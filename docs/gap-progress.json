@@ -2,6 +2,32 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-02 exact builtin integer set-key cache and owning comparison copies",
+      "gap_ids": [
+        "P0-14",
+        "OPT-10"
+      ],
+      "status": "partial",
+      "evidence": [
+        "docs/performance-report-2026-10-30.md",
+        "docs/test-report.md",
+        "docs/MANUAL.md",
+        "src/executor/ExecutionPlan.cpp"
+      ],
+      "tests": [
+        "tests/set_sort_key_cache_test.cpp",
+        "tests/set_sort_integer_key_protocol_e2e_test.py",
+        "scripts/benchmark_set_sort.py"
+      ],
+      "verification": {
+        "correctness": "Existing44native0+new19=45pass;old19only6cost-budgetfailures/allmetadata-resourcepass. Existing32wire31pass+newPG/before/C166all0=>33perentry32/1existingBindfull463/40wholelogbyteequal. Integerrealspool/restart/sourcewidthXX000cleanup/Main7/35ops/ownedspoolSIGKILLreopen1000rows4000cells+2000sortpass.",
+        "performance": "Threebudgets1188+preplanned6d6default396+onlyidentical4MBrepeat396=1980timed495warmup30SET-SHOW2505checks. 64kint278.636/194.661/278.608ms,offset203.829/155.364/203.259;16Moffset232.827/147.081/226.088. First4MBTopN261.315/38.425/34.789driftpreserved;legacyPK11.429/13.971/11.710slowerunresolved.NoallSQL/regressionfreeclaim.",
+        "diagnostics": "Fouractualcasesless/heap/ExtraBytesunchanged,107557integerprobes->0;all4040rows16160cellschecked. PhaseallocationsdonotcountcacheconstructionbeforeRuns.add. Actualwholecumulativeint817676->499584B/record237506623->181385965B,notRSS-CPU;128newcacheallocationscounted.Perfparanoid4denied,noglobalsystemchange.",
+        "scope": "OnlyExecCPP1TU/62linked,60core+Mainunchanged;exactrawsmallint/integer/bigintfullrange/nonenum/sametypevalidcacheonly/fallbackandlazydemandpreserved. CodecindependentintegerCountdefaultoldkeys/Kcapacitybudgeted/puretext-recordSetnocachearray. Freshowningcontext,noactualframe/provider/retainedplan/portal/sharedhelperchanges. Original273items/atomic/725protected/deferredunchanged.Goalactive.",
+        "proof": "build/pg-feature-set-key-33l7ewyf/final-provenance.json"
+      }
+    },
+    {
       "issue": "2026-11-02 bounded UNION ALL and VALUES sorts, count expressions and enum result metadata",
       "gap_ids": [
         "P0-01",

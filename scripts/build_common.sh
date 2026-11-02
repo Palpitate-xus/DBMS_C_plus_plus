@@ -350,6 +350,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/work_mem_session_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/typed_sort_spill_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/set_sort_spill_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/set_sort_integer_key_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/values_query_clause_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/enum_result_descriptor_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/values_count_expression_protocol_e2e_test.py)

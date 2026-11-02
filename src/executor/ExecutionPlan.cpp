@@ -788,6 +788,9 @@ struct TypedSortRow {
 };
 struct TypedSortRowCodec {
     size_t cells, keys, targets;
+    // Ordinary Sort caches one integer per owning key. Set output keys can
+    // borrow cells instead, so validate their independent cache descriptor.
+    std::optional<size_t> integers = std::nullopt;
     struct Header { uint64_t raw=0,cells=0,keys=0,integers=0,targets=0,ordinal=0; };
     size_t bytes(const TypedSortRow& row) const {
         using namespace typed_sort_detail;
@@ -819,7 +822,7 @@ struct TypedSortRowCodec {
     }
     TypedSortRow read(sort_detail::Reader& reader) const {
         const auto header=reader.scalar<Header>();
-        if(header.cells!=cells || header.keys!=keys || header.integers!=keys || header.targets!=targets ||
+        if(header.cells!=cells || header.keys!=keys || header.integers!=integers.value_or(keys) || header.targets!=targets ||
            header.raw>reader.remaining() || header.raw>std::numeric_limits<size_t>::max())
             typed_sort_detail::invalid("row descriptor");
         TypedSortRow row;row.ordinal=header.ordinal;row.raw=reader.string(static_cast<size_t>(header.raw));
@@ -2206,21 +2209,29 @@ class SetOutputComparisons {
     static bool truth(const ExprValue& value) {
         return !value.isNull && (value.value == "t" || value.value == "true");
     }
+    static RowContext context(const ExprValue& a,const ExprValue& b) {
+        // initializer_list elements are const; constructing a vector from
+        // {a,b} copies the owning nested values twice. Copy each datum into
+        // this invocation's vector once, then transfer its ownership.
+        std::vector<ExprValue> cells;cells.reserve(2);
+        cells.emplace_back(a);cells.emplace_back(b);
+        RowContext row;row.setParameters(std::move(cells));return row;
+    }
 public:
     void reset(size_t keys = 0) { std::vector<Entry> fresh(keys); entries_.swap(fresh); }
     int compare(size_t key, ExprEvaluator& evaluator, const ExprValue& a, const ExprValue& b,
         bool ascending, const std::optional<QueryComparisonBinding>& enumeration) {
         auto& entry = signature(key, a, b);
-        RowContext context; context.setParameters({a,b});
-        if (truth(evaluator.eval(expression(entry,0,ascending?"<":">",enumeration),context))) return -1;
-        if (truth(evaluator.eval(expression(entry,1,ascending?">":"<",enumeration),context))) return 1;
+        auto row=context(a,b);
+        if (truth(evaluator.eval(expression(entry,0,ascending?"<":">",enumeration),row))) return -1;
+        if (truth(evaluator.eval(expression(entry,1,ascending?">":"<",enumeration),row))) return 1;
         return 0;
     }
     bool equal(size_t key, ExprEvaluator& evaluator, const ExprValue& a, const ExprValue& b,
         const std::optional<QueryComparisonBinding>& enumeration) {
         auto& entry = signature(key, a, b);
-        RowContext context; context.setParameters({a,b});
-        return truth(evaluator.eval(expression(entry,0,"=",enumeration),context));
+        auto row=context(a,b);
+        return truth(evaluator.eval(expression(entry,0,"=",enumeration),row));
     }
 };
 
@@ -2241,6 +2252,7 @@ class PreparedSetSortOp final : public Operator {
     size_t arity_;
     std::optional<size_t> bound_;
     KeyProjector projectKeys_;
+    bool integerCache_=false;
     std::unique_ptr<Runs> runs_;
     Row current_;
     ExprEvaluator evaluator_;
@@ -2254,7 +2266,13 @@ class PreparedSetSortOp final : public Operator {
                 if (a.isNull != b.isNull) return a.isNull == directions_[key].second;
                 continue;
             }
-            const int order = comparisons_.compare(key,evaluator_,a,b,
+            int order;
+            if(integerCache_ && !enumComparisons_[key] && a.typeName==b.typeName &&
+               left.integerKeys.at(key) && right.integerKeys.at(key)) {
+                const auto x=*left.integerKeys[key],y=*right.integerKeys[key];
+                order=(x>y)-(x<y);
+                if(!directions_[key].first)order=-order;
+            } else order=comparisons_.compare(key,evaluator_,a,b,
                 directions_[key].first,enumComparisons_[key]);
             if (order) return order < 0;
         }
@@ -2267,9 +2285,9 @@ class PreparedSetSortOp final : public Operator {
     }
 public:
     PreparedSetSortOp(OpPtr child, std::vector<size_t> columns,
-        const std::vector<SelectStmt::OrderByElem>& order, size_t arity,
+        const std::vector<SelectStmt::OrderByElem>& order, const QueryRowDescriptor& output,
         std::optional<size_t> bound, const std::string& database, KeyProjector projectKeys = {})
-        : child_(std::move(child)), columns_(std::move(columns)), arity_(arity), bound_(bound),
+        : child_(std::move(child)), columns_(std::move(columns)), arity_(output.size()), bound_(bound),
           projectKeys_(std::move(projectKeys)) {
         if (columns_.size() != order.size() ||
             std::any_of(columns_.begin(),columns_.end(),[&](size_t key){return key>=(projectKeys_?order.size():arity_);}))
@@ -2277,6 +2295,15 @@ public:
         for (const auto& key : order) {
             directions_.push_back({key.asc,key.nullsFirst});
             enumComparisons_.push_back(key.enumComparison);
+        }
+        // Hidden VALUES keys already have a parallel cache vector. Ordinary
+        // set outputs need one only when their real descriptor admits an
+        // exact built-in signed integer key; pure text/record sorts keep none.
+        integerCache_=bool(projectKeys_);
+        if(!integerCache_)for(size_t key=0;key<columns_.size();++key) {
+            const auto& type=output.at(columns_[key]).type;
+            if(!enumComparisons_[key] && (type=="smallint" || type=="integer" || type=="bigint"))
+                integerCache_=true;
         }
         evaluator_.setCurrentDB(database);
     }
@@ -2286,7 +2313,7 @@ public:
         runs_.reset(); current_ = Row{}; loaded_ = available_ = false;
         comparisons_.reset(columns_.size());
         try {
-            runs_ = std::make_unique<Runs>(sortWorkMemBytes(),TypedSortRowCodec{arity_,projectKeys_?columns_.size():0,0},
+            runs_ = std::make_unique<Runs>(sortWorkMemBytes(),TypedSortRowCodec{arity_,projectKeys_?columns_.size():0,0,integerCache_?columns_.size():0},
                 Less{this},bound_,[](std::vector<Row>& rows,const Less& less) {
                     interruptibleStableSort(rows.begin(),rows.end(),less);
                 });
@@ -2316,7 +2343,20 @@ public:
                     if(projectKeys_) {
                         row.keys=projectKeys_(row.cells);
                         if(row.keys.size()!=columns_.size())throw DbError("XX000","VALUES sort lost its prepared keys");
-                        row.integerKeys.resize(row.keys.size());
+                    }
+                    if(integerCache_) {
+                        row.integerKeys.resize(columns_.size());
+                        for(size_t key=0;key<columns_.size();++key) {
+                            const auto& value=projectKeys_?row.keys.at(columns_[key]):row.cells.at(columns_[key]);
+                            if(value.isNull || enumComparisons_[key] ||
+                               (value.typeName!="smallint" && value.typeName!="integer" && value.typeName!="bigint"))continue;
+                            int64_t integer=0;const auto end=value.value.data()+value.value.size();
+                            const auto parsed=std::from_chars(value.value.data(),end,integer);
+                            if(parsed.ec==std::errc{} && parsed.ptr==end &&
+                               (value.typeName!="smallint" || (integer>=INT16_MIN && integer<=INT16_MAX)) &&
+                               (value.typeName!="integer" || (integer>=INT32_MIN && integer<=INT32_MAX)))
+                                row.integerKeys[key]=integer;
+                        }
                     }
                     runs_->add(std::move(row));
                 }
@@ -2592,7 +2632,7 @@ OpPtr QueryPlanner::buildPreparedUnionAllPlan(StorageEngine* engine,const std::s
             if(*select->limit<=std::numeric_limits<size_t>::max()-offset)bound=offset+*select->limit;
         }
         root=std::make_unique<PreparedSetSortOp>(std::move(root),keys->second,select->orderBy,
-            output->second.size(),bound,database);
+            output->second,bound,database);
         sorted=static_cast<PreparedSetSortOp*>(root.get());
     }
     if(select->offset && *select->offset)root=std::make_unique<OffsetOp>(std::move(root),*select->offset);
@@ -2689,7 +2729,7 @@ OpPtr QueryPlanner::applyPreparedValuesClauses(StorageEngine* engine,const std::
             if(*select->limit<=std::numeric_limits<size_t>::max()-offset)bound=offset+*select->limit;
         }
         source=std::make_unique<PreparedSetSortOp>(std::move(source),keys,select->orderBy,
-            output->second.size(),bound,database,std::move(projectKeys));
+            output->second,bound,database,std::move(projectKeys));
         sorted=static_cast<PreparedSetSortOp*>(source.get());
     }
     if(select->withTies && !sorted)throw DbError("42601","WITH TIES cannot be specified without ORDER BY");
