@@ -1,5 +1,6 @@
 #include "commands/StoredRowNull.h"
 #include "catalog/type_registry.h"
+#include "common/DbError.h"
 #include "test_utils.h"
 #include <cassert>
 #include <iostream>
@@ -38,6 +39,8 @@ int main() {
             const int id = std::stoi(StorageEngine::extractColumnValueStatic(row, schema, 0));
             const auto rid = StorageEngine::encodeRid(page, slot);
             StorageEngine::bindNullRow(&g_engine, database, schema.tablename, rid, schema.len);
+            std::vector<std::string> scalarValues;
+            std::vector<bool> scalarNulls;
             for (size_t column = 0; column < schema.len; ++column) {
                 const bool expected = column == 0 ? false : column < 3 ? id == 1
                     : (static_cast<int>(column - 3) + id) % 2 != 0;
@@ -53,7 +56,32 @@ int main() {
                 if (column == 1 && id == 3) assert(value == "-2147483648");
                 if (column == 2 && id == 2) assert(value.empty() && !null);
                 if (column == 2 && id == 3) assert(value == "NULL" && !null);
+                scalarValues.push_back(value);
+                scalarNulls.push_back(null);
             }
+            const auto bitmap = detail::storedRowNullBitmap(
+                g_engine, database, schema.tablename, schema, rid);
+            assert(bitmap && *bitmap == scalarNulls);
+            std::vector<std::string> decodedValues;
+            std::vector<bool> decodedNulls;
+            detail::decodeStoredRowValues(g_engine, database, row, schema,
+                                         *bitmap, decodedValues, decodedNulls);
+            assert(decodedValues == scalarValues && decodedNulls == scalarNulls);
+            // A nested decoder's bitmap must not poison the caller's live
+            // row binding after it returns, even for the very same schema.
+            auto nestedBitmap = *bitmap;
+            nestedBitmap[0] = true;
+            detail::decodeStoredRowValues(g_engine, database, row, schema,
+                                         nestedBitmap, decodedValues, decodedNulls);
+            assert(decodedNulls[0] && decodedValues[0].empty());
+            assert(g_engine.extractColumnValue(row, schema, 0, database) == std::to_string(id));
+            bool rejected = false;
+            try {
+                detail::decodeStoredRowValues(g_engine, database, row, schema,
+                                             {}, decodedValues, decodedNulls);
+            } catch (const DbError& error) { rejected = error.sqlState() == "XX000"; }
+            assert(rejected);
+            assert(g_engine.extractColumnValue(row, schema, 0, database) == std::to_string(id));
             assert(!detail::storedRowColumnIsNull(g_engine, database, schema.tablename,
                                                  schema, rid, schema.len));
             ++rows;

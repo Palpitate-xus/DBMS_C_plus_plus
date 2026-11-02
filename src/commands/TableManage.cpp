@@ -10525,6 +10525,27 @@ private:
     bool active_;
 };
 
+void detail::decodeStoredRowValues(StorageEngine& engine,
+                                  const std::string& database,
+                                  const std::string& raw,
+                                  const TableSchema& schema,
+                                  const std::vector<bool>& storedNulls,
+                                  std::vector<std::string>& values,
+                                  std::vector<bool>& nulls) {
+    if (storedNulls.size() != schema.len)
+        throw DbError("XX000", "stored row NULL bitmap width mismatch");
+    BufferedNullRowBinding binding(schema, storedNulls);
+    values.clear(); nulls.clear();
+    values.reserve(schema.len); nulls.reserve(schema.len);
+    for (size_t i = 0; i < schema.len; ++i) {
+        bool computedNull = false;
+        values.push_back(engine.extractColumnValue(raw, schema, i,
+                                                   database, true, &computedNull));
+        nulls.push_back(computedNull ||
+            (schema.cols[i].generatedKind != 'v' && storedNulls[i]));
+    }
+}
+
 
 std::string StorageEngine::extractColumnValueStatic(const std::string& rowBuffer,
                                                      const TableSchema& tbl, size_t colIdx) {

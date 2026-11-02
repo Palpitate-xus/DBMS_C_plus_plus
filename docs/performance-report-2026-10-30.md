@@ -186,6 +186,7 @@ python3 scripts/benchmark_queries.py \
 ## PostgreSQL 18.6 同机对照（2026-11-02）
 
 本节是新增的小表探索性对照，与上文 10 月 30 日的本项目版本比较分开解释。
+本节保留当时程序及 PG 的配对结果；随后源码优化见下文[有界排序批次](#有界排序-top-n2026-11-02)，未重写这里的历史样本。
 新建夹具、数据库文件和后台状态与旧批次不同，不能把本节较低的绝对延迟解释成新增源码优化收益。
 两边各 35 类操作、每类 6 个计时样本，共 **420 个计时样本**；另各执行一轮 35 类不计时预热。
 最终记录完整结束，既有驱动的结果/协议检查均通过。这里的数值回答指定夹具的客户端往返延迟，不能代表整体数据库性能。
@@ -271,6 +272,86 @@ python3 scripts/benchmark_postgresql.py \
 前两次私有初始化分别缺 `libpq.so.5` 和配置样本的链接目标，记录在 `paired-run/`、`paired-run-v2/`；
 这两次没有计时样本，补齐运行文件后才完成 v3，未将失败尝试写成通过。未重启已有参考服务或用户数据库。
 
+## 有界排序 Top-N（2026-11-02）
+
+### 实现与适用边界
+
+从 `e7dcd673` 开始，对照 PostgreSQL 18 的 [tuplesort](https://github.com/postgres/postgres/blob/REL_18_STABLE/src/backend/utils/sort/tuplesort.c)
+及 [tuple slots](https://github.com/postgres/postgres/blob/REL_18_STABLE/src/backend/executor/execTuples.c)、
+[DuckDB TopN](https://duckdb.org/2024/11/14/optimizers)和[外部排序](https://duckdb.org/2025/09/24/sorting-again)、
+[SQLite 临时结构](https://www.sqlite.org/tempfiles.html)与[原子提交](https://sqlite.org/atomiccommit.html)，独立实现本项目的有限改动：
+
+- `PreparedSortOp` 对普通正数 LIMIT 使用最大堆，候选上限为溢出安全的 `K=LIMIT+OFFSET`，最终排序后交给原投影/OFFSET/LIMIT 算子。
+  必要排序键和排序前输出仍对全部原输入求值；原始序号保持同键输入顺序，周期检查取消。
+- 可支持的单表排序 LIMIT 在执行阶段进入已有类型化执行器，修复参数化路径的多键顺序、OID 表达式和 volatile 投影需求。
+  Parse/Bind 规划未改，R244 暂缓边界不变。
+- 物理行只读取一次 NULL 位图，复用已有属性解码并恢复嵌套绑定，避免同一排序行重复解码；文件身份检查保留。
+  已求值的精确内置整数键只转换一次；其他类型保留原比较职责，浮点特殊值改由表达式比较器处理。
+- 排序候选约为 O(min(N,K))，比较工作约为 O(N log K + K log K)。这不是整个执行器的 O(K) 内存承诺：
+  **底层 TableScan 仍可能物化全部原始行**；无界排序、DISTINCT、WITH TIES、聚合/分组和边界溢出继续原路径，没有完整 work_mem/spill。
+
+### 相邻旧／新／旧延迟
+
+冻结旧程序为此前 CMake 产物 `996c0b6e…`；最终候选 SHA-256 为
+`c7f832ddbef2dd1811b87f25bf96474a5fb71b20b564f53b881c391b1df22d15`。
+两者同为 GCC 13.3 / C++17 / O2 / ICU / zlib / TLS stub；本批正常增量编译变更单元，未宣称重新 fresh 编译全部 62 单元。
+验收后已将同一候选原子安装到根目录 `dbms_main`，原根目录程序备份为证据目录内的 `root-before-dbms_main`；未重启既有数据库服务。
+
+同一份正常关闭的 1,000 行夹具复制为三个独立目录，源文件逐项哈希不变；依次旧、新、旧，每次独立启动，
+每类 3 次校验预热后做 3 轮×4 个样本，固定打乱每轮顺序，总计 **144 个计时样本**，全部校验完整结果。
+回环 TCP_NODELAY、单连接、热缓存；计时包含响应与结果验证；默认持久化不变、socket 15 秒，不与编译或其他测试重叠。
+
+| 操作 | 旧首轮 p50 ms | 新 p50 ms | 旧末轮 p50 ms | 结论 |
+| --- | ---: | ---: | ---: | --- |
+| amount DESC,id ASC LIMIT 20 | 56.219 | 41.612 | 58.482 | 延迟约降低 26%–29%，约快 1.35–1.41 倍 |
+| 同排序 LIMIT 20 OFFSET 500 | 57.896 | 42.462 | 57.481 | 延迟约降低 26%–27%，约快 1.35–1.36 倍 |
+| 主键点查控制 | 9.816 | 10.736 | 9.482 | 未证明提速，候选在此窗口略慢 |
+| 同排序无 LIMIT 控制 | 86.066 | 87.517 | 85.673 | 未证明提速 |
+
+这是共享主机上的小样本，不推导 p99、吞吐或大表收益，也不将新版延迟除以前一批独立 PG 样本来制造新的 PG 倍率。
+
+### 内存与正确性
+
+`prepared_topn_memory_test` 使用真正的类型化算子和 12,000 行生成流（每行 2 KiB payload），
+在子算子 EOF、输出消费之前用 `mallinfo2` 读取活跃分配增量；不是 RSS、峰值内存或实际 TableScan 的整条查询占用。
+同一冻结测试旧版完整 8 项有 3 项内存失败、结果均正确；最终新版 8 项全过。
+LIMIT 20 保留量由 72,817,360 字节（约 69.4 MiB）降到 131,952 字节（约 129 KiB）；
+OFFSET 13/LIMIT 7 为 124,656 字节，LIMIT 1 为 18,224 字节。
+LIMIT 0 原输入读取为 0；超量 LIMIT、无界、DISTINCT/WITH TIES 控制仍保留完整输入，证明观测没有隐藏全量缓冲。
+
+最终 11 个原生入口、11 个协议入口全过；新增完整 48 条在严格 PG 18.6 和新版各全过，旧版 11 条失败。
+10 个相邻协议入口涵盖完整 190 条聚合排序、69 条参数索引及取消/上下文等检查；原生含原完整 80 项排序中断检查。
+另外重跑既有 35 类操作，一轮 35 个样本和预热的现有结果检查均通过；与部分原生编译重叠，只作正确性 smoke，不用于性能结论。
+本批不是全仓库、真实 TLS、并发、崩溃恢复或完整 PG 兼容验收，原始总账保持 22/166/70/15。
+
+### 失败保留与待办
+
+- 早期仅接入类型化有界排序时，LIMIT 20 的 p50 实测回退到 160.678 ms（两侧旧版 59.503/62.479）；
+  独立 CPU 采样显示文件身份核验开销占主导，继而修复重复解码/按列位图读取。中间候选为 61.700 ms；
+  后续采样确认类型名反复规范化的成本，再加入整数键缓存，才得到上述最终结果。各候选与原始样本均保留。
+- 接入新分流曾暴露 2 条 Infinity 比较失败，按浮点比较语义修复后才通过；没有删除断言。
+  NULL 位图回归首次编译缺少 DbError 头文件，补齐后完整运行通过。
+- 10,000 行夹具在加载阶段触及 15 秒期限，清理等待 30 秒后被 helper 强制终止；未产生完整计时样本，
+  没有提高期限、降低持久化或称为大表通过。加载瓶颈仍待调查，不据此重开用户暂缓的退出/CTAS 专项。
+- 三方额外探针确认虚拟生成列失败返回 NULL 的既有差异，见[测试报告](test-report.md#2026-11-02-有界排序与类型化执行)；
+  流式物理扫描、完整工作内存/spill、修改路径快照开销仍是后续目标。
+
+### 复现与证据
+
+```bash
+python3 scripts/benchmark_topn.py \
+  --before /path/to/frozen-before-dbms_main \
+  --after "$PWD/build/cmake/dbms_main" \
+  --output build/topn-new-run --rows 1000 --rounds 3 --samples 4
+DBMS_MAIN="$PWD/build/cmake/dbms_main" python3 tests/prepared_topn_protocol_e2e_test.py
+```
+
+`--fixture` 可指定同一驱动创建并正常关闭的夹具（必须匹配 `--rows`），各次运行只修改其副本。
+证据目录 `build/pg-feature-topn-20261102-bc582b_s/`：
+`latency-keycache/comparison.json` 为最终 144 样本；`latency-comparison.json` 与 `latency-decode/comparison.json` 为早期候选；
+`native-before.log`、`native-keycache.json`、`protocol-keycache.json`、`protocol-{old,reference}-48.log` 保留完整检查；
+`operations-smoke/operations.json`、`fixture-10000-failure.json`、`virtual-demand-three-way.json` 记录操作回归及未关闭差异；
+`final-provenance.json` 记录生产输入、实际对象、测试与程序哈希。
 ## 剩余瓶颈与适用范围
 
 普通修改、保存点和其他 DDL 仍有物理快照、WAL 全文件映像及同步 I/O 开销；大数据库下会继续放大。整数 DML 筛选仍扫描堆，JOIN 优化仍可能枚举大量键对，索引覆盖、统计信息、计划选择、批处理及更细粒度的回滚机制仍有优化空间。

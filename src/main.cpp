@@ -20215,6 +20215,11 @@ static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bo
         (candidate->whereClause || candidate->limit || candidate->offset);
     const bool physicalColumnCandidate = candidate->fromClause &&
         candidate->fromClause->type == dbms::FromItem::Type::Table;
+    // A sorted limited base-table query needs the complete typed key list
+    // and projection demand, including after protocol parameter expansion.
+    // Admit it at execution, without changing Parse/Bind planning phases.
+    const bool orderedDemand = physicalColumnCandidate && candidate->limit &&
+        !candidate->orderBy.empty();
     const bool possibleBitNegation=physicalColumnCandidate && candidate->ctes.empty() &&
         candidate->setOp==dbms::SetOp::None && candidate->groupBy.empty() &&
         candidate->groupByElems.empty() && !candidate->having && candidate->windowDefs.empty() &&
@@ -20233,7 +20238,7 @@ static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bo
         // aliases retain their established consumers. This plan lowers a
         // single actual base range; no alternate namespace is fabricated.
         if (!g_engine.tableExists(session.currentDB, physical)) return false;
-        if (!roles.first && !scalarOrder && !possibleArray && !fromlessDemand && !possibleBitNegation) {
+        if (!roles.first && !scalarOrder && !possibleArray && !fromlessDemand && !possibleBitNegation && !orderedDemand) {
             const auto schema = g_engine.getTableSchema(session.currentDB, physical);
             if (none_of(schema.cols, schema.cols + schema.len,
                         [](const dbms::Column& column) { return column.isArray; })) return false;
@@ -20256,7 +20261,7 @@ static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bo
     const bool arrayOutput = any_of(prepared.output.begin(), prepared.output.end(),
         [](const dbms::QueryOutputColumn& column) { return dbms::array_detail::isArray(column.type); });
     const bool bitNegationOutput=possibleBitNegation && bitNegation(select,true);
-    if(!roles.first && !scalarOrder && !queryArrays(select,true) && !arrayOutput && !fromlessDemand && !bitNegationOutput)return false;
+    if(!roles.first && !scalarOrder && !queryArrays(select,true) && !arrayOutput && !fromlessDemand && !bitNegationOutput && !orderedDemand)return false;
     // Preserve column grants on precisely the bound source cells used by
     // this query (including correlated child references), not SELECT *.
     if (select->fromClause && !sessionIsAdmin(session)) {

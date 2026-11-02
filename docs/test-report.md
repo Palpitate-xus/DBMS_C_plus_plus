@@ -1,5 +1,24 @@
 # DBMS 功能测试报告
 
+## 2026-11-02 有界排序与类型化执行
+
+- 最终候选通过 11 个原生入口和 11 个真实协议入口；新增 `prepared_topn_memory_test` 完整 8 项，
+  `prepared_topn_protocol_e2e_test` 完整 48 条在本项目及 PostgreSQL 18.6 均全过。冻结旧程序跑同一份 48 条有 11 条失败，原始日志保留。
+- 协议覆盖 Simple、text Bind、binary 整数 Bind 和 binary 结果、多键/NULL/OFFSET、0/超量 LIMIT、DISTINCT/WITH TIES、
+  排序键与投影的序列调用次数、丢弃候选中的除零错误、OID、超出 2^53 的 numeric/bigint、整数最小/最大值、NaN/Infinity 与虚拟生成列的有效值。
+- 10 个相邻协议入口包括完整 190 条普通聚合排序检查、69 条参数索引检查、取消、子查询上下文、存储函数与 FETCH 边界；
+  10 个其他原生入口包括完整 80 项排序中断及扩展后的 NULL 位图逐列/按行等价与嵌套绑定恢复检查。
+- 既有操作驱动的 35 类全部完成一轮检查（另有预热）；该轮与原生编译有重叠，只作为有限正确性回归，不用于提速结论。
+  独立旧/新/旧延迟测量含 144 个已校验样本，详见[性能记录](performance-report-2026-10-30.md#有界排序-top-n2026-11-02)。
+- 额外三方探针确认既有缺口：虚拟生成列 `b AS (1/a)` 在 `a=0` 且读取 b 时，旧版和新版均返回 NULL，PG 18.6 报 22012；
+  只读 a 的控制三方均成功。本批没有关闭生成列表达式错误传播，也不把上述有效值检查视为全部虚拟列兼容。
+
+本批仅重编译有变化的生产单元并链接当前 CMake 对象，不是重新 fresh 编译全部 62 单元。
+NULL 位图测试初次编译缺少 DbError 头文件、早期候选的延迟回退、浮点排序失败及 10,000 行夹具加载超时均留有原始记录。
+未修改原始 273 项状态、用户暂缓项、R244 Bind 规划、默认持久化或协议期限；未执行完整仓库/TLS/并发/恢复矩阵。
+证据目录为 `build/pg-feature-topn-20261102-bc582b_s/`，最终入口退出码见 `native-keycache.json`、`protocol-keycache.json`，
+测试源、生产源、对象及程序哈希见 `final-provenance.json`。
+
 ## 2026-11-02 PostgreSQL 差距评估与操作对照
 
 复核 273 项总账及功能族分布，没有改变 complete/partial/unverified/deferred 状态。

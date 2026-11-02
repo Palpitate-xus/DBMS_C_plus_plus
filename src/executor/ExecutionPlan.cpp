@@ -260,7 +260,19 @@ struct PreparedSelectState {
         }
         std::vector<std::string> structured;
         std::vector<bool> nulls;
-        const bool available = source.supportsStructuredRows() && source.lastStructuredRow(structured, nulls);
+        bool available = source.supportsStructuredRows() && source.lastStructuredRow(structured, nulls);
+        if (!available) {
+            const auto origin = source.scanOrigin();
+            if (origin.engine == engine && origin.dbname == dbname &&
+                origin.tablename == schema.tablename) {
+                if (const auto bitmap = detail::storedRowNullBitmap(
+                        *engine, dbname, origin.tablename, schema, origin.rid)) {
+                    detail::decodeStoredRowValues(*engine, dbname, raw, schema,
+                                                 *bitmap, structured, nulls);
+                    available = true;
+                }
+            }
+        }
         for (size_t i = 0; i < schema.len; ++i) {
             bool computedNull = false;
             const std::string value = available ? structured.at(i) :
@@ -559,6 +571,17 @@ static int comparePreparedOrderValues(ExprEvaluator& evaluator,
     }
     if (const auto comparison = comparePreparedIdentityKeys(evaluator, left, right))
         return *comparison;
+    const auto type = ExprHelper::canonicalResultTypeName(left.typeName);
+    if ((type == "real" || type == "double precision") &&
+        type == ExprHelper::canonicalResultTypeName(right.typeName)) {
+        // Use the expression comparison owner for IEEE special values and
+        // float4 width. The generic storage predicate can reject infinities;
+        // SQL sorting instead orders NaN above every non-NaN value.
+        const auto binding = ExprEvaluator::resolveComparison("<", type, type);
+        if (evaluator.comparePrepared(binding, left, right).asBool()) return -1;
+        if (evaluator.comparePrepared(binding, right, left).asBool()) return 1;
+        return 0;
+    }
     Column column;
     const auto error = TypeRegistry::instance().resolveColumnType(column, left.typeName, {}, false);
     if (!error.empty()) throw DbError("0A000", "unsupported prepared sort type: " + left.typeName);
@@ -743,24 +766,76 @@ class PreparedSortOp final : public Operator {
     struct Row {
         std::string raw;
         std::vector<ExprValue> cells, keys;
+        std::vector<std::optional<int64_t>> integerKeys;
         RowContext context;
         std::vector<std::optional<ExprValue>> targets;
+        size_t ordinal = 0;
     };
     OpPtr child_;
     std::shared_ptr<PreparedSelectState> state_;
     std::vector<Row> rows_;
+    std::optional<size_t> bound_;
     size_t position_ = 0;
 public:
     PreparedSortOp(OpPtr child, std::shared_ptr<PreparedSelectState> state)
-        : child_(std::move(child)), state_(std::move(state)) {}
+        : child_(std::move(child)), state_(std::move(state)) {
+        const auto& select = state_->select();
+        // DISTINCT and WITH TIES can need rows beyond the ordinary LIMIT.
+        // Keep aggregate/grouped paths unchanged; this bound belongs only to
+        // the ordinary sorted input immediately below projection/OFFSET/LIMIT.
+        if (select.limit && *select.limit && !select.distinct &&
+            select.distinctOn.empty() && !select.withTies &&
+            state_->aggregates.empty() && !select.having &&
+            select.groupBy.empty() && select.groupByElems.empty() &&
+            (!select.signedFetchCount || *select.signedFetchCount >= 0)) {
+            const size_t offset = select.offset.value_or(0);
+            if (*select.limit <= std::numeric_limits<size_t>::max() - offset)
+                bound_ = offset + *select.limit;
+        }
+    }
     bool open() override {
         OpenInstrument startup(this);
         clearError(); rows_.clear(); position_ = 0;
         if (!child_->open()) return false;
+        const auto less = [&](const Row& left, const Row& right) {
+            for (size_t i = 0; i < state_->keys.size(); ++i) {
+                const auto& a = left.keys[i]; const auto& b = right.keys[i];
+                const auto& key = state_->keys[i];
+                if (a.isNull || b.isNull) {
+                    if (a.isNull == b.isNull) continue;
+                    return a.isNull == key.nullsFirst;
+                }
+                int order;
+                if (!key.enumComparison && a.typeName == b.typeName &&
+                    left.integerKeys[i] && right.integerKeys[i]) {
+                    const auto x = *left.integerKeys[i], y = *right.integerKeys[i];
+                    order = (x > y) - (x < y);
+                } else {
+                    order = comparePreparedOrderValues(state_->evaluator, a, b, key.enumComparison);
+                }
+                if (order) return key.asc ? order < 0 : order > 0;
+            }
+            // A bounded heap must retain the same first peer rows as the
+            // original stable sort, including when the boundary cuts a tie.
+            return bound_ && left.ordinal < right.ordinal;
+        };
+        size_t heapComparisons = 0, ordinal = 0;
+        const auto heapLess = [&](const Row& left, const Row& right) {
+            if ((heapComparisons++ & 127U) == 0) checkForQueryInterrupt();
+            return less(left, right);
+        };
         std::string raw;
         while (child_->next(raw)) {
-            Row row; row.raw = raw; row.context = state_->context(*child_, raw);
-            if (!state_->sourceContexts) row.cells = state_->cells(*child_, raw);
+            if (bound_ && (ordinal & 127U) == 0) checkForQueryInterrupt();
+            Row row; row.raw = raw;
+            row.ordinal = ordinal++;
+            if (!state_->sourceContexts && !child_->supportsPreparedContexts()) {
+                row.cells = state_->cells(*child_, raw);
+                row.context = state_->context(row.cells);
+            } else {
+                row.context = state_->context(*child_, raw);
+                if (!state_->sourceContexts) row.cells = state_->cells(*child_, raw);
+            }
             row.targets.resize(state_->targets.size());
             const auto& context = row.context;
             // Non-volatile targets are part of the sort input projection.
@@ -780,22 +855,38 @@ public:
                     row.keys.push_back(*row.targets[key.target]);
                 } else row.keys.push_back(state_->evaluate(key.expression, context));
             }
-            rows_.push_back(std::move(row));
+            // Cache only exact builtin signed integers after the original
+            // expression has run. Domains, OIDs, numeric, mixed/invalid values
+            // and all other types retain their existing comparison owner.
+            row.integerKeys.reserve(row.keys.size());
+            for (const auto& value : row.keys) {
+                std::optional<int64_t> integer;
+                if (!value.isNull && (value.typeName == "smallint" ||
+                    value.typeName == "integer" || value.typeName == "bigint")) {
+                    int64_t parsed = 0;
+                    const auto end = value.value.data() + value.value.size();
+                    const auto converted = std::from_chars(value.value.data(), end, parsed);
+                    if (converted.ec == std::errc{} && converted.ptr == end &&
+                        (value.typeName != "smallint" || (parsed >= INT16_MIN && parsed <= INT16_MAX)) &&
+                        (value.typeName != "integer" || (parsed >= INT32_MIN && parsed <= INT32_MAX)))
+                        integer = parsed;
+                }
+                row.integerKeys.push_back(integer);
+            }
+            // Evaluate every original target/key before rejecting a row.
+            // This preserves volatile calls and errors in discarded input.
+            if (!bound_ || rows_.size() < *bound_) {
+                rows_.push_back(std::move(row));
+                if (bound_ && rows_.size() == *bound_)
+                    std::make_heap(rows_.begin(), rows_.end(), heapLess);
+            } else if (heapLess(row, rows_.front())) {
+                std::pop_heap(rows_.begin(), rows_.end(), heapLess);
+                rows_.back() = std::move(row);
+                std::push_heap(rows_.begin(), rows_.end(), heapLess);
+            }
         }
         if (child_->hasError()) return propagateChildError(child_.get(), "prepared sort child failed");
-        interruptibleStableSort(rows_.begin(), rows_.end(), [&](const Row& left, const Row& right) {
-            for (size_t i = 0; i < state_->keys.size(); ++i) {
-                const auto& a = left.keys[i]; const auto& b = right.keys[i];
-                const auto& key = state_->keys[i];
-                if (a.isNull || b.isNull) {
-                    if (a.isNull == b.isNull) continue;
-                    return a.isNull == key.nullsFirst;
-                }
-                const int order = comparePreparedOrderValues(state_->evaluator, a, b, key.enumComparison);
-                if (order) return key.asc ? order < 0 : order > 0;
-            }
-            return false;
-        });
+        interruptibleStableSort(rows_.begin(), rows_.end(), less);
         return true;
     }
     bool next(std::string& row) override {

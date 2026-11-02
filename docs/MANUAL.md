@@ -810,6 +810,13 @@ SELECT * FROM users ORDER BY AGE NULLS FIRST;
 序号（例如 ORDER BY 2）。这与 ORDER BY 表达式中按输入列解析名字不同，
 详见[重复别名规则](issue-review-o05-order-by-duplicate-alias.md)。
 
+2026-11-02 起，类型化执行器中的普通有序 `LIMIT` 使用最多 `LIMIT+OFFSET` 个候选的有界堆，
+覆盖执行阶段可接入的单表查询及参数化查询，保留多列方向、NULL 顺序、类型值和原始同行顺序。
+所有必要排序键仍对全部输入求值；不参与排序的 volatile 输出按实际输出需求求值。
+`DISTINCT`、`WITH TIES`、聚合/分组及边界溢出的路径不使用这个普通候选上限。
+这只约束排序候选内存：底层扫描仍可能全量物化，尚未实现完整 `work_mem` 预算或临时文件归并。
+测量与适用范围见[Top-N 性能记录](performance-report-2026-10-30.md#有界排序-top-n2026-11-02)。
+
 ### 聚合
 
 ```sql

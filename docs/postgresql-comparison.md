@@ -2,7 +2,8 @@
 
 ## 当前评估（2026-11-02）
 
-本页以源码输入 `9b71e118`、产品 0.2.0 / C++17 和仓库既定的 **PostgreSQL 18.6** 行为基线为准。
+本页总账及 35 类 PG 性能对照以源码输入 `9b71e118` 为准；随后在 `e7dcd673` 上完成下述 Top-N 批次。
+产品仍为 0.2.0 / C++17，仓库既定行为基线为 **PostgreSQL 18.6**。
 本项目已有真实的单机数据库内核，但距离 PostgreSQL 级别的通用功能、规模扩展和生产验收仍有明显差距。
 这次更新复核总账、当前源码和测量记录，不重新认定 273 项要求已经验收，也不变更用户暂缓范围。
 
@@ -54,7 +55,7 @@
 | --- | --- | --- |
 | SQL、类型、目录与 DML | typed AST、常用查询/约束、窗口/集合操作/子查询和多种数据类型的真实执行子集 | parse/analyze/rewrite/planner 边界及复杂表达式、函数重载、目录字段/依赖和事务化 DDL 仍不完整；命令能解析不等于所有组合语义正确 |
 | 优化器与计划 | 顺序/受限索引扫描、三类 JOIN、基础统计和代价选择、部分参数化查询 | 缺完整候选 path 搜索、等价类、参数化路径、多表 JOIN 搜索和统计模型；计划质量不能随 SQL 复杂度稳定扩展，见 [OPT-01](issue-opt-01-path-planner-audit.md) |
-| 执行内存与并行 | 部分 heap page-range 多线程扫描，排序阶段已补协作中断 | `SortOp::open()` 仍全量缓冲输入，没有按 `work_mem` 预算 spill；parallel JOIN/aggregate、完整 worker 生命周期与资源限额仍缺，见[条款](review-requirement-clauses.json) |
+| 执行内存与并行 | 部分 heap page-range 多线程扫描、排序协作中断；普通类型化有序 LIMIT 已补有界堆 | 无界/其他排序及底层 TableScan 仍可能全量缓冲，没有按 `work_mem` 预算 spill；parallel JOIN/aggregate、完整 worker 生命周期与资源限额仍缺，见[条款](review-requirement-clauses.json) |
 | 索引与修改路径 | B+Tree、Hash 和其他访问方法的有限实现；部分 SELECT 使用真实索引候选 | 其余 AM/opclass、并发/WAL/谓词范围规则和 index-only/bitmap 能力不完整；本轮 UPDATE/DELETE 整数预筛选仍是堆扫描，不是物理索引定位，见[实现与实测](performance-report-2026-10-30.md) |
 | 事务与并发 | MVCC、保存点、行/表锁、死锁检测、SSI/2PC 的子集；advisory lock 和 NOTIFY 有完成标记 | 不能写成“没有行锁”；缺完整 snapshot/command counter、子事务、MultiXact、EPQ、索引范围谓词锁和 DDL 回滚一致性，见审计 TXN/VAC 族 |
 | 存储、恢复和维护 | 8 KiB 页、缓冲池、TOAST、WAL/CLOG、校验、归档、单节点恢复/PITR 子集；近期修复 WAL 截断后重开 | 自有磁盘格式，不能打开 PostgreSQL 数据目录；全资源 WAL、freeze/HOT/VM、调度节流、多时间线/升级恢复和长期故障验证仍有缺口 |
@@ -96,9 +97,13 @@ UPDATE、DELETE、保存点、排序和小表 ALTER 收益明显；普通点查�
 
 - 普通修改和部分 DDL 的物理快照、摘要校验及目录/文件工作量随数据库状态增加；5 行 ALTER 变快不等于大表在线 DDL。
 - UPDATE/DELETE 的必要条件堆预筛选减少了解码，但没有消除整表扫描；整数 JOIN 预筛选也没有消除全部候选组合和物化。
-- 排序仍全量缓冲，没有完整工作内存预算和 spill；数据增长后会同时暴露内存与延迟问题。
+- 普通类型化排序 LIMIT 已限制候选数量；底层扫描和其他排序仍可能全量缓冲，没有完整工作内存预算和 spill。
 - WAL、提交持久化和后台维护等待仍影响单行与尾延迟；不能用关闭 fsync、放宽语义或忽略错误来换取“对标”。
 - 完整代价/统计/多表搜索、并行执行和异步 I/O 能力仍有差距；先消除当前常见路径的额外工作，再判断高级加速是否值得。
+
+后续 Top-N 批次已修复可支持的单表有序 LIMIT 在执行分流中丢失多键顺序或提前计算投影的问题：
+新增 48 条协议检查在 PG 18.6 与新版全过，旧版有 11 条失败；独立旧/新/旧的 1,000 行 LIMIT/OFFSET 延迟约改善 1.4 倍。
+这批比较没有重新测量 PG 延迟，不能用新值除以上表旧 PG 样本；详细边界见[性能报告](performance-report-2026-10-30.md#有界排序-top-n2026-11-02)。
 
 ## 应如何缩小差距
 

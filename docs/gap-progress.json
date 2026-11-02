@@ -2,6 +2,19 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-02 bounded typed ORDER BY LIMIT and per-row decode reuse",
+      "gap_ids": ["P0-14", "OPT-10"],
+      "status": "partial",
+      "evidence": ["docs/performance-report-2026-10-30.md", "docs/test-report.md", "docs/postgresql-18-implementation-blueprint.md"],
+      "tests": ["tests/prepared_topn_memory_test.cpp", "tests/prepared_topn_protocol_e2e_test.py", "tests/stored_row_null_schema_test.cpp"],
+      "verification": {
+        "correctness": "Final11native/11wire entries exit0. Exact48wire controls: frozen old11fail; PG18.6 and final0fail. Original interrupt80/aggregate190/index69 retained. Existing35operation smoke complete with limited driver oracles.",
+        "performance": "Isolated1000row old/new/old144 validated samples; LIMIT20 p50 56.219/41.612/58.482ms, OFFSET500 57.896/42.462/57.481ms. No stable point/full-sort speedup claim. Synthetic12000row LIMIT20 live allocation delta at childEOF 72817360 to131952bytes, not RSS or full-query memory.",
+        "scope": "Only ordinary typed positive LIMIT uses bounded candidates. TableScan materialization, unbounded/work_mem/spill, generated-column error propagation, large-load timeout and broader PG compatibility remain open. Original273statuses/atomicclauses/userdeferrals unchanged; R244 Bind untouched.",
+        "proof": "build/pg-feature-topn-20261102-bc582b_s/final-provenance.json"
+      }
+    },
+    {
       "issue": "R185 cooperative cancellation in all12 ExecutionPlan sorting algorithm sites",
       "gap_ids": [
         "P0-14",
