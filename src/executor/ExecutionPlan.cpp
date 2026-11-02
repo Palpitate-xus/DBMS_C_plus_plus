@@ -5072,6 +5072,11 @@ struct SortOp::State {
         int32_t year = 0, month = 0, day = 0;
         uint8_t isNull = 0;
     };
+    struct Input {
+        std::unique_ptr<sort_detail::Reader> reader;
+        Row row;
+        uint64_t left;
+    };
     std::vector<Row> rows;
     size_t position = 0, dynamicBytes = 0, maximumRowBytes = 1;
     size_t budget, bufferSize, nullBytes;
@@ -5080,15 +5085,19 @@ struct SortOp::State {
     uint64_t total = 0, runCount = 0, extent = 0;
     std::unique_ptr<sort_detail::File> input, scratch;
     std::unique_ptr<sort_detail::Writer> writer;
-    std::unique_ptr<sort_detail::Reader> output;
+    std::vector<Input> finalHeads;
+    std::vector<size_t> finalHeap;
+    size_t pendingHead = std::numeric_limits<size_t>::max();
     uint64_t outputRows = 0;
+    StorageEngine::NullRowBindingState callerNullBinding;
 
     State(const TableSchema& schema, size_t ordinal, bool asc, bool first)
         : budget(g_config.workMemKb > std::numeric_limits<size_t>::max() / 1024
               ? std::numeric_limits<size_t>::max() : std::max<size_t>(1, g_config.workMemKb) * 1024),
           bufferSize(std::max<size_t>(64, std::min<size_t>(65536, budget / 16))),
           nullBytes((schema.len + 7) / 8), haveColumn(ordinal < schema.len),
-          ascending(asc), nullsFirst(first) {
+          ascending(asc), nullsFirst(first),
+          callerNullBinding(StorageEngine::captureNullRowBinding()) {
         if (haveColumn) column = schema.cols[ordinal];
     }
     bool less(const Row& a, const Row& b) const {
@@ -5218,14 +5227,16 @@ struct SortOp::State {
         // headers stay on disk, not in an input-sized directory or fd array.
         const size_t fanIn = std::max<size_t>(2, std::min<size_t>(16,
             budget / std::max<size_t>(1, maximumRowBytes + bufferSize)));
-        while (runCount > 1) {
+        // A forward-only consumer can merge the final bounded set of runs
+        // directly. Materializing that last pass would write and read every
+        // output row once more, even if the consumer closes early.
+        while (runCount > fanIn) {
             checkForQueryInterrupt();
             if (!scratch) scratch = std::make_unique<sort_detail::File>();
             else scratch->truncate();
             sort_detail::Writer target(scratch->fd(), bufferSize);
             uint64_t offset = 0, newRuns = 0;
             while (offset < extent) {
-                struct Input { std::unique_ptr<sort_detail::Reader> reader; Row row; uint64_t left; };
                 std::vector<Input> heads;
                 heads.reserve(fanIn);
                 uint64_t count = 0;
@@ -5261,22 +5272,52 @@ struct SortOp::State {
             extent = target.position(); runCount = newRuns; input.swap(scratch);
         }
         scratch.reset();
-        const auto header = runHeader(0);
-        if (header.bytes != extent || header.rows != total)
+        uint64_t offset = 0, count = 0;
+        finalHeads.reserve(runCount); finalHeap.reserve(runCount);
+        while (offset < extent && finalHeads.size() < runCount) {
+            checkForQueryInterrupt();
+            const auto header = runHeader(offset);
+            if (header.rows > total - count)
+                throw DbError("58030", "sort temporary output count mismatch");
+            auto reader = std::make_unique<sort_detail::Reader>(input->fd(),
+                offset + sizeof(header), offset + header.bytes, bufferSize);
+            auto row = readRow(*reader);
+            finalHeap.push_back(finalHeads.size());
+            finalHeads.push_back({std::move(reader), std::move(row), header.rows - 1});
+            offset += header.bytes; count += header.rows;
+        }
+        if (offset != extent || finalHeads.size() != runCount || count != total)
             throw DbError("58030", "sort temporary output count mismatch");
-        output = std::make_unique<sort_detail::Reader>(input->fd(),sizeof(header),extent,bufferSize);
-        outputRows = header.rows;
+        const auto later = [&](size_t a, size_t b) { return less(finalHeads[b].row, finalHeads[a].row); };
+        std::make_heap(finalHeap.begin(), finalHeap.end(), later);
+        outputRows = total;
     }
     bool next(Row& row) {
-        if (!output) {
+        if (!input) {
             if (position == rows.size()) return false;
             row = std::move(rows[position++]); return true;
         }
-        if (!outputRows) {
-            if (output->remaining()) throw DbError("58030", "invalid sort temporary output extent");
+        const auto later = [&](size_t a, size_t b) { return less(finalHeads[b].row, finalHeads[a].row); };
+        // Refill only when another row is requested. The previously returned
+        // row must not depend on reading its successor from temporary storage.
+        if (pendingHead != std::numeric_limits<size_t>::max()) {
+            auto& head = finalHeads[pendingHead];
+            if (head.left) {
+                head.row = readRow(*head.reader); --head.left;
+                finalHeap.push_back(pendingHead);
+                std::push_heap(finalHeap.begin(), finalHeap.end(), later);
+            } else if (head.reader->remaining())
+                throw DbError("58030", "invalid sort temporary run row count");
+            pendingHead = std::numeric_limits<size_t>::max();
+        }
+        if (finalHeap.empty()) {
+            if (outputRows) throw DbError("58030", "sort temporary output count mismatch");
             return false;
         }
-        row = readRow(*output); --outputRows; return true;
+        if (!outputRows) throw DbError("58030", "sort temporary output count mismatch");
+        std::pop_heap(finalHeap.begin(), finalHeap.end(), later);
+        pendingHead = finalHeap.back(); finalHeap.pop_back();
+        row = std::move(finalHeads[pendingHead].row); --outputRows; return true;
     }
 };
 
@@ -5297,7 +5338,11 @@ bool SortOp::open() {
     state_ = std::make_unique<State>(tbl_,sortIndex,asc_,nullsFirst_);
     try {
         childOpened_ = true;
-        if (!child_->open()) return propagateChildError(child_.get(), "sort child could not open");
+        if (!child_->open()) {
+            propagateChildError(child_.get(), "sort child could not open");
+            try { close(); } catch (...) {} // Keep the child's diagnostic primary.
+            return false;
+        }
         std::string raw;
         while (child_->next(raw)) {
             checkForQueryInterrupt();
@@ -5322,7 +5367,11 @@ bool SortOp::open() {
             if (state_->total == std::numeric_limits<uint64_t>::max()) throw DbError("54000", "too many sort input rows");
             state_->add(std::move(row));
         }
-        if (child_->hasError()) return propagateChildError(child_.get(),"sort child failed");
+        if (child_->hasError()) {
+            propagateChildError(child_.get(),"sort child failed");
+            try { close(); } catch (...) {}
+            return false;
+        }
         childOpened_ = false; child_->close();
         state_->finish();
         return true;
@@ -5335,6 +5384,7 @@ bool SortOp::open() {
 
 bool SortOp::next(std::string& outRow) {
     NextInstrument instrumentation(this);
+    try {
     checkForQueryInterrupt();
     State::Row row;
     if (!state_ || !state_->next(row)) return false;
@@ -5346,11 +5396,24 @@ bool SortOp::next(std::string& outRow) {
     else StorageEngine::unbindNullRow();
     outRow = std::move(row.raw); rowAvailable_ = true; instrumentation.emitted = true;
     return true;
+    } catch (...) {
+        const auto failure = std::current_exception();
+        try { close(); } catch (...) {}
+        std::rethrow_exception(failure);
+    }
 }
 
 void SortOp::close() {
+    std::optional<StorageEngine::NullRowBindingState> caller;
+    if (state_) caller = std::move(state_->callerNullBinding);
     state_.reset(); rowAvailable_ = false; lastOrigin_ = {}; lastNulls_.clear();
-    if (childOpened_) { childOpened_ = false; child_->close(); }
+    std::exception_ptr failure;
+    if (childOpened_) {
+        childOpened_ = false;
+        try { child_->close(); } catch (...) { failure = std::current_exception(); }
+    }
+    if (caller) StorageEngine::restoreNullRowBinding(std::move(*caller));
+    if (failure) std::rethrow_exception(failure);
 }
 
 bool SortOp::lastColumnIsNull(size_t colIdx) const {

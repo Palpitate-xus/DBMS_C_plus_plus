@@ -2,6 +2,31 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-02 on-demand final physical sort merge and caller NULL binding lifetime",
+      "gap_ids": [
+        "P0-14",
+        "OPT-10"
+      ],
+      "status": "partial",
+      "evidence": [
+        "docs/performance-report-2026-10-30.md",
+        "docs/test-report.md",
+        "docs/postgresql-18-implementation-blueprint.md"
+      ],
+      "tests": [
+        "tests/sort_final_merge_demand_test.cpp",
+        "tests/sort_null_binding_lifetime_test.cpp",
+        "tests/sort_spill_io_test.cpp"
+      ],
+      "verification": {
+        "correctness": "Final31native exit0. New8/32 controls old6/26fail,new0; exact IO16 old1/new0 under revised exact1row output-read boundary. Full22wire21pass/1existing deferred Bind fail;full47PG18.6/new0fail. Full463/40 observations byte-identical; actual Main anonymous sort SIGKILL/reopen1000rows4000cells and35operation smoke pass.",
+        "performance": "Native8192rows2048payload64KB old/new/old5samples each p50 811.820/456.265/847.333ms about1.78-1.86x; no SQL extrapolation. Two252-sample SQL windows retained incl low64 old-first drift and slower controls; SQL stable improvement/regression-free not proven.960mixed diagnostic queries separately retained.",
+        "failures": "Initial newIO expectation0rows failed with observed1row; deterministic exact1row replaced it,originalfailure retained. First old new-test run aborted on expected uncaughtEIO; robust capture added without loosening assertions and full8rerun old6fail/new0. Existing Bind40 and historical COPY/R197 failures not repaired or excluded.",
+        "scope": "Only ordinary physical SortOp changes; final bounded heads avoid final materialization,successor refill at next demand is own I/O policy not PG fault-prefix equivalence. Terminal cleanup preserves primary errors and restores actual caller NULL binding. Other sort/resource/SQL gaps remain; original273items/atomicclauses/dedicated deferrals/sharedinterrupthelpers/network unchanged.Goal active.",
+        "proof": "build/pg-feature-query-oxy0qhou/final-provenance.json"
+      }
+    },
+    {
       "issue": "2026-11-02 ordinary physical sort budget,external merge and actual SQL admission",
       "gap_ids": [
         "P0-14",

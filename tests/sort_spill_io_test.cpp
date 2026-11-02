@@ -151,7 +151,9 @@ int main() {
         if (success) good=good && opened && count==32 && creates>0 && reads>2 && writes>2;
         if (mode>=2 && mode<=8) good=good && triggered;
         if (mode==1) good=good && reads>2 && writes>2;
-        if (!expected.empty()) good=good && count==0;
+        // Final-run heads are preloaded during open. Returning the winning
+        // row does no successor read; output EIO is raised on the next demand.
+        if (!expected.empty()) good=good && count==(mode==8 ? 1U : 0U);
         ++checked;failures+=!good;
         std::cout << "SORT_SPILL_IO mode=" << mode << " opened=" << opened << " rows=" << count
                   << " state=" << sqlState << " message=" << message << " closed=" << closed
