@@ -6452,9 +6452,9 @@ ParseResult SQLParser::parseSet(const std::string& sql) {
         size_t end = values.size();
         if (end && values[end - 1] == ";") --end;
         size_t value = pos + (dedicatedTimeZone ? 2 : 1);
-        const auto syntax = [](const char* message) {
+        const auto syntax = [workMem](const char* message) {
             ParseResult failed;
-            failed.error = message;
+            failed.error = workMem ? "invalid SET work_mem syntax" : message;
             failed.sqlState = "42601";
             return failed;
         };

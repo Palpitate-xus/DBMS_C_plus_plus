@@ -1,6 +1,7 @@
 #include "executor/ExecutionPlan.h"
 #include "expression/prepared_query_execution.h"
 #include "parser/query_binding.h"
+#include "Config.h"
 
 #include <algorithm>
 #include <cassert>
@@ -10,8 +11,10 @@
 #include <set>
 
 // Observe live allocations at the real child EOF, before output consumption.
-// No allocator or comparator is replaced. The unbounded/DISTINCT/WITH TIES
-// controls must retain their full input, proving that the probe sees it.
+// No allocator or comparator is replaced. Every ordinary sort, including
+// DISTINCT/WITH TIES and large bounds, must now obey the same small budget.
+// This observes one input boundary, not the whole query or receiver peak.
+extern dbms::Config g_config;
 static size_t liveHeapBytes() {
     const auto memory = mallinfo2();
     return memory.uordblks + memory.hblkhd;
@@ -20,6 +23,7 @@ static size_t liveHeapBytes() {
 int main() {
     using namespace dbms;
     TypeRegistry::instance().bootstrap();
+    g_config.workMemKb = 64;
     StorageEngine engine;
     QueryBindingMetadata metadata;
     metadata.relation = [](const std::string& name) {
@@ -30,7 +34,7 @@ int main() {
     size_t checked = 0, failures = 0;
     const auto run = [&](size_t limit, size_t offset, bool distinct,
                          bool ties, bool unbounded, bool nullsFirst,
-                         bool uniqueOrder, bool requireBounded) {
+                         bool uniqueOrder) {
         std::string sql = distinct ? "SELECT DISTINCT k" : "SELECT id,k,payload";
         sql += " FROM topn_input ORDER BY k DESC NULLS ";
         sql += nullsFirst ? "FIRST" : "LAST";
@@ -111,22 +115,21 @@ int main() {
             good = good && reads == 0 && eof == 0;
         else {
             good = good && reads == count && eof == 1;
-            good = good && (requireBounded ? retained < 4 * 1024 * 1024
-                                          : retained > count * width / 2);
+            good = good && retained < 1024 * 1024;
         }
         ++checked;
         failures += !good;
         std::cout << "TOPN " << sql << " rows=" << position << " reads=" << reads
                   << " retained_bytes=" << retained << " passed=" << good << '\n';
     };
-    run(20, 0, false, false, false, false, true, true);
-    run(7, 13, false, false, false, false, true, true);
-    run(1, 0, false, false, false, true, false, true);
-    run(0, 500, false, false, false, false, true, true);
-    run(20000, 0, false, false, false, false, true, false);
-    run(5, 0, true, false, false, false, false, false);
-    run(1, 0, false, true, false, false, false, false);
-    run(0, 0, false, false, true, false, true, false);
+    run(20, 0, false, false, false, false, true);
+    run(7, 13, false, false, false, false, true);
+    run(1, 0, false, false, false, true, false);
+    run(0, 500, false, false, false, false, true);
+    run(20000, 0, false, false, false, false, true);
+    run(5, 0, true, false, false, false, false);
+    run(1, 0, false, true, false, false, false);
+    run(0, 0, false, false, true, false, true);
     std::cout << "TOPN_MEMORY_CHECKED=" << checked << " FAILURES=" << failures << '\n';
     return failures ? 1 : 0;
 }

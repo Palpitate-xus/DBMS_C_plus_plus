@@ -810,12 +810,13 @@ SELECT * FROM users ORDER BY AGE NULLS FIRST;
 序号（例如 ORDER BY 2）。这与 ORDER BY 表达式中按输入列解析名字不同，
 详见[重复别名规则](issue-review-o05-order-by-duplicate-alias.md)。
 
-2026-11-02 起，类型化执行器中的普通有序 `LIMIT` 使用最多 `LIMIT+OFFSET` 个候选的有界堆，
+2026-11-02 起，类型化执行器中的普通有序 `LIMIT` 优先使用最多 `LIMIT+OFFSET` 个候选的有界堆，
 覆盖执行阶段可接入的单表查询及参数化查询，保留多列方向、NULL 顺序、类型值和原始同行顺序。
 所有必要排序键仍对全部输入求值；不参与排序的 volatile 输出按实际输出需求求值。
 `DISTINCT`、`WITH TIES`、聚合/分组及边界溢出的路径不使用这个普通候选上限。
-这只约束排序候选内存：普通非分区 `TableScanOp` 已按页供给，分区/RLS、并行扫描及其他旧分流仍可能全量物化；
-类型化排序等其余路径尚未实现完整 `work_mem` 预算；下述普通物理排序的外部归并另行说明。
+候选超过 `work_mem` 预算时转为有序段与外部归并，仍返回同一批前 `LIMIT+OFFSET` 行；
+转换前已淘汰的行不必重新保留。排序键及原有提前投影仍对必要输入求值，不能因候选被淘汰而跳过原本应发生的副作用或错误。
+候选数量与排序预算只约束排序节点：普通非分区 `TableScanOp` 已按页供给，分区/RLS、并行扫描及其他旧分流仍可能全量物化。
 测量与适用范围见[Top-N 性能记录](performance-report-2026-10-30.md#有界排序-top-n2026-11-02)。
 
 按页扫描为现有类型化消费者保留固定 MVCC 视图及打开时的堆页范围，每次只保留一页未展开的行，
@@ -836,9 +837,28 @@ SELECT * FROM users ORDER BY AGE NULLS FIRST;
 
 普通单表、单个物理列 ORDER BY 的受支持内置整数、浮点、字符及日期/时间键，在 Simple Query 或不限 portal 行数的 Execute 中可接入该路径；
 能够解析到真实列的输出别名、ORDER BY 序号，以及普通 AND 筛选也可接入。保留 NULL、空串、文本 NULL、类型元数据与列顺序。
-NUMERIC、数组/对象身份、多个排序键、DISTINCT/WITH TIES、OR 分流、显式排序 COLLATE、虚拟生成列和有限行数 portal 等仍由各自既有路径处理，
-不能据此认定它们也已受此预算约束。类型化排序/Top-N、哈希/聚合/窗口/JOIN 及结果接收器的完整内存治理仍未完成。
-会话 `SET [SESSION|LOCAL] work_mem` 现在驱动该普通物理排序路径，支持 DEFAULT、FROM CURRENT、SHOW、RESET/RESET ALL/DISCARD ALL 与启动 options。
+这条单键物理快路径继续保留。普通 `TypedSort` 另按打开时的有效 `work_mem` 限制排序批次，
+覆盖已经接入类型化执行器的多个键、表达式键及 `SourceContexts` 逻辑/连接输入；
+排序继续使用原有类型比较；NUMERIC、数组/对象身份和显式排序 COLLATE 等值的类型与元数据不会因临时往返丢失，
+但不扩展这些类型原有的算子支持范围。
+每个临时快照保留完整 `ExprValue` 的类型、NULL、collation、对象/数组 OID 与递归 record 字段，
+以及行上下文的 SQL 值、名称值、参数值和绑定列值；缓存的键与提前投影值直接往返，不重新执行表达式。
+排序以原始输入 ordinal 作为同行的最终次序，跨批次和归并保持稳定；`WITH TIES` 判断同行时只比较原有键，不把 ordinal 当作 SQL 键。
+已接入的普通 `DISTINCT`/`WITH TIES` 可使用该排序预算，但 DISTINCT 自身保留状态不因此获得预算。
+普通类型化比较描述按键惰性缓存，NULL 放置和浮点 NaN 等仍由原有类型规则决定，不提前触发原本没有比较需求的错误。
+
+真实 Main 入口还接入了普通无 LIMIT 单表查询中的多键、表达式键及不能使用单键物理快路径的受支持类型；
+单键物理快路径不为此改走类型化排序。这项入口扩展仍受现有类型化查询形状约束，不表示所有 SQL 都会进入同一排序器。
+虚拟生成列、有限行数 portal，以及未接入的 OR/其他旧分流仍按各自既有路径解释。
+聚合、GROUP BY/HAVING、UNION 等集合运算的 `SetSort`、窗口、哈希、JOIN 本身及结果接收器的完整内存治理仍开放；
+即使 JOIN 输出接入普通 `TypedSort`，预算也只约束其下游排序快照。
+普通类型化排序同样允许单个超大行与固定数量归并读头超出预算；分配器开销和批次稳定排序的临时工作区也不在拥有值的容量估算内。
+该估算约束批次及固定读头，不是全查询或全进程 RSS 上限。
+完整快照只保存值，不改动实际执行、参数帧、相关子查询 provider 或 cursor 的 owner/lifecycle，
+R303/R304/R305 继续遵守既有[暂缓边界](deferred-scope.md)。普通类型化排序的实现与性能证据见
+[普通类型化排序报告](performance-report-2026-10-30.md#普通类型化排序的预算与比较缓存2026-11-02)。
+
+会话 `SET [SESSION|LOCAL] work_mem` 现在驱动上述普通物理及普通类型化排序路径，支持 DEFAULT、FROM CURRENT、SHOW、RESET/RESET ALL/DISCARD ALL 与启动 options。
 SQL 值范围为 64..2147483647 kB，支持 B/kB/MB/GB/TB（单位区分大小写）及按 PostgreSQL 规则舍入。
 普通 SET 在提交后保留，回滚取消；LOCAL 在事务结束时恢复，保存点回滚也恢复。块外 LOCAL 警告 25P01 且无持久效果，非法值仍报错。
 没有显式覆盖时跟随最新实例重载，启动 options 的重置默认值保留，FROM CURRENT 成为显式覆盖。排序打开后不改变其已截取的预算。
@@ -854,10 +874,12 @@ RESET work_mem;
 ```
 
 `pg_settings.setting/unit` 与现有 EXPLAIN SETTINGS 观察有效会话值；目录仍是已有有限列子集。
-`current_setting`/`set_config`、函数 SET 子句和内部例程 GUC 完整作用域尚未实现/验收；其他排序/算子的完整预算也保持开放。
+`current_setting`/`set_config`、函数 SET 子句和内部例程 GUC 完整作用域尚未实现/验收；上述范围以外的排序/算子完整预算也保持开放。
 实例 `work_mem_kb` 仍保留项目原生的微型测试预算，区别于 PG SQL 的 64 kB 下限。验证及性能见[会话工作内存报告](performance-report-2026-10-30.md#会话工作内存与实际排序预算2026-11-02)。
 
 最新按需归并的验证、性能与仍开放的资源边界见[最终归并报告](performance-report-2026-10-30.md#最终归并按需输出与排序绑定恢复2026-11-02)。
+排序中断仍按 [R185](issue-review-r185-sort-interrupt-propagation.md)及本批报告所列实际范围解释，不据此宣称完整 PostgreSQL cancel 语义；
+[R197 COPY 响应/中断归属](issue-review-r197-copy-response-interrupt-scope.md)仍依照其专属记录，不由普通排序资源修复关闭。
 
 ### 聚合
 

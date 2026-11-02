@@ -828,6 +828,166 @@ C++17/O2/ICU/zlib/TLS stub 的构建范围保持，原始 273 项及专属记录
 `parser-reference-observations.json`、`parser-reference-state-receipt.json`、`runtime-main-accepted.json`、`operations-accepted/operations.json`、
 `main-sort-crash-accepted.json`、延迟窗口、实际构建记录及 `final-provenance.json`。
 
+## 普通类型化排序的预算与比较缓存（2026-11-02）
+
+本批输入为 `d8533bc9`，冻结旧程序 `af67a1cf…`，最终程序 `6d6f1724…`。
+目标是约束普通类型化排序的输入保留量，减少重复比较准备，并补 NaN WITH TIES 的实际差异；原始 273 项没有关闭。
+
+### 调研与实现
+
+[PostgreSQL 18 tuplesort](https://github.com/postgres/postgres/blob/REL_18_STABLE/src/backend/utils/sort/tuplesort.c)按调用方工作预算生成有序段、有限路归并，并在顺序消费者请求时执行最终归并。
+[DuckDB 排序设计](https://duckdb.org/2025/09/24/sorting-again)将可溢写布局与比较开销一起考虑；
+[SQLite 临时文件说明](https://www.sqlite.org/tempfiles.html)区分排序临时结构与事务日志。
+本批采用按操作预算与 owning 快照，不实现 DuckDB 的 normalized keys/并行排序，也没有更改本项目的持久化/WAL 格式。
+
+- [BoundedSortRuns.h](../src/executor/BoundedSortRuns.h)把拥有值容量、vector 容量和行上下文计入批次估算，按预算生成段、最多两个匿名已 unlink 文件、有限读头归并。TopN 能放入预算时保留候选堆，超预算转段；之前已淘汰的行仍被保留候选支配。最终上限在下一次 pending refill 前检查。
+- [TypedSortSpill.h](../src/executor/TypedSortSpill.h)保留 type/NULL/collation、对象及数组 OID、递归 record、四类 RowContext 值容器、已求值的键/提前投影及输入 ordinal。只序列化 owning 值，不搬动 AST、执行器、参数帧、provider 或 cursor 的所有者。physical cells 不再另存重复副本；Filter 传递真实 typed 值。
+- [ExecutionPlan.cpp](../src/executor/ExecutionPlan.cpp)在原比较需求处惰性缓存每键最近类型/排序规则描述符，不改成 double 比较 NUMERIC；同一排序比较定义普通 float4/float8 WITH TIES，修复两项 NaN peer 差异。非 key volatile 仍在输出需求处执行，必要键仍检查全部输入。
+- [main.cpp](../src/main.cpp)在执行阶段接通受支持的普通无 LIMIT 多键、表达式及没有单物理键快路径的类型。已有单键物理快路径保留；聚合/HAVING/SetSort 及其 provider/生命周期不在此次接线中。[parser.cpp](../src/parser/parser.cpp)仅修 work_mem 无效语法误写成 TimeZone 的消息，不声明完整 PG 诊断文本/位置一致。
+
+### 内存、资源与正确性
+
+相同 64 KiB 设置、12,000 行×2 KiB payload、真实 child EOF 的活跃分配增量如下；全部值/顺序/NULL/行数继续核验。
+
+| 普通类型化路径 | 冻结旧版 bytes | 最终版 bytes |
+| --- | ---: | ---: |
+| 大 LIMIT | 73,910,976 | 18,064 |
+| DISTINCT | 42,615,632 | 14,768 |
+| WITH TIES | 71,604,640 | 50,048 |
+| 无界多键 | 73,906,016 | 18,064 |
+
+这不是查询/进程峰值。批次预留约 25% 估算空间，但稳定排序 scratch 与分配器开销没有逐字节纳入 Codec；单个超大行、固定归并读头、上游、AST 和结果接收器还可额外占用。
+低预算 SourceContexts 控制实际观测约 155 KB 活跃分配，而不是 64 KiB 硬 RSS 上限。其他算子的完整内存治理仍开放。
+
+最终 39 个原生入口通过，新增 codec 51、通用段 17、真实算子 17 共 85 控制全过。
+原 TopN 八个 SQL/输出/需求检查保留，资源要求改为同 64 KiB 下全部小于 1 MiB；旧版四项失败、新版全过。
+原八项旧源码和“必须保留全输入”的四个旧资源断言、旧默认预算、候选四失败也完整保留，不能把预期资源契约变化称为四项生产错误。
+实际 SourceRows/SourceContexts、OID/嵌套 record、NUMERIC >2^53、TopN、空需求、同图重开、实际 CTE/derived VALUES 和真实堆 volatile 需求均核验。
+JOIN 控制使用真实绑定上下文，不表示公共 buildPreparedQueryPlan 已新增 JOIN 算法。
+
+所选完整 26 协议为 25 通过/1 失败；新固定 108 在严格 PG 18.6/最终程序均全过，旧版仅两个 NaN ties 不符。
+原 80 顺序与预期不变，追加 28 个无 ARRAY 的普通无 LIMIT 入口；保留正常 text/binary、不限额 Execute。
+唯一失败为已有暂缓 Bind/portal 完整 463/40，全部观察与上一批逐字节相同；R197/R303/R304/R305 没有恢复调查。
+实际 Main 同一九项旧版六项低预算资源失败、最终九项全过：六项低预算确有匿名文件、三项高预算无文件，完整值正确、最多两个 FD 并全部释放。
+35 类操作有限检查通过；实际普通多键类型化排序匿名文件仍打开时 SIGKILL，重开核对 1,000 行/4,000 单元格并再次排序通过。这不是任意修改崩溃或整库恢复验收。
+
+初次完整 38 原生有一个入口失败：新回调用 std::sort，原 80 中十六项 stable_sort 分配观察未发生。
+恢复原批次稳定排序回调后最终 80 全过，共享模板/原断言字节不变；没有重开 R185 的旧专项诊断。
+初始 codec 声明、AST 字段/命名空间编译错误、NAME 声明/SHOW 标签/statement 名和算子夹具观察时点的失败均保留。
+输入 NAME 改用受支持的 cast 后核验，不声称修复 NAME 物理声明；所有最终断言保持单一期望。
+
+### 相邻 SQL 延迟：所有案例与慢值
+
+同一闭合的 1,000 行夹具、共享主机（48 逻辑 CPU）、GCC 13.3/-O2/C++17、ICU/zlib、TLS stub。
+每个预算窗口为旧/新/旧独立副本，11 类各 3 轮×4 次，三个 label 共 396 次计时；每 label 每类三次 warmup，固定种子打乱次序。
+显式 SET/SHOW work_mem，原默认持久化/后台维护、15 秒 socket 与 TCP_NODELAY 保留。计时含全部结果校验，夹具准备在外。
+类型化全排序含 ARRAY 输出以保持旧/新相同接入；普通无 ARRAY 的实际落盘由上述九项独立验证。
+NUMERIC 性能夹具是常规小值，超 2^53 精度由独立正确性测试验证，不把两者混为同一性能负载。
+
+首测为 64kB、默认值 4MB、高值 16MB，共 1,188 次。
+16MB 的旧基线及点查控制出现大幅漂移，随后仅按完全相同条件增加一次完整 396 次复测；原首测没有被替换。
+合计 1,584 次计时、396 次 warmup、24 次 SET/SHOW，即 2,004 条 SQL 全值/前置校验均通过，源夹具 1,072 个文件哈希不变。
+表中均为每段全部十二个样本的 p50 ms；没有置信区间，不能从小表共享主机样本推导并发/大数据普遍收益。
+
+#### 64kB
+
+| 操作 | 旧版先测 ms | 最终版 ms | 旧版后测 ms |
+| --- | ---: | ---: | ---: |
+| C 文本多键全排序 | 162.263 | 155.436 | 177.105 |
+| NUMERIC 多键全排序 | 227.480 | 229.655 | 231.684 |
+| float8 多键全排序 | 285.572 | 293.548 | 286.770 |
+| 取模表达式全排序 | 149.936 | 163.022 | 155.354 |
+| 整数多键全排序 | 136.740 | 147.104 | 142.231 |
+| 大 LIMIT 10000 | 146.019 | 150.391 | 141.790 |
+| LIMIT 20 OFFSET 500 | 117.882 | 122.106 | 115.607 |
+| DISTINCT 后 LIMIT | 40.016 | 47.655 | 39.674 |
+| WITH TIES | 66.879 | 74.814 | 67.158 |
+| 整数 TopN 控制 | 37.712 | 35.178 | 35.432 |
+| 主键点查控制 | 13.210 | 11.864 | 14.362 |
+
+#### 4MB（默认值）
+
+| 操作 | 旧版先测 ms | 最终版 ms | 旧版后测 ms |
+| --- | ---: | ---: | ---: |
+| C 文本多键全排序 | 162.299 | 150.548 | 163.762 |
+| NUMERIC 多键全排序 | 221.335 | 210.214 | 221.526 |
+| float8 多键全排序 | 280.128 | 249.347 | 287.877 |
+| 取模表达式全排序 | 147.507 | 150.333 | 149.163 |
+| 整数多键全排序 | 135.663 | 141.992 | 135.832 |
+| 大 LIMIT 10000 | 133.343 | 143.584 | 133.667 |
+| LIMIT 20 OFFSET 500 | 114.208 | 120.503 | 124.413 |
+| DISTINCT 后 LIMIT | 37.323 | 42.030 | 37.634 |
+| WITH TIES | 63.615 | 69.909 | 63.920 |
+| 整数 TopN 控制 | 33.106 | 37.797 | 35.589 |
+| 主键点查控制 | 10.623 | 11.641 | 11.511 |
+
+#### 16MB 首测（基线漂移）
+
+| 操作 | 旧版先测 ms | 最终版 ms | 旧版后测 ms |
+| --- | ---: | ---: | ---: |
+| C 文本多键全排序 | 669.305 | 146.135 | 667.971 |
+| NUMERIC 多键全排序 | 657.308 | 219.671 | 305.462 |
+| float8 多键全排序 | 764.393 | 282.616 | 360.045 |
+| 取模表达式全排序 | 361.609 | 158.837 | 457.788 |
+| 整数多键全排序 | 411.766 | 141.772 | 348.307 |
+| 大 LIMIT 10000 | 619.482 | 141.261 | 404.240 |
+| LIMIT 20 OFFSET 500 | 569.729 | 120.514 | 302.633 |
+| DISTINCT 后 LIMIT | 648.548 | 42.807 | 202.819 |
+| WITH TIES | 269.703 | 65.953 | 192.876 |
+| 整数 TopN 控制 | 340.562 | 35.545 | 47.400 |
+| 主键点查控制 | 551.628 | 11.341 | 18.019 |
+
+#### 16MB 唯一复测
+
+| 操作 | 旧版先测 ms | 最终版 ms | 旧版后测 ms |
+| --- | ---: | ---: | ---: |
+| C 文本多键全排序 | 162.492 | 141.371 | 172.210 |
+| NUMERIC 多键全排序 | 227.946 | 212.380 | 230.624 |
+| float8 多键全排序 | 293.755 | 255.990 | 313.377 |
+| 取模表达式全排序 | 153.890 | 163.260 | 168.170 |
+| 整数多键全排序 | 152.355 | 140.367 | 172.918 |
+| 大 LIMIT 10000 | 151.798 | 148.697 | 154.604 |
+| LIMIT 20 OFFSET 500 | 115.575 | 114.292 | 120.866 |
+| DISTINCT 后 LIMIT | 41.997 | 38.469 | 44.082 |
+| WITH TIES | 75.541 | 75.006 | 78.764 |
+| 整数 TopN 控制 | 37.792 | 35.852 | 39.168 |
+| 主键点查控制 | 12.087 | 28.488 | 16.041 |
+
+默认 4MB 的文本/NUMERIC/float8 全排序在本次窗口有所改善，其他若干路径变慢；64kB 外排的 I/O/编码成本也使多项变慢。
+16MB 首测连点查都出现 551.628/11.341/18.019 ms，不把其巨大倍率归因于本次代码。
+唯一复测的文本为 162.492/141.371/172.210 ms，但点查仍是 12.087/28.488/16.041 ms；较慢控制与波动原因尚未解决。
+复测前后主机/既有进程 CPU/I/O 快照保留，这些计数不能证明初测漂移原因，也不能证明控制项变化与本批无关。
+资源保留量改善已证实；不能宣称所有 SQL 稳定提速、无回退或达到 PostgreSQL 性能水平。
+
+### 构建来源与复现
+
+CMake 共 17 次成功 C++ 对象编译、16 个不同 CPP，最终链接全 62 对象（61 core+Main）；最后标准 CMake target 仅链接、零额外重编译。
+初次 Main 失败保留，修正后的 Main 输入逐字节冻结；core 构建期间 Main 单独修正的差异另列审计，实际 core 输入不变。
+后续仅 ExecutionPlan 的新回调重编译；最终原生 39 和实际 Main 26 使用相同冻结 core/程序。
+最终输入、62 对象、61 core、测试来源和产物 SHA 见本批 `release-binary.json`、`native-release-core-hashes.json`、`final-provenance.json`。
+
+可复现驱动为 [benchmark_typed_sort.py](../scripts/benchmark_typed_sort.py)，沿用 [benchmark_queries.py](../scripts/benchmark_queries.py) 的真实服务/客户端。
+计时驱动 `59792eb4…` 与仓库驱动 `9a8d8e0b…` 只因所在目录不同改变 REPO parents[2]→parents[1]；逆替换源码与规范化 AST 全等，--help/py_compile 通过。
+使用冻结旧二进制、同一个已关闭夹具和每次全新输出目录，例如：
+
+```bash
+python3 scripts/benchmark_typed_sort.py \
+  --before build/pg-feature-typed-sort-zm9x0zst/before-dbms_main \
+  --after build/cmake/dbms_main \
+  --fixture build/pg-feature-topn-20261102-bc582b_s/fixture-1000 \
+  --work-mem 64kB --rows 1000 --rounds 3 --samples 4 \
+  --output build/retest-typed-sort-64k
+```
+
+4MB/16MB 使用相同命令的对应预算和新目录；这会启动私有副本，不打开源夹具，也不重启用户服务。
+新建夹具可用既有 benchmark_topn.py 的无 --fixture 模式，但新夹具的历史/WAL/缓存不同，不能冒称与本次冻结输入字节相同。
+本机证据目录 `build/pg-feature-typed-sort-zm9x0zst/` 保留四个 `typed-latency-*/comparison.json` 全部样本、
+初测独立汇总、复测/主机快照、原版本与每个失败候选、PG108、39/26 汇总、实际 Main 九项和强杀重开记录。
+这些 build 证据是本机保留工件；仓库提交测试与驱动，不能把未打包工件当作可分发发布物。
+
+聚合/GROUP/HAVING/SetSort、窗口/哈希/JOIN 本身、结果接收器、虚拟生成列/未接入旧分流、完整配置函数/GUC 和其他原始功能族继续开放。
+原始 273 项、原子要求与专属暂缓原文不变，Goal 继续 active；无新 Markdown、分支或推送。
+
 ## 剩余瓶颈与适用范围
 
 普通修改、保存点和其他 DDL 仍有物理快照、WAL 全文件映像及同步 I/O 开销；大数据库下会继续放大。整数 DML 筛选仍扫描堆，JOIN 优化仍可能枚举大量键对，索引覆盖、统计信息、计划选择、批处理及更细粒度的回滚机制仍有优化空间。

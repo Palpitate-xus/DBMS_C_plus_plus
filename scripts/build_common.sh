@@ -348,6 +348,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/physical_limit_demand_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/sort_spill_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/work_mem_session_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/typed_sort_spill_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/quantified_query_demand_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/projectset_quantified_execution_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/scalar_subquery_sort_slot_protocol_e2e_test.py)

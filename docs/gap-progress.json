@@ -2,6 +2,36 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-02 ordinary typed sort work_mem spill and lazy key comparisons",
+      "gap_ids": [
+        "P0-14",
+        "OPT-10"
+      ],
+      "status": "partial",
+      "evidence": [
+        "docs/performance-report-2026-10-30.md",
+        "docs/test-report.md",
+        "docs/MANUAL.md",
+        "src/executor/BoundedSortRuns.h",
+        "src/executor/TypedSortSpill.h"
+      ],
+      "tests": [
+        "tests/typed_sort_spill_codec_test.cpp",
+        "tests/bounded_sort_runs_test.cpp",
+        "tests/typed_sort_operator_test.cpp",
+        "tests/typed_sort_spill_protocol_e2e_test.py",
+        "tests/prepared_topn_memory_test.cpp",
+        "scripts/benchmark_typed_sort.py"
+      ],
+      "verification": {
+        "correctness": "Final39native0;new51+17+17=85controls0;fullselected26wire25pass/1existingdeferredBindfail,full463observationsbyteequal40mismatches. PG18.6/final1080,old2NaNties;original80preserved+28plainadmissioncontrols. ActualMain9/0(old6resourcefail),35ops0,typedspoolSIGKILL/reopen1000rows4000cells0.",
+        "performance": "Initial3budgets1188timed+oneidentical16MBrepeat396=1584timed;396warmup24SET/SHOW,all2004SQLchecks0. Everyrawslowvaluepreserved. Default4MBtext162.299/150.548/163.762ms improves,othercases slower;16MBfirstbaseline drift;repeatPK12.087/28.488/16.041ms unresolved. No stableallSQL/regression-freeclaim. Same64K12000x2KiBunboundedinputEOF73906016to18064B,notquery/RSSpeak.",
+        "failures": "Initial38native37/1,old80allocation16observationsmissingundernewstdsortcallback;restoredexistingstablebatchhelper,sharedhelpersand80unchanged. OriginalTopN8semanticchecksretained,newallbounded64Kresourcecontractold4fail/new0;oldretentionexpectationscandidate4failpreserved. Native/wirefixtureandinitialcompilefailurespreserved,notclaimednewproductionfixes.",
+        "scope": "OrdinaryTypedSortowningvalues/context/metadata/keys/targets/ordinalspool,byteestimatedbatches/fixedheads/max2FD/finaldemand/TopNspill;lazyonecomparisonSignatureperkey;ordinaryMainnonLIMITmultikey/expressionnonfasttypesadmitted. Aggregates/HAVING/SetSort/sharedR185helpers/retainedplanning/parameterframes/provider/portalownersunchanged. Existingdeferredrecordsandoriginal273items/atomicclausesunchanged. Scratch/allocator/oversizedrows/headsnotstrictRSSbudget. Goalactive.",
+        "proof": "build/pg-feature-typed-sort-zm9x0zst/final-provenance.json"
+      }
+    },
+    {
       "issue": "2026-11-02 session work_mem utility/transaction/default-source and actual physical sort budget",
       "gap_ids": [
         "P0-14",

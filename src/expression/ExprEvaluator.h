@@ -88,6 +88,9 @@ public:
     const ExprValue& boundColumn(size_t sourceOrdinal, size_t columnOrdinal) const;
 
 private:
+    // Private executor spill codec observes owning value snapshots only;
+    // it never changes query execution, cursor or parameter-frame owners.
+    friend struct RowContextSpillAccess;
     std::map<FunctionCallExpr::SqlValue,ExprValue> sqlValues_;
     std::map<std::string, ExprValue> values_;
     std::vector<ExprValue> parameters_;

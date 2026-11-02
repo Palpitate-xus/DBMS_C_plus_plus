@@ -1,6 +1,8 @@
 #include "ExecutionPlan.h"
 #include "executor/PreparedTableSource.h"
 #include "executor/SortSpill.h"
+#include "executor/BoundedSortRuns.h"
+#include "executor/TypedSortSpill.h"
 #include "commands/StoredRowNull.h"
 #include "common/DbError.h"
 #include "common/TemporalStorageCodec.h"
@@ -46,6 +48,8 @@ namespace dbms {
 // Parallel query support
 int QueryPlanner::parallelWorkers_ = 0;
 QueryPlanner::CostModel QueryPlanner::costModel_{};
+
+static size_t sortWorkMemBytes();
 
 static std::string trimExec(const std::string& value) {
     const size_t first = value.find_first_not_of(" \t\r\n");
@@ -548,6 +552,7 @@ public:
     bool supportsStructuredRows() const override { return child_->supportsStructuredRows(); }
     bool supportsPreparedContexts() const override { return child_->supportsPreparedContexts(); }
     bool lastPreparedContext(RowContext& row) const override { return child_->lastPreparedContext(row); }
+    bool lastStructuredValues(std::vector<ExprValue>& values) const override { return child_->lastStructuredValues(values); }
     bool lastStructuredRow(std::vector<std::string>& cells, std::vector<bool>& nulls) const override {
         return child_->lastStructuredRow(cells, nulls);
     }
@@ -771,20 +776,166 @@ static std::optional<int> comparePreparedIdentityKeys(ExprEvaluator& evaluator,
     return std::nullopt;
 }
 
-class PreparedSortOp final : public Operator {
-    struct Row {
-        std::string raw;
-        std::vector<ExprValue> cells, keys;
-        std::vector<std::optional<int64_t>> integerKeys;
-        RowContext context;
-        std::vector<std::optional<ExprValue>> targets;
-        size_t ordinal = 0;
+// An owning input row. Physical source cells are already owned by the bound
+// context, so ordinary Sort need not retain another copy of those cells.
+struct TypedSortRow {
+    std::string raw;
+    std::vector<ExprValue> cells, keys;
+    std::vector<std::optional<int64_t>> integerKeys;
+    RowContext context;
+    std::vector<std::optional<ExprValue>> targets;
+    uint64_t ordinal = 0;
+};
+struct TypedSortRowCodec {
+    size_t cells, keys, targets;
+    struct Header { uint64_t raw=0,cells=0,keys=0,integers=0,targets=0,ordinal=0; };
+    size_t bytes(const TypedSortRow& row) const {
+        using namespace typed_sort_detail;
+        size_t result=addBytes(sizeof(row),row.raw.capacity());
+        const auto values=[&](const auto& list) {
+            size_t total=multiplyBytes(list.capacity(),sizeof(ExprValue));
+            for(const auto& value:list)total=addBytes(total,dynamicValueBytes(value));
+            return total;
+        };
+        result=addBytes(result,addBytes(values(row.cells),values(row.keys)));
+        result=addBytes(result,multiplyBytes(row.integerKeys.capacity(),sizeof(std::optional<int64_t>)));
+        result=addBytes(result,contextBytes(row.context)-sizeof(RowContext));
+        result=addBytes(result,multiplyBytes(row.targets.capacity(),sizeof(std::optional<ExprValue>)));
+        for(const auto& value:row.targets)if(value)result=addBytes(result,dynamicValueBytes(*value));
+        return result;
+    }
+    void write(sort_detail::Writer& writer,const TypedSortRow& row) const {
+        writer.scalar(Header{row.raw.size(),row.cells.size(),row.keys.size(),row.integerKeys.size(),row.targets.size(),row.ordinal});
+        writer.append(row.raw.data(),row.raw.size());
+        for(const auto& value:row.cells)typed_sort_detail::writeValue(writer,value);
+        for(const auto& value:row.keys)typed_sort_detail::writeValue(writer,value);
+        for(const auto& value:row.integerKeys) {
+            writer.scalar(uint8_t(value.has_value()));if(value)writer.scalar(*value);
+        }
+        typed_sort_detail::writeContext(writer,row.context);
+        for(const auto& value:row.targets) {
+            writer.scalar(uint8_t(value.has_value()));if(value)typed_sort_detail::writeValue(writer,*value);
+        }
+    }
+    TypedSortRow read(sort_detail::Reader& reader) const {
+        const auto header=reader.scalar<Header>();
+        if(header.cells!=cells || header.keys!=keys || header.integers!=keys || header.targets!=targets ||
+           header.raw>reader.remaining() || header.raw>std::numeric_limits<size_t>::max())
+            typed_sort_detail::invalid("row descriptor");
+        TypedSortRow row;row.ordinal=header.ordinal;row.raw=reader.string(static_cast<size_t>(header.raw));
+        const auto values=[&](uint64_t count,std::vector<ExprValue>& list) {
+            if(count>reader.remaining()/sizeof(typed_sort_detail::ValueHeader))typed_sort_detail::invalid("row value count");
+            // The extent and plan descriptor have been validated. Avoid
+            // geometric growth enlarging each decoded merge-head snapshot.
+            list.reserve(static_cast<size_t>(count));
+            for(uint64_t i=0;i<count;++i)list.push_back(typed_sort_detail::readValue(reader));
+        };
+        values(header.cells,row.cells);values(header.keys,row.keys);
+        if(header.integers>reader.remaining())typed_sort_detail::invalid("integer cache count");
+        row.integerKeys.reserve(static_cast<size_t>(header.integers));
+        for(uint64_t i=0;i<header.integers;++i) {
+            const auto present=reader.scalar<uint8_t>();if(present>1)typed_sort_detail::invalid("integer cache flag");
+            row.integerKeys.push_back(present?std::optional<int64_t>(reader.scalar<int64_t>()):std::nullopt);
+        }
+        row.context=typed_sort_detail::readContext(reader);
+        if(header.targets>reader.remaining())typed_sort_detail::invalid("target cache count");
+        row.targets.reserve(static_cast<size_t>(header.targets));
+        for(uint64_t i=0;i<header.targets;++i) {
+            const auto present=reader.scalar<uint8_t>();if(present>1)typed_sort_detail::invalid("target cache flag");
+            row.targets.push_back(present?std::optional<ExprValue>(typed_sort_detail::readValue(reader)):std::nullopt);
+        }
+        return row;
+    }
+};
+
+// Ordinary Sort owns one recent comparison signature per key. Descriptor
+// setup is lazy at the original comparison demand, never at key evaluation.
+// Aggregate/grouped sorting keeps its existing comparison owner above.
+class OrdinarySortComparisons {
+    struct Entry {
+        bool ready=false;
+        std::string leftType,rightType,leftCollation,rightCollation;
+        enum class Kind { Storage,Expression,Oid } kind=Kind::Storage;
+        std::optional<Column> column;
+        std::optional<QueryComparisonBinding> binding;
     };
+    std::vector<Entry> entries_;
+public:
+    void reset(size_t size=0) {std::vector<Entry> fresh(size);entries_.swap(fresh);}
+    int compare(size_t index,ExprEvaluator& evaluator,const ExprValue& a,const ExprValue& b,
+                const std::optional<QueryComparisonBinding>& enumeration) {
+        if(enumeration) {
+            if(evaluator.comparePrepared(*enumeration,a,b).asBool())return -1;
+            if(evaluator.comparePrepared(*enumeration,b,a).asBool())return 1;
+            return 0;
+        }
+        auto& entry=entries_.at(index);
+        if(!entry.ready || entry.leftType!=a.typeName || entry.rightType!=b.typeName ||
+           entry.leftCollation!=a.collation || entry.rightCollation!=b.collation) {
+            Entry next;next.leftType=a.typeName;next.rightType=b.typeName;
+            next.leftCollation=a.collation;next.rightCollation=b.collation;
+            const auto type=ExprHelper::canonicalResultTypeName(a.typeName);
+            const bool same=type==ExprHelper::canonicalResultTypeName(b.typeName);
+            if(same && type=="oid")next.kind=Entry::Kind::Oid;
+            else if(same && (type=="regtype" || type=="name" || type=="\"char\"" ||
+                             type=="real" || type=="double precision")) {
+                next.kind=Entry::Kind::Expression;
+                next.binding=ExprEvaluator::resolveComparison("<",type,type);
+            } else {
+                next.column.emplace();
+                const auto error=TypeRegistry::instance().resolveColumnType(*next.column,a.typeName,{},false);
+                if(!error.empty())throw DbError("0A000","unsupported prepared sort type: "+a.typeName);
+                next.column->collation=a.collation;
+            }
+            next.ready=true;entry=std::move(next);
+        }
+        if(entry.kind==Entry::Kind::Oid) {
+            const auto x=preparedOidValue(a.value),y=preparedOidValue(b.value);
+            return (x>y)-(x<y);
+        }
+        if(entry.kind==Entry::Kind::Expression) {
+            if(evaluator.comparePrepared(*entry.binding,a,b).asBool())return -1;
+            if(evaluator.comparePrepared(*entry.binding,b,a).asBool())return 1;
+            return 0;
+        }
+        const auto lower=StorageEngine::compareValues(*entry.column,a.value,false,b.value,false,"<");
+        const auto greater=StorageEngine::compareValues(*entry.column,a.value,false,b.value,false,">");
+        if(lower==StorageEngine::PredicateTruth::Unknown || greater==StorageEngine::PredicateTruth::Unknown)
+            throw DbError("0A000","unsupported prepared sort comparison");
+        return lower==StorageEngine::PredicateTruth::True?-1:greater==StorageEngine::PredicateTruth::True?1:0;
+    }
+};
+
+class PreparedSortOp final : public Operator {
+    using Row=TypedSortRow;
+    struct Less {PreparedSortOp* owner;bool operator()(const Row& a,const Row& b) const {return owner->less(a,b);}};
+    using Runs=sort_detail::BoundedRuns<Row,TypedSortRowCodec,Less>;
     OpPtr child_;
     std::shared_ptr<PreparedSelectState> state_;
-    std::vector<Row> rows_;
+    std::vector<Row> rows_; // Existing aggregate/HAVING path only.
+    std::unique_ptr<Runs> runs_;
     std::optional<size_t> bound_;
-    size_t position_ = 0;
+    size_t position_=0;
+    bool budgeted_=false,opened_=false,available_=false;
+    Row current_;
+    mutable OrdinarySortComparisons comparisons_;
+    const Row& current() const {return budgeted_?current_:rows_.at(position_-1);}
+    bool less(const Row& left,const Row& right) {
+        for(size_t i=0;i<state_->keys.size();++i) {
+            const auto& a=left.keys[i];const auto& b=right.keys[i];const auto& key=state_->keys[i];
+            if(a.isNull || b.isNull) {if(a.isNull==b.isNull)continue;return a.isNull==key.nullsFirst;}
+            int order;
+            if(!key.enumComparison && a.typeName==b.typeName && left.integerKeys[i] && right.integerKeys[i]) {
+                const auto x=*left.integerKeys[i],y=*right.integerKeys[i];order=(x>y)-(x<y);
+            } else order=budgeted_?comparisons_.compare(i,state_->evaluator,a,b,key.enumComparison)
+                :comparePreparedOrderValues(state_->evaluator,a,b,key.enumComparison);
+            if(order)return key.asc?order<0:order>0;
+        }
+        return (budgeted_ || bound_) && left.ordinal<right.ordinal;
+    }
+    bool fail(const char* message) {
+        propagateChildError(child_.get(),message);try{close();}catch(...){}return false;
+    }
 public:
     PreparedSortOp(OpPtr child, std::shared_ptr<PreparedSelectState> state)
         : child_(std::move(child)), state_(std::move(state)) {
@@ -802,49 +953,30 @@ public:
                 bound_ = offset + *select.limit;
         }
     }
+    ~PreparedSortOp() override {try{close();}catch(...) {}}
     bool open() override {
-        OpenInstrument startup(this);
-        clearError(); rows_.clear(); position_ = 0;
-        if (!child_->open()) return false;
-        const auto less = [&](const Row& left, const Row& right) {
-            for (size_t i = 0; i < state_->keys.size(); ++i) {
-                const auto& a = left.keys[i]; const auto& b = right.keys[i];
-                const auto& key = state_->keys[i];
-                if (a.isNull || b.isNull) {
-                    if (a.isNull == b.isNull) continue;
-                    return a.isNull == key.nullsFirst;
-                }
-                int order;
-                if (!key.enumComparison && a.typeName == b.typeName &&
-                    left.integerKeys[i] && right.integerKeys[i]) {
-                    const auto x = *left.integerKeys[i], y = *right.integerKeys[i];
-                    order = (x > y) - (x < y);
+        OpenInstrument startup(this);clearError();rows_.clear();runs_.reset();position_=0;available_=false;current_=Row{};
+        const auto& select=state_->select();
+        budgeted_=state_->aggregates.empty() && !select.having && select.groupBy.empty() && select.groupByElems.empty();
+        comparisons_.reset(budgeted_?state_->keys.size():0);
+        if(budgeted_)runs_=std::make_unique<Runs>(sortWorkMemBytes(),TypedSortRowCodec{0,state_->keys.size(),state_->targets.size()},Less{this},bound_,
+            [](std::vector<Row>& rows,const Less& less){interruptibleStableSort(rows.begin(),rows.end(),less);});
+        try {
+            opened_=true;
+            if(!child_->open())return fail("prepared sort child could not open");
+            uint64_t ordinal=0;
+            std::string raw;
+            while(child_->next(raw)) {
+                if((ordinal&127U)==0)checkForQueryInterrupt();
+                Row row;row.raw=raw;
+                if(ordinal==std::numeric_limits<uint64_t>::max())throw DbError("54000","too many sort input rows");
+                row.ordinal=ordinal++;
+                if(!state_->sourceContexts && !child_->supportsPreparedContexts()) {
+                    row.cells=state_->cells(*child_,raw);row.context=state_->context(row.cells);
                 } else {
-                    order = comparePreparedOrderValues(state_->evaluator, a, b, key.enumComparison);
+                    row.context=state_->context(*child_,raw);
+                    if(!state_->sourceContexts)row.cells=state_->cells(*child_,raw);
                 }
-                if (order) return key.asc ? order < 0 : order > 0;
-            }
-            // A bounded heap must retain the same first peer rows as the
-            // original stable sort, including when the boundary cuts a tie.
-            return bound_ && left.ordinal < right.ordinal;
-        };
-        size_t heapComparisons = 0, ordinal = 0;
-        const auto heapLess = [&](const Row& left, const Row& right) {
-            if ((heapComparisons++ & 127U) == 0) checkForQueryInterrupt();
-            return less(left, right);
-        };
-        std::string raw;
-        while (child_->next(raw)) {
-            if (bound_ && (ordinal & 127U) == 0) checkForQueryInterrupt();
-            Row row; row.raw = raw;
-            row.ordinal = ordinal++;
-            if (!state_->sourceContexts && !child_->supportsPreparedContexts()) {
-                row.cells = state_->cells(*child_, raw);
-                row.context = state_->context(row.cells);
-            } else {
-                row.context = state_->context(*child_, raw);
-                if (!state_->sourceContexts) row.cells = state_->cells(*child_, raw);
-            }
             row.targets.resize(state_->targets.size());
             const auto& context = row.context;
             // Non-volatile targets are part of the sort input projection.
@@ -882,70 +1014,81 @@ public:
                 }
                 row.integerKeys.push_back(integer);
             }
-            // Evaluate every original target/key before rejecting a row.
-            // This preserves volatile calls and errors in discarded input.
-            if (!bound_ || rows_.size() < *bound_) {
-                rows_.push_back(std::move(row));
-                if (bound_ && rows_.size() == *bound_)
-                    std::make_heap(rows_.begin(), rows_.end(), heapLess);
-            } else if (heapLess(row, rows_.front())) {
-                std::pop_heap(rows_.begin(), rows_.end(), heapLess);
-                rows_.back() = std::move(row);
-                std::push_heap(rows_.begin(), rows_.end(), heapLess);
+                if(budgeted_) {
+                    // The bound source cells remain genuine owning datums in
+                    // this exact context snapshot, not decoded display text.
+                    std::vector<ExprValue>().swap(row.cells);
+                    runs_->add(std::move(row));
+                } else rows_.push_back(std::move(row));
             }
+            if(child_->hasError())return fail("prepared sort child failed");
+            if(budgeted_)runs_->finish();
+            else interruptibleStableSort(rows_.begin(),rows_.end(),[&](const Row& a,const Row& b){return less(a,b);});
+            return true;
+        } catch(...) {
+            const auto primary=std::current_exception();try{close();}catch(...){}std::rethrow_exception(primary);
         }
-        if (child_->hasError()) return propagateChildError(child_.get(), "prepared sort child failed");
-        interruptibleStableSort(rows_.begin(), rows_.end(), less);
-        return true;
     }
     bool next(std::string& row) override {
-        NextInstrument instrumentation(this);
-        if (position_ == rows_.size()) return false;
-        row = rows_[position_++].raw; instrumentation.emitted = true; return true;
+        NextInstrument instrument(this);
+        try {
+            if(budgeted_) {if(!runs_ || !runs_->next(current_))return false;++position_;}
+            else {if(position_==rows_.size())return false;++position_;}
+            row=current().raw;available_=true;instrument.emitted=true;return true;
+        } catch(...) {
+            const auto primary=std::current_exception();try{close();}catch(...){}std::rethrow_exception(primary);
+        }
     }
-    const std::vector<std::optional<ExprValue>>& targets() const { return rows_.at(position_ - 1).targets; }
-    const std::vector<ExprValue>& keys() const { return rows_.at(position_-1).keys; }
+    const std::vector<std::optional<ExprValue>>& targets() const {return current().targets;}
+    const std::vector<ExprValue>& keys() const {return current().keys;}
     bool peers(const std::vector<ExprValue>& left,const std::vector<ExprValue>& right) const {
         for(size_t i=0;i<state_->keys.size();++i) {
             const auto& a=left.at(i);const auto& b=right.at(i);
             if(a.isNull || b.isNull){if(a.isNull!=b.isNull)return false;continue;}
+            if(budgeted_) {if(comparisons_.compare(i,state_->evaluator,a,b,state_->keys[i].enumComparison))return false;continue;}
             if(const auto& comparison=state_->keys[i].enumComparison) {
-                if(state_->evaluator.comparePrepared(*comparison,a,b).asBool() ||
-                   state_->evaluator.comparePrepared(*comparison,b,a).asBool())return false;
+                if(state_->evaluator.comparePrepared(*comparison,a,b).asBool() || state_->evaluator.comparePrepared(*comparison,b,a).asBool())return false;
                 continue;
             }
-            if(const auto comparison=comparePreparedIdentityKeys(state_->evaluator,a,b)) {
-                if(*comparison)return false;
-                continue;
-            }
+            if(const auto comparison=comparePreparedIdentityKeys(state_->evaluator,a,b)) {if(*comparison)return false;continue;}
             Column column;
             const auto error=TypeRegistry::instance().resolveColumnType(column,a.typeName,{},false);
             if(!error.empty())throw DbError("0A000","unsupported prepared peer type: "+a.typeName);
             column.collation=a.collation;
             const auto equality=StorageEngine::compareValues(column,a.value,false,b.value,false,"=");
-            if(equality==StorageEngine::PredicateTruth::Unknown)
-                throw DbError("0A000","unsupported prepared peer comparison");
+            if(equality==StorageEngine::PredicateTruth::Unknown)throw DbError("0A000","unsupported prepared peer comparison");
             if(equality!=StorageEngine::PredicateTruth::True)return false;
         }
         return true;
     }
-    bool supportsPreparedContexts() const override { return true; }
-    bool lastPreparedContext(RowContext& row) const override {
-        if (!position_ || position_ > rows_.size()) return false;
-        row = rows_[position_ - 1].context; return true;
-    }
-    bool supportsStructuredRows() const override { return true; }
-    bool lastStructuredRow(std::vector<std::string>& cells, std::vector<bool>& nulls) const override {
-        if (!position_ || position_ > rows_.size()) return false;
-        cells.clear(); nulls.clear();
-        for (const auto& value : rows_[position_ - 1].cells) {
-            cells.push_back(value.value); nulls.push_back(value.isNull);
-        }
+    bool supportsPreparedContexts() const override {return true;}
+    bool lastPreparedContext(RowContext& row) const override {if(!available_)return false;row=current().context;return true;}
+    bool supportsStructuredRows() const override {return true;}
+    bool lastStructuredValues(std::vector<ExprValue>& values) const override {
+        if(!available_ || state_->sourceContexts)return false;
+        values.clear();
+        if(!budgeted_)values=current().cells;
+        else if(state_->sourceOrdinal!=PreparedSelectState::noTarget)
+            for(size_t i=0;i<state_->schema.len;++i)values.push_back(current().context.boundColumn(state_->sourceOrdinal,i));
         return true;
     }
-    void close() override { rows_.clear(); position_ = 0; child_->close(); }
-    std::string preparedPlanNodeName() const override { return "TypedSort"; }
-    std::vector<Operator*> preparedPlanChildren() const override { return {child_.get()}; }
+    bool lastStructuredRow(std::vector<std::string>& cells,std::vector<bool>& nulls) const override {
+        if(!available_)return false;
+        cells.clear();nulls.clear();
+        if(budgeted_ && !state_->sourceContexts && state_->sourceOrdinal!=PreparedSelectState::noTarget) {
+            for(size_t i=0;i<state_->schema.len;++i) {
+                const auto& value=current().context.boundColumn(state_->sourceOrdinal,i);
+                cells.push_back(value.value);nulls.push_back(value.isNull);
+            }
+        } else for(const auto& value:current().cells){cells.push_back(value.value);nulls.push_back(value.isNull);}
+        return true;
+    }
+    void close() override {
+        runs_.reset();std::vector<Row>().swap(rows_);current_=Row{};position_=0;available_=false;comparisons_.reset();
+        if(opened_){opened_=false;child_->close();}
+    }
+    std::string preparedPlanNodeName() const override {return "TypedSort";}
+    std::vector<Operator*> preparedPlanChildren() const override {return {child_.get()};}
 };
 
 class PreparedProjectOp final : public Operator {

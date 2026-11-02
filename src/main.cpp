@@ -20257,6 +20257,41 @@ static pair<bool, bool> scalarQueryRoles(const dbms::Expr* expression, bool scal
     return result;
 }
 
+// Execution admission for ordinary base-table sorts that have no physical
+// single-key fast path. Retained planning and finite portal demand keep their
+// current owners; this helper does not prepare or open a query.
+[[gnu::noinline]] static bool ordinaryTypedSortDemand(
+    const dbms::SelectStmt& select, const dbms::TableSchema& table) {
+    if (currentQueryRowDemand() || select.limit || select.orderBy.empty() ||
+        !select.ctes.empty() || select.setOp != dbms::SetOp::None ||
+        !select.groupBy.empty() || !select.groupByElems.empty() || select.having ||
+        any_of(table.cols, table.cols + table.len,
+            [](const auto& column) { return column.generatedKind == 'v'; })) return false;
+    bool aggregate = false;
+    function<void(const dbms::Expr*)> inspect = [&](const dbms::Expr* expression) {
+        if (!expression || expression->preparedSubquery) return;
+        if (const auto* call = dynamic_cast<const dbms::FunctionCallExpr*>(expression))
+            aggregate = aggregate || !dbms::aggregate_type_detail::builtinName(call).empty();
+        visitWindowValueChildren(expression, inspect);
+    };
+    for (const auto& target : select.selectList) inspect(target.expr.get());
+    for (const auto& key : select.orderBy) inspect(key.expr.get());
+    if (aggregate) return false;
+    if (select.orderBy.size() != 1 || select.distinct || !select.distinctOn.empty()) return true;
+    const auto* key = queryDemandPhysicalOrderColumn(select, select.orderBy.front());
+    if (!key) return true;
+    static const set<string> physicalTypes = {"smallint","integer","bigint","real",
+        "double precision","text","character","character varying","date",
+        "time without time zone","timestamp without time zone","time","timestamp"};
+    for (size_t i = 0; i < table.len; ++i) {
+        const auto& column = table.cols[i];
+        if (column.dataName == key->column)
+            return column.isArray || !column.enumValues.empty() ||
+                !physicalTypes.count(dbms::ExprHelper::canonicalResultTypeName(column.dataType));
+    }
+    return false; // Normal binding owns an absent or ambiguous column.
+}
+
 static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bool& handled) {
     handled = false;
     dbms::SQLParser parser;
@@ -20355,6 +20390,7 @@ static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bo
     for (const auto& item : candidate->selectList) if (scalarQueryRoles(item.expr.get()).second) return false;
     for (const auto& item : candidate->orderBy) if (scalarQueryRoles(item.expr.get()).second) return false;
     string physical;
+    bool typedSortDemand = false;
     if (candidate->fromClause) {
         const string& spelling = candidate->fromClause->tableName;
         physical = resolveTableName(session, spelling, true);
@@ -20364,7 +20400,8 @@ static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bo
         if (!g_engine.tableExists(session.currentDB, physical)) return false;
         if (!roles.first && !scalarOrder && !possibleArray && !fromlessDemand && !possibleBitNegation && !physicalLimitDemand) {
             const auto schema = g_engine.getTableSchema(session.currentDB, physical);
-            if (none_of(schema.cols, schema.cols + schema.len,
+            typedSortDemand = ordinaryTypedSortDemand(*candidate, schema);
+            if (!typedSortDemand && none_of(schema.cols, schema.cols + schema.len,
                         [](const dbms::Column& column) { return column.isArray; })) return false;
         }
         dbms::CatalogManager::QualifiedName name;
@@ -20385,7 +20422,7 @@ static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bo
     const bool arrayOutput = any_of(prepared.output.begin(), prepared.output.end(),
         [](const dbms::QueryOutputColumn& column) { return dbms::array_detail::isArray(column.type); });
     const bool bitNegationOutput=possibleBitNegation && bitNegation(select,true);
-    if(!roles.first && !scalarOrder && !queryArrays(select,true) && !arrayOutput && !fromlessDemand && !bitNegationOutput && !physicalLimitDemand)return false;
+    if(!roles.first && !scalarOrder && !queryArrays(select,true) && !arrayOutput && !fromlessDemand && !bitNegationOutput && !physicalLimitDemand && !typedSortDemand)return false;
     // Preserve column grants on precisely the bound source cells used by
     // this query (including correlated child references), not SELECT *.
     if (select->fromClause && !sessionIsAdmin(session)) {
