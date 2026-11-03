@@ -6,7 +6,7 @@ C7 `f135335e…` 将真实复合值、声明元数据与普通格式 1 的结果
 
 新原生三个入口共 38 控制通过；C7 最终选取的 26 原生入口全过，31 协议入口为 24 通过/7 个既有失败入口。C5 完整 106 原生的 105/1 与 95 协议的 86/9 继续按 C5 代别记录，不能称 C7 全量 106/95 重跑。全部原始差异、来源和未完边界见[本批功能与成本报告](performance-report-2026-10-30.md#拥有值的复合类型输出与引用类型存储2026-11-03)。
 
-复合 binary RETURNING、更多 UPDATE WHERE/SET 输入加载、域数组/命名复合目录、数组位图历史、legacy typmod 和 ALTER USING 仍是普通缺口，未新增暂缓。本批独立成本与速度结论待测量后补入，资源检查与时钟分别报告；没有新的 PostgreSQL 速度对照；原 273 仍为 22 complete /166 partial /70 unverified /15 deferred_by_user。以下为前批记录，保留其当时输入与结论。
+复合 binary RETURNING、更多 UPDATE WHERE/SET 输入加载、域数组/命名复合目录、数组位图历史、legacy typmod 和 ALTER USING 仍是普通缺口，未新增暂缓。资源55通过；36组速度为4快/23慢/9居间，C7未通过默认安装性能门，根目录保持S3。分配与字节额外成本也已记录；没有新的PostgreSQL速度对照；原 273 仍为 22 complete /166 partial /70 unverified /15 deferred_by_user。以下为前批记录，保留其当时输入与结论。
 
 上一批未接受研究记录：
 

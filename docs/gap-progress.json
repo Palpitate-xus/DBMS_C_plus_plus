@@ -15,7 +15,8 @@
         "docs/performance-report-2026-10-30.md",
         "docs/test-report.md",
         "docs/postgresql-comparison.md",
-        "docs/postgresql-18-implementation-blueprint.md"
+        "docs/postgresql-18-implementation-blueprint.md",
+        "docs/benchmarks/owned-datum-20261103.json"
       ],
       "tests": [
         "tests/owned_compound_spill_codec_test.cpp",
@@ -23,14 +24,16 @@
         "tests/numeric_special_binary_output_test.cpp"
       ],
       "verification": {
-        "candidate": "C7 f135335e6ce07b23bf325f6303431488842cb418ebf84ef8a8a02c6df63d3482;226source/freshABI lineage;2actualCPP recompiled+60valid sameABI objects;functional source versioned on master;installed AA52 retained pending separatecost/resource/latency decision.",
+        "candidate": "Functional source896966989defe4c7b9e7a5746d2330f9762a9ba7;C7f135335e6ce07b23bf325f6303431488842cb418ebf84ef8a8a02c6df63d3482. OneEOFnewline normalrebuild:all62objects/binbitexact. Featuresourcekept, performancepromotionrejected,installedS3AA52retained.",
         "implementation": "Defaultoff actual owning datum/result/codec chain for correctly described ordinary compound outputs;actual/basetype OID and NULL/array bounds preserve.Original raw descriptors/top enum-family/R151 policies remain. New REGTYPE uint32 physical identity/index/COPY/cold read and normal2206/2211 parameter codecs.",
         "correctness_generations": "C5 complete106native105pass1oldfail;95wire86pass9oldfail,5011detailed0newwrong and220exact. C7 selected26native all0;31wire24pass7oldfail. Not C7 full106/95.",
         "strict_oracles": "PG18.6 frozen301 reference;C7 114remaining vsAA52201,87improved0oldpassregression.83/111 each2retainedSHOW/UTC configdifferences. REGTYPE68 57pass11ordinarydifferences+normalparams16all0, fullraw retained and same-data cold epochs.",
         "new_tests": "3native entries16+12+10=38controls;original2319testfiles exact+3=2322. File/entry/control counts remain separate.",
         "ordinary_remaining": "PreparedbinaryRETURNING capture,moreUPDATE WHERE/SET actualinput loads,domainarray/namedcatalog/complexinput/legacytypmod/physicalarraybitmaphistory,ALTER USING/chainedCAST/domainrename remain ordinary open;not new user deferrals.",
-        "cost": "ABI sizeof increases ExprValue16B/ExprEvalResult208B/DmlResult64B;privatePreparedReturning schema reference+owned database copy. Independent cost/resource/latency acceptance pending;no speed/RSS/zero-cost claim.",
-        "scope": "Original273items/status22complete166partial70unverified15deferred_by_user and251history raw suffix preserved;725protected and754MD pathset retained. R151 original103 and all dedicated deferrals remain;actualP/B/D owner bodies rawexact,handleClient has revieweddata-onlyreceiver delta. Goalactive/master/Palpitate-xus,no newbranch/push/Actions."
+        "cost": "ABI ExprValue168→184B,ExprEvalResult168→376B,DmlResult+64B. N512cursor+512requests/+204960Bcold/+204800Brestarts;captureoff1218134requests same,88357760→88677248B. Senderrequests/bytes same;oldcaptureAPIunavailable. Singlecold+3restarts notstablelatency/RSS.",
+        "scope": "Original273items/status22complete166partial70unverified15deferred_by_user and251history raw suffix preserved;725protected and754MD pathset retained. R151 original103 and all dedicated deferrals remain;actualP/B/D owner bodies rawexact,handleClient has revieweddata-onlyreceiver delta. Goalactive/master/Palpitate-xus,no newbranch/push/Actions.",
+        "performance": "Once1638=1296timed324untimedwarm18SET;1620000rows4725000cells/9normal0/inputsexact.36groups4faster23slower9between;64k3/2/7,4MB1/10/1,16MB0/11/1. Drift−6.65..+79.49%;worstp50ratio1.874623. All108raw12distributions/slowvalues retained,no resampling.",
+        "resources": "55requests40fullreads14SET_SHOW1verifiedreadonlykill;40000rows118000cells/5normal0/kill−9+same-datareopenvalues0/max2FDlow/highobserved0/EOFclean. NotWindowbudget/hardRSS/arbitrarywriterecovery/R15closure."
       }
     },
     {
