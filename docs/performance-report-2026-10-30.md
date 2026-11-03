@@ -1770,3 +1770,209 @@ python3 build/pg-feature-window-key-w4qeo1ai/runtime_benchmark_windows.py --befo
 ```
 
 研究、源/core/header/stub、完整原始数据/所有失败、文档检查与安装/提交证据统一在本批 `final-provenance.json`；原273状态不因缓存或样本改善关闭。
+
+
+## 窗口结果共享与排序投影（2026-11-03）
+
+### 输入、实现和研究依据
+
+本批基线master `d7793044fc8abdbd5d4d7e28432f7cabf3ada32b`，C1程序SHA256 `56d06bca0ddacd1d7c801b51d360d1d393765717f8d1aeda5b31b7f0196c6a19`。
+工件目录 `build/pg-feature-window-compat-xi39wepx/`；S1 `570863d34ffea3c5341e94d4ff6dd8e5ebd4853e7cd7cdc3d572d4cbe43f6808`，S2 `779617cb2afb9067fdf329c7fbd367c8fec53785734b37cd7ebc29721dddda8d`。
+S1完整正确性通过后减少准备期重复元数据工作，得到S2；下方保留S2完整首次性能失败事实。随后S3 `aa52b5fe35e1d1ef92a301bcad8b72d95b32edb705e650d3539b999d8c5b6b0f` 继续验证，不将S2慢值抹去或提前宣告回退已修。
+仍为0.2.0/C++17、GCC13.3/-O2、ICU/zlib、TLSstub，没有修改持久化格式或语言标准。
+
+[PG18.6 WindowAgg](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/executor/nodeWindowAgg.c#L2684)复用等价且不含易变函数的窗口调用；
+[make_sort_input_target](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/optimizer/plan/planner.c#L6574)在合适的真实最终排序前拆出窗口值，
+[add_new_columns_to_pathtarget](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/optimizer/util/tlist.c#L761)可能让推迟投影中的相同窗口叶引用同一已计算列。
+没有实际Sort时该投影会恢复；若两个易变目标都要供排序，它们也不因此合并。不能仅检查有ORDER BY或合并相同SQL文字。
+隐藏排序子树还影响调用顺序：原155观察第74项的调用总数相同，但PG可见值是3,5,…，C1为2,4,…，必须保持虚拟输入目标顺序。
+
+仅修改ExecCPP私有状态/接线及PreparedWindowOp.inc，147头、Main、网络/真实frame-context-provider、原共享比较/CPU排序助手与R177/R185及所有用户暂缓策略保持。
+每个原call/计算列、targetOwners、实际需求及原窗口声明winref均保留；同一实际stage内选择真正被需求的代表，逐行计算并向原列广播完整owning ExprValue，最后别名move，其余必要copy。
+不跨行/跨重启缓存结果或替换真实上下文。真实最终Sort的top demanded stage按完整保留根和抽出窗口叶的顺序处理，中间stage只采用非易变等价复用；完整wrapper不被误当作其子窗口已经是顶层值。
+S2另外仅在本次prepare内复用同原Expr的纯身份字符串，以必要函数/窗口/输入结果签名跳过不可能的完整身份计算；无postponed目标时不建没人读取的root身份，但仍按原hidden/priorKey遍历。
+没有重跑infer/fold、改写用户AST或改变保留规划/参数帧策略。通用已分析表达式的CAST/常量归一化仍未完成；额外6个PG合法正例24观察单独保留，未混入固定220或冒称候选已通过。
+
+### 正确性、成本与保留失败
+
+新固定220包括53条窗口查询及DDL/序列seed/post，独立PG18.6为220/0，C1为220/27，S1/S2均220/0；S1/S2完整case/fullactual/raw/normalized/match逐对象相同。
+原155完整raw保持，唯一对象身份归一化由真实id LIMIT0锚定物理表OID，字段类型/格式/消息顺序/实际值/错误/计数均严格保留。S3新220也完整通过并与S2逐对象相同，其他最终门见文末。
+原71native加新10入口共72全部通过；新10实际读取512行物理表，经公开绑定/真实图/cursor验证纯LAG/SUM、递归record及OID数组、重启/提前close、不同命名窗口、LIMIT0与22012。
+独立审查后错误前缀加强为固定完整integer行[[1,0,0],[2,-1,-1]]、3列真实OID23和两次重启一致；a585bd7a源在C1/S1/S2/S3均10/0，较弱旧源和原日志保留，不改任何原2316测试文件。
+
+S2旧61协议首次全跑55pass/6fail，其中新增1项在start_ours连接103、planned190/recorded0/attempted0，是0SQL采集失败，不是190项语义错误或验收通过。
+首次1158B日志SHA `cc55476f92162b5dd7beb49e57439916caa3db5e64e1d45ea1052b84b4e2893d` 保留；全部任务终态后同源同S2独立一次完整190/0，含53项预期SQL错误，cleanup和两组序列基线健康，前后自有S2进程均无残留。
+按各入口最终完成观察旧61为56pass/5fail，加新220后共62不同入口57pass/5fail；首轮合并new220的62入口56pass/6fail没有被改写。
+Bind463/40、CTE747/29、nested325/42整log与C1/S1字节一致，interval106/10完整JSON一致（log只输出路径变化），原四1641观察不变。
+原143恰42/43/85/86/128/129六项改善，14→8，另外137项fullactual/normalized/match相同；S2整143观察JSON与S1逐字节一致。
+剩余catalog来源2、record-json同行错误需求3、compound普通format1二进制输出3仍开放，不笼统归入暂停。二进制完整真实字段OID/域枚举codec/元素结构方案保存在binary-design-v2-complete-metadata.json，尚无产品修复。
+
+下表为同源512行warm公开cursor，计量包括restart→完整读取→显式close及owning接收行，初始绑定/建图在外。仅当前线程累计C++new请求，不是malloc全量、live/truepeak/RSS或整SQL速度。
+
+| 512行warm公开cursor | C1 new请求 | S2 new请求 | C1请求字节 | S2请求字节 |
+|---|---:|---:|---:|---:|
+| lag-1 | 226489 | 226490 | 25625206 | 25625214 |
+| lag-2 | 419723 | 232335 | 48048290 | 26317466 |
+| lag-4 | 806565 | 244394 | 92906086 | 27713486 |
+| sum-2 | 44542 | 43514 | 4621224 | 4432054 |
+
+双/四LAG请求减少44.65%/69.70%，请求字节减少45.23%/70.17%；单LAG仍多1请求/8B，双SUM请求只少2.31%，不隐藏控制项。
+S1/S2所有版本、构建与失败均保留。调查脚本首次PG路径契约断言在SQL前停止，仅新v2 resolve路径；原型v2隔离syntax因if-init/else同名found编译失败，v3只改aggregateFound；首次native runner在读取缺省配置时失败、未编译/执行，v2只优先显式--config。
+这些是观察器/原型修订，不冒充产品运行故障修复。新增O(producer)元数据和必要owning别名拷贝，不宣称零成本或窗口work_mem/spill已完成。
+
+### S2实际资源和首轮全部整SQL数据
+
+S2资源55=40完整读取+1预期强杀在途读取+14SET/SHOW，40000行/118000单元严格核对通过，3stage各exit0，5个正常服务context成功。
+common12三label全值与digest相等；64kB宽finalTypedSort最多2匿名deletedFD、16MB本次未采到，EOF无FD/命名残留（高预算未偷加硬no-spill断言）。
+真实ownedPID/exe/data/starttick和deletedFD确认后SIGKILL -9，同私有目录重开1000×4基表及1000×3再次排序通过。216source/2exe/3driver/1072原fixture前后exact，自有进程全退出。
+只证明普通最终Sort及该只读强杀场景，不能推广为Window内部预算、硬RSS或任意写崩溃恢复。原C9的35类操作值0错误但停机-6失败继续保留，本批不重复或调查R15。
+
+最终时钟计划在看到候选速度前已冻结：原common8完整SQL/oracle不变，加length_lag_1/2/4与duplicate_running_sum，共12类；64kB→4MB→16MB，每预算C1/S2/C1、各3warm和12timed样本。
+一次完成1296timed+324warm+18SET/SHOW=1638请求，结果查询1620000行/4725000单元全值相等，9正常contexts通过，源/二进制/driver/1072fixture不变，无删样本/超时调整/重复窗口。
+全36项为10快于两旧、19慢于两旧、7夹在两旧；原common8的24项仅1快/17慢/6混合。S2不能宣称整体提速。
+重复两份LAG(length)相对两旧减少37.95%–41.66%，四份减少64.46%–66.16%；单份及双SUM仍有混合/回退。
+16MB lead的C1首307.820→回测115.244ms漂移−62.56%，S2 285.429ms；全部漂移保留，不只挑某一基线，也不归因宿主。
+下表单位ms；“降低%”正值较快、负值较慢。完整min/max/每label12个raw、CSV与所有返回行JSONL均在perf-window-sharing-S2-latency-summary-v1.json及所引用工件，未只保存中位数。
+
+| work_mem | case | C1 first p50 ms | S2 p50 ms | C1 last p50 ms | S2 reduction vs first % | S2 reduction vs last % | C1 last drift % |
+|---|---|---:|---:|---:|---:|---:|---:|
+| 64kB | partition_ranking | 173.532 | 177.773 | 182.156 | -2.44 | 2.41 | 4.97 |
+| 64kB | partition_lag | 125.788 | 148.910 | 129.082 | -18.38 | -15.36 | 2.62 |
+| 64kB | partition_lead | 126.005 | 132.281 | 114.355 | -4.98 | -15.68 | -9.25 |
+| 64kB | running_sum | 143.138 | 129.086 | 145.252 | 9.82 | 11.13 | 1.48 |
+| 64kB | sliding_sum | 140.393 | 143.582 | 127.438 | -2.27 | -12.67 | -9.23 |
+| 64kB | partition_full_sum | 117.366 | 119.709 | 119.305 | -2.00 | -0.34 | 1.65 |
+| 64kB | full_first_last_nth | 180.729 | 206.624 | 182.445 | -14.33 | -13.25 | 0.95 |
+| 64kB | mixed_same_keys | 182.069 | 196.358 | 171.680 | -7.85 | -14.37 | -5.71 |
+| 64kB | length_lag_1 | 469.501 | 459.604 | 478.152 | 2.11 | 3.88 | 1.84 |
+| 64kB | length_lag_2 | 819.013 | 491.956 | 831.152 | 39.93 | 40.81 | 1.48 |
+| 64kB | length_lag_4 | 1527.467 | 542.869 | 1539.974 | 64.46 | 64.75 | 0.82 |
+| 64kB | duplicate_running_sum | 145.805 | 142.622 | 143.136 | 2.18 | 0.36 | -1.83 |
+| 4MB | partition_ranking | 137.750 | 150.121 | 131.746 | -8.98 | -13.95 | -4.36 |
+| 4MB | partition_lag | 106.364 | 123.369 | 116.593 | -15.99 | -5.81 | 9.62 |
+| 4MB | partition_lead | 122.814 | 123.321 | 115.625 | -0.41 | -6.66 | -5.85 |
+| 4MB | running_sum | 126.085 | 119.856 | 111.394 | 4.94 | -7.60 | -11.65 |
+| 4MB | sliding_sum | 114.992 | 126.621 | 108.795 | -10.11 | -16.39 | -5.39 |
+| 4MB | partition_full_sum | 106.378 | 114.607 | 104.872 | -7.74 | -9.28 | -1.41 |
+| 4MB | full_first_last_nth | 149.097 | 160.410 | 152.103 | -7.59 | -5.46 | 2.02 |
+| 4MB | mixed_same_keys | 171.065 | 176.192 | 151.359 | -3.00 | -16.41 | -11.52 |
+| 4MB | length_lag_1 | 451.819 | 452.725 | 447.706 | -0.20 | -1.12 | -0.91 |
+| 4MB | length_lag_2 | 818.602 | 478.372 | 770.915 | 41.56 | 37.95 | -5.83 |
+| 4MB | length_lag_4 | 1509.066 | 522.556 | 1471.379 | 65.37 | 64.49 | -2.50 |
+| 4MB | duplicate_running_sum | 149.271 | 133.864 | 121.386 | 10.32 | -10.28 | -18.68 |
+| 16MB | partition_ranking | 137.037 | 135.843 | 133.899 | 0.87 | -1.45 | -2.29 |
+| 16MB | partition_lag | 156.787 | 152.173 | 114.846 | 2.94 | -32.50 | -26.75 |
+| 16MB | partition_lead | 307.820 | 285.429 | 115.244 | 7.27 | -147.67 | -62.56 |
+| 16MB | running_sum | 116.051 | 119.982 | 124.878 | -3.39 | 3.92 | 7.61 |
+| 16MB | sliding_sum | 125.055 | 164.343 | 117.692 | -31.42 | -39.64 | -5.89 |
+| 16MB | partition_full_sum | 111.952 | 131.466 | 108.724 | -17.43 | -20.92 | -2.88 |
+| 16MB | full_first_last_nth | 150.704 | 155.455 | 148.759 | -3.15 | -4.50 | -1.29 |
+| 16MB | mixed_same_keys | 154.055 | 228.243 | 152.106 | -48.16 | -50.06 | -1.27 |
+| 16MB | length_lag_1 | 456.716 | 443.929 | 455.575 | 2.80 | 2.56 | -0.25 |
+| 16MB | length_lag_2 | 799.178 | 466.274 | 787.610 | 41.66 | 40.80 | -1.45 |
+| 16MB | length_lag_4 | 1529.988 | 517.803 | 1474.087 | 66.16 | 64.87 | -3.65 |
+| 16MB | duplicate_running_sum | 130.807 | 132.309 | 130.052 | -1.15 | -1.74 | -0.58 |
+
+### 为定位回退而另行完成的诊断
+
+前批64kB三慢项另用C9/C1单64kB交错旋转：16warm+48观察+4SET/SHOW=68请求，64000行/176000单元全过，真实自有PID/TID的CPU/IO/schedstat及first/lastDataRow/Ready另列。
+该短实验C1三旧慢项lag/running/fullsum的wall中位158.609/143.099/143.357ms、serverCPU粗样130/130/110ms；C9为231.649/218.707/202.783ms和200/190/180ms。
+旧慢值按case×执行位置成簇；新短交错未复现旧高段不等于旧回退修复。该数据既不替代前批864原样本，也不是S3加速证据。
+
+S2首轮普通查询回退后，又冻结单4MB C1/S2交错同common8的68请求，64000行/176000单元全部正确，2正常contexts和输入哈希通过；不是重测/替换原36表。
+8类wall p50为S2五高三低，processCPU三高三低二同；排名、lead、sliding的线程运行时间中位132.761→163.345、117.614→136.233、122.466→136.571ms，增长主要在首DataRow前。
+但lag/running/mixed CPU较低、fullsum/firstlast相同，不能把所有回退解释为CPU或某一种等待。7/8类logical IO跨六观察相等，read_bytes均0不能排除写等待/锁/网络；100Hz CPU/proc非原子窗口较clientwall宽3.609–8.461ms。
+外层wrapper首轮误用helper路径scripts/而非tests/，在0SQL预检前失败，原receipt保留；新wrapper只修路径，frozen诊断driver/SQL/序列完全不变。
+
+然后采用逐字原CPP6437e216、独立默认allocator clocks和覆盖new的allocation可执行文件，以真实prepareBoundQuery→新PQE/原rootplanner→实际图/provider→cursor执行。
+单4MB、C1/S2/C1、common8共48独立进程，各首cold+3同图真实重开=192执行、192000行/528000单元全部校验通过，48PID全终态；未运行可选16个额外evidence，不能冒称该lane也通过。
+warm执行CPU的C1首/S2/C1回测（ms）依次为：ranking41.758/39.632/42.871，lag35.141/35.301/34.580，lead34.987/35.456/34.173，running35.838/34.791/32.700，sliding38.181/42.261/35.371，fullsum33.622/32.645/32.303，first-last-nth48.792/51.132/49.387，mixed48.017/48.392/49.143。
+暖CPU仍1低/4高/3混合，新请求只在每次open多1/6/7个，并未观察到逐行新增请求；不是“所有phase无回退”。初始setup每进程只有一次，S2 12.829–42.504ms CPU不是建图分布。
+label私有路径长度不同（S2比C1-first短6、比C1-last短1字符），请求bytes含真实路径字符串，少量几KB差异不能归因共享节省。所有原始phase和inclusive节点wall保留，不相减命名exclusive comparator CPU。
+
+### S3改进与仍未完成范围
+
+静态核对确认common8的完整共享身份构造均为0次：单窗口早return，三不同函数以必要签名前缀拒绝；allretained不建root身份。
+有限的metadata/open额外请求不足以静态解释全部10–20ms；因此既不猜测主因，也不删除正确共享语义。S3只对完整stage的两套owner均self、无stage外incoming alias、两套order投影均原producer次序的情况恢复原C1类型化demand/move热循环。
+这个条件对实际demand任意子集和top-stage切换都成立；隐藏重排第74项及任何可能共享/only-alias需求仍走S2通用路径，构造期flag跨close/restart保持。不是恢复legacy receiver、伪造上下文或改变默认Core准入。
+S3构建与新220通过后继续执行完整回归、资源和原计划性能；其终态及全部慢值在下方追加，恢复旧循环本身不作为加速证据。
+
+原273完整对象、249历史、2316既有测试文件与725保护记录保持，22complete/166partial/70unverified/15originaldeferred不变，整体Goal active。
+本批额外请求不证明内存live/peak下降，Window partition/stage排序仍无完整预算。所有原始慢值、初始失败、S1/S2版本和诊断保存在同工件目录；最终安装/提交及命令收据见文末验收说明。
+
+### S3最终完整结果
+
+最终候选S3 `aa52b5fe…` 的原71native与新10入口全部通过，共72不同入口；完整旧61协议首轮56pass/5fail，加新220后62不同入口57pass/5fail，本轮190首次完整通过、没有startup失败或复试。
+原三失败入口全文log、interval106/10及143/8完整JSON与S2字节一致。190的全部服务observation/rawFrames/oracle及终态相同，只有请求中的自有schema UUID不同，不声称整log byteequal或归一化服务响应。严格wholelog首版complete=false和后续逐服务对象正确对照均保留。
+
+S3同源512行warm cursor的实际累计请求如下；单份请求数已等于C1，-3B只是微小布局记账，不作为内存收益。S2原表和所有版本继续保留。
+
+| 512行warm公开cursor | C1 new请求 | S3 new请求 | C1请求字节 | S3请求字节 |
+|---|---:|---:|---:|---:|
+| lag-1 | 226489 | 226489 | 25625206 | 25625203 |
+| lag-2 | 419723 | 232335 | 48048290 | 26317460 |
+| lag-4 | 806565 | 244394 | 92906086 | 27713474 |
+| sum-2 | 44542 | 43514 | 4621224 | 4432054 |
+
+独立S3实际Main资源55请求全部通过：40完整读取+1指定强杀读取+14SET/SHOW，40000行/118000单元，5正常context成功退出。64kB宽finalSort最多2个匿名deleted FD、16MB未采到，EOF/退出无残留；确认自有PID/exe/data/starttick与FD后SIGKILL -9，同目录重开完整1000×4基表及1000×3排序。
+216源、2程序、3driver、1072夹具文件前后exact，自有进程无残留。范围仍是普通最终Sort及该只读强杀场景；不证明窗口内部预算或任意写崩溃恢复，旧35操作停机-6失败不被改写。
+
+S3沿用观察任何候选速度前冻结的同一12类、三预算、C1/S3/C1顺序，完整运行一次1296timed+324warm+18SET/SHOW=1638请求，1620000行/4725000单元全部校验通过，9正常contexts成功，输入哈希不变；没有删样本或为慢值重测。
+全部36组按p50数值为11快于两旧/19慢于两旧/6夹两旧；原common8×3为3快/16慢/5夹两旧。64kB共同8项全部高于两旧；4MB滑动SUM仍高8.13%–10.16%，不能称整体回退已修。
+重复两份LAG(length)在三预算相对两旧降低37.94%–40.83%，四份降低63.65%–66.34%；单份和双SUM控制仍有较慢项。全矩阵最大增长17.48%，两旧p50漂移−11.01%…+11.92%，均原样保留。
+分类只是数值大小，不是显著性检验；4MB first/last/nth较old-last只高约0.004ms，也按严格规则计入慢项。样本中较大离群值没有剔除，也不凭数据自动归因宿主或某一等待。
+单位ms；降低百分比正为更快、负为更慢。下表完整保留36组；每label原12样本/min/p50/max在perf-window-sharing-S3-latency-summary-v1.json的108组数据、labels108/all1296 CSV和9份完整返回值JSONL中，没有只保留中位数。
+
+| work_mem | case | C1 first p50 ms | S3 p50 ms | C1 last p50 ms | S3 reduction vs first % | S3 reduction vs last % | C1 last drift % |
+|---|---|---:|---:|---:|---:|---:|---:|
+| 64kB | partition_ranking | 195.299 | 196.812 | 175.287 | -0.77 | -12.28 | -10.25 |
+| 64kB | partition_lag | 128.646 | 130.350 | 123.430 | -1.32 | -5.61 | -4.05 |
+| 64kB | partition_lead | 125.024 | 129.338 | 128.027 | -3.45 | -1.02 | 2.40 |
+| 64kB | running_sum | 125.922 | 135.268 | 124.349 | -7.42 | -8.78 | -1.25 |
+| 64kB | sliding_sum | 127.261 | 131.225 | 130.674 | -3.11 | -0.42 | 2.68 |
+| 64kB | partition_full_sum | 113.076 | 125.923 | 116.411 | -11.36 | -8.17 | 2.95 |
+| 64kB | full_first_last_nth | 188.388 | 208.098 | 177.136 | -10.46 | -17.48 | -5.97 |
+| 64kB | mixed_same_keys | 181.970 | 200.893 | 189.618 | -10.40 | -5.95 | 4.20 |
+| 64kB | length_lag_1 | 468.338 | 469.167 | 457.220 | -0.18 | -2.61 | -2.37 |
+| 64kB | length_lag_2 | 830.362 | 495.874 | 799.023 | 40.28 | 37.94 | -3.77 |
+| 64kB | length_lag_4 | 1521.358 | 545.786 | 1501.571 | 64.13 | 63.65 | -1.30 |
+| 64kB | duplicate_running_sum | 139.884 | 144.773 | 140.875 | -3.49 | -2.77 | 0.71 |
+| 4MB | partition_ranking | 146.149 | 145.419 | 144.285 | 0.50 | -0.79 | -1.27 |
+| 4MB | partition_lag | 116.119 | 111.141 | 129.964 | 4.29 | 14.48 | 11.92 |
+| 4MB | partition_lead | 117.443 | 113.130 | 117.826 | 3.67 | 3.99 | 0.33 |
+| 4MB | running_sum | 119.568 | 110.775 | 114.544 | 7.35 | 3.29 | -4.20 |
+| 4MB | sliding_sum | 118.785 | 130.852 | 121.009 | -10.16 | -8.13 | 1.87 |
+| 4MB | partition_full_sum | 109.375 | 115.551 | 115.172 | -5.65 | -0.33 | 5.30 |
+| 4MB | full_first_last_nth | 155.423 | 156.515 | 156.511 | -0.70 | -0.00 | 0.70 |
+| 4MB | mixed_same_keys | 157.088 | 158.507 | 157.522 | -0.90 | -0.63 | 0.28 |
+| 4MB | length_lag_1 | 454.208 | 450.737 | 461.849 | 0.76 | 2.41 | 1.68 |
+| 4MB | length_lag_2 | 800.620 | 485.409 | 793.899 | 39.37 | 38.86 | -0.84 |
+| 4MB | length_lag_4 | 1506.153 | 513.692 | 1488.218 | 65.89 | 65.48 | -1.19 |
+| 4MB | duplicate_running_sum | 132.668 | 132.040 | 143.253 | 0.47 | 7.83 | 7.98 |
+| 16MB | partition_ranking | 143.034 | 140.652 | 138.311 | 1.67 | -1.69 | -3.30 |
+| 16MB | partition_lag | 115.122 | 120.195 | 112.400 | -4.41 | -6.93 | -2.36 |
+| 16MB | partition_lead | 118.813 | 120.234 | 112.952 | -1.20 | -6.45 | -4.93 |
+| 16MB | running_sum | 122.489 | 114.241 | 113.765 | 6.73 | -0.42 | -7.12 |
+| 16MB | sliding_sum | 126.976 | 121.956 | 114.475 | 3.95 | -6.54 | -9.85 |
+| 16MB | partition_full_sum | 117.731 | 110.108 | 104.769 | 6.48 | -5.10 | -11.01 |
+| 16MB | full_first_last_nth | 154.657 | 156.755 | 147.194 | -1.36 | -6.50 | -4.83 |
+| 16MB | mixed_same_keys | 153.827 | 154.108 | 148.808 | -0.18 | -3.56 | -3.26 |
+| 16MB | length_lag_1 | 448.733 | 452.893 | 442.649 | -0.93 | -2.31 | -1.36 |
+| 16MB | length_lag_2 | 798.865 | 472.681 | 783.154 | 40.83 | 39.64 | -1.97 |
+| 16MB | length_lag_4 | 1518.115 | 510.973 | 1459.820 | 66.34 | 65.00 | -3.84 |
+| 16MB | duplicate_running_sum | 134.385 | 132.332 | 128.922 | 1.53 | -2.64 | -4.07 |
+
+### 复现与当前边界
+
+本地不可变S1/S2/S3、前后源/62对象、61 core+实际test stub、flags、全部协议raw、资源/时钟/phase、首次失败与最终收据均在上述工件目录；它们是本机证据，不是发布包内容。新原生和固定220协议资产已纳入版本管理和标准发现/注册。
+使用新的输出目录可按同一driver重放单预算（其他两预算分别改为4MB、16MB）；此命令是复现说明，本批实际执行只计前述一次完整矩阵：
+
+```sh
+p=build/pg-feature-window-compat-xi39wepx
+python3 "$p/runtime_benchmark_window_sharing_v1.py"   --before "$p/before-dbms_main" --after "$p/sharing3-dbms_main"   --fixture build/pg-feature-topn-20261102-bc582b_s/fixture-1000   --output build/window-sharing-manual-replay-64kB   --work-mem 64kB --rows 1000 --rounds 3 --samples 4
+```
+
+S3解决固定27差异并显著减少重复调用成本，但普通查询仍有回退；一般已分析表达式归一化、完整窗口内存预算、剩余catalog/peer-error/binary及其他原273要求继续开放。没有新的PG速度对照，不能用本项目两版倍率宣称达到PG性能。
+原273对象及raw数组、原249历史原文、2316既有测试文件和725保护记录保持，近期记录只新增1条partial（合计250），总账22/166/70/15不变；Goal active。最终范围/元数据/文档检查、安装与提交收据在同目录final-provenance.json及postcommit-provenance-v1.json。
+
+最终结构检查：版本/兼容契约、273总账覆盖、注册脚本语法、新协议AST/fixture JSON及diff空白检查均通过。754份Markdown、2429个本地文件目标无缺失/空文档/整篇重复或清单遗漏；该检查不包含全部外部URL/历史锚点。当前新增报告标题唯一，局部锚点由本批范围审计另核。

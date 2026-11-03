@@ -195,6 +195,8 @@ struct PreparedSelectState {
     std::vector<Aggregate> aggregates;
     std::vector<prepared_window_detail::Producer> windows;
     std::vector<prepared_window_detail::Stage> windowStages;
+    std::vector<size_t> windowBaseOwners,windowSortedOwners,windowBaseOrder,windowSortedOrder;
+    bool windowResultSortBarrier=false;
     struct WindowInput {
         Expr* expression=nullptr;
         std::string identity;
@@ -598,6 +600,7 @@ static bool prepareWindowOutputOrder(PreparedSelectState& state) {
     return true;
 }
 
+static void prepareWindowResultSharing(PreparedSelectState&,bool actualFinalSort);
 static OpPtr makePreparedWindowStages(OpPtr source,const std::shared_ptr<PreparedSelectState>& state);
 static OpPtr makePreparedWindowTiesLimit(OpPtr source,const std::shared_ptr<PreparedSelectState>& state,size_t limit);
 
@@ -2267,6 +2270,7 @@ OpPtr QueryPlanner::buildPreparedSelectPlan(StorageEngine* engine,
     state->prepareWindowInputs();
     state->prepareExecution();
     const bool orderedWindow=prepareWindowOutputOrder(*state);
+    prepareWindowResultSharing(*state,!state->keys.empty() && !orderedWindow);
     source = makePreparedTableSource(engine, dbname, state->query, select,
                                     sourceSchema, std::move(source));
     OpPtr root = std::move(source);

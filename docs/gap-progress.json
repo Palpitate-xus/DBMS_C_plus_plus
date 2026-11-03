@@ -2,6 +2,38 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-03 window result sharing and actual final-sort projection order",
+      "gap_ids": [
+        "QRY-08",
+        "SQL-12",
+        "FUNC-02",
+        "PROTO-04",
+        "OPT-10",
+        "P0-14"
+      ],
+      "status": "partial",
+      "evidence": [
+        "docs/performance-report-2026-10-30.md",
+        "docs/test-report.md",
+        "docs/MANUAL.md",
+        "src/executor/ExecutionPlan.cpp",
+        "src/executor/PreparedWindowOp.inc"
+      ],
+      "tests": [
+        "tests/prepared_window_result_sharing_test.cpp",
+        "tests/prepared_window_result_sharing_protocol_e2e_test.py",
+        "tests/compat/prepared_window_result_sharing_pg18_expected.json"
+      ],
+      "verification": {
+        "correctness": "S3 aa52b5fe frozen216src/62productionobjects, native71old+new10=72uniqueall0; fixedPG18.6 new220/0,C1/27,S1/S2/S3/0 and all3complete raw/actual exact. FullS3 old61first56pass5fail+new220=62unique57/5; old4/1641 and143/8 exactS2; 190firstfull0/serverraw exactS2success, onlyrequestschemaUUIDdiffers. S2startup0SQLfailure and isolated190/0 retained. Sixoriginal143controls improve14to8; catalog2/peererror-demand3/compoundbinary3 remain. No all-repo/fullPGclaim.",
+        "cost": "512physicalrows actual public bound cursor warm restart-consume-close: singleLAGnew226489sameC1/-3Bnegligiblelayout; double419723to232335(-44.65%);quad806565to244394(-69.70%);doubleSUM44542to43514(-2.31%). Cumulative C++new only, not live/peak/RSS or clocks.",
+        "performance": "Frozen12x3budgets/C1-S3-C1 once1638SQL=1296timed324warm18SET,1620000rows4725000cells0/9normalcontexts/inputs exact. All36 p50 11faster19slower6mixed vsbothC1; originalcommon8 3/16/5,64kall8slower,largestincrease17.48%;old drift-11.01..+11.92%. DuplicateLAGlength2/4 latency reduced37.94..40.83%/63.65..66.34%. S2all36/17of24common-slow and both68diagnostics/48publicphase processes retained, no universalgain/newPGspeedclaim.",
+        "resources": "S3resource55=40fullreads1ownedreadonlykilled14SET,40000rows118000cells0/5normalcontexts;64kactualmax2anonymousfinalSortFD,16MBsample0/EOFcleanup; ownedPID/exe/data/starttick+FD verifiedSIGKILL-9/reopenbase1000x4andSort1000x3 exact.216source2bin3driver1072fixtureexact/owned[]. No Windowbudget/writecrash/R15repairclaim.",
+        "scope": "OnlyExecCPP privatefields/forward/call plus PreparedWindowOp.inc; 147headers/Main/network/R177/R185/actualowners/provider/frames unchanged. Structural samewinref/nonvolatile result reuse and actualSort inputtarget volatile extraction preserve everycall/resultcolumn/demand/fullowning value, finalaliasmove. Purepreparemetadata memo/noASTfold. Provenentirestage bothownerpolicies self/noincomingalias/ordersoriginal retains C1typedloops; shared/hiddenreordered usesgeneric path. Original273objects/rawitems,249rawhistory,2316tests,725protected/754MDpaths unchanged; one newpartialhistory=>250; alluserdeferrals hold/goalactive.",
+        "proof": "build/pg-feature-window-compat-xi39wepx/final-provenance.json"
+      }
+    },
+    {
       "issue": "2026-11-03 lazy authoritative builtin integer window key cache and actual public execution cost",
       "gap_ids": [
         "QRY-08",

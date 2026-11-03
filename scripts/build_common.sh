@@ -362,6 +362,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/interval_division_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/prepared_window_order_demand_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/window_integer_key_cache_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/prepared_window_result_sharing_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/values_count_type_modifier_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/quantified_query_demand_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/projectset_quantified_execution_protocol_e2e_test.py)

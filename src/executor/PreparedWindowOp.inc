@@ -1,3 +1,162 @@
+// Metadata-only window result identities in the existing private executor
+// namespace. No public API or planning/frame owner is introduced.
+static void prepareWindowResultSharing(PreparedSelectState& state,bool actualFinalSort) {
+    const auto count=state.windows.size();
+    state.windowResultSortBarrier=actualFinalSort;
+    state.windowBaseOwners.resize(count);state.windowSortedOwners.resize(count);
+    state.windowBaseOrder.clear();state.windowSortedOrder.clear();
+    for(size_t i=0;i<count;++i) {
+        state.windowBaseOwners[i]=state.windowSortedOwners[i]=i;
+        state.windowBaseOrder.push_back(i);
+    }
+    if(count<2) {state.windowSortedOrder=state.windowBaseOrder;return;}
+    std::map<const FunctionCallExpr*,size_t> indexes;
+    std::vector<std::string> clauses(count),identities(count);
+    std::vector<bool> volatileCalls(count);
+    for(size_t i=0;i<count;++i)indexes.emplace(state.windows[i].call,i);
+    for(const auto& stage:state.windowStages)
+        for(size_t index:stage.producers)clauses.at(index)=stage.identity;
+    const auto field=[](const std::string& value){return std::to_string(value.size())+":"+value;};
+    const auto site=[&](const Expr* value){return "original-site"+field(std::to_string(reinterpret_cast<uintptr_t>(value)));};
+    // Reuse only a pure metadata string for the same original AST site
+    // within this preparation call. No value or execution context is cached.
+    std::map<const Expr*,std::string> identityMemo;
+    std::function<std::string(const Expr*)> identity;
+    identity=[&](const Expr* expression)->std::string {
+        if(const auto cached=identityMemo.find(expression);cached!=identityMemo.end())return cached->second;
+        std::string result;
+        try {
+            result=ExprHelper::scalarExpressionIdentity(expression,[&](const ColumnRefExpr& column) {
+                if(!column.binding)return site(&column);
+                const auto& b=*column.binding;uint32_t oid=b.typeOid;
+                for(const auto& range:state.query->sourceRanges)if(range.ordinal==b.sourceOrdinal) {
+                    oid=b.columnOrdinal<range.columns.size()?range.columns[b.columnOrdinal].typeOid:0;break;
+                }
+                return field(std::to_string(b.scopeDepth))+field(std::to_string(b.sourceOrdinal))+
+                    field(std::to_string(b.columnOrdinal))+field(b.declaredType)+field(std::to_string(oid))+
+                    field(b.mergedUsing?"merged":"ordinary");
+            },state.dbname,state.engine,[&](const Expr* node)->std::optional<std::string> {
+                // SubPlan-like original child sites stay independent. Never
+                // normalize/reparse a child or inspect its execution owner.
+                if(node->preparedSubquery)return site(node);
+                const auto* call=dynamic_cast<const FunctionCallExpr*>(node);
+                if(!call)return {};
+                if(call->sqlValue!=FunctionCallExpr::SqlValue::None)
+                    return "sql-value"+field(std::to_string(static_cast<unsigned>(call->sqlValue)))+
+                        field(call->sqlValuePrecision?std::to_string(*call->sqlValuePrecision):"default");
+                std::string key;
+                if(const auto found=indexes.find(call);found!=indexes.end()) {
+                    const auto index=found->second;const auto& producer=state.windows[index];
+                    key="window"+field(clauses.at(index))+field(producer.name)+field(producer.inputType)+
+                        field(producer.resultType)+field(producer.valueComparison?producer.valueComparison->identity:"");
+                } else {
+                    const auto aggregateFound=std::find_if(state.aggregates.begin(),state.aggregates.end(),
+                        [&](const auto& aggregate){return aggregate.call==call;});
+                    if(aggregateFound==state.aggregates.end())return {};
+                    key="actual-aggregate"+field(aggregateFound->name)+field(aggregateFound->argumentType)+field(aggregateFound->resultType);
+                }
+                key+=field(call->distinct?"distinct":"all")+field(call->orderBy);
+                for(const auto& value:call->args)key+=field(identity(value.get()));
+                for(const auto& value:call->namedArgs)key+=field(value.name)+field(identity(value.value.get()));
+                for(const auto& value:call->aggregateOrderKeys)key+=field(identity(value.expr.get()))+
+                    field(value.ascending?"asc":"desc")+field(value.nullsFirst?"first":"last")+
+                    field(value.enumComparison?value.enumComparison->identity:"")+field(value.usingOperator);
+                return key+field(identity(call->filter.get()));
+            });
+        } catch(const DbError& error) {
+            if(error.sqlState()!="0A000")throw;
+            result=site(expression); // Opaque identity never rejects execution.
+        }
+        identityMemo.emplace(expression,result);
+        return result;
+    };
+    const auto windowIdentity=[&](size_t index)->const std::string& {
+        auto& key=identities.at(index);
+        if(key.empty())key=identity(state.windows.at(index).call);
+        return key;
+    };
+    const auto sameSignature=[&](size_t first,size_t second) {
+        const auto& a=state.windows.at(first);const auto& b=state.windows.at(second);
+        return clauses.at(first)==clauses.at(second) && a.name==b.name &&
+            a.inputType==b.inputType && a.resultType==b.resultType;
+    };
+    std::function<bool(const Expr*)> containsVolatile;
+    containsVolatile=[&](const Expr* expression) {
+        if(!expression || expression->preparedSubquery)return false;
+        if(const auto* call=dynamic_cast<const FunctionCallExpr*>(expression)) {
+            if(!indexes.count(call) && call->sqlValue==FunctionCallExpr::SqlValue::None &&
+               std::none_of(state.aggregates.begin(),state.aggregates.end(),[&](const auto& a){return a.call==call;}) &&
+               state.evaluator.scalarFunctionVolatility(call,state.engine)=='v')return true;
+        }
+        bool result=false;
+        prepared_window_detail::spec_detail::valueChildren(const_cast<Expr*>(expression),[&](Expr* child) {
+            if(!result)result=containsVolatile(child);
+        });
+        return result;
+    };
+    for(size_t i=0;i<count;++i) {
+        volatileCalls[i]=containsVolatile(state.windows[i].call);
+        if(!volatileCalls[i])for(size_t j=0;j<i;++j)
+            if(!volatileCalls[j] && sameSignature(i,j) && windowIdentity(i)==windowIdentity(j)) {
+                state.windowBaseOwners[i]=state.windowBaseOwners[j];break;
+            }
+    }
+    if(!actualFinalSort) {
+        state.windowSortedOwners=state.windowBaseOwners;state.windowSortedOrder=state.windowBaseOrder;return;
+    }
+    // A virtual target remains a *whole* expression. Its nested WindowFunc
+    // is not an already available top-level value for a later pulled leaf.
+    std::vector<bool> retained(state.targets.size(),state.select().distinct);
+    for(size_t i=0;i<retained.size();++i)
+        retained[i]=retained[i] || !containsVolatile(state.targets[i]);
+    for(const auto& key:state.keys)if(key.target!=PreparedSelectState::noTarget)
+        retained.at(state.targetOwners.at(key.target))=true;
+    const bool hasPostponed=std::any_of(retained.begin(),retained.end(),[](bool value){return !value;});
+    std::vector<const Expr*> roots;
+    std::vector<std::string> rootIdentities;
+    const auto appendRoot=[&](const Expr* expression) {
+        roots.push_back(expression);
+        if(hasPostponed)rootIdentities.push_back(identity(expression));
+    };
+    // Keep the original virtual-root traversal even when nothing is pulled.
+    // Hidden sort roots/priorKey still determine its exact producer order.
+    for(size_t i=0;i<state.targets.size();++i)if(retained[i])appendRoot(state.targets[i]);
+    for(const auto& key:state.keys)if(key.target==PreparedSelectState::noTarget &&
+        key.priorKey==PreparedSelectState::noTarget)appendRoot(key.expression);
+    std::function<void(const Expr*,const std::function<void(size_t)>&)> windows;
+    windows=[&](const Expr* expression,const std::function<void(size_t)>& visit) {
+        if(!expression || expression->preparedSubquery)return;
+        if(const auto* call=dynamic_cast<const FunctionCallExpr*>(expression)) {
+            if(const auto found=indexes.find(call);found!=indexes.end()){visit(found->second);return;}
+            if(std::any_of(state.aggregates.begin(),state.aggregates.end(),[&](const auto& a){return a.call==call;}))return;
+        }
+        prepared_window_detail::spec_detail::valueChildren(const_cast<Expr*>(expression),
+            [&](Expr* child){windows(child,visit);});
+    };
+    const auto addOrder=[&](size_t index) {
+        if(std::find(state.windowSortedOrder.begin(),state.windowSortedOrder.end(),index)==state.windowSortedOrder.end())
+            state.windowSortedOrder.push_back(index);
+    };
+    for(const auto* expression:roots)windows(expression,addOrder);
+    for(size_t i=0;i<state.targets.size();++i)if(!retained[i])windows(state.targets[i],[&](size_t index) {
+        const auto found=std::find(rootIdentities.begin(),rootIdentities.end(),windowIdentity(index));
+        if(found!=rootIdentities.end()) {
+            const auto position=static_cast<size_t>(found-rootIdentities.begin());
+            const auto* call=dynamic_cast<const FunctionCallExpr*>(roots.at(position));
+            const auto owner=indexes.find(call);
+            if(owner==indexes.end())throw DbError("XX000","window target identity lost its actual producer");
+            state.windowSortedOwners[index]=owner->second;
+        } else {
+            appendRoot(state.windows[index].call);addOrder(index);
+        }
+    });
+    // ExecInitWindowAgg's additional nonvolatile equal() reuse applies
+    // regardless of whether an upper Sort retained the extracted target.
+    for(size_t i=0;i<count;++i)
+        state.windowSortedOwners[i]=state.windowBaseOwners.at(state.windowSortedOwners[i]);
+    for(size_t i=0;i<count;++i)addOrder(i);
+}
+
 // The real input projection is below every WindowAgg. Keys are owning typed
 // values, evaluated once before any window producer, and survive later sorts.
 class PreparedWindowInputOp final : public Operator {
@@ -105,6 +264,8 @@ class PreparedWindowOp final : public Operator {
     WindowFrame frame_;
     Exclusion exclusion_=Exclusion::None;
     std::vector<size_t> active_;
+    struct ResultAlias {size_t producer,slot;bool last=false;};
+    std::vector<ResultAlias> resultAliases_;
     std::vector<Transition> transitions_;
     SetOutputComparisons keyComparisons_,valueComparisons_;
     // nullopt means unexamined, OID0 means examined but not authoritative.
@@ -115,11 +276,40 @@ class PreparedWindowOp final : public Operator {
     size_t position_=0;
     bool opened_=false,childOpened_=false,eof_=false,initialized_=false;
     bool sorted_=false,reuseKeys_=false,available_=false;
+    bool unchangedResults_=false; // Frozen metadata; survives close/restart.
 
     bool demanded() const {
         return std::any_of(stage_.producers.begin(),stage_.producers.end(),[&](size_t i) {
             return state_->execution->aggregateColumnDemanded(state_->windows.at(i).call);
         });
+    }
+    bool hasOriginalResultMapping() const {
+        const auto& producers=stage_.producers;
+        const auto belongs=[&](size_t index) {
+            return std::find(producers.begin(),producers.end(),index)!=producers.end();
+        };
+        const auto ownersUnchanged=[&](const std::vector<size_t>& owners) {
+            if(owners.size()!=state_->windows.size())return false;
+            for(size_t index=0;index<owners.size();++index) {
+                if(owners[index]>=owners.size())return false;
+                if(belongs(index)) {if(owners[index]!=index)return false;}
+                else if(belongs(owners[index]))return false;
+            }
+            return true;
+        };
+        const auto orderUnchanged=[&](const std::vector<size_t>& order) {
+            size_t position=0;
+            for(size_t index:order) {
+                if(index>=state_->windows.size())return false;
+                if(!belongs(index))continue;
+                if(position>=producers.size() || producers[position++]!=index)return false;
+            }
+            return position==producers.size();
+        };
+        // Check both policies for the entire stage, not only this invocation's
+        // demanded subset. A top-stage/provider/demand change must stay valid.
+        return ownersUnchanged(state_->windowBaseOwners) && ownersUnchanged(state_->windowSortedOwners) &&
+            orderUnchanged(state_->windowBaseOrder) && orderUnchanged(state_->windowSortedOrder);
     }
     uint32_t boundKeyTypeOid(size_t index) {
         if(keyTypeOids_.empty())keyTypeOids_.resize(state_->windowInputs.size());
@@ -457,11 +647,47 @@ public:
         previous_=dynamic_cast<PreparedWindowOp*>(child_.get());
         for(const auto* key:stage_.spec.partition)partitionIndexes_.push_back(state_->windowInputIndex(key));
         for(const auto& key:stage_.spec.order)orderIndexes_.push_back(state_->windowInputIndex(key.expression));
+        unchangedResults_=hasOriginalResultMapping();
     }
     ~PreparedWindowOp() override {try{close();}catch(...) {}}
     bool open() override {
         OpenInstrument instrument(this);clearError();close();opened_=true;
-        for(size_t index:stage_.producers)if(state_->execution->aggregateColumnDemanded(state_->windows.at(index).call))active_.push_back(index);
+        if(unchangedResults_) {
+            for(size_t index:stage_.producers)
+                if(state_->execution->aggregateColumnDemanded(state_->windows.at(index).call))active_.push_back(index);
+        } else {
+            std::vector<size_t> demanded;
+            for(size_t index:stage_.producers)if(state_->execution->aggregateColumnDemanded(state_->windows.at(index).call))demanded.push_back(index);
+            if(demanded.size()<2) {
+                active_=demanded;
+                if(!demanded.empty())resultAliases_.push_back({demanded.front(),0,true});
+            } else {
+            bool lastDemanded=false;
+            for(const auto& stage:state_->windowStages) {
+                if(stage.identity==stage_.identity){lastDemanded=true;continue;}
+                if(lastDemanded && std::any_of(stage.producers.begin(),stage.producers.end(),[&](size_t index) {
+                    return state_->execution->aggregateColumnDemanded(state_->windows.at(index).call);
+                })){lastDemanded=false;break;}
+            }
+            const bool sorted=state_->windowResultSortBarrier && lastDemanded;
+            const auto& owners=sorted?state_->windowSortedOwners:state_->windowBaseOwners;
+            const auto& order=sorted?state_->windowSortedOrder:state_->windowBaseOrder;
+            std::map<size_t,size_t> groups;
+            for(size_t index:order) {
+                const auto owner=owners.at(index);
+                if(groups.count(owner))continue;
+                const auto representative=std::find_if(demanded.begin(),demanded.end(),[&](size_t value){return owners.at(value)==owner;});
+                if(representative==demanded.end())continue;
+                groups.emplace(owner,active_.size());active_.push_back(*representative);
+            }
+            std::vector<size_t> lastAlias(active_.size(),std::numeric_limits<size_t>::max());
+            for(size_t index:demanded) {
+                const auto slot=groups.at(owners.at(index));lastAlias.at(slot)=resultAliases_.size();
+                resultAliases_.push_back({index,slot,false});
+            }
+            for(size_t index:lastAlias)resultAliases_.at(index).last=true;
+            }
+        }
         auto* preceding=previous_;
         while(preceding && !preceding->demanded())preceding=preceding->previous_;
         reuseKeys_=preceding && preceding->stage_.keyIdentity==stage_.keyIdentity;
@@ -483,9 +709,9 @@ public:
             }
             initialize();
             if(!ensure(position_)){close();return false;}
-            // Plain window functions run before window aggregate transitions,
-            // as in the actual WindowAgg executor. Every producer keeps its
-            // own call site; volatile argument/default sites are never merged.
+            // Plain window functions precede aggregate transitions. Only
+            // approved equal window results share a representative; ordinary
+            // scalar sites and every original result column keep their owner.
             std::vector<std::optional<ExprValue>> values(active_.size());
             const auto aggregateCall=[&](size_t index) {
                 const auto& n=state_->windows.at(index).name;
@@ -501,16 +727,27 @@ public:
             for(size_t i:aggregates)values[i]=compute(active_[i],position_,i);
             const size_t source=layout_.sourceAt(position_);
             current_=input_[source].context;currentKeys_=input_[source].keys;
-            for(size_t i=0;i<active_.size();++i) {
-                const auto& producer=state_->windows.at(active_[i]);
-                current_.setBoundColumn(producer.column.sourceOrdinal,producer.column.columnOrdinal,std::move(*values[i]));
+            if(unchangedResults_) {
+                // The original typed host loop: all result columns and their
+                // evaluation order are unchanged by either metadata policy.
+                for(size_t i=0;i<active_.size();++i) {
+                    const auto& producer=state_->windows.at(active_[i]);
+                    current_.setBoundColumn(producer.column.sourceOrdinal,producer.column.columnOrdinal,std::move(*values[i]));
+                }
+            } else {
+                for(const auto& alias:resultAliases_) {
+                    const auto& producer=state_->windows.at(alias.producer);
+                    auto& value=*values.at(alias.slot);
+                    if(alias.last)current_.setBoundColumn(producer.column.sourceOrdinal,producer.column.columnOrdinal,std::move(value));
+                    else current_.setBoundColumn(producer.column.sourceOrdinal,producer.column.columnOrdinal,value);
+                }
             }
             ++position_;display.clear();available_=true;instrument.emitted=true;return true;
         } catch(...) {const auto primary=std::current_exception();try{close();}catch(...){}std::rethrow_exception(primary);}
     }
     void close() override {
         opened_=false;available_=false;initialized_=false;eof_=false;sorted_=false;reuseKeys_=false;position_=0;
-        input_.clear();layout_=Layout{};active_.clear();transitions_.clear();current_=RowContext{};
+        input_.clear();layout_=Layout{};active_.clear();resultAliases_.clear();transitions_.clear();current_=RowContext{};
         currentKeys_.clear();keyComparisons_.reset();valueComparisons_.reset();
         std::vector<std::optional<uint32_t>>().swap(keyTypeOids_);
         if(childOpened_){childOpened_=false;child_->close();}
