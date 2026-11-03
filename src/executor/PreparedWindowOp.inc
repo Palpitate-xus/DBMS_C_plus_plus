@@ -77,7 +77,17 @@ class PreparedWindowOp final : public Operator {
     using Frame=window_detail::Frame;
     using Exclusion=window_detail::Exclusion;
     using Producer=prepared_window_detail::Producer;
-    struct Input {RowContext context;std::vector<ExprValue> keys;};
+    struct IntegerKey {
+        enum class State : uint8_t { Unparsed, Invalid, Ready };
+        State state=State::Unparsed;
+        int64_t value=0;
+    };
+    struct Input {
+        RowContext context;
+        std::vector<ExprValue> keys;
+        // Empty until an actual eligible key comparison reaches this row.
+        std::vector<IntegerKey> integerKeys;
+    };
     struct Transition {
         std::unique_ptr<prepared_window_detail::AggregateState> state;
         size_t partition=0,first=0,last=0;
@@ -97,6 +107,9 @@ class PreparedWindowOp final : public Operator {
     std::vector<size_t> active_;
     std::vector<Transition> transitions_;
     SetOutputComparisons keyComparisons_,valueComparisons_;
+    // nullopt means unexamined, OID0 means examined but not authoritative.
+    // This metadata cache is also created only at actual comparison demand.
+    std::vector<std::optional<uint32_t>> keyTypeOids_;
     RowContext current_;
     std::vector<ExprValue> currentKeys_;
     size_t position_=0;
@@ -108,9 +121,78 @@ class PreparedWindowOp final : public Operator {
             return state_->execution->aggregateColumnDemanded(state_->windows.at(i).call);
         });
     }
+    uint32_t boundKeyTypeOid(size_t index) {
+        if(keyTypeOids_.empty())keyTypeOids_.resize(state_->windowInputs.size());
+        auto& cached=keyTypeOids_.at(index);
+        if(cached)return *cached;
+        const auto* expression=state_->windowInputs.at(index).expression;
+        if(!expression){cached=uint32_t{0};return 0;}
+        uint32_t oid=0;
+        if(const auto* column=dynamic_cast<const ColumnRefExpr*>(expression)) {
+            if(!column->binding){cached=uint32_t{0};return 0;}
+            const auto& binding=*column->binding;
+            for(const auto& range:state_->query->sourceRanges)
+                if(range.ordinal==binding.sourceOrdinal) {
+                    // This real descriptor wins even when its OID is zero.
+                    oid=binding.columnOrdinal<range.columns.size()
+                        ?range.columns[binding.columnOrdinal].typeOid:0;
+                    cached=oid;return oid;
+                }
+            cached=binding.typeOid;return binding.typeOid;
+        }
+        if(expression && expression->preparedSubquery) {
+            const auto output=state_->query->statementOutputs.find(expression->preparedSubquery.get());
+            if(output!=state_->query->statementOutputs.end() && output->second.size()==1)
+                oid=output->second.front().typeOid;
+            cached=oid;return oid;
+        }
+        // Only the exact original projected site has an authoritative result
+        // descriptor here. No spelling, operator inference or catalog lookup.
+        const auto projections=state_->query->projectionBindings.find(state_->statement);
+        const auto outputs=state_->query->statementOutputs.find(state_->statement);
+        bool matched=false;
+        if(projections!=state_->query->projectionBindings.end() &&
+           outputs!=state_->query->statementOutputs.end())
+            for(size_t i=0;i<projections->second.size();++i)
+                if(projections->second[i].expression==expression) {
+                    if(i>=outputs->second.size() || !outputs->second[i].typeOid ||
+                       (matched && oid!=outputs->second[i].typeOid)) {
+                        cached=uint32_t{0};return 0;
+                    }
+                    oid=outputs->second[i].typeOid;matched=true;
+                }
+        cached=oid;return oid;
+    }
+    static std::optional<int64_t> cachedInteger(Input& row,size_t index,const ExprValue& value) {
+        if(row.integerKeys.empty())row.integerKeys.resize(row.keys.size());
+        auto& cached=row.integerKeys.at(index);
+        if(cached.state==IntegerKey::State::Unparsed) {
+            int64_t integer=0;const auto end=value.value.data()+value.value.size();
+            const auto parsed=std::from_chars(value.value.data(),end,integer);
+            if(parsed.ec==std::errc{} && parsed.ptr==end &&
+               (value.typeName!="smallint" || (integer>=INT16_MIN && integer<=INT16_MAX)) &&
+               (value.typeName!="integer" || (integer>=INT32_MIN && integer<=INT32_MAX))) {
+                cached.value=integer;cached.state=IntegerKey::State::Ready;
+            } else cached.state=IntegerKey::State::Invalid;
+        }
+        return cached.state==IntegerKey::State::Ready?std::optional<int64_t>(cached.value):std::nullopt;
+    }
+    std::optional<int> integerCompare(Input& left,Input& right,size_t index,
+        const ExprValue& a,const ExprValue& b,
+        const std::optional<QueryComparisonBinding>& enumeration) {
+        if(enumeration || a.typeName!=b.typeName)return std::nullopt;
+        const uint32_t expected=a.typeName=="smallint"?21:a.typeName=="integer"?23:
+            a.typeName=="bigint"?20:0;
+        if(!expected || boundKeyTypeOid(index)!=expected)return std::nullopt;
+        const auto first=cachedInteger(left,index,a),second=cachedInteger(right,index,b);
+        if(!first || !second)return std::nullopt;
+        return (*first>*second)-(*first<*second);
+    }
     int compare(const ExprValue& a,const ExprValue& b,size_t key,bool first,
-                const std::optional<QueryComparisonBinding>& enumeration) {
+                const std::optional<QueryComparisonBinding>& enumeration,
+                Input& left,Input& right,size_t inputIndex) {
         if(a.isNull || b.isNull)return a.isNull==b.isNull?0:(a.isNull==first?-1:1);
+        if(const auto order=integerCompare(left,right,inputIndex,a,b,enumeration))return *order;
         return keyComparisons_.compare(key,state_->evaluator,a,b,true,enumeration);
     }
     int partitionCompare(size_t a,size_t b) {
@@ -119,7 +201,7 @@ class PreparedWindowOp final : public Operator {
             const auto& left=input_[a].keys.at(index);
             const auto& right=input_[b].keys.at(index);
             const int order=compare(left,right,i,
-                stage_.spec.partitionNullsFirst.at(i),stage_.spec.partitionComparisons.at(i));
+                stage_.spec.partitionNullsFirst.at(i),stage_.spec.partitionComparisons.at(i),input_[a],input_[b],index);
             if(order) {
                 if(left.isNull || right.isNull)return order;
                 return stage_.spec.partitionAsc.at(i)?order:-order;
@@ -134,7 +216,7 @@ class PreparedWindowOp final : public Operator {
             const auto& left=input_[a].keys.at(index);
             const auto& right=input_[b].keys.at(index);
             const int order=compare(left,right,i+stage_.spec.partition.size(),
-                key.nullsFirst,key.comparison);
+                key.nullsFirst,key.comparison,input_[a],input_[b],index);
             if(order) {
                 if(left.isNull || right.isNull)return order;
                 return key.asc?order:-order;
@@ -430,6 +512,7 @@ public:
         opened_=false;available_=false;initialized_=false;eof_=false;sorted_=false;reuseKeys_=false;position_=0;
         input_.clear();layout_=Layout{};active_.clear();transitions_.clear();current_=RowContext{};
         currentKeys_.clear();keyComparisons_.reset();valueComparisons_.reset();
+        std::vector<std::optional<uint32_t>>().swap(keyTypeOids_);
         if(childOpened_){childOpened_=false;child_->close();}
     }
     bool supportsPreparedContexts() const override {return true;}

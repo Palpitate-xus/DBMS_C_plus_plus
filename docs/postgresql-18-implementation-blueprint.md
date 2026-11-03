@@ -73,7 +73,7 @@ COPY 响应中断已有 R197 用户暂缓记录补入中央索引；完整回归
 保留计划、实际参数帧/provider、portal、共享排序 helper 和所有专属暂缓边界不变。
 该批验证终态及性能另见[性能报告](performance-report-2026-10-30.md)的对应记录；QRY-06 及原 273 项状态保持。
 
-2026-11-03，本轮基于 `9f019ffa`，最终 C9 程序 `c696d3b2` 为 Main、Core 和真实 SQL 子查询
+2026-11-03，前批基于 `9f019ffa`，最终 C9 程序 `c696d3b2` 为 Main、Core 和真实 SQL 子查询
 接入共用的类型化 WindowAgg，执行实际 source/filter、窗口投影和最终子句，沿用原查询上下文及外层关联。
 支持受验收的 derived/CTE/Main SourceContexts JOIN；通用 Core JOIN 的完整 lowering 仍开放。
 命名窗口保留真实父名与原始子句身份，支持合法继承及 ROWS/RANGE/GROUPS/EXCLUDE 的已接入边界；
@@ -96,6 +96,30 @@ window DISTINCT、内部 ORDER BY、数组值 ARRAY_AGG、完整聚合族及 tem
 不关闭 QRY-06、QRY-08 或原始 273 项。
 完整证据和速度限制见[类型化窗口宿主报告](performance-report-2026-10-30.md#类型化窗口宿主与有序输出复用2026-11-03)，
 历史失败及旧性能记录保留，不据此推断普遍加速或完整回归全绿。
+
+随后基于 `b04db801` 的 C1 程序 `56d06bca`，唯一生产变化是窗口私有实现 `85aef835` 的整数键缓存。
+准入要求实际非 NULL 比较、无枚举比较绑定、双方 raw type 同为 `smallint`/`integer`/`bigint`，
+并具有对应的权威 OID 21/23/20。每个 stage 拥有的已求值键单元只在首次实际比较时解析，
+全串解析及 int16/int32/int64 范围验证失败则交原比较 owner；不缓存原比较器的结果或异常。
+ColumnRef 的真实 sourceRange OID（含 0）优先，不能由旧 binding 或输出 OID 救回未知身份；
+真实 domain 即使显示为基类型也回退。仅有类型别名/显示名、无权威 OID 的隐藏表达式保留原路径，
+不是新增语法或类型拒绝。NULL、方向、同行及原始稳定顺序保持，缓存不跨执行重开。
+
+所有 buffered Input 都增加 vector 头与外层容量字节，纯文本等回退行也有固定代价；
+仅整数 payload 和 stage OID 元数据按比较需求分配。close 销毁行内 payload、释放 OID 元数据，
+外层容量仍可保留至图销毁。窗口分区/stage 排序仍无 work_mem 上限或 spill，不能将累计请求减少解释为 RSS 或峰值内存下降。
+独立 allocator 控制的 18 个进程、162 次快照全部完成；1,000 行整数首/末行 uordblks 中位差为 +68,160 B，
+文本回退 +22,544 B，单行 +48 B。它们是进程分配器快照，不能分解成精确 cache live 字节或证明真实峰值/RSS 改善。
+三种参数 origin、真实 frame/context/provider、Main、共享 SetOutputComparisons、R185 helper 及 R177 执行原文均不变。
+71 个 native 入口通过（新增 36 控制），61 个协议入口为 56/5；新增 143 控制中的 14 项差异与 C9 的全部 actual 相同，
+原四个失败入口也无新观察差异，不将这些普通差异一概归入暂停范围。
+共同八类 public cursor 独立执行阶段进程 CPU p50 降低 41.85–61.90%、C++ 分配请求减少 53.89–63.96%。
+另行完成的整 SQL 24 组中，4 MB/16 MB 的 16 项 p50 均低于两次 C9 22.3–39.1%；
+64 kB 为 2 项比两旧都快、3 项比两旧都慢（partition_lag、running_sum、partition_full_sum），其余混合，
+并保留 C9 首/回测 +13.2% 至 +75.8% 的漂移。不能宣布原七类慢项全清、统一加速或更新 old58/PG 倍率；
+原 C9 历史慢值和本批未重跑的旧 35 项停机失败继续保留。
+完整方法及内存限制见[窗口整数键缓存报告](performance-report-2026-10-30.md#窗口整数键缓存与实际执行成本2026-11-03)，
+不据此关闭原 273 项或宣称完整 PostgreSQL 能力。
 
 此后依次评估剩余分流/物化、常见修改快照工作量、完整工作内存与 spill、统计和计划选择，再扩大数据量与并发验证。
 聚合/HAVING/未接入集合分流、配置函数/例程 GUC 完整作用域、分区/RLS/并行等剩余物化及虚拟生成列表达式失败返回 NULL 的既有差异仍开放；

@@ -2,6 +2,33 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-03 lazy authoritative builtin integer window key cache and actual public execution cost",
+      "gap_ids": [
+        "QRY-08",
+        "P0-14",
+        "OPT-10"
+      ],
+      "status": "partial",
+      "evidence": [
+        "docs/performance-report-2026-10-30.md",
+        "docs/test-report.md",
+        "docs/MANUAL.md",
+        "src/executor/PreparedWindowOp.inc"
+      ],
+      "tests": [
+        "tests/prepared_window_integer_key_cache_test.cpp",
+        "tests/window_integer_key_cache_protocol_e2e_test.py",
+        "tests/compat/window_integer_key_cache_pg18_expected.json"
+      ],
+      "verification": {
+        "correctness": "C1 56d06bca; existing70native0+new36controls0=71uniqueall0. New36 C9 only3costguardfail/all33semantic0. Original60wire56/4 plusnew143/14 samePGexpectations/fullactualC9==C1 ->61unique56/5. Originalbind463/40/CTE747/29/nested325/42 logsbyteequal,interval106/10allobservationsbyteequal. No fullPG/familyclose claim.",
+        "execution_diagnostics": "Before/C1 sameCPP separateclocks/alloc/evidence48process144invocations pergen all0,144000rows396000cells each.16fulltype/origin/context/loops exact; CPU p50-41.85%..-61.90%,newcalls-53.89%..-63.96%;initialbuildsingle11.6..38.2ms remains. Warm publiccost450603->73176calls/19260574->10314925requestedB,notRSS/live/peak.",
+        "performance": "Final C9/C1/C9 samecommon8 all3budgets864timed216warmup18SET-SHOW=1098SQL,1080000rows2970000cells exact/all0/norerun.4MB/16MB16casep50belowbothC9by22.3-39.1%;64kB2fasterthanboth/3slowerthanboth/remainingmixed,baseline drift+13.2..+75.8% preserved.No universalgain or updatedold58/PG ratio. Allocatorsnapshots18process162points/12006rows24012cells0,first-lastintegeruord+68160B,text+22544B,single+48B,closecapacityretained;RSSinconsistent/notlive-truepeak-proof.",
+        "scope": "Onlyprivateinc/source216delta1,147headers/Main/ExecCPP/sharedSet/R185/R177/actualframe-context-provider original. ExactactualOID21/23/20+same rawtag/noenum/NULLfirst,parsemiss ordomain/unknown0 unchangedfallback;rangeOID0 overridesstalebinding/output,unboundColumn0. Allbuffered Input newvectorheader/outercapacityretained;payload/metadatademandlazy,noWindowwork_mem/spillclaim. Original273objects/rawarray/248history/2313tests/725records unchanged;existingR15failed35notrerun/investigated;goalactive.",
+        "proof": "build/pg-feature-window-key-w4qeo1ai/final-provenance.json"
+      }
+    },
+    {
       "issue": "2026-11-03 typed prepared window host, input keys and proven output-order reuse",
       "gap_ids": [
         "QRY-08",

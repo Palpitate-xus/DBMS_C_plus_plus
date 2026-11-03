@@ -1,5 +1,25 @@
 # DBMS 功能测试报告
 
+## 2026-11-03 窗口整数键缓存与实际执行成本
+
+C1 `56d06bca…` 使用冻结216源输入、62生产对象；公共147头、Main、ExecCPP/共享Set/R185/R177/真实frame-context-provider均与b04基线字节一致。
+原70原生全过，加新实际游标36控制入口全过，合计71个不同原生入口。相同新36在C9有3个成本断言失败，33个语义控制均通过；不是三个新SQL bug。
+成本控制的warm实际cursor累计C++new 450603→73176，请求bytes19260574→10314925；原Input外层容量在warm已分配，不能当cold/activepeak/live/RSS下降。
+新143在独立PG18.6全过、原C9和C1均14处差异且fullactual逐项相同；首次fixture错误要求用户OID>16383导致多3项失败，已仅改为实际pg_type正OID，原源/143-17/PG原预期保留。
+14分类为catalog来源2、secondary record-json的rank错误前缀3、重复volatile window调用共享6、compound binary结果3；没有改期望、删SQL或将它们泛称暂停项。
+原60协议仍56/4，Bind463/40、CTE747/29、nested325/42整log及interval106/10完整观察与C9一致；加新143入口后61unique/56pass5fail。没有把观察数当独立缺陷数。
+
+公共API诊断分clocks/allocations/evidence独立进程；before与C1各48进程、144次1000行结果全部0，各144000行/396000单元。
+16组owning行/descriptor/typeOID/来源/公开context及图rows/loops完全相同，仅排除跨进程指针数值和运行时间；同一图的重启身份由实际public cursor核对。
+CPU p50降低41.85%–61.90%、C++分配请求53.89%–63.96%，未将allocation版时间混入clocks，也未将inclusive节点耗时相减后命名为exclusive comparator CPU。
+初次建图每case仅一次、仍约11.6–38.2ms；解析/规划/建图与执行分别报告。C++请求字节不是malloc全量、live、peak或RSS。
+
+实际Main普通finalSort匿名FD/EOF、owned强杀和同目录重开等43请求通过，原1072fixture不变，全部自有进程退出。该资源范围不包括Window partition/stage/cache的预算治理。
+本批不重跑C9已有35操作shutdown失败，不把新的只读资源正常退出当作修复该停机问题。
+额外allocator18进程/162采样/12006行24012单元全0；整数首/末行uordblks +68160B，文本+22544B，单行+48B，close保留容量/RSS不一致原样报告，不声称truepeak降低。
+整SQL864计时+216预热+18SET-SHOW完整1098请求全值通过；4/16MB全部16项p50较两旧低22.3%–39.1%，64kB保留3个较两旧慢项及全部漂移，无重跑。
+源码范围pre-doc29项、原273完整对象/raw数组与248历史、2313既有测试、725专属记录和754 Markdown路径均保持；最终版本及完整24项SQL样本见[本批报告](performance-report-2026-10-30.md#窗口整数键缓存与实际执行成本2026-11-03)。整体Goal仍active。
+
 ## 2026-11-03 类型化窗口宿主与有序输出复用
 
 最终 C9 `c696d3b2…` 使用同代 61 core、Main 及已重编译且与当前公共头匹配的 stub；主回归 68 原生入口全部通过，另两个独立原生入口也通过，合计 70 个不同入口。
