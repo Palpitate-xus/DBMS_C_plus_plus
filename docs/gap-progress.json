@@ -2,6 +2,39 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-03 shared builtin registry and real compound RETURNING data",
+      "gap_ids": [
+        "QRY-08",
+        "TYPE-17",
+        "TYPE-19",
+        "PROTO-04"
+      ],
+      "status": "partial",
+      "evidence": [
+        "docs/performance-report-2026-10-30.md",
+        "docs/test-report.md",
+        "docs/postgresql-comparison.md",
+        "docs/postgresql-18-implementation-blueprint.md",
+        "docs/benchmarks/function-registry-returning-20261103.json"
+      ],
+      "tests": [
+        "tests/builtin_registry_isolation_test.cpp",
+        "tests/prepared_returning_owned_result_test.cpp"
+      ],
+      "verification": {
+        "source": "Parent7b87f84f;actualC3 binary425165afe19d10ccf9be806c3052e9a09e3875a3826142d2949cde995fdf94d1/source227. FreshC1actual62 thenC2/C3actual2CPP60reuse; strict62dependencies/objects/freshstubs validated. SameC3atomicallyinstalled/localS3backup/noexistingservicesrestart.",
+        "registry": "182instance-independent callbacks +fixedvolatility process-lifetimeconstbase;9actualinstancecallbacks+5SQLtimekeywords stayinstanceowned. All196originalassignmentstatements exact/targetmarkers/aliascopies/union191preserved. Nativeargument replacement regressionfoundC2 thenC3actual3fullresults restored; noAST/row/frame/provider/resultcache.",
+        "RETURNING": "Actualpreparedproducer values andexistingdeclarations retained; realstoredtarget/OLDNEWarrays hydrated onlyactualcapturedata. C3DELETEbytes/state/postsfixed; no graph/parameter/provider/admission/storageformat change. Newnative20 beforeC817fail→C3allpass; 14registrycontrols actualC8andC3allpass.",
+        "generations": "C2broad147native145pass2oldfail bothsameC8reproduced;95wire86pass8completefailed+1startup1030SQL. BeforeC89585pass8completefailed+2incomplete timeout. C3target56native55pass1oldmath +newRETURNINGentrypass =>57entries56pass1fail;31wire24pass7failed+separateCASE1old3semanticfailures. NotC3full147/95 orwhole1074nativesuite.",
+        "strict": "PG301188match113remaining;only254INSERTbinaryRETURNINGimprovedvsC8,other300fullactual/canonical/matchflags exact;allold187correctpreserved,88cumulativevsS3. All27883/111/68/16 observations fullactualexactC8 incloldfailedcomponents. NewRETURNING56 before20fail→C38fail,allpostoperationsnowcorrect,0oldcorrectcheckregression.",
+        "ordinary_remaining": "SixOLDNEWmissingDescribeT,virtualarrayproducerpayloadloss,physicalhistoricalarraybitmap;113fixed301residuals/morecatalog/CAST/UPDATEinputs andimplicitcopy/rawthis limitsordinaryopen. Notnewuserdeferrals orwholePGcompatibility.",
+        "cost": "Actual8processes496primitive+52constructormetrics. Helper512extra1536calls off1218134→213590requests/88677248→14491520B;on1450070→445526/126917504→52731776B. Actualcursorallocationssame; coldCPU20.750→35.862ms retained. Constructorfirst+1request96B;12batch64incl25216checks each29760→8704requests. CumulativeCPPnew notlive/peak/RSS; singlehelperCPU notSQLspeed.",
+        "operations35": "Once3independentC8/C3/C8contexts each210validatedoperations/normal0=630samples/no warmupdiscard. All35p50=18faster2slower15between;update_range/reindexslow andbaseline drift minus90.28..plus130.91percent retained. NotSQLrequestcount/universalorPGspeedclaim.",
+        "query_performance": "OnceS3/C3/S3threebudgets1296timed324untimedwarm18 SET/SHOW（9+9）=1638requests/1620000rows4725000cells/9normal0/inputsexact. All36p50belowbothS3;firstlower2.05..33.76percent,lastlower1.76..29.81. Baseline driftminus22.57..plus11.58;all108raw12+maxold1889.284ms/new1382.994ms retained. Independent346checks passed.",
+        "scope": "Original273items/status22complete166partial70unverified15deferred_by_user unchanged/prior253historyrawsuffix retained. Original2322testfiles unchanged+2new=2324/new14+20controls;754Markdownpaths unchanged/725protectedrecords retained. OnlyExprEvaluator oldheaderprivate declarations changed,fieldsABIunchanged +newregistryviewheader. MasterPalpitate-xus/no branch/push/Actions. Goalactive."
+      }
+    },
+    {
       "issue": "2026-11-03 primitive row materialization provenance and vector capacity",
       "gap_ids": [
         "QRY-08",

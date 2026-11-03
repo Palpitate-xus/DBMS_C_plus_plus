@@ -2552,6 +2552,11 @@ public:
         output.commandTag = command == "INSERT" ? "INSERT 0 " + std::to_string(rows.size())
                                                 : command + " " + std::to_string(rows.size());
         const auto& descriptor = execution_.query().statementOutputs.at(statement_);
+        const bool captureTyped = typedResultCaptureRequested();
+        if(captureTyped) {
+            output.typedRowDescriptor = descriptor;
+            output.typedRows.emplace();
+        }
         for (const auto& column : descriptor) {
             output.columns.push_back(column.name);
             output.columnTypes.push_back(column.type == "unknown" ? "text"
@@ -2578,6 +2583,13 @@ public:
                         value=stored_regtype_detail::load(isNull?std::string{}:*found->second,
                             table_.cols[ordinal].isArray,isNull,catalog,currentSession(),column.typeMetadata);
                     }
+                    // Only this genuine stored OLD/NEW source may decode
+                    // its declared array input. An already owning datum is
+                    // retained by the helper; VIRTUAL display is never storage.
+                    if(captureTyped && ordinal<table_.len &&
+                       table_.cols[ordinal].dataName==column.name &&
+                       table_.cols[ordinal].generatedKind!='v' && table_.cols[ordinal].isArray)
+                        (void)compound_value_detail::decodeArrayStorageInput(value,column.typeMetadata);
                     cells.push_back(std::move(value));
                 }
                 execution_.setSourceRow(row, source.ordinal, cells);
@@ -2602,6 +2614,7 @@ public:
             }
             output.rows.push_back(std::move(cells));
             output.nulls.push_back(std::move(nulls));
+            if(output.typedRows)output.typedRows->push_back(std::move(values));
         }
         g_lastDmlResult = std::move(output);
         return true;
@@ -5722,7 +5735,8 @@ class BoundDmlExecution {
             ExprEvaluator evaluator;(void)evaluator.eval(&cast,RowContext{});
         }
     }
-    RowContext context(const SqlRow& values,const RowContext* source=nullptr) const {
+    RowContext context(const SqlRow& values,const RowContext* source=nullptr,
+                       bool captureReturningArrays=false) const {
         auto row=source?*source:execution_->context();std::vector<ExprValue> cells;
         for(const auto& column:target_->columns) {
             const auto found=values.find(column.name);
@@ -5735,6 +5749,10 @@ class BoundDmlExecution {
                 cells.back()=stored_regtype_detail::load(found->second.value_or(""),
                     table_.cols[position].isArray,!found->second,catalog,&session_,column.typeMetadata);
             }
+            if(captureReturningArrays && position<table_.len &&
+               table_.cols[position].dataName==column.name &&
+               table_.cols[position].generatedKind!='v' && table_.cols[position].isArray)
+                (void)compound_value_detail::decodeArrayStorageInput(cells.back(),column.typeMetadata);
         }
         execution_->setSourceRow(row,target_->ordinal,cells);return row;
     }
@@ -5743,7 +5761,8 @@ class BoundDmlExecution {
         return isStarProjection(value) || (column && column->column=="*");
     }
     RowContext returningContext(const ReturningRowImage& image,const RowContext* source=nullptr) const {
-        auto row=context(returningSourceRow(image,ReturningProjection::Source::Default),source);
+        const bool captureArrays=typedResultCaptureRequested();
+        auto row=context(returningSourceRow(image,ReturningProjection::Source::Default),source,captureArrays);
         for(const auto& channel:transitionSources_) {
             const auto& source=*channel.first;
             const auto& values=returningSourceRow(image,channel.second);
@@ -5756,6 +5775,20 @@ class BoundDmlExecution {
                     throw DbError("XX000","RETURNING image lost its bound descriptor column");
                 const bool isNull=found==values.end() || !found->second;
                 cells.emplace_back(column.type,isNull?std::string{}:*found->second,isNull);
+                const auto position=cells.size()-1;
+                if(captureArrays && position<table_.len &&
+                   table_.cols[position].dataName==column.name &&
+                   table_.cols[position].generatedKind!='v') {
+                    // OLD/NEW aliases are original stored row versions, not
+                    // strings rendered by a query or a new parameter frame.
+                    if(stored_regtype_detail::columnType(table_.cols[position].dataType)) {
+                        const auto catalog=regtype_detail::metadata(g_engine,session_.currentDB);
+                        cells.back()=stored_regtype_detail::load(isNull?std::string{}:*found->second,
+                            table_.cols[position].isArray,isNull,catalog,&session_,column.typeMetadata);
+                    }
+                    if(table_.cols[position].isArray)
+                        (void)compound_value_detail::decodeArrayStorageInput(cells.back(),column.typeMetadata);
+                }
             }
             execution_->setSourceRow(row,source.ordinal,cells);
         }

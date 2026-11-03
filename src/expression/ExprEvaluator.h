@@ -18,6 +18,8 @@
 #include "parser/ast.h"
 #include "catalog/type_registry.h"
 #include "common/DatumType.h"
+#include "expression/BuiltinRegistryView.h"
+#include <ctime>
 #include <functional>
 #include <cstdint>
 #include <map>
@@ -202,7 +204,16 @@ private:
     ScalarSubqueryExecutor scalarSubqueryExecutor_;
     QuantifiedExecutor quantifiedExecutor_;
 
-    void registerBuiltins();
+    // Shared callbacks never capture an evaluator/clock/query. Actual instance
+    // callbacks and caller overrides remain in the original owning maps above.
+    struct BuiltinRegistry;
+    struct BuiltinRegistrySeed {};
+    explicit ExprEvaluator(BuiltinRegistrySeed);
+    static const BuiltinRegistry& builtinRegistry();
+    expr_registry_detail::BuiltinRegistryView<ScalarFunction> functionRegistry() const;
+    void decorateBuiltinCallbacks();
+    void registerStatelessBuiltins();
+    void registerInstanceBuiltins(std::time_t stableClock);
 
     ExprValue evalLiteral(const LiteralExpr* e) const;
     ExprValue evalColumnRef(const ColumnRefExpr* e, const RowContext& ctx) const;

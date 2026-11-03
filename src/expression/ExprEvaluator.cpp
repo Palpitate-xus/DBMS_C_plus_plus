@@ -611,8 +611,26 @@ const ExprValue& RowContext::boundColumn(size_t sourceOrdinal, size_t columnOrdi
 // ExprEvaluator
 // ============================================================================
 
+struct ExprEvaluator::BuiltinRegistry {
+    std::map<std::string, ScalarFunction, std::less<>> functions;
+    std::map<std::string, char, std::less<>> volatility;
+};
+
 ExprEvaluator::ExprEvaluator() {
-    registerBuiltins();
+    // Capture this instance's actual creation time before the one-time table
+    // initialization, including the first cold constructor in a process.
+    const std::time_t stableClock = std::time(nullptr);
+    (void)builtinRegistry();
+    registerInstanceBuiltins(stableClock);
+}
+
+ExprEvaluator::ExprEvaluator(BuiltinRegistrySeed) {
+    registerStatelessBuiltins();
+}
+
+expr_registry_detail::BuiltinRegistryView<ScalarFunction>
+ExprEvaluator::functionRegistry() const {
+    return {functions_, builtinRegistry().functions};
 }
 
 ExprValue ExprEvaluator::eval(const Expr* expr, const RowContext& ctx) const {
@@ -5547,12 +5565,14 @@ void ExprEvaluator::registerFunction(const std::string& name, ScalarFunction fn,
 }
 
 bool ExprEvaluator::hasFunction(const std::string& name) const {
-    return functions_.find(toLower(name)) != functions_.end();
+    return functionRegistry().find(toLower(name)) != functionRegistry().end();
 }
 
 char ExprEvaluator::volatility(const std::string& name) const {
-    auto it = volatility_.find(toLower(name));
-    return it != volatility_.end() ? it->second : 'v';
+    const expr_registry_detail::BuiltinRegistryView<char> registry(
+        volatility_, builtinRegistry().volatility);
+    const auto it = registry.find(toLower(name));
+    return it != registry.end() ? it->second : 'v';
 }
 
 namespace {
@@ -6119,7 +6139,7 @@ struct BoundScalarRoutine {
 ResolvedScalarFunction resolveScalarFunction(
     const ExprEvaluator& evaluator, const FunctionCallExpr* call,
     const std::string& database, StorageEngine* engine,
-    const std::map<std::string,ScalarFunction,std::less<>>& registry) {
+    const expr_registry_detail::BuiltinRegistryView<ScalarFunction>& registry) {
     if (!call) return {};
     // A bound callback is owned by this actual AST occurrence, not by an
     // SQL-visible name. Rebinding the same site preserves its engine/routine
@@ -6330,13 +6350,13 @@ bool ExprEvaluator::hasScalarFunction(const FunctionCallExpr* call,
     if(call && call->sqlValue!=FunctionCallExpr::SqlValue::None) {
         sql_value_detail::validate(*call);return true;
     }
-    return resolveScalarFunction(*this, call, currentDB_, engine,functions_).found;
+    return resolveScalarFunction(*this, call, currentDB_, engine,functionRegistry()).found;
 }
 
 const QueryHostSetReturningProvider* ExprEvaluator::queryHostSetReturningRole(
     const FunctionCallExpr* call,StorageEngine* engine) const {
     if(call && call->sqlValue!=FunctionCallExpr::SqlValue::None)return nullptr;
-    return resolveScalarFunction(*this,call,currentDB_,engine,functions_).provider;
+    return resolveScalarFunction(*this,call,currentDB_,engine,functionRegistry()).provider;
 }
 
 char ExprEvaluator::scalarFunctionVolatility(const FunctionCallExpr* call,
@@ -6344,7 +6364,7 @@ char ExprEvaluator::scalarFunctionVolatility(const FunctionCallExpr* call,
     if(call && call->sqlValue!=FunctionCallExpr::SqlValue::None) {
         sql_value_detail::validate(*call);return 's';
     }
-    const auto resolved = resolveScalarFunction(*this, call, currentDB_, engine,functions_);
+    const auto resolved = resolveScalarFunction(*this, call, currentDB_, engine,functionRegistry());
     if (!resolved.found)
         throw DbError("42883", "function does not exist: " +
             (call ? call->funcName : std::string{}));
@@ -6359,15 +6379,15 @@ std::string ExprEvaluator::scalarFunctionResultType(const FunctionCallExpr* call
     if(call && call->sqlValue!=FunctionCallExpr::SqlValue::None) {
         sql_value_detail::validate(*call);return sql_value_detail::type(call->sqlValue);
     }
-    const auto resolved = resolveScalarFunction(*this, call, currentDB_, engine,functions_);
+    const auto resolved = resolveScalarFunction(*this, call, currentDB_, engine,functionRegistry());
     if (!resolved.found)
         throw DbError("42883", "function does not exist: " +
             (call ? call->funcName : std::string{}));
     if (resolved.stored)
         return ExprHelper::canonicalResultTypeName(resolved.routine.returnType);
     if(!resolved.output.empty())return resolved.output;
-    const auto callback = functions_.find(toLower(resolved.name));
-    if (callback != functions_.end()) {
+    const auto callback = functionRegistry().find(toLower(resolved.name));
+    if (callback != functionRegistry().end()) {
         if(callback->second.target<SqlNameFunction>())return "name";
         if(callback->second.target<SqlTypeOfFunction>())return "regtype";
         if(callback->second.target<SqlVersionFunction>())return "text";
@@ -6387,7 +6407,7 @@ std::string ExprEvaluator::scalarFunctionIdentity(const FunctionCallExpr* call,
         sql_value_detail::validate(*call);
         return "sql-value:"+call->funcName+":"+(call->sqlValuePrecision?std::to_string(*call->sqlValuePrecision):"default");
     }
-    auto resolved = resolveScalarFunction(*this, call, currentDB_, engine,functions_);
+    auto resolved = resolveScalarFunction(*this, call, currentDB_, engine,functionRegistry());
     if (!resolved.found)
         throw DbError("42883", "function does not exist: " +
             (call ? call->funcName : std::string{}));
@@ -6395,8 +6415,8 @@ std::string ExprEvaluator::scalarFunctionIdentity(const FunctionCallExpr* call,
     engine = engine ? engine : &g_engine;
     bool opaqueResultDomain=false;
     if (!resolved.stored) {
-        const auto callback = functions_.find(toLower(resolved.name));
-        if (callback != functions_.end()) {
+        const auto callback = functionRegistry().find(toLower(resolved.name));
+        if (callback != functionRegistry().end()) {
             if (const auto* bound = callback->second.target<BoundScalarRoutine>()) {
                 resolved = bound->resolved;
                 database = bound->database;
@@ -6462,7 +6482,7 @@ void ExprEvaluator::bindScalarFunctions(Expr* expression, StorageEngine* engine)
             if (function->schema.empty() && toLower(function->funcName) == "exists" &&
                 function->args.size() == 1 && function->args.front()->preparedSubquery)
                 return; // SQL grammar owns this child; never register a routine callback.
-            const auto resolved = resolveScalarFunction(*this, function, currentDB_, engine,functions_);
+            const auto resolved = resolveScalarFunction(*this, function, currentDB_, engine,functionRegistry());
             if (!resolved.found && !function->setReturning)
                 throw DbError("42883", "function does not exist: " + function->funcName);
             for(size_t i=0;i<resolved.inputs.size();++i) {
@@ -6475,7 +6495,7 @@ void ExprEvaluator::bindScalarFunctions(Expr* expression, StorageEngine* engine)
                 if (function->hasOver || function->distinct || function->filter ||
                     !function->orderBy.empty())
                     throw DbError("0A000", "scalar routine used as an aggregate or window function");
-                std::string key = "__dbms_bound_routine_" + std::to_string(functions_.size());
+                std::string key = "__dbms_bound_routine_" + std::to_string(functionRegistry().size());
                 while (hasFunction(key)) key += '_';
                 registerFunction(key, BoundScalarRoutine{engine, currentDB_, resolved,function},
                                  resolved.routine.provolatile);
@@ -6576,8 +6596,8 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
     if(e->sqlValue!=FunctionCallExpr::SqlValue::None)return evalSqlValue(e,ctx);
     if(e->setReturning)throw DbError("0A000","set-returning routine requires its query-host receiver");
     std::string name = toLower(e->funcName);
-    const auto callback=functions_.find(name);
-    if(callback!=functions_.end() && callback->second.target<SqlTypeOfFunction>()) {
+    const auto callback=functionRegistry().find(name);
+    if(callback!=functionRegistry().end() && callback->second.target<SqlTypeOfFunction>()) {
         if(e->args.size()!=1 || !e->namedArgs.empty())
             throw DbError("42883","function pg_typeof does not exist for these arguments");
         if(e->hasOver || e->distinct || e->filter || !e->orderBy.empty())
@@ -6608,7 +6628,7 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
     // ARRAY constructors. The descriptor is read before any argument runs;
     // a brace-looking TEXT value never determines the result type.
     const auto declaredResult=arrayExpressionType(e,ctx,currentDB_,this);
-    const auto* arrayPush=callback==functions_.end()?nullptr:
+    const auto* arrayPush=callback==functionRegistry().end()?nullptr:
         callback->second.target<DeclaredArrayPushScalarFunction>();
     std::optional<std::string> pushElement;
     if(arrayPush && e->args.size()==2 && e->namedArgs.empty())
@@ -6668,7 +6688,7 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
     }
 
     if (e->schema.empty() && (name == "between" || name == "not between") &&
-        functions_.find(name) == functions_.end()) {
+        functionRegistry().find(name) == functionRegistry().end()) {
         if (e->args.size() != 3 && e->args.size() != 4) return ExprValue("boolean", "f", false);
         const bool negate = name == "not between";
         for (const auto& argument : e->args)
@@ -6758,8 +6778,13 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
         args.push_back(std::move(value));
     }
 
-    if(callback!=functions_.end() && !callback->second.target<BoundScalarRoutine>() &&
-       !scalarSignatures(name).empty() && ownsScalarSignatures(name,&callback->second)) {
+    // A native argument callback may replace this evaluator's registration.
+    // The immutable base pair remains valid; a real local override owns the
+    // post-argument signature decision, as in the original mutable registry.
+    const auto updated=functions_.find(name);
+    const auto invocationCallback=updated==functions_.end()?callback:&*updated;
+    if(invocationCallback!=functionRegistry().end() && !invocationCallback->second.target<BoundScalarRoutine>() &&
+       !scalarSignatures(name).empty() && ownsScalarSignatures(name,&invocationCallback->second)) {
         auto* owner=sqlValueEngine_?sqlValueEngine_:&g_engine;
         std::vector<std::string> inputs;
         for(const auto& argument:e->args)inputs.push_back(scalarSignatureInputType(
@@ -6904,8 +6929,8 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
         }
         return ExprValue("interval", intervalToText(mi_months, mi_days, mi_micros), false);
     }
-    auto it = functions_.find(name);
-    if (it != functions_.end()) {
+    auto it = functionRegistry().find(name);
+    if (it != functionRegistry().end()) {
         std::string argumentCollation;
         for (const ExprValue& argument : args) {
             if (isCollatableExprType(argument.typeName))
@@ -9348,14 +9373,8 @@ static ExprValue tsMatch(const std::string& vecText, const std::string& query) {
     return ExprValue("boolean", "t", false);
 }
 
-void ExprEvaluator::registerBuiltins() {
-    const std::time_t stableClock = std::time(nullptr);
-    const std::string stableDate =
-        formatUtcClock(stableClock, "%Y-%m-%d");
-    const std::string stableTimestamp =
-        formatUtcClock(stableClock, "%Y-%m-%d %H:%M:%S");
-    const std::string stableTime =
-        formatUtcClock(stableClock, "%H:%M:%S");
+void ExprEvaluator::registerStatelessBuiltins() {
+
 
     auto requireXmlArity = [](const std::vector<ExprValue>& arguments,
                               size_t expected,
@@ -9993,10 +10012,7 @@ void ExprEvaluator::registerBuiltins() {
         bool n = a.empty() || a[0].isNull;
         return ExprValue("boolean", n ? "f" : "t", false);
     };
-    functions_["now"] = [stableTimestamp](const std::vector<ExprValue>&) {
-        return ExprValue(
-            "timestamptz", stableTimestamp + "+00", stableTimestamp.empty());
-    };
+
 
     // ------------------------------------------------------------------------
     // Math functions
@@ -12647,39 +12663,15 @@ void ExprEvaluator::registerBuiltins() {
     // ------------------------------------------------------------------------
     // Date/time functions
     // ------------------------------------------------------------------------
-    sqlTimeValues_[sql_value_detail::Kind::CurrentDate] = [stableDate](const std::vector<ExprValue>&) {
-        return ExprValue("date", stableDate, stableDate.empty());
-    };
+
     // Stable clock functions share the evaluator's creation-time snapshot.
     // The engine currently has a fixed UTC session timezone.
-    sqlTimeValues_[sql_value_detail::Kind::CurrentTimestamp] = [stableTimestamp](const std::vector<ExprValue>&) {
-        return ExprValue("timestamptz", stableTimestamp + "+00",
-                         stableTimestamp.empty());
-    };
-    sqlTimeValues_[sql_value_detail::Kind::LocalTimestamp] = [stableTimestamp](const std::vector<ExprValue>&) {
-        return ExprValue(
-            "timestamp", stableTimestamp, stableTimestamp.empty());
-    };
-    functions_["transaction_timestamp"] = [stableTimestamp](const std::vector<ExprValue>&) {
-        return ExprValue("timestamptz", stableTimestamp + "+00",
-                         stableTimestamp.empty());
-    };
-    functions_["statement_timestamp"] = [stableTimestamp](const std::vector<ExprValue>&) {
-        return ExprValue("timestamptz", stableTimestamp + "+00",
-                         stableTimestamp.empty());
-    };
+
     functions_["clock_timestamp"] = [](const std::vector<ExprValue>&) {
         const std::string timestamp = formatUtcClock(
             std::time(nullptr), "%Y-%m-%d %H:%M:%S");
         return ExprValue(
             "timestamptz", timestamp + "+00", timestamp.empty());
-    };
-    sqlTimeValues_[sql_value_detail::Kind::CurrentTime] = [stableTime](const std::vector<ExprValue>&) {
-        return ExprValue("timetz", stableTime + "+00",
-                         stableTime.empty());
-    };
-    sqlTimeValues_[sql_value_detail::Kind::LocalTime] = [stableTime](const std::vector<ExprValue>&) {
-        return ExprValue("time", stableTime, stableTime.empty());
     };
 
     // Shared field extractor for extract() / date_part(); src is an ISO date or
@@ -13338,34 +13330,7 @@ void ExprEvaluator::registerBuiltins() {
     // input is treated as temporal when its declared type is date/time/timestamp
     // or its value looks like 'YYYY-MM-DD...' / 'HH:MM:SS'; otherwise numeric.
     // justify_hours/days/interval: PG interval normalization.
-    auto intervalToTextPg = [](long long months, long long days, long long micros) -> std::string {
-        std::string o;
-        auto part = [&](long long v, const char* one, const char* many) {
-            if (!v) return;
-            if (!o.empty()) o += " ";
-            o += std::to_string(v) + " " + ((v == 1) ? one : many);
-        };
-        long long yy = months / 12, mm = months % 12;
-        part(yy, "year", "years"); part(mm, "mon", "mons"); part(days, "day", "days");
-        if (micros || o.empty()) {
-            bool tn = micros < 0; long long au = tn ? -micros : micros;
-            long long hh = au / 3600000000LL; au %= 3600000000LL;
-            long long mi = au / 60000000LL; au %= 60000000LL;
-            long long se = au / 1000000LL;
-            long long frac = au % 1000000LL;
-            char tb[64];
-            if (frac) {
-                std::snprintf(tb, sizeof tb, "%s%02lld:%02lld:%02lld.%06lld",
-                              tn ? "-" : "", hh, mi, se, frac);
-            } else {
-                std::snprintf(tb, sizeof tb, "%s%02lld:%02lld:%02lld",
-                              tn ? "-" : "", hh, mi, se);
-            }
-            if (!o.empty()) o += " ";
-            o += tb;
-        }
-        return o;
-    };
+
     auto justifyCommon = [](const std::string& in,
                              int mode) -> std::optional<std::string> {
         const auto spelling = toLower(trimStr(in));
@@ -13443,155 +13408,12 @@ void ExprEvaluator::registerBuiltins() {
     };
     // age(ts [, ts]): with one argument PostgreSQL subtracts the timestamp
     // from current_date at midnight; two arguments subtract right from left.
-    functions_["age"] = [intervalToTextPg, stableDate](
-                            const std::vector<ExprValue>& a) -> ExprValue {
-        if (a.empty() || a[0].isNull ||
-            (a.size() >= 2 && a[1].isNull) || stableDate.empty())
-            return ExprValue("interval", "", true);
-        const std::string lhs = a.size() == 1
-            ? stableDate + " 00:00:00"
-            : a[0].value;
-        const std::string& rhs = a.size() == 1 ? a[0].value : a[1].value;
-        auto splitTs = [](const std::string& v, long long& Y, long long& Mo,
-                          long long& D, long long& us) {
-            int y = 0, mo = 0, d = 0;
-            if (std::sscanf(v.substr(0, 10).c_str(), "%d-%d-%d", &y, &mo, &d) != 3)
-                return false;
-            Y = y; Mo = mo; D = d;
-            long long h = 0, mi = 0, se = 0, fr = 0;
-            if (v.size() > 11) {
-                std::sscanf(v.substr(11).c_str(), "%lld:%lld:%lld", &h, &mi, &se);
-                size_t dot = v.find(46, 11);
-                if (dot != std::string::npos) {
-                    size_t digits = 0;
-                    for (size_t i = dot + 1;
-                         i < v.size() && v[i] >= '0' && v[i] <= '9' &&
-                         digits < 6;
-                         ++i, ++digits) {
-                        fr = fr * 10 + (v[i] - '0');
-                    }
-                    if (digits == 0) return false;
-                    while (digits++ < 6) fr *= 10;
-                }
-            }
-            us = ((h * 3600 + mi * 60 + se) * 1000000LL) + fr;
-            return true;
-        };
-        long long y1 = 0, m1 = 0, d1 = 0, us1 = 0, y2 = 0, m2 = 0, d2 = 0, us2 = 0;
-        if (!splitTs(lhs, y1, m1, d1, us1) ||
-            !splitTs(rhs, y2, m2, d2, us2))
-            return ExprValue("interval", "", true);
-        // PG renders a reversed age (earlier first) as the negated
-        // swap: age(2020-01-01, 2026-05-06) = -6 years -4 mons -5 days.
-        // Swap the operands and negate every field at the end.
-        bool swapped = false;
-        auto tsLess = [](long long y, long long mo, long long d, long long us2,
-                        long long yB, long long moB, long long dB, long long usB) {
-            if (y != yB) return y < yB;
-            if (mo != moB) return mo < moB;
-            if (d != dB) return d < dB;
-            return us2 < usB;
-        };
-        if (tsLess(y1, m1, d1, us1, y2, m2, d2, us2)) {
-            std::swap(y1, y2); std::swap(m1, m2); std::swap(d1, d2);
-            std::swap(us1, us2);
-            swapped = true;
-        }
-        long long months = (y1 * 12 + m1) - (y2 * 12 + m2);
-        long long days = d1 - d2;
-        long long micros = us1 - us2;
-        if (micros < 0) { micros += 86400000000LL; days -= 1; }
-        if (days < 0) {
-            // PG timestamp_age borrow: the day field borrows the
-            // length of the EARLIER timestamp's own month (dt2.mon
-            // in dt2.year), not the preceding month of dt1.  Derived
-            // empirically against reference PG 17 and verified on 16
-            // samples including leap-February and year-wrap borrows:
-            // age(2026-05-06, 2000-01-15) = 26y 3m 22d (Jan=31).
-            long long plen = civilToDays((int)(y2 + (m2 == 12 ? 1 : 0)),
-                                         (unsigned)(m2 == 12 ? 1 : m2 + 1), 1) -
-                             civilToDays((int)y2, (unsigned)m2, 1);
-            days += plen; months -= 1;
-        }
-        if (months < 0) { months += 12; y1 -= 1; }
-        if (swapped) { months = -months; days = -days; micros = -micros; }
-        return ExprValue("interval", intervalToTextPg(months, days, micros), false);
-    };
+
     // EXISTS (SELECT ... FROM t [WHERE ...]) as a SELECT-list item:
     // PG returns boolean true/false.  The subquery text arrives as
     // the single argument; parse the table and conditions, then ask
     // the storage engine whether any row satisfies them.
-    functions_["exists"] = [this](const std::vector<ExprValue>& a) -> ExprValue {
-        if (a.empty() || a[0].isNull) return ExprValue("boolean", "", true);
-        std::string sub = a[0].value;
-        // the argument arrives wrapped by the caller: strip one
-        // balanced outer paren pair if present
-        while (sub.size() >= 2 && sub.front() == '(' && sub.back() == ')') {
-            int depth = 0; bool bal = true;
-            for (size_t i = 0; i < sub.size(); ++i) {
-                if (sub[i] == '(') ++depth;
-                else if (sub[i] == ')') { --depth; if (depth == 0 && i + 1 != sub.size()) { bal = false; break; } }
-            }
-            if (!bal || depth != 0) break;
-            sub = sub.substr(1, sub.size() - 2);
-        }
-        std::string low;
-        for (char c : sub) low += static_cast<char>(tolower(static_cast<unsigned char>(c)));
-        size_t fp = low.find(" from ");
-        if (fp == std::string::npos) return ExprValue("boolean", "f", false);
-        size_t wp = low.find(" where ");
-        std::string table = trimStr(sub.substr(fp + 6, (wp == std::string::npos ? sub.size() : wp) - fp - 6));
-        size_t sp = table.find_first_of(" ,;)");
-        if (sp != std::string::npos) table = table.substr(0, sp);
-        std::string condRaw;
-        if (wp != std::string::npos) {
-            condRaw = trimStr(sub.substr(wp + 7));
-            // parseConditions expects whitespace-separated tokens:
-            // pad comparison operators with spaces when missing.
-            std::string padded;
-            for (size_t i = 0; i < condRaw.size(); ++i) {
-                char c = condRaw[i];
-                char prev = padded.empty() ? ' ' : padded.back();
-                bool isOp = (c == '=' || c == '<' || c == '>');
-                bool prevIsOp = (prev == '=' || prev == '<' || prev == '>' || prev == '!');
-                if (isOp && prev != ' ' && !prevIsOp) padded += ' ';
-                padded += c;
-                char next = (i + 1 < condRaw.size()) ? condRaw[i + 1] : ' ';
-                bool nextIsOp = (next == '=' || next == '<' || next == '>');
-                if (isOp && next != ' ' && !nextIsOp) padded += ' ';
-            }
-            condRaw = padded;
-        }
-        std::vector<std::string> condTexts;
-        if (!condRaw.empty()) {
-            // parseConditions expects the operator FIRST, glued to
-            // the column name: "id = 1" -> "=id 1".  Split the
-            // (already space-padded) text into three tokens and
-            // re-emit in engine order.
-            std::istringstream iss(condRaw);
-            std::string lhs, op, rhs;
-            iss >> lhs >> op >> rhs;
-            if (!lhs.empty() && !op.empty() && !rhs.empty()) {
-                std::string rest;
-                std::getline(iss, rest);
-                std::string tail = trimStr(rest);
-                if (!tail.empty()) rhs += ' ' + tail;
-                condTexts.push_back(op + lhs + ' ' + rhs);
-            }
-        }
 
-        auto conds = dbms::StorageEngine::parseConditions(condTexts);
-        bool scanFailed = false;
-        bool indexReadFailed = false;
-        bool any = g_engine.anyRowMatches(
-            currentDB_, table, conds, &scanFailed, &indexReadFailed);
-        if (indexReadFailed) {
-            throw DbError("XX001", "B-tree index read failed for relation \"" +
-                table + "\"");
-        }
-        (void)scanFailed;
-        return ExprValue("boolean", any ? "t" : "f", false);
-    };
     functions_["justify_interval"] = [justifyCommon](const std::vector<ExprValue>& a) -> ExprValue {
         if (a.empty() || a[0].isNull)
             return ExprValue("interval", "", true);
@@ -13673,96 +13495,8 @@ void ExprEvaluator::registerBuiltins() {
     // ------------------------------------------------------------------------
     // Sequence functions (delegate to the global StorageEngine)
     // ------------------------------------------------------------------------
-    auto requireSequenceArity = [](const std::vector<ExprValue>& arguments,
-                                   size_t expected,
-                                   const char* signature) {
-        if (arguments.size() != expected) {
-            throw DbError("42883", std::string("function ") + signature +
-                                       " does not exist");
-        }
-    };
-    functions_["nextval"] = [this, requireSequenceArity](
-        const std::vector<ExprValue>& a) -> ExprValue {
-        requireSequenceArity(a, 1, "nextval(regclass)");
-        if (a[0].isNull) return ExprValue("bigint", "", true);
-        int64_t v = g_engine.nextval(currentDB_, a[0].value);
-        return ExprValue("bigint", std::to_string(v), false);
-    };
-    functions_["currval"] = [this, requireSequenceArity](
-        const std::vector<ExprValue>& a) -> ExprValue {
-        requireSequenceArity(a, 1, "currval(regclass)");
-        if (a[0].isNull) return ExprValue("bigint", "", true);
-        int64_t v = g_engine.currval(currentDB_, a[0].value);
-        return ExprValue("bigint", std::to_string(v), false);
-    };
-    functions_["lastval"] = [this, requireSequenceArity](
-        const std::vector<ExprValue>& a) -> ExprValue {
-        requireSequenceArity(a, 0, "lastval()");
-        int64_t v = g_engine.lastval();
-        return ExprValue("bigint", std::to_string(v), false);
-    };
-    functions_["setval"] = [this](
-        const std::vector<ExprValue>& a) -> ExprValue {
-        if (a.size() != 2 && a.size() != 3) {
-            throw DbError("42883",
-                          "function setval(regclass, bigint [, boolean]) "
-                          "does not exist");
-        }
-        for (const auto& argument : a) {
-            if (argument.isNull) return ExprValue("bigint", "", true);
-        }
-        long long parsedValue = 0;
-        if (!parseInt64Exact(a[1].value, parsedValue)) {
-            throw DbError("22P02", "invalid input syntax for type bigint");
-        }
-        bool isCalled = true;
-        if (a.size() == 3) {
-            const auto parsedBoolean = parsePostgresBoolean(a[2].value);
-            if (!parsedBoolean) {
-                throw DbError("22P02", "invalid input syntax for type boolean");
-            }
-            isCalled = *parsedBoolean;
-        }
-        const int64_t v = g_engine.setval(
-            currentDB_, a[0].value, static_cast<int64_t>(parsedValue),
-            isCalled);
-        return ExprValue("bigint", std::to_string(v), false);
-    };
 
-    for(auto& entry:functions_) {
-        if(isCoreOverloadedScalarName(entry.first))
-            entry.second=DeclaredCoreScalarFunction{std::move(entry.second)};
-        else if(isFixedFloat8ScalarName(entry.first))
-            entry.second=DeclaredFloat8ScalarFunction{std::move(entry.second)};
-        else if(isStringLengthScalarName(entry.first))
-            entry.second=DeclaredStringLengthScalarFunction{std::move(entry.second)};
-        else if(isCharacterCodeScalarName(entry.first))
-            entry.second=DeclaredCharacterCodeScalarFunction{std::move(entry.second)};
-        else if(entry.first=="starts_with")
-            entry.second=DeclaredStartsWithScalarFunction{std::move(entry.second)};
-        else if(entry.first=="strpos")
-            entry.second=DeclaredStrposScalarFunction{std::move(entry.second)};
-        else if(entry.first=="to_tsvector" || entry.first=="setweight")
-            entry.second=DeclaredTsVectorScalarFunction{std::move(entry.second)};
-        else if(entry.first=="json_array_length" || entry.first=="jsonb_array_length")
-            entry.second=DeclaredJsonArrayLengthScalarFunction{std::move(entry.second)};
-        else if(isTrimScalarName(entry.first)) {
-            entry.second=DeclaredTrimScalarFunction{std::move(entry.second)};
-            volatility_[entry.first]='i';
-        }
-        else if(isJustifyScalarName(entry.first))
-            entry.second=DeclaredJustifyScalarFunction{std::move(entry.second)};
-        else if(entry.first=="string_to_array")
-            entry.second=DeclaredStringToArrayScalarFunction{std::move(entry.second)};
-        else if(entry.first=="width_bucket")
-            entry.second=DeclaredWidthBucketScalarFunction{std::move(entry.second)};
-        else if(isArraySearchScalarName(entry.first))
-            entry.second=DeclaredArraySearchScalarFunction{std::move(entry.second)};
-        else if(isIntegralRoundingScalarName(entry.first) || entry.first=="round")
-            entry.second=IntegralRoundingScalarFunction{std::move(entry.second)};
-        else if(entry.first=="mod")
-            entry.second=ModResultScalarFunction{std::move(entry.second)};
-    }
+    decorateBuiltinCallbacks();
 
     // Volatility metadata for builtins (safe default is 'v' set by registerFunction).
     volatility_["abs"] = 'i';
@@ -13818,6 +13552,343 @@ void ExprEvaluator::registerBuiltins() {
     volatility_["xml_is_document"] = 'i';
     volatility_["xmlconcat"] = 'i';
     volatility_["xmlcomment"] = 'i';
+}
+
+void ExprEvaluator::registerInstanceBuiltins(std::time_t stableClock) {
+    const std::string stableDate =
+        formatUtcClock(stableClock, "%Y-%m-%d");
+    const std::string stableTimestamp =
+        formatUtcClock(stableClock, "%Y-%m-%d %H:%M:%S");
+    const std::string stableTime =
+        formatUtcClock(stableClock, "%H:%M:%S");
+
+    auto intervalToTextPg = [](long long months, long long days, long long micros) -> std::string {
+        std::string o;
+        auto part = [&](long long v, const char* one, const char* many) {
+            if (!v) return;
+            if (!o.empty()) o += " ";
+            o += std::to_string(v) + " " + ((v == 1) ? one : many);
+        };
+        long long yy = months / 12, mm = months % 12;
+        part(yy, "year", "years"); part(mm, "mon", "mons"); part(days, "day", "days");
+        if (micros || o.empty()) {
+            bool tn = micros < 0; long long au = tn ? -micros : micros;
+            long long hh = au / 3600000000LL; au %= 3600000000LL;
+            long long mi = au / 60000000LL; au %= 60000000LL;
+            long long se = au / 1000000LL;
+            long long frac = au % 1000000LL;
+            char tb[64];
+            if (frac) {
+                std::snprintf(tb, sizeof tb, "%s%02lld:%02lld:%02lld.%06lld",
+                              tn ? "-" : "", hh, mi, se, frac);
+            } else {
+                std::snprintf(tb, sizeof tb, "%s%02lld:%02lld:%02lld",
+                              tn ? "-" : "", hh, mi, se);
+            }
+            if (!o.empty()) o += " ";
+            o += tb;
+        }
+        return o;
+    };
+
+    auto requireSequenceArity = [](const std::vector<ExprValue>& arguments,
+                                   size_t expected,
+                                   const char* signature) {
+        if (arguments.size() != expected) {
+            throw DbError("42883", std::string("function ") + signature +
+                                       " does not exist");
+        }
+    };
+
+    functions_["now"] = [stableTimestamp](const std::vector<ExprValue>&) {
+        return ExprValue(
+            "timestamptz", stableTimestamp + "+00", stableTimestamp.empty());
+    };
+
+    sqlTimeValues_[sql_value_detail::Kind::CurrentDate] = [stableDate](const std::vector<ExprValue>&) {
+        return ExprValue("date", stableDate, stableDate.empty());
+    };
+
+    sqlTimeValues_[sql_value_detail::Kind::CurrentTimestamp] = [stableTimestamp](const std::vector<ExprValue>&) {
+        return ExprValue("timestamptz", stableTimestamp + "+00",
+                         stableTimestamp.empty());
+    };
+
+    sqlTimeValues_[sql_value_detail::Kind::LocalTimestamp] = [stableTimestamp](const std::vector<ExprValue>&) {
+        return ExprValue(
+            "timestamp", stableTimestamp, stableTimestamp.empty());
+    };
+
+    functions_["transaction_timestamp"] = [stableTimestamp](const std::vector<ExprValue>&) {
+        return ExprValue("timestamptz", stableTimestamp + "+00",
+                         stableTimestamp.empty());
+    };
+
+    functions_["statement_timestamp"] = [stableTimestamp](const std::vector<ExprValue>&) {
+        return ExprValue("timestamptz", stableTimestamp + "+00",
+                         stableTimestamp.empty());
+    };
+
+    sqlTimeValues_[sql_value_detail::Kind::CurrentTime] = [stableTime](const std::vector<ExprValue>&) {
+        return ExprValue("timetz", stableTime + "+00",
+                         stableTime.empty());
+    };
+
+    sqlTimeValues_[sql_value_detail::Kind::LocalTime] = [stableTime](const std::vector<ExprValue>&) {
+        return ExprValue("time", stableTime, stableTime.empty());
+    };
+
+    functions_["age"] = [intervalToTextPg, stableDate](
+                            const std::vector<ExprValue>& a) -> ExprValue {
+        if (a.empty() || a[0].isNull ||
+            (a.size() >= 2 && a[1].isNull) || stableDate.empty())
+            return ExprValue("interval", "", true);
+        const std::string lhs = a.size() == 1
+            ? stableDate + " 00:00:00"
+            : a[0].value;
+        const std::string& rhs = a.size() == 1 ? a[0].value : a[1].value;
+        auto splitTs = [](const std::string& v, long long& Y, long long& Mo,
+                          long long& D, long long& us) {
+            int y = 0, mo = 0, d = 0;
+            if (std::sscanf(v.substr(0, 10).c_str(), "%d-%d-%d", &y, &mo, &d) != 3)
+                return false;
+            Y = y; Mo = mo; D = d;
+            long long h = 0, mi = 0, se = 0, fr = 0;
+            if (v.size() > 11) {
+                std::sscanf(v.substr(11).c_str(), "%lld:%lld:%lld", &h, &mi, &se);
+                size_t dot = v.find(46, 11);
+                if (dot != std::string::npos) {
+                    size_t digits = 0;
+                    for (size_t i = dot + 1;
+                         i < v.size() && v[i] >= '0' && v[i] <= '9' &&
+                         digits < 6;
+                         ++i, ++digits) {
+                        fr = fr * 10 + (v[i] - '0');
+                    }
+                    if (digits == 0) return false;
+                    while (digits++ < 6) fr *= 10;
+                }
+            }
+            us = ((h * 3600 + mi * 60 + se) * 1000000LL) + fr;
+            return true;
+        };
+        long long y1 = 0, m1 = 0, d1 = 0, us1 = 0, y2 = 0, m2 = 0, d2 = 0, us2 = 0;
+        if (!splitTs(lhs, y1, m1, d1, us1) ||
+            !splitTs(rhs, y2, m2, d2, us2))
+            return ExprValue("interval", "", true);
+        // PG renders a reversed age (earlier first) as the negated
+        // swap: age(2020-01-01, 2026-05-06) = -6 years -4 mons -5 days.
+        // Swap the operands and negate every field at the end.
+        bool swapped = false;
+        auto tsLess = [](long long y, long long mo, long long d, long long us2,
+                        long long yB, long long moB, long long dB, long long usB) {
+            if (y != yB) return y < yB;
+            if (mo != moB) return mo < moB;
+            if (d != dB) return d < dB;
+            return us2 < usB;
+        };
+        if (tsLess(y1, m1, d1, us1, y2, m2, d2, us2)) {
+            std::swap(y1, y2); std::swap(m1, m2); std::swap(d1, d2);
+            std::swap(us1, us2);
+            swapped = true;
+        }
+        long long months = (y1 * 12 + m1) - (y2 * 12 + m2);
+        long long days = d1 - d2;
+        long long micros = us1 - us2;
+        if (micros < 0) { micros += 86400000000LL; days -= 1; }
+        if (days < 0) {
+            // PG timestamp_age borrow: the day field borrows the
+            // length of the EARLIER timestamp's own month (dt2.mon
+            // in dt2.year), not the preceding month of dt1.  Derived
+            // empirically against reference PG 17 and verified on 16
+            // samples including leap-February and year-wrap borrows:
+            // age(2026-05-06, 2000-01-15) = 26y 3m 22d (Jan=31).
+            long long plen = civilToDays((int)(y2 + (m2 == 12 ? 1 : 0)),
+                                         (unsigned)(m2 == 12 ? 1 : m2 + 1), 1) -
+                             civilToDays((int)y2, (unsigned)m2, 1);
+            days += plen; months -= 1;
+        }
+        if (months < 0) { months += 12; y1 -= 1; }
+        if (swapped) { months = -months; days = -days; micros = -micros; }
+        return ExprValue("interval", intervalToTextPg(months, days, micros), false);
+    };
+
+    functions_["exists"] = [this](const std::vector<ExprValue>& a) -> ExprValue {
+        if (a.empty() || a[0].isNull) return ExprValue("boolean", "", true);
+        std::string sub = a[0].value;
+        // the argument arrives wrapped by the caller: strip one
+        // balanced outer paren pair if present
+        while (sub.size() >= 2 && sub.front() == '(' && sub.back() == ')') {
+            int depth = 0; bool bal = true;
+            for (size_t i = 0; i < sub.size(); ++i) {
+                if (sub[i] == '(') ++depth;
+                else if (sub[i] == ')') { --depth; if (depth == 0 && i + 1 != sub.size()) { bal = false; break; } }
+            }
+            if (!bal || depth != 0) break;
+            sub = sub.substr(1, sub.size() - 2);
+        }
+        std::string low;
+        for (char c : sub) low += static_cast<char>(tolower(static_cast<unsigned char>(c)));
+        size_t fp = low.find(" from ");
+        if (fp == std::string::npos) return ExprValue("boolean", "f", false);
+        size_t wp = low.find(" where ");
+        std::string table = trimStr(sub.substr(fp + 6, (wp == std::string::npos ? sub.size() : wp) - fp - 6));
+        size_t sp = table.find_first_of(" ,;)");
+        if (sp != std::string::npos) table = table.substr(0, sp);
+        std::string condRaw;
+        if (wp != std::string::npos) {
+            condRaw = trimStr(sub.substr(wp + 7));
+            // parseConditions expects whitespace-separated tokens:
+            // pad comparison operators with spaces when missing.
+            std::string padded;
+            for (size_t i = 0; i < condRaw.size(); ++i) {
+                char c = condRaw[i];
+                char prev = padded.empty() ? ' ' : padded.back();
+                bool isOp = (c == '=' || c == '<' || c == '>');
+                bool prevIsOp = (prev == '=' || prev == '<' || prev == '>' || prev == '!');
+                if (isOp && prev != ' ' && !prevIsOp) padded += ' ';
+                padded += c;
+                char next = (i + 1 < condRaw.size()) ? condRaw[i + 1] : ' ';
+                bool nextIsOp = (next == '=' || next == '<' || next == '>');
+                if (isOp && next != ' ' && !nextIsOp) padded += ' ';
+            }
+            condRaw = padded;
+        }
+        std::vector<std::string> condTexts;
+        if (!condRaw.empty()) {
+            // parseConditions expects the operator FIRST, glued to
+            // the column name: "id = 1" -> "=id 1".  Split the
+            // (already space-padded) text into three tokens and
+            // re-emit in engine order.
+            std::istringstream iss(condRaw);
+            std::string lhs, op, rhs;
+            iss >> lhs >> op >> rhs;
+            if (!lhs.empty() && !op.empty() && !rhs.empty()) {
+                std::string rest;
+                std::getline(iss, rest);
+                std::string tail = trimStr(rest);
+                if (!tail.empty()) rhs += ' ' + tail;
+                condTexts.push_back(op + lhs + ' ' + rhs);
+            }
+        }
+
+        auto conds = dbms::StorageEngine::parseConditions(condTexts);
+        bool scanFailed = false;
+        bool indexReadFailed = false;
+        bool any = g_engine.anyRowMatches(
+            currentDB_, table, conds, &scanFailed, &indexReadFailed);
+        if (indexReadFailed) {
+            throw DbError("XX001", "B-tree index read failed for relation \"" +
+                table + "\"");
+        }
+        (void)scanFailed;
+        return ExprValue("boolean", any ? "t" : "f", false);
+    };
+
+    functions_["nextval"] = [this, requireSequenceArity](
+        const std::vector<ExprValue>& a) -> ExprValue {
+        requireSequenceArity(a, 1, "nextval(regclass)");
+        if (a[0].isNull) return ExprValue("bigint", "", true);
+        int64_t v = g_engine.nextval(currentDB_, a[0].value);
+        return ExprValue("bigint", std::to_string(v), false);
+    };
+
+    functions_["currval"] = [this, requireSequenceArity](
+        const std::vector<ExprValue>& a) -> ExprValue {
+        requireSequenceArity(a, 1, "currval(regclass)");
+        if (a[0].isNull) return ExprValue("bigint", "", true);
+        int64_t v = g_engine.currval(currentDB_, a[0].value);
+        return ExprValue("bigint", std::to_string(v), false);
+    };
+
+    functions_["lastval"] = [this, requireSequenceArity](
+        const std::vector<ExprValue>& a) -> ExprValue {
+        requireSequenceArity(a, 0, "lastval()");
+        int64_t v = g_engine.lastval();
+        return ExprValue("bigint", std::to_string(v), false);
+    };
+
+    functions_["setval"] = [this](
+        const std::vector<ExprValue>& a) -> ExprValue {
+        if (a.size() != 2 && a.size() != 3) {
+            throw DbError("42883",
+                          "function setval(regclass, bigint [, boolean]) "
+                          "does not exist");
+        }
+        for (const auto& argument : a) {
+            if (argument.isNull) return ExprValue("bigint", "", true);
+        }
+        long long parsedValue = 0;
+        if (!parseInt64Exact(a[1].value, parsedValue)) {
+            throw DbError("22P02", "invalid input syntax for type bigint");
+        }
+        bool isCalled = true;
+        if (a.size() == 3) {
+            const auto parsedBoolean = parsePostgresBoolean(a[2].value);
+            if (!parsedBoolean) {
+                throw DbError("22P02", "invalid input syntax for type boolean");
+            }
+            isCalled = *parsedBoolean;
+        }
+        const int64_t v = g_engine.setval(
+            currentDB_, a[0].value, static_cast<int64_t>(parsedValue),
+            isCalled);
+        return ExprValue("bigint", std::to_string(v), false);
+    };
+
+    decorateBuiltinCallbacks();
+}
+
+void ExprEvaluator::decorateBuiltinCallbacks() {
+    for(auto& entry:functions_) {
+        if(isCoreOverloadedScalarName(entry.first))
+            entry.second=DeclaredCoreScalarFunction{std::move(entry.second)};
+        else if(isFixedFloat8ScalarName(entry.first))
+            entry.second=DeclaredFloat8ScalarFunction{std::move(entry.second)};
+        else if(isStringLengthScalarName(entry.first))
+            entry.second=DeclaredStringLengthScalarFunction{std::move(entry.second)};
+        else if(isCharacterCodeScalarName(entry.first))
+            entry.second=DeclaredCharacterCodeScalarFunction{std::move(entry.second)};
+        else if(entry.first=="starts_with")
+            entry.second=DeclaredStartsWithScalarFunction{std::move(entry.second)};
+        else if(entry.first=="strpos")
+            entry.second=DeclaredStrposScalarFunction{std::move(entry.second)};
+        else if(entry.first=="to_tsvector" || entry.first=="setweight")
+            entry.second=DeclaredTsVectorScalarFunction{std::move(entry.second)};
+        else if(entry.first=="json_array_length" || entry.first=="jsonb_array_length")
+            entry.second=DeclaredJsonArrayLengthScalarFunction{std::move(entry.second)};
+        else if(isTrimScalarName(entry.first)) {
+            entry.second=DeclaredTrimScalarFunction{std::move(entry.second)};
+            volatility_[entry.first]='i';
+        }
+        else if(isJustifyScalarName(entry.first))
+            entry.second=DeclaredJustifyScalarFunction{std::move(entry.second)};
+        else if(entry.first=="string_to_array")
+            entry.second=DeclaredStringToArrayScalarFunction{std::move(entry.second)};
+        else if(entry.first=="width_bucket")
+            entry.second=DeclaredWidthBucketScalarFunction{std::move(entry.second)};
+        else if(isArraySearchScalarName(entry.first))
+            entry.second=DeclaredArraySearchScalarFunction{std::move(entry.second)};
+        else if(isIntegralRoundingScalarName(entry.first) || entry.first=="round")
+            entry.second=IntegralRoundingScalarFunction{std::move(entry.second)};
+        else if(entry.first=="mod")
+            entry.second=ModResultScalarFunction{std::move(entry.second)};
+    }
+}
+
+const ExprEvaluator::BuiltinRegistry& ExprEvaluator::builtinRegistry() {
+    // C++17 initialization is once-only and synchronized. The completed table
+    // is const; callbacks retain their concrete std::function::target types.
+    // The immutable table has bounded process lifetime. In particular, later
+    // static destructors cannot observe a function-local map already destroyed.
+    // This is registry storage only: no evaluator, row, AST or callback owner
+    // from an executing query is retained here.
+    static const BuiltinRegistry* const registry = [] {
+        ExprEvaluator seed(BuiltinRegistrySeed{});
+        return new BuiltinRegistry{std::move(seed.functions_),
+                                   std::move(seed.volatility_)};
+    }();
+    return *registry;
 }
 
 } // namespace dbms
