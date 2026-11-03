@@ -34438,6 +34438,72 @@ PreparedQuery StorageEngine::prepareBoundQuery(const std::string& dbname,
                         throw DbError("0A000", "array-valued ARRAY_AGG window input is not supported");
                     return input + "[]";
                 }
+                if (function->hasOver && (name == "string_agg" || name == "bit_and" ||
+                        name == "bit_or" || name == "bit_xor")) {
+                    if (function->distinct)
+                        throw DbError("0A000", "DISTINCT is not implemented for window aggregates");
+                    const size_t arguments = name == "string_agg" ? 2 : 1;
+                    if (function->args.size() != arguments || !function->namedArgs.empty())
+                        throw DbError("42883", "aggregate function has no matching signature");
+                    std::vector<std::string> inputs;
+                    for (const auto& argument : function->args) {
+                        const auto* literal = dynamic_cast<const LiteralExpr*>(argument.get());
+                        if (literal && !literal->preparedSubquery && literal->value == "*")
+                            throw DbError("42883", "aggregate function has no matching signature");
+                        inputs.push_back(ExprHelper::canonicalResultTypeName(
+                            ExprHelper::inferParsedInputType(argument.get(), {}, dbname,
+                                const_cast<StorageEngine*>(this))));
+                    }
+                    if (name == "string_agg") {
+                        const auto text = [](const std::string& input) {
+                            return input == "unknown" || input == "text" ||
+                                input == "character varying" || input == "character" ||
+                                input == "name" || input == "\"char\"";
+                        };
+                        if (std::all_of(inputs.begin(), inputs.end(), text)) return std::string("text");
+                        if (std::all_of(inputs.begin(), inputs.end(), [](const auto& input) {
+                                return input == "bytea" || input == "unknown";
+                            }) && std::find(inputs.begin(), inputs.end(), "bytea") != inputs.end())
+                            return std::string("bytea");
+                    } else {
+                        const auto& input = inputs.front();
+                        if (input == "unknown")
+                            throw DbError("42725", "aggregate function is not unique");
+                        if (input == "smallint" || input == "integer" || input == "bigint" ||
+                            input == "bit") return input;
+                        if (input == "bit varying") return std::string("bit");
+                    }
+                    throw DbError("42883", "aggregate function has no matching signature");
+                }
+                if (function->hasOver) {
+                    static const std::set<std::string> unaryStatistics = {
+                        "stddev", "stddev_pop", "stddev_samp", "variance", "var_pop", "var_samp"};
+                    static const std::set<std::string> binaryStatistics = {
+                        "corr", "covar_pop", "covar_samp", "regr_avgx", "regr_avgy",
+                        "regr_count", "regr_intercept", "regr_r2", "regr_slope",
+                        "regr_sxx", "regr_sxy", "regr_syy"};
+                    if (unaryStatistics.count(name) || binaryStatistics.count(name)) {
+                        const size_t count = unaryStatistics.count(name) ? 1 : 2;
+                        bool signature = function->args.size() == count && function->namedArgs.empty();
+                        for (const auto& argument : function->args) {
+                            const auto* literal = dynamic_cast<const LiteralExpr*>(argument.get());
+                            if (literal && !literal->preparedSubquery && literal->value == "*") {
+                                signature = false; continue;
+                            }
+                            const auto type = ExprHelper::canonicalResultTypeName(
+                                ExprHelper::inferParsedInputType(argument.get(), {}, dbname,
+                                    const_cast<StorageEngine*>(this)));
+                            if (signature && count == 1 && type == "unknown")
+                                throw DbError("42725", "aggregate function is not unique");
+                            signature = signature && (type == "smallint" || type == "integer" ||
+                                type == "bigint" || type == "numeric" || type == "real" ||
+                                type == "double precision" || (count == 2 && type == "unknown"));
+                        }
+                        if (!signature)
+                            throw DbError("42883", "aggregate function has no matching signature");
+                        throw DbError("0A000", "statistical window aggregates require additional execution lowering");
+                    }
+                }
                 auto aggregate = aggregate_type_detail::builtinName(function);
                 // Aggregate windows keep the genuine aggregate signature;
                 // the ordinary aggregate planner deliberately excludes OVER.
@@ -34490,6 +34556,15 @@ PreparedQuery StorageEngine::prepareBoundQuery(const std::string& dbname,
                     const auto input = function->args.empty() ? std::string("unknown") :
                         ExprHelper::inferParsedInputType(function->args.front().get(), {}, dbname,
                                                        const_cast<StorageEngine*>(this));
+                    if (function->hasOver && (aggregate == "min" || aggregate == "max") &&
+                        function->args.size() == 1 && function->namedArgs.empty()) {
+                        const auto* column = dynamic_cast<const ColumnRefExpr*>(function->args.front().get());
+                        const uint32_t oid = column && column->binding ? column->binding->typeOid : 0;
+                        if (oid && metadata.enumType) {
+                            const auto actual = metadata.enumType(input, oid);
+                            if (actual) return actual->typeName;
+                        }
+                    }
                     return aggregate_type_detail::resultType(function, aggregate, input);
                 }
             }

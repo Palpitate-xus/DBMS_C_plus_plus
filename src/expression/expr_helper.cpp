@@ -407,6 +407,10 @@ std::string inferAstResultType(
                 return "interval";
             if (left == "date" && numericProtocolType(right)) return "date";
         }
+        // The actual interval division datum owner returns INTERVAL. Its
+        // numeric divisor does not turn an empty/NULL result into FLOAT8.
+        if (op == "/" && left == "interval" &&
+            (numericProtocolType(right) || right == "unknown")) return "interval";
         if (op == "/" && left == "money" && right == "money")
             return "double precision";
         if (op == "*" &&
@@ -1759,6 +1763,7 @@ std::string ExprHelper::preparedSortExpressionIdentity(
             std::string key = field(window.name) + field(toLower(window.frameMode)) + field(toLower(window.frameExclusion)) +
                 field(std::to_string(static_cast<unsigned>(window.frameStartKind))) +
                 field(std::to_string(static_cast<unsigned>(window.frameEndKind))) + field(window.frameBetween?"between":"single");
+            key += field(window.referenceName);
             for (const auto& value : window.partitionBy) key += field(expressionKey(value.get()));
             key += field("order");
             for (size_t i=0;i<window.orderBy.size();++i) {
@@ -1943,15 +1948,28 @@ std::string ExprHelper::preparedSortExpressionIdentity(
                     if(!CatalogManager::parseQualifiedName(call->schema.empty()?call->funcName:
                             call->schema+"."+call->funcName,name,true))
                         throw DbError("XX000","bound window has no canonical routine identity");
-                    const WindowDef* window=&call->over;
-                    if(!window->name.empty()) {
+                    const auto parentWindow=[&](const std::string& spelling)->const WindowDef* {
                         const auto found=std::find_if(outputAliasOwner->windowDefs.begin(),outputAliasOwner->windowDefs.end(),
                             [&](const auto& definition) {
                                 CatalogManager::QualifiedName declared,reference;
                                 return CatalogManager::parseQualifiedName(definition.name,declared,true) &&
-                                    CatalogManager::parseQualifiedName(window->name,reference,true) && declared.name==reference.name;
+                                    CatalogManager::parseQualifiedName(spelling,reference,true) && declared.name==reference.name;
                             });
-                        if(found!=outputAliasOwner->windowDefs.end())window=&*found;
+                        if(found==outputAliasOwner->windowDefs.end())
+                            throw DbError("XX000","bound window lost its named definition");
+                        return &*found;
+                    };
+                    const WindowDef* window=&call->over;
+                    if(!window->name.empty() && window->referenceName.empty())window=parentWindow(window->name);
+                    const WindowDef* partition=window;
+                    const WindowDef* ordering=window;
+                    std::set<const WindowDef*> visited;
+                    for(const WindowDef* inherited=window;inherited;) {
+                        if(!visited.insert(inherited).second)
+                            throw DbError("XX000","bound window has circular inheritance");
+                        if(partition->partitionBy.empty() && !inherited->partitionBy.empty())partition=inherited;
+                        if(ordering->orderBy.empty() && !inherited->orderBy.empty())ordering=inherited;
+                        inherited=inherited->referenceName.empty()?nullptr:parentWindow(inherited->referenceName);
                     }
                     const auto raw=[&](const Expr* value) {
                         return preparedSortExpressionIdentity(value,query,
@@ -1962,14 +1980,14 @@ std::string ExprHelper::preparedSortExpressionIdentity(
                         field(std::to_string(static_cast<unsigned>(window->frameStartKind)))+
                         field(std::to_string(static_cast<unsigned>(window->frameEndKind)))+
                         field(window->frameExclusion=="no others"?"":window->frameExclusion);
-                    for(const auto& partition:window->partitionBy)definition+=field(raw(partition.get()));
+                    for(const auto& key:partition->partitionBy)definition+=field(raw(key.get()));
                     definition+=field("order");
-                    for(size_t i=0;i<window->orderBy.size();++i) {
-                        const auto& order=window->orderBy[i];
-                        const bool explicitDirection=i<window->orderDirectionSpecified.size() && window->orderDirectionSpecified[i];
+                    for(size_t i=0;i<ordering->orderBy.size();++i) {
+                        const auto& order=ordering->orderBy[i];
+                        const bool explicitDirection=i<ordering->orderDirectionSpecified.size() && ordering->orderDirectionSpecified[i];
                         definition+=field(raw(order.first.get()))+field(explicitDirection?(order.second?"asc":"desc"):"default");
-                        definition+=field(i<window->orderNullsFirst.size() && window->orderNullsFirst[i].has_value()
-                            ?(*window->orderNullsFirst[i]?"first":"last"):"default");
+                        definition+=field(i<ordering->orderNullsFirst.size() && ordering->orderNullsFirst[i].has_value()
+                            ?(*ordering->orderNullsFirst[i]?"first":"last"):"default");
                     }
                     definition+=field(raw(window->frameStart.get()))+field(raw(window->frameEnd.get()));
                     std::string key="analyzed-window"+field(name.schema=="pg_catalog"?"":name.schema)+field(name.name)+
@@ -2550,13 +2568,17 @@ std::string ExprHelper::inferResultType(
         const bool resolvedArithmetic = binary && arithmetic_detail::resultType(
             toLower(binary->op), inferAstResultType(binary->left.get(), typeHints),
             inferAstResultType(binary->right.get(), typeHints)).has_value();
+        const auto intervalDivisor=binary?inferAstResultType(binary->right.get(),typeHints):std::string{};
+        const bool resolvedIntervalDivision=binary && binary->op=="/" &&
+            inferAstResultType(binary->left.get(),typeHints)=="interval" &&
+            (numericProtocolType(intervalDivisor) || intervalDivisor=="unknown");
         // A predicate inside an aggregate argument/FILTER (or a string value)
         // cannot declare the aggregate's result boolean. Infer the actual
         // outer reducer and its value-argument overload before textual scans.
         if (rangePredicate || !builtinReductionName(dynamic_cast<const FunctionCallExpr*>(structural)).empty() ||
             dynamic_cast<const UnaryOpExpr*>(structural) || dynamic_cast<const ArrayExpr*>(structural) ||
             (binary && (type == "boolean" || binary->op == "::" ||
-                        binary->op == "||" || resolvedArithmetic))) {
+                        binary->op == "||" || resolvedArithmetic || resolvedIntervalDivision))) {
             return type.empty() || type == "unknown" ? "text" : type;
         }
     }

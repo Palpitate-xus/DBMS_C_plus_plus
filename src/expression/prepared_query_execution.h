@@ -56,6 +56,13 @@ public:
     QueryColumnBinding registerAggregateColumn(const FunctionCallExpr* call,
                                                const std::string& type);
     bool aggregateColumnDemanded(const FunctionCallExpr* call) const;
+    // A real window input operator publishes a computed cell for an exact
+    // original projection/final-ORDER value site. Window OVER keys/frames
+    // and independently owned SQL children are never registered here.
+    QueryColumnBinding registerWindowInputColumn(const Expr* expression,
+        const std::string& type, bool includeWindowArguments = false);
+    std::optional<QueryColumnBinding> windowInputColumn(const Expr* expression) const;
+    bool windowInputColumnDemanded(const Expr* expression) const;
     // Explicit planning phase, after whole-query binding and before any
     // source/child is opened. Fold structural constants in execution-owned
     // copies, including explicitly resolved pure builtin operations. User
@@ -98,6 +105,7 @@ private:
     std::set<const Expr*> prepared_;
     std::map<const Expr*, ExprPtr> compiled_;
     std::map<const Expr*, QueryColumnBinding> aggregateColumns_;
+    std::map<const Expr*, QueryColumnBinding> windowInputColumns_;
     std::map<const SelectStmt*, std::set<size_t>> plannedOutputOrdinals_;
     std::map<const Expr*, const Expr*> originalSites_;
     mutable std::map<const Expr*, ExprValue> memo_;

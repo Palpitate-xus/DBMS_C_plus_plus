@@ -163,6 +163,10 @@ public:
     struct CountContext { const Stmt* owner; const char* clause; };
     std::vector<CountContext> countContexts;
     std::map<size_t,std::vector<ParameterExpr*>> metadataParameterNodes;
+    std::set<const WindowDef*> boundWindows, bindingWindows;
+    std::map<const WindowDef*,const WindowDef*> windowOrderSources;
+    std::map<const WindowDef*,std::vector<std::string>> windowOrderTypes;
+    const Stmt* windowWhereOwner = nullptr;
     Binder(const std::string& sql, const std::vector<QueryBindingDatum>& values,
            const QueryBindingMetadata& descriptions) : datums(values), metadata(descriptions) {
         result.source = sql;
@@ -1145,6 +1149,13 @@ public:
             // just like CAST and CASE. Returning only its spelling loses the
             // OID at query-output/child boundaries; never run it to infer one.
             call->resolvedResultType=declaredType(type.empty() ? first : type,call);
+            // Resolve the actual routine role before applying WHERE's
+            // window restriction. A scalar with OVER owns 42809, while a
+            // genuine window is rejected before its enclosing operator.
+            // A query child has its own owner and may use windows normally.
+            if(call->hasOver && !statementOwners.empty() &&
+               windowWhereOwner==statementOwners.back())
+                throw DbError("42P20","window functions are not allowed in WHERE");
             if(!countContexts.empty()) {
                 const Stmt* semanticOwner=statementOwners.empty()?nullptr:statementOwners.back();
                 // Only ranges visible at this actual call can determine an
@@ -1202,6 +1213,19 @@ public:
             const auto windowSpelling=call->schema.empty()?call->funcName:call->schema+"."+call->funcName;
             if(call->hasOver && CatalogManager::parseQualifiedName(windowSpelling,windowRoutine,true) &&
                (windowRoutine.schema.empty() || windowRoutine.schema=="pg_catalog") &&
+               windowRoutine.name=="string_agg" && call->args.size()==2 &&
+               (common=="text" || common=="bytea")) {
+                coerceCaseInput(call->args[0],argumentTypes[0].first,call->resolvedResultType);
+                coerceCaseInput(call->args[1],argumentTypes[1].first,call->resolvedResultType);
+            }
+            if(call->hasOver && CatalogManager::parseQualifiedName(windowSpelling,windowRoutine,true) &&
+               (windowRoutine.schema.empty() || windowRoutine.schema=="pg_catalog") &&
+               (windowRoutine.name=="bit_and" || windowRoutine.name=="bit_or" ||
+                windowRoutine.name=="bit_xor") &&
+               call->args.size()==1 && common=="bit")
+                coerceCaseInput(call->args[0],argumentTypes[0].first,"bit");
+            if(call->hasOver && CatalogManager::parseQualifiedName(windowSpelling,windowRoutine,true) &&
+               (windowRoutine.schema.empty() || windowRoutine.schema=="pg_catalog") &&
                (windowRoutine.name=="lag" || windowRoutine.name=="lead")) {
                 if(call->args.empty() || call->args.size()>3 || !call->namedArgs.empty())
                     throw DbError("42883","function does not exist: "+windowSpelling);
@@ -1219,6 +1243,10 @@ public:
                     throw DbError("42883","function does not exist: "+windowSpelling);
                 coerceCaseInput(call->args[1],argumentTypes[1].first,"integer");
             }
+            if(call->hasOver && CatalogManager::parseQualifiedName(windowSpelling,windowRoutine,true) &&
+               (windowRoutine.schema.empty() || windowRoutine.schema=="pg_catalog") &&
+               windowRoutine.name=="ntile" && call->args.size()==1)
+                coerceCaseInput(call->args[0],argumentTypes[0].first,"integer");
             if(call->schema.empty() && (grammarOperation=="coalesce" || grammarOperation=="greatest" || grammarOperation=="least"))
                 valueTypeModifiers[call]=commonModifier(argumentTypes,call->resolvedResultType);
             return call->resolvedResultType;
@@ -1446,26 +1474,160 @@ public:
         }
         return literal.typeName;
     }
-    void window(WindowDef& value, const std::vector<Namespace>& scopes) {
-        if(!value.name.empty() && !statementOwners.empty()) {
-            const auto* owner=dynamic_cast<const SelectStmt*>(statementOwners.back());
-            const auto name=identifier(value.name);
-            if(owner && std::none_of(owner->windowDefs.begin(),owner->windowDefs.end(),
-                    [&](const auto& definition){return identifier(definition.name)==name;}))
-                throw DbError("42704","window \""+name+"\" does not exist");
+    void validateWindowPlacements(const SelectStmt& select, const std::vector<Namespace>& scopes) {
+        std::function<void(const Expr*,const char*,bool)> inspect;
+        inspect=[&](const Expr* value,const char* forbidden,bool aggregateInput) {
+            if(!value || value->preparedSubquery)return;
+            if(const auto* call=dynamic_cast<const FunctionCallExpr*>(value)) {
+                if(call->hasOver) {
+                    if(aggregateInput)
+                        throw DbError("42803","aggregate function calls cannot contain window function calls");
+                    if(forbidden)
+                        throw DbError("42P20",std::string("window functions are not allowed in ")+forbidden);
+                }
+                const bool aggregate=!call->hasOver && !call->resolvedResultType.empty() &&
+                    metadata.aggregateFunction && metadata.aggregateFunction(call);
+                for(const auto& argument:call->args)
+                    inspect(argument.get(),call->hasOver?"window function arguments":forbidden,aggregateInput || aggregate);
+                for(const auto& argument:call->namedArgs)
+                    inspect(argument.value.get(),call->hasOver?"window function arguments":forbidden,aggregateInput || aggregate);
+                inspect(call->filter.get(),"FILTER",aggregateInput || aggregate);
+                for(const auto& key:call->aggregateOrderKeys)
+                    inspect(key.expr.get(),forbidden,aggregateInput || aggregate);
+                for(const auto& key:call->over.partitionBy)inspect(key.get(),"window definitions",false);
+                for(const auto& key:call->over.orderBy)inspect(key.first.get(),"window definitions",false);
+                inspect(call->over.frameStart.get(),"window definitions",false);
+                inspect(call->over.frameEnd.get(),"window definitions",false);
+            } else if(const auto* unary=dynamic_cast<const UnaryOpExpr*>(value))inspect(unary->operand.get(),forbidden,aggregateInput);
+            else if(const auto* binary=dynamic_cast<const BinaryOpExpr*>(value)) {
+                inspect(binary->left.get(),forbidden,aggregateInput);
+                if(binary->op!="::" && binary->op!="COLLATE")inspect(binary->right.get(),forbidden,aggregateInput);
+            } else if(const auto* quantified=dynamic_cast<const QuantifiedComparisonExpr*>(value)) {
+                inspect(quantified->left.get(),forbidden,aggregateInput);inspect(quantified->right.get(),forbidden,aggregateInput);
+            } else if(const auto* cast=dynamic_cast<const CastExpr*>(value))inspect(cast->operand.get(),forbidden,aggregateInput);
+            else if(const auto* conditional=dynamic_cast<const CaseExpr*>(value)) {
+                inspect(conditional->switchExpr.get(),forbidden,aggregateInput);
+                for(const auto& arm:conditional->whenClauses) {
+                    inspect(arm.first.get(),forbidden,aggregateInput);inspect(arm.second.get(),forbidden,aggregateInput);
+                }
+                inspect(conditional->elseExpr.get(),forbidden,aggregateInput);
+            } else if(const auto* array=dynamic_cast<const ArrayExpr*>(value))
+                for(const auto& item:array->elements)inspect(item.get(),forbidden,aggregateInput);
+            else if(const auto* row=dynamic_cast<const RowExpr*>(value))
+                for(const auto& item:row->elements)inspect(item.get(),forbidden,aggregateInput);
+        };
+        for(const auto& target:select.selectList)inspect(target.expr.get(),nullptr,false);
+        for(const auto& key:select.orderBy)inspect(key.expr.get(),nullptr,false);
+        inspect(select.having.get(),"HAVING",false);
+        const auto group=[&](const Expr* value) {
+            const Expr* producer=value;
+            if(const auto* name=dynamic_cast<const ColumnRefExpr*>(value);
+               name && name->schema.empty() && name->table.empty()) {
+                const bool local=!scopes.empty() && std::any_of(scopes.front().begin(),scopes.front().end(),
+                    [&](const auto& range){return !range.hiddenUnqualified.count(name->column) &&
+                        std::any_of(range.columns.begin(),range.columns.end(),
+                            [&](const auto& column){return column.name==name->column;});});
+                if(!local)for(const auto& target:select.selectList)
+                    if((target.alias.empty()?projectionLabel(target.expr.get()).first:identifier(target.alias))==name->column) {
+                        producer=target.expr.get();break;
+                    }
+            } else if(const auto* ordinal=dynamic_cast<const LiteralExpr*>(value);
+                ordinal && !ordinal->preparedSubquery && ordinal->typeName.empty() &&
+                !ordinal->value.empty() && std::all_of(ordinal->value.begin(),ordinal->value.end(),
+                    [](unsigned char ch){return ch>='0' && ch<='9';})) {
+                size_t index=0;
+                for(char ch:ordinal->value) {
+                    if(index>select.selectList.size())break;
+                    index=index*10+static_cast<size_t>(ch-'0');
+                }
+                if(index && index<=select.selectList.size())producer=select.selectList[index-1].expr.get();
+            }
+            inspect(producer,"GROUP BY",false);
+        };
+        for(const auto& value:select.groupBy)group(value.get());
+        for(const auto& set:select.groupByElems)for(const auto& value:set.exprs)group(value.get());
+        std::function<void(const FromItem*)> source=[&](const FromItem* item) {
+            if(!item)return;
+            inspect(item->joinCondition.get(),"JOIN conditions",false);
+            source(item->left.get());source(item->right.get());
+        };
+        source(select.fromClause.get());
+        for(const auto& definition:select.windowDefs) {
+            for(const auto& key:definition.partitionBy)inspect(key.get(),"window definitions",false);
+            for(const auto& key:definition.orderBy)inspect(key.first.get(),"window definitions",false);
+            inspect(definition.frameStart.get(),"window definitions",false);
+            inspect(definition.frameEnd.get(),"window definitions",false);
         }
-        for (auto& field : value.partitionBy) expression(field, scopes);
+    }
+    void window(WindowDef& value, const std::vector<Namespace>& scopes) {
+        // Every ordinary scalar call also has a default-constructed OVER
+        // member. It has no window metadata to bind or retain.
+        if(value.name.empty() && value.referenceName.empty() && value.partitionBy.empty() &&
+           value.orderBy.empty() && value.frameMode.empty() && !value.frameStart && !value.frameEnd)
+            return;
+        if(boundWindows.count(&value))return;
+        if(!bindingWindows.insert(&value).second)
+            throw DbError("42P20","circular window inheritance");
+        auto* owner=statementOwners.empty()?nullptr:
+            dynamic_cast<SelectStmt*>(const_cast<Stmt*>(statementOwners.back()));
+        const auto declaration=owner?std::find_if(owner->windowDefs.begin(),owner->windowDefs.end(),
+            [&](const auto& candidate){return &candidate==&value;}):std::vector<WindowDef>::iterator{};
+        const bool declared=owner && declaration!=owner->windowDefs.end();
+        const auto reference=!value.referenceName.empty()?value.referenceName:
+            declared?std::string():value.name;
+        WindowDef* parent=nullptr;
+        if(!reference.empty()) {
+            const auto name=identifier(reference);
+            if(owner) {
+                const auto found=std::find_if(owner->windowDefs.begin(),owner->windowDefs.end(),
+                    [&](const auto& candidate){return identifier(candidate.name)==name;});
+                if(found!=owner->windowDefs.end() && (!declared || found<declaration))parent=&*found;
+            }
+            if(!parent)throw DbError("42704","window \""+name+"\" does not exist");
+            window(*parent,scopes);
+            if(!value.referenceName.empty()) {
+                if(!value.partitionBy.empty())
+                    throw DbError("42P20","cannot override PARTITION BY clause of window \""+name+"\"");
+                if(!value.orderBy.empty() && !windowOrderSources.at(parent)->orderBy.empty())
+                    throw DbError("42P20","cannot override ORDER BY clause of window \""+name+"\"");
+                if(!parent->frameMode.empty())
+                    throw DbError("42P20","cannot copy window \""+name+"\" because it has a frame clause");
+            }
+        }
+        value.partitionComparisons.clear();
+        for (auto& field : value.partitionBy) {
+            const auto type=expression(field, scopes);
+            value.partitionComparisons.push_back(enumSortComparison(type,expressionTypeOid(field.get())));
+        }
         std::vector<std::string> orderTypes;
+        value.orderComparisons.clear();
         for (auto& field : value.orderBy) {
             const auto type=expression(field.first,scopes);
             orderTypes.push_back(patternBaseType(type,field.first.get()));
+            value.orderComparisons.push_back(enumSortComparison(type,expressionTypeOid(field.first.get())));
+        }
+        const WindowDef* orderSource=!value.orderBy.empty() || !parent?&value:windowOrderSources.at(parent);
+        windowOrderSources[&value]=orderSource;
+        if(orderSource!=&value)orderTypes=windowOrderTypes.at(orderSource);
+        windowOrderTypes[&value]=orderTypes;
+        std::set<std::string> effectiveOrder;
+        for(const auto& key:orderSource->orderBy) {
+            if(metadata.outputExpressionIdentity)
+                effectiveOrder.insert(metadata.outputExpressionIdentity(key.first.get(),result,owner));
+            else effectiveOrder.insert(ExprHelper::preparedSortExpressionIdentity(key.first.get(),result,
+                [](const ColumnRefExpr& column) {
+                    if(!column.binding)throw DbError("XX000","window order lost its actual source binding");
+                    const auto& binding=*column.binding;
+                    return std::to_string(binding.scopeDepth)+":"+std::to_string(binding.sourceOrdinal)+":"+
+                        std::to_string(binding.columnOrdinal)+":"+binding.declaredType;
+                },"",nullptr,false,owner));
         }
         using Bound=WindowDef::BoundKind;
         const auto offsetBound=[](Bound kind){return kind==Bound::Preceding || kind==Bound::Following;};
         const bool offsets=offsetBound(value.frameStartKind) || offsetBound(value.frameEndKind);
-        if(value.frameMode=="groups" && value.orderBy.empty())
+        if(value.frameMode=="groups" && effectiveOrder.empty())
             throw DbError("42P20","GROUPS mode requires an ORDER BY clause");
-        if(value.frameMode=="range" && offsets && value.orderBy.size()!=1)
+        if(value.frameMode=="range" && offsets && effectiveOrder.size()!=1)
             throw DbError("42P20","RANGE with offset requires exactly one ORDER BY column");
         std::set<size_t> currentSources;
         if(!scopes.empty())for(const auto& range:scopes.front())currentSources.insert(range.occurrence);
@@ -1559,6 +1721,8 @@ public:
         };
         prepareOffset(value.frameStart,value.frameStartKind);
         prepareOffset(value.frameEnd,value.frameEndKind);
+        bindingWindows.erase(&value);
+        boundWindows.insert(&value);
     }
     std::pair<std::string,int> projectionLabel(const Expr* expression) {
         return ExprHelper::projectionLabel(expression,[&](const std::string& spelling) {
@@ -2056,7 +2220,16 @@ public:
                         coerceCaseInput(select->valuesRows[row][column],inputs[row][column],common);
                 }
             }
-            const auto condition = expression(select->whereClause, scopes);
+            validateWindowPlacements(*select,scopes);
+            const auto condition = [&] {
+                const auto* previous = windowWhereOwner;
+                windowWhereOwner = select;
+                struct RestoreWhereOwner {
+                    const Stmt*& slot; const Stmt* previous;
+                    ~RestoreWhereOwner() { slot = previous; }
+                } restore{windowWhereOwner,previous};
+                return expression(select->whereClause, scopes);
+            }();
             if (select->whereClause) {
                 const auto type = common_type_detail::canonical(condition);
                 if (type != "unknown" && type != "boolean")

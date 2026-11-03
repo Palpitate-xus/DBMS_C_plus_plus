@@ -6264,7 +6264,8 @@ static bool requiresParsedValueBinding(const dbms::Stmt* root,bool constantScala
         for(const auto& row:select->valuesRows)
             for(const auto& cell:row)if(expression(cell.get()))return true;
         return expression(select->whereClause.get()) || expression(select->having.get()) ||
-            source(select->fromClause.get()) || statement(select->setOpLhs.get()) || statement(select->setOpRhs.get());
+            source(select->fromClause.get()) || statement(select->setOpLhs.get()) || statement(select->setOpRhs.get()) ||
+            (windowOnly && (expression(select->limitExpr.get()) || expression(select->offsetExpr.get())));
     };
     return statement(root);
 }
@@ -21454,11 +21455,16 @@ public:
         // through validate(). Do not install the root definitions twice.
         auto plan=selectPlan(readRoot_,validation_.context(),frames,true,true);
         const auto command=[&] {
-            // Ordinary top-level count failures happen after analysis has
-            // established the output descriptor. Keep that descriptor and
-            // any genuine row prefix on the existing SQL error receiver.
-            const bool countOutput=executeDepth==1 && !hasWriter && readRoot_->hasRowCountClause &&
-                (readRoot_->command==dbms::SqlCommand::Values || readRoot_->setOp!=dbms::SetOp::None);
+            // Ordinary top-level count/window failures happen after analysis
+            // established their descriptor. Preserve genuine row prefixes on
+            // the existing receiver, including actual window SQL children.
+            const bool windowOutput=any_of(query_->statementOutputs.begin(),query_->statementOutputs.end(),[](const auto& item) {
+                const auto* select=dynamic_cast<const dbms::SelectStmt*>(item.first);
+                return select && hasCurrentQueryWindows(select);
+            });
+            const bool countOutput=executeDepth==1 && !hasWriter && (windowOutput ||
+                (readRoot_->hasRowCountClause &&
+                 (readRoot_->command==dbms::SqlCommand::Values || readRoot_->setOp!=dbms::SetOp::None)));
             const auto demand=receiverRows ? receiverRows : currentQueryRowDemand();
             auto evaluated=countOutput
                 ? dbms::QueryPlanner::executePlanWithPrefix(std::move(plan),demand)
@@ -21500,6 +21506,20 @@ public:
         return hasWriter?dbms::executeAtomicDmlUnit(session_,command):command();
     }
 };
+}
+
+static void executePreparedWindowReceiver(Session& session,
+        const shared_ptr<dbms::PreparedQuery>& query) {
+    PreparedWithDmlRuntime runtime(session,query);
+    auto result=runtime.runRead();
+    for(const auto& name:result.columns)cout<<renderLegacyHeader(name)<<' ';
+    cout<<'\n';
+    for(size_t i=0;i<result.rows.size();++i) {
+        for(size_t j=0;j<result.rows[i].size();++j)
+            cout<<(result.nulls[i][j]?"NULL":result.rows[i][j])<<' ';
+        cout<<'\n';
+    }
+    dbms::publishLastDmlResult(std::move(result));
 }
 
 static bool executePreparedInputQuery(const string& sql, const vector<string>& arguments,
@@ -22285,6 +22305,50 @@ static bool handlePreparedFetchPeersQuery(const string& rawSql, Session& session
         ? dynamic_cast<const dbms::SelectStmt*>(parsed.stmt.get()) : nullptr;
     if (!select || !select->withTies || select->setOp != dbms::SetOp::None)
         return false;
+    if (hasCurrentQueryWindows(select)) {
+        // Only an ordinary read graph may bypass the legacy projection
+        // guard. Bind the original statement before testing host eligibility.
+        function<bool(const dbms::Stmt*)> read;
+        function<bool(const dbms::FromItem*)> source;
+        source = [&](const dbms::FromItem* item) {
+            return !item || (read(item->subquery.get()) &&
+                source(item->left.get()) && source(item->right.get()));
+        };
+        read = [&](const dbms::Stmt* statement) {
+            if (!statement) return true;
+            if (const auto* envelope = dynamic_cast<const dbms::WithStmt*>(statement)) {
+                for (const auto& cte : envelope->ctes)
+                    if (!read(cte.query.get())) return false;
+                return read(envelope->statement.get());
+            }
+            const auto* body = dynamic_cast<const dbms::SelectStmt*>(statement);
+            if (!body || (body->command != dbms::SqlCommand::Select &&
+                          body->command != dbms::SqlCommand::Values)) return false;
+            for (const auto& cte : body->ctes)
+                if (!read(cte.query.get())) return false;
+            return read(body->setOpLhs.get()) && read(body->setOpRhs.get()) &&
+                source(body->fromClause.get());
+        };
+        if (read(parsed.stmt.get())) {
+            auto query = make_shared<dbms::PreparedQuery>(
+                prepareRuntimeValueDeclaration(session, rawSql));
+            validateWindowQueryPlacements(query->ast.get());
+            const auto* bound = dynamic_cast<const dbms::SelectStmt*>(query->ast.get());
+            const bool readGraph = all_of(query->statementOutputs.begin(),
+                query->statementOutputs.end(), [](const auto& output) {
+                    return output.first &&
+                        (output.first->command == dbms::SqlCommand::Select ||
+                         output.first->command == dbms::SqlCommand::Values ||
+                         dynamic_cast<const dbms::WithStmt*>(output.first) != nullptr);
+                });
+            if (readGraph && bound && hasCurrentQueryWindows(bound) &&
+                dbms::QueryPlanner::supportsPreparedSourceSelectPlan(*bound)) {
+                handled = true;
+                executePreparedWindowReceiver(session, query);
+                return false;
+            }
+        }
+    }
     // A genuine ordinary FETCH envelope owns typed ORDER/peer evaluation.
     // Set-operation wrappers keep their existing complete-query consumer.
     return handlePreparedCaseQuery(rawSql, session, handled);
@@ -27389,7 +27453,8 @@ static bool executeInternal(const string& rawSql, Session& s) {
         {
             dbms::SQLParser parser;
             const auto parsed=parser.parseForBinding(effectiveRawSql);
-            if(requiresParsedValueBinding(parsed.stmt.get())) {
+            if(requiresParsedValueBinding(parsed.stmt.get()) ||
+               requiresParsedValueBinding(parsed.stmt.get(),false,true)) {
                 auto query=make_shared<dbms::PreparedQuery>(prepareRuntimeValueDeclaration(s, effectiveRawSql));
                 validateWindowQueryPlacements(query->ast.get());
                 if(requiresParsedValueBinding(parsed.stmt.get(),true)) {
@@ -27399,6 +27464,28 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     // or a user routine merely to discover an ABS error.
                     dbms::PreparedQueryExecution constants(query,&g_engine,s.currentDB);
                     constants.planStatementConstants(query->ast.get());
+                }
+                // Execute supported ordinary windows through the same real
+                // typed host used by scalar children and borrowed sources.
+                // Admission changes no retained frame or portal ownership.
+                const auto* windowSelect=dynamic_cast<const dbms::SelectStmt*>(query->ast.get());
+                // A window in a genuine CTE/derived producer belongs to this
+                // whole read graph. Preserve its bound cteStatement/source
+                // identities before legacy CTE materialization splits it.
+                const bool nestedWindowRead=windowSelect && !hasCurrentQueryWindows(windowSelect) &&
+                    any_of(query->statementOutputs.begin(),query->statementOutputs.end(),[](const auto& output) {
+                        const auto* select=dynamic_cast<const dbms::SelectStmt*>(output.first);
+                        return select && hasCurrentQueryWindows(select);
+                    }) && all_of(query->statementOutputs.begin(),query->statementOutputs.end(),[](const auto& output) {
+                        return output.first &&
+                            (output.first->command==dbms::SqlCommand::Select ||
+                             output.first->command==dbms::SqlCommand::Values ||
+                             dynamic_cast<const dbms::WithStmt*>(output.first)!=nullptr);
+                    });
+                if(windowSelect && (hasCurrentQueryWindows(windowSelect) || nestedWindowRead) &&
+                    dbms::QueryPlanner::supportsPreparedSourceSelectPlan(*windowSelect)) {
+                    executePreparedWindowReceiver(s,query);
+                    return false;
                 }
             }
         }

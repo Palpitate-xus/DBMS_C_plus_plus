@@ -1457,3 +1457,168 @@ python3 scripts/benchmark_set_sort.py \
 误运行报告、原预期哈希和完整性说明保存在本批 `prior-audit-overwrite-incident.json`，旧通过日志/原证据索引仍保留；没有改写原哈希来假装恢复。
 源码、已提交文档、原生/协议原始日志、性能raw与二进制未被该误运行修改。本批范围检查改为独立对照baba4bcb与更早未改的保护索引；不再用被覆盖的旧JSON证明本批通过。
 另一次本地链接检查器未识别旧文档合法的`:行号`文件链接，已仅修检查器；受保护旧文档未动。最初检查结果保留。
+
+
+## 类型化窗口宿主与有序输出复用（2026-11-03）
+
+### 范围、研究与实现
+
+本批输入 `9f019ffa8367a472bff9801c5fd6e43dfdcacc05`，直接在 master 开发；前版程序 SHA256 `58c94e05ce38e1744e5ec792de97a73d960c8ec284834f764ebb78d5374951ab`，
+最终 C9 程序 `c696d3b224748ee010d1f8bb9994494430730f2ffaeb9a5581247f7142f2abeb`。
+本批补入受支持查询形状的类型化窗口执行宿主，**没有实现普遍提速**：按同预算旧版回测，`full_first_last_nth` 在三个预算约快5.15/5.33/5.84倍；
+其余7类查询的21组新版p50延迟均更高，为旧回测的约1.92–2.70倍。64kB旧首/旧回测漂移很大，完整表和原始慢值一并保留，不能只引用旧首声称加速。
+这不是新的PostgreSQL速度对照，也没有把减少复制次数当作已证明的整库收益。
+
+工件目录 `build/pg-feature-window-host-557k7fi8/` 保存旧源/完整62对象、C1..C9程序/输入、原生/协议原始失败、PG预期、资源和性能记录；本地build工件不纳入Git。
+产品仍是0.2.0/C++17，GCC13.3/-O2、ICU/zlib及TLS stub，未通过切换语言标准宣称查询提速。
+通过验证的C9已原子安装到根目录dbms_main，文件和父目录已fsync；根目录、CMake产物和冻结C9 SHA一致，原58备份保留，没有重启既有服务。
+
+研究以 PostgreSQL 18.6 实际源码和独立协议观察为准：[窗口语义](https://www.postgresql.org/docs/18/functions-window.html)、
+[planner](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/optimizer/plan/planner.c)、
+[setrefs](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/optimizer/plan/setrefs.c)、
+[parse_agg](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/parser/parse_agg.c)、
+[WindowAgg](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/executor/nodeWindowAgg.c)、
+[windowfuncs](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/utils/adt/windowfuncs.c)与
+[timestamp interval除法](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/utils/adt/timestamp.c)。
+据此实现真实输入键投影、窗口栈排序复用、逐行aggregate transition与按需结果；WindowClause的原始身份和语义排序键身份分别保存，避免把两个初始化不同的窗口错误合并。
+
+另参考[SQLite窗口接口](https://www.sqlite.org/windowfunctions.html)的逆转移机制，以及DuckDB官方的
+[窗口执行说明](https://www.duckdb.org/2021/10/13/windowing)、[窗口优化文章](https://duckdb.org/2025/02/14/window-flying)和
+[窗口函数文档](https://duckdb.org/docs/2.0/sql/functions/window_functions)。
+逆转移、完整segment tree/vectorized窗口及窗口spill仍是后续方向，本批没有把这些系统的实现或性能当成本项目已完成项。
+
+实际管线为真实行源/过滤→既有普通聚合→拥有类型和值的窗口输入槽→一个或多个窗口阶段→必要时普通最终排序→投影/DISTINCT/OFFSET/计数。
+完整分区/排序表达式只投影一次；SELECT、最终ORDER、窗口参数/FILTER/default内相同深层键引用真实槽，窗口键自身的生产者不任意做子表达式消除。
+命名继承、真实作用域/sourceOccurrence/ordinal、声明比较类型/枚举OID和NULL/方向均保留。
+窗口内核支持已验证的ROWS/GROUPS/数值RANGE、peer/exclusion、排名、偏移/取值、分桶及有限聚合；无键阶段保持已有顺序；相同语义键的阶段复用已有排序，最终ORDER的已证明兼容前缀可省去冗余Sort。不同前缀stage的组内incremental sort尚未实现。
+运行前缀聚合复用累计状态；移动帧头/exclusion按需重算，尚无一般逆转移或segment tree。
+
+C9的私有窗口read把真实上游拥有的current context直接用于同步的原execution.context复制，不再先经过lastPreparedContext产生一个临时完整副本。
+返回的输入context仍独立拥有数据，原execution.context方法/调用次数与参数frame/provider不改，不保存任何跨调用借用；已有current_/currentKeys_输出快照、close/restart均保持。
+输入键存储由每行K+P+O个datum降为K个，分区/排序/RANGE通过原索引读取唯一keys；保留原read位置的防御性边界检查。这里是复制次数/数据结构变化，不是实测RSS或整库内存倍率。
+
+只有真实无条件投影窗口保证排序存在、且所有随后可能排序阶段都保持最终ORDER前缀时，才去掉冗余最终排序。
+LIMIT 1 的兼容前缀样例窗口参数求值从6次降至PG要求的1次；不兼容/条件窗口负控制仍需6次。
+这是求值需求证明，不是整库6倍速度声明；有序WITH TIES使用真实窗口保存键和投影前瞻，OFFSET、零LIMIT及错误前行均逐项核对。
+Main、Core与真实SQL子查询共享类型化宿主；Main真实SourceContexts JOIN已验证，通用Core JOIN lowering仍报不支持。
+Describe只用真实绑定/目录/来源推导，不打开游标或执行SQL；物理来源使用实际表OID/attnum，view使用自己的OID，表达式/合并USING等保持无来源。
+
+### 正确性、保留失败与资源
+
+最终61core/Main/新stub全部与头文件匹配，C9 link冻结src下216文件无漂移，生产对象为61core加Main共62个。主回归68原生全过，加两个独立入口共70个不同原生入口全过。
+六个新增入口分别223/37/3/39/30/16，共348控制全过；测试实现真实公共游标、同图重启、原始参数来源、heap/FD/NULL和异常清理，不以私有替身代替产品执行。
+新协议窗口宿主226、输入键241、有序输出201有独立PG18.6严格预期；类型/修饰/格式/来源/行值/ParameterDescription/错误阶段都参与比较。
+固定目录身份只凭实际物理LIMIT0/pg_type探针归一，不把本项目OID伪装成PG数值，也不改已有测试的固定预期。
+
+interval datum除法修正月/日小数向下级联、TSROUND/rint与边界检查，有限窗口AVG随之正确；原乘法及其他求值器逻辑保持字节一致。
+严格interval106保留10个常量错误的Bind/Execute阶段差异；值、类型、SQLSTATE、20个AVG控制均符合。它们属于既有R303等暂缓范围，未过滤、改预期或恢复该模块。
+最终同一C9的60个不同协议入口为56通过/4失败；主58协议为55通过/3失败，另键241通过、interval106/10保留失败。原Bind/portal完整463/40日志与前版字节相同，另外CTE/window-owner747/29及nested-window-projection325/42仍有严格差异。
+两个旧版完整结果分别747/453与325/77，改进不等于全部通过；剩余问题不能一律归为暂缓参数阶段。
+本批没有重新宣告前批完整910或全部数据库入口验收，新宿主消除了前批binding58中合法窗口子查询的0A000缺口。
+
+C1..C9全部候选、失败与harness版本保留。中途原生JOIN使用错误计划入口、错误阶段前提、排序图遍历未展开真实LIMIT/OFFSET子节点、metadata入口数前提均分别纠正并留原始失败；
+这些测试前提改动没有改既有2302个测试。实际窗口放置/继承、键复用、Frame初始化身份、ntile首行NULL、interval级联、清理与行需求问题由生产实现修复。
+
+逐观察审计发现C7相对旧58新增14个回退，不能因总失败数下降就称无回退：8个CTE串联Simple查询错误、6个LIMIT/OFFSET副作用计数过量。
+C8在真实whole-read图准入处保留CTE原生产者图，COALESCE builtin首参数必经证明去除冗余最终Sort；完整1072观察确认14项全部恢复，且无新增退化；最终C9逐观察另行复核。
+两完整入口仍有71个差异：CTE29为3个真实非零OID数值、2个42P01错误阶段、24个缺RowDescription；其所有行值/SQLSTATE已符合PG，没有剩余XX000。
+Nested42为18个OID数值、18个合法ANY/SOME/ALL仍被42883拒绝、3个重复volatile真实行值和3个对应少调用计数；它们不是71个独立bug，也不全属R303。
+新增native16首轮15/1仅最后控制的序列值1→5，计划/返回行正确；它使用默认未启用root常量规划的低层Core图。
+真实C8 Main同源PG14/0；仅新增15/16改为公开PreparedQueryExecution.planStatementConstants及真实executionProvider图后16/0，原14完整保留。
+原未规划结果、诊断和源码不删除；没有更改通用Core默认常量规划策略或宣告未规划API与PG等价。
+
+资源阶段不计时：共同8查询旧/新/旧共24次1,000行完整核对；普通最终TypedSort在64kB采到最多2个匿名FD，在16MB未采到FD，均验证1,000行/3,000单元，EOF无遗留FD/命名临时文件。
+强杀验证捕获自有PID/数据目录/启动身份及实际匿名FD后执行，退出-9并断连；同目录重开核对基表1,000行/4,000单元及再次排序1,000行。
+三阶段共43请求（28个完成全值读取、1个强杀中的读取、14个SET/SHOW），1072夹具文件不变，自有进程均结束。35类操作另以每类一次完成35个结果核对、0个操作错误，但服务器正常退出时抛std::system_error: Invalid argument并SIGABRT（-6），driver exit1/complete=false，该完整入口失败。
+原log/operations.json及operations-candidate9-failed-shutdown-receipt.json保留；既有R15停机链用户暂缓保持，未恢复调查/改代码/重跑挑选通过样本，未从源码未改就推断因果无关。
+窗口分区缓存和阶段内部排序仍无work_mem上限，只有保留的普通最终排序具有上述预算/落盘证明；没有声称硬RSS上限、所有窗口spill、任意写入崩溃恢复、并发或真实TLS通过。
+
+### 性能方法与完整结果
+
+性能使用固定1072文件、1,000行夹具，前版58/最终C9/前版58；构建、正确性和资源进程均结束后再计时。
+共同支持的8条SQL在64kB/4MB/16MB顺序执行，每budget每label3轮×4样本及3次预热；最终完成864计时、216预热、18次SET/SHOW，共1098次校验；1080个查询结果合计1,080,000行/2,970,000单元完整相等。
+计时包含整条SQL的解析、执行、网络和完整结果比较；逐样本原始数据与所有慢值/漂移保留，不将旧版拒绝的新SQL算作性能改善，也没有重新测PG性能。
+共同夹具base payload是row-i（5–8字节），不是前批VALUES基准的1536字符尾。
+八查询均有grp分区、最终ORDER id；当前保留普通TypedSort并使用会话预算，完整typed上下文含未投影源字段；旧WindowOp的最终排序在内存vector中，不使用该work_mem或落盘。
+相同SET不代表资源策略等同，不能直接把全部慢值因果归为I/O。已有匿名FD实证来自另行repeat(payload,512)宽投影控制，未逐条采样common8的FD。
+
+冻结driver为本批 `runtime_benchmark_windows.py`（SHA256 `f3d025e21e9ddfabff7cd9980faa27a295222b2d7b6d01178a5c2fbd8fb7450b`）；实际完成结果在下表及本批原始comparison文件中。
+
+### C9 全部24项结果
+
+每个p50来自12个样本，单位ms；新相对旧首/旧回测百分比的正值表示较慢。全部min/max、原序12个样本和9份CSV/JSONL见本批 `runtime-window-performance-candidate9-summary-v1.json/.csv` 及其raw_artifacts。
+三个预算全部自然exit0、无重测或剔除；原夹具1072文件/驱动/二进制前后哈希不变，自有进程均退出。
+内部构建、测试和资源任务已停止后才计时，但共享宿主其他负载未被排除；每label12样本不支持置信区间、全负载或无回退结论。
+
+| 预算 | 查询 | 旧首p50 ms | C9 p50 ms | 旧回测p50 ms | 新对旧首 | 新对旧回测 | 旧漂移 |
+|---|---|---:|---:|---:|---:|---:|---:|
+| 64kB | partition_ranking | 349.26 | 227.63 | 95.78 | -34.8% | +137.7% | -72.6% |
+| 64kB | partition_lag | 710.17 | 195.43 | 88.12 | -72.5% | +121.8% | -87.6% |
+| 64kB | partition_lead | 554.23 | 199.50 | 76.65 | -64.0% | +160.3% | -86.2% |
+| 64kB | running_sum | 377.79 | 212.39 | 78.52 | -43.8% | +170.5% | -79.2% |
+| 64kB | sliding_sum | 487.96 | 186.21 | 87.15 | -61.8% | +113.7% | -82.1% |
+| 64kB | partition_full_sum | 407.95 | 188.53 | 90.89 | -53.8% | +107.4% | -77.7% |
+| 64kB | full_first_last_nth | 1869.42 | 231.01 | 1190.03 | -87.6% | -80.6% | -36.3% |
+| 64kB | mixed_same_keys | 384.88 | 240.49 | 122.94 | -37.5% | +95.6% | -68.1% |
+| 4MB | partition_ranking | 98.25 | 190.63 | 90.83 | +94.0% | +109.9% | -7.6% |
+| 4MB | partition_lag | 81.33 | 164.60 | 75.27 | +102.4% | +118.7% | -7.5% |
+| 4MB | partition_lead | 77.76 | 165.18 | 68.58 | +112.4% | +140.9% | -11.8% |
+| 4MB | running_sum | 78.71 | 164.75 | 72.62 | +109.3% | +126.9% | -7.7% |
+| 4MB | sliding_sum | 87.40 | 165.81 | 77.93 | +89.7% | +112.8% | -10.8% |
+| 4MB | partition_full_sum | 85.54 | 146.53 | 72.97 | +71.3% | +100.8% | -14.7% |
+| 4MB | full_first_last_nth | 1136.89 | 213.54 | 1139.02 | -81.2% | -81.3% | +0.2% |
+| 4MB | mixed_same_keys | 100.39 | 215.90 | 98.35 | +115.1% | +119.5% | -2.0% |
+| 16MB | partition_ranking | 96.80 | 181.23 | 93.93 | +87.2% | +92.9% | -3.0% |
+| 16MB | partition_lag | 75.68 | 160.17 | 83.49 | +111.7% | +91.8% | +10.3% |
+| 16MB | partition_lead | 79.49 | 160.13 | 69.43 | +101.5% | +130.6% | -12.6% |
+| 16MB | running_sum | 81.68 | 160.87 | 71.96 | +97.0% | +123.5% | -11.9% |
+| 16MB | sliding_sum | 76.07 | 165.41 | 77.34 | +117.4% | +113.9% | +1.7% |
+| 16MB | partition_full_sum | 80.94 | 144.00 | 73.58 | +77.9% | +95.7% | -9.1% |
+| 16MB | full_first_last_nth | 1148.02 | 195.17 | 1139.79 | -83.0% | -82.9% | -0.7% |
+| 16MB | mixed_same_keys | 100.16 | 204.05 | 97.18 | +103.7% | +110.0% | -3.0% |
+
+4MB/16MB的7类查询比前后两个旧版都慢，未关闭这些慢项。64kB旧首/旧回测下降36.3%–87.6%，不能用对旧首的负百分比掩盖对旧回测的回退。
+first/last/nth组合相对旧回测的5.15/5.33/5.84倍收益只适用于本1,000行、100分区、热缓存、单连接夹具；不是PostgreSQL对照或全部窗口收益。
+这些结果覆盖功能/执行/资源策略的整批差异，没有用跨候选C7→C9未配对数据估算复制优化的独立倍率。
+
+### C7 已完成性能窗口（保留历史）
+
+C7在发现14个新增正确性回退前，已完成64kB旧/新/旧的288计时、72预热和6次SET/SHOW，共366次全值校验；该完整窗口未删除或被C9替代。
+发现回退后当前budget自然完成，后续4MB在创建输出目录时受控拒绝、未启动任何server/SQL/样本，16MB未启动；控制性exit1不记为产品性能失败。
+下表保留全部8例的p50/min/max和旧版漂移；C7是失败候选历史，不能作为最终C9的测量结果。原CSV/JSONL、启动闸门和控制收据均留在本批工件中。
+
+| 查询 | 旧版 p50 [min,max] ms | C7 p50 [min,max] ms | 旧版回测 p50 [min,max] ms | 旧版漂移 |
+|---|---:|---:|---:|---:|
+| partition_ranking | 159.52 [103.35, 417.16] | 205.12 [184.83, 268.37] | 103.56 [92.55, 117.98] | -35.1% |
+| partition_lag | 151.29 [103.71, 217.30] | 227.08 [160.14, 451.93] | 85.10 [75.09, 214.51] | -43.7% |
+| partition_lead | 125.09 [90.13, 210.61] | 177.94 [164.53, 192.14] | 86.34 [73.62, 101.88] | -31.0% |
+| running_sum | 150.58 [81.51, 217.52] | 191.16 [178.94, 240.35] | 87.38 [77.53, 90.70] | -42.0% |
+| sliding_sum | 97.09 [76.20, 247.98] | 197.18 [170.32, 303.56] | 90.47 [78.45, 93.80] | -6.8% |
+| partition_full_sum | 170.25 [144.42, 370.49] | 209.13 [144.75, 712.67] | 93.20 [87.03, 102.17] | -45.3% |
+| full_first_last_nth | 1216.49 [1093.03, 1265.98] | 257.77 [207.17, 299.29] | 1128.10 [1123.14, 1248.50] | -7.3% |
+| mixed_same_keys | 138.15 [101.90, 200.23] | 229.35 [208.28, 364.00] | 106.71 [89.87, 186.39] | -22.8% |
+
+旧首/旧回测漂移为-6.8%到-45.3%，原样保留；不能把单一前后比值直接归因于代码。C9另用独立新目录完整执行冻结的三预算计划。
+
+### 开放项、范围与复现
+
+性能下一步优先诊断窗口键比较中的typed datum复制/重复数值解析、上下文准备及最终TypedSort成本；可评估仅Window-owned的精确内置整数键缓存，保留enum/OID/domain/NaN/NULL等真实回退。
+静态热点尚不证明其解释了全部慢值；不改共享Set/R185助手或用legacy接收器绕过类型/资源正确性。当前7类慢项未关闭。
+
+完整窗口内存治理、统计/更多窗口聚合、temporal RANGE的in_range族、通用Core JOIN lowering、其他普通SELECT动态计数、全部类型/嵌套边界和统一执行预算仍开放。
+WITH TIES的枚举/NaN/record/array peer全组合及OOM/double-close故障矩阵未全部覆盖；本批有限核验不能关闭这些要求。
+原273项仍22 complete/166 partial/70 unverified/15 deferred；只追加近期partial进展，原完整对象/条款/725受保护记录不变，整体Goal active。
+受保护共享排序/中断helper、PreparedAggregateOp/prepareAggregateRoles、legacy WindowOp、PreparedOperatorCursor及真实参数帧/provider/portal等职责保持。
+最终只读源码审计33/33通过，既有2302测试不变；原144公共头仅AST/执行注册接口两处授权改动，所有受影响消费方和Main重新编译。
+
+当前复现使用本批 `runtime-candidate9-resources-v1-receipt.json` 的三个实际阶段命令，以及 `runtime-window-latency-candidate9-64kB-v1-receipt.json`、`runtime-window-latency-candidate9-4MB-v1-receipt.json`、`runtime-window-latency-candidate9-16MB-v1-receipt.json` 的最终冻结计时命令，在新的私有输出目录执行。C7 observation/validate计划仅作历史，不能冒充C9命令。
+原生入口经 `run_native.py` 与C9冻结core配置，协议入口使用已保存的真实PG18.6预期及对应二进制；不能用当前重建冒充旧58程序。
+例如在新的私有输出目录复现64kB（其余预算按各自receipt命令）：
+
+```bash
+python3 build/pg-feature-window-host-557k7fi8/runtime_benchmark_windows.py --before build/pg-feature-window-host-557k7fi8/before-dbms_main --after build/pg-feature-window-host-557k7fi8/candidate9-dbms_main --fixture build/pg-feature-topn-20261102-bc582b_s/fixture-1000 --output build/window-host-reproduce-64kB --work-mem 64kB --rows 1000 --rounds 3 --samples 4
+```
+
+原始raw与复现输出目录不能覆盖；研究和功能对照、资源、计时三个阶段分别解释。
+
+输入、完整资源记录、每入口日志、源码/core/header/stub收据和最终文档检查统一列入本批 `final-provenance.json`；上一批已披露旧scope-audit误覆盖事件不改写或伪造恢复。

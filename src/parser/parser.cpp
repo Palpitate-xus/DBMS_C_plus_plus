@@ -2691,6 +2691,12 @@ static WindowDef parseWindowDefinition(const std::vector<std::string>& tokens,si
     WindowDef winDef;
     if (pos < tokens.size() && tokens[pos] == "(") {
         ++pos;
+        if (pos < tokens.size() && tokens[pos] != ")") {
+            const auto first = SQLParser::toLower(tokens[pos]);
+            if (first != "partition" && first != "order" && first != "rows" &&
+                first != "range" && first != "groups")
+                winDef.referenceName = tokens[pos++];
+        }
         while (pos < tokens.size() && tokens[pos] != ")") {
             std::string w = SQLParser::toLower(tokens[pos]);
             if (w == "partition") {
@@ -3798,6 +3804,71 @@ static std::string parseRootRowCount(const std::vector<std::string>& tokens,
     return {};
 }
 
+static bool currentLevelWindowExpression(const Expr* expression) {
+    if (!expression || expression->preparedSubquery) return false;
+    if (const auto* call = dynamic_cast<const FunctionCallExpr*>(expression)) {
+        if (call->hasOver) return true;
+        for (const auto& argument : call->args)
+            if (currentLevelWindowExpression(argument.get())) return true;
+        for (const auto& argument : call->namedArgs)
+            if (currentLevelWindowExpression(argument.value.get())) return true;
+        for (const auto& key : call->aggregateOrderKeys)
+            if (currentLevelWindowExpression(key.expr.get())) return true;
+        return currentLevelWindowExpression(call->filter.get());
+    }
+    if (const auto* unary = dynamic_cast<const UnaryOpExpr*>(expression))
+        return currentLevelWindowExpression(unary->operand.get());
+    if (const auto* binary = dynamic_cast<const BinaryOpExpr*>(expression))
+        return currentLevelWindowExpression(binary->left.get()) ||
+            ((binary->op != "::" && binary->op != "COLLATE") &&
+             currentLevelWindowExpression(binary->right.get()));
+    if (const auto* comparison = dynamic_cast<const QuantifiedComparisonExpr*>(expression))
+        return currentLevelWindowExpression(comparison->left.get()) ||
+            currentLevelWindowExpression(comparison->right.get());
+    if (const auto* cast = dynamic_cast<const CastExpr*>(expression))
+        return currentLevelWindowExpression(cast->operand.get());
+    if (const auto* conditional = dynamic_cast<const CaseExpr*>(expression)) {
+        if (currentLevelWindowExpression(conditional->switchExpr.get()) ||
+            currentLevelWindowExpression(conditional->elseExpr.get())) return true;
+        for (const auto& arm : conditional->whenClauses)
+            if (currentLevelWindowExpression(arm.first.get()) ||
+                currentLevelWindowExpression(arm.second.get())) return true;
+    } else if (const auto* array = dynamic_cast<const ArrayExpr*>(expression)) {
+        for (const auto& element : array->elements)
+            if (currentLevelWindowExpression(element.get())) return true;
+    } else if (const auto* row = dynamic_cast<const RowExpr*>(expression)) {
+        for (const auto& element : row->elements)
+            if (currentLevelWindowExpression(element.get())) return true;
+    }
+    // SQL query children are opaque LiteralExprs at raw parsing, or carry
+    // preparedSubquery above. Neither belongs to this query's window level.
+    return false;
+}
+
+static bool parseSelectWindowCount(const std::vector<std::string>& tokens,
+                                   size_t& pos, SelectStmt& statement, RootRowCount kind) {
+    // Ordinary SELECT has no general dynamic-count execution contract. Keep
+    // only genuine current-level OVER sites so normal analysis can reject
+    // their actual routine role. Parse the original stream into temporary
+    // count fields; rejected candidates leave the legacy receiver untouched.
+    size_t next = pos;
+    SelectStmt parsed;
+    std::string diagnostic;
+    auto* previous = declarationSyntaxError;
+    declarationSyntaxError = &diagnostic;
+    struct RestoreDiagnostic {
+        std::string* previous;
+        ~RestoreDiagnostic() { declarationSyntaxError = previous; }
+    } restore{previous};
+    const auto error = parseRootRowCount(tokens,next,parsed,kind);
+    auto& expression = kind == RootRowCount::Offset ? parsed.offsetExpr : parsed.limitExpr;
+    if (!error.empty() || !diagnostic.empty() || !currentLevelWindowExpression(expression.get()))
+        return false;
+    (kind == RootRowCount::Offset ? statement.offsetExpr : statement.limitExpr) = std::move(expression);
+    pos = next;
+    return true;
+}
+
 static std::string parseQueryRootClauses(const std::vector<std::string>& tokens,
                                         size_t& pos, SelectStmt& statement) {
     const auto word = [&](size_t index) { return index < tokens.size() ? SQLParser::toLower(tokens[index]) : std::string{}; };
@@ -3837,6 +3908,8 @@ static std::string parseQueryRootClauses(const std::vector<std::string>& tokens,
             sawLimit = true; ++pos;
             if (statement.command == SqlCommand::Values || statement.setOp != SetOp::None) {
                 if (auto error = parseRootRowCount(tokens,pos,statement,RootRowCount::Limit); !error.empty()) return error;
+            } else if (parseSelectWindowCount(tokens,pos,statement,RootRowCount::Limit)) {
+                // Analysis-only count; its current-level window must fail.
             } else if (word(pos) == "all") ++pos;
             else if (word(pos) == "null") {
                 ++pos; statement.limit.reset(); statement.signedLimitCount.reset();
@@ -3851,6 +3924,8 @@ static std::string parseQueryRootClauses(const std::vector<std::string>& tokens,
             sawOffset = true; ++pos;
             if (statement.command == SqlCommand::Values || statement.setOp != SetOp::None) {
                 if (auto error = parseRootRowCount(tokens,pos,statement,RootRowCount::Offset); !error.empty()) return error;
+            } else if (parseSelectWindowCount(tokens,pos,statement,RootRowCount::Offset)) {
+                // Analysis-only count; its current-level window must fail.
             } else if (word(pos) == "null") {
                 ++pos; statement.offset = 0; statement.signedOffsetCount.reset();
             } else {
@@ -3870,6 +3945,8 @@ static std::string parseQueryRootClauses(const std::vector<std::string>& tokens,
                 (word(pos+1)=="only" || (word(pos+1)=="with" && word(pos+2)=="ties"));
             if (expressionOwner && !omitted) {
                 if (auto error=parseRootRowCount(tokens,pos,statement,RootRowCount::Fetch);!error.empty())return error;
+            } else if (parseSelectWindowCount(tokens,pos,statement,RootRowCount::Fetch)) {
+                // Analysis-only count; its current-level window must fail.
             } else if (word(pos) == "null") {
                 ++pos; statement.limit.reset(); statement.signedFetchCount.reset();
             } else if (word(pos) == "row" || word(pos) == "rows") {statement.limit = 1;statement.signedFetchCount=1;}
@@ -4394,7 +4471,9 @@ ParseResult SQLParser::parseSelect(const std::string& sql) {
             r.error = "LIMIT requires a non-negative integer or ALL";
             return r;
         }
-        if (toLower(tokens[pos]) == "all") {
+        if (parseSelectWindowCount(tokens,pos,*stmt,RootRowCount::Limit)) {
+            // The real count expression is retained only for analysis.
+        } else if (toLower(tokens[pos]) == "all") {
             ++pos;
         } else if (toLower(tokens[pos]) == "null") {
             ++pos; stmt->limit.reset();
@@ -4422,7 +4501,9 @@ ParseResult SQLParser::parseSelect(const std::string& sql) {
             r.error = "OFFSET requires a non-negative integer";
             return r;
         }
-        if (toLower(tokens[pos]) == "null") {
+        if (parseSelectWindowCount(tokens,pos,*stmt,RootRowCount::Offset)) {
+            // The real count expression is retained only for analysis.
+        } else if (toLower(tokens[pos]) == "null") {
             ++pos; stmt->offset = 0;
         } else {
             size_t offset = 0;
@@ -4449,7 +4530,9 @@ ParseResult SQLParser::parseSelect(const std::string& sql) {
         ++pos;
         stmt->fetchFirst = true;
 
-        if (pos < tokens.size() && toLower(tokens[pos]) == "null") {
+        if (parseSelectWindowCount(tokens,pos,*stmt,RootRowCount::Fetch)) {
+            // The real count expression is retained only for analysis.
+        } else if (pos < tokens.size() && toLower(tokens[pos]) == "null") {
             ++pos; stmt->limit.reset(); stmt->signedFetchCount.reset();
         } else if (pos < tokens.size() && (toLower(tokens[pos]) == "row" || toLower(tokens[pos]) == "rows")) {
             stmt->limit = 1;stmt->signedFetchCount=1;

@@ -416,6 +416,11 @@ struct WindowDef {
     BoundKind frameEndKind = BoundKind::Unspecified;
     bool frameBetween = false;
     std::string frameExclusion; // CURRENT ROW, GROUP, TIES, NO OTHERS
+    // A copied window, OVER (parent ...) / WINDOW name AS (parent ...),
+    // differs from a direct OVER name reference. Retain that grammar role.
+    std::string referenceName;
+    std::vector<std::optional<QueryComparisonBinding>> partitionComparisons;
+    std::vector<std::optional<QueryComparisonBinding>> orderComparisons;
 };
 
 // 函数调用

@@ -3,6 +3,9 @@
 #include "executor/SortSpill.h"
 #include "executor/BoundedSortRuns.h"
 #include "executor/TypedSortSpill.h"
+#include "executor/PreparedWindowSpec.h"
+#include "executor/WindowKernel.h"
+#include "executor/WindowAggregateState.h"
 #include "commands/StoredRowNull.h"
 #include "common/DbError.h"
 #include "common/TemporalStorageCodec.h"
@@ -190,6 +193,86 @@ struct PreparedSelectState {
         std::vector<size_t> keyOwners;
     };
     std::vector<Aggregate> aggregates;
+    std::vector<prepared_window_detail::Producer> windows;
+    std::vector<prepared_window_detail::Stage> windowStages;
+    struct WindowInput {
+        Expr* expression=nullptr;
+        std::string identity;
+        std::vector<Expr*> targets;
+        std::vector<QueryColumnBinding> columns;
+    };
+    std::vector<WindowInput> windowInputs;
+    std::vector<size_t> windowOrderIndexes;
+    std::function<std::vector<ExprValue>()> windowOrderKeys;
+    std::string windowInputIdentity(const Expr* expression) const {
+        return prepared_window_detail::spec_detail::expressionIdentity(expression,*query,engine,dbname,*statement);
+    }
+    bool windowInputDemanded(const WindowInput& input) const {
+        for(const auto* target:input.targets)if(execution->windowInputColumnDemanded(target))return true;
+        for(const auto& stage:windowStages) {
+            if(!std::any_of(stage.producers.begin(),stage.producers.end(),[&](size_t index) {
+                return execution->aggregateColumnDemanded(windows.at(index).call);
+            }))continue;
+            for(const auto* key:stage.spec.partition)if(windowInputIdentity(key)==input.identity)return true;
+            for(const auto& key:stage.spec.order)if(windowInputIdentity(key.expression)==input.identity)return true;
+        }
+        return false;
+    }
+    size_t windowInputIndex(const Expr* expression) const {
+        const auto value=windowInputIdentity(expression);
+        for(size_t i=0;i<windowInputs.size();++i)if(windowInputs[i].identity==value)return i;
+        throw DbError("XX000","window key lost its actual input projection");
+    }
+    void prepareWindowInputs() {
+        if(windowStages.empty())return;
+        std::map<std::string,Expr*> expressions;
+        for(const auto& stage:windowStages) {
+            for(const auto& key:stage.spec.order)expressions.try_emplace(windowInputIdentity(key.expression),key.expression);
+            for(auto* key:stage.spec.partition)expressions.try_emplace(windowInputIdentity(key),key);
+        }
+        const auto add=[&](Expr* expression) {
+            const auto id=windowInputIdentity(expression);
+            const auto found=expressions.find(id);
+            if(found==expressions.end())return;
+            if(std::none_of(windowInputs.begin(),windowInputs.end(),[&](const auto& item){return item.identity==id;}))
+                windowInputs.push_back({found->second,id,{},{}});
+        };
+        // Existing SELECT target entries precede the resjunk keys added by
+        // window transformation. Only actual key expressions are projected.
+        for(auto& target:select().selectList) {
+            const auto* column=dynamic_cast<const ColumnRefExpr*>(target.expr.get());
+            const auto* literal=dynamic_cast<const LiteralExpr*>(target.expr.get());
+            if(!target.expr || target.expr->type==ExprType::A_Star ||
+                (column && column->column=="*") || (literal && literal->value=="*"))continue;
+            add(target.expr.get());
+        }
+        for(const auto& key:keys)add(key.target==noTarget?key.expression:targets.at(key.target));
+        const auto addSpec=[&](const prepared_window_detail::ResolvedSpec& spec) {
+            for(const auto& key:spec.order)add(key.expression);
+            for(auto* key:spec.partition)add(key);
+        };
+        for(const auto& definition:select().windowDefs)addSpec(prepared_window_detail::resolve(select(),definition));
+        for(const auto& producer:windows)addSpec(prepared_window_detail::resolve(select(),producer.call->over));
+        std::function<void(Expr*)> reuse=[&](Expr* expression) {
+            if(!expression || expression->preparedSubquery)return;
+            // Aggregate inputs run below WindowInput and keep their existing
+            // producer. Upper scalar subexpressions may reference real keys.
+            if(auto* call=dynamic_cast<FunctionCallExpr*>(expression);
+                call && !call->hasOver && !aggregate_type_detail::builtinName(call).empty())return;
+            if(!dynamic_cast<ColumnRefExpr*>(expression) && !dynamic_cast<LiteralExpr*>(expression) &&
+                !dynamic_cast<ParameterExpr*>(expression)) {
+                const auto id=windowInputIdentity(expression);
+                for(auto& input:windowInputs)if(input.identity==id) {
+                    if(std::find(input.targets.begin(),input.targets.end(),expression)==input.targets.end())
+                        input.targets.push_back(expression);
+                    return;
+                }
+            }
+            prepared_window_detail::spec_detail::valueChildren(expression,reuse);
+        };
+        for(auto& target:select().selectList)reuse(target.expr.get());
+        for(auto& key:select().orderBy)reuse(key.expr.get());
+    }
     StorageEngine* engine;
     std::string dbname;
     TableSchema schema;
@@ -246,7 +329,7 @@ struct PreparedSelectState {
             const auto& physical = schema.cols[ordinal];
             return std::to_string(sourceOrdinal) + ":" + std::to_string(ordinal) + ":" +
                 column.binding->declaredType + ":" + std::to_string(physical.dsize) + ":" + physical.collation;
-        }, dbname, engine);
+        }, dbname, engine, false, windows.empty()?nullptr:statement);
     }
     std::vector<ExprValue> cells(Operator& source, const std::string& raw) const {
         std::vector<ExprValue> values;
@@ -331,6 +414,16 @@ struct PreparedSelectState {
             for (const auto& key : aggregate.call->aggregateOrderKeys)
                 execution->prepareExpression(key.expr.get());
         }
+        // Window values use the existing execution-owned computed-column
+        // registry. Their original AST sites and statement inputs stay intact.
+        for (auto& window : windows)
+            window.column=execution->registerAggregateColumn(window.call,window.resultType);
+        for(auto& input:windowInputs) {
+            input.columns.clear();
+            const auto type=ExprHelper::inferParsedResultType(input.expression,{},dbname,engine);
+            for(auto* target:input.targets)
+                input.columns.push_back(execution->registerWindowInputColumn(target,type,true));
+        }
         // Only the execution root opts into whole-query planning. Child
         // graph construction must not reacquire outputs that root demand
         // already pruned, or plan a child in a discarded CASE arm.
@@ -338,12 +431,34 @@ struct PreparedSelectState {
         if (!select().existsTargetPrunable) for (auto& target : starTargets)
             execution->prepareProjectionColumn(static_cast<ColumnRefExpr*>(target.get()), statement);
         if (!select().existsTargetPrunable)
-            for (auto* target : targets) execution->prepareExpression(target);
+            for (size_t i=0;i<targets.size();++i)
+                if(windows.empty() || targetOwners.at(i)==i)execution->prepareExpression(targets[i]);
         execution->prepareExpression(select().whereClause.get());
         prepareNullWhereBranches(*execution,select().whereClause.get());
         execution->prepareExpression(select().having.get());
         for (const auto& key : keys)
             if (key.target == noTarget) execution->prepareExpression(key.expression);
+        for(const auto& stage:windowStages) {
+            const bool demanded=std::any_of(stage.producers.begin(),stage.producers.end(),[&](size_t index) {
+                return execution->aggregateColumnDemanded(windows.at(index).call);
+            });
+            if(!demanded)continue;
+            for(const auto* key:stage.spec.partition)execution->prepareExpression(const_cast<Expr*>(key));
+            for(const auto& key:stage.spec.order)execution->prepareExpression(key.expression);
+            execution->prepareExpression(stage.spec.startOffset);
+            execution->prepareExpression(stage.spec.endOffset);
+            for(size_t index:stage.producers) {
+                const auto& window=windows.at(index);
+                if(!execution->aggregateColumnDemanded(window.call))continue;
+                for(const auto& argument:window.call->args) {
+                    const auto* star=dynamic_cast<const LiteralExpr*>(argument.get());
+                    if(!star || star->value!="*")execution->prepareExpression(argument.get());
+                }
+                execution->prepareExpression(window.call->filter.get());
+            }
+        }
+        for(const auto& input:windowInputs)if(windowInputDemanded(input))
+            execution->prepareExpression(input.expression);
         execution->prepareChildCursors();
     }
     void beginExecution() {
@@ -368,6 +483,7 @@ struct PreparedSelectState {
         if (const auto* quantified=dynamic_cast<const QuantifiedComparisonExpr*>(expression))
             return containsVolatile(quantified->left.get()) || containsVolatile(quantified->right.get());
         if (auto* call = dynamic_cast<const FunctionCallExpr*>(expression)) {
+            if(std::any_of(windows.begin(),windows.end(),[&](const auto& window){return window.call==call;}))return false;
             if (std::any_of(aggregates.begin(), aggregates.end(),
                     [&](const auto& aggregate) { return aggregate.call == call; })) return false;
             if (evaluator.scalarFunctionVolatility(call, engine) == 'v') return true;
@@ -410,6 +526,80 @@ struct PreparedSelectState {
         return false;
     }
 };
+
+// A builtin COALESCE always evaluates its first argument. Do not infer
+// unconditional demand from later arguments, arbitrary routines or operators.
+// Resolve its actual scalar identity just as the existing constant planner
+// does, without evaluating or rewriting any expression.
+static bool projectionAlwaysDemandsWindow(const Expr* expression,
+    const FunctionCallExpr* window, PreparedSelectState& state) {
+    if(expression==window)return true;
+    if(!expression || expression->preparedSubquery)return false;
+    const auto* call=dynamic_cast<const FunctionCallExpr*>(expression);
+    if(!call || !call->schema.empty() || SQLParser::toLower(call->funcName)!="coalesce" ||
+        call->args.empty() || !call->namedArgs.empty() || call->hasOver || call->filter ||
+        call->distinct || !call->orderBy.empty() || !call->aggregateOrderKeys.empty() ||
+        call->setReturning || !state.evaluator.hasScalarFunction(call,state.engine))return false;
+    FunctionCallExpr builtin;builtin.funcName="coalesce";
+    for(size_t i=0;i<call->args.size();++i) {
+        auto null=std::make_unique<LiteralExpr>();null->value="NULL";
+        builtin.args.push_back(std::move(null));
+    }
+    if(state.evaluator.scalarFunctionIdentity(call,state.engine)!=
+       state.evaluator.scalarFunctionIdentity(&builtin,state.engine))return false;
+    return projectionAlwaysDemandsWindow(call->args.front().get(),window,state);
+}
+
+// Prove the final ORDER from actual window pathkeys. An unconditionally
+// projected producer guarantees sorting for every invocation of this graph;
+// every later potential sorting stage must retain the same ORDER prefix.
+static bool prepareWindowOutputOrder(PreparedSelectState& state) {
+    if(state.windowStages.empty() || state.keys.empty() || state.select().existsTargetPrunable)return false;
+    struct Key {std::string expression,comparison;bool asc,nullsFirst;};
+    const auto append=[](std::vector<Key>& keys,Key key) {
+        if(std::none_of(keys.begin(),keys.end(),[&](const auto& old) {
+            return old.expression==key.expression && old.comparison==key.comparison;
+        }))keys.push_back(std::move(key));
+    };
+    const auto input=[&](const PreparedSelectState::SortKey& key) {
+        return key.target==PreparedSelectState::noTarget?key.expression:
+            state.targets.at(state.targetOwners.at(key.target));
+    };
+    std::vector<Key> wanted;
+    for(const auto& key:state.keys)append(wanted,{state.windowInputIdentity(input(key)),
+        prepared_window_detail::spec_detail::comparisonIdentity(key.enumComparison),key.asc,key.nullsFirst});
+    size_t guaranteed=PreparedSelectState::noTarget;
+    for(size_t i=state.windowStages.size();i--;) {
+        const auto& stage=state.windowStages[i];
+        if(stage.spec.partition.empty() && stage.spec.order.empty())continue;
+        for(size_t producer:stage.producers)for(size_t target=0;target<state.targets.size();++target)
+            if(state.targetOwners.at(target)==target &&
+                projectionAlwaysDemandsWindow(state.targets[target],state.windows.at(producer).call,state))
+                guaranteed=i;
+        if(guaranteed!=PreparedSelectState::noTarget)break;
+    }
+    if(guaranteed==PreparedSelectState::noTarget)return false;
+    for(size_t i=guaranteed;i<state.windowStages.size();++i) {
+        const auto& spec=state.windowStages[i].spec;
+        if(spec.partition.empty() && spec.order.empty())continue; // preserves its input order
+        std::vector<Key> supplied;
+        for(size_t j=0;j<spec.partition.size();++j)append(supplied,{state.windowInputIdentity(spec.partition[j]),
+            prepared_window_detail::spec_detail::comparisonIdentity(spec.partitionComparisons.at(j)),
+            spec.partitionAsc.at(j),spec.partitionNullsFirst.at(j)});
+        for(const auto& key:spec.order)append(supplied,{state.windowInputIdentity(key.expression),
+            prepared_window_detail::spec_detail::comparisonIdentity(key.comparison),key.asc,key.nullsFirst});
+        if(wanted.size()>supplied.size())return false;
+        for(size_t j=0;j<wanted.size();++j) {
+            const auto& a=wanted[j];const auto& b=supplied[j];
+            if(a.expression!=b.expression || a.comparison!=b.comparison || a.asc!=b.asc || a.nullsFirst!=b.nullsFirst)return false;
+        }
+    }
+    for(const auto& key:state.keys)state.windowOrderIndexes.push_back(state.windowInputIndex(input(key)));
+    return true;
+}
+
+static OpPtr makePreparedWindowStages(OpPtr source,const std::shared_ptr<PreparedSelectState>& state);
+static OpPtr makePreparedWindowTiesLimit(OpPtr source,const std::shared_ptr<PreparedSelectState>& state,size_t limit);
 
 class PreparedResultOp final : public Operator {
     bool emitted_ = false;
@@ -978,7 +1168,9 @@ public:
                     row.cells=state_->cells(*child_,raw);row.context=state_->context(row.cells);
                 } else {
                     row.context=state_->context(*child_,raw);
-                    if(!state_->sourceContexts)row.cells=state_->cells(*child_,raw);
+                    // WindowAgg emits the genuine owning context. Its
+                    // display row is empty and cannot be decoded as storage.
+                    if(!state_->sourceContexts && state_->windows.empty())row.cells=state_->cells(*child_,raw);
                 }
             row.targets.resize(state_->targets.size());
             const auto& context = row.context;
@@ -1500,7 +1692,7 @@ static bool supportsPreparedSelectShape(const SelectStmt& select, bool allowCtes
         (!selectBodyOnly && (select.setOp != SetOp::None || select.setOpLhs || select.setOpRhs)) ||
         (selectBodyOnly && (select.setOp != SetOp::Union || !select.setOpAll || select.setOpLhs || !select.setOpRhs)) ||
         !select.groupBy.empty() || !select.groupByElems.empty() ||
-        !select.windowDefs.empty() || !select.distinctOn.empty() ||
+        !select.distinctOn.empty() ||
         !select.locking.empty() || (select.withTies && ((select.distinct && !select.existsTargetPrunable) || selectBodyOnly))) return false;
     if (!sourceContexts && select.fromClause && select.fromClause->type != FromItem::Type::Table &&
         select.fromClause->type != FromItem::Type::Subquery) return false;
@@ -1508,6 +1700,9 @@ static bool supportsPreparedSelectShape(const SelectStmt& select, bool allowCtes
         if (!expr) return true;
         if (auto* call = dynamic_cast<const FunctionCallExpr*>(expr)) {
             if(call->setReturning)return false;
+            // A reached window call is lowered to an actual computed result
+            // by the shared window pipeline, never evaluated as a scalar.
+            if(call->hasOver)return true;
             static const std::set<std::string> aggregates = {"count", "sum", "avg", "min", "max", "string_agg", "array_agg", "bool_and", "bool_or", "every", "bit_and", "bit_or", "bit_xor", "json_agg", "jsonb_agg", "json_object_agg", "jsonb_object_agg", "xmlagg", "mode", "percentile_cont", "percentile_disc", "stddev", "stddev_pop", "stddev_samp", "variance", "var_pop", "var_samp", "corr", "covar_pop", "covar_samp"};
             CatalogManager::QualifiedName routine;
             const auto spelling = call->schema.empty() ? call->funcName : call->schema + "." + call->funcName;
@@ -1936,6 +2131,8 @@ OpPtr QueryPlanner::buildPreparedSelectPlan(StorageEngine* engine,
         });
     state->evaluator.setCurrentDB(dbname);
     prepareAggregateRoles(*state);
+    state->windows=prepared_window_detail::collect(*select,*state->query,engine,dbname);
+    state->windowStages=prepared_window_detail::stages(*select,*state->query,state->windows,engine,dbname);
     state->sourceContexts = source->supportsPreparedContexts();
     if (state->sourceContexts) state->logicalSource = source.get();
     if (state->sourceContexts && select->fromClause) {
@@ -1997,6 +2194,33 @@ OpPtr QueryPlanner::buildPreparedSelectPlan(StorageEngine* engine,
     for (auto& order : select->orderBy) {
         if (select->existsTargetPrunable) break;
         size_t target = PreparedSelectState::noTarget;
+        bool windowOrderExpression=false;
+        if(!state->windows.empty()) {
+            const auto* ordinal=dynamic_cast<const LiteralExpr*>(order.expr.get());
+            bool negative=false;
+            if(const auto* unary=dynamic_cast<const UnaryOpExpr*>(order.expr.get());unary && unary->op=="-") {
+                ordinal=dynamic_cast<const LiteralExpr*>(unary->operand.get());negative=true;
+            }
+            if(ordinal && !ordinal->preparedSubquery && ordinal->typeName.empty()) {
+                // Binding absorbs lexical signs when choosing a literal's
+                // numeric type. Its original '+' still denotes an expression
+                // in ORDER BY, rather than an output ordinal.
+                windowOrderExpression=ordinal->sourceBegin<state->query->source.size() &&
+                    state->query->source[ordinal->sourceBegin]=='+';
+                if(!windowOrderExpression) {
+                    int32_t position=0;
+                    const auto& text=ordinal->value;
+                    const bool signedNegative=!text.empty() && text.front()=='-';
+                    const size_t begin=signedNegative?1:0;
+                    const auto parsed=std::from_chars(text.data()+begin,text.data()+text.size(),position);
+                    if(begin==text.size() || !std::all_of(text.begin()+begin,text.end(),[](unsigned char c){return c>='0' && c<='9';}) ||
+                        parsed.ec!=std::errc{} || parsed.ptr!=text.data()+text.size())
+                        throw DbError("42601","non-integer constant in ORDER BY");
+                    if(negative || signedNegative || !position || static_cast<size_t>(position)>state->targets.size())
+                        throw DbError("42P10","ORDER BY position is not in select list");
+                }
+            }
+        }
         if (auto* ref = dynamic_cast<ColumnRefExpr*>(order.expr.get())) {
             if (ref->schema.empty() && ref->table.empty()) {
                 for (size_t i = 0; i < state->output.size(); ++i) {
@@ -2008,7 +2232,7 @@ OpPtr QueryPlanner::buildPreparedSelectPlan(StorageEngine* engine,
                 }
             }
         } else if (auto* literal = dynamic_cast<LiteralExpr*>(order.expr.get())) {
-            if (!literal->value.empty() && std::all_of(literal->value.begin(), literal->value.end(), [](unsigned char c) { return std::isdigit(c); })) {
+            if (!windowOrderExpression && !literal->value.empty() && std::all_of(literal->value.begin(), literal->value.end(), [](unsigned char c) { return std::isdigit(c); })) {
                 const auto ordinal = std::stoull(literal->value);
                 if (!ordinal || ordinal > state->targets.size()) throw DbError("42P10", "ORDER BY position is not in select list");
                 target = static_cast<size_t>(ordinal - 1);
@@ -2040,14 +2264,17 @@ OpPtr QueryPlanner::buildPreparedSelectPlan(StorageEngine* engine,
     for (auto* target : state->targets) {
         state->targetsBeforeSort.push_back(!state->containsVolatile(target));
     }
+    state->prepareWindowInputs();
     state->prepareExecution();
+    const bool orderedWindow=prepareWindowOutputOrder(*state);
     source = makePreparedTableSource(engine, dbname, state->query, select,
                                     sourceSchema, std::move(source));
     OpPtr root = std::move(source);
     if (select->whereClause) root = std::make_unique<PreparedFilterOp>(std::move(root), state);
     if (!state->aggregates.empty() || select->having)
         root = std::make_unique<PreparedAggregateOp>(std::move(root), state);
-    if (!state->keys.empty()) root = std::make_unique<PreparedSortOp>(std::move(root), state);
+    if(!state->windowStages.empty())root=makePreparedWindowStages(std::move(root),state);
+    if (!state->keys.empty() && !orderedWindow) root = std::make_unique<PreparedSortOp>(std::move(root), state);
     auto* tiesSort=select->withTies?dynamic_cast<PreparedSortOp*>(root.get()):nullptr;
     root = std::make_unique<PreparedProjectOp>(std::move(root), state);
     if (select->distinct && !select->existsTargetPrunable) root = std::make_unique<PreparedDistinctOp>(std::move(root));
@@ -2057,8 +2284,10 @@ OpPtr QueryPlanner::buildPreparedSelectPlan(StorageEngine* engine,
     else if(select->fetchFirst && select->withTies && !select->limit && !select->signedFetchCount)
         root=std::make_unique<PreparedRowCountErrorOp>(std::move(root),"2201W","row count cannot be null in FETCH FIRST ... WITH TIES clause");
     else if(select->limit) {
-        if(select->withTies && !select->existsTargetPrunable)
-            root=std::make_unique<PreparedTiesLimitOp>(std::move(root),tiesSort,*select->limit);
+        if(select->withTies && !select->existsTargetPrunable) {
+            if(orderedWindow)root=makePreparedWindowTiesLimit(std::move(root),state,*select->limit);
+            else root=std::make_unique<PreparedTiesLimitOp>(std::move(root),tiesSort,*select->limit);
+        }
         else root=std::make_unique<LimitOp>(std::move(root),*select->limit);
     }
     return root;
@@ -2234,6 +2463,8 @@ public:
         return truth(evaluator.eval(expression(entry,0,"=",enumeration),row));
     }
 };
+
+#include "executor/PreparedWindowOp.inc"
 
 // Sort the genuine common-typed Append output. Global set keys are bound
 // output ordinals, not re-evaluated branch expressions or display strings.

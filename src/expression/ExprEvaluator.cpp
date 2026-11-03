@@ -973,6 +973,55 @@ static bool scaleIntervalField(long long value, long double scale,
     return true;
 }
 
+static bool divideIntervalFields(const IntervalParts& input, double divisor,
+                                 long long& months, long long& days,
+                                 long long& micros) {
+    // Match PostgreSQL interval_div: keep calendar fields separate, but carry
+    // their fractional quotients down using 30 days/month and 24 hours/day.
+    const auto calendarQuotient = [](double value, long long& result) {
+        if (!std::isfinite(value) ||
+            value < static_cast<double>(std::numeric_limits<int32_t>::lowest()) ||
+            value >= static_cast<double>(std::numeric_limits<int32_t>::max()) + 1.0)
+            return false;
+        result = static_cast<long long>(value);
+        return true;
+    };
+    if (!calendarQuotient(static_cast<double>(input.months) / divisor, months) ||
+        !calendarQuotient(static_cast<double>(input.days) / divisor, days))
+        return false;
+
+    const auto roundFraction = [](double value) {
+        return std::rint(value * 1000000.0) / 1000000.0;
+    };
+    const double monthDays = roundFraction(
+        (static_cast<double>(input.months) / divisor - months) * 30.0);
+    double seconds = roundFraction(
+        (static_cast<double>(input.days) / divisor - days + monthDays -
+         static_cast<int>(monthDays)) * 86400.0);
+    if (std::fabs(seconds) >= 86400.0) {
+        const int wholeDays = static_cast<int>(seconds / 86400.0);
+        if (!combineIntervalField(days, wholeDays, false, days, true)) return false;
+        seconds -= wholeDays * 86400.0;
+    }
+    if (!combineIntervalField(days, static_cast<int32_t>(monthDays), false,
+                              days, true)) return false;
+
+    const double time = std::rint(static_cast<double>(input.micros) / divisor +
+                                  seconds * 1000000.0);
+    if (!std::isfinite(time) ||
+        time < static_cast<double>(std::numeric_limits<int64_t>::lowest()) ||
+        time >= -static_cast<double>(std::numeric_limits<int64_t>::lowest()))
+        return false;
+    micros = static_cast<long long>(time);
+    // These complete triples are reserved for nonfinite interval datums in PG.
+    return !((months == std::numeric_limits<int32_t>::lowest() &&
+              days == std::numeric_limits<int32_t>::lowest() &&
+              micros == std::numeric_limits<int64_t>::lowest()) ||
+             (months == std::numeric_limits<int32_t>::max() &&
+              days == std::numeric_limits<int32_t>::max() &&
+              micros == std::numeric_limits<int64_t>::max()));
+}
+
 static std::string formatMicrosNumeric(__int128 value) {
     const bool negative = value < 0;
     const unsigned __int128 magnitude = negative
@@ -2516,6 +2565,12 @@ ExprValue ExprEvaluator::applyArithmetic(const std::string& op,
             if (op == "/" && k == 0)
                 throw DbError("22012",
                     "division by zero");
+            if (op == "/") {
+                long long months = 0, days = 0, micros = 0;
+                if (!divideIntervalFields(iv, k, months, days, micros))
+                    throw DbError("22008", "interval out of range");
+                return ExprValue("interval", formatIntervalInput(months, days, micros, true), false);
+            }
             const long double scale = op == "*"
                 ? static_cast<long double>(k)
                 : 1.0L / static_cast<long double>(k);

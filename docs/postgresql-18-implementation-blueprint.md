@@ -1,6 +1,6 @@
 # DBMS_C_plus_plus 对标 PostgreSQL 18.6：逐项完整实施蓝图
 
-## 当前持续目标与首批实施（2026-11-02）
+## 当前持续目标与分批实施（2026-11-03）
 
 已按用户要求建立持续目标：调研成熟数据库实现，逐项补齐非用户暂缓的 PostgreSQL 功能与性能缺口，
 在 `master` 上按可验收批次提交代码、测试及文档。原始 273 项要求和暂缓边界继续有效，不以局部优化关闭整个功能族。
@@ -63,15 +63,39 @@ COPY 响应中断已有 R197 用户暂缓记录补入中央索引；完整回归
 第九批基于bb74ae97缓存精确集合整数键、减少原比较参数的重复owning复制，保留共享堆/中断/执行owner。
 45原生通过、33协议32/1（原463/40不变）、新66在PG/旧/新全过；1980延迟含所有慢值见[集合键缓存报告](performance-report-2026-10-30.md#集合整数键缓存与比较参数复制2026-11-02)，未关闭原273条款。
 
-本轮基于 `baba4bcb` 接通普通 UNION ALL 全局 LIMIT/OFFSET 表达式，以及 VALUES/集合根的 FETCH `c_expr` 计数。
+前批基于 `baba4bcb` 接通普通 UNION ALL 全局 LIMIT/OFFSET 表达式，以及 VALUES/集合根的 FETCH `c_expr` 计数。
 全局计数使用空本层命名空间和真实祖先作用域，不能借用集合 ORDER 输出名或分支 FROM；局部分支计数保持自己的作用域。
 同一实际执行上下文每次重开更新后，先求 OFFSET 再求 LIMIT；零计数不打开分支，NULL offset 为零、NULL count 不限行数。
 裸 NULL FETCH WITH TIES 在分析时报错，typed/computed NULL 在执行时不限行数；WITH TIES 不使用普通候选截断。
 安全的有限 LIMIT+OFFSET 可驱动动态 Top-N，每次执行重置，后续不限行数时撤销旧上限，保留有序输入的表达式需求。
 未声明 OID 参数已支持实际选中上下文的普通元数据推导，保持原身份、槽位与来源；完整函数签名和所有参数组合仍为 partial。
-合法窗口计数子查询仍明确报 `0A000`，需要独立的真实窗口宿主降层；不能把该开放项改写为已完成或用户暂缓。
+该批记录时，合法窗口计数子查询仍明确报 `0A000`，实际宿主由下述后续批次补入；原失败记录保留。
 保留计划、实际参数帧/provider、portal、共享排序 helper 和所有专属暂缓边界不变。
-本轮验证终态及性能另见[性能报告](performance-report-2026-10-30.md)的后续记录；QRY-06 及原 273 项状态保持。
+该批验证终态及性能另见[性能报告](performance-report-2026-10-30.md)的对应记录；QRY-06 及原 273 项状态保持。
+
+2026-11-03，本轮基于 `9f019ffa`，最终 C9 程序 `c696d3b2` 为 Main、Core 和真实 SQL 子查询
+接入共用的类型化 WindowAgg，执行实际 source/filter、窗口投影和最终子句，沿用原查询上下文及外层关联。
+支持受验收的 derived/CTE/Main SourceContexts JOIN；通用 Core JOIN 的完整 lowering 仍开放。
+命名窗口保留真实父名与原始子句身份，支持合法继承及 ROWS/RANGE/GROUPS/EXCLUDE 的已接入边界；
+stage 按原始 WindowDef/winref 分组，frame offset 的初始化不会因共享排序键而合并。
+每行实际选中的完整 partition/order 键只求值一次，后续 stage、匹配的投影子树及窗口参数/FILTER 复用拥有值；
+frame offset 保持独立。输入键专项的 241 项规范化值、计数及消息字节与 PG 18.6 一致。
+
+已接入排名、NTILE、LAG/LEAD、FIRST/LAST/NTH_VALUE，以及合法签名的 COUNT/SUM/AVG/MIN/MAX、
+BOOL_AND/BOOL_OR/EVERY、标量 ARRAY_AGG、TEXT/BYTEA STRING_AGG、整数/BIT 位聚合。
+保留真实参数、默认值和 FILTER 需求、实际结果类型与 NULL/OID/对象身份；
+有限 INTERVAL 除法及窗口 AVG 修正余数换算和舍入，NUMERIC 不借浮点替代精确结果。
+仅在实际 WindowAgg 生产者能保证最终 ORDER BY 的兼容顺序前缀时省去最终 Sort，
+不兼容方向/表达式/分区仍排序；窗口 WITH TIES 复用已有键，保留 OFFSET、同行边界预读和错误前缀，
+零行上限不打开输入。本层 LIMIT/OFFSET 的非法窗口调用经真实 AST 分析报 `42P20`，合法子查询角色单独处理。
+
+窗口排序、分区和历史行仍无 work_mem 约束或 spill；统计窗口聚合的合法签名仍明确 `0A000`，
+window DISTINCT、内部 ORDER BY、数组值 ARRAY_AGG、完整聚合族及 temporal in_range 仍有缺口。
+普通 SELECT 动态计数、完整参数推导与其他 PostgreSQL 能力继续为 partial。
+本批不改变 R177 分组聚合执行、保留计划、实际参数帧/provider、portal、共享排序 helper 或原暂缓边界，
+不关闭 QRY-06、QRY-08 或原始 273 项。
+完整证据和速度限制见[类型化窗口宿主报告](performance-report-2026-10-30.md#类型化窗口宿主与有序输出复用2026-11-03)，
+历史失败及旧性能记录保留，不据此推断普遍加速或完整回归全绿。
 
 此后依次评估剩余分流/物化、常见修改快照工作量、完整工作内存与 spill、统计和计划选择，再扩大数据量与并发验证。
 聚合/HAVING/未接入集合分流、配置函数/例程 GUC 完整作用域、分区/RLS/并行等剩余物化及虚拟生成列表达式失败返回 NULL 的既有差异仍开放；

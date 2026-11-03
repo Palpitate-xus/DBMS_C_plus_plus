@@ -66,6 +66,7 @@
 #include <poll.h>
 #include <random>
 #include <set>
+#include <tuple>
 #include <signal.h>
 #include <sstream>
 #include <string>
@@ -2750,6 +2751,137 @@ bool describePreparedOrdinarySourceResult(const std::string& sql, Session& sessi
     return true;
 }
 
+void retainPreparedWindowOrigins(std::vector<PgColumnDescription>& columns,
+    const PreparedQuery& query, Session& session) {
+    using Origin = std::pair<uint32_t,uint16_t>;
+    using Site = std::tuple<const PreparedQuery*,const Stmt*,size_t>;
+    const Origin none{0,0};
+    const auto catalog = g_engine.catalogService().metadataSnapshot(session.currentDB);
+    const auto relation = [&](const PreparedQuery::SourceRange& source,size_t ordinal) -> Origin {
+        if (source.relationSchema.empty() || source.relationName.empty()) return none;
+        uint32_t namespaceOid = 0, relationOid = 0;
+        for (const auto& space : catalog.namespaces)
+            if (space.nspname == source.relationSchema) { namespaceOid = space.oid; break; }
+        if (!namespaceOid) return none;
+        for (const auto& table : catalog.relations)
+            if (table.relnamespace == namespaceOid && table.relname == source.relationName) {
+                relationOid = table.oid; break;
+            }
+        if (!relationOid) return none;
+        std::vector<const PgAttributeRow*> attributes;
+        for (const auto& attribute : catalog.attributes)
+            if (attribute.attrelid == relationOid && attribute.attnum > 0 && !attribute.attisdropped)
+                attributes.push_back(&attribute);
+        std::sort(attributes.begin(),attributes.end(),
+            [](const auto* left,const auto* right) { return left->attnum < right->attnum; });
+        // Column aliases rename source.columns, but never change its actual
+        // physical ordinal. Dropped attributes retain their real attnum gap.
+        if (attributes.size() != source.columns.size() || ordinal >= attributes.size()) return none;
+        return {relationOid,static_cast<uint16_t>(attributes[ordinal]->attnum)};
+    };
+    std::set<Site> path;
+    std::function<Origin(const PreparedQuery&,const Stmt*,size_t)> output;
+    std::function<Origin(const PreparedQuery&,const QueryColumnBinding&)> column;
+    column = [&](const PreparedQuery& owner,const QueryColumnBinding& binding) -> Origin {
+        if (binding.mergedUsing) return none;
+        const auto range = std::find_if(owner.sourceRanges.begin(),owner.sourceRanges.end(),
+            [&](const auto& source) { return source.ordinal == binding.sourceOrdinal; });
+        if (range == owner.sourceRanges.end() || range->mergedUsing ||
+            binding.columnOrdinal >= range->columns.size()) return none;
+        if (range->cteStatement)
+            return output(owner,range->cteStatement,binding.columnOrdinal);
+        if (range->source && range->source->type == FromItem::Type::Subquery)
+            return output(owner,range->source->subquery.get(),binding.columnOrdinal);
+        if (range->source && range->source->type != FromItem::Type::Table) return none;
+        // A view has its own static relation origin in PostgreSQL. Its
+        // independently prepared base query must not replace that identity.
+        return relation(*range,binding.columnOrdinal);
+    };
+    output = [&](const PreparedQuery& owner,const Stmt* statement,size_t ordinal) -> Origin {
+        if (!statement) return none;
+        const Site site{&owner,statement,ordinal};
+        if (!path.insert(site).second) return none; // recursive CTE origin
+        struct Pop {
+            std::set<Site>& path;
+            Site site;
+            ~Pop() { path.erase(site); }
+        } pop{path,site};
+        if (const auto* envelope = dynamic_cast<const WithStmt*>(statement))
+            return output(owner,envelope->statement.get(),ordinal);
+        const auto* select = dynamic_cast<const SelectStmt*>(statement);
+        if (!select || select->setOp != SetOp::None || select->setOpLhs || select->setOpRhs) return none;
+        const auto projections = owner.projectionBindings.find(select);
+        if (projections == owner.projectionBindings.end() || ordinal >= projections->second.size()) return none;
+        const auto& projection = projections->second[ordinal];
+        // Only a genuine bound Var (including an expanded star) has origin;
+        // window results, other computations and SQL-child values have none.
+        return projection.column ? column(owner,*projection.column) : none;
+    };
+    for (size_t i = 0; i < columns.size(); ++i) {
+        const auto origin = output(query,query.ast.get(),i);
+        columns[i].tableOid = origin.first;
+        columns[i].attributeNumber = origin.second;
+    }
+}
+
+bool describePreparedWindowHostResult(const std::string& sql, Session& session,
+    std::vector<PgColumnDescription>& columns, const std::vector<uint32_t>& parameterOids) {
+    SQLParser parser;
+    const auto parsed = parser.parseForBinding(sql);
+    const auto selectBody = [](const Stmt* statement) {
+        if (const auto* envelope = dynamic_cast<const WithStmt*>(statement))
+            statement = envelope->statement.get();
+        return dynamic_cast<const SelectStmt*>(statement);
+    };
+    const auto* select = parsed.isValid() ? selectBody(parsed.stmt.get()) : nullptr;
+    if (!select || !QueryPlanner::supportsPreparedSourceSelectPlan(*select)) return false;
+    std::function<bool(const Expr*)> window = [&](const Expr* value) {
+        if (!value || value->preparedSubquery) return false;
+        if (const auto* call = dynamic_cast<const FunctionCallExpr*>(value)) {
+            if (call->hasOver) return true;
+            for (const auto& argument : call->args) if (window(argument.get())) return true;
+            for (const auto& argument : call->namedArgs) if (window(argument.value.get())) return true;
+            for (const auto& key : call->aggregateOrderKeys) if (window(key.expr.get())) return true;
+            return window(call->filter.get());
+        }
+        if (const auto* unary = dynamic_cast<const UnaryOpExpr*>(value)) return window(unary->operand.get());
+        if (const auto* cast = dynamic_cast<const CastExpr*>(value)) return window(cast->operand.get());
+        if (const auto* binary = dynamic_cast<const BinaryOpExpr*>(value))
+            return window(binary->left.get()) ||
+                (binary->op != "::" && binary->op != "COLLATE" && window(binary->right.get()));
+        if (const auto* quantified = dynamic_cast<const QuantifiedComparisonExpr*>(value))
+            return window(quantified->left.get()) || window(quantified->right.get());
+        if (const auto* conditional = dynamic_cast<const CaseExpr*>(value)) {
+            if (window(conditional->switchExpr.get()) || window(conditional->elseExpr.get())) return true;
+            for (const auto& arm : conditional->whenClauses)
+                if (window(arm.first.get()) || window(arm.second.get())) return true;
+        } else if (const auto* array = dynamic_cast<const ArrayExpr*>(value)) {
+            for (const auto& field : array->elements) if (window(field.get())) return true;
+        } else if (const auto* record = dynamic_cast<const RowExpr*>(value))
+            for (const auto& field : record->elements) if (window(field.get())) return true;
+        return false;
+    };
+    bool current = !select->windowDefs.empty();
+    for (const auto& target : select->selectList) current = current || window(target.expr.get());
+    for (const auto& key : select->orderBy) current = current || window(key.expr.get());
+    if (!current) return false;
+    ProtocolSessionScope scope(session);
+    // Only the ordinary query's genuine static declaration is acquired.
+    // No plan/constant planning, source opening, scalar call or row demand.
+    const auto prepared = g_engine.prepareBoundQuery(session.currentDB, sql,
+        protocolMetadataParameters(session, parameterOids));
+    const auto* bound = selectBody(prepared.ast.get());
+    if (!bound || !QueryPlanner::supportsPreparedSourceSelectPlan(*bound)) return false;
+    QueryResult shape;
+    for (const auto& field : prepared.output) {
+        shape.columns.push_back(field.name);
+        shape.columnTypes.push_back(field.type);
+    }
+    columns = describeProtocolColumns(shape, sql, session, &prepared.output);
+    retainPreparedWindowOrigins(columns, prepared, session);
+    return !columns.empty();
+}
+
 bool describePreparedHavingResult(const std::string& sql, Session& session,
     std::vector<PgColumnDescription>& columns, const std::vector<uint32_t>& parameterOids = {}) {
     SQLParser parser;
@@ -3753,6 +3885,7 @@ bool describePreparedQuantified(const std::string& sql, Session& session,
 bool describePreparedResultShape(const std::string& sql, Session& session,
                             std::vector<PgColumnDescription>& columns,
                             const std::vector<uint32_t>& parameterOids = {}) {
+    if (describePreparedWindowHostResult(sql,session,columns,parameterOids)) return true;
     if(describePreparedQuantified(sql,session,columns,parameterOids))return true;
     if(describePreparedNamespaceCatalog(sql,session,columns,parameterOids))return true;
     if (describePreparedBitNegation(sql,session,columns,parameterOids)) return true;
@@ -5786,8 +5919,10 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session,
             // and genuinely parameter-free portals. The legacy value carrier
             // loses derived computed typmods. Bind before execution effects,
             // and retain the original portal parameter owner after expansion.
-            if (retainOrdinarySourceDeclaration && !typedExplain)
-                (void)describePreparedOrdinarySourceResult(sql, session, ordinarySourceColumns);
+            if (retainOrdinarySourceDeclaration && !typedExplain) {
+                if (!describePreparedWindowHostResult(sql, session, ordinarySourceColumns, {}))
+                    (void)describePreparedOrdinarySourceResult(sql, session, ordinarySourceColumns);
+            }
             executionError = execute(sql, session);
         } catch (const dbms::StatementCommitError& e) {
             executionError = true;

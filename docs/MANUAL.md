@@ -893,8 +893,10 @@ WITH TIES 仍要求 ORDER BY，判断同行只使用真实排序键，并取消�
 未指定类型 OID 的参数已支持按实际选中的计数、算术、CAST、CASE/COALESCE 等上下文推导输入声明，
 同一参数的多处引用保持实际身份与槽位；计数结果为 bigint 不表示每个输入都声明为 bigint。
 这仍是普通元数据分析的有限子集，完整函数签名推导和任意多处参数组合继续开放。
-合法窗口标量子查询（例如计数中的 `SELECT row_number() OVER()`）仍因缺少实际执行宿主报 `0A000`，不是已完成的窗口子查询支持。
-本层计数直接使用聚合、窗口或集合返回函数时，仍按真实角色拒绝；子查询自身的合法角色不因此被当作本层调用。
+受支持的合法窗口标量子查询（例如计数中的 `SELECT row_number() OVER()`）已进入真实类型化窗口宿主，
+可使用自身的行源、过滤和最终子句；关联值及重开继续沿用实际查询上下文。
+本层计数直接使用窗口函数经真实 AST 分析报 `42P20`；聚合和集合返回函数也按各自真实角色拒绝，
+子查询自身的合法角色不因此被当作本层调用。普通 SELECT 的动态计数及其他未接入组合仍未完整覆盖。
 这些扩展不改变保留计划、参数帧、provider、portal 或无效结果格式的既有边界，QRY-06 与原 273 项不因此关闭。
 
 ```sql
@@ -1033,11 +1035,36 @@ SELECT * FROM cte;
 
 ### 窗口函数
 
-窗口排序/分区、`NTILE`、`LAG/LEAD` 及 frame 的专项修复和验收范围见
-[逐项修复进度](review-fixes-2026-10-13.md)。支持的 frame 区分 ROWS、GROUPS
-和数值排序键的 RANGE，包含方向边界、合法空区间及 EXCLUDE；带 offset 的
-DATE/INTERVAL RANGE 仍不支持。以下示例展示语法，不代表完整 PostgreSQL
-窗口兼容，详细边界见 [frame 说明](issue-review-r04-window-frame-boundaries.md)。
+2026-11-03，基于源码 `9f019ffa` 的本批最终 C9 程序 `c696d3b2` 已将受支持的普通窗口查询接入
+Main、Core 和 SQL 子查询共用的类型化 WindowAgg。它执行真实行源、WHERE、窗口计算、投影及最终子句；
+支持已接入的 derived table、CTE、实际 Main/SourceContexts JOIN 和关联子查询，
+同一算子图重开时保留真实外层上下文与拥有值的类型、NULL 和对象元数据。
+这不代表通用 Core JOIN 已完成 lowering，也不扩大保留计划或参数帧的既有职责。
+
+支持命名窗口及合法继承、ROWS/GROUPS 和数值排序键的 RANGE、合法空帧及
+EXCLUDE CURRENT ROW/GROUP/TIES/NO OTHERS。frame offset 按原始 OVER/WINDOW 子句的实际 stage 初始化；
+共享排序键不合并独立 frame 的初始化。带 offset 的 DATE/INTERVAL RANGE 仍缺少完整 temporal in_range 支持。
+排名、NTILE、LAG/LEAD、FIRST/LAST/NTH_VALUE 使用真实窗口行与帧；
+聚合支持已绑定签名的 COUNT/SUM/AVG/MIN/MAX、BOOL_AND/BOOL_OR/EVERY、标量 ARRAY_AGG、
+TEXT/BYTEA STRING_AGG 及整数/BIT 的 BIT_AND/BIT_OR/BIT_XOR。
+
+每行按需求只求值一次的完整分区/排序键可供后续 stage 和匹配的投影子树、窗口参数及 FILTER 复用；
+frame offset 不使用这种输入值复用。241 项输入键协议控制与 PG 18.6 的规范化值、计数及消息字节一致。
+参数、LAG/LEAD 默认值和聚合 FILTER 的实际求值需求保留，FILTER 先于被过滤行的聚合参数。
+仅在实际窗口生产者保证最终 ORDER BY 为已有顺序的兼容前缀时省去最终 Sort；
+方向、表达式或分区顺序不兼容时仍排序。窗口 WITH TIES 使用已有键值判断同行，
+仍读取首个非同行边界行，OFFSET 跳过的行及边界行保留相应求值和错误需求；LIMIT 0 不打开输入。
+
+AVG 使用实际声明的结果类型；NUMERIC 保留精确十进制，受支持的 INTERVAL 除法及窗口 AVG
+已补月到日、日到微秒的余数换算与舍入，未据此宣称完整 interval 运算兼容。
+统计窗口聚合（方差/标准差、相关/协方差、回归）的合法签名仍报 `0A000`；
+window DISTINCT、聚合内部 ORDER BY、数组值 ARRAY_AGG 及完整聚合族仍未完成。
+窗口 stage 排序、分区和历史行仍可全量驻留内存，尚无 work_mem 上限或 spill，
+已有序输出按需消费不等于窗口查询已具备完整内存治理。
+
+本批证据与性能边界见[类型化窗口宿主报告](performance-report-2026-10-30.md#类型化窗口宿主与有序输出复用2026-11-03)；
+历次专项保留在[逐项修复进度](review-fixes-2026-10-13.md)和[frame 说明](issue-review-r04-window-frame-boundaries.md)。
+以下示例展示已支持语法的使用方式，不代表完整 PostgreSQL 窗口兼容。
 
 ```sql
 SELECT NAME, ROW_NUMBER() OVER (ORDER BY SCORE DESC) FROM users;

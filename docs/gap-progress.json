@@ -2,6 +2,52 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-03 typed prepared window host, input keys and proven output-order reuse",
+      "gap_ids": [
+        "QRY-08",
+        "SQL-12",
+        "FUNC-02",
+        "PROTO-04",
+        "OPT-10",
+        "P0-14"
+      ],
+      "status": "partial",
+      "evidence": [
+        "docs/performance-report-2026-10-30.md",
+        "docs/test-report.md",
+        "docs/MANUAL.md",
+        "src/executor/ExecutionPlan.cpp",
+        "src/executor/PreparedWindowOp.inc",
+        "src/executor/PreparedWindowSpec.h",
+        "src/executor/WindowAggregateState.h",
+        "src/executor/WindowKernel.h",
+        "src/expression/prepared_query_execution.cpp",
+        "src/expression/ExprEvaluator.cpp",
+        "src/parser/query_binding.cpp",
+        "src/main.cpp",
+        "src/network/NetworkServer.cpp"
+      ],
+      "tests": [
+        "tests/window_kernel_test.cpp",
+        "tests/prepared_window_host_execution_test.cpp",
+        "tests/prepared_window_error_cleanup_test.cpp",
+        "tests/interval_division_test.cpp",
+        "tests/select_window_count_binding_test.cpp",
+        "tests/prepared_window_order_execution_test.cpp",
+        "tests/prepared_window_host_protocol_e2e_test.py",
+        "tests/pg_protocol_prepared_window_input_keys.py",
+        "tests/interval_division_protocol_e2e_test.py",
+        "tests/prepared_window_order_demand_protocol_e2e_test.py"
+      ],
+      "verification": {
+        "correctness": "Final C9 c696d3b2; broad68 native plus2 independent entries70 all0; new223/37/3/39/30/16=348 controls0. Full58wire55/3 plus same-C9 key2410 and interval106/10 ->60unique56pass4fail, unfiltered. FullBind463/40 byteequal. CTE747/29+nested325/42 retain71 categorized observations; C7 introduced14 old-pass regressions all C8-fixed and C9 rechecked, no blanket R303 claim. Host226/key241/order201 PG/finalall0; interval10 onlyconstant-error Bind/Execute frames/description count; values/types/state/20AVG0. No full910 rerun claim.",
+        "resources": "Final common8 old/new/old24 full1000row checks; ordinary finalTypedSort64kB actualmax2anonymousFD vs16MB sample0,1000rows3000cells equal/EOFclean; ownedFD SIGKILL/reopen1000base4000cells+1000sorted equal. 43 requests=28completed reads+1killed read+14SET/SHOW;1072fixturefiles unchanged;35 finite operation results/errors0 but server context exit-6 std::system_error Invalid argument, driver1/completefalse; whole entry failed, retained, existing R15 deferred/no investigation or rerun. Only finalSort budget proved, window partition/stage buffers still unbounded.",
+        "performance": "Final frozen common8 old58/newC9/old58 threebudgets all864timed216warmup18SET-SHOW=1098SQL,1080000rows2970000cells checked,24fullcases/min-max/raw retained/all0/norerun. full_first_last_nth vsold-last5.15/5.33/5.84x faster;other7classes21cells new latency1.92-2.70xoldlast,4/16MB slower than both baselines.64k old drift-36.3%..-87.6% retained,no universal gain. OldWindowOp finalsort ignoreswork_mem vsnewTypedSort fullcontexts,not equalresource policy;commonbasepayload5-8B/wideFDcontrolseparate. C7 historical288/72/6 retained independently;4MB controlledstopbeforeSQL/16MBnotlaunched. No new PG performance baseline.",
+        "scope": "Real owning computed input/output slots and structural WindowDef metadata, real sourceOccurrence/ordinal/provider/actual parameter-frame ownership retained. Same-key stage ordering/proven final-order prefix elimination/normal TIES demand/typed Describe/runtime prefix/finite interval division. C9 onlyprivate readcopy2->1 via original synchronous execution.context and keysK+P+O->K, same owning snapshots/defensive check timing. New15/16 tests explicitly planned public owner, original14 byteexact; default unplanned Core planning not changed. Existing2302tests/original273objects-array/atomic clauses/725protected exact, history247 strict suffix, final sourceaudit33/33. R185/R177/retained planning/portal/format-owner policies unchanged. GenericCoreJOIN/statwindows/temporalRANGE/windowwork_mem/otherSELECTcounts open, goalactive.",
+        "proof": "build/pg-feature-window-host-557k7fi8/final-provenance.json"
+      }
+    },
+    {
       "issue": "2026-11-02 global UNION ALL count expressions, FETCH grammar and dynamic sort bounds",
       "gap_ids": [
         "QRY-06",

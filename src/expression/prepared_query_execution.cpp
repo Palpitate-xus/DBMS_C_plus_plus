@@ -4,6 +4,7 @@
 #include "catalog/catalog.h"
 #include "common/DbError.h"
 #include "expression/expr_helper.h"
+#include "expression/aggregate_type.h"
 #include "parser/parser.h"
 #include <algorithm>
 #include <optional>
@@ -33,6 +34,9 @@ ExprPtr copyExpression(const Expr* source, std::map<const Expr*, const Expr*>& s
         target.frameBetween = source.frameBetween;
         target.orderNullsFirst = source.orderNullsFirst;
         target.orderDirectionSpecified = source.orderDirectionSpecified;
+        target.referenceName = source.referenceName;
+        target.partitionComparisons = source.partitionComparisons;
+        target.orderComparisons = source.orderComparisons;
         for (const auto& expr : source.partitionBy) target.partitionBy.push_back(copy(expr));
         for (const auto& expr : source.orderBy) target.orderBy.emplace_back(copy(expr.first),expr.second);
         target.frameStart = copy(source.frameStart); target.frameEnd = copy(source.frameEnd);
@@ -735,6 +739,57 @@ void lowerAggregateColumns(ExprPtr& expression,
     else if (auto* row = dynamic_cast<RowExpr*>(expression.get()))
         for (auto& child : row->elements) lower(child);
 }
+
+// Match exact original value occurrences, never textual/semantic identities.
+// An independently owned SQL child and the OVER key/frame trees keep their
+// original execution sites. Only the actual input operator supplies this
+// separate private computed-column namespace.
+void lowerWindowInputColumns(ExprPtr& expression,
+    const std::map<const Expr*, QueryColumnBinding>& columns,
+    std::map<const Expr*, const Expr*>& sites,
+    const std::map<const Expr*, const Stmt*>& owners, const Stmt* owner) {
+    if (!expression || columns.empty()) return;
+    const auto site = sites.find(expression.get());
+    if (site != sites.end()) {
+        const auto source = owners.find(site->second);
+        const auto column = columns.find(site->second);
+        if (source != owners.end() && source->second == owner && column != columns.end()) {
+            const auto* original = site->second;
+            auto result = std::make_unique<ColumnRefExpr>();
+            result->column = "__window_input";
+            result->binding = column->second;
+            result->sourceBegin = expression->sourceBegin;
+            result->sourceEnd = expression->sourceEnd;
+            visitStructuredValue(expression.get(), [&](const Expr* value) { sites.erase(value); });
+            sites[result.get()] = original;
+            expression = std::move(result);
+            return;
+        }
+    }
+    if (expression->preparedSubquery) return;
+    const auto lower = [&](ExprPtr& child) {
+        lowerWindowInputColumns(child, columns, sites, owners, owner);
+    };
+    if (auto* call = dynamic_cast<FunctionCallExpr*>(expression.get())) {
+        for (auto& argument : call->args) lower(argument);
+        for (auto& argument : call->namedArgs) lower(argument.value);
+        for (auto& key : call->aggregateOrderKeys) lower(key.expr);
+        lower(call->filter);
+    } else if (auto* unary = dynamic_cast<UnaryOpExpr*>(expression.get())) lower(unary->operand);
+    else if (auto* binary = dynamic_cast<BinaryOpExpr*>(expression.get())) {
+        lower(binary->left);
+        if (binary->op != "::" && binary->op != "COLLATE") lower(binary->right);
+    } else if (auto* quantified = dynamic_cast<QuantifiedComparisonExpr*>(expression.get())) {
+        lower(quantified->left); lower(quantified->right);
+    } else if (auto* cast = dynamic_cast<CastExpr*>(expression.get())) lower(cast->operand);
+    else if (auto* conditional = dynamic_cast<CaseExpr*>(expression.get())) {
+        lower(conditional->switchExpr); lower(conditional->elseExpr);
+        for (auto& arm : conditional->whenClauses) { lower(arm.first); lower(arm.second); }
+    } else if (auto* array = dynamic_cast<ArrayExpr*>(expression.get()))
+        for (auto& child : array->elements) lower(child);
+    else if (auto* row = dynamic_cast<RowExpr*>(expression.get()))
+        for (auto& child : row->elements) lower(child);
+}
 }
 
 QueryColumnBinding PreparedQueryExecution::registerAggregateColumn(
@@ -771,6 +826,93 @@ bool PreparedQueryExecution::aggregateColumnDemanded(const FunctionCallExpr* cal
     return demanded;
 }
 
+QueryColumnBinding PreparedQueryExecution::registerWindowInputColumn(
+    const Expr* expression, const std::string& type, bool includeWindowArguments) {
+    const auto owner = owners_.find(expression);
+    const auto* select = owner == owners_.end() ? nullptr : dynamic_cast<const SelectStmt*>(owner->second);
+    if (!expression || !select || type.empty())
+        throw DbError("XX000", "window input requires an original prepared SELECT value");
+    if (const auto* call = dynamic_cast<const FunctionCallExpr*>(expression); call && call->hasOver)
+        throw DbError("XX000", "a window producer cannot be registered as its input");
+    std::function<bool(const Expr*)> contains = [&](const Expr* value) {
+        if (!value) return false;
+        if (value == expression) return true;
+        if (value->preparedSubquery) return false;
+        if (const auto* call = dynamic_cast<const FunctionCallExpr*>(value)) {
+            if (call->hasOver && !includeWindowArguments) return false;
+            // The real aggregate operator already owns its argument demand.
+            // It is not a projection/window-input occurrence.
+            if (!call->hasOver && !aggregate_type_detail::builtinName(call).empty() &&
+                !evaluator_.hasScalarFunction(call, engine_)) return false;
+            for (const auto& argument : call->args) if (contains(argument.get())) return true;
+            for (const auto& argument : call->namedArgs) if (contains(argument.value.get())) return true;
+            return contains(call->filter.get());
+        }
+        if (const auto* unary = dynamic_cast<const UnaryOpExpr*>(value)) return contains(unary->operand.get());
+        if (const auto* cast = dynamic_cast<const CastExpr*>(value)) return contains(cast->operand.get());
+        if (const auto* binary = dynamic_cast<const BinaryOpExpr*>(value))
+            return contains(binary->left.get()) ||
+                (binary->op != "::" && binary->op != "COLLATE" && contains(binary->right.get()));
+        if (const auto* quantified = dynamic_cast<const QuantifiedComparisonExpr*>(value))
+            return contains(quantified->left.get()) || contains(quantified->right.get());
+        if (const auto* conditional = dynamic_cast<const CaseExpr*>(value)) {
+            if (contains(conditional->switchExpr.get()) || contains(conditional->elseExpr.get())) return true;
+            for (const auto& arm : conditional->whenClauses)
+                if (contains(arm.first.get()) || contains(arm.second.get())) return true;
+        } else if (const auto* array = dynamic_cast<const ArrayExpr*>(value)) {
+            for (const auto& field : array->elements) if (contains(field.get())) return true;
+        } else if (const auto* row = dynamic_cast<const RowExpr*>(value))
+            for (const auto& field : row->elements) if (contains(field.get())) return true;
+        return false;
+    };
+    bool eligible = false;
+    for (const auto& target : select->selectList) if (contains(target.expr.get())) { eligible = true; break; }
+    if (!eligible) for (const auto& order : select->orderBy)
+        if (contains(order.expr.get())) { eligible = true; break; }
+    if (!eligible)
+        throw DbError("XX000", "window input is outside its original projection/ORDER value scope");
+    auto [position, inserted] = windowInputColumns_.try_emplace(expression);
+    if (inserted) {
+        // This is an execution-private computed namespace, not a query
+        // SourceRange, parameter/frame slot, or a replacement aggregate site.
+        position->second.sourceOrdinal = std::numeric_limits<size_t>::max() - 1;
+        position->second.columnOrdinal = windowInputColumns_.size() - 1;
+        position->second.declaredType = type;
+        for (auto& compiled : compiled_) {
+            const auto original = owners_.find(compiled.first);
+            if (original != owners_.end() && original->second == select)
+                lowerWindowInputColumns(compiled.second, windowInputColumns_, originalSites_, owners_, select);
+        }
+    } else if (ExprHelper::canonicalResultTypeName(position->second.declaredType) !=
+               ExprHelper::canonicalResultTypeName(type))
+        throw DbError("XX000", "window input changed its result descriptor");
+    return position->second;
+}
+
+std::optional<QueryColumnBinding> PreparedQueryExecution::windowInputColumn(const Expr* expression) const {
+    const auto column = windowInputColumns_.find(expression);
+    return column == windowInputColumns_.end() ? std::nullopt
+        : std::optional<QueryColumnBinding>(column->second);
+}
+
+bool PreparedQueryExecution::windowInputColumnDemanded(const Expr* expression) const {
+    const auto binding = windowInputColumns_.find(expression);
+    if (binding == windowInputColumns_.end())
+        throw DbError("XX000", "window input demand requires its registered result column");
+    const auto owner = owners_.at(expression);
+    bool demanded = false;
+    for (const auto* original : prepared_) {
+        if (owners_.at(original) != owner) continue;
+        visitStructuredValue(compiled_.at(original).get(), [&](const Expr* value) {
+            const auto* column = dynamic_cast<const ColumnRefExpr*>(value);
+            if (column && column->binding &&
+                column->binding->sourceOrdinal == binding->second.sourceOrdinal &&
+                column->binding->columnOrdinal == binding->second.columnOrdinal) demanded = true;
+        });
+    }
+    return demanded;
+}
+
 void PreparedQueryExecution::prepareExpression(Expr* expression) {
     if (!expression || prepared_.count(expression)) return;
     if (!owners_.count(expression))
@@ -780,6 +922,7 @@ void PreparedQueryExecution::prepareExpression(Expr* expression) {
         // Explicit pure planning does not bind runtime callbacks or give an
         // aggregate/window/SRF a scalar execution role. The actual consumer
         // still performs its normal preparation before evaluation.
+        lowerWindowInputColumns(planned->second, windowInputColumns_, originalSites_, owners_, owners_.at(expression));
         evaluator_.bindScalarFunctions(planned->second.get(), engine_);
         prepared_.insert(expression);
         return;
@@ -788,6 +931,7 @@ void PreparedQueryExecution::prepareExpression(Expr* expression) {
     std::map<const Expr*, const Expr*> independentChildren;
     auto compiled = copyExpression(expression,sites,independentChildren);
     lowerAggregateColumns(compiled, aggregateColumns_, sites);
+    lowerWindowInputColumns(compiled, windowInputColumns_, sites, owners_, owners_.at(expression));
     for (const auto& child : independentChildren) {
         const auto source = children_.find(child.second);
         if (source == children_.end()) throw DbError("XX000", "range child has no prepared owner");

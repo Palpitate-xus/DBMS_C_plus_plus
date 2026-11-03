@@ -1,6 +1,6 @@
 # 与 PostgreSQL 18 的功能和性能差距
 
-## 当前评估（2026-11-02）
+## 当前评估（2026-11-03）
 
 本页总账及 35 类 PG 性能对照以源码输入 `9b71e118` 为准；随后在 `e7dcd673` 上完成下述 Top-N 批次。
 之后在 `17df7ff3` 上补充普通非分区 TableScan 按页扫描，局部验证范围分别记录，不重写历史 PG 样本。
@@ -10,7 +10,9 @@
 再基于 `049c0bce` 接通会话 work_mem 与普通物理 Sort 的实际预算，配置函数和完整例程/算子治理仍开放。
 随后基于 `d8533bc9` 为普通类型化/多键排序增加预算、完整快照和比较缓存，其他排序/算子边界继续分别开放。
 再基于 `8a8532a0` 接入普通 UNION ALL/VALUES 的预算排序、真实 VALUES 查询子句和枚举输出描述符；其他集合分流及完整参数推导继续开放。
-本轮基于 `baba4bcb` 扩展普通 UNION ALL 全局计数表达式、VALUES/集合根 FETCH `c_expr` 和实际选中上下文的参数声明推导；窗口子查询执行宿主与完整参数推导继续开放。
+前批基于 `baba4bcb` 扩展普通 UNION ALL 全局计数表达式、VALUES/集合根 FETCH `c_expr` 和实际选中上下文的参数声明推导。
+本轮基于 `9f019ffa`，最终 C9 程序 `c696d3b2` 接入 Main/Core/真实 SQL 子查询共用的类型化窗口宿主；
+窗口内存治理、通用 Core JOIN lowering、完整参数推导及其他 PostgreSQL 能力仍开放。
 产品仍为 0.2.0 / C++17，仓库既定行为基线为 **PostgreSQL 18.6**。
 本项目已有真实的单机数据库内核，但距离 PostgreSQL 级别的通用功能、规模扩展和生产验收仍有明显差距。
 这次更新复核总账、当前源码和测量记录，不重新认定 273 项要求已经验收，也不变更用户暂缓范围。
@@ -74,14 +76,31 @@
 执行时 OFFSET 先于 LIMIT，计数为零时不打开分支；动态 NULL count 不限行数，区别于裸 NULL FETCH WITH TIES 的分析错误。
 有限且加法安全的动态上限可用于 Top-N，逐次重置；后续 NULL/不限行数撤销旧界限，WITH TIES 不截断同行输入。
 未知 OID 输入按实际选中上下文推导声明的支持仍为 partial，计数结果 bigint 不等于所有输入类型 bigint。
-合法窗口标量子查询尚缺执行宿主，仍有明确 `0A000`；其他集合运算、完整函数签名推导和原始 QRY-06 功能族未完成。
-本轮验证与速度的最终记录另见[性能报告](performance-report-2026-10-30.md)；此处不把尚未完成的候选验证或历史倍率写成最新结论。
+受支持的合法窗口标量子查询现已使用真实窗口宿主；本层计数直接调用窗口函数仍经 AST 分析报 `42P20`。
+其他集合运算、普通 SELECT 动态计数、完整函数签名推导和原始 QRY-06 功能族未完成。
+
+窗口宿主执行真实行源、过滤、窗口投影和最终子句，支持已验证的 derived/CTE、Main SourceContexts JOIN 与外层关联，
+按实际原始子句保留命名继承、ROWS/RANGE/GROUPS/EXCLUDE 和 frame 初始化身份。
+排名及受支持的普通窗口聚合保留实际结果类型、NULL 和对象元数据；有限 INTERVAL 除法及 AVG 修正余数换算与舍入。
+完整输入键每行按需求只求值一次，匹配的投影、窗口参数/FILTER 和后续 stage 复用拥有值；
+241 项输入键协议的规范化值、计数及消息字节与 PG 18.6 一致，frame offset 不参与这种共享。
+实际生产者保证最终 ORDER 为既有顺序的兼容前缀时省去最终 Sort，反向/不同表达式等反例仍保留排序；
+窗口 WITH TIES 使用已有键并保留边界行预读、OFFSET 和投影/参数的求值需求。
+
+这仍是有限实现：窗口 stage 排序、分区和历史行驻留内存，不受 work_mem 约束且没有 spill；
+统计窗口聚合的合法签名仍报 `0A000`，window DISTINCT、内部 ORDER BY、数组值 ARRAY_AGG、
+完整聚合族及 temporal in_range 尚未完成。正常执行的这些改进不改变保留计划、参数帧/provider、
+portal 或其他既有暂缓范围，也不关闭 QRY-06、QRY-08 或原 273 项。
+本轮1,000行共同窗口对照中，first/last/nth组合相对旧回测约快5.15–5.84倍，其他7类在各预算仍较慢；
+旧窗口最终排序与新TypedSort的资源策略也不同，不能称全部查询加速或据此更新历史PG倍率。
+本轮证据和速度限制见[类型化窗口宿主报告](performance-report-2026-10-30.md#类型化窗口宿主与有序输出复用2026-11-03)；
+历史失败与慢值保留，不能据此宣称普遍加速或完整回归全绿。
 
 ## 主要能力差距及实际影响
 
 | 领域 | 当前已有能力 | 距离 PostgreSQL 18 的主要差距 |
 | --- | --- | --- |
-| SQL、类型、目录与 DML | typed AST、常用查询/约束、窗口/集合操作/子查询和多种数据类型的真实执行子集；已接入 UNION ALL/VALUES 的计数表达式与 FETCH `c_expr` | parse/analyze/rewrite/planner 边界、窗口查询子宿主、完整参数/函数重载推导、目录字段/依赖和事务化 DDL 仍不完整；命令能解析不等于所有组合语义正确 |
+| SQL、类型、目录与 DML | typed AST、常用查询/约束、集合/子查询和多种数据类型的真实执行子集；UNION ALL/VALUES 计数表达式及 FETCH `c_expr`；Main/Core/SQL 子查询的受支持 typed WindowAgg | parse/analyze/rewrite/planner 边界、其余窗口族与帧/类型组合、普通 SELECT 动态计数、完整参数/函数重载推导、目录字段/依赖和事务化 DDL 仍不完整；命令能解析不等于所有组合语义正确 |
 | 优化器与计划 | 顺序/受限索引扫描、三类 JOIN、基础统计和代价选择、部分参数化查询 | 缺完整候选 path 搜索、等价类、参数化路径、多表 JOIN 搜索和统计模型；计划质量不能随 SQL 复杂度稳定扩展，见 [OPT-01](issue-opt-01-path-planner-audit.md) |
 | 执行内存与并行 | 部分 heap page-range 多线程扫描、排序协作中断；类型化有序 LIMIT 有界堆、非分区 TableScan 按页游标；普通物理单键、已接入的普通类型化/多键及 UNION ALL/VALUES Sort 的会话预算与外部按需归并 | 聚合/HAVING/未接入集合分流、哈希/窗口/JOIN、结果接收器和部分源仍可能全量物化；配置函数/完整例程 GUC、完整资源治理及 worker 生命周期仍缺，见[条款](review-requirement-clauses.json) |
 | 索引与修改路径 | B+Tree、Hash 和其他访问方法的有限实现；部分 SELECT 使用真实索引候选 | 其余 AM/opclass、并发/WAL/谓词范围规则和 index-only/bitmap 能力不完整；本轮 UPDATE/DELETE 整数预筛选仍是堆扫描，不是物理索引定位，见[实现与实测](performance-report-2026-10-30.md) |
