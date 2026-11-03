@@ -2,6 +2,38 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-03 primitive row materialization provenance and vector capacity",
+      "gap_ids": [
+        "QRY-08",
+        "TYPE-17",
+        "TYPE-19",
+        "PROTO-04"
+      ],
+      "status": "partial",
+      "evidence": [
+        "docs/performance-report-2026-10-30.md",
+        "docs/test-report.md",
+        "docs/postgresql-comparison.md",
+        "docs/postgresql-18-implementation-blueprint.md",
+        "docs/benchmarks/owned-datum-primitive-20261103.json"
+      ],
+      "tests": [
+        "tests/owned_compound_spill_codec_test.cpp",
+        "tests/owned_compound_physical_spill_test.cpp",
+        "tests/numeric_special_binary_output_test.cpp"
+      ],
+      "verification": {
+        "candidate": "Parent745bed31c7cde0602a7484e877ce815f04ca3b4c; only ExecutionPlan.cpp cells changed SHA5df4afe4ac7d438c23fa5165ab344fc56b211d6e491da11588e2cf6a1e757691; C8 binary91d339db4bdfb55922e92d853f9a357e10c7c376b4c711cf302c191282ea6115. NormalCMake actual1compile61reuse and62object dependency closure verified.",
+        "implementation": "Only genuine stored arrays/REGTYPE consume new physical-provenance lookup. Complete available primitive rows reserve actual schema width; original structured/NULL/unavailable/malformed/array/reference paths and error ownership preserved. No ABI/publicheader changes.",
+        "correctness": "ActualC8 selected26native26pass;31wire24pass7sameoldfail, all31full observations equalC7. Frozen301187match114remaining;83/111 each2configdifferences;physicalREGTYPE68 57pass11ordinaryfail+normalparameters16pass. All final strict actuals unchangedC7, not full106/95 rerun or completePG support.",
+        "allocations": "Full690metrics across actual6S3/C7/C8 clocks/counter executables retained. N512 cold+3restarts each C8vsC7 minus1536CPPnewrequests/minus393216requestedB; vsS3 minus1024requests/minus188256Bcold or188416Brestarts. Only N1/N512 first-next allocation regions change; everyotherphase/helper/sender count andbytes equalC7. Cumulative allocations are notlive/peak/RSS; singlecold andcorrelatedrestartCPU are notstablecausal speed.",
+        "resources": "Actual55requests=40fullreads14SET1verifiedreadonlyspoolkill;40000rows118000cells,5normalcontexts0;lowFDmax2/highobserved0,remaining{},namedpathsclean;killminus9 andsameprivate-directoryreopen fullvalues. Not arbitrarywrite crashrecovery,windowbudget,hardRSS orR15closure.",
+        "performance": "Once1638=1296timed324untimedwarm18SET;1620000rows4725000cells/9normal0/inputsexact.36groups5faster18slower13between;64k0/9/3,4MB4/2/6,16MB1/7/4. Baseline drift minus49.167597..plus9.860801percent;worstp50ratio1.177434755. All108raw12distributions/slowvalues retained. SeparateC7 andC8 windows cannot establish causalC7speedratio.",
+        "release": "Source optimization retained; defaultinstallation performancepromotion rejected because18groups abovebothS3 medians. InstalledS3AA52 retained. OriginalC7 archive/report andfailedgate preserved; goalactive.",
+        "scope": "Original273 items/status22complete166partial70unverified15deferred_by_user unchanged; prior252recent_updates raw suffix preserved;all2322testfiles,156headers,725protected records and754MDpathset preserved. Original dedicated deferrals unchanged; no newbranch/push/Actions, master Palpitate-xus."
+      }
+    },
+    {
       "issue": "2026-11-03 owning compound binary result and physical REGTYPE subset",
       "gap_ids": [
         "TYPE-17",

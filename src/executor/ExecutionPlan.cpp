@@ -370,15 +370,30 @@ struct PreparedSelectState {
                 }
             }
         }
-        const auto physicalOrigin=source.scanOrigin();
         const QueryRowDescriptor* physicalDeclaration=nullptr;
-        if(physicalOrigin.engine==engine && physicalOrigin.dbname==dbname &&
-           physicalOrigin.tablename==schema.tablename && sourceOrdinal!=noTarget) {
-            for(const auto& range:query->sourceRanges)
-                if(range.owner==statement && range.ordinal==sourceOrdinal) {
-                    physicalDeclaration=&range.columns;break;
-                }
+        bool needsPhysicalDatum=false;
+        for(size_t i=0;i<schema.len;++i)
+            if(schema.cols[i].generatedKind!='v' &&
+               (schema.cols[i].isArray || stored_regtype_detail::columnType(schema.cols[i].dataType))) {
+                needsPhysicalDatum=true;break;
+            }
+        // Only the actual array/reference loaders below consume provenance.
+        // Primitive rows retain the original NULL/decode source path above.
+        if(needsPhysicalDatum) {
+            const auto physicalOrigin=source.scanOrigin();
+            if(physicalOrigin.engine==engine && physicalOrigin.dbname==dbname &&
+               physicalOrigin.tablename==schema.tablename && sourceOrdinal!=noTarget) {
+                for(const auto& range:query->sourceRanges)
+                    if(range.owner==statement && range.ordinal==sourceOrdinal) {
+                        physicalDeclaration=&range.columns;break;
+                    }
+            }
         }
+        // Reserve only after the original source supplied a complete row.
+        // Unavailable/malformed fallback keeps its original allocation/errors.
+        if(!needsPhysicalDatum && schema.len<=MAX_COLUMNS && values.empty() &&
+           available && structured.size()==schema.len && nulls.size()==schema.len)
+            values.reserve(schema.len);
         for (size_t i = 0; i < schema.len; ++i) {
             bool computedNull = false;
             const std::string value = available ? structured.at(i) :
