@@ -1137,6 +1137,16 @@ static PgAttributeRow catalogAttributeForColumn(
     attribute.attnum = static_cast<int16_t>(columnIndex + 1);
     attribute.attname = column.dataName;
     attribute.atttypid = ensureTypeInCatalog(cat, namespaceOid, column);
+    if (column.isArray && (column.dataType == "regtype" || column.dataType == "regtype[]")) {
+        // This newly supported stored family has a real built-in array
+        // identity. Do not manufacture a pair or change any older family.
+        const auto element = cat.getType(2206);
+        const auto array = cat.getType(2211);
+        if (!element || !array || element->typarray != 2211 || array->typelem != 2206 ||
+            element->typnamespace != 11 || array->typnamespace != 11)
+            throw DbError("XX001", "regtype array has no genuine built-in catalog pair");
+        attribute.atttypid = array->oid;
+    }
     if (!column.domainName.empty()) {
         CatalogManager::QualifiedName domain;
         if (!CatalogManager::parseQualifiedName(column.domainName, domain))
@@ -4795,6 +4805,10 @@ bool DdlExecutor::columnDefToColumn(const ColumnDef& cd, const std::string& dbna
     else if (baseType == "datetime") baseType = "timestamp";
 
     const auto& typeMods = cd.typeMods.empty() ? domainTypeMods : cd.typeMods;
+    if (baseType == "regtype" && !typeMods.empty()) {
+        error = "type modifier is not allowed for type regtype (SQLSTATE 42601)";
+        return false;
+    }
     int typeMod1 = 0, typeMod2 = 0;
     if (!typeMods.empty()) {
         try {
@@ -4874,6 +4888,18 @@ bool DdlExecutor::columnDefToColumn(const ColumnDef& cd, const std::string& dbna
         // hold n multibyte UTF-8 characters.  Keep the declared character
         // width in dsize and use a varlena physical slot for new SQL columns.
         col.isVariableLength = true;
+    } else if (baseType == "regtype") {
+        if (!typeMods.empty()) {
+            error = "type modifier is not allowed for type regtype (SQLSTATE 42601)";
+            return false;
+        }
+        col.dataName = cd.name;
+        col.dataType = "regtype";
+        col.dsize = cd.isArray ? size_t(65535) : sizeof(uint32_t);
+        col.isVariableLength = cd.isArray;
+        col.isUnsigned = !cd.isArray;
+        col.isNull = cd.isNull;
+        col.isPrimaryKey = cd.isPrimaryKey;
     } else if (baseType == "text") {
         col = makeTextColumn(cd.name, cd.isNull, cd.isPrimaryKey);
     } else if (baseType == "boolean" || baseType == "bool") {

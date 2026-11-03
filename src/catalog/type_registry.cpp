@@ -216,7 +216,8 @@ std::string TypeRegistry::resolveColumnType(Column& col,
         TypeModResult base = applyTypeMods(canonical, typeMods);
         if (!base.ok()) return base.error;
         col.dataType = canonical + "[]";
-        col.dsize = base.dsize;
+        col.dsize = canonical == "regtype" ? size_t(65535) : base.dsize;
+        if (canonical == "regtype") col.isUnsigned = false;
         col.isVariableLength = true;
         col.isArray = true;
         col.typeMod = retainsModifier ? base.typmod : -1;
@@ -230,6 +231,7 @@ std::string TypeRegistry::resolveColumnType(Column& col,
     col.dsize = r.dsize;
     col.isVariableLength = r.isVariableLength;
     col.isArray = false;
+    if (canonical == "regtype") col.isUnsigned = true;
     col.typeMod = retainsModifier ? r.typmod : -1;
 
     // 同步 dataName（列名）不应由类型系统设置，但保留调用者已设置的值
@@ -288,6 +290,11 @@ std::string TypeRegistry::validateColumn(Column& col) const {
             col.dsize = entry->maxLength;
             col.isVariableLength = true;
         }
+    }
+
+    if (entry->canonicalName == "regtype") {
+        col.isUnsigned = !isArray;
+        col.dsize = isArray ? size_t(65535) : sizeof(uint32_t);
     }
 
     // 修正 isVariableLength 标记：以注册表为准
@@ -357,6 +364,7 @@ void TypeRegistry::registerNumericTypes() {
 }
 
 void TypeRegistry::registerStringTypes() {
+    registerType({"regtype", 4, 'i', 'p', TypeCategory::ObjectReference, false, -1, 65535, true});
     registerType({"name", 64, 'c', 'p', TypeCategory::String, false, -1, 0, true});
     // The catalog's one-byte type has its own quoted identity. Never register
     // unquoted char as its alias: SQL CHAR remains the bpchar grammar alias.

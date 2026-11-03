@@ -17,6 +17,7 @@
 
 #include "parser/ast.h"
 #include "catalog/type_registry.h"
+#include "common/DatumType.h"
 #include <functional>
 #include <cstdint>
 #include <map>
@@ -27,6 +28,7 @@
 
 namespace dbms {
 struct QueryHostSetReturningProvider;
+struct CompoundDatum;
 
 // Forward declaration so sequence builtins can delegate to the engine.
 class StorageEngine;
@@ -47,6 +49,8 @@ struct ExprValue {
     // Actual typed record fields, independent of record text output. An
     // empty vector is ROW(); absence means no structural record datum.
     std::optional<std::vector<ExprValue>> recordFields;
+    // Owning immutable structure/type metadata, absent for ordinary scalars.
+    std::shared_ptr<const CompoundDatum> compound;
 
     ExprValue() = default;
     ExprValue(std::string typeName_, std::string value_, bool isNull_ = false)
@@ -56,6 +60,19 @@ struct ExprValue {
     bool asBool() const;
     int64_t asInt() const;
     double asDouble() const;
+};
+
+// Metadata-only record payloads may be shared across rows. Array results own
+// their complete row-major values and bounds; published payloads are immutable.
+// Missing arrayElements is distinct from an empty vector and from SQL NULL.
+struct CompoundDatum {
+    DatumTypePtr type;
+    std::optional<std::vector<ExprValue>> arrayElements;
+    std::vector<DatumArrayDimension> dimensions;
+    // Wire array flags can retain a NULL bitmap even after a NULL-free slice.
+    // Missing means no physical bitmap provenance; any actual NULL still
+    // requires a bitmap. Producers with known provenance retain it explicitly.
+    std::optional<bool> arrayNullBitmap;
 };
 
 // ----------------------------------------------------------------------------
@@ -130,6 +147,12 @@ public:
     // literal datum. No SQL type lookup, row, routine or query is evaluated.
     static ExprValue transformUnknownIntegerInput(const ExprValue& input,
         const std::string& resolvedType);
+    // Convert an already evaluated scalar reference datum using resolved
+    // builtin roles. No AST, RowContext, parameter slot, source or callback
+    // is manufactured; ALTER supplies its real engine and database.
+    static ExprValue castReferenceValue(const ExprValue& actual,
+        const std::string& resolvedSource, const std::string& resolvedTarget,
+        StorageEngine& engine, const std::string& database);
     ExprValue comparePrepared(const QueryComparisonBinding& binding,
         const ExprValue& left, const ExprValue& right) const;
     ExprValue coerceComparison(const QueryComparisonBinding& binding,

@@ -105,12 +105,15 @@ ExprPtr copyExpression(const Expr* source, std::map<const Expr*, const Expr*>& s
         auto target = std::make_unique<ArrayExpr>();
         target->elementType = node->elementType;
         target->nestedElements = node->nestedElements;
+        target->typeMetadata = node->typeMetadata;
         for (const auto& arg : node->elements) target->elements.push_back(copy(arg));
         result = std::move(target);
     } else if (const auto* node = dynamic_cast<const RowExpr*>(source)) {
         auto target = std::make_unique<RowExpr>();
         target->constructor = node->constructor;
         target->fieldTypes = node->fieldTypes;
+        target->typeMetadata = node->typeMetadata;
+        target->resultMetadata = node->resultMetadata;
         for (const auto& arg : node->elements) target->elements.push_back(copy(arg));
         result = std::move(target);
     } else throw DbError("0A000", "prepared execution requires a structured value expression");

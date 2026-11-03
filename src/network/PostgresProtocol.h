@@ -1,6 +1,7 @@
 #pragma once
 
 #include "TLSWrapper.h"
+#include "common/DatumType.h"
 
 #include <chrono>
 #include <cstdint>
@@ -10,6 +11,7 @@
 #include <vector>
 
 namespace dbms {
+struct ExprValue;
 
 // PostgreSQL protocol 3.0 startup packet. The protocol is deliberately kept
 // independent from Session so the transport/parser can be tested without the
@@ -39,6 +41,7 @@ struct PgColumnDescription {
     std::string moneyLocale = "C"; // session lc_monetary for binary cash I/O
     // Set only from the actual bound scalar type's catalog identity.
     bool enumType = false;
+    DatumTypePtr typeMetadata;
 };
 
 class PostgresProtocol {
@@ -117,6 +120,10 @@ public:
     bool sendDataRow(const std::vector<std::string>& values,
                      const std::vector<PgColumnDescription>& columns,
                      const std::vector<bool>& nulls);
+    bool sendDataRow(const std::vector<std::string>& values,
+                     const std::vector<PgColumnDescription>& columns,
+                     const std::vector<bool>& nulls,
+                     const std::vector<ExprValue>* owningValues);
 
     static uint32_t readUInt32(const std::vector<uint8_t>& data, size_t offset);
     static uint16_t readUInt16(const std::vector<uint8_t>& data, size_t offset);

@@ -15,10 +15,33 @@ struct DeclaredTypeBinding {
     Oid typeOid=INVALID_OID;
 };
 
+// Copied namespace values only. This does not create a Session or retain
+// one, and contains no transaction/provider/parameter execution state.
+struct DeclaredTypeNamespace {
+    std::vector<std::string> schemas;
+    std::string temporarySchema;
+};
+inline DeclaredTypeNamespace freezeDeclaredTypeNamespace(const Session* session) {
+    DeclaredTypeNamespace result;
+    std::string canonical;
+    if(!session || !parseSessionSearchPath(session->searchPath,result.schemas,canonical))
+        result.schemas={"public"};
+    for(auto& schema:result.schemas)
+        schema=expandSessionSearchPathEntry(schema,session?session->username:"");
+    if(std::find(result.schemas.begin(),result.schemas.end(),"pg_catalog")==result.schemas.end())
+        result.schemas.insert(result.schemas.begin(),"pg_catalog");
+    if(session) {
+        result.temporarySchema=sessionTempSchemaName(*session);
+        result.schemas.insert(result.schemas.begin(),result.temporarySchema);
+    }
+    return result;
+}
+
 // A copied catalog generation owns named declarations; syntax aliases select
 // catalog builtins. No routine/value/row is consulted to resolve a type.
 inline DeclaredTypeBinding resolveDeclaredTypeName(const std::string& spelling,
-    const CatalogManager::MetadataSnapshot* catalog,const Session* session) {
+    const CatalogManager::MetadataSnapshot* catalog,const Session* session,
+    const DeclaredTypeNamespace* frozenNamespace = nullptr) {
     auto declaration=SQLParser::parseTypeSpecification(spelling);
     const auto low=SQLParser::toLower(declaration.typeName);
     static const std::map<std::string,std::string> syntaxAliases={
@@ -65,6 +88,7 @@ inline DeclaredTypeBinding resolveDeclaredTypeName(const std::string& spelling,
     if(catalog) {
         std::vector<std::string> schemas;
         if(!requested.schema.empty())schemas.push_back(requested.schema);
+        else if(frozenNamespace)schemas=frozenNamespace->schemas;
         else {
             std::string canonical;
             if(!session || !parseSessionSearchPath(session->searchPath,schemas,canonical))schemas={"public"};
@@ -73,7 +97,9 @@ inline DeclaredTypeBinding resolveDeclaredTypeName(const std::string& spelling,
             if(session)schemas.insert(schemas.begin(),sessionTempSchemaName(*session));
         }
         for(auto schema:schemas) {
-            if(schema=="pg_temp" && session)schema=sessionTempSchemaName(*session);
+            if(schema=="pg_temp" && frozenNamespace && !frozenNamespace->temporarySchema.empty())
+                schema=frozenNamespace->temporarySchema;
+            else if(schema=="pg_temp" && session)schema=sessionTempSchemaName(*session);
             Oid namespaceOid=INVALID_OID;
             for(const auto& space:catalog->namespaces)if(space.nspname==schema){namespaceOid=space.oid;break;}
             if(!namespaceOid) {

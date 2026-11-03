@@ -1,4 +1,5 @@
 // ============================================================================
+#include "expression/ArrayDatumInput.h"
 // DML AST Executor — Phase 4 Wave 0.4
 // ============================================================================
 
@@ -13,6 +14,7 @@
 #include "common/DbError.h"
 #include "common/SqlSyntax.h"
 #include "expression/ExprEvaluator.h"
+#include "expression/StoredRegtypeValue.h"
 #include "expression/expr_helper.h"
 #include "expression/prepared_query_execution.h"
 #include "executor/ExecutionPlan.h"
@@ -42,6 +44,17 @@ namespace dbms {
 
 namespace {
 thread_local DmlResult g_lastDmlResult;
+thread_local bool typedResultCapture = false;
+thread_local bool typedExplicitReceiver = false;
+}
+bool typedResultCaptureRequested() noexcept { return typedResultCapture; }
+bool typedResultCaptureExplicitReceiver() noexcept { return typedExplicitReceiver; }
+ScopedTypedResultCapture::ScopedTypedResultCapture(bool enabled, bool explicitReceiver) noexcept
+    : previous_(typedResultCapture),previousExplicit_(typedExplicitReceiver) {
+    typedResultCapture=enabled;typedExplicitReceiver=enabled && explicitReceiver;
+}
+ScopedTypedResultCapture::~ScopedTypedResultCapture() {
+    typedResultCapture=previous_;typedExplicitReceiver=previousExplicit_;
 }
 
 void publishLastDmlResult(DmlResult result) {
@@ -1311,6 +1324,8 @@ struct ReturningProjection {
     std::string name;
     std::string typeName;
     Source source = Source::Default;
+    DatumTypePtr typeMetadata;
+    DatumMetadataContextPtr datumMetadata; // original pure analysis only
 };
 
 struct ReturningBinding {
@@ -1380,16 +1395,19 @@ bool returningBindingIsValid(const ReturningBinding& binding) {
 }
 
 ExprPtr copyReturningExpression(const Expr* expression, const TableSchema& table,
-                                const ReturningBinding& binding);
+                                const ReturningBinding& binding,
+                                const DatumMetadataContext* datumMetadata = nullptr);
 
 std::string inferReturningType(const Expr* expression, const TableSchema& table,
                                const ReturningBinding& binding,
-                               const std::string& currentDB) {
+                               const std::string& currentDB,
+                               const DatumMetadataContext* datumMetadata = nullptr,
+                               DatumTypePtr* resultMetadata = nullptr) {
     // Bind canonical row-image identities before pure inference. ARRAY/CASE,
     // declared widths and builtin/routine metadata use the same resolver as
     // prepared SELECT; no first returned row or separate type-name whitelist.
-    auto compiled = copyReturningExpression(expression, table, binding);
-    ExprHelper::prepareArrayTypes(compiled.get(), {}, currentDB, &g_engine);
+    auto compiled = copyReturningExpression(expression, table, binding,datumMetadata);
+    ExprHelper::prepareArrayTypes(compiled.get(), {}, currentDB, &g_engine,datumMetadata,resultMetadata);
     const auto type = ExprHelper::inferParsedResultType(
         compiled.get(), {}, currentDB, &g_engine);
     return type.empty() || type == "unknown" ? "text" : type;
@@ -1494,6 +1512,17 @@ bool buildReturningProjections(const std::vector<SelectItem>& returning,
     projections.clear();
     if (!returningBindingIsValid(binding)) return false;
     ExprEvaluator evaluator;
+    DatumMetadataContextPtr metadata;
+    const auto metadataOwner=[&]() -> DatumMetadataContextPtr {
+        if(typedResultCaptureRequested() && !metadata)
+            metadata=g_engine.prepareDatumMetadataContext(currentDB,table.tablename);
+        return metadata;
+    };
+    const auto columnMetadata=[&](const std::string& column) -> DatumTypePtr {
+        const auto owner=metadataOwner();if(!owner)return {};
+        const auto found=owner->columns.find(column);
+        return found==owner->columns.end()?DatumTypePtr{}:found->second;
+    };
     for (const auto& item : returning) {
         if (!item.expr) return false;
         const auto* star = item.expr ? dynamic_cast<const LiteralExpr*>(item.expr.get()) : nullptr;
@@ -1503,7 +1532,8 @@ bool buildReturningProjections(const std::vector<SelectItem>& returning,
                 projections.push_back({nullptr, table.cols[i].dataName,
                                        table.cols[i].dataName,
                                        table.cols[i].dataType + (table.cols[i].isArray ? "[]" : ""),
-                                       ReturningProjection::Source::Default});
+                                       ReturningProjection::Source::Default,
+                                       columnMetadata(table.cols[i].dataName),metadata});
             }
             continue;
         }
@@ -1515,7 +1545,8 @@ bool buildReturningProjections(const std::vector<SelectItem>& returning,
             for (size_t i = 0; i < table.len; ++i) {
                 projections.push_back({nullptr, table.cols[i].dataName,
                                        table.cols[i].dataName,
-                                       table.cols[i].dataType + (table.cols[i].isArray ? "[]" : ""), *source});
+                                       table.cols[i].dataType + (table.cols[i].isArray ? "[]" : ""), *source,
+                                       columnMetadata(table.cols[i].dataName),metadata});
             }
             continue;
         }
@@ -1535,13 +1566,16 @@ bool buildReturningProjections(const std::vector<SelectItem>& returning,
                        item.expr.get(), table, binding, evaluator)) {
             return false;
         }
+        DatumTypePtr declaration;
+        const auto owner=metadataOwner();
+        const auto type=mergeAction?std::string("text"):
+            inferReturningType(item.expr.get(),table,binding,currentDB,owner.get(),&declaration);
+        if(mergeAction && owner && owner->declaration)declaration=owner->declaration("text",25);
         projections.push_back({mergeAction ? nullptr : item.expr.get(), {},
-                               name.empty() ? "?column?" : name,
-                               mergeAction ? "text" :
-                                   inferReturningType(item.expr.get(), table, binding, currentDB),
-                               mergeAction
-                                   ? ReturningProjection::Source::Action
-                                   : ReturningProjection::Source::Default});
+                               name.empty() ? "?column?" : name,type,
+                               mergeAction ? ReturningProjection::Source::Action
+                                   : ReturningProjection::Source::Default,
+                               std::move(declaration),owner});
     }
     return !projections.empty();
 }
@@ -1648,14 +1682,36 @@ void checkPreparedInsertSources(const PreparedQuery& query, Session& session) {
 }
 
 void addReturningRowToContext(RowContext& context, const SqlRow& source,
-                              const TableSchema& table, size_t sourceOrdinal) {
+                              const TableSchema& table, size_t sourceOrdinal,
+                              const DatumMetadataContext* datumMetadata) {
     for (size_t i = 0; i < table.len; ++i) {
         const Column& column = table.cols[i];
         const auto it = source.find(column.dataName);
         const bool isNull = it == source.end() || !it->second;
-        const ExprValue value(
+        ExprValue value(
             column.dataType + (column.isArray ? "[]" : ""),
             isNull ? std::string{} : *it->second, isNull);
+        if(column.generatedKind!='v' &&
+           stored_regtype_detail::columnType(column.dataType)) {
+            // This is the actual stored OLD/NEW source, including all-text
+            // RETURNING. Its OID identity precedes optional wire metadata.
+            const auto* session=currentSession();
+            const auto catalog=regtype_detail::metadata(g_engine,session?session->currentDB:std::string{});
+            DatumTypePtr declaration;
+            if(datumMetadata) {
+                const auto found=datumMetadata->columns.find(column.dataName);
+                if(found!=datumMetadata->columns.end())declaration=found->second;
+            }
+            value=stored_regtype_detail::load(isNull?std::string{}:*it->second,column.isArray,isNull,
+                catalog,session,std::move(declaration));
+        }
+        value.collation=column.collation;
+        if(column.isArray && column.generatedKind!='v' && datumMetadata &&
+           datumMetadata->storedColumns.count(column.dataName)) {
+            const auto declaration=datumMetadata->columns.find(column.dataName);
+            if(declaration!=datumMetadata->columns.end())
+                (void)compound_value_detail::decodeArrayStorageInput(value,declaration->second);
+        }
         context.setBoundColumn(sourceOrdinal, i, value);
     }
 }
@@ -1669,16 +1725,16 @@ const SqlRow& returningSourceRow(
 }
 
 RowContext returningContext(const ReturningRowImage& image,
-                            const TableSchema& table) {
+                            const TableSchema& table,const DatumMetadataContext* datumMetadata) {
     RowContext context;
     const SqlRow& defaultRow = returningSourceRow(
         image, ReturningProjection::Source::Default);
     addReturningRowToContext(context, defaultRow, table,
-        static_cast<size_t>(ReturningProjection::Source::Default));
+        static_cast<size_t>(ReturningProjection::Source::Default),datumMetadata);
     addReturningRowToContext(
-        context, image.oldRow, table, static_cast<size_t>(ReturningProjection::Source::Old));
+        context, image.oldRow, table, static_cast<size_t>(ReturningProjection::Source::Old),datumMetadata);
     addReturningRowToContext(
-        context, image.newRow, table, static_cast<size_t>(ReturningProjection::Source::New));
+        context, image.newRow, table, static_cast<size_t>(ReturningProjection::Source::New),datumMetadata);
     return context;
 }
 
@@ -1686,11 +1742,12 @@ RowContext returningContext(const ReturningRowImage& image,
 // copy against exact canonical qualifiers and descriptor ordinals, rather
 // than normalizing user names through RowContext or mutating the shared AST.
 ExprPtr copyReturningExpression(const Expr* expression, const TableSchema& table,
-                                const ReturningBinding& binding) {
+                                const ReturningBinding& binding,
+                                const DatumMetadataContext* datumMetadata) {
     if (!expression) return {};
     ExprPtr result;
     const auto copy = [&](const ExprPtr& child) {
-        return copyReturningExpression(child.get(), table, binding);
+        return copyReturningExpression(child.get(), table, binding,datumMetadata);
     };
     if (const auto* node = dynamic_cast<const LiteralExpr*>(expression)) {
         result = std::make_unique<LiteralExpr>(*node);
@@ -1704,6 +1761,10 @@ ExprPtr copyReturningExpression(const Expr* expression, const TableSchema& table
         const auto& descriptor = table.cols[ordinal];
         column->binding = QueryColumnBinding{0, static_cast<size_t>(*source), ordinal,
             descriptor.dataType + (descriptor.isArray ? "[]" : ""), false};
+        if(datumMetadata) {
+            const auto declared=datumMetadata->columns.find(descriptor.dataName);
+            if(declared!=datumMetadata->columns.end())column->binding->typeMetadata=declared->second;
+        }
         result = std::move(column);
     } else if (const auto* node = dynamic_cast<const UnaryOpExpr*>(expression)) {
         auto target = std::make_unique<UnaryOpExpr>(); target->op = node->op;
@@ -1741,12 +1802,15 @@ ExprPtr copyReturningExpression(const Expr* expression, const TableSchema& table
         auto target = std::make_unique<ArrayExpr>();
         target->elementType = node->elementType;
         target->nestedElements = node->nestedElements;
+        target->typeMetadata = node->typeMetadata;
         for (const auto& item : node->elements) target->elements.push_back(copy(item));
         result = std::move(target);
     } else if (const auto* node = dynamic_cast<const RowExpr*>(expression)) {
         auto target = std::make_unique<RowExpr>();
         target->constructor = node->constructor;
         target->fieldTypes = node->fieldTypes;
+        target->typeMetadata = node->typeMetadata;
+        target->resultMetadata = node->resultMetadata;
         for (const auto& item : node->elements) target->elements.push_back(copy(item));
         result = std::move(target);
     } else {
@@ -2186,7 +2250,7 @@ bool evaluateUpdateFromExpression(
         value = "NULL";
         return true;
     }
-    value = result.value;
+    value = stored_regtype_detail::storageText(result);
     if (result.typeName == "boolean") {
         if (value == "t") value = "1";
         else if (value == "f") value = "0";
@@ -2211,7 +2275,7 @@ bool evaluateStructuredExpression(
         value = "NULL";
         return true;
     }
-    value = result.value;
+    value = stored_regtype_detail::storageText(result);
     if (result.typeName == "boolean") {
         if (value == "t") value = "1";
         else if (value == "f") value = "0";
@@ -2237,7 +2301,7 @@ bool evaluateStructuredSqlExpression(
         value = std::nullopt;
         return true;
     }
-    std::string evaluated = result.value;
+    std::string evaluated = stored_regtype_detail::storageText(result);
     if (result.typeName == "boolean") {
         if (evaluated == "t") evaluated = "1";
         else if (evaluated == "f") evaluated = "0";
@@ -2261,7 +2325,7 @@ bool evaluateUpdateExpression(const Expr* expression,
         value = std::nullopt;
         return true;
     }
-    std::string evaluated = result.value;
+    std::string evaluated = stored_regtype_detail::storageText(result);
     if (result.typeName == "boolean") {
         if (evaluated == "t") evaluated = "1";
         else if (evaluated == "f") evaluated = "0";
@@ -2277,16 +2341,18 @@ bool evaluateReturningExpression(const Expr* expression,
                                  const std::string& currentDB,
                                  std::string& value,
                                  bool& isNull,
-                                 std::string& typeName) {
+                                 std::string& typeName,
+                                 ExprValue* owningValue = nullptr,
+                                 const DatumMetadataContext* datumMetadata = nullptr) {
     ExprEvaluator evaluator;
     evaluator.setCurrentDB(currentDB);
-    auto compiled = copyReturningExpression(expression, table, binding);
+    auto compiled = copyReturningExpression(expression, table, binding,datumMetadata);
     // Raw legacy RETURNING ASTs may not carry preparation metadata yet.
     // Annotate only the execution-owned, ordinal-bound copy, without executing
     // row values or routines during metadata analysis.
-    ExprHelper::prepareArrayTypes(compiled.get(), {}, currentDB, &g_engine);
-    const ExprValue result = evaluator.eval(
-        compiled.get(), returningContext(image, table));
+    ExprHelper::prepareArrayTypes(compiled.get(), {}, currentDB, &g_engine,datumMetadata);
+    ExprValue result = evaluator.eval(
+        compiled.get(), returningContext(image, table,datumMetadata));
     if (!result.isNull &&
         (result.isUnknown() || result.typeName == "unknown")) {
         return false;
@@ -2294,6 +2360,7 @@ bool evaluateReturningExpression(const Expr* expression,
     isNull = result.isNull;
     value = isNull ? std::string{} : result.value;
     typeName = result.typeName;
+    if(owningValue)*owningValue=std::move(result);
     return true;
 }
 
@@ -2317,21 +2384,32 @@ bool publishReturning(const std::vector<ReturningProjection>& projections,
     for (const auto& projection : projections) {
         g_lastDmlResult.columns.push_back(projection.name);
         g_lastDmlResult.columnTypes.push_back(projection.typeName);
+        if(typedResultCaptureRequested()) {
+            if(!g_lastDmlResult.typedRowDescriptor)g_lastDmlResult.typedRowDescriptor.emplace();
+            const auto& declaration=projection.typeMetadata;
+            g_lastDmlResult.typedRowDescriptor->push_back({projection.name,projection.typeName,false,0,
+                declaration?declaration->actualOid:0,declaration?declaration->effectiveTypeMod:-1,declaration});
+        }
     }
     g_lastDmlResult.commandTag = command == "INSERT"
         ? "INSERT 0 " + std::to_string(images.size())
         : command + " " + std::to_string(images.size());
     g_lastDmlResult.rows.reserve(images.size());
     g_lastDmlResult.nulls.reserve(images.size());
+    if(typedResultCaptureRequested())g_lastDmlResult.typedRows.emplace();
     for (const auto& image : images) {
         std::vector<std::string> row;
         std::vector<bool> nulls;
         row.reserve(projections.size());
         nulls.reserve(projections.size());
+        std::vector<ExprValue> owning;
+        if(g_lastDmlResult.typedRows)owning.reserve(projections.size());
         for (size_t i = 0; i < projections.size(); ++i) {
             const auto& projection = projections[i];
             std::string value;
             bool isNull = false;
+            ExprValue owned;
+            bool loadedStoredReference = false;
             if (projection.expression == nullptr) {
                 if (projection.source == ReturningProjection::Source::Action) {
                     isNull = image.action.empty();
@@ -2342,12 +2420,31 @@ bool publishReturning(const std::vector<ReturningProjection>& projections,
                     const auto it = source.find(projection.column);
                     isNull = it == source.end() || !it->second;
                     value = isNull ? "NULL" : *it->second;
+                    if(stored_regtype_detail::columnType(projection.typeName)) {
+                        // Star projections consume the same genuine stored source
+                        // as expression projections, before rendering its value.
+                        for(size_t ordinal=0;ordinal<table.len;++ordinal) {
+                            const auto& column=table.cols[ordinal];
+                            if(column.dataName!=projection.column)continue;
+                            if(column.generatedKind!='v' &&
+                               stored_regtype_detail::columnType(column.dataType)) {
+                                const auto* session=currentSession();
+                                const auto catalog=regtype_detail::metadata(g_engine,currentDB);
+                                owned=stored_regtype_detail::load(isNull?std::string{}:*it->second,
+                                    column.isArray,isNull,catalog,session,projection.typeMetadata);
+                                value=isNull?"NULL":owned.value;
+                                loadedStoredReference=true;
+                            }
+                            break;
+                        }
+                    }
                 }
             } else {
                 std::string typeName;
                 if (!evaluateReturningExpression(
                         projection.expression, image, table, binding,
-                        currentDB, value, isNull, typeName)) {
+                        currentDB, value, isNull, typeName,
+                        g_lastDmlResult.typedRows ? &owned : nullptr,projection.datumMetadata.get())) {
                     std::cout << "RETURNING expression evaluation failed"
                               << std::endl;
                     g_lastDmlResult = {};
@@ -2358,11 +2455,26 @@ bool publishReturning(const std::vector<ReturningProjection>& projections,
                 }
                 if (isNull) value = "NULL";
             }
+            if(g_lastDmlResult.typedRows) {
+                if(projection.expression == nullptr) {
+                    if(projection.source == ReturningProjection::Source::Action)
+                        owned=ExprValue("text",value,isNull);
+                    else if(!loadedStoredReference) {
+                        size_t ordinal=0;
+                        while(ordinal<table.len && table.cols[ordinal].dataName!=projection.column)++ordinal;
+                        if(ordinal==table.len)throw DbError("XX000","RETURNING source column lost its ordinal");
+                        const auto context=returningContext(image,table,projection.datumMetadata.get());
+                        owned=context.boundColumn(static_cast<size_t>(projection.source),ordinal);
+                    }
+                }
+                owning.push_back(std::move(owned));
+            }
             row.push_back(std::move(value));
             nulls.push_back(isNull);
         }
         g_lastDmlResult.rows.push_back(std::move(row));
         g_lastDmlResult.nulls.push_back(std::move(nulls));
+        if(g_lastDmlResult.typedRows)g_lastDmlResult.typedRows->push_back(std::move(owning));
     }
     return true;
 }
@@ -2375,6 +2487,8 @@ class PreparedReturningExecution {
     PreparedQueryExecution& execution_;
     const Stmt* statement_;
     const std::vector<SelectItem>& items_;
+    const TableSchema& table_;
+    const std::string currentDB_;
     const PreparedQuery::SourceRange* target_ = nullptr;
     std::vector<std::pair<const PreparedQuery::SourceRange*, ReturningProjection::Source>> images_;
     std::map<const Expr*, std::vector<std::pair<size_t, size_t>>> stars_;
@@ -2386,8 +2500,10 @@ class PreparedReturningExecution {
 public:
     PreparedReturningExecution(PreparedQueryExecution& execution, const Stmt* statement,
                                const std::vector<SelectItem>& items,
-                               const ReturningBinding& binding)
-        : execution_(execution), statement_(statement), items_(items) {
+                               const ReturningBinding& binding,
+                               const TableSchema& table, const std::string& currentDB)
+        : execution_(execution), statement_(statement), items_(items),
+          table_(table), currentDB_(currentDB) {
         for (const auto& range : execution_.query().sourceRanges) {
             if (range.owner != statement_ || range.source || range.mergedUsing || range.cteStatement)
                 continue;
@@ -2445,12 +2561,24 @@ public:
             RowContext row = execution_.context();
             const auto set = [&](const PreparedQuery::SourceRange& source, const SqlRow& values) {
                 std::vector<ExprValue> cells;
-                for (const auto& column : source.columns) {
+                for (size_t ordinal=0;ordinal<source.columns.size();++ordinal) {
+                    const auto& column=source.columns[ordinal];
                     const auto found = values.find(column.name);
                     if (!values.empty() && found == values.end())
                         throw DbError("XX000", "RETURNING row image lost a bound column");
                     const bool isNull = found == values.end() || !found->second;
-                    cells.emplace_back(column.type, isNull ? std::string{} : *found->second, isNull);
+                    ExprValue value(column.type, isNull ? std::string{} : *found->second, isNull);
+                    // These are the original stored target/OLD/NEW cells, not
+                    // rendered query outputs. Bind the actual reference datum
+                    // once before evaluating the original RETURNING expression.
+                    if(ordinal<table_.len && table_.cols[ordinal].dataName==column.name &&
+                       table_.cols[ordinal].generatedKind!='v' &&
+                       stored_regtype_detail::columnType(table_.cols[ordinal].dataType)) {
+                        const auto catalog=regtype_detail::metadata(g_engine,currentDB_);
+                        value=stored_regtype_detail::load(isNull?std::string{}:*found->second,
+                            table_.cols[ordinal].isArray,isNull,catalog,currentSession(),column.typeMetadata);
+                    }
+                    cells.push_back(std::move(value));
                 }
                 execution_.setSourceRow(row, source.ordinal, cells);
             };
@@ -2639,7 +2767,7 @@ bool evaluateValue(const ExprPtr& expr, const std::string& currentDB,
         value = std::nullopt;
         return true;
     }
-    std::string evaluated = result.value;
+    std::string evaluated = stored_regtype_detail::storageText(result);
     // ExprEvaluator uses PostgreSQL-style t/f internally, while the storage
     // validator accepts the canonical on-disk boolean spellings 1/0.
     if (result.typeName == "boolean") {
@@ -2697,7 +2825,7 @@ bool evaluateConflictExpression(
         value = std::nullopt;
         return true;
     }
-    std::string evaluated = result.value;
+    std::string evaluated = stored_regtype_detail::storageText(result);
     if (result.typeName == "boolean") {
         if (evaluated == "t") evaluated = "1";
         else if (evaluated == "f") evaluated = "0";
@@ -2987,7 +3115,7 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback,
         if (!insert) throw DbError("XX000", "INSERT RETURNING lost its prepared statement");
         if (!insert->returning.empty())
             returningExecution = std::make_unique<PreparedReturningExecution>(
-                *insertExecution, insert, insert->returning, insertReturningBinding);
+                *insertExecution, insert, insert->returning, insertReturningBinding, table, s.currentDB);
         if (insert->conflictWhere) {
             insertExecution->planExpressionConstants(insert->conflictWhere.get());
             insertExecution->prepareExpression(insert->conflictWhere.get());
@@ -3221,7 +3349,7 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback,
                 return false;
             }
             if (!result.isNull) {
-                auto text = result.value;
+                auto text = stored_regtype_detail::storageText(result);
                 if (result.typeName == "boolean") {
                     if (text == "t") text = "1";
                     else if (text == "f") text = "0";
@@ -4073,7 +4201,7 @@ bool executePreparedUpdate(const UpdateStmt& stmt, Session& s, bool& fallback,
         assignment.second = std::move(cast);
     }
     PreparedQueryExecution execution(prepared, &g_engine, s.currentDB);
-    PreparedReturningExecution returningExecution(execution, update, update->returning, binding);
+    PreparedReturningExecution returningExecution(execution, update, update->returning, binding, table, s.currentDB);
     // A lowered DEFAULT remains this execution's actual value root. Plan its
     // structural constants before row demand, including arguments of a
     // volatile default, without invoking that routine. Non-DEFAULT legacy
@@ -4158,7 +4286,7 @@ bool executePreparedUpdate(const UpdateStmt& stmt, Session& s, bool& fallback,
             for (const auto& assignment : update->setClauses) {
                 const auto value = execution.evaluate(assignment.second.get(), row);
                 effectiveUpdates[identifier(assignment.first)] = value.isNull
-                    ? SqlCell{} : SqlCell{value.value};
+                    ? SqlCell{} : SqlCell{stored_regtype_detail::storageText(value)};
             }
             validateIntervalTargetInputs(table, effectiveUpdates);
             return true;
@@ -5368,6 +5496,12 @@ private:
                         const auto value=g_engine.extractColumnValue(raw,scanSchema,i,session_.currentDB,true,&computedNull);
                         cells.emplace_back(rangePointer->columns[i].type,value,computedNull ||
                             (scanSchema.cols[i].generatedKind!='v' && scan->lastColumnIsNull(i)));
+                        if(scanSchema.cols[i].generatedKind!='v' &&
+                           stored_regtype_detail::columnType(scanSchema.cols[i].dataType)) {
+                            const auto catalog=dbms::regtype_detail::metadata(g_engine,session_.currentDB);
+                            cells.back()=dbms::stored_regtype_detail::load(value,scanSchema.cols[i].isArray,
+                                cells.back().isNull,catalog,&session_,rangePointer->columns[i].typeMetadata);
+                        }
                         cells.back().collation=scanSchema.cols[i].collation;
                     }
                 }
@@ -5594,6 +5728,13 @@ class BoundDmlExecution {
             const auto found=values.find(column.name);
             if(found==values.end())throw DbError("XX000","DML row has no bound target column: "+column.name);
             cells.emplace_back(column.type,found->second.value_or(""),!found->second);
+            const auto position=cells.size()-1;
+            if(position<table_.len && table_.cols[position].generatedKind!='v' &&
+               stored_regtype_detail::columnType(table_.cols[position].dataType)) {
+                const auto catalog=regtype_detail::metadata(g_engine,session_.currentDB);
+                cells.back()=stored_regtype_detail::load(found->second.value_or(""),
+                    table_.cols[position].isArray,!found->second,catalog,&session_,column.typeMetadata);
+            }
         }
         execution_->setSourceRow(row,target_->ordinal,cells);return row;
     }
@@ -5669,6 +5810,9 @@ class BoundDmlExecution {
         DmlResult output;output.available=true;
         output.commandTag=command=="INSERT"?"INSERT 0 "+std::to_string(count):command+" "+std::to_string(count);
         const auto& descriptor=query_->statementOutputs.at(statement_);
+        output.rowDescriptor=descriptor;
+        if(typedResultCaptureRequested())output.typedRowDescriptor=descriptor;
+        if(typedResultCaptureRequested())output.typedRows.emplace();
         for(const auto& column:descriptor) {
             output.columns.push_back(column.name);
             output.columnTypes.push_back(column.type=="unknown"?"text":ExprHelper::canonicalResultTypeName(column.type));
@@ -5686,6 +5830,7 @@ class BoundDmlExecution {
             std::vector<std::string> cells;std::vector<bool> nulls;
             for(const auto& value:values){cells.push_back(value.value);nulls.push_back(value.isNull);}
             output.rows.push_back(std::move(cells));output.nulls.push_back(std::move(nulls));
+            if(output.typedRows)output.typedRows->push_back(std::move(values));
         }
         return output;
     }
@@ -5854,7 +5999,7 @@ private:
                     const auto& column=target_->columns[value.first];
                     if(row.find(column.name)!=row.end())continue;
                     const auto cell=execution_->evaluate(value.second.get(),execution_->context());
-                    row[column.name]=cell.isNull?SqlCell{}:SqlCell{cell.value};
+                    row[column.name]=cell.isNull?SqlCell{}:SqlCell{stored_regtype_detail::storageText(cell)};
                 }
                 const auto status=g_engine.insertRow(session_.currentDB,physical_,row,returning_->empty()?nullptr:&images,override);
                 if(status!=DBStatus::OK)throw DbError(sqlstateForDBStatus(status),"WITH INSERT failed");
@@ -5866,7 +6011,7 @@ private:
                 for(size_t i=0;i<expressions.size();++i) {
                     if(defaultValue(expressions[i].get()))continue;
                     const auto value=execution_->evaluate(expressions[i].get(),execution_->context());
-                    row[columns.at(i)]=value.isNull?SqlCell{}:SqlCell{value.value};
+                    row[columns.at(i)]=value.isNull?SqlCell{}:SqlCell{stored_regtype_detail::storageText(value)};
                 }
                 write(row);
             }
@@ -5877,7 +6022,7 @@ private:
                 for(const auto& values:rows) {
                     if(values.size()>columns.size())throw DbError("XX000","INSERT SELECT lost its prepared width");
                     SqlRow row;
-                    for(size_t i=0;i<values.size();++i)row[columns[i]]=values[i].isNull?SqlCell{}:SqlCell{values[i].value};
+                    for(size_t i=0;i<values.size();++i)row[columns[i]]=values[i].isNull?SqlCell{}:SqlCell{stored_regtype_detail::storageText(values[i])};
                     write(row);
                 }
             }
@@ -5908,7 +6053,7 @@ private:
                     SqlRow values;
                     if(update)for(const auto& assignment:update->setClauses) {
                         const auto value=execution_->evaluate(assignment.second.get(),row);
-                        values[identifier(assignment.first)]=value.isNull?SqlCell{}:SqlCell{value.value};
+                        values[identifier(assignment.first)]=value.isNull?SqlCell{}:SqlCell{stored_regtype_detail::storageText(value)};
                     }
                     // Multiple eligible join tuples still evaluate their
                     // projections/errors. The executor modifies each real
@@ -5943,7 +6088,7 @@ private:
                 const auto row=context(old);
                 for(const auto& assignment:update->setClauses) {
                     const auto value=execution_->evaluate(assignment.second.get(),row);
-                    values[identifier(assignment.first)]=value.isNull?SqlCell{}:SqlCell{value.value};
+                    values[identifier(assignment.first)]=value.isNull?SqlCell{}:SqlCell{stored_regtype_detail::storageText(value)};
                 }
                 return true;
             };

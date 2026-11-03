@@ -1,3 +1,4 @@
+#include "expression/StoredRegtypeValue.h"
 #include "NetworkServer.h"
 #include "common/version.h"
 #include "common/DbError.h"
@@ -391,6 +392,8 @@ struct QueryResult {
     std::vector<QueryNotice> notices;
     std::string commandTag;
     QueryRowDescriptor rowDescriptor;
+    std::optional<PreparedQueryRows> typedRows;
+    std::optional<QueryRowDescriptor> typedRowDescriptor;
 };
 
 struct ProtocolPortal {
@@ -847,7 +850,7 @@ std::string binaryProtocolParameterLiteral(uint32_t typeOid,
     // envelope, not their text input codec. No user-type lookup or automatic
     // array catalog construction belongs to this finite binary receiver.
     const uint32_t arrayElement=typeOid==1005?21:typeOid==1007?23:
-        typeOid==1016?20:typeOid==1009?25:typeOid==1015?1043:typeOid==3807?3802:typeOid==1187?1186:0;
+        typeOid==1016?20:typeOid==1009?25:typeOid==1015?1043:typeOid==3807?3802:typeOid==1187?1186:typeOid==2211?2206:0;
     if(arrayElement) {
         const auto invalid=[&](const char* state,const char* message) {
             inputSqlState=state;error=message;return std::string{};
@@ -950,7 +953,7 @@ std::string binaryProtocolParameterLiteral(uint32_t typeOid,
                     for(char byte:value){if(byte=='"' || byte=='\\')text+='\\';text+=byte;}
                     text+='"';
                 } else {
-                    const size_t width=arrayElement==21?2:arrayElement==23?4:8;
+                    const size_t width=arrayElement==21?2:(arrayElement==23 || arrayElement==2206)?4:8;
                     if(length<width){invalid("08P01","insufficient data left in message");return false;}
                     if(length>width){invalid("22P03","improper binary format in array element");return false;}
                     const auto value=binaryProtocolParameterLiteral(arrayElement,cell,moneyLocale,error,inputSqlState);
@@ -999,6 +1002,15 @@ std::string binaryProtocolParameterLiteral(uint32_t typeOid,
         case 23:
             if (!decodeBinaryUnsigned(raw, 4, bits)) break;
             return std::to_string(static_cast<int32_t>(bits));
+        case 2206:
+            if (raw.size() < 4) {
+                inputSqlState="08P01";error="insufficient data left in message";return {};
+            }
+            if (raw.size() > 4) {
+                inputSqlState="22P03";error="improper binary format in regtype parameter";return {};
+            }
+            if (!decodeBinaryUnsigned(raw, 4, bits)) break;
+            return std::to_string(bits);
         case 26:
             if (!decodeBinaryUnsigned(raw, 4, bits)) break;
             return std::to_string(bits);
@@ -1869,6 +1881,42 @@ void applyBoundProtocolDescriptor(std::vector<PgColumnDescription>& columns,
                 column.typeModifier = type->typtypmod;
             column.typeOid = type->typbasetype;
         }
+    }
+}
+
+// R151 remains paused: root enum and arrays whose ultimate array element is
+// enum (including domain bases) keep their complete original wire path.
+// Records/record[] do not inspect their nested field declarations here.
+static bool pausedTopEnumWireFamily(const DatumType& root) noexcept {
+    const auto next=[](const DatumType* type) noexcept -> const DatumType* {
+        return type && type->kind==DatumKind::Array?type->arrayElement.get():nullptr;
+    };
+    const DatumType* current=&root;const DatumType* slow=&root;const DatumType* fast=&root;
+    for(;;) {
+        if(!current || !current->codecOid)return true; // cannot prove ordinary
+        if(current->kind!=DatumKind::Array)
+            return current->kind==DatumKind::Scalar && current->enumType;
+        current=next(current);slow=next(slow);fast=next(next(fast));
+        if(slow && fast && slow==fast)return true; // no new error/validation
+    }
+}
+static void applyTypedResultCodecMetadata(std::vector<PgColumnDescription>& columns,
+    const std::optional<QueryRowDescriptor>& declaration) {
+    if(!declaration || declaration->size()!=columns.size() ||
+       std::any_of(columns.begin(),columns.end(),[](const auto& column) {
+           return column.formatCode<0 || column.formatCode>1;
+       }))return;
+    for(size_t i=0;i<columns.size();++i) {
+        auto& column=columns[i];const auto& field=declaration->at(i);
+        const auto& type=field.typeMetadata;
+        if(column.formatCode!=1 || !type || pausedTopEnumWireFamily(*type))continue;
+        const auto modifier=field.typeMod>=0?field.typeMod:type->effectiveTypeMod;
+        // A new DataRow must not silently disagree with an earlier original
+        // RowDescription. Unknown/mismatched declarations keep the old codec;
+        // this sidecar never repairs OID/len/typmod or invents an array pair.
+        if(column.typeOid!=type->codecOid || column.typeSize!=type->codecSize ||
+           column.typeModifier!=modifier)continue;
+        column.typeMetadata=type;
     }
 }
 
@@ -3882,6 +3930,157 @@ bool describePreparedQuantified(const std::string& sql, Session& session,
     return !columns.empty();
 }
 
+// A closed logical VALUES tree has no physical attribute provenance. Its
+// genuine binder supplies the entire declaration, including recursive ROW and
+// array metadata. No source/plan/value is opened to discover a descriptor.
+// Physical sources, SQL children, parameters and paused root enum wire shapes
+// retain their existing descriptor owners.
+bool describePreparedLogicalValuesResult(const std::string& sql,Session& session,
+    std::vector<PgColumnDescription>& columns) {
+    if(session.currentDB.empty())return false;
+    // A metadata-only adapter must not invent cells for an unbound SQL $n.
+    // Quoted identifiers/string data retain their token delimiters here.
+    for(const auto& token:SQLParser::tokenize(sql))
+        if(token.size()>1 && token.front()=='$' &&
+           std::all_of(token.begin()+1,token.end(),[](unsigned char c){return std::isdigit(c);}))
+            return false;
+    SQLParser parser;const auto parsed=parser.parseForBinding(sql);
+    const auto* root=parsed.isValid()?dynamic_cast<const SelectStmt*>(parsed.stmt.get()):nullptr;
+    if(!root)return false;
+    using Names=std::set<std::string>;
+    bool valuesSeen=false;
+    std::vector<const FunctionCallExpr*> calls;
+    const auto localName=[](const std::string& spelling) {
+        CatalogManager::QualifiedName name;
+        return CatalogManager::parseQualifiedName(spelling,name,true) && name.schema.empty()
+            ?name.name:std::string{};
+    };
+    std::function<bool(const Expr*,bool,size_t)> value;
+    value=[&](const Expr* expression,bool hasSource,size_t depth) {
+        if(!expression)return true;
+        if(depth>128 || expression->preparedSubquery || expression->type==ExprType::Subquery ||
+           dynamic_cast<const ParameterExpr*>(expression))return false;
+        const auto child=[&](const Expr* node){return value(node,hasSource,depth+1);};
+        if(const auto* literal=dynamic_cast<const LiteralExpr*>(expression)) {
+            const auto tokens=SQLParser::tokenize(literal->value);
+            if(tokens.size()>1 && tokens.front()=="(") {
+                const auto command=SQLParser::toLower(tokens[1]);
+                if(command=="select" || command=="with" || command=="values")return false;
+            }
+            return literal->value!="*" || hasSource;
+        }
+        if(dynamic_cast<const ColumnRefExpr*>(expression))return hasSource;
+        if(const auto* cast=dynamic_cast<const CastExpr*>(expression))return child(cast->operand.get());
+        if(const auto* unary=dynamic_cast<const UnaryOpExpr*>(expression))return child(unary->operand.get());
+        if(const auto* binary=dynamic_cast<const BinaryOpExpr*>(expression))
+            return child(binary->left.get()) &&
+                (binary->op=="::" || binary->op=="[:]" || child(binary->right.get()));
+        if(const auto* array=dynamic_cast<const ArrayExpr*>(expression))
+            return std::all_of(array->elements.begin(),array->elements.end(),[&](const auto& member){return child(member.get());});
+        if(const auto* record=dynamic_cast<const RowExpr*>(expression))
+            return record->constructor && std::all_of(record->elements.begin(),record->elements.end(),
+                [&](const auto& field){return child(field.get());});
+        if(const auto* conditional=dynamic_cast<const CaseExpr*>(expression)) {
+            if(!child(conditional->switchExpr.get()) || !child(conditional->elseExpr.get()))return false;
+            return std::all_of(conditional->whenClauses.begin(),conditional->whenClauses.end(),
+                [&](const auto& arm){return child(arm.first.get()) && child(arm.second.get());});
+        }
+        if(const auto* call=dynamic_cast<const FunctionCallExpr*>(expression)) {
+            if(call->hasOver || call->setReturning || call->distinct || call->filter ||
+               !call->orderBy.empty() || !call->aggregateOrderKeys.empty())return false;
+            calls.push_back(call);
+            return std::all_of(call->args.begin(),call->args.end(),[&](const auto& argument){return child(argument.get());}) &&
+                std::all_of(call->namedArgs.begin(),call->namedArgs.end(),[&](const auto& argument){return child(argument.value.get());});
+        }
+        return false;
+    };
+    std::function<bool(const SelectStmt*,const Names&,size_t)> query;
+    query=[&](const SelectStmt* statement,const Names& inherited,size_t depth) {
+        if(!statement || depth>128 ||
+           (statement->command!=SqlCommand::Select && statement->command!=SqlCommand::Values) ||
+           statement->setOp!=SetOp::None || statement->setOpLhs || statement->setOpRhs ||
+           !statement->groupBy.empty() || !statement->groupByElems.empty() || statement->having ||
+           statement->distinct || !statement->distinctOn.empty() || !statement->windowDefs.empty() ||
+           !statement->locking.empty())return false;
+        Names visible=inherited;
+        Names declared;
+        for(const auto& cte:statement->ctes) {
+            const auto name=localName(cte.name);
+            if(name.empty() || cte.recursive || !declared.insert(name).second ||
+               !query(dynamic_cast<const SelectStmt*>(cte.query.get()),visible,depth+1))return false;
+            visible.insert(name);
+        }
+        std::function<bool(const FromItem*)> source=[&](const FromItem* input) {
+            if(!input)return false;
+            if(input->type==FromItem::Type::Table) {
+                const auto name=localName(input->tableName);
+                return !name.empty() && visible.count(name);
+            }
+            if(input->type==FromItem::Type::Subquery)
+                return query(dynamic_cast<const SelectStmt*>(input->subquery.get()),visible,depth+1);
+            return input->type==FromItem::Type::Join && source(input->left.get()) && source(input->right.get()) &&
+                value(input->joinCondition.get(),true,0);
+        };
+        const bool hasSource=bool(statement->fromClause);
+        if(hasSource && !source(statement->fromClause.get()))return false;
+        if(statement->command==SqlCommand::Values) {
+            if(hasSource || statement->valuesRows.empty())return false;
+            valuesSeen=true;
+            for(const auto& row:statement->valuesRows)for(const auto& cell:row)
+                if(!cell || !value(cell.get(),false,0))return false;
+        } else {
+            if(statement->selectList.empty())return false;
+            for(const auto& target:statement->selectList)
+                if(!target.expr || !value(target.expr.get(),hasSource,0))return false;
+        }
+        if(!value(statement->whereClause.get(),hasSource,0) ||
+           !value(statement->limitExpr.get(),false,0) || !value(statement->offsetExpr.get(),false,0))return false;
+        for(const auto& key:statement->orderBy)
+            if(!value(key.expr.get(),hasSource || statement->command==SqlCommand::Values,0))return false;
+        return true;
+    };
+    if(!query(root,{},0) || !valuesSeen)return false;
+    ProtocolSessionScope scope(session);
+    try {
+        // This is ordinary binding only. In particular, no Core admission,
+        // plan construction, constant planning, output sampling or provider
+        // invocation is performed at this descriptor boundary.
+        const auto prepared=g_engine.prepareBoundQuery(session.currentDB,sql,{},true);
+        if(!prepared.parameters.empty() || !prepared.uses.empty())return false;
+        calls.clear();valuesSeen=false;
+        if(!query(dynamic_cast<const SelectStmt*>(prepared.ast.get()),{},0) || !valuesSeen)return false;
+        for(const auto& range:prepared.sourceRanges) {
+            if(!range.source) {
+                const auto* owner=dynamic_cast<const SelectStmt*>(range.owner);
+                if(!owner || owner->command!=SqlCommand::Values)return false;
+            } else if(range.source->type==FromItem::Type::Table) {
+                if(!range.cteStatement)return false;
+            } else if(range.source->type!=FromItem::Type::Subquery)return false;
+        }
+        ExprEvaluator evaluator;evaluator.setCurrentDB(session.currentDB);
+        for(const auto* call:calls)
+            if(!evaluator.hasScalarFunction(call,&g_engine))return false;
+        if(prepared.output.empty())return false;
+        for(const auto& field:prepared.output)
+            if(!field.typeMetadata || !field.typeOid || pausedTopEnumWireFamily(*field.typeMetadata))return false;
+        QueryResult shape;
+        for(const auto& field:prepared.output) {
+            shape.columns.push_back(field.name);shape.columnTypes.push_back(field.type);
+        }
+        // All actual leaves proved above are VALUES, so SQL origin is zero.
+        // Passing an empty physical-source envelope cannot erase a real heap
+        // origin because this adapter rejects every such source before bind.
+        columns=describeProtocolColumns(shape,std::string{},session,&prepared.output);
+        return !columns.empty();
+    } catch(const DbError& error) {
+        // Optional metadata discovery leaves existing unsupported/input-error
+        // consumers in charge. Cancellation, I/O and corruption stay primary.
+        const auto& code=error.sqlState();
+        if(code.rfind("22",0)==0 || code.rfind("42",0)==0 || code=="3F000" || code=="0A000")return false;
+        throw;
+    }
+}
+
 bool describePreparedResultShape(const std::string& sql, Session& session,
                             std::vector<PgColumnDescription>& columns,
                             const std::vector<uint32_t>& parameterOids = {}) {
@@ -3979,6 +4178,7 @@ bool describePreparedResultShape(const std::string& sql, Session& session,
         if(describePreparedQueryHostResult(sql,session,columns))return true;
     }
     if(parameterOids.empty() && describePreparedOrdinarySourceResult(sql,session,columns))return true;
+    if(parameterOids.empty() && describePreparedLogicalValuesResult(sql,session,columns))return true;
     if (select && select->command == SqlCommand::Values) {
         if (select->valuesRows.empty() ||
             select->valuesRows.front().empty()) return false;
@@ -5702,8 +5902,13 @@ CopyStreamResult sendCopyOut(PostgresProtocol& protocol,
                     if (selected != 0) output.push_back(plan.delimiter);
                     const size_t column = plan.columnIndexes[selected];
                     bool isNull = false;
-                    const std::string value = g_engine.extractColumnValue(
+                    std::string value = g_engine.extractColumnValue(
                         row, table, column, session.currentDB, true, &isNull);
+                    if(!isNull && table.cols[column].generatedKind!='v' &&
+                       dbms::stored_regtype_detail::columnType(table.cols[column].dataType)) {
+                        const auto catalog=dbms::regtype_detail::metadata(g_engine,session.currentDB);
+                        value=dbms::stored_regtype_detail::output(value,table.cols[column].isArray,catalog,&session);
+                    }
                     output += isNull
                         ? plan.nullMarker
                         : encodeCopyTextField(value, plan.delimiter);
@@ -5785,7 +5990,8 @@ CopyStreamResult sendCopyOut(PostgresProtocol& protocol,
 QueryResult executeProtocolQuery(const std::string& sql, Session& session,
                                  int statementTimeoutOverrideMs = -1,
                                  bool emitTimeDeclarationNotices = true,
-                                 bool retainOrdinarySourceDeclaration = true) {
+                                 bool retainOrdinarySourceDeclaration = true,
+                                 bool captureTyped = false) {
     QueryResult result;
     ScopedDiagnosticCapture diagnostics([&result](StatementDiagnostic diagnostic) {
         result.notices.push_back(QueryNotice{std::move(diagnostic.severity),
@@ -5923,6 +6129,7 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session,
                 if (!describePreparedWindowHostResult(sql, session, ordinarySourceColumns, {}))
                     (void)describePreparedOrdinarySourceResult(sql, session, ordinarySourceColumns);
             }
+            ScopedTypedResultCapture captureTypedScope(captureTyped);
             executionError = execute(sql, session);
         } catch (const dbms::StatementCommitError& e) {
             executionError = true;
@@ -5951,7 +6158,7 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session,
     // Keep the declaration fixed, but preserve the existing post-execution
     // session context used by wire codecs; this is not catalog reanalysis.
     for (auto& column : ordinarySourceColumns) column.moneyLocale = session.lcMonetary;
-    const dbms::DmlResult structuredDml = dbms::takeLastDmlResult();
+    dbms::DmlResult structuredDml = dbms::takeLastDmlResult();
     auto end = std::chrono::steady_clock::now();
     double elapsedMs = std::chrono::duration<double, std::milli>(end - start).count();
     if (elapsedMs > g_slowQueryThresholdMs) {
@@ -6129,6 +6336,9 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session,
             structuredDml.runtimeErrorMetadata && !structuredDml.columns.empty()) {
             result.resultSet=true;
             result.columns=structuredDml.columns;result.columnTypes=structuredDml.columnTypes;
+            result.rowDescriptor=structuredDml.rowDescriptor;
+            result.typedRows=structuredDml.typedRows;
+            result.typedRowDescriptor=structuredDml.typedRowDescriptor;
             if (!structuredDml.metadataOnly) {
                 result.rows=structuredDml.rows;result.nulls=structuredDml.nulls;
             }
@@ -6144,6 +6354,9 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session,
             result.resultSet = true;
             result.columns = structuredDml.columns;
             result.columnTypes = structuredDml.columnTypes;
+            result.rowDescriptor = structuredDml.rowDescriptor;
+            result.typedRows = structuredDml.typedRows;
+            result.typedRowDescriptor = structuredDml.typedRowDescriptor;
             result.rows = structuredDml.rows;
             result.nulls = structuredDml.nulls;
             result.columnDescriptions = describeProtocolColumns(result, sql, session);
@@ -6159,6 +6372,8 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session,
         result.columns = structuredDml.columns;
         result.columnTypes = structuredDml.columnTypes;
         result.rowDescriptor = structuredDml.rowDescriptor;
+        result.typedRows = std::move(structuredDml.typedRows);
+        result.typedRowDescriptor = std::move(structuredDml.typedRowDescriptor);
         result.rows = structuredDml.rows;
         result.nulls = structuredDml.nulls;
         result.columnDescriptions = ordinarySourceColumns.empty()
@@ -6616,7 +6831,9 @@ void sendQueryResult(PostgresProtocol& protocol, const QueryResult& result,
             normalized.resize(result.columns.size());
             const std::vector<bool> nulls = rowIndex < result.nulls.size()
                 ? result.nulls[rowIndex] : std::vector<bool>{};
-            protocol.sendDataRow(normalized, columns, nulls);
+            const auto* typed=result.typedRows && rowIndex<result.typedRows->size()
+                ? &result.typedRows->at(rowIndex) : nullptr;
+            protocol.sendDataRow(normalized, columns, nulls, typed);
         }
     }
     if (result.error) {
@@ -6999,7 +7216,8 @@ void handleClient(SecureSocket socket, std::string clientHost) {
     };
     const auto executeForProtocol = [&](const std::string& sql,
                                         bool typeDeclarationsAnalyzed = false,
-                                        bool retainOrdinarySourceDeclaration = true) -> QueryResult {
+                                        bool retainOrdinarySourceDeclaration = true,
+                                        bool captureTyped = false) -> QueryResult {
         // Portal objects live in this connection loop rather than Session.
         // Mirror their count while a command executes so a database-context
         // replacement cannot leave a portal bound to the previous database.
@@ -7090,7 +7308,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             result = executeProtocolQuery(
                 effectiveSql, *execSession,
                 remainingExtendedQueryTimeoutMs(), !typeDeclarationsAnalyzed,
-                retainOrdinarySourceDeclaration);
+                retainOrdinarySourceDeclaration, captureTyped);
         }
         if (!result.error && (!wasInTransaction || extendedImplicitTransaction) &&
             SQLParser::isSetTransactionStatement(sql)) {
@@ -8311,7 +8529,13 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 // Extended Parse already analyzed direct type declarations.
                 // Rebinding/executing the portal must not repeat their notice.
                 portalState.result = executeForProtocol(portalState.sql, true,
-                    portalState.parameterOids.empty());
+                    portalState.parameterOids.empty(),
+                    std::all_of(portalState.resultFormats.begin(),portalState.resultFormats.end(),
+                        [](uint16_t format){return format<=1;}) &&
+                    std::any_of(portalState.resultFormats.begin(),portalState.resultFormats.end(),
+                        [](uint16_t format){return format==1;}) &&
+                    (!portalState.result.resultSet || portalState.resultFormats.size()<=1 ||
+                        portalState.resultFormats.size()==portalState.result.columns.size()));
                 updateProcessIdle();
                 portalState.executed = true;
             }
@@ -8341,11 +8565,14 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                     for (size_t i = 0; i < columns.size(); ++i)
                         if (!portalState.resultFormats.empty()) columns[i].formatCode = static_cast<int16_t>(
                             portalState.resultFormats[portalState.resultFormats.size() == 1 ? 0 : i]);
+                    applyTypedResultCodecMetadata(columns,result.typedRowDescriptor);
                     bool sent = true;
                     for (size_t i = portalState.rowOffset; i < result.rows.size(); ++i) {
                         auto row = result.rows[i]; row.resize(columns.size());
                         const auto nulls = i < result.nulls.size() ? result.nulls[i] : std::vector<bool>{};
-                        if (!protocol.sendDataRow(row, columns, nulls)) { sent = false; break; }
+                        const auto* typed=result.typedRows && i<result.typedRows->size()
+                            ? &result.typedRows->at(i) : nullptr;
+                        if (!protocol.sendDataRow(row, columns, nulls, typed)) { sent = false; break; }
                     }
                     if (!sent) {
                         sendExtendedProtocolError("0A000", "binary result type is not supported");
@@ -8380,6 +8607,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                         columns[i].formatCode = static_cast<int16_t>(portalState.resultFormats[i]);
                     }
                 }
+                applyTypedResultCodecMetadata(columns,result.typedRowDescriptor);
                 const size_t remaining = result.rows.size() - portalState.rowOffset;
                 const size_t batchSize = maxRows == 0
                                              ? remaining
@@ -8394,7 +8622,9 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                         rowIndex < result.nulls.size()
                             ? result.nulls[rowIndex]
                             : std::vector<bool>{};
-                    if (!protocol.sendDataRow(normalized, columns, nulls)) {
+                    const auto* typed=result.typedRows && rowIndex<result.typedRows->size()
+                        ? &result.typedRows->at(rowIndex) : nullptr;
+                    if (!protocol.sendDataRow(normalized, columns, nulls, typed)) {
                         sendExtendedProtocolError("0A000", "binary result type is not supported");
                         extendedQueryError = true;
                         rowsSent = false;

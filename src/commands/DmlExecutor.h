@@ -42,6 +42,9 @@ struct DmlResult {
     // Actual bound output metadata owned by this result. Empty retains the
     // legacy declaration path; no prepared-query or runtime frame is borrowed.
     QueryRowDescriptor rowDescriptor;
+    // Present only for an explicit actual typed output consumer.
+    std::optional<PreparedQueryRows> typedRows;
+    std::optional<QueryRowDescriptor> typedRowDescriptor;
 };
 
 enum class StructuredSetOperation { Union, Intersect, Except };
@@ -59,6 +62,18 @@ bool combineStructuredSetResults(
     StructuredSetOperation operation, bool all,
     const std::string& database, const std::string& username,
     DmlResult& output, StructuredSetError& error);
+
+// A receiver request only; this does not bind a parameter frame or own a plan.
+bool typedResultCaptureRequested() noexcept;
+bool typedResultCaptureExplicitReceiver() noexcept;
+class ScopedTypedResultCapture {
+    bool previous_,previousExplicit_;
+public:
+    explicit ScopedTypedResultCapture(bool enabled, bool explicitReceiver = false) noexcept;
+    ~ScopedTypedResultCapture();
+    ScopedTypedResultCapture(const ScopedTypedResultCapture&) = delete;
+    ScopedTypedResultCapture& operator=(const ScopedTypedResultCapture&) = delete;
+};
 
 DmlResult takeLastDmlResult();
 void clearLastDmlResult();

@@ -1,4 +1,5 @@
 #pragma once
+#include "common/DatumType.h"
 
 #include "dbms_defs.h"
 #include <cstdint>
@@ -326,6 +327,7 @@ struct QueryColumnBinding {
     std::string declaredType;
     bool mergedUsing = false;
     uint32_t typeOid = 0; // exact catalog identity, including quoted domains
+    DatumTypePtr typeMetadata; // same original source declaration, no value/owner
 };
 struct ColumnRefExpr : public Expr {
     std::string schema;    // 可为空（无 schema 限定）
@@ -504,6 +506,7 @@ struct ArrayExpr : public Expr {
     std::vector<ExprPtr> elements;
     std::string elementType; // fixed metadata, never inferred from row values
     bool nestedElements = false;
+    DatumTypePtr typeMetadata;
     ArrayExpr() { type = ExprType::ArrayExpr; }
     std::string toString() const override {
         std::string sql = "ARRAY[";
@@ -520,6 +523,10 @@ struct RowExpr : public Expr {
     std::vector<ExprPtr> elements;
     bool constructor = false; // false is the historical scalar IN-list role
     std::vector<std::string> fieldTypes;
+    DatumTypePtr typeMetadata;
+    // Pure immutable wrapper with no row values. Prepared metadata may share
+    // this across rows; runtime rows still own their actual recordFields.
+    std::shared_ptr<const CompoundDatum> resultMetadata;
     RowExpr() { type = ExprType::RowExpr; }
     std::string toString() const override { return "ROW(...)"; }
 };

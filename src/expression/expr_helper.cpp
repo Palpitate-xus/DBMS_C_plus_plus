@@ -1,8 +1,11 @@
+#include "expression/StoredRegtypeValue.h"
 #include "expr_helper.h"
+#include "expression/ArrayDatumInput.h"
 #include "expression/aggregate_type.h"
 #include "types/numeric.h"
 #include "between_input.h"
 #include "expression/common_type.h"
+#include "expression/ArrayPushType.h"
 #include "array_type.h"
 #include "arithmetic_type.h"
 #include "geometric_input.h"
@@ -561,6 +564,8 @@ std::string inferAstResultType(
         if (name == "now" || name == "current_timestamp") return "timestamptz";
         if (name == "string_to_array" || name == "regexp_split_to_array" ||
             name == "regexp_matches") return "text[]";
+        if ((name=="array_append" || name=="array_prepend") && call->args.size()==2 && call->namedArgs.empty())
+            return array_push_type_detail::element(name=="array_prepend",argType(0),argType(1))+"[]";
         if (name == "array_append" || name == "array_prepend" ||
             name == "array_remove" || name == "array_replace")
             return name == "array_prepend" ? argType(1) : argType(0);
@@ -769,7 +774,8 @@ std::unique_ptr<FunctionCallExpr> hintedRoutineSignature(const FunctionCallExpr&
 RoutineResultTypes collectRoutineResultTypes(
     const Expr* expression, const std::string& currentDB,
     StorageEngine* functionEngine,const ExprEvaluator* functionEvaluator = nullptr,
-    const std::map<std::string,std::string>* typeHints = nullptr) {
+    const std::map<std::string,std::string>* typeHints = nullptr,
+    const DatumMetadataContext* datumMetadata = nullptr) {
     RoutineResultTypes routineTypes;
     if (currentDB.empty() && !functionEvaluator) return routineTypes;
     // A caller's native callback replacements belong to that evaluator.
@@ -787,7 +793,7 @@ RoutineResultTypes collectRoutineResultTypes(
         if(const auto* literal=dynamic_cast<const LiteralExpr*>(node)) {
             if(literal->analyzedPrimitiveConstant)routineTypes.declarations[node]=literal->typeName;
             else if(!literal->typeName.empty() && !legacyNullLiteral(literal))
-                routineTypes.declarations[node]=ExprHelper::declaredTypeInput(literal->typeName,currentDB,functionEngine);
+                routineTypes.declarations[node]=ExprHelper::declaredTypeInput(literal->typeName,currentDB,functionEngine,datumMetadata);
         } else if (const auto* call = dynamic_cast<const FunctionCallExpr*>(node)) {
             // Child declarations precede the parent signature probe, so a
             // nested generic routine consumes the same caller hints.
@@ -875,12 +881,12 @@ RoutineResultTypes collectRoutineResultTypes(
             inspect(binary->left.get());
             if (binary->op != "::") inspect(binary->right.get());
             else if(const auto* target=dynamic_cast<const LiteralExpr*>(binary->right.get()))
-                routineTypes.declarations[node]=ExprHelper::declaredTypeInput(target->value,currentDB,functionEngine);
+                routineTypes.declarations[node]=ExprHelper::declaredTypeInput(target->value,currentDB,functionEngine,datumMetadata);
         } else if (const auto* quantified = dynamic_cast<const QuantifiedComparisonExpr*>(node)) {
             inspect(quantified->left.get()); inspect(quantified->right.get());
         } else if (const auto* cast = dynamic_cast<const CastExpr*>(node)) {
             inspect(cast->operand.get());
-            routineTypes.declarations[node]=ExprHelper::declaredTypeInput(cast->typeName,currentDB,functionEngine);
+            routineTypes.declarations[node]=ExprHelper::declaredTypeInput(cast->typeName,currentDB,functionEngine,datumMetadata);
         } else if (const auto* conditional = dynamic_cast<const CaseExpr*>(node)) {
             inspect(conditional->switchExpr.get());
             for (const auto& arm : conditional->whenClauses) {
@@ -2064,7 +2070,10 @@ std::string ExprHelper::inferParsedResultType(
 }
 
 std::string ExprHelper::declaredTypeInput(const std::string& spelling,
-    const std::string& currentDB,StorageEngine* owner) {
+    const std::string& currentDB,StorageEngine* owner,
+    const DatumMetadataContext* datumMetadata) {
+    if(datumMetadata && datumMetadata->inputDeclaration)
+        return datumMetadata->inputDeclaration(spelling);
     const auto* session=currentSession();
     const auto database=currentDB.empty() && session?session->currentDB:currentDB;
     if(database.empty())return resolveDeclaredTypeName(spelling,nullptr,session).inputType;
@@ -2181,9 +2190,15 @@ std::optional<ArrayConcatBinding> ExprHelper::resolveArrayConcatTypes(
 
 void ExprHelper::prepareArrayTypes(Expr* expression,
     const std::map<std::string, std::string>& hints, const std::string& database,
-    StorageEngine* owner) {
-    const auto routines = collectRoutineResultTypes(expression, database, owner,nullptr,&hints);
-    const auto type = [&](const Expr* node) { return inferAstResultType(node,hints,&routines); };
+    StorageEngine* owner,const DatumMetadataContext* datumMetadata,DatumTypePtr* resultMetadata) {
+    if(resultMetadata)resultMetadata->reset();
+    const auto routines = collectRoutineResultTypes(expression, database, owner,nullptr,&hints,datumMetadata);
+    std::map<const Expr*,std::string> analyzedTypes;
+    const auto type = [&](const Expr* node) {
+        const auto result=inferAstResultType(node,hints,&routines);
+        if(datumMetadata)analyzedTypes[node]=result;
+        return result;
+    };
     const auto patternType = [&](std::string operation,const std::vector<const Expr*>& operands) {
         const auto op=toLower(operation);
         const bool like=op=="like" || op=="not like" || op=="like escape" || op=="not like escape";
@@ -2231,7 +2246,7 @@ void ExprHelper::prepareArrayTypes(Expr* expression,
         if (auto* cast = dynamic_cast<CastExpr*>(node)) {
             auto context=cast->typeName;
             if(array_detail::isArray(context) && !cast->typeMods.empty() &&
-               canonicalResultTypeName(declaredTypeInput(context,database,owner))=="bit[]") {
+               canonicalResultTypeName(declaredTypeInput(context,database,owner,datumMetadata))=="bit[]") {
                 context.resize(context.size()-2);context+='(';
                 for(const auto& modifier:cast->typeMods)context+=modifier;
                 context+=")[]";
@@ -2394,7 +2409,7 @@ void ExprHelper::prepareArrayTypes(Expr* expression,
             if(contextual && std::any_of(types.begin(),types.end(),[](const auto& input) {
                     const auto type=canonicalResultTypeName(input);
                     return type=="integer" || type=="bigint";
-                }) && canonicalResultTypeName(declaredTypeInput(context,database,owner))=="bit[]") {
+                }) && canonicalResultTypeName(declaredTypeInput(context,database,owner,datumMetadata))=="bit[]") {
                 const auto declaration=SQLParser::parseTypeSpecification(context);
                 for(size_t i=0;i<types.size();++i) {
                     const auto source=canonicalResultTypeName(types[i]);
@@ -2486,6 +2501,97 @@ void ExprHelper::prepareArrayTypes(Expr* expression,
         }
     };
     visit(expression,{});
+    if(!datumMetadata || !datumMetadata->declaration)return;
+    std::function<DatumTypePtr(Expr*)> freeze=[&](Expr* node)->DatumTypePtr {
+        if(!node || node->preparedSubquery)return {};
+        if(const auto* column=dynamic_cast<const ColumnRefExpr*>(node)) {
+            if(column->binding)return column->binding->typeMetadata;
+            const auto found=datumMetadata->columns.find(column->toString());
+            return found==datumMetadata->columns.end()?DatumTypePtr{}:found->second;
+        }
+        if(auto* row=dynamic_cast<RowExpr*>(node)) {
+            if(row->typeMetadata && row->resultMetadata)return row->typeMetadata;
+            std::vector<DatumTypePtr> fields;fields.reserve(row->elements.size());
+            for(auto& field:row->elements)fields.push_back(freeze(field.get()));
+            if(datumMetadata->record)row->resultMetadata=datumMetadata->record(fields);
+            if(row->resultMetadata)row->typeMetadata=row->resultMetadata->type;
+            return row->typeMetadata;
+        }
+        if(auto* array=dynamic_cast<ArrayExpr*>(node)) {
+            std::vector<DatumTypePtr> children;
+            for(auto& child:array->elements)children.push_back(freeze(child.get()));
+            if(!array->typeMetadata) {
+                array->typeMetadata=datumMetadata->declaration(array->elementType+"[]",0);
+                if(array->typeMetadata && array->typeMetadata->arrayElement && !children.empty()) {
+                    const auto expected=array->nestedElements?array->typeMetadata->actualOid:
+                        array->typeMetadata->arrayElement->actualOid;
+                    const auto modifier=children.front()?children.front()->effectiveTypeMod:-1;
+                    if(modifier>=0 && std::all_of(children.begin(),children.end(),[&](const auto& child) {
+                            return child && child->actualOid==expected && child->effectiveTypeMod==modifier;
+                        })) {
+                        if(datumMetadata->modifier)
+                            array->typeMetadata=datumMetadata->modifier(array->typeMetadata,modifier);
+                        else {
+                            auto adjusted=std::make_shared<DatumType>(*array->typeMetadata);
+                            adjusted->effectiveTypeMod=modifier;array->typeMetadata=std::move(adjusted);
+                        }
+                    }
+                }
+            }
+            return array->typeMetadata;
+        }
+        if(auto* unary=dynamic_cast<UnaryOpExpr*>(node)) {
+            const auto child=freeze(unary->operand.get());
+            if(unary->op.rfind("COLLATE ",0)==0)return child;
+        } else if(auto* binary=dynamic_cast<BinaryOpExpr*>(node)) {
+            const auto sourceDeclaration=freeze(binary->left.get());
+            if(binary->op!="::" && binary->op!="COLLATE") (void)freeze(binary->right.get());
+            // Shape-only slicing retains the original analyzed non-domain
+            // array declaration, including CHAR/VARCHAR/BIT element typmod.
+            // Keep the old child walk and never request new CASE/input types.
+            if(binary->op=="[:]" && sourceDeclaration &&
+               sourceDeclaration->kind==DatumKind::Array &&
+               sourceDeclaration->actualOid==sourceDeclaration->codecOid)
+                return sourceDeclaration;
+        } else if(auto* cast=dynamic_cast<CastExpr*>(node)) (void)freeze(cast->operand.get());
+        else if(auto* conditional=dynamic_cast<CaseExpr*>(node)) {
+            (void)freeze(conditional->switchExpr.get());
+            for(auto& arm:conditional->whenClauses){(void)freeze(arm.first.get());(void)freeze(arm.second.get());}
+            (void)freeze(conditional->elseExpr.get());
+        } else if(auto* call=dynamic_cast<FunctionCallExpr*>(node)) {
+            for(auto& arg:call->args)(void)freeze(arg.get());
+            for(auto& arg:call->namedArgs)(void)freeze(arg.value.get());
+            (void)freeze(call->filter.get());
+        } else if(auto* quantified=dynamic_cast<QuantifiedComparisonExpr*>(node)) {
+            (void)freeze(quantified->left.get());(void)freeze(quantified->right.get());
+        }
+        if(const auto* call=dynamic_cast<const FunctionCallExpr*>(node);
+           call && call->resolvedResultType.empty() && call->sqlValue==FunctionCallExpr::SqlValue::None && !call->setReturning) {
+            const auto declaration=routines.declarations.find(node);
+            if(declaration==routines.declarations.end() || declaration->second=="unknown")return {};
+        }
+        if(const auto* parameter=dynamic_cast<const ParameterExpr*>(node);
+           parameter && protocolTypeName(parameter->declaredType)=="unknown")return {};
+        uint32_t oid=0;
+        if(const auto* literal=dynamic_cast<const LiteralExpr*>(node);
+           literal && (literal->typeName.empty() || legacyNullLiteral(literal)))
+            oid=ExprHelper::inferValuesResultType(literal->value)=="unknown"?705:
+                mapBuiltinTypeNameToOid(ExprHelper::inferValuesResultType(literal->value));
+        const auto originalDeclaration=routines.declarations.find(node);
+        if(originalDeclaration!=routines.declarations.end())
+            return datumMetadata->declaration(originalDeclaration->second,oid);
+        const auto analyzed=analyzedTypes.find(node);
+        if(analyzed!=analyzedTypes.end())return datumMetadata->declaration(analyzed->second,oid);
+        // Only literal primitive identities exist independently of an
+        // analysis request. Never infer CASE/MOD or an opaque native branch
+        // merely to fill a wire declaration.
+        if(const auto* literal=dynamic_cast<const LiteralExpr*>(node);
+           literal && (literal->typeName.empty() || legacyNullLiteral(literal)))
+            return datumMetadata->declaration(ExprHelper::inferValuesResultType(literal->value),oid);
+        return {};
+    };
+    const auto result=freeze(expression);
+    if(resultMetadata)*resultMetadata=result;
 }
 
 std::string ExprHelper::inferResultType(
@@ -2972,7 +3078,10 @@ static ExprEvalResult evalStringImpl(
     const std::string& currentDB,
     const std::string& currentUser,
     StorageEngine* functionEngine = nullptr,
-    const std::map<std::string, std::string>* collationHints = nullptr) {
+    const std::map<std::string, std::string>* collationHints = nullptr,
+    bool captureOwningValue = false,
+    const std::map<std::string, ExprValue>* outputCoercionValues = nullptr,
+    const DatumMetadataContext* datumMetadata = nullptr) {
 
     // The parser retains the actual declared-type grammar. Rewriting a
     // keyword/string pair into :: changes bare BIT/CHAR length semantics and
@@ -3093,6 +3202,29 @@ static ExprEvalResult evalStringImpl(
             const auto collation=collationHints->find(name);
             if (collation!=collationHints->end()) datum.collation=collation->second;
         }
+        bool actualOwningInput=false;
+        if (outputCoercionValues) {
+            const auto actual=outputCoercionValues->find(name);
+            if (actual!=outputCoercionValues->end()) {
+                datum=actual->second;actualOwningInput=true;
+            }
+        }
+        if(!actualOwningInput && datumMetadata && datumMetadata->sourceColumns &&
+           datumMetadata->storedColumns.count(name) &&
+           stored_regtype_detail::columnType(typeName)) {
+            const auto declaration=datumMetadata->columns.find(name);
+            auto* storage=functionEngine?functionEngine:&g_engine;
+            const auto catalog=regtype_detail::metadata(*storage,currentDB);
+            datum=stored_regtype_detail::load(value,typeName=="regtype[]",isNull,
+                catalog,currentSession(),declaration==datumMetadata->columns.end()?
+                    DatumTypePtr{}:declaration->second);
+        }
+        if(captureOwningValue && !actualOwningInput && datumMetadata &&
+           datumMetadata->sourceColumns && datumMetadata->storedColumns.count(name)) {
+            const auto declaration=datumMetadata->columns.find(name);
+            if(declaration!=datumMetadata->columns.end())
+                (void)compound_value_detail::decodeArrayStorageInput(datum,declaration->second);
+        }
         ctx.set(key,std::move(datum));
         bindings.emplace(name, key);
     }
@@ -3134,6 +3266,7 @@ static ExprEvalResult evalStringImpl(
         return ExprValue("name", currentUser, currentUser.empty());
     }, 's');
     ExprValue v;
+    DatumTypePtr outputDeclaration;
     try {
         for (auto* reference : references) {
             auto binding = bindings.find(reference->toString());
@@ -3159,7 +3292,33 @@ static ExprEvalResult evalStringImpl(
         }
         std::map<std::string,std::string> preparedHints;
         for (const auto& entry : bindings) preparedHints[entry.second] = ctx.get(entry.second)->typeName;
-        ExprHelper::prepareArrayTypes(select->selectList[0].expr.get(),preparedHints,currentDB,functionEngine);
+        DatumMetadataContextPtr metadataOwner;
+        std::optional<DatumMetadataContext> preparedMetadata;
+        if(captureOwningValue) {
+            if(!datumMetadata) {
+                auto* engine=functionEngine?functionEngine:&g_engine;
+                metadataOwner=engine->prepareDatumMetadataContext(currentDB);
+                datumMetadata=metadataOwner.get();
+            }
+            if(datumMetadata) {
+                preparedMetadata=*datumMetadata;preparedMetadata->columns.clear();
+                for(const auto& binding:bindings) {
+                    const auto declared=datumMetadata->columns.find(binding.first);
+                    if(declared!=datumMetadata->columns.end())
+                        preparedMetadata->columns.emplace(binding.second,declared->second);
+                    else if(!datumMetadata->sourceColumns) {
+                        const auto type=typeHints.find(binding.first);
+                        if(type!=typeHints.end() && datumMetadata->declaration) {
+                            const auto declaration=protocolTypeName(type->second)=="unknown"?DatumTypePtr{}:
+                                datumMetadata->declaration(type->second,0);
+                            preparedMetadata->columns.emplace(binding.second,declaration);
+                        }
+                    }
+                }
+            }
+        }
+        ExprHelper::prepareArrayTypes(select->selectList[0].expr.get(),preparedHints,currentDB,functionEngine,
+            preparedMetadata?&*preparedMetadata:nullptr,captureOwningValue?&outputDeclaration:nullptr);
         evaluator.bindScalarFunctions(select->selectList[0].expr.get(), functionEngine);
         v = evaluator.eval(select->selectList[0].expr.get(), ctx);
     } catch (const DbError& e) {
@@ -3183,6 +3342,10 @@ static ExprEvalResult evalStringImpl(
     res.value = v.value;
     res.typeName = v.typeName;
     res.collation = v.collation;
+    if (captureOwningValue) {
+        res.owningValue=std::move(v);
+        res.typeMetadata=std::move(outputDeclaration);
+    }
     return res;
 }
 
@@ -3192,9 +3355,11 @@ ExprEvalResult ExprHelper::evalString(
     const std::map<std::string, std::string>& typeHints,
     const std::string& currentDB,
     const std::string& currentUser,
-    StorageEngine* functionEngine) {
+    StorageEngine* functionEngine,
+    bool captureOwningValue,const DatumMetadataContext* datumMetadata) {
     return evalStringImpl(
-        exprSql, row, typeHints, nullptr, currentDB, currentUser, functionEngine);
+        exprSql, row, typeHints, nullptr, currentDB, currentUser, functionEngine,
+        nullptr, captureOwningValue, nullptr, datumMetadata);
 }
 
 ExprEvalResult ExprHelper::evalStringWithNulls(
@@ -3205,9 +3370,13 @@ ExprEvalResult ExprHelper::evalStringWithNulls(
     const std::string& currentDB,
     const std::string& currentUser,
     StorageEngine* functionEngine,
-    const std::map<std::string, std::string>& collationHints) {
+    const std::map<std::string, std::string>& collationHints,
+    bool captureOwningValue,
+    const std::map<std::string, ExprValue>* outputCoercionValues,
+    const DatumMetadataContext* datumMetadata) {
     return evalStringImpl(
-        exprSql, row, typeHints, &nullColumns, currentDB, currentUser, functionEngine,&collationHints);
+        exprSql, row, typeHints, &nullColumns, currentDB, currentUser, functionEngine,
+        &collationHints, captureOwningValue, outputCoercionValues, datumMetadata);
 }
 
 bool ExprHelper::evalBool(

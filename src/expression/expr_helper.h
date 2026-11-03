@@ -1,5 +1,8 @@
 #pragma once
 
+#include "expression/ExprEvaluator.h"
+#include "expression/DatumMetadataContext.h"
+
 #include <map>
 #include <functional>
 #include <optional>
@@ -33,6 +36,8 @@ struct ExprEvalResult {
     bool ok = false;     // true if parse + eval succeeded
     std::string error;   // set when ok == false
     std::string sqlState; // structured DbError code; error retains legacy diagnostics
+    std::optional<ExprValue> owningValue; // requested actual eval result, never reconstructed
+    DatumTypePtr typeMetadata; // pure original analysis, only requested output
 };
 
 class ExprHelper {
@@ -40,7 +45,8 @@ public:
     // Pure declared type lookup. The backend's copied catalog/search_path
     // owns qualified/custom identities; this never executes a scalar call.
     static std::string declaredTypeInput(const std::string& spelling,
-        const std::string& currentDB = "", StorageEngine* owner = nullptr);
+        const std::string& currentDB = "", StorageEngine* owner = nullptr,
+        const DatumMetadataContext* datumMetadata = nullptr);
     // Default result naming from the retained AST. Strong source names win
     // over weak cast/type names. The optional resolver owns type metadata;
     // no expression, row or routine body is evaluated to choose a label.
@@ -53,7 +59,9 @@ public:
         bool binaryOperator = false);
     static void prepareArrayTypes(Expr* expression,
         const std::map<std::string, std::string>& typeHints = {},
-        const std::string& currentDB = "", StorageEngine* owner = nullptr);
+        const std::string& currentDB = "", StorageEngine* owner = nullptr,
+        const DatumMetadataContext* datumMetadata = nullptr,
+        DatumTypePtr* resultMetadata = nullptr);
     // Metadata-only structural identity. The consumer supplies already
     // validated source occurrence/column ordinal/type/collation identities.
     static std::string scalarExpressionIdentity(
@@ -138,7 +146,9 @@ public:
         const std::map<std::string, std::string>& typeHints = {},
         const std::string& currentDB = "",
         const std::string& currentUser = "",
-        StorageEngine* functionEngine = nullptr);
+        StorageEngine* functionEngine = nullptr,
+        bool captureOwningValue = false,
+        const DatumMetadataContext* datumMetadata = nullptr);
 
     // Variant for callers that retain SQL NULL metadata separately from the
     // textual value.  This preserves a real empty string as distinct from
@@ -152,7 +162,12 @@ public:
         const std::string& currentDB = "",
         const std::string& currentUser = "",
         StorageEngine* functionEngine = nullptr,
-        const std::map<std::string, std::string>& collationHints = {});
+        const std::map<std::string, std::string>& collationHints = {},
+        bool captureOwningValue = false,
+        // Output-only coercion: replace an existing helper datum slot with
+        // its already-evaluated value. No input frame or SQL is reconstructed.
+        const std::map<std::string, ExprValue>* outputCoercionValues = nullptr,
+        const DatumMetadataContext* datumMetadata = nullptr);
 
     // Convenience: evaluate a boolean expression. NULL is treated as false.
     // Returns false and writes the error message to `error` (if non-null) on

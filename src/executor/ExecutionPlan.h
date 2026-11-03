@@ -218,6 +218,9 @@ struct PlanExecutionResult {
     std::string errorSqlState;
     std::string errorMessage;
     std::exception_ptr errorException;
+    // Optional actual row values; disabled for ordinary text receivers.
+    PreparedQueryRows typedRows;
+    bool typedRowsAvailable = false;
 
     void throwIfFailed() const {
         if (!ok) {
@@ -363,7 +366,8 @@ public:
     // value is a logical column value, not an encoded physical primary key.
     IndexScanOp(StorageEngine* engine, const std::string& dbname,
                 const std::string& tablename, const std::string& colname,
-                const std::string& value);
+                const std::string& value,
+                std::optional<uint32_t> referenceInputOid = std::nullopt);
 
     bool open() override;
     bool next(std::string& outRow) override;
@@ -387,6 +391,8 @@ private:
     std::string tablename_;
     std::string colname_;
     std::string value_;
+    std::optional<uint32_t> referenceInputOid_;
+    std::optional<uint32_t> referenceEqualityOid_;
     TableSchema tbl_;
     std::vector<int64_t> rids_;
     size_t pos_ = 0;
@@ -1449,11 +1455,11 @@ public:
                                    const ExplainExecutionStats& execution);
 
     // Checked production entry point: EOF and execution failure are distinct.
-    static PlanExecutionResult executePlanChecked(OpPtr plan, size_t maxRows = 0);
+    static PlanExecutionResult executePlanChecked(OpPtr plan, size_t maxRows = 0, bool captureTyped = false);
     // A top-level SQL output receiver can retain the rows actually produced
     // before a typed runtime failure. ok remains false and throwIfFailed keeps
     // the original exception; ordinary checked/nested consumers still discard.
-    static PlanExecutionResult executePlanWithPrefix(OpPtr plan, size_t maxRows = 0);
+    static PlanExecutionResult executePlanWithPrefix(OpPtr plan, size_t maxRows = 0, bool captureTyped = false);
     // A demand-driven receiver over the same retained typed operator graph.
     // No SQL rewriting, pre-execution, transaction or snapshot reset occurs.
     static std::unique_ptr<PreparedQueryCursor> makePreparedCursor(

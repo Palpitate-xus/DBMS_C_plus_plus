@@ -43,6 +43,7 @@ struct PlPgsqlQueryResult {
     std::vector<std::optional<std::string>> firstRow;
     std::string sqlState;
     std::string message;
+    std::optional<std::vector<ExprValue>> firstOwningRow;
 };
 
 // Executor demand, not a SQL LIMIT rewrite or a cap on scanned input rows.
@@ -59,6 +60,7 @@ struct PlPgsqlQueryOptions {
     std::shared_ptr<PreparedQuery> preparedQuery;
     const Stmt* preparedStatement = nullptr;
     RowContext preparedRow;
+    bool captureOwningFirstRow = false; // output-only, default off
 };
 
 // Callbacks the interpreter needs from the host.
@@ -121,7 +123,8 @@ public:
                     bool* returnIsNull = nullptr,
                     const std::set<std::string>* nullParams = nullptr,
                     std::string* errorSqlState = nullptr,
-                    std::string* returnType = nullptr);
+                    std::string* returnType = nullptr,
+                    std::optional<ExprValue>* owningReturn = nullptr);
 };
 
 }  // namespace dbms

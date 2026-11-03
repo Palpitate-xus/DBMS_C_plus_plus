@@ -2,6 +2,38 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-03 owning compound binary result and physical REGTYPE subset",
+      "gap_ids": [
+        "TYPE-17",
+        "TYPE-19",
+        "TYPE-20",
+        "TYPE-21",
+        "PROTO-04"
+      ],
+      "status": "partial",
+      "evidence": [
+        "docs/performance-report-2026-10-30.md",
+        "docs/test-report.md",
+        "docs/postgresql-comparison.md",
+        "docs/postgresql-18-implementation-blueprint.md"
+      ],
+      "tests": [
+        "tests/owned_compound_spill_codec_test.cpp",
+        "tests/owned_compound_physical_spill_test.cpp",
+        "tests/numeric_special_binary_output_test.cpp"
+      ],
+      "verification": {
+        "candidate": "C7 f135335e6ce07b23bf325f6303431488842cb418ebf84ef8a8a02c6df63d3482;226source/freshABI lineage;2actualCPP recompiled+60valid sameABI objects;functional source versioned on master;installed AA52 retained pending separatecost/resource/latency decision.",
+        "implementation": "Defaultoff actual owning datum/result/codec chain for correctly described ordinary compound outputs;actual/basetype OID and NULL/array bounds preserve.Original raw descriptors/top enum-family/R151 policies remain. New REGTYPE uint32 physical identity/index/COPY/cold read and normal2206/2211 parameter codecs.",
+        "correctness_generations": "C5 complete106native105pass1oldfail;95wire86pass9oldfail,5011detailed0newwrong and220exact. C7 selected26native all0;31wire24pass7oldfail. Not C7 full106/95.",
+        "strict_oracles": "PG18.6 frozen301 reference;C7 114remaining vsAA52201,87improved0oldpassregression.83/111 each2retainedSHOW/UTC configdifferences. REGTYPE68 57pass11ordinarydifferences+normalparams16all0, fullraw retained and same-data cold epochs.",
+        "new_tests": "3native entries16+12+10=38controls;original2319testfiles exact+3=2322. File/entry/control counts remain separate.",
+        "ordinary_remaining": "PreparedbinaryRETURNING capture,moreUPDATE WHERE/SET actualinput loads,domainarray/namedcatalog/complexinput/legacytypmod/physicalarraybitmaphistory,ALTER USING/chainedCAST/domainrename remain ordinary open;not new user deferrals.",
+        "cost": "ABI sizeof increases ExprValue16B/ExprEvalResult208B/DmlResult64B;privatePreparedReturning schema reference+owned database copy. Independent cost/resource/latency acceptance pending;no speed/RSS/zero-cost claim.",
+        "scope": "Original273items/status22complete166partial70unverified15deferred_by_user and251history raw suffix preserved;725protected and754MD pathset retained. R151 original103 and all dedicated deferrals remain;actualP/B/D owner bodies rawexact,handleClient has revieweddata-onlyreceiver delta. Goalactive/master/Palpitate-xus,no newbranch/push/Actions."
+      }
+    },
+    {
       "issue": "2026-11-03 rejected window scratch proposals and owned binary datum investigation",
       "gap_ids": [
         "QRY-08",

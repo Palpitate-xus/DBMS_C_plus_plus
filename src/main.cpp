@@ -1,3 +1,4 @@
+#include "expression/StoredRegtypeValue.h"
 #include <algorithm>
 #include <charconv>
 #include "types/numeric.h"
@@ -307,7 +308,9 @@ static void publishStructuredUtilityResult(
     std::vector<std::string> columnTypes,
     std::vector<std::vector<std::string>> rows,
     std::vector<std::vector<bool>> nulls,
-    const std::string& commandTag) {
+    const std::string& commandTag,
+    std::optional<dbms::PreparedQueryRows> typedRows = {},
+    dbms::QueryRowDescriptor descriptor = {}) {
     if (!shouldPublishQueryMetadata()) return;
     dbms::DmlResult result;
     result.available = true;
@@ -316,7 +319,57 @@ static void publishStructuredUtilityResult(
     result.rows = std::move(rows);
     result.nulls = std::move(nulls);
     result.commandTag = commandTag;
+    result.typedRows=std::move(typedRows);
+    if(dbms::typedResultCaptureRequested())result.typedRowDescriptor=std::move(descriptor);
     dbms::publishLastDmlResult(std::move(result));
+}
+
+// These adapters only follow an already-decided output permutation. They
+// neither evaluate expressions nor infer a datum from its display text.
+static void selectCapturedResultRows(dbms::DmlResult& result,
+                                     const std::vector<size_t>& indices) {
+    if (!result.typedRows) return;
+    if (std::any_of(indices.begin(), indices.end(), [&](size_t i) {
+            return i >= result.typedRows->size();
+        })) {
+        result.typedRows.reset();
+        return;
+    }
+    dbms::PreparedQueryRows selected;
+    selected.reserve(indices.size());
+    for (size_t index : indices)
+        selected.push_back(std::move(result.typedRows->at(index)));
+    result.typedRows = std::move(selected);
+}
+static void mergeCapturedDeclarations(std::vector<dbms::DatumTypePtr>& output,
+    bool& observed,const std::vector<dbms::DatumTypePtr>& incoming) {
+    if(!observed) {output=incoming;observed=true;return;}
+    if(output.size()!=incoming.size()) {output.clear();return;}
+    for(size_t i=0;i<output.size();++i) {
+        const auto& declaration=incoming[i];auto& previous=output[i];
+        if(!previous || !declaration || previous->actualOid!=declaration->actualOid ||
+           previous->codecOid!=declaration->codecOid || previous->codecSize!=declaration->codecSize ||
+           previous->effectiveTypeMod!=declaration->effectiveTypeMod || previous->kind!=declaration->kind ||
+           previous->enumType!=declaration->enumType)previous.reset();
+    }
+}
+static void selectCapturedResultColumns(dbms::DmlResult& result,
+                                        const std::vector<size_t>& indices) {
+    if (!result.typedRows) return;
+    for (const auto& row : *result.typedRows)
+        if (std::any_of(indices.begin(), indices.end(), [&](size_t i) {
+                return i >= row.size();
+            })) {
+            result.typedRows.reset();
+            return;
+        }
+    for (auto& row : *result.typedRows) {
+        std::vector<dbms::ExprValue> selected;
+        selected.reserve(indices.size());
+        // SELECT may repeat a column; each result cell must own its value.
+        for (size_t index : indices) selected.push_back(row[index]);
+        row = std::move(selected);
+    }
 }
 
 // ========================================================================
@@ -5129,6 +5182,11 @@ static bool handleCopy(const string& sql, Session& s) {
             for (size_t i = 0; i < tbl.len; ++i) {
                 if (i > 0) csvOut << ",";
                 string val = dbms::StorageEngine::extractColumnValueStatic(row, tbl, i);
+                if(tbl.cols[i].generatedKind!='v' &&
+                   dbms::stored_regtype_detail::columnType(tbl.cols[i].dataType) && !val.empty()) {
+                    const auto catalog=dbms::regtype_detail::metadata(g_engine,s.currentDB);
+                    val=dbms::stored_regtype_detail::output(val,tbl.cols[i].isArray,catalog,&s);
+                }
                 bool needQuote = (val.find(',') != string::npos || val.find('"') != string::npos || val.find('\n') != string::npos);
                 if (needQuote) {
                     csvOut << '"';
@@ -7409,6 +7467,7 @@ static bool captureSetOperand(const string& sql, Session& s,
     // used by derived tables. Rendered stdout is retained only for an error
     // diagnostic; successful operands are never reconstructed from it.
     const string operandSql = unwrapParenthesizedQuery(sql);
+    dbms::ScopedTypedResultCapture typedReceiver(dbms::typedResultCaptureRequested(), true);
     const unsigned previousCaptureDepth = metadataCaptureDepth;
     metadataCaptureDepth = executeDepth + 1;
     dbms::clearLastDmlResult();
@@ -9304,8 +9363,18 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
     vector<bool> valueNulls;
     vector<string> columnTypes;
     vector<size_t> listeningChannelSrfIndices;
+    const bool captureOwning = dbms::typedResultCaptureRequested();
+    vector<std::optional<dbms::ExprValue>> owningCells;
+    vector<dbms::DatumTypePtr> outputDeclarations;
+    dbms::DatumMetadataContextPtr nativeMetadata;
     auto appendValue = [&](string value, bool isNull = false,
-                           string typeName = "text") {
+                           string typeName = "text",
+                           std::optional<dbms::ExprValue> actual = std::nullopt,
+                           dbms::DatumTypePtr declaration = {}) {
+        if (captureOwning) {
+            owningCells.push_back(std::move(actual));
+            outputDeclarations.push_back(std::move(declaration));
+        }
         const string loweredType = toLower(trim(typeName));
         if (!isNull &&
             (loweredType == "timestamptz" ||
@@ -9354,6 +9423,17 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
         valueNulls.push_back(isNull);
         columnTypes.push_back(typeName.empty() ? "text" : std::move(typeName));
     };
+    auto appendProducedScalar = [&](string value, bool isNull, string typeName) {
+        std::optional<dbms::ExprValue> actual;
+        dbms::DatumTypePtr declaration;
+        if (captureOwning) {
+            actual.emplace(typeName, value, isNull);
+            if(!nativeMetadata)nativeMetadata=g_engine.prepareDatumMetadataContext(s.currentDB);
+            const auto oid=dbms::mapBuiltinTypeNameToOid(typeName);
+            if(oid && nativeMetadata->declaration)declaration=nativeMetadata->declaration(typeName,oid);
+        }
+        appendValue(std::move(value), isNull, std::move(typeName), std::move(actual),std::move(declaration));
+    };
     for (const string& item : items) {
         if (item.empty()) {
             cout << "SQL syntax error: empty projection item" << endl;
@@ -9400,13 +9480,13 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
         // Pseudo functions
         if (lowItem == "current_user") {
             headers.push_back(disp == item ? "current_user" : disp);
-            appendValue(s.currentRole.empty() ? s.username : s.currentRole,
+            appendProducedScalar(s.currentRole.empty() ? s.username : s.currentRole,
                         false, "name");
             continue;
         }
         if (lowItem == "session_user") {
             headers.push_back(disp == item ? "session_user" : disp);
-            appendValue(s.username, false, "name");
+            appendProducedScalar(s.username, false, "name");
             continue;
         }
         if (lowItem.rfind("generate_series", 0) == 0) {
@@ -9417,7 +9497,7 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
         }
         if (lowItem == "current_database()" || lowItem == "current_database ( )") {
             headers.push_back(disp == item ? "current_database" : disp);
-            appendValue(s.currentDB.empty() ? std::string("postgres") : s.currentDB,
+            appendProducedScalar(s.currentDB.empty() ? std::string("postgres") : s.currentDB,
                         false, "name");
             continue;
         }
@@ -9438,19 +9518,19 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
         }
         if (lowItem == "current_schema()" || lowItem == "current_schema ( )") {
             const auto value = dbms::ExprHelper::evalString(
-                expr, {}, {}, s.currentDB, s.username, &g_engine);
+                expr, {}, {}, s.currentDB, s.username, &g_engine, captureOwning);
             if (!value.ok)
                 throw dbms::DbError(value.sqlState.empty() ? "XX000" : value.sqlState,
                                     value.error);
             headers.push_back(disp == item ? "current_schema" : disp);
-            appendValue(value.value, value.isNull, value.typeName);
+            appendValue(value.value, value.isNull, value.typeName, value.owningValue,value.typeMetadata);
             continue;
         }
         if (lowItem == "user" || lowItem == "current_user" || lowItem == "session_user") {
             // The bare keyword USER is a PG synonym for CURRENT_USER.
             if (lowItem == "user") {
                 headers.push_back(disp == item ? "user" : disp);
-                appendValue(s.username, false, "name");
+                appendProducedScalar(s.username, false, "name");
                 continue;
             }
         }
@@ -9469,10 +9549,10 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
             string fname = expr.substr(0, lp);
             if (nameOk && !s.currentDB.empty()) {
                 if(g_engine.udfExists(s.currentDB,fname) && fname!="pg_typeof" && fname!="version") {
-                    const auto value=dbms::ExprHelper::evalString(expr,{}, {},s.currentDB,s.username,&g_engine);
+                    const auto value=dbms::ExprHelper::evalString(expr,{}, {},s.currentDB,s.username,&g_engine,captureOwning);
                     if(!value.ok)throw dbms::DbError(value.sqlState.empty()?"XX000":value.sqlState,value.error);
                     headers.push_back(disp==item?fname:disp);
-                    appendValue(value.value,value.isNull,value.typeName);
+                    appendValue(value.value,value.isNull,value.typeName,value.owningValue,value.typeMetadata);
                     continue;
                 }
             }
@@ -9497,7 +9577,8 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
                 (void)g_engine.prepareBoundQuery(s.currentDB, "SELECT " + expr);
                 const auto value = g_engine.executeScalarSubquery(s.currentDB, inner);
                 headers.push_back(disp == item ? "?column?" : disp);
-                appendValue(value.value, value.isNull, value.typeName);
+                appendValue(value.value, value.isNull, value.typeName,
+                    captureOwning ? std::optional<dbms::ExprValue>{value} : std::nullopt);
                 continue;
             }
             if (selectKeyword) {
@@ -9534,14 +9615,24 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
                     inferSubQueryResultType(inner, s) :
                     nested.columnTypes.front();
                 headers.push_back(disp == item ? "?column?" : disp);
-                appendValue(cell, isNull, resultType);
+                std::optional<dbms::ExprValue> actual;
+                if (captureOwning) {
+                    if (nested.rows.empty()) actual.emplace(resultType, "", true);
+                    else if (nested.typedRows && nested.typedRows->size() == nested.rows.size() &&
+                             nested.typedRows->front().size() == 1)
+                        actual = std::move(nested.typedRows->front().front());
+                }
+                dbms::DatumTypePtr declaration;
+                if(nested.typedRowDescriptor && nested.typedRowDescriptor->size()==1)
+                    declaration=nested.typedRowDescriptor->front().typeMetadata;
+                appendValue(cell, isNull, resultType, std::move(actual),std::move(declaration));
                 continue;
             }
         }
 
         // Constant expression: literal, arithmetic, parens, unary minus.
         auto r = dbms::ExprHelper::evalString(
-            expr, {}, {}, s.currentDB, s.username);
+            expr, {}, {}, s.currentDB, s.username, nullptr, captureOwning);
         if (!r.ok) {
             // Surface the evaluator's own message (carries SQLSTATE markers
             // like division by zero 22012 and invalid cast input 22P02).
@@ -9648,7 +9739,7 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
                 isspace(static_cast<unsigned char>(lowE[exE + 7]))) {
                 headers.push_back("exists");
                 appendValue(r.value.empty() && r.isNull ? "NULL" : r.value,
-                            r.isNull, r.typeName);
+                            r.isNull, r.typeName, r.owningValue,r.typeMetadata);
                 continue;
             }
             // ARRAY[...] literal projects as header "array" (PG
@@ -9670,7 +9761,7 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
                 headers.push_back("array");
                 appendValue(r.value.empty() && r.isNull ? "NULL" : r.value,
                             r.isNull,
-                            dbms::ExprHelper::inferResultType(expr));
+                            dbms::ExprHelper::inferResultType(expr), r.owningValue,r.typeMetadata);
                 continue;
             }
             // CAST target type names the column (PG: cast(1 as text) ->
@@ -9849,7 +9940,7 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
             if (!explicitVarchar) protocolType = "text";
         }
         appendValue(r.isNull ? "NULL" : r.value, r.isNull,
-                    std::move(protocolType));
+                    std::move(protocolType), std::move(r.owningValue),std::move(r.typeMetadata));
     }
 
     size_t multiRowWidth = 0;  // >0 when a set-returning function expanded rows
@@ -9891,12 +9982,18 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
         if (hasSrf && srfIdx < values.size()) {
             vector<string> expanded;
             vector<bool> expandedNulls;
+            vector<std::optional<dbms::ExprValue>> expandedOwning;
             if (gsStep > 0) {
                 for (int64_t v2 = gsStart; v2 <= gsStop; v2 += gsStep) {
                     vector<string> row = values;
                     vector<bool> rowNulls = valueNulls;
                     row[srfIdx] = std::to_string(v2);
                     rowNulls[srfIdx] = false;
+                    if (captureOwning) {
+                        auto owningRow = owningCells;
+                        owningRow[srfIdx] = dbms::ExprValue("integer", std::to_string(v2), false);
+                        expandedOwning.insert(expandedOwning.end(), owningRow.begin(), owningRow.end());
+                    }
                     for (const auto& cell : row) expanded.push_back(cell);
                     expandedNulls.insert(expandedNulls.end(),
                                          rowNulls.begin(), rowNulls.end());
@@ -9907,6 +10004,11 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
                     vector<bool> rowNulls = valueNulls;
                     row[srfIdx] = std::to_string(v2);
                     rowNulls[srfIdx] = false;
+                    if (captureOwning) {
+                        auto owningRow = owningCells;
+                        owningRow[srfIdx] = dbms::ExprValue("integer", std::to_string(v2), false);
+                        expandedOwning.insert(expandedOwning.end(), owningRow.begin(), owningRow.end());
+                    }
                     for (const auto& cell : row) expanded.push_back(cell);
                     expandedNulls.insert(expandedNulls.end(),
                                          rowNulls.begin(), rowNulls.end());
@@ -9916,6 +10018,7 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
                 size_t width = values.size();
                 values = std::move(expanded);
                 valueNulls = std::move(expandedNulls);
+                if (captureOwning) owningCells = std::move(expandedOwning);
                 multiRowWidth = width;
             }
         }
@@ -9935,6 +10038,7 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
             const size_t width = values.size();
             vector<string> expanded;
             vector<bool> expandedNulls;
+            vector<std::optional<dbms::ExprValue>> expandedOwning;
             for (const auto& channel :
                  dbms::notificationManager().subscriptions(s.pid, s.currentDB)) {
                 vector<string> row = values;
@@ -9943,12 +10047,19 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
                     row[channelSrfIdx] = channel;
                     rowNulls[channelSrfIdx] = false;
                 }
+                if (captureOwning) {
+                    auto owningRow = owningCells;
+                    for (size_t index : listeningChannelSrfIndices)
+                        owningRow[index] = dbms::ExprValue("text", channel, false);
+                    expandedOwning.insert(expandedOwning.end(), owningRow.begin(), owningRow.end());
+                }
                 expanded.insert(expanded.end(), row.begin(), row.end());
                 expandedNulls.insert(expandedNulls.end(),
                                      rowNulls.begin(), rowNulls.end());
             }
             values = std::move(expanded);
             valueNulls = std::move(expandedNulls);
+            if (captureOwning) owningCells = std::move(expandedOwning);
             multiRowWidth = width;
         }
     }
@@ -9964,6 +10075,7 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
         if (kept == 0) {
             values.clear();
             valueNulls.clear();
+            if (captureOwning) owningCells.clear();
             suppressDataRow = true;
         } else if (first != 0 || kept != rowCount) {
             const size_t begin = first * width;
@@ -9972,6 +10084,8 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
                                     values.begin() + end);
             valueNulls = vector<bool>(valueNulls.begin() + begin,
                                       valueNulls.begin() + end);
+            if (captureOwning) owningCells = vector<std::optional<dbms::ExprValue>>(
+                owningCells.begin() + begin, owningCells.begin() + end);
         }
     }
 
@@ -9987,6 +10101,19 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
         queryResult.available = true;
         queryResult.columns = headers;
         queryResult.columnTypes = columnTypes;
+        if(captureOwning && outputDeclarations.size()==headers.size()) {
+            queryResult.typedRowDescriptor.emplace();
+            for(size_t i=0;i<headers.size();++i) {
+                const auto& declaration=outputDeclarations[i];
+                queryResult.typedRowDescriptor->push_back({headers[i],columnTypes[i],false,0,
+                    declaration?declaration->actualOid:0,declaration?declaration->effectiveTypeMod:-1,declaration});
+            }
+        }
+        const bool owningComplete = captureOwning &&
+            (suppressDataRow || owningCells.size() == values.size()) &&
+            std::all_of(owningCells.begin(), owningCells.end(),
+                [](const auto& value) { return value.has_value(); });
+        if (owningComplete) queryResult.typedRows.emplace();
         if (!suppressDataRow) {
             const size_t width = multiRowWidth > 0 ? multiRowWidth : values.size();
             if (width > 0) {
@@ -9997,6 +10124,13 @@ static bool handleFromlessSelect(const string& sql, Session& s) {
                     queryResult.nulls.emplace_back(
                         valueNulls.begin() + offset,
                         valueNulls.begin() + offset + width);
+                    if (queryResult.typedRows) {
+                        std::vector<dbms::ExprValue> actual;
+                        actual.reserve(width);
+                        for (size_t column = offset; column < offset + width; ++column)
+                            actual.push_back(std::move(*owningCells[column]));
+                        queryResult.typedRows->push_back(std::move(actual));
+                    }
                 }
             }
         }
@@ -13206,7 +13340,8 @@ static std::vector<std::string> runDerivedSubQueryFull(
     bool* outStructuredAvailable = nullptr,
     bool* outExecutionFailed = nullptr,
     std::string* outFailureText = nullptr,
-    bool inheritCtes = true, size_t maxRows = 0) {
+    bool inheritCtes = true, size_t maxRows = 0,
+    std::optional<dbms::PreparedQueryRows>* outOwningRows = nullptr) {
     outColNames.clear();
     if (outColTypes) outColTypes->clear();
     if (outStructuredRows) outStructuredRows->clear();
@@ -13214,6 +13349,8 @@ static std::vector<std::string> runDerivedSubQueryFull(
     if (outStructuredAvailable) *outStructuredAvailable = false;
     if (outExecutionFailed) *outExecutionFailed = false;
     if (outFailureText) outFailureText->clear();
+    if(outOwningRows)outOwningRows->reset();
+    dbms::ScopedTypedResultCapture typedReceiver(outOwningRows!=nullptr,true);
     std::stringstream captured;
     QueryRowDemandScope demandScope(maxRows);
     const unsigned previousCaptureDepth = metadataCaptureDepth;
@@ -13230,6 +13367,7 @@ static std::vector<std::string> runDerivedSubQueryFull(
         }
     }
     dbms::DmlResult nestedResult = dbms::takeLastDmlResult();
+    if(outOwningRows)*outOwningRows=std::move(nestedResult.typedRows);
     metadataCaptureDepth = previousCaptureDepth;
     if (failed) {
         if (outExecutionFailed) *outExecutionFailed = true;
@@ -19489,7 +19627,7 @@ static bool executePgTypeQuery(const string& rawSql, const Session& session) {
     vector<string> names,types;
     for(const auto& column:query->output){names.push_back(column.name);types.push_back(column.type);}
     auto plan=dbms::QueryPlanner::buildPreparedQueryPlan(&g_engine,session.currentDB,query,query->ast.get());
-    auto result=dbms::QueryPlanner::executePlanChecked(std::move(plan),currentQueryRowDemand());
+    auto result=dbms::QueryPlanner::executePlanChecked(std::move(plan),currentQueryRowDemand(),dbms::typedResultCaptureRequested());
     result.throwIfFailed();
     if(!result.structuredRowsAvailable)throw dbms::DbError("XX000","pg_type query lost typed rows");
     for(const auto& name:names)cout<<renderLegacyHeader(name)<<' ';
@@ -19497,7 +19635,9 @@ static bool executePgTypeQuery(const string& rawSql, const Session& session) {
     for(const auto& row:result.rows)cout<<row<<'\n';
     const auto tag="SELECT "+to_string(result.rows.size());
     publishStructuredUtilityResult(std::move(names),std::move(types),
-        std::move(result.structuredRows),std::move(result.structuredNulls),tag);
+        std::move(result.structuredRows),std::move(result.structuredNulls),tag,
+        result.typedRowsAvailable ? std::optional<dbms::PreparedQueryRows>{std::move(result.typedRows)} : std::nullopt,
+        dbms::typedResultCaptureRequested() ? query->output : dbms::QueryRowDescriptor{});
     return false;
 }
 
@@ -20515,6 +20655,8 @@ static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bo
         }
     }
     for (auto& type : types) if (type == "unknown") type = "text";
+    dbms::QueryRowDescriptor receiverDescriptor;
+    if (dbms::typedResultCaptureRequested()) receiverDescriptor = prepared.output;
     dbms::OpPtr plan;
     if (fromlessDemand) {
         // This execution root owns a genuine one-row, zero-column input.
@@ -20531,16 +20673,18 @@ static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bo
     }
     const bool topLevelOutput = executeDepth == 1;
     auto result = topLevelOutput
-        ? dbms::QueryPlanner::executePlanWithPrefix(std::move(plan), currentQueryRowDemand())
-        : dbms::QueryPlanner::executePlanChecked(std::move(plan), currentQueryRowDemand());
+        ? dbms::QueryPlanner::executePlanWithPrefix(std::move(plan), currentQueryRowDemand(), dbms::typedResultCaptureRequested())
+        : dbms::QueryPlanner::executePlanChecked(std::move(plan), currentQueryRowDemand(), dbms::typedResultCaptureRequested());
     if (!result.ok && topLevelOutput) {
         dbms::DmlResult prefix;
         prefix.available = true; prefix.runtimeErrorMetadata = true;
         prefix.metadataOnly = !result.structuredRowsAvailable;
         prefix.columns = columns; prefix.columnTypes = types;
+        if(dbms::typedResultCaptureRequested())prefix.typedRowDescriptor=receiverDescriptor;
         if (result.structuredRowsAvailable) {
             prefix.rows = std::move(result.structuredRows);
             prefix.nulls = std::move(result.structuredNulls);
+            if(result.typedRowsAvailable)prefix.typedRows=std::move(result.typedRows);
         }
         dbms::publishLastDmlResult(std::move(prefix));
     }
@@ -20551,7 +20695,9 @@ static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bo
     for (const auto& row : result.rows) cout << row << '\n';
     publishStructuredUtilityResult(std::move(columns), std::move(types),
         std::move(result.structuredRows), std::move(result.structuredNulls),
-        "SELECT " + std::to_string(result.rows.size()));
+        "SELECT " + std::to_string(result.rows.size()),
+        result.typedRowsAvailable ? std::optional<dbms::PreparedQueryRows>{std::move(result.typedRows)} : std::nullopt,
+        std::move(receiverDescriptor));
     handled = true;
     return false;
 }
@@ -20737,6 +20883,7 @@ class PreparedWithDmlRuntime {
             if(cache->writing)throw dbms::DbError("0A000","recursive data-modifying WITH producer is not supported");
             if(statement->command!=dbms::SqlCommand::Select && statement->command!=dbms::SqlCommand::Values) {
                 cache->writing=true;
+                dbms::ScopedTypedResultCapture actualReturningConsumer(true);
                 const auto result=dbms::executeBoundDml(const_cast<dbms::Stmt*>(statement),session_,query_,reader(frames),mutationSourceFactory(frames),cursorFactory(frames));
                 cache->rows=typed(result,output(statement));cache->complete=true;cache->writing=false;
             } else cache->plan=selectPlan(const_cast<dbms::SelectStmt*>(static_cast<const dbms::SelectStmt*>(statement)),frame->outer,frames);
@@ -20748,9 +20895,10 @@ class PreparedWithDmlRuntime {
                 if(cache->plan->hasError())throw dbms::DbError("XX000",cache->plan->errorMessage());
                 cache->plan->close();cache->opened=false;cache->plan.reset();cache->complete=true;break;
             }
-            vector<string> cells;vector<bool> nulls;
-            if(!cache->plan->lastStructuredRow(cells,nulls))throw dbms::DbError("XX000","WITH producer lost structured cells");
-            cache->rows.push_back(typedRow(cells,nulls,output(statement)));
+            vector<dbms::ExprValue> cells;
+            if(!cache->plan->lastStructuredValues(cells) || cells.size()!=output(statement).size())
+                throw dbms::DbError("XX000","WITH producer lost actual owning cells");
+            cache->rows.push_back(std::move(cells));
         }
         if(index>=cache->rows.size())return false;
         row=cache->rows[index];return true;
@@ -20764,22 +20912,28 @@ class PreparedWithDmlRuntime {
     static dbms::PreparedQueryRows typed(const dbms::DmlResult& result,const dbms::QueryRowDescriptor& descriptor) {
         if(!result.available || result.metadataOnly || result.rows.size()!=result.nulls.size())
             throw dbms::DbError("XX000","WITH DML has no structured result");
-        dbms::PreparedQueryRows rows;
-        for(size_t i=0;i<result.rows.size();++i)rows.push_back(typedRow(result.rows[i],result.nulls[i],descriptor));
-        return rows;
+        if(result.typedRows) {
+            if(result.typedRows->size()!=result.rows.size())
+                throw dbms::DbError("XX000","WITH DML owning values lost row alignment");
+            for(const auto& row:*result.typedRows)if(row.size()!=descriptor.size())
+                throw dbms::DbError("XX000","WITH DML owning values lost descriptor width");
+            return *result.typedRows;
+        }
+        // The actual internal DML consumer must request these at its existing
+        // result receiver, not rebuild compound values from display strings.
+        throw dbms::DbError("XX000","WITH DML result has no owning typed values");
     }
     dbms::PreparedChildExecutor reader(const Frames& frames) {
         return [this,frames](const dbms::Stmt* statement,const dbms::RowContext& row,size_t demand){
             auto* select=dynamic_cast<const dbms::SelectStmt*>(statement);
             if(!select)throw dbms::DbError("42601","prepared query reader requires SELECT/VALUES");
             auto plan=selectPlan(const_cast<dbms::SelectStmt*>(select),row,frames);
-            auto result=dbms::QueryPlanner::executePlanChecked(std::move(plan),demand);
+            auto result=dbms::QueryPlanner::executePlanChecked(std::move(plan),demand,true);
             result.throwIfFailed();
             if(!result.structuredRowsAvailable)throw dbms::DbError("XX000","WITH query reader lost typed rows");
-            dbms::PreparedQueryRows values;
-            for(size_t i=0;i<result.structuredRows.size();++i)
-                values.push_back(typedRow(result.structuredRows[i],result.structuredNulls[i],output(statement)));
-            return values;
+            if(!result.typedRowsAvailable)
+                throw dbms::DbError("XX000","WITH typed query reader lost its owning values");
+            return std::move(result.typedRows);
         };
     }
     // This materialized source executes its own graph. Children are the
@@ -20987,6 +21141,12 @@ class PreparedWithDmlRuntime {
                         const auto value=g_engine.extractColumnValue(raw,scanSchema,i,session_.currentDB,true,&computedNull);
                         cells.emplace_back(rangePointer->columns[i].type,value,computedNull ||
                             (scanSchema.cols[i].generatedKind!='v' && scan->lastColumnIsNull(i)));
+                        if(scanSchema.cols[i].generatedKind!='v' &&
+                           dbms::stored_regtype_detail::columnType(scanSchema.cols[i].dataType)) {
+                            const auto catalog=dbms::regtype_detail::metadata(g_engine,session_.currentDB);
+                            cells.back()=dbms::stored_regtype_detail::load(value,scanSchema.cols[i].isArray,
+                                cells.back().isNull,catalog,&session_,rangePointer->columns[i].typeMetadata);
+                        }
                         cells.back().collation=scanSchema.cols[i].collation;
                     }
                 }
@@ -21440,8 +21600,9 @@ public:
             return result;
         });
     }
-    dbms::DmlResult runRead(size_t receiverRows = 0) {
+    dbms::DmlResult runRead(size_t receiverRows = 0, bool captureOwnedRows = false) {
         if(!readRoot_)throw dbms::DbError("XX000","read runtime requires a genuine SELECT/VALUES");
+        const bool captureTyped=captureOwnedRows || dbms::typedResultCaptureRequested();
         Frames frames{definitions(readRoot_->ctes,validation_.context())};
         bool hasWriter=false;
         for(auto& cte:readRoot_->ctes) {
@@ -21467,18 +21628,20 @@ public:
                  (readRoot_->command==dbms::SqlCommand::Values || readRoot_->setOp!=dbms::SetOp::None)));
             const auto demand=receiverRows ? receiverRows : currentQueryRowDemand();
             auto evaluated=countOutput
-                ? dbms::QueryPlanner::executePlanWithPrefix(std::move(plan),demand)
-                : dbms::QueryPlanner::executePlanChecked(std::move(plan),demand);
+                ? dbms::QueryPlanner::executePlanWithPrefix(std::move(plan),demand,captureTyped)
+                : dbms::QueryPlanner::executePlanChecked(std::move(plan),demand,captureTyped);
             if(!evaluated.ok && countOutput) {
                 dbms::DmlResult prefix;prefix.available=true;prefix.runtimeErrorMetadata=true;
                 prefix.metadataOnly=!evaluated.structuredRowsAvailable;
                 prefix.rowDescriptor=output(readRoot_);
+                if(captureTyped)prefix.typedRowDescriptor=prefix.rowDescriptor;
                 for(const auto& column:prefix.rowDescriptor) {
                     prefix.columns.push_back(column.name);
                     prefix.columnTypes.push_back(column.type=="unknown"?"text":column.type);
                 }
                 if(evaluated.structuredRowsAvailable) {
                     prefix.rows=std::move(evaluated.structuredRows);prefix.nulls=std::move(evaluated.structuredNulls);
+                    if(evaluated.typedRowsAvailable)prefix.typedRows=std::move(evaluated.typedRows);
                 }
                 dbms::publishLastDmlResult(std::move(prefix));
             }
@@ -21486,11 +21649,13 @@ public:
             if(!evaluated.structuredRowsAvailable)throw dbms::DbError("XX000","prepared CASE query lost typed rows");
             dbms::DmlResult result;result.available=true;
             result.rowDescriptor=output(readRoot_);
+            if(captureTyped)result.typedRowDescriptor=result.rowDescriptor;
             for(const auto& column:output(readRoot_)) {
                 result.columns.push_back(column.name);
                 result.columnTypes.push_back(column.type=="unknown"?"text":column.type);
             }
             result.rows=std::move(evaluated.structuredRows);result.nulls=std::move(evaluated.structuredNulls);
+            if(evaluated.typedRowsAvailable)result.typedRows=std::move(evaluated.typedRows);
             result.commandTag="SELECT "+std::to_string(result.rows.size());
             for(auto& cte:readRoot_->ctes)if(cte.query->command!=dbms::SqlCommand::Select && cte.query->command!=dbms::SqlCommand::Values) {
                 vector<dbms::ExprValue> ignored;size_t index=0;
@@ -22481,9 +22646,10 @@ static bool handlePreparedMultirowQuery(const string& raw,Session& session,bool&
     auto plan=runtime.queryPlan();
     dbms::DmlResult descriptor;descriptor.available=true;descriptor.metadataOnly=true;descriptor.runtimeErrorMetadata=true;
     for(const auto& column:query->output){descriptor.columns.push_back(column.name);descriptor.columnTypes.push_back(column.type);}
+    if(dbms::typedResultCaptureRequested())descriptor.rowDescriptor=query->output;
     dbms::PlanExecutionResult result;
     try {
-        result=dbms::QueryPlanner::executePlanChecked(std::move(plan),currentQueryRowDemand());
+        result=dbms::QueryPlanner::executePlanChecked(std::move(plan),currentQueryRowDemand(),dbms::typedResultCaptureRequested());
         result.throwIfFailed();
         runtime.finishQueryWrites();
     } catch(...) {
@@ -22508,7 +22674,9 @@ static bool handlePreparedMultirowQuery(const string& raw,Session& session,bool&
         }
     } else for(const auto& row:result.rows)cout<<row<<'\n';
     publishStructuredUtilityResult(std::move(columns),std::move(types),
-        std::move(result.structuredRows),std::move(result.structuredNulls),"SELECT "+to_string(result.rows.size()));
+        std::move(result.structuredRows),std::move(result.structuredNulls),"SELECT "+to_string(result.rows.size()),
+        result.typedRowsAvailable ? std::optional<dbms::PreparedQueryRows>{std::move(result.typedRows)} : std::nullopt,
+        dbms::typedResultCaptureRequested() ? query->output : dbms::QueryRowDescriptor{});
     handled=true;return false;
 }
 
@@ -35012,6 +35180,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
         vector<vector<string>> volcanoStructuredRows;
         vector<vector<bool>> volcanoStructuredNulls;
         bool volcanoStructuredAvailable = false;
+        std::optional<dbms::PreparedQueryRows> volcanoTypedRows;
         auto executeVolcanoSelect = [&](const std::string& tblName,
                                          const std::set<std::string>& projCols,
                                          const std::vector<std::vector<std::string>>& condGroups,
@@ -35024,6 +35193,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
             volcanoStructuredRows.clear();
             volcanoStructuredNulls.clear();
             volcanoStructuredAvailable = false;
+            volcanoTypedRows.reset();
             // Fall back when the volcano path cannot yet handle the query.
             if (forUpdate || noWait || skipLocked) return false;
             if (!distinctOnCols.empty()) return false;
@@ -35155,9 +35325,11 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 }
             }
             dbms::PlanExecutionResult execution;
-            if (emptyReceiver) execution.structuredRowsAvailable = true;
-            else execution = dbms::QueryPlanner::executePlanChecked(
-                std::move(plan), receiverRows);
+            if (emptyReceiver) {
+                execution.structuredRowsAvailable = true;
+                execution.typedRowsAvailable = dbms::typedResultCaptureRequested();
+            } else execution = dbms::QueryPlanner::executePlanChecked(
+                std::move(plan), receiverRows, dbms::typedResultCaptureRequested());
             execution.throwIfFailed();
             if (!execution.ok) {
                 volcanoExecutionError = true;
@@ -35169,6 +35341,8 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 volcanoStructuredRows = std::move(execution.structuredRows);
                 volcanoStructuredNulls = std::move(execution.structuredNulls);
                 volcanoStructuredAvailable = true;
+                if (execution.typedRowsAvailable)
+                    volcanoTypedRows = std::move(execution.typedRows);
             }
             return true;
         };
@@ -35473,6 +35647,8 @@ static bool executeInternal(const string& rawSql, Session& s) {
         bool structuredPlainRows = false;
         dbms::DmlResult structuredScalarResult;
         bool structuredScalarRows = false;
+        bool structuredScalarOwningComplete = false;
+        std::vector<dbms::DatumTypePtr> structuredScalarDeclarations;
         bool structuredScalarExprOrderHandled = false;
         bool nativePlainExprOrderHandled = false;
         dbms::DmlResult structuredAggregateResult;
@@ -38234,6 +38410,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         std::move(volcanoStructuredRows);
                     structuredScalarResult.nulls =
                         std::move(volcanoStructuredNulls);
+                    structuredScalarResult.typedRows = std::move(volcanoTypedRows);
                     structuredScalarResult.commandTag =
                         "SELECT " + std::to_string(answers.size());
                     dbms::publishLastDmlResult(
@@ -38473,6 +38650,12 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 queryDb != "information_schema" && queryDb != "pg_catalog" &&
                 structuredScalarResult.columns.size() == selectExprs.size() &&
                 g_engine.getInheritedChildren(queryDb, tname).empty();
+            if (captureStructuredScalar && dbms::typedResultCaptureRequested()) {
+                structuredScalarResult.typedRows.emplace();
+                scalarExecutionOptions.owningRows = &*structuredScalarResult.typedRows;
+                scalarExecutionOptions.owningRowsComplete = &structuredScalarOwningComplete;
+                scalarExecutionOptions.owningDeclarations = &structuredScalarDeclarations;
+            }
             if (condTokens.empty()) {
                 if (captureStructuredScalar) {
                     answers = g_engine.queryExpr(
@@ -38552,13 +38735,28 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 } else if (captureStructuredScalar && !groups.empty() &&
                            !hasMixedOrderKeys) {
                     set<int64_t> seenRowIds;
+                    bool declarationsObserved=false;
                     for (const auto& group : groups) {
                         vector<vector<string>> rows;
                         vector<vector<bool>> nulls;
                         vector<int64_t> rowIds;
+                        dbms::PreparedQueryRows owningPart;
+                        bool owningPartComplete = false;
+                        std::vector<dbms::DatumTypePtr> partDeclarations;
+                        auto partOptions = scalarExecutionOptions;
+                        if (partOptions.owningRows) {
+                            partOptions.owningRows = &owningPart;
+                            partOptions.owningRowsComplete = &owningPartComplete;
+                        }
+                        if(partOptions.owningDeclarations)partOptions.owningDeclarations=&partDeclarations;
                         auto part = g_engine.queryExpr(
                             queryDb, tname, group, mergeExprs, {},
-                            &rows, &nulls, &rowIds);
+                            &rows, &nulls, &rowIds, partOptions);
+                        if(partOptions.owningDeclarations)
+                            mergeCapturedDeclarations(structuredScalarDeclarations,declarationsObserved,partDeclarations);
+                        if (structuredScalarResult.typedRows &&
+                            (!owningPartComplete || owningPart.size() != part.size()))
+                            structuredScalarResult.typedRows.reset();
                         if (part.size() != rows.size() ||
                             part.size() != nulls.size() ||
                             part.size() != rowIds.size()) {
@@ -38569,12 +38767,15 @@ static bool executeInternal(const string& rawSql, Session& s) {
                             if (!seenRowIds.insert(rowIds[i]).second)
                                 continue;
                             answers.push_back(std::move(part[i]));
+                            if (structuredScalarResult.typedRows)
+                                structuredScalarResult.typedRows->push_back(std::move(owningPart[i]));
                             structuredScalarResult.rows.push_back(
                                 std::move(rows[i]));
                             structuredScalarResult.nulls.push_back(
                                 std::move(nulls[i]));
                         }
                     }
+                    structuredScalarOwningComplete = structuredScalarResult.typedRows.has_value();
                     if (!hiddenOrderKeys.empty()) {
                         vector<size_t> order;
                         order.reserve(structuredScalarResult.rows.size());
@@ -38627,6 +38828,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                 }
                                 return false;
                             });
+                        selectCapturedResultRows(structuredScalarResult, order);
                         auto oldRows =
                             std::move(structuredScalarResult.rows);
                         auto oldNulls =
@@ -38648,6 +38850,8 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                 selectExprs.size());
                             structuredScalarResult.nulls[i].resize(
                                 selectExprs.size());
+                            if (structuredScalarResult.typedRows)
+                                structuredScalarResult.typedRows->at(i).resize(selectExprs.size());
                             string rendered;
                             for (size_t cell = 0; cell < selectExprs.size(); ++cell) {
                                 rendered += structuredScalarResult.nulls[i][cell]
@@ -38671,6 +38875,8 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     }
                 }
             }
+            if (scalarExecutionOptions.owningRows && !structuredScalarOwningComplete)
+                structuredScalarResult.typedRows.reset();
             if (structuredScalarRows && canSortScalarProjected &&
                 structuredScalarResult.rows.size() == answers.size() &&
                 structuredScalarResult.nulls.size() == answers.size()) {
@@ -38705,6 +38911,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         return false;
                     });
                 auto oldAnswers = std::move(answers);
+                selectCapturedResultRows(structuredScalarResult, order);
                 auto oldRows = std::move(structuredScalarResult.rows);
                 auto oldNulls = std::move(structuredScalarResult.nulls);
                 answers.reserve(order.size());
@@ -38720,6 +38927,8 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     for (size_t row = 0; row < structuredScalarResult.rows.size(); ++row) {
                         structuredScalarResult.rows[row].resize(selectExprs.size());
                         structuredScalarResult.nulls[row].resize(selectExprs.size());
+                        if (structuredScalarResult.typedRows)
+                            structuredScalarResult.typedRows->at(row).resize(selectExprs.size());
                         string rendered;
                         for (size_t cell = 0; cell < selectExprs.size(); ++cell) {
                             rendered += structuredScalarResult.nulls[row][cell]
@@ -38955,6 +39164,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     throw dbms::DbError("XX000", "native plain projection lost structured result metadata");
                 structuredPlainResult.rows = std::move(volcanoStructuredRows);
                 structuredPlainResult.nulls = std::move(volcanoStructuredNulls);
+                structuredPlainResult.typedRows = std::move(volcanoTypedRows);
                 structuredPlainRows = true;
             }
 
@@ -39251,6 +39461,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                             return false;
                         });
                     auto oldAnswers = std::move(answers);
+                    selectCapturedResultRows(structuredAggregateResult, order);
                     auto oldRows = std::move(structuredAggregateResult.rows);
                     auto oldNulls = std::move(structuredAggregateResult.nulls);
                     answers.reserve(order.size());
@@ -39315,6 +39526,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                             return false;
                         });
                     auto oldAnswers = std::move(answers);
+                    selectCapturedResultRows(structuredScalarResult, order);
                     auto oldRows = std::move(structuredScalarResult.rows);
                     auto oldNulls = std::move(structuredScalarResult.nulls);
                     answers.reserve(order.size());
@@ -39381,6 +39593,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                             return false;
                         });
                     auto oldAnswers = std::move(answers);
+                    selectCapturedResultRows(structuredPlainResult, order);
                     auto oldRows = std::move(structuredPlainResult.rows);
                     auto oldNulls = std::move(structuredPlainResult.nulls);
                     answers.reserve(order.size());
@@ -39448,17 +39661,20 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 vector<string> dedupedAnswers;
                 vector<vector<string>> dedupedRows;
                 vector<vector<bool>> dedupedNulls;
+                vector<size_t> retainedOwningIndices;
                 for (size_t i = 0; i < answers.size(); ++i) {
                     const auto key = typedDistinctResultKey(
                         structuredAggregateResult, i, structuredAggregateResult.columnTypes);
                     if (!seen.insert(key).second) continue;
                     dedupedAnswers.push_back(std::move(answers[i]));
+                    if (structuredAggregateResult.typedRows) retainedOwningIndices.push_back(i);
                     dedupedRows.push_back(
                         std::move(structuredAggregateResult.rows[i]));
                     dedupedNulls.push_back(
                         std::move(structuredAggregateResult.nulls[i]));
                 }
                 answers = std::move(dedupedAnswers);
+                selectCapturedResultRows(structuredAggregateResult, retainedOwningIndices);
                 structuredAggregateResult.rows = std::move(dedupedRows);
                 structuredAggregateResult.nulls = std::move(dedupedNulls);
             } else if (canDeduplicateStructuredScalar) {
@@ -39466,17 +39682,20 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 vector<string> dedupedAnswers;
                 vector<vector<string>> dedupedRows;
                 vector<vector<bool>> dedupedNulls;
+                vector<size_t> retainedOwningIndices;
                 for (size_t i = 0; i < answers.size(); ++i) {
                     const auto key = typedDistinctResultKey(
                         structuredScalarResult, i, structuredScalarResult.columnTypes);
                     if (!seen.insert(key).second) continue;
                     dedupedAnswers.push_back(std::move(answers[i]));
+                    if (structuredScalarResult.typedRows) retainedOwningIndices.push_back(i);
                     dedupedRows.push_back(
                         std::move(structuredScalarResult.rows[i]));
                     dedupedNulls.push_back(
                         std::move(structuredScalarResult.nulls[i]));
                 }
                 answers = std::move(dedupedAnswers);
+                selectCapturedResultRows(structuredScalarResult, retainedOwningIndices);
                 structuredScalarResult.rows = std::move(dedupedRows);
                 structuredScalarResult.nulls = std::move(dedupedNulls);
             } else if (structuredPlainRows &&
@@ -39494,16 +39713,19 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 vector<string> dedupedAnswers;
                 vector<vector<string>> dedupedRows;
                 vector<vector<bool>> dedupedNulls;
+                vector<size_t> retainedOwningIndices;
                 for (size_t i = 0; i < answers.size(); ++i) {
                     const auto key = typedDistinctResultKey(structuredPlainResult, i, plainKeyTypes);
                     if (!seen.insert(key).second) continue;
                     dedupedAnswers.push_back(std::move(answers[i]));
+                    if (structuredPlainResult.typedRows) retainedOwningIndices.push_back(i);
                     dedupedRows.push_back(
                         std::move(structuredPlainResult.rows[i]));
                     dedupedNulls.push_back(
                         std::move(structuredPlainResult.nulls[i]));
                 }
                 answers = std::move(dedupedAnswers);
+                selectCapturedResultRows(structuredPlainResult, retainedOwningIndices);
                 structuredPlainResult.rows = std::move(dedupedRows);
                 structuredPlainResult.nulls = std::move(dedupedNulls);
             } else {
@@ -39529,15 +39751,19 @@ static bool executeInternal(const string& rawSql, Session& s) {
             structuredAggregateResult.nulls.size() == answers.size();
         vector<vector<string>>* slicedRows = nullptr;
         vector<vector<bool>>* slicedNulls = nullptr;
+        std::optional<dbms::PreparedQueryRows>* slicedOwning = nullptr;
         if (canSliceStructuredScalar) {
             slicedRows = &structuredScalarResult.rows;
             slicedNulls = &structuredScalarResult.nulls;
+            slicedOwning = &structuredScalarResult.typedRows;
         } else if (canSliceStructuredPlain) {
             slicedRows = &structuredPlainResult.rows;
             slicedNulls = &structuredPlainResult.nulls;
+            slicedOwning = &structuredPlainResult.typedRows;
         } else if (canSliceStructuredAggregate) {
             slicedRows = &structuredAggregateResult.rows;
             slicedNulls = &structuredAggregateResult.nulls;
+            slicedOwning = &structuredAggregateResult.typedRows;
         }
         if (slicedRows && slicedNulls) {
             size_t count = 0, offset = 0;
@@ -39550,12 +39776,17 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 answers.clear();
                 slicedRows->clear();
                 slicedNulls->clear();
+                if (slicedOwning && *slicedOwning) (*slicedOwning)->clear();
             } else {
                 answers.erase(answers.begin(), answers.begin() + offset);
                 slicedRows->erase(
                     slicedRows->begin(), slicedRows->begin() + offset);
                 slicedNulls->erase(
                     slicedNulls->begin(), slicedNulls->begin() + offset);
+                if (slicedOwning && *slicedOwning) {
+                    auto& owning = **slicedOwning;
+                    owning.erase(owning.begin(), owning.begin() + offset);
+                }
                 if (finiteLimit && count < answers.size()) {
                     size_t retained = count;
                     if (queryFetchWithTies &&
@@ -39612,6 +39843,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     answers.resize(retained);
                     slicedRows->resize(retained);
                     slicedNulls->resize(retained);
+                    if (slicedOwning && *slicedOwning) (*slicedOwning)->resize(retained);
                 }
             }
         } else {
@@ -39699,6 +39931,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     row = out;
                 }
                 if (structuredPlainRows) {
+                    selectCapturedResultColumns(structuredPlainResult, srcIdx);
                     for (auto& row : structuredPlainResult.rows) {
                         vector<string> reordered;
                         reordered.reserve(srcIdx.size());
@@ -39729,6 +39962,16 @@ static bool executeInternal(const string& rawSql, Session& s) {
             dbms::publishLastDmlResult(
                 std::move(structuredAggregateResult));
         } else if (structuredScalarRows) {
+            if(dbms::typedResultCaptureRequested() && structuredScalarResult.typedRows &&
+               structuredScalarDeclarations.size()>=structuredScalarResult.columns.size()) {
+                structuredScalarResult.typedRowDescriptor.emplace();
+                for(size_t i=0;i<structuredScalarResult.columns.size();++i) {
+                    const auto& declaration=structuredScalarDeclarations[i];
+                    structuredScalarResult.typedRowDescriptor->push_back({structuredScalarResult.columns[i],
+                        i<structuredScalarResult.columnTypes.size()?structuredScalarResult.columnTypes[i]:std::string{},false,0,
+                        declaration?declaration->actualOid:0,declaration?declaration->effectiveTypeMod:-1,declaration});
+                }
+            }
             structuredScalarResult.available = true;
             structuredScalarResult.metadataOnly = false;
             structuredScalarResult.commandTag =
@@ -40046,6 +40289,12 @@ static bool executeWithCteInheritance(const std::string& inputSql, Session& s,
     PlanCacheChangeGuard planCacheChange(
         changesPlanCache(dbms::SQLParser::classify(rawSql)));
     const bool outermost = executeDepth == 0;
+    // Wire output capture belongs to this SQL receiver, not recursively
+    // executed function/trigger commands. Explicit internal typed consumers
+    // request their own result cells without inheriting a row quota or frame.
+    dbms::ScopedTypedResultCapture typedCaptureScope(
+        (outermost || dbms::typedResultCaptureExplicitReceiver()) &&
+        dbms::typedResultCaptureRequested());
     const auto command = dbms::SQLParser::classify(rawSql);
     // A calling statement can execute SET in a SQL function before it fails.
     // Own the GUC transaction independently of the storage transaction so
@@ -40318,6 +40567,9 @@ int main(int argc, char* argv[]) {
             result.message = "stored-function query requires its active database session";
             return result;
         }
+        // This real receiver explicitly chooses its own output payload;
+        // unrelated nested SQL cannot inherit the outer wire request.
+        dbms::ScopedTypedResultCapture typedReceiver(options.captureOwningFirstRow);
         struct HostScope {
             bool routine;
             explicit HostScope(bool body) : routine(body) { if (routine) ++storedFunctionHostDepth; }
@@ -40333,7 +40585,7 @@ int main(int argc, char* argv[]) {
                 options.preparedStatement == options.preparedQuery->ast.get()) {
                 QueryCteScope functionNamespace(*activeSession, false);
                 PreparedWithDmlRuntime runtime(*activeSession, options.preparedQuery);
-                const auto executed = runtime.runRead(options.maxRows);
+                auto executed = runtime.runRead(options.maxRows, options.captureOwningFirstRow);
                 result.columnCount = executed.columns.size();
                 result.columnTypes = executed.columnTypes;
                 result.rowCount = executed.rows.size();
@@ -40346,6 +40598,10 @@ int main(int argc, char* argv[]) {
                         result.firstRow.push_back(executed.nulls.front()[i]
                             ? std::nullopt : std::optional<string>{executed.rows.front()[i]});
                 }
+                if (options.captureOwningFirstRow && !executed.rows.empty() &&
+                    executed.typedRows && executed.typedRows->size() == executed.rows.size() &&
+                    executed.typedRows->front().size() == result.columnCount)
+                    result.firstOwningRow = std::move(executed.typedRows->front());
                 result.ok = true;
                 return result;
             }
@@ -40358,7 +40614,8 @@ int main(int argc, char* argv[]) {
                     if (error.sqlState() != "0A000") throw;
                 }
                 if (typedPlan) {
-                    const auto executed = dbms::QueryPlanner::executePlanChecked(std::move(typedPlan), options.maxRows);
+                    auto executed = dbms::QueryPlanner::executePlanChecked(
+                        std::move(typedPlan), options.maxRows, options.captureOwningFirstRow);
                     executed.throwIfFailed();
                     if (!executed.structuredRowsAvailable)
                         throw dbms::DbError("XX000", "ordinary typed child lost structured rows");
@@ -40376,6 +40633,11 @@ int main(int argc, char* argv[]) {
                             result.firstRow.push_back(executed.structuredNulls.front()[i]
                                 ? std::nullopt : std::optional<string>{executed.structuredRows.front()[i]});
                     }
+                    if (options.captureOwningFirstRow && !executed.structuredRows.empty() &&
+                        executed.typedRowsAvailable &&
+                        executed.typedRows.size() == executed.structuredRows.size() &&
+                        executed.typedRows.front().size() == result.columnCount)
+                        result.firstOwningRow = std::move(executed.typedRows.front());
                     result.ok = true;
                     return result;
                 }
@@ -40386,11 +40648,12 @@ int main(int argc, char* argv[]) {
         vector<vector<bool>> nulls;
         bool structured = false, failed = false;
         string failureText;
+        std::optional<dbms::PreparedQueryRows> owningRows;
         try {
             (void)runDerivedSubQueryFull(querySql, *activeSession, names, &types,
                 &rows, &nulls, &structured, &failed, &failureText,
                 options.purpose == dbms::PlPgsqlQueryOptions::Purpose::OrdinarySubquery,
-                options.maxRows);
+                options.maxRows, options.captureOwningFirstRow ? &owningRows : nullptr);
         } catch (const dbms::DbError& error) {
             result.sqlState = error.sqlState();
             result.message = error.message();
@@ -40454,6 +40717,10 @@ int main(int argc, char* argv[]) {
                 result.firstRow.push_back(nulls.front()[i]
                     ? std::nullopt : std::optional<string>{rows.front()[i]});
         }
+        if (options.captureOwningFirstRow && !rows.empty() && owningRows &&
+            owningRows->size() == rows.size() &&
+            owningRows->front().size() == result.columnCount)
+            result.firstOwningRow = std::move(owningRows->front());
         return result;
     });
 

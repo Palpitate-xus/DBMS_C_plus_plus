@@ -42,7 +42,8 @@ enum class TypeCategory {
     Range,
     Domain,
     Pseudo,
-    Unknown
+    Unknown,
+    ObjectReference // Fixed unsigned OID datum; not an arithmetic numeric type.
 };
 
 struct TypeEntry {

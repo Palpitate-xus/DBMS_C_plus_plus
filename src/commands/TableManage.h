@@ -3,6 +3,7 @@
 #include <cstdint>
 #include "replication/LogicalDecoder.h"
 #include "utils/plpgsql.h"
+#include "expression/DatumMetadataContext.h"
 #include <filesystem>
 #include <functional>
 #include <map>
@@ -423,7 +424,8 @@ public:
         const std::string& newName,const std::string& newSchema);
     bool callUDFDefinition(const std::string& dbname,const UDFInfo& function,
         const std::vector<std::string>& values,std::string& result,
-        bool* returnIsNull = nullptr,const std::vector<bool>* nulls = nullptr) const;
+        bool* returnIsNull = nullptr,const std::vector<bool>* nulls = nullptr,
+        std::optional<ExprValue>* owningReturn = nullptr) const;
     // Invoke a stored UDF with literal argument values.  Dispatches to the
     // PL/pgSQL interpreter or the SQL-expression evaluator; used by trigger
     // EXECUTE FUNCTION actions and any other host-side call sites.
@@ -475,6 +477,9 @@ public:
         const PlPgsqlQueryOptions& options = {}) const;
     // Metadata-only preparation shared by ordinary queries and routine SPI.
     // This never executes SQL, changes command IDs, or refreshes ReadView.
+    // Pure copied-catalog declarations for an existing legacy expression owner.
+    DatumMetadataContextPtr prepareDatumMetadataContext(const std::string& dbname,
+        const std::string& physicalTable = "") const;
     PreparedQuery prepareBoundQuery(const std::string& dbname,
         const std::string& sql,
         const std::vector<QueryBindingDatum>& bindings = {},
@@ -789,13 +794,21 @@ public:
         // an explicit SQL alias, or an execution-owned inherited CTE alias.
         // Empty retains the physical relation's ordinary visible identity.
         std::string aggregateSourceAlias;
+        // Optional observational output only; rows follow the exact existing
+        // final sort/slice. Unknown placeholders mark unavailable producers.
+        std::vector<std::vector<ExprValue>>* owningRows = nullptr;
+        bool* owningRowsComplete = nullptr;
+        // Column declarations from the original actual analysis/extractor.
+        // No declaration is inferred from rendered cells or user values.
+        std::vector<DatumTypePtr>* owningDeclarations = nullptr;
     };
+    static QueryExprExecutionOptions defaultQueryExprOptions();
     std::vector<std::string> queryExpr(const std::string& dbname,
                                         const std::string& tablename,
                                         const std::vector<std::string>& conditions,
                                         const std::vector<SelectExpr>& exprs,
                                         const std::vector<OrderBySpec>& orderBy = {},
-                                        const QueryExprExecutionOptions& options = {});
+                                        const QueryExprExecutionOptions& options = defaultQueryExprOptions());
     // Structured counterpart for queryExpr.  It preserves exact scalar
     // cells and carries SQL NULL independently from the display value.
     std::vector<std::string> queryExpr(
@@ -806,7 +819,7 @@ public:
         std::vector<std::vector<std::string>>* structuredRows,
         std::vector<std::vector<bool>>* structuredNulls,
         std::vector<int64_t>* structuredRowIds = nullptr,
-        const QueryExprExecutionOptions& options = {});
+        const QueryExprExecutionOptions& options = defaultQueryExprOptions());
 
     // information_schema virtual tables
     std::vector<std::string> queryInformationSchema(
@@ -1317,6 +1330,9 @@ public:
         std::string patternType;
         std::string patternEscapeType;
         std::string patternEscapeColumn;
+        // Only an already evaluated/coerced REGTYPE input may fill this.
+        // It is a datum OID, never the column declaration's type OID.
+        std::optional<uint32_t> referenceInputOid;
     };
     enum class PredicateTruth { False, True, Unknown };
     // Compare two already decoded values using the column's PostgreSQL-like

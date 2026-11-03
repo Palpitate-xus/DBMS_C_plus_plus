@@ -14,6 +14,7 @@ struct QueryOutputColumn {
     char identity = 0;
     uint32_t typeOid = 0;
     int32_t typeMod = -1; // same-generation physical assignment metadata
+    DatumTypePtr typeMetadata;
 };
 using QueryRowDescriptor = std::vector<QueryOutputColumn>;
 struct QueryRelationMetadata {
@@ -83,6 +84,8 @@ struct QueryBindingMetadata {
     // analysis. A stored scalar selected before a builtin aggregate must
     // remain scalar; expression contexts must not guess from its spelling.
     std::function<bool(const FunctionCallExpr*)> aggregateFunction;
+    // Pure same-snapshot declaration identity and binary codec metadata.
+    std::function<DatumTypePtr(const std::string&,uint32_t)> datumType;
 };
 struct PreparedQuery {
     struct Use { size_t begin, end, slot; };

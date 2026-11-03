@@ -229,7 +229,10 @@ bool encodePostgresNumeric(const std::string& value, std::vector<uint8_t>& raw) 
         appendUInt16(raw, 0);
         appendUInt16(raw, canonical.front() == '-' ? kNumericNegativeInfinity
                                                    : kNumericPositiveInfinity);
-        appendUInt16(raw, 0);
+        // PostgreSQL 18.6 numeric_send extracts the short special header's
+        // dscale: (0xD000 or 0xF000) & 0x1F80, shifted by 7, yields 32.
+        // This is wire compatibility only; NaN/finite scale stay unchanged.
+        appendUInt16(raw, 0x0020);
         return true;
     }
 

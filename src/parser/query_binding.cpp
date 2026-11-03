@@ -154,6 +154,7 @@ public:
     std::vector<const Ctes*> cteScopes;
     std::map<const Stmt*, std::vector<const Expr*>> projectionLeaves;
     std::map<const Expr*,uint32_t> valueTypeOids;
+    std::map<const Expr*,DatumTypePtr> valueTypeMetadata;
     std::map<const Expr*,int32_t> valueTypeModifiers;
     const QueryRowDescriptor* setOrderScope = nullptr;
     // Collect real source occurrences while binding a row-count expression.
@@ -354,6 +355,36 @@ public:
         return unary && unary->op.rfind("COLLATE ",0)==0
             ? expressionTypeModifier(unary->operand.get()) : -1;
     }
+    DatumTypePtr datumMetadata(const std::string& spelling,const Expr* node) {
+        DatumTypePtr declaration;
+        if(const auto* column=dynamic_cast<const ColumnRefExpr*>(node)) {
+            // A real source declaration (including a genuine unknown/null
+            // metadata pointer) is authoritative; never rescue it by spelling.
+            return column->binding?column->binding->typeMetadata:DatumTypePtr{};
+        }
+        if(const auto found=valueTypeMetadata.find(node);found!=valueTypeMetadata.end())
+            declaration=found->second;
+        else if(metadata.datumType) {
+            if(const auto* parameter=dynamic_cast<const ParameterExpr*>(node);
+               parameter && !expressionTypeOid(node) && common_type_detail::canonical(parameter->declaredType)=="unknown")
+                return {}; // unresolved declaration is not a literal UNKNOWN705
+            auto oid=expressionTypeOid(node);
+            if(!oid) {
+                if(const auto* literal=dynamic_cast<const LiteralExpr*>(node);
+                   literal && !literal->preparedSubquery && literal->typeName.empty())
+                    oid=ExprHelper::inferValuesResultType(literal->value)=="unknown"?705:
+                        mapBuiltinTypeNameToOid(ExprHelper::inferValuesResultType(literal->value));
+            }
+            declaration=metadata.datumType(spelling,oid);
+        }
+        const auto modifier=expressionTypeModifier(node);
+        if(declaration && modifier>=0 && declaration->effectiveTypeMod!=modifier) {
+            auto adjusted=std::make_shared<DatumType>(*declaration);
+            adjusted->effectiveTypeMod=modifier;declaration=std::move(adjusted);
+        }
+        if(node)valueTypeMetadata[node]=declaration;
+        return declaration;
+    }
     int32_t commonModifier(const std::vector<std::pair<std::string,const Expr*>>& inputs,
                            const std::string& common) const {
         if(inputs.empty())return -1;
@@ -416,6 +447,11 @@ public:
                 if(resolved.ok())valueTypeModifiers[node]=resolved.typmod;
             }
         }
+        if(metadata.datumType) {
+            valueTypeMetadata[node]=type.typeMetadata?type.typeMetadata:
+                metadata.datumType(type.type,type.typeOid);
+            valueTypeMetadata[node]=datumMetadata(type.type,node);
+        }
         return type.type;
     }
     std::optional<QueryEnumType> enumType(const std::string& spelling,const Expr* node) const {
@@ -436,6 +472,14 @@ public:
         if(const auto type=enumType(spelling,nullptr)) {
             validateEnumLiteral(input,*type);
             valueTypeOids[expression]=type->typeOid;
+            if(metadata.datumType) {
+                // Enum validation uses its base codec, while a previously
+                // resolved domain declaration remains the actual record field.
+                const auto declared=valueTypeMetadata.find(expression);
+                if(declared==valueTypeMetadata.end() || !declared->second ||
+                   !declared->second->enumType || declared->second->codecOid!=type->typeOid)
+                    valueTypeMetadata[expression]=metadata.datumType(type->typeName,type->typeOid);
+            }
         }
     }
     std::optional<QueryComparisonBinding> enumComparison(const std::string& rawOp,
@@ -575,7 +619,8 @@ public:
                         if (column->table.empty() && range.hiddenUnqualified.count(field.name)) continue;
                         ++matches; sourceType = field.type;
                         valueTypeModifiers[column]=field.typeMod;
-                        resolved = {scopeDepth, range.occurrence, ordinal, field.type, range.mergedUsing, field.typeOid};
+                        resolved = {scopeDepth, range.occurrence, ordinal, field.type, range.mergedUsing, field.typeOid,
+                            field.typeMetadata};
                     }
                 }
                 if (matches || rangeFound) break; // nearest SQL level wins
@@ -763,7 +808,40 @@ public:
                 const auto type=ExprHelper::inferParsedResultType(receiver,{});
                 const auto element=arrayElement(type);
                 if(element.empty())throw DbError("42804","cannot subscript a non-array value");
-                if(binary->op=="[]")coerceCaseInput(binary->right,right,"integer");
+                if(binary->op=="[]") {
+                    coerceCaseInput(binary->right,right,"integer");
+                    const auto declaration=datumMetadata(type,receiver);
+                    if(declaration && declaration->kind==DatumKind::Array &&
+                       declaration->arrayElement && declaration->arrayElement->actualOid) {
+                        auto elementDeclaration=declaration->arrayElement;
+                        // A genuine non-domain array typmod also describes
+                        // its non-domain scalar element (e.g. CHAR(2)).
+                        // Domain element declarations keep their own metadata.
+                        if(declaration->actualOid==declaration->codecOid &&
+                           elementDeclaration->actualOid==elementDeclaration->codecOid &&
+                           elementDeclaration->kind==DatumKind::Scalar &&
+                           declaration->effectiveTypeMod>=0 &&
+                           elementDeclaration->effectiveTypeMod!=declaration->effectiveTypeMod) {
+                            auto adjusted=std::make_shared<DatumType>(*elementDeclaration);
+                            adjusted->effectiveTypeMod=declaration->effectiveTypeMod;
+                            elementDeclaration=std::move(adjusted);
+                        }
+                        valueTypeOids[binary]=elementDeclaration->actualOid;
+                        valueTypeModifiers[binary]=elementDeclaration->effectiveTypeMod;
+                        valueTypeMetadata[binary]=std::move(elementDeclaration);
+                    }
+                } else {
+                    // A slice preserves this already-analyzed array's typmod.
+                    // The original receiver owns its immutable declaration;
+                    // do not infer a new type from the delivered value.
+                    valueTypeModifiers[binary]=expressionTypeModifier(receiver);
+                    const auto declaration=datumMetadata(type,receiver);
+                    if(declaration && declaration->kind==DatumKind::Array &&
+                       declaration->actualOid==declaration->codecOid) {
+                        valueTypeOids[binary]=declaration->actualOid;
+                        valueTypeMetadata[binary]=declaration;
+                    }
+                }
                 return binary->op=="[]"?element:type;
             }
             if(patternOperator(binary->op)) {
@@ -1384,13 +1462,30 @@ public:
             const auto modifier=commonModifier(modifierInputs,common);
             const auto resultType=declaredType(array->elementType + "[]",array);
             valueTypeModifiers[array]=modifier;
+            array->typeMetadata=datumMetadata(resultType,array);
             return resultType;
         }
         case ExprType::RowExpr: {
             auto* row = static_cast<RowExpr*>(node.get());
             row->fieldTypes.clear();
-            for (auto& element : row->elements) row->fieldTypes.push_back(expression(element, scopes));
+            std::vector<DatumTypePtr> fields;
+            for (auto& element : row->elements) {
+                const auto type=expression(element, scopes);row->fieldTypes.push_back(type);
+                fields.push_back(datumMetadata(type,element.get()));
+            }
             if (row->constructor) valueTypeOids[row] = mapBuiltinTypeNameToOid("record");
+            if(metadata.datumType && std::all_of(fields.begin(),fields.end(),[](const auto& field){return bool(field);})) {
+                const auto record=metadata.datumType("record",2249);
+                if(record) {
+                    auto declaration=std::make_shared<DatumType>(*record);
+                    declaration->recordFields.clear();
+                    for(const auto& field:fields)declaration->recordFields.push_back(*field);
+                    row->typeMetadata=declaration;
+                    auto wrapper=std::make_shared<CompoundDatum>();wrapper->type=std::move(declaration);
+                    row->resultMetadata=std::move(wrapper);
+                    valueTypeMetadata[row]=row->typeMetadata;
+                }
+            }
             return "record";
         }
         default: throw DbError("0A000", "expression requires structured preparation");
@@ -1422,6 +1517,7 @@ public:
             coerceSetUnknown(parsed.stmt.get(), 0, "text");
             columns.front().type = declaredType("text", &literal);
             columns.front().typeOid = expressionTypeOid(&literal);
+            columns.front().typeMetadata=datumMetadata(columns.front().type,&literal);
             result.statementOutputs[parsed.stmt.get()] = columns;
         }
         if (!scalar) {
@@ -1432,6 +1528,7 @@ public:
                 const auto* value = result.projectionBindings.at(select).at(i).expression;
                 columns[i].type = declaredType("text", value);
                 columns[i].typeOid = expressionTypeOid(value);
+                columns[i].typeMetadata=datumMetadata(columns[i].type,value);
             }
             result.statementOutputs[parsed.stmt.get()] = columns;
             if (auto* select = dynamic_cast<SelectStmt*>(parsed.stmt.get())) {
@@ -1471,6 +1568,7 @@ public:
         if(scalar) {
             valueTypeOids[&literal]=columns.front().typeOid;
             valueTypeModifiers[&literal]=columns.front().typeMod;
+            valueTypeMetadata[&literal]=columns.front().typeMetadata;
         }
         return literal.typeName;
     }
@@ -1747,7 +1845,7 @@ public:
                             columns.push_back(column);
                             if (leaves) leaves->push_back(nullptr);
                             if (bindings) bindings->push_back({item.expr.get(),
-                                QueryColumnBinding{0,range.occurrence,i,column.type,range.mergedUsing,column.typeOid}});
+                                QueryColumnBinding{0,range.occurrence,i,column.type,range.mergedUsing,column.typeOid,column.typeMetadata}});
                         }
                     }
                 continue;
@@ -1762,7 +1860,7 @@ public:
                     if (bindings)
                         for (size_t i=0;i<range.columns.size();++i)
                             bindings->push_back({item.expr.get(),
-                                QueryColumnBinding{0,range.occurrence,i,range.columns[i].type,range.mergedUsing,range.columns[i].typeOid}});
+                                QueryColumnBinding{0,range.occurrence,i,range.columns[i].type,range.mergedUsing,range.columns[i].typeOid,range.columns[i].typeMetadata}});
                 }
                 if (!found) throw DbError("42P01", "missing FROM-clause entry for qualified star");
                 continue;
@@ -1788,7 +1886,7 @@ public:
                 result.projectionAliases.emplace_back(item.sourceExpressionEnd, quoted);
             }
             columns.push_back({name, type, false, 0, expressionTypeOid(item.expr.get()),
-                expressionTypeModifier(item.expr.get())});
+                expressionTypeModifier(item.expr.get()),datumMetadata(type,item.expr.get())});
             if (leaves) leaves->push_back(item.expr.get());
             if (bindings) {
                 const auto* column = dynamic_cast<const ColumnRefExpr*>(item.expr.get());
@@ -1905,7 +2003,10 @@ public:
             // but its lexical level still counts for ancestor provenance.
             derivedOuter.insert(derivedOuter.begin(), Namespace{});
             auto columns = statement(*item->subquery, derivedOuter, ctes);
-            for (auto& column : columns) if (column.type == "unknown") column.type = "text";
+            for (auto& column : columns) if (column.type == "unknown") {
+                    column.type = "text";
+                    if(metadata.datumType)column.typeMetadata=metadata.datumType("text",25);
+                }
             return {aliases({"", item->alias.empty() ? "" : identifier(item->alias), std::move(columns)})};
         }
         if (item->type != FromItem::Type::Join) throw DbError("0A000", "source requires structured preparation");
@@ -1954,7 +2055,9 @@ public:
             };
             for (auto& range : left) hide(range);
             for (auto& range : right) hide(range);
-            merged.columns.push_back({key, selectCommonType({leftType,rightType},"JOIN/USING")});
+            const auto mergedType=selectCommonType({leftType,rightType},"JOIN/USING");
+            merged.columns.push_back({key,mergedType,false,0,0,-1,
+                metadata.datumType?metadata.datumType(mergedType,0):DatumTypePtr{}});
         }
         left.insert(left.end(), right.begin(), right.end());
         auto scopes = outer; scopes.insert(scopes.begin(), left);
@@ -2002,6 +2105,7 @@ public:
         if(auto output=result.statementOutputs.find(statement);output!=result.statementOutputs.end()) {
             output->second.at(ordinal).type=targetType;
             output->second.at(ordinal).typeOid=sourceType=="unknown"?0:expressionTypeOid(item->expr.get());
+            output->second.at(ordinal).typeMetadata=datumMetadata(targetType,item->expr.get());
             output->second.at(ordinal).typeMod=interval ? targetTypeMod : -1;
         }
     }
@@ -2065,6 +2169,18 @@ public:
                 right[i].type=common;
             }
             output[i].type=common;
+            if(metadata.datumType) {
+                const bool same=left[i].typeMetadata && right[i].typeMetadata &&
+                    left[i].typeMetadata->actualOid==right[i].typeMetadata->actualOid &&
+                    common_type_detail::canonical(left[i].type)==common_type_detail::canonical(common) &&
+                    common_type_detail::canonical(right[i].type)==common_type_detail::canonical(common);
+                output[i].typeMetadata=same?left[i].typeMetadata:metadata.datumType(common,output[i].typeOid);
+                if(output[i].typeMetadata && output[i].typeMod>=0 &&
+                   output[i].typeMetadata->effectiveTypeMod!=output[i].typeMod) {
+                    auto modified=std::make_shared<DatumType>(*output[i].typeMetadata);
+                    modified->effectiveTypeMod=output[i].typeMod;output[i].typeMetadata=std::move(modified);
+                }
+            }
         }
         result.setOperationInputs[&select]={std::move(left),std::move(right)};
         if(select.withTies && select.orderBy.empty())throw DbError("42601","WITH TIES cannot be specified without ORDER BY");
@@ -2145,7 +2261,10 @@ public:
                     }
                     applyNames(columns, cte.columnNames);
                     auto seed=columns;
-                    for(auto& column:seed)if(column.type=="unknown")column.type="text";
+                    for(auto& column:seed)if(column.type=="unknown") {
+                        column.type="text";
+                        if(metadata.datumType)column.typeMetadata=metadata.datumType("text",25);
+                    }
                     auto inner = ctes; inner[name] = {seed, cte.query.get()};
                     if (recursive->setOpRhs) {
                         const auto firstRange=result.sourceRanges.size();
@@ -2171,7 +2290,10 @@ public:
                 // A relation's unknown output is finalized as text. Only a
                 // direct INSERT SELECT literal retains assignment context;
                 // equal bytes from a derived/CTE TEXT cell cannot gain it.
-                for (auto& column : columns) if (column.type == "unknown") column.type = "text";
+                for (auto& column : columns) if (column.type == "unknown") {
+                    column.type = "text";
+                    if(metadata.datumType)column.typeMetadata=metadata.datumType("text",25);
+                }
                 result.statementOutputs[cte.query.get()] = columns;
                 ctes[name] = {std::move(columns), cte.query.get()};
             }
@@ -2660,6 +2782,7 @@ PreparedQuery prepareQuery(const std::string& sql, const std::vector<QueryBindin
             const auto* value = binder.result.projectionBindings.at(select).at(i).expression;
             output.type = binder.declaredType("text", value);
             output.typeOid = binder.expressionTypeOid(value);
+            output.typeMetadata=binder.datumMetadata(output.type,value);
         }
         binder.result.statementOutputs[parsed.stmt.get()] = binder.result.output;
     }

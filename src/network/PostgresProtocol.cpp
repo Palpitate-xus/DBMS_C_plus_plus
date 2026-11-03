@@ -1,4 +1,5 @@
 #include "PostgresProtocol.h"
+#include "expression/ExprEvaluator.h"
 #include "common/DateType.h"
 #include "PostgresNumeric.h"
 #include "types/bytea.h"
@@ -497,6 +498,7 @@ bool encodeBinaryValue(const std::string& value, const PgColumnDescription& colu
     }
 }
 
+#include "OwnedBinaryDatum.inc"
 } // namespace
 
 bool PostgresProtocol::readExact(void* destination, size_t length) {
@@ -957,6 +959,14 @@ bool PostgresProtocol::sendDataRow(
     const std::vector<std::string>& values,
     const std::vector<PgColumnDescription>& columns,
     const std::vector<bool>& nulls) {
+    return sendDataRow(values,columns,nulls,nullptr);
+}
+
+bool PostgresProtocol::sendDataRow(
+    const std::vector<std::string>& values,
+    const std::vector<PgColumnDescription>& columns,
+    const std::vector<bool>& nulls,
+    const std::vector<ExprValue>* owningValues) {
     if (values.size() > std::numeric_limits<uint16_t>::max()) return false;
     if (columns.size() != values.size()) return false;
     if (!nulls.empty() && nulls.size() != values.size()) return false;
@@ -980,7 +990,12 @@ bool PostgresProtocol::sendDataRow(
                 if (text.size() > static_cast<size_t>(std::numeric_limits<int32_t>::max())) return false;
                 encoded.assign(text.begin(), text.end());
             } else if (columns[i].formatCode == 1) {
-                if (!encodeBinaryValue(value, columns[i], encoded)) return false;
+                if (owningValues && columns[i].typeMetadata) {
+                    // Validate new carriers only for a demanded non-NULL
+                    // binary cell; text and SQL NULL retain their old path.
+                    if(owningValues->size()!=values.size() || owningValues->at(i).isNull)return false;
+                    if (!encodeOwnedBinaryValue(owningValues->at(i), columns[i], encoded)) return false;
+                } else if (!encodeBinaryValue(value, columns[i], encoded)) return false;
             } else {
                 return false;
             }

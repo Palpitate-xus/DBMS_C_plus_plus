@@ -1,4 +1,7 @@
 #include "ExprEvaluator.h"
+#include "expression/CompoundValueOps.h"
+#include "expression/ArrayCastPolicy.h"
+#include "expression/ArrayPushType.h"
 #include "arithmetic_type.h"
 #include "equality_type.h"
 #include "expr_helper.h"
@@ -3182,6 +3185,20 @@ ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& c
             else subscripts.push_back(parseInt32Argument(value));
         }
         if(null)return ExprValue(element,"",true);
+        if(const auto* values=compound_value_detail::owningElements(array)) {
+            const auto& dimensions=array.compound->dimensions;
+            if(subscripts.size()!=dimensions.size())return ExprValue(element,"",true);
+            if(compound_value_detail::elementCount(dimensions)!=values->size())
+                throw DbError("XX000","array subscript lost its owning dimensions");
+            size_t selected=0;
+            for(size_t i=0;i<dimensions.size();++i) {
+                const int64_t offset=int64_t(subscripts[i])-dimensions[i].lower;
+                if(offset<0 || offset>=dimensions[i].length)return ExprValue(element,"",true);
+                selected=selected*static_cast<size_t>(dimensions[i].length)+static_cast<size_t>(offset);
+            }
+            auto result=values->at(selected);
+            result.collation=array.collation;return result;
+        }
         const auto literal=sql_array_text::parse(array.value);
         if(subscripts.size()!=literal.dimensions.size())return ExprValue(element,"",true);
         std::string current=literal.body;
@@ -3289,23 +3306,10 @@ ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& c
             if (l.isNull && r.isNull) return ExprValue(binding.elementType+"[]","",true);
             if (l.isNull) return r;
             if (r.isNull) return l;
-            return ExprValue(binding.elementType+"[]",sql_array_text::concatenate(l.value,r.value),false);
+            return compound_value_detail::concatenated(l,r,binding.elementType+"[]");
         }
-        std::vector<std::string> left, right;
-        if (binding.leftArray) {
-            if (!l.isNull && !parseArrayElements(l.value,left)) throw DbError("22P02","malformed array literal");
-        } else left.push_back(l.isNull ? "NULL" : arrayElemQuote(l.value));
-        if (binding.rightArray) {
-            if (!r.isNull && !parseArrayElements(r.value,right)) throw DbError("22P02","malformed array literal");
-        } else right.push_back(r.isNull ? "NULL" : arrayElemQuote(r.value));
-        const auto shape=arrayShapeOf(binding.leftArray?l.value:r.value);
-        if(shape && shape->size()>1)throw DbError("22000","argument must be empty or one-dimensional array");
-        left.insert(left.end(),right.begin(),right.end());
-        const auto& receiver=binding.leftArray?l:r;
-        auto dimensions=receiver.isNull?std::vector<sql_array_text::Dimension>{}:sql_array_text::parse(receiver.value).dimensions;
-        if(dimensions.empty())dimensions.push_back({1,0});
-        dimensions.front().length=static_cast<int32_t>(left.size());
-        return ExprValue(binding.elementType+"[]",sql_array_text::compose(left,dimensions),false);
+        return compound_value_detail::pushed(binding.leftArray?l:r,
+            binding.leftArray?r:l,!binding.leftArray,binding.elementType+"[]");
     }
 
     if (op == "<<" || op == "<<=" || op == ">>" || op == ">>=" ||
@@ -3795,17 +3799,19 @@ ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& c
     // Array slice (expr[lower:upper]) — PostgreSQL inclusive bounds,
     // 1-based; empty side = open bound; result is an array literal.
     if (op == "[:]") {
-        if (l.isNull) return ExprValue("text", "", true);
-        std::vector<std::string> elems;
-        const auto literal=sql_array_text::parse(l.value);elems=literal.elements;
-        if(literal.dimensions.empty())return ExprValue(l.typeName,"{}",false);
+        if (l.isNull) return ExprValue(l.typeName, "", true);
+        auto dimensions=compound_value_detail::arrayDimensions(l);
+        if(dimensions.empty()) {
+            ExprValue empty(l.typeName,"{}",false);
+            compound_value_detail::attach(empty,{},{});return empty;
+        }
         // Bounds literal "lower:upper" (either side may be empty).
         const std::string& b = r.value;
         size_t colon = b.find(':');
         std::string loS = colon == std::string::npos ? b : b.substr(0, colon);
         std::string hiS = colon == std::string::npos ? "" : b.substr(colon + 1);
-        const int64_t lower=literal.dimensions.front().lower;
-        const int64_t upper=lower+literal.dimensions.front().length-1;
+        const int64_t lower=dimensions.front().lower;
+        const int64_t upper=lower+dimensions.front().length-1;
         long lo = lower, hi = upper;
         auto parseBound = [](const std::string& s, long def) -> long {
             if (s.empty()) return def;
@@ -3834,13 +3840,26 @@ ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& c
         hi = parseBound(hiS, upper);
         if (lo < lower) lo = lower;
         if (hi > upper) hi = upper;
-        std::string out = "{";
-        for (long i = lo; i <= hi; ++i) {
-            if (i > lo) out += ",";
-            out += elems[static_cast<size_t>(i - lower)];
-        }
-        out += "}";
-        return ExprValue(l.typeName, out, false);
+        std::vector<ExprValue> decoded;
+        const auto* values=compound_value_detail::owningElements(l);
+        if(!values){decoded=compound_value_detail::elements(l);values=&decoded;}
+        if(compound_value_detail::elementCount(dimensions)!=values->size())
+            throw DbError("XX000","array slice lost its owning dimensions");
+        size_t stride=1;
+        for(size_t i=1;i<dimensions.size();++i)stride*=static_cast<size_t>(dimensions[i].length);
+        const size_t first=hi<lo?0:static_cast<size_t>(lo-lower)*stride;
+        const size_t count=hi<lo?0:static_cast<size_t>(hi-lo+1)*stride;
+        std::vector<ExprValue> selected;
+        if(count) {
+            if(first>values->size() || count>values->size()-first)throw DbError("XX000","array slice lost its owning extent");
+            selected.insert(selected.end(),values->begin()+first,values->begin()+first+count);
+            dimensions.front().length=static_cast<int32_t>(hi-lo+1);
+            for(auto& dimension:dimensions)dimension.lower=1;
+        } else dimensions.clear();
+        ExprValue result(l.typeName,compound_value_detail::render(selected,dimensions),false);
+        compound_value_detail::attach(result,std::move(selected),std::move(dimensions),
+            l.compound?l.compound->type:DatumTypePtr{},count?compound_value_detail::bitmap(l):std::optional<bool>(false),true);
+        return result;
     }
 
     return ExprValue{};
@@ -5050,6 +5069,50 @@ ExprValue ExprEvaluator::transformUnknownIntegerInput(const ExprValue& input,
         target=="integer"?IntegerCastTarget::Integer:IntegerCastTarget::BigInt);
 }
 
+ExprValue ExprEvaluator::castReferenceValue(const ExprValue& v,
+    const std::string& sourceType, const std::string& target,
+    StorageEngine& engine, const std::string& database) {
+    regtype_cast_detail::validate(sourceType,target);
+    if(target=="regtype") {
+        regtype_detail::validateCast(sourceType,target);
+        if(v.isNull)return ExprValue("regtype","",true);
+        const auto* session=currentSession();
+        const auto catalog=regtype_detail::metadata(engine,database);
+        const auto source=common_type_detail::canonical(sourceType);
+        Oid oid=0;
+        if(source=="regtype" && v.objectOid)oid=*v.objectOid;
+        else if(source=="smallint" || source=="integer" || source=="bigint") {
+            const auto kind=source=="smallint"?IntegerCastTarget::SmallInt:
+                source=="integer"?IntegerCastTarget::Integer:IntegerCastTarget::BigInt;
+            const auto integer=castToInteger(v,kind);
+            long long number=0;
+            if(!parseInt64Exact(integer.value,number) ||
+               (source=="bigint" && (number<0 || static_cast<unsigned long long>(number)>std::numeric_limits<Oid>::max())))
+                throw DbError("22003","OID out of range");
+            oid=static_cast<Oid>(number);
+        } else if(common_type_detail::oidType(source) && source!="regtype") {
+            oid=v.objectOid?*v.objectOid:regtype_detail::numericOid(v.value);
+        } else oid=regtype_detail::inputOid(v.value,catalog,session);
+        ExprValue result("regtype",regtype_detail::output(oid,catalog,session),false);
+        result.objectOid=oid;return result;
+    }
+    if(sourceType=="regtype" &&
+       (target=="oid" || target=="integer" || target=="smallint" || target=="bigint")) {
+        if(v.isNull)return ExprValue(target,"",true);
+        const auto* session=currentSession();
+        const auto catalog=regtype_detail::metadata(engine,database);
+        const Oid oid=v.objectOid?*v.objectOid:regtype_detail::inputOid(v.value,catalog,session);
+        if(target=="oid"){ExprValue result("oid",std::to_string(oid));result.objectOid=oid;return result;}
+        if(target=="integer") {
+            const int64_t number=oid>std::numeric_limits<int32_t>::max()?static_cast<int64_t>(oid)-(int64_t{1}<<32):oid;
+            return ExprValue("integer",std::to_string(number));
+        }
+        if(target=="smallint")throw DbError("42846","cannot cast type regtype to smallint");
+        return ExprValue("bigint",std::to_string(oid));
+    }
+    throw DbError("42846", "unsupported resolved scalar reference cast");
+}
+
 // Helper overload used by BinaryOpExpr "::"
 ExprValue ExprEvaluator::evalCast(const Expr* inputExpression, const RowContext&,
                                   const ExprValue& v, const std::string& targetTypeName) const {
@@ -5139,46 +5202,13 @@ ExprValue ExprEvaluator::evalCast(const Expr* inputExpression, const RowContext&
         if (v.isNull) return ExprValue("record","",true);
         throw DbError("0A000", "input of anonymous composite types is not implemented");
     }
+    if(target=="regtype" || (sourceType=="regtype" &&
+       (target=="oid" || target=="integer" || target=="smallint" || target=="bigint"))) {
+        const auto* session=currentSession();
+        const auto database=currentDB_.empty() && session?session->currentDB:currentDB_;
+        return castReferenceValue(v,sourceType,target,g_engine,database);
+    }
     regtype_cast_detail::validate(sourceType,target);
-    if(target=="regtype") {
-        regtype_detail::validateCast(sourceType,target);
-        if(v.isNull)return ExprValue("regtype","",true);
-        const auto* session=currentSession();
-        const auto database=currentDB_.empty() && session?session->currentDB:currentDB_;
-        const auto catalog=regtype_detail::metadata(g_engine,database);
-        const auto source=common_type_detail::canonical(sourceType);
-        Oid oid=0;
-        if(source=="regtype" && v.objectOid)oid=*v.objectOid;
-        else if(source=="smallint" || source=="integer" || source=="bigint") {
-            const auto kind=source=="smallint"?IntegerCastTarget::SmallInt:
-                source=="integer"?IntegerCastTarget::Integer:IntegerCastTarget::BigInt;
-            const auto integer=castToInteger(v,kind);
-            long long number=0;
-            if(!parseInt64Exact(integer.value,number) ||
-               (source=="bigint" && (number<0 || static_cast<unsigned long long>(number)>std::numeric_limits<Oid>::max())))
-                throw DbError("22003","OID out of range");
-            oid=static_cast<Oid>(number);
-        } else if(common_type_detail::oidType(source) && source!="regtype") {
-            oid=v.objectOid?*v.objectOid:regtype_detail::numericOid(v.value);
-        } else oid=regtype_detail::inputOid(v.value,catalog,session);
-        ExprValue result("regtype",regtype_detail::output(oid,catalog,session),false);
-        result.objectOid=oid;return result;
-    }
-    if(sourceType=="regtype" &&
-       (target=="oid" || target=="integer" || target=="smallint" || target=="bigint")) {
-        if(v.isNull)return ExprValue(target,"",true);
-        const auto* session=currentSession();
-        const auto database=currentDB_.empty() && session?session->currentDB:currentDB_;
-        const auto catalog=regtype_detail::metadata(g_engine,database);
-        const Oid oid=v.objectOid?*v.objectOid:regtype_detail::inputOid(v.value,catalog,session);
-        if(target=="oid"){ExprValue result("oid",std::to_string(oid));result.objectOid=oid;return result;}
-        if(target=="integer") {
-            const int64_t number=oid>std::numeric_limits<int32_t>::max()?static_cast<int64_t>(oid)-(int64_t{1}<<32):oid;
-            return ExprValue("integer",std::to_string(number));
-        }
-        if(target=="smallint")throw DbError("42846","cannot cast type regtype to smallint");
-        return ExprValue("bigint",std::to_string(oid));
-    }
     if (target=="\"char\"") {
         const auto source=common_type_detail::canonical(sourceType);
         static const std::set<std::string> inputs={"unknown","integer","text","varchar","bpchar","name","\"char\""};
@@ -5300,8 +5330,6 @@ ExprValue ExprEvaluator::evalCast(const Expr* inputExpression, const RowContext&
                 elementTarget = elementType == "bit" ? "pg_catalog.\"bit\"" : "pg_catalog.bpchar";
         }
         const auto sourceArrayType=common_type_detail::canonical(sourceType);
-        const bool oidElements=elementType=="regtype" ||
-            (common_type_detail::array(sourceArrayType) && sourceArrayType=="regtype[]");
         const bool intervalElements = elementType == "interval";
         // Element conversion owns the actual source type too. Treating a
         // BPCHAR array element as UNKNOWN would lose its implicit blank trim
@@ -5309,36 +5337,56 @@ ExprValue ExprEvaluator::evalCast(const Expr* inputExpression, const RowContext&
         const auto sourceElement=common_type_detail::array(sourceArrayType)
             ?sourceArrayType.substr(0,sourceArrayType.size()-2):std::string("unknown");
         if(elementType=="regtype")regtype_detail::validateCast(sourceElement,elementType);
-        std::vector<std::optional<uint32_t>> identities;
-        size_t elementIndex=0;
-        auto literal = sql_array_text::parse(v.value);
-        std::function<std::string(const std::string&)> convert = [&](const std::string& source) {
-            std::vector<std::string> elements;
-            if (!parseArrayElements(source,elements)) throw DbError("22P02","malformed array literal: " + source);
-            std::string output="{";
-            for(size_t i=0;i<elements.size();++i){
-                if(i)output+=',';
-                const auto& token=elements[i];
-                if(!token.empty() && token.front()=='{') output+=convert(token);
-                else {
-                    ExprValue input(sourceElement,arrayElemUnquote(token),toLower(token)=="null");
-                    if(oidElements && elementIndex<v.elementOids.size())input.objectOid=v.elementOids[elementIndex];
-                    ++elementIndex;
-                    // Array input/element coercion parses an unconstrained
-                    // interval first, even for UNKNOWN array text. Element
-                    // field/precision modifiers are a separate second stage.
-                    if (intervalElements)
-                        input = evalCast(nullptr,RowContext{},input,"interval");
-                    const auto converted=evalCast(nullptr,RowContext{},input,elementTarget);
-                    if(elementType=="regtype")identities.push_back(converted.objectOid);
-                    output+=converted.isNull?"NULL":arrayElemQuote(converted.value);
-                }
+        auto items=compound_value_detail::elements(v);
+        const auto dimensions=compound_value_detail::arrayDimensions(v);
+        const auto sourceDeclaration=compound_value_detail::originalArrayDeclaration(v,inputExpression);
+        uint32_t sourceOid=sourceDeclaration && sourceDeclaration->kind==DatumKind::Array &&
+            sourceDeclaration->arrayElement?sourceDeclaration->arrayElement->actualOid:
+            mapBuiltinTypeNameToOid(sourceElement);
+        const uint32_t targetOid=mapBuiltinTypeNameToOid(elementType);
+        // A private ARRAY callback has already produced real typed children.
+        // Their uniform builtin tag may supply its missing result container
+        // tag; no datum bytes or display text determine a type identity.
+        if(!sourceOid && compound_value_detail::owningElements(v) && !items.empty()) {
+            sourceOid=mapBuiltinTypeNameToOid(items.front().typeName);
+            for(const auto& item:items)
+                if(mapBuiltinTypeNameToOid(item.typeName)!=sourceOid){sourceOid=0;break;}
+        }
+        const bool known=compound_value_detail::knownBuiltinArrayCastType(sourceOid) &&
+            compound_value_detail::knownBuiltinArrayCastType(targetOid);
+        bool preserveBitmap=true; // retain preexisting policy for undeclared/user type routes
+        if(known) {
+            preserveBitmap=sourceOid==targetOid ||
+                compound_value_detail::binaryBuiltinArrayElementCast(sourceOid,targetOid);
+            const auto targetSyntax=SQLParser::parseTypeSpecification(target);
+            auto modifiers=targetSyntax.typeMods;
+            const auto originalSyntax=SQLParser::parseTypeSpecification(targetTypeName);
+            const auto originalName=toLower(originalSyntax.typeName);
+            if(modifiers.empty() && (originalName=="char" || originalName=="character" || originalName=="bit"))
+                modifiers.push_back("1");
+            if(!modifiers.empty()) {
+                const auto modifier=TypeRegistry::instance().applyTypeMods(elementType,modifiers);
+                preserveBitmap=preserveBitmap && sourceOid==targetOid && sourceDeclaration &&
+                    modifier.ok() && sourceDeclaration->effectiveTypeMod==modifier.typmod;
             }
-            return output+'}';
-        };
-        literal.body=convert(literal.body);
-        ExprValue result(elementType+"[]",sql_array_text::render(literal),false);
-        result.elementOids=std::move(identities);return result;
+        }
+        if(!compound_value_detail::owningElements(v) && !common_type_detail::array(sourceArrayType))
+            preserveBitmap=false; // a true scalar textual input constructs a fresh array
+        for(auto& input:items) {
+            // Preserve actual record fields/object identity before coercion.
+            // UNKNOWN textual input remains the existing real input codec.
+            if(intervalElements)input=evalCast(nullptr,RowContext{},input,"interval");
+            input=evalCast(nullptr,RowContext{},input,elementTarget);
+        }
+        ExprValue result(elementType+"[]",compound_value_detail::render(items,dimensions),false);
+        result.collation=v.collation;
+        // The genuine receiving declaration supplies the converted array's
+        // type. Keeping the old element descriptor here would encode a cast
+        // with stale source metadata (e.g. int4[] -> int8[]).
+        const auto retainedType=preserveBitmap && sourceOid==targetOid?sourceDeclaration:DatumTypePtr{};
+        compound_value_detail::attach(result,std::move(items),dimensions,retainedType,
+            preserveBitmap?compound_value_detail::bitmap(v):std::optional<bool>{},preserveBitmap);
+        return result;
     }
 
     if (target == "boolean" || target == "bool") return castToBoolean(v);
@@ -5599,6 +5647,16 @@ struct DeclaredStringToArrayScalarFunction {
 bool isArraySearchScalarName(const std::string& name) {
     return name=="array_position" || name=="array_positions";
 }
+// Exact identity of the existing append/prepend builtin callbacks. Stored
+// routines/native replacements never acquire this value coercion by spelling.
+struct DeclaredArrayPushScalarFunction {
+    bool prepend;
+    ExprValue operator()(const std::vector<ExprValue>& args) const {
+        if(args.size()<2)return ExprValue("ARRAY","",true);
+        const auto& array=args[prepend?1:0];
+        return compound_value_detail::pushed(array,args[prepend?0:1],prepend,array.typeName);
+    }
+};
 struct DeclaredArraySearchScalarFunction {
     ScalarFunction callback;
     ExprValue operator()(const std::vector<ExprValue>& args) const {
@@ -6049,8 +6107,10 @@ struct BoundScalarRoutine {
         for(const auto& arg:converted) {values.push_back(arg.value);nulls.push_back(arg.isNull);}
         std::string value;
         bool isNull = false;
-        if (!engine->callUDFDefinition(database, selected.routine, values, value, &isNull, &nulls))
+        std::optional<ExprValue> owningReturn;
+        if (!engine->callUDFDefinition(database, selected.routine, values, value, &isNull, &nulls,&owningReturn))
             throw DbError("22023", "stored-function evaluation failed: " + selected.name);
+        if (owningReturn) return std::move(*owningReturn);
         return ExprValue(ExprHelper::canonicalResultTypeName(selected.routine.returnType),
                          value, isNull);
     }
@@ -6548,6 +6608,13 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
     // ARRAY constructors. The descriptor is read before any argument runs;
     // a brace-looking TEXT value never determines the result type.
     const auto declaredResult=arrayExpressionType(e,ctx,currentDB_,this);
+    const auto* arrayPush=callback==functions_.end()?nullptr:
+        callback->second.target<DeclaredArrayPushScalarFunction>();
+    std::optional<std::string> pushElement;
+    if(arrayPush && e->args.size()==2 && e->namedArgs.empty())
+        pushElement=array_push_type_detail::element(arrayPush->prepend,
+            arrayExpressionType(e->args[0].get(),ctx,currentDB_,this,true),
+            arrayExpressionType(e->args[1].get(),ctx,currentDB_,this,true));
     // The chosen datum must have the query's declared common type, not the
     // narrower type of the selected arm. Reuse the real implicit cast path
     // with a runtime cell: this preserves NULL/physical metadata and avoids
@@ -6679,6 +6746,15 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
         // effects, while still evaluating every demanded argument.
         if (name=="greatest" || name=="least")
             value=commonResultValue(std::move(value));
+        if(pushElement) {
+            const bool arrayArgument=args.size()==(arrayPush->prepend?1U:0U);
+            const auto target=*pushElement+(arrayArgument?"[]":"");
+            // Convert this already evaluated argument before demanding the
+            // next, like a genuine implicit FuncExpr argument coercion. No
+            // fabricated parameter, expression, source or caller frame.
+            if(common_type_detail::canonical(value.typeName)!=target)
+                value=evalCast(a.get(),ctx,value,array_push_type_detail::implicitDeclaration(target));
+        }
         args.push_back(std::move(value));
     }
 
@@ -6843,7 +6919,7 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
             intrinsic.funcName=keyword->kind==sql_value_detail::Kind::CurrentCatalog?"current_catalog":name;
             result=evalSqlValue(&intrinsic,ctx);
         } else result = it->second(args);
-        if(declaredResult.size()>=2 && declaredResult.compare(declaredResult.size()-2,2,"[]")==0)
+        if(!pushElement && declaredResult.size()>=2 && declaredResult.compare(declaredResult.size()-2,2,"[]")==0)
             result=implicitRuntimeValue(*this,std::move(result),declaredResult);
         if (isCollatableExprType(result.typeName))
             result.collation = mergeExplicitCollations(
@@ -6928,67 +7004,59 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
 // Array / Row expressions
 // ----------------------------------------------------------------------------
 
-ExprValue ExprEvaluator::evalArrayExpr(const ArrayExpr* array, const RowContext& row) const {
+ExprValue ExprEvaluator::evalArrayExpr(const ArrayExpr* array,const RowContext& row) const {
     auto elementType=array->elementType;
-    if(elementType.empty()){
-        auto type=arrayExpressionType(array,row,currentDB_,this);elementType=type.substr(0,type.size()-2);
+    if(elementType.empty()) {
+        const auto type=arrayExpressionType(array,row,currentDB_,this);
+        elementType=type.substr(0,type.size()-2);
     }
-    // Constructor element coercion has no typmod. The SQL CHAR/CHARACTER
-    // keywords instead mean CHAR(1) in an explicit cast, so use the existing
-    // unconstrained BPCHAR input spelling for scalar and nested elements.
-    const std::string elementCastType = elementType == "character" || elementType == "bpchar"
+    const std::string elementCastType=elementType=="character" || elementType=="bpchar"
         ? "pg_catalog.bpchar" : elementType;
-    std::string output="{";
     bool nested=array->nestedElements;
-    if(array->elementType.empty())for(const auto& item:array->elements){
+    if(array->elementType.empty())for(const auto& item:array->elements) {
         const auto type=arrayExpressionType(item.get(),row,currentDB_,this);
         if(type.size()>=2 && type.compare(type.size()-2,2,"[]")==0)nested=true;
     }
-    size_t nestedWidth=0;
-    std::vector<sql_array_text::Dimension> childDimensions;
-    std::vector<std::optional<uint32_t>> identities;
-    for(size_t i=0;i<array->elements.size();++i){
-        ExprValue value=eval(array->elements[i].get(),row);
-        if(i)output+=',';
-        if(nested){
+    std::vector<ExprValue> items;
+    if(!nested)items.reserve(array->elements.size());
+    std::vector<DatumArrayDimension> childDimensions;
+    size_t width=0;
+    for(size_t i=0;i<array->elements.size();++i) {
+        auto value=eval(array->elements[i].get(),row);
+        if(nested) {
             if(value.isNull)throw DbError("2202E","multidimensional arrays must have matching dimensions");
-            if (elementType == "bit" && value.typeName != "bit[]")
-                // A common ARRAY element has typmod -1, even when its
-                // source is VARBIT[]. Do not reinterpret it as BIT(1)[].
-                value=implicitRuntimeValue(*this,std::move(value),"bit[]");
-            else if (elementType != "bit")
-                value=evalCast(nullptr,row,value,elementCastType+"[]");
-            std::vector<std::string> elements;
-            if(!parseArrayElements(value.value,elements))throw DbError("22P02","malformed array literal");
-            if(i && nestedWidth!=elements.size())throw DbError("2202E","multidimensional arrays must have matching dimensions");
-            const auto child=sql_array_text::parse(value.value);
-            if(i && child.dimensions!=childDimensions)throw DbError("2202E","multidimensional arrays must have matching dimensions");
-            childDimensions=child.dimensions;
-            nestedWidth=elements.size();output+=child.body;
-            if(elementType=="regtype")identities.insert(identities.end(),value.elementOids.begin(),value.elementOids.end());
-        } else {
-            if (elementType == "bit") {
-                // ARRAY chooses a common element type without a typmod.
-                // The scalar explicit ::bit cast instead defaults to bit(1)
-                // and must not truncate already typed constructor elements.
-                value=evalCast(nullptr,row,value,"bit varying");
-                value.typeName="bit";
-            } else {
-                value=evalCast(nullptr,row,value,elementCastType);
+            if(elementType=="bit" && value.typeName!="bit[]")value=implicitRuntimeValue(*this,std::move(value),"bit[]");
+            else if(elementType!="bit")value=evalCast(nullptr,row,value,elementCastType+"[]");
+            const auto dims=compound_value_detail::arrayDimensions(value);
+            if(i && (dims.size()!=childDimensions.size() ||
+                !std::equal(dims.begin(),dims.end(),childDimensions.begin(),[](const auto& a,const auto& b){
+                    return a.length==b.length && a.lower==b.lower;
+                })))throw DbError("2202E","multidimensional arrays must have matching dimensions");
+            auto child=compound_value_detail::elements(value);
+            if(i && child.size()!=width)throw DbError("2202E","multidimensional arrays must have matching dimensions");
+            childDimensions=dims;width=child.size();
+            if(!i && width) {
+                if(array->elements.size()>items.max_size()/width)throw DbError("54000","array size exceeds the maximum allowed");
+                items.reserve(array->elements.size()*width);
             }
-            output+=value.isNull?"NULL":arrayElemQuote(value.value);
-            if(elementType=="regtype")identities.push_back(value.objectOid);
+            if(child.size()>items.max_size()-items.size())throw DbError("54000","array size exceeds the maximum allowed");
+            items.insert(items.end(),std::make_move_iterator(child.begin()),std::make_move_iterator(child.end()));
+        } else {
+            if(elementType=="bit") {value=evalCast(nullptr,row,value,"bit varying");value.typeName="bit";}
+            else value=evalCast(nullptr,row,value,elementCastType);
+            items.push_back(std::move(value));
         }
     }
-    const auto result=[&](std::string value){ExprValue cell(elementType+"[]",std::move(value));cell.collation=explicitResultCollation(array);cell.elementOids=identities;return cell;};
-    if(nested && nestedWidth==0)return result("{}");
-    if(!arrayShapeOf(output+'}'))throw DbError("2202E","multidimensional arrays must have matching dimensions");
-    if(nested) {
-        auto literal=sql_array_text::parse(output+'}');
-        for(size_t i=0;i<childDimensions.size();++i)literal.dimensions.at(i+1).lower=childDimensions[i].lower;
-        return result(sql_array_text::render(literal));
+    std::vector<DatumArrayDimension> dimensions;
+    if(!array->elements.empty() && (!nested || width)) {
+        if(array->elements.size()>static_cast<size_t>(INT32_MAX))throw DbError("54000","array size exceeds the maximum allowed");
+        dimensions.push_back({static_cast<int32_t>(array->elements.size()),1});
+        if(nested)dimensions.insert(dimensions.end(),childDimensions.begin(),childDimensions.end());
     }
-    return result(output+'}');
+    ExprValue result(elementType+"[]",compound_value_detail::render(items,dimensions),false);
+    result.collation=explicitResultCollation(array);
+    compound_value_detail::attach(result,std::move(items),std::move(dimensions),array->typeMetadata);
+    return result;
 }
 
 ExprValue ExprEvaluator::evalQuantified(const QuantifiedComparisonExpr* expression,const RowContext& row) const {
@@ -7002,27 +7070,12 @@ ExprValue ExprEvaluator::evalQuantified(const QuantifiedComparisonExpr* expressi
     const auto left=eval(expression->left.get(),row);
     const auto array=eval(expression->right.get(),row);
     if (array.isNull) return ExprValue("boolean","",true);
-    std::vector<std::string> elements;
-    std::function<void(const std::string&)> flatten=[&](const std::string& input) {
-        std::vector<std::string> fields;
-        if(!parseArrayElements(input,fields))throw DbError("22P02","malformed array literal");
-        for(const auto& field:fields) {
-            if(!field.empty() && field.front()=='{')flatten(field);
-            else elements.push_back(field);
-        }
-    };
-    flatten(array.value);
+    auto elements=compound_value_detail::elements(array);
     const bool all=expression->quantifier==QuantifiedComparisonExpr::Quantifier::All;
     bool unknown=false;
-    size_t elementIndex=0;
-    for (const auto& token:elements) {
-        const auto text=trimStr(token);
-        const bool quoted=text.size()>=2 && text.front()=='"' && text.back()=='"';
+    for(auto& right:elements) {
         const std::string arrayType=common_type_detail::canonical(array.typeName);
         if(!common_type_detail::array(arrayType))throw DbError("XX000","quantified ARRAY lost its typed datum");
-        ExprValue right(arrayType.substr(0,arrayType.size()-2),arrayElemUnquote(text),!quoted && toLower(text)=="null");
-        if(elementIndex<array.elementOids.size())right.objectOid=array.elementOids[elementIndex];
-        ++elementIndex;
         right.collation=array.collation;
         const auto truth=comparePrepared(*expression->comparison,left,right);
         if (truth.isNull) unknown=true;
@@ -7034,30 +7087,19 @@ ExprValue ExprEvaluator::evalQuantified(const QuantifiedComparisonExpr* expressi
 std::vector<ExprValue> ExprEvaluator::arrayElements(const ExprValue& array) {
     const std::string type=common_type_detail::canonical(array.typeName);
     if(!common_type_detail::array(type))throw DbError("42809","array receiver requires a declared array datum");
-    std::vector<ExprValue> elements;
-    if(array.isNull)return elements;
-    const auto elementType=type.substr(0,type.size()-2);
-    std::function<void(const std::string&)> flatten=[&](const std::string& input) {
-        std::vector<std::string> fields;
-        if(!parseArrayElements(input,fields))throw DbError("22P02","malformed array literal");
-        for(const auto& field:fields) {
-            if(!field.empty() && field.front()=='{')flatten(field);
-            else {
-                const auto text=trimStr(field);
-                const bool quoted=text.size()>=2 && text.front()=='"' && text.back()=='"';
-                ExprValue value(elementType,arrayElemUnquote(text),!quoted && toLower(text)=="null");
-                if(elements.size()<array.elementOids.size())value.objectOid=array.elementOids[elements.size()];
-                value.collation=array.collation;elements.push_back(std::move(value));
-            }
-        }
-    };
-    flatten(array.value);return elements;
+    return compound_value_detail::elements(array);
 }
 
 ExprValue ExprEvaluator::evalRowExpr(const RowExpr* row, const RowContext& context) const {
     if (!row || !row->constructor) return ExprValue("unknown", "", true);
     ExprValue result("record", "(", false);
+    result.compound=row->resultMetadata;
+    if(!result.compound && row->typeMetadata) {
+        auto metadata=std::make_shared<CompoundDatum>();metadata->type=row->typeMetadata;
+        result.compound=std::move(metadata);
+    }
     result.recordFields.emplace();
+    result.recordFields->reserve(row->elements.size());
     for (size_t i = 0; i < row->elements.size(); ++i) {
         auto field = eval(row->elements[i].get(), context);
         if (i < row->fieldTypes.size()) field.typeName = row->fieldTypes[i];
@@ -11972,6 +12014,12 @@ void ExprEvaluator::registerBuiltins() {
         long long dim = 0;
         if (!parseArrayDimension(a, dim))
             return ExprValue("integer", "", true);
+        if(compound_value_detail::owningElements(a[0])) {
+            const auto& dims=a[0].compound->dimensions;
+            return dim>0 && static_cast<uint64_t>(dim)<=dims.size()
+                ? ExprValue("integer",std::to_string(dims[static_cast<size_t>(dim-1)].length),false)
+                : ExprValue("integer","",true);
+        }
         const auto extent = arrayExtent(a[0].value, dim);
         return extent
             ? ExprValue("integer", std::to_string(*extent), false)
@@ -11980,6 +12028,8 @@ void ExprEvaluator::registerBuiltins() {
     // cardinality(arr) — total number of elements across all dimensions
     functions_["cardinality"] = [](const std::vector<ExprValue>& a) {
         if (a.empty() || a[0].isNull) return ExprValue("integer", "", true);
+        if(const auto* values=compound_value_detail::owningElements(a[0]))
+            return ExprValue("integer",std::to_string(values->size()),false);
         std::vector<std::string> elems;
         if (!parseArrayElements(a[0].value, elems)) return ExprValue("integer", "", true);
         // Count leaves recursively.
@@ -11998,6 +12048,10 @@ void ExprEvaluator::registerBuiltins() {
     // array_ndims(arr) — number of non-empty nested array dimensions
     functions_["array_ndims"] = [](const std::vector<ExprValue>& a) {
         if (a.empty() || a[0].isNull) return ExprValue("integer", "", true);
+        if(compound_value_detail::owningElements(a[0])) {
+            const auto n=a[0].compound->dimensions.size();
+            return ExprValue("integer",n?std::to_string(n):std::string{},n==0);
+        }
         std::string current = a[0].value;
         int n = 0;
         while (true) {
@@ -12017,9 +12071,9 @@ void ExprEvaluator::registerBuiltins() {
         long long dim = 0;
         if (!parseArrayDimension(a, dim))
             return ExprValue("integer", "", true);
-        const auto literal=sql_array_text::parse(a[0].value);
-        return dim>0 && static_cast<uint64_t>(dim)<=literal.dimensions.size()
-            ? ExprValue("integer",std::to_string(literal.dimensions[static_cast<size_t>(dim-1)].lower),false)
+        const auto dimensions=compound_value_detail::arrayDimensions(a[0]);
+        return dim>0 && static_cast<uint64_t>(dim)<=dimensions.size()
+            ? ExprValue("integer",std::to_string(dimensions[static_cast<size_t>(dim-1)].lower),false)
             : ExprValue("integer","",true);
     };
     // array_upper(arr, dim) — upper bound == length for the default lower bound 1
@@ -12029,81 +12083,50 @@ void ExprEvaluator::registerBuiltins() {
         long long dim = 0;
         if (!parseArrayDimension(a, dim))
             return ExprValue("integer", "", true);
-        const auto literal=sql_array_text::parse(a[0].value);
-        if(dim<=0 || static_cast<uint64_t>(dim)>literal.dimensions.size())return ExprValue("integer","",true);
-        const auto& metadata=literal.dimensions[static_cast<size_t>(dim-1)];
+        const auto dimensions=compound_value_detail::arrayDimensions(a[0]);
+        if(dim<=0 || static_cast<uint64_t>(dim)>dimensions.size())return ExprValue("integer","",true);
+        const auto& metadata=dimensions[static_cast<size_t>(dim-1)];
         return ExprValue("integer",std::to_string(int64_t(metadata.lower)+metadata.length-1),false);
     };
     // array_append(arr, elem) — append element, returning the new array literal
-    functions_["array_append"] = [](const std::vector<ExprValue>& a) {
-        if (a.size() < 2) return ExprValue("ARRAY", "", true);
-        std::vector<std::string> elems;
-        if (!a[0].isNull && !parseArrayElements(a[0].value, elems))
-            return ExprValue("ARRAY", "", true);
-        auto dimensions=a[0].isNull?std::vector<sql_array_text::Dimension>{}:sql_array_text::parse(a[0].value).dimensions;
-        if(dimensions.size()>1)throw DbError("22000","argument must be empty or one-dimensional array");
-        if(dimensions.empty())dimensions.push_back({1,0});
-        elems.push_back(a[1].isNull ? "NULL" : arrayElemQuote(a[1].value));
-        std::string out = "{";
-        for (size_t i = 0; i < elems.size(); ++i) { if (i) out += ","; out += elems[i]; }
-        out += "}";
-        dimensions.front().length=static_cast<int32_t>(elems.size());
-        return ExprValue("ARRAY",sql_array_text::prefix(dimensions)+out,false);
-    };
-    // array_prepend(elem, arr) — prepend element
-    functions_["array_prepend"] = [](const std::vector<ExprValue>& a) {
-        if (a.size() < 2) return ExprValue("ARRAY", "", true);
-        std::vector<std::string> elems;
-        if (!a[1].isNull && !parseArrayElements(a[1].value, elems))
-            return ExprValue("ARRAY", "", true);
-        auto dimensions=a[1].isNull?std::vector<sql_array_text::Dimension>{}:sql_array_text::parse(a[1].value).dimensions;
-        if(dimensions.size()>1)throw DbError("22000","argument must be empty or one-dimensional array");
-        if(dimensions.empty())dimensions.push_back({1,0});
-        elems.insert(elems.begin(), a[0].isNull ? "NULL" : arrayElemQuote(a[0].value));
-        std::string out = "{";
-        for (size_t i = 0; i < elems.size(); ++i) { if (i) out += ","; out += elems[i]; }
-        out += "}";
-        dimensions.front().length=static_cast<int32_t>(elems.size());
-        return ExprValue("ARRAY",sql_array_text::prefix(dimensions)+out,false);
-    };
-    // array_cat(a, b) — concatenate two arrays
+    functions_["array_append"] = DeclaredArrayPushScalarFunction{false};
+    // array_prepend(elem, arr) retains each actual owning element.
+    functions_["array_prepend"] = DeclaredArrayPushScalarFunction{true};
+    // array_cat follows actual dimensions and row-major datums, not display.
     functions_["array_cat"] = [](const std::vector<ExprValue>& a) {
-        if (a.size() < 2) return ExprValue("ARRAY", "", true);
-        if(a[0].isNull && a[1].isNull)return ExprValue("ARRAY","",true);
-        if (a[0].isNull && !a[1].isNull) return ExprValue("ARRAY", a[1].value, false);
-        if (a[1].isNull && !a[0].isNull) return ExprValue("ARRAY", a[0].value, false);
-        return ExprValue("ARRAY",sql_array_text::concatenate(a[0].value,a[1].value),false);
+        if(a.size()<2 || (a[0].isNull && a[1].isNull))return ExprValue("ARRAY","",true);
+        return compound_value_detail::concatenated(a[0],a[1],"ARRAY");
     };
     // array_position(arr, elem) — 1-based index of first matching element, NULL if absent
     // array_dims(arr) — dimensions as PG text, e.g. [1:3].
     functions_["array_dims"] = [](const std::vector<ExprValue>& a) {
         if (a.empty() || a[0].isNull) return ExprValue("text", "", true);
         std::string dimensions;
-        const auto literal=sql_array_text::parse(a[0].value);
-        for(const auto& metadata:literal.dimensions)dimensions+='['+std::to_string(metadata.lower)+':'+std::to_string(int64_t(metadata.lower)+metadata.length-1)+']';
+        const auto dims=compound_value_detail::arrayDimensions(a[0]);
+        for(const auto& metadata:dims)dimensions+='['+std::to_string(metadata.lower)+':'+std::to_string(int64_t(metadata.lower)+metadata.length-1)+']';
         if (dimensions.empty()) return ExprValue("text", "", true);
         return ExprValue("text", dimensions, false);
     };
 
     const auto searchArray = [](const std::vector<ExprValue>& a,bool all) {
         const std::string resultType=all?"integer[]":"integer";
-        const auto noMatch=[&](){return ExprValue(resultType,all?"{}":"",!all);};
+        const auto noMatch=[&](){return all?compound_value_detail::constructed("integer[]",{}):ExprValue(resultType,"",true);};
         if (a.size() < 2 || a[0].isNull) return ExprValue(resultType, "", true);
-        std::vector<std::string> elems;
-        if (!parseArrayElements(a[0].value, elems)) return ExprValue(resultType, "", true);
-        const auto literal=sql_array_text::parse(a[0].value);
-        const int64_t lower=literal.dimensions.empty()?1:literal.dimensions.front().lower;
-        for (const auto& elem : elems) {
-            std::vector<std::string> nested;
-            if (parseArrayElements(elem, nested)) {
-                throw std::runtime_error(
-                    "searching for elements in multidimensional arrays is "
-                    "not supported (SQLSTATE 0A000)");
-            }
+        const auto dimensions=compound_value_detail::arrayDimensions(a[0]);
+        if(dimensions.size()>1)throw std::runtime_error(
+            "searching for elements in multidimensional arrays is not supported (SQLSTATE 0A000)");
+        const auto* actualElements=compound_value_detail::owningElements(a[0]);
+        const size_t count=actualElements?actualElements->size():compound_value_detail::elementCount(dimensions);
+        const int64_t lower=dimensions.empty()?1:dimensions.front().lower;
+        bool hasNull=false;
+        if(actualElements)hasNull=a[0].compound->arrayNullBitmap.value_or(
+            std::any_of(actualElements->begin(),actualElements->end(),[](const auto& value){return value.isNull;}));
+        else {
+            const auto literal=sql_array_text::parse(a[0].value);
+            hasNull=std::any_of(literal.elements.begin(),literal.elements.end(),[](const auto& token){
+                return toLower(trimStr(token))=="null";
+            });
         }
-        const bool hasNull=std::any_of(elems.begin(),elems.end(),[](const auto& token){
-            return toLower(trimStr(token))=="null";
-        });
         // No NULL bitmap means a NULL needle cannot match. This shortcut
         // precedes NULL-start validation and default equality lookup.
         if(a[1].isNull && !hasNull)return noMatch();
@@ -12112,19 +12135,21 @@ void ExprEvaluator::registerBuiltins() {
             if (a[2].isNull) {
                 // An empty array has no search position to validate. Keep
                 // non-NULL start parsing below, including invalid input.
-                if (elems.empty()) return noMatch();
+                if (count==0) return noMatch();
                 throw std::runtime_error(
                     "initial position must not be null (SQLSTATE 22004)");
             }
             initialPosition = parseInt32Argument(a[2]);
         }
-        if(elems.empty())return noMatch();
+        if(count==0)return noMatch();
         const auto elementType=array_detail::elementType(a[0].typeName);
         static const std::set<std::string> noDefaultEquality={
             "point","line","lseg","box","path","polygon","circle","json","xml"};
         if(noDefaultEquality.count(elementType))
             throw DbError("42883","could not identify an equality operator for type "+elementType);
-        const auto elements=arrayElements(a[0]);
+        std::vector<ExprValue> decoded;
+        if(!actualElements){decoded=arrayElements(a[0]);actualElements=&decoded;}
+        const auto& elements=*actualElements;
         const auto equal=[&](const ExprValue& left,const ExprValue& right) {
             const auto type=common_type_detail::canonical(left.typeName);
             if(type=="jsonb")return jsonbArrayElementEqual(left.value,right.value);
@@ -12166,22 +12191,21 @@ void ExprEvaluator::registerBuiltins() {
         };
         size_t first = 0;
         if (initialPosition > lower) {
-            if (static_cast<unsigned long long>(initialPosition-lower) >= elems.size())
+            if (static_cast<unsigned long long>(initialPosition-lower) >= count)
                 return noMatch();
             first = static_cast<size_t>(initialPosition - lower);
         }
-        std::string positions="{";
-        for (size_t i = first; i < elems.size(); ++i) {
+        std::vector<ExprValue> positions;
+        for (size_t i = first; i < count; ++i) {
             const auto& element=elements[i];
             if ((a[1].isNull && element.isNull) ||
                 (!a[1].isNull && !element.isNull && equal(element,a[1]))) {
                 const auto position=std::to_string(static_cast<int64_t>(i)+lower);
                 if(!all)return ExprValue("integer",position,false);
-                if(positions.size()>1)positions+=',';
-                positions+=position;
+                positions.emplace_back("integer",position,false);
             }
         }
-        if(all)return ExprValue("integer[]",positions+'}',false);
+        if(all)return compound_value_detail::constructed("integer[]",std::move(positions));
         return noMatch();
     };
     functions_["array_position"] = [searchArray](const std::vector<ExprValue>& a) {
@@ -12193,6 +12217,16 @@ void ExprEvaluator::registerBuiltins() {
     // array_to_string(arr, delim [, null_string]) — join non-NULL elements
     functions_["array_to_string"] = [](const std::vector<ExprValue>& a) {
         if (a.size() < 2 || a[0].isNull || a[1].isNull) return ExprValue("text", "", true);
+        if(const auto* values=compound_value_detail::owningElements(a[0])) {
+            const bool nullText=a.size()>=3 && !a[2].isNull;
+            std::string out;bool first=true;
+            for(const auto& value:*values) {
+                if(value.isNull && !nullText)continue;
+                if(!first)out+=a[1].value;
+                out+=value.isNull?a[2].value:value.value;first=false;
+            }
+            return ExprValue("text",std::move(out),false);
+        }
         std::vector<std::string> elems;
         if (!parseArrayElements(a[0].value, elems)) return ExprValue("text", "", true);
         const std::string& delim = a[1].value;
@@ -12247,14 +12281,12 @@ void ExprEvaluator::registerBuiltins() {
                 parts.push_back(s.substr(pos));
             }
         }
-        std::string out = "{";
-        for (size_t i = 0; i < parts.size(); ++i) {
-            if (i) out += ",";
-            if (hasNullStr && parts[i] == nullStr) out += "NULL";
-            else out += arrayElemQuote(parts[i]);
+        std::vector<ExprValue> values;values.reserve(parts.size());
+        for(auto& part:parts) {
+            const bool null=hasNullStr && part==nullStr;
+            values.emplace_back("text",null?std::string{}:std::move(part),null);
         }
-        out += "}";
-        return ExprValue("ARRAY", out, false);
+        return compound_value_detail::constructed("ARRAY",std::move(values));
     };
 
     // ------------------------------------------------------------------------
@@ -12454,17 +12486,14 @@ void ExprEvaluator::registerBuiltins() {
         std::smatch m;
         if (!std::regex_search(input, m, re))
             return ExprValue("ARRAY", "", true);  // NULL
-        std::string out = "{";
-        if (m.size() <= 1) {
-            out += arrayElemQuote(m[0].str());
-        } else {
-            for (size_t i = 1; i < m.size(); ++i) {
-                if (i > 1) out += ",";
-                out += m[i].matched ? arrayElemQuote(m[i].str()) : "NULL";
-            }
+        std::vector<ExprValue> values;
+        if(m.size()<=1)values.emplace_back("text",m[0].str(),false);
+        else {
+            values.reserve(m.size()-1);
+            for(size_t i=1;i<m.size();++i)
+                values.emplace_back("text",m[i].matched?m[i].str():std::string{},!m[i].matched);
         }
-        out += "}";
-        return ExprValue("ARRAY", out, false);
+        return compound_value_detail::constructed("ARRAY",std::move(values));
     };
     // regexp_split_to_array(string, pattern [, flags]) -> array of the parts
     functions_["regexp_split_to_array"] = [](const std::vector<ExprValue>& a) {
@@ -12478,8 +12507,7 @@ void ExprEvaluator::registerBuiltins() {
         std::regex re = buildRegex(textArgumentValue(a[1]), flags, ok);
         if (!ok) throwInvalidRegularExpression();
         const std::string s = textArgumentValue(a[0]);
-        std::string out = "{";
-        bool first = true;
+        std::vector<ExprValue> values;
         try {
             // Split on accepted match boundaries, not token_iterator's
             // unmatched ranges: that iterator drops a final empty field and
@@ -12498,9 +12526,7 @@ void ExprEvaluator::registerBuiltins() {
                 // after the previous match, as PostgreSQL's split functions
                 // do. Nonempty edge matches still produce empty fields.
                 if (begin < s.size() && end > previousMatchEnd) {
-                    if (!first) out += ",";
-                    out += arrayElemQuote(s.substr(fieldBegin, begin - fieldBegin));
-                    first = false;
+                    values.emplace_back("text",s.substr(fieldBegin,begin-fieldBegin),false);
                     fieldBegin = end;
                 }
                 previousMatchEnd = end;
@@ -12515,13 +12541,11 @@ void ExprEvaluator::registerBuiltins() {
                         ++search;
                 }
             }
-            if (!first) out += ",";
-            out += arrayElemQuote(s.substr(fieldBegin));
+            values.emplace_back("text",s.substr(fieldBegin),false);
         } catch (...) {
             return ExprValue("ARRAY", "", true);
         }
-        out += "}";
-        return ExprValue("ARRAY", out, false);
+        return compound_value_detail::constructed("ARRAY",std::move(values));
     };
     // regexp_count(string, pattern [, start [, flags]]) -> number of matches
     functions_["regexp_count"] = [](const std::vector<ExprValue>& a) {

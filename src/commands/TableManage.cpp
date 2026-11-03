@@ -1,4 +1,5 @@
 #include "TableManage.h"
+#include "expression/ArrayDatumInput.h"
 #include "commands/HeapScanCursor.h"
 #include "commands/StoredRowNull.h"
 #include "commands/DdlRewrite.h"
@@ -9,6 +10,7 @@
 #include "commands/SequenceStorageName.h"
 #include "common/DbError.h"
 #include "common/SqlArrayText.h"
+#include "expression/StoredRegtypeValue.h"
 #include "common/BooleanCodec.h"
 #include "common/NetworkValue.h"
 #include "common/GeometryValue.h"
@@ -36,6 +38,7 @@
 #include "types/xml.h"
 #include "catalog/collation.h"
 #include "catalog/CatalogService.h"
+#include "catalog/DatumMetadataFactory.h"
 #include "catalog/declared_type.h"
 #include "catalog/type_catalog.h"
 #include "catalog/namespace_catalog.h"
@@ -971,6 +974,15 @@ static std::string canonicalColumnKeyValue(const Column& column,
         }
         return key;
     }
+    if (!column.isArray && column.dataType == "regtype") {
+        const Oid oid = stored_regtype_detail::rawOid(value);
+        // Fixed width preserves unsigned OID ordering in the existing byte-key
+        // B+tree/hash/SSI/unique-key owners. This is not a rendered type name.
+        std::string key(8, '0');
+        for (size_t digit=0; digit<8; ++digit)
+            key[7-digit] = "0123456789abcdef"[(oid >> (4*digit)) & 15u];
+        return key;
+    }
     if (!column.isArray && isIntegerStorageType(column.dataType)) {
         // Heap encoding parses the integer datum, so index writes and unique
         // checks must not preserve alternate lexical spellings of that datum.
@@ -1096,7 +1108,7 @@ static bool variableColumnWidthsValid(
             (nullColumns ? nullColumns->count(column.dataName) != 0
                          : value->second == "NULL");
         if (value == values.end() || isNull) continue;
-        const size_t maxLength = column.isArray ? 1024 :
+        const size_t maxLength = column.isArray && column.dataType != "regtype" ? 1024 :
             characterColumnByteLimit(column);
         if (value->second.size() > maxLength) return false;
     }
@@ -1290,18 +1302,30 @@ static bool evalExpressionSqlValue(
     std::string& value,
     bool& isNull,
     const std::set<std::string>* nullColumns = nullptr,
-    StorageEngine* functionEngine = nullptr) {
+    StorageEngine* functionEngine = nullptr,
+    bool referenceOutput = false,
+    const TableSchema* referenceSchema = nullptr) {
     value.clear();
     isNull = false;
     if (exprSql.empty()) return false;
+    DatumMetadataContextPtr referenceMetadata;
+    if(referenceOutput && referenceSchema && functionEngine)
+        referenceMetadata=functionEngine->prepareDatumMetadataContext(currentDB,referenceSchema->tablename);
     const auto result = nullColumns
         ? dbms::ExprHelper::evalStringWithNulls(
-              exprSql, row, *nullColumns, typeHints, currentDB, "", functionEngine)
+              exprSql, row, *nullColumns, typeHints, currentDB, "", functionEngine,
+              {}, referenceOutput, nullptr, referenceMetadata.get())
         : dbms::ExprHelper::evalString(
-              exprSql, row, typeHints, currentDB, "", functionEngine);
+              exprSql, row, typeHints, currentDB, "", functionEngine,
+              referenceOutput, referenceMetadata.get());
     if (!result.ok) return false;
     isNull = result.isNull;
-    if (!isNull) value = result.value;
+    if (!isNull) {
+        if(referenceOutput) {
+            if(!result.owningValue)return false;
+            value=stored_regtype_detail::storageText(*result.owningValue);
+        } else value = result.value;
+    }
     return true;
 }
 
@@ -6175,7 +6199,8 @@ static bool evalUDFBody(const StorageEngine::UDFInfo& udf,
                         std::string& returnValue,
                         const std::map<std::string, std::string>* extraVars = nullptr,
                         bool* returnIsNull = nullptr,
-                        const std::vector<bool>* argNulls = nullptr);
+                        const std::vector<bool>* argNulls = nullptr,
+                        std::optional<ExprValue>* owningReturn = nullptr);
 
 // Stage EXECUTE FUNCTION context for the imminent trigger firing: NEW/OLD
 // row values (dotted lowercase keys) plus TG_* diagnostics.  Consumed by
@@ -6238,9 +6263,9 @@ bool StorageEngine::callUDF(const std::string& dbname, const std::string& funcna
 
 bool StorageEngine::callUDFDefinition(const std::string& dbname,const UDFInfo& function,
     const std::vector<std::string>& values,std::string& result,bool* returnIsNull,
-    const std::vector<bool>* nulls) const {
+    const std::vector<bool>* nulls,std::optional<ExprValue>* owningReturn) const {
     return evalUDFBody(function,function.name,values,const_cast<StorageEngine*>(this),
-        dbname,result,nullptr,returnIsNull,nulls);
+        dbname,result,nullptr,returnIsNull,nulls,owningReturn);
 }
 
 bool StorageEngine::callUDFWithCtx(const std::string& dbname,
@@ -10806,6 +10831,15 @@ std::string StorageEngine::extractColumnValueStatic(const std::string& rowBuffer
         for (int i = 0; i < n; ++i)
             bytes[i] = static_cast<uint8_t>(rowBuffer[offset + i]);
         return formatMacAddr(bytes, n);
+    } else if (!col.isArray && col.dataType == "regtype") {
+        // REGTYPE is persisted as the complete unsigned OID datum.  This
+        // identity does not depend on the legacy schema unsigned suffix.
+        if (col.dsize != sizeof(uint32_t)) {
+            throw DbError("XX001", "invalid persisted regtype object width");
+        }
+        uint32_t oid = 0;
+        std::memcpy(&oid, rowBuffer.data() + offset, sizeof(oid));
+        return std::to_string(oid);
     } else if (col.dataType == "boolean") {
         int8_t val = 0;
         std::memcpy(&val, rowBuffer.data() + offset, sizeof(int8_t));
@@ -19245,6 +19279,25 @@ DBStatus StorageEngine::alterTableAlterColumnType(const std::string& dbname,
         lockManager_.unlock(tablename);
         return DBStatus::INVALID_VALUE;
     }
+    const auto referenceSourceType=ExprHelper::canonicalResultTypeName(tbl.cols[colIdx].dataType);
+    const auto referenceTargetType=ExprHelper::canonicalResultTypeName(target.dataType);
+    const bool sourceReference=referenceSourceType=="regtype";
+    const bool targetReference=referenceTargetType=="regtype";
+    const auto referenceIntegerRole=[](const std::string& type) {
+        return type=="smallint" || type=="integer" || type=="bigint" || type=="oid";
+    };
+    const auto referenceOutputIntegerRole=[](const std::string& type) {
+        return type=="integer" || type=="bigint" || type=="oid";
+    };
+    const bool referenceStringTarget=referenceTargetType=="text" ||
+        referenceTargetType=="character varying" || referenceTargetType=="character";
+    if((targetReference && !sourceReference && !referenceIntegerRole(referenceSourceType)) ||
+       (sourceReference && !targetReference && !referenceOutputIntegerRole(referenceTargetType) &&
+        !referenceStringTarget) ||
+       ((sourceReference || targetReference) && tbl.cols[colIdx].isArray!=target.isArray)) {
+        lockManager_.unlock(tablename);
+        throw DbError("42804", "column cannot be cast automatically to the requested type");
+    }
     if (tbl.cols[colIdx].isArray || target.isArray) {
         const auto sourceType = ExprHelper::canonicalResultTypeName(tbl.cols[colIdx].dataType);
         const auto targetType = ExprHelper::canonicalResultTypeName(target.dataType);
@@ -19256,7 +19309,9 @@ DBStatus StorageEngine::alterTableAlterColumnType(const std::string& dbname,
         const bool stringTarget = targetType == "text" || targetType == "character varying" ||
                                   targetType == "character";
         if (!tbl.cols[colIdx].isArray || !target.isArray ||
-            (sourceType != targetType && !numericCast && !stringTarget)) {
+            (sourceType != targetType && !numericCast && !stringTarget &&
+             !(targetReference && referenceIntegerRole(sourceType)) &&
+             !(sourceReference && referenceOutputIntegerRole(targetType)))) {
             lockManager_.unlock(tablename);
             throw DbError("42804", "column \"" + colName +
                 "\" cannot be cast automatically to type " + targetType +
@@ -19308,6 +19363,23 @@ DBStatus StorageEngine::alterTableAlterColumnType(const std::string& dbname,
         if (target.isArray) {
             try {
                 const auto convertElement = [&](const std::string& input) {
+                    if(sourceReference || targetReference) {
+                        ExprValue actual(referenceSourceType,input,false);
+                        if(sourceReference) {
+                            const auto catalog=regtype_detail::metadata(*this,dbname);
+                            actual=stored_regtype_detail::load(input,false,false,catalog,currentSession());
+                        }
+                        if(targetReference || referenceOutputIntegerRole(referenceTargetType)) {
+                            const auto converted=ExprEvaluator::castReferenceValue(actual,
+                                referenceSourceType,referenceTargetType,*this,dbname);
+                            return stored_regtype_detail::storageText(converted);
+                        }
+                        std::string displayed=actual.value;
+                        if((target.dataType=="varchar" || target.dataType=="char") &&
+                           !truncateCharacterValue(displayed,target.dsize))
+                            throw DbError("22001","regtype array output exceeds character width");
+                        return displayed;
+                    }
                     std::string value = input;
                     if ((target.dataType == "varchar" || target.dataType == "char") &&
                         !truncateCharacterValue(value, target.dsize)) {
@@ -19333,13 +19405,27 @@ DBStatus StorageEngine::alterTableAlterColumnType(const std::string& dbname,
                     throw DbError("22P02", "malformed array literal: " + *it->second);
                 literal.body = std::move(converted);
                 converted = sql_array_text::render(literal);
-                if (converted.size() > 1024)
+                if (converted.size() > (targetReference?size_t(65535):size_t(1024)))
                     throw DbError("22001", "array value exceeds supported storage length");
                 it->second = std::move(converted);
             } catch (...) {
                 lockManager_.unlock(tablename);
                 throw;
             }
+        } else if(targetReference || (sourceReference && referenceOutputIntegerRole(referenceTargetType))) {
+            try {
+                ExprValue actual(referenceSourceType,*it->second,false);
+                if(sourceReference) {
+                    const auto catalog=regtype_detail::metadata(*this,dbname);
+                    actual=stored_regtype_detail::load(*it->second,false,false,catalog,currentSession());
+                }
+                const auto converted=ExprEvaluator::castReferenceValue(actual,
+                    referenceSourceType,referenceTargetType,*this,dbname);
+                it->second=stored_regtype_detail::storageText(converted);
+            } catch(...) {lockManager_.unlock(tablename);throw;}
+        } else if(sourceReference && referenceStringTarget) {
+            const auto catalog=regtype_detail::metadata(*this,dbname);
+            it->second=stored_regtype_detail::output(*it->second,false,catalog,currentSession());
         } else if (target.storageCodec == Column::StorageCodec::TemporalMicros) {
             std::string canonical;
             std::string temporalInput = *it->second;
@@ -23987,6 +24073,11 @@ StorageEngine::PredicateTruth StorageEngine::compareValues(
         return result ? PredicateTruth::True : PredicateTruth::False;
     };
 
+    if (!col.isArray && col.dataType == "regtype") {
+        const Oid l = stored_regtype_detail::rawOid(left);
+        const Oid r = stored_regtype_detail::rawOid(right);
+        return fromCompare((l > r) - (l < r));
+    }
     if (col.dataType == "uuid") {
         UuidValue leftUuid;
         UuidValue rightUuid;
@@ -24121,7 +24212,10 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                                     const TableSchema& tbl,
                                     StorageEngine* engine,
                                     const std::string& dbname,
-                                    std::optional<bool>* knownNull = nullptr);
+                                    std::optional<bool>* knownNull = nullptr,
+                                    std::optional<ExprValue>* owningValue = nullptr,
+                                    const DatumMetadataContext* datumMetadata = nullptr,
+                                    DatumTypePtr* owningDeclaration = nullptr);
 
 static bool containsBetweenExpression(const Expr* expression) {
     if (!expression || expression->preparedSubquery) return false;
@@ -24213,7 +24307,8 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
         }
         Condition bound = cond;
         const std::string comparison = cond.op.substr(9);
-        if (!numericColumn && (column || cond.colName.find('(') != std::string::npos)) {
+        const bool referenceColumn=column && !column->isArray && column->dataType=="regtype";
+        if (!numericColumn && !referenceColumn && (column || cond.colName.find('(') != std::string::npos)) {
             // Compact API values have historically been decoded literals.
             // Text "1+2" and date "2024-01-01" must not become arithmetic.
             bound.op = comparison;
@@ -24497,6 +24592,21 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
             if (op == ">=") return !ltOk();
             return false;
         }
+    }
+    if (!col.isArray && col.dataType=="regtype" &&
+        (cond.op=="=" || cond.op=="<>" || cond.op=="!=" || cond.op=="<" ||
+         cond.op==">" || cond.op=="<=" || cond.op==">=")) {
+        std::string right=cond.referenceInputOid?std::to_string(*cond.referenceInputOid):
+            decodeSqlLiteral(cond.value);
+        const bool numeric=!right.empty() && std::all_of(right.begin(),right.end(),
+            [](unsigned char ch){return ch>='0' && ch<='9';});
+        if(!numeric) {
+            if(!valueEngine || valueDb.empty())
+                throw DbError("0A000","regtype name predicate requires its actual database context");
+            const auto catalog=regtype_detail::metadata(*valueEngine,valueDb);
+            right=stored_regtype_detail::input(right,false,catalog,currentSession());
+        }
+        return compareValues(col,val,false,right,false,cond.op)==PredicateTruth::True;
     }
     if (cond.op == "in" || cond.op == "notin") {
         if (cond.patternType=="bit") {
@@ -25051,6 +25161,9 @@ static std::string buildRowBuffer(const TableSchema& tbl,
                 uint8_t bytes[8] = {0};
                 if (!val.empty()) normalizeMacAddr(val, n, bytes);
                 std::memcpy(&rowBuffer[offset], bytes, n);
+            } else if (col.dataType == "regtype" && !col.isArray) {
+                const uint32_t oid = val.empty() ? 0 : stored_regtype_detail::rawOid(val);
+                std::memcpy(&rowBuffer[offset], &oid, sizeof(oid));
             } else if (col.dataType == "boolean") {
                 const auto parsed = parsePostgresBoolean(val);
                 int8_t bval = val.empty() ? INT8_MIN :
@@ -25077,7 +25190,7 @@ static std::string buildRowBuffer(const TableSchema& tbl,
             std::string val = (it != values.end()) ? it->second : "";
             if (columnIsNull(i)) val.clear();
             if (col.isVariableLength) {
-                size_t maxLen = col.isArray ? 1024 :
+                size_t maxLen = col.isArray && col.dataType != "regtype" ? 1024 :
                     characterColumnByteLimit(col);
                 if (val.size() > maxLen) val.resize(maxLen);
                 varDataList.push_back(val);
@@ -25135,6 +25248,9 @@ static std::string buildRowBuffer(const TableSchema& tbl,
                     std::memcpy(&fixedData[fixedOff], &x, sizeof(double));
                     std::memcpy(&fixedData[fixedOff + sizeof(double)], &y,
                                 sizeof(double));
+                } else if (col.dataType == "regtype" && !col.isArray) {
+                    const uint32_t oid = val.empty() ? 0 : stored_regtype_detail::rawOid(val);
+                    std::memcpy(&fixedData[fixedOff], &oid, sizeof(oid));
                 } else if (col.dataType == "boolean") {
                     const auto parsed = parsePostgresBoolean(val);
                     int8_t bval = val.empty() ? INT8_MIN :
@@ -25733,7 +25849,7 @@ DBStatus StorageEngine::insertInternal(
             bool computedNull = false;
             if (evalExpressionSqlValue(col.defaultValue, actualValues,
                                        typeHints, dbname, computed,
-                                       computedNull, nullptr, this)) {
+                                       computedNull, nullptr, this, col.dataType=="regtype")) {
                 actualValues[col.dataName] = computed;
                 if (computedNull) actualNullColumns.insert(col.dataName);
                 else actualNullColumns.erase(col.dataName);
@@ -26080,6 +26196,20 @@ DBStatus StorageEngine::insertInternal(
         // The NULL marker encodes SQL NULL; type validations below must not
         // try to parse it as a value.
         if (isNullMarker) val.clear();
+        if (hasValue && !isNullMarker && col.dataType == "regtype") {
+            try {
+                const auto catalog = regtype_detail::metadata(*this, dbname);
+                actualValues[col.dataName] = stored_regtype_detail::input(
+                    val, col.isArray, catalog, currentSession());
+                val = actualValues[col.dataName];
+            } catch (...) {
+                lockManager_.unlock(tablename);
+                throw;
+            }
+            // Reference input is complete; arithmetic/array casts must not
+            // interpret the canonical OID as a different SQL input type.
+            continue;
+        }
         // An array's dataType names its element. Scalar validators must not
         // parse the whole brace literal as NUMERIC, UUID, MONEY, etc.
         if (col.isArray) {
@@ -26443,7 +26573,7 @@ DBStatus StorageEngine::insertInternal(
         bool computedNull = false;
         if (!evalExpressionSqlValue(col.generatedExpr, actualValues,
                                     typeHints, dbname, computed,
-                                    computedNull, nullptr, this)) {
+                                    computedNull, nullptr, this, col.dataType=="regtype", &tbl)) {
             lockManager_.unlock(tablename);
             return DBStatus::INVALID_VALUE;
         }
@@ -27907,7 +28037,23 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
         return failScan();
     };
     TableSchema tbl = getTableSchema(dbname, tablename);
-    const auto conds = prepareStoredUnknownBitScalarInputs(tbl, inputConditions);
+    auto conds = prepareStoredUnknownBitScalarInputs(tbl, inputConditions);
+    for (auto& condition : conds) {
+        if (condition.op!="=" && condition.op!="<>" && condition.op!="!=" &&
+            condition.op!="<" && condition.op!=">" && condition.op!="<=" && condition.op!=">=") continue;
+        const Column* declared=nullptr; bool rightIsColumn=false;
+        for(size_t i=0;i<tbl.len;++i) {
+            if(tbl.cols[i].dataName==condition.colName)declared=&tbl.cols[i];
+            if(!condition.decodedLiteralRhs && tbl.cols[i].dataName==condition.value)rightIsColumn=true;
+        }
+        if(declared && !rightIsColumn && !declared->isArray && declared->dataType=="regtype") {
+            const auto catalog=regtype_detail::metadata(*this,dbname);
+            condition.value=condition.referenceInputOid?std::to_string(*condition.referenceInputOid):
+                stored_regtype_detail::input(
+                    decodeSqlLiteral(condition.value),false,catalog,currentSession());
+            condition.decodedLiteralRhs=true;
+        }
+    }
     validateStoredPatternConditions(tbl,conds);
     for (const auto& condition:conds) if (condition.op=="typedexpr") {
         SQLParser parser;auto parsed=parser.parse("SELECT "+condition.value);
@@ -29795,7 +29941,14 @@ DBStatus StorageEngine::updateInternal(
                         return DBStatus::INVALID_VALUE;
                     }
                     std::string storeVal = kv.second;
-                    if (col.storageCodec == Column::StorageCodec::TemporalMicros) {
+                    if (col.dataType == "regtype" && !isNullMarker) {
+                        const auto catalog = regtype_detail::metadata(*this, dbname);
+                        storeVal = stored_regtype_detail::input(
+                            kv.second, col.isArray, catalog, currentSession());
+                    }
+                    if (col.dataType == "regtype") {
+                        // Already canonicalized once by the actual input owner.
+                    } else if (col.storageCodec == Column::StorageCodec::TemporalMicros) {
                         if (!normalizeTemporalColumn(col, kv.second, storeVal)) return DBStatus::INVALID_VALUE;
                     } else if (col.isArray && col.dataType == "numeric") {
                         if (!normalizeModifiedColumn(col, kv.second, storeVal)) return DBStatus::INVALID_VALUE;
@@ -29971,7 +30124,7 @@ DBStatus StorageEngine::updateInternal(
                             }
                         }
                     }
-                    const size_t maxLength = col.isArray ? 1024 : col.dsize;
+                    const size_t maxLength = col.isArray && col.dataType != "regtype" ? 1024 : col.dsize;
                     if (varyingCharacterColumn(col) ||
                         variableBlankPaddedCharacterColumn(col)) {
                         size_t characters = 0;
@@ -30255,7 +30408,7 @@ DBStatus StorageEngine::updateInternal(
             bool assignsNull = false;
             if (!evalExpressionSqlValue(
                     col.generatedExpr, rowValues, updateTypeHints, dbname,
-                    computed, assignsNull, nullptr, this)) {
+                    computed, assignsNull, nullptr, this, col.dataType=="regtype", &tbl)) {
                 lockManager_.unlock(tablename);
                 return DBStatus::INVALID_VALUE;
             }
@@ -30404,7 +30557,7 @@ DBStatus StorageEngine::updateInternal(
                 bool assignsNull = false;
                 if (!evalExpressionSqlValue(
                         col.generatedExpr, rowValues, updateTypeHints2,
-                        dbname, computed, assignsNull, nullptr, this)) {
+                        dbname, computed, assignsNull, nullptr, this, col.dataType=="regtype", &tbl)) {
                     lockManager_.unlock(tablename);
                     return DBStatus::INVALID_VALUE;
                 }
@@ -30629,7 +30782,7 @@ DBStatus StorageEngine::updateInternal(
                 bool computedNull = false;
                 if (!evalExpressionSqlValue(
                         column.generatedExpr, rowValues, updateTypeHints,
-                        dbname, computed, computedNull, nullptr, this)) {
+                        dbname, computed, computedNull, nullptr, this, column.dataType=="regtype", &tbl)) {
                     lockManager_.unlock(tablename);
                     return DBStatus::INVALID_VALUE;
                 }
@@ -33998,6 +34151,74 @@ bool StorageEngine::ownsPreparedSetReturningCall(const std::string& dbname,
     return preparedSetReturningRole(evaluator,function,this)!=nullptr;
 }
 
+DatumMetadataContextPtr StorageEngine::prepareDatumMetadataContext(
+    const std::string& dbname,const std::string& physicalTable) const {
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
+    struct Owner {
+        CatalogManager::MetadataSnapshot snapshot;
+        DeclaredTypeNamespace nameSpace;
+        std::unique_ptr<DatumMetadataFactory> factory;
+    };
+    auto owner=std::make_shared<Owner>();
+    owner->nameSpace=freezeDeclaredTypeNamespace(currentSession());
+    if(!dbname.empty())owner->snapshot=catalogService_->metadataSnapshot(dbname);
+    if(owner->snapshot.types.empty() && owner->snapshot.namespaces.empty()) {
+        // Actual immutable bootstrap identities only; not catalog seeding.
+        owner->snapshot.types=CatalogManager::builtinTypeRows();
+        PgNamespaceRow catalog;catalog.oid=11;catalog.nspname="pg_catalog";
+        owner->snapshot.namespaces.push_back(std::move(catalog));
+    }
+    owner->factory=std::make_unique<DatumMetadataFactory>(owner->snapshot,
+        [raw=owner.get()](const std::string& declaration) {
+            return resolveDeclaredTypeName(declaration,&raw->snapshot,nullptr,&raw->nameSpace).typeOid;
+        });
+    auto result=std::make_shared<DatumMetadataContext>();
+    result->declaration=[owner](const std::string& declaration,uint32_t oid) {
+        try {return owner->factory->declaration(declaration,oid);}
+        catch(const DbError&) {return DatumTypePtr{};}
+    };
+    result->inputDeclaration=[owner](const std::string& declaration) {
+        return resolveDeclaredTypeName(declaration,&owner->snapshot,nullptr,&owner->nameSpace).inputType;
+    };
+    result->modifier=[owner](DatumTypePtr declaration,int32_t modifier) {
+        return owner->factory->modifier(std::move(declaration),modifier);
+    };
+    result->sourceColumns=!physicalTable.empty();
+    result->record=[owner](const std::vector<DatumTypePtr>& fields) {
+        return owner->factory->record(fields);
+    };
+    if(!physicalTable.empty()) {
+        auto logical=CatalogService::logicalName(physicalTable);
+        if(const auto* session=currentSession()) {
+            const auto prefix=tempTablePrefix(*session,"");
+            if(physicalTable.rfind(prefix,0)==0) {
+                logical.schema=sessionTempSchemaName(*session);
+                logical.name=physicalTable.substr(prefix.size());
+            }
+        }
+        if(logical.schema.empty())logical.schema="public";
+        Oid schema=INVALID_OID,relation=INVALID_OID;
+        for(const auto& row:owner->snapshot.namespaces)
+            if(row.nspname==logical.schema)schema=row.oid;
+        for(const auto& row:owner->snapshot.relations)
+            if(row.relnamespace==schema && row.relname==logical.name)relation=row.oid;
+        for(const auto& row:owner->snapshot.attributes) {
+            if(row.attrelid!=relation || !relation || row.attnum<=0 || row.attisdropped)continue;
+            DatumTypePtr declaration;
+            try {declaration=owner->factory->attribute(row);}catch(const DbError&) {}
+            result->columns.emplace(row.attname,declaration);
+            result->columns.emplace(logical.name+"."+row.attname,declaration);
+            result->columns.emplace(logical.schema+"."+logical.name+"."+row.attname,declaration);
+            if(row.attgenerated!='v') {
+                result->storedColumns.insert(row.attname);
+                result->storedColumns.insert(logical.name+"."+row.attname);
+                result->storedColumns.insert(logical.schema+"."+logical.name+"."+row.attname);
+            }
+        }
+    }
+    return result;
+}
+
 PreparedQuery StorageEngine::prepareBoundQuery(const std::string& dbname,
     const std::string& sql, const std::vector<QueryBindingDatum>& bindings,
     bool finalizeUnknownOutput,
@@ -34024,6 +34245,37 @@ PreparedQuery StorageEngine::prepareBoundQuery(const std::string& dbname,
             }
         }
         QueryBindingMetadata metadata;
+        std::unique_ptr<DatumMetadataFactory> datumFactory;
+        std::unique_ptr<DatumMetadataFactory> primitiveDatumFactory;
+        CatalogManager::MetadataSnapshot primitiveDatumSnapshot;
+        metadata.datumType=[&](const std::string& spelling,uint32_t oid) -> DatumTypePtr {
+            if((!catalogSnapshot || (catalogSnapshot->types.empty() && catalogSnapshot->namespaces.empty())) && oid) {
+                const auto& builtins=CatalogManager::builtinTypeRows();
+                const auto found=std::find_if(builtins.begin(),builtins.end(),
+                    [&](const auto& row){return row.oid==oid && row.typnamespace==11;});
+                if(found!=builtins.end()) {
+                    if(!primitiveDatumFactory) {
+                        primitiveDatumSnapshot.types=builtins;
+                        primitiveDatumFactory=std::make_unique<DatumMetadataFactory>(primitiveDatumSnapshot);
+                    }
+                    return primitiveDatumFactory->type(oid);
+                }
+            }
+            if(!catalogSnapshot)catalogSnapshot=catalogService_->metadataSnapshot(dbname);
+            if(!datumFactory)datumFactory=std::make_unique<DatumMetadataFactory>(*catalogSnapshot,
+                [&](const std::string& declaration) {
+                    const bool empty=catalogSnapshot->types.empty() && catalogSnapshot->namespaces.empty();
+                    return resolveDeclaredTypeName(declaration,empty?nullptr:&*catalogSnapshot,currentSession()).typeOid;
+                });
+            try {return datumFactory->declaration(spelling,oid);}
+            catch(const DbError&) {return DatumTypePtr{};}
+        };
+        const auto physicalDatum=[&](const PgAttributeRow& attribute) -> DatumTypePtr {
+            if(!catalogSnapshot)catalogSnapshot=catalogService_->metadataSnapshot(dbname);
+            if(!datumFactory) (void)metadata.datumType("",attribute.atttypid);
+            try {return datumFactory?datumFactory->attribute(attribute):DatumTypePtr{};}
+            catch(const DbError&) {return DatumTypePtr{};}
+        };
         metadata.finalizeUnknownOutput = finalizeUnknownOutput;
         // Lexical query sources are distinct from the catalog provider so a
         // stored view can reset that namespace without losing catalog types.
@@ -34101,14 +34353,20 @@ PreparedQuery StorageEngine::prepareBoundQuery(const std::string& dbname,
                         (tableExists(dbname,requested.name) || viewExists(dbname,requested.name));
                     if (found != virtualTables.end() && !physicalShadow) {
                         description.columns = found->second;
-                        for(auto& column:description.columns)column.typeOid=mapBuiltinTypeNameToOid(column.type);
+                        for(auto& column:description.columns) {
+                            column.typeOid=mapBuiltinTypeNameToOid(column.type);
+                            if(column.typeOid)column.typeMetadata=metadata.datumType(column.type,column.typeOid);
+                        }
                         return description;
                     }
                     if(requested.name=="pg_type" &&
                        (!requested.schema.empty() ||
                         (!tableExists(dbname,requested.name) && !viewExists(dbname,requested.name)))) {
                         description.columns=ownedTypeCatalogDescriptor();
-                        for(auto& column:description.columns)column.typeOid=mapBuiltinTypeNameToOid(column.type);
+                        for(auto& column:description.columns) {
+                            column.typeOid=mapBuiltinTypeNameToOid(column.type);
+                            if(column.typeOid)column.typeMetadata=metadata.datumType(column.type,column.typeOid);
+                        }
                         return description;
                     }
                 }
@@ -34148,7 +34406,8 @@ PreparedQuery StorageEngine::prepareBoundQuery(const std::string& dbname,
                         // scalar alias registry does not fold "int4[]".
                         typeName = ExprHelper::canonicalResultTypeName(typeName) + (arrayType ? "[]" : "");
                         description.columns.push_back({attribute.attname, typeName,
-                            attribute.attgenerated != '\0', attribute.attidentity, attribute.atttypid, attribute.atttypmod});
+                            attribute.attgenerated != '\0', attribute.attidentity, attribute.atttypid, attribute.atttypmod,
+                            physicalDatum(attribute)});
                     }
                     if (relation.relkind == 'v') {
                         description.viewSql = viewSource(schema == "public" ? requested.name : schema + "." + requested.name);
@@ -34300,7 +34559,8 @@ PreparedQuery StorageEngine::prepareBoundQuery(const std::string& dbname,
             const bool emptyCatalog=catalogSnapshot->namespaces.empty() && catalogSnapshot->types.empty();
             const auto type=resolveDeclaredTypeName(spelling,
                 emptyCatalog?nullptr:&*catalogSnapshot,currentSession());
-            return QueryOutputColumn{"",type.typeName,false,0,type.typeOid};
+            return QueryOutputColumn{"",type.typeName,false,0,type.typeOid,-1,
+                metadata.datumType(type.typeName,type.typeOid)};
         };
         ExprEvaluator evaluator; evaluator.setCurrentDB(dbname);
         metadata.setReturning = [&](const FunctionCallExpr* function) -> std::optional<QuerySetReturningBinding> {
@@ -34626,6 +34886,7 @@ ExprValue StorageEngine::executeScalarSubquery(const std::string& dbname,
         throw DbError("42601", "scalar subquery must be a SELECT or VALUES query");
     PlPgsqlQueryOptions options;
     options.maxRows = 2;
+    options.captureOwningFirstRow=true;
     options.purpose = PlPgsqlQueryOptions::Purpose::OrdinarySubquery;
     if (query) {
         if (!statement || !query->statementOutputs.count(statement))
@@ -34652,6 +34913,8 @@ ExprValue StorageEngine::executeScalarSubquery(const std::string& dbname,
     if (result.rowCount == 0) return ExprValue(type, "", true);
     if (result.firstRow.size() != 1)
         throw DbError("XX000", "scalar subquery has no structured first row");
+    if (result.firstOwningRow && result.firstOwningRow->size()==1)
+        return result.firstOwningRow->front();
     return ExprValue(type, result.firstRow.front().value_or(""), !result.firstRow.front().has_value());
 }
 
@@ -34710,6 +34973,7 @@ static PlPgsqlQueryResult plpgsqlScalarResult(const ExprEvalResult& value) {
     result.columnTypes = {value.typeName};
     result.firstRow = {value.isNull ? std::nullopt
         : std::optional<std::string>{value.value}};
+    if (value.owningValue) result.firstOwningRow=std::vector<ExprValue>{*value.owningValue};
     return result;
 }
 
@@ -34722,7 +34986,8 @@ static PlPgsqlQueryResult plpgsqlEvalBoundExpression(
     const std::set<std::string>& nullVariables,
     const std::map<std::string, std::string>& types,
     const std::string& dbname, const std::string& username,
-    StorageEngine* sqlFunctionEngine = nullptr) {
+    StorageEngine* sqlFunctionEngine = nullptr,
+    bool captureOwningValue = false) {
     try {
         SQLParser parser;
         auto parsed = parser.parse("SELECT " + expression);
@@ -34912,6 +35177,7 @@ static PlPgsqlQueryResult plpgsqlEvalBoundExpression(
         evaluated.isNull = value.isNull;
         evaluated.typeName = value.typeName;
         evaluated.collation = value.collation;
+        if (captureOwningValue && evaluated.ok) evaluated.owningValue=value;
         if (!evaluated.ok) evaluated.error = "unsupported scalar PL/pgSQL expression (SQLSTATE 0A000)";
         return plpgsqlScalarResult(evaluated);
     } catch (const DbError& error) {
@@ -34934,7 +35200,9 @@ static bool evalUDFBody(const StorageEngine::UDFInfo& udf,
                         std::string& returnValue,
                         const std::map<std::string, std::string>* extraVars,
                         bool* returnIsNull,
-                        const std::vector<bool>* argNulls) {
+                        const std::vector<bool>* argNulls,
+                        std::optional<ExprValue>* owningReturn) {
+    if (owningReturn) owningReturn->reset();
     // SQL dispatched by a stored body can invoke that body again. Each
     // interpreter owns a separate step budget, so also bound the native
     // call stack and restore the counter on every error/return. The stack
@@ -35007,27 +35275,34 @@ static bool evalUDFBody(const StorageEngine::UDFInfo& udf,
         return true;
     }
     const auto coerceReturn = [&](const std::string& value, bool valueIsNull,
-                                  const std::string& sourceType) {
+                                  const std::string& sourceType,
+                                  const ExprValue* actualValue = nullptr) {
         if (valueIsNull ||
             TypeRegistry::instance().normalizeTypeName(udf.returnType) ==
                 "void") {
             returnValue.clear();
             if (returnIsNull) *returnIsNull = true;
+            if (owningReturn) *owningReturn=ExprValue(
+                ExprHelper::canonicalResultTypeName(udf.returnType),"",true);
             return true;
         }
         const std::string binding = "__dbms_function_result";
         std::map<std::string, std::string> row{{binding, value}};
         std::map<std::string, std::string> hints{
             {binding, sourceType.empty() ? "text" : sourceType}};
+        std::map<std::string, ExprValue> actualOutput;
+        if (actualValue) actualOutput.emplace(binding,*actualValue);
         const auto converted = ExprHelper::evalStringWithNulls(
             "CAST(" + binding + " AS " + udf.returnType + ")",
-            row, {}, hints, dbname, "", engine);
+            row, {}, hints, dbname, "", engine, {}, owningReturn!=nullptr,
+            actualValue ? &actualOutput : nullptr);
         if (!converted.ok) {
             const auto failure = plpgsqlScalarResult(converted);
             throw DbError(failure.sqlState, failure.message);
         }
         returnValue = converted.isNull ? std::string{} : converted.value;
         if (returnIsNull) *returnIsNull = converted.isNull;
+        if (owningReturn) *owningReturn=converted.owningValue;
         return true;
     };
     if (udf.language == "plpgsql") {
@@ -35052,7 +35327,7 @@ static bool evalUDFBody(const StorageEngine::UDFInfo& udf,
         if (host.parameterOrder.size() == 1 && host.parameterOrder.front().empty()) host.parameterOrder.clear();
         for (size_t i = 0; i < udf.paramNames.size() && i < udf.paramTypes.size(); ++i)
             host.parameterTypes[udf.paramNames[i]] = udf.paramTypes[i];
-        host.evalExprTyped = [engine, &dbname](const std::string& expression,
+        host.evalExprTyped = [engine, &dbname, owningReturn](const std::string& expression,
                                       const std::map<std::string, std::string>& variables,
                                       const std::set<std::string>& nullVariables,
                                       const std::map<std::string, std::string>& types) {
@@ -35060,7 +35335,7 @@ static bool evalUDFBody(const StorageEngine::UDFInfo& udf,
                 const Session* session = currentSession();
                 return plpgsqlEvalBoundExpression(expression, variables,
                     nullVariables, types, dbname,
-                    session ? session->username : std::string{}, engine);
+                    session ? session->username : std::string{}, engine,owningReturn!=nullptr);
             } catch (const DbError& error) {
                 PlPgsqlQueryResult result;
                 result.sqlState = error.sqlState();
@@ -35112,17 +35387,20 @@ static bool evalUDFBody(const StorageEngine::UDFInfo& udf,
             return engine->plpgsqlQueryPrepared(dbname, sql, bindings, options);
         };
         std::string rv, err, sqlState, plpgsqlReturnType;
+        std::optional<ExprValue> plpgsqlOwningReturn;
         bool plpgsqlIsNull = false;
         const auto notice = [](const std::string& level, const std::string& message) {
             if (level == "notice") emitNotice(message);
             else if (level == "warning") emitWarning(message);
         };
         if (!PlPgsql::run(udf.expression, params, host, rv, err, notice,
-                          &plpgsqlIsNull, &nullParams, &sqlState, &plpgsqlReturnType)) {
+                          &plpgsqlIsNull, &nullParams, &sqlState, &plpgsqlReturnType,
+                          owningReturn ? &plpgsqlOwningReturn : nullptr)) {
             if (!sqlState.empty()) throw DbError(sqlState, err);
             return false;
         }
-        return coerceReturn(rv, plpgsqlIsNull, plpgsqlReturnType);
+        return coerceReturn(rv, plpgsqlIsNull, plpgsqlReturnType,
+            plpgsqlOwningReturn ? &*plpgsqlOwningReturn : nullptr);
     }
 
     // A SQL query body is a whole statement, not a scalar-expression suffix.
@@ -35149,6 +35427,7 @@ static bool evalUDFBody(const StorageEngine::UDFInfo& udf,
         throw DbError("42601", "SQL scalar function must return one column");
     PlPgsqlQueryOptions options;
     options.maxRows = 1; // SQL scalar functions return the first row, not scalar-subquery cardinality.
+    options.captureOwningFirstRow=owningReturn!=nullptr;
     options.purpose = PlPgsqlQueryOptions::Purpose::StoredFunction;
     options.preparedQuery = prepared;
     options.preparedStatement = prepared->ast.get();
@@ -35160,7 +35439,9 @@ static bool evalUDFBody(const StorageEngine::UDFInfo& udf,
         throw DbError("XX000", "SQL-function scalar host returned an invalid result shape");
     if (!evaluated.rowCount) return coerceReturn("", true, udf.returnType);
     return coerceReturn(evaluated.firstRow.front().value_or(""),
-        !evaluated.firstRow.front(), evaluated.columnTypes.empty() ? "text" : evaluated.columnTypes.front());
+        !evaluated.firstRow.front(), evaluated.columnTypes.empty() ? "text" : evaluated.columnTypes.front(),
+        evaluated.firstOwningRow && evaluated.firstOwningRow->size()==1
+            ? &evaluated.firstOwningRow->front() : nullptr);
     };
     const bool succeeded = body();
     if (ownsTransaction && !succeeded) {
@@ -35291,9 +35572,24 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                                     const TableSchema& tbl,
                                     StorageEngine* engine,
                                     const std::string& dbname,
-                                    std::optional<bool>* knownNull) {
+                                    std::optional<bool>* knownNull,
+                                    std::optional<ExprValue>* owningValue,
+                                    const DatumMetadataContext* datumMetadata,
+                                    DatumTypePtr* owningDeclaration) {
+    if (owningDeclaration)owningDeclaration->reset();
     if (knownNull) knownNull->reset();
+    if (owningValue) owningValue->reset();
     const auto publishScalarResult = [&](const auto& value) {
+        if (owningValue) {
+            using Value=std::decay_t<decltype(value)>;
+            if constexpr (std::is_same_v<Value,ExprValue>) *owningValue=value;
+            else if (value.owningValue) *owningValue=*value.owningValue;
+        }
+        if(owningDeclaration) {
+            using Value=std::decay_t<decltype(value)>;
+            if constexpr (!std::is_same_v<Value,ExprValue>)
+                *owningDeclaration=value.typeMetadata;
+        }
         if (knownNull) *knownNull = value.isNull;
         return value.isNull ? std::string("NULL") : value.value;
     };
@@ -35319,8 +35615,16 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             return arg.substr(1, arg.size() - 2);
         for (size_t i = 0; i < tbl.len; ++i) {
             if (tbl.cols[i].dataName == arg) {
-                if (engine && !dbname.empty())
-                    return engine->extractColumnValue(rowBuffer, tbl, i, dbname, true);
+                if (engine && !dbname.empty()) {
+                    bool isNull=false;
+                    auto value=engine->extractColumnValue(rowBuffer,tbl,i,dbname,true,&isNull);
+                    if(!isNull && tbl.cols[i].generatedKind!='v' &&
+                       stored_regtype_detail::columnType(tbl.cols[i].dataType)) {
+                        const auto catalog=regtype_detail::metadata(*engine,dbname);
+                        value=stored_regtype_detail::output(value,tbl.cols[i].isArray,catalog,currentSession());
+                    }
+                    return value;
+                }
                 return StorageEngine::extractColumnValueStatic(rowBuffer, tbl, i);
             }
         }
@@ -35514,7 +35818,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         }
         const auto evaluated = dbms::ExprHelper::evalStringWithNulls(
             normalizedArg, rowContext, nullColumns, typeHints, dbname,
-            expr.sessionUser, engine);
+            expr.sessionUser, engine, {}, (owningValue!=nullptr || owningDeclaration!=nullptr),nullptr,datumMetadata);
         return evaluated.ok ? evaluated.isNull : true;
     };
     auto stringSearchPosition = [](const std::string& haystack,
@@ -35558,7 +35862,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             // typed ABS already owns NULL and evaluates its argument once.
             const auto result = ExprHelper::evalStringWithNulls(
                 "abs(" + expr.funcArgs.front() + ")", values, nulls, types,
-                dbname, expr.sessionUser, engine);
+                dbname, expr.sessionUser, engine, {}, (owningValue!=nullptr || owningDeclaration!=nullptr),nullptr,datumMetadata);
             if (!result.ok) {
                 const auto error = plpgsqlScalarResult(result);
                 throw DbError(error.sqlState, error.message);
@@ -35705,7 +36009,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             }
             const auto evaluated = dbms::ExprHelper::evalStringWithNulls(
                 whereSql, rowContext, nullColumns, typeHints, dbname,
-                expr.sessionUser, engine);
+                expr.sessionUser, engine, {}, (owningValue!=nullptr || owningDeclaration!=nullptr),nullptr,datumMetadata);
             if (!evaluated.ok) {
                 evaluationError = evaluated.error.empty()
                     ? "failed to evaluate EXISTS predicate"
@@ -35764,7 +36068,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             "(" + expr.funcArgs[0] + ")" + operation +
                 "(" + expr.funcArgs[1] + ")",
             rowContext, nullColumns, typeHints, dbname,
-            expr.sessionUser, engine);
+            expr.sessionUser, engine, {}, (owningValue!=nullptr || owningDeclaration!=nullptr),nullptr,datumMetadata);
         if (!evaluated.ok) {
             throw std::runtime_error(
                 evaluated.error.empty()
@@ -35809,7 +36113,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         expressionSql += ")";
         auto res = dbms::ExprHelper::evalStringWithNulls(
             expressionSql, rowContext, nullColumns, typeHints, dbname,
-            expr.sessionUser, engine);
+            expr.sessionUser, engine, {}, (owningValue!=nullptr || owningDeclaration!=nullptr),nullptr,datumMetadata);
         if (res.ok) return publishScalarResult(res);
         throw std::runtime_error(
             res.error.empty() ? "failed to evaluate math function"
@@ -35845,7 +36149,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             // BETWEEN's AND is grammar, not a separately rendered boolean
             // arm. Keep the complete typed AST and UNKNOWN input provenance.
             const auto value = ExprHelper::evalStringWithNulls(expr.funcArgs[0],
-                rowCtx, nullColumns, typeHints, dbname, expr.sessionUser, engine);
+                rowCtx, nullColumns, typeHints, dbname, expr.sessionUser, engine, {}, (owningValue!=nullptr || owningDeclaration!=nullptr),nullptr,datumMetadata);
             if (!value.ok) {
                 const auto failure = plpgsqlScalarResult(value);
                 throw DbError(failure.sqlState, failure.message);
@@ -35869,7 +36173,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             if (caseSelect && caseSelect->selectList.size() == 1 &&
                 dynamic_cast<const CaseExpr*>(caseSelect->selectList.front().expr.get())) {
                 const auto result = ExprHelper::evalStringWithNulls(
-                    expr.funcArgs[0], rowCtx, nullColumns, typeHints, dbname, expr.sessionUser, engine);
+                    expr.funcArgs[0], rowCtx, nullColumns, typeHints, dbname, expr.sessionUser, engine, {}, (owningValue!=nullptr || owningDeclaration!=nullptr),nullptr,datumMetadata);
                 if (!result.ok) throw std::runtime_error(result.error);
                 return publishScalarResult(result);
             }
@@ -36015,7 +36319,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                     }
                     auto r3 = dbms::ExprHelper::evalStringWithNulls(
                         a2, rowCtx, nullColumns, typeHints, dbname,
-                        expr.sessionUser, engine);
+                        expr.sessionUser, engine, {}, (owningValue!=nullptr || owningDeclaration!=nullptr),nullptr,datumMetadata);
                     if (!r3.ok) { anyNull = true; continue; }
                     if (r3.isNull) { anyNull = true; continue; }
                     const std::string& v = r3.value;
@@ -36059,7 +36363,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         }
         auto r2 = dbms::ExprHelper::evalStringWithNulls(
             evalSrc, rowCtx, nullColumns, typeHints, dbname,
-            expr.sessionUser, engine);
+            expr.sessionUser, engine, {}, (owningValue!=nullptr || owningDeclaration!=nullptr),nullptr,datumMetadata);
         if (!r2.ok) {
             // PG aborts the statement when a projection expression
             // errors (e.g. undefined function 42883); surface the
@@ -36116,7 +36420,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                     done = true;
                 }
             }
-            return applyScalarFunc(fixed, rowBuffer, tbl, engine, dbname);
+            return applyScalarFunc(fixed, rowBuffer, tbl, engine, dbname, nullptr, owningValue, datumMetadata,owningDeclaration);
         }
     }
 
@@ -36144,7 +36448,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             expression += argument;
         }
         const auto result = ExprHelper::evalStringWithNulls(
-            expression, values, nulls, types, dbname, expr.sessionUser, engine);
+            expression, values, nulls, types, dbname, expr.sessionUser, engine, {}, (owningValue!=nullptr || owningDeclaration!=nullptr),nullptr,datumMetadata);
         if (!result.ok) {
             const auto error = plpgsqlScalarResult(result);
             throw DbError(error.sqlState, error.message);
@@ -36371,7 +36675,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             }
             const auto evaluated = dbms::ExprHelper::evalStringWithNulls(
                 expressionSql, rowContext, nullColumns, typeHints, dbname,
-                expr.sessionUser, engine);
+                expr.sessionUser, engine, {}, (owningValue!=nullptr || owningDeclaration!=nullptr),nullptr,datumMetadata);
             if (!evaluated.ok) {
                 throw std::runtime_error(
                     evaluated.error.empty()
@@ -36630,7 +36934,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         const auto evaluated = dbms::ExprHelper::evalStringWithNulls(
             expr.funcName + "(" + expr.funcArgs[0] + ")",
             rowContext, nullColumns, typeHints, dbname,
-            expr.sessionUser, engine);
+            expr.sessionUser, engine, {}, (owningValue!=nullptr || owningDeclaration!=nullptr),nullptr,datumMetadata);
         if (!evaluated.ok) {
             throw std::runtime_error(
                 evaluated.error.empty()
@@ -36657,7 +36961,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         }
         const auto evaluated = dbms::ExprHelper::evalStringWithNulls(
             expr.funcName + "(" + expr.funcArgs[0] + ")", rowContext,
-            nullColumns, typeHints, dbname, expr.sessionUser, engine, collationHints);
+            nullColumns, typeHints, dbname, expr.sessionUser, engine, collationHints, (owningValue!=nullptr || owningDeclaration!=nullptr),nullptr,datumMetadata);
         if (!evaluated.ok) {
             if (!evaluated.sqlState.empty()) throw DbError(evaluated.sqlState, evaluated.error);
             throw std::runtime_error(evaluated.error.empty()
@@ -36691,7 +36995,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         expressionSql += ')';
         const auto evaluated = dbms::ExprHelper::evalStringWithNulls(
             expressionSql, rowContext, nullColumns, typeHints, dbname,
-            expr.sessionUser, engine);
+            expr.sessionUser, engine, {}, (owningValue!=nullptr || owningDeclaration!=nullptr),nullptr,datumMetadata);
         if (!evaluated.ok) {
             throw std::runtime_error(
                 evaluated.error.empty()
@@ -36725,7 +37029,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         expressionSql += ')';
         const auto evaluated = dbms::ExprHelper::evalStringWithNulls(
             expressionSql, rowContext, nullColumns, typeHints, dbname,
-            expr.sessionUser, engine);
+            expr.sessionUser, engine, {}, (owningValue!=nullptr || owningDeclaration!=nullptr),nullptr,datumMetadata);
         if (!evaluated.ok) {
             throw std::runtime_error(
                 evaluated.error.empty()
@@ -36758,7 +37062,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         expressionSql += ')';
         const auto evaluated = dbms::ExprHelper::evalStringWithNulls(
             expressionSql, rowContext, nullColumns, typeHints, dbname,
-            expr.sessionUser, engine);
+            expr.sessionUser, engine, {}, (owningValue!=nullptr || owningDeclaration!=nullptr),nullptr,datumMetadata);
         if (!evaluated.ok) {
             throw std::runtime_error(
                 evaluated.error.empty()
@@ -36848,7 +37152,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             "translate(" + expr.funcArgs[0] + "," +
                 expr.funcArgs[1] + "," + expr.funcArgs[2] + ")",
             rowContext, nullColumns, typeHints, dbname,
-            expr.sessionUser, engine);
+            expr.sessionUser, engine, {}, (owningValue!=nullptr || owningDeclaration!=nullptr),nullptr,datumMetadata);
         if (!evaluated.ok) {
             throw std::runtime_error(
                 evaluated.error.empty()
@@ -36891,7 +37195,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         expressionSql += ')';
         const auto evaluated = dbms::ExprHelper::evalStringWithNulls(
             expressionSql, rowContext, nullColumns, typeHints, dbname,
-            expr.sessionUser, engine);
+            expr.sessionUser, engine, {}, (owningValue!=nullptr || owningDeclaration!=nullptr),nullptr,datumMetadata);
         if (!evaluated.ok) {
             throw std::runtime_error(
                 evaluated.error.empty()
@@ -36921,7 +37225,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             expr.funcName + "(" + expr.funcArgs[0] + "," +
                 expr.funcArgs[1] + ")",
             rowContext, nullColumns, typeHints, dbname,
-            expr.sessionUser, engine);
+            expr.sessionUser, engine, {}, (owningValue!=nullptr || owningDeclaration!=nullptr),nullptr,datumMetadata);
         if (!evaluated.ok) {
             throw std::runtime_error(
                 evaluated.error.empty()
@@ -36949,7 +37253,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         const auto evaluated = dbms::ExprHelper::evalStringWithNulls(
             "repeat(" + expr.funcArgs[0] + "," + expr.funcArgs[1] + ")",
             rowContext, nullColumns, typeHints, dbname,
-            expr.sessionUser, engine);
+            expr.sessionUser, engine, {}, (owningValue!=nullptr || owningDeclaration!=nullptr),nullptr,datumMetadata);
         if (!evaluated.ok) {
             throw std::runtime_error(
                 evaluated.error.empty()
@@ -36979,7 +37283,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             expr.funcName + "(" + expr.funcArgs[0] + "," +
                 expr.funcArgs[1] + ")",
             rowContext, nullColumns, typeHints, dbname,
-            expr.sessionUser, engine);
+            expr.sessionUser, engine, {}, (owningValue!=nullptr || owningDeclaration!=nullptr),nullptr,datumMetadata);
         if (!evaluated.ok) {
             throw std::runtime_error(
                 evaluated.error.empty()
@@ -37065,7 +37369,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
     if (expr.funcName == "now" || expr.funcName == "current_timestamp") {
         const auto evaluated = ExprHelper::evalString(
             expr.funcName == "current_timestamp" ? expr.funcName : expr.funcName + "()",
-            {}, {}, dbname, expr.sessionUser, engine);
+            {}, {}, dbname, expr.sessionUser, engine, (owningValue!=nullptr || owningDeclaration!=nullptr),datumMetadata);
         return evaluated.ok && !evaluated.isNull ? evaluated.value : "";
     }
     if (expr.funcName == "extract" || expr.funcName == "date_part") {
@@ -37105,7 +37409,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             if (isNull || (!engine && value.empty())) nulls.insert(name);
         }
         const auto result = ExprHelper::evalStringWithNulls(
-            expression, values, nulls, types, dbname, expr.sessionUser, engine);
+            expression, values, nulls, types, dbname, expr.sessionUser, engine, {}, (owningValue!=nullptr || owningDeclaration!=nullptr),nullptr,datumMetadata);
         if (!result.ok) {
             const auto failure = plpgsqlScalarResult(result);
             throw DbError(failure.sqlState, failure.message);
@@ -37148,7 +37452,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                 " from __date_component_value)",
             {{"__date_component_value", val}},
             {{"__date_component_value", sourceType}}, dbname,
-            expr.sessionUser, engine);
+            expr.sessionUser, engine, (owningValue!=nullptr || owningDeclaration!=nullptr),datumMetadata);
         if (!evaluated.ok || evaluated.isNull) return "";
         return evaluated.value;
     }
@@ -37291,6 +37595,10 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                       rowBuffer, tbl, i);
             rowContext[tbl.cols[i].dataName] = value;
             typeHints[tbl.cols[i].dataName] = tbl.cols[i].dataType;
+            // The stored reference array keeps its real physical envelope;
+            // an unrelated scalar CAST must not load it as one scalar OID.
+            if(tbl.cols[i].isArray && stored_regtype_detail::columnType(tbl.cols[i].dataType))
+                typeHints[tbl.cols[i].dataName] += "[]";
             if (valueIsNull || (!engine && value.empty()))
                 nullColumns.insert(tbl.cols[i].dataName);
         }
@@ -37309,7 +37617,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
 
         const auto evaluated = dbms::ExprHelper::evalStringWithNulls(
             "cast(" + expr.funcArgs[0] + " as " + targetType + ")",
-            rowContext, nullColumns, typeHints, dbname, expr.sessionUser, engine);
+            rowContext, nullColumns, typeHints, dbname, expr.sessionUser, engine, {}, (owningValue!=nullptr || owningDeclaration!=nullptr),nullptr,datumMetadata);
         if (!evaluated.ok) {
             throw std::runtime_error(
                 evaluated.error.empty() ? "failed to evaluate cast"
@@ -37332,7 +37640,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         castExpression.funcArgs = {
             expr.funcArgs[0], getVal(expr.funcArgs[1])};
         return applyScalarFunc(
-            castExpression, rowBuffer, tbl, engine, dbname);
+            castExpression, rowBuffer, tbl, engine, dbname, nullptr, owningValue, datumMetadata,owningDeclaration);
     }
     if (expr.funcName == "to_number" && !expr.funcArgs.empty()) {
         std::string val = getVal(expr.funcArgs[0]);
@@ -37552,7 +37860,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         expression += ")";
         const auto evaluated = dbms::ExprHelper::evalStringWithNulls(
             expression, rowContext, nullColumns, typeHints, dbname,
-            expr.sessionUser, engine);
+            expr.sessionUser, engine, {}, (owningValue!=nullptr || owningDeclaration!=nullptr),nullptr,datumMetadata);
         if (!evaluated.ok) {
             throw std::runtime_error(
                 evaluated.error.empty()
@@ -37581,7 +37889,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             "nullif(" + expr.funcArgs[0] + "," +
                 expr.funcArgs[1] + ")",
             rowContext, nullColumns, typeHints, dbname,
-            expr.sessionUser, engine);
+            expr.sessionUser, engine, {}, (owningValue!=nullptr || owningDeclaration!=nullptr),nullptr,datumMetadata);
         if (!evaluated.ok) {
             throw std::runtime_error(
                 evaluated.error.empty() ? "failed to evaluate nullif"
@@ -37645,7 +37953,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         expressionSql += ')';
         const auto evaluated = dbms::ExprHelper::evalStringWithNulls(
             expressionSql, rowContext, nullColumns, typeHints, dbname,
-            expr.sessionUser, engine);
+            expr.sessionUser, engine, {}, (owningValue!=nullptr || owningDeclaration!=nullptr),nullptr,datumMetadata);
         if (!evaluated.ok) {
             throw std::runtime_error(
                 evaluated.error.empty() ? "failed to evaluate padding"
@@ -37697,7 +38005,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         expressionSql += ')';
         const auto evaluated = dbms::ExprHelper::evalStringWithNulls(
             expressionSql, rowContext, nullColumns, typeHints, dbname,
-            expr.sessionUser, engine);
+            expr.sessionUser, engine, {}, (owningValue!=nullptr || owningDeclaration!=nullptr),nullptr,datumMetadata);
         if (!evaluated.ok) {
             throw std::runtime_error(
                 evaluated.error.empty()
@@ -37727,7 +38035,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             expr.funcName + "(" + expr.funcArgs[0] + "," +
                 expr.funcArgs[1] + "," + expr.funcArgs[2] + ")",
             rowContext, nullColumns, typeHints, dbname,
-            expr.sessionUser, engine);
+            expr.sessionUser, engine, {}, (owningValue!=nullptr || owningDeclaration!=nullptr),nullptr,datumMetadata);
         if (!evaluated.ok) {
             throw std::runtime_error(
                 evaluated.error.empty()
@@ -37826,7 +38134,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             "split_part(" + expr.funcArgs[0] + "," +
                 expr.funcArgs[1] + "," + expr.funcArgs[2] + ")",
             rowContext, nullColumns, typeHints, dbname,
-            expr.sessionUser, engine);
+            expr.sessionUser, engine, {}, (owningValue!=nullptr || owningDeclaration!=nullptr),nullptr,datumMetadata);
         if (!evaluated.ok) {
             throw std::runtime_error(
                 evaluated.error.empty() ? "failed to evaluate split_part"
@@ -37861,7 +38169,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         expressionSql += ")";
         const auto evaluated = dbms::ExprHelper::evalStringWithNulls(
             expressionSql, rowContext, nullColumns, typeHints, dbname,
-            expr.sessionUser, engine);
+            expr.sessionUser, engine, {}, (owningValue!=nullptr || owningDeclaration!=nullptr),nullptr,datumMetadata);
         if (!evaluated.ok) {
             throw std::runtime_error(
                 evaluated.error.empty()
@@ -37935,7 +38243,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             expression += expr.funcArgs[argument];
         }
         const auto result = ExprHelper::evalStringWithNulls(
-            expression + ")", values, nulls, types, dbname, expr.sessionUser, engine);
+            expression + ")", values, nulls, types, dbname, expr.sessionUser, engine, {}, (owningValue!=nullptr || owningDeclaration!=nullptr),nullptr,datumMetadata);
         if (!result.ok) {
             const auto failure = plpgsqlScalarResult(result);
             throw DbError(failure.sqlState, failure.message);
@@ -38114,7 +38422,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         subExpr.isScalar = true;
         subExpr.funcName = "json_extract";
         subExpr.funcArgs = expr.funcArgs;
-        return applyScalarFunc(subExpr, rowBuffer, tbl, engine, dbname);
+        return applyScalarFunc(subExpr, rowBuffer, tbl, engine, dbname, nullptr, owningValue, datumMetadata,owningDeclaration);
     }
     // ---- JSONB scalar functions ----
     if (expr.funcName == "jsonb_extract" && expr.funcArgs.size() >= 2) {
@@ -38123,7 +38431,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         subExpr.isScalar = true;
         subExpr.funcName = "json_extract";
         subExpr.funcArgs = expr.funcArgs;
-        return applyScalarFunc(subExpr, rowBuffer, tbl, engine, dbname);
+        return applyScalarFunc(subExpr, rowBuffer, tbl, engine, dbname, nullptr, owningValue, datumMetadata,owningDeclaration);
     }
     if (expr.funcName == "jsonb_extract_text" && expr.funcArgs.size() >= 2) {
         // jsonb_extract_text is alias for json_value
@@ -38131,7 +38439,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         subExpr.isScalar = true;
         subExpr.funcName = "json_value";
         subExpr.funcArgs = expr.funcArgs;
-        return applyScalarFunc(subExpr, rowBuffer, tbl, engine, dbname);
+        return applyScalarFunc(subExpr, rowBuffer, tbl, engine, dbname, nullptr, owningValue, datumMetadata,owningDeclaration);
     }
     if (expr.funcName == "jsonb_contains" && expr.funcArgs.size() >= 2) {
         // JSONB @> operator: check if target contains pattern (shallow check)
@@ -38455,7 +38763,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                         const auto predicate =
                             dbms::ExprHelper::evalStringWithNulls(
                                 whereSql, rowContext, nullColumns, typeHints,
-                                dbname, expr.sessionUser, engine);
+                                dbname, expr.sessionUser, engine, {}, (owningValue!=nullptr || owningDeclaration!=nullptr),nullptr,datumMetadata);
                         if (!predicate.ok) {
                             evaluationError = predicate.error.empty()
                                 ? "failed to evaluate scalar subquery predicate"
@@ -38558,7 +38866,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                 }
                 const auto selected = dbms::ExprHelper::evalStringWithNulls(
                     colsStr, candidate.values, candidate.nulls, candidate.types,
-                    dbname, expr.sessionUser, engine);
+                    dbname, expr.sessionUser, engine, {}, (owningValue!=nullptr || owningDeclaration!=nullptr),nullptr,datumMetadata);
                 if (!selected.ok)
                     throw std::runtime_error(selected.error.empty()
                         ? "failed to evaluate scalar subquery projection" : selected.error);
@@ -38627,7 +38935,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         expressionSql += ")";
         const auto evaluated = dbms::ExprHelper::evalStringWithNulls(
             expressionSql, rowContext, nullColumns, typeHints, dbname,
-            expr.sessionUser, engine);
+            expr.sessionUser, engine, {}, (owningValue!=nullptr || owningDeclaration!=nullptr),nullptr,datumMetadata);
         if (!evaluated.ok) {
             throw std::runtime_error(
                 evaluated.error.empty()
@@ -38687,7 +38995,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         expressionSql += ")";
         const auto evaluated = dbms::ExprHelper::evalStringWithNulls(
             expressionSql, rowContext, nullColumns, typeHints, dbname,
-            expr.sessionUser, engine);
+            expr.sessionUser, engine, {}, (owningValue!=nullptr || owningDeclaration!=nullptr),nullptr,datumMetadata);
         if (!evaluated.ok) {
             throw std::runtime_error(
                 evaluated.error.empty()
@@ -38745,7 +39053,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         for (const auto& argument : expr.funcArgs) {
             auto evaluated = ExprHelper::evalStringWithNulls(
                 argument, rowContext, nullColumns, typeHints, dbname,
-                expr.sessionUser, engine);
+                expr.sessionUser, engine, {}, (owningValue!=nullptr || owningDeclaration!=nullptr),nullptr,datumMetadata);
             if (!evaluated.ok) {
                 throw std::runtime_error(evaluated.error);
             }
@@ -38809,7 +39117,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             call += (i ? "," : "") + expr.funcArgs[i];
         call += ')';
         const auto evaluated = ExprHelper::evalStringWithNulls(
-            call, values, nulls, types, dbname, expr.sessionUser, engine);
+            call, values, nulls, types, dbname, expr.sessionUser, engine, {}, (owningValue!=nullptr || owningDeclaration!=nullptr),nullptr,datumMetadata);
         if (!evaluated.ok) {
             const auto failure = plpgsqlScalarResult(evaluated);
             throw DbError(failure.sqlState, failure.message);
@@ -39161,6 +39469,10 @@ ExprValue finishAggregateExpression(AggregateExpressionState& state, ExprEvaluat
 
 } // namespace
 
+StorageEngine::QueryExprExecutionOptions StorageEngine::defaultQueryExprOptions() {
+    return QueryExprExecutionOptions{};
+}
+
 std::vector<std::string> StorageEngine::queryExpr(const std::string& dbname,
                                                    const std::string& tablename,
                                                    const std::vector<std::string>& conditions,
@@ -39187,6 +39499,39 @@ std::vector<std::string> StorageEngine::queryExpr(
     if (structuredRows) structuredRows->clear();
     if (structuredNulls) structuredNulls->clear();
     if (structuredRowIds) structuredRowIds->clear();
+    if (options.owningRows) options.owningRows->clear();
+    if (options.owningRowsComplete) *options.owningRowsComplete=true;
+    std::vector<bool> declarationObserved;
+    if(options.owningDeclarations) {
+        options.owningDeclarations->assign(exprs.size(),{});
+        declarationObserved.assign(exprs.size(),false);
+    }
+    const auto publishDeclaration=[&](size_t column,const DatumTypePtr& declaration) {
+        if(!options.owningDeclarations || column>=exprs.size())return;
+        auto& previous=options.owningDeclarations->at(column);
+        if(!declarationObserved[column]) {
+            previous=declaration;declarationObserved[column]=true;
+        } else if(!previous || !declaration || previous->actualOid!=declaration->actualOid ||
+                  previous->codecOid!=declaration->codecOid || previous->codecSize!=declaration->codecSize ||
+                  previous->effectiveTypeMod!=declaration->effectiveTypeMod || previous->kind!=declaration->kind ||
+                  previous->enumType!=declaration->enumType) {
+            // A changing/missing original declaration is unavailable. Never
+            // select a new common type or throw a new user-expression error.
+            previous.reset();
+        }
+    };
+    const auto publishOwningRow=[&](std::vector<std::optional<ExprValue>> values) {
+        if (!options.owningRows) return;
+        std::vector<ExprValue> row;row.reserve(values.size());
+        for (auto& value:values) {
+            if (value) row.push_back(std::move(*value));
+            else {
+                if (options.owningRowsComplete) *options.owningRowsComplete=false;
+                row.emplace_back(); // explicitly unavailable, never rendered text
+            }
+        }
+        options.owningRows->push_back(std::move(row));
+    };
     if (transactionContext().inTransaction && dbname == transactionContext().txnDB) {
         if ((transactionContext().txnIsolationLevel == IsolationLevel::READ_COMMITTED ||
              transactionContext().txnIsolationLevel == IsolationLevel::READ_UNCOMMITTED) &&
@@ -39203,6 +39548,12 @@ std::vector<std::string> StorageEngine::queryExpr(
     ResourceUnlockGuard tableLockGuard(lockManager_, tablename);
 
     TableSchema tbl = getTableSchema(dbname, tablename);
+    DatumMetadataContextPtr outputDatumMetadata;
+    const bool storedReferenceColumns=std::any_of(tbl.cols,tbl.cols+tbl.len,
+        [](const Column& column){return column.generatedKind!='v' &&
+            stored_regtype_detail::columnType(column.dataType);});
+    if(options.owningRows || options.owningDeclarations || storedReferenceColumns)
+        outputDatumMetadata=prepareDatumMetadataContext(dbname,tablename);
     PageAllocator* pa = getPageAllocator(dbname, tablename);
     std::vector<AggregateExpressionProjection> aggregateProjections;
     bool aggregateProjection = false;
@@ -39365,13 +39716,17 @@ std::vector<std::string> StorageEngine::queryExpr(
         std::string display;
         std::vector<std::string> cells;
         std::vector<bool> nulls;
+        std::vector<std::optional<ExprValue>> owning;
+        if (options.owningRows) owning.reserve(aggregateProjections.size());
         for (const auto& projection : aggregateProjections) {
             const auto value = aggregateEvaluator.eval(projection.select->selectList.front().expr.get(), context);
             display += (value.isNull ? "NULL" : value.value) + ' ';
             cells.push_back(value.isNull ? std::string{} : value.value);
             nulls.push_back(value.isNull);
+            if (options.owningRows) owning.push_back(value);
         }
         result.push_back(std::move(display));
+        if (options.owningRows) publishOwningRow(std::move(owning));
         if (structuredRows) structuredRows->push_back(std::move(cells));
         if (structuredNulls) structuredNulls->push_back(std::move(nulls));
         if (structuredRowIds) structuredRowIds->push_back(-1);
@@ -39550,12 +39905,17 @@ std::vector<std::string> StorageEngine::queryExpr(
     if (allAggArith && matchRows.size() > 1)
         matchRows.resize(1);
     const auto evaluateCell = [&](const SelectExpr& expr,
-                                  const std::pair<int64_t, std::string>& mr) {
+                                  const std::pair<int64_t, std::string>& mr,
+                                  std::optional<ExprValue>* owningCell = nullptr,
+                                  size_t outputColumn = std::numeric_limits<size_t>::max()) {
+        if (owningCell) owningCell->reset();
+        DatumTypePtr declaration;
         std::string val;
         bool valueIsNull = false;
         if (expr.isScalar) {
             std::optional<bool> knownNull;
-            val = applyScalarFunc(expr, mr.second, tbl, this, dbname, &knownNull);
+            val = applyScalarFunc(expr, mr.second, tbl, this, dbname, &knownNull,owningCell,
+                outputDatumMetadata.get(),options.owningDeclarations?&declaration:nullptr);
             if (knownNull.has_value()) valueIsNull = *knownNull;
             if (!knownNull.has_value() && val == "NULL") {
                 std::map<std::string, std::string> rowContext;
@@ -39599,20 +39959,57 @@ std::vector<std::string> StorageEngine::queryExpr(
             for (size_t i = 0; i < tbl.len; ++i) {
                 if (tbl.cols[i].dataName != expr.colName) continue;
                 val = extractColumnValue(mr.second, tbl, i, dbname, true, &valueIsNull);
+                std::optional<ExprValue> storedReference;
+                if(tbl.cols[i].generatedKind!='v' &&
+                   stored_regtype_detail::columnType(tbl.cols[i].dataType)) {
+                    const auto catalog=regtype_detail::metadata(*this,dbname);
+                    DatumTypePtr actualDeclaration;
+                    if(outputDatumMetadata) {
+                        const auto actual=outputDatumMetadata->columns.find(tbl.cols[i].dataName);
+                        if(actual!=outputDatumMetadata->columns.end())actualDeclaration=actual->second;
+                    }
+                    storedReference=stored_regtype_detail::load(val,tbl.cols[i].isArray,valueIsNull,
+                        catalog,currentSession(),std::move(actualDeclaration));
+                    val=storedReference->value;
+                }
+                if(options.owningDeclarations && outputDatumMetadata) {
+                    const auto actual=outputDatumMetadata->columns.find(tbl.cols[i].dataName);
+                    if(actual!=outputDatumMetadata->columns.end())declaration=actual->second;
+                }
                 if (valueIsNull || (val.empty() && tbl.cols[i].generatedKind != 'v' &&
                     dbms::detail::storedRowColumnIsNull(*this, dbname, tbl.tablename, tbl, mr.first, i))) val = "NULL";
+                if (owningCell) {
+                    // This is the original raw physical cell, not a display-row
+                    // parse. Complex payloads absent in storage stay absent;
+                    // this bridge never invents record/array/OID structure.
+                    owningCell->emplace(ExprHelper::canonicalResultTypeName(
+                        tbl.cols[i].dataType+(tbl.cols[i].isArray?"[]":"")),val,valueIsNull);
+                    if(storedReference)owningCell->value()=std::move(*storedReference);
+                    owningCell->value().collation=tbl.cols[i].collation;
+                    if(tbl.cols[i].isArray && tbl.cols[i].generatedKind!='v' && outputDatumMetadata &&
+                       outputDatumMetadata->storedColumns.count(tbl.cols[i].dataName)) {
+                        const auto declaration=outputDatumMetadata->columns.find(tbl.cols[i].dataName);
+                        if(declaration!=outputDatumMetadata->columns.end())
+                            (void)compound_value_detail::decodeArrayStorageInput(
+                                owningCell->value(),declaration->second);
+                    }
+                }
                 break;
             }
         }
+        publishDeclaration(outputColumn,declaration);
         return std::make_pair(std::move(val), valueIsNull);
     };
     using CachedCell = std::optional<std::pair<std::string, bool>>;
     std::vector<std::vector<CachedCell>> earlySortProjection;
+    std::vector<std::vector<std::optional<ExprValue>>> earlyOwningProjection;
     if (options.maxProjectionRows && !orderBy.empty() && !hasUnnest) {
         // Preserve expressions placed below Sort, including their errors,
         // while keeping volatile non-key expressions above it. Cache each
         // early value so a delivered row never evaluates it a second time.
         earlySortProjection.assign(matchRows.size(), std::vector<CachedCell>(exprs.size()));
+        if (options.owningRows) earlyOwningProjection.assign(matchRows.size(),
+            std::vector<std::optional<ExprValue>>(exprs.size()));
         std::vector<size_t> inputToSorted(sortedInputPositions.size(),
                                         std::numeric_limits<size_t>::max());
         for (size_t row = 0; row < matchRows.size(); ++row)
@@ -39623,7 +40020,8 @@ std::vector<std::string> StorageEngine::queryExpr(
                                    matchRows[row].first, tbl.len);
             for (size_t col = 0; col < exprs.size(); ++col) {
                 if (!options.deferredSortProjections.count(col))
-                    earlySortProjection[row][col] = evaluateCell(exprs[col], matchRows[row]);
+                    earlySortProjection[row][col] = evaluateCell(exprs[col], matchRows[row],
+                        options.owningRows ? &earlyOwningProjection[row][col] : nullptr,col);
             }
         }
     }
@@ -39705,6 +40103,10 @@ std::vector<std::string> StorageEngine::queryExpr(
                     nulls.push_back(vi == unnestIdx ? false : valNulls[vi]);
                 }
                 result.push_back(rowStr);
+                if (options.owningRows) {
+                    if (options.owningRowsComplete) *options.owningRowsComplete=false;
+                    options.owningRows->emplace_back(exprs.size());
+                }
                 if (structuredRows) structuredRows->push_back(std::move(cells));
                 if (structuredNulls) structuredNulls->push_back(std::move(nulls));
                 if (structuredRowIds) structuredRowIds->push_back(mr.first);
@@ -39713,9 +40115,14 @@ std::vector<std::string> StorageEngine::queryExpr(
             std::string rowStr;
             std::vector<std::string> cells;
             std::vector<bool> nulls;
+            std::vector<std::optional<ExprValue>> owning;
+            if (options.owningRows) owning.resize(exprs.size());
             for (size_t col = 0; col < exprs.size(); ++col) {
                 const auto cell = !earlySortProjection.empty() && earlySortProjection[rowIndex][col]
-                    ? *earlySortProjection[rowIndex][col] : evaluateCell(exprs[col], mr);
+                    ? *earlySortProjection[rowIndex][col] : evaluateCell(exprs[col], mr,
+                        options.owningRows ? &owning[col] : nullptr,col);
+                if (options.owningRows && !earlySortProjection.empty() && earlySortProjection[rowIndex][col])
+                    owning[col]=earlyOwningProjection[rowIndex][col];
                 const std::string& val = cell.first;
                 const bool valueIsNull = cell.second;
                 rowStr += val + ' ';
@@ -39723,6 +40130,7 @@ std::vector<std::string> StorageEngine::queryExpr(
                 nulls.push_back(valueIsNull);
             }
             result.push_back(rowStr);
+            if (options.owningRows) publishOwningRow(std::move(owning));
             if (structuredRows) structuredRows->push_back(std::move(cells));
             if (structuredNulls) structuredNulls->push_back(std::move(nulls));
             if (structuredRowIds) structuredRowIds->push_back(mr.first);
@@ -55473,10 +55881,12 @@ PlPgsqlQueryResult StorageEngine::plpgsqlQueryNative(
                 while ((!options.maxRows || result.rowCount < options.maxRows) && cursor->next(cells)) {
                     if (cells.size() != result.columnCount)
                         throw DbError("XX000", "native typed child lost structured width");
-                    if (result.rowCount++ == 0)
+                    if (result.rowCount++ == 0) {
+                        if (options.captureOwningFirstRow) result.firstOwningRow=cells;
                         for (const auto& cell : cells)
                             result.firstRow.push_back(cell.isNull ? std::optional<std::string>{}
                                 : std::optional<std::string>{cell.value});
+                    }
                 }
                 cursor->close();
             } catch (...) {
@@ -55949,9 +56359,14 @@ PlPgsqlQueryResult StorageEngine::plpgsqlQueryNative(
                         : evaluator.eval(projection[col].expr.get(), projected);
                 if (value.isUnknown())
                     return fail("0A000", "unsupported SELECT expression");
-                if (row == offset)
+                if (row == offset) {
                     result.firstRow.push_back(value.isNull
                         ? std::optional<std::string>{} : value.value);
+                    if (options.captureOwningFirstRow) {
+                        if (!result.firstOwningRow) result.firstOwningRow.emplace();
+                        result.firstOwningRow->push_back(value);
+                    }
+                }
             }
         }
         result.ok = true;

@@ -1026,6 +1026,8 @@ struct Interp {
     }
     std::string returnValue;
     std::string returnType = "unknown";
+    bool captureOwningReturn = false;
+    std::optional<ExprValue> returnOwningValue;
     bool returnIsNull = false;
     bool hasReturn = false;
     bool exitLoop = false;
@@ -1368,7 +1370,9 @@ struct Interp {
     // (function calls, ||, column expressions) defers to the host.
     std::optional<std::string> eval(const std::string& raw,
                                     bool* valueIsNull = nullptr,
-                                    std::string* valueType = nullptr) {
+                                    std::string* valueType = nullptr,
+                                    std::optional<ExprValue>* owningValue = nullptr) {
+        if (owningValue) owningValue->reset();
         if (valueIsNull) *valueIsNull = false;
         if (valueType) *valueType = "unknown";
         std::string expr = trimCopy(raw);
@@ -1431,7 +1435,9 @@ struct Interp {
             // treating a parser-retained subquery as a textual literal.
             // Unlike INTO demand or an inner scalar subquery, this outer
             // query runs to completion before its row/column checks (PG SPI).
-            const auto result = host.queryPrepared("SELECT " + expr, bindings(), {});
+            PlPgsqlQueryOptions outputOptions;
+            outputOptions.captureOwningFirstRow=owningValue!=nullptr;
+            const auto result = host.queryPrepared("SELECT " + expr, bindings(), outputOptions);
             if (!result.ok) {
                 fail(result.message.empty() ? "expression query failed" : result.message,
                      result.sqlState);
@@ -1456,6 +1462,8 @@ struct Interp {
                 return std::nullopt;
             }
             if (valueIsNull) *valueIsNull = !result.firstRow.front();
+            if (owningValue && result.firstOwningRow && result.firstOwningRow->size()==1)
+                *owningValue=result.firstOwningRow->front();
             return result.firstRow.front().value_or("null");
         }
         if (host.evalExprTyped) {
@@ -1480,6 +1488,8 @@ struct Interp {
             if (valueIsNull) *valueIsNull = !result.firstRow.front();
             if (valueType && result.columnTypes.size() == 1)
                 *valueType = result.columnTypes.front();
+            if (owningValue && result.firstOwningRow && result.firstOwningRow->size()==1)
+                *owningValue=result.firstOwningRow->front();
             return result.firstRow.front().value_or("null");
         }
         auto native = nativeEval(expr);
@@ -1775,7 +1785,8 @@ struct Interp {
         }
         if (auto* r = dynamic_cast<const ReturnStmt*>(&s)) {
             if (r->hasExpr) {
-                auto v = eval(r->expr, &returnIsNull, &returnType);
+                auto v = eval(r->expr, &returnIsNull, &returnType,
+                    captureOwningReturn ? &returnOwningValue : nullptr);
                 if (!v) return fail("RETURN evaluation failed: " + r->expr.substr(0, 40));
                 returnValue = *v;
             } else {
@@ -2115,8 +2126,10 @@ bool PlPgsql::run(const std::string& body,
                   bool* returnIsNull,
                   const std::set<std::string>* nullParams,
                   std::string* errorSqlState,
-                  std::string* returnType) {
+                  std::string* returnType,
+                  std::optional<ExprValue>* owningReturn) {
     using namespace plpgsql_impl;
+    if (owningReturn) owningReturn->reset();
     returnValue.clear();
     error.clear();
     if (errorSqlState) errorSqlState->clear();
@@ -2163,6 +2176,7 @@ bool PlPgsql::run(const std::string& body,
 
     std::function<void(const std::string&, const std::string&)> sink = notice;
     Interp interp(host, params, sink);
+    interp.captureOwningReturn=owningReturn!=nullptr;
     if (nullParams) interp.nullVars.insert(nullParams->begin(), nullParams->end());
     interp.pushScope(rootLabel, defaults);
     for (const auto& d : defaults) {
@@ -2202,6 +2216,7 @@ bool PlPgsql::run(const std::string& body,
         returnValue = interp.returnValue;
         if (returnIsNull) *returnIsNull = interp.returnIsNull;
         if (returnType) *returnType = interp.returnType;
+        if (owningReturn) *owningReturn=std::move(interp.returnOwningValue);
         return true;
     }
     // no RETURN: function body ends (NULL for functions)

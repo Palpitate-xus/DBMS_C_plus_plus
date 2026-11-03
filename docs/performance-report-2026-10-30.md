@@ -1,6 +1,6 @@
 # 数据库操作性能测试报告（2026-10-30）
 
-最新批次见[窗口暂存分配与类型输出调研](#窗口暂存分配与类型输出调研2026-11-03)：两版暂存候选均未接受，保留完整失败/慢值与类型功能缺口。
+最新功能批次见[拥有值的复合类型输出与引用类型存储2026-11-03](#拥有值的复合类型输出与引用类型存储2026-11-03)：本批功能与严格差分已记录，资源/性能验收待独立完成；前批暂存候选的拒绝与全部旧数据继续按原代别保留。
 
 2026-11-02 已补充 [PostgreSQL 18.6 同机对照](#postgresql-186-同机对照2026-11-02)，原 10 月 30 日内部优化记录继续按原批次解释。
 
@@ -2133,3 +2133,67 @@ R151明确暂停的顶层enum/enum[]协议描述符与原103门禁、R177/R185/R
 
 拒绝候选后正常执行CMake构建，实际重编Exec并链接，退出0、59.60秒（构建时间，非查询性能）。216生产源与基线全文相同，构建程序和安装程序均精确为S3 SHA256 `aa52b5fe35e1d1ef92a301bcad8b72d95b32edb705e650d3539b999d8c5b6b0f`，见 `restored-S3-cmake-receipt-v1.json`；这不是新全库fresh build，也没有把旧S3回归写成恢复后的新测试。
 九份既有文档同步，结构检查覆盖754 Markdown及2435个本地文件链接，缺失/空文件/全文重复/清单遗漏均0；一般外部URL和历史fragment不在该检查范围。原273条目和250历史原文保留，新增近期记录仅partial；原2319测试/147头/725保护记录不改，没有新增Markdown或永久测试，Goal active。
+
+## 拥有值的复合类型输出与引用类型存储（2026-11-03）
+
+本批基于 `6c27d232`，功能程序为 C7 `f135335e6ce07b23bf325f6303431488842cb418ebf84ef8a8a02c6df63d3482`，冻结输入为 226 源码。下面只报告已完成的功能验证和成本前提；本批独立性能时钟与资源验收尚未完成，不能据此给出速度/RSS收益或 PostgreSQL 替代结论。旧 AA52、暂存候选、全部旧时钟和失败继续保留，旧性能倍率不转用于本批。
+
+### 实现及设计来源
+
+原分析位置冻结真实声明，区分 actual OID 与基础 codec OID，保留域、枚举角色、字段 typmod、长度和 NULL 字段类型；内部识别的 binary role 不是已修好 `pg_type.typsend` 的声明。`ExprValue` 追加一个共享不可变复合载体，已有 recordFields 继续拥有真实字段；数组保留真实 flat 元素、维度/下界及已知位图状态，NULL 数组、空数组和全 NULL 元素分开。值流经实际 ROW/数组生产者、转换/切片/拼接、排序快照和例程/查询接收器，不从打印结果反推 record 字段或按 search_path 猜 OID。
+
+普通结果捕获默认关闭；仅全部格式码有效为 0/1 且确需格式 1 的原请求才打开载体，混合 0/1 仍保持逐列格式。旧 RowDescription 所有字段保留，只有冻结声明与已有 OID/长度/typmod 匹配时才附 codec 元数据。未知/不匹配声明继续原完整路径；顶层枚举、枚举数组和底层涉及该族的域仍原完整路径，不借 binary 输出改 R151 暂停表现或补数组目录配对。没有增加 Bind/portal 的宽度缓存、参数帧、provider、查询重评或格式 2 的新验证时点。
+
+REGTYPE/REGTYPE[] 是本批新增的真实存储类型：输入名字按实际目录解析一次；标量持久化完整 uint32 OID，SQL NULL 由位图区分，OID 0 不充作 NULL。数组保留真实元素 OID 和形状；读取从原始数值载入 OID 后生成显示，不把 pretty name 当持久身份。新增类型的索引键按无符号身份构造；输入缓存仅属于实际本次 open，close/错误/重开清除。普通格式 1 参数使用原 envelope 检查，2206/2211 对应真实 scalar/array 角色。
+
+C6 修正 schema 重载后丢失通用 unsigned 标志造成的高位符号扩展：真实 REGTYPE 固定读取 uint32，不改磁盘格式或一般整数分类。C7 再修正原 CAST 输入 hint 丢失新 REGTYPE[] 的数组声明，以及真正 `PreparedReturningExecution` 在原 setSourceRow 前的 stored OLD/NEW 值加载；原 AST、行绑定、投影次序、回滚/锁及实际执行 owner 保持。旧 legacy RETURNING 适配和这次真实 prepared receiver 分开记录，不把前者通过当后者完成。
+
+设计参考 [PG18.6 parse_coerce](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/parser/parse_coerce.c)对目标类型、typmod 和转换上下文的处理，[record_send](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/utils/adt/rowtypes.c)从真实记录描述符发出字段 OID/NULL/数据，以及 [array_send](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/utils/adt/arrayfuncs.c)使用真实元素类型、维度、下界和位图。NULL record 字段仍有声明 OID；非 NULL 数组即使为空也有元素输出角色要求，不能用探测值替代类型能力。
+
+[SQLite VDBE](https://www.sqlite.org/opcode.html#registers)将原始类型/NULL/值保存在寄存器中，[DuckDB Vector/DataChunk](https://duckdb.org/docs/2.0/internals/vector.html)将类型化列作为执行容器。本批借鉴“值和类型在明确生命周期内一起传递”的做法，没有实现 VDBE、DataChunk/vectorized executor，也没有据此声称与两种引擎等价或获得其性能。
+
+多态 `array_append/array_prepend` 按原始参数顺序确定共同元素类型，再在同一原参数求值处转换实际值，每个参数仍只求值一次。修正了 CHAR/TEXT 尾部空格丢失和 NUMERIC/INTEGER 混合时小数被取整的问题；原 1133 观察的差异由 69 降为 39，所有原来正确的值组件继续正确，原生数组入口的 481 条检查通过。数组下标/切片还从真实数组声明传递元素 OID、typmod 和记录字段结构，修正了四处逻辑 VALUES 的缺失描述符及三处 CHAR(2) 切片的修饰符。
+
+NUMERIC 的 `Infinity/-Infinity` 二进制输出按实际 PG18.6 金样本保留 scale 头 `0x0020`；NaN、有限值和接收策略不变。新增原生十项逐字节检查通过，两个既有数值输出入口在同批 S3/C5 对照均通过；没有扩大 R271 暂缓的裸 NUMERIC 输入范围。
+
+### 分代构建与功能证据
+
+本轮先建立完整 fresh ABI，再按真实依赖构建后续候选。C7 为两个 CPP 实际重编及 60 个有效同 ABI 对象复用，生产链接共 62 对象；不能称每代均 fresh62。首轮嵌套默认 options 编译问题、早期 copy2/mtime 导致的漏重编及其不可用于当前源码/对象验收的观察均按原记录保留，以真实 `.o.d`/输入哈希/对象谱系核验后的候选作为当前证据。
+
+提交前仅删除 `OwnedBinaryDatum.inc` 末尾一处多余空行；正常 CMake 确实重编 Protocol 并链接，全部 62 个对象与程序均和 C7 逐字节相同。已执行的功能与资源观察属于同一程序，不为这处格式修正重新采样；最终源码清单按该格式核对收据记录。
+
+| 代别/固定范围 | 实际结果 | 保留限制 |
+| --- | --- | --- |
+| C5 完整原生 106 | 105 通过/1 失败 | 原例程数组签名退出失败，不写成全部通过 |
+| C5 完整协议 95 | 86 通过/9 失败入口 | 5011 详细观察无新增错误结果、原220完整相等；不等于 C7 重跑全部95 |
+| C7 最终选取原生 26 | 26 通过 | 含新三个入口共38控制；不是原生全量 |
+| C7 最终选取协议 31 | 24 通过/7 既有失败入口 | bit、name、Bind、CTE、nested、interval、143；完整原始失败保留 |
+| PG18.6 固定301 | 187 匹配/114 差异 | AA52 为100/201，本批改善87；无原通过观察退回错误 |
+| 位图/CAST83 | 81 匹配/2 配置差异 | SHOW/UTC 原预期不改 |
+| 多态数组111 | 109 匹配/2 配置差异 | SHOW/UTC 原预期不改 |
+| REGTYPE物理68 | 57 匹配/11 差异 | 真磁盘、索引、COPY、同目录冷重开；完整11不删 |
+| REGTYPE正常参数16 | 16 匹配 | 文本/二进制、NULL、空数组、多维、无符号边界及原错误 |
+
+PG 参考使用实际验证的 18.6（180006）自有上下文；旧误连版本、原输入/配置错误和所有原始帧保留。候选不支持相同 SHOW/version/UTC 行为时仍算真实差异，没有换成 180000 或更宽松预期。每项按固定 SQL、预期、消息结构、真实 OID/长度/typmod、行/NULL及错误验证；上述重复模式观察不能当作独立 PostgreSQL 功能数。
+
+三个新永久原生入口为 `tests/owned_compound_spill_codec_test.cpp`16、`tests/owned_compound_physical_spill_test.cpp`12、`tests/numeric_special_binary_output_test.cpp`10，共38控制；原2319测试文件不变，新增后2322文件。真实物理/排序快照值和 codec 控制分开；原保护记录及原273状态仍为22 complete /166 partial /70 unverified /15 deferred_by_user。
+
+C4 的 REGTYPE68 为29差异，C6为13，C7为11。C7 第10项真实文本为 `-`、`boolean`、`2147483648`、`4294967295`、NULL；第42项 UPDATE RETURNING 为 `(2,20,(bigint,"{boolean,boolean}"))`。与 C6 的完整实际响应/原始帧相比只有10/42改变，其余66完全相等；两个同数据目录的物理epoch与参数进程均干净终止。其余11项为 SHOW（1）、链式CAST（9/50/59）、域rename/drop/recreate及后续identity连锁（25/26/27/28/29/68）、ALTER USING（49），仍是普通未完，不新增用户暂缓。
+
+### 尚未完成的普通能力与保护范围
+
+真正 prepared RETURNING 仍缺按需捕获复合 binary 结果的分支；修正其文本行物化不等于该载体完成。错误前已经产生的部分记录行仍未完整交付；更多 UPDATE WHERE/SET 原 raw 输入的类型加载还需实际控制，68内某个赋值通过不覆盖全族。域数组/命名复合目录、部分真实复杂输入、legacy/unbound typmod 冻结及 PL变量/参数的 payload 传递仍有普通依赖；不以有一个 carrier 指针就称完整 producer。
+
+旧数组文本存储无法恢复所有位图历史，NULL-free 切片可能仍需保留源位图身份；新运行期拥有值与已有可知位图不能伪称旧磁盘格式已经保真。普通 REGTYPE 的域重命名、删除/重建、ALTER USING 及相关 chained CAST 仍开放。R151 的目录/顶层描述符和原103、R65子provider、R106、保留规划/实际参数帧/portal/format2、R177/R185以及其他已暂缓记录均未恢复；这些暂停范围与本节普通剩余问题分开列示。
+
+### 成本及后续测量
+
+实测 ABI 增量为每个 `ExprValue` +16 B、`ExprEvalResult` +208 B、`DmlResult` +64 B；无复合值的 primitive 也承担新增对象头大小。不可变 metadata 可共享，但实际物化/快照/接收器仍可能增加分配与复制。私有 prepared RETURNING 另持真实 TableSchema 引用和一份数据库名副本：表局部对象的寿命覆盖接收器，数据库名确有复制成本，不能称零开销。
+
+本节先记录功能，性能与资源结论待独立测量后补入。后续应分别记录准备/分析、建图、首次 next、重启执行、完整拥有值接收/验证、协议发送及关闭；默认 allocator 时钟与累计 C++new 观察分开，冷样本不当分布，包含子节点的时间不相减后称 exclusive comparator CPU。还需保留原始非复合 primitive 路径、NULL/空结果、默认关闭捕获与格式0/1控制，完整慢项不得筛掉。旧窗口全部数据、35操作停机失败R15及原速度对照保持，资源/阶段观察不替代这些验收。
+
+### 复现输入
+
+本机工件位于 `build/pg-feature-owned-binary-afdbnxxu`，不可变程序为 `candidate-v7-dbms_main`；固定计划、PG参考、全部初次失败及每次原始帧均保留。REGTYPE复用 `physical-regtype-proposal-v2/run_candidate_oracles_v1.py`，分别 `--mode physical68`/`parameters16`，显式指定上述程序与完整SHA及新的未存在label；68自动在同一私有data目录停机/冷重开，不替换为新空目录。原始68/16计划和预期不改。其它协议与选取回归的精确command见各冻结receipt，不把旧候选命令标成C7；原生只能链接C7同ABI对象/config及fresh stub，不能混用AA52旧头/对象。
+
+Goal active；本节是部分功能的可审验收，不关闭原273功能族，不宣称全面性能优化或 PostgreSQL 等价。版本仍为0.2.0/C++17/TLSstub；按用户指定身份在master管理，不创建新分支、不push、不触发Actions。

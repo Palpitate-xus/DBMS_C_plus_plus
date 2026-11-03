@@ -1,4 +1,6 @@
 #include "ExecutionPlan.h"
+#include "expression/StoredRegtypeValue.h"
+#include "expression/ArrayDatumInput.h"
 #include "executor/PreparedTableSource.h"
 #include "executor/SortSpill.h"
 #include "executor/BoundedSortRuns.h"
@@ -368,6 +370,15 @@ struct PreparedSelectState {
                 }
             }
         }
+        const auto physicalOrigin=source.scanOrigin();
+        const QueryRowDescriptor* physicalDeclaration=nullptr;
+        if(physicalOrigin.engine==engine && physicalOrigin.dbname==dbname &&
+           physicalOrigin.tablename==schema.tablename && sourceOrdinal!=noTarget) {
+            for(const auto& range:query->sourceRanges)
+                if(range.owner==statement && range.ordinal==sourceOrdinal) {
+                    physicalDeclaration=&range.columns;break;
+                }
+        }
         for (size_t i = 0; i < schema.len; ++i) {
             bool computedNull = false;
             const std::string value = available ? structured.at(i) :
@@ -376,7 +387,18 @@ struct PreparedSelectState {
                 (schema.cols[i].generatedKind != 'v' && source.lastColumnIsNull(i));
             values.emplace_back(ExprHelper::canonicalResultTypeName(schema.cols[i].dataType +
                 (schema.cols[i].isArray ? "[]" : "")), value, isNull);
+            if(schema.cols[i].generatedKind!='v' && physicalDeclaration &&
+               i<physicalDeclaration->size() &&
+               stored_regtype_detail::columnType(schema.cols[i].dataType)) {
+                const auto catalog=regtype_detail::metadata(*engine,dbname);
+                values.back()=stored_regtype_detail::load(value,schema.cols[i].isArray,isNull,
+                    catalog,currentSession(),physicalDeclaration->at(i).typeMetadata);
+            }
             values.back().collation = schema.cols[i].collation;
+            if(schema.cols[i].isArray && schema.cols[i].generatedKind!='v' &&
+               physicalDeclaration && i<physicalDeclaration->size())
+                (void)compound_value_detail::decodeArrayStorageInput(
+                    values.back(),physicalDeclaration->at(i).typeMetadata);
         }
         return values;
     }
@@ -3699,10 +3721,16 @@ static bool isSingleColumnPrimaryKey(const TableSchema& table,
 
 static std::string integerEqualityValue(const TableSchema& table,
                                        const std::string& column,
-                                       const std::string& value) {
+                                       const std::string& value,
+                                       StorageEngine* engine=nullptr,
+                                       const std::string& database={}) {
     for (size_t i = 0; i < table.len; ++i) {
         if (table.cols[i].dataName != column) continue;
         const auto& type = table.cols[i].dataType;
+        if(type=="regtype" && !table.cols[i].isArray && engine) {
+            const auto catalog=regtype_detail::metadata(*engine,database);
+            return stored_regtype_detail::input(value,false,catalog,currentSession());
+        }
         const bool integer = type == "tinyint" || type == "smallint" ||
             type == "int" || type == "integer" || type == "bigint" ||
             type == "long" || type == "int2" || type == "int4" ||
@@ -3744,6 +3772,9 @@ static std::string integerEqualityValue(const TableSchema& table,
 static bool equalityIndexKeyIsEmpty(const TableSchema& table,
                                     const StorageEngine::Condition& condition) {
     if (condition.op != "=") return false;
+    for(size_t i=0;i<table.len;++i)
+        if(table.cols[i].dataName==condition.colName && table.cols[i].dataType=="regtype" &&
+           !table.cols[i].isArray)return false; // Every genuine OID key is nonempty.
     const auto value = integerEqualityValue(table, condition.colName, condition.value);
     return isSingleColumnPrimaryKey(table, condition.colName)
         ? table.buildPKValue({{condition.colName, value}}).empty()
@@ -3772,11 +3803,18 @@ static std::vector<int64_t> lookupBtreeMultiChecked(
 
 IndexScanOp::IndexScanOp(StorageEngine* engine, const std::string& dbname,
                           const std::string& tablename, const std::string& colname,
-                          const std::string& value)
+                          const std::string& value,
+                         std::optional<uint32_t> referenceInputOid)
     : engine_(engine), dbname_(dbname), tablename_(tablename),
-      colname_(colname), value_(value) {}
+      colname_(colname), value_(value), referenceInputOid_(referenceInputOid) {}
 
 bool IndexScanOp::open() {
+    referenceEqualityOid_.reset();
+    struct ReferenceInputGuard {
+        std::optional<uint32_t>& value;
+        bool keep=false;
+        ~ReferenceInputGuard(){if(!keep)value.reset();}
+    } referenceGuard{referenceEqualityOid_};
     auto& lockManager = engine_->getLockManager();
     lockManager.setResourceNamespace(dbname_);
     if (!lockManager.lockShared(tablename_)) {
@@ -3785,6 +3823,28 @@ bool IndexScanOp::open() {
     }
     tableLockHeld_ = true;
     tbl_ = engine_->getTableSchema(dbname_, tablename_);
+    for(size_t i=0;i<tbl_.len;++i)
+        if(tbl_.cols[i].dataName==colname_ && !tbl_.cols[i].isArray &&
+           tbl_.cols[i].dataType=="regtype") {
+            try {
+                if(referenceInputOid_)referenceEqualityOid_=referenceInputOid_;
+                else {
+                    const auto catalog=regtype_detail::metadata(*engine_,dbname_);
+                    referenceEqualityOid_=regtype_detail::inputOid(value_,catalog,currentSession());
+                }
+            } catch(...) {
+                // Only this newly introduced conversion owns this cleanup.
+                // Preserve the input exception and the old index lifecycle.
+                const auto primary=std::current_exception();
+                referenceEqualityOid_.reset();
+                if(tableLockHeld_)try {
+                    lockManager.unlock(tablename_);
+                    tableLockHeld_=false;
+                } catch(...) {}
+                std::rethrow_exception(primary);
+            }
+            break;
+        }
     rids_.clear();
     lastRid_ = 0;
     // Check if this is a PK scan
@@ -3805,8 +3865,10 @@ bool IndexScanOp::open() {
     }
 
     const std::string key = isPK_
-        ? tbl_.buildPKValue({{colname_, integerEqualityValue(tbl_, colname_, value_)}})
-        : tbl_.columnIndexKey(colname_, integerEqualityValue(tbl_, colname_, value_));
+        ? tbl_.buildPKValue({{colname_, (referenceEqualityOid_ ? std::to_string(*referenceEqualityOid_) :
+            integerEqualityValue(tbl_, colname_, value_))}})
+        : tbl_.columnIndexKey(colname_, (referenceEqualityOid_ ? std::to_string(*referenceEqualityOid_) :
+            integerEqualityValue(tbl_, colname_, value_)));
     if (key.empty()) {
         // Historical build/write paths omit empty keys. Direct callers need
         // the same complete heap fallback as the planner, with next() still
@@ -3827,6 +3889,7 @@ bool IndexScanOp::open() {
             recordTableScan(dbname_, tablename_, rids_.size(), false, true);
             statsRecorded_ = true;
         }
+        referenceGuard.keep=true;
         return true;
     }
     BPTree* idx = isPK_
@@ -3847,10 +3910,16 @@ bool IndexScanOp::open() {
         recordTableScan(dbname_, tablename_, rids_.size(), true, false);
         statsRecorded_ = true;
     }
+    referenceGuard.keep=true;
     return true;
 }
 
 bool IndexScanOp::next(std::string& outRow) {
+    const int priorExceptions=std::uncaught_exceptions();
+    struct ReferenceErrorGuard {
+        std::optional<uint32_t>& value; int prior;
+        ~ReferenceErrorGuard(){if(std::uncaught_exceptions()>prior)value.reset();}
+    } referenceGuard{referenceEqualityOid_,priorExceptions};
     NextInstrument rtInstr_(this);  // EXPLAIN ANALYZE per-node stats
     // Fetch indexed tuples directly. Scanning every heap tuple for each RID
     // turns an index lookup into O(index_matches * table_rows), which is
@@ -3863,6 +3932,7 @@ bool IndexScanOp::next(std::string& outRow) {
                                           &readFailed)) {
             if (readFailed) {
                 setError("indexed heap fetch failed");
+                referenceEqualityOid_.reset();
                 return false;
             }
             continue;
@@ -3872,7 +3942,8 @@ bool IndexScanOp::next(std::string& outRow) {
             dbname_, tablename_, row, tbl_, &toastOk);
         if (!toastOk) {
             setError("TOAST value read failed");
-            return false;
+            referenceEqualityOid_.reset();
+                return false;
         }
         lastRid_ = rid;
         StorageEngine::bindNullRow(
@@ -3886,7 +3957,8 @@ bool IndexScanOp::next(std::string& outRow) {
             if (tbl_.cols[i].dataName == colname_) { columnIndex = i; break; }
         if (columnIndex == tbl_.len) {
             setError("indexed column does not exist");
-            return false;
+            referenceEqualityOid_.reset();
+                return false;
         }
         bool valueIsNull = false;
         const std::string actual = engine_->extractColumnValue(
@@ -3895,12 +3967,14 @@ bool IndexScanOp::next(std::string& outRow) {
             (tbl_.cols[columnIndex].generatedKind != 'v' &&
              detail::storedRowColumnIsNull(*engine_, dbname_, tablename_, tbl_, rid, columnIndex));
         if (StorageEngine::compareValues(tbl_.cols[columnIndex], actual,
-                valueIsNull, integerEqualityValue(tbl_, colname_, value_),
+                valueIsNull, (referenceEqualityOid_ ? std::to_string(*referenceEqualityOid_) :
+            integerEqualityValue(tbl_, colname_, value_)),
                 false, "=") != StorageEngine::PredicateTruth::True)
             continue;
         rtInstr_.emitted = true;
         return true;
     }
+    referenceEqualityOid_.reset();
     return false;
 }
 
@@ -3910,6 +3984,7 @@ bool IndexScanOp::lastColumnIsNull(size_t colIdx) const {
 }
 
 void IndexScanOp::close() {
+    referenceEqualityOid_.reset();
     rids_.clear();
     lastRid_ = 0;
     StorageEngine::unbindNullRow();
@@ -3927,8 +4002,13 @@ static bool collectEqualityIndexCandidates(
     const StorageEngine::Condition& condition,
     std::set<int64_t>& candidates) {
     if (condition.op != "=" || equalityIndexKeyIsEmpty(tbl, condition)) return false;
-    const std::string value = integerEqualityValue(
-        tbl, condition.colName, condition.value);
+    std::string value; bool reference=false;
+    for(size_t i=0;i<tbl.len;++i)
+        if(tbl.cols[i].dataName==condition.colName && !tbl.cols[i].isArray &&
+           tbl.cols[i].dataType=="regtype")reference=true;
+    if(reference && condition.referenceInputOid)value=std::to_string(*condition.referenceInputOid);
+    else value = integerEqualityValue(
+        tbl, condition.colName, condition.value, engine, dbname);
 
     if (isSingleColumnPrimaryKey(tbl, condition.colName)) {
         auto* index = engine->getPKIndex(dbname, tablename);
@@ -8235,7 +8315,7 @@ OpPtr QueryPlanner::buildSelectPlan(StorageEngine* engine, const PlanContext& in
                     // the same lock/MVCC boundary. A visibility-map-backed
                     // index-only scan is not implemented yet.
                     root = std::make_unique<IndexScanOp>(engine, ctx.dbname, ctx.tablename,
-                                                          c.colName, c.value);
+                                                          c.colName, c.value, c.referenceInputOid);
                     // Remove this condition from Filter since IndexScan handles it
                     auto it = remainingConds.begin();
                     while (it != remainingConds.end()) {
@@ -9879,7 +9959,7 @@ std::unique_ptr<PreparedQueryCursor> QueryPlanner::makePreparedCursor(
     return std::make_unique<PreparedOperatorCursor>(std::move(plan), std::move(descriptor));
 }
 
-static PlanExecutionResult executePlanResult(OpPtr plan, size_t maxRows, bool retainPrefix) {
+static PlanExecutionResult executePlanResult(OpPtr plan, size_t maxRows, bool retainPrefix, bool captureTyped) {
     PlanExecutionResult result;
     if (!plan) {
         result.ok = false;
@@ -9898,6 +9978,7 @@ static PlanExecutionResult executePlanResult(OpPtr plan, size_t maxRows, bool re
     try {
         checkForQueryInterrupt();
         result.structuredRowsAvailable = plan->supportsStructuredRows();
+        result.typedRowsAvailable = captureTyped && result.structuredRowsAvailable;
         if (!plan->open()) {
             result.ok = false;
             result.error = plan->errorMessage();
@@ -9905,6 +9986,7 @@ static PlanExecutionResult executePlanResult(OpPtr plan, size_t maxRows, bool re
             result.errorSqlState = "XX000";
             result.errorMessage = result.error;
             result.structuredRowsAvailable = false;
+            result.typedRowsAvailable = false;
             // Preserve the failure that caused cleanup, including when an
             // operator's close itself fails.
             try { closePlan(); } catch (...) {}
@@ -9926,6 +10008,17 @@ static PlanExecutionResult executePlanResult(OpPtr plan, size_t maxRows, bool re
                     result.structuredRows.push_back(std::move(cells));
                     result.structuredNulls.push_back(std::move(nulls));
                 }
+            }
+            // Observe the same already-executed row, never evaluate a target
+            // again. A missing owning carrier stays unavailable; the actual
+            // binary cell receiver must not reconstruct compound display text.
+            if (captureTyped && result.typedRowsAvailable) {
+                std::vector<ExprValue> values;
+                if (!result.structuredRowsAvailable || !plan->lastStructuredValues(values) ||
+                    values.size() != result.structuredRows.back().size()) {
+                    result.typedRowsAvailable = false;
+                    result.typedRows.clear();
+                } else result.typedRows.push_back(std::move(values));
             }
         }
         if (plan->hasError()) {
@@ -9957,16 +10050,18 @@ static PlanExecutionResult executePlanResult(OpPtr plan, size_t maxRows, bool re
         result.structuredRows.clear();
         result.structuredNulls.clear();
         result.structuredRowsAvailable = false;
+        result.typedRows.clear();
+        result.typedRowsAvailable = false;
     }
     return result;
 }
 
-PlanExecutionResult QueryPlanner::executePlanChecked(OpPtr plan, size_t maxRows) {
-    return executePlanResult(std::move(plan), maxRows, false);
+PlanExecutionResult QueryPlanner::executePlanChecked(OpPtr plan, size_t maxRows, bool captureTyped) {
+    return executePlanResult(std::move(plan), maxRows, false, captureTyped);
 }
 
-PlanExecutionResult QueryPlanner::executePlanWithPrefix(OpPtr plan, size_t maxRows) {
-    return executePlanResult(std::move(plan), maxRows, true);
+PlanExecutionResult QueryPlanner::executePlanWithPrefix(OpPtr plan, size_t maxRows, bool captureTyped) {
+    return executePlanResult(std::move(plan), maxRows, true, captureTyped);
 }
 
 // Check if an index provides the required pathkey ordering.
