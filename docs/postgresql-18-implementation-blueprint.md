@@ -2,6 +2,10 @@
 
 ## 当前持续目标与分批实施（2026-11-03）
 
+最新 `3d576b8b` 后续批次拒绝两版窗口暂存性能提案，生产源码/程序保持S3；真实分配减少未形成稳定跨预算wholeSQL收益，不能以局部请求计数关闭优化目标。
+后续类型输出方向参考PG18.6 record_send/array_send、SQLite原始类型与值生命周期、DuckDB2.0类型化DataChunk：保留真实声明/owning值/NULL和维度，不从文本重建结构。独立301参考与三版201差异、隔离提案及静态阻断详见[本批报告](performance-report-2026-10-30.md#窗口暂存分配与类型输出调研2026-11-03)。
+先补已有正确描述符下的真实值producer/codec，再分别验证ordinary物理REGTYPE、domain/named catalog依赖；新纯metadata不得触发原不需求的CASE分析，不恢复R106/R151/retained planning/portal/format2等暂停工作。新ExprValue载体的全路径成本、真实ABI链接/完整回归/资源与时钟未通过前不应用或计功能完成。Goal active，原273不变。
+
 已按用户要求建立持续目标：调研成熟数据库实现，逐项补齐非用户暂缓的 PostgreSQL 功能与性能缺口，
 在 `master` 上按可验收批次提交代码、测试及文档。原始 273 项要求和暂缓边界继续有效，不以局部优化关闭整个功能族。
 

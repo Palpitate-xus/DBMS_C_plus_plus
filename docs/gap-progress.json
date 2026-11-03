@@ -2,6 +2,39 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-03 rejected window scratch proposals and owned binary datum investigation",
+      "gap_ids": [
+        "QRY-08",
+        "TYPE-17",
+        "TYPE-19",
+        "TYPE-20",
+        "TYPE-21",
+        "PROTO-04",
+        "OPT-10"
+      ],
+      "status": "partial",
+      "evidence": [
+        "docs/performance-report-2026-10-30.md",
+        "docs/test-report.md",
+        "docs/postgresql-comparison.md",
+        "docs/postgresql-18-implementation-blueprint.md"
+      ],
+      "tests": [
+        "tests/prepared_window_result_sharing_test.cpp",
+        "tests/prepared_window_result_sharing_protocol_e2e_test.py",
+        "tests/compat/prepared_window_result_sharing_pg18_expected.json"
+      ],
+      "verification": {
+        "decision": "Both private scratch proposals rejected; exact S3 production source restored and installed aa52 unchanged. No new accepted feature or permanent test. Goal remains active.",
+        "correctness": "Each candidate72unique native all0,62unique wire57pass5retainedfail/fulloldfailurebytes exact S3. scratch2 extra220 terminal proof0/fullrawexact first. Additional301 actual/canonical/matchflags exact S3 each201 PG differences, not compatibility pass. Independent realPG18.6 frozen301 reference valid; wrong17.2 versionguardfailure retained/ownedUUIDdatabase cleanup verified.",
+        "cost": "Same-source native10: each512row LAG saves512new requests,SUM saves1024; cold6 scratch2 N0 no extra requests but72B operator headers remain; N1LAG cold+1call80B/SUM+72B. Not latency/live/peak/RSS/work_mem.",
+        "performance": "Each once1638SQL=1296timed324warm18SET/1620000rows4725000cells/9normalcontexts0. scratch1 all36=4faster21slower11between; scratch2=12/8/16,common24=8/4/12,4+16MB=2/8/14; drift−36.89..+30.93 retained,no stable cross-budget gain. All raw12/min/p50/max/1296 samples retained, no resampling.",
+        "resources": "Eachresource55/40000rows118000cells/5normalcontexts,ownedreadonlykill/reopen values0. scratch2 lowmax2deletedFD/highsample0/EOFcleanup; no Windowbudget/writecrash/R15closure.",
+        "typed_work": "Isolated contracts/factory/receiver/routine/codec/array/spill unaccepted. Unified ExprEvaluator/TypedSortSpill/PostgresProtocol syntax-only0, first63 AST redefinitions retained. Full ABI/producers/catalog/native/protocol/resource/performance dependencies remain; no fresh whole-production validation claim.",
+        "scope": "Original273 raw/250history suffix,2319tests/147headers/725protected/754Markdown retained. R151 topenum/array descriptor and original103, R106,R177,R185,R65 and all other existing deferrals unchanged; no branch/push/Actions, master Palpitate-xus."
+      }
+    },
+    {
       "issue": "2026-11-03 window result sharing and actual final-sort projection order",
       "gap_ids": [
         "QRY-08",
