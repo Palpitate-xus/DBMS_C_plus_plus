@@ -1,5 +1,15 @@
 # DBMS 功能测试报告
 
+## C4功能与完整成本记录（2026-11-04）
+
+当前源码C4（9d85c688…）补入RETURNING纯声明与真实来源元数据、虚拟列拥有值及部分MERGE来源输出。新增123原生控制122通过/1个严格元数据差异，新132协议对照全过，原56项为55通过/1差异；273项状态未变，Goal继续active。
+
+实际35操作为7快/19慢/9居间，范围UPDATE及REINDEX仍慢；36组完整查询25快/2慢/9居间。未通过本机默认程序的整体性能提升验收，默认仍为425（425165af…），现有服务未重启。独立API512行的分配/CPU收益及空表/单行负值分开报告，不能概括为所有数据库操作已提速。
+
+新增5入口：[声明46](../tests/returning_declaration_api_test.cpp)45/1，[虚拟列28](../tests/virtual_generated_owning_test.cpp)、[语法14](../tests/local_expression_syntax_test.cpp)、[REINDEX16](../tests/reindex_single_pass_test.cpp)、[MERGE19](../tests/merge_returning_source_owning_test.cpp)全部通过。quoted stored extract严格integer预期保留。原2324测试字节未改，现2329文件、1080个cpp文件（排除链接桩test_stubs.cpp后为1079原生入口），未宣称全部重跑。C4选取57原生56/1、31协议24/7，10533共同观察无旧正确变错；严格56旧48/8→55/1，新132旧9/123→132/0，新33生成语义仍27/6。原579为451匹配/128差异，全部raw/canonical/原正确组件连续；暂停enum九项保持，原341/103未执行。
+
+详见[本批报告](performance-report-2026-10-30.md#returning-声明真实行值与操作热路径2026-11-04)及[机器归档](benchmarks/returning-declarations-hotpaths-20261104.json)。以下为历史记录。
+
 ## 2026-11-03 内置函数注册与复合 RETURNING
 
 最终功能程序C3 `425165af…` 与初期C2宽回归按不同代别记录，不能将所有通过项拼成C3全量验收：

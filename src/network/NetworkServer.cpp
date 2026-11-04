@@ -3190,10 +3190,22 @@ void validatePreparedAggregateOrderInputs(const std::string& sql,Session& sessio
     (void)g_engine.prepareBoundQuery(session.currentDB,sql,protocolMetadataParameters(session,parameterOids));
 }
 
+bool protocolHasReturningTransition(const Stmt* parsed);
+void validatePreparedReturningNamespace(const std::string& sql,Session& session,const Stmt* parsed) {
+    if(!protocolHasReturningTransition(parsed))return;
+    auto* previous=currentSession();setCurrentSession(&session);
+    struct Restore {Session* previous;~Restore(){setCurrentSession(previous);}} restore{previous};
+    // This API examines actual names/stars only. Unsupported scopes fall
+    // through in full; errors are pure ordinary namespace analysis before
+    // ParseComplete, with no Bind/portal/constant-planning policy changes.
+    (void)g_engine.validateReturningNamespace(session.currentDB,sql);
+}
+
 void validatePreparedStoredSignatures(const std::string& sql,Session& session,
                                      const std::vector<uint32_t>& parameterOids) {
     SQLParser parser;
     const auto parsed=parser.parseForBinding(sql);
+    validatePreparedReturningNamespace(sql,session,parsed.isValid()?parsed.stmt.get():nullptr);
     const auto* select=parsed.isValid()?dynamic_cast<const SelectStmt*>(parsed.stmt.get()):nullptr;
     if(!select)return;
     auto* previous=currentSession();setCurrentSession(&session);
@@ -4081,6 +4093,69 @@ bool describePreparedLogicalValuesResult(const std::string& sql,Session& session
     }
 }
 
+bool protocolHasReturningTransition(const Stmt* parsed) {
+    const Stmt* statement=parsed;
+    while(const auto* envelope=dynamic_cast<const WithStmt*>(statement))statement=envelope->statement.get();
+    const std::vector<SelectItem>* items=nullptr;const ReturningOptions* images=nullptr;
+    if(const auto* insert=dynamic_cast<const InsertStmt*>(statement)){items=&insert->returning;images=&insert->returningOptions;}
+    else if(const auto* update=dynamic_cast<const UpdateStmt*>(statement)){items=&update->returning;images=&update->returningOptions;}
+    else if(const auto* remove=dynamic_cast<const DeleteStmt*>(statement)){items=&remove->returning;images=&remove->returningOptions;}
+    else if(const auto* merge=dynamic_cast<const MergeStmt*>(statement)){items=&merge->returning;images=&merge->returningOptions;}
+    if(!items || items->empty())return false;
+    bool transition=images->oldAliased || images->newAliased;
+    std::function<void(const Expr*)> probe=[&](const Expr* value) {
+        if(!value || transition)return;
+        if(const auto* column=dynamic_cast<const ColumnRefExpr*>(value))
+            transition=column->table=="old" || column->table=="new";
+        else if(const auto* unary=dynamic_cast<const UnaryOpExpr*>(value))probe(unary->operand.get());
+        else if(const auto* binary=dynamic_cast<const BinaryOpExpr*>(value)){probe(binary->left.get());probe(binary->right.get());}
+        else if(const auto* cast=dynamic_cast<const CastExpr*>(value))probe(cast->operand.get());
+        else if(const auto* call=dynamic_cast<const FunctionCallExpr*>(value)) {
+            for(const auto& item:call->args)probe(item.get());
+            for(const auto& item:call->namedArgs)probe(item.value.get());
+        } else if(const auto* conditional=dynamic_cast<const CaseExpr*>(value)) {
+            probe(conditional->switchExpr.get());probe(conditional->elseExpr.get());
+            for(const auto& arm:conditional->whenClauses){probe(arm.first.get());probe(arm.second.get());}
+        } else if(const auto* array=dynamic_cast<const ArrayExpr*>(value))for(const auto& item:array->elements)probe(item.get());
+        else if(const auto* row=dynamic_cast<const RowExpr*>(value))for(const auto& item:row->elements)probe(item.get());
+    };
+    for(const auto& item:*items)probe(item.expr.get());
+    return transition;
+}
+
+bool describePreparedReturningDeclaration(const std::string& sql,Session& session,const Stmt* parsed,
+    std::vector<PgColumnDescription>& columns,const std::vector<uint32_t>& parameterOids) {
+    if(!protocolHasReturningTransition(parsed))return false;
+    // Original non-transition Describe branches, unknown parameter inference,
+    // and every paused root enum family retain their complete old path.
+    if(std::any_of(parameterOids.begin(),parameterOids.end(),[](uint32_t oid){return !oid;}))return false;
+    auto* previous=currentSession();setCurrentSession(&session);
+    struct Restore {Session* previous;~Restore(){setCurrentSession(previous);}} restore{previous};
+    try {
+        std::vector<QueryReturningOrigin> origins;
+        const auto declared=g_engine.prepareReturningDeclaration(session.currentDB,sql,
+            protocolMetadataParameters(session,parameterOids),&origins);
+        if(declared.empty() || origins.size()!=declared.size())return false;
+        for(const auto& field:declared)
+            if(!field.typeMetadata || pausedTopEnumWireFamily(*field.typeMetadata))return false;
+        std::vector<PgColumnDescription> output;output.reserve(declared.size());
+        for(size_t i=0;i<declared.size();++i) {
+            const auto& field=declared[i];const auto& type=*field.typeMetadata;
+            PgColumnDescription column;column.name=field.name;
+            column.tableOid=origins[i].relationOid;column.attributeNumber=origins[i].attributeNumber;
+            column.typeOid=type.codecOid;column.typeSize=type.codecSize;
+            column.typeModifier=field.typeMod>=0?field.typeMod:type.effectiveTypeMod;
+            column.moneyLocale=session.lcMonetary;column.typeMetadata=field.typeMetadata;
+            output.push_back(std::move(column));
+        }
+        columns=std::move(output);return true;
+    } catch(const DbError& error) {
+        const auto& code=error.sqlState();
+        if(code.rfind("22",0)==0 || code.rfind("42",0)==0 || code=="3F000" || code=="0A000")return false;
+        throw; // cancellation, I/O and corruption remain primary
+    }
+}
+
 bool describePreparedResultShape(const std::string& sql, Session& session,
                             std::vector<PgColumnDescription>& columns,
                             const std::vector<uint32_t>& parameterOids = {}) {
@@ -4099,6 +4174,7 @@ bool describePreparedResultShape(const std::string& sql, Session& session,
     SQLParser parser;
     ParseResult parsed = parser.parse(sql);
     if (!parsed.isValid()) return false;
+    if(describePreparedReturningDeclaration(sql,session,parsed.stmt.get(),columns,parameterOids))return true;
     if (const auto* shown = dynamic_cast<const SetStmt*>(parsed.stmt.get())) {
         const auto name = SQLParser::toLower(shown->name);
         if (shown->isShow && (name == "transaction_isolation" ||

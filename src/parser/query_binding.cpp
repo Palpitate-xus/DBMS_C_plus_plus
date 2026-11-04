@@ -2683,6 +2683,602 @@ public:
     // parent's original source coordinates. Used solely for source rebasing.
     static void rebase(Stmt& node, size_t offset);
 };
+class ReturningDeclarationBinder final : public Binder {
+public:
+    using Binder::Binder;
+    // A declaration-only sibling of the ordinary statement binder. No partial
+    // query is executable or published; only copied output/type/source data
+    // leaves prepareReturningDeclaration. Existing binding bodies stay intact.
+    std::map<const Stmt*,std::vector<PreparedQuery::ProjectionBinding>> declarationBindings;
+    std::map<size_t,size_t> declarationTransitions;
+
+    void declarationExpression(const Expr* node,bool conditional=false) const {
+        if(!node)return;
+        if(node->preparedSubquery || node->type==ExprType::Subquery)
+            throw DbError("0A000","RETURNING declaration does not yet support expression query children");
+        const auto* literal=dynamic_cast<const LiteralExpr*>(node);
+        const auto* binary=dynamic_cast<const BinaryOpExpr*>(node);
+        if(conditional && (dynamic_cast<const CastExpr*>(node) ||
+                (binary && binary->op=="::") || (literal && !literal->typeName.empty())))
+            throw DbError("0A000","conditional explicit input keeps its original analysis owner");
+        if(literal) {
+            const auto tokens=SQLParser::tokenize(literal->value);
+            if(tokens.size()>1 && tokens.front()=="(" &&
+               (SQLParser::toLower(tokens[1])=="select" || SQLParser::toLower(tokens[1])=="values" ||
+                SQLParser::toLower(tokens[1])=="with"))
+                throw DbError("0A000","RETURNING declaration does not yet support expression query children");
+        } else if(const auto* unary=dynamic_cast<const UnaryOpExpr*>(node))
+            declarationExpression(unary->operand.get(),conditional);
+        else if(const auto* cast=dynamic_cast<const CastExpr*>(node))
+            declarationExpression(cast->operand.get(),conditional);
+        else if(binary) {
+            const auto op=SQLParser::toLower(binary->op);
+            const bool branch=conditional || op=="and" || op=="or";
+            declarationExpression(binary->left.get(),branch);
+            if(op!="::" && op!="collate")declarationExpression(binary->right.get(),branch);
+        } else if(const auto* compare=dynamic_cast<const QuantifiedComparisonExpr*>(node)) {
+            declarationExpression(compare->left.get(),conditional);
+            declarationExpression(compare->right.get(),conditional);
+        } else if(const auto* call=dynamic_cast<const FunctionCallExpr*>(node)) {
+            if(call->hasOver)
+                throw DbError("0A000","RETURNING declaration does not yet lower window output dependencies");
+            const auto name=SQLParser::toLower(call->funcName);
+            const bool conditionalCall=name=="coalesce" || name=="iif" || name=="if" ||
+                name=="ifnull" || name=="nvl" || name=="nullif" || name=="decode";
+            for(size_t i=0;i<call->args.size();++i)
+                declarationExpression(call->args[i].get(),conditional || (conditionalCall && i>0));
+            for(const auto& named:call->namedArgs)declarationExpression(named.value.get(),conditional || conditionalCall);
+            for(const auto& order:call->aggregateOrderKeys)declarationExpression(order.expr.get(),conditional);
+            declarationExpression(call->filter.get(),true);
+        } else if(const auto* value=dynamic_cast<const CaseExpr*>(node)) {
+            declarationExpression(value->switchExpr.get(),conditional);
+            for(const auto& arm:value->whenClauses) {
+                declarationExpression(arm.first.get(),true);
+                declarationExpression(arm.second.get(),true);
+            }
+            declarationExpression(value->elseExpr.get(),true);
+        } else if(const auto* array=dynamic_cast<const ArrayExpr*>(node))
+            for(const auto& value:array->elements)declarationExpression(value.get(),conditional);
+        else if(const auto* row=dynamic_cast<const RowExpr*>(node))
+            for(const auto& value:row->elements)declarationExpression(value.get(),conditional);
+    }
+    void declarationItems(const std::vector<SelectItem>& items) const {
+        for(const auto& item:items)declarationExpression(item.expr.get());
+    }
+    void declarationFinalize(QueryRowDescriptor& columns) {
+        for(auto& column:columns)if(column.type=="unknown") {
+            const auto name=column.name;
+            column=metadata.declaredType?metadata.declaredType("text"):QueryOutputColumn{"","text",false,0,25};
+            column.name=name;
+            if(metadata.datumType && !column.typeMetadata)column.typeMetadata=metadata.datumType("text",25);
+        }
+    }
+    Range declarationRelation(const std::string& source,const std::string& alias,const Ctes& ctes) {
+        CatalogManager::QualifiedName name;
+        if(!CatalogManager::parseQualifiedName(source,name,true))throw DbError("42601","invalid relation name");
+        if(name.schema.empty())if(const auto found=ctes.find(name.name);found!=ctes.end()) {
+            if(found->second.columns.empty())throw DbError("0A000","WITH query does not have a RETURNING clause: "+name.name);
+            Range range{"",alias.empty()?name.name:identifier(alias),found->second.columns};
+            range.cteStatement=found->second.statement;return range;
+        }
+        const auto owned=metadata.queryRelation?metadata.queryRelation(source):std::optional<QueryRelationMetadata>{};
+        if(!owned && !metadata.relation)throw DbError("42P01","relation does not exist: "+source);
+        const auto description=owned?*owned:metadata.relation(source);
+        if(description.columns.empty() && !description.viewSql.empty())
+            throw DbError("0A000","view declaration is missing its actual catalog columns");
+        Range range{alias.empty()?description.schema:"",alias.empty()?description.name:identifier(alias),description.columns};
+        range.relationSchema=description.schema;range.relationName=description.name;
+        // The stored view's own catalog declaration is authoritative. Do not
+        // reprepare its non-output predicates or drill through its origin.
+        return range;
+    }
+    Namespace declarationFrom(FromItem* item, const std::vector<Namespace>& outer, const Ctes& ctes) {
+        if (!item) return {};
+        const auto aliases=[&](Range range) {
+            if(incompleteNamespaceCatalog(range) && item->columnAliases.size()==4)
+                throw DbError("0A000","pg_namespace ACL column aliases are not implemented");
+            if(item->columnAliases.size()>range.columns.size())
+                throw DbError("42P10","source alias has more column names than its relation");
+            for(size_t i=0;i<item->columnAliases.size();++i)range.columns[i].name=identifier(item->columnAliases[i]);
+            return registerSource(std::move(range),item);
+        };
+        if (item->type == FromItem::Type::Table)
+            return {aliases(declarationRelation(item->tableName, item->alias, ctes))};
+        if (item->type == FromItem::Type::Subquery) {
+            if (!item->subquery) throw DbError("42601", "derived query is missing");
+            auto derivedOuter = outer;
+            // A non-LATERAL source cannot see this SQL level's siblings,
+            // but its lexical level still counts for ancestor provenance.
+            derivedOuter.insert(derivedOuter.begin(), Namespace{});
+            auto columns = declarationStatement(*item->subquery, derivedOuter, ctes);
+            for (auto& column : columns) if (column.type == "unknown") {
+                    column.type = "text";
+                    if(metadata.datumType)column.typeMetadata=metadata.datumType("text",25);
+                }
+            return {aliases({"", item->alias.empty() ? "" : identifier(item->alias), std::move(columns)})};
+        }
+        if (item->type != FromItem::Type::Join) throw DbError("0A000", "source requires structured preparation");
+        auto left = declarationFrom(item->left.get(), outer, ctes);
+        auto right = declarationFrom(item->right.get(), outer, ctes);
+        checkRangeConflicts(left, right);
+        std::vector<std::string> keys;
+        std::set<std::string> seenKeys;
+        for (const auto& spelling : item->usingCols) {
+            const auto key = identifier(spelling);
+            if (!seenKeys.insert(key).second)
+                throw DbError("42701", "column \"" + key + "\" appears more than once in USING clause");
+            keys.push_back(key);
+        }
+        if (SQLParser::toLower(item->joinType).rfind("natural", 0) == 0) {
+            // NATURAL derives join keys from the complete source schema;
+            // omitting the unowned ACL field would change the actual join.
+            for(const auto& range:left)requireCompleteStar(range);
+            for(const auto& range:right)requireCompleteStar(range);
+            for (const auto& a : left) for (const auto& x : a.columns)
+                for (const auto& b : right) for (const auto& y : b.columns)
+                    if (!a.hiddenUnqualified.count(x.name) && !b.hiddenUnqualified.count(y.name) &&
+                        x.name == y.name && seenKeys.insert(x.name).second) keys.push_back(x.name);
+        }
+        Range merged;
+        for (const auto& key : keys) {
+            if(key=="nspacl") {
+                for(const auto& range:left)if(incompleteNamespaceCatalog(range))
+                    throw DbError("0A000","pg_namespace ACL JOIN key is not implemented");
+                for(const auto& range:right)if(incompleteNamespaceCatalog(range))
+                    throw DbError("0A000","pg_namespace ACL JOIN key is not implemented");
+            }
+            size_t leftCount = 0, rightCount = 0; std::string leftType,rightType;
+            for (auto& range : left) for (const auto& col : range.columns)
+                if (col.name == key && !range.hiddenUnqualified.count(key)) { ++leftCount; leftType = col.type; }
+            for (auto& range : right) for (const auto& col : range.columns)
+                if (col.name == key && !range.hiddenUnqualified.count(key)) { ++rightCount; rightType = col.type; }
+            if (!leftCount || !rightCount) throw DbError("42703", "column \"" + key + "\" specified in USING does not exist");
+            if (leftCount > 1 || rightCount > 1) throw DbError("42702", "USING column is ambiguous");
+            const auto hide = [&](Range& range) {
+                range.hiddenUnqualified.insert(key);
+                const auto found = std::find_if(result.sourceRanges.begin(), result.sourceRanges.end(),
+                    [&](const auto& source) { return source.ordinal == range.occurrence; });
+                if (found == result.sourceRanges.end()) throw DbError("XX000", "JOIN lost its source occurrence");
+                found->hiddenUnqualified = range.hiddenUnqualified;
+            };
+            for (auto& range : left) hide(range);
+            for (auto& range : right) hide(range);
+            const auto mergedType=selectCommonType({leftType,rightType},"JOIN/USING");
+            merged.columns.push_back({key,mergedType,false,0,0,-1,
+                metadata.datumType?metadata.datumType(mergedType,0):DatumTypePtr{}});
+        }
+        left.insert(left.end(), right.begin(), right.end());
+        // Only actual namespace/USING output declarations are needed here.
+        // The original ON expression belongs to the whole DML analysis.
+        if (!merged.columns.empty()) {
+            merged.mergedUsing = true;
+            left.insert(left.begin(), registerSource(std::move(merged), item));
+        }
+        return left;
+    }
+    std::optional<QueryColumnBinding> declarationColumn(const Expr* value) const {
+        if(const auto* column=dynamic_cast<const ColumnRefExpr*>(value))return column->binding;
+        const Expr* input=nullptr;
+        if(const auto* cast=dynamic_cast<const CastExpr*>(value))input=cast->operand.get();
+        else if(const auto* binary=dynamic_cast<const BinaryOpExpr*>(value);binary && binary->op=="::")input=binary->left.get();
+        if(!input)return {};
+        const auto inner=declarationColumn(input);
+        if(!inner || !inner->typeMetadata || inner->typeMetadata->enumType ||
+           inner->typeMetadata->actualOid!=inner->typeMetadata->codecOid)return {};
+        const auto resultType=valueTypeMetadata.find(value);
+        const auto actual=resultType!=valueTypeMetadata.end() && resultType->second
+            ?resultType->second->actualOid:expressionTypeOid(value);
+        // Only an already bound identity cast can be transparent; domain
+        // constraints, changed typmods and value conversions retain origin0.
+        if(actual!=inner->typeMetadata->actualOid || !actual ||
+           expressionTypeModifier(value)!=expressionTypeModifier(input))return {};
+        return inner;
+    }
+    std::vector<PreparedQuery::ProjectionBinding> declarationProjectionBindings(
+        const std::vector<SelectItem>& items,const Namespace& scope) {
+        std::vector<PreparedQuery::ProjectionBinding> bindings;
+        for(const auto& item:items) {
+            const auto* literal=dynamic_cast<const LiteralExpr*>(item.expr.get());
+            const auto* star=dynamic_cast<const ColumnRefExpr*>(item.expr.get());
+            const bool bare=literal && literal->value=="*";
+            if(bare || (star && star->column=="*")) {
+                for(const auto& range:scope) {
+                    if(!bare && !rangeMatches(*star,range))continue;
+                    for(size_t i=0;i<range.columns.size();++i) {
+                        const auto& column=range.columns[i];
+                        if(bare && range.hiddenUnqualified.count(column.name))continue;
+                        bindings.push_back({item.expr.get(),QueryColumnBinding{0,range.occurrence,i,
+                            column.type,range.mergedUsing,column.typeOid,column.typeMetadata}});
+                    }
+                }
+            } else bindings.push_back({item.expr.get(),declarationColumn(item.expr.get())});
+        }
+        return bindings;
+    }
+    QueryRowDescriptor declarationReturning(Stmt& node,std::vector<SelectItem>& items,
+        const ReturningOptions& options,const Range& target,std::vector<Namespace> scopes) {
+        declarationItems(items);
+        const auto firstTransition=result.sourceRanges.size();
+        auto columns=returning(items,options,target,scopes);
+        auto scope=scopes.front();
+        for(size_t i=firstTransition;i<result.sourceRanges.size();++i) {
+            const auto& image=result.sourceRanges[i];
+            if(image.owner!=&node || image.source || image.cteStatement || !image.relationName.empty())
+                throw DbError("XX000","RETURNING transition declaration lost its actual occurrence");
+            declarationTransitions[image.ordinal]=target.occurrence;
+            Range range{image.schema,image.name,image.columns};
+            range.occurrence=image.ordinal;range.hiddenUnqualified=image.hiddenUnqualified;
+            scope.push_back(std::move(range));
+        }
+        auto bindings=declarationProjectionBindings(items,scope);
+        if(bindings.size()!=columns.size())throw DbError("XX000","RETURNING declaration width differs from original projection");
+        declarationBindings[&node]=std::move(bindings);
+        declarationFinalize(columns);
+        return columns;
+    }
+    QueryRowDescriptor declarationCommon(QueryRowDescriptor left,const QueryRowDescriptor& right) {
+        if(left.size()!=right.size())throw DbError("42601","query declaration column count mismatch");
+        for(size_t i=0;i<left.size();++i) {
+            const auto common=selectCommonType({left[i].type,right[i].type},"declaration");
+            const bool same=left[i].typeMetadata && right[i].typeMetadata &&
+                left[i].typeMetadata->actualOid==right[i].typeMetadata->actualOid &&
+                common_type_detail::canonical(left[i].type)==common_type_detail::canonical(common) &&
+                common_type_detail::canonical(right[i].type)==common_type_detail::canonical(common);
+            const auto modifier=left[i].typeMod==right[i].typeMod?left[i].typeMod:-1;
+            if(!same) {
+                const auto name=left[i].name;
+                left[i]=metadata.declaredType?metadata.declaredType(common):QueryOutputColumn{"",common};
+                left[i].name=name;
+                if(metadata.datumType && !left[i].typeMetadata)left[i].typeMetadata=metadata.datumType(common,left[i].typeOid);
+            }
+            left[i].type=common;left[i].typeMod=modifier;
+        }
+        return left;
+    }
+    QueryRowDescriptor declarationStatement(Stmt& node,const std::vector<Namespace>& outer,Ctes ctes) {
+        if(++depth>128)throw DbError("54001","query declaration nesting limit exceeded");
+        struct Depth {size_t& value;~Depth(){--value;}} depthScope{depth};
+        statementOwners.push_back(&node);
+        struct Owner {std::vector<const Stmt*>& stack;~Owner(){stack.pop_back();}} owner{statementOwners};
+        cteScopes.push_back(&ctes);
+        struct CteScope {std::vector<const Ctes*>& stack;~CteScope(){stack.pop_back();}} cteScope{cteScopes};
+        const auto definitions=[&](std::vector<SelectStmt::CTE>& values) {
+            auto cteOuter=outer;cteOuter.insert(cteOuter.begin(),Namespace{});
+            std::set<std::string> localNames;
+            for(auto& value:values) {
+                if(!value.query)throw DbError("42601","WITH query is missing");
+                if(value.recursive)throw DbError("0A000","recursive RETURNING declaration dependencies are not implemented");
+                const auto name=identifier(value.name);
+                if(!localNames.insert(name).second)throw DbError("42712","WITH query name specified more than once");
+                auto columns=declarationStatement(*value.query,cteOuter,ctes);
+                applyNames(columns,value.columnNames);declarationFinalize(columns);
+                result.statementOutputs[value.query.get()]=columns;
+                ctes[name]={std::move(columns),value.query.get()};
+            }
+        };
+        QueryRowDescriptor output;
+        if(auto* envelope=dynamic_cast<WithStmt*>(&node)) {
+            if(!envelope->statement)throw DbError("42601","WITH primary statement is missing");
+            definitions(envelope->ctes);
+            output=declarationStatement(*envelope->statement,outer,ctes);
+            declarationBindings[&node]=declarationBindings[envelope->statement.get()];
+        } else if(auto* select=dynamic_cast<SelectStmt*>(&node)) {
+            definitions(select->ctes);
+            if(select->setOpLhs)output=declarationStatement(*select->setOpLhs,outer,ctes);
+            else {
+                auto scopes=outer;scopes.insert(scopes.begin(),declarationFrom(select->fromClause.get(),outer,ctes));
+                if(select->command==SqlCommand::Values) {
+                    if(select->valuesRows.empty())throw DbError("42601","VALUES has no output rows");
+                    bool first=true;
+                    for(auto& row:select->valuesRows) {
+                        QueryRowDescriptor columns;
+                        for(size_t i=0;i<row.size();++i) {
+                            declarationExpression(row[i].get());
+                            const auto type=expression(row[i],scopes);
+                            columns.push_back({"column"+std::to_string(i+1),type,false,0,
+                                expressionTypeOid(row[i].get()),expressionTypeModifier(row[i].get()),datumMetadata(type,row[i].get())});
+                        }
+                        if(first){output=std::move(columns);first=false;}
+                        else output=declarationCommon(std::move(output),columns);
+                    }
+                    declarationBindings[&node].resize(output.size());
+                } else {
+                    declarationItems(select->selectList);
+                    output=project(select->selectList,scopes);
+                    declarationBindings[&node]=declarationProjectionBindings(select->selectList,scopes.front());
+                }
+            }
+            if(select->setOp!=SetOp::None) {
+                if(!select->setOpRhs)throw DbError("42601","set query right operand is missing");
+                output=declarationCommon(std::move(output),declarationStatement(*select->setOpRhs,outer,ctes));
+                declarationBindings[&node].assign(output.size(),{});
+            }
+            // WHERE/JOIN ON, HAVING/GROUP, window clauses, final ORDER/counts
+            // are not output declarations and are never visited here.
+            declarationFinalize(output);
+        } else {
+            std::vector<SelectItem>* items=nullptr;
+            const ReturningOptions* images=nullptr;
+            std::string targetName,targetAlias;
+            FromItem* source=nullptr;
+            if(auto* insert=dynamic_cast<InsertStmt*>(&node)) {
+                targetName=insert->tableName;items=&insert->returning;images=&insert->returningOptions;
+                // INSERT SELECT/VALUES/DEFAULT/conflict inputs are deliberately
+                // not traversed, even when they contain invalid input CASTs.
+            } else if(auto* update=dynamic_cast<UpdateStmt*>(&node)) {
+                targetName=update->tableName;targetAlias=update->alias;
+                items=&update->returning;images=&update->returningOptions;source=update->fromClause.get();
+            } else if(auto* remove=dynamic_cast<DeleteStmt*>(&node)) {
+                targetName=remove->tableName;targetAlias=remove->alias;
+                items=&remove->returning;images=&remove->returningOptions;source=remove->usingClause.get();
+            } else if(auto* merge=dynamic_cast<MergeStmt*>(&node)) {
+                targetName=merge->targetTable;targetAlias=merge->targetAlias;
+                items=&merge->returning;images=&merge->returningOptions;source=merge->source.get();
+            } else throw DbError("0A000","statement has no supported RETURNING declaration");
+            // The target is always its real catalog relation, never a CTE
+            // reinterpreted as a physical row owner.
+            const auto target=registerSource(declarationRelation(targetName,targetAlias,{}));
+            auto ranges=declarationFrom(source,outer,ctes);checkRangeConflicts({target},ranges);
+            ranges.insert(ranges.begin(),target);
+            auto scopes=outer;scopes.insert(scopes.begin(),std::move(ranges));
+            output=declarationReturning(node,*items,*images,target,std::move(scopes));
+        }
+        result.statementOutputs[&node]=output;
+        return output;
+    }
+    QueryReturningSource declarationOrigin(std::optional<QueryColumnBinding> binding) const {
+        std::set<std::pair<size_t,size_t>> visited;
+        while(binding && visited.emplace(binding->sourceOrdinal,binding->columnOrdinal).second) {
+            const auto source=std::find_if(result.sourceRanges.begin(),result.sourceRanges.end(),
+                [&](const auto& range){return range.ordinal==binding->sourceOrdinal;});
+            if(source==result.sourceRanges.end() || binding->columnOrdinal>=source->columns.size() || source->mergedUsing)return {};
+            if(const auto image=declarationTransitions.find(source->ordinal);image!=declarationTransitions.end()) {
+                binding->sourceOrdinal=image->second;continue;
+            }
+            if(!source->relationName.empty())return {source->relationSchema,source->relationName,binding->columnOrdinal,true};
+            const Stmt* child=source->cteStatement;
+            if(!child && source->source && source->source->type==FromItem::Type::Subquery)
+                child=source->source->subquery.get();
+            const auto columns=declarationBindings.find(child);
+            if(!child || columns==declarationBindings.end() || binding->columnOrdinal>=columns->second.size())return {};
+            binding=columns->second[binding->columnOrdinal].column;
+        }
+        return {};
+    }
+};
+// Names-only analysis for the ordinary pre-Parse metadata boundary. These are
+// annotations of actual SQL sources, not row descriptors, execution frames or
+// values. No existing Binder expression/type/input validator is called.
+class ReturningNamespaceBinder {
+    const QueryBindingMetadata& metadata;
+    struct Names {
+        std::string schema,name,relationSchema,relationName;
+        std::vector<std::string> columns;
+        std::set<std::string> hidden;
+    };
+    using Scope=std::vector<Names>;
+    using Ctes=std::map<std::string,std::vector<std::string>>;
+    size_t depth=0;
+    static std::string quoted(const std::string& name) {
+        std::string result="\"";for(char c:name){result+=c;if(c=='\"')result+=c;}return result+'\"';
+    }
+    bool matches(const ColumnRefExpr& value,const Names& range) const {
+        if(!value.table.empty() && value.table!=range.name)return false;
+        if(value.schema.empty() || value.schema==range.schema)return true;
+        if(range.schema.empty() || range.relationName.empty() || range.name!=range.relationName ||
+           value.table.empty() || !metadata.relation)return false;
+        const auto actual=metadata.relation(quoted(value.schema)+"."+quoted(value.table));
+        return actual.schema==range.relationSchema && actual.name==range.relationName;
+    }
+    static void conflicts(const Scope& left,const Scope& right) {
+        for(const auto& a:left)for(const auto& b:right)if(!a.name.empty() && a.name==b.name) {
+            const bool physical=!a.relationName.empty() && !b.relationName.empty() &&
+                a.name==a.relationName && b.name==b.relationName && !a.schema.empty() && !b.schema.empty();
+            if(physical && a.schema!=b.schema)continue;
+            throw DbError("42712","table name \""+a.name+"\" specified more than once");
+        }
+    }
+    Names relation(const std::string& spelling,const std::string& alias,const Ctes& ctes) const {
+        CatalogManager::QualifiedName requested;
+        if(!CatalogManager::parseQualifiedName(spelling,requested,true))throw DbError("42601","invalid relation name");
+        if(requested.schema.empty())if(const auto found=ctes.find(requested.name);found!=ctes.end()) {
+            if(found->second.empty())throw DbError("0A000","WITH source has no RETURNING declaration");
+            return {"",alias.empty()?requested.name:identifier(alias),"","",found->second,{}};
+        }
+        if(!metadata.relation)throw DbError("0A000","RETURNING namespace has no actual relation declarations");
+        const auto actual=metadata.relation(spelling);
+        if(actual.schema=="pg_catalog" && actual.name=="pg_namespace" && actual.columns.size()==3)
+            throw DbError("0A000","RETURNING namespace requires the complete catalog declaration");
+        if(actual.columns.empty())throw DbError("0A000","RETURNING namespace relation declaration is incomplete");
+        Names result{alias.empty()?actual.schema:"",alias.empty()?actual.name:identifier(alias),actual.schema,actual.name,{},{}};
+        for(const auto& column:actual.columns)result.columns.push_back(column.name);
+        return result;
+    }
+    void reference(const ColumnRefExpr& value,const Scope& scope) const {
+        size_t count=0;bool table=false;
+        for(const auto& range:scope) {
+            if(!matches(value,range))continue;
+            table=true;
+            if(value.column=="*"){++count;continue;}
+            for(const auto& column:range.columns)
+                if(column==value.column && (!value.table.empty() || !value.schema.empty() || !range.hidden.count(column)))++count;
+        }
+        if(count==1)return;
+        if(count>1 && value.column!="*")throw DbError("42702","RETURNING column reference is ambiguous");
+        if(count && value.column=="*")return;
+        if(!table && (!value.table.empty() || !value.schema.empty()))
+            throw DbError("42P01","missing FROM-clause entry for table \""+value.table+"\"");
+        throw DbError("42703","column \""+value.column+"\" does not exist");
+    }
+    void expression(const Expr* value,const Scope& scope) const {
+        if(!value)return;
+        if(value->preparedSubquery || value->type==ExprType::Subquery)
+            throw DbError("0A000","namespace-only RETURNING query children are not implemented");
+        if(const auto* column=dynamic_cast<const ColumnRefExpr*>(value))reference(*column,scope);
+        else if(const auto* literal=dynamic_cast<const LiteralExpr*>(value)) {
+            const auto tokens=SQLParser::tokenize(literal->value);
+            if(tokens.size()>1 && tokens[0]=="(" && (SQLParser::toLower(tokens[1])=="select" ||
+                SQLParser::toLower(tokens[1])=="values" || SQLParser::toLower(tokens[1])=="with"))
+                throw DbError("0A000","namespace-only RETURNING query children are not implemented");
+            // All other literal bytes, type names and input syntax are data
+            // for existing analysis owners, never parsed/coerced here.
+        } else if(const auto* unary=dynamic_cast<const UnaryOpExpr*>(value))expression(unary->operand.get(),scope);
+        else if(const auto* cast=dynamic_cast<const CastExpr*>(value))expression(cast->operand.get(),scope);
+        else if(const auto* binary=dynamic_cast<const BinaryOpExpr*>(value)) {
+            expression(binary->left.get(),scope);
+            if(binary->op!="::" && binary->op!="COLLATE")expression(binary->right.get(),scope);
+        } else if(const auto* compare=dynamic_cast<const QuantifiedComparisonExpr*>(value)) {
+            expression(compare->left.get(),scope);expression(compare->right.get(),scope);
+        } else if(const auto* call=dynamic_cast<const FunctionCallExpr*>(value)) {
+            for(size_t i=0;i<call->args.size();++i) {
+                // Match the original Binder/ExprHelper EXTRACT grammar role.
+                // Quoted function names keep their quote bytes; qualified
+                // routines and date_part have ordinary value arguments.
+                if(i==0 && call->schema.empty() && SQLParser::toLower(call->funcName)=="extract") {
+                    const auto* field=dynamic_cast<const ColumnRefExpr*>(call->args[i].get());
+                    if(field && field->schema.empty() && field->table.empty())continue;
+                }
+                expression(call->args[i].get(),scope);
+            }
+            for(const auto& arg:call->namedArgs)expression(arg.value.get(),scope);
+            expression(call->filter.get(),scope);
+            for(const auto& key:call->aggregateOrderKeys)expression(key.expr.get(),scope);
+        } else if(const auto* conditional=dynamic_cast<const CaseExpr*>(value)) {
+            expression(conditional->switchExpr.get(),scope);expression(conditional->elseExpr.get(),scope);
+            for(const auto& arm:conditional->whenClauses){expression(arm.first.get(),scope);expression(arm.second.get(),scope);}
+        } else if(const auto* array=dynamic_cast<const ArrayExpr*>(value))for(const auto& arg:array->elements)expression(arg.get(),scope);
+        else if(const auto* row=dynamic_cast<const RowExpr*>(value))for(const auto& arg:row->elements)expression(arg.get(),scope);
+    }
+    std::vector<std::string> projection(const std::vector<SelectItem>& items,const Scope& scope,bool requireOutputNames=true) const {
+        std::vector<std::string> result;
+        for(const auto& item:items) {
+            if(!item.expr)throw DbError("42601","RETURNING expression is missing");
+            expression(item.expr.get(),scope);
+            if(!requireOutputNames)continue; // top RETURNING only needs names checked, not labels
+            const auto* literal=dynamic_cast<const LiteralExpr*>(item.expr.get());
+            const auto* column=dynamic_cast<const ColumnRefExpr*>(item.expr.get());
+            const bool bare=literal && literal->value=="*";
+            if(bare || (column && column->column=="*")) {
+                for(const auto& range:scope) {
+                    if(!bare && !matches(*column,range))continue;
+                    for(const auto& name:range.columns)if(!bare || !range.hidden.count(name))result.push_back(name);
+                }
+            } else if(!item.alias.empty())result.push_back(identifier(item.alias));
+            else if(column)result.push_back(column->column);
+            else if(const auto* call=dynamic_cast<const FunctionCallExpr*>(item.expr.get())) {
+                if(call->funcName.empty())throw DbError("0A000","namespace-only SQL value output needs an explicit name");
+                result.push_back(identifier(call->funcName));
+            }
+            else if(dynamic_cast<const RowExpr*>(item.expr.get()))result.push_back("row");
+            else if(dynamic_cast<const ArrayExpr*>(item.expr.get()))result.push_back("array");
+            else if(dynamic_cast<const CaseExpr*>(item.expr.get()))result.push_back("case");
+            else if(dynamic_cast<const CastExpr*>(item.expr.get()) ||
+                    (dynamic_cast<const BinaryOpExpr*>(item.expr.get()) && static_cast<const BinaryOpExpr*>(item.expr.get())->op=="::"))
+                {if(requireOutputNames)throw DbError("0A000","namespace-only CAST output dependencies need an explicit output name");
+                 result.push_back("?column?");}
+            else result.push_back("?column?");
+        }
+        return result;
+    }
+    Scope from(const FromItem* item,const Ctes& ctes) {
+        if(!item)return {};
+        const auto alias=[&](Names value) {
+            if(item->columnAliases.size()>value.columns.size())throw DbError("42P10","source alias has too many columns");
+            for(size_t i=0;i<item->columnAliases.size();++i)value.columns[i]=identifier(item->columnAliases[i]);
+            return value;
+        };
+        if(item->type==FromItem::Type::Table)return {alias(relation(item->tableName,item->alias,ctes))};
+        if(item->type==FromItem::Type::Subquery) {
+            if(!item->subquery)throw DbError("42601","derived query is missing");
+            return {alias({"",item->alias.empty()?"":identifier(item->alias),"","",statement(*item->subquery,ctes),{}})};
+        }
+        if(item->type!=FromItem::Type::Join)throw DbError("0A000","namespace-only function sources are not implemented");
+        auto left=from(item->left.get(),ctes),right=from(item->right.get(),ctes);conflicts(left,right);
+        std::vector<std::string> keys;std::set<std::string> seen;
+        for(const auto& raw:item->usingCols) {
+            const auto key=identifier(raw);
+            if(!seen.insert(key).second)throw DbError("42701","USING column appears more than once");
+            keys.push_back(key);
+        }
+        if(SQLParser::toLower(item->joinType).rfind("natural",0)==0)
+            for(const auto& a:left)for(const auto& x:a.columns)for(const auto& b:right)for(const auto& y:b.columns)
+                if(x==y && !a.hidden.count(x) && !b.hidden.count(y) && seen.insert(x).second)keys.push_back(x);
+        Names merged;
+        for(const auto& key:keys) {
+            size_t l=0,r=0;
+            for(const auto& range:left)for(const auto& name:range.columns)if(name==key && !range.hidden.count(key))++l;
+            for(const auto& range:right)for(const auto& name:range.columns)if(name==key && !range.hidden.count(key))++r;
+            if(!l || !r)throw DbError("42703","USING column does not exist");
+            if(l>1 || r>1)throw DbError("42702","USING column is ambiguous");
+            for(auto& range:left)range.hidden.insert(key);
+            for(auto& range:right)range.hidden.insert(key);
+            merged.columns.push_back(key);
+        }
+        left.insert(left.end(),right.begin(),right.end());if(!merged.columns.empty())left.insert(left.begin(),std::move(merged));
+        // JOIN ON is deliberately not visited.
+        return left;
+    }
+public:
+    explicit ReturningNamespaceBinder(const QueryBindingMetadata& owner):metadata(owner) {}
+    std::vector<std::string> statement(const Stmt& node,Ctes ctes={},bool requireOutputNames=true) {
+        if(++depth>128)throw DbError("54001","RETURNING namespace nesting limit exceeded");
+        struct Depth {size_t& value;~Depth(){--value;}} guard{depth};
+        const auto definitions=[&](const std::vector<SelectStmt::CTE>& values) {
+            std::set<std::string> local;
+            for(const auto& value:values) {
+                if(!value.query)throw DbError("42601","WITH query is missing");
+                if(value.recursive)throw DbError("0A000","recursive namespace dependencies are not implemented");
+                const auto name=identifier(value.name);if(!local.insert(name).second)throw DbError("42712","WITH name specified more than once");
+                auto output=statement(*value.query,ctes);
+                if(value.columnNames.size()>output.size())throw DbError("42P10","WITH alias has too many columns");
+                for(size_t i=0;i<value.columnNames.size();++i)output[i]=identifier(value.columnNames[i]);
+                ctes[name]=std::move(output);
+            }
+        };
+        if(const auto* with=dynamic_cast<const WithStmt*>(&node)) {
+            if(!with->statement)throw DbError("42601","WITH primary statement is missing");
+            definitions(with->ctes);return statement(*with->statement,std::move(ctes),requireOutputNames);
+        }
+        if(const auto* select=dynamic_cast<const SelectStmt*>(&node)) {
+            definitions(select->ctes);
+            std::vector<std::string> output;
+            if(select->setOpLhs)output=statement(*select->setOpLhs,ctes);
+            else if(select->command==SqlCommand::Values) {
+                if(select->valuesRows.empty())throw DbError("42601","VALUES declaration is missing");
+                for(size_t i=0;i<select->valuesRows.front().size();++i)output.push_back("column"+std::to_string(i+1));
+            } else output=projection(select->selectList,from(select->fromClause.get(),ctes));
+            if(select->setOp!=SetOp::None) {
+                if(!select->setOpRhs)throw DbError("42601","set right operand is missing");
+                if(statement(*select->setOpRhs,ctes).size()!=output.size())throw DbError("42601","set output width differs");
+            }
+            return output;
+        }
+        const std::vector<SelectItem>* items=nullptr;const ReturningOptions* options=nullptr;
+        std::string targetName,targetAlias;const FromItem* source=nullptr;
+        if(const auto* insert=dynamic_cast<const InsertStmt*>(&node)) {
+            targetName=insert->tableName;items=&insert->returning;options=&insert->returningOptions;
+        } else if(const auto* update=dynamic_cast<const UpdateStmt*>(&node)) {
+            targetName=update->tableName;targetAlias=update->alias;source=update->fromClause.get();items=&update->returning;options=&update->returningOptions;
+        } else if(const auto* remove=dynamic_cast<const DeleteStmt*>(&node)) {
+            targetName=remove->tableName;targetAlias=remove->alias;source=remove->usingClause.get();items=&remove->returning;options=&remove->returningOptions;
+        } else if(const auto* merge=dynamic_cast<const MergeStmt*>(&node)) {
+            targetName=merge->targetTable;targetAlias=merge->targetAlias;source=merge->source.get();items=&merge->returning;options=&merge->returningOptions;
+        } else throw DbError("0A000","statement has no RETURNING namespace");
+        const auto target=relation(targetName,targetAlias,{});auto scope=from(source,ctes);conflicts({target},scope);scope.insert(scope.begin(),target);
+        const auto image=[&](const std::string& name,bool explicitAlias) {
+            if(std::any_of(scope.begin(),scope.end(),[&](const auto& range){return range.name==name;})) {
+                if(explicitAlias)throw DbError("42712","table name \""+name+"\" specified more than once");return;
+            }
+            Names range{"",name,"","",target.columns,{}};
+            range.hidden.insert(range.columns.begin(),range.columns.end());scope.push_back(std::move(range));
+        };
+        if(options->oldAliased)image(identifier(options->oldAlias),true);
+        if(options->newAliased)image(identifier(options->newAlias),true);
+        if(!options->oldAliased)image("old",false);
+        if(!options->newAliased)image("new",false);
+        return projection(*items,scope,requireOutputNames);
+    }
+};
 } // namespace
 
 void Binder::rebase(Stmt& root, size_t offset) {
@@ -2765,6 +3361,47 @@ void Binder::rebase(Stmt& root, size_t offset) {
         }
     };
     stmt(root);
+}
+
+bool validateReturningNamespace(const std::string& sql,const QueryBindingMetadata& metadata) {
+    SQLParser parser;auto parsed=parser.parseForReturningDeclaration(sql);
+    if(!parsed.isValid())return false; // original syntax owner remains primary
+    const Stmt* root=parsed.stmt.get();
+    while(const auto* with=dynamic_cast<const WithStmt*>(root))root=with->statement.get();
+    const std::vector<SelectItem>* items=nullptr;
+    if(const auto* insert=dynamic_cast<const InsertStmt*>(root))items=&insert->returning;
+    else if(const auto* update=dynamic_cast<const UpdateStmt*>(root))items=&update->returning;
+    else if(const auto* remove=dynamic_cast<const DeleteStmt*>(root))items=&remove->returning;
+    else if(const auto* merge=dynamic_cast<const MergeStmt*>(root))items=&merge->returning;
+    if(!items || items->empty())return false;
+    try {ReturningNamespaceBinder binder(metadata);(void)binder.statement(*parsed.stmt,{},false);return true;}
+    catch(const DbError& error) {if(error.sqlState()=="0A000")return false;throw;}
+}
+
+QueryReturningDeclaration prepareReturningDeclaration(const std::string& sql,
+    const std::vector<QueryBindingDatum>& datums,const QueryBindingMetadata& metadata) {
+    ReturningDeclarationBinder binder(sql,datums,metadata);
+    SQLParser parser;auto parsed=parser.parseForReturningDeclaration(sql);
+    if(!parsed.isValid())throw DbError("42601",parsed.error);
+    const Stmt* root=parsed.stmt.get();
+    while(const auto* envelope=dynamic_cast<const WithStmt*>(root))root=envelope->statement.get();
+    if(!root || (!dynamic_cast<const InsertStmt*>(root) && !dynamic_cast<const UpdateStmt*>(root) &&
+                 !dynamic_cast<const DeleteStmt*>(root) && !dynamic_cast<const MergeStmt*>(root)))
+        throw DbError("0A000","pure RETURNING declaration requires a mutation statement");
+    QueryReturningDeclaration result;
+    result.output=binder.declarationStatement(*parsed.stmt,{},{});
+    // Only the new owned output copy is normalized to its already frozen
+    // declaration. Existing SourceRange/whole-query raw OIDs never change.
+    for(auto& column:result.output)if(column.typeMetadata) {
+        column.typeOid=column.typeMetadata->actualOid;
+        if(column.typeMod<0)column.typeMod=column.typeMetadata->effectiveTypeMod;
+    }
+    const auto bindings=binder.declarationBindings.find(parsed.stmt.get());
+    if(bindings==binder.declarationBindings.end() || bindings->second.size()!=result.output.size())
+        throw DbError("XX000","pure RETURNING output lost original projection bindings");
+    result.sources.reserve(result.output.size());
+    for(const auto& binding:bindings->second)result.sources.push_back(binder.declarationOrigin(binding.column));
+    return result;
 }
 
 PreparedQuery prepareQuery(const std::string& sql, const std::vector<QueryBindingDatum>& datums,

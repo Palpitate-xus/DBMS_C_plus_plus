@@ -1,3 +1,4 @@
+#include "expression/LocalExpressionSyntax.h"
 #include "expression/StoredRegtypeValue.h"
 #include "expr_helper.h"
 #include "expression/ArrayDatumInput.h"
@@ -3081,7 +3082,8 @@ static ExprEvalResult evalStringImpl(
     const std::map<std::string, std::string>* collationHints = nullptr,
     bool captureOwningValue = false,
     const std::map<std::string, ExprValue>* outputCoercionValues = nullptr,
-    const DatumMetadataContext* datumMetadata = nullptr) {
+    const DatumMetadataContext* datumMetadata = nullptr,
+    LocalExpressionSyntax* syntax = nullptr) {
 
     // The parser retains the actual declared-type grammar. Rewriting a
     // keyword/string pair into :: changes bare BIT/CHAR length semantics and
@@ -3096,7 +3098,8 @@ static ExprEvalResult evalStringImpl(
 
     // Parse the expression by wrapping it in a SELECT.
     SQLParser parser;
-    ParseResult pr = parser.parse("SELECT " + sql);
+    ParseResult pr = syntax ? syntax->parse("SELECT " + sql, false)
+                            : parser.parse("SELECT " + sql);
     if (!pr.success || !pr.stmt) {
         res.error = pr.error.empty() ? "failed to parse expression" : pr.error;
         res.sqlState = pr.sqlState;
@@ -3377,6 +3380,24 @@ ExprEvalResult ExprHelper::evalStringWithNulls(
     return evalStringImpl(
         exprSql, row, typeHints, &nullColumns, currentDB, currentUser, functionEngine,
         &collationHints, captureOwningValue, outputCoercionValues, datumMetadata);
+}
+
+ExprEvalResult ExprHelper::evalStringWithNullsSyntax(
+    LocalExpressionSyntax& syntax,
+    const std::string& exprSql,
+    const std::map<std::string, std::string>& row,
+    const std::set<std::string>& nullColumns,
+    const std::map<std::string, std::string>& typeHints,
+    const std::string& currentDB,
+    const std::string& currentUser,
+    StorageEngine* functionEngine,
+    const std::map<std::string, std::string>& collationHints,
+    bool captureOwningValue,
+    const std::map<std::string, ExprValue>* outputCoercionValues,
+    const DatumMetadataContext* datumMetadata) {
+    return evalStringImpl(
+        exprSql, row, typeHints, &nullColumns, currentDB, currentUser, functionEngine,
+        &collationHints, captureOwningValue, outputCoercionValues, datumMetadata, &syntax);
 }
 
 bool ExprHelper::evalBool(

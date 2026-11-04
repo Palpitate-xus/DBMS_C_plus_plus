@@ -13,6 +13,7 @@
 
 namespace dbms {
 class StorageEngine;
+class LocalExpressionSyntax;
 class ExprEvaluator;
 class Expr;
 struct ColumnRefExpr;
@@ -155,6 +156,23 @@ public:
     // NULL while constructing the evaluator's row context. Collation hints
     // retain actual source-column semantics without interpolating row SQL.
     static ExprEvalResult evalStringWithNulls(
+        const std::string& exprSql,
+        const std::map<std::string, std::string>& row,
+        const std::set<std::string>& nullColumns,
+        const std::map<std::string, std::string>& typeHints = {},
+        const std::string& currentDB = "",
+        const std::string& currentUser = "",
+        StorageEngine* functionEngine = nullptr,
+        const std::map<std::string, std::string>& collationHints = {},
+        bool captureOwningValue = false,
+        // Output-only coercion: replace an existing helper datum slot with
+        // its already-evaluated value. No input frame or SQL is reconstructed.
+        const std::map<std::string, ExprValue>* outputCoercionValues = nullptr,
+        const DatumMetadataContext* datumMetadata = nullptr);
+
+    // Same row-local semantics, with a caller-owned pristine syntax cache.
+    static ExprEvalResult evalStringWithNullsSyntax(
+        LocalExpressionSyntax& syntax,
         const std::string& exprSql,
         const std::map<std::string, std::string>& row,
         const std::set<std::string>& nullColumns,

@@ -30,6 +30,8 @@ thread_local BindingParseContext* bindingParse = nullptr;
 thread_local std::string* declarationSyntaxError = nullptr;
 thread_local bool executeArgumentSyntaxOnly = false;
 thread_local bool rowCountExpressionSyntax = false;
+// Private syntax purpose; never a query execution/admission flag.
+thread_local bool returningDeclarationSyntax = false;
 void validateExecuteSyntaxExpression(const Expr* expression, bool allowStar);
 struct DeclarationSyntaxAbort {};
 static void retainDeclarationSyntaxError(const DbError& error) {
@@ -2021,6 +2023,15 @@ ParseResult SQLParser::parseForBinding(const std::string& sql) {
     return parsed;
 }
 
+ParseResult SQLParser::parseForReturningDeclaration(const std::string& sql) {
+    const bool previous=returningDeclarationSyntax;
+    returningDeclarationSyntax=true;
+    struct Restore {bool previous;~Restore(){returningDeclarationSyntax=previous;}} restore{previous};
+    // The existing parser retains each original expression and byte span.
+    // No value/CAST/count is bound, planned, coerced or executed here.
+    return parseForBinding(sql);
+}
+
 std::optional<std::string> SQLParser::parseRawSyntax(const std::string& sql) {
     const auto lexical = lexicalError(sql);
     if (!lexical.empty()) return lexical;
@@ -3847,6 +3858,23 @@ static bool currentLevelWindowExpression(const Expr* expression) {
 
 static bool parseSelectWindowCount(const std::vector<std::string>& tokens,
                                    size_t& pos, SelectStmt& statement, RootRowCount kind) {
+    // This private syntax purpose is consumed only by the two pure
+    // RETURNING endpoints. Ordinary parse/binding keeps the window-only
+    // count contract below; no executable query or plan escapes this path.
+    if (returningDeclarationSyntax) {
+        // FETCH FIRST/NEXT ROW(S) omits its count: the original caller owns
+        // the implicit literal 1 and its ROW(S)/ONLY/WITH TIES grammar.
+        if (kind == RootRowCount::Fetch && pos < tokens.size() &&
+            (SQLParser::toLower(tokens[pos]) == "row" ||
+             SQLParser::toLower(tokens[pos]) == "rows")) return false;
+        const auto error = parseRootRowCount(tokens, pos, statement, kind);
+        if (!error.empty()) {
+            if (declarationSyntaxError && declarationSyntaxError->empty())
+                *declarationSyntaxError = error;
+            throw DeclarationSyntaxAbort{};
+        }
+        return true;
+    }
     // Ordinary SELECT has no general dynamic-count execution contract. Keep
     // only genuine current-level OVER sites so normal analysis can reject
     // their actual routine role. Parse the original stream into temporary
@@ -3906,7 +3934,7 @@ static std::string parseQueryRootClauses(const std::vector<std::string>& tokens,
             if (sawLimit) return "multiple LIMIT/FETCH clauses";
             statement.hasRowCountClause = true;
             sawLimit = true; ++pos;
-            if (statement.command == SqlCommand::Values || statement.setOp != SetOp::None) {
+            if (statement.command == SqlCommand::Values || statement.setOp != SetOp::None || returningDeclarationSyntax) {
                 if (auto error = parseRootRowCount(tokens,pos,statement,RootRowCount::Limit); !error.empty()) return error;
             } else if (parseSelectWindowCount(tokens,pos,statement,RootRowCount::Limit)) {
                 // Analysis-only count; its current-level window must fail.
@@ -3922,7 +3950,7 @@ static std::string parseQueryRootClauses(const std::vector<std::string>& tokens,
             if (sawOffset) return "multiple OFFSET clauses";
             statement.hasRowCountClause = true;
             sawOffset = true; ++pos;
-            if (statement.command == SqlCommand::Values || statement.setOp != SetOp::None) {
+            if (statement.command == SqlCommand::Values || statement.setOp != SetOp::None || returningDeclarationSyntax) {
                 if (auto error = parseRootRowCount(tokens,pos,statement,RootRowCount::Offset); !error.empty()) return error;
             } else if (parseSelectWindowCount(tokens,pos,statement,RootRowCount::Offset)) {
                 // Analysis-only count; its current-level window must fail.
@@ -3940,7 +3968,7 @@ static std::string parseQueryRootClauses(const std::vector<std::string>& tokens,
             sawLimit = true; ++pos;
             if (word(pos) != "first" && word(pos) != "next") return "FETCH requires FIRST or NEXT";
             ++pos; statement.fetchFirst = true;
-            const bool expressionOwner=statement.command==SqlCommand::Values || statement.setOp!=SetOp::None;
+            const bool expressionOwner=statement.command==SqlCommand::Values || statement.setOp!=SetOp::None || returningDeclarationSyntax;
             const bool omitted=(word(pos)=="row" || word(pos)=="rows") &&
                 (word(pos+1)=="only" || (word(pos+1)=="with" && word(pos+2)=="ties"));
             if (expressionOwner && !omitted) {

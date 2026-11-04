@@ -33,6 +33,8 @@ struct Session;
 struct SessionInterruptState;
 
 namespace dbms {
+struct QueryReturningOrigin;
+class LocalExpressionSyntax;
 
 class CatalogService;
 class HeapScanCursor;
@@ -486,6 +488,14 @@ public:
         bool finalizeUnknownOutput = false,
         const std::function<std::optional<QueryRelationMetadata>(const std::string&)>&
             queryRelations = {}) const;
+    // Describe only original RETURNING output declarations. This never
+    // prepares mutation inputs, opens a row source or returns an executable
+    // partial graph. Unsupported declaration scopes throw 0A000.
+    QueryRowDescriptor prepareReturningDeclaration(const std::string& dbname,
+        const std::string& sql, const std::vector<QueryBindingDatum>& bindings = {},
+        std::vector<QueryReturningOrigin>* origins = nullptr) const;
+    // Namespace validation only: no expression/type/input planning or execution.
+    bool validateReturningNamespace(const std::string& dbname,const std::string& sql) const;
     // Pure provider ownership probe. It resolves routine identity only;
     // argument binding/errors remain at the whole-query analysis boundary.
     bool ownsPreparedSetReturningCall(const std::string& dbname,
@@ -616,6 +626,15 @@ public:
     // still means DEFAULT (INSERT) or leave unchanged (UPDATE).
     using SqlCell = std::optional<std::string>;
     using SqlRow = std::map<std::string, SqlCell>;
+    // Optional actual generated values, produced at the original extraction
+    // site. No map or value owner exists on the default-null output path.
+    using OwningSqlRow = std::map<std::string, ExprValue>;
+    struct OwningRowImage {
+        OwningSqlRow oldRow;
+        OwningSqlRow newRow;
+    };
+    using OwningRowImagePtr = std::shared_ptr<const OwningRowImage>;
+    using OwningMutationRows = std::vector<OwningRowImagePtr>;
     struct UpdateRowImage {
         SqlRow oldRow;
         SqlRow newRow;
@@ -651,17 +670,20 @@ public:
     DBStatus insert(const std::string& dbname, const std::string& tablename,
                     const std::map<std::string, std::string>& values,
                     std::vector<std::map<std::string, std::string>>* insertedRows = nullptr,
-                    IdentityOverride identityOverride = IdentityOverride::None);
+                    IdentityOverride identityOverride = IdentityOverride::None,
+                    OwningMutationRows* owningRows = nullptr);
     DBStatus insertRow(const std::string& dbname,
                        const std::string& tablename,
                        const SqlRow& values,
                        std::vector<SqlRow>* insertedRows = nullptr,
-                       IdentityOverride identityOverride = IdentityOverride::None);
+                       IdentityOverride identityOverride = IdentityOverride::None,
+                    OwningMutationRows* owningRows = nullptr);
     // INSERT INTO t DEFAULT VALUES — uses column defaults or NULL.
     DBStatus insertDefaultValues(const std::string& dbname,
                                  const std::string& tablename,
                                  const TableSchema& tbl,
-                                 std::vector<std::map<std::string, std::string>>* insertedRows = nullptr);
+                                 std::vector<std::map<std::string, std::string>>* insertedRows = nullptr,
+                                 OwningMutationRows* owningRows = nullptr);
     DBStatus update(
         const std::string& dbname, const std::string& tablename,
         const std::map<std::string, std::string>& updates,
@@ -685,7 +707,8 @@ public:
         const UpdateResolver& updateResolver,
         const UpdateMatcher& updateMatcher,
         size_t* affectedRows,
-        std::vector<UpdateRowImage>* rowImages);
+        std::vector<UpdateRowImage>* rowImages,
+        OwningMutationRows* owningRows = nullptr);
     DBStatus updateRows(
         const std::string& dbname, const std::string& tablename,
         const SqlRow& updates, const std::vector<std::string>& conditions,
@@ -707,7 +730,8 @@ public:
         const SqlUpdateMatcher& updateMatcher,
         size_t* affectedRows,
         std::vector<UpdateRowImage>* rowImages,
-        const SqlMutationCallbacks* mutationCallbacks = nullptr);
+        const SqlMutationCallbacks* mutationCallbacks = nullptr,
+        OwningMutationRows* owningRows = nullptr);
     DBStatus remove(
         const std::string& dbname, const std::string& tablename,
         const std::vector<std::string>& conditions,
@@ -730,7 +754,8 @@ public:
         std::vector<SqlRow>* deletedRows,
         const SqlDeleteMatcher& deleteMatcher,
         size_t* affectedRows,
-        const SqlMutationCallbacks* mutationCallbacks = nullptr);
+        const SqlMutationCallbacks* mutationCallbacks = nullptr,
+        OwningMutationRows* owningRows = nullptr);
     struct OrderBySpec {
         std::string colName;
         bool ascending = true;
@@ -1351,6 +1376,10 @@ public:
                                         bool valueIsNull);
     static std::vector<Condition> parseConditions(const std::vector<std::string>& cstr);
     static bool evalConditionOnRow(const Condition& cond, const std::string& rowBuffer, const TableSchema& tbl);
+    // Execution-local pristine syntax only; original public entry stays uncached.
+    static bool evalConditionOnRowWithSyntax(const Condition& cond,
+        const std::string& rowBuffer, const TableSchema& tbl,
+        LocalExpressionSyntax* syntax);
     // Materialized executor rows must carry their own NULL bitmap: the
     // originating scan's RID binding is no longer active after buffering.
     static bool evalConditionOnRow(const Condition& cond,
@@ -1371,6 +1400,13 @@ public:
                                    const std::string& dbname,
                                    bool computeVirtual,
                                    bool* valueIsNull);
+    // The optional value is the exact evaluated VIRTUAL datum, not a decode
+    // of the returned display. Persisted columns leave it disengaged.
+    std::string extractColumnValue(const std::string& rowBuffer,
+                                   const TableSchema& tbl, size_t colIdx,
+                                   const std::string& dbname, bool computeVirtual,
+                                   bool* valueIsNull,
+                                   std::optional<ExprValue>* owningValue);
 
     // RID encode/decode (public for external use)
     static int64_t encodeRid(uint32_t pageId, uint16_t slotId);
@@ -2165,7 +2201,8 @@ private:
         const std::map<std::string, std::string>& values,
         const std::set<std::string>& nullColumns,
         std::vector<SqlRow>* insertedRows,
-        IdentityOverride identityOverride);
+        IdentityOverride identityOverride,
+        OwningMutationRows* owningRows = nullptr);
     DBStatus removeInternal(
         const std::string& dbname, const std::string& tablename,
         const std::vector<std::string>& conditions,
@@ -2174,7 +2211,8 @@ private:
         const std::set<int64_t>* exactRids,
         ReferentialActionContext& referentialContext,
         size_t* affectedRows = nullptr,
-        const SqlMutationCallbacks* mutationCallbacks = nullptr);
+        const SqlMutationCallbacks* mutationCallbacks = nullptr,
+        OwningMutationRows* owningRows = nullptr);
     DBStatus updateInternal(
         const std::string& dbname, const std::string& tablename,
         const std::map<std::string, std::string>& updates,
@@ -2187,7 +2225,8 @@ private:
         ReferentialActionContext& referentialContext,
         size_t* affectedRows = nullptr,
         std::vector<UpdateRowImage>* rowImages = nullptr,
-        const SqlMutationCallbacks* mutationCallbacks = nullptr);
+        const SqlMutationCallbacks* mutationCallbacks = nullptr,
+        OwningMutationRows* owningRows = nullptr);
 
 
 private:
@@ -2327,6 +2366,11 @@ private:
     inline static thread_local std::string moneyLocale_ = "C";
 
 private:
+    template<class Builder>
+    decltype(auto) withQueryBindingMetadata(const std::string& dbname,
+        const std::string& sql,bool finalizeUnknownOutput,
+        const std::function<std::optional<QueryRelationMetadata>(const std::string&)>& queryRelations,
+        Builder&& builder) const;
     void startBackgroundWorker();
     void stopBackgroundWorker();
     void backgroundWorkerLoop();

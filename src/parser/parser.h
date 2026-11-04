@@ -19,7 +19,17 @@ namespace dbms {
 //   2. 再逐步完善每个命令的参数解析
 // ============================================================================
 
+struct QueryBindingDatum;
+struct QueryBindingMetadata;
+struct QueryReturningDeclaration;
 class SQLParser {
+    // Only the two data-only RETURNING consumers can obtain this syntax.
+    // They destroy the original AST before returning descriptor data/bool;
+    // there is no public metadata-purpose AST/executable query interface.
+    friend QueryReturningDeclaration prepareReturningDeclaration(const std::string&,
+        const std::vector<QueryBindingDatum>&,const QueryBindingMetadata&);
+    friend bool validateReturningNamespace(const std::string&,const QueryBindingMetadata&);
+    ParseResult parseForReturningDeclaration(const std::string& sql);
 public:
     SQLParser() = default;
 

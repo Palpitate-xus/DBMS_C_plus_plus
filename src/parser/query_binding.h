@@ -149,6 +149,25 @@ struct PreparedQuery {
     std::string legacySql() const;
 };
 
+// New pure output endpoint: no partially prepared query escapes this API.
+struct QueryReturningOrigin {
+    uint32_t relationOid = 0;
+    uint16_t attributeNumber = 0;
+};
+struct QueryReturningSource {
+    std::string schema, relation;
+    size_t columnOrdinal = 0;
+    bool available = false;
+};
+struct QueryReturningDeclaration {
+    QueryRowDescriptor output;
+    std::vector<QueryReturningSource> sources;
+};
+// Names only; false means unsupported and preserves the existing consumer.
+bool validateReturningNamespace(const std::string& sql,const QueryBindingMetadata& metadata);
+QueryReturningDeclaration prepareReturningDeclaration(const std::string& sql,
+    const std::vector<QueryBindingDatum>& datums, const QueryBindingMetadata& metadata);
+
 PreparedQuery prepareQuery(const std::string& sql,
     const std::vector<QueryBindingDatum>& datums, const QueryBindingMetadata& metadata);
 } // namespace dbms

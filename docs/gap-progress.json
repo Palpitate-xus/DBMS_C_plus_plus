@@ -2,6 +2,40 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-04 RETURNING declaration, genuine generated/source values and actual operation costs",
+      "gap_ids": [
+        "QRY-08",
+        "TYPE-17",
+        "TYPE-19",
+        "PROTO-04"
+      ],
+      "status": "partial",
+      "evidence": [
+        "docs/performance-report-2026-10-30.md",
+        "docs/test-report.md",
+        "docs/postgresql-comparison.md",
+        "docs/postgresql-18-implementation-blueprint.md",
+        "docs/benchmarks/returning-declarations-hotpaths-20261104.json"
+      ],
+      "tests": [
+        "tests/returning_declaration_api_test.cpp",
+        "tests/virtual_generated_owning_test.cpp",
+        "tests/local_expression_syntax_test.cpp",
+        "tests/reindex_single_pass_test.cpp",
+        "tests/merge_returning_source_owning_test.cpp"
+      ],
+      "verification": {
+        "source": "Parent5df73e63;C4binary9d85/source228;freshC1actual62,C2rebuild16,C3one,C4two;strict62dependencies/core/freshstubs. Default425hold,masterPalpitate-xus,no branch/push/restart.",
+        "functional": "New123native122pass1strictquotedextractmetadata;132strictwire9→132pass;original5648→55pass/historybitmap1remaining. Original579fullraw/canonical/checks exact425/C3:301188/113,8381/2,111109/2,6857/11,1616/0. New33PG33pass,old/new27/6assignment_demandremain;pausedenum9exact,341/103notrun.",
+        "generations": "C3broad148native146/2 and95wire86/9 inclCTEstartup0SQL;C4target57native56/1,31wire24/7,0startup/timeout,CTEfull747/29old425same. Full13910/10533common no oldtrue→false;PID/13broadnonstandardlimits/oldtimeout1695prefix retained.",
+        "operations35": "Actual425/C4/425 each210validated/all3normal0=630/no warmupdiscard. All35=7faster19slower9between;update_range13.23/17.33percent slower,REINDEX2.28/7.51percent slower. Old driftminus42..plus56.30percent/allrawCPU/RSS/IO kept;defaultpromotion withheld.",
+        "query36": "Threebudgets9normal0,1296timed324warm18controls=1638requests/1620000rows4725000cells/full1620JSONL+CSVchecked1706. All36=25faster2slower9between;budgets9/1/2,4/1/7,12/0/0. Driftminus14.46..plus11.53percent;notnewPG/causal/statsclaim.",
+        "public_cost": "4process108phase/96publicstatements/8208queryrows/32updated. N512query212976→143005requests;UPDATEminus52611/3697887B;CPUlower onlythispublicfixture. N0samecallsplus11B/all4UPDATECPUs slower;N1queryplus36/7837B,UPDATEplus22/3797B,mixedCPU. Notlive/RSS/truepeak. ActualMain preparedmatcher bypassesfilterRows: prior2000parseMainestimate withdrawn.",
+        "resource55": "40complete+14controls+1readonlyspoolkill/40000rows118000cells/63checks/5normalcontexts;actualsame-dir reopen exact/ownednone. ObservedFDlow2high0,EOFempty;notwindowhardbudget/arbitrarywritecrash.",
+        "scope": "Original273statuses22/166/70/15 and254historyraw retained;onepartial=>255. Original2324tests exact+5=>2329/native1079. MD754/protected725/old3archives unchanged. No wholePG/all-operation completion;goalactive."
+      }
+    },
+    {
       "issue": "2026-11-03 shared builtin registry and real compound RETURNING data",
       "gap_ids": [
         "QRY-08",
