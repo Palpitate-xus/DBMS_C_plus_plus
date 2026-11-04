@@ -86,6 +86,8 @@
 #include <cstring>
 #include <exception>
 #include <iomanip>
+#include <locale>
+#include <string_view>
 #include <limits>
 #include <mutex>
 #include <thread>
@@ -6399,6 +6401,187 @@ std::filesystem::path StorageEngine::statsPath(const std::string& dbname) const 
     return dbPath(dbname) / ".stats";
 }
 
+namespace {
+// One column/ANALYZE only. Original self-comparability validation precedes
+// prepare(). No process-global locale, callback, datum or provider cache.
+class AnalyzeComparisonCache {
+public:
+    AnalyzeComparisonCache() = default;
+    AnalyzeComparisonCache(const AnalyzeComparisonCache&) = delete;
+    AnalyzeComparisonCache& operator=(const AnalyzeComparisonCache&) = delete;
+    struct SavedKey {
+        std::optional<int64_t> integer;
+        std::optional<double> floating;
+    };
+    bool prepare(const Column& column, const std::vector<std::string>& values,
+                 const std::vector<bool>& comparable) {
+        if (values.size() <= 1 || comparable.size() != values.size()) return false;
+        try {
+            // Mirror the existing compareValues branch precedence. In
+            // particular an array/variable datum must not enter the integral
+            // cache merely because its raw dataType spells "integer".
+            if ((!column.isArray && column.dataType == "regtype") ||
+                column.dataType == "uuid" ||
+                (!column.isArray && (column.dataType == "bit" ||
+                                      column.dataType == "bit varying"))) return false;
+            if (column.dataType == "char" ||
+                (column.isVariableLength && column.dataType != "numeric")) {
+                return prepareText(column);
+            }
+            if (column.dataType == "date" ||
+                column.storageCodec == Column::StorageCodec::TemporalMicros ||
+                column.dataType == "timestamp" || column.dataType == "timestamptz" ||
+                column.dataType == "datetime" || column.dataType == "time" ||
+                column.dataType == "numeric" || column.dataType == "money") return false;
+            if (column.dataType == "float" || column.dataType == "double" ||
+                column.dataType == "decimal") {
+                kind_ = Kind::Floating;
+                floating_.resize(values.size());
+                for (size_t i = 0; i < values.size(); ++i) if (comparable[i]) {
+                    double value = 0;
+                    if (!parseDoubleLiteral(values[i], value)) { disable(); return false; }
+                    floating_[i] = value;
+                }
+                return true;
+            }
+            const bool boolean = column.dataType == "boolean";
+            if (!boolean && !isIntegerStorageType(column.dataType)) return false;
+            kind_ = Kind::Integral;
+            integral_.resize(values.size());
+            for (size_t i = 0; i < values.size(); ++i) if (comparable[i]) {
+                if (boolean) {
+                    const auto value = parsePostgresBoolean(values[i]);
+                    if (!value) { disable(); return false; }
+                    integral_[i] = *value ? 1 : 0;
+                } else {
+                    // Same parser and complete-string rule as compareValues,
+                    // including its accepted leading whitespace and '+' sign.
+                    size_t used = 0;
+                    const int64_t value = std::stoll(values[i], &used);
+                    if (used != values[i].size()) { disable(); return false; }
+                    integral_[i] = value;
+                }
+            }
+            return true;
+        } catch (...) {
+            // Optional cache failure does not alter the original validation
+            // flags or comparator. The entire column takes its existing path.
+            disable();
+            return false;
+        }
+    }
+    bool enabled() const { return kind_ != Kind::None; }
+    std::optional<int> compare(size_t left, size_t right,
+                              const std::string& rawLeft,
+                              const std::string& rawRight) const {
+        if (kind_ == Kind::Integral) {
+            if (!integral_[left] || !integral_[right]) return std::nullopt;
+            return (*integral_[left] > *integral_[right]) -
+                   (*integral_[left] < *integral_[right]);
+        }
+        if (kind_ == Kind::Floating) {
+            if (!floating_[left] || !floating_[right]) return std::nullopt;
+            return compareFloatingValues(*floating_[left], *floating_[right]);
+        }
+        if (!enabled()) return std::nullopt;
+        const auto end = [&](const std::string& value) {
+            if (!blankPadded_) return value.size();
+            const auto last = value.find_last_not_of(' ');
+            return last == std::string::npos ? size_t(0) : last + 1;
+        };
+        const std::string_view a(rawLeft.data(), end(rawLeft));
+        const std::string_view b(rawRight.data(), end(rawRight));
+        if (kind_ == Kind::Binary) return a.compare(b);
+        if (kind_ == Kind::Reverse) return b.compare(a);
+        int compared;
+        if (catchLocaleErrors_) {
+            // Match localeCompare's existing per-pair catch-all fallback.
+            try { compared = facet_->compare(a.data(), a.data() + a.size(),
+                                              b.data(), b.data() + b.size()); }
+            catch (...) { compared = a.compare(b); }
+        } else {
+            // Explicit validated system locales retain their throwing path.
+            compared = facet_->compare(a.data(), a.data() + a.size(),
+                                       b.data(), b.data() + b.size());
+        }
+        return defaultByteTie_ && compared == 0 ? a.compare(b) : compared;
+    }
+    SavedKey take(size_t position) const {
+        SavedKey saved;
+        if (kind_ == Kind::Integral) saved.integer = integral_[position];
+        if (kind_ == Kind::Floating) saved.floating = floating_[position];
+        return saved;
+    }
+    void move(size_t destination, size_t source) {
+        if (kind_ == Kind::Integral) integral_[destination] = integral_[source];
+        if (kind_ == Kind::Floating) floating_[destination] = floating_[source];
+    }
+    void put(size_t destination, const SavedKey& saved) {
+        if (kind_ == Kind::Integral) integral_[destination] = saved.integer;
+        if (kind_ == Kind::Floating) floating_[destination] = saved.floating;
+    }
+private:
+    enum class Kind { None, Integral, Floating, Binary, Reverse, Locale };
+    bool prepareText(const Column& column) {
+        if (!column.enumValues.empty()) return false;
+        blankPadded_ = column.dataType == "char" || column.dataType == "character";
+        // canonicalColumnKeyValue has an earlier temporal-codec branch.
+        // Nonstandard padded/temporal metadata retains that original path.
+        if (blankPadded_ && column.storageCodec != Column::StorageCodec::Legacy) return false;
+        bool implicitLocale = false;
+        std::string name;
+        if (column.collation.empty()) {
+            if (!usesDefaultTextLocale(column)) { kind_ = Kind::Binary; return true; }
+            implicitLocale = true;
+            defaultByteTie_ = true;
+            name = "en_US.UTF-8";
+        } else {
+            const auto& effective = column.resolvedCollation.empty()
+                ? column.collation : column.resolvedCollation;
+            if (column.resolvedCollationUsesLocale) {
+                name = effective.empty() ? "C" : effective;
+            } else {
+                const auto normalized = collation::normalizeName(effective);
+                if (collation::isBinary(normalized)) { kind_ = Kind::Binary; return true; }
+                if (normalized == "reverse") { kind_ = Kind::Reverse; return true; }
+                if (normalized != "default" && normalized != "en_us" &&
+                    normalized != "en_us.utf8") return false;
+                implicitLocale = true;
+                name = "en_US.UTF-8";
+            }
+        }
+        try {
+            locale_.emplace(name.c_str());
+            facet_ = &std::use_facet<std::collate<char>>(*locale_);
+        } catch (const std::runtime_error&) {
+            if (!implicitLocale) throw;
+            // The fixed builtin's unavailable named locale follows exactly
+            // its existing binary fallback, without one throw for every pair.
+            locale_.reset();
+            facet_ = nullptr;
+            kind_ = Kind::Binary;
+            return true;
+        }
+        catchLocaleErrors_ = implicitLocale;
+        kind_ = Kind::Locale;
+        return true;
+    }
+    void disable() {
+        kind_ = Kind::None;
+        integral_.clear(); floating_.clear();
+        facet_ = nullptr; locale_.reset();
+    }
+    Kind kind_ = Kind::None;
+    bool blankPadded_ = false;
+    bool defaultByteTie_ = false;
+    bool catchLocaleErrors_ = false;
+    std::vector<std::optional<int64_t>> integral_;
+    std::vector<std::optional<double>> floating_;
+    std::optional<std::locale> locale_;
+    const std::collate<char>* facet_ = nullptr;
+};
+} // namespace
+
 // The input is already ordered by the column's SQL comparison semantics.
 // Coalesce equal values without losing their original display precision.
 static std::vector<std::pair<std::string, size_t>> computeTypedMCV(
@@ -6414,6 +6597,39 @@ static std::vector<std::pair<std::string, size_t>> computeTypedMCV(
         } else {
             result.push_back({value, 1});
         }
+    }
+    cardinality = result.size();
+    std::stable_sort(result.begin(), result.end(),
+              [](const auto& a, const auto& b) { return a.second > b.second; });
+    if (result.size() > topN) result.resize(topN);
+    return result;
+}
+
+// Preserve the original full raw representatives and stable frequency ties.
+// A key missing for an invalid input falls back to the original typed equality.
+static std::vector<std::pair<std::string, size_t>> computeCachedTypedMCV(
+    const Column& column, const std::vector<std::string>& vals,
+    const AnalyzeComparisonCache& comparison, size_t& cardinality,
+    size_t topN = 10) {
+    if (!comparison.enabled())
+        return computeTypedMCV(column, vals, cardinality, topN);
+    std::vector<std::pair<std::string, size_t>> result;
+    size_t representative = 0;
+    for (size_t position = 0; position < vals.size(); ++position) {
+        const auto& value = vals[position];
+        bool equal = false;
+        if (!result.empty()) {
+            if (result.back().first == value) equal = true;
+            else {
+                const auto compared = comparison.compare(
+                    representative, position, result.back().first, value);
+                equal = compared ? *compared == 0 : StorageEngine::compareValues(
+                    column, result.back().first, false, value, false, "=")
+                    == StorageEngine::PredicateTruth::True;
+            }
+        }
+        if (equal) ++result.back().second;
+        else { result.push_back({value, 1}); representative = position; }
     }
     cardinality = result.size();
     std::stable_sort(result.begin(), result.end(),
@@ -6534,6 +6750,36 @@ static void writeStatsEntry(std::ostream& ofs, const std::string& tname,
     ofs << "|" << mcvToString(cs.mcv) << "|" << cs.nullCount << "\n";
 }
 
+// Materialized OLD/NEW images have no live RID (DELETE can already have
+// removed the tuple). Keep their own v2 NULL bitmap attached while decoding,
+// rather than reusing another scan row's bitmap or the legacy int sentinel.
+class BufferedNullRowBinding {
+public:
+    BufferedNullRowBinding(const TableSchema& schema,
+                           const std::vector<bool>& nulls)
+        : oldSchema_(g_bufferedConditionSchema),
+          oldNulls_(g_bufferedConditionNulls),
+          active_(usesHeapTupleHeader(schema.formatVersion) &&
+                  nulls.size() == schema.len) {
+        if (active_) {
+            g_bufferedConditionSchema = &schema;
+            g_bufferedConditionNulls = &nulls;
+        }
+    }
+    ~BufferedNullRowBinding() {
+        if (active_) {
+            g_bufferedConditionSchema = oldSchema_;
+            g_bufferedConditionNulls = oldNulls_;
+        }
+    }
+    BufferedNullRowBinding(const BufferedNullRowBinding&) = delete;
+    BufferedNullRowBinding& operator=(const BufferedNullRowBinding&) = delete;
+private:
+    const TableSchema* oldSchema_;
+    const std::vector<bool>* oldNulls_;
+    bool active_;
+};
+
 bool StorageEngine::analyzeTable(const std::string& dbname,
                                  const std::string& tablename) {
     if (!tableExists(dbname, tablename)) return false;
@@ -6543,15 +6789,55 @@ bool StorageEngine::analyzeTable(const std::string& dbname,
     stats.rowCount = 0;
     std::map<std::string, std::vector<std::string>> allVals;
     std::map<std::string, size_t> nullCounts;
+    bool capturePhysicalNulls = tbl.formatVersion == DATA_FILE_FORMAT_VERSION;
+    for (size_t column = 0; column < tbl.len; ++column)
+        if (tbl.cols[column].generatedKind == 'v') capturePhysicalNulls = false;
 
-    if (!forEachRow(dbname, tablename, [&](uint32_t, uint16_t, const char* data, size_t len) {
+    if (!forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId, const char* data, size_t len) {
         stats.rowCount++;
         std::string row(data, len);
+        std::vector<bool> capturedNulls;
+        std::optional<BufferedNullRowBinding> capturedBinding;
+        bool bitmapAttempted = false;
         for (size_t i = 0; i < tbl.len; ++i) {
             const std::string& cname = tbl.cols[i].dataName;
             if (g_scanHeapTuple && dbms::isNull(g_scanHeapTuple, static_cast<int>(i))) {
                 ++nullCounts[cname];
                 continue;
+            }
+            // Start exactly at the first original non-NULL nullable-cell
+            // extraction. All-NULL/NOT-NULL-only rows keep zero probes.
+            if (capturePhysicalNulls && !bitmapAttempted &&
+                tbl.cols[i].isNull && g_scanHeapTuple) {
+                bitmapAttempted = true;
+                // Retain a real current-file check per used row. Borrow only
+                // the same tuple that this scan still pins; never reuse a
+                // bitmap from a different allocator/page generation.
+                PageAllocator* current = getPageAllocator(dbname, tablename);
+                if (current) {
+                    char* buffer = current->fetchPage(pageId);
+                    if (buffer) {
+                        struct Pin {
+                            PageAllocator* allocator;
+                            uint32_t page;
+                            ~Pin() { allocator->unpinPage(page); }
+                        } pin{current, pageId};
+                        PageWrapper page(buffer, current->pageSize(), tbl.formatVersion);
+                        const char* tuple = nullptr;
+                        size_t length = 0;
+                        if (page.read(slotId, tuple, length) &&
+                            length >= sizeof(HeapTupleHeaderData) &&
+                            tuple == reinterpret_cast<const char*>(g_scanHeapTuple)) {
+                            capturedNulls.assign(tbl.len, false);
+                            for (size_t column = 0; column < tbl.len; ++column)
+                                capturedNulls[column] = dbms::isNull(
+                                    castHeapHeader(tuple), static_cast<int>(column));
+                            capturedBinding.emplace(tbl, capturedNulls);
+                        }
+                    }
+                }
+                // If a coherent capture is unavailable, execute the complete
+                // original per-cell extraction below. Exceptions propagate.
             }
             std::string val = extractColumnValue(row, tbl, i);
             allVals[tbl.cols[i].dataName].push_back(val);
@@ -6566,6 +6852,7 @@ bool StorageEngine::analyzeTable(const std::string& dbname,
         cs.nullCount = nullCounts[cname];
         auto& vals = allVals[cname];
         const Column& column = tbl.cols[i];
+        AnalyzeComparisonCache comparison;
         if (vals.size() > 1) {
             std::vector<size_t> order;
             std::vector<bool> comparable;
@@ -6580,31 +6867,39 @@ bool StorageEngine::analyzeTable(const std::string& dbname,
                     : compareValues(column, value, false, value, false, "=") != PredicateTruth::Unknown);
                 order.push_back(valueIndex);
             }
+            // Original validation above is complete before any cache setup.
+            // An unsupported/failed cache retains the entire old comparator.
+            comparison.prepare(column, vals, comparable);
             std::sort(order.begin(), order.end(),
-                [&column, &vals, &comparable](size_t left, size_t right) -> bool {
+                [&column, &vals, &comparable, &comparison](size_t left, size_t right) -> bool {
                     // Retain the orderable/non-orderable partition: a
                     // per-pair fallback would break strict weak ordering.
                     if (comparable[left] != comparable[right]) return comparable[left];
                     if (!comparable[left]) return vals[left] < vals[right];
                     // Comparability (and locale validity) was checked first.
                     if (vals[left] == vals[right]) return false;
+                    if (const auto compared = comparison.compare(
+                            left, right, vals[left], vals[right])) return *compared < 0;
                     return compareValues(column, vals[left], false, vals[right], false, "<")
                         == PredicateTruth::True;
                 });
-            // Apply the destination-to-source permutation in place. Only
-            // indexes, comparability bits and one temporary string are extra;
-            // neither long datums nor an array of string objects are copied.
+            // Apply the destination-to-source permutation in place. Scalar
+            // cache keys follow exactly the same cycles as the raw strings;
+            // no extra raw datum or array of raw string objects is copied.
             for (size_t start = 0; start < order.size(); ++start) {
                 if (order[start] == start) continue;
                 std::string saved = std::move(vals[start]);
+                const auto savedKey = comparison.take(start);
                 size_t destination = start;
                 while (order[destination] != start) {
                     const size_t source = order[destination];
                     vals[destination] = std::move(vals[source]);
+                    comparison.move(destination, source);
                     order[destination] = destination;
                     destination = source;
                 }
                 vals[destination] = std::move(saved);
+                comparison.put(destination, savedKey);
                 order[destination] = destination;
             }
         }
@@ -6624,7 +6919,8 @@ bool StorageEngine::analyzeTable(const std::string& dbname,
             }
         }
         // Compute MCV
-        cs.mcv = computeTypedMCV(column, vals, cs.cardinality, MCV_TOP_N);
+        cs.mcv = computeCachedTypedMCV(
+            column, vals, comparison, cs.cardinality, MCV_TOP_N);
         stats.colStats[cname] = cs;
     }
 
@@ -10641,35 +10937,6 @@ private:
     std::string oldDb_;
 };
 
-// Materialized OLD/NEW images have no live RID (DELETE can already have
-// removed the tuple). Keep their own v2 NULL bitmap attached while decoding,
-// rather than reusing another scan row's bitmap or the legacy int sentinel.
-class BufferedNullRowBinding {
-public:
-    BufferedNullRowBinding(const TableSchema& schema,
-                           const std::vector<bool>& nulls)
-        : oldSchema_(g_bufferedConditionSchema),
-          oldNulls_(g_bufferedConditionNulls),
-          active_(usesHeapTupleHeader(schema.formatVersion) &&
-                  nulls.size() == schema.len) {
-        if (active_) {
-            g_bufferedConditionSchema = &schema;
-            g_bufferedConditionNulls = &nulls;
-        }
-    }
-    ~BufferedNullRowBinding() {
-        if (active_) {
-            g_bufferedConditionSchema = oldSchema_;
-            g_bufferedConditionNulls = oldNulls_;
-        }
-    }
-    BufferedNullRowBinding(const BufferedNullRowBinding&) = delete;
-    BufferedNullRowBinding& operator=(const BufferedNullRowBinding&) = delete;
-private:
-    const TableSchema* oldSchema_;
-    const std::vector<bool>* oldNulls_;
-    bool active_;
-};
 
 void detail::decodeStoredRowValues(StorageEngine& engine,
                                   const std::string& database,
@@ -13221,6 +13488,36 @@ DBStatus StorageEngine::reindex(const std::string& dbname,
         if (!metadata.whereCondition.empty()) singlePassEligible = false;
     }
 
+    // Project only the owning map, not physical extraction demand. Every
+    // column still takes its original decoder/NULL/TOAST path in schema order.
+    // Bad or ambiguous dependency metadata keeps the exact current full-map
+    // callback in this same single-pass branch; no alternate scan is retried.
+    std::array<bool, MAX_COLUMNS> retainedIndexColumns{};
+    bool projectIndexMap = singlePassEligible;
+    if (projectIndexMap) {
+        const auto requireColumn = [&](const std::string& name) {
+            size_t ordinal = tbl.len;
+            for (size_t i = 0; i < tbl.len; ++i) {
+                if (tbl.cols[i].dataName != name) continue;
+                if (ordinal != tbl.len) return false;
+                ordinal = i;
+            }
+            if (ordinal == tbl.len) return false;
+            retainedIndexColumns[ordinal] = true;
+            return true;
+        };
+        for (const auto& metadata : secondaryIndexes) {
+            if (!requireColumn(metadata.name)) projectIndexMap = false;
+            for (const auto& included : metadata.includeCols)
+                if (!requireColumn(included)) projectIndexMap = false;
+        }
+        for (const auto& metadata : compositeIndexes) {
+            if (metadata.columns.empty()) projectIndexMap = false;
+            for (const auto& name : metadata.columns)
+                if (!requireColumn(name)) projectIndexMap = false;
+        }
+    }
+
     if (singlePassEligible) {
         BPTree* primary = createPending(
             indexPath(dbname, tablename), tableKey, true);
@@ -13260,7 +13557,17 @@ DBStatus StorageEngine::reindex(const std::string& dbname,
             // One owning logical map is valid only during this genuine heap
             // callback and its existing NULL binding. Keep no row/context
             // between callbacks and pass the original schema/key builders.
-            const auto values = indexRowValuesFromBuffer(*this, tbl, row, dbname);
+            const auto values = [&]() {
+                if (!projectIndexMap)
+                    return indexRowValuesFromBuffer(*this, tbl, row, dbname);
+                std::map<std::string, std::string> retained;
+                for (size_t ordinal = 0; ordinal < tbl.len; ++ordinal) {
+                    auto value = extractColumnValue(row, tbl, ordinal, dbname, true);
+                    if (retainedIndexColumns[ordinal])
+                        retained[tbl.cols[ordinal].dataName] = std::move(value);
+                }
+                return retained;
+            }();
             for (size_t i = 0; i < secondaryIndexes.size(); ++i) {
                 if (secondaryStatus[i] != DBStatus::OK) return;
                 EvaluatedIndexEntry entry;

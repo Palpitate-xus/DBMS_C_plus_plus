@@ -2,6 +2,35 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-04 ANALYZE comparison/owned NULL bitmap and REINDEX map costs",
+      "gap_ids": [
+        "OPT-04",
+        "IDX-03",
+        "IDX-15"
+      ],
+      "status": "partial",
+      "evidence": [
+        "docs/performance-report-2026-10-30.md",
+        "docs/test-report.md",
+        "docs/postgresql-comparison.md",
+        "docs/postgresql-18-implementation-blueprint.md",
+        "docs/benchmarks/analyze-reindex-main-costs-20261104.json"
+      ],
+      "tests": [
+        "tests/analyze_comparison_cache_test.cpp",
+        "tests/analyze_bitmap_caller_test.cpp",
+        "tests/reindex_materialization_test.cpp"
+      ],
+      "verification": {
+        "source": "Parent019cd761;P5C2normala3ba/source228/headers158;actualnormal1TU61reuse descendedfresh62 andfreshstub;default425held/masterPalpitate-xus/no branch,push,restart.",
+        "functional": "Original22native allpass;new comparison8/240/3probes oldC4/C2 16statsbytesexact;bitmap each12/0;newREINDEX8/0;private observer first1/7incorrectN retained, v2 8/0 each3344decoder;PUBLICall60/48rebuilds/12setups. Independentreview18/18;initialharness/compile/fault limits kept.",
+        "Main_diagnostic": "32old425/C4UPDATEs1450SQL+2prepare;selected4/tail4 each366SQL+1prepare;tailCPU412.707–431.121ms,heap79.382–80.698/sortMCV332.226–351.135/persist.486–.618/6001getPA. Parentselectedincludespostlude. InstrumentsnotnormalSQLspeed; no unchangedPK50x1000scan.",
+        "performance": "All630operationactions/35=4fast28slow3between;ANALYZE369.369→73.629→402.820ms,rangeUPDATE599.605→388.647→649.714. Whole36=4fast6slow26between/all1296timed324warm18controls1638SQL/1620000rows4725000cells/9normalcontexts. Resource55/40fullreads14controls1ownedreadonlykill/40000rows118000cells/63checks;ownednone.",
+        "remaining_cost": "28wallslow include15CPUalsoaboveboth;RSSpostsnapshotall35higher,notpeak/causal. FullREINDEX278.582→331.909→326.213ms remainsnegative, despite separateC4/C1API CPU14.21percentlower/allN0N1counternegativekept. No fullPG or alloperation completion.",
+        "scope": "Original273statusitems and255historyprefixexact+1partial=>256;original2329tests+3=>2332/top1083CPP(1082excludingstub)+5nested;MD754/protected725/old4archivebytesretained. Goalactive."
+      }
+    },
+    {
       "issue": "2026-11-04 RETURNING declaration, genuine generated/source values and actual operation costs",
       "gap_ids": [
         "QRY-08",
