@@ -22,7 +22,10 @@ namespace dbms {
 struct QueryBindingDatum;
 struct QueryBindingMetadata;
 struct QueryReturningDeclaration;
+struct GeneratedColumnProgram;
 class SQLParser {
+    friend struct GeneratedColumnProgram;
+    static ExprPtr parseGeneratedDefinition(const std::string& source);
     // Only the two data-only RETURNING consumers can obtain this syntax.
     // They destroy the original AST before returning descriptor data/bool;
     // there is no public metadata-purpose AST/executable query interface.

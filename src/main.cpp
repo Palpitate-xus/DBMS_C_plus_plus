@@ -21137,6 +21137,7 @@ class PreparedWithDmlRuntime {
                     found=scan->next(raw);
                     if(!found && scan->hasError())throw dbms::DbError("XX000",scan->errorMessage());
                     if(found)for(size_t i=0;i<scanSchema.len;++i) {
+                        if(scanSchema.cols[i].generatedKind=='v'){cells.emplace_back();continue;}
                         bool computedNull=false;
                         const auto value=g_engine.extractColumnValue(raw,scanSchema,i,session_.currentDB,true,&computedNull);
                         cells.emplace_back(rangePointer->columns[i].type,value,computedNull ||
@@ -21151,7 +21152,7 @@ class PreparedWithDmlRuntime {
                     }
                 }
                 if(!found)return false;
-                row=*currentOuter;(*executionOwner)->setSourceRow(row,rangePointer->ordinal,cells);
+                row=*currentOuter;(*executionOwner)->setSourceInputs(row,rangePointer->ordinal,cells,true);
                 return true;
             };
             return node;
@@ -21250,7 +21251,14 @@ class PreparedWithDmlRuntime {
                         return find(side->occurrences.begin(),side->occurrences.end(),ordinal)!=side->occurrences.end();
                     };
                     if(belongs(right,a->binding->sourceOrdinal) && belongs(left,b->binding->sourceOrdinal))swap(a,b);
-                    if(belongs(left,a->binding->sourceOrdinal) && belongs(right,b->binding->sourceOrdinal)) {
+                    const auto generated=[&](const dbms::QueryColumnBinding& binding) {
+                        for(const auto& range:query_->sourceRanges)if(range.ordinal==binding.sourceOrdinal)
+                            return range.generatedRelation && binding.columnOrdinal<range.generatedRelation->columns.size() &&
+                                bool(range.generatedRelation->columns[binding.columnOrdinal]);
+                        return false;
+                    };
+                    if(!generated(*a->binding) && !generated(*b->binding) &&
+                       belongs(left,a->binding->sourceOrdinal) && belongs(right,b->binding->sourceOrdinal)) {
                         integerJoinKey=IntegerJoinKey{{a->binding->sourceOrdinal,a->binding->columnOrdinal},
                             {b->binding->sourceOrdinal,b->binding->columnOrdinal},type};
                         node->planAttributes["integerKeyPrefilter"]="true";
@@ -21269,19 +21277,16 @@ class PreparedWithDmlRuntime {
             if(item->joinCondition)(*executionOwner)->prepareExpression(item->joinCondition.get());
             left->rebind(row);right->rebind(row);*position=JoinPosition{};
         };
-        node->read=[executionOwner,currentOuter,left,right,leftJoin,rightJoin,merged,item,keys,comparisons,position,integerJoinKey]
+        node->read=[executionOwner,currentOuter,left,right,leftJoin,rightJoin,merged,item,keys,comparisons,position,integerJoinKey,database=session_.currentDB]
             (size_t,dbms::RowContext& output) {
             const auto& execution=*executionOwner;
-            dbms::ExprEvaluator comparator;
+            dbms::ExprEvaluator comparator;comparator.setCurrentDB(database);
             const auto combine=[&](const dbms::RowContext* a,const dbms::RowContext* b) {
                 auto row=*currentOuter;
                 const auto fill=[&](const shared_ptr<DmlSourceNode>& side,const dbms::RowContext* input) {
                     for(const auto ordinal:side->occurrences) {
                         const auto& range=execution->sourceRange(ordinal);
-                        vector<dbms::ExprValue> cells;
-                        for(size_t i=0;i<range.columns.size();++i)
-                            cells.push_back(input?input->boundColumn(ordinal,i):dbms::ExprValue(range.columns[i].type,"",true));
-                        execution->setSourceRow(row,ordinal,cells);
+                        execution->copySourceInputs(row,ordinal,input);
                     }
                 };
                 fill(left,a);fill(right,b);
@@ -21289,7 +21294,7 @@ class PreparedWithDmlRuntime {
                     vector<dbms::ExprValue> cells;
                     for(size_t i=0;i<keys.size();++i) {
                         const auto& key=keys[i];
-                        const auto& l=row.boundColumn(key.first.first,key.first.second);
+                        const auto l=comparator.readBoundColumn(key.first.first,key.first.second,row);
                         const auto* operands=static_cast<const dbms::BinaryOpExpr*>(comparisons->at(i).get());
                         cells.push_back(comparator.eval(l.isNull?operands->right.get():operands->left.get(),row));
                     }
@@ -21304,8 +21309,8 @@ class PreparedWithDmlRuntime {
                     const auto occurrence=position->right++;
                     if(position->rightMatched.size()<=occurrence)position->rightMatched.resize(occurrence+1,false);
                     if(integerJoinKey) {
-                        const auto& l=a.boundColumn(integerJoinKey->left.first,integerJoinKey->left.second);
-                        const auto& r=b.boundColumn(integerJoinKey->right.first,integerJoinKey->right.second);
+                        const auto l=comparator.readBoundColumn(integerJoinKey->left.first,integerJoinKey->left.second,a);
+                        const auto r=comparator.readBoundColumn(integerJoinKey->right.first,integerJoinKey->right.second,b);
                         if(l.typeName==integerJoinKey->type && r.typeName==integerJoinKey->type) {
                             if(l.isNull || r.isNull)continue;
                             int64_t lk=0,rk=0;
@@ -22178,6 +22183,74 @@ static bool usesInheritedQueryCteSource(const dbms::SelectStmt& root,
     return statement(&root, {});
 }
 
+// This finite probe adds no expression analysis. An ordinary physical
+// generated-column JOIN may use the already existing typed source owner only
+// when its raw input/target syntax cannot introduce CAST/callee/child-input
+// analysis. All other legacy admission remains unchanged.
+static bool plainGeneratedJoinSourceProbe(const dbms::SelectStmt& select,Session& session) {
+    if(select.command!=dbms::SqlCommand::Select || !select.fromClause ||
+       select.fromClause->type!=dbms::FromItem::Type::Join || !select.ctes.empty() ||
+       select.setOp!=dbms::SetOp::None || select.setOpLhs || select.setOpRhs ||
+       !select.valuesRows.empty() || !select.groupBy.empty() || !select.groupByElems.empty() ||
+       select.having || select.distinct || !select.distinctOn.empty() ||
+       !select.windowDefs.empty() || !select.locking.empty() || select.withTies ||
+       select.limitExpr || select.offsetExpr)return false;
+    function<bool(const dbms::Expr*)> plainValue=[&](const dbms::Expr* value) {
+        if(!value)return true;
+        if(value->preparedSubquery)return false;
+        if(dynamic_cast<const dbms::ColumnRefExpr*>(value) || value->type==dbms::ExprType::A_Star)return true;
+        if(const auto* literal=dynamic_cast<const dbms::LiteralExpr*>(value)) {
+            if(!literal->typeName.empty())return false;
+            const auto text=toLower(literal->value);
+            return text=="null" || text=="true" || text=="false" ||
+                (!text.empty() && all_of(text.begin(),text.end(),[](unsigned char c){return c>='0' && c<='9';}));
+        }
+        if(const auto* binary=dynamic_cast<const dbms::BinaryOpExpr*>(value)) {
+            static const set<string> operators={"=","<>","!=","<",">","<=",">=","AND","OR","IS DISTINCT FROM","IS NOT DISTINCT FROM"};
+            return operators.count(binary->op) && plainValue(binary->left.get()) && plainValue(binary->right.get());
+        }
+        if(const auto* unary=dynamic_cast<const dbms::UnaryOpExpr*>(value)) {
+            static const set<string> operators={"NOT","IS NULL","IS NOT NULL","+","-"};
+            return operators.count(unary->op) && plainValue(unary->operand.get());
+        }
+        // In particular no CASE, COALESCE/call, CAST, parameter or SQL child
+        // enters new whole-query analysis through this structural probe.
+        return false;
+    };
+    for(const auto& target:select.selectList)if(!plainValue(target.expr.get()))return false;
+    if(!plainValue(select.whereClause.get()))return false;
+    for(const auto& order:select.orderBy)if(!order.usingOp.empty() || !plainValue(order.expr.get()))return false;
+    function<bool(const dbms::FromItem*)> plainSource=[&](const dbms::FromItem* item) {
+        if(!item)return false;
+        if(item->type==dbms::FromItem::Type::Table)return true;
+        if(item->type==dbms::FromItem::Type::Join)
+            return plainValue(item->joinCondition.get()) && plainSource(item->left.get()) && plainSource(item->right.get());
+        if(item->type!=dbms::FromItem::Type::Subquery)return false;
+        const auto* child=dynamic_cast<const dbms::SelectStmt*>(item->subquery.get());
+        if(!child || child->command!=dbms::SqlCommand::Values || child->fromClause ||
+           !child->ctes.empty() || child->setOp!=dbms::SetOp::None || child->setOpLhs || child->setOpRhs ||
+           child->whereClause || !child->groupBy.empty() || !child->groupByElems.empty() || child->having ||
+           !child->orderBy.empty() || child->limit || child->offset || child->limitExpr || child->offsetExpr ||
+           child->withTies || !child->locking.empty() || child->valuesRows.empty())return false;
+        for(const auto& row:child->valuesRows)for(const auto& value:row)
+            if(!dynamic_cast<const dbms::LiteralExpr*>(value.get()) || !plainValue(value.get()))return false;
+        return true;
+    };
+    if(!plainSource(select.fromClause.get()))return false;
+    // Resolve only genuine physical metadata after the entire new syntax
+    // envelope was proven; there is no source/value/routine evaluation here.
+    function<bool(const dbms::FromItem*)> hasPhysicalVirtual=[&](const dbms::FromItem* item) {
+        if(item->type==dbms::FromItem::Type::Join)
+            return hasPhysicalVirtual(item->left.get()) || hasPhysicalVirtual(item->right.get());
+        if(item->type!=dbms::FromItem::Type::Table)return false;
+        const auto table=resolveTableName(session,item->tableName);
+        if(!g_engine.tableExists(session.currentDB,table))return false;
+        const auto schema=g_engine.getTableSchema(session.currentDB,table);
+        return any_of(schema.cols,schema.cols+schema.len,[](const auto& column){return column.generatedKind=='v';});
+    };
+    return hasPhysicalVirtual(select.fromClause.get());
+}
+
 static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& handled) {
     handled=false;
     dbms::SQLParser parser;auto parsed=parser.parseForBinding(rawSql);
@@ -22347,7 +22420,8 @@ static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& 
         return false;
     };
     required=required || requiresTypedSource(select->fromClause.get());
-    if(!required && !comparisonCandidate)return false;
+    const bool generatedJoinProbe=!required && !comparisonCandidate && plainGeneratedJoinSourceProbe(*select,session);
+    if(!required && !comparisonCandidate && !generatedJoinProbe)return false;
     if(select->command==dbms::SqlCommand::Values) {
         if(!select->ctes.empty() || !select->orderBy.empty() || select->whereClause || select->limit || select->offset || select->setOp!=dbms::SetOp::None)return false;
     } else {
@@ -22405,7 +22479,38 @@ static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& 
         bool enumRequired=false;
         for(const auto& item:bound->selectList)enumRequired=enumRequired || requiresPreparedValue(item.expr.get());
         for(const auto& item:bound->orderBy)enumRequired=enumRequired || requiresPreparedValue(item.expr.get());
-        if(!enumRequired)return false;
+        // Reuse this already bound actual query, including for ordinary
+        // comparisons that previously fell back after their existing bind.
+        // Only an actual current-level physical generated occurrence grants
+        // this role; child/CTE/view/merged ranges cannot impersonate it.
+        const bool generatedRequired=any_of(query->sourceRanges.begin(),query->sourceRanges.end(),[&](const auto& range) {
+            return range.owner==bound && range.source && range.source->type==dbms::FromItem::Type::Table &&
+                !range.mergedUsing && !range.cteStatement && !range.viewQuery && bool(range.generatedRelation);
+        });
+        if(!enumRequired && generatedRequired) {
+            // This new admission must preserve the connected old receiver
+            // when its raw source OID and actual character-array output
+            // declaration still name different data carriers. Inspect only
+            // the same already bound declaration; never returned row bytes.
+            const auto legacyCharacterArrayCarrier=[](const dbms::QueryOutputColumn& field) {
+                const auto& declaration=field.typeMetadata;
+                if(!declaration || declaration->kind!=dbms::DatumKind::Array ||
+                   declaration->enumType || !declaration->arrayElement)return false;
+                const auto& element=*declaration->arrayElement;
+                if(element.kind!=dbms::DatumKind::Scalar || element.enumType ||
+                   element.actualOid!=field.typeOid || element.codecOid!=field.typeOid)return false;
+                const auto arrayOid=field.typeOid==1042 ? 1014U :
+                    field.typeOid==1043 ? 1015U : 0U;
+                return arrayOid && declaration->actualOid==arrayOid &&
+                    declaration->codecOid==arrayOid &&
+                    dbms::mapBuiltinTypeNameToOid(field.type)==arrayOid;
+            };
+            const auto declaration=query->statementOutputs.find(bound);
+            if(declaration!=query->statementOutputs.end() &&
+               any_of(declaration->second.begin(),declaration->second.end(),
+                   legacyCharacterArrayCarrier))return false;
+        }
+        if(!enumRequired && !generatedRequired)return false;
     }
     PreparedWithDmlRuntime runtime(session,std::move(query));auto result=runtime.runRead();
     for(const auto& name:result.columns)cout<<name<<' ';cout<<'\n';
@@ -37280,7 +37385,11 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 if(previous==initializedFrames.end())initializedFrames.emplace(argument.frameIdentity,
                     make_pair(function.preparedFrame.startOffset,function.preparedFrame.endOffset));
             }
-            bool canUseVolcanoWindow = !nestedWindowProjection && !hasAgg && !hasScalar &&
+            const bool generatedPhysicalInput=any_of(tbl.cols,tbl.cols+tbl.len,
+                [](const dbms::Column& column){return column.generatedKind=='v';});
+            // This older raw-row WindowOp has no generated-input receiver;
+            // its existing semantic fallback below now owns that transport.
+            bool canUseVolcanoWindow = !generatedPhysicalInput && !nestedWindowProjection && !hasAgg && !hasScalar &&
                                        distinctOnCols.empty() &&
                                        exprOrderBySpecs.empty() &&
                                        orderBySpecs.size() <= 1;
@@ -37460,8 +37569,44 @@ static bool executeInternal(const string& rawSql, Session& s) {
             struct LegacyWindowRow : map<string, string> {
                 set<size_t> nullWindows;
                 vector<string> windowValues;
+                shared_ptr<const vector<dbms::ExprValue>> storedInputs;
+                shared_ptr<const dbms::RowContext> generatedInput;
             };
             vector<LegacyWindowRow> rows;
+            dbms::DatumMetadataContextPtr windowInputMetadata;
+            if(any_of(tbl.cols,tbl.cols+tbl.len,[](const dbms::Column& column){return column.generatedKind=='v';}))
+                windowInputMetadata=g_engine.prepareDatumMetadataContext(queryDb,tname);
+            const auto windowGeneration=windowInputMetadata?windowInputMetadata->generatedSource:dbms::GeneratedRelationPtr{};
+            vector<dbms::GeneratedReadPtr> windowReads(tbl.len);
+            if(windowGeneration) {
+                if(windowGeneration->columns.size()!=tbl.len)throw dbms::DbError("XX000","window generated source lost its actual declaration");
+                map<string,string> names;for(size_t i=0;i<tbl.len;++i)names.emplace(tbl.cols[i].dataName,tbl.cols[i].dataName);
+                for(size_t i=0;i<tbl.len;++i)if(windowGeneration->columns[i])
+                    windowReads[i]=dbms::bindGeneratedColumn(windowGeneration->columns[i],0,names,true);
+            }
+            dbms::ExprEvaluator generatedWindowReader;generatedWindowReader.setCurrentDB(queryDb);
+            const auto windowValue=[&](const LegacyWindowRow& row,const string& name)->dbms::ExprValue {
+                for(size_t i=0;i<tbl.len;++i)if(tbl.cols[i].dataName==name) {
+                    if(windowReads[i]) {
+                        if(!row.generatedInput)throw dbms::DbError("XX000","window row lost its explicit generated-input presence");
+                        return generatedWindowReader.readNamedColumn(name,*row.generatedInput);
+                    }
+                    const auto cell=row.find(name);
+                    return dbms::ExprValue(dbms::ExprHelper::canonicalResultTypeName(tbl.cols[i].dataType+(tbl.cols[i].isArray?"[]":"")),
+                        cell==row.end()?string():cell->second,cell==row.end());
+                }
+                throw dbms::DbError("42703","window input column does not exist: "+name);
+            };
+            const auto windowInputs=[&](const LegacyWindowRow& row,const dbms::QueryRowDescriptor& descriptor) {
+                if(row.storedInputs)return *row.storedInputs;
+                vector<dbms::ExprValue> cells;cells.reserve(tbl.len);
+                for(size_t column=0;column<tbl.len;++column) {
+                    const auto cell=row.find(tbl.cols[column].dataName);
+                    cells.emplace_back(descriptor[column].type,cell==row.end()?string():cell->second,cell==row.end());
+                    cells.back().collation=tbl.cols[column].collation;
+                }
+                return cells;
+            };
             const auto partitionColumn = [&](const string& name) -> const dbms::Column& {
                 for (size_t column = 0; column < tbl.len; ++column)
                     if (tbl.cols[column].dataName == name) return tbl.cols[column];
@@ -37604,13 +37749,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     [&, descriptor](size_t index, vector<dbms::ExprValue>& cells) {
                         cells.clear();
                         if (index >= rows.size() || (finiteWindowLimit && windowLimit == 0)) return false;
-                        for (size_t column = 0; column < tbl.len; ++column) {
-                            const auto value = rows[index].find(tbl.cols[column].dataName);
-                            dbms::ExprValue cell(descriptor[column].type,
-                                value == rows[index].end() ? string() : value->second, value == rows[index].end());
-                            cell.collation = tbl.cols[column].collation;
-                            cells.push_back(std::move(cell));
-                        }
+                        cells=windowInputs(rows[index],descriptor);
                         return true;
                     });
                 scalarWindowCursor = dbms::QueryPlanner::makePreparedCursor(
@@ -37626,8 +37765,11 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 vector<vector<string>> cells;
                 vector<vector<bool>> nulls;
                 vector<int64_t> ids;
-                g_engine.query(queryDb, tname, conditions, allCols, {},
-                    false, false, false, 0, {}, &cells, &nulls, &ids);
+                vector<vector<dbms::ExprValue>> generatedInputs;
+                g_engine.query(queryDb,tname,conditions,allCols,{},false,false,false,0,{},&cells,&nulls,&ids,
+                    windowGeneration,windowGeneration?&generatedInputs:nullptr);
+                if(windowGeneration && generatedInputs.size()!=cells.size())
+                    throw dbms::DbError("XX000","window generated inputs lost actual row association");
                 if (cells.size() != nulls.size() || cells.size() != ids.size())
                     throw dbms::DbError("XX000", "window source lost its structured row identity");
                 for (size_t index = 0; index < cells.size(); ++index) {
@@ -37637,7 +37779,17 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     LegacyWindowRow row;
                     row.windowValues.resize(windowFuncs.size());
                     for (size_t column = 0; column < tbl.len; ++column)
-                        if (!nulls[index][column]) row[tbl.cols[column].dataName] = cells[index][column];
+                        if (!windowReads[column] && !nulls[index][column])row[tbl.cols[column].dataName]=cells[index][column];
+                    if(windowGeneration) {
+                        if(generatedInputs[index].size()!=tbl.len)throw dbms::DbError("XX000","window generated stored input width changed");
+                        auto context=make_shared<dbms::RowContext>();
+                        for(size_t column=0;column<tbl.len;++column) {
+                            if(windowReads[column])context->setGeneratedNamed(tbl.cols[column].dataName,windowReads[column],true);
+                            else context->set(tbl.cols[column].dataName,generatedInputs[index][column]);
+                        }
+                        row.generatedInput=std::move(context);
+                        row.storedInputs=make_shared<const vector<dbms::ExprValue>>(std::move(generatedInputs[index]));
+                    }
                     rows.push_back(std::move(row));
                 }
             };
@@ -37659,30 +37811,29 @@ static bool executeInternal(const string& rawSql, Session& s) {
             // SQL NULL is an absent cell, not an empty string or "NULL".
             // Partition keys use the actual descriptor and lossless grouping
             // encoding already shared with ordinary GROUP BY.
-            const auto partitionKey = [&](const map<string, string>& row, const string& name) {
-                const auto value = row.find(name);
-                return dbms::StorageEngine::groupingValueKey(partitionColumn(name),
-                    value == row.end() ? string() : value->second, value == row.end());
+            const auto partitionKey = [&](const LegacyWindowRow& row,const string& name) {
+                const auto value=windowValue(row,name);
+                return dbms::StorageEngine::groupingValueKey(partitionColumn(name),value.value,value.isNull);
             };
-            const auto comparePartitionColumn = [&](const map<string, string>& a,
-                const map<string, string>& b, const string& name) {
-                const auto left = a.find(name), right = b.find(name);
-                if ((left == a.end()) != (right == b.end())) return left == a.end() ? 1 : -1;
-                if (left == a.end()) return 0;
+            const auto comparePartitionColumn = [&](const LegacyWindowRow& a,
+                const LegacyWindowRow& b,const string& name) {
+                const auto left=windowValue(a,name),right=windowValue(b,name);
+                if(left.isNull!=right.isNull)return left.isNull?1:-1;
+                if(left.isNull)return 0;
                 const auto& column = partitionColumn(name);
-                const auto less = dbms::StorageEngine::compareValues(column, left->second, false, right->second, false, "<");
-                const auto greater = dbms::StorageEngine::compareValues(column, left->second, false, right->second, false, ">");
+                const auto less = dbms::StorageEngine::compareValues(column,left.value,false,right.value,false,"<");
+                const auto greater = dbms::StorageEngine::compareValues(column,left.value,false,right.value,false,">");
                 if (less == dbms::StorageEngine::PredicateTruth::Unknown ||
                     greater == dbms::StorageEngine::PredicateTruth::Unknown)
                     throw dbms::DbError("0A000", "unsupported declared window comparison");
                 return less == dbms::StorageEngine::PredicateTruth::True ? -1 :
                     greater == dbms::StorageEngine::PredicateTruth::True ? 1 : 0;
             };
-            const auto compareWindowOrder = [&](const map<string, string>& a,
-                const map<string, string>& b, const WindowFunc& window) {
+            const auto compareWindowOrder = [&](const LegacyWindowRow& a,
+                const LegacyWindowRow& b, const WindowFunc& window) {
                 if (window.orderByCol.empty()) return 0;
-                const bool leftNull = a.find(window.orderByCol) == a.end();
-                const bool rightNull = b.find(window.orderByCol) == b.end();
+                const bool leftNull=windowValue(a,window.orderByCol).isNull;
+                const bool rightNull=windowValue(b,window.orderByCol).isNull;
                 if (leftNull != rightNull) {
                     const bool first = window.hasExplicitOrderNulls
                         ? window.orderByNullsFirst : !window.orderByAsc;
@@ -37709,10 +37860,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     while(last<indices.size() && samePeer(indices[last],indices[position],window))++last;
                     return make_pair(first,last);
                 },[&](size_t position) {
-                    const auto& source=rows[indices[position]];
-                    const auto value=source.find(window.orderByCol);
-                    return dbms::ExprValue(partitionColumn(window.orderByCol).dataType,
-                        value==source.end()?string():value->second,value==source.end());
+                    return windowValue(rows[indices[position]],window.orderByCol);
                 },window.orderByAsc,window.hasExplicitOrderNulls?window.orderByNullsFirst:!window.orderByAsc);
             };
 
@@ -37740,14 +37888,8 @@ static bool executeInternal(const string& rawSql, Session& s) {
             const auto evaluateWindowExpression = [&](size_t wi, const dbms::Expr* expression, size_t row) {
                 auto& argument=windowArguments.at(wi);
                 auto context=argument.execution->context();
-                vector<dbms::ExprValue> cells;
-                for(size_t column=0;column<tbl.len;++column) {
-                    const auto cell=rows.at(row).find(tbl.cols[column].dataName);
-                    cells.emplace_back(argument.descriptor[column].type,
-                        cell==rows[row].end()?string():cell->second,cell==rows[row].end());
-                    cells.back().collation=tbl.cols[column].collation;
-                }
-                argument.execution->setSourceRow(context,argument.sourceOrdinal,cells);
+                auto cells=windowInputs(rows.at(row),argument.descriptor);
+                argument.execution->setSourceInputs(context,argument.sourceOrdinal,cells,true);
                 return argument.execution->evaluate(expression,context);
             };
             const auto evaluateWindowArgument = [&](size_t wi, size_t value, size_t row) {
@@ -38121,6 +38263,11 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         nulls.push_back(isNull);
                         line += (isNull ? "NULL" : value) + " ";
                     } else if (exprTypes[i] == 0) {
+                        if(windowGeneration) {
+                            const auto actual=windowValue(row,aggItems[i].arg);
+                            cells.push_back(actual.isNull?string():actual.value);nulls.push_back(actual.isNull);
+                            line+=(actual.isNull?"NULL":actual.value)+" ";continue;
+                        }
                         auto it = row.find(aggItems[i].arg);
                         const bool isNull = it == row.end();
                         const string value = isNull ? string() : it->second;
@@ -38143,14 +38290,8 @@ static bool executeInternal(const string& rawSql, Session& s) {
             const auto projectionContext = [&](size_t row) {
                 auto& projection=*nestedWindowProjection;
                 auto context=projection.execution->context();
-                vector<dbms::ExprValue> source;
-                for(size_t column=0;column<tbl.len;++column) {
-                    const auto cell=rows.at(row).find(tbl.cols[column].dataName);
-                    source.emplace_back(projection.source->columns[column].type,
-                        cell==rows[row].end()?string():cell->second,cell==rows[row].end());
-                    source.back().collation=tbl.cols[column].collation;
-                }
-                projection.execution->setSourceRow(context,projection.source->ordinal,source);
+                auto source=windowInputs(rows.at(row),projection.source->columns);
+                projection.execution->setSourceInputs(context,projection.source->ordinal,source,true);
                 for(size_t wi=0;wi<projection.slots.size();++wi) {
                     const auto& slot=projection.slots[wi];
                     context.setBoundColumn(slot.sourceOrdinal,slot.columnOrdinal,
@@ -38166,7 +38307,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     const auto context=projectionContext(row);
                     const auto& binding=projection.query->projectionBindings.at(projection.select).at(owner);
                     const auto value=binding.column
-                        ? context.boundColumn(binding.column->sourceOrdinal,binding.column->columnOrdinal)
+                        ? projection.execution->readSourceColumn(context,binding.column->sourceOrdinal,binding.column->columnOrdinal)
                         : projection.execution->evaluate(binding.expression,context);
                     winCells[row][owner]=value.isNull?string():value.value;
                     winNulls[row][owner]=value.isNull;
@@ -38216,6 +38357,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                 return ownedWindowSortValue(row,key.ownedExpression);
                             if (key.scalar != numeric_limits<size_t>::max())
                                 return scalarWindowValues.at(row).at(key.scalar);
+                            if(windowGeneration)return windowValue(rows[row],key.sourceColumn);
                             const auto cell = rows[row].find(key.sourceColumn);
                             return dbms::ExprValue(key.column.dataType,
                                 cell == rows[row].end() ? string() : cell->second, cell == rows[row].end());

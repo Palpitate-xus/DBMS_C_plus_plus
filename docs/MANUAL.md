@@ -1,5 +1,25 @@
 # DBMS 使用手册
 
+<!-- CURRENT_GENERATED_DEMAND_20261104 -->
+
+## 虚拟生成列读值需求与完整 SQL 实测（2026-11-04）
+
+本批源码 P6-C8，对应正常程序 SHA256 `45264111…`，保持 0.2.0 / C++17 / GCC 13.3 / O2 / ICU 74.2 / zlib 1.3 / TLS stub。根目录默认程序仍为 `425165af…`，现有服务未重启。
+
+普通虚拟生成列在读取时执行声明赋值；未被读取的列保留其延迟求值。以下SQL的id查询得到40000，读取v返回22003；NOT NULL/CHECK等真实需求仍会要求读值。
+
+```sql
+CREATE TABLE demand_demo(id integer, v smallint GENERATED ALWAYS AS(id) VIRTUAL);
+INSERT INTO demand_demo(id) VALUES(40000);
+SELECT id FROM demand_demo;
+SELECT v FROM demand_demo;
+```
+
+隐式INSERT按物理前N列对应，生成列位不能被非DEFAULT值占用。字符数组、SQLNULL与缺失OLD/NEW行分别处理。尚未完整兼容来源描述符、运行时错误前缀及所有索引表达式；详见[当前测试与性能范围](performance-report-2026-10-30.md)。
+
+原273项仍为22 complete /166 partial /70 unverified /15 deferred_by_user；Goal active。下方旧批次保留当时事实，当前状态以本节为准。
+
+
 ## ANALYZE 与 REINDEX 成本优化（2026-11-04）
 
 本批源码 P5-C2（a3baaca6…）优化同次 ANALYZE 的类型/locale 比较和真实行 NULL 位图，以及 REINDEX 逻辑 map 保留。C++17、原维护频率/持久化和用户暂缓边界保持。ANALYZE p50 369–403→74 ms，范围 UPDATE 600–650→389 ms；完整 35 操作为4快/28慢/3居间，36组查询为4快/6慢/26居间，整体性能提升尚未验收，默认仍为425，现有服务未重启。

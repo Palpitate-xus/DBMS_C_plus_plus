@@ -671,19 +671,22 @@ public:
                     const std::map<std::string, std::string>& values,
                     std::vector<std::map<std::string, std::string>>* insertedRows = nullptr,
                     IdentityOverride identityOverride = IdentityOverride::None,
-                    OwningMutationRows* owningRows = nullptr);
+                    OwningMutationRows* owningRows = nullptr,
+        bool deferVirtualInputs = false);
     DBStatus insertRow(const std::string& dbname,
                        const std::string& tablename,
                        const SqlRow& values,
                        std::vector<SqlRow>* insertedRows = nullptr,
                        IdentityOverride identityOverride = IdentityOverride::None,
-                    OwningMutationRows* owningRows = nullptr);
+                    OwningMutationRows* owningRows = nullptr,
+        bool deferVirtualInputs = false);
     // INSERT INTO t DEFAULT VALUES — uses column defaults or NULL.
     DBStatus insertDefaultValues(const std::string& dbname,
                                  const std::string& tablename,
                                  const TableSchema& tbl,
                                  std::vector<std::map<std::string, std::string>>* insertedRows = nullptr,
-                                 OwningMutationRows* owningRows = nullptr);
+                                 OwningMutationRows* owningRows = nullptr,
+        bool deferVirtualInputs = false);
     DBStatus update(
         const std::string& dbname, const std::string& tablename,
         const std::map<std::string, std::string>& updates,
@@ -708,7 +711,8 @@ public:
         const UpdateMatcher& updateMatcher,
         size_t* affectedRows,
         std::vector<UpdateRowImage>* rowImages,
-        OwningMutationRows* owningRows = nullptr);
+        OwningMutationRows* owningRows = nullptr,
+        bool deferVirtualInputs = false);
     DBStatus updateRows(
         const std::string& dbname, const std::string& tablename,
         const SqlRow& updates, const std::vector<std::string>& conditions,
@@ -731,7 +735,8 @@ public:
         size_t* affectedRows,
         std::vector<UpdateRowImage>* rowImages,
         const SqlMutationCallbacks* mutationCallbacks = nullptr,
-        OwningMutationRows* owningRows = nullptr);
+        OwningMutationRows* owningRows = nullptr,
+        bool deferVirtualInputs = false);
     DBStatus remove(
         const std::string& dbname, const std::string& tablename,
         const std::vector<std::string>& conditions,
@@ -755,7 +760,8 @@ public:
         const SqlDeleteMatcher& deleteMatcher,
         size_t* affectedRows,
         const SqlMutationCallbacks* mutationCallbacks = nullptr,
-        OwningMutationRows* owningRows = nullptr);
+        OwningMutationRows* owningRows = nullptr,
+        bool deferVirtualInputs = false);
     struct OrderBySpec {
         std::string colName;
         bool ascending = true;
@@ -793,7 +799,11 @@ public:
         const std::vector<std::string>& distinctOnCols,
         std::vector<std::vector<std::string>>* structuredRows,
         std::vector<std::vector<bool>>* structuredNulls,
-        std::vector<int64_t>* structuredRowIds = nullptr);
+        std::vector<int64_t>* structuredRowIds = nullptr,
+        // Data-only transport for a caller that reads virtual inputs lazily.
+        // Width/real occurrence/presence are carried independently of NULLs.
+        const GeneratedRelationPtr& generatedDeclaration = {},
+        std::vector<std::vector<ExprValue>>* generatedInputs = nullptr);
 
     // Scalar function expression for queryExpr
     struct SelectExpr {
@@ -1379,7 +1389,7 @@ public:
     // Execution-local pristine syntax only; original public entry stays uncached.
     static bool evalConditionOnRowWithSyntax(const Condition& cond,
         const std::string& rowBuffer, const TableSchema& tbl,
-        LocalExpressionSyntax* syntax);
+        LocalExpressionSyntax* syntax,const DatumMetadataContext* generatedMetadata=nullptr);
     // Materialized executor rows must carry their own NULL bitmap: the
     // originating scan's RID binding is no longer active after buffering.
     static bool evalConditionOnRow(const Condition& cond,
@@ -1406,7 +1416,8 @@ public:
                                    const TableSchema& tbl, size_t colIdx,
                                    const std::string& dbname, bool computeVirtual,
                                    bool* valueIsNull,
-                                   std::optional<ExprValue>* owningValue);
+                                   std::optional<ExprValue>* owningValue,
+                                   GeneratedRelationPtr declaredSource = {});
 
     // RID encode/decode (public for external use)
     static int64_t encodeRid(uint32_t pageId, uint16_t slotId);
@@ -2202,7 +2213,8 @@ private:
         const std::set<std::string>& nullColumns,
         std::vector<SqlRow>* insertedRows,
         IdentityOverride identityOverride,
-        OwningMutationRows* owningRows = nullptr);
+        OwningMutationRows* owningRows = nullptr,
+        bool deferVirtualInputs = false);
     DBStatus removeInternal(
         const std::string& dbname, const std::string& tablename,
         const std::vector<std::string>& conditions,
@@ -2212,7 +2224,8 @@ private:
         ReferentialActionContext& referentialContext,
         size_t* affectedRows = nullptr,
         const SqlMutationCallbacks* mutationCallbacks = nullptr,
-        OwningMutationRows* owningRows = nullptr);
+        OwningMutationRows* owningRows = nullptr,
+        bool deferVirtualInputs = false);
     DBStatus updateInternal(
         const std::string& dbname, const std::string& tablename,
         const std::map<std::string, std::string>& updates,
@@ -2226,7 +2239,8 @@ private:
         size_t* affectedRows = nullptr,
         std::vector<UpdateRowImage>* rowImages = nullptr,
         const SqlMutationCallbacks* mutationCallbacks = nullptr,
-        OwningMutationRows* owningRows = nullptr);
+        OwningMutationRows* owningRows = nullptr,
+        bool deferVirtualInputs = false);
 
 
 private:

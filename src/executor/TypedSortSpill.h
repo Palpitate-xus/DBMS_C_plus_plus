@@ -28,6 +28,8 @@ struct RowContextSpillAccess {
     static const Values& values(const RowContext& row) { return row.values_; }
     static const Parameters& parameters(const RowContext& row) { return row.parameters_; }
     static const BoundColumns& boundColumns(const RowContext& row) { return row.boundColumns_; }
+    static const std::shared_ptr<const GeneratedInputState>& generated(const RowContext& row){return row.generatedInputs_;}
+    static void generated(RowContext& row,std::shared_ptr<const GeneratedInputState> state){row.generatedInputs_=std::move(state);}
     static RowContext restore(SqlValues sql, Values values, Parameters parameters, BoundColumns bound) {
         RowContext result;
         result.sqlValues_ = std::move(sql); result.values_ = std::move(values);
@@ -37,6 +39,20 @@ struct RowContextSpillAccess {
 };
 
 namespace typed_sort_detail {
+// Codec-local immutable program identities; no runtime row/parameter/provider
+// is retained and no process pointer is serialized into a temporary file.
+struct GeneratedRegistry {
+    std::vector<GeneratedReadPtr> reads;
+    uint64_t intern(const GeneratedReadPtr& read) {
+        if(!read)throw DbError("XX000","generated spill input has no program");
+        for(size_t i=0;i<reads.size();++i)if(reads[i]==read)return i;
+        reads.push_back(read);return reads.size()-1;
+    }
+    GeneratedReadPtr at(uint64_t id) const {
+        if(id>=reads.size())throw DbError("58030","invalid generated spill descriptor identity");
+        return reads[id];
+    }
+};
 
 // Process-private framing: value/type pointers never appear on disk.
 struct ValueHeader {
@@ -53,7 +69,7 @@ struct TypeHeader {
     int16_t size=-1;
     uint8_t kind=0,enumType=0,output=0,element=0;
 };
-struct ContextHeader {uint64_t sql=0,values=0,parameters=0,bound=0;};
+struct ContextHeader {uint64_t sql=0,values=0,parameters=0,bound=0,generatedBound=0,generatedNamed=0;};
 inline size_t addBytes(size_t a,size_t b) {
     return b>std::numeric_limits<size_t>::max()-a?std::numeric_limits<size_t>::max():a+b;
 }
@@ -151,6 +167,11 @@ inline size_t contextBytes(const RowContext& row) {
     for(const auto& item:values){bytes=addBytes(bytes,addBytes(item.first.capacity(),1));bytes=addBytes(bytes,dynamicValueBytes(item.second));}
     for(const auto& cell:parameters)bytes=addBytes(bytes,dynamicValueBytes(cell));
     for(const auto& item:bound)bytes=addBytes(bytes,dynamicValueBytes(item.second));
+    if(const auto& generated=RowContextSpillAccess::generated(row)) {
+        bytes=addBytes(bytes,sizeof(GeneratedInputState)+2*sizeof(void*));
+        bytes=addBytes(bytes,addBytes(mapBytes(generated->bound),mapBytes(generated->named)));
+        for(const auto& entry:generated->named)bytes=addBytes(bytes,entry.first.capacity()+1);
+    }
     return bytes;
 }
 inline void writeType(sort_detail::Writer& writer,const DatumType& type) {
@@ -280,12 +301,15 @@ inline ExprValue readValue(sort_detail::Reader& reader) {
     return value;
 }
 
-inline void writeContext(sort_detail::Writer& writer, const RowContext& row) {
+inline void writeContext(sort_detail::Writer& writer, const RowContext& row,GeneratedRegistry* registry=nullptr) {
     const auto& sql = RowContextSpillAccess::sqlValues(row);
     const auto& values = RowContextSpillAccess::values(row);
     const auto& parameters = RowContextSpillAccess::parameters(row);
     const auto& bound = RowContextSpillAccess::boundColumns(row);
-    writer.scalar(ContextHeader{sql.size(), values.size(), parameters.size(), bound.size()});
+    const auto& generated=RowContextSpillAccess::generated(row);
+    if(generated && !registry)throw DbError("XX000","generated context spill lost its actual codec owner");
+    writer.scalar(ContextHeader{sql.size(),values.size(),parameters.size(),bound.size(),
+        generated?generated->bound.size():0,generated?generated->named.size():0});
     for (const auto& item : sql) { writer.scalar(static_cast<uint32_t>(item.first)); writeValue(writer, item.second); }
     for (const auto& item : values) {
         writer.scalar(uint64_t(item.first.size())); writer.append(item.first.data(), item.first.size());
@@ -296,8 +320,18 @@ inline void writeContext(sort_detail::Writer& writer, const RowContext& row) {
         writer.scalar(uint64_t(item.first.first)); writer.scalar(uint64_t(item.first.second));
         writeValue(writer, item.second);
     }
+    if(generated) {
+        for(const auto& entry:generated->bound) {
+            writer.scalar(uint64_t(entry.first.first));writer.scalar(uint64_t(entry.first.second));
+            writer.scalar(registry->intern(entry.second.read));writer.scalar(uint8_t(entry.second.present));
+        }
+        for(const auto& entry:generated->named) {
+            writer.scalar(uint64_t(entry.first.size()));writer.append(entry.first.data(),entry.first.size());
+            writer.scalar(registry->intern(entry.second.read));writer.scalar(uint8_t(entry.second.present));
+        }
+    }
 }
-inline RowContext readContext(sort_detail::Reader& reader) {
+inline RowContext readContext(sort_detail::Reader& reader,const GeneratedRegistry* registry=nullptr) {
     const auto header = reader.scalar<ContextHeader>();
     RowContextSpillAccess::SqlValues sql;
     RowContextSpillAccess::Values values;
@@ -329,7 +363,32 @@ inline RowContext readContext(sort_detail::Reader& reader) {
         if (!bound.emplace(std::make_pair(static_cast<size_t>(source), static_cast<size_t>(column)), std::move(cell)).second)
             invalid("duplicate bound column");
     }
-    return RowContextSpillAccess::restore(std::move(sql), std::move(values), std::move(parameters), std::move(bound));
+    auto result=RowContextSpillAccess::restore(std::move(sql),std::move(values),std::move(parameters),std::move(bound));
+    if(header.generatedBound || header.generatedNamed) {
+        if(!registry)invalid("generated program registry");
+        requireCount(header.generatedBound,3*sizeof(uint64_t)+sizeof(uint8_t),std::numeric_limits<size_t>::max(),remaining);
+        requireCount(header.generatedNamed,2*sizeof(uint64_t)+sizeof(uint8_t),std::numeric_limits<size_t>::max(),remaining);
+        auto generated=std::make_shared<GeneratedInputState>();
+        for(uint64_t i=0;i<header.generatedBound;++i) {
+            const auto source=reader.scalar<uint64_t>(),column=reader.scalar<uint64_t>(),id=reader.scalar<uint64_t>();
+            const auto present=reader.scalar<uint8_t>();if(present>1 || source>SIZE_MAX || column>SIZE_MAX)invalid("generated occurrence");
+            auto read=registry->at(id);
+            // Restore the same occurrence/attribute invariant as the live
+            // RowContext attachment, before exposing any generated recipe.
+            if(!read || !read->program || read->named || read->sourceOrdinal!=source ||
+               column>=read->program->inputs.size() ||
+               read->program->inputs[size_t(column)].dataName!=read->program->target.dataName)
+                invalid("generated occurrence descriptor");
+            if(!generated->bound.emplace(std::make_pair(size_t(source),size_t(column)),GeneratedInputState::Input{std::move(read),bool(present)}).second)invalid("duplicate generated occurrence");
+        }
+        for(uint64_t i=0;i<header.generatedNamed;++i) {
+            const auto length=reader.scalar<uint64_t>();auto key=readString(reader,length);
+            const auto id=reader.scalar<uint64_t>();const auto present=reader.scalar<uint8_t>();if(present>1)invalid("generated presence");
+            if(!generated->named.emplace(std::move(key),GeneratedInputState::Input{registry->at(id),bool(present)}).second)invalid("duplicate generated name");
+        }
+        RowContextSpillAccess::generated(result,std::move(generated));
+    }
+    return result;
 }
 
 } // namespace typed_sort_detail

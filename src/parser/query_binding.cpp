@@ -42,6 +42,7 @@ struct Range {
     std::string relationSchema, relationName;
     const Stmt* cteStatement = nullptr;
     std::shared_ptr<PreparedQuery> viewQuery;
+    GeneratedRelationPtr generatedRelation;
 };
 using Namespace = std::vector<Range>;
 bool incompleteNamespaceCatalog(const Range& range) {
@@ -179,7 +180,7 @@ public:
             statementOwners.empty() ? nullptr : statementOwners.back(), source,
             range.schema, range.name, range.columns, range.mergedUsing,
             range.relationSchema, range.relationName, range.cteStatement,
-            range.hiddenUnqualified, range.viewQuery});
+            range.hiddenUnqualified, range.viewQuery,range.generatedRelation});
         return range;
     }
 
@@ -1909,6 +1910,7 @@ public:
             // RETURNING OLD/NEW names are table-only transition namespaces.
             // Unqualified columns and a bare star retain the target shape.
             Range transition{"",name,target.columns};
+            transition.generatedRelation=target.generatedRelation;
             for(const auto& column:transition.columns) transition.hiddenUnqualified.insert(column.name);
             scopes.front().push_back(registerSource(std::move(transition)));
         };
@@ -1939,6 +1941,7 @@ public:
         Range range{alias.empty() ? description.schema : "", alias.empty() ? description.name : identifier(alias), description.columns};
         range.relationSchema = description.schema;
         range.relationName = description.name;
+        range.generatedRelation=description.generatedRelation;
         if (!description.viewSql.empty()) {
             // Preparing a view does not inherit the caller's PL datums or
             // SQL ranges. The retained child owns all of its AST identities.

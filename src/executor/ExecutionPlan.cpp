@@ -359,12 +359,12 @@ struct PreparedSelectState {
                 origin.tablename == schema.tablename) {
                 std::vector<bool> captured;
                 if (source.lastStoredNullBitmap(captured)) {
-                    detail::decodeStoredRowValues(*engine, dbname, raw, schema,
+                    detail::decodeStoredRowInputs(*engine, dbname, raw, schema,
                                                  captured, structured, nulls);
                     available = true;
                 } else if (const auto bitmap = detail::storedRowNullBitmap(
                                *engine, dbname, origin.tablename, schema, origin.rid)) {
-                    detail::decodeStoredRowValues(*engine, dbname, raw, schema,
+                    detail::decodeStoredRowInputs(*engine, dbname, raw, schema,
                                                  *bitmap, structured, nulls);
                     available = true;
                 }
@@ -395,6 +395,7 @@ struct PreparedSelectState {
            available && structured.size()==schema.len && nulls.size()==schema.len)
             values.reserve(schema.len);
         for (size_t i = 0; i < schema.len; ++i) {
+            if(schema.cols[i].generatedKind=='v'){values.emplace_back();continue;}
             bool computedNull = false;
             const std::string value = available ? structured.at(i) :
                 engine->extractColumnValue(raw, schema, i, dbname, true, &computedNull);
@@ -419,7 +420,7 @@ struct PreparedSelectState {
     }
     RowContext context(const std::vector<ExprValue>& values) const {
         auto row = execution->context(outerRow);
-        if (sourceOrdinal != noTarget) execution->setSourceRow(row, sourceOrdinal, values);
+        if (sourceOrdinal != noTarget) execution->setSourceInputs(row, sourceOrdinal, values,true);
         return row;
     }
     RowContext context(Operator& source, const std::string& raw) const {
@@ -1021,6 +1022,7 @@ struct TypedSortRowCodec {
     // Ordinary Sort caches one integer per owning key. Set output keys can
     // borrow cells instead, so validate their independent cache descriptor.
     std::optional<size_t> integers = std::nullopt;
+    mutable std::shared_ptr<typed_sort_detail::GeneratedRegistry> generatedRegistry; // lazy actual spill metadata only
     struct Header { uint64_t raw=0,cells=0,keys=0,integers=0,targets=0,ordinal=0; };
     size_t bytes(const TypedSortRow& row) const {
         using namespace typed_sort_detail;
@@ -1045,7 +1047,12 @@ struct TypedSortRowCodec {
         for(const auto& value:row.integerKeys) {
             writer.scalar(uint8_t(value.has_value()));if(value)writer.scalar(*value);
         }
-        typed_sort_detail::writeContext(writer,row.context);
+        // BoundedRuns uses this same codec for all its writes/reads/merges.
+        // Allocate only when a real generated context is actually spilled;
+        // ordinary/SetSort owner algorithms and zero-demand paths are intact.
+        if(row.context.hasGeneratedInputs() && !generatedRegistry)
+            generatedRegistry=std::make_shared<typed_sort_detail::GeneratedRegistry>();
+        typed_sort_detail::writeContext(writer,row.context,generatedRegistry.get());
         for(const auto& value:row.targets) {
             writer.scalar(uint8_t(value.has_value()));if(value)typed_sort_detail::writeValue(writer,*value);
         }
@@ -1070,7 +1077,7 @@ struct TypedSortRowCodec {
             const auto present=reader.scalar<uint8_t>();if(present>1)typed_sort_detail::invalid("integer cache flag");
             row.integerKeys.push_back(present?std::optional<int64_t>(reader.scalar<int64_t>()):std::nullopt);
         }
-        row.context=typed_sort_detail::readContext(reader);
+        row.context=typed_sort_detail::readContext(reader,generatedRegistry.get());
         if(header.targets>reader.remaining())typed_sort_detail::invalid("target cache count");
         row.targets.reserve(static_cast<size_t>(header.targets));
         for(uint64_t i=0;i<header.targets;++i) {
@@ -1304,7 +1311,7 @@ public:
         values.clear();
         if(!budgeted_)values=current().cells;
         else if(state_->sourceOrdinal!=PreparedSelectState::noTarget)
-            for(size_t i=0;i<state_->schema.len;++i)values.push_back(current().context.boundColumn(state_->sourceOrdinal,i));
+            for(size_t i=0;i<state_->schema.len;++i)values.push_back(state_->execution->readSourceColumn(current().context,state_->sourceOrdinal,i));
         return true;
     }
     bool lastStructuredRow(std::vector<std::string>& cells,std::vector<bool>& nulls) const override {
@@ -1312,7 +1319,7 @@ public:
         cells.clear();nulls.clear();
         if(budgeted_ && !state_->sourceContexts && state_->sourceOrdinal!=PreparedSelectState::noTarget) {
             for(size_t i=0;i<state_->schema.len;++i) {
-                const auto& value=current().context.boundColumn(state_->sourceOrdinal,i);
+                const auto value=state_->execution->readSourceColumn(current().context,state_->sourceOrdinal,i);
                 cells.push_back(value.value);nulls.push_back(value.isNull);
             }
         } else for(const auto& value:current().cells){cells.push_back(value.value);nulls.push_back(value.isNull);}

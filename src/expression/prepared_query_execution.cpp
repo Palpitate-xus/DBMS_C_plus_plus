@@ -695,6 +695,7 @@ void PreparedQueryExecution::setSourceRow(RowContext& row, size_t ordinal,
     const auto& source = sourceRange(ordinal);
     if (source.columns.size() != cells.size())
         throw DbError("XX000", "prepared source row width differs from its descriptor");
+    row.clearGeneratedSource(ordinal);
     for (size_t i = 0; i < cells.size(); ++i) {
         ExprValue cell = cells[i];
         const auto type = ExprHelper::canonicalResultTypeName(source.columns[i].type);
@@ -704,6 +705,48 @@ void PreparedQueryExecution::setSourceRow(RowContext& row, size_t ordinal,
         row.setBoundColumn(ordinal, i, std::move(cell));
     }
 }
+
+GeneratedReadPtr PreparedQueryExecution::generatedSourceRead(size_t source,size_t column) const {
+    if(std::none_of(query_->sourceRanges.begin(),query_->sourceRanges.end(),[&](const auto& range){return range.ordinal==source;}))return {};
+    const auto& range=sourceRange(source);
+    if(!range.generatedRelation || column>=range.generatedRelation->columns.size() ||
+       !range.generatedRelation->columns[column])return {};
+    const auto key=std::make_pair(source,column);
+    if(!generatedReads_)generatedReads_=std::make_unique<std::map<std::pair<size_t,size_t>,GeneratedReadPtr>>();
+    const auto found=generatedReads_->find(key);
+    if(found!=generatedReads_->end())return found->second;
+    auto read=bindGeneratedColumn(range.generatedRelation->columns[column],source);
+    generatedReads_->emplace(key,read);return read;
+}
+void PreparedQueryExecution::setSourceInputs(RowContext& row,size_t source,
+    const std::vector<ExprValue>& cells,bool present) const {
+    const auto& range=sourceRange(source);
+    if(!range.generatedRelation){setSourceRow(row,source,cells);return;}
+    if(cells.size()!=range.columns.size() || range.generatedRelation->columns.size()!=cells.size())
+        throw DbError("XX000","generated source inputs lost the real declaration width");
+    row.clearGeneratedSource(source);
+    for(size_t i=0;i<cells.size();++i) {
+        if(auto read=generatedSourceRead(source,i)){row.setGeneratedBound(source,i,std::move(read),present);continue;}
+        auto cell=present?cells[i]:ExprValue(range.columns[i].type,"",true);
+        const auto declared=ExprHelper::canonicalResultTypeName(range.columns[i].type);
+        if(!cell.typeName.empty() && ExprHelper::canonicalResultTypeName(cell.typeName)!=declared)
+            throw DbError("XX000","stored generated-source input changed its actual declaration");
+        cell.typeName=declared;row.setBoundColumn(source,i,std::move(cell));
+    }
+}
+void PreparedQueryExecution::copySourceInputs(RowContext& row,size_t source,const RowContext* actual) const {
+    const auto& range=sourceRange(source);std::vector<ExprValue> cells;cells.reserve(range.columns.size());
+    for(size_t i=0;i<range.columns.size();++i) {
+        if(generatedSourceRead(source,i))cells.emplace_back();
+        else cells.push_back(actual?actual->boundColumn(source,i):ExprValue(range.columns[i].type,"",true));
+    }
+    setSourceInputs(row,source,cells,actual!=nullptr);
+    if(actual)row.copyGeneratedSource(*actual,source);
+}
+ExprValue PreparedQueryExecution::readSourceColumn(const RowContext& row,size_t source,size_t column) const {
+    return evaluator_.readBoundColumn(source,column,row);
+}
+
 
 namespace {
 void lowerAggregateColumns(ExprPtr& expression,
@@ -944,6 +987,11 @@ void PreparedQueryExecution::prepareExpression(Expr* expression) {
     }
     ExprHelper::prepareArrayTypes(compiled.get(), {}, database_, engine_);
     planCaseConstants(compiled,evaluator_);
+    if(std::any_of(query_->sourceRanges.begin(),query_->sourceRanges.end(),[](const auto& range){return bool(range.generatedRelation);}))
+    visitStructuredValue(compiled.get(),[&](const Expr* value) {
+        auto* column=const_cast<ColumnRefExpr*>(dynamic_cast<const ColumnRefExpr*>(value));
+        if(column && column->binding)column->generatedRead=generatedSourceRead(column->binding->sourceOrdinal,column->binding->columnOrdinal);
+    });
     evaluator_.bindScalarFunctions(compiled.get(), engine_);
     for (const auto& site : sites) originalSites_[site.first] = site.second;
     for (const auto& site : sites)
@@ -1623,7 +1671,7 @@ ExprValue PreparedQueryExecution::executeChild(const Expr* expression, const Row
             adapter.projectionAliases.emplace_back(alias.first - child.begin, alias.second);
     for (const auto* column : child.correlations) {
         const auto& binding = *column->binding;
-        ExprValue cell = row.boundColumn(binding.sourceOrdinal, binding.columnOrdinal);
+        ExprValue cell = readSourceColumn(row,binding.sourceOrdinal,binding.columnOrdinal);
         const auto type = ExprHelper::canonicalResultTypeName(binding.declaredType);
         if (ExprHelper::canonicalResultTypeName(cell.typeName) != type)
             throw DbError("XX000", "correlated runtime cell has an unexpected declared type");

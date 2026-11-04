@@ -1,5 +1,14 @@
 # 全部文档检查清单
 
+<!-- CURRENT_GENERATED_DEMAND_20261104 -->
+
+## 虚拟生成列读值需求与完整 SQL 实测（2026-11-04）
+
+本批更新8份既有Markdown及进度JSON，新增[一份机器归档](benchmarks/generated-column-demand-20261104.json)；原754个Markdown路径、原273项状态、原256条历史原文、725保护记录及五份旧归档保留。新增partial后历史257条；测试源文件2334，新增两个CPP入口。
+
+当前源程序P6-C8 `45264111…`，默认执行文件425保持；当前技术与测试事实统一见[性能报告](performance-report-2026-10-30.md)。结构/链接检查仅验证文档结构。原273项仍为22 complete /166 partial /70 unverified /15 deferred_by_user；Goal active。下方旧批次保留当时事实，当前状态以本节为准。
+
+
 ## ANALYZE 与 REINDEX 成本优化（2026-11-04）
 
 本批源码 P5-C2（a3baaca6…）优化同次 ANALYZE 的类型/locale 比较和真实行 NULL 位图，以及 REINDEX 逻辑 map 保留。C++17、原维护频率/持久化和用户暂缓边界保持。ANALYZE p50 369–403→74 ms，范围 UPDATE 600–650→389 ms；完整 35 操作为4快/28慢/3居间，36组查询为4快/6慢/26居间，整体性能提升尚未验收，默认仍为425，现有服务未重启。

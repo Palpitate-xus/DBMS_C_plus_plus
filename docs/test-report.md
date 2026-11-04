@@ -1,5 +1,20 @@
 # DBMS 功能测试报告
 
+<!-- CURRENT_GENERATED_DEMAND_20261104 -->
+
+## 虚拟生成列读值需求与完整 SQL 实测（2026-11-04）
+
+本批源码 P6-C8，对应正常程序 SHA256 `45264111…`，保持 0.2.0 / C++17 / GCC 13.3 / O2 / ICU 74.2 / zlib 1.3 / TLS stub。根目录默认程序仍为 `425165af…`，现有服务未重启。
+
+新永久原生入口[读取需求36控制](../tests/generated_column_demand_test.cpp)与[真实spill身份10控制](../tests/generated_context_spill_validation_test.cpp)通过；实际运行C6的61个核心对象/159头文件与当前C8一致。相关25原入口在C5为24/1，旧C2同一quoted extract普通控制也失败，本批未修，未新增deferred；不称当前全仓重跑。
+
+C8固定258为238通过/20差异（13/3/2/2），较C2新增82整项通过、零整项回退，另有6项描述符组件损失。原767观察仍129差异，完整记录对旧版/C6一致、九enum原始记录一致。所有原始SQL、预期、失败与raw保留。
+
+当前Main15个实际上下文正常退出；72个正常基准请求、7200行/25200单元零失败。原2332测试源字节不变，现2334；顶层1085 CPP（排除桩1084），另5子目录CPP。首批编译/包装器/接收器缺口与拒绝C7见[详细报告](performance-report-2026-10-30.md)及[机器归档](benchmarks/generated-column-demand-20261104.json)。
+
+原273项仍为22 complete /166 partial /70 unverified /15 deferred_by_user；Goal active。下方旧批次保留当时事实，当前状态以本节为准。
+
+
 ## ANALYZE 与 REINDEX 成本优化（2026-11-04）
 
 本批源码 P5-C2（a3baaca6…）优化同次 ANALYZE 的类型/locale 比较和真实行 NULL 位图，以及 REINDEX 逻辑 map 保留。C++17、原维护频率/持久化和用户暂缓边界保持。ANALYZE p50 369–403→74 ms，范围 UPDATE 600–650→389 ms；完整 35 操作为4快/28慢/3居间，36组查询为4快/6慢/26居间，整体性能提升尚未验收，默认仍为425，现有服务未重启。

@@ -2117,6 +2117,24 @@ static ExprPtr parseExpr(const std::vector<std::string>& tokens, size_t& pos) {
     return result;
 }
 
+// Private expression-only syntax for an actual stored generation definition.
+// Its spans refer to those exact bytes; no SELECT/query owner is constructed.
+ExprPtr SQLParser::parseGeneratedDefinition(const std::string& source) {
+    BindingParseContext context{source};
+    auto* previous=bindingParse;bindingParse=&context;
+    struct Restore {BindingParseContext* p;~Restore(){bindingParse=p;}} restore{previous};
+    std::string error;
+    const auto tokens=tokenizeImpl(source,&error);
+    if(!error.empty())throw DbError("42601",error);
+    size_t position=0;
+    try {
+        auto result=parseExpr(tokens,position);
+        if(!result || position!=tokens.size())throw DbError("42601","invalid generated expression");
+        return result;
+    } catch(const DbError&){throw;}
+      catch(const std::exception& error){throw DbError("42601",error.what());}
+}
+
 // OR (lowest precedence, left-associative)
 static ExprPtr parseOrExpr(const std::vector<std::string>& tokens, size_t& pos) {
     auto left = parseAndExpr(tokens, pos);
@@ -4683,6 +4701,21 @@ ParseResult SQLParser::parseInsert(const std::string& sql) {
     // Optional column list: (col1, col2, ...)
     if (pos < tokens.size() && tokens[pos] == "(") {
         auto cols = collectParenthesized(tokens, pos);
+        // An omitted target list and an explicitly empty list are different
+        // grammar. Keep the original identifier tokens/provenance unchanged,
+        // but reject an empty comma-delimited entry before columns.empty()
+        // can be interpreted by the binder/executor as implicit first-N.
+        const bool missingColumn = cols.empty() || cols.front() == "," ||
+            cols.back() == "," ||
+            std::adjacent_find(cols.begin(), cols.end(),
+                [](const std::string& left, const std::string& right) {
+                    return left == "," && right == ",";
+                }) != cols.end();
+        if (missingColumn) {
+            r.error = "INSERT target column list requires non-empty entries";
+            r.sqlState = "42601";
+            return r;
+        }
         for (const auto& c : cols) {
             if (c != ",") stmt->columns.push_back(c);
         }

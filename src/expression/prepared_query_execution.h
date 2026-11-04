@@ -48,6 +48,10 @@ public:
     const PreparedQuery::SourceRange& sourceRange(size_t ordinal) const;
     void setSourceRow(RowContext& row, size_t ordinal,
                       const std::vector<ExprValue>& cells) const;
+    void setSourceInputs(RowContext&,size_t,const std::vector<ExprValue>&,bool present) const;
+    void copySourceInputs(RowContext&,size_t,const RowContext* actual) const;
+    ExprValue readSourceColumn(const RowContext&,size_t,size_t) const;
+    GeneratedReadPtr generatedSourceRead(size_t,size_t) const;
     // Call on every executable expression before opening sources/evaluating
     // any expression. Routine registration and collation checks are pure.
     void prepareExpression(Expr* expression);
@@ -89,6 +93,7 @@ public:
     ExprValue evaluate(const Expr* expression, const RowContext& row) const;
 
 private:
+    mutable std::unique_ptr<std::map<std::pair<size_t,size_t>,GeneratedReadPtr>> generatedReads_;
     struct Child {
         size_t begin = 0, end = 0;
         bool runtimeParameters = false;

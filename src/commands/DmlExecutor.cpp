@@ -1322,7 +1322,7 @@ bool buildConditions(const ExprPtr& expr, std::vector<std::string>& conditions) 
 // occurrence and attribute of this same MERGE statement, never a fake range.
 using ReturningSourceKey=std::tuple<std::string,std::string,std::string>;
 using ReturningSourceBindings=std::map<ReturningSourceKey,QueryColumnBinding>;
-struct ReturningSourceCell { QueryColumnBinding binding; ExprValue value; };
+struct ReturningSourceCell { QueryColumnBinding binding; ExprValue value; GeneratedReadPtr generated; bool present=false; };
 using ReturningSourceCells=std::vector<ReturningSourceCell>;
 using ReturningSourceCellsPtr=std::shared_ptr<const ReturningSourceCells>;
 
@@ -1351,6 +1351,7 @@ struct ReturningRowImage {
         ReturningProjection::Source::New;
     std::string action;
     StorageEngine::OwningRowImagePtr generated;
+    bool oldPresent=false,newPresent=false; // actual mutation/version facts
 };
 
 // A statement-local data receiver, never a source provider or parameter frame.
@@ -1568,7 +1569,7 @@ bool buildReturningProjections(const std::vector<SelectItem>& returning,
     ExprEvaluator evaluator;
     DatumMetadataContextPtr metadata;
     const auto metadataOwner=[&]() -> DatumMetadataContextPtr {
-        if(typedResultCaptureRequested() && !metadata)
+        if((typedResultCaptureRequested() || std::any_of(table.cols,table.cols+table.len,[](const Column& c){return c.generatedKind=='v';})) && !metadata)
             metadata=g_engine.prepareDatumMetadataContext(currentDB,table.tablename);
         return metadata;
     };
@@ -1738,10 +1739,18 @@ void checkPreparedInsertSources(const PreparedQuery& query, Session& session) {
 void addReturningRowToContext(RowContext& context, const SqlRow& source,
                               const TableSchema& table, size_t sourceOrdinal,
                               const DatumMetadataContext* datumMetadata,
-                              const StorageEngine::OwningSqlRow* generated = nullptr) {
+                              const StorageEngine::OwningSqlRow* generated = nullptr,bool present=true) {
     for (size_t i = 0; i < table.len; ++i) {
         const Column& column = table.cols[i];
+        if(column.generatedKind=='v') {
+            if(!datumMetadata || !datumMetadata->generatedSource || i>=datumMetadata->generatedSource->columns.size())
+                throw DbError("XX000","RETURNING omitted virtual input lost its frozen source declaration");
+            context.setGeneratedBound(sourceOrdinal,i,bindGeneratedColumn(datumMetadata->generatedSource->columns[i],sourceOrdinal),present);
+            continue;
+        }
         const auto it = source.find(column.dataName);
+        if(present && datumMetadata && datumMetadata->generatedSource && it==source.end())
+            throw DbError("XX000","present RETURNING generated source omitted a real stored input");
         const bool isNull = it == source.end() || !it->second;
         ExprValue value(
             column.dataType + (column.isArray ? "[]" : ""),
@@ -1784,6 +1793,11 @@ const SqlRow& returningSourceRow(
         ? image.oldRow : image.newRow;
 }
 
+bool returningSourcePresent(const ReturningRowImage& image,ReturningProjection::Source source) {
+    if(source==ReturningProjection::Source::Default)source=image.defaultSource;
+    return source==ReturningProjection::Source::Old?image.oldPresent:image.newPresent;
+}
+
 RowContext returningContext(const ReturningRowImage& image,
                             const TableSchema& table,const DatumMetadataContext* datumMetadata,
                             const ReturningSourceCells* sourceCells=nullptr) {
@@ -1792,15 +1806,17 @@ RowContext returningContext(const ReturningRowImage& image,
         image, ReturningProjection::Source::Default);
     addReturningRowToContext(context, defaultRow, table,
         static_cast<size_t>(ReturningProjection::Source::Default),datumMetadata,
-        returningGeneratedValues(image,ReturningProjection::Source::Default));
+        returningGeneratedValues(image,ReturningProjection::Source::Default),returningSourcePresent(image,ReturningProjection::Source::Default));
     addReturningRowToContext(
         context, image.oldRow, table, static_cast<size_t>(ReturningProjection::Source::Old),datumMetadata,
-        returningGeneratedValues(image,ReturningProjection::Source::Old));
+        returningGeneratedValues(image,ReturningProjection::Source::Old),image.oldPresent);
     addReturningRowToContext(
         context, image.newRow, table, static_cast<size_t>(ReturningProjection::Source::New),datumMetadata,
-        returningGeneratedValues(image,ReturningProjection::Source::New));
-    if(sourceCells)for(const auto& source:*sourceCells)
-        context.setBoundColumn(source.binding.sourceOrdinal,source.binding.columnOrdinal,source.value);
+        returningGeneratedValues(image,ReturningProjection::Source::New),image.newPresent);
+    if(sourceCells)for(const auto& source:*sourceCells) {
+        if(source.generated)context.setGeneratedBound(source.binding.sourceOrdinal,source.binding.columnOrdinal,source.generated,source.present);
+        else context.setBoundColumn(source.binding.sourceOrdinal,source.binding.columnOrdinal,source.value);
+    }
     return context;
 }
 
@@ -1917,6 +1933,7 @@ std::vector<ReturningRowImage> insertedReturningImages(
     for (const auto& row : rows) {
         images.push_back(
             {{}, returningSqlRow(row), ReturningProjection::Source::New, {}});
+        images.back().newPresent=true;
         if(generated)images.back().generated=generated->get(images.size()-1,rows.size());
     }
     return images;
@@ -1928,6 +1945,7 @@ std::vector<ReturningRowImage> insertedReturningImages(
     images.reserve(rows.size());
     for (const auto& row : rows) {
         images.push_back({{}, row, ReturningProjection::Source::New, {}});
+        images.back().newPresent=true;
         if(generated)images.back().generated=generated->get(images.size()-1,rows.size());
     }
     return images;
@@ -1940,6 +1958,7 @@ std::vector<ReturningRowImage> updatedReturningImages(
     for (const auto& row : rows) {
         images.push_back(
             {row.oldRow, row.newRow, ReturningProjection::Source::New, {}});
+        images.back().oldPresent=true;images.back().newPresent=true;
         if(generated)images.back().generated=generated->get(images.size()-1,rows.size());
     }
     return images;
@@ -1951,27 +1970,79 @@ std::vector<ReturningRowImage> deletedReturningImages(
     images.reserve(rows.size());
     for (const auto& row : rows) {
         images.push_back({row, {}, ReturningProjection::Source::Old, {}});
+        images.back().oldPresent=true;
         if(generated)images.back().generated=generated->get(images.size()-1,rows.size());
     }
     return images;
 }
 
+// Freeze declarations once at the genuine statement/relation entry.  The
+// schema/cache remains a data-only persisted description: no runtime owner is
+// installed on TableSchema, and this owner never contains row values.
+static GeneratedRelationPtr freezeGeneratedInput(const TableSchema& table,
+    const std::string& database,const std::string& physicalRelation) {
+    if(!std::any_of(table.cols,table.cols+table.len,
+        [](const Column& column){return column.generatedKind=='v';}))return {};
+    const auto metadata=g_engine.prepareDatumMetadataContext(database,physicalRelation);
+    if(!metadata || !metadata->generatedSource ||
+       metadata->generatedSource->columns.size()!=table.len)
+        throw DbError("XX000","generated input lost its frozen relation declaration");
+    for(size_t i=0;i<table.len;++i)
+        if((table.cols[i].generatedKind=='v')!=bool(metadata->generatedSource->columns[i]))
+            throw DbError("XX000","generated input changed its authoritative omitted-column set");
+    for(size_t i=0;i<table.len;++i)if(const auto& program=metadata->generatedSource->columns[i]) {
+        if(program->target.dataName!=table.cols[i].dataName ||
+           program->target.generatedExpr!=table.cols[i].generatedExpr ||
+           program->target.dataType!=table.cols[i].dataType || program->target.domainName!=table.cols[i].domainName ||
+           program->target.isArray!=table.cols[i].isArray || program->target.typeMod!=table.cols[i].typeMod ||
+           program->target.dsize!=table.cols[i].dsize ||
+           program->inputs.size()!=table.len)
+            throw DbError("XX000","generated input declaration differs from its actual schema");
+        for(size_t j=0;j<table.len;++j)
+            if(program->inputs[j].dataName!=table.cols[j].dataName ||
+               program->inputs[j].dataType!=table.cols[j].dataType ||
+               program->inputs[j].isArray!=table.cols[j].isArray)
+                throw DbError("XX000","generated input declaration lost a real attribute");
+    }
+    return metadata->generatedSource;
+}
+
+static void attachGeneratedNames(RowContext& context,const GeneratedRelationPtr& declaration,
+    const std::vector<std::string>& qualifiers,bool unqualified,bool present,size_t sourceOrdinal=0) {
+    if(!declaration)return;
+    for(const auto& program:declaration->columns)if(program) {
+        // Slots 0 and 4+n are the existing genuine legacy target/USING
+        // occurrence namespaces, not a synthetic query or parameter range.
+        auto read=bindGeneratedColumn(program,sourceOrdinal,{},true);
+        if(unqualified)context.setGeneratedNamed(program->target.dataName,read,present);
+        for(const auto& qualifier:qualifiers)if(!qualifier.empty())
+            context.setGeneratedNamed(qualifier+"."+program->target.dataName,read,present);
+    }
+}
+
 RowContext updateContext(const SqlRow& source,
                          const TableSchema& table,
-                         const std::string& targetTable) {
+                         const std::string& targetTable,const GeneratedRelationPtr& generation) {
     RowContext context;
     for (size_t i = 0; i < table.len; ++i) {
         const Column& column = table.cols[i];
+        if(generation && column.generatedKind=='v')continue;
         const auto it = source.find(column.dataName);
         const bool isNull = it == source.end() || !it->second;
         const ExprValue value(
-            column.dataType,
+            column.dataType+(column.generatedKind=='v' && column.isArray?"[]":""),
             isNull ? std::string{} : *it->second, isNull);
+        if(generation && column.generatedKind!='v') {
+            if(it==source.end())throw DbError("XX000","UPDATE generated source omitted a stored input");
+            auto actual=value;actual.typeName=ExprHelper::canonicalResultTypeName(column.dataType+(column.isArray?"[]":""));
+            context.setBoundColumn(0,i,std::move(actual));
+        }
         context.set(column.dataName, value);
         if (!targetTable.empty()) {
             context.set(targetTable + "." + column.dataName, value);
         }
     }
+    attachGeneratedNames(context,generation,{targetTable},true,true);
     return context;
 }
 
@@ -2037,6 +2108,7 @@ struct StructuredSourceRelation {
     std::string qualifier;
     TableSchema schema;
     std::vector<std::map<std::string, std::string>> rows;
+    GeneratedRelationPtr generation;
 };
 
 using ReturningSourceRow=std::map<size_t,ExprValue>;
@@ -2044,6 +2116,8 @@ struct MergeReturningSourceRows {
     const FromItem* occurrence=nullptr;
     DatumMetadataContextPtr metadata;
     std::set<size_t> columns;
+    std::set<size_t> inputColumns; // stored dependencies of genuinely returned virtuals
+    TableSchema schema;
     std::vector<ReturningSourceRow> rows;
 };
 struct MergeReturningSourceStore {
@@ -2172,32 +2246,45 @@ RowContext structuredRelationContext(
     const std::map<std::string, std::string>& targetValues,
     const TableSchema& targetTable, const std::string& targetQualifier,
     const std::vector<StructuredSourceRelation>& sources,
-    const std::vector<const std::map<std::string, std::string>*>& sourceRows) {
+    const std::vector<const std::map<std::string, std::string>*>& sourceRows,
+    const std::string& currentDB,bool targetPresent=true,
+    const GeneratedRelationPtr& targetGeneration={}) {
     RowContext context;
     auto addValues = [&](const std::map<std::string, std::string>& values,
                          const TableSchema& table,
                          const std::vector<std::string>& qualifiers,
-                         bool unqualified) {
+                         bool unqualified,bool present,const GeneratedRelationPtr& generation,size_t sourceOrdinal) {
+        const auto& actualGeneration=generation;
+        if(!actualGeneration && std::any_of(table.cols,table.cols+table.len,
+            [](const Column& column){return column.generatedKind=='v';}))
+            throw DbError("XX000","generated relation consumer has no statement declaration");
         for (size_t i = 0; i < table.len; ++i) {
             const std::string& column = table.cols[i].dataName;
+            if(actualGeneration && table.cols[i].generatedKind=='v')continue;
             const auto it = values.find(column);
             const bool isNull = it == values.end() ||
                                 isStructuredNull(it->second);
-            const ExprValue value(table.cols[i].dataType,
+            const ExprValue value(table.cols[i].dataType+(table.cols[i].generatedKind=='v' && table.cols[i].isArray?"[]":""),
                                   isNull ? std::string{} : it->second, isNull);
+            if(actualGeneration && table.cols[i].generatedKind!='v') {
+                if(present && it==values.end())throw DbError("XX000","generated source omitted a real stored tuple input");
+                auto actual=value;actual.typeName=ExprHelper::canonicalResultTypeName(table.cols[i].dataType+(table.cols[i].isArray?"[]":""));
+                context.setBoundColumn(sourceOrdinal,i,std::move(actual));
+            }
             if (unqualified) context.set(column, value);
             for (const auto& qualifier : qualifiers) {
                 if (!qualifier.empty()) context.set(qualifier + "." + column, value);
             }
         }
+        attachGeneratedNames(context,actualGeneration,qualifiers,unqualified,present,sourceOrdinal);
     };
     addValues(targetValues, targetTable,
-              {identifier(targetQualifier), unqualifiedRelationName(targetQualifier)}, true);
-    for (size_t i = 0; i < sources.size() && i < sourceRows.size(); ++i) {
-        if (!sourceRows[i]) continue;
-        addValues(*sourceRows[i], sources[i].schema,
+              {identifier(targetQualifier), unqualifiedRelationName(targetQualifier)}, true,targetPresent,targetGeneration,0);
+    for (size_t i = 0; i < sources.size(); ++i) {
+        const std::map<std::string,std::string> absent;
+        addValues(i<sourceRows.size() && sourceRows[i]?*sourceRows[i]:absent, sources[i].schema,
                   {identifier(sources[i].qualifier),
-                   unqualifiedRelationName(sources[i].qualifier)}, false);
+                   unqualifiedRelationName(sources[i].qualifier)}, false,i<sourceRows.size() && sourceRows[i]!=nullptr,sources[i].generation,4+i);
     }
     return context;
 }
@@ -2207,13 +2294,16 @@ RowContext updateFromContext(const std::map<std::string, std::string>& targetVal
                              const std::string& targetQualifier,
                              const std::map<std::string, std::string>& sourceValues,
                              const TableSchema& sourceTable,
-                             const std::string& sourceQualifier) {
+                             const std::string& sourceQualifier,const std::string& currentDB,
+                             const GeneratedRelationPtr& targetGeneration,
+                             const GeneratedRelationPtr& sourceGeneration) {
     StructuredSourceRelation source;
     source.qualifier = sourceQualifier;
     source.schema = sourceTable;
+    source.generation=sourceGeneration;
     const std::vector<const std::map<std::string, std::string>*> rows = {&sourceValues};
     return structuredRelationContext(targetValues, targetTable, targetQualifier,
-                                     {source}, rows);
+                                     {source}, rows,currentDB,true,targetGeneration);
 }
 
 bool collectTableRows(const std::string& currentDB, const std::string& tableName,
@@ -2231,6 +2321,7 @@ bool collectTableRows(const std::string& currentDB, const std::string& tableName
         for (size_t i = 0; i < table.len; ++i) {
             bool isNull = false;
             const bool requested=returningRows && returningColumns && returningColumns->count(i);
+            if(table.cols[i].generatedKind=='v')continue;
             std::optional<ExprValue> actual;
             std::string value = g_engine.extractColumnValue(row,table,i,currentDB,true,&isNull,
                 requested && table.cols[i].generatedKind=='v'?&actual:nullptr);
@@ -2299,6 +2390,8 @@ StructuredRelationResult collectStructuredRelations(
             return StructuredRelationResult::Unsupported;
         }
         source.schema = g_engine.getTableSchema(s.currentDB, resolvedName);
+        if(std::any_of(source.schema.cols,source.schema.cols+source.schema.len,[](const Column& c){return c.generatedKind=='v';}))
+            source.generation=freezeGeneratedInput(source.schema,s.currentDB,resolvedName);
         std::set<size_t> returned;
         if(returningStore)for(size_t i=0;i<source.schema.len;++i)
             if(returningStore->references.count({"",source.qualifier,source.schema.cols[i].dataName}))returned.insert(i);
@@ -2307,12 +2400,17 @@ StructuredRelationResult collectStructuredRelations(
             capture=&returningStore->sources[sources.size()];
             capture->occurrence=item;capture->columns=std::move(returned);
             capture->metadata=g_engine.prepareDatumMetadataContext(s.currentDB,resolvedName);
+            capture->schema=source.schema;capture->inputColumns=capture->columns;
+            bool generatedRead=false;
+            for(const auto ordinal:capture->columns)generatedRead=generatedRead||source.schema.cols[ordinal].generatedKind=='v';
+            if(generatedRead)for(size_t ordinal=0;ordinal<source.schema.len;++ordinal)
+                if(source.schema.cols[ordinal].generatedKind!='v')capture->inputColumns.insert(ordinal);
         }
         // Capture only requested true attribute ordinals, in either format.
         // In particular REGTYPE identity is required by SQL evaluation too.
         if (!collectTableRows(s.currentDB,resolvedName,source.schema,"SELECT",source.rows,
             capture?&capture->rows:nullptr,capture?capture->metadata.get():nullptr,
-            capture?&capture->columns:nullptr)) {
+            capture?&capture->inputColumns:nullptr)) {
             return StructuredRelationResult::Unsupported;
         }
         sources.push_back(std::move(source));
@@ -2364,7 +2462,7 @@ bool findStructuredMatch(
     const std::string& currentDB,
     const std::function<bool(const RowContext&, const std::vector<
                              const std::map<std::string, std::string>*>&)>& consumer,
-    bool& evaluationFailed) {
+    bool& evaluationFailed,const GeneratedRelationPtr& targetGeneration) {
     std::vector<const std::map<std::string, std::string>*> sourceRows;
     std::function<bool(size_t)> visit = [&](size_t index) {
         if (index < sources.size()) {
@@ -2378,7 +2476,7 @@ bool findStructuredMatch(
         }
 
         const RowContext context = structuredRelationContext(
-            targetValues, targetTable, targetQualifier, sources, sourceRows);
+            targetValues, targetTable, targetQualifier, sources, sourceRows,currentDB,true,targetGeneration);
         ExprEvaluator evaluator;
         evaluator.setCurrentDB(currentDB);
         for (const Expr* predicate : joinPredicates) {
@@ -2406,16 +2504,18 @@ bool evaluateUpdateFromExpression(
     const TableSchema& sourceTable,
     const std::string& sourceQualifier,
     const std::string& currentDB,
-    std::string& value) {
+    std::string& value,const GeneratedRelationPtr& targetGeneration,
+    const GeneratedRelationPtr& sourceGeneration) {
     StructuredSourceRelation source;
     source.qualifier = sourceQualifier;
     source.schema = sourceTable;
+    source.generation=sourceGeneration;
     const std::vector<const std::map<std::string, std::string>*> rows = {&sourceValues};
     ExprEvaluator evaluator;
     evaluator.setCurrentDB(currentDB);
     const ExprValue result = evaluator.eval(
         expression, structuredRelationContext(targetValues, targetTable, targetQualifier,
-                                              {source}, rows));
+                                              {source}, rows,currentDB,true,targetGeneration));
     if (result.isUnknown() || result.typeName == "unknown") return false;
     if (result.isNull) {
         value = "NULL";
@@ -2435,12 +2535,13 @@ bool evaluateStructuredExpression(
     const TableSchema& targetTable, const std::string& targetQualifier,
     const std::vector<StructuredSourceRelation>& sources,
     const std::vector<const std::map<std::string, std::string>*>& sourceRows,
-    const std::string& currentDB, std::string& value) {
+    const std::string& currentDB, std::string& value,
+    const GeneratedRelationPtr& targetGeneration) {
     ExprEvaluator evaluator;
     evaluator.setCurrentDB(currentDB);
     const ExprValue result = evaluator.eval(
         expression, structuredRelationContext(targetValues, targetTable, targetQualifier,
-                                              sources, sourceRows));
+                                              sources, sourceRows,currentDB,true,targetGeneration));
     if (result.isUnknown() || result.typeName == "unknown") return false;
     if (result.isNull) {
         value = "NULL";
@@ -2460,13 +2561,14 @@ bool evaluateStructuredSqlExpression(
     const TableSchema& targetTable, const std::string& targetQualifier,
     const std::vector<StructuredSourceRelation>& sources,
     const std::vector<const std::map<std::string, std::string>*>& sourceRows,
-    const std::string& currentDB, SqlCell& value) {
+    const std::string& currentDB, SqlCell& value,
+    const GeneratedRelationPtr& targetGeneration) {
     ExprEvaluator evaluator;
     evaluator.setCurrentDB(currentDB);
     const ExprValue result = evaluator.eval(
         expression, structuredRelationContext(targetValues, targetTable,
                                               targetQualifier, sources,
-                                              sourceRows));
+                                              sourceRows,currentDB,true,targetGeneration));
     if (result.isUnknown() || result.typeName == "unknown") return false;
     if (result.isNull) {
         value = std::nullopt;
@@ -2486,11 +2588,11 @@ bool evaluateUpdateExpression(const Expr* expression,
                               const TableSchema& table,
                               const std::string& targetTable,
                               const std::string& currentDB,
-                              SqlCell& value) {
+                              SqlCell& value,const GeneratedRelationPtr& generation) {
     ExprEvaluator evaluator;
     evaluator.setCurrentDB(currentDB);
     const ExprValue result = evaluator.eval(
-        expression, updateContext(source, table, targetTable));
+        expression, updateContext(source, table, targetTable,generation));
     if (result.isUnknown() || result.typeName == "unknown") return false;
     if (result.isNull) {
         value = std::nullopt;
@@ -2597,9 +2699,18 @@ bool publishReturning(const std::vector<ReturningProjection>& projections,
                     const SqlRow& source = returningSourceRow(
                         image, projection.source);
                     const auto it = source.find(projection.column);
+                    size_t generatedOrdinal=0;
+                    while(generatedOrdinal<table.len && table.cols[generatedOrdinal].dataName!=projection.column)++generatedOrdinal;
+                    const bool virtualColumn=generatedOrdinal<table.len && table.cols[generatedOrdinal].generatedKind=='v';
                     isNull = it == source.end() || !it->second;
                     value = isNull ? "NULL" : *it->second;
-                    if(stored_regtype_detail::columnType(projection.typeName)) {
+                    if(virtualColumn) {
+                        const auto context=returningContext(image,table,projection.datumMetadata.get());
+                        ExprEvaluator reader;reader.setCurrentDB(currentDB);
+                        owned=reader.readBoundColumn(static_cast<size_t>(projection.source),generatedOrdinal,context);
+                        isNull=owned.isNull;value=isNull?"NULL":owned.value;loadedStoredReference=true;
+                    }
+                    if(!virtualColumn && stored_regtype_detail::columnType(projection.typeName)) {
                         // Star projections consume the same genuine stored source
                         // as expression projections, before rendering its value.
                         for(size_t ordinal=0;ordinal<table.len;++ordinal) {
@@ -2643,7 +2754,8 @@ bool publishReturning(const std::vector<ReturningProjection>& projections,
                         while(ordinal<table.len && table.cols[ordinal].dataName!=projection.column)++ordinal;
                         if(ordinal==table.len)throw DbError("XX000","RETURNING source column lost its ordinal");
                         const auto context=returningContext(image,table,projection.datumMetadata.get());
-                        owned=context.boundColumn(static_cast<size_t>(projection.source),ordinal);
+                        ExprEvaluator reader;reader.setCurrentDB(currentDB);
+                        owned=reader.readBoundColumn(static_cast<size_t>(projection.source),ordinal,context);
                     }
                 }
                 owning.push_back(std::move(owned));
@@ -2745,12 +2857,13 @@ public:
         for (const auto& image : rows) {
             RowContext row = execution_.context();
             const auto set = [&](const PreparedQuery::SourceRange& source, const SqlRow& values,
-                                 const StorageEngine::OwningSqlRow* generated) {
+                                 const StorageEngine::OwningSqlRow* generated,bool present) {
                 std::vector<ExprValue> cells;
                 for (size_t ordinal=0;ordinal<source.columns.size();++ordinal) {
                     const auto& column=source.columns[ordinal];
+                    if(source.generatedRelation && execution_.generatedSourceRead(source.ordinal,ordinal)){cells.emplace_back();continue;}
                     const auto found = values.find(column.name);
-                    if (!values.empty() && found == values.end())
+                    if ((source.generatedRelation?present:!values.empty()) && found == values.end())
                         throw DbError("XX000", "RETURNING row image lost a bound column");
                     const bool isNull = found == values.end() || !found->second;
                     ExprValue value(column.type, isNull ? std::string{} : *found->second, isNull);
@@ -2778,18 +2891,18 @@ public:
                     }
                     cells.push_back(std::move(value));
                 }
-                execution_.setSourceRow(row, source.ordinal, cells);
+                execution_.setSourceInputs(row, source.ordinal, cells,present);
             };
             set(*target_, returningSourceRow(image, ReturningProjection::Source::Default),
-                returningGeneratedValues(image,ReturningProjection::Source::Default));
+                returningGeneratedValues(image,ReturningProjection::Source::Default),returningSourcePresent(image,ReturningProjection::Source::Default));
             for (const auto& channel : images_)
                 set(*channel.first, returningSourceRow(image, channel.second),
-                    returningGeneratedValues(image,channel.second));
+                    returningGeneratedValues(image,channel.second),returningSourcePresent(image,channel.second));
             std::vector<ExprValue> values;
             for (const auto& item : items_) {
                 if (star(item.expr.get())) {
                     for (const auto& cell : stars_.at(item.expr.get()))
-                        values.push_back(row.boundColumn(cell.first, cell.second));
+                        values.push_back(execution_.readSourceColumn(row,cell.first,cell.second));
                 } else values.push_back(execution_.evaluate(item.expr.get(), row));
             }
             if (values.size() != descriptor.size())
@@ -3259,7 +3372,12 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback,
     ExprEvaluator literalEvaluator;
     for (size_t rowIndex = 0; rowIndex < stmt.values.size(); ++rowIndex) {
         const auto& row = stmt.values[rowIndex];
-        if (row.size() != columns.size()) {
+        // An implicit target list names the physical prefix supplied by
+        // this row; only an explicit column list requires exact arity.
+        // Keep generated columns in that prefix: DEFAULT may occupy their
+        // real position, while a supplied value is rejected below.
+        if (row.size() > columns.size() ||
+            (!stmt.columns.empty() && row.size() != columns.size())) {
             // Transform this complete original row before its contextual
             // width error. Typed unknown-input casts and unresolved names
             // belong to analysis; do not fold arithmetic/numeric narrowing or
@@ -3402,14 +3520,6 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback,
     std::vector<SqlRow> pendingRows;
     if (stmt.selectSource) {
         checkPreparedInsertSources(*preparedInsert, s);
-        for (size_t i = 0; i < generatedTargets.size(); ++i) {
-            if (generatedTargets[i]) return rejectGeneratedValue(i);
-            if (identityTargets[i] == 'a' &&
-                identityOverride != StorageEngine::IdentityOverride::System &&
-                identityOverride != StorageEngine::IdentityOverride::User) {
-                return rejectAlwaysIdentityValue(i);
-            }
-        }
         const auto* typedInsert = dynamic_cast<const InsertStmt*>(preparedInsert->ast.get());
         const auto* select = typedInsert
             ? dynamic_cast<const SelectStmt*>(typedInsert->selectSource.get()) : nullptr;
@@ -3421,8 +3531,19 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback,
         // parameter and NULL cells. Do not reparse it through the narrower
         // legacy SELECT receiver or retry it after partial evaluation.
         const auto& descriptor = preparedInsert->statementOutputs.at(select);
-        if (descriptor.size() != columns.size())
+        if (descriptor.size() > columns.size() ||
+            (!stmt.columns.empty() && descriptor.size() != columns.size()))
             throw DbError("XX000", "INSERT SELECT lost its prepared width");
+        // The source supplies this exact positional prefix. Omitted target
+        // columns retain the original storage/default/generated owner.
+        for (size_t i = 0; i < descriptor.size(); ++i) {
+            if (generatedTargets[i]) return rejectGeneratedValue(i);
+            if (identityTargets[i] == 'a' &&
+                identityOverride != StorageEngine::IdentityOverride::System &&
+                identityOverride != StorageEngine::IdentityOverride::User) {
+                return rejectAlwaysIdentityValue(i);
+            }
+        }
         auto plan = select->fromClause && select->fromClause->type == FromItem::Type::Join
             ? buildPreparedInsertJoinSource(preparedInsert, const_cast<SelectStmt*>(select), s, insertExecution)
             : QueryPlanner::buildPreparedQueryPlan(&g_engine, s.currentDB, preparedInsert, select, insertExecution->context());
@@ -3430,7 +3551,7 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback,
         try {
             std::vector<ExprValue> cells;
             while (cursor->next(cells)) {
-                if (cells.size() != columns.size())
+                if (cells.size() != descriptor.size())
                     throw DbError("XX000", "INSERT SELECT lost its structured row width");
                 SqlRow values;
                 for (size_t i = 0; i < cells.size(); ++i) {
@@ -3475,7 +3596,7 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback,
         }
         const DBStatus status = g_engine.insertDefaultValues(
             s.currentDB, resolvedTable, table,
-            stmt.returning.empty() ? nullptr : &insertedRows,virtualRows.output());
+            stmt.returning.empty() ? nullptr : &insertedRows,virtualRows.output(),true);
         if (status == DBStatus::DUPLICATE_KEY && ignoreDuplicate) {
             std::cout << "INSERT 0 0 (ON CONFLICT DO NOTHING)" << std::endl;
             if (!stmt.returning.empty()) {
@@ -3525,7 +3646,12 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback,
             if (!isDefaultValue(value)) execution.prepareExpression(value.get());
     pendingRows.reserve(stmt.values.size());
     for (const auto& row : typedInsert->values) {
-        if (row.size() != columns.size()) {
+        // An implicit target list names the physical prefix supplied by
+        // this row; only an explicit column list requires exact arity.
+        // Keep generated columns in that prefix: DEFAULT may occupy their
+        // real position, while a supplied value is rejected below.
+        if (row.size() > columns.size() ||
+            (!stmt.columns.empty() && row.size() != columns.size())) {
             std::cout << "SQL syntax error: column count mismatch" << std::endl;
             return true;
         }
@@ -3613,7 +3739,7 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback,
         const DBStatus status = g_engine.insertRow(
             s.currentDB, resolvedTable, values,
             stmt.returning.empty() ? nullptr : &sqlInsertedRows,
-            identityOverride,virtualRows.output());
+            identityOverride,virtualRows.output(),true);
         if (status == DBStatus::DUPLICATE_KEY) {
             if (ignoreDuplicate) {
                 if (conflictTarget.empty()) continue;
@@ -3681,11 +3807,12 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback,
                         std::vector<ExprValue> cells;
                         for (const auto& column : range.columns) {
                             const auto found = image.find(column.name);
+                            if(execution.generatedSourceRead(range.ordinal,cells.size())){cells.emplace_back();continue;}
                             if (found == image.end())
                                 throw DbError("XX000", "ON CONFLICT predicate lost a bound row column");
                             cells.emplace_back(column.type, found->second.value_or(""), !found->second);
                         }
-                        execution.setSourceRow(row, range.ordinal, cells);
+                        execution.setSourceInputs(row, range.ordinal, cells,true);
                     }
                     const auto whereValue = execution.evaluate(typedInsert->conflictWhere.get(), row);
                     if (ExprHelper::canonicalResultTypeName(whereValue.typeName) != "boolean")
@@ -3718,7 +3845,7 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback,
                 const DBStatus updateStatus = g_engine.updateRows(
                     s.currentDB, resolvedTable, rowConflictUpdates, {},
                     &updatedRows, {}, targetMatcher, nullptr,
-                    stmt.returning.empty() ? nullptr : &updateImages,nullptr,conflictVirtualRows.output());
+                    stmt.returning.empty() ? nullptr : &updateImages,nullptr,conflictVirtualRows.output(),true);
                 if (updateStatus != DBStatus::OK || updatedRows.size() != 1) {
                     std::cout << "ON CONFLICT DO UPDATE failed" << std::endl;
                     return true;
@@ -3749,6 +3876,7 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback,
                 {{}, sqlInsertedRows.back(),
                  ReturningProjection::Source::New, {},
                  virtualRows.get(sqlInsertedRows.size()-1,sqlInsertedRows.size())});
+            returningImages.back().newPresent=true;
         }
         ++inserted;
     }
@@ -3789,6 +3917,7 @@ bool executeUpdateFromJoin(const UpdateStmt& stmt, Session& s, bool& fallback) {
                              StorageEngine::TablePrivilege::Update)) return true;
 
     const TableSchema targetSchema = g_engine.getTableSchema(s.currentDB, resolvedTable);
+    const auto targetGeneration=freezeGeneratedInput(targetSchema,s.currentDB,resolvedTable);
     CapturedVirtualRows virtualRows(targetSchema,!stmt.returning.empty());
     const std::string targetQualifier = stmt.alias.empty()
         ? unqualifiedRelationName(requestedTable)
@@ -3886,7 +4015,7 @@ bool executeUpdateFromJoin(const UpdateStmt& stmt, Session& s, bool& fallback) {
                     std::string value;
                     if (!evaluateStructuredExpression(
                             expression, targetValues, targetSchema, targetQualifier,
-                            sources, sourceRows, s.currentDB, value)) {
+                            sources, sourceRows, s.currentDB, value,targetGeneration)) {
                         evaluationFailed = true;
                         return true;
                     }
@@ -3895,7 +4024,7 @@ bool executeUpdateFromJoin(const UpdateStmt& stmt, Session& s, bool& fallback) {
                 matchedUpdates.emplace(rowValueKey(targetValues),
                                       std::move(effectiveUpdates));
                 return true;
-            }, evaluationFailed);
+            }, evaluationFailed,targetGeneration);
         if (evaluationFailed) break;
     }
     if (evaluationFailed) {
@@ -3935,7 +4064,7 @@ bool executeUpdateFromJoin(const UpdateStmt& stmt, Session& s, bool& fallback) {
         s.currentDB, resolvedTable, staticUpdates, {},
         stmt.returning.empty() ? nullptr : &updatedRows,
         updateResolver, updateMatcher, &affectedRows,
-        stmt.returning.empty() ? nullptr : &updateImages,virtualRows.output());
+        stmt.returning.empty() ? nullptr : &updateImages,virtualRows.output(),true);
     if (status != DBStatus::OK) {
         std::cout << "ERROR: UPDATE FROM failed (SQLSTATE "
                   << sqlstateForDBStatus(status) << ")" << std::endl;
@@ -3998,8 +4127,10 @@ bool executeUpdateFrom(const UpdateStmt& stmt, Session& s, bool& fallback) {
     }
 
     const TableSchema targetSchema = g_engine.getTableSchema(s.currentDB, resolvedTable);
+    const auto targetGeneration=freezeGeneratedInput(targetSchema,s.currentDB,resolvedTable);
     CapturedVirtualRows virtualRows(targetSchema,!stmt.returning.empty());
     const TableSchema sourceSchema = g_engine.getTableSchema(s.currentDB, resolvedSource);
+    const auto sourceGeneration=freezeGeneratedInput(sourceSchema,s.currentDB,resolvedSource);
     const std::string targetQualifier = stmt.alias.empty()
         ? unqualifiedRelationName(requestedTable)
         : identifier(stmt.alias);
@@ -4088,7 +4219,7 @@ bool executeUpdateFrom(const UpdateStmt& stmt, Session& s, bool& fallback) {
             evaluator.setCurrentDB(s.currentDB);
             const RowContext context = updateFromContext(
                 targetValues, targetSchema, targetQualifier,
-                sourceValues, sourceSchema, sourceQualifier);
+                sourceValues, sourceSchema, sourceQualifier,s.currentDB,targetGeneration,sourceGeneration);
             if (stmt.whereClause) {
                 const ExprValue predicate = evaluator.eval(stmt.whereClause.get(), context);
                 if (predicate.isUnknown() || predicate.isNull || !predicate.asBool()) continue;
@@ -4100,7 +4231,7 @@ bool executeUpdateFrom(const UpdateStmt& stmt, Session& s, bool& fallback) {
                 if (!evaluateUpdateFromExpression(
                         expression, targetValues, targetSchema, targetQualifier,
                         sourceValues, sourceSchema, sourceQualifier,
-                        s.currentDB, value)) {
+                        s.currentDB, value,targetGeneration,sourceGeneration)) {
                     evaluationFailed = true;
                     break;
                 }
@@ -4147,7 +4278,7 @@ bool executeUpdateFrom(const UpdateStmt& stmt, Session& s, bool& fallback) {
         s.currentDB, resolvedTable, staticUpdates, {},
         stmt.returning.empty() ? nullptr : &updatedRows,
         updateResolver, updateMatcher, &affectedRows,
-        stmt.returning.empty() ? nullptr : &updateImages,virtualRows.output());
+        stmt.returning.empty() ? nullptr : &updateImages,virtualRows.output(),true);
     if (status != DBStatus::OK) {
         std::cout << "ERROR: UPDATE FROM failed (SQLSTATE "
                   << sqlstateForDBStatus(status) << ")" << std::endl;
@@ -4471,11 +4602,12 @@ bool executePreparedUpdate(const UpdateStmt& stmt, Session& s, bool& fallback,
         cells.reserve(descriptor.size());
         for (const auto& column : descriptor) {
             const auto found = oldValues.find(column.name);
+            if(execution.generatedSourceRead(targetOrdinal,cells.size())){cells.emplace_back();continue;}
             if (found == oldValues.end())
                 throw DbError("XX000", "UPDATE OLD row has an absent bound column");
             cells.emplace_back(column.type, found->second.value_or(""), !found->second);
         }
-        execution.setSourceRow(row, targetOrdinal, cells);
+        execution.setSourceInputs(row, targetOrdinal, cells,true);
         return row;
     };
     const StorageEngine::SqlUpdateMatcher matcher = [&](const SqlRow& oldValues) {
@@ -4507,7 +4639,7 @@ bool executePreparedUpdate(const UpdateStmt& stmt, Session& s, bool& fallback,
     const DBStatus status = g_engine.updateRows(
         s.currentDB, resolvedTable, constantUpdates, {},
         stmt.returning.empty() ? nullptr : &updatedRows, resolver, matcher,
-        &affectedRows, stmt.returning.empty() ? nullptr : &images,nullptr,virtualRows.output());
+        &affectedRows, stmt.returning.empty() ? nullptr : &images,nullptr,virtualRows.output(),true);
     if (status != DBStatus::OK)
         throw DbError(sqlstateForDBStatus(status), "UPDATE failed");
     if (!stmt.returning.empty() &&
@@ -4609,6 +4741,7 @@ bool executeUpdate(const UpdateStmt& stmt, Session& s, bool& fallback) {
     std::vector<SqlRow> updatedRows;
     std::vector<StorageEngine::UpdateRowImage> updateImages;
     StorageEngine::SqlUpdateResolver updateResolver;
+    const auto generation=freezeGeneratedInput(table,s.currentDB,resolvedTable);
     if (!expressionUpdates.empty()) {
         updateResolver = [&, targetQualifier](
                              const SqlRow& oldValues,
@@ -4616,7 +4749,7 @@ bool executeUpdate(const UpdateStmt& stmt, Session& s, bool& fallback) {
             for (const auto& [column, expression] : expressionUpdates) {
                 SqlCell value;
                 if (!evaluateUpdateExpression(expression, oldValues, table,
-                                              targetQualifier, s.currentDB, value)) {
+                                              targetQualifier, s.currentDB, value,generation)) {
                     return false;
                 }
                 effectiveUpdates[column] = std::move(value);
@@ -4635,7 +4768,7 @@ bool executeUpdate(const UpdateStmt& stmt, Session& s, bool& fallback) {
         s.currentDB, resolvedTable, updates, conditions,
         stmt.returning.empty() ? nullptr : &updatedRows, updateResolver,
         StorageEngine::SqlUpdateMatcher{}, &affectedRows,
-        stmt.returning.empty() ? nullptr : &updateImages,nullptr,virtualRows.output());
+        stmt.returning.empty() ? nullptr : &updateImages,nullptr,virtualRows.output(),true);
     if (status != DBStatus::OK) {
         std::cout << "ERROR: Update failed (SQLSTATE "
                   << sqlstateForDBStatus(status) << ")" << std::endl;
@@ -4686,17 +4819,48 @@ static std::shared_ptr<const ReturningSourceBindings> mergeReturningBindings(
 static ReturningSourceCellsPtr mergeReturningSourceCells(
     const ReturningSourceBindings& bindings,const std::vector<size_t>* positions,
     const MergeReturningSourceStore& store) {
-    auto result=std::make_shared<ReturningSourceCells>();result->reserve(bindings.size());
+    auto result=std::make_shared<ReturningSourceCells>();
+    std::set<std::pair<size_t,size_t>> published;
     for(const auto& declared:bindings) {
         const auto& binding=declared.second;const size_t source=binding.sourceOrdinal-4;
-        ExprValue value(binding.declaredType,"",true);
-        if(positions) {
-            const auto& row=store.sources.at(source).rows.at(positions->at(source));
-            const auto actual=row.find(binding.columnOrdinal);
-            if(actual==row.end())throw DbError("XX000","MERGE source lost an actual captured attribute");
-            value=actual->second;
+        const auto& captured=store.sources.at(source);
+        const ReturningSourceRow* row=positions?&captured.rows.at(positions->at(source)):nullptr;
+        const auto program=captured.metadata && captured.metadata->generatedSource &&
+            binding.columnOrdinal<captured.metadata->generatedSource->columns.size()
+            ?captured.metadata->generatedSource->columns[binding.columnOrdinal]:nullptr;
+        if(program) {
+            if(published.insert({binding.sourceOrdinal,binding.columnOrdinal}).second)
+                result->push_back({binding,ExprValue{},bindGeneratedColumn(program,binding.sourceOrdinal),positions!=nullptr});
+            // The same actual selected source image owns stored dependencies.
+            // They are data inputs, not extra SQL projections or evaluations.
+            for(const auto ordinal:captured.inputColumns) {
+                if(captured.schema.cols[ordinal].generatedKind=='v' ||
+                   !published.insert({binding.sourceOrdinal,ordinal}).second)continue;
+                const auto& column=captured.schema.cols[ordinal];
+                QueryColumnBinding dependency{0,binding.sourceOrdinal,ordinal,
+                    ExprHelper::canonicalResultTypeName(column.dataType+(column.isArray?"[]":"")),false};
+                if(captured.metadata) {
+                    const auto type=captured.metadata->columns.find(column.dataName);
+                    if(type!=captured.metadata->columns.end())dependency.typeMetadata=type->second;
+                }
+                if(dependency.typeMetadata)dependency.typeOid=dependency.typeMetadata->actualOid;
+                ExprValue value(dependency.declaredType,"",true);
+                if(row) {
+                    const auto actual=row->find(ordinal);
+                    if(actual==row->end())throw DbError("XX000","MERGE generated source lost an actual stored dependency");
+                    value=actual->second;
+                }
+                result->push_back({std::move(dependency),std::move(value),{},positions!=nullptr});
+            }
+        } else if(published.insert({binding.sourceOrdinal,binding.columnOrdinal}).second) {
+            ExprValue value(binding.declaredType,"",true);
+            if(row) {
+                const auto actual=row->find(binding.columnOrdinal);
+                if(actual==row->end())throw DbError("XX000","MERGE source lost an actual captured attribute");
+                value=actual->second;
+            }
+            result->push_back({binding,std::move(value),{},positions!=nullptr});
         }
-        result->push_back({binding,std::move(value)});
     }
     return result;
 }
@@ -4739,6 +4903,7 @@ bool executeMerge(const MergeStmt& stmt, Session& s, bool& fallback) {
     }
 
     const TableSchema targetSchema = g_engine.getTableSchema(s.currentDB, targetTable);
+    const auto targetGeneration=freezeGeneratedInput(targetSchema,s.currentDB,targetTable);
     CapturedVirtualRows insertVirtualRows(targetSchema,!stmt.returning.empty());
     CapturedVirtualRows updateVirtualRows(targetSchema,!stmt.returning.empty());
     CapturedVirtualRows deleteVirtualRows(targetSchema,!stmt.returning.empty());
@@ -4806,7 +4971,7 @@ bool executeMerge(const MergeStmt& stmt, Session& s, bool& fallback) {
         }
         const std::map<std::string, std::string> emptyTarget;
         const RowContext context = structuredRelationContext(
-            emptyTarget, noTargetSchema, "", sources, sourceTuple);
+            emptyTarget, noTargetSchema, "", sources, sourceTuple,s.currentDB,false);
         ExprEvaluator evaluator;
         evaluator.setCurrentDB(s.currentDB);
         for (const Expr* predicate : sourceJoinPredicates) {
@@ -4996,7 +5161,7 @@ bool executeMerge(const MergeStmt& stmt, Session& s, bool& fallback) {
         for (size_t targetIndex = 0; targetIndex < targetRows.size(); ++targetIndex) {
             const RowContext context = structuredRelationContext(
                 targetRows[targetIndex], targetSchema, targetQualifier,
-                sources, sourceRows[sourceIndex]);
+                sources, sourceRows[sourceIndex],s.currentDB,true,targetGeneration);
             ExprEvaluator evaluator;
             evaluator.setCurrentDB(s.currentDB);
             if (structuredPredicateMatches(stmt.joinCondition.get(), context,
@@ -5016,12 +5181,12 @@ bool executeMerge(const MergeStmt& stmt, Session& s, bool& fallback) {
 
     auto chooseClause = [&](const std::vector<const MergeStmt::WhenClause*>& clauses,
                             const std::map<std::string, std::string>& targetValues,
-                            const std::vector<const std::map<std::string, std::string>*>& rows)
+                            const std::vector<const std::map<std::string, std::string>*>& rows,bool targetPresent)
         -> const MergeStmt::WhenClause* {
         for (const auto* clause : clauses) {
             if (!clause->condition) return clause;
             const RowContext context = structuredRelationContext(
-                targetValues, targetSchema, targetQualifier, sources, rows);
+                targetValues, targetSchema, targetQualifier, sources, rows,s.currentDB,targetPresent,targetGeneration);
             ExprEvaluator evaluator;
             evaluator.setCurrentDB(s.currentDB);
             if (structuredPredicateMatches(clause->condition.get(), context,
@@ -5094,7 +5259,7 @@ bool executeMerge(const MergeStmt& stmt, Session& s, bool& fallback) {
             SqlCell value;
             if (!evaluateStructuredSqlExpression(
                     expression.get(), targetRows[targetIndex], targetSchema,
-                    targetQualifier, sources, rows, s.currentDB, value)) {
+                    targetQualifier, sources, rows, s.currentDB, value,targetGeneration)) {
                 evaluationFailed = true;
                 return false;
             }
@@ -5118,7 +5283,7 @@ bool executeMerge(const MergeStmt& stmt, Session& s, bool& fallback) {
         if (sourceMatches[sourceIndex].empty()) {
             const std::map<std::string, std::string> emptyTarget;
             const auto* clause = chooseClause(byTargetClauses, emptyTarget,
-                                              sourceRows[sourceIndex]);
+                                              sourceRows[sourceIndex],false);
             if (evaluationFailed) break;
             if (!clause || lower(clause->action) == "do nothing") continue;
             SqlRow values;
@@ -5126,7 +5291,7 @@ bool executeMerge(const MergeStmt& stmt, Session& s, bool& fallback) {
                 SqlCell value;
                 if (!evaluateStructuredSqlExpression(
                         expression.get(), emptyTarget, noTargetSchema, "",
-                        sources, sourceRows[sourceIndex], s.currentDB, value)) {
+                        sources, sourceRows[sourceIndex], s.currentDB, value,{})) {
                     evaluationFailed = true;
                     break;
                 }
@@ -5140,7 +5305,7 @@ bool executeMerge(const MergeStmt& stmt, Session& s, bool& fallback) {
         }
         for (const size_t targetIndex : sourceMatches[sourceIndex]) {
             const auto* clause = chooseClause(
-                matchedClauses, targetRows[targetIndex], sourceRows[sourceIndex]);
+                matchedClauses, targetRows[targetIndex], sourceRows[sourceIndex],true);
             if (evaluationFailed ||
                 !planTargetAction(targetIndex, clause, sourceRows[sourceIndex],returningSourceBindings?&sourcePositions[sourceIndex]:nullptr)) {
                 if (!evaluationFailed) return true;
@@ -5154,7 +5319,7 @@ bool executeMerge(const MergeStmt& stmt, Session& s, bool& fallback) {
         for (size_t targetIndex = 0; targetIndex < targetRows.size(); ++targetIndex) {
             if (!targetMatches[targetIndex].empty()) continue;
             const auto* clause = chooseClause(
-                bySourceClauses, targetRows[targetIndex], noSourceRows);
+                bySourceClauses, targetRows[targetIndex], noSourceRows,true);
             if (evaluationFailed ||
                 !planTargetAction(targetIndex, clause, noSourceRows)) {
                 if (!evaluationFailed) return true;
@@ -5179,7 +5344,7 @@ bool executeMerge(const MergeStmt& stmt, Session& s, bool& fallback) {
             return pendingDeletes.count(rowValueKey(logicalValues(oldValues))) != 0;
         };
         const DBStatus status = g_engine.removeRows(
-            s.currentDB, targetTable, {}, &deletedRows, matcher, &deleted,nullptr,deleteVirtualRows.output());
+            s.currentDB, targetTable, {}, &deletedRows, matcher, &deleted,nullptr,deleteVirtualRows.output(),true);
         if (status != DBStatus::OK) return mutationFailure("DELETE", status);
         if (deleted != expectedDeletes) {
             std::cout << "ERROR: MERGE target row changed during execution "
@@ -5205,7 +5370,7 @@ bool executeMerge(const MergeStmt& stmt, Session& s, bool& fallback) {
         };
         const DBStatus status = g_engine.updateRows(
             s.currentDB, targetTable, {}, {}, &updatedRows, resolver, matcher,
-            &updated, stmt.returning.empty() ? nullptr : &updateImages,nullptr,updateVirtualRows.output());
+            &updated, stmt.returning.empty() ? nullptr : &updateImages,nullptr,updateVirtualRows.output(),true);
         if (status != DBStatus::OK) return mutationFailure("UPDATE", status);
         if (updated != expectedUpdates) {
             std::cout << "ERROR: MERGE target row changed during execution "
@@ -5216,7 +5381,7 @@ bool executeMerge(const MergeStmt& stmt, Session& s, bool& fallback) {
 
     for (const auto& values : pendingInserts) {
         const DBStatus status = g_engine.insertRow(
-            s.currentDB, targetTable, values, &insertedRows,StorageEngine::IdentityOverride::None,insertVirtualRows.output());
+            s.currentDB, targetTable, values, &insertedRows,StorageEngine::IdentityOverride::None,insertVirtualRows.output(),true);
         if (status != DBStatus::OK) return mutationFailure("INSERT", status);
     }
 
@@ -5228,18 +5393,22 @@ bool executeMerge(const MergeStmt& stmt, Session& s, bool& fallback) {
         const auto& row=deletedRows[i];
         returningImages.push_back({row,{},ReturningProjection::Source::Old,"DELETE",
             deleteVirtualRows.get(i,deletedRows.size())});
+        returningImages.back().oldPresent=true;
         if(returningSourceBindings)returningSourceImages.push_back(returningSources.at(rowValueKey(logicalValues(row))));
     }
     for(size_t i=0;i<updateImages.size();++i) {
         const auto& row=updateImages[i];
         returningImages.push_back({row.oldRow,row.newRow,ReturningProjection::Source::New,"UPDATE",
             updateVirtualRows.get(i,updateImages.size())});
+        returningImages.back().oldPresent=true;
+        returningImages.back().newPresent=true;
         if(returningSourceBindings)returningSourceImages.push_back(returningSources.at(rowValueKey(logicalValues(row.oldRow))));
     }
     for(size_t i=0;i<insertedRows.size();++i) {
         const auto& row=insertedRows[i];
         returningImages.push_back({{},row,ReturningProjection::Source::New,"INSERT",
             insertVirtualRows.get(i,insertedRows.size())});
+        returningImages.back().newPresent=true;
         if(returningSourceBindings) {
             if(insertSources.size()!=insertedRows.size())throw DbError("XX000","MERGE INSERT source image count mismatch");
             returningSourceImages.push_back(insertSources.at(i));
@@ -5306,6 +5475,7 @@ bool executeDeleteUsingJoin(const DeleteStmt& stmt, Session& s, bool& fallback) 
                              StorageEngine::TablePrivilege::Delete)) return true;
 
     const TableSchema targetSchema = g_engine.getTableSchema(s.currentDB, resolvedTable);
+    const auto targetGeneration=freezeGeneratedInput(targetSchema,s.currentDB,resolvedTable);
     CapturedVirtualRows virtualRows(targetSchema,!stmt.returning.empty());
     const std::string targetQualifier = stmt.alias.empty()
         ? unqualifiedRelationName(requestedTable)
@@ -5357,7 +5527,7 @@ bool executeDeleteUsingJoin(const DeleteStmt& stmt, Session& s, bool& fallback) 
             [&](const RowContext&, const std::vector<const std::map<std::string, std::string>*>&) {
                 matchedTargets.insert(rowValueKey(targetValues));
                 return true;
-            }, evaluationFailed);
+            }, evaluationFailed,targetGeneration);
         if (evaluationFailed) break;
     }
     if (evaluationFailed) {
@@ -5386,7 +5556,7 @@ bool executeDeleteUsingJoin(const DeleteStmt& stmt, Session& s, bool& fallback) 
     const DBStatus status = g_engine.removeRows(
         s.currentDB, resolvedTable, {},
         stmt.returning.empty() ? nullptr : &deletedRows, deleteMatcher,
-        &affectedRows,nullptr,virtualRows.output());
+        &affectedRows,nullptr,virtualRows.output(),true);
     if (status != DBStatus::OK) {
         std::cout << "ERROR: DELETE USING failed (SQLSTATE "
                   << sqlstateForDBStatus(status) << ")" << std::endl;
@@ -5449,8 +5619,10 @@ bool executeDeleteUsing(const DeleteStmt& stmt, Session& s, bool& fallback) {
     }
 
     const TableSchema targetSchema = g_engine.getTableSchema(s.currentDB, resolvedTable);
+    const auto targetGeneration=freezeGeneratedInput(targetSchema,s.currentDB,resolvedTable);
     CapturedVirtualRows virtualRows(targetSchema,!stmt.returning.empty());
     const TableSchema sourceSchema = g_engine.getTableSchema(s.currentDB, resolvedSource);
+    const auto sourceGeneration=freezeGeneratedInput(sourceSchema,s.currentDB,resolvedSource);
     const std::string targetQualifier = stmt.alias.empty()
         ? unqualifiedRelationName(requestedTable)
         : identifier(stmt.alias);
@@ -5492,7 +5664,7 @@ bool executeDeleteUsing(const DeleteStmt& stmt, Session& s, bool& fallback) {
                 evaluator.setCurrentDB(s.currentDB);
                 const RowContext context = updateFromContext(
                     targetValues, targetSchema, targetQualifier,
-                    sourceValues, sourceSchema, sourceQualifier);
+                    sourceValues, sourceSchema, sourceQualifier,s.currentDB,targetGeneration,sourceGeneration);
                 const ExprValue predicate = evaluator.eval(stmt.whereClause.get(), context);
                 if (predicate.isUnknown() || predicate.typeName == "unknown") {
                     evaluationFailed = true;
@@ -5538,7 +5710,7 @@ bool executeDeleteUsing(const DeleteStmt& stmt, Session& s, bool& fallback) {
     const DBStatus status = g_engine.removeRows(
         s.currentDB, resolvedTable, {},
         stmt.returning.empty() ? nullptr : &deletedRows, deleteMatcher,
-        &affectedRows,nullptr,virtualRows.output());
+        &affectedRows,nullptr,virtualRows.output(),true);
     if (status != DBStatus::OK) {
         std::cout << "ERROR: DELETE USING failed (SQLSTATE "
                   << sqlstateForDBStatus(status) << ")" << std::endl;
@@ -5613,7 +5785,7 @@ bool executeDelete(const DeleteStmt& stmt, Session& s, bool& fallback) {
     const DBStatus status = g_engine.removeRows(
         s.currentDB, resolvedTable, conditions,
         stmt.returning.empty() ? nullptr : &deletedRows,
-        StorageEngine::SqlDeleteMatcher{}, &affectedRows,nullptr,virtualRows.output());
+        StorageEngine::SqlDeleteMatcher{}, &affectedRows,nullptr,virtualRows.output(),true);
     if (status != DBStatus::OK) {
         std::cout << "ERROR: DELETE failed (SQLSTATE "
                   << sqlstateForDBStatus(status) << ")" << std::endl;
@@ -5797,6 +5969,7 @@ private:
                     found=scan->next(raw);
                     if(!found && scan->hasError())throw dbms::DbError("XX000",scan->errorMessage());
                     if(found)for(size_t i=0;i<scanSchema.len;++i) {
+                        if(scanSchema.cols[i].generatedKind=='v'){cells.emplace_back();continue;}
                         bool computedNull=false;
                         const auto value=g_engine.extractColumnValue(raw,scanSchema,i,session_.currentDB,true,&computedNull);
                         cells.emplace_back(rangePointer->columns[i].type,value,computedNull ||
@@ -5811,7 +5984,7 @@ private:
                     }
                 }
                 if(!found)return false;
-                row=outer;execution->setSourceRow(row,rangePointer->ordinal,cells);
+                row=outer;execution->setSourceInputs(row,rangePointer->ordinal,cells,true);
                 return true;
             };
             return node;
@@ -5890,18 +6063,15 @@ private:
             std::vector<bool> rightMatched;
         };
         auto position=std::make_shared<JoinPosition>();
-        node->read=[execution,outer,left,right,leftJoin,rightJoin,merged,item,keys,comparisons,position]
+        node->read=[execution,outer,left,right,leftJoin,rightJoin,merged,item,keys,comparisons,position,database=session_.currentDB]
             (size_t,dbms::RowContext& output) {
-            dbms::ExprEvaluator comparator;
+            dbms::ExprEvaluator comparator;comparator.setCurrentDB(database);
             const auto combine=[&](const dbms::RowContext* a,const dbms::RowContext* b) {
                 auto row=outer;
                 const auto fill=[&](const std::shared_ptr<NativeSourceNode>& side,const dbms::RowContext* input) {
                     for(const auto ordinal:side->occurrences) {
                         const auto& range=execution->sourceRange(ordinal);
-                        std::vector<dbms::ExprValue> cells;
-                        for(size_t i=0;i<range.columns.size();++i)
-                            cells.push_back(input?input->boundColumn(ordinal,i):dbms::ExprValue(range.columns[i].type,"",true));
-                        execution->setSourceRow(row,ordinal,cells);
+                        execution->copySourceInputs(row,ordinal,input);
                     }
                 };
                 fill(left,a);fill(right,b);
@@ -5909,7 +6079,7 @@ private:
                     std::vector<dbms::ExprValue> cells;
                     for(size_t i=0;i<keys.size();++i) {
                         const auto& key=keys[i];
-                        const auto& l=row.boundColumn(key.first.first,key.first.second);
+                        const auto l=comparator.readBoundColumn(key.first.first,key.first.second,row);
                         const auto* operands=static_cast<const dbms::BinaryOpExpr*>(comparisons->at(i).get());
                         cells.push_back(comparator.eval(l.isNull?operands->right.get():operands->left.get(),row));
                     }
@@ -6056,9 +6226,10 @@ class BoundDmlExecution {
     }
     RowContext context(const SqlRow& values,const RowContext* source=nullptr,
                        bool captureReturningArrays=false,
-                       const StorageEngine::OwningSqlRow* generated=nullptr) const {
+                       const StorageEngine::OwningSqlRow* generated=nullptr,bool present=true) const {
         auto row=source?*source:execution_->context();std::vector<ExprValue> cells;
         for(const auto& column:target_->columns) {
+            if(target_->generatedRelation && execution_->generatedSourceRead(target_->ordinal,cells.size())){cells.emplace_back();continue;}
             const auto found=values.find(column.name);
             if(found==values.end())throw DbError("XX000","DML row has no bound target column: "+column.name);
             cells.emplace_back(column.type,found->second.value_or(""),!found->second);
@@ -6079,7 +6250,7 @@ class BoundDmlExecution {
             if(actual!=generated->end() && compatibleGeneratedDatum(actual->second,target_->columns[i].type))
                 cells.at(i)=actual->second;
         }
-        execution_->setSourceRow(row,target_->ordinal,cells);return row;
+        execution_->setSourceInputs(row,target_->ordinal,cells,present);return row;
     }
     static bool returningStar(const Expr* value) {
         const auto* column=dynamic_cast<const ColumnRefExpr*>(value);
@@ -6088,16 +6259,17 @@ class BoundDmlExecution {
     RowContext returningContext(const ReturningRowImage& image,const RowContext* source=nullptr) const {
         const bool captureArrays=typedResultCaptureRequested();
         auto row=context(returningSourceRow(image,ReturningProjection::Source::Default),source,captureArrays,
-            returningGeneratedValues(image,ReturningProjection::Source::Default));
+            returningGeneratedValues(image,ReturningProjection::Source::Default),returningSourcePresent(image,ReturningProjection::Source::Default));
         for(const auto& channel:transitionSources_) {
             const auto& source=*channel.first;
             const auto& values=returningSourceRow(image,channel.second);
             std::vector<ExprValue> cells;
             for(const auto& column:source.columns) {
+                if(source.generatedRelation && execution_->generatedSourceRead(source.ordinal,cells.size())){cells.emplace_back();continue;}
                 const auto found=values.find(column.name);
                 // A missing row version is a whole typed NULL row (INSERT
                 // OLD / DELETE NEW), not a guessed textual NULL sentinel.
-                if(!values.empty() && found==values.end())
+                if((source.generatedRelation?returningSourcePresent(image,channel.second):!values.empty()) && found==values.end())
                     throw DbError("XX000","RETURNING image lost its bound descriptor column");
                 const bool isNull=found==values.end() || !found->second;
                 cells.emplace_back(column.type,isNull?std::string{}:*found->second,isNull);
@@ -6124,7 +6296,7 @@ class BoundDmlExecution {
                     if(actual!=generated->end() && compatibleGeneratedDatum(actual->second,source.columns[i].type))
                         cells.at(i)=actual->second;
                 }
-            execution_->setSourceRow(row,source.ordinal,cells);
+            execution_->setSourceInputs(row,source.ordinal,cells,returningSourcePresent(image,channel.second));
         }
         return row;
     }
@@ -6194,7 +6366,7 @@ class BoundDmlExecution {
             for(const auto& item:*returning_) {
                 if(returningStar(item.expr.get())) {
                     for(const auto& cell:returningStarCells_.at(item.expr.get()))
-                        values.push_back(row.boundColumn(cell.first,cell.second));
+                        values.push_back(execution_->readSourceColumn(row,cell.first,cell.second));
                 } else values.push_back(execution_->evaluate(item.expr.get(),row));
             }
             if(values.size()!=descriptor.size())throw DbError("XX000","DML RETURNING width differs from prepared descriptor");
@@ -6373,7 +6545,7 @@ private:
                     const auto cell=execution_->evaluate(value.second.get(),execution_->context());
                     row[column.name]=cell.isNull?SqlCell{}:SqlCell{stored_regtype_detail::storageText(cell)};
                 }
-                const auto status=g_engine.insertRow(session_.currentDB,physical_,row,returning_->empty()?nullptr:&images,override,virtualRows.output());
+                const auto status=g_engine.insertRow(session_.currentDB,physical_,row,returning_->empty()?nullptr:&images,override,virtualRows.output(),true);
                 if(status!=DBStatus::OK)throw DbError(sqlstateForDBStatus(status),"WITH INSERT failed");
                 ++count;
             };
@@ -6445,11 +6617,12 @@ private:
                 const auto found=chosen.find(rid);
                 if(found==chosen.end())throw DbError("XX000","RETURNING target lost its matched physical occurrence");
                 changes.push_back({old,values,update?ReturningProjection::Source::New:ReturningProjection::Source::Old,{}});
+                changes.back().oldPresent=true;changes.back().newPresent=update;
                 provenance.push_back(found->second.row);
             };
             const auto status=update
                 ?g_engine.updateRows(session_.currentDB,physical_,{}, {},nullptr,{}, {},&count,nullptr,&callbacks,virtualRows.output())
-                :g_engine.removeRows(session_.currentDB,physical_,{},nullptr,{},&count,&callbacks,virtualRows.output());
+                :g_engine.removeRows(session_.currentDB,physical_,{},nullptr,{},&count,&callbacks,virtualRows.output(),true);
             if(status!=DBStatus::OK)throw NativeMutationStatusError(status);
             for(size_t i=0;i<changes.size();++i)
                 changes[i].generated=virtualRows.get(i,changes.size());
@@ -6467,13 +6640,13 @@ private:
                 return true;
             };
             const auto status=g_engine.updateRows(session_.currentDB,physical_,{}, integerEqualityCandidates(update->whereClause.get()),returning_->empty()?nullptr:&images,
-                resolver,matcher,&count,returning_->empty()?nullptr:&changes,nullptr,virtualRows.output());
+                resolver,matcher,&count,returning_->empty()?nullptr:&changes,nullptr,virtualRows.output(),true);
             if(status!=DBStatus::OK)throw DbError(sqlstateForDBStatus(status),"WITH UPDATE failed");
             return result(updatedReturningImages(changes,&virtualRows),"UPDATE",count);
         }
         auto* remove=static_cast<DeleteStmt*>(statement_);
         const auto matcher=[&](const SqlRow& old){return matches(remove->whereClause.get(),old);};
-        const auto status=g_engine.removeRows(session_.currentDB,physical_,integerEqualityCandidates(remove->whereClause.get()),returning_->empty()?nullptr:&images,matcher,&count,nullptr,virtualRows.output());
+        const auto status=g_engine.removeRows(session_.currentDB,physical_,integerEqualityCandidates(remove->whereClause.get()),returning_->empty()?nullptr:&images,matcher,&count,nullptr,virtualRows.output(),true);
         if(status!=DBStatus::OK)throw DbError(sqlstateForDBStatus(status),"WITH DELETE failed");
         return result(deletedReturningImages(images,&virtualRows),"DELETE",count);
     }

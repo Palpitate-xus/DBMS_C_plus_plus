@@ -1,5 +1,18 @@
 # DBMS_C_plus_plus 对标 PostgreSQL 18.6：逐项完整实施蓝图
 
+<!-- CURRENT_GENERATED_DEMAND_20261104 -->
+
+## 虚拟生成列读值需求与完整 SQL 实测（2026-11-04）
+
+本批源码P6-C8 `45264111…` 已将虚拟生成列接入真实行输入、声明赋值及落盘身份验证。读取需求/赋值258严格观察新增82整项通过，剩余20；旧767完整记录连续。C++17、原规划/portal/format策略和用户暂停边界保持。
+
+下一步普通缺口包括错误前缀和来源元数据、字符数组新接收器声明一致性、表达式索引AST、ANALYZE virtual统计、legacy LATERAL/EXCLUDED/default/BEFORE组合及目录/identity语法。备份私有摘要原型864组件控制通过，真实备份/SQL收益尚未验证。
+
+C8四条100行生成列SQL实测均快于两C2，但完整35操作/36查询成本未对C8验收，默认425保持。执行依据见[当前报告](performance-report-2026-10-30.md)。
+
+原273项仍为22 complete /166 partial /70 unverified /15 deferred_by_user；Goal active。下方旧批次保留当时事实，当前状态以本节为准。
+
+
 ## ANALYZE 与 REINDEX 成本优化（2026-11-04）
 
 本批源码 P5-C2（a3baaca6…）优化同次 ANALYZE 的类型/locale 比较和真实行 NULL 位图，以及 REINDEX 逻辑 map 保留。C++17、原维护频率/持久化和用户暂缓边界保持。ANALYZE p50 369–403→74 ms，范围 UPDATE 600–650→389 ms；完整 35 操作为4快/28慢/3居间，36组查询为4快/6慢/26居间，整体性能提升尚未验收，默认仍为425，现有服务未重启。

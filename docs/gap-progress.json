@@ -2,6 +2,35 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-04 virtual generated demand, declared assignment and normal SQL100 costs",
+      "gap_ids": [
+        "QRY-08",
+        "TYPE-17",
+        "TYPE-19",
+        "PROTO-04"
+      ],
+      "status": "partial",
+      "evidence": [
+        "docs/performance-report-2026-10-30.md",
+        "docs/test-report.md",
+        "docs/postgresql-comparison.md",
+        "docs/postgresql-18-implementation-blueprint.md",
+        "docs/benchmarks/generated-column-demand-20261104.json"
+      ],
+      "tests": [
+        "tests/generated_column_demand_test.cpp",
+        "tests/generated_context_spill_validation_test.cpp"
+      ],
+      "verification": {
+        "source": "Parent453fb63a;P6C845264111/source229/header159;freshC3zero62 lineage->requiredrebuilds;finalMain1TU/all61nativecoreexactC6/freshstub794;default425held/masterPalpitate-xus/no branch/push/restart.",
+        "functional": "Permanent36+10=46/0onidenticalC6core;related25C5=24/1/oldC2same46control36fail retained. Strict258C2=156/102->C8=238/20(13/3/2/2),82newfullpass0fullpassregress;264componentgains6descriptorloss retained. All258rowchecks and255statesmatchPG. Legacy767129diff/0service/all767completeoldactualexact+9enumexact/8normalcontexts.",
+        "normalMain": "OriginalC2/C8/C2 72requests12warm60timed/7200rows25200cells/full7descriptor/value/NULL/commands/Ready all0fail/3normalcontexts. id34.750/22.158/25.273ms;idg1142.855/38.203/136.402;star923.223/80.538/916.453;guard863.623/21.730/871.064. Drift-27.27..+.86percent;only4shapes100rows8virtual4MB5timedsamples/noPGspeed/global/defaultpromotion.",
+        "negative_history": "C4native10fail/C3firstcompile andharnessfailures kept. C5arrayv262saved+target63actualrawunrecoverable;v3offline835/258expectedexact thenactualfullcoverage. C6sixfullregressionsfixedfinitechararrayoldreceiverC5full90proof. C7unacceptedpublicationreversed,array24same/shutdown-6/assignmentNOTRUN;132resetTRUNCATE16.245s then18misaligned records unknowncause,allkept/noR15investigation.",
+        "other_costs": "PrivateMainv5actual24+v4old12profiles diagnostic/C2shutdown-6;singlepublicBackupnormal1000rows163files35.708MB/manifestCPU342.288ms/stagesyncwall523.192ms. PrivatecreationSHAprototype864correctnesspassed/unapplied/noDBspeed. OldP5whole35=4fast28slow3between/36=4fast6slow26between/RSSnegativekept.",
+        "scope": "Original273items/256historyrawbytes remain+1partial=257;2332oldtests+2=2334/topCPP1085excludingstub1084+nested5;MD754/protected725/old5archives exact;remainingordinarygaps documented/no newdeferrals/Goalactive."
+      }
+    },
+    {
       "issue": "2026-11-04 ANALYZE comparison/owned NULL bitmap and REINDEX map costs",
       "gap_ids": [
         "OPT-04",

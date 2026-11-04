@@ -1,5 +1,16 @@
 # DBMS C++
 
+<!-- CURRENT_GENERATED_DEMAND_20261104 -->
+
+## 虚拟生成列读值需求与完整 SQL 实测（2026-11-04）
+
+本批源码 P6-C8（正常程序 `45264111…`）补入虚拟生成列实际读值需求、声明赋值和排序输入身份验证，仍使用C++17。四条100行/八virtual的正常SQL在C2/C8/C2中全部正确；SELECT * p50 923.223→80.538→916.453ms，未选分支CASE为863.623→21.730→871.064ms。
+
+固定258观察新增82个整项通过、无整项通过回退，仍有20项差异及6项组件描述符损失；原767观察保留129差异。默认仍是425，整库性能未验收。详见[性能与范围报告](docs/performance-report-2026-10-30.md)及[完整机器归档](docs/benchmarks/generated-column-demand-20261104.json)。
+
+原273项仍为22 complete /166 partial /70 unverified /15 deferred_by_user；Goal active。下方旧批次保留当时事实，当前状态以本节为准。
+
+
 ## ANALYZE 与 REINDEX 成本优化（2026-11-04）
 
 本批源码 P5-C2（a3baaca6…）优化同次 ANALYZE 的类型/locale 比较和真实行 NULL 位图，以及 REINDEX 逻辑 map 保留。C++17、原维护频率/持久化和用户暂缓边界保持。ANALYZE p50 369–403→74 ms，范围 UPDATE 600–650→389 ms；完整 35 操作为4快/28慢/3居间，36组查询为4快/6慢/26居间，整体性能提升尚未验收，默认仍为425，现有服务未重启。

@@ -329,11 +329,14 @@ struct QueryColumnBinding {
     uint32_t typeOid = 0; // exact catalog identity, including quoted domains
     DatumTypePtr typeMetadata; // same original source declaration, no value/owner
 };
+struct GeneratedColumnRead;
 struct ColumnRefExpr : public Expr {
     std::string schema;    // 可为空（无 schema 限定）
     std::string table;     // 可为空（无表限定）
     std::string column;
     std::optional<QueryColumnBinding> binding;
+    std::shared_ptr<const GeneratedColumnRead> generatedRead; // lowered actual read only
+    DatumTypePtr generatedBaseDeclaration; // real stored dependency, not rendered output
     ColumnRefExpr() { type = ExprType::ColumnRef; }
     std::string toString() const override {
         if (!schema.empty()) return schema + "." + table + "." + column;

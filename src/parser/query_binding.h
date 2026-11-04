@@ -3,6 +3,7 @@
 #include "parser/ast.h"
 #include "expression/ExprEvaluator.h"
 #include <functional>
+#include "expression/GeneratedColumn.h"
 #include <optional>
 #include <set>
 
@@ -21,6 +22,7 @@ struct QueryRelationMetadata {
     std::string schema, name;
     QueryRowDescriptor columns;
     std::string viewSql;
+    GeneratedRelationPtr generatedRelation;
 };
 struct QueryBindingDatum {
     std::string identity, name, type;
@@ -109,6 +111,7 @@ struct PreparedQuery {
         // output cells are rebound only to this occurrence, never flattened
         // into the caller's textual SQL or procedural parameter namespace.
         std::shared_ptr<PreparedQuery> viewQuery;
+        GeneratedRelationPtr generatedRelation;
     };
     std::string source;
     StmtPtr ast;

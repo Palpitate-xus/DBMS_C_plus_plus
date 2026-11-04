@@ -46,6 +46,17 @@ void decodeStoredRowValues(StorageEngine& engine, const std::string& database,
                           std::vector<std::string>& values,
                           std::vector<bool>& nulls);
 
+// Prepared physical-input role: virtual cells are opaque positional
+// placeholders, never computed values or an absent-row/SQL-NULL signal.
+// Only the connected prepared source may use these inputs; setSourceInputs
+// installs its genuine frozen generated reads and explicit row presence.
+// The original full-row decoder above remains unchanged for full consumers.
+void decodeStoredRowInputs(StorageEngine& engine, const std::string& database,
+                          const std::string& raw, const TableSchema& schema,
+                          const std::vector<bool>& storedNulls,
+                          std::vector<std::string>& values,
+                          std::vector<bool>& nulls);
+
 // A scan/decoder already owns this physical schema under its relation lock.
 // Reading the tuple bitmap must not re-resolve domains or reload the catalog
 // for every cell. Unbound native callers still resolve their schema first.

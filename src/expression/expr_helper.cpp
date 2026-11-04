@@ -3231,6 +3231,24 @@ static ExprEvalResult evalStringImpl(
         ctx.set(key,std::move(datum));
         bindings.emplace(name, key);
     }
+    if(datumMetadata && datumMetadata->generatedSource) {
+        const auto& source=*datumMetadata->generatedSource;
+        for(const auto& program:source.columns)if(program && !bindings.count(program->target.dataName)) {
+            std::string key;
+            do {key="\x01helper_value_"+std::to_string(nextPosition++);}while(!occupiedKeys.insert(key).second);
+            bindings.emplace(program->target.dataName,key);
+        }
+        for(const auto& program:source.columns)if(program) {
+            std::map<std::string,std::string> inputs;
+            for(const auto& original:program->inputs) {
+                const auto found=bindings.find(original.dataName);
+                if(found==bindings.end())throw DbError("XX000","actual generated helper source lost a declared base input");
+                inputs.emplace(original.dataName,found->second);
+            }
+            const auto key=bindings.at(program->target.dataName);
+            ctx.setGeneratedNamed(key,bindGeneratedColumn(program,0,inputs),true);
+        }
+    }
     // PostgreSQL exposes these as special session-value expressions. The
     // parser accepts both the function-like AST form and the bare identifier
     // form, so seed the context as well as registering evaluator functions.
@@ -3294,7 +3312,12 @@ static ExprEvalResult evalStringImpl(
             reference->schema.clear();
         }
         std::map<std::string,std::string> preparedHints;
-        for (const auto& entry : bindings) preparedHints[entry.second] = ctx.get(entry.second)->typeName;
+        for (const auto& entry : bindings) {
+            if(const auto* generated=ctx.generatedNamed(entry.second)) {
+                const auto& column=generated->read->program->target;
+                preparedHints[entry.second]=canonicalTypeName(column.dataType+(column.isArray?"[]":""));
+            } else preparedHints[entry.second]=ctx.get(entry.second)->typeName;
+        }
         DatumMetadataContextPtr metadataOwner;
         std::optional<DatumMetadataContext> preparedMetadata;
         if(captureOwningValue) {
@@ -3325,6 +3348,7 @@ static ExprEvalResult evalStringImpl(
         evaluator.bindScalarFunctions(select->selectList[0].expr.get(), functionEngine);
         v = evaluator.eval(select->selectList[0].expr.get(), ctx);
     } catch (const DbError& e) {
+        if(dynamic_cast<const GeneratedColumnReadError*>(&e))throw;
         res.error = e.what();
         res.sqlState = e.sqlState();
         return res;

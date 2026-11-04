@@ -1,5 +1,10 @@
 #include "ExprEvaluator.h"
+#include "ArrayDatumInput.h"
 #include "expression/CompoundValueOps.h"
+#include "expression/LocalExpressionSyntax.h"
+#include "catalog/DatumMetadataFactory.h"
+#include "expression/StoredRegtypeValue.h"
+#include "utils/numeric_type.h"
 #include "expression/ArrayCastPolicy.h"
 #include "expression/ArrayPushType.h"
 #include "arithmetic_type.h"
@@ -605,6 +610,250 @@ const ExprValue& RowContext::boundColumn(size_t sourceOrdinal, size_t columnOrdi
     if (found == boundColumns_.end())
         throw DbError("XX000", "prepared source column has no runtime cell");
     return found->second;
+}
+
+
+struct ExprEvaluator::GeneratedEvaluationState {
+    // No RowContext, value, parameter, query, provider or frame is retained.
+    std::map<GeneratedReadPtr,std::shared_ptr<Expr>> expressions;
+};
+
+void RowContext::setGeneratedBound(size_t source,size_t column,GeneratedReadPtr read,bool present) {
+    if(!read || !read->program || read->named || read->sourceOrdinal!=source ||
+       column>=read->program->inputs.size() ||
+       read->program->inputs[column].dataName!=read->program->target.dataName)
+        throw DbError("XX000","generated source attachment changed its actual occurrence/attribute");
+    auto state=generatedInputs_?std::make_shared<GeneratedInputState>(*generatedInputs_):std::make_shared<GeneratedInputState>();
+    state->bound[{source,column}]={std::move(read),present};
+    // Omitted virtual input is not a fabricated SQL NULL/empty scalar cell.
+    boundColumns_.erase({source,column});generatedInputs_=std::move(state);
+}
+void RowContext::setGeneratedNamed(const std::string& key,GeneratedReadPtr read,bool present) {
+    auto state=generatedInputs_?std::make_shared<GeneratedInputState>(*generatedInputs_):std::make_shared<GeneratedInputState>();
+    state->named[normalize(key)]={std::move(read),present};generatedInputs_=std::move(state);
+}
+const GeneratedInputState::Input* RowContext::generatedBound(size_t source,size_t column) const {
+    if(!generatedInputs_)return nullptr;
+    const auto found=generatedInputs_->bound.find({source,column});
+    return found==generatedInputs_->bound.end()?nullptr:&found->second;
+}
+const GeneratedInputState::Input* RowContext::generatedNamed(const std::string& key) const {
+    if(!generatedInputs_)return nullptr;
+    const auto found=generatedInputs_->named.find(normalize(key));
+    return found==generatedInputs_->named.end()?nullptr:&found->second;
+}
+void RowContext::clearGeneratedSource(size_t ordinal) {
+    if(!generatedInputs_)return;
+    auto state=std::make_shared<GeneratedInputState>(*generatedInputs_);
+    for(auto i=state->bound.begin();i!=state->bound.end();)
+        if(i->first.first==ordinal)i=state->bound.erase(i);else ++i;
+    generatedInputs_=(state->bound.empty()&&state->named.empty())?nullptr:std::move(state);
+}
+void RowContext::copyGeneratedSource(const RowContext& source,size_t ordinal) {
+    clearGeneratedSource(ordinal);
+    if(!source.generatedInputs_)return;
+    for(const auto& item:source.generatedInputs_->bound)
+        if(item.first.first==ordinal)setGeneratedBound(ordinal,item.first.second,item.second.read,item.second.present);
+}
+
+ExprPtr GeneratedColumnProgram::parseDefinition(const std::string& source) {
+    return SQLParser::parseGeneratedDefinition(source);
+}
+static std::string generatedAssignmentDeclaration(const Column& column) {
+    std::string target=column.domainName.empty()?column.dataType:column.domainName;
+    if(column.domainName.empty()) {
+        if(column.typeMod>=0 && (column.dataType=="numeric" || column.dataType=="interval")) {
+            const auto modifiers=column.dataType=="numeric"?numeric_type_detail::unpack(column.typeMod):interval_type_detail::unpack(column.typeMod);
+            if(!modifiers.empty()){target+='(';for(size_t i=0;i<modifiers.size();++i){if(i)target+=',';target+=modifiers[i];}target+=')';}
+        } else if(column.dataType=="varchar" || column.dataType=="character varying" ||
+                  column.dataType=="char" || column.dataType=="character" || column.dataType=="bpchar" ||
+                  column.dataType=="bit" || column.dataType=="bit varying")
+            target+='('+std::to_string(column.dsize)+')';
+    }
+    if(column.isArray)target+="[]";
+    return target;
+}
+
+GeneratedRelationPtr makeGeneratedRelation(const TableSchema& table,const std::string& db,
+    StorageEngine* engine,const std::vector<DatumTypePtr>& types,
+    std::shared_ptr<const DatumMetadataContext> metadata,const std::string& schema,const std::string& sourceName) {
+    bool any=false;for(size_t i=0;i<table.len;++i)any=any||table.cols[i].generatedKind=='v';
+    if(!any)return {};
+    std::vector<DatumTypePtr> declarations=types;
+    if(declarations.empty()) {
+        // A native caller may own a real physical schema before a catalog
+        // output descriptor exists. Only intrinsic builtin declarations can
+        // obtain builtin identity here; a domain/user declaration remains 0.
+        struct Owner {CatalogManager::MetadataSnapshot snapshot;std::unique_ptr<DatumMetadataFactory> factory;};
+        auto owner=std::make_shared<Owner>();owner->snapshot.types=CatalogManager::builtinTypeRows();
+        owner->factory=std::make_unique<DatumMetadataFactory>(owner->snapshot);
+        auto context=std::make_shared<DatumMetadataContext>();
+        context->declaration=[owner](const std::string& name,uint32_t oid) {
+            return owner->factory->declaration(name,oid?oid:mapBuiltinTypeNameToOid(name));
+        };
+        context->modifier=[owner](DatumTypePtr type,int32_t mod){return owner->factory->modifier(std::move(type),mod);};
+        context->record=[owner](const std::vector<DatumTypePtr>& fields){return owner->factory->record(fields);};
+        context->sourceColumns=true;
+        for(size_t i=0;i<table.len;++i) {
+            const auto& column=table.cols[i];DatumTypePtr type;
+            if(column.domainName.empty()) {
+                uint32_t oid=mapBuiltinTypeNameToOid(column.dataType);
+                if(column.isArray && oid) {
+                    uint32_t array=0;
+                    for(const auto& candidate:owner->snapshot.types)if(candidate.oid==oid)array=candidate.typarray;
+                    bool pair=false;for(const auto& candidate:owner->snapshot.types)if(candidate.oid==array && candidate.typelem==oid)pair=true;
+                    oid=pair?array:0;
+                }
+                if(oid)type=owner->factory->modifier(owner->factory->type(oid),column.typeMod);
+            }
+            declarations.push_back(type);context->columns.emplace(column.dataName,type);
+            if(column.generatedKind!='v')context->storedColumns.insert(column.dataName);
+        }
+        metadata=std::move(context);
+    }
+    auto relation=std::make_shared<GeneratedRelationDeclaration>();relation->relation=table.tablename;
+    relation->columns.resize(table.len);
+    for(size_t i=0;i<table.len;++i) {
+        if(table.cols[i].generatedKind!='v')continue;
+        auto program=std::make_shared<GeneratedColumnProgram>();program->target=table.cols[i];
+        program->inputs.assign(table.cols,table.cols+table.len);program->inputTypes=declarations;
+        if(i<declarations.size())program->resultType=declarations[i];
+        program->database=db;program->engine=engine;program->metadata=metadata;
+        program->sourceSchema=schema;program->sourceName=sourceName.empty()?table.tablename:sourceName;
+        program->assignmentType=generatedAssignmentDeclaration(program->target);
+        if(program->metadata && program->metadata->inputDeclaration) {
+            try {
+                const auto resolved=program->metadata->inputDeclaration(program->assignmentType);
+                if(program->resultType && program->metadata->declaration) {
+                    const auto identity=program->metadata->declaration(resolved,0);
+                    if(!identity || identity->actualOid!=program->resultType->actualOid)
+                        throw DbError("0A000","generated assignment declaration has no authoritative matching type identity");
+                }
+                program->assignmentType=resolved;
+            } catch(const DbError& failure) {program->assignmentState=failure.sqlState();program->assignmentError=failure.message();}
+        }
+        try {program->expression=std::shared_ptr<const Expr>(GeneratedColumnProgram::parseDefinition(program->target.generatedExpr));}
+        catch(const DbError& failure){program->syntaxState=failure.sqlState();program->syntaxError=failure.message();}
+        relation->columns[i]=std::move(program);
+    }
+    return relation;
+}
+GeneratedReadPtr bindGeneratedColumn(std::shared_ptr<const GeneratedColumnProgram> program,
+    size_t source,const std::map<std::string,std::string>& names,bool rawStoredInputs) {
+    auto read=std::make_shared<GeneratedColumnRead>();read->program=std::move(program);
+    read->sourceOrdinal=source;read->names=names;read->named=!names.empty();read->rawStoredInputs=rawStoredInputs;return read;
+}
+ExprValue ExprEvaluator::readBoundColumn(size_t source,size_t column,const RowContext& row) const {
+    if(const auto* input=row.generatedBound(source,column))return evaluateGenerated(*input,row);
+    return row.boundColumn(source,column);
+}
+ExprValue ExprEvaluator::readNamedColumn(const std::string& key,const RowContext& row) const {
+    if(const auto* input=row.generatedNamed(key))return evaluateGenerated(*input,row);
+    const auto value=row.get(key);return value?*value:ExprValue("unknown","",true);
+}
+ExprValue ExprEvaluator::evaluateGenerated(const GeneratedInputState::Input& input,const RowContext& row) const {
+    if(!input.read || !input.read->program)throw DbError("XX000","generated input lost its frozen declaration");
+    try {
+    const auto& read=*input.read;const auto& program=*read.program;
+    const auto declared=ExprHelper::canonicalResultTypeName(program.target.dataType+(program.target.isArray?"[]":""));
+    if(!input.present)return ExprValue(declared,"",true);
+    if(!program.expression)throw DbError(program.syntaxState.empty()?"XX001":program.syntaxState,
+        program.syntaxError.empty()?"generated column has no stored expression":program.syntaxError);
+    if(currentDB_!=program.database)throw DbError("XX000","generated reader changed its actual database owner");
+    // This guard is a recursion stack, not a result/parameter cache.
+    static thread_local std::vector<const GeneratedColumnProgram*> active;
+    if(std::find(active.begin(),active.end(),&program)!=active.end())
+        throw DbError("42P17","generation expression contains a generated-column cycle");
+    active.push_back(&program);struct Pop {std::vector<const GeneratedColumnProgram*>& s;~Pop(){s.pop_back();}} pop{active};
+    if(!generatedCompiled_)generatedCompiled_=std::make_shared<GeneratedEvaluationState>();
+    const auto prepared=generatedCompiled_->expressions.find(input.read);
+    if(prepared!=generatedCompiled_->expressions.end()) {
+        const auto value=eval(prepared->second.get(),row);
+        return assignGenerated(prepared->second.get(),row,value,program);
+    }
+    // Preserve the existing public evaluator-copy contract. Existing compiled
+    // metadata/callback sites may be shared, but a newly registered site is
+    // private to this actual evaluator and its corresponding function map.
+    if(!generatedCompiled_.unique())generatedCompiled_=std::make_shared<GeneratedEvaluationState>(*generatedCompiled_);
+    ExprPtr expression;
+    try {expression=local_expression_syntax_detail::cloneSyntaxExpression(program.expression.get());}
+    catch(const local_expression_syntax_detail::SyntaxCloneUnsupported&) {
+        throw DbError("0A000","generation expression requires unsupported query execution");
+    }
+    std::function<void(Expr*)> bind=[&](Expr* node) {
+        if(!node)return;
+        if(node->preparedSubquery)throw DbError("0A000","subquery in generation expression");
+        if(dynamic_cast<ParameterExpr*>(node))throw DbError("42P02","parameter is not a generated-column source input");
+        if(auto* column=dynamic_cast<ColumnRefExpr*>(node)) {
+            if((!column->table.empty() && column->table!=program.sourceName) ||
+               (!column->schema.empty() && column->schema!=program.sourceSchema))
+                throw DbError("42P01","generation expression refers to another relation");
+            size_t ordinal=program.inputs.size();
+            for(size_t i=0;i<program.inputs.size();++i)if(program.inputs[i].dataName==column->column) {
+                if(ordinal!=program.inputs.size())throw DbError("42702","ambiguous generated input");ordinal=i;
+            }
+            if(ordinal==program.inputs.size())throw DbError("42703","generation input column does not exist: "+column->column);
+            const auto& original=program.inputs[ordinal];
+            if(read.named) {
+                const auto key=read.names.find(original.dataName);
+                if(key==read.names.end())throw DbError("XX000","generated read lost its actual helper input binding");
+                column->schema.clear();column->table.clear();column->column=key->second;column->binding.reset();
+            } else {
+                DatumTypePtr type=ordinal<program.inputTypes.size()?program.inputTypes[ordinal]:DatumTypePtr{};
+                column->binding=QueryColumnBinding{0,read.sourceOrdinal,ordinal,
+                    ExprHelper::canonicalResultTypeName(original.dataType+(original.isArray?"[]":"")),false,
+                    type?type->actualOid:0,type};
+            }
+            if(original.generatedKind!='v' && ordinal<program.inputTypes.size())
+                {column->generatedBaseDeclaration=program.inputTypes[ordinal];column->generatedRead=input.read;}
+            return;
+        }
+        if(auto* call=dynamic_cast<FunctionCallExpr*>(node)) {
+            for(size_t i=0;i<call->args.size();++i) {
+                // Preserve the parser-owned EXTRACT field role.
+                if(i==0 && call->schema.empty() && toLower(call->funcName)=="extract")
+                    if(const auto* label=dynamic_cast<const ColumnRefExpr*>(call->args[i].get());label&&label->schema.empty()&&label->table.empty())continue;
+                bind(call->args[i].get());
+            }
+            for(auto& arg:call->namedArgs)bind(arg.value.get());bind(call->filter.get());return;
+        }
+        if(auto* op=dynamic_cast<BinaryOpExpr*>(node)){bind(op->left.get());if(op->op!="::"&&op->op!="COLLATE")bind(op->right.get());}
+        else if(auto* op=dynamic_cast<UnaryOpExpr*>(node))bind(op->operand.get());
+        else if(auto* cast=dynamic_cast<CastExpr*>(node))bind(cast->operand.get());
+        else if(auto* value=dynamic_cast<CaseExpr*>(node)){bind(value->switchExpr.get());for(auto& arm:value->whenClauses){bind(arm.first.get());bind(arm.second.get());}bind(value->elseExpr.get());}
+        else if(auto* values=dynamic_cast<ArrayExpr*>(node))for(auto& v:values->elements)bind(v.get());
+        else if(auto* values=dynamic_cast<RowExpr*>(node))for(auto& v:values->elements)bind(v.get());
+        else if(auto* value=dynamic_cast<QuantifiedComparisonExpr*>(node)){bind(value->left.get());bind(value->right.get());}
+    };
+    bind(expression.get());
+    // Compile into this actual evaluator, preserving native argument callbacks
+    // which register/replace its functions. Only immutable AST metadata is
+    // retained, never a generated result or a caller/parameter context.
+    std::map<std::string,std::string> hints;
+    DatumMetadataContext metadata=program.metadata?*program.metadata:DatumMetadataContext{};
+    metadata.generatedSource.reset();metadata.columns.clear();
+    for(size_t i=0;i<program.inputs.size();++i) {
+        const auto& source=program.inputs[i];const auto key=read.named?read.names.at(source.dataName):source.dataName;
+        hints[key]=ExprHelper::canonicalResultTypeName(source.dataType+(source.isArray?"[]":""));
+        if(i<program.inputTypes.size())metadata.columns[key]=program.inputTypes[i];
+    }
+    ExprHelper::prepareArrayTypes(expression.get(),hints,program.database,program.engine,&metadata);
+    std::set<std::string> previousMarkers;
+    for(const auto& function:functions_)if(function.first.rfind("__dbms_bound_routine_",0)==0)previousMarkers.insert(function.first);
+    try {const_cast<ExprEvaluator*>(this)->bindScalarFunctions(expression.get(),program.engine);}
+    catch(...) {
+        for(auto i=functions_.begin();i!=functions_.end();) {
+            if(i->first.rfind("__dbms_bound_routine_",0)==0 && !previousMarkers.count(i->first)) {
+                volatility_.erase(i->first);i=functions_.erase(i);
+            } else ++i;
+        }
+        throw;
+    }
+    auto inserted=generatedCompiled_->expressions.emplace(input.read,std::shared_ptr<Expr>(std::move(expression)));
+    const auto value=eval(inserted.first->second.get(),row);
+    return assignGenerated(inserted.first->second.get(),row,value,program);
+    } catch(const GeneratedColumnReadError&) {throw;}
+      catch(const DbError& failure) {throw GeneratedColumnReadError(failure);}
 }
 
 // ============================================================================
@@ -1591,17 +1840,31 @@ ExprValue ExprEvaluator::evalLiteral(const LiteralExpr* e) const {
 
 ExprValue ExprEvaluator::evalColumnRef(const ColumnRefExpr* e, const RowContext& ctx) const {
     if (!e) return ExprValue{};
+    const auto storedDependency=[&](ExprValue value) {
+        if(e->generatedBaseDeclaration) {
+            if(e->generatedRead && e->generatedRead->program && e->generatedRead->rawStoredInputs &&
+               stored_regtype_detail::columnType(value.typeName) &&
+               !(value.compound && value.compound->arrayElements)) {
+                const auto& program=*e->generatedRead->program;
+                const auto catalog=regtype_detail::metadata(*program.engine,program.database);
+                value=stored_regtype_detail::load(value.value,e->generatedBaseDeclaration->kind==DatumKind::Array,
+                    value.isNull,catalog,currentSession(),e->generatedBaseDeclaration);
+            }
+            (void)compound_value_detail::decodeArrayStorageInput(value,e->generatedBaseDeclaration);
+        }
+        return value;
+    };
     if (e->binding)
-        return ctx.boundColumn(e->binding->sourceOrdinal, e->binding->columnOrdinal);
+        return storedDependency(readBoundColumn(e->binding->sourceOrdinal, e->binding->columnOrdinal,ctx));
     // A qualified reference must win over an unqualified value with the same
     // column name. This is essential for joins and UPDATE ... FROM, where
     // the target and source relations commonly share column names.
     if (!e->table.empty()) {
         auto v = ctx.get(e->table + "." + e->column);
-        if (v) return *v;
+        if (v || ctx.generatedNamed(e->table + "." + e->column)) return storedDependency(readNamedColumn(e->table + "." + e->column,ctx));
     }
     auto v = ctx.get(e->column);
-    if (v) return *v;
+    if (v || ctx.generatedNamed(e->column)) return storedDependency(readNamedColumn(e->column,ctx));
     return ExprValue("unknown", "", true);
 }
 
@@ -13889,6 +14152,51 @@ const ExprEvaluator::BuiltinRegistry& ExprEvaluator::builtinRegistry() {
                                    std::move(seed.volatility_)};
     }();
     return *registry;
+}
+
+
+ExprValue ExprEvaluator::assignGenerated(const Expr* expression,const RowContext& row,
+    const ExprValue& value,const GeneratedColumnProgram& program) const {
+    const auto& column=program.target;
+    if(!program.assignmentState.empty())throw DbError(program.assignmentState,program.assignmentError);
+    const std::string& target=program.assignmentType;
+    ExprValue convertedInput;
+    const ExprValue* input=&value;
+    const bool characterArray=column.isArray && (column.dataType=="varchar" || column.dataType=="character varying" ||
+        column.dataType=="char" || column.dataType=="character" || column.dataType=="bpchar");
+    if(!value.isNull && characterArray && !compound_value_detail::owningElements(value)) {
+        // The same existing array-input owner handles a genuine raw input
+        // representation (including a typed builtin result such as
+        // string_to_array). An already owning array never enters this path.
+        // No record display is used to reconstruct tuple field identity.
+        if(value.recordFields)throw DbError("42846","cannot assign record to character array");
+        auto elements=compound_value_detail::elements(value);
+        auto dimensions=compound_value_detail::arrayDimensions(value);
+        const auto declaration=compound_value_detail::originalArrayDeclaration(value,expression);
+        const auto bitmap=value.compound?value.compound->arrayNullBitmap:std::optional<bool>{};
+        convertedInput=value;
+        compound_value_detail::attach(convertedInput,std::move(elements),std::move(dimensions),declaration,bitmap,true);
+        input=&convertedInput;
+    }
+    if(!value.isNull && characterArray) {
+        for(const auto& element:*input->compound->arrayElements)if(!element.isNull && utf8CharCount(element.value)>column.dsize) {
+            const size_t boundary=utf8ByteAt(element.value,column.dsize);
+            if(std::any_of(element.value.begin()+boundary,element.value.end(),[](char c){return c!=' ';}))
+                throw DbError("22001","value too long for type "+target);
+        }
+    }
+    if(!value.isNull && !column.isArray &&
+       (column.dataType=="varchar" || column.dataType=="character varying" || column.dataType=="char" || column.dataType=="character" || column.dataType=="bpchar")) {
+        const size_t length=utf8CharCount(value.value);
+        if(length>column.dsize) {
+            const size_t boundary=utf8ByteAt(value.value,column.dsize);
+            if(std::any_of(value.value.begin()+boundary,value.value.end(),[](char c){return c!=' ';}))
+                throw DbError("22001","value too long for type "+target);
+        }
+    }
+    auto result=evalCast(expression,row,*input,target);
+    result.collation=column.collation;
+    return result;
 }
 
 } // namespace dbms

@@ -1338,6 +1338,73 @@ static bool evalExpressionSqlValue(
     return true;
 }
 
+// This runtime owner is parallel to the actual operation's TableSchema. It
+// is never inserted in schemaCache/catalog metadata or persisted across calls.
+static DatumMetadataContextPtr freezeGeneratedStorageInput(const TableSchema& table,
+    const std::string& database,const std::string& physical,StorageEngine* engine) {
+    if(!std::any_of(table.cols,table.cols+table.len,
+        [](const Column& column){return column.generatedKind=='v';}))return {};
+    auto metadata=engine->prepareDatumMetadataContext(database,physical);
+    if(!metadata || !metadata->generatedSource || metadata->generatedSource->columns.size()!=table.len)
+        throw DbError("XX000","generated storage input lost its actual declaration");
+    for(size_t i=0;i<table.len;++i)
+        if((table.cols[i].generatedKind=='v')!=bool(metadata->generatedSource->columns[i]))
+            throw DbError("XX000","generated input changed its authoritative omitted-column set");
+    for(size_t i=0;i<table.len;++i)if(const auto& program=metadata->generatedSource->columns[i]) {
+        if(program->target.dataName!=table.cols[i].dataName ||
+           program->target.generatedExpr!=table.cols[i].generatedExpr ||
+           program->target.dataType!=table.cols[i].dataType || program->target.domainName!=table.cols[i].domainName ||
+           program->target.isArray!=table.cols[i].isArray || program->target.typeMod!=table.cols[i].typeMod ||
+           program->target.dsize!=table.cols[i].dsize || program->inputs.size()!=table.len)
+            throw DbError("XX000","generated storage declaration differs from its actual schema");
+        for(size_t j=0;j<table.len;++j)
+            if(program->inputs[j].dataName!=table.cols[j].dataName || program->inputs[j].dataType!=table.cols[j].dataType ||
+               program->inputs[j].isArray!=table.cols[j].isArray)
+                throw DbError("XX000","generated storage declaration lost an actual attribute");
+    }
+    return metadata;
+}
+
+// A real storage/CHECK constraint consumer supplies actual SQL NULL bits.
+// Private names identify these actual schema columns; they are not parameters
+// or an invented SQL range. No input is inferred from empty text/missing keys.
+static ExprValue generatedValueFromMap(const TableSchema& table,size_t requested,
+    const std::map<std::string,std::string>& values,const std::set<std::string>& nulls,
+    const std::string& database,StorageEngine* engine,const DatumMetadataContext* frozen=nullptr) {
+    DatumMetadataContextPtr owner;
+    if(!frozen){owner=freezeGeneratedStorageInput(table,database,table.tablename,engine);frozen=owner.get();}
+    if(!frozen || !frozen->generatedSource || frozen->generatedSource->columns.size()!=table.len || requested>=table.len)
+        throw DbError("XX000","generated constraint source lost its frozen declaration");
+    const auto& declaration=*frozen->generatedSource;
+    RowContext row;std::map<std::string,std::string> names;
+    for(size_t i=0;i<table.len;++i) {
+        const std::string key="\x01generated_constraint_"+std::to_string(i);
+        names.emplace(table.cols[i].dataName,key);
+        if(table.cols[i].generatedKind=='v')continue;
+        const auto input=values.find(table.cols[i].dataName);
+        if(input==values.end())throw DbError("XX000","generated constraint source omitted a stored input");
+        row.set(key,ExprValue(ExprHelper::canonicalResultTypeName(table.cols[i].dataType+(table.cols[i].isArray?"[]":"")),input->second,nulls.count(table.cols[i].dataName)!=0));
+    }
+    for(size_t i=0;i<declaration.columns.size();++i)if(const auto& program=declaration.columns[i])
+        row.setGeneratedNamed(names.at(program->target.dataName),bindGeneratedColumn(program,0,names,true),true);
+    ExprEvaluator evaluator;evaluator.setCurrentDB(database);
+    return evaluator.readNamedColumn(names.at(table.cols[requested].dataName),row);
+}
+
+static bool generatedCheckInput(const std::string& expression,const TableSchema& table,
+    const std::map<std::string,std::string>& values,const std::set<std::string>& nulls,
+    const std::map<std::string,std::string>& hints,const std::string& database,
+    StorageEngine* engine,std::string* error,const DatumMetadataContext* frozen=nullptr) {
+    const bool virtuals=std::any_of(table.cols,table.cols+table.len,[](const Column& column){return column.generatedKind=='v';});
+    if(!virtuals)return ExprHelper::evalCheck(expression,values,hints,error,database,"",engine);
+    DatumMetadataContextPtr owner;
+    if(!frozen){owner=freezeGeneratedStorageInput(table,database,table.tablename,engine);frozen=owner.get();}
+    if(!frozen || !frozen->generatedSource)throw DbError("XX000","CHECK source lost its actual virtual declaration");
+    const auto value=ExprHelper::evalStringWithNulls(expression,values,nulls,hints,database,"",engine,{},false,nullptr,frozen);
+    if(!value.ok){if(error)*error=value.error;return false;}
+    return value.isNull || ExprValue("boolean",value.value,false).asBool();
+}
+
 static std::string storedPatternOperator(const std::string& input) {
     std::string op;
     for (const unsigned char c : input) if (!std::isspace(c)) op += std::tolower(c);
@@ -10960,6 +11027,34 @@ void detail::decodeStoredRowValues(StorageEngine& engine,
 }
 
 
+// Actual prepared input decoding never creates virtual-column value demand.
+void detail::decodeStoredRowInputs(StorageEngine& engine,
+                                  const std::string& database,
+                                  const std::string& raw,
+                                  const TableSchema& schema,
+                                  const std::vector<bool>& storedNulls,
+                                  std::vector<std::string>& values,
+                                  std::vector<bool>& nulls) {
+    if (storedNulls.size() != schema.len)
+        throw DbError("XX000", "stored row NULL bitmap width mismatch");
+    BufferedNullRowBinding binding(schema, storedNulls);
+    values.clear(); nulls.clear();
+    values.reserve(schema.len); nulls.reserve(schema.len);
+    for (size_t i = 0; i < schema.len; ++i) {
+        if (schema.cols[i].generatedKind == 'v') {
+            // The prepared consumer skips both placeholder lanes, then
+            // attaches its real read recipe/presence with setSourceInputs.
+            values.emplace_back(); nulls.push_back(false); continue;
+        }
+        bool computedNull = false;
+        values.push_back(engine.extractColumnValue(raw, schema, i,
+                                                   database, true, &computedNull));
+        nulls.push_back(computedNull ||
+            (schema.cols[i].generatedKind != 'v' && storedNulls[i]));
+    }
+}
+
+
 std::string StorageEngine::extractColumnValueStatic(const std::string& rowBuffer,
                                                      const TableSchema& tbl, size_t colIdx) {
     if (colIdx >= tbl.len) return "";
@@ -11162,7 +11257,7 @@ std::string StorageEngine::extractColumnValue(const std::string& rowBuffer,
                                                const std::string& dbname,
                                                bool computeVirtual,
                                                bool* valueIsNull,
-                                               std::optional<ExprValue>* owningValue) {
+                                               std::optional<ExprValue>* owningValue,GeneratedRelationPtr declaredSource) {
     if (owningValue) owningValue->reset();
     if (valueIsNull) *valueIsNull = false;
     if (colIdx >= tbl.len) return "";
@@ -11210,70 +11305,30 @@ std::string StorageEngine::extractColumnValue(const std::string& rowBuffer,
         valueDb = g_nullRowDb;
     }
 
-    // Compute VIRTUAL generated columns on demand at query time.
-    if (computeVirtual && !valueDb.empty() && col.generatedKind == 'v' && !col.generatedExpr.empty()) {
-        std::map<std::string, std::string> rowValues;
-        std::set<std::string> nullColumns;
-        const bool hasBoundNullMetadata =
-            (g_bufferedConditionSchema == &tbl && g_bufferedConditionNulls &&
-             g_bufferedConditionNulls->size() == tbl.len) ||
-            (g_nullRowEngine && g_nullRowRid >= 0 &&
-             tbl.tablename == g_nullRowTable) ||
-            (g_condNullEngine && g_condNullRid >= 0 &&
-             tbl.tablename == g_condNullTable);
-        for (size_t i = 0; i < tbl.len; ++i) {
-            bool sourceIsNull = false;
-            rowValues[tbl.cols[i].dataName] =
-                valueEngine->extractColumnValue(
-                    rowBuffer, tbl, i, valueDb, false, &sourceIsNull);
-            if (tbl.cols[i].generatedKind != 'v' &&
-                (sourceIsNull || (!hasBoundNullMetadata &&
-                                  rowValues[tbl.cols[i].dataName].empty()))) {
-                nullColumns.insert(tbl.cols[i].dataName);
-            }
+    // This is an explicitly requested value, not an intermediate full-row
+    // materialization. Read only its real definition and preserve errors.
+    if(computeVirtual && !valueDb.empty() && col.generatedKind=='v' && !col.generatedExpr.empty()) {
+        const auto declaration=declaredSource?declaredSource:valueEngine->prepareDatumMetadataContext(valueDb,tbl.tablename)->generatedSource;
+        if(!declaration || colIdx>=declaration->columns.size())
+            throw DbError("XX000","virtual source lost its frozen physical declaration");
+        RowContext context;std::map<std::string,std::string> names;
+        for(size_t i=0;i<tbl.len;++i) {
+            names.emplace(tbl.cols[i].dataName,tbl.cols[i].dataName);
+            if(tbl.cols[i].generatedKind=='v')continue;
+            bool isNull=false;
+            auto value=valueEngine->extractColumnValue(rowBuffer,tbl,i,valueDb,false,&isNull);
+            ExprValue datum(ExprHelper::canonicalResultTypeName(tbl.cols[i].dataType+(tbl.cols[i].isArray?"[]":"")),value,isNull);
+            context.set(tbl.cols[i].dataName,std::move(datum));
         }
-        // Compute all VIRTUAL columns in column order so later columns can reference earlier ones.
-        auto typeHints = buildTypeHints(tbl);
-        // Metadata belongs to the same real relation; only actual captured
-        // generated values enter the existing helper's owning datum slots.
-        DatumMetadataContextPtr generatedMetadata;
-        std::unique_ptr<OwningSqlRow> generatedValues;
-        if (owningValue) {
-            generatedMetadata=valueEngine->prepareDatumMetadataContext(valueDb,tbl.tablename);
-            generatedValues=std::make_unique<OwningSqlRow>();
-        }
-        bool targetEvaluated = false;
-        bool targetIsNull = false;
-        for (size_t i = 0; i < tbl.len; ++i) {
-            const Column& vc = tbl.cols[i];
-            if (vc.generatedKind != 'v' || vc.generatedExpr.empty()) continue;
-            std::string computed;
-            bool computedIsNull = false;
-            std::optional<ExprValue> computedValue;
-            const bool ok = evalExpressionSqlValue(
-                vc.generatedExpr, rowValues, typeHints, valueDb,
-                computed, computedIsNull, &nullColumns, const_cast<StorageEngine*>(this),
-                false,nullptr,owningValue?&computedValue:nullptr,
-                generatedValues.get(),generatedMetadata.get());
-            if (ok) {
-                rowValues[vc.dataName] = computed;
-                if (generatedValues && computedValue)
-                    (*generatedValues)[vc.dataName]=*computedValue;
-                if (computedIsNull) nullColumns.insert(vc.dataName);
-                else nullColumns.erase(vc.dataName);
-            }
-            if (i == colIdx) {
-                targetEvaluated = ok;
-                targetIsNull = !ok || computedIsNull;
-                if (owningValue && computedValue) *owningValue=std::move(computedValue);
-            }
-        }
-        if (targetEvaluated) {
-            if (valueIsNull) *valueIsNull = targetIsNull;
-            return rowValues[col.dataName];
-        }
-        if (valueIsNull) *valueIsNull = true;
-        return "";
+        for(size_t i=0;i<declaration->columns.size();++i)
+            if(const auto& program=declaration->columns[i])
+                context.setGeneratedNamed(program->target.dataName,bindGeneratedColumn(program,0,names,true),true);
+        ExprEvaluator evaluator;evaluator.setCurrentDB(valueDb);
+        auto actual=evaluator.readNamedColumn(col.dataName,context);
+        if(valueIsNull)*valueIsNull=actual.isNull;
+        const auto text=actual.isNull?std::string{}:actual.value;
+        if(owningValue)*owningValue=std::move(actual);
+        return text;
     }
 
     std::string val = extractColumnValueStatic(rowBuffer, tbl, colIdx);
@@ -12491,6 +12546,20 @@ bool StorageEngine::runDeferredCheck(const DeferredCheck& dc) const {
         // must fail closed instead of silently bypassing the constraint.
         return !readFailed;
     }
+    if(std::any_of(tbl.cols,tbl.cols+tbl.len,[](const Column& column){return column.generatedKind=='v';})) {
+        const auto generatedMetadata=freezeGeneratedStorageInput(tbl,dc.dbname,dc.tablename,const_cast<StorageEngine*>(this));
+        const auto bitmap=detail::storedRowNullBitmap(*this,dc.dbname,dc.tablename,tbl,currentRid);
+        if(!bitmap || bitmap->size()!=tbl.len)throw DbError("XX001","deferred CHECK lost its actual stored NULL bitmap");
+        std::map<std::string,std::string> values;std::set<std::string> nulls;
+        BufferedNullRowBinding binding(tbl,*bitmap);
+        for(size_t i=0;i<tbl.len;++i) {
+            if(tbl.cols[i].generatedKind=='v')continue;
+            values[tbl.cols[i].dataName]=const_cast<StorageEngine*>(this)->extractColumnValue(row,tbl,i,dc.dbname,false);
+            if((*bitmap)[i])nulls.insert(tbl.cols[i].dataName);
+        }
+        std::string error;
+        return generatedCheckInput(expression,tbl,values,nulls,buildTypeHints(tbl),dc.dbname,const_cast<StorageEngine*>(this),&error,generatedMetadata.get());
+    }
     std::map<std::string, std::string> rowValues;
     for (size_t i = 0; i < tbl.len; ++i) {
         rowValues[tbl.cols[i].dataName] =
@@ -12731,13 +12800,62 @@ static bool compositeIndexEntry(
     return true;
 }
 
+static bool indexExpressionMayReadVirtual(const std::string& source,const TableSchema& table) {
+    if(source.empty())return false;
+    ExprPtr root;
+    try {root=GeneratedColumnProgram::parseDefinition(source);}catch(const DbError&){return true;}
+    bool reads=false;
+    std::function<void(const Expr*)> visit=[&](const Expr* node) {
+        if(!node || reads)return;
+        if(node->preparedSubquery){reads=true;return;}
+        if(const auto* column=dynamic_cast<const ColumnRefExpr*>(node)) {
+            if(column->column=="*"){reads=true;return;}
+            bool found=false;
+            for(size_t i=0;i<table.len;++i)if(table.cols[i].dataName==column->column) {
+                found=true;reads=reads||table.cols[i].generatedKind=='v';
+            }
+            if(!found)reads=true; // Preserve original handling of unknown roles.
+            return;
+        }
+        if(const auto* value=dynamic_cast<const BinaryOpExpr*>(node)){visit(value->left.get());if(value->op!="::"&&value->op!="COLLATE")visit(value->right.get());}
+        else if(const auto* value=dynamic_cast<const UnaryOpExpr*>(node))visit(value->operand.get());
+        else if(const auto* value=dynamic_cast<const CastExpr*>(node))visit(value->operand.get());
+        else if(const auto* value=dynamic_cast<const CaseExpr*>(node)){visit(value->switchExpr.get());for(const auto& arm:value->whenClauses){visit(arm.first.get());visit(arm.second.get());}visit(value->elseExpr.get());}
+        else if(const auto* value=dynamic_cast<const FunctionCallExpr*>(node)) {
+            for(size_t i=0;i<value->args.size();++i) {
+                if(i==0 && value->schema.empty() && SQLParser::toLower(value->funcName)=="extract")
+                    if(const auto* label=dynamic_cast<const ColumnRefExpr*>(value->args[i].get());label&&label->schema.empty()&&label->table.empty())continue;
+                visit(value->args[i].get());
+            }
+            for(const auto& arg:value->namedArgs)visit(arg.value.get());visit(value->filter.get());
+        } else if(const auto* value=dynamic_cast<const ArrayExpr*>(node))for(const auto& item:value->elements)visit(item.get());
+        else if(const auto* value=dynamic_cast<const RowExpr*>(node))for(const auto& item:value->elements)visit(item.get());
+        else if(const auto* value=dynamic_cast<const QuantifiedComparisonExpr*>(node)){visit(value->left.get());visit(value->right.get());}
+    };
+    visit(root.get());return reads;
+}
+static bool indexColumnIsVirtual(const std::string& name,const TableSchema& table) {
+    for(size_t i=0;i<table.len;++i)if(table.cols[i].dataName==name)return table.cols[i].generatedKind=='v';
+    return true; // unknown metadata retains the exact full-map fallback
+}
+static bool secondaryMayReadVirtual(const StorageEngine::IndexMetadata& metadata,const TableSchema& table) {
+    if(metadata.isExpression?indexExpressionMayReadVirtual(metadata.name,table):indexColumnIsVirtual(metadata.name,table))return true;
+    return indexExpressionMayReadVirtual(metadata.whereCondition,table);
+}
+static bool compositeMayReadVirtual(const StorageEngine::CompositeIndexInfo& metadata,const TableSchema& table) {
+    if(metadata.columns.empty())return true;
+    for(const auto& name:metadata.columns)if(indexColumnIsVirtual(name,table))return true;
+    return indexExpressionMayReadVirtual(metadata.whereCondition,table);
+}
+
 static std::map<std::string, std::string> indexRowValuesFromBuffer(
     StorageEngine& engine,
     const TableSchema& table,
     const std::string& rowBuffer,
-    const std::string& dbname) {
+    const std::string& dbname,bool omitVirtual=false) {
     std::map<std::string, std::string> values;
     for (size_t i = 0; i < table.len; ++i) {
+        if(omitVirtual && table.cols[i].generatedKind=='v')continue;
         values[table.cols[i].dataName] = engine.extractColumnValue(
             rowBuffer, table, i, dbname, true);
     }
@@ -12752,7 +12870,7 @@ static bool secondaryIndexEntryFromBuffer(
     const std::string& dbname,
     EvaluatedIndexEntry& entry) {
     const auto values = indexRowValuesFromBuffer(
-        engine, table, rowBuffer, dbname);
+        engine,table,rowBuffer,dbname,!secondaryMayReadVirtual(metadata,table));
     return secondaryIndexEntry(
         metadata, table, values, dbname, entry, &engine);
 }
@@ -12765,7 +12883,7 @@ static bool compositeIndexEntryFromBuffer(
     const std::string& dbname,
     EvaluatedIndexEntry& entry) {
     const auto values = indexRowValuesFromBuffer(
-        engine, table, rowBuffer, dbname);
+        engine,table,rowBuffer,dbname,!compositeMayReadVirtual(metadata,table));
     return compositeIndexEntry(
         metadata, table, values, dbname, entry, &engine);
 }
@@ -21586,8 +21704,12 @@ DBStatus StorageEngine::alterTableAddCheckConstraint(const std::string& dbname,
     // every visible row before publishing the expression so ALTER cannot
     // leave pre-existing rows that violate the newly advertised invariant.
     const auto typeHints = buildTypeHints(tbl);
+    DatumMetadataContextPtr generatedMetadata;
+    try {generatedMetadata=freezeGeneratedStorageInput(tbl,dbname,tablename,this);}
+    catch(...){lockManager_.unlock(tablename);throw;}
     DBStatus validationStatus = DBStatus::OK;
-    const bool scanOk = forEachRow(
+    bool scanOk;
+    try {scanOk = forEachRow(
         dbname, tablename,
         [&](uint32_t pageId, uint16_t slotId, const char* data, size_t len) {
             if (validationStatus != DBStatus::OK) return;
@@ -21596,6 +21718,7 @@ DBStatus StorageEngine::alterTableAddCheckConstraint(const std::string& dbname,
             std::map<std::string, std::string> rowValues;
             for (size_t columnIndex = 0;
                  columnIndex < tbl.len; ++columnIndex) {
+                if(generatedMetadata && tbl.cols[columnIndex].generatedKind=='v')continue;
                 if (tbl.cols[columnIndex].isNull &&
                     dbms::detail::storedRowColumnIsNull(*this, dbname, tablename, tbl, rid, columnIndex)) {
                     rowValues[tbl.cols[columnIndex].dataName] = "";
@@ -21606,16 +21729,20 @@ DBStatus StorageEngine::alterTableAddCheckConstraint(const std::string& dbname,
                 }
             }
             std::string evaluationError;
-            if (!dbms::ExprHelper::evalCheck(
-                    expr, rowValues, typeHints, &evaluationError, dbname,
-                    "", this)) {
+            bool accepted;
+            if(std::any_of(tbl.cols,tbl.cols+tbl.len,[](const Column& c){return c.generatedKind=='v';})) {
+                std::set<std::string> nulls;
+                for(size_t i=0;i<tbl.len;++i)if(tbl.cols[i].generatedKind!='v' && detail::storedRowColumnIsNull(*this,dbname,tablename,tbl,rid,i))nulls.insert(tbl.cols[i].dataName);
+                accepted=generatedCheckInput(expr,tbl,rowValues,nulls,typeHints,dbname,this,&evaluationError,generatedMetadata.get());
+            } else accepted=dbms::ExprHelper::evalCheck(expr,rowValues,typeHints,&evaluationError,dbname,"",this);
+            if (!accepted) {
                 // Distinguish a valid predicate that rejects an existing row
                 // from a malformed or otherwise unevaluable expression,
                 // just as the INSERT/UPDATE CHECK paths do.
                 validationStatus = evaluationError.empty()
                     ? DBStatus::CHECK_VIOLATION : DBStatus::INVALID_VALUE;
             }
-        });
+        });} catch(...){lockManager_.unlock(tablename);throw;}
     if (!scanOk) {
         lockManager_.unlock(tablename);
         return DBStatus::IO_ERROR;
@@ -24723,7 +24850,8 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
 }
 
 bool StorageEngine::evalConditionOnRowWithSyntax(const Condition& cond,
-    const std::string& rowBuffer, const TableSchema& tbl, LocalExpressionSyntax* syntax) {
+    const std::string& rowBuffer, const TableSchema& tbl, LocalExpressionSyntax* syntax,
+    const DatumMetadataContext* generatedMetadata) {
     if (cond.colName == "__true__") return true;
     if (cond.colName == "__false__") return false;
 
@@ -24736,6 +24864,13 @@ bool StorageEngine::evalConditionOnRowWithSyntax(const Condition& cond,
     } else if (g_nullRowEngine && tbl.tablename == g_nullRowTable) {
         valueEngine = const_cast<StorageEngine*>(g_nullRowEngine);
         valueDb = g_nullRowDb;
+    }
+
+    DatumMetadataContextPtr generatedOwner;
+    if(!generatedMetadata && valueEngine && !valueDb.empty() &&
+       std::any_of(tbl.cols,tbl.cols+tbl.len,[](const Column& column){return column.generatedKind=='v';})) {
+        generatedOwner=freezeGeneratedStorageInput(tbl,valueDb,tbl.tablename,valueEngine);
+        generatedMetadata=generatedOwner.get();
     }
 
     if (cond.op.rfind("typedrhs ", 0) == 0) {
@@ -24783,7 +24918,7 @@ bool StorageEngine::evalConditionOnRowWithSyntax(const Condition& cond,
             bound.value = left + " " + comparison + " " + cond.value;
             bound.colName.clear();
         }
-        return evalConditionOnRow(bound, rowBuffer, tbl);
+        return evalConditionOnRowWithSyntax(bound,rowBuffer,tbl,syntax,generatedMetadata);
     }
 
     // Compact execution conditions put the operator first
@@ -24826,7 +24961,7 @@ bool StorageEngine::evalConditionOnRowWithSyntax(const Condition& cond,
         }
         scalarCondition.value = cond.op == "isnull" ? "IS NULL" :
             cond.op == "isnotnull" ? "IS NOT NULL" : operation + " " + right;
-        return evalConditionOnRow(scalarCondition, rowBuffer, tbl);
+        return evalConditionOnRowWithSyntax(scalarCondition,rowBuffer,tbl,syntax,generatedMetadata);
     }
 
     const auto extractValue = [&](size_t columnIndex,
@@ -24836,7 +24971,8 @@ bool StorageEngine::evalConditionOnRowWithSyntax(const Condition& cond,
                            (*g_bufferedConditionNulls)[columnIndex];
         return valueEngine
             ? valueEngine->extractColumnValue(
-                  rowBuffer, tbl, columnIndex, valueDb, true, valueIsNull)
+                  rowBuffer,tbl,columnIndex,valueDb,true,valueIsNull,nullptr,
+                  generatedMetadata?generatedMetadata->generatedSource:GeneratedRelationPtr{})
             : extractColumnValueStatic(rowBuffer, tbl, columnIndex);
     };
 
@@ -24845,6 +24981,7 @@ bool StorageEngine::evalConditionOnRowWithSyntax(const Condition& cond,
         std::map<std::string, std::string> collations;
         std::set<std::string> nullColumns;
         for (size_t i = 0; i < tbl.len; ++i) {
+            if(generatedMetadata && tbl.cols[i].generatedKind=='v')continue;
             bool isNull = false;
             std::string value = extractValue(i, &isNull);
             if (!buffered && !valueEngine && !tbl.cols[i].isVariableLength &&
@@ -24856,8 +24993,8 @@ bool StorageEngine::evalConditionOnRowWithSyntax(const Condition& cond,
         }
         const auto hints=buildTypeHints(tbl);
         auto evaluate=[&](const std::string& sql) {
-            return syntax ? ExprHelper::evalStringWithNullsSyntax(*syntax,sql,rowValues,nullColumns,hints,valueDb,"",valueEngine,collations)
-                : ExprHelper::evalStringWithNulls(sql,rowValues,nullColumns,hints,valueDb,"",valueEngine,collations);
+            return syntax ? ExprHelper::evalStringWithNullsSyntax(*syntax,sql,rowValues,nullColumns,hints,valueDb,"",valueEngine,collations,false,nullptr,generatedMetadata)
+                : ExprHelper::evalStringWithNulls(sql,rowValues,nullColumns,hints,valueDb,"",valueEngine,collations,false,nullptr,generatedMetadata);
         };
         SQLParser parser;const std::string source="SELECT "+cond.value;
         auto parsed=syntax?syntax->parse(source,true):parser.parseForBinding(source);
@@ -24920,7 +25057,7 @@ bool StorageEngine::evalConditionOnRowWithSyntax(const Condition& cond,
         typed.op = "typedexpr";
         typed.value = cond.colName + " " + cond.value;
         typed.colName.clear();
-        return evalConditionOnRowWithSyntax(typed, rowBuffer, tbl, syntax);
+        return evalConditionOnRowWithSyntax(typed,rowBuffer,tbl,syntax,generatedMetadata);
     }
     // Handle OVERLAPS operator: overlaps:s1,e1,s2,e2
     if (cond.op == "overlaps") {
@@ -25102,7 +25239,7 @@ bool StorageEngine::evalConditionOnRowWithSyntax(const Condition& cond,
             eq.colName = cond.colName;
             eq.value = tok;
             eq.decodedLiteralRhs = cond.decodedLiteralRhs;
-            if (evalConditionOnRow(eq, rowBuffer, tbl)) { hit = true; break; }
+            if (evalConditionOnRowWithSyntax(eq,rowBuffer,tbl,syntax,generatedMetadata)) { hit = true; break; }
         }
         if (cond.op == "in") return hit;
         if (sawNull && !hit) return false;  // UNKNOWN
@@ -26030,11 +26167,11 @@ DBStatus StorageEngine::insert(const std::string& dbname,
                                 const std::map<std::string, std::string>& values,
                                 std::vector<std::map<std::string, std::string>>* insertedRows,
                                 IdentityOverride identityOverride,
-                                OwningMutationRows* owningRows) {
+                                OwningMutationRows* owningRows, bool deferVirtualInputs) {
     std::vector<SqlRow> typedRows;
     const DBStatus status = insertRow(
         dbname, tablename, sqlRowFromLegacy(values),
-        insertedRows ? &typedRows : nullptr, identityOverride,owningRows);
+        insertedRows ? &typedRows : nullptr, identityOverride,owningRows,deferVirtualInputs);
     if (insertedRows) {
         for (const auto& row : typedRows) {
             insertedRows->push_back(legacyRowFromSql(row));
@@ -26048,7 +26185,7 @@ DBStatus StorageEngine::insertRow(const std::string& dbname,
                                    const SqlRow& sqlValues,
                                    std::vector<SqlRow>* insertedRows,
                                    IdentityOverride identityOverride,
-                                OwningMutationRows* owningRows) {
+                                OwningMutationRows* owningRows, bool deferVirtualInputs) {
     const auto ownershipStatus = ensureDatabaseTransactionOwnership(dbname);
     if (ownershipStatus != DBStatus::OK) return ownershipStatus;
     std::map<std::string, std::string> values;
@@ -26081,12 +26218,12 @@ DBStatus StorageEngine::insertRow(const std::string& dbname,
         } else {
             return insertInternal(
                 dbname, tablename, values, nullColumns, insertedRows,
-                identityOverride,owningRows);
+                identityOverride,owningRows,deferVirtualInputs);
         }
         if (usesLegacyPartitionRoute) {
             const DBStatus status = insertInternal(
                 dbname, tablename, values, nullColumns, insertedRows,
-                identityOverride,owningRows);
+                identityOverride,owningRows,deferVirtualInputs);
             if (status != DBStatus::OK && insertedRows) {
                 insertedRows->resize(returnedRowStart);
             }
@@ -26099,7 +26236,7 @@ DBStatus StorageEngine::insertRow(const std::string& dbname,
         try {
         const DBStatus insertStatus = insertInternal(
             dbname, tablename, values, nullColumns, insertedRows,
-            identityOverride,owningRows);
+            identityOverride,owningRows,deferVirtualInputs);
         if (insertStatus != DBStatus::OK) {
             const DBStatus rollbackStatus = rollbackTransaction();
             if (insertedRows) insertedRows->resize(returnedRowStart);
@@ -26142,7 +26279,7 @@ DBStatus StorageEngine::insertRow(const std::string& dbname,
     try {
     const DBStatus insertStatus =
         insertInternal(dbname, tablename, values, nullColumns, insertedRows,
-                       identityOverride,owningRows);
+                       identityOverride,owningRows,deferVirtualInputs);
     if (insertStatus != DBStatus::OK) {
         DBStatus rollbackStatus = DBStatus::OK;
         if (transactionContext().inTransaction && hasStatementSavepoint) {
@@ -26201,7 +26338,7 @@ DBStatus StorageEngine::insertInternal(
                                 const std::set<std::string>& nullColumns,
                                 std::vector<SqlRow>* insertedRows,
                                 IdentityOverride identityOverride,
-                                OwningMutationRows* owningRows) {
+                                OwningMutationRows* owningRows, bool deferVirtualInputs) {
     noteTemporaryRelationAccess(dbname, tablename);
     if (transactionContext().inTransaction && dbname == transactionContext().txnDB) {
         if ((transactionContext().txnIsolationLevel == IsolationLevel::READ_COMMITTED ||
@@ -26225,8 +26362,11 @@ DBStatus StorageEngine::insertInternal(
     if (!lockManager_.lockIntentExclusive(tablename)) return DBStatus::LOCK_CONFLICT;
 
     TableSchema tbl;
-    try { tbl = getTableSchema(dbname, tablename); }
-    catch (...) { lockManager_.unlock(tablename); throw; }
+    DatumMetadataContextPtr generatedMetadata;
+    try {
+        tbl = getTableSchema(dbname, tablename);
+        generatedMetadata=freezeGeneratedStorageInput(tbl,dbname,tablename,this);
+    } catch (...) { lockManager_.unlock(tablename); throw; }
     bool captureLogicalInsert = false;
     try {
         captureLogicalInsert = !tbl.isUnlogged && PublicationCatalog::instance().publishes(
@@ -27030,8 +27170,12 @@ DBStatus StorageEngine::insertInternal(
     // omitted fields. Build a complete typed NEW image: absence at the SQL
     // input boundary means SQL NULL, not an unbound column in a generated
     // expression or CHECK. Do not replace a supplied empty text value.
+    const bool legacyFullImage=shouldEnforceRLS(tbl,StorageEngine::getRLSUser()) ||
+        !filterTriggers(operationTriggers,tablename,"before","insert").empty() ||
+        !filterTriggers(operationTriggers,tablename,"after","insert").empty();
     for (size_t i = 0; i < tbl.len; ++i) {
         const auto& column = tbl.cols[i];
+        if(deferVirtualInputs && column.generatedKind=='v' && !legacyFullImage)continue;
         if (actualValues.emplace(column.dataName, std::string{}).second)
             actualNullColumns.insert(column.dataName);
     }
@@ -27057,6 +27201,13 @@ DBStatus StorageEngine::insertInternal(
         else actualNullColumns.erase(col.dataName);
     }
 
+    for(size_t i=0;i<tbl.len;++i)if(tbl.cols[i].generatedKind=='v' && (!tbl.cols[i].isNull || domainRequired[i])) {
+        ExprValue value;
+        try {value=generatedValueFromMap(tbl,i,actualValues,actualNullColumns,dbname,this,generatedMetadata.get());}
+        catch(...){lockManager_.unlock(tablename);throw;}
+        actualValues[tbl.cols[i].dataName]=value.isNull?std::string{}:stored_regtype_detail::storageText(value);
+        if(value.isNull)actualNullColumns.insert(tbl.cols[i].dataName);else actualNullColumns.erase(tbl.cols[i].dataName);
+    }
     const DBStatus finalValidation = validateRowValues(true);
     if (finalValidation != DBStatus::OK) return finalValidation;
 
@@ -27129,8 +27280,10 @@ DBStatus StorageEngine::insertInternal(
             continue;
         }
         std::string err;
-        if (!dbms::ExprHelper::evalCheck(
-                col.checkExpr, actualValues, typeHints, &err, dbname, "", this)) {
+        bool accepted;
+        try {accepted=generatedCheckInput(col.checkExpr,tbl,actualValues,actualNullColumns,typeHints,dbname,this,&err,generatedMetadata.get());}
+        catch(...){lockManager_.unlock(tablename);throw;}
+        if (!accepted) {
             lockManager_.unlock(tablename);
             return err.empty() ? DBStatus::CHECK_VIOLATION
                                : DBStatus::INVALID_VALUE;
@@ -27147,8 +27300,10 @@ DBStatus StorageEngine::insertInternal(
             continue;
         }
         std::string err;
-        if (!dbms::ExprHelper::evalCheck(
-                check.expression, actualValues, typeHints, &err, dbname, "", this)) {
+        bool accepted;
+        try {accepted=generatedCheckInput(check.expression,tbl,actualValues,actualNullColumns,typeHints,dbname,this,&err,generatedMetadata.get());}
+        catch(...){lockManager_.unlock(tablename);throw;}
+        if (!accepted) {
             lockManager_.unlock(tablename);
             return err.empty() ? DBStatus::CHECK_VIOLATION
                                : DBStatus::INVALID_VALUE;
@@ -27943,6 +28098,7 @@ DBStatus StorageEngine::insertInternal(
         SqlRow returnedValues;
         std::shared_ptr<OwningRowImage> owning;
         for (size_t i = 0; i < tbl.len; ++i) {
+            if(deferVirtualInputs && tbl.cols[i].generatedKind=='v')continue;
             if (insertedColumnIsNull(i)) {
                 returnedValues[tbl.cols[i].dataName] = std::nullopt;
             } else {
@@ -28520,6 +28676,7 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
     TableSchema tbl = getTableSchema(dbname, tablename);
     auto conds = prepareStoredUnknownBitScalarInputs(tbl, inputConditions);
     LocalExpressionSyntax predicateSyntax; // parses lazily only when a real row reaches its consumer
+    const auto generatedMetadata=freezeGeneratedStorageInput(tbl,dbname,tablename,this);
     for (auto& condition : conds) {
         if (condition.op!="=" && condition.op!="<>" && condition.op!="!=" &&
             condition.op!="<" && condition.op!=">" && condition.op!="<=" && condition.op!=">=") continue;
@@ -28852,7 +29009,7 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
                     bool match = true;
                     for (const auto& condition : conds) {
                         if (&condition == indexPredicate && !recheckIndexPredicate) continue;
-                        if (!evalConditionOnRowWithSyntax(condition, row, tbl, &predicateSyntax)) {
+                        if (!evalConditionOnRowWithSyntax(condition, row,tbl,&predicateSyntax,generatedMetadata.get())) {
                             match = false;
                             break;
                         }
@@ -28895,7 +29052,7 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
                         bool match = true;
                         std::string row(data, len);
                         for (const auto& c : conds) {
-                            if (!evalConditionOnRowWithSyntax(c, row, tbl, &predicateSyntax)) { match = false; break; }
+                            if (!evalConditionOnRowWithSyntax(c, row,tbl,&predicateSyntax,generatedMetadata.get())) { match = false; break; }
                         }
                         if (match) ids.insert(rid);
                     });
@@ -28911,7 +29068,7 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
         bool match = true;
         std::string row(data, len);
         for (const auto& c : conds) {
-            if (!evalConditionOnRowWithSyntax(c, row, tbl, &predicateSyntax)) { match = false; break; }
+            if (!evalConditionOnRowWithSyntax(c, row,tbl,&predicateSyntax,generatedMetadata.get())) { match = false; break; }
         }
         if (match) ids.insert(rid);
     }, nullptr, {}, false)) return failScan();
@@ -28923,14 +29080,14 @@ DBStatus StorageEngine::insertDefaultValues(const std::string& dbname,
                                              const std::string& tablename,
                                              const TableSchema& tbl,
                                              std::vector<std::map<std::string, std::string>>* insertedRows,
-                                             OwningMutationRows* owningRows) {
+                                             OwningMutationRows* owningRows, bool deferVirtualInputs) {
     // Omission is the storage boundary's representation of DEFAULT. insert()
     // evaluates default expressions, allocates identity values, and checks
     // NOT NULL against columns without defaults. Supplying raw default text
     // here bypasses expression evaluation and can reject valid timestamp
     // literals; manufacturing values for NOT NULL columns is also invalid.
     (void)tbl;
-    return insert(dbname, tablename, {}, insertedRows,IdentityOverride::None,owningRows);
+    return insert(dbname, tablename, {}, insertedRows,IdentityOverride::None,owningRows,deferVirtualInputs);
 }
 
 DBStatus StorageEngine::remove(
@@ -28982,7 +29139,7 @@ DBStatus StorageEngine::removeRows(
     const SqlDeleteMatcher& deleteMatcher,
     size_t* affectedRows,
     const SqlMutationCallbacks* mutationCallbacks,
-    OwningMutationRows* owningRows) {
+    OwningMutationRows* owningRows, bool deferVirtualInputs) {
     const auto ownershipStatus = ensureDatabaseTransactionOwnership(dbname);
     if (ownershipStatus != DBStatus::OK) return ownershipStatus;
     if (affectedRows) *affectedRows = 0;
@@ -29042,7 +29199,7 @@ DBStatus StorageEngine::removeRows(
     try {
         deleteStatus = removeInternal(
             dbname, tablename, conditions, deletedRows, deleteMatcher, nullptr,
-            referentialContext, affectedRows, mutationCallbacks,owningRows);
+            referentialContext, affectedRows, mutationCallbacks,owningRows,deferVirtualInputs);
     } catch (...) {
         // Predicates, typed RETURNING observations and trigger callbacks can
         // throw after opening the same statement owner used by status errors.
@@ -29089,7 +29246,7 @@ DBStatus StorageEngine::removeInternal(
     ReferentialActionContext& referentialContext,
     size_t* affectedRows,
     const SqlMutationCallbacks* mutationCallbacks,
-    OwningMutationRows* owningRows) {
+    OwningMutationRows* owningRows, bool deferVirtualInputs) {
     if (transactionContext().inTransaction && dbname == transactionContext().txnDB) {
         if ((transactionContext().txnIsolationLevel == IsolationLevel::READ_COMMITTED ||
              transactionContext().txnIsolationLevel == IsolationLevel::READ_UNCOMMITTED) &&
@@ -29183,6 +29340,7 @@ DBStatus StorageEngine::removeInternal(
             BufferedNullRowBinding nullBinding(tbl, nullColumns);
             SqlRow rowValues;
             for (size_t i = 0; i < tbl.len; ++i) {
+                if(deferVirtualInputs && tbl.cols[i].generatedKind=='v')continue;
                 if (tbl.cols[i].generatedKind!='v' && tbl.cols[i].isNull &&
                     dbms::detail::storedRowColumnIsNull(*this, dbname, tablename, tbl, rid, i)) {
                     rowValues[tbl.cols[i].dataName] = std::nullopt;
@@ -29482,7 +29640,7 @@ DBStatus StorageEngine::removeInternal(
                             dbname, tableName, rawValues, nullColumns, {},
                             nullptr, SqlUpdateResolver{}, SqlUpdateMatcher{},
                             &rows,
-                            referentialContext);
+                            referentialContext,nullptr,nullptr,nullptr,nullptr,deferVirtualInputs);
                         if (actionStatus != DBStatus::OK) break;
                     }
                     if (actionStatus != DBStatus::OK) break;
@@ -29493,7 +29651,7 @@ DBStatus StorageEngine::removeInternal(
                         actionStatus = removeInternal(
                             dbname, tableName, {}, nullptr,
                             SqlDeleteMatcher{},
-                            &rows, referentialContext);
+                            &rows, referentialContext,nullptr,nullptr,nullptr,deferVirtualInputs);
                         if (actionStatus != DBStatus::OK) break;
                     }
                 }
@@ -29626,6 +29784,7 @@ DBStatus StorageEngine::removeInternal(
             SqlRow values;
             std::shared_ptr<OwningRowImage> owning;
             for (size_t i = 0; i < tbl.len; ++i) {
+                if(deferVirtualInputs && tbl.cols[i].generatedKind=='v')continue;
                 const bool physicallyNull =
                     tbl.cols[i].generatedKind != 'v' &&
                     rowIndex < nullColumnsToDelete.size() &&
@@ -30205,7 +30364,7 @@ DBStatus StorageEngine::update(
     const UpdateMatcher& updateMatcher,
     size_t* affectedRows,
     std::vector<UpdateRowImage>* rowImages,
-    OwningMutationRows* owningRows) {
+    OwningMutationRows* owningRows, bool deferVirtualInputs) {
     const auto ownershipStatus = ensureDatabaseTransactionOwnership(dbname);
     if (ownershipStatus != DBStatus::OK) return ownershipStatus;
     SqlUpdateResolver typedResolver;
@@ -30229,7 +30388,7 @@ DBStatus StorageEngine::update(
     const DBStatus status = updateRows(
         dbname, tablename, sqlRowFromLegacy(updates), conditions,
         updatedRows ? &typedRows : nullptr, typedResolver, typedMatcher,
-        affectedRows, rowImages,nullptr,owningRows);
+        affectedRows, rowImages,nullptr,owningRows,deferVirtualInputs);
     if (updatedRows) {
         for (const auto& row : typedRows) {
             updatedRows->push_back(legacyRowFromSql(row));
@@ -30272,7 +30431,7 @@ DBStatus StorageEngine::updateRows(
     size_t* affectedRows,
     std::vector<UpdateRowImage>* rowImages,
     const SqlMutationCallbacks* mutationCallbacks,
-    OwningMutationRows* owningRows) {
+    OwningMutationRows* owningRows, bool deferVirtualInputs) {
     if (affectedRows) *affectedRows = 0;
     std::map<std::string, std::string> updates;
     std::set<std::string> updateNullColumns;
@@ -30310,7 +30469,7 @@ DBStatus StorageEngine::updateRows(
     const DBStatus updateStatus = updateInternal(
         dbname, tablename, updates, updateNullColumns, conditions,
         updatedRows, updateResolver, updateMatcher, nullptr,
-        referentialContext, affectedRows, rowImages, mutationCallbacks,owningRows);
+        referentialContext, affectedRows, rowImages, mutationCallbacks,owningRows,deferVirtualInputs);
     if (updateStatus != DBStatus::OK) {
         DBStatus rollbackStatus = DBStatus::OK;
         if (ownsTransaction && transactionContext().inTransaction) {
@@ -30370,7 +30529,7 @@ DBStatus StorageEngine::updateInternal(
     size_t* affectedRows,
     std::vector<UpdateRowImage>* rowImages,
     const SqlMutationCallbacks* mutationCallbacks,
-    OwningMutationRows* owningRows) {
+    OwningMutationRows* owningRows, bool deferVirtualInputs) {
     if (transactionContext().inTransaction && dbname == transactionContext().txnDB) {
         if ((transactionContext().txnIsolationLevel == IsolationLevel::READ_COMMITTED ||
              transactionContext().txnIsolationLevel == IsolationLevel::READ_UNCOMMITTED) &&
@@ -30388,6 +30547,7 @@ DBStatus StorageEngine::updateInternal(
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
 
     TableSchema tbl = getTableSchema(dbname, tablename);
+    const auto generatedMetadata=freezeGeneratedStorageInput(tbl,dbname,tablename,this);
     bool captureLogicalUpdate = false;
     try {
         captureLogicalUpdate = !tbl.isUnlogged && PublicationCatalog::instance().publishes(
@@ -30735,6 +30895,7 @@ DBStatus StorageEngine::updateInternal(
             BufferedNullRowBinding nullBinding(tbl, nullColumns);
             SqlRow rowValues;
             for (size_t i = 0; i < tbl.len; ++i) {
+                if(deferVirtualInputs && tbl.cols[i].generatedKind=='v')continue;
                 if (tbl.cols[i].generatedKind!='v' && tbl.cols[i].isNull &&
                     dbms::detail::storedRowColumnIsNull(*this, dbname, tablename, tbl, rid, i)) {
                     rowValues[tbl.cols[i].dataName] = std::nullopt;
@@ -30794,6 +30955,15 @@ DBStatus StorageEngine::updateInternal(
     auto hashIndexedCols = getHashIndexedColumns(dbname, tablename);
     const auto secondaryIndexMetadata = getIndexMetadata(dbname, tablename);
     const auto compositeIndexMetadata = getCompositeIndexes(dbname, tablename);
+    bool fullGeneratedRow=!deferVirtualInputs || enforceRls;
+    fullGeneratedRow=fullGeneratedRow || !filterTriggers(operationTriggers,tablename,"before","update").empty() ||
+        !filterTriggers(operationTriggers,tablename,"after","update").empty();
+    for(const auto& metadata:secondaryIndexMetadata)fullGeneratedRow=fullGeneratedRow||secondaryMayReadVirtual(metadata,tbl);
+    for(const auto& metadata:compositeIndexMetadata)fullGeneratedRow=fullGeneratedRow||compositeMayReadVirtual(metadata,tbl);
+    for(const auto& name:hashIndexedCols)fullGeneratedRow=fullGeneratedRow||indexColumnIsVirtual(name,tbl);
+    for(const auto& name:getBloomIndexedColumns(dbname,tablename))fullGeneratedRow=fullGeneratedRow||indexColumnIsVirtual(name,tbl);
+    for(size_t i=0;i<tbl.len;++i)if(tbl.cols[i].generatedKind=='v' && (tbl.cols[i].isPrimaryKey || tbl.cols[i].isUnique))fullGeneratedRow=true;
+    for(const auto& key:tbl.uniqueConstraints)for(const auto i:key)if(i<tbl.len && tbl.cols[i].generatedKind=='v')fullGeneratedRow=true;
 
     // For each matching row, read old data, update, write back, update indexes
     // Pre-update row images keyed by rid: AFTER UPDATE triggers expose OLD
@@ -30827,6 +30997,7 @@ DBStatus StorageEngine::updateInternal(
         std::array<bool,MAX_COLUMNS> oldVirtualNulls{};
         std::shared_ptr<OwningRowImage> owning;
         for (size_t i = 0; i < tbl.len; ++i) {
+            if(!fullGeneratedRow && tbl.cols[i].generatedKind=='v')continue;
             BufferedNullRowBinding binding(tbl, oldNullColumns);
             if (tbl.cols[i].generatedKind != 'v' &&
                 i < oldNullColumns.size() && oldNullColumns[i]) {
@@ -30874,6 +31045,7 @@ DBStatus StorageEngine::updateInternal(
         if (updateResolver || (mutationCallbacks && mutationCallbacks->resolve)) {
             SqlRow resolverValues;
             for (size_t i = 0; i < tbl.len; ++i) {
+                if(deferVirtualInputs && tbl.cols[i].generatedKind=='v')continue;
                 if ((tbl.cols[i].generatedKind=='v' && oldVirtualNulls[i]) ||
                     (tbl.cols[i].generatedKind!='v' && i<oldNullColumns.size() && oldNullColumns[i])) {
                     resolverValues[tbl.cols[i].dataName] = std::nullopt;
@@ -31344,6 +31516,15 @@ DBStatus StorageEngine::updateInternal(
                 finalNullColumnNames.insert(tbl.cols[i].dataName);
             }
         }
+        for(size_t i=0;i<tbl.len;++i)if(tbl.cols[i].generatedKind=='v' && !tbl.cols[i].isNull) {
+            ExprValue value;
+            try {value=generatedValueFromMap(tbl,i,rowValues,finalNullColumnNames,dbname,this,generatedMetadata.get());}
+            catch(...){lockManager_.unlock(tablename);throw;}
+            if(value.isNull) {
+                lockManager_.unlock(tablename);return DBStatus::NULL_NOT_ALLOWED;
+            }
+            rowValues[tbl.cols[i].dataName]=stored_regtype_detail::storageText(value);
+        }
         if (!normalizePointColumns(
                 tbl, rowValues, &finalNullColumnNames)) {
             lockManager_.unlock(tablename);
@@ -31443,6 +31624,9 @@ DBStatus StorageEngine::updateInternal(
                       .size()
                 : 0;
 
+        // The tuple builder's genuine NULL bitmap also describes CHECK inputs.
+        std::set<std::string> checkNulls;
+        for(size_t i=0;i<tbl.len;++i)if(tbl.cols[i].generatedKind!='v' && newRowNulls[i])checkNulls.insert(tbl.cols[i].dataName);
         // Check CHECK constraints before writing; collect deferrable deferred checks for commit-time validation.
         std::vector<size_t> deferredCheckCols;
         for (size_t i = 0; i < tbl.len; ++i) {
@@ -31456,9 +31640,10 @@ DBStatus StorageEngine::updateInternal(
                 continue;
             }
             std::string err;
-            if (!dbms::ExprHelper::evalCheck(
-                    col.checkExpr, rowValues, updateTypeHints, &err, dbname,
-                    "", this)) {
+            bool accepted;
+            try {accepted=generatedCheckInput(col.checkExpr,tbl,rowValues,checkNulls,updateTypeHints,dbname,this,&err,generatedMetadata.get());}
+            catch(...){lockManager_.unlock(tablename);throw;}
+            if (!accepted) {
                 lockManager_.unlock(tablename);
                 return err.empty() ? DBStatus::CHECK_VIOLATION
                                    : DBStatus::INVALID_VALUE;
@@ -31490,9 +31675,10 @@ DBStatus StorageEngine::updateInternal(
                 continue;
             }
             std::string err;
-            if (!dbms::ExprHelper::evalCheck(
-                    storedCheck.expression, rowValues, updateTypeHints, &err,
-                    dbname, "", this)) {
+            bool accepted;
+            try {accepted=generatedCheckInput(storedCheck.expression,tbl,rowValues,checkNulls,updateTypeHints,dbname,this,&err,generatedMetadata.get());}
+            catch(...){lockManager_.unlock(tablename);throw;}
+            if (!accepted) {
                 lockManager_.unlock(tablename);
                 return err.empty() ? DBStatus::CHECK_VIOLATION
                                    : DBStatus::INVALID_VALUE;
@@ -32210,7 +32396,7 @@ DBStatus StorageEngine::updateInternal(
                     actionStatus = updateInternal(
                         dbname, tableName, rawValues, nullColumns, {}, nullptr,
                         SqlUpdateResolver{}, SqlUpdateMatcher{}, &rows,
-                        referentialContext);
+                        referentialContext,nullptr,nullptr,nullptr,nullptr,deferVirtualInputs);
                     if (actionStatus != DBStatus::OK) break;
                 }
                 if (actionStatus != DBStatus::OK) break;
@@ -32919,6 +33105,7 @@ DBStatus StorageEngine::updateInternal(
             SqlRow oldValues;
             SqlRow newValues;
             for (size_t i = 0; i < tbl.len; ++i) {
+                if(deferVirtualInputs && tbl.cols[i].generatedKind=='v')continue;
                 if ((tbl.cols[i].generatedKind=='v' && oldVirtualNulls[i]) ||
                     (tbl.cols[i].generatedKind!='v' && i<oldNullColumns.size() && oldNullColumns[i])) {
                     oldValues[tbl.cols[i].dataName] = std::nullopt;
@@ -33659,12 +33846,15 @@ std::vector<std::string> StorageEngine::query(
     const std::vector<std::string>& distinctOnCols,
     std::vector<std::vector<std::string>>* structuredRows,
     std::vector<std::vector<bool>>* structuredNulls,
-    std::vector<int64_t>* structuredRowIds) {
+    std::vector<int64_t>* structuredRowIds,
+    const GeneratedRelationPtr& generatedDeclaration,
+    std::vector<std::vector<ExprValue>>* generatedInputs) {
     noteTemporaryRelationAccess(dbname, tablename);
     std::vector<std::string> result;
     if (structuredRows) structuredRows->clear();
     if (structuredNulls) structuredNulls->clear();
     if (structuredRowIds) structuredRowIds->clear();
+    if(generatedInputs)generatedInputs->clear();
 
     if (transactionContext().inTransaction && dbname == transactionContext().txnDB) {
         if ((transactionContext().txnIsolationLevel == IsolationLevel::READ_COMMITTED ||
@@ -33725,6 +33915,17 @@ std::vector<std::string> StorageEngine::query(
     }
 
     TableSchema tbl = getTableSchema(dbname, tablename);
+    const auto generatedMetadata=freezeGeneratedStorageInput(tbl,dbname,tablename,this);
+    const auto generation=generatedDeclaration?generatedDeclaration:
+        (generatedMetadata?generatedMetadata->generatedSource:GeneratedRelationPtr{});
+    const bool transportGenerated=generatedInputs && generation;
+    if(transportGenerated) {
+        if(!selectCols.empty() || generation->columns.size()!=tbl.len)
+            throw DbError("XX000","generated row transport lost the actual full input declaration");
+        for(size_t i=0;i<tbl.len;++i)if(const auto& program=generation->columns[i])
+            if(program->target.dataName!=tbl.cols[i].dataName || program->target.generatedExpr!=tbl.cols[i].generatedExpr)
+                throw DbError("XX000","generated row transport changed its actual source declaration");
+    }
     PageAllocator* pa = getPageAllocator(dbname, tablename);
 
     ReadView autocommitView;
@@ -33814,7 +34015,7 @@ std::vector<std::string> StorageEngine::query(
             [&](uint32_t pid, uint16_t sid, const char* data, size_t len) {
                 std::string row(data, len);
                 for (const auto& c : conds) {
-                    if (!evalConditionOnRow(c, row, tbl)) return;
+                    if (!evalConditionOnRowWithSyntax(c,row,tbl,nullptr,generatedMetadata.get())) return;
                 }
                 matchRows.emplace_back(encodeRid(pid, sid), std::move(row));
             }, queryView, targetParts);
@@ -33830,7 +34031,7 @@ std::vector<std::string> StorageEngine::query(
             std::string row(data, len);
             bool match = true;
             for (const auto& c : conds) {
-                if (!evalConditionOnRow(c, row, tbl)) { match = false; break; }
+                if (!evalConditionOnRowWithSyntax(c,row,tbl,nullptr,generatedMetadata.get())) { match = false; break; }
             }
             if (match) matchRows.emplace_back(encodeRid(pid, sid), std::move(row));
         }, queryView, targetParts)) scanFailed = true;
@@ -33953,7 +34154,7 @@ std::vector<std::string> StorageEngine::query(
                 if (sortIdx < tbl.len) {
                     bool valueIsNull = false;
                     std::string val = extractColumnValue(
-                        mr.second, tbl, sortIdx, dbname, true, &valueIsNull);
+                        mr.second,tbl,sortIdx,dbname,true,&valueIsNull,nullptr,generation);
                     const Column& scol = tbl.cols[sortIdx];
                     const bool resultIsNull = valueIsNull ||
                         (scol.generatedKind != 'v' && dbms::detail::storedRowColumnIsNull(*this, dbname, tbl.tablename, tbl, mr.first, sortIdx));
@@ -34201,6 +34402,7 @@ std::vector<std::string> StorageEngine::query(
             std::map<std::string, std::string> rowData;
             std::map<std::string, bool> rowNulls;
             for (size_t ci = 0; ci < tbl.len; ++ci) {
+                if(generation && tbl.cols[ci].generatedKind=='v')continue;
                 bool valueIsNull = false;
                 rowData[tbl.cols[ci].dataName] = extractColumnValue(
                     matchRows[ri].second, tbl, ci, dbname, true,
@@ -34209,25 +34411,37 @@ std::vector<std::string> StorageEngine::query(
                     (tbl.cols[ci].generatedKind != 'v' &&
                      dbms::detail::storedRowColumnIsNull(*this, dbname, tbl.tablename, tbl, matchRows[ri].first, ci));
             }
+            const auto actualSortColumn=[&](const std::string& name)->ExprValue {
+                for(size_t i=0;i<tbl.len;++i)if(tbl.cols[i].dataName==name && generation && generation->columns[i]) {
+                    bool null=false;std::optional<ExprValue> actual;
+                    (void)extractColumnValue(matchRows[ri].second,tbl,i,dbname,true,&null,&actual,generation);
+                    if(!actual)throw DbError("XX000","generated sort input lost its actual value");
+                    return std::move(*actual);
+                }
+                const auto cell=rowData.find(name);const auto null=rowNulls.find(name);
+                return ExprValue("unknown",cell==rowData.end()?std::string{}:cell->second,
+                    null==rowNulls.end() || null->second);
+            };
             size_t expressionIndex = 0;
             std::map<std::string, ExprEvalResult> expressionValues;
             for (const auto& spec : orderBy) {
                 const size_t keyIndex = expressionIndex++;
                 if (!spec.isExpression) {
-                    const auto value = rowData.find(spec.colName);
-                    const auto isNull = rowNulls.find(spec.colName);
-                    ek.exprVals.push_back(value == rowData.end() ? "" : value->second);
-                    ek.exprNulls.push_back(isNull == rowNulls.end() || isNull->second);
+                    const auto actual=actualSortColumn(spec.colName);
+                    ek.exprVals.push_back(actual.value);
+                    ek.exprNulls.push_back(actual.isNull);
                     continue;
                 }
                 std::string ev;
                 bool expressionIsNull = false;
                 bool evaluatedGeneralExpression = false;
+                std::optional<bool> generatedArgumentNull;
                 auto getCol = [&](const std::string& name) -> std::string {
+                    if(generation) {const auto actual=actualSortColumn(name);generatedArgumentNull=actual.isNull;return actual.value;}
                     auto it = rowData.find(name);
                     return (it != rowData.end()) ? it->second : "";
                 };
-                std::string argVal = getCol(spec.exprArg);
+                std::string argVal = generation && !spec.expressionSql.empty()?std::string{}:getCol(spec.exprArg);
                 if (!spec.expressionSql.empty()) {
                     std::set<std::string> nullColumns;
                     for (const auto& [name, isNull] : rowNulls)
@@ -34238,7 +34452,7 @@ std::vector<std::string> StorageEngine::query(
                         found = expressionValues.emplace(expressionIdentity,
                             ExprHelper::evalStringWithNulls(spec.expressionSql,
                                 rowData, nullColumns, expressionTypeHints, dbname,
-                                "", this)).first;
+                                "",this,{},false,nullptr,generatedMetadata.get())).first;
                     const auto& evaluated = found->second;
                     if (!evaluated.ok) {
                         if (!evaluated.sqlState.empty())
@@ -34304,7 +34518,8 @@ std::vector<std::string> StorageEngine::query(
                 }
                 ek.exprVals.push_back(ev);
                 const auto nullIt = rowNulls.find(spec.exprArg);
-                if (!evaluatedGeneralExpression && nullIt != rowNulls.end())
+                if(!evaluatedGeneralExpression && generatedArgumentNull)expressionIsNull=*generatedArgumentNull;
+                else if (!evaluatedGeneralExpression && nullIt != rowNulls.end())
                     expressionIsNull = nullIt->second;
                 ek.exprNulls.push_back(expressionIsNull);
             }
@@ -34361,7 +34576,7 @@ std::vector<std::string> StorageEngine::query(
                 for (size_t idx : distinctIdxs) {
                     bool valueIsNull = false;
                     std::string value = extractColumnValue(
-                        mr.second, tbl, idx, dbname, true, &valueIsNull);
+                        mr.second,tbl,idx,dbname,true,&valueIsNull,nullptr,generation);
                     const bool resultIsNull = valueIsNull ||
                         (tbl.cols[idx].generatedKind != 'v' &&
                          dbms::detail::storedRowColumnIsNull(*this, dbname, tbl.tablename, tbl, mr.first, idx));
@@ -34385,17 +34600,29 @@ std::vector<std::string> StorageEngine::query(
         std::string rowStr;
         std::vector<std::string> structuredRow;
         std::vector<bool> structuredNullRow;
+        std::vector<ExprValue> actualInputs;
+        if(transportGenerated)actualInputs.reserve(tbl.len);
         for (size_t i = 0; i < tbl.len; ++i) {
             const Column& col = tbl.cols[i];
             if (!selectCols.empty() && selectCols.find(col.dataName) == selectCols.end())
                 continue;
+            if(transportGenerated && generation->columns[i]) {
+                actualInputs.emplace_back(); // explicitly omitted by declaration
+                structuredRow.emplace_back();structuredNullRow.push_back(false);
+                continue;
+            }
             bool valueIsNull = false;
             std::string val = extractColumnValue(
-                mr.second, tbl, i, dbname, true, &valueIsNull);
+                mr.second,tbl,i,dbname,true,&valueIsNull,nullptr,generation);
             // VIRTUAL generated columns carry the evaluator's NULL result;
             // their unused heap slot cannot describe logical nullness.
             const bool resultIsNull = valueIsNull ||
                 (col.generatedKind != 'v' && dbms::detail::storedRowColumnIsNull(*this, dbname, tbl.tablename, tbl, mr.first, i));
+            if(transportGenerated) {
+                actualInputs.emplace_back(ExprHelper::canonicalResultTypeName(col.dataType+(col.isArray?"[]":"")),
+                    resultIsNull?std::string{}:val,resultIsNull);
+                actualInputs.back().collation=col.collation;
+            }
             // Apply session timezone for TIMESTAMPTZ columns
             if (col.dataType == "timestamptz" && !col.isArray &&
                 !resultIsNull && !val.empty()) {
@@ -34425,6 +34652,7 @@ std::vector<std::string> StorageEngine::query(
             structuredNullRow.push_back(resultIsNull);
         }
         result.push_back(rowStr);
+        if(transportGenerated)generatedInputs->push_back(std::move(actualInputs));
         if (structuredRows) structuredRows->push_back(std::move(structuredRow));
         if (structuredNulls)
             structuredNulls->push_back(std::move(structuredNullRow));
@@ -34672,6 +34900,27 @@ bool StorageEngine::ownsPreparedSetReturningCall(const std::string& dbname,
     return preparedSetReturningRole(evaluator,function,this)!=nullptr;
 }
 
+// Generation readers freeze the original binding snapshot, not a second
+// row-time catalog lookup or an output value-derived declaration.
+static DatumMetadataContextPtr generationMetadataFromSnapshot(
+    const CatalogManager::MetadataSnapshot& snapshot,DeclaredTypeNamespace nameSpace,
+    const QueryRowDescriptor& columns) {
+    struct Owner {CatalogManager::MetadataSnapshot snapshot;DeclaredTypeNamespace nameSpace;std::unique_ptr<DatumMetadataFactory> factory;};
+    auto owner=std::make_shared<Owner>();owner->snapshot=snapshot;owner->nameSpace=std::move(nameSpace);
+    owner->factory=std::make_unique<DatumMetadataFactory>(owner->snapshot,
+        [raw=owner.get()](const std::string& spelling){return resolveDeclaredTypeName(spelling,&raw->snapshot,nullptr,&raw->nameSpace).typeOid;});
+    auto result=std::make_shared<DatumMetadataContext>();result->sourceColumns=true;
+    result->declaration=[owner](const std::string& spelling,uint32_t oid){return owner->factory->declaration(spelling,oid);};
+    result->inputDeclaration=[owner](const std::string& spelling){return resolveDeclaredTypeName(spelling,&owner->snapshot,nullptr,&owner->nameSpace).inputType;};
+    result->modifier=[owner](DatumTypePtr type,int32_t mod){return owner->factory->modifier(std::move(type),mod);};
+    result->record=[owner](const std::vector<DatumTypePtr>& fields){return owner->factory->record(fields);};
+    for(const auto& column:columns) {
+        result->columns.emplace(column.name,column.typeMetadata);
+        if(!column.generated)result->storedColumns.insert(column.name);
+    }
+    return result;
+}
+
 DatumMetadataContextPtr StorageEngine::prepareDatumMetadataContext(
     const std::string& dbname,const std::string& physicalTable) const {
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
@@ -34705,6 +34954,7 @@ DatumMetadataContextPtr StorageEngine::prepareDatumMetadataContext(
         return owner->factory->modifier(std::move(declaration),modifier);
     };
     result->sourceColumns=!physicalTable.empty();
+    std::string generatedSchema,generatedName;
     result->record=[owner](const std::vector<DatumTypePtr>& fields) {
         return owner->factory->record(fields);
     };
@@ -34718,6 +34968,7 @@ DatumMetadataContextPtr StorageEngine::prepareDatumMetadataContext(
             }
         }
         if(logical.schema.empty())logical.schema="public";
+        generatedSchema=logical.schema;generatedName=logical.name;
         Oid schema=INVALID_OID,relation=INVALID_OID;
         for(const auto& row:owner->snapshot.namespaces)
             if(row.nspname==logical.schema)schema=row.oid;
@@ -34735,6 +34986,20 @@ DatumMetadataContextPtr StorageEngine::prepareDatumMetadataContext(
                 result->storedColumns.insert(logical.name+"."+row.attname);
                 result->storedColumns.insert(logical.schema+"."+logical.name+"."+row.attname);
             }
+        }
+    }
+    if(!physicalTable.empty()) {
+        const auto table=getTableSchema(dbname,physicalTable);
+        bool virtuals=false;for(size_t i=0;i<table.len;++i)virtuals=virtuals||table.cols[i].generatedKind=='v';
+        if(virtuals) {
+            std::vector<DatumTypePtr> declarations;
+            for(size_t i=0;i<table.len;++i) {
+                const auto field=result->columns.find(table.cols[i].dataName);
+                declarations.push_back(field==result->columns.end()?DatumTypePtr{}:field->second);
+            }
+            auto frozen=std::make_shared<DatumMetadataContext>(*result);
+            frozen->generatedSource.reset();
+            result->generatedSource=makeGeneratedRelation(table,dbname,const_cast<StorageEngine*>(this),declarations,std::move(frozen),generatedSchema,generatedName);
         }
     }
     return result;
@@ -34935,7 +35200,26 @@ decltype(auto) StorageEngine::withQueryBindingMetadata(const std::string& dbname
                         if (description.viewSql.empty()) throw DbError("XX000", "view has no stored query");
                         return description;
                     }
-                    if (!description.columns.empty()) return description;
+                    if (!description.columns.empty()) {
+                        bool virtuals=false;
+                        for(const auto& attribute:catalog.attributes)
+                            if(attribute.attrelid==relation.oid && !attribute.attisdropped && attribute.attgenerated=='v')virtuals=true;
+                        if(virtuals) {
+                            const bool temporary=session && schema==sessionTempSchemaName(*session);
+                            const std::string actual=temporary?tempTablePrefix(*session,requested.name):
+                                schema=="public"?requested.name:schema+"__"+requested.name;
+                            const auto table=getTableSchema(dbname,actual);
+                            if(table.len!=description.columns.size())throw DbError("XX000","generated binding source descriptor width changed");
+                            std::vector<DatumTypePtr> types;
+                            for(size_t i=0;i<table.len;++i) {
+                                if(table.cols[i].dataName!=description.columns[i].name)throw DbError("XX000","generated binding source attribute identity changed");
+                                types.push_back(description.columns[i].typeMetadata);
+                            }
+                            const auto declarations=generationMetadataFromSnapshot(catalog,freezeDeclaredTypeNamespace(currentSession()),description.columns);
+                            description.generatedRelation=makeGeneratedRelation(table,dbname,const_cast<StorageEngine*>(this),types,declarations,description.schema,description.name);
+                        }
+                        return description;
+                    }
                 }
                 const bool temporary = session && schema == sessionTempSchemaName(*session);
                 const std::string physical = temporary ? tempTablePrefix(*session, requested.name)
@@ -34947,7 +35231,13 @@ decltype(auto) StorageEngine::withQueryBindingMetadata(const std::string& dbname
                         description.columns.push_back({table.cols[i].dataName,
                             ExprHelper::canonicalResultTypeName(table.cols[i].dataType + (table.cols[i].isArray ? "[]" : "")),
                             !table.cols[i].generatedExpr.empty(), table.cols[i].identityKind, 0, table.cols[i].typeMod});
-                    if (!description.columns.empty()) return description;
+                    if (!description.columns.empty()) {
+                        std::vector<DatumTypePtr> types;
+                        for(const auto& column:description.columns)types.push_back(column.typeMetadata);
+                        const auto declarations=generationMetadataFromSnapshot(catalog,freezeDeclaredTypeNamespace(currentSession()),description.columns);
+                        description.generatedRelation=makeGeneratedRelation(table,dbname,const_cast<StorageEngine*>(this),types,declarations,description.schema,description.name);
+                        return description;
+                    }
                 }
                 auto view = viewSource(schema == "public" ? requested.name : schema + "." + requested.name);
                 if (!view.empty()) {
@@ -36182,6 +36472,11 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         }
         return digit;
     };
+    std::unique_ptr<std::map<size_t,bool>> generatedArgumentNulls;
+    const auto actualArgument=[&](const std::string& value)->std::optional<size_t> {
+        for(size_t i=0;i<expr.funcArgs.size();++i)if(&expr.funcArgs[i]==&value)return i;
+        return {};
+    };
     auto getVal = [&](const std::string& arg) -> std::string {
         if (arg.size() >= 2 && ((arg.front() == '\'' && arg.back() == '\'') || (arg.front() == '"' && arg.back() == '"')))
             return arg.substr(1, arg.size() - 2);
@@ -36189,7 +36484,12 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             if (tbl.cols[i].dataName == arg) {
                 if (engine && !dbname.empty()) {
                     bool isNull=false;
-                    auto value=engine->extractColumnValue(rowBuffer,tbl,i,dbname,true,&isNull);
+                    auto value=engine->extractColumnValue(rowBuffer,tbl,i,dbname,true,&isNull,nullptr,
+                        datumMetadata?datumMetadata->generatedSource:GeneratedRelationPtr{});
+                    if(tbl.cols[i].generatedKind=='v')if(const auto site=actualArgument(arg)) {
+                        if(!generatedArgumentNulls)generatedArgumentNulls=std::make_unique<std::map<size_t,bool>>();
+                        (*generatedArgumentNulls)[*site]=isNull;
+                    }
                     if(!isNull && tbl.cols[i].generatedKind!='v' &&
                        stored_regtype_detail::columnType(tbl.cols[i].dataType)) {
                         const auto catalog=regtype_detail::metadata(*engine,dbname);
@@ -36349,6 +36649,12 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
     };
     auto scalarValueIsNull = [&](const std::string& arg,
                                  const std::string& value) {
+        if(generatedArgumentNulls)if(const auto site=actualArgument(arg)) {
+            const auto alreadyRead=generatedArgumentNulls->find(*site);
+            if(alreadyRead!=generatedArgumentNulls->end()) {
+                const bool isNull=alreadyRead->second;generatedArgumentNulls->erase(alreadyRead);return isNull;
+            }
+        }
         for (size_t i = 0; i < tbl.len; ++i) {
             if (tbl.cols[i].dataName == arg) {
                 return scalarArgColumnIsNull(
@@ -36377,6 +36683,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         std::map<std::string, std::string> typeHints;
         std::set<std::string> nullColumns;
         for (size_t i = 0; i < tbl.len; ++i) {
+            if(tbl.cols[i].generatedKind=='v')continue;
             bool valueIsNull = false;
             const std::string columnValue = engine && !dbname.empty()
                 ? engine->extractColumnValue(
@@ -36422,6 +36729,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             std::map<std::string, std::string> values;
             std::set<std::string> nulls;
             for (size_t i = 0; i < tbl.len; ++i) {
+            if(tbl.cols[i].generatedKind=='v')continue;
                 bool isNull = false;
                 const auto value = engine && !dbname.empty()
                     ? engine->extractColumnValue(rowBuffer, tbl, i, dbname, true, &isNull)
@@ -36622,6 +36930,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         std::map<std::string, std::string> typeHints;
         std::set<std::string> nullColumns;
         for (size_t i = 0; i < tbl.len; ++i) {
+            if(tbl.cols[i].generatedKind=='v')continue;
             bool valueIsNull = false;
             const std::string value = engine && !dbname.empty()
                 ? engine->extractColumnValue(
@@ -36666,6 +36975,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         std::map<std::string, std::string> typeHints;
         std::set<std::string> nullColumns;
         for (size_t i = 0; i < tbl.len; ++i) {
+            if(tbl.cols[i].generatedKind=='v')continue;
             bool valueIsNull = false;
             const std::string value = engine && !dbname.empty()
                 ? engine->extractColumnValue(
@@ -37229,6 +37539,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             std::map<std::string, std::string> typeHints;
             std::set<std::string> nullColumns;
             for (size_t i = 0; i < tbl.len; ++i) {
+            if(tbl.cols[i].generatedKind=='v')continue;
                 bool valueIsNull = false;
                 const std::string value = engine && !dbname.empty()
                     ? engine->extractColumnValue(
@@ -37492,6 +37803,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         std::map<std::string, std::string> typeHints;
         std::set<std::string> nullColumns;
         for (size_t i = 0; i < tbl.len; ++i) {
+            if(tbl.cols[i].generatedKind=='v')continue;
             bool valueIsNull = false;
             const std::string value = engine && !dbname.empty()
                 ? engine->extractColumnValue(
@@ -37520,6 +37832,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         std::map<std::string, std::string> rowContext, typeHints, collationHints;
         std::set<std::string> nullColumns;
         for (size_t i = 0; i < tbl.len; ++i) {
+            if(tbl.cols[i].generatedKind=='v')continue;
             bool valueIsNull = false;
             const std::string value = engine && !dbname.empty()
                 ? engine->extractColumnValue(
@@ -37548,6 +37861,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         std::map<std::string, std::string> typeHints;
         std::set<std::string> nullColumns;
         for (size_t i = 0; i < tbl.len; ++i) {
+            if(tbl.cols[i].generatedKind=='v')continue;
             bool valueIsNull = false;
             const std::string value = engine && !dbname.empty()
                 ? engine->extractColumnValue(
@@ -37582,6 +37896,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         std::map<std::string, std::string> typeHints;
         std::set<std::string> nullColumns;
         for (size_t i = 0; i < tbl.len; ++i) {
+            if(tbl.cols[i].generatedKind=='v')continue;
             bool valueIsNull = false;
             const std::string value = engine && !dbname.empty()
                 ? engine->extractColumnValue(
@@ -37615,6 +37930,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         std::map<std::string, std::string> typeHints;
         std::set<std::string> nullColumns;
         for (size_t i = 0; i < tbl.len; ++i) {
+            if(tbl.cols[i].generatedKind=='v')continue;
             bool valueIsNull = false;
             const std::string value = engine && !dbname.empty()
                 ? engine->extractColumnValue(
@@ -37709,6 +38025,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         std::map<std::string, std::string> typeHints;
         std::set<std::string> nullColumns;
         for (size_t i = 0; i < tbl.len; ++i) {
+            if(tbl.cols[i].generatedKind=='v')continue;
             bool valueIsNull = false;
             const std::string value = engine && !dbname.empty()
                 ? engine->extractColumnValue(
@@ -37748,6 +38065,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         std::map<std::string, std::string> typeHints;
         std::set<std::string> nullColumns;
         for (size_t i = 0; i < tbl.len; ++i) {
+            if(tbl.cols[i].generatedKind=='v')continue;
             bool valueIsNull = false;
             const std::string value = engine && !dbname.empty()
                 ? engine->extractColumnValue(
@@ -37782,6 +38100,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         std::map<std::string, std::string> typeHints;
         std::set<std::string> nullColumns;
         for (size_t i = 0; i < tbl.len; ++i) {
+            if(tbl.cols[i].generatedKind=='v')continue;
             bool valueIsNull = false;
             const std::string value = engine && !dbname.empty()
                 ? engine->extractColumnValue(
@@ -37811,6 +38130,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         std::map<std::string, std::string> typeHints;
         std::set<std::string> nullColumns;
         for (size_t i = 0; i < tbl.len; ++i) {
+            if(tbl.cols[i].generatedKind=='v')continue;
             bool valueIsNull = false;
             const std::string value = engine && !dbname.empty()
                 ? engine->extractColumnValue(
@@ -37840,6 +38160,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         std::map<std::string, std::string> typeHints;
         std::set<std::string> nullColumns;
         for (size_t i = 0; i < tbl.len; ++i) {
+            if(tbl.cols[i].generatedKind=='v')continue;
             bool valueIsNull = false;
             const std::string value = engine && !dbname.empty()
                 ? engine->extractColumnValue(
@@ -38159,6 +38480,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         std::map<std::string, std::string> typeHints;
         std::set<std::string> nullColumns;
         for (size_t i = 0; i < tbl.len; ++i) {
+            if(tbl.cols[i].generatedKind=='v')continue;
             bool valueIsNull = false;
             const std::string value = engine && !dbname.empty()
                 ? engine->extractColumnValue(
@@ -38413,6 +38735,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         std::map<std::string, std::string> typeHints;
         std::set<std::string> nullColumns;
         for (size_t i = 0; i < tbl.len; ++i) {
+            if(tbl.cols[i].generatedKind=='v')continue;
             bool valueIsNull = false;
             const std::string value = engine && !dbname.empty()
                 ? engine->extractColumnValue(
@@ -38446,6 +38769,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         std::map<std::string, std::string> typeHints;
         std::set<std::string> nullColumns;
         for (size_t i = 0; i < tbl.len; ++i) {
+            if(tbl.cols[i].generatedKind=='v')continue;
             bool valueIsNull = false;
             const std::string value = engine && !dbname.empty()
                 ? engine->extractColumnValue(
@@ -38506,6 +38830,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         std::map<std::string, std::string> typeHints;
         std::set<std::string> nullColumns;
         for (size_t i = 0; i < tbl.len; ++i) {
+            if(tbl.cols[i].generatedKind=='v')continue;
             bool valueIsNull = false;
             const std::string value = engine && !dbname.empty()
                 ? engine->extractColumnValue(
@@ -38558,6 +38883,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         std::map<std::string, std::string> typeHints;
         std::set<std::string> nullColumns;
         for (size_t i = 0; i < tbl.len; ++i) {
+            if(tbl.cols[i].generatedKind=='v')continue;
             bool valueIsNull = false;
             const std::string value = engine && !dbname.empty()
                 ? engine->extractColumnValue(
@@ -38592,6 +38918,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         std::map<std::string, std::string> typeHints;
         std::set<std::string> nullColumns;
         for (size_t i = 0; i < tbl.len; ++i) {
+            if(tbl.cols[i].generatedKind=='v')continue;
             bool valueIsNull = false;
             const std::string value = engine && !dbname.empty()
                 ? engine->extractColumnValue(
@@ -38691,6 +39018,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         std::map<std::string, std::string> typeHints;
         std::set<std::string> nullColumns;
         for (size_t i = 0; i < tbl.len; ++i) {
+            if(tbl.cols[i].generatedKind=='v')continue;
             bool valueIsNull = false;
             const std::string value = engine && !dbname.empty()
                 ? engine->extractColumnValue(
@@ -38722,6 +39050,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         std::map<std::string, std::string> typeHints;
         std::set<std::string> nullColumns;
         for (size_t i = 0; i < tbl.len; ++i) {
+            if(tbl.cols[i].generatedKind=='v')continue;
             bool valueIsNull = false;
             const std::string value = engine && !dbname.empty()
                 ? engine->extractColumnValue(
@@ -39489,6 +39818,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         const auto typeHints = buildTypeHints(tbl);
         std::set<std::string> nullColumns;
         for (size_t i = 0; i < tbl.len; ++i) {
+            if(tbl.cols[i].generatedKind=='v')continue;
             bool valueIsNull = false;
             const std::string value = engine && !dbname.empty()
                 ? engine->extractColumnValue(
@@ -39549,6 +39879,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         const auto typeHints = buildTypeHints(tbl);
         std::set<std::string> nullColumns;
         for (size_t i = 0; i < tbl.len; ++i) {
+            if(tbl.cols[i].generatedKind=='v')continue;
             bool valueIsNull = false;
             const std::string value = engine && !dbname.empty()
                 ? engine->extractColumnValue(
@@ -39612,6 +39943,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         std::map<std::string, std::string> typeHints;
         std::set<std::string> nullColumns;
         for (size_t i = 0; i < tbl.len; ++i) {
+            if(tbl.cols[i].generatedKind=='v')continue;
             bool valueIsNull = false;
             const std::string value = engine && !dbname.empty()
                 ? engine->extractColumnValue(
@@ -39672,6 +40004,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         std::map<std::string, std::string> values, types;
         std::set<std::string> nulls;
         for (size_t i = 0; i < tbl.len; ++i) {
+            if(tbl.cols[i].generatedKind=='v')continue;
             bool isNull = false;
             const auto& column = tbl.cols[i];
             values[column.dataName] = engine->extractColumnValue(
@@ -40124,7 +40457,8 @@ std::vector<std::string> StorageEngine::queryExpr(
     const bool storedReferenceColumns=std::any_of(tbl.cols,tbl.cols+tbl.len,
         [](const Column& column){return column.generatedKind!='v' &&
             stored_regtype_detail::columnType(column.dataType);});
-    if(options.owningRows || options.owningDeclarations || storedReferenceColumns)
+    if(options.owningRows || options.owningDeclarations || storedReferenceColumns ||
+       std::any_of(tbl.cols,tbl.cols+tbl.len,[](const Column& c){return c.generatedKind=='v';}))
         outputDatumMetadata=prepareDatumMetadataContext(dbname,tablename);
     PageAllocator* pa = getPageAllocator(dbname, tablename);
     std::vector<AggregateExpressionProjection> aggregateProjections;
@@ -40494,6 +40828,7 @@ std::vector<std::string> StorageEngine::queryExpr(
                 const auto typeHints = buildTypeHints(tbl);
                 std::set<std::string> nullColumns;
                 for (size_t i = 0; i < tbl.len; ++i) {
+                    if(tbl.cols[i].generatedKind=='v')continue;
                     bool columnIsNull = false;
                     const std::string value = extractColumnValue(
                         mr.second, tbl, i, dbname, true, &columnIsNull);
@@ -40523,14 +40858,17 @@ std::vector<std::string> StorageEngine::queryExpr(
                 if (!expression.empty()) {
                     const auto evaluated = ExprHelper::evalStringWithNulls(
                         expression, rowContext, nullColumns, typeHints,
-                        dbname, expr.sessionUser, this);
-                    valueIsNull = evaluated.ok ? evaluated.isNull : true;
+                        dbname, expr.sessionUser, this,{},false,nullptr,outputDatumMetadata.get());
+                    if(!evaluated.ok)throw DbError(evaluated.sqlState.empty()?"XX000":evaluated.sqlState,evaluated.error);
+                    valueIsNull = evaluated.isNull;
                 } else valueIsNull = true;
             }
         } else {
             for (size_t i = 0; i < tbl.len; ++i) {
                 if (tbl.cols[i].dataName != expr.colName) continue;
-                val = extractColumnValue(mr.second, tbl, i, dbname, true, &valueIsNull);
+                val = extractColumnValue(mr.second,tbl,i,dbname,true,&valueIsNull,
+                    tbl.cols[i].generatedKind=='v'?owningCell:nullptr,
+                    outputDatumMetadata?outputDatumMetadata->generatedSource:GeneratedRelationPtr{});
                 std::optional<ExprValue> storedReference;
                 if(tbl.cols[i].generatedKind!='v' &&
                    stored_regtype_detail::columnType(tbl.cols[i].dataType)) {
@@ -40554,7 +40892,7 @@ std::vector<std::string> StorageEngine::queryExpr(
                     // This is the original raw physical cell, not a display-row
                     // parse. Complex payloads absent in storage stay absent;
                     // this bridge never invents record/array/OID structure.
-                    owningCell->emplace(ExprHelper::canonicalResultTypeName(
+                    if(!owningCell->has_value())owningCell->emplace(ExprHelper::canonicalResultTypeName(
                         tbl.cols[i].dataType+(tbl.cols[i].isArray?"[]":"")),val,valueIsNull);
                     if(storedReference)owningCell->value()=std::move(*storedReference);
                     owningCell->value().collation=tbl.cols[i].collation;

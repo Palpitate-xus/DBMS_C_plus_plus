@@ -19,6 +19,7 @@
 #include "catalog/type_registry.h"
 #include "common/DatumType.h"
 #include "expression/BuiltinRegistryView.h"
+#include "expression/GeneratedColumn.h"
 #include <ctime>
 #include <functional>
 #include <cstdint>
@@ -105,6 +106,14 @@ public:
         boundColumns_[{sourceOrdinal, columnOrdinal}] = std::move(cell);
     }
     const ExprValue& boundColumn(size_t sourceOrdinal, size_t columnOrdinal) const;
+    void setGeneratedBound(size_t source,size_t column,GeneratedReadPtr read,bool present);
+    void setGeneratedNamed(const std::string& key,GeneratedReadPtr read,bool present);
+    const GeneratedInputState::Input* generatedBound(size_t source,size_t column) const;
+    const GeneratedInputState::Input* generatedNamed(const std::string& key) const;
+    bool hasGeneratedInputs() const {return bool(generatedInputs_);}
+    void copyGeneratedSource(const RowContext& source,size_t ordinal);
+    void clearGeneratedSource(size_t ordinal);
+
 
 private:
     // Private executor spill codec observes owning value snapshots only;
@@ -114,6 +123,7 @@ private:
     std::map<std::string, ExprValue> values_;
     std::vector<ExprValue> parameters_;
     std::map<std::pair<size_t, size_t>, ExprValue> boundColumns_;
+    std::shared_ptr<const GeneratedInputState> generatedInputs_;
     static std::string normalize(const std::string& s);
 };
 
@@ -135,6 +145,12 @@ public:
     ExprValue eval(const ExprPtr& expr, const RowContext& ctx) const {
         return expr ? eval(expr.get(), ctx) : ExprValue{};
     }
+
+    ExprValue readBoundColumn(size_t source,size_t column,const RowContext&) const;
+    ExprValue readNamedColumn(const std::string&,const RowContext&) const;
+    ExprValue evaluateGenerated(const GeneratedInputState::Input&,const RowContext&) const;
+    ExprValue assignGenerated(const Expr* actualExpression,const RowContext&,
+        const ExprValue&,const GeneratedColumnProgram&) const;
 
     // Analyze collation-bearing result arms without executing the expression.
     // Conflicting explicit collations raise SQLSTATE 42P21 even for zero rows.
@@ -195,14 +211,16 @@ public:
     }
 
 private:
-    std::map<std::string, ScalarFunction, std::less<>> functions_;
-    std::map<std::string, char, std::less<>> volatility_;
+    mutable std::map<std::string, ScalarFunction, std::less<>> functions_;
+    mutable std::map<std::string, char, std::less<>> volatility_;
     std::string currentDB_;
-    StorageEngine* sqlValueEngine_ = nullptr;
+    mutable StorageEngine* sqlValueEngine_ = nullptr;
     std::map<FunctionCallExpr::SqlValue,ScalarFunction> sqlTimeValues_;
     ExprValue evalSqlValue(const FunctionCallExpr*,const RowContext&) const;
     ScalarSubqueryExecutor scalarSubqueryExecutor_;
     QuantifiedExecutor quantifiedExecutor_;
+    struct GeneratedEvaluationState;
+    mutable std::shared_ptr<GeneratedEvaluationState> generatedCompiled_; // metadata only, default null
 
     // Shared callbacks never capture an evaluator/clock/query. Actual instance
     // callbacks and caller overrides remain in the original owning maps above.

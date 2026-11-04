@@ -2253,6 +2253,54 @@ static bool executeSchemaPhysicalDropPlan(
 static bool catalogTableStorageName(const CatalogManager& catalog,
     const PgClassRow& relation, std::string& storageName, std::string& error);
 
+static bool generatedVirtualName(const TableSchema& table,const std::string& name) {
+    for(size_t i=0;i<table.len;++i)if(table.cols[i].dataName==name)return table.cols[i].generatedKind=='v';
+    return false;
+}
+static bool generatedVirtualReference(const Expr* expression,const TableSchema& table) {
+    if(!expression || expression->preparedSubquery)return false;
+    if(const auto* column=dynamic_cast<const ColumnRefExpr*>(expression)) {
+        const auto name=[](const std::string& spelling) {
+            if(spelling.size()>=2 && spelling.front()=='"' && spelling.back()=='"') {
+                std::string decoded;for(size_t i=1;i+1<spelling.size();++i) {
+                    decoded+=spelling[i];if(spelling[i]=='"' && i+2<spelling.size() && spelling[i+1]=='"')++i;
+                }return decoded;
+            }return SQLParser::toLower(spelling);
+        };
+        const auto actual=CatalogService::logicalName(table.tablename);
+        if(!column->table.empty() && name(column->table)!=actual.name)return false;
+        if(!column->schema.empty() && name(column->schema)!=(actual.schema.empty()?"public":actual.schema))return false;
+        return generatedVirtualName(table,name(column->column));
+    }
+    if(const auto* node=dynamic_cast<const BinaryOpExpr*>(expression))return generatedVirtualReference(node->left.get(),table) ||
+        ((node->op!="::" && node->op!="COLLATE") && generatedVirtualReference(node->right.get(),table));
+    if(const auto* node=dynamic_cast<const UnaryOpExpr*>(expression))return generatedVirtualReference(node->operand.get(),table);
+    if(const auto* node=dynamic_cast<const CastExpr*>(expression))return generatedVirtualReference(node->operand.get(),table);
+    if(const auto* node=dynamic_cast<const CaseExpr*>(expression)) {
+        if(generatedVirtualReference(node->switchExpr.get(),table) || generatedVirtualReference(node->elseExpr.get(),table))return true;
+        for(const auto& arm:node->whenClauses)if(generatedVirtualReference(arm.first.get(),table) || generatedVirtualReference(arm.second.get(),table))return true;
+    } else if(const auto* node=dynamic_cast<const FunctionCallExpr*>(expression)) {
+        for(size_t i=0;i<node->args.size();++i) {
+            if(i==0 && node->schema.empty() && SQLParser::toLower(node->funcName)=="extract")
+                if(const auto* field=dynamic_cast<const ColumnRefExpr*>(node->args[i].get());field && field->schema.empty() && field->table.empty())continue;
+            if(generatedVirtualReference(node->args[i].get(),table))return true;
+        }
+        for(const auto& argument:node->namedArgs)if(generatedVirtualReference(argument.value.get(),table))return true;
+        if(generatedVirtualReference(node->filter.get(),table))return true;
+        for(const auto& key:node->aggregateOrderKeys)if(generatedVirtualReference(key.expr.get(),table))return true;
+    } else if(const auto* node=dynamic_cast<const ArrayExpr*>(expression)) {
+        for(const auto& value:node->elements)if(generatedVirtualReference(value.get(),table))return true;
+    } else if(const auto* node=dynamic_cast<const RowExpr*>(expression)) {
+        for(const auto& value:node->elements)if(generatedVirtualReference(value.get(),table))return true;
+    } else if(const auto* node=dynamic_cast<const QuantifiedComparisonExpr*>(expression))return
+        generatedVirtualReference(node->left.get(),table) || generatedVirtualReference(node->right.get(),table);
+    return false;
+}
+static void rejectVirtualKey(const TableSchema& table,const std::vector<std::string>& columns,const char* role) {
+    for(const auto& name:columns)if(generatedVirtualName(table,name))
+        throw DbError("0A000",std::string(role)+" on virtual generated columns are not supported");
+}
+
 bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
     if (!stmt) return true;
     if (!checkDB(s)) return true;
@@ -3069,6 +3117,15 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
             case AlterTableStmt::Action::AddConstraint: {
                 const auto& tc = sub.constraint;
                 const std::string type = toLower(tc.type);
+                if(type=="primary key" || type=="unique" || type=="foreign key") {
+                    const auto actual=g_engine.getTableSchema(s.currentDB,tableName);
+                    rejectVirtualKey(actual,tc.columns,type=="foreign key"?"foreign keys":"indexes");
+                    if(type=="foreign key") {
+                        const auto referenced=resolveTableName(s,tc.refTable);
+                        if(g_engine.tableExists(s.currentDB,referenced))
+                            rejectVirtualKey(g_engine.getTableSchema(s.currentDB,referenced),tc.refColumns,"foreign keys");
+                    }
+                }
                 std::string constraintName = tc.name;
                 if (constraintName.empty()) {
                     std::string suffix = tc.columns.empty() ? "constraint" : tc.columns.front();
@@ -6227,6 +6284,10 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
         else if (pt == "hash") tbl.partitionType = TableSchema::PartitionType::Hash;
     }
 
+    for(size_t i=0;i<tbl.len;++i)if(tbl.cols[i].generatedKind=='v' &&
+        (tbl.cols[i].isPrimaryKey || tbl.cols[i].isUnique))
+        throw DbError("0A000","indexes on virtual generated columns are not supported");
+
     // Inline PRIMARY KEY declarations and a copied key each already define
     // the table's one permitted primary key.  Without composite index metadata,
     // multiple inline flags represent multiple declarations rather than one
@@ -6303,6 +6364,7 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
                 }
                 primaryColumns.push_back(columnIndex);
             }
+            rejectVirtualKey(tbl,tc.columns,"indexes");
             tbl.pkColIndices = std::move(primaryColumns);
             for (const size_t columnIndex : tbl.pkColIndices) {
                 tbl.cols[columnIndex].isPrimaryKey = true;
@@ -6337,9 +6399,11 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
                 }
                 idxs.push_back(columnIndex);
             }
+            rejectVirtualKey(tbl,tc.columns,"indexes");
             tbl.uniqueConstraints.push_back(std::move(idxs));
             tbl.uniqueConstraintNames.push_back(tc.name);
         } else if (t == "foreign key") {
+            rejectVirtualKey(tbl,tc.columns,"foreign keys");
             ForeignKey fk = tableConstraintToForeignKey(tc);
             // Store the relation selected by the creation-time search_path.
             // Re-resolving an unqualified name during a later DROP or DML
@@ -7905,6 +7969,14 @@ bool DdlExecutor::executeCreateIndex(const CreateIndexStmt* stmt, Session& s) {
         return true;
     }
 
+    const auto generatedIndexTarget=g_engine.getTableSchema(s.currentDB,tname);
+    for(const auto& key:stmt->columns)
+        if(generatedVirtualName(generatedIndexTarget,key.column) ||
+           generatedVirtualReference(key.expr.get(),generatedIndexTarget))
+            throw DbError("0A000","indexes on virtual generated columns are not supported");
+    rejectVirtualKey(generatedIndexTarget,stmt->includeCols,"indexes");
+    if(generatedVirtualReference(stmt->whereClause.get(),generatedIndexTarget))
+        throw DbError("0A000","indexes on virtual generated columns are not supported");
     std::string whereCondition = stmt->whereClause ? stmt->whereClause->toString() : "";
     std::vector<std::string> includeCols = stmt->includeCols;
 

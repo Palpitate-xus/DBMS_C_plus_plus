@@ -1,5 +1,6 @@
 #pragma once
 #include "common/DatumType.h"
+#include "expression/GeneratedColumn.h"
 #include <functional>
 #include <map>
 #include <set>
@@ -17,6 +18,7 @@ struct DatumMetadataContext {
     // Real durable source input only. Virtual/generated expression displays
     // must arrive through their actual owning-datum receiver instead.
     std::set<std::string> storedColumns;
+    GeneratedRelationPtr generatedSource; // real physical schema; no runtime row
 };
 using DatumMetadataContextPtr = std::shared_ptr<const DatumMetadataContext>;
 } // namespace dbms
