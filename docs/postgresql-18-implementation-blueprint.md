@@ -1,5 +1,18 @@
 # DBMS_C_plus_plus 对标 PostgreSQL 18.6：逐项完整实施蓝图
 
+<!-- CURRENT_BACKUP_ANALYZE_20261104 -->
+
+## 备份摘要与 virtual 列统计（2026-11-04，P7-C1）
+
+本批 P7-C1 `724c1147…` 已将备份创建端SHA块处理接入真实physicalBackup，并在ANALYZE的收集和结果生成两处排除virtual列；同页位图继续使用真实物理ordinal。原校验、恢复、共享SHA、安全认证及用户暂缓代码保持字节不变。
+
+新增永久20+864控制及原相关12入口通过，四组既有探针目标交叉恢复通过；首轮旧→旧在较早全局状态目标的恢复探针失败仍是普通开放缺口，不新增deferred。PG34还有17项严格差异。下一步统计表应补真实当前数据库的typed pg_stats行源、namespace/attribute身份，不能只删除原failclosed守卫或把八列文本renderer当PG视图。
+
+完整备份wall p50为737.771→587.376→677.477ms，较两次旧版低20.38%/13.30%；四类DDLwall p50为2快/2慢，ALTER与TRUNCATE慢于两次旧版。完整35操作/36查询和默认提升未验收。其他已列明的查询需求、类型/来源及语法缺口继续开放。 见[证据与后续边界](performance-report-2026-10-30.md)。
+
+原273项仍为22 complete /166 partial /70 unverified /15 deferred_by_user；Goal active。下方按批次保留当时记录，当前状态以本节为准。
+
+
 <!-- CURRENT_GENERATED_DEMAND_20261104 -->
 
 ## 虚拟生成列读值需求与完整 SQL 实测（2026-11-04）

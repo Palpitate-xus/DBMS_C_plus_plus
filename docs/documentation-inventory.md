@@ -1,5 +1,16 @@
 # 全部文档检查清单
 
+<!-- CURRENT_BACKUP_ANALYZE_20261104 -->
+
+## 备份摘要与 virtual 列统计（2026-11-04，P7-C1）
+
+本批更新8份当前状态Markdown及打包说明，共9份既有Markdown，新增[一份机器归档](benchmarks/backup-analyze-20261104.json)，未新增Markdown路径。原754个Markdown路径、725保护记录、六份旧归档、原273项及257条历史原文保持；新增partial后历史258条。
+
+现2336测试源文件，原2334字节不变，新增两个永久入口884控制通过。源码P7-C1 `724c1147…`，默认425保持；性能、17项SQL差异及首轮旧版恢复缺口统一见[当前报告](performance-report-2026-10-30.md)。结构/链接检查仅验证文档结构。
+
+原273项仍为22 complete /166 partial /70 unverified /15 deferred_by_user；Goal active。下方按批次保留当时记录，当前状态以本节为准。
+
+
 <!-- CURRENT_GENERATED_DEMAND_20261104 -->
 
 ## 虚拟生成列读值需求与完整 SQL 实测（2026-11-04）

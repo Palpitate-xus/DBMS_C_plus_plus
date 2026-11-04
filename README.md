@@ -1,5 +1,16 @@
 # DBMS C++
 
+<!-- CURRENT_BACKUP_ANALYZE_20261104 -->
+
+## 备份摘要与 virtual 列统计（2026-11-04，P7-C1）
+
+本批 P7-C1（正常程序 `724c1147…`）优化物理备份清单的创建端摘要，并按 PostgreSQL 18.6 排除 virtual 生成列统计；仍使用 C++17。新增两个永久测试共884项通过，相关12个原有入口通过。
+
+完整备份：wall p50为737.771→587.376→677.477ms，较两次旧版低20.38%/13.30%；四类正常 SQL DDL：wall p50为2快/2慢，ALTER与TRUNCATE慢于两次旧版。完整35操作/36查询未对本批重跑，默认程序仍为425，现有服务未重启。SQL对照34项仍有17项差异，另保留一个旧版恢复缺口。详见[性能与范围报告](docs/performance-report-2026-10-30.md)和[机器归档](docs/benchmarks/backup-analyze-20261104.json)。
+
+原273项仍为22 complete /166 partial /70 unverified /15 deferred_by_user；Goal active。下方按批次保留当时记录，当前状态以本节为准。
+
+
 <!-- CURRENT_GENERATED_DEMAND_20261104 -->
 
 ## 虚拟生成列读值需求与完整 SQL 实测（2026-11-04）

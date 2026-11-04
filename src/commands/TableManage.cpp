@@ -20,6 +20,7 @@
 #include "common/QueryHostProvider.h"
 #include "process/OutputCapture.h"
 #include "common/sha256.h"
+#include "commands/BackupManifestCreationSha256.h"
 #include "utils/plpgsql.h"
 #include "utils/interval.h"
 #include "utils/interval_type.h"
@@ -6857,8 +6858,6 @@ bool StorageEngine::analyzeTable(const std::string& dbname,
     std::map<std::string, std::vector<std::string>> allVals;
     std::map<std::string, size_t> nullCounts;
     bool capturePhysicalNulls = tbl.formatVersion == DATA_FILE_FORMAT_VERSION;
-    for (size_t column = 0; column < tbl.len; ++column)
-        if (tbl.cols[column].generatedKind == 'v') capturePhysicalNulls = false;
 
     if (!forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId, const char* data, size_t len) {
         stats.rowCount++;
@@ -6867,6 +6866,7 @@ bool StorageEngine::analyzeTable(const std::string& dbname,
         std::optional<BufferedNullRowBinding> capturedBinding;
         bool bitmapAttempted = false;
         for (size_t i = 0; i < tbl.len; ++i) {
+            if (tbl.cols[i].generatedKind == 'v') continue;
             const std::string& cname = tbl.cols[i].dataName;
             if (g_scanHeapTuple && dbms::isNull(g_scanHeapTuple, static_cast<int>(i))) {
                 ++nullCounts[cname];
@@ -6914,6 +6914,7 @@ bool StorageEngine::analyzeTable(const std::string& dbname,
     const size_t HIST_BUCKETS = 10;
     const size_t MCV_TOP_N = 10;
     for (size_t i = 0; i < tbl.len; ++i) {
+        if (tbl.cols[i].generatedKind == 'v') continue;
         const std::string& cname = tbl.cols[i].dataName;
         StorageEngine::ColumnStats cs;
         cs.nullCount = nullCounts[cname];
@@ -47540,11 +47541,74 @@ static bool collectPhysicalBackupEntries(
     return !error;
 }
 
+static bool digestManifestCreationFile(const std::filesystem::path& path,
+                             PhysicalBackupFileEntry& entry) {
+    std::error_code error;
+    if (!std::filesystem::is_regular_file(path, error) || error) return false;
+    entry.size = std::filesystem::file_size(path, error);
+    if (error) return false;
+
+    std::ifstream input(path, std::ios::binary);
+    if (!input) return false;
+    dbms::backup_manifest_detail::ManifestCreationSha256 digest;
+    std::array<char, 64 * 1024> buffer{};
+    while (input) {
+        input.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+        const auto count = input.gcount();
+        if (count > 0) {
+            digest.append(buffer.data(), static_cast<size_t>(count));
+        }
+    }
+    if (!input.eof()) return false;
+    entry.digest = digest.finishHex();
+    return true;
+}
+
+static bool collectManifestCreationEntries(
+    const std::filesystem::path& root,
+    PhysicalBackupDirectories& directories,
+    PhysicalBackupFiles& files) {
+    directories.clear();
+    files.clear();
+    std::error_code error;
+    if (!std::filesystem::is_directory(root, error) || error) return false;
+
+    std::filesystem::recursive_directory_iterator iterator(root, error);
+    const std::filesystem::recursive_directory_iterator end;
+    if (error) return false;
+    for (; iterator != end; iterator.increment(error)) {
+        if (error) return false;
+        const auto& entry = *iterator;
+        if (entry.is_symlink(error) || error) return false;
+        const auto relative =
+            std::filesystem::relative(entry.path(), root, error);
+        if (error) return false;
+        const std::string name = relative.generic_string();
+        if (name == kPhysicalBackupMarker ||
+            name == kPhysicalBackupManifest) {
+            if (entry.is_directory(error) || error) return false;
+            continue;
+        }
+        if (!validBackupRelativePath(name)) return false;
+        if (entry.is_directory(error) && !error) {
+            if (!directories.insert(name).second) return false;
+            continue;
+        }
+        if (error || !entry.is_regular_file(error) || error) return false;
+        PhysicalBackupFileEntry file;
+        if (!digestManifestCreationFile(entry.path(), file) ||
+            !files.emplace(name, std::move(file)).second) {
+            return false;
+        }
+    }
+    return !error;
+}
+
 static bool writePhysicalBackupManifest(const std::filesystem::path& root,
                                         const std::string& database) {
     PhysicalBackupDirectories directories;
     PhysicalBackupFiles files;
-    if (!collectPhysicalBackupEntries(root, directories, files)) return false;
+    if (!collectManifestCreationEntries(root, directories, files)) return false;
 
     std::ostringstream output;
     output << "DBMS_PHYSICAL_BACKUP_MANIFEST_V2\n";

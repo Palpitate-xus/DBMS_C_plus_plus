@@ -2,6 +2,34 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-04 backup creation SHA and virtual ANALYZE statistics",
+      "gap_ids": [
+        "OPT-04",
+        "BACKUP-01",
+        "BACKUP-02"
+      ],
+      "status": "partial",
+      "evidence": [
+        "docs/performance-report-2026-10-30.md",
+        "docs/test-report.md",
+        "docs/postgresql-comparison.md",
+        "docs/postgresql-18-implementation-blueprint.md",
+        "docs/benchmarks/backup-analyze-20261104.json"
+      ],
+      "tests": [
+        "tests/analyze_virtual_statistics_test.cpp",
+        "tests/backup_manifest_creation_sha256_test.cpp"
+      ],
+      "verification": {
+        "source": "Parent d748ebab; P7-C1 724c1147/source230/header160; only TM rebuilt +61 verified reuse with fresh62 origin. Original159 publicheaders, old validation/restore/sharedSHA/deferred code exact. Default425 held/master/Palpitate-xus/no branch or push/restart.",
+        "functional": "Permanent20: C8 14/6 ->C1 20/0. PermanentSHA864/0 fixed independent144x6, productionheader same864/0. Originalrelated12/0. OriginalPG34 preserved; C1 strict17match17diff/0service/normal0. Actual persisted ordinary/STORED stats excludevirtual.",
+        "backup": "Two writers full manifests/payloads exact. First old->old lower-global-horizon target physicalRestoretrue/primary1000pass/probecountfail remains open. Separate existingprobe target4crossrestores actual1000+4/RID/NULL all0. Original preflight/ownership/reducer mistakes preserved; no database sample retry.",
+        "public_API": "C8/C1/C8 3samples each/warm0/all9normal0/18000rows72000cells/fullmanifest valid. wallp50 737.771/587.376/677.477ms (-20.38%/-13.30%); processCPU378.942/287.206/363.727ms; old14690.372ms walloutlier retained.",
+        "normal_Main": "Original fourDDL 3rounds2samples/24actions perlabel/72total/3normalcontexts. wall2fast2slow; ALTER+8.16%/+2.97%; TRUNCATE+17.62%/+20.82%; CREATEafteronly-.31%. All4serverCPUmedianslower; IO/RSS snapshots notpeak retained; no whole35/36 orPGspeed/defaultpromotion.",
+        "scope": "Original273 statuses unchanged22/166/70/15; original257historyraw/725protected/6archives/754MDpaths/2334tests bytes retained; now258history/2336tests/884newcontrols. Goalactive."
+      }
+    },
+    {
       "issue": "2026-11-04 virtual generated demand, declared assignment and normal SQL100 costs",
       "gap_ids": [
         "QRY-08",

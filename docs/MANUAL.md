@@ -1,5 +1,16 @@
 # DBMS 使用手册
 
+<!-- CURRENT_BACKUP_ANALYZE_20261104 -->
+
+## 备份摘要与 virtual 列统计（2026-11-04，P7-C1）
+
+当前源码 P7-C1 `724c1147…` 的无列列表 `ANALYZE 表名` 统计普通列和STORED生成列，跳过virtual生成列。未选择的溢出或除零virtual表达式仍不应由统计操作求值；真正读取该列仍返回相应错误。ANALYZE列列表及qualified pg_catalog.pg_stats入口尚有差异，详见[测试与性能范围](performance-report-2026-10-30.md)。
+
+物理备份仍使用本项目原V2清单与V3标记，创建端新摘要与旧校验器逐文件兼容；这不是PostgreSQL备份格式。已有较早目标全局状态的恢复探针缺口仍开放，请按[完整报告](performance-report-2026-10-30.md)所列范围验证。二进制分发同时附带[第三方声明](../THIRD_PARTY_NOTICES)，CMake会安装到share/doc/DBMS_C_plus_plus。默认程序仍是425，需构建当前源码获得本批改动。
+
+原273项仍为22 complete /166 partial /70 unverified /15 deferred_by_user；Goal active。下方按批次保留当时记录，当前状态以本节为准。
+
+
 <!-- CURRENT_GENERATED_DEMAND_20261104 -->
 
 ## 虚拟生成列读值需求与完整 SQL 实测（2026-11-04）

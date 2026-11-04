@@ -1,5 +1,16 @@
 # 与 PostgreSQL 18 的功能和性能差距
 
+<!-- CURRENT_BACKUP_ANALYZE_20261104 -->
+
+## 备份摘要与 virtual 列统计（2026-11-04，P7-C1）
+
+当前 P7-C1 `724c1147…` 按PG18.6跳过virtual列统计，普通/STORED与真实NULL/TOAST控制通过。原生20控制修复6项失败，SQL34仍17项差异，qualified pg_stats视图、部分语法与协议帧尚待补齐；原273项没有功能族关闭。
+
+本批只有内部C8/C1/C8速度对照：完整备份wall p50为737.771→587.376→677.477ms，较两次旧版低20.38%/13.30%；四DDLwall p50为2快/2慢，ALTER与TRUNCATE慢于两次旧版。没有新的PostgreSQL速度采样或整库倍率。原有旧→旧恢复探针失败及独立四组成功对照分别保留，完整35操作/36查询未验收，默认425保持。[完整数据与边界](performance-report-2026-10-30.md)。
+
+原273项仍为22 complete /166 partial /70 unverified /15 deferred_by_user；Goal active。下方按批次保留当时记录，当前状态以本节为准。
+
+
 <!-- CURRENT_GENERATED_DEMAND_20261104 -->
 
 ## 虚拟生成列读值需求与完整 SQL 实测（2026-11-04）

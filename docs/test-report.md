@@ -1,5 +1,18 @@
 # DBMS 功能测试报告
 
+<!-- CURRENT_BACKUP_ANALYZE_20261104 -->
+
+## 备份摘要与 virtual 列统计（2026-11-04，P7-C1）
+
+本批 P7-C1 `724c1147…`，0.2.0 / C++17 / GCC13.3 / O2 / ICU74.2 / zlib1.3 / TLS stub。ANALYZE永久20控制由旧14通过/6失败变为20/0；摘要永久864/0，独立固定预期全部保留；相关12个原有入口全部通过。原2334测试源字节保持，现2336；顶层1087 CPP（排除桩1086），另5个子目录CPP，未全仓重跑。
+
+PG18.6原34参考全部保留，两处最初帧顺序预测错误亦保留；当前正常Main同34为17匹配/17差异，零服务故障、正常退出。差异为11个qualified pg_stats入口、REINDEX INDEX与ANALYZE列列表各1、错误帧2、DELETE空描述帧2。实际停止后的.stats证实普通/STORED统计存在、virtual统计缺席；不代替缺失的SQL视图。
+
+两代创建备份清单与所有载荷摘要完全一致。首轮旧→旧恢复探针行数失败保留；独立既有探针目标的四组交叉恢复均通过完整1000+4行/真实RID/NULL。完整API9与正常SQL DDL72均成功，wall p50为2快/2慢，ALTER与TRUNCATE慢于两次旧版。预检和所有原始失败见[完整报告](performance-report-2026-10-30.md)及[机器归档](benchmarks/backup-analyze-20261104.json)。
+
+原273项仍为22 complete /166 partial /70 unverified /15 deferred_by_user；Goal active。下方按批次保留当时记录，当前状态以本节为准。
+
+
 <!-- CURRENT_GENERATED_DEMAND_20261104 -->
 
 ## 虚拟生成列读值需求与完整 SQL 实测（2026-11-04）

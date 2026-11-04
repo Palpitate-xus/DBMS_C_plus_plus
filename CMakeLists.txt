@@ -112,3 +112,4 @@ endif()
 
 # 安装目标
 install(TARGETS dbms_main DESTINATION bin)
+install(FILES THIRD_PARTY_NOTICES DESTINATION share/doc/DBMS_C_plus_plus)
