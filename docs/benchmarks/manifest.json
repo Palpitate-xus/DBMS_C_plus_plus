@@ -173,8 +173,18 @@
       "sha256": "efdd42532b790f7ae25676fd2826e18f1c9af21c5cb418ed00d2aeeb34f2b1cc",
       "encoding": "gzip",
       "roundtrip_bytes_exact": true
+    },
+    {
+      "original_path": "docs/benchmarks/typed-planner-statistics-20261105.json",
+      "original_bytes": 54640903,
+      "original_sha256": "14cfa3cd1c118d7cff59672bf5170aca36ef6cad1a9bc50259ba3b15078f7b6e",
+      "path": "docs/benchmarks/typed-planner-statistics-20261105.json.gz",
+      "bytes": 5375956,
+      "sha256": "f43131886e70718099131f0c2cf6dc6c2639960654a2e234c0fb634f79890a20",
+      "encoding": "gzip",
+      "roundtrip_bytes_exact": true
     }
   ],
-  "total_original_bytes": 328883732,
-  "total_bytes": 47040673
+  "total_original_bytes": 383524635,
+  "total_bytes": 52416629
 }

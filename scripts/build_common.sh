@@ -696,6 +696,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/analyzed_scalar_auto_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/equality_scan_cost_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/like_prefix_scan_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/analyzed_planner_statistics_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/pg_stats_source_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/planner_relation_metadata_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/test_registration_inventory_test.py)

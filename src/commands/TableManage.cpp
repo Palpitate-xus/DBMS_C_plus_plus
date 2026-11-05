@@ -79,6 +79,7 @@
 #include "storage/HeapWalIdentity.h"
 #include "commands/RelationNameCodec.h"
 #include "commands/AnalyzedStatisticsCapture.h"
+#include "catalog/AnalyzedStatisticsReadCache.h"
 #include "HashIndex.h"
 #include "BloomIndex.h"
 #include "SPGiSTIndex.h"
@@ -6874,6 +6875,16 @@ private:
 bool StorageEngine::analyzeTable(const std::string& dbname,
                                  const std::string& tablename) {
     if (!tableExists(dbname, tablename)) return false;
+    // ANALYZE publishes physical metadata too. In an open transaction use
+    // the existing exclusive DDL image owner, so foreign readers cannot
+    // consume uncommitted samples and ROLLBACK restores both statistics
+    // files. A row-only undo log cannot undo this file publication.
+    if (inTransaction()) {
+        if (transactionDatabase() != dbname) return false;
+        preserveTransactionBackupOnRollback(true);
+        if (!hasTransactionBackup()) return false;
+        restoreTransactionBackupBeforeRowUndo(true);
+    }
     TableSchema tbl = getTableSchema(dbname, tablename);
     analyzed_statistics::ScalarStatisticsCapture typedAnalysis(
         tbl, tablename, schemaPath(dbname, tablename),
@@ -7101,6 +7112,7 @@ bool StorageEngine::analyzeTable(const std::string& dbname,
             serialized << "|" << mcvToString(mv.second.mcv) << "\n";
         }
     }
+    markTransactionBackupDirty();
     if (!index_file::writeAtomically(spath, serialized.str())) return false;
     if (typedAnalysis.hasIdentity()) {
         const auto publication = analyzed_statistics::updateRelation(
@@ -33532,6 +33544,80 @@ std::vector<std::string> StorageEngine::queryInformationSchema(
     return result;
 }
 
+
+std::shared_ptr<const analyzed_statistics::Column> StorageEngine::getAnalyzedColumnStatistics(
+    const std::string& dbname, const std::string& table, const std::string& column) const {
+    const auto ownership = catalogReadOwnership(dbname);
+    if (!ownership.mayReadCurrentFiles) return {};
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
+    try {
+        if (!analyzedStatisticsReadCache_)
+            analyzedStatisticsReadCache_ = std::make_unique<analyzed_statistics::ReadCache>();
+        const auto snapshot = analyzedStatisticsReadCache_->snapshot(dbPath(dbname)/".analyzed_statistics");
+        if (!snapshot) return {};
+        auto logical = CatalogService::logicalName(table);
+        const auto* session = currentSession();
+        if (session) {
+            const auto prefix = tempTablePrefix(*session, "");
+            if (table.rfind(prefix, 0) == 0) {
+                logical.schema = sessionTempSchemaName(*session);
+                logical.name = table.substr(prefix.size());
+            }
+        }
+        const auto catalog = analyzedStatisticsReadCache_->catalog(dbPath(dbname),
+            !ownership.writeTransaction && !catalogService_->has(dbname),
+            [&] { return catalogService_->acquire(dbname); });
+        const auto space = catalog->getNamespaceByName(logical.schema.empty()?"public":logical.schema);
+        if (!space) return {};
+        const auto relation = catalog->getClassByName(logical.name, space->oid);
+        if (!relation || (relation->relkind != 'r' && relation->relkind != 'm') || relation->relrowsecurity)
+            return {};
+        const auto attribute = catalog->getAttribute(relation->oid, column);
+        if (!attribute || attribute->attisdropped || attribute->attnum <= 0 || attribute->attstattarget == 0)
+            return {};
+        const auto found = snapshot->columns.find({relation->oid, attribute->attnum, false});
+        if (found == snapshot->columns.end()) return {};
+        const auto& statistics = found->second;
+        // Only genuine builtin scalar declarations are currently consumed by
+        // these scan estimates. Domain, compound and extension roles retain
+        // their existing estimators instead of borrowing a basename's codec.
+        const auto declaration = catalog->getType(attribute->atttypid);
+        const auto& builtins = CatalogManager::builtinTypeRows();
+        if (!declaration || declaration->typnamespace != 11 || declaration->typtype != 'b' ||
+            std::none_of(builtins.begin(), builtins.end(), [&](const auto& row) {
+                return row.oid == declaration->oid && row.typnamespace == 11 &&
+                    row.typname == declaration->typname && row.typtype == declaration->typtype;
+            }) || !statistics.attributeType || statistics.attributeType->kind != DatumKind::Scalar ||
+            statistics.attributeType->actualOid != attribute->atttypid ||
+            statistics.attributeType->codecOid != attribute->atttypid ||
+            statistics.attributeType->effectiveTypeMod != attribute->atttypmod ||
+            statistics.collation != attribute->attcollation ||
+            statistics.target != (attribute->attstattarget < 0 ? 100 : attribute->attstattarget))
+            return {};
+        const auto operators = analyzed_statistics::capture_detail::scalarOperators(attribute->atttypid);
+        if (!operators.first) return {};
+        for (const auto& slot : statistics.slots) {
+            if ((slot.kind == analyzed_statistics::Kind::MostCommon && slot.comparisonOperator != operators.first) ||
+                (slot.kind == analyzed_statistics::Kind::Histogram && slot.comparisonOperator != operators.second) ||
+                slot.collation != statistics.collation) return {};
+        }
+        if (session && !sessionIsAdmin(*session) && !hasColumnPermission(dbname, table,
+                effectiveSessionRole(*session), TablePrivilege::Select, {column})) return {};
+        const auto schema = getTableSchema(dbname, table);
+        if (!schema.len || schema.partitionType != TableSchema::PartitionType::None ||
+            schema.physicalRelationId != statistics.physicalRelation) return {};
+        const auto digest = analyzedStatisticsReadCache_->schemaDigest(schemaPath(dbname, table));
+        if (!digest || *digest != statistics.schemaGeneration) return {};
+        return std::shared_ptr<const analyzed_statistics::Column>(snapshot, &statistics);
+    } catch (const DbError& error) {
+        // Optional cost evidence cannot turn corrupt/missing statistics into
+        // a new SQL input-analysis phase. Cancellation and other errors keep
+        // their existing owners. pg_stats still reports its strict read error.
+        if (error.sqlState() == "58030" || error.sqlState() == "XX001" ||
+            error.sqlState() == "54000" || error.sqlState() == "55P03") return {};
+        throw;
+    }
+}
 
 // Full database-owned pg_stats source. The separate eight-column native
 // compatibility renderer below retains its existing public API and storage.

@@ -2,6 +2,41 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-05 owned typed scalar ANALYZE scan costing, cache identity and transactional analysis rollback",
+      "gap_ids": [
+        "OPT-04",
+        "OPT-16"
+      ],
+      "status": "partial",
+      "evidence": [
+        "src/commands/TableManage.cpp",
+        "src/commands/TableManage.h",
+        "src/executor/ExecutionPlan.cpp",
+        "src/catalog/AnalyzedStatisticsReadCache.h",
+        "src/executor/AnalyzedSelectivity.h",
+        "docs/performance-report-2026-10-30.md",
+        "docs/benchmarks/typed-planner-statistics-20261105.json.gz"
+      ],
+      "tests": [
+        "tests/analyzed_planner_statistics_protocol_e2e_test.py",
+        "tests/analyzed_planner_statistics_test.cpp",
+        "tests/analyzed_selectivity_test.cpp",
+        "tests/analyzed_statistics_read_cache_test.cpp"
+      ],
+      "verification": {
+        "implementation": "真实typed MCV频率/剩余不同值/NULL及残余直方图用于普通等值和LIKE密度扫描成本。拥有的列快照与物理/catalog身份校验；实际文件帧代次/校验值参与缓存；事务内显式ANALYZE使用已有独占DDL快照回滚两份文件。",
+        "correctness": "最终专项3292和独立cold 1454检查，48最终原生入口0；选择率8235/缓存2080各O2与scoped ASan/UBSan；新65协议15扫描、旧LIKE123/27，相关32旧协议29正常0及3父代完整相同严格失败；初次2自动回滚超时保留，后续原deadline固定旧/新/旧6次0；真实PG18.6共享33命令6732字段/NULL/OID/标签一致，1actualRows一致；7restore workers/2477检查/14完整流。",
+        "performance": "热点前缀 73.72%／73.25%；热点等值 51.25%／15.72%；低频前缀 58.53%／-8.58%；低频等值 44.30%／38.10%；不存在等值 24.66%／24.31%；主键控制 30.77%／29.00%；固定9正常服务进程，完整socket与活服务CPU，所有样本/尾部/负数保留，不是全部操作或PG速度。",
+        "preservation": "273fullobjects268oldhistories exact,new269partial;2361oldtests exact+4=>2365;248source177headers,754MD725protected,17oldgzip exact+1=>18;masterlocal,no push/default/service,Goalactive.",
+        "remaining": [
+          "Not full typed range/array/join/multicolumn/histogram or cold relation-population consumption. Existing legacy stats format remains incomplete for delimiters/newlines.",
+          "Transactional ANALYZE uses temporary whole-database DDL backup; not PostgreSQL statistics MVCC or a demonstrated transaction-maintenance speedup.",
+          "No retained/custom/generic/parameter planning, R291 Runtime/SQL publication failure, generic rollback or other user-deferred owner repair.",
+          "No whole-PG feature/AM/cost/performance equivalence, complete-suite pass or whole-engine sanitizer claim."
+        ]
+      }
+    },
+    {
       "issue": "2026-11-05 literal LIKE prefix physical reads, dense-prefix cost guard and GiST JSON/UTF8 correctness",
       "gap_ids": [
         "OPT-04",

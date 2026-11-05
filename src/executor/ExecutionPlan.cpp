@@ -3,6 +3,7 @@
 #include "expression/ArrayDatumInput.h"
 #include "executor/PreparedTableSource.h"
 #include "executor/EqualityStatistics.h"
+#include "executor/AnalyzedSelectivity.h"
 #include "executor/LikePrefix.h"
 #include "executor/SortSpill.h"
 #include "executor/BoundedSortRuns.h"
@@ -2129,38 +2130,47 @@ static std::optional<std::string> nativeLikePrefix(
 }
 
 // Do not turn a visibly dense prefix into random heap fetches. Existing
-// native ANALYZE MCVs and fully covered equidepth buckets provide evidence of
+// typed ANALYZE MCVs and fully covered equidepth buckets provide evidence of
 // density; straddling/unknown buckets contribute nothing to this guard, so a
 // rare prefix is not rejected just because the histogram is coarse. This is
 // a scan-cost guard, not PostgreSQL's full patternsel/correlation model.
 static bool densePrefixPrefersHeap(StorageEngine* engine, const std::string& database,
     const std::string& table, const std::string& column, const std::string& prefix) {
     size_t analyzedRows = 0;
-    if (!engine->tryGetTableRowCount(database, table, analyzedRows) || !analyzedRows)
-        return false;
-    const auto statistics = engine->getColumnStats(database, table, column);
-    double common = 0;
-    for (const auto& value : statistics.mcv)
-        if (value.first.compare(0,prefix.size(),prefix)==0) common += value.second;
-    double fraction = common / analyzedRows;
-    if (!statistics.histogram.empty()) {
-        size_t covered = 0;
-        for (const auto& bounds : statistics.histogram)
-            covered += bounds.first.compare(0,prefix.size(),prefix)==0 && bounds.second.compare(0,prefix.size(),prefix)==0;
-        const double nonnull = 1.0 - std::min(1.0,
-            static_cast<double>(statistics.nullCount) / analyzedRows);
-        fraction = std::max(fraction, nonnull * covered / statistics.histogram.size());
+    double analyzedPopulation = 0;
+    std::optional<double> fraction;
+    if (const auto typed = engine->getAnalyzedColumnStatistics(database, table, column)) {
+        fraction = planner_statistics::analyzedPrefixDensity(*typed, prefix);
+        if (fraction) analyzedPopulation = typed->totalRows;
+    }
+    if (!fraction) {
+        if (!engine->tryGetTableRowCount(database, table, analyzedRows) || !analyzedRows)
+            return false;
+        analyzedPopulation = analyzedRows;
+        const auto statistics = engine->getColumnStats(database, table, column);
+        double common = 0;
+        for (const auto& value : statistics.mcv)
+            if (value.first.compare(0,prefix.size(),prefix)==0) common += value.second;
+        fraction = common / analyzedRows;
+        if (!statistics.histogram.empty()) {
+            size_t covered = 0;
+            for (const auto& bounds : statistics.histogram)
+                covered += bounds.first.compare(0,prefix.size(),prefix)==0 && bounds.second.compare(0,prefix.size(),prefix)==0;
+            const double nonnull = 1.0 - std::min(1.0,
+                static_cast<double>(statistics.nullCount) / analyzedRows);
+            fraction = std::max(*fraction, nonnull * covered / statistics.histogram.size());
+        }
     }
     uint64_t runtimeRows = 0;
     const double rows = getRuntimeLiveRowEstimate(database, table, runtimeRows)
-        ? static_cast<double>(runtimeRows) : static_cast<double>(analyzedRows);
+        ? static_cast<double>(runtimeRows) : analyzedPopulation;
     const auto pages = engine->tableNumPages(database, table);
     if (!pages || !rows) return false;
     // Absent/truncated legacy slots are not evidence of a zero-cost probe.
     // Use the ordinary planner's one-row costing floor for unknown/empty
     // candidate estimates, while keeping the executor's true empty result.
     const double index = QueryPlanner::costScan("index_scan",
-        std::max(1.0, rows * std::min(1.0, fraction)), 0);
+        std::max(1.0, rows * std::min(1.0, *fraction)), 0);
     const double heap = QueryPlanner::costScan("seq_scan", rows, pages);
     return std::isfinite(index) && std::isfinite(heap) && index >= heap;
 }
@@ -8563,17 +8573,46 @@ static std::optional<double> analyzedEqualityFraction(
         });
 }
 
+static std::optional<double> analyzedEqualityFraction(
+    const Column& column, const analyzed_statistics::Column& statistics,
+    double populationRows, const std::string& probe) {
+    return planner_statistics::analyzedEqualityFraction(statistics, populationRows,
+        [&](const ExprValue& value) -> std::optional<bool> {
+            if (value.value == probe) return true;
+            try {
+                const auto truth = StorageEngine::compareValues(column, value.value, false, probe, false, "=");
+                if (truth == StorageEngine::PredicateTruth::Unknown) return {};
+                return truth == StorageEngine::PredicateTruth::True;
+            } catch (const DbError& error) {
+                if (error.sqlState().rfind("22", 0) == 0) return {};
+                throw;
+            }
+        });
+}
+
 static std::optional<size_t> chooseEqualityIndexCondition(
     StorageEngine* engine,const PlanContext& context,const TableSchema& table,
     const std::vector<size_t>& candidates) {
     if(candidates.empty())return {};
     const size_t fallback=candidates.front();
     size_t analyzedRows=0;
-    if(!engine->tryGetTableRowCount(context.dbname,context.tablename,analyzedRows) || !analyzedRows)
-        return fallback;
+    double analyzedPopulation=0;
+    std::map<std::string,std::shared_ptr<const analyzed_statistics::Column>> typed;
+    for (const auto position : candidates) {
+        const auto& name=context.conds[position].colName;
+        if (isSingleColumnPrimaryKey(table,name)) continue;
+        const auto entry=typed.emplace(name,nullptr);
+        if(entry.second)entry.first->second=engine->getAnalyzedColumnStatistics(context.dbname,context.tablename,name);
+        if(!analyzedPopulation && entry.first->second)analyzedPopulation=entry.first->second->totalRows;
+    }
+    if(!analyzedPopulation) {
+        if(!engine->tryGetTableRowCount(context.dbname,context.tablename,analyzedRows) || !analyzedRows)
+            return fallback;
+        analyzedPopulation=analyzedRows;
+    }
     uint64_t runtimeRows=0;
     const double rows=getRuntimeLiveRowEstimate(context.dbname,context.tablename,runtimeRows)
-        ?double(runtimeRows):double(analyzedRows);
+        ?double(runtimeRows):analyzedPopulation;
     // Local to this one plan: no cross-session/cache invalidation contract.
     std::map<std::string,StorageEngine::ColumnStats> statistics;
     std::optional<double> bestCost;
@@ -8588,12 +8627,19 @@ static std::optional<size_t> chooseEqualityIndexCondition(
         // match. Do not read/parse MCVs to rediscover that uniqueness on
         // every ordinary point lookup; still compare actual scan costs.
         if(!isSingleColumnPrimaryKey(table,condition.colName)) {
-            auto entry=statistics.find(condition.colName);
-            if(entry==statistics.end())entry=statistics.emplace(condition.colName,
-                engine->getColumnStats(context.dbname,context.tablename,condition.colName)).first;
             const auto probe=condition.referenceInputOid
                 ?std::to_string(*condition.referenceInputOid):condition.value;
-            const auto fraction=analyzedEqualityFraction(*column,entry->second,analyzedRows,probe);
+            std::optional<double> fraction;
+            if(const auto evidence=typed.at(condition.colName))
+                fraction=analyzedEqualityFraction(*column,*evidence,rows,probe);
+            if(!fraction) {
+                if(!analyzedRows && (!engine->tryGetTableRowCount(context.dbname,context.tablename,analyzedRows) || !analyzedRows))
+                    return fallback;
+                auto entry=statistics.find(condition.colName);
+                if(entry==statistics.end())entry=statistics.emplace(condition.colName,
+                    engine->getColumnStats(context.dbname,context.tablename,condition.colName)).first;
+                fraction=analyzedEqualityFraction(*column,entry->second,analyzedRows,probe);
+            }
             if(!fraction)return fallback;
             matches=rows>0?std::max(1.0,rows**fraction):0;
         }
@@ -9275,6 +9321,20 @@ static double estimateSelectivity(const StorageEngine::Condition& cond,
                                   StorageEngine* engine,
                                   const std::string& dbname,
                                   const std::string& tablename) {
+    if(cond.op=="isnull" || cond.op=="isnotnull" || cond.op=="=" || cond.op=="!=") {
+        if(const auto typed=engine->getAnalyzedColumnStatistics(dbname,tablename,cond.colName)) {
+            if(cond.op=="isnull")return typed->nullFraction;
+            if(cond.op=="isnotnull")return 1.0-typed->nullFraction;
+            const auto schema=engine->getTableSchema(dbname,tablename);
+            for(size_t i=0;i<schema.len;++i)if(schema.cols[i].dataName==cond.colName) {
+                const auto probe=cond.referenceInputOid?std::to_string(*cond.referenceInputOid):cond.value;
+                if(const auto fraction=analyzedEqualityFraction(schema.cols[i],*typed,
+                        plannerRowEstimate(engine,dbname,tablename),probe))
+                    return cond.op=="="?*fraction:std::max(0.0,1.0-typed->nullFraction-*fraction);
+                break;
+            }
+        }
+    }
     auto stats = engine->getColumnStats(dbname, tablename, cond.colName);
     double totalRows = static_cast<double>(engine->getTableRowCount(dbname, tablename));
     // NULL fraction (pg null_frac): 0 when stats predate nullCount.
@@ -9475,6 +9535,13 @@ static double estimateEqualityIndexRows(StorageEngine* engine,const std::string&
                                        const IndexScanOp& index) {
     const auto table=engine->getTableSchema(database,index.tableName());
     const double rows=plannerRowEstimate(engine,database,index.tableName());
+    if(!isSingleColumnPrimaryKey(table,index.colName()))
+        if(const auto typed=engine->getAnalyzedColumnStatistics(database,index.tableName(),index.colName()))
+            for(size_t i=0;i<table.len;++i)if(table.cols[i].dataName==index.colName()) {
+                if(const auto fraction=analyzedEqualityFraction(table.cols[i],*typed,rows,index.value()))
+                    return rows>0?std::max(1.0,rows**fraction):0;
+                break;
+            }
     const auto statistics=engine->getColumnStats(database,index.tableName(),index.colName());
     size_t analyzedRows=0;
     const bool analyzed=engine->tryGetTableRowCount(database,index.tableName(),analyzedRows);

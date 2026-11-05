@@ -39,6 +39,7 @@ class LocalExpressionSyntax;
 class CatalogService;
 class HeapScanCursor;
 struct SavepointImageReceipt;
+namespace analyzed_statistics { struct Column; class ReadCache; }
 
 // Storage/index classes appear only as unique_ptr members in this header;
 // forward declarations keep ~100 dependent translation units from
@@ -574,6 +575,10 @@ public:
                                             const std::string& onlyColumn = "") const;
     // Full owning pg_stats source for one actual database/catalog generation.
     std::vector<std::vector<ExprValue>> getAnalyzedStatisticsRows(const std::string& dbname) const;
+    // Optional planner evidence, with current logical/physical declaration
+    // validation. Returned columns own their immutable decoded generation.
+    std::shared_ptr<const analyzed_statistics::Column> getAnalyzedColumnStatistics(
+        const std::string& dbname, const std::string& table, const std::string& column) const;
     // Canonicalize a tsvector literal (used by to_tsvector and insert paths).
     bool normalizeTsVectorText(const std::string& in, std::string& out) const;
     // ---- PL/pgSQL support (helpers for the plpgsql interpreter) ----
@@ -1882,6 +1887,7 @@ private:
     // and database lifecycle operations. A recursive mutex is intentional:
     // cache-owning DDL paths call other cache helpers while holding it.
     mutable std::recursive_mutex cacheMutex_;
+    mutable std::unique_ptr<analyzed_statistics::ReadCache> analyzedStatisticsReadCache_;
     mutable std::map<std::string, std::shared_ptr<PageAllocator>> pageAllocators_;
     std::shared_ptr<PageAllocator> acquireSharedHeap(
         const std::string& dbname, const std::filesystem::path& path,
