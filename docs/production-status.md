@@ -1,5 +1,16 @@
 # 生产化状态
 
+<!-- CURRENT_ANALYZED_STATS_SNAPSHOT_20261105 -->
+
+## 完整统计视图的快照基础（2026-11-05，P10）
+
+P10为完整pg_stats的持久化基础阶段：新增3个头文件，模型与文件读写已经过实际测试；尚未被dbms_main或ANALYZE调用。CMake正常目标0重编、62对象哈希保持，普通后端仍为 `30c57ca8…`，不是新增SQL能力的发布版本。
+
+新组件568父检查及3个fresh子进程均通过，ASan/UBSan启用泄漏检测通过，正式core入口通过。完整SQL两条探针仍0A000；原5项Main元数据差异、跨进程恢复准入及全17字段采集/来源/输出仍开放。组件性能比例不代表SQL提速。[报告](performance-report-2026-10-30.md#完整统计视图的快照基础2026-11-05p10)与[证据](benchmarks/analyzed-statistics-snapshot-20261105.json)。
+
+原273项仍为22 complete /166 partial /70 unverified /15 deferred_by_user；Goal active。下方旧节保留各批次当时结果。
+
+
 <!-- CURRENT_STORAGE_LIFETIME_20261105 -->
 
 ## 存储退出期生命周期（2026-11-05，P9-C2）

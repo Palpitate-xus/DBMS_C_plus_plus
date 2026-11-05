@@ -2,6 +2,31 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-05 full17 analyzed statistics owned snapshot foundation",
+      "gap_ids": [
+        "OPT-04"
+      ],
+      "status": "partial",
+      "evidence": [
+        "docs/performance-report-2026-10-30.md",
+        "docs/test-report.md",
+        "docs/postgresql-comparison.md",
+        "docs/postgresql-18-implementation-blueprint.md",
+        "docs/benchmarks/analyzed-statistics-snapshot-20261105.json"
+      ],
+      "tests": [
+        "tests/analyzed_statistics_snapshot_test.cpp"
+      ],
+      "verification": {
+        "scope": "Necessary full17 model/typed persistence phase only. ANALYZE collectors/catalog/source/anyarray output not connected. Current normal2 full17 SQL probes both0A000 strictFAIL, normalserver0; driver0 is observation completion only. No4-field endpoint/family closure.",
+        "source": "Parent7d74a522; only3newheaders. All231 priorproduction/161headers unchanged. CMake0compiles/62objects+normal30cunchanged, default425held. Source234/header164. Formaltest current frozenheaders+verified61core+freshstub794. Directmaster Palpitate-xus/no branch/push/restart.",
+        "reference": "Real privatePG18.6 full17 name/typeOID/size exact;8attrs include all7kinds, arrayMCVelem1007/MCELEM23/rangelength701/multirangebounds3904. Emptyrange actualvaluesNULL preserved; no product numericstats equivalence claim.",
+        "component": "Same568parentchecks+3freshchildren each1. BeforeO2/finalO2/finalSAN(leaks enabled)/formalcore all0. Independent220B golden/all220bytecorruptions/all220truncprefixes/semanticflags/ownership/typecycles/depth/actualOFDblocking/cold/atomicnormalpublication/generationmax. SharedIO faultpaths not reinjected or claimed newly complete.",
+        "cost": "Before/final/before3each,9normal0,1024syntheticcolumns543797B/canonicalpayloadsame,100encode+100decode perworker,1untimedpairpreflight. CPUencode353.931/302.898/353.907ms(-14.42/-14.41%),decode370.229/353.669/363.034ms(-4.47/-2.58%);395.952ms finaldecode tail retained. Newcomponent only, not oldproductionSQL/ANALYZE/fsync/PGspeed.",
+        "preservation": "Original273items/states22/166/70/15 and raw260history unchanged; new1partial=261. Original2341tests/current2342(top1092 inclstub/1091 excluding/nested5),725protected/9oldarchives/754MDpaths exact. Goalactive."
+      }
+    },
+    {
       "issue": "2026-11-05 storage registry and relation-list lifetime",
       "gap_ids": [
         "BACKUP-01",

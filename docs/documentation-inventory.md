@@ -1,5 +1,16 @@
 # 全部文档检查清单
 
+<!-- CURRENT_ANALYZED_STATS_SNAPSHOT_20261105 -->
+
+## 完整统计视图的快照基础（2026-11-05，P10）
+
+本批更新本节所列8份既有Markdown及进度JSON，新增非Markdown[机器归档](benchmarks/analyzed-statistics-snapshot-20261105.json)；路径仍754。原725保护记录、9份旧机器归档、273完整对象及260条历史保持；追加一条partial后历史261。
+
+新目录组件3头文件加入后源234/头164；原2341测试不改，新增1入口后2342（顶层1092 CPP，去stub1091入口，另5个子目录CPP）。后端程序字节保持P9-C2；新组件及568检查通过、SQL全17列两项失败分别记录。组件性能不能视为当前数据库性能变化，详见[报告](performance-report-2026-10-30.md#完整统计视图的快照基础2026-11-05p10)。
+
+原273项仍为22 complete /166 partial /70 unverified /15 deferred_by_user；Goal active。下方旧节保留各批次当时结果。
+
+
 <!-- CURRENT_STORAGE_LIFETIME_20261105 -->
 
 ## 存储退出期生命周期（2026-11-05，P9-C2）

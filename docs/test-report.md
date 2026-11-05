@@ -1,5 +1,18 @@
 # DBMS 功能测试报告
 
+<!-- CURRENT_ANALYZED_STATS_SNAPSHOT_20261105 -->
+
+## 完整统计视图的快照基础（2026-11-05，P10）
+
+P10新增3个生产头文件及 `analyzed_statistics_snapshot_test.cpp`，源234/头164，原2341测试文件保持，新增后2342；顶层1092 CPP含test_stubs（排除后1091入口），另5个子目录CPP。正常CMake没有重编译，62旧对象与后端 `30c57ca8…` 保持；正式原生测试采用冻结的新头文件、经哈希核对的61个旧core对象和实际新编译stub794，既有161头/231源码字节不变。
+
+同一组件测试在未优化O2、最终O2、最终ASan/UBSan和正式core入口分别通过：每次父进程568次检查，3个fresh子进程各1次检查。包含独立Python220B固定字节夹具、逐字节损坏/全截断前缀、修复校验后的非法字段、拥有数组/记录/域身份、冷读、实际OFD阻塞的并发写入、关系整组替换和代别耗尽；这些是组件检查，不是568个SQL场景。SAN覆盖组件与StatsPersistence，启用泄漏检测，不是全库SAN。
+
+真实PG18.6参考核对17字段并采集8列的全部7类槽及实际数组元素OID；仅声明/类型契约对应，不宣称产品统计数值已与PG逐项一致。当前普通Main的两条全17列查询均0A000、server正常0；记录为2严格失败。9次组件成本测试全部正常0且完整payload相同。[完整报告](performance-report-2026-10-30.md#完整统计视图的快照基础2026-11-05p10)及[归档](benchmarks/analyzed-statistics-snapshot-20261105.json)。
+
+原273项仍为22 complete /166 partial /70 unverified /15 deferred_by_user；Goal active。下方旧节保留各批次当时结果。
+
+
 <!-- CURRENT_STORAGE_LIFETIME_20261105 -->
 
 ## 存储退出期生命周期（2026-11-05，P9-C2）

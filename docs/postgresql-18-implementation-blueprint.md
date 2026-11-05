@@ -1,5 +1,18 @@
 # DBMS_C_plus_plus 对标 PostgreSQL 18.6：逐项完整实施蓝图
 
+<!-- CURRENT_ANALYZED_STATS_SNAPSHOT_20261105 -->
+
+## 完整统计视图的快照基础（2026-11-05，P10）
+
+完整17字段目标不变。P10已落地第一层：全字段声明契约、键为真实relation/attribute/inherited的拥有值模型、全部7类槽、带界限/版本/校验的无损快照及单代原子发布；原`.stats`和后端执行路径保持。实际PG参考、独立字节夹具、冷进程/并发合并和组件SAN通过，完整SQL两项仍严格失败。
+
+下一层必须将真实ANALYZE扫描接到该模型，产出width、带符号distinct、排除MCV的histogram、物理顺序correlation、数组/范围槽和真实继承/表达式索引所有者；随后注册真实pg_stats view和17属性，贯通Binder/Main/Describe与output-only anyarray，复用现有权限消费者。当前持久化不会解析旧文件来猜测缺失统计，也不发布一个只含少数字段的替代视图。全源验收仍须标量/数组/范围/冷读/DDL失效/来源/正常0或1格式对照。
+
+该阶段不改变既有暂缓政策或原273项状态，已确认的持久化能力与未接入的SQL能力分列在[报告](performance-report-2026-10-30.md#完整统计视图的快照基础2026-11-05p10)和[归档](benchmarks/analyzed-statistics-snapshot-20261105.json)。
+
+原273项仍为22 complete /166 partial /70 unverified /15 deferred_by_user；Goal active。下方旧节保留各批次当时结果。
+
+
 <!-- CURRENT_STORAGE_LIFETIME_20261105 -->
 
 ## 存储退出期生命周期（2026-11-05，P9-C2）

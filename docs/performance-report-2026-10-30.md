@@ -1,5 +1,51 @@
 # 数据库操作性能测试报告（2026-10-30）
 
+<!-- CURRENT_ANALYZED_STATS_SNAPSHOT_20261105 -->
+
+## 完整统计视图的快照基础（2026-11-05，P10）
+
+本批是完整pg_stats的持久化基础阶段，尚未接入ANALYZE采集器、SQL来源或输出通路。普通后端仍为P9-C2 `30c57ca82d55d6a18b6a305d8595ae74f8edde52062a9eca63ba6448a4be26c2`，默认根程序仍425。新增3头文件后源234/头164；旧231源码及161头逐字保持，正常CMake0重编/62对象保持。新头文件在组件和正式原生入口实际编译，匹配fresh stub794；不是一次新增后端功能的冷编译或发布。
+
+### 设计依据与实际范围
+
+[PG18的完整pg_stats说明](https://www.postgresql.org/docs/18/view-pg-stats.html)与[REL_18_6 pg_statistic](https://github.com/postgres/postgres/blob/REL_18_6/src/include/catalog/pg_statistic.h)使用relation/attribute/inherited键和至多5个槽，以kind、operator、collation、可空numbers/values表示不同类型统计。[SQLite ANALYZE](https://www.sqlite.org/lang_analyze.html)将统计保存在内部表供优化器使用；[DuckDB2.0 ANALYZE说明](https://duckdb.org/docs/2.0/sql/statements/analyze)强调其重计算统计的join-order用途。本批取其采集/持久化/消费分离原则，没有运行SQLite/DuckDB速度比较。
+
+新增AnalyzedStatistics模型保留完整17字段契约及全部1..7类槽、signed float4 distinct/频率、实际声明与域/元素/记录元数据。值拥有自己的文本、NULL、objectOid/elementOids、record字段、数组维度/下界/NULL-bitmap及子值；类型身份按元数据保存，未从显示字符串重新猜测。Values可缺失、存在但为空或含NULL子值，三者保持不同。schema/表/属性显示标签留给未来当前数据库目录源按真实键连接，不存伪造viewOID。
+
+codec采用明确小端字段、版本1、长度边界与FNV64完整帧校验；限制128MiB、100万结构节点、深度128和数组6维。编码资源超限为54000，损坏输入为XX001。Store复用现有StatsFileLock和StatsPersistence；关系更新在同一OFD锁内reload/merge，整组替换该relation的base/inherited记录并保留其他关系，64位generation耗尽拒绝回绕。PublishedNotDurable枚举透传既有发布语义；本次正常发布为Durable，没有注入共享持久化故障。
+
+新组件使用独立文件，由调用者提供路径。现有`.stats`文件格式、ANALYZE、旧优化器和8列原生renderer保持；旧分隔符局限仍未在这些路径中修复。新文件缺失返回unavailable，旧文件不能被当作已拥有avg_width/correlation等新字段。采集器仍需实际填充并发布记录，不能用未计算的零值伪装完整视图。
+
+### 真实参考、组件检查与SQL失败
+
+私有PG18.6新集群实际核对全部17个名称/类型OID/宽度，并对8个属性采集到1..7全部槽。原始anyarray_send证实：数组列MCV元素1007，常见元素23，范围长度701，多范围bounds元素3904；全NULL没有使用槽。全empty-range本次参考的values为SQLNULL、numbers为[1]，并非先前草稿假定的空数组；保留该参考结果，模型仍区分两种表示，采集/输出适用性必须按实际PG验证。这里只确认声明及表示契约，不是产品统计数值对照通过。
+
+同一测试在未优化O2、最终O2、最终ASan/UBSan和正式core入口分别通过：每次568父进程检查，真实冷读及两个写入子进程各1次检查，均正常0。包括独立Python生成的220B固定帧、全部220个单字节损坏和220个截断前缀、重算校验后的非法字段/重复键、类型/值环及深度边界、完整拥有字段、缺失/损坏读入、generation耗尽及保持旧文件。两个线程实际合并不同关系，两个fresh进程在父锁持有时均被观察到阻塞于目标`.lock`的F_OFD_SETLKW，再释放并验证更新都保留；未用sleep当作锁成立的证明。组件SAN包含StatsPersistence且启用泄漏检测，非全库SAN。
+
+正式core入口使用冻结新头、61个经哈希核对的旧core对象和新编译stub；既有公共头ABI不变。当前普通Main两条完整17列零行探针均返回0A000“system catalog relation is not implemented”，2项严格失败；服务器正常0。观测驱动退出0表示结果采集完成，不表示功能通过。P9的5项元数据差异和其他旧失败原文保持；本批未重测全部35操作/36查询。
+
+### 组件成本：本批未优化版本／最终版本／同一未优化版本
+
+父提交不存在此新组件，因此对照是本批初始std::set路径检查版本，不是旧版数据库。最终用7类槽位图及有界祖先指针栈保留重复kind/环检查，减少逐节点树结点分配。每段3个新进程，同一源码、O2、1024个合成列记录，单帧543797B；每worker先做1次不计时encode/decode完整字段预检，再各计时100次encode与100次decode。内存已被预检触及，不是零热身/冷盘或fsync测试。循环检查长度/校验尾、行数/代别，计时后核对完整字节和完整字段；9份payload实际SHA一致。
+
+| 指标，ms／100次：p50 [min, max] | 本批未优化前 | 最终组件 | 本批未优化后 |
+| --- | ---: | ---: | ---: |
+| encode wall | 353.947 [345.669, 357.605] | 302.901 [280.857, 312.181] | 353.924 [350.057, 358.122] |
+| encode CPU | 353.931 [345.666, 357.303] | 302.898 [280.846, 312.159] | 353.907 [350.054, 358.119] |
+| decode wall | 370.230 [354.107, 370.990] | 353.671 [350.004, 396.033] | 363.036 [355.689, 369.287] |
+| decode CPU | 370.229 [354.027, 370.988] | 353.669 [350.002, 395.952] | 363.034 [355.687, 369.285] |
+
+编码CPU p50较两次本批未优化对照低14.42%/14.41%，解码低4.47%/2.58%。编码对照前后漂移−0.0066%，解码−1.94%；最终解码第2样本CPU395.952ms长尾保留，高于两侧旧样本，未删样本或重采。只有3样本/段，均为描述性组件统计，不证明所有样本占优或统计显著性，更不是数据库查询、ANALYZE、持久化fsync或PostgreSQL速度提升。
+
+9/9进程正常0，18组计时记录及9份完整payload独立重读校验，所有原始min/p50/max、源码/配置/对象哈希、正常和失败记录见[机器归档](benchmarks/analyzed-statistics-snapshot-20261105.json)。最初PG套接字路径过长在启动期终止、组件初版API拼写、参考空值假设及两版SQL结果采集脚本错误均保留；原数据与失败预期没有被改成成功。
+
+### 后续验收
+
+必须接入真实ANALYZE采样与宽度/distinct/correlation/标量、数组、范围槽，覆盖真实继承/分区/表达式索引所有者和DDL/冷读失效；随后注册真实pg_stats view/17属性、当前数据库冻结源和来源身份，并贯通output-only anyarray及普通格式0/1/Describe，复用既有权限消费者。当前2项0A000是开放失败，不能以模型通过替代。全部原暂缓政策不变；原273对象/22-166-70-15、260条历史、725保护记录、9份旧归档和754 Markdown路径保持，仅加1条partial后历史261；Goal active。
+
+原273项仍为22 complete /166 partial /70 unverified /15 deferred_by_user；Goal active。下方旧节保留各批次当时结果。
+
+
 <!-- CURRENT_STORAGE_LIFETIME_20261105 -->
 
 ## 存储退出期生命周期（2026-11-05，P9-C2）

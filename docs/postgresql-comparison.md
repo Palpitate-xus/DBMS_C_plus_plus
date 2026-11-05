@@ -1,5 +1,16 @@
 # 与 PostgreSQL 18 的功能和性能差距
 
+<!-- CURRENT_ANALYZED_STATS_SNAPSHOT_20261105 -->
+
+## 完整统计视图的快照基础（2026-11-05，P10）
+
+P10完成完整17字段/7类槽的拥有值快照基础，保存真实的关系/属性/继承键、类型声明、操作符和collation身份及可空numbers/values。真实PG18.6确认数组列MCV的元素OID1007、常见元素23、范围长度701，以及多范围bounds使用范围3904；本模型可保存这些不同身份。
+
+SQL侧尚未接入：两条完整17列探针仍0A000，采集算法、真实view/attribute来源、anyarray输出和现有权限消费者接入仍待实现，不以内部组件通过关闭pg_stats或原功能族。编码CPU对照只针对本批新组件，未测PostgreSQL性能或普通SQL提速。[报告](performance-report-2026-10-30.md#完整统计视图的快照基础2026-11-05p10)与[归档](benchmarks/analyzed-statistics-snapshot-20261105.json)。
+
+原273项仍为22 complete /166 partial /70 unverified /15 deferred_by_user；Goal active。下方旧节保留各批次当时结果。
+
+
 <!-- CURRENT_STORAGE_LIFETIME_20261105 -->
 
 ## 存储退出期生命周期（2026-11-05，P9-C2）

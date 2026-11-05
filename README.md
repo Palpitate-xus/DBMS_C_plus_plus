@@ -1,5 +1,16 @@
 # DBMS C++
 
+<!-- CURRENT_ANALYZED_STATS_SNAPSHOT_20261105 -->
+
+## 完整统计视图的快照基础（2026-11-05，P10）
+
+P10 已加入完整17字段的类型化统计模型、7类统计槽及无损快照读写组件。ANALYZE采集器和SQL视图尚未接入；两条完整17列SQL探针仍返回0A000，保留为严格失败。普通后端仍是P9-C2 `30c57ca8…`，原有`.stats`和SQL行为保持。
+
+组件父进程568次检查、冷读和两个fresh写入子进程通过，O2、ASan/UBSan及正式原生入口通过。新组件编码CPU p50较本批未优化组件低14.42%/14.41%，属于组件对照，不能称数据库查询提速。详见[报告](docs/performance-report-2026-10-30.md#完整统计视图的快照基础2026-11-05p10)和[机器归档](docs/benchmarks/analyzed-statistics-snapshot-20261105.json)；默认425及既有服务保持。
+
+原273项仍为22 complete /166 partial /70 unverified /15 deferred_by_user；Goal active。下方旧节保留各批次当时结果。
+
+
 <!-- CURRENT_STORAGE_LIFETIME_20261105 -->
 
 ## 存储退出期生命周期（2026-11-05，P9-C2）

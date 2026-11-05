@@ -1,5 +1,16 @@
 # DBMS 使用手册
 
+<!-- CURRENT_ANALYZED_STATS_SNAPSHOT_20261105 -->
+
+## 完整统计视图的快照基础（2026-11-05，P10）
+
+本批先实现完整pg_stats所需的类型化统计快照内部组件，尚未增加可用的pg_stats SQL入口；完整17列的两个普通查询实际均为0A000。现有ANALYZE执行路径及`.stats`兼容行为保持，普通后端仍为P9-C2。
+
+新快照保留实际类型身份、NULL/空数组差别及统计槽的元数据；旧`.stats`不足以重建这些字段，后续仍需新采集器重分析、真实目录来源和输出通路。实现与剩余门槛见[报告](performance-report-2026-10-30.md#完整统计视图的快照基础2026-11-05p10)及[归档](benchmarks/analyzed-statistics-snapshot-20261105.json)，默认服务未切换。
+
+原273项仍为22 complete /166 partial /70 unverified /15 deferred_by_user；Goal active。下方旧节保留各批次当时结果。
+
+
 <!-- CURRENT_STORAGE_LIFETIME_20261105 -->
 
 ## 存储退出期生命周期（2026-11-05，P9-C2）
