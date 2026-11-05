@@ -6,6 +6,7 @@
 #include "catalog/CatalogService.h"
 #include "catalog/DatumMetadataFactory.h"
 #include "commands/TableManage.h"
+#include "commands/AnalyzedRangeInput.h"
 #include "expression/ArrayDatumInput.h"
 #include "utils/Session.h"
 #include <cstring>
@@ -74,6 +75,9 @@ class ScalarStatisticsCapture {
         std::vector<ArraySample> arrays;
         dbms::Column elementStorage;
         uint32_t elementEquality = 0;
+        std::optional<range_input::BuiltinRange> range;
+        DatumTypePtr rangeType, lengthType;
+        std::vector<RangeSample> ranges;
     };
     std::vector<Attribute> attributes_;
     std::filesystem::path schemaPath_;
@@ -121,7 +125,8 @@ public:
                 if (!leaf || leaf->kind != DatumKind::Scalar || leaf->enumType ||
                     array != storage.isArray) continue;
                 const auto ops = capture_detail::scalarOperators(leaf->codecOid);
-                if (!ops.first) continue; // Range/custom analysis needs its own owner.
+                const auto range = range_input::builtin(leaf->codecOid);
+                if ((!ops.first && !range) || (array && range)) continue;
                 const auto genuine = std::find_if(snapshot.types.begin(), snapshot.types.end(),
                     [&](const auto& t) { return t.oid == leaf->codecOid && t.typnamespace == 11; });
                 const auto& builtin = CatalogManager::builtinTypeRows();
@@ -136,7 +141,13 @@ public:
                 capacity_ = std::max(capacity_, size_t(stats.target) * 300);
                 attributes_.push_back({i, {relation_, a.attnum,
                     table.partitionType != TableSchema::PartitionType::None}, std::move(stats), storage,
-                    array ? 1070U : ops.first, array ? 1072U : ops.second, {}, {}, {}, 0});
+                    array ? 1070U : ops.first, array ? 1072U : ops.second, {}, {}, {}, 0, {}, {}, {}, {}});
+                if (range) {
+                    auto& attribute = attributes_.back();
+                    attribute.range = range;
+                    attribute.rangeType = factory.type(range->oid);
+                    attribute.lengthType = factory.type(701);
+                }
                 if (array) {
                     auto& attribute = attributes_.back();
                     // Comparison consumes the physical element's existing
@@ -163,7 +174,8 @@ public:
         }
         if (selected_ && seen_ <= capacity_)
             for (auto& a : attributes_) {
-                if (a.elementEquality) a.arrays.emplace_back();
+                if (a.range) a.ranges.emplace_back();
+                else if (a.elementEquality) a.arrays.emplace_back();
                 else a.sample.emplace_back();
             }
     }
@@ -187,6 +199,13 @@ public:
                 }
                 if (width > INT32_MAX) throw DbError("54000", "analyzed datum width exceeds int32");
                 cell.storedWidth = width;
+            }
+            if (a.range) {
+                a.ranges[*selected_] = range_input::decode(*a.range, raw, isNull,
+                    cell.ordinal, cell.storedWidth, true);
+                continue;
+            }
+            if (!isNull) {
                 cell.tooWide = a.statistics.attributeType->codecSize < 0 && raw.size() + 4 > 1024;
                 if (!cell.tooWide || (a.elementEquality && raw.size() + 4 <= 65536))
                     cell.value.value = raw;
@@ -203,6 +222,22 @@ public:
         std::map<Key, Column> result;
         for (auto& a : attributes_) {
             a.statistics.totalRows = seen_;
+            if (a.range) {
+                auto sample = std::move(a.ranges);
+                const auto compare = [&a](const RangeBound& x, const RangeBound& y) {
+                    return range_input::compare(*a.range, x, y);
+                };
+                const auto distance = [&a](const RangeBound& upper, const RangeBound& lower) {
+                    return range_input::distance(*a.range, upper, lower);
+                };
+                const auto construct = [&a](const RangeBound& lower, const RangeBound& upper) {
+                    return range_input::construct(*a.range, lower, upper);
+                };
+                if (auto stats = collectRangeStatistics(a.statistics, sample, a.rangeType,
+                        a.lengthType, compare, distance, construct, [] { checkForQueryInterrupt(); }))
+                    result.emplace(a.key, std::move(*stats));
+                continue;
+            }
             if (a.elementEquality) {
                 auto sample = std::move(a.arrays);
                 // Reuse the existing local parsed-key/locale owner for the

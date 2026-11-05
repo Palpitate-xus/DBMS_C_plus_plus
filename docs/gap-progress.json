@@ -2,6 +2,33 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-05 real range ANALYZE collectors and cached complete API costs",
+      "gap_ids": [
+        "OPT-04"
+      ],
+      "status": "partial",
+      "evidence": [
+        "src/catalog/AnalyzedRangeStatistics.h",
+        "src/commands/AnalyzedRangeInput.h",
+        "src/commands/AnalyzedStatisticsCapture.h",
+        "docs/performance-report-2026-10-30.md",
+        "docs/benchmarks/analyzed-range-collector-20261105.json.gz"
+      ],
+      "tests": [
+        "tests/analyzed_range_statistics_test.cpp",
+        "tests/analyzed_range_collector_test.cpp",
+        "tests/analyzed_range_auto_protocol_e2e_test.py"
+      ],
+      "verification": {
+        "implementation": "Six genuine builtin ranges plus real domain: independently sorted boundary histograms slot7, length/empty slot6, actual subtypes/OIDs/operators/roles/physical widths. Sample-local parsed keys; no global/provider cache. Source239/header169; only old privateCapture header changed, all other236 production files exact.",
+        "correctness": "Same final native source: parent missing-feature failure retained, finalC2 845+cold262 normal0; pureO2/SAN43leaks each. Range19/array19/scalar25 protocol0; arrays786+cold191, scalar641+cold2; related21 native all0 incl full7workers1574 and14streams. Main4 rangeSQL plus actual3904/3906/3908 descriptors/snapshot pass; full17pg_stats2 strict0A000 remain. C1 harness stale-object failure and correction retained.",
+        "reference": "ActualPG18.6/en_US same520positiveSQL+2expected22003;18cols243checks229match14strictdiffs:13storagewidth,1NaNlengthorder. NaN full multiset equal but strict difference retained. Distinct/type/bound flags/subtype lengths and independent reservoir invariants checked, not fullPG equivalence.",
+        "cost": "Same-functionality P13-C1/C2/C1 fixed3each9normal0;2048rows/1scalar+6ranges/14336cells/957NULLs;1untimedpreflight+3timed complete durableAPI calls each. processCPU p50 -48.13/-48.63%, wall -43.31/-45.18%. All9 complete805158B proofs/69467B snapshots byteexact; independent allrows/RIDs/NULLs/fullframes/bounds/lengths/emptyfraction/type verification. Not arbitrarySELECT/shippingparent/PG speed.",
+        "preservation": "Original273 objects/states22/166/70/15 and263 raw histories exact; append1partial=>264. All2348 old tests exact+3=>2351/top1098inclstub+5nested. Markdown754/protected725 unchanged; all12oldgzip payloads exact,1newgzip. Master local only, no push/default/service promotion; Goalactive.",
+        "remaining": "Full17 catalog/realview/attribute source and output-onlyanyarray/0,1formats; native multirange real type/storage owner, range arrays/custom ranges/enum/record elements, inheritance/index, completeDDL/twofileatomicity/recovery/transaction semantics and all original open/deferred boundaries."
+      }
+    },
+    {
       "issue": "2026-11-05 real array ANALYZE collectors and cached complete API costs",
       "gap_ids": [
         "OPT-04"

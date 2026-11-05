@@ -25,6 +25,16 @@
       "roundtrip_bytes_exact": true
     },
     {
+      "original_path": "docs/benchmarks/analyzed-range-collector-20261105.json",
+      "original_bytes": 18902914,
+      "original_sha256": "720faf44c3b077e78cf09bf58ceb800bdc4502f328629bc94cf6d8d7d8d260d9",
+      "path": "docs/benchmarks/analyzed-range-collector-20261105.json.gz",
+      "bytes": 1413574,
+      "sha256": "2bc7930a55893eb64ae43945c5cb4fc62ff09bcb8452c4135cea101b9eeebd56",
+      "encoding": "gzip",
+      "roundtrip_bytes_exact": true
+    },
+    {
       "original_path": "docs/benchmarks/analyzed-scalar-collector-20261105.json",
       "original_bytes": 7468950,
       "original_sha256": "e5a9b721b44af495473be779c6df358741cee34214161b747c8806a88089ae93",
@@ -125,6 +135,6 @@
       "roundtrip_bytes_exact": true
     }
   ],
-  "total_original_bytes": 176049339,
-  "total_bytes": 32519360
+  "total_original_bytes": 194952253,
+  "total_bytes": 33932934
 }
