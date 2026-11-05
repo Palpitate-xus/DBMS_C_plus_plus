@@ -2,6 +2,32 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-05 real array ANALYZE collectors and cached complete API costs",
+      "gap_ids": [
+        "OPT-04"
+      ],
+      "status": "partial",
+      "evidence": [
+        "src/catalog/AnalyzedArrayStatistics.h",
+        "src/commands/AnalyzedStatisticsCapture.h",
+        "docs/performance-report-2026-10-30.md",
+        "docs/benchmarks/analyzed-array-collector-20261105.json.gz"
+      ],
+      "tests": [
+        "tests/analyzed_array_statistics_test.cpp",
+        "tests/analyzed_array_collector_test.cpp",
+        "tests/analyzed_array_auto_protocol_e2e_test.py"
+      ],
+      "verification": {
+        "implementation": "Real owning physical arrays -> whole-array slots1/2/3 and membership/count slots4/5; actual element operators/metadata/NULL/dimensions, bounded reservoir and local comparison cache. C1float0A000 retained; C2 fixes physical element descriptor; finalC3 7d3cc2a1. Source237/header167; only old privateCapture header changed, all other235production files exact; existing166 headers unchanged except privateCapture.",
+        "correctness": "Final arrays786+cold191, componentO2/SAN32leaks, all17related native0 incl full7/1574. Originalscalar641+cold2/25wire plus array19wire/6snapshots/targets0,1 all0. CurrentMain4arraySQL/actual1007,1009 descriptors and independent snapshot pass;2full17pg_stats strict0A000 failures remain. No fullSQL acceptance.",
+        "reference": "ActualPG18.6/en_US same554SQL/14cols/325checks:301matches24strictdiffs (11localstoragewidth,11collation0/100,2equalfrequencytruncation selections); independently sampled450/target1 bounded invariants, not forced identical. No fullPG equivalence.",
+        "cost": "Same-functionality P12-C2/C3/C2 fixed3each9normal0;2048rows/1scalar+3arraytypes/638NULLs;1untimedpreflight+3timed complete durableAPI calls each. processCPU p50 -86.80/-87.34%;wall -85.86/-86.87%;685.690ms C3 walltail retained. All9 complete247598B proofs and6740B snapshots byteexact; independent full field/member/RID/NULL/number verification.",
+        "preservation": "Original273fullobjects/states22/166/70/15 and postcompression262rawhistory exact; append1partial=>263. All2345oldtests exact+3=>2348/top1096inclstub+5nested. Markdown754/protected725 unchanged. Separate452fe958 user-authorized11archives compressed losslessly; old11gzip payloads unchanged by this feature batch. No push/default/service promotion; Goalactive.",
+        "remaining": "Full17catalog/realview/attribute source and output-onlyanyarray/0,1 formats; ranges/multiranges, custom/enum/record elements, inheritance/index, completeDDL/twofileatomicity/recovery/transaction semantics and all original open/deferred boundaries remain."
+      }
+    },
+    {
       "issue": "2026-11-05 real scalar ANALYZE collectors and cached complete API costs",
       "gap_ids": [
         "OPT-04"

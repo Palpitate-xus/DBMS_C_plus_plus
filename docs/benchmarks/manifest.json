@@ -15,6 +15,16 @@
       "roundtrip_bytes_exact": true
     },
     {
+      "original_path": "docs/benchmarks/analyzed-array-collector-20261105.json",
+      "original_bytes": 13826598,
+      "original_sha256": "05c54cc7bf8e96624886f646adba080d1d486b32677e4faee4b54fca70f24539",
+      "path": "docs/benchmarks/analyzed-array-collector-20261105.json.gz",
+      "bytes": 1590465,
+      "sha256": "efbaf209743566188039a1143d49c582a4949eaee8077eb02e48ddda02b4e920",
+      "encoding": "gzip",
+      "roundtrip_bytes_exact": true
+    },
+    {
       "original_path": "docs/benchmarks/analyzed-scalar-collector-20261105.json",
       "original_bytes": 7468950,
       "original_sha256": "e5a9b721b44af495473be779c6df358741cee34214161b747c8806a88089ae93",
@@ -115,6 +125,6 @@
       "roundtrip_bytes_exact": true
     }
   ],
-  "total_original_bytes": 162222741,
-  "total_bytes": 30928895
+  "total_original_bytes": 176049339,
+  "total_bytes": 32519360
 }

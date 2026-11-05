@@ -1,14 +1,17 @@
 #pragma once
 
 #include "catalog/AnalyzedScalarStatistics.h"
+#include "catalog/AnalyzedArrayStatistics.h"
 #include "catalog/AnalyzedStatisticsStore.h"
 #include "catalog/CatalogService.h"
 #include "catalog/DatumMetadataFactory.h"
 #include "commands/TableManage.h"
+#include "expression/ArrayDatumInput.h"
 #include "utils/Session.h"
 #include <cstring>
 #include <fstream>
 #include <random>
+#include <unordered_map>
 
 namespace dbms::analyzed_statistics {
 namespace capture_detail {
@@ -68,6 +71,9 @@ class ScalarStatisticsCapture {
         dbms::Column storage;
         uint32_t equality, ordering;
         std::vector<ScalarSample> sample;
+        std::vector<ArraySample> arrays;
+        dbms::Column elementStorage;
+        uint32_t elementEquality = 0;
     };
     std::vector<Attribute> attributes_;
     std::filesystem::path schemaPath_;
@@ -109,11 +115,15 @@ public:
                 if (a.attrelid != relation_ || a.attname != storage.dataName ||
                     a.attnum <= 0 || a.attisdropped || a.attstattarget == 0) continue;
                 const auto type = factory.attribute(a);
-                if (!type || type->kind != DatumKind::Scalar || type->enumType || storage.isArray) continue;
-                const auto ops = capture_detail::scalarOperators(type->codecOid);
-                if (!ops.first) continue; // Array/range/custom analysis is a separate owner.
+                if (!type || type->enumType || type->kind == DatumKind::Record) continue;
+                const bool array = type->kind == DatumKind::Array;
+                const auto leaf = array ? type->arrayElement : type;
+                if (!leaf || leaf->kind != DatumKind::Scalar || leaf->enumType ||
+                    array != storage.isArray) continue;
+                const auto ops = capture_detail::scalarOperators(leaf->codecOid);
+                if (!ops.first) continue; // Range/custom analysis needs its own owner.
                 const auto genuine = std::find_if(snapshot.types.begin(), snapshot.types.end(),
-                    [&](const auto& t) { return t.oid == type->codecOid && t.typnamespace == 11; });
+                    [&](const auto& t) { return t.oid == leaf->codecOid && t.typnamespace == 11; });
                 const auto& builtin = CatalogManager::builtinTypeRows();
                 if (genuine == snapshot.types.end() || std::none_of(builtin.begin(), builtin.end(),
                     [&](const auto& t) { return t.oid == genuine->oid && t.typnamespace == 11 &&
@@ -126,7 +136,18 @@ public:
                 capacity_ = std::max(capacity_, size_t(stats.target) * 300);
                 attributes_.push_back({i, {relation_, a.attnum,
                     table.partitionType != TableSchema::PartitionType::None}, std::move(stats), storage,
-                    ops.first, ops.second, {}});
+                    array ? 1070U : ops.first, array ? 1072U : ops.second, {}, {}, {}, 0});
+                if (array) {
+                    auto& attribute = attributes_.back();
+                    // Comparison consumes the physical element's existing
+                    // spelling/codec, not a newly normalized SQL declaration
+                    // (e.g. double versus double precision).
+                    attribute.elementStorage = storage;
+                    attribute.elementStorage.isArray = false;
+                    attribute.elementStorage.isVariableLength = leaf->codecSize < 0;
+                    if (leaf->codecSize > 0) attribute.elementStorage.dsize = leaf->codecSize;
+                    attribute.elementEquality = ops.first;
+                }
                 break;
             }
         }
@@ -141,7 +162,10 @@ public:
             if (slot < capacity_) selected_ = slot;
         }
         if (selected_ && seen_ <= capacity_)
-            for (auto& a : attributes_) a.sample.emplace_back();
+            for (auto& a : attributes_) {
+                if (a.elementEquality) a.arrays.emplace_back();
+                else a.sample.emplace_back();
+            }
     }
     void cell(size_t physicalColumn, const std::string& raw, bool isNull,
               const std::string& row, const TableSchema& table) {
@@ -149,7 +173,7 @@ public:
         for (auto& a : attributes_) {
             if (a.physicalColumn != physicalColumn) continue;
             ScalarSample cell; cell.ordinal = seen_ - 1;
-            cell.value = ExprValue(a.storage.dataType, {}, isNull);
+            cell.value = ExprValue(a.storage.dataType + (a.elementEquality ? "[]" : ""), {}, isNull);
             if (!isNull) {
                 size_t width = a.storage.dsize;
                 if (a.storage.isVariableLength) {
@@ -164,19 +188,77 @@ public:
                 if (width > INT32_MAX) throw DbError("54000", "analyzed datum width exceeds int32");
                 cell.storedWidth = width;
                 cell.tooWide = a.statistics.attributeType->codecSize < 0 && raw.size() + 4 > 1024;
-                if (!cell.tooWide) cell.value.value = raw;
+                if (!cell.tooWide || (a.elementEquality && raw.size() + 4 <= 65536))
+                    cell.value.value = raw;
                 cell.value.collation = a.storage.collation;
+                if (a.elementEquality && raw.size() + 4 <= 65536 &&
+                    !compound_value_detail::decodeArrayStorageInput(cell.value, a.statistics.attributeType))
+                    throw DbError("XX001", "could not decode actual analyzed array storage input");
             }
-            a.sample[*selected_] = std::move(cell);
+            if (a.elementEquality) a.arrays[*selected_] = {std::move(cell), isNull ? 0 : raw.size() + 4};
+            else a.sample[*selected_] = std::move(cell);
         }
     }
     std::map<Key, Column> finish(const ComparisonFactory& prepareComparison = {}) {
         std::map<Key, Column> result;
         for (auto& a : attributes_) {
+            a.statistics.totalRows = seen_;
+            if (a.elementEquality) {
+                auto sample = std::move(a.arrays);
+                // Reuse the existing local parsed-key/locale owner for the
+                // element comparison too. Raw spelling only locates a key;
+                // it never defines equality. Bound this optional cache by
+                // the column's sample target; exceeding it keeps the entire
+                // column on its original comparator.
+                std::vector<ScalarSample> keys;
+                std::unordered_map<std::string, size_t> keyIndex;
+                bool complete = bool(prepareComparison);
+                if (complete) for (const auto& input : sample) {
+                    if (input.scalar.value.isNull || input.logicalBytes > 65536) continue;
+                    checkForQueryInterrupt();
+                    for (const auto& value : *analyzedArray(input.scalar.value, a.statistics.attributeType).arrayElements) {
+                        if (value.isNull) continue;
+                        const auto inserted = keyIndex.emplace(value.value, keys.size());
+                        if (!inserted.second) continue;
+                        if (keys.size() >= size_t(a.statistics.target) * 300) { complete = false; break; }
+                        ScalarSample key; key.value = value; keys.push_back(std::move(key));
+                    }
+                    if (!complete) break;
+                }
+                IndexedComparison cached;
+                if (complete) {
+                    for (const auto& key : keys)
+                        if (StorageEngine::compareValues(a.elementStorage, key.value.value, false,
+                                key.value.value, false, "=") != StorageEngine::PredicateTruth::True)
+                            throw DbError("0A000", "analyzed array element has no applicable equality");
+                    cached = prepareComparison(a.elementStorage, keys);
+                }
+                if (!cached) { keyIndex.clear(); keys.clear(); }
+                const auto compare = [&a, &keyIndex, &cached](const ExprValue& x, const ExprValue& y) {
+                    if (x.value == y.value) return 0;
+                    if (cached) {
+                        const auto left = keyIndex.find(x.value), right = keyIndex.find(y.value);
+                        if (left == keyIndex.end() || right == keyIndex.end())
+                            throw DbError("XX001", "analyzed array comparison key is absent");
+                        return cached(left->second, right->second);
+                    }
+                    const auto equal = StorageEngine::compareValues(a.elementStorage,
+                        x.value, false, y.value, false, "=");
+                    const auto less = StorageEngine::compareValues(a.elementStorage,
+                        x.value, false, y.value, false, "<");
+                    if (equal == StorageEngine::PredicateTruth::Unknown || less == StorageEngine::PredicateTruth::Unknown)
+                        throw DbError("0A000", "analyzed array element has no applicable comparison");
+                    return equal == StorageEngine::PredicateTruth::True ? 0 :
+                        less == StorageEngine::PredicateTruth::True ? -1 : 1;
+                };
+                if (auto stats = collectArrayStatistics(a.statistics, sample, a.equality, a.ordering,
+                        a.elementEquality, compare, [] { checkForQueryInterrupt(); }))
+                    result.emplace(a.key, std::move(*stats));
+                continue;
+            }
             // The produced slots own their selected values. Release each
             // sample before the original full-scan statistics sort begins.
             auto sample = std::move(a.sample);
-            a.statistics.totalRows = seen_;
             bool supported = true;
             for (const auto& s : sample) if (!s.value.isNull && !s.tooWide &&
                 StorageEngine::compareValues(a.storage, s.value.value, false, s.value.value, false, "=")

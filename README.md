@@ -1,5 +1,16 @@
 # DBMS C++
 
+<!-- CURRENT_ANALYZED_ARRAY_COLLECTOR_20261105 -->
+
+## 数组统计采集与完整 ANALYZE 成本（2026-11-05，P12-C3）
+
+本批把真实数组存储输入接到同一次ANALYZE采样：保存整数组MCV/直方图/相关性，以及常见元素、按非NULL数组计算的成员频率和不同元素数直方图。实际验证integer/text/numeric/boolean/float8数组的NULL、空数组、字面NULL、重复值、多维/下界和冷读；其他元素类型及全部PostgreSQL功能仍需分别验收。
+
+最终私有普通后端P12-C3为 `7d3cc2a1353c105ecac62579a919ec96d088cd325fa74234bc47252061e1029a`，默认根程序425保持。完整pg_stats目录/17列SQL与output-only anyarray尚未接通，两条实际探针仍严格失败0A000；本批是采集阶段的partial进展，Goal active。
+
+原始测量、失败和复核见[压缩机器归档](docs/benchmarks/analyzed-array-collector-20261105.json.gz)及[性能报告](docs/performance-report-2026-10-30.md)。
+
+
 <!-- CURRENT_ANALYZED_SCALAR_COLLECTOR_20261105 -->
 
 ## 标量统计采集与 ANALYZE 优化（2026-11-05，P11-C4）
