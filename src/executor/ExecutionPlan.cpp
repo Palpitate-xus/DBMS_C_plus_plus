@@ -3,6 +3,7 @@
 #include "expression/ArrayDatumInput.h"
 #include "executor/PreparedTableSource.h"
 #include "executor/EqualityStatistics.h"
+#include "executor/LikePrefix.h"
 #include "executor/SortSpill.h"
 #include "executor/BoundedSortRuns.h"
 #include "executor/TypedSortSpill.h"
@@ -2082,9 +2083,168 @@ public:
     }
 };
 
+// Only an actual string literal behind the binder's builtin text coercion is
+// inspected. No CAST tree, parameter, routine or subquery is evaluated here.
+static std::optional<std::string> literalLikeInput(const Expr* input) {
+    while (const auto* cast = dynamic_cast<const CastExpr*>(input)) {
+        if (!cast->implicit || cast->typeName != "text" || !cast->typeMods.empty() ||
+            cast->preparedSubquery) return std::nullopt;
+        input = cast->operand.get();
+    }
+    const auto* literal = dynamic_cast<const LiteralExpr*>(input);
+    if (!literal || literal->preparedSubquery || !literal->typeName.empty() ||
+        literal->value.size() < 2 || literal->value.front() != '\'' ||
+        literal->value.back() != '\'') return std::nullopt;
+    ExprEvaluator evaluator;
+    const auto value = evaluator.eval(literal, RowContext{});
+    return value.isNull ? std::nullopt : std::optional<std::string>(value.value);
+}
+
+static std::optional<std::string> nativeLikePrefix(
+    const StorageEngine::Condition& condition, const TableSchema& schema) {
+    if (condition.op != "like" || condition.patternIsNull ||
+        condition.patternEscapeIsNull || !condition.patternEscapeColumn.empty())
+        return std::nullopt;
+    const Column* key = nullptr;
+    for (size_t i = 0; i < schema.len; ++i) {
+        if (schema.cols[i].dataName == condition.colName) key = &schema.cols[i];
+        if (!condition.decodedLiteralRhs && schema.cols[i].dataName == condition.value)
+            return std::nullopt;
+    }
+    if (!key || key->isArray || !key->domainName.empty() || key->generatedKind ||
+        (!key->collation.empty() && !key->resolvedCollationIsBinary))
+        return std::nullopt;
+    const auto type = ExprHelper::canonicalResultTypeName(key->dataType);
+    const auto patternType = ExprHelper::canonicalResultTypeName(condition.patternType);
+    if ((type != "text" && type != "character varying") ||
+        (!patternType.empty() && patternType != "unknown" && patternType != "text" &&
+         patternType != "character varying"))
+        return std::nullopt;
+    // The old normalizer's 0x01 escape envelope belongs to its matcher.
+    if (!condition.decodedLiteralRhs && condition.patternType.empty() &&
+        condition.value.find(char(1)) != std::string::npos)
+        return std::nullopt;
+    return planner_pattern::likePrefix(condition.value,
+        condition.patternEscape.value_or("\\"));
+}
+
+// Do not turn a visibly dense prefix into random heap fetches. Existing
+// native ANALYZE MCVs and fully covered equidepth buckets provide evidence of
+// density; straddling/unknown buckets contribute nothing to this guard, so a
+// rare prefix is not rejected just because the histogram is coarse. This is
+// a scan-cost guard, not PostgreSQL's full patternsel/correlation model.
+static bool densePrefixPrefersHeap(StorageEngine* engine, const std::string& database,
+    const std::string& table, const std::string& column, const std::string& prefix) {
+    size_t analyzedRows = 0;
+    if (!engine->tryGetTableRowCount(database, table, analyzedRows) || !analyzedRows)
+        return false;
+    const auto statistics = engine->getColumnStats(database, table, column);
+    double common = 0;
+    for (const auto& value : statistics.mcv)
+        if (value.first.compare(0,prefix.size(),prefix)==0) common += value.second;
+    double fraction = common / analyzedRows;
+    if (!statistics.histogram.empty()) {
+        size_t covered = 0;
+        for (const auto& bounds : statistics.histogram)
+            covered += bounds.first.compare(0,prefix.size(),prefix)==0 && bounds.second.compare(0,prefix.size(),prefix)==0;
+        const double nonnull = 1.0 - std::min(1.0,
+            static_cast<double>(statistics.nullCount) / analyzedRows);
+        fraction = std::max(fraction, nonnull * covered / statistics.histogram.size());
+    }
+    uint64_t runtimeRows = 0;
+    const double rows = getRuntimeLiveRowEstimate(database, table, runtimeRows)
+        ? static_cast<double>(runtimeRows) : static_cast<double>(analyzedRows);
+    const auto pages = engine->tableNumPages(database, table);
+    if (!pages || !rows) return false;
+    // Absent/truncated legacy slots are not evidence of a zero-cost probe.
+    // Use the ordinary planner's one-row costing floor for unknown/empty
+    // candidate estimates, while keeping the executor's true empty result.
+    const double index = QueryPlanner::costScan("index_scan",
+        std::max(1.0, rows * std::min(1.0, fraction)), 0);
+    const double heap = QueryPlanner::costScan("seq_scan", rows, pages);
+    return std::isfinite(index) && std::isfinite(heap) && index >= heap;
+}
+
+static OpPtr literalLikeTableSource(StorageEngine* engine, const std::string& database,
+    const std::shared_ptr<PreparedQuery>& query, const SelectStmt* select,
+    const TableSchema& schema, Operator* source) {
+    const auto* physical = dynamic_cast<const TableScanOp*>(source);
+    if (!physical || !query->parameters.empty() || !select->whereClause ||
+        !select->fromClause || select->fromClause->type != FromItem::Type::Table ||
+        schema.partitionType != TableSchema::PartitionType::None)
+        return {};
+    std::vector<const Expr*> conjuncts;
+    const auto gather = [&](const auto& self, const Expr* node) -> void {
+        const auto* binary = dynamic_cast<const BinaryOpExpr*>(node);
+        if (binary && binary->op == "AND") {
+            self(self, binary->left.get());
+            self(self, binary->right.get());
+        } else conjuncts.push_back(node);
+    };
+    gather(gather, select->whereClause.get());
+    for (const auto* node : conjuncts) {
+        const Expr* left = nullptr;
+        const Expr* right = nullptr;
+        const Expr* escape = nullptr;
+        if (const auto* binary = dynamic_cast<const BinaryOpExpr*>(node);
+            binary && binary->op == "LIKE") {
+            left = binary->left.get();
+            right = binary->right.get();
+        } else if (const auto* call = dynamic_cast<const FunctionCallExpr*>(node);
+                   call && call->schema.empty() && call->funcName == "LIKE ESCAPE" &&
+                   call->args.size() == 3 && call->namedArgs.empty() && !call->hasOver &&
+                   !call->filter && !call->distinct) {
+            left = call->args[0].get();
+            right = call->args[1].get();
+            escape = call->args[2].get();
+        } else continue;
+        const auto* column = dynamic_cast<const ColumnRefExpr*>(left);
+        if (!column || !column->binding || column->binding->scopeDepth ||
+            column->binding->mergedUsing || column->binding->columnOrdinal >= schema.len)
+            continue;
+        bool sameRange = false;
+        for (const auto& range : query->sourceRanges)
+            if (range.owner == select && range.source == select->fromClause.get() &&
+                range.ordinal == column->binding->sourceOrdinal) sameRange = true;
+        const auto& key = schema.cols[column->binding->columnOrdinal];
+        const auto type = ExprHelper::canonicalResultTypeName(key.dataType);
+        const auto& declaration = column->binding->typeMetadata;
+        if (!sameRange || key.isArray || !key.domainName.empty() || key.generatedKind ||
+            (type != "text" && type != "character varying") ||
+            ExprHelper::canonicalResultTypeName(column->binding->declaredType) != type ||
+            !declaration || declaration->kind != DatumKind::Scalar ||
+            declaration->actualOid != declaration->codecOid ||
+            (declaration->codecOid != 25 && declaration->codecOid != 1043) ||
+            (!key.collation.empty() && !key.resolvedCollationIsBinary))
+            continue;
+        const auto pattern = literalLikeInput(right);
+        const auto escapeValue = escape ? literalLikeInput(escape)
+            : std::optional<std::string>("\\");
+        if (!pattern || !escapeValue) continue;
+        const auto prefix = planner_pattern::likePrefix(*pattern, *escapeValue);
+        if (!prefix) continue;
+        const auto table = physical->tableName();
+        if (engine->rlsAppliesTo(database, table) ||
+            !engine->hasGiSTIndex(database, table, key.dataName)) continue;
+        if (densePrefixPrefersHeap(engine, database, table, key.dataName, *prefix))
+            continue;
+        std::vector<StorageEngine::Condition> bounds;
+        bounds.push_back({">=", key.dataName, *prefix});
+        bounds.push_back({"<", key.dataName,
+            planner_pattern::prefixCeiling(*prefix).value_or("\x7f")});
+        // The existing PreparedFilter remains above this candidate source;
+        // it owns the original LIKE, residual expressions and NULL semantics.
+        return std::make_unique<GiSTScanOp>(engine, database, table, bounds);
+    }
+    return {};
+}
+
 OpPtr makePreparedTableSource(StorageEngine* engine, const std::string& database,
     const std::shared_ptr<PreparedQuery>& query, SelectStmt* select,
     const TableSchema& schema, OpPtr source) {
+    if (auto narrowed = literalLikeTableSource(engine, database, query, select,
+                                               schema, source.get()))
+        return narrowed;
     const auto* physical = dynamic_cast<const TableScanOp*>(source.get());
     const auto* equality = dynamic_cast<const BinaryOpExpr*>(select->whereClause.get());
     if (!physical || !select->fromClause || select->fromClause->type != FromItem::Type::Table ||
@@ -4336,6 +4496,7 @@ bool GiSTScanOp::open() {
     else if (haveLo && isGist(loCol)) gistCol = loCol;
     else if (haveHi && isGist(hiCol)) gistCol = hiCol;
 
+    bool probedIndex = false;
     if (!gistCol.empty()) {
         // Missing side: use the widest possible bound.  The sidecar compares
         // textually, so an empty lo is below every key and a high sentinel
@@ -4344,24 +4505,24 @@ bool GiSTScanOp::open() {
         const std::string overlapHi = haveHi ? hi : "\x7f";
         rids_ = engine_->giSTSearchOverlap(dbname_, tablename_, gistCol,
                                            overlapLo, overlapHi);
+        probedIndex = true;
     } else {
         // Text-prefix predicate: LIKE 'prefix%' via the GiST containment
         // style (entry low <= prefix <= entry high is replaced by the
         // overlap with [prefix, prefix + sentinel]).
         for (const auto& c : conds_) {
-            if (c.op != "like" || c.value.empty()) continue;
-            if (c.value.back() != '%' || c.value.find('%') != c.value.size() - 1)
-                continue;  // only anchored prefixes
+            const auto prefix = nativeLikePrefix(c, tbl_);
+            if (!prefix) continue;
             if (!isGist(c.colName)) continue;
-            std::string prefix = c.value.substr(0, c.value.size() - 1);
             rids_ = engine_->giSTSearchOverlap(dbname_, tablename_, c.colName,
-                                               prefix, prefix + "\x7f");
+                *prefix, planner_pattern::prefixCeiling(*prefix).value_or("\x7f"));
+            probedIndex = true;
             break;
         }
     }
 
     const auto afterFence = engine_->indexReadSnapshotFence(dbname_);
-    const bool usedIndex = beforeFence && afterFence && *beforeFence == *afterFence;
+    const bool usedIndex = probedIndex && beforeFence && afterFence && *beforeFence == *afterFence;
     if (!usedIndex && !collectVisibleHeapCandidates(engine_, dbname_, tablename_, rids_)) {
         setError("snapshot gist heap fallback failed");
         return false;
@@ -8339,10 +8500,10 @@ static bool canUseGiSTScan(PlanningRelationMetadata& relation) {
         const bool isRange = condition.op == "<" || condition.op == "<=" ||
                              condition.op == ">" || condition.op == ">=";
         if (isRange && isGist(condition.colName)) return true;
-        if (condition.op == "like" && !condition.value.empty() &&
-            condition.value.back() == '%' &&
-            condition.value.find('%') == condition.value.size() - 1 &&
-            isGist(condition.colName)) {
+        if (const auto prefix = nativeLikePrefix(condition, relation.table);
+            prefix && isGist(condition.colName) &&
+            !densePrefixPrefersHeap(relation.engine, relation.context.dbname,
+                relation.context.tablename, condition.colName, *prefix)) {
             return true;
         }
     }
@@ -9698,6 +9859,12 @@ static std::string jsonEscape(const std::string& s) {
         else if (c == '\n') out += "\\n";
         else if (c == '\r') out += "\\r";
         else if (c == '\t') out += "\\t";
+        else if (static_cast<unsigned char>(c) < 0x20) {
+            static constexpr char hex[] = "0123456789abcdef";
+            out += "\\u00";
+            out += hex[static_cast<unsigned char>(c) >> 4];
+            out += hex[static_cast<unsigned char>(c) & 15];
+        }
         else out += c;
     }
     return out;
@@ -9775,6 +9942,16 @@ static std::pair<std::string, CostEstimate> explainOpJson(Operator* op,
         est = bitmapExplainEstimate(engine, dbname, table);
         json += "\"nodeType\":\"BitmapOrHeapScan\",";
         json += "\"table\":\"" + jsonEscape(table) + "\",";
+        json += jsonCostRows(est, opts);
+        json += "\"children\":[]";
+
+    } else if (auto* gist = dynamic_cast<GiSTScanOp*>(op)) {
+        est.rows = std::max(1.0, static_cast<double>(
+            plannerRowEstimate(engine, dbname, gist->tableName())));
+        est.cost = est.rows * 3.0;
+        json += "\"nodeType\":\"GiSTScan\",";
+        json += "\"table\":\"" + jsonEscape(gist->tableName()) + "\",";
+        json += "\"indexCond\":\"" + jsonEscape(gist->describeConds()) + "\",";
         json += jsonCostRows(est, opts);
         json += "\"children\":[]";
 

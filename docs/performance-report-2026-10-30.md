@@ -1,5 +1,98 @@
 # 数据库操作性能测试报告（2026-10-30）
 
+<!-- CURRENT_LITERAL_LIKE_SCAN_20261105 -->
+
+## LIKE前缀的真实索引读取与密集前缀成本（2026-11-05，P17-C6）
+
+普通无参数SELECT中的TEXT/VARCHAR字面量LIKE现在可实际使用已有GiST侧索引。已绑定AST提供真实关系/列身份；前缀范围只筛选候选，原类型化LIKE、AND剩余条件和NULL语义继续复查。转义百分号/下划线、多字节ESCAPE、UTF8上界以及打开前删除索引均有回归。可用ANALYZE的MCV与完整覆盖直方图桶识别密集前缀，按真实表extent和成本参数保留堆扫描；未知探测至少计1行成本。
+
+同一4096行×3列、父代／最终C6／同一父代回测各3进程交错运行；wall中位数变化（正数为减少，相对首轮／回测）：热点前缀（3200行）6.88%／-3.83%；低频前缀（1行）68.01%／67.77%；不存在前缀（0行）69.40%／68.72%；显式ESCAPE前缀（1行）71.84%／71.06%。仅代表本负载；C3热点超过3倍耗时的失败尝试完整保留。
+
+最终C6通过新原生310检查、原13068与独立冷读105检查、37个相关原生入口；纯前缀组件O2和ASan/UBSan各72567检查，启用泄漏检测。新123条协议命令含27次实际扫描断言；32个相关旧协议入口29正常0、3项严格失败与父代完整观察相同。真实PG18.6以两个会话重放共享65条SQL，935个完整字段/NULL/OID逐项相同，3个EXPLAIN ANALYZE实际行数相同；未比较PG的AM路径、成本或速度。
+
+### 实现与主源调研
+
+[PG18.6 like_support.c](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/utils/adt/like_support.c)从模式导出必要索引条件，并保留原模式复查；[SQLite LIKE优化](https://www.sqlite.org/optoverview.html#the_like_optimization)同样要求合适的声明、模式和排序语义。[DuckDB LikeOptimizationRule](https://github.com/duckdb/duckdb/blob/main/src/optimizer/rule/like_optimizations.cpp)识别常量、前缀等模式并重写表达式。这些是实现调研，没有运行SQLite/DuckDB速度对照。PG主源/COPYRIGHT、DuckDB固定commit源码/LICENSE与SQLite页面及SHA随归档保留；不是直接移植这些数据库的索引实现。
+
+只从当前Select真实source occurrence、scopeDepth=0且非mergedUsing的已绑定列提取必要条件；需要原生text/varchar声明、无参数帧、非分区、无生成/域/数组及可用现有索引，并沿用RLS边界。只有UNKNOWN字符串字面量及binder的内置隐式text包裹可供检查；不执行参数、例程、子查询、显式CAST或任意常量树。OR/NOT等不能证明的条件保留原路径。AND可取其中必要的LIKE前缀，整个原谓词仍由既有PreparedFilter执行，没有改provider或retained-plan生命周期。
+
+LIKE前缀按Unicode字符和实际ESCAPE解析；整个模式均检查，尾部非法escape或无固定前缀时不提前改变错误需求。范围上界保持有效UTF8，跨U+00FF/U+07FF/代理区及U+10FFFF正确进位；GiST包含式上界可能多取一个候选，由原谓词排除。原生Condition路径也使用同一规则，修正此前把下划线或转义符当作固定前缀而漏行的情况。GiST在打开时没有探测到索引则读取完整可见堆；既有前后snapshot fence、旧快照/读己写fallback、TOAST、NULL与损坏错误仍在原执行路径。
+
+GiST的JSON EXPLAIN现在有实际GiSTScan节点和条件字段；索引条件内控制字符正确转义。显示成本仍为旧候选上界模型，不是完整PG cost/选择率模型。新前缀成本只读取现有native .stats的可用MCV与完整覆盖桶；不把跨桶位置当作精确行数，不把未知探测当成0成本。未接入typed .analyzed_statistics槽，未修旧统计持久化格式或R291发布/重试问题。[PG costsize.c](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/optimizer/path/costsize.c)的clamp_row_est同样对普通估计使用至少1行；这里保留实际空结果，不把成本下限写成实际行数。
+
+### 正确性与完整观察
+
+最终C6通过新原生310检查、原13068与独立冷读105检查、37个相关原生入口；纯前缀组件O2和ASan/UBSan各72567检查，启用泄漏检测。新123条协议命令含27次实际扫描断言；32个相关旧协议入口29正常0、3项严格失败与父代完整观察相同。真实PG18.6以两个会话重放共享65条SQL，935个完整字段/NULL/OID逐项相同，3个EXPLAIN ANALYZE实际行数相同；未比较PG的AM路径、成本或速度。
+
+本批私有普通后端C6 SHA256：e106a4c3c1e855892a5a7bdc410d4818191e20440416969a1f85fdc6c14559c0。
+
+新原生同源父代、新旧候选与最终版本的完整输出均保留。直接原生API、普通SQL、text/varchar值、真实JSON节点、通配符/ESCAPE、全部行/NULL/空串/字面NULL/UTF8/换行、密集前缀成本切换及建计划后DROP INDEX均检查。新普通协议还验证真实seq/idx计数、AND/OR、NOT/ILIKE/非固定前缀和列模式、别名、旧快照历史键、读己写与DROP后的读取。强制低random_page_cost用于功能路径验证，另恢复普通成本验证密集前缀回堆；SQL语义不要求每种LIKE必须使用索引。
+
+补齐7项缺失E2E注册（本批1项、此前6项），原有667项顺序及其余构建脚本逐字保持；现在674个唯一入口覆盖654份独立E2E文件，库存检查通过。补跑新增调度的3个统计auto协议均正常0，未运行完整注册套件。
+
+37个相关原生入口实际链接最终C6同一61核心对象；恢复入口含7个exec隔离worker、1974检查和14份完整子进程输出。纯组件SAN只覆盖该前缀组件，不是全库SAN。32个旧协议保留name257控制70失败、timetz2563控制314失败及table_structured表达式别名排序原断言；完整观察与父代相同（仅name私有UUID归一），未删改原2358个测试。原R151整个NetworkServer.cpp保持，原341/103矩阵未运行。
+
+最初C1的Unicode上界性质测试及真实JSON文本校验失败，C2改为有效Unicode上界；C3再统一原生模式提取和JSON转义。C3实际网络计时显示稀疏前缀获益、热点因大量随机堆读取退化，最终加入密度成本选择。C4编译因使用C++20的starts_with而被项目实际C++17配置拒绝，未生成新程序/对象；C5改用兼容比较。C5协议成本控制又暴露旧.stats换行记录导致槽不完整、未知密度直接跳过成本比较，C6补成本下限。诊断和所有失败保留，未冒称修复旧格式。一次37项驱动误用了不存在的桩对象，只有编译/链接失败、没有实际测试退出；更正路径后在最终C6重新构建并运行。当前生产和原生配置仍为C++17，收益不是语言标准升级。
+
+PG18.6/en_US.UTF-8私有集群默认fsync，init/start/stop实际0；共享65条SQL包括完整模式结果、三个ANALYZE实际行数、两个真实会话RR和自身写入。排除58条DBMS专有auto_analyze、访问计数及本地GiST(text) DDL；没有把它们翻译成声称相同的PG索引。无ORDER BY按完整多重集比较，NULL和重复完整保留。
+
+### 真实网络成本
+
+两轮均固定9个独立服务，(父代、候选、同一父代回测)×3；同一4096行/3列/512NULL键/3200热点键，i×37置换插入，真实GiST与ANALYZE。热点每段2次，低频/不存在/显式ESCAPE各8次。计时从SimpleQuery发送至完整网络收包，包含解析/绑定/物理源/完整谓词/投影/编码；建表、装载、统计、完整总体、每项一次预检与计数读取在时钟外。运行时验证全部堆和两种统计映像逐字不变，实际扫描增量逐项记录。
+
+所有值为整段毫秒中位数[min,max]；服务CPU取存活整个服务进程POSIX CPU clock，另保留客户端CPU。OS缓存未清空或固定，只有每组3个进程，所有尾部保留，无计时查询重试。不能将它们推广为所有操作、统计显著性或PG速度。
+
+| C3未做密度选择 wall（ms） | 父代首轮 | 候选 | 同一父代回测 |
+| --- | ---: | ---: | ---: |
+| 热点前缀（3200行） | 515.511 [511.283, 528.725] | 1672.119 [1666.821, 1685.991] | 463.215 [459.018, 526.455] |
+| 低频前缀（1行） | 1512.279 [1435.194, 1552.228] | 440.717 [416.462, 452.562] | 1516.853 [1457.653, 1524.777] |
+| 不存在前缀（0行） | 1506.485 [1442.421, 1546.203] | 436.849 [416.215, 458.133] | 1444.483 [1410.042, 1535.446] |
+| 显式ESCAPE前缀（1行） | 1844.807 [1808.003, 1859.143] | 444.208 [427.079, 444.820] | 1890.533 [1838.830, 1890.625] |
+
+| 最终C6 wall（ms） | 父代首轮 | 候选 | 同一父代回测 |
+| --- | ---: | ---: | ---: |
+| 热点前缀（3200行） | 503.333 [496.029, 519.791] | 468.726 [459.447, 1273.544] | 451.419 [439.751, 458.533] |
+| 低频前缀（1行） | 1452.066 [1443.031, 1573.533] | 464.535 [410.993, 5152.559] | 1441.343 [1414.375, 1458.524] |
+| 不存在前缀（0行） | 1457.111 [1432.544, 1479.739] | 445.888 [420.630, 4060.971] | 1425.428 [1420.883, 1607.018] |
+| 显式ESCAPE前缀（1行） | 1807.962 [1752.703, 1880.186] | 509.105 [423.692, 2359.130] | 1759.097 [1736.511, 2898.080] |
+
+| 最终C6 server process CPU（ms） | 父代首轮 | 候选 | 同一父代回测 |
+| --- | ---: | ---: | ---: |
+| 热点前缀（3200行） | 445.300 [435.961, 471.037] | 394.886 [384.146, 509.872] | 393.527 [364.385, 432.037] |
+| 低频前缀（1行） | 1392.850 [1378.555, 1457.672] | 397.430 [370.164, 768.994] | 1379.956 [1345.988, 1394.235] |
+| 不存在前缀（0行） | 1386.687 [1355.736, 1412.784] | 382.361 [376.702, 727.983] | 1362.046 [1338.449, 1372.523] |
+| 显式ESCAPE前缀（1行） | 1705.883 [1677.427, 1772.100] | 443.488 [380.616, 719.382] | 1689.967 [1676.036, 1960.649] |
+
+热点前缀（3200行）：wall相对首轮/回测变化（正数为减少）6.88%/-3.83%，基线漂移-10.31%；server CPU相对首轮/回测变化（正数为减少）11.32%/-0.35%，基线漂移-11.63%；
+
+低频前缀（1行）：wall相对首轮/回测变化（正数为减少）68.01%/67.77%，基线漂移-0.74%；server CPU相对首轮/回测变化（正数为减少）71.47%/71.20%，基线漂移-0.93%；
+
+不存在前缀（0行）：wall相对首轮/回测变化（正数为减少）69.40%/68.72%，基线漂移-2.17%；server CPU相对首轮/回测变化（正数为减少）72.43%/71.93%，基线漂移-1.78%；
+
+显式ESCAPE前缀（1行）：wall相对首轮/回测变化（正数为减少）71.84%/71.06%，基线漂移-2.70%；server CPU相对首轮/回测变化（正数为减少）74.00%/73.76%，基线漂移-0.93%；
+
+unsuccessful_C3_cost：9/9服务正常0，逐帧独立复核234计时回复、18完整总体、480870字段/18630NULL与36物理映像哈希。完整索引候选数和真正堆/索引扫描增量独立核对；不冒称独立解析全部存储页。
+
+cost：9/9服务正常0，逐帧独立复核234计时回复、18完整总体、480870字段/18630NULL与36物理映像哈希。完整索引候选数和真正堆/索引扫描增量独立核对；不冒称独立解析全部存储页。
+
+### 尚未完成的范围与版本
+
+Typed .analyzed_statistics optimizer consumption is still incomplete. Existing native .stats delimiter/newline values can make some legacy slots unreadable; dense-prefix costing uses available MCV/fully covered histogram buckets and a one-row unknown-probe floor, not a repaired persistence format.
+
+This is not a full PG patternsel/opclass/correlation/startup model. The native GiST sidecar still scans its file linearly; cost calibration, full PG GiST trees/operator classes and typed histogram selection remain open.
+
+Positive plain-string literal LIKE over the existing single physical text/varchar source is covered. Parameter frames, computed/nonconstant patterns, explicit CAST trees, ILIKE/NOT LIKE, nonbinary explicit collations and other source/type owners retain their existing path; no deferred retained/custom/generic/portal/format2 or mutation/provider lifecycle work resumed.
+
+All short measurements, before-return drift and C3 hot regressions are retained; three processes per group are descriptive evidence, not statistical significance, all-operation throughput or PostgreSQL speed equivalence.
+
+Original name257/70failed, timetz2563/314failed and table_structured expression-alias-sort strict observations remain parent-identical, not accepted full-suite success. Original R151341/103 matrix not run.
+
+Original273 objects/status22complete166partial70unverified15deferred and267 histories remain exact; append1partial=>268.754MDpaths725protected,16oldgzip preserved. Goal active, direct master, no push/default/service promotion.
+
+原273完整对象和22/166/70/15状态、267条历史保持，追加1条partial后268。原2358测试逐字保持，新3后2361；源246/头175，顶层CPP1104含桩/嵌套5。更新8份现有文档，无新增Markdown；754路径/725保护记录保持。旧16份gzip与清单项保留，新1后17，原大JSON压缩政策继续。直接master本地提交，默认425程序与服务保持；Goal active。
+详见[性能报告](performance-report-2026-10-30.md)与[压缩原始证据](benchmarks/like-prefix-scan-20261105.json.gz)。本批仍为partial，Goal active。
+
+
 <!-- CURRENT_ORDINARY_QUERY_PROFILE_20261105 -->
 
 ## 普通查询的规划元数据与解析开销（2026-11-05，P16-C2）

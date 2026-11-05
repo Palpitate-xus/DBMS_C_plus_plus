@@ -1,5 +1,14 @@
 # DBMS C++
 
+<!-- CURRENT_LITERAL_LIKE_SCAN_20261105 -->
+
+## LIKE前缀的真实索引读取与密集前缀成本（2026-11-05，P17-C6）
+
+普通无参数SELECT中的TEXT/VARCHAR字面量LIKE现在可实际使用已有GiST侧索引。已绑定AST提供真实关系/列身份；前缀范围只筛选候选，原类型化LIKE、AND剩余条件和NULL语义继续复查。转义百分号/下划线、多字节ESCAPE、UTF8上界以及打开前删除索引均有回归。可用ANALYZE的MCV与完整覆盖直方图桶识别密集前缀，按真实表extent和成本参数保留堆扫描；未知探测至少计1行成本。
+
+详见[性能报告](docs/performance-report-2026-10-30.md)与[压缩原始证据](docs/benchmarks/like-prefix-scan-20261105.json.gz)。本批仍为partial，Goal active。
+
+
 <!-- CURRENT_ORDINARY_QUERY_PROFILE_20261105 -->
 
 ## 普通查询的规划元数据与解析开销（2026-11-05，P16-C2）

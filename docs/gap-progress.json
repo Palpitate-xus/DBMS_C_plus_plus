@@ -2,6 +2,39 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-05 literal LIKE prefix physical reads, dense-prefix cost guard and GiST JSON/UTF8 correctness",
+      "gap_ids": [
+        "OPT-04",
+        "OPT-16"
+      ],
+      "status": "partial",
+      "evidence": [
+        "src/executor/ExecutionPlan.cpp",
+        "src/executor/LikePrefix.h",
+        "docs/performance-report-2026-10-30.md",
+        "docs/benchmarks/like-prefix-scan-20261105.json.gz"
+      ],
+      "tests": [
+        "tests/like_prefix_scan_protocol_e2e_test.py",
+        "tests/like_prefix_scan_test.cpp",
+        "tests/like_prefix_test.cpp"
+      ],
+      "verification": {
+        "implementation": "普通无参数SELECT中的TEXT/VARCHAR字面量LIKE现在可实际使用已有GiST侧索引。已绑定AST提供真实关系/列身份；前缀范围只筛选候选，原类型化LIKE、AND剩余条件和NULL语义继续复查。转义百分号/下划线、多字节ESCAPE、UTF8上界以及打开前删除索引均有回归。可用ANALYZE的MCV与完整覆盖直方图桶识别密集前缀，按真实表extent和成本参数保留堆扫描；未知探测至少计1行成本。",
+        "correctness": "最终C6通过新原生310检查、原13068与独立冷读105检查、37个相关原生入口；纯前缀组件O2和ASan/UBSan各72567检查，启用泄漏检测。新123条协议命令含27次实际扫描断言；32个相关旧协议入口29正常0、3项严格失败与父代完整观察相同。真实PG18.6以两个会话重放共享65条SQL，935个完整字段/NULL/OID逐项相同，3个EXPLAIN ANALYZE实际行数相同；未比较PG的AM路径、成本或速度。",
+        "performance": "同一4096行×3列、父代／最终C6／同一父代回测各3进程交错运行；wall中位数变化（正数为减少，相对首轮／回测）：热点前缀（3200行）6.88%／-3.83%；低频前缀（1行）68.01%／67.77%；不存在前缀（0行）69.40%／68.72%；显式ESCAPE前缀（1行）71.84%／71.06%。仅代表本负载；C3热点超过3倍耗时的失败尝试完整保留。",
+        "preservation": "273fullobjects267oldhistories exact,new268partial;2358oldtests exact+3=>2361;246source175headers,754MD725protected,16oldgzip exact+1=>17;masterlocal,no push/default/service,Goalactive.",
+        "remaining": [
+          "Typed .analyzed_statistics optimizer consumption is still incomplete. Existing native .stats delimiter/newline values can make some legacy slots unreadable; dense-prefix costing uses available MCV/fully covered histogram buckets and a one-row unknown-probe floor, not a repaired persistence format.",
+          "This is not a full PG patternsel/opclass/correlation/startup model. The native GiST sidecar still scans its file linearly; cost calibration, full PG GiST trees/operator classes and typed histogram selection remain open.",
+          "Positive plain-string literal LIKE over the existing single physical text/varchar source is covered. Parameter frames, computed/nonconstant patterns, explicit CAST trees, ILIKE/NOT LIKE, nonbinary explicit collations and other source/type owners retain their existing path; no deferred retained/custom/generic/portal/format2 or mutation/provider lifecycle work resumed.",
+          "All short measurements, before-return drift and C3 hot regressions are retained; three processes per group are descriptive evidence, not statistical significance, all-operation throughput or PostgreSQL speed equivalence.",
+          "Original name257/70failed, timetz2563/314failed and table_structured expression-alias-sort strict observations remain parent-identical, not accepted full-suite success. Original R151341/103 matrix not run.",
+          "Original273 objects/status22complete166partial70unverified15deferred and267 histories remain exact; append1partial=>268.754MDpaths725protected,16oldgzip preserved. Goal active, direct master, no push/default/service promotion."
+        ]
+      }
+    },
+    {
       "issue": "2026-11-05 ordinary-query relation metadata reuse and speculative type-constant parser cost",
       "gap_ids": [
         "OPT-04"

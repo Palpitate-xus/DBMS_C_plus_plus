@@ -95,6 +95,16 @@
       "roundtrip_bytes_exact": true
     },
     {
+      "original_path": "docs/benchmarks/like-prefix-scan-20261105.json",
+      "original_bytes": 27539339,
+      "original_sha256": "c05bb823c41e3d7067a88ebbcc66b71f9a6e6db86f981c49c239282a0aaa0230",
+      "path": "docs/benchmarks/like-prefix-scan-20261105.json.gz",
+      "bytes": 2395985,
+      "sha256": "6db1309260b7d0f03fbccd6f6bd6172a3c375d3de8da11c1da312f2f47a2d78a",
+      "encoding": "gzip",
+      "roundtrip_bytes_exact": true
+    },
+    {
       "original_path": "docs/benchmarks/ordinary-query-profile-20261105.json",
       "original_bytes": 35077781,
       "original_sha256": "7e84792bbba35ab015010299d3dd26aeb1da8d786440db51255a5568c90aee85",
@@ -165,6 +175,6 @@
       "roundtrip_bytes_exact": true
     }
   ],
-  "total_original_bytes": 301344393,
-  "total_bytes": 44644688
+  "total_original_bytes": 328883732,
+  "total_bytes": 47040673
 }
