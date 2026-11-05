@@ -2,6 +2,33 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-05 runtime CPU dispatch for shared index CRC32C with exact file compatibility",
+      "gap_ids": [
+        "WAL-06",
+        "IDX-07"
+      ],
+      "status": "partial",
+      "evidence": [
+        "src/access/IndexChecksum.h",
+        "docs/performance-report-2026-10-30.md",
+        "docs/benchmarks/index-crc32c-20261105.json.gz"
+      ],
+      "tests": [
+        "tests/index_checksum_dispatch_test.cpp"
+      ],
+      "verification": {
+        "implementation": "Shared Hash/Bloom/GIN/BRIN/GiST/SP-GiST CRC32C uses immutable portable table and CPU-guarded local SSE4.2 function, no new CRC local-static initialization/synchronization, no global ISA requirement or file/API/checksum weakening.",
+        "correctness": "Final CRC native44392; scoped O2 and ASan/UBSan44392; qemu64 no-SSE35520/max44392, concurrent first use and forked CRC. Cross-version actual12 workers3840 cells/NULL/point/nativeRID assertions; six whole rebuilt/mutated index files exact with old/new/portable and42 independent scalar CRC images. 68native67normal0+1 parent-identical TOAST abort; 32protocol29normal0+3 complete parent-identical failures; old39/123/65 and checksum corruption gates0; 3serial auto0; PG18.6 shared37/1287; restore7/2477/14 streams.",
+        "performance": "热点前缀 18.62%／-0.48%；热点等值 3.68%／0.90%；低频前缀 11.82%／14.98%；低频等值 -12.80%／-22.17%；不存在等值 6.78%／0.48%；主键控制 -1.07%／-6.83%; nine normal full-socket processes fixed old/new/same-old with independent raw wire and image validation, all CPU/wall/client samples and negatives retained. Not six-family maintenance speed evidence.",
+        "preservation": "273 full objects/statuses270histories exact,new271partial;2367oldtests exact+1=>2368;248source177headers754MD725protected19oldgzip exact+1=>20;masterlocal,no push/default/service,Goalactive.",
+        "remaining": [
+          "ARM hardware and full PG CPU dispatch/software algorithms remain unimplemented/unverified; emulator is not physical CPU performance.",
+          "Not full metadata checksum, enable/disable/rewrite/online verifier, PG GiST tree/opclass/KNN/WAL or global cost/throughput equivalence.",
+          "All user-deferred owners, original R151 matrix, original test expectations and default executable remain unchanged."
+        ]
+      }
+    },
+    {
       "issue": "2026-11-05 GiST current-read owner fence and visible tuple NULL fallback",
       "gap_ids": [
         "IDX-07",

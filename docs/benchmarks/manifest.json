@@ -105,6 +105,16 @@
       "roundtrip_bytes_exact": true
     },
     {
+      "original_path": "docs/benchmarks/index-crc32c-20261105.json",
+      "original_bytes": 26445435,
+      "original_sha256": "2ca277da45c70b561eb217e723f7a9a46dd3923fab914eebbc9c999e663dc372",
+      "path": "docs/benchmarks/index-crc32c-20261105.json.gz",
+      "bytes": 1784030,
+      "sha256": "972abc8cefb8babdd94f6652536a158461e24f31c9a61b544759d0ebbba13110",
+      "encoding": "gzip",
+      "roundtrip_bytes_exact": true
+    },
+    {
       "original_path": "docs/benchmarks/like-prefix-scan-20261105.json",
       "original_bytes": 27539339,
       "original_sha256": "c05bb823c41e3d7067a88ebbcc66b71f9a6e6db86f981c49c239282a0aaa0230",
@@ -195,6 +205,6 @@
       "roundtrip_bytes_exact": true
     }
   ],
-  "total_original_bytes": 421117102,
-  "total_bytes": 56226003
+  "total_original_bytes": 447562537,
+  "total_bytes": 58010033
 }
