@@ -19,7 +19,7 @@
 
 P10完成完整17字段/7类槽的拥有值快照基础，保存真实的关系/属性/继承键、类型声明、操作符和collation身份及可空numbers/values。真实PG18.6确认数组列MCV的元素OID1007、常见元素23、范围长度701，以及多范围bounds使用范围3904；本模型可保存这些不同身份。
 
-SQL侧尚未接入：两条完整17列探针仍0A000，采集算法、真实view/attribute来源、anyarray输出和现有权限消费者接入仍待实现，不以内部组件通过关闭pg_stats或原功能族。编码CPU对照只针对本批新组件，未测PostgreSQL性能或普通SQL提速。[报告](performance-report-2026-10-30.md#完整统计视图的快照基础2026-11-05p10)与[归档](benchmarks/analyzed-statistics-snapshot-20261105.json)。
+SQL侧尚未接入：两条完整17列探针仍0A000，采集算法、真实view/attribute来源、anyarray输出和现有权限消费者接入仍待实现，不以内部组件通过关闭pg_stats或原功能族。编码CPU对照只针对本批新组件，未测PostgreSQL性能或普通SQL提速。[报告](performance-report-2026-10-30.md#完整统计视图的快照基础2026-11-05p10)与[归档](benchmarks/analyzed-statistics-snapshot-20261105.json.gz)。
 
 原273项仍为22 complete /166 partial /70 unverified /15 deferred_by_user；Goal active。下方旧节保留各批次当时结果。
 
@@ -30,7 +30,7 @@ SQL侧尚未接入：两条完整17列探针仍0A000，采集算法、真实view
 
 P9-C2 `30c57ca8…` 补的是本项目存储生命周期可靠性：两处实际use-after-free已修复，原七阶段恢复及完整Memcheck本次通过。它不等于PostgreSQL完整恢复/epoch/跨进程准入或所有退出时序等价。正常Main保留5项探针元数据差异，完整17字段pg_stats仍为后续工作。
 
-本批9次完整恢复对照未证明稳定提速；没有重测PostgreSQL速度或全部35操作/36查询。默认425保持。原失败与新版本证据见[报告](performance-report-2026-10-30.md#存储退出期生命周期2026-11-05p9-c2)及[归档](benchmarks/relation-list-engine-lifetime-20261105.json)。
+本批9次完整恢复对照未证明稳定提速；没有重测PostgreSQL速度或全部35操作/36查询。默认425保持。原失败与新版本证据见[报告](performance-report-2026-10-30.md#存储退出期生命周期2026-11-05p9-c2)及[归档](benchmarks/relation-list-engine-lifetime-20261105.json.gz)。
 
 原273项仍为22 complete /166 partial /70 unverified /15 deferred_by_user，Goal active。下方旧节保留当时版本的结果。
 
@@ -41,7 +41,7 @@ P9-C2 `30c57ca8…` 补的是本项目存储生命周期可靠性：两处实际
 
 本批P8-C3 `d778afbd…` 参照恢复后事务分配器必须超过导入事务号的原则，补入本项目公开恢复的只读水位扫描和持久推进；这不等于PostgreSQL的WAL恢复、epoch/wrap或并发机制。较早目标首次探针1→4行得到实际验证，正常Main仍有5项探针元数据差异，最终七阶段原生验收仍因advance阶段异常退出而严格失败。
 
-第二轮仅比较本项目旧P7-C1/C2/C3/旧P7-C1：C3 wall p50较两次旧版低4.16%/6.42%，process CPU低2.47%/3.17%。第一轮C2慢项、6.8秒与18.5秒长尾不删除；没有PostgreSQL速度或完整35/36新结论，默认425未提升。跨进程准入、完整恢复失败及完整17字段pg_stats仍开放，不能把少数字段renderer当视图完成。详见[完整报告](performance-report-2026-10-30.md#物理恢复事务号水位2026-11-05p8-c3)和[机器归档](benchmarks/restore-transaction-horizon-20261105.json)。
+第二轮仅比较本项目旧P7-C1/C2/C3/旧P7-C1：C3 wall p50较两次旧版低4.16%/6.42%，process CPU低2.47%/3.17%。第一轮C2慢项、6.8秒与18.5秒长尾不删除；没有PostgreSQL速度或完整35/36新结论，默认425未提升。跨进程准入、完整恢复失败及完整17字段pg_stats仍开放，不能把少数字段renderer当视图完成。详见[完整报告](performance-report-2026-10-30.md#物理恢复事务号水位2026-11-05p8-c3)和[机器归档](benchmarks/restore-transaction-horizon-20261105.json.gz)。
 
 原273项仍为22 complete /166 partial /70 unverified /15 deferred_by_user；Goal active。下方旧节保留各批次当时结果，不能覆盖本节的失败与范围。
 
@@ -74,7 +74,7 @@ P9-C2 `30c57ca8…` 补的是本项目存储生命周期可靠性：两处实际
 
 本批是425/C2/425内部实测，没有新PG速度测量或功能族关闭。原273仍22 complete /166 partial /70 unverified /15 deferred_by_user，生成列需求/赋值与更多组合仍开放；Goal active。
 
-详见[完整性能报告](performance-report-2026-10-30.md)和[本批机器归档](benchmarks/analyze-reindex-main-costs-20261104.json)。下方旧批次保留其当时结论，当前以本节与报告首节为准。
+详见[完整性能报告](performance-report-2026-10-30.md)和[本批机器归档](benchmarks/analyze-reindex-main-costs-20261104.json.gz)。下方旧批次保留其当时结论，当前以本节与报告首节为准。
 
 ## C4功能与完整成本记录（2026-11-04）
 
@@ -84,7 +84,7 @@ P9-C2 `30c57ca8…` 补的是本项目存储生命周期可靠性：两处实际
 
 固定301仍188匹配/113差异，其他四组结果未变；生成列赋值/需求、历史位图、quoted routine元数据、更多目录/输入/来源形式仍开放。原273为22 complete /166 partial /70 unverified /15 deferred_by_user，251项未标记完成。新数据为内部425/C4/425对照，没有新增PG速度测量或稳定跨版本倍率。
 
-详见[本批报告](performance-report-2026-10-30.md#returning-声明真实行值与操作热路径2026-11-04)及[机器归档](benchmarks/returning-declarations-hotpaths-20261104.json)。以下为历史记录。
+详见[本批报告](performance-report-2026-10-30.md#returning-声明真实行值与操作热路径2026-11-04)及[机器归档](benchmarks/returning-declarations-hotpaths-20261104.json.gz)。以下为历史记录。
 
 ## 本批局部能力与距离（2026-11-03）
 
@@ -92,13 +92,13 @@ C3 `425165af…` 在真实RETURNING所有者内保存已经求值的拥有值，
 
 辅助求值循环的请求次数与字节减少，但公开游标512行分配不变、单次冷CPU20.750→35.862ms变慢；没有新的PG速度对照，也不能将局部构造收益解释为整SQL或所有数据库操作加速。
 
-只读共享内置函数注册表用于减少重复构造，同时保留实际实例覆盖、时钟及参数求值期间的回调替换；这属于本项目内部实现，不代表与PG执行器等价。C3原生选取57为56/1，协议选取32为24/8；最终S3/C3/S3全部36组查询p50低于两次S3：相对首/末降低2.05–33.76%/1.76–29.81%，基线漂移−22.57%至+11.58%。另一组C8/C3/C8的35类操作仍为18快/2慢/15居间，保留update_range、reindex慢项及−90.28%至+130.91%漂移；两种对照不拼成跨版本稳定倍率，没有新的PG速度对照或统计显著性结论。完整代别与原失败见[本批报告](performance-report-2026-10-30.md#内置函数注册与复合-returning2026-11-03)。原273仍22 complete /166 partial /70 unverified /15 deferred_by_user；独立机器归档见[全部原始统计](benchmarks/function-registry-returning-20261103.json)。以下C8/C7为历史评估。
+只读共享内置函数注册表用于减少重复构造，同时保留实际实例覆盖、时钟及参数求值期间的回调替换；这属于本项目内部实现，不代表与PG执行器等价。C3原生选取57为56/1，协议选取32为24/8；最终S3/C3/S3全部36组查询p50低于两次S3：相对首/末降低2.05–33.76%/1.76–29.81%，基线漂移−22.57%至+11.58%。另一组C8/C3/C8的35类操作仍为18快/2慢/15居间，保留update_range、reindex慢项及−90.28%至+130.91%漂移；两种对照不拼成跨版本稳定倍率，没有新的PG速度对照或统计显著性结论。完整代别与原失败见[本批报告](performance-report-2026-10-30.md#内置函数注册与复合-returning2026-11-03)。原273仍22 complete /166 partial /70 unverified /15 deferred_by_user；独立机器归档见[全部原始统计](benchmarks/function-registry-returning-20261103.json.gz)。以下C8/C7为历史评估。
 
 ## 当前评估（2026-11-03）
 
 C8 `91d339db…` 保留原始类型行物化的局部分配优化，没有扩大类型、目录或DML的兼容范围。26原生/31协议选取集及301/83/111/68/16固定观察与C7连续，301仍有114差异、REGTYPE68仍有11普通缺口；原273状态不变。
 
-512行公开游标累计请求与字节减少，但完整查询36组为5快/18慢/13居间：64kB为0/9/3，4MB为4/2/6，16MB为1/7/4。两次S3基线漂移全部保留，不能用跨窗口数据构造稳定C7→C8倍率，也没有新的PostgreSQL速度采样。源码保留该优化，默认安装仍为S3；详见[本批报告](performance-report-2026-10-30.md#原始类型行物化分配优化2026-11-03)及[机器归档](benchmarks/owned-datum-primitive-20261103.json)。
+512行公开游标累计请求与字节减少，但完整查询36组为5快/18慢/13居间：64kB为0/9/3，4MB为4/2/6，16MB为1/7/4。两次S3基线漂移全部保留，不能用跨窗口数据构造稳定C7→C8倍率，也没有新的PostgreSQL速度采样。源码保留该优化，默认安装仍为S3；详见[本批报告](performance-report-2026-10-30.md#原始类型行物化分配优化2026-11-03)及[机器归档](benchmarks/owned-datum-primitive-20261103.json.gz)。
 
 前批C7评估（保留原结论）：
 

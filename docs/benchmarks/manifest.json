@@ -1,0 +1,120 @@
+{
+  "format_version": 1,
+  "purpose": "Compressed original benchmark evidence, not a database feature acceptance claim. All original JSON bytes remain exactly recoverable.",
+  "compression": "gzip level9, mtime0",
+  "historical_payload_paths": "Original uncompressed filenames and hashes inside historical payloads retain their identity; resolve them through original_path below.",
+  "archives": [
+    {
+      "original_path": "docs/benchmarks/analyze-reindex-main-costs-20261104.json",
+      "original_bytes": 56047459,
+      "original_sha256": "8e5eb21899e4a864b6db4394832bac5cc98ee85438d43bbb559efb0be3c21910",
+      "path": "docs/benchmarks/analyze-reindex-main-costs-20261104.json.gz",
+      "bytes": 5977159,
+      "sha256": "fdd81c6aaa7777319bcecfc262e37f8e330caeed0dca67cb96e00b1ae3e9ef74",
+      "encoding": "gzip",
+      "roundtrip_bytes_exact": true
+    },
+    {
+      "original_path": "docs/benchmarks/analyzed-scalar-collector-20261105.json",
+      "original_bytes": 7468950,
+      "original_sha256": "e5a9b721b44af495473be779c6df358741cee34214161b747c8806a88089ae93",
+      "path": "docs/benchmarks/analyzed-scalar-collector-20261105.json.gz",
+      "bytes": 4602333,
+      "sha256": "5e32933a81523079e29b2605b2da19f8260b6ff4d98527ec19952617fed42d60",
+      "encoding": "gzip",
+      "roundtrip_bytes_exact": true
+    },
+    {
+      "original_path": "docs/benchmarks/analyzed-statistics-snapshot-20261105.json",
+      "original_bytes": 1464179,
+      "original_sha256": "40b0aa0032db3dce8c1e338457e93177980de9eec05e1e7aee85515d73394389",
+      "path": "docs/benchmarks/analyzed-statistics-snapshot-20261105.json.gz",
+      "bytes": 523207,
+      "sha256": "cff9665d3d5a6351719c8a8d1e6a9378811dbf5b1a5ea3dc3f92c75e38ee7588",
+      "encoding": "gzip",
+      "roundtrip_bytes_exact": true
+    },
+    {
+      "original_path": "docs/benchmarks/backup-analyze-20261104.json",
+      "original_bytes": 4238774,
+      "original_sha256": "35ef58dbc2d3c436079c392c0134515c5a24e8f993de215136d87a1df346912b",
+      "path": "docs/benchmarks/backup-analyze-20261104.json.gz",
+      "bytes": 2035380,
+      "sha256": "f3640c6286c6422622dc0ad533f90afff342d5ee9795ad1bd8066734477bb689",
+      "encoding": "gzip",
+      "roundtrip_bytes_exact": true
+    },
+    {
+      "original_path": "docs/benchmarks/function-registry-returning-20261103.json",
+      "original_bytes": 14016481,
+      "original_sha256": "669b7aeda8fb0c4429282430f1936965784d7a456283d2cecf098bd53baf4e57",
+      "path": "docs/benchmarks/function-registry-returning-20261103.json.gz",
+      "bytes": 1008392,
+      "sha256": "49d86742de64f38a7be2db512257e084ac5c50e4ecc58cb1418aa929b138619e",
+      "encoding": "gzip",
+      "roundtrip_bytes_exact": true
+    },
+    {
+      "original_path": "docs/benchmarks/generated-column-demand-20261104.json",
+      "original_bytes": 16962687,
+      "original_sha256": "2f824ba7cdf6a4b524d037e5d0cba0b5c1a22ac0eef0f45a69046b36b6825873",
+      "path": "docs/benchmarks/generated-column-demand-20261104.json.gz",
+      "bytes": 7034838,
+      "sha256": "e3eaa69a81c157734888a8102e59d8045b640c2c12498971a8e1b1a2185d7137",
+      "encoding": "gzip",
+      "roundtrip_bytes_exact": true
+    },
+    {
+      "original_path": "docs/benchmarks/owned-datum-20261103.json",
+      "original_bytes": 5219885,
+      "original_sha256": "a3a12d8872c87dbd806f6f97e10a947b4ceaef9d27148db906f33c505f9d9833",
+      "path": "docs/benchmarks/owned-datum-20261103.json.gz",
+      "bytes": 303939,
+      "sha256": "5d3e05d9d52f9a61b5368a8f7b0ddeb55e485c1ba9a6f7968b45207c1e46ac46",
+      "encoding": "gzip",
+      "roundtrip_bytes_exact": true
+    },
+    {
+      "original_path": "docs/benchmarks/owned-datum-primitive-20261103.json",
+      "original_bytes": 6920310,
+      "original_sha256": "4f927b89df52b07dfcd297038dc8f77d5dc12e53e0578b36d61f486a07ad3bce",
+      "path": "docs/benchmarks/owned-datum-primitive-20261103.json.gz",
+      "bytes": 548621,
+      "sha256": "6151329bdfbe4dcca57bc81edd3772ba4fee1936720a062b7c15d6c83afb6ba7",
+      "encoding": "gzip",
+      "roundtrip_bytes_exact": true
+    },
+    {
+      "original_path": "docs/benchmarks/relation-list-engine-lifetime-20261105.json",
+      "original_bytes": 4386260,
+      "original_sha256": "a1ee80fb94b664e515d77f622d196d912028f89269842e4a7204f336ec8b3d04",
+      "path": "docs/benchmarks/relation-list-engine-lifetime-20261105.json.gz",
+      "bytes": 1598040,
+      "sha256": "5ed183cf19d2e4f8c95c5ad854422125e93be854ac8e41ecdc433edddfd7c43d",
+      "encoding": "gzip",
+      "roundtrip_bytes_exact": true
+    },
+    {
+      "original_path": "docs/benchmarks/restore-transaction-horizon-20261105.json",
+      "original_bytes": 9024251,
+      "original_sha256": "ee25cb7843f21c6edcd7686ab734f3d571f823818499992a1a81d647b63ba2cb",
+      "path": "docs/benchmarks/restore-transaction-horizon-20261105.json.gz",
+      "bytes": 3656471,
+      "sha256": "dbe1bd9fedc9535456f0f673a362e1a913c3d5eeca57c39257d5d96347c893bf",
+      "encoding": "gzip",
+      "roundtrip_bytes_exact": true
+    },
+    {
+      "original_path": "docs/benchmarks/returning-declarations-hotpaths-20261104.json",
+      "original_bytes": 36473505,
+      "original_sha256": "c470e2467fc951417bf0073b3710755689d5a9dd94487796ea42a442e7a297cb",
+      "path": "docs/benchmarks/returning-declarations-hotpaths-20261104.json.gz",
+      "bytes": 3640515,
+      "sha256": "efdd42532b790f7ae25676fd2826e18f1c9af21c5cb418ed00d2aeeb34f2b1cc",
+      "encoding": "gzip",
+      "roundtrip_bytes_exact": true
+    }
+  ],
+  "total_original_bytes": 162222741,
+  "total_bytes": 30928895
+}

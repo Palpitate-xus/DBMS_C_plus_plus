@@ -1,5 +1,14 @@
 # 数据库操作性能测试报告（2026-10-30）
 
+<!-- BENCHMARK_ARCHIVE_COMPRESSION_20261105 -->
+
+## 测试证据压缩（2026-11-05）
+
+原始测量、失败记录和源码证据有复核价值，现统一保存为标准 `.json.gz`，不删除有效测量。11份机器归档由 154.71 MiB 压缩为 29.50 MiB；触发GitHub警告的ANALYZE/REINDEX档由53.45 MiB压缩为5.70 MiB。每份解压后的长度与SHA-256均和原文件逐字相同，结果、功能状态和273项总账状态不变。
+
+读取可使用Python的 `json.load(gzip.open(path, "rt"))`。原始文件名/哈希和压缩文件名/哈希见[机器归档清单](benchmarks/manifest.json)；历史载荷中的原文件名通过该清单定位。文档和总账的文件链接已更新。新未压缩机器载荷默认被Git忽略，避免再次误提交。当前压缩提交保留已有Git历史，因此旧大对象仍存在于历史中；没有重写共享历史。
+
+
 <!-- CURRENT_ANALYZED_SCALAR_COLLECTOR_20261105 -->
 
 ## 标量统计采集与 ANALYZE 优化（2026-11-05，P11-C4）
@@ -46,7 +55,7 @@ process CPU p50较两轮未缓存对照低51.93%/54.81%，调用线程CPU低51.9
 
 9/9进程正常0。每worker在计时外核对4096行、16384单元格、1275个真实NULL和全RID，前后全行不变；旧统计文件字节不变，新快照除已预定generation增长外每字段/值不变。9份189213B全行证明与9份3659B最终快照分别逐字相同。独立脚本重读全部9条计时、每个真实RID/值/NULL及帧长度/版本/FNV/generation6/4列；不只是核对汇总json。
 
-这是这组4类型负载的完整ANALYZE提速，不是任意SELECT、所有数据库操作、冷盘、数据库整体或PostgreSQL速度比较。全部原始源码/配置/哈希、失败与正常结果见[机器归档](benchmarks/analyzed-scalar-collector-20261105.json)。
+这是这组4类型负载的完整ANALYZE提速，不是任意SELECT、所有数据库操作、冷盘、数据库整体或PostgreSQL速度比较。全部原始源码/配置/哈希、失败与正常结果见[机器归档](benchmarks/analyzed-scalar-collector-20261105.json.gz)。
 
 已接入真实ANALYZE的标量采集和快照发布；旧优化器/原生8列统计保持。普通服务器四条SQL流程与独立快照读回通过，完整pg_stats查询仍有2项0A000失败。PG对照的3处存储宽度及2处collation OID差异仍开放。
 
@@ -96,7 +105,7 @@ codec采用明确小端字段、版本1、长度边界与FNV64完整帧校验；
 
 编码CPU p50较两次本批未优化对照低14.42%/14.41%，解码低4.47%/2.58%。编码对照前后漂移−0.0066%，解码−1.94%；最终解码第2样本CPU395.952ms长尾保留，高于两侧旧样本，未删样本或重采。只有3样本/段，均为描述性组件统计，不证明所有样本占优或统计显著性，更不是数据库查询、ANALYZE、持久化fsync或PostgreSQL速度提升。
 
-9/9进程正常0，18组计时记录及9份完整payload独立重读校验，所有原始min/p50/max、源码/配置/对象哈希、正常和失败记录见[机器归档](benchmarks/analyzed-statistics-snapshot-20261105.json)。最初PG套接字路径过长在启动期终止、组件初版API拼写、参考空值假设及两版SQL结果采集脚本错误均保留；原数据与失败预期没有被改成成功。
+9/9进程正常0，18组计时记录及9份完整payload独立重读校验，所有原始min/p50/max、源码/配置/对象哈希、正常和失败记录见[机器归档](benchmarks/analyzed-statistics-snapshot-20261105.json.gz)。最初PG套接字路径过长在启动期终止、组件初版API拼写、参考空值假设及两版SQL结果采集脚本错误均保留；原数据与失败预期没有被改成成功。
 
 ### 后续验收
 
@@ -152,7 +161,7 @@ codec采用明确小端字段、版本1、长度边界与FNV64完整帧校验；
 
 ### 证据及剩余范围
 
-工具启动时的缺符号/路径、初版include配置及两个汇总脚本假设错误保留，均未改动数据库样本或原断言。全部实际命令、源码/配置/对象哈希、原失败、worker stdout/stderr、九次原始时间及PID归属记录见[机器归档](benchmarks/relation-list-engine-lifetime-20261105.json)。
+工具启动时的缺符号/路径、初版include配置及两个汇总脚本假设错误保留，均未改动数据库样本或原断言。全部实际命令、源码/配置/对象哈希、原失败、worker stdout/stderr、九次原始时间及PID归属记录见[机器归档](benchmarks/relation-list-engine-lifetime-20261105.json.gz)。
 
 正常Main五项元数据、跨服务进程在线准入、完整17字段pg_stats及其他原始功能族仍开放。本批未重测完整35操作/36查询或PostgreSQL性能，未切换默认425。原273对象与22/166/70/15状态、259条历史、725保护记录、8份旧归档和754 Markdown路径保持，仅追加一条partial后历史260；Goal active。
 
@@ -220,7 +229,7 @@ C2较同轮C1 wall/CPU p50低14.65%/27.91%，但仍比两旧版wall高7.63%/4.61
 
 C3较同轮C2 wall/CPU p50低10.23%/19.66%；较两次旧版wall低4.16%/6.42%，CPU低2.47%/3.17%。旧版前后wall漂移+2.41%、CPU+0.72%。C2第3次18517.621ms与C3最大2170.976ms全部保留；每段仅三样本，这些是固定夹具的描述性统计，不宣称统计显著性、全部样本占优或所有数据库操作加速。
 
-两轮分别12/12调用、144/144检查通过；每轮12进程正常0且PID/组无残留，36108行输出/144336单元/48个真实NULL均逐值核对，包含全1000+4的前后RID、哨兵真实存在/移除、清单及全部镜像文件字节不变。原命令、配置、来源/目标清单及SHA、各3原始时间、stdout/stderr、PID/startticks与首轮失败保留在[机器归档](benchmarks/restore-transaction-horizon-20261105.json)；两轮成功不覆盖前述七阶段FAIL。
+两轮分别12/12调用、144/144检查通过；每轮12进程正常0且PID/组无残留，36108行输出/144336单元/48个真实NULL均逐值核对，包含全1000+4的前后RID、哨兵真实存在/移除、清单及全部镜像文件字节不变。原命令、配置、来源/目标清单及SHA、各3原始时间、stdout/stderr、PID/startticks与首轮失败保留在[机器归档](benchmarks/restore-transaction-horizon-20261105.json.gz)；两轮成功不覆盖前述七阶段FAIL。
 
 ### 剩余范围
 
@@ -279,7 +288,7 @@ C3较同轮C2 wall/CPU p50低10.23%/19.66%；较两次旧版wall低4.16%/6.42%�
 
 只有上述完整备份及四DDL对照，本批未重跑全部35操作/36查询、没有新的PG速度样本。旧整体慢项、动作后RSS负值及P6-C8的20项新观察差异/129项旧观察差异不因本批局部通过而清零。原query来源/错误前缀、字符数组声明、表达式索引、LATERAL/EXCLUDED/default/BEFORE及identity语法等仍开放。qualified pg_stats需要真实当前数据库行源与namespace/attribute身份，不能直接挂旧八列文本renderer或删除failclosed守卫。原273项仍22 complete /166 partial /70 unverified /15 deferred_by_user；Goal active。
 
-根目录默认程序仍`425165af…`，现有服务未重启；仅验证私有前缀安装，未提升默认程序。所有研究、构建/ABI、实际SQL/raw、首失败、完整计时、负值、进程身份和独立审查见[机器归档](benchmarks/backup-analyze-20261104.json)；其中嵌入原始文本/二进制记录的精确字节和SHA，数据库与对象/可执行文件本身由实际receipt中的哈希识别。原754个Markdown路径、725保护记录、六份旧归档及273项/257历史原文保留，新partial后历史258。
+根目录默认程序仍`425165af…`，现有服务未重启；仅验证私有前缀安装，未提升默认程序。所有研究、构建/ABI、实际SQL/raw、首失败、完整计时、负值、进程身份和独立审查见[机器归档](benchmarks/backup-analyze-20261104.json.gz)；其中嵌入原始文本/二进制记录的精确字节和SHA，数据库与对象/可执行文件本身由实际receipt中的哈希识别。原754个Markdown路径、725保护记录、六份旧归档及273项/257历史原文保留，新partial后历史258。
 
 
 纯静态汇总首次样本索引断言也保留，修正只影响reduce脚本，未重复任何数据库运行。
@@ -375,7 +384,7 @@ C5接收器v2在62条已保存观察后，实际执行了第63条但独立1043�
 
 原273项仍为22 complete /166 partial /70 unverified /15 deferred_by_user；Goal active。下方旧批次保留当时事实，当前状态以本节为准。
 
-完整原始数据见[本批机器归档](benchmarks/generated-column-demand-20261104.json)。归档采用UTF8/base64/gzip+base64逐项保存原始字节并校验SHA256，摘要和计数可直接读取；压缩只改变归档表示。新增一份非Markdown归档，既有754个Markdown路径、原273项、原256条历史原文、725保护记录及五份旧归档保持。
+完整原始数据见[本批机器归档](benchmarks/generated-column-demand-20261104.json.gz)。归档采用UTF8/base64/gzip+base64逐项保存原始字节并校验SHA256，摘要和计数可直接读取；压缩只改变归档表示。新增一份非Markdown归档，既有754个Markdown路径、原273项、原256条历史原文、725保护记录及五份旧归档保持。
 
 
 ## ANALYZE 与 REINDEX 成本优化（2026-11-04）
@@ -517,7 +526,7 @@ PostgreSQL 的自动 ANALYZE 使用后台 worker、变化行数阈值及规模�
 
 本批没有新的 PostgreSQL 速度倍率测量。默认 425 继续保持；下一步对点查、单行写入、DDL、事务及完整 REINDEX 的实际慢路径做正常 Main 分段与分配/CPU 调研，查明原因后继续优化。普通生成列赋值/未选中需求、历史数组位图、quoted stored routine 元数据、更多目录和组合语义仍开放；273 项没有关闭。独立 API 的收益和 normal 全量的负值均须保留。
 
-全部构建、原失败、控制、原始分布及静态核对见[本批机器归档](benchmarks/analyze-reindex-main-costs-20261104.json)。下方为较早批次的历史记录，“当前”仅指其当时版本。
+全部构建、原失败、控制、原始分布及静态核对见[本批机器归档](benchmarks/analyze-reindex-main-costs-20261104.json.gz)。下方为较早批次的历史记录，“当前”仅指其当时版本。
 
 ## RETURNING 声明、真实行值与操作热路径（2026-11-04）
 
@@ -652,7 +661,7 @@ C3 完整选取148原生为146通过/2个既有SIGABRT；95协议为86通过/9�
 本批下一步继续真实Main修改路径和REINDEX成本调查。性能回退及普通功能差距没有改成用户暂缓；严格失败没有弱化。
 
 
-新增一份非 Markdown [机器归档](benchmarks/returning-declarations-hotpaths-20261104.json)集中保存全量测量、函数/协议/资源结果、原失败、研究来源与复现命令；旧归档字节保持。原2324测试未改，新增5个入口后2329；原754个Markdown路径集合及725保护记录保持。九份既有文档同步，一条partial近期记录追加后255，原273对象/状态及254条历史原文保留。直接在 master 使用 Palpitate-xus <palpitate.xus@outlook.com> 提交，不建分支、不推送、不重启现有服务。
+新增一份非 Markdown [机器归档](benchmarks/returning-declarations-hotpaths-20261104.json.gz)集中保存全量测量、函数/协议/资源结果、原失败、研究来源与复现命令；旧归档字节保持。原2324测试未改，新增5个入口后2329；原754个Markdown路径集合及725保护记录保持。九份既有文档同步，一条partial近期记录追加后255，原273对象/状态及254条历史原文保留。直接在 master 使用 Palpitate-xus <palpitate.xus@outlook.com> 提交，不建分支、不推送、不重启现有服务。
 
 前批记录见[内置函数注册与复合RETURNING](#内置函数注册与复合-returning2026-11-03)：本机默认已更新为C3；固定查询36组p50均低于两次S3，35操作18快/2慢/15居间。PG仍有113/301差异，全部原始数据、负向成本与旧历史保留。
 
@@ -2857,7 +2866,7 @@ C4 的 REGTYPE68 为29差异，C6为13，C7为11。C7 第10项真实文本为 `-
 
 独立资源55项通过：40次完整读取、14次SET/SHOW、1次预期在途只读强杀，完整核对40000行/118000单元格，5个正常进程上下文退出0。64kB普通最终排序实际观察最多2个匿名FD，16MB采样为0（不是硬性无spill保证），EOF无残留，瞬态命名文件均解析完成。仅强杀核对过exe/data/start-ticks且存在真实deleted spool的私有进程（退出−9）；同目录重开再次核对1000×4基础值和1000×3排序值。它不证明窗口预算、硬RSS或任意写入恢复，原R15失败不重写。
 
-同一原生驱动分别编译旧/新、默认分配器/计数器四个程序，使用真实0/1/512行堆表、实际绑定和公开游标，每图首次执行及三次重启。四进程完整3例/0失败，共48次游标调用/8208行；所有值、NULL、类型和保留行的寿命均检查。旧捕获API缺失保留“不可用”，默认分配器的计数字段记为未测量；全部442条wall/process/thread CPU和分配指标见[机器归档](benchmarks/owned-datum-20261103.json)。
+同一原生驱动分别编译旧/新、默认分配器/计数器四个程序，使用真实0/1/512行堆表、实际绑定和公开游标，每图首次执行及三次重启。四进程完整3例/0失败，共48次游标调用/8208行；所有值、NULL、类型和保留行的寿命均检查。旧捕获API缺失保留“不可用”，默认分配器的计数字段记为未测量；全部442条wall/process/thread CPU和分配指标见[机器归档](benchmarks/owned-datum-20261103.json.gz)。
 
 | 计数区间 | S3 | C7 | 限定解释 |
 | --- | ---: | ---: | --- |
@@ -2921,14 +2930,14 @@ C4 的 REGTYPE68 为29差异，C6为13，C7为11。C7 第10项真实文本为 `-
 
 ### 可移植数据与后续工作
 
-[owned-datum-20261103.json](benchmarks/owned-datum-20261103.json)保存全部样本、阶段指标、114项残余SQL及实际/期望、三份冻结驱动源码与SHA、固定SQL/Python值预期、夹具清单和依赖哈希。原程序与私有目录留在本机工件区；其他机器可按归档装载函数建立相同逻辑数据，不能声称重现相同文件哈希或延迟。
+[owned-datum-20261103.json.gz](benchmarks/owned-datum-20261103.json.gz)保存全部样本、阶段指标、114项残余SQL及实际/期望、三份冻结驱动源码与SHA、固定SQL/Python值预期、夹具清单和依赖哈希。原程序与私有目录留在本机工件区；其他机器可按归档装载函数建立相同逻辑数据，不能声称重现相同文件哈希或延迟。
 
 在仓库根目录提取驱动，再按原参数提供旧/新程序、夹具与新的输出目录；保持 `build/<folder>/` 深度，以保留原依赖定位：
 
 ```python
 import json
 from pathlib import Path
-archive = json.loads(Path("docs/benchmarks/owned-datum-20261103.json").read_text())
+archive = json.loads(Path("docs/benchmarks/owned-datum-20261103.json.gz").read_text())
 for driver in archive["reproduction"]["drivers"]:
     target = Path(driver["extract_relative_path"])
     assert not target.exists()
@@ -2941,7 +2950,7 @@ for driver in archive["reproduction"]["drivers"]:
 
 ## 原始类型行物化分配优化（2026-11-03）
 
-本轮只修改 `PreparedSelectState::cells`，基于 `745bed31` 的 C8 程序 SHA256 为 `91d339db4bdfb55922e92d853f9a357e10c7c376b4c711cf302c191282ea6115`。实际分配请求减少；完整查询对照为5快/18慢/13居间，仍未通过默认安装性能门，根目录保留 S3 `aa52b5fe…`。C7 的功能源提交、4/23/9结果、慢样本与[原机器归档](benchmarks/owned-datum-20261103.json)继续保留；两个独立测量窗口不能计算因果性的 C7→C8 查询加速倍率。
+本轮只修改 `PreparedSelectState::cells`，基于 `745bed31` 的 C8 程序 SHA256 为 `91d339db4bdfb55922e92d853f9a357e10c7c376b4c711cf302c191282ea6115`。实际分配请求减少；完整查询对照为5快/18慢/13居间，仍未通过默认安装性能门，根目录保留 S3 `aa52b5fe…`。C7 的功能源提交、4/23/9结果、慢样本与[原机器归档](benchmarks/owned-datum-20261103.json.gz)继续保留；两个独立测量窗口不能计算因果性的 C7→C8 查询加速倍率。
 
 ### 实现与成本
 
@@ -2970,7 +2979,7 @@ for driver in archive["reproduction"]["drivers"]:
 
 36组 p50 为5低于两旧/18高于两旧/13居间；原common8的24组为4/9/11，额外4项的12组为1/9/2。三档分别0/9/3、4/2/6、1/7/4。分类只表示大小，无统计显著性结论。两次 S3 漂移−49.17%至+9.86%，全部保留；不能把18个慢项统一解释为噪声，也不能用4MB的旧版大漂移宣称新版普遍加速。
 
-最坏中位数比为64kB partition_full_sum：118.624/134.446/114.185ms，C8为两旧的1.133/1.177倍。最大单样本为4MB old-first running_sum index2=1455.411885ms；C8自身最大为4MB partition_full_sum index0=1104.842667ms，均完整值校验通过，未删除。全部108组原始12样本及min/p50/max、1296计时记录、324预热校验见[本轮机器归档](benchmarks/owned-datum-primitive-20261103.json)。
+最坏中位数比为64kB partition_full_sum：118.624/134.446/114.185ms，C8为两旧的1.133/1.177倍。最大单样本为4MB old-first running_sum index2=1455.411885ms；C8自身最大为4MB partition_full_sum index0=1104.842667ms，均完整值校验通过，未删除。全部108组原始12样本及min/p50/max、1296计时记录、324预热校验见[本轮机器归档](benchmarks/owned-datum-primitive-20261103.json.gz)。
 
 | work_mem | case | S3 first p50 ms | C8 p50 ms | S3 last p50 ms | C8/S3 first | C8/S3 last | S3 drift % | class |
 |---|---|---:|---:|---:|---:|---:|---:|---|
@@ -3020,7 +3029,7 @@ for driver in archive["reproduction"]["drivers"]:
 
 ## 内置函数注册与复合 RETURNING（2026-11-03）
 
-基于 `7b87f84f` 的最终 C3 程序 SHA256 为 `425165afe19d10ccf9be806c3052e9a09e3875a3826142d2949cde995fdf94d1`。固定1000行、12条查询、三档预算的36组p50均低于前后两次S3；局部辅助求值也减少分配。35类操作对C8为18快/2慢/15居间，仍有慢项。已将同一受测程序原子替换为本地默认，S3回滚副本保留、既有服务未重启。全部原始数据见[本轮机器归档](benchmarks/function-registry-returning-20261103.json)；C7/C8失败性能门、最大样本及两份旧归档按原代别保留。
+基于 `7b87f84f` 的最终 C3 程序 SHA256 为 `425165afe19d10ccf9be806c3052e9a09e3875a3826142d2949cde995fdf94d1`。固定1000行、12条查询、三档预算的36组p50均低于前后两次S3；局部辅助求值也减少分配。35类操作对C8为18快/2慢/15居间，仍有慢项。已将同一受测程序原子替换为本地默认，S3回滚副本保留、既有服务未重启。全部原始数据见[本轮机器归档](benchmarks/function-registry-returning-20261103.json.gz)；C7/C8失败性能门、最大样本及两份旧归档按原代别保留。
 
 ### 研究与生产实现
 
@@ -3157,7 +3166,7 @@ C1从零编译62对象；C2、C3各实际重编两个CPP、复用60个有效对�
 
 ### 复现与发布状态
 
-[机器归档](benchmarks/function-registry-returning-20261103.json)保存全部时钟/预热、630操作、局部成本原日志、113残余与新的56对照、来源/fixture/oracle和各次首次测试故障。准确命令在各执行receipt：`run_registry_C3_cost8_v1.py`、`run_operations35_C8_C3_C8_v1.py`、`perf-resource55-registry-C3-executor-v1.py`、`perf-latency1638-registry-C3-executor-v1.py` 均位于 `build/pg-feature-function-registry-45zctwo9`。复现应取新的输出目录，保留原固定驱动/SQL/参数，不能覆盖首次结果。
+[机器归档](benchmarks/function-registry-returning-20261103.json.gz)保存全部时钟/预热、630操作、局部成本原日志、113残余与新的56对照、来源/fixture/oracle和各次首次测试故障。准确命令在各执行receipt：`run_registry_C3_cost8_v1.py`、`run_operations35_C8_C3_C8_v1.py`、`perf-resource55-registry-C3-executor-v1.py`、`perf-latency1638-registry-C3-executor-v1.py` 均位于 `build/pg-feature-function-registry-45zctwo9`。复现应取新的输出目录，保留原固定驱动/SQL/参数，不能覆盖首次结果。
 
 资源另行55请求/40000行/118000单元格全部核对：64kB最多两个已删除FD，16MB观察0，EOF/close后剩余严格 `{}`、无命名文件；只读临时排序文件强杀后同私有目录重开值正确，五个正常上下文退出0。它不证明任意写入崩溃恢复、窗口硬预算或RSS峰值。
 

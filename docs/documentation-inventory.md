@@ -1,5 +1,7 @@
 # 全部文档检查清单
 
+机器性能证据现统一为标准gzip压缩JSON，既有11份归档的原始字节完整保留，压缩及原始哈希见[清单](benchmarks/manifest.json)。Markdown库存不增加，历史记录中的测量值不改写。
+
 <!-- CURRENT_ANALYZED_SCALAR_COLLECTOR_20261105 -->
 
 ## 标量统计采集与 ANALYZE 优化（2026-11-05，P11-C4）
@@ -10,7 +12,7 @@
 
 源236/头166；原234生产文件仅TableManage.cpp变更，164旧头和2342旧测试保持。新增3测试后2345（顶层1094 CPP含桩、去桩1093，另5子目录CPP）。原273项22/166/70/15及261条历史保持，仅加1条partial后262；Goal active。
 
-本批不新增Markdown路径：仍754。仅更新8份现行入口，在既有性能报告增加本批记录，并新增一份[机器归档](benchmarks/analyzed-scalar-collector-20261105.json)；原10归档和旧文档段落保持。原始失配和旧阶段性能数字不覆盖。
+本批不新增Markdown路径：仍754。仅更新8份现行入口，在既有性能报告增加本批记录，并新增一份[机器归档](benchmarks/analyzed-scalar-collector-20261105.json.gz)；原10归档和旧文档段落保持。原始失配和旧阶段性能数字不覆盖。
 
 最终C4还修复默认自动分析的可见性：旧C3在批量INSERT达到阈值时生成空列快照；现在普通事务成功COMMIT、清理原命令视图与锁后，按已有改动表集合触发分析。失败/回滚不提前发布；只有分析成功才扣除已统计修改数，保留并发新增计数。维护错误不把已持久提交伪装成失败。25条普通协议SQL验证INSERT55、显式事务提交110、UPDATE110、DELETE50、回滚不改快照、ALTER SYSTEM+reload关闭自动分析后显式分析105，并核对5次EXPLAIN基数；服务器正常0。原恢复入口1574检查及7个worker全部正常0。共享IO/分配失败、两阶段提交的自动统计调度及显式事务内ANALYZE的全部回滚语义仍未完整验收。
 
@@ -21,7 +23,7 @@
 
 ## 完整统计视图的快照基础（2026-11-05，P10）
 
-本批更新本节所列8份既有Markdown及进度JSON，新增非Markdown[机器归档](benchmarks/analyzed-statistics-snapshot-20261105.json)；路径仍754。原725保护记录、9份旧机器归档、273完整对象及260条历史保持；追加一条partial后历史261。
+本批更新本节所列8份既有Markdown及进度JSON，新增非Markdown[机器归档](benchmarks/analyzed-statistics-snapshot-20261105.json.gz)；路径仍754。原725保护记录、9份旧机器归档、273完整对象及260条历史保持；追加一条partial后历史261。
 
 新目录组件3头文件加入后源234/头164；原2341测试不改，新增1入口后2342（顶层1092 CPP，去stub1091入口，另5个子目录CPP）。后端程序字节保持P9-C2；新组件及568检查通过、SQL全17列两项失败分别记录。组件性能不能视为当前数据库性能变化，详见[报告](performance-report-2026-10-30.md#完整统计视图的快照基础2026-11-05p10)。
 
@@ -32,7 +34,7 @@
 
 ## 存储退出期生命周期（2026-11-05，P9-C2）
 
-本批更新本节所列8份既有Markdown及进度JSON，新增非Markdown[机器归档](benchmarks/relation-list-engine-lifetime-20261105.json)；Markdown路径仍754。原725保护记录、8份旧机器归档、273完整对象及259条历史保持，追加一条partial后历史260。
+本批更新本节所列8份既有Markdown及进度JSON，新增非Markdown[机器归档](benchmarks/relation-list-engine-lifetime-20261105.json.gz)；Markdown路径仍754。原725保护记录、8份旧机器归档、273完整对象及259条历史保持，追加一条partial后历史260。
 
 源码231/头161，原2340测试文件不改，新增长期生命周期回归后2341，顶层1091 CPP（排除test_stubs后1090入口），另5个子目录CPP。最终原七阶段及Memcheck通过，正常Main仍5项元数据失败，性能无稳定加速结论；事实以[报告](performance-report-2026-10-30.md#存储退出期生命周期2026-11-05p9-c2)为准。
 
@@ -43,9 +45,9 @@
 
 ## 物理恢复事务号水位（2026-11-05，P8-C3）
 
-本次更新本节所列8份既有Markdown及进度JSON，新增非Markdown[机器归档](benchmarks/restore-transaction-horizon-20261105.json)，不新增Markdown路径。原754个Markdown路径、725保护记录、七份旧机器归档、原273完整对象及258条历史原文保持；新增一条partial后历史259条。上述保持条件以最终范围检查为准，不以文档结构检查代替功能验收。
+本次更新本节所列8份既有Markdown及进度JSON，新增非Markdown[机器归档](benchmarks/restore-transaction-horizon-20261105.json.gz)，不新增Markdown路径。原754个Markdown路径、725保护记录、七份旧机器归档、原273完整对象及258条历史原文保持；新增一条partial后历史259条。上述保持条件以最终范围检查为准，不以文档结构检查代替功能验收。
 
-源码P8-C3 `d778afbd…` 为231源/161头；原2336测试文件不改，新增3个CPP入口及1个夹具头后2340。顶层CPP1090（含test_stubs，排除后1089入口），另5个子目录CPP。正常Main数据/冷启动、两轮12次公开API与最终七阶段严格失败分别报告，不能写成新测试全部通过。默认425保持，全文事实以[完整报告](performance-report-2026-10-30.md#物理恢复事务号水位2026-11-05p8-c3)和[机器归档](benchmarks/restore-transaction-horizon-20261105.json)为准。
+源码P8-C3 `d778afbd…` 为231源/161头；原2336测试文件不改，新增3个CPP入口及1个夹具头后2340。顶层CPP1090（含test_stubs，排除后1089入口），另5个子目录CPP。正常Main数据/冷启动、两轮12次公开API与最终七阶段严格失败分别报告，不能写成新测试全部通过。默认425保持，全文事实以[完整报告](performance-report-2026-10-30.md#物理恢复事务号水位2026-11-05p8-c3)和[机器归档](benchmarks/restore-transaction-horizon-20261105.json.gz)为准。
 
 原273项仍为22 complete /166 partial /70 unverified /15 deferred_by_user；Goal active。下方旧节保留各批次当时结果，不能覆盖本节的失败与范围。
 
@@ -54,7 +56,7 @@
 
 ## 备份摘要与 virtual 列统计（2026-11-04，P7-C1）
 
-本批更新8份当前状态Markdown及打包说明，共9份既有Markdown，新增[一份机器归档](benchmarks/backup-analyze-20261104.json)，未新增Markdown路径。原754个Markdown路径、725保护记录、六份旧归档、原273项及257条历史原文保持；新增partial后历史258条。
+本批更新8份当前状态Markdown及打包说明，共9份既有Markdown，新增[一份机器归档](benchmarks/backup-analyze-20261104.json.gz)，未新增Markdown路径。原754个Markdown路径、725保护记录、六份旧归档、原273项及257条历史原文保持；新增partial后历史258条。
 
 现2336测试源文件，原2334字节不变，新增两个永久入口884控制通过。源码P7-C1 `724c1147…`，默认425保持；性能、17项SQL差异及首轮旧版恢复缺口统一见[当前报告](performance-report-2026-10-30.md)。结构/链接检查仅验证文档结构。
 
@@ -65,7 +67,7 @@
 
 ## 虚拟生成列读值需求与完整 SQL 实测（2026-11-04）
 
-本批更新8份既有Markdown及进度JSON，新增[一份机器归档](benchmarks/generated-column-demand-20261104.json)；原754个Markdown路径、原273项状态、原256条历史原文、725保护记录及五份旧归档保留。新增partial后历史257条；测试源文件2334，新增两个CPP入口。
+本批更新8份既有Markdown及进度JSON，新增[一份机器归档](benchmarks/generated-column-demand-20261104.json.gz)；原754个Markdown路径、原273项状态、原256条历史原文、725保护记录及五份旧归档保留。新增partial后历史257条；测试源文件2334，新增两个CPP入口。
 
 当前源程序P6-C8 `45264111…`，默认执行文件425保持；当前技术与测试事实统一见[性能报告](performance-report-2026-10-30.md)。结构/链接检查仅验证文档结构。原273项仍为22 complete /166 partial /70 unverified /15 deferred_by_user；Goal active。下方旧批次保留当时事实，当前状态以本节为准。
 
@@ -76,7 +78,7 @@
 
 本批只更新既有Markdown和进度JSON，新增非Markdown机器归档；原754个Markdown路径、273项状态、255条历史前缀、725保护记录及旧4归档保持。新增partial后256条历史。结构/链接检查仅证明文档结构，不代表功能或整体性能通过。
 
-详见[完整性能报告](performance-report-2026-10-30.md)和[本批机器归档](benchmarks/analyze-reindex-main-costs-20261104.json)。下方旧批次保留其当时结论，当前以本节与报告首节为准。
+详见[完整性能报告](performance-report-2026-10-30.md)和[本批机器归档](benchmarks/analyze-reindex-main-costs-20261104.json.gz)。下方旧批次保留其当时结论，当前以本节与报告首节为准。
 
 ## C4功能与完整成本记录（2026-11-04）
 
@@ -88,11 +90,11 @@
 
 本批更新九份既有文档，新增非Markdown机器归档，不新增Markdown。原273和254条近期历史原文保持，新增partial后255；原2324测试未改，新增5后2329，原754个Markdown路径及725保护记录保持。旧3归档字节保持。原始慢值/漂移、失败、各构建代别及新N0/N1负值全部记录；提交前执行实际结构与范围检查，不把结构检查当成功能验收。
 
-详见[本批报告](performance-report-2026-10-30.md#returning-声明真实行值与操作热路径2026-11-04)及[机器归档](benchmarks/returning-declarations-hotpaths-20261104.json)。以下为历史记录。
+详见[本批报告](performance-report-2026-10-30.md#returning-声明真实行值与操作热路径2026-11-04)及[机器归档](benchmarks/returning-declarations-hotpaths-20261104.json.gz)。以下为历史记录。
 
 ## 内置函数注册与复合 RETURNING 同步（2026-11-03）
 
-本批继续更新九份既有文档，不新增Markdown。完整实现、研究来源及性能结果见[本批报告](performance-report-2026-10-30.md#内置函数注册与复合-returning2026-11-03)，新增非Markdown[机器归档](benchmarks/function-registry-returning-20261103.json)保留全部1296计时、324预热、108组原始分布、36组查询比较、630个操作计时、55资源请求、两套成本原日志及功能残余。旧C7/C8归档与两轮未通过安装性能门的历史保持原样。
+本批继续更新九份既有文档，不新增Markdown。完整实现、研究来源及性能结果见[本批报告](performance-report-2026-10-30.md#内置函数注册与复合-returning2026-11-03)，新增非Markdown[机器归档](benchmarks/function-registry-returning-20261103.json.gz)保留全部1296计时、324预热、108组原始分布、36组查询比较、630个操作计时、55资源请求、两套成本原日志及功能残余。旧C7/C8归档与两轮未通过安装性能门的历史保持原样。
 
 最终C3已成为本机默认程序，保留S3回滚副本，未重启既有服务。固定1000行、12条查询、三档预算的36组p50均低于两次S3，降低1.76%–33.76%；35类操作对C8为18快/2慢/15居间，实际游标CPU负向观察与全部基线漂移保留。功能和性能的验证代别分别列出；原301对照现188匹配/113差异，新增RETURNING协议56为48通过/8差异，不能称为完整PostgreSQL兼容。
 
@@ -100,7 +102,7 @@
 
 ## 原始类型行物化分配优化同步（2026-11-03）
 
-本轮继续更新九份既有文档，完整结果集中在[行物化分配报告](performance-report-2026-10-30.md#原始类型行物化分配优化2026-11-03)。新增一份非 Markdown [机器归档](benchmarks/owned-datum-primitive-20261103.json)，保存全部1296计时、324未计时预热、108组原始分布、36组比较、690阶段成本与55资源证据；C7归档与历史报告保留。
+本轮继续更新九份既有文档，完整结果集中在[行物化分配报告](performance-report-2026-10-30.md#原始类型行物化分配优化2026-11-03)。新增一份非 Markdown [机器归档](benchmarks/owned-datum-primitive-20261103.json.gz)，保存全部1296计时、324未计时预热、108组原始分布、36组比较、690阶段成本与55资源证据；C7归档与历史报告保留。
 
 512行公开游标相比C7减少1536次请求/393216B，完整查询对照5快/18慢/13居间；源码优化保留，默认安装性能提升拒绝，根目录仍为S3。实际C8选取26原生/31协议、固定301/83/111及68+16控制分别记录，未把旧失败或普通缺口算作完成。原273项及252条既有近期记录原文保持，新增一条partial；2322测试文件、156头文件、725保护记录和754个Markdown路径保持，无新Markdown。
 

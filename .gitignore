@@ -41,3 +41,7 @@ dist/
 __t_*/
 *.vm
 *.lst
+
+# Benchmark payloads are committed compressed; the small index remains JSON.
+/docs/benchmarks/*.json
+!/docs/benchmarks/manifest.json

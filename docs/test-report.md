@@ -12,7 +12,7 @@
 
 本批新增三个永久入口：analyzed_scalar_statistics_test（真实DDL/heap/ANALYZE，641检查和独立cold2）与analyzed_scalar_collector_test（22个计算/边界控制）。最终16相关入口均0；计算组件启用leaks的ASan/UBSan通过，非整个Capture/StorageEngine/数据库的SAN。Main4条SQL成功，pg_stats2条0A000仍失败；PG189中保留5个差异。旧2342测试与725保护记录保持，当前2345/顶层1094/去桩1093/子目录5。
 
-原始输入、正常和失败构建/执行、PG两种locale及完整9进程成本见[报告](performance-report-2026-10-30.md)和[归档](benchmarks/analyzed-scalar-collector-20261105.json)。
+原始输入、正常和失败构建/执行、PG两种locale及完整9进程成本见[报告](performance-report-2026-10-30.md)和[归档](benchmarks/analyzed-scalar-collector-20261105.json.gz)。
 
 最终C4还修复默认自动分析的可见性：旧C3在批量INSERT达到阈值时生成空列快照；现在普通事务成功COMMIT、清理原命令视图与锁后，按已有改动表集合触发分析。失败/回滚不提前发布；只有分析成功才扣除已统计修改数，保留并发新增计数。维护错误不把已持久提交伪装成失败。25条普通协议SQL验证INSERT55、显式事务提交110、UPDATE110、DELETE50、回滚不改快照、ALTER SYSTEM+reload关闭自动分析后显式分析105，并核对5次EXPLAIN基数；服务器正常0。原恢复入口1574检查及7个worker全部正常0。共享IO/分配失败、两阶段提交的自动统计调度及显式事务内ANALYZE的全部回滚语义仍未完整验收。
 
@@ -29,7 +29,7 @@ P10新增3个生产头文件及 `analyzed_statistics_snapshot_test.cpp`，源234
 
 同一组件测试在未优化O2、最终O2、最终ASan/UBSan和正式core入口分别通过：每次父进程568次检查，3个fresh子进程各1次检查。包含独立Python220B固定字节夹具、逐字节损坏/全截断前缀、修复校验后的非法字段、拥有数组/记录/域身份、冷读、实际OFD阻塞的并发写入、关系整组替换和代别耗尽；这些是组件检查，不是568个SQL场景。SAN覆盖组件与StatsPersistence，启用泄漏检测，不是全库SAN。
 
-真实PG18.6参考核对17字段并采集8列的全部7类槽及实际数组元素OID；仅声明/类型契约对应，不宣称产品统计数值已与PG逐项一致。当前普通Main的两条全17列查询均0A000、server正常0；记录为2严格失败。9次组件成本测试全部正常0且完整payload相同。[完整报告](performance-report-2026-10-30.md#完整统计视图的快照基础2026-11-05p10)及[归档](benchmarks/analyzed-statistics-snapshot-20261105.json)。
+真实PG18.6参考核对17字段并采集8列的全部7类槽及实际数组元素OID；仅声明/类型契约对应，不宣称产品统计数值已与PG逐项一致。当前普通Main的两条全17列查询均0A000、server正常0；记录为2严格失败。9次组件成本测试全部正常0且完整payload相同。[完整报告](performance-report-2026-10-30.md#完整统计视图的快照基础2026-11-05p10)及[归档](benchmarks/analyzed-statistics-snapshot-20261105.json.gz)。
 
 原273项仍为22 complete /166 partial /70 unverified /15 deferred_by_user；Goal active。下方旧节保留各批次当时结果。
 
@@ -42,7 +42,7 @@ P10新增3个生产头文件及 `analyzed_statistics_snapshot_test.cpp`，源234
 
 最终23个相关入口、新生命周期入口及原七阶段恢复均通过；完整七阶段Memcheck父进程+7worker均0错误，未启用泄漏检查。P9-C1的advance134和Memcheck冷进程维护表错误完整保留。正常Main固定22对象与P8-C3/P9-C1相同，含轮询计数为C1 219/224、最终C2 212/217，各5项元数据失败，两个进程上下文各正常0。
 
-原2340测试文件逐字保持，新增1文件后2341；顶层1091 CPP含test_stubs，排除后1090入口，另5个子目录CPP。完整恢复9次/108检查通过，无重采；详见[报告](performance-report-2026-10-30.md#存储退出期生命周期2026-11-05p9-c2)及[归档](benchmarks/relation-list-engine-lifetime-20261105.json)。
+原2340测试文件逐字保持，新增1文件后2341；顶层1091 CPP含test_stubs，排除后1090入口，另5个子目录CPP。完整恢复9次/108检查通过，无重采；详见[报告](performance-report-2026-10-30.md#存储退出期生命周期2026-11-05p9-c2)及[归档](benchmarks/relation-list-engine-lifetime-20261105.json.gz)。
 
 原273项仍为22 complete /166 partial /70 unverified /15 deferred_by_user，Goal active。下方旧节保留当时版本的结果。
 
@@ -57,7 +57,7 @@ P10新增3个生产头文件及 `analyzed_statistics_snapshot_test.cpp`，源234
 
 正常Main原始固定22操作在C1/C2/C3的完整固定响应逐字节一致，首次探针为4/4；各版均有5项探针描述符/缺目录身份失败，其他值、命令、NULL和冷启动检查通过。含实际轮询的检查计数分别为C1 249/254、C2 234/239、C3 209/214；这三个检查总数不同不代表改变固定SQL。旧版首次1/4及冷启动−6完整保留，未作原因推断或重试。
 
-新增3个原生入口和1个同源夹具头，测试文件2336→2340，原2336字节保持；顶层1090个CPP含test_stubs，排除该桩后1089个入口，另5个子目录CPP。注册时缺夹具头、缺wrap注解的首轮构建失败保留；补齐同源夹具头和首行wrap注解后，并发入口93335实际编译运行exit0；最终夹具头及七阶段入口仅清理原型注释，控制体和断言保持。新入口不能概括为全部通过。两轮公开恢复各12次、各144检查全部通过，所有长尾及完整失败均见[完整报告](performance-report-2026-10-30.md#物理恢复事务号水位2026-11-05p8-c3)和[机器归档](benchmarks/restore-transaction-horizon-20261105.json)。
+新增3个原生入口和1个同源夹具头，测试文件2336→2340，原2336字节保持；顶层1090个CPP含test_stubs，排除该桩后1089个入口，另5个子目录CPP。注册时缺夹具头、缺wrap注解的首轮构建失败保留；补齐同源夹具头和首行wrap注解后，并发入口93335实际编译运行exit0；最终夹具头及七阶段入口仅清理原型注释，控制体和断言保持。新入口不能概括为全部通过。两轮公开恢复各12次、各144检查全部通过，所有长尾及完整失败均见[完整报告](performance-report-2026-10-30.md#物理恢复事务号水位2026-11-05p8-c3)和[机器归档](benchmarks/restore-transaction-horizon-20261105.json.gz)。
 
 原273项仍为22 complete /166 partial /70 unverified /15 deferred_by_user；Goal active。下方旧节保留各批次当时结果，不能覆盖本节的失败与范围。
 
@@ -70,7 +70,7 @@ P10新增3个生产头文件及 `analyzed_statistics_snapshot_test.cpp`，源234
 
 PG18.6原34参考全部保留，两处最初帧顺序预测错误亦保留；当前正常Main同34为17匹配/17差异，零服务故障、正常退出。差异为11个qualified pg_stats入口、REINDEX INDEX与ANALYZE列列表各1、错误帧2、DELETE空描述帧2。实际停止后的.stats证实普通/STORED统计存在、virtual统计缺席；不代替缺失的SQL视图。
 
-两代创建备份清单与所有载荷摘要完全一致。首轮旧→旧恢复探针行数失败保留；独立既有探针目标的四组交叉恢复均通过完整1000+4行/真实RID/NULL。完整API9与正常SQL DDL72均成功，wall p50为2快/2慢，ALTER与TRUNCATE慢于两次旧版。预检和所有原始失败见[完整报告](performance-report-2026-10-30.md)及[机器归档](benchmarks/backup-analyze-20261104.json)。
+两代创建备份清单与所有载荷摘要完全一致。首轮旧→旧恢复探针行数失败保留；独立既有探针目标的四组交叉恢复均通过完整1000+4行/真实RID/NULL。完整API9与正常SQL DDL72均成功，wall p50为2快/2慢，ALTER与TRUNCATE慢于两次旧版。预检和所有原始失败见[完整报告](performance-report-2026-10-30.md)及[机器归档](benchmarks/backup-analyze-20261104.json.gz)。
 
 原273项仍为22 complete /166 partial /70 unverified /15 deferred_by_user；Goal active。下方按批次保留当时记录，当前状态以本节为准。
 
@@ -85,7 +85,7 @@ PG18.6原34参考全部保留，两处最初帧顺序预测错误亦保留；当
 
 C8固定258为238通过/20差异（13/3/2/2），较C2新增82整项通过、零整项回退，另有6项描述符组件损失。原767观察仍129差异，完整记录对旧版/C6一致、九enum原始记录一致。所有原始SQL、预期、失败与raw保留。
 
-当前Main15个实际上下文正常退出；72个正常基准请求、7200行/25200单元零失败。原2332测试源字节不变，现2334；顶层1085 CPP（排除桩1084），另5子目录CPP。首批编译/包装器/接收器缺口与拒绝C7见[详细报告](performance-report-2026-10-30.md)及[机器归档](benchmarks/generated-column-demand-20261104.json)。
+当前Main15个实际上下文正常退出；72个正常基准请求、7200行/25200单元零失败。原2332测试源字节不变，现2334；顶层1085 CPP（排除桩1084），另5子目录CPP。首批编译/包装器/接收器缺口与拒绝C7见[详细报告](performance-report-2026-10-30.md)及[机器归档](benchmarks/generated-column-demand-20261104.json.gz)。
 
 原273项仍为22 complete /166 partial /70 unverified /15 deferred_by_user；Goal active。下方旧批次保留当时事实，当前状态以本节为准。
 
@@ -96,7 +96,7 @@ C8固定258为238通过/20差异（13/3/2/2），较C2新增82整项通过、零
 
 原相关22入口全过；新比较8规模/240完整字段、bitmap caller新旧各12/0、REINDEX拥有值/RID8/0，私有观察器8/3344与完整PUBLIC60阶段分开。新增3个永久入口，原2329测试字节不变，现2332文件/顶层1083 CPP（排除桩后1082顶层入口，另有5子目录CPP）；未宣称全套重跑。55资源、630动作、1638查询均完整收集；首次预检/编译/观察失败保留。
 
-详见[完整性能报告](performance-report-2026-10-30.md)和[本批机器归档](benchmarks/analyze-reindex-main-costs-20261104.json)。下方旧批次保留其当时结论，当前以本节与报告首节为准。
+详见[完整性能报告](performance-report-2026-10-30.md)和[本批机器归档](benchmarks/analyze-reindex-main-costs-20261104.json.gz)。下方旧批次保留其当时结论，当前以本节与报告首节为准。
 
 ## C4功能与完整成本记录（2026-11-04）
 
@@ -106,7 +106,7 @@ C8固定258为238通过/20差异（13/3/2/2），较C2新增82整项通过、零
 
 新增5入口：[声明46](../tests/returning_declaration_api_test.cpp)45/1，[虚拟列28](../tests/virtual_generated_owning_test.cpp)、[语法14](../tests/local_expression_syntax_test.cpp)、[REINDEX16](../tests/reindex_single_pass_test.cpp)、[MERGE19](../tests/merge_returning_source_owning_test.cpp)全部通过。quoted stored extract严格integer预期保留。原2324测试字节未改，现2329文件、1080个cpp文件（排除链接桩test_stubs.cpp后为1079原生入口），未宣称全部重跑。C4选取57原生56/1、31协议24/7，10533共同观察无旧正确变错；严格56旧48/8→55/1，新132旧9/123→132/0，新33生成语义仍27/6。原579为451匹配/128差异，全部raw/canonical/原正确组件连续；暂停enum九项保持，原341/103未执行。
 
-详见[本批报告](performance-report-2026-10-30.md#returning-声明真实行值与操作热路径2026-11-04)及[机器归档](benchmarks/returning-declarations-hotpaths-20261104.json)。以下为历史记录。
+详见[本批报告](performance-report-2026-10-30.md#returning-声明真实行值与操作热路径2026-11-04)及[机器归档](benchmarks/returning-declarations-hotpaths-20261104.json.gz)。以下为历史记录。
 
 ## 2026-11-03 内置函数注册与复合 RETURNING
 
@@ -137,13 +137,13 @@ C8固定258为238通过/20差异（13/3/2/2），较C2新增82整项通过、零
 
 新56项剩余22/23/24/40/41/42只缺OLD/NEW别名描述符，47为虚拟数组载荷，53为历史数组NULL位图；均为普通未完项，未新增暂缓。完整查询S3/C3/S3的1638请求（1296计时、324预热、18 SET/SHOW（9+9））全终态，36组p50均低于两次S3，每预算12/0/0；不是与PG新速度比较。35类操作C8/C3/C8为630样本、每标签210项完整校验、3进程正常结束，18快/2慢/15居间；update_range和reindex为慢项，基线漂移全部保留。
 
-全部证据、旧启动失败及性能结果见[本批报告](performance-report-2026-10-30.md#内置函数注册与复合-returning2026-11-03)；独立机器归档见[全部原始统计](benchmarks/function-registry-returning-20261103.json)。以下C8及更早记录保留原始代别、失败和时钟数据。
+全部证据、旧启动失败及性能结果见[本批报告](performance-report-2026-10-30.md#内置函数注册与复合-returning2026-11-03)；独立机器归档见[全部原始统计](benchmarks/function-registry-returning-20261103.json.gz)。以下C8及更早记录保留原始代别、失败和时钟数据。
 
 ## 2026-11-03 原始类型行物化分配优化
 
 C8 `91d339db…` 仅重编实际修改的ExecCPP，沿用有效的新ABI对象谱系。选取的26原生入口全部通过；31协议入口仍为24通过/7既有失败入口。固定301观察仍有114差异，83/111各两项配置差异，REGTYPE68仍为57通过/11普通差异，参数16全部通过；这些入口的完整实际响应与C7相同，没有以修改预期刷绿。2322个既有测试文件均未改，不能将选取集称为完整106/95重跑。
 
-实际512行公开游标的累计分配比C7少1536次请求/393216B，比S3少1024次请求、冷次少188256B/重启少188416B。完整查询唯一窗口的36组为5快/18慢/13居间，基线漂移和全部慢项保留；分配减少不是RSS或普遍速度结论。完整收据及原始样本见[本批报告](performance-report-2026-10-30.md#原始类型行物化分配优化2026-11-03)和[机器归档](benchmarks/owned-datum-primitive-20261103.json)。下列C7及更早记录按其当时输入保留，原273与既有暂缓不变。
+实际512行公开游标的累计分配比C7少1536次请求/393216B，比S3少1024次请求、冷次少188256B/重启少188416B。完整查询唯一窗口的36组为5快/18慢/13居间，基线漂移和全部慢项保留；分配减少不是RSS或普遍速度结论。完整收据及原始样本见[本批报告](performance-report-2026-10-30.md#原始类型行物化分配优化2026-11-03)和[机器归档](benchmarks/owned-datum-primitive-20261103.json.gz)。下列C7及更早记录按其当时输入保留，原273与既有暂缓不变。
 
 ## 2026-11-03 拥有值复合输出与引用类型存储
 

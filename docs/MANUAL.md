@@ -23,7 +23,7 @@
 
 本批先实现完整pg_stats所需的类型化统计快照内部组件，尚未增加可用的pg_stats SQL入口；完整17列的两个普通查询实际均为0A000。现有ANALYZE执行路径及`.stats`兼容行为保持，普通后端仍为P9-C2。
 
-新快照保留实际类型身份、NULL/空数组差别及统计槽的元数据；旧`.stats`不足以重建这些字段，后续仍需新采集器重分析、真实目录来源和输出通路。实现与剩余门槛见[报告](performance-report-2026-10-30.md#完整统计视图的快照基础2026-11-05p10)及[归档](benchmarks/analyzed-statistics-snapshot-20261105.json)，默认服务未切换。
+新快照保留实际类型身份、NULL/空数组差别及统计槽的元数据；旧`.stats`不足以重建这些字段，后续仍需新采集器重分析、真实目录来源和输出通路。实现与剩余门槛见[报告](performance-report-2026-10-30.md#完整统计视图的快照基础2026-11-05p10)及[归档](benchmarks/analyzed-statistics-snapshot-20261105.json.gz)，默认服务未切换。
 
 原273项仍为22 complete /166 partial /70 unverified /15 deferred_by_user；Goal active。下方旧节保留各批次当时结果。
 
@@ -34,7 +34,7 @@
 
 当前源码P9-C2 `30c57ca8…` 保持C++17和原V2表名列表字节格式。版本标记采用无析构的常量存储，维护状态表在每个存储引擎构造完成前初始化，覆盖后台线程的寿命。SQL恢复命令及后台作业使用方式见下方既有说明。
 
-原七阶段恢复及其完整Memcheck本次通过，正常Main数据和冷启动通过，5项元数据检查仍失败；跨服务进程在线恢复准入仍开放。默认425未替换。[报告](performance-report-2026-10-30.md#存储退出期生命周期2026-11-05p9-c2)与[机器归档](benchmarks/relation-list-engine-lifetime-20261105.json)区分各版本失败及本次通过。
+原七阶段恢复及其完整Memcheck本次通过，正常Main数据和冷启动通过，5项元数据检查仍失败；跨服务进程在线恢复准入仍开放。默认425未替换。[报告](performance-report-2026-10-30.md#存储退出期生命周期2026-11-05p9-c2)与[机器归档](benchmarks/relation-list-engine-lifetime-20261105.json.gz)区分各版本失败及本次通过。
 
 原273项仍为22 complete /166 partial /70 unverified /15 deferred_by_user，Goal active。下方旧节保留当时版本的结果。
 
@@ -47,7 +47,7 @@
 
 普通SQL仍需显式extended模式和管理员权限，通过 `RESTORE DATABASE 数据库 FROM '路径'` 提交后台作业，再用 `SHOW MAINTENANCE JOB 作业号` 查看终态。作业succeeded不等于全部兼容或恢复验收通过：固定22操作的值、NULL、后续INSERT/CREATE与两个正常Main上下文（含冷启动）通过，但5项探针类型描述符/目录身份检查仍失败；最终七阶段原生控制在advance阶段异常退出，后四阶段未执行。
 
-准入屏障仅覆盖当前进程的分配及活动登记窗口；其他实际活动事务号不高于导入水位时保守拒绝恢复。跨服务进程的在线准入仍有缺口。本批未提升默认425或重启现有服务，完整边界与两轮计时见[完整报告](performance-report-2026-10-30.md#物理恢复事务号水位2026-11-05p8-c3)和[机器归档](benchmarks/restore-transaction-horizon-20261105.json)。
+准入屏障仅覆盖当前进程的分配及活动登记窗口；其他实际活动事务号不高于导入水位时保守拒绝恢复。跨服务进程的在线准入仍有缺口。本批未提升默认425或重启现有服务，完整边界与两轮计时见[完整报告](performance-report-2026-10-30.md#物理恢复事务号水位2026-11-05p8-c3)和[机器归档](benchmarks/restore-transaction-horizon-20261105.json.gz)。
 
 原273项仍为22 complete /166 partial /70 unverified /15 deferred_by_user；Goal active。下方旧节保留各批次当时结果，不能覆盖本节的失败与范围。
 
@@ -89,7 +89,7 @@ SELECT v FROM demand_demo;
 
 使用本批源码优化需自行构建当前源码；根目录程序仍为425。命令覆盖及PostgreSQL兼容性不因性能控制通过而扩大。
 
-详见[完整性能报告](performance-report-2026-10-30.md)和[本批机器归档](benchmarks/analyze-reindex-main-costs-20261104.json)。下方旧批次保留其当时结论，当前以本节与报告首节为准。
+详见[完整性能报告](performance-report-2026-10-30.md)和[本批机器归档](benchmarks/analyze-reindex-main-costs-20261104.json.gz)。下方旧批次保留其当时结论，当前以本节与报告首节为准。
 
 ## C4功能与完整成本记录（2026-11-04）
 
@@ -99,7 +99,7 @@ SELECT v FROM demand_demo;
 
 C4支持范围内的目标/OLD/NEW以及MERGE实际USING限定列使用真实值和目录身份。声明API仍有quoted stored extract类型差异；历史数组位图、生成列赋值/按需错误、更多来源名称/星号与类型目录仍开放。Parse名字检查不提前求值修改输入，不能把132控制通过理解为完整DML兼容。
 
-详见[本批报告](performance-report-2026-10-30.md#returning-声明真实行值与操作热路径2026-11-04)及[机器归档](benchmarks/returning-declarations-hotpaths-20261104.json)。以下为历史记录。
+详见[本批报告](performance-report-2026-10-30.md#returning-声明真实行值与操作热路径2026-11-04)及[机器归档](benchmarks/returning-declarations-hotpaths-20261104.json.gz)。以下为历史记录。
 
 ## RETURNING 拥有值的新增支持（2026-11-03）
 
@@ -109,11 +109,11 @@ C3 `425165af…` 在原 RETURNING 表达式求值后保留实际 `ExprValue`，�
 
 独立辅助求值循环减少分配；公开游标512行的分配不变，单次冷执行CPU从20.750ms升至35.862ms。该负值保留，不能用辅助循环的收益保证实际查询提速。
 
-固定PG18.6参考的56项中，C8有20差异，C3有8差异。DELETE二进制内容与提交后状态已修复，但6项OLD/NEW别名的Statement/Portal Describe仍缺RowDescription，另有虚拟生成数组载荷及历史物理数组NULL位图各1项；不能将这些正例记成通过。新增20项原生控制通过，验证NULL/空值/下界、真实OLD/NEW、零行、volatile每站点一次、原错误回滚及查询对象销毁后的值寿命。其余WHERE/SET输入、目录、typmod和ALTER USING普通缺口保留，见[本批报告](performance-report-2026-10-30.md#内置函数注册与复合-returning2026-11-03)。最终36组查询均低于两次S3中位数，但35类操作仍有2项慢于两次C8对照，不能保证任意SQL提速；独立机器归档见[全部原始统计](benchmarks/function-registry-returning-20261103.json)。以下C8/C7使用边界按当时版本保留。
+固定PG18.6参考的56项中，C8有20差异，C3有8差异。DELETE二进制内容与提交后状态已修复，但6项OLD/NEW别名的Statement/Portal Describe仍缺RowDescription，另有虚拟生成数组载荷及历史物理数组NULL位图各1项；不能将这些正例记成通过。新增20项原生控制通过，验证NULL/空值/下界、真实OLD/NEW、零行、volatile每站点一次、原错误回滚及查询对象销毁后的值寿命。其余WHERE/SET输入、目录、typmod和ALTER USING普通缺口保留，见[本批报告](performance-report-2026-10-30.md#内置函数注册与复合-returning2026-11-03)。最终36组查询均低于两次S3中位数，但35类操作仍有2项慢于两次C8对照，不能保证任意SQL提速；独立机器归档见[全部原始统计](benchmarks/function-registry-returning-20261103.json.gz)。以下C8/C7使用边界按当时版本保留。
 
 ## 复合类型输出与 REGTYPE 使用边界（2026-11-03）
 
-C8 `91d339db…` 仅减少原始类型行物化中的多余来源复制和临时容量分配，类型与操作边界沿用C7。独立512行公开游标的累计分配请求减少，但完整查询36组仍为5快/18慢/13居间，默认安装继续为S3；使用当前源码功能仍需自行构建。全部结果见[本批报告](performance-report-2026-10-30.md#原始类型行物化分配优化2026-11-03)及[机器归档](benchmarks/owned-datum-primitive-20261103.json)。以下C7能力与测量记录按原代别保留，不把两批独立时钟拼成C7→C8稳定倍率。
+C8 `91d339db…` 仅减少原始类型行物化中的多余来源复制和临时容量分配，类型与操作边界沿用C7。独立512行公开游标的累计分配请求减少，但完整查询36组仍为5快/18慢/13居间，默认安装继续为S3；使用当前源码功能仍需自行构建。全部结果见[本批报告](performance-report-2026-10-30.md#原始类型行物化分配优化2026-11-03)及[机器归档](benchmarks/owned-datum-primitive-20261103.json.gz)。以下C7能力与测量记录按原代别保留，不把两批独立时钟拼成C7→C8稳定倍率。
 
 C7 `f135335e…` 在已有真实声明、正确 RowDescription 和完整拥有值的查询路径上补入正常二进制结果输出：保留 record 的实际字段类型及 NULL、record[] 的逐元素记录形状、数组元素/维度/下界和已有位图信息。格式 0 继续使用原文本输出；只有所有格式码合法为 0/1 且确有格式 1 的请求才启用可选结果载体。未知或不匹配的旧描述符，以及暂停的顶层枚举/枚举数组族继续原路径，不能把“客户端请求 binary”理解为任意类型均已支持。
 

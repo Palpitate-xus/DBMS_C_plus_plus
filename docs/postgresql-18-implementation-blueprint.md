@@ -12,7 +12,7 @@
 
 P10完整模型/持久化之后，P11已接上真实标量采集、原生及普通Main发布，比较缓存复用通过完整API成本对照。下步仍按原完整17列目标接数组/范围专用槽、继承/索引实际owner、真实目录源/来源身份和output-only anyarray；同时处理实际collation元数据及所有未完成验收。采样后的schema检查不代替并发DDL隔离，两统计文件也非共同原子事务。原暂停边界不变，不以四字段视图或全零槽收尾。
 
-[报告与差异](performance-report-2026-10-30.md)、[原始证据](benchmarks/analyzed-scalar-collector-20261105.json)。
+[报告与差异](performance-report-2026-10-30.md)、[原始证据](benchmarks/analyzed-scalar-collector-20261105.json.gz)。
 
 
 <!-- CURRENT_ANALYZED_STATS_SNAPSHOT_20261105 -->
@@ -23,7 +23,7 @@ P10完整模型/持久化之后，P11已接上真实标量采集、原生及普�
 
 下一层必须将真实ANALYZE扫描接到该模型，产出width、带符号distinct、排除MCV的histogram、物理顺序correlation、数组/范围槽和真实继承/表达式索引所有者；随后注册真实pg_stats view和17属性，贯通Binder/Main/Describe与output-only anyarray，复用现有权限消费者。当前持久化不会解析旧文件来猜测缺失统计，也不发布一个只含少数字段的替代视图。全源验收仍须标量/数组/范围/冷读/DDL失效/来源/正常0或1格式对照。
 
-该阶段不改变既有暂缓政策或原273项状态，已确认的持久化能力与未接入的SQL能力分列在[报告](performance-report-2026-10-30.md#完整统计视图的快照基础2026-11-05p10)和[归档](benchmarks/analyzed-statistics-snapshot-20261105.json)。
+该阶段不改变既有暂缓政策或原273项状态，已确认的持久化能力与未接入的SQL能力分列在[报告](performance-report-2026-10-30.md#完整统计视图的快照基础2026-11-05p10)和[归档](benchmarks/analyzed-statistics-snapshot-20261105.json.gz)。
 
 原273项仍为22 complete /166 partial /70 unverified /15 deferred_by_user；Goal active。下方旧节保留各批次当时结果。
 
@@ -34,7 +34,7 @@ P10完整模型/持久化之后，P11已接上真实标量采集、原生及普�
 
 P9-C2 `30c57ca8…` 将表名列表版本标记改为64字节常量存储，并让维护登记表在引擎构造完成前初始化，消除两处实际退出期失效。原七阶段的最终正常及Memcheck通过，旧P8-C2/C3和P9-C1失败保留；没有重写断言或靠隔离的advance成功取代完整验收。
 
-后续继续处理跨服务进程恢复准入、正常Main五项描述符/目录身份，以及真实pg_stats全部17字段和typed数组/来源。R218、恢复功能族及用户暂缓模块均未关闭或扩大。本批9次恢复成本对照无稳定提速结论。[报告](performance-report-2026-10-30.md#存储退出期生命周期2026-11-05p9-c2)和[归档](benchmarks/relation-list-engine-lifetime-20261105.json)。
+后续继续处理跨服务进程恢复准入、正常Main五项描述符/目录身份，以及真实pg_stats全部17字段和typed数组/来源。R218、恢复功能族及用户暂缓模块均未关闭或扩大。本批9次恢复成本对照无稳定提速结论。[报告](performance-report-2026-10-30.md#存储退出期生命周期2026-11-05p9-c2)和[归档](benchmarks/relation-list-engine-lifetime-20261105.json.gz)。
 
 原273项仍为22 complete /166 partial /70 unverified /15 deferred_by_user，Goal active。下方旧节保留当时版本的结果。
 
@@ -47,7 +47,7 @@ P8-C3 `d778afbd…` 已将checkpoint、真实CLOG状态、主heap的xmin/xmax及
 
 后续普通工作仍包括：定位同一七阶段验收advance阶段的实际异常、贯通跨服务进程准入、补齐五项探针描述符/真实目录身份，以及实现真实pg_stats全部17字段与有类型数组/来源。已冻结的完整视图计划不是四字段替代终点。用户已暂缓模块和原273项状态不动，不因单个正确性或计时控制通过关闭功能族。
 
-独立较早目标数据与两次正常Main上下文通过；最终C3七阶段整体严格FAIL、后四阶段NOTRUN。第二轮完整恢复调用p50较两次旧版低4.16%/6.42%，第一轮负值和所有长尾保留；默认425和既有服务保持。证据与范围见[完整报告](performance-report-2026-10-30.md#物理恢复事务号水位2026-11-05p8-c3)和[机器归档](benchmarks/restore-transaction-horizon-20261105.json)。
+独立较早目标数据与两次正常Main上下文通过；最终C3七阶段整体严格FAIL、后四阶段NOTRUN。第二轮完整恢复调用p50较两次旧版低4.16%/6.42%，第一轮负值和所有长尾保留；默认425和既有服务保持。证据与范围见[完整报告](performance-report-2026-10-30.md#物理恢复事务号水位2026-11-05p8-c3)和[机器归档](benchmarks/restore-transaction-horizon-20261105.json.gz)。
 
 原273项仍为22 complete /166 partial /70 unverified /15 deferred_by_user；Goal active。下方旧节保留各批次当时结果，不能覆盖本节的失败与范围。
 
@@ -84,7 +84,7 @@ C8四条100行生成列SQL实测均快于两C2，但完整35操作/36查询成�
 
 真实Main分段确认阈值50的同步自动统计是范围修改的大成本；原selected父区间包含后置ANALYZE，不能当独占行体。点查/单行写入/DDL/事务/完整REINDEX负值及更高动作后RSS待进一步定位，不能据快照归因；普通生成列reader prototype仍隔离未交付。
 
-详见[完整性能报告](performance-report-2026-10-30.md)和[本批机器归档](benchmarks/analyze-reindex-main-costs-20261104.json)。下方旧批次保留其当时结论，当前以本节与报告首节为准。
+详见[完整性能报告](performance-report-2026-10-30.md)和[本批机器归档](benchmarks/analyze-reindex-main-costs-20261104.json.gz)。下方旧批次保留其当时结论，当前以本节与报告首节为准。
 
 ## C4功能与完整成本记录（2026-11-04）
 
@@ -94,7 +94,7 @@ C8四条100行生成列SQL实测均快于两C2，但完整35操作/36查询成�
 
 纯声明API与私有计数语法用途不开放普通动态SELECT计数执行；names-only Parse校验不分析修改输入值。已有参数帧、provider、原Binder/共享求值回调主体保持。部分StorageEngine函数增补默认空的数据输出形参，依赖已重编；未增大既有值/求值器/执行帧字段布局。下一步核对Main真实prepared修改的OLD行物化/绑定上下文，并分开测REINDEX索引键物化与持久化。直接typedexpr API未证明实际Main路径加速，不能沿用静态约2000次解析推断。
 
-详见[本批报告](performance-report-2026-10-30.md#returning-声明真实行值与操作热路径2026-11-04)及[机器归档](benchmarks/returning-declarations-hotpaths-20261104.json)。以下为历史记录。
+详见[本批报告](performance-report-2026-10-30.md#returning-声明真实行值与操作热路径2026-11-04)及[机器归档](benchmarks/returning-declarations-hotpaths-20261104.json.gz)。以下为历史记录。
 
 ## 内置注册表与RETURNING的本批增量（2026-11-03）
 
@@ -104,13 +104,13 @@ C3 `425165af…` 将无实例状态的内置回调放入只读共享表，实际
 
 RETURNING复用原绑定声明与表达式，只在实际有请求时保存已有拥有值；真实目标、OLD与NEW的非虚拟存储数组在原source-slot边界按真实schema物化，已拥有结构不解析显示文本。原事务回滚、行锁、mutation graph、provider、参数帧、Describe/Bind/portal和格式2策略不变。新增原生14+20控制通过；PG301为188匹配/113差异，新56项仍有8差异。尚缺别名描述符、虚拟数组载荷、历史物理位图，以及更多WHERE/SET输入、域数组/命名目录、typmod和ALTER USING等普通能力；不以本批关闭原273或B1 typed I/O。
 
-最终实际程序与完整C2/选取C3的不同回归范围、原始失败及完整查询/操作的全部性能结果见[本批报告](performance-report-2026-10-30.md#内置函数注册与复合-returning2026-11-03)。原始273、既有暂缓和历史测量保持，Goal active；独立机器归档见[全部原始统计](benchmarks/function-registry-returning-20261103.json)。以下C8及更早实施记录按当时状态解释。
+最终实际程序与完整C2/选取C3的不同回归范围、原始失败及完整查询/操作的全部性能结果见[本批报告](performance-report-2026-10-30.md#内置函数注册与复合-returning2026-11-03)。原始273、既有暂缓和历史测量保持，Goal active；独立机器归档见[全部原始统计](benchmarks/function-registry-returning-20261103.json.gz)。以下C8及更早实施记录按当时状态解释。
 
 ## 原始类型行物化优化（2026-11-03）
 
 C8 `91d339db…` 只在私有 `PreparedSelectState::cells` 收紧实际数据处理：只有真实非虚拟数组/REGTYPE加载需要新增的物理来源查询；原NULL来源查询、解码、值和collation保留。仅当原来源已有完整行、值/NULL宽度匹配且schema有界时，为原始类型值数组预留容量；不造来源、借用datum或复用参数帧/provider。三列夹具避免重复数据库名复制及1/2/4逐级容量，实际512行比C7少1536次分配/393216B；ExprValue的ABI增量并未消失。
 
-功能观察与C7相同，普通剩余能力与原273不关闭。完整查询36组仍为5快/18慢/13居间，不能将局部分配改进解释为普遍查询加速；源码保留，默认安装仍为S3。方法、全部慢项和后续工作见[本批报告](performance-report-2026-10-30.md#原始类型行物化分配优化2026-11-03)及[机器归档](benchmarks/owned-datum-primitive-20261103.json)。以下C7记录和其失败性能证据保持。
+功能观察与C7相同，普通剩余能力与原273不关闭。完整查询36组仍为5快/18慢/13居间，不能将局部分配改进解释为普遍查询加速；源码保留，默认安装仍为S3。方法、全部慢项和后续工作见[本批报告](performance-report-2026-10-30.md#原始类型行物化分配优化2026-11-03)及[机器归档](benchmarks/owned-datum-primitive-20261103.json.gz)。以下C7记录和其失败性能证据保持。
 
 ## 已落地的类型输出增量与下一步（2026-11-03）
 

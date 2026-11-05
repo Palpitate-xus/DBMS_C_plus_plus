@@ -12,7 +12,7 @@
         "docs/test-report.md",
         "docs/postgresql-comparison.md",
         "docs/postgresql-18-implementation-blueprint.md",
-        "docs/benchmarks/analyzed-scalar-collector-20261105.json"
+        "docs/benchmarks/analyzed-scalar-collector-20261105.json.gz"
       ],
       "tests": [
         "tests/analyzed_scalar_statistics_test.cpp",
@@ -39,7 +39,7 @@
         "docs/test-report.md",
         "docs/postgresql-comparison.md",
         "docs/postgresql-18-implementation-blueprint.md",
-        "docs/benchmarks/analyzed-statistics-snapshot-20261105.json"
+        "docs/benchmarks/analyzed-statistics-snapshot-20261105.json.gz"
       ],
       "tests": [
         "tests/analyzed_statistics_snapshot_test.cpp"
@@ -66,7 +66,7 @@
         "docs/test-report.md",
         "docs/postgresql-comparison.md",
         "docs/postgresql-18-implementation-blueprint.md",
-        "docs/benchmarks/relation-list-engine-lifetime-20261105.json"
+        "docs/benchmarks/relation-list-engine-lifetime-20261105.json.gz"
       ],
       "tests": [
         "tests/relation_list_lifetime_test.cpp",
@@ -94,7 +94,7 @@
         "docs/test-report.md",
         "docs/postgresql-comparison.md",
         "docs/postgresql-18-implementation-blueprint.md",
-        "docs/benchmarks/restore-transaction-horizon-20261105.json"
+        "docs/benchmarks/restore-transaction-horizon-20261105.json.gz"
       ],
       "tests": [
         "tests/physical_restore_allocator_horizon_test.cpp",
@@ -124,7 +124,7 @@
         "docs/test-report.md",
         "docs/postgresql-comparison.md",
         "docs/postgresql-18-implementation-blueprint.md",
-        "docs/benchmarks/backup-analyze-20261104.json"
+        "docs/benchmarks/backup-analyze-20261104.json.gz"
       ],
       "tests": [
         "tests/analyze_virtual_statistics_test.cpp",
@@ -153,7 +153,7 @@
         "docs/test-report.md",
         "docs/postgresql-comparison.md",
         "docs/postgresql-18-implementation-blueprint.md",
-        "docs/benchmarks/generated-column-demand-20261104.json"
+        "docs/benchmarks/generated-column-demand-20261104.json.gz"
       ],
       "tests": [
         "tests/generated_column_demand_test.cpp",
@@ -181,7 +181,7 @@
         "docs/test-report.md",
         "docs/postgresql-comparison.md",
         "docs/postgresql-18-implementation-blueprint.md",
-        "docs/benchmarks/analyze-reindex-main-costs-20261104.json"
+        "docs/benchmarks/analyze-reindex-main-costs-20261104.json.gz"
       ],
       "tests": [
         "tests/analyze_comparison_cache_test.cpp",
@@ -211,7 +211,7 @@
         "docs/test-report.md",
         "docs/postgresql-comparison.md",
         "docs/postgresql-18-implementation-blueprint.md",
-        "docs/benchmarks/returning-declarations-hotpaths-20261104.json"
+        "docs/benchmarks/returning-declarations-hotpaths-20261104.json.gz"
       ],
       "tests": [
         "tests/returning_declaration_api_test.cpp",
@@ -245,7 +245,7 @@
         "docs/test-report.md",
         "docs/postgresql-comparison.md",
         "docs/postgresql-18-implementation-blueprint.md",
-        "docs/benchmarks/function-registry-returning-20261103.json"
+        "docs/benchmarks/function-registry-returning-20261103.json.gz"
       ],
       "tests": [
         "tests/builtin_registry_isolation_test.cpp",
@@ -278,7 +278,7 @@
         "docs/test-report.md",
         "docs/postgresql-comparison.md",
         "docs/postgresql-18-implementation-blueprint.md",
-        "docs/benchmarks/owned-datum-primitive-20261103.json"
+        "docs/benchmarks/owned-datum-primitive-20261103.json.gz"
       ],
       "tests": [
         "tests/owned_compound_spill_codec_test.cpp",
@@ -311,7 +311,7 @@
         "docs/test-report.md",
         "docs/postgresql-comparison.md",
         "docs/postgresql-18-implementation-blueprint.md",
-        "docs/benchmarks/owned-datum-20261103.json"
+        "docs/benchmarks/owned-datum-20261103.json.gz"
       ],
       "tests": [
         "tests/owned_compound_spill_codec_test.cpp",
