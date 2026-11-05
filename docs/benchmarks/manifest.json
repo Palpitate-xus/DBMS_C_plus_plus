@@ -203,6 +203,16 @@
       "sha256": "f43131886e70718099131f0c2cf6dc6c2639960654a2e234c0fb634f79890a20",
       "encoding": "gzip",
       "roundtrip_bytes_exact": true
+    },
+    {
+      "original_path": "docs/benchmarks/index-build-scan-owner-20261105.json",
+      "original_bytes": 54014288,
+      "original_sha256": "c1feda97383a30adb9b4a4b7ba17bdbc7c75a9cda74e14bc73c37d872b046b27",
+      "path": "docs/benchmarks/index-build-scan-owner-20261105.json.gz",
+      "bytes": 5858645,
+      "sha256": "6918fe4f2d09178a27150e54f7b5a1884812539a85896be11a8f699b01336b0f",
+      "encoding": "gzip",
+      "roundtrip_bytes_exact": true
     }
   ],
   "total_original_bytes": 447562537,

@@ -6872,6 +6872,32 @@ private:
     bool active_;
 };
 
+// Index builders already own the physical tuple for this callback. Borrow
+// its bitmap only after proving that the callback payload belongs to that
+// header; never look up this row again by a partition-ambiguous RID. Scratch
+// storage belongs to the builder, and the existing binding restores nested
+// materialized/scan owners in LIFO order, including exception unwinding.
+class ScannedNullRowBinding {
+public:
+    ScannedNullRowBinding(const TableSchema& schema,
+                          std::vector<bool>& scratch,
+                          const char* payload, size_t payloadLength,
+                          const HeapTupleHeaderData* tuple = g_scanHeapTuple) {
+        if (schema.formatVersion != DATA_FILE_FORMAT_VERSION || !tuple ||
+            schema.len > MAX_COLUMNS || scratch.size() != schema.len ||
+            (tuple->t_infomask2 & HEAP_NATTS_MASK) != schema.len ||
+            tuple->t_hoff < computeHeapHeaderSize(schema.len) ||
+            payload != reinterpret_cast<const char*>(tuple) + tuple->t_hoff ||
+            payloadLength == 0) return;
+        for (size_t i = 0; i < schema.len; ++i)
+            scratch[i] = schema.cols[i].isNull && dbms::isNull(tuple, i);
+        binding_.emplace(schema, scratch);
+    }
+    bool active() const { return binding_.has_value(); }
+private:
+    std::optional<BufferedNullRowBinding> binding_;
+};
+
 bool StorageEngine::analyzeTable(const std::string& dbname,
                                  const std::string& tablename) {
     if (!tableExists(dbname, tablename)) return false;
@@ -9630,6 +9656,7 @@ DBStatus StorageEngine::createHashIndex(const std::string& dbname,
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     TableSchema tbl = getTableSchema(dbname, tablename);
+    std::vector<bool> scanNulls(tbl.len, false);
     bool found = false;
     for (size_t i = 0; i < tbl.len; ++i) {
         if (tbl.cols[i].dataName == colname) { found = true; break; }
@@ -9659,6 +9686,7 @@ DBStatus StorageEngine::createHashIndex(const std::string& dbname,
     hidx->clear();
     if (!forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
                                        const char* data, size_t len) {
+        ScannedNullRowBinding scanNullOwner(tbl, scanNulls, data, len);
         std::string row(data, len);
         for (size_t i = 0; i < tbl.len; ++i) {
             if (tbl.cols[i].dataName == colname) {
@@ -9789,6 +9817,7 @@ DBStatus StorageEngine::createBloomIndex(const std::string& dbname,
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     TableSchema tbl = getTableSchema(dbname, tablename);
+    std::vector<bool> scanNulls(tbl.len, false);
     bool found = false;
     for (size_t i = 0; i < tbl.len; ++i) {
         if (tbl.cols[i].dataName == colname) { found = true; break; }
@@ -9817,6 +9846,7 @@ DBStatus StorageEngine::createBloomIndex(const std::string& dbname,
     bidx->clear();
     if (!forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
                                            const char* data, size_t len) {
+        ScannedNullRowBinding scanNullOwner(tbl, scanNulls, data, len);
         std::string row(data, len);
         for (size_t i = 0; i < tbl.len; ++i) {
             if (tbl.cols[i].dataName == colname) {
@@ -12985,6 +13015,7 @@ DBStatus StorageEngine::createIndex(const std::string& dbname, const std::string
         if (!lockManager_.lockMetadata(tablename)) return DBStatus::LOCK_CONFLICT;
     }
     TableSchema tbl = getTableSchema(dbname, tablename);
+    std::vector<bool> scanNulls(tbl.len, false);
     if (unique &&
         tbl.partitionType != TableSchema::PartitionType::None) {
         lockManager_.unlock(tablename);
@@ -13101,6 +13132,7 @@ DBStatus StorageEngine::createIndex(const std::string& dbname, const std::string
     if (!forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
                                        const char* data, size_t len) {
         if (!entriesValid || duplicate || indexWriteFailed) return;
+        ScannedNullRowBinding scanNullOwner(tbl, scanNulls, data, len);
         std::string row(data, len);
         EvaluatedIndexEntry entry;
         if (!secondaryIndexEntryFromBuffer(
@@ -13307,6 +13339,7 @@ DBStatus StorageEngine::createCompositeIndex(const std::string& dbname,
         if (!lockManager_.lockMetadata(tablename)) return DBStatus::LOCK_CONFLICT;
     }
     TableSchema tbl = getTableSchema(dbname, tablename);
+    std::vector<bool> scanNulls(tbl.len, false);
     if (unique &&
         tbl.partitionType != TableSchema::PartitionType::None) {
         lockManager_.unlock(tablename);
@@ -13389,6 +13422,7 @@ DBStatus StorageEngine::createCompositeIndex(const std::string& dbname,
     if (!forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
                                        const char* data, size_t len) {
         if (!entriesValid || duplicate || indexWriteFailed) return;
+        ScannedNullRowBinding scanNullOwner(tbl, scanNulls, data, len);
         std::string row(data, len);
         EvaluatedIndexEntry entry;
         if (!compositeIndexEntryFromBuffer(
@@ -13649,6 +13683,7 @@ DBStatus StorageEngine::reindex(const std::string& dbname,
     };
 
     const TableSchema tbl = getTableSchema(dbname, tablename);
+    std::vector<bool> scanNulls(tbl.len, false);
     const auto secondaryIndexes = getIndexMetadata(dbname, tablename);
     const auto compositeIndexes = getCompositeIndexes(dbname, tablename);
     const std::string tableKey = dbname + "/" + tablename;
@@ -13740,6 +13775,7 @@ DBStatus StorageEngine::reindex(const std::string& dbname,
         if (!forEachRow(dbname, tablename,
                         [&](uint32_t pageId, uint16_t slotId,
                             const char* data, size_t len) {
+            ScannedNullRowBinding scanNullOwner(tbl, scanNulls, data, len);
             const std::string row(data, len);
             const int64_t rid = encodeRid(pageId, slotId);
             if (tbl.hasPrimaryKey() && !primaryWriteFailed) {
@@ -13816,6 +13852,7 @@ DBStatus StorageEngine::reindex(const std::string& dbname,
                     [&](uint32_t pageId, uint16_t slotId,
                         const char* data, size_t len) {
             if (primaryWriteFailed) return;
+            ScannedNullRowBinding scanNullOwner(tbl, scanNulls, data, len);
             const std::string row(data, len);
             const std::string key = extractPKValue(row, tbl);
             if (!key.empty()) {
@@ -13845,6 +13882,7 @@ DBStatus StorageEngine::reindex(const std::string& dbname,
                         [&](uint32_t pageId, uint16_t slotId,
                             const char* data, size_t len) {
             if (!metadataValid || writeFailed) return;
+            ScannedNullRowBinding scanNullOwner(tbl, scanNulls, data, len);
             const std::string row(data, len);
             EvaluatedIndexEntry entry;
             if (!secondaryIndexEntryFromBuffer(
@@ -13882,6 +13920,7 @@ DBStatus StorageEngine::reindex(const std::string& dbname,
                         [&](uint32_t pageId, uint16_t slotId,
                             const char* data, size_t len) {
             if (!metadataValid || writeFailed) return;
+            ScannedNullRowBinding scanNullOwner(tbl, scanNulls, data, len);
             const std::string row(data, len);
             EvaluatedIndexEntry entry;
             if (!compositeIndexEntryFromBuffer(
@@ -14078,6 +14117,7 @@ DBStatus StorageEngine::createFullTextIndex(const std::string& dbname,
                                              const std::string& colname) {
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     TableSchema tbl = getTableSchema(dbname, tablename);
+    std::vector<bool> scanNulls(tbl.len, false);
     size_t colIdx = tbl.len;
     for (size_t i = 0; i < tbl.len; ++i) {
         if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
@@ -14087,6 +14127,7 @@ DBStatus StorageEngine::createFullTextIndex(const std::string& dbname,
     std::map<std::string, std::set<int64_t>> inverted;
     if (!forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
                                        const char* data, size_t len) {
+        ScannedNullRowBinding scanNullOwner(tbl, scanNulls, data, len);
         std::string row(data, len);
         std::string val = extractColumnValue(
             row, tbl, colIdx, dbname, true);
@@ -14312,6 +14353,7 @@ DBStatus StorageEngine::createGinIndex(const std::string& dbname,
                                         const std::string& colname) {
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     TableSchema tbl = getTableSchema(dbname, tablename);
+    std::vector<bool> scanNulls(tbl.len, false);
     size_t colIdx = tbl.len;
     for (size_t i = 0; i < tbl.len; ++i) {
         if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
@@ -14321,6 +14363,7 @@ DBStatus StorageEngine::createGinIndex(const std::string& dbname,
     std::map<std::string, std::set<int64_t>> inverted;
     if (!forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
                                        const char* data, size_t len) {
+        ScannedNullRowBinding scanNullOwner(tbl, scanNulls, data, len);
         std::string row(data, len);
         std::string val = extractColumnValue(
             row, tbl, colIdx, dbname, true);
@@ -14621,6 +14664,7 @@ DBStatus StorageEngine::createGiSTIndex(const std::string& dbname,
                                          const std::string& colname) {
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     TableSchema tbl = getTableSchema(dbname, tablename);
+    std::vector<bool> scanNulls(tbl.len, false);
     size_t colIdx = tbl.len;
     for (size_t i = 0; i < tbl.len; ++i) {
         if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
@@ -14633,6 +14677,7 @@ DBStatus StorageEngine::createGiSTIndex(const std::string& dbname,
 
     if (!forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
                                        const char* data, size_t len) {
+        ScannedNullRowBinding scanNullOwner(tbl, scanNulls, data, len);
         std::string row(data, len);
         std::string val = extractColumnValue(
             row, tbl, colIdx, dbname, true);
@@ -15195,6 +15240,7 @@ DBStatus StorageEngine::createSPGiSTIndex(const std::string& dbname,
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     TableSchema tbl = getTableSchema(dbname, tablename);
+    std::vector<bool> scanNulls(tbl.len, false);
     size_t colIdx = tbl.len;
     for (size_t i = 0; i < tbl.len; ++i) {
         if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
@@ -15209,6 +15255,7 @@ DBStatus StorageEngine::createSPGiSTIndex(const std::string& dbname,
 
     if (!forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
                                        const char* data, size_t len) {
+        ScannedNullRowBinding scanNullOwner(tbl, scanNulls, data, len);
         std::string row(data, len);
         std::string val = extractColumnValue(
             row, tbl, colIdx, dbname, true);
@@ -15600,6 +15647,7 @@ DBStatus StorageEngine::createBrinIndex(const std::string& dbname,
     }
 
     auto scanAllocator = [&](PageAllocator& allocator, const TableSchema& t) -> bool {
+        std::vector<bool> scanNulls(t.len, false);
         const uint32_t np = allocator.numPages();
         for (uint64_t start = 1; start < np; start += rangeWidth) {
             const uint32_t blockStart = static_cast<uint32_t>(start);
@@ -15622,8 +15670,16 @@ DBStatus StorageEngine::createBrinIndex(const std::string& dbname,
                     if (len < rowHeaderSize(t.formatVersion, t.len)) return;
                     std::string row = stripRowHeader(data, len, t.formatVersion, t.len);
                     if (row.empty()) return;
+                    const auto* tuple = usesHeapTupleHeader(t.formatVersion)
+                        ? reinterpret_cast<const HeapTupleHeaderData*>(data)
+                        : nullptr;
+                    const size_t headerLength = rowHeaderSize(t.formatVersion, t.len);
+                    ScannedNullRowBinding scanNullOwner(
+                        t, scanNulls, data + headerLength, len - headerLength, tuple);
+                    bool valueIsNull = false;
                     std::string val = extractColumnValue(
-                        row, t, colIdx, dbname, true);
+                        row, t, colIdx, dbname, true, &valueIsNull);
+                    if (scanNullOwner.active() && valueIsNull) return;
                     if (!hasValue) {
                         rangeMin = rangeMax = std::move(val);
                         hasValue = true;

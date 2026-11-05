@@ -2,6 +2,41 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-05 current tuple NULL bitmap ownership for index build and BRIN NULL summaries",
+      "gap_ids": [
+        "IDX-03",
+        "IDX-05",
+        "IDX-06",
+        "IDX-07",
+        "IDX-08",
+        "IDX-09",
+        "IDX-15"
+      ],
+      "status": "partial",
+      "evidence": [
+        "src/commands/TableManage.cpp",
+        "docs/performance-report-2026-10-30.md",
+        "docs/benchmarks/index-build-scan-owner-20261105.json.gz"
+      ],
+      "tests": [
+        "tests/index_build_null_owner_protocol_e2e_test.py",
+        "tests/index_build_scan_owner_test.cpp"
+      ],
+      "verification": {
+        "implementation": "Borrow current owned tuple bitmap after current-format/natts/payload identity proof, existing RAII restoration and builder-local scratch; preserve decode demand/order/publication/maintenance view; BRIN skips semantic NULL ranges but retains actual empty text and virtual computed values. Current heap format2 is ordinary scope; wire/output format2 deferral unchanged.",
+        "correctness": "New native13366, protocol40; real PG18.6 shared35/2250; native79=78normal0+1 exact parent TOAST abort; oldprotocol32=29normal0+3 exact parent failures; 4 selected protocols0; 3 serial automatic stats0; restore7/2477 with14full streams. 99 final file images across normal9 exact including54 independent CRC checks.",
+        "performance": "Normal9 maintenance actual StorageEngine API, 368640 independent cells, every wall/CPU sample retained: CPU relative same-old return: Hash 创建 27.96%；Bloom 创建 24.52%；GIN 创建 32.01%；GiST 创建 40.33%；SP-GiST 创建 41.02%；BRIN 创建 -154.76%；全文创建 67.66%；单列 Btree 创建 19.30%；复合 Btree 创建 19.02%；REINDEX 14.13%；INSERT+UPDATE+DELETE+COMMIT 45.10%；UPDATE+ROLLBACK 47.67%；完整堆解码控制 -5.21%; wall returns include severe regressions, not all-operations latency improvement. Query-control normal9/740313cells: 热点前缀 7.23%／11.31%；热点等值 0.15%／-1.15%；低频前缀 -14.76%／10.60%；低频等值 -5.74%／-16.10%；不存在等值 -0.35%／3.56%；主键控制 -7.82%／-0.75%; no consistent query gain. No retry/profiler/PG speed claim.",
+        "preservation": "273 exact objects/statuses and271oldhistories preserved, new272partial;2368oldtests exact+2=>2370;248source177headers754MD725protected20oldgzip preserved+1=>21. Direct master local commit; no push/default/service. Goal active.",
+        "remaining": [
+          "BRIN numeric ordering/pruning over 2 and 10 still misses actual n>=8 match; no BRIN SQL execution operator.",
+          "Bloom and v2 GiST omit genuine empty text keys in existing builders; not fixed in P21.",
+          "No full PostgreSQL AM/opclass/WAL/concurrent build/throughput equivalence.",
+          "BRIN CPU negative, maintenance wall tails and baseline drift remain; no whole workload or PostgreSQL throughput completion.",
+          "All existing user-deferred owners unchanged; original R151 enum matrix not run."
+        ]
+      }
+    },
+    {
       "issue": "2026-11-05 runtime CPU dispatch for shared index CRC32C with exact file compatibility",
       "gap_ids": [
         "WAL-06",
