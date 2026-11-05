@@ -1,5 +1,18 @@
 # 与 PostgreSQL 18 的功能和性能差距
 
+<!-- CURRENT_ANALYZED_SCALAR_COLLECTOR_20261105 -->
+
+## 标量统计采集与 ANALYZE 优化（2026-11-05，P11-C4）
+
+本批把真实ANALYZE扫描接入标量统计快照：保留NULL、实际存储宽度和原始扫描顺序，按统计目标维护有界样本，生成signed float4 distinct、MCV、排除MCV后的直方图及相关性。数组/范围专用采集、完整继承/表达式索引统计、真实pg_stats目录源和anyarray输出仍待完成；不是完整17列SQL功能验收。
+
+最终私有普通后端为P11-C4 `e1cab6f6…`；默认根程序425保持。原生641检查及fresh冷读2检查通过，统计计算组件O2与ASan/UBSan各22检查通过（启用泄漏检测，非全库SAN），16个相关原生入口全部正常0。普通Main的CREATE/INSERT/ANALYZE/SELECT四条命令通过，464B实际快照独立解码核对两列；两条完整pg_stats SQL探针仍严格失败0A000，服务器正常0。
+
+相同输入、匹配en_US默认排序规则的真实PG18.6对照共189项：184相同，保留3处实际存储宽度差异和文本槽2处collation OID差异（本地0/PG100）。样本边界按独立样本检查有效范围，不要求随机结果相同。原C-locale参考的文本相关性差异也保留；没有修改SQL语料以取得通过。
+
+仍不能称为PostgreSQL等价：完整17列目录源/真实view与属性身份、anyarray输出、其他类型采集、继承/索引所有者、DDL/恢复和既有权限消费者尚未完整验收。CPU52%左右为本批同功能ANALYZE对照，非PG速度或全库提速。原273项状态22/166/70/15不变、历史262、Goal active。见[性能报告](performance-report-2026-10-30.md)。
+
+
 <!-- CURRENT_ANALYZED_STATS_SNAPSHOT_20261105 -->
 
 ## 完整统计视图的快照基础（2026-11-05，P10）

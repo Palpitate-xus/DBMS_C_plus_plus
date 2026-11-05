@@ -1,5 +1,26 @@
 # DBMS 功能测试报告
 
+<!-- CURRENT_ANALYZED_SCALAR_COLLECTOR_20261105 -->
+
+## 标量统计采集与 ANALYZE 优化（2026-11-05，P11-C4）
+
+本批把真实ANALYZE扫描接入标量统计快照：保留NULL、实际存储宽度和原始扫描顺序，按统计目标维护有界样本，生成signed float4 distinct、MCV、排除MCV后的直方图及相关性。数组/范围专用采集、完整继承/表达式索引统计、真实pg_stats目录源和anyarray输出仍待完成；不是完整17列SQL功能验收。
+
+最终私有普通后端为P11-C4 `e1cab6f6…`；默认根程序425保持。原生641检查及fresh冷读2检查通过，统计计算组件O2与ASan/UBSan各22检查通过（启用泄漏检测，非全库SAN），16个相关原生入口全部正常0。普通Main的CREATE/INSERT/ANALYZE/SELECT四条命令通过，464B实际快照独立解码核对两列；两条完整pg_stats SQL探针仍严格失败0A000，服务器正常0。
+
+相同输入、匹配en_US默认排序规则的真实PG18.6对照共189项：184相同，保留3处实际存储宽度差异和文本槽2处collation OID差异（本地0/PG100）。样本边界按独立样本检查有效范围，不要求随机结果相同。原C-locale参考的文本相关性差异也保留；没有修改SQL语料以取得通过。
+
+本批新增三个永久入口：analyzed_scalar_statistics_test（真实DDL/heap/ANALYZE，641检查和独立cold2）与analyzed_scalar_collector_test（22个计算/边界控制）。最终16相关入口均0；计算组件启用leaks的ASan/UBSan通过，非整个Capture/StorageEngine/数据库的SAN。Main4条SQL成功，pg_stats2条0A000仍失败；PG189中保留5个差异。旧2342测试与725保护记录保持，当前2345/顶层1094/去桩1093/子目录5。
+
+原始输入、正常和失败构建/执行、PG两种locale及完整9进程成本见[报告](performance-report-2026-10-30.md)和[归档](benchmarks/analyzed-scalar-collector-20261105.json)。
+
+最终C4还修复默认自动分析的可见性：旧C3在批量INSERT达到阈值时生成空列快照；现在普通事务成功COMMIT、清理原命令视图与锁后，按已有改动表集合触发分析。失败/回滚不提前发布；只有分析成功才扣除已统计修改数，保留并发新增计数。维护错误不把已持久提交伪装成失败。25条普通协议SQL验证INSERT55、显式事务提交110、UPDATE110、DELETE50、回滚不改快照、ALTER SYSTEM+reload关闭自动分析后显式分析105，并核对5次EXPLAIN基数；服务器正常0。原恢复入口1574检查及7个worker全部正常0。共享IO/分配失败、两阶段提交的自动统计调度及显式事务内ANALYZE的全部回滚语义仍未完整验收。
+
+按用户清理要求删除93209个旧编译文件，实际空闲增加约658GiB；分区85%→72%、空闲约1.5TiB，项目约111→28GiB。源码、原2342测试、全部已跟踪文件、当前C4/default425及PG18参考工具已核对保持。后续以现有CMake缓存和当前core复用构建，证据归档后清理可重建产物。删除在9样本全部结束后进行；只读du盘点与最终对照的回测段重叠，全部结果保留，不称为无并发负载测量。
+
+第三入口为tests/analyzed_scalar_auto_protocol_e2e_test.py，25条SQL原始wire和5份真实快照均留存。两个配置控制草稿误用SET/SET GLOBAL，被当前SQL模式拒绝，错误原样保留；最终沿用既有ALTER SYSTEM及pg_reload_conf，未改配置策略。
+
+
 <!-- CURRENT_ANALYZED_STATS_SNAPSHOT_20261105 -->
 
 ## 完整统计视图的快照基础（2026-11-05，P10）

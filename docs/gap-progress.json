@@ -2,6 +2,33 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-05 real scalar ANALYZE collectors and cached complete API costs",
+      "gap_ids": [
+        "OPT-04"
+      ],
+      "status": "partial",
+      "evidence": [
+        "docs/performance-report-2026-10-30.md",
+        "docs/test-report.md",
+        "docs/postgresql-comparison.md",
+        "docs/postgresql-18-implementation-blueprint.md",
+        "docs/benchmarks/analyzed-scalar-collector-20261105.json"
+      ],
+      "tests": [
+        "tests/analyzed_scalar_statistics_test.cpp",
+        "tests/analyzed_scalar_collector_test.cpp",
+        "tests/analyzed_scalar_auto_protocol_e2e_test.py"
+      ],
+      "verification": {
+        "actual_implementation": "Real scan/reservoir/width/order -> typed scalar slots and durable snapshot; source236/header166, only old TableManage.cpp changed, all164priorheaders exact. C4 normale1cab6f6 and actual16related/641+cold2/22componentSAN checks passed. Default425unchanged.",
+        "SQL_and_PG": "Normal Main4 positive SQL commands and independently decoded2col snapshot, normalexit0; original2 full17SQL probes both0A000 strictFAIL. Real matching-locale PG15cols189checks:184match,3stored-width+2collationOIDdifferences retained. OriginalC-locale text correlation mismatch retained; no fullPGacceptance.",
+        "cost": "Complete API same full scalar functionality P11-C2/C4/C2 three each,9normal0. 4096rows/4types,1untimed preflight+5timed calls each. 9complete heap proof/snapshot bytes identical;1275NULLs/allRIDs/cells. processCPU p50 -51.93/-54.81%,wall -50.64/-54.17%,allrawtails retained. Not shippingDB or SELECT/PG speed.",
+        "open_scope": "Array/range/custom/inherited/index collectors; full17catalog/source/origins/output; collationidentity and original273 incomplete/deferred families; fullDDL/recovery/two-file atomicity not accepted. Goalactive.",
+        "preservation": "Original273items22/166/70/15 and raw261history,2342oldtests,725protected,10oldarchives,754MDpaths unchanged; new1partial=262.",
+        "automatic": "FinalC4 real25 SQL commands incl defaultauto INSERT/UPDATE/DELETE, successful COMMIT, rollback unchanged, persisted disable+reload then explicitANALYZE and5EXPLAIN totalRows; priorC3 first55rows produced0column snapshot strictFAIL. Full7 normal0/1574controls. 2PC and complete stats transaction rollback remain open."
+      }
+    },
+    {
       "issue": "2026-11-05 full17 analyzed statistics owned snapshot foundation",
       "gap_ids": [
         "OPT-04"

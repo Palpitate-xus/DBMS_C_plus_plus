@@ -1,5 +1,20 @@
 # DBMS_C_plus_plus 对标 PostgreSQL 18.6：逐项完整实施蓝图
 
+<!-- CURRENT_ANALYZED_SCALAR_COLLECTOR_20261105 -->
+
+## 标量统计采集与 ANALYZE 优化（2026-11-05，P11-C4）
+
+本批把真实ANALYZE扫描接入标量统计快照：保留NULL、实际存储宽度和原始扫描顺序，按统计目标维护有界样本，生成signed float4 distinct、MCV、排除MCV后的直方图及相关性。数组/范围专用采集、完整继承/表达式索引统计、真实pg_stats目录源和anyarray输出仍待完成；不是完整17列SQL功能验收。
+
+最终私有普通后端为P11-C4 `e1cab6f6…`；默认根程序425保持。原生641检查及fresh冷读2检查通过，统计计算组件O2与ASan/UBSan各22检查通过（启用泄漏检测，非全库SAN），16个相关原生入口全部正常0。普通Main的CREATE/INSERT/ANALYZE/SELECT四条命令通过，464B实际快照独立解码核对两列；两条完整pg_stats SQL探针仍严格失败0A000，服务器正常0。
+
+相同输入、匹配en_US默认排序规则的真实PG18.6对照共189项：184相同，保留3处实际存储宽度差异和文本槽2处collation OID差异（本地0/PG100）。样本边界按独立样本检查有效范围，不要求随机结果相同。原C-locale参考的文本相关性差异也保留；没有修改SQL语料以取得通过。
+
+P10完整模型/持久化之后，P11已接上真实标量采集、原生及普通Main发布，比较缓存复用通过完整API成本对照。下步仍按原完整17列目标接数组/范围专用槽、继承/索引实际owner、真实目录源/来源身份和output-only anyarray；同时处理实际collation元数据及所有未完成验收。采样后的schema检查不代替并发DDL隔离，两统计文件也非共同原子事务。原暂停边界不变，不以四字段视图或全零槽收尾。
+
+[报告与差异](performance-report-2026-10-30.md)、[原始证据](benchmarks/analyzed-scalar-collector-20261105.json)。
+
+
 <!-- CURRENT_ANALYZED_STATS_SNAPSHOT_20261105 -->
 
 ## 完整统计视图的快照基础（2026-11-05，P10）

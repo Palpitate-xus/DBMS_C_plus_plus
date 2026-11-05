@@ -1,5 +1,18 @@
 # DBMS C++
 
+<!-- CURRENT_ANALYZED_SCALAR_COLLECTOR_20261105 -->
+
+## 标量统计采集与 ANALYZE 优化（2026-11-05，P11-C4）
+
+已接入真实ANALYZE的标量采集和快照发布；旧优化器/原生8列统计保持。普通服务器四条SQL流程与独立快照读回通过，完整pg_stats查询仍有2项0A000失败。PG对照的3处存储宽度及2处collation OID差异仍开放。
+
+本批同功能版本的完整ANALYZE对照（4096行、4类型，每进程计时5次，前/新/回测各3进程）CPU中位数降低51.93%/54.81%，wall降低50.64%/54.17%；9份完整数据/RID/NULL和统计快照逐字一致。对照是本批P11-C2/P11-C4，不是父提交后端或任意SELECT查询提速。
+
+源236/头166；原234生产文件仅TableManage.cpp变更，164旧头和2342旧测试保持。新增3测试后2345（顶层1094 CPP含桩、去桩1093，另5子目录CPP）。原273项22/166/70/15及261条历史保持，仅加1条partial后262；Goal active。
+
+详见[性能报告](docs/performance-report-2026-10-30.md)、[验证状态](docs/production-status.md)和[原始证据](docs/benchmarks/analyzed-scalar-collector-20261105.json)。
+
+
 <!-- CURRENT_ANALYZED_STATS_SNAPSHOT_20261105 -->
 
 ## 完整统计视图的快照基础（2026-11-05，P10）

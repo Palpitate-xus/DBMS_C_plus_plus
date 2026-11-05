@@ -76,6 +76,7 @@
 #include "WAL.h"
 #include "storage/HeapWalIdentity.h"
 #include "commands/RelationNameCodec.h"
+#include "commands/AnalyzedStatisticsCapture.h"
 #include "HashIndex.h"
 #include "BloomIndex.h"
 #include "SPGiSTIndex.h"
@@ -6872,6 +6873,9 @@ bool StorageEngine::analyzeTable(const std::string& dbname,
                                  const std::string& tablename) {
     if (!tableExists(dbname, tablename)) return false;
     TableSchema tbl = getTableSchema(dbname, tablename);
+    analyzed_statistics::ScalarStatisticsCapture typedAnalysis(
+        tbl, tablename, schemaPath(dbname, tablename),
+        catalogService().metadataSnapshot(dbname));
 
     TableStats stats;
     stats.rowCount = 0;
@@ -6881,6 +6885,7 @@ bool StorageEngine::analyzeTable(const std::string& dbname,
 
     if (!forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId, const char* data, size_t len) {
         stats.rowCount++;
+        typedAnalysis.beginRow();
         std::string row(data, len);
         std::vector<bool> capturedNulls;
         std::optional<BufferedNullRowBinding> capturedBinding;
@@ -6890,6 +6895,7 @@ bool StorageEngine::analyzeTable(const std::string& dbname,
             const std::string& cname = tbl.cols[i].dataName;
             if (g_scanHeapTuple && dbms::isNull(g_scanHeapTuple, static_cast<int>(i))) {
                 ++nullCounts[cname];
+                typedAnalysis.cell(i, {}, true, row, tbl);
                 continue;
             }
             // Start exactly at the first original non-NULL nullable-cell
@@ -6927,9 +6933,37 @@ bool StorageEngine::analyzeTable(const std::string& dbname,
                 // original per-cell extraction below. Exceptions propagate.
             }
             std::string val = extractColumnValue(row, tbl, i);
+            typedAnalysis.cell(i, val, false, row, tbl);
             allVals[tbl.cols[i].dataName].push_back(val);
         }
     })) return false;
+    auto typedStatistics = typedAnalysis.finish([](const Column& column,
+        const std::vector<analyzed_statistics::ScalarSample>& sample)
+        -> analyzed_statistics::ScalarStatisticsCapture::IndexedComparison {
+        // The actual per-cell validation is complete. Reuse the same local
+        // comparison owner as legacy ANALYZE without retaining an execution
+        // frame or adding a process/global datum or locale cache.
+        auto comparison = std::make_shared<AnalyzeComparisonCache>();
+        std::vector<std::string> raw;
+        std::vector<bool> comparable;
+        raw.reserve(sample.size()); comparable.reserve(sample.size());
+        for (const auto& cell : sample) {
+            comparable.push_back(!cell.value.isNull && !cell.tooWide);
+            raw.push_back(comparable.back() ? cell.value.value : std::string{});
+        }
+        if (!comparison->prepare(column, raw, comparable)) return {};
+        // prepare() owns parsed keys/locale. Discard its temporary strings
+        // before sorting; all selected values remain in the real sample.
+        return [comparison, &sample](size_t left, size_t right) {
+            const auto& a = sample[left].value.value;
+            const auto& b = sample[right].value.value;
+            if (a == b) return 0;
+            const auto result = comparison->compare(left, right, a, b);
+            if (!result) throw DbError("XX001", "analyzed comparison key is absent");
+            return *result;
+        };
+    });
+    typedAnalysis.verify(catalogService().metadataSnapshot(dbname));
 
     const size_t HIST_BUCKETS = 10;
     const size_t MCV_TOP_N = 10;
@@ -7065,7 +7099,13 @@ bool StorageEngine::analyzeTable(const std::string& dbname,
             serialized << "|" << mcvToString(mv.second.mcv) << "\n";
         }
     }
-    return index_file::writeAtomically(spath, serialized.str());
+    if (!index_file::writeAtomically(spath, serialized.str())) return false;
+    if (typedAnalysis.hasIdentity()) {
+        const auto publication = analyzed_statistics::updateRelation(
+            dbPath(dbname) / ".analyzed_statistics", typedAnalysis.relation(), typedStatistics);
+        if (publication.publication != StatsSnapshotPublication::Durable) return false;
+    }
+    return true;
 }
 
 bool StorageEngine::analyzeMultiColumn(const std::string& dbname, const std::string& tablename,
@@ -51895,7 +51935,10 @@ DBStatus StorageEngine::commitTransaction() {
     }
     transactionContext().txnLog.clear();
     transactionContext().txnHeapWritebackPages.clear();
-    transactionContext().specializedIndexTables.clear();
+    // This set already owns every table changed by the committed transaction.
+    // Move its nodes without allocating after the durable COMMIT boundary.
+    std::set<std::string> committedAnalysisTables;
+    committedAnalysisTables.swap(transactionContext().specializedIndexTables);
     // Logical decoding: rollback discards buffered changes — subscribers
     // never see uncommitted work.
     transactionContext().txnLogicalChanges.clear();
@@ -51935,6 +51978,18 @@ DBStatus StorageEngine::commitTransaction() {
     transactionContext().databaseSharedLock.reset();
     transactionContext().databaseTxnMutex.reset();
     flushDeferredSequences();
+    if (g_config.autoAnalyzeEnabled) {
+        for (const auto& table : committedAnalysisTables) {
+            try {
+                maybeAutoAnalyze(committingDb, table);
+            } catch (const std::exception& error) {
+                // Statistics are retryable maintenance. COMMIT is already
+                // durable and must not become an apparent statement failure.
+                std::cerr << "[statistics] committed with ANALYZE pending for "
+                    << committingDb << "/" << table << ": " << error.what() << std::endl;
+            }
+        }
+    }
     return DBStatus::OK;
 }
 
@@ -56446,6 +56501,9 @@ void StorageEngine::recordModification(const std::string& dbname,
 void StorageEngine::maybeAutoAnalyze(const std::string& dbname,
                                      const std::string& tablename) {
     if (!g_config.autoAnalyzeEnabled) return;
+    // A write command's MVCC view excludes its own current-command changes.
+    // Analyze once after successful COMMIT, when all of them are visible.
+    if (transactionContext().inTransaction) return;
     auto key = std::make_pair(dbname, tablename);
     size_t count = 0;
     {
@@ -56455,9 +56513,12 @@ void StorageEngine::maybeAutoAnalyze(const std::string& dbname,
         count = it->second;
     }
     if (count >= static_cast<size_t>(g_config.autoAnalyzeThreshold)) {
-        analyzeTable(dbname, tablename);
-        std::lock_guard<std::mutex> lock(modifyMutex_);
-        modifyCounts_[key] = 0;
+        if (analyzeTable(dbname, tablename)) {
+            std::lock_guard<std::mutex> lock(modifyMutex_);
+            const auto found = modifyCounts_.find(key);
+            if (found != modifyCounts_.end())
+                found->second -= std::min(found->second, count);
+        }
     }
 }
 
