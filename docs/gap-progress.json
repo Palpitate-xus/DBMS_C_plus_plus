@@ -2,6 +2,35 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-05 GiST current-read owner fence and visible tuple NULL fallback",
+      "gap_ids": [
+        "IDX-07",
+        "OPT-04"
+      ],
+      "status": "partial",
+      "evidence": [
+        "src/commands/TableManage.cpp",
+        "docs/performance-report-2026-10-30.md",
+        "docs/benchmarks/gist-read-owner-20261105.json.gz"
+      ],
+      "tests": [
+        "tests/gist_read_owner_probe_test.cpp",
+        "tests/gist_read_owner_protocol_e2e_test.py"
+      ],
+      "verification": {
+        "implementation": "GiST overlap/contained current-only sidecar fenced by actual durable allocation and dirty state; historical/overlapping/own-write/SERIALIZABLE/invalid or absent file/empty-text range retain visible heap. Reuse owned visible-tuple NULL bitmap without repeated allocator checks.",
+        "correctness": "Final new native 1214 checks normal0; same source parent fails physical owner guard. 60 old native:59normal0+1 complete parent-identical TOAST SIGABRT. 32 old protocols:29normal0+3 full parent-identical failures. New39, oldLIKE123/27, typed65/15, three serial auto fixtures, restore7/2477 checks/14 streams, actualPG18.6 shared37/1287 cells/NULL/OIDs/tags/states.",
+        "performance": "热点前缀 2.54%／3.42%；热点等值 -0.42%／-1.44%；低频前缀 56.62%／52.19%；低频等值 -12.42%／-10.29%；不存在等值 2.15%／1.44%；主键控制 -6.09%／-3.54%; 9 normal socket processes fixed before/after/same-before, live CPU, independent full decoder, all samples/tails/negatives retained. Operator counters are not physical index-I/O proof.",
+        "preservation": "273 full objects/statuses269histories exact,new270partial;2365oldtests exact+2=>2367;248source177headers754MD725protected18oldgzip exact+1=>19;masterlocal,no push/default/service,Goalactive.",
+        "remaining": [
+          "Flat checksummed linear GiST, no PG tree/opclass/KNN/WAL or historical-version index completeness.",
+          "No global performance improvement or full suite/sanitizer/PG AM-path-speed equivalence.",
+          "Old P17/P18 GiST operator labels do not independently prove physical index file access; original samples retained.",
+          "All user-deferred owners and original R151 matrix remain untouched."
+        ]
+      }
+    },
+    {
       "issue": "2026-11-05 owned typed scalar ANALYZE scan costing, cache identity and transactional analysis rollback",
       "gap_ids": [
         "OPT-04",

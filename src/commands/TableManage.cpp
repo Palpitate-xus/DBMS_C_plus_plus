@@ -14994,17 +14994,32 @@ std::vector<int64_t> StorageEngine::giSTSearchOverlap(const std::string& dbname,
     const auto scanHeap = [&]() -> std::vector<int64_t> {
         result.clear();
         bool valuesValid = true;
+        std::vector<bool> visibleNulls(table.len, false);
         const bool scanned = forEachRow(
             dbname, tablename,
             [&](uint32_t pageId, uint16_t slotId,
                 const char* data, size_t length) {
                 if (!valuesValid) return;
+                // The callback owns this visible tuple, including an older
+                // version's bitmap. Do not re-fetch the current physical row
+                // to decide whether its value is NULL.
+                if (table.formatVersion == DATA_FILE_FORMAT_VERSION) {
+                    if (!g_scanHeapTuple) {
+                        valuesValid = false;
+                        return;
+                    }
+                    for (size_t i = 0; i < table.len; ++i)
+                        visibleNulls[i] = table.cols[i].isNull &&
+                            dbms::isNull(g_scanHeapTuple, static_cast<int>(i));
+                }
+                BufferedNullRowBinding binding(table, visibleNulls);
+                bool valueIsNull = false;
                 const std::string value =
                     const_cast<StorageEngine*>(this)->extractColumnValue(
                         std::string(data, length), table, columnIndex,
-                        dbname, true);
-                if (value.empty()) return;
-                if (!gistEntryRangeIsValid(ordering, value, value)) {
+                        dbname, true, &valueIsNull);
+                if (valueIsNull || (value.empty() && ordering != GistKeyOrdering::Text)) return;
+                if (!value.empty() && !gistEntryRangeIsValid(ordering, value, value)) {
                     valuesValid = false;
                     return;
                 }
@@ -15021,11 +15036,24 @@ std::vector<int64_t> StorageEngine::giSTSearchOverlap(const std::string& dbname,
     std::error_code pathError;
     const bool isIndexFile =
         std::filesystem::is_regular_file(path, pathError);
-    if (specializedIndexesNeedHeapFallback(dbname, tablename)) {
+    // A proven current reader may use the current index even though its
+    // own read transaction is active. Historical/overlapping/own-write
+    // readers retain the heap path. Recheck the durable allocation fence
+    // and cross-backend dirty marker after reading every index entry.
+    // GiST has no predicate-level SSI registration. Preserve the existing
+    // visible heap scan's relation/page/tuple SIREAD ownership, including
+    // empty answers, for serializable native and SQL readers.
+    const auto& context = transactionContext();
+    if (context.inTransaction && context.txnDB == dbname &&
+        context.txnIsolationLevel == IsolationLevel::SERIALIZABLE)
         return scanHeap();
-    }
-    if (pathError) return scanHeap();
-    if (!isIndexFile) return result;
+    const auto indexFence = indexReadSnapshotFence(dbname);
+    if (!indexFence || specializedIndexesAreDirty(*this, dbname, tablename))
+        return scanHeap();
+    if (pathError || !isIndexFile) return scanHeap();
+    // Existing V2 sidecars omit empty text keys. A range that can include
+    // them must read visible heap tuples, keeping empty distinct from NULL.
+    if (ordering == GistKeyOrdering::Text && low.empty()) return scanHeap();
     const bool valid = forEachGiSTEntry(
         path, ordering,
         [&](int64_t rid, const std::string& entryLow,
@@ -15037,7 +15065,8 @@ std::vector<int64_t> StorageEngine::giSTSearchOverlap(const std::string& dbname,
                 result.push_back(rid);
             }
         });
-    if (!valid) return scanHeap();
+    if (!valid || specializedIndexesAreDirty(*this, dbname, tablename) ||
+        indexReadSnapshotFence(dbname) != indexFence) return scanHeap();
     return result;
 }
 
@@ -15063,17 +15092,32 @@ std::vector<int64_t> StorageEngine::giSTSearchContainedBy(const std::string& dbn
     const auto scanHeap = [&]() -> std::vector<int64_t> {
         result.clear();
         bool valuesValid = true;
+        std::vector<bool> visibleNulls(table.len, false);
         const bool scanned = forEachRow(
             dbname, tablename,
             [&](uint32_t pageId, uint16_t slotId,
                 const char* data, size_t length) {
                 if (!valuesValid) return;
+                // The callback owns this visible tuple, including an older
+                // version's bitmap. Do not re-fetch the current physical row
+                // to decide whether its value is NULL.
+                if (table.formatVersion == DATA_FILE_FORMAT_VERSION) {
+                    if (!g_scanHeapTuple) {
+                        valuesValid = false;
+                        return;
+                    }
+                    for (size_t i = 0; i < table.len; ++i)
+                        visibleNulls[i] = table.cols[i].isNull &&
+                            dbms::isNull(g_scanHeapTuple, static_cast<int>(i));
+                }
+                BufferedNullRowBinding binding(table, visibleNulls);
+                bool valueIsNull = false;
                 const std::string value =
                     const_cast<StorageEngine*>(this)->extractColumnValue(
                         std::string(data, length), table, columnIndex,
-                        dbname, true);
-                if (value.empty()) return;
-                if (!gistEntryRangeIsValid(ordering, value, value)) {
+                        dbname, true, &valueIsNull);
+                if (valueIsNull || (value.empty() && ordering != GistKeyOrdering::Text)) return;
+                if (!value.empty() && !gistEntryRangeIsValid(ordering, value, value)) {
                     valuesValid = false;
                     return;
                 }
@@ -15090,11 +15134,24 @@ std::vector<int64_t> StorageEngine::giSTSearchContainedBy(const std::string& dbn
     std::error_code pathError;
     const bool isIndexFile =
         std::filesystem::is_regular_file(path, pathError);
-    if (specializedIndexesNeedHeapFallback(dbname, tablename)) {
+    // A proven current reader may use the current index even though its
+    // own read transaction is active. Historical/overlapping/own-write
+    // readers retain the heap path. Recheck the durable allocation fence
+    // and cross-backend dirty marker after reading every index entry.
+    // GiST has no predicate-level SSI registration. Preserve the existing
+    // visible heap scan's relation/page/tuple SIREAD ownership, including
+    // empty answers, for serializable native and SQL readers.
+    const auto& context = transactionContext();
+    if (context.inTransaction && context.txnDB == dbname &&
+        context.txnIsolationLevel == IsolationLevel::SERIALIZABLE)
         return scanHeap();
-    }
-    if (pathError) return scanHeap();
-    if (!isIndexFile) return result;
+    const auto indexFence = indexReadSnapshotFence(dbname);
+    if (!indexFence || specializedIndexesAreDirty(*this, dbname, tablename))
+        return scanHeap();
+    if (pathError || !isIndexFile) return scanHeap();
+    // Existing V2 sidecars omit empty text keys. A range that can include
+    // them must read visible heap tuples, keeping empty distinct from NULL.
+    if (ordering == GistKeyOrdering::Text && low.empty()) return scanHeap();
     const bool valid = forEachGiSTEntry(
         path, ordering,
         [&](int64_t rid, const std::string& entryLow,
@@ -15105,7 +15162,8 @@ std::vector<int64_t> StorageEngine::giSTSearchContainedBy(const std::string& dbn
                 result.push_back(rid);
             }
         });
-    if (!valid) return scanHeap();
+    if (!valid || specializedIndexesAreDirty(*this, dbname, tablename) ||
+        indexReadSnapshotFence(dbname) != indexFence) return scanHeap();
     return result;
 }
 
