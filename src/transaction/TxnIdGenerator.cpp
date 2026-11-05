@@ -183,6 +183,27 @@ uint64_t TxnIdGenerator::maxCommittedTxId() const {
     return maxCommitted_;
 }
 
+bool TxnIdGenerator::advancePast(uint64_t recoveredTxId) {
+    if (recoveredTxId > kMaxHeapTupleXid) return false;
+    std::lock_guard<std::mutex> lock(mtx_);
+    CounterFileLock fileLock(persistPath_);
+    if (!fileLock.ok() || !healthy_) return false;
+    if (!load()) {
+        healthy_ = false;
+        return false;
+    }
+    if (recoveredTxId < nextTxId_) return true;
+
+    // The exhausted next value UINT32_MAX+1 is representable in the durable
+    // 64-bit counter; nextTxId() will refuse further heap XID allocations.
+    const uint64_t next = recoveredTxId + 1;
+    const uint64_t highWater = std::max(maxCommitted_, recoveredTxId);
+    if (!save(next, highWater)) return false;
+    nextTxId_ = next;
+    maxCommitted_ = highWater;
+    return true;
+}
+
 void TxnIdGenerator::notifyCommit(uint64_t txId) {
     std::lock_guard<std::mutex> lock(mtx_);
     // Allocation is the durability point for both nextTxId and the snapshot

@@ -1,5 +1,16 @@
 # 与 PostgreSQL 18 的功能和性能差距
 
+<!-- CURRENT_RESTORE_TRANSACTION_HORIZON_20261105 -->
+
+## 物理恢复事务号水位（2026-11-05，P8-C3）
+
+本批P8-C3 `d778afbd…` 参照恢复后事务分配器必须超过导入事务号的原则，补入本项目公开恢复的只读水位扫描和持久推进；这不等于PostgreSQL的WAL恢复、epoch/wrap或并发机制。较早目标首次探针1→4行得到实际验证，正常Main仍有5项探针元数据差异，最终七阶段原生验收仍因advance阶段异常退出而严格失败。
+
+第二轮仅比较本项目旧P7-C1/C2/C3/旧P7-C1：C3 wall p50较两次旧版低4.16%/6.42%，process CPU低2.47%/3.17%。第一轮C2慢项、6.8秒与18.5秒长尾不删除；没有PostgreSQL速度或完整35/36新结论，默认425未提升。跨进程准入、完整恢复失败及完整17字段pg_stats仍开放，不能把少数字段renderer当视图完成。详见[完整报告](performance-report-2026-10-30.md#物理恢复事务号水位2026-11-05p8-c3)和[机器归档](benchmarks/restore-transaction-horizon-20261105.json)。
+
+原273项仍为22 complete /166 partial /70 unverified /15 deferred_by_user；Goal active。下方旧节保留各批次当时结果，不能覆盖本节的失败与范围。
+
+
 <!-- CURRENT_BACKUP_ANALYZE_20261104 -->
 
 ## 备份摘要与 virtual 列统计（2026-11-04，P7-C1）

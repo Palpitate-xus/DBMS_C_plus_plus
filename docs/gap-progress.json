@@ -2,6 +2,36 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-05 public physical restore transaction horizon and validation costs",
+      "gap_ids": [
+        "BACKUP-01",
+        "BACKUP-02",
+        "TXN-01"
+      ],
+      "status": "partial",
+      "evidence": [
+        "docs/performance-report-2026-10-30.md",
+        "docs/test-report.md",
+        "docs/postgresql-comparison.md",
+        "docs/postgresql-18-implementation-blueprint.md",
+        "docs/benchmarks/restore-transaction-horizon-20261105.json"
+      ],
+      "tests": [
+        "tests/physical_restore_allocator_horizon_test.cpp",
+        "tests/physical_restore_admission_concurrency_test.cpp",
+        "tests/wal_snapshot_transaction_highwater_test.cpp",
+        "tests/RestoreAdmissionFixture.h"
+      ],
+      "verification": {
+        "source": "Parent d18b9375; final P8-C3 d778afbd/source231/header161, C++17/O2/TLSstub. Actual C1 16/C2 WAL1/C3 TM1 rebuilds with verified fresh62 ancestry and matching stub. Direct master / Palpitate-xus; default425 held, no branch/push/service restart.",
+        "functional": "Original early-target native full1000+4/RID/NULL now passed; original Main probe1/4->4/4, post-write and cold data pass. Main C3 209/214 with5 strict descriptor/catalog failures. Original old cold -6 retained, unknown cause. Process-local 3 admission semantics /5workers normal0; cross-process live admission remains open.",
+        "strict_failure": "Same full7: old data FAIL, P8-C1 7normal0, P8-C2 advance SIGABRT Invalid argument, final C3 advance SIGABRT corrupted double-linked list, each last4 NOTRUN. Actual writes occurred; exact cause unknown. No retry, no recategorization as deferred. Overall recovery family remains partial.",
+        "related": "21 old entries pass; standalone reader19, TxID8 top+3peers, WAL32 pass. Registered concurrency corrected missing helper/link annotation, v3 actual0; final header/full7 comment-only cleanup preserves controls. All original2336 files exact; now2340.",
+        "performance": "Two separate full public-restore cohorts, each12calls/144checks, all0 and raw long tails retained. Cohort1 wallp50 old1649.601/C1 2080.188/C2 1775.514/old1697.333ms; C2 still slowerold. Cohort2 old1633.279/C2 1743.687/C3 1565.301/old1672.605ms; C3 wall -4.16%/-6.42%, CPU -2.47%/-3.17% vsold. 18.5s C2 sample retained. No whole35/36/PGspeed claim.",
+        "scope": "Original273 full objects/states22/166/70/15 and original258history preserved; now259history. 725protected/sevenoldarchives/754MDpaths unchanged. Complete17-field pg_stats plan remains future work. Goalactive; no family closure."
+      }
+    },
+    {
       "issue": "2026-11-04 backup creation SHA and virtual ANALYZE statistics",
       "gap_ids": [
         "OPT-04",

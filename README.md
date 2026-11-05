@@ -1,5 +1,16 @@
 # DBMS C++
 
+<!-- CURRENT_RESTORE_TRANSACTION_HORIZON_20261105 -->
+
+## 物理恢复事务号水位（2026-11-05，P8-C3）
+
+P8-C3 正常程序为 `d778afbd…`，补入公开物理恢复发布前的事务号水位对齐，并优化该公开入口的清单验证；保持C++17。原始较早目标的正常Main首次探针由1/4行恢复为4/4，数据、后续写入与冷启动检查通过，仍有5项描述符/目录身份检查失败。相同七阶段原生验收在最终C3仍于advance阶段异常退出，后四阶段未运行，不能称完整恢复验收通过。
+
+第二轮独立公开API计时中，C3 wall p50较两次旧P7-C1低4.16%/6.42%；第一轮C2仍慢于旧版，两轮全部长尾保留。这是固定正确目标上的完整恢复调用，完整35操作/36查询与PostgreSQL速度未重测。默认程序仍为425，现有服务未重启。详见[完整报告](docs/performance-report-2026-10-30.md#物理恢复事务号水位2026-11-05p8-c3)和[机器归档](docs/benchmarks/restore-transaction-horizon-20261105.json)。
+
+原273项仍为22 complete /166 partial /70 unverified /15 deferred_by_user；Goal active。下方旧节保留各批次当时结果，不能覆盖本节的失败与范围。
+
+
 <!-- CURRENT_BACKUP_ANALYZE_20261104 -->
 
 ## 备份摘要与 virtual 列统计（2026-11-04，P7-C1）

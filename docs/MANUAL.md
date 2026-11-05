@@ -1,5 +1,18 @@
 # DBMS 使用手册
 
+<!-- CURRENT_RESTORE_TRANSACTION_HORIZON_20261105 -->
+
+## 物理恢复事务号水位（2026-11-05，P8-C3）
+
+当前源码P8-C3 `d778afbd…` 在公开 `RESTORE DATABASE` 的发布前读取真实恢复文件的事务号证据，持久推进本机分配器且不回退既有高水位；未改变项目V2清单/V3备份标记。此项目格式与PostgreSQL物理备份格式不同。
+
+普通SQL仍需显式extended模式和管理员权限，通过 `RESTORE DATABASE 数据库 FROM '路径'` 提交后台作业，再用 `SHOW MAINTENANCE JOB 作业号` 查看终态。作业succeeded不等于全部兼容或恢复验收通过：固定22操作的值、NULL、后续INSERT/CREATE与两个正常Main上下文（含冷启动）通过，但5项探针类型描述符/目录身份检查仍失败；最终七阶段原生控制在advance阶段异常退出，后四阶段未执行。
+
+准入屏障仅覆盖当前进程的分配及活动登记窗口；其他实际活动事务号不高于导入水位时保守拒绝恢复。跨服务进程的在线准入仍有缺口。本批未提升默认425或重启现有服务，完整边界与两轮计时见[完整报告](performance-report-2026-10-30.md#物理恢复事务号水位2026-11-05p8-c3)和[机器归档](benchmarks/restore-transaction-horizon-20261105.json)。
+
+原273项仍为22 complete /166 partial /70 unverified /15 deferred_by_user；Goal active。下方旧节保留各批次当时结果，不能覆盖本节的失败与范围。
+
+
 <!-- CURRENT_BACKUP_ANALYZE_20261104 -->
 
 ## 备份摘要与 virtual 列统计（2026-11-04，P7-C1）

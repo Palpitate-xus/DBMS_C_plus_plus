@@ -300,6 +300,264 @@ bool WALManager::refersToCurrentDirectory() const {
            opened.st_ino == current.st_ino;
 }
 
+namespace {
+// Private snapshot validation only; original shared/read/write CRC bodies
+// remain unchanged. Portable reflected Castagnoli, init/final XOR 0xffffffff.
+constexpr std::array<uint32_t, 256> snapshotCrc32cTable() {
+    std::array<uint32_t, 256> table{};
+    for (size_t index = 0; index < table.size(); ++index) {
+        uint32_t value = static_cast<uint32_t>(index);
+        for (unsigned bit = 0; bit < 8; ++bit)
+            value = (value >> 1) ^ ((value & 1) ? 0x82F63B78u : 0u);
+        table[index] = value;
+    }
+    return table;
+}
+uint32_t snapshotCrc32c(const char* data, size_t size) {
+    static constexpr auto table = snapshotCrc32cTable();
+    uint32_t crc = 0xffffffffu;
+    for (size_t index = 0; index < size; ++index)
+        crc = table[(crc ^ static_cast<unsigned char>(data[index])) & 0xffu] ^
+              (crc >> 8);
+    return crc ^ 0xffffffffu;
+}
+
+// Reader state is private to this immutable-snapshot operation. Ordinary WAL
+// manager/read/write paths and their persistent ownership remain unchanged.
+class SnapshotWalReader {
+public:
+    struct Segment { std::filesystem::path path; uintmax_t size; };
+    std::map<uint32_t, std::map<uint32_t, Segment>> timelines;
+
+    bool addRoot(const std::filesystem::path& root) {
+        directories_.push_back(-1); // Allocate the owner before opening an fd.
+        const int directory = ::open(root.c_str(),
+            O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        if (directory < 0) return false;
+        directories_.back() = directory;
+        for (const auto& entry : std::filesystem::directory_iterator(root)) {
+            const auto name = entry.path().filename().string();
+            if (name.size() != 24 || !std::all_of(name.begin(), name.end(),
+                    [](unsigned char ch) {
+                        return (ch >= '0' && ch <= '9') ||
+                               (ch >= 'a' && ch <= 'f') ||
+                               (ch >= 'A' && ch <= 'F');
+                    })) continue;
+            const auto timeline = static_cast<uint32_t>(
+                std::stoull(name.substr(0, 8), nullptr, 16));
+            uint32_t segment = 0;
+            if (!timeline || !parseSegmentName(name, timeline, segment) ||
+                !entry.is_regular_file() || entry.is_symlink()) return false;
+            const uintmax_t size = entry.file_size();
+            if (size > WALManager::kSegmentSize) return false;
+            auto& chain = timelines[timeline];
+            const auto found = chain.find(segment);
+            if (found == chain.end()) {
+                chain.emplace(segment, Segment{entry.path(), size});
+            } else {
+                if (!samePrefix(found->second.path, entry.path(),
+                                std::min(found->second.size, size))) return false;
+                if (size > found->second.size)
+                    found->second = Segment{entry.path(), size};
+            }
+        }
+        return true;
+    }
+    ~SnapshotWalReader() {
+        for (int descriptor : directories_) if (descriptor >= 0) ::close(descriptor);
+    }
+
+    bool readBytes(uint32_t timeline, Lsn offset, char* output, size_t size) const {
+        const auto chain = timelines.find(timeline);
+        if (chain == timelines.end()) return false;
+        while (size) {
+            const auto segment = static_cast<uint32_t>(offset / WALManager::kSegmentSize);
+            const auto within = static_cast<size_t>(offset % WALManager::kSegmentSize);
+            const auto found = chain->second.find(segment);
+            if (found == chain->second.end()) return false;
+            const size_t count = std::min<size_t>(size,
+                WALManager::kSegmentSize - within);
+            if (within > found->second.size ||
+                count > found->second.size - within ||
+                !readFile(found->second.path, within, output, count)) return false;
+            size -= count;
+            output += count;
+            offset += count;
+        }
+        return true;
+    }
+
+    std::optional<XLogRecord> readRecord(uint32_t timeline, Lsn lsn, Lsn limit) const {
+        if (lsn >= limit || lsn % MAXALIGN) return std::nullopt;
+        XLogRecord record;
+        if (!readBytes(timeline, lsn, reinterpret_cast<char*>(&record.header),
+                       sizeof(record.header))) return std::nullopt;
+        const auto size = record.header.xl_tot_len;
+        if (size < sizeof(XLogRecHeader) ||
+            size > sizeof(XLogRecHeader) + WALManager::kMaxRecordPayload + MAXALIGN - 1 ||
+            size % MAXALIGN || size > limit - lsn) return std::nullopt;
+        record.data.resize(size - sizeof(XLogRecHeader));
+        if (!record.data.empty() && !readBytes(timeline,
+                lsn + sizeof(XLogRecHeader), record.data.data(), record.data.size()))
+            return std::nullopt;
+        // Same record format and unchanged existing CRC32C implementation.
+        XLogRecHeader header = record.header;
+        header.xl_crc = 0;
+        std::string bytes(reinterpret_cast<const char*>(&header), sizeof(header));
+        if (!record.data.empty()) bytes.append(record.data.data(), record.data.size());
+        if (snapshotCrc32c(bytes.data(), bytes.size()) != record.header.xl_crc)
+            return std::nullopt;
+        return record;
+    }
+
+    std::optional<Lsn> retainedStart(uint32_t timeline,
+            const std::filesystem::path& checkpoint, Lsn boundary, Lsn limit) const {
+        if (const auto first = readRecord(timeline, boundary, limit)) {
+            if ((!boundary && !first->header.xl_prev) ||
+                (boundary && first->header.xl_prev < boundary)) return boundary;
+        }
+        if (!boundary) return std::nullopt;
+        const int fd = ::open(checkpoint.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+        if (fd < 0) return std::nullopt;
+        std::array<uint64_t, 3> metadata{};
+        struct stat status{};
+        bool valid = ::fstat(fd, &status) == 0 && S_ISREG(status.st_mode) &&
+            status.st_size == static_cast<off_t>(sizeof(metadata));
+        size_t done = 0;
+        while (valid && done < sizeof(metadata)) {
+            const auto count = ::read(fd,
+                reinterpret_cast<char*>(metadata.data()) + done, sizeof(metadata) - done);
+            if (count < 0 && errno == EINTR) continue;
+            if (count <= 0) { valid = false; break; }
+            done += static_cast<size_t>(count);
+        }
+        ::close(fd);
+        const Lsn anchor = metadata[2];
+        if (!valid || anchor < boundary || anchor >= limit) return std::nullopt;
+        auto record = readRecord(timeline, anchor, limit);
+        if (!record || record->rmid() != RM_CHECKPOINT_ID) return std::nullopt;
+        Lsn current = anchor;
+        while (record->header.xl_prev >= boundary) {
+            const Lsn previous = record->header.xl_prev;
+            if (previous >= current) return std::nullopt;
+            auto prior = readRecord(timeline, previous, limit);
+            if (!prior || prior->header.xl_tot_len != current - previous)
+                return std::nullopt;
+            current = previous;
+            record = std::move(prior);
+        }
+        return current;
+    }
+private:
+    std::vector<int> directories_;
+    static bool readFile(const std::filesystem::path& path, uint64_t offset,
+                         char* output, size_t size) {
+        int fd;
+        do { fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW); }
+        while (fd < 0 && errno == EINTR);
+        if (fd < 0) return false;
+        size_t done = 0;
+        while (done < size) {
+            const auto count = ::pread(fd, output + done, size - done,
+                                       static_cast<off_t>(offset + done));
+            if (count < 0 && errno == EINTR) continue;
+            if (count <= 0) { ::close(fd); return false; }
+            done += static_cast<size_t>(count);
+        }
+        ::close(fd);
+        return true;
+    }
+    static bool samePrefix(const std::filesystem::path& left,
+                           const std::filesystem::path& right, uintmax_t size) {
+        std::array<char, 65536> a{}, b{};
+        for (uintmax_t offset = 0; offset < size;) {
+            const auto count = static_cast<size_t>(
+                std::min<uintmax_t>(a.size(), size - offset));
+            if (!readFile(left, offset, a.data(), count) ||
+                !readFile(right, offset, b.data(), count) ||
+                std::memcmp(a.data(), b.data(), count) != 0) return false;
+            offset += count;
+        }
+        return true;
+    }
+};
+} // namespace
+
+bool WALManager::readSnapshotTransactionHighWater(
+    const std::filesystem::path& walDir, uint64_t& highWater) {
+    return readSnapshotTransactionHighWater(
+        std::vector<std::filesystem::path>{walDir},
+        walDir.parent_path() / "checkpoint", highWater);
+}
+
+bool WALManager::readSnapshotTransactionHighWater(
+    const std::vector<std::filesystem::path>& roots,
+    const std::filesystem::path& checkpoint, uint64_t& highWater) {
+    try {
+        if (roots.empty()) return false;
+        SnapshotWalReader reader;
+        for (const auto& root : roots) if (!reader.addRoot(root)) return false;
+        uint64_t result = 0;
+        for (const auto& [timeline, segments] : reader.timelines) {
+            auto prior = segments.begin();
+            for (auto current = std::next(prior); current != segments.end();
+                 ++current, ++prior) {
+                if (prior->first == std::numeric_limits<uint32_t>::max() ||
+                    current->first != prior->first + 1 ||
+                    prior->second.size != kSegmentSize) return false;
+            }
+            const Lsn boundary = static_cast<Lsn>(segments.begin()->first) * kSegmentSize;
+            const Lsn limit = static_cast<Lsn>(segments.rbegin()->first) * kSegmentSize +
+                segments.rbegin()->second.size;
+            Lsn lsn = boundary;
+            if (boundary) {
+                const auto retained = reader.retainedStart(timeline,
+                    checkpoint, boundary, limit);
+                if (retained) lsn = *retained;
+            }
+            std::optional<Lsn> previous;
+            while (lsn < limit) {
+                const auto record = reader.readRecord(timeline, lsn, limit);
+                if (!record) {
+                    const Lsn end = std::min(limit,
+                        (lsn / kSegmentSize + 1) * kSegmentSize);
+                    std::array<char, 65536> zeros{};
+                    for (Lsn offset = lsn; offset < end;) {
+                        const size_t count = static_cast<size_t>(
+                            std::min<Lsn>(zeros.size(), end - offset));
+                        if (!reader.readBytes(timeline, offset, zeros.data(), count) ||
+                            std::any_of(zeros.begin(), zeros.begin() + count,
+                                [](char byte) { return byte != 0; })) return false;
+                        offset += count;
+                    }
+                    lsn = end;
+                    continue;
+                }
+                if (previous) {
+                    if (record->header.xl_prev != *previous) return false;
+                } else if ((!lsn && record->header.xl_prev) ||
+                           (lsn && record->header.xl_prev >= lsn)) return false;
+                result = std::max(result, record->header.xl_xid);
+                if (record->rmid() == RM_CHECKPOINT_ID) {
+                    if (record->data.size() < sizeof(uint64_t)) return false;
+                    uint64_t nextXid = 0;
+                    std::memcpy(&nextXid, record->data.data(), sizeof(nextXid));
+                    if (!nextXid) return false;
+                    result = std::max(result, nextXid - 1);
+                }
+                previous = lsn;
+                const Lsn next = lsn + record->header.xl_tot_len;
+                if (next <= lsn || next > limit) return false;
+                lsn = next;
+            }
+        }
+        highWater = result;
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
 bool WALManager::ensureOpen(bool createDirectory) {
     if (directoryFd_ >= 0 && !refersToCurrentDirectory()) return false;
     if (open_) return true;

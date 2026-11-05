@@ -1,5 +1,18 @@
 # 生产化状态
 
+<!-- CURRENT_RESTORE_TRANSACTION_HORIZON_20261105 -->
+
+## 物理恢复事务号水位（2026-11-05，P8-C3）
+
+最终源码P8-C3（程序 `d778afbd…`）实现公开恢复的水位读取、持久推进及当前进程准入屏障。真实较早目标的首次探针1→4行，公开原生扫描的完整1000+4值/RID/NULL与哨兵移除通过；正常Main固定22操作的数据和冷启动通过，仍保留5项元数据失败。
+
+整体恢复验收仍为partial：同一七阶段夹具在P8-C1曾全部通过，P8-C2/C3分别于实际advance写入后的阶段出现wait状态134（Invalid argument／corrupted double-linked list），精确触发点和原因未知，后四阶段NOTRUN。原失败未重试、未改为暂缓或启动前失败。相关21个旧入口、32个WAL控制及当前进程的3种准入语义通过，不能抵消该失败或证明跨进程准入完整。
+
+两轮完整公开恢复计时分别保留；第二轮C3较两次旧版wall p50低4.16%/6.42%，并非完整35操作、36查询或生产负载提速结论。默认425与现有服务保持，详见[完整报告](performance-report-2026-10-30.md#物理恢复事务号水位2026-11-05p8-c3)和[机器归档](benchmarks/restore-transaction-horizon-20261105.json)。
+
+原273项仍为22 complete /166 partial /70 unverified /15 deferred_by_user；Goal active。下方旧节保留各批次当时结果，不能覆盖本节的失败与范围。
+
+
 <!-- CURRENT_BACKUP_ANALYZE_20261104 -->
 
 ## 备份摘要与 virtual 列统计（2026-11-04，P7-C1）

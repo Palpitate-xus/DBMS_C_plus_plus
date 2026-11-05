@@ -21,8 +21,13 @@ public:
     // invalid ID 0 when state is corrupt, exhausted, or cannot be persisted.
     uint64_t nextTxId();
 
-    // Get the highest committed transaction ID.
+    // Get the durable allocation high-water mark (legacy method name).
     uint64_t maxCommittedTxId() const;
+
+    // Reserve every ID through a validated recovery image's referenced XID.
+    // Never rewind the cluster counter. The caller owns transaction admission
+    // while reconciling an image with live database state.
+    bool advancePast(uint64_t recoveredTxId);
 
     // Called on COMMIT to update the max committed txId.
     void notifyCommit(uint64_t txId);

@@ -1,5 +1,18 @@
 # DBMS_C_plus_plus 对标 PostgreSQL 18.6：逐项完整实施蓝图
 
+<!-- CURRENT_RESTORE_TRANSACTION_HORIZON_20261105 -->
+
+## 物理恢复事务号水位（2026-11-05，P8-C3）
+
+P8-C3 `d778afbd…` 已将checkpoint、真实CLOG状态、主heap的xmin/xmax及WAL证据汇总到公开物理恢复发布前，持久推进分配器；BEGIN的实际分配—登记窗口由进程内屏障保护。当前进程内低活动事务保守拒绝、高活动事务可继续及登记窗口控制通过。原共享SHA、原共享校验、安全路径和null/savepoint分流不变。
+
+后续普通工作仍包括：定位同一七阶段验收advance阶段的实际异常、贯通跨服务进程准入、补齐五项探针描述符/真实目录身份，以及实现真实pg_stats全部17字段与有类型数组/来源。已冻结的完整视图计划不是四字段替代终点。用户已暂缓模块和原273项状态不动，不因单个正确性或计时控制通过关闭功能族。
+
+独立较早目标数据与两次正常Main上下文通过；最终C3七阶段整体严格FAIL、后四阶段NOTRUN。第二轮完整恢复调用p50较两次旧版低4.16%/6.42%，第一轮负值和所有长尾保留；默认425和既有服务保持。证据与范围见[完整报告](performance-report-2026-10-30.md#物理恢复事务号水位2026-11-05p8-c3)和[机器归档](benchmarks/restore-transaction-horizon-20261105.json)。
+
+原273项仍为22 complete /166 partial /70 unverified /15 deferred_by_user；Goal active。下方旧节保留各批次当时结果，不能覆盖本节的失败与范围。
+
+
 <!-- CURRENT_BACKUP_ANALYZE_20261104 -->
 
 ## 备份摘要与 virtual 列统计（2026-11-04，P7-C1）

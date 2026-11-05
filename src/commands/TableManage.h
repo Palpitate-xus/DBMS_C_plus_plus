@@ -2187,9 +2187,11 @@ private:
                               bool includeUnloggedMain = false);
     // Restore a physical generation after the caller has acquired the
     // database transaction lock and discarded database-owned caches.
+    struct PhysicalRestoreAdmission;
     bool physicalRestoreLocked(const std::string& dbname,
                                const std::string& backupPath,
-                               const MaintenanceProgress& progress = {});
+                               const MaintenanceProgress& progress = {},
+                               PhysicalRestoreAdmission* admission = nullptr);
 
     // Evaluate a single row against conditions, returning matching row indices
     std::set<int64_t> filterRows(const std::string& dbname, const std::string& tablename,

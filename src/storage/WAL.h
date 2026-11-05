@@ -132,6 +132,16 @@ public:
     WALManager(const WALManager&) = delete;
     WALManager& operator=(const WALManager&) = delete;
 
+    // Scan complete retained timelines in a closed immutable WAL snapshot.
+    // Multiple roots form one logical namespace; duplicate segments must have
+    // byte-identical common prefixes and the longest consistent copy is used.
+    // No files/locks/metadata are created. Failure leaves highWater unchanged.
+    static bool readSnapshotTransactionHighWater(
+        const std::filesystem::path& walDir, uint64_t& highWater);
+    static bool readSnapshotTransactionHighWater(
+        const std::vector<std::filesystem::path>& roots,
+        const std::filesystem::path& checkpoint, uint64_t& highWater);
+
     // Insert a WAL record. Returns the LSN of the new record.
     Lsn XLogInsert(uint8_t rmid, uint8_t info, uint64_t xid,
                    const std::vector<char>& data);

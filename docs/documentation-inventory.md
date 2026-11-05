@@ -1,5 +1,16 @@
 # 全部文档检查清单
 
+<!-- CURRENT_RESTORE_TRANSACTION_HORIZON_20261105 -->
+
+## 物理恢复事务号水位（2026-11-05，P8-C3）
+
+本次更新本节所列8份既有Markdown及进度JSON，新增非Markdown[机器归档](benchmarks/restore-transaction-horizon-20261105.json)，不新增Markdown路径。原754个Markdown路径、725保护记录、七份旧机器归档、原273完整对象及258条历史原文保持；新增一条partial后历史259条。上述保持条件以最终范围检查为准，不以文档结构检查代替功能验收。
+
+源码P8-C3 `d778afbd…` 为231源/161头；原2336测试文件不改，新增3个CPP入口及1个夹具头后2340。顶层CPP1090（含test_stubs，排除后1089入口），另5个子目录CPP。正常Main数据/冷启动、两轮12次公开API与最终七阶段严格失败分别报告，不能写成新测试全部通过。默认425保持，全文事实以[完整报告](performance-report-2026-10-30.md#物理恢复事务号水位2026-11-05p8-c3)和[机器归档](benchmarks/restore-transaction-horizon-20261105.json)为准。
+
+原273项仍为22 complete /166 partial /70 unverified /15 deferred_by_user；Goal active。下方旧节保留各批次当时结果，不能覆盖本节的失败与范围。
+
+
 <!-- CURRENT_BACKUP_ANALYZE_20261104 -->
 
 ## 备份摘要与 virtual 列统计（2026-11-04，P7-C1）

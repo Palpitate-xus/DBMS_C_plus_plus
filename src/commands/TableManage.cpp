@@ -21,6 +21,7 @@
 #include "process/OutputCapture.h"
 #include "common/sha256.h"
 #include "commands/BackupManifestCreationSha256.h"
+#include "commands/RestoreTransactionHorizon.h"
 #include "utils/plpgsql.h"
 #include "utils/interval.h"
 #include "utils/interval_type.h"
@@ -459,6 +460,14 @@ static bool resolvedToastEntry(const std::string& rowBuffer,
     if (wantedOffset) *wantedOffset = selectedOffset;
     if (wantedLength) *wantedLength = selectedLength;
     return true;
+}
+
+// Allocation-to-registration admission, separate from the active-set mutex.
+// A public physical restore holds this exclusively before taking cache locks;
+// BEGIN holds it shared only until its allocated XID has an active owner.
+static std::shared_mutex& physicalRestoreTransactionAdmission() {
+    static auto* mutex = new std::shared_mutex;
+    return *mutex;
 }
 
 // Global active transaction tracking
@@ -48400,6 +48409,109 @@ bool StorageEngine::physicalBackupLocked(
     }
 }
 
+struct StorageEngine::PhysicalRestoreAdmission {
+    std::set<uint64_t> activeBeforeRestore;
+
+    static bool validatePublicSource(const std::filesystem::path& source,
+                                     std::string& sourceDatabase) {
+        sourceDatabase.clear();
+        if (!std::filesystem::is_directory(source)) return false;
+        const auto marker = source / kPhysicalBackupMarker;
+        if (!std::filesystem::is_regular_file(marker)) return false;
+        std::ifstream input(marker, std::ios::binary);
+        if (!input) return false;
+        const std::string contents{
+            std::istreambuf_iterator<char>(input),
+            std::istreambuf_iterator<char>()};
+        if (contents != "DBMS_PHYSICAL_BACKUP_V3\n") return false;
+
+        PhysicalBackupDirectories expectedDirectories;
+        PhysicalBackupFiles expectedFiles;
+        PhysicalBackupDirectories actualDirectories;
+        PhysicalBackupFiles actualFiles;
+        return readPhysicalBackupManifest(
+                   source, sourceDatabase, expectedDirectories, expectedFiles) &&
+               collectManifestCreationEntries(
+                   source, actualDirectories, actualFiles) &&
+               expectedDirectories == actualDirectories &&
+               expectedFiles == actualFiles;
+    }
+
+    bool reconcile(StorageEngine& engine, const std::string& database,
+                   const std::vector<DurableDirectoryReplacement>& replacements) const {
+        if (replacements.empty()) return false;
+        const auto& staged = replacements.front().staging;
+        uint64_t highWater = 0;
+        if (!restore_horizon_detail::readCheckpoint(staged / "checkpoint", highWater) ||
+            !restore_horizon_detail::readClog(staged / "pg_xact", highWater)) return false;
+
+        std::vector<std::filesystem::path> walRoots;
+        const auto addWalRoot = [&](const std::filesystem::path& path) {
+            std::error_code error;
+            const bool exists = std::filesystem::exists(path, error);
+            if (error) return false;
+            if (!exists) return true;
+            walRoots.push_back(path);
+            return true;
+        };
+        if (!addWalRoot(staged / "pg_wal")) return false;
+        for (const auto& replacement : replacements) {
+            if (replacement.target == engine.walArchiveDir(database) &&
+                !addWalRoot(replacement.staging)) return false;
+        }
+        if (!walRoots.empty()) {
+            uint64_t walHighWater = 0;
+            if (!WALManager::readSnapshotTransactionHighWater(
+                    walRoots, staged / "checkpoint", walHighWater)) return false;
+            highWater = std::max(highWater, walHighWater);
+        }
+
+        for (const auto& entry : std::filesystem::directory_iterator(staged)) {
+            if (entry.path().extension() != ".stc") continue;
+            const std::string tableName = entry.path().stem().string();
+            std::ifstream input(entry.path(), std::ios::binary);
+            if (!input) return false;
+            const TableSchema schema = engine.readSchema(input, tableName);
+            if (schema.tablename != tableName) return false;
+            auto relationRoot = staged;
+            if (!schema.tablespace.empty() && schema.tablespace != "pg_default") {
+                const std::filesystem::path name(schema.tablespace);
+                if (name.filename() != name || name == "." || name == "..") return false;
+                std::filesystem::path location;
+                if (!readTablespaceMarker(staged / "pg_tblspc" /
+                        (schema.tablespace + ".path"), location)) return false;
+                const auto target = location / database;
+                const auto found = std::find_if(replacements.begin(), replacements.end(),
+                    [&](const auto& replacement) { return replacement.target == target; });
+                if (found == replacements.end()) return false;
+                relationRoot = found->staging;
+            }
+            std::set<std::string> names{tableName + ".dt"};
+            for (const auto& leaf : partitionLeaves(schema)) {
+                names.insert(tableName + "#" + leaf.partition + ".dt");
+                if (!leaf.subPartition.empty()) names.insert(
+                    tableName + "#" + leaf.partition + "#" + leaf.subPartition + ".dt");
+            }
+            for (const auto& name : names) {
+                for (const char* suffix : {"", ".init"}) {
+                    const auto path = relationRoot / (name + suffix);
+                    std::error_code error;
+                    const bool exists = std::filesystem::exists(path, error);
+                    if (error || (exists && !restore_horizon_detail::readHeap(path, highWater)))
+                        return false;
+                }
+            }
+        }
+        // Existing snapshots cannot be rebased onto an imported XID namespace.
+        // No new backend can enter the allocation/registration gap while the
+        // caller owns the exclusive admission guard. Refuse a conflicting live
+        // namespace before publication instead of exposing partially visible rows.
+        if (!activeBeforeRestore.empty() && *activeBeforeRestore.begin() <= highWater)
+            return false;
+        return TxnIdGenerator::instance().advancePast(highWater);
+    }
+};
+
 bool StorageEngine::physicalRestore(const std::string& dbname,
                                     const std::string& backupPath,
                                     const MaintenanceProgress& progress) {
@@ -48410,6 +48522,13 @@ bool StorageEngine::physicalRestore(const std::string& dbname,
     if (transactionContext().inTransaction) return false;
     const auto databaseMutex = databaseTxnLockFor(dbname);
     std::unique_lock<std::shared_mutex> databaseLock(*databaseMutex);
+    std::unique_lock<std::shared_mutex> transactionAdmission(
+        physicalRestoreTransactionAdmission());
+    PhysicalRestoreAdmission admission;
+    {
+        std::lock_guard<std::mutex> activeLock(globalTxnMutex());
+        admission.activeBeforeRestore = activeTransactions();
+    }
     PhysicalCatalogOwnership catalogOwnership(
         transactionContext(), databaseMutex, databaseLock);
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
@@ -48417,12 +48536,12 @@ bool StorageEngine::physicalRestore(const std::string& dbname,
         tablespaceCatalogLockPath(*this, dbname), true);
     if (!tablespaceLock.acquired()) return false;
     closeDatabaseCaches(dbname);
-    return physicalRestoreLocked(dbname, backupPath, progress);
+    return physicalRestoreLocked(dbname, backupPath, progress, &admission);
 }
 
 bool StorageEngine::physicalRestoreLocked(
     const std::string& dbname, const std::string& backupPath,
-    const MaintenanceProgress& progress) {
+    const MaintenanceProgress& progress, PhysicalRestoreAdmission* admission) {
     struct PhysicalSchemaReadScope {
         const StorageEngine* prior = physicalSchemaReader;
         explicit PhysicalSchemaReadScope(const StorageEngine* owner) { physicalSchemaReader = owner; }
@@ -48439,7 +48558,9 @@ bool StorageEngine::physicalRestoreLocked(
         // parent/child paths must not let remove_all(dst) erase the only
         // backup copy before directory iteration begins.
         std::string sourceDatabase;
-        if (!validPhysicalBackupSource(src, sourceDatabase) ||
+        if (!(admission
+                  ? admission->validatePublicSource(src, sourceDatabase)
+                  : validPhysicalBackupSource(src, sourceDatabase)) ||
             sourceDatabase != dbname ||
             restorePathsOverlap(src, dst) ||
             restorePathsOverlap(src, walArchiveDir(dbname))) {
@@ -48643,12 +48764,21 @@ bool StorageEngine::physicalRestoreLocked(
         // Detect a backup source changed while its files were staged. The
         // staged generations are fixed now; no live target has been touched.
         std::string revalidatedDatabase;
-        if (!validPhysicalBackupSource(src, revalidatedDatabase) ||
+        if (!(admission
+                  ? admission->validatePublicSource(src, revalidatedDatabase)
+                  : validPhysicalBackupSource(src, revalidatedDatabase)) ||
             revalidatedDatabase != dbname) {
             discardUnpublished();
             return false;
         }
         if (progress && !progress(0)) {
+            discardUnpublished();
+            return false;
+        }
+
+        // Reconcile the exact staged generation while it is still private.
+        // Internal transaction/savepoint restores pass no admission object.
+        if (admission && !admission->reconcile(*this, dbname, restoreReplacements)) {
             discardUnpublished();
             return false;
         }
@@ -50964,6 +51094,10 @@ DBStatus StorageEngine::beginTransaction(const std::string& dbname, bool ddlSnap
     // snapshots are created later by createTransactionBackup(), which owns
     // the exclusive database lock and performs its own complete cache flush.
 
+    // Physical restore cannot overtake an allocated but unregistered backend.
+    // Release this guard before any subsequent cache or catalog acquisition.
+    std::shared_lock<std::shared_mutex> transactionAdmission(
+        physicalRestoreTransactionAdmission());
     // Assign transaction ID and create ReadView (if needed).
     transactionContext().currentTxnId = TxnIdGenerator::instance().nextTxId();
     if (transactionContext().currentTxnId == 0) {
@@ -50984,6 +51118,7 @@ DBStatus StorageEngine::beginTransaction(const std::string& dbname, bool ddlSnap
         activeTransactions().insert(transactionContext().currentTxnId);
         activeTransactionDatabases()[transactionContext().currentTxnId] = dbname;
     }
+    transactionAdmission.unlock();
     // Initialize SSI tracking
     {
         std::lock_guard<std::mutex> lock(ssiMutex_);

@@ -51,7 +51,8 @@
  */
 
 
-// Ordinary backup-manifest CREATION only. Not a security/auth/SQL hash replacement.
+// Private ordinary manifest hashing: creation and public restore admission.
+// Shared validators and security/auth/SQL hash implementations stay separate.
 // Portable C++17 adaptation of PG REL_18_6 SHA-256 unrolled compression and
 // full-block streaming. Preserve this source's copyright/license notices.
 // Reference: https://github.com/postgres/postgres/blob/REL_18_6/src/common/sha2.c
