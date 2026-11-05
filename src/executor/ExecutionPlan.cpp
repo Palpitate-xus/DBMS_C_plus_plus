@@ -2,6 +2,7 @@
 #include "expression/StoredRegtypeValue.h"
 #include "expression/ArrayDatumInput.h"
 #include "executor/PreparedTableSource.h"
+#include "executor/EqualityStatistics.h"
 #include "executor/SortSpill.h"
 #include "executor/BoundedSortRuns.h"
 #include "executor/TypedSortSpill.h"
@@ -3903,7 +3904,7 @@ bool IndexScanOp::open() {
             integerEqualityValue(tbl_, colname_, value_))}})
         : tbl_.columnIndexKey(colname_, (referenceEqualityOid_ ? std::to_string(*referenceEqualityOid_) :
             integerEqualityValue(tbl_, colname_, value_)));
-    if (key.empty()) {
+    const auto heapFallback=[&]() {
         // Historical build/write paths omit empty keys. Direct callers need
         // the same complete heap fallback as the planner, with next() still
         // doing the typed equality and NULL recheck.
@@ -3915,7 +3916,7 @@ bool IndexScanOp::open() {
             : engine_->forEachRow(dbname_, tablename_, append);
         if (!ok) {
             rids_.clear();
-            setError("empty-key heap fallback failed");
+            setError(key.empty()?"empty-key heap fallback failed":"snapshot heap fallback failed");
             return false;
         }
         pos_ = 0;
@@ -3925,7 +3926,10 @@ bool IndexScanOp::open() {
         }
         referenceGuard.keep=true;
         return true;
-    }
+    };
+    engine_->noteQuerySnapshot();
+    const auto beforeFence=engine_->indexReadSnapshotFence(dbname_);
+    if(key.empty())return heapFallback();
     BPTree* idx = isPK_
         ? engine_->getPKIndex(dbname_, tablename_)
         : engine_->getSecondaryIndex(dbname_, tablename_, colname_);
@@ -3933,11 +3937,17 @@ bool IndexScanOp::open() {
         throw DbError("XX001", "could not open B-tree index for relation \"" +
             tablename_ + "\"");
     }
+    if(!beforeFence)return heapFallback();
     if (isPK_) {
         int64_t rid = 0;
         if (lookupBtreeKeyChecked(idx, key, rid)) rids_.push_back(rid);
     } else {
         rids_ = lookupBtreeMultiChecked(idx, key);
+    }
+    const auto afterFence=engine_->indexReadSnapshotFence(dbname_);
+    if(!afterFence || *afterFence!=*beforeFence) {
+        rids_.clear();
+        return heapFallback();
     }
     pos_ = 0;
     if (!statsRecorded_) {
@@ -4114,6 +4124,20 @@ static bool collectEqualityIndexCandidates(
 // BitmapHeapScanOp
 // ========================================================================
 
+static bool collectVisibleHeapCandidates(StorageEngine* engine,
+    const std::string& dbname, const std::string& tablename,
+    std::vector<int64_t>& rids) {
+    rids.clear();
+    const auto append = [&](uint32_t page, uint16_t slot, const char*, size_t) {
+        rids.push_back(StorageEngine::encodeRid(page, slot));
+    };
+    const bool ok = engine->rlsAppliesTo(dbname, tablename)
+        ? engine->forEachVisibleRow(dbname, tablename, "SELECT", append)
+        : engine->forEachRow(dbname, tablename, append);
+    if (!ok) rids.clear();
+    return ok;
+}
+
 BitmapHeapScanOp::BitmapHeapScanOp(
     StorageEngine* engine, const std::string& dbname,
     const std::string& tablename,
@@ -4134,6 +4158,8 @@ bool BitmapHeapScanOp::open() {
     pos_ = 0;
     lastRid_ = 0;
 
+    engine_->noteQuerySnapshot();
+    const auto beforeFence = engine_->indexReadSnapshotFence(dbname_);
     std::set<std::string> indexedColumns;
     std::set<int64_t> matched;
     bool initialized = false;
@@ -4167,6 +4193,16 @@ bool BitmapHeapScanOp::open() {
     // mechanism inside an already-open plan.
     if (indexedPredicates < 2 || !initialized) return false;
     rids_.assign(matched.begin(), matched.end());
+    const auto afterFence = engine_->indexReadSnapshotFence(dbname_);
+    const bool usedIndex = beforeFence && afterFence && *beforeFence == *afterFence;
+    // Sidecars only contain current keys. A historical snapshot, own writes,
+    // or a writer racing the probes needs the complete visible heap instead.
+    // The Filter above this node retains every original predicate.
+    if (!usedIndex && !collectVisibleHeapCandidates(engine_, dbname_, tablename_, rids_)) {
+        setError("snapshot bitmap heap fallback failed");
+        return false;
+    }
+    const size_t heapCandidates = rids_.size();
 
     bool readFailed = false;
     std::vector<int64_t> visibleRids;
@@ -4195,7 +4231,8 @@ bool BitmapHeapScanOp::open() {
     }
     rids_ = std::move(visibleRids);
     if (!statsRecorded_) {
-        recordTableScan(dbname_, tablename_, rows_.size(), true, false);
+        recordTableScan(dbname_, tablename_, usedIndex ? rows_.size() : heapCandidates,
+                        usedIndex, !usedIndex);
         statsRecorded_ = true;
     }
     return true;
@@ -4262,6 +4299,8 @@ bool GiSTScanOp::open() {
     pos_ = 0;
     lastRid_ = 0;
 
+    engine_->noteQuerySnapshot();
+    const auto beforeFence = engine_->indexReadSnapshotFence(dbname_);
     // Fold the GiST-servable predicates into [lo, hi] bounds on the
     // indexed column.  Mixed-column predicates stay in FilterOp; this node
     // only takes over when at least one bound is known.
@@ -4321,6 +4360,13 @@ bool GiSTScanOp::open() {
         }
     }
 
+    const auto afterFence = engine_->indexReadSnapshotFence(dbname_);
+    const bool usedIndex = beforeFence && afterFence && *beforeFence == *afterFence;
+    if (!usedIndex && !collectVisibleHeapCandidates(engine_, dbname_, tablename_, rids_)) {
+        setError("snapshot gist heap fallback failed");
+        return false;
+    }
+    const size_t heapCandidates = rids_.size();
     bool readFailed = false;
     std::vector<int64_t> visibleRids;
     visibleRids.reserve(rids_.size());
@@ -4335,13 +4381,21 @@ bool GiSTScanOp::open() {
             }
             continue;  // concurrently removed row: not visible, skip
         }
+        bool toastOk = false;
+        row = engine_->resolveToastValues(dbname_, tablename_, row, tbl_, &toastOk);
+        if (!toastOk) {
+            rows_.clear();
+            setError("TOAST value read failed");
+            return false;
+        }
         rows_.push_back(std::move(row));
         visibleRids.push_back(rid);
     }
     rids_ = std::move(visibleRids);
     pos_ = 0;
     if (!statsRecorded_) {
-        recordTableScan(dbname_, tablename_, rows_.size(), true, false);
+        recordTableScan(dbname_, tablename_, usedIndex ? rows_.size() : heapCandidates,
+                        usedIndex, !usedIndex);
         statsRecorded_ = true;
     }
     return true;
@@ -4401,6 +4455,8 @@ bool BitmapOrHeapScanOp::open() {
     lastRid_ = 0;
     if (branches_.size() < 2) return false;
 
+    engine_->noteQuerySnapshot();
+    const auto beforeFence = engine_->indexReadSnapshotFence(dbname_);
     const auto hashIndexedColumns = engine_->getHashIndexedColumns(dbname_, tablename_);
     std::set<int64_t> unionRids;
     for (const auto& branch : branches_) {
@@ -4433,6 +4489,17 @@ bool BitmapOrHeapScanOp::open() {
         unionRids.insert(matched.begin(), matched.end());
     }
 
+    const auto afterFence = engine_->indexReadSnapshotFence(dbname_);
+    const bool usedIndex = beforeFence && afterFence && *beforeFence == *afterFence;
+    if (!usedIndex) {
+        std::vector<int64_t> visible;
+        if (!collectVisibleHeapCandidates(engine_, dbname_, tablename_, visible)) {
+            setError("snapshot bitmap heap fallback failed");
+            return false;
+        }
+        unionRids = std::set<int64_t>(visible.begin(), visible.end());
+    }
+    const size_t heapCandidates = unionRids.size();
     bool readFailed = false;
     for (int64_t rid : unionRids) {
         std::string row;
@@ -4454,6 +4521,13 @@ bool BitmapOrHeapScanOp::open() {
             return false;
         }
 
+        struct PredicateNullBinding {
+            StorageEngine::NullRowBindingState saved;
+            ~PredicateNullBinding() {
+                StorageEngine::restoreNullRowBinding(std::move(saved));
+            }
+        } nullBinding{StorageEngine::captureNullRowBinding()};
+        StorageEngine::bindNullRow(engine_, dbname_, tablename_, rid, tbl_.len);
         bool matches = false;
         for (const auto& branch : branches_) {
             bool branchMatches = true;
@@ -4474,7 +4548,8 @@ bool BitmapOrHeapScanOp::open() {
         }
     }
     if (!statsRecorded_) {
-        recordTableScan(dbname_, tablename_, rows_.size(), true, false);
+        recordTableScan(dbname_, tablename_, usedIndex ? rows_.size() : heapCandidates,
+                        usedIndex, !usedIndex);
         statsRecorded_ = true;
     }
     return true;
@@ -8284,6 +8359,74 @@ static bool canUseBitmapOrScan(
     return true;
 }
 
+// Ordinary literal access-path costing only. Prepared/retained parameter
+// plans, bitmap/GiST priority and provider lifetimes retain their owners.
+static std::optional<double> analyzedEqualityFraction(
+    const Column& column,const StorageEngine::ColumnStats& statistics,
+    double analyzedRows,const std::string& probe) {
+    return planner_statistics::equalityFraction(statistics,analyzedRows,
+        [&](const std::string& value)->std::optional<bool> {
+            if(value==probe)return true;
+            try {
+                const auto truth=StorageEngine::compareValues(column,value,false,probe,false,"=");
+                if(truth==StorageEngine::PredicateTruth::Unknown)return {};
+                return truth==StorageEngine::PredicateTruth::True;
+            } catch(const DbError& error) {
+                // Cost estimation may decline an unknown input; the existing
+                // selected executor still owns its input error and phase.
+                if(error.sqlState().rfind("22",0)==0)return {};
+                throw;
+            }
+        });
+}
+
+static std::optional<size_t> chooseEqualityIndexCondition(
+    StorageEngine* engine,const PlanContext& context,const TableSchema& table,
+    const std::vector<size_t>& candidates) {
+    if(candidates.empty())return {};
+    const size_t fallback=candidates.front();
+    size_t analyzedRows=0;
+    if(!engine->tryGetTableRowCount(context.dbname,context.tablename,analyzedRows) || !analyzedRows)
+        return fallback;
+    uint64_t runtimeRows=0;
+    const double rows=getRuntimeLiveRowEstimate(context.dbname,context.tablename,runtimeRows)
+        ?double(runtimeRows):double(analyzedRows);
+    // Local to this one plan: no cross-session/cache invalidation contract.
+    std::map<std::string,StorageEngine::ColumnStats> statistics;
+    std::optional<double> bestCost;
+    size_t best=fallback;
+    for(const auto position:candidates) {
+        const auto& condition=context.conds[position];
+        const Column* column=nullptr;
+        for(size_t i=0;i<table.len;++i)if(table.cols[i].dataName==condition.colName){column=&table.cols[i];break;}
+        if(!column)return fallback;
+        double matches=rows>0?1.0:0;
+        // A genuine single-column primary key already proves at most one
+        // match. Do not read/parse MCVs to rediscover that uniqueness on
+        // every ordinary point lookup; still compare actual scan costs.
+        if(!isSingleColumnPrimaryKey(table,condition.colName)) {
+            auto entry=statistics.find(condition.colName);
+            if(entry==statistics.end())entry=statistics.emplace(condition.colName,
+                engine->getColumnStats(context.dbname,context.tablename,condition.colName)).first;
+            const auto probe=condition.referenceInputOid
+                ?std::to_string(*condition.referenceInputOid):condition.value;
+            const auto fraction=analyzedEqualityFraction(*column,entry->second,analyzedRows,probe);
+            if(!fraction)return fallback;
+            matches=rows>0?std::max(1.0,rows**fraction):0;
+        }
+        const double cost=QueryPlanner::costScan("index_scan",matches,0);
+        if(!std::isfinite(cost))return fallback;
+        if(!bestCost || cost<*bestCost){best=position;bestCost=cost;}
+    }
+    // This existing physical extent accessor honors the actual tablespace;
+    // it neither visits tuples nor substitutes a guessed row width.
+    const auto pages=engine->tableNumPages(context.dbname,context.tablename);
+    if(!pages)return fallback;
+    const double sequential=QueryPlanner::costScan("seq_scan",rows,pages);
+    if(!std::isfinite(sequential))return fallback;
+    return *bestCost<sequential?std::optional<size_t>(best):std::nullopt;
+}
+
 OpPtr QueryPlanner::buildSelectPlan(StorageEngine* engine, const PlanContext& inputContext) {
     auto ctx = inputContext;
     const auto table = engine->getTableSchema(ctx.dbname, ctx.tablename);
@@ -8323,45 +8466,25 @@ OpPtr QueryPlanner::buildSelectPlan(StorageEngine* engine, const PlanContext& in
     } else if (useGiST) {
         root = std::make_unique<GiSTScanOp>(
             engine, ctx.dbname, ctx.tablename, ctx.conds);
-    } else if (!root && !rlsApplies && !remainingConds.empty()) {
-        for (const auto& c : remainingConds) {
-            if (c.op == "=" && !equalityIndexKeyIsEmpty(
-                    engine->getTableSchema(ctx.dbname, ctx.tablename), c)) {
-                // Check if column has primary key index
-                TableSchema tbl = engine->getTableSchema(ctx.dbname, ctx.tablename);
-                const bool isPK = isSingleColumnPrimaryKey(tbl, c.colName);
-                bool hasSecIdx = false;
-                if (!isPK) {
-                    auto indexedCols = engine->getIndexedColumns(ctx.dbname, ctx.tablename);
-                    for (const auto& ic : indexedCols) {
-                        if (ic == c.colName) { hasSecIdx = true; break; }
-                    }
-                }
-                // Parent indexes currently store page/slot only.  Partition
-                // heaps reuse those local addresses, so an index fetch cannot
-                // identify which physical heap owns the RID.  Keep SELECT on
-                // the partition-aware sequential scan until partitioned index
-                // row locators are implemented.
-                const bool partitioned =
-                    tbl.partitionType != TableSchema::PartitionType::None;
-                if (!partitioned && (isPK || hasSecIdx)) {
-                    // Every indexed path must recheck the heap tuple under
-                    // the same lock/MVCC boundary. A visibility-map-backed
-                    // index-only scan is not implemented yet.
-                    root = std::make_unique<IndexScanOp>(engine, ctx.dbname, ctx.tablename,
-                                                          c.colName, c.value, c.referenceInputOid);
-                    // Remove this condition from Filter since IndexScan handles it
-                    auto it = remainingConds.begin();
-                    while (it != remainingConds.end()) {
-                        if (it->colName == c.colName && it->op == c.op && it->value == c.value) {
-                            it = remainingConds.erase(it);
-                            break;
-                        }
-                        ++it;
-                    }
-                    break;
-                }
-            }
+    } else if (!root && !rlsApplies && !remainingConds.empty() &&
+               table.partitionType==TableSchema::PartitionType::None) {
+        const auto indexedColumns=engine->getIndexedColumns(ctx.dbname,ctx.tablename);
+        std::vector<size_t> candidates;
+        for(size_t i=0;i<ctx.conds.size();++i) {
+            const auto& condition=ctx.conds[i];
+            if(condition.op!="=" || equalityIndexKeyIsEmpty(table,condition))continue;
+            const bool primary=isSingleColumnPrimaryKey(table,condition.colName);
+            if(primary || std::find(indexedColumns.begin(),indexedColumns.end(),condition.colName)!=indexedColumns.end())
+                candidates.push_back(i);
+        }
+        const auto selected=chooseEqualityIndexCondition(engine,ctx,table,candidates);
+        if(selected) {
+            const auto condition=ctx.conds[*selected];
+            // Keep the existing heap/MVCC/SSI/full-value recheck inside
+            // IndexScan. Partitioned row locators remain unsupported.
+            root=std::make_unique<IndexScanOp>(engine,ctx.dbname,ctx.tablename,
+                condition.colName,condition.value,condition.referenceInputOid);
+            remainingConds.erase(remainingConds.begin()+*selected);
         }
     }
 
@@ -9019,6 +9142,10 @@ static double estimateSelectivity(const StorageEngine::Condition& cond,
                 break;
             }
         }
+        if(column) {
+            const auto probe=cond.referenceInputOid?std::to_string(*cond.referenceInputOid):cond.value;
+            if(const auto fraction=analyzedEqualityFraction(*column,stats,totalRows,probe))return *fraction;
+        }
         for (const auto& m : stats.mcv) {
             if (m.first == cond.value || (column && StorageEngine::compareValues(
                     *column, m.first, false, cond.value, false, "=")
@@ -9160,6 +9287,23 @@ static double estimateJoinSel(StorageEngine* engine, const std::string& dbname,
     return 0.1;
 }
 
+static double estimateEqualityIndexRows(StorageEngine* engine,const std::string& database,
+                                       const IndexScanOp& index) {
+    const auto table=engine->getTableSchema(database,index.tableName());
+    const double rows=plannerRowEstimate(engine,database,index.tableName());
+    const auto statistics=engine->getColumnStats(database,index.tableName(),index.colName());
+    size_t analyzedRows=0;
+    const bool analyzed=engine->tryGetTableRowCount(database,index.tableName(),analyzedRows);
+    double fallback=index.colName().empty()?1.0:5.0;
+    for(size_t i=0;i<table.len;++i)if(table.cols[i].dataName==index.colName()) {
+        if(table.cols[i].isPrimaryKey)fallback=1.0;
+        if(analyzed)if(const auto fraction=analyzedEqualityFraction(table.cols[i],statistics,analyzedRows,index.value()))
+            return rows>0?std::max(1.0,rows**fraction):0;
+        break;
+    }
+    return statistics.cardinality?std::max(1.0,rows/statistics.cardinality):fallback;
+}
+
 static std::string costRowsStr(const CostEstimate& est, const QueryPlanner::ExplainOptions& opts) {
     if (!opts.costs) return "";
     return "  cost=" + std::to_string(static_cast<int>(est.cost)) +
@@ -9285,21 +9429,7 @@ static CostEstimate explainOp(Operator* op, int indent,
                costRowsStr(est, opts) + "\n";
 
     } else if (auto* idx = dynamic_cast<IndexScanOp*>(op)) {
-        double rows = idx->colName().empty() ? 1.0 : 5.0;
-        TableSchema tbl = engine->getTableSchema(dbname, idx->tableName());
-        for (size_t i = 0; i < tbl.len; ++i) {
-            if (tbl.cols[i].dataName == idx->colName() && tbl.cols[i].isPrimaryKey) {
-                rows = 1.0;
-                break;
-            }
-        }
-        auto stats = engine->getColumnStats(dbname, idx->tableName(), idx->colName());
-        if (stats.cardinality > 0) {
-            rows = static_cast<double>(plannerRowEstimate(
-                engine, dbname, idx->tableName()))
-                   / static_cast<double>(stats.cardinality);
-            if (rows < 1.0) rows = 1.0;
-        }
+        const double rows=estimateEqualityIndexRows(engine,dbname,*idx);
         est.rows = rows;
         est.cost = rows * 2.0;
         out += prefix + "IndexScan(table=" + idx->tableName() +
@@ -9347,7 +9477,7 @@ static CostEstimate explainOp(Operator* op, int indent,
             }
             sel *= estimateSelectivity(c, engine, dbname, tblName);
         }
-        est.rows = child.rows * sel;
+        est.rows = child.rows>0?std::max(1.0,child.rows*sel):0;
         est.cost = child.cost + est.rows * 0.5;
         out += prefix + "Filter" + costRowsStr(est, opts) + "\n";
 
@@ -9599,21 +9729,7 @@ static std::pair<std::string, CostEstimate> explainOpJson(Operator* op,
         json += "\"children\":[]";
 
     } else if (auto* idx = dynamic_cast<IndexScanOp*>(op)) {
-        double rows = idx->colName().empty() ? 1.0 : 5.0;
-        TableSchema tbl = engine->getTableSchema(dbname, idx->tableName());
-        for (size_t i = 0; i < tbl.len; ++i) {
-            if (tbl.cols[i].dataName == idx->colName() && tbl.cols[i].isPrimaryKey) {
-                rows = 1.0;
-                break;
-            }
-        }
-        auto stats = engine->getColumnStats(dbname, idx->tableName(), idx->colName());
-        if (stats.cardinality > 0) {
-            rows = static_cast<double>(plannerRowEstimate(
-                engine, dbname, idx->tableName()))
-                   / static_cast<double>(stats.cardinality);
-            if (rows < 1.0) rows = 1.0;
-        }
+        const double rows=estimateEqualityIndexRows(engine,dbname,*idx);
         est.rows = rows;
         est.cost = rows * 2.0;
         json += "\"nodeType\":\"IndexScan\",";
@@ -9657,7 +9773,7 @@ static std::pair<std::string, CostEstimate> explainOpJson(Operator* op,
             }
             sel *= estimateSelectivity(c, engine, dbname, tblName);
         }
-        est.rows = child.rows * sel;
+        est.rows = child.rows>0?std::max(1.0,child.rows*sel):0;
         est.cost = child.cost + est.rows * 0.5;
         json += "\"nodeType\":\"Filter\",";
         json += jsonCostRows(est, opts);

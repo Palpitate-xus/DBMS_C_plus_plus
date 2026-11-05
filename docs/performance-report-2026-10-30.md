@@ -1,5 +1,112 @@
 # 数据库操作性能测试报告（2026-10-30）
 
+<!-- CURRENT_EQUALITY_SCAN_COST_20261105 -->
+
+## 普通等值查询的实际扫描选择与完整网络成本（2026-11-05，P15-C7）
+
+本批让普通原生标量堆表查询实际消费基于ANALYZE频率的扫描选择：热点等值可选顺序扫描，低频等值和主键保留索引路径。此前只修改规划器时，无ORDER BY的普通查询仍绕开物理计划；现在结构化输出已接通，并修复无可用索引OR的显示文本合并，以保留重复行、NULL、空串和换行。B-tree、位图AND/OR与GiST在探测前取得语句快照，并在快照不适合当前索引或探测期间提交边界改变时读取完整可见堆候选，再做原条件检查。
+
+这是普通读取的partial进展，使用现有原生 `.stats` 中的MCV/计数；尚未让优化器全面消费新的typed `.analyzed_statistics` 槽。普通EXPLAIN的文本缓存键现包含精确的实时成本设置；没有修改已暂缓的retained/custom/generic规划、参数、portal/format2或mutation/provider生命周期。当前私有普通后端P15-C7 SHA256为 `3ff5f16a9cc3a223d6618db87d8a5bbe85240dfd4c08cfdceafeb6ba49c03d3a`。默认根程序425与既有服务保持；Goal active，PostgreSQL整体功能仍partial。
+同一4096行×3列、同一真实SQL与完整网络返回，父代／最终C7／同一父代回测各3进程，固定9个完成测量的进程，不重试计时查询；另两次在基线装载/启动阶段失败、没有计时样本，完整保留。wall中位数相对首轮父代／回测的变化（正值为减少、负值为增加）：热点等值（3200行）12.51%／2.45%；低频等值（1行）-5.57%／-5.47%；不存在等值（0行）77.31%／77.36%；主键等值（1行）-11.11%／9.44%。正负变化均如实保留；仅代表这四个普通读取负载，不能推广为全部操作、通用吞吐或PG速度。
+
+新原生13068检查与独立冷读105检查通过，纯频率组件O2及ASan/UBSan各17检查（启用泄漏检测）。24个相关原生入口实际正常0，含完整7worker恢复1974检查和14份子进程完整输出；这些入口实际链接最终C7的61个核心对象。新73条普通协议命令正常0，验证实际扫描计数、全部行值/NULL及旧快照；26个旧协议入口中23正常0，另3保留与父代一致的严格失败，未称全套通过。真实PG18.6对共享25条命令的7331个逻辑单元格全部逐字相同，9个EXPLAIN行数相同，8个扫描选择相同、1处成本边界扫描选择不同。
+### 实现与研究依据
+
+[PG18行数估计](https://www.postgresql.org/docs/18/row-estimation-examples.html)和[REL_18_6 selfuncs.c](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/utils/adt/selfuncs.c)按MCV频率、NULL比例和剩余不同值总体估计等值选择率，再由[costsize.c](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/optimizer/path/costsize.c)比较候选路径。[SQLite查询规划](https://sqlite.org/queryplanner.html)使用ANALYZE辅助索引选择；[DuckDB索引指南](https://duckdb.org/docs/2.0/guides/performance/indexing.html)强调高选择性，ART扫描默认阈值为MAX(2048,0.001×行数)。这些是实现调研，不是SQLite/DuckDB性能测量；原始PG源码、COPYRIGHT和来源哈希随归档保留。
+
+本地共用等值频率组件，使用列的真实比较语义合并匹配MCV，非MCV使用剩余非NULL频率/不同值，并受最小MCV频率约束。统计缺失、零样本或语义不能确定时保持旧选择，输入错误仍交实际所选执行路径处理。当前行数优先既有运行时估计，页数读取真实表空间的物理extent；不扫描元组来规划，不新增全局统计缓存、不改磁盘统计格式或发布重试策略。真正单列主键使用唯一性已保证的最多1行，省去每次为此重新读取/解析MCV，但仍比较实际顺序/索引成本；不跳过成本GUC或自定义回调。已有bitmap/GiST优先级保留，未声称完成这些索引族的完整成本比较。
+
+普通原生标量查询沿既有物理Project/Filter发布完整单元格与NULL元数据；支持当前基础堆表、普通条件与现有安全边界。缺索引的OR改用同一堆源加DNF过滤，避免按投影文本去重、丢失重复物理行和拆分换行。数组、枚举、域、虚拟列、分区、DISTINCT/ties、表达式排序及已有输出需求边界仍走原拥有者，未重新定义已暂缓的执行图生命周期。
+
+当前版本索引不能代表旧快照、读己写或并行写入中的全部历史键。物理B-tree/bitmap/GiST先取得语句快照，再在探测前后核对既有提交fence；不安全或发生变化时收集完整可见堆RID，并由原谓词和MVCC读取检查。实际扫描计数按真实fallback记为seq，缺失B-tree文件仍报原XX001，不用fallback掩盖损坏。位图OR在原条件复查时绑定实际RID的NULL元数据，并在正常/异常退出恢复之前的绑定，防止旧快照fallback把整数NULL当作0。GiST补齐TOAST值解析；权限/行策略仍由既有关系级路径处理。
+
+普通EXPLAIN文本缓存键包含五个成本参数的classic-locale hexfloat精确值与三个join开关，原生customCost回调存在时不缓存该显示结果。重复同一SQL的两个接近成本值可实际跨过扫描边界，避免六位小数碰撞。这只修普通EXPLAIN显示缓存，不是已暂缓的参数/保留计划策略。
+
+### 正确性、参考数据库与原有严格差异
+
+1024行实表含128个NULL键、800个热点键和96个低频键，打乱物理插入顺序；原生13068及独立exec冷读105检查核对真实数据、全量行/NULL、MCV行数、页成本、自定义成本、冷热选择、等价整数字面值及规划读取不修改文件。父代用同一最终原生源失败于热点仍选索引且只估10行，现估800行；热点有界q-error由80变1。O2和ASan/UBSan各17仅证明纯频率组件，不是全库SAN。
+
+新73条普通后端协议命令验证原有有序查询、SET成本切换与精确边界、全部数据/NULL/空串/UTF8、无ORDER BY真实seq/idx计数、未索引OR的重复行与嵌入换行，以及B-tree、位图AND/OR、GiST旧快照读取。当前索引候选命中与更新提交后旧键不可由sidecar找回的场景均有实际结果和计数；旧快照三个侧索引路径各完整读取4个可见堆候选，不漏历史行。
+
+24个相关原生入口全部正常0；全部实际链接与普通C7后端一致的61个核心对象。完整7worker恢复1974检查及14份原始子进程stdout/stderr保留。26个相关旧协议入口保留全部结果：23正常0；name257控制有70处严格失败、timetz2563控制有314处严格失败，与父代完整观察相同（仅name私有命名空间随机UUID归一）；table_structured仍在表达式别名排序处失败，与父代同一原断言和结果相同。未修这些既有缺口，未宣称整个注册套件通过；原R151 guard逐字保持，原341/103矩阵未运行。
+
+旧analyze_null协议fixture原来期待pg_stats返回0A000，与已经接受的P14完整17列契约冲突；原始fixture在父代和本批均失败的证据保留。仅此旧fixture按真实17列、全NULL、SQL NULL/空串/字面NULL槽值加强检查，更新后在父代及候选均通过，其余2353个原测试文件逐字保持。没有删除失败断言来宣称产品通过。
+
+真实PG18.6/en_US.UTF-8私有集群、Unix socket、默认fsync，init/start/stop正常0；共享原26条命令前缀中仅排除DBMS专有auto_analyze设置，实际重放其余25条。7331/7331结果单元格逐字一致，9/9行估计一致，8/9扫描路径一致；1处本地TableScan/PG Index Scan差异保留。新增DBMS专有计数/侧索引快照扩展单独验证，未伪称这部分也在PG重放。EXPLAIN显示cost仍有旧row-touch单位，不能等同选择路径时的成本函数或PG真实cost；现有GiST显示Unknown与OR解释/实际路径不同仍开放。
+
+初版C1在SET后暴露普通EXPLAIN缓存键缺成本；C2只改变规划/显示，实际无序查询仍绕开物理路径。C3接通后暴露bitmap旧快照漏行；C4暴露取得快照过晚、缺文件被fallback掩盖；C5扩展回归暴露未索引OR显示文本合并的真实回归；均保留失败；C6随后被新增诊断发现旧快照bitmap OR把NULL当作0，最终C7修复该回归并新增3条永久协议检查。C7的73条最终源在父代失败于热点计划，在C6失败于NULL/0历史键；最终同源全部通过。非存在的两个猜测测试名、C5脚本误指不存在的stub对象、程序复制前误启动协议、参考工具语法/数量错误及原始资料下载403属于工具/准备失败，未计为成功产品测试。
+
+### 完整普通网络查询性能
+
+基线为已提交187ea9c5的真实P14-C6普通后端；候选为本批最终C7；回测重新使用同一基线程序。固定顺序3/3/3共9个完成测量的独立进程，不重试计时查询、不丢计时样本。此前两次在首个基线装载/启动阶段失败，均未产生计时区间：一次4096行INSERT超过15秒且清理后-9，另一次20秒内未连上监听。失败receipt/trace保留，未归因或修复任何已暂缓模块。最终全组统一装载超时120秒、计时查询超时仍15秒；另保留每进程启动前身份和完整服务日志，并用新socket轮询启动。此为测量工具变化，未改生产程序或SQL/数据/调用次数。每个进程相同SQL创建4096行×3列（512个NULL键、3200个热点键），按i×37置换物理插入顺序，真实B-tree与ANALYZE。热点查询每段3次，低频/不存在/主键每段各32次。时钟覆盖真实SimpleQuery解析/绑定、路径构造、堆/索引/MVCC/谓词、完整投影与网络帧接收；建表/插入/ANALYZE/完整总体检查/各1次预检在计时外。没有prepared、EXPLAIN或PG速度计时。
+
+所有时长是整段毫秒中位数[min,max]；另保留客户端CPU，server CPU取运行中整个服务进程的POSIX CPU clock。数据预热与操作系统缓存未清空/固定；每组仅3个样本，属于描述性观察，不证明统计显著性。
+
+| wall（ms） | 父代首轮 | 最终C7 | 同一父代回测 |
+| --- | ---: | ---: | ---: |
+| 热点等值（3200行） | 686.919 [638.433, 783.425] | 600.959 [596.125, 2112.871] | 616.033 [577.750, 1462.805] |
+| 低频等值（1行） | 385.685 [343.042, 563.188] | 407.175 [337.976, 8772.021] | 386.042 [341.942, 9398.978] |
+| 不存在等值（0行） | 2525.870 [2521.379, 2536.569] | 573.072 [351.712, 577.666] | 2531.696 [2531.333, 2765.847] |
+| 主键等值（1行） | 423.599 [379.460, 797.582] | 470.663 [414.416, 520.251] | 519.747 [286.821, 593.138] |
+
+| server process CPU（ms） | 父代首轮 | 最终C7 | 同一父代回测 |
+| --- | ---: | ---: | ---: |
+| 热点等值（3200行） | 586.126 [524.728, 639.621] | 532.585 [532.266, 679.087] | 509.493 [501.335, 700.270] |
+| 低频等值（1行） | 211.017 [185.482, 351.169] | 222.052 [163.658, 434.809] | 224.742 [177.837, 369.335] |
+| 不存在等值（0行） | 2270.426 [2252.394, 2350.438] | 342.512 [186.015, 349.670] | 2331.174 [2296.963, 2352.068] |
+| 主键等值（1行） | 197.241 [186.199, 259.039] | 262.186 [229.659, 333.830] | 207.463 [132.933, 282.647] |
+
+热点等值（3200行）：wall相对首轮/回测变化（正值为减少）12.51%/2.45%，基线前后漂移-10.32%；server CPU相对首轮/回测变化（正值为减少）9.13%/-4.53%，基线前后漂移-13.07%；
+
+低频等值（1行）：wall相对首轮/回测变化（正值为减少）-5.57%/-5.47%，基线前后漂移+0.09%；server CPU相对首轮/回测变化（正值为减少）-5.23%/1.20%，基线前后漂移+6.50%；
+
+不存在等值（0行）：wall相对首轮/回测变化（正值为减少）77.31%/77.36%，基线前后漂移+0.23%；server CPU相对首轮/回测变化（正值为减少）84.91%/85.31%，基线前后漂移+2.68%；
+
+主键等值（1行）：wall相对首轮/回测变化（正值为减少）-11.11%/9.44%，基线前后漂移+22.70%；server CPU相对首轮/回测变化（正值为减少）-32.93%/-26.38%，基线前后漂移+5.18%；
+
+先前C2版本同一9进程负载未加速；其所有数据和长尾完整保留，不能用规划器局部成功覆盖实际网络退化：
+
+| C2未加速尝试wall（ms） | 父代首轮 | C2 | 同一父代回测 |
+| --- | ---: | ---: | ---: |
+| 热点等值（3200行） | 657.148 [621.542, 742.096] | 664.710 [652.927, 732.987] | 629.390 [611.446, 648.152] |
+| 低频等值（1行） | 451.329 [406.964, 483.361] | 956.542 [428.602, 17135.114] | 528.777 [526.154, 532.991] |
+| 不存在等值（0行） | 2650.274 [2638.014, 2896.516] | 3104.175 [2558.123, 4297.617] | 2684.749 [2668.547, 2813.185] |
+| 主键等值（1行） | 454.191 [329.396, 840.172] | 661.778 [609.910, 694.801] | 471.063 [356.758, 612.920] |
+
+中间C6同负载9次也全部保留：其后发现与本负载不同的NULL/0快照回归，因此不是接受版本；低频/主键的性能退化亦未隐藏。
+
+| C6中间版wall（ms） | 父代首轮 | C6 | 同一父代回测 |
+| --- | ---: | ---: | ---: |
+| 热点等值（3200行） | 643.928 [633.557, 711.806] | 622.917 [604.314, 633.639] | 690.935 [633.629, 719.963] |
+| 低频等值（1行） | 867.124 [858.245, 870.216] | 940.001 [863.956, 967.482] | 863.084 [811.219, 899.013] |
+| 不存在等值（0行） | 3050.418 [3008.481, 3078.710] | 971.995 [893.259, 1021.908] | 2903.748 [2870.686, 2961.412] |
+| 主键等值（1行） | 822.599 [762.834, 843.955] | 872.958 [867.883, 905.790] | 769.605 [741.387, 788.662] |
+
+C2的低频查询约17.135秒、最终C7约8.772秒及其基线回测约9.399秒单段长尾也保留，不作为重试或排除依据。最终负载的查询、数据、调用次数、setup SQL、计时/收包范围与C2尝试相同；替换最终普通后端与对应验收前置条件，并采用上述统一装载超时及启动日志。
+
+三批各9/9服务正常0。每批独立解码891次计时回复、18次完整总体回复及全部预检，检查568566个真实字段/20322个NULL、真实字段OID、每行全部值及空串/UTF8；逐一复核36份保留物理映像的字节/哈希。每worker在运行时逐字检查全部堆文件和两种ANALYZE映像读取前后不变；独立复核验证保留映像哈希，不冒称独立解析了全部存储页格式。所有9个计时、CPU、长尾和原始wire帧可由压缩归档复核；不提交ELF、对象文件或完整数据库映像。
+
+### 后续门槛、文档与版本
+
+Measured finalC7 workloads without improvement against both baseline groups remain open: hot server_process_cpu_ns: change percentages (positive=faster) 9.13/-4.53; cold wall_ns: change percentages (positive=faster) -5.57/-5.47; cold server_process_cpu_ns: change percentages (positive=faster) -5.23/1.20; primary wall_ns: change percentages (positive=faster) -11.11/9.44; primary server_process_cpu_ns: change percentages (positive=faster) -32.93/-26.38. Do not relabel a regression as a win or replace it with an overall mean.
+
+Full PostgreSQL cost calibration/startup/order/correlation/caching/visibility estimates and typed .analyzed_statistics slot consumption, extended/multicolumn/inheritance/partition statistics and index-family path costing remain partial. This implementation consumes the existing native .stats MCV/counts only.
+
+One of9 PG scan choices differs at a close cost boundary; actual logical7331 cells and9 estimates match. Display costs retain older row-touch units and are not the exact choice-cost model.
+
+Existing GiST JSON/text node rendering and OR EXPLAIN physical-plan divergence remain open, with actual counters retained.
+
+All operations/general throughput/PG speed and full database sanitizers unmeasured. Current scalar physical bridge excludes arrays/enums/domains/virtual/partition rows and unsupported output-demand/expression-order/distinct/ties owners.
+
+Pre-existing strict name DDL and array/protocol phase controls, and the existing expression-alias sort mismatch, remain failed and independently equal to parent observations; no user-paused owners reopened.
+
+All dedicated user pauses and original15 deferred items unchanged. Retained/generic/parameter planning, portal/format2 ownership, mutation graph/provider lifecycle, shared CPU sort and publication failure/retry scopes not changed.
+
+原273个完整对象与状态22 complete/166 partial/70 unverified/15 deferred_by_user不变；原265条历史逐字保留，只追加1条partial后266。原2354测试仅上述旧NULL契约fixture调整，其余2353逐字保持；新增3后2357，顶层CPP1102含桩、嵌套CPP5。当前源245/头174。更新8份现有入口文档，不新增Markdown；754路径与725份保护记录保持。旧14份gzip归档及清单项逐字保留，新1份后15；原大JSON的452fe958压缩提交保持，不重写历史。直接master本地提交，不推送、不切换默认程序/服务，Goal active。
+
+原始测量、失败与独立复核见[压缩机器归档](benchmarks/equality-scan-cost-20261105.json.gz)和[性能报告](performance-report-2026-10-30.md)。
+
+
 <!-- CURRENT_PG_STATS_SOURCE_20261105 -->
 
 ## pg_stats 完整基础查询与读取成本（2026-11-05，P14-C6）

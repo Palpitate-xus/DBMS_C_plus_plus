@@ -299,6 +299,29 @@ static const dbms::ColumnRefExpr* queryDemandPhysicalOrderColumn(
     return false;
 }
 
+// The ordinary physical Project/Filter operators now publish exact cells
+// and NULL metadata. Admit the same basic heap source without requiring a
+// Sort merely to escape the legacy text/materialization consumer.
+[[gnu::noinline]] static bool lowerStructuredPhysicalScan(
+    const dbms::TableSchema& table,const vector<string>& conditions,
+    const vector<dbms::StorageEngine::OrderBySpec>& orders,
+    bool expressionOrder,bool distinct,bool withTies) {
+    if(currentQueryRowDemand() || expressionOrder || distinct || withTies || !orders.empty() ||
+       table.partitionType!=dbms::TableSchema::PartitionType::None)return false;
+    for(const auto& condition:conditions)
+        if(condition=="typedexpr" || condition.rfind("typedexpr ",0)==0)return false;
+    for(size_t i=0;i<table.len;++i) {
+        const auto& column=table.cols[i];
+        // Preserve the paused enum/domain and existing compound/virtual
+        // source owners. Only genuine native builtin scalar declarations
+        // enter this ordinary base-heap bridge.
+        if(column.isArray || column.generatedKind=='v' || !column.enumValues.empty() ||
+           !column.domainName.empty() || !dbms::mapBuiltinTypeNameToOid(
+               dbms::ExprHelper::canonicalResultTypeName(column.dataType)))return false;
+    }
+    return true;
+}
+
 static bool shouldPublishQueryMetadata() {
     return executeDepth == 1 ||
            (metadataCaptureDepth != 0 && executeDepth == metadataCaptureDepth);
@@ -530,12 +553,23 @@ static void trimPlanCacheLocked() {
 static std::string planCacheSettingsKey() {
     const auto* session = dbms::currentSession();
     const auto workMem = session ? session->workMem.effective(g_config.workMemKb) : g_config.workMemKb;
+    // This key belongs only to plain EXPLAIN's rendered-text cache. Keep
+    // the exact live costs, including SET overrides, rather than rounding
+    // nearby settings into the same display result. No retained plan owner
+    // or parameter/portal lifecycle is changed here.
+    const auto& cost = dbms::QueryPlanner::costModel();
+    std::ostringstream costs;
+    costs.imbue(std::locale::classic());
+    costs << std::hexfloat << cost.seqPageCost << ':' << cost.randomPageCost << ':'
+          << cost.cpuTupleCost << ':' << cost.cpuIndexTupleCost << ':' << cost.cpuOperatorCost
+          << ':' << cost.enableNestloop << ':' << cost.enableHashJoin << ':' << cost.enableMergeJoin;
     return ":cfg=" + std::to_string(workMem) +
            ":seq=" + (g_config.enableSeqScan ? "1" : "0") +
            ":hash=" + (g_config.enableHashJoin ? "1" : "0") +
            ":merge=" + (g_config.enableMergeJoin ? "1" : "0") +
            ":parallel=" + std::to_string(g_config.maxParallelWorkersPerGather) +
-           ":planner_parallel=" + std::to_string(dbms::QueryPlanner::parallelWorkers());
+           ":planner_parallel=" + std::to_string(dbms::QueryPlanner::parallelWorkers()) +
+           ":live_cost=" + costs.str();
 }
 
 static void invalidatePlanCacheForConfigChange() {
@@ -5571,7 +5605,8 @@ static bool handleDeallocate(const string& sql, Session& s) {
 static bool publishExplainPlan(dbms::OpPtr plan, const string& inner,
     Session& s, const dbms::QueryPlanner::ExplainOptions& opts, bool isJson,
     const string& relationIdentity = {}) {
-    const bool usePlanCache = !opts.analyze && g_config.enableQueryPlanCache &&
+    const bool usePlanCache = !opts.analyze && !dbms::QueryPlanner::costModel().customCost &&
+                             g_config.enableQueryPlanCache &&
                              g_config.queryPlanCacheSize > 0;
     string cacheKey = s.currentDB + "::" + inner;
     cacheKey += ":R" + std::to_string(relationIdentity.size()) + ":" + relationIdentity;
@@ -35379,53 +35414,14 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 plan = dbms::QueryPlanner::buildDisjunctiveSelectPlan(
                     &g_engine, ctx, branches);
                 if (!plan) {
-                    // Bitmap-OR needs an equality index per branch; without
-                    // one, evaluate each branch with its own volcano plan and
-                    // union the results (first-seen dedupe).  Each branch is a
-                    // plain conjunction, so TableScanOp null metadata still
-                    // reaches the projection and NULL cells render as NULL
-                    // instead of the zero-filled fixed-width value.
-                    std::vector<std::string> unionRows;
-                    std::set<std::string> seen;
-                    for (const auto& branch : branches) {
-                        dbms::PlanContext bctx = ctx;
-                        bctx.conds = branch;
-                        dbms::OpPtr branchPlan = dbms::QueryPlanner::buildSelectPlan(
-                            &g_engine, bctx);
-                        if (!branchPlan) return false;
-                        auto branchRun = dbms::QueryPlanner::executePlanChecked(
-                            std::move(branchPlan));
-                        branchRun.throwIfFailed();
-                        if (!branchRun.ok) {
-                            volcanoExecutionError = true;
-                            cout << "ERROR: " << branchRun.error << endl;
-                            return true;
-                        }
-                        for (auto& r : branchRun.rows) {
-                            if (seen.insert(r).second) unionRows.push_back(std::move(r));
-                        }
-                    }
-                    if (!ctx.orderByCol.empty()) {
-                        TableSchema otbl = g_engine.getTableSchema(ctx.dbname, ctx.tablename);
-                        dbms::OpPtr sortPlan = std::make_unique<dbms::MaterializedRowsOp>(
-                            std::move(unionRows));
-                        sortPlan = std::make_unique<dbms::SortOp>(std::move(sortPlan), otbl,
-                            ctx.orderByCol, ctx.orderByAsc,
-                            ctx.orderByNullsFirst,
-                            ctx.hasExplicitOrderNulls);
-                        auto sortedRun = dbms::QueryPlanner::executePlanChecked(
-                            std::move(sortPlan));
-                        sortedRun.throwIfFailed();
-                        if (!sortedRun.ok) {
-                            volcanoExecutionError = true;
-                            cout << "ERROR: " << sortedRun.error << endl;
-                            return true;
-                        }
-                        outAnswers = std::move(sortedRun.rows);
-                    } else {
-                        outAnswers = std::move(unionRows);
-                    }
-                    return true;
+                    // A branch without a usable index still needs one heap
+                    // source and a DNF recheck. Unioning formatted branch
+                    // results loses duplicate physical rows, NULL identity
+                    // and embedded newlines before structured publication.
+                    ctx.conds.clear();
+                    ctx.disjunctiveConds = std::move(branches);
+                    plan = dbms::QueryPlanner::buildSelectPlan(&g_engine, ctx);
+                    if (!plan) return false;
                 }
             } else {
                 // One group (or no groups) is the normal AND/table path.
@@ -39255,6 +39251,9 @@ static bool executeInternal(const string& rawSql, Session& s) {
             const bool structuredPhysicalSort = captureStructuredPlain &&
                 lowerStructuredPhysicalSort(effectiveRawSql,tbl,condTokens,
                     orderBySpecs,structuredPlainOrderSpecs,!exprOrderBySpecs.empty(),useDistinct,queryFetchWithTies);
+            const bool structuredPhysicalScan = captureStructuredPlain &&
+                lowerStructuredPhysicalScan(tbl,condTokens,orderBySpecs,
+                    !exprOrderBySpecs.empty(),useDistinct,queryFetchWithTies);
 
             // Correlated scalar aggregate subqueries must bypass both the
             // volcano and plain paths: neither can evaluate a per-row
@@ -39290,7 +39289,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
             bool volcanoUsed = corrAggHandled;
             if (corrAggHandled) {
                 // answers already filled by the correlated scalar filter.
-            } else if ((captureStructuredPlain && !structuredPhysicalSort) || !exprOrderBySpecs.empty()) {
+            } else if ((captureStructuredPlain && !structuredPhysicalSort && !structuredPhysicalScan) || !exprOrderBySpecs.empty()) {
                 // Deliberately enter the StorageEngine fallback below.
             } else if (condTokens.empty()) {
                 volcanoUsed = executeVolcanoSelect(tname, selectCols, {},

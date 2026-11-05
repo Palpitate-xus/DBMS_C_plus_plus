@@ -1,5 +1,16 @@
 # DBMS C++
 
+<!-- CURRENT_EQUALITY_SCAN_COST_20261105 -->
+
+## 普通等值查询的实际扫描选择与完整网络成本（2026-11-05，P15-C7）
+
+本批让普通原生标量堆表查询实际消费基于ANALYZE频率的扫描选择：热点等值可选顺序扫描，低频等值和主键保留索引路径。此前只修改规划器时，无ORDER BY的普通查询仍绕开物理计划；现在结构化输出已接通，并修复无可用索引OR的显示文本合并，以保留重复行、NULL、空串和换行。B-tree、位图AND/OR与GiST在探测前取得语句快照，并在快照不适合当前索引或探测期间提交边界改变时读取完整可见堆候选，再做原条件检查。
+
+这是普通读取的partial进展，使用现有原生 `.stats` 中的MCV/计数；尚未让优化器全面消费新的typed `.analyzed_statistics` 槽。普通EXPLAIN的文本缓存键现包含精确的实时成本设置；没有修改已暂缓的retained/custom/generic规划、参数、portal/format2或mutation/provider生命周期。当前私有普通后端P15-C7 SHA256为 `3ff5f16a9cc3a223d6618db87d8a5bbe85240dfd4c08cfdceafeb6ba49c03d3a`。默认根程序425与既有服务保持；Goal active，PostgreSQL整体功能仍partial。
+
+原始测量、失败与独立复核见[压缩机器归档](docs/benchmarks/equality-scan-cost-20261105.json.gz)和[性能报告](docs/performance-report-2026-10-30.md)。
+
+
 <!-- CURRENT_PG_STATS_SOURCE_20261105 -->
 
 ## pg_stats 完整基础查询与读取成本（2026-11-05，P14-C6）

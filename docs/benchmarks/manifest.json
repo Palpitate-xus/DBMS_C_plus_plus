@@ -65,6 +65,16 @@
       "roundtrip_bytes_exact": true
     },
     {
+      "original_path": "docs/benchmarks/equality-scan-cost-20261105.json",
+      "original_bytes": 38533015,
+      "original_sha256": "d6b7c1b389be7ecf46798f7ef78ccc40176eb4b718a4e3a9cb00ee2897f74e9c",
+      "path": "docs/benchmarks/equality-scan-cost-20261105.json.gz",
+      "bytes": 3945764,
+      "sha256": "486982a260260a55de13b2c788ea42af2b2ca115038336afdb04dbaa3015b4bf",
+      "encoding": "gzip",
+      "roundtrip_bytes_exact": true
+    },
+    {
       "original_path": "docs/benchmarks/function-registry-returning-20261103.json",
       "original_bytes": 14016481,
       "original_sha256": "669b7aeda8fb0c4429282430f1936965784d7a456283d2cecf098bd53baf4e57",
@@ -145,6 +155,6 @@
       "roundtrip_bytes_exact": true
     }
   ],
-  "total_original_bytes": 227733597,
-  "total_bytes": 38238983
+  "total_original_bytes": 266266612,
+  "total_bytes": 42184747
 }

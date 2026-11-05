@@ -2,6 +2,42 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-05 actual ordinary equality access-path costing and exact structured heap/DNF reads",
+      "gap_ids": [
+        "OPT-04"
+      ],
+      "status": "partial",
+      "evidence": [
+        "src/executor/EqualityStatistics.h",
+        "src/executor/ExecutionPlan.cpp",
+        "src/main.cpp",
+        "docs/performance-report-2026-10-30.md",
+        "docs/benchmarks/equality-scan-cost-20261105.json.gz"
+      ],
+      "tests": [
+        "tests/equality_scan_cost_protocol_e2e_test.py",
+        "tests/equality_scan_cost_test.cpp",
+        "tests/equality_statistics_test.cpp"
+      ],
+      "verification": {
+        "implementation": "Native .stats MCV/null/distinct equality selectivity, real extent scan costing and ordinary scalar physical-query bridge; unindexed DNF complete structured heap recheck, snapshot fences before/after Btree/bitmap/GiST probes and exact live GUC key for plainEXPLAIN display cache only. No retainedplan/portal/mutation ownership or paused modules changed.",
+        "correctness": "Native13068+cold105, pureO2/SAN17eachleaks;24native0 incl7restoreworkers1974checks14fullstreams, finalC6 61core byteexact.73actualnewprotocol0 with unordered counters/fullNULL/newlines/duplicateOR and RRhistorical Btree/bitmapAND/OR/GiST.26oldprotocol23pass3strict parent-identical failures retained, not fullsuite pass. One obsolete pg_stats0A000 NULLfixture upgraded17fieldpositive oracle, passesparentandcandidate; originalfailure retained.",
+        "reference": "ActualPG18.6 private en_US core25SQL:7331/7331strict logical cells,9/9estimates,8/9scanpaths;1closeboundary pathdiff retained.47DBMS counter/sidecar/OR extension commands separately tested, not PG-replayed. Costs not equivalent.",
+        "performance": "同一4096行×3列、同一真实SQL与完整网络返回，父代／最终C7／同一父代回测各3进程，固定9个完成测量的进程，不重试计时查询；另两次在基线装载/启动阶段失败、没有计时样本，完整保留。wall中位数相对首轮父代／回测的变化（正值为减少、负值为增加）：热点等值（3200行）12.51%／2.45%；低频等值（1行）-5.57%／-5.47%；不存在等值（0行）77.31%／77.36%；主键等值（1行）-11.11%／9.44%。正负变化均如实保留；仅代表这四个普通读取负载，不能推广为全部操作、通用吞吐或PG速度。",
+        "unsuccessful_attempt": "Same full-network C2 fixed9 process comparison regressed; all4cases/alltails retained and independently decoded. Final same workload separately measured; no data/call-count/physical-shape changes or discarded samples.",
+        "preservation": "273fullobjects/states22/166/70/15 and265rawhistories exact,append1partial=>266;2354oldtests2353exact+1obsoleteNULLoracle,new3=>2357/top1102inclstub+nested5;245source/174headers,754MDpaths/protected725exact,14oldgzip exact+1=>15. Masterlocal, no push/default/service; Goalactive.",
+        "remaining": [
+          "Measured finalC7 workloads without improvement against both baseline groups remain open: hot server_process_cpu_ns: change percentages (positive=faster) 9.13/-4.53; cold wall_ns: change percentages (positive=faster) -5.57/-5.47; cold server_process_cpu_ns: change percentages (positive=faster) -5.23/1.20; primary wall_ns: change percentages (positive=faster) -11.11/9.44; primary server_process_cpu_ns: change percentages (positive=faster) -32.93/-26.38. Do not relabel a regression as a win or replace it with an overall mean.",
+          "Full PostgreSQL cost calibration/startup/order/correlation/caching/visibility estimates and typed .analyzed_statistics slot consumption, extended/multicolumn/inheritance/partition statistics and index-family path costing remain partial. This implementation consumes the existing native .stats MCV/counts only.",
+          "One of9 PG scan choices differs at a close cost boundary; actual logical7331 cells and9 estimates match. Display costs retain older row-touch units and are not the exact choice-cost model.",
+          "Existing GiST JSON/text node rendering and OR EXPLAIN physical-plan divergence remain open, with actual counters retained.",
+          "All operations/general throughput/PG speed and full database sanitizers unmeasured. Current scalar physical bridge excludes arrays/enums/domains/virtual/partition rows and unsupported output-demand/expression-order/distinct/ties owners.",
+          "Pre-existing strict name DDL and array/protocol phase controls, and the existing expression-alias sort mismatch, remain failed and independently equal to parent observations; no user-paused owners reopened.",
+          "All dedicated user pauses and original15 deferred items unchanged. Retained/generic/parameter planning, portal/format2 ownership, mutation graph/provider lifecycle, shared CPU sort and publication failure/retry scopes not changed."
+        ]
+      }
+    },
+    {
       "issue": "2026-11-05 genuine seventeen-field pg_stats SQL source and complete-query read cost",
       "gap_ids": [
         "OPT-04"
