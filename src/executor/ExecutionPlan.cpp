@@ -8285,34 +8285,57 @@ void GroupAggregateOp::close() {
 // QueryPlanner
 // ========================================================================
 
-static bool hasEqualityIndex(StorageEngine* engine, const PlanContext& ctx,
-                             const StorageEngine::Condition& condition) {
-    if (condition.op != "=") return false;
-    const TableSchema table = engine->getTableSchema(ctx.dbname, ctx.tablename);
-    if (equalityIndexKeyIsEmpty(table, condition)) return false;
-    if (isSingleColumnPrimaryKey(table, condition.colName)) return true;
-    const auto btreeColumns = engine->getIndexedColumns(ctx.dbname, ctx.tablename);
-    if (std::find(btreeColumns.begin(), btreeColumns.end(), condition.colName) != btreeColumns.end())
-        return true;
-    const auto hashColumns = engine->getHashIndexedColumns(ctx.dbname, ctx.tablename);
-    if (std::find(hashColumns.begin(), hashColumns.end(), condition.colName) != hashColumns.end())
-        return true;
-    const auto bloomColumns = engine->getBloomIndexedColumns(ctx.dbname, ctx.tablename);
-    return std::find(bloomColumns.begin(), bloomColumns.end(), condition.colName) != bloomColumns.end();
-}
+namespace {
+// One planning call owns this descriptor. Schema and access-method discovery
+// do not need repeated catalog validation/copies for each candidate or node.
+// Nothing escapes into a retained plan, session cache, or operator execution.
+struct PlanningRelationMetadata {
+    StorageEngine* engine;
+    const PlanContext& context;
+    const TableSchema& table;
+    std::optional<std::vector<std::string>> btrees{}, hashes{}, blooms{}, gists{};
+
+    const std::vector<std::string>& btreeColumns() {
+        if (!btrees) btrees = engine->getIndexedColumns(context.dbname, context.tablename);
+        return *btrees;
+    }
+    const std::vector<std::string>& hashColumns() {
+        if (!hashes) hashes = engine->getHashIndexedColumns(context.dbname, context.tablename);
+        return *hashes;
+    }
+    const std::vector<std::string>& bloomColumns() {
+        if (!blooms) blooms = engine->getBloomIndexedColumns(context.dbname, context.tablename);
+        return *blooms;
+    }
+    const std::vector<std::string>& gistColumns() {
+        if (!gists) gists = engine->getGiSTIndexedColumns(context.dbname, context.tablename);
+        return *gists;
+    }
+    bool hasBtreeColumn(const std::string& name) {
+        const auto& columns = btreeColumns();
+        return std::find(columns.begin(), columns.end(), name) != columns.end();
+    }
+    bool hasEqualityIndex(const StorageEngine::Condition& condition) {
+        if (condition.op != "=" || equalityIndexKeyIsEmpty(table, condition)) return false;
+        if (isSingleColumnPrimaryKey(table, condition.colName)) return true;
+        const auto contains = [&](const auto& columns) {
+            return std::find(columns.begin(), columns.end(), condition.colName) != columns.end();
+        };
+        return contains(btreeColumns()) || contains(hashColumns()) || contains(bloomColumns());
+    }
+};
+} // namespace
 
 // A GiST-servable predicate exists: a range (>, >=, <, <=) pair or single
 // bound, or an anchored prefix LIKE 'abc%', whose column carries a .gist
 // sidecar index.
-static bool canUseGiSTScan(StorageEngine* engine, const PlanContext& ctx) {
-    const TableSchema table = engine->getTableSchema(ctx.dbname, ctx.tablename);
-    if (table.partitionType != TableSchema::PartitionType::None) return false;
-    const auto gistColumns = engine->getGiSTIndexedColumns(ctx.dbname, ctx.tablename);
-    if (gistColumns.empty()) return false;
+static bool canUseGiSTScan(PlanningRelationMetadata& relation) {
+    if (relation.table.partitionType != TableSchema::PartitionType::None) return false;
     auto isGist = [&](const std::string& col) {
-        return std::find(gistColumns.begin(), gistColumns.end(), col) != gistColumns.end();
+        const auto& columns = relation.gistColumns();
+        return std::find(columns.begin(), columns.end(), col) != columns.end();
     };
-    for (const auto& condition : ctx.conds) {
+    for (const auto& condition : relation.context.conds) {
         const bool isRange = condition.op == "<" || condition.op == "<=" ||
                              condition.op == ">" || condition.op == ">=";
         if (isRange && isGist(condition.colName)) return true;
@@ -8326,30 +8349,29 @@ static bool canUseGiSTScan(StorageEngine* engine, const PlanContext& ctx) {
     return false;
 }
 
-static bool canUseBitmapHeapScan(StorageEngine* engine, const PlanContext& ctx) {
-    const TableSchema table = engine->getTableSchema(ctx.dbname, ctx.tablename);
-    if (table.partitionType != TableSchema::PartitionType::None) return false;
+static bool canUseBitmapHeapScan(PlanningRelationMetadata& relation) {
+    if (relation.table.partitionType != TableSchema::PartitionType::None ||
+        relation.context.conds.size() < 2) return false;
     std::set<std::string> seenColumns;
     size_t indexedPredicates = 0;
-    for (const auto& condition : ctx.conds) {
+    for (const auto& condition : relation.context.conds) {
         if (!seenColumns.insert(condition.colName).second) continue;
-        if (hasEqualityIndex(engine, ctx, condition)) ++indexedPredicates;
+        if (relation.hasEqualityIndex(condition)) ++indexedPredicates;
     }
     return indexedPredicates >= 2;
 }
 
 static bool canUseBitmapOrScan(
-    StorageEngine* engine, const PlanContext& ctx,
+    PlanningRelationMetadata& relation,
     const std::vector<std::vector<StorageEngine::Condition>>& branches) {
-    const TableSchema table = engine->getTableSchema(ctx.dbname, ctx.tablename);
-    if (table.partitionType != TableSchema::PartitionType::None || branches.size() < 2)
+    if (relation.table.partitionType != TableSchema::PartitionType::None || branches.size() < 2)
         return false;
     for (const auto& branch : branches) {
         std::set<std::string> seenColumns;
         bool indexed = false;
         for (const auto& condition : branch) {
             if (!seenColumns.insert(condition.colName).second) continue;
-            if (hasEqualityIndex(engine, ctx, condition)) {
+            if (relation.hasEqualityIndex(condition)) {
                 indexed = true;
                 break;
             }
@@ -8430,6 +8452,7 @@ static std::optional<size_t> chooseEqualityIndexCondition(
 OpPtr QueryPlanner::buildSelectPlan(StorageEngine* engine, const PlanContext& inputContext) {
     auto ctx = inputContext;
     const auto table = engine->getTableSchema(ctx.dbname, ctx.tablename);
+    PlanningRelationMetadata relation{engine, ctx, table};
     // Prepare once before selecting an access path: both the index key and
     // its heap/residual predicate must consume the same canonical datum.
     ctx.conds = prepareUnknownBitPredicateInputs(table, ctx.conds);
@@ -8452,12 +8475,12 @@ OpPtr QueryPlanner::buildSelectPlan(StorageEngine* engine, const PlanContext& in
     // bitmap, or parallel access path duplicate policy evaluation: use the
     // policy-aware TableScanOp and keep user predicates above it.
     const bool rlsApplies = engine->rlsAppliesTo(ctx.dbname, ctx.tablename);
-    const bool useBitmap = !root && !rlsApplies && canUseBitmapHeapScan(engine, ctx);
+    const bool useBitmap = !root && !rlsApplies && canUseBitmapHeapScan(relation);
     // GiST acceleration: a range or anchored-prefix predicate on a
     // .gist-indexed column narrows candidates via the sidecar overlap
     // scan.  All predicates stay in FilterOp above as the recheck
     // boundary, identical to the bitmap path.
-    const bool useGiST = !root && !rlsApplies && canUseGiSTScan(engine, ctx);
+    const bool useGiST = !root && !rlsApplies && canUseGiSTScan(relation);
     if (useBitmap) {
         // Keep all predicates for FilterOp's heap recheck.  The bitmap node
         // only narrows the candidate RID set; it is not a correctness filter.
@@ -8468,13 +8491,12 @@ OpPtr QueryPlanner::buildSelectPlan(StorageEngine* engine, const PlanContext& in
             engine, ctx.dbname, ctx.tablename, ctx.conds);
     } else if (!root && !rlsApplies && !remainingConds.empty() &&
                table.partitionType==TableSchema::PartitionType::None) {
-        const auto indexedColumns=engine->getIndexedColumns(ctx.dbname,ctx.tablename);
         std::vector<size_t> candidates;
         for(size_t i=0;i<ctx.conds.size();++i) {
             const auto& condition=ctx.conds[i];
             if(condition.op!="=" || equalityIndexKeyIsEmpty(table,condition))continue;
             const bool primary=isSingleColumnPrimaryKey(table,condition.colName);
-            if(primary || std::find(indexedColumns.begin(),indexedColumns.end(),condition.colName)!=indexedColumns.end())
+            if(primary || relation.hasBtreeColumn(condition.colName))
                 candidates.push_back(i);
         }
         const auto selected=chooseEqualityIndexCondition(engine,ctx,table,candidates);
@@ -8534,11 +8556,11 @@ OpPtr QueryPlanner::buildSelectPlan(StorageEngine* engine, const PlanContext& in
 
     // Add Filter if there are remaining conditions
     if (!remainingConds.empty()) {
-        TableSchema tbl = engine->getTableSchema(ctx.dbname, ctx.tablename);
+        const auto& tbl = table;
         root = std::make_unique<FilterOp>(std::move(root), tbl, remainingConds);
     }
     if (!ctx.disjunctiveConds.empty()) {
-        TableSchema tbl = engine->getTableSchema(ctx.dbname, ctx.tablename);
+        const auto& tbl = table;
         root = std::make_unique<FilterOp>(
             std::move(root), tbl, ctx.disjunctiveConds);
     }
@@ -8547,7 +8569,7 @@ OpPtr QueryPlanner::buildSelectPlan(StorageEngine* engine, const PlanContext& in
     // before projection/aggregation.  The join only carries outer rows, so
     // it does not change the schema visible to all downstream operators.
     if (!ctx.semiJoins.empty()) {
-        const TableSchema outerTbl = engine->getTableSchema(ctx.dbname, ctx.tablename);
+        const auto& outerTbl = table;
         for (const auto& spec : ctx.semiJoins) {
             const std::string innerDb = spec.dbname.empty() ? ctx.dbname : spec.dbname;
             const TableSchema innerTbl = engine->getTableSchema(innerDb, spec.tablename);
@@ -8574,7 +8596,7 @@ OpPtr QueryPlanner::buildSelectPlan(StorageEngine* engine, const PlanContext& in
     // existence predicate is independent of each outer row, so the inner
     // plan can be opened once and the outer row shape remains unchanged.
     if (!ctx.existenceFilters.empty()) {
-        const TableSchema outerTbl = engine->getTableSchema(ctx.dbname, ctx.tablename);
+        const auto& outerTbl = table;
         for (const auto& spec : ctx.existenceFilters) {
             const std::string innerDb = spec.dbname.empty() ? ctx.dbname : spec.dbname;
             const TableSchema innerTbl = engine->getTableSchema(innerDb, spec.tablename);
@@ -8611,7 +8633,7 @@ OpPtr QueryPlanner::buildSelectPlan(StorageEngine* engine, const PlanContext& in
     // inner value set is initialized once and the outer stream is evaluated
     // with SQL's ANY/ALL three-valued logic.
     if (!ctx.quantifiedSubqueries.empty()) {
-        const TableSchema outerTbl = engine->getTableSchema(ctx.dbname, ctx.tablename);
+        const auto& outerTbl = table;
         for (const auto& spec : ctx.quantifiedSubqueries) {
             const std::string innerDb = spec.dbname.empty() ? ctx.dbname : spec.dbname;
             const TableSchema innerTbl = engine->getTableSchema(innerDb, spec.tablename);
@@ -8629,7 +8651,7 @@ OpPtr QueryPlanner::buildSelectPlan(StorageEngine* engine, const PlanContext& in
     }
 
     if (!ctx.groupByCols.empty()) {
-        TableSchema tbl = engine->getTableSchema(ctx.dbname, ctx.tablename);
+        const auto& tbl = table;
         if (ctx.groupingSets.empty() && !rlsApplies && parallelWorkers_ > 1) {
             // Worker threads partition the buffered child rows into local
             // group buckets; results are merged and finalized once.
@@ -8642,7 +8664,7 @@ OpPtr QueryPlanner::buildSelectPlan(StorageEngine* engine, const PlanContext& in
                 ctx.aggregateItems, ctx.havingConds);
         }
     } else if (!ctx.aggregateItems.empty()) {
-        TableSchema tbl = engine->getTableSchema(ctx.dbname, ctx.tablename);
+        const auto& tbl = table;
         if (!rlsApplies && parallelWorkers_ > 1) {
             root = std::make_unique<ParallelGroupAggregateOp>(
                 std::move(root), tbl, std::vector<std::string>{},
@@ -8657,7 +8679,7 @@ OpPtr QueryPlanner::buildSelectPlan(StorageEngine* engine, const PlanContext& in
                 ctx.havingConds);
         }
     } else if (!ctx.windowFunctions.empty()) {
-        TableSchema tbl = engine->getTableSchema(ctx.dbname, ctx.tablename);
+        const auto& tbl = table;
         root = std::make_unique<WindowOp>(std::move(root), tbl,
                                           ctx.windowTargets, ctx.windowFunctions,
                                           ctx.orderByCol, ctx.orderByAsc,
@@ -8666,7 +8688,7 @@ OpPtr QueryPlanner::buildSelectPlan(StorageEngine* engine, const PlanContext& in
         // Add Sort if ORDER BY.  WindowOp sorts each window internally and
         // applies the final query ordering after it computes the values.
         if (!ctx.orderByCol.empty()) {
-            TableSchema tbl = engine->getTableSchema(ctx.dbname, ctx.tablename);
+            const auto& tbl = table;
             // Parallel path: worker threads sort disjoint rid partitions and
             // GatherMerge k-way merges the sorted streams (PG Gather Merge).
             const uint32_t pageCount = engine->tableNumPages(ctx.dbname, ctx.tablename);
@@ -8749,7 +8771,7 @@ OpPtr QueryPlanner::buildSelectPlan(StorageEngine* engine, const PlanContext& in
 
         // Always add a Project so the output is formatted text (not raw binary).
         // When selectCols is empty, Project emits all columns (SELECT * semantics).
-        TableSchema tbl = engine->getTableSchema(ctx.dbname, ctx.tablename);
+        const auto& tbl = table;
         if (!ctx.projectionTargets.empty()) {
             const std::string innerDb = ctx.scalarSubquery.dbname.empty()
                 ? ctx.dbname : ctx.scalarSubquery.dbname;
@@ -8795,6 +8817,7 @@ OpPtr QueryPlanner::buildDisjunctiveSelectPlan(
     StorageEngine* engine, const PlanContext& ctx,
     const std::vector<std::vector<StorageEngine::Condition>>& inputBranches) {
     const auto table = engine->getTableSchema(ctx.dbname, ctx.tablename);
+    PlanningRelationMetadata relation{engine, ctx, table};
     std::vector<std::vector<StorageEngine::Condition>> branches;
     for (const auto& branch : inputBranches)
         branches.push_back(prepareUnknownBitPredicateInputs(table, branch));
@@ -8812,11 +8835,11 @@ OpPtr QueryPlanner::buildDisjunctiveSelectPlan(
         return buildSelectPlan(engine,single);
     }
     if (engine->rlsAppliesTo(ctx.dbname, ctx.tablename) ||
-        !canUseBitmapOrScan(engine, ctx, branches)) return nullptr;
+        !canUseBitmapOrScan(relation, branches)) return nullptr;
 
     OpPtr root = std::make_unique<BitmapOrHeapScanOp>(
         engine, ctx.dbname, ctx.tablename, branches);
-    TableSchema tbl = engine->getTableSchema(ctx.dbname, ctx.tablename);
+    const auto& tbl = table;
 
     if (!ctx.orderByCol.empty()) {
         root = std::make_unique<SortOp>(std::move(root), tbl,

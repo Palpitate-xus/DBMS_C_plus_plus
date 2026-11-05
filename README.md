@@ -1,5 +1,14 @@
 # DBMS C++
 
+<!-- CURRENT_ORDINARY_QUERY_PROFILE_20261105 -->
+
+## 普通查询的规划元数据与解析开销（2026-11-05，P16-C2）
+
+本批在一次普通查询规划内复用关系schema，并按需各读取一次B-tree/Hash/Bloom/GiST列清单；主键与不可能使用位图/GiST的条件省去无用发现。普通表达式先排除不可能的类型常量前缀，避免对数字、表达式分隔符前的列名做推测类型解析及异常处理。真正的限定/引号/修饰/复合类型常量与显式CAST仍使用原声明语法。
+
+详见[性能报告](docs/performance-report-2026-10-30.md)与[压缩原始证据](docs/benchmarks/ordinary-query-profile-20261105.json.gz)。本批是普通读取partial进展，Goal active。
+
+
 <!-- CURRENT_EQUALITY_SCAN_COST_20261105 -->
 
 ## 普通等值查询的实际扫描选择与完整网络成本（2026-11-05，P15-C7）

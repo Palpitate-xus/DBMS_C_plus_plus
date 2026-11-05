@@ -199,6 +199,24 @@ static bool declaredTypePrefixEligible(const std::string& token) {
     return true;
 }
 
+// A type constant needs an identifier and a following string or type
+// suffix. Ordinary values and identifiers ending at an expression delimiter
+// cannot take this grammar role. Reject them before speculative declaration
+// parsing; genuine qualified/modified/compound types keep the existing path.
+static bool mayBeginTypeConstant(const std::vector<std::string>& tokens,
+                                 size_t pos) {
+    const auto identifierStart = [](unsigned char value) {
+        return value == '"' || std::isalpha(value) || value == '_';
+    };
+    if (tokens[pos].empty() ||
+        !identifierStart(static_cast<unsigned char>(tokens[pos].front())) ||
+        pos + 1 >= tokens.size() || tokens[pos + 1].empty())
+        return false;
+    const auto& next = tokens[pos + 1];
+    return next.front() == '\'' || next == "." || next == "(" || next == "[" ||
+        identifierStart(static_cast<unsigned char>(next.front()));
+}
+
 static ColumnDef consumeDeclaredType(const std::vector<std::string>& tokens,
                                      size_t& pos) {
     ColumnDef definition;
@@ -2894,8 +2912,10 @@ static ExprPtr parsePrimaryExprImpl(const std::vector<std::string>& tokens, size
     // A declared type followed by a real string constant is a type-input
     // grammar role, including named/qualified/quoted and modified types.
     // A function call without that following constant retains its callee.
-    const bool eligibleTypePrefix=declaredTypePrefixEligible(tokens[pos]);
-    if(!eligibleTypePrefix && SQLParser::toLower(tokens[pos])!="case" &&
+    const bool possibleTypeConstant = mayBeginTypeConstant(tokens, pos);
+    const bool eligibleTypePrefix = possibleTypeConstant &&
+        declaredTypePrefixEligible(tokens[pos]);
+    if(possibleTypeConstant && !eligibleTypePrefix && SQLParser::toLower(tokens[pos])!="case" &&
        pos+1<tokens.size() && tokens[pos+1].size()>=2 &&
        tokens[pos+1].front()=='\'' && tokens[pos+1].back()=='\'')
         retainDeclarationSyntaxError(DbError("42601","grammar keyword cannot introduce a type constant"));

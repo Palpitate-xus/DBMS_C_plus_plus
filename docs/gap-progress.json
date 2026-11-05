@@ -2,6 +2,37 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-05 ordinary-query relation metadata reuse and speculative type-constant parser cost",
+      "gap_ids": [
+        "OPT-04"
+      ],
+      "status": "partial",
+      "evidence": [
+        "src/executor/ExecutionPlan.cpp",
+        "src/parser/parser.cpp",
+        "docs/performance-report-2026-10-30.md",
+        "docs/benchmarks/ordinary-query-profile-20261105.json.gz"
+      ],
+      "tests": [
+        "tests/planner_relation_metadata_protocol_e2e_test.py"
+      ],
+      "verification": {
+        "implementation": "本批在一次普通查询规划内复用关系schema，并按需各读取一次B-tree/Hash/Bloom/GiST列清单；主键与不可能使用位图/GiST的条件省去无用发现。普通表达式先排除不可能的类型常量前缀，避免对数字、表达式分隔符前的列名做推测类型解析及异常处理。真正的限定/引号/修饰/复合类型常量与显式CAST仍使用原声明语法。",
+        "correctness": "最终C2通过原生13068与独立冷读105检查、32个规划/存储入口和14个语法入口；另2个冷目录原生入口保留父代完全相同的严格失败。新65条协议命令含10个实际扫描断言，原有73条等值协议通过；另30个相关旧协议入口27通过、3个严格失败与父代完整观察相同。实际PG18.6的共享25条SQL仍为7331/7331逻辑单元格、9/9行估计一致，8/9路径相同；不是完整兼容验收。",
+        "performance": "交错的8倍调用补测，父代／最终C2／同一父代回测各3进程；wall中位数变化（正数为减少，相对首轮／回测）为：热点等值（3200行）12.15%／-1.12%；低频等值（1行）15.17%／18.32%；不存在等值（0行）17.94%／14.60%；主键等值（1行）25.52%／19.68%。全部短时及补测的正负结果保留，不能推广为全部操作或PG速度。",
+        "sampling": "8actual normal0 profiling services,1024 actual queries each, diagnostics only; perf denial, unreliable gprofng smoke and first profile cleanup failure retained.",
+        "preservation": "245source174headers;2357original tests byteexact+1=>2358;32native+14grammar0,2strict parent-identical;30oldprotocol27pass3strict parent-identical;754MD725protected,15oldgzip exact+1=>16;273objects266oldhistories exact+1partial=>267. Goal active,masterlocal,no push/default/service.",
+        "remaining": [
+          "Ordinary query CPU still includes repeated frontend parsing, catalog publication-state file probes, transaction setup/commit and index-page work. This batch does not change catalog publication retry, generic I/O atomicity or any deferred owner.",
+          "Whole-query timing is descriptive, three processes per group, with baseline drift and all tails retained; no global throughput, every-operation or PostgreSQL speed claim. Any case without improvement against both baseline groups remains open.",
+          "Ordinary LIKE-prefix frontend eligibility and expression-alias sorting remain open. The corrected new metadata fixture keeps full LIKE rows/types and uses an actual eligible GiST range to assert GiST execution; no claim of a LIKE access-path implementation.",
+          "Typed .analyzed_statistics optimizer consumption, full PG cost calibration, multicolumn/partition statistics and index-family costing remain partial. PG25 shared commands match7331 cells/9estimates but one of9 scan choices differs.",
+          "Two original cold-catalog native fixtures and three original protocol entries remain strict failures with complete parent-identical observations; not counted as accepted full-suite success.",
+          "273 original objects/status22complete166partial70unverified15deferred and266 histories remain exact, append1partial=>267. All user-deferred scopes including R106/R151/R303-R305 retained; original R151341/103 matrix not run. Goal active, direct master, no push/default/service promotion."
+        ]
+      }
+    },
+    {
       "issue": "2026-11-05 actual ordinary equality access-path costing and exact structured heap/DNF reads",
       "gap_ids": [
         "OPT-04"

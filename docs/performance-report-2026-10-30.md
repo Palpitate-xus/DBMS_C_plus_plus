@@ -1,5 +1,130 @@
 # 数据库操作性能测试报告（2026-10-30）
 
+<!-- CURRENT_ORDINARY_QUERY_PROFILE_20261105 -->
+
+## 普通查询的规划元数据与解析开销（2026-11-05，P16-C2）
+
+本批在一次普通查询规划内复用关系schema，并按需各读取一次B-tree/Hash/Bloom/GiST列清单；主键与不可能使用位图/GiST的条件省去无用发现。普通表达式先排除不可能的类型常量前缀，避免对数字、表达式分隔符前的列名做推测类型解析及异常处理。真正的限定/引号/修饰/复合类型常量与显式CAST仍使用原声明语法。
+
+交错的8倍调用补测，父代／最终C2／同一父代回测各3进程；wall中位数变化（正数为减少，相对首轮／回测）为：热点等值（3200行）12.15%／-1.12%；低频等值（1行）15.17%／18.32%；不存在等值（0行）17.94%／14.60%；主键等值（1行）25.52%／19.68%。全部短时及补测的正负结果保留，不能推广为全部操作或PG速度。
+
+最终C2通过原生13068与独立冷读105检查、32个规划/存储入口和14个语法入口；另2个冷目录原生入口保留父代完全相同的严格失败。新65条协议命令含10个实际扫描断言，原有73条等值协议通过；另30个相关旧协议入口27通过、3个严格失败与父代完整观察相同。实际PG18.6的共享25条SQL仍为7331/7331逻辑单元格、9/9行估计一致，8/9路径相同；不是完整兼容验收。
+
+### 实现与调研
+
+[PostgreSQL REL_18_6 plancat.c](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/optimizer/util/plancat.c)的get_relation_info打开关系并从关系描述符取得索引清单，为规划构造关系信息。本批借鉴一次规划持有关系元数据的方法，不移植PG共享relcache、锁或失效生命周期；原始源码、COPYRIGHT、来源哈希随归档保留。此前[SQLite规划器](https://www.sqlite.org/queryplanner.html)与[DuckDB索引指南](https://duckdb.org/docs/2.0/guides/performance/indexing.html)的ANALYZE/选择率调研仍适用，没有新增这两个数据库的速度测量。
+
+PlanningRelationMetadata只在buildSelectPlan/buildDisjunctiveSelectPlan栈上存在，引用该调用已取得的schema，懒加载索引列清单；下游算子仍拥有自己的schema副本，并在open时执行原校验。原统计成本、路径优先级、快照fence、MVCC、NULL、谓词复查和RLS路径保持。新查询重新取得元数据，未增加跨语句缓存，未改prepared/retained/custom/generic、portal/参数/format2、mutation/provider所有权。
+
+解析预判只作用于普通表达式的推测类型常量入口，标识符起始规则与原声明解析相同。数字/字符串/运算符本身不能引入类型名，后继逗号、结束括号、二元运算符或语句末尾也不能构成类型常量；点号、修饰括号、数组后缀和复合类型词仍进入原语法。显式CAST、::、DDL、类型规格解析未改，没有实现R106未选显式CAST输入分析，也未恢复R303-R305规划/portal模块。
+
+### CPU定位与工具边界
+
+perf实际探测因perf_event_paranoid=4拒绝，保留退出255，没有修改内核权限。gprofng两次smoke存在timer changed to 0警告、采样数量与CPU工作量不符，其原始实验/日志保留而不作性能依据。gperftools 2.15项目局部包按APT元数据SHA256核验；仅为诊断预加载libprofiler，没有替换分配器。按[官方CPU profiler说明](https://gperftools.github.io/gperftools/cpuprofile.html)，用SIGUSR2在装载/预检后开始、1024条实际点查结束后停止，采样100Hz；计时版本不预加载profiler。
+
+共8个有效诊断服务全部正常0，每份1024条查询的全部结果与NULL、前后4096行总体以及堆/两种统计映像逐字检查。另保留最初一次因清理前缀校验失败的profile；该次没有完整持久化trace/正常退出收据，不计入8个有效服务。符号被剥离的系统库别名不能用来断言DNS或具体分配器实现问题。以下inclusive比例会相互覆盖，不相加，也不直接换算为查询加速：
+
+| 程序／查询 | 样本数 | getTableSchema | buildSelectPlan | domainColumns |
+| --- | ---: | ---: | ---: | ---: |
+| before／主键等值（1行） | 935 | 17.3% | 10.7% | 14.0% |
+| before／低频等值（1行） | 1004 | 15.7% | 9.9% | 12.2% |
+| legacy／主键等值（1行） | 847 | 13.1% | 未采到该符号 | 8.7% |
+| legacy／低频等值（1行） | 881 | 10.7% | 未采到该符号 | 8.7% |
+| C1／主键等值（1行） | 864 | 13.5% | 5.6% | 10.5% |
+| C1／低频等值（1行） | 1016 | 12.7% | 4.0% | 9.0% |
+| C2／主键等值（1行） | 757 | 13.5% | 5.7% | 9.5% |
+| C2／低频等值（1行） | 856 | 15.2% | 5.0% | 11.7% |
+
+
+legacy是P14-C6普通读取的额外定位对照；C1只改规划，C2再加类型常量前缀预判。legacy没有采到buildSelectPlan，保留缺失而非填0。当前仍有前端重复解析、catalog publication-state文件探测、事务开始/提交和索引页开销，未用本批局部改动宣称这些已解决。
+
+### 正确性与原有差异
+
+全部最终原生入口实际链接最终C2同一61个核心对象和固定桩。恢复入口包含7个exec隔离worker、1974检查，14份完整子进程输出均保留。16个语法入口两侧各14通过；declared_type_cold_binding的12检查中2失败、declared_modifier_owner的50检查中1失败，完整stdout与父代逐字相同，涉及createDatabase之后冷目录前提；没有删改原2357测试或把它们算作通过。
+
+新永久协议测试65条覆盖B-tree/Hash/Bloom/GiST创建与删除后的实际seq/idx计数、完整NULL/空串/字面NULL/UTF8/换行、列重命名、同名DROP/recreate及类型OID。父代、C1、最终C2均通过，证明元数据按查询重取；性能变化由独立计时判断。初稿在父代和C1都错误要求LIKE必走GiST，完整失败保留；最终保留LIKE完整行和OID检查，用真实可达GiST范围检查扫描路径，未宣称修复普通LIKE前缀路径。
+
+30个旧协议入口27正常0；另name257控制70失败、timetz2563控制314失败、table_structured表达式别名排序原断言失败。前两者完整stdout、后者完整stderr与父代相同（仅name私有UUID归一），均保留为未解决缺口。原R151整个NetworkServer.cpp逐字保持，原341/103矩阵未运行。
+
+实际PG18.6/en_US.UTF-8私有集群正常init/start/stop、默认fsync，25条共享SQL完整重放；最终C2的7331个逻辑字段逐字相同，9个估计一致，8个路径相同，另1处成本临界TableScan/PG Index Scan差异保留。新DBMS专有AM/实际计数测试单独验收，不假称在PG等价重放。
+
+### 真实普通查询网络计时
+
+同一4096行×3列，512个NULL键、3200热点键、384低频键，i×37置换物理插入、真实B-tree与ANALYZE。每个worker从创建独立数据目录开始；计时包括实际SimpleQuery解析、绑定、规划、读取/谓词/投影/结果编码与完整收包，建表/装载/ANALYZE、完整总体检查及每种查询1次预检在计时外。记录wall、整个存活服务进程POSIX CPU clock与客户端CPU；数据预热，OS缓存未清空或固定，无prepared或PG速度计时。
+
+初轮C1与最终C2短时负载各固定9worker，先父代3、候选3、同一父代回测3；hot每段3次，其余每段32次。C2短时热点与低频退化，基线/长尾波动也很大。为检查短时测量影响，预先固定且只执行一轮8倍调用补测：hot24次，其余256次，顺序为(父代、C2、同一父代回测)×3。程序、SQL、数据、物理形状、setup、预检和计时范围保持；调用数/顺序变化明确记录。不以补测替换短时失败，不重试或排除任何计时样本。第6个服务在监听前绑定端口失败、没有计时回复，完整退出1收据/日志保留；前5个已完成worker全部原样复用，仅继续剩余4个预定worker，并改用INADDR_ANY探测非临时端口。完整计时仍为原定9个不同进程，没有重新测量前5个。
+
+以下为整段毫秒中位数[min,max]；每组仅3个进程，是描述性观察。所有三批原始wall/server CPU/client CPU及长尾随归档保留。
+
+| P16-C1短时，3/32次 wall（ms） | 父代首轮 | 候选 | 同一父代回测 |
+| --- | ---: | ---: | ---: |
+| 热点等值（3200行） | 603.699 [581.287, 674.654] | 599.267 [597.605, 604.763] | 597.247 [596.579, 616.828] |
+| 低频等值（1行） | 343.187 [327.724, 16473.993] | 529.245 [296.835, 801.557] | 509.506 [362.990, 529.516] |
+| 不存在等值（0行） | 494.879 [417.338, 564.122] | 500.067 [492.772, 556.020] | 552.100 [502.328, 801.817] |
+| 主键等值（1行） | 521.214 [428.240, 800.574] | 495.525 [485.458, 545.308] | 533.792 [517.819, 534.520] |
+
+| P16-C2短时，3/32次 wall（ms） | 父代首轮 | 候选 | 同一父代回测 |
+| --- | ---: | ---: | ---: |
+| 热点等值（3200行） | 607.154 [582.502, 677.691] | 903.702 [642.922, 2666.118] | 585.053 [583.929, 620.282] |
+| 低频等值（1行） | 428.734 [351.654, 501.554] | 664.554 [595.751, 2342.746] | 450.427 [397.896, 682.224] |
+| 不存在等值（0行） | 450.654 [432.784, 579.846] | 529.739 [397.449, 624.435] | 590.226 [580.169, 787.387] |
+| 主键等值（1行） | 508.477 [485.227, 536.439] | 508.396 [488.923, 529.415] | 529.979 [436.913, 538.599] |
+
+| P16-C2短时，3/32次 server process CPU（ms） | 父代首轮 | 候选 | 同一父代回测 |
+| --- | ---: | ---: | ---: |
+| 热点等值（3200行） | 512.734 [474.962, 524.117] | 586.487 [481.094, 694.197] | 521.146 [481.815, 524.820] |
+| 低频等值（1行） | 260.689 [172.809, 310.050] | 310.115 [303.609, 340.559] | 264.007 [230.005, 285.699] |
+| 不存在等值（0行） | 267.610 [240.328, 373.881] | 308.402 [224.388, 324.468] | 361.557 [356.033, 367.670] |
+| 主键等值（1行） | 305.020 [274.229, 319.668] | 265.750 [264.463, 278.201] | 325.877 [277.311, 329.723] |
+
+| P16-C2交错补测，24/256次 wall（ms） | 父代首轮 | 候选 | 同一父代回测 |
+| --- | ---: | ---: | ---: |
+| 热点等值（3200行） | 5570.150 [4714.484, 12811.399] | 4893.189 [4890.154, 5112.705] | 4838.782 [4838.546, 4994.860] |
+| 低频等值（1行） | 4859.875 [4132.848, 10984.664] | 4122.803 [4056.771, 4234.366] | 5047.797 [4213.065, 9433.966] |
+| 不存在等值（0行） | 4862.499 [3926.394, 5220.796] | 3990.219 [3535.916, 4292.758] | 4672.141 [4219.512, 4815.719] |
+| 主键等值（1行） | 4550.086 [3855.577, 5019.247] | 3388.742 [3085.793, 3733.774] | 4219.060 [4010.085, 4464.040] |
+
+| P16-C2交错补测，24/256次 server process CPU（ms） | 父代首轮 | 候选 | 同一父代回测 |
+| --- | ---: | ---: | ---: |
+| 热点等值（3200行） | 4450.316 [3875.270, 4562.222] | 4220.047 [3769.108, 4442.241] | 4201.012 [4184.779, 4268.056] |
+| 低频等值（1行） | 2627.073 [2321.486, 2652.095] | 2223.358 [2121.337, 2308.888] | 2806.386 [2539.808, 2828.936] |
+| 不存在等值（0行） | 2699.923 [2220.372, 2709.729] | 2102.919 [2076.208, 2198.733] | 2599.074 [2181.074, 2650.435] |
+| 主键等值（1行） | 2384.693 [2369.785, 2438.140] | 1804.192 [1660.140, 1821.477] | 2307.013 [2265.669, 2369.264] |
+
+热点等值（3200行）补测：wall相对首轮/回测变化（正数为减少）12.15%/-1.12%，基线前后漂移-13.13%；server CPU相对首轮/回测变化（正数为减少）5.17%/-0.45%，基线前后漂移-5.60%；
+
+低频等值（1行）补测：wall相对首轮/回测变化（正数为减少）15.17%/18.32%，基线前后漂移+3.87%；server CPU相对首轮/回测变化（正数为减少）15.37%/20.78%，基线前后漂移+6.83%；
+
+不存在等值（0行）补测：wall相对首轮/回测变化（正数为减少）17.94%/14.60%，基线前后漂移-3.91%；server CPU相对首轮/回测变化（正数为减少）22.11%/19.09%，基线前后漂移-3.74%；
+
+主键等值（1行）补测：wall相对首轮/回测变化（正数为减少）25.52%/19.68%，基线前后漂移-7.28%；server CPU相对首轮/回测变化（正数为减少）24.34%/21.80%，基线前后漂移-3.26%；
+
+cost_C1：9/9服务正常0，独立逐帧检查891个计时回复、18个完整总体、568566个字段/20322个NULL和36份映像哈希。
+
+cost_short_C2：9/9服务正常0，独立逐帧检查891个计时回复、18个完整总体、568566个字段/20322个NULL和36份映像哈希。
+
+cost：9/9服务正常0，独立逐帧检查7128个计时回复、18个完整总体、2395062个字段/55854个NULL和36份映像哈希。
+
+运行中的worker逐字验证全部堆和两种统计映像前后不变；独立复核另验证保存映像的长度/哈希，不冒称独立解析全部存储页。没有全库SAN或全操作吞吐结论。没有同时改善两组基线的场景仍开放，不能用局部采样占比或平均值覆盖退化。
+
+### 尚未完成的范围与版本
+
+Ordinary query CPU still includes repeated frontend parsing, catalog publication-state file probes, transaction setup/commit and index-page work. This batch does not change catalog publication retry, generic I/O atomicity or any deferred owner.
+
+Whole-query timing is descriptive, three processes per group, with baseline drift and all tails retained; no global throughput, every-operation or PostgreSQL speed claim. Any case without improvement against both baseline groups remains open.
+
+Ordinary LIKE-prefix frontend eligibility and expression-alias sorting remain open. The corrected new metadata fixture keeps full LIKE rows/types and uses an actual eligible GiST range to assert GiST execution; no claim of a LIKE access-path implementation.
+
+Typed .analyzed_statistics optimizer consumption, full PG cost calibration, multicolumn/partition statistics and index-family costing remain partial. PG25 shared commands match7331 cells/9estimates but one of9 scan choices differs.
+
+Two original cold-catalog native fixtures and three original protocol entries remain strict failures with complete parent-identical observations; not counted as accepted full-suite success.
+
+273 original objects/status22complete166partial70unverified15deferred and266 histories remain exact, append1partial=>267. All user-deferred scopes including R106/R151/R303-R305 retained; original R151341/103 matrix not run. Goal active, direct master, no push/default/service promotion.
+
+原273完整对象和22/166/70/15状态、266条历史保持，追加1条partial后267。原2357测试逐字保持，新1后2358；源245/头174、顶层CPP1102含桩及嵌套5。更新8份现有文档，无新增Markdown，754路径/725保护记录保持；旧15个gzip与清单项保留，新1后16。原53.45MiB JSON已在452fe958无损压缩为5.70MiB，未改写Git历史；本批仍只提交压缩证据，不提交程序、对象或数据库映像。直接master本地提交，默认425程序与服务保持，Goal active。
+详见[性能报告](performance-report-2026-10-30.md)与[压缩原始证据](benchmarks/ordinary-query-profile-20261105.json.gz)。本批是普通读取partial进展，Goal active。
+
+
 <!-- CURRENT_EQUALITY_SCAN_COST_20261105 -->
 
 ## 普通等值查询的实际扫描选择与完整网络成本（2026-11-05，P15-C7）

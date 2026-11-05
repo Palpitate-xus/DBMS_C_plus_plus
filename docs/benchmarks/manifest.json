@@ -95,6 +95,16 @@
       "roundtrip_bytes_exact": true
     },
     {
+      "original_path": "docs/benchmarks/ordinary-query-profile-20261105.json",
+      "original_bytes": 35077781,
+      "original_sha256": "7e84792bbba35ab015010299d3dd26aeb1da8d786440db51255a5568c90aee85",
+      "path": "docs/benchmarks/ordinary-query-profile-20261105.json.gz",
+      "bytes": 2459941,
+      "sha256": "b6859f10a9ca4082ed793c99837ce405dc86138ba702479e60e58f1b5f2e2b04",
+      "encoding": "gzip",
+      "roundtrip_bytes_exact": true
+    },
+    {
       "original_path": "docs/benchmarks/owned-datum-20261103.json",
       "original_bytes": 5219885,
       "original_sha256": "a3a12d8872c87dbd806f6f97e10a947b4ceaef9d27148db906f33c505f9d9833",
@@ -155,6 +165,6 @@
       "roundtrip_bytes_exact": true
     }
   ],
-  "total_original_bytes": 266266612,
-  "total_bytes": 42184747
+  "total_original_bytes": 301344393,
+  "total_bytes": 44644688
 }
