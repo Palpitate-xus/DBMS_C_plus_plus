@@ -1,5 +1,18 @@
 # DBMS 功能测试报告
 
+<!-- CURRENT_STORAGE_LIFETIME_20261105 -->
+
+## 存储退出期生命周期（2026-11-05，P9-C2）
+
+最终P9-C2正常程序 `30c57ca8…`，源231/头161；C1、C2各按正常CMake重编TableManage一个单元，另61对象依赖及fresh62血缘核对，fresh stub794。新永久 `relation_list_lifetime_test.cpp` 的9控制在main和更早owner析构各执行一次，最终18次检查通过；旧O2在第11次检查失败，旧ASan报use-after-free，新ASan/UBSan通过。原562项名称/列表/WAL组件草稿在旧/新O2与ASan/UBSan四次均通过，仅作兼容性控制，不验收R218功能族。
+
+最终23个相关入口、新生命周期入口及原七阶段恢复均通过；完整七阶段Memcheck父进程+7worker均0错误，未启用泄漏检查。P9-C1的advance134和Memcheck冷进程维护表错误完整保留。正常Main固定22对象与P8-C3/P9-C1相同，含轮询计数为C1 219/224、最终C2 212/217，各5项元数据失败，两个进程上下文各正常0。
+
+原2340测试文件逐字保持，新增1文件后2341；顶层1091 CPP含test_stubs，排除后1090入口，另5个子目录CPP。完整恢复9次/108检查通过，无重采；详见[报告](performance-report-2026-10-30.md#存储退出期生命周期2026-11-05p9-c2)及[归档](benchmarks/relation-list-engine-lifetime-20261105.json)。
+
+原273项仍为22 complete /166 partial /70 unverified /15 deferred_by_user，Goal active。下方旧节保留当时版本的结果。
+
+
 <!-- CURRENT_RESTORE_TRANSACTION_HORIZON_20261105 -->
 
 ## 物理恢复事务号水位（2026-11-05，P8-C3）

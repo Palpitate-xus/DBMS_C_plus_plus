@@ -1,5 +1,16 @@
 # DBMS C++
 
+<!-- CURRENT_STORAGE_LIFETIME_20261105 -->
+
+## 存储退出期生命周期（2026-11-05，P9-C2）
+
+当前源码P9-C2（正常程序 `30c57ca8…`）修复表名列表标记与维护状态表的两处退出期生命周期错误。原七阶段恢复回归7个工作进程正常0，完整Memcheck的父进程及7个工作进程均未报告内存错误；正常Main仍有5项探针元数据差异。
+
+旧／新／旧各3次完整恢复调用全部通过，CPU p50约±1%，墙钟受旧版前后漂移影响，未观察到稳定加速。本批是正确性修复。默认425及既有服务保持；详见[完整报告](docs/performance-report-2026-10-30.md#存储退出期生命周期2026-11-05p9-c2)和[机器归档](docs/benchmarks/relation-list-engine-lifetime-20261105.json)。
+
+原273项仍为22 complete /166 partial /70 unverified /15 deferred_by_user，Goal active。下方旧节保留当时版本的结果。
+
+
 <!-- CURRENT_RESTORE_TRANSACTION_HORIZON_20261105 -->
 
 ## 物理恢复事务号水位（2026-11-05，P8-C3）

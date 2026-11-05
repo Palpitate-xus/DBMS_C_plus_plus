@@ -1,5 +1,16 @@
 # 生产化状态
 
+<!-- CURRENT_STORAGE_LIFETIME_20261105 -->
+
+## 存储退出期生命周期（2026-11-05，P9-C2）
+
+P9-C2 `30c57ca8…` 修复两处已实际捕获的use-after-free：退出期读取已析构的表名列表标记，以及后台写回访问已析构的维护登记表。原七阶段在P9-C1仍于advance异常；最终C2原7阶段全部正常0，完整Memcheck父进程+7工作进程均0错误。
+
+23个相关入口和新生命周期入口通过；正常Main为212/217，保留5项描述符/目录身份差异。跨进程准入、完整pg_stats17字段和其他功能族仍开放。9次完整恢复成本对照未证明稳定提速，默认425及服务保持。[证据](performance-report-2026-10-30.md#存储退出期生命周期2026-11-05p9-c2)及[归档](benchmarks/relation-list-engine-lifetime-20261105.json)。
+
+原273项仍为22 complete /166 partial /70 unverified /15 deferred_by_user，Goal active。下方旧节保留当时版本的结果。
+
+
 <!-- CURRENT_RESTORE_TRANSACTION_HORIZON_20261105 -->
 
 ## 物理恢复事务号水位（2026-11-05，P8-C3）

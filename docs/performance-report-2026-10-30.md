@@ -1,5 +1,59 @@
 # 数据库操作性能测试报告（2026-10-30）
 
+<!-- CURRENT_STORAGE_LIFETIME_20261105 -->
+
+## 存储退出期生命周期（2026-11-05，P9-C2）
+
+最终正常程序P9-C2 SHA256为 `30c57ca82d55d6a18b6a305d8595ae74f8edde52062a9eca63ba6448a4be26c2`；本批基线为770d7dfc / P8-C3 `d778afbd…`，中间P9-C1为 `708b02c5…`。源231/头161，C++17/O2/ICU/zlib/TLS stub保持。两代各真实重编TableManage一个TU，另61依赖核对，沿原fresh62构建血缘；匹配测试桩794。默认根程序425与现有服务保持。
+
+### 捕获的错误与实现
+
+完整Memcheck在旧版seed退出时捕获 `relation_name_codec::decode → getTableNames → flushSelectedCaches → ~StorageEngine` 读取已释放65B字符串。`listMagic()` 的动态局部static晚于全局引擎初始化，其析构可能先于引擎。现用64字节 `static constexpr char[]` 和按值string_view，标记、填零、旧短名列表及V2长度/校验字节不变。独立持久化固定夹具在main及更早owner的析构各作9个控制：旧O2第11次检查失败、旧ASan报告UAF，新O2及ASan/UBSan各18次通过；永久入口使用同一源码。
+
+仅修标记后的P9-C1仍在正常advance阶段报corrupted double-linked list；完整Memcheck继续到cold-low，捕获后台 `backgroundBufferFlush → maintenanceStateFor` 访问已销毁std::map节点。现把原mutex和weak_ptr表合为一个登记对象，在每个StorageEngine构造完成及线程启动前初始化，使其析构晚于所有引擎和已join的工作线程。不添加数据库条目或故意泄漏；原状态查找、锁、任务调度和完成通知保持。机械反向替换后TableManage全旧字节精确恢复，仅有登记对象及构造预初始化两处变化；R15网络唤醒、CTAS/checkpoint调度、R96 collation及其他暂缓路径代码保持。
+
+[C++17 N4659生命周期规则](https://timsong-cpp.github.io/cppwp/n4659/basic.start.term)说明动态静态对象的退出顺序与析构后使用约束；[SQLite格式说明](https://www.sqlite.org/fileformat2.html#the_database_header)的固定文件头是保持格式标记为确定字节的参照，不表示SQLite格式兼容。使用[Memcheck官方说明](https://valgrind.org/docs/manual/mc-manual.html)的分配/释放历史核实实际缺陷，没有仅从崩溃文字推断根因。
+
+### 完整回归与保留的失败
+
+| 版本／方式 | 实际结果 | 后续阶段 |
+| --- | --- | --- |
+| 原P8-C3正常 | advance wait134，corrupted double-linked list | 后4阶段NOTRUN |
+| 本批P9-C1正常（仅标记修复） | advance wait134，同样文字 | 后4阶段NOTRUN |
+| 旧版完整Memcheck | seed退出时表名标记UAF，工具exit97 | 后6阶段NOTRUN |
+| P9-C1完整Memcheck | cold-low维护状态表UAF，工具exit97 | 后2阶段NOTRUN |
+| 最终P9-C2正常 | 原7worker全部正常0 | 原全部断言通过 |
+| 最终P9-C2完整Memcheck | 父进程及7worker全部正常0，8日志各0错误 | 原全部断言通过 |
+
+七阶段仍是同一控制体，覆盖真实较早/较晚目标、INSERT/UPDATE/DELETE、已结算PREPARE提交/回滚、最高已分配但中止事务号、真实新tuple xmin及关系身份、完整RID/NULL/值和冷进程续写；未修改SQL、断言、时限或用退出钩子跳过析构。分离advance三次、两种GDB设置和分离Memcheck曾正常0，均未当作整体通过。旧SIGABRT本次未取得同一次执行的abort调用栈，不能把两个已捕获UAF当作所有旧崩溃的排他归因。最终完整Memcheck未启用泄漏检查，不是全库ASan/TSan验收。
+
+最终23个相关入口（含WAL32及进程内准入控制）和新生命周期入口正常0。原562控制的名称/列表/WAL草稿在旧/新O2与ASan/UBSan四次均0，只证明有限编码兼容性，未注册该草稿或关闭R218。原2340测试文件不改，新增1永久入口后2341；顶层1091 CPP含桩、去桩1090入口，另5个子目录CPP。
+
+正常Main仍保留原5项描述符/真实目录身份失败：P9-C1为219/224，最终C2为212/217；固定22个actual对象（含6次真实目录读取）与P8-C3相同。总数差别来自后台作业实际轮询。两版数据、NULL、后续写入及两个正常Main上下文（含cold）正确，均正常0；探针的OID20/size8及缺pg_class身份仍开放。
+
+### 完整恢复成本对照：旧P8-C3／最终P9-C2／旧P8-C3
+
+每段3次、零额外热身；直接复用上一批的精确C3原生二进制，只编译新C2。两者同一c038原生源、默认分配器，无测试包裹器。使用相同正确闭合H72 seed与原镜像，每样本新进程、新目标与镜像副本。计时仅包围实际完整physicalRestore调用；克隆、SHA、全1000+4行/RID/NULL扫描、2001哨兵和输出在计时外。准备会触及缓存，未清除或锁定OS缓存；登记对象初始化在引擎构造中，不计入本API区间，不声称启动提速。
+
+| 指标，ms：p50 [min, max] | 旧P8-C3前 | 最终P9-C2 | 旧P8-C3后 |
+| --- | ---: | ---: | ---: |
+| wall | 1985.683 [1789.234, 2024.291] | 1728.068 [1589.105, 1764.977] | 1716.633 [1596.170, 1741.020] |
+| process CPU | 810.095 [795.673, 832.848] | 818.376 [782.026, 832.238] | 825.474 [795.689, 864.813] |
+| thread CPU | 807.882 [794.053, 830.354] | 815.419 [779.091, 830.112] | 823.267 [793.656, 823.619] |
+
+新版本wall p50较旧前低12.97%，较旧后高0.67%；CPU分别高1.02%、低0.86%。旧版前后wall漂移−13.55%、CPU+1.90%，未证明稳定加速；每段仅3样本，全部原始值和长尾保留，不筛选或重采。这是生命周期修复的成本控制，不是查询提速结论。
+
+9/9调用正常0、108/108检查通过；27081行、108252单元、36个真实NULL逐值核对，完整前后RID与哨兵存在/移除检查通过，全部原镜像文件字节不变。独立从原stdout重新汇总每个计时值及min/p50/max，未把组件或全进程时间替代实际API耗时。
+
+### 证据及剩余范围
+
+工具启动时的缺符号/路径、初版include配置及两个汇总脚本假设错误保留，均未改动数据库样本或原断言。全部实际命令、源码/配置/对象哈希、原失败、worker stdout/stderr、九次原始时间及PID归属记录见[机器归档](benchmarks/relation-list-engine-lifetime-20261105.json)。
+
+正常Main五项元数据、跨服务进程在线准入、完整17字段pg_stats及其他原始功能族仍开放。本批未重测完整35操作/36查询或PostgreSQL性能，未切换默认425。原273对象与22/166/70/15状态、259条历史、725保护记录、8份旧归档和754 Markdown路径保持，仅追加一条partial后历史260；Goal active。
+
+原273项仍为22 complete /166 partial /70 unverified /15 deferred_by_user，Goal active。下方旧节保留当时版本的结果。
+
+
 <!-- CURRENT_RESTORE_TRANSACTION_HORIZON_20261105 -->
 
 ## 物理恢复事务号水位（2026-11-05，P8-C3）

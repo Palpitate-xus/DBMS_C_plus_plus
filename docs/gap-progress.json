@@ -2,6 +2,34 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-05 storage registry and relation-list lifetime",
+      "gap_ids": [
+        "BACKUP-01",
+        "STO-01",
+        "CAT-01"
+      ],
+      "status": "partial",
+      "evidence": [
+        "docs/performance-report-2026-10-30.md",
+        "docs/test-report.md",
+        "docs/postgresql-comparison.md",
+        "docs/postgresql-18-implementation-blueprint.md",
+        "docs/benchmarks/relation-list-engine-lifetime-20261105.json"
+      ],
+      "tests": [
+        "tests/relation_list_lifetime_test.cpp",
+        "tests/physical_restore_allocator_horizon_test.cpp"
+      ],
+      "verification": {
+        "source": "Parent770d7dfc; finalP9-C2 30c57ca8/source231/header161. C++17/O2/TLSstub. Each C1/C2 normalCMake TM1 rebuild+61 verified reuse, fresh stub794/fresh62 ancestry. Default425 held/directmaster/Palpitate-xus/no push or restart.",
+        "functional": "Late list marker: oldnormal failscheck11, oldASan UAF; same9 controls main+late=18 newnormal/ASanUBSan pass. Fixed persisted206B V2 and128B legacy bytes unchanged. Old/new562 compatibility controls fourbuilds0; originalR218 remains open.",
+        "full7": "Old P8C3 and new P9C1 advance134 failures retained. CompleteMemcheck oldseed markerUAF; P9C1 cold-low maintenance mapUAF. FinalC2 same full7 normal7/0 and fullMemcheck parent+7workers0,8logs0errors; no assertion/timeout/lifecycle skip. Old exactabortstack not obtained; no exclusive cause claim.",
+        "related": "Final23 related entries+new lifetime entry0. NormalMain fixed22 actualobjects C3=C1=C2; final212/217,5 strictmetadatafailures unchanged; two contexts normal0/gone.",
+        "performance": "One separate oldC3/newC2/oldC3 cohort,3each/warm0,all9normal0/108checks. wallp50 1985.683/1728.068/1716.633ms; CPU810.095/818.376/825.474ms. No stable acceleration; wallold drift-13.55%, allraw retained. 27081rows108252cells36NULL. No wholeSQL/PGspeed claim.",
+        "scope": "Original273/items/status22/166/70/15 and original259rawhistory exact; new1partial=260. Original2340tests unchanged/current2341; 725protected/8oldarchives/754MDpaths unchanged. Only codec marker and maintenance registry lifetime edits, deferred code/scope unchanged. Crossprocess/Main5metadata/pg_stats17 remain open; Goalactive."
+      }
+    },
+    {
       "issue": "2026-11-05 public physical restore transaction horizon and validation costs",
       "gap_ids": [
         "BACKUP-01",

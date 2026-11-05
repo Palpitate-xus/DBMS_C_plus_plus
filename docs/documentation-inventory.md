@@ -1,5 +1,16 @@
 # 全部文档检查清单
 
+<!-- CURRENT_STORAGE_LIFETIME_20261105 -->
+
+## 存储退出期生命周期（2026-11-05，P9-C2）
+
+本批更新本节所列8份既有Markdown及进度JSON，新增非Markdown[机器归档](benchmarks/relation-list-engine-lifetime-20261105.json)；Markdown路径仍754。原725保护记录、8份旧机器归档、273完整对象及259条历史保持，追加一条partial后历史260。
+
+源码231/头161，原2340测试文件不改，新增长期生命周期回归后2341，顶层1091 CPP（排除test_stubs后1090入口），另5个子目录CPP。最终原七阶段及Memcheck通过，正常Main仍5项元数据失败，性能无稳定加速结论；事实以[报告](performance-report-2026-10-30.md#存储退出期生命周期2026-11-05p9-c2)为准。
+
+原273项仍为22 complete /166 partial /70 unverified /15 deferred_by_user，Goal active。下方旧节保留当时版本的结果。
+
+
 <!-- CURRENT_RESTORE_TRANSACTION_HORIZON_20261105 -->
 
 ## 物理恢复事务号水位（2026-11-05，P8-C3）

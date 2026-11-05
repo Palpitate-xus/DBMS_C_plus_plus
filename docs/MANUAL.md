@@ -1,5 +1,16 @@
 # DBMS 使用手册
 
+<!-- CURRENT_STORAGE_LIFETIME_20261105 -->
+
+## 存储退出期生命周期（2026-11-05，P9-C2）
+
+当前源码P9-C2 `30c57ca8…` 保持C++17和原V2表名列表字节格式。版本标记采用无析构的常量存储，维护状态表在每个存储引擎构造完成前初始化，覆盖后台线程的寿命。SQL恢复命令及后台作业使用方式见下方既有说明。
+
+原七阶段恢复及其完整Memcheck本次通过，正常Main数据和冷启动通过，5项元数据检查仍失败；跨服务进程在线恢复准入仍开放。默认425未替换。[报告](performance-report-2026-10-30.md#存储退出期生命周期2026-11-05p9-c2)与[机器归档](benchmarks/relation-list-engine-lifetime-20261105.json)区分各版本失败及本次通过。
+
+原273项仍为22 complete /166 partial /70 unverified /15 deferred_by_user，Goal active。下方旧节保留当时版本的结果。
+
+
 <!-- CURRENT_RESTORE_TRANSACTION_HORIZON_20261105 -->
 
 ## 物理恢复事务号水位（2026-11-05，P8-C3）

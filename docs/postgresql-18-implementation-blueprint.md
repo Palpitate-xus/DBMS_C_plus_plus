@@ -1,5 +1,16 @@
 # DBMS_C_plus_plus 对标 PostgreSQL 18.6：逐项完整实施蓝图
 
+<!-- CURRENT_STORAGE_LIFETIME_20261105 -->
+
+## 存储退出期生命周期（2026-11-05，P9-C2）
+
+P9-C2 `30c57ca8…` 将表名列表版本标记改为64字节常量存储，并让维护登记表在引擎构造完成前初始化，消除两处实际退出期失效。原七阶段的最终正常及Memcheck通过，旧P8-C2/C3和P9-C1失败保留；没有重写断言或靠隔离的advance成功取代完整验收。
+
+后续继续处理跨服务进程恢复准入、正常Main五项描述符/目录身份，以及真实pg_stats全部17字段和typed数组/来源。R218、恢复功能族及用户暂缓模块均未关闭或扩大。本批9次恢复成本对照无稳定提速结论。[报告](performance-report-2026-10-30.md#存储退出期生命周期2026-11-05p9-c2)和[归档](benchmarks/relation-list-engine-lifetime-20261105.json)。
+
+原273项仍为22 complete /166 partial /70 unverified /15 deferred_by_user，Goal active。下方旧节保留当时版本的结果。
+
+
 <!-- CURRENT_RESTORE_TRANSACTION_HORIZON_20261105 -->
 
 ## 物理恢复事务号水位（2026-11-05，P8-C3）

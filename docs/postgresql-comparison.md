@@ -1,5 +1,16 @@
 # 与 PostgreSQL 18 的功能和性能差距
 
+<!-- CURRENT_STORAGE_LIFETIME_20261105 -->
+
+## 存储退出期生命周期（2026-11-05，P9-C2）
+
+P9-C2 `30c57ca8…` 补的是本项目存储生命周期可靠性：两处实际use-after-free已修复，原七阶段恢复及完整Memcheck本次通过。它不等于PostgreSQL完整恢复/epoch/跨进程准入或所有退出时序等价。正常Main保留5项探针元数据差异，完整17字段pg_stats仍为后续工作。
+
+本批9次完整恢复对照未证明稳定提速；没有重测PostgreSQL速度或全部35操作/36查询。默认425保持。原失败与新版本证据见[报告](performance-report-2026-10-30.md#存储退出期生命周期2026-11-05p9-c2)及[归档](benchmarks/relation-list-engine-lifetime-20261105.json)。
+
+原273项仍为22 complete /166 partial /70 unverified /15 deferred_by_user，Goal active。下方旧节保留当时版本的结果。
+
+
 <!-- CURRENT_RESTORE_TRANSACTION_HORIZON_20261105 -->
 
 ## 物理恢复事务号水位（2026-11-05，P8-C3）

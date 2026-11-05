@@ -290,11 +290,18 @@ struct MaintenanceState {
     bool lastCheckpointSucceeded = false;
     const StorageEngine* lastCheckpointOwner = nullptr;
 };
+struct MaintenanceRegistry {
+    std::mutex mutex;
+    std::map<std::string, std::weak_ptr<MaintenanceState>> states;
+};
+MaintenanceRegistry& maintenanceRegistry() {
+    static MaintenanceRegistry registry;
+    return registry;
+}
 std::shared_ptr<MaintenanceState> maintenanceStateFor(const std::string& database) {
-    static std::mutex mutex;
-    static std::map<std::string,std::weak_ptr<MaintenanceState>> states;
-    std::lock_guard<std::mutex> lock(mutex);
-    auto& entry = states[database];
+    auto& registry = maintenanceRegistry();
+    std::lock_guard<std::mutex> lock(registry.mutex);
+    auto& entry = registry.states[database];
     auto state = entry.lock();
     if (!state) { state = std::make_shared<MaintenanceState>(); entry = state; }
     return state;
@@ -2586,6 +2593,10 @@ bool writeUnloggedLifecycle(const std::filesystem::path& databasePath,
 
 StorageEngine::StorageEngine()
     : lockManager_(LockManager::global()) {
+    // A background worker may first use this registry long after construction.
+    // Initialize it before any engine finishes construction, so its lifetime
+    // encloses every engine and the workers joined by their destructors.
+    (void)maintenanceRegistry();
     if (!recoverAllDatabases()) {
         throw std::runtime_error(
             "WAL crash recovery failed; startup aborted to protect data");

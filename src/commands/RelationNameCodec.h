@@ -42,16 +42,15 @@ inline bool valid(std::string_view name) {
     return false;
 }
 
-inline const std::string& listMagic() {
+inline std::string_view listMagic() noexcept {
     // A backslash cannot occur in any valid legacy table name. The first old
     // fixed record is deliberately nonempty, so old recovery cannot silently
     // treat a new list as an empty database. New decoding never guesses width.
-    static const std::string magic = [] {
-        std::string value = "DBMS_RELATION_LIST_V2\\";
-        value.resize(identifierWidth, '\0');
-        return value;
-    }();
-    return magic;
+    // Earlier owners (including the global storage engine) can decode lists
+    // during destruction, after dynamically initialized local statics die.
+    // Constant backing bytes have no destructor and preserve the disk format.
+    static constexpr char magic[identifierWidth] = "DBMS_RELATION_LIST_V2\\";
+    return {magic, sizeof(magic)};
 }
 
 inline uint64_t checksum(std::string_view bytes) {
