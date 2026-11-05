@@ -36,6 +36,22 @@ bool encodeOwnedBinaryDatum(const ExprValue& root,const DatumType& declaration,
             frame.started=true;
             if(frame.value->isNull || !frame.declaration->codecOid || !frame.declaration->hasBinaryOutput)return false;
             frame.layout=frame.declaration;
+            if(frame.declaration->codecOid==2277) {
+                const auto actual=frame.value->compound?frame.value->compound->type:DatumTypePtr{};
+                if(frame.declaration->kind!=DatumKind::Array || !actual ||
+                   actual->actualOid!=2277 || actual->codecOid!=2277 || actual->kind!=DatumKind::Array ||
+                   !actual->hasBinaryOutput || !actual->arrayElement)return false;
+                // New output-only arrays must not opt an enum root or
+                // array-of-enum into the paused R151 wire family. Records
+                // retain the existing independent field-output boundary.
+                const DatumType* element=actual->arrayElement.get();size_t depth=0;
+                while(element && element->kind==DatumKind::Array) {
+                    if(++depth>128)return false;
+                    element=element->arrayElement.get();
+                }
+                if(!element || (element->kind==DatumKind::Scalar && element->enumType))return false;
+                frame.layout=actual.get();
+            }
             if(frame.declaration->kind==DatumKind::Record) {
                 const auto actual=frame.value->compound?frame.value->compound->type:DatumTypePtr{};
                 if(frame.declaration->codecOid==2249) {

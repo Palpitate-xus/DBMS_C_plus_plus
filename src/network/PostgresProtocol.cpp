@@ -10,6 +10,7 @@
 #include "types/jsonb.h"
 #include "types/tsvector.h"
 #include "catalog/catalog.h"
+#include "commands/AnalyzedRangeInput.h"
 #include "common/SqlArrayText.h"
 #include "utils/interval.h"
 
@@ -150,6 +151,8 @@ bool parseUuidBytes(const std::string& value, std::vector<uint8_t>& bytes) {
     return true;
 }
 
+#include "network/RangeBinaryDatum.inc"
+
 bool encodeBinaryValue(const std::string& value, const PgColumnDescription& column,
                        std::vector<uint8_t>& encoded);
 
@@ -223,6 +226,8 @@ bool encodeBinaryValue(const std::string& value, const PgColumnDescription& colu
             encoded.insert(encoded.end(), value.begin(), value.end());
             return true;
         }
+        if(const auto range=analyzed_statistics::range_input::builtin(column.typeOid))
+            return encodeBinaryRangeDatum(value,*range,encoded);
         // Only genuine immutable builtin catalog identities are admitted here.
         // A result name or an arbitrary user OID cannot select an array codec.
         // This shared bootstrap producer does not acquire a live catalog or do I/O.

@@ -3295,6 +3295,18 @@ OpPtr QueryPlanner::buildPreparedQueryPlan(StorageEngine* engine,const std::stri
                     if(!cache->cursor->next(row)){cache->cursor->close();cache->eof=true;return false;}
                     cache->rows.push_back(row);return true;
                 });
+        } else if(found->relationSchema=="pg_catalog" && found->relationName=="pg_stats") {
+            for(const auto& output:found->columns) {
+                Column column;column.dataName=output.name;column.dataType=output.type;
+                column.isVariableLength=true;schema.append(column);
+            }
+            auto rows=std::make_shared<std::optional<PreparedQueryRows>>();
+            source=std::make_unique<PreparedSourceRowsOp>(found->columns,
+                [engine,database,rows](size_t index,std::vector<ExprValue>& row) {
+                    if(!*rows)*rows=engine->getAnalyzedStatisticsRows(database);
+                    if(index>=(**rows).size())return false;
+                    row=(**rows)[index];return true;
+                });
         } else if(found->relationSchema=="pg_catalog" && found->relationName=="pg_namespace") {
             for(const auto& output:found->columns) {
                 Column column;column.dataName=output.name;column.dataType=output.type;

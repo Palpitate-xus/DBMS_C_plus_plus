@@ -2,6 +2,35 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-05 genuine seventeen-field pg_stats SQL source and complete-query read cost",
+      "gap_ids": [
+        "OPT-04"
+      ],
+      "status": "partial",
+      "evidence": [
+        "src/catalog/PgStatsCatalog.h",
+        "src/catalog/PgStatsProjection.h",
+        "src/catalog/pg_stats_query.h",
+        "src/commands/CreatedDatabaseCatalog.h",
+        "src/network/RangeBinaryDatum.inc",
+        "docs/performance-report-2026-10-30.md",
+        "docs/benchmarks/pg-stats-source-20261105.json.gz"
+      ],
+      "tests": [
+        "tests/pg_stats_source_test.cpp",
+        "tests/pg_stats_projection_test.cpp",
+        "tests/pg_stats_source_protocol_e2e_test.py"
+      ],
+      "verification": {
+        "implementation": "Actual view/rowtype/17attribute catalog declarations and genuine2277 output-only anyarray; creation-owned publication, metadata-only cold/Describe, owning slot projection and formats0/1/mixed. Query-local metadata indices and per-relation physical validation; no global/provider cache or paused lifecycle change.",
+        "correctness": "FinalC6 native109+cold90, pureO2/SAN548eachleaks; related34all0 incl7restoreworkers1974checks and14fullstreams; newnormal26SQL/153binarycells/6directrange24cells, scalar25/array19/range19auto protocolall0. Same final sources parent missing-feature failures retained;3legacyfixture preparations updated, originalassertions preserved.",
+        "reference": "ActualPG18.6/en_US same26wireSQL;991cells938match53strictdiffs(48repeatedstoragewidth,4tstztextoffset,1allocatedviewOID). Full17binary153:145match8widthdiff;6directrange24binaryallmatch.225descriptors4attributeorigin differences remain.510finitefloat4text+bitsallmatch. Not fullPG equivalence.",
+        "cost": "Correct complete17-field nativeSQLAPI C2/C6/sameC2 fixed3each9normal0;16tablesx30colsx32rows=512physicalrows/15360cells/1696NULL;480x17querycells.1untimedpreflight+3timedprepare/plan/execute each. wallp50 -36.21/-35.45%,processCPU -35.20/-34.41%.All9heap341692B/query1508041B/snapshot780277B/legacy299520Bexact, independentlydecodedallframes/types/arraybounds/bitmaps/values/RIDs/NULL. C2binaryprotocol incomplete outside timedAPI; not shippingparent/generalSQL/PG speed. First64colfixture rejected beforetiming, retained.",
+        "preservation": "273fullobjects/states22/166/70/15 and264rawhistories exact;append1partial=>265.2351originaltests:2348exact+3legacyfixture preparations;add3=>2354/top1100inclstub+5nested.244src/173headers,754MDpaths/protected725exact;13oldgzip exact+1=>14. Masterlocal, no push/default/servicepromotion; Goalactive.",
+        "remaining": "Full pg_statistic direct catalog, general polymorphic coercion, numeric/type/storage and timestamp text differences, identity cast/pg_class origins, stale schema/rename stats, indirect view paths, planner consumption, inheritance/index/custom/enum/record/multirange collectors, full DDL/two-file atomicity/recovery/transaction semantics and original deferred scope."
+      }
+    },
+    {
       "issue": "2026-11-05 real range ANALYZE collectors and cached complete API costs",
       "gap_ids": [
         "OPT-04"

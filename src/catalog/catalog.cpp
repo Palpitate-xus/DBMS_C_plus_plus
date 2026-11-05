@@ -2003,6 +2003,11 @@ const std::vector<PgTypeRow>& CatalogManager::builtinTypeRows() {
     ensureType(1027,  "_polygon",   -1,   'b', 'A');
     ensureType(700,   "float4",      4,   'b', 'N');
     ensureType(701,   "float8",      8,   'b', 'N');
+    // Genuine output-only array pseudo-type used by pg_statistic/pg_stats.
+    // Its element declaration belongs to each actual array value, not pg_type.
+    ensureType(2277,  "anyarray",   -1,   'p', 'P');
+    types.at(typeByOid.at(2277)).typalign='d';
+    types.at(typeByOid.at(2277)).typstorage='x';
     ensureType(705,   "unknown",    -2,   'p', 'X');
     auto& unknown = types.at(typeByOid.at(705));
     unknown.typowner = 10;

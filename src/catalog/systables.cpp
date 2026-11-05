@@ -73,6 +73,7 @@ static const std::unordered_map<std::string, Oid> kBuiltinTypeMap = {
     {"regclass", 2205}, {"regclass[]", 2210},
     {"regnamespace", 4089}, {"regnamespace[]", 4090},
     {"regrole", 4096}, {"regrole[]", 4097},
+    {"anyarray", 2277},
     {"void", 2278},
     {"uuid", 2950},
     {"uuid[]", 2951},

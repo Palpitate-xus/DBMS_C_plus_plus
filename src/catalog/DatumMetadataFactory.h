@@ -89,7 +89,8 @@ public:
         const char* role=genuineBuiltin(*base)?builtinDatumBinaryRole(base->oid):nullptr;
         // Actual array_send identity is sufficient for genuine catalog arrays.
         // A user basename/category by itself never selects a codec role.
-        const bool arrayRole=(role && std::string(role)=="array_send") ||
+        const bool arrayRole=(role && (std::string(role)=="array_send" ||
+            std::string(role)=="anyarray_send")) ||
             (!role && base->typsend==2401 && base->typelem && base->typlen==-1);
         if(arrayRole) {
             result->kind=DatumKind::Array;

@@ -143,6 +143,12 @@ int main() {
         }
         return files;
     };
+    // CREATE publishes real system metadata. Recreate the original legacy
+    // no-image fixture before taking its baseline; preserve all original
+    // cold lookup, no-allocation and byte-equality assertions.
+    g_engine.catalogService().evict(database);
+    require(std::filesystem::remove_all(g_engine.dbPath(database)/"pg_catalog")>0,
+        "prepare legacy database without a catalog image");
     const auto diskBefore=diskSnapshot();
     const auto before=g_engine.catalogService().metadataSnapshot(database);
     require(before.types.empty() && before.namespaces.empty() && !g_engine.catalogService().has(database),
@@ -215,5 +221,5 @@ int main() {
     }
     require(shared,"pure physical definitions equal actual initialized rows");
     std::cout<<"PHYSICAL_CATALOG_CHECKED="<<checked<<" FAILED="<<failed<<'\n';
-    return checked==634 && !failed?0:1;
+    return checked==635 && !failed?0:1;
 }

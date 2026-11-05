@@ -2,6 +2,7 @@
 #include "TableManage.h"
 #include "expression/ArrayDatumInput.h"
 #include "commands/HeapScanCursor.h"
+#include "commands/CreatedDatabaseCatalog.h"
 #include "commands/StoredRowNull.h"
 #include "commands/DdlRewrite.h"
 #include "commands/DdlTransaction.h"
@@ -45,6 +46,7 @@
 #include "catalog/declared_type.h"
 #include "catalog/type_catalog.h"
 #include "catalog/namespace_catalog.h"
+#include "catalog/PgStatsProjection.h"
 #include "common/SqlSyntax.h"
 #include "expression/expr_helper.h"
 #include "expression/sql_value.h"
@@ -16086,6 +16088,12 @@ DBStatus StorageEngine::createDatabase(const std::string& dbname, const std::str
             dbPath(dbname), kUnloggedLifecycleRunning)) {
         return failCreateDatabase();
     }
+    // System view/type/attribute identities are a database creation product,
+    // not an effect of SELECT, Describe, or the first user table's DDL.
+    try {
+        if(!initializeCreatedDatabaseCatalog(*this,dbname) ||
+           !index_file::syncDirectory(databasePath))return failCreateDatabase();
+    } catch(const DbError&) { return failCreateDatabase(); }
     // The per-file writes synced entries inside the database directory, but
     // the database directory itself was created in its parent. Persist that
     // final namespace link before reporting CREATE DATABASE success.
@@ -33525,13 +33533,69 @@ std::vector<std::string> StorageEngine::queryInformationSchema(
 }
 
 
-// ---------------------------------------------------------------------------
-// pg_stats / pg_statistic rows: one per (database, table, column) with
-// schemaname tablename attname null_frac n_distinct most_common_vals
-// most_common_freqs histogram_bounds.  null_frac stays 0 until per-column
-// null counts are tracked; n_distinct follows PG conventions (negative =
-// fraction of rows, -1 = fully unique).
-// ---------------------------------------------------------------------------
+// Full database-owned pg_stats source. The separate eight-column native
+// compatibility renderer below retains its existing public API and storage.
+std::vector<std::vector<ExprValue>> StorageEngine::getAnalyzedStatisticsRows(const std::string& dbname) const {
+    // The new source reads only one database. A foreign uncommitted physical
+    // statistics image must never be combined with committed catalog labels.
+    const auto ownership=catalogReadOwnership(dbname);
+    if(!ownership.mayReadCurrentFiles)throw DbError("55P03","statistics read conflicts with an active database writer");
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
+    const auto metadata=catalogService_->metadataSnapshot(dbname);
+    const auto snapshot=analyzed_statistics::read(dbPath(dbname)/".analyzed_statistics");
+    std::vector<std::vector<ExprValue>> result;if(!snapshot)return result;
+    DatumMetadataFactory factory(metadata);
+    const analyzed_statistics::OutputTypes types{factory.type(2277),factory.type(1021),factory.type(700)};
+    const auto* session=currentSession();
+    const bool administrator=session && sessionIsAdmin(*session);
+    const auto role=session?effectiveSessionRole(*session):std::string{};
+    // These indices and physical images belong to this one read invocation.
+    // Repeated columns must not copy a schema or hash its file again.
+    std::map<Oid,const PgClassRow*> relations;
+    std::map<Oid,const PgNamespaceRow*> namespaces;
+    std::map<std::pair<Oid,int16_t>,const PgAttributeRow*> attributes;
+    for(const auto& r:metadata.relations)relations.emplace(r.oid,&r);
+    for(const auto& n:metadata.namespaces)namespaces.emplace(n.oid,&n);
+    for(const auto& a:metadata.attributes)if(!a.attisdropped)attributes.emplace(std::make_pair(a.attrelid,a.attnum),&a);
+    struct PhysicalImage {bool present=false;uint64_t relation=0,schema=0;};
+    std::map<Oid,PhysicalImage> images;
+    for(const auto& pair:snapshot->columns) {
+        checkForQueryInterrupt();const auto& key=pair.first;const auto& statistics=pair.second;
+        const auto r=relations.find(key.relation);
+        if(r==relations.end())continue;const auto* relation=r->second;
+        if(relation->relkind!='r'&&relation->relkind!='p'&&relation->relkind!='m')continue;
+        const auto n=namespaces.find(relation->relnamespace);
+        const auto a=attributes.find({key.relation,key.attribute});
+        if(n==namespaces.end() || a==attributes.end())continue;
+        const auto* space=n->second;const auto* attribute=a->second;
+        std::string physical;
+        if(space->nspname.rfind("pg_temp_",0)==0) {
+            if(!session || space->nspname!=sessionTempSchemaName(*session))continue;
+            physical=tempTablePrefix(*session,relation->relname);
+        } else physical=space->nspname=="public"?relation->relname:space->nspname+"__"+relation->relname;
+        if(!administrator && (role.empty() || !hasColumnPermission(dbname,physical,role,TablePrivilege::Select,{attribute->attname})))continue;
+        // Reuse the existing policy boundary; do not expose a restricted
+        // table's raw statistics through a new view consumer.
+        if(!administrator && relation->relrowsecurity)continue;
+        const auto inserted=images.emplace(key.relation,PhysicalImage{});
+        auto& image=inserted.first->second;
+        if(inserted.second) {
+            const auto schema=getTableSchema(dbname,physical);
+            if(schema.len && std::filesystem::exists(schemaPath(dbname,physical))) {
+                image.present=true;image.relation=schema.physicalRelationId;
+                image.schema=analyzed_statistics::capture_detail::schemaImage(schemaPath(dbname,physical));
+            }
+        }
+        if(!image.present || image.relation!=statistics.physicalRelation || image.schema!=statistics.schemaGeneration)continue;
+        const auto declaration=factory.attribute(*attribute);
+        if(!declaration || declaration->actualOid!=statistics.attributeType->actualOid ||
+           declaration->codecOid!=statistics.attributeType->codecOid || declaration->kind!=statistics.attributeType->kind)continue;
+        auto row=analyzed_statistics::project(statistics,space->nspname,relation->relname,attribute->attname,types);
+        row[3].value=key.inherited?"t":"f";result.push_back(std::move(row));
+    }
+    return result;
+}
+
 std::vector<std::string> StorageEngine::getPgStatsRows(
     const std::string& onlyDb,
     const std::string& onlyTable,
@@ -35255,6 +35319,15 @@ decltype(auto) StorageEngine::withQueryBindingMetadata(const std::string& dbname
                         description.columns.push_back({attribute.attname, typeName,
                             attribute.attgenerated != '\0', attribute.attidentity, attribute.atttypid, attribute.atttypmod,
                             physicalDatum(attribute)});
+                    }
+                    if(schema=="pg_catalog" && relation.relname=="pg_stats") {
+                        if(relation.relkind!='v' || description.columns.size()!=analyzed_statistics::fields.size())
+                            throw DbError("XX001","incomplete actual statistics view declaration");
+                        for(size_t i=0;i<description.columns.size();++i)
+                            if(description.columns[i].name!=analyzed_statistics::fields[i].name ||
+                               description.columns[i].typeOid!=analyzed_statistics::fields[i].typeOid)
+                                throw DbError("XX001","conflicting actual statistics view declaration");
+                        return description;
                     }
                     if (relation.relkind == 'v') {
                         description.viewSql = viewSource(schema == "public" ? requested.name : schema + "." + requested.name);

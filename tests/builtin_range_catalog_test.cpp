@@ -41,6 +41,11 @@ int main() {
     const auto database=testDbPath("builtin_range_catalog");
     require(g_engine.createDatabase(database)==DBStatus::OK,"isolated database");
     const auto catalogDirectory=g_engine.dbPath(database)/"pg_catalog";
+    // CREATE now publishes the actual system view declaration. Exercise
+    // the original metadata-free legacy fixture explicitly, keeping every
+    // no-allocation/no-write assertion below.
+    g_engine.catalogService().evict(database);
+    require(std::filesystem::remove_all(catalogDirectory)>0,"prepare legacy database without a catalog image");
     require(!std::filesystem::exists(catalogDirectory) && !g_engine.catalogService().has(database),"actual cold catalog");
     const auto bindings=[&](const std::string& role,bool standalone) {
         for(const auto& range:ranges) {
@@ -77,5 +82,5 @@ int main() {
     metadataCheck(disk.types,"actual persisted definition");
     bindings("uncached persisted preparation",false);
     std::cout<<"BUILTIN_RANGE_CHECKED="<<checked<<" FAILED="<<failures<<'\n';
-    return checked==245 && !failures?0:1;
+    return checked==246 && !failures?0:1;
 }

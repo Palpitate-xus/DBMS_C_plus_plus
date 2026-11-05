@@ -1,4 +1,7 @@
 #include "catalog/CatalogService.h"
+#include "catalog/PgStatsCatalog.h"
+#include "commands/CreatedDatabaseCatalog.h"
+#include "process/StatsPersistence.h"
 #include "commands/TableManage.h"
 #include "commands/SequenceStorageName.h"
 #include "utils/Session.h"
@@ -129,6 +132,12 @@ bool databaseIdentity(const std::filesystem::path& path, CatalogDatabaseIdentity
 std::shared_ptr<CatalogManager> loadOwnedCatalog(
     const StorageEngine& engine, const std::string& database) {
     const auto directory = catalogDirForDb(engine, database);
+    // Allocated system view/row-type OIDs must be published by one actual
+    // startup/DDL owner before another engine can initialize the same image.
+    // Read-only metadata snapshots never enter this mutable bootstrap path.
+    fs::create_directories(directory);
+    StatsFileLock bootstrap(directory/".system_view_bootstrap");
+    if(!bootstrap.ok())throw DbError("58030","could not lock system view initialization");
     struct stat namespaceFile{};
     const bool newNamespaceCatalog =
         ::lstat((directory / "pg_namespace.cat").c_str(), &namespaceFile) != 0;
@@ -137,6 +146,7 @@ std::shared_ptr<CatalogManager> loadOwnedCatalog(
     auto catalog = std::make_shared<CatalogManager>(directory.string(), false);
     catalog->bootstrapSystemNamespaces();
     catalog->bootstrapSystemTypes();
+    const bool initializedStatisticsView=analyzed_statistics::bootstrapView(*catalog);
     // Some legitimate server cluster scaffolds already have tlist.lst and
     // auth metadata, but no namespace catalog. A newly bootstrapped logical
     // public namespace must have the same checked physical marker as CREATE
@@ -161,8 +171,20 @@ std::shared_ptr<CatalogManager> loadOwnedCatalog(
         }
     }
     migrateLegacyPublicDottedSequences(engine, database, *catalog);
+    if(initializedStatisticsView && !catalog->persistAll())
+        throw DbError("58030","could not publish initialized system view identities");
     return catalog;
 }
+}
+
+bool initializeCreatedDatabaseCatalog(const StorageEngine& engine,const std::string& database) {
+    // The database creator owns the exclusive name lock. Acquiring a normal
+    // catalog read lease here would conflict with that same creation owner.
+    // Publish the initialized private catalog before CREATE reports success;
+    // keep the mutable service cache empty for subsequent metadata-only reads.
+    if(fs::exists(catalogDirForDb(engine,database)))return false;
+    const auto catalog=loadOwnedCatalog(engine,database);
+    return catalog->persistAll();
 }
 
 CatalogManager& CatalogService::get(const std::string& dbname) {

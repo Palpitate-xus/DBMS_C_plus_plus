@@ -5444,6 +5444,17 @@ ExprValue ExprEvaluator::evalCast(const Expr* inputExpression, const RowContext&
         (inputLiteral && !inputLiteral->preparedSubquery &&
          inputLiteral->typeName.empty() && !inputLiteral->analyzedPrimitiveConstant &&
          isQuotedString(inputLiteral->value));
+    if(targetBase=="anyarray") {
+        // Output-only does not define a string input function. This is a
+        // selected runtime datum path; it performs no dead-arm input analysis.
+        if(sourceType=="anyarray")return v;
+        const bool unknownInput=sourceType=="unknown" ||
+            (inputLiteral && !inputLiteral->preparedSubquery &&
+             inputLiteral->typeName.empty() && isQuotedString(inputLiteral->value));
+        if(!v.isNull && unknownInput)throw DbError("0A000","cannot accept a value of type anyarray");
+        if(!v.isNull && common_type_detail::category(sourceType)=='S')
+            throw DbError("42846","cannot cast type "+sourceType+" to anyarray");
+    }
     if (targetBase=="tsvector") {
         const auto source=common_type_detail::canonical(sourceType);
         if (source!="unknown" && source!="tsvector" && common_type_detail::category(source)!='S')

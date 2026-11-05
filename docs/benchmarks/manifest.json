@@ -105,6 +105,16 @@
       "roundtrip_bytes_exact": true
     },
     {
+      "original_path": "docs/benchmarks/pg-stats-source-20261105.json",
+      "original_bytes": 32781344,
+      "original_sha256": "d5810d4c943dadef484099f630457f8dcc2be5b9efcf64f2afcda786feb85cda",
+      "path": "docs/benchmarks/pg-stats-source-20261105.json.gz",
+      "bytes": 4306049,
+      "sha256": "f6b3ea592b4da5d1f8734ebfe7e305efa28b375ff09dd9ad4114c2cc635c37c7",
+      "encoding": "gzip",
+      "roundtrip_bytes_exact": true
+    },
+    {
       "original_path": "docs/benchmarks/relation-list-engine-lifetime-20261105.json",
       "original_bytes": 4386260,
       "original_sha256": "a1ee80fb94b664e515d77f622d196d912028f89269842e4a7204f336ec8b3d04",
@@ -135,6 +145,6 @@
       "roundtrip_bytes_exact": true
     }
   ],
-  "total_original_bytes": 194952253,
-  "total_bytes": 33932934
+  "total_original_bytes": 227733597,
+  "total_bytes": 38238983
 }

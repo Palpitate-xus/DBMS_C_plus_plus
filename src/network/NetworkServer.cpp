@@ -17,6 +17,7 @@
 #include "common/NotificationManager.h"
 #include "catalog/CatalogService.h"
 #include "catalog/namespace_query.h"
+#include "catalog/pg_stats_query.h"
 #include "catalog/systables.h"
 #include "expression/regtype_input.h"
 #include "common/DateType.h"
@@ -1909,7 +1910,11 @@ static void applyTypedResultCodecMetadata(std::vector<PgColumnDescription>& colu
     for(size_t i=0;i<columns.size();++i) {
         auto& column=columns[i];const auto& field=declaration->at(i);
         const auto& type=field.typeMetadata;
-        if(column.formatCode!=1 || !type || pausedTopEnumWireFamily(*type))continue;
+        const bool outputAnyArray=type && type->actualOid==2277 && type->codecOid==2277 &&
+            type->kind==DatumKind::Array && type->hasBinaryOutput;
+        // A genuine anyarray output resolves its element from each owned
+        // value. Its new codec separately rejects the paused enum family.
+        if(column.formatCode!=1 || !type || (!outputAnyArray && pausedTopEnumWireFamily(*type)))continue;
         const auto modifier=field.typeMod>=0?field.typeMod:type->effectiveTypeMod;
         // A new DataRow must not silently disagree with an earlier original
         // RowDescription. Unknown/mismatched declarations keep the old codec;
@@ -3862,6 +3867,27 @@ bool describePreparedNamespaceCatalog(const std::string& sql,Session& session,
     return !columns.empty();
 }
 
+bool describePreparedPgStatsCatalog(const std::string& sql,Session& session,
+    std::vector<PgColumnDescription>& columns,const std::vector<uint32_t>& parameterOids) {
+    // Admission only: every supported spelling of this fixed ASCII catalog
+    // name contains these bytes. The parsed/bound source remains authority.
+    constexpr char name[]="pg_stats";
+    if(std::search(sql.begin(),sql.end(),name,name+sizeof(name)-1,
+        [](unsigned char c,char expected){return (c>='A'&&c<='Z'?c+('a'-'A'):c)==expected;})==sql.end())return false;
+    SQLParser parser;const auto parsed=parser.parseForBinding(sql);
+    if(!parsed.success || !pgStatsCatalogSourceCandidate(parsed.stmt.get()))return false;
+    auto* previous=currentSession();setCurrentSession(&session);
+    struct Restore {Session* previous;~Restore(){setCurrentSession(previous);}} restore{previous};
+    const auto query=g_engine.prepareBoundQuery(session.currentDB,sql,
+        protocolMetadataParameters(session,parameterOids));
+    if(!ownsPgStatsCatalogSource(query))return false;
+    QueryResult shape;
+    for(const auto& field:query.output) {shape.columns.push_back(field.name);shape.columnTypes.push_back(field.type);}
+    columns=describeProtocolColumns(shape,sql,session,&query.output);
+    retainPreparedWindowOrigins(columns,query,session);
+    return !columns.empty();
+}
+
 // A typed quantified consumer owns whole-query metadata, not a guessed
 // BOOLEAN descriptor. Reuse pure preparation/planning before Describe so
 // missing names, operand types and constant-plan failures cannot arrive after
@@ -4161,6 +4187,7 @@ bool describePreparedResultShape(const std::string& sql, Session& session,
                             const std::vector<uint32_t>& parameterOids = {}) {
     if (describePreparedWindowHostResult(sql,session,columns,parameterOids)) return true;
     if(describePreparedQuantified(sql,session,columns,parameterOids))return true;
+    if(describePreparedPgStatsCatalog(sql,session,columns,parameterOids))return true;
     if(describePreparedNamespaceCatalog(sql,session,columns,parameterOids))return true;
     if (describePreparedBitNegation(sql,session,columns,parameterOids)) return true;
     if (describePreparedHavingResult(sql, session, columns, parameterOids)) return true;
@@ -6202,8 +6229,9 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session,
             // loses derived computed typmods. Bind before execution effects,
             // and retain the original portal parameter owner after expansion.
             if (retainOrdinarySourceDeclaration && !typedExplain) {
-                if (!describePreparedWindowHostResult(sql, session, ordinarySourceColumns, {}))
-                    (void)describePreparedOrdinarySourceResult(sql, session, ordinarySourceColumns);
+                if (!describePreparedPgStatsCatalog(sql,session,ordinarySourceColumns,{}))
+                    if (!describePreparedWindowHostResult(sql, session, ordinarySourceColumns, {}))
+                        (void)describePreparedOrdinarySourceResult(sql, session, ordinarySourceColumns);
             }
             ScopedTypedResultCapture captureTypedScope(captureTyped);
             executionError = execute(sql, session);
@@ -8162,6 +8190,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 // statement. Describe must never be its first validation.
                 std::vector<PgColumnDescription> namespaceDescriptor;
                 (void)describePreparedNamespaceCatalog(sql,session,namespaceDescriptor,parameterTypes);
+                if(namespaceDescriptor.empty())(void)describePreparedPgStatsCatalog(sql,session,namespaceDescriptor,parameterTypes);
                 inferProtocolConcatParameters(sql,session,parameterTypes);
                 inferProtocolWholeScalarParameters(sql,session,parameterTypes);
                 validatePreparedAggregateOrderInputs(sql,session,parameterTypes);

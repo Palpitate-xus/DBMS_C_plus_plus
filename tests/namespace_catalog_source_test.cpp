@@ -72,6 +72,11 @@ int main(int argc,char** argv) {
     require(engine.createDatabase(second)==DBStatus::OK,"create second actual database");
     require(engine.createDatabase(empty)==DBStatus::OK,"create cold empty database");
     const auto emptyDirectory=engine.dbPath(empty)/"pg_catalog";
+    // CREATE DATABASE now publishes real system view/type metadata. Keep
+    // this existing no-image read control as an explicit legacy scaffold;
+    // every original read-only/no-insertion assertion below remains intact.
+    engine.catalogService().evict(empty);
+    require(std::filesystem::remove_all(emptyDirectory)>0,"prepare genuine legacy database without catalog image");
     read(engine,empty,"SELECT count(*) AS n FROM pg_catalog.pg_namespace",{{"0"}});
     require(!engine.catalogService().has(empty) && !std::filesystem::exists(emptyDirectory),"empty read creates no fabricated namespaces or files");
     auto& catalog=engine.catalogService().get(first);
@@ -131,5 +136,5 @@ int main(int argc,char** argv) {
     require(!engine.catalogService().has(first),"evicted reader does not initialize cache");
     require(files(path)==before,"evicted reader preserves persisted metadata");
     std::cout<<"NAMESPACE_CATALOG_NATIVE_COMPLETE "<<checked<<" FAILURES "<<failures<<std::endl;
-    return checked==35 && !failures?0:1;
+    return checked==36 && !failures?0:1;
 }

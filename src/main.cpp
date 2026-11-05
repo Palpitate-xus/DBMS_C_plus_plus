@@ -67,6 +67,7 @@
 #include "catalog/CatalogService.h"
 #include "catalog/namespace_catalog.h"
 #include "catalog/namespace_query.h"
+#include "catalog/pg_stats_query.h"
 #include "catalog/collation.h"
 #include "catalog/systables.h"
 #include "catalog/type_registry.h"
@@ -21073,6 +21074,7 @@ class PreparedWithDmlRuntime {
             shared_ptr<dbms::Operator> scan;
             shared_ptr<PreparedWithDmlRuntime> viewRuntime;
             shared_ptr<dbms::PreparedQueryRows> virtualRows;
+            shared_ptr<optional<dbms::PreparedQueryRows>> statisticsRows;
             dbms::TableSchema scanSchema;
             if(item->type==dbms::FromItem::Type::Subquery) {
                 auto* select=dynamic_cast<dbms::SelectStmt*>(item->subquery.get());
@@ -21087,6 +21089,8 @@ class PreparedWithDmlRuntime {
                 cursor=dbms::QueryPlanner::makePreparedCursor(viewRuntime->selectPlan(select,dbms::RowContext{},{}),range.columns);
             } else if(range.relationSchema=="pg_catalog" && range.relationName=="pg_class") {
                 virtualRows=make_shared<dbms::PreparedQueryRows>(preparedPgClassRows(session_));
+            } else if(range.relationSchema=="pg_catalog" && range.relationName=="pg_stats") {
+                statisticsRows=make_shared<optional<dbms::PreparedQueryRows>>();
             } else if(range.relationSchema=="pg_catalog" && range.relationName=="pg_namespace") {
                 virtualRows=make_shared<dbms::PreparedQueryRows>();
                 const auto metadata=g_engine.catalogService().metadataSnapshot(session_.currentDB);
@@ -21123,11 +21127,15 @@ class PreparedWithDmlRuntime {
             node->reset=[currentOuter,resetExecution](const dbms::RowContext& row) {
                 *currentOuter=row;resetExecution();
             };
-            node->read=[this,executionOwner,currentOuter,frames,rangePointer=&range,cursor,scan,scanSchema,virtualRows,scanOpened]
+            node->read=[this,executionOwner,currentOuter,frames,rangePointer=&range,cursor,scan,scanSchema,virtualRows,statisticsRows,scanOpened]
                 (size_t index,dbms::RowContext& row) {
                 vector<dbms::ExprValue> cells;
                 bool found=false;
                 if(cursor)found=cursor->next(cells);
+                else if(statisticsRows) {
+                    if(!*statisticsRows)*statisticsRows=g_engine.getAnalyzedStatisticsRows(session_.currentDB);
+                    if(index<(**statisticsRows).size()){cells=(**statisticsRows)[index];found=true;}
+                }
                 else if(virtualRows) {
                     if(index<virtualRows->size()){cells=virtualRows->at(index);found=true;}
                 } else if(!scan)found=readCte(rangePointer->cteStatement,index,cells,frames);
@@ -22556,6 +22564,23 @@ static bool handlePreparedNamespaceCatalogQuery(const string& rawSql,Session& se
        !dbms::namespaceCatalogSourceCandidate(parsed.stmt.get()))return false;
     auto query=make_shared<dbms::PreparedQuery>(g_engine.prepareBoundQuery(session.currentDB,rawSql));
     if(!dbms::ownsNamespaceCatalogSource(*query))return false;
+    PreparedWithDmlRuntime runtime(session,std::move(query));auto result=runtime.runRead();
+    for(const auto& column:result.columns) {cout<<renderLegacyHeader(column)<<' ';}
+    cout<<'\n';
+    for(size_t i=0;i<result.rows.size();++i) {
+        for(size_t j=0;j<result.rows[i].size();++j)cout<<(result.nulls[i][j]?"NULL":result.rows[i][j])<<' ';
+        cout<<'\n';
+    }
+    dbms::publishLastDmlResult(std::move(result));handled=true;return false;
+}
+
+static bool handlePreparedPgStatsCatalogQuery(const string& rawSql,Session& session,bool& handled) {
+    handled=false;
+    dbms::SQLParser parser;const auto parsed=parser.parseForBinding(rawSql);
+    if(!parsed.success || !dynamic_cast<const dbms::SelectStmt*>(parsed.stmt.get()) ||
+       !dbms::pgStatsCatalogSourceCandidate(parsed.stmt.get()))return false;
+    auto query=make_shared<dbms::PreparedQuery>(g_engine.prepareBoundQuery(session.currentDB,rawSql));
+    if(!dbms::ownsPgStatsCatalogSource(*query))return false;
     PreparedWithDmlRuntime runtime(session,std::move(query));auto result=runtime.runRead();
     for(const auto& column:result.columns) {cout<<renderLegacyHeader(column)<<' ';}
     cout<<'\n';
@@ -27808,6 +27833,10 @@ static bool executeInternal(const string& rawSql, Session& s) {
         bool qualifiedCatalogHandled=false;
         const bool qualifiedCatalogFailed=handlePreparedQualifiedCatalogQuery(effectiveRawSql,s,qualifiedCatalogHandled);
         if(qualifiedCatalogHandled)return qualifiedCatalogFailed;
+
+        bool statisticsCatalogHandled=false;
+        const bool statisticsCatalogFailed=handlePreparedPgStatsCatalogQuery(effectiveRawSql,s,statisticsCatalogHandled);
+        if(statisticsCatalogHandled)return statisticsCatalogFailed;
 
         bool namespaceCatalogHandled=false;
         const bool namespaceCatalogFailed=handlePreparedNamespaceCatalogQuery(effectiveRawSql,s,namespaceCatalogHandled);

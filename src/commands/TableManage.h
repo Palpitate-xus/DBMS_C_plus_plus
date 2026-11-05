@@ -572,6 +572,8 @@ public:
     std::vector<std::string> getPgStatsRows(const std::string& onlyDb = "",
                                             const std::string& onlyTable = "",
                                             const std::string& onlyColumn = "") const;
+    // Full owning pg_stats source for one actual database/catalog generation.
+    std::vector<std::vector<ExprValue>> getAnalyzedStatisticsRows(const std::string& dbname) const;
     // Canonicalize a tsvector literal (used by to_tsvector and insert paths).
     bool normalizeTsVectorText(const std::string& in, std::string& out) const;
     // ---- PL/pgSQL support (helpers for the plpgsql interpreter) ----

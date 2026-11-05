@@ -1,5 +1,16 @@
 # DBMS C++
 
+<!-- CURRENT_PG_STATS_SOURCE_20261105 -->
+
+## pg_stats 完整基础查询与读取成本（2026-11-05，P14-C6）
+
+本批接通实际 `pg_catalog.pg_stats` 的17列基础SQL查询、参数为零的纯Describe、文本/二进制/混合结果格式，以及实际 owning anyarray 输出；支持已测的过滤、投影、排序、LIMIT、别名、CTE和JOIN。每次查询只读取当前数据库的真实统计与目录，重用本次查询内的关系/属性索引和每关系一次的物理模式校验，减少逐列重复扫描、模式复制和文件散列。
+
+本节更新下方P13当时“17列SQL尚未接通”的结论；下方历史批次保留当时事实，当前状态以本节为准。当前私有普通后端P14-C6为 `9362b02aba17d45038702211ba42a6a1d797ef3580d97edb8ffabce80e0f63b6`。默认根程序425和既有服务未切换，Goal保持active；整体PostgreSQL功能仍为partial。
+
+原始测量、失败及逐字复核见[压缩机器归档](docs/benchmarks/pg-stats-source-20261105.json.gz)与[性能报告](docs/performance-report-2026-10-30.md)。
+
+
 <!-- CURRENT_ANALYZED_RANGE_COLLECTOR_20261105 -->
 
 ## 范围统计采集与完整 ANALYZE 成本（2026-11-05，P13-C2）
