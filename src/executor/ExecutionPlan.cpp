@@ -4150,6 +4150,10 @@ bool TableScanOp::nextRow(std::string& outRow, const TableSchema* projection,
                     *projection, lastNulls_, *selected, *cells, *nulls);
             outRow = std::move(row.data);
         } else {
+            // The cursor already captured this exact tuple's physical NULL
+            // bitmap. Full-row TOAST materialization must use it too instead
+            // of fetching the heap again for each variable-width field.
+            detail::ScopedStoredRowNullBitmap nullOwner(tbl_, lastNulls_);
             outRow = engine_->resolveToastValues(dbname_, tablename_, row.data, tbl_, &ok);
         }
         if (!ok) { setError("TOAST value read failed"); return false; }
@@ -5967,9 +5971,8 @@ bool ProjectOp::next(std::string& outRow) {
         rtInstr_.emitted = true;
         return true;
     }
-    // This bridge is intentionally limited to the direct physical cursor.
-    // Keep bitmap ownership local to this next() call; transformed, filtered,
-    // indexed and buffered children retain their original fallback paths.
+    // Borrow only the current physical cursor or a concrete sort's emitted
+    // row, for this next() call. Other children keep their existing fallback.
     std::vector<bool> storedNulls;
     std::optional<detail::ScopedStoredRowNullBitmap> storedNullOwner;
     // Nonnullable physical targets never ask the stored-NULL fallback. A
@@ -5983,6 +5986,24 @@ bool ProjectOp::next(std::string& outRow) {
         }
         return false;
     };
+    const auto matchingSort = [&]() -> SortOp* {
+        if (typeid(*child_) != typeid(SortOp)) return nullptr;
+        auto* sort = static_cast<SortOp*>(child_.get());
+        const auto& source = sort->tbl_;
+        if (source.tablename != tbl_.tablename || source.len != tbl_.len ||
+            source.formatVersion != tbl_.formatVersion) return nullptr;
+        for (size_t i = 0; i < tbl_.len; ++i) {
+            const auto& a = source.cols[i];
+            const auto& b = tbl_.cols[i];
+            if (a.dataName != b.dataName || a.dataType != b.dataType ||
+                a.dsize != b.dsize || a.isVariableLength != b.isVariableLength ||
+                a.isNull != b.isNull || a.isArray != b.isArray ||
+                a.isUnsigned != b.isUnsigned || a.generatedKind != b.generatedKind ||
+                a.generatedExpr != b.generatedExpr || a.storageCodec != b.storageCodec)
+                return nullptr;
+        }
+        return sort;
+    };
     if (physicalScan && origin.engine && !origin.dbname.empty() &&
         origin.rid > 0 && origin.rid == physicalScan->lastRid() &&
         origin.tablename == physicalScan->tableName() &&
@@ -5992,6 +6013,12 @@ bool ProjectOp::next(std::string& outRow) {
         physicalScan->lastStoredNullBitmap(storedNulls) &&
         storedNulls.size() == tbl_.len) {
         storedNullOwner.emplace(tbl_, storedNulls);
+    } else if (!physicalScan && origin.engine && !origin.dbname.empty() &&
+               origin.rid > 0 && origin.tablename == tbl_.tablename &&
+               tbl_.formatVersion == DATA_FILE_FORMAT_VERSION && needsStoredNulls()) {
+        if (auto* sort = matchingSort(); sort &&
+            sort->lastStoredNullBitmap(storedNulls) && storedNulls.size() == tbl_.len)
+            storedNullOwner.emplace(tbl_, storedNulls);
     }
     outRow.clear();
     for (size_t i = 0; i < tbl_.len; ++i) {

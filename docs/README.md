@@ -1,5 +1,16 @@
 # 文档索引
 
+<!-- P36 physical-row-null-reuse begin -->
+<a id="physical-row-null-reuse-current"></a>
+## 当前批次：扫描与排序投影执行优化
+
+固定数据下的 720 次完整查询对照中，固定字段排序、单长字段排序、多长字段全列无排序的墙钟中位数分别下降约 27%～29%、23%～24%、10%～11%。只选 ID 的服务器 CPU 高于两次旧版约 12.37%／5.00%，墙钟居间；不能称所有查询或数据库操作都更快。
+
+原样 270 操作矩阵的 30 个区域，墙钟 19 低于两旧／2 高于两旧／9 居间，服务器 CPU 为 12／9／9，客户端 CPU 为 9／16／5。单长字段 VACUUM 墙钟高约 22.90%／28.87%，多长字段 VACUUM 高约 19.10%／4.85%；另有 9 个区域服务器 CPU 高于两旧，全部保留，原因仍 OPEN。
+
+新增原生1156检查通过，既有TOAST断言在旧／新两版均失败，未称全套通过。[测试报告](test-report.md#physical-row-null-reuse-current)、[性能与压缩证据](performance-report-2026-10-30.md#physical-row-null-reuse-20261106)。正式库存 2397 个测试文件（1130 顶层／1135 总 C++），注册 E2E 684／独立 E2E 664 不变；754 个 Markdown 路径与 725 份保护记录保持。原 273 项及 22 complete／166 partial／70 unverified／15 deferred_by_user 不变，历史增至 286，IDX-07 仍 unverified/evidence[]。
+<!-- P36 physical-row-null-reuse end -->
+
 <!-- P35 view-column-dependencies begin -->
 ## 最新验证：视图列依赖与 DDL 开销（2026-11-06）
 

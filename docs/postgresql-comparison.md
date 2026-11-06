@@ -1,5 +1,18 @@
 # 与 PostgreSQL 18 的功能和性能差距
 
+<!-- P36 physical-row-null-reuse begin -->
+<a id="physical-row-null-reuse-current"></a>
+## 2026-11-06：普通查询执行开销进一步降低
+
+扫描展开长字段时，借用该物理行已捕获的 NULL 位图；排序后的投影在核对真实来源、具体 Sort 类型和全部物理列声明后，借用排序已保存的位图。借用仅存在于一次取行调用内，退出与异常均恢复原绑定；表结构不匹配、Sort 子类及其他来源继续原路径。没有新增页／allocator 缓存或改变文件身份检查本身。
+
+固定数据下的 720 次完整查询对照中，固定字段排序、单长字段排序、多长字段全列无排序的墙钟中位数分别下降约 27%～29%、23%～24%、10%～11%。只选 ID 的服务器 CPU 高于两次旧版约 12.37%／5.00%，墙钟居间；不能称所有查询或数据库操作都更快。
+
+原样 270 操作矩阵的 30 个区域，墙钟 19 低于两旧／2 高于两旧／9 居间，服务器 CPU 为 12／9／9，客户端 CPU 为 9／16／5。单长字段 VACUUM 墙钟高约 22.90%／28.87%，多长字段 VACUUM 高约 19.10%／4.85%；另有 9 个区域服务器 CPU 高于两旧，全部保留，原因仍 OPEN。
+
+PostgreSQL tuple slots、SQLite排序记录取列及DuckDB validity mask作为机制参考；没有三库速度对比或完整PG等价结论。原273项状态不变，新增历史记录仍partial；TOAST既有断言与原9条PG协议差异仍OPEN。[完整对照](performance-report-2026-10-30.md#physical-row-null-reuse-20261106)。
+<!-- P36 physical-row-null-reuse end -->
+
 <!-- P35 view-column-dependencies begin -->
 <a id="view-column-dependencies-current"></a>
 ## 2026-11-06：进一步补齐静态视图依赖（P35-C4）

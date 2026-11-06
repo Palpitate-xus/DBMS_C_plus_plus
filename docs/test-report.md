@@ -1,5 +1,22 @@
 # DBMS 功能测试报告
 
+<!-- P36 physical-row-null-reuse begin -->
+<a id="physical-row-null-reuse-current"></a>
+## 2026-11-06：物理位图复用、完整协议及真实成本
+
+新增 sorted_projection_null_bitmap_cost_test 在相同冻结测试源码上，旧版 1156 检查／8 失败／exit1，C1 1156／0／exit0；每 64 行排序后投影的文件校验从 353 降到 0，两个回退控制仍为 233／353。覆盖内存与真实落盘排序、升降序、NULL/空串/文本 NULL、UTF-8、二进制、长字段、过滤来源、schema 不匹配、子类虚调用、LIMIT 与虚拟列错误。
+
+7项旧／新均exit0的既有程序为 ordinary_project_toast_demand_test、sort_null_binding_lifetime_test、typed_sort_operator_test、bounded_sort_runs_test、sort_final_merge_demand_test、view_column_dependency_test、scalar_result_null_bitmap_test。两代均使用各自冻结249源码、61core及stub。
+
+另外 7 项相关原生回归在旧版和 C1 均实际 exit0。既有 toast_test 在两版均于第 604 行 `!corruptScan.open()` 断言中止（actual -6）；保留为失败，后续断言未运行，未修改测试预期或调查／修复该故障模块。首个原生控制器因此停止，后续仅执行原计划尚未启动的 11 个运行，没有重跑已完成项，也没有宣称全套通过。
+
+原 62 条 SQL 在旧版与 C1 全部重新运行，初开／冷开 4 个 Main 正常0，完整请求／回复逐字节一致；全部 T7、值／NULL、SQLSTATE、诊断、tag 与 Ready 保留。既有 9 条 PostgreSQL 差异仍在，strict PG=false；沿用并核对真实 PostgreSQL18.6 的固定原始 oracle，没有运行 PG 速度对比。
+
+新正式性能270+720操作共72个Main正常0，1926完整回复逐值核对；定位阶段另720操作／18Main正常0，采样另1536查询／3Main正常0，全部原始错误、尾部、时钟括号与文件核对保留。
+
+正式库存 2397 个测试文件（1130 顶层／1135 总 C++），注册 E2E 684／独立 E2E 664 不变；754 个 Markdown 路径与 725 份保护记录保持。原 273 项及 22 complete／166 partial／70 unverified／15 deferred_by_user 不变，历史增至 286，IDX-07 仍 unverified/evidence[]。 [正负结果与归档](performance-report-2026-10-30.md#physical-row-null-reuse-20261106)。
+<!-- P36 physical-row-null-reuse end -->
+
 <!-- P35 view-column-dependencies begin -->
 <a id="view-column-dependencies-current"></a>
 ## 2026-11-06：视图依赖、旧库与事务回归

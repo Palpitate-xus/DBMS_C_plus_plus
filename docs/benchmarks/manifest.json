@@ -381,6 +381,20 @@
       "payload_raw_bytes": 1150721336,
       "payload_raw_sha256": "407a8065befb156ad951005144b5362a3960ce4469352ba7c01db486213a761d",
       "scope": "P35 static view dependency implementation, all finite functional failures and complete ordinary270 + DDL27 measurements; partial, no PG/global speedup claim"
+    },
+    {
+      "original_path": "docs/benchmarks/physical-row-null-reuse-20261106.json",
+      "original_bytes": 42268486,
+      "original_sha256": "c66a96ebcef6d25d940c14e076577afddb6a9b5444b2f80a984f2a49a18cc040",
+      "path": "docs/benchmarks/physical-row-null-reuse-20261106.json.gz",
+      "bytes": 31777550,
+      "sha256": "28613515ced123a2f04161749f67e7f0b898e0cf18f7c7dca42a9458121f672d",
+      "encoding": "gzip",
+      "roundtrip_bytes_exact": true,
+      "payload_encoding": "base64+xz+json-content-addressed-v1",
+      "payload_raw_bytes": 2933021207,
+      "payload_raw_sha256": "c01bee25b4bf0863b75a04e30d25e2f1998d29115f82cf526e8eafa382192510",
+      "scope": "P36 physical NULL metadata reuse: complete first720,12diagnostic profiles,new270+720 and original62 pair; all timing negatives and inherited TOAST assertions preserved; partial, no overall or PG speed claim"
     }
   ],
   "total_original_bytes": 1625701048,

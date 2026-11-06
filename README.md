@@ -1,5 +1,18 @@
 # DBMS C++
 
+<!-- P36 physical-row-null-reuse begin -->
+<a id="physical-row-null-reuse-current"></a>
+## 2026-11-06：查询执行继续优化
+
+固定数据下的 720 次完整查询对照中，固定字段排序、单长字段排序、多长字段全列无排序的墙钟中位数分别下降约 27%～29%、23%～24%、10%～11%。只选 ID 的服务器 CPU 高于两次旧版约 12.37%／5.00%，墙钟居间；不能称所有查询或数据库操作都更快。
+
+新增 sorted_projection_null_bitmap_cost_test 在相同冻结测试源码上，旧版 1156 检查／8 失败／exit1，C1 1156／0／exit0；每 64 行排序后投影的文件校验从 353 降到 0，两个回退控制仍为 233／353。覆盖内存与真实落盘排序、升降序、NULL/空串/文本 NULL、UTF-8、二进制、长字段、过滤来源、schema 不匹配、子类虚调用、LIMIT 与虚拟列错误。
+
+另外 7 项相关原生回归在旧版和 C1 均实际 exit0。既有 toast_test 在两版均于第 604 行 `!corruptScan.open()` 断言中止（actual -6）；保留为失败，后续断言未运行，未修改测试预期或调查／修复该故障模块。首个原生控制器因此停止，后续仅执行原计划尚未启动的 11 个运行，没有重跑已完成项，也没有宣称全套通过。
+
+VACUUM 与部分写入／维护 CPU 的负向结果继续 OPEN，完整270操作与720次固定数据查询均已保留。[性能报告](docs/performance-report-2026-10-30.md#physical-row-null-reuse-20261106)。源码、测试、压缩证据与既有文档已同步，Goal active。
+<!-- P36 physical-row-null-reuse end -->
+
 <!-- P35 view-column-dependencies begin -->
 <a id="view-column-dependencies-current"></a>
 ## 2026-11-06：视图依赖删除保护（P35-C4，partial）

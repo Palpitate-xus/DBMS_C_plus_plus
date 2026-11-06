@@ -883,6 +883,9 @@ public:
     ScanOrigin scanOrigin() const override { return lastOrigin_; }
 
 private:
+    // Projection may borrow this emitted row's bitmap only after checking
+    // the concrete sort and its complete physical descriptor.
+    friend class ProjectOp;
     OpPtr child_;
     TableSchema tbl_;
     std::string orderByCol_;

@@ -1,5 +1,22 @@
 # 生产化状态
 
+<!-- P36 physical-row-null-reuse begin -->
+<a id="physical-row-null-reuse-current"></a>
+## 当前批次：查询收益与未解决的成本回退（P36-C1）
+
+固定数据下的 720 次完整查询对照中，固定字段排序、单长字段排序、多长字段全列无排序的墙钟中位数分别下降约 27%～29%、23%～24%、10%～11%。只选 ID 的服务器 CPU 高于两次旧版约 12.37%／5.00%，墙钟居间；不能称所有查询或数据库操作都更快。
+
+原样 270 操作矩阵的 30 个区域，墙钟 19 低于两旧／2 高于两旧／9 居间，服务器 CPU 为 12／9／9，客户端 CPU 为 9／16／5。单长字段 VACUUM 墙钟高约 22.90%／28.87%，多长字段 VACUUM 高约 19.10%／4.85%；另有 9 个区域服务器 CPU 高于两旧，全部保留，原因仍 OPEN。
+
+另外 7 项相关原生回归在旧版和 C1 均实际 exit0。既有 toast_test 在两版均于第 604 行 `!corruptScan.open()` 断言中止（actual -6）；保留为失败，后续断言未运行，未修改测试预期或调查／修复该故障模块。首个原生控制器因此停止，后续仅执行原计划尚未启动的 11 个运行，没有重跑已完成项，也没有宣称全套通过。
+
+正式库存 2397 个测试文件（1130 顶层／1135 总 C++），注册 E2E 684／独立 E2E 664 不变；754 个 Markdown 路径与 725 份保护记录保持。原 273 项及 22 complete／166 partial／70 unverified／15 deferred_by_user 不变，历史增至 286，IDX-07 仍 unverified/evidence[]。
+
+完整证据压缩为 [physical-row-null-reuse-20261106.json.gz](benchmarks/physical-row-null-reuse-20261106.json.gz)：31,777,550 字节（30.31 MiB），SHA256 `28613515ced123a2f04161749f67e7f0b898e0cf18f7c7dca42a9458121f672d`；内层完整证据 JSON 为 2,933,021,207 字节。38,167 个非 ELF 文件、1,449 个目录、2,285 个内容块及 152 个本地 ELF 引用均独立重建核对。随后删除 34,702 个已备份生成文件，逻辑副本 5.247 GiB；这不是独占文件系统释放量。保留源码、可执行／对象文件、本地 ELF 引用、stdout/stderr 与错误记录、目录和一个最终正常关闭的三表工作数据集；生成数据目录中的运行日志随其副本压缩保存，旧 36 个压缩包保持。
+
+本批只接受普通物理扫描／排序投影的有限优化，未关闭 PostgreSQL 功能家族或整体性能目标。P35 原始负向矩阵、ID CPU 与本批 VACUUM 等负例继续有效。用户暂缓的执行图／child-provider、retained planning／portal、CPU-sort interrupt 和通用故障矩阵等范围保持。Goal active，直接 master 分批提交；正常 CMake C++17/O2 候选 SHA 前缀 30412452，默认程序 SHA425165af 保持，未推送。 [完整性能报告](performance-report-2026-10-30.md#physical-row-null-reuse-20261106)。
+<!-- P36 physical-row-null-reuse end -->
+
 <!-- P35 view-column-dependencies begin -->
 <a id="view-column-dependencies-current"></a>
 ## 当前批次：静态视图依赖与真实代价（P35-C4）

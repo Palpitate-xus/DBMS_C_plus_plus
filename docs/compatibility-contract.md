@@ -1,5 +1,20 @@
 # 兼容版本契约
 
+<!-- P36 physical-row-null-reuse begin -->
+<a id="physical-row-null-reuse-current"></a>
+## 2026-11-06：当前物理行 NULL 状态的局部复用
+
+扫描展开长字段时，借用该物理行已捕获的 NULL 位图；排序后的投影在核对真实来源、具体 Sort 类型和全部物理列声明后，借用排序已保存的位图。借用仅存在于一次取行调用内，退出与异常均恢复原绑定；表结构不匹配、Sort 子类及其他来源继续原路径。没有新增页／allocator 缓存或改变文件身份检查本身。
+
+选中的虚拟列仍读取实际依赖并保留运行时错误；未扩大投影需求或修改 Sort 子类的虚调用。内存／落盘排序与NULL/空串/文本NULL、二进制、长字段均有完整值检查。
+
+原 62 条 SQL 在旧版与 C1 全部重新运行，初开／冷开 4 个 Main 正常0，完整请求／回复逐字节一致；全部 T7、值／NULL、SQLSTATE、诊断、tag 与 Ready 保留。既有 9 条 PostgreSQL 差异仍在，strict PG=false；沿用并核对真实 PostgreSQL18.6 的固定原始 oracle，没有运行 PG 速度对比。
+
+另外 7 项相关原生回归在旧版和 C1 均实际 exit0。既有 toast_test 在两版均于第 604 行 `!corruptScan.open()` 断言中止（actual -6）；保留为失败，后续断言未运行，未修改测试预期或调查／修复该故障模块。首个原生控制器因此停止，后续仅执行原计划尚未启动的 11 个运行，没有重跑已完成项，也没有宣称全套通过。
+
+只接受有限执行优化，未承诺所有操作变快；[完整开销与未解决项](performance-report-2026-10-30.md#physical-row-null-reuse-20261106)。
+<!-- P36 physical-row-null-reuse end -->
+
 <!-- P35 view-column-dependencies begin -->
 <a id="view-column-dependencies-current"></a>
 ## 2026-11-06：普通 SQL 视图依赖与删除契约

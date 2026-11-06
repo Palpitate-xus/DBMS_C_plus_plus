@@ -1,5 +1,184 @@
 # 数据库操作性能测试报告（2026-10-30）
 
+<!-- P36 physical-row-null-reuse begin -->
+<a id="physical-row-null-reuse-20261106"></a>
+## 2026-11-06：物理行 NULL 位图复用及完整性能对照（P36-C1）
+
+固定数据下的 720 次完整查询对照中，固定字段排序、单长字段排序、多长字段全列无排序的墙钟中位数分别下降约 27%～29%、23%～24%、10%～11%。只选 ID 的服务器 CPU 高于两次旧版约 12.37%／5.00%，墙钟居间；不能称所有查询或数据库操作都更快。
+
+原样 270 操作矩阵的 30 个区域，墙钟 19 低于两旧／2 高于两旧／9 居间，服务器 CPU 为 12／9／9，客户端 CPU 为 9／16／5。单长字段 VACUUM 墙钟高约 22.90%／28.87%，多长字段 VACUUM 高约 19.10%／4.85%；另有 9 个区域服务器 CPU 高于两旧，全部保留，原因仍 OPEN。
+
+扫描展开长字段时，借用该物理行已捕获的 NULL 位图；排序后的投影在核对真实来源、具体 Sort 类型和全部物理列声明后，借用排序已保存的位图。借用仅存在于一次取行调用内，退出与异常均恢复原绑定；表结构不匹配、Sort 子类及其他来源继续原路径。没有新增页／allocator 缓存或改变文件身份检查本身。
+
+设计依据：[固定 PostgreSQL18 源码 execTuples.c](https://raw.githubusercontent.com/postgres/postgres/724edf9bde9d356724ad384a2e196edc3c9f80f7/src/backend/executor/execTuples.c)让 tuple slot 保存已解码值与 NULL 状态，并按需求增量展开；[SQLite 字节码文档](https://www.sqlite.org/opcode.html)的 OpenPseudo/Column 从排序输出记录中取列；[DuckDB Vector 文档](https://duckdb.org/docs/current/clients/c/vector)让列数据携带对应 validity mask。本项目据此复用已有行元数据，仍保留现有逐行执行模型。三个官方 HTTP200 原文及响应元数据已存档，未借这些机制推导三库速度排名。
+
+新增 sorted_projection_null_bitmap_cost_test 在相同冻结测试源码上，旧版 1156 检查／8 失败／exit1，C1 1156／0／exit0；每 64 行排序后投影的文件校验从 353 降到 0，两个回退控制仍为 233／353。覆盖内存与真实落盘排序、升降序、NULL/空串/文本 NULL、UTF-8、二进制、长字段、过滤来源、schema 不匹配、子类虚调用、LIMIT 与虚拟列错误。
+
+另外 7 项相关原生回归在旧版和 C1 均实际 exit0。既有 toast_test 在两版均于第 604 行 `!corruptScan.open()` 断言中止（actual -6）；保留为失败，后续断言未运行，未修改测试预期或调查／修复该故障模块。首个原生控制器因此停止，后续仅执行原计划尚未启动的 11 个运行，没有重跑已完成项，也没有宣称全套通过。
+
+原 62 条 SQL 在旧版与 C1 全部重新运行，初开／冷开 4 个 Main 正常0，完整请求／回复逐字节一致；全部 T7、值／NULL、SQLSTATE、诊断、tag 与 Ready 保留。既有 9 条 PostgreSQL 差异仍在，strict PG=false；沿用并核对真实 PostgreSQL18.6 的固定原始 oracle，没有运行 PG 速度对比。
+
+定位阶段先在同一真实 P35 三表闭库种子上执行 720 次普通查询：旧73 → 当前774 → 旧73，9 上下文／18 Main 正常0，828 回复、179388 行、605601 单元、42435 NULL、304584957 请求／回复字节。原多长字段全列的大幅退化没有在这个固定状态中重现；单长字段排序 CPU 仍高约 11.09%／3.42%。该数据为 after-UPDATE 人口，不能替换 P35 原 after-VACUUM 测量或宣称此前负例已修复。
+
+随后单独执行 CPU8、libprofiler-only1000Hz 的 12 个诊断窗口：1536 次采样查询／1587 完整回复、354867 行、1170231 单元、81180 NULL、582842892 字节，3 个 Main 正常0、96 个 TID 快照。原始 PC 按真实 ELF/maps 与有长度符号范围解释，未猜测 stripped DSO 函数名。当前774的单长字段排序窗口中，Project::next 含子调用约25.46%、Sort::open46.49%、storedRowColumnIsNull34.22%、getPageAllocator33.59%、文件身份检查32.71%；这些调用子树重叠，不能相加，亦不能代替正常耗时或证明旧版差异的原因。实际位图复用分支另由上面的真实文件校验计数验证。
+
+正式普通矩阵使用旧 P35-C4 `77418e9c` → 候选 C1 `30412452` → 同旧回测：原样 27 个全新数据库、54 个正常 Main、270 计时点、1098 回复、96624 行、386388 单元、27864 NULL、231410943 字节，5796 个闭库文件均核对。固定／单长字段／多长字段的 INSERT1、UPDATE16、全列 SELECT、DELETE16、VACUUM、全列 SELECT、TRUNCATE、重新写入，以及另列的全列／仅 ID 无排序查询全部保留。
+
+新的固定状态查询对照再次完整运行 9 个上下文、18 个正常 Main、720 计时点、828 回复与相同完整值总量。每个上下文每条查询连续20次，先求20次中位数，再汇总3个上下文的 min/p50/max；首轮、热态及尾部均保留。两套正式对照共990个计时操作／72个正常Main／1926回复。所有正常窗口均无本任务编译、采样器、压缩、CPU绑定或其他 SQL；自然缓存，未宣称宿主机空闲。服务器 CPU 是整个 Main 进程，包含后台线程；不是请求线程的独占 CPU。
+
+### 固定状态720次查询：三上下文中位数（毫秒）
+
+| 查询 | 时钟 | 旧版 | C1 | 旧版回测 | C1/旧版 | C1/回测 |
+|---|---|---:|---:|---:|---:|---:|
+| fixed_full_ordered | wall_ns | 48.897203 | 35.791450 | 50.461500 | -26.803% | -29.072% |
+| fixed_full_ordered | server_process_cpu_ns | 30.241319 | 18.024002 | 29.992283 | -40.399% | -39.905% |
+| fixed_full_ordered | client_process_cpu_ns | 4.853256 | 4.915216 | 4.956652 | +1.277% | -0.836% |
+| single_full_ordered | wall_ns | 77.067546 | 59.098637 | 77.606820 | -23.316% | -23.849% |
+| single_full_ordered | server_process_cpu_ns | 59.193275 | 42.047863 | 59.877958 | -28.965% | -29.777% |
+| single_full_ordered | client_process_cpu_ns | 6.092505 | 6.181285 | 5.817166 | +1.457% | +6.259% |
+| overflow_full_no_order | wall_ns | 73.198169 | 65.559572 | 73.809732 | -10.436% | -11.178% |
+| overflow_full_no_order | server_process_cpu_ns | 53.462404 | 48.582261 | 53.899868 | -9.128% | -9.866% |
+| overflow_full_no_order | client_process_cpu_ns | 4.157331 | 4.162324 | 4.229456 | +0.120% | -1.587% |
+| single_id_no_order | wall_ns | 34.132010 | 33.406312 | 32.743275 | -2.126% | +2.025% |
+| single_id_no_order | server_process_cpu_ns | 15.395940 | 17.300562 | 16.476689 | +12.371% | +5.000% |
+| single_id_no_order | client_process_cpu_ns | 4.888833 | 4.877959 | 4.867878 | -0.222% | +0.207% |
+
+### 原样270操作：全部30区域、三时钟中位数
+
+下表均为各角色3次原始样本的中位数，单位毫秒；两个百分比分别对旧版和旧版回测，漂移为回测相对旧版。所有 raw3/min/p50/max、完整270项时钟括号、最长尾部与负例在压缩证据内，未剔除样本。
+
+#### 墙钟
+
+| 区域 | 旧版 | C1 | 旧版回测 | C1/旧版 | C1/回测 | 旧版漂移 |
+|---|---:|---:|---:|---:|---:|---:|
+| canonical-fixed-single/fixed/delete16 | 81.951 | 78.315 | 74.051 | -4.44% | +5.76% | -9.64% |
+| canonical-fixed-single/fixed/insert1 | 42.295 | 33.903 | 42.006 | -19.84% | -19.29% | -0.68% |
+| canonical-fixed-single/fixed/reinsert_population | 715.393 | 669.824 | 720.327 | -6.37% | -7.01% | +0.69% |
+| canonical-fixed-single/fixed/select_after_update | 51.398 | 38.915 | 49.903 | -24.29% | -22.02% | -2.91% |
+| canonical-fixed-single/fixed/select_after_vacuum | 44.547 | 32.630 | 44.514 | -26.75% | -26.70% | -0.08% |
+| canonical-fixed-single/fixed/truncate | 360.099 | 341.642 | 341.393 | -5.13% | +0.07% | -5.19% |
+| canonical-fixed-single/fixed/update16 | 118.403 | 103.428 | 112.625 | -12.65% | -8.17% | -4.88% |
+| canonical-fixed-single/fixed/vacuum | 2.547 | 2.485 | 2.262 | -2.42% | +9.86% | -11.18% |
+| canonical-fixed-single/single/delete16 | 99.523 | 95.932 | 100.216 | -3.61% | -4.27% | +0.70% |
+| canonical-fixed-single/single/insert1 | 39.689 | 34.829 | 43.667 | -12.24% | -20.24% | +10.02% |
+| canonical-fixed-single/single/reinsert_population | 1227.538 | 1201.412 | 1236.122 | -2.13% | -2.81% | +0.70% |
+| canonical-fixed-single/single/select_after_update | 81.043 | 59.053 | 78.143 | -27.13% | -24.43% | -3.58% |
+| canonical-fixed-single/single/select_after_vacuum | 71.921 | 62.165 | 80.311 | -13.56% | -22.59% | +11.67% |
+| canonical-fixed-single/single/truncate | 542.789 | 542.469 | 548.314 | -0.06% | -1.07% | +1.02% |
+| canonical-fixed-single/single/update16 | 202.008 | 200.940 | 200.127 | -0.53% | +0.41% | -0.93% |
+| canonical-fixed-single/single/vacuum | 9.780 | 12.020 | 9.327 | +22.90% | +28.87% | -4.63% |
+| canonical-overflow/overflow/delete16 | 97.942 | 96.431 | 94.252 | -1.54% | +2.31% | -3.77% |
+| canonical-overflow/overflow/insert1 | 43.909 | 42.637 | 38.728 | -2.90% | +10.09% | -11.80% |
+| canonical-overflow/overflow/reinsert_population | 1228.176 | 1202.718 | 1221.517 | -2.07% | -1.54% | -0.54% |
+| canonical-overflow/overflow/select_after_update | 79.017 | 60.161 | 82.217 | -23.86% | -26.83% | +4.05% |
+| canonical-overflow/overflow/select_after_vacuum | 78.305 | 63.918 | 77.374 | -18.37% | -17.39% | -1.19% |
+| canonical-overflow/overflow/truncate | 342.121 | 329.838 | 337.775 | -3.59% | -2.35% | -1.27% |
+| canonical-overflow/overflow/update16 | 199.895 | 205.552 | 213.276 | +2.83% | -3.62% | +6.69% |
+| canonical-overflow/overflow/vacuum | 12.476 | 14.859 | 14.172 | +19.11% | +4.85% | +13.59% |
+| direct-hit/fixed/direct_full_no_order | 35.187 | 35.078 | 31.650 | -0.31% | +10.83% | -10.05% |
+| direct-hit/fixed/direct_id_only_no_order | 29.254 | 30.324 | 36.177 | +3.66% | -16.18% | +23.66% |
+| direct-hit/overflow/direct_full_no_order | 72.564 | 63.133 | 66.128 | -13.00% | -4.53% | -8.87% |
+| direct-hit/overflow/direct_id_only_no_order | 28.680 | 25.766 | 28.800 | -10.16% | -10.53% | +0.42% |
+| direct-hit/single/direct_full_no_order | 62.607 | 56.984 | 60.331 | -8.98% | -5.55% | -3.64% |
+| direct-hit/single/direct_id_only_no_order | 35.422 | 31.691 | 33.867 | -10.53% | -6.43% | -4.39% |
+
+#### 服务器 CPU
+
+| 区域 | 旧版 | C1 | 旧版回测 | C1/旧版 | C1/回测 | 旧版漂移 |
+|---|---:|---:|---:|---:|---:|---:|
+| canonical-fixed-single/fixed/delete16 | 56.128 | 51.033 | 52.744 | -9.08% | -3.24% | -6.03% |
+| canonical-fixed-single/fixed/insert1 | 14.245 | 8.499 | 14.961 | -40.33% | -43.19% | +5.03% |
+| canonical-fixed-single/fixed/reinsert_population | 598.212 | 592.905 | 591.064 | -0.89% | +0.31% | -1.19% |
+| canonical-fixed-single/fixed/select_after_update | 30.861 | 15.870 | 30.935 | -48.58% | -48.70% | +0.24% |
+| canonical-fixed-single/fixed/select_after_vacuum | 30.547 | 9.595 | 28.277 | -68.59% | -66.07% | -7.43% |
+| canonical-fixed-single/fixed/truncate | 104.386 | 116.267 | 112.366 | +11.38% | +3.47% | +7.64% |
+| canonical-fixed-single/fixed/update16 | 78.923 | 79.319 | 80.715 | +0.50% | -1.73% | +2.27% |
+| canonical-fixed-single/fixed/vacuum | 2.414 | 2.350 | 2.153 | -2.66% | +9.14% | -10.81% |
+| canonical-fixed-single/single/delete16 | 69.863 | 72.659 | 69.113 | +4.00% | +5.13% | -1.07% |
+| canonical-fixed-single/single/insert1 | 13.565 | 11.490 | 15.399 | -15.30% | -25.39% | +13.52% |
+| canonical-fixed-single/single/reinsert_population | 1043.398 | 1060.506 | 1111.719 | +1.64% | -4.61% | +6.55% |
+| canonical-fixed-single/single/select_after_update | 60.796 | 41.370 | 62.061 | -31.95% | -33.34% | +2.08% |
+| canonical-fixed-single/single/select_after_vacuum | 56.173 | 43.958 | 58.699 | -21.74% | -25.11% | +4.50% |
+| canonical-fixed-single/single/truncate | 119.344 | 150.097 | 119.901 | +25.77% | +25.18% | +0.47% |
+| canonical-fixed-single/single/update16 | 138.997 | 142.686 | 140.812 | +2.65% | +1.33% | +1.31% |
+| canonical-fixed-single/single/vacuum | 9.482 | 11.119 | 9.022 | +17.27% | +23.25% | -4.85% |
+| canonical-overflow/overflow/delete16 | 72.282 | 71.560 | 71.453 | -1.00% | +0.15% | -1.15% |
+| canonical-overflow/overflow/insert1 | 12.144 | 17.990 | 13.027 | +48.14% | +38.11% | +7.26% |
+| canonical-overflow/overflow/reinsert_population | 1100.141 | 1068.883 | 1114.268 | -2.84% | -4.07% | +1.28% |
+| canonical-overflow/overflow/select_after_update | 60.181 | 45.437 | 62.323 | -24.50% | -27.09% | +3.56% |
+| canonical-overflow/overflow/select_after_vacuum | 59.624 | 45.756 | 59.753 | -23.26% | -23.42% | +0.22% |
+| canonical-overflow/overflow/truncate | 94.325 | 97.081 | 93.706 | +2.92% | +3.60% | -0.66% |
+| canonical-overflow/overflow/update16 | 143.213 | 152.466 | 158.014 | +6.46% | -3.51% | +10.34% |
+| canonical-overflow/overflow/vacuum | 11.652 | 13.474 | 13.866 | +15.64% | -2.83% | +19.01% |
+| direct-hit/fixed/direct_full_no_order | 14.092 | 16.911 | 16.817 | +20.00% | +0.56% | +19.33% |
+| direct-hit/fixed/direct_id_only_no_order | 13.074 | 14.143 | 14.736 | +8.18% | -4.02% | +12.71% |
+| direct-hit/overflow/direct_full_no_order | 50.146 | 45.628 | 50.300 | -9.01% | -9.29% | +0.31% |
+| direct-hit/overflow/direct_id_only_no_order | 12.410 | 11.637 | 11.422 | -6.23% | +1.88% | -7.96% |
+| direct-hit/single/direct_full_no_order | 45.470 | 39.830 | 46.335 | -12.40% | -14.04% | +1.90% |
+| direct-hit/single/direct_id_only_no_order | 14.708 | 18.009 | 15.875 | +22.44% | +13.44% | +7.93% |
+
+#### 客户端 CPU
+
+| 区域 | 旧版 | C1 | 旧版回测 | C1/旧版 | C1/回测 | 旧版漂移 |
+|---|---:|---:|---:|---:|---:|---:|
+| canonical-fixed-single/fixed/delete16 | 0.249 | 0.199 | 0.251 | -20.12% | -20.64% | +0.66% |
+| canonical-fixed-single/fixed/insert1 | 0.217 | 0.232 | 0.218 | +6.59% | +6.46% | +0.12% |
+| canonical-fixed-single/fixed/reinsert_population | 0.262 | 0.238 | 0.265 | -9.10% | -10.04% | +1.05% |
+| canonical-fixed-single/fixed/select_after_update | 5.020 | 5.025 | 5.013 | +0.10% | +0.23% | -0.13% |
+| canonical-fixed-single/fixed/select_after_vacuum | 4.719 | 4.666 | 4.758 | -1.12% | -1.92% | +0.82% |
+| canonical-fixed-single/fixed/truncate | 0.205 | 0.223 | 0.246 | +8.50% | -9.53% | +19.93% |
+| canonical-fixed-single/fixed/update16 | 0.223 | 0.243 | 0.245 | +9.02% | -0.88% | +9.98% |
+| canonical-fixed-single/fixed/vacuum | 0.210 | 0.152 | 0.218 | -27.80% | -30.33% | +3.64% |
+| canonical-fixed-single/single/delete16 | 0.235 | 0.231 | 0.252 | -1.73% | -8.45% | +7.34% |
+| canonical-fixed-single/single/insert1 | 0.222 | 0.209 | 0.244 | -6.04% | -14.63% | +10.07% |
+| canonical-fixed-single/single/reinsert_population | 0.561 | 0.605 | 0.578 | +7.85% | +4.78% | +2.93% |
+| canonical-fixed-single/single/select_after_update | 6.160 | 6.182 | 6.066 | +0.37% | +1.92% | -1.52% |
+| canonical-fixed-single/single/select_after_vacuum | 5.299 | 6.367 | 5.887 | +20.16% | +8.15% | +11.10% |
+| canonical-fixed-single/single/truncate | 0.249 | 0.234 | 0.223 | -6.11% | +5.07% | -10.64% |
+| canonical-fixed-single/single/update16 | 0.259 | 0.246 | 0.263 | -4.96% | -6.25% | +1.38% |
+| canonical-fixed-single/single/vacuum | 0.196 | 0.251 | 0.202 | +28.19% | +24.32% | +3.11% |
+| canonical-overflow/overflow/delete16 | 0.251 | 0.265 | 0.229 | +5.36% | +15.70% | -8.94% |
+| canonical-overflow/overflow/insert1 | 0.238 | 0.231 | 0.241 | -2.78% | -4.15% | +1.43% |
+| canonical-overflow/overflow/reinsert_population | 0.773 | 0.829 | 0.814 | +7.24% | +1.84% | +5.30% |
+| canonical-overflow/overflow/select_after_update | 4.354 | 4.294 | 4.450 | -1.37% | -3.49% | +2.20% |
+| canonical-overflow/overflow/select_after_vacuum | 3.893 | 4.019 | 4.014 | +3.25% | +0.12% | +3.12% |
+| canonical-overflow/overflow/truncate | 0.222 | 0.238 | 0.223 | +7.19% | +6.99% | +0.18% |
+| canonical-overflow/overflow/update16 | 0.266 | 0.277 | 0.260 | +4.08% | +6.38% | -2.17% |
+| canonical-overflow/overflow/vacuum | 0.216 | 0.225 | 0.229 | +3.89% | -1.76% | +5.76% |
+| direct-hit/fixed/direct_full_no_order | 4.940 | 5.016 | 4.858 | +1.54% | +3.25% | -1.66% |
+| direct-hit/fixed/direct_id_only_no_order | 4.827 | 4.920 | 5.661 | +1.94% | -13.08% | +17.29% |
+| direct-hit/overflow/direct_full_no_order | 3.961 | 4.386 | 4.075 | +10.72% | +7.62% | +2.88% |
+| direct-hit/overflow/direct_id_only_no_order | 2.051 | 2.132 | 1.878 | +3.94% | +13.49% | -8.42% |
+| direct-hit/single/direct_full_no_order | 5.484 | 6.289 | 6.162 | +14.68% | +2.07% | +12.36% |
+| direct-hit/single/direct_id_only_no_order | 4.167 | 4.590 | 3.893 | +10.15% | +17.89% | -6.56% |
+
+旧版墙钟漂移 -11.80%～+23.66%，服务器 CPU -10.81%～+19.33%，客户端 CPU -10.64%～+19.93%。单长字段 TRUNCATE CPU 仍高约25.77%／25.18%，多长字段 INSERT1 CPU 高约48.14%／38.11%；绝对耗时见上表，不能用查询收益抵消这些负例。只选 ID 的新固定状态 CPU 回退也未关闭。
+
+完整失败记录包括：最初测试源码误把 StorageCodec 枚举当指针，编译 actual1；原始编译日志保留，初稿由已记录补丁重建并明确标注，未伪称独立原始快照。初次独立归约 v1 有重复 case 参数，v2 在完整摘要写入后显示时发生变量遮蔽；后续 v3 仅离线核对全部原始828回复并正常完成，没有重采 SQL。旧 TOAST 断言导致的首次控制器停止及仅未启动项的继续均保留。
+
+完整证据压缩为 [physical-row-null-reuse-20261106.json.gz](benchmarks/physical-row-null-reuse-20261106.json.gz)：31,777,550 字节（30.31 MiB），SHA256 `28613515ced123a2f04161749f67e7f0b898e0cf18f7c7dca42a9458121f672d`；内层完整证据 JSON 为 2,933,021,207 字节。38,167 个非 ELF 文件、1,449 个目录、2,285 个内容块及 152 个本地 ELF 引用均独立重建核对。随后删除 34,702 个已备份生成文件，逻辑副本 5.247 GiB；这不是独占文件系统释放量。保留源码、可执行／对象文件、本地 ELF 引用、stdout/stderr 与错误记录、目录和一个最终正常关闭的三表工作数据集；生成数据目录中的运行日志随其副本压缩保存，旧 36 个压缩包保持。
+
+可从压缩证据中逐字节提取完整 raw3/min/p50/max 与尾部表：
+
+```sh
+python3 - <<'PY'
+import base64, gzip, hashlib, json, lzma, pathlib, sys
+e = json.loads(gzip.decompress(pathlib.Path('docs/benchmarks/physical-row-null-reuse-20261106.json.gz').read_bytes()))
+raw = lzma.decompress(base64.b64decode(e['payload_xz_base64'], validate=True))
+assert hashlib.sha256(raw).hexdigest() == e['payload_raw_sha256']
+b = json.loads(raw)
+f = b['artifacts']['batch/physical-null-bitmap-cost27-C1-v1/all-performance-tables-v3.md']
+v = base64.b64decode(b['blobs'][f['blob']], validate=True)
+assert hashlib.sha256(v).hexdigest() == f['sha256']
+sys.stdout.buffer.write(v)
+PY
+```
+
+正式库存 2397 个测试文件（1130 顶层／1135 总 C++），注册 E2E 684／独立 E2E 664 不变；754 个 Markdown 路径与 725 份保护记录保持。原 273 项及 22 complete／166 partial／70 unverified／15 deferred_by_user 不变，历史增至 286，IDX-07 仍 unverified/evidence[]。
+
+本批只接受普通物理扫描／排序投影的有限优化，未关闭 PostgreSQL 功能家族或整体性能目标。P35 原始负向矩阵、ID CPU 与本批 VACUUM 等负例继续有效。用户暂缓的执行图／child-provider、retained planning／portal、CPU-sort interrupt 和通用故障矩阵等范围保持。Goal active，直接 master 分批提交；正常 CMake C++17/O2 候选 SHA 前缀 30412452，默认程序 SHA425165af 保持，未推送。
+<!-- P36 physical-row-null-reuse end -->
+
 <!-- P35 view-column-dependencies begin -->
 <a id="view-column-dependencies-20261106"></a>
 ## 2026-11-06：视图列依赖保护与真实开销（P35-C4）
