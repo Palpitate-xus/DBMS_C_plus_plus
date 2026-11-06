@@ -1,5 +1,13 @@
 # 兼容版本契约
 
+<!-- CURRENT_LEGACY_LOG_APPEND_20261106 -->
+
+## 本批有限日志契约（P32-C1）
+
+普通日志 `::log` 仍按 time、四个空格、user、四个空格、operation 和换行追加原始字节；每次实际打开当前路径，以 `O_APPEND` 和六段 `writev` 写入，EINTR 重试、正短写继续消费未写后缀，零进展或其他写错误停止并关闭。打开失败仍输出 `error 1` 并返回0；权限、已有前缀、rename/unlink 与真实 symlink 重新解析保持。`getTime`、`auditLog` 正文字节未变，没有持久缓存日志FD或改服务端协议发送。
+
+验证限本地普通文件与默认char-codecvt环境；真实短记录并发、轮转及有限系统调用控制不构成NFS、大记录事务原子性、fsync持久性或完整故障矩阵承诺。本批不改协议、目录/参数帧/retained/provider边界；58目标仍53通过、4冷锚仍失败，共9项普通差异未豁免。产品、PG行为目标和wire格式版本仍分别定义。[本批完整报告](performance-report-2026-10-30.md#legacy-log-append-20261106)与[可逆原始证据](benchmarks/legacy-log-append-20261106.json.gz)。以下原契约不变。
+
 [R145](issue-review-r145-search-path-value-identity.md)有限支持SQL SET search_path的
 逐参数list-quote、原样名字数据、空名字及FROM CURRENT真实事务赋值。
 PG3573、Root18/clean10及独立复核通过；不据此宣称startup raw GUC格式、

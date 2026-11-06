@@ -1,5 +1,114 @@
 # 数据库操作性能测试报告（2026-10-30）
 
+<!-- CURRENT_LEGACY_LOG_APPEND_20261106 -->
+
+## 普通日志追加与实际查询成本（2026-11-06，P32-C1）
+
+<a id="legacy-log-append-20261106"></a>
+
+普通日志 `::log` 仍按 time、四个空格、user、四个空格、operation 和换行追加原始字节；每次实际打开当前路径，以 `O_APPEND` 和六段 `writev` 写入，EINTR 重试、正短写继续消费未写后缀，零进展或其他写错误停止并关闭。打开失败仍输出 `error 1` 并返回0；权限、已有前缀、rename/unlink 与真实 symlink 重新解析保持。`getTime`、`auditLog` 正文字节未变，没有持久缓存日志FD或改服务端协议发送。
+
+正常CMake C++17/O2、旧版→C1→同旧版各三轮的固定矩阵完整结束：27个数据库上下文、54个正常Main、270个计时区间，校验1098响应、96624行/386388单元/27864个NULL。30案例的服务器CPU为16项低于两旧、6项高于两旧、8项居间；墙钟为13低/5高/12居间。固定/单BYTEA直接仅id查询有有限收益，但多LOB直接全列和仅id的服务器CPU均高于两旧，其中仅id墙钟也回退，全列墙钟居间。全部负向、旧回测漂移及长尾保留，未证明一致SQL提速、稳定吞吐或PG速度等价；原因仍OPEN，P30原负向证据保持。
+
+正式只新增1个CPP回归，最终源码 `d2669466…`。完整61对象/core加本代stub的实际配对中，before为6组普通行为通过、7组新机制能力缺失NOTRUN；C1共13组、105项检查通过，测试作用域内观察38次writev封装层命中（含控制返回，非物理写盘次数），两代最终测试编译stderr均0字节。覆盖NUL/UTF8/空串/换行/长值、追加、轮转、权限、symlink、实际打开错误和有限EINTR/短写/零进展/EIO控制；128条并发短记录比较完整无序集合，不宣称任意大记录跨短写原子性。两项既有TRUNCATE测试两代均正常0，完整stdout/stderr逐字节一致，实际分别记录5次/3次TRUNCATE日志。
+
+原58个严格协议目标及4个额外冷锚控制全部保留，两代产品各完成62请求、目标各53/58，原9项普通差异未关闭，strict CLI仍为1；全部62请求/响应原始字节一致。每代实际207行/848单元/156个NULL，4个初始/冷Main均取得真实子进程wait0、PID/组消失。复用此前真实PG18.6参考，没有重跑PG，没有把目录来源元数据或选中错误的TEZ/EZ差异改成PASS或暂缓。
+
+本批before为已验证P30-C2正常程序（SHA `472e093d40b8…`），C1仅重编main和DdlExecutor两个TU，保持C++17/O2。固定/单BYTEA两表9个常规上下文、多LOB单表9个常规上下文、共享三表的9个直接查询上下文，均按旧版→C1→同旧版运行三轮；初始人口256/256/128。INSERT1、UPDATE16、全SELECT、DELETE16、VACUUM、全SELECT、TRUNCATE及原人口重新写入全部保留，UPDATE16/DELETE16各是一条影响16行的SQL。直接仅id查询执行`SELECT id FROM perf_fixed`等无WHERE/ORDER查询，更新后分别返回257/257/129行；表中的direct-hit是旧工作量标识，不表示索引命中。
+
+wall从发送完整SimpleQuery到Ready，包含帧头处理和原始块复制；完整解码、值校验、hash及保存wire在计时后。serverCPU计整个Main，clientCPU另列；时钟与/proc端点非原子，RSS/IO端点不是峰值。正常窗口不绑CPU、不清OS缓存，setup自然预热；本批没有同时进行其他SQL、C++编译、profile或压缩。各格只有3样本，旧版前后墙钟漂移范围−27.073%至+43.946%，不能据此证明频率/负载等回退原因。客户端CPU方向另为13低/10高/7居间，全部原样保留。
+
+下表包括全部30案例，常规ORDER BY流程24案例与独立无ORDER直接查询6案例分列，不互换或筛选。三列耗时均为各自原3样本中位数，单位ms；变化=`(C1/旧−1)×100`，正值增加、负值减少；旧漂移=`(回测/首次−1)×100`。客户端接收墙钟和服务端进程CPU不是profile样本；保留完整返回、正常冷开和所有失败观察。
+
+### 全部30案例：查询/操作墙钟
+
+| 批次 | 表 | 操作 | 旧首次ms | C1 ms | 旧回测ms | 对首次变化% | 对回测变化% | 旧回测漂移% |
+|---|---|---|---:|---:|---:|---:|---:|---:|
+| canonical-fixed-single | fixed | delete16 | 46.653655 | 44.508280 | 48.186311 | -4.599 | -7.633 | +3.285 |
+| canonical-fixed-single | fixed | insert1 | 18.360097 | 16.984138 | 13.389397 | -7.494 | +26.848 | -27.073 |
+| canonical-fixed-single | fixed | reinsert_population | 596.261920 | 616.169480 | 620.768775 | +3.339 | -0.741 | +4.110 |
+| canonical-fixed-single | fixed | select_after_update | 25.209886 | 25.822615 | 28.042068 | +2.431 | -7.915 | +11.234 |
+| canonical-fixed-single | fixed | select_after_vacuum | 26.534910 | 26.613811 | 29.181030 | +0.297 | -8.798 | +9.972 |
+| canonical-fixed-single | fixed | truncate | 290.862646 | 266.510508 | 408.287939 | -8.372 | -34.725 | +40.371 |
+| canonical-fixed-single | fixed | update16 | 68.860966 | 67.970559 | 85.788637 | -1.293 | -20.770 | +24.582 |
+| canonical-fixed-single | fixed | vacuum | 1.893278 | 1.364028 | 1.673151 | -27.954 | -18.475 | -11.627 |
+| canonical-fixed-single | single | delete16 | 67.906581 | 79.579625 | 71.348408 | +17.190 | +11.537 | +5.068 |
+| canonical-fixed-single | single | insert1 | 18.896445 | 22.736136 | 16.780296 | +20.320 | +35.493 | -11.199 |
+| canonical-fixed-single | single | reinsert_population | 1081.484412 | 1077.394995 | 1146.464049 | -0.378 | -6.025 | +6.008 |
+| canonical-fixed-single | single | select_after_update | 55.965436 | 54.688421 | 53.757097 | -2.282 | +1.732 | -3.946 |
+| canonical-fixed-single | single | select_after_vacuum | 60.672890 | 55.166821 | 59.175170 | -9.075 | -6.774 | -2.469 |
+| canonical-fixed-single | single | truncate | 473.266988 | 465.002277 | 399.481030 | -1.746 | +16.402 | -15.591 |
+| canonical-fixed-single | single | update16 | 158.124178 | 148.173800 | 144.325444 | -6.293 | +2.666 | -8.727 |
+| canonical-fixed-single | single | vacuum | 7.314450 | 8.250711 | 6.921662 | +12.800 | +19.201 | -5.370 |
+| canonical-overflow | overflow | delete16 | 78.195697 | 75.511622 | 90.568367 | -3.433 | -16.625 | +15.823 |
+| canonical-overflow | overflow | insert1 | 21.468954 | 18.460315 | 29.669677 | -14.014 | -37.781 | +38.198 |
+| canonical-overflow | overflow | reinsert_population | 1252.960154 | 1214.638759 | 1185.215609 | -3.058 | +2.483 | -5.407 |
+| canonical-overflow | overflow | select_after_update | 66.943787 | 60.998071 | 70.587013 | -8.882 | -13.585 | +5.442 |
+| canonical-overflow | overflow | select_after_vacuum | 57.615791 | 62.793941 | 62.073291 | +8.987 | +1.161 | +7.737 |
+| canonical-overflow | overflow | truncate | 179.765263 | 203.165049 | 229.206616 | +13.017 | -11.362 | +27.503 |
+| canonical-overflow | overflow | update16 | 174.518641 | 160.537580 | 251.211902 | -8.011 | -36.095 | +43.946 |
+| canonical-overflow | overflow | vacuum | 8.672119 | 8.882708 | 11.768352 | +2.428 | -24.520 | +35.703 |
+| direct-hit | fixed | direct_full_no_order | 25.308857 | 21.914329 | 23.179452 | -13.412 | -5.458 | -8.414 |
+| direct-hit | fixed | direct_id_only_no_order | 22.758355 | 20.700487 | 25.621755 | -9.042 | -19.207 | +12.582 |
+| direct-hit | overflow | direct_full_no_order | 56.809573 | 56.151831 | 47.785452 | -1.158 | +17.508 | -15.885 |
+| direct-hit | overflow | direct_id_only_no_order | 46.845459 | 49.554183 | 47.934762 | +5.782 | +3.378 | +2.325 |
+| direct-hit | single | direct_full_no_order | 55.641604 | 48.205033 | 44.394162 | -13.365 | +8.584 | -20.214 |
+| direct-hit | single | direct_id_only_no_order | 45.475530 | 42.743512 | 47.182188 | -6.008 | -9.408 | +3.753 |
+
+### 全部30案例：服务器进程CPU
+
+| 批次 | 表 | 操作 | 旧首次ms | C1 ms | 旧回测ms | 对首次变化% | 对回测变化% | 旧回测漂移% |
+|---|---|---|---:|---:|---:|---:|---:|---:|
+| canonical-fixed-single | fixed | delete16 | 35.720972 | 34.029949 | 40.133365 | -4.734 | -15.208 | +12.352 |
+| canonical-fixed-single | fixed | insert1 | 9.805053 | 8.319537 | 6.532070 | -15.151 | +27.364 | -33.381 |
+| canonical-fixed-single | fixed | reinsert_population | 570.403910 | 568.771393 | 590.589725 | -0.286 | -3.694 | +3.539 |
+| canonical-fixed-single | fixed | select_after_update | 14.430047 | 17.467122 | 19.146805 | +21.047 | -8.773 | +32.687 |
+| canonical-fixed-single | fixed | select_after_vacuum | 17.493728 | 17.262458 | 20.543718 | -1.322 | -15.972 | +17.435 |
+| canonical-fixed-single | fixed | truncate | 90.766686 | 94.787844 | 107.003514 | +4.430 | -11.416 | +17.889 |
+| canonical-fixed-single | fixed | update16 | 59.160480 | 59.566230 | 78.256099 | +0.686 | -23.883 | +32.278 |
+| canonical-fixed-single | fixed | vacuum | 1.781049 | 1.232617 | 1.517644 | -30.793 | -18.781 | -14.789 |
+| canonical-fixed-single | single | delete16 | 55.684873 | 67.567525 | 62.393768 | +21.339 | +8.292 | +12.048 |
+| canonical-fixed-single | single | insert1 | 10.059306 | 10.849717 | 9.738803 | +7.858 | +11.407 | -3.186 |
+| canonical-fixed-single | single | reinsert_population | 1053.301526 | 1034.377984 | 1103.494397 | -1.797 | -6.263 | +4.765 |
+| canonical-fixed-single | single | select_after_update | 46.799848 | 46.494605 | 46.808623 | -0.652 | -0.671 | +0.019 |
+| canonical-fixed-single | single | select_after_vacuum | 54.781644 | 49.573408 | 50.144655 | -9.507 | -1.139 | -8.464 |
+| canonical-fixed-single | single | truncate | 138.515437 | 133.393926 | 136.857065 | -3.697 | -2.530 | -1.197 |
+| canonical-fixed-single | single | update16 | 131.688465 | 127.961166 | 128.069559 | -2.830 | -0.085 | -2.748 |
+| canonical-fixed-single | single | vacuum | 7.025082 | 7.892161 | 6.510332 | +12.343 | +21.225 | -7.327 |
+| canonical-overflow | overflow | delete16 | 68.404652 | 67.032039 | 70.028724 | -2.007 | -4.279 | +2.374 |
+| canonical-overflow | overflow | insert1 | 12.502999 | 9.647244 | 12.102614 | -22.841 | -20.288 | -3.202 |
+| canonical-overflow | overflow | reinsert_population | 1143.445550 | 1145.370260 | 1108.550287 | +0.168 | +3.321 | -3.052 |
+| canonical-overflow | overflow | select_after_update | 54.480986 | 53.353869 | 62.946410 | -2.069 | -15.239 | +15.538 |
+| canonical-overflow | overflow | select_after_vacuum | 51.638020 | 56.802074 | 57.736283 | +10.000 | -1.618 | +11.810 |
+| canonical-overflow | overflow | truncate | 75.358964 | 75.022532 | 91.905863 | -0.446 | -18.370 | +21.957 |
+| canonical-overflow | overflow | update16 | 146.035519 | 130.160953 | 144.080814 | -10.870 | -9.661 | -1.339 |
+| canonical-overflow | overflow | vacuum | 8.331543 | 8.600265 | 10.790086 | +3.225 | -20.295 | +29.509 |
+| direct-hit | fixed | direct_full_no_order | 15.119406 | 13.748687 | 11.300508 | -9.066 | +21.664 | -25.258 |
+| direct-hit | fixed | direct_id_only_no_order | 14.154106 | 13.051541 | 14.213758 | -7.790 | -8.177 | +0.421 |
+| direct-hit | overflow | direct_full_no_order | 44.506625 | 47.071040 | 36.533296 | +5.762 | +28.844 | -17.915 |
+| direct-hit | overflow | direct_id_only_no_order | 37.708028 | 43.367602 | 38.911726 | +15.009 | +11.451 | +3.192 |
+| direct-hit | single | direct_full_no_order | 46.917075 | 42.275101 | 36.249776 | -9.894 | +16.622 | -22.736 |
+| direct-hit | single | direct_id_only_no_order | 38.489230 | 37.022726 | 39.474735 | -3.810 | -6.212 | +2.560 |
+
+归档实际8,381,352B（7.99MiB），SHA `e4f81ec92c054b80c434e5558d7e95df2093afaaa0bacc65c8eecde7f89b7eae`；共32份，旧31份字节保持。全部原三样本、min/p50/max、客户端CPU及长尾在归档的 `legacy-read-log-cost27-C1-v1/all-performance-tables-v3.md` 与原始回执中，未以本表中位数替代。
+
+归档保存15,827个非ELF文件的完整字节、780个目录和4个符号链接记录。程序/core/对象作为137个精确SHA引用留在工作区，未嵌入归档；回放程序仍需要对应的执行文件和依赖。可用Python标准库从归档取出完整原始分布，无需依赖本机build目录：
+
+```python
+from pathlib import Path
+import base64, gzip, json, lzma
+outer = json.loads(gzip.decompress(Path("docs/benchmarks/legacy-log-append-20261106.json.gz").read_bytes()))
+bundle = json.loads(lzma.decompress(base64.b64decode(outer["payload"])))
+record = next(r for r in bundle["files"] if r["path"].endswith("/legacy-read-log-cost27-C1-v1/all-performance-tables-v3.md"))
+print(base64.b64decode(bundle["blobs"][record["blob"]]["data"]).decode())
+```
+
+当前仅生产头 `src/common/logs.h` 改动，私有正常C1程序SHA `310a2c01d84c1cd92dcf05ee5a5825fecface8dc0446adc312269be2bd144eb4`；默认安装程序仍为 `425165af…`，现有服务未替换。源248/头177，正式测试2393（顶层CPP1126、含子目录总CPP1131、子目录5），登记684个driver/664个独立E2E；754 Markdown路径、725保护记录不变。原273项状态仍22 complete/166 partial/70 unverified/15 deferred_by_user，旧281条历史原文保持，仅追加第282条partial；IDX-07仍unverified且evidence=[]。不扩用户暂停范围，无分支切换、推送或默认程序晋升，Goal active。
+
+[本批完整报告](performance-report-2026-10-30.md#legacy-log-append-20261106)与[可逆原始证据](benchmarks/legacy-log-append-20261106.json.gz)。以下各批历史原文保持。
+
+归档逐文件校验完成后，本轮仅清理13,510个已归档的正常测试生成副本，nlink=1分配空间1,187,860,480字节（约1.11GiB）。独立新进程后验确认，其余2,317个非ELF工件、137个精确引用、780个目录和4个链接/目标保持；`20-candidate/data`完整工作库及全部协议数据保留，源码、程序和对象未删除。
+
 <!-- CURRENT_FIXED_ID_PROFILE_20261106 -->
 
 ## 主键查询回退的执行路径与CPU采样（2026-11-06，P31）

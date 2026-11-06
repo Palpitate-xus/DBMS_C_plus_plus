@@ -2,6 +2,30 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-06 legacy log append without per-record stream setup",
+      "gap_ids": [
+        "QRY-01",
+        "QRY-13"
+      ],
+      "status": "partial",
+      "evidence": [
+        "src/common/logs.h",
+        "docs/performance-report-2026-10-30.md",
+        "docs/benchmarks/legacy-log-append-20261106.json.gz"
+      ],
+      "tests": [
+        "tests/logfile_append_test.cpp",
+        "tests/truncate_test.cpp",
+        "tests/truncate_owned_sequence_restart_test.cpp"
+      ],
+      "verification": [
+        "Normal CMake C++17/O2 actual0; only production logs.h body/includes changed, getTime/auditLog byteexact. Six public log byte/rotation/symlink/mode/open-error/concurrency groups match before; final C1 all13 groups/105checks with38 actual writev calls. Before retains7 new-path NOTRUN. Full61core final source warning-free; two whole existing TRUNCATE tests each generation actual0 and outputs byteexact.",
+        "Before P30C2 472 and candidate310 each execute original58+4cold protocol requests; all62 request/response bytes and decoded values identical. Original9 strict PG mismatches and both strict CLI actualexit1 remain; four Mainactual normal0. No PostgreSQL equivalence claim or deferred scope expansion.",
+        "Original270 timed regions/27DB/54normalMain/1098responses complete; independent reducer actual0 with all96624rows/386388cells/27864NULL and allraw3/min/p50/max/negative/drift/tails retained. ServerCPU directions16 lower/6 higher/8 between two old roles; fixed and single id queries improve, overflow full/id regressions remain OPEN. No stable or allSQL speed claim.",
+        "Original273 status objects and prior281 update records preserved byteexact; IDX07 remains unverified/evidence[]. Default425 unchanged; Goalactive, no branch/push/service promotion."
+      ]
+    },
+    {
       "issue": "2026-11-06 ordinary physical projection current-row NULL bitmap reuse and demand admission",
       "gap_ids": [
         "QRY-01",

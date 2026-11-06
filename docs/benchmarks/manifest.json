@@ -327,6 +327,16 @@
       "sha256": "31e2bb007fa648a4133c108e0ecf2bdb54d5eb57f6d40197abb2009b64cea451",
       "encoding": "gzip",
       "roundtrip_bytes_exact": true
+    },
+    {
+      "original_path": "docs/benchmarks/legacy-log-append-20261106.json",
+      "original_bytes": 11089986,
+      "original_sha256": "d6ae3944217eabb3d41b24185aab7452774222f94e23bdc50b2cc0add17f4526",
+      "path": "docs/benchmarks/legacy-log-append-20261106.json.gz",
+      "bytes": 8381352,
+      "sha256": "e4f81ec92c054b80c434e5558d7e95df2093afaaa0bacc65c8eecde7f89b7eae",
+      "encoding": "gzip",
+      "roundtrip_bytes_exact": true
     }
   ],
   "total_original_bytes": 1520549589,

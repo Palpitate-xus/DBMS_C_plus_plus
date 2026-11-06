@@ -1,5 +1,11 @@
 # 文档索引
 
+<!-- CURRENT_LEGACY_LOG_APPEND_20261106 -->
+
+## 最新验证入口（P32-C1）
+
+普通日志改为逐次O_APPEND/writev追加，新增13组原生检查；当前正式测试2393，本批没有全套重跑。30案例服务器CPU为16低/6高/8居间，多LOB负向保留，未宣称一致提速。完整协议仍有原9项普通差异、默认425未换；见[本批完整报告](performance-report-2026-10-30.md#legacy-log-append-20261106)与[可逆原始证据](benchmarks/legacy-log-append-20261106.json.gz)。下方索引和历史保持。
+
 使用项目从 [README](../README.md)、[使用手册](MANUAL.md)和[打包与部署](PACKAGING.md)开始。
 接口范围以[兼容性契约](compatibility-contract.md)为准；命令示例不代表所有组合均已实现。
 

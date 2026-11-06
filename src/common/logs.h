@@ -1,6 +1,11 @@
 #pragma once
 
+#include <cerrno>
 #include <ctime>
+#include <fcntl.h>
+#include <limits>
+#include <sys/uio.h>
+#include <unistd.h>
 #include <fstream>
 #include <iostream>
 #include <string>
@@ -19,11 +24,63 @@ inline std::string getTime() {
 
 // 写入日志文件
 inline int log(const std::string& user, const std::string& operation, const std::string& time) {
-    std::ofstream oFile("dbms.log", std::ios::binary | std::ios::out | std::ios::app);
-    if (!oFile) {
+    const int fd = ::open("dbms.log", O_WRONLY | O_CREAT | O_APPEND, 0666);
+    if (fd < 0) {
         std::cout << "error 1" << std::endl;
+        return 0;
     }
-    oFile << time << "    " << user << "    " << operation << std::endl;
+    struct CloseOnce {
+        int fd;
+        ~CloseOnce() { (void)::close(fd); }
+    } closeOnce{fd};
+    constexpr char spaces[] = "    ";
+    constexpr char newline[] = "\n";
+    iovec pending[6] = {
+        {const_cast<char*>(time.data()), time.size()},
+        {const_cast<char*>(spaces), sizeof(spaces) - 1},
+        {const_cast<char*>(user.data()), user.size()},
+        {const_cast<char*>(spaces), sizeof(spaces) - 1},
+        {const_cast<char*>(operation.data()), operation.size()},
+        {const_cast<char*>(newline), sizeof(newline) - 1}
+    };
+    int first = 0;
+    while (first < 6) {
+        while (first < 6 && pending[first].iov_len == 0) ++first;
+        if (first == 6) break;
+        size_t budget = static_cast<size_t>(std::numeric_limits<ssize_t>::max());
+        int end = first;
+        int capped = -1;
+        size_t originalLength = 0;
+        while (end < 6) {
+            if (pending[end].iov_len > budget) {
+                capped = end;
+                originalLength = pending[end].iov_len;
+                pending[end].iov_len = budget;
+                ++end;
+                break;
+            }
+            budget -= pending[end].iov_len;
+            ++end;
+            if (budget == 0) break;
+        }
+        const ssize_t written = ::writev(fd, pending + first, end - first);
+        // Restore before consuming a positive short write: the unwritten
+        // original suffix still belongs to this same pending segment.
+        if (capped >= 0) pending[capped].iov_len = originalLength;
+        if (written < 0 && errno == EINTR) continue;
+        if (written <= 0) break;
+        size_t consumed = static_cast<size_t>(written);
+        while (consumed > 0) {
+            if (consumed >= pending[first].iov_len) {
+                consumed -= pending[first].iov_len;
+                ++first;
+            } else {
+                pending[first].iov_base = static_cast<char*>(pending[first].iov_base) + consumed;
+                pending[first].iov_len -= consumed;
+                consumed = 0;
+            }
+        }
+    }
     return 0;
 }
 
