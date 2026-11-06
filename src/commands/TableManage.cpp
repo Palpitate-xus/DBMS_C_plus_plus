@@ -1999,6 +1999,51 @@ size_t TableSchema::rowSize() const {
     return total + rowHeaderSize(formatVersion, len);
 }
 
+// The allocator header records a nominal schema width, not a tuple stride.
+// Keep every representable historical width byte-for-byte. Only a format-2
+// variable-width schema whose logical maxima overflow that field uses zero;
+// its tuples still carry their actual lengths and the ordinary heap headers.
+// Failure is explicit: no platform-sized invalid-width sentinel reaches PA.
+static std::optional<uint32_t> heapHeaderRowWidth(const TableSchema& table) {
+    if (table.len > MAX_COLUMNS) return std::nullopt;
+    constexpr size_t maximumHeaderWidth = std::numeric_limits<uint32_t>::max();
+    const size_t header = rowHeaderSize(table.formatVersion, table.len);
+    size_t nominal = header;
+    bool nominalOverflow = nominal > maximumHeaderWidth;
+    bool variableWidth = false;
+    for (size_t i = 0; i < table.len; ++i) {
+        const Column& column = table.cols[i];
+        variableWidth |= column.isVariableLength;
+        if (!nominalOverflow) {
+            if (column.dsize > maximumHeaderWidth - nominal)
+                nominalOverflow = true;
+            else
+                nominal += column.dsize;
+        }
+    }
+    if (!nominalOverflow) return static_cast<uint32_t>(nominal);
+    if (table.formatVersion != DATA_FILE_FORMAT_VERSION || !variableWidth)
+        return std::nullopt;
+
+    // buildRowBuffer keeps each fixed slot even for NULL, plus one pair of
+    // uint16 offset/length entries per variable column. Use the same actual
+    // natts header; a logical varlen maximum is not an inline reservation.
+    // PgPage::init reserves its uint32 next-page link in special space.
+    constexpr size_t maximumTuple = PgPage::PAGE_SIZE -
+        sizeof(PgPage::PageHeaderData) - sizeof(PgPage::ItemIdData) -
+        sizeof(uint32_t);
+    size_t minimumTuple = header;
+    if (minimumTuple > maximumTuple) return std::nullopt;
+    for (size_t i = 0; i < table.len; ++i) {
+        const Column& column = table.cols[i];
+        const size_t inlineWidth = column.isVariableLength
+            ? 2 * sizeof(uint16_t) : column.dsize;
+        if (inlineWidth > maximumTuple - minimumTuple) return std::nullopt;
+        minimumTuple += inlineWidth;
+    }
+    return uint32_t{0};
+}
+
 bool TableSchema::hasVariableLength() const {
     for (size_t i = 0; i < len; ++i) {
         if (cols[i].isVariableLength) return true;
@@ -3217,10 +3262,12 @@ bool StorageEngine::ensureUnloggedInitForks(
     try {
         const TableSchema table = getTableSchema(dbname, tablename);
         if (!table.isUnlogged) return false;
+        const auto heapRowWidth = heapHeaderRowWidth(table);
+        if (!heapRowWidth) return false;
 
         std::vector<std::pair<std::filesystem::path, size_t>> heaps;
         if (table.partitionType == TableSchema::PartitionType::None) {
-            heaps.emplace_back(dataPath(dbname, tablename), table.rowSize());
+            heaps.emplace_back(dataPath(dbname, tablename), *heapRowWidth);
         } else {
             std::set<std::string> parentPartitions;
             for (const auto& leaf : partitionLeaves(table)) {
@@ -3228,14 +3275,14 @@ bool StorageEngine::ensureUnloggedInitForks(
                     heaps.emplace_back(
                         partitionDataPath(
                             dbname, tablename, leaf.partition),
-                        table.rowSize());
+                        *heapRowWidth);
                 }
                 if (!leaf.subPartition.empty()) {
                     heaps.emplace_back(
                         partitionDataPath(
                             dbname, tablename, leaf.partition,
                             leaf.subPartition),
-                        table.rowSize());
+                        *heapRowWidth);
                 }
             }
         }
@@ -3258,12 +3305,24 @@ bool StorageEngine::ensureUnloggedInitForks(
                 std::filesystem::is_regular_file(initPath, error) && !error &&
                 std::filesystem::file_size(initPath, error) ==
                     pageSizeForFormatVersion(table.formatVersion) && !error) {
-                PageAllocator existing(
-                    initPath.string(), rowSize,
-                    pageSizeForFormatVersion(table.formatVersion),
-                    table.formatVersion);
-                valid = existing.open() && existing.numPages() == 1;
-                existing.close();
+                // open() validates the stored heap header, but its requested
+                // width is not compared until allocation/flush. Inspect the
+                // actual init header before opening with this schema's hint;
+                // a layout rewrite may have retained an old empty init fork.
+                DataFileHeader storedHeader{};
+                std::ifstream headerInput(initPath, std::ios::binary);
+                const bool sameWidth = headerInput.read(
+                    reinterpret_cast<char*>(&storedHeader), sizeof(storedHeader)) &&
+                    storedHeader.rowSize == rowSize;
+                headerInput.close();
+                if (sameWidth) {
+                    PageAllocator existing(
+                        initPath.string(), rowSize,
+                        pageSizeForFormatVersion(table.formatVersion),
+                        table.formatVersion);
+                    valid = existing.open() && existing.numPages() == 1;
+                    existing.close();
+                }
             }
             if (valid) continue;
 
@@ -4156,6 +4215,9 @@ DBStatus StorageEngine::attachPartition(const std::string& dbname,
         return DBStatus::INVALID_VALUE;  // table is not partitioned
     }
 
+    const auto heapRowWidth = heapHeaderRowWidth(tbl);
+    if (!heapRowWidth) return DBStatus::INVALID_VALUE;
+
     // Check partition name doesn't already exist
     auto nameExists = [&]() -> bool {
         if (tbl.partitionType == TableSchema::PartitionType::Range) {
@@ -4373,7 +4435,7 @@ DBStatus StorageEngine::attachPartition(const std::string& dbname,
     // Create the partition data file
     {
         auto ppa = std::make_unique<PageAllocator>(
-            partitionDataPath(dbname, tablename, partitionName).string(), tbl.rowSize(), pageSizeForFormatVersion(tbl.formatVersion), tbl.formatVersion);
+            partitionDataPath(dbname, tablename, partitionName).string(), *heapRowWidth, pageSizeForFormatVersion(tbl.formatVersion), tbl.formatVersion);
         ppa->open();
         ppa->close();
     }
@@ -8081,6 +8143,8 @@ PageAllocator* StorageEngine::getPageAllocator(const std::string& dbname,
         return nullptr;
     }
     const std::string tablespace = tbl.tablespace.empty() ? "pg_default" : tbl.tablespace;
+    const auto heapRowWidth = heapHeaderRowWidth(tbl);
+    if (!heapRowWidth) return nullptr;
     if (tablespace != "pg_default") {
         std::filesystem::path tablespaceRoot;
         if (!resolveTablespaceRoot(
@@ -8097,7 +8161,7 @@ PageAllocator* StorageEngine::getPageAllocator(const std::string& dbname,
         (!std::filesystem::is_regular_file(dt, dataError) || dataError))
         return nullptr;
 
-    auto pa = acquireSharedHeap(dbname, dt, tbl.rowSize(),
+    auto pa = acquireSharedHeap(dbname, dt, *heapRowWidth,
         pageSizeForFormatVersion(tbl.formatVersion), tbl.formatVersion);
     if (!pa) {
         return nullptr;
@@ -8817,6 +8881,9 @@ bool StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
 
     TableSchema tbl = getTableSchema(dbname, tablename);
 
+    const auto heapRowWidth = heapHeaderRowWidth(tbl);
+    if (!heapRowWidth) return false;
+
     // A relation-level SIREAD marker is deliberately acquired even when the
     // scan returns no rows.  It is conservative (and therefore may reduce
     // serializable concurrency), but it closes the correctness hole where a
@@ -8934,7 +9001,7 @@ bool StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
                 : partitionDataPath(dbname, tablename, leaf.partition,
                                     leaf.subPartition);
             auto ppa = acquireSharedHeap(
-                dbname, path, tbl.rowSize(),
+                dbname, path, *heapRowWidth,
                 pageSizeForFormatVersion(tbl.formatVersion),
                 tbl.formatVersion, dbname + "/" + tablename + "#" + leaf.partition +
                     (leaf.subPartition.empty() ? "" : "#" + leaf.subPartition));
@@ -16332,6 +16399,8 @@ DBStatus StorageEngine::createBrinIndex(const std::string& dbname,
     // If table is partitioned, scan partition files; otherwise scan main data file
     auto scanTable = [&](const std::string& actualTableName) -> bool {
         TableSchema t = getTableSchema(dbname, actualTableName);
+        const auto heapRowWidth = heapHeaderRowWidth(t);
+        if (!heapRowWidth) return false;
         if (t.partitionType != TableSchema::PartitionType::None) {
             std::vector<std::string> partNames;
             if (t.partitionType == TableSchema::PartitionType::Range) {
@@ -16343,7 +16412,7 @@ DBStatus StorageEngine::createBrinIndex(const std::string& dbname,
             }
             for (const auto& pname : partNames) {
                 auto ppa = acquireSharedHeap(
-                    dbname, partitionDataPath(dbname, actualTableName, pname), t.rowSize(), pageSizeForFormatVersion(t.formatVersion), t.formatVersion,
+                    dbname, partitionDataPath(dbname, actualTableName, pname), *heapRowWidth, pageSizeForFormatVersion(t.formatVersion), t.formatVersion,
                     dbname + "/" + actualTableName + "#" + pname);
                 if (!ppa || !scanAllocator(*ppa, t)) return false;
             }
@@ -19437,6 +19506,11 @@ DBStatus StorageEngine::createTable(const std::string& dbname, const TableSchema
         if (error) *error = "unsupported table storage format; expected format version 2";
         return DBStatus::INVALID_ARGUMENT;
     }
+    const auto heapRowWidth = heapHeaderRowWidth(tblWithVersion);
+    if (!heapRowWidth) {
+        if (error) *error = "could not initialize table heap";
+        return DBStatus::INVALID_VALUE;
+    }
     size_t pageSize = pageSizeForFormatVersion(tblWithVersion.formatVersion);
 
     // CREATE TABLE is a multi-relation operation: schema, heap forks, TOAST,
@@ -19603,13 +19677,13 @@ DBStatus StorageEngine::createTable(const std::string& dbname, const TableSchema
                 : partitionDataPath(
                       dbname, tblWithVersion.tablename, leaf.partition,
                       leaf.subPartition);
-            const auto heapStatus = initializeHeap(path, tblWithVersion.rowSize());
+            const auto heapStatus = initializeHeap(path, *heapRowWidth);
             if (heapStatus != DBStatus::OK) {
                 return failCreate("could not initialize table partition", heapStatus);
             }
         }
     } else {
-        const auto heapStatus = initializeHeap(dataPath(dbname, tblWithVersion.tablename), tblWithVersion.rowSize());
+        const auto heapStatus = initializeHeap(dataPath(dbname, tblWithVersion.tablename), *heapRowWidth);
         if (heapStatus != DBStatus::OK) {
             return failCreate("could not initialize table heap", heapStatus);
         }
@@ -20167,6 +20241,10 @@ DBStatus StorageEngine::truncateTable(const std::string& dbname,
     if (!lockManager_.lockMetadata(tablename)) return DBStatus::LOCK_CONFLICT;
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     const TableSchema table = getTableSchema(dbname, tablename);
+    if (!heapHeaderRowWidth(table)) {
+        lockManager_.unlock(tablename);
+        return DBStatus::INVALID_VALUE;
+    }
 
     // An unreadable publication is not a negative membership result. Check
     // before WAL/heap mutation so direct callers cannot truncate without a
@@ -20327,6 +20405,12 @@ DBStatus StorageEngine::alterTableAddColumn(const std::string& dbname,
             brinIndexPath(dbname, tablename, column)));
 
     tbl.append(validatedCol);
+
+    const auto heapRowWidth = heapHeaderRowWidth(tbl);
+    if (!heapRowWidth) {
+        lockManager_.unlock(tablename);
+        return DBStatus::INVALID_VALUE;
+    }
     const std::string key = dbname + "/" + tablename;
 
     // Evict all file-backed table caches before deleting their files.
@@ -20409,7 +20493,7 @@ DBStatus StorageEngine::alterTableAddColumn(const std::string& dbname,
     const size_t pageSize = pageSizeForFormatVersion(tbl.formatVersion);
     if (tbl.partitionType == TableSchema::PartitionType::None) {
         auto pa = acquireSharedHeap(
-            dbname, dataPath(dbname, tablename), tbl.rowSize(), pageSize, tbl.formatVersion);
+            dbname, dataPath(dbname, tablename), *heapRowWidth, pageSize, tbl.formatVersion);
         if (!pa) return DBStatus::IO_ERROR;
         pageAllocators_[key] = std::move(pa);
     } else {
@@ -20424,14 +20508,14 @@ DBStatus StorageEngine::alterTableAddColumn(const std::string& dbname,
         }
         for (const auto& p : partitions) {
             auto pa = std::make_unique<PageAllocator>(
-                partitionDataPath(dbname, tablename, p).string(), tbl.rowSize(), pageSize, tbl.formatVersion);
+                partitionDataPath(dbname, tablename, p).string(), *heapRowWidth, pageSize, tbl.formatVersion);
             pa->open();
             pa->close();
             if (tbl.subPartitionType == TableSchema::PartitionType::Hash) {
                 for (size_t i = 0; i < tbl.subHashPartitions; ++i) {
                     auto subPa = std::make_unique<PageAllocator>(
                         partitionDataPath(dbname, tablename, p, "sp" + std::to_string(i)).string(),
-                        tbl.rowSize(), pageSize, tbl.formatVersion);
+                        *heapRowWidth, pageSize, tbl.formatVersion);
                     subPa->open();
                     subPa->close();
                 }
@@ -20693,6 +20777,12 @@ DBStatus StorageEngine::alterTableDropColumn(const std::string& dbname,
     for (size_t i = dropIdx; i + 1 < tbl.len; ++i) tbl.cols[i] = tbl.cols[i + 1];
     tbl.len--;
 
+    const auto heapRowWidth = heapHeaderRowWidth(tbl);
+    if (!heapRowWidth) {
+        lockManager_.unlock(tablename);
+        return DBStatus::INVALID_VALUE;
+    }
+
     const std::string key = dbname + "/" + tablename;
     pageAllocators_.erase(key);
     fsmCache_.erase(key);
@@ -20749,7 +20839,7 @@ DBStatus StorageEngine::alterTableDropColumn(const std::string& dbname,
     const size_t pageSize = pageSizeForFormatVersion(tbl.formatVersion);
     if (tbl.partitionType == TableSchema::PartitionType::None) {
         auto pa = acquireSharedHeap(
-            dbname, dataPath(dbname, tablename), tbl.rowSize(), pageSize, tbl.formatVersion);
+            dbname, dataPath(dbname, tablename), *heapRowWidth, pageSize, tbl.formatVersion);
         if (!pa) return DBStatus::IO_ERROR;
         pageAllocators_[key] = std::move(pa);
     } else {
@@ -20761,7 +20851,7 @@ DBStatus StorageEngine::alterTableDropColumn(const std::string& dbname,
                       dbname, tablename, leaf.partition,
                       leaf.subPartition);
             auto pa = std::make_unique<PageAllocator>(
-                path.string(), tbl.rowSize(), pageSize, tbl.formatVersion);
+                path.string(), *heapRowWidth, pageSize, tbl.formatVersion);
             pa->open();
             pa->close();
         }
@@ -21089,6 +21179,12 @@ DBStatus StorageEngine::alterTableAlterColumnType(const std::string& dbname,
     updated.enumValues = target.enumValues;
     tbl.cols[colIdx] = updated;
 
+    const auto heapRowWidth = heapHeaderRowWidth(tbl);
+    if (!heapRowWidth) {
+        lockManager_.unlock(tablename);
+        return DBStatus::INVALID_VALUE;
+    }
+
     std::string key = dbname + "/" + tablename;
     // Evict caches so new files are created with the new row layout.
     pageAllocators_.erase(key);
@@ -21136,7 +21232,7 @@ DBStatus StorageEngine::alterTableAlterColumnType(const std::string& dbname,
     // 5. Re-create the empty data file with the NEW row size.
     {
         auto pa = acquireSharedHeap(
-            dbname, dataPath(dbname, tablename), tbl.rowSize(),
+            dbname, dataPath(dbname, tablename), *heapRowWidth,
             pageSizeForFormatVersion(tbl.formatVersion), tbl.formatVersion);
         if (!pa) return DBStatus::IO_ERROR;
         pageAllocators_[key] = std::move(pa);
@@ -27699,6 +27795,12 @@ DBStatus StorageEngine::insertInternal(
         tbl = getTableSchema(dbname, tablename);
         generatedMetadata=freezeGeneratedStorageInput(tbl,dbname,tablename,this);
     } catch (...) { lockManager_.unlock(tablename); throw; }
+
+    const auto heapRowWidth = heapHeaderRowWidth(tbl);
+    if (!heapRowWidth) {
+        lockManager_.unlock(tablename);
+        return DBStatus::INVALID_VALUE;
+    }
     bool captureLogicalInsert = false;
     try {
         captureLogicalInsert = !tbl.isUnlogged && PublicationCatalog::instance().publishes(
@@ -28934,14 +29036,14 @@ DBStatus StorageEngine::insertInternal(
     PageAllocator* pa = nullptr;
     std::shared_ptr<PageAllocator> partPa;
     if (!targetPartition.empty() && !targetSubPartition.empty()) {
-        partPa = acquireSharedHeap(dbname, partitionDataPath(dbname, tablename, targetPartition, targetSubPartition), tbl.rowSize(), pageSizeForFormatVersion(tbl.formatVersion), tbl.formatVersion,
+        partPa = acquireSharedHeap(dbname, partitionDataPath(dbname, tablename, targetPartition, targetSubPartition), *heapRowWidth, pageSizeForFormatVersion(tbl.formatVersion), tbl.formatVersion,
             dbname + "/" + tablename + "#" + targetPartition + "#" + targetSubPartition);
         if (!partPa) {
             return failBeforeHeapInsert(DBStatus::INVALID_VALUE);
         }
         pa = partPa.get();
     } else if (!targetPartition.empty()) {
-        partPa = acquireSharedHeap(dbname, partitionDataPath(dbname, tablename, targetPartition), tbl.rowSize(), pageSizeForFormatVersion(tbl.formatVersion), tbl.formatVersion,
+        partPa = acquireSharedHeap(dbname, partitionDataPath(dbname, tablename, targetPartition), *heapRowWidth, pageSizeForFormatVersion(tbl.formatVersion), tbl.formatVersion,
             dbname + "/" + tablename + "#" + targetPartition);
         if (!partPa) {
             return failBeforeHeapInsert(DBStatus::INVALID_VALUE);
@@ -30041,6 +30143,9 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
         return failScan();
     };
     TableSchema tbl = getTableSchema(dbname, tablename);
+
+    const auto heapRowWidth = heapHeaderRowWidth(tbl);
+    if (!heapRowWidth) return failScan();
     auto conds = prepareStoredUnknownBitScalarInputs(tbl, inputConditions);
     LocalExpressionSyntax predicateSyntax; // parses lazily only when a real row reaches its consumer
     const auto generatedMetadata=freezeGeneratedStorageInput(tbl,dbname,tablename,this);
@@ -30405,7 +30510,7 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
         if (!targetParts.empty()) {
             for (const auto& pname : targetParts) {
                 auto ppa = acquireSharedHeap(
-                    dbname, partitionDataPath(dbname, tablename, pname), tbl.rowSize(), pageSizeForFormatVersion(tbl.formatVersion), tbl.formatVersion,
+                    dbname, partitionDataPath(dbname, tablename, pname), *heapRowWidth, pageSizeForFormatVersion(tbl.formatVersion), tbl.formatVersion,
                     dbname + "/" + tablename + "#" + pname);
                 if (!ppa) return failScan();
                 uint32_t np = ppa->numPages();
@@ -46543,6 +46648,9 @@ bool StorageEngine::redoPageImage(const std::string& dbname, const std::string& 
                                   Lsn recordLsn, bool force,
                                   uint32_t forkNum) {
     const TableSchema table = getTableSchema(dbname, tablename);
+
+    const auto heapRowWidth = heapHeaderRowWidth(table);
+    if (!heapRowWidth) return false;
     PageAllocator* pa = nullptr;
     if (forkNum == 0) {
         // Older releases incorrectly emitted partition page images as fork
@@ -46581,7 +46689,7 @@ bool StorageEngine::redoPageImage(const std::string& dbname, const std::string& 
                 : partitionDataPath(dbname, tablename, leaf.partition,
                                     leaf.subPartition);
             auto allocator = acquireSharedHeap(
-                dbname, path, table.rowSize(),
+                dbname, path, *heapRowWidth,
                 pageSizeForFormatVersion(table.formatVersion),
                 table.formatVersion);
             if (!allocator) return false;
@@ -46652,6 +46760,8 @@ bool StorageEngine::resetTableStorage(
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     try {
         const TableSchema table = getTableSchema(dbname, tablename);
+        const auto heapRowWidth = heapHeaderRowWidth(table);
+        if (!heapRowWidth) return false;
         if (table.isUnlogged &&
             !ensureUnloggedInitForks(dbname, tablename)) {
             return false;
@@ -46805,7 +46915,7 @@ bool StorageEngine::resetTableStorage(
         std::set<std::string> partitionNames;
         if (table.partitionType == TableSchema::PartitionType::None) {
             if (!createEmptyHeap(
-                    dataPath(dbname, tablename), table.rowSize())) {
+                    dataPath(dbname, tablename), *heapRowWidth)) {
                 return false;
             }
         } else if (table.partitionType == TableSchema::PartitionType::Range) {
@@ -46823,7 +46933,7 @@ bool StorageEngine::resetTableStorage(
         for (const auto& partition : partitionNames) {
             if (!createEmptyHeap(
                     partitionDataPath(dbname, tablename, partition),
-                    table.rowSize())) {
+                    *heapRowWidth)) {
                 return false;
             }
             if (table.subPartitionType ==
@@ -46833,7 +46943,7 @@ bool StorageEngine::resetTableStorage(
                             partitionDataPath(
                                 dbname, tablename, partition,
                                 "sp" + std::to_string(i)),
-                            table.rowSize())) {
+                            *heapRowWidth)) {
                         return false;
                     }
                 }
@@ -50794,6 +50904,9 @@ size_t StorageEngine::vacuumToast(const std::string& dbname,
     if (!lockManager_.lockExclusive(tablename)) return 0;
 
     const TableSchema tbl = getTableSchema(dbname, tablename);
+
+    const auto heapRowWidth = heapHeaderRowWidth(tbl);
+    if (!heapRowWidth) return 0;
     std::set<uint64_t> activeToastIds;
 
     // A tuple can be invisible to the vacuuming transaction while an older
@@ -50902,7 +51015,7 @@ size_t StorageEngine::vacuumToast(const std::string& dbname,
             if (!allocator || !collectReferences(*allocator)) return 0;
         } else {
             PageAllocator allocator(
-                relation.string(), tbl.rowSize(),
+                relation.string(), *heapRowWidth,
                 pageSizeForFormatVersion(tbl.formatVersion),
                 tbl.formatVersion);
             if (!allocator.open() || !collectReferences(allocator)) return 0;
@@ -51093,6 +51206,9 @@ size_t StorageEngine::vacuumFull(const std::string& dbname,
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
 
     const TableSchema tbl = getTableSchema(dbname, tablename);
+
+    const auto heapRowWidth = heapHeaderRowWidth(tbl);
+    if (!heapRowWidth) return 0;
     const std::string tableKey = dbname + "/" + tablename;
     const std::string secondaryPrefix = tableKey + "/";
     const std::string hashPrefix = dbname + "." + tablename + ".";
@@ -51234,7 +51350,7 @@ size_t StorageEngine::vacuumFull(const std::string& dbname,
             }
         } else {
             PageAllocator allocator(
-                relation.path.string(), tbl.rowSize(),
+                relation.path.string(), *heapRowWidth,
                 pageSizeForFormatVersion(tbl.formatVersion),
                 tbl.formatVersion);
             if (!allocator.open() || !scanRelation(relation, allocator)) {
@@ -51442,7 +51558,7 @@ size_t StorageEngine::vacuumFull(const std::string& dbname,
     // constraints and TOAST allocation are not spuriously invoked.
     for (const auto& relation : relations) {
         auto allocator = std::make_unique<PageAllocator>(
-            relation.path.string(), tbl.rowSize(),
+            relation.path.string(), *heapRowWidth,
             pageSizeForFormatVersion(tbl.formatVersion), tbl.formatVersion);
         if (!allocator->open()) return failRewrite();
         destinations.emplace(relation.path.string(), std::move(allocator));

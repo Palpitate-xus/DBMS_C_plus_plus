@@ -22056,6 +22056,8 @@ static bool executePreparedViewUpdate(Session& session, const string& viewname,
         if (executeTypedViewTriggers(session, viewname, triggers, newValues, oldValues)) return true;
     }
     dbms::DmlResult result; result.available = true;
+    result.metadataOnly = true;
+    result.commandOnly = true;
     result.commandTag = "UPDATE " + to_string(rows.size());
     dbms::publishLastDmlResult(std::move(result));
     cout << "INSTEAD OF UPDATE trigger executed on view " << viewname << " (" << rows.size() << " row(s))" << endl;
@@ -22070,6 +22072,8 @@ static bool executePreparedViewDelete(Session& session, const string& viewname,
     for (const auto& oldValues : rows)
         if (executeTypedViewTriggers(session, viewname, triggers, {}, oldValues)) return true;
     dbms::DmlResult result; result.available = true;
+    result.metadataOnly = true;
+    result.commandOnly = true;
     result.commandTag = "DELETE " + to_string(rows.size());
     dbms::publishLastDmlResult(std::move(result));
     cout << "INSTEAD OF DELETE trigger executed on view " << viewname << " (" << rows.size() << " row(s))" << endl;

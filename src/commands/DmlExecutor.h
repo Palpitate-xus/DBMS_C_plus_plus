@@ -45,6 +45,9 @@ struct DmlResult {
     // Present only for an explicit actual typed output consumer.
     std::optional<PreparedQueryRows> typedRows;
     std::optional<QueryRowDescriptor> typedRowDescriptor;
+    // Published by an actual mutation owner with no RETURNING clause.
+    // Independent of column/row counts: a zero-column rowset is still a rowset.
+    bool commandOnly = false;
 };
 
 enum class StructuredSetOperation { Union, Intersect, Except };

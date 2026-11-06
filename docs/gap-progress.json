@@ -2,6 +2,187 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-06 multi-LOB heap width and actual command result shape",
+      "gap_ids": [
+        "STO-06",
+        "PROTO-01"
+      ],
+      "status": "partial",
+      "evidence": [
+        "src/commands/TableManage.cpp",
+        "src/commands/DmlExecutor.cpp",
+        "src/commands/DmlExecutor.h",
+        "src/network/NetworkServer.cpp",
+        "src/main.cpp",
+        "docs/performance-report-2026-10-30.md",
+        "docs/benchmarks/multilob-storage-20261106.json.gz"
+      ],
+      "tests": [
+        "tests/constraint_definition_signature_test.cpp",
+        "tests/multilob_storage_lifecycle_test.cpp",
+        "tests/multilob_storage_protocol_e2e_test.py"
+      ],
+      "verification": {
+        "batch": "P29-C2",
+        "normal_candidate": "C2 CMake C++17/O2",
+        "program_sha256": "b53f853b356e9c8cf1e8fedf9832201d9bf705cf81d817b35314b4660e334594",
+        "functional_counts": {
+          "signature19": {
+            "C1": {
+              "parent_checks": 2154,
+              "worker_checks": 604,
+              "worker_phases": [
+                452,
+                152
+              ],
+              "strict_pass": true
+            },
+            "C2": {
+              "parent_checks": 2154,
+              "worker_checks": 604,
+              "worker_phases": [
+                452,
+                152
+              ],
+              "strict_pass": true
+            }
+          },
+          "dual12": {
+            "generation_roles": {
+              "before": 4,
+              "after": 8
+            },
+            "normal_workers": 12,
+            "assertion_checks": 2662,
+            "cold_RID_pairs": 6
+          },
+          "C2_formal_multi10": {
+            "normal_workers": 10,
+            "worker_checks": 2483,
+            "parent_checks": 17809
+          },
+          "core40": {
+            "PG": 40,
+            "C1": 38,
+            "C2": 40,
+            "requested": 40,
+            "C2_permanent_separate_same40": true,
+            "rows_per_core40": 119,
+            "cells_per_core40": 847,
+            "NULLs_per_core40": 220
+          },
+          "constraint154_C2": {
+            "actual": 154,
+            "differences": 0
+          },
+          "mini21": {
+            "PG": 21,
+            "C1": 13,
+            "C2": 19,
+            "requested": 21,
+            "ordinary_remaining": [
+              {
+                "id": "select.zero-columns-one-row",
+                "differences": [
+                  {
+                    "field": "frames",
+                    "actual": "TCZ",
+                    "expected": "TDCZ"
+                  },
+                  {
+                    "field": "rows",
+                    "actual": [],
+                    "expected": [
+                      []
+                    ]
+                  }
+                ]
+              },
+              {
+                "id": "zero-column-returning-star-invalid",
+                "differences": [
+                  {
+                    "field": "SQLSTATE",
+                    "actual": "42P01",
+                    "expected": "42601"
+                  }
+                ]
+              }
+            ]
+          },
+          "related_pair": {
+            "generation_names": [
+              "before_P28C4",
+              "C1"
+            ],
+            "attempted_each": 9,
+            "pass_each": 8,
+            "toast_original_assertion_line": 604,
+            "toast_exit_each": -6,
+            "user_paused_whole_test_NOTRUN": {
+              "name": "physical_restore_validation_test",
+              "original_source": "tests/physical_restore_validation_test.cpp",
+              "snapshot": "build/pg-feature-multilob-20261106-qo4694u1/related-storage-native-pair-v1/sources/physical_restore_validation_test.cpp",
+              "source_sha256": "5371f9054cfc2d2d0a456091d3a647c923c367f0e001debe2844353caa4a9052",
+              "expected_exit": 0,
+              "status": "deferred-scope-NOTRUN",
+              "deferred_reason": {
+                "source_lines": [
+                  153,
+                  231,
+                  275
+                ],
+                "scope": "actual failDirectorySyncAfterForTesting publication/sync fault matrix; root explicitly excludes full unchanged fixture; no subset executed"
+              }
+            }
+          },
+          "WAL": {
+            "roles": 2,
+            "actual_actions": 12,
+            "each_role_exits": [
+              -9,
+              0
+            ],
+            "visible_observers": 4,
+            "visible_rows": 34,
+            "visible_cells": 238,
+            "visible_NULL": 44,
+            "all_visible_observers_normal0": true
+          }
+        },
+        "functional_facts_sha256": "aa6b0afe1e49bf8fb237e702ccaf2c1744097c983d4693b2af04d81b956317c0",
+        "canonical_cost_summary_sha256": "2cffd7760fef98c29b17ca773ea36f770b5de61860c911b6ddc603be17d76437",
+        "performance_classification": {
+          "wall_ns": {
+            "lower_than_both": 1,
+            "higher_than_both": 12,
+            "between_or_equal": 3
+          },
+          "server_process_cpu_ns": {
+            "lower_than_both": 1,
+            "higher_than_both": 12,
+            "between_or_equal": 3
+          },
+          "client_process_cpu_ns": {
+            "lower_than_both": 6,
+            "higher_than_both": 2,
+            "between_or_equal": 8
+          }
+        },
+        "affinity8_summary_sha256": "f89f58b6af17d4834c0b4935c30b62161b480f0a111b85b246865294a6b90ca0",
+        "regression_cause": "OPEN; narrow conditions do not overwrite original negative samples",
+        "no_stable_or_global_speed_claim": true,
+        "all_original273_states_unchanged": true,
+        "old279_history_preserved": true,
+        "goal_status": "active",
+        "no_push": true,
+        "no_default_promotion": true,
+        "profile4_raw_PC_audit_sha256": "b9b226bd4e05a4e5eae0166ed37b63ec7d4a842aa71a50a65ee761a0daf1e800",
+        "affinity8_static_review_sha256": "8256ce16180a843503a406820c3f0a8da82f97f2510642de5f2fb5e520413003",
+        "normal_diagnostic_cannot_replace_canonical": true
+      }
+    },
+    {
       "issue": "2026-11-06 CHECK/FK NOT VALID and actual history validation",
       "gap_ids": [
         "CONS-02",

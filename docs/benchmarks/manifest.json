@@ -283,8 +283,25 @@
       "sha256": "45fb2a9e058b39e8fb5b5bff542e0948b85d9b5e69ecb75f08f37710c18005e8",
       "encoding": "gzip",
       "roundtrip_bytes_exact": true
+    },
+    {
+      "original_path": "docs/benchmarks/multilob-storage-20261106.json",
+      "original_bytes": 22096038,
+      "original_sha256": "bdb1bfbe9ee835ba538513f78027bf12a36dd34c60e180887353dd8d0ce18da1",
+      "path": "docs/benchmarks/multilob-storage-20261106.json.gz",
+      "bytes": 16629802,
+      "sha256": "80aaf5c0215a2bf5ce571809d7cd87992e3e1c552133315a6818de9a6a76cf12",
+      "encoding": "gzip",
+      "roundtrip_bytes_exact": true,
+      "container_format_version": 6,
+      "payload_format_version": 5,
+      "payload_encoding": "xz+base64",
+      "payload_bytes": 1613689016,
+      "payload_sha256": "54792f83cb058b5b0947245c1026c3d0c3b04c8cb0d196aa2bf5f5ae43acbc13",
+      "payload_xz_bytes": 16571788,
+      "payload_xz_sha256": "28a95f0bcdf5eca6092283c7e3f66acf65f4dc50d642c4817a235a71fc059634"
     }
   ],
-  "total_original_bytes": 1483840777,
-  "total_bytes": 139022405
+  "total_original_bytes": 1505936815,
+  "total_bytes": 155652207
 }

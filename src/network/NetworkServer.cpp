@@ -6471,6 +6471,15 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session,
         return result;
     }
 
+    // This role comes from the completed actual mutation, never SQL text or
+    // the width/cardinality of a possible SELECT/RETURNING rowset. In
+    // particular a WITH envelope does not change its primary command's role.
+    if (structuredDml.available && structuredDml.commandOnly) {
+        result.commandTag = structuredDml.commandTag;
+        dbms::recordQueryExecution(sql, elapsedMs, session.currentDB, true, 0);
+        return result;
+    }
+
     if (structuredDml.available && !structuredDml.metadataOnly) {
         result.resultSet = true;
         result.columns = structuredDml.columns;

@@ -2643,6 +2643,7 @@ void publishMutationCount(const std::string& command, size_t affectedRows) {
     g_lastDmlResult = {};
     g_lastDmlResult.available = true;
     g_lastDmlResult.metadataOnly = true;
+    g_lastDmlResult.commandOnly = true;
     g_lastDmlResult.commandTag =
         command + " " + std::to_string(affectedRows);
 }
@@ -6348,6 +6349,11 @@ class BoundDmlExecution {
                      const std::vector<RowContext>* sources=nullptr) {
         DmlResult output;output.available=true;
         output.commandTag=command=="INSERT"?"INSERT 0 "+std::to_string(count):command+" "+std::to_string(count);
+        if (returning_->empty()) {
+            output.metadataOnly = true;
+            output.commandOnly = true;
+            return output;
+        }
         const auto& descriptor=query_->statementOutputs.at(statement_);
         output.rowDescriptor=descriptor;
         // The frozen actual declaration is authoritative for this result,

@@ -1,5 +1,313 @@
 # 数据库操作性能测试报告（2026-10-30）
 
+<!-- CURRENT_MULTILOB_20261106 -->
+
+## 多个大字段存储与真实命令结果（2026-11-06，P29-C2）
+
+<a id="multilob-storage-20261106"></a>
+
+原七列建表同时含两个 BYTEA 和两个 TEXT 时，类型逻辑上限之和会超过堆头的 uint32 字段。现在仅对 format 2 中这种确实含变长列且最小实际元组可装页的溢出定义，将堆头名义宽度记为 0；可表示的旧宽度、列上限、实际变长元组和 TOAST 格式保持。UNLOGGED 初始化分叉在原有维护入口校验自身宽度，不匹配时重建。执行结果另显式标记无 RETURNING 的计数命令，普通 WITH DML 也据实际执行结果发送命令帧。
+
+原19项定义/排序规则诊断在C1及C2均完整通过：每代父进程2154项检查，两个工作进程合计604项（452+152）。原失败发生在旧七列建表前置阶段，不能把它写成19项全已执行。另C1/旧P28C4双代12工作进程共2662项检查、6组真实冷重启RID对照全过；C2正式物理生命周期用例为10工作进程2483项、父进程17809项，覆盖真实大值/NULL/RID、备份恢复、分区、UNLOGGED及维护路径。以上是不同固定夹具和进程角色，不能相加冒充全仓测试数。
+
+固定SimpleQuery文本格式0的37+3条、七列全值/NULL/十六进制BYTEA/列描述七项/命令与Ready检查，PG18.6首次40/40，C1为38/40，C2为40/40；C2自包含正式协议用例另一次同40控制也通过。C1保留的两项是DELETE多发空RowDescription帧，行值/NULL/状态/命令原本正确。C2按真实DML命令角色修正该帧形状，并保留SELECT/RETURNING结果形状；没有靠搜索字符串中的RETURNING判断。PG与本地分别读取真实关系OID进行来源锚定，不要求两个数据库的原始OID或整段原始协议字节相同。
+
+原constraint154协议回归在C2完整通过。独立结果形状mini21参考PG21/21，C1为13/21，C2为19/21，仍保留两个普通缺口：零列一行SELECT缺少一个零列DataRow；零列表RETURNING *的错误代码实际42P01而PG为42601。它们未被改为PASS。
+
+两个产品专属普通WAL角色共实际12条动作：COMMIT确认后强杀与未提交UPDATE确认后强杀，各自退出为预期-9，随后正常Main首先打开同一目录完成恢复并正常退出0；没有由原生读取器抢先恢复，也没有PG崩溃参考。后续在4份正常关闭后的独立副本上运行真实公共HeapScanCursor，34行/238单元/44个NULL和全部真实RID身份检查通过，四观察者均正常0且PID/进程组消失。初始到冷开共同键1..7不变，未提交角色全部8个旧键恢复，提交角色7个未修改旧键保持，实际修改键3及新键使用真实唯一RID。原WAL回执不回写；独立sidecar补充可见性证据，绝不把LP_NORMAL或虚构SQL ctid当可见行。
+
+正常 CMake C++17/O2 固定成本对照已完整执行：旧版—C2—同一旧版各三轮，固定表及单 BYTEA 表各256行，另有C2专属多LOB表128行。168句实际计时、546个响应、24个正常Main及42个只读副本观察者均完成；全值/NULL/来源/冷开与真实RID验证通过。结果不支持本批普遍提速：16个可比操作中，墙钟与服务端CPU各为1项低于两旧、12项高于两旧、3项介于两旧；固定表查询在原双表流程中服务端CPU中位数15.667→30.044→18.536ms，C2增加91.76%/62.08%。全部变慢项、原三样本、长尾及漂移保留。DELETE旧版还多一个空T帧，不能当完全相同协议工作量；新多LOB因旧版建表失败，仅描述新版成本，不计算提速比。
+
+后续固定CPU8的单表、三代正常构建窄诊断另有12次目标观测与24个正常Main；C2查询墙钟中位数22.086ms，对两旧24.181/26.336ms，服务端CPU14.326ms，对两旧15.406/16.605ms；C2相对C1的CPU中位数仍增加4.40%。这个更窄条件未重现原流程的大幅差异，但不能冲销原负向结果、归因于CPU亲和性或证明稳定收益，回退原因仍未确认。四角色用户态CPU采样的512次完整查询均通过，显示共同热点在逐列NULL检查及文件身份核验；采样计时没有混入正常性能表。
+
+### 功能、兼容范围与未通过项
+
+原始七列定义未删改：
+
+```sql
+CREATE TABLE cv_sig(id INT PRIMARY KEY,n INT,tag TEXT,other_tag TEXT,bytes BYTEA,other_bytes BYTEA,"select" INT);
+```
+
+相关存储原生回归实际是旧P28C4与C1各9例、各8例正常通过；toast_test两代均在原第604行 !corruptScan.open() 断言中止(-6)，原stdout/stderr和后续未执行边界保留，不称问题已解决或正常退出。physical_restore_validation_test整例因用户既有同步故障矩阵边界保持NOTRUN，没有拆出易过子集，也不算通过。本批不是全量测试或全部TOAST/恢复故障能力验收。
+
+这里的物理formatVersion=2不同于用户暂停的协议输出格式码2。新增协议只覆盖SimpleQuery文本格式0，BYTEA的00/FF以真实\x十六进制全值核对，不宣称新增二进制结果格式1/2、参数Portal或retained/provider兼容。双代往返只证明旧可表示固定/单LOB文件在新程序写入并关闭后仍能被旧程序读取；没有证明旧版可建立或读取新多LOB声明。
+
+未将mini21中仍失败的两个零列用例删掉或注册成绿色子集；完整草稿和原始失败保留。只读可见行工具首次编译的Session命名空间错误、profile启动前的路径/序列化错误均保留原记录；修正的是离线夹具和接收器，不是数据库SQL预期，正式正常成本样本没有重采。
+
+### 其他数据库设计调研
+
+设计参考分别来自PG18.6逐属性真实Datum与TOAST处理、SQLite记录串行类型/溢出页按实际载荷长度存储、DuckDB按实际字符串GetSize及溢出块存储。它们支持把声明容量与物理载荷/分配提示分离，不构成三库存储格式或事务恢复等价证明。本地既有BYTEA逻辑容量2147483647字节(2GiB-1)与PG文档约1GB的varlena单值限制不同；本轮保留本地边界，未测试接近2GiB值，也不声称相同单值上限。
+
+官方原始资料：[PostgreSQL18.6](https://raw.githubusercontent.com/postgres/postgres/724edf9bde9d356724ad384a2e196edc3c9f80f7/src/backend/access/heap/heaptoast.c)，[PostgreSQL18](https://www.postgresql.org/docs/18/storage-toast.html)，[SQLite](https://www.sqlite.org/fileformat2.html#record_format)，[DuckDB pinned](https://raw.githubusercontent.com/duckdb/duckdb/d1dc88f950d456d72493df452dabdcd13aa413dd/src/storage/compression/string_uncompressed.cpp)。
+
+DuckDB按已固定源码commit取证，不宣称最新main；最新commit查询的403失败也保留。本批没有运行SQLite/DuckDB吞吐对比，也没有据资料研究宣布功能验收。
+
+### 正常成本完整原样本
+
+每个UPDATE16/DELETE16都是一条影响16行的SQL。墙钟边界为发出完整SimpleQuery至收到Ready；含收发、5字节帧头识别和原始块复制，完整字段解码/核对及证据文件写盘在计时后。服务器与客户端CPU、/proc观测并非原子同刻；自然的建表和全值核验发生在计时前，不能当冷查询。采样期间无编译、压缩或分析器。初次mixed流程没有记录请求线程频率，不能用leader最后CPU猜测根因。
+
+#### P29 normal fixed-size operation costs
+
+All values are the original three independent contexts. Percentages compare medians; no exclusions or causal/stable-speed claim. Each range UPDATE/DELETE is one SQL statement affecting16 rows. DELETE before includes an extra zero-column T frame; overflow is new-only. Native cloned visible-cursor work occurs after all Main timing in that context.
+
+| Scope | Region | Metric | Program | raw3 ms | min ms | p50 ms | max ms |
+|---|---|---|---|---|---:|---:|---:|
+| fixed | insert1 | wall_ns | before-first | 14.911379, 15.368281, 15.897223 | 14.911379 | 15.368281 | 15.897223 |
+| fixed | insert1 | wall_ns | candidate | 21.906650, 18.961670, 21.699761 | 18.961670 | 21.699761 | 21.906650 |
+| fixed | insert1 | wall_ns | before-return | 20.685983, 19.731638, 15.970625 | 15.970625 | 19.731638 | 20.685983 |
+| fixed | insert1 | server_process_cpu_ns | before-first | 6.430956, 6.551277, 8.410963 | 6.430956 | 6.551277 | 8.410963 |
+| fixed | insert1 | server_process_cpu_ns | candidate | 6.235741, 9.332008, 9.017166 | 6.235741 | 9.017166 | 9.332008 |
+| fixed | insert1 | server_process_cpu_ns | before-return | 7.740937, 10.709492, 6.781100 | 6.781100 | 7.740937 | 10.709492 |
+| fixed | insert1 | client_process_cpu_ns | before-first | 0.194334, 0.202264, 0.219741 | 0.194334 | 0.202264 | 0.219741 |
+| fixed | insert1 | client_process_cpu_ns | candidate | 0.193017, 0.210367, 0.202497 | 0.193017 | 0.202497 | 0.210367 |
+| fixed | insert1 | client_process_cpu_ns | before-return | 0.199455, 0.211388, 0.206196 | 0.199455 | 0.206196 | 0.211388 |
+| fixed | update16 | wall_ns | before-first | 57.340675, 70.666998, 63.783918 | 57.340675 | 63.783918 | 70.666998 |
+| fixed | update16 | wall_ns | candidate | 85.292136, 125.426008, 181.841489 | 85.292136 | 125.426008 | 181.841489 |
+| fixed | update16 | wall_ns | before-return | 125.706849, 68.262573, 72.532255 | 68.262573 | 72.532255 | 125.706849 |
+| fixed | update16 | server_process_cpu_ns | before-first | 47.321324, 47.142728, 56.614810 | 47.142728 | 47.321324 | 56.614810 |
+| fixed | update16 | server_process_cpu_ns | candidate | 67.944380, 72.350463, 64.129337 | 64.129337 | 67.944380 | 72.350463 |
+| fixed | update16 | server_process_cpu_ns | before-return | 72.142558, 59.965554, 63.079728 | 59.965554 | 63.079728 | 72.142558 |
+| fixed | update16 | client_process_cpu_ns | before-first | 0.189845, 0.251725, 0.208503 | 0.189845 | 0.208503 | 0.251725 |
+| fixed | update16 | client_process_cpu_ns | candidate | 0.224314, 0.208751, 0.169523 | 0.169523 | 0.208751 | 0.224314 |
+| fixed | update16 | client_process_cpu_ns | before-return | 0.210287, 0.220727, 0.206888 | 0.206888 | 0.210287 | 0.220727 |
+| fixed | select_after_update | wall_ns | before-first | 22.930225, 24.698857, 25.015661 | 22.930225 | 24.698857 | 25.015661 |
+| fixed | select_after_update | wall_ns | candidate | 30.165556, 41.230261, 102.765130 | 30.165556 | 41.230261 | 102.765130 |
+| fixed | select_after_update | wall_ns | before-return | 37.410188, 27.868672, 26.601337 | 26.601337 | 27.868672 | 37.410188 |
+| fixed | select_after_update | server_process_cpu_ns | before-first | 12.260123, 16.499056, 15.667344 | 12.260123 | 15.667344 | 16.499056 |
+| fixed | select_after_update | server_process_cpu_ns | candidate | 20.793163, 30.043768, 31.134099 | 20.793163 | 30.043768 | 31.134099 |
+| fixed | select_after_update | server_process_cpu_ns | before-return | 28.601690, 18.536101, 18.423045 | 18.423045 | 18.536101 | 28.601690 |
+| fixed | select_after_update | client_process_cpu_ns | before-first | 4.764929, 4.892809, 6.886161 | 4.764929 | 4.892809 | 6.886161 |
+| fixed | select_after_update | client_process_cpu_ns | candidate | 4.990799, 4.833728, 4.948835 | 4.833728 | 4.948835 | 4.990799 |
+| fixed | select_after_update | client_process_cpu_ns | before-return | 3.756705, 4.989380, 4.959846 | 3.756705 | 4.959846 | 4.989380 |
+| fixed | delete16 | wall_ns | before-first | 40.615603, 42.339548, 40.223311 | 40.223311 | 40.615603 | 42.339548 |
+| fixed | delete16 | wall_ns | candidate | 50.358311, 60.365315, 58.569172 | 50.358311 | 58.569172 | 60.365315 |
+| fixed | delete16 | wall_ns | before-return | 55.578539, 44.278606, 35.236604 | 35.236604 | 44.278606 | 55.578539 |
+| fixed | delete16 | server_process_cpu_ns | before-first | 32.541211, 33.129494, 33.538235 | 32.541211 | 33.129494 | 33.538235 |
+| fixed | delete16 | server_process_cpu_ns | candidate | 39.827968, 49.553592, 50.260100 | 39.827968 | 49.553592 | 50.260100 |
+| fixed | delete16 | server_process_cpu_ns | before-return | 46.810142, 36.129187, 27.025847 | 27.025847 | 36.129187 | 46.810142 |
+| fixed | delete16 | client_process_cpu_ns | before-first | 0.259191, 0.228084, 0.219557 | 0.219557 | 0.228084 | 0.259191 |
+| fixed | delete16 | client_process_cpu_ns | candidate | 0.221130, 0.176036, 0.216144 | 0.176036 | 0.216144 | 0.221130 |
+| fixed | delete16 | client_process_cpu_ns | before-return | 0.283338, 0.234247, 0.182712 | 0.182712 | 0.234247 | 0.283338 |
+| fixed | vacuum | wall_ns | before-first | 1.313317, 1.533314, 1.286283 | 1.286283 | 1.313317 | 1.533314 |
+| fixed | vacuum | wall_ns | candidate | 1.485597, 2.906156, 2.084523 | 1.485597 | 2.084523 | 2.906156 |
+| fixed | vacuum | wall_ns | before-return | 2.053779, 1.482527, 1.221131 | 1.221131 | 1.482527 | 2.053779 |
+| fixed | vacuum | server_process_cpu_ns | before-first | 1.222884, 1.434989, 1.192736 | 1.192736 | 1.222884 | 1.434989 |
+| fixed | vacuum | server_process_cpu_ns | candidate | 1.384110, 2.823291, 1.957017 | 1.384110 | 1.957017 | 2.823291 |
+| fixed | vacuum | server_process_cpu_ns | before-return | 1.922630, 1.380680, 1.132533 | 1.132533 | 1.380680 | 1.922630 |
+| fixed | vacuum | client_process_cpu_ns | before-first | 0.185151, 0.204153, 0.183567 | 0.183567 | 0.185151 | 0.204153 |
+| fixed | vacuum | client_process_cpu_ns | candidate | 0.197297, 0.150487, 0.198477 | 0.150487 | 0.197297 | 0.198477 |
+| fixed | vacuum | client_process_cpu_ns | before-return | 0.209027, 0.199225, 0.123133 | 0.123133 | 0.199225 | 0.209027 |
+| fixed | select_after_vacuum | wall_ns | before-first | 21.851845, 24.790847, 23.518761 | 21.851845 | 23.518761 | 24.790847 |
+| fixed | select_after_vacuum | wall_ns | candidate | 30.109219, 32.308897, 28.843535 | 28.843535 | 30.109219 | 32.308897 |
+| fixed | select_after_vacuum | wall_ns | before-return | 32.465611, 30.539337, 20.934131 | 20.934131 | 30.539337 | 32.465611 |
+| fixed | select_after_vacuum | server_process_cpu_ns | before-first | 15.844468, 16.663150, 16.824282 | 15.844468 | 16.663150 | 16.824282 |
+| fixed | select_after_vacuum | server_process_cpu_ns | candidate | 21.869752, 22.955342, 21.791410 | 21.791410 | 21.869752 | 22.955342 |
+| fixed | select_after_vacuum | server_process_cpu_ns | before-return | 24.050478, 22.600625, 13.165023 | 13.165023 | 22.600625 | 24.050478 |
+| fixed | select_after_vacuum | client_process_cpu_ns | before-first | 3.578215, 4.600109, 4.696975 | 3.578215 | 4.600109 | 4.696975 |
+| fixed | select_after_vacuum | client_process_cpu_ns | candidate | 4.606465, 4.611646, 4.586422 | 4.586422 | 4.606465 | 4.611646 |
+| fixed | select_after_vacuum | client_process_cpu_ns | before-return | 4.626946, 4.832059, 4.574462 | 4.574462 | 4.626946 | 4.832059 |
+| fixed | truncate | wall_ns | before-first | 254.543869, 249.177426, 300.796862 | 249.177426 | 254.543869 | 300.796862 |
+| fixed | truncate | wall_ns | candidate | 346.433765, 388.733075, 260.849299 | 260.849299 | 346.433765 | 388.733075 |
+| fixed | truncate | wall_ns | before-return | 232.872547, 269.093861, 240.315008 | 232.872547 | 240.315008 | 269.093861 |
+| fixed | truncate | server_process_cpu_ns | before-first | 79.615640, 73.255798, 86.058318 | 73.255798 | 79.615640 | 86.058318 |
+| fixed | truncate | server_process_cpu_ns | candidate | 115.818387, 104.234914, 80.993695 | 80.993695 | 104.234914 | 115.818387 |
+| fixed | truncate | server_process_cpu_ns | before-return | 94.112141, 83.134156, 73.633328 | 73.633328 | 83.134156 | 94.112141 |
+| fixed | truncate | client_process_cpu_ns | before-first | 0.249117, 0.179271, 0.230766 | 0.179271 | 0.230766 | 0.249117 |
+| fixed | truncate | client_process_cpu_ns | candidate | 0.268835, 0.235243, 0.224522 | 0.224522 | 0.235243 | 0.268835 |
+| fixed | truncate | client_process_cpu_ns | before-return | 0.235026, 0.180520, 0.242761 | 0.180520 | 0.235026 | 0.242761 |
+| fixed | reinsert_population | wall_ns | before-first | 584.860154, 566.686053, 625.286000 | 566.686053 | 584.860154 | 625.286000 |
+| fixed | reinsert_population | wall_ns | candidate | 662.246121, 654.359402, 614.305245 | 614.305245 | 654.359402 | 662.246121 |
+| fixed | reinsert_population | wall_ns | before-return | 637.614042, 633.124814, 580.543462 | 580.543462 | 633.124814 | 637.614042 |
+| fixed | reinsert_population | server_process_cpu_ns | before-first | 556.108540, 533.518790, 602.113984 | 533.518790 | 556.108540 | 602.113984 |
+| fixed | reinsert_population | server_process_cpu_ns | candidate | 585.324844, 569.109756, 559.099173 | 559.099173 | 569.109756 | 585.324844 |
+| fixed | reinsert_population | server_process_cpu_ns | before-return | 583.058661, 604.982497, 548.389193 | 548.389193 | 583.058661 | 604.982497 |
+| fixed | reinsert_population | client_process_cpu_ns | before-first | 0.213840, 0.227761, 0.251597 | 0.213840 | 0.227761 | 0.251597 |
+| fixed | reinsert_population | client_process_cpu_ns | candidate | 0.229869, 0.253189, 0.164165 | 0.164165 | 0.229869 | 0.253189 |
+| fixed | reinsert_population | client_process_cpu_ns | before-return | 0.224800, 0.236640, 0.244997 | 0.224800 | 0.236640 | 0.244997 |
+| single | insert1 | wall_ns | before-first | 16.536043, 15.236743, 16.567373 | 15.236743 | 16.536043 | 16.567373 |
+| single | insert1 | wall_ns | candidate | 24.026323, 32.520507, 20.684454 | 20.684454 | 24.026323 | 32.520507 |
+| single | insert1 | wall_ns | before-return | 21.736532, 23.046251, 15.531870 | 15.531870 | 21.736532 | 23.046251 |
+| single | insert1 | server_process_cpu_ns | before-first | 7.230427, 8.741299, 8.882624 | 7.230427 | 8.741299 | 8.882624 |
+| single | insert1 | server_process_cpu_ns | candidate | 9.657295, 13.887095, 10.081112 | 9.657295 | 10.081112 | 13.887095 |
+| single | insert1 | server_process_cpu_ns | before-return | 10.513493, 8.339402, 8.517592 | 8.339402 | 8.517592 | 10.513493 |
+| single | insert1 | client_process_cpu_ns | before-first | 0.200283, 0.215494, 0.219960 | 0.200283 | 0.215494 | 0.219960 |
+| single | insert1 | client_process_cpu_ns | candidate | 0.172658, 0.206250, 0.140514 | 0.140514 | 0.172658 | 0.206250 |
+| single | insert1 | client_process_cpu_ns | before-return | 0.161035, 0.173124, 0.207773 | 0.161035 | 0.173124 | 0.207773 |
+| single | update16 | wall_ns | before-first | 122.525452, 132.940008, 148.979316 | 122.525452 | 132.940008 | 148.979316 |
+| single | update16 | wall_ns | candidate | 148.891836, 170.538208, 158.909128 | 148.891836 | 158.909128 | 170.538208 |
+| single | update16 | wall_ns | before-return | 165.202636, 230.891972, 128.106894 | 128.106894 | 165.202636 | 230.891972 |
+| single | update16 | server_process_cpu_ns | before-first | 102.549495, 116.263182, 118.049581 | 102.549495 | 116.263182 | 118.049581 |
+| single | update16 | server_process_cpu_ns | candidate | 118.211122, 135.585931, 117.989084 | 117.989084 | 118.211122 | 135.585931 |
+| single | update16 | server_process_cpu_ns | before-return | 102.980948, 138.175703, 114.214891 | 102.980948 | 114.214891 | 138.175703 |
+| single | update16 | client_process_cpu_ns | before-first | 0.242301, 0.218841, 0.230824 | 0.218841 | 0.230824 | 0.242301 |
+| single | update16 | client_process_cpu_ns | candidate | 0.212045, 0.232125, 0.221180 | 0.212045 | 0.221180 | 0.232125 |
+| single | update16 | client_process_cpu_ns | before-return | 0.185907, 0.163133, 0.222920 | 0.163133 | 0.185907 | 0.222920 |
+| single | select_after_update | wall_ns | before-first | 35.819874, 43.986405, 47.569176 | 35.819874 | 43.986405 | 47.569176 |
+| single | select_after_update | wall_ns | candidate | 50.104482, 57.507591, 51.837468 | 50.104482 | 51.837468 | 57.507591 |
+| single | select_after_update | wall_ns | before-return | 51.644243, 47.943115, 42.183275 | 42.183275 | 47.943115 | 51.644243 |
+| single | select_after_update | server_process_cpu_ns | before-first | 29.249991, 35.767469, 36.568199 | 29.249991 | 35.767469 | 36.568199 |
+| single | select_after_update | server_process_cpu_ns | candidate | 40.949064, 45.945792, 42.392317 | 40.949064 | 42.392317 | 45.945792 |
+| single | select_after_update | server_process_cpu_ns | before-return | 41.943863, 39.947655, 33.992000 | 33.992000 | 39.947655 | 41.943863 |
+| single | select_after_update | client_process_cpu_ns | before-first | 2.978107, 6.166451, 8.133779 | 2.978107 | 6.166451 | 8.133779 |
+| single | select_after_update | client_process_cpu_ns | candidate | 5.941226, 5.898526, 6.163726 | 5.898526 | 5.941226 | 6.163726 |
+| single | select_after_update | client_process_cpu_ns | before-return | 5.886766, 6.161067, 6.226311 | 5.886766 | 6.161067 | 6.226311 |
+| single | delete16 | wall_ns | before-first | 48.681016, 133.542830, 55.529704 | 48.681016 | 55.529704 | 133.542830 |
+| single | delete16 | wall_ns | candidate | 57.750556, 81.321329, 58.665659 | 57.750556 | 58.665659 | 81.321329 |
+| single | delete16 | wall_ns | before-return | 61.026664, 60.460375, 51.959083 | 51.959083 | 60.460375 | 61.026664 |
+| single | delete16 | server_process_cpu_ns | before-first | 39.758936, 74.249297, 48.308573 | 39.758936 | 48.308573 | 74.249297 |
+| single | delete16 | server_process_cpu_ns | candidate | 47.653730, 62.614411, 49.126889 | 47.653730 | 49.126889 | 62.614411 |
+| single | delete16 | server_process_cpu_ns | before-return | 52.087155, 50.668426, 45.109475 | 45.109475 | 50.668426 | 52.087155 |
+| single | delete16 | client_process_cpu_ns | before-first | 0.181027, 0.246948, 0.234007 | 0.181027 | 0.234007 | 0.246948 |
+| single | delete16 | client_process_cpu_ns | candidate | 0.173525, 0.230875, 0.225670 | 0.173525 | 0.225670 | 0.230875 |
+| single | delete16 | client_process_cpu_ns | before-return | 0.233811, 0.272837, 0.194173 | 0.194173 | 0.233811 | 0.272837 |
+| single | vacuum | wall_ns | before-first | 5.499223, 8.348321, 6.494562 | 5.499223 | 6.494562 | 8.348321 |
+| single | vacuum | wall_ns | candidate | 5.898434, 7.166589, 6.368668 | 5.898434 | 6.368668 | 7.166589 |
+| single | vacuum | wall_ns | before-return | 6.824096, 6.398009, 5.955423 | 5.955423 | 6.398009 | 6.824096 |
+| single | vacuum | server_process_cpu_ns | before-first | 5.196209, 8.077382, 6.205124 | 5.196209 | 6.205124 | 8.077382 |
+| single | vacuum | server_process_cpu_ns | candidate | 5.688353, 6.894376, 6.093428 | 5.688353 | 6.093428 | 6.894376 |
+| single | vacuum | server_process_cpu_ns | before-return | 6.582422, 6.122304, 5.695983 | 5.695983 | 6.122304 | 6.582422 |
+| single | vacuum | client_process_cpu_ns | before-first | 0.203910, 0.221176, 0.211244 | 0.203910 | 0.211244 | 0.221176 |
+| single | vacuum | client_process_cpu_ns | candidate | 0.138863, 0.197230, 0.208791 | 0.138863 | 0.197230 | 0.208791 |
+| single | vacuum | client_process_cpu_ns | before-return | 0.129105, 0.212010, 0.201947 | 0.129105 | 0.201947 | 0.212010 |
+| single | select_after_vacuum | wall_ns | before-first | 37.088214, 51.843135, 44.571003 | 37.088214 | 44.571003 | 51.843135 |
+| single | select_after_vacuum | wall_ns | candidate | 44.281384, 47.516380, 47.290786 | 44.281384 | 47.290786 | 47.516380 |
+| single | select_after_vacuum | wall_ns | before-return | 50.515455, 46.874847, 43.630850 | 43.630850 | 46.874847 | 50.515455 |
+| single | select_after_vacuum | server_process_cpu_ns | before-first | 31.553363, 45.510612, 36.579174 | 31.553363 | 36.579174 | 45.510612 |
+| single | select_after_vacuum | server_process_cpu_ns | candidate | 36.070559, 40.019267, 37.153596 | 36.070559 | 37.153596 | 40.019267 |
+| single | select_after_vacuum | server_process_cpu_ns | before-return | 35.290584, 39.378133, 36.781228 | 35.290584 | 36.781228 | 39.378133 |
+| single | select_after_vacuum | client_process_cpu_ns | before-first | 3.168377, 5.695870, 5.672364 | 3.168377 | 5.672364 | 5.695870 |
+| single | select_after_vacuum | client_process_cpu_ns | candidate | 5.123526, 5.403636, 5.774138 | 5.123526 | 5.403636 | 5.774138 |
+| single | select_after_vacuum | client_process_cpu_ns | before-return | 8.155490, 5.659887, 5.558702 | 5.558702 | 5.659887 | 8.155490 |
+| single | truncate | wall_ns | before-first | 390.896665, 423.934982, 421.084433 | 390.896665 | 421.084433 | 423.934982 |
+| single | truncate | wall_ns | candidate | 451.273962, 489.557581, 435.221318 | 435.221318 | 451.273962 | 489.557581 |
+| single | truncate | wall_ns | before-return | 390.833655, 656.023382, 430.680378 | 390.833655 | 430.680378 | 656.023382 |
+| single | truncate | server_process_cpu_ns | before-first | 102.439798, 118.483423, 104.773000 | 102.439798 | 104.773000 | 118.483423 |
+| single | truncate | server_process_cpu_ns | candidate | 118.402489, 125.818133, 131.076713 | 118.402489 | 125.818133 | 131.076713 |
+| single | truncate | server_process_cpu_ns | before-return | 115.518101, 131.995939, 122.516476 | 115.518101 | 122.516476 | 131.995939 |
+| single | truncate | client_process_cpu_ns | before-first | 0.212089, 0.233130, 0.336181 | 0.212089 | 0.233130 | 0.336181 |
+| single | truncate | client_process_cpu_ns | candidate | 0.270948, 0.170784, 0.264046 | 0.170784 | 0.264046 | 0.270948 |
+| single | truncate | client_process_cpu_ns | before-return | 0.299190, 0.235682, 0.262587 | 0.235682 | 0.262587 | 0.299190 |
+| single | reinsert_population | wall_ns | before-first | 1036.686179, 1076.466840, 1075.774511 | 1036.686179 | 1075.774511 | 1076.466840 |
+| single | reinsert_population | wall_ns | candidate | 1142.383063, 1141.026326, 1943.413029 | 1141.026326 | 1142.383063 | 1943.413029 |
+| single | reinsert_population | wall_ns | before-return | 992.071766, 1039.853398, 1128.246772 | 992.071766 | 1039.853398 | 1128.246772 |
+| single | reinsert_population | server_process_cpu_ns | before-first | 1008.470510, 1010.415164, 1008.222837 | 1008.222837 | 1008.470510 | 1010.415164 |
+| single | reinsert_population | server_process_cpu_ns | candidate | 1035.106492, 1033.614696, 1113.000870 | 1033.614696 | 1035.106492 | 1113.000870 |
+| single | reinsert_population | server_process_cpu_ns | before-return | 936.613806, 996.994019, 1032.138425 | 936.613806 | 996.994019 | 1032.138425 |
+| single | reinsert_population | client_process_cpu_ns | before-first | 0.699655, 0.564333, 0.822251 | 0.564333 | 0.699655 | 0.822251 |
+| single | reinsert_population | client_process_cpu_ns | candidate | 1.186009, 0.582085, 0.615537 | 0.582085 | 0.615537 | 1.186009 |
+| single | reinsert_population | client_process_cpu_ns | before-return | 0.601117, 0.774925, 0.567147 | 0.567147 | 0.601117 | 0.774925 |
+| overflow | insert1 | wall_ns | candidate-only | 30.618840, 912.663801, 16.708637 | 16.708637 | 30.618840 | 912.663801 |
+| overflow | insert1 | server_process_cpu_ns | candidate-only | 17.686450, 19.315776, 9.294738 | 9.294738 | 17.686450 | 19.315776 |
+| overflow | insert1 | client_process_cpu_ns | candidate-only | 0.218150, 0.183761, 0.247067 | 0.183761 | 0.218150 | 0.247067 |
+| overflow | update16 | wall_ns | candidate-only | 170.381926, 184.714439, 140.756455 | 140.756455 | 170.381926 | 184.714439 |
+| overflow | update16 | server_process_cpu_ns | candidate-only | 140.627918, 110.583841, 122.122418 | 110.583841 | 122.122418 | 140.627918 |
+| overflow | update16 | client_process_cpu_ns | candidate-only | 0.248601, 0.157679, 0.272071 | 0.157679 | 0.248601 | 0.272071 |
+| overflow | select_after_update | wall_ns | candidate-only | 55.748627, 45.105495, 46.543759 | 45.105495 | 46.543759 | 55.748627 |
+| overflow | select_after_update | server_process_cpu_ns | candidate-only | 48.258159, 36.708798, 41.384431 | 36.708798 | 41.384431 | 48.258159 |
+| overflow | select_after_update | client_process_cpu_ns | candidate-only | 4.055785, 3.970971, 4.139664 | 3.970971 | 4.055785 | 4.139664 |
+| overflow | delete16 | wall_ns | candidate-only | 59.395416, 57.207372, 52.790412 | 52.790412 | 57.207372 | 59.395416 |
+| overflow | delete16 | server_process_cpu_ns | candidate-only | 50.265878, 47.751550, 45.066072 | 45.066072 | 47.751550 | 50.265878 |
+| overflow | delete16 | client_process_cpu_ns | candidate-only | 0.237147, 0.270983, 0.286086 | 0.237147 | 0.270983 | 0.286086 |
+| overflow | vacuum | wall_ns | candidate-only | 7.453795, 7.745876, 7.812579 | 7.453795 | 7.745876 | 7.812579 |
+| overflow | vacuum | server_process_cpu_ns | candidate-only | 7.186637, 7.437928, 7.512695 | 7.186637 | 7.437928 | 7.512695 |
+| overflow | vacuum | client_process_cpu_ns | candidate-only | 0.200553, 0.215007, 0.235426 | 0.200553 | 0.215007 | 0.235426 |
+| overflow | select_after_vacuum | wall_ns | candidate-only | 44.127592, 44.668352, 44.166935 | 44.127592 | 44.166935 | 44.668352 |
+| overflow | select_after_vacuum | server_process_cpu_ns | candidate-only | 37.715462, 38.094461, 38.569260 | 37.715462 | 38.094461 | 38.569260 |
+| overflow | select_after_vacuum | client_process_cpu_ns | candidate-only | 3.561141, 3.645407, 3.805513 | 3.561141 | 3.645407 | 3.805513 |
+| overflow | truncate | wall_ns | candidate-only | 144.252421, 146.657150, 128.593187 | 128.593187 | 144.252421 | 146.657150 |
+| overflow | truncate | server_process_cpu_ns | candidate-only | 69.701345, 74.183641, 57.465814 | 57.465814 | 69.701345 | 74.183641 |
+| overflow | truncate | client_process_cpu_ns | candidate-only | 0.229252, 0.232780, 0.259222 | 0.229252 | 0.232780 | 0.259222 |
+| overflow | reinsert_population | wall_ns | candidate-only | 1096.392369, 1137.886347, 1049.277980 | 1049.277980 | 1096.392369 | 1137.886347 |
+| overflow | reinsert_population | server_process_cpu_ns | candidate-only | 1043.161237, 1049.400023, 960.600984 | 960.600984 | 1043.161237 | 1049.400023 |
+| overflow | reinsert_population | client_process_cpu_ns | candidate-only | 1.673976, 0.734158, 0.800551 | 0.734158 | 0.800551 | 1.673976 |
+
+| Scope | Region | Metric | C2 vs first % | C2 vs return % | Old return drift % | Class |
+|---|---|---|---:|---:|---:|---|
+| fixed | insert1 | wall_ns | +41.198362 | +9.974453 | +28.391965 | higher_than_both |
+| fixed | insert1 | server_process_cpu_ns | +37.639822 | +16.486751 | +18.159208 | higher_than_both |
+| fixed | insert1 | client_process_cpu_ns | +0.115196 | -1.793924 | +1.943994 | between_or_equal |
+| fixed | update16 | wall_ns | +96.642056 | +72.924457 | +13.715584 | higher_than_both |
+| fixed | update16 | server_process_cpu_ns | +43.580894 | +7.711910 | +33.300852 | higher_than_both |
+| fixed | update16 | client_process_cpu_ns | +0.118943 | -0.730430 | +0.855623 | between_or_equal |
+| fixed | select_after_update | wall_ns | +66.931858 | +47.944836 | +12.833853 | higher_than_both |
+| fixed | select_after_update | server_process_cpu_ns | +91.760441 | +62.082457 | +18.310423 | higher_than_both |
+| fixed | select_after_update | client_process_cpu_ns | +1.145068 | -0.222003 | +1.370113 | between_or_equal |
+| fixed | delete16 | wall_ns | +44.203625 | +32.274200 | +9.018709 | higher_than_both |
+| fixed | delete16 | server_process_cpu_ns | +49.575457 | +37.156676 | +9.054449 | higher_than_both |
+| fixed | delete16 | client_process_cpu_ns | -5.234913 | -7.728167 | +2.702075 | lower_than_both |
+| fixed | vacuum | wall_ns | +58.721999 | +40.606073 | +12.884170 | higher_than_both |
+| fixed | vacuum | server_process_cpu_ns | +60.032922 | +41.742982 | +12.903595 | higher_than_both |
+| fixed | vacuum | client_process_cpu_ns | +6.560051 | -0.967750 | +7.601363 | between_or_equal |
+| fixed | select_after_vacuum | wall_ns | +28.022131 | -1.408406 | +29.850960 | between_or_equal |
+| fixed | select_after_vacuum | server_process_cpu_ns | +31.246205 | -3.233862 | +35.632368 | between_or_equal |
+| fixed | select_after_vacuum | client_process_cpu_ns | +0.138171 | -0.442646 | +0.583399 | between_or_equal |
+| fixed | truncate | wall_ns | +36.099827 | +44.158190 | -5.589944 | higher_than_both |
+| fixed | truncate | server_process_cpu_ns | +30.922660 | +25.381575 | +4.419378 | higher_than_both |
+| fixed | truncate | client_process_cpu_ns | +1.940060 | +0.092330 | +1.846026 | higher_than_both |
+| fixed | reinsert_population | wall_ns | +11.883054 | +3.353934 | +8.252342 | higher_than_both |
+| fixed | reinsert_population | server_process_cpu_ns | +2.337892 | -2.392367 | +4.846198 | between_or_equal |
+| fixed | reinsert_population | client_process_cpu_ns | +0.925532 | -2.861308 | +3.898385 | between_or_equal |
+| single | insert1 | wall_ns | +45.296689 | +10.534298 | +31.449416 | higher_than_both |
+| single | insert1 | server_process_cpu_ns | +15.327390 | +18.356362 | -2.559196 | higher_than_both |
+| single | insert1 | client_process_cpu_ns | -19.878048 | -0.269171 | -19.661800 | lower_than_both |
+| single | update16 | wall_ns | +19.534466 | -3.809569 | +24.268562 | between_or_equal |
+| single | update16 | server_process_cpu_ns | +1.675457 | +3.498870 | -1.761771 | higher_than_both |
+| single | update16 | client_process_cpu_ns | -4.178075 | +18.973465 | -19.459415 | between_or_equal |
+| single | select_after_update | wall_ns | +17.848840 | +8.122862 | +8.995302 | higher_than_both |
+| single | select_after_update | server_process_cpu_ns | +18.521993 | +6.119663 | +11.687117 | higher_than_both |
+| single | select_after_update | client_process_cpu_ns | -3.652425 | -3.568229 | -0.087311 | lower_than_both |
+| single | delete16 | wall_ns | +5.647347 | -2.968417 | +8.879340 | between_or_equal |
+| single | delete16 | server_process_cpu_ns | +1.693935 | -3.042402 | +4.884957 | between_or_equal |
+| single | delete16 | client_process_cpu_ns | -3.562714 | -3.481872 | -0.083758 | lower_than_both |
+| single | vacuum | wall_ns | -1.938453 | -0.458596 | -1.486675 | lower_than_both |
+| single | vacuum | server_process_cpu_ns | -1.800061 | -0.471653 | -1.334703 | lower_than_both |
+| single | vacuum | client_process_cpu_ns | -6.634035 | -2.335761 | -4.401072 | lower_than_both |
+| single | select_after_vacuum | wall_ns | +6.102136 | +0.887339 | +5.168930 | higher_than_both |
+| single | select_after_vacuum | server_process_cpu_ns | +1.570353 | +1.012386 | +0.552374 | higher_than_both |
+| single | select_after_vacuum | client_process_cpu_ns | -4.737496 | -4.527493 | -0.219961 | lower_than_both |
+| single | truncate | wall_ns | +7.169472 | +4.781640 | +2.278865 | higher_than_both |
+| single | truncate | server_process_cpu_ns | +20.086409 | +2.694868 | +16.935161 | higher_than_both |
+| single | truncate | client_process_cpu_ns | +13.261271 | +0.555625 | +12.635439 | higher_than_both |
+| single | reinsert_population | wall_ns | +6.191683 | +9.860012 | -3.339093 | higher_than_both |
+| single | reinsert_population | server_process_cpu_ns | +2.641226 | +3.822738 | -1.138010 | higher_than_both |
+| single | reinsert_population | client_process_cpu_ns | -12.022783 | +2.398867 | -14.083798 | between_or_equal |
+
+All negative results and maxima remain in the machine summary; raw process/client brackets and /proc CPU/RSS/IO snapshots are non-atomic and are not memory peaks. Matched data sizes are N256 only; overflow N128 has no usable old CREATE denominator.
+
+
+### CPU8正常构建窄诊断（独立条件）
+
+仅使用固定表257行的原SELECT-after-update，加入C1中间代；每代三个独立新目录，全部线程限制CPU8，正常Main不加载分析器。保留原建表/核验/手动CHECKPOINT/INSERT1/UPDATE16顺序，但没有初次mixed流程的第二张单BYTEA表，因此这不是原双表基准重跑或替换。216个响应、18,516行/55,500单元/4,824个NULL及1,536个关闭图像文件核对通过。24个频率端点实测1,200,239至2,913,730kHz；没有修改频率策略或按频率筛样本。这组只做协议/数据与调度诊断，没有运行native观察者或声称新增RID验收。
+
+| 指标 | 角色 | 原3样本 ms | 最小 ms | 中位 ms | 最大 ms |
+|---|---|---|---:|---:|---:|
+| wall_ns | before-first | 24.791555, 21.643514, 24.180781 | 21.643514 | 24.180781 | 24.791555 |
+| wall_ns | C1 | 22.416698, 19.825118, 24.556637 | 19.825118 | 22.416698 | 24.556637 |
+| wall_ns | C2 | 26.234830, 21.506968, 22.085525 | 21.506968 | 22.085525 | 26.234830 |
+| wall_ns | before-return | 26.801870, 26.335544, 23.115601 | 23.115601 | 26.335544 | 26.801870 |
+| server_process_cpu_ns | before-first | 15.744346, 14.112677, 15.405517 | 14.112677 | 15.405517 | 15.744346 |
+| server_process_cpu_ns | C1 | 14.591040, 13.722106, 12.931775 | 12.931775 | 13.722106 | 14.591040 |
+| server_process_cpu_ns | C2 | 16.971065, 12.549032, 14.326150 | 12.549032 | 14.326150 | 16.971065 |
+| server_process_cpu_ns | before-return | 16.605246, 17.220134, 15.722027 | 15.722027 | 16.605246 | 17.220134 |
+| client_process_cpu_ns | before-first | 4.644053, 4.513725, 4.747710 | 4.513725 | 4.644053 | 4.747710 |
+| client_process_cpu_ns | C1 | 4.945619, 2.348159, 7.322048 | 2.348159 | 4.945619 | 7.322048 |
+| client_process_cpu_ns | C2 | 4.767529, 4.701989, 5.519954 | 4.701989 | 4.767529 | 5.519954 |
+| client_process_cpu_ns | before-return | 7.402150, 4.806372, 4.820543 | 4.806372 | 4.820543 | 7.402150 |
+
+### 用户态调用栈定位（不作为正常计时）
+
+硬件perf因当前权限不可用，未修改内核或系统安装。临时本地libprofiler仅用于函数采样，没有替换分配器；四个实际正常进程各128次完整查询，采样周期1000微秒，样本总数2968/2747/2922/2760。原始profile、映射、线程记录和函数/地址表全部保留；剥离符号的系统库可能只有最近符号名，不能据其别名推断具体内存函数。程序本身的NULL检查→getPageAllocator→文件身份检查是共同热点，不是已证实的C2回退原因。后续普通顺序物理行bitmap复用仍只是审查建议，没有实现或收益验收。[工具官方说明](https://gperftools.github.io/gperftools/cpuprofile.html)。
+
+采样四角色总计572个完整响应、133,648行/400,928单元/36,920个NULL；其中512条为目标查询。独立直接解析原始profile并按实际映射及ELF有大小符号区间核验程序PC，保留地址表及累计表，不从系统库最近别名推断原因。归档清单明确列出4个原始profile和128个无扩展名线程文件，避免仅按后缀归档遗漏。
+
+最终验证对象是候选C2（SHA `b53f853b356e9c8cf1e8fedf9832201d9bf705cf81d817b35314b4660e334594`），默认安装程序未替换，未推送或切换分支。原53.45MiB性能JSON当前保留为5.70MiB gzip，未压缩基准文件已被Git忽略；本批完整证据同样采用可逐字节还原的gzip归档。只对核验可恢复的生成副本安排清理，Git历史不重写。性能目标继续，不能把功能修复称为全库优化完成。
+
+实际清单：源248/头177；测试2391，原2388逐字保持，新增2个CPP和1个协议测试；顶层CPP1124/全部CPP1129（nested5），登记684 driver/664 standalone E2E；Markdown754/保护725保持；旧28份gzip不变，总计29。原279条历史原文保持，新增第280条partial。
+
+这是有限的 partial 进展，Goal active。原 273 项状态保持 22 complete/166 partial/70 unverified/15 deferred_by_user；`IDX-07` 仍为 `unverified`、`evidence=[]`。零列行集、零列表和原 TOAST 损坏夹具的普通缺口仍保留，用户暂缓边界保持。本批不证明完整 PostgreSQL 数据类型上限、文件格式、WAL 或协议等价。
+
+完整定义、首轮失败与测试边界见[本批报告](performance-report-2026-10-30.md#multilob-storage-20261106)和[可逆压缩证据](benchmarks/multilob-storage-20261106.json.gz)。下方 P28 及更早段落是对应代别的历史记录。
+
 <!-- CURRENT_CONSTRAINT_VALIDATION_20261106 -->
 
 ## CHECK/FK NOT VALID 与真实历史验证（2026-11-06，P28-C4）
