@@ -2,6 +2,317 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-06 BRIN operator-specific summary consistency",
+      "gap_ids": [
+        "IDX-09",
+        "IDX-14",
+        "IDX-15"
+      ],
+      "status": "partial",
+      "evidence": [
+        "src/commands/TableManage.cpp",
+        "docs/performance-report-2026-10-30.md",
+        "docs/benchmarks/brin-operator-pruning-20261106.json.gz"
+      ],
+      "tests": [
+        "tests/brin_operator_pruning_test.cpp"
+      ],
+      "verification": {
+        "implementation": "Lazy original supported type, original min<=max validity, operator-required endpoint, definiteFalse-only equality short circuit. Original comparator/file/fence/heap/recheck owners remain; legacy partial timestamp fallback.",
+        "actual_receipts": [
+          {
+            "role": "新原生专项（同一源码，修前仅25预算失败，最终全部通过）",
+            "path": "build/pg-feature-brin-consistent-20261106-e5_u6fjz/new-native-observations-v1.json",
+            "sha256": "90b8b9a8e28af5c446ced5a138659a9e227948419d0d399fe359b3bfb8f58be1",
+            "gates": [
+              {
+                "keys": [
+                  "complete"
+                ],
+                "actual": true,
+                "expected": true
+              },
+              {
+                "keys": [
+                  "all_expected_observations"
+                ],
+                "actual": true,
+                "expected": true
+              },
+              {
+                "keys": [
+                  "semantics_both_passed"
+                ],
+                "actual": true,
+                "expected": true
+              },
+              {
+                "keys": [
+                  "after_checks"
+                ],
+                "actual": 23414,
+                "expected": 23414
+              },
+              {
+                "keys": [
+                  "after_probes"
+                ],
+                "actual": 325,
+                "expected": 325
+              },
+              {
+                "keys": [
+                  "before_budget_failures"
+                ],
+                "actual": 25,
+                "expected": 25
+              },
+              {
+                "keys": [
+                  "after_budget_failures"
+                ],
+                "actual": 0,
+                "expected": 0
+              },
+              {
+                "keys": [
+                  "same325_probe_trust_and_range_counts"
+                ],
+                "actual": true,
+                "expected": true
+              },
+              {
+                "keys": [
+                  "same1308_complete_printed_row_records"
+                ],
+                "actual": true,
+                "expected": true
+              },
+              {
+                "keys": [
+                  "wide_canonical_before"
+                ],
+                "actual": 222,
+                "expected": 222
+              },
+              {
+                "keys": [
+                  "wide_canonical_after"
+                ],
+                "actual": 1,
+                "expected": 1
+              }
+            ],
+            "actual_fields": {
+              "after_checks": 23414,
+              "after_probes": 325,
+              "before_budget_failures": 25,
+              "after_budget_failures": 0,
+              "wide_canonical_before": 222,
+              "wide_canonical_after": 1,
+              "compareValues_internal_calls": "UNAVAILABLE; same-TU wrap cannot measure them, 2/3 call bound remains a static algorithm property"
+            }
+          },
+          {
+            "role": "25项相关原生测试",
+            "path": "build/pg-feature-brin-consistent-20261106-e5_u6fjz/related25-native-C2-v1.json",
+            "sha256": "dfa09498e92d9929733e90204d57bcce5361372230ad16106c87035d3f57d868",
+            "gates": [
+              {
+                "keys": [
+                  "complete"
+                ],
+                "actual": true,
+                "expected": true
+              },
+              {
+                "keys": [
+                  "all_passed"
+                ],
+                "actual": true,
+                "expected": true
+              }
+            ],
+            "actual_fields": {
+              "complete": true,
+              "all_passed": true
+            }
+          },
+          {
+            "role": "6项专项协议测试（维护42命令、类型化BRIN101命令等）",
+            "path": "build/pg-feature-brin-consistent-20261106-e5_u6fjz/selected6-protocol-C2-v1.json",
+            "sha256": "0c194ab7a5007fa91326ee410c328206a8a727cb72db6f06e33220b5147ca3b6",
+            "gates": [
+              {
+                "keys": [
+                  "complete"
+                ],
+                "actual": true,
+                "expected": true
+              },
+              {
+                "keys": [
+                  "all_passed"
+                ],
+                "actual": true,
+                "expected": true
+              }
+            ],
+            "actual_fields": {
+              "complete": true,
+              "all_passed": true
+            }
+          },
+          {
+            "role": "3项自动统计测试（原deadline、串行一次）",
+            "path": "build/pg-feature-brin-consistent-20261106-e5_u6fjz/registered3-auto-protocol-C2-v1.json",
+            "sha256": "2f96697da5fac72b84781753d7796d6e70194ace1d447c61841855d0a0982600",
+            "gates": [
+              {
+                "keys": [
+                  "complete"
+                ],
+                "actual": true,
+                "expected": true
+              },
+              {
+                "keys": [
+                  "all_passed"
+                ],
+                "actual": true,
+                "expected": true
+              }
+            ],
+            "actual_fields": {
+              "complete": true,
+              "all_passed": true
+            }
+          },
+          {
+            "role": "真实PostgreSQL18.6共享对照",
+            "path": "build/pg-feature-brin-consistent-20261106-e5_u6fjz/pg-maintenance-reference-C2-v1/receipt-v1.json",
+            "sha256": "59f493b6ec1735c849d258980ca386bf5d722054a5526d3493d3defeee3c4006",
+            "gates": [
+              {
+                "keys": [
+                  "complete"
+                ],
+                "actual": true,
+                "expected": true
+              },
+              {
+                "keys": [
+                  "shared_commands"
+                ],
+                "actual": 35,
+                "expected": 35
+              },
+              {
+                "keys": [
+                  "strict_result_cells"
+                ],
+                "actual": 19327,
+                "expected": 19327
+              },
+              {
+                "keys": [
+                  "independent_PG_effective_width_metapages"
+                ],
+                "actual": 11,
+                "expected": 11
+              },
+              {
+                "keys": [
+                  "ReadyT_images_recorded_without_checkpoint_or_page_read"
+                ],
+                "actual": 1,
+                "expected": 1
+              },
+              {
+                "keys": [
+                  "owned_PID_gone"
+                ],
+                "actual": true,
+                "expected": true
+              },
+              {
+                "keys": [
+                  "normal_stop"
+                ],
+                "actual": true,
+                "expected": true
+              }
+            ],
+            "actual_fields": {
+              "shared_commands": 35,
+              "strict_result_cells": 19327,
+              "independent_PG_effective_width_metapages": 11,
+              "ReadyT_images_recorded_without_checkpoint_or_page_read": 1,
+              "normal_stop": true,
+              "owned_PID_gone": true
+            }
+          },
+          {
+            "role": "物理恢复worker完整结果",
+            "path": "build/pg-feature-brin-consistent-20261106-e5_u6fjz/restore-workers-C2-v1/receipt-v1.json",
+            "sha256": "3d63241bcdf149eedadefe5daad7e2ea1c47a5968aa8032386d665a1e0542a8e",
+            "gates": [
+              {
+                "keys": [
+                  "complete"
+                ],
+                "actual": true,
+                "expected": true
+              },
+              {
+                "keys": [
+                  "workers"
+                ],
+                "actual": 7,
+                "expected": 7
+              },
+              {
+                "keys": [
+                  "worker_checks"
+                ],
+                "actual": 2477,
+                "expected": 2477
+              },
+              {
+                "keys": [
+                  "retained_complete_streams"
+                ],
+                "actual": 14,
+                "expected": 14
+              },
+              {
+                "keys": [
+                  "all_owned_PIDs_gone_or_reused"
+                ],
+                "actual": true,
+                "expected": true
+              }
+            ],
+            "actual_fields": {
+              "workers": 7,
+              "worker_checks": 2477,
+              "retained_complete_streams": 14
+            }
+          }
+        ],
+        "performance": "Same-width ordinary9 cohort; all306 queries+9 durableVAC; complete independently checked original observations and all3clock min/p50/max/negative/drift retained. Seven query wall classification: {'faster_both': 5, 'between_or_equal': 1, 'slower_both': 1}. Not a causal/PG/wholeDB speed claim.",
+        "preservation": "Old2374tests exact+1CPP; source248/header177; topCPP1113/total1118; no build_common change; original273items and274histories preserved+275partial; 23oldgzip protected+24total; default425 held; Goal active.",
+        "remaining": [
+          "仍完整读取、CRC校验并解码全部摘要；规划探测与open前后复核仍重复，元数据和整个SQL成本未由本局部比较计数隔离。",
+          "仍是本项目有限builtin比较/NULL摘要/lossy候选实现，不是完整PostgreSQL BRIN opclass/catalog/revmap、增量维护、并发构建或AM专用WAL。",
+          "legacy非TemporalMicros timestamp三种raw spelling保留原三态比较；不把部分字符串解析器声称为全序。",
+          "P22数组ROLLBACK间歇超时、Bloom/GiST非NULL空文本原生覆盖及既有普通功能缺口保持；本批没有修复或新增暂缓。",
+          "只运行所列实际门禁和固定9进程；没有新增35操作、36查询全集或PostgreSQL速度测量，所有控制项负数、长尾和漂移保留。",
+          "原R151矩阵未运行，用户此前所有暂缓范围不变；完整REINDEX/PG BRIN AM、规划元数据复用与重复文件验证仍开放。"
+        ]
+      }
+    },
+    {
       "issue": "2026-11-06 preserve BRIN pages_per_range across ordinary table maintenance",
       "gap_ids": [
         "IDX-09",

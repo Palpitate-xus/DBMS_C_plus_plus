@@ -233,8 +233,18 @@
       "sha256": "e98b50882d9082e2a320097d52d9ffe5a04ac6b15ebd16856c0b1290c3c5f1f8",
       "encoding": "gzip",
       "roundtrip_bytes_exact": true
+    },
+    {
+      "original_path": "docs/benchmarks/brin-operator-pruning-20261106.json",
+      "original_bytes": 74266022,
+      "original_sha256": "99e44675ab7470282df91c20e6a468c3a73c5ca25421bf02c6be3619533ca1d3",
+      "path": "docs/benchmarks/brin-operator-pruning-20261106.json.gz",
+      "bytes": 5747626,
+      "sha256": "37174b21ce76414b923234fe44840f59575c6b86f722ee7559e5200fedd4b99c",
+      "encoding": "gzip",
+      "roundtrip_bytes_exact": true
     }
   ],
-  "total_original_bytes": 658944538,
-  "total_bytes": 77503404
+  "total_original_bytes": 733210560,
+  "total_bytes": 83251030
 }

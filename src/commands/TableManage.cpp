@@ -15624,10 +15624,9 @@ bool readLegacyStorageBrinString(const std::string& data, size_t& offset,
 }
 // V3 pruning only uses declared scalar orders implemented by this engine.
 // Unknown types/collations stay unbounded; there is no lexical numeric fallback.
-static std::optional<int> brinCompare(const Column& column,
-    const std::string& left, const std::string& right) {
+static bool brinHasScalarOrder(const Column& column) {
     if (column.isArray || !column.enumValues.empty() ||
-        (!column.collation.empty() && !column.resolvedCollationIsBinary)) return {};
+        (!column.collation.empty() && !column.resolvedCollationIsBinary)) return false;
     const auto type = ExprHelper::canonicalResultTypeName(column.dataType);
     constexpr std::string_view supported[]{
         "smallint", "integer", "bigint", "real", "double precision", "numeric",
@@ -15635,7 +15634,11 @@ static std::optional<int> brinCompare(const Column& column,
         "date", "time", "timestamp", "timestamptz",
         "time without time zone", "timestamp without time zone",
         "timestamp with time zone", "bit", "bit varying"};
-    if (std::find(std::begin(supported), std::end(supported), std::string_view(type)) == std::end(supported)) return {};
+    return std::find(std::begin(supported), std::end(supported), std::string_view(type)) != std::end(supported);
+}
+static std::optional<int> brinCompare(const Column& column,
+    const std::string& left, const std::string& right) {
+    if (!brinHasScalarOrder(column)) return {};
     using Truth = StorageEngine::PredicateTruth;
     try {
         const auto less = StorageEngine::compareValues(column, left, false, right, false, "<");
@@ -15914,29 +15917,60 @@ std::optional<std::vector<std::pair<uint32_t, uint32_t>>> StorageEngine::tryBrin
     const auto image = brinSchemaImage(schemaPath(dbname, tablename));
     if (!image || index.orderingIdentity != brinOrderingIdentity(table, column, *image)) return {};
     const auto& key = table.cols[column];
+    std::optional<bool> ordered; // Resolve once, only if a non-NULL bound is needed.
+    // The legacy seconds parser has pair-dependent Unknown results at epoch
+    // zero. Keep its original two-endpoint proof rather than assuming a total
+    // order. Modern TemporalMicros columns normalize each operand separately.
+    const bool legacyTimestamp = key.storageCodec != Column::StorageCodec::TemporalMicros &&
+        (key.dataType == "timestamp" || key.dataType == "timestamptz" || key.dataType == "datetime");
+    using Truth = PredicateTruth;
     std::vector<std::pair<uint32_t, uint32_t>> ranges;
-    for (const auto& range : index.ranges) {
-        checkForQueryInterrupt();
-        bool match = false;
-        if (op == "IS NULL") match = range.flags & kHasNull;
-        else if (op == "IS NOT NULL") match = range.flags & kHasNonNull;
-        else if (range.flags & kHasNonNull) {
-            if (range.flags & kUnbounded) return {};
-            const auto order = brinCompare(key, range.min, range.max);
-            const auto lower = brinCompare(key, value, range.min);
-            const auto upper = brinCompare(key, value, range.max);
-            if (!order || *order > 0 || !lower || !upper) return {};
-            if (op == "=") match = *lower >= 0 && *upper <= 0;
-            else if (op == "<") match = *lower > 0;
-            else if (op == "<=") match = *lower >= 0;
-            else if (op == ">") match = *upper < 0;
-            else if (op == ">=") match = *upper <= 0;
+    try {
+        for (const auto& range : index.ranges) {
+            checkForQueryInterrupt();
+            bool match = false;
+            if (op == "IS NULL") match = range.flags & kHasNull;
+            else if (op == "IS NOT NULL") match = range.flags & kHasNonNull;
+            else if (range.flags & kHasNonNull) {
+                if (range.flags & kUnbounded) return {};
+                if (!ordered) ordered = brinHasScalarOrder(key);
+                if (!*ordered) return {};
+                Truth result;
+                if (legacyTimestamp) {
+                    const auto order = brinCompare(key, range.min, range.max);
+                    const auto lower = brinCompare(key, value, range.min);
+                    const auto upper = brinCompare(key, value, range.max);
+                    if (!order || *order > 0 || !lower || !upper) return {};
+                    const bool matches = op == "=" ? *lower >= 0 && *upper <= 0 :
+                        op == "<" ? *lower > 0 : op == "<=" ? *lower >= 0 :
+                        op == ">" ? *upper < 0 : *upper <= 0;
+                    result = matches ? Truth::True : Truth::False;
+                } else {
+                    // Retain semantic bound validation even for an early mismatch.
+                    // Only the matching predicate uses the operator's needed end.
+                    if (compareValues(key, range.min, false, range.max, false, "<=") != Truth::True)
+                        return {};
+                    if (op == "=") {
+                        result = compareValues(key, range.min, false, value, false, "<=");
+                        if (result == Truth::True)
+                            result = compareValues(key, range.max, false, value, false, ">=");
+                    } else {
+                        const auto& bound = op.front() == '<' ? range.min : range.max;
+                        result = compareValues(key, bound, false, value, false, op);
+                    }
+                }
+                if (result == Truth::Unknown) return {};
+                match = result == Truth::True;
+            }
+            if (match) {
+                if (!ranges.empty() && uint64_t(ranges.back().second) + 1 == range.first)
+                    ranges.back().second = range.last;
+                else ranges.emplace_back(range.first, range.last);
+            }
         }
-        if (match) {
-            if (!ranges.empty() && uint64_t(ranges.back().second) + 1 == range.first)
-                ranges.back().second = range.last;
-            else ranges.emplace_back(range.first, range.last);
-        }
+    } catch (const DbError& error) {
+        if (error.sqlState().rfind("22", 0) != 0) throw;
+        return {};
     }
     const auto after = requireCurrentSnapshot ? indexReadSnapshotFence(dbname)
                                               : std::optional<uint64_t>(0);
