@@ -1,5 +1,11 @@
 # 文档索引
 
+<!-- P35 view-column-dependencies begin -->
+## 最新验证：视图列依赖与 DDL 开销（2026-11-06）
+
+[性能报告](performance-report-2026-10-30.md#view-column-dependencies-20261106)提供 270 个普通操作和 27 个视图 DDL 操作的全部样本、负向及压缩恢复方法；[测试报告](test-report.md#view-column-dependencies-current)记录 242 新检查、7 既有专项及原始 PG 差异；[契约](compatibility-contract.md#view-column-dependencies-current)列出删除保护、旧库和边界。正式库存 2396，Markdown 路径仍 754，历史 285，Goal active。下方为各自版本的历史结果。
+<!-- P35 view-column-dependencies end -->
+
 <!-- P34 projected-toast-demand begin -->
 ## 最新验证：部分列 TOAST 需求读取（2026-11-06）
 

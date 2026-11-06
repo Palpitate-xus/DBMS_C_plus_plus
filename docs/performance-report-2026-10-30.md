@@ -1,5 +1,171 @@
 # 数据库操作性能测试报告（2026-10-30）
 
+<!-- P35 view-column-dependencies begin -->
+<a id="view-column-dependencies-20261106"></a>
+## 2026-11-06：视图列依赖保护与真实开销（P35-C4）
+
+本轮没有接受整体提速结论。30 个普通操作区域中，墙钟中位数 5 低于两旧／19 高于两旧／6 居间，服务器 CPU 为 6／16／8，客户端 CPU 为 5／16／9。旧版墙钟漂移 -28.19%～+27.35%，服务器 CPU -26.58%～+29.13%。查询执行路径源码未改，负向原因尚未隔离，继续 OPEN。
+
+创建／兼容替换视图时，从已绑定的真实来源、具体列及查询子树记录依赖，覆盖投影、谓词、排序、分组、窗口、子查询与 USING/NATURAL 键。删除前先检查依赖；RESTRICT 返回 2BP01，未引用列仍可删除。CASCADE 按依赖顺序删除相关视图，后续子命令失败时由已有 DDL 快照恢复文件和目录记录。列序号压缩后，剩余引用沿用已有重映射。
+
+设计参考：[PostgreSQL 18 依赖追踪](https://www.postgresql.org/docs/18/ddl-depend.html)与[列删除规则](https://www.postgresql.org/docs/18/sql-altertable.html)要求 RESTRICT 保护依赖、CASCADE 递归处理依赖对象；[固定 PG18 源码 dependency.c](https://raw.githubusercontent.com/postgres/postgres/724edf9bde9d356724ad384a2e196edc3c9f80f7/src/backend/catalog/dependency.c)从解析树的真实关系／列身份收集引用。这里沿用本项目已有 pg_depend 列号格式，直接记录视图身份，未实现 PG 的完整 rewrite-rule 体系。[SQLite ALTER TABLE](https://www.sqlite.org/lang_altertable.html)通过修改后重解析 schema 检查引用；[DuckDB DROP 文档](https://www.duckdb.org/docs/stable/sql/statements/drop)明确说明其视图依赖追踪限制。这些是机制与边界参考，没有运行三库速度对比。
+
+新视图的星号只记录创建时的展开列；后加列不会自动成为依赖。有效旧定义通过只读绑定恢复缺失的关系／列引用；单来源旧星号仅在历史输出与原始列前缀吻合时恢复，歧义历史返回明确错误。编译目录是合法读来源；部分目录被别名覆盖的字段先只读取原始声明，再映射实际属性身份，不执行数据或视图表达式。
+
+最终 C4 正常 CMake C++17/O2（程序 SHA 前缀 77418e9c）通过新增原生 242 项检查；同一最终测试旧版实际 120 项失败，中间 C3 实际 2 项失败。7 个既有相关原生测试在旧版及最终 C4 均实际 exit0。28 条真实依赖删除返回 2BP01；29 条普通事务／保存点对照的值、tag、SQLSTATE 和 Ready 与 PostgreSQL18.6 一致，保留先前写入、失败 CASCADE、恢复与冷重启均有记录。
+
+新 201 条协议矩阵仍有 3 条别名运行查询差异，真实旧库升级 42 条仍有 5 条嵌套／字面量运行差异；整表／视图删除 13 条的值与状态匹配 PG，编译目录视图 12 条仍有 1 条别名执行 0A000。全部请求、完整 T7、NULL、诊断和 Ready 原样保留，完整 PG 协议等价仍为 false。原 62 条 SQL 完整回复在旧／C4 间逐字节相同，41 条目录查询及 7 条控制回复相同，原有 9／24 条 PG 差异保持。另保留完整 pg_attribute 89 条调研。
+
+正常性能对照为旧 P34-C2 `73bb61eb` → C4 `77418e9c` → 同旧回测。普通矩阵完整保留 27 个数据库／54 个正常 Main／270 个计时操作、1098 回复、96624 行、386388 单元、27864 NULL、231410943 请求／回复字节；5796 个闭库文件核对。范围包含 INSERT、单条 UPDATE16／DELETE16、VACUUM、TRUNCATE、重填、维护前后 SELECT，以及直接全列／id 查询。固定／单长字段人口 256，多长字段 128，直接投影使用真实更新后的 257／257／129 行；direct-hit 的 id 查询没有 WHERE 或 ORDER BY。
+
+另有 9 个独立数据库／18 个正常 Main／27 个 DDL 计时操作。每库同样插入 65 行，视图返回其中 64 行；CREATE VIEW、兼容 REPLACE、删除未引用列各三次，99 个完整回复跨全部 9 库逐字节相同，2340 行／4662 单元／18 NULL／450 闭库文件独立核对。候选增加依赖检查与元数据持久化，记录的是该特性的开销。旧版错误地接受 RESTRICT 或没有删除依赖视图的工作没有计为等价加速对照。
+
+共 72 个正常 Main、1197 回复、98964 行、391050 单元、27882 NULL。时钟覆盖请求到 ReadyI 的帧接收；服务器 CPU 为整个 Main 进程，完整解码、值校验、输出写盘和 proc 读取在区间外。时钟／proc 不原子，端点不是峰值。计时期间没有本任务的编译、分析器、压缩、CPU 绑定或额外 SQL；自然缓存状态，40 个既有数据库进程仅观察，主机非独占。全部三样本／min／p50／max、客户端 CPU、尾部和旧版漂移保留，不作稳定比率或 PostgreSQL 性能等价结论。
+
+创建视图墙钟为旧首测 102.639 → C4 145.206 → 旧回测 94.602 ms，相对两旧为 +41.47%／+53.49%；服务器 CPU 28.954 → 28.315 → 26.796 ms，为 -2.21%／+5.67%。兼容替换墙钟 +3.63%／-33.05%，删除未引用列 +14.64%／-3.20%；所有其余原始值见完整表。
+
+**wall_ns，ms，全部三次样本的中位数**
+
+| Cohort / table / case | Old first | C4 | Old return | C4 vs first | C4 vs return | Old drift |
+|---|---:|---:|---:|---:|---:|---:|
+| canonical-fixed-single/fixed/delete16 | 38.565 | 44.839 | 47.171 | +16.27% | -4.94% | +22.31% |
+| canonical-fixed-single/fixed/insert1 | 17.076 | 22.299 | 15.365 | +30.59% | +45.13% | -10.02% |
+| canonical-fixed-single/fixed/reinsert_population | 575.191 | 611.631 | 545.745 | +6.34% | +12.07% | -5.12% |
+| canonical-fixed-single/fixed/select_after_update | 24.167 | 29.172 | 22.061 | +20.71% | +32.23% | -8.71% |
+| canonical-fixed-single/fixed/select_after_vacuum | 25.830 | 26.894 | 26.203 | +4.12% | +2.64% | +1.45% |
+| canonical-fixed-single/fixed/truncate | 170.233 | 187.925 | 204.392 | +10.39% | -8.06% | +20.07% |
+| canonical-fixed-single/fixed/update16 | 75.901 | 84.360 | 64.909 | +11.14% | +29.97% | -14.48% |
+| canonical-fixed-single/fixed/vacuum | 1.407 | 1.581 | 1.617 | +12.37% | -2.22% | +14.92% |
+| canonical-fixed-single/single/delete16 | 70.656 | 74.300 | 67.908 | +5.16% | +9.41% | -3.89% |
+| canonical-fixed-single/single/insert1 | 16.896 | 17.245 | 18.546 | +2.07% | -7.01% | +9.77% |
+| canonical-fixed-single/single/reinsert_population | 1057.601 | 1121.333 | 1085.456 | +6.03% | +3.31% | +2.63% |
+| canonical-fixed-single/single/select_after_update | 51.666 | 66.980 | 43.916 | +29.64% | +52.52% | -15.00% |
+| canonical-fixed-single/single/select_after_vacuum | 53.790 | 70.679 | 55.162 | +31.40% | +28.13% | +2.55% |
+| canonical-fixed-single/single/truncate | 369.849 | 322.837 | 336.096 | -12.71% | -3.95% | -9.13% |
+| canonical-fixed-single/single/update16 | 136.667 | 147.036 | 141.788 | +7.59% | +3.70% | +3.75% |
+| canonical-fixed-single/single/vacuum | 7.584 | 8.294 | 6.700 | +9.36% | +23.80% | -11.66% |
+| canonical-overflow/overflow/delete16 | 66.391 | 81.636 | 80.388 | +22.96% | +1.55% | +21.08% |
+| canonical-overflow/overflow/insert1 | 24.213 | 22.614 | 25.980 | -6.60% | -12.96% | +7.30% |
+| canonical-overflow/overflow/reinsert_population | 1132.334 | 1209.218 | 1087.865 | +6.79% | +11.16% | -3.93% |
+| canonical-overflow/overflow/select_after_update | 60.828 | 65.668 | 50.719 | +7.96% | +29.48% | -16.62% |
+| canonical-overflow/overflow/select_after_vacuum | 66.966 | 62.883 | 62.399 | -6.10% | +0.78% | -6.82% |
+| canonical-overflow/overflow/truncate | 193.081 | 170.525 | 204.691 | -11.68% | -16.69% | +6.01% |
+| canonical-overflow/overflow/update16 | 166.765 | 182.010 | 159.055 | +9.14% | +14.43% | -4.62% |
+| canonical-overflow/overflow/vacuum | 8.559 | 11.189 | 10.900 | +30.73% | +2.66% | +27.35% |
+| direct-hit/fixed/direct_full_no_order | 25.341 | 19.349 | 23.977 | -23.64% | -19.30% | -5.38% |
+| direct-hit/fixed/direct_id_only_no_order | 23.961 | 17.479 | 24.177 | -27.05% | -27.70% | +0.90% |
+| direct-hit/overflow/direct_full_no_order | 49.846 | 60.799 | 47.989 | +21.97% | +26.69% | -3.73% |
+| direct-hit/overflow/direct_id_only_no_order | 24.290 | 23.029 | 17.443 | -5.20% | +32.02% | -28.19% |
+| direct-hit/single/direct_full_no_order | 54.083 | 56.223 | 40.934 | +3.96% | +37.35% | -24.31% |
+| direct-hit/single/direct_id_only_no_order | 23.898 | 27.566 | 21.082 | +15.35% | +30.75% | -11.78% |
+
+**server_process_cpu_ns，ms，全部三次样本的中位数**
+
+| Cohort / table / case | Old first | C4 | Old return | C4 vs first | C4 vs return | Old drift |
+|---|---:|---:|---:|---:|---:|---:|
+| canonical-fixed-single/fixed/delete16 | 32.291 | 38.165 | 40.368 | +18.19% | -5.46% | +25.02% |
+| canonical-fixed-single/fixed/insert1 | 8.578 | 9.231 | 8.079 | +7.62% | +14.26% | -5.81% |
+| canonical-fixed-single/fixed/reinsert_population | 549.493 | 579.192 | 519.939 | +5.40% | +11.40% | -5.38% |
+| canonical-fixed-single/fixed/select_after_update | 17.159 | 20.832 | 15.220 | +21.41% | +36.87% | -11.30% |
+| canonical-fixed-single/fixed/select_after_vacuum | 20.260 | 20.096 | 18.508 | -0.81% | +8.58% | -8.65% |
+| canonical-fixed-single/fixed/truncate | 84.574 | 94.282 | 95.994 | +11.48% | -1.78% | +13.50% |
+| canonical-fixed-single/fixed/update16 | 67.132 | 73.605 | 56.498 | +9.64% | +30.28% | -15.84% |
+| canonical-fixed-single/fixed/vacuum | 1.271 | 1.480 | 1.494 | +16.46% | -0.97% | +17.60% |
+| canonical-fixed-single/single/delete16 | 62.653 | 64.195 | 57.602 | +2.46% | +11.45% | -8.06% |
+| canonical-fixed-single/single/insert1 | 9.019 | 10.064 | 10.073 | +11.59% | -0.08% | +11.68% |
+| canonical-fixed-single/single/reinsert_population | 982.473 | 1064.258 | 1044.683 | +8.32% | +1.87% | +6.33% |
+| canonical-fixed-single/single/select_after_update | 43.319 | 46.196 | 37.538 | +6.64% | +23.06% | -13.34% |
+| canonical-fixed-single/single/select_after_vacuum | 47.221 | 58.744 | 47.867 | +24.40% | +22.72% | +1.37% |
+| canonical-fixed-single/single/truncate | 133.017 | 121.895 | 125.418 | -8.36% | -2.81% | -5.71% |
+| canonical-fixed-single/single/update16 | 116.050 | 126.546 | 123.555 | +9.04% | +2.42% | +6.47% |
+| canonical-fixed-single/single/vacuum | 7.304 | 8.039 | 6.389 | +10.06% | +25.83% | -12.53% |
+| canonical-overflow/overflow/delete16 | 56.086 | 70.770 | 67.506 | +26.18% | +4.84% | +20.36% |
+| canonical-overflow/overflow/insert1 | 10.401 | 13.113 | 11.345 | +26.07% | +15.59% | +9.07% |
+| canonical-overflow/overflow/reinsert_population | 1050.819 | 1101.319 | 1040.266 | +4.81% | +5.87% | -1.00% |
+| canonical-overflow/overflow/select_after_update | 50.404 | 53.958 | 41.483 | +7.05% | +30.07% | -17.70% |
+| canonical-overflow/overflow/select_after_vacuum | 55.343 | 53.935 | 55.284 | -2.54% | -2.44% | -0.11% |
+| canonical-overflow/overflow/truncate | 84.536 | 68.453 | 91.659 | -19.03% | -25.32% | +8.43% |
+| canonical-overflow/overflow/update16 | 137.782 | 135.132 | 138.516 | -1.92% | -2.44% | +0.53% |
+| canonical-overflow/overflow/vacuum | 8.206 | 10.567 | 10.596 | +28.78% | -0.27% | +29.13% |
+| direct-hit/fixed/direct_full_no_order | 16.368 | 11.861 | 15.417 | -27.53% | -23.06% | -5.81% |
+| direct-hit/fixed/direct_id_only_no_order | 15.527 | 11.447 | 15.194 | -26.28% | -24.66% | -2.15% |
+| direct-hit/overflow/direct_full_no_order | 43.874 | 54.935 | 40.742 | +25.21% | +34.84% | -7.14% |
+| direct-hit/overflow/direct_id_only_no_order | 11.447 | 11.882 | 12.221 | +3.79% | -2.77% | +6.76% |
+| direct-hit/single/direct_full_no_order | 45.784 | 47.946 | 33.614 | +4.72% | +42.64% | -26.58% |
+| direct-hit/single/direct_id_only_no_order | 17.011 | 16.002 | 14.600 | -5.93% | +9.60% | -14.17% |
+
+**client_process_cpu_ns，ms，全部三次样本的中位数**
+
+| Cohort / table / case | Old first | C4 | Old return | C4 vs first | C4 vs return | Old drift |
+|---|---:|---:|---:|---:|---:|---:|
+| canonical-fixed-single/fixed/delete16 | 0.214 | 0.227 | 0.218 | +6.12% | +4.06% | +1.99% |
+| canonical-fixed-single/fixed/insert1 | 0.199 | 0.221 | 0.123 | +11.41% | +79.87% | -38.06% |
+| canonical-fixed-single/fixed/reinsert_population | 0.214 | 0.257 | 0.220 | +20.22% | +16.50% | +3.19% |
+| canonical-fixed-single/fixed/select_after_update | 4.952 | 4.797 | 4.668 | -3.12% | +2.77% | -5.73% |
+| canonical-fixed-single/fixed/select_after_vacuum | 3.905 | 4.489 | 4.595 | +14.94% | -2.31% | +17.66% |
+| canonical-fixed-single/fixed/truncate | 0.229 | 0.238 | 0.272 | +4.23% | -12.26% | +18.79% |
+| canonical-fixed-single/fixed/update16 | 0.229 | 0.246 | 0.218 | +7.41% | +12.56% | -4.58% |
+| canonical-fixed-single/fixed/vacuum | 0.203 | 0.214 | 0.196 | +5.59% | +9.30% | -3.40% |
+| canonical-fixed-single/single/delete16 | 0.207 | 0.259 | 0.161 | +24.94% | +60.47% | -22.14% |
+| canonical-fixed-single/single/insert1 | 0.243 | 0.203 | 0.279 | -16.66% | -27.34% | +14.70% |
+| canonical-fixed-single/single/reinsert_population | 0.576 | 0.613 | 0.584 | +6.32% | +4.90% | +1.35% |
+| canonical-fixed-single/single/select_after_update | 5.986 | 6.111 | 5.417 | +2.09% | +12.81% | -9.50% |
+| canonical-fixed-single/single/select_after_vacuum | 5.217 | 5.382 | 5.186 | +3.16% | +3.77% | -0.59% |
+| canonical-fixed-single/single/truncate | 0.210 | 0.246 | 0.246 | +17.10% | +0.23% | +16.84% |
+| canonical-fixed-single/single/update16 | 0.231 | 0.260 | 0.242 | +12.30% | +7.21% | +4.74% |
+| canonical-fixed-single/single/vacuum | 0.226 | 0.210 | 0.169 | -6.84% | +24.56% | -25.21% |
+| canonical-overflow/overflow/delete16 | 0.241 | 0.296 | 0.214 | +22.99% | +38.38% | -11.12% |
+| canonical-overflow/overflow/insert1 | 0.211 | 0.219 | 0.214 | +3.78% | +2.30% | +1.44% |
+| canonical-overflow/overflow/reinsert_population | 0.857 | 0.784 | 0.703 | -8.48% | +11.56% | -17.96% |
+| canonical-overflow/overflow/select_after_update | 4.334 | 4.626 | 4.463 | +6.74% | +3.65% | +2.98% |
+| canonical-overflow/overflow/select_after_vacuum | 4.067 | 3.773 | 3.907 | -7.23% | -3.45% | -3.92% |
+| canonical-overflow/overflow/truncate | 0.255 | 0.237 | 0.234 | -7.15% | +1.23% | -8.28% |
+| canonical-overflow/overflow/update16 | 0.263 | 0.263 | 0.257 | -0.00% | +2.42% | -2.37% |
+| canonical-overflow/overflow/vacuum | 0.199 | 0.234 | 0.216 | +17.62% | +8.49% | +8.42% |
+| direct-hit/fixed/direct_full_no_order | 4.906 | 4.934 | 4.792 | +0.55% | +2.96% | -2.34% |
+| direct-hit/fixed/direct_id_only_no_order | 4.808 | 4.725 | 6.674 | -1.72% | -29.20% | +38.81% |
+| direct-hit/overflow/direct_full_no_order | 4.369 | 4.050 | 4.015 | -7.29% | +0.88% | -8.10% |
+| direct-hit/overflow/direct_id_only_no_order | 2.396 | 2.222 | 2.281 | -7.28% | -2.58% | -4.82% |
+| direct-hit/single/direct_full_no_order | 7.798 | 6.480 | 6.560 | -16.90% | -1.22% | -15.87% |
+| direct-hit/single/direct_id_only_no_order | 4.315 | 3.862 | 3.861 | -10.49% | +0.05% | -10.54% |
+
+**视图 DDL 全部原始样本与分布，ms**
+
+| case | metric | old raw3/min/p50/max ms | candidate raw3/min/p50/max ms | old return raw3/min/p50/max ms | candidate vs old % | candidate vs return % | old drift % |
+|---|---|---|---|---|---:|---:|---:|
+| create_view | wall_ns | 102.639,95.438,121.699 / 95.438 / 102.639 / 121.699 | 89.054,158.243,145.206 / 89.054 / 145.206 / 158.243 | 91.636,94.602,135.105 / 91.636 / 94.602 / 135.105 | 41.47 | 53.49 | -7.83 |
+| create_view | server_process_cpu_ns | 39.488,27.587,28.954 / 27.587 / 28.954 / 39.488 | 28.315,35.956,26.465 / 26.465 / 28.315 / 35.956 | 33.986,24.495,26.796 / 24.495 / 26.796 / 33.986 | -2.21 | 5.67 | -7.45 |
+| create_view | client_process_cpu_ns | 0.219,0.222,0.210 / 0.210 / 0.219 / 0.222 | 0.210,0.217,0.252 / 0.210 / 0.217 / 0.252 | 0.214,0.199,0.213 / 0.199 / 0.213 / 0.214 | -0.63 | 1.81 | -2.39 |
+| replace_view | wall_ns | 78.808,85.632,102.520 / 78.808 / 85.632 / 102.520 | 75.066,120.384,88.744 / 75.066 / 88.744 / 120.384 | 143.964,132.551,105.484 / 105.484 / 132.551 / 143.964 | 3.63 | -33.05 | 54.79 |
+| replace_view | server_process_cpu_ns | 37.281,40.177,43.348 / 37.281 / 40.177 / 43.348 | 36.176,41.200,23.275 / 23.275 / 36.176 / 41.200 | 36.857,36.394,40.359 / 36.394 / 36.857 / 40.359 | -9.96 | -1.85 | -8.26 |
+| replace_view | client_process_cpu_ns | 0.203,0.228,0.244 / 0.203 / 0.228 / 0.244 | 0.220,0.229,0.178 / 0.178 / 0.220 / 0.229 | 0.213,0.227,0.246 / 0.213 / 0.227 / 0.246 | -3.76 | -3.33 | -0.44 |
+| drop_unreferenced_column | wall_ns | 211.993,246.507,274.857 / 211.993 / 246.507 / 274.857 | 282.585,291.106,256.959 / 256.959 / 282.585 / 291.106 | 257.657,321.032,291.917 / 257.657 / 291.917 / 321.032 | 14.64 | -3.20 | 18.42 |
+| drop_unreferenced_column | server_process_cpu_ns | 149.772,172.050,173.166 / 149.772 / 172.050 / 173.166 | 170.174,179.491,137.793 / 137.793 / 170.174 / 179.491 | 154.304,179.689,167.932 / 154.304 / 167.932 / 179.689 | -1.09 | 1.33 | -2.39 |
+| drop_unreferenced_column | client_process_cpu_ns | 0.215,0.286,0.215 / 0.215 / 0.215 / 0.286 | 0.223,0.235,0.167 / 0.167 / 0.223 / 0.235 | 0.228,0.256,0.224 / 0.224 / 0.228 / 0.256 | 3.54 | -2.19 | 5.86 |
+
+新增压缩证据 21,397,678 字节（20.41 MiB），SHA256 `0b906588b6991c839d0355c94a8ae10b60c179286174b026d5e090a7adb43b72`；54,132 个非 ELF 文件、2,771 个目录、3,988 个内容块和 376 个本地 ELF 引用经过独立重建核对。随后清理 50,311 个已备份的生成文件，逻辑副本 2.008 GiB；这不是独占文件系统释放量。源码、原始错误／日志、所有 ELF、一个最终工作数据集和一个真实旧库冷关闭种子保留。 [压缩证据](benchmarks/view-column-dependencies-20261106.json.gz)包含完整 SQL、回复、数据、源代码快照、正常与失败记录。大体积原始 JSON 只在忽略的 build 目录工作，不加入 Git。最初 53.45 MiB 报告仍以 5.70 MiB gzip 保留，用于核对测量和追溯；没有重写历史提交。
+
+在仓库根目录恢复完整普通性能原始表；将 member 改为 `batch/view-ddl-cost9-C4-v1/all-DDL-performance-tables-v1.md` 可恢复 DDL 表：
+
+```sh
+python3 - <<'PYEXTRACT'
+import base64, gzip, json, lzma, sys
+with gzip.open("docs/benchmarks/view-column-dependencies-20261106.json.gz", "rb") as f:
+    envelope = json.load(f)
+bundle = json.loads(lzma.decompress(base64.b64decode(envelope["payload_xz_base64"])))
+member = "batch/view-column-dependency-cost27-C4-v1/all-performance-tables-v3.md"
+entry = bundle["artifacts"][member]
+sys.stdout.buffer.write(base64.b64decode(bundle["blobs"][entry["blob"]]))
+PYEXTRACT
+```
+
+保留的失败包括：C1 升级首条查询超时、0 回复／42 NOTRUN，实际强制 -9 且进程组已消失，原因 OPEN；C3 目录视图前置存在性检查导致的原生 abort，以及 TypeRegistry 启动诊断；最终 C4 修复真实前置检查，旧版缺少能力以失败检查记录。外围进度脚本在普通 270 操作及独立校验成功后发生 exclusive-create FileExistsError，只继续尚未启动的 DDL 测量，没有重采样。首次输入审计的暂缓状态键拼写错误已由 v2 对原始对象逐项核对；首次第六来源 HTTP403 及后续完整成功的六来源抓取记录均保留。
+
+本批范围是普通 SQL 的静态 DDL 关系／列依赖。视图来源 T7 的零 origin、列别名运行时重绑定、部分嵌套视图、字面量／envelope 运行时、含歧义历史的旧视图、物化视图、函数／类型依赖及大量视图的扩展性仍有缺口；普通 pg_attribute 查询尚未补齐。用户暂缓范围保持，未修改执行图／child-provider、portal 或通用故障矩阵。
+
+正式库存为 2396 个测试文件（1129 顶层／1134 总 C++），注册 E2E 驱动 684／其中独立 E2E 664 不变；本批没有声称全套通过。原 273 项、22 complete／166 partial／70 unverified／15 deferred_by_user 保持，历史记录增至 285，IDX-07 仍 unverified/evidence[]。754 个 Markdown 路径、725 份保护记录及旧 35 个压缩包保持。 当前仍是 partial，Goal active；下一步优先定位性能负向并继续 pg_attribute 等目录功能。默认程序 SHA425165af 未更新、没有推送。下方条目保留各自版本的历史结果。
+<!-- P35 view-column-dependencies end -->
+
 <!-- P34 projected-toast-demand begin -->
 <a id="projected-toast-demand-20261106"></a>
 ## 2026-11-06：部分列查询按需求读取长字段（P34-C2）

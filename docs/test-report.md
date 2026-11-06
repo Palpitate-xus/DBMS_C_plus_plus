@@ -1,5 +1,22 @@
 # DBMS 功能测试报告
 
+<!-- P35 view-column-dependencies begin -->
+<a id="view-column-dependencies-current"></a>
+## 2026-11-06：视图依赖、旧库与事务回归
+
+最终 C4 正常 CMake C++17/O2（程序 SHA 前缀 77418e9c）通过新增原生 242 项检查；同一最终测试旧版实际 120 项失败，中间 C3 实际 2 项失败。7 个既有相关原生测试在旧版及最终 C4 均实际 exit0。28 条真实依赖删除返回 2BP01；29 条普通事务／保存点对照的值、tag、SQLSTATE 和 Ready 与 PostgreSQL18.6 一致，保留先前写入、失败 CASCADE、恢复与冷重启均有记录。
+
+新增 `view_column_dependency_test.cpp` 覆盖真实列／别名／表达式／谓词／排序／分组／窗口／CTE／派生／相关子查询／USING／NATURAL／自连接／CASE/ARRAY/ROW/FILTER/UNION、星号后加列、兼容替换、编译目录列身份、保留注释、列重映射、递归 CASCADE、多子命令失败恢复、真实旧式关系依赖及纯元数据校验。旧版最终 242/120失败/exit1，C3 242/2失败/exit1，C4 242/0/exit0；初版六次 abort 未改为通过。
+
+7 项既有程序为 view_test、view_replacement_contract_test、serial_owned_sequence_test、ddl_rollback_restart_test、temp_alter_column_catalog_test、with_dml_native_command_view_test、catalog_snapshot_test。旧版记录实际复用并核对，最终 C4 全部重新运行 actual0，61 core 与各代冻结源码／stub 对应。
+
+新 201 条协议矩阵仍有 3 条别名运行查询差异，真实旧库升级 42 条仍有 5 条嵌套／字面量运行差异；整表／视图删除 13 条的值与状态匹配 PG，编译目录视图 12 条仍有 1 条别名执行 0A000。全部请求、完整 T7、NULL、诊断和 Ready 原样保留，完整 PG 协议等价仍为 false。原 62 条 SQL 完整回复在旧／C4 间逐字节相同，41 条目录查询及 7 条控制回复相同，原有 9／24 条 PG 差异保持。另保留完整 pg_attribute 89 条调研。
+
+普通事务补充 29 条在 PG／旧版／C4 全部运行，初始及冷开 Main 均实际正常0；C4 的所有值/tag/SQLSTATE/Ready 匹配 PG。前期 C1 首查询超时的 42 条 NOTRUN 保持失败；两个单独 source-first 诊断、旧版完整 42、后续候选完整 42 均有原始记录，未归因为已修复。
+
+正常 270+27 操作的 72 个 Main 正常0，1197 完整回复独立核对。正式库存为 2396 个测试文件（1129 顶层／1134 总 C++），注册 E2E 驱动 684／其中独立 E2E 664 不变；本批没有声称全套通过。原 273 项、22 complete／166 partial／70 unverified／15 deferred_by_user 保持，历史记录增至 285，IDX-07 仍 unverified/evidence[]。754 个 Markdown 路径、725 份保护记录及旧 35 个压缩包保持。 [全部原始值、负向与压缩证据](performance-report-2026-10-30.md#view-column-dependencies-20261106)。
+<!-- P35 view-column-dependencies end -->
+
 <!-- P34 projected-toast-demand begin -->
 <a id="projected-toast-demand-current"></a>
 ## 2026-11-06：按需求读取 TOAST 验证

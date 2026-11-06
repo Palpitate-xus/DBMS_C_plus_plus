@@ -20,6 +20,7 @@
 #include "common/logs.h"
 #include "common/FeatureGate.h"
 #include "common/DbError.h"
+#include "common/SqlSyntax.h"
 #include "process/OutputCapture.h"
 #include "common/GeometryValue.h"
 #include "common/scram_sha256.h"
@@ -37,6 +38,7 @@
 #include <iostream>
 #include <iterator>
 #include <limits>
+#include <map>
 #include <memory>
 #include <set>
 #include <sstream>
@@ -2264,6 +2266,10 @@ static bool executeSchemaPhysicalDropPlan(
 static bool catalogTableStorageName(const CatalogManager& catalog,
     const PgClassRow& relation, std::string& storageName, std::string& error);
 
+static void dropColumnDependentViews(
+    CatalogManager& catalog, const std::string& database, Oid relation,
+    int32_t attribute, bool cascade, DdlTransaction& transaction);
+
 static bool generatedVirtualName(const TableSchema& table,const std::string& name) {
     for(size_t i=0;i<table.len;++i)if(table.cols[i].dataName==name)return table.cols[i].generatedKind=='v';
     return false;
@@ -2389,7 +2395,8 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
         // ADD COLUMN declaration conversion is pure. A rejected declaration
         // must not turn a clean snapshot into a database-wide physical
         // restore; successful earlier actions still keep the snapshot dirty.
-        if (sub.action != AlterTableStmt::Action::AddColumn)
+        if (sub.action != AlterTableStmt::Action::AddColumn &&
+            sub.action != AlterTableStmt::Action::DropColumn)
             txn.markSnapshotDirty();
         DBStatus status = DBStatus::OK;
         switch (sub.action) {
@@ -2456,6 +2463,29 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                         return true;
                     }
                 }
+                // Resolve column dependencies before clearing comments or
+                // rewriting a single heap row. A view reads columns in its
+                // predicates/joins/children as well as its visible output.
+                try {
+                    CatalogManager& catalog =
+                        g_engine.catalogService().get(s.currentDB);
+                    const auto name = CatalogService::logicalName(tableName);
+                    const auto relation = catalog.resolveRelationSnapshot(
+                        name.name, {name.schema.empty() ? "public" : name.schema});
+                    const auto attribute = relation
+                        ? catalog.getAttribute(relation->oid, sub.name)
+                        : std::nullopt;
+                    if (attribute) {
+                        dropColumnDependentViews(
+                            catalog, s.currentDB, relation->oid, attribute->attnum,
+                            sub.options.count("cascade") != 0, txn);
+                    }
+                } catch (const std::exception& error) {
+                    std::cout << "ALTER TABLE DROP COLUMN: " << error.what()
+                              << std::endl;
+                    return true;
+                }
+                txn.markSnapshotDirty();
                 if (!g_engine.getColumnComment(
                          s.currentDB, tableName, sub.name).empty() &&
                     g_engine.commentOnColumn(
@@ -7625,7 +7655,8 @@ static bool executeDropTableSingle(const DropStmt* stmt, Session& s,
                                 : CatalogManager::DropBehavior::Restrict;
             catalogDropPlan = cat.planDrop(PgClassOid_Class, cls->oid, behavior);
             if (!catalogDropPlan.ok()) {
-                std::cout << "ERROR: " << catalogDropPlan.error << std::endl;
+                std::cout << "ERROR: " << catalogDropPlan.error
+                          << " (SQLSTATE 2BP01)" << std::endl;
                 return true;
             }
             hasCatalogDropPlan = true;
@@ -10269,6 +10300,314 @@ bool DdlExecutor::executeDropType(const DropStmt* stmt, Session& s) {
     return false;
 }
 
+// A view stores parse-time dependencies, independently of execution demand.
+// Use bound occurrence/column ordinals: aliases, repeated table occurrences,
+// expanded stars and lexical children must never become name guesses here.
+using ViewRelationDependencies = std::set<std::pair<Oid, int32_t>>;
+
+static ViewRelationDependencies boundViewRelationDependencies(
+    const CatalogManager& catalog, const std::string& database,
+    const PreparedQuery& prepared) {
+    ViewRelationDependencies dependencies;
+    std::map<size_t, const PreparedQuery::SourceRange*> sources;
+    std::map<size_t, std::vector<PgAttributeRow>> attributes;
+    std::map<size_t, Oid> relations;
+    std::map<size_t, std::vector<std::string>> originalNames;
+    for (const auto& source : prepared.sourceRanges) {
+        sources.emplace(source.ordinal, &source);
+        if (source.mergedUsing || source.cteStatement || source.relationName.empty())
+            continue;
+        const auto schema = catalog.getNamespaceByName(source.relationSchema);
+        const auto relation = schema
+            ? catalog.getClassByName(source.relationName, schema->oid) : std::nullopt;
+        if (!relation)
+            throw DbError("XX001", "view source has no catalog relation identity");
+        relations.emplace(source.ordinal, relation->oid);
+        dependencies.emplace(relation->oid, 0);
+        auto columns = catalog.findAttributesByNum(relation->oid);
+        columns.erase(std::remove_if(columns.begin(), columns.end(),
+            [](const auto& column) { return column.attnum <= 0 || column.attisdropped; }),
+            columns.end());
+        auto& names = originalNames[source.ordinal];
+        for (const auto& field : source.columns) names.push_back(field.name);
+        const size_t aliases = source.source ? source.source->columnAliases.size() : 0;
+        if (aliases && columns.size() == source.columns.size()) {
+            for (size_t column = 0; column < aliases; ++column)
+                names[column] = columns[column].attname;
+        } else if (aliases) {
+            // A compiled catalog can expose a reordered subset. Recover its
+            // unaliased descriptor with a pure source declaration: SELECT 1
+            // reads no values and does not require a complete SELECT * shape.
+            const auto declaration = g_engine.prepareBoundQuery(database,
+                "SELECT 1 FROM " + domainQuotedIdentifier(source.relationSchema) + "." +
+                    domainQuotedIdentifier(source.relationName), {}, true);
+            const PreparedQuery::SourceRange* original = nullptr;
+            for (const auto& range : declaration.sourceRanges)
+                if (range.owner == declaration.ast.get() &&
+                    range.relationSchema == source.relationSchema &&
+                    range.relationName == source.relationName) original = &range;
+            if (!original || original->columns.size() != source.columns.size())
+                throw DbError("XX001", "view source declaration changed while binding aliases");
+            for (size_t column = 0; column < names.size(); ++column)
+                names[column] = original->columns[column].name;
+        }
+        attributes.emplace(source.ordinal, std::move(columns));
+    }
+    const auto columnDependency = [&](size_t source, size_t column) {
+        const auto relation = relations.find(source);
+        if (relation == relations.end()) return; // logical/merged source; its child/keys are visited
+        const auto& columns = attributes.at(source);
+        const auto& range = *sources.at(source);
+        if (column >= range.columns.size())
+            throw DbError("XX001", "view source column has no catalog identity");
+        const auto found = std::find_if(columns.begin(), columns.end(), [&](const auto& field) {
+            return field.attname == originalNames.at(source).at(column);
+        });
+        if (found == columns.end())
+            throw DbError("XX001", "view source column has no catalog declaration");
+        dependencies.emplace(relation->second, found->attnum);
+    };
+    const auto bindingDependency = [&](const QueryColumnBinding& binding) {
+        if (!sources.count(binding.sourceOrdinal))
+            throw DbError("XX001", "view column lost its bound source occurrence");
+        columnDependency(binding.sourceOrdinal, binding.columnOrdinal);
+    };
+
+    // These include SELECT * / alias.* even though the original syntax has
+    // no individual ColumnRefExpr for the expanded output cells.
+    for (const auto& projection : prepared.projectionBindings)
+        for (const auto& item : projection.second)
+            if (item.column) bindingDependency(*item.column);
+
+    std::function<void(const Expr*)> expression;
+    const auto window = [&](const WindowDef& definition) {
+        for (const auto& item : definition.partitionBy) expression(item.get());
+        for (const auto& item : definition.orderBy) expression(item.first.get());
+        expression(definition.frameStart.get());
+        expression(definition.frameEnd.get());
+    };
+    expression = [&](const Expr* node) {
+        if (!node || node->preparedSubquery) return; // child is in statementOutputs
+        if (const auto* column = dynamic_cast<const ColumnRefExpr*>(node)) {
+            if (column->binding) bindingDependency(*column->binding);
+        } else if (const auto* unary = dynamic_cast<const UnaryOpExpr*>(node)) {
+            expression(unary->operand.get());
+        } else if (const auto* binary = dynamic_cast<const BinaryOpExpr*>(node)) {
+            expression(binary->left.get()); expression(binary->right.get());
+        } else if (const auto* call = dynamic_cast<const FunctionCallExpr*>(node)) {
+            for (const auto& argument : call->args) expression(argument.get());
+            for (const auto& argument : call->namedArgs) expression(argument.value.get());
+            expression(call->filter.get());
+            for (const auto& key : call->aggregateOrderKeys) expression(key.expr.get());
+            if (call->hasOver) window(call->over);
+        } else if (const auto* cast = dynamic_cast<const CastExpr*>(node)) {
+            expression(cast->operand.get());
+        } else if (const auto* conditional = dynamic_cast<const CaseExpr*>(node)) {
+            expression(conditional->switchExpr.get());
+            for (const auto& clause : conditional->whenClauses) {
+                expression(clause.first.get()); expression(clause.second.get());
+            }
+            expression(conditional->elseExpr.get());
+        } else if (const auto* array = dynamic_cast<const ArrayExpr*>(node)) {
+            for (const auto& item : array->elements) expression(item.get());
+        } else if (const auto* row = dynamic_cast<const RowExpr*>(node)) {
+            for (const auto& item : row->elements) expression(item.get());
+        } else if (const auto* comparison = dynamic_cast<const QuantifiedComparisonExpr*>(node)) {
+            expression(comparison->left.get()); expression(comparison->right.get());
+        } else if (node->type != ExprType::Literal && node->type != ExprType::Parameter &&
+                   node->type != ExprType::A_Star) {
+            throw DbError("0A000", "view expression dependency is not implemented");
+        }
+    };
+    std::function<void(const FromItem*)> from = [&](const FromItem* item) {
+        if (!item) return;
+        expression(item->joinCondition.get());
+        from(item->left.get()); from(item->right.get());
+        if (item->type != FromItem::Type::Join) return;
+        std::set<const FromItem*> descendants;
+        std::function<void(const FromItem*)> collect = [&](const FromItem* child) {
+            if (!child) return;
+            descendants.insert(child);
+            collect(child->left.get()); collect(child->right.get());
+        };
+        collect(item);
+        // Binding has already resolved the precise USING/NATURAL keys.
+        // Both inputs read each key even when no output projects that key.
+        for (const auto& merged : prepared.sourceRanges) {
+            if (!merged.mergedUsing || merged.source != item) continue;
+            for (const auto& key : merged.columns)
+                for (const auto& source : prepared.sourceRanges) {
+                    if (source.mergedUsing || !descendants.count(source.source)) continue;
+                    for (size_t column = 0; column < source.columns.size(); ++column)
+                        if (source.columns[column].name == key.name)
+                            columnDependency(source.ordinal, column);
+                }
+        }
+    };
+    // Query-local CTEs, derived tables, set operands and correlated/scalar
+    // children belong to this preparation. Independently stored source
+    // views keep their own graph; do not flatten their viewQuery into ours.
+    for (const auto& output : prepared.statementOutputs) {
+        const auto* select = dynamic_cast<const SelectStmt*>(output.first);
+        if (!select)
+            throw DbError("0A000", "view modifying-query dependencies are not implemented");
+        for (const auto& item : select->selectList) expression(item.expr.get());
+        from(select->fromClause.get());
+        expression(select->whereClause.get());
+        for (const auto& item : select->groupBy) expression(item.get());
+        for (const auto& group : select->groupByElems)
+            for (const auto& item : group.exprs) expression(item.get());
+        expression(select->having.get());
+        for (const auto& item : select->orderBy) expression(item.expr.get());
+        for (const auto& item : select->distinctOn) expression(item.get());
+        for (const auto& row : select->valuesRows)
+            for (const auto& item : row) expression(item.get());
+        for (const auto& definition : select->windowDefs) window(definition);
+        expression(select->limitExpr.get()); expression(select->offsetExpr.get());
+    }
+    return dependencies;
+}
+
+static std::string viewDefinitionQuery(std::string definition) {
+    const auto protectedBytes = sqlProtectedBytes(definition);
+    size_t end = definition.size();
+    for (const auto* marker : {"\nBASE_TABLE:", "\nWITH_CHECK_OPTION:"}) {
+        auto at = definition.find(marker);
+        while (at != std::string::npos) {
+            if (!protectedBytes[at + 1]) { end = std::min(end, at); break; }
+            at = definition.find(marker, at + 1);
+        }
+    }
+    definition.resize(end);
+    return definition;
+}
+
+static void dropColumnDependentViews(
+    CatalogManager& catalog, const std::string& database, Oid relation,
+    int32_t attribute, bool cascade, DdlTransaction& transaction) {
+    std::map<Oid, ViewRelationDependencies> graph;
+    for (const auto& view : catalog.listClasses()) {
+        if (view.relkind != 'v') continue;
+        // pg_stats is an owned, compiled metadata source, with no stored
+        // user query and no dependency on user table-column declarations.
+        const auto viewSchema = catalog.getNamespace(view.relnamespace);
+        if (viewSchema && viewSchema->nspname == "pg_catalog" &&
+            view.relname == "pg_stats") continue;
+        auto& dependencies = graph[view.oid];
+        bool hasColumnIdentity = false;
+        for (const auto& dependency : catalog.findDepends(PgClassOid_Class, view.oid)) {
+            if (dependency.refclassid != PgClassOid_Class) continue;
+            dependencies.emplace(dependency.refobjid, dependency.refobjsubid);
+            hasColumnIdentity |= dependency.refobjsubid > 0;
+        }
+        if (hasColumnIdentity) continue;
+        // Older CREATE VIEW persisted only a guessed whole-table edge (or
+        // none for complex queries). Recover valid old definitions purely,
+        // without executing data, publishing repairs on RESTRICT or treating
+        // every column of a referenced table as used.
+        std::string name, error;
+        if (!catalogViewStorageName(catalog, view, name, error))
+            throw DbError("XX001", error);
+        const auto sql = viewDefinitionQuery(g_engine.getViewSQL(database, name));
+        if (sql.empty()) throw DbError("XX001", "legacy view definition is missing");
+        auto prepared = g_engine.prepareBoundQuery(database, sql, {}, true);
+        if (view.relnatts > 0 && prepared.output.size() != static_cast<size_t>(view.relnatts)) {
+            // An old SELECT * has a persisted output contract even though
+            // its old dependency rows omitted the expanded column identities.
+            // A later ADD must not turn that star into a dependency on the
+            // appended column. Recover only an unambiguous, matching prefix
+            // of one real source; never guess a join's historic expansion.
+            const auto* select = dynamic_cast<const SelectStmt*>(prepared.ast.get());
+            const auto* input = select ? select->fromClause.get() : nullptr;
+            const Expr* target = select && select->selectList.size() == 1
+                ? select->selectList.front().expr.get() : nullptr;
+            const auto* literal = dynamic_cast<const LiteralExpr*>(target);
+            const auto* qualified = dynamic_cast<const ColumnRefExpr*>(target);
+            const bool star = (literal && literal->value == "*") ||
+                (qualified && qualified->column == "*");
+            const PreparedQuery::SourceRange* source = nullptr;
+            for (const auto& range : prepared.sourceRanges)
+                if (range.source == input && !range.relationName.empty() && !range.cteStatement)
+                    source = &range;
+            const auto previous = catalog.findAttributesByNum(view.oid);
+            const size_t width = static_cast<size_t>(view.relnatts);
+            bool prefix = star && input && input->type == FromItem::Type::Table &&
+                source && previous.size() == width && source->columns.size() > width;
+            for (size_t column = 0; prefix && column < width; ++column) {
+                const auto& field = source->columns[column];
+                const bool array = field.type.size() >= 2 &&
+                    field.type.compare(field.type.size() - 2, 2, "[]") == 0;
+                prefix = previous[column].attnum == static_cast<int16_t>(column + 1) &&
+                    previous[column].attname == field.name &&
+                    viewOutputTypeOid(catalog, previous[column].atttypid,
+                        previous[column].attndims > 0) ==
+                    viewOutputTypeOid(catalog, field.typeOid, array) &&
+                    previous[column].atttypmod == field.typeMod;
+            }
+            if (!prefix)
+                throw DbError("0A000", "legacy view output changed; exact dependencies require view replacement");
+            const std::string spelling = input->tableName;
+            QueryRelationMetadata frozen{source->relationSchema, source->relationName,
+                source->columns, {}};
+            frozen.columns.resize(width);
+            prepared = g_engine.prepareBoundQuery(database, sql, {}, true,
+                [&](const std::string& requested) -> std::optional<QueryRelationMetadata> {
+                    return requested == spelling ? std::optional<QueryRelationMetadata>(frozen) : std::nullopt;
+                });
+        }
+        dependencies = boundViewRelationDependencies(catalog, database, prepared);
+    }
+    std::set<Oid> affected;
+    for (const auto& view : graph)
+        if (view.second.count({relation, attribute})) affected.insert(view.first);
+    if (affected.empty()) return;
+    if (!cascade)
+        throw DbError("2BP01", "cannot drop column because a view depends on it");
+
+    // Include legacy complex views whose old catalog had no parent edge.
+    // Plans stay local until the complete closure/physical worklist is valid.
+    bool changed;
+    do {
+        changed = false;
+        for (const auto& view : graph) {
+            if (affected.count(view.first)) continue;
+            for (const auto& dependency : view.second)
+                if (affected.count(dependency.first)) {
+                    affected.insert(view.first); changed = true; break;
+                }
+        }
+    } while (changed);
+    CatalogManager::DropPlan plan;
+    std::set<std::pair<Oid, Oid>> planned;
+    std::set<Oid> visiting, visited;
+    std::function<void(Oid)> visit = [&](Oid view) {
+        if (visited.count(view)) return;
+        if (!visiting.insert(view).second)
+            throw DbError("2BP01", "view dependency cycle prevents column removal");
+        for (Oid dependent : affected)
+            for (const auto& edge : graph.at(dependent))
+                if (edge.first == view) { visit(dependent); break; }
+        const auto childPlan = catalog.planDrop(
+            PgClassOid_Class, view, CatalogManager::DropBehavior::Cascade);
+        if (!childPlan.ok()) throw DbError("2BP01", childPlan.error);
+        for (const auto& object : childPlan.objectsToDrop)
+            if (planned.insert(object).second) plan.objectsToDrop.push_back(object);
+        visiting.erase(view); visited.insert(view);
+    };
+    for (Oid view : affected) visit(view);
+    std::vector<PhysicalCascadeAction> actions;
+    std::string error;
+    if (!buildPhysicalCascadeActions(
+            catalog, g_engine, database, INVALID_OID, plan, actions, error))
+        throw DbError("XX001", error);
+    transaction.markSnapshotDirty();
+    for (const auto& action : actions)
+        if (!dropPhysicalCascadeAction(g_engine, database, action))
+            throw DbError("58030", "dependent view physical removal failed");
+    if (!catalog.applyDropPlan(plan, &error) || !catalog.persistAll())
+        throw DbError("58030", "dependent view catalog removal failed: " + error);
+}
+
 // ----------------------------------------------------------------------------
 // CREATE VIEW
 // ----------------------------------------------------------------------------
@@ -10367,15 +10706,15 @@ bool DdlExecutor::executeCreateView(const CreateViewStmt* stmt, Session& s) {
         return true;
     }
 
-    std::string resolvedBaseTable;
     if (!baseTable.empty()) {
-        resolvedBaseTable = resolveTableName(s, baseTable);
+        const auto resolvedBaseTable = resolveTableName(s, baseTable);
         if (!g_engine.tableExists(s.currentDB, resolvedBaseTable) &&
             !g_engine.viewExists(s.currentDB, baseTable) &&
             !g_engine.isMaterializedView(s.currentDB, baseTable)) {
-            std::cout << "ERROR: relation \"" << baseTable
-                      << "\" does not exist" << std::endl;
-            return true;
+            // A compiled catalog is a valid read source without a heap or
+            // stored .view file. Whole-query binding below owns existence
+            // validation; this heuristic only identifies a writable base.
+            baseTable.clear();
         }
     }
 
@@ -10383,10 +10722,13 @@ bool DdlExecutor::executeCreateView(const CreateViewStmt* stmt, Session& s) {
     // row or textual projection guesses. This is pure even for empty input,
     // expressions, constants and volatile routines.
     QueryRowDescriptor output;
+    ViewRelationDependencies viewDependencies;
     try {
         auto prepared = g_engine.prepareBoundQuery(s.currentDB, viewSql, {}, true);
         if (!dynamic_cast<const SelectStmt*>(prepared.ast.get()))
             throw DbError("42601", "CREATE VIEW requires a query");
+        viewDependencies = boundViewRelationDependencies(
+            g_engine.catalogService().get(s.currentDB), s.currentDB, prepared);
         output = std::move(prepared.output);
         if (stmt->columnNames.size() > output.size())
             throw DbError("42601", "CREATE VIEW has more column names than columns");
@@ -10505,17 +10847,15 @@ bool DdlExecutor::executeCreateView(const CreateViewStmt* stmt, Session& s) {
                 dependency.refclassid, dependency.refobjid,
                 dependency.refobjsubid);
         }
-        if (!baseTable.empty()) {
-            const auto baseRelation =
-                catalog->resolveRelationSnapshot(baseTable, {"public"});
-            if (baseRelation && baseRelation->oid != viewOid) {
+        for (const auto& referenced : viewDependencies) {
+            if (referenced.first != viewOid) {
                 PgDependRow dependency;
                 dependency.classid = PgClassOid_Class;
                 dependency.objid = viewOid;
                 dependency.objsubid = 0;
                 dependency.refclassid = PgClassOid_Class;
-                dependency.refobjid = baseRelation->oid;
-                dependency.refobjsubid = 0;
+                dependency.refobjid = referenced.first;
+                dependency.refobjsubid = referenced.second;
                 dependency.deptype = 'n';
                 catalog->addDepend(dependency);
             }
@@ -10654,7 +10994,8 @@ bool DdlExecutor::executeDropView(const DropStmt* stmt, Session& s) {
         catalogPlan = catalog->planDrop(
             PgClassOid_Class, viewOid, behavior);
         if (!catalogPlan.ok()) {
-            std::cout << "ERROR: " << catalogPlan.error << std::endl;
+            std::cout << "ERROR: " << catalogPlan.error
+                      << " (SQLSTATE 2BP01)" << std::endl;
             return true;
         }
         hasCatalogPlan = true;

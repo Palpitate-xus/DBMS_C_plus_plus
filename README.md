@@ -1,5 +1,16 @@
 # DBMS C++
 
+<!-- P35 view-column-dependencies begin -->
+<a id="view-column-dependencies-current"></a>
+## 2026-11-06：视图依赖删除保护（P35-C4，partial）
+
+创建／兼容替换视图时，从已绑定的真实来源、具体列及查询子树记录依赖，覆盖投影、谓词、排序、分组、窗口、子查询与 USING/NATURAL 键。删除前先检查依赖；RESTRICT 返回 2BP01，未引用列仍可删除。CASCADE 按依赖顺序删除相关视图，后续子命令失败时由已有 DDL 快照恢复文件和目录记录。列序号压缩后，剩余引用沿用已有重映射。
+
+新增 242 项原生检查和 7 项既有专项通过；28 次依赖删除返回正确状态，普通事务／保存点、真实旧库与冷重启有完整对照。本轮没有整体提速：普通 30 区域墙钟 19 高于两旧，创建视图墙钟 +41.47%／+53.49%，全部负向与原始分布见[性能报告](docs/performance-report-2026-10-30.md#view-column-dependencies-20261106)。
+
+压缩后再清理生成副本，最初 53.45 MiB 报告保留为 5.70 MiB gzip；新证据 20.41 MiB。功能仍 partial，默认程序保持，Goal active；下方各批为历史结果。
+<!-- P35 view-column-dependencies end -->
+
 <!-- P34 projected-toast-demand begin -->
 ## 2026-11-06：部分列查询减少长字段读取（P34-C2）
 

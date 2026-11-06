@@ -367,6 +367,20 @@
       "sha256": "6f1cedfa278c53063fbfdf3edf7daff9786fc4350833789a96daafa93a52071d",
       "encoding": "gzip",
       "roundtrip_bytes_exact": true
+    },
+    {
+      "original_path": "docs/benchmarks/view-column-dependencies-20261106.json",
+      "original_bytes": 28338837,
+      "original_sha256": "50fff61469e4fea12e42e0cec2422a1e7252459fc9ac24a3cd534479b4ff7b99",
+      "path": "docs/benchmarks/view-column-dependencies-20261106.json.gz",
+      "bytes": 21397678,
+      "sha256": "0b906588b6991c839d0355c94a8ae10b60c179286174b026d5e090a7adb43b72",
+      "encoding": "gzip",
+      "roundtrip_bytes_exact": true,
+      "payload_encoding": "base64+xz+json-content-addressed-v1",
+      "payload_raw_bytes": 1150721336,
+      "payload_raw_sha256": "407a8065befb156ad951005144b5362a3960ce4469352ba7c01db486213a761d",
+      "scope": "P35 static view dependency implementation, all finite functional failures and complete ordinary270 + DDL27 measurements; partial, no PG/global speedup claim"
     }
   ],
   "total_original_bytes": 1625701048,

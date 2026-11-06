@@ -1,5 +1,16 @@
 # 与 PostgreSQL 18 的功能和性能差距
 
+<!-- P35 view-column-dependencies begin -->
+<a id="view-column-dependencies-current"></a>
+## 2026-11-06：进一步补齐静态视图依赖（P35-C4）
+
+创建／兼容替换视图时，从已绑定的真实来源、具体列及查询子树记录依赖，覆盖投影、谓词、排序、分组、窗口、子查询与 USING/NATURAL 键。删除前先检查依赖；RESTRICT 返回 2BP01，未引用列仍可删除。CASCADE 按依赖顺序删除相关视图，后续子命令失败时由已有 DDL 快照恢复文件和目录记录。列序号压缩后，剩余引用沿用已有重映射。
+
+28 条真实依赖删除得到 2BP01，29 条普通事务／保存点的值与状态匹配 PG；201 条主矩阵、42 条真实旧库升级、13 条整表／视图删除和 12 条编译目录视图仍完整保留。主矩阵 3、旧库 5、编译目录别名 1 条运行差异仍 OPEN；完整声明／诊断并未归一化成 PG 通过。普通 pg_attribute 89 条调研已保存，SQL 来源尚未补齐。
+
+原 273 项和 22／166／70／15 状态不变，新增历史记录为 partial；没有关闭整个 CAT-02/06/07/10/16 家族。正常 270+27 操作表明本轮没有整体提速，创建视图墙钟更高，负向原因继续跟进。[完整结果](performance-report-2026-10-30.md#view-column-dependencies-20261106)。本批范围是普通 SQL 的静态 DDL 关系／列依赖。视图来源 T7 的零 origin、列别名运行时重绑定、部分嵌套视图、字面量／envelope 运行时、含歧义历史的旧视图、物化视图、函数／类型依赖及大量视图的扩展性仍有缺口；普通 pg_attribute 查询尚未补齐。用户暂缓范围保持，未修改执行图／child-provider、portal 或通用故障矩阵。
+<!-- P35 view-column-dependencies end -->
+
 <!-- P34 projected-toast-demand begin -->
 <a id="projected-toast-demand-current"></a>
 ## 2026-11-06：投影需求读取的有限进展

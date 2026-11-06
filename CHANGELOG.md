@@ -1,5 +1,13 @@
 # Changelog
 
+<!-- P35 view-column-dependencies begin -->
+## 2026-11-06 — 视图关系／列依赖与破坏性 DDL 保护
+
+创建／兼容替换视图时，从已绑定的真实来源、具体列及查询子树记录依赖，覆盖投影、谓词、排序、分组、窗口、子查询与 USING/NATURAL 键。删除前先检查依赖；RESTRICT 返回 2BP01，未引用列仍可删除。CASCADE 按依赖顺序删除相关视图，后续子命令失败时由已有 DDL 快照恢复文件和目录记录。列序号压缩后，剩余引用沿用已有重映射。
+
+合法编译目录读来源由完整查询绑定校验，别名保留实际列身份；旧视图依赖只读恢复。新增原生 242 检查、7 既有专项、真实 PG／旧库／保存点对照通过有限范围验证；[报告](docs/performance-report-2026-10-30.md#view-column-dependencies-20261106)保留 270+27 操作全部开销及退化。本批没有整体性能提升结论，PG 家族仍 partial、Goal active。
+<!-- P35 view-column-dependencies end -->
+
 <!-- P34 projected-toast-demand begin -->
 ## 2026-11-06 — 普通部分列投影按需求读取 TOAST
 

@@ -2,6 +2,46 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-06 static view relation and column dependency protection",
+      "gap_ids": [
+        "CAT-02",
+        "CAT-06",
+        "CAT-07",
+        "CAT-10",
+        "CAT-16"
+      ],
+      "status": "partial",
+      "evidence": [
+        "src/commands/DdlExecutor.cpp",
+        "tests/view_column_dependency_test.cpp",
+        "docs/performance-report-2026-10-30.md",
+        "docs/postgresql-comparison.md",
+        "docs/compatibility-contract.md",
+        "docs/benchmarks/view-column-dependencies-20261106.json.gz"
+      ],
+      "tests": [
+        "tests/view_column_dependency_test.cpp",
+        "tests/view_test.cpp",
+        "tests/view_replacement_contract_test.cpp",
+        "tests/serial_owned_sequence_test.cpp",
+        "tests/ddl_rollback_restart_test.cpp",
+        "tests/temp_alter_column_catalog_test.cpp",
+        "tests/with_dml_native_command_view_test.cpp",
+        "tests/catalog_snapshot_test.cpp"
+      ],
+      "verification": [
+        "创建／兼容替换视图时，从已绑定的真实来源、具体列及查询子树记录依赖，覆盖投影、谓词、排序、分组、窗口、子查询与 USING/NATURAL 键。删除前先检查依赖；RESTRICT 返回 2BP01，未引用列仍可删除。CASCADE 按依赖顺序删除相关视图，后续子命令失败时由已有 DDL 快照恢复文件和目录记录。列序号压缩后，剩余引用沿用已有重映射。",
+        "最终 C4 正常 CMake C++17/O2（程序 SHA 前缀 77418e9c）通过新增原生 242 项检查；同一最终测试旧版实际 120 项失败，中间 C3 实际 2 项失败。7 个既有相关原生测试在旧版及最终 C4 均实际 exit0。28 条真实依赖删除返回 2BP01；29 条普通事务／保存点对照的值、tag、SQLSTATE 和 Ready 与 PostgreSQL18.6 一致，保留先前写入、失败 CASCADE、恢复与冷重启均有记录。",
+        "新 201 条协议矩阵仍有 3 条别名运行查询差异，真实旧库升级 42 条仍有 5 条嵌套／字面量运行差异；整表／视图删除 13 条的值与状态匹配 PG，编译目录视图 12 条仍有 1 条别名执行 0A000。全部请求、完整 T7、NULL、诊断和 Ready 原样保留，完整 PG 协议等价仍为 false。原 62 条 SQL 完整回复在旧／C4 间逐字节相同，41 条目录查询及 7 条控制回复相同，原有 9／24 条 PG 差异保持。另保留完整 pg_attribute 89 条调研。",
+        "本轮没有接受整体提速结论。30 个普通操作区域中，墙钟中位数 5 低于两旧／19 高于两旧／6 居间，服务器 CPU 为 6／16／8，客户端 CPU 为 5／16／9。旧版墙钟漂移 -28.19%～+27.35%，服务器 CPU -26.58%～+29.13%。查询执行路径源码未改，负向原因尚未隔离，继续 OPEN。",
+        "Normal270 + separate DDL27,72 actual normal Main,1197 responses,98964 rows,391050 cells,27882 NULLs; full original timings/tails/raw3/min/p50/max/CPU/old drift preserved. No overall or PG speedup accepted.",
+        "Final native242/0, same old242/120 and C3/2 actual failures; genuine old image and ordinary29 transaction/savepoint values/status checked. First native aborts/C1 timeout and outer progress-script error preserved.",
+        "新增压缩证据 21,397,678 字节（20.41 MiB），SHA256 `0b906588b6991c839d0355c94a8ae10b60c179286174b026d5e090a7adb43b72`；54,132 个非 ELF 文件、2,771 个目录、3,988 个内容块和 376 个本地 ELF 引用经过独立重建核对。随后清理 50,311 个已备份的生成文件，逻辑副本 2.008 GiB；这不是独占文件系统释放量。源码、原始错误／日志、所有 ELF、一个最终工作数据集和一个真实旧库冷关闭种子保留。",
+        "正式库存为 2396 个测试文件（1129 顶层／1134 总 C++），注册 E2E 驱动 684／其中独立 E2E 664 不变；本批没有声称全套通过。原 273 项、22 complete／166 partial／70 unverified／15 deferred_by_user 保持，历史记录增至 285，IDX-07 仍 unverified/evidence[]。754 个 Markdown 路径、725 份保护记录及旧 35 个压缩包保持。",
+        "Only one production TU changed; existing metadata format reused. No default promotion, push, branch change or goal closure. 本批范围是普通 SQL 的静态 DDL 关系／列依赖。视图来源 T7 的零 origin、列别名运行时重绑定、部分嵌套视图、字面量／envelope 运行时、含歧义历史的旧视图、物化视图、函数／类型依赖及大量视图的扩展性仍有缺口；普通 pg_attribute 查询尚未补齐。用户暂缓范围保持，未修改执行图／child-provider、portal 或通用故障矩阵。"
+      ]
+    },
+    {
       "issue": "2026-11-06 ordinary physical projection demand-directed TOAST reads",
       "gap_ids": [
         "QRY-01",

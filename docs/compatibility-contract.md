@@ -1,5 +1,20 @@
 # 兼容版本契约
 
+<!-- P35 view-column-dependencies begin -->
+<a id="view-column-dependencies-current"></a>
+## 2026-11-06：普通 SQL 视图依赖与删除契约
+
+创建／兼容替换视图时，从已绑定的真实来源、具体列及查询子树记录依赖，覆盖投影、谓词、排序、分组、窗口、子查询与 USING/NATURAL 键。删除前先检查依赖；RESTRICT 返回 2BP01，未引用列仍可删除。CASCADE 按依赖顺序删除相关视图，后续子命令失败时由已有 DDL 快照恢复文件和目录记录。列序号压缩后，剩余引用沿用已有重映射。
+
+CREATE/REPLACE 从纯绑定声明记录真实关系 OID 与列号，不执行表达式推断值；星号固定当前展开，列别名映射回实际来源。有效旧视图在删除前只读绑定，单来源旧星号需历史输出前缀的明确证据；歧义旧定义会失败，不猜测已丢失的数据。编译目录来源不要求物理堆／view 文件。
+
+删除保护在注释清理、堆重写前执行；IF EXISTS 的缺失列不删除视图。CASCADE 包含依赖视图与其子视图，失败恢复由已有 DDL 事务快照负责。普通保存点恢复经真实 SQL 验证，未扩展到通用注入故障矩阵。
+
+本批范围是普通 SQL 的静态 DDL 关系／列依赖。视图来源 T7 的零 origin、列别名运行时重绑定、部分嵌套视图、字面量／envelope 运行时、含歧义历史的旧视图、物化视图、函数／类型依赖及大量视图的扩展性仍有缺口；普通 pg_attribute 查询尚未补齐。用户暂缓范围保持，未修改执行图／child-provider、portal 或通用故障矩阵。
+
+完整 T7、NOTICE／错误明细等 PG 差异仍保留，未声称完整协议等价。[测试](test-report.md#view-column-dependencies-current)及[真实开销](performance-report-2026-10-30.md#view-column-dependencies-20261106)给出本批界限。
+<!-- P35 view-column-dependencies end -->
+
 <!-- P34 projected-toast-demand begin -->
 <a id="projected-toast-demand-current"></a>
 ## 2026-11-06：普通物理部分列投影
