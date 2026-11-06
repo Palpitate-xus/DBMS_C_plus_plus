@@ -1,5 +1,11 @@
 # 文档索引
 
+<!-- P34 projected-toast-demand begin -->
+## 最新验证：部分列 TOAST 需求读取（2026-11-06）
+
+[性能报告](performance-report-2026-10-30.md#projected-toast-demand-20261106)记录完整 C1/C2 两轮矩阵、收益与全部回退；[测试报告](test-report.md#projected-toast-demand-current)列出 83 项新检查、5 项既有专项和完整协议复核；[契约](compatibility-contract.md#projected-toast-demand-current)说明物理部分列适用范围。正式测试库存 2395，Markdown 路径仍 754，Goal active。后续各批条目保留各自版本的历史结果。
+<!-- P34 projected-toast-demand end -->
+
 <!-- P33 pg-class-declaration begin -->
 ## Latest: 2026-11-06 pg_class declaration
 

@@ -2,6 +2,40 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-06 ordinary physical projection demand-directed TOAST reads",
+      "gap_ids": [
+        "QRY-01",
+        "QRY-13",
+        "STO-06"
+      ],
+      "status": "partial",
+      "evidence": [
+        "src/commands/StoredRowNull.h",
+        "src/commands/TableManage.cpp",
+        "src/executor/ExecutionPlan.cpp",
+        "src/executor/ExecutionPlan.h",
+        "docs/performance-report-2026-10-30.md",
+        "docs/benchmarks/projected-toast-demand-20261106.json.gz",
+        "docs/benchmarks/catalog-query-profile-20261106.json.gz"
+      ],
+      "tests": [
+        "tests/ordinary_project_toast_demand_test.cpp",
+        "tests/ordinary_project_bitmap_test.cpp",
+        "tests/multilob_storage_lifecycle_test.cpp",
+        "tests/shared_toast_runtime_missing_file_test.cpp",
+        "tests/pg_class_declaration_test.cpp",
+        "tests/bytea_large_toast_test.cpp"
+      ],
+      "verification": [
+        "普通物理游标上的部分列投影按实际选择解码字段，复用当前行 NULL 位图，仅解析被选中长字段的 TOAST 引用。选中长字段读取失败仍在行输出前报错，输出值、NULL、RID 与旧路径的列顺序保持。全列/星号投影继续原 materialization 路径；选中虚拟列保留原完整输入。过滤、索引、排序、缓冲和不同 schema 的子路径仍由各自已有执行路径处理。",
+        "新增原生回归 14 组、83 项检查全部通过；同一测试在旧版实际失败 6 项。另 5 个既有相关原生测试在旧版及最终 C2 均通过，包含多 LOB 正常冷开/恢复生命周期、缺文件错误、BYTEA 和目录声明 550 项检查。原有 62 条完整协议回复、额外 41 条目录查询及 7 条控制回复，在旧版/C1/C2 间逐字节一致；原 9 项与新 24 条 PostgreSQL 查询差异继续保留。",
+        "Normal CMake C++17/O2 C2 73bb61eb; C1 full-projection regression preserved, full-column fallback added before full C2 matrix. Each cohort270timings/27DB/54Main normal0/1098responses. 仅取 id 的单长字段表墙钟相对旧首测/旧回测为 -54.47% / -47.06%，多长字段表为 -61.28% / -61.63%。",
+        "All 90 comparisons/raw3/min/p50/max/client CPU/tails/old drift and negative cases retained. CPU directions 7 低于两旧 / 11 高于两旧 / 12 居间或相等. No stable/global or PostgreSQL performance parity claim.",
+        "Old273 item objects/source and prior283 history exact. IDX07 unverified/evidence[], protected725 Markdown, old33 archives and default425 unchanged. New formal test inventory2395, no full suite rerun. Master direct, configured identity, no push/deployment or goal closure.",
+        "Compressed evidence independently reconstructed before safe exact-whitelist generated-file cleanup; no raw benchmark JSON tracked."
+      ]
+    },
+    {
       "issue": "2026-11-06 owned pg_class34 declaration and metadata-only type input boundary",
       "gap_ids": [
         "CAT-01",

@@ -1,5 +1,156 @@
 # 数据库操作性能测试报告（2026-10-30）
 
+<!-- P34 projected-toast-demand begin -->
+<a id="projected-toast-demand-20261106"></a>
+## 2026-11-06：部分列查询按需求读取长字段（P34-C2）
+
+最终候选为正常 CMake C++17/O2 `73bb61eb`，旧版为 P33-C2 `280ad4a8`。仅取 id 的单长字段表墙钟相对旧首测/旧回测为 -54.47% / -47.06%，多长字段表为 -61.28% / -61.63%。这是本轮三次样本中位数的有限结果，全部 30 个操作区域、长尾、回退与旧版漂移一并列于下方。下方更早批次保留各自源码版本的历史结果。
+
+普通物理游标上的部分列投影按实际选择解码字段，复用当前行 NULL 位图，仅解析被选中长字段的 TOAST 引用。选中长字段读取失败仍在行输出前报错，输出值、NULL、RID 与旧路径的列顺序保持。全列/星号投影继续原 materialization 路径；选中虚拟列保留原完整输入。过滤、索引、排序、缓冲和不同 schema 的子路径仍由各自已有执行路径处理。
+
+设计参考：[PostgreSQL 18.6 tuple slot](https://raw.githubusercontent.com/postgres/postgres/724edf9bde9d356724ad384a2e196edc3c9f80f7/src/include/executor/tuptable.h) 的按需展开及资源归属、[SQLite Column 指令](https://www.sqlite.org/opcode.html#Column) 的列读取、[DuckDB v1.4.0 table-function API](https://raw.githubusercontent.com/duckdb/duckdb/v1.4.0/src/include/duckdb.h) 的投影下推声明与请求列索引。这些是实现机制参考，没有运行它们的速度比较。
+
+诊断先使用 P33 实际测试正常关闭后的三张表数据，运行旧程序/旧目录、旧程序/新目录、P33 程序280/新目录、旧程序回测四组；每组 512 次 `SELECT id FROM perf_single`，共 2048 次采样目标/2100 次完整响应，前后校验三表全部字段。4 个 Main 实际正常退出。相同 CPU8 与 libprofiler-only 1000Hz 窗口仅用于诊断，原始 PC 经真实 ELF/maps 和有长度的符号范围解释；目录调用栈占比约 13.6%～14.1%，Project 约 65.5%～66.1%。组间重叠不可相加，采样包含前端/后台工作；这不足以判定先前目录特性导致退化。实际源码与缺失未选中 LOB 的正向回归共同定位到扫描阶段全量解码开销。
+
+C1 曾让全列查询也使用新解码器。其首轮完整矩阵中，多 LOB 全列的墙钟比两旧高 9.69%/14.21%，服务器 CPU 高 2.36%/6.36%。该候选不作为最终实现；C2 明确让全列走原路径，再运行一整轮矩阵。全列路径中位数的变化保留为测量观察，不能单凭两轮数据归因于该分支选择。C1 的所有原始样本及负向仍在归档中；没有筛选 C1 的好结果或仅重测不利项目。
+
+新增原生回归 14 组、83 项检查全部通过；同一测试在旧版实际失败 6 项。另 5 个既有相关原生测试在旧版及最终 C2 均通过，包含多 LOB 正常冷开/恢复生命周期、缺文件错误、BYTEA 和目录声明 550 项检查。原有 62 条完整协议回复、额外 41 条目录查询及 7 条控制回复，在旧版/C1/C2 间逐字节一致；原 9 项与新 24 条 PostgreSQL 查询差异继续保留。本次比较复用实际冻结的旧版记录，最终 C2 新运行 4 个初始/冷启动 Main；其余 4 个旧版 Main 的原始正常退出记录与完整回复独立复核。没有重新运行旧 PostgreSQL 参考，也没有把严格 CLI 的失败标成通过。正式测试库存为 2395 个文件（1128 个顶层/1133 个总 C++ 文件），本批运行上述专项，未声称全套通过。
+
+C1 与最终 C2 各执行完整 27 个数据库上下文/54 个正常 Main/270 个计时区间；每轮 1098 响应、96624 行、386388 单元、27864 NULL、231410943 请求/回复字节均经独立解码检查。最终 C2 的 5796 个闭库文件逐字节验证。每轮采用旧版→候选→同旧版，各三轮，完整保留 INSERT、UPDATE16、DELETE16、VACUUM、TRUNCATE、重填、维护前后 SELECT 及直接全列/仅 id 查询。UPDATE16/DELETE16 各为一条影响 16 行的 SQL。
+
+正常性能窗口没有 CPU 绑定、分析器、分配器替换、编译、额外 SQL 或压缩。使用自然缓存状态，既有其他数据库进程仅观察且保持运行，因此不作独占主机结论。服务器 CPU 为整个 Main 进程 CPU；墙钟/客户端 CPU 覆盖请求及帧缓冲至 ReadyI；完整解码、值校验、文件落盘和 proc 快照在计时之后。时钟和 proc 采集非原子，RSS/IO 端点不是峰值。
+
+固定/单长字段 canonical 人口为 256，多 LOB 为 128；直接投影使用真实更新后的 257/257/129 行。继承标签 direct-hit 下的 `SELECT id` 是全部行的列投影，没有 WHERE 或 ORDER BY。全列查询仍读取全部字段，本报告没有将此处收益外推至所有查询或全部写入操作。
+
+最终 C2 的 30 区域方向：墙钟 7 低于两旧 / 12 高于两旧 / 11 居间或相等；服务器 CPU 7 低于两旧 / 11 高于两旧 / 12 居间或相等；客户端 CPU 11 低于两旧 / 13 高于两旧 / 6 居间或相等。方向依据未四舍五入的原始纳秒中位数，含极小差异，不代表统计显著性。旧版墙钟漂移范围为 -27.30%～+17.42%，服务器 CPU 为 -30.52%～+18.26%。所有高于两旧及居间结果完整保留，原 P30/P32/P33 的原因追踪和本轮负向继续 OPEN。
+
+wall_ns (milliseconds; medians of all3 raw timings)
+
+| Cohort / table / case | Old first | C2 | Old return | C2 vs first | C2 vs return | Old drift |
+|---|---:|---:|---:|---:|---:|---:|
+| canonical-fixed-single/fixed/delete16 | 50.260 | 46.538 | 47.171 | -7.40% | -1.34% | -6.15% |
+| canonical-fixed-single/fixed/insert1 | 19.756 | 23.636 | 15.354 | +19.64% | +53.95% | -22.28% |
+| canonical-fixed-single/fixed/reinsert_population | 622.272 | 665.249 | 663.366 | +6.91% | +0.28% | +6.60% |
+| canonical-fixed-single/fixed/select_after_update | 31.925 | 30.719 | 27.438 | -3.78% | +11.96% | -14.06% |
+| canonical-fixed-single/fixed/select_after_vacuum | 33.060 | 30.341 | 26.502 | -8.22% | +14.49% | -19.84% |
+| canonical-fixed-single/fixed/truncate | 228.025 | 197.998 | 181.871 | -13.17% | +8.87% | -20.24% |
+| canonical-fixed-single/fixed/update16 | 88.089 | 90.384 | 79.773 | +2.61% | +13.30% | -9.44% |
+| canonical-fixed-single/fixed/vacuum | 1.774 | 1.728 | 1.615 | -2.60% | +7.00% | -8.97% |
+| canonical-fixed-single/single/delete16 | 67.314 | 84.546 | 65.911 | +25.60% | +28.27% | -2.08% |
+| canonical-fixed-single/single/insert1 | 20.926 | 24.759 | 19.348 | +18.32% | +27.97% | -7.54% |
+| canonical-fixed-single/single/reinsert_population | 1093.917 | 1085.646 | 1045.824 | -0.76% | +3.81% | -4.40% |
+| canonical-fixed-single/single/select_after_update | 49.232 | 60.806 | 51.342 | +23.51% | +18.43% | +4.28% |
+| canonical-fixed-single/single/select_after_vacuum | 55.448 | 54.705 | 51.179 | -1.34% | +6.89% | -7.70% |
+| canonical-fixed-single/single/truncate | 261.984 | 279.257 | 255.862 | +6.59% | +9.14% | -2.34% |
+| canonical-fixed-single/single/update16 | 149.486 | 173.179 | 142.357 | +15.85% | +21.65% | -4.77% |
+| canonical-fixed-single/single/vacuum | 7.525 | 7.757 | 7.035 | +3.08% | +10.26% | -6.51% |
+| canonical-overflow/overflow/delete16 | 77.535 | 138.909 | 80.809 | +79.16% | +71.90% | +4.22% |
+| canonical-overflow/overflow/insert1 | 24.073 | 20.099 | 17.502 | -16.51% | +14.84% | -27.30% |
+| canonical-overflow/overflow/reinsert_population | 1108.433 | 1098.243 | 1131.886 | -0.92% | -2.97% | +2.12% |
+| canonical-overflow/overflow/select_after_update | 58.337 | 57.781 | 54.829 | -0.95% | +5.39% | -6.01% |
+| canonical-overflow/overflow/select_after_vacuum | 63.393 | 68.218 | 55.032 | +7.61% | +23.96% | -13.19% |
+| canonical-overflow/overflow/truncate | 213.693 | 246.123 | 250.922 | +15.18% | -1.91% | +17.42% |
+| canonical-overflow/overflow/update16 | 155.714 | 163.048 | 169.142 | +4.71% | -3.60% | +8.62% |
+| canonical-overflow/overflow/vacuum | 9.938 | 11.339 | 8.171 | +14.10% | +38.78% | -17.78% |
+| direct-hit/fixed/direct_full_no_order | 26.699 | 19.417 | 20.626 | -27.28% | -5.86% | -22.75% |
+| direct-hit/fixed/direct_id_only_no_order | 22.749 | 18.678 | 23.470 | -17.90% | -20.42% | +3.17% |
+| direct-hit/overflow/direct_full_no_order | 57.918 | 37.233 | 58.094 | -35.71% | -35.91% | +0.30% |
+| direct-hit/overflow/direct_id_only_no_order | 49.027 | 18.983 | 49.470 | -61.28% | -61.63% | +0.90% |
+| direct-hit/single/direct_full_no_order | 52.300 | 50.776 | 49.727 | -2.91% | +2.11% | -4.92% |
+| direct-hit/single/direct_id_only_no_order | 54.255 | 24.703 | 46.662 | -54.47% | -47.06% | -13.99% |
+
+server_process_cpu_ns (milliseconds; medians of all3 raw timings)
+
+| Cohort / table / case | Old first | C2 | Old return | C2 vs first | C2 vs return | Old drift |
+|---|---:|---:|---:|---:|---:|---:|
+| canonical-fixed-single/fixed/delete16 | 40.234 | 39.035 | 40.966 | -2.98% | -4.71% | +1.82% |
+| canonical-fixed-single/fixed/insert1 | 9.008 | 8.815 | 7.602 | -2.15% | +15.96% | -15.62% |
+| canonical-fixed-single/fixed/reinsert_population | 592.785 | 582.959 | 590.351 | -1.66% | -1.25% | -0.41% |
+| canonical-fixed-single/fixed/select_after_update | 21.388 | 21.668 | 20.277 | +1.31% | +6.86% | -5.19% |
+| canonical-fixed-single/fixed/select_after_vacuum | 22.446 | 21.746 | 19.854 | -3.12% | +9.53% | -11.55% |
+| canonical-fixed-single/fixed/truncate | 101.612 | 96.730 | 87.604 | -4.80% | +10.42% | -13.79% |
+| canonical-fixed-single/fixed/update16 | 73.248 | 72.818 | 67.390 | -0.59% | +8.06% | -8.00% |
+| canonical-fixed-single/fixed/vacuum | 1.656 | 1.584 | 1.480 | -4.32% | +7.04% | -10.61% |
+| canonical-fixed-single/single/delete16 | 58.308 | 68.705 | 58.587 | +17.83% | +17.27% | +0.48% |
+| canonical-fixed-single/single/insert1 | 8.642 | 13.349 | 10.220 | +54.46% | +30.62% | +18.26% |
+| canonical-fixed-single/single/reinsert_population | 1014.239 | 1036.257 | 1015.952 | +2.17% | +2.00% | +0.17% |
+| canonical-fixed-single/single/select_after_update | 43.323 | 48.706 | 42.575 | +12.42% | +14.40% | -1.73% |
+| canonical-fixed-single/single/select_after_vacuum | 48.980 | 45.624 | 44.381 | -6.85% | +2.80% | -9.39% |
+| canonical-fixed-single/single/truncate | 116.090 | 120.319 | 133.263 | +3.64% | -9.71% | +14.79% |
+| canonical-fixed-single/single/update16 | 122.510 | 139.442 | 117.824 | +13.82% | +18.35% | -3.83% |
+| canonical-fixed-single/single/vacuum | 7.230 | 7.513 | 6.752 | +3.91% | +11.27% | -6.61% |
+| canonical-overflow/overflow/delete16 | 67.010 | 72.364 | 68.328 | +7.99% | +5.91% | +1.97% |
+| canonical-overflow/overflow/insert1 | 11.815 | 10.910 | 9.361 | -7.66% | +16.55% | -20.78% |
+| canonical-overflow/overflow/reinsert_population | 1056.145 | 1036.280 | 1055.697 | -1.88% | -1.84% | -0.04% |
+| canonical-overflow/overflow/select_after_update | 51.671 | 49.501 | 46.658 | -4.20% | +6.09% | -9.70% |
+| canonical-overflow/overflow/select_after_vacuum | 56.319 | 61.465 | 48.125 | +9.14% | +27.72% | -14.55% |
+| canonical-overflow/overflow/truncate | 86.677 | 88.327 | 88.677 | +1.90% | -0.40% | +2.31% |
+| canonical-overflow/overflow/update16 | 130.402 | 137.520 | 132.065 | +5.46% | +4.13% | +1.28% |
+| canonical-overflow/overflow/vacuum | 9.595 | 11.022 | 7.851 | +14.87% | +40.40% | -18.18% |
+| direct-hit/fixed/direct_full_no_order | 14.333 | 11.149 | 9.958 | -22.21% | +11.96% | -30.52% |
+| direct-hit/fixed/direct_id_only_no_order | 14.107 | 11.263 | 13.848 | -20.17% | -18.67% | -1.84% |
+| direct-hit/overflow/direct_full_no_order | 46.401 | 30.542 | 51.197 | -34.18% | -40.34% | +10.34% |
+| direct-hit/overflow/direct_id_only_no_order | 41.871 | 11.015 | 42.870 | -73.69% | -74.31% | +2.39% |
+| direct-hit/single/direct_full_no_order | 45.340 | 43.835 | 42.996 | -3.32% | +1.95% | -5.17% |
+| direct-hit/single/direct_id_only_no_order | 38.764 | 16.019 | 37.756 | -58.68% | -57.57% | -2.60% |
+
+client_process_cpu_ns (milliseconds; medians of all3 raw timings)
+
+| Cohort / table / case | Old first | C2 | Old return | C2 vs first | C2 vs return | Old drift |
+|---|---:|---:|---:|---:|---:|---:|
+| canonical-fixed-single/fixed/delete16 | 0.231 | 0.248 | 0.202 | +7.19% | +22.82% | -12.73% |
+| canonical-fixed-single/fixed/insert1 | 0.203 | 0.248 | 0.200 | +22.56% | +24.50% | -1.56% |
+| canonical-fixed-single/fixed/reinsert_population | 0.255 | 0.244 | 0.220 | -4.16% | +10.99% | -13.65% |
+| canonical-fixed-single/fixed/select_after_update | 4.992 | 4.782 | 4.912 | -4.21% | -2.66% | -1.59% |
+| canonical-fixed-single/fixed/select_after_vacuum | 4.648 | 4.659 | 4.639 | +0.25% | +0.43% | -0.18% |
+| canonical-fixed-single/fixed/truncate | 0.230 | 0.242 | 0.183 | +5.32% | +32.50% | -20.51% |
+| canonical-fixed-single/fixed/update16 | 0.223 | 0.258 | 0.218 | +15.70% | +18.39% | -2.28% |
+| canonical-fixed-single/fixed/vacuum | 0.205 | 0.218 | 0.201 | +6.65% | +8.82% | -2.00% |
+| canonical-fixed-single/single/delete16 | 0.240 | 0.280 | 0.213 | +16.60% | +31.25% | -11.16% |
+| canonical-fixed-single/single/insert1 | 0.210 | 0.244 | 0.205 | +16.42% | +19.29% | -2.40% |
+| canonical-fixed-single/single/reinsert_population | 0.768 | 0.678 | 0.708 | -11.80% | -4.26% | -7.88% |
+| canonical-fixed-single/single/select_after_update | 6.038 | 5.969 | 5.989 | -1.13% | -0.33% | -0.80% |
+| canonical-fixed-single/single/select_after_vacuum | 5.755 | 5.184 | 5.289 | -9.91% | -1.98% | -8.09% |
+| canonical-fixed-single/single/truncate | 0.234 | 0.240 | 0.236 | +2.40% | +1.41% | +0.98% |
+| canonical-fixed-single/single/update16 | 0.237 | 0.308 | 0.235 | +30.08% | +31.17% | -0.83% |
+| canonical-fixed-single/single/vacuum | 0.219 | 0.258 | 0.189 | +17.94% | +36.65% | -13.69% |
+| canonical-overflow/overflow/delete16 | 0.221 | 0.263 | 0.254 | +19.03% | +3.59% | +14.90% |
+| canonical-overflow/overflow/insert1 | 0.205 | 0.206 | 0.232 | +0.56% | -11.23% | +13.29% |
+| canonical-overflow/overflow/reinsert_population | 0.734 | 0.760 | 0.841 | +3.49% | -9.65% | +14.54% |
+| canonical-overflow/overflow/select_after_update | 4.400 | 4.249 | 4.433 | -3.44% | -4.16% | +0.76% |
+| canonical-overflow/overflow/select_after_vacuum | 3.953 | 3.953 | 3.496 | -0.02% | +13.05% | -11.56% |
+| canonical-overflow/overflow/truncate | 0.216 | 0.207 | 0.241 | -4.12% | -14.06% | +11.57% |
+| canonical-overflow/overflow/update16 | 0.253 | 0.233 | 0.272 | -7.88% | -14.04% | +7.17% |
+| canonical-overflow/overflow/vacuum | 0.206 | 0.193 | 0.260 | -6.40% | -25.58% | +25.78% |
+| direct-hit/fixed/direct_full_no_order | 5.061 | 4.942 | 4.914 | -2.37% | +0.57% | -2.92% |
+| direct-hit/fixed/direct_id_only_no_order | 4.992 | 4.925 | 4.965 | -1.34% | -0.81% | -0.54% |
+| direct-hit/overflow/direct_full_no_order | 4.011 | 3.698 | 4.197 | -7.80% | -11.90% | +4.65% |
+| direct-hit/overflow/direct_id_only_no_order | 2.021 | 2.315 | 2.029 | +14.54% | +14.11% | +0.38% |
+| direct-hit/single/direct_full_no_order | 6.059 | 5.851 | 6.197 | -3.42% | -5.57% | +2.28% |
+| direct-hit/single/direct_id_only_no_order | 4.280 | 3.792 | 3.655 | -11.39% | +3.75% | -14.59% |
+
+
+原始三样本/min/p50/max、三类 CPU/墙钟、长尾、完整 SQL/帧/数据/源码与两代候选证据均在 [projected-toast-demand-20261106.json.gz](benchmarks/projected-toast-demand-20261106.json.gz)，21,927,356 字节（20.91 MiB），SHA256 `82f53d6ec18f0f194af4d68db48ffa665220f4a730c32d29b71fcb80aa03ae1d`。全部非 ELF 字节独立解码重建并与原件比较后才清理；CPU 诊断、原始 PC 与采样树另存 [catalog-query-profile-20261106.json.gz](benchmarks/catalog-query-profile-20261106.json.gz)，28,037,375 字节（26.74 MiB），SHA256 `6f1cedfa278c53063fbfdf3edf7daff9786fc4350833789a96daafa93a52071d`。两包合并的文件名集合与本批全部输入一致，每包均低于 49 MiB。ELF 为明确 SHA 引用且保留在本机。压缩结构为 gzip JSON→base64/XZ→内容寻址 JSON；没有将大体积原始 JSON 加入 Git。
+
+在仓库根目录提取最终完整原始表（将路径里的 C2 改为 C1 可提取首轮表）：
+
+```sh
+python3 - <<'PYEXTRACT'
+import base64, gzip, json, lzma, sys
+with gzip.open("docs/benchmarks/projected-toast-demand-20261106.json.gz", "rb") as f:
+    envelope = json.load(f)
+bundle = json.loads(lzma.decompress(base64.b64decode(envelope["payload_xz_base64"])))
+entry = bundle["artifacts"]["batch/projected-toast-demand-cost27-C2-v1/all-performance-tables-v3.md"]
+sys.stdout.buffer.write(base64.b64decode(bundle["blobs"][entry["blob"]]))
+PYEXTRACT
+```
+
+原 273 项状态与既有 283 条历史逐项保持；新增部分进展一条，总历史 284。IDX-07 仍 unverified/evidence[]，725 份受保护历史 Markdown、33 份旧压缩归档及用户暂缓范围均保持，Markdown 路径仍 754。默认425未替换；工作直接提交 master。原始 `analyze-reindex-main-costs-20261104.json` 继续仅以已验证 gzip 保留，53.45 MiB→5.70 MiB；Git 历史未重写。Goal active，完整 PostgreSQL 功能、稳定吞吐及一般写入提速仍待完成。
+
+清理在两包独立完整还原校验通过后进行：删除 41,010 个本批生成副本、三个实际私有原生测试目录中的 4,935 个文件（共 444 个目录），以及两份重复临时压缩包。合计 45,947 个常规文件、3,116,489,621 逻辑字节（2.902 GiB）；被删除单链接文件 st_blocks 之和为 3,151,708,160 字节（2.935 GiB），这不是整台服务器独占空闲空间增量。213 个 ELF 引用、源码、原始 main.prof/maps/nm、最终 C2 的真实20-candidate工作数据和 6484 个其余归档输入文件均逐字节保持；所有非 ELF 原始数据可由两份压缩包恢复。清理采用精确文件白名单与完整 SHA 校验，既有数据库进程保持运行。
+
+<!-- P34 projected-toast-demand end -->
+
 <!-- P33 pg-class-declaration begin -->
 <a id="pg-class-declaration-20261106"></a>
 ## 2026-11-06: owned pg_class declaration and ordinary SQL cost controls

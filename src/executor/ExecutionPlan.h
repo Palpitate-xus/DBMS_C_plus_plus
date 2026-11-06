@@ -306,6 +306,16 @@ public:
     }
 
 private:
+    friend class ProjectOp;
+    // Private consumer capability, never retained across pulls. Other next()
+    // callers and subclasses keep the complete-row materialization contract.
+    bool nextForProjection(std::string& raw, const TableSchema& schema,
+                           const std::set<std::string>& selected,
+                           std::vector<std::string>& cells,
+                           std::vector<bool>& nulls, bool& decoded);
+    bool nextRow(std::string& raw, const TableSchema* projection,
+                 const std::set<std::string>* selected,
+                 std::vector<std::string>* cells, std::vector<bool>* nulls);
     StorageEngine* engine_;
     std::string dbname_;
     std::string tablename_;

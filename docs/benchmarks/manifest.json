@@ -347,8 +347,28 @@
       "sha256": "0b56d74a328f44120ee1a216c9e323e8317a80b552bdb1d80fc291e7afca67c2",
       "encoding": "gzip",
       "roundtrip_bytes_exact": true
+    },
+    {
+      "original_path": "docs/benchmarks/projected-toast-demand-20261106.json",
+      "original_bytes": 29068164,
+      "original_sha256": "acc640bf000132b9f782e642907d56205aa6293352b7492110986a8d3e0e2395",
+      "path": "docs/benchmarks/projected-toast-demand-20261106.json.gz",
+      "bytes": 21927356,
+      "sha256": "82f53d6ec18f0f194af4d68db48ffa665220f4a730c32d29b71fcb80aa03ae1d",
+      "encoding": "gzip",
+      "roundtrip_bytes_exact": true
+    },
+    {
+      "original_path": "docs/benchmarks/catalog-query-profile-20261106.json",
+      "original_bytes": 37014920,
+      "original_sha256": "6a273d45b9b239296e2e286dd44a1c71a84e4c607d9c99ba4d381cb7ada2756e",
+      "path": "docs/benchmarks/catalog-query-profile-20261106.json.gz",
+      "bytes": 28037375,
+      "sha256": "6f1cedfa278c53063fbfdf3edf7daff9786fc4350833789a96daafa93a52071d",
+      "encoding": "gzip",
+      "roundtrip_bytes_exact": true
     }
   ],
-  "total_original_bytes": 1559617964,
-  "total_bytes": 196190680
+  "total_original_bytes": 1625701048,
+  "total_bytes": 246155411
 }

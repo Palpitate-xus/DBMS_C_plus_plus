@@ -19163,6 +19163,52 @@ std::string StorageEngine::resolveToastValues(const std::string& dbname,
     return result;
 }
 
+bool detail::decodeStoredRowProjection(StorageEngine& engine,
+                                      const std::string& database,
+                                      const std::string& raw,
+                                      const TableSchema& schema,
+                                      const std::vector<bool>& storedNulls,
+                                      const std::set<std::string>& selected,
+                                      std::vector<std::string>& values,
+                                      std::vector<bool>& nulls) {
+    if (schema.formatVersion != DATA_FILE_FORMAT_VERSION ||
+        storedNulls.size() != schema.len) return false;
+    std::vector<size_t> indexes;
+    for (size_t i = 0; i < schema.len; ++i) {
+        if (!selected.empty() && !selected.count(schema.cols[i].dataName)) continue;
+        if (schema.cols[i].generatedKind == 'v') return false;
+        indexes.push_back(i);
+    }
+    if (!selected.empty() && indexes.size() != selected.size()) return false;
+    std::vector<std::string> cells(indexes.size());
+    std::vector<bool> bitmap(indexes.size(), false);
+    ScopedStoredRowNullBitmap owner(schema, storedNulls);
+    // Resolve demanded variable fields in their original schema order, before
+    // fixed-field conversion, as the old full-row resolver did. No selected
+    // failure is converted into an empty value or a partially emitted row.
+    for (size_t j = 0; j < indexes.size(); ++j) {
+        const size_t i = indexes[j];
+        bitmap[j] = storedNulls[i];
+        if (bitmap[j] || !schema.cols[i].isVariableLength) continue;
+        auto value = StorageEngine::extractColumnValueStatic(raw, schema, i);
+        uint64_t toastId = 0;
+        if (StorageEngine::parseToastMarker(value, toastId)) {
+            std::string resolved;
+            if (!engine.readToast(database, schema.tablename, toastId,
+                                  characterColumnByteLimit(schema.cols[i]), resolved))
+                return false;
+            value = std::move(resolved);
+        }
+        cells[j] = std::move(value);
+    }
+    for (size_t j = 0; j < indexes.size(); ++j)
+        if (!bitmap[j] && !schema.cols[indexes[j]].isVariableLength)
+            cells[j] = StorageEngine::extractColumnValueStatic(raw, schema, indexes[j]);
+    values = std::move(cells);
+    nulls = std::move(bitmap);
+    return true;
+}
+
 namespace {
 
 struct ForeignKeyDefinitionDiagnostic {

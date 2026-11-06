@@ -1,5 +1,13 @@
 # Changelog
 
+<!-- P34 projected-toast-demand begin -->
+## 2026-11-06 — 普通部分列投影按需求读取 TOAST
+
+- 仅为直接物理游标的部分列投影解码所需字段；维持选中长字段错误、NULL 与虚拟列完整输入。全列使用原路径。
+- 新增 14 组/83 项回归，并复核 5 项相关原生测试及全部普通协议回复。
+- 完整保留 C1 回退及 C2 的各 270 项正常性能对照、漂移和长尾；更新[性能报告](docs/performance-report-2026-10-30.md#projected-toast-demand-20261106)，证据仅以压缩归档提交。
+<!-- P34 projected-toast-demand end -->
+
 <!-- P33 pg-class-declaration begin -->
 ## 2026-11-06 — owned pg_class declaration (partial)
 

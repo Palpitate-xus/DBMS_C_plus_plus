@@ -48,6 +48,7 @@
 #include <map>
 #include <sstream>
 #include <thread>
+#include <typeinfo>
 #include <unordered_set>
 
 extern dbms::Config g_config;
@@ -4088,6 +4089,49 @@ TableSchema unnestTableSchema() {
 }
 
 bool TableScanOp::next(std::string& outRow) {
+    return nextRow(outRow, nullptr, nullptr, nullptr, nullptr);
+}
+
+bool TableScanOp::nextForProjection(std::string& raw, const TableSchema& schema,
+                                    const std::set<std::string>& selected,
+                                    std::vector<std::string>& cells,
+                                    std::vector<bool>& nulls, bool& decoded) {
+    decoded = false;
+    // A subclass may implement a different next()/owner contract. Never
+    // bypass that virtual method or a filtered/indexed/buffered source.
+    // A full projection cannot avoid any source field. Keep its existing
+    // materialization path without building an extra selected-field plan.
+    if (selected.empty() || selected.size() >= schema.len ||
+        typeid(*this) != typeid(TableScanOp) || !cursor_ ||
+        tbl_.formatVersion != DATA_FILE_FORMAT_VERSION ||
+        schema.formatVersion != tbl_.formatVersion || schema.len != tbl_.len ||
+        schema.tablename != tablename_ || tbl_.tablename != tablename_)
+        return next(raw);
+    size_t matched = 0;
+    for (size_t i = 0; i < tbl_.len; ++i) {
+        const auto& source = tbl_.cols[i];
+        const auto& consumer = schema.cols[i];
+        if (source.dataName != consumer.dataName || source.dataType != consumer.dataType ||
+            source.dsize != consumer.dsize || source.isVariableLength != consumer.isVariableLength ||
+            source.isNull != consumer.isNull || source.isArray != consumer.isArray ||
+            source.generatedKind != consumer.generatedKind || source.storageCodec != consumer.storageCodec)
+            return next(raw);
+        if (selected.empty() || selected.count(source.dataName)) {
+            ++matched;
+            // The existing virtual evaluator constructs a complete physical
+            // input context. It still needs the full materialization owner.
+            if (source.generatedKind == 'v') return next(raw);
+        }
+    }
+    if (!selected.empty() && matched != selected.size()) return next(raw);
+    const bool good = nextRow(raw, &schema, &selected, &cells, &nulls);
+    decoded = good;
+    return good;
+}
+
+bool TableScanOp::nextRow(std::string& outRow, const TableSchema* projection,
+                          const std::set<std::string>* selected,
+                          std::vector<std::string>* cells, std::vector<bool>* nulls) {
     NextInstrument rtInstr_(this);  // EXPLAIN ANALYZE per-node stats
     if (cursor_) {
         HeapScanRow row;
@@ -4101,7 +4145,13 @@ bool TableScanOp::next(std::string& outRow) {
         lastRid_ = row.rid; lastNulls_ = std::move(row.nulls);
         StorageEngine::bindNullRow(engine_, dbname_, tablename_, lastRid_, tbl_.len);
         bool ok = false;
-        outRow = engine_->resolveToastValues(dbname_, tablename_, row.data, tbl_, &ok);
+        if (projection) {
+            ok = detail::decodeStoredRowProjection(*engine_, dbname_, row.data,
+                    *projection, lastNulls_, *selected, *cells, *nulls);
+            outRow = std::move(row.data);
+        } else {
+            outRow = engine_->resolveToastValues(dbname_, tablename_, row.data, tbl_, &ok);
+        }
         if (!ok) { setError("TOAST value read failed"); return false; }
         ++pos_; rtInstr_.emitted = true; return true;
     }
@@ -5884,7 +5934,15 @@ bool ProjectOp::open() {
 bool ProjectOp::next(std::string& outRow) {
     NextInstrument rtInstr_(this);  // EXPLAIN ANALYZE per-node stats
     std::string raw;
-    if (!child_->next(raw)) {
+    auto* physicalScan = dynamic_cast<TableScanOp*>(child_.get());
+    std::vector<std::string> projectedCells;
+    std::vector<bool> projectedNulls;
+    bool decoded = false;
+    const bool good = physicalScan
+        ? physicalScan->nextForProjection(raw, tbl_, selectCols_,
+                                          projectedCells, projectedNulls, decoded)
+        : child_->next(raw);
+    if (!good) {
         if (child_->hasError()) return propagateChildError(child_.get(), "projection child failed");
         return false;
     }
@@ -5894,12 +5952,26 @@ bool ProjectOp::next(std::string& outRow) {
     if (origin.engine && origin.rid > 0)
         StorageEngine::bindNullRow(origin.engine, origin.dbname, origin.tablename,
                                   origin.rid, tbl_.len);
+    if (decoded) {
+        lastCells_ = std::move(projectedCells);
+        lastNulls_ = std::move(projectedNulls);
+        outRow.clear();
+        for (size_t i = 0; i < lastCells_.size(); ++i) {
+            const auto& value = lastCells_[i];
+            if (lastNulls_[i]) outRow += "NULL ";
+            else if (value.find(' ') != std::string::npos && selectCols_.size() != 1)
+                outRow += "\"" + value + "\" ";
+            else outRow += value + ' ';
+        }
+        lastRowAvailable_ = true;
+        rtInstr_.emitted = true;
+        return true;
+    }
     // This bridge is intentionally limited to the direct physical cursor.
     // Keep bitmap ownership local to this next() call; transformed, filtered,
     // indexed and buffered children retain their original fallback paths.
     std::vector<bool> storedNulls;
     std::optional<detail::ScopedStoredRowNullBitmap> storedNullOwner;
-    const auto* physicalScan = dynamic_cast<const TableScanOp*>(child_.get());
     // Nonnullable physical targets never ask the stored-NULL fallback. A
     // selected virtual target can still demand nullable physical inputs.
     const auto needsStoredNulls = [&] {

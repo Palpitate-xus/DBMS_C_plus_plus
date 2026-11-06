@@ -1,5 +1,11 @@
 # DBMS C++
 
+<!-- P34 projected-toast-demand begin -->
+## 2026-11-06：部分列查询减少长字段读取（P34-C2）
+
+仅取 id 的单长字段表墙钟相对旧首测/旧回测为 -54.47% / -47.06%，多长字段表为 -61.28% / -61.63%。全列查询保留原读取路径。新回归 14 组/83 检查及 5 项相关原生测试通过；完整协议回复保持。两轮各 270 项性能对照、全部负向与 PostgreSQL 兼容差异见[性能报告](docs/performance-report-2026-10-30.md#projected-toast-demand-20261106)。本批更新已有文档，性能证据压缩为 20.91 MiB，CPU 诊断另存 26.74 MiB；下方各批为对应版本的历史结果。
+<!-- P34 projected-toast-demand end -->
+
 <!-- P33 pg-class-declaration begin -->
 ## 2026-11-06: owned pg_class declaration, partial
 

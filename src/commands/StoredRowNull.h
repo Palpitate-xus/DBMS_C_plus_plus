@@ -65,6 +65,19 @@ void decodeStoredRowValues(StorageEngine& engine, const std::string& database,
                           std::vector<std::string>& values,
                           std::vector<bool>& nulls);
 
+// A direct physical Project owns this schema, captured bitmap and requested
+// stored columns. Decode only those values, without a temporary full-row
+// TOAST representation. Selected TOAST read errors are reported before any
+// row escapes; virtual targets must retain the full-row owner instead.
+bool decodeStoredRowProjection(StorageEngine& engine,
+                               const std::string& database,
+                               const std::string& raw,
+                               const TableSchema& schema,
+                               const std::vector<bool>& storedNulls,
+                               const std::set<std::string>& selected,
+                               std::vector<std::string>& values,
+                               std::vector<bool>& nulls);
+
 // Prepared physical-input role: virtual cells are opaque positional
 // placeholders, never computed values or an absent-row/SQL-NULL signal.
 // Only the connected prepared source may use these inputs; setSourceInputs

@@ -1,5 +1,18 @@
 # DBMS 功能测试报告
 
+<!-- P34 projected-toast-demand begin -->
+<a id="projected-toast-demand-current"></a>
+## 2026-11-06：按需求读取 TOAST 验证
+
+新增原生回归 14 组、83 项检查全部通过；同一测试在旧版实际失败 6 项。另 5 个既有相关原生测试在旧版及最终 C2 均通过，包含多 LOB 正常冷开/恢复生命周期、缺文件错误、BYTEA 和目录声明 550 项检查。原有 62 条完整协议回复、额外 41 条目录查询及 7 条控制回复，在旧版/C1/C2 间逐字节一致；原 9 项与新 24 条 PostgreSQL 查询差异继续保留。
+
+新测试 `ordinary_project_toast_demand_test.cpp` 在旧版为 14 组/83 检查/6 失败/实际 exit1，C1 与最终 C2 均 83/0/exit0。检查真实正常值、NULL/空串/字面 marker、10KiB BYTEA、缺失未选中 LOB 的正向读取、选中 LOB 行输出前失败、Filter/错误 schema 回退、恢复原 LOB 文件和虚拟依赖；没有放宽旧断言或将 NOTRUN 算通过。5 项既有测试为 ordinary_project_bitmap、multilob_storage_lifecycle、shared_toast_runtime_missing_file、pg_class_declaration、bytea_large_toast。
+
+最终 C2 的 6 个原生程序均实际 exit0，完整匹配 61 core/本代 stub/冻结源码。原协议仍 strict CLI exit1；新 41 查询 PG 参考 41/41，产品 17/41、24 条差异不变。最终 C2 新运行 4 个初始/冷 Main 正常 exit0，旧版原始完整记录复用并独立重新解码。
+
+C1/C2 各 270 个正常计时/54 Main、1098 完整响应/96624 行/386388 单元/27864 NULL 独立校验；CPU 诊断另有 2100 回复和 4 个正常 Main。正式库存 2395 文件、1128 顶层/1133 总 C++；注册 684/664 standalone E2E 保持，本批不代表整套通过。[全部原始值与边界](performance-report-2026-10-30.md#projected-toast-demand-20261106)。
+<!-- P34 projected-toast-demand end -->
+
 <!-- P33 pg-class-declaration begin -->
 <a id="pg-class-declaration-current"></a>
 ## 2026-11-06 pg_class declaration validation

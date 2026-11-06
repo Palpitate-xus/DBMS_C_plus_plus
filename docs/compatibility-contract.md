@@ -1,5 +1,14 @@
 # 兼容版本契约
 
+<!-- P34 projected-toast-demand begin -->
+<a id="projected-toast-demand-current"></a>
+## 2026-11-06：普通物理部分列投影
+
+普通物理游标上的部分列投影按实际选择解码字段，复用当前行 NULL 位图，仅解析被选中长字段的 TOAST 引用。选中长字段读取失败仍在行输出前报错，输出值、NULL、RID 与旧路径的列顺序保持。全列/星号投影继续原 materialization 路径；选中虚拟列保留原完整输入。过滤、索引、排序、缓冲和不同 schema 的子路径仍由各自已有执行路径处理。
+
+原生用例覆盖真实缺失 TOAST 文件、SQL NULL/空串/字面 NULL、marker-looking 字符串、UTF8、换行、BYTEA 和虚拟列错误。普通协议的完整 RowDescription/数据/NULL/错误/tag/Ready 与旧版一致；原 PostgreSQL 差异仍保留。本批适用于当前普通执行器，保留既有存储格式；retained/参数/portal/wire-format2、未选中显式 CAST 分析和用户暂缓边界保持。详见[完整报告](performance-report-2026-10-30.md#projected-toast-demand-20261106)。
+<!-- P34 projected-toast-demand end -->
+
 <!-- P33 pg-class-declaration begin -->
 <a id="pg-class-declaration-current"></a>
 ## 2026-11-06 pg_class declaration and value boundary

@@ -1,5 +1,14 @@
 # 与 PostgreSQL 18 的功能和性能差距
 
+<!-- P34 projected-toast-demand begin -->
+<a id="projected-toast-demand-current"></a>
+## 2026-11-06：投影需求读取的有限进展
+
+调研 PostgreSQL tuple slot、SQLite Column 和 DuckDB 投影下推后，直接物理部分列查询采用需求字段解码。仅取 id 的单长字段表墙钟相对旧首测/旧回测为 -54.47% / -47.06%，多长字段表为 -61.28% / -61.63%。全列仍使用原路径；所有写入、维护和普通 SELECT 的完整对照及负向见[报告](performance-report-2026-10-30.md#projected-toast-demand-20261106)，没有 PostgreSQL 速度等价结论。
+
+原严格协议 9 项差异和额外 41 查询中的 24 项差异仍开放；`pg_class` 仍为 34 列声明/7 列可执行值的有限实现。总账状态保持 22 complete/166 partial/70 unverified/15 deferred_by_user。本次只增加部分进展，未关闭 QRY-01、QRY-13 或 STO-06。
+<!-- P34 projected-toast-demand end -->
+
 <!-- P33 pg-class-declaration begin -->
 <a id="pg-class-declaration-current"></a>
 ## 2026-11-06 pg_class declaration: implemented subset and open gaps
