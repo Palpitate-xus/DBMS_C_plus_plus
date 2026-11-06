@@ -1,5 +1,17 @@
 # 生产化状态
 
+<!-- CURRENT_FIXED_ID_PROFILE_20261106 -->
+
+## 当前实现与新增诊断（2026-11-06，P31）
+
+生产源码仍为已提交P30-C2（父提交bc5679c62d…、私有正常程序SHA472e093d40b8…），默认安装程序及现有服务未替换。新增P29-C2→P30-C2→同一P29-C2的有限CPU采样，3个Main正常退出；独立核全部1,575响应和1,536次主键查询完整结果。逐行日志、逐行发送结果成为下一步候选；P30主键查询CPU回退原因仍OPEN，未宣称本批提速或全库优化完成。
+
+pg_class自身声明/来源元数据依赖真实34属性及元数据类型与运行时能力分离，本批仅审计和准备未运行验收方案。P30全部58个严格目标及9项普通差异保持，未改为PASS或暂缓。源248/头177、正式测试2392、Markdown754/保护725、history281与原273项状态保持（22complete/166partial/70unverified/15deferred）；IDX-07仍unverified、evidence=[]。压缩证据共31份，旧30份字节保持，原53.45MiB报告仍为5.70MiB gzip。未创建分支或推送，Goal active。
+
+独立还原核验后另清理5,101个生成副本，约232.41MiB分配空间；源码、程序和父批工作库均保留。
+
+详情见[本批报告](performance-report-2026-10-30.md#fixed-id-query-profile-20261106)与[压缩证据](benchmarks/fixed-id-query-profile-20261106.json.gz)。下方P30及更早段落属于对应实现批次。
+
 <!-- CURRENT_ORDINARY_PROJECT_BITMAP_20261106 -->
 
 ## 当前行NULL位图复用与按需求捕获（2026-11-06，P30-C2）

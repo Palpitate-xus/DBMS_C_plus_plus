@@ -1,5 +1,13 @@
 # DBMS 功能测试报告
 
+<!-- CURRENT_FIXED_ID_PROFILE_20261106 -->
+
+## 主键查询路径的独立诊断（2026-11-06，P31）
+
+复用P30真实三表闭库状态，P29-C2→P30-C2→同一P29-C2三个实际正常进程，各512次原样主键查询。外层及3个Main实际wait0、PID/组退出，零重试。独立重解1,575个完整响应：1,536个目标的394,752个ID、18次前后完整三表模型、1,560次物理SELECT的全部7项描述字段/标签/ReadyI均相符；合计400,179行观测、412,533单元、1,230个NULL。6次EXPLAIN旁观均为TableScan→Project；6次pprof渲染和独立原始PC解码全部真实退出0。
+
+这是CPU8/libprofiler诊断，不是新增正常性能矩阵或功能验收。原P30正常负例、58个严格协议目标和9项差异保持，回退原因仍OPEN。pg_class完整34列声明及来源补全只有依赖审计和未运行方案，未应用生产补丁，不计功能通过。正式测试仍2392、源248/头177、原功能273项状态与history281不变；没有新正式测试或重跑既有native/PG参考。完整定义见[本批报告](performance-report-2026-10-30.md#fixed-id-query-profile-20261106)与[压缩原始证据](benchmarks/fixed-id-query-profile-20261106.json.gz)。
+
 <!-- CURRENT_ORDINARY_PROJECT_BITMAP_20261106 -->
 
 ## 当前行NULL位图复用与按需求捕获（2026-11-06，P30-C2）

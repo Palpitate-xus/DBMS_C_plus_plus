@@ -317,6 +317,16 @@
       "payload_sha256": "310f3987a735d460d6079306f9b3d94a70c2181e2e8339f8a1ef12e2eaecab15",
       "payload_xz_bytes": 10959340,
       "payload_xz_sha256": "f174f1d656a991a1f6a9ea54cefcc540d1b9857f27cf4cc256461bc1dd385077"
+    },
+    {
+      "original_path": "docs/benchmarks/fixed-id-query-profile-20261106.json",
+      "original_bytes": 5902750,
+      "original_sha256": "281813438d3ff64b242352bf614fdab2e5760346a4acb8d1a6109e0d48a082c0",
+      "path": "docs/benchmarks/fixed-id-query-profile-20261106.json.gz",
+      "bytes": 4466729,
+      "sha256": "31e2bb007fa648a4133c108e0ecf2bdb54d5eb57f6d40197abb2009b64cea451",
+      "encoding": "gzip",
+      "roundtrip_bytes_exact": true
     }
   ],
   "total_original_bytes": 1520549589,
