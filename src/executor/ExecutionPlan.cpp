@@ -12,6 +12,7 @@
 #include "executor/WindowKernel.h"
 #include "executor/WindowAggregateState.h"
 #include "commands/StoredRowNull.h"
+#include "commands/HeapScanCursor.h"
 #include "common/DbError.h"
 #include "common/TemporalStorageCodec.h"
 #include "access/BPTree.h"
@@ -1948,6 +1949,263 @@ static std::optional<ExprValue> constantIntegerIndexInput(const Expr* expression
     }
 }
 
+// A V3 summary supplies lossy pages; the normal heap cursor captures one
+// read view and owns each row/NULL bitmap. Full predicates stay above it.
+class BrinScanOp final : public Operator {
+    StorageEngine* engine_;
+    std::string database_, table_, column_, op_, value_, plannedShape_;
+    OpPtr fallback_;
+    std::unique_ptr<HeapScanCursor> cursor_;
+    std::vector<bool> lastNulls_;
+    TableSchema schema_;
+    size_t position_ = 0, plannedPages_ = 0;
+    int64_t rid_ = 0;
+    bool opened_ = false, locked_ = false, fallbackOpen_ = false;
+    bool usedSummary_ = false, statsRecorded_ = false;
+    double rowsEstimate_ = 1, costEstimate_ = 0;
+    static std::string shape(const TableSchema& schema) {
+        std::string out;
+        const auto field = [&](const std::string& text) { out += std::to_string(text.size())+":"+text; };
+        field(std::to_string(schema.physicalRelationId)); field(std::to_string(schema.formatVersion));
+        field(std::to_string(schema.len));
+        for (size_t i = 0; i < schema.len; ++i) {
+            const auto& c = schema.cols[i];
+            for (const auto& text : {c.dataName,c.dataType,c.domainName,c.collation,c.resolvedCollation,c.generatedExpr}) field(text);
+            for (const auto n : {int64_t(c.dsize),int64_t(c.typeMod),int64_t(c.storageCodec),int64_t(c.isArray),int64_t(c.isNull),int64_t(c.generatedKind),int64_t(c.isUnsigned)}) field(std::to_string(n));
+            field(std::to_string(c.enumValues.size()));
+            field(std::to_string(c.resolvedCollationIsBinary)); field(std::to_string(c.resolvedCollationUsesLocale));
+            for (const auto& value : c.enumValues) field(value);
+        }
+        return out;
+    }
+    void record() {
+        if (!statsRecorded_) {
+            recordTableScan(database_, table_, position_, true, false);
+            statsRecorded_ = true;
+        }
+    }
+public:
+    BrinScanOp(StorageEngine* engine, std::string database, std::string table,
+        std::string column, std::string op, std::string value, OpPtr fallback,
+        const TableSchema& schema, size_t pages, double estimatedRows, double cost)
+        : engine_(engine), database_(std::move(database)), table_(std::move(table)),
+          column_(std::move(column)), op_(std::move(op)), value_(std::move(value)),
+          plannedShape_(shape(schema)), fallback_(std::move(fallback)), plannedPages_(pages),
+          rowsEstimate_(estimatedRows), costEstimate_(cost) {}
+    ~BrinScanOp() override { if (opened_) try { close(); } catch (...) {} }
+    bool open() override {
+        OpenInstrument instrumentation(this);
+        clearError(); cursor_.reset(); lastNulls_.clear(); position_ = 0; rid_ = 0;
+        usedSummary_ = false; statsRecorded_ = false; opened_ = true;
+        auto& locks = engine_->getLockManager(); locks.setResourceNamespace(database_);
+        if (!locks.lockShared(table_))
+            throw DbError("55P03", "could not obtain lock on relation \"" + table_ + "\"");
+        locked_ = true;
+        schema_ = engine_->getTableSchema(database_, table_);
+        engine_->noteQuerySnapshot();
+        const auto fence = engine_->indexReadSnapshotFence(database_);
+        if (fence && shape(schema_) == plannedShape_ &&
+            (!engine_->inTransaction() || engine_->getIsolationLevel() != IsolationLevel::SERIALIZABLE) &&
+            !engine_->rlsAppliesTo(database_, table_) &&
+            engine_->getInheritedChildren(database_, table_).empty()) {
+            if (const auto pages = engine_->tryBrinPageRanges(database_, table_, column_, op_, value_)) {
+                cursor_ = engine_->beginHeapScan(database_, table_, schema_, &*pages);
+                if (engine_->indexReadSnapshotFence(database_) == fence &&
+                    engine_->tryBrinPageRanges(database_, table_, column_, op_, value_) == pages) {
+                    usedSummary_ = true; return true;
+                }
+                // No heap row or demanded datum has escaped. Later commits
+                // are covered by the already captured immutable read view.
+                cursor_.reset();
+            }
+        }
+        fallbackOpen_ = true;
+        return fallback_->open() || propagateChildError(fallback_.get(), "BRIN heap fallback failed");
+    }
+    bool next(std::string& out) override {
+        NextInstrument instrumentation(this);
+        if (fallbackOpen_) {
+            if (!fallback_->next(out)) {
+                if (fallback_->hasError()) return propagateChildError(fallback_.get(), "BRIN fallback failed");
+                return false;
+            }
+        } else {
+            HeapScanRow row;
+            if (!cursor_ || !cursor_->next(row)) { record(); return false; }
+            rid_ = row.rid; lastNulls_ = std::move(row.nulls);
+            StorageEngine::bindNullRow(engine_, database_, table_, rid_, schema_.len);
+            bool ok = false;
+            out = engine_->resolveToastValues(database_, table_, row.data, schema_, &ok);
+            if (!ok) { setError("BRIN heap TOAST read failed"); return false; }
+            ++position_;
+        }
+        instrumentation.emitted = true; return true;
+    }
+    bool lastColumnIsNull(size_t column) const override {
+        if (fallbackOpen_) return fallback_->lastColumnIsNull(column);
+        return rid_ && column < lastNulls_.size() && lastNulls_[column];
+    }
+    bool lastStoredNullBitmap(std::vector<bool>& nulls) const override {
+        if (fallbackOpen_) return fallback_->lastStoredNullBitmap(nulls);
+        if (!rid_) return false;
+        nulls = lastNulls_; return true;
+    }
+    ScanOrigin scanOrigin() const override {
+        if (fallbackOpen_) return fallback_->scanOrigin();
+        ScanOrigin origin; origin.engine = engine_; origin.dbname = database_;
+        origin.tablename = table_; origin.rid = rid_; return origin;
+    }
+    std::vector<Operator*> preparedPlanChildren() const override {
+        return fallbackOpen_ ? std::vector<Operator*>{fallback_.get()} : std::vector<Operator*>{};
+    }
+    std::vector<IOperator*> children() override {
+        return fallbackOpen_ ? std::vector<IOperator*>{fallback_.get()} : std::vector<IOperator*>{};
+    }
+    double estimatedRows() const override { return rowsEstimate_; }
+    double estimatedCost() const override { return costEstimate_; }
+    const std::string& table() const { return table_; }
+    std::string condition() const { return column_ + " " + op_ + " " + value_; }
+    size_t plannedPages() const { return plannedPages_; }
+    bool usedSummary() const { return usedSummary_; }
+    void close() override {
+        if (!opened_) return;
+        opened_ = false;
+        std::exception_ptr error;
+        try { if (fallbackOpen_) fallback_->close(); else if (usedSummary_) record(); }
+        catch (...) { error = std::current_exception(); }
+        fallbackOpen_ = false; cursor_.reset(); lastNulls_.clear(); position_ = 0; rid_ = 0;
+        StorageEngine::unbindNullRow();
+        if (locked_) {
+            locked_ = false; engine_->getLockManager().setResourceNamespace(database_);
+            engine_->getLockManager().unlock(table_);
+        }
+        if (error) std::rethrow_exception(error);
+    }
+};
+
+// Only immutable literal cells and the binder's implicit primitive coercion
+// envelope are inspected. Explicit CAST, functions and retained parameters
+// keep their existing demand/owner and are never evaluated by this planner.
+static std::optional<std::string> brinLiteralInput(const Expr* expression) {
+    while (const auto* cast = dynamic_cast<const CastExpr*>(expression)) {
+        if (!cast->implicit || !cast->typeMods.empty() || cast->preparedSubquery) return {};
+        expression = cast->operand.get();
+    }
+    const auto* unary = dynamic_cast<const UnaryOpExpr*>(expression);
+    bool negate = false;
+    if (unary && (unary->op == "-" || unary->op == "+")) {
+        negate = unary->op == "-"; expression = unary->operand.get();
+    }
+    const auto* literal = dynamic_cast<const LiteralExpr*>(expression);
+    if (!literal || literal->preparedSubquery ||
+        (!literal->analyzedPrimitiveConstant && !literal->typeName.empty() &&
+         literal->typeName != "unknown")) return {};
+    try {
+        ExprEvaluator evaluator;
+        const auto value = evaluator.eval(literal, RowContext{});
+        if (value.isNull) return {};
+        if (!negate) return value.value;
+        const auto type = ExprHelper::canonicalResultTypeName(value.typeName);
+        if (type != "smallint" && type != "integer" && type != "bigint" &&
+            type != "numeric" && type != "real" && type != "double precision") return {};
+        return "-" + value.value;
+    } catch (const DbError& error) {
+        if (error.sqlState().rfind("22", 0) == 0) return {};
+        throw;
+    }
+}
+static OpPtr literalBrinTableSource(StorageEngine* engine, const std::string& database,
+    const std::shared_ptr<PreparedQuery>& query, const SelectStmt* select,
+    const TableSchema& schema, OpPtr& source) {
+    const auto* physical = dynamic_cast<const TableScanOp*>(source.get());
+    if (!physical || !query->parameters.empty() || !select->whereClause ||
+        !select->fromClause || select->fromClause->type != FromItem::Type::Table ||
+        schema.partitionType != TableSchema::PartitionType::None) return {};
+    const auto table = physical->tableName();
+    std::vector<const Expr*> conjuncts;
+    const auto gather = [&](const auto& self, const Expr* node) -> void {
+        const auto* binary = dynamic_cast<const BinaryOpExpr*>(node);
+        if (binary && binary->op == "AND") { self(self, binary->left.get()); self(self, binary->right.get()); }
+        else conjuncts.push_back(node);
+    };
+    gather(gather, select->whereClause.get());
+    std::string bestColumn, bestOp, bestValue;
+    size_t bestPages = 0; std::optional<double> bestCost;
+    std::optional<uint32_t> extent;
+    double sequential = 0;
+    for (const auto* expression : conjuncts) {
+        const ColumnRefExpr* column = nullptr; const Expr* input = nullptr;
+        std::string op;
+        if (const auto* unary = dynamic_cast<const UnaryOpExpr*>(expression);
+            unary && (unary->op == "IS NULL" || unary->op == "IS NOT NULL")) {
+            column = dynamic_cast<const ColumnRefExpr*>(unary->operand.get()); op = unary->op;
+        } else if (const auto* binary = dynamic_cast<const BinaryOpExpr*>(expression);
+                   binary && (binary->op == "=" || binary->op == "<" || binary->op == "<=" || binary->op == ">" || binary->op == ">=")) {
+            if (binary->comparison && (!binary->comparison->strict ||
+                binary->comparison->identity.rfind("builtin-comparison:", 0) != 0)) continue;
+            column = dynamic_cast<const ColumnRefExpr*>(binary->left.get());
+            input = binary->right.get(); op = binary->op;
+            if (!column) {
+                column = dynamic_cast<const ColumnRefExpr*>(binary->right.get()); input = binary->left.get();
+                if (op == "<") op = ">"; else if (op == "<=") op = ">=";
+                else if (op == ">") op = "<"; else if (op == ">=") op = "<=";
+            }
+        }
+        if (!column || !column->binding || column->binding->scopeDepth ||
+            column->binding->mergedUsing || column->binding->columnOrdinal >= schema.len) continue;
+        bool sameRange = false;
+        for (const auto& range : query->sourceRanges)
+            if (range.owner == select && range.source == select->fromClause.get() &&
+                range.ordinal == column->binding->sourceOrdinal) sameRange = true;
+        const auto& key = schema.cols[column->binding->columnOrdinal];
+        const auto& declaration = column->binding->typeMetadata;
+        const bool nullTest = op == "IS NULL" || op == "IS NOT NULL";
+        if (!sameRange || key.generatedKind || !declaration ||
+            declaration->kind == DatumKind::Record ||
+            (!nullTest && (key.isArray || key.isUnsigned || !key.domainName.empty() ||
+                declaration->kind != DatumKind::Scalar || declaration->enumType ||
+                declaration->actualOid != declaration->codecOid ||
+                (!key.collation.empty() && !key.resolvedCollationIsBinary))) ||
+            !engine->hasBrinIndex(database, table, key.dataName)) continue;
+        if (!nullTest) {
+            // Ordinary scalar builtins use the evaluator's implicit dispatch;
+            // the optional AST cell is retained only for enum/reference roles.
+            // Validate the same pure builtin signature without mutating that
+            // AST or evaluating a provider, parameter or CAST expression.
+            const auto type = ExprHelper::canonicalResultTypeName(key.dataType);
+            if (ExprHelper::canonicalResultTypeName(column->binding->declaredType) != type) continue;
+            try {
+                const auto role = ExprEvaluator::resolveComparison(op, type, type);
+                if (!role.strict || role.identity.rfind("builtin-comparison:", 0) != 0) continue;
+            } catch (const DbError& error) {
+                if (error.sqlState() == "42883") continue;
+                throw;
+            }
+        }
+        if (op == "=" && isSingleColumnPrimaryKey(schema, key.dataName)) continue;
+        if (!extent) {
+            if (engine->rlsAppliesTo(database, table) || !engine->getInheritedChildren(database, table).empty()) return {};
+            extent = engine->tableNumPages(database, table);
+            if (*extent <= 1) return {};
+            sequential = QueryPlanner::costScan("seq_scan", 0, *extent-1);
+        }
+        const auto value = input ? brinLiteralInput(input) : std::optional<std::string>("");
+        if (!value) continue;
+        const auto ranges = engine->tryBrinPageRanges(database, table, key.dataName, op, *value, false);
+        if (!ranges) continue;
+        uint64_t pages = 0;
+        for (const auto& range : *ranges) pages += uint64_t(range.second) - range.first + 1;
+        const double cost = QueryPlanner::costScan("seq_scan", 0, pages) +
+                            QueryPlanner::costScan("index_scan", 1, 0);
+        if (!std::isfinite(cost) || !std::isfinite(sequential) || cost >= sequential ||
+            (bestCost && cost >= *bestCost)) continue;
+        bestCost = cost; bestColumn = key.dataName; bestOp = op; bestValue = *value; bestPages = pages;
+    }
+    if (!bestCost) return {};
+    return std::make_unique<BrinScanOp>(engine, database, table, bestColumn, bestOp, bestValue,
+                                      std::move(source), schema, bestPages, bestPages*32.0, *bestCost);
+}
+
 // Bind input is read when this physical source opens, including cursor
 // restarts. The typed Filter above it remains the final predicate owner.
 // Reuse IndexScan's checked heap/MVCC/NULL access and keep the conservative
@@ -2252,6 +2510,8 @@ static OpPtr literalLikeTableSource(StorageEngine* engine, const std::string& da
 OpPtr makePreparedTableSource(StorageEngine* engine, const std::string& database,
     const std::shared_ptr<PreparedQuery>& query, SelectStmt* select,
     const TableSchema& schema, OpPtr source) {
+    if (auto narrowed = literalBrinTableSource(engine, database, query, select, schema, source))
+        return narrowed;
     if (auto narrowed = literalLikeTableSource(engine, database, query, select,
                                                schema, source.get()))
         return narrowed;
@@ -8656,6 +8916,103 @@ static std::optional<size_t> chooseEqualityIndexCondition(
     return *bestCost<sequential?std::optional<size_t>(best):std::nullopt;
 }
 
+// The ordinary frontend lowers simple predicates to Condition cells rather
+// than the bound AST used above. Inspect only literal/physical-column cells;
+// keep the original Filter as the sole predicate evaluator on candidate rows.
+static OpPtr ordinaryBrinTableSource(StorageEngine* engine, const PlanContext& context,
+                                    const TableSchema& schema) {
+    if (schema.partitionType != TableSchema::PartitionType::None || context.conds.empty()) return {};
+    struct Probe { std::string column, op, value; };
+    std::vector<Probe> probes;
+    const auto comparison = [](const std::string& op) {
+        return op == "=" || op == "<" || op == "<=" || op == ">" || op == ">=";
+    };
+    const auto inspect = [&](const auto& self, const Expr* node) -> void {
+        if (const auto* binary = dynamic_cast<const BinaryOpExpr*>(node)) {
+            if (binary->op == "AND") { self(self, binary->left.get()); self(self, binary->right.get()); return; }
+            if (!comparison(binary->op) || binary->comparison) return;
+            const auto* column = dynamic_cast<const ColumnRefExpr*>(binary->left.get());
+            const Expr* input = binary->right.get(); std::string op = binary->op;
+            if (!column) {
+                column = dynamic_cast<const ColumnRefExpr*>(binary->right.get()); input = binary->left.get();
+                if (op == "<") op = ">"; else if (op == "<=") op = ">=";
+                else if (op == ">") op = "<"; else if (op == ">=") op = "<=";
+            }
+            if (!column || !column->table.empty() || !column->schema.empty()) return;
+            if (const auto value = brinLiteralInput(input)) probes.push_back({column->column, op, *value});
+        } else if (const auto* unary = dynamic_cast<const UnaryOpExpr*>(node);
+                   unary && (unary->op == "IS NULL" || unary->op == "IS NOT NULL")) {
+            const auto* column = dynamic_cast<const ColumnRefExpr*>(unary->operand.get());
+            if (column && column->table.empty() && column->schema.empty())
+                probes.push_back({column->column, unary->op, ""});
+        }
+    };
+    for (const auto& condition : context.conds) {
+        if (condition.patternIsNull || condition.referenceInputOid) continue;
+        if (condition.op == "typedexpr") {
+            SQLParser parser; auto parsed = parser.parseForBinding("SELECT " + condition.value);
+            const auto* select = parsed.success ? dynamic_cast<const SelectStmt*>(parsed.stmt.get()) : nullptr;
+            if (select && !select->fromClause && select->selectList.size() == 1)
+                inspect(inspect, select->selectList.front().expr.get());
+        } else if (condition.op == "isnull" || condition.op == "isnotnull") {
+            if (!engine->hasBrinIndex(context.dbname, context.tablename, condition.colName)) continue;
+            probes.push_back({condition.colName, condition.op == "isnull" ? "IS NULL" : "IS NOT NULL", ""});
+        } else if (comparison(condition.op)) {
+            if (!engine->hasBrinIndex(context.dbname, context.tablename, condition.colName)) continue;
+            if (condition.decodedLiteralRhs) probes.push_back({condition.colName, condition.op, condition.value});
+            else {
+                SQLParser parser; auto parsed = parser.parseForBinding("SELECT " + condition.value);
+                const auto* select = parsed.success ? dynamic_cast<const SelectStmt*>(parsed.stmt.get()) : nullptr;
+                if (select && !select->fromClause && select->selectList.size() == 1)
+                    if (const auto value = brinLiteralInput(select->selectList.front().expr.get()))
+                        probes.push_back({condition.colName, condition.op, *value});
+            }
+        }
+    }
+    std::optional<double> bestCost; std::optional<uint32_t> extent;
+    Probe best; size_t bestPages = 0;
+    for (const auto& probe : probes) {
+        const Column* key = nullptr;
+        for (size_t i = 0; i < schema.len; ++i)
+            if (schema.cols[i].dataName == probe.column) { key = &schema.cols[i]; break; }
+        if (!key || key->generatedKind || !key->domainName.empty() || !key->enumValues.empty()) continue;
+        const bool nullTest = probe.op == "IS NULL" || probe.op == "IS NOT NULL";
+        const auto* type = TypeRegistry::instance().findType(key->dataType);
+        if (!type || type->category == TypeCategory::Composite || type->category == TypeCategory::Pseudo ||
+            (!nullTest && (key->isArray || key->isUnsigned ||
+                (!key->collation.empty() && !key->resolvedCollationIsBinary))) ||
+            (probe.op == "=" && isSingleColumnPrimaryKey(schema, key->dataName)) ||
+            !engine->hasBrinIndex(context.dbname, context.tablename, key->dataName)) continue;
+        if (!nullTest) {
+            const auto canonical = ExprHelper::canonicalResultTypeName(key->dataType);
+            try {
+                const auto role = ExprEvaluator::resolveComparison(probe.op, canonical, canonical);
+                if (!role.strict || role.identity.rfind("builtin-comparison:", 0) != 0) continue;
+            } catch (const DbError& error) { if (error.sqlState() == "42883") continue; throw; }
+        }
+        if (!extent) {
+            if (!engine->getInheritedChildren(context.dbname, context.tablename).empty()) return {};
+            extent = engine->tableNumPages(context.dbname, context.tablename);
+            if (*extent <= 1) return {};
+        }
+        const auto ranges = engine->tryBrinPageRanges(context.dbname, context.tablename,
+            probe.column, probe.op, probe.value, false);
+        if (!ranges) continue;
+        uint64_t pages = 0;
+        for (const auto& range : *ranges) pages += uint64_t(range.second) - range.first + 1;
+        const double cost = QueryPlanner::costScan("seq_scan", 0, pages) + QueryPlanner::costScan("index_scan", 1, 0);
+        const double sequential = QueryPlanner::costScan("seq_scan", 0, *extent - 1);
+        if (!std::isfinite(cost) || !std::isfinite(sequential) || cost >= sequential ||
+            (bestCost && cost >= *bestCost)) continue;
+        best = probe; bestPages = pages; bestCost = cost;
+    }
+    if (!bestCost) return {};
+    return std::make_unique<BrinScanOp>(engine, context.dbname, context.tablename,
+        best.column, best.op, best.value,
+        std::make_unique<TableScanOp>(engine, context.dbname, context.tablename),
+        schema, bestPages, bestPages * 32.0, *bestCost);
+}
+
 OpPtr QueryPlanner::buildSelectPlan(StorageEngine* engine, const PlanContext& inputContext) {
     auto ctx = inputContext;
     const auto table = engine->getTableSchema(ctx.dbname, ctx.tablename);
@@ -8717,6 +9074,7 @@ OpPtr QueryPlanner::buildSelectPlan(StorageEngine* engine, const PlanContext& in
         }
     }
 
+    if (!root && !rlsApplies) root = ordinaryBrinTableSource(engine, ctx, table);
     if (!root) {
         // Keep the original typed predicate above a candidate-only lookup.
         // This also covers wire parameters expanded to explicit builtin
@@ -9605,7 +9963,13 @@ static CostEstimate explainOp(Operator* op, int indent,
     std::string prefix(indent * 2, ' ');
     CostEstimate est;
 
-    if (const auto name = op->preparedPlanNodeName(); !name.empty()) {
+    if (auto* brin = dynamic_cast<BrinScanOp*>(op)) {
+        est.rows = brin->estimatedRows(); est.cost = brin->estimatedCost();
+        out += prefix + "BrinScan(table=" + brin->table() + ", " + brin->condition() +
+               ", pages=" + std::to_string(brin->plannedPages()) + ")" + costRowsStr(est, opts) + "\n";
+        for (auto* child : brin->preparedPlanChildren())
+            explainOp(child, indent + 1, engine, dbname, out, opts);
+    } else if (const auto name = op->preparedPlanNodeName(); !name.empty()) {
         const auto children = op->preparedPlanChildren();
         est.rows = children.empty() ? 1.0 : 0.0;
         for (auto* child : children) {
@@ -9950,7 +10314,20 @@ static std::pair<std::string, CostEstimate> explainOpJson(Operator* op,
     std::string json = "{";
     CostEstimate est;
 
-    if (const auto name = op->preparedPlanNodeName(); !name.empty()) {
+    if (auto* brin = dynamic_cast<BrinScanOp*>(op)) {
+        est.rows = brin->estimatedRows(); est.cost = brin->estimatedCost();
+        json += "\"nodeType\":\"BrinScan\",\"table\":\"" + jsonEscape(brin->table()) + "\",";
+        json += "\"indexCond\":\"" + jsonEscape(brin->condition()) + "\",";
+        json += "\"candidatePages\":" + std::to_string(brin->plannedPages()) + ",";
+        json += "\"usedSummary\":" + std::string(brin->usedSummary() ? "true" : "false") + ",";
+        json += jsonCostRows(est, opts); json += "\"children\":[";
+        bool first = true;
+        for (auto* child : brin->preparedPlanChildren()) {
+            if (!first) json += ","; first = false;
+            json += explainOpJson(child, engine, dbname, opts).first;
+        }
+        json += "]";
+    } else if (const auto name = op->preparedPlanNodeName(); !name.empty()) {
         const auto children = op->preparedPlanChildren();
         est.rows = children.empty() ? 1.0 : 0.0;
         std::string childJson;

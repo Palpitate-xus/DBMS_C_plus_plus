@@ -27,8 +27,11 @@
 #include "network/NetworkServer.h"
 #include "permissions.h"
 #include <algorithm>
+#include <cerrno>
 #include <charconv>
 #include <cctype>
+#include <cmath>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -7982,6 +7985,10 @@ bool DdlExecutor::executeCreateIndex(const CreateIndexStmt* stmt, Session& s) {
 
     DBStatus res;
     std::string am = toLower(stmt->accessMethod);
+    if (!stmt->options.empty() && !am.empty() && am != "brin")
+        throw DbError("0A000", "storage parameters for this index access method are not implemented");
+    if (!stmt->options.empty() && am.empty())
+        throw DbError("0A000", "B-tree storage parameters are not implemented");
     if (stmt->unique) {
         const bool unsupportedMethod = !am.empty() && am != "btree";
         const bool unsupportedShape = stmt->concurrently ||
@@ -8046,7 +8053,48 @@ bool DdlExecutor::executeCreateIndex(const CreateIndexStmt* stmt, Session& s) {
         const auto& colname = colnames.front();
         if (am == "gin") res = g_engine.createGinIndex(s.currentDB, tname, colname);
         else if (am == "gist") res = g_engine.createGiSTIndex(s.currentDB, tname, colname);
-        else if (am == "brin") res = g_engine.createBrinIndex(s.currentDB, tname, colname);
+        else if (am == "brin") {
+            size_t pagesPerRange = 128; // PostgreSQL 18 BRIN default.
+            for (const auto& option : stmt->options) {
+                if (SQLParser::toLower(option.first) != "pages_per_range") {
+                    if (SQLParser::toLower(option.first) == "autosummarize")
+                        throw DbError("0A000", "BRIN autosummarize is not implemented");
+                    throw DbError("22023", "unrecognized parameter \"" + option.first + "\"");
+                }
+                auto input = option.second;
+                const bool quoted = input.size() >= 2 && input.front() == '\'' && input.back() == '\'';
+                if (quoted)
+                    input = input.substr(1, input.size()-2);
+                else {
+                    // PG defGetString renders an SQL integer as decimal;
+                    // quoted strings retain parse_int's octal/hex syntax.
+                    const size_t first = !input.empty() && (input.front() == '+' || input.front() == '-') ? 1 : 0;
+                    if (first < input.size() && std::all_of(input.begin()+first, input.end(),
+                            [](unsigned char c) { return c >= '0' && c <= '9'; })) {
+                        size_t significant = first;
+                        while (significant+1 < input.size() && input[significant] == '0') ++significant;
+                        input.erase(first, significant-first);
+                    }
+                }
+                // Match PostgreSQL 18 parse_int with no unit flags: integer
+                // first, decimal/exponent/overflow as double, ties-to-even
+                // rounding, then bounds. Never cast a nonfinite/out-of-range
+                // value or silently accept a suffix.
+                char* end = nullptr;
+                errno = 0;
+                double value = std::strtol(input.c_str(), &end, 0);
+                if (*end == '.' || *end == 'e' || *end == 'E' || errno == ERANGE) {
+                    errno = 0; value = std::strtod(input.c_str(), &end);
+                }
+                const bool parsed = end != input.c_str() && errno != ERANGE && std::isfinite(value);
+                while (std::isspace(static_cast<unsigned char>(*end))) ++end;
+                value = std::rint(value);
+                if (!parsed || end != input.c_str()+input.size() || value < 1 || value > 131072)
+                    throw DbError("22023", "pages_per_range must be between 1 and 131072");
+                pagesPerRange = static_cast<size_t>(value);
+            }
+            res = g_engine.createBrinIndex(s.currentDB, tname, colname, pagesPerRange);
+        }
         else res = g_engine.createSPGiSTIndex(s.currentDB, tname, colname);
     } else {
         std::cout << "Unsupported index access method: " << am << std::endl;

@@ -2,6 +2,50 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-05 typed BRIN bounds, NULL flags and real lossy page SQL scans",
+      "gap_ids": [
+        "IDX-09",
+        "IDX-14",
+        "IDX-15",
+        "WAL-06"
+      ],
+      "status": "partial",
+      "evidence": [
+        "src/main.cpp",
+        "src/common/DataDirectory.cpp",
+        "src/commands/DdlExecutor.cpp",
+        "src/commands/TableManage.cpp",
+        "src/commands/TableManage.h",
+        "src/executor/ExecutionPlan.cpp",
+        "src/access/BrinIndexFormat.h",
+        "src/parser/parser.cpp",
+        "docs/performance-report-2026-10-30.md",
+        "docs/benchmarks/brin-typed-scan-20261105.json.gz"
+      ],
+      "tests": [
+        "tests/brin_typed_format_test.cpp",
+        "tests/brin_typed_range_test.cpp",
+        "tests/brin_typed_scan_protocol_e2e_test.py",
+        "tests/gin_brin_index_test.cpp",
+        "tests/index_build_null_owner_protocol_e2e_test.py"
+      ],
+      "verification": {
+        "implementation": "Typed V3 with physical schema/extent/order identity and CRC; old1/2 safe visible-heap candidates; immutable literal candidate sources retain complete predicates, captured MVCC/NULL/RID, open-time fence checks and conservative fallback. SQL pages_per_range128 default/1..131072; non-BRIN options/autosummarize explicitly unsupported.",
+        "correctness": "Format O2/ASAN each5588; new native1834; wire101/25; PG18.6 shared73/10490 complete fields/13 error states; native81=80actual0+1parentTOASTabort; oldwire32=29actual0+3parent-identical failures; selected6 normal0; auto range/scalar initial0, array initial15s rollback timeout preserved, one exact-source original-deadline parent/candidate pair0, cause unresolved; restore7/2477/14 streams; offline8 immutable verifier cases.",
+        "performance": "Fixed ordinary socket9,4096x4,7cases; 306 timed replies/715356 independent fields; full rows/NULL/OIDs/tags/images and all tails kept. CPU reductions first/return: 高端窄范围 41.19%／42.36%；低端窄范围 48.68%／49.29%；非主键等值 25.78%／20.13%；不存在的范围 94.22%／94.12%；密集范围控制 -7.44%／-6.64%；主键控制 30.31%／28.42%；无对应索引列控制 7.79%／4.38%; wall: 高端窄范围 36.54%／36.45%；低端窄范围 47.39%／46.50%；非主键等值 22.37%／15.22%；不存在的范围 87.45%／87.20%；密集范围控制 -5.30%／12.46%；主键控制 8.62%／11.51%；无对应索引列控制 9.65%／7.04%. No retries/profiler/PG speed/whole-workload claim.",
+        "preservation": "273 exact original objects/statuses and272histories +new273partial;2368oldtests exact+2 genuine format fixture migrations+3new=2373;248source177headers754MD725protected21oldgzip preserved+new22. Direct master local commit; no push/default executable/service promotion; Goal active.",
+        "remaining": [
+          "PostgreSQL BRIN opclass/catalog/revmap、增量 summarize/desummarize/autosummarize、concurrent build 和 AM 专用 WAL 尚未实现。",
+          "REINDEX 当前仅重建 Btree。正常专用索引提交/回滚保存有效 V3 的宽度，但既有 ALTER/rewrite/vacuum/restore 的显式默认64重建路径尚未统一保存配置。",
+          "非二进制排序规则、未支持的比较身份/容器顺序、generated key、分区/继承/RLS 来源以及 SERIALIZABLE/历史/脏快照继续回堆，没有完整类型/opclass 覆盖。",
+          "C5/C8 在前一个 SERIALIZABLE 事务结束后的自动提交数组 NULL EXPLAIN 保守回堆；最终数组剪枝使用显式 READ COMMITTED 读事务验证，没有所有自动提交路径均剪枝的结论。",
+          "自动数组统计原始 fixture 首轮 ROLLBACK 出现15秒超时；配对复核父代和候选均正常0，但根因尚未定位，不当作干净的首次通过。",
+          "Bloom 和 v2 GiST 遗漏真正空文本 key 的问题仍开放；没有完整工作负载、所有操作延迟或 PostgreSQL 吞吐等价结论。",
+          "All prior user-deferred scopes unchanged; original R151 matrix not run."
+        ]
+      }
+    },
+    {
       "issue": "2026-11-05 current tuple NULL bitmap ownership for index build and BRIN NULL summaries",
       "gap_ids": [
         "IDX-03",

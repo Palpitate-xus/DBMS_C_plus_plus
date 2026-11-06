@@ -136,13 +136,17 @@ static void test_storage_engine_gin_brin() {
     }
     assert(g_engine.brinSearchRange(db, "t", "id", "=", "1").empty());
 
-    // V1 is the same native-endian payload without the version-2 checksum.
-    std::string legacyBrin =
-        validBrin.substr(0, validBrin.size() - sizeof(uint32_t));
-    legacyBrin[sizeof(uint32_t)] = 1;
-    legacyBrin[sizeof(uint32_t) + 1] = 0;
-    legacyBrin[sizeof(uint32_t) + 2] = 0;
-    legacyBrin[sizeof(uint32_t) + 3] = 0;
+    // Build an independent V1 fixture: new writes may use a newer layout.
+    // The real three-row heap fits page 1; legacy lexical bounds are not
+    // trusted for pruning by current readers, so the visible heap is checked.
+    std::string legacyBrin;
+    const auto appendNative = [&](const auto value) {
+        legacyBrin.append(reinterpret_cast<const char*>(&value), sizeof(value));
+    };
+    appendNative(uint32_t(0x5342524e)); appendNative(uint32_t(1));
+    appendNative(uint64_t(1)); appendNative(uint32_t(1)); appendNative(uint32_t(1));
+    appendNative(uint64_t(1)); legacyBrin += "1";
+    appendNative(uint64_t(1)); legacyBrin += "3";
     {
         std::ofstream output(brinPath, std::ios::binary | std::ios::trunc);
         assert(output);

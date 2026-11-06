@@ -25,6 +25,7 @@
 #include <fcntl.h>
 #include <fstream>
 #include <iomanip>
+#include <limits>
 #include <set>
 #include <sstream>
 #include <sys/file.h>
@@ -1439,6 +1440,20 @@ bool verifyBrinIndex(const std::filesystem::path& root,
     const bool littleEndianHeader =
         readU32(prefix, prefixOffset, magic) &&
         readU32(prefix, prefixOffset, version) && magic == kMagic;
+    if (littleEndianHeader && version == kTypedVersion) {
+        if (fileBytes < kTypedMinimumBytes || fileBytes > std::numeric_limits<size_t>::max()) {
+            error = shown + ": truncated typed BRIN index"; return false;
+        }
+        std::string bytes(static_cast<size_t>(fileBytes), '\0');
+        if (!readExactlyAt(data.get(), bytes.data(), bytes.size(), 0)) {
+            error = shown + ": short read of typed BRIN index"; return false;
+        }
+        TypedIndex index;
+        if (!decodeTyped(bytes, index)) {
+            error = shown + ": invalid typed BRIN framing or checksum mismatch"; return false;
+        }
+        ++stats.checksumFiles; ++stats.files; return true;
+    }
     if (littleEndianHeader && version == kChecksumVersion) {
         if (fileBytes < kHeaderBytes + kChecksumBytes) {
             error = shown + ": truncated checksummed BRIN index";

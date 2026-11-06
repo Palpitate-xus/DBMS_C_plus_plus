@@ -5751,6 +5751,13 @@ static bool explainNeedsTypedPlan(const dbms::SelectStmt& select) {
         if (auto* binary = dynamic_cast<const dbms::BinaryOpExpr*>(expression)) {
             if (binary->op == "::" || binary->op == "COLLATE" || binary->op == "+" ||
                 binary->op == "-" || binary->op == "*" || binary->op == "/" || binary->op == "%") return true;
+            // A literal-left comparison is a typed expression, not a
+            // compact condition with a numeric/string column name. Let the
+            // already bound query retain its operator and source identity.
+            if ((binary->op == "=" || binary->op == "<" || binary->op == "<=" ||
+                 binary->op == ">" || binary->op == ">=") &&
+                dynamic_cast<const dbms::LiteralExpr*>(binary->left.get()) &&
+                dynamic_cast<const dbms::ColumnRefExpr*>(binary->right.get())) return true;
             return typed(binary->left.get()) || typed(binary->right.get());
         }
         return false;

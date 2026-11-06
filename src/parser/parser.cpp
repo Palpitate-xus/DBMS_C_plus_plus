@@ -8937,14 +8937,24 @@ StmtPtr SQLParser::parseCreateIndex(const std::vector<std::string>& tokens, size
                 ++pos;
             }
         } else if (kw == "with" && pos + 1 < tokens.size() && tokens[pos + 1] == "(") {
-            pos += 2;
-            auto opts = collectParenthesized(tokens, pos);
-            for (size_t i = 0; i < opts.size(); i += 2) {
-                if (i + 1 < opts.size() && opts[i + 1] == "=") {
-                    if (i + 2 < opts.size()) { stmt->options[opts[i]] = opts[i + 2]; i += 2; }
-                } else if (i + 1 < opts.size()) {
-                    stmt->options[opts[i]] = opts[i + 1];
+            ++pos; // collectParenthesized owns the opening and closing tokens.
+            const auto opts = collectParenthesized(tokens, pos);
+            if (opts.empty()) return nullptr;
+            size_t i = 0;
+            while (i < opts.size()) {
+                const auto name = parseRoutineIdentifier(opts[i++]);
+                if (name.empty() || name == "," || name == "=" ||
+                    stmt->options.count(name)) return nullptr;
+                std::string value = "true";
+                if (i < opts.size() && opts[i] == "=") {
+                    if (++i == opts.size() || opts[i] == "," || opts[i] == "=") return nullptr;
+                    value = opts[i++];
+                    if ((value == "-" || value == "+") && i < opts.size() && opts[i] != ",")
+                        value += opts[i++];
                 }
+                stmt->options.emplace(name, std::move(value));
+                if (i == opts.size()) break;
+                if (opts[i++] != "," || i == opts.size()) return nullptr;
             }
         } else if (kw == "tablespace") {
             ++pos;

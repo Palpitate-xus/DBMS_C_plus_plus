@@ -1339,6 +1339,12 @@ public:
     std::vector<std::pair<uint32_t, uint32_t>> brinSearchRange(
         const std::string& dbname, const std::string& tablename, const std::string& colname,
         const std::string& op, const std::string& value) const;
+    // nullopt means untrusted/legacy/stale/unsupported: SQL must use its heap
+    // source. An engaged empty vector is a verified empty candidate set.
+    std::optional<std::vector<std::pair<uint32_t, uint32_t>>> tryBrinPageRanges(
+        const std::string& dbname, const std::string& tablename,
+        const std::string& colname, const std::string& op,
+        const std::string& value, bool requireCurrentSnapshot = true) const;
     std::vector<std::string> getBrinIndexedColumns(const std::string& dbname,
                                                     const std::string& tablename) const;
 
@@ -1489,6 +1495,10 @@ public:
     std::unique_ptr<HeapScanCursor> beginHeapScan(
         const std::string& dbname, const std::string& tablename,
         const TableSchema& schema) const;
+    std::unique_ptr<HeapScanCursor> beginHeapScan(
+        const std::string& dbname, const std::string& tablename,
+        const TableSchema& schema,
+        const std::vector<std::pair<uint32_t, uint32_t>>* inclusivePageRanges) const;
     // Relation-aware scan that applies the current session's RLS SELECT/command
     // policies before invoking the callback. Returns false when a policy cannot
     // be parsed or evaluated; callers must treat that as a statement error or

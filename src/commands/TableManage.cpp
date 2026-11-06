@@ -8944,6 +8944,13 @@ public:
 std::unique_ptr<HeapScanCursor> StorageEngine::beginHeapScan(
     const std::string& dbname, const std::string& tablename,
     const TableSchema& schema) const {
+    return beginHeapScan(dbname, tablename, schema, nullptr);
+}
+
+std::unique_ptr<HeapScanCursor> StorageEngine::beginHeapScan(
+    const std::string& dbname, const std::string& tablename,
+    const TableSchema& schema,
+    const std::vector<std::pair<uint32_t, uint32_t>>* inclusivePageRanges) const {
     if (schema.partitionType != TableSchema::PartitionType::None ||
         rlsAppliesTo(dbname, tablename))
         throw DbError("0A000", "relation requires its policy or partition scan path");
@@ -8965,13 +8972,32 @@ std::unique_ptr<HeapScanCursor> StorageEngine::beginHeapScan(
         TableSchema schema;
         ReadView view;
         uint32_t page = 1, end = 0;
+        bool limited = false;
+        size_t range = 0;
+        std::vector<std::pair<uint32_t, uint32_t>> ranges;
     };
     auto state = std::make_shared<State>();
+    if (inclusivePageRanges) {
+        state->limited = true;
+        state->ranges = *inclusivePageRanges;
+        uint32_t previous = 0;
+        for (const auto& range : state->ranges) {
+            if (!range.first || range.second < range.first || range.first <= previous)
+                throw DbError("XX000", "invalid heap candidate page ranges");
+            previous = range.second;
+        }
+    }
     state->allocator = std::move(allocator); state->schema = schema;
     state->view = *view; state->end = state->allocator->numPages();
     return std::make_unique<PageHeapScanCursor>(
         [this, state, dbname, tablename](std::vector<HeapScanRow>& rows) {
             checkForQueryInterrupt();
+            if (state->limited) {
+                while (state->range < state->ranges.size() &&
+                       state->page > state->ranges[state->range].second) ++state->range;
+                if (state->range == state->ranges.size()) return false;
+                state->page = std::max(state->page, state->ranges[state->range].first);
+            }
             if (state->page >= state->end) return false;
             // Nested commands may create combo IDs after this scan began.
             // Their decoding table can grow without advancing our snapshot's
@@ -15578,12 +15604,6 @@ std::vector<std::string> StorageEngine::getSPGiSTIndexedColumns(const std::strin
 namespace {
 constexpr uint32_t STORAGE_BRIN_MAGIC = brin_index_format::kMagic;
 
-struct StorageBrinRange {
-    uint32_t pageStart = 0;
-    uint32_t pageEnd = 0;
-    std::string minValue;
-    std::string maxValue;
-};
 
 template <typename T>
 bool readStorageBrinBytes(const std::string& data, size_t& offset, T& value) {
@@ -15602,6 +15622,104 @@ bool readLegacyStorageBrinString(const std::string& data, size_t& offset,
     offset += static_cast<size_t>(length);
     return true;
 }
+// V3 pruning only uses declared scalar orders implemented by this engine.
+// Unknown types/collations stay unbounded; there is no lexical numeric fallback.
+static std::optional<int> brinCompare(const Column& column,
+    const std::string& left, const std::string& right) {
+    if (column.isArray || !column.enumValues.empty() ||
+        (!column.collation.empty() && !column.resolvedCollationIsBinary)) return {};
+    const auto type = ExprHelper::canonicalResultTypeName(column.dataType);
+    constexpr std::string_view supported[]{
+        "smallint", "integer", "bigint", "real", "double precision", "numeric",
+        "money", "boolean", "text", "character varying", "character", "uuid",
+        "date", "time", "timestamp", "timestamptz",
+        "time without time zone", "timestamp without time zone",
+        "timestamp with time zone", "bit", "bit varying"};
+    if (std::find(std::begin(supported), std::end(supported), std::string_view(type)) == std::end(supported)) return {};
+    using Truth = StorageEngine::PredicateTruth;
+    try {
+        const auto less = StorageEngine::compareValues(column, left, false, right, false, "<");
+        const auto greater = StorageEngine::compareValues(column, left, false, right, false, ">");
+        if (less == Truth::Unknown || greater == Truth::Unknown ||
+            (less == Truth::True && greater == Truth::True)) return {};
+        if (less == Truth::True) return -1;
+        if (greater == Truth::True) return 1;
+        if (StorageEngine::compareValues(column, left, false, right, false, "=") == Truth::True)
+            return 0;
+    } catch (const DbError& error) {
+        if (error.sqlState().rfind("22", 0) != 0) throw;
+    }
+    return {};
+}
+static std::optional<std::string> brinSchemaImage(const std::filesystem::path& path) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) return {};
+    std::string image{std::istreambuf_iterator<char>(in), {}};
+    if (in.bad()) return {};
+    return image;
+}
+static std::string brinOrderingIdentity(const TableSchema& table, size_t column,
+                                        const std::string& image) {
+    using namespace brin_index_format;
+    const auto& key = table.cols[column];
+    std::string out("brin-typed-order-v1");
+    appendU32(out, table.formatVersion); appendU64(out, column);
+    appendString(out, image); appendString(out, key.dataName);
+    appendString(out, key.dataType); appendString(out, key.domainName);
+    appendString(out, key.collation); appendString(out, key.resolvedCollation);
+    appendU32(out, key.resolvedCollationIsBinary);
+    appendU32(out, key.resolvedCollationUsesLocale);
+    appendU32(out, static_cast<uint32_t>(key.storageCodec));
+    appendU32(out, static_cast<uint32_t>(key.typeMod));
+    appendU64(out, key.dsize); appendU32(out, key.isArray); appendU32(out, key.isUnsigned);
+    for (const auto& label : key.enumValues) appendString(out, label);
+    return out;
+}
+static size_t brinConfiguredRangeWidth(const std::filesystem::path& path) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) return 64; // V1/V2 did not persist the setting.
+    const std::string bytes{std::istreambuf_iterator<char>(in), {}};
+    brin_index_format::TypedIndex index;
+    return !in.bad() && brin_index_format::decodeTyped(bytes, index)
+        ? index.pagesPerRange : 64;
+}
+static bool brinOperator(const std::string& op) {
+    return op == "=" || op == "<" || op == "<=" || op == ">" || op == ">=" ||
+           op == "IS NULL" || op == "IS NOT NULL";
+}
+static bool brinLegacyFrame(const std::string& data) {
+    using namespace brin_index_format;
+    size_t offset = 0; uint32_t magic = 0, version = 0; uint64_t count = 0;
+    const bool littleEndian = readU32(data, offset, magic) && readU32(data, offset, version);
+    if (littleEndian && magic == kMagic && version == kChecksumVersion) {
+        if (data.size() < kHeaderBytes + kChecksumBytes) return false;
+        size_t crcOffset = data.size() - kChecksumBytes; uint32_t crc = 0;
+        if (!readU32(data, crcOffset, crc) ||
+            index_checksum::crc32c(data.data(), data.size() - kChecksumBytes) != crc) return false;
+        const std::string_view payload(data.data(), data.size() - kChecksumBytes);
+        if (!readU64(payload, offset, count) || count > (payload.size() - offset) / 24) return false;
+        for (uint64_t i = 0; i < count; ++i) {
+            uint32_t first = 0, last = 0; std::string min, max;
+            if (!readU32(payload, offset, first) || !readU32(payload, offset, last) ||
+                !first || last < first || !readString(payload, offset, min) ||
+                !readString(payload, offset, max)) return false;
+        }
+        return offset == payload.size();
+    }
+    offset = 0;
+    if (!readStorageBrinBytes(data, offset, magic) ||
+        !readStorageBrinBytes(data, offset, version) ||
+        !readStorageBrinBytes(data, offset, count) || magic != kMagic ||
+        version != kLegacyVersion || count > (data.size() - offset) / 24) return false;
+    for (uint64_t i = 0; i < count; ++i) {
+        uint32_t first = 0, last = 0; std::string min, max;
+        if (!readStorageBrinBytes(data, offset, first) || !readStorageBrinBytes(data, offset, last) ||
+            !first || last < first || !readLegacyStorageBrinString(data, offset, min) ||
+            !readLegacyStorageBrinString(data, offset, max)) return false;
+    }
+    return offset == data.size();
+}
+
 }
 
 std::filesystem::path StorageEngine::brinIndexPath(const std::string& dbname,
@@ -15625,7 +15743,15 @@ DBStatus StorageEngine::createBrinIndex(const std::string& dbname,
     if (colIdx >= tbl.len) return DBStatus::INVALID_VALUE;
 
     auto path = brinIndexPath(dbname, tablename, colname);
-    std::vector<StorageBrinRange> ranges;
+    brin_index_format::TypedIndex index;
+    index.pagesPerRange = static_cast<uint32_t>(pagesPerRange);
+    index.heapPages = 1;
+    index.physicalRelation = tbl.physicalRelationId;
+    if (tbl.partitionType != TableSchema::PartitionType::None)
+        index.flags = brin_index_format::kPartitioned;
+    const auto schemaImage = brinSchemaImage(schemaPath(dbname, tablename));
+    if (!schemaImage) return DBStatus::IO_ERROR;
+    index.orderingIdentity = brinOrderingIdentity(tbl, colIdx, *schemaImage);
     const uint32_t rangeWidth = static_cast<uint32_t>(pagesPerRange);
 
     ReadView autocommitView;
@@ -15649,13 +15775,13 @@ DBStatus StorageEngine::createBrinIndex(const std::string& dbname,
     auto scanAllocator = [&](PageAllocator& allocator, const TableSchema& t) -> bool {
         std::vector<bool> scanNulls(t.len, false);
         const uint32_t np = allocator.numPages();
+        index.heapPages = std::max(index.heapPages, np);
         for (uint64_t start = 1; start < np; start += rangeWidth) {
             const uint32_t blockStart = static_cast<uint32_t>(start);
             const uint32_t blockEnd = static_cast<uint32_t>(std::min<uint64_t>(
                 start + rangeWidth - 1, static_cast<uint64_t>(np - 1)));
-            bool hasValue = false;
-            std::string rangeMin;
-            std::string rangeMax;
+            brin_index_format::Range range;
+            range.first = blockStart; range.last = blockEnd;
             for (uint32_t pid = blockStart; pid <= blockEnd; ++pid) {
                 char* buf = allocator.fetchPage(pid);
                 if (!buf) return false;
@@ -15679,20 +15805,30 @@ DBStatus StorageEngine::createBrinIndex(const std::string& dbname,
                     bool valueIsNull = false;
                     std::string val = extractColumnValue(
                         row, t, colIdx, dbname, true, &valueIsNull);
-                    if (scanNullOwner.active() && valueIsNull) return;
-                    if (!hasValue) {
-                        rangeMin = rangeMax = std::move(val);
-                        hasValue = true;
-                    } else {
-                        if (val < rangeMin) rangeMin = val;
-                        if (val > rangeMax) rangeMax = val;
+                    using namespace brin_index_format;
+                    if (!scanNullOwner.active()) {
+                        range.flags |= kHasNull | kHasNonNull | kUnbounded;
+                        return;
+                    }
+                    if (valueIsNull) { range.flags |= kHasNull; return; }
+                    if (!(range.flags & kHasNonNull)) {
+                        range.min = range.max = val;
+                        range.flags |= kHasNonNull;
+                        if (!brinCompare(t.cols[colIdx], val, val)) range.flags |= kUnbounded;
+                    } else if (!(range.flags & kUnbounded)) {
+                        const auto lo = brinCompare(t.cols[colIdx], val, range.min);
+                        const auto hi = brinCompare(t.cols[colIdx], val, range.max);
+                        if (!lo || !hi) range.flags |= kUnbounded;
+                        else {
+                            if (*lo < 0) range.min = val;
+                            if (*hi > 0) range.max = val;
+                        }
                     }
                 });
                 allocator.unpinPage(pid);
                 if (pid == blockEnd) break;
             }
-            if (hasValue) ranges.push_back({blockStart, blockEnd,
-                                             std::move(rangeMin), std::move(rangeMax)});
+            if (range.flags) index.ranges.push_back(std::move(range));
         }
         return true;
     };
@@ -15725,22 +15861,8 @@ DBStatus StorageEngine::createBrinIndex(const std::string& dbname,
     };
 
     if (!scanTable(tablename)) return DBStatus::IO_ERROR;
-    std::string bytes;
-    using namespace brin_index_format;
-    appendU32(bytes, STORAGE_BRIN_MAGIC);
-    appendU32(bytes, kChecksumVersion);
-    const uint64_t rangeCount = ranges.size();
-    appendU64(bytes, rangeCount);
-    for (const auto& range : ranges) {
-        appendU32(bytes, range.pageStart);
-        appendU32(bytes, range.pageEnd);
-        appendU64(bytes, range.minValue.size());
-        bytes.append(range.minValue);
-        appendU64(bytes, range.maxValue.size());
-        bytes.append(range.maxValue);
-    }
-    appendU32(bytes, index_checksum::crc32c(bytes.data(), bytes.size()));
-    if (!index_file::writeAtomically(path, bytes)) return DBStatus::IO_ERROR;
+    if (!index_file::writeAtomically(path, brin_index_format::encodeTyped(index)))
+        return DBStatus::IO_ERROR;
     return DBStatus::OK;
 }
 
@@ -15762,159 +15884,122 @@ bool StorageEngine::hasBrinIndex(const std::string& dbname,
     return std::filesystem::exists(brinIndexPath(dbname, tablename, colname));
 }
 
+std::optional<std::vector<std::pair<uint32_t, uint32_t>>> StorageEngine::tryBrinPageRanges(
+    const std::string& dbname, const std::string& tablename,
+    const std::string& colname, const std::string& op,
+    const std::string& value, bool requireCurrentSnapshot) const {
+    using namespace brin_index_format;
+    if (!brinOperator(op) || specializedIndexesAreDirty(*this, dbname, tablename)) return {};
+    const auto& context = transactionContext();
+    if (requireCurrentSnapshot && context.inTransaction && context.txnDB == dbname &&
+        context.txnIsolationLevel == IsolationLevel::SERIALIZABLE) return {};
+    const auto before = requireCurrentSnapshot ? indexReadSnapshotFence(dbname)
+                                               : std::optional<uint64_t>(0);
+    if (!before) return {};
+    const auto table = getTableSchema(dbname, tablename);
+    if (table.partitionType != TableSchema::PartitionType::None ||
+        !table.physicalRelationId || table.formatVersion != DATA_FILE_FORMAT_VERSION) return {};
+    size_t column = table.len;
+    for (size_t i = 0; i < table.len; ++i)
+        if (table.cols[i].dataName == colname) { column = i; break; }
+    if (column == table.len) return {};
+    std::ifstream in(brinIndexPath(dbname, tablename, colname), std::ios::binary);
+    if (!in) return {};
+    const std::string bytes{std::istreambuf_iterator<char>(in), {}};
+    if (in.bad()) return {};
+    TypedIndex index;
+    if (!decodeTyped(bytes, index) || index.flags ||
+        index.physicalRelation != table.physicalRelationId ||
+        index.heapPages != tableNumPages(dbname, tablename)) return {};
+    const auto image = brinSchemaImage(schemaPath(dbname, tablename));
+    if (!image || index.orderingIdentity != brinOrderingIdentity(table, column, *image)) return {};
+    const auto& key = table.cols[column];
+    std::vector<std::pair<uint32_t, uint32_t>> ranges;
+    for (const auto& range : index.ranges) {
+        checkForQueryInterrupt();
+        bool match = false;
+        if (op == "IS NULL") match = range.flags & kHasNull;
+        else if (op == "IS NOT NULL") match = range.flags & kHasNonNull;
+        else if (range.flags & kHasNonNull) {
+            if (range.flags & kUnbounded) return {};
+            const auto order = brinCompare(key, range.min, range.max);
+            const auto lower = brinCompare(key, value, range.min);
+            const auto upper = brinCompare(key, value, range.max);
+            if (!order || *order > 0 || !lower || !upper) return {};
+            if (op == "=") match = *lower >= 0 && *upper <= 0;
+            else if (op == "<") match = *lower > 0;
+            else if (op == "<=") match = *lower >= 0;
+            else if (op == ">") match = *upper < 0;
+            else if (op == ">=") match = *upper <= 0;
+        }
+        if (match) {
+            if (!ranges.empty() && uint64_t(ranges.back().second) + 1 == range.first)
+                ranges.back().second = range.last;
+            else ranges.emplace_back(range.first, range.last);
+        }
+    }
+    const auto after = requireCurrentSnapshot ? indexReadSnapshotFence(dbname)
+                                              : std::optional<uint64_t>(0);
+    if (!after || *after != *before || specializedIndexesAreDirty(*this, dbname, tablename)) return {};
+    return ranges;
+}
+
 std::vector<std::pair<uint32_t, uint32_t>> StorageEngine::brinSearchRange(
     const std::string& dbname, const std::string& tablename, const std::string& colname,
     const std::string& op, const std::string& value) const {
-    std::vector<std::pair<uint32_t, uint32_t>> result;
-    auto path = brinIndexPath(dbname, tablename, colname);
-    std::error_code pathError;
-    if (!std::filesystem::is_regular_file(path, pathError) || pathError)
-        return result;
-    if (specializedIndexesNeedHeapFallback(dbname, tablename)) {
-        const TableSchema table = getTableSchema(dbname, tablename);
-        size_t columnIndex = table.len;
-        for (size_t i = 0; i < table.len; ++i) {
-            if (table.cols[i].dataName == colname) {
-                columnIndex = i;
-                break;
-            }
-        }
-        if (columnIndex >= table.len) return result;
-        std::set<uint32_t> matchingPages;
-        const bool scanned = forEachRow(
-            dbname, tablename,
-            [&](uint32_t pageId, uint16_t, const char* data, size_t length) {
-                const std::string row(data, length);
-                const std::string candidate =
-                    const_cast<StorageEngine*>(this)->extractColumnValue(
-                    row, table, columnIndex, dbname, true);
-                bool matches = false;
-                if (op == "=") matches = candidate == value;
-                else if (op == "<") matches = candidate < value;
-                else if (op == "<=") matches = candidate <= value;
-                else if (op == ">") matches = candidate > value;
-                else if (op == ">=") matches = candidate >= value;
-                if (matches) matchingPages.insert(pageId);
-            });
-        if (!scanned || matchingPages.empty()) return result;
-        uint32_t rangeStart = *matchingPages.begin();
-        uint32_t rangeEnd = rangeStart;
-        for (auto it = std::next(matchingPages.begin());
-             it != matchingPages.end(); ++it) {
-            if (*it == rangeEnd + 1) {
-                rangeEnd = *it;
-            } else {
-                result.push_back({rangeStart, rangeEnd});
-                rangeStart = rangeEnd = *it;
-            }
-        }
-        result.push_back({rangeStart, rangeEnd});
-        return result;
-    }
-    std::ifstream in(path, std::ios::binary);
-    if (!in) return result;
-    const std::string data((std::istreambuf_iterator<char>(in)),
-                           std::istreambuf_iterator<char>());
-    if (in.bad()) return {};
     using namespace brin_index_format;
-    size_t headerOffset = 0;
-    uint32_t littleEndianMagic = 0;
-    uint32_t littleEndianVersion = 0;
-    const bool hasLittleEndianHeader =
-        readU32(data, headerOffset, littleEndianMagic) &&
-        readU32(data, headerOffset, littleEndianVersion) &&
-        littleEndianMagic == kMagic;
-    if (hasLittleEndianHeader &&
-        littleEndianVersion == kChecksumVersion) {
-        if (data.size() < sizeof(uint32_t) * 2 + sizeof(uint64_t) +
-                              kChecksumBytes) return {};
-        const size_t payloadBytes = data.size() - kChecksumBytes;
-        size_t checksumOffset = payloadBytes;
-        uint32_t storedChecksum = 0;
-        if (!readU32(data, checksumOffset, storedChecksum) ||
-            checksumOffset != data.size() ||
-            index_checksum::crc32c(data.data(), payloadBytes) !=
-                storedChecksum) {
-            return {};
-        }
-
-        const std::string_view payload(data.data(), payloadBytes);
-        size_t offset = 0;
-        uint32_t magic = 0;
-        uint32_t version = 0;
-        uint64_t rangeCount = 0;
-        constexpr uint64_t minimumRangeBytes =
-            sizeof(uint32_t) * 2 + sizeof(uint64_t) * 2;
-        if (!readU32(payload, offset, magic) ||
-            !readU32(payload, offset, version) ||
-            !readU64(payload, offset, rangeCount) || magic != kMagic ||
-            version != kChecksumVersion ||
-            rangeCount > (payloadBytes - offset) / minimumRangeBytes) {
-            return {};
-        }
-        for (uint64_t i = 0; i < rangeCount; ++i) {
-            uint32_t pstart = 0;
-            uint32_t pend = 0;
-            std::string rangeMin;
-            std::string rangeMax;
-            if (!readU32(payload, offset, pstart) ||
-                !readU32(payload, offset, pend) ||
-                !readString(payload, offset, rangeMin) ||
-                !readString(payload, offset, rangeMax) ||
-                pstart == 0 || pend < pstart) return {};
-            bool mayMatch = false;
-            if (op == "=") {
-                mayMatch = (rangeMin <= value && value <= rangeMax);
-            } else if (op == "<") {
-                mayMatch = (rangeMin < value);
-            } else if (op == "<=") {
-                mayMatch = (rangeMin <= value);
-            } else if (op == ">") {
-                mayMatch = (rangeMax > value);
-            } else if (op == ">=") {
-                mayMatch = (rangeMax >= value);
+    std::vector<std::pair<uint32_t, uint32_t>> result;
+    if (!brinOperator(op)) return result;
+    if (!specializedIndexesNeedHeapFallback(dbname, tablename)) {
+        std::ifstream in(brinIndexPath(dbname, tablename, colname), std::ios::binary);
+        if (!in) return result;
+        const std::string bytes{std::istreambuf_iterator<char>(in), {}};
+        TypedIndex index;
+        // A healthy generation retains diagnostic corruption rejection.
+        // Dirty/incomplete generations bypass even unreadable sidecars,
+        // preserving the existing public native heap-fallback contract.
+        // SQL uses the optional API above and always has a heap fallback.
+        if (in.bad() || (!decodeTyped(bytes, index) && !brinLegacyFrame(bytes))) return result;
+        if (const auto trusted = tryBrinPageRanges(dbname, tablename, colname, op, value))
+            return *trusted;
+    }
+    // V1/V2 extrema cannot prove typed pruning; obtain visible candidates
+    // from the real heap. Never reinterpret their lexical bounds as numeric.
+    const auto table = getTableSchema(dbname, tablename);
+    size_t column = table.len;
+    for (size_t i = 0; i < table.len; ++i)
+        if (table.cols[i].dataName == colname) { column = i; break; }
+    if (column == table.len) return result;
+    std::vector<bool> nulls(table.len, false);
+    std::set<uint32_t> pages;
+    const bool scanned = forEachRow(dbname, tablename,
+        [&](uint32_t page, uint16_t, const char* payload, size_t length) {
+            ScannedNullRowBinding owner(table, nulls, payload, length);
+            bool isNull = false;
+            const auto datum = const_cast<StorageEngine*>(this)->extractColumnValue(
+                std::string(payload, length), table, column, dbname, true, &isNull);
+            bool match = !owner.active(); // unknown bitmap must widen
+            if (owner.active()) {
+                if (op == "IS NULL") match = isNull;
+                else if (op == "IS NOT NULL") match = !isNull;
+                else if (!isNull) {
+                    const auto cmp = brinCompare(table.cols[column], datum, value);
+                    if (!cmp) match = true;
+                    else if (op == "=") match = *cmp == 0;
+                    else if (op == "<") match = *cmp < 0;
+                    else if (op == "<=") match = *cmp <= 0;
+                    else if (op == ">") match = *cmp > 0;
+                    else if (op == ">=") match = *cmp >= 0;
+                }
             }
-            if (mayMatch) result.push_back({pstart, pend});
-        }
-        if (offset != payload.size()) return {};
-        return result;
+            if (match) pages.insert(page);
+        });
+    if (!scanned) throw DbError("58030", "BRIN legacy heap fallback failed");
+    for (const auto page : pages) {
+        if (!result.empty() && uint64_t(result.back().second) + 1 == page)
+            result.back().second = page;
+        else result.emplace_back(page, page);
     }
-
-    // V1 used native byte order and has no checksum.
-    size_t offset = 0;
-    uint32_t magic = 0;
-    uint32_t version = 0;
-    uint64_t rangeCount = 0;
-    if (!readStorageBrinBytes(data, offset, magic) ||
-        !readStorageBrinBytes(data, offset, version) ||
-        !readStorageBrinBytes(data, offset, rangeCount) ||
-        magic != STORAGE_BRIN_MAGIC || version != kLegacyVersion ||
-        rangeCount > data.size() / 24) return {};
-    for (uint64_t i = 0; i < rangeCount; ++i) {
-        uint32_t pstart = 0;
-        uint32_t pend = 0;
-        std::string rangeMin;
-        std::string rangeMax;
-        if (!readStorageBrinBytes(data, offset, pstart) ||
-            !readStorageBrinBytes(data, offset, pend) ||
-            !readLegacyStorageBrinString(data, offset, rangeMin) ||
-            !readLegacyStorageBrinString(data, offset, rangeMax) ||
-            pstart == 0 || pend < pstart) return {};
-        bool mayMatch = false;
-        if (op == "=") {
-            mayMatch = (rangeMin <= value && value <= rangeMax);
-        } else if (op == "<") {
-            mayMatch = (rangeMin < value);
-        } else if (op == "<=") {
-            mayMatch = (rangeMin <= value);
-        } else if (op == ">") {
-            mayMatch = (rangeMax > value);
-        } else if (op == ">=") {
-            mayMatch = (rangeMax >= value);
-        }
-        if (mayMatch) result.push_back({pstart, pend});
-    }
-    if (offset != data.size()) return {};
     return result;
 }
 
@@ -16000,8 +16085,9 @@ bool StorageEngine::rebuildSpecializedIndexes(
             }
         }
         for (const auto& column : brinColumns) {
+            const auto width = brinConfiguredRangeWidth(brinIndexPath(dbname, tablename, column));
             if (rebuilt && createBrinIndex(
-                               dbname, tablename, column, 64) !=
+                               dbname, tablename, column, width) !=
                                DBStatus::OK) {
                 rebuilt = false;
             }
@@ -28777,6 +28863,32 @@ std::vector<StorageEngine::Condition> StorageEngine::parseConditions(
                    dynamic_cast<const CastExpr*>(expression);
         };
         const std::string rawRight = s.substr(sp + 1);
+        if (!apiCondition && !c.colName.empty() &&
+            (std::isdigit(static_cast<unsigned char>(c.colName.front())) ||
+             c.colName.front() == '.' || c.colName.front() == '\'' ||
+             c.colName.front() == '-' || c.colName.front() == '+' ||
+             c.colName == "true" || c.colName == "false" || c.colName == "null")) {
+            // A literal on the left is an expression, never a physical
+            // column named "376". Preserve its SQL spelling and direction
+            // for the typed evaluator instead of decoding it as a column.
+            SQLParser parser;
+            const auto left = parser.parseForBinding("SELECT " + c.colName);
+            const auto right = parser.parseForBinding("SELECT " + rawRight);
+            const auto* a = left.success ? dynamic_cast<const SelectStmt*>(left.stmt.get()) : nullptr;
+            const auto* b = right.success ? dynamic_cast<const SelectStmt*>(right.stmt.get()) : nullptr;
+            const Expr* value = a && !a->fromClause && a->selectList.size() == 1
+                ? a->selectList.front().expr.get() : nullptr;
+            if (const auto* sign = dynamic_cast<const UnaryOpExpr*>(value);
+                sign && (sign->op == "+" || sign->op == "-")) value = sign->operand.get();
+            const auto* column = b && !b->fromClause && b->selectList.size() == 1
+                ? dynamic_cast<const ColumnRefExpr*>(b->selectList.front().expr.get()) : nullptr;
+            if (dynamic_cast<const LiteralExpr*>(value) && column &&
+                column->table.empty() && column->schema.empty()) {
+                c.value = c.colName + " " + c.op + " " + rawRight;
+                c.colName.clear(); c.op = "typedexpr";
+                conds.push_back(std::move(c)); continue;
+            }
+        }
         if (computedOperand(c.colName, false)) {
             c.value = c.colName + " " + c.op + " " + rawRight;
             c.colName.clear();

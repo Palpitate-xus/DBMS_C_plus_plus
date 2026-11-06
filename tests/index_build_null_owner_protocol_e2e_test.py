@@ -43,14 +43,35 @@ def main():
     def brin_image(name):
         raw = (Path(server['dir'])/'info'/name).read_bytes()
         trace['brin_images'][name] = raw.hex()
-        assert len(raw) >= 20 and struct.unpack_from('<II', raw) == (0x5342524e, 2)
+        assert len(raw) >= 20 and struct.unpack_from('<II', raw) == (0x5342524e, 3)
         checksum = 0xffffffff
         for byte in raw[:-4]:
             checksum ^= byte
             for _ in range(8):
                 checksum = (checksum >> 1) ^ (0x82f63b78 if checksum & 1 else 0)
         assert checksum ^ 0xffffffff == int.from_bytes(raw[-4:], 'little')
-        return raw
+        # Independent V3 framing decoder; NULL flags are distinct from
+        # non-NULL empty-string extrema. Do not infer NULL from text bytes.
+        count = struct.unpack_from('<Q', raw, 8)[0]
+        width, pages, flags = struct.unpack_from('<III', raw, 16)
+        relation = struct.unpack_from('<Q', raw, 28)[0]
+        identity_length = struct.unpack_from('<Q', raw, 36)[0]
+        offset = 44+identity_length
+        assert width and pages and not flags and relation and identity_length
+        ranges = []
+        for _ in range(count):
+            first, last, state = struct.unpack_from('<III', raw, offset)
+            offset += 12
+            bounds = []
+            for _ in range(2):
+                length = struct.unpack_from('<Q', raw, offset)[0]
+                offset += 8
+                bounds.append(raw[offset:offset+length])
+                offset += length
+            assert 0 < first <= last < pages and 0 < state <= 7
+            ranges.append((first, last, state, *bounds))
+        assert offset == len(raw)-4
+        return raw, ranges
 
     try:
         query('ALTER SYSTEM SET auto_analyze=off', shared=False)
@@ -96,16 +117,15 @@ def main():
         query('CREATE INDEX idx_null_brin ON idx_null USING brin(n)', tag='CREATE INDEX')
         rows, oids = query('SELECT id,n FROM idx_null', tag='SELECT 3')
         assert sorted(rows) == [['1', None], ['2', None], ['3', None]] and oids == [23, 23]
-        raw = brin_image('idx_null_n.brin')
-        assert len(raw) == 20 and struct.unpack_from('<Q', raw, 8)[0] == 0, 'all-NULL range omitted'
+        raw, ranges = brin_image('idx_null_n.brin')
+        assert len(ranges) == 1 and ranges[0][2:] == (2, b'', b''), 'all-NULL range has only the NULL flag'
         query('CREATE TABLE idx_empty(id integer PRIMARY KEY,s text)', tag='CREATE TABLE')
         query("INSERT INTO idx_empty VALUES(1,NULL),(2,'')", tag='INSERT 0 2')
         query('CREATE INDEX idx_empty_brin ON idx_empty USING brin(s)', tag='CREATE INDEX')
         rows, oids = query('SELECT id,s FROM idx_empty', tag='SELECT 2')
         assert sorted(rows) == [['1', None], ['2', '']] and oids == [23, 25]
-        raw = brin_image('idx_empty_s.brin')
-        assert struct.unpack_from('<Q', raw, 8)[0] == 1, 'genuine empty text has a range'
-        assert len(raw) == 44 and struct.unpack_from('<Q', raw, 24)[0] == 0 and struct.unpack_from('<Q', raw, 32)[0] == 0
+        raw, ranges = brin_image('idx_empty_s.brin')
+        assert len(ranges) == 1 and ranges[0][2:] == (3, b'', b''), 'NULL plus genuine empty text has both flags'
         select(latest)
         trace['complete'] = True
     finally:
