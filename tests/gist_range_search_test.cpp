@@ -155,50 +155,87 @@ void testCorruptSidecarFallback(StorageEngine& engine) {
     std::cout << "[GIST RANGE] corrupt sidecar heap fallback OK\n";
 }
 
-void testV2ChecksumFallback(StorageEngine& engine) {
+void testCurrentV3AndLegacyV2ChecksumFallback(StorageEngine& engine) {
     const fs::path path =
         fs::path(kDatabase) / "values_table_number_value.gist";
     std::ifstream input(path, std::ios::binary);
     assert(input.good());
-    std::string bytes((std::istreambuf_iterator<char>(input)),
-                      std::istreambuf_iterator<char>());
-    assert(gist_index_format::hasMagic(bytes));
+    const std::string current((std::istreambuf_iterator<char>(input)),
+                              std::istreambuf_iterator<char>());
+    assert(!input.bad() && gist_index_format::hasMagicV3(current));
     std::vector<gist_index_format::Entry> entries;
-    assert(gist_index_format::decodeV2(bytes, entries));
-    assert(entries.size() == 5);
+    assert(gist_index_format::decodeV3(current, entries));
+    uint32_t actualVersion = 0;
+    std::vector<gist_index_format::Entry> currentGeneric;
+    assert(gist_index_format::decode(current, currentGeneric, &actualVersion));
+    assert(actualVersion == 3 && entries.size() == 5 && currentGeneric.size() == 5);
+    std::vector<gist_index_format::Entry> wrongVersion;
+    assert(!gist_index_format::decodeV2(current, wrongVersion));
 
-    // Row 2's two bounds are both changed from 2 to 3, leaving a structurally
-    // valid range. The CRC must be what rejects this otherwise plausible
-    // false-negative source.
-    size_t secondEntryLow = gist_index_format::kHeaderBytes;
-    bool foundSecondRow = false;
-    for (const auto& entry : entries) {
-        if (entry.rid == static_cast<uint64_t>(ridFor(engine, "2"))) {
-            assert(entry.low == "2" && entry.high == "2");
-            foundSecondRow = true;
-            break;
+    // Preserve explicit legacy V2 coverage using the real current row/RIDs.
+    // Its marker, version and CRC are all genuinely V2, never a mixed frame.
+    const std::string legacyV2 = gist_index_format::encodeV2(entries);
+    assert(gist_index_format::hasMagic(legacyV2));
+    std::vector<gist_index_format::Entry> legacyEntries;
+    assert(gist_index_format::decodeV2(legacyV2, legacyEntries));
+    assert(legacyEntries.size() == 5);
+    std::vector<gist_index_format::Entry> legacyGeneric;
+    assert(gist_index_format::decode(legacyV2, legacyGeneric, &actualVersion));
+    assert(actualVersion == 2 && legacyGeneric.size() == 5);
+    assert(!gist_index_format::decodeV3(legacyV2, wrongVersion));
+
+    for (const auto& fixture : std::vector<std::pair<uint32_t, std::string>>{
+             {3, current}, {2, legacyV2}}) {
+        std::string bytes = fixture.second;
+        {
+            std::ofstream output(path, std::ios::binary | std::ios::trunc);
+            output.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+            assert(output.good());
         }
-        secondEntryLow += gist_index_format::kMinimumEntryBytes +
-                          entry.low.size() + entry.high.size();
-    }
-    assert(foundSecondRow);
-    secondEntryLow += gist_index_format::kMinimumEntryBytes;
-    assert(bytes.at(secondEntryLow) == '2');
-    assert(bytes.at(secondEntryLow + 1) == '2');
-    bytes[secondEntryLow] = '3';
-    bytes[secondEntryLow + 1] = '3';
-    std::vector<gist_index_format::Entry> damagedEntries;
-    assert(!gist_index_format::decodeV2(bytes, damagedEntries));
-    {
-        std::ofstream output(path, std::ios::binary | std::ios::trunc);
-        output.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
-        assert(output.good());
-    }
+        // Both genuine versions must remain positive native read inputs.
+        assertRids(engine.giSTSearchOverlap(
+                       kDatabase, kTable, "number_value", "2", "2"),
+                   {ridFor(engine, "2")});
+        assertRids(engine.giSTSearchContainedBy(
+                       kDatabase, kTable, "number_value", "2", "100"),
+                   {ridFor(engine, "2"), ridFor(engine, "3"), ridFor(engine, "4")});
 
-    assertRids(engine.giSTSearchOverlap(
-                   kDatabase, kTable, "number_value", "2", "2"),
-               {ridFor(engine, "2")});
-    std::cout << "[GIST RANGE] checksummed plausible-corruption fallback OK\n";
+        // Row2 bounds2->3 keep a plausible frame. Keep the original CRC so
+        // checksum rejection, rather than an impossible range, is required.
+        size_t secondEntryLow = gist_index_format::kHeaderBytes;
+        bool foundSecondRow = false;
+        for (const auto& entry : entries) {
+            if (entry.rid == static_cast<uint64_t>(ridFor(engine, "2"))) {
+                assert(entry.low == "2" && entry.high == "2");
+                foundSecondRow = true;
+                break;
+            }
+            secondEntryLow += gist_index_format::kMinimumEntryBytes +
+                              entry.low.size() + entry.high.size();
+        }
+        assert(foundSecondRow);
+        secondEntryLow += gist_index_format::kMinimumEntryBytes;
+        assert(bytes.at(secondEntryLow) == '2');
+        assert(bytes.at(secondEntryLow + 1) == '2');
+        bytes[secondEntryLow] = '3';
+        bytes[secondEntryLow + 1] = '3';
+        std::vector<gist_index_format::Entry> damagedEntries;
+        assert(!gist_index_format::decode(bytes, damagedEntries));
+        if (fixture.first == 2)
+            assert(!gist_index_format::decodeV2(bytes, damagedEntries));
+        else
+            assert(!gist_index_format::decodeV3(bytes, damagedEntries));
+        {
+            std::ofstream output(path, std::ios::binary | std::ios::trunc);
+            output.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+            assert(output.good());
+        }
+        assertRids(engine.giSTSearchOverlap(
+                       kDatabase, kTable, "number_value", "2", "2"),
+                   {ridFor(engine, "2")});
+        std::cout << "[GIST RANGE] V" << fixture.first
+                  << " positive + plausible-corruption fallback OK\n";
+    }
 }
 
 void testLegacyCompatibility(StorageEngine& engine) {
@@ -228,7 +265,7 @@ int main() {
         StorageEngine engine;
         buildFixture(engine);
         testTypedRangeSearch(engine);
-        testV2ChecksumFallback(engine);
+        testCurrentV3AndLegacyV2ChecksumFallback(engine);
         testLegacyCompatibility(engine);
         testCorruptSidecarFallback(engine);
     }

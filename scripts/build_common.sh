@@ -702,6 +702,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/brin_typed_scan_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/brin_maintenance_options_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/reindex_access_methods_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/gist_empty_key_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/pg_stats_source_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/planner_relation_metadata_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/test_registration_inventory_test.py)

@@ -1317,6 +1317,29 @@ public:
                             const std::string& colname);
     bool hasGiSTIndex(const std::string& dbname, const std::string& tablename,
                        const std::string& colname) const;
+    // A present zero-byte value is a finite bound, distinct from no bound.
+    // These probes only read a proven complete current index: nullopt asks
+    // the original query owner to keep its visible heap source and recheck.
+    struct GiSTBound {
+        std::string value;
+        bool inclusive = true;
+    };
+    struct GiSTBounds {
+        std::optional<GiSTBound> low;
+        std::optional<GiSTBound> high;
+    };
+    std::optional<std::vector<int64_t>> tryGiSTSearchOverlap(
+        const std::string& dbname, const std::string& tablename,
+        const std::string& colname, const GiSTBounds& bounds) const;
+    std::optional<std::vector<int64_t>> tryGiSTSearchContainedBy(
+        const std::string& dbname, const std::string& tablename,
+        const std::string& colname, const GiSTBounds& bounds) const;
+    // LIKE's necessary byte prefix has a different ordering contract from
+    // locale-sensitive SQL comparisons. Bounds are derived here, never
+    // supplied as an arbitrary scalar range with a collation override.
+    std::optional<std::vector<int64_t>> tryGiSTSearchLikePrefix(
+        const std::string& dbname, const std::string& tablename,
+        const std::string& colname, const std::string& prefix) const;
     // Search rows whose indexed value OVERLAPS with query range [low,high]
     std::vector<int64_t> giSTSearchOverlap(const std::string& dbname, const std::string& tablename,
                                             const std::string& colname,
@@ -1876,6 +1899,12 @@ public:
     std::vector<std::string> listTablespaces(const std::string& dbname) const;
 
 private:
+
+    enum class GiSTOrderingRole { SqlScalar, BinaryLikePrefix };
+    std::optional<std::vector<int64_t>> tryGiSTCandidates(
+        const std::string& dbname, const std::string& tablename,
+        const std::string& colname, const GiSTBounds& bounds,
+        bool contained, GiSTOrderingRole ordering = GiSTOrderingRole::SqlScalar) const;
 
     // Build existing auxiliary AM definitions into private replacement files.
     // The reserving REINDEX owner controls publication and cache invalidation.

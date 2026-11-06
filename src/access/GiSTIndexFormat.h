@@ -162,4 +162,118 @@ inline bool decodeV2(std::string_view input,
     return true;
 }
 
+// V3 has the same entry framing as V2. Its producer contract covers every
+// genuine non-NULL indexed value, including empty text. The codec does not
+// infer NULL or establish that a producer fulfilled this coverage contract.
+// V2 remains readable, but its historical builders could omit empty values.
+constexpr std::array<char, 8> kMagicV3 = {
+    '\0', 'D', 'B', 'M', 'S', 'S', '\0', '3'};
+constexpr uint32_t kVersionV3 = 3;
+
+inline std::string encodeV3(uint64_t entryCount,
+                            std::string_view entryPayload) {
+    std::string output(kMagicV3.begin(), kMagicV3.end());
+    appendU32(output, kVersionV3);
+    appendU64(output, entryCount);
+    if (!entryPayload.empty()) {
+        output.append(entryPayload.data(), entryPayload.size());
+    }
+    appendU32(output, index_checksum::crc32c(output.data(), output.size()));
+    return output;
+}
+
+inline std::string encodeV3(const std::vector<Entry>& entries) {
+    std::string payload;
+    for (const auto& entry : entries) {
+        appendEntryPayload(payload, entry.rid, entry.low, entry.high);
+    }
+    return encodeV3(static_cast<uint64_t>(entries.size()), payload);
+}
+
+inline bool hasMagicV3(std::string_view input) {
+    return input.size() >= kMagicV3.size() &&
+           std::equal(kMagicV3.begin(), kMagicV3.end(), input.begin());
+}
+
+inline bool decodeV3(std::string_view input,
+                     std::vector<Entry>& entries) {
+    if (!hasMagicV3(input) ||
+        input.size() < kHeaderBytes + kChecksumBytes) {
+        return false;
+    }
+    const size_t payloadBytes = input.size() - kChecksumBytes;
+    const std::string_view payload = input.substr(0, payloadBytes);
+    const uint32_t storedChecksum = index_checksum::crc32c(
+        payload.data(), payload.size());
+    size_t checksumOffset = payloadBytes;
+    uint32_t trailer = 0;
+    if (!readU32(input, checksumOffset, trailer) ||
+        trailer != storedChecksum) {
+        return false;
+    }
+
+    size_t offset = kMagicV3.size();
+    uint32_t version = 0;
+    uint64_t entryCount = 0;
+    if (!readU32(payload, offset, version) || version != kVersionV3 ||
+        !readU64(payload, offset, entryCount) ||
+        entryCount > (payloadBytes - kHeaderBytes) / kMinimumEntryBytes ||
+        entryCount > entries.max_size()) {
+        return false;
+    }
+
+    std::vector<Entry> decoded;
+    try {
+        decoded.reserve(static_cast<size_t>(entryCount));
+        for (uint64_t i = 0; i < entryCount; ++i) {
+            Entry entry;
+            uint64_t lowLength = 0;
+            uint64_t highLength = 0;
+            if (!readU64(payload, offset, entry.rid) ||
+                !readU64(payload, offset, lowLength) ||
+                !readU64(payload, offset, highLength) ||
+                lowLength > std::numeric_limits<size_t>::max() ||
+                highLength > std::numeric_limits<size_t>::max() ||
+                offset > payload.size() ||
+                lowLength > payload.size() - offset ||
+                highLength > payload.size() - offset -
+                                 static_cast<size_t>(lowLength)) {
+                return false;
+            }
+            entry.low.assign(payload.data() + offset,
+                             static_cast<size_t>(lowLength));
+            offset += static_cast<size_t>(lowLength);
+            entry.high.assign(payload.data() + offset,
+                              static_cast<size_t>(highLength));
+            offset += static_cast<size_t>(highLength);
+            decoded.push_back(std::move(entry));
+        }
+    } catch (...) {
+        return false;
+    }
+    if (offset != payload.size()) return false;
+    entries = std::move(decoded);
+    return true;
+}
+
+
+// Decode only recognized, internally consistent versions. Both versioned
+// decoders publish entries after validating the complete frame; publish the
+// optional version only after that same success boundary.
+inline bool decode(std::string_view input, std::vector<Entry>& entries,
+                    uint32_t* version = nullptr) {
+    uint32_t decodedVersion = 0;
+    if (hasMagic(input)) {
+        if (!decodeV2(input, entries)) return false;
+        decodedVersion = kVersion;
+    } else if (hasMagicV3(input)) {
+        if (!decodeV3(input, entries)) return false;
+        decodedVersion = kVersionV3;
+    } else {
+        return false;
+    }
+    if (version) *version = decodedVersion;
+    return true;
+}
+
 }  // namespace dbms::gist_index_format

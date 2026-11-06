@@ -367,8 +367,10 @@ void verifyIndexes(StorageEngine& engine, const Model& model, const Heap& physic
       while (std::getline(input, line)) { std::istringstream item(line); std::string key; int64_t rid; if (!(item >> key)) continue; while (item >> rid) fti[key].push_back(rid); } }
     std::vector<gist_index_format::Entry> gist;
     const auto gistBytes = bytes(root() / "am_txt.gist");
-    const bool gistValid = checkedCrc(gistBytes) && gist_index_format::decodeV2(gistBytes, gist);
-    need(gistValid, "actual GiST full encoded frame and independent CRC");
+    uint32_t gistVersion = 0;
+    const bool gistValid = checkedCrc(gistBytes) &&
+        gist_index_format::decode(gistBytes, gist, &gistVersion) && gistVersion == 3;
+    need(gistValid, "actual current GiST V3 full encoded frame and independent CRC");
     std::vector<spgist_index_format::Entry> points;
     const auto pointBytes = bytes(root() / "am_p.spgist");
     const bool pointValid = checkedCrc(pointBytes) && spgist_index_format::decodeV2(pointBytes, points);
@@ -382,13 +384,16 @@ void verifyIndexes(StorageEngine& engine, const Model& model, const Heap& physic
             need(contains(engine.ginSearch(db, table, "txt", "alpha"), rid), "GIN native candidate contains every true match");
         }
         if (row.text) {
-            // Empty text is intentionally checked through the actual native
-            // lossy receiver. Encoding's separate known-positive diagnostic
-            // is not silently relabelled as repaired by this coverage check.
+            // The original native lossy inclusion remains checked; V3 also
+            // must physically encode each real non-NULL key, including empty.
             need(contains(engine.giSTSearchOverlap(db, table, "txt", *row.text, *row.text), rid), "GiST lossy native receiver includes all true matches, including empty text");
-            if (!row.text->empty()) need(gistValid && std::any_of(gist.begin(), gist.end(), [&](const auto& entry) {
+            need(gistValid && std::any_of(gist.begin(), gist.end(), [&](const auto& entry) {
                 return entry.rid == uint64_t(rid) && entry.low == *row.text && entry.high == *row.text;
-            }), "GiST nonempty encoded actual value and real RID");
+            }), "GiST V3 encoded actual non-NULL value, including empty, and real RID");
+        } else {
+            need(gistValid && std::none_of(gist.begin(), gist.end(), [&](const auto& entry) {
+                return entry.rid == uint64_t(rid);
+            }), "GiST V3 excludes genuine physical NULL RID");
         }
         if (!row.pointNull) {
             need(pointValid && std::any_of(points.begin(), points.end(), [&](const auto& entry) {
@@ -633,7 +638,7 @@ int main() try {
     std::cout << "REINDEX_AM_KNOWN_GAP native_only_deleted_definition status=" << int(nativeStatus)
               << " physical_exists=" << g_engine.hasGinIndex(db, "native_only", "txt")
               << " declaration_authority=absent classification=NOT_A_PASS\n";
-    std::cout << "REINDEX_AM_SCOPE gist_empty_encoded=SEPARATE_STRICT_DIAGNOSTIC native_lossy_empty=CHECKED"
+    std::cout << "REINDEX_AM_SCOPE gist_empty_encoded=STRICT_V3_REAL_RID_NULL_EXCLUSION native_lossy_empty=CHECKED"
                  " lost_reloptions=EXPLICIT_64_7_FALLBACK no_am_family_closure\n";
     std::cout << "REINDEX_ACCESS_METHODS checks=" << checks << " cases=" << cases << " failures=" << failures << '\n';
     return failures ? 1 : 0;

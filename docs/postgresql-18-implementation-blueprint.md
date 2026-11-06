@@ -1,5 +1,22 @@
 # DBMS_C_plus_plus 对标 PostgreSQL 18.6：逐项完整实施蓝图
 
+<!-- CURRENT_GIST_EMPTY_BOUNDS_20261106 -->
+
+## GiST 空字符串、边界与 LIKE 检索（2026-11-06，P26-C4）
+
+当前物理heap格式的存储列构建/REINDEX会写GiST V3，覆盖真实非NULL空字符串；NULL仍由真实位图区分。V2编码本来允许零长度，缺陷在旧producer省略空键，V3标记新的覆盖保证。旧V2/文本文件继续严格读取；无法证明覆盖、CRC、文件归属或可见性时交回原堆来源。有限空端点、缺失端点、严格/非严格边界和字面DEL分别表示；最终完整谓词、MVCC、NULL及TOAST仍检查。
+
+LIKE必要字节前缀使用单独的tryGiSTSearchLikePrefix，保留原pattern/escape角色；默认locale下不把字节前缀的权限推广到SQL标量比较。无有效Unicode上界时保留无上界，避免DEL哨兵截断。普通EXPLAIN的>=空串不再独立触发全宽索引遍历；JSON usedIndex仅在真实索引候选读取成功时为true。
+
+实现依据分别保留固定版本的[PostgreSQL btree_gist源码](https://raw.githubusercontent.com/postgres/postgres/724edf9bde9d356724ad384a2e196edc3c9f80f7/contrib/btree_gist/btree_utils_var.c)、[PG text consistent](https://raw.githubusercontent.com/postgres/postgres/724edf9bde9d356724ad384a2e196edc3c9f80f7/contrib/btree_gist/btree_text.c)、[SQLite记录格式](https://www.sqlite.org/fileformat2.html#record_format)和[DuckDB ART键实现](https://raw.githubusercontent.com/duckdb/duckdb/d1dc88f950d456d72493df452dabdcd13aa413dd/src/execution/index/art/art_key.cpp)。空数据、NULL、端点存在性分别处理；PG btree_gist的text叶项可精确判断，不将PG全部GiST称为有损。23份官方源码/许可证与研究行锚随归档保存；研究不是运行验收。
+
+下一步仍需实现真正分页树/AM与opclass身份、维护/WAL/并发完整协议，改造关系身份驱动的文件命名，并依据真实维护与查询成本选择访问路径。完整树、KNN、统一opclass和全部PG行为不因空键修复而完成；暂缓项目保持原范围。
+
+本地GiST仍是flat sidecar，每次候选检索完整校验文件，并非PG的分页GiST树、opclass/KNN/WAL/concurrent全功能。虚拟键仍保留旧覆盖来源；native-only丢失定义、虚拟Bloom NEW NULL、既有missing-memory协议失败及其不完整旧版配对仍开放。下划线文件名歧义现在安全回堆，物理文件命名/关系身份布局仍需后续改造。原用户暂缓范围保持，Goal active；本批为partial。
+
+实际运行与全部成本见[本轮报告](performance-report-2026-10-30.md#gist-empty-bounds-20261106)。以下 P25 及更早段落均保留当时的实现、计数和未完事项；本轮状态以本节为准。
+
+
 <!-- CURRENT_REINDEX_ACCESS_METHODS_20261106 -->
 
 ## 普通访问方法 REINDEX 与空文本生命周期（2026-11-06）

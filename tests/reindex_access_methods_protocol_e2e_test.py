@@ -167,12 +167,13 @@ def main():
                       'current Bloom format and actual configuration', phase=phase,
                       actual_hashes=actual_hashes, expected_hashes=hashes)
             elif path.suffix in ('.gin', '.gist', '.spgist'):
-                marker = {'.gin': b'\0DBMSG\0002', '.gist': b'\0DBMSS\0002', '.spgist': b'\0DBMSP\0002'}[path.suffix]
+                marker = {'.gin': b'\0DBMSG\0002', '.gist': b'\0DBMSS\0003', '.spgist': b'\0DBMSP\0002'}[path.suffix]
                 version, count = struct.unpack_from('<IQ', raw, 8)
-                record['entries'] = count
-                check(raw[:8] == marker and version == 2 and count > 0,
+                expected_version = 3 if path.suffix == '.gist' else 2
+                record.update(entries=count, version=version)
+                check(raw[:8] == marker and version == expected_version and count > 0,
                       'current nonempty AM frame', phase=phase, name=path.name)
-                if raw[:8] != marker or version != 2 or count > max(0, len(raw)-24)//24:
+                if raw[:8] != marker or version != expected_version or count > max(0, len(raw)-24)//24:
                     raise ValueError('invalid AM header or bounded entry count')
                 position = 20
                 if path.suffix == '.spgist':

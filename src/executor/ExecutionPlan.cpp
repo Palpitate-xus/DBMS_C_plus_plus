@@ -2086,7 +2086,8 @@ public:
 // Only immutable literal cells and the binder's implicit primitive coercion
 // envelope are inspected. Explicit CAST, functions and retained parameters
 // keep their existing demand/owner and are never evaluated by this planner.
-static std::optional<std::string> brinLiteralInput(const Expr* expression) {
+static std::optional<std::string> brinLiteralInput(const Expr* expression,
+    std::string* literalType = nullptr) {
     while (const auto* cast = dynamic_cast<const CastExpr*>(expression)) {
         if (!cast->implicit || !cast->typeMods.empty() || cast->preparedSubquery) return {};
         expression = cast->operand.get();
@@ -2104,6 +2105,7 @@ static std::optional<std::string> brinLiteralInput(const Expr* expression) {
         ExprEvaluator evaluator;
         const auto value = evaluator.eval(literal, RowContext{});
         if (value.isNull) return {};
+        if (literalType) *literalType = value.typeName;
         if (!negate) return value.value;
         const auto type = ExprHelper::canonicalResultTypeName(value.typeName);
         if (type != "smallint" && type != "integer" && type != "bigint" &&
@@ -2435,8 +2437,8 @@ static bool densePrefixPrefersHeap(StorageEngine* engine, const std::string& dat
 
 static OpPtr literalLikeTableSource(StorageEngine* engine, const std::string& database,
     const std::shared_ptr<PreparedQuery>& query, const SelectStmt* select,
-    const TableSchema& schema, Operator* source) {
-    const auto* physical = dynamic_cast<const TableScanOp*>(source);
+    const TableSchema& schema, OpPtr& source) {
+    const auto* physical = dynamic_cast<const TableScanOp*>(source.get());
     if (!physical || !query->parameters.empty() || !select->whereClause ||
         !select->fromClause || select->fromClause->type != FromItem::Type::Table ||
         schema.partitionType != TableSchema::PartitionType::None)
@@ -2496,13 +2498,155 @@ static OpPtr literalLikeTableSource(StorageEngine* engine, const std::string& da
             !engine->hasGiSTIndex(database, table, key.dataName)) continue;
         if (densePrefixPrefersHeap(engine, database, table, key.dataName, *prefix))
             continue;
-        std::vector<StorageEngine::Condition> bounds;
-        bounds.push_back({">=", key.dataName, *prefix});
-        bounds.push_back({"<", key.dataName,
-            planner_pattern::prefixCeiling(*prefix).value_or("\x7f")});
+        // Preserve the LIKE role as well as its decoded immutable values.
+        // Default-locale pattern prefixes use bytes; ordinary comparison
+        // bounds must retain their independent SQL collation admission.
+        StorageEngine::Condition patternCondition;
+        patternCondition.op = "like";
+        patternCondition.colName = key.dataName;
+        patternCondition.value = *pattern;
+        patternCondition.patternType = "text";
+        patternCondition.patternEscape = *escapeValue;
+        patternCondition.patternEscapeType = "text";
+        patternCondition.decodedLiteralRhs = true;
+        std::vector<StorageEngine::Condition> bounds{std::move(patternCondition)};
         // The existing PreparedFilter remains above this candidate source;
         // it owns the original LIKE, residual expressions and NULL semantics.
-        return std::make_unique<GiSTScanOp>(engine, database, table, bounds);
+        return std::make_unique<GiSTScanOp>(engine, database, table, bounds,
+            std::optional<TableSchema>(schema), std::move(source));
+    }
+    return {};
+}
+
+// Candidate narrowing only: the original PreparedFilter still owns every
+// predicate and its demand. No index contents are read while choosing this
+// source, and the real physical source moves only after all admission checks.
+static OpPtr literalGiSTTableSource(StorageEngine* engine, const std::string& database,
+    const std::shared_ptr<PreparedQuery>& query, const SelectStmt* select,
+    const TableSchema& schema, OpPtr& source) {
+    const auto* physical = dynamic_cast<const TableScanOp*>(source.get());
+    if (!physical || !query->parameters.empty() || !select->whereClause ||
+        !select->fromClause || select->fromClause->type != FromItem::Type::Table ||
+        schema.partitionType != TableSchema::PartitionType::None)
+        return {};
+    const auto table = physical->tableName();
+    if (engine->rlsAppliesTo(database, table) ||
+        !engine->getInheritedChildren(database, table).empty()) return {};
+
+    std::vector<const Expr*> conjuncts;
+    const auto gather = [&](const auto& self, const Expr* expression) -> void {
+        const auto* binary = dynamic_cast<const BinaryOpExpr*>(expression);
+        if (binary && binary->op == "AND") {
+            self(self, binary->left.get());
+            self(self, binary->right.get());
+        } else conjuncts.push_back(expression);
+    };
+    gather(gather, select->whereClause.get());
+    struct ColumnBounds {
+        size_t ordinal;
+        std::vector<StorageEngine::Condition> conditions;
+        bool useful = false;
+    };
+    std::vector<ColumnBounds> columns;
+    for (const auto* expression : conjuncts) {
+        const auto* binary = dynamic_cast<const BinaryOpExpr*>(expression);
+        if (!binary || (binary->op != "=" && binary->op != "<" &&
+            binary->op != "<=" && binary->op != ">" && binary->op != ">="))
+            continue;
+        const auto* column = dynamic_cast<const ColumnRefExpr*>(binary->left.get());
+        const Expr* input = binary->right.get();
+        std::string op = binary->op;
+        if (!column) {
+            column = dynamic_cast<const ColumnRefExpr*>(binary->right.get());
+            input = binary->left.get();
+            if (op == "<") op = ">";
+            else if (op == "<=") op = ">=";
+            else if (op == ">") op = "<";
+            else if (op == ">=") op = "<=";
+        }
+        if (!column || !column->binding || column->binding->scopeDepth ||
+            column->binding->mergedUsing ||
+            column->binding->columnOrdinal >= schema.len) continue;
+        bool sameRange = false;
+        for (const auto& range : query->sourceRanges)
+            if (range.owner == select && range.source == select->fromClause.get() &&
+                range.ordinal == column->binding->sourceOrdinal) sameRange = true;
+        const auto ordinal = column->binding->columnOrdinal;
+        const auto& key = schema.cols[ordinal];
+        const auto& declaration = column->binding->typeMetadata;
+        const auto type = ExprHelper::canonicalResultTypeName(key.dataType);
+        // The default text locale is not byte ordered even though an empty
+        // Column::collation leaves resolvedCollationIsBinary at its default.
+        if (!sameRange || key.isArray || key.isUnsigned || key.generatedKind ||
+            !key.domainName.empty() || !key.enumValues.empty() ||
+            (type != "text" && type != "character varying") ||
+            ExprHelper::canonicalResultTypeName(column->binding->declaredType) != type ||
+            !declaration || declaration->kind != DatumKind::Scalar || declaration->enumType ||
+            declaration->actualOid != declaration->codecOid ||
+            declaration->actualOid != (type == "text" ? 25u : 1043u) ||
+            key.collation.empty() || !key.resolvedCollationIsBinary ||
+            key.resolvedCollationUsesLocale ||
+            !engine->hasGiSTIndex(database, table, key.dataName)) continue;
+        try {
+            const auto role = ExprEvaluator::resolveComparison(binary->op, type, type);
+            if (!role.strict || role.identity.rfind("builtin-comparison:", 0) != 0)
+                continue;
+            if (binary->comparison) {
+                const auto& bound = *binary->comparison;
+                if (!bound.strict || bound.identity != role.identity ||
+                    bound.op != role.op || bound.leftType != role.leftType ||
+                    bound.rightType != role.rightType || bound.enumTypeOid ||
+                    !bound.enumLabels.empty() || !bound.collation.empty()) continue;
+            }
+        } catch (const DbError& error) {
+            if (error.sqlState() == "42883") continue;
+            throw;
+        }
+        // Only binder-owned primitive text coercion envelopes are safe to
+        // inspect. A domain/qualified/other target is opaque even if the
+        // original leaf happens to be a string literal.
+        bool primitiveEnvelope = true;
+        for (const Expr* envelope = input; envelope;) {
+            const auto* cast = dynamic_cast<const CastExpr*>(envelope);
+            if (!cast) break;
+            if (!cast->implicit || !cast->typeMods.empty() || cast->preparedSubquery ||
+                (cast->typeName != "text" && cast->typeName != "varchar" &&
+                 cast->typeName != "character varying")) {
+                primitiveEnvelope = false;
+                break;
+            }
+            envelope = cast->operand.get();
+        }
+        if (!primitiveEnvelope) continue;
+        // Reuse the existing immutable-literal decoder once. Its actual
+        // output type prevents numeric/boolean bytes from becoming text
+        // bounds; explicit CAST/functions/parameters/children remain opaque.
+        std::string literalType;
+        const auto value = brinLiteralInput(input, &literalType);
+        const auto canonicalLiteral = ExprHelper::canonicalResultTypeName(literalType);
+        if (!value || (canonicalLiteral != "text" &&
+                       canonicalLiteral != "character varying")) continue;
+        auto found = std::find_if(columns.begin(), columns.end(),
+            [&](const ColumnBounds& candidate) { return candidate.ordinal == ordinal; });
+        if (found == columns.end()) {
+            columns.push_back({ordinal, {}, false});
+            found = std::prev(columns.end());
+        }
+        StorageEngine::Condition condition;
+        condition.op = op;
+        condition.colName = key.dataName;
+        condition.value = *value;
+        condition.decodedLiteralRhs = true;
+        found->conditions.push_back(std::move(condition));
+        // Do not select a stand-alone >= empty bound that retains every
+        // non-NULL byte string. A later upper/equality/strict bound on this
+        // same column still makes the combined candidate worth considering.
+        found->useful = found->useful || op != ">=" || !value->empty();
+    }
+    for (auto& column : columns) {
+        if (!column.useful) continue;
+        return std::make_unique<GiSTScanOp>(engine, database, table,
+            column.conditions, std::optional<TableSchema>(schema), std::move(source));
     }
     return {};
 }
@@ -2512,8 +2656,10 @@ OpPtr makePreparedTableSource(StorageEngine* engine, const std::string& database
     const TableSchema& schema, OpPtr source) {
     if (auto narrowed = literalBrinTableSource(engine, database, query, select, schema, source))
         return narrowed;
+    if (auto narrowed = literalGiSTTableSource(engine, database, query, select, schema, source))
+        return narrowed;
     if (auto narrowed = literalLikeTableSource(engine, database, query, select,
-                                               schema, source.get()))
+                                               schema, source))
         return narrowed;
     const auto* physical = dynamic_cast<const TableScanOp*>(source.get());
     const auto* equality = dynamic_cast<const BinaryOpExpr*>(select->whereClause.get());
@@ -4701,10 +4847,31 @@ void BitmapHeapScanOp::close() {
 // GiSTScanOp
 // ========================================================================
 
+static std::string gistScanSchemaShape(const TableSchema& schema) {
+    std::string out;
+    const auto field = [&](const std::string& text) { out += std::to_string(text.size())+":"+text; };
+    field(std::to_string(schema.physicalRelationId)); field(std::to_string(schema.formatVersion));
+    field(std::to_string(schema.len));
+    for (size_t i = 0; i < schema.len; ++i) {
+        const auto& c = schema.cols[i];
+        for (const auto& text : {c.dataName,c.dataType,c.domainName,c.collation,c.resolvedCollation,c.generatedExpr}) field(text);
+        for (const auto n : {int64_t(c.dsize),int64_t(c.typeMod),int64_t(c.storageCodec),int64_t(c.isArray),int64_t(c.isNull),int64_t(c.generatedKind),int64_t(c.isUnsigned)}) field(std::to_string(n));
+        field(std::to_string(c.enumValues.size()));
+        field(std::to_string(c.resolvedCollationIsBinary)); field(std::to_string(c.resolvedCollationUsesLocale));
+        for (const auto& value : c.enumValues) field(value);
+    }
+    return out;
+}
+
 GiSTScanOp::GiSTScanOp(StorageEngine* engine, const std::string& dbname,
                        const std::string& tablename,
-                       const std::vector<StorageEngine::Condition>& conds)
-    : engine_(engine), dbname_(dbname), tablename_(tablename), conds_(conds) {}
+                       const std::vector<StorageEngine::Condition>& conds,
+                       std::optional<TableSchema> plannedSchema, OpPtr fallback)
+    : engine_(engine), dbname_(dbname), tablename_(tablename),
+      plannedShape_(plannedSchema ? gistScanSchemaShape(*plannedSchema) : std::string{}),
+      fallback_(std::move(fallback)), conds_(conds) {
+    if (!fallback_) fallback_ = std::make_unique<TableScanOp>(engine, dbname, tablename);
+}
 
 std::string GiSTScanOp::describeConds() const {
     std::string out;
@@ -4716,149 +4883,134 @@ std::string GiSTScanOp::describeConds() const {
 }
 
 bool GiSTScanOp::open() {
-    auto& lockManager = engine_->getLockManager();
-    lockManager.setResourceNamespace(dbname_);
-    if (!lockManager.lockShared(tablename_)) {
-        throw DbError("55P03", "could not obtain lock on relation \"" +
-            tablename_ + "\"");
-    }
+    if (opened_) close();
+    OpenInstrument instrumentation(this);
+    clearError();
+    opened_ = true;
+    fallbackOpen_ = false;
+    usedIndex_ = false;
+    statsRecorded_ = false;
+    rids_.clear(); rows_.clear(); pos_ = 0; lastRid_ = 0;
+    auto& locks = engine_->getLockManager();
+    locks.setResourceNamespace(dbname_);
+    if (!locks.lockShared(tablename_))
+        throw DbError("55P03", "could not obtain lock on relation \"" + tablename_ + "\"");
     tableLockHeld_ = true;
     tbl_ = engine_->getTableSchema(dbname_, tablename_);
-    rids_.clear();
-    rows_.clear();
-    pos_ = 0;
-    lastRid_ = 0;
-
     engine_->noteQuerySnapshot();
-    const auto beforeFence = engine_->indexReadSnapshotFence(dbname_);
-    // Fold the GiST-servable predicates into [lo, hi] bounds on the
-    // indexed column.  Mixed-column predicates stay in FilterOp; this node
-    // only takes over when at least one bound is known.
-    std::string lo, hi;
-    bool haveLo = false, haveHi = false;
-    std::string loCol, hiCol;
-    for (const auto& c : conds_) {
-        const bool isRange = c.op == "<" || c.op == "<=" || c.op == ">" || c.op == ">=";
-        if (!isRange) continue;
-        if (c.op == ">" || c.op == ">=") {
-            if (haveLo) continue;  // narrowest wins is FilterOp's job
-            lo = c.value;
-            if (c.op == ">") {
-                // exclusive: keep the boundary but note the recheck above
-                // still enforces strictness; overlap widening is safe.
-            }
-            haveLo = true;
-            loCol = c.colName;
-        } else {
-            if (haveHi) continue;
-            hi = c.value;
-            haveHi = true;
-            hiCol = c.colName;
-        }
-    }
-    // Both bounds must target the same GiST-indexed column.
-    std::string gistCol;
-    const auto gistColumns = engine_->getGiSTIndexedColumns(dbname_, tablename_);
-    auto isGist = [&](const std::string& col) {
-        return std::find(gistColumns.begin(), gistColumns.end(), col) != gistColumns.end();
+    const auto openHeap = [&]() {
+        fallbackOpen_ = true;
+        return fallback_->open() || propagateChildError(fallback_.get(), "GiST heap fallback failed");
     };
-    if (haveLo && haveHi && loCol == hiCol && isGist(loCol)) gistCol = loCol;
-    else if (haveLo && isGist(loCol)) gistCol = loCol;
-    else if (haveHi && isGist(hiCol)) gistCol = hiCol;
-
-    bool probedIndex = false;
-    if (!gistCol.empty()) {
-        // Missing side: use the widest possible bound.  The sidecar compares
-        // textually, so an empty lo is below every key and a high sentinel
-        // is above every ASCII key.
-        const std::string overlapLo = haveLo ? lo : "";
-        const std::string overlapHi = haveHi ? hi : "\x7f";
-        rids_ = engine_->giSTSearchOverlap(dbname_, tablename_, gistCol,
-                                           overlapLo, overlapHi);
-        probedIndex = true;
-    } else {
-        // Text-prefix predicate: LIKE 'prefix%' via the GiST containment
-        // style (entry low <= prefix <= entry high is replaced by the
-        // overlap with [prefix, prefix + sentinel]).
-        for (const auto& c : conds_) {
-            const auto prefix = nativeLikePrefix(c, tbl_);
+    if ((!plannedShape_.empty() && plannedShape_ != gistScanSchemaShape(tbl_)) ||
+        tbl_.partitionType != TableSchema::PartitionType::None ||
+        engine_->rlsAppliesTo(dbname_, tablename_) ||
+        !engine_->getInheritedChildren(dbname_, tablename_).empty()) return openHeap();
+    const auto beforeFence = engine_->indexReadSnapshotFence(dbname_);
+    if (!beforeFence) return openHeap();
+    const auto gistColumns = engine_->getGiSTIndexedColumns(dbname_, tablename_);
+    const auto isGist = [&](const std::string& column) {
+        return std::find(gistColumns.begin(), gistColumns.end(), column) != gistColumns.end();
+    };
+    const auto literalRhs = [&](const StorageEngine::Condition& condition) {
+        return condition.decodedLiteralRhs || !std::any_of(tbl_.cols, tbl_.cols + tbl_.len,
+            [&](const auto& column) { return column.dataName == condition.value; });
+    };
+    StorageEngine::GiSTBounds bounds;
+    std::string column;
+    std::optional<std::string> likePrefix;
+    for (const auto& condition : conds_) {
+        const auto& op = condition.op;
+        if ((op != "=" && op != "<" && op != "<=" && op != ">" && op != ">=") ||
+            !isGist(condition.colName) || !literalRhs(condition)) continue;
+        if (column.empty()) column = condition.colName;
+        if (condition.colName != column) continue;
+        // Presence, strictness and datum bytes remain separate. Other
+        // columns and any further conjuncts stay with the original filter.
+        if ((op == "=" || op == ">" || op == ">=") && !bounds.low)
+            bounds.low = StorageEngine::GiSTBound{condition.value, op != ">"};
+        if ((op == "=" || op == "<" || op == "<=") && !bounds.high)
+            bounds.high = StorageEngine::GiSTBound{condition.value, op != "<"};
+    }
+    if (column.empty()) {
+        for (const auto& condition : conds_) {
+            if (!isGist(condition.colName)) continue;
+            const auto prefix = nativeLikePrefix(condition, tbl_);
             if (!prefix) continue;
-            if (!isGist(c.colName)) continue;
-            rids_ = engine_->giSTSearchOverlap(dbname_, tablename_, c.colName,
-                *prefix, planner_pattern::prefixCeiling(*prefix).value_or("\x7f"));
-            probedIndex = true;
+            column = condition.colName;
+            likePrefix = *prefix;
             break;
         }
     }
-
-    const auto afterFence = engine_->indexReadSnapshotFence(dbname_);
-    const bool usedIndex = probedIndex && beforeFence && afterFence && *beforeFence == *afterFence;
-    if (!usedIndex && !collectVisibleHeapCandidates(engine_, dbname_, tablename_, rids_)) {
-        setError("snapshot gist heap fallback failed");
-        return false;
-    }
-    const size_t heapCandidates = rids_.size();
+    if (column.empty()) return openHeap();
+    auto candidates = likePrefix
+        ? engine_->tryGiSTSearchLikePrefix(dbname_, tablename_, column, *likePrefix)
+        : engine_->tryGiSTSearchOverlap(dbname_, tablename_, column, bounds);
+    if (!candidates || engine_->indexReadSnapshotFence(dbname_) != beforeFence) return openHeap();
+    usedIndex_ = true;
+    rids_ = std::move(*candidates);
     bool readFailed = false;
-    std::vector<int64_t> visibleRids;
-    visibleRids.reserve(rids_.size());
-    for (int64_t rid : rids_) {
+    std::vector<int64_t> visible;
+    visible.reserve(rids_.size());
+    for (const auto rid : rids_) {
         std::string row;
-        if (!engine_->readIndexedRowByRid(dbname_, tablename_, rid, row, tbl_, nullptr,
-                                          &readFailed)) {
-            if (readFailed) {
-                rows_.clear();
-                setError("gist heap fetch failed");
-                return false;
-            }
-            continue;  // concurrently removed row: not visible, skip
+        if (!engine_->readIndexedRowByRid(dbname_, tablename_, rid, row, tbl_, nullptr, &readFailed)) {
+            if (readFailed) { rows_.clear(); setError("GiST heap fetch failed"); return false; }
+            continue;
         }
         bool toastOk = false;
         row = engine_->resolveToastValues(dbname_, tablename_, row, tbl_, &toastOk);
-        if (!toastOk) {
-            rows_.clear();
-            setError("TOAST value read failed");
-            return false;
-        }
-        rows_.push_back(std::move(row));
-        visibleRids.push_back(rid);
+        if (!toastOk) { rows_.clear(); setError("TOAST value read failed"); return false; }
+        rows_.push_back(std::move(row)); visible.push_back(rid);
     }
-    rids_ = std::move(visibleRids);
-    pos_ = 0;
+    rids_ = std::move(visible);
     if (!statsRecorded_) {
-        recordTableScan(dbname_, tablename_, usedIndex ? rows_.size() : heapCandidates,
-                        usedIndex, !usedIndex);
+        recordTableScan(dbname_, tablename_, rows_.size(), true, false);
         statsRecorded_ = true;
     }
     return true;
 }
 
 bool GiSTScanOp::next(std::string& outRow) {
-    NextInstrument rtInstr_(this);  // EXPLAIN ANALYZE per-node stats
-    if (pos_ >= rows_.size()) return false;
-    lastRid_ = rids_[pos_];
-    outRow = rows_[pos_++];
-    StorageEngine::bindNullRow(
-        engine_, dbname_, tablename_, lastRid_, tbl_.len);
-    rtInstr_.emitted = true;
+    NextInstrument instrumentation(this);
+    if (fallbackOpen_) {
+        if (!fallback_->next(outRow)) {
+            if (fallback_->hasError()) return propagateChildError(fallback_.get(), "GiST heap fallback failed");
+            return false;
+        }
+    } else {
+        if (pos_ >= rows_.size()) return false;
+        lastRid_ = rids_[pos_]; outRow = rows_[pos_++];
+        StorageEngine::bindNullRow(engine_, dbname_, tablename_, lastRid_, tbl_.len);
+    }
+    instrumentation.emitted = true;
     return true;
 }
 
-bool GiSTScanOp::lastColumnIsNull(size_t colIdx) const {
-    return lastRid_ > 0 && colIdx < tbl_.len &&
-        engine_->isColumnNullByRid(dbname_, tablename_, lastRid_, colIdx);
+bool GiSTScanOp::lastColumnIsNull(size_t ordinal) const {
+    if (fallbackOpen_) return fallback_->lastColumnIsNull(ordinal);
+    return lastRid_ > 0 && ordinal < tbl_.len &&
+        engine_->isColumnNullByRid(dbname_, tablename_, lastRid_, ordinal);
+}
+
+bool GiSTScanOp::lastStoredNullBitmap(std::vector<bool>& nulls) const {
+    return fallbackOpen_ && fallback_->lastStoredNullBitmap(nulls);
 }
 
 void GiSTScanOp::close() {
-    rids_.clear();
-    rows_.clear();
-    pos_ = 0;
-    lastRid_ = 0;
-    StorageEngine::unbindNullRow();
-    statsRecorded_ = false;
+    if (!opened_) return;
+    opened_ = false;
+    std::exception_ptr error;
+    try { if (fallbackOpen_) fallback_->close(); } catch (...) { error = std::current_exception(); }
+    fallbackOpen_ = false;
+    rids_.clear(); rows_.clear(); pos_ = 0; lastRid_ = 0;
+    StorageEngine::unbindNullRow(); statsRecorded_ = false;
     if (tableLockHeld_) {
-        engine_->getLockManager().unlock(tablename_);
         tableLockHeld_ = false;
+        engine_->getLockManager().setResourceNamespace(dbname_);
+        engine_->getLockManager().unlock(tablename_);
     }
+    if (error) std::rethrow_exception(error);
 }
 
 // ========================================================================
@@ -8767,9 +8919,24 @@ static bool canUseGiSTScan(PlanningRelationMetadata& relation) {
         return std::find(columns.begin(), columns.end(), col) != columns.end();
     };
     for (const auto& condition : relation.context.conds) {
+        // A binary text >= empty probe keeps every non-NULL key. It is
+        // not an independent reason to replace the heap with a full index
+        // traversal. Other useful conjuncts can still select this source.
+        if (condition.op == ">=" && condition.value.empty()) {
+            const auto* end = relation.table.cols + relation.table.len;
+            const auto* key = std::find_if(relation.table.cols, end,
+                [&](const auto& c) { return c.dataName == condition.colName; });
+            if (key != end && !key->isArray && key->domainName.empty() &&
+                key->enumValues.empty() && !key->collation.empty() &&
+                key->resolvedCollationIsBinary && !key->resolvedCollationUsesLocale) {
+                const auto type = ExprHelper::canonicalResultTypeName(key->dataType);
+                if (type == "text" || type == "character varying") continue;
+            }
+        }
         const bool isRange = condition.op == "<" || condition.op == "<=" ||
                              condition.op == ">" || condition.op == ">=";
-        if (isRange && isGist(condition.colName)) return true;
+        if ((isRange || (condition.op == "=" && !relation.hasEqualityIndex(condition))) &&
+            isGist(condition.colName)) return true;
         if (const auto prefix = nativeLikePrefix(condition, relation.table);
             prefix && isGist(condition.colName) &&
             !densePrefixPrefersHeap(relation.engine, relation.context.dbname,
@@ -10395,6 +10562,7 @@ static std::pair<std::string, CostEstimate> explainOpJson(Operator* op,
         est.cost = est.rows * 3.0;
         json += "\"nodeType\":\"GiSTScan\",";
         json += "\"table\":\"" + jsonEscape(gist->tableName()) + "\",";
+        json += "\"usedIndex\":" + std::string(gist->usedIndex() ? "true" : "false") + ",";
         json += "\"indexCond\":\"" + jsonEscape(gist->describeConds()) + "\",";
         json += jsonCostRows(est, opts);
         json += "\"children\":[]";

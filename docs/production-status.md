@@ -1,5 +1,24 @@
 # 生产化状态
 
+<!-- CURRENT_GIST_EMPTY_BOUNDS_20261106 -->
+
+## GiST 空字符串、边界与 LIKE 检索（2026-11-06，P26-C4）
+
+当前物理heap格式的存储列构建/REINDEX会写GiST V3，覆盖真实非NULL空字符串；NULL仍由真实位图区分。V2编码本来允许零长度，缺陷在旧producer省略空键，V3标记新的覆盖保证。旧V2/文本文件继续严格读取；无法证明覆盖、CRC、文件归属或可见性时交回原堆来源。有限空端点、缺失端点、严格/非严格边界和字面DEL分别表示；最终完整谓词、MVCC、NULL及TOAST仍检查。
+
+LIKE必要字节前缀使用单独的tryGiSTSearchLikePrefix，保留原pattern/escape角色；默认locale下不把字节前缀的权限推广到SQL标量比较。无有效Unicode上界时保留无上界，避免DEL哨兵截断。普通EXPLAIN的>=空串不再独立触发全宽索引遍历；JSON usedIndex仅在真实索引候选读取成功时为true。
+
+最终C4普通CMake C++17/O2构建退出0。格式组件O2与ASan/UBSan（含泄漏检测）各8434检查；现有API生命周期2879检查及独立进程冷启183检查通过；typed接口806检查/9组/68探测全部目标堆fetch为0，并有4次真实堆fetch正控制；文件归属冲突四个语义探针通过。17个有限native入口（其中2个新、15个旧）和6个旧协议入口全部正常0；迁移后的all-AM native实际12168检查/17场景，恢复实际3579检查/18workers（5次预期SIGKILL、13次正常0，36份完整输出及真实marker/event保留）。新协议120条命令、15个索引图像记录及六阶段真实heap RID/NULL见证通过，含正常双进程冷启。
+
+真实PG18.6安装并加载btree_gist后重放75条共享SQL；最终C4逐项比较3231行/19382单元（661个NULL）、248列描述符的1736个元数据字段。75/75语义及描述符一致，73/75完整帧一致；两次DELETE本项目额外发送零字段T，PG只发CZ，严格全协议通过仍为false。两端关系OID各由真实目录锚定；PG正常退出、PID已回收，未比较PG访问方法格式、路径或速度。
+
+当前清单为2383个测试文件：原2378中2374份逐字保持，4份只迁移当前GiST格式断言并加强V2兼容/空串真实RID检查，另增4个CPP及1个协议测试。顶层CPP1119（含链接桩）、全部CPP1124/其中子目录5；登记681个driver/661个独立E2E。源248/头177，754份Markdown、725份保护记录保持；25份旧gzip逐字保持，新增第26份。原273项及22complete/166partial/70unverified/15用户暂缓状态、原276条历史逐字保持，仅prepend第277条partial。
+
+本地GiST仍是flat sidecar，每次候选检索完整校验文件，并非PG的分页GiST树、opclass/KNN/WAL/concurrent全功能。虚拟键仍保留旧覆盖来源；native-only丢失定义、虚拟Bloom NEW NULL、既有missing-memory协议失败及其不完整旧版配对仍开放。下划线文件名歧义现在安全回堆，物理文件命名/关系身份布局仍需后续改造。原用户暂缓范围保持，Goal active；本批为partial。
+
+完整性能、首次失败和证据见[本轮报告](performance-report-2026-10-30.md#gist-empty-bounds-20261106)。以下 P25 及更早段落均保留当时的实现、计数和未完事项；本轮状态以本节为准。
+
+
 <!-- CURRENT_REINDEX_ACCESS_METHODS_20261106 -->
 
 ## 普通访问方法 REINDEX 与空文本生命周期（2026-11-06）

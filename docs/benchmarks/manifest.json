@@ -253,8 +253,18 @@
       "sha256": "b87d7864171630c72b1b788165c7030c5156af3cd29cde3221ad20646a3fa702",
       "encoding": "gzip",
       "roundtrip_bytes_exact": true
+    },
+    {
+      "original_path": "docs/benchmarks/gist-empty-bounds-20261106.json",
+      "original_bytes": 225427127,
+      "original_sha256": "4d91ac9fcd6eb3a4132e0941f0590d48e9a1012ecff866f328a5abfa9a4ab360",
+      "path": "docs/benchmarks/gist-empty-bounds-20261106.json.gz",
+      "bytes": 15761403,
+      "sha256": "eb8e26b7570131ca430c09b9adacd93a837e2dc1ca6718cce4375add7fc1f639",
+      "encoding": "gzip",
+      "roundtrip_bytes_exact": true
     }
   ],
-  "total_original_bytes": 865822057,
-  "total_bytes": 95035944
+  "total_original_bytes": 1091249184,
+  "total_bytes": 110797347
 }

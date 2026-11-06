@@ -82,8 +82,11 @@ bool gistSidecarContains(const std::string& value) {
                                std::istreambuf_iterator<char>()};
     assert(!input.bad());
     std::vector<gist_index_format::Entry> entries;
-    if (gist_index_format::hasMagic(contents)) {
-        assert(gist_index_format::decodeV2(contents, entries));
+    if (gist_index_format::hasMagic(contents) ||
+        gist_index_format::hasMagicV3(contents)) {
+        uint32_t version = 0;
+        assert(gist_index_format::decode(contents, entries, &version));
+        assert(version == 3); // All actual builders in this fixture emit V3.
         return std::any_of(entries.begin(), entries.end(),
             [&](const auto& entry) {
                 return entry.low == value || entry.high == value;

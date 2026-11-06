@@ -412,13 +412,17 @@ class GiSTScanOp : public Operator {
 public:
     GiSTScanOp(StorageEngine* engine, const std::string& dbname,
                const std::string& tablename,
-               const std::vector<StorageEngine::Condition>& conds);
+               const std::vector<StorageEngine::Condition>& conds,
+               std::optional<TableSchema> plannedSchema = {}, OpPtr fallback = {});
+    ~GiSTScanOp() override { if (opened_) try { close(); } catch (...) {} }
 
     bool open() override;
     bool next(std::string& outRow) override;
     bool lastColumnIsNull(size_t colIdx) const override;
+    bool lastStoredNullBitmap(std::vector<bool>& nulls) const override;
     void close() override;
     ScanOrigin scanOrigin() const override {
+        if (fallbackOpen_) return fallback_->scanOrigin();
         ScanOrigin origin;
         origin.engine = engine_;
         origin.dbname = dbname_;
@@ -428,6 +432,13 @@ public:
     }
 
     const std::string& tableName() const { return tablename_; }
+    bool usedIndex() const { return usedIndex_; }
+    std::vector<Operator*> preparedPlanChildren() const override {
+        return fallbackOpen_ ? std::vector<Operator*>{fallback_.get()} : std::vector<Operator*>{};
+    }
+    std::vector<IOperator*> children() override {
+        return fallbackOpen_ ? std::vector<IOperator*>{fallback_.get()} : std::vector<IOperator*>{};
+    }
     // Human-readable predicate summary for EXPLAIN.
     std::string describeConds() const;
 
@@ -435,6 +446,8 @@ private:
     StorageEngine* engine_;
     std::string dbname_;
     std::string tablename_;
+    std::string plannedShape_;
+    OpPtr fallback_;
     std::vector<StorageEngine::Condition> conds_;
     TableSchema tbl_;
     std::vector<int64_t> rids_;
@@ -443,6 +456,9 @@ private:
     int64_t lastRid_ = 0;
     bool statsRecorded_ = false;
     bool tableLockHeld_ = false;
+    bool opened_ = false;
+    bool fallbackOpen_ = false;
+    bool usedIndex_ = false;
 };
 
 // BitmapHeapScan: intersect candidate RIDs from multiple equality indexes,

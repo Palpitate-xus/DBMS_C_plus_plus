@@ -2,6 +2,455 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-06 GiST empty keys, typed finite bounds and LIKE ordering ownership",
+      "gap_ids": [
+        "IDX-02",
+        "IDX-07",
+        "IDX-14",
+        "IDX-15"
+      ],
+      "status": "partial",
+      "evidence": [
+        "src/access/GiSTIndexFormat.h",
+        "src/commands/TableManage.cpp",
+        "src/commands/TableManage.h",
+        "src/executor/ExecutionPlan.cpp",
+        "src/executor/ExecutionPlan.h",
+        "scripts/build_common.sh",
+        "docs/performance-report-2026-10-30.md",
+        "docs/benchmarks/gist-empty-bounds-20261106.json.gz"
+      ],
+      "tests": [
+        "tests/gist_empty_key_protocol_e2e_test.py",
+        "tests/gist_empty_key_test.cpp",
+        "tests/gist_format_v3_test.cpp",
+        "tests/gist_owner_collision_test.cpp",
+        "tests/gist_typed_bounds_api_test.cpp",
+        "tests/gist_range_search_test.cpp",
+        "tests/reindex_access_methods_protocol_e2e_test.py",
+        "tests/reindex_access_methods_test.cpp",
+        "tests/specialized_index_dml_test.cpp"
+      ],
+      "verification": {
+        "implementation": "V3 physical nonNULL empty coverage; explicit bound presence/inclusivity; genuine index-only candidate optional with full original filter; separate LIKE prefix ordering; safe ambiguous filename fallback.",
+        "actual_receipts": [
+          {
+            "role": "format-component",
+            "path": "gist-format-component-v1/receipt-v1.json",
+            "sha256": "afb92bf57fb3227efa3aa0c8a9746ad32827fc1812ede6e3b9ea21ebc2b8b796",
+            "gates": [
+              {
+                "keys": [
+                  "complete"
+                ],
+                "equals": true
+              },
+              {
+                "keys": [
+                  "compile_exit"
+                ],
+                "equals": 0
+              },
+              {
+                "keys": [
+                  "run_exit"
+                ],
+                "equals": 0
+              }
+            ]
+          },
+          {
+            "role": "format-component-ASan-UBSan",
+            "path": "gist-format-component-asan-v1/receipt-v1.json",
+            "sha256": "d940fc466ae26feed7351dd7d1717749813f8d9a41b86d64d1ad83205c272277",
+            "gates": [
+              {
+                "keys": [
+                  "complete"
+                ],
+                "equals": true
+              },
+              {
+                "keys": [
+                  "compile",
+                  "exit"
+                ],
+                "equals": 0
+              },
+              {
+                "keys": [
+                  "run",
+                  "exit"
+                ],
+                "equals": 0
+              }
+            ]
+          },
+          {
+            "role": "existing-API-final",
+            "path": "gist-empty-lifecycle-C4-v1/receipt-v1.json",
+            "sha256": "3d80c57ca02734f2f81d0606d3ac41a2398ea56253378b0f59841a9cc49e21bb",
+            "gates": [
+              {
+                "keys": [
+                  "complete"
+                ],
+                "equals": true
+              },
+              {
+                "keys": [
+                  "source_unchanged"
+                ],
+                "equals": true
+              },
+              {
+                "keys": [
+                  "program_unchanged"
+                ],
+                "equals": true
+              }
+            ]
+          },
+          {
+            "role": "typed-API-final",
+            "path": "gist_typed_bounds_api_test-C4-related-v1.json",
+            "sha256": "a0b384d49476a0fa6d859be551ffa7a6db7da42dad1ad7af4c8baa9dfad7d6b4",
+            "gates": [
+              {
+                "keys": [
+                  "exit"
+                ],
+                "equals": 0
+              },
+              {
+                "keys": [
+                  "source_sha256"
+                ],
+                "equals": "f5de5440d9561fd84ede1e3211162ddbf61b71c13a8706a0eb1f57d7e034c905"
+              }
+            ]
+          },
+          {
+            "role": "collision-final",
+            "path": "gist_owner_collision_test-C4-related-v1.json",
+            "sha256": "9c321ef6b8d7d5cca84d3208eb379522576fb81e25539898e1a871313557b96f",
+            "gates": [
+              {
+                "keys": [
+                  "exit"
+                ],
+                "equals": 0
+              }
+            ]
+          },
+          {
+            "role": "protocol-final",
+            "path": "gist_empty_key_protocol_e2e_test-C4-v2/receipt-v1.json",
+            "sha256": "48b373f18e9fbf35a4895748d9cfb1cd2de68dec14c67c22bc35a3d652fdc47c",
+            "gates": [
+              {
+                "keys": [
+                  "exit"
+                ],
+                "equals": 0
+              },
+              {
+                "keys": [
+                  "pid_gone"
+                ],
+                "equals": true
+              }
+            ]
+          },
+          {
+            "role": "final-protocol-content",
+            "path": "gist_empty_key_protocol_e2e_test-C4-v2/evidence/trace-v1.json",
+            "sha256": "f4f92226b1d492bf8ef8e95f077f4638770d5a6b264dd8f422c6a264532ea48a",
+            "gates": [
+              {
+                "keys": [
+                  "complete"
+                ],
+                "equals": true
+              },
+              {
+                "keys": [
+                  "cohort_complete"
+                ],
+                "equals": true
+              },
+              {
+                "keys": [
+                  "failures"
+                ],
+                "equals": []
+              }
+            ]
+          },
+          {
+            "role": "PG18.6-shared",
+            "path": "final-C4-wire-PG75-reduction-v1.json",
+            "sha256": "d00cbffffb9d5a62d416de007698d7e5927467f3ba06fa22c97b9732e263e6b6",
+            "gates": [
+              {
+                "keys": [
+                  "reducer_completed"
+                ],
+                "equals": true
+              },
+              {
+                "keys": [
+                  "semantic_all_equal"
+                ],
+                "equals": true
+              },
+              {
+                "keys": [
+                  "descriptors_all_equal"
+                ],
+                "equals": true
+              },
+              {
+                "keys": [
+                  "raw_frames_all_equal"
+                ],
+                "equals": false
+              },
+              {
+                "keys": [
+                  "strict_full_protocol_pass"
+                ],
+                "equals": false
+              },
+              {
+                "keys": [
+                  "known_DELETE_extra_zero_field_T_count"
+                ],
+                "equals": 2
+              },
+              {
+                "keys": [
+                  "unexpected_raw_frame_difference_names"
+                ],
+                "equals": []
+              }
+            ]
+          },
+          {
+            "role": "related17-native-final",
+            "path": "related-native-C4-v1/receipt-v1.json",
+            "sha256": "3af369303e1841227b0d800e99f5784fac9ce3c3bd615752c5742bfc154756a8",
+            "gates": [
+              {
+                "keys": [
+                  "complete"
+                ],
+                "equals": true
+              },
+              {
+                "keys": [
+                  "all_passed"
+                ],
+                "equals": true
+              },
+              {
+                "keys": [
+                  "sources_exact"
+                ],
+                "equals": true
+              }
+            ]
+          },
+          {
+            "role": "related6-wire-final",
+            "path": "related-wire-C4-v1/receipt-v1.json",
+            "sha256": "63930ce3d0f5bacf76461d87bc74042d1a07a29a5e268364ded0ba18f56f1ffe",
+            "gates": [
+              {
+                "keys": [
+                  "complete"
+                ],
+                "equals": true
+              },
+              {
+                "keys": [
+                  "all_passed"
+                ],
+                "equals": true
+              }
+            ]
+          },
+          {
+            "role": "recovery18-final",
+            "path": "reindex-recovery-workers-C4-related-v1/receipt-v1.json",
+            "sha256": "a1dc4a1d67af97d756db99ec38acc2025304d31c73ef79bc25523101d009603d",
+            "gates": [
+              {
+                "keys": [
+                  "complete"
+                ],
+                "equals": true
+              },
+              {
+                "keys": [
+                  "checks"
+                ],
+                "equals": 3579
+              },
+              {
+                "keys": [
+                  "workers"
+                ],
+                "equals": 18
+              },
+              {
+                "keys": [
+                  "normal_exit_0"
+                ],
+                "equals": 13
+              },
+              {
+                "keys": [
+                  "intentional_SIGKILL"
+                ],
+                "equals": 5
+              },
+              {
+                "keys": [
+                  "retained_full_streams"
+                ],
+                "equals": 36
+              }
+            ]
+          },
+          {
+            "role": "performance-independent",
+            "path": "gist-empty-normal-cost9-C4-v1/independent-summary-v1.json",
+            "sha256": "09085cba6bd572e626612669e8a5b7a80be9d6b43e3d6808c08dc4b49aaaba91",
+            "gates": [
+              {
+                "keys": [
+                  "complete"
+                ],
+                "equals": true
+              },
+              {
+                "keys": [
+                  "all_checks_passed"
+                ],
+                "equals": true
+              },
+              {
+                "keys": [
+                  "sampling_driver_actual_exit"
+                ],
+                "equals": 0
+              },
+              {
+                "keys": [
+                  "all9_normal0"
+                ],
+                "equals": true
+              },
+              {
+                "keys": [
+                  "SQL"
+                ],
+                "equals": 0
+              },
+              {
+                "keys": [
+                  "resampling"
+                ],
+                "equals": 0
+              },
+              {
+                "keys": [
+                  "counts",
+                  "responses"
+                ],
+                "equals": 792
+              },
+              {
+                "keys": [
+                  "counts",
+                  "cells"
+                ],
+                "equals": 1069848
+              },
+              {
+                "keys": [
+                  "counts",
+                  "images"
+                ],
+                "equals": 459
+              }
+            ]
+          }
+        ],
+        "retained_first_failures": [
+          {
+            "path": "build/pg-feature-gist-empty-20261106-acgn52jq/gist-empty-before-existing-api-v3/stdout.log",
+            "sha256": "e623b4f412e8991a5f5aec91bf3fe6730c167d9998afaccba72826384e572992",
+            "description": "Actual BEFORE183 checks/21 failures: one V3 marker, ten omitted empty encoded RIDs, ten legacy query extra-row errors. Prepared full rows passed; not all old SQL failed."
+          },
+          {
+            "path": "build/pg-feature-gist-empty-20261106-acgn52jq/gist_owner_collision_diagnostic-before-v1.log",
+            "sha256": "20202ad4e053f31e90fb496e19700d579b35921ac963a44a0d59c2225a7668f0",
+            "description": "Original namespace fixture setup failed before semantic probes; not a product correctness comparison."
+          },
+          {
+            "path": "build/pg-feature-gist-empty-20261106-acgn52jq/gist_owner_collision_diagnostic-C1-v1.log",
+            "sha256": "20202ad4e053f31e90fb496e19700d579b35921ac963a44a0d59c2225a7668f0",
+            "description": "Same setup failure; not a semantic result."
+          },
+          {
+            "path": "build/pg-feature-gist-empty-20261106-acgn52jq/gist_owner_collision_diagnostic-before-v2.log",
+            "sha256": "a89bf7f155b5346aec71dfc4f20f1a98fd16848cd94ed139dbd292cf4be97239",
+            "description": "Real successful shorter-first fixture: prepared correct, native empty extra row; actual one failure."
+          },
+          {
+            "path": "build/pg-feature-gist-empty-20261106-acgn52jq/gist_owner_collision_diagnostic-C1-v2.log",
+            "sha256": "0c218c5445fabcd0a10d7a334c559aaf4405abfca8b911e50f4c3d057b146847",
+            "description": "Real successful shared-file fixture: both prepared/native empty and nonempty missed rows; actual four failures, fixed by C2 owner guard."
+          },
+          {
+            "path": "build/pg-feature-gist-empty-20261106-acgn52jq/gist_empty_key_protocol_e2e_test-C2-v1/evidence/trace-v1.json",
+            "sha256": "ec512e178d86a000e2dddc88260ef80c7f2021944c9b0dc4ac79b9d0ca636fe7",
+            "description": "Actual120 commands/server0/cohortcomplete with118 assertions:117 witness-slot harness errors plus one real ineffective full index traversal; not a pass."
+          },
+          {
+            "path": "build/pg-feature-gist-empty-20261106-acgn52jq/like_prefix_scan_protocol_e2e_test-C3-related-v1/stderr.log",
+            "sha256": "f1fad3c0b4ede975fbe4c209c04b741f22389e34252621ee042298151aaed045",
+            "description": "Unchanged old protocol strict fail: default-locale LIKE values correct but index counter fell back to heap. C4 distinct pattern ordering role repairs it."
+          },
+          {
+            "path": "build/pg-feature-gist-empty-20261106-acgn52jq/pg-gist-empty-reference-v1/receipt-v1.json",
+            "sha256": "dae0e305b2b3f51f349ab55f1793a09e4b74cbcebe52f9a90dcdda9331312ebd",
+            "description": "PG harness omitted initdb -U postgres: startup role failure, zero shared SQL. Original evidence retained; v2 adds exact role setup then first75 SQL."
+          }
+        ],
+        "performance_summary": {
+          "path": "build/pg-feature-gist-empty-20261106-acgn52jq/gist-empty-normal-cost9-C4-v1/independent-summary-v1.json",
+          "sha256": "09085cba6bd572e626612669e8a5b7a80be9d6b43e3d6808c08dc4b49aaaba91",
+          "contexts": 9,
+          "timed_queries": 306,
+          "REINDEX": 9,
+          "retries": 0
+        },
+        "unresolved": [
+          "GiST remains flat, complete CRC every probe; true page tree/opclasses/KNN/WAL/concurrent remain partial.",
+          "High/absent and low-range wall regressions are retained; no uniform speed claim.",
+          "Filename alias now safe heap fallback, physical relation-identity filename layout remains open.",
+          "Virtual-key coverage, native-only lost definitions and virtual Bloom logical NULL remain open.",
+          "Known PG two DELETE T0000 frame differences remain explicit; NetworkServer unchanged.",
+          "P25 missing-memory protocol strict failure with incomplete baseline comparison remains open.",
+          "All original user deferrals unchanged; R151 original341/103 matrix not run."
+        ],
+        "preservation": "Original273 raw items/status and276 raw histories, old25gzip,754MD725protected preserved;5newtests4explicitmigrations;directmaster localcommit/no push/default promotion;goal active."
+      }
+    },
+    {
       "issue": "2026-11-06 ordinary all-AM REINDEX and physical Bloom NULL/empty lifecycle",
       "gap_ids": [
         "IDX-05",

@@ -53,6 +53,7 @@
 #include "expression/assignment_input.h"
 #include "expression/ExprEvaluator.h"
 #include "executor/ExecutionPlan.h"
+#include "executor/LikePrefix.h"
 #include "expression/SqlPattern.h"
 #include "expression/ExpressionVolatility.h"
 #include "permissions.h"
@@ -14816,6 +14817,75 @@ std::filesystem::path StorageEngine::spGiSTIndexPath(const std::string& dbname,
     return relationDir(dbname, tablename) / (tablename + "_" + colname + ".spgist");
 }
 
+// The callback still owns the raw tuple and its real bitmap. Read only the
+// requested stored key, and keep TOAST failure distinct from a valid empty
+// datum. Virtual keys retain their existing single logical evaluation and
+// the legacy coverage format; this does not create a new provider owner.
+static bool gistBuildKey(StorageEngine& engine, const std::string& database,
+                         const TableSchema& table, size_t ordinal,
+                         const std::string& row,
+                         const std::vector<bool>* physicalNulls,
+                         std::string& value, bool& isNull) {
+    const auto& key = table.cols[ordinal];
+    if (!physicalNulls || key.generatedKind == 'v') {
+        value = engine.extractColumnValue(row, table, ordinal, database, true, &isNull);
+        return true;
+    }
+    if (physicalNulls->size() != table.len) return false;
+    isNull = (*physicalNulls)[ordinal];
+    value.clear();
+    if (isNull) return true;
+    value = StorageEngine::extractColumnValueStatic(row, table, ordinal);
+    uint32_t offset = 0, length = 0;
+    uint64_t toast = 0;
+    if (key.isVariableLength && !resolvedToastEntry(row, table, 0, &offset, &length) &&
+        StorageEngine::parseToastMarker(value, toast)) {
+        std::string resolved;
+        if (!engine.readToast(database, table.tablename, toast,
+                              characterColumnByteLimit(key), resolved)) return false;
+        value = std::move(resolved);
+    }
+    return true;
+}
+
+// Legacy names concatenate table and column with '_'. A valid neighboring
+// table can therefore interpret the same file as its own column index. The
+// complete-value marker does not prove which relation owns such a name.
+// Examine only the possible splits, using real schemas and physical paths;
+// an ambiguous source keeps the original heap owner for both relations.
+template <typename ResolvePath>
+static bool gistFileOwnerIsUnique(const StorageEngine& engine,
+                                  const std::string& database,
+                                  const std::string& table,
+                                  const std::string& column,
+                                  const std::filesystem::path& target,
+                                  ResolvePath&& resolvePath) {
+    const std::string stem = table + "_" + column;
+    try {
+        for (size_t split = stem.find('_'); split != std::string::npos;
+             split = stem.find('_', split + 1)) {
+            if (split == 0 || split + 1 == stem.size()) continue;
+            const auto otherTable = stem.substr(0, split);
+            const auto otherColumn = stem.substr(split + 1);
+            if (otherTable == table && otherColumn == column) continue;
+            if (!engine.tableExists(database, otherTable)) continue;
+            const auto schema = engine.getTableSchema(database, otherTable);
+            if (!std::any_of(schema.cols, schema.cols + schema.len,
+                    [&](const auto& key) { return key.dataName == otherColumn; })) continue;
+            const auto alternate = resolvePath(otherTable, otherColumn);
+            if (alternate.lexically_normal() == target.lexically_normal()) return false;
+            std::error_code error;
+            if (std::filesystem::equivalent(alternate, target, error)) return false;
+            if (error && error != std::errc::no_such_file_or_directory) return false;
+        }
+    } catch (const std::filesystem::filesystem_error&) {
+        return false;
+    } catch (const DbError&) {
+        return false;
+    }
+    return true;
+}
+
 DBStatus StorageEngine::createGiSTIndex(const std::string& dbname,
                                          const std::string& tablename,
                                          const std::string& colname) {
@@ -14831,26 +14901,41 @@ DBStatus StorageEngine::createGiSTIndex(const std::string& dbname,
     auto path = giSTIndexPath(dbname, tablename, colname);
     std::string entryPayload;
     uint64_t entryCount = 0;
+    const bool completeEmptyCoverage = tbl.formatVersion == DATA_FILE_FORMAT_VERSION &&
+                                      tbl.cols[colIdx].generatedKind != 'v';
+    bool keysReadable = true;
 
     if (!forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
                                        const char* data, size_t len) {
+        if (!keysReadable) return;
         ScannedNullRowBinding scanNullOwner(tbl, scanNulls, data, len);
-        std::string row(data, len);
-        std::string val = extractColumnValue(
-            row, tbl, colIdx, dbname, true);
+        if (completeEmptyCoverage && !scanNullOwner.active()) {
+            keysReadable = false;
+            return;
+        }
+        const std::string row(data, len);
+        std::string val;
+        bool isNull = false;
+        if (!gistBuildKey(*this, dbname, tbl, colIdx, row,
+                          completeEmptyCoverage ? &scanNulls : nullptr, val, isNull)) {
+            keysReadable = false;
+            return;
+        }
         int64_t rid = encodeRid(pageId, slotId);
         // For GiST we store each row's value range.
         // For single scalar values, min=max=val.
         // For multi-value (array), min=min element, max=max element.
         // For text, we store the value itself (prefix containment).
-        if (!val.empty()) {
+        if (!isNull && (completeEmptyCoverage || !val.empty())) {
             gist_index_format::appendEntryPayload(
                 entryPayload, static_cast<uint64_t>(rid), val, val);
             ++entryCount;
         }
-    })) return DBStatus::IO_ERROR;
+    }) || !keysReadable) return DBStatus::IO_ERROR;
     if (!index_file::writeAtomically(
-            path, gist_index_format::encodeV2(entryCount, entryPayload))) {
+            path, completeEmptyCoverage
+                ? gist_index_format::encodeV3(entryCount, entryPayload)
+                : gist_index_format::encodeV2(entryCount, entryPayload))) {
         return DBStatus::IO_ERROR;
     }
     return DBStatus::OK;
@@ -14976,8 +15061,10 @@ static bool gistQueryRangeIsValid(GistKeyOrdering ordering,
 
 static bool gistEntryRangeIsValid(GistKeyOrdering ordering,
                                   const std::string& entryLow,
-                                  const std::string& entryHigh) {
-    if (entryLow.empty() || entryHigh.empty()) return false;
+                                  const std::string& entryHigh,
+                                  bool completeEmptyCoverage = false) {
+    if ((entryLow.empty() || entryHigh.empty()) &&
+        !(completeEmptyCoverage && ordering == GistKeyOrdering::Text)) return false;
     int comparison = 0;
     return gistCompare(ordering, entryLow, entryHigh, comparison) &&
            comparison <= 0;
@@ -14986,7 +15073,7 @@ static bool gistEntryRangeIsValid(GistKeyOrdering ordering,
 template <typename Visitor>
 static bool forEachGiSTEntry(
     const std::filesystem::path& path, GistKeyOrdering ordering,
-    Visitor&& visit) {
+    Visitor&& visit, uint32_t* actualVersion = nullptr) {
     using namespace gist_index_format;
     std::ifstream input(path, std::ios::binary);
     if (!input) return false;
@@ -15003,8 +15090,11 @@ static bool forEachGiSTEntry(
     std::array<char, kMagic.size()> probe{};
     input.read(probe.data(), static_cast<std::streamsize>(probe.size()));
     const size_t probed = static_cast<size_t>(input.gcount());
-    const bool checksummed = probed == probe.size() &&
+    const bool v2 = probed == probe.size() &&
         std::equal(probe.begin(), probe.end(), kMagic.begin());
+    const bool v3 = probed == probe.size() &&
+        std::equal(probe.begin(), probe.end(), kMagicV3.begin());
+    const bool checksummed = v2 || v3;
 
     std::unordered_set<int64_t> seenRids;
     if (checksummed) {
@@ -15015,7 +15105,7 @@ static bool forEachGiSTEntry(
         uint64_t entryCount = 0;
         if (!readU32(std::string_view(header.data(), header.size()),
                      headerOffset, version) ||
-            version != kVersion ||
+            version != (v3 ? kVersionV3 : kVersion) ||
             !readU64(std::string_view(header.data(), header.size()),
                      headerOffset, entryCount)) {
             return false;
@@ -15109,12 +15199,14 @@ static bool forEachGiSTEntry(
             remaining -= lowLength + highLength;
             const int64_t signedRid = static_cast<int64_t>(rid);
             if (!seenRids.insert(signedRid).second ||
-                !gistEntryRangeIsValid(ordering, entryLow, entryHigh)) {
+                !gistEntryRangeIsValid(ordering, entryLow, entryHigh, v3)) {
                 return false;
             }
             visit(signedRid, entryLow, entryHigh);
         }
-        return remaining == 0;
+        if (remaining != 0) return false;
+        if (actualVersion) *actualVersion = version;
+        return true;
     }
 
     input.clear();
@@ -15137,7 +15229,9 @@ static bool forEachGiSTEntry(
         }
         visit(rid, entryLow, entryHigh);
     }
-    return input.eof() && !input.bad();
+    if (!input.eof() || input.bad()) return false;
+    if (actualVersion) *actualVersion = 0;
+    return true;
 }
 
 static bool gistEntryOverlaps(GistKeyOrdering ordering,
@@ -15172,6 +15266,150 @@ static bool gistEntryContained(GistKeyOrdering ordering,
         return false;
     }
     return true;
+}
+
+// SQL probes share the actual column comparison contract. Unknown types,
+// enum/domain/array identities and nonbinary collations keep their heap
+// source rather than being reinterpreted as byte-ordered text.
+static bool gistHasSqlScalarOrder(const Column& key, std::string& type) {
+    if (key.isArray || key.isUnsigned || !key.enumValues.empty() ||
+        !key.domainName.empty() || key.generatedKind == 'v' ||
+        !columnUsesBinaryCollation(key)) return false;
+    type = ExprHelper::canonicalResultTypeName(key.dataType);
+    constexpr std::string_view types[]{
+        "smallint", "integer", "bigint", "real", "double precision", "numeric",
+        "money", "boolean", "text", "character varying", "character", "uuid",
+        "date", "time", "timestamp", "timestamptz",
+        "time without time zone", "timestamp without time zone",
+        "timestamp with time zone", "bit", "bit varying"};
+    return std::find(std::begin(types), std::end(types), std::string_view(type)) != std::end(types);
+}
+
+static std::optional<int> gistSqlCompare(const Column& key, bool binaryText,
+                                        const std::string& left,
+                                        const std::string& right) {
+    if (binaryText) return left.compare(right);
+    using Truth = StorageEngine::PredicateTruth;
+    try {
+        const auto less = StorageEngine::compareValues(key, left, false, right, false, "<");
+        const auto greater = StorageEngine::compareValues(key, left, false, right, false, ">");
+        if (less == Truth::Unknown || greater == Truth::Unknown ||
+            (less == Truth::True && greater == Truth::True)) return {};
+        if (less == Truth::True) return -1;
+        if (greater == Truth::True) return 1;
+        if (StorageEngine::compareValues(key, left, false, right, false, "=") == Truth::True) return 0;
+    } catch (const DbError& error) {
+        if (error.sqlState().rfind("22", 0) != 0) throw;
+    }
+    return {};
+}
+
+std::optional<std::vector<int64_t>> StorageEngine::tryGiSTCandidates(
+    const std::string& database, const std::string& tableName,
+    const std::string& column, const GiSTBounds& bounds, bool contained,
+    GiSTOrderingRole ordering) const {
+    const auto table = getTableSchema(database, tableName);
+    if (table.partitionType != TableSchema::PartitionType::None ||
+        !getInheritedChildren(database, tableName).empty()) return {};
+    size_t ordinal = table.len;
+    for (size_t i = 0; i < table.len; ++i)
+        if (table.cols[i].dataName == column) { ordinal = i; break; }
+    if (ordinal == table.len) return {};
+    const auto& key = table.cols[ordinal];
+    std::string type;
+    if (ordering == GiSTOrderingRole::BinaryLikePrefix) {
+        type = ExprHelper::canonicalResultTypeName(key.dataType);
+        if (key.isArray || key.isUnsigned || !key.enumValues.empty() ||
+            !key.domainName.empty() || key.generatedKind ||
+            (type != "text" && type != "character varying") ||
+            (!key.collation.empty() && (!key.resolvedCollationIsBinary ||
+                                       key.resolvedCollationUsesLocale))) return {};
+    } else if (!gistHasSqlScalarOrder(key, type)) return {};
+    const bool binaryText = type == "text" || type == "character varying";
+    const auto compare = [&](const std::string& left, const std::string& right) {
+        return gistSqlCompare(key, binaryText, left, right);
+    };
+    if ((bounds.low && !compare(bounds.low->value, bounds.low->value)) ||
+        (bounds.high && !compare(bounds.high->value, bounds.high->value))) return {};
+    if (bounds.low && bounds.high && !compare(bounds.low->value, bounds.high->value)) return {};
+
+    // A serializable reader must still acquire the real heap SIREAD owner,
+    // even for an empty answer. All other original snapshot/dirty fences
+    // remain in force before and after the complete file validation.
+    const auto& tx = transactionContext();
+    if (tx.inTransaction && tx.txnDB == database &&
+        tx.txnIsolationLevel == IsolationLevel::SERIALIZABLE) return {};
+    const auto fence = indexReadSnapshotFence(database);
+    if (!fence || specializedIndexesAreDirty(*this, database, tableName)) return {};
+    const auto path = giSTIndexPath(database, tableName, column);
+    std::error_code error;
+    if (!std::filesystem::is_regular_file(path, error) || error) return {};
+    if (!gistFileOwnerIsUnique(*this, database, tableName, column, path,
+            [&](const auto& otherTable, const auto& otherColumn) {
+                return giSTIndexPath(database, otherTable, otherColumn);
+            })) return {};
+
+    bool comparable = true;
+    const auto matches = [&](const std::string& low, const std::string& high) {
+        if (bounds.low) {
+            const auto c = compare(contained ? low : high, bounds.low->value);
+            if (!c) { comparable = false; return false; }
+            if (*c < 0 || (*c == 0 && !bounds.low->inclusive)) return false;
+        }
+        if (bounds.high) {
+            const auto c = compare(contained ? high : low, bounds.high->value);
+            if (!c) { comparable = false; return false; }
+            if (*c > 0 || (*c == 0 && !bounds.high->inclusive)) return false;
+        }
+        return true;
+    };
+    const bool mayMatchEmpty = (binaryText || type == "character") && matches("", "");
+    if (!comparable) return {};
+    uint32_t version = 0;
+    std::vector<int64_t> rids;
+    const bool valid = forEachGiSTEntry(path, gistKeyOrdering(key),
+        [&](int64_t rid, const std::string& low, const std::string& high) {
+            if (!comparable) return;
+            // Native producers store one scalar datum twice. A general
+            // interval supplied through the legacy native API is not proof
+            // of this SQL key's ordering/identity; keep its original source.
+            if (low != high) { comparable = false; return; }
+            if (matches(low, high)) rids.push_back(rid);
+        }, &version);
+    if (!valid || !comparable || (version < gist_index_format::kVersionV3 && mayMatchEmpty) ||
+        specializedIndexesAreDirty(*this, database, tableName) ||
+        indexReadSnapshotFence(database) != fence) return {};
+    return rids;
+}
+
+std::optional<std::vector<int64_t>> StorageEngine::tryGiSTSearchOverlap(
+    const std::string& database, const std::string& table,
+    const std::string& column, const GiSTBounds& bounds) const {
+    return tryGiSTCandidates(database, table, column, bounds, false);
+}
+
+std::optional<std::vector<int64_t>> StorageEngine::tryGiSTSearchContainedBy(
+    const std::string& database, const std::string& table,
+    const std::string& column, const GiSTBounds& bounds) const {
+    return tryGiSTCandidates(database, table, column, bounds, true);
+}
+
+std::optional<std::vector<int64_t>> StorageEngine::tryGiSTSearchLikePrefix(
+    const std::string& database, const std::string& table,
+    const std::string& column, const std::string& prefix) const {
+    if (prefix.empty()) return {};
+    try {
+        (void)sql_pattern::characters(prefix);
+    } catch (const DbError& error) {
+        if (error.sqlState().rfind("22", 0) != 0) throw;
+        return {};
+    }
+    GiSTBounds bounds;
+    bounds.low = GiSTBound{prefix, true};
+    if (const auto ceiling = planner_pattern::prefixCeiling(prefix))
+        bounds.high = GiSTBound{*ceiling, false};
+    return tryGiSTCandidates(database, table, column, bounds, false,
+                            GiSTOrderingRole::BinaryLikePrefix);
 }
 
 std::vector<int64_t> StorageEngine::giSTSearchOverlap(const std::string& dbname,
@@ -15256,6 +15494,10 @@ std::vector<int64_t> StorageEngine::giSTSearchOverlap(const std::string& dbname,
     // Existing V2 sidecars omit empty text keys. A range that can include
     // them must read visible heap tuples, keeping empty distinct from NULL.
     if (ordering == GistKeyOrdering::Text && low.empty()) return scanHeap();
+    if (!gistFileOwnerIsUnique(*this, dbname, tablename, colname, path,
+            [&](const auto& otherTable, const auto& otherColumn) {
+                return giSTIndexPath(dbname, otherTable, otherColumn);
+            })) return scanHeap();
     const bool valid = forEachGiSTEntry(
         path, ordering,
         [&](int64_t rid, const std::string& entryLow,
@@ -15354,6 +15596,10 @@ std::vector<int64_t> StorageEngine::giSTSearchContainedBy(const std::string& dbn
     // Existing V2 sidecars omit empty text keys. A range that can include
     // them must read visible heap tuples, keeping empty distinct from NULL.
     if (ordering == GistKeyOrdering::Text && low.empty()) return scanHeap();
+    if (!gistFileOwnerIsUnique(*this, dbname, tablename, colname, path,
+            [&](const auto& otherTable, const auto& otherColumn) {
+                return giSTIndexPath(dbname, otherTable, otherColumn);
+            })) return scanHeap();
     const bool valid = forEachGiSTEntry(
         path, ordering,
         [&](int64_t rid, const std::string& entryLow,
@@ -16273,6 +16519,7 @@ DBStatus StorageEngine::stageReindexAuxiliaryIndexes(
         std::map<std::string, std::set<int64_t>> inverted;
         std::string payload;
         uint64_t count = 0;
+        bool completeGiSTEmptyCoverage = false;
         brin_index_format::TypedIndex brin;
         std::map<uint32_t, brin_index_format::Range> ranges;
     };
@@ -16292,6 +16539,9 @@ DBStatus StorageEngine::stageReindexAuxiliaryIndexes(
             const auto path = reserve(build.definition.target, build.definition.method, build.definition.column);
             if (!path) return DBStatus::IO_ERROR;
             build.temporary = *path;
+            if (build.definition.method == "gist")
+                build.completeGiSTEmptyCoverage = table.formatVersion == DATA_FILE_FORMAT_VERSION &&
+                    table.cols[build.definition.ordinal].generatedKind != 'v';
             if (build.definition.method == "hash") {
                 build.hash = std::make_unique<HashIndex>(*path);
                 if (!build.hash->openForBuild()) return DBStatus::IO_ERROR;
@@ -16326,7 +16576,14 @@ DBStatus StorageEngine::stageReindexAuxiliaryIndexes(
                     const auto& definition = build.definition;
                     const auto& column = table.cols[definition.ordinal];
                     bool isNull = false;
-                    auto value = extractColumnValue(row, table, definition.ordinal, dbname, true, &isNull);
+                    std::string value;
+                    if (definition.method == "gist" && build.completeGiSTEmptyCoverage) {
+                        if (!nullOwner.active() || !gistBuildKey(*this, dbname, table,
+                                definition.ordinal, row, &nulls, value, isNull)) {
+                            status = DBStatus::IO_ERROR;
+                            return;
+                        }
+                    } else value = extractColumnValue(row, table, definition.ordinal, dbname, true, &isNull);
                     if (definition.method == "brin") {
                         using namespace brin_index_format;
                         build.brin.heapPages = std::max(build.brin.heapPages, page + 1);
@@ -16355,9 +16612,7 @@ DBStatus StorageEngine::stageReindexAuxiliaryIndexes(
                     } else if (!isNull && definition.method == "fulltext") {
                         for (const auto& token : tokenizeText(value)) build.inverted[token].insert(rid);
                     } else if (!isNull && definition.method == "gist") {
-                        // V2 uses nonempty endpoints; its existing empty-text
-                        // read fallback remains separate from REINDEX coverage.
-                        if (!value.empty()) {
+                        if (build.completeGiSTEmptyCoverage || !value.empty()) {
                             gist_index_format::appendEntryPayload(build.payload, static_cast<uint64_t>(rid), value, value);
                             ++build.count;
                         }
@@ -16385,7 +16640,9 @@ DBStatus StorageEngine::stageReindexAuxiliaryIndexes(
                         output << '\n';
                     }
                     bytes = output.str();
-                } else if (method == "gist") bytes = gist_index_format::encodeV2(build.count, build.payload);
+                } else if (method == "gist") bytes = build.completeGiSTEmptyCoverage
+                    ? gist_index_format::encodeV3(build.count, build.payload)
+                    : gist_index_format::encodeV2(build.count, build.payload);
                 else if (method == "spgist") bytes = spgist_index_format::encodeV2(build.count, build.payload);
                 else if (method == "brin") {
                     for (auto& item : build.ranges) {
@@ -29652,21 +29909,23 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
     for (const auto& c : conds) {
         if (columnNeedsCollation(c.colName)) continue;
         if (hasGiSTIndex(dbname, tablename, c.colName)) {
+            if (!c.decodedLiteralRhs && std::any_of(tbl.cols, tbl.cols + tbl.len,
+                    [&](const auto& key) { return key.dataName == c.value; })) continue;
+            GiSTBounds bounds;
             if (c.op == "=") {
-                // GiST overlap with [val, val] is equivalent to equality for scalars
-                auto rids = giSTSearchOverlap(dbname, tablename, c.colName, c.value, c.value);
-                for (int64_t rid : rids) ids.insert(rid);
+                bounds.low = GiSTBound{c.value, true};
+                bounds.high = GiSTBound{c.value, true};
             } else if (c.op == ">=" || c.op == ">") {
-                // Search for values that overlap with [query_val, +inf)
-                auto rids = giSTSearchOverlap(dbname, tablename, c.colName, c.value, "");
-                for (int64_t rid : rids) ids.insert(rid);
+                bounds.low = GiSTBound{c.value, c.op == ">="};
             } else if (c.op == "<=" || c.op == "<") {
-                // Search for values that overlap with (-inf, query_val]
-                auto rids = giSTSearchOverlap(dbname, tablename, c.colName, "", c.value);
-                for (int64_t rid : rids) ids.insert(rid);
-            }
-            if (!ids.empty()) {
+                bounds.high = GiSTBound{c.value, c.op == "<="};
+            } else continue;
+            if (const auto rids = tryGiSTSearchOverlap(dbname, tablename, c.colName, bounds)) {
+                ids.insert(rids->begin(), rids->end());
                 indexPredicate = &c;
+                // Candidate completeness does not discharge the original
+                // SQL atom, including strictness, NULL and type semantics.
+                recheckIndexPredicate = true;
                 return ids;
             }
         }
