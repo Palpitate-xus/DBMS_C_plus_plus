@@ -2,6 +2,99 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-06 CHECK/FK NOT VALID and actual history validation",
+      "gap_ids": [
+        "CONS-02",
+        "CONS-03"
+      ],
+      "status": "partial",
+      "evidence": [
+        "src/commands/TableManage.cpp",
+        "src/commands/TableManage.h",
+        "src/commands/DdlExecutor.cpp",
+        "src/parser/parser.cpp",
+        "docs/performance-report-2026-10-30.md",
+        "docs/benchmarks/constraint-validation-20261106.json.gz"
+      ],
+      "tests": [
+        "tests/constraint_validation_lifecycle_test.cpp",
+        "tests/constraint_not_valid_protocol_e2e_test.py"
+      ],
+      "verification": {
+        "normal_candidate": "C4 CMake C++17/O2",
+        "normal_program_sha256": "5cd5fd9e15f72257d13f2622e180d643e5cc93fffe8a128cbf8e820f64caf539",
+        "functional_scope_audit": "build/pg-feature-constraint-validation-20261106-ovw7dega/C4-core-functional-scope-audit-v2.json",
+        "native": {
+          "parent_checks_including_file_assertions": 4896,
+          "parent_failures": 0,
+          "workers": 2,
+          "lifecycle_checks": 779,
+          "cold_checks": 158,
+          "fetch_observations": 38,
+          "zero_fetch": 18,
+          "nonzero_fetch": 20
+        },
+        "protocol": {
+          "primary": 142,
+          "cold": 12,
+          "matched": 154,
+          "NOTRUN": 0,
+          "all_defined_fields_match": true,
+          "full_raw_PG_byte_equivalence": false
+        },
+        "mini": {
+          "PG20": 20,
+          "product19_plus_cold6": 25,
+          "metadata_checks": 13,
+          "append10": 10
+        },
+        "related_native": {
+          "normal0": 11,
+          "abort": 1,
+          "all_passed": false,
+          "failure_log_equal_before": true,
+          "aborted_later_constraint_portion_completed": false
+        },
+        "signature_diagnostic": {
+          "expression_attempted": 0,
+          "expression_NOTRUN": 19,
+          "all_passed": false,
+          "legitimate_multiLOB_CREATE_failed": true,
+          "secondary_shutdown_clean": false
+        },
+        "performance_counts": {
+          "responses": 3024,
+          "timed_DDL": 216,
+          "population_SELECT": 1350,
+          "cells": 2384640,
+          "SQL_NULL_cells": 157950,
+          "images": 18360,
+          "heap_images": 2700,
+          "normal_processes": 54
+        },
+        "actual_cost_outer_exit": 0,
+        "performance_summary_sha256": "0a0fb06ea157bee1d0cecb9d074bdc60f4e0f03a932cc7c3941e2c7ff80591b9",
+        "ordinary_open": [
+          "Full pg_constraint SQL catalogs and dependency/cooked-expression framework",
+          "PG18 NOT NULL NOT VALID and physical NULL authority separation",
+          "UNKNOWN implicit literal input-codec completeness",
+          "Multiple LOB CREATE logical width overflow / allocator header width",
+          "Ordinary lock/snapshot concurrency acceptance",
+          "Existing paired routine rollback abort prevents later ddl_ast_bridge portion",
+          "Secondary shutdown std::bad_alloc cause unclassified; no clean-shutdown acceptance from that diagnostic",
+          "This batch has no general SELECT or DML throughput resampling"
+        ],
+        "all_original273_item_states_unchanged": true,
+        "old278_history_preserved": true,
+        "goal_status": "active",
+        "no_default_program_promotion": true,
+        "no_push": true,
+        "batch": "P28-C4",
+        "source": "build/pg-feature-constraint-validation-20261106-ovw7dega/final-facts-v1.json",
+        "program_sha256": "5cd5fd9e15f72257d13f2622e180d643e5cc93fffe8a128cbf8e820f64caf539"
+      }
+    },
+    {
       "issue": "2026-11-06 GiST bounded reader costs and headerless empty-file fallback",
       "gap_ids": [
         "IDX-07"

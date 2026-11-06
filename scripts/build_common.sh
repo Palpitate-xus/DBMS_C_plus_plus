@@ -704,6 +704,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/reindex_access_methods_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/gist_empty_key_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/gist_empty_legacy_file_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/constraint_not_valid_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/pg_stats_source_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/planner_relation_metadata_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/test_registration_inventory_test.py)

@@ -29,6 +29,7 @@
 #include "utils/numeric_type.h"
 #include "expression/aggregate_type.h"
 #include "expression/common_type.h"
+#include "expression/equality_type.h"
 #include "replication/ReplicationManager.h"
 #include "parser/parser.h"
 #include "TxnIdGenerator.h"
@@ -1316,6 +1317,19 @@ static std::map<std::string, std::string> buildTypeHints(const dbms::TableSchema
     return hints;
 }
 
+// CHECK row maps are keyed by the actual raw attribute name, including
+// when their expression uses a qualified reference. Historical validation and
+// later mutations must receive the same resolved source collation metadata.
+static std::map<std::string, std::string> storedCheckCollations(const TableSchema& table) {
+    std::map<std::string, std::string> result;
+    for (size_t i = 0; i < table.len; ++i) {
+        const auto& column = table.cols[i];
+        const auto& effective = column.resolvedCollation.empty() ? column.collation : column.resolvedCollation;
+        if (!effective.empty()) result.emplace(column.dataName, effective);
+    }
+    return result;
+}
+
 // Callers that retain SQL NULL metadata need the evaluator's NULL bit as well
 // as its text.  A string result equal to "NULL" is ordinary data and must not
 // be folded into SQL NULL at this boundary.
@@ -1418,11 +1432,11 @@ static bool generatedCheckInput(const std::string& expression,const TableSchema&
     const std::map<std::string,std::string>& hints,const std::string& database,
     StorageEngine* engine,std::string* error,const DatumMetadataContext* frozen=nullptr) {
     const bool virtuals=std::any_of(table.cols,table.cols+table.len,[](const Column& column){return column.generatedKind=='v';});
-    if(!virtuals)return ExprHelper::evalCheck(expression,values,hints,error,database,"",engine);
     DatumMetadataContextPtr owner;
-    if(!frozen){owner=freezeGeneratedStorageInput(table,database,table.tablename,engine);frozen=owner.get();}
-    if(!frozen || !frozen->generatedSource)throw DbError("XX000","CHECK source lost its actual virtual declaration");
-    const auto value=ExprHelper::evalStringWithNulls(expression,values,nulls,hints,database,"",engine,{},false,nullptr,frozen);
+    if(virtuals && !frozen){owner=freezeGeneratedStorageInput(table,database,table.tablename,engine);frozen=owner.get();}
+    if(virtuals && (!frozen || !frozen->generatedSource))throw DbError("XX000","CHECK source lost its actual virtual declaration");
+    const auto collations = storedCheckCollations(table);
+    const auto value=ExprHelper::evalStringWithNulls(expression,values,nulls,hints,database,"",engine,collations,false,nullptr,frozen);
     if(!value.ok){if(error)*error=value.error;return false;}
     return value.isNull || ExprValue("boolean",value.value,false).asBool();
 }
@@ -19059,6 +19073,11 @@ std::string StorageEngine::resolveToastValues(const std::string& dbname,
 
 namespace {
 
+struct ForeignKeyDefinitionDiagnostic {
+    std::string sqlState;
+    std::string message;
+};
+
 struct ValidatedForeignKeyDefinition {
     std::vector<size_t> localColumnIndices;
     std::vector<size_t> referencedColumnIndices;
@@ -19138,9 +19157,12 @@ DBStatus validateForeignKeyDefinition(
     const TableSchema& localTable, const TableSchema& referencedTable,
     const std::vector<std::string>& localColumnNames,
     const std::vector<std::string>& requestedReferencedColumnNames,
-    ValidatedForeignKeyDefinition& result, std::string* error = nullptr) {
-    const auto reject = [&](const std::string& message) {
+    ValidatedForeignKeyDefinition& result, std::string* error = nullptr,
+    ForeignKeyDefinitionDiagnostic* diagnostic = nullptr) {
+    if (diagnostic) *diagnostic = {};
+    const auto reject = [&](const std::string& message, const std::string& state = "42830") {
         if (error) *error = message;
+        if (diagnostic) *diagnostic = {state, message};
         return DBStatus::INVALID_VALUE;
     };
     if (localColumnNames.empty() || localColumnNames.size() > MAX_COLUMNS) {
@@ -19159,18 +19181,18 @@ DBStatus validateForeignKeyDefinition(
         }
         if (columnIndex >= localTable.len) {
             return reject("foreign key local column does not exist: " +
-                          columnName);
+                          columnName, "42703");
         }
         if (!distinctLocalColumns.insert(columnIndex).second) {
             return reject("foreign key local column appears more than once: " +
-                          columnName);
+                          columnName, "42701");
         }
         result.localColumnIndices.push_back(columnIndex);
     }
 
     std::vector<size_t> primaryColumns;
     if (!collectPrimaryKeyColumns(referencedTable, primaryColumns)) {
-        return reject("referenced primary key metadata is invalid");
+        return reject("referenced primary key metadata is invalid", "XX001");
     }
     result.referencedColumnNames = requestedReferencedColumnNames;
     if (result.referencedColumnNames.empty()) {
@@ -19201,12 +19223,12 @@ DBStatus validateForeignKeyDefinition(
         }
         if (columnIndex >= referencedTable.len) {
             return reject("foreign key referenced column does not exist: " +
-                          columnName);
+                          columnName, "42703");
         }
         if (!distinctReferencedColumns.insert(columnIndex).second) {
             return reject(
                 "foreign key referenced column appears more than once: " +
-                columnName);
+                columnName, "42701");
         }
         result.referencedColumnIndices.push_back(columnIndex);
     }
@@ -19223,7 +19245,7 @@ DBStatus validateForeignKeyDefinition(
     for (const auto& uniqueColumns : referencedTable.uniqueConstraints) {
         for (const size_t columnIndex : uniqueColumns) {
             if (columnIndex >= referencedTable.len) {
-                return reject("referenced unique-key metadata is invalid");
+                return reject("referenced unique-key metadata is invalid", "XX001");
             }
         }
         if (sameColumnSet(result.referencedColumnIndices, uniqueColumns)) {
@@ -19241,7 +19263,7 @@ DBStatus validateForeignKeyDefinition(
                 localTable.cols[result.localColumnIndices[columnIndex]],
                 referencedTable.cols[
                     result.referencedColumnIndices[columnIndex]])) {
-            return reject("foreign key column types are incompatible");
+            return reject("foreign key column types are incompatible", "42804");
         }
     }
     return DBStatus::OK;
@@ -22695,118 +22717,430 @@ DBStatus StorageEngine::alterTableDropNotNull(const std::string& dbname,
     return DBStatus::OK;
 }
 
-DBStatus StorageEngine::alterTableAddCheckConstraint(const std::string& dbname,
-                                                        const std::string& tablename,
-                                                        const std::string& name,
-                                                        const std::string& expr) {
-    if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
-    if (!validStoredIdentifier(name, MAX_TABLE_NAME_LEN) || expr.empty() ||
-        expr.size() > std::numeric_limits<uint16_t>::max()) {
-        return DBStatus::INVALID_VALUE;
-    }
-    if (!lockManager_.lockMetadata(tablename)) return DBStatus::LOCK_CONFLICT;
+namespace {
 
-    TableSchema tbl = getTableSchema(dbname, tablename);
-    // Find the first column referenced in the expression
-    size_t targetCol = tbl.len;
-    for (size_t i = 0; i < tbl.len; ++i) {
-        if (expr.find(tbl.cols[i].dataName) != std::string::npos) {
-            targetCol = i;
-            break;
-        }
+// No lock escapes on definition, scan, expression or publication exceptions.
+// Reserve the entire canonical relation set before acquiring its first lock.
+class ConstraintMetadataLocks {
+    LockManager& locks_;
+    std::vector<std::string> relations_;
+    size_t acquired_ = 0;
+public:
+    ConstraintMetadataLocks(LockManager& locks, std::vector<std::string> relations)
+        : locks_(locks), relations_(std::move(relations)) {
+        std::sort(relations_.begin(), relations_.end());
+        relations_.erase(std::unique(relations_.begin(), relations_.end()), relations_.end());
     }
-    if (targetCol >= tbl.len) {
-        lockManager_.unlock(tablename);
-        return DBStatus::INVALID_VALUE;
+    bool acquire() {
+        for (; acquired_ < relations_.size(); ++acquired_)
+            if (!locks_.lockMetadata(relations_[acquired_])) return false;
+        return true;
     }
-    // Ensure constraint name is unique
-    for (size_t i = 0; i < tbl.len; ++i) {
-        if (tbl.cols[i].checkConstraintName == name) {
-            lockManager_.unlock(tablename);
-            return DBStatus::TABLE_ALREADY_EXISTS;
-        }
+    ~ConstraintMetadataLocks() {
+        while (acquired_) locks_.unlock(relations_[--acquired_]);
     }
-    for (const auto& check : tbl.additionalCheckConstraints) {
-        if (check.name == name) {
-            lockManager_.unlock(tablename);
-            return DBStatus::TABLE_ALREADY_EXISTS;
-        }
-    }
+};
 
-    // CHECK constraints apply to the whole relation immediately. Validate
-    // every visible row before publishing the expression so ALTER cannot
-    // leave pre-existing rows that violate the newly advertised invariant.
-    const auto typeHints = buildTypeHints(tbl);
-    DatumMetadataContextPtr generatedMetadata;
-    try {generatedMetadata=freezeGeneratedStorageInput(tbl,dbname,tablename,this);}
-    catch(...){lockManager_.unlock(tablename);throw;}
-    DBStatus validationStatus = DBStatus::OK;
-    bool scanOk;
-    try {scanOk = forEachRow(
-        dbname, tablename,
-        [&](uint32_t pageId, uint16_t slotId, const char* data, size_t len) {
-            if (validationStatus != DBStatus::OK) return;
-            const int64_t rid = encodeRid(pageId, slotId);
-            const std::string row(data, len);
-            std::map<std::string, std::string> rowValues;
-            for (size_t columnIndex = 0;
-                 columnIndex < tbl.len; ++columnIndex) {
-                if(generatedMetadata && tbl.cols[columnIndex].generatedKind=='v')continue;
-                if (tbl.cols[columnIndex].isNull &&
-                    dbms::detail::storedRowColumnIsNull(*this, dbname, tablename, tbl, rid, columnIndex)) {
-                    rowValues[tbl.cols[columnIndex].dataName] = "";
-                } else {
-                    rowValues[tbl.cols[columnIndex].dataName] =
-                        extractColumnValue(
-                            row, tbl, columnIndex, dbname);
+// The shared scan owner must finish its normal TLS cleanup even if an
+// expression throws. Retain that primary exception inside its callback and
+// rethrow only after forEachRow has released its actual scan resources.
+template<class Visitor>
+bool forEachConstraintRow(StorageEngine& engine, const std::string& database,
+    const std::string& relation, Visitor&& visitor) {
+    std::exception_ptr failure;
+    const bool ok = engine.forEachRow(database, relation,
+        [&](uint32_t page, uint16_t slot, const char* data, size_t length) {
+            if (failure) return;
+            try { visitor(page, slot, data, length); }
+            catch (...) { failure = std::current_exception(); }
+        });
+    if (failure) std::rethrow_exception(failure);
+    return ok;
+}
+
+// The private expression parser intentionally retains some legacy query
+// grammar as LiteralExpr with preparedSubquery unset. Guard its genuine token
+// role at this definition entry too: native callers do not pass through ALTER
+// TABLE's parser guard. Quoted strings/identifiers are whole distinct tokens,
+// so text containing "(SELECT ...)" never becomes a query by substring.
+void rejectStoredCheckQueryHeads(const std::string& source) {
+    const auto tokens = SQLParser::tokenize(source);
+    for (size_t i = 0; i + 1 < tokens.size(); ++i) {
+        if (tokens[i] != "(") continue;
+        const auto head = SQLParser::toLower(tokens[i + 1]);
+        if (head == "select" || head == "with" || head == "values" || head == "table")
+            throw DbError("0A000", "cannot use subquery in check constraint");
+    }
+}
+
+struct StoredCheckDefinition {
+    std::map<std::string, std::string> hints;
+    std::map<std::string, std::string> collations;
+    size_t firstReferencedColumn;
+};
+
+// Definition analysis never evaluates a row, a cast input, or a user routine.
+// The actual expression-only parser retains quoted identifiers and source
+// spans; there is no synthetic SELECT or borrowed query/parameter owner.
+StoredCheckDefinition prepareStoredCheckDefinition(StorageEngine& engine,
+    const std::string& database, const std::string& relation,
+    const TableSchema& table, const std::string& expression) {
+    rejectStoredCheckQueryHeads(expression);
+    auto root = GeneratedColumnProgram::parseDefinition(expression);
+    StoredCheckDefinition result{buildTypeHints(table), storedCheckCollations(table), table.len};
+    const auto logical = CatalogService::logicalName(relation);
+    ExprEvaluator evaluator;
+    evaluator.setCurrentDB(database);
+    const auto typeOf = [&](const Expr* node) {
+        return ExprHelper::canonicalResultTypeName(
+            ExprHelper::inferParsedInputType(node, result.hints, database, &engine, &evaluator));
+    };
+    // Scalar IN and DISTINCT choose the original builtin '=' signatures,
+    // not CASE common types and not an evaluated sample. Named enums retain
+    // their actual immutable catalog identity; UNKNOWN remains contextual.
+    std::function<void(const Expr*, const Expr*)> equality = [&](const Expr* left, const Expr* right) {
+        const auto* leftRow = dynamic_cast<const RowExpr*>(left);
+        const auto* rightRow = dynamic_cast<const RowExpr*>(right);
+        if (leftRow && leftRow->constructor && rightRow && rightRow->constructor) {
+            if (leftRow->elements.size() != rightRow->elements.size())
+                throw DbError("42601", "unequal number of entries in row expressions");
+            if (leftRow->elements.empty()) throw DbError("0A000", "cannot compare rows of zero length");
+            for (size_t i = 0; i < leftRow->elements.size(); ++i)
+                equality(leftRow->elements[i].get(), rightRow->elements[i].get());
+            return;
+        }
+        const auto lhs = typeOf(left), rhs = typeOf(right);
+        const auto enumIdentity = [&](const std::string& spelling) {
+            if (spelling.empty() || spelling == "unknown" || common_type_detail::array(spelling) ||
+                TypeRegistry::instance().findType(spelling)) return std::string{};
+            return engine.getEnumType(database, spelling).name;
+        };
+        const auto leftEnum = enumIdentity(lhs), rightEnum = enumIdentity(rhs);
+        if (!leftEnum.empty() || !rightEnum.empty()) {
+            if ((!leftEnum.empty() && !rightEnum.empty() && leftEnum == rightEnum) ||
+                (!leftEnum.empty() && rhs == "unknown") || (!rightEnum.empty() && lhs == "unknown")) return;
+            throw DbError("42883", "operator does not exist: " + lhs + " = " + rhs);
+        }
+        (void)resolveBuiltinEquality(lhs, rhs);
+    };
+    const auto pattern = [&](const std::string& operation, const std::vector<const Expr*>& operands) {
+        // Same admitted roles as ExprHelper::prepareArrayTypes::patternType.
+        // Only LIKE has bytea signatures; no pattern/ESCAPE input or routine
+        // is evaluated here, and no fake cast/row/query is constructed.
+        const bool like = operation == "like" || operation == "not like" ||
+            operation == "like escape" || operation == "not like escape";
+        bool bytes = false;
+        std::vector<std::string> types;
+        for (const auto* operand : operands) {
+            const auto type = typeOf(operand);
+            bytes = bytes || type == "bytea";
+            types.push_back(type);
+        }
+        for (const auto& type : types) {
+            const bool unknown = type.empty() || type == "unknown";
+            const bool text = type == "text" || type == "character" || type == "character varying" ||
+                type == "name" || type == "citext";
+            if ((!like && bytes) || (!unknown && (bytes ? type != "bytea" : !text)))
+                throw DbError("42883", "operator does not exist for SQL pattern operand types");
+        }
+    };
+    const auto requireBoolean = [&](const Expr* node) {
+        const auto type = typeOf(node);
+        if (type != "boolean" && type != "unknown")
+            throw DbError("42804", "argument of CHECK must be type boolean, not type " + type);
+        // UNKNOWN string constants have a real builtin boolean input codec;
+        // checking this input is not expression evaluation or constant folding.
+        if (type == "unknown") if (const auto* literal = dynamic_cast<const LiteralExpr*>(node)) {
+            std::string value = literal->value;
+            if (SQLParser::toLower(value) != "null" && value.size() >= 2 && value.front() == '\'' && value.back() == '\'') {
+                std::string decoded;
+                for (size_t i = 1; i + 1 < value.size(); ++i) {
+                    decoded += value[i];
+                    if (value[i] == '\'' && i + 2 < value.size() && value[i + 1] == '\'') ++i;
+                }
+                if (!parsePostgresBoolean(decoded))
+                    throw DbError("22P02", "invalid input syntax for type boolean: " + value);
+            }
+        }
+    };
+    std::function<void(Expr*)> bind = [&](Expr* node) {
+        if (!node) return;
+        if (node->preparedSubquery || node->type == ExprType::Subquery)
+            throw DbError("0A000", "cannot use subquery in check constraint");
+        if (node->type == ExprType::Parameter)
+            throw DbError("42P02", "there is no parameter in a check constraint definition");
+        if (const auto* literal = dynamic_cast<const LiteralExpr*>(node))
+            rejectStoredCheckQueryHeads(literal->value);
+        if (auto* column = dynamic_cast<ColumnRefExpr*>(node)) {
+            if ((!column->table.empty() && column->table != logical.name && column->table != relation) ||
+                (!column->schema.empty() && column->schema != logical.schema))
+                throw DbError("42P01", "invalid reference to relation in check constraint: " + column->toString());
+            size_t index = 0;
+            while (index < table.len && table.cols[index].dataName != column->column) ++index;
+            if (index == table.len)
+                throw DbError("42703", "column does not exist: " + column->toString());
+            result.firstReferencedColumn = std::min(result.firstReferencedColumn, index);
+            const std::string type = result.hints.at(column->column);
+            result.hints[column->toString()] = type;
+            column->binding = QueryColumnBinding{0, 0, index, type};
+            return;
+        }
+        if (auto* binary = dynamic_cast<BinaryOpExpr*>(node)) {
+            bind(binary->left.get());
+            if (binary->op != "::" && binary->op != "COLLATE") bind(binary->right.get());
+            const auto op = SQLParser::toLower(binary->op);
+            if (op == "and" || op == "or") {
+                requireBoolean(binary->left.get()); requireBoolean(binary->right.get());
+            } else if (op == "=" || op == "<>" || op == "!=" || op == "<" || op == ">" || op == "<=" || op == ">=") {
+                const auto left = typeOf(binary->left.get()), right = typeOf(binary->right.get());
+                // Existing enum/domain comparison resolution needs its actual
+                // catalog role; inference below retains that original owner.
+                const auto builtin = [](const std::string& t) {
+                    return t == "unknown" || t == "boolean" || t == "text" || t == "character varying" ||
+                        t == "character" || t == "smallint" || t == "integer" || t == "bigint" ||
+                        t == "real" || t == "double precision" || t == "numeric";
+                };
+                if (builtin(left) && builtin(right)) (void)ExprEvaluator::resolveComparison(binary->op, left, right);
+            } else if (op == "is distinct from" || op == "is not distinct from") {
+                equality(binary->left.get(), binary->right.get());
+            } else if (op == "in" || op == "not in") {
+                const auto* list = dynamic_cast<const RowExpr*>(binary->right.get());
+                if (!list || list->constructor || list->elements.empty())
+                    throw DbError("42601", "IN requires a nonempty expression list");
+                for (const auto& member : list->elements) equality(binary->left.get(), member.get());
+            } else if (op == "like" || op == "not like" || op == "ilike" || op == "not ilike" ||
+                       op == "similar to" || op == "not similar to") {
+                pattern(op, {binary->left.get(), binary->right.get()});
+            } else if (op == "+" || op == "-" || op == "*" || op == "/" || op == "%" || op == "^") {
+                for (const Expr* operand : {binary->left.get(), binary->right.get()}) {
+                    const auto type = typeOf(operand);
+                    if (type == "text" || type == "character varying" || type == "character" || type == "boolean")
+                        throw DbError("42883", "operator does not exist for CHECK operand type " + type);
                 }
             }
-            std::string evaluationError;
-            bool accepted;
-            if(std::any_of(tbl.cols,tbl.cols+tbl.len,[](const Column& c){return c.generatedKind=='v';})) {
-                std::set<std::string> nulls;
-                for(size_t i=0;i<tbl.len;++i)if(tbl.cols[i].generatedKind!='v' && detail::storedRowColumnIsNull(*this,dbname,tablename,tbl,rid,i))nulls.insert(tbl.cols[i].dataName);
-                accepted=generatedCheckInput(expr,tbl,rowValues,nulls,typeHints,dbname,this,&evaluationError,generatedMetadata.get());
-            } else accepted=dbms::ExprHelper::evalCheck(expr,rowValues,typeHints,&evaluationError,dbname,"",this);
-            if (!accepted) {
-                // Distinguish a valid predicate that rejects an existing row
-                // from a malformed or otherwise unevaluable expression,
-                // just as the INSERT/UPDATE CHECK paths do.
-                validationStatus = evaluationError.empty()
-                    ? DBStatus::CHECK_VIOLATION : DBStatus::INVALID_VALUE;
+        } else if (auto* unary = dynamic_cast<UnaryOpExpr*>(node)) {
+            bind(unary->operand.get());
+            if (SQLParser::toLower(unary->op) == "not") requireBoolean(unary->operand.get());
+        } else if (auto* cast = dynamic_cast<CastExpr*>(node)) {
+            bind(cast->operand.get());
+            (void)ExprHelper::declaredTypeInput(cast->typeName, database, &engine);
+        } else if (auto* conditional = dynamic_cast<CaseExpr*>(node)) {
+            bind(conditional->switchExpr.get());
+            for (auto& arm : conditional->whenClauses) {
+                bind(arm.first.get()); bind(arm.second.get());
+                if (!conditional->switchExpr) requireBoolean(arm.first.get());
             }
-        });} catch(...){lockManager_.unlock(tablename);throw;}
-    if (!scanOk) {
-        lockManager_.unlock(tablename);
-        return DBStatus::IO_ERROR;
-    }
-    if (validationStatus != DBStatus::OK) {
-        lockManager_.unlock(tablename);
-        return validationStatus;
-    }
-
-    if (tbl.cols[targetCol].checkExpr.empty()) {
-        tbl.cols[targetCol].checkExpr = expr;
-        tbl.cols[targetCol].checkConstraintName = name;
-        tbl.cols[targetCol].deferrable = false;
-        tbl.cols[targetCol].initiallyDeferred = false;
-    } else {
-        if (tbl.additionalCheckConstraints.size() >=
-            static_cast<size_t>(MAX_ADDITIONAL_CHECK_CONSTRAINTS)) {
-            lockManager_.unlock(tablename);
-            return DBStatus::INVALID_VALUE;
+            bind(conditional->elseExpr.get());
+        } else if (auto* call = dynamic_cast<FunctionCallExpr*>(node)) {
+            if (call->hasOver) throw DbError("42P20", "window functions are not allowed in check constraints");
+            if (call->setReturning || evaluator.queryHostSetReturningRole(call, &engine))
+                throw DbError("0A000", "set-returning functions are not allowed in check constraints");
+            if (!evaluator.hasScalarFunction(call, &engine) && !aggregate_type_detail::builtinName(call).empty())
+                throw DbError("42803", "aggregate functions are not allowed in check constraints");
+            for (size_t i = 0; i < call->args.size(); ++i) {
+                if (i == 0 && call->schema.empty() && SQLParser::toLower(call->funcName) == "extract")
+                    if (const auto* field = dynamic_cast<const ColumnRefExpr*>(call->args[i].get());
+                        field && field->schema.empty() && field->table.empty()) continue;
+                bind(call->args[i].get());
+            }
+            for (auto& argument : call->namedArgs) bind(argument.value.get());
+            const auto operation = SQLParser::toLower(call->funcName);
+            if (call->schema.empty() && call->args.size() == 3 &&
+                (operation == "like escape" || operation == "not like escape" ||
+                 operation == "ilike escape" || operation == "not ilike escape" ||
+                 operation == "similar to escape" || operation == "not similar to escape"))
+                pattern(operation, {call->args[0].get(), call->args[1].get(), call->args[2].get()});
+            if (call->filter || !call->orderBy.empty() || call->distinct)
+                throw DbError("42803", "aggregate expressions are not allowed in check constraints");
+        } else if (auto* array = dynamic_cast<ArrayExpr*>(node)) {
+            for (auto& element : array->elements) bind(element.get());
+        } else if (auto* row = dynamic_cast<RowExpr*>(node)) {
+            for (auto& element : row->elements) bind(element.get());
+        } else if (auto* quantified = dynamic_cast<QuantifiedComparisonExpr*>(node)) {
+            bind(quantified->left.get()); bind(quantified->right.get());
         }
-        CheckConstraint check;
-        check.name = name;
-        check.expression = expr;
-        tbl.additionalCheckConstraints.push_back(std::move(check));
+    };
+    bind(root.get());
+    (void)ExprEvaluator::analyzeExplicitResultCollation(root.get());
+    evaluator.bindScalarFunctions(root.get(), &engine);
+    requireBoolean(root.get());
+    return result;
+}
+
+DBStatus validateStoredCheckRows(StorageEngine& engine, const std::string& database,
+    const std::string& relation, const TableSchema& table, const std::string& expression,
+    const StoredCheckDefinition& definition) {
+    const auto generated = freezeGeneratedStorageInput(table, database, relation, &engine);
+    LocalExpressionSyntax syntax;
+    DBStatus status = DBStatus::OK;
+    std::vector<bool> capturedNulls(table.len);
+    const bool ok = forEachConstraintRow(engine, database, relation,
+        [&](uint32_t, uint16_t, const char* data, size_t length) {
+            if (status != DBStatus::OK) return;
+            ScannedNullRowBinding binding(table, capturedNulls, data, length);
+            const std::string row(data, length);
+            std::map<std::string, std::string> values;
+            std::set<std::string> nulls;
+            for (size_t i = 0; i < table.len; ++i) {
+                if (table.cols[i].generatedKind == 'v') continue;
+                bool isNull = false;
+                values[table.cols[i].dataName] = engine.extractColumnValue(row, table, i, database, true, &isNull);
+                if (isNull) nulls.insert(table.cols[i].dataName);
+            }
+            const auto evaluated = ExprHelper::evalStringWithNullsSyntax(syntax, expression,
+                values, nulls, definition.hints, database, "", &engine,
+                definition.collations, false, nullptr, generated.get());
+            if (!evaluated.ok)
+                throw DbError(evaluated.sqlState.empty() ? "XX000" : evaluated.sqlState, evaluated.error);
+            if (!evaluated.isNull) {
+                const auto boolean = parsePostgresBoolean(evaluated.value);
+                if (!boolean) throw DbError("42804", "CHECK expression did not produce a boolean");
+                if (!*boolean) status = DBStatus::CHECK_VIOLATION;
+            }
+        });
+    return ok ? status : DBStatus::IO_ERROR;
+}
+
+DBStatus validateStoredForeignKeyRows(StorageEngine& engine, const std::string& database,
+    const std::string& childName, const TableSchema& child,
+    const std::string& parentName, const TableSchema& parent,
+    const ValidatedForeignKeyDefinition& definition) {
+    // Canonical equality is sufficient only for these actual parent roles.
+    // Locale/network/legacy temporal keys retain the existing FK equality.
+    bool canonicalSafe = true;
+    for (const size_t index : definition.referencedColumnIndices) {
+        const auto& column = parent.cols[index];
+        canonicalSafe = canonicalSafe && columnUsesBinaryCollation(column) &&
+            column.dataType != "inet" && column.dataType != "cidr" &&
+            column.dataType != "macaddr" && column.dataType != "macaddr8" &&
+            !(column.storageCodec == Column::StorageCodec::Legacy &&
+              (column.dataType == "date" || column.dataType == "time" ||
+               column.dataType == "timestamp" || column.dataType == "timestamptz" || column.dataType == "datetime"));
     }
-    if (!writeSchemaFile(dbname, tablename, tbl)) {
-        lockManager_.unlock(tablename);
+    std::set<std::vector<std::string>> canonicalKeys;
+    std::vector<std::vector<std::string>> comparisonKeys;
+    std::vector<bool> parentNulls(parent.len), childNulls(child.len);
+    const bool parentOk = forEachConstraintRow(engine, database, parentName,
+        [&](uint32_t, uint16_t, const char* data, size_t length) {
+            ScannedNullRowBinding binding(parent, parentNulls, data, length);
+            const std::string row(data, length);
+            std::vector<std::string> key;
+            key.reserve(definition.referencedColumnIndices.size());
+            for (const size_t index : definition.referencedColumnIndices) {
+                bool isNull = false;
+                auto value = engine.extractColumnValue(row, parent, index, database, true, &isNull);
+                if (isNull) return;
+                key.push_back(canonicalSafe ? canonicalColumnKeyValue(parent.cols[index], value) : std::move(value));
+            }
+            if (canonicalSafe) canonicalKeys.insert(std::move(key));
+            else comparisonKeys.push_back(std::move(key));
+        });
+    if (!parentOk) return DBStatus::IO_ERROR;
+    bool orphan = false;
+    const bool childOk = forEachConstraintRow(engine, database, childName,
+        [&](uint32_t, uint16_t, const char* data, size_t length) {
+            if (orphan) return;
+            ScannedNullRowBinding binding(child, childNulls, data, length);
+            const std::string row(data, length);
+            std::vector<std::string> key;
+            key.reserve(definition.localColumnIndices.size());
+            for (size_t i = 0; i < definition.localColumnIndices.size(); ++i) {
+                bool isNull = false;
+                auto value = engine.extractColumnValue(row, child, definition.localColumnIndices[i], database, true, &isNull);
+                if (isNull) return; // MATCH SIMPLE, never infer NULL from empty text.
+                key.push_back(canonicalSafe ? canonicalColumnKeyValue(parent.cols[definition.referencedColumnIndices[i]], value) : std::move(value));
+            }
+            if (canonicalSafe) orphan = canonicalKeys.count(key) == 0;
+            else orphan = std::none_of(comparisonKeys.begin(), comparisonKeys.end(), [&](const auto& candidate) {
+                for (size_t i = 0; i < key.size(); ++i)
+                    if (!foreignKeyColumnValuesEqual(parent.cols[definition.referencedColumnIndices[i]], candidate[i], key[i])) return false;
+                return true;
+            });
+        });
+    return childOk ? (orphan ? DBStatus::FOREIGN_KEY_VIOLATION : DBStatus::OK) : DBStatus::IO_ERROR;
+}
+
+} // namespace
+
+DBStatus StorageEngine::publishConstraintValidation(const std::string& database,
+    const std::string& relation, const std::string& name, bool validated) {
+    const auto before = getStorageParams(database, relation);
+    auto after = before;
+    after["constraint." + name + ".validated"] = validated ? "1" : "0";
+    after["constraint." + name + ".not_valid"] = validated ? "0" : "1";
+    const auto status = setStorageParams(database, relation, after);
+    if (status != DBStatus::OK && setStorageParams(database, relation, before) != DBStatus::OK)
+        throw DbError("58030", "could not restore constraint validation metadata after failed publication");
+    return status;
+}
+
+DBStatus StorageEngine::publishConstraintSchema(const std::string& database,
+    const std::string& relation, const TableSchema& before, const TableSchema& after,
+    const std::string& name, bool validated) {
+    if (!writeSchemaFile(database, relation, after)) {
+        if (!writeSchemaFile(database, relation, before))
+            throw DbError("58030", "could not restore constraint definition after failed publication");
         return DBStatus::IO_ERROR;
     }
-    lockManager_.unlock(tablename);
-    return DBStatus::OK;
+    try {
+        const auto status = publishConstraintValidation(database, relation, name, validated);
+        if (status == DBStatus::OK) return status;
+        if (!writeSchemaFile(database, relation, before))
+            throw DbError("58030", "could not restore constraint definition after failed publication");
+        return status;
+    } catch (...) {
+        const auto primary = std::current_exception();
+        if (!writeSchemaFile(database, relation, before))
+            throw DbError("58030", "could not restore constraint definition after failed publication");
+        std::rethrow_exception(primary);
+    }
+}
+
+DBStatus StorageEngine::alterTableAddCheckConstraint(const std::string& database,
+    const std::string& relation, const std::string& name, const std::string& expression) {
+    try { return alterTableAddCheckConstraint(database, relation, name, expression, true); }
+    catch (const DbError& error) {
+        const auto& state = error.sqlState();
+        if (state.rfind("42", 0) == 0 || state.rfind("22", 0) == 0 || state.rfind("0A", 0) == 0)
+            return DBStatus::INVALID_VALUE;
+        throw;
+    }
+}
+
+DBStatus StorageEngine::alterTableAddCheckConstraint(const std::string& database,
+    const std::string& relation, const std::string& name, const std::string& expression,
+    bool validateExisting) {
+    if (!tableExists(database, relation)) return DBStatus::TABLE_NOT_FOUND;
+    if (!validStoredIdentifier(name, MAX_TABLE_NAME_LEN) || expression.empty() ||
+        expression.size() > std::numeric_limits<uint16_t>::max()) return DBStatus::INVALID_VALUE;
+    ConstraintMetadataLocks locks(lockManager_, {relation});
+    if (!locks.acquire()) return DBStatus::LOCK_CONFLICT;
+    const auto before = getTableSchema(database, relation);
+    auto table = before;
+    for (size_t i = 0; i < table.len; ++i)
+        if (table.cols[i].checkConstraintName == name) return DBStatus::TABLE_ALREADY_EXISTS;
+    for (const auto& check : table.additionalCheckConstraints)
+        if (check.name == name) return DBStatus::TABLE_ALREADY_EXISTS;
+    for (size_t i = 0; i < table.fkLen; ++i)
+        if (table.fks[i].name == name) return DBStatus::TABLE_ALREADY_EXISTS;
+    const auto definition = prepareStoredCheckDefinition(*this, database, relation, table, expression);
+    if (validateExisting) {
+        const auto status = validateStoredCheckRows(*this, database, relation, table, expression, definition);
+        if (status != DBStatus::OK) return status;
+    }
+    const size_t target = definition.firstReferencedColumn;
+    if (target < table.len && table.cols[target].checkExpr.empty()) {
+        table.cols[target].checkExpr = expression;
+        table.cols[target].checkConstraintName = name;
+        table.cols[target].deferrable = false;
+        table.cols[target].initiallyDeferred = false;
+    } else {
+        if (table.additionalCheckConstraints.size() >= size_t(MAX_ADDITIONAL_CHECK_CONSTRAINTS)) return DBStatus::INVALID_VALUE;
+        CheckConstraint check;
+        check.name = name; check.expression = expression;
+        table.additionalCheckConstraints.push_back(std::move(check));
+    }
+    return publishConstraintSchema(database, relation, before, table, name, validateExisting);
 }
 
 DBStatus StorageEngine::alterTableAddUniqueConstraint(const std::string& dbname,
@@ -23060,159 +23394,124 @@ DBStatus StorageEngine::alterTableAddPrimaryKey(const std::string& dbname,
 }
 
 
-DBStatus StorageEngine::alterTableAddFKConstraint(const std::string& dbname,
-                                                     const std::string& tablename,
-                                                     const std::string& name,
-                                                     const std::vector<std::string>& localCols,
-                                                     const std::string& refTable,
-                                                     const std::vector<std::string>& refCols,
-                                                     const std::string& onDelete,
-                                                     const std::string& onUpdate) {
-    if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
-    std::string normalizedDelete;
-    std::string normalizedUpdate;
-    if (!normalizeForeignKeyAction(onDelete, normalizedDelete) ||
-        !normalizeForeignKeyAction(onUpdate, normalizedUpdate)) {
-        return DBStatus::INVALID_VALUE;
-    }
-    if (!validStoredIdentifier(name, MAX_TABLE_NAME_LEN) ||
-        !validStoredRelationName(refTable)) return DBStatus::INVALID_VALUE;
-    if (localCols.empty() ||
-        (!refCols.empty() && localCols.size() != refCols.size()) ||
-        localCols.size() > MAX_COLUMNS) {
-        return DBStatus::INVALID_VALUE;
-    }
-    for (const auto& columnName : localCols) {
-        if (!validStoredIdentifier(columnName, MAX_COL_NAME_LEN)) {
+DBStatus StorageEngine::alterTableAddFKConstraint(const std::string& database,
+    const std::string& relation, const std::string& name,
+    const std::vector<std::string>& localColumns, const std::string& parentName,
+    const std::vector<std::string>& parentColumns, const std::string& onDelete,
+    const std::string& onUpdate) {
+    try {
+        const auto status = alterTableAddFKConstraint(database, relation, name, localColumns,
+            parentName, parentColumns, onDelete, onUpdate, true);
+        return status == DBStatus::FOREIGN_KEY_VIOLATION ? DBStatus::INVALID_VALUE : status;
+    } catch (const DbError& error) {
+        const auto& state = error.sqlState();
+        if (state == "42P01") return DBStatus::TABLE_NOT_FOUND;
+        if (state.rfind("42", 0) == 0 || state.rfind("22", 0) == 0 || state.rfind("0A", 0) == 0)
             return DBStatus::INVALID_VALUE;
-        }
+        throw;
     }
-    for (const auto& columnName : refCols) {
-        if (!validStoredIdentifier(columnName, MAX_COL_NAME_LEN)) {
-            return DBStatus::INVALID_VALUE;
-        }
-    }
-    if (!tableExists(dbname, refTable)) {
-        // FK references a table in the same database
-        if (!std::filesystem::exists(schemaPath(dbname, refTable))) {
-            return DBStatus::TABLE_NOT_FOUND;
-        }
-    }
+}
 
-    // The definition scan must see stable child and parent relations. Acquire
-    // both metadata locks in a canonical order to avoid cross-table DDL
-    // deadlocks; self-references acquire the relation only once.
-    std::vector<std::string> relationNames = {tablename};
-    if (refTable != tablename) relationNames.push_back(refTable);
-    std::sort(relationNames.begin(), relationNames.end());
-    std::vector<std::string> lockedRelations;
-    for (const auto& relationName : relationNames) {
-        if (!lockManager_.lockMetadata(relationName)) {
-            for (auto it = lockedRelations.rbegin();
-                 it != lockedRelations.rend(); ++it) {
-                lockManager_.unlock(*it);
-            }
-            return DBStatus::LOCK_CONFLICT;
-        }
-        lockedRelations.push_back(relationName);
-    }
-    const auto finish = [&](DBStatus status) {
-        for (auto it = lockedRelations.rbegin();
-             it != lockedRelations.rend(); ++it) {
-            lockManager_.unlock(*it);
-        }
-        return status;
-    };
-
-    if (!tableExists(dbname, tablename) ||
-        !tableExists(dbname, refTable)) {
-        return finish(DBStatus::TABLE_NOT_FOUND);
-    }
-
-    TableSchema tbl = getTableSchema(dbname, tablename);
-    TableSchema referencedTable = getTableSchema(dbname, refTable);
-    if (tbl.fkLen >= MAX_COLUMNS) {
-        return finish(DBStatus::INVALID_VALUE);
-    }
-
-    // Check for duplicate constraint name
-    for (size_t i = 0; i < tbl.fkLen; ++i) {
-        if (tbl.fks[i].name == name) {
-            return finish(DBStatus::TABLE_ALREADY_EXISTS);
-        }
-    }
-
+DBStatus StorageEngine::alterTableAddFKConstraint(const std::string& database,
+    const std::string& relation, const std::string& name,
+    const std::vector<std::string>& localColumns, const std::string& parentName,
+    const std::vector<std::string>& parentColumns, const std::string& onDelete,
+    const std::string& onUpdate, bool validateExisting) {
+    if (!tableExists(database, relation)) return DBStatus::TABLE_NOT_FOUND;
+    if (!tableExists(database, parentName))
+        throw DbError("42P01", "referenced relation does not exist: " + parentName);
+    std::string deleteAction, updateAction;
+    if (!validStoredIdentifier(name, MAX_TABLE_NAME_LEN) || !validStoredRelationName(parentName) ||
+        !normalizeForeignKeyAction(onDelete, deleteAction) || !normalizeForeignKeyAction(onUpdate, updateAction)) return DBStatus::INVALID_VALUE;
+    for (const auto& column : localColumns)
+        if (!validStoredIdentifier(column, MAX_COL_NAME_LEN)) return DBStatus::INVALID_VALUE;
+    for (const auto& column : parentColumns)
+        if (!validStoredIdentifier(column, MAX_COL_NAME_LEN)) return DBStatus::INVALID_VALUE;
+    ConstraintMetadataLocks locks(lockManager_, {relation, parentName});
+    if (!locks.acquire()) return DBStatus::LOCK_CONFLICT;
+    const auto before = getTableSchema(database, relation);
+    auto table = before;
+    const auto parent = getTableSchema(database, parentName);
+    if (table.fkLen >= MAX_COLUMNS) return DBStatus::INVALID_VALUE;
+    for (size_t i = 0; i < table.fkLen; ++i)
+        if (table.fks[i].name == name) return DBStatus::TABLE_ALREADY_EXISTS;
+    for (size_t i = 0; i < table.len; ++i)
+        if (table.cols[i].checkConstraintName == name) return DBStatus::TABLE_ALREADY_EXISTS;
+    for (const auto& check : table.additionalCheckConstraints)
+        if (check.name == name) return DBStatus::TABLE_ALREADY_EXISTS;
     ValidatedForeignKeyDefinition definition;
-    const DBStatus validationStatus = validateForeignKeyDefinition(
-        tbl, referencedTable, localCols, refCols, definition);
-    if (validationStatus != DBStatus::OK) {
-        return finish(validationStatus);
+    ForeignKeyDefinitionDiagnostic diagnostic;
+    const auto status = validateForeignKeyDefinition(table, parent, localColumns, parentColumns, definition, nullptr, &diagnostic);
+    if (status != DBStatus::OK) {
+        if (!diagnostic.sqlState.empty()) throw DbError(diagnostic.sqlState, diagnostic.message);
+        return status;
     }
-    const auto& localColumnIndices = definition.localColumnIndices;
-    const auto& referencedColumnIndices =
-        definition.referencedColumnIndices;
-
-    std::set<std::vector<std::string>> referencedKeys;
-    const bool parentScanOk = forEachRow(
-        dbname, refTable,
-        [&](uint32_t pageId, uint16_t slotId, const char* data, size_t len) {
-            const int64_t rid = encodeRid(pageId, slotId);
-            const std::string row(data, len);
-            std::vector<std::string> key;
-            key.reserve(referencedColumnIndices.size());
-            for (const size_t columnIndex : referencedColumnIndices) {
-                if (referencedTable.cols[columnIndex].isNull &&
-                    dbms::detail::storedRowColumnIsNull(*this, dbname, refTable, referencedTable, rid, columnIndex)) {
-                    return;
-                }
-                key.push_back(canonicalColumnKeyValue(
-                    referencedTable.cols[columnIndex],
-                    extractColumnValue(
-                        row, referencedTable, columnIndex, dbname)));
-            }
-            referencedKeys.insert(std::move(key));
-        });
-    if (!parentScanOk) return finish(DBStatus::IO_ERROR);
-
-    bool orphanedRow = false;
-    const bool childScanOk = forEachRow(
-        dbname, tablename,
-        [&](uint32_t pageId, uint16_t slotId, const char* data, size_t len) {
-            if (orphanedRow) return;
-            const int64_t rid = encodeRid(pageId, slotId);
-            const std::string row(data, len);
-            std::vector<std::string> key;
-            key.reserve(localColumnIndices.size());
-            for (size_t valueIndex = 0;
-                 valueIndex < localColumnIndices.size(); ++valueIndex) {
-                const size_t localColumnIndex =
-                    localColumnIndices[valueIndex];
-                if (tbl.cols[localColumnIndex].isNull &&
-                    dbms::detail::storedRowColumnIsNull(*this, dbname, tablename, tbl, rid, localColumnIndex)) {
-                    return;  // MATCH SIMPLE: any NULL suppresses the check.
-                }
-                key.push_back(canonicalColumnKeyValue(
-                    referencedTable.cols[referencedColumnIndices[valueIndex]],
-                    extractColumnValue(
-                        row, tbl, localColumnIndex, dbname)));
-            }
-            orphanedRow = referencedKeys.count(key) == 0;
-        });
-    if (!childScanOk) return finish(DBStatus::IO_ERROR);
-    if (orphanedRow) return finish(DBStatus::INVALID_VALUE);
-
-    ForeignKey fk;
-    fk.name = name;
-    fk.colNames = localCols;
-    fk.refCols = definition.referencedColumnNames;
-    fk.refTable = refTable;
-    fk.onDelete = std::move(normalizedDelete);
-    fk.onUpdate = std::move(normalizedUpdate);
-    tbl.appendFK(fk);
-    if (!writeSchemaFile(dbname, tablename, tbl)) {
-        return finish(DBStatus::IO_ERROR);
+    if (validateExisting) {
+        const auto validation = validateStoredForeignKeyRows(*this, database, relation, table, parentName, parent, definition);
+        if (validation != DBStatus::OK) return validation;
     }
-    return finish(DBStatus::OK);
+    ForeignKey key;
+    key.name = name; key.colNames = localColumns;
+    key.refCols = definition.referencedColumnNames; key.refTable = parentName;
+    key.onDelete = std::move(deleteAction); key.onUpdate = std::move(updateAction);
+    table.appendFK(key);
+    return publishConstraintSchema(database, relation, before, table, name, validateExisting);
+}
+
+DBStatus StorageEngine::validateTableConstraint(const std::string& database,
+    const std::string& relation, const std::string& name) {
+    if (!tableExists(database, relation)) return DBStatus::TABLE_NOT_FOUND;
+    // Discover only the canonical lock set, then resolve the constraint again
+    // after acquisition. A concurrent definition change cannot borrow an
+    // unprotected parent or silently validate a different constraint.
+    const auto initial = getTableSchema(database, relation);
+    std::string parentName;
+    for (size_t i = 0; i < initial.fkLen; ++i)
+        if (initial.fks[i].name == name) parentName = initial.fks[i].refTable;
+    std::vector<std::string> relations{relation};
+    if (!parentName.empty()) relations.push_back(parentName);
+    ConstraintMetadataLocks locks(lockManager_, std::move(relations));
+    if (!locks.acquire()) return DBStatus::LOCK_CONFLICT;
+    const auto table = getTableSchema(database, relation);
+    const auto validationParams = getStorageParams(database, relation);
+    const auto flag = validationParams.find("constraint." + name + ".validated");
+    const bool alreadyValidated = flag == validationParams.end() || flag->second == "1";
+    std::string expression;
+    for (size_t i = 0; i < table.len; ++i)
+        if (table.cols[i].checkConstraintName == name) expression = table.cols[i].checkExpr;
+    for (const auto& check : table.additionalCheckConstraints)
+        if (check.name == name) expression = check.expression;
+    if (!expression.empty()) {
+        if (alreadyValidated) return DBStatus::OK;
+        const auto definition = prepareStoredCheckDefinition(*this, database, relation, table, expression);
+        const auto status = validateStoredCheckRows(*this, database, relation, table, expression, definition);
+        return status == DBStatus::OK ? publishConstraintValidation(database, relation, name, true) : status;
+    }
+    for (size_t i = 0; i < table.fkLen; ++i) if (table.fks[i].name == name) {
+        const auto& key = table.fks[i];
+        if (key.refTable != parentName) return DBStatus::LOCK_CONFLICT;
+        if (alreadyValidated) return DBStatus::OK;
+        if (!tableExists(database, parentName)) return DBStatus::TABLE_NOT_FOUND;
+        const auto parent = getTableSchema(database, parentName);
+        ValidatedForeignKeyDefinition definition;
+        ForeignKeyDefinitionDiagnostic diagnostic;
+        const auto status = validateForeignKeyDefinition(table, parent, key.colNames, key.refCols, definition, nullptr, &diagnostic);
+        if (status != DBStatus::OK) {
+            if (!diagnostic.sqlState.empty()) throw DbError(diagnostic.sqlState, diagnostic.message);
+            return status;
+        }
+        const auto validation = validateStoredForeignKeyRows(*this, database, relation, table, parentName, parent, definition);
+        return validation == DBStatus::OK ? publishConstraintValidation(database, relation, name, true) : validation;
+    }
+    // Constraint kind is checked before its validated flag. UNIQUE, PRIMARY
+    // KEY and EXCLUDE are not targets of ALTER TABLE VALIDATE CONSTRAINT.
+    if (std::find(table.uniqueConstraintNames.begin(), table.uniqueConstraintNames.end(), name) != table.uniqueConstraintNames.end() ||
+        primaryKeyConstraintName(table) == name)
+        throw DbError("42809", "constraint cannot be validated: " + name);
+    for (const auto& exclusion : getExclusionConstraints(database, relation))
+        if (exclusion.name == name)
+            throw DbError("42809", "constraint cannot be validated: " + name);
+    throw DbError("42704", "constraint does not exist: " + name);
 }
 
 DBStatus StorageEngine::alterTableDropConstraint(const std::string& dbname,
@@ -32853,28 +33152,6 @@ DBStatus StorageEngine::updateInternal(
                     localValues.push_back(newValue);
                 }
                 if (!changed || hasNull) continue;
-                if (!foreignKey.name.empty() &&
-                    transactionContext().inTransaction &&
-                    isConstraintCurrentlyDeferred(
-                        dbname, tablename, foreignKey.name)) {
-                    DeferredCheck check;
-                    check.kind = DeferredCheck::Kind::ForeignKey;
-                    check.dbname = dbname;
-                    check.tablename = tablename;
-                    check.rid = rid;
-                    check.constraintName = foreignKey.name;
-                    check.colIdx = 0;
-                    check.uniqueCol = foreignKey.colNames.front();
-                    check.payloadValue = localValues.front();
-                    check.refTable = foreignKey.refTable;
-                    check.refCol = foreignKey.refCols.front();
-                    check.fkPayloadValues = localValues;
-                    check.fkLocalCols = foreignKey.colNames;
-                    check.fkRefCols = foreignKey.refCols;
-                    pendingDeferredForeignKeyChecks.push_back(
-                        std::move(check));
-                    continue;
-                }
                 if (!tableExists(dbname, foreignKey.refTable)) {
                     lockManager_.unlock(tablename);
                     return DBStatus::TABLE_NOT_FOUND;
@@ -32900,6 +33177,42 @@ DBStatus StorageEngine::updateInternal(
                     referencedColumns.push_back(columnIndex);
                 }
 
+                bool equalKey = true;
+                for (size_t valueIndex = 0; valueIndex < foreignKey.colNames.size(); ++valueIndex) {
+                    const auto& columnName = foreignKey.colNames[valueIndex];
+                    size_t local = 0;
+                    while (local < tbl.len && tbl.cols[local].dataName != columnName) ++local;
+                    if (local == tbl.len || local >= oldNullColumns.size() || oldNullColumns[local] ||
+                        !foreignKeyColumnValuesEqual(referenced.cols[referencedColumns[valueIndex]],
+                            valueFromRowMap(oldLogicalValues, columnName), localValues[valueIndex])) {
+                        equalKey = false;
+                        break;
+                    }
+                }
+                if (equalKey) continue;
+
+                if (!foreignKey.name.empty() &&
+                    transactionContext().inTransaction &&
+                    isConstraintCurrentlyDeferred(
+                        dbname, tablename, foreignKey.name)) {
+                    DeferredCheck check;
+                    check.kind = DeferredCheck::Kind::ForeignKey;
+                    check.dbname = dbname;
+                    check.tablename = tablename;
+                    check.rid = rid;
+                    check.constraintName = foreignKey.name;
+                    check.colIdx = 0;
+                    check.uniqueCol = foreignKey.colNames.front();
+                    check.payloadValue = localValues.front();
+                    check.refTable = foreignKey.refTable;
+                    check.refCol = foreignKey.refCols.front();
+                    check.fkPayloadValues = localValues;
+                    check.fkLocalCols = foreignKey.colNames;
+                    check.fkRefCols = foreignKey.refCols;
+                    pendingDeferredForeignKeyChecks.push_back(
+                        std::move(check));
+                    continue;
+                }
                 bool found = false;
                 // A row may update both its referenced key and its
                 // self-reference in one statement.
@@ -32910,8 +33223,8 @@ DBStatus StorageEngine::updateInternal(
                         const std::string& referencedName =
                             referenced.cols[referencedColumns[valueIndex]].dataName;
                         if (newColumnIsNull(referencedColumns[valueIndex]) ||
-                            valueFromRowMap(rowValues, referencedName) !=
-                            localValues[valueIndex]) {
+                            !foreignKeyColumnValuesEqual(referenced.cols[referencedColumns[valueIndex]],
+                                valueFromRowMap(rowValues, referencedName), localValues[valueIndex])) {
                             found = false;
                             break;
                         }
@@ -32929,10 +33242,9 @@ DBStatus StorageEngine::updateInternal(
                                     encodeRid(pageId, slotId), referencedColumns[valueIndex])) {
                                 return;
                             }
-                            if (extractColumnValue(
-                                    referencedRow, referenced,
-                                    referencedColumns[valueIndex], dbname) !=
-                                localValues[valueIndex]) {
+                            if (!foreignKeyColumnValuesEqual(referenced.cols[referencedColumns[valueIndex]],
+                                    extractColumnValue(referencedRow, referenced,
+                                        referencedColumns[valueIndex], dbname), localValues[valueIndex])) {
                                 return;
                             }
                         }

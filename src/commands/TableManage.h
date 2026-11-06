@@ -168,8 +168,13 @@ public:
                                                   const std::string& constraintName,
                                                   bool deferrable,
                                                   bool initiallyDeferred);
+    // Original native overloads retain their DBStatus definition-error contract.
     DBStatus alterTableAddCheckConstraint(const std::string& dbname, const std::string& tablename,
                                            const std::string& name, const std::string& expr);
+    // SQL requests this explicit phase overload for typed definition diagnostics.
+    DBStatus alterTableAddCheckConstraint(const std::string& dbname, const std::string& tablename,
+                                           const std::string& name, const std::string& expr,
+                                           bool validateExisting);
     DBStatus alterTableAddUniqueConstraint(const std::string& dbname, const std::string& tablename,
                                             const std::string& name, const std::vector<std::string>& colNames);
     DBStatus alterTableAddPrimaryKey(const std::string& dbname, const std::string& tablename,
@@ -178,6 +183,14 @@ public:
                                         const std::string& name, const std::vector<std::string>& localCols,
                                         const std::string& refTable, const std::vector<std::string>& refCols,
                                         const std::string& onDelete = "restrict", const std::string& onUpdate = "restrict");
+    DBStatus alterTableAddFKConstraint(const std::string& dbname, const std::string& tablename,
+                                        const std::string& name, const std::vector<std::string>& localCols,
+                                        const std::string& refTable, const std::vector<std::string>& refCols,
+                                        const std::string& onDelete, const std::string& onUpdate,
+                                        bool validateExisting);
+    // Historical validation is distinct from enforcement on subsequent writes.
+    DBStatus validateTableConstraint(const std::string& dbname, const std::string& tablename,
+                                     const std::string& name);
     DBStatus alterTableDropConstraint(const std::string& dbname, const std::string& tablename,
                                        const std::string& name);
     DBStatus commentOnTable(const std::string& dbname, const std::string& tablename,
@@ -2450,6 +2463,11 @@ private:
     inline static thread_local std::string moneyLocale_ = "C";
 
 private:
+    DBStatus publishConstraintSchema(const std::string& dbname, const std::string& tablename,
+        const TableSchema& before, const TableSchema& after,
+        const std::string& name, bool validated);
+    DBStatus publishConstraintValidation(const std::string& dbname, const std::string& tablename,
+        const std::string& name, bool validated);
     template<class Builder>
     decltype(auto) withQueryBindingMetadata(const std::string& dbname,
         const std::string& sql,bool finalizeUnknownOutput,

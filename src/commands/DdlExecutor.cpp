@@ -714,6 +714,14 @@ std::string constraintMetadataKey(const std::string& name, const std::string& op
     return "constraint." + name + "." + option;
 }
 
+// SQL storage options cannot stand in for a successful constraint proof.
+// Quoted option spelling is inspected too; the native metadata publication
+// API remains available to the real ADD/VALIDATE/rename/drop owners.
+bool internalConstraintStorageOption(const std::string& spelling) {
+    const auto name = toLower(stripQuotes(trim(spelling)));
+    return name == "constraint" || name.rfind("constraint.", 0) == 0;
+}
+
 bool metadataBool(const std::map<std::string, std::string>& params,
                   const std::string& key, bool fallback) {
     auto it = params.find(key);
@@ -2916,14 +2924,11 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                     std::cout << "SQL syntax error: VALIDATE CONSTRAINT requires a name" << std::endl;
                     return true;
                 }
-                if (!tableConstraintExists(s.currentDB, tableName, sub.name)) {
-                    std::cout << "Constraint not found" << std::endl;
-                    return true;
-                }
-                status = g_engine.updateStorageParams(
-                    s.currentDB, tableName,
-                    {{constraintMetadataKey(sub.name, "validated"), "1"},
-                     {constraintMetadataKey(sub.name, "not_valid"), "0"}});
+                status = g_engine.validateTableConstraint(s.currentDB, tableName, sub.name);
+                if (status == DBStatus::CHECK_VIOLATION)
+                    throw DbError("23514", "check constraint \"" + sub.name + "\" is violated by some row");
+                if (status == DBStatus::FOREIGN_KEY_VIOLATION)
+                    throw DbError("23503", "foreign key constraint \"" + sub.name + "\" is violated by some row");
                 if (!alterStatusOk(status, "Constraint")) return true;
                 std::cout << "Constraint " << sub.name << " validated" << std::endl;
                 break;
@@ -3196,28 +3201,40 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                         std::cout << "CHECK constraint expression is required" << std::endl;
                         return true;
                     }
+                    std::string expression = tc.checkExpr->toString();
+                    if (ddlSourceIdentity.statement == stmt && ddlSourceIdentity.source) {
+                        const size_t begin = tc.checkExpr->sourceBegin;
+                        const size_t end = tc.checkExpr->sourceEnd;
+                        if (begin == std::string::npos || end < begin || end > ddlSourceIdentity.source->size())
+                            throw DbError("XX000", "CHECK definition lost its original source span");
+                        expression = ddlSourceIdentity.source->substr(begin, end - begin);
+                    }
                     status = g_engine.alterTableAddCheckConstraint(
-                        s.currentDB, tableName, constraintName, tc.checkExpr->toString());
+                        s.currentDB, tableName, constraintName, expression, !tc.notValid);
                     if (status == DBStatus::CHECK_VIOLATION) {
                         throw DbError("23514", "check constraint \"" +
                             constraintName + "\" of relation \"" +
                             stmt->tableName + "\" is violated by some row");
                     }
                 } else if (type == "primary key") {
+                    if (tc.notValid) throw DbError("0A000", "PRIMARY KEY constraints cannot be marked NOT VALID");
                     status = g_engine.alterTableAddPrimaryKey(
                         s.currentDB, tableName, constraintName, tc.columns);
                 } else if (type == "unique") {
+                    if (tc.notValid) throw DbError("0A000", "UNIQUE constraints cannot be marked NOT VALID");
                     status = g_engine.alterTableAddUniqueConstraint(
                         s.currentDB, tableName, constraintName, tc.columns);
                 } else if (type == "foreign key") {
                     status = g_engine.alterTableAddFKConstraint(
                         s.currentDB, tableName, constraintName, tc.columns,
                         resolveTableName(s, tc.refTable),
-                        tc.refColumns, tc.onDelete, tc.onUpdate);
+                        tc.refColumns, tc.onDelete, tc.onUpdate, !tc.notValid);
                 } else {
                     std::cout << "ALTER TABLE constraint type is unsupported" << std::endl;
                     return true;
                 }
+                if (status == DBStatus::FOREIGN_KEY_VIOLATION)
+                    throw DbError("23503", "foreign key constraint \"" + constraintName + "\" is violated by some row");
                 if (!alterStatusOk(status, "Constraint")) return true;
                 if (type == "check") {
                     status = g_engine.alterTableSetConstraintDeferrability(
@@ -3298,7 +3315,15 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
             case AlterTableStmt::Action::SetOptions:
             case AlterTableStmt::Action::ResetOptions: {
                 std::map<std::string, std::string> params;
-                for (const auto& option : sub.options) params[option.first] = option.second;
+                for (const auto& option : sub.options) {
+                    if (internalConstraintStorageOption(option.first)) {
+                        // RESET of an unrecognized reloption is a successful
+                        // no-op, not permission to erase an internal proof.
+                        if (sub.action == AlterTableStmt::Action::ResetOptions) continue;
+                        throw DbError("22023", "unrecognized storage parameter: " + option.first);
+                    }
+                    params[option.first] = option.second;
+                }
                 status = g_engine.updateStorageParams(s.currentDB, tableName, params);
                 if (!alterStatusOk(status, "Storage option")) return true;
                 break;
@@ -5814,6 +5839,9 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
     tbl.isTemporary = temporary;
     tbl.isUnlogged = stmt->unlogged;
     tbl.tablespace = stmt->tablespace.empty() ? "pg_default" : stmt->tablespace;
+    for (const auto& option : stmt->options)
+        if (internalConstraintStorageOption(option.first))
+            throw DbError("22023", "unrecognized storage parameter: " + option.first);
     tbl.storageParams = stmt->options;
 
     // CREATE TABLE ... (LIKE source [INCLUDING ...]) — copy source columns first.

@@ -11757,8 +11757,29 @@ StmtPtr SQLParser::parseAlterTable(const std::vector<std::string>& tokens, size_
             if (sub.constraint.type != "EXCLUDE" && pos < tokens.size() && tokens[pos] == "(") {
                 if (sub.constraint.type == "CHECK") {
                     ++pos;
+                    const size_t expressionBegin = pos;
                     sub.constraint.checkExpr = parseSimpleExpr(tokens, pos);
-                    if (pos < tokens.size() && tokens[pos] == ")") ++pos;
+                    if (!sub.constraint.checkExpr || pos >= tokens.size() ||
+                        tokens[pos] != ")") return nullptr;
+                    // This is the complete declaration root, including its
+                    // original parentheses. Inner expression sites keep the
+                    // shared parser's ordinary provenance rules.
+                    markSource(sub.constraint.checkExpr.get(), tokens,
+                               expressionBegin, pos);
+                    // Legacy scalar SQL children are represented as literals,
+                    // not an executable Subquery node. CHECK declarations must
+                    // reject their actual grammar even on an empty table or in
+                    // an unselected CASE arm. Inspect only this reached CHECK
+                    // token interval; quoted identifiers/strings are not query
+                    // heads, and no expression is bound or evaluated here.
+                    for (size_t i = expressionBegin; i + 1 < pos; ++i) {
+                        if (tokens[i] != "(") continue;
+                        const auto head = toLower(tokens[i + 1]);
+                        if (head == "select" || head == "with" ||
+                            head == "values")
+                            throw DbError("0A000", "cannot use subquery in check constraint");
+                    }
+                    ++pos;
                 } else {
                     auto cols = collectParenthesized(tokens, pos);
                     for (const auto& c : cols) if (c != ",") sub.constraint.columns.push_back(parseRoutineIdentifier(c));
@@ -11960,7 +11981,7 @@ StmtPtr SQLParser::parseAlterTable(const std::vector<std::string>& tokens, size_
             recognized = true;
             sub.action = AlterTableStmt::Action::ValidateConstraint;
             pos += 2;
-            if (pos < tokens.size()) sub.name = tokens[pos++];
+            if (pos < tokens.size()) sub.name = parseRoutineIdentifier(tokens[pos++]);
         } else if (kw == "alter" && pos + 1 < tokens.size() &&
                    toLower(tokens[pos + 1]) == "constraint") {
             recognized = true;
@@ -12027,6 +12048,52 @@ StmtPtr SQLParser::parseAlterTable(const std::vector<std::string>& tokens, size_
                 sub.action = AlterTableStmt::Action::SetTablespace; ++pos;
                 if (pos < tokens.size()) sub.newName = tokens[pos++];
                 recognized = true;
+            } else if (pos < tokens.size() && tokens[pos] == "(") {
+                sub.action = AlterTableStmt::Action::SetOptions;
+                recognized = true;
+                auto opts = collectParenthesized(tokens, pos);
+                if (opts.empty() || pos == 0 || tokens[pos - 1] != ")")
+                    return nullptr;
+                const auto optionName = [](const std::string& token) {
+                    if (token.size() >= 2 && token.front() == '"' &&
+                        token.back() == '"') return true;
+                    if (token.empty()) return false;
+                    const auto first = static_cast<unsigned char>(token.front());
+                    if (!std::isalpha(first) && first != '_' && first < 128)
+                        return false;
+                    for (const unsigned char c : token)
+                        if (!std::isalnum(c) && c != '_' && c != '$' && c < 128)
+                            return false;
+                    return true;
+                };
+                size_t i = 0;
+                while (i < opts.size()) {
+                    if (!optionName(opts[i])) return nullptr;
+                    std::string name = parseRoutineIdentifier(opts[i++]);
+                    if (name.empty()) return nullptr;
+                    if (i < opts.size() && opts[i] == ".") {
+                        ++i;
+                        if (i >= opts.size() || !optionName(opts[i]))
+                            return nullptr;
+                        name += "." + parseRoutineIdentifier(opts[i++]);
+                    }
+                    if (i >= opts.size() || opts[i++] != "=" ||
+                        i >= opts.size()) return nullptr;
+                    std::string value = opts[i++];
+                    if (value == "," || value == "=" || value == "(" ||
+                        value == ")" || value == ".") return nullptr;
+                    if (value == "+" || value == "-") {
+                        if (i >= opts.size() || opts[i] == "," ||
+                            opts[i] == "=" || opts[i] == "(" ||
+                            opts[i] == ")" || opts[i] == ".") return nullptr;
+                        value += opts[i++];
+                    }
+                    sub.options[name] = std::move(value);
+                    if (i == opts.size()) break;
+                    if (opts[i++] != "," || i == opts.size()) return nullptr;
+                }
+                if (pos < tokens.size() && tokens[pos] != "," &&
+                    tokens[pos] != ";") return nullptr;
             } else if (pos + 1 < tokens.size() && toLower(tokens[pos]) == "with" && tokens[pos + 1] == "(") {
                 sub.action = AlterTableStmt::Action::SetOptions; pos += 2;
                 recognized = true;
