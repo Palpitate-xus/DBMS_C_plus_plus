@@ -1,5 +1,22 @@
 # DBMS 功能测试报告
 
+<!-- P33 pg-class-declaration begin -->
+<a id="pg-class-declaration-current"></a>
+## 2026-11-06 pg_class declaration validation
+
+Final C2 normal CMake C++17/O2 builds successfully. `pg_class_declaration_test.cpp` passes all six groups/550 checks with the exact61-core objects and own test stub. It covers real34 fields/type closure, ordinary DDL, cold CSV/read-only absence, startup idempotence, qualified user type shadows, unavailable selected inputs (NULL included), and finite class/type/attribute/dependency bootstrap conflicts before mutation. It compares complete declared class/type/attribute values, rather than relying on abbreviated `toString()` summaries. The old generation executes the same final test with48 checks,31 failures and one unavailable-capability NOTRUN; it is not counted as a pass.
+
+`catalog_snapshot_test`, `declared_type_physical_catalog_test` and `pg_stats_histogram_extent_test` each pass on old and C2. Earlier C1/native fixtures and both launcher failures remain in the archive. Initial quoted raw-native DDL fixtures retain four failed checks each; the normalMain41-query run confirms the corresponding quoted CREATE/ALTER/index operations succeed. C1's wrong12-byte type and TEXT25 NULL output are rejected, not accepted fixes.
+
+The original58 targets plus four cold controls run unfiltered on before/C1/C2: all strict drivers exit1 with the same9 PG difference IDs. Before/C2 has60 full replies byteexact; only two self-identity replies gain the actual row. C1/C2 all62 replies are exact. Every frame/NULL/T7/error/tag/Ready is independently decoded from the saved bytes.
+
+The additional frozen41-query matrix runs on real PostgreSQL18.6 and each product generation. PG passes41/41; before and C2 each match17/41, while24 queries differ (258 before/246 C2 failed field/shape checks, not246 different queries). Another seven controls per product preserve `pg_attribute`42P01 and type input limitations. Five returned type rows match PG on nine fields; independently decoded catalog files match all34 attribute rows on six fields. Input/result codec completeness is not asserted.
+
+The actual old-image upgrade and cold restart run20 requests with fresh-C2 byteexact replies and normal actualwait0 for both servers. Old class/type/attribute rows and the original old image stay unchanged. Full ordinary performance validation runs270 timed requests/1098 replies, independently checks96624 rows/386388 cells/27864 NULLs, and closes54 Main processes normally. All raw values, tails and regressions are retained in the [report](performance-report-2026-10-30.md#pg-class-declaration-20261106).
+
+Inventory:2394 test files,1127 top-level/1132 total C++ files;684 registered drivers/664 standalone E2E drivers unchanged. The full inventory is not represented as an all-tests pass.
+<!-- P33 pg-class-declaration end -->
+
 <!-- CURRENT_LEGACY_LOG_APPEND_20261106 -->
 
 ## 普通日志追加与实际查询成本（2026-11-06，P32-C1）

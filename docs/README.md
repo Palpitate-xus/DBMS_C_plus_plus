@@ -1,5 +1,11 @@
 # 文档索引
 
+<!-- P33 pg-class-declaration begin -->
+## Latest: 2026-11-06 pg_class declaration
+
+The [comparison](postgresql-comparison.md#pg-class-declaration-current) and [compatibility contract](compatibility-contract.md#pg-class-declaration-current) distinguish the actual34-column declaration from its seven executable values. The [test report](test-report.md#pg-class-declaration-current) records550 native checks, PG41 strict pass/product17of41, and actual legacy upgrade/cold results. The [performance report](performance-report-2026-10-30.md#pg-class-declaration-20261106) retains all270 timings, negative cases and both old medians. The new compressed evidence is 15.92 MiB; no extra Markdown file was added. The earlier P31 source-only proposal and rejected P33-C1 runs remain historical evidence, superseded only for the accepted declaration scope.
+<!-- P33 pg-class-declaration end -->
+
 <!-- CURRENT_LEGACY_LOG_APPEND_20261106 -->
 
 ## 最新验证入口（P32-C1）

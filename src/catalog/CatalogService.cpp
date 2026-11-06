@@ -1,5 +1,6 @@
 #include "catalog/CatalogService.h"
 #include "catalog/PgStatsCatalog.h"
+#include "catalog/PgClassCatalog.h"
 #include "commands/CreatedDatabaseCatalog.h"
 #include "process/StatsPersistence.h"
 #include "commands/TableManage.h"
@@ -146,6 +147,7 @@ std::shared_ptr<CatalogManager> loadOwnedCatalog(
     auto catalog = std::make_shared<CatalogManager>(directory.string(), false);
     catalog->bootstrapSystemNamespaces();
     catalog->bootstrapSystemTypes();
+    const bool initializedClassCatalog=class_catalog::bootstrapRelation(*catalog);
     const bool initializedStatisticsView=analyzed_statistics::bootstrapView(*catalog);
     // Some legitimate server cluster scaffolds already have tlist.lst and
     // auth metadata, but no namespace catalog. A newly bootstrapped logical
@@ -171,7 +173,7 @@ std::shared_ptr<CatalogManager> loadOwnedCatalog(
         }
     }
     migrateLegacyPublicDottedSequences(engine, database, *catalog);
-    if(initializedStatisticsView && !catalog->persistAll())
+    if((initializedClassCatalog || initializedStatisticsView) && !catalog->persistAll())
         throw DbError("58030","could not publish initialized system view identities");
     return catalog;
 }

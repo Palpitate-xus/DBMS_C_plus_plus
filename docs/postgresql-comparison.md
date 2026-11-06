@@ -1,5 +1,24 @@
 # 与 PostgreSQL 18 的功能和性能差距
 
+<!-- P33 pg-class-declaration begin -->
+<a id="pg-class-declaration-current"></a>
+## 2026-11-06 pg_class declaration: implemented subset and open gaps
+
+The accepted candidate is normal CMake C++17/O2 C2 `280ad4a8`; the first C1 is rejected and retained as evidence. This is a partial catalog feature, with no speed improvement or full PostgreSQL compatibility claim.
+
+Primary design references at the pinned PostgreSQL18.6 source commit: [pg_class.h](https://raw.githubusercontent.com/postgres/postgres/724edf9bde9d356724ad384a2e196edc3c9f80f7/src/include/catalog/pg_class.h), [pg_type.dat](https://raw.githubusercontent.com/postgres/postgres/724edf9bde9d356724ad384a2e196edc3c9f80f7/src/include/catalog/pg_type.dat), and [AclItem layout](https://raw.githubusercontent.com/postgres/postgres/724edf9bde9d356724ad384a2e196edc3c9f80f7/src/include/utils/acl.h). Declared identities/layout are kept separate from this engine's implemented value capabilities.
+
+| Area | Actual evidence | Remaining work |
+|---|---|---|
+| Owned declaration | One real class1259;34 continuous attributes; rowtype83/array273; actual field-type closure. Persisted34 rows match PG on six declaration fields each. | No physical catalog heap/MVCC; the `pg_attribute` SQL route remains42P01. |
+| Type declarations | Five actual type rows match PG on nine identity/layout fields each; `pg_type` SQL returns those rows. `aclitem` is16 bytes/alignment `d`. | Value/result codecs, including NULL, are unsupported0A000; no ACL semantics are added. |
+| Ordinary pg_class queries | Self identity is now present; seven values remain executable. All60 other replies in the old62-request pair are byteexact. | Source origins,27 value columns and wildcard are unfinished. New41 strict PG reference passes; product17/41 match,24 differ. |
+| Persistence/lifecycle | Real old-program database copy upgrades, then restarts normally;20 replies equal fresh C2 bytes; prior class/type/attribute rows remain exact. | This finite normal-path evidence does not close generic IO/OOM/savepoint fault matrices. |
+| Ordinary SQL cost | One complete270-timing cohort,27 DB contexts/54 Main normal0, all raw data retained. | Wall medians13/30 and CPU16/30 are above both old medians; no general acceleration claim, causes remain open. |
+
+The first candidate's12-byte `aclitem` and NULL output labeled TEXT25 are rejected, retained observations. They are corrected by C2's16-byte declaration and explicit unavailable-input error. Raw native qualified quoted table DDL has four unchanged failed checks in the initial fixtures; the corresponding normalMain quoted DDL passes. These API observations are kept separately. Original273 ledger states and user deferrals are unchanged. [Performance and artifact report](performance-report-2026-10-30.md#pg-class-declaration-20261106).
+<!-- P33 pg-class-declaration end -->
+
 <!-- CURRENT_LEGACY_LOG_APPEND_20261106 -->
 
 ## 普通日志追加与实际查询成本（2026-11-06，P32-C1）

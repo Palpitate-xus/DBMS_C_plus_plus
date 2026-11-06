@@ -5436,6 +5436,19 @@ ExprValue ExprEvaluator::evalCast(const Expr* inputExpression, const RowContext&
     }
     const auto sourceType=ExprHelper::canonicalResultTypeName(v.typeName);
     const auto targetBase=ExprHelper::canonicalResultTypeName(target);
+    // These actual pg_catalog declarations describe the virtual pg_class
+    // schema. They grant no value-input codec. This is a selected runtime
+    // conversion only; declaration resolution and dead-arm analysis are not
+    // changed. Even NULL input stays unsupported until the value/result path
+    // can carry these declarations without falling back to a TEXT descriptor.
+    std::string_view declarationBase=targetBase;
+    while(declarationBase.size()>=2 &&
+          declarationBase.compare(declarationBase.size()-2,2,"[]")==0)
+        declarationBase.remove_suffix(2);
+    if(declarationBase=="pg_node_tree" || declarationBase=="aclitem" ||
+       declarationBase=="_aclitem" || declarationBase=="pg_class" || declarationBase=="_pg_class") {
+        throw DbError("0A000","value input for catalog type "+target+" is not implemented");
+    }
     // The generic literal evaluator returns VARCHAR bytes. Only the original
     // untyped SQL leaf (or an explicitly UNKNOWN native datum) owns contextual
     // interval input; typed/planned values must keep their declared role.

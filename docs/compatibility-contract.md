@@ -1,5 +1,18 @@
 # 兼容版本契约
 
+<!-- P33 pg-class-declaration begin -->
+<a id="pg-class-declaration-current"></a>
+## 2026-11-06 pg_class declaration and value boundary
+
+The accepted candidate is normal CMake C++17/O2 C2 `280ad4a8`; the first C1 is rejected and retained as evidence. This is a partial catalog feature, with no speed improvement or full PostgreSQL compatibility claim.
+
+The mutable CatalogService startup owner now creates and persists actual relation1259, rowtype83/array273 and34 sequential attributes. The extra actual types are `pg_node_tree`194, `aclitem`1033 (16 bytes/alignment `d`) and `_aclitem`1034. Cold metadata snapshots neither bootstrap nor allocate or publish. A loaded incompatible class/type/attribute/dependency declaration raises `XX001`; the finite tested conflicts do not claim an exhaustive corruption/fault matrix.
+
+Type discoverability does not grant a value codec. Selected CAST/typed-literal conversions for these metadata-only declarations, including NULL/array input, raise `0A000`. No input/output function OID is invented. The generic declaration resolver and unselected explicit-CAST input analysis are unchanged. Ordinary qualified user types with the same basename remain separate.
+
+The ordinary `pg_class` renderer still implements only `oid, relname, relnamespace, relkind, relnatts, relpersistence, relowner`; the other27 values and wildcard remain unsupported. Virtual source origins still differ from PG; the tested `pg_attribute` SQL route still fails `42P01`. This does not provide a catalog heap/MVCC, ACL/security semantics, retained planning/portal/format2 work or full CAT02 closure. [Full unfiltered evidence](performance-report-2026-10-30.md#pg-class-declaration-20261106).
+<!-- P33 pg-class-declaration end -->
+
 <!-- CURRENT_LEGACY_LOG_APPEND_20261106 -->
 
 ## 本批有限日志契约（P32-C1）

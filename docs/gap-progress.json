@@ -2,6 +2,37 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-06 owned pg_class34 declaration and metadata-only type input boundary",
+      "gap_ids": [
+        "CAT-01",
+        "CAT-02",
+        "TYPE-01"
+      ],
+      "status": "partial",
+      "evidence": [
+        "src/catalog/PgClassCatalog.h",
+        "src/catalog/CatalogService.cpp",
+        "src/expression/ExprEvaluator.cpp",
+        "docs/postgresql-comparison.md",
+        "docs/performance-report-2026-10-30.md",
+        "docs/benchmarks/pg-class-declaration-20261106.json.gz"
+      ],
+      "tests": [
+        "tests/pg_class_declaration_test.cpp",
+        "tests/catalog_snapshot_test.cpp",
+        "tests/declared_type_physical_catalog_test.cpp",
+        "tests/pg_stats_histogram_extent_test.cpp"
+      ],
+      "verification": [
+        "Normal CMake C++17/O2 actual0 C2 280ad4a8;249 source files/178 headers. Real owned class1259,34 contiguous attributes,rowtype83/array273 and actual194/1033/1034 types, namespace/dependencies persisted before locked startup publication. PG18.6 aclitem16bytes/align d verified; rejected firstC1 size12/TEXT25 NULL behavior retained. No fake codec functions or new storage/WAL layout.",
+        "Final native6groups/550checks/0fail/0NOTRUN, full61matching core and own stub. Old final source48checks/31fail/1capabilityNOTRUN actual1 retained. Existing3 whole native tests each old and C2 actual0. Finite preflight conflicts, startup idempotence/cold readonly and public namespace shadow controls pass; no full2394-suite pass claim.",
+        "Original58+4 protocol requests each before/C1/C2, all retained strictdriver actual1 and9 PG differences. Before/C2 60complete replies byteexact; only2 self-identity replies now contain the real row. C1/C2 all62 replies byteexact. New independent41-query PG reference strictPASS; before and C2 each17/41match,24query differences remain. Actual persisted34 six-field attribute rows/5 nine-field type rows match PG. pg_attribute SQL42P01, virtual origins,27 values/wildcard, value/result codecs includingNULL0A000 remain ordinary unfinished work.",
+        "Actual old-program database copy upgrades with1class/5types/34attrs; original user class/type/attribute rows unchanged. Upgrade+cold20 query replies byteexact freshC2,2normalMain exit0. Earlier harness failures and raw-native qualified quoted DDL4failures retained; corresponding normalMain DDL succeeds. No paused planning/provider/portal/format2 or unselected explicitCAST analysis changes.",
+        "One whole normal270-timing cohort/27DB/54Main normal0/1098replies; all96624rows/386388cells/27864NULL checked. Wall directions8lower/13higher/9between; serverCPU4lower/16higher/10between; clientCPU8lower/13higher/9between. All raw3/min/p50/max/old-drift/negative/tails retained. This is a feature cost control, not a speed improvement; regressions and causes OPEN, no global idle or PostgreSQL speed claim.",
+        "Original273 items/source and prior282 updates preserved; IDX07 unverified/evidence[]. Default425 unchanged, direct master with existing identity, no push/branch/default promotion. New evidence compressed under49MiB after independent byte reconstruction; only verified generated duplicate copies eligible for cleanup."
+      ]
+    },
+    {
       "issue": "2026-11-06 legacy log append without per-record stream setup",
       "gap_ids": [
         "QRY-01",

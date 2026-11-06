@@ -1,5 +1,22 @@
 # 生产化状态
 
+<!-- P33 pg-class-declaration begin -->
+<a id="pg-class-declaration-current"></a>
+## 2026-11-06 accepted pg_class declaration batch
+
+The accepted candidate is normal CMake C++17/O2 C2 `280ad4a8`; the first C1 is rejected and retained as evidence. This is a partial catalog feature, with no speed improvement or full PostgreSQL compatibility claim.
+
+Current source:249 files/178 headers;2394 formal test files,1127 top-level C++ tests plus five nested C++ files. Six new native groups/550 checks pass with the matching61-core build; three existing native tests pass on old and C2. This is not a full2394-test-suite rerun. The old program's new-test exit1/31 failed checks/one unavailable-capability NOTRUN is preserved.
+
+The owned34-attribute declaration and five dependency types persist and survive a real old-image upgrade/cold restart. The original62 strict protocol requests retain9 PG differences; the new41-query PG reference is strict green while the product is17/41. `pg_attribute` SQL, virtual source origins,27 values/wildcard and value/result codecs remain ordinary unfinished work. Selected metadata-only type inputs, even NULL, explicitly fail0A000. No paused planning/provider/portal/format2 or unselected explicitCAST analysis change was made.
+
+The ordinary270-timing control has server CPU4 regions below both old medians,16 above and10 between; wall8 below/13 above/9 between. These directions include tiny differences and substantial old drift, not significance or causal attribution. Negative cases and prior P32 regressions remain open. [Full report](performance-report-2026-10-30.md#pg-class-declaration-20261106).
+
+The original273 states remain22 complete/166 partial/70 unverified/15 user-deferred; IDX07 remains unverified with empty evidence. History has283 records. Work stays on `master` with the configured identity. Default program425 is unchanged; no deployment/push was performed. The33rd evidence archive embeds source/SQL/wire/data bytes and explicit kept ELF references, rather than claiming portable executable payloads.
+After independent byte reconstruction, cleanup removed 19,969 generated duplicate regular files: 1,396,915,572 logical bytes; their single-link st_blocks sum was 1,407,332,352 bytes (1.311 GiB), not an exclusive whole-filesystem free-space measurement. All214 ELF references, directories, source/trace/SQL metadata, normal20-candidate working data, functional working data and the final PG reference working image remain. Postcheck verifies the exact removal whitelist and all4,932 remaining embedded files.
+
+<!-- P33 pg-class-declaration end -->
+
 <!-- CURRENT_LEGACY_LOG_APPEND_20261106 -->
 
 ## 普通日志追加与实际查询成本（2026-11-06，P32-C1）

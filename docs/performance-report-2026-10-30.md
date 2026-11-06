@@ -1,5 +1,114 @@
 # 数据库操作性能测试报告（2026-10-30）
 
+<!-- P33 pg-class-declaration begin -->
+<a id="pg-class-declaration-20261106"></a>
+## 2026-11-06: owned pg_class declaration and ordinary SQL cost controls
+
+The accepted candidate is normal CMake C++17/O2 C2 `280ad4a8`; the first C1 is rejected and retained as evidence. This is a partial catalog feature, with no speed improvement or full PostgreSQL compatibility claim.
+
+The source adds a real persisted34-column `pg_class` declaration, its rowtype/array and actual required types under the existing locked startup owner. It keeps the seven value renderers, unsupported27 values/wildcard and virtual-source-origin gap separate. Actual PG18.6 proves `aclitem`16 bytes/alignment `d`; C1's12-byte declaration and NULL output with TEXT25 are rejected. C2 explicitly rejects unavailable selected type input, including NULL, with0A000. It adds no ACL semantics, heap/MVCC, retained/portal/format2 or unselected CAST analysis policy.
+
+Finite correctness: final native six groups/550 checks pass; three existing whole native tests pass on old and C2. All62 old protocol requests remain:60 before/C2 replies are exact and two self-identity replies gain the actual row; strict9 PG differences remain. The new41-query PG reference passes, product17/41 matches with24 query differences still open. Actual persisted34 attribute rows match six PG fields each, and five type rows match nine PG fields each. The `pg_attribute` SQL route still fails42P01. A real old-image upgrade/cold pair preserves prior metadata and has20 replies byteexact with fresh C2, both normalwait0.
+
+The normal cost control uses before P32C1 `310a2c01` → C2 `280ad4a8` → the identical before program. It retains the inherited full270 timings/27 DB contexts/54 normal Main processes/1098 replies, without taskset/profiler/allocator substitution, parallel native work, extra SQL or compression during sampling. CPU clocks include the whole server process; wall/client CPU include request/envelope buffering through ReadyI. Decoding, full oracle checks, raw file writes and process snapshots occur after timing. Clocks/proc reads are non-atomic; endpoint RSS/IO is not a peak. Natural cache state is used. Other preexisting DB processes are observed and untouched, so this is not an exclusive-host result.
+
+Canonical fixed/single populations are256, overflow128; UPDATE16/DELETE16 each use one statement affecting16 rows. Direct full/id projections use actual post-insert/update populations257/257/129. Despite the inherited cohort label `direct-hit`, `SELECT id FROM perf_fixed` and its peers are **all-row projections without WHERE/index lookup or ORDER BY**. This workload does not time `pg_class` queries or catalog initialization. It is an ordinary SQL regression control for the feature, not a PostgreSQL performance comparison.
+
+Independent readback verifies all270 timed records,96624 rows/386388 cells/27864 NULLs and231,410,943 request/response bytes, all5796 terminal files, all270 raw-three distributions and90 metric comparisons. Root also rederives every median and percentage from raw records (540 checks). No warm/tail/negative sample is excluded.
+
+Across30 named regions, wall directions are8 below both old medians/13 above/9 between; server CPU4 below/16 above/10 between; client CPU8 below/13 above/9 between. A direction compares raw nanosecond medians before table rounding, including tiny differences; it is not statistical significance. Old wall drift ranges−16.45% to+36.82%, server CPU−29.62% to+36.93%. All regressions, including the prior P32 cases, and their causes remain **OPEN**. No general or stable acceleration is established.
+
+Measured wall time (milliseconds; candidate percentages relative to each old median).
+
+| Cohort / scope / region | Old first | C2 | Old return | C2 vs first | C2 vs return | Old drift |
+|---|---:|---:|---:|---:|---:|---:|
+| canonical-fixed-single/fixed/delete16 | 55.025 | 55.414 | 54.856 | +0.71% | +1.02% | -0.31% |
+| canonical-fixed-single/fixed/insert1 | 22.277 | 20.512 | 22.568 | -7.92% | -9.11% | +1.30% |
+| canonical-fixed-single/fixed/reinsert_population | 677.136 | 654.409 | 698.395 | -3.36% | -6.30% | +3.14% |
+| canonical-fixed-single/fixed/select_after_update | 34.724 | 34.138 | 29.010 | -1.69% | +17.67% | -16.45% |
+| canonical-fixed-single/fixed/select_after_vacuum | 33.715 | 35.752 | 28.988 | +6.04% | +23.34% | -14.02% |
+| canonical-fixed-single/fixed/truncate | 276.975 | 328.911 | 298.350 | +18.75% | +10.24% | +7.72% |
+| canonical-fixed-single/fixed/update16 | 84.095 | 86.145 | 79.945 | +2.44% | +7.75% | -4.93% |
+| canonical-fixed-single/fixed/vacuum | 1.941 | 1.926 | 1.815 | -0.77% | +6.12% | -6.49% |
+| canonical-fixed-single/single/delete16 | 77.339 | 86.794 | 89.708 | +12.23% | -3.25% | +15.99% |
+| canonical-fixed-single/single/insert1 | 23.526 | 107.463 | 20.820 | +356.78% | +416.16% | -11.50% |
+| canonical-fixed-single/single/reinsert_population | 1200.887 | 1162.139 | 1173.899 | -3.23% | -1.00% | -2.25% |
+| canonical-fixed-single/single/select_after_update | 50.064 | 64.148 | 67.373 | +28.13% | -4.79% | +34.57% |
+| canonical-fixed-single/single/select_after_vacuum | 47.555 | 68.621 | 65.066 | +44.30% | +5.46% | +36.82% |
+| canonical-fixed-single/single/truncate | 232.182 | 308.062 | 255.270 | +32.68% | +20.68% | +9.94% |
+| canonical-fixed-single/single/update16 | 159.660 | 174.236 | 176.559 | +9.13% | -1.32% | +10.58% |
+| canonical-fixed-single/single/vacuum | 7.392 | 8.473 | 8.460 | +14.63% | +0.15% | +14.45% |
+| canonical-overflow/overflow/delete16 | 71.799 | 79.037 | 78.280 | +10.08% | +0.97% | +9.03% |
+| canonical-overflow/overflow/insert1 | 20.027 | 20.048 | 21.732 | +0.10% | -7.75% | +8.51% |
+| canonical-overflow/overflow/reinsert_population | 1224.300 | 1116.937 | 1531.007 | -8.77% | -27.05% | +25.05% |
+| canonical-overflow/overflow/select_after_update | 50.958 | 52.928 | 67.836 | +3.86% | -21.98% | +33.12% |
+| canonical-overflow/overflow/select_after_vacuum | 55.235 | 66.698 | 60.974 | +20.75% | +9.39% | +10.39% |
+| canonical-overflow/overflow/truncate | 272.933 | 227.895 | 308.065 | -16.50% | -26.02% | +12.87% |
+| canonical-overflow/overflow/update16 | 154.870 | 160.693 | 183.829 | +3.76% | -12.59% | +18.70% |
+| canonical-overflow/overflow/vacuum | 10.709 | 10.001 | 10.649 | -6.61% | -6.08% | -0.56% |
+| direct-hit/fixed/direct_full_no_order | 22.590 | 23.865 | 20.802 | +5.64% | +14.72% | -7.91% |
+| direct-hit/fixed/direct_id_only_no_order | 23.643 | 20.982 | 21.128 | -11.25% | -0.69% | -10.63% |
+| direct-hit/overflow/direct_full_no_order | 59.218 | 64.094 | 50.192 | +8.23% | +27.70% | -15.24% |
+| direct-hit/overflow/direct_id_only_no_order | 53.900 | 49.219 | 52.678 | -8.69% | -6.57% | -2.27% |
+| direct-hit/single/direct_full_no_order | 51.373 | 56.005 | 52.548 | +9.02% | +6.58% | +2.29% |
+| direct-hit/single/direct_id_only_no_order | 46.527 | 45.681 | 45.006 | -1.82% | +1.50% | -3.27% |
+
+Measured server process CPU (milliseconds; candidate percentages relative to each old median).
+
+| Cohort / scope / region | Old first | C2 | Old return | C2 vs first | C2 vs return | Old drift |
+|---|---:|---:|---:|---:|---:|---:|
+| canonical-fixed-single/fixed/delete16 | 41.808 | 44.646 | 39.371 | +6.79% | +13.40% | -5.83% |
+| canonical-fixed-single/fixed/insert1 | 12.376 | 6.919 | 8.710 | -44.09% | -20.56% | -29.62% |
+| canonical-fixed-single/fixed/reinsert_population | 601.954 | 593.058 | 569.630 | -1.48% | +4.11% | -5.37% |
+| canonical-fixed-single/fixed/select_after_update | 20.774 | 22.728 | 19.967 | +9.41% | +13.83% | -3.88% |
+| canonical-fixed-single/fixed/select_after_vacuum | 18.632 | 24.066 | 20.368 | +29.17% | +18.15% | +9.32% |
+| canonical-fixed-single/fixed/truncate | 102.970 | 103.103 | 84.420 | +0.13% | +22.13% | -18.01% |
+| canonical-fixed-single/fixed/update16 | 72.061 | 72.610 | 68.746 | +0.76% | +5.62% | -4.60% |
+| canonical-fixed-single/fixed/vacuum | 1.838 | 1.779 | 1.684 | -3.19% | +5.68% | -8.39% |
+| canonical-fixed-single/single/delete16 | 65.926 | 68.746 | 77.587 | +4.28% | -11.39% | +17.69% |
+| canonical-fixed-single/single/insert1 | 9.607 | 13.144 | 9.793 | +36.82% | +34.22% | +1.94% |
+| canonical-fixed-single/single/reinsert_population | 1059.396 | 1007.230 | 1070.279 | -4.92% | -5.89% | +1.03% |
+| canonical-fixed-single/single/select_after_update | 44.373 | 52.581 | 56.279 | +18.50% | -6.57% | +26.83% |
+| canonical-fixed-single/single/select_after_vacuum | 42.414 | 55.744 | 55.728 | +31.43% | +0.03% | +31.39% |
+| canonical-fixed-single/single/truncate | 119.627 | 129.936 | 124.392 | +8.62% | +4.46% | +3.98% |
+| canonical-fixed-single/single/update16 | 128.739 | 142.648 | 130.130 | +10.80% | +9.62% | +1.08% |
+| canonical-fixed-single/single/vacuum | 7.167 | 8.153 | 8.133 | +13.76% | +0.25% | +13.47% |
+| canonical-overflow/overflow/delete16 | 59.169 | 65.798 | 66.226 | +11.20% | -0.65% | +11.93% |
+| canonical-overflow/overflow/insert1 | 9.189 | 10.472 | 11.033 | +13.97% | -5.08% | +20.08% |
+| canonical-overflow/overflow/reinsert_population | 1091.806 | 1077.514 | 1143.019 | -1.31% | -5.73% | +4.69% |
+| canonical-overflow/overflow/select_after_update | 43.168 | 42.545 | 58.452 | -1.44% | -27.21% | +35.41% |
+| canonical-overflow/overflow/select_after_vacuum | 49.209 | 57.948 | 53.101 | +17.76% | +9.13% | +7.91% |
+| canonical-overflow/overflow/truncate | 63.745 | 87.300 | 87.285 | +36.95% | +0.02% | +36.93% |
+| canonical-overflow/overflow/update16 | 127.354 | 126.752 | 124.881 | -0.47% | +1.50% | -1.94% |
+| canonical-overflow/overflow/vacuum | 8.423 | 9.731 | 10.030 | +15.52% | -2.99% | +19.08% |
+| direct-hit/fixed/direct_full_no_order | 15.249 | 14.506 | 10.854 | -4.87% | +33.65% | -28.82% |
+| direct-hit/fixed/direct_id_only_no_order | 13.627 | 13.323 | 11.142 | -2.23% | +19.57% | -18.23% |
+| direct-hit/overflow/direct_full_no_order | 49.162 | 50.666 | 43.171 | +3.06% | +17.36% | -12.19% |
+| direct-hit/overflow/direct_id_only_no_order | 41.604 | 44.115 | 42.246 | +6.04% | +4.42% | +1.54% |
+| direct-hit/single/direct_full_no_order | 44.509 | 44.509 | 43.184 | +0.00% | +3.07% | -2.98% |
+| direct-hit/single/direct_id_only_no_order | 39.059 | 40.536 | 37.946 | +3.78% | +6.83% | -2.85% |
+
+
+The complete raw-three/min/p50/max/client CPU, per-case old drift and long-tail table is retained inside [pg-class-declaration-20261106.json.gz](benchmarks/pg-class-declaration-20261106.json.gz), 16,696,087 bytes (15.92 MiB), SHA256 `0b56d74a328f44120ee1a216c9e323e8317a80b552bdb1d80fc291e7afca67c2`. The archive contains full selected nonELF source/SQL/wire/data/native and rejected-first-attempt bytes, directory modes and symlink texts. Executable/core ELFs are explicit SHA references kept locally, not embedded executable images. The inner content-addressed JSON is XZ-compressed, then base64 JSON and gzip; independent decoding compares every embedded file byte and every kept ELF reference before cleanup. No raw benchmark JSON is added to Git.
+
+From the repository root, recover the complete table with Python standard library only (the exact stdout bytes are tested against the original table):
+
+```sh
+python3 - <<'PY'
+import base64, gzip, json, lzma, sys
+with gzip.open("docs/benchmarks/pg-class-declaration-20261106.json.gz", "rb") as stream:
+    outer = json.load(stream)
+bundle = json.loads(lzma.decompress(base64.b64decode(outer["payload_xz_base64"])))
+entry = bundle["artifacts"]["batch/class-declaration-cost27-C2-v1/all-performance-tables-v3.md"]
+sys.stdout.buffer.write(base64.b64decode(bundle["blobs"][entry["blob"]]))
+PY
+```
+
+Original273 status objects/282 prior history records,725 protected Markdown records and32 prior archives remain unchanged; history advances to283, Markdown paths stay754. Default425 and the old baseline remain intact. This batch does not close CAT02, the goal or any deferred issue.
+After independent byte reconstruction, cleanup removed 19,969 generated duplicate regular files: 1,396,915,572 logical bytes; their single-link st_blocks sum was 1,407,332,352 bytes (1.311 GiB), not an exclusive whole-filesystem free-space measurement. All214 ELF references, directories, source/trace/SQL metadata, normal20-candidate working data, functional working data and the final PG reference working image remain. Postcheck verifies the exact removal whitelist and all4,932 remaining embedded files.
+
+<!-- P33 pg-class-declaration end -->
+
 <!-- CURRENT_LEGACY_LOG_APPEND_20261106 -->
 
 ## 普通日志追加与实际查询成本（2026-11-06，P32-C1）

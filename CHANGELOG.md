@@ -1,5 +1,13 @@
 # Changelog
 
+<!-- P33 pg-class-declaration begin -->
+## 2026-11-06 — owned pg_class declaration (partial)
+
+- Persist the actual `pg_class` identity, all34 attributes, rowtype83/array273 and required metadata-only types through the existing locked startup owner. Validate loaded declarations/dependencies and reject conflicting bootstrap input before edits.
+- Use the PostgreSQL18.6 `aclitem` declaration (16 bytes, alignment `d`); keep unavailable value/result codecs explicit, including NULL input `0A000`.
+- Add the550-check native regression, full unfiltered41-query PG comparison, real old-image upgrade/cold evidence and one complete270-timing control cohort. Performance regressions, virtual origins and remaining catalog/value functionality stay open. [Report](docs/performance-report-2026-10-30.md#pg-class-declaration-20261106).
+<!-- P33 pg-class-declaration end -->
+
 本项目的所有显著变更记录于此文件。
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。

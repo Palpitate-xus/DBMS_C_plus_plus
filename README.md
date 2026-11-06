@@ -1,5 +1,13 @@
 # DBMS C++
 
+<!-- P33 pg-class-declaration begin -->
+## 2026-11-06: owned pg_class declaration, partial
+
+`pg_class` now has a real persisted self declaration, 34 contiguous attributes, a row type/array pair and actual field-type dependencies. Unsupported value conversions for these metadata-only types, including NULL, fail explicitly with `0A000`. Seven value columns remain executable; query origins, the other27 values/wildcard, `pg_attribute` SQL and the type value/result codecs are unfinished.
+
+Final native regression: six groups/550 checks pass, plus three existing native tests on both old and C2. The new strict PostgreSQL41-query reference passes; this engine matches17/41, with24 query differences retained. Full ordinary SQL cost controls do **not** show general acceleration: server CPU medians are above both old roles in16/30 regions. See the [implementation boundaries and complete performance report](docs/performance-report-2026-10-30.md#pg-class-declaration-20261106). No new Markdown path was added; evidence is compressed into 15.92 MiB.
+<!-- P33 pg-class-declaration end -->
+
 <!-- CURRENT_LEGACY_LOG_APPEND_20261106 -->
 
 ## 普通日志追加与实际查询成本（2026-11-06，P32-C1）
