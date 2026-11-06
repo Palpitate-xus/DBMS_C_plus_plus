@@ -2,6 +2,36 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-06 ordinary physical projection current-row NULL bitmap reuse and demand admission",
+      "gap_ids": [
+        "QRY-01",
+        "QRY-13"
+      ],
+      "status": "partial",
+      "evidence": [
+        "src/commands/StoredRowNull.h",
+        "src/commands/TableManage.cpp",
+        "src/executor/ExecutionPlan.cpp",
+        "docs/performance-report-2026-10-30.md",
+        "docs/benchmarks/ordinary-project-bitmap-20261106.json.gz"
+      ],
+      "tests": [
+        "tests/ordinary_project_bitmap_test.cpp",
+        "tests/stored_row_null_schema_test.cpp",
+        "tests/index_scan_null_metadata_test.cpp",
+        "tests/table_scan_snapshot_test.cpp",
+        "tests/table_scan_streaming_test.cpp",
+        "tests/strict_projection_null_text_test.cpp",
+        "tests/bytea_large_toast_test.cpp"
+      ],
+      "verification": [
+        "Final C2 normal CMake C++17/O2 actual0; only3 production files, no source-class ABI or storage/tuple/WAL format changes. Before13 shared controls PASS +6 API absent NOTRUN; C1/C2 all19 actual PASS; six whole existing native tests each generation actual0 and outputs byteexact.",
+        "ActualPG18.6 all58fixed+7controls PASS; before/C1/C2 all58+4controls complete but each target53/58 plus4 cold-anchor failures. All62 original query request/response bytes exact across products. Preserve5target+4control ordinary known differences (pg_class self/source metadata, TEZ/EZ); not accepted as PG-equivalent or deferred. Portable full58 known-gap draft remains unexecuted/unregistered.",
+        "C1 and final C2 each complete original270timed/54normalMain/1098fullresponses; all raw3/negative/return drift retained. Independent reducers actual0; final direct full-query three scopes all wall/serverCPU p50 lower than both old roles; id-only negatives remain, no wholeDB/stable speed or causal attribution claim.",
+        "Original273 status rows and prior280 history preserved byteexact; IDX07 remains unverified/evidence[]. Default425 unchanged; Goal active, no branch switch/push/service promotion."
+      ]
+    },
+    {
       "issue": "2026-11-06 multi-LOB heap width and actual command result shape",
       "gap_ids": [
         "STO-06",

@@ -300,8 +300,25 @@
       "payload_sha256": "54792f83cb058b5b0947245c1026c3d0c3b04c8cb0d196aa2bf5f5ae43acbc13",
       "payload_xz_bytes": 16571788,
       "payload_xz_sha256": "28a95f0bcdf5eca6092283c7e3f66acf65f4dc50d642c4817a235a71fc059634"
+    },
+    {
+      "original_path": "docs/benchmarks/ordinary-project-bitmap-20261106.json",
+      "original_bytes": 14612774,
+      "original_sha256": "eb63e97a280d5086e5d64a085ee76d3cf9d8a0e8993a650fd224608ecae7678d",
+      "path": "docs/benchmarks/ordinary-project-bitmap-20261106.json.gz",
+      "bytes": 10994305,
+      "sha256": "bcc194787de1694db51b28612a2b7b105de7723a54b3d1b6ce195e5c8479b583",
+      "encoding": "gzip",
+      "roundtrip_bytes_exact": true,
+      "container_format_version": 6,
+      "payload_format_version": 5,
+      "payload_encoding": "xz+base64",
+      "payload_bytes": 1226900319,
+      "payload_sha256": "310f3987a735d460d6079306f9b3d94a70c2181e2e8339f8a1ef12e2eaecab15",
+      "payload_xz_bytes": 10959340,
+      "payload_xz_sha256": "f174f1d656a991a1f6a9ea54cefcc540d1b9857f27cf4cc256461bc1dd385077"
     }
   ],
-  "total_original_bytes": 1505936815,
-  "total_bytes": 155652207
+  "total_original_bytes": 1520549589,
+  "total_bytes": 166646512
 }

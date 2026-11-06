@@ -6969,6 +6969,29 @@ static void writeStatsEntry(std::ostream& ofs, const std::string& tname,
     ofs << "|" << mcvToString(cs.mcv) << "|" << cs.nullCount << "\n";
 }
 
+// Direct physical projection can borrow its current owning bitmap without
+// re-reading the same tuple for each column. Keep the original private
+// BufferedNullRowBinding and all of its consumers unchanged; both scopes
+// restore the same TLS slots in LIFO order, including nested decode/errors.
+detail::ScopedStoredRowNullBitmap::ScopedStoredRowNullBitmap(
+    const TableSchema& schema, const std::vector<bool>& nulls) noexcept
+    : oldSchema_(g_bufferedConditionSchema),
+      oldNulls_(g_bufferedConditionNulls),
+      active_(schema.formatVersion == DATA_FILE_FORMAT_VERSION &&
+              nulls.size() == schema.len) {
+    if (active_) {
+        g_bufferedConditionSchema = &schema;
+        g_bufferedConditionNulls = &nulls;
+    }
+}
+
+detail::ScopedStoredRowNullBitmap::~ScopedStoredRowNullBitmap() noexcept {
+    if (active_) {
+        g_bufferedConditionSchema = oldSchema_;
+        g_bufferedConditionNulls = oldNulls_;
+    }
+}
+
 // Materialized OLD/NEW images have no live RID (DELETE can already have
 // removed the tuple). Keep their own v2 NULL bitmap attached while decoding,
 // rather than reusing another scan row's bitmap or the legacy int sentinel.

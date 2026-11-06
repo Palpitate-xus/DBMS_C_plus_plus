@@ -5894,6 +5894,33 @@ bool ProjectOp::next(std::string& outRow) {
     if (origin.engine && origin.rid > 0)
         StorageEngine::bindNullRow(origin.engine, origin.dbname, origin.tablename,
                                   origin.rid, tbl_.len);
+    // This bridge is intentionally limited to the direct physical cursor.
+    // Keep bitmap ownership local to this next() call; transformed, filtered,
+    // indexed and buffered children retain their original fallback paths.
+    std::vector<bool> storedNulls;
+    std::optional<detail::ScopedStoredRowNullBitmap> storedNullOwner;
+    const auto* physicalScan = dynamic_cast<const TableScanOp*>(child_.get());
+    // Nonnullable physical targets never ask the stored-NULL fallback. A
+    // selected virtual target can still demand nullable physical inputs.
+    const auto needsStoredNulls = [&] {
+        for (size_t i = 0; i < tbl_.len; ++i) {
+            const auto& column = tbl_.cols[i];
+            if ((column.isNull || column.generatedKind == 'v') &&
+                (selectCols_.empty() || selectCols_.count(column.dataName)))
+                return true;
+        }
+        return false;
+    };
+    if (physicalScan && origin.engine && !origin.dbname.empty() &&
+        origin.rid > 0 && origin.rid == physicalScan->lastRid() &&
+        origin.tablename == physicalScan->tableName() &&
+        origin.tablename == tbl_.tablename &&
+        tbl_.formatVersion == DATA_FILE_FORMAT_VERSION &&
+        needsStoredNulls() &&
+        physicalScan->lastStoredNullBitmap(storedNulls) &&
+        storedNulls.size() == tbl_.len) {
+        storedNullOwner.emplace(tbl_, storedNulls);
+    }
     outRow.clear();
     for (size_t i = 0; i < tbl_.len; ++i) {
         if (!selectCols_.empty() && !selectCols_.count(tbl_.cols[i].dataName))

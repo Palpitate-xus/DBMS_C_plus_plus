@@ -1,5 +1,846 @@
 # 数据库操作性能测试报告（2026-10-30）
 
+<!-- CURRENT_ORDINARY_PROJECT_BITMAP_20261106 -->
+
+## 当前行NULL位图复用与按需求捕获（2026-11-06，P30-C2）
+
+<a id="ordinary-project-bitmap-20261106"></a>
+
+普通物理表的直接投影现在按选中列需求，复用当前行已有的完整NULL位图；局部作用域在正常或异常退出时恢复，只选非空物理列时不再复制。既有值提取、虚拟列求值顺序、TOAST处理、文件身份校验函数和暂停范围保持。
+
+正常CMake C++17/O2的最终C2，在固定/单BYTEA/多LOB三类直接完整查询中，墙钟中位数对前后两次旧版降低约9%–32%，服务器CPU降低约11%–35%；这是本机各三样本的有限结果。主键投影负控仍有回退，固定表服务器CPU为+26.19%/+25.84%，单BYTEA主键查询墙钟为+8.03%/+3.65%。跳过多余复制没有消除这些回退，其根因未证，不能据此归因频率、负载或噪声，也不能称全库提速。
+
+### 原因、功能与边界
+
+本批仅优化真实物理 TableScan→Project 的当前行 NULL 读取：选中列需要 NULL 信息时，借用该行已拥有的完整位图，并在局部作用域退出或异常时恢复；C2 在既未选中可空物理列、也未选中虚拟列时不复制位图。新增的普通 native 回归在 before 执行13组并明确保留6组能力缺失 NOTRUN，C1、最终C2各19组全部真实通过。NULL、空串、文本 NULL、TOAST及标记字面量、相反位图、虚拟列需求、嵌套和异常恢复均保留完整值与真实RID观察。外部 current-file lookup 的有限机制计数不等于 SQL 耗时或整体提速。
+
+真实 PostgreSQL 18.6 参考完成全部58个固定目标及7个控制，观测205行、846个单元、156个NULL；before、C1、C2分别完成全部58个目标及4个冷锚控制，各为53/58，观测204行、845个单元、156个NULL。三代产品全部62组查询的请求、响应及差异保持原始字节一致。既有9项普通差异未关闭：4个初始目录源锚和4个冷目录锚涉及 pg_class 自身行及目录RowDescription源OID/列号，另一个是选中虚拟列除零时PG发送TEZ而产品发送EZ。它们不是PASS，也不是用户暂缓；没有删例或放宽期望。PG启用fsync，所有初始及冷上下文都取得实际子进程wait0，PID和进程组消失。
+
+六个既有native测试在before、C1、C2三代共18次全部真实通过，stdout/stderr逐字节一致；C1与C2新增native的完整stdout也一致。正式只新增1个CPP测试，完整58条portable协议草稿仍以known_gap形式保留，未运行、未注册，不能计为通过。本批不改参数帧、provider生命周期、retained规划或暂停的输出format2边界，不宣称目录/协议错误帧已与PG等价，也不据这些功能回归单独宣称全查询性能提升、默认程序晋升或服务重启。
+
+调研采用原始、带版权的固定源码：PostgreSQL18.6的tuple slot将当前属性值与NULL状态共同持有并在换行时重置；SQLite record格式用serial type0区别NULL、12/13区别空BLOB/TEXT；DuckDB向量把validity与同一逻辑行索引配对，RowIsValid极性与本地isNull相反。本地实现仅借用“同一实际行拥有其NULL状态”的原则，没有移植代码或宣称架构、性能等同。原件、14处源码锚和许可随压缩证据保留。 [PostgreSQL tuple slots](https://raw.githubusercontent.com/postgres/postgres/724edf9bde9d356724ad384a2e196edc3c9f80f7/src/include/executor/tuptable.h)。 [SQLite record format](https://www.sqlite.org/fileformat2.html)。 [DuckDB validity](https://raw.githubusercontent.com/duckdb/duckdb/d1dc88f950d456d72493df452dabdcd13aa413dd/src/include/duckdb/common/types/validity_mask.hpp)。
+
+外部真实BufferPool文件身份校验观察器先以实际缓存命中作正控（每代1次），再观察同一8行：完整nullable投影24→0、nullable子集12→0，TOAST例62→22；Filter/缺位图fallback24→24、非空列0→0。C1/C2各92次行观测、320个单元、NULL位图与真实RID逐字相同。它们是有限调用次数，不是磁盘读次数或SQL计时。C2只取消可证明不需要的复制；负控回退仍在，不把该代码事实当成回退根因已解决。
+
+### 固定性能实验
+
+before是父提交P29C2正常程序（SHA b53f853b356e9c8cf1e8fedf9832201d9bf705cf81d817b35314b4660e334594），本批C1为f9de172592815d62b6610a67654bd1365bb3465c7c3b85254b8945f78e0b536c，最终C2为472e093d40b833bb11715765138d5b4a0ca8002c725afab9d796b1d3a4e2eff3。C1正常构建2个源文件actual0，C2仅重编ExecutionPlan一个源文件actual0；未改变编译标准和O2。
+
+C1与C2各独立执行原样27上下文：canonical固定/单BYTEA两表9上下文（N256），多LOB单表9上下文（N128），每表原8操作完整保留：INSERT1、UPDATE16、全SELECT、DELETE16、VACUUM、全SELECT、TRUNCATE、重新写入原人口；每个UPDATE16/DELETE16是一条影响16行的SQL。另direct9上下文保相同三表catalog/更新后人口，每表完整无ORDER查询与只选id负控。每个角色各3轮before→candidate→same-before，共270计时点，未筛选或重采样。canonical原ORDER BY通常使Project下游为Sort，不据该组的差值断言位图复用命中。两代DELETE均是真CZ，同P28额外空T的旧工作量差别不适用。
+
+每个候选矩阵54次Main上下文均真实正常0并PID/组退出、27个终态树；1098份完整响应逐字段复核，共96624次行观测、386388单元、27864个NULL，单份原始request/response合231410943字节。原始wire每份只存一次，trace只存元数据/计数/摘要，独立reducer重新解码完整wire、核所有原始值而非信任摘要；不再为只读投影加native clone。C1和C2的原始540个计时点均保留，两个实际外层与两个独立reducer全部退出0。
+
+wall从发出完整SimpleQuery到收到Ready，含收发、帧头识别和原始块复制；完整字段解码、值oracle、hash和写盘在计时后。serverCPU是真实整个Main进程，clientCPU另列，时钟与/proc括号不是原子同刻。建表、人口检查自然预热，不是冷查询；cold重启只用于另行正确性复验。正常窗口无编译、分析器、压缩或竞争SQL，不绑CPU、不清OS缓存。每格只有3样本，保留raw/min/p50/max和旧版回测漂移，不作显著性、稳定吞吐或与PG速度比较。
+
+### 最终C2直接完整查询（所有百分比为候选相对该次旧版，负数表示减少）
+
+| schema | rows after UPDATE | clock | before-first p50 ms | C2 p50 ms | before-return p50 ms | C2 vs first | C2 vs return | old-return drift |
+|---|---:|---|---:|---:|---:|---:|---:|---:|
+| fixed | 257 | wall_ns | 28.718385 | 23.645419 | 26.345005 | -17.664524% | -10.247051% | -8.264323% |
+| fixed | 257 | server_process_cpu_ns | 19.857274 | 13.545056 | 20.030613 | -31.787938% | -32.378225% | +0.872924% |
+| single | 257 | wall_ns | 65.476482 | 45.241063 | 66.706389 | -30.904866% | -32.178816% | +1.878395% |
+| single | 257 | server_process_cpu_ns | 57.933788 | 37.931080 | 57.571894 | -34.526843% | -34.115282% | -0.624668% |
+| overflow | 129 | wall_ns | 51.951237 | 47.097845 | 55.293306 | -9.342207% | -14.821796% | +6.433088% |
+| overflow | 129 | server_process_cpu_ns | 43.615965 | 38.873304 | 50.295550 | -10.873681% | -22.710252% | +15.314541% |
+
+### 最终C2全部30种case的分布方向
+
+| cohort | clock | lower than both | higher than both | between/equal |
+|---|---|---:|---:|---:|
+| canonical-fixed-single | wall_ns | 6 | 5 | 5 |
+| canonical-fixed-single | server_process_cpu_ns | 3 | 3 | 10 |
+| canonical-fixed-single | client_process_cpu_ns | 4 | 3 | 9 |
+| canonical-overflow | wall_ns | 2 | 1 | 5 |
+| canonical-overflow | server_process_cpu_ns | 4 | 1 | 3 |
+| canonical-overflow | client_process_cpu_ns | 4 | 2 | 2 |
+| direct-hit | wall_ns | 3 | 2 | 1 |
+| direct-hit | server_process_cpu_ns | 3 | 1 | 2 |
+| direct-hit | client_process_cpu_ns | 0 | 3 | 3 |
+
+全30种case合计：wall11低/8高/11在中，serverCPU10低/5高/15在中；不能把3个完整投影的收益外推为所有数据库操作变快。id-only仍包含整个TableScan/TOAST/元数据等公共成本，不将不同SQL间的差值当成独占位图复制CPU。
+
+### 最终C2所有同时慢于前后旧版的指标
+
+| cohort | scope | case | clock | C2 vs first | C2 vs return |
+|---|---|---|---|---:|---:|
+| canonical-fixed-single | single | delete16 | wall_ns | +17.692822% | +4.569202% |
+| canonical-fixed-single | single | insert1 | client_process_cpu_ns | +9.002969% | +13.438090% |
+| canonical-fixed-single | single | reinsert_population | wall_ns | +10.994200% | +8.595565% |
+| canonical-fixed-single | single | reinsert_population | server_process_cpu_ns | +7.140620% | +12.186056% |
+| canonical-fixed-single | single | select_after_update | wall_ns | +6.117702% | +10.635092% |
+| canonical-fixed-single | single | select_after_update | server_process_cpu_ns | +6.924272% | +12.988533% |
+| canonical-fixed-single | single | select_after_vacuum | client_process_cpu_ns | +5.121606% | +3.413773% |
+| canonical-fixed-single | single | update16 | wall_ns | +5.579067% | +13.126636% |
+| canonical-fixed-single | single | vacuum | wall_ns | +7.585513% | +4.268881% |
+| canonical-fixed-single | single | vacuum | server_process_cpu_ns | +5.657442% | +2.304187% |
+| canonical-fixed-single | single | vacuum | client_process_cpu_ns | +8.422270% | +8.712459% |
+| canonical-overflow | overflow | reinsert_population | server_process_cpu_ns | +6.166505% | +5.322946% |
+| canonical-overflow | overflow | reinsert_population | client_process_cpu_ns | +13.875960% | +8.031687% |
+| canonical-overflow | overflow | select_after_update | client_process_cpu_ns | +0.062652% | +5.454153% |
+| canonical-overflow | overflow | vacuum | wall_ns | +2.145571% | +10.589864% |
+| direct-hit | fixed | direct_id_only_no_order | wall_ns | +18.449787% | +6.416175% |
+| direct-hit | fixed | direct_id_only_no_order | server_process_cpu_ns | +26.185699% | +25.840039% |
+| direct-hit | fixed | direct_id_only_no_order | client_process_cpu_ns | +1.361221% | +1.598482% |
+| direct-hit | overflow | direct_id_only_no_order | client_process_cpu_ns | +28.633672% | +26.597675% |
+| direct-hit | single | direct_id_only_no_order | wall_ns | +8.026427% | +3.651565% |
+| direct-hit | single | direct_id_only_no_order | client_process_cpu_ns | +5.231742% | +5.317329% |
+
+### 最终C2完整raw3/min/p50/max及全部比较
+
+#### P30 finite ordinary operation and direct projection costs
+
+Each raw value is retained from three independent contexts. Canonical ORDER BY samples and separately named direct no-ORDER controls stay separate. No exclusions, stable ratio, PG speed, or whole-database claim. Both generations use P29C2-compatible command-only DELETE.
+
+| Cohort | Scope | Region | Clock | Role | raw3 ms | min ms | p50 ms | max ms |
+|---|---|---|---|---|---|---:|---:|---:|
+| canonical-fixed-single | fixed | delete16 | wall_ns | before-first | 61.678139, 47.959509, 49.234751 | 47.959509 | 49.234751 | 61.678139 |
+| canonical-fixed-single | fixed | delete16 | wall_ns | candidate | 45.129978, 45.689278, 44.389693 | 44.389693 | 45.129978 | 45.689278 |
+| canonical-fixed-single | fixed | delete16 | wall_ns | before-return | 55.145040, 52.993271, 66.821127 | 52.993271 | 55.145040 | 66.821127 |
+| canonical-fixed-single | fixed | delete16 | server_process_cpu_ns | before-first | 55.403690, 38.403856, 39.378469 | 38.403856 | 39.378469 | 55.403690 |
+| canonical-fixed-single | fixed | delete16 | server_process_cpu_ns | candidate | 37.629844, 38.656983, 37.068031 | 37.068031 | 37.629844 | 38.656983 |
+| canonical-fixed-single | fixed | delete16 | server_process_cpu_ns | before-return | 47.247166, 44.682215, 53.984623 | 44.682215 | 47.247166 | 53.984623 |
+| canonical-fixed-single | fixed | delete16 | client_process_cpu_ns | before-first | 0.228425, 0.276508, 0.218847 | 0.218847 | 0.228425 | 0.276508 |
+| canonical-fixed-single | fixed | delete16 | client_process_cpu_ns | candidate | 0.200354, 0.211597, 0.198568 | 0.198568 | 0.200354 | 0.211597 |
+| canonical-fixed-single | fixed | delete16 | client_process_cpu_ns | before-return | 0.205621, 0.205673, 0.233710 | 0.205621 | 0.205673 | 0.233710 |
+| canonical-fixed-single | fixed | insert1 | wall_ns | before-first | 15.939240, 16.690000, 28.546039 | 15.939240 | 16.690000 | 28.546039 |
+| canonical-fixed-single | fixed | insert1 | wall_ns | candidate | 14.120781, 14.561457, 22.928859 | 14.120781 | 14.561457 | 22.928859 |
+| canonical-fixed-single | fixed | insert1 | wall_ns | before-return | 17.752418, 22.386141, 41.214144 | 17.752418 | 22.386141 | 41.214144 |
+| canonical-fixed-single | fixed | insert1 | server_process_cpu_ns | before-first | 7.152671, 8.902757, 15.849176 | 7.152671 | 8.902757 | 15.849176 |
+| canonical-fixed-single | fixed | insert1 | server_process_cpu_ns | candidate | 6.451646, 7.197653, 7.565783 | 6.451646 | 7.197653 | 7.565783 |
+| canonical-fixed-single | fixed | insert1 | server_process_cpu_ns | before-return | 8.956039, 13.237487, 13.959768 | 8.956039 | 13.237487 | 13.959768 |
+| canonical-fixed-single | fixed | insert1 | client_process_cpu_ns | before-first | 0.194317, 0.213923, 0.241227 | 0.194317 | 0.213923 | 0.241227 |
+| canonical-fixed-single | fixed | insert1 | client_process_cpu_ns | candidate | 0.191214, 0.204881, 0.187067 | 0.187067 | 0.191214 | 0.204881 |
+| canonical-fixed-single | fixed | insert1 | client_process_cpu_ns | before-return | 0.179119, 0.214007, 0.218726 | 0.179119 | 0.214007 | 0.218726 |
+| canonical-fixed-single | fixed | reinsert_population | wall_ns | before-first | 626.361082, 594.085105, 668.499102 | 594.085105 | 626.361082 | 668.499102 |
+| canonical-fixed-single | fixed | reinsert_population | wall_ns | candidate | 623.255309, 622.993373, 619.268779 | 619.268779 | 622.993373 | 623.255309 |
+| canonical-fixed-single | fixed | reinsert_population | wall_ns | before-return | 613.563893, 642.307962, 681.554662 | 613.563893 | 642.307962 | 681.554662 |
+| canonical-fixed-single | fixed | reinsert_population | server_process_cpu_ns | before-first | 590.668757, 563.044478, 541.551423 | 541.551423 | 563.044478 | 590.668757 |
+| canonical-fixed-single | fixed | reinsert_population | server_process_cpu_ns | candidate | 586.611211, 582.481644, 594.942187 | 582.481644 | 586.611211 | 594.942187 |
+| canonical-fixed-single | fixed | reinsert_population | server_process_cpu_ns | before-return | 576.873186, 609.508000, 587.979871 | 576.873186 | 587.979871 | 609.508000 |
+| canonical-fixed-single | fixed | reinsert_population | client_process_cpu_ns | before-first | 0.215184, 0.214051, 0.219873 | 0.214051 | 0.215184 | 0.219873 |
+| canonical-fixed-single | fixed | reinsert_population | client_process_cpu_ns | candidate | 0.180521, 0.218750, 0.227297 | 0.180521 | 0.218750 | 0.227297 |
+| canonical-fixed-single | fixed | reinsert_population | client_process_cpu_ns | before-return | 0.222893, 0.225348, 0.223470 | 0.222893 | 0.223470 | 0.225348 |
+| canonical-fixed-single | fixed | select_after_update | wall_ns | before-first | 59.549066, 26.835633, 30.648422 | 26.835633 | 30.648422 | 59.549066 |
+| canonical-fixed-single | fixed | select_after_update | wall_ns | candidate | 29.802467, 27.502386, 25.345057 | 25.345057 | 27.502386 | 29.802467 |
+| canonical-fixed-single | fixed | select_after_update | wall_ns | before-return | 28.228887, 31.370980, 31.275709 | 28.228887 | 31.275709 | 31.370980 |
+| canonical-fixed-single | fixed | select_after_update | server_process_cpu_ns | before-first | 12.952131, 17.552444, 22.162932 | 12.952131 | 17.552444 | 22.162932 |
+| canonical-fixed-single | fixed | select_after_update | server_process_cpu_ns | candidate | 18.696069, 18.103500, 16.323439 | 16.323439 | 18.103500 | 18.696069 |
+| canonical-fixed-single | fixed | select_after_update | server_process_cpu_ns | before-return | 17.594721, 23.462109, 21.919702 | 17.594721 | 21.919702 | 23.462109 |
+| canonical-fixed-single | fixed | select_after_update | client_process_cpu_ns | before-first | 4.884482, 4.932933, 4.852070 | 4.852070 | 4.884482 | 4.932933 |
+| canonical-fixed-single | fixed | select_after_update | client_process_cpu_ns | candidate | 4.823035, 4.852296, 5.131575 | 4.823035 | 4.852296 | 5.131575 |
+| canonical-fixed-single | fixed | select_after_update | client_process_cpu_ns | before-return | 4.809449, 4.996146, 3.135456 | 3.135456 | 4.809449 | 4.996146 |
+| canonical-fixed-single | fixed | select_after_vacuum | wall_ns | before-first | 30.865446, 29.907802, 25.789369 | 25.789369 | 29.907802 | 30.865446 |
+| canonical-fixed-single | fixed | select_after_vacuum | wall_ns | candidate | 27.243735, 28.426400, 25.803037 | 25.803037 | 27.243735 | 28.426400 |
+| canonical-fixed-single | fixed | select_after_vacuum | wall_ns | before-return | 22.981485, 23.847395, 42.206686 | 22.981485 | 23.847395 | 42.206686 |
+| canonical-fixed-single | fixed | select_after_vacuum | server_process_cpu_ns | before-first | 23.136382, 21.985189, 19.839459 | 19.839459 | 21.985189 | 23.136382 |
+| canonical-fixed-single | fixed | select_after_vacuum | server_process_cpu_ns | candidate | 20.828624, 20.336246, 18.541737 | 18.541737 | 20.336246 | 20.828624 |
+| canonical-fixed-single | fixed | select_after_vacuum | server_process_cpu_ns | before-return | 13.621685, 16.388426, 28.547773 | 13.621685 | 16.388426 | 28.547773 |
+| canonical-fixed-single | fixed | select_after_vacuum | client_process_cpu_ns | before-first | 4.592536, 4.881089, 3.093118 | 3.093118 | 4.592536 | 4.881089 |
+| canonical-fixed-single | fixed | select_after_vacuum | client_process_cpu_ns | candidate | 2.726656, 4.520839, 4.482062 | 2.726656 | 4.482062 | 4.520839 |
+| canonical-fixed-single | fixed | select_after_vacuum | client_process_cpu_ns | before-return | 4.433692, 3.671436, 4.609172 | 3.671436 | 4.433692 | 4.609172 |
+| canonical-fixed-single | fixed | truncate | wall_ns | before-first | 267.082130, 342.789167, 254.248212 | 254.248212 | 267.082130 | 342.789167 |
+| canonical-fixed-single | fixed | truncate | wall_ns | candidate | 237.500951, 280.415601, 291.256072 | 237.500951 | 280.415601 | 291.256072 |
+| canonical-fixed-single | fixed | truncate | wall_ns | before-return | 301.703156, 302.677775, 338.778943 | 301.703156 | 302.677775 | 338.778943 |
+| canonical-fixed-single | fixed | truncate | server_process_cpu_ns | before-first | 97.981723, 82.880267, 86.505336 | 82.880267 | 86.505336 | 97.981723 |
+| canonical-fixed-single | fixed | truncate | server_process_cpu_ns | candidate | 95.365218, 84.505780, 87.476074 | 84.505780 | 87.476074 | 95.365218 |
+| canonical-fixed-single | fixed | truncate | server_process_cpu_ns | before-return | 87.730891, 90.622895, 119.412203 | 87.730891 | 90.622895 | 119.412203 |
+| canonical-fixed-single | fixed | truncate | client_process_cpu_ns | before-first | 0.204539, 0.199967, 0.197672 | 0.197672 | 0.199967 | 0.204539 |
+| canonical-fixed-single | fixed | truncate | client_process_cpu_ns | candidate | 0.200806, 0.268904, 0.234459 | 0.200806 | 0.234459 | 0.268904 |
+| canonical-fixed-single | fixed | truncate | client_process_cpu_ns | before-return | 0.230237, 0.271527, 0.240893 | 0.230237 | 0.240893 | 0.271527 |
+| canonical-fixed-single | fixed | update16 | wall_ns | before-first | 119.412204, 62.201543, 82.234121 | 62.201543 | 82.234121 | 119.412204 |
+| canonical-fixed-single | fixed | update16 | wall_ns | candidate | 68.820065, 77.299386, 71.396340 | 68.820065 | 71.396340 | 77.299386 |
+| canonical-fixed-single | fixed | update16 | wall_ns | before-return | 69.306560, 86.924545, 88.155234 | 69.306560 | 86.924545 | 88.155234 |
+| canonical-fixed-single | fixed | update16 | server_process_cpu_ns | before-first | 71.055657, 53.032207, 72.114038 | 53.032207 | 71.055657 | 72.114038 |
+| canonical-fixed-single | fixed | update16 | server_process_cpu_ns | candidate | 59.579636, 69.704474, 63.913948 | 59.579636 | 63.913948 | 69.704474 |
+| canonical-fixed-single | fixed | update16 | server_process_cpu_ns | before-return | 61.184192, 76.129572, 77.532239 | 61.184192 | 76.129572 | 77.532239 |
+| canonical-fixed-single | fixed | update16 | client_process_cpu_ns | before-first | 0.205661, 0.201164, 0.231913 | 0.201164 | 0.205661 | 0.231913 |
+| canonical-fixed-single | fixed | update16 | client_process_cpu_ns | candidate | 0.193026, 0.202487, 0.207184 | 0.193026 | 0.202487 | 0.207184 |
+| canonical-fixed-single | fixed | update16 | client_process_cpu_ns | before-return | 0.215484, 0.228000, 0.243680 | 0.215484 | 0.228000 | 0.243680 |
+| canonical-fixed-single | fixed | vacuum | wall_ns | before-first | 2.072524, 1.705598, 2.101004 | 1.705598 | 2.072524 | 2.101004 |
+| canonical-fixed-single | fixed | vacuum | wall_ns | candidate | 1.787327, 1.698608, 1.733929 | 1.698608 | 1.733929 | 1.787327 |
+| canonical-fixed-single | fixed | vacuum | wall_ns | before-return | 1.195343, 1.624792, 2.417087 | 1.195343 | 1.624792 | 2.417087 |
+| canonical-fixed-single | fixed | vacuum | server_process_cpu_ns | before-first | 1.929052, 1.567519, 2.022814 | 1.567519 | 1.929052 | 2.022814 |
+| canonical-fixed-single | fixed | vacuum | server_process_cpu_ns | candidate | 1.680892, 1.556210, 1.597449 | 1.556210 | 1.597449 | 1.680892 |
+| canonical-fixed-single | fixed | vacuum | server_process_cpu_ns | before-return | 1.063656, 1.501589, 2.280070 | 1.063656 | 1.501589 | 2.280070 |
+| canonical-fixed-single | fixed | vacuum | client_process_cpu_ns | before-first | 0.214133, 0.235106, 0.160233 | 0.160233 | 0.214133 | 0.235106 |
+| canonical-fixed-single | fixed | vacuum | client_process_cpu_ns | candidate | 0.202327, 0.205107, 0.201134 | 0.201134 | 0.202327 | 0.205107 |
+| canonical-fixed-single | fixed | vacuum | client_process_cpu_ns | before-return | 0.200024, 0.197857, 0.208703 | 0.197857 | 0.200024 | 0.208703 |
+| canonical-fixed-single | single | delete16 | wall_ns | before-first | 65.687808, 62.049388, 79.049954 | 62.049388 | 65.687808 | 79.049954 |
+| canonical-fixed-single | single | delete16 | wall_ns | candidate | 77.309835, 108.906609, 68.363983 | 68.363983 | 77.309835 | 108.906609 |
+| canonical-fixed-single | single | delete16 | wall_ns | before-return | 73.931744, 67.146180, 78.500418 | 67.146180 | 73.931744 | 78.500418 |
+| canonical-fixed-single | single | delete16 | server_process_cpu_ns | before-first | 53.644653, 54.082051, 70.070506 | 53.644653 | 54.082051 | 70.070506 |
+| canonical-fixed-single | single | delete16 | server_process_cpu_ns | candidate | 69.759375, 63.088773, 57.305785 | 57.305785 | 63.088773 | 69.759375 |
+| canonical-fixed-single | single | delete16 | server_process_cpu_ns | before-return | 66.418794, 59.348727, 66.353934 | 59.348727 | 66.353934 | 66.418794 |
+| canonical-fixed-single | single | delete16 | client_process_cpu_ns | before-first | 0.234530, 0.224043, 0.375647 | 0.224043 | 0.234530 | 0.375647 |
+| canonical-fixed-single | single | delete16 | client_process_cpu_ns | candidate | 0.231759, 0.216352, 0.225914 | 0.216352 | 0.225914 | 0.231759 |
+| canonical-fixed-single | single | delete16 | client_process_cpu_ns | before-return | 0.216760, 0.212995, 0.265852 | 0.212995 | 0.216760 | 0.265852 |
+| canonical-fixed-single | single | insert1 | wall_ns | before-first | 22.893469, 16.279011, 56.386545 | 16.279011 | 22.893469 | 56.386545 |
+| canonical-fixed-single | single | insert1 | wall_ns | candidate | 23.118507, 18.346362, 18.774264 | 18.346362 | 18.774264 | 23.118507 |
+| canonical-fixed-single | single | insert1 | wall_ns | before-return | 17.958382, 19.561102, 26.737648 | 17.958382 | 19.561102 | 26.737648 |
+| canonical-fixed-single | single | insert1 | server_process_cpu_ns | before-first | 8.612662, 8.341009, 11.876376 | 8.341009 | 8.612662 | 11.876376 |
+| canonical-fixed-single | single | insert1 | server_process_cpu_ns | candidate | 12.159680, 9.101453, 9.903845 | 9.101453 | 9.903845 | 12.159680 |
+| canonical-fixed-single | single | insert1 | server_process_cpu_ns | before-return | 11.049182, 9.769099, 10.742190 | 9.769099 | 10.742190 | 11.049182 |
+| canonical-fixed-single | single | insert1 | client_process_cpu_ns | before-first | 0.210475, 0.198137, 0.237737 | 0.198137 | 0.210475 | 0.237737 |
+| canonical-fixed-single | single | insert1 | client_process_cpu_ns | candidate | 0.251560, 0.206983, 0.229424 | 0.206983 | 0.229424 | 0.251560 |
+| canonical-fixed-single | single | insert1 | client_process_cpu_ns | before-return | 0.199659, 0.202246, 0.229944 | 0.199659 | 0.202246 | 0.229944 |
+| canonical-fixed-single | single | reinsert_population | wall_ns | before-first | 1099.424242, 1063.129712, 997.803840 | 997.803840 | 1063.129712 | 1099.424242 |
+| canonical-fixed-single | single | reinsert_population | wall_ns | candidate | 1124.802906, 1180.012322, 1375.490769 | 1124.802906 | 1180.012322 | 1375.490769 |
+| canonical-fixed-single | single | reinsert_population | wall_ns | before-return | 1086.611886, 1003.081027, 1148.161007 | 1003.081027 | 1086.611886 | 1148.161007 |
+| canonical-fixed-single | single | reinsert_population | server_process_cpu_ns | before-first | 1036.263219, 1003.437020, 956.034890 | 956.034890 | 1003.437020 | 1036.263219 |
+| canonical-fixed-single | single | reinsert_population | server_process_cpu_ns | candidate | 1075.088642, 1121.352639, 1064.765783 | 1064.765783 | 1075.088642 | 1121.352639 |
+| canonical-fixed-single | single | reinsert_population | server_process_cpu_ns | before-return | 1041.497193, 958.308615, 951.513476 | 951.513476 | 958.308615 | 1041.497193 |
+| canonical-fixed-single | single | reinsert_population | client_process_cpu_ns | before-first | 0.594725, 0.617798, 0.577001 | 0.577001 | 0.594725 | 0.617798 |
+| canonical-fixed-single | single | reinsert_population | client_process_cpu_ns | candidate | 0.557391, 0.739560, 0.595867 | 0.557391 | 0.595867 | 0.739560 |
+| canonical-fixed-single | single | reinsert_population | client_process_cpu_ns | before-return | 0.660467, 0.628351, 0.585957 | 0.585957 | 0.628351 | 0.660467 |
+| canonical-fixed-single | single | select_after_update | wall_ns | before-first | 55.294565, 52.824766, 47.541509 | 47.541509 | 52.824766 | 55.294565 |
+| canonical-fixed-single | single | select_after_update | wall_ns | candidate | 56.056428, 105.492166, 45.651023 | 45.651023 | 56.056428 | 105.492166 |
+| canonical-fixed-single | single | select_after_update | wall_ns | before-return | 48.585891, 50.667855, 66.279740 | 48.585891 | 50.667855 | 66.279740 |
+| canonical-fixed-single | single | select_after_update | server_process_cpu_ns | before-first | 45.453529, 46.904938, 42.209961 | 42.209961 | 45.453529 | 46.904938 |
+| canonical-fixed-single | single | select_after_update | server_process_cpu_ns | candidate | 48.600855, 60.688800, 36.102887 | 36.102887 | 48.600855 | 60.688800 |
+| canonical-fixed-single | single | select_after_update | server_process_cpu_ns | before-return | 40.489986, 43.013971, 54.033432 | 40.489986 | 43.013971 | 54.033432 |
+| canonical-fixed-single | single | select_after_update | client_process_cpu_ns | before-first | 6.707132, 4.167398, 6.294034 | 4.167398 | 6.294034 | 6.707132 |
+| canonical-fixed-single | single | select_after_update | client_process_cpu_ns | candidate | 5.547595, 6.699888, 5.900944 | 5.547595 | 5.900944 | 6.699888 |
+| canonical-fixed-single | single | select_after_update | client_process_cpu_ns | before-return | 5.809585, 5.967064, 6.042717 | 5.809585 | 5.967064 | 6.042717 |
+| canonical-fixed-single | single | select_after_vacuum | wall_ns | before-first | 54.936410, 49.662604, 53.648151 | 49.662604 | 53.648151 | 54.936410 |
+| canonical-fixed-single | single | select_after_vacuum | wall_ns | candidate | 56.694185, 59.088630, 62.777364 | 56.694185 | 59.088630 | 62.777364 |
+| canonical-fixed-single | single | select_after_vacuum | wall_ns | before-return | 61.402248, 61.627266, 63.136890 | 61.402248 | 61.627266 | 63.136890 |
+| canonical-fixed-single | single | select_after_vacuum | server_process_cpu_ns | before-first | 47.369796, 43.682065, 46.856221 | 43.682065 | 46.856221 | 47.369796 |
+| canonical-fixed-single | single | select_after_vacuum | server_process_cpu_ns | candidate | 49.542050, 49.627816, 55.987096 | 49.542050 | 49.627816 | 55.987096 |
+| canonical-fixed-single | single | select_after_vacuum | server_process_cpu_ns | before-return | 56.135521, 54.716151, 53.265189 | 53.265189 | 54.716151 | 56.135521 |
+| canonical-fixed-single | single | select_after_vacuum | client_process_cpu_ns | before-first | 4.900264, 5.262021, 5.986698 | 4.900264 | 5.262021 | 5.986698 |
+| canonical-fixed-single | single | select_after_vacuum | client_process_cpu_ns | candidate | 5.839955, 5.523482, 5.531521 | 5.523482 | 5.531521 | 5.839955 |
+| canonical-fixed-single | single | select_after_vacuum | client_process_cpu_ns | before-return | 4.779712, 5.570510, 5.348921 | 4.779712 | 5.348921 | 5.570510 |
+| canonical-fixed-single | single | truncate | wall_ns | before-first | 270.710618, 239.970308, 278.746431 | 239.970308 | 270.710618 | 278.746431 |
+| canonical-fixed-single | single | truncate | wall_ns | candidate | 223.989218, 339.008075, 258.231110 | 223.989218 | 258.231110 | 339.008075 |
+| canonical-fixed-single | single | truncate | wall_ns | before-return | 297.124739, 217.601604, 218.816696 | 217.601604 | 218.816696 | 297.124739 |
+| canonical-fixed-single | single | truncate | server_process_cpu_ns | before-first | 136.817586, 135.714692, 137.370200 | 135.714692 | 136.817586 | 137.370200 |
+| canonical-fixed-single | single | truncate | server_process_cpu_ns | candidate | 131.633234, 111.660610, 138.458396 | 111.660610 | 131.633234 | 138.458396 |
+| canonical-fixed-single | single | truncate | server_process_cpu_ns | before-return | 112.493723, 102.612759, 117.642477 | 102.612759 | 112.493723 | 117.642477 |
+| canonical-fixed-single | single | truncate | client_process_cpu_ns | before-first | 0.228505, 0.243465, 0.253464 | 0.228505 | 0.243465 | 0.253464 |
+| canonical-fixed-single | single | truncate | client_process_cpu_ns | candidate | 0.224061, 0.238600, 0.255101 | 0.224061 | 0.238600 | 0.255101 |
+| canonical-fixed-single | single | truncate | client_process_cpu_ns | before-return | 0.211343, 0.244830, 0.233996 | 0.211343 | 0.233996 | 0.244830 |
+| canonical-fixed-single | single | update16 | wall_ns | before-first | 148.573249, 160.961433, 146.092162 | 146.092162 | 148.573249 | 160.961433 |
+| canonical-fixed-single | single | update16 | wall_ns | candidate | 198.533315, 156.862250, 140.844230 | 140.844230 | 156.862250 | 198.533315 |
+| canonical-fixed-single | single | update16 | wall_ns | before-return | 138.660757, 130.599717, 175.271243 | 130.599717 | 138.660757 | 175.271243 |
+| canonical-fixed-single | single | update16 | server_process_cpu_ns | before-first | 128.616244, 126.948638, 127.085192 | 126.948638 | 127.085192 | 128.616244 |
+| canonical-fixed-single | single | update16 | server_process_cpu_ns | candidate | 123.912751, 129.689701, 118.997293 | 118.997293 | 123.912751 | 129.689701 |
+| canonical-fixed-single | single | update16 | server_process_cpu_ns | before-return | 120.288598, 111.251437, 128.505024 | 111.251437 | 120.288598 | 128.505024 |
+| canonical-fixed-single | single | update16 | client_process_cpu_ns | before-first | 0.217066, 0.238600, 0.217512 | 0.217066 | 0.217512 | 0.238600 |
+| canonical-fixed-single | single | update16 | client_process_cpu_ns | candidate | 0.236658, 0.227911, 0.231891 | 0.227911 | 0.231891 | 0.236658 |
+| canonical-fixed-single | single | update16 | client_process_cpu_ns | before-return | 0.267937, 0.228478, 0.257160 | 0.228478 | 0.257160 | 0.267937 |
+| canonical-fixed-single | single | vacuum | wall_ns | before-first | 7.298122, 6.501652, 8.135543 | 6.501652 | 7.298122 | 8.135543 |
+| canonical-fixed-single | single | vacuum | wall_ns | candidate | 8.061628, 7.851722, 7.394089 | 7.394089 | 7.851722 | 8.061628 |
+| canonical-fixed-single | single | vacuum | wall_ns | before-return | 7.469578, 7.530264, 7.973806 | 7.469578 | 7.530264 | 7.973806 |
+| canonical-fixed-single | single | vacuum | server_process_cpu_ns | before-first | 7.078252, 6.257968, 7.882661 | 6.257968 | 7.078252 | 7.882661 |
+| canonical-fixed-single | single | vacuum | server_process_cpu_ns | candidate | 7.783174, 7.478700, 7.145878 | 7.145878 | 7.478700 | 7.783174 |
+| canonical-fixed-single | single | vacuum | server_process_cpu_ns | before-return | 7.237276, 7.310258, 7.686326 | 7.237276 | 7.310258 | 7.686326 |
+| canonical-fixed-single | single | vacuum | client_process_cpu_ns | before-first | 0.171092, 0.201549, 0.235615 | 0.171092 | 0.201549 | 0.235615 |
+| canonical-fixed-single | single | vacuum | client_process_cpu_ns | candidate | 0.200733, 0.254578, 0.218524 | 0.200733 | 0.218524 | 0.254578 |
+| canonical-fixed-single | single | vacuum | client_process_cpu_ns | before-return | 0.201011, 0.200458, 0.242307 | 0.200458 | 0.201011 | 0.242307 |
+| canonical-overflow | overflow | delete16 | wall_ns | before-first | 54.622649, 91.536410, 85.337794 | 54.622649 | 85.337794 | 91.536410 |
+| canonical-overflow | overflow | delete16 | wall_ns | candidate | 98.560751, 76.413798, 69.683409 | 69.683409 | 76.413798 | 98.560751 |
+| canonical-overflow | overflow | delete16 | wall_ns | before-return | 75.807947, 85.622535, 69.666998 | 69.666998 | 75.807947 | 85.622535 |
+| canonical-overflow | overflow | delete16 | server_process_cpu_ns | before-first | 45.344001, 71.436405, 73.021092 | 45.344001 | 71.436405 | 73.021092 |
+| canonical-overflow | overflow | delete16 | server_process_cpu_ns | candidate | 69.325092, 68.098660, 61.079253 | 61.079253 | 68.098660 | 69.325092 |
+| canonical-overflow | overflow | delete16 | server_process_cpu_ns | before-return | 66.893396, 70.145581, 55.160144 | 55.160144 | 66.893396 | 70.145581 |
+| canonical-overflow | overflow | delete16 | client_process_cpu_ns | before-first | 0.252303, 0.281867, 0.220581 | 0.220581 | 0.252303 | 0.281867 |
+| canonical-overflow | overflow | delete16 | client_process_cpu_ns | candidate | 0.247740, 0.278807, 0.239431 | 0.239431 | 0.247740 | 0.278807 |
+| canonical-overflow | overflow | delete16 | client_process_cpu_ns | before-return | 0.279839, 0.253681, 0.237189 | 0.237189 | 0.253681 | 0.279839 |
+| canonical-overflow | overflow | insert1 | wall_ns | before-first | 26.495412, 27.523904, 38.665556 | 26.495412 | 27.523904 | 38.665556 |
+| canonical-overflow | overflow | insert1 | wall_ns | candidate | 19.810484, 18.629867, 16.089200 | 16.089200 | 18.629867 | 19.810484 |
+| canonical-overflow | overflow | insert1 | wall_ns | before-return | 18.915860, 22.522496, 38.072382 | 18.915860 | 22.522496 | 38.072382 |
+| canonical-overflow | overflow | insert1 | server_process_cpu_ns | before-first | 9.108295, 17.516687, 19.233188 | 9.108295 | 17.516687 | 19.233188 |
+| canonical-overflow | overflow | insert1 | server_process_cpu_ns | candidate | 10.432227, 8.059878, 8.133840 | 8.059878 | 8.133840 | 10.432227 |
+| canonical-overflow | overflow | insert1 | server_process_cpu_ns | before-return | 10.817072, 8.372134, 9.923612 | 8.372134 | 9.923612 | 10.817072 |
+| canonical-overflow | overflow | insert1 | client_process_cpu_ns | before-first | 0.180877, 0.220052, 0.246534 | 0.180877 | 0.220052 | 0.246534 |
+| canonical-overflow | overflow | insert1 | client_process_cpu_ns | candidate | 0.200249, 0.201777, 0.202419 | 0.200249 | 0.201777 | 0.202419 |
+| canonical-overflow | overflow | insert1 | client_process_cpu_ns | before-return | 0.198990, 0.107350, 0.186171 | 0.107350 | 0.186171 | 0.198990 |
+| canonical-overflow | overflow | reinsert_population | wall_ns | before-first | 1459.137672, 1072.947750, 1245.641057 | 1072.947750 | 1245.641057 | 1459.137672 |
+| canonical-overflow | overflow | reinsert_population | wall_ns | candidate | 1233.713081, 1217.456124, 1189.841574 | 1189.841574 | 1217.456124 | 1233.713081 |
+| canonical-overflow | overflow | reinsert_population | wall_ns | before-return | 1086.299465, 1058.776273, 1235.186373 | 1058.776273 | 1086.299465 | 1235.186373 |
+| canonical-overflow | overflow | reinsert_population | server_process_cpu_ns | before-first | 1041.701215, 978.856767, 1105.559815 | 978.856767 | 1041.701215 | 1105.559815 |
+| canonical-overflow | overflow | reinsert_population | server_process_cpu_ns | candidate | 1035.306881, 1105.937772, 1146.743726 | 1035.306881 | 1105.937772 | 1146.743726 |
+| canonical-overflow | overflow | reinsert_population | server_process_cpu_ns | before-return | 1050.044468, 1020.912481, 1078.688404 | 1020.912481 | 1050.044468 | 1078.688404 |
+| canonical-overflow | overflow | reinsert_population | client_process_cpu_ns | before-first | 0.544997, 0.719734, 0.760920 | 0.544997 | 0.719734 | 0.760920 |
+| canonical-overflow | overflow | reinsert_population | client_process_cpu_ns | candidate | 1.106365, 0.819604, 0.764978 | 0.764978 | 0.819604 | 1.106365 |
+| canonical-overflow | overflow | reinsert_population | client_process_cpu_ns | before-return | 0.749518, 0.758670, 1.292883 | 0.749518 | 0.758670 | 1.292883 |
+| canonical-overflow | overflow | select_after_update | wall_ns | before-first | 66.565880, 67.836175, 62.038982 | 62.038982 | 66.565880 | 67.836175 |
+| canonical-overflow | overflow | select_after_update | wall_ns | candidate | 56.777434, 67.860833, 43.651506 | 43.651506 | 56.777434 | 67.860833 |
+| canonical-overflow | overflow | select_after_update | wall_ns | before-return | 47.359201, 154.542920, 54.145329 | 47.359201 | 54.145329 | 154.542920 |
+| canonical-overflow | overflow | select_after_update | server_process_cpu_ns | before-first | 58.817035, 53.990606, 53.250445 | 53.250445 | 53.990606 | 58.817035 |
+| canonical-overflow | overflow | select_after_update | server_process_cpu_ns | candidate | 44.075450, 57.694720, 37.344073 | 37.344073 | 44.075450 | 57.694720 |
+| canonical-overflow | overflow | select_after_update | server_process_cpu_ns | before-return | 40.873340, 67.938779, 42.993546 | 40.873340 | 42.993546 | 67.938779 |
+| canonical-overflow | overflow | select_after_update | client_process_cpu_ns | before-first | 4.143527, 4.317272, 3.931197 | 3.931197 | 4.143527 | 4.317272 |
+| canonical-overflow | overflow | select_after_update | client_process_cpu_ns | candidate | 4.534115, 4.146123, 3.963954 | 3.963954 | 4.146123 | 4.534115 |
+| canonical-overflow | overflow | select_after_update | client_process_cpu_ns | before-return | 3.913240, 4.284709, 3.931683 | 3.913240 | 3.931683 | 4.284709 |
+| canonical-overflow | overflow | select_after_vacuum | wall_ns | before-first | 51.611641, 70.341704, 67.008167 | 51.611641 | 67.008167 | 70.341704 |
+| canonical-overflow | overflow | select_after_vacuum | wall_ns | candidate | 82.155192, 62.177983, 59.057650 | 59.057650 | 62.177983 | 82.155192 |
+| canonical-overflow | overflow | select_after_vacuum | wall_ns | before-return | 59.131679, 61.659412, 72.486238 | 59.131679 | 61.659412 | 72.486238 |
+| canonical-overflow | overflow | select_after_vacuum | server_process_cpu_ns | before-first | 45.257791, 62.262054, 59.284220 | 45.257791 | 59.284220 | 62.262054 |
+| canonical-overflow | overflow | select_after_vacuum | server_process_cpu_ns | candidate | 75.549351, 56.817200, 53.471146 | 53.471146 | 56.817200 | 75.549351 |
+| canonical-overflow | overflow | select_after_vacuum | server_process_cpu_ns | before-return | 54.091773, 55.111631, 58.292921 | 54.091773 | 55.111631 | 58.292921 |
+| canonical-overflow | overflow | select_after_vacuum | client_process_cpu_ns | before-first | 4.058232, 3.388746, 3.794473 | 3.388746 | 3.794473 | 4.058232 |
+| canonical-overflow | overflow | select_after_vacuum | client_process_cpu_ns | candidate | 3.612591, 3.311135, 3.929187 | 3.311135 | 3.612591 | 3.929187 |
+| canonical-overflow | overflow | select_after_vacuum | client_process_cpu_ns | before-return | 3.826113, 3.788343, 3.816481 | 3.788343 | 3.816481 | 3.826113 |
+| canonical-overflow | overflow | truncate | wall_ns | before-first | 164.379853, 223.164615, 222.395574 | 164.379853 | 222.395574 | 223.164615 |
+| canonical-overflow | overflow | truncate | wall_ns | candidate | 168.289006, 149.905403, 203.504509 | 149.905403 | 168.289006 | 203.504509 |
+| canonical-overflow | overflow | truncate | wall_ns | before-return | 184.877071, 134.639516, 209.151919 | 134.639516 | 184.877071 | 209.151919 |
+| canonical-overflow | overflow | truncate | server_process_cpu_ns | before-first | 85.823160, 91.433927, 89.122556 | 85.823160 | 89.122556 | 91.433927 |
+| canonical-overflow | overflow | truncate | server_process_cpu_ns | candidate | 63.169897, 81.281043, 85.811062 | 63.169897 | 81.281043 | 85.811062 |
+| canonical-overflow | overflow | truncate | server_process_cpu_ns | before-return | 86.352397, 60.191796, 88.391515 | 60.191796 | 86.352397 | 88.391515 |
+| canonical-overflow | overflow | truncate | client_process_cpu_ns | before-first | 0.254056, 0.232215, 0.212495 | 0.212495 | 0.232215 | 0.254056 |
+| canonical-overflow | overflow | truncate | client_process_cpu_ns | candidate | 0.236821, 0.224121, 0.240182 | 0.224121 | 0.236821 | 0.240182 |
+| canonical-overflow | overflow | truncate | client_process_cpu_ns | before-return | 0.276087, 0.258834, 0.229235 | 0.229235 | 0.258834 | 0.276087 |
+| canonical-overflow | overflow | update16 | wall_ns | before-first | 178.297210, 168.245816, 443.483128 | 168.245816 | 178.297210 | 443.483128 |
+| canonical-overflow | overflow | update16 | wall_ns | candidate | 162.276724, 162.078530, 149.838661 | 149.838661 | 162.078530 | 162.276724 |
+| canonical-overflow | overflow | update16 | wall_ns | before-return | 154.853201, 180.563931, 154.211253 | 154.211253 | 154.853201 | 180.563931 |
+| canonical-overflow | overflow | update16 | server_process_cpu_ns | before-first | 141.223868, 139.997483, 156.274261 | 139.997483 | 141.223868 | 156.274261 |
+| canonical-overflow | overflow | update16 | server_process_cpu_ns | candidate | 137.565048, 128.374784, 131.625046 | 128.374784 | 131.625046 | 137.565048 |
+| canonical-overflow | overflow | update16 | server_process_cpu_ns | before-return | 131.684644, 141.695426, 120.569210 | 120.569210 | 131.684644 | 141.695426 |
+| canonical-overflow | overflow | update16 | client_process_cpu_ns | before-first | 0.210062, 0.259639, 0.316326 | 0.210062 | 0.259639 | 0.316326 |
+| canonical-overflow | overflow | update16 | client_process_cpu_ns | candidate | 0.226401, 0.253188, 0.243936 | 0.226401 | 0.243936 | 0.253188 |
+| canonical-overflow | overflow | update16 | client_process_cpu_ns | before-return | 0.252100, 0.298521, 0.242098 | 0.242098 | 0.252100 | 0.298521 |
+| canonical-overflow | overflow | vacuum | wall_ns | before-first | 10.322398, 14.062169, 10.714862 | 10.322398 | 10.714862 | 14.062169 |
+| canonical-overflow | overflow | vacuum | wall_ns | candidate | 10.944757, 11.610084, 9.409261 | 9.409261 | 10.944757 | 11.610084 |
+| canonical-overflow | overflow | vacuum | wall_ns | before-return | 7.951665, 10.437493, 9.896709 | 7.951665 | 9.896709 | 10.437493 |
+| canonical-overflow | overflow | vacuum | server_process_cpu_ns | before-first | 10.076847, 11.860150, 10.493914 | 10.076847 | 10.493914 | 11.860150 |
+| canonical-overflow | overflow | vacuum | server_process_cpu_ns | candidate | 10.616654, 9.684166, 9.132073 | 9.132073 | 9.684166 | 10.616654 |
+| canonical-overflow | overflow | vacuum | server_process_cpu_ns | before-return | 7.673293, 10.189005, 9.684176 | 7.673293 | 9.684176 | 10.189005 |
+| canonical-overflow | overflow | vacuum | client_process_cpu_ns | before-first | 0.235630, 0.197894, 0.211206 | 0.197894 | 0.211206 | 0.235630 |
+| canonical-overflow | overflow | vacuum | client_process_cpu_ns | candidate | 0.205571, 0.258678, 0.197557 | 0.197557 | 0.205571 | 0.258678 |
+| canonical-overflow | overflow | vacuum | client_process_cpu_ns | before-return | 0.234152, 0.221031, 0.177996 | 0.177996 | 0.221031 | 0.234152 |
+| direct-hit | fixed | direct_full_no_order | wall_ns | before-first | 30.670564, 28.718385, 18.755787 | 18.755787 | 28.718385 | 30.670564 |
+| direct-hit | fixed | direct_full_no_order | wall_ns | candidate | 25.778541, 18.952379, 23.645419 | 18.952379 | 23.645419 | 25.778541 |
+| direct-hit | fixed | direct_full_no_order | wall_ns | before-return | 28.494162, 26.345005, 24.453209 | 24.453209 | 26.345005 | 28.494162 |
+| direct-hit | fixed | direct_full_no_order | server_process_cpu_ns | before-first | 20.938926, 19.857274, 12.280454 | 12.280454 | 19.857274 | 20.938926 |
+| direct-hit | fixed | direct_full_no_order | server_process_cpu_ns | candidate | 14.167282, 11.313703, 13.545056 | 11.313703 | 13.545056 | 14.167282 |
+| direct-hit | fixed | direct_full_no_order | server_process_cpu_ns | before-return | 20.903415, 20.030613, 16.326684 | 16.326684 | 20.030613 | 20.903415 |
+| direct-hit | fixed | direct_full_no_order | client_process_cpu_ns | before-first | 4.940999, 4.958276, 3.347394 | 3.347394 | 4.940999 | 4.958276 |
+| direct-hit | fixed | direct_full_no_order | client_process_cpu_ns | candidate | 4.838119, 5.017413, 4.851780 | 4.838119 | 4.851780 | 5.017413 |
+| direct-hit | fixed | direct_full_no_order | client_process_cpu_ns | before-return | 4.987815, 3.713140, 4.817985 | 3.713140 | 4.817985 | 4.987815 |
+| direct-hit | fixed | direct_id_only_no_order | wall_ns | before-first | 19.026843, 22.764981, 12.270446 | 12.270446 | 19.026843 | 22.764981 |
+| direct-hit | fixed | direct_id_only_no_order | wall_ns | candidate | 22.537255, 17.831798, 23.092414 | 17.831798 | 22.537255 | 23.092414 |
+| direct-hit | fixed | direct_id_only_no_order | wall_ns | before-return | 21.778431, 21.178411, 15.298454 | 15.298454 | 21.178411 | 21.778431 |
+| direct-hit | fixed | direct_id_only_no_order | server_process_cpu_ns | before-first | 11.802242, 10.705477, 5.928947 | 5.928947 | 10.705477 | 11.802242 |
+| direct-hit | fixed | direct_id_only_no_order | server_process_cpu_ns | candidate | 13.617061, 10.250844, 13.508781 | 10.250844 | 13.508781 | 13.617061 |
+| direct-hit | fixed | direct_id_only_no_order | server_process_cpu_ns | before-return | 10.734883, 13.791976, 7.677790 | 7.677790 | 10.734883 | 13.791976 |
+| direct-hit | fixed | direct_id_only_no_order | client_process_cpu_ns | before-first | 4.961019, 4.898763, 3.067973 | 3.067973 | 4.898763 | 4.961019 |
+| direct-hit | fixed | direct_id_only_no_order | client_process_cpu_ns | candidate | 4.836149, 4.965446, 5.164936 | 4.836149 | 4.965446 | 5.164936 |
+| direct-hit | fixed | direct_id_only_no_order | client_process_cpu_ns | before-return | 4.796655, 4.927680, 4.887323 | 4.796655 | 4.887323 | 4.927680 |
+| direct-hit | overflow | direct_full_no_order | wall_ns | before-first | 51.951237, 59.104093, 50.820346 | 50.820346 | 51.951237 | 59.104093 |
+| direct-hit | overflow | direct_full_no_order | wall_ns | candidate | 47.097845, 61.612734, 43.733209 | 43.733209 | 47.097845 | 61.612734 |
+| direct-hit | overflow | direct_full_no_order | wall_ns | before-return | 53.782487, 55.293306, 67.271706 | 53.782487 | 55.293306 | 67.271706 |
+| direct-hit | overflow | direct_full_no_order | server_process_cpu_ns | before-first | 43.615965, 52.791412, 40.473502 | 40.473502 | 43.615965 | 52.791412 |
+| direct-hit | overflow | direct_full_no_order | server_process_cpu_ns | candidate | 33.626316, 48.992280, 38.873304 | 33.626316 | 38.873304 | 48.992280 |
+| direct-hit | overflow | direct_full_no_order | server_process_cpu_ns | before-return | 47.359678, 50.295550, 60.159402 | 47.359678 | 50.295550 | 60.159402 |
+| direct-hit | overflow | direct_full_no_order | client_process_cpu_ns | before-first | 3.525811, 4.165848, 3.685737 | 3.525811 | 3.685737 | 4.165848 |
+| direct-hit | overflow | direct_full_no_order | client_process_cpu_ns | candidate | 3.916929, 3.441181, 4.061236 | 3.441181 | 3.916929 | 4.061236 |
+| direct-hit | overflow | direct_full_no_order | client_process_cpu_ns | before-return | 2.747553, 4.253011, 4.198729 | 2.747553 | 4.198729 | 4.253011 |
+| direct-hit | overflow | direct_id_only_no_order | wall_ns | before-first | 37.923058, 51.686001, 42.775527 | 37.923058 | 42.775527 | 51.686001 |
+| direct-hit | overflow | direct_id_only_no_order | wall_ns | candidate | 46.727407, 54.493939, 45.101120 | 45.101120 | 46.727407 | 54.493939 |
+| direct-hit | overflow | direct_id_only_no_order | wall_ns | before-return | 34.631879, 48.734412, 47.629587 | 34.631879 | 47.629587 | 48.734412 |
+| direct-hit | overflow | direct_id_only_no_order | server_process_cpu_ns | before-first | 30.336007, 43.866240, 37.215813 | 30.336007 | 37.215813 | 43.866240 |
+| direct-hit | overflow | direct_id_only_no_order | server_process_cpu_ns | candidate | 40.445507, 42.344877, 39.163833 | 39.163833 | 40.445507 | 42.344877 |
+| direct-hit | overflow | direct_id_only_no_order | server_process_cpu_ns | before-return | 29.180141, 42.520215, 41.494925 | 29.180141 | 41.494925 | 42.520215 |
+| direct-hit | overflow | direct_id_only_no_order | client_process_cpu_ns | before-first | 1.837721, 1.947014, 1.785558 | 1.785558 | 1.837721 | 1.947014 |
+| direct-hit | overflow | direct_id_only_no_order | client_process_cpu_ns | candidate | 1.730814, 2.363928, 2.368961 | 1.730814 | 2.363928 | 2.368961 |
+| direct-hit | overflow | direct_id_only_no_order | client_process_cpu_ns | before-return | 1.721982, 2.508360, 1.867276 | 1.721982 | 1.867276 | 2.508360 |
+| direct-hit | single | direct_full_no_order | wall_ns | before-first | 65.476482, 116.081986, 42.990849 | 42.990849 | 65.476482 | 116.081986 |
+| direct-hit | single | direct_full_no_order | wall_ns | candidate | 50.508186, 45.241063, 43.703564 | 43.703564 | 45.241063 | 50.508186 |
+| direct-hit | single | direct_full_no_order | wall_ns | before-return | 74.600648, 66.706389, 57.035736 | 57.035736 | 66.706389 | 74.600648 |
+| direct-hit | single | direct_full_no_order | server_process_cpu_ns | before-first | 57.933788, 76.782261, 37.010125 | 37.010125 | 57.933788 | 76.782261 |
+| direct-hit | single | direct_full_no_order | server_process_cpu_ns | candidate | 44.171553, 37.931080, 34.946935 | 34.946935 | 37.931080 | 44.171553 |
+| direct-hit | single | direct_full_no_order | server_process_cpu_ns | before-return | 57.571894, 57.705516, 49.797758 | 49.797758 | 57.571894 | 57.705516 |
+| direct-hit | single | direct_full_no_order | client_process_cpu_ns | before-first | 5.830670, 5.334822, 4.555058 | 4.555058 | 5.334822 | 5.830670 |
+| direct-hit | single | direct_full_no_order | client_process_cpu_ns | candidate | 6.172691, 7.233967, 5.614178 | 5.614178 | 6.172691 | 7.233967 |
+| direct-hit | single | direct_full_no_order | client_process_cpu_ns | before-return | 6.326008, 6.252110, 5.342690 | 5.342690 | 6.252110 | 6.326008 |
+| direct-hit | single | direct_id_only_no_order | wall_ns | before-first | 43.117665, 53.219795, 30.292869 | 30.292869 | 43.117665 | 53.219795 |
+| direct-hit | single | direct_id_only_no_order | wall_ns | candidate | 47.244320, 45.889961, 46.578473 | 45.889961 | 46.578473 | 47.244320 |
+| direct-hit | single | direct_id_only_no_order | wall_ns | before-return | 44.937549, 54.877132, 43.887892 | 43.887892 | 44.937549 | 54.877132 |
+| direct-hit | single | direct_id_only_no_order | server_process_cpu_ns | before-first | 37.149316, 46.544258, 24.844469 | 24.844469 | 37.149316 | 46.544258 |
+| direct-hit | single | direct_id_only_no_order | server_process_cpu_ns | candidate | 37.527921, 39.876264, 38.707986 | 37.527921 | 38.707986 | 39.876264 |
+| direct-hit | single | direct_id_only_no_order | server_process_cpu_ns | before-return | 39.988560, 39.579437, 35.764912 | 35.764912 | 39.579437 | 39.988560 |
+| direct-hit | single | direct_id_only_no_order | client_process_cpu_ns | before-first | 3.748197, 5.556986, 3.263656 | 3.263656 | 3.748197 | 5.556986 |
+| direct-hit | single | direct_id_only_no_order | client_process_cpu_ns | candidate | 3.726158, 4.483609, 3.944293 | 3.726158 | 3.944293 | 4.483609 |
+| direct-hit | single | direct_id_only_no_order | client_process_cpu_ns | before-return | 3.745151, 4.070041, 3.607566 | 3.607566 | 3.745151 | 4.070041 |
+
+| Cohort | Scope | Region | Clock | Candidate vs first % | Candidate vs return % | Return drift % | Class |
+|---|---|---|---|---:|---:|---:|---|
+| canonical-fixed-single | fixed | delete16 | wall_ns | -8.337146 | -18.161311 | +12.004304 | lower_than_both |
+| canonical-fixed-single | fixed | delete16 | server_process_cpu_ns | -4.440561 | -20.355342 | +19.982232 | lower_than_both |
+| canonical-fixed-single | fixed | delete16 | client_process_cpu_ns | -12.288935 | -2.586144 | -9.960381 | lower_than_both |
+| canonical-fixed-single | fixed | insert1 | wall_ns | -12.753403 | -34.953251 | +34.129065 | lower_than_both |
+| canonical-fixed-single | fixed | insert1 | server_process_cpu_ns | -19.152539 | -45.626742 | +48.689749 | lower_than_both |
+| canonical-fixed-single | fixed | insert1 | client_process_cpu_ns | -10.615502 | -10.650586 | +0.039266 | lower_than_both |
+| canonical-fixed-single | fixed | reinsert_population | wall_ns | -0.537663 | -3.007060 | +2.545956 | lower_than_both |
+| canonical-fixed-single | fixed | reinsert_population | server_process_cpu_ns | +4.185590 | -0.232773 | +4.428672 | between_or_equal |
+| canonical-fixed-single | fixed | reinsert_population | client_process_cpu_ns | +1.657186 | -2.112140 | +3.850658 | between_or_equal |
+| canonical-fixed-single | fixed | select_after_update | wall_ns | -10.264920 | -12.064708 | +2.046719 | lower_than_both |
+| canonical-fixed-single | fixed | select_after_update | server_process_cpu_ns | +3.139483 | -17.409917 | +24.881196 | between_or_equal |
+| canonical-fixed-single | fixed | select_after_update | client_process_cpu_ns | -0.658944 | +0.890892 | -1.536151 | between_or_equal |
+| canonical-fixed-single | fixed | select_after_vacuum | wall_ns | -8.907599 | +14.241975 | -20.263632 | between_or_equal |
+| canonical-fixed-single | fixed | select_after_vacuum | server_process_cpu_ns | -7.500245 | +24.089074 | -25.456970 | between_or_equal |
+| canonical-fixed-single | fixed | select_after_vacuum | client_process_cpu_ns | -2.405512 | +1.090964 | -3.458743 | between_or_equal |
+| canonical-fixed-single | fixed | truncate | wall_ns | +4.992274 | -7.355074 | +13.327603 | between_or_equal |
+| canonical-fixed-single | fixed | truncate | server_process_cpu_ns | +1.122171 | -3.472435 | +4.759890 | between_or_equal |
+| canonical-fixed-single | fixed | truncate | client_process_cpu_ns | +17.248846 | -2.670895 | +20.466377 | between_or_equal |
+| canonical-fixed-single | fixed | update16 | wall_ns | -13.179178 | -17.864005 | +5.703744 | lower_than_both |
+| canonical-fixed-single | fixed | update16 | server_process_cpu_ns | -10.050866 | -16.045833 | +7.140762 | lower_than_both |
+| canonical-fixed-single | fixed | update16 | client_process_cpu_ns | -1.543316 | -11.189912 | +10.862050 | lower_than_both |
+| canonical-fixed-single | fixed | vacuum | wall_ns | -16.337326 | +6.716983 | -21.603224 | between_or_equal |
+| canonical-fixed-single | fixed | vacuum | server_process_cpu_ns | -17.189946 | +6.383904 | -22.159226 | between_or_equal |
+| canonical-fixed-single | fixed | vacuum | client_process_cpu_ns | -5.513396 | +1.151362 | -6.588896 | between_or_equal |
+| canonical-fixed-single | single | delete16 | wall_ns | +17.692822 | +4.569202 | +12.550177 | higher_than_both |
+| canonical-fixed-single | single | delete16 | server_process_cpu_ns | +16.653810 | -4.920825 | +22.691231 | between_or_equal |
+| canonical-fixed-single | single | delete16 | client_process_cpu_ns | -3.673730 | +4.223104 | -7.576856 | between_or_equal |
+| canonical-fixed-single | single | insert1 | wall_ns | -17.992926 | -4.022463 | -14.555972 | lower_than_both |
+| canonical-fixed-single | single | insert1 | server_process_cpu_ns | +14.991683 | -7.804228 | +24.725549 | between_or_equal |
+| canonical-fixed-single | single | insert1 | client_process_cpu_ns | +9.002969 | +13.438090 | -3.909728 | higher_than_both |
+| canonical-fixed-single | single | reinsert_population | wall_ns | +10.994200 | +8.595565 | +2.208778 | higher_than_both |
+| canonical-fixed-single | single | reinsert_population | server_process_cpu_ns | +7.140620 | +12.186056 | -4.497383 | higher_than_both |
+| canonical-fixed-single | single | reinsert_population | client_process_cpu_ns | +0.192022 | -5.169722 | +5.654042 | between_or_equal |
+| canonical-fixed-single | single | select_after_update | wall_ns | +6.117702 | +10.635092 | -4.083144 | higher_than_both |
+| canonical-fixed-single | single | select_after_update | server_process_cpu_ns | +6.924272 | +12.988533 | -5.367148 | higher_than_both |
+| canonical-fixed-single | single | select_after_update | client_process_cpu_ns | -6.245438 | -1.108083 | -5.194920 | lower_than_both |
+| canonical-fixed-single | single | select_after_vacuum | wall_ns | +10.141037 | -4.119339 | +14.873048 | between_or_equal |
+| canonical-fixed-single | single | select_after_vacuum | server_process_cpu_ns | +5.915106 | -9.299512 | +16.774571 | between_or_equal |
+| canonical-fixed-single | single | select_after_vacuum | client_process_cpu_ns | +5.121606 | +3.413773 | +1.651457 | higher_than_both |
+| canonical-fixed-single | single | truncate | wall_ns | -4.609907 | +18.012526 | -19.169519 | between_or_equal |
+| canonical-fixed-single | single | truncate | server_process_cpu_ns | -3.789244 | +17.013848 | -17.778316 | between_or_equal |
+| canonical-fixed-single | single | truncate | client_process_cpu_ns | -1.998234 | +1.967555 | -3.889265 | between_or_equal |
+| canonical-fixed-single | single | update16 | wall_ns | +5.579067 | +13.126636 | -6.671788 | higher_than_both |
+| canonical-fixed-single | single | update16 | server_process_cpu_ns | -2.496311 | +3.012882 | -5.348061 | between_or_equal |
+| canonical-fixed-single | single | update16 | client_process_cpu_ns | +6.610670 | -9.826178 | +18.227960 | between_or_equal |
+| canonical-fixed-single | single | vacuum | wall_ns | +7.585513 | +4.268881 | +3.180846 | higher_than_both |
+| canonical-fixed-single | single | vacuum | server_process_cpu_ns | +5.657442 | +2.304187 | +3.277730 | higher_than_both |
+| canonical-fixed-single | single | vacuum | client_process_cpu_ns | +8.422270 | +8.712459 | -0.266933 | higher_than_both |
+| canonical-overflow | overflow | delete16 | wall_ns | -10.457261 | +0.799192 | -11.167206 | between_or_equal |
+| canonical-overflow | overflow | delete16 | server_process_cpu_ns | -4.672331 | +1.801768 | -6.359515 | between_or_equal |
+| canonical-overflow | overflow | delete16 | client_process_cpu_ns | -1.808540 | -2.341918 | +0.546169 | lower_than_both |
+| canonical-overflow | overflow | insert1 | wall_ns | -32.313864 | -17.283293 | -18.171143 | lower_than_both |
+| canonical-overflow | overflow | insert1 | server_process_cpu_ns | -53.565192 | -18.035489 | -43.347666 | lower_than_both |
+| canonical-overflow | overflow | insert1 | client_process_cpu_ns | -8.304855 | +8.382616 | -15.396815 | between_or_equal |
+| canonical-overflow | overflow | reinsert_population | wall_ns | -2.262685 | +12.073711 | -12.791935 | between_or_equal |
+| canonical-overflow | overflow | reinsert_population | server_process_cpu_ns | +6.166505 | +5.322946 | +0.800926 | higher_than_both |
+| canonical-overflow | overflow | reinsert_population | client_process_cpu_ns | +13.875960 | +8.031687 | +5.409776 | higher_than_both |
+| canonical-overflow | overflow | select_after_update | wall_ns | -14.704900 | +4.861186 | -18.659035 | between_or_equal |
+| canonical-overflow | overflow | select_after_update | server_process_cpu_ns | -18.364595 | +2.516434 | -20.368469 | between_or_equal |
+| canonical-overflow | overflow | select_after_update | client_process_cpu_ns | +0.062652 | +5.454153 | -5.112649 | higher_than_both |
+| canonical-overflow | overflow | select_after_vacuum | wall_ns | -7.208351 | +0.841025 | -7.982243 | between_or_equal |
+| canonical-overflow | overflow | select_after_vacuum | server_process_cpu_ns | -4.161343 | +3.094753 | -7.038279 | between_or_equal |
+| canonical-overflow | overflow | select_after_vacuum | client_process_cpu_ns | -4.793340 | -5.342356 | +0.580001 | lower_than_both |
+| canonical-overflow | overflow | truncate | wall_ns | -24.328977 | -8.972484 | -16.870166 | lower_than_both |
+| canonical-overflow | overflow | truncate | server_process_cpu_ns | -8.798573 | -5.872858 | -3.108258 | lower_than_both |
+| canonical-overflow | overflow | truncate | client_process_cpu_ns | +1.983507 | -8.504679 | +11.463084 | between_or_equal |
+| canonical-overflow | overflow | update16 | wall_ns | -9.096429 | +4.665922 | -13.148837 | between_or_equal |
+| canonical-overflow | overflow | update16 | server_process_cpu_ns | -6.796884 | -0.045258 | -6.754683 | lower_than_both |
+| canonical-overflow | overflow | update16 | client_process_cpu_ns | -6.048013 | -3.238397 | -2.903647 | lower_than_both |
+| canonical-overflow | overflow | vacuum | wall_ns | +2.145571 | +10.589864 | -7.635684 | higher_than_both |
+| canonical-overflow | overflow | vacuum | server_process_cpu_ns | -7.716358 | -0.000103 | -7.716263 | lower_than_both |
+| canonical-overflow | overflow | vacuum | client_process_cpu_ns | -2.668011 | -6.994494 | +4.651856 | lower_than_both |
+| direct-hit | fixed | direct_full_no_order | wall_ns | -17.664524 | -10.247051 | -8.264323 | lower_than_both |
+| direct-hit | fixed | direct_full_no_order | server_process_cpu_ns | -31.787938 | -32.378225 | +0.872924 | lower_than_both |
+| direct-hit | fixed | direct_full_no_order | client_process_cpu_ns | -1.805687 | +0.701434 | -2.489658 | between_or_equal |
+| direct-hit | fixed | direct_id_only_no_order | wall_ns | +18.449787 | +6.416175 | +11.308066 | higher_than_both |
+| direct-hit | fixed | direct_id_only_no_order | server_process_cpu_ns | +26.185699 | +25.840039 | +0.274682 | higher_than_both |
+| direct-hit | fixed | direct_id_only_no_order | client_process_cpu_ns | +1.361221 | +1.598482 | -0.233528 | higher_than_both |
+| direct-hit | overflow | direct_full_no_order | wall_ns | -9.342207 | -14.821796 | +6.433088 | lower_than_both |
+| direct-hit | overflow | direct_full_no_order | server_process_cpu_ns | -10.873681 | -22.710252 | +15.314541 | lower_than_both |
+| direct-hit | overflow | direct_full_no_order | client_process_cpu_ns | +6.272613 | -6.711555 | +13.918302 | between_or_equal |
+| direct-hit | overflow | direct_id_only_no_order | wall_ns | +9.238647 | -1.894159 | +11.347750 | between_or_equal |
+| direct-hit | overflow | direct_id_only_no_order | server_process_cpu_ns | +8.678284 | -2.529027 | +11.498102 | between_or_equal |
+| direct-hit | overflow | direct_id_only_no_order | client_process_cpu_ns | +28.633672 | +26.597675 | +1.608242 | higher_than_both |
+| direct-hit | single | direct_full_no_order | wall_ns | -30.904866 | -32.178816 | +1.878395 | lower_than_both |
+| direct-hit | single | direct_full_no_order | server_process_cpu_ns | -34.526843 | -34.115282 | -0.624668 | lower_than_both |
+| direct-hit | single | direct_full_no_order | client_process_cpu_ns | +15.705660 | -1.270275 | +17.194351 | between_or_equal |
+| direct-hit | single | direct_id_only_no_order | wall_ns | +8.026427 | +3.651565 | +4.220739 | higher_than_both |
+| direct-hit | single | direct_id_only_no_order | server_process_cpu_ns | +4.195690 | -2.201777 | +6.541496 | between_or_equal |
+| direct-hit | single | direct_id_only_no_order | client_process_cpu_ns | +5.231742 | +5.317329 | -0.081266 | higher_than_both |
+
+Wall/clientCPU include socket envelope framing and raw buffering through ReadyI; full decoding/oracles/raw file writes and proc snapshots are outside wall. Process snapshots and clocks are non-atomic. RSS/IO endpoints are not peaks. Direct id-only and full projection include common scan/TOAST costs; neither latency nor their difference proves an exclusive bitmap-copy cost. Every negative result and maximum remains in the summary.
+
+### 中间C1完整结果（保留原负控，不能与C2跨窗口拼接）
+
+C1出现非空列仍复制位图的代码浪费后，C2仅增加选列声明条件。C1原270点及其三时钟分布全部保留。C1和C2属于独立时间窗口，各自只能与各自匹配的两次旧版比较。
+
+#### P30 finite ordinary operation and direct projection costs
+
+Each raw value is retained from three independent contexts. Canonical ORDER BY samples and separately named direct no-ORDER controls stay separate. No exclusions, stable ratio, PG speed, or whole-database claim. Both generations use P29C2-compatible command-only DELETE.
+
+| Cohort | Scope | Region | Clock | Role | raw3 ms | min ms | p50 ms | max ms |
+|---|---|---|---|---|---|---:|---:|---:|
+| canonical-fixed-single | fixed | delete16 | wall_ns | before-first | 56.956362, 56.820393, 46.453948 | 46.453948 | 56.820393 | 56.956362 |
+| canonical-fixed-single | fixed | delete16 | wall_ns | candidate | 52.458261, 53.964088, 51.479705 | 51.479705 | 52.458261 | 53.964088 |
+| canonical-fixed-single | fixed | delete16 | wall_ns | before-return | 52.479297, 56.028028, 32.188001 | 32.188001 | 52.479297 | 56.028028 |
+| canonical-fixed-single | fixed | delete16 | server_process_cpu_ns | before-first | 46.902056, 45.393685, 40.926870 | 40.926870 | 45.393685 | 46.902056 |
+| canonical-fixed-single | fixed | delete16 | server_process_cpu_ns | candidate | 39.844591, 40.600974, 40.707793 | 39.844591 | 40.600974 | 40.707793 |
+| canonical-fixed-single | fixed | delete16 | server_process_cpu_ns | before-return | 42.523860, 47.776001, 25.328383 | 25.328383 | 42.523860 | 47.776001 |
+| canonical-fixed-single | fixed | delete16 | client_process_cpu_ns | before-first | 0.235830, 0.233578, 0.227394 | 0.227394 | 0.233578 | 0.235830 |
+| canonical-fixed-single | fixed | delete16 | client_process_cpu_ns | candidate | 0.206105, 0.202540, 0.217284 | 0.202540 | 0.206105 | 0.217284 |
+| canonical-fixed-single | fixed | delete16 | client_process_cpu_ns | before-return | 0.210007, 0.207266, 0.228620 | 0.207266 | 0.210007 | 0.228620 |
+| canonical-fixed-single | fixed | insert1 | wall_ns | before-first | 19.752385, 23.141644, 17.605909 | 17.605909 | 19.752385 | 23.141644 |
+| canonical-fixed-single | fixed | insert1 | wall_ns | candidate | 15.569312, 18.718330, 15.671522 | 15.569312 | 15.671522 | 18.718330 |
+| canonical-fixed-single | fixed | insert1 | wall_ns | before-return | 22.852766, 22.325886, 13.378862 | 13.378862 | 22.325886 | 22.852766 |
+| canonical-fixed-single | fixed | insert1 | server_process_cpu_ns | before-first | 9.600602, 8.671270, 9.276607 | 8.671270 | 9.276607 | 9.600602 |
+| canonical-fixed-single | fixed | insert1 | server_process_cpu_ns | candidate | 7.417316, 9.832926, 7.461584 | 7.417316 | 7.461584 | 9.832926 |
+| canonical-fixed-single | fixed | insert1 | server_process_cpu_ns | before-return | 6.596799, 9.032617, 6.401796 | 6.401796 | 6.596799 | 9.032617 |
+| canonical-fixed-single | fixed | insert1 | client_process_cpu_ns | before-first | 0.244958, 0.240597, 0.259053 | 0.240597 | 0.244958 | 0.259053 |
+| canonical-fixed-single | fixed | insert1 | client_process_cpu_ns | candidate | 0.194490, 0.128274, 0.222187 | 0.128274 | 0.194490 | 0.222187 |
+| canonical-fixed-single | fixed | insert1 | client_process_cpu_ns | before-return | 0.197711, 0.204930, 0.203176 | 0.197711 | 0.203176 | 0.204930 |
+| canonical-fixed-single | fixed | reinsert_population | wall_ns | before-first | 629.129363, 593.626120, 601.697749 | 593.626120 | 601.697749 | 629.129363 |
+| canonical-fixed-single | fixed | reinsert_population | wall_ns | candidate | 678.000721, 566.728029, 1008.026919 | 566.728029 | 678.000721 | 1008.026919 |
+| canonical-fixed-single | fixed | reinsert_population | wall_ns | before-return | 711.410540, 661.978892, 629.063432 | 629.063432 | 661.978892 | 711.410540 |
+| canonical-fixed-single | fixed | reinsert_population | server_process_cpu_ns | before-first | 578.009549, 518.023620, 577.951980 | 518.023620 | 577.951980 | 578.009549 |
+| canonical-fixed-single | fixed | reinsert_population | server_process_cpu_ns | candidate | 571.158086, 486.042943, 568.475671 | 486.042943 | 568.475671 | 571.158086 |
+| canonical-fixed-single | fixed | reinsert_population | server_process_cpu_ns | before-return | 580.012830, 589.520866, 599.538656 | 580.012830 | 589.520866 | 599.538656 |
+| canonical-fixed-single | fixed | reinsert_population | client_process_cpu_ns | before-first | 0.202152, 0.228617, 0.222346 | 0.202152 | 0.222346 | 0.228617 |
+| canonical-fixed-single | fixed | reinsert_population | client_process_cpu_ns | candidate | 0.260175, 0.210550, 0.226220 | 0.210550 | 0.226220 | 0.260175 |
+| canonical-fixed-single | fixed | reinsert_population | client_process_cpu_ns | before-return | 0.252384, 0.241393, 0.239976 | 0.239976 | 0.241393 | 0.252384 |
+| canonical-fixed-single | fixed | select_after_update | wall_ns | before-first | 34.437410, 37.503683, 29.946622 | 29.946622 | 34.437410 | 37.503683 |
+| canonical-fixed-single | fixed | select_after_update | wall_ns | candidate | 28.133161, 28.888836, 30.905798 | 28.133161 | 28.888836 | 30.905798 |
+| canonical-fixed-single | fixed | select_after_update | wall_ns | before-return | 35.241721, 39.137178, 21.854171 | 21.854171 | 35.241721 | 39.137178 |
+| canonical-fixed-single | fixed | select_after_update | server_process_cpu_ns | before-first | 23.457418, 30.297296, 21.523935 | 21.523935 | 23.457418 | 30.297296 |
+| canonical-fixed-single | fixed | select_after_update | server_process_cpu_ns | candidate | 19.220559, 19.125526, 20.208365 | 19.125526 | 19.220559 | 20.208365 |
+| canonical-fixed-single | fixed | select_after_update | server_process_cpu_ns | before-return | 26.828309, 32.004599, 13.819242 | 13.819242 | 26.828309 | 32.004599 |
+| canonical-fixed-single | fixed | select_after_update | client_process_cpu_ns | before-first | 5.007372, 4.976882, 5.035876 | 4.976882 | 5.007372 | 5.035876 |
+| canonical-fixed-single | fixed | select_after_update | client_process_cpu_ns | candidate | 4.887063, 4.972843, 4.747969 | 4.747969 | 4.887063 | 4.972843 |
+| canonical-fixed-single | fixed | select_after_update | client_process_cpu_ns | before-return | 4.897602, 4.962023, 5.090556 | 4.897602 | 4.962023 | 5.090556 |
+| canonical-fixed-single | fixed | select_after_vacuum | wall_ns | before-first | 32.473964, 30.297154, 26.425230 | 26.425230 | 30.297154 | 32.473964 |
+| canonical-fixed-single | fixed | select_after_vacuum | wall_ns | candidate | 29.850373, 25.032206, 28.213278 | 25.032206 | 28.213278 | 29.850373 |
+| canonical-fixed-single | fixed | select_after_vacuum | wall_ns | before-return | 37.952145, 30.606918, 21.856263 | 21.856263 | 30.606918 | 37.952145 |
+| canonical-fixed-single | fixed | select_after_vacuum | server_process_cpu_ns | before-first | 25.330613, 20.413647, 20.602175 | 20.413647 | 20.602175 | 25.330613 |
+| canonical-fixed-single | fixed | select_after_vacuum | server_process_cpu_ns | candidate | 21.013018, 16.215058, 19.467629 | 16.215058 | 19.467629 | 21.013018 |
+| canonical-fixed-single | fixed | select_after_vacuum | server_process_cpu_ns | before-return | 24.346430, 22.608750, 14.907525 | 14.907525 | 22.608750 | 24.346430 |
+| canonical-fixed-single | fixed | select_after_vacuum | client_process_cpu_ns | before-first | 4.712243, 4.735963, 4.686073 | 4.686073 | 4.712243 | 4.735963 |
+| canonical-fixed-single | fixed | select_after_vacuum | client_process_cpu_ns | candidate | 4.708119, 4.681336, 4.523662 | 4.523662 | 4.681336 | 4.708119 |
+| canonical-fixed-single | fixed | select_after_vacuum | client_process_cpu_ns | before-return | 4.599225, 4.676386, 4.667462 | 4.599225 | 4.667462 | 4.676386 |
+| canonical-fixed-single | fixed | truncate | wall_ns | before-first | 299.074751, 276.115235, 261.678870 | 261.678870 | 276.115235 | 299.074751 |
+| canonical-fixed-single | fixed | truncate | wall_ns | candidate | 410.799185, 594.700044, 251.184979 | 251.184979 | 410.799185 | 594.700044 |
+| canonical-fixed-single | fixed | truncate | wall_ns | before-return | 340.849863, 284.474201, 322.651771 | 284.474201 | 322.651771 | 340.849863 |
+| canonical-fixed-single | fixed | truncate | server_process_cpu_ns | before-first | 94.423033, 94.094295, 92.779692 | 92.779692 | 94.094295 | 94.423033 |
+| canonical-fixed-single | fixed | truncate | server_process_cpu_ns | candidate | 90.279711, 110.694984, 82.455917 | 82.455917 | 90.279711 | 110.694984 |
+| canonical-fixed-single | fixed | truncate | server_process_cpu_ns | before-return | 101.294599, 94.608029, 84.740897 | 84.740897 | 94.608029 | 101.294599 |
+| canonical-fixed-single | fixed | truncate | client_process_cpu_ns | before-first | 0.247217, 0.227944, 0.272378 | 0.227944 | 0.247217 | 0.272378 |
+| canonical-fixed-single | fixed | truncate | client_process_cpu_ns | candidate | 0.215820, 0.238921, 0.232440 | 0.215820 | 0.232440 | 0.238921 |
+| canonical-fixed-single | fixed | truncate | client_process_cpu_ns | before-return | 0.233710, 0.183525, 0.247194 | 0.183525 | 0.233710 | 0.247194 |
+| canonical-fixed-single | fixed | update16 | wall_ns | before-first | 95.778802, 126.484778, 81.660753 | 81.660753 | 95.778802 | 126.484778 |
+| canonical-fixed-single | fixed | update16 | wall_ns | candidate | 75.858522, 68.177145, 83.903830 | 68.177145 | 75.858522 | 83.903830 |
+| canonical-fixed-single | fixed | update16 | wall_ns | before-return | 93.677073, 163.256541, 53.916445 | 53.916445 | 93.677073 | 163.256541 |
+| canonical-fixed-single | fixed | update16 | server_process_cpu_ns | before-first | 79.397623, 75.307109, 70.761741 | 70.761741 | 75.307109 | 79.397623 |
+| canonical-fixed-single | fixed | update16 | server_process_cpu_ns | candidate | 64.195784, 56.468783, 67.958820 | 56.468783 | 64.195784 | 67.958820 |
+| canonical-fixed-single | fixed | update16 | server_process_cpu_ns | before-return | 70.055183, 69.578936, 46.558534 | 46.558534 | 69.578936 | 70.055183 |
+| canonical-fixed-single | fixed | update16 | client_process_cpu_ns | before-first | 0.274564, 0.239570, 0.236953 | 0.236953 | 0.239570 | 0.274564 |
+| canonical-fixed-single | fixed | update16 | client_process_cpu_ns | candidate | 0.207953, 0.180533, 0.231570 | 0.180533 | 0.207953 | 0.231570 |
+| canonical-fixed-single | fixed | update16 | client_process_cpu_ns | before-return | 0.197260, 0.217162, 0.211994 | 0.197260 | 0.211994 | 0.217162 |
+| canonical-fixed-single | fixed | vacuum | wall_ns | before-first | 1.708623, 1.513204, 1.637617 | 1.513204 | 1.637617 | 1.708623 |
+| canonical-fixed-single | fixed | vacuum | wall_ns | candidate | 1.727810, 1.251736, 1.509834 | 1.251736 | 1.509834 | 1.727810 |
+| canonical-fixed-single | fixed | vacuum | wall_ns | before-return | 1.641035, 1.834918, 1.159241 | 1.159241 | 1.641035 | 1.834918 |
+| canonical-fixed-single | fixed | vacuum | server_process_cpu_ns | before-first | 1.623498, 1.375773, 1.513919 | 1.375773 | 1.513919 | 1.623498 |
+| canonical-fixed-single | fixed | vacuum | server_process_cpu_ns | candidate | 1.586439, 1.189619, 1.405997 | 1.189619 | 1.405997 | 1.586439 |
+| canonical-fixed-single | fixed | vacuum | server_process_cpu_ns | before-return | 1.537326, 1.696093, 1.026060 | 1.026060 | 1.537326 | 1.696093 |
+| canonical-fixed-single | fixed | vacuum | client_process_cpu_ns | before-first | 0.136635, 0.228810, 0.203616 | 0.136635 | 0.203616 | 0.228810 |
+| canonical-fixed-single | fixed | vacuum | client_process_cpu_ns | candidate | 0.231009, 0.123916, 0.195974 | 0.123916 | 0.195974 | 0.231009 |
+| canonical-fixed-single | fixed | vacuum | client_process_cpu_ns | before-return | 0.211688, 0.198764, 0.192924 | 0.192924 | 0.198764 | 0.211688 |
+| canonical-fixed-single | single | delete16 | wall_ns | before-first | 79.443717, 85.734313, 67.402433 | 67.402433 | 79.443717 | 85.734313 |
+| canonical-fixed-single | single | delete16 | wall_ns | candidate | 87.569480, 78.949554, 79.624669 | 78.949554 | 79.624669 | 87.569480 |
+| canonical-fixed-single | single | delete16 | wall_ns | before-return | 81.660060, 104.554762, 79.403060 | 79.403060 | 81.660060 | 104.554762 |
+| canonical-fixed-single | single | delete16 | server_process_cpu_ns | before-first | 66.019863, 69.011315, 59.629982 | 59.629982 | 66.019863 | 69.011315 |
+| canonical-fixed-single | single | delete16 | server_process_cpu_ns | candidate | 67.256469, 64.427977, 65.370911 | 64.427977 | 65.370911 | 67.256469 |
+| canonical-fixed-single | single | delete16 | server_process_cpu_ns | before-return | 66.924544, 68.019839, 69.606537 | 66.924544 | 68.019839 | 69.606537 |
+| canonical-fixed-single | single | delete16 | client_process_cpu_ns | before-first | 0.217120, 0.182945, 0.205680 | 0.182945 | 0.205680 | 0.217120 |
+| canonical-fixed-single | single | delete16 | client_process_cpu_ns | candidate | 0.235985, 0.221664, 0.280920 | 0.221664 | 0.235985 | 0.280920 |
+| canonical-fixed-single | single | delete16 | client_process_cpu_ns | before-return | 0.235732, 0.234621, 0.262243 | 0.234621 | 0.235732 | 0.262243 |
+| canonical-fixed-single | single | insert1 | wall_ns | before-first | 19.774315, 27.585559, 17.161605 | 17.161605 | 19.774315 | 27.585559 |
+| canonical-fixed-single | single | insert1 | wall_ns | candidate | 38.429982, 17.274803, 32.662346 | 17.274803 | 32.662346 | 38.429982 |
+| canonical-fixed-single | single | insert1 | wall_ns | before-return | 25.802537, 34.165346, 16.767427 | 16.767427 | 25.802537 | 34.165346 |
+| canonical-fixed-single | single | insert1 | server_process_cpu_ns | before-first | 8.960694, 11.474740, 10.310108 | 8.960694 | 10.310108 | 11.474740 |
+| canonical-fixed-single | single | insert1 | server_process_cpu_ns | candidate | 16.665117, 8.453622, 12.770672 | 8.453622 | 12.770672 | 16.665117 |
+| canonical-fixed-single | single | insert1 | server_process_cpu_ns | before-return | 12.414159, 10.318575, 9.473538 | 9.473538 | 10.318575 | 12.414159 |
+| canonical-fixed-single | single | insert1 | client_process_cpu_ns | before-first | 0.207741, 0.211147, 0.235427 | 0.207741 | 0.211147 | 0.235427 |
+| canonical-fixed-single | single | insert1 | client_process_cpu_ns | candidate | 0.220487, 0.219311, 0.280424 | 0.219311 | 0.220487 | 0.280424 |
+| canonical-fixed-single | single | insert1 | client_process_cpu_ns | before-return | 0.225095, 0.206436, 0.221597 | 0.206436 | 0.221597 | 0.225095 |
+| canonical-fixed-single | single | reinsert_population | wall_ns | before-first | 1054.356052, 1206.001312, 1046.602323 | 1046.602323 | 1054.356052 | 1206.001312 |
+| canonical-fixed-single | single | reinsert_population | wall_ns | candidate | 1280.689896, 1171.107182, 1133.100757 | 1133.100757 | 1171.107182 | 1280.689896 |
+| canonical-fixed-single | single | reinsert_population | wall_ns | before-return | 1124.388725, 1297.057645, 1297.828991 | 1124.388725 | 1297.057645 | 1297.828991 |
+| canonical-fixed-single | single | reinsert_population | server_process_cpu_ns | before-first | 1015.938109, 1005.160632, 1001.260124 | 1001.260124 | 1005.160632 | 1015.938109 |
+| canonical-fixed-single | single | reinsert_population | server_process_cpu_ns | candidate | 1046.087078, 1059.613119, 1050.790226 | 1046.087078 | 1050.790226 | 1059.613119 |
+| canonical-fixed-single | single | reinsert_population | server_process_cpu_ns | before-return | 975.869021, 1075.728236, 1076.012158 | 975.869021 | 1075.728236 | 1076.012158 |
+| canonical-fixed-single | single | reinsert_population | client_process_cpu_ns | before-first | 0.445566, 0.583057, 0.619721 | 0.445566 | 0.583057 | 0.619721 |
+| canonical-fixed-single | single | reinsert_population | client_process_cpu_ns | candidate | 0.576652, 0.733047, 0.408228 | 0.408228 | 0.576652 | 0.733047 |
+| canonical-fixed-single | single | reinsert_population | client_process_cpu_ns | before-return | 0.656154, 0.827458, 0.572598 | 0.572598 | 0.656154 | 0.827458 |
+| canonical-fixed-single | single | select_after_update | wall_ns | before-first | 57.638818, 66.682082, 44.831266 | 44.831266 | 57.638818 | 66.682082 |
+| canonical-fixed-single | single | select_after_update | wall_ns | candidate | 62.857534, 59.595466, 54.007724 | 54.007724 | 59.595466 | 62.857534 |
+| canonical-fixed-single | single | select_after_update | wall_ns | before-return | 61.367688, 58.513167, 48.460008 | 48.460008 | 58.513167 | 61.367688 |
+| canonical-fixed-single | single | select_after_update | server_process_cpu_ns | before-first | 47.474169, 57.928616, 38.206714 | 38.206714 | 47.474169 | 57.928616 |
+| canonical-fixed-single | single | select_after_update | server_process_cpu_ns | candidate | 46.809731, 49.452914, 45.453549 | 45.453549 | 46.809731 | 49.452914 |
+| canonical-fixed-single | single | select_after_update | server_process_cpu_ns | before-return | 53.538900, 47.184728, 42.258164 | 42.258164 | 47.184728 | 53.538900 |
+| canonical-fixed-single | single | select_after_update | client_process_cpu_ns | before-first | 5.519942, 6.119009, 5.931742 | 5.519942 | 5.931742 | 6.119009 |
+| canonical-fixed-single | single | select_after_update | client_process_cpu_ns | candidate | 6.014108, 6.175658, 6.046671 | 6.014108 | 6.046671 | 6.175658 |
+| canonical-fixed-single | single | select_after_update | client_process_cpu_ns | before-return | 5.966102, 6.053548, 5.969063 | 5.966102 | 5.969063 | 6.053548 |
+| canonical-fixed-single | single | select_after_vacuum | wall_ns | before-first | 55.513189, 63.496334, 64.460089 | 55.513189 | 63.496334 | 64.460089 |
+| canonical-fixed-single | single | select_after_vacuum | wall_ns | candidate | 66.158341, 63.078758, 56.527759 | 56.527759 | 63.078758 | 66.158341 |
+| canonical-fixed-single | single | select_after_vacuum | wall_ns | before-return | 53.425548, 67.759942, 57.509317 | 53.425548 | 57.509317 | 67.759942 |
+| canonical-fixed-single | single | select_after_vacuum | server_process_cpu_ns | before-first | 50.637087, 51.668932, 51.284656 | 50.637087 | 51.284656 | 51.668932 |
+| canonical-fixed-single | single | select_after_vacuum | server_process_cpu_ns | candidate | 59.288191, 56.468172, 46.121074 | 46.121074 | 56.468172 | 59.288191 |
+| canonical-fixed-single | single | select_after_vacuum | server_process_cpu_ns | before-return | 46.487711, 58.630100, 50.246526 | 46.487711 | 50.246526 | 58.630100 |
+| canonical-fixed-single | single | select_after_vacuum | client_process_cpu_ns | before-first | 3.468626, 5.713104, 5.428990 | 3.468626 | 5.428990 | 5.713104 |
+| canonical-fixed-single | single | select_after_vacuum | client_process_cpu_ns | candidate | 5.125292, 5.615860, 5.527629 | 5.125292 | 5.527629 | 5.615860 |
+| canonical-fixed-single | single | select_after_vacuum | client_process_cpu_ns | before-return | 4.981683, 5.577364, 5.577939 | 4.981683 | 5.577364 | 5.577939 |
+| canonical-fixed-single | single | truncate | wall_ns | before-first | 236.442834, 525.281393, 211.999039 | 211.999039 | 236.442834 | 525.281393 |
+| canonical-fixed-single | single | truncate | wall_ns | candidate | 257.454643, 266.822044, 292.793244 | 257.454643 | 266.822044 | 292.793244 |
+| canonical-fixed-single | single | truncate | wall_ns | before-return | 278.623175, 264.475115, 247.870215 | 247.870215 | 264.475115 | 278.623175 |
+| canonical-fixed-single | single | truncate | server_process_cpu_ns | before-first | 116.233960, 126.925945, 123.654360 | 116.233960 | 123.654360 | 126.925945 |
+| canonical-fixed-single | single | truncate | server_process_cpu_ns | candidate | 106.634007, 111.089995, 113.882253 | 106.634007 | 111.089995 | 113.882253 |
+| canonical-fixed-single | single | truncate | server_process_cpu_ns | before-return | 140.331445, 126.956839, 117.856219 | 117.856219 | 126.956839 | 140.331445 |
+| canonical-fixed-single | single | truncate | client_process_cpu_ns | before-first | 0.167420, 0.280844, 0.275102 | 0.167420 | 0.275102 | 0.280844 |
+| canonical-fixed-single | single | truncate | client_process_cpu_ns | candidate | 0.213796, 0.160982, 0.217165 | 0.160982 | 0.213796 | 0.217165 |
+| canonical-fixed-single | single | truncate | client_process_cpu_ns | before-return | 0.203012, 0.251142, 0.288372 | 0.203012 | 0.251142 | 0.288372 |
+| canonical-fixed-single | single | update16 | wall_ns | before-first | 148.720740, 206.852400, 137.395580 | 137.395580 | 148.720740 | 206.852400 |
+| canonical-fixed-single | single | update16 | wall_ns | candidate | 172.656587, 682.296976, 173.933444 | 172.656587 | 173.933444 | 682.296976 |
+| canonical-fixed-single | single | update16 | wall_ns | before-return | 170.943780, 173.956297, 148.301935 | 148.301935 | 170.943780 | 173.956297 |
+| canonical-fixed-single | single | update16 | server_process_cpu_ns | before-first | 125.209537, 127.437444, 122.824804 | 122.824804 | 125.209537 | 127.437444 |
+| canonical-fixed-single | single | update16 | server_process_cpu_ns | candidate | 140.136565, 107.503944, 140.492506 | 107.503944 | 140.136565 | 140.492506 |
+| canonical-fixed-single | single | update16 | server_process_cpu_ns | before-return | 132.914983, 130.428820, 127.002784 | 127.002784 | 130.428820 | 132.914983 |
+| canonical-fixed-single | single | update16 | client_process_cpu_ns | before-first | 0.205464, 0.246960, 0.224163 | 0.205464 | 0.224163 | 0.246960 |
+| canonical-fixed-single | single | update16 | client_process_cpu_ns | candidate | 0.261449, 0.237005, 0.264667 | 0.237005 | 0.261449 | 0.264667 |
+| canonical-fixed-single | single | update16 | client_process_cpu_ns | before-return | 0.208457, 0.237596, 0.268134 | 0.208457 | 0.237596 | 0.268134 |
+| canonical-fixed-single | single | vacuum | wall_ns | before-first | 7.443456, 9.900620, 7.387852 | 7.387852 | 7.443456 | 9.900620 |
+| canonical-fixed-single | single | vacuum | wall_ns | candidate | 8.697954, 8.591340, 8.263111 | 8.263111 | 8.591340 | 8.697954 |
+| canonical-fixed-single | single | vacuum | wall_ns | before-return | 9.016777, 11.924844, 8.062179 | 8.062179 | 9.016777 | 11.924844 |
+| canonical-fixed-single | single | vacuum | server_process_cpu_ns | before-first | 7.066929, 8.236457, 6.923481 | 6.923481 | 7.066929 | 8.236457 |
+| canonical-fixed-single | single | vacuum | server_process_cpu_ns | candidate | 8.389663, 8.225687, 8.005162 | 8.005162 | 8.225687 | 8.389663 |
+| canonical-fixed-single | single | vacuum | server_process_cpu_ns | before-return | 8.887188, 11.626561, 7.772967 | 7.772967 | 8.887188 | 11.626561 |
+| canonical-fixed-single | single | vacuum | client_process_cpu_ns | before-first | 0.294685, 0.253597, 0.196585 | 0.196585 | 0.253597 | 0.294685 |
+| canonical-fixed-single | single | vacuum | client_process_cpu_ns | candidate | 0.211311, 0.250007, 0.233914 | 0.211311 | 0.233914 | 0.250007 |
+| canonical-fixed-single | single | vacuum | client_process_cpu_ns | before-return | 0.204732, 0.211040, 0.228676 | 0.204732 | 0.211040 | 0.228676 |
+| canonical-overflow | overflow | delete16 | wall_ns | before-first | 201.540685, 82.557518, 72.029647 | 72.029647 | 82.557518 | 201.540685 |
+| canonical-overflow | overflow | delete16 | wall_ns | candidate | 81.970246, 66.525256, 70.190848 | 66.525256 | 70.190848 | 81.970246 |
+| canonical-overflow | overflow | delete16 | wall_ns | before-return | 82.288720, 50.754271, 77.551788 | 50.754271 | 77.551788 | 82.288720 |
+| canonical-overflow | overflow | delete16 | server_process_cpu_ns | before-first | 74.745273, 67.336422, 60.798550 | 60.798550 | 67.336422 | 74.745273 |
+| canonical-overflow | overflow | delete16 | server_process_cpu_ns | candidate | 67.138767, 59.535619, 54.370393 | 54.370393 | 59.535619 | 67.138767 |
+| canonical-overflow | overflow | delete16 | server_process_cpu_ns | before-return | 66.922601, 43.706604, 62.887771 | 43.706604 | 62.887771 | 66.922601 |
+| canonical-overflow | overflow | delete16 | client_process_cpu_ns | before-first | 0.216929, 0.202361, 0.231171 | 0.202361 | 0.216929 | 0.231171 |
+| canonical-overflow | overflow | delete16 | client_process_cpu_ns | candidate | 0.218920, 0.256408, 0.255931 | 0.218920 | 0.255931 | 0.256408 |
+| canonical-overflow | overflow | delete16 | client_process_cpu_ns | before-return | 0.218588, 0.273158, 0.249684 | 0.218588 | 0.249684 | 0.273158 |
+| canonical-overflow | overflow | insert1 | wall_ns | before-first | 38.135013, 20.477450, 24.605831 | 20.477450 | 24.605831 | 38.135013 |
+| canonical-overflow | overflow | insert1 | wall_ns | candidate | 24.590844, 16.298524, 29.097553 | 16.298524 | 24.590844 | 29.097553 |
+| canonical-overflow | overflow | insert1 | wall_ns | before-return | 20.401567, 20.408625, 25.416382 | 20.401567 | 20.408625 | 25.416382 |
+| canonical-overflow | overflow | insert1 | server_process_cpu_ns | before-first | 16.658749, 8.749765, 11.868454 | 8.749765 | 11.868454 | 16.658749 |
+| canonical-overflow | overflow | insert1 | server_process_cpu_ns | candidate | 10.838313, 9.520486, 10.333594 | 9.520486 | 10.333594 | 10.838313 |
+| canonical-overflow | overflow | insert1 | server_process_cpu_ns | before-return | 8.649516, 10.755549, 11.255325 | 8.649516 | 10.755549 | 11.255325 |
+| canonical-overflow | overflow | insert1 | client_process_cpu_ns | before-first | 0.242432, 0.202574, 0.202243 | 0.202243 | 0.202574 | 0.242432 |
+| canonical-overflow | overflow | insert1 | client_process_cpu_ns | candidate | 0.241818, 0.204601, 0.219317 | 0.204601 | 0.219317 | 0.241818 |
+| canonical-overflow | overflow | insert1 | client_process_cpu_ns | before-return | 0.213000, 0.234754, 0.225304 | 0.213000 | 0.225304 | 0.234754 |
+| canonical-overflow | overflow | reinsert_population | wall_ns | before-first | 1183.293057, 1155.410908, 1085.456408 | 1085.456408 | 1155.410908 | 1183.293057 |
+| canonical-overflow | overflow | reinsert_population | wall_ns | candidate | 1130.806202, 1226.653702, 1418.307522 | 1130.806202 | 1226.653702 | 1418.307522 |
+| canonical-overflow | overflow | reinsert_population | wall_ns | before-return | 1063.290751, 1082.693052, 1484.747853 | 1063.290751 | 1082.693052 | 1484.747853 |
+| canonical-overflow | overflow | reinsert_population | server_process_cpu_ns | before-first | 1030.212109, 1046.304710, 1024.986736 | 1024.986736 | 1030.212109 | 1046.304710 |
+| canonical-overflow | overflow | reinsert_population | server_process_cpu_ns | candidate | 1081.618982, 1168.058724, 1052.718593 | 1052.718593 | 1081.618982 | 1168.058724 |
+| canonical-overflow | overflow | reinsert_population | server_process_cpu_ns | before-return | 948.658340, 1035.052603, 1035.677591 | 948.658340 | 1035.052603 | 1035.677591 |
+| canonical-overflow | overflow | reinsert_population | client_process_cpu_ns | before-first | 0.568356, 1.046712, 1.043951 | 0.568356 | 1.043951 | 1.046712 |
+| canonical-overflow | overflow | reinsert_population | client_process_cpu_ns | candidate | 0.874457, 0.751343, 0.564031 | 0.564031 | 0.751343 | 0.874457 |
+| canonical-overflow | overflow | reinsert_population | client_process_cpu_ns | before-return | 0.512326, 0.906944, 0.733709 | 0.512326 | 0.733709 | 0.906944 |
+| canonical-overflow | overflow | select_after_update | wall_ns | before-first | 79.527662, 70.900789, 66.402756 | 66.402756 | 70.900789 | 79.527662 |
+| canonical-overflow | overflow | select_after_update | wall_ns | candidate | 66.839702, 45.777177, 58.174108 | 45.777177 | 58.174108 | 66.839702 |
+| canonical-overflow | overflow | select_after_update | wall_ns | before-return | 62.669885, 48.182307, 64.171820 | 48.182307 | 62.669885 | 64.171820 |
+| canonical-overflow | overflow | select_after_update | server_process_cpu_ns | before-first | 66.873538, 61.677338, 56.413639 | 56.413639 | 61.677338 | 66.873538 |
+| canonical-overflow | overflow | select_after_update | server_process_cpu_ns | candidate | 59.543080, 39.312539, 50.093168 | 39.312539 | 50.093168 | 59.543080 |
+| canonical-overflow | overflow | select_after_update | server_process_cpu_ns | before-return | 55.632672, 41.991123, 47.669007 | 41.991123 | 47.669007 | 55.632672 |
+| canonical-overflow | overflow | select_after_update | client_process_cpu_ns | before-first | 4.097020, 2.861270, 4.166297 | 2.861270 | 4.097020 | 4.166297 |
+| canonical-overflow | overflow | select_after_update | client_process_cpu_ns | candidate | 3.446885, 4.147805, 4.391432 | 3.446885 | 4.147805 | 4.391432 |
+| canonical-overflow | overflow | select_after_update | client_process_cpu_ns | before-return | 4.238850, 3.973993, 4.711392 | 3.973993 | 4.238850 | 4.711392 |
+| canonical-overflow | overflow | select_after_vacuum | wall_ns | before-first | 68.188457, 58.480205, 64.672118 | 58.480205 | 64.672118 | 68.188457 |
+| canonical-overflow | overflow | select_after_vacuum | wall_ns | candidate | 65.736727, 54.476366, 60.468130 | 54.476366 | 60.468130 | 65.736727 |
+| canonical-overflow | overflow | select_after_vacuum | wall_ns | before-return | 58.290406, 60.951538, 47.861473 | 47.861473 | 58.290406 | 60.951538 |
+| canonical-overflow | overflow | select_after_vacuum | server_process_cpu_ns | before-first | 60.939417, 51.980073, 57.181794 | 51.980073 | 57.181794 | 60.939417 |
+| canonical-overflow | overflow | select_after_vacuum | server_process_cpu_ns | candidate | 56.286414, 50.028796, 53.738148 | 50.028796 | 53.738148 | 56.286414 |
+| canonical-overflow | overflow | select_after_vacuum | server_process_cpu_ns | before-return | 50.419671, 55.822616, 41.584214 | 41.584214 | 50.419671 | 55.822616 |
+| canonical-overflow | overflow | select_after_vacuum | client_process_cpu_ns | before-first | 3.953152, 3.441674, 3.854348 | 3.441674 | 3.854348 | 3.953152 |
+| canonical-overflow | overflow | select_after_vacuum | client_process_cpu_ns | candidate | 3.429419, 3.082682, 3.758208 | 3.082682 | 3.429419 | 3.758208 |
+| canonical-overflow | overflow | select_after_vacuum | client_process_cpu_ns | before-return | 2.919265, 3.953371, 4.065119 | 2.919265 | 3.953371 | 4.065119 |
+| canonical-overflow | overflow | truncate | wall_ns | before-first | 204.950948, 278.673789, 316.541473 | 204.950948 | 278.673789 | 316.541473 |
+| canonical-overflow | overflow | truncate | wall_ns | candidate | 382.091554, 269.843189, 253.399384 | 253.399384 | 269.843189 | 382.091554 |
+| canonical-overflow | overflow | truncate | wall_ns | before-return | 282.690900, 242.207216, 185.353555 | 185.353555 | 242.207216 | 282.690900 |
+| canonical-overflow | overflow | truncate | server_process_cpu_ns | before-first | 87.768008, 89.218139, 88.802337 | 87.768008 | 88.802337 | 89.218139 |
+| canonical-overflow | overflow | truncate | server_process_cpu_ns | candidate | 79.794507, 85.257494, 72.422356 | 72.422356 | 79.794507 | 85.257494 |
+| canonical-overflow | overflow | truncate | server_process_cpu_ns | before-return | 84.697131, 67.437173, 67.900986 | 67.437173 | 67.900986 | 84.697131 |
+| canonical-overflow | overflow | truncate | client_process_cpu_ns | before-first | 0.268537, 0.194334, 0.234126 | 0.194334 | 0.234126 | 0.268537 |
+| canonical-overflow | overflow | truncate | client_process_cpu_ns | candidate | 0.263667, 0.221327, 0.179691 | 0.179691 | 0.221327 | 0.263667 |
+| canonical-overflow | overflow | truncate | client_process_cpu_ns | before-return | 0.156033, 0.276518, 0.179221 | 0.156033 | 0.179221 | 0.276518 |
+| canonical-overflow | overflow | update16 | wall_ns | before-first | 228.319702, 213.798903, 180.621650 | 180.621650 | 213.798903 | 228.319702 |
+| canonical-overflow | overflow | update16 | wall_ns | candidate | 176.143522, 148.900073, 185.315331 | 148.900073 | 176.143522 | 185.315331 |
+| canonical-overflow | overflow | update16 | wall_ns | before-return | 180.047413, 160.947080, 165.107299 | 160.947080 | 165.107299 | 180.047413 |
+| canonical-overflow | overflow | update16 | server_process_cpu_ns | before-first | 152.038182, 134.887944, 135.178537 | 134.887944 | 135.178537 | 152.038182 |
+| canonical-overflow | overflow | update16 | server_process_cpu_ns | candidate | 140.208762, 132.671234, 158.256747 | 132.671234 | 140.208762 | 158.256747 |
+| canonical-overflow | overflow | update16 | server_process_cpu_ns | before-return | 146.194600, 138.531920, 133.974392 | 133.974392 | 138.531920 | 146.194600 |
+| canonical-overflow | overflow | update16 | client_process_cpu_ns | before-first | 0.313116, 0.244942, 0.280058 | 0.244942 | 0.280058 | 0.313116 |
+| canonical-overflow | overflow | update16 | client_process_cpu_ns | candidate | 0.249920, 0.260208, 0.233693 | 0.233693 | 0.249920 | 0.260208 |
+| canonical-overflow | overflow | update16 | client_process_cpu_ns | before-return | 0.272345, 0.318718, 0.258746 | 0.258746 | 0.272345 | 0.318718 |
+| canonical-overflow | overflow | vacuum | wall_ns | before-first | 12.501427, 10.079584, 10.260390 | 10.079584 | 10.260390 | 12.501427 |
+| canonical-overflow | overflow | vacuum | wall_ns | candidate | 10.809210, 9.176545, 9.752644 | 9.176545 | 9.752644 | 10.809210 |
+| canonical-overflow | overflow | vacuum | wall_ns | before-return | 8.275736, 7.918835, 7.751233 | 7.751233 | 7.918835 | 8.275736 |
+| canonical-overflow | overflow | vacuum | server_process_cpu_ns | before-first | 12.163291, 9.807407, 9.988835 | 9.807407 | 9.988835 | 12.163291 |
+| canonical-overflow | overflow | vacuum | server_process_cpu_ns | candidate | 10.487442, 8.842019, 9.426560 | 8.842019 | 9.426560 | 10.487442 |
+| canonical-overflow | overflow | vacuum | server_process_cpu_ns | before-return | 8.060957, 7.570325, 7.505007 | 7.505007 | 7.570325 | 8.060957 |
+| canonical-overflow | overflow | vacuum | client_process_cpu_ns | before-first | 0.245375, 0.198529, 0.209126 | 0.198529 | 0.209126 | 0.245375 |
+| canonical-overflow | overflow | vacuum | client_process_cpu_ns | candidate | 0.200588, 0.192139, 0.206661 | 0.192139 | 0.200588 | 0.206661 |
+| canonical-overflow | overflow | vacuum | client_process_cpu_ns | before-return | 0.172627, 0.246390, 0.138753 | 0.138753 | 0.172627 | 0.246390 |
+| direct-hit | fixed | direct_full_no_order | wall_ns | before-first | 32.026741, 24.785944, 33.615739 | 24.785944 | 32.026741 | 33.615739 |
+| direct-hit | fixed | direct_full_no_order | wall_ns | candidate | 16.657725, 23.614763, 28.104402 | 16.657725 | 23.614763 | 28.104402 |
+| direct-hit | fixed | direct_full_no_order | wall_ns | before-return | 42.256313, 72.155832, 29.883123 | 29.883123 | 42.256313 | 72.155832 |
+| direct-hit | fixed | direct_full_no_order | server_process_cpu_ns | before-first | 23.797958, 15.559762, 22.991691 | 15.559762 | 22.991691 | 23.797958 |
+| direct-hit | fixed | direct_full_no_order | server_process_cpu_ns | candidate | 12.098126, 18.180070, 18.784090 | 12.098126 | 18.180070 | 18.784090 |
+| direct-hit | fixed | direct_full_no_order | server_process_cpu_ns | before-return | 30.650172, 29.575362, 20.378919 | 20.378919 | 29.575362 | 30.650172 |
+| direct-hit | fixed | direct_full_no_order | client_process_cpu_ns | before-first | 5.030483, 4.814950, 4.742132 | 4.742132 | 4.814950 | 5.030483 |
+| direct-hit | fixed | direct_full_no_order | client_process_cpu_ns | candidate | 2.845009, 5.038590, 4.948286 | 2.845009 | 4.948286 | 5.038590 |
+| direct-hit | fixed | direct_full_no_order | client_process_cpu_ns | before-return | 4.864563, 5.029589, 4.859919 | 4.859919 | 4.864563 | 5.029589 |
+| direct-hit | fixed | direct_id_only_no_order | wall_ns | before-first | 20.857618, 19.663370, 20.962462 | 19.663370 | 20.857618 | 20.962462 |
+| direct-hit | fixed | direct_id_only_no_order | wall_ns | candidate | 18.196583, 24.205558, 22.744455 | 18.196583 | 22.744455 | 24.205558 |
+| direct-hit | fixed | direct_id_only_no_order | wall_ns | before-return | 24.807490, 56.226659, 19.564473 | 19.564473 | 24.807490 | 56.226659 |
+| direct-hit | fixed | direct_id_only_no_order | server_process_cpu_ns | before-first | 14.743329, 8.751560, 11.753855 | 8.751560 | 11.753855 | 14.743329 |
+| direct-hit | fixed | direct_id_only_no_order | server_process_cpu_ns | candidate | 9.779952, 15.680986, 14.681994 | 9.779952 | 14.681994 | 15.680986 |
+| direct-hit | fixed | direct_id_only_no_order | server_process_cpu_ns | before-return | 9.387001, 14.142133, 11.684389 | 9.387001 | 11.684389 | 14.142133 |
+| direct-hit | fixed | direct_id_only_no_order | client_process_cpu_ns | before-first | 4.962136, 4.913042, 4.724289 | 4.724289 | 4.913042 | 4.962136 |
+| direct-hit | fixed | direct_id_only_no_order | client_process_cpu_ns | candidate | 4.567834, 4.896496, 4.907530 | 4.567834 | 4.896496 | 4.907530 |
+| direct-hit | fixed | direct_id_only_no_order | client_process_cpu_ns | before-return | 4.755430, 4.934160, 4.845688 | 4.755430 | 4.845688 | 4.934160 |
+| direct-hit | overflow | direct_full_no_order | wall_ns | before-first | 67.383094, 64.616293, 59.057867 | 59.057867 | 64.616293 | 67.383094 |
+| direct-hit | overflow | direct_full_no_order | wall_ns | candidate | 49.007654, 57.801149, 48.254409 | 48.254409 | 49.007654 | 57.801149 |
+| direct-hit | overflow | direct_full_no_order | wall_ns | before-return | 75.298762, 63.397601, 55.572064 | 55.572064 | 63.397601 | 75.298762 |
+| direct-hit | overflow | direct_full_no_order | server_process_cpu_ns | before-first | 55.821998, 57.865022, 50.031515 | 50.031515 | 55.821998 | 57.865022 |
+| direct-hit | overflow | direct_full_no_order | server_process_cpu_ns | candidate | 41.725245, 44.066907, 43.392765 | 41.725245 | 43.392765 | 44.066907 |
+| direct-hit | overflow | direct_full_no_order | server_process_cpu_ns | before-return | 61.722851, 51.811294, 49.275988 | 49.275988 | 51.811294 | 61.722851 |
+| direct-hit | overflow | direct_full_no_order | client_process_cpu_ns | before-first | 3.731915, 3.806667, 3.435514 | 3.435514 | 3.731915 | 3.806667 |
+| direct-hit | overflow | direct_full_no_order | client_process_cpu_ns | candidate | 3.817442, 3.852525, 3.876909 | 3.817442 | 3.852525 | 3.876909 |
+| direct-hit | overflow | direct_full_no_order | client_process_cpu_ns | before-return | 3.810249, 3.671732, 3.853936 | 3.671732 | 3.810249 | 3.853936 |
+| direct-hit | overflow | direct_id_only_no_order | wall_ns | before-first | 48.425451, 54.334791, 43.744629 | 43.744629 | 48.425451 | 54.334791 |
+| direct-hit | overflow | direct_id_only_no_order | wall_ns | candidate | 51.878421, 54.977198, 53.137514 | 51.878421 | 53.137514 | 54.977198 |
+| direct-hit | overflow | direct_id_only_no_order | wall_ns | before-return | 34.695975, 36.067873, 52.272467 | 34.695975 | 36.067873 | 52.272467 |
+| direct-hit | overflow | direct_id_only_no_order | server_process_cpu_ns | before-first | 42.360461, 44.476173, 37.183688 | 37.183688 | 42.360461 | 44.476173 |
+| direct-hit | overflow | direct_id_only_no_order | server_process_cpu_ns | candidate | 42.092045, 43.436938, 42.541709 | 42.092045 | 42.541709 | 43.436938 |
+| direct-hit | overflow | direct_id_only_no_order | server_process_cpu_ns | before-return | 22.748489, 31.341386, 43.886812 | 22.748489 | 31.341386 | 43.886812 |
+| direct-hit | overflow | direct_id_only_no_order | client_process_cpu_ns | before-first | 2.619964, 2.181639, 2.515002 | 2.181639 | 2.515002 | 2.619964 |
+| direct-hit | overflow | direct_id_only_no_order | client_process_cpu_ns | candidate | 1.970973, 1.883626, 2.442074 | 1.883626 | 1.970973 | 2.442074 |
+| direct-hit | overflow | direct_id_only_no_order | client_process_cpu_ns | before-return | 2.367093, 1.929615, 2.401852 | 1.929615 | 2.367093 | 2.401852 |
+| direct-hit | single | direct_full_no_order | wall_ns | before-first | 61.836997, 65.939658, 72.897785 | 61.836997 | 65.939658 | 72.897785 |
+| direct-hit | single | direct_full_no_order | wall_ns | candidate | 50.255075, 52.259399, 54.573381 | 50.255075 | 52.259399 | 54.573381 |
+| direct-hit | single | direct_full_no_order | wall_ns | before-return | 67.132906, 57.707021, 68.883943 | 57.707021 | 67.132906 | 68.883943 |
+| direct-hit | single | direct_full_no_order | server_process_cpu_ns | before-first | 51.258260, 58.280732, 61.897321 | 51.258260 | 58.280732 | 61.897321 |
+| direct-hit | single | direct_full_no_order | server_process_cpu_ns | candidate | 42.001279, 45.978789, 47.456237 | 42.001279 | 45.978789 | 47.456237 |
+| direct-hit | single | direct_full_no_order | server_process_cpu_ns | before-return | 57.111410, 49.409807, 61.478127 | 49.409807 | 57.111410 | 61.478127 |
+| direct-hit | single | direct_full_no_order | client_process_cpu_ns | before-first | 6.042448, 5.599858, 5.190885 | 5.190885 | 5.599858 | 6.042448 |
+| direct-hit | single | direct_full_no_order | client_process_cpu_ns | candidate | 4.911367, 5.783600, 4.798745 | 4.798745 | 4.911367 | 5.783600 |
+| direct-hit | single | direct_full_no_order | client_process_cpu_ns | before-return | 5.334912, 5.309126, 5.774485 | 5.309126 | 5.334912 | 5.774485 |
+| direct-hit | single | direct_id_only_no_order | wall_ns | before-first | 45.301404, 47.849701, 46.482293 | 45.301404 | 46.482293 | 47.849701 |
+| direct-hit | single | direct_id_only_no_order | wall_ns | candidate | 47.725251, 52.041242, 35.596653 | 35.596653 | 47.725251 | 52.041242 |
+| direct-hit | single | direct_id_only_no_order | wall_ns | before-return | 48.764328, 42.213521, 58.024864 | 42.213521 | 48.764328 | 58.024864 |
+| direct-hit | single | direct_id_only_no_order | server_process_cpu_ns | before-first | 39.914569, 40.147108, 38.409914 | 38.409914 | 39.914569 | 40.147108 |
+| direct-hit | single | direct_id_only_no_order | server_process_cpu_ns | candidate | 38.457270, 40.699973, 29.789493 | 29.789493 | 38.457270 | 40.699973 |
+| direct-hit | single | direct_id_only_no_order | server_process_cpu_ns | before-return | 40.006859, 35.887574, 51.956165 | 35.887574 | 40.006859 | 51.956165 |
+| direct-hit | single | direct_id_only_no_order | client_process_cpu_ns | before-first | 3.868821, 4.020254, 4.075019 | 3.868821 | 4.020254 | 4.075019 |
+| direct-hit | single | direct_id_only_no_order | client_process_cpu_ns | candidate | 4.295344, 3.716816, 3.537290 | 3.537290 | 3.716816 | 4.295344 |
+| direct-hit | single | direct_id_only_no_order | client_process_cpu_ns | before-return | 3.789929, 3.559396, 5.452768 | 3.559396 | 3.789929 | 5.452768 |
+
+| Cohort | Scope | Region | Clock | Candidate vs first % | Candidate vs return % | Return drift % | Class |
+|---|---|---|---|---:|---:|---:|---|
+| canonical-fixed-single | fixed | delete16 | wall_ns | -7.677054 | -0.040084 | -7.640032 | lower_than_both |
+| canonical-fixed-single | fixed | delete16 | server_process_cpu_ns | -10.558101 | -4.521899 | -6.322080 | lower_than_both |
+| canonical-fixed-single | fixed | delete16 | client_process_cpu_ns | -11.761810 | -1.858033 | -10.091276 | lower_than_both |
+| canonical-fixed-single | fixed | insert1 | wall_ns | -20.660103 | -29.805599 | +13.028811 | lower_than_both |
+| canonical-fixed-single | fixed | insert1 | server_process_cpu_ns | -19.565591 | +13.109161 | -28.887803 | between_or_equal |
+| canonical-fixed-single | fixed | insert1 | client_process_cpu_ns | -20.602716 | -4.275111 | -17.056802 | lower_than_both |
+| canonical-fixed-single | fixed | reinsert_population | wall_ns | +12.681279 | +2.420293 | +10.018509 | higher_than_both |
+| canonical-fixed-single | fixed | reinsert_population | server_process_cpu_ns | -1.639636 | -3.569881 | +2.001704 | lower_than_both |
+| canonical-fixed-single | fixed | reinsert_population | client_process_cpu_ns | +1.742330 | -6.285601 | +8.566379 | between_or_equal |
+| canonical-fixed-single | fixed | select_after_update | wall_ns | -16.112054 | -18.026603 | +2.335573 | lower_than_both |
+| canonical-fixed-single | fixed | select_after_update | server_process_cpu_ns | -18.061915 | -28.357173 | +14.370256 | lower_than_both |
+| canonical-fixed-single | fixed | select_after_update | client_process_cpu_ns | -2.402638 | -1.510674 | -0.905645 | lower_than_both |
+| canonical-fixed-single | fixed | select_after_vacuum | wall_ns | -6.878125 | -7.820585 | +1.022419 | lower_than_both |
+| canonical-fixed-single | fixed | select_after_vacuum | server_process_cpu_ns | -5.506923 | -13.893386 | +9.739627 | lower_than_both |
+| canonical-fixed-single | fixed | select_after_vacuum | client_process_cpu_ns | -0.655887 | +0.297249 | -0.950312 | between_or_equal |
+| canonical-fixed-single | fixed | truncate | wall_ns | +48.778167 | +27.319675 | +16.854027 | higher_than_both |
+| canonical-fixed-single | fixed | truncate | server_process_cpu_ns | -4.054001 | -4.575001 | +0.545978 | lower_than_both |
+| canonical-fixed-single | fixed | truncate | client_process_cpu_ns | -5.977340 | -0.543408 | -5.463621 | lower_than_both |
+| canonical-fixed-single | fixed | update16 | wall_ns | -20.798214 | -19.021251 | -2.194357 | lower_than_both |
+| canonical-fixed-single | fixed | update16 | server_process_cpu_ns | -14.754683 | -7.736755 | -7.606417 | lower_than_both |
+| canonical-fixed-single | fixed | update16 | client_process_cpu_ns | -13.197395 | -1.906186 | -11.510623 | lower_than_both |
+| canonical-fixed-single | fixed | vacuum | wall_ns | -7.802984 | -7.995015 | +0.208718 | lower_than_both |
+| canonical-fixed-single | fixed | vacuum | server_process_cpu_ns | -7.128651 | -8.542690 | +1.546120 | lower_than_both |
+| canonical-fixed-single | fixed | vacuum | client_process_cpu_ns | -3.753143 | -1.403675 | -2.382917 | lower_than_both |
+| canonical-fixed-single | single | delete16 | wall_ns | +0.227774 | -2.492517 | +2.789828 | between_or_equal |
+| canonical-fixed-single | single | delete16 | server_process_cpu_ns | -0.982965 | -3.894346 | +3.029355 | lower_than_both |
+| canonical-fixed-single | single | delete16 | client_process_cpu_ns | +14.734053 | +0.107325 | +14.611046 | higher_than_both |
+| canonical-fixed-single | single | insert1 | wall_ns | +65.175613 | +26.585793 | +30.485112 | higher_than_both |
+| canonical-fixed-single | single | insert1 | server_process_cpu_ns | +23.865550 | +23.763911 | +0.082123 | higher_than_both |
+| canonical-fixed-single | single | insert1 | client_process_cpu_ns | +4.423459 | -0.500909 | +4.949159 | between_or_equal |
+| canonical-fixed-single | single | reinsert_population | wall_ns | +11.073217 | -9.710475 | +23.018941 | between_or_equal |
+| canonical-fixed-single | single | reinsert_population | server_process_cpu_ns | +4.539533 | -2.318244 | +7.020530 | between_or_equal |
+| canonical-fixed-single | single | reinsert_population | client_process_cpu_ns | -1.098520 | -12.116363 | +12.536853 | lower_than_both |
+| canonical-fixed-single | single | select_after_update | wall_ns | +3.394671 | +1.849667 | +1.516945 | higher_than_both |
+| canonical-fixed-single | single | select_after_update | server_process_cpu_ns | -1.399578 | -0.794742 | -0.609681 | lower_than_both |
+| canonical-fixed-single | single | select_after_update | client_process_cpu_ns | +1.937525 | +1.300171 | +0.629174 | higher_than_both |
+| canonical-fixed-single | single | select_after_vacuum | wall_ns | -0.657638 | +9.684415 | -9.428918 | between_or_equal |
+| canonical-fixed-single | single | select_after_vacuum | server_process_cpu_ns | +10.107343 | +12.382241 | -2.024251 | higher_than_both |
+| canonical-fixed-single | single | select_after_vacuum | client_process_cpu_ns | +1.816894 | -0.891729 | +2.732995 | between_or_equal |
+| canonical-fixed-single | single | truncate | wall_ns | +12.848438 | +0.887391 | +11.855839 | higher_than_both |
+| canonical-fixed-single | single | truncate | server_process_cpu_ns | -10.160875 | -12.497825 | +2.670734 | lower_than_both |
+| canonical-fixed-single | single | truncate | client_process_cpu_ns | -22.284825 | -14.870472 | -8.709497 | lower_than_both |
+| canonical-fixed-single | single | update16 | wall_ns | +16.953052 | +1.748917 | +14.942798 | higher_than_both |
+| canonical-fixed-single | single | update16 | server_process_cpu_ns | +11.921638 | +7.442945 | +4.168439 | higher_than_both |
+| canonical-fixed-single | single | update16 | client_process_cpu_ns | +16.633432 | +10.039310 | +5.992514 | higher_than_both |
+| canonical-fixed-single | single | vacuum | wall_ns | +15.421385 | -4.718282 | +21.136969 | between_or_equal |
+| canonical-fixed-single | single | vacuum | server_process_cpu_ns | +16.396910 | -7.443311 | +25.757426 | between_or_equal |
+| canonical-fixed-single | single | vacuum | client_process_cpu_ns | -7.761527 | +10.838704 | -16.781350 | between_or_equal |
+| canonical-overflow | overflow | delete16 | wall_ns | -14.979460 | -9.491644 | -6.063324 | lower_than_both |
+| canonical-overflow | overflow | delete16 | server_process_cpu_ns | -11.584820 | -5.330372 | -6.606604 | lower_than_both |
+| canonical-overflow | overflow | delete16 | client_process_cpu_ns | +17.979154 | +2.501962 | +15.099410 | higher_than_both |
+| canonical-overflow | overflow | insert1 | wall_ns | -0.060908 | +20.492409 | -17.057770 | between_or_equal |
+| canonical-overflow | overflow | insert1 | server_process_cpu_ns | -12.932266 | -3.923138 | -9.377001 | lower_than_both |
+| canonical-overflow | overflow | insert1 | client_process_cpu_ns | +8.265128 | -2.657299 | +11.220591 | between_or_equal |
+| canonical-overflow | overflow | reinsert_population | wall_ns | +6.166014 | +13.296534 | -6.293679 | higher_than_both |
+| canonical-overflow | overflow | reinsert_population | server_process_cpu_ns | +4.989931 | +4.498938 | +0.469854 | higher_than_both |
+| canonical-overflow | overflow | reinsert_population | client_process_cpu_ns | -28.028902 | +2.403405 | -29.718061 | between_or_equal |
+| canonical-overflow | overflow | select_after_update | wall_ns | -17.949985 | -7.173744 | -11.609044 | lower_than_both |
+| canonical-overflow | overflow | select_after_update | server_process_cpu_ns | -18.781890 | +5.085403 | -22.712282 | between_or_equal |
+| canonical-overflow | overflow | select_after_update | client_process_cpu_ns | +1.239559 | -2.147870 | +3.461784 | between_or_equal |
+| canonical-overflow | overflow | select_after_vacuum | wall_ns | -6.500464 | +3.735990 | -9.867795 | between_or_equal |
+| canonical-overflow | overflow | select_after_vacuum | server_process_cpu_ns | -6.022277 | +6.581711 | -11.825657 | between_or_equal |
+| canonical-overflow | overflow | select_after_vacuum | client_process_cpu_ns | -11.024666 | -13.253297 | +2.569125 | lower_than_both |
+| canonical-overflow | overflow | truncate | wall_ns | -3.168795 | +11.410054 | -13.085756 | between_or_equal |
+| canonical-overflow | overflow | truncate | server_process_cpu_ns | -10.143686 | +17.515977 | -23.536938 | between_or_equal |
+| canonical-overflow | overflow | truncate | client_process_cpu_ns | -5.466715 | +23.493899 | -23.451048 | between_or_equal |
+| canonical-overflow | overflow | update16 | wall_ns | -17.612523 | +6.684273 | -22.774487 | between_or_equal |
+| canonical-overflow | overflow | update16 | server_process_cpu_ns | +3.721171 | +1.210437 | +2.480707 | higher_than_both |
+| canonical-overflow | overflow | update16 | client_process_cpu_ns | -10.761342 | -8.234041 | -2.754072 | lower_than_both |
+| canonical-overflow | overflow | vacuum | wall_ns | -4.948603 | +23.157560 | -22.821306 | between_or_equal |
+| canonical-overflow | overflow | vacuum | server_process_cpu_ns | -5.629035 | +24.519885 | -24.212133 | between_or_equal |
+| canonical-overflow | overflow | vacuum | client_process_cpu_ns | -4.082706 | +16.197350 | -17.453114 | between_or_equal |
+| direct-hit | fixed | direct_full_no_order | wall_ns | -26.265482 | -44.115420 | +31.940721 | lower_than_both |
+| direct-hit | fixed | direct_full_no_order | server_process_cpu_ns | -20.927652 | -38.529679 | +28.635001 | lower_than_both |
+| direct-hit | fixed | direct_full_no_order | client_process_cpu_ns | +2.769208 | +1.721080 | +1.030395 | higher_than_both |
+| direct-hit | fixed | direct_id_only_no_order | wall_ns | +9.046273 | -8.316178 | +18.937311 | between_or_equal |
+| direct-hit | fixed | direct_id_only_no_order | server_process_cpu_ns | +24.912159 | +25.654786 | -0.591006 | higher_than_both |
+| direct-hit | fixed | direct_id_only_no_order | client_process_cpu_ns | -0.336777 | +1.048520 | -1.370923 | between_or_equal |
+| direct-hit | overflow | direct_full_no_order | wall_ns | -24.155887 | -22.697936 | -1.886044 | lower_than_both |
+| direct-hit | overflow | direct_full_no_order | server_process_cpu_ns | -22.265833 | -16.248444 | -7.184809 | lower_than_both |
+| direct-hit | overflow | direct_full_no_order | client_process_cpu_ns | +3.231853 | +1.109534 | +2.099030 | higher_than_both |
+| direct-hit | overflow | direct_id_only_no_order | wall_ns | +9.730551 | +47.326442 | -25.518767 | higher_than_both |
+| direct-hit | overflow | direct_id_only_no_order | server_process_cpu_ns | +0.427871 | +35.736527 | -26.012642 | higher_than_both |
+| direct-hit | overflow | direct_id_only_no_order | client_process_cpu_ns | -21.631355 | -16.734450 | -5.881069 | lower_than_both |
+| direct-hit | single | direct_full_no_order | wall_ns | -20.746633 | -22.155315 | +1.809606 | lower_than_both |
+| direct-hit | single | direct_full_no_order | server_process_cpu_ns | -21.108079 | -19.492814 | -2.006361 | lower_than_both |
+| direct-hit | single | direct_full_no_order | client_process_cpu_ns | -12.294794 | -7.939119 | -4.731299 | lower_than_both |
+| direct-hit | single | direct_id_only_no_order | wall_ns | +2.674046 | -2.130814 | +4.909472 | between_or_equal |
+| direct-hit | single | direct_id_only_no_order | server_process_cpu_ns | -3.651045 | -3.873308 | +0.231219 | lower_than_both |
+| direct-hit | single | direct_id_only_no_order | client_process_cpu_ns | -7.547732 | -1.929139 | -5.729116 | lower_than_both |
+
+Wall/clientCPU include socket envelope framing and raw buffering through ReadyI; full decoding/oracles/raw file writes and proc snapshots are outside wall. Process snapshots and clocks are non-atomic. RSS/IO endpoints are not peaks. Direct id-only and full projection include common scan/TOAST costs; neither latency nor their difference proves an exclusive bitmap-copy cost. Every negative result and maximum remains in the summary.
+
+原273项仍为22 complete/166 partial/70 unverified/15 deferred_by_user，`IDX-07`保持`unverified`且`evidence=[]`。完整PG参考58/58；三代产品均完成全58目标与4冷控制，目标各53/58，另4冷锚控制仍失败。原9项目录/普通错误帧差异完整保留、没有改为PASS或新增暂缓。仅新增1个正式CPP回归；whole58 known-gap协议草稿未运行、未登记。Goal active，默认程序未替换，无服务重启、分支切换或推送。
+
+本批实际清单：源248/头177；测试2392，原2391逐字保持，新增1个CPP；顶层CPP1125/全部CPP1130（nested5）；E2E登记684 driver/664 standalone保持；Markdown754/保护725保持；旧29份gzip保持，新归档后总30。原280条历史原文保持，追加第281条partial。
+
+完整原始分布、既有差异、许可和验收边界见[本批性能报告](performance-report-2026-10-30.md#ordinary-project-bitmap-20261106)与[可逆压缩证据](benchmarks/ordinary-project-bitmap-20261106.json.gz)。以下P29及更早内容为对应代别的历史记录。
+
 <!-- CURRENT_MULTILOB_20261106 -->
 
 ## 多个大字段存储与真实命令结果（2026-11-06，P29-C2）

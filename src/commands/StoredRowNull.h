@@ -7,6 +7,25 @@
 
 namespace dbms::detail {
 
+// A consumer already owns this exact physical row's captured bitmap. This
+// scope borrows it only until destruction; it never retains a page/allocator
+// or changes RID ownership. The caller must keep both arguments alive and
+// must prove that the bitmap belongs to the row being decoded.
+class ScopedStoredRowNullBitmap {
+public:
+    ScopedStoredRowNullBitmap(const TableSchema& schema,
+                             const std::vector<bool>& nulls) noexcept;
+    ~ScopedStoredRowNullBitmap() noexcept;
+    ScopedStoredRowNullBitmap(const ScopedStoredRowNullBitmap&) = delete;
+    ScopedStoredRowNullBitmap& operator=(const ScopedStoredRowNullBitmap&) = delete;
+    ScopedStoredRowNullBitmap(ScopedStoredRowNullBitmap&&) = delete;
+    ScopedStoredRowNullBitmap& operator=(ScopedStoredRowNullBitmap&&) = delete;
+private:
+    const TableSchema* oldSchema_;
+    const std::vector<bool>* oldNulls_;
+    bool active_;
+};
+
 // Capture one tuple's bitmap under the existing scan/schema owner. This does
 // not cache across rows or skip the allocator's current-file validation.
 inline std::optional<std::vector<bool>> storedRowNullBitmap(
