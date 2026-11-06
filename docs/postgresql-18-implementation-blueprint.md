@@ -1,5 +1,15 @@
 # DBMS_C_plus_plus 对标 PostgreSQL 18.6：逐项完整实施蓝图
 
+<!-- CURRENT_GIST_PROBE_READER_20261106 -->
+
+## GiST 读取开销与空文件回退（2026-11-06，P27-C2）
+
+当前阶段只优化flat GiST的完整验证：不超过1MiB时同一拥有缓冲承载CRC及键视图，RID严格递增走线性证明，乱序则排序私有验证向量；所有条目/范围/尾部和原读视图边界保留。零字节文件安全回堆，正规V3零记录文件仍可给出索引空结果，旧格式覆盖身份不升级。
+
+下一步分页GiST仍需真实页与代际身份、内部/叶项和操作类语义、长键溢出、split发布、WAL及读并发协议。参考[PG18.6页扫描](https://raw.githubusercontent.com/postgres/postgres/724edf9bde9d356724ad384a2e196edc3c9f80f7/src/backend/access/gist/gistget.c)、[SQLite有界payload所有权](https://raw.githubusercontent.com/sqlite/sqlite/8ed5e7365e6f12f427910188bbf6b254daad2ef6/src/btree.c)及[DuckDB ART范围查找](https://raw.githubusercontent.com/duckdb/duckdb/d1dc88f950d456d72493df452dabdcd13aa413dd/src/execution/index/art/art.cpp)只能说明设计取舍，不能冒称已经获得其完整实现。
+
+本次分配次数降低有累计请求字节上升的代价；大文件仍走旧流式路径，未宣称总内存恒定、RSS降低或高端/缺失查询已变为树复杂度。完整证据见[报告](performance-report-2026-10-30.md#gist-probe-reader-20261106)。原273项与既有暂缓边界保持，本批为partial。
+
 <!-- CURRENT_GIST_EMPTY_BOUNDS_20261106 -->
 
 ## GiST 空字符串、边界与 LIKE 检索（2026-11-06，P26-C4）

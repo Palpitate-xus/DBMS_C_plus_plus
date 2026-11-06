@@ -2,6 +2,93 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-06 GiST bounded reader costs and headerless empty-file fallback",
+      "gap_ids": [
+        "IDX-07"
+      ],
+      "status": "partial",
+      "evidence": [
+        "src/commands/TableManage.cpp",
+        "docs/performance-report-2026-10-30.md",
+        "docs/benchmarks/gist-probe-reader-20261106.json.gz"
+      ],
+      "tests": [
+        "tests/gist_probe_mechanism_test.cpp",
+        "tests/gist_probe_reader_validation_test.cpp",
+        "tests/gist_empty_legacy_file_protocol_e2e_test.py"
+      ],
+      "verification": {
+        "batch": "P27-C2",
+        "source": "build/pg-feature-gist-probe-20261106-oann7sme/final-facts-v1.json",
+        "program_sha256": "dd5d9b8519ad26b893563471fb70b252f835403369d51124b95fcd8ddb10cd56",
+        "normal": "Actual CMake C++17/O2 exit0, source248/core61 frozen matching.",
+        "functional": {
+          "mechanism_checks_each": 52219,
+          "mechanism_probes_each": 20,
+          "mechanism_full_RIDsets_equal": true,
+          "mechanism_target_heap_fetches": 0,
+          "reader_before_exit": 1,
+          "reader_before_checks": 2217,
+          "reader_before_failed_assertions": 4,
+          "reader_final_exit": 0,
+          "reader_final_checks": 2215,
+          "reader_final_probes": 110,
+          "reader_final_zero_target_heap_probes": 110,
+          "reader_final_positive_heap_fetches": 10,
+          "new_wire_before_exit": 1,
+          "new_wire_before_assertion_failures": 12,
+          "new_wire_final_exit": 0,
+          "new_wire_commands": 82,
+          "existing_wire_commands": 120,
+          "existing_native_selected": 17,
+          "existing_wire_selected": 6,
+          "lifecycle_all_checks": 2879,
+          "lifecycle_cold_checks": 183,
+          "recovery_final_checks": 3303,
+          "recovery_intermediate_C1_checks": 3413,
+          "recovery_workers_each": 18,
+          "recovery_intentional_SIGKILL_each": 5,
+          "recovery_normal0_each": 13,
+          "recovery_retained_streams_each": 36,
+          "recovery_retained_marker_events_each": 17,
+          "parser_component_sanitizer": {
+            "compile_exit": 0,
+            "runtime_exit": 0,
+            "checks": 12355,
+            "frames": 2021,
+            "parser_calls": 4042,
+            "scope": "Exact extracted production parser plus real Numeric; not whole DB sanitizer"
+          },
+          "PG_reference": {
+            "source": "Recorded actual P26 PostgreSQL18.6/btree_gist1.8; offline final C2 reduction, zero new PG products",
+            "shared_commands": 75,
+            "semantic_equal": 75,
+            "raw_equal": 73,
+            "known_DELETE_extra_T": 2,
+            "strict_full_protocol_pass": false
+          }
+        },
+        "performance": {
+          "path": "build/pg-feature-gist-probe-20261106-oann7sme/gist-probe-normal-cost9-C2-v1/independent-summary-v1.json",
+          "sha256": "a1b46fdca0f619e5e1bf0e9509df913b0f45b15a92294e78a747afb55a7656ad",
+          "contexts": 9,
+          "timed_SELECT": 306,
+          "timed_REINDEX": 9,
+          "resampling": 0,
+          "actual_outer_exit": 0,
+          "all27_V3_complete_bytes_identical": true,
+          "limits": "n3; wall baseline drift -66.652743% to +1819.365505%; no stable wall speedup or causal claim. All negative noindex/PK changes retained."
+        },
+        "preservation": "Original273 items/statuses and277 histories,2383 oldtests,26oldgz,754MD725protected unchanged; directmaster local commit,no push/default promotion; goal active.",
+        "unresolved": [
+          "True page-tree GiST/opclasses/KNN/WAL/concurrency incomplete; original IDX-07 stays partial.",
+          "Existing virtual-key coverage, physical filename identity layout, native-only lost definitions and virtual Bloom NULL remain open.",
+          "Known two DELETE T0000 protocol differences remain.",
+          "Original security/TDE and all user-deferred boundaries unchanged; R151 original341/103 matrix not run."
+        ]
+      }
+    },
+    {
       "issue": "2026-11-06 GiST empty keys, typed finite bounds and LIKE ordering ownership",
       "gap_ids": [
         "IDX-02",

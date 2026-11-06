@@ -15125,6 +15125,88 @@ static bool forEachGiSTEntry(
             return false;
         }
 
+        // Keep small generations in an operation-owned bounded buffer. CRC
+        // and parsing then see exactly the same captured bytes, without a
+        // second stream pass or per-RID hash-node allocations. Larger files
+        // retain the existing streaming path and its memory behaviour.
+        constexpr uint64_t bufferedLimit = 1024 * 1024;
+        if (fileBytes <= bufferedLimit) {
+            std::string captured;
+            try {
+                captured.resize(static_cast<size_t>(fileBytes));
+            } catch (...) {
+                return false;
+            }
+            input.clear();
+            input.seekg(0, std::ios::beg);
+            if (!input || !readExactly(captured.data(), captured.size()) ||
+                input.peek() != std::char_traits<char>::eof() || input.bad()) return false;
+            const std::string_view bytes(captured);
+            const auto& magic = v3 ? kMagicV3 : kMagic;
+            if (!std::equal(magic.begin(), magic.end(), bytes.begin())) return false;
+            size_t offset = magic.size();
+            uint32_t capturedVersion = 0, storedChecksum = 0;
+            uint64_t capturedCount = 0;
+            if (!readU32(bytes, offset, capturedVersion) || capturedVersion != version ||
+                !readU64(bytes, offset, capturedCount) || capturedCount != entryCount) return false;
+            size_t checksumOffset = static_cast<size_t>(payloadBytes);
+            if (!readU32(bytes, checksumOffset, storedChecksum) ||
+                index_checksum::crc32cFinish(index_checksum::crc32cUpdate(
+                    0xFFFFFFFFu, bytes.data(), static_cast<size_t>(payloadBytes))) != storedChecksum)
+                return false;
+
+            std::vector<int64_t> validatedRids;
+            validatedRids.reserve(static_cast<size_t>(entryCount));
+            bool increasing = true;
+            int64_t previous = 0;
+            const auto payload = bytes.substr(0, static_cast<size_t>(payloadBytes));
+            for (uint64_t i = 0; i < entryCount; ++i) {
+                uint64_t rid = 0, lowLength = 0, highLength = 0;
+                if (!readU64(payload, offset, rid) ||
+                    !readU64(payload, offset, lowLength) ||
+                    !readU64(payload, offset, highLength) ||
+                    rid == 0 || rid > static_cast<uint64_t>(INT64_MAX) ||
+                    lowLength > payload.size() - offset ||
+                    highLength > payload.size() - offset - lowLength) return false;
+                const auto entryLow = payload.substr(offset, static_cast<size_t>(lowLength));
+                offset += static_cast<size_t>(lowLength);
+                const auto entryHigh = payload.substr(offset, static_cast<size_t>(highLength));
+                offset += static_cast<size_t>(highLength);
+                const auto signedRid = static_cast<int64_t>(rid);
+                if (signedRid <= previous) increasing = false;
+                previous = signedRid;
+                validatedRids.push_back(signedRid);
+                std::string low, high;
+                if (ordering == GistKeyOrdering::Text) {
+                    if ((!v3 && (entryLow.empty() || entryHigh.empty())) ||
+                        entryLow.compare(entryHigh) > 0) return false;
+                } else {
+                    low.assign(entryLow.data(), entryLow.size());
+                    high.assign(entryHigh.data(), entryHigh.size());
+                    if (!gistEntryRangeIsValid(ordering, low, high, v3)) return false;
+                }
+                if constexpr (std::is_invocable_v<Visitor&, int64_t, std::string_view, std::string_view>) {
+                    visit(signedRid, entryLow, entryHigh);
+                } else {
+                    if (ordering == GistKeyOrdering::Text) {
+                        low.assign(entryLow.data(), entryLow.size());
+                        high.assign(entryHigh.data(), entryHigh.size());
+                    }
+                    visit(signedRid, low, high);
+                }
+            }
+            if (offset != payload.size()) return false;
+            if (!increasing) {
+                // Unsorted legacy generations are valid. Sort only our RID
+                // proof vector; candidate order and payloads stay intact.
+                std::sort(validatedRids.begin(), validatedRids.end());
+                if (std::adjacent_find(validatedRids.begin(), validatedRids.end()) !=
+                    validatedRids.end()) return false;
+            }
+            if (actualVersion) *actualVersion = version;
+            return true;
+        }
+
         std::array<char, kChecksumBytes> checksumBytes{};
         input.seekg(static_cast<std::streamoff>(payloadBytes), std::ios::beg);
         if (!input || !readExactly(checksumBytes.data(),
@@ -15229,7 +15311,10 @@ static bool forEachGiSTEntry(
         }
         visit(rid, entryLow, entryHigh);
     }
-    if (!input.eof() || input.bad()) return false;
+    // A headerless empty stream cannot distinguish an old empty index from
+    // a truncated generation. Let the original visible heap prove its answer;
+    // checksummed V2/V3 zero-entry generations above keep their format proof.
+    if (seenRids.empty() || !input.eof() || input.bad()) return false;
     if (actualVersion) *actualVersion = 0;
     return true;
 }
@@ -15367,7 +15452,24 @@ std::optional<std::vector<int64_t>> StorageEngine::tryGiSTCandidates(
     if (!comparable) return {};
     uint32_t version = 0;
     std::vector<int64_t> rids;
-    const bool valid = forEachGiSTEntry(path, gistKeyOrdering(key),
+    const auto orderingForKey = gistKeyOrdering(key);
+    bool valid = false;
+    if (binaryText) {
+        valid = forEachGiSTEntry(path, orderingForKey,
+            [&](int64_t rid, std::string_view low, std::string_view high) {
+                if (!comparable) return;
+                if (low != high) { comparable = false; return; }
+                if (bounds.low) {
+                    const int c = (contained ? low : high).compare(bounds.low->value);
+                    if (c < 0 || (c == 0 && !bounds.low->inclusive)) return;
+                }
+                if (bounds.high) {
+                    const int c = (contained ? high : low).compare(bounds.high->value);
+                    if (c > 0 || (c == 0 && !bounds.high->inclusive)) return;
+                }
+                rids.push_back(rid);
+            }, &version);
+    } else valid = forEachGiSTEntry(path, orderingForKey,
         [&](int64_t rid, const std::string& low, const std::string& high) {
             if (!comparable) return;
             // Native producers store one scalar datum twice. A general

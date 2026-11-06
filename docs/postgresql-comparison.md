@@ -1,5 +1,15 @@
 # 与 PostgreSQL 18 的功能和性能差距
 
+<!-- CURRENT_GIST_PROBE_READER_20261106 -->
+
+## GiST 读取开销与空文件回退（2026-11-06，P27-C2）
+
+本次优化完整验证后才发布候选，零字节旧文本文件不再被误认为可信空集。合法V2/V3和非空旧文本继续兼容，V2空键覆盖限制不变。与先前实际PG18.6记录作75项离线对照，全部值及七字段描述符相同，原始帧73项相同；两处DELETE额外T差异仍使严格全协议通过为false。两端关系OID仅按各自真实目录锚定，未重跑PG或比较PG速度。
+
+读取设计参考固定版本的[PG18.6 gistScanPage](https://raw.githubusercontent.com/postgres/postgres/724edf9bde9d356724ad384a2e196edc3c9f80f7/src/backend/access/gist/gistget.c)、[SQLite3.50.4 payload读取](https://raw.githubusercontent.com/sqlite/sqlite/8ed5e7365e6f12f427910188bbf6b254daad2ef6/src/btree.c)和[DuckDB1.4.3 ART查找](https://raw.githubusercontent.com/duckdb/duckdb/d1dc88f950d456d72493df452dabdcd13aa413dd/src/execution/index/art/art.cpp)。PG有页锁、split NSN和一致性重检；SQLite借用本地payload并为溢出提供拥有缓冲；ART有真正树查找。本地小文件缓冲仍完整遍历flat sidecar，没有这些引擎的树、WAL和并发等价。
+
+机制计数减少C++read调用和new请求，同时增加累计请求字节；正常SQL是否改善只能看[本轮完整对照](performance-report-2026-10-30.md#gist-probe-reader-20261106)，不能用instrumented单次时钟替代。既有普通缺口、完整GiST目标和用户暂缓边界均保持。
+
 <!-- CURRENT_GIST_EMPTY_BOUNDS_20261106 -->
 
 ## GiST 空字符串、边界与 LIKE 检索（2026-11-06，P26-C4）

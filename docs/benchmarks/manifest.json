@@ -263,8 +263,18 @@
       "sha256": "eb8e26b7570131ca430c09b9adacd93a837e2dc1ca6718cce4375add7fc1f639",
       "encoding": "gzip",
       "roundtrip_bytes_exact": true
+    },
+    {
+      "original_path": "docs/benchmarks/gist-probe-reader-20261106.json",
+      "original_bytes": 229227247,
+      "original_sha256": "34a973b0634d3c3ec429300ad584c3b9f35d54036222a37854eddc0eae520677",
+      "path": "docs/benchmarks/gist-probe-reader-20261106.json.gz",
+      "bytes": 13878961,
+      "sha256": "a72c769d19f82e4d59985ba027cfe7e2d7622fcc5770916d8283a3d90eb623f6",
+      "encoding": "gzip",
+      "roundtrip_bytes_exact": true
     }
   ],
-  "total_original_bytes": 1091249184,
-  "total_bytes": 110797347
+  "total_original_bytes": 1320476431,
+  "total_bytes": 124676308
 }
