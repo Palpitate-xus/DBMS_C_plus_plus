@@ -2,6 +2,40 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-06 preserve BRIN pages_per_range across ordinary table maintenance",
+      "gap_ids": [
+        "IDX-09",
+        "IDX-14",
+        "IDX-15",
+        "VAC-03"
+      ],
+      "status": "partial",
+      "evidence": [
+        "src/commands/TableManage.cpp",
+        "docs/performance-report-2026-10-30.md",
+        "docs/benchmarks/brin-maintenance-options-20261106.json.gz"
+      ],
+      "tests": [
+        "tests/brin_maintenance_options_protocol_e2e_test.py"
+      ],
+      "verification": {
+        "implementation": "Four owning width captures before deletion/rewrite, four explicit rebuild widths. Existing V3 CRC/structure helper, default64 fallback unchanged, locks/rollback/persistence/publish and all other source byteexact. ALTER TYPE already preserved width3 and is a control.",
+        "correctness": "Before fixture actual1 with13 configuration/summary failures; final v2 actual0 with42 commands/12 images/4 plans/full rows NULL OIDs and explicit VAC/TRUNC tags. Native25 all0; selected6 all0; auto3 serial/original deadlines each0 once; prior P22 array first15s timeout remains unresolved. PG18.6 35shared/19327cells/11metapages,1 ReadyT no physical read; restore7/2477/14 whole streams. PG harness initial2 failures preserved; no full prior81/32 suite rerun claim.",
+        "performance": "Fixed ordinary socket9,4096 initial/4095 survivors x4,9 complete durable VACUUM calls+306timed queries/7cases, independent full frames/values/NULL/OIDs/tags/Ready/images. Wall reduction first/return: VACUUM FULL（一次完整命令） -0.63%／-1.16%；高端窄范围 57.60%／51.08%；低端窄范围 68.50%／68.40%；非主键等值 6.53%／7.41%；不存在的范围 -99.01%／-101.10%；密集范围控制 -43.61%／-28.15%；主键控制 2.91%／2.50%；无对应索引列控制 -17.55%／-22.39%; serverCPU: VACUUM FULL（一次完整命令） -0.51%／-2.00%；高端窄范围 60.24%／56.43%；低端窄范围 76.26%／76.52%；非主键等值 50.45%／51.55%；不存在的范围 -294.62%／-144.27%；密集范围控制 -21.09%／-8.28%；主键控制 -20.31%／-11.79%；无对应索引列控制 -17.21%／-21.19%. All controls/negative/tails/drift preserved; no retries/profiler/PGspeed/alloperation equivalence.",
+        "preservation": "273 original items/statuses and273histories exact +new274partial;2373oldtests exact+1=2374;248source177h754MD725protected22oldgzip preserved+new23. Directmaster localcommit; no push/default executable/service promotion; Goal active.",
+        "remaining": [
+          "REINDEX 仍只重建 Btree；本批没有完整 PostgreSQL AM/opclass/catalog/revmap、增量 summarize/desummarize/autosummarize、concurrent build 或 AM 专用 WAL。",
+          "配置保存针对可读取且结构/CRC有效的当前 V3；缺失、旧格式或损坏时沿用既有64回退，尚无独立持久化 reloptions catalog，不能声称恢复了不可读文件中的设置。",
+          "本批只覆盖四条普通维护重建路径及测试中的事务/恢复控制；未覆盖所有 DDL/恢复/故障阶段，也未加入通用原子发布、分配器或 I/O 故障矩阵。",
+          "前批密集范围服务器 CPU 回测变慢6.64%仍是历史真实观测；本批保留宽度1会增加摘要数量，查询规划重复验证/解码及密集控制开销仍需优化，当前表格中的负数和漂移不得删去。",
+          "P22 自动数组统计原始 fixture 的 ROLLBACK 15秒超时根因仍未定位；本批三个原 deadline fixture 一次正常0，不构成该间歇故障已解决。",
+          "Bloom/GiST 对真正非NULL空文本的引擎建键/维护覆盖仍开放；只读诊断证明原生索引缺键，SQL可经可见堆回退，未证明SQL假阴性。",
+          "SSI 后某些自动提交数组 NULL 条件保守回堆、特殊类型/排序规则/历史或脏快照回退及其余既有普通功能缺口保持开放。",
+          "All prior user-deferred scopes unchanged; original R151 matrix not run."
+        ]
+      }
+    },
+    {
       "issue": "2026-11-05 typed BRIN bounds, NULL flags and real lossy page SQL scans",
       "gap_ids": [
         "IDX-09",

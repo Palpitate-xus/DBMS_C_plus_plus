@@ -223,8 +223,18 @@
       "sha256": "96d2a07be71a03717f64782b58d43ebb324c6472dc469386237bea5137e680fe",
       "encoding": "gzip",
       "roundtrip_bytes_exact": true
+    },
+    {
+      "original_path": "docs/benchmarks/brin-maintenance-options-20261106.json",
+      "original_bytes": 68233889,
+      "original_sha256": "029e8ed137402870c78a2b47d3b454f31077b90a0f1100947fcc6938cf6ceebe",
+      "path": "docs/benchmarks/brin-maintenance-options-20261106.json.gz",
+      "bytes": 4891229,
+      "sha256": "e98b50882d9082e2a320097d52d9ffe5a04ac6b15ebd16856c0b1290c3c5f1f8",
+      "encoding": "gzip",
+      "roundtrip_bytes_exact": true
     }
   ],
-  "total_original_bytes": 590710649,
-  "total_bytes": 72612175
+  "total_original_bytes": 658944538,
+  "total_bytes": 77503404
 }

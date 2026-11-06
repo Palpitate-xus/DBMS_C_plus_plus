@@ -19558,6 +19558,10 @@ DBStatus StorageEngine::alterTableAddColumn(const std::string& dbname,
     const auto gistCols = getGiSTIndexedColumns(dbname, tablename);
     const auto spgistCols = getSPGiSTIndexedColumns(dbname, tablename);
     const auto brinCols = getBrinIndexedColumns(dbname, tablename);
+    std::map<std::string, size_t> brinWidths;
+    for (const auto& column : brinCols)
+        brinWidths.emplace(column, brinConfiguredRangeWidth(
+            brinIndexPath(dbname, tablename, column)));
 
     tbl.append(validatedCol);
     const std::string key = dbname + "/" + tablename;
@@ -19761,7 +19765,7 @@ DBStatus StorageEngine::alterTableAddColumn(const std::string& dbname,
     for (const auto& cn : spgistCols)
         if (createSPGiSTIndex(dbname, tablename, cn) != DBStatus::OK) return DBStatus::IO_ERROR;
     for (const auto& cn : brinCols)
-        if (createBrinIndex(dbname, tablename, cn) != DBStatus::OK) return DBStatus::IO_ERROR;
+        if (createBrinIndex(dbname, tablename, cn, brinWidths.at(cn)) != DBStatus::OK) return DBStatus::IO_ERROR;
     return DBStatus::OK;
 }
 
@@ -19850,6 +19854,10 @@ DBStatus StorageEngine::alterTableDropColumn(const std::string& dbname,
     const auto gistCols = getGiSTIndexedColumns(dbname, tablename);
     const auto spgistCols = getSPGiSTIndexedColumns(dbname, tablename);
     const auto brinCols = getBrinIndexedColumns(dbname, tablename);
+    std::map<std::string, size_t> brinWidths;
+    for (const auto& column : brinCols)
+        brinWidths.emplace(column, brinConfiguredRangeWidth(
+            brinIndexPath(dbname, tablename, column)));
     for (const auto& cn : indexedCols) {
         if (cn == colName) {
             lockManager_.unlock(tablename);
@@ -20056,7 +20064,7 @@ DBStatus StorageEngine::alterTableDropColumn(const std::string& dbname,
     for (const auto& cn : spgistCols)
         if (createSPGiSTIndex(dbname, tablename, cn) != DBStatus::OK) return DBStatus::IO_ERROR;
     for (const auto& cn : brinCols)
-        if (createBrinIndex(dbname, tablename, cn) != DBStatus::OK) return DBStatus::IO_ERROR;
+        if (createBrinIndex(dbname, tablename, cn, brinWidths.at(cn)) != DBStatus::OK) return DBStatus::IO_ERROR;
     return DBStatus::OK;
 }
 
@@ -45557,6 +45565,11 @@ bool StorageEngine::resetTableStorage(
         const auto spgistColumns =
             getSPGiSTIndexedColumns(dbname, tablename);
         const auto brinColumns = getBrinIndexedColumns(dbname, tablename);
+        // Preserve the definition before any heap/index reset or rewrite.
+        std::map<std::string, size_t> brinWidths;
+        for (const auto& column : brinColumns)
+            brinWidths.emplace(column, brinConfiguredRangeWidth(
+                brinIndexPath(dbname, tablename, column)));
 
         // These access methods currently use the index file itself as their
         // durable definition.  Leave the old file in place until the empty
@@ -45787,7 +45800,7 @@ bool StorageEngine::resetTableStorage(
             }
         }
         for (const auto& column : brinColumns) {
-            if (createBrinIndex(dbname, tablename, column, 64) !=
+            if (createBrinIndex(dbname, tablename, column, brinWidths.at(column)) !=
                 DBStatus::OK) {
                 return false;
             }
@@ -50037,6 +50050,11 @@ size_t StorageEngine::vacuumFull(const std::string& dbname,
     const auto gistColumns = getGiSTIndexedColumns(dbname, tablename);
     const auto spgistColumns = getSPGiSTIndexedColumns(dbname, tablename);
     const auto brinColumns = getBrinIndexedColumns(dbname, tablename);
+    // Preserve the definition before any heap/index reset or rewrite.
+    std::map<std::string, size_t> brinWidths;
+    for (const auto& column : brinColumns)
+        brinWidths.emplace(column, brinConfiguredRangeWidth(
+            brinIndexPath(dbname, tablename, column)));
 
     ReadView readView;
     {
@@ -50475,7 +50493,7 @@ size_t StorageEngine::vacuumFull(const std::string& dbname,
             return failRewrite();
     }
     for (const auto& column : brinColumns) {
-        if (createBrinIndex(dbname, tablename, column, 64) != DBStatus::OK)
+        if (createBrinIndex(dbname, tablename, column, brinWidths.at(column)) != DBStatus::OK)
             return failRewrite();
     }
     if (!clearSpecializedIndexDirty(*this, dbname, tablename))
