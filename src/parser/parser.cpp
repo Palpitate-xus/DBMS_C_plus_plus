@@ -8886,6 +8886,19 @@ StmtPtr SQLParser::parseCreateIndex(const std::vector<std::string>& tokens, size
                 }
                 elem.expr = std::make_unique<LiteralExpr>();
                 static_cast<LiteralExpr*>(elem.expr.get())->value = exprStr;
+            } else if (pos + 1 < tokens.size() && tokens[pos + 1] == "(") {
+                // PostgreSQL permits a function call without an extra pair
+                // of expression parentheses. Preserve the same source role
+                // as the parenthesized form; this does not evaluate the call.
+                std::string source = tokens[pos++] + "(";
+                const auto inner = collectParenthesized(tokens, pos);
+                for (const auto& token : inner) {
+                    if (source.back() != '(') source += ' ';
+                    source += token;
+                }
+                source += ')';
+                elem.expr = std::make_unique<LiteralExpr>();
+                static_cast<LiteralExpr*>(elem.expr.get())->value = std::move(source);
             } else {
                 elem.column = parseRoutineIdentifier(tokens[pos++]);
                 if (pos < tokens.size() && toLower(tokens[pos]) == "collate") {

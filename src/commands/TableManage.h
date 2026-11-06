@@ -1877,6 +1877,13 @@ public:
 
 private:
 
+    // Build existing auxiliary AM definitions into private replacement files.
+    // The reserving REINDEX owner controls publication and cache invalidation.
+    DBStatus stageReindexAuxiliaryIndexes(
+        const std::string& dbname, const std::string& tablename,
+        const std::function<std::optional<std::filesystem::path>(
+            const std::filesystem::path&, const std::string&, const std::string&)>& reserve);
+
     const ReadView* prepareRowScanView(
         const std::string& dbname, const std::string& tablename,
         const ReadView* supplied, bool indexMaintenanceView,
@@ -2304,16 +2311,30 @@ private:
         // physical version at previousRowIdx until vacuum.  Older log entries
         // (and INSERT/DELETE) leave this at -1.
         int64_t previousRowIdx = -1;
+        // Only Bloom-bearing transactional mutations allocate this owner.
+        // These are genuine physical row NULL flags, not decoded text bytes.
+        struct BloomNullSnapshot {
+            std::vector<bool> row;
+            std::vector<bool> next;
+        };
+        std::shared_ptr<const BloomNullSnapshot> bloomNulls;
     };
     void logTxnInsert(const std::string& tableName, int64_t rowIdx,
-                      const std::string& rowData);
-    void logTxnUpdate(const std::string& tableName, int64_t rowIdx, const std::string& oldRowData);
-    void logTxnDelete(const std::string& tableName, int64_t rowIdx, const std::string& oldRowData);
+                      const std::string& rowData,
+                      const std::vector<bool>* rowNulls = nullptr);
+    void logTxnUpdate(const std::string& tableName, int64_t rowIdx,
+                      const std::string& oldRowData,
+                      const std::vector<bool>* oldNulls = nullptr,
+                      const std::vector<bool>* newNulls = nullptr);
+    void logTxnDelete(const std::string& tableName, int64_t rowIdx,
+                      const std::string& oldRowData,
+                      const std::vector<bool>* rowNulls = nullptr);
     bool undoVersionedUpdate(const TxnLogEntry& entry);
     bool restoreDeletedRowIndexes(
         const std::string& dbname, const std::string& tablename,
         const TableSchema& tbl, const std::string& rowData, int64_t rid,
-        std::set<BloomIndex*>& bloomUndoIndexes);
+        std::set<BloomIndex*>& bloomUndoIndexes,
+        const std::vector<bool>* bloomNulls = nullptr);
     bool undoDeletedRow(
         const TxnLogEntry& entry,
         std::set<BloomIndex*>& bloomUndoIndexes);

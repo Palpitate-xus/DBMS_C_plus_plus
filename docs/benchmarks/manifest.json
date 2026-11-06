@@ -243,8 +243,18 @@
       "sha256": "37174b21ce76414b923234fe44840f59575c6b86f722ee7559e5200fedd4b99c",
       "encoding": "gzip",
       "roundtrip_bytes_exact": true
+    },
+    {
+      "original_path": "docs/benchmarks/reindex-access-methods-20261106.json",
+      "original_bytes": 132611497,
+      "original_sha256": "dfabcf9e9ccaf8f577b734b9d342a2f527dc21af7b3f5c5dfe9b8865b979e1cb",
+      "path": "docs/benchmarks/reindex-access-methods-20261106.json.gz",
+      "bytes": 11784914,
+      "sha256": "b87d7864171630c72b1b788165c7030c5156af3cd29cde3221ad20646a3fa702",
+      "encoding": "gzip",
+      "roundtrip_bytes_exact": true
     }
   ],
-  "total_original_bytes": 733210560,
-  "total_bytes": 83251030
+  "total_original_bytes": 865822057,
+  "total_bytes": 95035944
 }

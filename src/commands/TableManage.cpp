@@ -3608,6 +3608,7 @@ struct ReindexSwapEntry {
     std::filesystem::path target;
     std::filesystem::path temporary;
     std::filesystem::path backup;
+    bool paired = true; // The existing Btree/authentication pair stays V1.
 };
 
 std::filesystem::path reindexSidecar(const std::filesystem::path& path) {
@@ -3713,7 +3714,18 @@ bool validReindexSwapEntry(const ReindexSwapEntry& entry,
     const bool composite =
         targetName.rfind(tablename + ".idx_", 0) == 0 &&
         targetName.size() > tablename.size() + 5;
-    if (!primary && !secondary && !composite) return false;
+    if (entry.paired) {
+        if (!primary && !secondary && !composite) return false;
+    } else {
+        constexpr std::string_view suffixes[]{".hidx", ".bidx", ".fti", ".gin", ".gist", ".spgist", ".brin"};
+        const bool auxiliary = std::any_of(std::begin(suffixes), std::end(suffixes),
+            [&](std::string_view suffix) {
+                return targetName.rfind(tablename + "_", 0) == 0 &&
+                    targetName.size() > tablename.size() + 1 + suffix.size() &&
+                    targetName.compare(targetName.size() - suffix.size(), suffix.size(), suffix) == 0;
+            });
+        if (!auxiliary) return false;
+    }
 
     const std::string temporaryName = temporary.filename().string();
     const std::string backupName = backup.filename().string();
@@ -3724,9 +3736,12 @@ bool validReindexSwapEntry(const ReindexSwapEntry& entry,
 bool serializeReindexSwapPlan(const std::vector<ReindexSwapEntry>& entries,
                               std::string& serialized) {
     if (entries.empty() || entries.size() > 4096) return false;
+    const bool mixed = std::any_of(entries.begin(), entries.end(),
+        [](const auto& entry) { return !entry.paired; });
     std::ostringstream output;
-    output << "DBMS_REINDEX_SWAP_V1\n" << entries.size() << '\n';
+    output << (mixed ? "DBMS_REINDEX_SWAP_V2\n" : "DBMS_REINDEX_SWAP_V1\n") << entries.size() << '\n';
     for (const auto& entry : entries) {
+        if (mixed) output << (entry.paired ? 1 : 0) << ' ';
         output << std::quoted(entry.target.string()) << ' '
                << std::quoted(entry.temporary.string()) << ' '
                << std::quoted(entry.backup.string()) << '\n';
@@ -3744,13 +3759,17 @@ bool readReindexSwapPlan(const std::filesystem::path& marker,
     std::ifstream input(marker);
     std::string magic;
     size_t count = 0;
-    if (!std::getline(input, magic) || magic != "DBMS_REINDEX_SWAP_V1" ||
+    if (!std::getline(input, magic) ||
+        (magic != "DBMS_REINDEX_SWAP_V1" && magic != "DBMS_REINDEX_SWAP_V2") ||
         !(input >> count) || count == 0 || count > 4096) {
         return false;
     }
 
+    const bool mixed = magic == "DBMS_REINDEX_SWAP_V2";
     std::set<std::filesystem::path> targets;
     for (size_t i = 0; i < count; ++i) {
+        int paired = 1;
+        if (mixed && (!(input >> paired) || (paired != 0 && paired != 1))) return false;
         std::string targetText;
         std::string temporaryText;
         std::string backupText;
@@ -3761,7 +3780,7 @@ bool readReindexSwapPlan(const std::filesystem::path& marker,
         ReindexSwapEntry entry{
             std::filesystem::path(targetText),
             std::filesystem::path(temporaryText),
-            std::filesystem::path(backupText)};
+            std::filesystem::path(backupText), paired != 0};
         if (!validReindexSwapEntry(entry, relationRoot, tablename)) return false;
         if (!normalizedAbsolutePath(entry.target, entry.target) ||
             !normalizedAbsolutePath(entry.temporary, entry.temporary) ||
@@ -3775,10 +3794,41 @@ bool readReindexSwapPlan(const std::filesystem::path& marker,
     return !(input >> trailing) && input.eof() && !input.bad();
 }
 
+// Auxiliary access-method files have no authentication sidecar. Keep this
+// recovery branch separate from the existing Btree pair policy.
+bool recoverBareReindexSwap(const ReindexSwapEntry& entry) {
+    const auto restore = std::filesystem::path(entry.backup.string() + ".restore");
+    bool backupExists = false, temporaryExists = false, targetExists = false;
+    if (!inspectRegularFile(entry.backup, backupExists) ||
+        !inspectRegularFile(entry.temporary, temporaryExists) ||
+        !inspectRegularFile(entry.target, targetExists)) return false;
+    std::error_code error;
+    if (backupExists) {
+        if (!copyRegularFileDurably(entry.backup, restore)) return false;
+        std::filesystem::rename(restore, entry.target, error);
+        if (error) return false;
+        targetExists = true;
+    } else if (temporaryExists) {
+        if (!removeRegularFileIfPresent(entry.target)) return false;
+        std::filesystem::rename(entry.temporary, entry.target, error);
+        if (error) return false;
+        targetExists = true;
+    }
+    if (!targetExists || !syncDirectoryDurably(entry.target.parent_path())) return false;
+    return removeRegularFileIfPresent(entry.backup) &&
+           removeRegularFileIfPresent(entry.temporary) &&
+           removeRegularFileIfPresent(restore);
+}
+
 bool recoverReindexSwapPlan(const std::vector<ReindexSwapEntry>& entries,
                             const std::filesystem::path& marker) {
     std::set<std::filesystem::path> directories;
     for (const auto& entry : entries) {
+        if (!entry.paired) {
+            directories.insert(entry.target.parent_path());
+            if (!recoverBareReindexSwap(entry)) return false;
+            continue;
+        }
         const auto targetSidecar = reindexSidecar(entry.target);
         const auto temporarySidecar = reindexSidecar(entry.temporary);
         const auto backupSidecar = reindexSidecar(entry.backup);
@@ -9876,10 +9926,11 @@ DBStatus StorageEngine::createBloomIndex(const std::string& dbname,
         std::string row(data, len);
         for (size_t i = 0; i < tbl.len; ++i) {
             if (tbl.cols[i].dataName == colname) {
+                bool isNull = false;
                 std::string val = canonicalColumnKeyValue(
                     tbl.cols[i], extractColumnValue(
-                                     row, tbl, i, dbname, true));
-                if (!val.empty()) {
+                                     row, tbl, i, dbname, true, &isNull));
+                if (!isNull) {
                     bidx->insert(val, encodeRid(pageId, slotId));
                 }
                 break;
@@ -13627,6 +13678,7 @@ DBStatus StorageEngine::reindex(const std::string& dbname,
         ReindexSwapEntry swap;
         std::string cacheKey;
         bool primary = false;
+        std::string accessMethod, column;
         std::unique_ptr<BPTree> tree;
     };
 
@@ -13640,13 +13692,31 @@ DBStatus StorageEngine::reindex(const std::string& dbname,
         for (auto& index : pending) {
             if (index.tree) index.tree->close();
             removeRegularFileIfPresent(index.swap.temporary);
-            removeRegularFileIfPresent(reindexSidecar(index.swap.temporary));
+            if (index.swap.paired)
+                removeRegularFileIfPresent(reindexSidecar(index.swap.temporary));
         }
     };
     const auto evictLiveCaches = [&]() {
         for (const auto& index : pending) {
-            if (index.primary) pkIndexCache_.erase(index.cacheKey);
-            else secondaryIndexCache_.erase(index.cacheKey);
+            if (index.swap.paired) {
+                if (index.primary) pkIndexCache_.erase(index.cacheKey);
+                else secondaryIndexCache_.erase(index.cacheKey);
+            } else if (index.accessMethod == "hash") {
+                const auto found = hashIndexCache_.find(index.cacheKey);
+                if (found != hashIndexCache_.end()) {
+                    if (found->second) found->second->discard();
+                    hashIndexCache_.erase(found);
+                }
+            } else if (index.accessMethod == "bloom") {
+                const auto found = bloomIndexCache_.find(index.cacheKey);
+                if (found != bloomIndexCache_.end()) {
+                    if (found->second) found->second->discard();
+                    bloomIndexCache_.erase(found);
+                }
+            } else if (index.accessMethod == "spgist") {
+                std::lock_guard<std::mutex> lock(spGiSTMutex_);
+                spGiSTCache_.erase(dbname + "/" + tablename + "/" + index.column);
+            }
         }
     };
     const auto finishFailure = [&](DBStatus status) {
@@ -13701,6 +13771,27 @@ DBStatus StorageEngine::reindex(const std::string& dbname,
         }
         pending.push_back(std::move(index));
         return pending.back().tree.get();
+    };
+    const auto reserveAuxiliary = [&](const std::filesystem::path& target,
+                                      const std::string& method,
+                                      const std::string& column) -> std::optional<std::filesystem::path> {
+        PendingIndex index;
+        if (!normalizedAbsolutePath(target, index.swap.target)) return {};
+        const auto sequence = temporarySequence.fetch_add(1);
+        const auto suffix = std::to_string(static_cast<unsigned long long>(::getpid())) + "." + std::to_string(sequence);
+        index.swap.temporary = index.swap.target.string() + ".reindex.tmp." + suffix;
+        index.swap.backup = index.swap.target.string() + ".reindex.old." + suffix;
+        index.swap.paired = false;
+        index.accessMethod = method; index.column = column;
+        index.cacheKey = dbname + "." + tablename + "." + column;
+        bool targetExists = false;
+        if (!inspectRegularFile(index.swap.target, targetExists) ||
+            !validReindexSwapEntry(index.swap, reindexRelationRoot, tablename) ||
+            !removeRegularFileIfPresent(index.swap.temporary) ||
+            !removeRegularFileIfPresent(index.swap.backup)) return {};
+        const auto temporary = index.swap.temporary;
+        pending.push_back(std::move(index));
+        return temporary;
     };
     const auto finishTree = [&](BPTree* tree) {
         if (!tree || !tree->flush()) return false;
@@ -13971,6 +14062,17 @@ DBStatus StorageEngine::reindex(const std::string& dbname,
 
     }
 
+    DBStatus auxiliaryStatus;
+    try {
+        auxiliaryStatus = stageReindexAuxiliaryIndexes(dbname, tablename, reserveAuxiliary);
+    } catch (...) {
+        // No auxiliary file has been published. Preserve the original error
+        // after removing this attempt's private replacements.
+        (void)finishFailure(DBStatus::IO_ERROR);
+        throw;
+    }
+    if (auxiliaryStatus != DBStatus::OK) return finishFailure(auxiliaryStatus);
+
     // A B+ tree and its TDE authentication sidecar are one logical file. Keep
     // the old pair as a rollback generation and publish a durable swap plan
     // before the first rename. Startup can then repair a crash at any point
@@ -13980,6 +14082,32 @@ DBStatus StorageEngine::reindex(const std::string& dbname,
     std::set<std::filesystem::path> uniqueTargets;
     for (auto& index : pending) {
         index.tree.reset();
+
+        if (!index.swap.paired) {
+            // Flush only a still-current old cache. An invalidated owner must
+            // never write its discarded generation over the replacement.
+            if (index.accessMethod == "hash") {
+                const auto found = hashIndexCache_.find(index.cacheKey);
+                if (found != hashIndexCache_.end() && found->second && found->second->isOpen() &&
+                    !found->second->hasStaleFileGeneration() && !found->second->flush())
+                    return finishFailure(DBStatus::IO_ERROR);
+            } else if (index.accessMethod == "bloom") {
+                const auto found = bloomIndexCache_.find(index.cacheKey);
+                if (found != bloomIndexCache_.end() && found->second && found->second->isOpen() &&
+                    !found->second->hasStaleFileGeneration() && !found->second->flush())
+                    return finishFailure(DBStatus::IO_ERROR);
+            }
+            bool targetExists = false, temporaryExists = false, backupExists = false;
+            if (!inspectRegularFile(index.swap.target, targetExists) ||
+                !inspectRegularFile(index.swap.temporary, temporaryExists) ||
+                !inspectRegularFile(index.swap.backup, backupExists) ||
+                !temporaryExists || backupExists ||
+                !validReindexSwapEntry(index.swap, reindexRelationRoot, tablename) ||
+                !uniqueTargets.insert(index.swap.target).second ||
+                !syncRegularFileDurably(index.swap.temporary)) return finishFailure(DBStatus::IO_ERROR);
+            swapEntries.push_back(index.swap);
+            continue;
+        }
 
         BPTree* cached = nullptr;
         if (index.primary) {
@@ -14056,8 +14184,8 @@ DBStatus StorageEngine::reindex(const std::string& dbname,
         bool targetExists = false;
         bool targetSidecarExists = false;
         if (!inspectRegularFile(entry.target, targetExists) ||
-            !inspectRegularFile(
-                reindexSidecar(entry.target), targetSidecarExists)) {
+            (entry.paired && !inspectRegularFile(
+                reindexSidecar(entry.target), targetSidecarExists))) {
             return finishFailure(DBStatus::IO_ERROR);
         }
         if (targetExists) {
@@ -14072,10 +14200,11 @@ DBStatus StorageEngine::reindex(const std::string& dbname,
         }
         std::filesystem::rename(entry.temporary, entry.target, error);
         if (error) return finishFailure(DBStatus::IO_ERROR);
-        std::filesystem::rename(
-            reindexSidecar(entry.temporary), reindexSidecar(entry.target),
-            error);
-        if (error) return finishFailure(DBStatus::IO_ERROR);
+        if (entry.paired) {
+            std::filesystem::rename(
+                reindexSidecar(entry.temporary), reindexSidecar(entry.target), error);
+            if (error) return finishFailure(DBStatus::IO_ERROR);
+        }
     }
 
     std::set<std::filesystem::path> parentDirectories;
@@ -14093,7 +14222,7 @@ DBStatus StorageEngine::reindex(const std::string& dbname,
     // beside a new sidecar.
     for (const auto& entry : swapEntries) {
         if (!removeRegularFileIfPresent(entry.backup) ||
-            !removeRegularFileIfPresent(reindexSidecar(entry.backup))) {
+            (entry.paired && !removeRegularFileIfPresent(reindexSidecar(entry.backup)))) {
             return finishFailure(DBStatus::IO_ERROR);
         }
     }
@@ -14107,6 +14236,8 @@ DBStatus StorageEngine::reindex(const std::string& dbname,
         return finishFailure(DBStatus::IO_ERROR);
     }
     swapMarkerPublished = false;
+    if (std::any_of(pending.begin(), pending.end(), [](const auto& index) { return !index.swap.paired; }) &&
+        !clearSpecializedIndexDirty(*this, dbname, tablename)) return DBStatus::IO_ERROR;
 
     return DBStatus::OK;
 }
@@ -16053,6 +16184,223 @@ std::vector<std::string> StorageEngine::getBrinIndexedColumns(const std::string&
         }
     }
     return result;
+}
+
+DBStatus StorageEngine::stageReindexAuxiliaryIndexes(
+    const std::string& dbname, const std::string& tablename,
+    const std::function<std::optional<std::filesystem::path>(
+        const std::filesystem::path&, const std::string&, const std::string&)>& reserve) {
+    const auto table = getTableSchema(dbname, tablename);
+    struct Definition { std::string method, column; size_t ordinal; std::filesystem::path target; };
+    std::map<std::pair<std::string, std::string>, Definition> definitions;
+    const auto add = [&](const std::string& method, const std::string& column) {
+        size_t ordinal = table.len;
+        for (size_t i = 0; i < table.len; ++i)
+            if (table.cols[i].dataName == column) { ordinal = i; break; }
+        if (ordinal == table.len) return false;
+        std::filesystem::path path;
+        if (method == "hash") path = hashIndexPath(dbname, tablename, column);
+        else if (method == "bloom") path = bloomIndexPath(dbname, tablename, column);
+        else if (method == "fulltext") path = fullTextIndexPath(dbname, tablename, column);
+        else if (method == "gin") path = ginIndexPath(dbname, tablename, column);
+        else if (method == "gist") path = giSTIndexPath(dbname, tablename, column);
+        else if (method == "spgist") {
+            if (table.cols[ordinal].dataType != "point") return false;
+            path = spGiSTIndexPath(dbname, tablename, column);
+        } else if (method == "brin") path = brinIndexPath(dbname, tablename, column);
+        else return false;
+        definitions.emplace(std::make_pair(method, column), Definition{method, column, ordinal, path});
+        return true;
+    };
+    for (const auto& column : getHashIndexedColumns(dbname, tablename))
+        if (!add("hash", column)) return DBStatus::CORRUPTED_DATA;
+    for (const auto& column : getBloomIndexedColumns(dbname, tablename))
+        if (!add("bloom", column)) return DBStatus::CORRUPTED_DATA;
+    const auto root = relationDir(dbname, tablename);
+    const std::string prefix = tablename + "_";
+    constexpr std::pair<std::string_view, std::string_view> files[]{
+        {"fulltext", ".fti"}, {"gin", ".gin"}, {"gist", ".gist"},
+        {"spgist", ".spgist"}, {"brin", ".brin"}};
+    std::error_code scanError;
+    for (std::filesystem::directory_iterator it(root, scanError), end;
+         !scanError && it != end; it.increment(scanError)) {
+        const bool regular = it->is_regular_file(scanError);
+        if (scanError) break;
+        if (!regular) continue;
+        const auto name = it->path().filename().string();
+        if (name.rfind(prefix, 0) != 0) continue;
+        for (const auto& file : files) {
+            const auto suffix = file.second;
+            if (name.size() > prefix.size() + suffix.size() &&
+                name.compare(name.size() - suffix.size(), suffix.size(), suffix) == 0 &&
+                name.size() - prefix.size() - suffix.size() > 0) {
+                const auto column = name.substr(prefix.size(), name.size() - prefix.size() - suffix.size());
+                // A longer table name can share this filename prefix. Only
+                // this schema's actual columns are native definitions here;
+                // persisted named/hash/bloom declarations remain strict.
+                const bool owned = std::any_of(table.cols, table.cols + table.len,
+                    [&](const auto& candidate) { return candidate.dataName == column; });
+                if (owned && !add(std::string(file.first), column)) return DBStatus::CORRUPTED_DATA;
+            }
+        }
+    }
+    if (scanError) return DBStatus::IO_ERROR;
+
+    // SQL names survive a missing data file. Read their actual persisted AM
+    // and key, without re-registering names or allocating catalog identities.
+    std::string names;
+    if (!readIndexMetadata(namedIndexMetaPath(*this, dbname, tablename), names))
+        return DBStatus::IO_ERROR;
+    std::istringstream named(names);
+    std::string line;
+    while (std::getline(named, line)) {
+        const auto first = line.find('\t');
+        const auto second = first == std::string::npos ? first : line.find('\t', first + 1);
+        if (first == std::string::npos || second == std::string::npos || first == 0 ||
+            second <= first + 1 || second + 1 == line.size() || line.find('\t', second + 1) != std::string::npos)
+            return DBStatus::CORRUPTED_DATA;
+        const auto method = line.substr(first + 1, second - first - 1);
+        if (method == "btree" || method == "composite") continue;
+        if (!add(method, line.substr(second + 1))) return DBStatus::CORRUPTED_DATA;
+    }
+    if (named.bad()) return DBStatus::IO_ERROR;
+
+    struct Build {
+        Definition definition;
+        std::filesystem::path temporary;
+        std::unique_ptr<HashIndex> hash;
+        std::unique_ptr<BloomIndex> bloom;
+        std::map<std::string, std::set<int64_t>> inverted;
+        std::string payload;
+        uint64_t count = 0;
+        brin_index_format::TypedIndex brin;
+        std::map<uint32_t, brin_index_format::Range> ranges;
+    };
+    std::vector<Definition> ordered;
+    for (const auto& definition : definitions) ordered.push_back(definition.second);
+    // Like the existing Btree fast path, bound live builders. Virtual values
+    // keep index-major evaluation; no new provider/row context is retained.
+    size_t fanout = 8;
+    for (size_t i = 0; i < table.len; ++i)
+        if (table.cols[i].generatedKind == 'v') fanout = 1;
+    for (size_t start = 0; start < ordered.size(); start += fanout) {
+        std::vector<Build> batch;
+        batch.reserve(std::min(fanout, ordered.size() - start));
+        for (size_t i = start; i < std::min(start + fanout, ordered.size()); ++i) {
+            Build build;
+            build.definition = ordered[i];
+            const auto path = reserve(build.definition.target, build.definition.method, build.definition.column);
+            if (!path) return DBStatus::IO_ERROR;
+            build.temporary = *path;
+            if (build.definition.method == "hash") {
+                build.hash = std::make_unique<HashIndex>(*path);
+                if (!build.hash->openForBuild()) return DBStatus::IO_ERROR;
+            } else if (build.definition.method == "bloom") {
+                uint32_t hashes = 7;
+                BloomIndex previous(build.definition.target);
+                if (previous.openExisting()) hashes = previous.hashCount();
+                // m is derived from the real new key set, as in the loader.
+                build.bloom = std::make_unique<BloomIndex>(*path, 128, hashes);
+                if (!build.bloom->openForBuild()) return DBStatus::IO_ERROR;
+            } else if (build.definition.method == "brin") {
+                build.brin.pagesPerRange = static_cast<uint32_t>(brinConfiguredRangeWidth(build.definition.target));
+                build.brin.heapPages = std::max<uint32_t>(1, tableNumPages(dbname, tablename));
+                build.brin.physicalRelation = table.physicalRelationId;
+                if (table.partitionType != TableSchema::PartitionType::None)
+                    build.brin.flags = brin_index_format::kPartitioned;
+                const auto schema = brinSchemaImage(schemaPath(dbname, tablename));
+                if (!schema) return DBStatus::IO_ERROR;
+                build.brin.orderingIdentity = brinOrderingIdentity(table, build.definition.ordinal, *schema);
+            }
+            batch.push_back(std::move(build));
+        }
+        DBStatus status = DBStatus::OK;
+        std::vector<bool> nulls(table.len, false);
+        if (!forEachRow(dbname, tablename,
+            [&](uint32_t page, uint16_t slot, const char* data, size_t length) {
+                if (status != DBStatus::OK) return;
+                ScannedNullRowBinding nullOwner(table, nulls, data, length);
+                const std::string row(data, length);
+                const auto rid = encodeRid(page, slot);
+                for (auto& build : batch) {
+                    const auto& definition = build.definition;
+                    const auto& column = table.cols[definition.ordinal];
+                    bool isNull = false;
+                    auto value = extractColumnValue(row, table, definition.ordinal, dbname, true, &isNull);
+                    if (definition.method == "brin") {
+                        using namespace brin_index_format;
+                        build.brin.heapPages = std::max(build.brin.heapPages, page + 1);
+                        const auto first = ((page - 1) / build.brin.pagesPerRange) * build.brin.pagesPerRange + 1;
+                        auto& range = build.ranges[first]; range.first = first;
+                        if (!nullOwner.active()) { range.flags |= kHasNull | kHasNonNull | kUnbounded; continue; }
+                        if (isNull) { range.flags |= kHasNull; continue; }
+                        if (!(range.flags & kHasNonNull)) {
+                            range.min = range.max = value; range.flags |= kHasNonNull;
+                            if (!brinCompare(column, value, value)) range.flags |= kUnbounded;
+                        } else if (!(range.flags & kUnbounded)) {
+                            const auto low = brinCompare(column, value, range.min);
+                            const auto high = brinCompare(column, value, range.max);
+                            if (!low || !high) range.flags |= kUnbounded;
+                            else { if (*low < 0) range.min = value; if (*high > 0) range.max = value; }
+                        }
+                    } else if (definition.method == "hash") {
+                        value = canonicalColumnKeyValue(column, value);
+                        if (hashKeyIncluded(column, value, isNull) && !build.hash->insert(value, rid)) status = DBStatus::IO_ERROR;
+                    } else if (definition.method == "bloom") {
+                        value = canonicalColumnKeyValue(column, value);
+                        if (hashKeyIncluded(column, value, isNull) && !build.bloom->insert(value, rid)) status = DBStatus::IO_ERROR;
+                    } else if (!isNull && definition.method == "gin") {
+                        for (const auto& key : extractGinKeys(value, column.dataType))
+                            if (!key.empty()) build.inverted[key].insert(rid);
+                    } else if (!isNull && definition.method == "fulltext") {
+                        for (const auto& token : tokenizeText(value)) build.inverted[token].insert(rid);
+                    } else if (!isNull && definition.method == "gist") {
+                        // V2 uses nonempty endpoints; its existing empty-text
+                        // read fallback remains separate from REINDEX coverage.
+                        if (!value.empty()) {
+                            gist_index_format::appendEntryPayload(build.payload, static_cast<uint64_t>(rid), value, value);
+                            ++build.count;
+                        }
+                    } else if (!isNull && definition.method == "spgist") {
+                        double x = 0, y = 0; std::string canonical;
+                        if (!normalizePointLiteral(value, canonical, &x, &y)) status = DBStatus::INVALID_VALUE;
+                        else { spgist_index_format::appendEntryPayload(build.payload, static_cast<uint64_t>(rid), x, y); ++build.count; }
+                    }
+                    if (status != DBStatus::OK) return;
+                }
+            }, nullptr, {}, false, true)) return DBStatus::IO_ERROR;
+        if (status != DBStatus::OK) return status;
+        for (auto& build : batch) {
+            const auto& method = build.definition.method;
+            if (method == "hash") { if (!build.hash->close()) return DBStatus::IO_ERROR; }
+            else if (method == "bloom") { if (!build.bloom->close()) return DBStatus::IO_ERROR; }
+            else {
+                std::string bytes;
+                if (method == "gin") bytes = serializeGinIndex(build.inverted);
+                else if (method == "fulltext") {
+                    std::ostringstream output;
+                    for (const auto& item : build.inverted) {
+                        output << item.first;
+                        for (const auto rid : item.second) output << ' ' << rid;
+                        output << '\n';
+                    }
+                    bytes = output.str();
+                } else if (method == "gist") bytes = gist_index_format::encodeV2(build.count, build.payload);
+                else if (method == "spgist") bytes = spgist_index_format::encodeV2(build.count, build.payload);
+                else if (method == "brin") {
+                    for (auto& item : build.ranges) {
+                        auto& range = item.second;
+                        range.last = static_cast<uint32_t>(std::min<uint64_t>(
+                            uint64_t(range.first) + build.brin.pagesPerRange - 1, uint64_t(build.brin.heapPages) - 1));
+                        build.brin.ranges.push_back(std::move(range));
+                    }
+                    bytes = brin_index_format::encodeTyped(build.brin);
+                } else return DBStatus::CORRUPTED_DATA;
+                if (!index_file::writeAtomically(build.temporary, bytes)) return DBStatus::IO_ERROR;
+            }
+        }
+    }
+    return DBStatus::OK;
 }
 
 bool StorageEngine::rebuildSpecializedIndexes(
@@ -19780,13 +20128,16 @@ DBStatus StorageEngine::alterTableAddColumn(const std::string& dbname,
             if (rebuilt.cols[i].dataName == cn) { colIdx = i; break; }
         }
         if (colIdx >= rebuilt.len) return DBStatus::INVALID_VALUE;
+        std::vector<bool> scanNulls(rebuilt.len, false);
         if (!forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
                                                const char* data, size_t len) {
+            ScannedNullRowBinding nullOwner(rebuilt, scanNulls, data, len);
             std::string row(data, len);
+            bool isNull = false;
             std::string value = canonicalColumnKeyValue(
                 rebuilt.cols[colIdx],
-                extractColumnValue(row, rebuilt, colIdx, dbname));
-            if (!value.empty()) bidx->insert(value, encodeRid(pageId, slotId));
+                extractColumnValue(row, rebuilt, colIdx, dbname, true, &isNull));
+            if (!isNull) bidx->insert(value, encodeRid(pageId, slotId));
         })) return DBStatus::IO_ERROR;
         if (!bidx->close() || !bidx->open()) return DBStatus::IO_ERROR;
     }
@@ -28179,7 +28530,14 @@ DBStatus StorageEngine::insertInternal(
 
     // Log for transaction rollback
     if (transactionContext().inTransaction && dbname == transactionContext().txnDB) {
-        logTxnInsert(tablename, rid, strippedRow);
+        std::vector<bool> bloomNulls;
+        if (!getBloomIndexedColumns(dbname, tablename).empty()) {
+            bloomNulls.assign(tbl.len, false);
+            for (const size_t column : physicalNullColumns)
+                bloomNulls[column] = true;
+        }
+        logTxnInsert(tablename, rid, strippedRow,
+                     bloomNulls.empty() ? nullptr : &bloomNulls);
     }
 
     // Index writes are part of the INSERT atomicity boundary.  A failed
@@ -28247,7 +28605,8 @@ DBStatus StorageEngine::insertInternal(
                     dbname, tablename, colname); idx) {
                 const std::string val = canonicalKeyValueFromRowMap(
                     actualValues, tbl, colname);
-                if (!val.empty()) idx->remove(val, rid);
+                if (actualNullColumns.count(colname) == 0)
+                    idx->remove(val, rid);
             }
         }
         deleteRowToast(dbname, tablename, rid);
@@ -28376,7 +28735,8 @@ DBStatus StorageEngine::insertInternal(
             BloomIndex* bidx = getBloomIndex(dbname, tablename, colname);
             std::string val = canonicalKeyValueFromRowMap(
                 actualValues, tbl, colname);
-            if (!bidx || (!val.empty() && !bidx->insert(val, rid))) {
+            if (!bidx || (actualNullColumns.count(colname) == 0 &&
+                          !bidx->insert(val, rid))) {
                 return abortIndexUpdate();
             }
         }
@@ -30338,7 +30698,9 @@ DBStatus StorageEngine::removeInternal(
         if (transactionContext().inTransaction &&
             dbname == transactionContext().txnDB &&
             !rowsToDelete[delIdx].empty()) {
-            logTxnDelete(tablename, rid, rowsToDelete[delIdx]);
+            logTxnDelete(tablename, rid, rowsToDelete[delIdx],
+                getBloomIndexedColumns(dbname, tablename).empty()
+                    ? nullptr : &nullColumnsToDelete[delIdx]);
         }
 
         pa->markDirty(pageId);
@@ -30506,11 +30868,18 @@ DBStatus StorageEngine::removeInternal(
                     std::string val = canonicalColumnKeyValue(
                         tbl.cols[colIdx],
                         deletedColumnValue(bidx_i, colIdx));
-                    if (!val.empty()) {
+                    const bool included = tbl.cols[colIdx].generatedKind == 'v'
+                        ? !val.empty() // No logical virtual NULL owner at this site.
+                        : !(colIdx < nullColumnsToDelete[bidx_i].size() &&
+                            nullColumnsToDelete[bidx_i][colIdx]);
+                    if (included) {
                         const auto indexedRids = bidx->search(val);
-                        if (std::find(indexedRids.begin(), indexedRids.end(),
-                                      rid) == indexedRids.end() ||
-                            !bidx->remove(val, rid)) {
+                        const bool mapped = std::find(indexedRids.begin(),
+                            indexedRids.end(), rid) != indexedRids.end();
+                        // Older Bloom builds omitted empty keys. Absence is
+                        // compatible only for that old empty-key case.
+                        if ((!val.empty() && !mapped) ||
+                            (mapped && !bidx->remove(val, rid))) {
                             lockManager_.unlock(tablename);
                             return DBStatus::IO_ERROR;
                         }
@@ -32791,7 +33160,11 @@ DBStatus StorageEngine::updateInternal(
         std::optional<size_t> updateLogIndex;
         if (transactionContext().inTransaction &&
             dbname == transactionContext().txnDB) {
-            logTxnUpdate(tablename, rid, row);
+            const bool hasBloom =
+                !getBloomIndexedColumns(dbname, tablename).empty();
+            logTxnUpdate(tablename, rid, row,
+                         hasBloom ? &oldNullColumns : nullptr,
+                         hasBloom ? &newRowNulls : nullptr);
             updateLogIndex = transactionContext().txnLog.size() - 1;
         }
         newRow = buildRowBuffer(
@@ -33395,20 +33768,46 @@ DBStatus StorageEngine::updateInternal(
             std::string oldVal = (itOld != oldIdxVals.end()) ? itOld->second : "";
             std::string newVal = canonicalKeyValueFromRowMap(
                 rowValues, tbl, colname);
-            if (oldVal != newVal) {
-                if (!oldVal.empty() &&
-                    (!containsIndexRid(bidx->search(oldVal), rid) ||
-                     !bidx->remove(oldVal, rid))) {
+            if (tbl.cols[colIdx].generatedKind == 'v') {
+                if (oldVal != newVal) {
+                    if (!oldVal.empty() &&
+                        (!containsIndexRid(bidx->search(oldVal), rid) ||
+                         !bidx->remove(oldVal, rid))) {
+                        return indexMaintenanceFailure();
+                    }
+                    if (!newVal.empty() &&
+                        (containsIndexRid(bidx->search(newVal), actualRid) ||
+                         !bidx->insert(newVal, actualRid))) {
+                        return indexMaintenanceFailure();
+                    }
+                } else if (actualRid != rid && !newVal.empty()) {
+                    if (!containsIndexRid(bidx->search(newVal), rid) ||
+                        !bidx->remove(newVal, rid) ||
+                        containsIndexRid(bidx->search(newVal), actualRid) ||
+                        !bidx->insert(newVal, actualRid)) {
+                        return indexMaintenanceFailure();
+                    }
+                }
+                continue;
+            }
+            const bool oldIncluded =
+                !(colIdx < oldNullColumns.size() && oldNullColumns[colIdx]);
+            const bool newIncluded = !newColumnIsNull(colIdx);
+            const bool oldMapped = oldIncluded &&
+                containsIndexRid(bidx->search(oldVal), rid);
+            if (oldVal != newVal || oldIncluded != newIncluded) {
+                if (oldIncluded && (oldMapped || !oldVal.empty()) &&
+                    (!oldMapped || !bidx->remove(oldVal, rid))) {
                     return indexMaintenanceFailure();
                 }
-                if (!newVal.empty() &&
+                if (newIncluded &&
                     (containsIndexRid(bidx->search(newVal), actualRid) ||
                      !bidx->insert(newVal, actualRid))) {
                     return indexMaintenanceFailure();
                 }
-            } else if (actualRid != rid && !newVal.empty()) {
-                if (!containsIndexRid(bidx->search(newVal), rid) ||
-                    !bidx->remove(newVal, rid) ||
+            } else if (actualRid != rid && newIncluded) {
+                if (((oldMapped || !oldVal.empty()) &&
+                     (!oldMapped || !bidx->remove(newVal, rid))) ||
                     containsIndexRid(bidx->search(newVal), actualRid) ||
                     !bidx->insert(newVal, actualRid)) {
                     return indexMaintenanceFailure();
@@ -45978,11 +46377,14 @@ bool StorageEngine::rebuildIndexesAfterRecovery(
                 if (columnIndex >= table.len) return false;
                 index->clear();
                 bool indexValid = true;
+                std::vector<bool> scanNulls(table.len, false);
                 const bool scanOk = forEachRow(
                     dbname, tableName,
                     [&](uint32_t pageId, uint16_t slotId,
                         const char* data, size_t length) {
                         if (!indexValid) return;
+                        ScannedNullRowBinding nullOwner(
+                            table, scanNulls, data, length);
                         const std::string row(data, length);
                         bool isNull = false;
                         const std::string value = canonicalColumnKeyValue(
@@ -45990,7 +46392,7 @@ bool StorageEngine::rebuildIndexesAfterRecovery(
                                 row, table, columnIndex, dbname, true, &isNull));
                         if ((includeEmptyHash
                                 ? hashKeyIncluded(table.cols[columnIndex], value, isNull)
-                                : !value.empty()) &&
+                                : !isNull) &&
                             !index->insert(value,
                                            encodeRid(pageId, slotId))) {
                             indexValid = false;
@@ -50483,10 +50885,13 @@ size_t StorageEngine::vacuumFull(const std::string& dbname,
         if (!index) return failRewrite();
         index->clear();
         auxiliaryValid = true;
+        std::vector<bool> scanNulls(tbl.len, false);
         if (!forEachRow(dbname, tablename,
                 [&](uint32_t pageId, uint16_t slotId,
                     const char* data, size_t length) {
                     if (!auxiliaryValid) return;
+                    ScannedNullRowBinding nullOwner(
+                        tbl, scanNulls, data, length);
                     const std::string row(data, length);
                     size_t columnIndex = tbl.len;
                     for (size_t i = 0; i < tbl.len; ++i) {
@@ -50499,10 +50904,11 @@ size_t StorageEngine::vacuumFull(const std::string& dbname,
                         auxiliaryValid = false;
                         return;
                     }
+                    bool isNull = false;
                     const std::string value = canonicalColumnKeyValue(
                         tbl.cols[columnIndex], extractColumnValue(
-                            row, tbl, columnIndex, dbname, true));
-                    if (!value.empty() &&
+                            row, tbl, columnIndex, dbname, true, &isNull));
+                    if (!isNull &&
                         !index->insert(value, encodeRid(pageId, slotId))) {
                         auxiliaryValid = false;
                     }
@@ -50675,7 +51081,8 @@ void StorageEngine::recordSsiIndexKeys(const std::string& dbname,
 }
 
 void StorageEngine::logTxnInsert(const std::string& tableName, int64_t rowIdx,
-                                 const std::string& rowData) {
+                                 const std::string& rowData,
+                                 const std::vector<bool>* rowNulls) {
     // Executor-owned CTE/derived relations are dropped before the outer SQL
     // command returns.  They must not leave undo entries that point at files
     // which no longer exist when an explicit transaction later rolls back.
@@ -50687,6 +51094,11 @@ void StorageEngine::logTxnInsert(const std::string& tableName, int64_t rowIdx,
     entry.tableName = tableName;
     entry.rowIdx = rowIdx;
     entry.rowData = rowData;
+    if (rowNulls) {
+        auto owner = std::make_shared<TxnLogEntry::BloomNullSnapshot>();
+        owner->row = *rowNulls;
+        entry.bloomNulls = std::move(owner);
+    }
     transactionContext().txnLog.push_back(std::move(entry));
     uint32_t pageId = 0;
     uint16_t slotId = 0;
@@ -50712,7 +51124,9 @@ void StorageEngine::logTxnInsert(const std::string& tableName, int64_t rowIdx,
 }
 
 void StorageEngine::logTxnUpdate(const std::string& tableName, int64_t rowIdx,
-                                  const std::string& oldRowData) {
+                                  const std::string& oldRowData,
+                                  const std::vector<bool>* oldNulls,
+                                  const std::vector<bool>* newNulls) {
     if (transactionContext().commandInternalRelations.count(tableName) != 0) {
         return;
     }
@@ -50721,6 +51135,12 @@ void StorageEngine::logTxnUpdate(const std::string& tableName, int64_t rowIdx,
     entry.tableName = tableName;
     entry.rowIdx = rowIdx;
     entry.rowData = oldRowData;
+    if (oldNulls && newNulls) {
+        auto owner = std::make_shared<TxnLogEntry::BloomNullSnapshot>();
+        owner->row = *oldNulls;
+        owner->next = *newNulls;
+        entry.bloomNulls = std::move(owner);
+    }
     transactionContext().txnLog.push_back(std::move(entry));
     uint32_t pageId = 0;
     uint16_t slotId = 0;
@@ -50745,7 +51165,8 @@ void StorageEngine::logTxnUpdate(const std::string& tableName, int64_t rowIdx,
 }
 
 void StorageEngine::logTxnDelete(const std::string& tableName, int64_t rowIdx,
-                                  const std::string& oldRowData) {
+                                  const std::string& oldRowData,
+                                  const std::vector<bool>* rowNulls) {
     if (transactionContext().commandInternalRelations.count(tableName) != 0) {
         return;
     }
@@ -50754,6 +51175,11 @@ void StorageEngine::logTxnDelete(const std::string& tableName, int64_t rowIdx,
     entry.tableName = tableName;
     entry.rowIdx = rowIdx;
     entry.rowData = oldRowData;
+    if (rowNulls) {
+        auto owner = std::make_shared<TxnLogEntry::BloomNullSnapshot>();
+        owner->row = *rowNulls;
+        entry.bloomNulls = std::move(owner);
+    }
     transactionContext().txnLog.push_back(std::move(entry));
     uint32_t pageId = 0;
     uint16_t slotId = 0;
@@ -50780,7 +51206,8 @@ void StorageEngine::logTxnDelete(const std::string& tableName, int64_t rowIdx,
 bool StorageEngine::restoreDeletedRowIndexes(
     const std::string& dbname, const std::string& tablename,
     const TableSchema& tbl, const std::string& rowData, int64_t rid,
-    std::set<BloomIndex*>& bloomUndoIndexes) {
+    std::set<BloomIndex*>& bloomUndoIndexes,
+    const std::vector<bool>* bloomNulls) {
     std::string heapRow;
     std::vector<bool> nullColumns;
     readRowByRid(getPageAllocator(dbname, tablename), rid,
@@ -50887,10 +51314,19 @@ bool StorageEngine::restoreDeletedRowIndexes(
             ok = false;
             continue;
         }
+        const auto& keyNulls = bloomNulls ? *bloomNulls : nullColumns;
+        if (keyNulls.size() != tbl.len) {
+            // A stripped undo payload has no bitmap of its own. Never
+            // manufacture a SQL NULL decision when both owners are lost.
+            ok = false;
+            continue;
+        }
+        BufferedNullRowBinding bloomNullOwner(tbl, keyNulls);
+        bool isNull = false;
         const std::string value = canonicalColumnKeyValue(
             tbl.cols[columnIndex], extractColumnValue(
-                rowData, tbl, columnIndex, dbname));
-        if (value.empty()) continue;
+                rowData, tbl, columnIndex, dbname, true, &isNull));
+        if (isNull) continue;
         BloomIndex* index = getBloomIndex(dbname, tablename, columnName);
         if (!index) {
             ok = false;
@@ -50988,7 +51424,8 @@ bool StorageEngine::undoDeletedRow(
     // unreadable; the logged OLD image is independent of that page.
     const bool indexesOk = restoreDeletedRowIndexes(
         dbname, tablename, tbl, entry.rowData, entry.rowIdx,
-        bloomUndoIndexes);
+        bloomUndoIndexes,
+        entry.bloomNulls ? &entry.bloomNulls->row : nullptr);
     return heapOk && indexesOk;
 }
 
@@ -52542,20 +52979,36 @@ bool StorageEngine::undoVersionedUpdate(const TxnLogEntry& entry) {
                 index < previousNullColumns.size() && previousNullColumns[index]))
             values.second.reset();
     }
-    std::map<std::string, std::pair<std::string, std::string>> bloomValues;
+    std::map<std::string, std::pair<std::optional<std::string>,
+                                    std::optional<std::string>>> bloomValues;
     for (const auto& columnName : getBloomIndexedColumns(dbname, tablename)) {
         const size_t index = columnIndex(columnName);
         if (index >= tbl.len) {
             indexesOk = false;
             continue;
         }
+        const auto keyForImage = [&](const std::string& image,
+                                     const std::vector<bool>& nulls)
+                -> std::optional<std::string> {
+            if (nulls.size() != tbl.len) {
+                indexesOk = false;
+                return std::nullopt;
+            }
+            bool isNull = false;
+            const std::string value = withUndoRowNulls(nulls, [&] {
+                return extractColumnValue(
+                    image, tbl, index, dbname, true, &isNull);
+            });
+            if (isNull) return std::nullopt;
+            return canonicalColumnKeyValue(tbl.cols[index], value);
+        };
+        const auto& currentBloomNulls = entry.bloomNulls
+            ? entry.bloomNulls->next : currentNullColumns;
+        const auto& previousBloomNulls = entry.bloomNulls
+            ? entry.bloomNulls->row : previousNullColumns;
         bloomValues[columnName] = {
-            canonicalColumnKeyValue(
-                tbl.cols[index], undoColumnValue(
-                    currentRow, currentNullColumns, index)),
-            canonicalColumnKeyValue(
-                tbl.cols[index], undoColumnValue(
-                    entry.rowData, previousNullColumns, index))};
+            keyForImage(currentRow, currentBloomNulls),
+            keyForImage(entry.rowData, previousBloomNulls)};
     }
 
     uint32_t previousPageId = 0;
@@ -52786,17 +53239,17 @@ bool StorageEngine::undoVersionedUpdate(const TxnLogEntry& entry) {
             indexesOk = false;
             continue;
         }
-        if (!values.first.empty()) {
-            const auto currentRids = index->search(values.first);
+        if (values.first) {
+            const auto currentRids = index->search(*values.first);
             if (containsRid(currentRids, entry.rowIdx) &&
-                !index->remove(values.first, entry.rowIdx)) {
+                !index->remove(*values.first, entry.rowIdx)) {
                 indexesOk = false;
             }
         }
-        if (!values.second.empty()) {
-            const auto previousRids = index->search(values.second);
+        if (values.second) {
+            const auto previousRids = index->search(*values.second);
             if (!containsRid(previousRids, entry.previousRowIdx) &&
-                !index->insert(values.second, entry.previousRowIdx)) {
+                !index->insert(*values.second, entry.previousRowIdx)) {
                 indexesOk = false;
             }
         }
@@ -52975,11 +53428,19 @@ DBStatus StorageEngine::rollbackTransaction() {
                         }
                     }
                     if (colIdx < tbl.len) {
+                        const auto& keyNulls = it->bloomNulls
+                            ? it->bloomNulls->row : nullColumns;
+                        if (keyNulls.size() != tbl.len) {
+                            rowUndoOk = false;
+                            continue;
+                        }
+                        BufferedNullRowBinding bloomNullOwner(tbl, keyNulls);
+                        bool isNull = false;
                         std::string value = canonicalColumnKeyValue(
                             tbl.cols[colIdx], extractColumnValue(
                                 insertedRow, tbl, colIdx,
-                                transactionContext().txnDB));
-                        if (!value.empty()) {
+                                transactionContext().txnDB, true, &isNull));
+                        if (!isNull) {
                             bloomIdxVals[colname] = std::move(value);
                         }
                     } else {
@@ -53345,21 +53806,36 @@ DBStatus StorageEngine::rollbackTransaction() {
                     continue;
                 }
                 bloomUndoIndexes.insert(bloomIdx);
+                const std::vector<bool> legacyNulls(
+                    usesHeapTupleHeader(tbl.formatVersion) ? 0 : tbl.len, false);
+                const auto& currentKeyNulls = it->bloomNulls
+                    ? it->bloomNulls->next : legacyNulls;
+                const auto& previousKeyNulls = it->bloomNulls
+                    ? it->bloomNulls->row : legacyNulls;
+                if (currentKeyNulls.size() != tbl.len ||
+                    previousKeyNulls.size() != tbl.len) {
+                    rowUndoOk = false;
+                    continue;
+                }
                 if (foundCurrent) {
+                    BufferedNullRowBinding nullOwner(tbl, currentKeyNulls);
+                    bool isNull = false;
                     const std::string currentVal = canonicalColumnKeyValue(
                         tbl.cols[colIdx], extractColumnValue(
                             currentRow, tbl, colIdx,
-                            transactionContext().txnDB));
-                    if (!currentVal.empty() &&
+                            transactionContext().txnDB, true, &isNull));
+                    if (!isNull &&
                         !bloomIdx->remove(currentVal, it->rowIdx)) {
                         rowUndoOk = false;
                     }
                 }
+                BufferedNullRowBinding nullOwner(tbl, previousKeyNulls);
+                bool isNull = false;
                 const std::string oldVal = canonicalColumnKeyValue(
                     tbl.cols[colIdx], extractColumnValue(
                         it->rowData, tbl, colIdx,
-                        transactionContext().txnDB));
-                if (!oldVal.empty() &&
+                        transactionContext().txnDB, true, &isNull));
+                if (!isNull &&
                     !bloomIdx->insert(oldVal, it->rowIdx)) {
                     rowUndoOk = false;
                 }
@@ -54858,10 +55334,18 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
                     rowUndoOk = false;
                     continue;
                 }
+                const auto& keyNulls = entry.bloomNulls
+                    ? entry.bloomNulls->row : nullColumns;
+                if (keyNulls.size() != tbl.len) {
+                    rowUndoOk = false;
+                    continue;
+                }
+                BufferedNullRowBinding bloomNullOwner(tbl, keyNulls);
+                bool isNull = false;
                 const std::string value = canonicalColumnKeyValue(
                     tbl.cols[colIdx], extractColumnValue(
                         insertedRow, tbl, colIdx,
-                        transactionContext().txnDB));
+                        transactionContext().txnDB, true, &isNull));
                 BloomIndex* bloomIdx = getBloomIndex(
                     transactionContext().txnDB, entry.tableName, colname);
                 if (!bloomIdx ||
@@ -54870,7 +55354,7 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
                     continue;
                 }
                 bloomUndoIndexes.insert(bloomIdx);
-                if (!value.empty() &&
+                if (!isNull &&
                     !removeBloomRid(bloomIdx, value, entry.rowIdx)) {
                     rowUndoOk = false;
                 }
@@ -55135,21 +55619,36 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
                     continue;
                 }
                 bloomUndoIndexes.insert(bloomIdx);
+                const std::vector<bool> legacyNulls(
+                    usesHeapTupleHeader(tbl.formatVersion) ? 0 : tbl.len, false);
+                const auto& currentKeyNulls = entry.bloomNulls
+                    ? entry.bloomNulls->next : legacyNulls;
+                const auto& previousKeyNulls = entry.bloomNulls
+                    ? entry.bloomNulls->row : legacyNulls;
+                if (currentKeyNulls.size() != tbl.len ||
+                    previousKeyNulls.size() != tbl.len) {
+                    rowUndoOk = false;
+                    continue;
+                }
                 if (foundCurrent) {
+                    BufferedNullRowBinding nullOwner(tbl, currentKeyNulls);
+                    bool isNull = false;
                     const std::string currentVal = canonicalColumnKeyValue(
                         tbl.cols[colIdx], extractColumnValue(
                             currentRow, tbl, colIdx,
-                            transactionContext().txnDB));
-                    if (!currentVal.empty() &&
+                            transactionContext().txnDB, true, &isNull));
+                    if (!isNull &&
                         !bloomIdx->remove(currentVal, entry.rowIdx)) {
                         rowUndoOk = false;
                     }
                 }
+                BufferedNullRowBinding nullOwner(tbl, previousKeyNulls);
+                bool isNull = false;
                 const std::string oldVal = canonicalColumnKeyValue(
                     tbl.cols[colIdx], extractColumnValue(
                         entry.rowData, tbl, colIdx,
-                        transactionContext().txnDB));
-                if (!oldVal.empty() &&
+                        transactionContext().txnDB, true, &isNull));
+                if (!isNull &&
                     !bloomIdx->insert(oldVal, entry.rowIdx)) {
                     rowUndoOk = false;
                 }

@@ -1,5 +1,26 @@
 # DBMS 功能测试报告
 
+<!-- CURRENT_REINDEX_ACCESS_METHODS_20261106 -->
+
+## 普通访问方法 REINDEX 与空文本生命周期（2026-11-06）
+
+本批补入普通 `REINDEX TABLE` 的 B-tree/Hash/Bloom/FTI/GIN/GiST/SPGiST/BRIN 重建、物理 Bloom NULL/空文本维护与 UPPER/LOWER 表达式索引 SQL 桥接。有效旧头的 BRIN `pages_per_range` 与 Bloom `k` 保留；`m` 随真实新键集按既有 loader 默认128 bitsPerEntry重算。旧头损坏/缺失时回退宽64/k7。默认程序仍为 `425165…`，没有服务重启或默认升级。
+
+当前统计：2378 测试文件（原2375字节不变加2 CPP及1协议），顶层CPP1115（含链接桩）、总CPP1120/其中子目录5；登记680个driver/660个独立E2E。源248/头177，754 Markdown、725保护记录；24份旧gzip逐字保持，归档总计25份。原273项22/166/70/15及275条历史保持，仅新增partial第276条。
+
+C2 主 native 实际 12096 检查/17 场景通过，恢复 native 实际 3183 检查、8 控制/18 workers （5 次预期 SIGKILL、13 次正常退出）；24 条 PG18.6 共享命令比较 1343 行/8058 单元及全部字段声明。31 个既有 native 与 5 个相关协议及 auto3 通过；另一个相关协议仍失败，旧版配对尚未到相同阶段。
+
+GiST 空文本编码、native-only 丢失定义、虚拟 Bloom NEW NULL 和上述失败均保留普通未完；不关闭原273项。
+
+本批本地专项协议实际69条命令/40个文件图像通过；PG共享24条、7次完整人口结果共1,343行/8,058单元（441个NULL），42个列描述符逐项检查7个字段。这些是6个数据列的描述元数据，并非7个数据列；两端tableOID各自真实锚定。PG保留4个实际BRIN metapage，损坏/丢失时本地宽64与PG intact宽1明确分列；事务内1个ReadyT图像没有CHECKPOINT或物理页读取。
+
+恢复控制覆盖真实V2持久标记、首次辅助文件旧代备份/新代发布、全部rename及目录fsync后的进程中断，并保留V1兼容控制、私有文件fsync/发布rename的定点EIO与正常控制。5次预期SIGKILL不是普通退出；18个worker的36份完整stdout/stderr均保留。该控制不覆盖发布标记前崩溃的临时文件回收，也不等价完整PG事务WAL/并发恢复；原有混合reindex_atomicity回归仅原样观察一次，不扩展安全/TDE范围。
+
+完整代别、首轮失败、工作量差异与全部成本表见[本批报告](performance-report-2026-10-30.md#普通访问方法-reindex-与空文本生命周期2026-11-06)。以下P24及更早段落保留当时历史，不把旧数字当作当前统计。
+
+下方 P24 及更早段落为历史记录。
+
+
 <!-- CURRENT_BRIN_OPERATOR_CONSISTENCY_20261106 -->
 
 最新P24-C2将普通BRIN摘要比较改为运算符专用路径；仍校验min<=max、所有文件/CRC/identity/dirty/snapshot fences与完整heap Filter复核，NULL flags不新增求值，legacy timestamp原路径保留。实际功能门禁及全部首次结果、固定9进程的完整维护/查询wall、CPU、长尾、负数与漂移见[性能报告](performance-report-2026-10-30.md)和[压缩证据](benchmarks/brin-operator-pruning-20261106.json.gz)；不称完整PG BRIN、所有SQL提速或因果已隔离。性能外层runner因label覆盖退出1、九backend正常0，二者分开记录；原source/plan/complete=false回执保留，后续仅离线finalize，不重采样、不当产品故障。默认425保持，partial、Goal active。旧2374测试逐字不变+1 native=2375；679/659 roster、源248/头177、顶层CPP1113/全部1118、754MD/725保护记录保持，历史275，旧23gzip保持+新24。下方P23及更早段落为历史记录。

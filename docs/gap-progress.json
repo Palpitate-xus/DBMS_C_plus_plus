@@ -2,6 +2,655 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-06 ordinary all-AM REINDEX and physical Bloom NULL/empty lifecycle",
+      "gap_ids": [
+        "IDX-05",
+        "IDX-09",
+        "IDX-10",
+        "IDX-14",
+        "IDX-15"
+      ],
+      "status": "partial",
+      "evidence": [
+        "src/commands/DdlExecutor.cpp",
+        "src/commands/TableManage.cpp",
+        "src/commands/TableManage.h",
+        "src/parser/parser.cpp",
+        "scripts/build_common.sh",
+        "docs/performance-report-2026-10-30.md",
+        "docs/benchmarks/reindex-access-methods-20261106.json.gz"
+      ],
+      "tests": [
+        "tests/reindex_access_methods_protocol_e2e_test.py",
+        "tests/reindex_access_methods_recovery_test.cpp",
+        "tests/reindex_access_methods_test.cpp"
+      ],
+      "verification": {
+        "implementation": "Ordinary TABLE: native existing AM definitions rebuilt privately with bounded8 shared scan, physical Bloom real NULL ownership and native UPPER/LOWER DDL source bridge. V1 Btree pair unchanged; V2 mixed per-file durable swap/recovery. Valid BRIN width and Bloom k preserved; m derived at128 bits/key; missing/corrupt config fallback64/7. Not full PostgreSQL AM/WAL/concurrent parity.",
+        "actual_receipts": [
+          {
+            "role": "main-native",
+            "path": "build/pg-feature-reindex-am-20261106-1y5alicy/reindex_access_methods_test-C2-v3.json",
+            "sha256": "f6e2620634d955d2c7ecc4e10784dd27c53494e15238d799fee3c2e6b3864c72",
+            "gates": [
+              {
+                "keys": [
+                  "exit"
+                ],
+                "actual": 0
+              },
+              {
+                "keys": [
+                  "source_sha256"
+                ],
+                "actual": "70c943a2ccb0a7bf875b76058fea91898f03dbabf1ced24645201ea81ef93d28"
+              }
+            ],
+            "fields": {
+              "source_sha256": "70c943a2ccb0a7bf875b76058fea91898f03dbabf1ced24645201ea81ef93d28"
+            }
+          },
+          {
+            "role": "recovery-native-final",
+            "path": "build/pg-feature-reindex-am-20261106-1y5alicy/reindex_access_methods_recovery_test-C2-v1.json",
+            "sha256": "1ab791bd9aecc7ed252487bf893d290b056ec3743822ca887725c1765fd1b087",
+            "gates": [
+              {
+                "keys": [
+                  "exit"
+                ],
+                "actual": 0
+              }
+            ],
+            "fields": {
+              "source_sha256": "2581a19124881e329c4bb807bd6a5107dc5a042830f6b756b7d89dda332c9d7c"
+            }
+          },
+          {
+            "role": "protocol-final",
+            "path": "build/pg-feature-reindex-am-20261106-1y5alicy/reindex_access_methods_protocol_e2e_test-C2-v2/receipt-v1.json",
+            "sha256": "d12447e559298c563c8e75b4c88381f3346618f319df2ab2339e141f0b691665",
+            "gates": [
+              {
+                "keys": [
+                  "exit"
+                ],
+                "actual": 0
+              },
+              {
+                "keys": [
+                  "pid_gone"
+                ],
+                "actual": true
+              }
+            ],
+            "fields": {
+              "source_sha256": "c8c9cefa8827600d543dcde6c8271fd83635bfcd422a5199772b939856523e2e",
+              "binary_sha256": "99f476a899816ad759cf165817394d3bfca4b4961f56887f07c719871d031e64"
+            }
+          },
+          {
+            "role": "PG18.6-shared",
+            "path": "build/pg-feature-reindex-am-20261106-1y5alicy/pg-reindex-reference-C2-v1/receipt-v1.json",
+            "sha256": "25419f1e9ff4b75c5c07f98be6ae785dc7349af570a6cf000ff0f3aa1ad0c1a1",
+            "gates": [
+              {
+                "keys": [
+                  "complete"
+                ],
+                "actual": true
+              },
+              {
+                "keys": [
+                  "assertions_succeeded"
+                ],
+                "actual": true
+              },
+              {
+                "keys": [
+                  "owned_PID_gone"
+                ],
+                "actual": true
+              },
+              {
+                "keys": [
+                  "normal_stop"
+                ],
+                "actual": true
+              },
+              {
+                "keys": [
+                  "actual_difference_records"
+                ],
+                "actual": 0
+              }
+            ],
+            "fields": {
+              "shared_commands": 24,
+              "cells": 8058,
+              "population_results": 7,
+              "all7fields": true
+            }
+          },
+          {
+            "role": "related28",
+            "path": "build/pg-feature-reindex-am-20261106-1y5alicy/related28-native-C2-v1.json",
+            "sha256": "d9b2f675426d2bd99852d89370e164d5cd3edd5ff2a97fd6117e0f1c0ba9fceb",
+            "gates": [
+              {
+                "keys": [
+                  "complete"
+                ],
+                "actual": true
+              },
+              {
+                "keys": [
+                  "all_passed"
+                ],
+                "actual": true
+              }
+            ],
+            "fields": {}
+          },
+          {
+            "role": "unparenthesized-native-function-SQL",
+            "path": "build/pg-feature-reindex-am-20261106-1y5alicy/reindex_access_methods_test-C2-unparenthesized-v2.json",
+            "sha256": "3c91796c5100b9b5d750a1898708c4affde3a65bee9a24ce321fb3ddcfab9bdb",
+            "gates": [
+              {
+                "keys": [
+                  "exit"
+                ],
+                "actual": 0
+              },
+              {
+                "keys": [
+                  "source_sha256"
+                ],
+                "actual": "c1070880a60abeb7e2adb5a7b6b8b9751032619b45218c31a18b1148bdc68083"
+              }
+            ],
+            "fields": {
+              "exit": 0,
+              "source_sha256": "c1070880a60abeb7e2adb5a7b6b8b9751032619b45218c31a18b1148bdc68083"
+            }
+          },
+          {
+            "role": "new-native-classifications-not-all-PASS",
+            "path": "build/pg-feature-reindex-am-20261106-1y5alicy/new-native-observations-v1.json",
+            "sha256": "a52410d49c926ef3166bc003cee2ec1bda8f32f690acfa9db33d13414cac233c",
+            "gates": [
+              {
+                "keys": [
+                  "complete"
+                ],
+                "actual": true
+              },
+              {
+                "keys": [
+                  "all_expected_observations"
+                ],
+                "actual": true
+              },
+              {
+                "keys": [
+                  "all_positive_native_tests_passed"
+                ],
+                "actual": false
+              }
+            ],
+            "fields": {
+              "complete": true,
+              "all_expected_observations": true,
+              "all_positive_native_tests_passed": false
+            }
+          },
+          {
+            "role": "all-AM-before-C2-protocol-observations",
+            "path": "build/pg-feature-reindex-am-20261106-1y5alicy/protocol-observations-v1.json",
+            "sha256": "d68825e05d981c7c6f599944ae3f4301800a5dceca779864bd9ed84c0012c9f0",
+            "gates": [
+              {
+                "keys": [
+                  "complete"
+                ],
+                "actual": true
+              },
+              {
+                "keys": [
+                  "all_expected_observations"
+                ],
+                "actual": true
+              }
+            ],
+            "fields": {
+              "complete": true,
+              "all_expected_observations": true
+            }
+          },
+          {
+            "role": "recovery-genuine-worker-observations",
+            "path": "build/pg-feature-reindex-am-20261106-1y5alicy/recovery-observations-v1.json",
+            "sha256": "dbd453fe2e65b75d9dcca4021f066afd20cec873f5d53573558feb67c9d5cd6a",
+            "gates": [
+              {
+                "keys": [
+                  "complete"
+                ],
+                "actual": true
+              },
+              {
+                "keys": [
+                  "all_expected_observations"
+                ],
+                "actual": true
+              },
+              {
+                "keys": [
+                  "all36_stream_payloads_byteexact"
+                ],
+                "actual": true
+              }
+            ],
+            "fields": {
+              "complete": true,
+              "all_expected_observations": true,
+              "all36_stream_payloads_byteexact": true
+            }
+          },
+          {
+            "role": "recovery-C2-complete-streams",
+            "path": "build/pg-feature-reindex-am-20261106-1y5alicy/reindex-recovery-workers-C2-v1/receipt-v1.json",
+            "sha256": "c115d72b055dffe826ced5ff13febea5591e60662a6d82beaebca7b6f015635e",
+            "gates": [
+              {
+                "keys": [
+                  "complete"
+                ],
+                "actual": true
+              },
+              {
+                "keys": [
+                  "checks"
+                ],
+                "actual": 3183
+              },
+              {
+                "keys": [
+                  "workers"
+                ],
+                "actual": 18
+              },
+              {
+                "keys": [
+                  "normal_exit_0"
+                ],
+                "actual": 13
+              },
+              {
+                "keys": [
+                  "intentional_SIGKILL"
+                ],
+                "actual": 5
+              },
+              {
+                "keys": [
+                  "retained_full_streams"
+                ],
+                "actual": 36
+              },
+              {
+                "keys": [
+                  "all_owned_PIDs_gone"
+                ],
+                "actual": true
+              }
+            ],
+            "fields": {
+              "complete": true,
+              "checks": 3183,
+              "workers": 18,
+              "normal_exit_0": 13,
+              "intentional_SIGKILL": 5,
+              "retained_full_streams": 36,
+              "all_owned_PIDs_gone": true
+            }
+          },
+          {
+            "role": "restore7-complete-streams",
+            "path": "build/pg-feature-reindex-am-20261106-1y5alicy/restore-workers-C2-v1/receipt-v1.json",
+            "sha256": "fd84f82e9a3e0fae7c00d83a929f6dd053bb6e7d780a2a3eb2125ac6253adf71",
+            "gates": [
+              {
+                "keys": [
+                  "complete"
+                ],
+                "actual": true
+              },
+              {
+                "keys": [
+                  "workers"
+                ],
+                "actual": 7
+              },
+              {
+                "keys": [
+                  "worker_checks"
+                ],
+                "actual": 2477
+              },
+              {
+                "keys": [
+                  "retained_complete_streams"
+                ],
+                "actual": 14
+              }
+            ],
+            "fields": {
+              "complete": true,
+              "workers": 7,
+              "worker_checks": 2477,
+              "retained_complete_streams": 14
+            }
+          },
+          {
+            "role": "finite-related-QA-classifications-contains1unresolved",
+            "path": "build/pg-feature-reindex-am-20261106-1y5alicy/related-QA-observations-v1.json",
+            "sha256": "fefdc3bfa6902987733e2c424f85584ea3a193b5f1ec0bd731724bc43e9c89e8",
+            "gates": [
+              {
+                "keys": [
+                  "complete"
+                ],
+                "actual": true
+              },
+              {
+                "keys": [
+                  "all_classifications_checked"
+                ],
+                "actual": true
+              },
+              {
+                "keys": [
+                  "all_selected_protocol_passed"
+                ],
+                "actual": false
+              },
+              {
+                "keys": [
+                  "existing_native_passed"
+                ],
+                "actual": 31
+              },
+              {
+                "keys": [
+                  "existing_native_failed"
+                ],
+                "actual": 0
+              },
+              {
+                "keys": [
+                  "related_protocol_passed"
+                ],
+                "actual": 5
+              },
+              {
+                "keys": [
+                  "related_protocol_failed"
+                ],
+                "actual": 1
+              },
+              {
+                "keys": [
+                  "auto3_passed"
+                ],
+                "actual": 3
+              }
+            ],
+            "fields": {
+              "complete": true,
+              "all_classifications_checked": true,
+              "all_selected_protocol_passed": false,
+              "existing_native_passed": 31,
+              "existing_native_failed": 0,
+              "related_protocol_passed": 5,
+              "related_protocol_failed": 1,
+              "auto3_passed": 3
+            }
+          },
+          {
+            "role": "supplemental-QA-strict-failure-preserved",
+            "path": "build/pg-feature-reindex-am-20261106-1y5alicy/C2-supplemental-QA-v1/receipt-v1.json",
+            "sha256": "aa6e567368f419caa9cc6167a3b488d792ca0bed908c9b4621a3bf249557ee86",
+            "gates": [
+              {
+                "keys": [
+                  "complete"
+                ],
+                "actual": true
+              },
+              {
+                "keys": [
+                  "all_passed"
+                ],
+                "actual": false
+              },
+              {
+                "keys": [
+                  "inputs_unchanged"
+                ],
+                "actual": true
+              },
+              {
+                "keys": [
+                  "object_stats_unchanged"
+                ],
+                "actual": true
+              },
+              {
+                "keys": [
+                  "retries"
+                ],
+                "actual": 0
+              }
+            ],
+            "fields": {
+              "complete": true,
+              "all_passed": false,
+              "inputs_unchanged": true,
+              "object_stats_unchanged": true,
+              "retries": 0
+            }
+          },
+          {
+            "role": "missing-memory-paired-baseline-comparison-incomplete",
+            "path": "build/pg-feature-reindex-am-20261106-1y5alicy/missing-memory-index-paired-observation-v1.json",
+            "sha256": "04fe17d5a48b56e7bb1b123d6df2f4be0a59789b5039f8e1ed6d6eed39e581a4",
+            "gates": [
+              {
+                "keys": [
+                  "status"
+                ],
+                "actual": "INCOMPLETE_PAIRED_PRODUCT_OBSERVATION"
+              },
+              {
+                "keys": [
+                  "all_our_jobs_terminal"
+                ],
+                "actual": true
+              }
+            ],
+            "fields": {
+              "status": "INCOMPLETE_PAIRED_PRODUCT_OBSERVATION",
+              "all_our_jobs_terminal": true
+            }
+          },
+          {
+            "role": "strict-GiST-encodedempty-before-NOT_A_PASS",
+            "path": "build/pg-feature-reindex-am-20261106-1y5alicy/reindex_gist_empty_encoded_diagnostic-before-v1.json",
+            "sha256": "ebc1091018ba315049d02d5dee321585cef09f5c32c237c572f80e193f06644f",
+            "gates": [
+              {
+                "keys": [
+                  "exit"
+                ],
+                "actual": 1
+              },
+              {
+                "keys": [
+                  "source_sha256"
+                ],
+                "actual": "95336de9b8a290a7df1643ffe41418efa5c00ea6094c17277f8747ea4448c137"
+              }
+            ],
+            "fields": {
+              "exit": 1,
+              "source_sha256": "95336de9b8a290a7df1643ffe41418efa5c00ea6094c17277f8747ea4448c137"
+            }
+          },
+          {
+            "role": "strict-GiST-encodedempty-C2-NOT_A_PASS",
+            "path": "build/pg-feature-reindex-am-20261106-1y5alicy/reindex_gist_empty_encoded_diagnostic-C2-v1.json",
+            "sha256": "0b2d6cd9a97e57e5fab9ab33b654ef937ec40dcae0f75377891f7034a02211ba",
+            "gates": [
+              {
+                "keys": [
+                  "exit"
+                ],
+                "actual": 1
+              },
+              {
+                "keys": [
+                  "source_sha256"
+                ],
+                "actual": "95336de9b8a290a7df1643ffe41418efa5c00ea6094c17277f8747ea4448c137"
+              }
+            ],
+            "fields": {
+              "exit": 1,
+              "source_sha256": "95336de9b8a290a7df1643ffe41418efa5c00ea6094c17277f8747ea4448c137"
+            }
+          },
+          {
+            "role": "independent-all90-cost-records-review",
+            "path": "build/pg-feature-reindex-am-20261106-1y5alicy/reindex-am-cost9-independent-review-v1.json",
+            "sha256": "42468b63286d410d8b4712a37ce5c6e14aa99ee124ac4ec35557d5024395a722",
+            "gates": [
+              {
+                "keys": [
+                  "complete"
+                ],
+                "actual": true
+              },
+              {
+                "keys": [
+                  "all_checks_passed"
+                ],
+                "actual": true
+              },
+              {
+                "keys": [
+                  "check_count"
+                ],
+                "actual": 235
+              },
+              {
+                "keys": [
+                  "SQL"
+                ],
+                "actual": 0
+              },
+              {
+                "keys": [
+                  "resampling"
+                ],
+                "actual": 0
+              },
+              {
+                "keys": [
+                  "original_sampler_actual_exit"
+                ],
+                "actual": 0
+              }
+            ],
+            "fields": {}
+          }
+        ],
+        "retained_first_failures": [
+          {
+            "path": "build/pg-feature-reindex-am-20261106-1y5alicy/reindex_access_methods_test-before-v2.log",
+            "sha256": "a34d29fce27b4ae854cb40d36996bab862c5bc6b531d0c3e9c34c89471d9aa51",
+            "description": "Before setup parser42601 at checks23/cases0, no REINDEX execution; no REINDEX baseline failure claimed."
+          },
+          {
+            "path": "build/pg-feature-reindex-am-20261106-1y5alicy/reindex_access_methods_test-before-v3.log",
+            "sha256": "385e78c7725caa5de8f7dbbde247656ab5763cf1b632ba94e2aa67626f7e0e96",
+            "description": "Before valid extra-parenthesis expression reached existing DDL missing bridge, setup failure; zero REINDEX."
+          },
+          {
+            "path": "build/pg-feature-reindex-am-20261106-1y5alicy/reindex_access_methods_protocol_e2e_test-C2-v1/stderr.log",
+            "sha256": "e25c2e94019ac007215ecab3228c9edc40f829c2beceec0131fd80232f6feeee",
+            "description": "First protocol invocation used frozen build-path import, harness error before product SQL; unchanged fixture used tests path later."
+          },
+          {
+            "path": "build/pg-feature-reindex-am-20261106-1y5alicy/reindex_access_methods_protocol_e2e_test-before-v1/evidence/trace-v1.json",
+            "sha256": "105f9286adf3c6f268dc2ef7b2a90c17dd11e3435e3742fbb7717264dc10241c",
+            "description": "Before full69 commands/40images completed with63 AM-generation/CRC/repair assertions failing; protocol-observations retains exact categories; product server0, not a syntax setup failure."
+          },
+          {
+            "path": "build/pg-feature-reindex-am-20261106-1y5alicy/missing_memory_index_protocol_e2e_test-C2-selected-v1/stderr.log",
+            "sha256": "bd263dccd52ab8ec3cc6b9d17b4871c14b9bba1b497caf2d109bbc180cd566f9",
+            "description": "Unchanged existing protocol strict fail at post-unlink Hash SELECT: expected row, actualXX001. Unresolved, never PASS."
+          },
+          {
+            "path": "build/pg-feature-reindex-am-20261106-1y5alicy/missing_memory_index_protocol_e2e_test-before-paired-baseline-v1/stderr.log",
+            "sha256": "681017308ad16e4766bac58521cd42dfd87f68aeeb4decc4d41144d9e35a161c",
+            "description": "One exact-source before90f paired attempt timed out at CREATE TABLE before unlink; baseline comparison INCOMPLETE, not samefail/non-regression."
+          },
+          {
+            "path": "build/pg-feature-reindex-am-20261106-1y5alicy/reindex_gist_empty_encoded_diagnostic-before-v1.log",
+            "sha256": "b0a5cf7bd16c5867a5b0ff23f167ba46cc5a3aa1d40659f82969fe5f46ec474b",
+            "description": "Strict positive diagnostic actual1: encodedempty0, native lossy trueRID1; not feature completion."
+          },
+          {
+            "path": "build/pg-feature-reindex-am-20261106-1y5alicy/reindex_gist_empty_encoded_diagnostic-C2-v1.log",
+            "sha256": "b0a5cf7bd16c5867a5b0ff23f167ba46cc5a3aa1d40659f82969fe5f46ec474b",
+            "description": "Same strict positive actual1 afterC2: encodedempty0, native lossy trueRID1; gap retained."
+          },
+          {
+            "path": "build/pg-feature-reindex-am-20261106-1y5alicy/syntax-stage-v1.log",
+            "sha256": "165cc99a7e44de9472a3b5a4a2bc0126c33b0ba1986cfe9c481785fa3cb0ed56",
+            "description": "Preliminary unfrozen mixed-include syntax diagnostic failed; concurrent editable source hashes cannot establish acceptance. Real frozen C1/C2 normal builds passed; observation note retained."
+          }
+        ],
+        "cost_evidence": {
+          "path": "build/pg-feature-reindex-am-20261106-1y5alicy/reindex-am-cost9-v1/independent-summary-v1.json",
+          "sha256": "afc3290885a2255326f1f6b68c616bbf26984d7b9ce5e829a21efef9ca791af0",
+          "contexts": 9,
+          "complete_REINDEX": 27,
+          "timed_queries": 306,
+          "repair_queries_untimed": 63,
+          "sampling_driver_actual_exit": 0,
+          "retries": 0,
+          "comparability": "Mixed rebuild adds7AM over old Btree-only; corrupt BRIN new64 versus old still bad. No equal-work algorithm speed claim."
+        },
+        "research": {
+          "path": "build/pg-feature-reindex-am-20261106-1y5alicy/primary-reindex-v1/research-v2.json",
+          "sha256": "7d40e967aee1d49e98fe73acfd165c3691139faf351de9f7480986aeb0557608",
+          "official_sources": 23
+        },
+        "unresolved": [
+          "GiST 真正空文本编码仍未修复；原生候选包含真实 RID 不能证明编码已覆盖。",
+          "native-only 索引的唯一定义文件删除后无权威定义可恢复；缺失的配置不能从名称/文本猜回。",
+          "虚拟 Bloom NEW UPDATE/DELETE 的真实 logical NULL owner 仍不足；本批不伪造该数据所有者。",
+          "missing_memory_index_protocol_e2e_test.py 在丢 Hash 后期待行、实际 XX001，仍严格失败；旧版配对运行在 CREATE TABLE 等待超时，未到删除阶段，baseline comparison INCOMPLETE，不能称旧版同失败或证明非回归。",
+          "仍非完整 AM/opclass/catalog/并发 REINDEX 覆盖；REINDEX INDEX/DATABASE/SYSTEM/CONCURRENTLY 不在本批实现。",
+          "没有修改既有用户暂缓、安全/TDE、参数帧、retained/portal/format2 或 R65 provider 生命周期。"
+        ],
+        "preservation": "Original273 full items/status22complete166partial70unverified15deferred and275 raw histories retained+1partial276. Old2375tests byteexact+3=2378;248source177headers/topCPP1115total1120;680drivers660standalone;754MD725protected;24oldgzip byteexact+new25. Directmaster localcommit, no push/default/service promotion. Goal active."
+      }
+    },
+    {
       "issue": "2026-11-06 BRIN operator-specific summary consistency",
       "gap_ids": [
         "IDX-09",

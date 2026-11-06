@@ -7983,6 +7983,19 @@ bool DdlExecutor::executeCreateIndex(const CreateIndexStmt* stmt, Session& s) {
     std::string whereCondition = stmt->whereClause ? stmt->whereClause->toString() : "";
     std::vector<std::string> includeCols = stmt->includeCols;
 
+    std::string indexExpression;
+    if (stmt->columns.size() == 1 && stmt->columns.front().expr) {
+        const auto* stored = dynamic_cast<const LiteralExpr*>(stmt->columns.front().expr.get());
+        // The index parser's parenthesized form stores source text, rather
+        // than a SQL string datum. Pass that text to the existing limited
+        // UPPER/LOWER builder and use its exact key for catalog/drop identity.
+        indexExpression = stored ? stored->value : stmt->columns.front().expr->toString();
+        const auto left = indexExpression.find('(');
+        const auto right = indexExpression.rfind(')');
+        if (left != std::string::npos && right != std::string::npos && right > left + 1 &&
+            generatedVirtualName(generatedIndexTarget, trim(indexExpression.substr(left + 1, right - left - 1))))
+            throw DbError("0A000", "indexes on virtual generated columns are not supported");
+    }
     DBStatus res;
     std::string am = toLower(stmt->accessMethod);
     if (!stmt->options.empty() && !am.empty() && am != "brin")
@@ -8013,7 +8026,7 @@ bool DdlExecutor::executeCreateIndex(const CreateIndexStmt* stmt, Session& s) {
     if (am.empty() || am == "btree") {
         if (colnames.size() == 1) {
             res = g_engine.createIndex(s.currentDB, tname, colnames.front(), true,
-                                       includeCols, whereCondition, "",
+                                       includeCols, whereCondition, indexExpression,
                                        stmt->concurrently, stmt->unique);
         } else {
             res = g_engine.createCompositeIndex(s.currentDB, tname, colnames,
@@ -8108,7 +8121,7 @@ bool DdlExecutor::executeCreateIndex(const CreateIndexStmt* stmt, Session& s) {
     const std::string physicalMethod = (colnames.size() > 1)
         ? "composite" : (am.empty() ? "btree" : am);
     const std::string physicalKey = (colnames.size() > 1)
-        ? idxName : (stmt->columns.front().expr ? stmt->columns.front().expr->toString() : colnames.front());
+        ? idxName : (stmt->columns.front().expr ? indexExpression : colnames.front());
     auto discardCreatedIndex = [&]() {
         if (physicalMethod == "composite") g_engine.dropCompositeIndex(s.currentDB, tname, idxName);
         else if (physicalMethod == "hash") g_engine.dropHashIndex(s.currentDB, tname, physicalKey);
