@@ -1,5 +1,18 @@
 # 文档索引
 
+<!-- P41 large-varchar-toast-search begin -->
+<a id="large-varchar-toast-search-current"></a>
+## 当前批次：长VARCHAR与完整性能证据
+
+本批功能有进展，长值写入部分提速；全面提速尚未成立。新增1MiB混合插入墙钟中位1801.508072ms，相对旧bf9首测／同旧回测-10.720%／-10.799%；更新RETURNING 411.759537ms，-13.372%／-12.280%；重新插入1431.222130ms，-9.197%／-10.414%。对应服务器CPU分别-12.689%／-12.822%、-20.934%／-21.267%、-12.666%／-12.762%。
+
+负向保持OPEN：新长值DELETE RETURNING墙钟43.553088ms，+9.954%／+23.830%，服务器CPU+67.962%／+39.067%；首次VACUUM墙钟25.753918ms，+22.574%／+1.265%；FULL墙钟218.226818ms，+32.204%／+21.215%，服务器CPU+7.756%／+1.774%。新增完整值读取墙钟+2.080%／-2.014%，结果混合。通用270项矩阵的30个区域，墙钟6低于两旧／18高于两旧／6居间；服务器CPU10／8／12，客户端CPU6／14／10。没有排除、重采或把漂移归因为已证实的产品原因；全部负向与原因继续开放。
+
+[全部225行性能、原始证据与低内存提取](performance-report-2026-10-30.md#large-varchar-toast-search-20261107)、[测试](test-report.md#large-varchar-toast-search-current)。
+
+正式库存2404个文件（1137顶层／1142总C++），2401个旧测试逐字节不变、一个类型注册测试按上述范围扩充、另加两个新测试；注册E2E684／独立E2E664不变。生产251个文件，改6个cpp并加CharacterColumn.h，正常CMake C++17/O2程序C6为587f898d，旧bf9ad7ae、更早c8ca0215，61核心对象冻结；没有靠升级C++23宣称提速。默认425165af不变。754个Markdown路径／725份保护记录保留，仅已有8文档插入说明；原273项及22 complete／166 partial／70 unverified／15 deferred_by_user不变，290条旧历史原样，新增partial第291条，IDX-07仍unverified/evidence[]。全部用户暂缓范围不变。Goal active，直接master提交，未推送或替换默认程序。下方各批均为各自历史版本。
+<!-- P41 large-varchar-toast-search end -->
+
 <!-- P40 vacuum-full-relation-snapshot begin -->
 <a id="vacuum-full-relation-snapshot-current"></a>
 ## 当前批次：FULL有限开销优化

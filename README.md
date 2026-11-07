@@ -1,5 +1,18 @@
 # DBMS C++
 
+<!-- P41 large-varchar-toast-search begin -->
+<a id="large-varchar-toast-search-current"></a>
+## 2026-11-07：长VARCHAR与TOAST写入优化
+
+新增VARCHAR逻辑字符长度元数据：显式长度支持1..10485760字符，未指定长度使用独立的无界标记，名义物理dsize仍不超过65535。列声明、pg_attribute／RowDescription、普通写入／更新、数组元素、domain／generated赋值、ALTER及项目逻辑导出使用真实长度。标量不再把65535字节误当成字符上限；已验证70000字符／245000字节UTF8和1MiB无界值。内部无界字节上限为1073741819，但没有实际验收1GiB值或整个PG字符类型族。CHAR旧限制、完整encoding／collation语义仍开放。
+
+本批功能有进展，长值写入部分提速；全面提速尚未成立。新增1MiB混合插入墙钟中位1801.508072ms，相对旧bf9首测／同旧回测-10.720%／-10.799%；更新RETURNING 411.759537ms，-13.372%／-12.280%；重新插入1431.222130ms，-9.197%／-10.414%。对应服务器CPU分别-12.689%／-12.822%、-20.934%／-21.267%、-12.666%／-12.762%。
+
+负向保持OPEN：新长值DELETE RETURNING墙钟43.553088ms，+9.954%／+23.830%，服务器CPU+67.962%／+39.067%；首次VACUUM墙钟25.753918ms，+22.574%／+1.265%；FULL墙钟218.226818ms，+32.204%／+21.215%，服务器CPU+7.756%／+1.774%。新增完整值读取墙钟+2.080%／-2.014%，结果混合。通用270项矩阵的30个区域，墙钟6低于两旧／18高于两旧／6居间；服务器CPU10／8／12，客户端CPU6／14／10。没有排除、重采或把漂移归因为已证实的产品原因；全部负向与原因继续开放。
+
+GitHub原53.45MiB JSON早已移出当前跟踪树，完整内容保留为5.70MiB gzip，原始大小／SHA及解压验证在manifest；历史未重写。当前HEAD无50MiB以上文件，忽略规则继续阻止同目录原始大JSON（manifest除外）。本次保留有用的压缩证据，不把原始大文件重新放进Git。 [完整正确性、升级边界与225行性能比较](docs/performance-report-2026-10-30.md#large-varchar-toast-search-20261107)。Goal active。
+<!-- P41 large-varchar-toast-search end -->
+
 <!-- P40 vacuum-full-relation-snapshot begin -->
 <a id="vacuum-full-relation-snapshot-current"></a>
 ## 2026-11-07：减少FULL无关刷盘和备份复制

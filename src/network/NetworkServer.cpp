@@ -2,6 +2,7 @@
 #include "NetworkServer.h"
 #include "common/version.h"
 #include "common/DbError.h"
+#include "common/CharacterColumn.h"
 #include "common/SqlTrivia.h"
 #include "commands/DmlExecutor.h"
 #include "executor/ExecutionPlan.h"
@@ -2301,6 +2302,8 @@ std::vector<PgColumnDescription> describeProtocolColumns(const QueryResult& resu
                             !unconstrainedVarbit
                         ? static_cast<int32_t>(column.dsize + 4)
                         : -1;
+                if (character_column::varying(column) && column.typeMod != -1)
+                    description.typeModifier = character_column::protocolModifier(column);
                 std::string bitBaseType = typeName;
                 if (column.isArray && bitBaseType.size() >= 2 &&
                     bitBaseType.compare(bitBaseType.size() - 2, 2, "[]") == 0)

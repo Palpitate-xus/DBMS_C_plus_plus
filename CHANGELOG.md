@@ -1,5 +1,20 @@
 # Changelog
 
+<!-- P41 large-varchar-toast-search begin -->
+<a id="large-varchar-toast-search-current"></a>
+## 2026-11-07：VARCHAR声明／长值与TOAST搜索
+
+TOAST每次写入一个长值时，等长2KB分块从本次上一个成功页继续搜索，避免每块重新扫描前面的已满页；较短末块从头寻找空洞，插入／索引失败仍保留原回退。游标不跨值保存，页格式、Fletcher-16校验、zlib、WAL／CRC32C、锁与持久化屏障保持。这个局部游标没有实现PostgreSQL关系级FSM或bulk-insert完整策略。
+
+本批功能有进展，长值写入部分提速；全面提速尚未成立。新增1MiB混合插入墙钟中位1801.508072ms，相对旧bf9首测／同旧回测-10.720%／-10.799%；更新RETURNING 411.759537ms，-13.372%／-12.280%；重新插入1431.222130ms，-9.197%／-10.414%。对应服务器CPU分别-12.689%／-12.822%、-20.934%／-21.267%、-12.666%／-12.762%。
+
+负向保持OPEN：新长值DELETE RETURNING墙钟43.553088ms，+9.954%／+23.830%，服务器CPU+67.962%／+39.067%；首次VACUUM墙钟25.753918ms，+22.574%／+1.265%；FULL墙钟218.226818ms，+32.204%／+21.215%，服务器CPU+7.756%／+1.774%。新增完整值读取墙钟+2.080%／-2.014%，结果混合。通用270项矩阵的30个区域，墙钟6低于两旧／18高于两旧／6居间；服务器CPU10／8／12，客户端CPU6／14／10。没有排除、重采或把漂移归因为已证实的产品原因；全部负向与原因继续开放。
+
+旧typeMod=-1按原dsize字符上限读取，不从65535猜测成无界；新显式正长度和私有-2保存在已有ITM1扩展，-2输出PG时为-1。旧数据可以由新版读取；旧程序没有识别这些新VARCHAR修饰符，不能承诺降级读取新写的schema。旧无界意图缺少可判定来源时不自动迁移，须明确新DDL／ALTER。名义dsize、SQL字符数和实际UTF8字节数分别处理。没有改变元组布局、校验、TOAST指针格式或WAL格式；仍是项目自定义存储，不是PG物理格式等价。
+
+原273状态不变，新增partial历史291。[完整报告](docs/performance-report-2026-10-30.md#large-varchar-toast-search-20261107)。Goal active。
+<!-- P41 large-varchar-toast-search end -->
+
 <!-- P40 vacuum-full-relation-snapshot begin -->
 <a id="vacuum-full-relation-snapshot-current"></a>
 ## 2026-11-07：FULL限定关系刷盘与可回退硬链接备份

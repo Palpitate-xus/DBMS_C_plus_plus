@@ -20,6 +20,7 @@
 #include "common/logs.h"
 #include "common/FeatureGate.h"
 #include "common/DbError.h"
+#include "common/CharacterColumn.h"
 #include "common/SqlSyntax.h"
 #include "process/OutputCapture.h"
 #include "common/GeometryValue.h"
@@ -323,7 +324,8 @@ bool declaredColumnTypeMod(const ColumnDef& definition, int32_t& modifier) {
         // BIT typmods count bits, without the character VARHDRSZ offset.
         modifier = first;
     } else {
-        if (definition.typeMods.size() != 1 || first <= 0 || first > 65535) return false;
+        const int32_t maximum = varying ? character_column::maxDeclaredCharacters : 65535;
+        if (definition.typeMods.size() != 1 || first <= 0 || first > maximum) return false;
         modifier = first + 4;
     }
     return true;
@@ -1194,13 +1196,12 @@ static PgAttributeRow catalogAttributeForColumn(
                (column.dataType == "character" || column.dataType == "char" ||
                 column.dataType == "bpchar") && column.dsize > 0) {
         attribute.atttypmod = static_cast<int32_t>(column.dsize + 4);
-    } else if (column.dataType == "varchar" &&
-               column.dsize > 0 && column.dsize != 65535) {
-        attribute.atttypmod = static_cast<int32_t>(column.dsize + 4);
+    } else if (character_column::varying(column)) {
+        attribute.atttypmod = character_column::protocolModifier(column);
     }
     if (previous && attribute.atttypid == previous->atttypid &&
         (previous->attndims > 0) == column.isArray &&
-        ((attribute.atttypid == 1043 && previous->atttypmod >= 4 &&
+        ((attribute.atttypid == 1043 && column.typeMod == -1 && previous->atttypmod >= 4 &&
           static_cast<size_t>(previous->atttypmod - 4) == column.dsize) ||
          (attribute.atttypid == 1700 && column.typeMod == -1) ||
          ((attribute.atttypid == 1562 || attribute.atttypid == 1563) &&
@@ -2846,6 +2847,10 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                     }
                     if (status == DBStatus::DUPLICATE_KEY) {
                         throw DbError("23505", "could not rebuild unique index after altering column \"" +
+                            sub.name + "\"");
+                    }
+                    if (status == DBStatus::STRING_DATA_RIGHT_TRUNCATION) {
+                        throw DbError("22001", "value too long for the requested type of column \"" +
                             sub.name + "\"");
                     }
                 } else {
@@ -4992,10 +4997,12 @@ bool DdlExecutor::columnDefToColumn(const ColumnDef& cd, const std::string& dbna
         col = makeIntColumn(cd.name, cd.isNull, 3, cd.isPrimaryKey,
                             cd.isUnsignedExtension);
     } else if (baseType == "varchar" || baseType == "character varying") {
-        // The SQL type is unbounded when no length is supplied.  This is
-        // still capped by our current physical varchar storage capacity.
-        size_t len = typeMod1 > 0 ? static_cast<size_t>(typeMod1) : 65535;
+        // The nominal heap width does not limit a logical TOAST value.
+        const size_t len = typeMod1 > 0 ? static_cast<size_t>(typeMod1)
+                                      : character_column::nominalVarcharBytes;
         col = makeVarCharColumn(cd.name, cd.isNull, len, cd.isPrimaryKey);
+        if (enumTypeName.empty())
+            col.typeMod = typeMods.empty() ? character_column::unboundedVarchar : typeMod1;
     } else if (baseType == "char" || baseType == "character") {
         size_t len = typeMod1 > 0 ? static_cast<size_t>(typeMod1) : 1;
         col = makeStringColumn(cd.name, cd.isNull, len, cd.isPrimaryKey);

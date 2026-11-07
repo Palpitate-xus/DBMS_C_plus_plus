@@ -22,6 +22,7 @@
 #include "common/DateType.h"
 #include "common/TemporalStorageCodec.h"
 #include "common/BooleanCodec.h"
+#include "common/CharacterColumn.h"
 #include "common/NetworkValue.h"
 #include "common/GeometryValue.h"
 #include "expression/geometric_input.h"
@@ -665,8 +666,9 @@ static std::string generatedAssignmentDeclaration(const Column& column) {
         if(column.typeMod>=0 && (column.dataType=="numeric" || column.dataType=="interval")) {
             const auto modifiers=column.dataType=="numeric"?numeric_type_detail::unpack(column.typeMod):interval_type_detail::unpack(column.typeMod);
             if(!modifiers.empty()){target+='(';for(size_t i=0;i<modifiers.size();++i){if(i)target+=',';target+=modifiers[i];}target+=')';}
-        } else if(column.dataType=="varchar" || column.dataType=="character varying" ||
-                  column.dataType=="char" || column.dataType=="character" || column.dataType=="bpchar" ||
+        } else if(character_column::varying(column))
+            target = character_column::inputDeclaration(column);
+        else if(column.dataType=="char" || column.dataType=="character" || column.dataType=="bpchar" ||
                   column.dataType=="bit" || column.dataType=="bit varying")
             target+='('+std::to_string(column.dsize)+')';
     }
@@ -14188,6 +14190,8 @@ ExprValue ExprEvaluator::assignGenerated(const Expr* expression,const RowContext
     const ExprValue* input=&value;
     const bool characterArray=column.isArray && (column.dataType=="varchar" || column.dataType=="character varying" ||
         column.dataType=="char" || column.dataType=="character" || column.dataType=="bpchar");
+    const auto characterBound=character_column::varying(column)
+        ?character_column::characterLimit(column):std::optional<size_t>{column.dsize};
     if(!value.isNull && characterArray && !compound_value_detail::owningElements(value)) {
         // The same existing array-input owner handles a genuine raw input
         // representation (including a typed builtin result such as
@@ -14202,18 +14206,18 @@ ExprValue ExprEvaluator::assignGenerated(const Expr* expression,const RowContext
         compound_value_detail::attach(convertedInput,std::move(elements),std::move(dimensions),declaration,bitmap,true);
         input=&convertedInput;
     }
-    if(!value.isNull && characterArray) {
-        for(const auto& element:*input->compound->arrayElements)if(!element.isNull && utf8CharCount(element.value)>column.dsize) {
-            const size_t boundary=utf8ByteAt(element.value,column.dsize);
+    if(!value.isNull && characterArray && characterBound) {
+        for(const auto& element:*input->compound->arrayElements)if(!element.isNull && utf8CharCount(element.value)>*characterBound) {
+            const size_t boundary=utf8ByteAt(element.value,*characterBound);
             if(std::any_of(element.value.begin()+boundary,element.value.end(),[](char c){return c!=' ';}))
                 throw DbError("22001","value too long for type "+target);
         }
     }
-    if(!value.isNull && !column.isArray &&
+    if(!value.isNull && !column.isArray && characterBound &&
        (column.dataType=="varchar" || column.dataType=="character varying" || column.dataType=="char" || column.dataType=="character" || column.dataType=="bpchar")) {
         const size_t length=utf8CharCount(value.value);
-        if(length>column.dsize) {
-            const size_t boundary=utf8ByteAt(value.value,column.dsize);
+        if(length>*characterBound) {
+            const size_t boundary=utf8ByteAt(value.value,*characterBound);
             if(std::any_of(value.value.begin()+boundary,value.value.end(),[](char c){return c!=' ';}))
                 throw DbError("22001","value too long for type "+target);
         }

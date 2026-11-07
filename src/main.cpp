@@ -3,6 +3,7 @@
 #include <charconv>
 #include "types/numeric.h"
 #include "types/money.h"
+#include "common/CharacterColumn.h"
 #include <chrono>
 #include <cctype>
 #include <cmath>
@@ -2325,9 +2326,11 @@ static bool publishDumpFile(
             const auto& column = table.cols[columnIndex];
             output << quoteDumpIdentifier(column.dataName) << ' '
                    << column.dataType;
-            if (column.dsize > 0 &&
-                (column.dataType == "char" ||
-                 column.dataType == "varchar")) {
+            if (dbms::character_column::varying(column)) {
+                if (const auto bound = dbms::character_column::characterLimit(column))
+                    output << '(' << *bound << ')';
+                if (column.isArray) output << "[]";
+            } else if (column.dsize > 0 && column.dataType == "char") {
                 output << '(' << column.dsize << ')';
             }
             if (column.isPrimaryKey) output << " PRIMARY KEY";

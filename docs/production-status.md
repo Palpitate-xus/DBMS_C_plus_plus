@@ -1,5 +1,26 @@
 # 生产化状态
 
+<!-- P41 large-varchar-toast-search begin -->
+<a id="large-varchar-toast-search-current"></a>
+## 当前批次：VARCHAR／TOAST（P41-C6，partial）
+
+新增VARCHAR逻辑字符长度元数据：显式长度支持1..10485760字符，未指定长度使用独立的无界标记，名义物理dsize仍不超过65535。列声明、pg_attribute／RowDescription、普通写入／更新、数组元素、domain／generated赋值、ALTER及项目逻辑导出使用真实长度。标量不再把65535字节误当成字符上限；已验证70000字符／245000字节UTF8和1MiB无界值。内部无界字节上限为1073741819，但没有实际验收1GiB值或整个PG字符类型族。CHAR旧限制、完整encoding／collation语义仍开放。
+
+TOAST每次写入一个长值时，等长2KB分块从本次上一个成功页继续搜索，避免每块重新扫描前面的已满页；较短末块从头寻找空洞，插入／索引失败仍保留原回退。游标不跨值保存，页格式、Fletcher-16校验、zlib、WAL／CRC32C、锁与持久化屏障保持。这个局部游标没有实现PostgreSQL关系级FSM或bulk-insert完整策略。
+
+旧typeMod=-1按原dsize字符上限读取，不从65535猜测成无界；新显式正长度和私有-2保存在已有ITM1扩展，-2输出PG时为-1。旧数据可以由新版读取；旧程序没有识别这些新VARCHAR修饰符，不能承诺降级读取新写的schema。旧无界意图缺少可判定来源时不自动迁移，须明确新DDL／ALTER。名义dsize、SQL字符数和实际UTF8字节数分别处理。没有改变元组布局、校验、TOAST指针格式或WAL格式；仍是项目自定义存储，不是PG物理格式等价。
+
+本批功能有进展，长值写入部分提速；全面提速尚未成立。新增1MiB混合插入墙钟中位1801.508072ms，相对旧bf9首测／同旧回测-10.720%／-10.799%；更新RETURNING 411.759537ms，-13.372%／-12.280%；重新插入1431.222130ms，-9.197%／-10.414%。对应服务器CPU分别-12.689%／-12.822%、-20.934%／-21.267%、-12.666%／-12.762%。
+
+负向保持OPEN：新长值DELETE RETURNING墙钟43.553088ms，+9.954%／+23.830%，服务器CPU+67.962%／+39.067%；首次VACUUM墙钟25.753918ms，+22.574%／+1.265%；FULL墙钟218.226818ms，+32.204%／+21.215%，服务器CPU+7.756%／+1.774%。新增完整值读取墙钟+2.080%／-2.014%，结果混合。通用270项矩阵的30个区域，墙钟6低于两旧／18高于两旧／6居间；服务器CPU10／8／12，客户端CPU6／14／10。没有排除、重采或把漂移归因为已证实的产品原因；全部负向与原因继续开放。
+
+相关48个原有正式测试按当前要求：46个actual0；toast_test仍在604行 !corruptScan.open() 断言actual -6、后续NOTRUN；declared_type_cold_binding_test旧bf9与C6都actual1，12项中2个初始catalog条件失败，保留OPEN。全套未运行，full suite=false。原type_registry_test把65536声明当错误，旧源码在C6实际-6的首次观察保留；依据已冻结PG声明范围，扩充为65536／10485760成功及10485761／非法修饰符拒绝，更新源码在旧版-6、C6为0。没有删除负向或改掉其余要求。加上两个新测试，共50个不同正式测试，当前48个0和上述两个失败；另外的历史原断言失败单列保存。旧26项对照来自相同bf9正常核心／源码的P40实测，另外22项旧版在本批真实重跑；70个原源码终态及全库文件／模式独立核对。
+
+完整证据[large-varchar-toast-search-20261107.json.gz](benchmarks/large-varchar-toast-search-20261107.json.gz)：索引25,047字节及3个分片，共84,954,533字节（81.02MiB），单文件均小于49MiB，SHA256 `28406a8e3fae95096263704ae2524a9d8e598b3975db0cca95e3e388f272b90c`；内层JSON 6,484,652,072字节，135,115文件／4,617目录／5,972内容块／544本地ELF引用。完整解码与当前文件名／模式／字节在清理前后核对。仅清理本批119,744个可恢复生成副本，逻辑量9,887,161,418字节（9.208GiB），不等同独占文件系统释放量；源码、ELF、失败日志／失败库映像、初始故障映像与有用种子保留。
+
+正式库存2404个文件（1137顶层／1142总C++），2401个旧测试逐字节不变、一个类型注册测试按上述范围扩充、另加两个新测试；注册E2E684／独立E2E664不变。生产251个文件，改6个cpp并加CharacterColumn.h，正常CMake C++17/O2程序C6为587f898d，旧bf9ad7ae、更早c8ca0215，61核心对象冻结；没有靠升级C++23宣称提速。默认425165af不变。754个Markdown路径／725份保护记录保留，仅已有8文档插入说明；原273项及22 complete／166 partial／70 unverified／15 deferred_by_user不变，290条旧历史原样，新增partial第291条，IDX-07仍unverified/evidence[]。全部用户暂缓范围不变。Goal active，直接master提交，未推送或替换默认程序。下方各批均为各自历史版本。 [完整报告](performance-report-2026-10-30.md#large-varchar-toast-search-20261107)。
+<!-- P41 large-varchar-toast-search end -->
+
 <!-- P40 vacuum-full-relation-snapshot begin -->
 <a id="vacuum-full-relation-snapshot-current"></a>
 ## 当前批次：FULL关系快照与完整成本（P40-C1，partial）

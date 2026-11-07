@@ -1,5 +1,288 @@
 # 数据库操作性能测试报告（2026-10-30）
 
+<!-- P41 large-varchar-toast-search begin -->
+<a id="large-varchar-toast-search-20261107"></a>
+## 2026-11-07：VARCHAR长度、TOAST局部搜索与1680次新成本（P41-C6，partial）
+
+本批功能有进展，长值写入部分提速；全面提速尚未成立。新增1MiB混合插入墙钟中位1801.508072ms，相对旧bf9首测／同旧回测-10.720%／-10.799%；更新RETURNING 411.759537ms，-13.372%／-12.280%；重新插入1431.222130ms，-9.197%／-10.414%。对应服务器CPU分别-12.689%／-12.822%、-20.934%／-21.267%、-12.666%／-12.762%。
+
+负向保持OPEN：新长值DELETE RETURNING墙钟43.553088ms，+9.954%／+23.830%，服务器CPU+67.962%／+39.067%；首次VACUUM墙钟25.753918ms，+22.574%／+1.265%；FULL墙钟218.226818ms，+32.204%／+21.215%，服务器CPU+7.756%／+1.774%。新增完整值读取墙钟+2.080%／-2.014%，结果混合。通用270项矩阵的30个区域，墙钟6低于两旧／18高于两旧／6居间；服务器CPU10／8／12，客户端CPU6／14／10。没有排除、重采或把漂移归因为已证实的产品原因；全部负向与原因继续开放。
+
+新增VARCHAR逻辑字符长度元数据：显式长度支持1..10485760字符，未指定长度使用独立的无界标记，名义物理dsize仍不超过65535。列声明、pg_attribute／RowDescription、普通写入／更新、数组元素、domain／generated赋值、ALTER及项目逻辑导出使用真实长度。标量不再把65535字节误当成字符上限；已验证70000字符／245000字节UTF8和1MiB无界值。内部无界字节上限为1073741819，但没有实际验收1GiB值或整个PG字符类型族。CHAR旧限制、完整encoding／collation语义仍开放。
+
+TOAST每次写入一个长值时，等长2KB分块从本次上一个成功页继续搜索，避免每块重新扫描前面的已满页；较短末块从头寻找空洞，插入／索引失败仍保留原回退。游标不跨值保存，页格式、Fletcher-16校验、zlib、WAL／CRC32C、锁与持久化屏障保持。这个局部游标没有实现PostgreSQL关系级FSM或bulk-insert完整策略。
+
+旧typeMod=-1按原dsize字符上限读取，不从65535猜测成无界；新显式正长度和私有-2保存在已有ITM1扩展，-2输出PG时为-1。旧数据可以由新版读取；旧程序没有识别这些新VARCHAR修饰符，不能承诺降级读取新写的schema。旧无界意图缺少可判定来源时不自动迁移，须明确新DDL／ALTER。名义dsize、SQL字符数和实际UTF8字节数分别处理。没有改变元组布局、校验、TOAST指针格式或WAL格式；仍是项目自定义存储，不是PG物理格式等价。
+
+新141条VARCHAR SQL在独立PG18.6、旧bf9、候选C6均完整执行，三角色共423条核心SQL、305行／1249单元／132 NULL、228,538,937字节；10个正常Main0及2个预期SIGKILL -9。全值、顺序、重复数、NULL、状态／tag／Ready和全部七个描述字段与实际PG核对，关系OID只用各自真实探针映射。C6普通数据要求通过，仍有17个pg_class来源描述差异，以及3个大常量ADD DEFAULT的PG实现限制差异：PG对70000字节常量报54000，随后读取／DROP列报42703，项目接受并正确存取；这些差异保持开放，strict PG=false。137条V1参考模型的4个假设被真实PG否定，首次actual1及全部原始数据保留；141条V2在任何候选执行前冻结，另加4097字节默认值成功控制，没有按候选结果降低要求。
+
+原72条TEXT／VARCHAR SQL另用本批新PG参照核对，三角色216条核心SQL、600行／2292单元／96 NULL、96,178,911字节；7个正常Main0与2个预期-9。原3个VARCHAR声明／写入差距修复，4个catalog来源描述差距仍在。22／62／72／28及wide OID控制共185条新完整请求，2588行／11613单元／969 NULL、45,817,003字节、8个正常Main0与1个预期-9。相对P40只有上述3条VARCHAR成功结果改变，其余请求回复逐字节一致；62条原9项与28条原3项PG差距保留。以上计数按各队列给出，72条复用于185桥接，没有重复计算成新的SQL执行。
+
+两个新正式原生测试验证完整数据。large_varchar_toast_test在C6三种模式各setup／cold1／cold2，共9个新进程子阶段全部0，覆盖更新返回完整行、回滚、越界原子拒绝、删除、VACUUM／FULL、提交后DML、TRUNCATE、索引RID与NULL位图。独立解码C6的29份完整观测及旧版2份成功部分观测，共31份／140行／420单元／106 NULL／11,200,242字节；旧版三种setup为1、六次冷开NOTRUN，属于不支持准入，未写成数据损坏。新TOAST布局测试在旧bf9与C6均0，两版各2个实际新子进程，180个数据页／544个存活分块的全部二进制值、头、Fletcher-16、页槽RID与朴素串行first-fit模型相等，短末块复用早期空洞，删除及冷开正确。其原始二进制API输入包含NUL，不能理解为SQL TEXT允许NUL。
+
+相关48个原有正式测试按当前要求：46个actual0；toast_test仍在604行 !corruptScan.open() 断言actual -6、后续NOTRUN；declared_type_cold_binding_test旧bf9与C6都actual1，12项中2个初始catalog条件失败，保留OPEN。全套未运行，full suite=false。原type_registry_test把65536声明当错误，旧源码在C6实际-6的首次观察保留；依据已冻结PG声明范围，扩充为65536／10485760成功及10485761／非法修饰符拒绝，更新源码在旧版-6、C6为0。没有删除负向或改掉其余要求。加上两个新测试，共50个不同正式测试，当前48个0和上述两个失败；另外的历史原断言失败单列保存。旧26项对照来自相同bf9正常核心／源码的P40实测，另外22项旧版在本批真实重跑；70个原源码终态及全库文件／模式独立核对。
+
+六种既有FULL专属有限故障计划在C6均通过，保留同一真实透传钩子字节：120条完整SQL、4条中断FULL、10400行／48966单元／3696 NULL、64,393,755字节、4个预期-9与8个正常Main0、6285映像文件。6087条／47,972,984字节WAL的CRC32C／prev链及COMMIT／ABORT／未提交边界独立核对。它们没有重开用户已暂缓的通用IO／分配器／保存点矩阵。
+
+所有正常窗口关闭后，项目DUMP扩展补测15条完整SQL、3个正常Main0：有界／无界VARCHAR及两类数组的真实逻辑导出，在全新数据库恢复并再次冷开，全值／NULL／全部七个描述字段正确。只验收这组类型声明与值，不声称项目DUMP已完整保留所有PG对象／约束。
+
+诊断不计正常成本：C2和C3在141条计划中均完成60条，第61条ALTER请求已发且60秒无回复，其后80条未发、全部冷开NOTRUN；两个Main均正常关闭0。C2／C3闭库失败映像和全wire分别保留；映像在超时后正常关闭保存，不能当作故障瞬间或零检查点崩溃证明。C3只对自己的Main允许父进程后代GDB附加，四次真实栈显示writeToast反复访问并校验缓存页，不能写成死锁证明。系统sudo非交互安装失败，GDB由下载包解到自有临时目录，未更改系统ptrace设置。C6全部141条在无调试器下完成。另一次相同原生数据的strace，两版toast.dt pread64都是364次，请求2,981,888字节、实际读1,499,136字节；没有磁盘读调用数减少的证据。新正式测试最初日志写CRC，窗口后仅修正为实际Fletcher16并重新运行两版；断言、模型、生产程序和1680个时钟未改变，原日志保留。
+
+参考[PostgreSQL18字符类型说明](https://www.postgresql.org/docs/18/datatype-character.html)及[固定varchar.c](https://raw.githubusercontent.com/postgres/postgres/724edf9bde9d356724ad384a2e196edc3c9f80f7/src/backend/utils/adt/varchar.c)的字符计数、上限和无界语义；[固定hio.c](https://raw.githubusercontent.com/postgres/postgres/724edf9bde9d356724ad384a2e196edc3c9f80f7/src/backend/access/heap/hio.c)的bulk-insert当前缓冲与目标页说明了保留搜索位置的设计。这里仅实现每个长值的局部游标，并保留串行物理布局证明。[SQLite](https://www.sqlite.org/datatype3.html)和[DuckDB](https://duckdb.org/docs/stable/sql/data_types/text)通常忽略VARCHAR(n)长度，不作为PG有界语义依据。PG／SQLite原HTTP字节及固定PG源码、响应头与SHA保存；DuckDB直接抓取HTTP403的响应也保留，另存官方网页提取结果，不将它说成HTTP200原文。未进行跨数据库速度排名。
+
+### 正常性能范围与全部225项指标行
+
+本轮1680次新正常计时：159个实际正常Main0、3288条完整SQL、467859行／1695258单元／121014 NULL、1,090,713,993请求回复字节、22881个闭库文件。五组采集器和五组独立归约器实际0；窗口内没有本任务编译、调试、插桩、压缩或其他SQL，自然缓存、不绑定CPU，不声称宿主机全空闲。墙钟／客户端CPU覆盖发包到ReadyI，服务器CPU为整个Main并包括后台线程。全部样本一次执行、0排除／0重采；P40原1545次观察保持关闭和原样。本轮是新的程序／时间窗口，不能替代旧负向。
+
+原样270项：27个新库／54个Main，以旧bf9→587f候选→同旧bf9三角色、每组三次采样；原216项及独立direct54输入不变。固定状态读取1200次、首次普通VACUUM30次、首次FULL45次：更早c8→旧bf9→候选587f→同旧bf9→同更早c8，三轮15克隆；读取每查询每上下文20次；维护每新克隆只计首次，完整前后值及所声明冷开核对。FULL保持历史primary-only计时边界，不提供冷恢复速度比较。新长TEXT135次使用同一五角色／三轮，每上下文9次真实INSERT／SELECT／UPDATE／DELETE／VACUUM／FULL／TRUNCATE／重插入，均有完整值和新的Main冷开。所有raw20／raw3／min／p50／max、首轮、长尾、旧版漂移与四种世代对照均在归档。
+
+以下单位毫秒，正数表示更慢。first／return按comparison列所指角色解释，四类比较都保留。归档中继承的beforec8ca／earlier84bb等原始标签是历史名称；本批实际before=bf9、earlier=c8、candidate=587f，由plan的ELF SHA确认，表按实际角色重新标明，数值未改。
+
+|group/case|comparison|metric|first ms|current ms|return ms|current/first|current/return|old drift|classification|
+|---|---|---|---|---|---|---|---|---|---|
+|ordinary270/canonical-fixed-single/fixed/delete16|candidate/before-bf9-first-return|wall_ns|42.013597|52.289211|62.083202|+24.458%|-15.776%|+47.769%|between_or_equal|
+|ordinary270/canonical-fixed-single/fixed/delete16|candidate/before-bf9-first-return|server_process_cpu_ns|34.232745|42.824783|50.308131|+25.099%|-14.875%|+46.959%|between_or_equal|
+|ordinary270/canonical-fixed-single/fixed/delete16|candidate/before-bf9-first-return|client_process_cpu_ns|0.204680|0.216763|0.217217|+5.903%|-0.209%|+6.125%|between_or_equal|
+|ordinary270/canonical-fixed-single/fixed/insert1|candidate/before-bf9-first-return|wall_ns|13.688916|17.852258|19.723811|+30.414%|-9.489%|+44.086%|between_or_equal|
+|ordinary270/canonical-fixed-single/fixed/insert1|candidate/before-bf9-first-return|server_process_cpu_ns|7.471335|10.102496|9.184976|+35.217%|+9.989%|+22.936%|higher_than_both|
+|ordinary270/canonical-fixed-single/fixed/insert1|candidate/before-bf9-first-return|client_process_cpu_ns|0.188320|0.226515|0.228436|+20.282%|-0.841%|+21.302%|between_or_equal|
+|ordinary270/canonical-fixed-single/fixed/reinsert_population|candidate/before-bf9-first-return|wall_ns|629.666128|669.585207|668.831481|+6.340%|+0.113%|+6.220%|higher_than_both|
+|ordinary270/canonical-fixed-single/fixed/reinsert_population|candidate/before-bf9-first-return|server_process_cpu_ns|592.086295|596.140165|600.521582|+0.685%|-0.730%|+1.425%|between_or_equal|
+|ordinary270/canonical-fixed-single/fixed/reinsert_population|candidate/before-bf9-first-return|client_process_cpu_ns|0.215967|0.238926|0.238050|+10.631%|+0.368%|+10.225%|higher_than_both|
+|ordinary270/canonical-fixed-single/fixed/select_after_update|candidate/before-bf9-first-return|wall_ns|16.394184|20.993240|20.621911|+28.053%|+1.801%|+25.788%|higher_than_both|
+|ordinary270/canonical-fixed-single/fixed/select_after_update|candidate/before-bf9-first-return|server_process_cpu_ns|8.058727|12.900245|11.226209|+60.078%|+14.912%|+39.305%|higher_than_both|
+|ordinary270/canonical-fixed-single/fixed/select_after_update|candidate/before-bf9-first-return|client_process_cpu_ns|5.031977|4.908975|4.757040|-2.444%|+3.194%|-5.464%|between_or_equal|
+|ordinary270/canonical-fixed-single/fixed/select_after_vacuum|candidate/before-bf9-first-return|wall_ns|19.674930|23.292711|22.072422|+18.388%|+5.529%|+12.186%|higher_than_both|
+|ordinary270/canonical-fixed-single/fixed/select_after_vacuum|candidate/before-bf9-first-return|server_process_cpu_ns|11.997562|15.596710|15.542490|+29.999%|+0.349%|+29.547%|higher_than_both|
+|ordinary270/canonical-fixed-single/fixed/select_after_vacuum|candidate/before-bf9-first-return|client_process_cpu_ns|4.632692|4.613705|4.555341|-0.410%|+1.281%|-1.670%|between_or_equal|
+|ordinary270/canonical-fixed-single/fixed/truncate|candidate/before-bf9-first-return|wall_ns|301.554869|346.931327|341.237145|+15.047%|+1.669%|+13.159%|higher_than_both|
+|ordinary270/canonical-fixed-single/fixed/truncate|candidate/before-bf9-first-return|server_process_cpu_ns|85.835755|96.591486|103.832379|+12.531%|-6.974%|+20.966%|between_or_equal|
+|ordinary270/canonical-fixed-single/fixed/truncate|candidate/before-bf9-first-return|client_process_cpu_ns|0.197874|0.237737|0.232077|+20.146%|+2.439%|+17.285%|higher_than_both|
+|ordinary270/canonical-fixed-single/fixed/update16|candidate/before-bf9-first-return|wall_ns|54.037863|95.935421|86.322801|+77.534%|+11.136%|+59.745%|higher_than_both|
+|ordinary270/canonical-fixed-single/fixed/update16|candidate/before-bf9-first-return|server_process_cpu_ns|46.827922|76.614406|77.939778|+63.608%|-1.701%|+66.439%|between_or_equal|
+|ordinary270/canonical-fixed-single/fixed/update16|candidate/before-bf9-first-return|client_process_cpu_ns|0.220152|0.230167|0.218310|+4.549%|+5.431%|-0.837%|higher_than_both|
+|ordinary270/canonical-fixed-single/fixed/vacuum|candidate/before-bf9-first-return|wall_ns|1.398810|2.023973|2.111886|+44.692%|-4.163%|+50.977%|between_or_equal|
+|ordinary270/canonical-fixed-single/fixed/vacuum|candidate/before-bf9-first-return|server_process_cpu_ns|1.299236|1.911272|1.983016|+47.107%|-3.618%|+52.629%|between_or_equal|
+|ordinary270/canonical-fixed-single/fixed/vacuum|candidate/before-bf9-first-return|client_process_cpu_ns|0.186789|0.222767|0.208930|+19.261%|+6.623%|+11.853%|higher_than_both|
+|ordinary270/canonical-fixed-single/single/delete16|candidate/before-bf9-first-return|wall_ns|75.069317|80.852164|87.392486|+7.703%|-7.484%|+16.416%|between_or_equal|
+|ordinary270/canonical-fixed-single/single/delete16|candidate/before-bf9-first-return|server_process_cpu_ns|66.312708|69.944456|73.701455|+5.477%|-5.098%|+11.142%|between_or_equal|
+|ordinary270/canonical-fixed-single/single/delete16|candidate/before-bf9-first-return|client_process_cpu_ns|0.240712|0.229685|0.229115|-4.581%|+0.249%|-4.818%|between_or_equal|
+|ordinary270/canonical-fixed-single/single/insert1|candidate/before-bf9-first-return|wall_ns|16.963202|29.462424|22.196499|+73.684%|+32.735%|+30.851%|higher_than_both|
+|ordinary270/canonical-fixed-single/single/insert1|candidate/before-bf9-first-return|server_process_cpu_ns|9.304868|9.423022|9.045305|+1.270%|+4.176%|-2.790%|higher_than_both|
+|ordinary270/canonical-fixed-single/single/insert1|candidate/before-bf9-first-return|client_process_cpu_ns|0.212034|0.218471|0.215796|+3.036%|+1.240%|+1.774%|higher_than_both|
+|ordinary270/canonical-fixed-single/single/reinsert_population|candidate/before-bf9-first-return|wall_ns|1102.705168|1111.764517|1102.850960|+0.822%|+0.808%|+0.013%|higher_than_both|
+|ordinary270/canonical-fixed-single/single/reinsert_population|candidate/before-bf9-first-return|server_process_cpu_ns|1067.052606|1052.776939|1063.401001|-1.338%|-0.999%|-0.342%|lower_than_both|
+|ordinary270/canonical-fixed-single/single/reinsert_population|candidate/before-bf9-first-return|client_process_cpu_ns|0.803195|0.586456|0.599433|-26.985%|-2.165%|-25.369%|lower_than_both|
+|ordinary270/canonical-fixed-single/single/select_after_update|candidate/before-bf9-first-return|wall_ns|34.048336|47.952039|42.109519|+40.835%|+13.875%|+23.676%|higher_than_both|
+|ordinary270/canonical-fixed-single/single/select_after_update|candidate/before-bf9-first-return|server_process_cpu_ns|26.787344|40.406059|35.653866|+50.840%|+13.329%|+33.100%|higher_than_both|
+|ordinary270/canonical-fixed-single/single/select_after_update|candidate/before-bf9-first-return|client_process_cpu_ns|5.844834|6.218033|5.740163|+6.385%|+8.325%|-1.791%|higher_than_both|
+|ordinary270/canonical-fixed-single/single/select_after_vacuum|candidate/before-bf9-first-return|wall_ns|37.200558|48.948996|41.497387|+31.581%|+17.957%|+11.550%|higher_than_both|
+|ordinary270/canonical-fixed-single/single/select_after_vacuum|candidate/before-bf9-first-return|server_process_cpu_ns|30.298882|40.333284|36.078013|+33.118%|+11.795%|+19.074%|higher_than_both|
+|ordinary270/canonical-fixed-single/single/select_after_vacuum|candidate/before-bf9-first-return|client_process_cpu_ns|4.580377|5.908160|5.680793|+28.989%|+4.002%|+24.025%|higher_than_both|
+|ordinary270/canonical-fixed-single/single/truncate|candidate/before-bf9-first-return|wall_ns|221.722430|201.545976|243.271689|-9.100%|-17.152%|+9.719%|lower_than_both|
+|ordinary270/canonical-fixed-single/single/truncate|candidate/before-bf9-first-return|server_process_cpu_ns|115.712684|111.102677|115.687397|-3.984%|-3.963%|-0.022%|lower_than_both|
+|ordinary270/canonical-fixed-single/single/truncate|candidate/before-bf9-first-return|client_process_cpu_ns|0.238786|0.269707|0.243274|+12.949%|+10.866%|+1.880%|higher_than_both|
+|ordinary270/canonical-fixed-single/single/update16|candidate/before-bf9-first-return|wall_ns|137.581371|200.776311|167.977077|+45.933%|+19.526%|+22.093%|higher_than_both|
+|ordinary270/canonical-fixed-single/single/update16|candidate/before-bf9-first-return|server_process_cpu_ns|122.230435|136.309812|140.236477|+11.519%|-2.800%|+14.731%|between_or_equal|
+|ordinary270/canonical-fixed-single/single/update16|candidate/before-bf9-first-return|client_process_cpu_ns|0.240213|0.234204|0.205353|-2.502%|+14.049%|-14.512%|between_or_equal|
+|ordinary270/canonical-fixed-single/single/vacuum|candidate/before-bf9-first-return|wall_ns|8.671843|9.454882|8.900655|+9.030%|+6.227%|+2.639%|higher_than_both|
+|ordinary270/canonical-fixed-single/single/vacuum|candidate/before-bf9-first-return|server_process_cpu_ns|8.364647|9.152252|8.552284|+9.416%|+7.015%|+2.243%|higher_than_both|
+|ordinary270/canonical-fixed-single/single/vacuum|candidate/before-bf9-first-return|client_process_cpu_ns|0.201065|0.215290|0.200152|+7.075%|+7.563%|-0.454%|higher_than_both|
+|ordinary270/canonical-overflow/overflow/delete16|candidate/before-bf9-first-return|wall_ns|81.594395|78.972744|78.074458|-3.213%|+1.151%|-4.314%|between_or_equal|
+|ordinary270/canonical-overflow/overflow/delete16|candidate/before-bf9-first-return|server_process_cpu_ns|73.032106|69.050343|70.390863|-5.452%|-1.904%|-3.617%|lower_than_both|
+|ordinary270/canonical-overflow/overflow/delete16|candidate/before-bf9-first-return|client_process_cpu_ns|0.242802|0.266575|0.244666|+9.791%|+8.955%|+0.768%|higher_than_both|
+|ordinary270/canonical-overflow/overflow/insert1|candidate/before-bf9-first-return|wall_ns|18.928283|17.683417|19.337043|-6.577%|-8.552%|+2.160%|lower_than_both|
+|ordinary270/canonical-overflow/overflow/insert1|candidate/before-bf9-first-return|server_process_cpu_ns|11.158304|8.571617|10.420907|-23.182%|-17.746%|-6.609%|lower_than_both|
+|ordinary270/canonical-overflow/overflow/insert1|candidate/before-bf9-first-return|client_process_cpu_ns|0.205614|0.204930|0.213727|-0.333%|-4.116%|+3.946%|lower_than_both|
+|ordinary270/canonical-overflow/overflow/reinsert_population|candidate/before-bf9-first-return|wall_ns|1155.422364|1118.959256|1093.143127|-3.156%|+2.362%|-5.390%|between_or_equal|
+|ordinary270/canonical-overflow/overflow/reinsert_population|candidate/before-bf9-first-return|server_process_cpu_ns|1102.174732|1065.642246|1057.710021|-3.315%|+0.750%|-4.034%|between_or_equal|
+|ordinary270/canonical-overflow/overflow/reinsert_population|candidate/before-bf9-first-return|client_process_cpu_ns|0.792924|0.736264|0.873738|-7.146%|-15.734%|+10.192%|lower_than_both|
+|ordinary270/canonical-overflow/overflow/select_after_update|candidate/before-bf9-first-return|wall_ns|50.638232|36.918218|38.311779|-27.094%|-3.637%|-24.342%|lower_than_both|
+|ordinary270/canonical-overflow/overflow/select_after_update|candidate/before-bf9-first-return|server_process_cpu_ns|44.952701|28.861402|32.779104|-35.796%|-11.952%|-27.081%|lower_than_both|
+|ordinary270/canonical-overflow/overflow/select_after_update|candidate/before-bf9-first-return|client_process_cpu_ns|4.139890|4.145977|3.891346|+0.147%|+6.544%|-6.004%|higher_than_both|
+|ordinary270/canonical-overflow/overflow/select_after_vacuum|candidate/before-bf9-first-return|wall_ns|48.041167|47.660038|50.751408|-0.793%|-6.091%|+5.641%|lower_than_both|
+|ordinary270/canonical-overflow/overflow/select_after_vacuum|candidate/before-bf9-first-return|server_process_cpu_ns|42.820499|42.491378|43.433288|-0.769%|-2.169%|+1.431%|lower_than_both|
+|ordinary270/canonical-overflow/overflow/select_after_vacuum|candidate/before-bf9-first-return|client_process_cpu_ns|3.774111|3.579368|3.060290|-5.160%|+16.962%|-18.914%|between_or_equal|
+|ordinary270/canonical-overflow/overflow/truncate|candidate/before-bf9-first-return|wall_ns|229.457896|257.036378|182.782444|+12.019%|+40.624%|-20.342%|higher_than_both|
+|ordinary270/canonical-overflow/overflow/truncate|candidate/before-bf9-first-return|server_process_cpu_ns|64.774455|64.876780|68.154148|+0.158%|-4.809%|+5.218%|between_or_equal|
+|ordinary270/canonical-overflow/overflow/truncate|candidate/before-bf9-first-return|client_process_cpu_ns|0.200468|0.229490|0.183122|+14.477%|+25.321%|-8.653%|higher_than_both|
+|ordinary270/canonical-overflow/overflow/update16|candidate/before-bf9-first-return|wall_ns|175.836778|144.161408|162.975855|-18.014%|-11.544%|-7.314%|lower_than_both|
+|ordinary270/canonical-overflow/overflow/update16|candidate/before-bf9-first-return|server_process_cpu_ns|155.057055|128.430181|142.801163|-17.172%|-10.064%|-7.904%|lower_than_both|
+|ordinary270/canonical-overflow/overflow/update16|candidate/before-bf9-first-return|client_process_cpu_ns|0.226353|0.224023|0.221534|-1.029%|+1.124%|-2.129%|between_or_equal|
+|ordinary270/canonical-overflow/overflow/vacuum|candidate/before-bf9-first-return|wall_ns|10.841599|11.529663|11.023452|+6.347%|+4.592%|+1.677%|higher_than_both|
+|ordinary270/canonical-overflow/overflow/vacuum|candidate/before-bf9-first-return|server_process_cpu_ns|10.556889|10.440916|10.700954|-1.099%|-2.430%|+1.365%|lower_than_both|
+|ordinary270/canonical-overflow/overflow/vacuum|candidate/before-bf9-first-return|client_process_cpu_ns|0.206597|0.180816|0.225435|-12.479%|-19.792%|+9.118%|lower_than_both|
+|ordinary270/direct-hit/fixed/direct_full_no_order|candidate/before-bf9-first-return|wall_ns|24.288173|26.382316|20.654155|+8.622%|+27.734%|-14.962%|higher_than_both|
+|ordinary270/direct-hit/fixed/direct_full_no_order|candidate/before-bf9-first-return|server_process_cpu_ns|14.949988|13.138876|12.181955|-12.114%|+7.855%|-18.515%|between_or_equal|
+|ordinary270/direct-hit/fixed/direct_full_no_order|candidate/before-bf9-first-return|client_process_cpu_ns|4.993772|4.955269|5.093019|-0.771%|-2.705%|+1.987%|lower_than_both|
+|ordinary270/direct-hit/fixed/direct_id_only_no_order|candidate/before-bf9-first-return|wall_ns|21.813605|22.124539|20.029358|+1.425%|+10.461%|-8.180%|higher_than_both|
+|ordinary270/direct-hit/fixed/direct_id_only_no_order|candidate/before-bf9-first-return|server_process_cpu_ns|15.251470|14.498741|10.610469|-4.935%|+36.646%|-30.430%|between_or_equal|
+|ordinary270/direct-hit/fixed/direct_id_only_no_order|candidate/before-bf9-first-return|client_process_cpu_ns|4.918930|4.932516|4.835459|+0.276%|+2.007%|-1.697%|higher_than_both|
+|ordinary270/direct-hit/overflow/direct_full_no_order|candidate/before-bf9-first-return|wall_ns|51.776206|56.913862|53.378867|+9.923%|+6.622%|+3.095%|higher_than_both|
+|ordinary270/direct-hit/overflow/direct_full_no_order|candidate/before-bf9-first-return|server_process_cpu_ns|45.006520|40.333424|43.507365|-10.383%|-7.295%|-3.331%|lower_than_both|
+|ordinary270/direct-hit/overflow/direct_full_no_order|candidate/before-bf9-first-return|client_process_cpu_ns|4.156437|4.167092|4.171349|+0.256%|-0.102%|+0.359%|between_or_equal|
+|ordinary270/direct-hit/overflow/direct_id_only_no_order|candidate/before-bf9-first-return|wall_ns|22.628707|20.377602|20.691608|-9.948%|-1.518%|-8.560%|lower_than_both|
+|ordinary270/direct-hit/overflow/direct_id_only_no_order|candidate/before-bf9-first-return|server_process_cpu_ns|12.744252|11.775026|12.133334|-7.605%|-2.953%|-4.794%|lower_than_both|
+|ordinary270/direct-hit/overflow/direct_id_only_no_order|candidate/before-bf9-first-return|client_process_cpu_ns|2.161821|2.075860|2.031968|-3.976%|+2.160%|-6.007%|between_or_equal|
+|ordinary270/direct-hit/single/direct_full_no_order|candidate/before-bf9-first-return|wall_ns|45.790148|49.349722|46.286848|+7.774%|+6.617%|+1.085%|higher_than_both|
+|ordinary270/direct-hit/single/direct_full_no_order|candidate/before-bf9-first-return|server_process_cpu_ns|39.554311|41.189784|38.708111|+4.135%|+6.411%|-2.139%|higher_than_both|
+|ordinary270/direct-hit/single/direct_full_no_order|candidate/before-bf9-first-return|client_process_cpu_ns|5.927738|6.191680|5.913667|+4.453%|+4.701%|-0.237%|higher_than_both|
+|ordinary270/direct-hit/single/direct_id_only_no_order|candidate/before-bf9-first-return|wall_ns|23.498214|24.155884|22.354354|+2.799%|+8.059%|-4.868%|higher_than_both|
+|ordinary270/direct-hit/single/direct_id_only_no_order|candidate/before-bf9-first-return|server_process_cpu_ns|16.554242|16.201540|16.038056|-2.131%|+1.019%|-3.118%|between_or_equal|
+|ordinary270/direct-hit/single/direct_id_only_no_order|candidate/before-bf9-first-return|client_process_cpu_ns|3.951206|3.612204|3.824016|-8.580%|-5.539%|-3.219%|lower_than_both|
+|reads/fixed_full_ordered|candidate/before-bf9-first-return|wall_ns|33.210716|34.976168|35.955855|+5.316%|-2.725%|+8.266%|between_or_equal|
+|reads/fixed_full_ordered|candidate/earlier-c8-first-return|wall_ns|35.504160|34.976168|33.219997|-1.487%|+5.286%|-6.434%|between_or_equal|
+|reads/fixed_full_ordered|before-bf9-first/earlier-c8-first-return|wall_ns|35.504160|33.210716|33.219997|-6.460%|-0.028%|-6.434%|lower_than_both|
+|reads/fixed_full_ordered|before-bf9-return/earlier-c8-first-return|wall_ns|35.504160|35.955855|33.219997|+1.272%|+8.236%|-6.434%|higher_than_both|
+|reads/fixed_full_ordered|candidate/before-bf9-first-return|server_process_cpu_ns|17.417806|18.993057|17.371515|+9.044%|+9.334%|-0.266%|higher_than_both|
+|reads/fixed_full_ordered|candidate/earlier-c8-first-return|server_process_cpu_ns|18.686695|18.993057|17.798099|+1.639%|+6.714%|-4.755%|higher_than_both|
+|reads/fixed_full_ordered|before-bf9-first/earlier-c8-first-return|server_process_cpu_ns|18.686695|17.417806|17.798099|-6.790%|-2.137%|-4.755%|lower_than_both|
+|reads/fixed_full_ordered|before-bf9-return/earlier-c8-first-return|server_process_cpu_ns|18.686695|17.371515|17.798099|-7.038%|-2.397%|-4.755%|lower_than_both|
+|reads/fixed_full_ordered|candidate/before-bf9-first-return|client_process_cpu_ns|4.891601|4.958950|4.889184|+1.377%|+1.427%|-0.049%|higher_than_both|
+|reads/fixed_full_ordered|candidate/earlier-c8-first-return|client_process_cpu_ns|5.020255|4.958950|5.019082|-1.221%|-1.198%|-0.023%|lower_than_both|
+|reads/fixed_full_ordered|before-bf9-first/earlier-c8-first-return|client_process_cpu_ns|5.020255|4.891601|5.019082|-2.563%|-2.540%|-0.023%|lower_than_both|
+|reads/fixed_full_ordered|before-bf9-return/earlier-c8-first-return|client_process_cpu_ns|5.020255|4.889184|5.019082|-2.611%|-2.588%|-0.023%|lower_than_both|
+|reads/single_full_ordered|candidate/before-bf9-first-return|wall_ns|58.334739|60.186310|57.725335|+3.174%|+4.263%|-1.045%|higher_than_both|
+|reads/single_full_ordered|candidate/earlier-c8-first-return|wall_ns|58.298311|60.186310|58.837168|+3.239%|+2.293%|+0.924%|higher_than_both|
+|reads/single_full_ordered|before-bf9-first/earlier-c8-first-return|wall_ns|58.298311|58.334739|58.837168|+0.062%|-0.854%|+0.924%|between_or_equal|
+|reads/single_full_ordered|before-bf9-return/earlier-c8-first-return|wall_ns|58.298311|57.725335|58.837168|-0.983%|-1.890%|+0.924%|lower_than_both|
+|reads/single_full_ordered|candidate/before-bf9-first-return|server_process_cpu_ns|41.986117|44.102255|41.777015|+5.040%|+5.566%|-0.498%|higher_than_both|
+|reads/single_full_ordered|candidate/earlier-c8-first-return|server_process_cpu_ns|42.669269|44.102255|41.443055|+3.358%|+6.417%|-2.874%|higher_than_both|
+|reads/single_full_ordered|before-bf9-first/earlier-c8-first-return|server_process_cpu_ns|42.669269|41.986117|41.443055|-1.601%|+1.310%|-2.874%|between_or_equal|
+|reads/single_full_ordered|before-bf9-return/earlier-c8-first-return|server_process_cpu_ns|42.669269|41.777015|41.443055|-2.091%|+0.806%|-2.874%|between_or_equal|
+|reads/single_full_ordered|candidate/before-bf9-first-return|client_process_cpu_ns|5.988418|6.192914|5.896687|+3.415%|+5.024%|-1.532%|higher_than_both|
+|reads/single_full_ordered|candidate/earlier-c8-first-return|client_process_cpu_ns|6.062498|6.192914|5.929725|+2.151%|+4.438%|-2.190%|higher_than_both|
+|reads/single_full_ordered|before-bf9-first/earlier-c8-first-return|client_process_cpu_ns|6.062498|5.988418|5.929725|-1.222%|+0.990%|-2.190%|between_or_equal|
+|reads/single_full_ordered|before-bf9-return/earlier-c8-first-return|client_process_cpu_ns|6.062498|5.896687|5.929725|-2.735%|-0.557%|-2.190%|lower_than_both|
+|reads/overflow_full_no_order|candidate/before-bf9-first-return|wall_ns|63.517167|64.354252|65.772982|+1.318%|-2.157%|+3.552%|between_or_equal|
+|reads/overflow_full_no_order|candidate/earlier-c8-first-return|wall_ns|63.967821|64.354252|65.790285|+0.604%|-2.183%|+2.849%|between_or_equal|
+|reads/overflow_full_no_order|before-bf9-first/earlier-c8-first-return|wall_ns|63.967821|63.517167|65.790285|-0.705%|-3.455%|+2.849%|lower_than_both|
+|reads/overflow_full_no_order|before-bf9-return/earlier-c8-first-return|wall_ns|63.967821|65.772982|65.790285|+2.822%|-0.026%|+2.849%|between_or_equal|
+|reads/overflow_full_no_order|candidate/before-bf9-first-return|server_process_cpu_ns|47.223121|47.080725|48.729399|-0.302%|-3.383%|+3.190%|lower_than_both|
+|reads/overflow_full_no_order|candidate/earlier-c8-first-return|server_process_cpu_ns|47.316158|47.080725|48.344034|-0.498%|-2.613%|+2.172%|lower_than_both|
+|reads/overflow_full_no_order|before-bf9-first/earlier-c8-first-return|server_process_cpu_ns|47.316158|47.223121|48.344034|-0.197%|-2.319%|+2.172%|lower_than_both|
+|reads/overflow_full_no_order|before-bf9-return/earlier-c8-first-return|server_process_cpu_ns|47.316158|48.729399|48.344034|+2.987%|+0.797%|+2.172%|higher_than_both|
+|reads/overflow_full_no_order|candidate/before-bf9-first-return|client_process_cpu_ns|3.889797|4.007007|3.987112|+3.013%|+0.499%|+2.502%|higher_than_both|
+|reads/overflow_full_no_order|candidate/earlier-c8-first-return|client_process_cpu_ns|4.045227|4.007007|4.059622|-0.945%|-1.296%|+0.356%|lower_than_both|
+|reads/overflow_full_no_order|before-bf9-first/earlier-c8-first-return|client_process_cpu_ns|4.045227|3.889797|4.059622|-3.842%|-4.183%|+0.356%|lower_than_both|
+|reads/overflow_full_no_order|before-bf9-return/earlier-c8-first-return|client_process_cpu_ns|4.045227|3.987112|4.059622|-1.437%|-1.786%|+0.356%|lower_than_both|
+|reads/single_id_no_order|candidate/before-bf9-first-return|wall_ns|33.757492|33.593944|33.960223|-0.484%|-1.079%|+0.601%|lower_than_both|
+|reads/single_id_no_order|candidate/earlier-c8-first-return|wall_ns|31.515597|33.593944|36.062410|+6.595%|-6.845%|+14.427%|between_or_equal|
+|reads/single_id_no_order|before-bf9-first/earlier-c8-first-return|wall_ns|31.515597|33.757492|36.062410|+7.114%|-6.391%|+14.427%|between_or_equal|
+|reads/single_id_no_order|before-bf9-return/earlier-c8-first-return|wall_ns|31.515597|33.960223|36.062410|+7.757%|-5.829%|+14.427%|between_or_equal|
+|reads/single_id_no_order|candidate/before-bf9-first-return|server_process_cpu_ns|16.910910|16.796372|16.976013|-0.677%|-1.058%|+0.385%|lower_than_both|
+|reads/single_id_no_order|candidate/earlier-c8-first-return|server_process_cpu_ns|17.005057|16.796372|17.067177|-1.227%|-1.587%|+0.365%|lower_than_both|
+|reads/single_id_no_order|before-bf9-first/earlier-c8-first-return|server_process_cpu_ns|17.005057|16.910910|17.067177|-0.554%|-0.916%|+0.365%|lower_than_both|
+|reads/single_id_no_order|before-bf9-return/earlier-c8-first-return|server_process_cpu_ns|17.005057|16.976013|17.067177|-0.171%|-0.534%|+0.365%|lower_than_both|
+|reads/single_id_no_order|candidate/before-bf9-first-return|client_process_cpu_ns|4.958319|4.951353|4.932823|-0.140%|+0.376%|-0.514%|between_or_equal|
+|reads/single_id_no_order|candidate/earlier-c8-first-return|client_process_cpu_ns|4.979073|4.951353|4.948088|-0.557%|+0.066%|-0.622%|between_or_equal|
+|reads/single_id_no_order|before-bf9-first/earlier-c8-first-return|client_process_cpu_ns|4.979073|4.958319|4.948088|-0.417%|+0.207%|-0.622%|between_or_equal|
+|reads/single_id_no_order|before-bf9-return/earlier-c8-first-return|client_process_cpu_ns|4.979073|4.932823|4.948088|-0.929%|-0.309%|-0.622%|lower_than_both|
+|vacuum/vacuum-single|candidate/before-bf9-first-return|wall_ns|25.021571|19.470265|22.968505|-22.186%|-15.231%|-8.205%|lower_than_both|
+|vacuum/vacuum-single|candidate/earlier-c8-first-return|wall_ns|24.030032|19.470265|25.935171|-18.975%|-24.927%|+7.928%|lower_than_both|
+|vacuum/vacuum-single|before-bf9-first/earlier-c8-first-return|wall_ns|24.030032|25.021571|25.935171|+4.126%|-3.523%|+7.928%|between_or_equal|
+|vacuum/vacuum-single|before-bf9-return/earlier-c8-first-return|wall_ns|24.030032|22.968505|25.935171|-4.418%|-11.439%|+7.928%|lower_than_both|
+|vacuum/vacuum-single|candidate/before-bf9-first-return|server_process_cpu_ns|11.561154|7.538236|11.361030|-34.797%|-33.648%|-1.731%|lower_than_both|
+|vacuum/vacuum-single|candidate/earlier-c8-first-return|server_process_cpu_ns|11.593876|7.538236|12.143632|-34.981%|-37.924%|+4.742%|lower_than_both|
+|vacuum/vacuum-single|before-bf9-first/earlier-c8-first-return|server_process_cpu_ns|11.593876|11.561154|12.143632|-0.282%|-4.797%|+4.742%|lower_than_both|
+|vacuum/vacuum-single|before-bf9-return/earlier-c8-first-return|server_process_cpu_ns|11.593876|11.361030|12.143632|-2.008%|-6.445%|+4.742%|lower_than_both|
+|vacuum/vacuum-single|candidate/before-bf9-first-return|client_process_cpu_ns|0.219422|0.219529|0.206834|+0.049%|+6.138%|-5.737%|higher_than_both|
+|vacuum/vacuum-single|candidate/earlier-c8-first-return|client_process_cpu_ns|0.220666|0.219529|0.219331|-0.515%|+0.090%|-0.605%|between_or_equal|
+|vacuum/vacuum-single|before-bf9-first/earlier-c8-first-return|client_process_cpu_ns|0.220666|0.219422|0.219331|-0.564%|+0.041%|-0.605%|between_or_equal|
+|vacuum/vacuum-single|before-bf9-return/earlier-c8-first-return|client_process_cpu_ns|0.220666|0.206834|0.219331|-6.268%|-5.698%|-0.605%|lower_than_both|
+|vacuum/vacuum-overflow|candidate/before-bf9-first-return|wall_ns|24.338766|28.299456|31.918458|+16.273%|-11.338%|+31.142%|between_or_equal|
+|vacuum/vacuum-overflow|candidate/earlier-c8-first-return|wall_ns|27.625224|28.299456|26.573910|+2.441%|+6.493%|-3.806%|higher_than_both|
+|vacuum/vacuum-overflow|before-bf9-first/earlier-c8-first-return|wall_ns|27.625224|24.338766|26.573910|-11.897%|-8.411%|-3.806%|lower_than_both|
+|vacuum/vacuum-overflow|before-bf9-return/earlier-c8-first-return|wall_ns|27.625224|31.918458|26.573910|+15.541%|+20.112%|-3.806%|higher_than_both|
+|vacuum/vacuum-overflow|candidate/before-bf9-first-return|server_process_cpu_ns|17.112933|15.724102|15.737398|-8.116%|-0.084%|-8.038%|lower_than_both|
+|vacuum/vacuum-overflow|candidate/earlier-c8-first-return|server_process_cpu_ns|15.835108|15.724102|15.504296|-0.701%|+1.418%|-2.089%|between_or_equal|
+|vacuum/vacuum-overflow|before-bf9-first/earlier-c8-first-return|server_process_cpu_ns|15.835108|17.112933|15.504296|+8.070%|+10.375%|-2.089%|higher_than_both|
+|vacuum/vacuum-overflow|before-bf9-return/earlier-c8-first-return|server_process_cpu_ns|15.835108|15.737398|15.504296|-0.617%|+1.503%|-2.089%|between_or_equal|
+|vacuum/vacuum-overflow|candidate/before-bf9-first-return|client_process_cpu_ns|0.213646|0.210478|0.235500|-1.483%|-10.625%|+10.229%|lower_than_both|
+|vacuum/vacuum-overflow|candidate/earlier-c8-first-return|client_process_cpu_ns|0.260950|0.210478|0.176810|-19.342%|+19.042%|-32.244%|between_or_equal|
+|vacuum/vacuum-overflow|before-bf9-first/earlier-c8-first-return|client_process_cpu_ns|0.260950|0.213646|0.176810|-18.128%|+20.834%|-32.244%|between_or_equal|
+|vacuum/vacuum-overflow|before-bf9-return/earlier-c8-first-return|client_process_cpu_ns|0.260950|0.235500|0.176810|-9.753%|+33.194%|-32.244%|between_or_equal|
+|full/vacuum-full-fixed|candidate/before-bf9-first-return|wall_ns|253.214826|256.588069|258.268987|+1.332%|-0.651%|+1.996%|between_or_equal|
+|full/vacuum-full-fixed|candidate/earlier-c8-first-return|wall_ns|271.534367|256.588069|261.940773|-5.504%|-2.043%|-3.533%|lower_than_both|
+|full/vacuum-full-fixed|before-bf9-first/earlier-c8-first-return|wall_ns|271.534367|253.214826|261.940773|-6.747%|-3.331%|-3.533%|lower_than_both|
+|full/vacuum-full-fixed|before-bf9-return/earlier-c8-first-return|wall_ns|271.534367|258.268987|261.940773|-4.885%|-1.402%|-3.533%|lower_than_both|
+|full/vacuum-full-fixed|candidate/before-bf9-first-return|server_process_cpu_ns|114.602511|114.100198|115.917346|-0.438%|-1.568%|+1.147%|lower_than_both|
+|full/vacuum-full-fixed|candidate/earlier-c8-first-return|server_process_cpu_ns|118.878356|114.100198|88.487222|-4.019%|+28.945%|-25.565%|between_or_equal|
+|full/vacuum-full-fixed|before-bf9-first/earlier-c8-first-return|server_process_cpu_ns|118.878356|114.602511|88.487222|-3.597%|+29.513%|-25.565%|between_or_equal|
+|full/vacuum-full-fixed|before-bf9-return/earlier-c8-first-return|server_process_cpu_ns|118.878356|115.917346|88.487222|-2.491%|+30.999%|-25.565%|between_or_equal|
+|full/vacuum-full-fixed|candidate/before-bf9-first-return|client_process_cpu_ns|0.234420|0.247861|0.242296|+5.734%|+2.297%|+3.360%|higher_than_both|
+|full/vacuum-full-fixed|candidate/earlier-c8-first-return|client_process_cpu_ns|0.227993|0.247861|0.205383|+8.714%|+20.682%|-9.917%|higher_than_both|
+|full/vacuum-full-fixed|before-bf9-first/earlier-c8-first-return|client_process_cpu_ns|0.227993|0.234420|0.205383|+2.819%|+14.138%|-9.917%|higher_than_both|
+|full/vacuum-full-fixed|before-bf9-return/earlier-c8-first-return|client_process_cpu_ns|0.227993|0.242296|0.205383|+6.273%|+17.973%|-9.917%|higher_than_both|
+|full/vacuum-full-single|candidate/before-bf9-first-return|wall_ns|264.520131|299.035319|330.840555|+13.048%|-9.613%|+25.072%|between_or_equal|
+|full/vacuum-full-single|candidate/earlier-c8-first-return|wall_ns|290.376409|299.035319|301.193514|+2.982%|-0.717%|+3.725%|between_or_equal|
+|full/vacuum-full-single|before-bf9-first/earlier-c8-first-return|wall_ns|290.376409|264.520131|301.193514|-8.904%|-12.176%|+3.725%|lower_than_both|
+|full/vacuum-full-single|before-bf9-return/earlier-c8-first-return|wall_ns|290.376409|330.840555|301.193514|+13.935%|+9.843%|+3.725%|higher_than_both|
+|full/vacuum-full-single|candidate/before-bf9-first-return|server_process_cpu_ns|115.515031|136.048380|134.465236|+17.775%|+1.177%|+16.405%|higher_than_both|
+|full/vacuum-full-single|candidate/earlier-c8-first-return|server_process_cpu_ns|148.741494|136.048380|141.833951|-8.534%|-4.079%|-4.644%|lower_than_both|
+|full/vacuum-full-single|before-bf9-first/earlier-c8-first-return|server_process_cpu_ns|148.741494|115.515031|141.833951|-22.338%|-18.556%|-4.644%|lower_than_both|
+|full/vacuum-full-single|before-bf9-return/earlier-c8-first-return|server_process_cpu_ns|148.741494|134.465236|141.833951|-9.598%|-5.195%|-4.644%|lower_than_both|
+|full/vacuum-full-single|candidate/before-bf9-first-return|client_process_cpu_ns|0.246238|0.226061|0.248242|-8.194%|-8.935%|+0.814%|lower_than_both|
+|full/vacuum-full-single|candidate/earlier-c8-first-return|client_process_cpu_ns|0.231293|0.226061|0.247829|-2.262%|-8.783%|+7.149%|lower_than_both|
+|full/vacuum-full-single|before-bf9-first/earlier-c8-first-return|client_process_cpu_ns|0.231293|0.246238|0.247829|+6.462%|-0.642%|+7.149%|between_or_equal|
+|full/vacuum-full-single|before-bf9-return/earlier-c8-first-return|client_process_cpu_ns|0.231293|0.248242|0.247829|+7.328%|+0.167%|+7.149%|higher_than_both|
+|full/vacuum-full-overflow|candidate/before-bf9-first-return|wall_ns|264.961958|283.195613|229.504393|+6.882%|+23.394%|-13.382%|higher_than_both|
+|full/vacuum-full-overflow|candidate/earlier-c8-first-return|wall_ns|255.218620|283.195613|251.292971|+10.962%|+12.695%|-1.538%|higher_than_both|
+|full/vacuum-full-overflow|before-bf9-first/earlier-c8-first-return|wall_ns|255.218620|264.961958|251.292971|+3.818%|+5.439%|-1.538%|higher_than_both|
+|full/vacuum-full-overflow|before-bf9-return/earlier-c8-first-return|wall_ns|255.218620|229.504393|251.292971|-10.075%|-8.671%|-1.538%|lower_than_both|
+|full/vacuum-full-overflow|candidate/before-bf9-first-return|server_process_cpu_ns|101.252476|97.990890|77.827401|-3.221%|+25.908%|-23.135%|between_or_equal|
+|full/vacuum-full-overflow|candidate/earlier-c8-first-return|server_process_cpu_ns|104.103107|97.990890|103.408732|-5.871%|-5.239%|-0.667%|lower_than_both|
+|full/vacuum-full-overflow|before-bf9-first/earlier-c8-first-return|server_process_cpu_ns|104.103107|101.252476|103.408732|-2.738%|-2.085%|-0.667%|lower_than_both|
+|full/vacuum-full-overflow|before-bf9-return/earlier-c8-first-return|server_process_cpu_ns|104.103107|77.827401|103.408732|-25.240%|-24.738%|-0.667%|lower_than_both|
+|full/vacuum-full-overflow|candidate/before-bf9-first-return|client_process_cpu_ns|0.281104|0.261860|0.209503|-6.846%|+24.991%|-25.471%|between_or_equal|
+|full/vacuum-full-overflow|candidate/earlier-c8-first-return|client_process_cpu_ns|0.232390|0.261860|0.249956|+12.681%|+4.762%|+7.559%|higher_than_both|
+|full/vacuum-full-overflow|before-bf9-first/earlier-c8-first-return|client_process_cpu_ns|0.232390|0.281104|0.249956|+20.962%|+12.461%|+7.559%|higher_than_both|
+|full/vacuum-full-overflow|before-bf9-return/earlier-c8-first-return|client_process_cpu_ns|0.232390|0.209503|0.249956|-9.849%|-16.184%|+7.559%|lower_than_both|
+|long135/insert-1MiB-mixed|candidate/before-bf9-first-return|wall_ns|2017.815176|1801.508072|2019.602317|-10.720%|-10.799%|+0.089%|lower_than_both|
+|long135/insert-1MiB-mixed|candidate/before-bf9-first-return|server_process_cpu_ns|1942.702224|1696.200395|1945.681727|-12.689%|-12.822%|+0.153%|lower_than_both|
+|long135/insert-1MiB-mixed|candidate/before-bf9-first-return|client_process_cpu_ns|3.381029|2.892821|3.052510|-14.440%|-5.231%|-9.717%|lower_than_both|
+|long135/select-complete|candidate/before-bf9-first-return|wall_ns|60.516031|61.775037|63.044882|+2.080%|-2.014%|+4.179%|between_or_equal|
+|long135/select-complete|candidate/before-bf9-first-return|server_process_cpu_ns|46.340722|47.294967|43.940310|+2.059%|+7.635%|-5.180%|higher_than_both|
+|long135/select-complete|candidate/before-bf9-first-return|client_process_cpu_ns|1.725930|1.857701|2.036263|+7.635%|-8.769%|+17.981%|between_or_equal|
+|long135/select-id|candidate/before-bf9-first-return|wall_ns|57.841381|56.112125|53.945460|-2.990%|+4.016%|-6.736%|between_or_equal|
+|long135/select-id|candidate/before-bf9-first-return|server_process_cpu_ns|39.840221|39.305686|39.399268|-1.342%|-0.238%|-1.107%|lower_than_both|
+|long135/select-id|candidate/before-bf9-first-return|client_process_cpu_ns|0.281837|0.344404|0.356645|+22.200%|-3.432%|+26.543%|between_or_equal|
+|long135/update-returning|candidate/before-bf9-first-return|wall_ns|475.320677|411.759537|469.399677|-13.372%|-12.280%|-1.246%|lower_than_both|
+|long135/update-returning|candidate/before-bf9-first-return|server_process_cpu_ns|421.599723|333.341375|423.384135|-20.934%|-21.267%|+0.423%|lower_than_both|
+|long135/update-returning|candidate/before-bf9-first-return|client_process_cpu_ns|0.773478|0.616177|0.724970|-20.337%|-15.007%|-6.271%|lower_than_both|
+|long135/delete-returning|candidate/before-bf9-first-return|wall_ns|39.610418|43.553088|35.171607|+9.954%|+23.830%|-11.206%|higher_than_both|
+|long135/delete-returning|candidate/before-bf9-first-return|server_process_cpu_ns|11.647883|19.564070|14.068136|+67.962%|+39.067%|+20.778%|higher_than_both|
+|long135/delete-returning|candidate/before-bf9-first-return|client_process_cpu_ns|0.342394|0.332295|0.320074|-2.950%|+3.818%|-6.519%|between_or_equal|
+|long135/vacuum-first|candidate/before-bf9-first-return|wall_ns|21.010996|25.753918|25.432108|+22.574%|+1.265%|+21.042%|higher_than_both|
+|long135/vacuum-first|candidate/before-bf9-first-return|server_process_cpu_ns|20.799303|25.356717|25.124040|+21.911%|+0.926%|+20.793%|higher_than_both|
+|long135/vacuum-first|candidate/before-bf9-first-return|client_process_cpu_ns|0.125197|0.216929|0.215560|+73.270%|+0.635%|+72.177%|higher_than_both|
+|long135/vacuum-full|candidate/before-bf9-first-return|wall_ns|165.068530|218.226818|180.032267|+32.204%|+21.215%|+9.065%|higher_than_both|
+|long135/vacuum-full|candidate/before-bf9-first-return|server_process_cpu_ns|27.683094|29.830307|29.310463|+7.756%|+1.774%|+5.879%|higher_than_both|
+|long135/vacuum-full|candidate/before-bf9-first-return|client_process_cpu_ns|0.237254|0.226977|0.248464|-4.332%|-8.648%|+4.725%|lower_than_both|
+|long135/truncate|candidate/before-bf9-first-return|wall_ns|246.445791|249.683113|257.983437|+1.314%|-3.217%|+4.682%|between_or_equal|
+|long135/truncate|candidate/before-bf9-first-return|server_process_cpu_ns|63.593291|60.749764|63.365876|-4.471%|-4.129%|-0.358%|lower_than_both|
+|long135/truncate|candidate/before-bf9-first-return|client_process_cpu_ns|0.232780|0.247370|0.238978|+6.268%|+3.512%|+2.663%|higher_than_both|
+|long135/reinsert-1MiB|candidate/before-bf9-first-return|wall_ns|1576.187916|1431.222130|1597.598988|-9.197%|-10.414%|+1.358%|lower_than_both|
+|long135/reinsert-1MiB|candidate/before-bf9-first-return|server_process_cpu_ns|1499.603271|1309.661769|1501.244725|-12.666%|-12.762%|+0.109%|lower_than_both|
+|long135/reinsert-1MiB|candidate/before-bf9-first-return|client_process_cpu_ns|2.729757|2.361512|2.360430|-13.490%|+0.046%|-13.530%|between_or_equal|
+
+
+完整证据[large-varchar-toast-search-20261107.json.gz](benchmarks/large-varchar-toast-search-20261107.json.gz)：索引25,047字节及3个分片，共84,954,533字节（81.02MiB），单文件均小于49MiB，SHA256 `28406a8e3fae95096263704ae2524a9d8e598b3975db0cca95e3e388f272b90c`；内层JSON 6,484,652,072字节，135,115文件／4,617目录／5,972内容块／544本地ELF引用。完整解码与当前文件名／模式／字节在清理前后核对。仅清理本批119,744个可恢复生成副本，逻辑量9,887,161,418字节（9.208GiB），不等同独占文件系统释放量；源码、ELF、失败日志／失败库映像、初始故障映像与有用种子保留。
+
+GitHub原53.45MiB JSON早已移出当前跟踪树，完整内容保留为5.70MiB gzip，原始大小／SHA及解压验证在manifest；历史未重写。当前HEAD无50MiB以上文件，忽略规则继续阻止同目录原始大JSON（manifest除外）。本次保留有用的压缩证据，不把原始大文件重新放进Git。
+
+```sh
+python3 scripts/extract_benchmark_parts.py \
+  docs/benchmarks/large-varchar-toast-search-20261107.json.gz \
+  batch/all225-performance-tables-v1.md \
+  --output /tmp/p41-performance-tables.md
+```
+
+命令已实际执行，输出与原225行表逐字节／SHA相同。脚本流式读取内层JSON，检查完整载荷及目标文件SHA后才写新文件，拒绝覆盖；外层封装与一个目标文件保留在内存，ELF路径引用不会被自动读取。两个提取脚本共16个真实CLI控制覆盖完整二进制跨读取边界、损坏／截断拒绝、缺失／非法路径和禁止覆盖。原始计时、五角色分布、wire、全部闭库／失败映像及源码仍可按artifact路径提取。
+
+正式库存2404个文件（1137顶层／1142总C++），2401个旧测试逐字节不变、一个类型注册测试按上述范围扩充、另加两个新测试；注册E2E684／独立E2E664不变。生产251个文件，改6个cpp并加CharacterColumn.h，正常CMake C++17/O2程序C6为587f898d，旧bf9ad7ae、更早c8ca0215，61核心对象冻结；没有靠升级C++23宣称提速。默认425165af不变。754个Markdown路径／725份保护记录保留，仅已有8文档插入说明；原273项及22 complete／166 partial／70 unverified／15 deferred_by_user不变，290条旧历史原样，新增partial第291条，IDX-07仍unverified/evidence[]。全部用户暂缓范围不变。Goal active，直接master提交，未推送或替换默认程序。下方各批均为各自历史版本。
+<!-- P41 large-varchar-toast-search end -->
+
 <!-- P40 vacuum-full-relation-snapshot begin -->
 <a id="vacuum-full-relation-snapshot-20261107"></a>
 ## 2026-11-07：FULL关系刷盘、旧inode备份与1545项完整成本（P40-C1）

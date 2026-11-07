@@ -81,11 +81,17 @@ static void test_apply_type_mods_varchar() {
     r = reg.applyTypeMods("character", {"1006"});
     assert(!r.ok());
     r = reg.applyTypeMods("character varying", {"65536"});
+    assert(r.ok() && r.typmod == 65536 && r.dsize == 65535);
+    r = reg.applyTypeMods("character varying", {"10485760"});
+    assert(r.ok() && r.typmod == 10485760 && r.dsize == 65535);
+    r = reg.applyTypeMods("character varying", {"10485761"});
+    assert(!r.ok());
+    r = reg.applyTypeMods("character varying", {"-1"});
     assert(!r.ok());
 
     r = reg.applyTypeMods("character varying", {});
     assert(r.ok());
-    assert(r.dsize == 65535); // 默认最大长度
+    assert(r.dsize == 65535); // Nominal physical width, not an unbounded value's limit.
     std::cout << "test_apply_type_mods_varchar passed\n";
 }
 
@@ -133,6 +139,21 @@ static void test_resolve_column_type() {
     assert(col.dsize == 100);
     assert(col.isVariableLength);
     assert(!col.isArray);
+    assert(col.typeMod == 100);
+
+    err = reg.resolveColumnType(col, "varchar", {"70000"}, false);
+    assert(err.empty() && col.typeMod == 70000 && col.dsize == 65535);
+    err = reg.resolveColumnType(col, "varchar", {}, false);
+    assert(err.empty() && col.typeMod == -2 && col.dsize == 65535);
+    err = reg.resolveColumnType(col, "varchar", {"70000"}, true);
+    assert(err.empty() && col.isArray && col.typeMod == 70000);
+    assert(reg.validateColumn(col).empty() && col.dataType == "character varying");
+    col.typeMod = 10485761;
+    assert(!reg.validateColumn(col).empty());
+    col.typeMod = -3;
+    assert(!reg.validateColumn(col).empty());
+    col.typeMod = -1; // Actual legacy metadata is still a valid representation.
+    assert(reg.validateColumn(col).empty());
 
     err = reg.resolveColumnType(col, "integer", {}, false);
     assert(err.empty());

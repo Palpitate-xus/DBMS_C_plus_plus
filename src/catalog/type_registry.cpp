@@ -3,6 +3,7 @@
 #include "types/numeric.h"
 #include "utils/interval_type.h"
 #include "utils/numeric_type.h"
+#include "common/CharacterColumn.h"
 
 #include <cctype>
 #include <cstdint>
@@ -122,13 +123,17 @@ TypeModResult TypeRegistry::applyTypeMods(const std::string& canonicalName,
                 return res;
             }
             size_t len = static_cast<size_t>(n);
-            if (entry->maxLength > 0 && len > entry->maxLength) {
+            const size_t declarationLimit = c == "character varying"
+                ? static_cast<size_t>(character_column::maxDeclaredCharacters)
+                : entry->maxLength;
+            if (declarationLimit > 0 && len > declarationLimit) {
                 res.error = "length " + std::to_string(len) + " exceeds maximum " +
-                            std::to_string(entry->maxLength) + " for type " + canonicalName;
+                            std::to_string(declarationLimit) + " for type " + canonicalName;
                 return res;
             }
             res.typmod = static_cast<int32_t>(len);
-            res.dsize = len;
+            res.dsize = c == "character varying"
+                ? std::min(len, character_column::nominalVarcharBytes) : len;
             res.isVariableLength = entry->typlen < 0;
         } else if (c == "numeric" || c == "decimal") {
             int64_t precision = n;
@@ -220,7 +225,9 @@ std::string TypeRegistry::resolveColumnType(Column& col,
         if (canonical == "regtype") col.isUnsigned = false;
         col.isVariableLength = true;
         col.isArray = true;
-        col.typeMod = retainsModifier ? base.typmod : -1;
+        col.typeMod = canonical == "character varying"
+            ? (typeMods.empty() ? character_column::unboundedVarchar : base.typmod)
+            : retainsModifier ? base.typmod : -1;
         return "";
     }
 
@@ -232,7 +239,9 @@ std::string TypeRegistry::resolveColumnType(Column& col,
     col.isVariableLength = r.isVariableLength;
     col.isArray = false;
     if (canonical == "regtype") col.isUnsigned = true;
-    col.typeMod = retainsModifier ? r.typmod : -1;
+    col.typeMod = canonical == "character varying"
+        ? (typeMods.empty() ? character_column::unboundedVarchar : r.typmod)
+        : retainsModifier ? r.typmod : -1;
 
     // 同步 dataName（列名）不应由类型系统设置，但保留调用者已设置的值
     return "";
@@ -259,6 +268,11 @@ std::string TypeRegistry::validateColumn(Column& col) const {
         try {
             if (canonical == "interval") (void)interval_type_detail::unpack(col.typeMod);
             else if (canonical == "numeric" || canonical == "decimal") (void)numeric_type_detail::unpack(col.typeMod);
+            else if (canonical == "character varying") {
+                if (col.typeMod != character_column::unboundedVarchar &&
+                    (col.typeMod <= 0 || col.typeMod > character_column::maxDeclaredCharacters))
+                    return "invalid VARCHAR declaration modifier";
+            }
             else if (canonical == "time" || canonical == "timetz" ||
                      canonical == "timestamp" || canonical == "timestamptz") {
                 if (col.typeMod < 0 || col.typeMod > 6)

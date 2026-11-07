@@ -451,6 +451,64 @@
       "payload_raw_bytes": 4154013795,
       "payload_raw_sha256": "1edea3c8bd8c311d315bd225772c2b7624303d8d7896342f3d410bd7f8e5781c",
       "scope": "P40 future ordinary FULL relation-only flushing and physical hardlink snapshots/complete-copy fallback; finite same-source baseline/current native data and cold values, all26 related terminals including known toast failure,185 exact protocol SQL,six FULL-specific faults,actual syscall profiles; all1545 normal costs and all198 comparisons including ordinary VACUUM negative and bounded post-window diagnostic; no full suite, strict PG, PITR, partition cold or old damaged-cluster repair claim"
+    },
+    {
+      "original_path": "docs/benchmarks/large-varchar-toast-search-20261107.json",
+      "original_bytes": 329078,
+      "original_sha256": "3cb8d5b305132ae94f56c9f0b9983a04eb0662123d258f5832f488855ce35c1d",
+      "path": "docs/benchmarks/large-varchar-toast-search-20261107.json.gz",
+      "bytes": 25047,
+      "sha256": "28406a8e3fae95096263704ae2524a9d8e598b3975db0cca95e3e388f272b90c",
+      "encoding": "gzip",
+      "roundtrip_bytes_exact": true,
+      "payload_encoding": "multipart-gzip+base64+xz+json-content-addressed-v1",
+      "archive_total_bytes": 84954533,
+      "reassembled_bytes": 84092993,
+      "reassembled_sha256": "c5ce5ee7dc2edade31e3d31bb7b70dc3c2015b8aa162f946283204037a535901",
+      "parts": [
+        "docs/benchmarks/large-varchar-toast-search-20261107-part01.json.gz",
+        "docs/benchmarks/large-varchar-toast-search-20261107-part02.json.gz",
+        "docs/benchmarks/large-varchar-toast-search-20261107-part03.json.gz"
+      ],
+      "payload_raw_bytes": 6484652072,
+      "payload_raw_sha256": "21d1a7a2344ecc99cfae5a7a092a1099a3219023e9cc73f40e608b61fc96b817",
+      "scope": "P41 large VARCHAR logical declaration, scalar/array/domain/generated ordinary width persistence and per-value TOAST search hint; complete before/PG/C6 wire/native/cold/recovery including failed candidates and open differences,all1680 new normal costs and225 metric rows incl all negative/drift,real logical dump restore,streaming extraction proof. No full suite/strict PG/1GiB/runtime or all-database speedup claim; original user deferrals unchanged."
+    },
+    {
+      "original_path": "docs/benchmarks/large-varchar-toast-search-20261107-part01.json",
+      "original_bytes": 44739434,
+      "original_sha256": "91571a4efb7b4da46064186714ae06f48dfaa3c47cb7b71a9af4782170bd6b9b",
+      "path": "docs/benchmarks/large-varchar-toast-search-20261107-part01.json.gz",
+      "bytes": 33888509,
+      "sha256": "9763d4e0ea5c8f89ee4b74745dc8f9f4065b581adf81768f62d69f6134f919f2",
+      "encoding": "gzip",
+      "roundtrip_bytes_exact": true,
+      "scope": "P41 exact compressed byte segment; all3 parts and the index reconstruct the unchanged complete archive. Use scripts/extract_benchmark_parts.py.",
+      "multipart_index": "docs/benchmarks/large-varchar-toast-search-20261107.json.gz"
+    },
+    {
+      "original_path": "docs/benchmarks/large-varchar-toast-search-20261107-part02.json",
+      "original_bytes": 44739441,
+      "original_sha256": "2ffe28da464a751077e67fcad5f7cd8c6475f9c4b5e84109342fb8671b0a55f6",
+      "path": "docs/benchmarks/large-varchar-toast-search-20261107-part02.json.gz",
+      "bytes": 33888525,
+      "sha256": "4a417d373a4ba974279c5dabb9ee907163a0310944a1708e13612d687e8a79a8",
+      "encoding": "gzip",
+      "roundtrip_bytes_exact": true,
+      "scope": "P41 exact compressed byte segment; all3 parts and the index reconstruct the unchanged complete archive. Use scripts/extract_benchmark_parts.py.",
+      "multipart_index": "docs/benchmarks/large-varchar-toast-search-20261107.json.gz"
+    },
+    {
+      "original_path": "docs/benchmarks/large-varchar-toast-search-20261107-part03.json",
+      "original_bytes": 22645705,
+      "original_sha256": "ccddb91f28ecc1876c6a1b9546446025515df8c9083e4f0f6fabb31984ce5713",
+      "path": "docs/benchmarks/large-varchar-toast-search-20261107-part03.json.gz",
+      "bytes": 17152452,
+      "sha256": "d0a77da1f88b043399b8935d51cf9570e5037d7667df21d678dcf45841aa4975",
+      "encoding": "gzip",
+      "roundtrip_bytes_exact": true,
+      "scope": "P41 exact compressed byte segment; all3 parts and the index reconstruct the unchanged complete archive. Use scripts/extract_benchmark_parts.py.",
+      "multipart_index": "docs/benchmarks/large-varchar-toast-search-20261107.json.gz"
     }
   ],
   "total_original_bytes": 1625701048,

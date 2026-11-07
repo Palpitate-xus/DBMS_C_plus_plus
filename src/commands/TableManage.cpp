@@ -15,6 +15,7 @@
 #include "common/SqlArrayText.h"
 #include "expression/StoredRegtypeValue.h"
 #include "common/BooleanCodec.h"
+#include "common/CharacterColumn.h"
 #include "common/NetworkValue.h"
 #include "common/GeometryValue.h"
 #include "expression/geometric_input.h"
@@ -1122,6 +1123,8 @@ static bool normalizePointColumns(const TableSchema& table,
 }
 
 static size_t characterColumnByteLimit(const Column& column);
+static DBStatus normalizeVarcharArrayWidth(const Column& column,
+                                          std::string& value);
 
 static bool variableColumnWidthsValid(
     const TableSchema& table,
@@ -1135,7 +1138,8 @@ static bool variableColumnWidthsValid(
             (nullColumns ? nullColumns->count(column.dataName) != 0
                          : value->second == "NULL");
         if (value == values.end() || isNull) continue;
-        const size_t maxLength = column.isArray && column.dataType != "regtype" ? 1024 :
+        const size_t maxLength = column.isArray && column.dataType != "regtype" &&
+            !character_column::varying(column) ? 1024 :
             characterColumnByteLimit(column);
         if (value->second.size() > maxLength) return false;
     }
@@ -1165,16 +1169,22 @@ static bool variableBlankPaddedCharacterColumn(const Column& column) {
 }
 
 static size_t characterColumnByteLimit(const Column& column) {
+    if (character_column::varying(column)) {
+        if (column.isArray) return character_column::maxVarlenaBytes;
+        const auto bound = character_column::characterLimit(column);
+        return bound ? std::min(*bound * size_t(4), character_column::maxVarlenaBytes)
+                     : character_column::maxVarlenaBytes;
+    }
     if (!column.isArray && column.dataType == "text") {
         // TEXT has no declared character width. Its persisted dsize is a
         // historical nominal heap width, not the length of a logical TOAST
         // value. Match PostgreSQL's MaxAllocSize minus the varlena header;
         // keep the existing schema and compact inline references unchanged.
-        return (size_t{1} << 30) - 1 - sizeof(uint32_t);
+        return character_column::maxVarlenaBytes;
     }
     if (!varyingCharacterColumn(column) &&
         !variableBlankPaddedCharacterColumn(column)) return column.dsize;
-    // The existing bounded CHAR/VARCHAR path still has a 64 KiB byte cap.
+    // The legacy blank-padded CHAR path retains its existing byte cap.
     // Four bytes per declared character covers valid UTF-8 code points.
     return std::min(column.dsize * size_t(4), size_t(65535));
 }
@@ -1217,15 +1227,25 @@ static DBStatus normalizeCharacterColumnWidths(
     const std::set<std::string>* nullColumns = nullptr) {
     for (size_t i = 0; i < table.len; ++i) {
         const Column& column = table.cols[i];
-        if (!characterWidthLimitedType(column)) continue;
         auto value = values.find(column.dataName);
         if (value == values.end() ||
             (nullColumns && nullColumns->count(column.dataName) != 0)) continue;
+        if (column.isArray && character_column::varying(column)) {
+            if (!nullColumns && value->second == "NULL") continue;
+            const auto status = normalizeVarcharArrayWidth(column, value->second);
+            if (status != DBStatus::OK) return status;
+            continue;
+        }
+        if (!characterWidthLimitedType(column)) continue;
         if (varyingCharacterColumn(column) ||
             variableBlankPaddedCharacterColumn(column)) {
+            const auto varyingBound = varyingCharacterColumn(column)
+                ? character_column::characterLimit(column)
+                : std::optional<size_t>{column.dsize};
+            if (!varyingBound) continue;
             size_t characters = 0;
             if (!truncateCharacterValue(
-                    value->second, column.dsize, &characters)) {
+                    value->second, *varyingBound, &characters)) {
                 return DBStatus::STRING_DATA_RIGHT_TRUNCATION;
             }
             if (variableBlankPaddedCharacterColumn(column) &&
@@ -2144,6 +2164,9 @@ Column makeVarCharColumn(const std::string& name, bool isNull, size_t maxLen, bo
     c.isVariableLength = true;
     c.dataType = "varchar";
     c.dsize = std::max(size_t(1), std::min(maxLen, size_t(65535)));
+    if (maxLen > character_column::nominalVarcharBytes)
+        c.typeMod = static_cast<int32_t>(std::min(maxLen,
+            static_cast<size_t>(std::numeric_limits<int32_t>::max())));
     return c;
 }
 
@@ -10883,6 +10906,36 @@ struct ArrayParser {
     }
 };
 
+static DBStatus normalizeVarcharArrayWidth(const Column& column,
+                                          std::string& value) {
+    const auto bound = character_column::characterLimit(column);
+    if (!bound) return DBStatus::OK;
+    try {
+        auto literal = sql_array_text::parse(value);
+        const auto convert = [&](const std::string& input) {
+            std::string result = input;
+            if (!truncateCharacterValue(result, *bound))
+                throw DbError("22001", "value too long for VARCHAR array element");
+            return result;
+        };
+        ArrayParser parser(literal.body, column.dataType, convert);
+        std::string normalized;
+        size_t count = 0;
+        parser.skipWs();
+        if (parser.i >= literal.body.size() || literal.body[parser.i] != '{')
+            return DBStatus::INVALID_VALUE;
+        parser.parseValue(normalized, count);
+        parser.skipWs();
+        if (!parser.ok || parser.i != literal.body.size()) return DBStatus::INVALID_VALUE;
+        literal.body = std::move(normalized);
+        value = sql_array_text::render(literal);
+        return DBStatus::OK;
+    } catch (const DbError& error) {
+        return error.sqlState() == "22001" ? DBStatus::STRING_DATA_RIGHT_TRUNCATION
+                                          : DBStatus::INVALID_VALUE;
+    }
+}
+
 static bool normalizeArray(const std::string& in, const std::string& elemType, std::string& out) {
     try {
         auto literal = sql_array_text::parse(in);
@@ -17452,6 +17505,7 @@ void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
             try {
                 if (tbl.cols[i].dataType == "interval") (void)interval_type_detail::unpack(tbl.cols[i].typeMod);
                 else if (tbl.cols[i].dataType == "numeric") (void)numeric_type_detail::unpack(tbl.cols[i].typeMod);
+                else if (character_column::validModifier(tbl.cols[i])) {}
                 else if (!isValidTemporalColumnModifier(tbl.cols[i])) { out.setstate(std::ios::failbit); return; }
             }
             catch (const DbError&) { out.setstate(std::ios::failbit); return; }
@@ -18255,6 +18309,7 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
                 try {
                     if (tbl.cols[i].dataType == "interval") (void)interval_type_detail::unpack(tbl.cols[i].typeMod);
                     else if (tbl.cols[i].dataType == "numeric") (void)numeric_type_detail::unpack(tbl.cols[i].typeMod);
+                    else if (character_column::validModifier(tbl.cols[i])) {}
                     else if (!isValidTemporalColumnModifier(tbl.cols[i])) return {};
                 }
                 catch (const DbError&) { return {}; }
@@ -18740,6 +18795,8 @@ bool StorageEngine::writeToast(const std::string& dbname, const std::string& tab
     size_t offset = 0;
     uint32_t seq = 0;
     const size_t chunkSize = TOAST_CHUNK_SIZE;
+    uint32_t searchHint = 1;
+    size_t previousRowSize = 0;
     while (offset < storedData.size()) {
         size_t len = std::min(chunkSize, storedData.size() - offset);
         std::string row;
@@ -18752,8 +18809,16 @@ bool StorageEngine::writeToast(const std::string& dbname, const std::string& tab
 
         bool inserted = false;
         uint32_t numPages = pa->numPages();
+        const uint32_t firstPage = numPages == 0 ? 0 : 1;
+        // Full chunks have identical widths. Earlier pages rejected for this
+        // width cannot gain space from this write, so do not rescan them for
+        // every chunk. A shorter final chunk must search earlier holes again.
+        const uint32_t searchStart = previousRowSize == row.size() &&
+            searchHint >= firstPage && searchHint < numPages ? searchHint : firstPage;
+        uint32_t insertedPage = firstPage;
+        bool retryEarlierPages = false;
         uint16_t slotId = 0;
-        for (uint32_t pid = (numPages == 0 ? 0 : 1); pid < numPages && !inserted; ++pid) {
+        for (uint32_t pid = searchStart; pid < numPages && !inserted; ++pid) {
             if (!lockManager_.pageLockExclusive(dbname, tablename + ".toast", pid)) return false;
             char* buf = pa->fetchPage(pid);
             if (!buf) {
@@ -18774,6 +18839,8 @@ bool StorageEngine::writeToast(const std::string& dbname, const std::string& tab
                         pa->markDirty(pid);
                     }
                 }
+                if (inserted) insertedPage = pid;
+                else retryEarlierPages = true;
             }
             pa->unpinPage(pid);
             lockManager_.pageUnlock(dbname, tablename + ".toast", pid);
@@ -18792,6 +18859,7 @@ bool StorageEngine::writeToast(const std::string& dbname, const std::string& tab
                 pa->markDirty(pid);
                 int64_t rid = encodeRid(pid, slotId);
                 inserted = idx->insert(toastIndexKey(toastId, seq), rid);
+                if (inserted) insertedPage = pid;
                 if (!inserted) {
                     page.remove(slotId);
                     pa->markDirty(pid);
@@ -18803,6 +18871,10 @@ bool StorageEngine::writeToast(const std::string& dbname, const std::string& tab
 
         if (!inserted) return false;
 
+        // A transient insert/index failure left an earlier reusable page.
+        // Keep the existing retry policy, and never retain a hint across values.
+        searchHint = retryEarlierPages ? firstPage : insertedPage;
+        previousRowSize = row.size();
         offset += len;
         ++seq;
     }
@@ -21145,11 +21217,22 @@ DBStatus StorageEngine::alterTableAlterColumnType(const std::string& dbname,
     // modifier list. Arrays always retain that element width during a rewrite.
     if (elementCast.typeMods.empty() &&
         (target.dataType == "varchar" || target.dataType == "char")) {
-        elementCast.typeMods = {std::to_string(target.dsize)};
+        const auto bound = character_column::varying(target)
+            ? character_column::characterLimit(target)
+            : std::optional<size_t>{target.dsize};
+        if (bound) elementCast.typeMods = {std::to_string(*bound)};
     }
     for (auto& values : rows) {
         auto it = values.find(colName);
         if (it == values.end() || !it->second) continue;
+        if (!target.isArray && character_column::varying(target)) {
+            const auto bound = character_column::characterLimit(target);
+            if ((bound && !truncateCharacterValue(*it->second, *bound)) ||
+                it->second->size() > characterColumnByteLimit(target)) {
+                lockManager_.unlock(tablename);
+                return DBStatus::STRING_DATA_RIGHT_TRUNCATION;
+            }
+        }
         if (target.isArray) {
             try {
                 const auto convertElement = [&](const std::string& input) {
@@ -21165,16 +21248,22 @@ DBStatus StorageEngine::alterTableAlterColumnType(const std::string& dbname,
                             return stored_regtype_detail::storageText(converted);
                         }
                         std::string displayed=actual.value;
-                        if((target.dataType=="varchar" || target.dataType=="char") &&
-                           !truncateCharacterValue(displayed,target.dsize))
+                        const auto bound = character_column::varying(target)
+                            ? character_column::characterLimit(target)
+                            : target.dataType == "char" ? std::optional<size_t>{target.dsize}
+                                                       : std::optional<size_t>{};
+                        if(bound && !truncateCharacterValue(displayed,*bound))
                             throw DbError("22001","regtype array output exceeds character width");
                         return displayed;
                     }
                     std::string value = input;
-                    if ((target.dataType == "varchar" || target.dataType == "char") &&
-                        !truncateCharacterValue(value, target.dsize)) {
+                    const auto bound = character_column::varying(target)
+                        ? character_column::characterLimit(target)
+                        : target.dataType == "char" ? std::optional<size_t>{target.dsize}
+                                                   : std::optional<size_t>{};
+                    if (bound && !truncateCharacterValue(value, *bound)) {
                         throw DbError("22001", "value too long for type " +
-                            elementCast.typeName + "(" + std::to_string(target.dsize) + ")");
+                            elementCast.typeName + "(" + std::to_string(*bound) + ")");
                     }
                     RowContext context;
                     context.setParameters({ExprValue(
@@ -21195,7 +21284,10 @@ DBStatus StorageEngine::alterTableAlterColumnType(const std::string& dbname,
                     throw DbError("22P02", "malformed array literal: " + *it->second);
                 literal.body = std::move(converted);
                 converted = sql_array_text::render(literal);
-                if (converted.size() > (targetReference?size_t(65535):size_t(1024)))
+                const size_t arrayLimit = character_column::varying(target)
+                    ? character_column::maxVarlenaBytes
+                    : targetReference ? size_t(65535) : size_t(1024);
+                if (converted.size() > arrayLimit)
                     throw DbError("22001", "array value exceeds supported storage length");
                 it->second = std::move(converted);
             } catch (...) {
@@ -32350,13 +32442,21 @@ DBStatus StorageEngine::updateInternal(
                             }
                         }
                     }
-                    const size_t maxLength = col.isArray && col.dataType != "regtype" ? 1024 :
+                    const size_t maxLength = col.isArray && col.dataType != "regtype" &&
+                        !character_column::varying(col) ? 1024 :
                         characterColumnByteLimit(col);
-                    if (varyingCharacterColumn(col) ||
+                    if (col.isArray && character_column::varying(col)) {
+                        const auto status = normalizeVarcharArrayWidth(col, storeVal);
+                        if (status != DBStatus::OK) return status;
+                        if (storeVal.size() > maxLength) return DBStatus::STRING_DATA_RIGHT_TRUNCATION;
+                    } else if (varyingCharacterColumn(col) ||
                         variableBlankPaddedCharacterColumn(col)) {
+                        const auto bound = varyingCharacterColumn(col)
+                            ? character_column::characterLimit(col)
+                            : std::optional<size_t>{col.dsize};
                         size_t characters = 0;
-                        if (!truncateCharacterValue(
-                                storeVal, col.dsize, &characters)) {
+                        if (bound && !truncateCharacterValue(
+                                storeVal, *bound, &characters)) {
                             return DBStatus::STRING_DATA_RIGHT_TRUNCATION;
                         }
                         if (variableBlankPaddedCharacterColumn(col) &&
@@ -36973,7 +37073,9 @@ decltype(auto) StorageEngine::withQueryBindingMetadata(const std::string& dbname
                     for (size_t i = 0; i < table.len; ++i)
                         description.columns.push_back({table.cols[i].dataName,
                             ExprHelper::canonicalResultTypeName(table.cols[i].dataType + (table.cols[i].isArray ? "[]" : "")),
-                            !table.cols[i].generatedExpr.empty(), table.cols[i].identityKind, 0, table.cols[i].typeMod});
+                            !table.cols[i].generatedExpr.empty(), table.cols[i].identityKind, 0,
+                            character_column::varying(table.cols[i]) && table.cols[i].typeMod != -1
+                                ? character_column::protocolModifier(table.cols[i]) : table.cols[i].typeMod});
                     if (!description.columns.empty()) {
                         std::vector<DatumTypePtr> types;
                         for(const auto& column:description.columns)types.push_back(column.typeMetadata);
