@@ -10,6 +10,7 @@
 #include "commands/RoutineStore.h"
 #include "commands/SchemaNamespace.h"
 #include "commands/SequenceStorageName.h"
+#include "commands/VacuumFullBackup.h"
 #include "common/DbError.h"
 #include "common/SqlArrayText.h"
 #include "expression/StoredRegtypeValue.h"
@@ -47948,6 +47949,58 @@ bool StorageEngine::recoverAllDatabases() {
         }
     }
 
+    // FULL owns only its relation images, not a database-wide copy. Resolve
+    // its durable pending receipt after transaction snapshot restoration and
+    // before any heap WAL image is assigned to the current generation.
+    for (const auto& dbname : getDatabaseNames()) {
+        const auto databaseRoot = dbPath(dbname);
+        std::vector<std::filesystem::path> pendingRewrites;
+        for (const auto& entry : std::filesystem::directory_iterator(databaseRoot)) {
+            const auto name = entry.path().filename().string();
+            const std::string suffix(vacuum_full_backup::pendingSuffix);
+            if (name.size() > suffix.size() + 1 && name.front() == '.' &&
+                name.compare(name.size() - suffix.size(), suffix.size(), suffix) == 0)
+                pendingRewrites.push_back(entry.path());
+        }
+        for (const auto& pending : pendingRewrites) {
+            vacuum_full_backup::State state;
+            std::string bytes;
+            const auto fail = [&]() {
+                std::cerr << "[recovery] invalid or incomplete FULL rewrite state for "
+                          << dbname << "/" << pending.filename() << std::endl;
+                return false;
+            };
+            if (!vacuum_full_backup::read(pending, bytes) ||
+                !vacuum_full_backup::decode(bytes, state) || state.database != dbname ||
+                !validStoredRelationName(state.table) ||
+                pending.filename() != "." + state.table + vacuum_full_backup::pendingSuffix)
+                return fail();
+            for (const auto& file : state.files) {
+                if (file.role == vacuum_full_backup::Role::Physical &&
+                    !isRelationPhysicalFileName(file.name, state.table)) return fail();
+            }
+            const auto root = relationDir(dbname, state.table);
+            const auto backup = root / state.backupLeaf;
+            if (state.undone || committedXidsByDb[dbname].count(state.xid)) {
+                if (!vacuum_full_backup::discard(pending, backup, bytes)) return fail();
+                continue;
+            }
+            if (!tableExists(dbname, state.table)) return fail();
+            const auto current = getTableSchema(dbname, state.table);
+            if (current.physicalRelationId != state.oldIdentity &&
+                current.physicalRelationId != state.newIdentity) return fail();
+            closeDatabaseCaches(dbname);
+            if (!vacuum_full_backup::restore(state, bytes, backup,
+                    schemaPath(dbname, state.table), root,
+                    specializedIndexDirtyPath(*this, dbname, state.table))) return fail();
+            invalidateCatalogSchema(dbname, state.table);
+            state.undone = true;
+            const auto undone = vacuum_full_backup::encode(state);
+            if (undone.empty() || !vacuum_full_backup::publish(pending, undone) ||
+                !vacuum_full_backup::discard(pending, backup, undone)) return fail();
+        }
+    }
+
     for (const auto& entry : std::filesystem::directory_iterator(".", std::filesystem::directory_options::skip_permission_denied)) {
         try {
             if (!entry.is_directory()) continue;
@@ -48144,6 +48197,12 @@ bool StorageEngine::recoverAllDatabases() {
         };
         std::map<uint64_t, RetirementIntent> retirementIntents;
         std::map<uint64_t, Lsn> committedRetirements;
+        struct LegacyRewrite {
+            uint64_t newIdentity;
+            Lsn lsn;
+            std::string name;
+        };
+        std::vector<LegacyRewrite> committedLegacyRewrites;
         uint64_t relationHighwater = 1;
         for (const auto& [identity, name] : physicalRelations) {
             (void)name;
@@ -48156,7 +48215,8 @@ bool StorageEngine::recoverAllDatabases() {
             if (record->rmid() == RM_SMGR_ID &&
                 (record->info() == XLOG_SMGR_RELATION_CREATE ||
                  record->info() == XLOG_SMGR_RELATION_RETIRE ||
-                 record->info() == XLOG_SMGR_RELATION_RETIRE_COMPLETE)) {
+                 record->info() == XLOG_SMGR_RELATION_RETIRE_COMPLETE ||
+                 record->info() == XLOG_SMGR_LEGACY_REWRITE_COMPLETE)) {
                 heap_wal_identity::Event event;
                 if (!heap_wal_identity::event(*record, event) ||
                     !validStoredRelationName(event.name) ||
@@ -48173,6 +48233,12 @@ bool StorageEngine::recoverAllDatabases() {
                 } else if (record->info() == XLOG_SMGR_RELATION_RETIRE) {
                     retirementIntents[event.relationId] = {
                         record->header.xl_xid, historyLsn, event.name};
+                } else if (record->info() == XLOG_SMGR_LEGACY_REWRITE_COMPLETE) {
+                    if (record->header.xl_xid == 0) return false;
+                    if (committedXids.count(record->header.xl_xid)) {
+                        committedLegacyRewrites.push_back(
+                            {event.relationId, historyLsn, event.name});
+                    }
                 } else {
                     const auto intent = retirementIntents.find(event.relationId);
                     if (intent == retirementIntents.end() ||
@@ -48190,6 +48256,17 @@ bool StorageEngine::recoverAllDatabases() {
                 }
             }
             historyLsn += record->header.xl_tot_len;
+        }
+        std::map<std::string, Lsn> legacyRewriteBoundaries;
+        for (const auto& rewrite : committedLegacyRewrites) {
+            const auto retired = committedRetirements.find(rewrite.newIdentity);
+            // A durable live replacement, or its later completed retirement,
+            // is required before a legacy image can be discarded.
+            if (physicalRelations.count(rewrite.newIdentity) ||
+                (retired != committedRetirements.end() && retired->second > rewrite.lsn)) {
+                auto& boundary = legacyRewriteBoundaries[rewrite.name];
+                boundary = std::max(boundary, rewrite.lsn);
+            }
         }
         if (relationHighwater > 1) {
             const std::filesystem::path counter = ".physical_relation_ids";
@@ -48287,10 +48364,15 @@ bool StorageEngine::recoverAllDatabases() {
                                       << *identity << " in " << dbname << '\n';
                             return false;
                         }
-                    } else if (getTableSchema(dbname, tableName).physicalRelationId != 0) {
-                        // A name-only image cannot be safely assigned to a
-                        // later generation which happens to reuse its name.
-                        return false;
+                    } else {
+                        const auto rewrite = legacyRewriteBoundaries.find(tableName);
+                        if (rewrite != legacyRewriteBoundaries.end() &&
+                            recordLsn < rewrite->second) return true;
+                        if (getTableSchema(dbname, tableName).physicalRelationId != 0) {
+                            // Ordinary name reuse still has no authority to
+                            // assign a legacy image to a later generation.
+                            return false;
+                        }
                     }
                 }
                 const auto truncate = latestTruncateLsns.find(resolvedHeapName);
@@ -51303,19 +51385,59 @@ size_t StorageEngine::vacuumFull(const std::string& dbname,
     // VACUUM is not transaction-safe and PostgreSQL rejects it inside an
     // explicit transaction.  Rewriting here would otherwise escape rollback.
     if (transactionContext().inTransaction) return 0;
-    if (!lockManager_.lockExclusive(tablename)) return 0;
+    const auto priorIsolation = transactionContext().txnIsolationLevel;
+    // Match the database/table/cache order used by physical DDL. No database
+    // snapshot is made: only this relation's files are copied below.
+    if (beginTransaction(dbname, true) != DBStatus::OK) return 0;
+    transactionContext().txnIsolationLevel = IsolationLevel::READ_COMMITTED;
+    lockManager_.setResourceNamespace(dbname);
+    if (!lockManager_.lockExclusive(tablename)) {
+        (void)rollbackTransaction();
+        transactionContext().txnIsolationLevel = priorIsolation;
+        return 0;
+    }
     std::unique_ptr<int, std::function<void(int*)>> tableLockGuard(
         reinterpret_cast<int*>(1),
         [&](int*) { lockManager_.unlock(tablename); });
-    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
+    bool fullCommitted = false;
+    std::function<void()> afterRollback;
+    struct FullTransactionGuard {
+        std::function<void()> finish;
+        ~FullTransactionGuard() noexcept {
+            try { finish(); }
+            catch (const std::exception& error) {
+                std::cerr << "[vacuum full] transaction cleanup failed: "
+                          << error.what() << std::endl;
+            }
+        }
+    } transactionGuard{[&]() {
+        if (!fullCommitted) {
+            if (inTransaction()) (void)rollbackTransaction();
+            if (!inTransaction() && afterRollback) afterRollback();
+        }
+        transactionContext().txnIsolationLevel = priorIsolation;
+    }};
+    std::unique_lock<std::recursive_mutex> cacheLock(cacheMutex_);
 
     const TableSchema tbl = getTableSchema(dbname, tablename);
+    const auto pendingRewrite = dbPath(dbname) /
+        ("." + tablename + vacuum_full_backup::pendingSuffix);
+    bool pendingExists = false;
+    if (!vacuum_full_backup::regularExists(pendingRewrite, pendingExists) || pendingExists)
+        return 0;
 
     const auto heapRowWidth = heapHeaderRowWidth(tbl);
     if (!heapRowWidth) return 0;
     const std::string tableKey = dbname + "/" + tablename;
     const std::string secondaryPrefix = tableKey + "/";
     const std::string hashPrefix = dbname + "." + tablename + ".";
+    const auto deadTupleKey = std::make_pair(dbname, tablename);
+    std::optional<size_t> priorDeadCount;
+    {
+        std::lock_guard<std::mutex> lock(deadTupleMutex_);
+        const auto found = deadTupleCounts_.find(deadTupleKey);
+        if (found != deadTupleCounts_.end()) priorDeadCount = found->second;
+    }
 
     struct RewriteRelation {
         std::filesystem::path path;
@@ -51539,39 +51661,59 @@ size_t StorageEngine::vacuumFull(const std::string& dbname,
         return 0;
     }
 
-    std::vector<std::pair<std::filesystem::path, std::filesystem::path>> backups;
-    size_t backupNumber = 0;
+    vacuum_full_backup::State backupState;
+    backupState.database = dbname;
+    backupState.table = tablename;
+    backupState.backupLeaf = backupDirectory.filename().string();
+    backupState.xid = transactionContext().currentTxnId;
+    backupState.oldIdentity = tbl.physicalRelationId;
+    using BackupRole = vacuum_full_backup::Role;
+    std::vector<std::pair<BackupRole, std::filesystem::path>> backupTargets;
+    for (const auto& path : physicalPaths) backupTargets.emplace_back(BackupRole::Physical, path);
+    backupTargets.emplace_back(BackupRole::Schema, schemaPath(dbname, tablename));
+    const auto dirtyPath = specializedIndexDirtyPath(*this, dbname, tablename);
+    backupTargets.emplace_back(BackupRole::SpecializedDirty, dirtyPath);
     bool backupValid = true;
-    for (const auto& path : physicalPaths) {
-        fileError.clear();
-        if (!std::filesystem::exists(path, fileError)) {
-            if (fileError) {
-                backupValid = false;
-                break;
-            }
-            continue;
+    for (size_t i = 0; i < backupTargets.size(); ++i) {
+        const auto& [role, path] = backupTargets[i];
+        vacuum_full_backup::File file;
+        file.role = role;
+        if (role == BackupRole::Physical) {
+            file.name = path.filename().string();
+            if (!isRelationPhysicalFileName(file.name, tablename)) { backupValid = false; break; }
         }
-        if (!std::filesystem::is_regular_file(path, fileError) || fileError) {
-            backupValid = false;
-            break;
+        bool exists = false;
+        if (!vacuum_full_backup::regularExists(path, exists)) { backupValid = false; break; }
+        if (exists) {
+            fileError.clear();
+            const auto size = std::filesystem::file_size(path, fileError);
+            if (fileError) { backupValid = false; break; }
+            const auto mode = static_cast<uint32_t>(std::filesystem::status(path, fileError).permissions()) & 07777;
+            const auto backup = vacuum_full_backup::backupFile(backupDirectory, i);
+            if (fileError || !std::filesystem::copy_file(path, backup,
+                    std::filesystem::copy_options::none, fileError) || fileError ||
+                !vacuum_full_backup::syncFile(backup) ||
+                !vacuum_full_backup::digestFile(backup, file) || !file.present ||
+                file.size != size || file.mode != mode) { backupValid = false; break; }
         }
-        const auto backup = backupDirectory /
-            (std::to_string(backupNumber++) + ".bak");
-        if (!std::filesystem::copy_file(path, backup,
-                                         std::filesystem::copy_options::none,
-                                         fileError) || fileError) {
-            backupValid = false;
-            break;
-        }
-        backups.emplace_back(path, backup);
+        backupState.files.push_back(std::move(file));
     }
-    if (!backupValid) {
+    if (!backupValid || allocatePhysicalRelationId(
+            *this, dbname, backupState.newIdentity) != DBStatus::OK) {
         std::error_code cleanupError;
         std::filesystem::remove_all(backupDirectory, cleanupError);
         return 0;
     }
+    const auto backupBytes = vacuum_full_backup::encode(backupState);
+    if (backupBytes.empty() ||
+        !vacuum_full_backup::publish(backupDirectory / "manifest", backupBytes, true) ||
+        !index_file::syncDirectory(relationRoot)) return 0;
+    auto undoneState = backupState;
+    undoneState.undone = true;
+    const auto undoneBytes = vacuum_full_backup::encode(undoneState);
+    if (undoneBytes.empty()) return 0;
 
-    const auto evictTableCaches = [&]() {
+    const auto evictTableCaches = [this, tableKey, secondaryPrefix, hashPrefix]() {
         pageAllocators_.erase(tableKey);
         fsmCache_.erase(tableKey);
         vmCache_.erase(tableKey);
@@ -51608,49 +51750,61 @@ size_t StorageEngine::vacuumFull(const std::string& dbname,
         }
     };
 
-    std::map<std::string, std::unique_ptr<PageAllocator>> destinations;
-    bool mutationStarted = false;
-    const auto restoreBackup = [&]() {
+    // Register value-owned undo before publishing the pending name. A failed
+    // restore remains retryable through the existing rollback-pending fence.
+    const auto schemaTarget = schemaPath(dbname, tablename);
+    registerDdlUndo([this, dbname, tablename, backupState, backupBytes, undoneBytes,
+                     backupDirectory, pendingRewrite, schemaTarget, relationRoot,
+                     dirtyPath, evictTableCaches, deadTupleKey, priorDeadCount]() {
+        std::lock_guard<std::recursive_mutex> lock(cacheMutex_);
+        bool exists = false;
+        if (!vacuum_full_backup::regularExists(pendingRewrite, exists)) return false;
+        if (!exists) return true; // Publication failed before any live replacement.
+        std::string current;
+        if (!vacuum_full_backup::read(pendingRewrite, current) ||
+            (current != backupBytes && current != undoneBytes)) return false;
         evictTableCaches();
-        bool restored = true;
-        for (const auto& path : physicalPaths) {
-            std::error_code removeError;
-            std::filesystem::remove(path, removeError);
-            if (removeError) restored = false;
+        if (current != undoneBytes && !vacuum_full_backup::restore(
+                backupState, backupBytes, backupDirectory, schemaTarget,
+                relationRoot, dirtyPath)) return false;
+        invalidateCatalogSchema(dbname, tablename);
+        {
+            std::lock_guard<std::mutex> deadLock(deadTupleMutex_);
+            if (priorDeadCount) deadTupleCounts_[deadTupleKey] = *priorDeadCount;
+            else deadTupleCounts_.erase(deadTupleKey);
         }
-        for (const auto& [target, backup] : backups) {
-            std::error_code restoreError;
-            if (!std::filesystem::copy_file(
-                    backup, target,
-                    std::filesystem::copy_options::overwrite_existing,
-                    restoreError) || restoreError) {
-                restored = false;
-            }
-        }
-        if (restored) {
-            std::error_code cleanupError;
-            std::filesystem::remove_all(backupDirectory, cleanupError);
-        } else {
-            std::cerr << "[vacuum full] restore failed; recovery copies remain in "
-                      << backupDirectory << std::endl;
-        }
-        return restored;
+        return vacuum_full_backup::publish(pendingRewrite, undoneBytes);
+    });
+    afterRollback = [pendingRewrite, backupDirectory, undoneBytes]() {
+        if (!vacuum_full_backup::discard(pendingRewrite, backupDirectory, undoneBytes))
+            std::cerr << "[vacuum full] completed undo cleanup retained at "
+                      << pendingRewrite << std::endl;
     };
+    if (!vacuum_full_backup::publish(pendingRewrite, backupBytes, true)) return 0;
+
+    WALManager* rewriteWal = getWAL(dbname);
+    const auto birth = heap_wal_identity::event(backupState.newIdentity, tablename);
+    Lsn lifecycleLsn = rewriteWal ? rewriteWal->XLogInsert(
+        RM_SMGR_ID, XLOG_SMGR_RELATION_CREATE, backupState.xid, birth) : INVALID_LSN;
+    if (!rewriteWal || lifecycleLsn == INVALID_LSN) return 0;
+    if (backupState.oldIdentity != 0) {
+        const auto retirement = heap_wal_identity::event(backupState.oldIdentity, tablename);
+        lifecycleLsn = rewriteWal->XLogInsert(
+            RM_SMGR_ID, XLOG_SMGR_RELATION_RETIRE, backupState.xid, retirement);
+        if (lifecycleLsn == INVALID_LSN) return 0;
+    }
+    if (!rewriteWal->XLogFlush(lifecycleLsn)) return 0;
+
+    std::map<std::string, std::unique_ptr<PageAllocator>> destinations;
     const auto failRewrite = [&]() -> size_t {
-        // Close private rewrite descriptors before restoring their paths;
-        // otherwise a destructor flush could race the restored files.
+        // Descriptors must close before the outer transaction guard restores
+        // paths. The stored undo owns its inputs independently of this frame.
         destinations.clear();
-        if (mutationStarted) restoreBackup();
-        else {
-            std::error_code cleanupError;
-            std::filesystem::remove_all(backupDirectory, cleanupError);
-        }
         return 0;
     };
 
     try {
         evictTableCaches();
-        mutationStarted = true;
         for (const auto& path : physicalPaths) {
         fileError.clear();
         std::filesystem::remove(path, fileError);
@@ -51833,19 +51987,40 @@ size_t StorageEngine::vacuumFull(const std::string& dbname,
         return failRewrite();
 
     if (!flushDatabaseCaches(dbname)) return failRewrite();
-    std::error_code cleanupError;
-    std::filesystem::remove_all(backupDirectory, cleanupError);
-    if (cleanupError) {
-        std::cerr << "[vacuum full] could not remove completed backup "
-                  << backupDirectory << ": " << cleanupError.message()
-                  << std::endl;
+    std::set<std::filesystem::path> publicationParents{relationRoot, dbPath(dbname)};
+    for (const auto& path : physicalPaths) {
+        bool exists = false;
+        if (!vacuum_full_backup::regularExists(path, exists) ||
+            (exists && !vacuum_full_backup::syncFile(path))) return failRewrite();
+        publicationParents.insert(path.parent_path());
     }
-
+    for (const auto& parent : publicationParents)
+        if (!index_file::syncDirectory(parent)) return failRewrite();
+    TableSchema rewritten = tbl;
+    rewritten.physicalRelationId = backupState.newIdentity;
+    if (!writeSchemaFile(dbname, tablename, rewritten)) return failRewrite();
+    const auto completionPayload = heap_wal_identity::event(
+        backupState.oldIdentity == 0 ? backupState.newIdentity : backupState.oldIdentity,
+        tablename);
+    const Lsn completion = rewriteWal->XLogInsert(RM_SMGR_ID,
+        backupState.oldIdentity == 0 ? XLOG_SMGR_LEGACY_REWRITE_COMPLETE :
+                                      XLOG_SMGR_RELATION_RETIRE_COMPLETE,
+        backupState.xid, completionPayload);
+    if (completion == INVALID_LSN) return failRewrite();
     {
-        const auto deadTupleKey = std::make_pair(dbname, tablename);
         std::lock_guard<std::mutex> lock(deadTupleMutex_);
         deadTupleCounts_[deadTupleKey] = 0;
     }
+    // All replacement files and the schema are durable before COMMIT grants
+    // recovery permission to ignore old-generation images. No cache mutex is
+    // held across the transaction boundary.
+    cacheLock.unlock();
+    if (commitTransaction() != DBStatus::OK) return 0;
+    fullCommitted = true;
+    if (!vacuum_full_backup::discard(pendingRewrite, backupDirectory, backupBytes))
+        std::cerr << "[vacuum full] committed rewrite cleanup retained at "
+                  << pendingRewrite << std::endl;
+
     if (succeeded) *succeeded = true;
     return rowCount;
     } catch (const std::exception& error) {

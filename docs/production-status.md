@@ -1,5 +1,22 @@
 # 生产化状态
 
+<!-- P39 vacuum-full-wal-generation begin -->
+<a id="vacuum-full-wal-generation-current"></a>
+## 当前批次：FULL代次恢复（P39-C1，partial）
+
+修复普通VACUUM FULL仍沿用旧物理身份、冷启动把旧页镜像重放到压缩后堆的问题。每次重写分配新物理代次；同一内部事务记录出生、旧代次退休意图／完成及COMMIT。替换前先持久化只属于该关系的原文件、完整模式／大小／SHA256清单及pending记录，替换文件与schema全部落盘后才提交。失败和未提交崩溃先恢复旧文件／schema，再重放WAL；已提交只清理备份。完成回滚的durable receipt防止遗留备份覆盖后续已提交DML。旧09 schema仅在FULL成功时发布新代次及专门的0x23完成记录，普通旧名称重用仍拒绝错误归属。没有放宽CRC、物理身份或页缺口校验。
+
+12项恢复相关原生测试在旧84bb与C1均本批实际0，覆盖身份codec／保护、退休完成、出生与崩溃、redo、基础WAL／全页／截断、UNLOGGED强杀／恢复和TRUNCATE恢复。C1另10项长字段／VACUUM／投影／视图相关测试实际0，既有vacuum_full_test的4组热态、分区、备份失败与中途失败恢复也实际0。既有toast_test仍在第604行 `!corruptScan.open()` 断言中止（actual -6），后续NOTRUN；保留P38同位失败，未修改预期，full suite=false。该计数为有限相关原生测试，未宣称全套通过或原生分区FULL冷开已验收。
+
+本批没有证明全面提速。270项原样读写矩阵保留27个全新数据库、54个正常Main及1098条完整回复。30个区域的墙钟：7低于两旧／13高于两旧／10居间；服务器CPU：5低于两旧／14高于两旧／11居间；客户端CPU：7低于两旧／12高于两旧／11居间。所有90项比较均列出，性能原因OPEN。 vacuum-full-fixed墙钟 +64.55%／+78.39%；vacuum-full-fixed服务器CPU +10.12%／+10.45%；vacuum-full-single墙钟 +78.30%／+112.77%；vacuum-full-single服务器CPU +17.97%／+38.94%；vacuum-full-overflow墙钟 +131.53%／+114.90%；vacuum-full-overflow服务器CPU +18.05%／+13.79%（相对旧84首测／同旧回测，正数为更慢）。
+
+本批验收只覆盖未来普通关系FULL的有限重写／关闭／强杀／回滚恢复情形。不能修复已被旧FULL写坏且没有新pending／退休授权的旧集群；P38实际失败库仍保留。跨FULL的PITR／物理基备重建未验收，不能仅凭新生命周期记录重建重写后的完整堆。内部事务暂时使用数据库排他锁，再取表锁和cache锁，并非PG表级并发等价；热态分区既有回归通过，不宣称分区冷开闭环。原始15项安全／TDE暂缓与额外用户暂缓记录保持；这六项不是已暂缓的通用IO／分配器／保存点故障矩阵，也未修改执行图／child-provider、retained planning／portal或CPU-sort interrupt。
+
+完整证据压缩为[vacuum-full-wal-generation-20261107.json.gz](benchmarks/vacuum-full-wal-generation-20261107.json.gz)，51,060,466字节（48.70MiB），SHA256 `0ae60933438851bedacdc9870c34f238c4d391dd0661a8bf4631a074047385c8`；内层完整JSON 4,159,917,907字节。82,182个非ELF文件／3,167个目录／3,481个内容块／274个本地ELF引用在清理前后独立核对。只删除73,977个已逐字节归档的本批生成副本，逻辑量6,412,778,626字节（5.972GiB），不等同独占文件系统释放量。保留源码、ELF、任务stdout/stderr与错误、全部故障初始映像、当前正常旧库混合1MiB种子和P38实际损坏库，外部P36／P37种子及旧39个压缩包不动。
+
+正式库存2401个测试文件（1134顶层／1139总C++），2399个旧测试逐字节不变，注册E2E684／独立E2E664不变。源码250个文件，正常CMake C++17/O2候选C1为c8ca0215，旧84bbadb4、更早56aad0c0；默认425165af不变。754个Markdown路径和725份保护记录保持，只在8份已有文档插入本批说明。原273项和22 complete／166 partial／70 unverified／15 deferred_by_user不变，既有288条历史保持、新增partial第289条；IDX-07仍unverified/evidence[]。Goal active，直接master分批提交，未推送或替换默认程序。下方各批均为对应历史程序的记录。 [完整报告](performance-report-2026-10-30.md#vacuum-full-wal-generation-20261107)。
+<!-- P39 vacuum-full-wal-generation end -->
+
 <!-- P38 scalar-text-logical-limit begin -->
 <a id="scalar-text-logical-limit-current"></a>
 ## 当前批次：标量TEXT容量（P38-C2）

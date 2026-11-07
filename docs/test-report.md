@@ -1,5 +1,30 @@
 # DBMS 功能测试报告
 
+<!-- P39 vacuum-full-wal-generation begin -->
+<a id="vacuum-full-wal-generation-current"></a>
+## 2026-11-07：FULL新代次、恢复与完整性能验证
+
+新增vacuum_full_cold_recovery_test使用同一源码对照：旧84bb两种情形均在首次冷开出现重复可见主键（父actual1，4个子阶段已执行／2失败／2后续NOTRUN）；C1为6个子阶段全部符合实际终态，正常关闭或主动SIGKILL -9后连续两次新进程冷开全值／NULL／主键通过。原堆352256字节（43页）压到32768字节（4页），之后真实UPDATE到1MiB TEXT、INSERT、DELETE并提交。两份WAL共1194条独立CRC32C核对，旧代次578个页镜像最大块42、新代次7个镜像，退休完成及提交顺序正确，0个检查点，不能归因于checkpoint绕过。
+
+新增vacuum_full_generation_recovery_test进一步覆盖有效空09 schema在首次堆WAL前加载、三次FULL／中途重命名、空表两次FULL及后续插入。C1实际10个子阶段均0，完整值／NULL与两次冷开通过；旧版在3次新代次检查失败（父actual1，4阶段执行／3失败／6冷开NOTRUN），不把未运行阶段计为冷开复现。09 fixture保留format2堆格式，不代表所有历史堆版本已迁移。独立解码验证legacy的0x23提交边界、重复重写退休、最终身份2／4／3及不可回退计数器，0个检查点。
+
+12项恢复相关原生测试在旧84bb与C1均本批实际0，覆盖身份codec／保护、退休完成、出生与崩溃、redo、基础WAL／全页／截断、UNLOGGED强杀／恢复和TRUNCATE恢复。C1另10项长字段／VACUUM／投影／视图相关测试实际0，既有vacuum_full_test的4组热态、分区、备份失败与中途失败恢复也实际0。既有toast_test仍在第604行 `!corruptScan.open()` 断言中止（actual -6），后续NOTRUN；保留P38同位失败，未修改预期，full suite=false。该计数为有限相关原生测试，未宣称全套通过或原生分区FULL冷开已验收。
+
+原先因冷开退出-6中断的同一旧库22条SQL计划，现在C1完整执行22条／2130行／9813单元／738NULL／12,433,869请求回复字节，两个正常Main实际0，944个闭库文件核对。初开16条完整请求和回复与P38旧84bb原观察逐字节一致，新增完成原先未运行的6条冷开。原始旧库种子334个名字／模式／字节不变；P38原失败、被旧观察器遮蔽的旧终态及缺失阶段保持原记录。
+
+六种FULL专属有限故障控制全部经独立完整值／NULL／全部T7／错误／tag／Ready核对：schema发布前强杀、发布后提交前强杀、COMMIT后清理前强杀、发布报错后回滚schema期间再次强杀、提交后清理失败、回滚后清理失败。共120条完整SQL、4条确实发出后被中断的FULL、10400行／48966单元／3696NULL／64,393,755字节，4个预期SIGKILL -9和8个正常Main0，6285个实际映像文件；一个预期XX000保留。6087条WAL／47,972,984字节独立CRC与prev链核对，并核实各自COMMIT／ABORT／未提交及不可复用代次。两种清理失败后继续UPDATE，再显式CHECKPOINT，检查点确实晚于该DML提交；冷开值未被旧备份覆盖。只在初开Main加载版本化syscall钩子，冷开使用未插桩的同一正常C1。
+
+首轮测试钩子漏拦截libstdc++实际使用的libc remove：after_commit未按预期断开，采集器actual1且未启动冷开；两种cleanup_fail虽各完成24条SQL，独立故障核对均actual1。所有首轮源码、日志、计划、完整wire、实际终态及NOTRUN保留。V2只增加remove拦截，三个原计划字节不变，正常生产ELF不变，再实际完成相应故障控制；没有改成忽略故障的预期，也没有重采或筛选任何正常性能样本。
+
+原62、72、28条SQL及一条实际wide OID控制在本批C1重新执行，共163请求、458行／1800单元／231NULL／33,383,364字节，6个正常Main0和1个预期SIGKILL -9。所有完整请求与回复均与P38实际84bb逐字节一致，独立第二解码器核对全部值、NULL、T7、错误、NOTICE、tag和Ready；复用的是已认证归档中的真实PG18.6参照，没有本批新跑PG的声明。原62的9项差异、72的7项差异及28的3项SQL子分区差异继续保留，strict PG=false。
+
+全部正常计时共1545项／129个实际正常Main0／3003完整SQL／467094行／1693173单元／120549NULL／911,125,308请求回复字节／19656闭库文件。窗口无本任务编译、压缩、插桩、剖析或其他SQL；自然缓存、不绑定CPU，不声称宿主机全空闲。墙钟／客户端CPU覆盖socket至ReadyI；服务器CPU为整个Main并含后台线程。
+
+本批验收只覆盖未来普通关系FULL的有限重写／关闭／强杀／回滚恢复情形。不能修复已被旧FULL写坏且没有新pending／退休授权的旧集群；P38实际失败库仍保留。跨FULL的PITR／物理基备重建未验收，不能仅凭新生命周期记录重建重写后的完整堆。内部事务暂时使用数据库排他锁，再取表锁和cache锁，并非PG表级并发等价；热态分区既有回归通过，不宣称分区冷开闭环。原始15项安全／TDE暂缓与额外用户暂缓记录保持；这六项不是已暂缓的通用IO／分配器／保存点故障矩阵，也未修改执行图／child-provider、retained planning／portal或CPU-sort interrupt。
+
+正式库存2401个测试文件（1134顶层／1139总C++），2399个旧测试逐字节不变，注册E2E684／独立E2E664不变。源码250个文件，正常CMake C++17/O2候选C1为c8ca0215，旧84bbadb4、更早56aad0c0；默认425165af不变。754个Markdown路径和725份保护记录保持，只在8份已有文档插入本批说明。原273项和22 complete／166 partial／70 unverified／15 deferred_by_user不变，既有288条历史保持、新增partial第289条；IDX-07仍unverified/evidence[]。Goal active，直接master分批提交，未推送或替换默认程序。下方各批均为对应历史程序的记录。 [完整性能与归档](performance-report-2026-10-30.md#vacuum-full-wal-generation-20261107)。
+<!-- P39 vacuum-full-wal-generation end -->
+
 <!-- P38 scalar-text-logical-limit begin -->
 <a id="scalar-text-logical-limit-current"></a>
 ## 2026-11-07：TEXT全值、普通恢复与1500项完整成本

@@ -1,5 +1,20 @@
 # DBMS C++
 
+<!-- P39 vacuum-full-wal-generation begin -->
+<a id="vacuum-full-wal-generation-current"></a>
+## 2026-11-07：修复FULL重写后的冷启动恢复
+
+修复普通VACUUM FULL仍沿用旧物理身份、冷启动把旧页镜像重放到压缩后堆的问题。每次重写分配新物理代次；同一内部事务记录出生、旧代次退休意图／完成及COMMIT。替换前先持久化只属于该关系的原文件、完整模式／大小／SHA256清单及pending记录，替换文件与schema全部落盘后才提交。失败和未提交崩溃先恢复旧文件／schema，再重放WAL；已提交只清理备份。完成回滚的durable receipt防止遗留备份覆盖后续已提交DML。旧09 schema仅在FULL成功时发布新代次及专门的0x23完成记录，普通旧名称重用仍拒绝错误归属。没有放宽CRC、物理身份或页缺口校验。
+
+原失败的22条旧库SQL现全部通过，关闭／强杀后的完整1MiB TEXT读回通过；旧损坏库和跨FULL的PITR不在本批修复范围。
+
+本批没有证明全面提速。270项原样读写矩阵保留27个全新数据库、54个正常Main及1098条完整回复。30个区域的墙钟：7低于两旧／13高于两旧／10居间；服务器CPU：5低于两旧／14高于两旧／11居间；客户端CPU：7低于两旧／12高于两旧／11居间。所有90项比较均列出，性能原因OPEN。 vacuum-full-fixed墙钟 +64.55%／+78.39%；vacuum-full-fixed服务器CPU +10.12%／+10.45%；vacuum-full-single墙钟 +78.30%／+112.77%；vacuum-full-single服务器CPU +17.97%／+38.94%；vacuum-full-overflow墙钟 +131.53%／+114.90%；vacuum-full-overflow服务器CPU +18.05%／+13.79%（相对旧84首测／同旧回测，正数为更慢）。
+
+最初被GitHub提示的53.45MiB原始JSON，目前以5.70MiB gzip保留完整性能原始数据与错误供复核，manifest记录原始长度／SHA和逐字节解压验证。当前版本不再跟踪该原始大JSON，忽略规则拦截同目录未来原始JSON（小manifest除外），不重写历史。
+
+[完整测试与性能报告](docs/performance-report-2026-10-30.md#vacuum-full-wal-generation-20261107)。Goal active，下方各批为历史记录。
+<!-- P39 vacuum-full-wal-generation end -->
+
 <!-- P38 scalar-text-logical-limit begin -->
 <a id="scalar-text-logical-limit-current"></a>
 ## 2026-11-07：TEXT长值容量修复

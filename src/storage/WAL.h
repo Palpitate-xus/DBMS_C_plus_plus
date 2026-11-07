@@ -69,6 +69,9 @@ constexpr uint8_t XLOG_SMGR_TRUNCATE   = 0x01;
 constexpr uint8_t XLOG_SMGR_RELATION_CREATE = 0x20;
 constexpr uint8_t XLOG_SMGR_RELATION_RETIRE = 0x21;
 constexpr uint8_t XLOG_SMGR_RELATION_RETIRE_COMPLETE = 0x22;
+// A committed FULL rewrite publishes a new physical identity for a legacy
+// name-only relation. Only older name-only images of this name are retired.
+constexpr uint8_t XLOG_SMGR_LEGACY_REWRITE_COMPLETE = 0x23;
 
 // CHECKPOINT info flags
 constexpr uint8_t XLOG_CHECKPOINT_SHUTDOWN = 0x00;

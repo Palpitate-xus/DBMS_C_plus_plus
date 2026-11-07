@@ -423,6 +423,20 @@
       "payload_raw_bytes": 3229936943,
       "payload_raw_sha256": "f1eb2b7d95fb5052fee8b910a9211fb0362111801bd1c328be04a26632cd68ae",
       "scope": "P38 scalar TEXT logical length; all1500 normal operations/114Main; original62 byteexact, exact original28 TEXT gaps resolved, fresh72 PG/before/current, ordinary old-schema controls and committed1MiB SIGKILL recovery; failed original FULL cold startup, legacy TOAST assertion and all negative performance retained; partial, no overall/PG speed claim"
+    },
+    {
+      "original_path": "docs/benchmarks/vacuum-full-wal-generation-20261107.json",
+      "original_bytes": 67917777,
+      "original_sha256": "4594d93912cfa121139fb63002ec266ba85830a4e0314136d391e3685947ffb9",
+      "path": "docs/benchmarks/vacuum-full-wal-generation-20261107.json.gz",
+      "bytes": 51060466,
+      "sha256": "0ae60933438851bedacdc9870c34f238c4d391dd0661a8bf4631a074047385c8",
+      "encoding": "gzip",
+      "roundtrip_bytes_exact": true,
+      "payload_encoding": "base64+xz+json-content-addressed-v1",
+      "payload_raw_bytes": 4159917907,
+      "payload_raw_sha256": "34e92cd76c7391df6f72712a4578af70b38c71f9f5eda34ea10569cab6dd0311",
+      "scope": "P39 future ordinary FULL physical generations/durable undo; finite native cold/kill/legacy/repeat/empty/rename, exact original22 and original62/72/28 wire, six FULL-specific faults; all1545 normal costs/129Main and all negative outcomes; prior damaged cluster/PITR/partition cold/full suite/strict PG remain unaccepted"
     }
   ],
   "total_original_bytes": 1625701048,
