@@ -1,5 +1,20 @@
 # DBMS C++
 
+<!-- P37 vacuum-physical-references begin -->
+<a id="vacuum-physical-references-current"></a>
+## 2026-11-07：VACUUM长字段数据安全修复
+
+当调用者仍绑定一次真实 TableScan 的正 RID，特别是另一个数据库中同名表的 NULL 行时，旧收集器可能漏掉仍在使用的 TOAST 引用并回收这些对象；新代码只使用正在检查的物理元组。该触发由原生维护接口复现，未将正常 SQL 对照中的旧／新相同结果伪称为 SQL 数据丢失复现。
+
+新增 vacuum_toast_physical_reference_test 在同一冻结源码上执行全部16种情形：旧版160检查／48失败／actual1，C1为160／0／actual0。覆盖普通表与原生范围分区存储、vacuumToast及外层vacuum、真实同库／跨库同名表调用者、跨位图字节的NULL、空串、文本NULL、UTF-8、类似marker的普通字符串、TEXT11003／40003及BYTEA70003／11009。独立完整值物理解码核对16种情形中的80个存活对象全部原始字节，以及每个真实孤儿的回收、调用者绑定恢复和第二次维护幂等。
+
+本批1500项完整正常计时没有证明全面提速。在共同的真实after-DELETE种子上，单长字段首次VACUUM服务器CPU比旧版及旧版回测低8.36%／7.73%；多长字段首次VACUUM墙钟高9.83%／27.97%，CPU分别低1.92%／高35.29%。在共同after-UPDATE种子上，仅选ID的CPU高8.43%／8.39%，墙钟高9.77%／14.77%；三个全列查询墙钟也高于两次旧版，完整正负结果保留，原因OPEN。
+
+用户指出的analyze-reindex-main-costs-20261104原始JSON为56,047,459字节（53.45MiB）；当前版本已使用5,977,159字节（5.70MiB）的.json.gz保存，原始SHA与逐字节解压核对保存在manifest，当前Git不跟踪原始大JSON，忽略规则阻止未来同目录原始JSON误加入（小manifest除外）。该证据用于复核原始耗时与错误，保留压缩内容；未重写旧提交历史。
+
+[完整性能与压缩证据](docs/performance-report-2026-10-30.md#vacuum-physical-references-20261107)；Goal active，数据库功能与性能继续逐项推进。
+<!-- P37 vacuum-physical-references end -->
+
 <!-- P36 physical-row-null-reuse begin -->
 <a id="physical-row-null-reuse-current"></a>
 ## 2026-11-06：查询执行继续优化

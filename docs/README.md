@@ -1,5 +1,16 @@
 # 文档索引
 
+<!-- P37 vacuum-physical-references begin -->
+<a id="vacuum-physical-references-current"></a>
+## 当前批次：VACUUM引用安全与完整成本
+
+本批1500项完整正常计时没有证明全面提速。在共同的真实after-DELETE种子上，单长字段首次VACUUM服务器CPU比旧版及旧版回测低8.36%／7.73%；多长字段首次VACUUM墙钟高9.83%／27.97%，CPU分别低1.92%／高35.29%。在共同after-UPDATE种子上，仅选ID的CPU高8.43%／8.39%，墙钟高9.77%／14.77%；三个全列查询墙钟也高于两次旧版，完整正负结果保留，原因OPEN。
+
+新测试160／0通过，旧版160／48复现；8项相关回归旧／新均actual0，既有TOAST断言仍actual -6。[测试报告](test-report.md#vacuum-physical-references-current)、[1500操作与完整压缩证据](performance-report-2026-10-30.md#vacuum-physical-references-20261107)。
+
+正式库存2398个测试文件（1131顶层／1136总C++），注册E2E684／独立E2E664不变。754个Markdown路径和725份保护记录保持，8份既有文档仅插入本批说明。原273项及22 complete／166 partial／70 unverified／15 deferred_by_user不变，历史增至287，IDX-07仍unverified/evidence[]。
+<!-- P37 vacuum-physical-references end -->
+
 <!-- P36 physical-row-null-reuse begin -->
 <a id="physical-row-null-reuse-current"></a>
 ## 当前批次：扫描与排序投影执行优化

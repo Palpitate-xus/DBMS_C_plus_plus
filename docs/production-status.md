@@ -1,5 +1,26 @@
 # 生产化状态
 
+<!-- P37 vacuum-physical-references begin -->
+<a id="vacuum-physical-references-current"></a>
+## 当前批次：普通VACUUM引用安全（P37-C1）
+
+新增 vacuum_toast_physical_reference_test 在同一冻结源码上执行全部16种情形：旧版160检查／48失败／actual1，C1为160／0／actual0。覆盖普通表与原生范围分区存储、vacuumToast及外层vacuum、真实同库／跨库同名表调用者、跨位图字节的NULL、空串、文本NULL、UTF-8、类似marker的普通字符串、TEXT11003／40003及BYTEA70003／11009。独立完整值物理解码核对16种情形中的80个存活对象全部原始字节，以及每个真实孤儿的回收、调用者绑定恢复和第二次维护幂等。
+
+本批1500项完整正常计时没有证明全面提速。在共同的真实after-DELETE种子上，单长字段首次VACUUM服务器CPU比旧版及旧版回测低8.36%／7.73%；多长字段首次VACUUM墙钟高9.83%／27.97%，CPU分别低1.92%／高35.29%。在共同after-UPDATE种子上，仅选ID的CPU高8.43%／8.39%，墙钟高9.77%／14.77%；三个全列查询墙钟也高于两次旧版，完整正负结果保留，原因OPEN。
+
+原样270操作矩阵的30个区域中，墙钟22低于两旧／3高于两旧／5居间，服务器CPU为16／4／10，客户端CPU为10／9／11。固定／单长字段／多长字段的插入、更新、删除、全列读取、VACUUM、TRUNCATE和重写，以及直接全列／仅ID查询全部保留；不能用部分区域改善覆盖其他操作的回退。
+
+8项相关原生测试在旧版和C1均actual0：vacuum_toast_test、parallel_vacuum_test、vacuum_page_lock_test、vacuum_full_test、bytea_large_toast_test、ordinary_project_toast_demand_test、sorted_projection_null_bitmap_cost_test、view_column_dependency_test。其中旧版后3项复用相同源码／冻结对象／ELF的既有正常终态，其余均本批实际执行。既有toast_test在旧版与C1仍于第604行 `!corruptScan.open()` 断言中止（actual -6），保留失败，后续断言未运行；未修改测试预期，full suite=false。
+
+本批实际PG缺口包括：TEXT70003字符INSERT在产品返回22023而PG成功，立即读取与冷开读取缺该行；SQL `CREATE TABLE ... PARTITION OF` 返回0A000，子表目录身份及冷开身份读取缺行。原生分区物理存储控制不代表这项SQL功能已实现，也不代表逻辑分区扫描已通过。
+
+完整证据压缩为[vacuum-physical-references-20261107.json.gz](benchmarks/vacuum-physical-references-20261107.json.gz)，34,381,025字节（32.79MiB），SHA256 `0b4576a981b223747eb97287378931d41e79bbdc27c2ae998211b8149ae01c1e`；内层完整证据JSON为2,675,881,552字节。51,608个非ELF文件、2,014个目录、2,934个内容块和221个本地ELF引用已在清理前后独立逐字节核对。删除48,458个已归档生成副本，逻辑文件量4,625,982,422字节（4.308GiB），不等同于独占文件系统释放量。保留全部源码、ELF、原始PC采样、任务stdout/stderr和错误记录、目录、新after-DELETE实际冷开种子及外部P36 after-UPDATE实际种子；生成数据目录中的dbms.log副本随数据压缩保存。旧37个压缩包保持。
+
+正式库存2398个测试文件（1131顶层／1136总C++），注册E2E684／独立E2E664不变。754个Markdown路径和725份保护记录保持，8份既有文档仅插入本批说明。原273项及22 complete／166 partial／70 unverified／15 deferred_by_user不变，历史增至287，IDX-07仍unverified/evidence[]。
+
+本批只关闭物理TOAST引用识别这一有限数据安全问题，功能总账仍partial。旧P35/P36负向性能矩阵、当前ID与多长字段VACUUM回退、既有TOAST断言及PG协议／新SQL差异继续OPEN。执行图／child-provider生命周期、retained planning／portal、CPU-sort interrupt及通用故障矩阵等用户暂缓范围不变。Goal active，直接master分批提交，未推送或替换默认程序；正常CMake C++17/O2候选SHA前缀56aad0c0，旧版30412452，更早对照77418e9c，默认425165af保持。 [完整性能报告](performance-report-2026-10-30.md#vacuum-physical-references-20261107)。
+<!-- P37 vacuum-physical-references end -->
+
 <!-- P36 physical-row-null-reuse begin -->
 <a id="physical-row-null-reuse-current"></a>
 ## 当前批次：查询收益与未解决的成本回退（P36-C1）

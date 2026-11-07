@@ -50977,6 +50977,13 @@ size_t StorageEngine::vacuumToast(const std::string& dbname,
     const auto heapRowWidth = heapHeaderRowWidth(tbl);
     if (!heapRowWidth) return 0;
     std::set<uint64_t> activeToastIds;
+    const size_t minimumHeader = rowHeaderSize(tbl.formatVersion, tbl.len);
+    const size_t fixedSize = tbl.fixedDataSize();
+    std::vector<size_t> variableColumns;
+    variableColumns.reserve(tbl.varColCount());
+    for (size_t i = 0; i < tbl.len; ++i)
+        if (tbl.cols[i].isVariableLength) variableColumns.push_back(i);
+    const size_t toastPrefixLength = strlen(TOAST_PREFIX);
 
     // A tuple can be invisible to the vacuuming transaction while an older
     // snapshot can still read it.  Scan every physical live slot, rather than
@@ -51039,20 +51046,40 @@ size_t StorageEngine::vacuumToast(const std::string& dbname,
                         return;
                     }
                     const auto* header = castHeapHeader(tuple);
-                    const size_t minimumHeader = rowHeaderSize(
-                        tbl.formatVersion, tbl.len);
                     if (header->t_hoff < minimumHeader ||
                         header->t_hoff > length) {
                         valid = false;
                         return;
                     }
-                    const std::string row(
-                        tuple + header->t_hoff, length - header->t_hoff);
-                    for (size_t i = 0; i < tbl.len; ++i) {
-                        if (!tbl.cols[i].isVariableLength) continue;
+                    if (variableColumns.empty()) return;
+                    const char* row = tuple + header->t_hoff;
+                    const size_t rowLength = length - header->t_hoff;
+                    if (fixedSize > rowLength ||
+                        variableColumns.size() > (rowLength - fixedSize) / 4) {
+                        valid = false;
+                        return;
+                    }
+                    // This is a pinned physical tuple, not an executor row.
+                    // A runtime value getter can consult a different caller's
+                    // bound RID/NULL state and hide a live TOAST reference.
+                    // Read only this tuple's bitmap and stored varlen spans;
+                    // inline values need no materialization or heap re-fetch.
+                    for (size_t v = 0; v < variableColumns.size(); ++v) {
+                        if (dbms::isNull(header, static_cast<int>(variableColumns[v])))
+                            continue;
+                        uint16_t offset = 0, bytes = 0;
+                        std::memcpy(&offset, row + fixedSize + v * 4, sizeof(offset));
+                        std::memcpy(&bytes, row + fixedSize + v * 4 + 2, sizeof(bytes));
+                        if (offset > rowLength || bytes > rowLength - offset) {
+                            valid = false;
+                            return;
+                        }
+                        if (bytes <= toastPrefixLength ||
+                            std::memcmp(row + offset, TOAST_PREFIX, toastPrefixLength) != 0)
+                            continue;
                         uint64_t toastId = 0;
                         if (parseToastMarker(
-                                extractColumnValueStatic(row, tbl, i),
+                                std::string(row + offset, bytes),
                                 toastId)) {
                             activeToastIds.insert(toastId);
                         }

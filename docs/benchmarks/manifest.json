@@ -395,6 +395,20 @@
       "payload_raw_bytes": 2933021207,
       "payload_raw_sha256": "c01bee25b4bf0863b75a04e30d25e2f1998d29115f82cf526e8eafa382192510",
       "scope": "P36 physical NULL metadata reuse: complete first720,12diagnostic profiles,new270+720 and original62 pair; all timing negatives and inherited TOAST assertions preserved; partial, no overall or PG speed claim"
+    },
+    {
+      "original_path": "docs/benchmarks/vacuum-physical-references-20261107.json",
+      "original_bytes": 45665745,
+      "original_sha256": "81906f1bf83377bc8d3db5c69f0802e91121b3854207845bfdf91d4b36f5d9eb",
+      "path": "docs/benchmarks/vacuum-physical-references-20261107.json.gz",
+      "bytes": 34381025,
+      "sha256": "0b4576a981b223747eb97287378931d41e79bbdc27c2ae998211b8149ae01c1e",
+      "encoding": "gzip",
+      "roundtrip_bytes_exact": true,
+      "payload_encoding": "base64+xz+json-content-addressed-v1",
+      "payload_raw_bytes": 2675881552,
+      "payload_raw_sha256": "440b2e83a13dc34bbe4818b48a3bbe621eb5150dcb54035507d00b65ad74699b",
+      "scope": "P37 physical ordinary VACUUM reference safety; all1500 normal operations/114Main,3diagnostic profiles,original62 pair,fresh28PG/before/current; every prototype/TOAST failure and performance negative retained; partial, no overall/PG speed claim"
     }
   ],
   "total_original_bytes": 1625701048,
