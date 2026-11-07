@@ -51431,6 +51431,7 @@ size_t StorageEngine::vacuumFull(const std::string& dbname,
     const std::string tableKey = dbname + "/" + tablename;
     const std::string secondaryPrefix = tableKey + "/";
     const std::string hashPrefix = dbname + "." + tablename + ".";
+    const std::set<std::string> rewriteTables{tablename};
     const auto deadTupleKey = std::make_pair(dbname, tablename);
     std::optional<size_t> priorDeadCount;
     {
@@ -51590,8 +51591,9 @@ size_t StorageEngine::vacuumFull(const std::string& dbname,
         rowCount += relation.tuples.size();
     }
 
-    // Make the backup a faithful image of every cached relation fork.
-    if (!flushDatabaseCaches(dbname)) {
+    // Make this relation's backup faithful without publishing unrelated
+    // tables' dirty buffers as a side effect of the rewrite.
+    if (!flushTableCaches(dbname, rewriteTables)) {
         return 0;
     }
     if (auto it = fsmCache_.find(tableKey); it != fsmCache_.end() && it->second)
@@ -51690,8 +51692,22 @@ size_t StorageEngine::vacuumFull(const std::string& dbname,
             if (fileError) { backupValid = false; break; }
             const auto mode = static_cast<uint32_t>(std::filesystem::status(path, fileError).permissions()) & 07777;
             const auto backup = vacuum_full_backup::backupFile(backupDirectory, i);
-            if (fileError || !std::filesystem::copy_file(path, backup,
-                    std::filesystem::copy_options::none, fileError) || fileError ||
+            if (fileError) { backupValid = false; break; }
+            bool saved = false;
+            if (role == BackupRole::Physical) {
+                // Every physical path is unlinked below before rebuilding.
+                // A link retains its old, already-flushed inode without a
+                // second data copy. Schema/dirty metadata can be changed by
+                // other helpers, so keep independent copies of those files.
+                std::filesystem::create_hard_link(path, backup, fileError);
+                saved = !fileError;
+            }
+            if (!saved) {
+                fileError.clear();
+                saved = std::filesystem::copy_file(path, backup,
+                    std::filesystem::copy_options::none, fileError);
+            }
+            if (!saved || fileError ||
                 !vacuum_full_backup::syncFile(backup) ||
                 !vacuum_full_backup::digestFile(backup, file) || !file.present ||
                 file.size != size || file.mode != mode) { backupValid = false; break; }
@@ -51986,7 +52002,7 @@ size_t StorageEngine::vacuumFull(const std::string& dbname,
     if (!clearSpecializedIndexDirty(*this, dbname, tablename))
         return failRewrite();
 
-    if (!flushDatabaseCaches(dbname)) return failRewrite();
+    if (!flushTableCaches(dbname, rewriteTables)) return failRewrite();
     std::set<std::filesystem::path> publicationParents{relationRoot, dbPath(dbname)};
     for (const auto& path : physicalPaths) {
         bool exists = false;

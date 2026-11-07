@@ -1,5 +1,18 @@
 # Changelog
 
+<!-- P40 vacuum-full-relation-snapshot begin -->
+<a id="vacuum-full-relation-snapshot-current"></a>
+## 2026-11-07：FULL限定关系刷盘与可回退硬链接备份
+
+普通VACUUM FULL在备份前与重建后，只刷新目标逻辑关系及其分区／TOAST缓存，避免把其他表的脏页一并刷出。物理文件已同步，且在任何重建写入前全部unlink：这些文件优先用硬链接保留旧inode作为回滚映像，失败则完整复制；schema和specialized-dirty元数据继续独立复制。每份备份的fsync、完整大小／模式／SHA256校验，以及manifest、pending、替换文件／schema、WAL、COMMIT和undo的持久化顺序全部保留。本批只改TableManage.cpp的vacuumFull，没有修改全局缓存、index_file、WAL格式、CRC或恢复授权规则。
+
+本批只证明固定字段FULL墙钟低于两侧旧版：-11.57%／-1.51%；单长／多长FULL服务器CPU均较低，墙钟各为-3.35%／+1.84%、-1.35%／+3.87%，结果混合。没有证明数据库全面提速，也没有追回P39相对更早84bb的全部恢复成本。
+
+明显负向保持OPEN：首次普通VACUUM多长字段墙钟C1中位67.010218ms，旧c8ca首测30.951480ms／回测25.722458ms，即+116.501%／+160.512%。原三次样本分别为C1 [71.510152,26.679347,67.010218]ms、旧首测[35.992784,30.951480,25.821788]ms、旧回测[25.722458,23.927581,29.365169]ms，全部保留。单长字段大批重新插入的墙钟也+51.70%／+58.00%。未因负向重跑、排除样本或更改预期。
+
+新增完整值／冷开／脏页owner／复制回退正式测试，原273状态不变，新增partial历史290，Goal active。[报告](docs/performance-report-2026-10-30.md#vacuum-full-relation-snapshot-20261107)。
+<!-- P40 vacuum-full-relation-snapshot end -->
+
 <!-- P39 vacuum-full-wal-generation begin -->
 <a id="vacuum-full-wal-generation-current"></a>
 ## 2026-11-07：FULL物理代次与持久化回滚

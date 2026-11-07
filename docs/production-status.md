@@ -1,5 +1,24 @@
 # 生产化状态
 
+<!-- P40 vacuum-full-relation-snapshot begin -->
+<a id="vacuum-full-relation-snapshot-current"></a>
+## 当前批次：FULL关系快照与完整成本（P40-C1，partial）
+
+普通VACUUM FULL在备份前与重建后，只刷新目标逻辑关系及其分区／TOAST缓存，避免把其他表的脏页一并刷出。物理文件已同步，且在任何重建写入前全部unlink：这些文件优先用硬链接保留旧inode作为回滚映像，失败则完整复制；schema和specialized-dirty元数据继续独立复制。每份备份的fsync、完整大小／模式／SHA256校验，以及manifest、pending、替换文件／schema、WAL、COMMIT和undo的持久化顺序全部保留。本批只改TableManage.cpp的vacuumFull，没有修改全局缓存、index_file、WAL格式、CRC或恢复授权规则。
+
+C1本批重新执行26项相关原生测试：12项WAL／身份／出生／退休／redo／UNLOGGED／TRUNCATE、10项长字段／VACUUM／投影／视图、热态vacuum_full_test及既有两个FULL恢复测试通过，合计25项actual0。既有toast_test仍在604行 `!corruptScan.open()` 断言actual -6，后续NOTRUN；未修改预期，full suite=false。旧c8ca的26个对照终态来自P39已认证实际运行，逐项核对相同冻结源码、250生产文件、61核心对象和正常ELF后复用，没有声称本批重跑旧版26项。
+
+本批只证明固定字段FULL墙钟低于两侧旧版：-11.57%／-1.51%；单长／多长FULL服务器CPU均较低，墙钟各为-3.35%／+1.84%、-1.35%／+3.87%，结果混合。没有证明数据库全面提速，也没有追回P39相对更早84bb的全部恢复成本。
+
+明显负向保持OPEN：首次普通VACUUM多长字段墙钟C1中位67.010218ms，旧c8ca首测30.951480ms／回测25.722458ms，即+116.501%／+160.512%。原三次样本分别为C1 [71.510152,26.679347,67.010218]ms、旧首测[35.992784,30.951480,25.821788]ms、旧回测[25.722458,23.927581,29.365169]ms，全部保留。单长字段大批重新插入的墙钟也+51.70%／+58.00%。未因负向重跑、排除样本或更改预期。
+
+本批仍只验收未来普通关系FULL的有限重写／关闭／强杀／回滚恢复。不能修复已被旧FULL写坏且没有新pending／退休授权的旧集群；P38实际损坏库继续保留。跨FULL的PITR／物理基备未验收；数据库排他锁范围仍大于PG表级锁，未验收分区FULL冷开或高并发等价。硬链接需要文件系统支持，实际失败会走复制回退；不宣称所有平台／文件系统已验证。原15项安全／TDE及额外用户暂缓范围保持，这六种FULL故障不是已暂缓的通用IO／分配器／保存点矩阵，也未恢复执行图／child-provider或retained planning／portal工作。
+
+完整证据压缩为[vacuum-full-relation-snapshot-20261107.json.gz](benchmarks/vacuum-full-relation-snapshot-20261107.json.gz)，47,044,953字节（44.87MiB），SHA256 `c833252e2069713019be97f05b1186aaa1f5d39a90020fe9c184994618757522`；内层完整JSON 4,154,013,795字节。77,852个非ELF文件／2,810目录／3,397内容块／251个本地ELF引用在清理前后独立核对。只删除71,031个逐字节归档的本批生成副本，逻辑量6,471,891,795字节（6.027GiB），不等同独占文件系统释放量。源码、ELF、stdout/stderr、错误、全部故障初始映像、工作旧库1MiB种子、P38实际损坏库、外部P36／P37种子及旧40个压缩包保留。
+
+正式测试库存2402个文件（1135顶层／1140总C++），2401个旧测试逐字节不变；注册E2E684／独立E2E664不变。250个生产文件只改TableManage.cpp，正常CMake C++17/O2 C1为bf9ad7ae，旧c8ca0215、更早84bbadb4；61核心对象冻结。默认425165af不变。754个Markdown路径、725份保护记录保持，只在已有8文档插入说明。原273项和22 complete／166 partial／70 unverified／15 deferred_by_user不变；289条历史保持，新增partial第290条；IDX-07仍unverified/evidence[]。Goal active，直接master提交，未推送或替换默认程序。下方各批是各自历史程序的记录。 [完整报告](performance-report-2026-10-30.md#vacuum-full-relation-snapshot-20261107)。
+<!-- P40 vacuum-full-relation-snapshot end -->
+
 <!-- P39 vacuum-full-wal-generation begin -->
 <a id="vacuum-full-wal-generation-current"></a>
 ## 当前批次：FULL代次恢复（P39-C1，partial）

@@ -437,6 +437,20 @@
       "payload_raw_bytes": 4159917907,
       "payload_raw_sha256": "34e92cd76c7391df6f72712a4578af70b38c71f9f5eda34ea10569cab6dd0311",
       "scope": "P39 future ordinary FULL physical generations/durable undo; finite native cold/kill/legacy/repeat/empty/rename, exact original22 and original62/72/28 wire, six FULL-specific faults; all1545 normal costs/129Main and all negative outcomes; prior damaged cluster/PITR/partition cold/full suite/strict PG remain unaccepted"
+    },
+    {
+      "original_path": "docs/benchmarks/vacuum-full-relation-snapshot-20261107.json",
+      "original_bytes": 62629116,
+      "original_sha256": "f338dc0b803d313cb7fd27683fee8720557c2d5bd36de18a3353e091ca0e4cb7",
+      "path": "docs/benchmarks/vacuum-full-relation-snapshot-20261107.json.gz",
+      "bytes": 47044953,
+      "sha256": "c833252e2069713019be97f05b1186aaa1f5d39a90020fe9c184994618757522",
+      "encoding": "gzip",
+      "roundtrip_bytes_exact": true,
+      "payload_encoding": "base64+xz+json-content-addressed-v1",
+      "payload_raw_bytes": 4154013795,
+      "payload_raw_sha256": "1edea3c8bd8c311d315bd225772c2b7624303d8d7896342f3d410bd7f8e5781c",
+      "scope": "P40 future ordinary FULL relation-only flushing and physical hardlink snapshots/complete-copy fallback; finite same-source baseline/current native data and cold values, all26 related terminals including known toast failure,185 exact protocol SQL,six FULL-specific faults,actual syscall profiles; all1545 normal costs and all198 comparisons including ordinary VACUUM negative and bounded post-window diagnostic; no full suite, strict PG, PITR, partition cold or old damaged-cluster repair claim"
     }
   ],
   "total_original_bytes": 1625701048,

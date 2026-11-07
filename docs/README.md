@@ -1,5 +1,18 @@
 # 文档索引
 
+<!-- P40 vacuum-full-relation-snapshot begin -->
+<a id="vacuum-full-relation-snapshot-current"></a>
+## 当前批次：FULL有限开销优化
+
+本批只证明固定字段FULL墙钟低于两侧旧版：-11.57%／-1.51%；单长／多长FULL服务器CPU均较低，墙钟各为-3.35%／+1.84%、-1.35%／+3.87%，结果混合。没有证明数据库全面提速，也没有追回P39相对更早84bb的全部恢复成本。
+
+明显负向保持OPEN：首次普通VACUUM多长字段墙钟C1中位67.010218ms，旧c8ca首测30.951480ms／回测25.722458ms，即+116.501%／+160.512%。原三次样本分别为C1 [71.510152,26.679347,67.010218]ms、旧首测[35.992784,30.951480,25.821788]ms、旧回测[25.722458,23.927581,29.365169]ms，全部保留。单长字段大批重新插入的墙钟也+51.70%／+58.00%。未因负向重跑、排除样本或更改预期。
+
+[测试](test-report.md#vacuum-full-relation-snapshot-current)、[全部198项比较与压缩证据](performance-report-2026-10-30.md#vacuum-full-relation-snapshot-20261107)。
+
+正式测试库存2402个文件（1135顶层／1140总C++），2401个旧测试逐字节不变；注册E2E684／独立E2E664不变。250个生产文件只改TableManage.cpp，正常CMake C++17/O2 C1为bf9ad7ae，旧c8ca0215、更早84bbadb4；61核心对象冻结。默认425165af不变。754个Markdown路径、725份保护记录保持，只在已有8文档插入说明。原273项和22 complete／166 partial／70 unverified／15 deferred_by_user不变；289条历史保持，新增partial第290条；IDX-07仍unverified/evidence[]。Goal active，直接master提交，未推送或替换默认程序。下方各批是各自历史程序的记录。
+<!-- P40 vacuum-full-relation-snapshot end -->
+
 <!-- P39 vacuum-full-wal-generation begin -->
 <a id="vacuum-full-wal-generation-current"></a>
 ## 当前批次：FULL恢复与完整成本
