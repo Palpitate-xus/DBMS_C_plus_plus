@@ -2,6 +2,35 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-07 no-effect transaction commit publication and full621 normal costs",
+      "gap_ids": [
+        "TXN-01",
+        "TXN-02",
+        "TXN-03",
+        "STO-05"
+      ],
+      "status": "partial",
+      "evidence": [
+        "src/commands/TableManage.cpp",
+        "src/commands/TableManage.h",
+        "tests/read_transaction_publication_test.cpp",
+        "docs/performance-report-2026-10-30.md",
+        "docs/benchmarks/no-effect-transaction-publication-20261107.json.gz"
+      ],
+      "tests": [
+        "tests/read_transaction_publication_test.cpp",
+        "tests/phase5_remaining_test.cpp",
+        "tests/checkpoint_test.cpp",
+        "tests/toast_test.cpp",
+        "tests/wal_append_failure_test.cpp"
+      ],
+      "verification": [
+        "full-fixed -20.19% / -20.66%；id-fixed -11.93% / -9.90%；full-single -7.33% / +0.83%；id-single -0.68% / +3.52%；full-overflow -3.08% / +0.05%；id-overflow -12.74% / -12.31%",
+        "Actual full95 SQL per PG/before/C1; old/current request/reply exact, values/NULL/tag/Ready/SQLSTATE model pass. 33selected current31zero+knownToast-6+WALfault300s-15 incomplete; fullsuite=false. Normal621 all once,all135metricrows and negatives retained. Full records in performance report/archive.",
+        "All original273 item objects/status,291 prior history and user-deferred scope unchanged; only this partial evidence entry. Goal active; default binary unchanged; directmaster/no push."
+      ]
+    },
+    {
       "issue": "2026-11-07 ordinary large VARCHAR declaration/storage and per-value TOAST page search, full data/cold checks and all1680 new normal costs",
       "gap_ids": [
         "TYPE-04",

@@ -1,5 +1,11 @@
 # 生产化状态
 
+## 当前 P42 候选与安装状态（2026-11-07）
+
+正常CMake C++17/O2候选C1为`4312607034af4e188352222984ff93e05e44cdbeef92e17975f43747188a1d53`，源251文件中只改事务管理CPP／头；新正式原生回归的38项要求全部通过，95条SQL与旧版请求回复逐字节一致，并核对并发快照与SIGKILL后的完整恢复。选定33个原生入口当前31个0，TOAST断言和300s未完成的WAL追加故障测试仍OPEN；未运行全库或重开用户暂缓的通用矩阵。
+
+当前根目录默认程序仍`425165afe19d10ccf9be806c3052e9a09e3875a3826142d2949cde995fdf94d1`，未替换默认程序或重启既有服务。621次正常时钟与所有负向见[完整报告](performance-report-2026-10-30.md#no-effect-transaction-publication-20261107)，不能把减少fsync直接写成全库提速。压缩完整证据后按全字节校验清理本批可重建副本，失败映像和复现输入保留。直接master使用指定Git身份，不推送；原273／原历史／暂缓不变，Goal active。
+
 <!-- P41 large-varchar-toast-search begin -->
 <a id="large-varchar-toast-search-current"></a>
 ## 当前批次：VARCHAR／TOAST（P41-C6，partial）

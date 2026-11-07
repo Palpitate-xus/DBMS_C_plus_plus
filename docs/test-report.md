@@ -1,5 +1,13 @@
 # DBMS 功能测试报告
 
+## P42 最新有限验证（2026-11-07）
+
+新正式`read_transaction_publication_test.cpp`：旧版38项中15个新增优化要求失败、冷开数据成功；C1的38项全部成功。独立核对两版16份完整原生观测与55条WAL记录。另32个既有原生入口旧／新各30个0，TOAST在604行断言-6、WAL追加故障测试300s未完成并由本任务执行器终止-15，两版全部保留且不计通过。加新回归后C1的33个不同入口为31个0、2项未通过，full suite=false。
+
+实际PG18.6／旧／新各95条SQL完整模型通过，旧新95份请求回复逐字节相同；六份产品闭库WAL共475条CRC／prev链核对0。TEMP提交动作、序列、事务DDL、读后写、失败事务、RR并发与崩溃后完整值／NULL均保留严格检查。性能前还有10个不计时场景、366条完整SQL、20个Main0通过。621次新正常成本及全部135行比较在[报告](performance-report-2026-10-30.md#no-effect-transaction-publication-20261107)，任何负向不排除、不重采。
+
+原2404测试字节不变、新增1后2405（顶层CPP1138／全部CPP1143）。源251、Markdown754及725保护记录保持；原273状态及291条历史不变，只追加partial第292条，Goal active。
+
 <!-- P41 large-varchar-toast-search begin -->
 <a id="large-varchar-toast-search-current"></a>
 ## 2026-11-07：长VARCHAR全值、冷开及性能验证

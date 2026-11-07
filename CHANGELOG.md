@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-11-07：无写入事务提交优化（P42，partial）
+
+- 为同一WAL owner记录事务起始位置，严格无变更条件下省去无用COMMIT／CLOG发布；写入、DDL、序列与TEMP终止动作保留保守路径。
+- 新正式原生回归验证零WAL、完整数据、并发快照、真实fsync和新进程恢复；95条SQL旧新逐字节相同，33个选定原生入口仍有2项未通过。
+- [性能报告](docs/performance-report-2026-10-30.md#no-effect-transaction-publication-20261107)保留621次新正常时钟、135行比较及全部负向；八份原文只插入新块，新增压缩证据，校验后清理本批副本。原273状态与所有用户暂缓保持，默认程序未提升，Goal active。
+
 <!-- P41 large-varchar-toast-search begin -->
 <a id="large-varchar-toast-search-current"></a>
 ## 2026-11-07：VARCHAR声明／长值与TOAST搜索

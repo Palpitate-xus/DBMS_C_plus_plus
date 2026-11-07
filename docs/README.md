@@ -1,5 +1,9 @@
 # 文档索引
 
+## 当前 P42：无写入事务提交和621次正常成本
+
+最新状态以[本批性能／正确性报告](performance-report-2026-10-30.md#no-effect-transaction-publication-20261107)为准：[完整压缩证据](benchmarks/no-effect-transaction-publication-20261107.json.gz)含所有原始结果、失败和提取方式。新增一个正式回归，保留95条完整SQL旧新字节比较；33个选定原生入口有31个0、2项未通过，全套未跑。源码已更新，默认程序未替换。八份既有文档插入更新，没有新增Markdown；原754路径和725保护记录保持。Goal active；下方为历史索引。
+
 <!-- P41 large-varchar-toast-search begin -->
 <a id="large-varchar-toast-search-current"></a>
 ## 当前批次：长VARCHAR与完整性能证据

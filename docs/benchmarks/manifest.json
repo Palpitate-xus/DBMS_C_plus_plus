@@ -509,8 +509,18 @@
       "roundtrip_bytes_exact": true,
       "scope": "P41 exact compressed byte segment; all3 parts and the index reconstruct the unchanged complete archive. Use scripts/extract_benchmark_parts.py.",
       "multipart_index": "docs/benchmarks/large-varchar-toast-search-20261107.json.gz"
+    },
+    {
+      "original_path": "docs/benchmarks/no-effect-transaction-publication-20261107.json",
+      "original_bytes": 51383200,
+      "original_sha256": "8de28e70cc0c11db53a5766cfdd798157eb9a70421bf9443b0acc8790f4f42c5",
+      "path": "docs/benchmarks/no-effect-transaction-publication-20261107.json.gz",
+      "bytes": 38701943,
+      "sha256": "2c301399e7540a22c11b20c3db6f0fc0559157c19a421588baaaa6c852d76a87",
+      "encoding": "gzip",
+      "roundtrip_bytes_exact": true
     }
   ],
-  "total_original_bytes": 1625701048,
-  "total_bytes": 246155411
+  "total_original_bytes": 1677084248,
+  "total_bytes": 284857354
 }

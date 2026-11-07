@@ -1,5 +1,11 @@
 # DBMS C++
 
+## 2026-11-07 P42：纯读取事务减少提交刷盘
+
+最新候选在确认同一 WAL 未推进且无写入／DDL／TEMP提交动作等状态时，跳过无用 COMMIT WAL 和 CLOG同步；SSI、约束、快照与锁清理保持。五类原生无写入事务从每次48B WAL、2～3次真实fsync降为0，写入保留原同步。新增95条SQL的旧／新请求回复逐字节相同，完整数据和崩溃后恢复通过。
+
+正常621次计时、90个Main0及全部135行成本比较见[完整报告](docs/performance-report-2026-10-30.md#no-effect-transaction-publication-20261107)。固定字段全量查询墙钟中位数变化（首测／回测）：-24.44% / -19.53%。其余查询有混合结果，其他操作和所有负向均保留，不能称为全面提速。33个选定原生入口当前31个0；既有TOAST断言及WAL故障测试超时未通过，未运行全套。源码已更新，根目录默认程序未替换。直接master、指定身份、无推送，Goal active；原273项状态保持。下方P41及更早为历史记录。
+
 <!-- P41 large-varchar-toast-search begin -->
 <a id="large-varchar-toast-search-current"></a>
 ## 2026-11-07：长VARCHAR与TOAST写入优化

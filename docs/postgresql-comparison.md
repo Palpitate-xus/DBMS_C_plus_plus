@@ -1,5 +1,11 @@
 # 与 PostgreSQL 18 的功能和性能差距
 
+## 最新 P42（2026-11-07）：读取提交成本的局部进展
+
+参考PG18.6未分配持久XID／未写WAL的提交分支和DuckDB ChangesMade检查，为本项目已证实无持久事务变更的读取消除无用COMMIT／CLOG同步；项目仍在BEGIN分配内部保留ID，尚非PG完整惰性XID／事务实现。95条SQL在实际PG／旧／新程序完整跑完，模型值／NULL／tag／事务状态正确，旧新请求回复逐字节一致；映射实际items OID后仍保留8处catalog或未映射TEMP／aux来源观察，不称为全PG协议等价。
+
+621次正常成本与全部负向、33项选定原生中的2个未通过项详见[报告](performance-report-2026-10-30.md#no-effect-transaction-publication-20261107)。这是本项目两版对照，没有新增PG速度基准；原273状态仍22／166／70／15，Goal active，继续补齐普通功能和性能。
+
 <!-- P41 large-varchar-toast-search begin -->
 <a id="large-varchar-toast-search-current"></a>
 ## 2026-11-07：长VARCHAR接近PG，功能和性能仍partial

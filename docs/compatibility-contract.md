@@ -1,5 +1,11 @@
 # 兼容版本契约
 
+## P42 当前事务提交补充（2026-11-07）
+
+无写入事务仍保留内部txid、快照、SSI和锁生命周期；同一物理WAL owner位置未变且所有保守条件满足时，不为未被持久变更引用的保留ID写COMMIT或CLOG。不能据READ ONLY或SQL前缀省略写事务同步。目录失效与序列写入单独标记，UNLOGGED DDL／TEMP提交动作及检测到共享WAL推进时保留原路径。没有引入异步写入提交，没有改变磁盘／协议编码或校验。
+
+新95条SQL与旧版回复逐字节一致，完整数据与实际崩溃恢复通过；原PG描述符来源差异仍可见，未声称整体PG等价。仍C++17／O2，根目录默认程序未提升。参见[最新边界、失败和性能证据](performance-report-2026-10-30.md#no-effect-transaction-publication-20261107)；原273和既有暂缓保持，Goal active。
+
 <!-- P41 large-varchar-toast-search begin -->
 <a id="large-varchar-toast-search-current"></a>
 ## VARCHAR逻辑长度与新旧元数据边界

@@ -1,5 +1,189 @@
 # 数据库操作性能测试报告（2026-10-30）
 
+<a id="no-effect-transaction-publication-20261107"></a>
+
+## 2026-11-07 P42：无写入事务减少提交 WAL／CLOG 同步
+
+本节是最新的有限 partial 进展；下方 P41 及更早章节保留历史结果。基线是 master `3d663d217262` 的 P41-C6 `587f898d3abb`，候选为正常 CMake C++17/O2 构建 C1 `4312607034af4e188352222984ff93e05e44cdbeef92e17975f43747188a1d53`。只修改 TableManage.cpp／h 的事务提交状态；根目录默认程序仍为 `425165afe19d10ccf9be806c3052e9a09e3875a3826142d2949cde995fdf94d1`，没有替换默认程序、重启既有服务、切换分支或推送。Goal active，原273项仍为22 complete／166 partial／70 unverified／15 deferred_by_user；这不是 PostgreSQL 功能或性能等价验收。
+
+### 实现依据和边界
+
+实际旧 Main 的两类查询保存262条完整回复与12次本人子进程 GDB 堆栈：固定字段查询两次捕获 WAL COMMIT fsync，长值查询还捕获 TOAST／结果字符串复制；没有捕获页 checksum 调用。这组离散堆栈不是统计 CPU 占比，未据此修改校验算法，也未把上批 DELETE／FULL 回退归因于校验。参考 [PostgreSQL 18.6 固定源码 RecordTransactionCommit](https://github.com/postgres/postgres/blob/724edf9bde9d356724ad384a2e196edc3c9f80f7/src/backend/access/transam/xact.c) 对未取得持久 XID／未写 WAL 的处理，以及 [DuckDB 事务管理器](https://github.com/duckdb/duckdb/blob/main/src/transaction/duck_transaction_manager.cpp) 按 ChangesMade 区分提交工作。两份实际下载源码及 HTTP／SHA 收据保留在归档；DuckDB main 是本次字节快照，不承诺以后相同。
+
+在物理 BEGIN 或延迟数据库所有权升级时，记录同一 WAL owner 的起始位置，零位置有效；owner 代次失效时同时丢弃凭证。在 SSI 检查、延迟约束和提交准备之后，只有 WAL 未推进、所有权未换代，且无写入、行／逻辑／堆回写／特殊索引／DDL undo、备份、未完成保存点或子事务状态、TEMP 访问与提交动作等条件同时成立，才跳过无用 COMMIT WAL 和 CLOG 发布。目录失效通知及 nextval／setval／延迟序列写入另作保守标记，原生 UNLOGGED DDL 也保留原路径。不能只根据 READ ONLY 或 SQL 开头判断。
+
+真实写入仍保留原来的 COMMIT WAL flush、TOAST／分配器屏障和 CLOG 可见性发布。无写入路径仍执行 SSI／活动事务／快照／锁／序列清理，不提前返回。没有先把 CLOG 标成 dirty 再拖延刷盘，从而避免妨碍共享状态刷新。项目仍在 BEGIN 分配内部保留 txid，未实现 PG 的完整惰性 XID；无物理变更的保留 ID 不写 CLOG，不能将该保留 ID 当作持久提交状态。共享 WAL 有推进、保守条件不满足时仍走原提交；繁忙并发场景可继续优化。没有修改磁盘格式、WAL 编码／CRC、Fletcher-16 或任何用户暂缓模块。
+
+### 正确性和未通过项
+
+新正式 `read_transaction_publication_test.cpp` 同一要求源码在旧版 setup=1／cold=0，在 C1 setup=0／cold=0。最终每版38项检查：旧版15个优化要求失败、数据检查通过；C1全部通过。五类零 WAL／普通读／RR READ ONLY／SERIALIZABLE READ ONLY／空事务，旧版每次追加48B并调用2～3次真实 fsync，C1全部为 WAL 不变、CLOG完整文件不变、fsync=0。计数 wrapper 总是调用真实 fsync，未模拟成功；只作正常计时前诊断。更新仍调用7次真实 fsync，并发 peer 推进 WAL 后 reader 保留原回退。原生 UNLOGGED DDL、nextval／setval、完整旧 RR 快照和新进程序列状态均验证。独立解码两版16份完整原生观测，共96行／288单元／68 NULL／1,125,160字节；原生 WAL 的55条 CRC／prev 链核对通过。
+
+新增95条完整 SQL 在实际 PG18.6、旧版、C1均完成：完整值、NULL、顺序、tag、Ready I／T／E、SQLSTATE 符合冻结模型。覆盖读后写、只读报错与失败事务终止、ROLLBACK、空 DML、保存点、SQL 函数与序列副作用、TEMP ON COMMIT DELETE、事务 DDL、双连接 RR、正常冷开，以及已确认写入后纯读再 SIGKILL 的恢复。旧版与 C1的95份请求／回复逐字节相同；两份独立回复解码器核对。PG 原始 T7 有41处不同；仅将实际探测的 items OID 映射到相同身份后还剩8处 catalog／未映射 TEMP、aux 来源观察，全部字段原样保留，不写成完整 PG 描述符等价。六份产品闭库映像475条／1,542,960B WAL 的完整 CRC32C、prev 链及 COMMIT／ABORT 排他核对通过；本批未重开通用故障矩阵。
+
+另选32个既有正式原生入口：旧版与 C1各30个实际0，包括 SSI 冲突、检查点、快照、两阶段提交、只读／TEMP／序列、写 WAL 拒绝及长 VARCHAR／TOAST。`toast_test` 两版仍在604行 `!corruptScan.open()` 断言 -6；`wal_append_failure_test` 两版在300s期限仍未完成，各由自己的执行器 SIGTERM 得 -15，后续未运行要求不计通过。两项完整源码、日志、实际终态和闭库映像保留，原因仍 OPEN；没有删除或放宽测试。加新回归共33个不同正式入口，C1为31个0及上述2项未通过，全仓库测试没有运行。正常成本前另有10个不计时场景／366条完整 SQL／20个正常 Main0，完整行、NULL、T7及闭库控制通过。
+
+### 全部正常成本
+
+原定45个场景、90个正常 Main0、1650条完整 SQL，共621次正常计时；独立核对172,344行／611,148单元／42,903 NULL／445,285,782请求回复字节和10,233闭库文件。包括原样270次普通读写／DDL／索引／回滚／维护，270次同一闭库种子的六类全值或 ID 查询，以及81次1MiB长值读写维护。每组三轮按旧版首测→C1→同旧回测，全部样本保留，0排除／0重采。P40原1545与P41原1680计时仍关闭且未替换。
+
+采集器V1在完成原270次普通成本和首个读取场景30次计时后，进入第37个后置控制前因缺少 `timed_region` 参数实际退出1，数据库正常退出0；该控制只保存请求文件、尚未发出。原300个完整计时、全部失败源码／日志／闭库图像原样保留。V2只补未发出的后置／冷开控制和剩余321次计时，实际0，没有重测任何已完成计时。首个读取场景的后置控制改在字节相同克隆的新冷进程执行，另有3次实际OID控制；这不能证明原backend现场后置控制已通过，且首对读取测量之间有采集中断间隔。全部621次实际计时均参与比较，原始未完成场景仍标incomplete；不能把这一续采写成采集器V1通过或无间断采集。
+
+发包到完整 ReadyI 的墙钟与客户端 CPU、整个 Main（含后台线程）的 CPU 均保留。正常窗口内本任务没有编译、剖析、插桩、其他 SQL 或压缩；自然缓存、不绑定 CPU，不声称宿主机全空闲。每次冷开是新进程，不是清空操作系统缓存。先冻结要求并通过有限正确性门，再开始时钟；不使用 fsync 次数直接代替速度。
+
+同闭库六类查询的服务器 CPU 中位变化（相对旧版首测／回测，负数更低）：full-fixed -20.19% / -20.66%；id-fixed -11.93% / -9.90%；full-single -7.33% / +0.83%；id-single -0.68% / +3.52%；full-overflow -3.08% / +0.05%；id-overflow -12.74% / -12.31%。全部区域／指标的正负变化如下；非查询项的波动不能自动归因于此处提交修改，所有退步及原因继续 OPEN，不宣称所有数据库操作提速，也没有测 PG 与本项目的速度倍率。表中三值是首测／C1／回测 p50（ms），完整 raw／min／p50／max 和进程 I/O 括号在机器证据。
+
+| 队列／范围／区域 | 指标 | p50 ms：旧／C1／回测 | C1相对首测／回测 | 位置 |
+| --- | --- | ---: | ---: | --- |
+| large-text/large/delete-returning | client_process_cpu_ns | 0.350 / 0.335 / 0.393 | -4.46% / -14.80% | below_both |
+| large-text/large/delete-returning | server_process_cpu_ns | 14.515 / 10.641 / 12.916 | -26.69% / -17.61% | below_both |
+| large-text/large/delete-returning | wall_ns | 23.093 / 17.528 / 23.740 | -24.10% / -26.17% | below_both |
+| large-text/large/insert-1MiB-mixed | client_process_cpu_ns | 3.159 / 2.537 / 2.852 | -19.70% / -11.06% | below_both |
+| large-text/large/insert-1MiB-mixed | server_process_cpu_ns | 1653.008 / 1610.948 / 1692.283 | -2.54% / -4.81% | below_both |
+| large-text/large/insert-1MiB-mixed | wall_ns | 1929.499 / 1651.890 / 1750.073 | -14.39% / -5.61% | below_both |
+| large-text/large/reinsert-1MiB | client_process_cpu_ns | 2.533 / 2.509 / 2.623 | -0.94% / -4.36% | below_both |
+| large-text/large/reinsert-1MiB | server_process_cpu_ns | 1268.286 / 1243.730 / 1232.169 | -1.94% / +0.94% | between |
+| large-text/large/reinsert-1MiB | wall_ns | 1306.513 / 1296.124 / 1266.323 | -0.80% / +2.35% | between |
+| large-text/large/select-complete | client_process_cpu_ns | 1.788 / 1.710 / 1.603 | -4.37% / +6.71% | between |
+| large-text/large/select-complete | server_process_cpu_ns | 37.894 / 32.731 / 36.237 | -13.62% / -9.67% | below_both |
+| large-text/large/select-complete | wall_ns | 47.008 / 39.811 / 39.472 | -15.31% / +0.86% | between |
+| large-text/large/select-id | client_process_cpu_ns | 0.272 / 0.286 / 0.233 | +5.21% / +22.89% | above_both |
+| large-text/large/select-id | server_process_cpu_ns | 37.972 / 34.695 / 37.426 | -8.63% / -7.30% | below_both |
+| large-text/large/select-id | wall_ns | 44.209 / 39.080 / 42.702 | -11.60% / -8.48% | below_both |
+| large-text/large/truncate | client_process_cpu_ns | 0.243 / 0.190 / 0.240 | -21.46% / -20.74% | below_both |
+| large-text/large/truncate | server_process_cpu_ns | 61.646 / 58.653 / 55.252 | -4.86% / +6.16% | between |
+| large-text/large/truncate | wall_ns | 142.651 / 108.294 / 180.497 | -24.08% / -40.00% | below_both |
+| large-text/large/update-returning | client_process_cpu_ns | 0.630 / 0.602 / 0.656 | -4.58% / -8.28% | below_both |
+| large-text/large/update-returning | server_process_cpu_ns | 295.840 / 266.469 / 302.793 | -9.93% / -12.00% | below_both |
+| large-text/large/update-returning | wall_ns | 336.099 / 286.918 / 319.358 | -14.63% / -10.16% | below_both |
+| large-text/large/vacuum-first | client_process_cpu_ns | 0.221 / 0.233 / 0.222 | +5.57% / +4.75% | above_both |
+| large-text/large/vacuum-first | server_process_cpu_ns | 24.191 / 15.796 / 19.351 | -34.70% / -18.37% | below_both |
+| large-text/large/vacuum-first | wall_ns | 23.641 / 16.061 / 19.637 | -32.06% / -18.21% | below_both |
+| large-text/large/vacuum-full | client_process_cpu_ns | 0.228 / 0.237 / 0.230 | +3.97% / +2.85% | above_both |
+| large-text/large/vacuum-full | server_process_cpu_ns | 28.687 / 26.957 / 28.254 | -6.03% / -4.59% | below_both |
+| large-text/large/vacuum-full | wall_ns | 67.453 / 69.194 / 70.409 | +2.58% / -1.73% | between |
+| ordinary/fixed/delete16 | client_process_cpu_ns | 0.218 / 0.245 / 0.226 | +12.43% / +8.31% | above_both |
+| ordinary/fixed/delete16 | server_process_cpu_ns | 44.970 / 38.597 / 35.073 | -14.17% / +10.05% | between |
+| ordinary/fixed/delete16 | wall_ns | 57.199 / 53.837 / 41.636 | -5.88% / +29.30% | between |
+| ordinary/fixed/direct_full_no_order | client_process_cpu_ns | 4.935 / 3.472 / 4.821 | -29.65% / -27.98% | below_both |
+| ordinary/fixed/direct_full_no_order | server_process_cpu_ns | 11.969 / 11.355 / 9.487 | -5.13% / +19.69% | between |
+| ordinary/fixed/direct_full_no_order | wall_ns | 20.565 / 15.492 / 20.216 | -24.66% / -23.36% | below_both |
+| ordinary/fixed/direct_id_only_no_order | client_process_cpu_ns | 4.830 / 3.434 / 4.775 | -28.90% / -28.09% | below_both |
+| ordinary/fixed/direct_id_only_no_order | server_process_cpu_ns | 9.654 / 10.517 / 12.262 | +8.94% / -14.23% | between |
+| ordinary/fixed/direct_id_only_no_order | wall_ns | 19.219 / 15.468 / 21.314 | -19.52% / -27.43% | below_both |
+| ordinary/fixed/insert1 | client_process_cpu_ns | 0.179 / 0.208 / 0.198 | +16.46% / +5.17% | above_both |
+| ordinary/fixed/insert1 | server_process_cpu_ns | 7.557 / 6.554 / 9.744 | -13.28% / -32.74% | below_both |
+| ordinary/fixed/insert1 | wall_ns | 19.074 / 15.876 / 17.908 | -16.76% / -11.35% | below_both |
+| ordinary/fixed/reinsert_population | client_process_cpu_ns | 0.200 / 0.224 / 0.249 | +12.08% / -9.71% | between |
+| ordinary/fixed/reinsert_population | server_process_cpu_ns | 581.331 / 589.905 / 599.274 | +1.47% / -1.56% | between |
+| ordinary/fixed/reinsert_population | wall_ns | 624.371 / 625.771 / 627.709 | +0.22% / -0.31% | between |
+| ordinary/fixed/select_after_update | client_process_cpu_ns | 4.915 / 4.763 / 4.764 | -3.08% / -0.03% | below_both |
+| ordinary/fixed/select_after_update | server_process_cpu_ns | 14.577 / 9.236 / 11.458 | -36.64% / -19.39% | below_both |
+| ordinary/fixed/select_after_update | wall_ns | 23.012 / 14.902 / 18.479 | -35.24% / -19.36% | below_both |
+| ordinary/fixed/select_after_vacuum | client_process_cpu_ns | 4.661 / 4.172 / 4.625 | -10.50% / -9.81% | below_both |
+| ordinary/fixed/select_after_vacuum | server_process_cpu_ns | 13.894 / 12.662 / 15.028 | -8.87% / -15.75% | below_both |
+| ordinary/fixed/select_after_vacuum | wall_ns | 24.406 / 15.915 / 18.978 | -34.79% / -16.14% | below_both |
+| ordinary/fixed/truncate | client_process_cpu_ns | 0.219 / 0.222 / 0.237 | +1.63% / -6.13% | between |
+| ordinary/fixed/truncate | server_process_cpu_ns | 96.615 / 96.915 / 91.185 | +0.31% / +6.28% | above_both |
+| ordinary/fixed/truncate | wall_ns | 262.090 / 257.341 / 227.357 | -1.81% / +13.19% | between |
+| ordinary/fixed/update16 | client_process_cpu_ns | 0.233 / 0.213 / 0.206 | -8.92% / +3.31% | between |
+| ordinary/fixed/update16 | server_process_cpu_ns | 73.424 / 59.030 / 71.312 | -19.60% / -17.22% | below_both |
+| ordinary/fixed/update16 | wall_ns | 95.650 / 67.340 / 81.385 | -29.60% / -17.26% | below_both |
+| ordinary/fixed/vacuum | client_process_cpu_ns | 0.205 / 0.197 / 0.211 | -4.04% / -6.92% | below_both |
+| ordinary/fixed/vacuum | server_process_cpu_ns | 1.503 / 1.659 / 1.375 | +10.41% / +20.71% | above_both |
+| ordinary/fixed/vacuum | wall_ns | 1.635 / 1.794 / 1.493 | +9.73% / +20.19% | above_both |
+| ordinary/overflow/delete16 | client_process_cpu_ns | 0.199 / 0.256 / 0.209 | +28.85% / +22.85% | above_both |
+| ordinary/overflow/delete16 | server_process_cpu_ns | 65.279 / 67.735 / 69.891 | +3.76% / -3.08% | between |
+| ordinary/overflow/delete16 | wall_ns | 75.900 / 80.621 / 77.414 | +6.22% / +4.14% | above_both |
+| ordinary/overflow/direct_full_no_order | client_process_cpu_ns | 4.239 / 3.747 / 3.532 | -11.59% / +6.09% | between |
+| ordinary/overflow/direct_full_no_order | server_process_cpu_ns | 42.777 / 33.783 / 39.159 | -21.03% / -13.73% | below_both |
+| ordinary/overflow/direct_full_no_order | wall_ns | 49.888 / 41.049 / 45.838 | -17.72% / -10.45% | below_both |
+| ordinary/overflow/direct_id_only_no_order | client_process_cpu_ns | 2.016 / 1.794 / 2.082 | -11.03% / -13.86% | below_both |
+| ordinary/overflow/direct_id_only_no_order | server_process_cpu_ns | 11.450 / 10.855 / 12.275 | -5.20% / -11.57% | below_both |
+| ordinary/overflow/direct_id_only_no_order | wall_ns | 18.031 / 13.326 / 23.113 | -26.09% / -42.34% | below_both |
+| ordinary/overflow/insert1 | client_process_cpu_ns | 0.195 / 0.217 / 0.200 | +11.37% / +8.48% | above_both |
+| ordinary/overflow/insert1 | server_process_cpu_ns | 10.379 / 7.951 / 10.949 | -23.40% / -27.38% | below_both |
+| ordinary/overflow/insert1 | wall_ns | 17.487 / 18.205 / 21.366 | +4.10% / -14.80% | between |
+| ordinary/overflow/reinsert_population | client_process_cpu_ns | 0.739 / 0.778 / 0.736 | +5.19% / +5.65% | above_both |
+| ordinary/overflow/reinsert_population | server_process_cpu_ns | 1067.771 / 1069.560 / 1046.637 | +0.17% / +2.19% | above_both |
+| ordinary/overflow/reinsert_population | wall_ns | 1113.011 / 1097.790 / 1102.184 | -1.37% / -0.40% | below_both |
+| ordinary/overflow/select_after_update | client_process_cpu_ns | 4.222 / 4.106 / 4.141 | -2.77% / -0.85% | below_both |
+| ordinary/overflow/select_after_update | server_process_cpu_ns | 26.635 / 26.371 / 38.031 | -0.99% / -30.66% | below_both |
+| ordinary/overflow/select_after_update | wall_ns | 35.393 / 29.913 / 43.684 | -15.49% / -31.52% | below_both |
+| ordinary/overflow/select_after_vacuum | client_process_cpu_ns | 3.848 / 3.664 / 3.419 | -4.77% / +7.18% | between |
+| ordinary/overflow/select_after_vacuum | server_process_cpu_ns | 42.069 / 39.682 / 43.212 | -5.67% / -8.17% | below_both |
+| ordinary/overflow/select_after_vacuum | wall_ns | 47.079 / 42.070 / 51.817 | -10.64% / -18.81% | below_both |
+| ordinary/overflow/truncate | client_process_cpu_ns | 0.224 / 0.217 / 0.239 | -3.54% / -9.25% | below_both |
+| ordinary/overflow/truncate | server_process_cpu_ns | 63.576 / 69.563 / 78.179 | +9.42% / -11.02% | between |
+| ordinary/overflow/truncate | wall_ns | 145.818 / 206.866 / 198.594 | +41.87% / +4.17% | above_both |
+| ordinary/overflow/update16 | client_process_cpu_ns | 0.213 / 0.213 / 0.204 | +0.26% / +4.50% | above_both |
+| ordinary/overflow/update16 | server_process_cpu_ns | 124.581 / 122.920 / 127.070 | -1.33% / -3.27% | below_both |
+| ordinary/overflow/update16 | wall_ns | 144.855 / 140.353 / 147.145 | -3.11% / -4.62% | below_both |
+| ordinary/overflow/vacuum | client_process_cpu_ns | 0.188 / 0.221 / 0.221 | +17.32% / -0.02% | between |
+| ordinary/overflow/vacuum | server_process_cpu_ns | 10.062 / 9.243 / 11.121 | -8.14% / -16.89% | below_both |
+| ordinary/overflow/vacuum | wall_ns | 10.358 / 12.131 / 11.399 | +17.12% / +6.42% | above_both |
+| ordinary/single/delete16 | client_process_cpu_ns | 0.187 / 0.235 / 0.164 | +25.30% / +43.02% | above_both |
+| ordinary/single/delete16 | server_process_cpu_ns | 66.700 / 65.892 / 59.798 | -1.21% / +10.19% | between |
+| ordinary/single/delete16 | wall_ns | 78.008 / 74.861 / 73.323 | -4.03% / +2.10% | between |
+| ordinary/single/direct_full_no_order | client_process_cpu_ns | 7.131 / 4.951 / 6.265 | -30.57% / -20.97% | below_both |
+| ordinary/single/direct_full_no_order | server_process_cpu_ns | 30.048 / 33.387 / 38.384 | +11.11% / -13.02% | between |
+| ordinary/single/direct_full_no_order | wall_ns | 36.882 / 38.101 / 45.193 | +3.31% / -15.69% | between |
+| ordinary/single/direct_id_only_no_order | client_process_cpu_ns | 4.484 / 3.753 / 3.804 | -16.30% / -1.34% | below_both |
+| ordinary/single/direct_id_only_no_order | server_process_cpu_ns | 15.625 / 14.657 / 15.022 | -6.19% / -2.43% | below_both |
+| ordinary/single/direct_id_only_no_order | wall_ns | 24.240 / 18.905 / 23.254 | -22.01% / -18.70% | below_both |
+| ordinary/single/insert1 | client_process_cpu_ns | 0.235 / 0.145 / 0.170 | -38.20% / -14.82% | below_both |
+| ordinary/single/insert1 | server_process_cpu_ns | 10.055 / 8.701 / 8.307 | -13.47% / +4.74% | between |
+| ordinary/single/insert1 | wall_ns | 22.544 / 19.429 / 16.731 | -13.82% / +16.13% | between |
+| ordinary/single/reinsert_population | client_process_cpu_ns | 0.610 / 0.712 / 0.604 | +16.65% / +17.78% | above_both |
+| ordinary/single/reinsert_population | server_process_cpu_ns | 1077.759 / 1107.409 / 1034.466 | +2.75% / +7.05% | above_both |
+| ordinary/single/reinsert_population | wall_ns | 1213.869 / 1207.312 / 1116.388 | -0.54% / +8.14% | between |
+| ordinary/single/select_after_update | client_process_cpu_ns | 4.583 / 6.022 / 6.157 | +31.41% / -2.18% | between |
+| ordinary/single/select_after_update | server_process_cpu_ns | 27.666 / 29.562 / 27.467 | +6.85% / +7.63% | above_both |
+| ordinary/single/select_after_update | wall_ns | 38.643 / 33.729 / 35.389 | -12.72% / -4.69% | below_both |
+| ordinary/single/select_after_vacuum | client_process_cpu_ns | 4.662 / 5.708 / 5.260 | +22.42% / +8.52% | above_both |
+| ordinary/single/select_after_vacuum | server_process_cpu_ns | 39.301 / 34.826 / 34.918 | -11.39% / -0.26% | below_both |
+| ordinary/single/select_after_vacuum | wall_ns | 47.091 / 42.166 / 40.999 | -10.46% / +2.85% | between |
+| ordinary/single/truncate | client_process_cpu_ns | 0.228 / 0.227 / 0.227 | -0.62% / -0.04% | below_both |
+| ordinary/single/truncate | server_process_cpu_ns | 125.827 / 140.171 / 135.337 | +11.40% / +3.57% | above_both |
+| ordinary/single/truncate | wall_ns | 353.071 / 348.532 / 334.180 | -1.29% / +4.29% | between |
+| ordinary/single/update16 | client_process_cpu_ns | 0.270 / 0.247 / 0.218 | -8.56% / +13.28% | between |
+| ordinary/single/update16 | server_process_cpu_ns | 140.149 / 122.128 / 122.978 | -12.86% / -0.69% | below_both |
+| ordinary/single/update16 | wall_ns | 172.012 / 139.654 / 141.326 | -18.81% / -1.18% | below_both |
+| ordinary/single/vacuum | client_process_cpu_ns | 0.213 / 0.234 / 0.215 | +9.83% / +8.44% | above_both |
+| ordinary/single/vacuum | server_process_cpu_ns | 9.055 / 7.620 / 6.905 | -15.85% / +10.35% | between |
+| ordinary/single/vacuum | wall_ns | 9.411 / 10.605 / 7.221 | +12.69% / +46.86% | above_both |
+| reads/fixed/full-fixed | client_process_cpu_ns | 4.899 / 3.931 / 4.940 | -19.77% / -20.44% | below_both |
+| reads/fixed/full-fixed | server_process_cpu_ns | 17.086 / 13.637 / 17.188 | -20.19% / -20.66% | below_both |
+| reads/fixed/full-fixed | wall_ns | 24.323 / 18.378 / 22.837 | -24.44% / -19.53% | below_both |
+| reads/fixed/id-fixed | client_process_cpu_ns | 4.970 / 4.875 / 4.896 | -1.92% / -0.43% | below_both |
+| reads/fixed/id-fixed | server_process_cpu_ns | 14.441 / 12.718 / 14.115 | -11.93% / -9.90% | below_both |
+| reads/fixed/id-fixed | wall_ns | 22.702 / 19.375 / 21.937 | -14.65% / -11.68% | below_both |
+| reads/overflow/full-overflow | client_process_cpu_ns | 4.156 / 3.911 / 3.911 | -5.90% / -0.01% | below_both |
+| reads/overflow/full-overflow | server_process_cpu_ns | 47.673 / 46.204 / 46.183 | -3.08% / +0.05% | between |
+| reads/overflow/full-overflow | wall_ns | 57.074 / 51.702 / 50.873 | -9.41% / +1.63% | between |
+| reads/overflow/id-overflow | client_process_cpu_ns | 2.542 / 2.103 / 2.399 | -17.26% / -12.35% | below_both |
+| reads/overflow/id-overflow | server_process_cpu_ns | 12.292 / 10.725 / 12.231 | -12.74% / -12.31% | below_both |
+| reads/overflow/id-overflow | wall_ns | 17.998 / 14.143 / 17.023 | -21.42% / -16.92% | below_both |
+| reads/single/full-single | client_process_cpu_ns | 5.922 / 5.264 / 5.511 | -11.11% / -4.48% | below_both |
+| reads/single/full-single | server_process_cpu_ns | 39.779 / 36.864 / 36.559 | -7.33% / +0.83% | between |
+| reads/single/full-single | wall_ns | 47.240 / 41.461 / 43.121 | -12.23% / -3.85% | below_both |
+| reads/single/id-single | client_process_cpu_ns | 4.478 / 4.256 / 4.881 | -4.96% / -12.81% | below_both |
+| reads/single/id-single | server_process_cpu_ns | 16.309 / 16.198 / 15.647 | -0.68% / +3.52% | between |
+| reads/single/id-single | wall_ns | 24.324 / 20.417 / 22.282 | -16.06% / -8.37% | below_both |
+
+按中位数相对两旧的完整分类（below_both／above_both／between）为：`{"large-text": {"client_process_cpu_ns": {"above_both": 3, "below_both": 5, "between": 1}, "server_process_cpu_ns": {"below_both": 7, "between": 2}, "wall_ns": {"below_both": 6, "between": 3}}, "ordinary": {"client_process_cpu_ns": {"above_both": 10, "below_both": 12, "between": 8}, "server_process_cpu_ns": {"above_both": 6, "below_both": 14, "between": 10}, "wall_ns": {"above_both": 5, "below_both": 15, "between": 10}}, "reads": {"client_process_cpu_ns": {"below_both": 6}, "server_process_cpu_ns": {"below_both": 3, "between": 3}, "wall_ns": {"below_both": 5, "between": 1}}}`。这是一次有限性能对照；不同阶段和指标均单列，不合并成一个全库提升比例。
+
+### 证据、磁盘和版本
+
+[完整压缩证据](benchmarks/no-effect-transaction-publication-20261107.json.gz) 为38,701,943B，包含采集目录内所有非 ELF 原始字节（失败也包含，不含归档器输出及Python字节码）、完整值／请求回复、源快照、要求、脚本、时钟和闭库映像，ELF为本机路径／SHA引用。完整解码、路径／模式／字节核对55,959项通过后，才清理本批31,326个可重建副本、2,794,000,499逻辑字节；失败映像、日志、源／ELF和可用种子仍保留。不是删除旧测试或全盘缓存。原45份 gzip 字节保持，新增后46份，每个当前跟踪文件均小于49MiB。原 GitHub 提醒的53.45MiB JSON当前不跟踪，5.70MiB gzip解压后仍是56,047,459B、SHA `8e5eb21899e4a864b6db4394832bac5cc98ee85438d43bbb559efb0be3c21910`；历史没有重写。
+
+提取全部135行比较与原始样本（输出文件必须不存在）：
+
+```sh
+python3 scripts/extract_benchmark_artifact.py docs/benchmarks/no-effect-transaction-publication-20261107.json.gz batch/costs-normal-independent-v1.json --output /tmp/dbms-p42-performance-metrics.json
+```
+
+251个生产文件、原2404测试字节保持加1=2405（顶层CPP1138／全部CPP1143），754 Markdown路径集合保持；八份既有文档仅插入最新块，原正文可逐字恢复，725保护记录保持。原273完整对象／状态、291条历史和既有暂缓不变，只追加第292条 partial。功能族及未通过项继续开放，Goal active。
+
 <!-- P41 large-varchar-toast-search begin -->
 <a id="large-varchar-toast-search-20261107"></a>
 ## 2026-11-07：VARCHAR长度、TOAST局部搜索与1680次新成本（P41-C6，partial）

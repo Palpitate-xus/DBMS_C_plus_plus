@@ -8526,6 +8526,7 @@ void StorageEngine::closeDatabaseCaches(const std::string& dbname) {
         // the replacement; a background pruner must not release another
         // backend's transaction-owned manager.
         context.transactionWalOwner.reset();
+        context.transactionWalStart.reset();
     }
     lastCheckpointLsns_.erase(dbname);
 
@@ -25716,6 +25717,8 @@ int64_t StorageEngine::nextval(const std::string& dbname,
         throw DbError("25006",
                       "cannot execute nextval() in a read-only transaction");
     }
+    if (transactionContext().inTransaction)
+        transactionContext().commitPublicationRequired = true;
     const auto path = sequencePath(dbname, resolved.storageName);
     std::lock_guard<std::mutex> lock(g_sequenceMutex);
     dbms::SequenceInfo info;
@@ -25897,6 +25900,8 @@ int64_t StorageEngine::setval(const std::string& dbname,
         throw DbError("25006",
                       "cannot execute setval() in a read-only transaction");
     }
+    if (transactionContext().inTransaction)
+        transactionContext().commitPublicationRequired = true;
     const auto path = sequencePath(dbname, resolved.storageName);
     std::lock_guard<std::mutex> lock(g_sequenceMutex);
     dbms::SequenceInfo info;
@@ -48906,6 +48911,8 @@ void StorageEngine::clearCatalogSnapshot() {
 
 void StorageEngine::invalidateCatalogSchema(const std::string& dbname,
                                             const std::string& tablename) {
+    if (transactionContext().inTransaction)
+        transactionContext().commitPublicationRequired = true;
     invalidateCachedSchema(dbname, tablename);
     std::lock_guard<std::mutex> lock(catalogSnapshotMutex_);
     if (transactionContext().catalogSnapshot) {
@@ -48931,6 +48938,8 @@ bool StorageEngine::writeSchemaFile(const std::string& dbname,
 }
 
 void StorageEngine::invalidateCatalogTableList(const std::string& dbname) {
+    if (transactionContext().inTransaction)
+        transactionContext().commitPublicationRequired = true;
     std::lock_guard<std::mutex> lock(catalogSnapshotMutex_);
     if (transactionContext().catalogSnapshot) {
         transactionContext().catalogSnapshot->tableNames.erase(dbname);
@@ -52839,6 +52848,7 @@ DBStatus StorageEngine::ensureDatabaseTransactionOwnership(const std::string& db
         transactionWal = walManagers_.at(context.txnDB);
     }
     context.readView.commitLog = commitLog;
+    context.transactionWalStart = transactionWal->currentWriteLsn();
     context.transactionWalOwner = std::move(transactionWal);
     context.databaseOwnershipDeferred = false;
     promotionSucceeded = true;
@@ -53111,6 +53121,8 @@ DBStatus StorageEngine::beginTransaction(const std::string& dbname, bool ddlSnap
     }
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
     context.transactionWalOwner.reset();
+    context.transactionWalStart.reset();
+    context.commitPublicationRequired = false;
     bool deferOwnership = context.deferDatabaseBeginRequested && !ddlSnapshot;
     if (Session* session = currentSession()) {
         if (!session->tempTablesCreatedInTransaction.empty()) deferOwnership = false;
@@ -53191,6 +53203,7 @@ DBStatus StorageEngine::beginTransaction(const std::string& dbname, bool ddlSnap
             return DBStatus::IO_ERROR;
         }
         context.transactionWalOwner = walManagers_.at(dbname);
+        context.transactionWalStart = context.transactionWalOwner->currentWriteLsn();
     }
     }
     if (Session* session = currentSession(); session && session->currentDB == dbname) {
@@ -53213,6 +53226,7 @@ DBStatus StorageEngine::beginTransaction(const std::string& dbname, bool ddlSnap
     transactionContext().currentTxnId = TxnIdGenerator::instance().nextTxId();
     if (transactionContext().currentTxnId == 0) {
         context.transactionWalOwner.reset();
+        context.transactionWalStart.reset();
         context.databaseExclusiveLock.reset();
         context.databaseSharedLock.reset();
         context.databaseTxnMutex.reset();
@@ -53883,8 +53897,33 @@ DBStatus StorageEngine::commitTransaction() {
             }
         }
     }
-    const Lsn commitLsn = walXactCommit(committingDb, committingTxnId);
-    if (commitLsn == INVALID_LSN || !wal->XLogFlush(commitLsn)) {
+    // Reads reserve an xid for snapshots/SSI, but no tuple or catalog change
+    // references it. Do not manufacture a durable COMMIT and CLOG replacement
+    // for that unused xid. Check after deferred work, and fall back if shared
+    // WAL moved, physical ownership changed, or any write/DDL/subtransaction
+    // state exists. In particular, READ ONLY and SQL spelling are not proofs.
+    bool terminalTempAction = false;
+    if (Session* session = currentSession();
+        session && session->currentDB == committingDb) {
+        terminalTempAction = !session->tempTablesCreatedInTransaction.empty();
+        for (const auto& action : session->tempTableOnCommit)
+            terminalTempAction = terminalTempAction || action.second != "preserve";
+    }
+    const bool noEffects = committingContext.transactionWalOwner.get() == wal &&
+        committingContext.transactionWalStart.has_value() &&
+        *committingContext.transactionWalStart == wal->currentWriteLsn() &&
+        !committingContext.commitPublicationRequired &&
+        !committingContext.hasWrite && !committingContext.accessedTemporaryObjects &&
+        committingContext.txnLog.empty() && committingContext.txnLogicalChanges.empty() &&
+        committingContext.txnHeapWritebackPages.empty() &&
+        committingContext.specializedIndexTables.empty() &&
+        committingContext.ddlUndoActions.empty() && committingContext.deferredChecks.empty() &&
+        committingContext.txnBackupPath.empty() && !committingContext.transactionBackupDirty &&
+        !committingContext.preserveBackupOnRollback && !committingContext.databaseExclusiveLock &&
+        committingContext.savepoints.empty() && committingContext.txnSubTxnIds.empty() &&
+        !terminalTempAction;
+    const Lsn commitLsn = noEffects ? INVALID_LSN : walXactCommit(committingDb, committingTxnId);
+    if (!noEffects && (commitLsn == INVALID_LSN || !wal->XLogFlush(commitLsn))) {
         releaseCommitHeapPageLocks();
         rollbackTransaction();
         return DBStatus::IO_ERROR;
@@ -53938,7 +53977,10 @@ DBStatus StorageEngine::commitTransaction() {
     // is the live visibility cache and recovery can reconstruct it from WAL;
     // a CLOG write failure must therefore never route through rollback and
     // append a contradictory ABORT record for the same xid.
-    CommitLog* clog = getCommitLog(transactionContext().txnDB);
+    // An unused xid has no visibility state to publish. Do not dirty the
+    // shared CLOG cache either: deferring a dirty cache flush would hide a
+    // peer process's newer committed statuses from its refresh path.
+    CommitLog* clog = noEffects ? nullptr : getCommitLog(transactionContext().txnDB);
     if (clog) {
         clog->setStatus(transactionContext().currentTxnId, CommitLog::Status::Committed);
         if (!clog->flush()) {
@@ -54030,6 +54072,7 @@ DBStatus StorageEngine::commitTransaction() {
     transactionContext().currentTxnId = 0;
     transactionContext().inTransaction = false;
     transactionContext().transactionWalOwner.reset();
+    transactionContext().transactionWalStart.reset();
     transactionContext().querySnapshotUsed = false;
     transactionContext().readOnly = false;
     transactionContext().preserveBackupOnRollback = false;
@@ -55260,6 +55303,7 @@ DBStatus StorageEngine::rollbackTransaction() {
     transactionContext().rollbackAbortLsn = INVALID_LSN;
     transactionContext().inTransaction = false;
     transactionContext().transactionWalOwner.reset();
+    transactionContext().transactionWalStart.reset();
     transactionContext().readOnly = false;
     transactionContext().transactionBackupDirty = false;
     transactionContext().restoreBackupBeforeRowUndo = false;
@@ -55910,6 +55954,7 @@ DBStatus StorageEngine::prepareTransaction(const std::string& xid) {
     transactionContext().currentTxnId = 0;
     transactionContext().inTransaction = false;
     transactionContext().transactionWalOwner.reset();
+    transactionContext().transactionWalStart.reset();
     transactionContext().readOnly = false;
     // The database transaction mutex is a backend-local implementation lock;
     // it cannot be unlocked safely by COMMIT/ROLLBACK PREPARED on another
@@ -56014,6 +56059,7 @@ DBStatus StorageEngine::commitPrepared(const std::string& xid) {
     completionContext.currentTxnId = 0;
     completionContext.inTransaction = false;
     completionContext.transactionWalOwner.reset();
+    completionContext.transactionWalStart.reset();
     completionContext.hasRead = false;
     completionContext.hasWrite = false;
     completionContext.txnDB.clear();
@@ -56085,6 +56131,7 @@ DBStatus StorageEngine::commitPrepared(const std::string& xid) {
     transactionContext().currentTxnId = 0;
     transactionContext().inTransaction = false;
     transactionContext().transactionWalOwner.reset();
+    transactionContext().transactionWalStart.reset();
     transactionContext().readOnly = false;
     transactionContext().txnBackupPath.clear();
     transactionContext().txnDB.clear();
@@ -57497,6 +57544,8 @@ int64_t StorageEngine::readNextSeq(const std::string& dbname, const std::string&
 }
 
 void StorageEngine::writeNextSeq(const std::string& dbname, const std::string& tablename, const std::string& colname, int64_t val) {
+    if (transactionContext().inTransaction)
+        transactionContext().commitPublicationRequired = true;
     const std::string key = dbname + "/" + tablename;
     std::lock_guard<std::mutex> lock(seqCacheMutex_);
     auto& state = seqFileCache_[key];

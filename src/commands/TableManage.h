@@ -2509,6 +2509,11 @@ private:
         // Pinned under physical BEGIN/promotion ownership and retained until
         // terminal WAL I/O completes, independently of the public name cache.
         std::shared_ptr<WALManager> transactionWalOwner;
+        // Zero is a valid empty-WAL position. Invalidate the receipt whenever
+        // physical ownership is replaced; a different generation cannot prove
+        // that this reserved xid has never been used by a persistent change.
+        std::optional<Lsn> transactionWalStart;
+        bool commitPublicationRequired = false;
         bool snapshotImported = false;
         bool snapshotAcquired = false;
         // Like PostgreSQL's FirstSnapshotSet: once used, a user subabort
