@@ -16,6 +16,7 @@ struct QueryOutputColumn {
     uint32_t typeOid = 0;
     int32_t typeMod = -1; // same-generation physical assignment metadata
     DatumTypePtr typeMetadata;
+    int16_t physicalAttributeNumber = 0; // actual catalog attnum, independent of compact owned values
 };
 using QueryRowDescriptor = std::vector<QueryOutputColumn>;
 struct QueryRelationMetadata {
@@ -88,6 +89,11 @@ struct QueryBindingMetadata {
     std::function<bool(const FunctionCallExpr*)> aggregateFunction;
     // Pure same-snapshot declaration identity and binary codec metadata.
     std::function<DatumTypePtr(const std::string&,uint32_t)> datumType;
+    // Pure physical target lookup. A sequence OID creates an internal
+    // identity value, never a textual column default or a SQL callee.
+    // Appended to retain existing positional callback initialization.
+    std::function<std::optional<uint32_t>(const std::string&,
+        const std::string&, const std::string&)> identityDefault;
 };
 struct PreparedQuery {
     struct Use { size_t begin, end, slot; };

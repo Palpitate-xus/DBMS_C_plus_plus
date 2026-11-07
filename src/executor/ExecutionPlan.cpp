@@ -1,3 +1,4 @@
+#include "catalog/SystemCatalogRows.h"
 #include "ExecutionPlan.h"
 #include "expression/StoredRegtypeValue.h"
 #include "expression/ArrayDatumInput.h"
@@ -413,7 +414,7 @@ struct PreparedSelectState {
                stored_regtype_detail::columnType(schema.cols[i].dataType)) {
                 const auto catalog=regtype_detail::metadata(*engine,dbname);
                 values.back()=stored_regtype_detail::load(value,schema.cols[i].isArray,isNull,
-                    catalog,currentSession(),physicalDeclaration->at(i).typeMetadata);
+                    catalog,currentSession(),physicalDeclaration->at(i).typeMetadata,schema.cols[i].dataType);
             }
             values.back().collation = schema.cols[i].collation;
             if(schema.cols[i].isArray && schema.cols[i].generatedKind!='v' &&
@@ -1003,7 +1004,7 @@ static std::optional<int> comparePreparedIdentityKeys(ExprEvaluator& evaluator,
         const auto a=preparedOidValue(left.value),b=preparedOidValue(right.value);
         return (a>b)-(a<b);
     }
-    if(type=="regtype" || type=="name" || type=="\"char\"") {
+    if(stored_regtype_detail::scalarType(type) || type=="name" || type=="\"char\"") {
         const auto binding=ExprEvaluator::resolveComparison("<",type,type);
         if(evaluator.comparePrepared(binding,left,right).asBool())return -1;
         if(evaluator.comparePrepared(binding,right,left).asBool())return 1;
@@ -1122,7 +1123,7 @@ public:
             const auto type=ExprHelper::canonicalResultTypeName(a.typeName);
             const bool same=type==ExprHelper::canonicalResultTypeName(b.typeName);
             if(same && type=="oid")next.kind=Entry::Kind::Oid;
-            else if(same && (type=="regtype" || type=="name" || type=="\"char\"" ||
+            else if(same && (stored_regtype_detail::scalarType(type) || type=="name" || type=="\"char\"" ||
                              type=="real" || type=="double precision")) {
                 next.kind=Entry::Kind::Expression;
                 next.binding=ExprEvaluator::resolveComparison("<",type,type);
@@ -1392,12 +1393,12 @@ public:
         std::string key;
         for (const auto& value : values_) {
             const auto type=ExprHelper::canonicalResultTypeName(value.typeName);
-            if(type=="oid" || type=="regtype" || type=="name" || type=="\"char\"") {
+            if(type=="oid" || stored_regtype_detail::scalarType(type) || type=="name" || type=="\"char\"") {
                 if(value.isNull){key+="N;";continue;}
                 std::string material;
-                if(type=="oid" || type=="regtype") {
+                if(type=="oid" || stored_regtype_detail::scalarType(type)) {
                     ExprEvaluator evaluator;
-                    const auto oid=type=="regtype"?evaluator.coerceComparison(ExprEvaluator::resolveComparison("=",type,type),value,true):value;
+                    const auto oid=stored_regtype_detail::scalarType(type)?evaluator.coerceComparison(ExprEvaluator::resolveComparison("=",type,type),value,true):value;
                     material="oid:"+std::to_string(oid.objectOid?*oid.objectOid:preparedOidValue(oid.value));
                 }
                 else {
@@ -3846,7 +3847,8 @@ OpPtr QueryPlanner::buildPreparedQueryPlan(StorageEngine* engine,const std::stri
                 throw DbError("0A000","writing CTE requires the statement-owned source provider");
             for(const auto& output:found->columns) {
                 Column column;column.dataName=output.name;
-                if(output.typeOid==2206 && output.type=="regtype") {
+                if((output.typeOid==2206 && output.type=="regtype") ||
+                   (output.typeOid==2205 && output.type=="regclass")) {
                     // This source owns typed ExprValue cells, not heap bytes.
                     // Its genuine descriptor keeps OIDs without inventing a
                     // TypeRegistry storage codec for the displayed type name.
@@ -3872,6 +3874,35 @@ OpPtr QueryPlanner::buildPreparedQueryPlan(StorageEngine* engine,const std::stri
                     if(!cache->cursor)cache->cursor=childFactory(statement,outer);
                     if(!cache->cursor->next(row)){cache->cursor->close();cache->eof=true;return false;}
                     cache->rows.push_back(row);return true;
+                });
+        } else if(found->relationSchema=="pg_catalog" &&
+                  (found->relationName=="pg_class" || found->relationName=="pg_attribute")) {
+            for(const auto& output:found->columns) {
+                Column column;column.dataName=output.name;column.dataType=output.type;
+                column.isVariableLength=true;schema.append(column);
+            }
+            const bool attributes=found->relationName=="pg_attribute";
+            auto rows=std::make_shared<std::optional<PreparedQueryRows>>();
+            source=std::make_unique<PreparedSourceRowsOp>(found->columns,
+                [engine,database,rows,attributes](size_t index,std::vector<ExprValue>& row) {
+                    if(!*rows) {
+                        const auto metadata=engine->catalogService().metadataSnapshot(database);
+                        *rows=attributes?system_catalog::attributeRows(metadata):system_catalog::classRows(metadata);
+                    }
+                    if(index>=(**rows).size())return false;
+                    row=(**rows)[index];return true;
+                });
+        } else if(found->relationSchema=="pg_catalog" && found->relationName=="pg_sequence") {
+            for(const auto& output:found->columns) {
+                Column column;column.dataName=output.name;column.dataType=output.type;
+                column.isVariableLength=true;schema.append(column);
+            }
+            auto rows=std::make_shared<std::optional<PreparedQueryRows>>();
+            source=std::make_unique<PreparedSourceRowsOp>(found->columns,
+                [engine,database,rows](size_t index,std::vector<ExprValue>& row) {
+                    if(!*rows)*rows=engine->getSequenceCatalogRows(database);
+                    if(index>=(**rows).size())return false;
+                    row=(**rows)[index];return true;
                 });
         } else if(found->relationSchema=="pg_catalog" && found->relationName=="pg_stats") {
             for(const auto& output:found->columns) {
@@ -4392,9 +4423,9 @@ static std::string integerEqualityValue(const TableSchema& table,
     for (size_t i = 0; i < table.len; ++i) {
         if (table.cols[i].dataName != column) continue;
         const auto& type = table.cols[i].dataType;
-        if(type=="regtype" && !table.cols[i].isArray && engine) {
+        if(stored_regtype_detail::scalarType(type) && !table.cols[i].isArray && engine) {
             const auto catalog=regtype_detail::metadata(*engine,database);
-            return stored_regtype_detail::input(value,false,catalog,currentSession());
+            return stored_regtype_detail::input(value,false,catalog,currentSession(),type);
         }
         const bool integer = type == "tinyint" || type == "smallint" ||
             type == "int" || type == "integer" || type == "bigint" ||
@@ -4438,7 +4469,7 @@ static bool equalityIndexKeyIsEmpty(const TableSchema& table,
                                     const StorageEngine::Condition& condition) {
     if (condition.op != "=") return false;
     for(size_t i=0;i<table.len;++i)
-        if(table.cols[i].dataName==condition.colName && table.cols[i].dataType=="regtype" &&
+        if(table.cols[i].dataName==condition.colName && stored_regtype_detail::scalarType(table.cols[i].dataType) &&
            !table.cols[i].isArray)return false; // Every genuine OID key is nonempty.
     const auto value = integerEqualityValue(table, condition.colName, condition.value);
     return isSingleColumnPrimaryKey(table, condition.colName)
@@ -4490,12 +4521,12 @@ bool IndexScanOp::open() {
     tbl_ = engine_->getTableSchema(dbname_, tablename_);
     for(size_t i=0;i<tbl_.len;++i)
         if(tbl_.cols[i].dataName==colname_ && !tbl_.cols[i].isArray &&
-           tbl_.cols[i].dataType=="regtype") {
+           stored_regtype_detail::scalarType(tbl_.cols[i].dataType)) {
             try {
                 if(referenceInputOid_)referenceEqualityOid_=referenceInputOid_;
                 else {
                     const auto catalog=regtype_detail::metadata(*engine_,dbname_);
-                    referenceEqualityOid_=regtype_detail::inputOid(value_,catalog,currentSession());
+                    referenceEqualityOid_=stored_regtype_detail::inputOid(value_,catalog,currentSession(),tbl_.cols[i].dataType);
                 }
             } catch(...) {
                 // Only this newly introduced conversion owns this cleanup.
@@ -4679,7 +4710,7 @@ static bool collectEqualityIndexCandidates(
     std::string value; bool reference=false;
     for(size_t i=0;i<tbl.len;++i)
         if(tbl.cols[i].dataName==condition.colName && !tbl.cols[i].isArray &&
-           tbl.cols[i].dataType=="regtype")reference=true;
+           stored_regtype_detail::scalarType(tbl.cols[i].dataType))reference=true;
     if(reference && condition.referenceInputOid)value=std::to_string(*condition.referenceInputOid);
     else value = integerEqualityValue(
         tbl, condition.colName, condition.value, engine, dbname);

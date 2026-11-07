@@ -1,5 +1,13 @@
 # 与 PostgreSQL 18 的功能和性能差距
 
+<!-- P43-D18 unaccepted draft checkpoint -->
+## 最新源代码检查点：P43/D18 仍未接受（2026-11-07）
+
+目录／类型有实际进展：保存真实 `pg_type`／`pg_attribute`／`pg_class` 声明和系统属性元数据，110个已有内建类型的有限物理属性投影与实际PG参照一致；6个目录字段改用真实 `C` 排序规则，选定 `pg_type` 别名／CTE的完整来源描述匹配PG。元数据声明不等于实现全部值、堆格式或SQL系统列；未提供真实值生产者的字段仍拒绝，不能把短schema或虚构NULL称为完整目录。
+
+原273项仍为22 complete／166 partial／70 unverified／15用户暂缓，未关闭任何项目。REGCLASS依赖、旧数组迁移、序列完整语义和恢复、生成列ALTER TYPE、错误阶段及其他非暂缓功能仍需补齐；本批正常性能未测试，无法据此缩小整库性能差距。版本、全部观察及边界见[草稿报告](performance-report-2026-10-30.md#identity-sequence-catalog-draft-20261107)。下方性能数字保留对应历史程序口径。
+
+
 ## 最新 P42（2026-11-07）：读取提交成本的局部进展
 
 参考PG18.6未分配持久XID／未写WAL的提交分支和DuckDB ChangesMade检查，为本项目已证实无持久事务变更的读取消除无用COMMIT／CLOG同步；项目仍在BEGIN分配内部保留ID，尚非PG完整惰性XID／事务实现。95条SQL在实际PG／旧／新程序完整跑完，模型值／NULL／tag／事务状态正确，旧新请求回复逐字节一致；映射实际items OID后仍保留8处catalog或未映射TEMP／aux来源观察，不称为全PG协议等价。

@@ -143,6 +143,12 @@ public:
                                 const std::string& action,
                                 char identityKind,
                                 bool ifExists = false);
+    DBStatus alterTableIdentity(const std::string& dbname,
+                                const std::string& tablename,
+                                const std::string& colName,
+                                const std::string& action,
+                                char identityKind, bool ifExists,
+                                uint32_t identitySequenceOid);
     DBStatus alterTableSetNotNull(const std::string& dbname, const std::string& tablename,
                                    const std::string& colName);
     DBStatus alterTableDropNotNull(const std::string& dbname, const std::string& tablename,
@@ -217,6 +223,11 @@ public:
                              const std::string& seqname,
                              dbms::SequenceInfo& info) const;
     int64_t nextval(const std::string& dbname, const std::string& seqname);
+    std::string identitySequenceName(const std::string& dbname,
+                                     uint32_t sequenceOid) const;
+    int64_t nextIdentityValue(const std::string& dbname, uint32_t sequenceOid);
+    std::optional<std::string> serialSequenceName(const std::string& dbname,
+        const std::string& tableReference, const std::string& columnName) const;
     int64_t currval(const std::string& dbname, const std::string& seqname);
     int64_t lastval() const;
     int64_t setval(const std::string& dbname, const std::string& seqname, int64_t value, bool isCalled = true);
@@ -588,6 +599,9 @@ public:
                                             const std::string& onlyColumn = "") const;
     // Full owning pg_stats source for one actual database/catalog generation.
     std::vector<std::vector<ExprValue>> getAnalyzedStatisticsRows(const std::string& dbname) const;
+    // All eight declared pg_sequence values from actual catalog identities
+    // and persisted native parameters in this database's read ownership.
+    std::vector<std::vector<ExprValue>> getSequenceCatalogRows(const std::string& dbname) const;
     // Optional planner evidence, with current logical/physical declaration
     // validation. Returned columns own their immutable decoded generation.
     std::shared_ptr<const analyzed_statistics::Column> getAnalyzedColumnStatistics(
@@ -693,13 +707,18 @@ public:
                     IdentityOverride identityOverride = IdentityOverride::None,
                     OwningMutationRows* owningRows = nullptr,
         bool deferVirtualInputs = false);
+    // Optional conflictingRow is cleared on entry. On DUPLICATE_KEY it owns
+    // the rejected candidate's normalized base/stored values, including real
+    // defaults and identities; virtual columns keep their separate read owner.
+    // It is never an inserted/RETURNING row and is only valid for that status.
     DBStatus insertRow(const std::string& dbname,
                        const std::string& tablename,
                        const SqlRow& values,
                        std::vector<SqlRow>* insertedRows = nullptr,
                        IdentityOverride identityOverride = IdentityOverride::None,
                     OwningMutationRows* owningRows = nullptr,
-        bool deferVirtualInputs = false);
+        bool deferVirtualInputs = false,
+        SqlRow* conflictingRow = nullptr);
     // INSERT INTO t DEFAULT VALUES — uses column defaults or NULL.
     DBStatus insertDefaultValues(const std::string& dbname,
                                  const std::string& tablename,
@@ -1805,6 +1824,9 @@ public:
     const CatalogService& catalogService() const;
 
 private:
+    int64_t nextvalWithIdentity(const std::string& dbname,
+                               const std::string& seqname,
+                               uint32_t expectedOid);
     std::filesystem::path schemaPath(const std::string& dbname, const std::string& tablename) const;
     std::filesystem::path paramsPath(const std::string& dbname, const std::string& tablename) const;
     // Physical relation files live in the database directory for pg_default,
@@ -2283,7 +2305,8 @@ private:
         std::vector<SqlRow>* insertedRows,
         IdentityOverride identityOverride,
         OwningMutationRows* owningRows = nullptr,
-        bool deferVirtualInputs = false);
+        bool deferVirtualInputs = false,
+        SqlRow* conflictingRow = nullptr);
     DBStatus removeInternal(
         const std::string& dbname, const std::string& tablename,
         const std::vector<std::string>& conditions,

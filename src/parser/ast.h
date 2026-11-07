@@ -472,6 +472,11 @@ struct FunctionCallExpr : public Expr {
     };
     std::vector<AggregateOrderKey> aggregateOrderKeys;
 
+    // Query-owned identity DEFAULT value. The SQL parser never sets this
+    // binding. It is an effectful internal value, independent of SQL routine
+    // lookup, and uses the execution's real engine/database context.
+    uint32_t identitySequenceOid = 0;
+
     FunctionCallExpr() { type = ExprType::FunctionCall; }
     std::string toString() const override;
 };
@@ -1013,7 +1018,10 @@ struct ColumnDef {
     char generatedKind = 0;                    // 0=none, 's'=STORED, 'v'=VIRTUAL
     bool isGeneratedIdentity = false;          // GENERATED ... AS IDENTITY
     char identityKind = 0;                     // 0=none, 'a'=ALWAYS, 'd'=BY DEFAULT
-    bool hasIdentityOptions = false;           // sequence options are not implemented yet
+    bool hasIdentityOptions = false;
+    // Keep order and duplicates for semantic validation. A map would erase
+    // conflicting START, MINVALUE/NO MINVALUE, or LOGGED/UNLOGGED clauses.
+    std::vector<std::pair<std::string, std::string>> identityOptions;
     bool isAutoIncrementExtension = false;     // MySQL AUTO_INCREMENT
     bool isUnsignedExtension = false;          // MySQL integer UNSIGNED
     std::vector<std::string> constraints;      // GENERATED, IDENTITY 等
@@ -1128,6 +1136,8 @@ struct CreateObjectStmt : public Stmt {
     bool replace = false;
     std::map<std::string, std::string> options;
     std::vector<std::string> enumLabels; // lossless CREATE TYPE ... AS ENUM labels
+    std::vector<std::pair<std::string,std::string>> sequenceOptions;
+    bool sequenceOptionsParsed = false;
 
     CreateObjectStmt(SqlCommand cmd) : Stmt(cmd) {}
     std::string toString() const override { return "CREATE " + objectType; }
@@ -1182,6 +1192,8 @@ struct AlterObjectStmt : public Stmt {
     bool only = false;
     std::string subCommand;    // raw remainder of statement for later analysis
     std::optional<std::vector<std::string>> routineInputTypes;
+    std::vector<std::pair<std::string,std::string>> sequenceOptions;
+    bool sequenceOptionsParsed = false;
 
     AlterObjectStmt(SqlCommand cmd) : Stmt(cmd) {}
     std::string toString() const override { return "ALTER " + objectType; }

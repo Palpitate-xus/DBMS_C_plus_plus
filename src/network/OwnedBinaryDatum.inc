@@ -73,7 +73,7 @@ bool encodeOwnedBinaryDatum(const ExprValue& root,const DatumType& declaration,
             const auto& type=*frame.layout;
             if(type.kind==DatumKind::Scalar) {
                 scalarBytes.clear();
-                if(type.codecOid==2206) {
+                if(type.codecOid==2206 || type.codecOid==2205) {
                     if(!frame.value->objectOid)return false;
                     appendRawUInt32(scalarBytes,*frame.value->objectOid);
                 } else if(type.codecOid==705 || type.codecOid==114) {
@@ -163,7 +163,7 @@ bool encodeOwnedBinaryValue(const ExprValue& value,const PgColumnDescription& co
         // staging vector. Keep the existing scalar destination and locale.
         if(declaration->kind==DatumKind::Scalar && encoded.empty()) {
             if(value.isNull || !declaration->hasBinaryOutput)return false;
-            if(declaration->codecOid==2206) {
+            if(declaration->codecOid==2206 || declaration->codecOid==2205) {
                 if(!value.objectOid)return false;
                 appendRawUInt32(encoded,*value.objectOid);return true;
             }
@@ -180,7 +180,7 @@ bool encodeOwnedBinaryValue(const ExprValue& value,const PgColumnDescription& co
         }
         return encodeOwnedBinaryDatum(value,*declaration,column,encoded);
     }
-    if(column.typeOid==2206 && value.objectOid) {
+    if((column.typeOid==2206 || column.typeOid==2205) && value.objectOid) {
         appendRawUInt32(encoded,*value.objectOid);return true;
     }
     // Preserve the existing primitive path for producers with no structural

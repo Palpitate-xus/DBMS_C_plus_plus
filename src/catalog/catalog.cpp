@@ -1,3 +1,6 @@
+#include "catalog/SystemAttributeDeclaration.h"
+#include "catalog/BuiltinTypeProperties.h"
+#include "catalog/SystemCatalogCollation.h"
 #include "catalog.h"
 #include "common/DbError.h"
 #include <filesystem>
@@ -517,7 +520,7 @@ CatalogManager::CatalogManager(const std::string& dbPath, ReadOnlyTag)
 
 CatalogManager::MetadataSnapshot CatalogManager::metadataSnapshot() const {
     std::lock_guard<std::mutex> lock(mutex_);
-    return {namespaces_, classes_, attributes_, types_, procs_, enums_};
+    return {namespaces_, classes_, attributes_, types_, procs_, enums_, systemAttributesMaterialized_};
 }
 
 CatalogManager::MetadataSnapshot CatalogManager::readMetadataSnapshot(const std::string& path) {
@@ -783,10 +786,13 @@ Oid CatalogManager::createClass(const PgClassRow& row) {
     Oid oid = (row.oid != INVALID_OID) ? row.oid : oidGen_->allocate();
     PgClassRow r = row;
     r.oid = oid;
+    const auto systemFields=systemAttributesMaterialized_ && system_attributes::eligible(r.relkind)
+        ?system_attributes::declarations(oid,types_):std::vector<PgAttributeRow>{};
     size_t idx = classes_.size();
     classes_.push_back(r);
     classByOid_[oid] = idx;
     classByName_[classNameKey(r.relnamespace, r.relname)] = idx;
+    attributes_.insert(attributes_.end(),systemFields.begin(),systemFields.end());
     // 表/视图/索引/函数/类型均依赖其所属 schema
     if (r.relnamespace != INVALID_OID) {
         PgDependRow dep;
@@ -991,16 +997,46 @@ bool CatalogManager::dropAttributesUnlocked(Oid relOid) {
 
 void CatalogManager::addAttribute(const PgAttributeRow& row) {
     std::lock_guard<std::mutex> lock(mutex_);
+    const auto* relation=findClassUnlocked(row.attrelid);
+    if(systemAttributesMaterialized_ && relation && system_attributes::eligible(relation->relkind) &&
+       row.attnum>0 && system_attributes::reserved(row.attname))
+        throw DbError("42701","column name conflicts with a system column: "+row.attname);
     attributes_.push_back(row);
 }
 
-std::vector<PgAttributeRow> CatalogManager::findAttributes(Oid relOid) const {
+std::vector<PgAttributeRow> CatalogManager::findAttributesIncludingSystem(Oid relOid) const {
     std::lock_guard<std::mutex> lock(mutex_);
     std::vector<PgAttributeRow> result;
     for (const auto& a : attributes_) {
         if (a.attrelid == relOid) result.push_back(a);
     }
     return result;
+}
+
+std::vector<PgAttributeRow> CatalogManager::findAttributes(Oid relOid) const {
+    auto result=findAttributesIncludingSystem(relOid);
+    result.erase(std::remove_if(result.begin(),result.end(),[](const auto& a){return a.attnum<=0;}),result.end());
+    return result;
+}
+
+std::vector<PgAttributeRow> CatalogManager::findUserAttributes(Oid relOid) const {
+    return findAttributes(relOid);
+}
+
+bool CatalogManager::bootstrapSystemAttributes(bool requireExisting) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto replacement=attributes_;bool changed=false;
+    for(const auto& relation:classes_) {
+        system_attributes::validate(relation,attributes_,types_,requireExisting);
+        if(!system_attributes::eligible(relation.relkind))continue;
+        const bool present=std::any_of(attributes_.begin(),attributes_.end(),[&](const auto& a){return a.attrelid==relation.oid && a.attnum<0;});
+        if(present)continue;
+        for(const auto& a:attributes_)if(a.attrelid==relation.oid && system_attributes::reserved(a.attname))
+            throw DbError("0A000","legacy column conflicts with a system attribute declaration");
+        const auto rows=system_attributes::declarations(relation.oid,types_);
+        replacement.insert(replacement.end(),rows.begin(),rows.end());changed=true;
+    }
+    attributes_.swap(replacement);systemAttributesMaterialized_=true;return changed;
 }
 
 std::vector<PgAttributeRow> CatalogManager::findAttributesByNum(Oid relOid) const {
@@ -1074,7 +1110,7 @@ bool CatalogManager::replaceAttributes(
     std::vector<PgAttributeRow> replacement;
     replacement.reserve(attributes_.size() + attributes.size());
     for (const auto& current : attributes_) {
-        if (current.attrelid != relOid) replacement.push_back(current);
+        if (current.attrelid != relOid || current.attnum<0) replacement.push_back(current);
     }
     replacement.insert(
         replacement.end(), attributes.begin(), attributes.end());
@@ -1949,7 +1985,10 @@ void CatalogManager::bootstrapSystemNamespaces() {
     persistence_->namespaceBootstrapApplied = true;
 }
 
-const std::vector<PgTypeRow>& CatalogManager::builtinTypeRows() {
+namespace {
+// Retain the exact previous declaration signature for a checked, mutable
+// startup upgrade. Cold readers continue to expose their actual stored rows.
+const std::vector<PgTypeRow>& legacyBuiltinTypeRows() {
     static const auto rows=[] {
     std::vector<PgTypeRow> types;
     std::unordered_map<Oid,size_t> typeByOid;
@@ -2152,6 +2191,73 @@ const std::vector<PgTypeRow>& CatalogManager::builtinTypeRows() {
     return types;
     }();
     return rows;
+}
+} // namespace
+
+const std::vector<PgTypeRow>& CatalogManager::builtinTypeRows() {
+    static const auto rows=[] {
+        auto result=legacyBuiltinTypeRows();
+        for(const auto& property:builtin_type_properties::properties) {
+            const auto row=std::find_if(result.begin(),result.end(),[&](const auto& t){return t.oid==property.oid;});
+            if(row==result.end() || row->typname!=property.name || row->typlen!=property.size)
+                throw DbError("XX001","conflicting builtin physical declaration");
+            row->typbyval=property.byval;row->typalign=property.align;
+            row->typstorage=property.storage;row->typcollation=property.collation;
+        }
+        return result;
+    }();
+    return rows;
+}
+
+bool CatalogManager::bootstrapBuiltinTypeProperties(bool requireCurrent) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto replacementTypes=types_;auto replacementAttributes=attributes_;bool changed=false;
+    const auto& definitions=builtinTypeRows();const auto& legacy=legacyBuiltinTypeRows();
+    for(const auto& definition:definitions) {
+        const auto index=typeByOid_.find(definition.oid);
+        const auto old=std::find_if(legacy.begin(),legacy.end(),[&](const auto& t){return t.oid==definition.oid;});
+        if(index==typeByOid_.end() || old==legacy.end())throw DbError("XX001","missing builtin physical declaration");
+        auto& actual=replacementTypes[index->second];
+        if(actual.typnamespace!=11 || actual.typname!=definition.typname || actual.typlen!=definition.typlen ||
+           actual.typtype!=definition.typtype || !actual.typisdefined)
+            throw DbError("XX001","conflicting builtin type identity during physical upgrade");
+        const bool current=builtin_type_properties::equal(actual,definition);
+        if(!current && (requireCurrent || !builtin_type_properties::equal(actual,*old)))
+            throw DbError("XX001","unrecognized builtin type physical metadata");
+        if(!current){builtin_type_properties::copy(actual,definition);changed=true;}
+    }
+    if(!requireCurrent)for(auto& a:replacementAttributes) {
+        if(a.attisdropped)continue;
+        const auto type=std::find_if(definitions.begin(),definitions.end(),[&](const auto& t){return t.oid==a.atttypid;});
+        if(type==definitions.end())continue;
+        // Historical arrays carrying an element OID need a separate schema
+        // and dependency migration. Do not silently reinterpret that image.
+        if(a.attndims>0 && type->typcategory!='A')continue;
+        const auto old=std::find_if(legacy.begin(),legacy.end(),[&](const auto& t){return t.oid==a.atttypid;});
+        const bool previous=a.attbyval==old->typbyval && a.attalign==old->typalign &&
+            a.attstorage==old->typstorage && a.attcollation==old->typcollation;
+        const bool oldColumnWriter=a.attnum>0 && !a.attbyval && a.attalign=='i' &&
+            !a.attcollation && (a.attstorage=='p' || a.attstorage=='x');
+        const bool current=a.attbyval==type->typbyval && a.attalign==type->typalign &&
+            a.attstorage==type->typstorage && a.attcollation==type->typcollation;
+        if(current || (!previous && !oldColumnWriter))continue;
+        a.attbyval=type->typbyval;a.attalign=type->typalign;
+        a.attstorage=type->typstorage;a.attcollation=type->typcollation;changed=true;
+    }
+    // No in-memory edit escapes until the complete staged image validates.
+    if(systemAttributesMaterialized_)system_attributes::validateAll(classes_,replacementAttributes,replacementTypes);
+    types_.swap(replacementTypes);attributes_.swap(replacementAttributes);return changed;
+}
+
+bool CatalogManager::bootstrapSystemCatalogCollations(bool requireCurrent) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto fields=system_catalog_collation::inspect(classes_,attributes_,types_,requireCurrent,!requireCurrent);
+    // Inspect every existing declaration before changing any actual row.
+    bool changed=false;
+    for(const auto index:fields)if(attributes_[index].attcollation!=950) {
+        attributes_[index].attcollation=950;changed=true;
+    }
+    return changed;
 }
 
 void CatalogManager::bootstrapSystemTypes() {
@@ -2502,6 +2608,8 @@ void CatalogManager::loadAll() {
 }
 
 void CatalogManager::loadAllLocked() {
+    const bool systemAttributesExpected=system_attributes::published(dbPath_);
+    const bool systemCatalogCollationsExpected=system_catalog_collation::published(dbPath_);
     // Parse into a replacement model, retaining the old rows and indexes
     // until every catalog has loaded successfully. In particular a failed
     // peer refresh must not empty unrelated rows or throw from destruction.
@@ -2932,6 +3040,8 @@ void CatalogManager::loadAllLocked() {
     // No files/OIDs are changed by a cold read, and cached dirty edits remain
     // observable: snapshots themselves never normalize caller-owned changes.
     upgradeLegacyAttributeLengths(attributes_,types_,typeByOid_);
+    if(systemAttributesExpected)system_attributes::validateAll(classes_,attributes_,types_);
+    if(systemCatalogCollationsExpected)system_catalog_collation::validate(classes_,attributes_,types_);
     auto images = serializeAllLocked();
     std::map<std::string, CatalogFileGeneration> observed;
     for (const auto& image : images) {
@@ -2945,6 +3055,7 @@ void CatalogManager::loadAllLocked() {
     }
     persistence_->baseline = std::move(images);
     persistence_->observed = std::move(observed);
+    systemAttributesMaterialized_=systemAttributesExpected;
     } catch (...) {
         std::tie(namespaces_, classes_, attributes_, types_, enums_, procs_,
                  depends_, authIds_, authMembers_, descriptions_) = std::move(priorRows);

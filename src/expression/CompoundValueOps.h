@@ -91,7 +91,7 @@ inline void attach(ExprValue& value,std::vector<ExprValue> items,
     // A true empty array has no bitmap, even when it came from a nonempty slice.
     if(data->dimensions.empty())data->arrayNullBitmap=false;
     const auto canonical=common_type_detail::canonical(value.typeName);
-    if(canonical=="regtype[]") {
+    if(canonical=="regtype[]" || canonical=="regclass[]") {
         value.elementOids.clear();value.elementOids.reserve(data->arrayElements->size());
         for(const auto& item:*data->arrayElements)value.elementOids.push_back(item.objectOid);
     }

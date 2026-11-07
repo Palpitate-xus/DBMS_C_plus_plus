@@ -1,3 +1,4 @@
+#include "catalog/SystemAttributeDeclaration.h"
 #include "catalog/declared_type.h"
 // ============================================================================
 // DDL AST Executor — Phase 4 Wave 0.3
@@ -9,6 +10,8 @@
 #include "commands/DdlRewrite.h"
 #include "commands/SchemaNamespace.h"
 #include "commands/SequenceStorageName.h"
+#include "commands/IdentitySequenceOptions.h"
+#include "commands/SequenceParameters.h"
 #include "process/StatementNotice.h"
 #include "parser/parser.h"
 #include "catalog/CatalogService.h"
@@ -26,6 +29,7 @@
 #include "common/GeometryValue.h"
 #include "common/scram_sha256.h"
 #include "expression/expr_helper.h"
+#include "expression/StoredRegtypeValue.h"
 #include "network/NetworkServer.h"
 #include "permissions.h"
 #include <algorithm>
@@ -1152,12 +1156,14 @@ static PgAttributeRow catalogAttributeForColumn(
     attribute.attnum = static_cast<int16_t>(columnIndex + 1);
     attribute.attname = column.dataName;
     attribute.atttypid = ensureTypeInCatalog(cat, namespaceOid, column);
-    if (column.isArray && (column.dataType == "regtype" || column.dataType == "regtype[]")) {
+    if (column.isArray && stored_regtype_detail::columnType(column.dataType)) {
         // This newly supported stored family has a real built-in array
         // identity. Do not manufacture a pair or change any older family.
-        const auto element = cat.getType(2206);
-        const auto array = cat.getType(2211);
-        if (!element || !array || element->typarray != 2211 || array->typelem != 2206 ||
+        const bool relationReference=column.dataType=="regclass" || column.dataType=="regclass[]";
+        const Oid elementOid=relationReference?2205:2206,arrayOid=relationReference?2210:2211;
+        const auto element = cat.getType(elementOid);
+        const auto array = cat.getType(arrayOid);
+        if (!element || !array || element->typarray != arrayOid || array->typelem != elementOid ||
             element->typnamespace != 11 || array->typnamespace != 11)
             throw DbError("XX001", "regtype array has no genuine built-in catalog pair");
         attribute.atttypid = array->oid;
@@ -1172,8 +1178,16 @@ static PgAttributeRow catalogAttributeForColumn(
             throw DbError("XX001", "domain has no catalog identity");
         attribute.atttypid = type->oid;
     }
-    const auto declaredType = cat.getType(attribute.atttypid);
+    auto declaredType = cat.getType(attribute.atttypid);
     if (!declaredType) throw DbError("XX001", "column has no declared catalog type");
+    if (column.isArray && declaredType->typnamespace == 11 && declaredType->typcategory != 'A') {
+        const auto array = cat.getType(declaredType->typarray);
+        if (!array || array->typnamespace != 11 || array->typcategory != 'A' ||
+            array->typelem != declaredType->oid)
+            throw DbError("XX001", "array column has no genuine built-in catalog pair");
+        attribute.atttypid = array->oid;
+        declaredType = array;
+    }
     // PostgreSQL attlen copies the declared type, not this engine's heap
     // codec width (DATE/TIME/TIMETZ/INTERVAL deliberately use other layouts).
     // Legacy physical arrays can still name their element plus attndims.
@@ -1218,8 +1232,13 @@ static PgAttributeRow catalogAttributeForColumn(
     }
     if (!column.domainName.empty()) attribute.atttypmod = -1;
     attribute.attnotnull = !column.isNull;
-    attribute.atthasdef = !column.defaultValue.empty() && column.defaultOrigin != Column::DefaultOrigin::Domain;
-    attribute.attstorage = column.isVariableLength ? 'x' : 'p';
+    attribute.atthasdef = (!column.defaultValue.empty() && column.defaultOrigin != Column::DefaultOrigin::Domain) ||
+        !column.generatedExpr.empty();
+    attribute.attbyval = declaredType->typbyval;
+    attribute.attalign = declaredType->typalign;
+    attribute.attstorage = declaredType->typstorage;
+    if (!previous || previous->atttypid != attribute.atttypid || !attribute.attcollation)
+        attribute.attcollation = declaredType->typcollation;
     attribute.attidentity = column.identityKind;
     attribute.attgenerated = column.generatedExpr.empty()
         ? '\0' : (column.generatedKind == 'v' ? 'v' : 's');
@@ -1581,7 +1600,7 @@ static bool synchronizeTableAttributesInCatalog(
             engine.getTableSchema(dbname, physicalTableName);
         if (table.len == 0) return false;
         const std::vector<PgAttributeRow> previous =
-            catalog.findAttributes(relationOid);
+            catalog.findUserAttributes(relationOid);
         std::vector<PgAttributeRow> replacement;
         replacement.reserve(table.len);
         for (size_t columnIndex = 0; columnIndex < table.len;
@@ -1780,7 +1799,7 @@ static bool updateInheritanceColumnsInCatalog(
     // Temporary and storage-only relations intentionally have no catalog row.
     if (!childRelation) return true;
 
-    auto attributes = catalog.findAttributes(childRelation->oid);
+    auto attributes = catalog.findUserAttributes(childRelation->oid);
     std::map<std::string, int32_t> directParentCounts;
     for (const auto& candidate : g_engine.getTableNames(dbname)) {
         if (candidate == physicalChildName) continue;
@@ -1880,7 +1899,7 @@ static bool updateColumnStatisticsInCatalog(
         // Storage-only relations intentionally remain outside pg_catalog.
         if (!relation) return true;
         const Oid relationOid = relation->oid;
-        auto attributes = catalog.findAttributes(relationOid);
+        auto attributes = catalog.findUserAttributes(relationOid);
         const auto attribute = std::find_if(
             attributes.begin(), attributes.end(),
             [&](const PgAttributeRow& row) {
@@ -2319,6 +2338,17 @@ static void rejectVirtualKey(const TableSchema& table,const std::vector<std::str
         throw DbError("0A000",std::string(role)+" on virtual generated columns are not supported");
 }
 
+struct PendingIdentitySequence {
+    std::string column;
+    uint32_t oid = 0;
+};
+static PendingIdentitySequence createIdentityColumnSequence(
+    Session&, DdlTransaction&, CatalogManager&, const std::string&, const std::string&,
+    Column&, const std::vector<std::pair<std::string, std::string>>&,
+    const SequenceInfo* copied = nullptr, bool tableUnlogged = false);
+static void attachIdentityColumnSequences(CatalogManager&, Oid,
+    const std::vector<PendingIdentitySequence>&);
+
 bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
     if (!stmt) return true;
     if (!checkDB(s)) return true;
@@ -2413,6 +2443,23 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                     std::cout << "Invalid column type: " << typeError << std::endl;
                     return true;
                 }
+                std::vector<PendingIdentitySequence> addedIdentity;
+                if (column.identityKind != 0) {
+                    const auto existing = g_engine.getTableSchema(s.currentDB, tableName);
+                    const auto duplicate = std::find_if(existing.cols, existing.cols + existing.len,
+                        [&](const Column& c) { return c.dataName == column.dataName; });
+                    if (duplicate != existing.cols + existing.len && sub.ifNotExists) {
+                        emitNotice("column already exists, skipping");
+                        break;
+                    }
+                    if (duplicate != existing.cols + existing.len)
+                        throw DbError("42701", "column already exists: " + column.dataName);
+                    auto& catalog = g_engine.catalogService().get(s.currentDB);
+                    const auto name = CatalogService::logicalName(tableName);
+                    const auto schema = name.schema.empty() ? "public" : name.schema;
+                    addedIdentity.push_back(createIdentityColumnSequence(s, txn, catalog,
+                        schema, name.name, column, sub.colDef.identityOptions, nullptr, existing.isUnlogged));
+                }
                 txn.markSnapshotDirty();
                 {
                     detail::DdlRewriteScope rewriting(txn, g_engine, s.currentDB, tableName);
@@ -2444,6 +2491,14 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                     std::cout << "ALTER TABLE ADD COLUMN catalog update failed"
                               << std::endl;
                     return true;
+                }
+                if (!addedIdentity.empty()) {
+                    auto& catalog = g_engine.catalogService().get(s.currentDB);
+                    const auto name = CatalogService::logicalName(tableName);
+                    const auto ns = catalog.getNamespaceByName(name.schema.empty() ? "public" : name.schema);
+                    const auto relation = ns ? catalog.getClassByName(name.name, ns->oid) : std::nullopt;
+                    if (!relation) throw DbError("XX001", "identity owner relation is missing");
+                    attachIdentityColumnSequences(catalog, relation->oid, addedIdentity);
                 }
                 break;
             }
@@ -2799,15 +2854,118 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                 }
                 std::map<std::string, int32_t> declaredVarcharMods;
                 if (!sub.identityAction.empty()) {
-                    if (sub.colDef.hasIdentityOptions) {
-                        std::cout << "ERROR: identity sequence options are not "
-                                     "supported (SQLSTATE 0A000)" << std::endl;
+                    const auto table = g_engine.getTableSchema(s.currentDB, tableName);
+                    auto found = std::find_if(table.cols, table.cols + table.len,
+                        [&](const Column& c) { return c.dataName == sub.name; });
+                    if (found == table.cols + table.len) {
+                        std::cout << "ERROR: " << DbError("42703", "column does not exist: " + sub.name).what() << std::endl;
                         return true;
                     }
-                    status = g_engine.alterTableIdentity(
-                        s.currentDB, tableName, sub.name,
-                        sub.identityAction, sub.identityKind,
-                        sub.identityIfExists);
+                    auto& catalog = g_engine.catalogService().get(s.currentDB);
+                    const auto name = CatalogService::logicalName(tableName);
+                    const auto schema = name.schema.empty() ? "public" : name.schema;
+                    const auto ns = catalog.getNamespaceByName(schema);
+                    const auto relation = ns ? catalog.getClassByName(name.name, ns->oid) : std::nullopt;
+                    if (!relation) throw DbError("XX001", "identity owner relation is missing");
+                    uint32_t sequenceOid = 0;
+                    if (sub.identityAction == "add") {
+                        if (found->identityKind != 0 || found->isNull || !found->defaultValue.empty()) {
+                            const auto reason = found->identityKind != 0 ? "column is already an identity column" :
+                                found->isNull ? "column must be declared NOT NULL before identity can be added" :
+                                "column already has a default value";
+                            std::cout << "ERROR: " << DbError("55000", reason).what() << std::endl;
+                            return true;
+                        }
+                        try { (void)identity_sequence::parameters(*found, sub.colDef.identityOptions); }
+                        catch (const DbError& error) {
+                            std::cout << "ERROR: " << error.what() << std::endl;
+                            return true;
+                        }
+                        auto column = *found;
+                        column.identityKind = sub.identityKind; column.isAutoIncrement = true;
+                        auto pending = createIdentityColumnSequence(s, txn, catalog, schema, name.name,
+                            column, sub.colDef.identityOptions, nullptr, table.isUnlogged);
+                        sequenceOid = pending.oid;
+                        attachIdentityColumnSequences(catalog, relation->oid, {pending});
+                    } else if (sub.identityAction == "set") {
+                        const auto reject = [](const std::string& state, const std::string& message) {
+                            std::cout << "ERROR: " << DbError(state, message).what() << std::endl;
+                            return true;
+                        };
+                        if (found->identityKind == 0)
+                            return reject("55000", "column is not an identity column");
+                        bool generated = false;
+                        std::vector<std::pair<std::string, std::string>> options;
+                        for (const auto& option : sub.colDef.identityOptions) {
+                            if (option.first == "generated") {
+                                if (generated) return reject("42601", "conflicting or redundant options");
+                                generated = true;
+                            } else options.push_back(option);
+                        }
+                        if (options.empty() && sub.identityKind == 0)
+                            return reject("42601", "identity alteration requires an option");
+                        if (!options.empty()) {
+                            // PostgreSQL's ALTER identity grammar accepts these
+                            // spellings, but the sequence executor rejects them.
+                            // Keep its actual diagnostic classes and validate
+                            // all options before changing the mode or sequence.
+                            std::set<std::string> seen;
+                            for (const auto& option : options) {
+                                auto key = option.first;
+                                if (key == "sequence_name")
+                                    return reject("42601", "invalid sequence option SEQUENCE NAME");
+                                if (key == "logged" || key == "unlogged")
+                                    return reject("XX000", "option \"" + key + "\" not recognized");
+                                if (key == "nominvalue") key = "minvalue";
+                                if (key == "nomaxvalue") key = "maxvalue";
+                                if (key == "nocycle") key = "cycle";
+                                if (!seen.insert(key).second)
+                                    return reject("42601", "conflicting or redundant options");
+                            }
+                            if (found->identitySequenceOid == 0)
+                                return reject("0A000", "legacy anonymous identity sequence options require migration");
+                            const auto sequence = catalog.getClass(found->identitySequenceOid);
+                            const auto sequenceNamespace = sequence
+                                ? catalog.getNamespace(sequence->relnamespace) : std::nullopt;
+                            if (!sequence || sequence->relkind != 'S' || !sequenceNamespace)
+                                throw DbError("XX001", "identity sequence catalog binding is missing");
+                            const auto storage = sequenceStorageName(sequenceNamespace->nspname, sequence->relname);
+                            SequenceInfo previous;
+                            if (g_engine.getSequenceInfo(s.currentDB, storage, previous) != DBStatus::OK)
+                                throw DbError("XX001", "identity sequence definition cannot be read");
+                            identity_sequence::Options parsed;
+                            try { parsed = identity_sequence::parameters(*found, options, &previous); }
+                            catch (const DbError& error) { return reject(error.sqlState(), error.message()); }
+                            parsed.sequence.restartSpecified = parsed.restartSpecified;
+                            parsed.sequence.restartValueSpecified = parsed.restart.has_value();
+                            parsed.sequence.restart = parsed.restart.value_or(parsed.sequence.start);
+                            const auto altered = g_engine.alterSequence(s.currentDB, storage, parsed.sequence);
+                            if (altered != DBStatus::OK)
+                                return reject(altered == DBStatus::INVALID_VALUE ? "22023" : sqlstateForDBStatus(altered),
+                                              "could not alter identity sequence");
+                        }
+                        if (sub.identityKind != 0)
+                            status = g_engine.alterTableIdentity(s.currentDB, tableName, sub.name,
+                                                                "set", sub.identityKind, false);
+                    } else if (sub.identityAction == "drop" && found->identitySequenceOid != 0) {
+                        const auto sequence = catalog.getClass(found->identitySequenceOid);
+                        const auto attribute = catalog.getAttribute(relation->oid, found->dataName);
+                        if (!sequence || sequence->relkind != 'S' || !attribute)
+                            throw DbError("XX001", "identity sequence or owner attribute is missing");
+                        if (!catalog.removeDepend(PgClassOid_Class, sequence->oid, 0,
+                                PgClassOid_Class, relation->oid, attribute->attnum))
+                            throw DbError("XX001", "identity ownership dependency is missing");
+                        DropStmt drop;
+                        drop.command = SqlCommand::DropSequence;
+                        drop.objectType = "SEQUENCE";
+                        drop.objectNames.push_back(g_engine.identitySequenceName(s.currentDB, sequence->oid));
+                        if (executeDropSequence(&drop, s)) return true;
+                    }
+                    if (sub.identityAction != "set")
+                        status = g_engine.alterTableIdentity(
+                            s.currentDB, tableName, sub.name,
+                            sub.identityAction, sub.identityKind,
+                            sub.identityIfExists, sequenceOid);
                 } else if (sub.defaultValue) {
                     std::string definition=sub.defaultValue->toString();
                     if(ddlSourceIdentity.statement==stmt && ddlSourceIdentity.source) {
@@ -4255,7 +4413,7 @@ bool DdlExecutor::executeTruncate(const TruncateStmt* stmt, Session& s) {
         if (stmt->restartIdentity) {
             const TableSchema table = g_engine.getTableSchema(s.currentDB, name);
             for (size_t i = 0; i < table.len; ++i) {
-                if (table.cols[i].isAutoIncrement) {
+                if (table.cols[i].isAutoIncrement && table.cols[i].identitySequenceOid == 0) {
                     g_engine.resetSequence(s.currentDB, name, table.cols[i].dataName, 1);
                 }
             }
@@ -4799,10 +4957,6 @@ bool DdlExecutor::columnDefToColumn(const ColumnDef& cd, const std::string& dbna
                 "(SQLSTATE 42601)";
         return false;
     }
-    if (cd.hasIdentityOptions) {
-        error = "identity sequence options are not supported (SQLSTATE 0A000)";
-        return false;
-    }
     if (cd.isGeneratedIdentity && cd.defaultValue) {
         error = "identity column cannot also have a DEFAULT (SQLSTATE 42601)";
         return false;
@@ -4925,8 +5079,8 @@ bool DdlExecutor::columnDefToColumn(const ColumnDef& cd, const std::string& dbna
     else if (baseType == "datetime") baseType = "timestamp";
 
     const auto& typeMods = cd.typeMods.empty() ? domainTypeMods : cd.typeMods;
-    if (baseType == "regtype" && !typeMods.empty()) {
-        error = "type modifier is not allowed for type regtype (SQLSTATE 42601)";
+    if (stored_regtype_detail::scalarType(baseType) && !typeMods.empty()) {
+        error = "type modifier is not allowed for type "+baseType+" (SQLSTATE 42601)";
         return false;
     }
     int typeMod1 = 0, typeMod2 = 0;
@@ -5010,13 +5164,13 @@ bool DdlExecutor::columnDefToColumn(const ColumnDef& cd, const std::string& dbna
         // hold n multibyte UTF-8 characters.  Keep the declared character
         // width in dsize and use a varlena physical slot for new SQL columns.
         col.isVariableLength = true;
-    } else if (baseType == "regtype") {
+    } else if (stored_regtype_detail::scalarType(baseType)) {
         if (!typeMods.empty()) {
-            error = "type modifier is not allowed for type regtype (SQLSTATE 42601)";
+            error = "type modifier is not allowed for type "+baseType+" (SQLSTATE 42601)";
             return false;
         }
         col.dataName = cd.name;
-        col.dataType = "regtype";
+        col.dataType = baseType;
         col.dsize = cd.isArray ? size_t(65535) : sizeof(uint32_t);
         col.isVariableLength = cd.isArray;
         col.isUnsigned = !cd.isArray;
@@ -5195,6 +5349,12 @@ bool DdlExecutor::columnDefToColumn(const ColumnDef& cd, const std::string& dbna
     }
     // COLLATE determined after the storage type is assigned above.
     if (!cd.collation.empty()) col.collation = cd.collation;
+    if (cd.isGeneratedIdentity) {
+        // Declaration conversion reports validation failures through its
+        // existing bool/error contract, before any sequence is created.
+        try { (void)identity_sequence::parameters(col, cd.identityOptions); }
+        catch (const DbError& failure) { error = failure.what(); return false; }
+    }
     return true;
 }
 
@@ -5306,6 +5466,8 @@ static dbms::Column makeColumnFromSource(const dbms::Column& src, const std::str
     col.isPrimaryKey = false;
     col.isUnique = false;
     col.isAutoIncrement = false;
+    col.identityKind = 0;
+    col.identitySequenceOid = 0;
     col.defaultValue.clear();
     col.checkExpr.clear();
     col.checkConstraintName.clear();
@@ -5614,6 +5776,105 @@ static std::string serialNextvalDefault(const std::string& schema,
     return "nextval(" + literal + "')";
 }
 
+static PendingIdentitySequence createIdentityColumnSequence(
+    Session& session, DdlTransaction& txn, CatalogManager& catalog,
+    const std::string& tableSchema, const std::string& tableName,
+    Column& column, const std::vector<std::pair<std::string, std::string>>& options,
+    const SequenceInfo* copied, bool tableUnlogged) {
+    auto parsed = identity_sequence::parameters(column, options, copied, copied != nullptr);
+    parsed.sequence.restartSpecified = parsed.restartSpecified;
+    parsed.sequence.restartValueSpecified = parsed.restart.has_value();
+    parsed.sequence.restart = parsed.restart.value_or(parsed.sequence.start);
+    const bool temporary = tableSchema == sessionTempSchemaName(session);
+    if (temporary && parsed.persistence != 0)
+        throw DbError("42P16", "cannot set logged status of a temporary sequence");
+    char persistence = temporary ? 't' : parsed.persistence != 0
+        ? parsed.persistence : tableUnlogged ? 'u' : 'p';
+    std::string sequenceSchema = tableSchema, sequenceName;
+    if (parsed.name) {
+        CatalogManager::QualifiedName qualified;
+        if (!CatalogManager::parseQualifiedName(*parsed.name, qualified, true) || qualified.name.empty())
+            throw DbError("42601", "invalid identity sequence name");
+        sequenceName = qualified.name;
+        if (!qualified.schema.empty()) sequenceSchema = qualified.schema;
+        if (temporary && sequenceSchema != tableSchema)
+            throw DbError("42P16", "cannot create temporary relation in non-temporary schema");
+        // PostgreSQL's deferred internal OWNED BY is resolved relative to
+        // the chosen sequence namespace. A different table schema does not
+        // silently bind to a same-named relation in the sequence namespace.
+        if (sequenceSchema != tableSchema)
+            throw DbError("42P01", "identity sequence owner relation does not exist in sequence schema");
+    }
+    const auto ns = catalog.getNamespaceByName(sequenceSchema);
+    if (!ns) throw DbError("3F000", "identity sequence schema does not exist");
+    if (!parsed.name) {
+        for (uint64_t suffix = 0;; ++suffix) {
+            sequenceName = serialSequenceRelationName(tableName, column.dataName, suffix);
+            if (!catalog.getClassByName(sequenceName, ns->oid) &&
+                !g_engine.sequenceExists(session.currentDB, sequenceStorageName(sequenceSchema, sequenceName))) break;
+            if (suffix == std::numeric_limits<uint64_t>::max())
+                throw DbError("54000", "cannot choose identity sequence name");
+        }
+    } else if (catalog.getClassByName(sequenceName, ns->oid) ||
+               g_engine.sequenceExists(session.currentDB, sequenceStorageName(sequenceSchema, sequenceName))) {
+        throw DbError("42P07", "identity sequence name already exists");
+    }
+    if (parsed.requestedOwner && toLower(*parsed.requestedOwner) != "none") {
+        std::string ownerTable, ownerColumn;
+        if (!parseSequenceOwnedByReference(*parsed.requestedOwner, ownerTable, ownerColumn))
+            throw DbError("42601", "invalid sequence OWNED BY reference");
+        CatalogManager::QualifiedName qualified;
+        if (!CatalogManager::parseQualifiedName(ownerTable, qualified, true))
+            throw DbError("42601", "invalid sequence OWNED BY table");
+        const auto ownerSchema = qualified.schema.empty() ? sequenceSchema : qualified.schema;
+        const auto ownerNs = catalog.getNamespaceByName(ownerSchema);
+        const auto owner = ownerNs ? catalog.getClassByName(qualified.name, ownerNs->oid) : std::nullopt;
+        if (!owner) throw DbError("42P01", "sequence OWNED BY relation does not exist");
+        if (!catalog.getAttribute(owner->oid, ownerColumn))
+            throw DbError("42703", "sequence OWNED BY column does not exist");
+        if (ownerSchema != sequenceSchema)
+            throw DbError("55000", "sequence must be in same schema as owned table");
+    }
+    auto& info = parsed.sequence;
+    info.ownedByTable = storedOwnedTableReference(tableSchema, tableName);
+    info.ownedByColumn = column.dataName;
+    info.ownedBySpecified = true;
+    const auto storage = sequenceStorageName(sequenceSchema, sequenceName);
+    txn.markSnapshotDirty();
+    const auto status = g_engine.createSequence(session.currentDB, storage, info);
+    if (status != DBStatus::OK)
+        throw DbError(sqlstateForDBStatus(status), "could not create identity sequence");
+    txn.recordCreate(DdlObjectKind::Sequence, storage);
+    PgClassRow relation;
+    relation.relname = sequenceName; relation.relnamespace = ns->oid;
+    relation.relkind = 'S'; relation.relpersistence = persistence; relation.relnatts = 0;
+    const auto oid = catalog.createClass(relation);
+    if (oid == INVALID_OID) throw DbError("XX000", "identity sequence catalog publication failed");
+    if (parsed.restartSpecified) {
+        SequenceInfo restart;
+        restart.restartSpecified = true; restart.restartValueSpecified = true;
+        restart.restart = parsed.restart.value_or(info.start);
+        if (g_engine.alterSequence(session.currentDB, storage, restart) != DBStatus::OK)
+            throw DbError("58030", "could not initialize identity sequence restart");
+    }
+    column.identitySequenceOid = oid;
+    return {column.dataName, oid};
+}
+
+static void attachIdentityColumnSequences(CatalogManager& catalog,
+    Oid tableOid, const std::vector<PendingIdentitySequence>& pending) {
+    for (const auto& sequence : pending) {
+        const auto attribute = catalog.getAttribute(tableOid, sequence.column);
+        if (!attribute) throw DbError("XX000", "identity owner attribute is missing");
+        PgDependRow edge;
+        edge.classid = PgClassOid_Class; edge.objid = sequence.oid; edge.objsubid = 0;
+        edge.refclassid = PgClassOid_Class; edge.refobjid = tableOid;
+        edge.refobjsubid = attribute->attnum; edge.deptype = 'i';
+        catalog.addDepend(edge);
+    }
+    if (!catalog.persistAll()) throw DbError("58030", "could not persist identity sequence ownership");
+}
+
 bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
     if (!stmt) return rejectMalformedDdlAst();
     if (!checkAdmin(s)) return true;
@@ -5638,7 +5899,13 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
     DdlTransaction txn(s);
     // A nested CREATE SEQUENCE needs a physical snapshot. Capture it before
     // creating the table, not between table creation and sequence creation.
-    if (!outerTransaction || createsSerialSequence || temporary) txn.enableSnapshotRollback();
+    const bool createsIdentitySequence = std::any_of(
+        stmt->columns.begin(), stmt->columns.end(),
+        [](const ColumnDef& column) { return column.isGeneratedIdentity; }) ||
+        std::any_of(stmt->likeClauses.begin(), stmt->likeClauses.end(),
+        [](const auto& clause) { return clause.includingIdentity; });
+    if (!outerTransaction || createsSerialSequence || createsIdentitySequence || temporary)
+        txn.enableSnapshotRollback();
     if (!txn.begin()) {
         std::cout << "DDL transaction begin failed" << std::endl;
         return true;
@@ -5963,6 +6230,7 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
             if (!lc.includingIdentity && c.identityKind != 0) {
                 c.isAutoIncrement = false;
                 c.identityKind = 0;
+                c.identitySequenceOid = 0;
             }
             if (!lc.includingIndexes) {
                 c.isPrimaryKey = false;
@@ -6031,6 +6299,7 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
     // declaration with the same name as a parent column is merged instead of
     // being appended as a duplicate after the inheritance pass.
     for (const auto& cd : stmt->columns) {
+        if(system_attributes::reserved(cd.name))throw DbError("42701","column name conflicts with a system column: "+cd.name);
         if (!locallyDeclaredColumnNames.insert(cd.name).second) {
             std::cout << "ERROR: column \"" << cd.name
                       << "\" specified more than once" << std::endl;
@@ -6173,6 +6442,7 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
                 target.isUnique = incoming.isUnique;
                 target.isAutoIncrement = incoming.isAutoIncrement;
                 target.identityKind = incoming.identityKind;
+                target.identitySequenceOid = incoming.identitySequenceOid;
             }
             return true;
         };
@@ -6204,6 +6474,7 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
                 inherited.isUnique = false;
                 inherited.isAutoIncrement = false;
                 inherited.identityKind = 0;
+                inherited.identitySequenceOid = 0;
                 const auto existing = mergedColumns.find(inherited.dataName);
                 inheritedColumnNames.insert(inherited.dataName);
                 if (existing != mergedColumns.end()) {
@@ -6572,6 +6843,30 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
         }
     }
 
+    std::vector<PendingIdentitySequence> identitySequences;
+    for (size_t i = 0; i < tbl.len; ++i) {
+        auto& column = tbl.cols[i];
+        if (column.identityKind == 0) continue;
+        std::vector<std::pair<std::string, std::string>> options;
+        for (const auto& definition : stmt->columns)
+            if (definition.name == column.dataName) options = definition.identityOptions;
+        std::optional<SequenceInfo> copied;
+        if (column.identitySequenceOid != 0) {
+            const auto sequence = tableCatalog->getClass(column.identitySequenceOid);
+            const auto ns = sequence ? tableCatalog->getNamespace(sequence->relnamespace) : std::nullopt;
+            if (!sequence || sequence->relkind != 'S' || !ns)
+                throw DbError("XX001", "LIKE source identity sequence is missing");
+            copied.emplace();
+            if (g_engine.getSequenceInfo(s.currentDB,
+                    sequenceStorageName(ns->nspname, sequence->relname), *copied) != DBStatus::OK)
+                throw DbError("XX001", "LIKE source identity sequence cannot be read");
+            column.identitySequenceOid = 0;
+        }
+        identitySequences.push_back(createIdentityColumnSequence(
+            s, txn, *tableCatalog, targetSchema, targetName.name,
+            column, options, copied ? &*copied : nullptr, tbl.isUnlogged));
+    }
+
     std::vector<CreateObjectStmt> serialSequences;
     {
         const auto tableNamespace = tableCatalog->getNamespaceByName(targetSchema);
@@ -6609,11 +6904,15 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
             sequence.options["maxvalue"] = (type == "smallserial" || type == "serial2")
                 ? "32767" : ((type == "serial" || type == "serial4")
                     ? "2147483647" : "9223372036854775807");
+            sequence.options["as"] = (type == "smallserial" || type == "serial2")
+                ? "smallint" : ((type == "serial" || type == "serial4") ? "integer" : "bigint");
             serialSequences.push_back(std::move(sequence));
         }
     }
 
     txn.markSnapshotDirty();
+    for(size_t i=0;i<tbl.len;++i)if(system_attributes::reserved(tbl.cols[i].dataName))
+        throw DbError("42701","column name conflicts with a system column: "+tbl.cols[i].dataName);
     DBStatus res = g_engine.createTable(s.currentDB, tbl);
     if (res != DBStatus::OK) {
         std::cout << "CREATE TABLE failed" << std::endl;
@@ -6716,6 +7015,7 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
             if (!tableRelation || tableRelation->relkind != 'r') {
                 throw std::runtime_error("created table catalog row is missing");
             }
+            attachIdentityColumnSequences(cat, tableRelation->oid, identitySequences);
             for (const auto& parent : inheritedParents) {
                 if (!updateTableHierarchyFlagsInCatalog(
                         cat, s.currentDB, parent)) {
@@ -6830,7 +7130,7 @@ static bool updateOwnedSequenceNames(
          catalog.findRefs(PgClassOid_Class, tableOid, -1)) {
         if (dependency.classid != PgClassOid_Class ||
             dependency.objsubid != 0 ||
-            dependency.deptype != 'a') {
+            (dependency.deptype != 'a' && dependency.deptype != 'i')) {
             continue;
         }
         if (renamingColumn && dependency.refobjsubid > 0 &&
@@ -7212,7 +7512,7 @@ static bool dropOwnedSequencesForColumn(
     for (const auto& dependency :
          catalog.findRefs(PgClassOid_Class, tableOid, -1)) {
         if (dependency.classid != PgClassOid_Class ||
-            dependency.objsubid != 0 || dependency.deptype != 'a') {
+            dependency.objsubid != 0 || (dependency.deptype != 'a' && dependency.deptype != 'i')) {
             continue;
         }
         if (dependency.refobjsubid > 0 &&
@@ -8666,62 +8966,15 @@ bool DdlExecutor::executeCreateSequence(const CreateObjectStmt* stmt, Session& s
     }
     const std::string seqname = sequenceStorageName(
         sequenceSchema, sequenceName.name);
-    dbms::SequenceInfo info;
-    auto opt = stmt->options.find("start");
-    if (opt != stmt->options.end()) {
-        if (!parseInt64Strict(opt->second, info.start)) return true;
-        info.startSpecified = true;
-    }
-    opt = stmt->options.find("increment");
-    if (opt != stmt->options.end()) {
-        if (!parseInt64Strict(opt->second, info.increment)) return true;
-        info.incrementSpecified = true;
-    }
-    opt = stmt->options.find("minvalue");
-    if (opt != stmt->options.end()) {
-        if (!parseInt64Strict(opt->second, info.minValue)) return true;
-        info.hasMinValue = true;
-    }
-    opt = stmt->options.find("maxvalue");
-    if (opt != stmt->options.end()) {
-        if (!parseInt64Strict(opt->second, info.maxValue)) return true;
-        info.hasMaxValue = true;
-    }
-    opt = stmt->options.find("cache");
-    if (opt != stmt->options.end()) {
-        if (!parseInt64Strict(opt->second, info.cache)) return true;
-        info.cacheSpecified = true;
-    }
-    opt = stmt->options.find("cycle");
-    if (opt != stmt->options.end()) {
-        info.cycleSpecified = true;
-        info.cycle = (opt->second == "yes");
-    }
-    opt = stmt->options.find("nominvalue");
-    if (opt != stmt->options.end()) {
-        info.noMinValue = true;
-        info.hasMinValue = false;
-    }
-    opt = stmt->options.find("nomaxvalue");
-    if (opt != stmt->options.end()) {
-        info.noMaxValue = true;
-        info.hasMaxValue = false;
-    }
-    opt = stmt->options.find("ownedby");
-    if (opt != stmt->options.end()) {
-        info.ownedBySpecified = true;
-        const std::string& owner = opt->second;
-        if (owner == "none") {
-            info.ownedByTable.clear();
-            info.ownedByColumn.clear();
-        } else if (!parseSequenceOwnedByReference(
-                       owner, info.ownedByTable,
-                       info.ownedByColumn)) {
-            std::cout << "CREATE SEQUENCE OWNED BY target is invalid"
-                      << std::endl;
-            return true;
+    std::vector<std::pair<std::string,std::string>> options = stmt->sequenceOptions;
+    if (!stmt->sequenceOptionsParsed) {
+        for (const auto& option : stmt->options) {
+            if (option.first == "temporary") continue;
+            if (option.first == "cycle") options.emplace_back(option.second == "no" ? "nocycle" : "cycle", "");
+            else options.push_back(option);
         }
     }
+    dbms::SequenceInfo info;
 
     CatalogManager* sequenceCatalog = nullptr;
     Oid sequenceNamespaceOid = INVALID_OID;
@@ -8766,6 +9019,17 @@ bool DdlExecutor::executeCreateSequence(const CreateObjectStmt* stmt, Session& s
                       << std::endl;
             return true;
         }
+        auto parameters = sequence_parameters::resolve(options,nullptr,[&](const std::string& type) {
+            const auto metadata = catalog.metadataSnapshot();
+            return resolveDeclaredTypeName(type,&metadata,&s).typeOid;
+        });
+        info = std::move(parameters.effective);
+        if (parameters.owner) {
+            info.ownedBySpecified = true;
+            if (toLower(*parameters.owner) != "none" &&
+                !parseSequenceOwnedByReference(*parameters.owner,info.ownedByTable,info.ownedByColumn))
+                throw DbError("42601","OWNED BY requires table.column or NONE");
+        }
         if (!info.ownedByTable.empty()) {
             CatalogManager::QualifiedName ownerName;
             if (!CatalogManager::parseQualifiedName(
@@ -8797,6 +9061,9 @@ bool DdlExecutor::executeCreateSequence(const CreateObjectStmt* stmt, Session& s
             info.ownedByTable = storedOwnedTableReference(
                 sequenceSchema, ownerName.name);
         }
+    } catch (const DbError& error) {
+        std::cout << "ERROR: " << error.message() << " (SQLSTATE " << error.sqlState() << ")" << std::endl;
+        return true;
     } catch (const std::exception& error) {
         std::cout << "CREATE SEQUENCE catalog preflight failed: "
                   << error.what() << std::endl;
@@ -8912,143 +9179,11 @@ bool DdlExecutor::executeAlterSequence(const AlterObjectStmt* stmt, Session& s) 
         newName = newSequenceName.name;
     }
 
-    auto lower = [](const std::string& str) {
-        std::string r = str;
-        for (char& c : r) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        return r;
-    };
-
-    if (!renameRequested) {
-        for (const auto& token : tokens) {
-            if (toLower(token) == "rename" || toLower(token) == "to") {
-                std::cout << "SQL syntax error: ALTER SEQUENCE name RENAME TO new_name"
-                          << std::endl;
-                return true;
-            }
-        }
-
-        for (size_t i = 0; i < tokens.size(); ++i) {
-            std::string tok = lower(tokens[i]);
-            auto readValue = [&](int64_t& target, const char* name) {
-                size_t consumed = 0;
-                if (!parseInt64Tokens(
-                        tokens, i + 1, target, consumed)) {
-                    std::cout << "SQL syntax error: invalid " << name
-                              << " value" << std::endl;
-                    return false;
-                }
-                i += consumed;
-                return true;
-            };
-            if (tok == "start") {
-                info.startSpecified = true;
-                if (i + 1 < tokens.size() && lower(tokens[i + 1]) == "with") {
-                    ++i;
-                }
-                if (!readValue(info.start, "START")) return true;
-            } else if (tok == "restart") {
-                info.restartSpecified = true;
-                if (i + 1 < tokens.size() && lower(tokens[i + 1]) == "with") {
-                    ++i;
-                    if (!readValue(info.restart, "RESTART")) return true;
-                    info.restartValueSpecified = true;
-                } else if (i + 1 < tokens.size()) {
-                    int64_t restartValue = 0;
-                    size_t consumed = 0;
-                    if (parseInt64Tokens(
-                            tokens, i + 1, restartValue, consumed)) {
-                        info.restart = restartValue;
-                        info.restartValueSpecified = true;
-                        i += consumed;
-                    } else if (tokens[i + 1] == "+" ||
-                               tokens[i + 1] == "-") {
-                        std::cout << "SQL syntax error: invalid RESTART value"
-                                  << std::endl;
-                        return true;
-                    }
-                }
-            } else if (tok == "increment") {
-                info.incrementSpecified = true;
-                if (i + 1 < tokens.size() && lower(tokens[i + 1]) == "by") {
-                    ++i;
-                    if (!readValue(info.increment, "INCREMENT")) return true;
-                } else if (!readValue(info.increment, "INCREMENT")) {
-                    return true;
-                }
-            } else if (tok == "minvalue") {
-                info.hasMinValue = true;
-                if (!readValue(info.minValue, "MINVALUE")) return true;
-            } else if (tok == "maxvalue") {
-                info.hasMaxValue = true;
-                if (!readValue(info.maxValue, "MAXVALUE")) return true;
-            } else if (tok == "cache") {
-                info.cacheSpecified = true;
-                if (!readValue(info.cache, "CACHE")) return true;
-            } else if (tok == "no") {
-                if (i + 1 >= tokens.size()) {
-                    std::cout << "SQL syntax error: incomplete NO option"
-                              << std::endl;
-                    return true;
-                }
-                const std::string next = lower(tokens[i + 1]);
-                if (next == "minvalue") {
-                    info.noMinValue = true;
-                } else if (next == "maxvalue") {
-                    info.noMaxValue = true;
-                } else if (next == "cycle") {
-                    info.cycleSpecified = true;
-                    info.cycle = false;
-                } else {
-                    std::cout << "SQL syntax error: unsupported ALTER SEQUENCE option NO "
-                              << tokens[i + 1] << std::endl;
-                    return true;
-                }
-                ++i;
-            } else if (tok == "cycle") {
-                info.cycleSpecified = true;
-                info.cycle = true;
-            } else if (tok == "owned") {
-                if (info.ownedBySpecified || i + 2 >= tokens.size() ||
-                    lower(tokens[i + 1]) != "by") {
-                    std::cout << "SQL syntax error: invalid OWNED BY clause"
-                              << std::endl;
-                    return true;
-                }
-                info.ownedBySpecified = true;
-                if (lower(tokens[i + 2]) == "none") {
-                    info.ownedByTable.clear();
-                    info.ownedByColumn.clear();
-                    i += 2;
-                } else if (i + 6 < tokens.size() &&
-                           tokens[i + 3] == "." && tokens[i + 5] == ".") {
-                    info.ownedByTable =
-                        tokens[i + 2] + "." + tokens[i + 4];
-                    info.ownedByColumn = tokens[i + 6];
-                    i += 6;
-                } else if (i + 4 < tokens.size() && tokens[i + 3] == ".") {
-                    info.ownedByTable = tokens[i + 2];
-                    info.ownedByColumn = tokens[i + 4];
-                    i += 4;
-                } else {
-                    std::cout << "SQL syntax error: OWNED BY requires table.column"
-                              << std::endl;
-                    return true;
-                }
-            } else {
-                std::cout << "SQL syntax error: unsupported ALTER SEQUENCE option "
-                          << tokens[i] << std::endl;
-                return true;
-            }
-        }
-    }
-
-    if (info.ownedBySpecified && !info.ownedByTable.empty()) {
-        const std::string owner = info.ownedByTable + "." +
-            info.ownedByColumn;
-        if (!parseSequenceOwnedByReference(
-                owner, info.ownedByTable, info.ownedByColumn)) {
-            std::cout << "ALTER SEQUENCE OWNED BY target is invalid"
-                      << std::endl;
+    std::vector<std::pair<std::string,std::string>> options = stmt->sequenceOptions;
+    if (!renameRequested && !stmt->sequenceOptionsParsed) {
+        size_t position = 0;
+        if (!SQLParser::parseSequenceParameterList(tokens,position,options)) {
+            std::cout << "ERROR: invalid ALTER SEQUENCE options (SQLSTATE 42601)" << std::endl;
             return true;
         }
     }
@@ -9115,6 +9250,23 @@ bool DdlExecutor::executeAlterSequence(const AlterObjectStmt* stmt, Session& s) 
             }
         }
 
+        if (!renameRequested) {
+            SequenceInfo previous;
+            if (g_engine.getSequenceInfo(s.currentDB,seqname,previous) != DBStatus::OK)
+                throw DbError("XX001","sequence declaration cannot be read");
+            auto parameters = sequence_parameters::resolve(options,&previous,[&](const std::string& type) {
+                const auto metadata = catalog.metadataSnapshot();
+                return resolveDeclaredTypeName(type,&metadata,&s).typeOid;
+            });
+            info = std::move(parameters.request);
+            if (parameters.owner) {
+                info.ownedBySpecified = true;
+                if (toLower(*parameters.owner) != "none" &&
+                    !parseSequenceOwnedByReference(*parameters.owner,info.ownedByTable,info.ownedByColumn))
+                    throw DbError("42601","OWNED BY requires table.column or NONE");
+            }
+        }
+
         if (info.ownedBySpecified && !info.ownedByTable.empty()) {
             CatalogManager::QualifiedName ownerName;
             if (!CatalogManager::parseQualifiedName(
@@ -9146,6 +9298,9 @@ bool DdlExecutor::executeAlterSequence(const AlterObjectStmt* stmt, Session& s) 
             info.ownedByTable = storedOwnedTableReference(
                 sequenceSchema, ownerName.name);
         }
+    } catch (const DbError& error) {
+        std::cout << "ERROR: " << error.message() << " (SQLSTATE " << error.sqlState() << ")" << std::endl;
+        return true;
     } catch (const std::exception& error) {
         std::cout << "ALTER SEQUENCE catalog preflight failed: "
                   << error.what() << std::endl;
@@ -9225,6 +9380,15 @@ bool DdlExecutor::executeAlterSequence(const AlterObjectStmt* stmt, Session& s) 
         return false;
     }
 
+    if (info.ownedBySpecified) {
+        for (const auto& edge : sequenceCatalog->findDepends(PgClassOid_Class, sequenceOid, 0)) {
+            if (edge.deptype == 'i') {
+                std::cout << "ERROR: cannot change ownership of identity sequence "
+                             "(SQLSTATE 0A000)" << std::endl;
+                return true;
+            }
+        }
+    }
     txn.markSnapshotDirty();
     const DBStatus alterStatus = g_engine.alterSequence(s.currentDB, seqname, info);
     if (alterStatus != DBStatus::OK) {
@@ -9382,6 +9546,10 @@ bool DdlExecutor::executeDropSequence(const DropStmt* stmt, Session& s) {
                           << "\" is not a sequence (SQLSTATE 42809)"
                           << std::endl;
                 return true;
+            }
+            for (const auto& dependency : catalog->findDepends(PgClassOid_Class, sequence->oid, 0)) {
+                if (dependency.deptype == 'i')
+                    throw DbError("2BP01", "cannot drop identity sequence because its table column requires it");
             }
             if (!physicalExists) {
                 std::cout << "DROP SEQUENCE failed: physical sequence is missing for \""

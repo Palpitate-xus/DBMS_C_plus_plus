@@ -1,12 +1,13 @@
 #pragma once
 #include "catalog/catalog.h"
 #include "parser/query_binding.h"
+#include "catalog/SystemCatalogDeclaration.h"
 
 namespace dbms {
 // Columns with actual owned PgTypeRow storage. The additional PostgreSQL
 // typsubscript/default/defaultbin/ACL fields are not fabricated here.
 inline const QueryRowDescriptor& ownedTypeCatalogDescriptor() {
-    static const QueryRowDescriptor columns={
+    static const QueryRowDescriptor columns=[] {QueryRowDescriptor result={
         {"oid","oid"},{"typname","name"},{"typnamespace","oid"},{"typowner","oid"},
         {"typlen","smallint"},{"typbyval","boolean"},{"typtype","\"char\""},
         {"typcategory","\"char\""},{"typispreferred","boolean"},{"typisdefined","boolean"},
@@ -17,6 +18,10 @@ inline const QueryRowDescriptor& ownedTypeCatalogDescriptor() {
         {"typnotnull","boolean"},{"typbasetype","oid"},{"typtypmod","integer"},
         {"typndims","integer"},{"typcollation","oid"}
     };
+        for(auto& column:result)for(size_t i=0;i<system_catalog::typeFields.size();++i)
+            if(column.name==system_catalog::typeFields[i].name)column.physicalAttributeNumber=int16_t(i+1);
+        return result;
+    }();
     return columns;
 }
 

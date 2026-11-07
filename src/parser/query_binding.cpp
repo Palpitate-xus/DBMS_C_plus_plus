@@ -1,4 +1,6 @@
+#include "catalog/SystemCatalogRows.h"
 #include "query_binding.h"
+#include "expression/IdentityValue.h"
 #include "common/GeometryValue.h"
 #include "expression/unary_type.h"
 #include "parser/parser.h"
@@ -46,14 +48,23 @@ struct Range {
 };
 using Namespace = std::vector<Range>;
 bool incompleteNamespaceCatalog(const Range& range) {
-    // Retain physical/derived/CTE columns and alias semantics. Only this
-    // resolved catalog source has a deliberately incomplete row schema.
-    return range.relationSchema=="pg_catalog" && range.relationName=="pg_namespace" &&
-        range.columns.size()==3;
+    return range.relationSchema=="pg_catalog" && range.relationName=="pg_namespace" && range.columns.size()==3;
+}
+bool incompleteOwnedCatalog(const Range& range) {
+    return range.relationSchema=="pg_catalog" &&
+        ((range.relationName=="pg_class" && range.columns.size()==30) ||
+         (range.relationName=="pg_attribute" && range.columns.size()==19) ||
+         (range.relationName=="pg_type" && range.columns.size()==28));
 }
 void requireCompleteStar(const Range& range) {
-    if(incompleteNamespaceCatalog(range))
-        throw DbError("0A000","SELECT * requires the complete pg_namespace schema");
+    if(incompleteNamespaceCatalog(range) || incompleteOwnedCatalog(range))
+        throw DbError("0A000","SELECT * requires the complete "+range.relationName+" schema");
+}
+void requireOwnedAliasPrefix(const Range& range,size_t count) {
+    if(!incompleteOwnedCatalog(range))return;
+    if(count>range.columns.size())throw DbError("0A000","catalog aliases require unowned fields");
+    for(size_t i=0;i<count;++i)if(range.columns[i].physicalAttributeNumber!=int16_t(i+1))
+        throw DbError("0A000","catalog aliases require unowned fields");
 }
 void checkRangeConflicts(const Namespace& left, const Namespace& right) {
     for (const auto& a : left) for (const auto& b : right) {
@@ -533,6 +544,17 @@ public:
         coerceCaseInput(right,rightType,target);
     }
     ExprPtr targetDefault(const Range& range, const QueryOutputColumn& column) {
+        if (metadata.identityDefault) {
+            const auto sequence = metadata.identityDefault(range.relationSchema,range.relationName,column.name);
+            if (sequence) {
+                auto value = identity_value_detail::make(*sequence);
+                const std::vector<QueryBindingDatum> noDatums;
+                Binder defaultBinder("",noDatums,metadata);
+                const auto type = defaultBinder.expression(value,{});
+                defaultBinder.coerceCaseInput(value,type,ExprHelper::canonicalResultTypeName(column.type));
+                return value;
+            }
+        }
         if (!metadata.updateDefault) return {};
         const auto definition=metadata.updateDefault(range.relationSchema,range.relationName,column.name);
         if (!definition) return {};
@@ -600,7 +622,7 @@ public:
             }
             size_t matches = 0;
             bool rangeFound = false;
-            bool unsupportedNamespaceAcl = false;
+            bool unsupportedNamespaceAcl = false;bool unsupportedOwnedCatalog=false;
             std::string sourceType;
             QueryColumnBinding resolved;
             for (size_t scopeDepth = 0; scopeDepth < scopes.size(); ++scopeDepth) {
@@ -614,6 +636,8 @@ public:
                         // precedence before reporting that capability gap.
                         ++matches;unsupportedNamespaceAcl=true;
                     }
+                    if(incompleteOwnedCatalog(range) && system_catalog::unownedColumn(
+                        range.relationName,range.columns,column->column)) {++matches;unsupportedOwnedCatalog=true;}
                     for (size_t ordinal = 0; ordinal < range.columns.size(); ++ordinal) {
                         const auto& field = range.columns[ordinal];
                         if (field.name != column->column) continue;
@@ -631,6 +655,7 @@ public:
             if (matches) {
                 if(unsupportedNamespaceAcl)
                     throw DbError("0A000","pg_namespace column nspacl is not implemented");
+                if(unsupportedOwnedCatalog)throw DbError("0A000","catalog field has no owned value producer");
                 column->binding = std::move(resolved);
                 for(auto* references:countReferences)references->push_back(column->binding->sourceOrdinal);
                 return sourceType;
@@ -956,7 +981,7 @@ public:
             const bool bitOperand=leftBase=="bit" || leftBase=="bit varying" ||
                                   rightBase=="bit" || rightBase=="bit varying";
             static const std::set<std::string> bitComparisons={"=","<>","!=","<",">","<=",">="};
-            const bool typeReference=leftBase=="regtype" || rightBase=="regtype";
+            const bool typeReference=regtype_cast_detail::reference(leftBase) || regtype_cast_detail::reference(rightBase);
             if((bitOperand || typeReference) && bitComparisons.count(binary->op)) {
                 const auto comparison=ExprEvaluator::resolveComparison(binary->op,left,right);
                 if(typeReference)binary->comparison=comparison;
@@ -1078,6 +1103,12 @@ public:
         }
         case ExprType::FunctionCall: {
             auto* call = static_cast<FunctionCallExpr*>(node.get());
+            if (identity_value_detail::bound(call)) {
+                identity_value_detail::validate(*call);
+                call->resolvedResultType = "bigint";
+                valueTypeOids[call] = mapBuiltinTypeNameToOid("bigint");
+                return call->resolvedResultType;
+            }
             if(call->sqlValue!=FunctionCallExpr::SqlValue::None) {
                 sql_value_detail::validate(*call);
                 call->resolvedResultType=sql_value_detail::type(call->sqlValue);
@@ -1990,6 +2021,7 @@ public:
     Namespace from(FromItem* item, const std::vector<Namespace>& outer, const Ctes& ctes) {
         if (!item) return {};
         const auto aliases=[&](Range range) {
+            requireOwnedAliasPrefix(range,item->columnAliases.size());
             if(incompleteNamespaceCatalog(range) && item->columnAliases.size()==4)
                 throw DbError("0A000","pg_namespace ACL column aliases are not implemented");
             if(item->columnAliases.size()>range.columns.size())
@@ -2542,16 +2574,35 @@ public:
                 // ambiguity), but the row is not visible in RETURNING.
                 conflictScopes.front().push_back(registerSource({"","excluded",target.columns}));
             }
+            std::vector<std::string> explicitConflictIdentityAssignments;
+            std::set<std::string> conflictAssignments;
             for (auto& value : insert->conflictUpdateSet) {
-                const auto source=expression(value.second,conflictScopes);
+                const auto name=identifier(value.first);
                 const auto column=std::find_if(target.columns.begin(),target.columns.end(),
-                    [&](const auto& candidate){return candidate.name==identifier(value.first);});
-                if(column!=target.columns.end()) {
-                    const auto targetType=common_type_detail::canonical(column->type);
-                    if ((targetType=="inet" || targetType=="cidr") && metadata.assignmentInput)
-                        metadata.assignmentInput(*column,value.second.get(),source);
-                    coerceAddressAssignment(value.second,source,column->type);
+                    [&](const auto& candidate){return candidate.name==name;});
+                if(column==target.columns.end())
+                    throw DbError("42703","ON CONFLICT target column does not exist: "+name);
+                if(!conflictAssignments.insert(name).second)
+                    throw DbError("42601","multiple assignments to column "+name);
+                const auto* literal=dynamic_cast<const LiteralExpr*>(value.second.get());
+                const bool isDefault=literal && !literal->preparedSubquery && literal->typeName.empty() &&
+                    SQLParser::toLower(literal->value)=="default";
+                if(column->identity=='a' && !isDefault)
+                    explicitConflictIdentityAssignments.push_back(name);
+                if(isDefault) {
+                    value.second=targetDefault(target,*column);
+                    if(!value.second) {
+                        auto null=std::make_unique<LiteralExpr>();null->value="NULL";
+                        value.second=std::move(null);
+                        coerceCaseInput(value.second,"unknown",ExprHelper::canonicalResultTypeName(column->type));
+                    }
+                    continue;
                 }
+                const auto source=expression(value.second,conflictScopes);
+                const auto targetType=common_type_detail::canonical(column->type);
+                if ((targetType=="inet" || targetType=="cidr") && metadata.assignmentInput)
+                    metadata.assignmentInput(*column,value.second.get(),source);
+                coerceAddressAssignment(value.second,source,column->type);
             }
             const auto conflictCondition = expression(insert->conflictWhere, conflictScopes);
             if (insert->conflictWhere) {
@@ -2564,6 +2615,8 @@ public:
                 coerceCaseInput(insert->conflictWhere, conflictCondition, "boolean");
             }
             auto output=returning(insert->returning,insert->returningOptions,target,std::move(scopes));
+            if(!explicitConflictIdentityAssignments.empty())
+                throw DbError("428C9","column can only be updated to DEFAULT: "+explicitConflictIdentityAssignments.front());
             // Analysis of every explicit input and RETURNING site precedes
             // stored-default planning. Retain only actually omitted/DEFAULT
             // physical columns; a fully supplied bad default is not reached.
@@ -2604,14 +2657,20 @@ public:
             ranges.insert(ranges.begin(), target);
             auto scopes = outer; scopes.insert(scopes.begin(), std::move(ranges));
             std::vector<std::string> assignmentTypes;
+            std::vector<std::string> explicitIdentityAssignments;
             for (auto& value : update->setClauses) {
                 const auto name = identifier(value.first);
                 const auto& target = scopes.front().front().columns;
                 if (std::none_of(target.begin(), target.end(), [&](const auto& column) { return column.name == name; }))
                     throw DbError("42703", "UPDATE target column does not exist: " + name);
                 const auto* literal=dynamic_cast<const LiteralExpr*>(value.second.get());
-                if (metadata.updateDefault && literal && !literal->preparedSubquery &&
-                    literal->typeName.empty() && SQLParser::toLower(literal->value)=="default") {
+                const bool isDefault = literal && !literal->preparedSubquery &&
+                    literal->typeName.empty() && SQLParser::toLower(literal->value)=="default";
+                const auto assignmentColumn = std::find_if(target.begin(),target.end(),
+                    [&](const auto& item){return item.name==name;});
+                if (assignmentColumn->identity == 'a' && !isDefault)
+                    explicitIdentityAssignments.push_back(name);
+                if ((metadata.updateDefault || metadata.identityDefault) && isDefault) {
                     const auto& range=scopes.front().front();
                     const auto column=std::find_if(target.begin(),target.end(),
                         [&](const auto& item){return item.name==name;});
@@ -2646,6 +2705,8 @@ public:
                         metadata.assignmentInput(*column,update->setClauses[i].second.get(),assignmentTypes[i]);
                     coerceAddressAssignment(update->setClauses[i].second,assignmentTypes[i],column->type);
                 }
+            if (!explicitIdentityAssignments.empty())
+                throw DbError("428C9", "column can only be updated to DEFAULT: " + explicitIdentityAssignments.front());
             return output;
         }
         if (auto* remove = dynamic_cast<DeleteStmt*>(&node)) {
@@ -2778,6 +2839,7 @@ public:
     Namespace declarationFrom(FromItem* item, const std::vector<Namespace>& outer, const Ctes& ctes) {
         if (!item) return {};
         const auto aliases=[&](Range range) {
+            requireOwnedAliasPrefix(range,item->columnAliases.size());
             if(incompleteNamespaceCatalog(range) && item->columnAliases.size()==4)
                 throw DbError("0A000","pg_namespace ACL column aliases are not implemented");
             if(item->columnAliases.size()>range.columns.size())

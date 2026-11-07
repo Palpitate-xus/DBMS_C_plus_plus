@@ -1,3 +1,6 @@
+#include "catalog/pg_owned_catalog_query.h"
+#include "catalog/type_catalog.h"
+#include "catalog/SystemCatalogRows.h"
 #include "expression/StoredRegtypeValue.h"
 #include <algorithm>
 #include <charconv>
@@ -69,6 +72,7 @@
 #include "catalog/namespace_catalog.h"
 #include "catalog/namespace_query.h"
 #include "catalog/pg_stats_query.h"
+#include "catalog/pg_sequence_query.h"
 #include "catalog/collation.h"
 #include "catalog/systables.h"
 #include "catalog/type_registry.h"
@@ -5223,7 +5227,7 @@ static bool handleCopy(const string& sql, Session& s) {
                 if(tbl.cols[i].generatedKind!='v' &&
                    dbms::stored_regtype_detail::columnType(tbl.cols[i].dataType) && !val.empty()) {
                     const auto catalog=dbms::regtype_detail::metadata(g_engine,s.currentDB);
-                    val=dbms::stored_regtype_detail::output(val,tbl.cols[i].isArray,catalog,&s);
+                    val=dbms::stored_regtype_detail::output(val,tbl.cols[i].isArray,catalog,&s,tbl.cols[i].dataType);
                 }
                 bool needQuote = (val.find(',') != string::npos || val.find('"') != string::npos || val.find('\n') != string::npos);
                 if (needQuote) {
@@ -19585,18 +19589,7 @@ static bool executePgStatActivityQuery(const string& rawSql,
 // physical heap. Feed the same real catalog rows to typed source consumers;
 // keep the physical descriptor guard for actual heap relations.
 static dbms::PreparedQueryRows preparedPgClassRows(const Session& session) {
-    dbms::PreparedQueryRows rows;
-    for (const auto& relation : g_engine.catalogService().get(session.currentDB).listClasses()) {
-        rows.push_back({
-            dbms::ExprValue("oid", to_string(relation.oid), false),
-            dbms::ExprValue("name", relation.relname, false),
-            dbms::ExprValue("oid", to_string(relation.relnamespace), false),
-            dbms::ExprValue("\"char\"", string(1, relation.relkind), false),
-            dbms::ExprValue("smallint", to_string(relation.relnatts), false),
-            dbms::ExprValue("\"char\"", string(1, relation.relpersistence), false),
-            dbms::ExprValue("oid", to_string(relation.relowner), false)});
-    }
-    return rows;
+    return dbms::system_catalog::classRows(g_engine.catalogService().metadataSnapshot(session.currentDB));
 }
 
 // pg_settings is exposed as a deliberate typed subset.  PostgreSQL 18 has
@@ -20108,296 +20101,10 @@ static bool handlePreparedDatabaseCatalogQuery(const string& rawSql,
     return executePgDatabaseQuery(rawSql, session);
 }
 
-static bool executePgClassQuery(const string& rawSql, Session& session,
-                                const string& database) {
-    dbms::SQLParser parser;
-    const auto parsed = parser.parse(rawSql);
-    const auto* select = parsed.success
-        ? dynamic_cast<const dbms::SelectStmt*>(parsed.stmt.get()) : nullptr;
-    if (!select || !select->fromClause ||
-        select->fromClause->type != dbms::FromItem::Type::Table) {
-        throw dbms::DbError("42601", "invalid pg_class query");
-    }
-    if (!select->groupBy.empty() || !select->groupByElems.empty() ||
-        select->having || select->setOp != dbms::SetOp::None ||
-        !select->locking.empty() || !select->distinctOn.empty() ||
-        !select->windowDefs.empty() || select->withTies) {
-        throw dbms::DbError("0A000", "complex pg_class query is not supported");
-    }
-    const vector<string> names = {"oid", "relname", "relnamespace", "relkind",
-                                  "relnatts", "relpersistence", "relowner"};
-    const vector<string> types = {"oid", "name", "oid", "\"char\"",
-                                  "smallint", "\"char\"", "oid"};
-    const string qualifier = select->fromClause->alias.empty()
-        ? "pg_class" : decodeQuotedIdentifier(select->fromClause->alias);
-    map<string, string> hints;
-    for (size_t i = 0; i < names.size(); ++i) {
-        hints[names[i]] = types[i];
-        hints[qualifier + "." + names[i]] = types[i];
-        if (select->fromClause->alias.empty()) hints["pg_catalog.pg_class." + names[i]] = types[i];
-    }
-    static const set<string> kPg18ClassColumns = {
-        "oid", "relname", "relnamespace", "reltype", "reloftype",
-        "relowner", "relam", "relfilenode", "reltablespace", "relpages",
-        "reltuples", "relallvisible", "relallfrozen", "reltoastrelid",
-        "relhasindex", "relisshared", "relpersistence", "relkind",
-        "relnatts", "relchecks", "relhasrules", "relhastriggers",
-        "relhassubclass", "relrowsecurity", "relforcerowsecurity",
-        "relispopulated", "relreplident", "relispartition", "relrewrite",
-        "relfrozenxid", "relminmxid", "relacl", "reloptions",
-        "relpartbound"};
-    std::function<void(const dbms::Expr*, bool)> validate =
-        [&](const dbms::Expr* expression, bool countArgument) {
-            if (!expression) return;
-            if (const auto* column = dynamic_cast<const dbms::ColumnRefExpr*>(expression)) {
-                const bool validQualifier = column->table.empty() ||
-                    (column->table == qualifier &&
-                     (column->schema.empty() ||
-                      (select->fromClause->alias.empty() && column->schema == "pg_catalog")));
-                if (!validQualifier) throw dbms::DbError("42P01", "missing FROM-clause entry");
-                if (column->column == "*" && countArgument) return;
-                if (!hints.count(column->column) &&
-                    kPg18ClassColumns.count(column->column)) {
-                    throw dbms::DbError(
-                        "0A000", "pg_class column \"" + column->column +
-                                     "\" is not implemented");
-                }
-                if (!hints.count(column->column))
-                    throw dbms::DbError("42703", "column does not exist: " + column->column);
-                return;
-            }
-            if (dynamic_cast<const dbms::LiteralExpr*>(expression)) return;
-            if (const auto* unary = dynamic_cast<const dbms::UnaryOpExpr*>(expression)) {
-                validate(unary->operand.get(), false); return;
-            }
-            if (const auto* binary = dynamic_cast<const dbms::BinaryOpExpr*>(expression)) {
-                validate(binary->left.get(), false);
-                validate(binary->right.get(), false); return;
-            }
-            if (const auto* cast = dynamic_cast<const dbms::CastExpr*>(expression)) {
-                validate(cast->operand.get(), false); return;
-            }
-            if (const auto* call = dynamic_cast<const dbms::FunctionCallExpr*>(expression)) {
-                const bool count = toLower(call->funcName) == "count";
-                if (call->hasOver || call->distinct || call->filter ||
-                    !call->orderBy.empty() || !call->namedArgs.empty() ||
-                    (count && (!countArgument || call->args.size() != 1)))
-                    throw dbms::DbError("0A000", "complex catalog aggregate is not supported");
-                for (const auto& argument : call->args) validate(argument.get(), count);
-                return;
-            }
-            throw dbms::DbError("0A000", "catalog expression is not supported");
-        };
-    struct OutputColumn {
-        const dbms::Expr* expression;
-        string name;
-        string type;
-        bool count;
-    };
-    vector<OutputColumn> output;
-    std::function<string(const dbms::Expr*)> header = [&](const dbms::Expr* expression) {
-        if (const auto* column = dynamic_cast<const dbms::ColumnRefExpr*>(expression)) return column->column;
-        if (const auto* cast = dynamic_cast<const dbms::CastExpr*>(expression)) return header(cast->operand.get());
-        if (const auto* cast = dynamic_cast<const dbms::BinaryOpExpr*>(expression))
-            if (cast->op == "::") return header(cast->left.get());
-        if (const auto* call = dynamic_cast<const dbms::FunctionCallExpr*>(expression)) return toLower(call->funcName);
-        return string("?column?");
-    };
-    const size_t selectPosition = dbms::findTopLevelSqlKeyword(rawSql, "select");
-    const size_t fromPosition = dbms::findTopLevelSqlKeyword(rawSql, "from");
-    if (selectPosition == string::npos || fromPosition == string::npos ||
-        fromPosition < selectPosition + 6)
-        throw dbms::DbError("42601", "invalid catalog projection");
-    string projection = trim(rawSql.substr(selectPosition + 6,
-                                           fromPosition - selectPosition - 6));
-    if (select->distinct) projection = trim(projection.substr(8));
-    const auto rawItems = splitTopLevelComma(projection);
-    for (size_t i = 0; i < select->selectList.size(); ++i) {
-        const auto& item = select->selectList[i];
-        const auto* column = dynamic_cast<const dbms::ColumnRefExpr*>(item.expr.get());
-        if ((column && column->column == "*") ||
-            item.expr->toString() == "*") {
-            throw dbms::DbError(
-                "0A000", "SELECT * requires the complete pg_class schema");
-        }
-        validate(item.expr.get(), true);
-        const auto* call = dynamic_cast<const dbms::FunctionCallExpr*>(item.expr.get());
-        const bool count = call && toLower(call->funcName) == "count";
-        const string type = count ? "bigint" : dbms::ExprHelper::inferResultType(
-            i < rawItems.size() ? rawItems[i] : item.expr->toString(), hints);
-        output.push_back({item.expr.get(), item.alias.empty() ? header(item.expr.get()) :
-                          decodeQuotedIdentifier(item.alias), type, count});
-    }
-    const bool aggregate = any_of(output.begin(), output.end(), [](const auto& column) { return column.count; });
-    if (aggregate && any_of(output.begin(), output.end(), [](const auto& column) { return !column.count; }))
-        throw dbms::DbError("42803", "catalog column must appear in GROUP BY");
-    validate(select->whereClause.get(), false);
-    if (select->whereClause) {
-        const size_t wherePosition = dbms::findTopLevelSqlKeyword(rawSql, "where");
-        size_t whereEnd = rawSql.size();
-        for (const string keyword : {"order", "limit", "offset", "fetch"}) {
-            const size_t position = dbms::findTopLevelSqlKeyword(rawSql, keyword);
-            if (position != string::npos && position > wherePosition)
-                whereEnd = std::min(whereEnd, position);
-        }
-        string predicateSql = trim(rawSql.substr(wherePosition + 5,
-                                                 whereEnd - wherePosition - 5));
-        if (!predicateSql.empty() && predicateSql.back() == ';') predicateSql.pop_back();
-        const auto* literal = dynamic_cast<const dbms::LiteralExpr*>(select->whereClause.get());
-        const bool unknownNull = literal && toLower(literal->value) == "null" && literal->typeName.empty();
-        const string predicateType = dbms::ExprHelper::inferResultType(predicateSql, hints);
-        if (!unknownNull && predicateType != "boolean" && predicateType != "bool")
-            throw dbms::DbError("42804", "argument of WHERE must be type boolean");
-    }
-    dbms::ExprEvaluator evaluator;
-    evaluator.setCurrentDB(database);
-    vector<dbms::RowContext> inputs;
-    for (const auto& relation : g_engine.catalogService().get(database).listClasses()) {
-        const vector<string> cells = {to_string(relation.oid), relation.relname,
-            to_string(relation.relnamespace), string(1, relation.relkind),
-            to_string(relation.relnatts), string(1, relation.relpersistence), to_string(relation.relowner)};
-        dbms::RowContext context;
-        for (size_t i = 0; i < cells.size(); ++i) {
-            context.set(names[i], dbms::ExprValue(types[i], cells[i], false));
-            context.set(qualifier + "." + names[i], dbms::ExprValue(types[i], cells[i], false));
-            if (select->fromClause->alias.empty())
-                context.set("pg_catalog.pg_class." + names[i], dbms::ExprValue(types[i], cells[i], false));
-        }
-        if (select->whereClause) {
-            const auto predicate = evaluator.eval(select->whereClause.get(), context);
-            if (!predicate.isNull && predicate.typeName != "boolean" && predicate.typeName != "bool")
-                throw dbms::DbError("42804", "argument of WHERE must be type boolean");
-            if (predicate.isNull || !predicate.asBool()) continue;
-        }
-        inputs.push_back(std::move(context));
-    }
-    vector<vector<dbms::ExprValue>> results;
-    if (aggregate) {
-        vector<dbms::ExprValue> row;
-        for (const auto& column : output) {
-            const auto* count = static_cast<const dbms::FunctionCallExpr*>(column.expression);
-            const auto* star = dynamic_cast<const dbms::ColumnRefExpr*>(count->args[0].get());
-            size_t value = 0;
-            for (const auto& input : inputs)
-                if ((star && star->column == "*") || !evaluator.eval(count->args[0].get(), input).isNull) ++value;
-            row.emplace_back("bigint", to_string(value), false);
-        }
-        results.push_back(std::move(row));
-    } else {
-        for (auto& input : inputs) {
-            vector<dbms::ExprValue> row;
-            for (const auto& column : output) row.push_back(evaluator.eval(column.expression, input));
-            results.push_back(std::move(row));
-        }
-    }
-    if (!select->orderBy.empty()) {
-        if (aggregate) throw dbms::DbError("0A000", "ordered catalog aggregate is not supported");
-        set<string> aliases;
-        for (const auto& column : output) aliases.insert(column.name);
-        vector<int> ordinalPositions;
-        vector<bool> nullsFirst;
-        const size_t orderPosition = dbms::findTopLevelSqlKeyword(rawSql, "order");
-        const size_t byPosition = dbms::findTopLevelSqlKeyword(rawSql.substr(orderPosition + 5), "by") + orderPosition + 5;
-        size_t orderEnd = rawSql.size();
-        for (const string keyword : {"limit", "offset", "fetch"}) {
-            const size_t position = dbms::findTopLevelSqlKeyword(rawSql, keyword);
-            if (position != string::npos && position > byPosition) orderEnd = std::min(orderEnd, position);
-        }
-        const auto rawOrders = splitTopLevelComma(rawSql.substr(byPosition + 2, orderEnd - byPosition - 2));
-        for (size_t i = 0; i < select->orderBy.size(); ++i) {
-            const auto& order = select->orderBy[i];
-            if (!order.usingOp.empty()) throw dbms::DbError("0A000", "catalog ORDER BY USING is not supported");
-            int ordinal = -1;
-            const dbms::Expr* ordinalExpression = order.expr.get();
-            bool negativeOrdinal = false;
-            if (const auto* unary = dynamic_cast<const dbms::UnaryOpExpr*>(ordinalExpression))
-                if (unary->op == "+" || unary->op == "-") {
-                    negativeOrdinal = unary->op == "-";
-                    ordinalExpression = unary->operand.get();
-                }
-            if (const auto* literal = dynamic_cast<const dbms::LiteralExpr*>(ordinalExpression)) {
-                if (!literal->value.empty() && literal->value.find_first_not_of("0123456789") == string::npos) {
-                    if (negativeOrdinal) throw dbms::DbError("42P10", "ORDER BY position is not in select list");
-                    unsigned long long position;
-                    try { position = std::stoull(literal->value); }
-                    catch (const std::out_of_range&) { throw dbms::DbError("42P10", "ORDER BY position is not in select list"); }
-                    if (!position || position > output.size()) throw dbms::DbError("42P10", "ORDER BY position is not in select list");
-                    ordinal = static_cast<int>(position - 1);
-                } else throw dbms::DbError("42601", "non-integer constant in ORDER BY");
-            }
-            ordinalPositions.push_back(ordinal);
-            const bool explicitNulls = i < rawOrders.size() && dbms::findTopLevelSqlKeyword(rawOrders[i], "nulls") != string::npos;
-            nullsFirst.push_back(explicitNulls ? order.nullsFirst : !order.asc);
-            const auto* column = dynamic_cast<const dbms::ColumnRefExpr*>(order.expr.get());
-            const bool outputAlias = column && column->table.empty() && aliases.count(column->column);
-            if (ordinal < 0 && !outputAlias) validate(order.expr.get(), false);
-            if (select->distinct && ordinal < 0 && !outputAlias &&
-                none_of(output.begin(), output.end(), [&](const auto& result) {
-                    return result.expression->toString() == order.expr->toString();
-                })) throw dbms::DbError("42P10", "ORDER BY expressions must appear in select list");
-        }
-        vector<vector<dbms::ExprValue>> keys;
-        for (size_t i = 0; i < inputs.size(); ++i) {
-            auto context = inputs[i];
-            for (size_t j = 0; j < output.size(); ++j) context.set(output[j].name, results[i][j]);
-            vector<dbms::ExprValue> row;
-            for (size_t j = 0; j < select->orderBy.size(); ++j)
-                row.push_back(ordinalPositions[j] >= 0 ? results[i][ordinalPositions[j]] :
-                              evaluator.eval(select->orderBy[j].expr.get(), context));
-            keys.push_back(std::move(row));
-        }
-        vector<size_t> positions(results.size());
-        std::iota(positions.begin(), positions.end(), 0);
-        std::stable_sort(positions.begin(), positions.end(), [&](size_t a, size_t b) {
-            for (size_t j = 0; j < select->orderBy.size(); ++j) {
-                const auto& left = keys[a][j]; const auto& right = keys[b][j];
-                if (left.isNull || right.isNull) {
-                    if (left.isNull != right.isNull) return left.isNull == nullsFirst[j];
-                    continue;
-                }
-                if (left.value == right.value) continue;
-                const bool numeric = left.typeName == "oid" || left.typeName == "smallint" ||
-                    left.typeName == "integer" || left.typeName == "bigint" || left.typeName == "numeric";
-                if (numeric && dbms::Numeric(left.value) == dbms::Numeric(right.value)) continue;
-                const bool less = numeric ? dbms::Numeric(left.value) < dbms::Numeric(right.value) : left.value < right.value;
-                return select->orderBy[j].asc ? less : !less;
-            }
-            return false;
-        });
-        vector<vector<dbms::ExprValue>> sorted;
-        for (size_t position : positions) sorted.push_back(std::move(results[position]));
-        results = std::move(sorted);
-    }
-    if (select->distinct) {
-        set<vector<pair<bool, string>>> seen;
-        vector<vector<dbms::ExprValue>> unique;
-        for (auto& row : results) {
-            vector<pair<bool, string>> key;
-            for (const auto& value : row) key.emplace_back(value.isNull, value.isNull ? "" : value.value);
-            if (seen.insert(key).second) unique.push_back(std::move(row));
-        }
-        results = std::move(unique);
-    }
-    vector<string> headers, columnTypes;
-    for (const auto& column : output) { headers.push_back(column.name); columnTypes.push_back(column.type); }
-    vector<vector<string>> rows;
-    vector<vector<bool>> nulls;
-    const size_t first = std::min(select->offset.value_or(0), results.size());
-    const size_t kept = std::min(select->limit.value_or(results.size()), results.size() - first);
-    for (size_t i = first; i < first + kept; ++i) {
-        vector<string> row; vector<bool> bitmap;
-        for (const auto& value : results[i]) { row.push_back(value.value); bitmap.push_back(value.isNull); }
-        rows.push_back(std::move(row)); nulls.push_back(std::move(bitmap));
-    }
-    publishStructuredUtilityResult(headers, columnTypes, rows, nulls, "SELECT " + to_string(rows.size()));
-    for (const auto& name : headers) cout << renderLegacyHeader(name) << ' ';
-    cout << '\n';
-    for (size_t i = 0; i < rows.size(); ++i) {
-        for (size_t j = 0; j < rows[i].size(); ++j) cout << (nulls[i][j] ? "NULL" : rows[i][j]) << ' ';
-        cout << '\n';
-    }
-    (void)session;
-    return false;
+static bool executeTypedPgClassQuery(const string& rawSql,Session& session);
+static bool executePgClassQuery(const string& rawSql,Session& session,const string& database) {
+    if(database!=session.currentDB)throw dbms::DbError("0A000","cross-database catalog query is not supported");
+    return executeTypedPgClassQuery(rawSql,session);
 }
 
 // This is a grammar-role detector, not an executor or a result fingerprint.
@@ -21134,6 +20841,15 @@ class PreparedWithDmlRuntime {
                 cursor=dbms::QueryPlanner::makePreparedCursor(viewRuntime->selectPlan(select,dbms::RowContext{},{}),range.columns);
             } else if(range.relationSchema=="pg_catalog" && range.relationName=="pg_class") {
                 virtualRows=make_shared<dbms::PreparedQueryRows>(preparedPgClassRows(session_));
+            } else if(range.relationSchema=="pg_catalog" && range.relationName=="pg_attribute") {
+                virtualRows=make_shared<dbms::PreparedQueryRows>(dbms::system_catalog::attributeRows(
+                    g_engine.catalogService().metadataSnapshot(session_.currentDB)));
+            } else if(range.relationSchema=="pg_catalog" && range.relationName=="pg_type") {
+                virtualRows=make_shared<dbms::PreparedQueryRows>();
+                const auto metadata=g_engine.catalogService().metadataSnapshot(session_.currentDB);
+                for(const auto& row:metadata.types)virtualRows->push_back(dbms::ownedTypeCatalogCells(row));
+            } else if(range.relationSchema=="pg_catalog" && range.relationName=="pg_sequence") {
+                virtualRows=make_shared<dbms::PreparedQueryRows>(g_engine.getSequenceCatalogRows(session_.currentDB));
             } else if(range.relationSchema=="pg_catalog" && range.relationName=="pg_stats") {
                 statisticsRows=make_shared<optional<dbms::PreparedQueryRows>>();
             } else if(range.relationSchema=="pg_catalog" && range.relationName=="pg_namespace") {
@@ -21199,7 +20915,7 @@ class PreparedWithDmlRuntime {
                            dbms::stored_regtype_detail::columnType(scanSchema.cols[i].dataType)) {
                             const auto catalog=dbms::regtype_detail::metadata(g_engine,session_.currentDB);
                             cells.back()=dbms::stored_regtype_detail::load(value,scanSchema.cols[i].isArray,
-                                cells.back().isNull,catalog,&session_,rangePointer->columns[i].typeMetadata);
+                                cells.back().isNull,catalog,&session_,rangePointer->columns[i].typeMetadata,scanSchema.cols[i].dataType);
                         }
                         cells.back().collation=scanSchema.cols[i].collation;
                     }
@@ -22638,6 +22354,52 @@ static bool handlePreparedPgStatsCatalogQuery(const string& rawSql,Session& sess
         cout<<'\n';
     }
     dbms::publishLastDmlResult(std::move(result));handled=true;return false;
+}
+
+static bool handlePreparedPgSequenceCatalogQuery(const string& rawSql,Session& session,bool& handled) {
+    handled=false;
+    dbms::SQLParser parser;const auto parsed=parser.parseForBinding(rawSql);
+    if(!parsed.success || !dynamic_cast<const dbms::SelectStmt*>(parsed.stmt.get()) ||
+       !dbms::pgSequenceCatalogSourceCandidate(parsed.stmt.get()))return false;
+    auto query=make_shared<dbms::PreparedQuery>(g_engine.prepareBoundQuery(session.currentDB,rawSql));
+    if(!dbms::ownsPgSequenceCatalogSource(*query))return false;
+    PreparedWithDmlRuntime runtime(session,std::move(query));auto result=runtime.runRead();
+    for(const auto& column:result.columns) {cout<<renderLegacyHeader(column)<<' ';}
+    cout<<'\n';
+    for(size_t i=0;i<result.rows.size();++i) {
+        for(size_t j=0;j<result.rows[i].size();++j)cout<<(result.nulls[i][j]?"NULL":result.rows[i][j])<<' ';
+        cout<<'\n';
+    }
+    dbms::publishLastDmlResult(std::move(result));handled=true;return false;
+}
+
+
+static bool handlePreparedOwnedCatalogQuery(const string& rawSql,Session& session,bool& handled) {
+    handled=false;
+    const auto contains=[&](const char* name) {
+        return std::search(rawSql.begin(),rawSql.end(),name,name+std::char_traits<char>::length(name),
+            [](unsigned char c,char e){return (c>='A'&&c<='Z'?c+('a'-'A'):c)==e;})!=rawSql.end();
+    };
+    if(!contains("pg_class") && !contains("pg_attribute") && !contains("pg_type"))return false;
+    dbms::SQLParser parser;const auto parsed=parser.parseForBinding(rawSql);
+    if(!parsed.success || !dynamic_cast<const dbms::SelectStmt*>(parsed.stmt.get()) ||
+       !dbms::pgOwnedCatalogSourceCandidate(parsed.stmt.get()))return false;
+    auto query=make_shared<dbms::PreparedQuery>(g_engine.prepareBoundQuery(session.currentDB,rawSql));
+    if(!dbms::ownsPgOwnedCatalogSource(*query))return false;
+    PreparedWithDmlRuntime runtime(session,std::move(query));auto result=runtime.runRead();
+    for(const auto& column:result.columns) {cout<<renderLegacyHeader(column)<<' ';}
+    cout<<'\n';
+    for(size_t i=0;i<result.rows.size();++i) {
+        for(size_t j=0;j<result.rows[i].size();++j)cout<<(result.nulls[i][j]?"NULL":result.rows[i][j])<<' ';
+        cout<<'\n';
+    }
+    dbms::publishLastDmlResult(std::move(result));handled=true;return false;
+}
+
+static bool executeTypedPgClassQuery(const string& rawSql,Session& session) {
+    bool handled=false;const bool failed=handlePreparedOwnedCatalogQuery(rawSql,session,handled);
+    if(!handled)throw dbms::DbError("0A000","catalog query has no actual pg_class source");
+    return failed;
 }
 
 static bool handlePreparedFetchPeersQuery(const string& rawSql, Session& session,
@@ -27882,6 +27644,14 @@ static bool executeInternal(const string& rawSql, Session& s) {
         bool qualifiedCatalogHandled=false;
         const bool qualifiedCatalogFailed=handlePreparedQualifiedCatalogQuery(effectiveRawSql,s,qualifiedCatalogHandled);
         if(qualifiedCatalogHandled)return qualifiedCatalogFailed;
+
+        bool ownedCatalogHandled=false;
+        const bool ownedCatalogFailed=handlePreparedOwnedCatalogQuery(effectiveRawSql,s,ownedCatalogHandled);
+        if(ownedCatalogHandled)return ownedCatalogFailed;
+
+        bool sequenceCatalogHandled=false;
+        const bool sequenceCatalogFailed=handlePreparedPgSequenceCatalogQuery(effectiveRawSql,s,sequenceCatalogHandled);
+        if(sequenceCatalogHandled)return sequenceCatalogFailed;
 
         bool statisticsCatalogHandled=false;
         const bool statisticsCatalogFailed=handlePreparedPgStatsCatalogQuery(effectiveRawSql,s,statisticsCatalogHandled);

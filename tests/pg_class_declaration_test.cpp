@@ -90,7 +90,7 @@ void declaration(const Snapshot& s) {
       "single actual pg_catalog.pg_class identity");
  need(self->relname=="pg_class"&&self->relnamespace==11&&self->reltype==83&&self->relnatts==34&&self->relkind=='r',"full actual self declaration");
  std::vector<PgAttributeRow> attrs;
- for(const auto& a:s.attributes)if(a.attrelid==self->oid)attrs.push_back(a);
+ for(const auto& a:s.attributes)if(a.attrelid==self->oid&&a.attnum>0)attrs.push_back(a);
  std::sort(attrs.begin(),attrs.end(),[](const auto& a,const auto& b){return a.attnum<b.attnum;});
  need(attrs.size()==expected.size(),"exactly34 actual attributes without compact substitute");
  for(size_t i=0;i<expected.size()&&i<attrs.size();++i) {
@@ -100,6 +100,26 @@ void declaration(const Snapshot& s) {
   const auto t=std::find_if(s.types.begin(),s.types.end(),[&](const auto& t){return t.oid==a.atttypid;});
   need(t!=s.types.end()&&t->typnamespace==11&&t->typlen==e.size,"actual field type closure "+std::string(e.name));
   need(a.attnotnull==(i<31)&&a.atttypmod==-1,"nullability and unmodified declaration "+std::string(e.name));
+ }
+ if(s.systemAttributesMaterialized) {
+  // PostgreSQL's six heap system attributes are stored separately from the
+  // 34 positive pg_class fields. Keep every original field assertion above.
+  constexpr std::array<Field,6> systemExpected{{
+   {"tableoid",26,4},{"cmax",29,4},{"xmax",28,4},
+   {"cmin",29,4},{"xmin",28,4},{"ctid",27,6}}};
+  std::vector<PgAttributeRow> system;
+  for(const auto& a:s.attributes)if(a.attrelid==self->oid&&a.attnum<0)system.push_back(a);
+  std::sort(system.begin(),system.end(),[](const auto& a,const auto& b){return a.attnum<b.attnum;});
+  need(system.size()==systemExpected.size(),"six actual stored heap system fields");
+  need(attrs.size()+system.size()==40,"complete self attribute image has40 fields");
+  for(size_t i=0;i<systemExpected.size()&&i<system.size();++i) {
+   const auto& a=system[i];const auto& e=systemExpected[i];
+   need(a.attnum==int(i)-6&&a.attname==e.name&&a.atttypid==e.type&&a.attlen==e.size&&
+        a.attnotnull&&!a.attisdropped&&!a.atthasdef&&!a.attidentity&&!a.attgenerated,
+        "actual negative field "+std::string(e.name));
+   need(a.attbyval==(e.type!=27)&&a.attalign==(e.type==27?'s':'i')&&a.attstorage=='p',
+        "PG18 physical flags for negative field "+std::string(e.name));
+  }
  }
  for(const Oid oid:{83U,273U,194U,1033U,1034U}) {
   const auto t=std::find_if(s.types.begin(),s.types.end(),[&](const auto& t){return t.oid==oid;});

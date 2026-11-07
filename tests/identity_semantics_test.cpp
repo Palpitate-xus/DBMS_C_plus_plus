@@ -162,10 +162,18 @@ void test_alter_identity_and_fail_closed_options() {
     assert(!ddl.executeSql(
         "ALTER TABLE altered ALTER COLUMN id DROP IDENTITY IF EXISTS", session));
 
-    assert(ddl.executeSql(
+    assert(!ddl.executeSql(
         "ALTER TABLE altered ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY "
         "(START WITH 10)", session));
-    assert(g_engine.getTableSchema(database, "altered").cols[0].identityKind == 0);
+    const auto withOptions = g_engine.getTableSchema(database, "altered");
+    assert(withOptions.cols[0].identityKind == 'a');
+    assert(withOptions.cols[0].identitySequenceOid != 0);
+    assert(g_engine.serialSequenceName(database, "altered", "id") ==
+           std::optional<std::string>("public.altered_id_seq"));
+    assert(!runDml("INSERT INTO altered(note) VALUES('option-start')", session));
+    assert(!runDml("INSERT INTO altered(note) VALUES('option-next')", session));
+    assert(value(database, "altered", "=note option-start", "id") == "10");
+    assert(value(database, "altered", "=note option-next", "id") == "11");
 
     assert(!ddl.executeSql("CREATE TABLE nullable_t (id INTEGER)", session));
     assert(ddl.executeSql(
@@ -178,7 +186,7 @@ void test_alter_identity_and_fail_closed_options() {
         session));
     assert(ddl.executeSql(
         "CREATE TABLE bad_options (id INTEGER GENERATED ALWAYS AS IDENTITY "
-        "(START WITH 10))", session));
+        "(START WITH 0))", session));
 
     dbms::SQLParser parser;
     assert(!parser.parse(

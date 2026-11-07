@@ -1,3 +1,4 @@
+#include "cold_catalog_fixture.h"
 #include "commands/TableManage.h"
 #include "catalog/CatalogService.h"
 #include "expression/regtype_cast.h"
@@ -11,7 +12,7 @@ int main() {
     const auto db=testDbPath("regtype_cast_graph");
     size_t checks=0,failures=0;
     const auto require=[&](bool pass,const std::string& role){++checks;failures+=!pass;std::cout<<"REGTYPE_CAST_GRAPH "<<role<<" pass="<<pass<<'\n';};
-    require(g_engine.createDatabase(db)==DBStatus::OK,"create isolated database");
+    require(dbms::test::createColdCatalogFixture(g_engine,db),"create isolated database");
     const std::vector<std::string> invalid={"smallint","numeric","real","double precision","boolean","date","\"char\"","regproc","regclass","regnamespace","regrole","regtype[]"};
     for(const auto& target:invalid)for(const auto& input:{std::string("NULL::regtype"),std::string("'integer'::regtype")}) {
         bool pass=false;try{(void)g_engine.prepareBoundQuery(db,"SELECT CAST("+input+" AS "+target+") WHERE false");}

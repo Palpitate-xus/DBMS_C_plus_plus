@@ -1,3 +1,4 @@
+#include "cold_catalog_fixture.h"
 #include "commands/TableManage.h"
 #include "expression/ExprEvaluator.h"
 #include "expression/regtype_input.h"
@@ -12,7 +13,7 @@ int main() {
     size_t checked=0,failures=0;
     const auto require=[&](bool pass,const std::string& role){++checked;failures+=!pass;std::cout<<"REGTYPE_INPUT "<<role<<" pass="<<pass<<'\n';};
     const auto database=testDbPath("regtype_input");
-    require(g_engine.createDatabase(database)==DBStatus::OK,"create isolated database");
+    require(dbms::test::createColdCatalogFixture(g_engine,database),"create isolated database");
     ExprEvaluator evaluator;evaluator.setCurrentDB(database);
     const auto evaluate=[&](const std::string& expression){
         SQLParser parser;const auto parsed=parser.parseForBinding("SELECT "+expression);

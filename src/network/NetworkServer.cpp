@@ -1,3 +1,4 @@
+#include "catalog/pg_owned_catalog_query.h"
 #include "expression/StoredRegtypeValue.h"
 #include "NetworkServer.h"
 #include "common/version.h"
@@ -19,6 +20,7 @@
 #include "catalog/CatalogService.h"
 #include "catalog/namespace_query.h"
 #include "catalog/pg_stats_query.h"
+#include "catalog/pg_sequence_query.h"
 #include "catalog/systables.h"
 #include "expression/regtype_input.h"
 #include "common/DateType.h"
@@ -852,7 +854,7 @@ std::string binaryProtocolParameterLiteral(uint32_t typeOid,
     // envelope, not their text input codec. No user-type lookup or automatic
     // array catalog construction belongs to this finite binary receiver.
     const uint32_t arrayElement=typeOid==1005?21:typeOid==1007?23:
-        typeOid==1016?20:typeOid==1009?25:typeOid==1015?1043:typeOid==3807?3802:typeOid==1187?1186:typeOid==2211?2206:0;
+        typeOid==1016?20:typeOid==1009?25:typeOid==1015?1043:typeOid==3807?3802:typeOid==1187?1186:typeOid==2211?2206:typeOid==2210?2205:0;
     if(arrayElement) {
         const auto invalid=[&](const char* state,const char* message) {
             inputSqlState=state;error=message;return std::string{};
@@ -955,7 +957,7 @@ std::string binaryProtocolParameterLiteral(uint32_t typeOid,
                     for(char byte:value){if(byte=='"' || byte=='\\')text+='\\';text+=byte;}
                     text+='"';
                 } else {
-                    const size_t width=arrayElement==21?2:(arrayElement==23 || arrayElement==2206)?4:8;
+                    const size_t width=arrayElement==21?2:(arrayElement==23 || arrayElement==2206 || arrayElement==2205)?4:8;
                     if(length<width){invalid("08P01","insufficient data left in message");return false;}
                     if(length>width){invalid("22P03","improper binary format in array element");return false;}
                     const auto value=binaryProtocolParameterLiteral(arrayElement,cell,moneyLocale,error,inputSqlState);
@@ -1004,12 +1006,13 @@ std::string binaryProtocolParameterLiteral(uint32_t typeOid,
         case 23:
             if (!decodeBinaryUnsigned(raw, 4, bits)) break;
             return std::to_string(static_cast<int32_t>(bits));
+        case 2205:
         case 2206:
             if (raw.size() < 4) {
                 inputSqlState="08P01";error="insufficient data left in message";return {};
             }
             if (raw.size() > 4) {
-                inputSqlState="22P03";error="improper binary format in regtype parameter";return {};
+                inputSqlState="22P03";error="improper binary format in object reference parameter";return {};
             }
             if (!decodeBinaryUnsigned(raw, 4, bits)) break;
             return std::to_string(bits);
@@ -2832,6 +2835,14 @@ void retainPreparedWindowOrigins(std::vector<PgColumnDescription>& columns,
             [](const auto* left,const auto* right) { return left->attnum < right->attnum; });
         // Column aliases rename source.columns, but never change its actual
         // physical ordinal. Dropped attributes retain their real attnum gap.
+        if(source.relationSchema=="pg_catalog" && ordinal<source.columns.size() &&
+           (source.relationName=="pg_class" || source.relationName=="pg_attribute" || source.relationName=="pg_type") &&
+           source.columns[ordinal].physicalAttributeNumber>0) {
+            const auto number=source.columns[ordinal].physicalAttributeNumber;
+            for(const auto* attribute:attributes)if(attribute->attnum==number &&
+                attribute->atttypid==source.columns[ordinal].typeOid)return {relationOid,uint16_t(number)};
+            return none;
+        }
         if (attributes.size() != source.columns.size() || ordinal >= attributes.size()) return none;
         return {relationOid,static_cast<uint16_t>(attributes[ordinal]->attnum)};
     };
@@ -3891,6 +3902,51 @@ bool describePreparedPgStatsCatalog(const std::string& sql,Session& session,
     return !columns.empty();
 }
 
+bool describePreparedPgSequenceCatalog(const std::string& sql,Session& session,
+    std::vector<PgColumnDescription>& columns,const std::vector<uint32_t>& parameterOids) {
+    // Admission only: every supported spelling of this fixed ASCII catalog
+    // name contains these bytes. The parsed/bound source remains authority.
+    constexpr char name[]="pg_sequence";
+    if(std::search(sql.begin(),sql.end(),name,name+sizeof(name)-1,
+        [](unsigned char c,char expected){return (c>='A'&&c<='Z'?c+('a'-'A'):c)==expected;})==sql.end())return false;
+    SQLParser parser;const auto parsed=parser.parseForBinding(sql);
+    if(!parsed.success || !pgSequenceCatalogSourceCandidate(parsed.stmt.get()))return false;
+    auto* previous=currentSession();setCurrentSession(&session);
+    struct Restore {Session* previous;~Restore(){setCurrentSession(previous);}} restore{previous};
+    const auto query=g_engine.prepareBoundQuery(session.currentDB,sql,
+        protocolMetadataParameters(session,parameterOids));
+    if(!ownsPgSequenceCatalogSource(query))return false;
+    QueryResult shape;
+    for(const auto& field:query.output) {shape.columns.push_back(field.name);shape.columnTypes.push_back(field.type);}
+    columns=describeProtocolColumns(shape,sql,session,&query.output);
+    retainPreparedWindowOrigins(columns,query,session);
+    return !columns.empty();
+}
+
+
+bool describePreparedOwnedCatalog(const std::string& sql,Session& session,
+    std::vector<PgColumnDescription>& columns,const std::vector<uint32_t>& parameterOids) {
+    // Admission only: every supported spelling of this fixed ASCII catalog
+    // name contains these bytes. The parsed/bound source remains authority.
+    const auto contains=[&](const char* name) {
+        return std::search(sql.begin(),sql.end(),name,name+std::char_traits<char>::length(name),
+            [](unsigned char c,char e){return (c>='A'&&c<='Z'?c+('a'-'A'):c)==e;})!=sql.end();
+    };
+    if(!contains("pg_class") && !contains("pg_attribute") && !contains("pg_type"))return false;
+    SQLParser parser;const auto parsed=parser.parseForBinding(sql);
+    if(!parsed.success || !pgOwnedCatalogSourceCandidate(parsed.stmt.get()))return false;
+    auto* previous=currentSession();setCurrentSession(&session);
+    struct Restore {Session* previous;~Restore(){setCurrentSession(previous);}} restore{previous};
+    const auto query=g_engine.prepareBoundQuery(session.currentDB,sql,
+        protocolMetadataParameters(session,parameterOids));
+    if(!ownsPgOwnedCatalogSource(query))return false;
+    QueryResult shape;
+    for(const auto& field:query.output) {shape.columns.push_back(field.name);shape.columnTypes.push_back(field.type);}
+    columns=describeProtocolColumns(shape,sql,session,&query.output);
+    retainPreparedWindowOrigins(columns,query,session);
+    return !columns.empty();
+}
+
 // A typed quantified consumer owns whole-query metadata, not a guessed
 // BOOLEAN descriptor. Reuse pure preparation/planning before Describe so
 // missing names, operand types and constant-plan failures cannot arrive after
@@ -4191,6 +4247,8 @@ bool describePreparedResultShape(const std::string& sql, Session& session,
     if (describePreparedWindowHostResult(sql,session,columns,parameterOids)) return true;
     if(describePreparedQuantified(sql,session,columns,parameterOids))return true;
     if(describePreparedPgStatsCatalog(sql,session,columns,parameterOids))return true;
+    if(describePreparedOwnedCatalog(sql,session,columns,parameterOids))return true;
+    if(describePreparedPgSequenceCatalog(sql,session,columns,parameterOids))return true;
     if(describePreparedNamespaceCatalog(sql,session,columns,parameterOids))return true;
     if (describePreparedBitNegation(sql,session,columns,parameterOids)) return true;
     if (describePreparedHavingResult(sql, session, columns, parameterOids)) return true;
@@ -6013,7 +6071,7 @@ CopyStreamResult sendCopyOut(PostgresProtocol& protocol,
                     if(!isNull && table.cols[column].generatedKind!='v' &&
                        dbms::stored_regtype_detail::columnType(table.cols[column].dataType)) {
                         const auto catalog=dbms::regtype_detail::metadata(g_engine,session.currentDB);
-                        value=dbms::stored_regtype_detail::output(value,table.cols[column].isArray,catalog,&session);
+                        value=dbms::stored_regtype_detail::output(value,table.cols[column].isArray,catalog,&session,table.cols[column].dataType);
                     }
                     output += isNull
                         ? plan.nullMarker
@@ -6233,6 +6291,8 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session,
             // and retain the original portal parameter owner after expansion.
             if (retainOrdinarySourceDeclaration && !typedExplain) {
                 if (!describePreparedPgStatsCatalog(sql,session,ordinarySourceColumns,{}))
+                    if (!describePreparedOwnedCatalog(sql,session,ordinarySourceColumns,{}))
+                    if (!describePreparedPgSequenceCatalog(sql,session,ordinarySourceColumns,{}))
                     if (!describePreparedWindowHostResult(sql, session, ordinarySourceColumns, {}))
                         (void)describePreparedOrdinarySourceResult(sql, session, ordinarySourceColumns);
             }
@@ -8203,6 +8263,8 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 std::vector<PgColumnDescription> namespaceDescriptor;
                 (void)describePreparedNamespaceCatalog(sql,session,namespaceDescriptor,parameterTypes);
                 if(namespaceDescriptor.empty())(void)describePreparedPgStatsCatalog(sql,session,namespaceDescriptor,parameterTypes);
+                if(namespaceDescriptor.empty())(void)describePreparedOwnedCatalog(sql,session,namespaceDescriptor,parameterTypes);
+                if(namespaceDescriptor.empty())(void)describePreparedPgSequenceCatalog(sql,session,namespaceDescriptor,parameterTypes);
                 inferProtocolConcatParameters(sql,session,parameterTypes);
                 inferProtocolWholeScalarParameters(sql,session,parameterTypes);
                 validatePreparedAggregateOrderInputs(sql,session,parameterTypes);

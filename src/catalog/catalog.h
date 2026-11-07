@@ -49,6 +49,7 @@ public:
         std::vector<PgTypeRow> types;
         std::vector<PgProcRow> routines;
         std::vector<PgEnumRow> enumLabels;
+        bool systemAttributesMaterialized = false;
     };
     // A single-lock copy: callers never retain catalog-owned row pointers.
     MetadataSnapshot metadataSnapshot() const;
@@ -135,7 +136,12 @@ public:
     // pg_attribute
     // =====================================================================
     void addAttribute(const PgAttributeRow& row);
+    // Existing native callers enumerate declared user fields. SQL pg_attribute
+    // and explicit system metadata readers retain the complete stored image.
     std::vector<PgAttributeRow> findAttributes(Oid relOid) const;
+    std::vector<PgAttributeRow> findAttributesIncludingSystem(Oid relOid) const;
+    std::vector<PgAttributeRow> findUserAttributes(Oid relOid) const;
+    bool bootstrapSystemAttributes(bool requireExisting = false);
     std::vector<PgAttributeRow> findAttributesByNum(Oid relOid) const; // 按 attnum 排序
     const PgAttributeRow* findAttribute(Oid relOid, const std::string& attname) const;
     std::optional<PgAttributeRow> getAttribute(Oid relOid, const std::string& attname) const;
@@ -267,6 +273,10 @@ public:
     // Bootstrap: 初始化标准 schema / 类型
     // =====================================================================
     void bootstrapSystemTypes();
+    // Mutable startup only: upgrade recognized legacy physical properties;
+    // a published generation validates and never rewrites changed metadata.
+    bool bootstrapBuiltinTypeProperties(bool requireCurrent = false);
+    bool bootstrapSystemCatalogCollations(bool requireCurrent = false);
     // The immutable physical rows used by real catalog initialization.
     // Standalone/cold lookup shares these definitions without filesystem I/O,
     // catalog allocation, namespace creation or aliases inventing types.
@@ -282,6 +292,7 @@ private:
     CatalogManager(const std::string& dbPath, ReadOnlyTag);
     std::string dbPath_;
     bool persistOnDestruction_ = true;
+    bool systemAttributesMaterialized_ = false;
     std::unique_ptr<OidGenerator> oidGen_;
     mutable std::mutex mutex_;
     // Serialized baselines and receipts, not setter-only dirty flags. The

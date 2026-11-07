@@ -2,6 +2,7 @@
 // The call site must already own genuine stored-column provenance. Display
 // strings are never accepted as a source of persistent object identity here.
 #include "expression/regtype_input.h"
+#include "expression/regclass_input.h"
 #include "expression/CompoundValueOps.h"
 #include "common/SqlArrayText.h"
 #include <charconv>
@@ -10,7 +11,18 @@
 
 namespace dbms::stored_regtype_detail {
 inline bool columnType(const std::string& type) {
-    return type == "regtype" || type == "regtype[]";
+    return type == "regtype" || type == "regtype[]" || type == "regclass" || type == "regclass[]";
+}
+inline bool scalarType(const std::string& type) {
+    return type=="regtype" || type=="regclass";
+}
+inline Oid inputOid(const std::string& input,const CatalogManager::MetadataSnapshot& catalog,
+    const Session* session,const std::string& type) {
+    return type=="regclass"?regclass_detail::inputOid(input,catalog,session):regtype_detail::inputOid(input,catalog,session);
+}
+inline std::string outputOid(Oid oid,const CatalogManager::MetadataSnapshot& catalog,
+    const Session* session,const std::string& type) {
+    return type=="regclass"?regclass_detail::output(oid,catalog,session):regtype_detail::output(oid,catalog,session);
 }
 inline std::string tokenValue(const std::string& token) {
     if (token.empty() || token.front() != '"') return token;
@@ -47,28 +59,28 @@ inline std::string mapArray(const std::string& input,
 }
 inline std::string input(const std::string& value,bool array,
                          const CatalogManager::MetadataSnapshot& catalog,
-                         const Session* session) {
+                         const Session* session,const std::string& type="regtype") {
     const auto convert=[&](const std::string& token) {
-        return std::to_string(regtype_detail::inputOid(token,catalog,session));
+        return std::to_string(inputOid(token,catalog,session,type));
     };
     return array?mapArray(value,convert):convert(value);
 }
 inline std::string output(const std::string& raw,bool array,
                           const CatalogManager::MetadataSnapshot& catalog,
-                          const Session* session) {
+                          const Session* session,const std::string& type="regtype") {
     const auto render=[&](const std::string& token) {
-        return regtype_detail::output(rawOid(token),catalog,session);
+        return outputOid(rawOid(token),catalog,session,type);
     };
     return array?mapArray(raw,render):render(raw);
 }
 inline ExprValue load(const std::string& raw,bool array,bool isNull,
                       const CatalogManager::MetadataSnapshot& catalog,
-                      const Session* session,DatumTypePtr declaration={}) {
-    ExprValue value(array?"regtype[]":"regtype","",isNull);
+                      const Session* session,DatumTypePtr declaration={},const std::string& type="regtype") {
+    ExprValue value(type+(array?"[]":""),"",isNull);
     if(isNull)return value;
     if(!array) {
         const Oid oid=rawOid(raw);value.objectOid=oid;
-        value.value=regtype_detail::output(oid,catalog,session);
+        value.value=outputOid(oid,catalog,session,type);
         return value;
     }
     const auto parsed=sql_array_text::parse(raw);
@@ -77,10 +89,10 @@ inline ExprValue load(const std::string& raw,bool array,bool isNull,
         for(const auto& token:part.elements) {
             if(!token.empty() && token.front()=='{')collect(sql_array_text::parse(token));
             else if(token=="NULL") {
-                elements.emplace_back("regtype","",true);value.elementOids.emplace_back();
+                elements.emplace_back(type,"",true);value.elementOids.emplace_back();
             } else {
                 const Oid oid=rawOid(tokenValue(token));
-                elements.emplace_back("regtype",regtype_detail::output(oid,catalog,session));
+                elements.emplace_back(type,outputOid(oid,catalog,session,type));
                 elements.back().objectOid=oid;value.elementOids.emplace_back(oid);
             }
         }
@@ -88,7 +100,7 @@ inline ExprValue load(const std::string& raw,bool array,bool isNull,
     collect(parsed);
     std::vector<DatumArrayDimension> dimensions;
     for(const auto& dimension:parsed.dimensions)dimensions.push_back({dimension.length,dimension.lower});
-    value.value=output(raw,true,catalog,session);
+    value.value=output(raw,true,catalog,session,type);
     compound_value_detail::attach(value,std::move(elements),std::move(dimensions),std::move(declaration),{},true);
     return value;
 }
@@ -96,8 +108,9 @@ inline ExprValue load(const std::string& raw,bool array,bool isNull,
 // actual evaluated datum. Ordinary text input continues through input() once.
 inline std::string storageText(const ExprValue& value) {
     if(value.isNull)return {};
-    if(value.typeName=="regtype" && value.objectOid)return std::to_string(*value.objectOid);
-    if(value.typeName!="regtype[]")return value.value;
+    if(scalarType(value.typeName) && value.objectOid)return std::to_string(*value.objectOid);
+    if(value.typeName!="regtype[]" && value.typeName!="regclass[]")return value.value;
+    const auto type=value.typeName.substr(0,value.typeName.size()-2);
     const auto* owned=compound_value_detail::owningElements(value);
     if(!owned)
         throw DbError("0A000","REGTYPE array storage requires actual owning elements");
@@ -106,11 +119,11 @@ inline std::string storageText(const ExprValue& value) {
         throw DbError("XX000","regtype array owning cardinality mismatch");
     std::vector<ExprValue> raw;raw.reserve(owned->size());
     for(const auto& child:*owned) {
-        if(child.isNull)raw.emplace_back("regtype","",true);
+        if(child.isNull)raw.emplace_back(type,"",true);
         else {
-            if(child.typeName!="regtype" || !child.objectOid)
+            if(child.typeName!=type || !child.objectOid)
                 throw DbError("XX000","regtype array element lost its actual identity");
-            raw.emplace_back("regtype",std::to_string(*child.objectOid),false);
+            raw.emplace_back(type,std::to_string(*child.objectOid),false);
         }
     }
     return compound_value_detail::render(raw,dimensions);

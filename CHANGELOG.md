@@ -1,5 +1,13 @@
 # Changelog
 
+<!-- P43-D18 unaccepted draft checkpoint -->
+## 2026-11-07：P43/D18 草稿版本检查点（未接受）
+
+- 保存身份列 DEFAULT／序列类型参数／REGCLASS 值和系统目录实现草稿；校正实际目录的6个 `C` 排序规则字段，并从真实绑定来源生成 `pg_type` 的协议来源信息。
+- 39个选定原生入口、35条身份冲突与9条目录正式协议回归实际通过；全套未运行，正常性能 `NOTRUN`，不关闭功能项。
+- REGCLASS 默认依赖、旧数组元数据迁移、序列完整生命周期、生成列 ALTER TYPE 和其他协议／恢复缺口继续开放。默认程序不变、未推送。证据与边界见[报告](docs/performance-report-2026-10-30.md#identity-sequence-catalog-draft-20261107)。
+
+
 ## 2026-11-07：无写入事务提交优化（P42，partial）
 
 - 为同一WAL owner记录事务起始位置，严格无变更条件下省去无用COMMIT／CLOG发布；写入、DDL、序列与TEMP终止动作保留保守路径。

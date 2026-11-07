@@ -104,12 +104,12 @@ inline bool bootstrapRelation(CatalogManager& catalog) {
         PgAttributeRow a;a.attrelid=PgClassOid_Class;a.attname=field.name;
         a.atttypid=field.type;a.attlen=field.size;a.attnum=int16_t(i+1);
         a.attbyval=fieldType->typbyval;a.attalign=fieldType->typalign;
-        a.attstorage=fieldType->typstorage;a.attcollation=fieldType->typcollation;
+        a.attstorage=fieldType->typstorage;a.attcollation=fieldType->typcollation?950:0;
         a.attndims=fieldType->typcategory=='A'?1:0;a.attnotnull=i<31;
         attributes.push_back(std::move(a));
     }
     std::vector<const PgAttributeRow*> loaded;
-    for(const auto& a:snapshot.attributes)if(a.attrelid==PgClassOid_Class)loaded.push_back(&a);
+    for(const auto& a:snapshot.attributes)if(a.attrelid==PgClassOid_Class && a.attnum>0)loaded.push_back(&a);
     std::sort(loaded.begin(),loaded.end(),[](const auto* a,const auto* b){return a->attnum<b->attnum;});
     if(!existing && !loaded.empty())throw DbError("XX001","orphan pg_class attributes");
     if(existing) {

@@ -1,5 +1,11 @@
 # DBMS_C_plus_plus 对标 PostgreSQL 18.6：逐项完整实施蓝图
 
+<!-- P43-D18 unaccepted draft checkpoint -->
+## 当前推进：P43/D18 草稿检查点（2026-11-07）
+
+已保存身份DEFAULT、对象引用值和系统目录的实现／验证进展，选定39个原生入口通过；没有关闭原273项或增加已接受的进展记录。下一步仍须完成REGCLASS默认早绑定与依赖、历史数组真实类型／依赖迁移、序列完整声明及缓存／WAL／恢复、生成列ALTER TYPE和其他错误阶段缺口，再完成普通性能对照。用户暂缓范围全部保持，不能用本批有限目录对照替代这些要求。事实与证据入口见[草稿报告](performance-report-2026-10-30.md#identity-sequence-catalog-draft-20261107)。
+
+
 <!-- CURRENT_ORDINARY_PROJECT_BITMAP_20261106 -->
 
 ## 当前行NULL位图复用与按需求捕获（2026-11-06，P30-C2）

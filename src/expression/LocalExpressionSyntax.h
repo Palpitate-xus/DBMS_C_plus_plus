@@ -65,6 +65,7 @@ inline ExprPtr cloneSyntaxExpression(const Expr* source) {
         target->sqlValue = node->sqlValue; target->sqlValuePrecision = node->sqlValuePrecision;
         target->setReturning = node->setReturning;
         target->resolvedResultType = node->resolvedResultType;
+        target->identitySequenceOid = node->identitySequenceOid;
         target->distinct = node->distinct; target->orderBy = node->orderBy; target->hasOver = node->hasOver;
         for (const auto& key : node->aggregateOrderKeys)
             target->aggregateOrderKeys.push_back({copy(key.expr), key.ascending, key.nullsFirst, key.enumComparison, key.usingOperator});

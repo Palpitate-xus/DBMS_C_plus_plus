@@ -708,6 +708,8 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/multilob_storage_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/pg_stats_source_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/planner_relation_metadata_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/identity_conflict_default_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/system_catalog_metadata_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/test_registration_inventory_test.py)
     DBMS_CXXFLAGS=(-std=c++17 -O2 -pthread -Wall -Wextra)
     DBMS_LDFLAGS=(-pthread)

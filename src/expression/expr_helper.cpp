@@ -1,4 +1,5 @@
 #include "expression/LocalExpressionSyntax.h"
+#include "expression/IdentityValue.h"
 #include "expression/StoredRegtypeValue.h"
 #include "expr_helper.h"
 #include "expression/ArrayDatumInput.h"
@@ -445,6 +446,9 @@ std::string inferAstResultType(
         return selectCommonType(types,"CASE");
     }
     if (const auto* call = dynamic_cast<const FunctionCallExpr*>(expression)) {
+        if (identity_value_detail::bound(call)) {
+            identity_value_detail::validate(*call); return "bigint";
+        }
         if(call->sqlValue!=FunctionCallExpr::SqlValue::None)
             return sql_value_detail::type(call->sqlValue);
         if (!call->resolvedResultType.empty()) return protocolTypeName(call->resolvedResultType);
@@ -747,6 +751,7 @@ std::unique_ptr<FunctionCallExpr> hintedRoutineSignature(const FunctionCallExpr&
     const auto signature=[&] {
         auto result=std::make_unique<FunctionCallExpr>();
         result->funcName=call.funcName;result->schema=call.schema;
+        result->identitySequenceOid=call.identitySequenceOid;
         result->sourceBegin=call.sourceBegin;result->sourceEnd=call.sourceEnd;
         result->distinct=call.distinct;result->hasOver=call.hasOver;
         result->orderBy=call.orderBy;result->setReturning=call.setReturning;
@@ -2829,7 +2834,7 @@ std::string ExprHelper::inferResultType(
             "smallint", "integer", "bigint", "numeric", "real",
             "double precision", "boolean", "text", "varchar", "bpchar",
             "date", "time", "timetz", "timestamp", "timestamptz",
-            "interval", "json", "jsonb", "xml", "uuid", "name", "regtype",
+            "interval", "json", "jsonb", "xml", "uuid", "name", "regtype", "regclass",
             "smallint[]", "integer[]", "bigint[]", "numeric[]", "real[]",
             "double precision[]", "boolean[]", "text[]", "varchar[]",
             "date[]", "time[]", "timestamp[]", "timestamptz[]", "uuid[]"
@@ -3218,9 +3223,10 @@ static ExprEvalResult evalStringImpl(
             const auto declaration=datumMetadata->columns.find(name);
             auto* storage=functionEngine?functionEngine:&g_engine;
             const auto catalog=regtype_detail::metadata(*storage,currentDB);
-            datum=stored_regtype_detail::load(value,typeName=="regtype[]",isNull,
+            const bool array=common_type_detail::array(typeName);
+            datum=stored_regtype_detail::load(value,array,isNull,
                 catalog,currentSession(),declaration==datumMetadata->columns.end()?
-                    DatumTypePtr{}:declaration->second);
+                    DatumTypePtr{}:declaration->second,array?typeName.substr(0,typeName.size()-2):typeName);
         }
         if(captureOwningValue && !actualOwningInput && datumMetadata &&
            datumMetadata->sourceColumns && datumMetadata->storedColumns.count(name)) {

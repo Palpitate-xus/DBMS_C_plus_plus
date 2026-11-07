@@ -221,8 +221,8 @@ std::string TypeRegistry::resolveColumnType(Column& col,
         TypeModResult base = applyTypeMods(canonical, typeMods);
         if (!base.ok()) return base.error;
         col.dataType = canonical + "[]";
-        col.dsize = canonical == "regtype" ? size_t(65535) : base.dsize;
-        if (canonical == "regtype") col.isUnsigned = false;
+        col.dsize = canonical == "regtype" || canonical == "regclass" ? size_t(65535) : base.dsize;
+        if (canonical == "regtype" || canonical == "regclass") col.isUnsigned = false;
         col.isVariableLength = true;
         col.isArray = true;
         col.typeMod = canonical == "character varying"
@@ -238,7 +238,7 @@ std::string TypeRegistry::resolveColumnType(Column& col,
     col.dsize = r.dsize;
     col.isVariableLength = r.isVariableLength;
     col.isArray = false;
-    if (canonical == "regtype") col.isUnsigned = true;
+    if (canonical == "regtype" || canonical == "regclass") col.isUnsigned = true;
     col.typeMod = canonical == "character varying"
         ? (typeMods.empty() ? character_column::unboundedVarchar : r.typmod)
         : retainsModifier ? r.typmod : -1;
@@ -306,7 +306,7 @@ std::string TypeRegistry::validateColumn(Column& col) const {
         }
     }
 
-    if (entry->canonicalName == "regtype") {
+    if (entry->canonicalName == "regtype" || entry->canonicalName == "regclass") {
         col.isUnsigned = !isArray;
         col.dsize = isArray ? size_t(65535) : sizeof(uint32_t);
     }
@@ -379,6 +379,7 @@ void TypeRegistry::registerNumericTypes() {
 
 void TypeRegistry::registerStringTypes() {
     registerType({"regtype", 4, 'i', 'p', TypeCategory::ObjectReference, false, -1, 65535, true});
+    registerType({"regclass", 4, 'i', 'p', TypeCategory::ObjectReference, false, -1, 65535, true});
     registerType({"name", 64, 'c', 'p', TypeCategory::String, false, -1, 0, true});
     // The catalog's one-byte type has its own quoted identity. Never register
     // unquoted char as its alias: SQL CHAR remains the bpchar grammar alias.

@@ -14,6 +14,7 @@
 #include "common/DbError.h"
 #include "common/SqlSyntax.h"
 #include "expression/ExprEvaluator.h"
+#include "expression/IdentityValue.h"
 #include "expression/StoredRegtypeValue.h"
 #include "expression/expr_helper.h"
 #include "expression/prepared_query_execution.h"
@@ -892,6 +893,10 @@ bool validateConflictExpression(const Expr* expr, const TableSchema& table,
                                            evaluator, sourceColumns, targetTable);
     }
     if (const auto* call = dynamic_cast<const FunctionCallExpr*>(expr)) {
+        if (identity_value_detail::bound(call)) {
+            identity_value_detail::validate(*call);
+            return true;
+        }
         if (!evaluator.hasFunction(call->funcName) || call->distinct || call->filter ||
             call->hasOver || !call->namedArgs.empty() || !call->orderBy.empty() || !call->aggregateOrderKeys.empty()) {
             return false;
@@ -1148,7 +1153,8 @@ bool resolveConflictTarget(const InsertStmt& stmt, const TableSchema& table,
     return false;
 }
 
-bool buildConflictUpdatePlan(const InsertStmt& stmt, const TableSchema& table,
+bool buildConflictUpdatePlan(const InsertStmt& stmt, const InsertStmt& boundStmt,
+                             const TableSchema& table,
                              const std::string& currentDB,
                              const std::string& physicalTable,
                              std::vector<std::string>& targetColumns,
@@ -1168,14 +1174,23 @@ bool buildConflictUpdatePlan(const InsertStmt& stmt, const TableSchema& table,
     }
 
     std::set<std::string> seen;
-    for (const auto& [rawColumn, expr] : stmt.conflictUpdateSet) {
+    if (boundStmt.conflictUpdateSet.size() != stmt.conflictUpdateSet.size())
+        throw DbError("XX000", "ON CONFLICT lost its bound assignments");
+    for (size_t index = 0; index < stmt.conflictUpdateSet.size(); ++index) {
+        const auto& rawColumn = stmt.conflictUpdateSet[index].first;
+        const bool isDefault = isDefaultValue(stmt.conflictUpdateSet[index].second);
+        // Stored defaults have already been bound in their independent value
+        // namespace. Keep that exact root, including an identity sequence OID,
+        // until a conflict passes WHERE; planning must not allocate a value.
+        const auto& expr = isDefault ? boundStmt.conflictUpdateSet[index].second
+                                     : stmt.conflictUpdateSet[index].second;
         const std::string column = identifier(rawColumn);
         if (column.empty() || !seen.insert(column).second || isDefaultValue(expr)) {
             return false;
         }
         if (!findTableColumn(table, column)) return false;
 
-        if (referencesColumn(expr.get())) {
+        if (isDefault || referencesColumn(expr.get())) {
             ExprEvaluator evaluator;
             std::set<std::string> sourceColumns;
             if (!validateConflictExpression(expr.get(), table, evaluator,
@@ -1767,7 +1782,7 @@ void addReturningRowToContext(RowContext& context, const SqlRow& source,
                 if(found!=datumMetadata->columns.end())declaration=found->second;
             }
             value=stored_regtype_detail::load(isNull?std::string{}:*it->second,column.isArray,isNull,
-                catalog,session,std::move(declaration));
+                catalog,session,std::move(declaration),column.dataType);
         }
         if(generated) {
             const auto actual=generated->find(column.dataName);
@@ -1887,6 +1902,7 @@ ExprPtr copyReturningExpression(const Expr* expression, const TableSchema& table
         target->sqlValue = node->sqlValue; target->sqlValuePrecision = node->sqlValuePrecision;
         target->setReturning = node->setReturning;
         target->resolvedResultType = node->resolvedResultType;
+        target->identitySequenceOid = node->identitySequenceOid;
         for (const auto& arg : node->args) target->args.push_back(copy(arg));
         result = std::move(target);
     } else if (const auto* node = dynamic_cast<const ArrayExpr*>(expression)) {
@@ -2340,7 +2356,7 @@ bool collectTableRows(const std::string& currentDB, const std::string& tableName
                 else if(column.generatedKind!='v') {
                     if(stored_regtype_detail::columnType(column.dataType)) {
                         const auto catalog=regtype_detail::metadata(g_engine,currentDB);
-                        cell=stored_regtype_detail::load(value,column.isArray,isNull,catalog,currentSession(),declaration);
+                        cell=stored_regtype_detail::load(value,column.isArray,isNull,catalog,currentSession(),declaration,column.dataType);
                     }
                     if(column.isArray)(void)compound_value_detail::decodeArrayStorageInput(cell,declaration);
                 }
@@ -2722,7 +2738,7 @@ bool publishReturning(const std::vector<ReturningProjection>& projections,
                                 const auto* session=currentSession();
                                 const auto catalog=regtype_detail::metadata(g_engine,currentDB);
                                 owned=stored_regtype_detail::load(isNull?std::string{}:*it->second,
-                                    column.isArray,isNull,catalog,session,projection.typeMetadata);
+                                    column.isArray,isNull,catalog,session,projection.typeMetadata,column.dataType);
                                 value=isNull?"NULL":owned.value;
                                 loadedStoredReference=true;
                             }
@@ -2876,7 +2892,7 @@ public:
                        stored_regtype_detail::columnType(table_.cols[ordinal].dataType)) {
                         const auto catalog=regtype_detail::metadata(g_engine,currentDB_);
                         value=stored_regtype_detail::load(isNull?std::string{}:*found->second,
-                            table_.cols[ordinal].isArray,isNull,catalog,currentSession(),column.typeMetadata);
+                            table_.cols[ordinal].isArray,isNull,catalog,currentSession(),column.typeMetadata,table_.cols[ordinal].dataType);
                     }
                     // Only this genuine stored OLD/NEW source may decode
                     // its declared array input. An already owning datum is
@@ -3441,6 +3457,9 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback,
             insertExecution->planExpressionConstants(insert->conflictWhere.get());
             insertExecution->prepareExpression(insert->conflictWhere.get());
         }
+        for (size_t index = 0; index < stmt.conflictUpdateSet.size(); ++index)
+            if (isDefaultValue(stmt.conflictUpdateSet[index].second))
+                insertExecution->planExpressionConstants(insert->conflictUpdateSet.at(index).second.get());
     }
     std::vector<std::map<std::string, std::string>> insertedRows;
     const bool ignoreDuplicate = lower(stmt.conflictAction) == "do nothing";
@@ -3482,7 +3501,9 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback,
                                  StorageEngine::TablePrivilege::Update)) {
             return true;
         }
-        if (!buildConflictUpdatePlan(stmt, table, s.currentDB, resolvedTable,
+        const auto* boundInsert = preparedInsert ? dynamic_cast<const InsertStmt*>(preparedInsert->ast.get()) : nullptr;
+        if (!boundInsert) throw DbError("XX000", "ON CONFLICT has no bound INSERT");
+        if (!buildConflictUpdatePlan(stmt, *boundInsert, table, s.currentDB, resolvedTable,
                                      conflictTarget, requestedTable,
                                      conflictUpdates,
                                      conflictExpressionUpdates, conflictExpressionSources,
@@ -3693,38 +3714,19 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback,
         validateIntervalTargetInputs(table, values);
 
     if (conflictUpdate || (ignoreDuplicate && !conflictTarget.empty())) {
-        // The narrow plan needs the inferred target value before the insert
-        // reports a duplicate. DEFAULT/generated target values require a
-        // storage-level conflict key API and therefore remain legacy-owned.
-        for (const auto& values : pendingRows) {
-            for (const auto& targetColumn : conflictTarget) {
-                const auto it = values.find(targetColumn);
-                if (it == values.end()) {
+        // The storage insert now retains the final conflicting candidate.
+        // Virtual incoming values still need their separate read owner;
+        // ordinary defaults, identities and stored generation are captured.
+        std::set<std::string> inputs(conflictTarget.begin(),conflictTarget.end());
+        inputs.insert(conflictWhereExcludedColumns.begin(),conflictWhereExcludedColumns.end());
+        for (const auto& assignment : conflictExpressionSources)
+            inputs.insert(assignment.second.begin(),assignment.second.end());
+        for (const auto& input : inputs) {
+            for (size_t index = 0; index < table.len; ++index)
+                if (table.cols[index].dataName == input && table.cols[index].generatedKind == 'v') {
                     fallback = true;
                     return false;
                 }
-            }
-            for (const auto& [updateColumn, sourceColumns] : conflictExpressionSources) {
-                (void)updateColumn;
-                for (const auto& sourceColumn : sourceColumns) {
-                    const auto source = values.find(sourceColumn);
-                    if (source == values.end()) {
-                        // DEFAULT/generated incoming values need to be resolved
-                        // by the storage insert path before they can become
-                        // EXCLUDED.
-                        fallback = true;
-                        return false;
-                    }
-                }
-            }
-            for (const auto& sourceColumn : conflictWhereExcludedColumns) {
-                if (values.find(sourceColumn) == values.end()) {
-                    // A WHERE expression over EXCLUDED cannot be evaluated
-                    // until DEFAULT/generated input values have been materialized.
-                    fallback = true;
-                    return false;
-                }
-            }
         }
     }
 
@@ -3737,10 +3739,12 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback,
     int inserted = 0;
     std::vector<ReturningRowImage> returningImages;
     for (const auto& values : pendingRows) {
+        SqlRow conflictingRow;
         const DBStatus status = g_engine.insertRow(
             s.currentDB, resolvedTable, values,
             stmt.returning.empty() ? nullptr : &sqlInsertedRows,
-            identityOverride,virtualRows.output(),true);
+            identityOverride,virtualRows.output(),true,
+            conflictUpdate || (ignoreDuplicate && !conflictTarget.empty()) ? &conflictingRow : nullptr);
         if (status == DBStatus::DUPLICATE_KEY) {
             if (ignoreDuplicate) {
                 if (conflictTarget.empty()) continue;
@@ -3748,8 +3752,8 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback,
                 SqlRow targetValues;
                 bool targetValueUnavailable = false;
                 for (const auto& targetColumn : conflictTarget) {
-                    const auto targetValue = values.find(targetColumn);
-                    if (targetValue == values.end() || !targetValue->second) {
+                    const auto targetValue = conflictingRow.find(targetColumn);
+                    if (targetValue == conflictingRow.end() || !targetValue->second) {
                         targetValueUnavailable = true;
                         break;
                     }
@@ -3775,8 +3779,8 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback,
             if (conflictUpdate) {
                 SqlRow targetValues;
                 for (const auto& targetColumn : conflictTarget) {
-                    const auto targetValue = values.find(targetColumn);
-                    if (targetValue == values.end() || !targetValue->second) {
+                    const auto targetValue = conflictingRow.find(targetColumn);
+                    if (targetValue == conflictingRow.end() || !targetValue->second) {
                         std::cout << "ON CONFLICT target value is unavailable" << std::endl;
                         return true;
                     }
@@ -3804,7 +3808,7 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback,
                             continue;
                         const bool incoming = range.relationName.empty() && range.name == "excluded";
                         if (!incoming && range.relationName.empty()) continue;
-                        const auto& image = incoming ? values : targetRow;
+                        const auto& image = incoming ? conflictingRow : targetRow;
                         std::vector<ExprValue> cells;
                         for (const auto& column : range.columns) {
                             const auto found = image.find(column.name);
@@ -3827,7 +3831,7 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback,
                 SqlRow rowConflictUpdates = conflictUpdates;
                 for (const auto& [updateColumn, expression] : conflictExpressionUpdates) {
                     SqlCell value;
-                    if (!evaluateConflictExpression(expression, table, values,
+                    if (!evaluateConflictExpression(expression, table, conflictingRow,
                                                     s.currentDB, value, nullptr, {},
                                                     conflictAssignmentType(table,updateColumn))) {
                         std::cout << "ON CONFLICT expression evaluation failed" << std::endl;
@@ -5979,7 +5983,7 @@ private:
                            stored_regtype_detail::columnType(scanSchema.cols[i].dataType)) {
                             const auto catalog=dbms::regtype_detail::metadata(g_engine,session_.currentDB);
                             cells.back()=dbms::stored_regtype_detail::load(value,scanSchema.cols[i].isArray,
-                                cells.back().isNull,catalog,&session_,rangePointer->columns[i].typeMetadata);
+                                cells.back().isNull,catalog,&session_,rangePointer->columns[i].typeMetadata,scanSchema.cols[i].dataType);
                         }
                         cells.back().collation=scanSchema.cols[i].collation;
                     }
@@ -6239,7 +6243,7 @@ class BoundDmlExecution {
                stored_regtype_detail::columnType(table_.cols[position].dataType)) {
                 const auto catalog=regtype_detail::metadata(g_engine,session_.currentDB);
                 cells.back()=stored_regtype_detail::load(found->second.value_or(""),
-                    table_.cols[position].isArray,!found->second,catalog,&session_,column.typeMetadata);
+                    table_.cols[position].isArray,!found->second,catalog,&session_,column.typeMetadata,table_.cols[position].dataType);
             }
             if(captureReturningArrays && position<table_.len &&
                table_.cols[position].dataName==column.name &&
@@ -6285,7 +6289,7 @@ class BoundDmlExecution {
                     if((captureArrays || !isNull) && stored_regtype_detail::columnType(table_.cols[position].dataType)) {
                         const auto catalog=regtype_detail::metadata(g_engine,session_.currentDB);
                         cells.back()=stored_regtype_detail::load(isNull?std::string{}:*found->second,
-                            table_.cols[position].isArray,isNull,catalog,&session_,column.typeMetadata);
+                            table_.cols[position].isArray,isNull,catalog,&session_,column.typeMetadata,table_.cols[position].dataType);
                     }
                     if(captureArrays && table_.cols[position].isArray)
                         (void)compound_value_detail::decodeArrayStorageInput(cells.back(),column.typeMetadata);

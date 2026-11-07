@@ -1,4 +1,5 @@
 #include "ExprEvaluator.h"
+#include "expression/IdentityValue.h"
 #include "ArrayDatumInput.h"
 #include "expression/CompoundValueOps.h"
 #include "expression/LocalExpressionSyntax.h"
@@ -1850,7 +1851,8 @@ ExprValue ExprEvaluator::evalColumnRef(const ColumnRefExpr* e, const RowContext&
                 const auto& program=*e->generatedRead->program;
                 const auto catalog=regtype_detail::metadata(*program.engine,program.database);
                 value=stored_regtype_detail::load(value.value,e->generatedBaseDeclaration->kind==DatumKind::Array,
-                    value.isNull,catalog,currentSession(),e->generatedBaseDeclaration);
+                    value.isNull,catalog,currentSession(),e->generatedBaseDeclaration,
+                    value.typeName.substr(0,value.typeName.find("[]")));
             }
             (void)compound_value_detail::decodeArrayStorageInput(value,e->generatedBaseDeclaration);
         }
@@ -2177,10 +2179,12 @@ int ExprEvaluator::compareValues(const ExprValue& a, const ExprValue& b) {
             throw DbError("42804", "cannot compare record types with different numbers of columns");
         return 0;
     }
-    if((ta=="oid" || ta=="regtype") && (tb=="oid" || tb=="regtype")) {
+    if((ta=="oid" || regtype_cast_detail::reference(ta)) &&
+       (tb=="oid" || regtype_cast_detail::reference(tb))) {
         const auto identity=[](const ExprValue& value) {
             if(value.objectOid)return *value.objectOid;
             if(value.typeName=="oid")return regtype_detail::numericOid(value.value);
+            if(value.typeName=="regclass")throw DbError("XX000","regclass datum lost its actual object identity");
             const auto* session=currentSession();
             const auto catalog=regtype_detail::metadata(g_engine,session?session->currentDB:std::string{});
             return regtype_detail::inputOid(value.value,catalog,session);
@@ -2455,7 +2459,8 @@ static std::optional<bool> compareGeometricEquality(const std::string& op,
 ExprValue ExprEvaluator::applyComparison(const std::string& op,
                                          const ExprValue& l,
                                          const ExprValue& r) {
-    if(common_type_detail::canonical(l.typeName)=="regtype" || common_type_detail::canonical(r.typeName)=="regtype") {
+    if(regtype_cast_detail::reference(common_type_detail::canonical(l.typeName)) ||
+       regtype_cast_detail::reference(common_type_detail::canonical(r.typeName))) {
         ExprEvaluator evaluator;
         return evaluator.comparePrepared(resolveComparison(op,l.typeName,r.typeName),l,r);
     }
@@ -5356,14 +5361,14 @@ ExprValue ExprEvaluator::castReferenceValue(const ExprValue& v,
     const std::string& sourceType, const std::string& target,
     StorageEngine& engine, const std::string& database) {
     regtype_cast_detail::validate(sourceType,target);
-    if(target=="regtype") {
+    if(regtype_cast_detail::reference(target)) {
         regtype_detail::validateCast(sourceType,target);
-        if(v.isNull)return ExprValue("regtype","",true);
+        if(v.isNull)return ExprValue(target,"",true);
         const auto* session=currentSession();
         const auto catalog=regtype_detail::metadata(engine,database);
         const auto source=common_type_detail::canonical(sourceType);
         Oid oid=0;
-        if(source=="regtype" && v.objectOid)oid=*v.objectOid;
+        if(regtype_cast_detail::reference(source) && v.objectOid)oid=*v.objectOid;
         else if(source=="smallint" || source=="integer" || source=="bigint") {
             const auto kind=source=="smallint"?IntegerCastTarget::SmallInt:
                 source=="integer"?IntegerCastTarget::Integer:IntegerCastTarget::BigInt;
@@ -5373,24 +5378,24 @@ ExprValue ExprEvaluator::castReferenceValue(const ExprValue& v,
                (source=="bigint" && (number<0 || static_cast<unsigned long long>(number)>std::numeric_limits<Oid>::max())))
                 throw DbError("22003","OID out of range");
             oid=static_cast<Oid>(number);
-        } else if(common_type_detail::oidType(source) && source!="regtype") {
+        } else if(common_type_detail::oidType(source) && !regtype_cast_detail::reference(source)) {
             oid=v.objectOid?*v.objectOid:regtype_detail::numericOid(v.value);
-        } else oid=regtype_detail::inputOid(v.value,catalog,session);
-        ExprValue result("regtype",regtype_detail::output(oid,catalog,session),false);
+        } else oid=stored_regtype_detail::inputOid(v.value,catalog,session,target);
+        ExprValue result(target,stored_regtype_detail::outputOid(oid,catalog,session,target),false);
         result.objectOid=oid;return result;
     }
-    if(sourceType=="regtype" &&
+    if(regtype_cast_detail::reference(sourceType) &&
        (target=="oid" || target=="integer" || target=="smallint" || target=="bigint")) {
         if(v.isNull)return ExprValue(target,"",true);
         const auto* session=currentSession();
         const auto catalog=regtype_detail::metadata(engine,database);
-        const Oid oid=v.objectOid?*v.objectOid:regtype_detail::inputOid(v.value,catalog,session);
+        const Oid oid=v.objectOid?*v.objectOid:stored_regtype_detail::inputOid(v.value,catalog,session,sourceType);
         if(target=="oid"){ExprValue result("oid",std::to_string(oid));result.objectOid=oid;return result;}
         if(target=="integer") {
             const int64_t number=oid>std::numeric_limits<int32_t>::max()?static_cast<int64_t>(oid)-(int64_t{1}<<32):oid;
             return ExprValue("integer",std::to_string(number));
         }
-        if(target=="smallint")throw DbError("42846","cannot cast type regtype to smallint");
+        if(target=="smallint")throw DbError("42846","cannot cast type "+sourceType+" to smallint");
         return ExprValue("bigint",std::to_string(oid));
     }
     throw DbError("42846", "unsupported resolved scalar reference cast");
@@ -5509,11 +5514,11 @@ ExprValue ExprEvaluator::evalCast(const Expr* inputExpression, const RowContext&
         if (v.isNull) return ExprValue("record","",true);
         throw DbError("0A000", "input of anonymous composite types is not implemented");
     }
-    if(target=="regtype" || (sourceType=="regtype" &&
+    if(regtype_cast_detail::reference(target) || (regtype_cast_detail::reference(sourceType) &&
        (target=="oid" || target=="integer" || target=="smallint" || target=="bigint"))) {
         const auto* session=currentSession();
         const auto database=currentDB_.empty() && session?session->currentDB:currentDB_;
-        return castReferenceValue(v,sourceType,target,g_engine,database);
+        return castReferenceValue(v,sourceType,target,sqlValueEngine_?*sqlValueEngine_:g_engine,database);
     }
     regtype_cast_detail::validate(sourceType,target);
     if (target=="\"char\"") {
@@ -5643,7 +5648,7 @@ ExprValue ExprEvaluator::evalCast(const Expr* inputExpression, const RowContext&
         // on a real TEXT/VARCHAR target (and other typed cast semantics).
         const auto sourceElement=common_type_detail::array(sourceArrayType)
             ?sourceArrayType.substr(0,sourceArrayType.size()-2):std::string("unknown");
-        if(elementType=="regtype")regtype_detail::validateCast(sourceElement,elementType);
+        if(regtype_cast_detail::reference(elementType))regtype_detail::validateCast(sourceElement,elementType);
         auto items=compound_value_detail::elements(v);
         const auto dimensions=compound_value_detail::arrayDimensions(v);
         const auto sourceDeclaration=compound_value_detail::originalArrayDeclaration(v,inputExpression);
@@ -5992,7 +5997,14 @@ struct ModResultScalarFunction {
         return callback(args);
     }
 };
+struct SqlSerialSequenceFunction {
+    ExprValue operator()(const std::vector<ExprValue>&) const {
+        throw DbError("XX000", "pg_get_serial_sequence requires its actual evaluation context");
+    }
+};
 bool ownsScalarSignatures(const std::string& name,const ScalarFunction* callback) {
+    if(name=="pg_get_serial_sequence")
+        return callback && callback->target<SqlSerialSequenceFunction>();
     if(isCoreOverloadedScalarName(name))
         return callback && callback->target<DeclaredCoreScalarFunction>();
     if(isArraySearchScalarName(name))
@@ -6060,6 +6072,7 @@ struct ScalarSignature {
     std::string output;
 };
 std::vector<ScalarSignature> scalarSignatures(const std::string& name) {
+    if(name=="pg_get_serial_sequence")return {{{"text","text"},"text"}};
     if(name=="scale" || name=="min_scale")return {{{"numeric"},"integer"}};
     if(name=="factorial")return {{{"bigint"},"numeric"}};
     if(name=="gcd" || name=="lcm")return {
@@ -6636,6 +6649,7 @@ ResolvedScalarFunction resolveScalarFunction(
 
 bool ExprEvaluator::hasScalarFunction(const FunctionCallExpr* call,
                                       StorageEngine* engine) const {
+    if (identity_value_detail::bound(call)) { identity_value_detail::validate(*call); return true; }
     if(call && call->sqlValue!=FunctionCallExpr::SqlValue::None) {
         sql_value_detail::validate(*call);return true;
     }
@@ -6644,12 +6658,14 @@ bool ExprEvaluator::hasScalarFunction(const FunctionCallExpr* call,
 
 const QueryHostSetReturningProvider* ExprEvaluator::queryHostSetReturningRole(
     const FunctionCallExpr* call,StorageEngine* engine) const {
+    if (identity_value_detail::bound(call)) { identity_value_detail::validate(*call); return nullptr; }
     if(call && call->sqlValue!=FunctionCallExpr::SqlValue::None)return nullptr;
     return resolveScalarFunction(*this,call,currentDB_,engine,functionRegistry()).provider;
 }
 
 char ExprEvaluator::scalarFunctionVolatility(const FunctionCallExpr* call,
                                              StorageEngine* engine) const {
+    if (identity_value_detail::bound(call)) { identity_value_detail::validate(*call); return 'v'; }
     if(call && call->sqlValue!=FunctionCallExpr::SqlValue::None) {
         sql_value_detail::validate(*call);return 's';
     }
@@ -6665,6 +6681,7 @@ char ExprEvaluator::scalarFunctionVolatility(const FunctionCallExpr* call,
 
 std::string ExprEvaluator::scalarFunctionResultType(const FunctionCallExpr* call,
                                                    StorageEngine* engine) const {
+    if (identity_value_detail::bound(call)) { identity_value_detail::validate(*call); return "bigint"; }
     if(call && call->sqlValue!=FunctionCallExpr::SqlValue::None) {
         sql_value_detail::validate(*call);return sql_value_detail::type(call->sqlValue);
     }
@@ -6692,6 +6709,10 @@ std::string ExprEvaluator::scalarFunctionResultType(const FunctionCallExpr* call
 
 std::string ExprEvaluator::scalarFunctionIdentity(const FunctionCallExpr* call,
                                                  StorageEngine* engine) const {
+    if (identity_value_detail::bound(call)) {
+        identity_value_detail::validate(*call);
+        return "identity-value:" + currentDB_ + ":" + std::to_string(call->identitySequenceOid);
+    }
     if(call && call->sqlValue!=FunctionCallExpr::SqlValue::None) {
         sql_value_detail::validate(*call);
         return "sql-value:"+call->funcName+":"+(call->sqlValuePrecision?std::to_string(*call->sqlValuePrecision):"default");
@@ -6765,6 +6786,9 @@ void ExprEvaluator::bindScalarFunctions(Expr* expression, StorageEngine* engine)
     std::function<void(Expr*)> visit = [&](Expr* node) {
         if (!node) return;
         if (auto* function = dynamic_cast<FunctionCallExpr*>(node)) {
+            if (identity_value_detail::bound(function)) {
+                identity_value_detail::validate(*function); return;
+            }
             if(function->sqlValue!=FunctionCallExpr::SqlValue::None) {
                 sql_value_detail::validate(*function);return;
             }
@@ -6882,10 +6906,26 @@ ExprValue ExprEvaluator::evalSqlValue(const FunctionCallExpr* e,const RowContext
 
 ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowContext& ctx) const {
     if (!e) return ExprValue{};
+    if (identity_value_detail::bound(e)) {
+        identity_value_detail::validate(*e);
+        auto* owner = sqlValueEngine_ ? sqlValueEngine_ : &g_engine;
+        return ExprValue("bigint", std::to_string(owner->nextIdentityValue(currentDB_, e->identitySequenceOid)));
+    }
     if(e->sqlValue!=FunctionCallExpr::SqlValue::None)return evalSqlValue(e,ctx);
     if(e->setReturning)throw DbError("0A000","set-returning routine requires its query-host receiver");
     std::string name = toLower(e->funcName);
     const auto callback=functionRegistry().find(name);
+    if(callback!=functionRegistry().end() && callback->second.target<SqlSerialSequenceFunction>()) {
+        if(e->args.size()!=2 || !e->namedArgs.empty())
+            throw DbError("42883", "function pg_get_serial_sequence does not exist for these arguments");
+        if(e->hasOver || e->distinct || e->filter || !e->orderBy.empty())
+            throw DbError("42809", "pg_get_serial_sequence is not an aggregate or window function");
+        const auto table=eval(e->args[0].get(),ctx), column=eval(e->args[1].get(),ctx);
+        if(table.isNull || column.isNull)return ExprValue("text", "", true);
+        auto* owner=sqlValueEngine_?sqlValueEngine_:&g_engine;
+        const auto sequence=owner->serialSequenceName(currentDB_,table.value,column.value);
+        return ExprValue("text", sequence.value_or(""), !sequence);
+    }
     if(callback!=functionRegistry().end() && callback->second.target<SqlTypeOfFunction>()) {
         if(e->args.size()!=1 || !e->namedArgs.empty())
             throw DbError("42883","function pg_typeof does not exist for these arguments");
@@ -12969,6 +13009,7 @@ void ExprEvaluator::registerStatelessBuiltins() {
     functions_["current_database"]=SqlNameFunction{sql_value_detail::Kind::CurrentCatalog};
     functions_["current_schema"]=SqlNameFunction{sql_value_detail::Kind::CurrentSchema};
     functions_["pg_typeof"]=SqlTypeOfFunction{};
+    functions_["pg_get_serial_sequence"]=SqlSerialSequenceFunction{};
     functions_["version"]=SqlVersionFunction{};
     for(const auto* name:{"current_user","session_user","current_database","current_schema"})
         volatility_[name]='s';
@@ -13828,6 +13869,7 @@ void ExprEvaluator::registerStatelessBuiltins() {
     volatility_["clock_timestamp"] = 'v';
     volatility_["current_user"] = 's';
     volatility_["pg_typeof"] = 's';
+    volatility_["pg_get_serial_sequence"] = 's';
     volatility_["version"] = 's';
     volatility_["session_user"] = 's';
     volatility_["nextval"] = 'v';

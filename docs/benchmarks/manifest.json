@@ -519,8 +519,18 @@
       "sha256": "2c301399e7540a22c11b20c3db6f0fc0559157c19a421588baaaa6c852d76a87",
       "encoding": "gzip",
       "roundtrip_bytes_exact": true
+    },
+    {
+      "original_path": "docs/benchmarks/identity-sequence-catalog-draft-20261107.json",
+      "original_bytes": 27252524,
+      "original_sha256": "f2353535b666a6ffd771e7281635619212a2f508454343fc8fe01c4c80a378fb",
+      "path": "docs/benchmarks/identity-sequence-catalog-draft-20261107.json.gz",
+      "bytes": 4824208,
+      "sha256": "867733bd7463a77de63c6c9feff48e476a507316d98b0e0d21d95bffea5f4ac0",
+      "encoding": "gzip",
+      "roundtrip_bytes_exact": true
     }
   ],
-  "total_original_bytes": 1677084248,
-  "total_bytes": 284857354
+  "total_original_bytes": 2128856535,
+  "total_bytes": 609445737
 }

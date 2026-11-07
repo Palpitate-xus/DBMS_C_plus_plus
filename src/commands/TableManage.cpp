@@ -1,3 +1,4 @@
+#include "catalog/SystemCatalogRows.h"
 #include "expression/LocalExpressionSyntax.h"
 #include "TableManage.h"
 #include "expression/ArrayDatumInput.h"
@@ -10,6 +11,7 @@
 #include "commands/RoutineStore.h"
 #include "commands/SchemaNamespace.h"
 #include "commands/SequenceStorageName.h"
+#include "catalog/PgSequenceCatalog.h"
 #include "commands/VacuumFullBackup.h"
 #include "common/DbError.h"
 #include "common/SqlArrayText.h"
@@ -1002,7 +1004,7 @@ static std::string canonicalColumnKeyValue(const Column& column,
         }
         return key;
     }
-    if (!column.isArray && column.dataType == "regtype") {
+    if (!column.isArray && stored_regtype_detail::scalarType(column.dataType)) {
         const Oid oid = stored_regtype_detail::rawOid(value);
         // Fixed width preserves unsigned OID ordering in the existing byte-key
         // B+tree/hash/SSI/unique-key owners. This is not a rendered type name.
@@ -1138,7 +1140,7 @@ static bool variableColumnWidthsValid(
             (nullColumns ? nullColumns->count(column.dataName) != 0
                          : value->second == "NULL");
         if (value == values.end() || isNull) continue;
-        const size_t maxLength = column.isArray && column.dataType != "regtype" &&
+        const size_t maxLength = column.isArray && !stored_regtype_detail::scalarType(column.dataType) &&
             !character_column::varying(column) ? 1024 :
             characterColumnByteLimit(column);
         if (value->second.size() > maxLength) return false;
@@ -6670,7 +6672,7 @@ public:
             // Mirror the existing compareValues branch precedence. In
             // particular an array/variable datum must not enter the integral
             // cache merely because its raw dataType spells "integer".
-            if ((!column.isArray && column.dataType == "regtype") ||
+            if ((!column.isArray && stored_regtype_detail::scalarType(column.dataType)) ||
                 column.dataType == "uuid" ||
                 (!column.isArray && (column.dataType == "bit" ||
                                       column.dataType == "bit varying"))) return false;
@@ -11549,7 +11551,7 @@ std::string StorageEngine::extractColumnValueStatic(const std::string& rowBuffer
         for (int i = 0; i < n; ++i)
             bytes[i] = static_cast<uint8_t>(rowBuffer[offset + i]);
         return formatMacAddr(bytes, n);
-    } else if (!col.isArray && col.dataType == "regtype") {
+    } else if (!col.isArray && stored_regtype_detail::scalarType(col.dataType)) {
         // REGTYPE is persisted as the complete unsigned OID datum.  This
         // identity does not depend on the legacy schema unsigned suffix.
         if (col.dsize != sizeof(uint32_t)) {
@@ -17415,6 +17417,7 @@ constexpr int32_t SCHEMA_COLUMN_TYPEMOD_FORMAT_VERSION = 0x4442000C;
 constexpr int32_t SCHEMA_TEMPORAL_CODEC_FORMAT_VERSION = 0x4442000D;
 // E widens only persisted FK relation identities, never SQL identifier fields.
 constexpr int32_t SCHEMA_LONG_RELATION_FORMAT_VERSION = 0x4442000E;
+constexpr int32_t SCHEMA_IDENTITY_SEQUENCE_FORMAT_VERSION = 0x4442000F;
 constexpr uint32_t SCHEMA_TEMPORAL_CODEC_MAGIC = 0x314D4354; // "TCM1"
 constexpr uint32_t SCHEMA_COLUMN_TYPEMOD_MAGIC = 0x314D5449; // "ITM1"
 constexpr uint32_t SCHEMA_PHYSICAL_ID_MAGIC = 0x31444952;  // "RID1"
@@ -17422,6 +17425,7 @@ constexpr uint32_t SCHEMA_DEFAULT_ORIGIN_MAGIC = 0x314F5344; // "DSO1"
 constexpr int32_t MAX_PERSISTED_COLUMN_SIZE = 65535;
 constexpr uint32_t SCHEMA_ADDITIONAL_CHECK_MAGIC = 0x324B4843;  // "CHK2"
 constexpr uint32_t SCHEMA_IDENTITY_KIND_MAGIC = 0x314E4449;     // "IDN1"
+constexpr uint32_t SCHEMA_IDENTITY_SEQUENCE_MAGIC = 0x31515349; // "ISQ1"
 constexpr uint32_t SCHEMA_LONG_DEFAULT_MAGIC = 0x31544644;      // "DFT1"
 constexpr uint32_t SCHEMA_RANGE_LOWER_BOUNDS_MAGIC = 0x31424C52;  // "RLB1"
 constexpr int32_t MAX_ADDITIONAL_CHECK_CONSTRAINTS = 1024;
@@ -17453,6 +17457,19 @@ void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
         out.setstate(std::ios::failbit);
         return;
     }
+
+    bool hasIdentitySequences = false;
+    std::set<uint32_t> identitySequenceIds;
+    for (size_t i = 0; i < tbl.len; ++i) {
+        const auto& column = tbl.cols[i];
+        if (column.identitySequenceOid == 0) continue;
+        if ((column.identityKind != 'a' && column.identityKind != 'd') ||
+            !column.isAutoIncrement || !identitySequenceIds.insert(column.identitySequenceOid).second) {
+            out.setstate(std::ios::failbit); return;
+        }
+        hasIdentitySequences = true;
+    }
+
     if (tbl.rangePartitions.size() > MAX_COLUMNS) {
         out.setstate(std::ios::failbit);
         return;
@@ -17486,7 +17503,7 @@ void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
             return;
         }
     }
-    bool longReferences = false;
+    bool longReferences = hasIdentitySequences;
     for (size_t i = 0; i < tbl.fkLen; ++i) {
         if (!validStoredRelationName(tbl.fks[i].refTable)) {
             out.setstate(std::ios::failbit); return;
@@ -17527,7 +17544,7 @@ void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
     }
     // Old readers reject B before consuming it rather than treating an
     // implicit domain default as a frozen SQL column expression.
-    const int32_t schemaFormat = longReferences ? SCHEMA_LONG_RELATION_FORMAT_VERSION : hasTemporalCodecs ? SCHEMA_TEMPORAL_CODEC_FORMAT_VERSION : hasColumnTypeMods ? SCHEMA_COLUMN_TYPEMOD_FORMAT_VERSION : hasDefaultOrigins ? SCHEMA_DEFAULT_ORIGIN_FORMAT_VERSION : tbl.physicalRelationId == 0
+    const int32_t schemaFormat = hasIdentitySequences ? SCHEMA_IDENTITY_SEQUENCE_FORMAT_VERSION : longReferences ? SCHEMA_LONG_RELATION_FORMAT_VERSION : hasTemporalCodecs ? SCHEMA_TEMPORAL_CODEC_FORMAT_VERSION : hasColumnTypeMods ? SCHEMA_COLUMN_TYPEMOD_FORMAT_VERSION : hasDefaultOrigins ? SCHEMA_DEFAULT_ORIGIN_FORMAT_VERSION : tbl.physicalRelationId == 0
         ? SCHEMA_FORMAT_VERSION : SCHEMA_PHYSICAL_ID_FORMAT_VERSION;
     out.write(reinterpret_cast<const char*>(&schemaFormat), sizeof(schemaFormat));
     int32_t len = static_cast<int32_t>(tbl.len);
@@ -17746,7 +17763,7 @@ void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
     uint16_t longDefaultCount = 0;
     for (size_t i = 0; i < tbl.len; ++i)
         if (tbl.cols[i].defaultValue.size() > MAX_COL_NAME_LEN) ++longDefaultCount;
-    if (longDefaultCount != 0 || !tbl.rangePartitions.empty() || tbl.physicalRelationId != 0 || hasDefaultOrigins || hasColumnTypeMods || hasTemporalCodecs || longReferences) {
+    if (longDefaultCount != 0 || !tbl.rangePartitions.empty() || tbl.physicalRelationId != 0 || hasDefaultOrigins || hasColumnTypeMods || hasTemporalCodecs || longReferences || hasIdentitySequences) {
         out.write(reinterpret_cast<const char*>(&SCHEMA_LONG_DEFAULT_MAGIC),
                   sizeof(SCHEMA_LONG_DEFAULT_MAGIC));
         out.write(reinterpret_cast<const char*>(&longDefaultCount),
@@ -17763,7 +17780,7 @@ void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
 
     // Persist lower endpoints without changing the legacy schema prefix. Old
     // schemas infer them as MINVALUE followed by the preceding upper bound.
-    if (!tbl.rangePartitions.empty() || tbl.physicalRelationId != 0 || hasDefaultOrigins || hasColumnTypeMods || hasTemporalCodecs || longReferences) {
+    if (!tbl.rangePartitions.empty() || tbl.physicalRelationId != 0 || hasDefaultOrigins || hasColumnTypeMods || hasTemporalCodecs || longReferences || hasIdentitySequences) {
         out.write(reinterpret_cast<const char*>(&SCHEMA_RANGE_LOWER_BOUNDS_MAGIC),
                   sizeof(SCHEMA_RANGE_LOWER_BOUNDS_MAGIC));
         const int32_t lowerBoundCount =
@@ -17815,6 +17832,13 @@ void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
             out.write(reinterpret_cast<const char*>(&codec), sizeof(codec));
         }
     }
+    if (hasIdentitySequences) {
+        out.write(reinterpret_cast<const char*>(&SCHEMA_IDENTITY_SEQUENCE_MAGIC), sizeof(SCHEMA_IDENTITY_SEQUENCE_MAGIC));
+        const uint16_t count = static_cast<uint16_t>(tbl.len);
+        out.write(reinterpret_cast<const char*>(&count), sizeof(count));
+        for (size_t i = 0; i < tbl.len; ++i)
+            out.write(reinterpret_cast<const char*>(&tbl.cols[i].identitySequenceOid), sizeof(uint32_t));
+    }
 }
 
 TableSchema StorageEngine::readSchema(std::istream& in, const std::string& tablename) const {
@@ -17824,7 +17848,7 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
     in.read(reinterpret_cast<char*>(&firstInt), 4);
     if (!in) return {};
 
-    if (firstInt != SCHEMA_FORMAT_VERSION && firstInt != SCHEMA_PHYSICAL_ID_FORMAT_VERSION && firstInt != SCHEMA_DEFAULT_ORIGIN_FORMAT_VERSION && firstInt != SCHEMA_COLUMN_TYPEMOD_FORMAT_VERSION && firstInt != SCHEMA_TEMPORAL_CODEC_FORMAT_VERSION && firstInt != SCHEMA_LONG_RELATION_FORMAT_VERSION) {
+    if (firstInt != SCHEMA_FORMAT_VERSION && firstInt != SCHEMA_PHYSICAL_ID_FORMAT_VERSION && firstInt != SCHEMA_DEFAULT_ORIGIN_FORMAT_VERSION && firstInt != SCHEMA_COLUMN_TYPEMOD_FORMAT_VERSION && firstInt != SCHEMA_TEMPORAL_CODEC_FORMAT_VERSION && (firstInt != SCHEMA_LONG_RELATION_FORMAT_VERSION && firstInt != SCHEMA_IDENTITY_SEQUENCE_FORMAT_VERSION)) {
         std::cerr << "[catalog] unsupported schema format for table " << tablename
                   << "; recreate the database with the current binary" << std::endl;
         return {};
@@ -17923,7 +17947,7 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
                 tbl.fks[i].colNames.push_back(readFixedString(in, MAX_COL_NAME_LEN));
                 tbl.fks[i].refCols.push_back(readFixedString(in, MAX_COL_NAME_LEN));
             }
-            tbl.fks[i].refTable = readFixedString(in, firstInt == SCHEMA_LONG_RELATION_FORMAT_VERSION
+            tbl.fks[i].refTable = readFixedString(in, (firstInt == SCHEMA_LONG_RELATION_FORMAT_VERSION || firstInt == SCHEMA_IDENTITY_SEQUENCE_FORMAT_VERSION)
                 ? relation_name_codec::storageWidth : MAX_TABLE_NAME_LEN);
             if (!in || !validStoredRelationName(tbl.fks[i].refTable)) return {};
             tbl.fks[i].onDelete = readFixedString(in, 10);
@@ -18135,7 +18159,7 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
     if (!in) return {};
     if (in.peek() == std::char_traits<char>::eof()) {
         if (!in.eof()) return {};
-        if (firstInt == SCHEMA_PHYSICAL_ID_FORMAT_VERSION || firstInt == SCHEMA_DEFAULT_ORIGIN_FORMAT_VERSION || firstInt == SCHEMA_COLUMN_TYPEMOD_FORMAT_VERSION || firstInt == SCHEMA_TEMPORAL_CODEC_FORMAT_VERSION || firstInt == SCHEMA_LONG_RELATION_FORMAT_VERSION) return {};
+        if (firstInt == SCHEMA_PHYSICAL_ID_FORMAT_VERSION || firstInt == SCHEMA_DEFAULT_ORIGIN_FORMAT_VERSION || firstInt == SCHEMA_COLUMN_TYPEMOD_FORMAT_VERSION || firstInt == SCHEMA_TEMPORAL_CODEC_FORMAT_VERSION || (firstInt == SCHEMA_LONG_RELATION_FORMAT_VERSION || firstInt == SCHEMA_IDENTITY_SEQUENCE_FORMAT_VERSION)) return {};
         in.clear();
         return tbl;
     }
@@ -18181,7 +18205,7 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
     // them as SERIAL-like auto-increment columns (identityKind == 0).
     if (in.peek() == std::char_traits<char>::eof()) {
         if (!in.eof()) return {};
-        if (firstInt == SCHEMA_PHYSICAL_ID_FORMAT_VERSION || firstInt == SCHEMA_DEFAULT_ORIGIN_FORMAT_VERSION || firstInt == SCHEMA_COLUMN_TYPEMOD_FORMAT_VERSION || firstInt == SCHEMA_TEMPORAL_CODEC_FORMAT_VERSION || firstInt == SCHEMA_LONG_RELATION_FORMAT_VERSION) return {};
+        if (firstInt == SCHEMA_PHYSICAL_ID_FORMAT_VERSION || firstInt == SCHEMA_DEFAULT_ORIGIN_FORMAT_VERSION || firstInt == SCHEMA_COLUMN_TYPEMOD_FORMAT_VERSION || firstInt == SCHEMA_TEMPORAL_CODEC_FORMAT_VERSION || (firstInt == SCHEMA_LONG_RELATION_FORMAT_VERSION || firstInt == SCHEMA_IDENTITY_SEQUENCE_FORMAT_VERSION)) return {};
         in.clear();
         return tbl;
     }
@@ -18202,7 +18226,7 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
     }
     if (in.peek() == std::char_traits<char>::eof()) {
         if (!in.eof()) return {};
-        if (firstInt == SCHEMA_PHYSICAL_ID_FORMAT_VERSION || firstInt == SCHEMA_DEFAULT_ORIGIN_FORMAT_VERSION || firstInt == SCHEMA_COLUMN_TYPEMOD_FORMAT_VERSION || firstInt == SCHEMA_TEMPORAL_CODEC_FORMAT_VERSION || firstInt == SCHEMA_LONG_RELATION_FORMAT_VERSION) return {};
+        if (firstInt == SCHEMA_PHYSICAL_ID_FORMAT_VERSION || firstInt == SCHEMA_DEFAULT_ORIGIN_FORMAT_VERSION || firstInt == SCHEMA_COLUMN_TYPEMOD_FORMAT_VERSION || firstInt == SCHEMA_TEMPORAL_CODEC_FORMAT_VERSION || (firstInt == SCHEMA_LONG_RELATION_FORMAT_VERSION || firstInt == SCHEMA_IDENTITY_SEQUENCE_FORMAT_VERSION)) return {};
         in.clear();
         return tbl;
     }
@@ -18230,7 +18254,7 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
     }
     if (in.peek() == std::char_traits<char>::eof()) {
         if (!in.eof()) return {};
-        if (firstInt == SCHEMA_PHYSICAL_ID_FORMAT_VERSION || firstInt == SCHEMA_DEFAULT_ORIGIN_FORMAT_VERSION || firstInt == SCHEMA_COLUMN_TYPEMOD_FORMAT_VERSION || firstInt == SCHEMA_TEMPORAL_CODEC_FORMAT_VERSION || firstInt == SCHEMA_LONG_RELATION_FORMAT_VERSION) return {};
+        if (firstInt == SCHEMA_PHYSICAL_ID_FORMAT_VERSION || firstInt == SCHEMA_DEFAULT_ORIGIN_FORMAT_VERSION || firstInt == SCHEMA_COLUMN_TYPEMOD_FORMAT_VERSION || firstInt == SCHEMA_TEMPORAL_CODEC_FORMAT_VERSION || (firstInt == SCHEMA_LONG_RELATION_FORMAT_VERSION || firstInt == SCHEMA_IDENTITY_SEQUENCE_FORMAT_VERSION)) return {};
         // A zero-entry DFT1 block is emitted only with the new RANGE-bound
         // extension; an EOF here therefore means a truncated new schema.
         if (defaultCount == 0 && !tbl.rangePartitions.empty()) return {};
@@ -18268,7 +18292,7 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
         }
         persistedLowerBounds.push_back(std::move(lower));
     }
-    if (firstInt == SCHEMA_PHYSICAL_ID_FORMAT_VERSION || firstInt == SCHEMA_DEFAULT_ORIGIN_FORMAT_VERSION || firstInt == SCHEMA_COLUMN_TYPEMOD_FORMAT_VERSION || firstInt == SCHEMA_TEMPORAL_CODEC_FORMAT_VERSION || firstInt == SCHEMA_LONG_RELATION_FORMAT_VERSION) {
+    if (firstInt == SCHEMA_PHYSICAL_ID_FORMAT_VERSION || firstInt == SCHEMA_DEFAULT_ORIGIN_FORMAT_VERSION || firstInt == SCHEMA_COLUMN_TYPEMOD_FORMAT_VERSION || firstInt == SCHEMA_TEMPORAL_CODEC_FORMAT_VERSION || (firstInt == SCHEMA_LONG_RELATION_FORMAT_VERSION || firstInt == SCHEMA_IDENTITY_SEQUENCE_FORMAT_VERSION)) {
         uint32_t physicalIdMagic = 0;
         in.read(reinterpret_cast<char*>(&physicalIdMagic), sizeof(physicalIdMagic));
         in.read(reinterpret_cast<char*>(&tbl.physicalRelationId), sizeof(tbl.physicalRelationId));
@@ -18276,7 +18300,7 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
             (firstInt == SCHEMA_PHYSICAL_ID_FORMAT_VERSION && tbl.physicalRelationId == 0))
             return {};
     }
-    if (firstInt == SCHEMA_DEFAULT_ORIGIN_FORMAT_VERSION || firstInt == SCHEMA_COLUMN_TYPEMOD_FORMAT_VERSION || firstInt == SCHEMA_TEMPORAL_CODEC_FORMAT_VERSION || firstInt == SCHEMA_LONG_RELATION_FORMAT_VERSION) {
+    if (firstInt == SCHEMA_DEFAULT_ORIGIN_FORMAT_VERSION || firstInt == SCHEMA_COLUMN_TYPEMOD_FORMAT_VERSION || firstInt == SCHEMA_TEMPORAL_CODEC_FORMAT_VERSION || (firstInt == SCHEMA_LONG_RELATION_FORMAT_VERSION || firstInt == SCHEMA_IDENTITY_SEQUENCE_FORMAT_VERSION)) {
         uint32_t magic = 0; uint16_t count = 0;
         in.read(reinterpret_cast<char*>(&magic),sizeof(magic));
         in.read(reinterpret_cast<char*>(&count),sizeof(count));
@@ -18298,7 +18322,7 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
             }
         }
     }
-    if (firstInt == SCHEMA_COLUMN_TYPEMOD_FORMAT_VERSION || firstInt == SCHEMA_TEMPORAL_CODEC_FORMAT_VERSION || firstInt == SCHEMA_LONG_RELATION_FORMAT_VERSION) {
+    if (firstInt == SCHEMA_COLUMN_TYPEMOD_FORMAT_VERSION || firstInt == SCHEMA_TEMPORAL_CODEC_FORMAT_VERSION || (firstInt == SCHEMA_LONG_RELATION_FORMAT_VERSION || firstInt == SCHEMA_IDENTITY_SEQUENCE_FORMAT_VERSION)) {
         uint32_t magic = 0; uint16_t count = 0;
         in.read(reinterpret_cast<char*>(&magic), sizeof(magic));
         in.read(reinterpret_cast<char*>(&count), sizeof(count));
@@ -18317,7 +18341,7 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
             }
         }
     }
-    if (firstInt == SCHEMA_TEMPORAL_CODEC_FORMAT_VERSION || firstInt == SCHEMA_LONG_RELATION_FORMAT_VERSION) {
+    if (firstInt == SCHEMA_TEMPORAL_CODEC_FORMAT_VERSION || (firstInt == SCHEMA_LONG_RELATION_FORMAT_VERSION || firstInt == SCHEMA_IDENTITY_SEQUENCE_FORMAT_VERSION)) {
         uint32_t magic = 0; uint16_t count = 0;
         in.read(reinterpret_cast<char*>(&magic), sizeof(magic));
         in.read(reinterpret_cast<char*>(&count), sizeof(count));
@@ -18332,7 +18356,24 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
             hasTemporalCodec = hasTemporalCodec ||
                 tbl.cols[i].storageCodec != Column::StorageCodec::Legacy;
         }
-        if (!hasTemporalCodec && firstInt != SCHEMA_LONG_RELATION_FORMAT_VERSION) return {};
+        if (!hasTemporalCodec && (firstInt != SCHEMA_LONG_RELATION_FORMAT_VERSION && firstInt != SCHEMA_IDENTITY_SEQUENCE_FORMAT_VERSION)) return {};
+    }
+    if (firstInt == SCHEMA_IDENTITY_SEQUENCE_FORMAT_VERSION) {
+        uint32_t magic = 0; uint16_t count = 0;
+        in.read(reinterpret_cast<char*>(&magic), sizeof(magic));
+        in.read(reinterpret_cast<char*>(&count), sizeof(count));
+        if (!in || magic != SCHEMA_IDENTITY_SEQUENCE_MAGIC || count != tbl.len) return {};
+        bool any = false; std::set<uint32_t> ids;
+        for (size_t i = 0; i < tbl.len; ++i) {
+            auto& column = tbl.cols[i];
+            in.read(reinterpret_cast<char*>(&column.identitySequenceOid), sizeof(uint32_t));
+            if (!in) return {};
+            if (column.identitySequenceOid == 0) continue;
+            if ((column.identityKind != 'a' && column.identityKind != 'd') ||
+                !column.isAutoIncrement || !ids.insert(column.identitySequenceOid).second) return {};
+            any = true;
+        }
+        if (!any) return {};
     }
     if (in.peek() != std::char_traits<char>::eof() || !in.eof()) return {};
     tbl.rangePartitionLowerBounds = std::move(persistedLowerBounds);
@@ -19882,7 +19923,7 @@ DBStatus StorageEngine::createTable(const std::string& dbname, const TableSchema
     }
     // Initialize auto-increment sequences
     for (size_t i = 0; i < tbl.len; ++i) {
-        if (tbl.cols[i].isAutoIncrement) {
+        if (tbl.cols[i].isAutoIncrement && tbl.cols[i].identitySequenceOid == 0) {
             writeNextSeq(dbname, tbl.tablename, tbl.cols[i].dataName, 1);
         }
     }
@@ -20533,7 +20574,8 @@ DBStatus StorageEngine::alterTableAddColumn(const std::string& dbname,
 
     // ADD COLUMN without a default cannot satisfy NOT NULL for existing rows.
     // Reject before touching schema or data so the DDL remains failure-safe.
-    if (!rows.empty() && !col.isNull && col.defaultValue.empty()) {
+    if (!rows.empty() && !col.isNull && col.defaultValue.empty() &&
+        !(col.identityKind != 0 && col.identitySequenceOid != 0)) {
         lockManager_.unlock(tablename);
         return DBStatus::NULL_NOT_ALLOWED;
     }
@@ -20704,8 +20746,8 @@ DBStatus StorageEngine::alterTableAddColumn(const std::string& dbname,
             std::map<std::string, std::string> stored;
             std::set<std::string> nulls;
             splitSqlRow(values, stored, nulls);
-            status = insertInternal(dbname, tablename, stored, nulls, nullptr, IdentityOverride::None);
-        } else status = insertRow(dbname, tablename, values);
+            status = insertInternal(dbname, tablename, stored, nulls, nullptr, IdentityOverride::System);
+        } else status = insertRow(dbname, tablename, values, nullptr, IdentityOverride::System);
         if (status != DBStatus::OK) return status;
     }
 
@@ -21035,8 +21077,8 @@ DBStatus StorageEngine::alterTableDropColumn(const std::string& dbname,
             std::map<std::string, std::string> stored;
             std::set<std::string> nulls;
             splitSqlRow(values, stored, nulls);
-            status = insertInternal(dbname, tablename, stored, nulls, nullptr, IdentityOverride::None);
-        } else status = insertRow(dbname, tablename, values);
+            status = insertInternal(dbname, tablename, stored, nulls, nullptr, IdentityOverride::System);
+        } else status = insertRow(dbname, tablename, values, nullptr, IdentityOverride::System);
         if (status != DBStatus::OK) return status;
     }
     DBStatus indexStatus = reindex(dbname, tablename);
@@ -21144,8 +21186,20 @@ DBStatus StorageEngine::alterTableAlterColumnType(const std::string& dbname,
     }
     const auto referenceSourceType=ExprHelper::canonicalResultTypeName(tbl.cols[colIdx].dataType);
     const auto referenceTargetType=ExprHelper::canonicalResultTypeName(target.dataType);
-    const bool sourceReference=referenceSourceType=="regtype";
-    const bool targetReference=referenceTargetType=="regtype";
+    uint32_t identityTypeOid = 0;
+    if (tbl.cols[colIdx].identityKind != 0) {
+        if (!target.isArray && target.domainName.empty()) {
+            if (referenceTargetType == "smallint") identityTypeOid = 21;
+            else if (referenceTargetType == "integer") identityTypeOid = 23;
+            else if (referenceTargetType == "bigint") identityTypeOid = 20;
+        }
+        if (!identityTypeOid) {
+            lockManager_.unlock(tablename);
+            throw DbError("22023","identity column type must be smallint, integer, or bigint");
+        }
+    }
+    const bool sourceReference=stored_regtype_detail::scalarType(referenceSourceType);
+    const bool targetReference=stored_regtype_detail::scalarType(referenceTargetType);
     const auto referenceIntegerRole=[](const std::string& type) {
         return type=="smallint" || type=="integer" || type=="bigint" || type=="oid";
     };
@@ -21241,7 +21295,7 @@ DBStatus StorageEngine::alterTableAlterColumnType(const std::string& dbname,
                         ExprValue actual(referenceSourceType,input,false);
                         if(sourceReference) {
                             const auto catalog=regtype_detail::metadata(*this,dbname);
-                            actual=stored_regtype_detail::load(input,false,false,catalog,currentSession());
+                            actual=stored_regtype_detail::load(input,false,false,catalog,currentSession(),{},referenceSourceType);
                         }
                         if(targetReference || referenceOutputIntegerRole(referenceTargetType)) {
                             const auto converted=ExprEvaluator::castReferenceValue(actual,
@@ -21300,7 +21354,7 @@ DBStatus StorageEngine::alterTableAlterColumnType(const std::string& dbname,
                 ExprValue actual(referenceSourceType,*it->second,false);
                 if(sourceReference) {
                     const auto catalog=regtype_detail::metadata(*this,dbname);
-                    actual=stored_regtype_detail::load(*it->second,false,false,catalog,currentSession());
+                    actual=stored_regtype_detail::load(*it->second,false,false,catalog,currentSession(),{},referenceSourceType);
                 }
                 const auto converted=ExprEvaluator::castReferenceValue(actual,
                     referenceSourceType,referenceTargetType,*this,dbname);
@@ -21308,7 +21362,7 @@ DBStatus StorageEngine::alterTableAlterColumnType(const std::string& dbname,
             } catch(...) {lockManager_.unlock(tablename);throw;}
         } else if(sourceReference && referenceStringTarget) {
             const auto catalog=regtype_detail::metadata(*this,dbname);
-            it->second=stored_regtype_detail::output(*it->second,false,catalog,currentSession());
+            it->second=stored_regtype_detail::output(*it->second,false,catalog,currentSession(),referenceSourceType);
         } else if (target.storageCodec == Column::StorageCodec::TemporalMicros) {
             std::string canonical;
             std::string temporalInput = *it->second;
@@ -21332,6 +21386,25 @@ DBStatus StorageEngine::alterTableAlterColumnType(const std::string& dbname,
             lockManager_.unlock(tablename);
             return DBStatus::INVALID_VALUE;
         }
+    }
+
+    // Identity type changes also change the actual owned generator. All old
+    // row conversions have passed; SQL DDL's surrounding snapshot owns both
+    // declarations if a subsequent physical rewrite cannot complete.
+    if (identityTypeOid) {
+        try {
+            const auto sequenceOid = tbl.cols[colIdx].identitySequenceOid;
+            if (!sequenceOid) throw DbError("0A000","legacy anonymous identity type changes require migration");
+            const auto catalog = catalogService_->acquire(dbname);
+            const auto sequence = catalog->getClass(sequenceOid);
+            const auto space = sequence ? catalog->getNamespace(sequence->relnamespace) : std::nullopt;
+            if (!sequence || sequence->relkind != 'S' || !space)
+                throw DbError("XX001","identity type change lost its sequence binding");
+            SequenceInfo change;change.dataTypeOid = identityTypeOid;change.dataTypeSpecified = true;
+            const auto status = alterSequence(dbname,sequenceStorageName(space->nspname,sequence->relname),change);
+            if (status == DBStatus::INVALID_VALUE) throw DbError("22023","sequence bounds do not fit the identity column type");
+            if (status != DBStatus::OK) {lockManager_.unlock(tablename);return status;}
+        } catch (...) {lockManager_.unlock(tablename);throw;}
     }
 
     // 3. Swap the column's type fields; preserve its name + constraints.
@@ -21435,8 +21508,8 @@ DBStatus StorageEngine::alterTableAlterColumnType(const std::string& dbname,
             std::map<std::string, std::string> stored;
             std::set<std::string> nulls;
             splitSqlRow(values, stored, nulls);
-            status = insertInternal(dbname, tablename, stored, nulls, nullptr, IdentityOverride::None);
-        } else status = insertRow(dbname, tablename, values);
+            status = insertInternal(dbname, tablename, stored, nulls, nullptr, IdentityOverride::System);
+        } else status = insertRow(dbname, tablename, values, nullptr, IdentityOverride::System);
         if (status != DBStatus::OK) return status;
     }
 
@@ -22672,11 +22745,18 @@ DBStatus StorageEngine::alterTableDropDefault(const std::string& dbname,
 }
 
 DBStatus StorageEngine::alterTableIdentity(const std::string& dbname,
+    const std::string& tablename, const std::string& colName,
+    const std::string& action, char identityKind, bool ifExists) {
+    return alterTableIdentity(dbname, tablename, colName, action, identityKind, ifExists, 0);
+}
+
+DBStatus StorageEngine::alterTableIdentity(const std::string& dbname,
                                             const std::string& tablename,
                                             const std::string& colName,
                                             const std::string& action,
                                             char identityKind,
-                                            bool ifExists) {
+                                            bool ifExists,
+                                            uint32_t identitySequenceOid) {
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     if (!lockManager_.lockMetadata(tablename)) return DBStatus::LOCK_CONFLICT;
 
@@ -22702,6 +22782,7 @@ DBStatus StorageEngine::alterTableIdentity(const std::string& dbname,
         }
         column.identityKind = 0;
         column.isAutoIncrement = false;
+        column.identitySequenceOid = 0;
     } else if (action == "set") {
         if (column.identityKind == 0 ||
             (identityKind != 'a' && identityKind != 'd')) {
@@ -22724,7 +22805,8 @@ DBStatus StorageEngine::alterTableIdentity(const std::string& dbname,
         }
         column.identityKind = identityKind;
         column.isAutoIncrement = true;
-        initializeSequence = true;
+        column.identitySequenceOid = identitySequenceOid;
+        initializeSequence = identitySequenceOid == 0;
     } else {
         lockManager_.unlock(tablename);
         return DBStatus::INVALID_ARGUMENT;
@@ -25019,6 +25101,7 @@ static constexpr const char* SEQUENCE_FILE_V2 = "DBMSSEQ2";
 static constexpr const char* SEQUENCE_FILE_V3 = "DBMSSEQ3";
 static constexpr const char* SEQUENCE_FILE_V4 = "DBMSSEQ4";
 static constexpr const char* SEQUENCE_FILE_V5 = "DBMSSEQ5";
+static constexpr const char* SEQUENCE_FILE_V6 = "DBMSSEQ6";
 static constexpr const char* SEQUENCE_RUNTIME_DIRECTORY = ".sequence_runtime";
 
 struct SequenceCallState {
@@ -25169,7 +25252,9 @@ static bool parseSequenceInt64(const std::string& token, int64_t& value) {
 // returned", which made non-cycling sequences repeat their final value.
 // V4 encodes ownership strings so quoted whitespace cannot shift token
 // boundaries. V5 separates the transactional declaration/storage generation
-// from its nontransactional allocation fork. Older files remain readable.
+// from its nontransactional allocation fork. V6 requires its own declared
+// integer type trailer; complete trailer removal cannot alias V5. Older
+// files retain their historically int8 generator semantics.
 static bool readSequenceFile(const std::filesystem::path& path,
                              dbms::SequenceInfo& info,
                              int64_t& nextValue,
@@ -25183,7 +25268,8 @@ static bool readSequenceFile(const std::filesystem::path& path,
     if (!(ifs >> firstToken)) return false;
 
     const bool version4 = firstToken == SEQUENCE_FILE_V4;
-    const bool version5 = firstToken == SEQUENCE_FILE_V5;
+    const bool version6 = firstToken == SEQUENCE_FILE_V6;
+    const bool version5 = firstToken == SEQUENCE_FILE_V5 || version6;
     std::string generation;
     const bool version3 = firstToken == SEQUENCE_FILE_V3;
     const bool version2 = firstToken == SEQUENCE_FILE_V2;
@@ -25293,6 +25379,16 @@ static bool readSequenceFile(const std::filesystem::path& path,
             }
         }
     }
+    uint32_t dataTypeOid = 20;
+    if (version6) {
+        std::string marker, rawType;
+        uint32_t parsedType = 0;
+        if (!(ifs >> marker >> rawType) || marker != "SEQTYPE1") return false;
+        const auto parsed = std::from_chars(rawType.data(),rawType.data()+rawType.size(),parsedType);
+        if (parsed.ec != std::errc{} || parsed.ptr != rawType.data()+rawType.size() ||
+            !SequenceInfo::validDataType(parsedType)) return false;
+        dataTypeOid = parsedType;
+    }
     ifs.clear();
     std::string extra;
     if (ifs >> extra) return false;
@@ -25308,7 +25404,9 @@ static bool readSequenceFile(const std::filesystem::path& path,
     if (cycleFlag != 0 && cycleFlag != 1) return false;
     if (increment == 0 || minValue > maxValue ||
         start < minValue || start > maxValue || cache < 1 ||
-        next < minValue || next > maxValue) {
+        next < minValue || next > maxValue ||
+        minValue < SequenceInfo::typeMinimum(dataTypeOid) ||
+        maxValue > SequenceInfo::typeMaximum(dataTypeOid)) {
         return false;
     }
     if (last < minValue || last > maxValue) {
@@ -25336,6 +25434,8 @@ static bool readSequenceFile(const std::filesystem::path& path,
     info.minValue = minValue;
     info.maxValue = maxValue;
     info.cache = cache;
+    info.dataTypeOid = dataTypeOid;
+    info.hasStoredType = version6;
     info.cycle = cycleFlag != 0;
     info.hasMinValue = minExplicit != 0;
     info.hasMaxValue = maxExplicit != 0;
@@ -25366,6 +25466,9 @@ static bool writeSequenceFile(const std::filesystem::path& path,
                               bool exhausted = false,
                               std::string generation = {},
                               const SequenceCallState* suppliedCallState = nullptr) {
+    if (!SequenceInfo::validDataType(info.dataTypeOid) ||
+        info.minValue < SequenceInfo::typeMinimum(info.dataTypeOid) ||
+        info.maxValue > SequenceInfo::typeMaximum(info.dataTypeOid)) return false;
     if (generation.empty()) generation = UuidValue::generateV4().toString();
     SequenceCallState initial;
     if (!suppliedCallState) {
@@ -25377,7 +25480,8 @@ static bool writeSequenceFile(const std::filesystem::path& path,
     if (!writeSequenceRuntime(path, generation, nextValue, lastAllocated, exhausted, suppliedCallState))
         return false;
     std::ostringstream serialized;
-    serialized << SEQUENCE_FILE_V5 << " "
+    const bool typed = info.hasStoredType || info.dataTypeSpecified || info.dataTypeOid != 20;
+    serialized << (typed ? SEQUENCE_FILE_V6 : SEQUENCE_FILE_V5) << " "
                << info.start << " "
                << info.increment << " "
                << info.minValue << " "
@@ -25391,7 +25495,9 @@ static bool writeSequenceFile(const std::filesystem::path& path,
                << (exhausted ? 1 : 0) << " "
                << generation << " "
                << encodeSequenceOwnedField(info.ownedByTable) << " "
-               << encodeSequenceOwnedField(info.ownedByColumn) << "\n";
+               << encodeSequenceOwnedField(info.ownedByColumn);
+    if (typed) serialized << " SEQTYPE1 " << info.dataTypeOid;
+    serialized << "\n";
     return index_file::writeAtomically(path, serialized.str());
 }
 
@@ -25485,6 +25591,7 @@ DBStatus StorageEngine::createSequence(const std::string& dbname,
     std::lock_guard<std::mutex> lock(g_sequenceMutex);
     if (std::filesystem::exists(path)) return DBStatus::TABLE_ALREADY_EXISTS;
     if (info.increment == 0) return DBStatus::INVALID_VALUE;
+    if (!SequenceInfo::validDataType(info.dataTypeOid)) return DBStatus::INVALID_VALUE;
     dbms::SequenceInfo applied = info;
     applied.applyDefaults();
     if (!info.startSpecified && info.start == 1) {
@@ -25493,10 +25600,15 @@ DBStatus StorageEngine::createSequence(const std::string& dbname,
     }
     if (applied.minValue > applied.start || applied.start > applied.maxValue)
         return DBStatus::INVALID_VALUE;
+    if (applied.minValue < SequenceInfo::typeMinimum(applied.dataTypeOid) ||
+        applied.maxValue > SequenceInfo::typeMaximum(applied.dataTypeOid))
+        return DBStatus::INVALID_VALUE;
     if (applied.cache < 1) return DBStatus::INVALID_VALUE;
-    int64_t nextValue = applied.start;
+    int64_t nextValue = applied.restartSpecified
+        ? (applied.restartValueSpecified ? applied.restart : applied.start) : applied.start;
+    if (nextValue < applied.minValue || nextValue > applied.maxValue) return DBStatus::INVALID_VALUE;
     int64_t lastAllocated = 0;
-    sequencePredecessor(applied.start, applied.increment, lastAllocated);
+    sequencePredecessor(nextValue, applied.increment, lastAllocated);
     if (!writeSequenceFile(path, applied, nextValue, lastAllocated))
         return DBStatus::IO_ERROR;
     return DBStatus::OK;
@@ -25535,6 +25647,15 @@ DBStatus StorageEngine::alterSequence(const std::string& dbname,
         return DBStatus::INVALID_VALUE;
 
     dbms::SequenceInfo merged = old;
+    if (info.dataTypeSpecified) {
+        if (!SequenceInfo::validDataType(info.dataTypeOid)) return DBStatus::INVALID_VALUE;
+        merged.dataTypeOid = info.dataTypeOid;
+        merged.hasStoredType = true;
+        if (old.minValue == SequenceInfo::typeMinimum(old.dataTypeOid))
+            merged.minValue = SequenceInfo::typeMinimum(merged.dataTypeOid);
+        if (old.maxValue == SequenceInfo::typeMaximum(old.dataTypeOid))
+            merged.maxValue = SequenceInfo::typeMaximum(merged.dataTypeOid);
+    }
     if (info.startSpecified) {
         merged.start = info.start;
     }
@@ -25545,12 +25666,12 @@ DBStatus StorageEngine::alterSequence(const std::string& dbname,
     if (info.hasMinValue) { merged.minValue = info.minValue; merged.hasMinValue = true; merged.noMinValue = false; }
     if (info.noMinValue) {
         merged.noMinValue = true; merged.hasMinValue = false;
-        merged.minValue = merged.increment > 0 ? 1 : -std::numeric_limits<int64_t>::max();
+        merged.minValue = merged.increment > 0 ? 1 : SequenceInfo::typeMinimum(merged.dataTypeOid);
     }
     if (info.hasMaxValue) { merged.maxValue = info.maxValue; merged.hasMaxValue = true; merged.noMaxValue = false; }
     if (info.noMaxValue) {
         merged.noMaxValue = true; merged.hasMaxValue = false;
-        merged.maxValue = merged.increment > 0 ? std::numeric_limits<int64_t>::max() : -1;
+        merged.maxValue = merged.increment > 0 ? SequenceInfo::typeMaximum(merged.dataTypeOid) : -1;
     }
     if (info.cacheSpecified) merged.cache = info.cache;
     if (info.cycleSpecified) merged.cycle = info.cycle;
@@ -25560,6 +25681,9 @@ DBStatus StorageEngine::alterSequence(const std::string& dbname,
     }
 
     if (merged.minValue > merged.maxValue) return DBStatus::INVALID_VALUE;
+    if (merged.minValue < SequenceInfo::typeMinimum(merged.dataTypeOid) ||
+        merged.maxValue > SequenceInfo::typeMaximum(merged.dataTypeOid))
+        return DBStatus::INVALID_VALUE;
     if (merged.start < merged.minValue || merged.start > merged.maxValue) {
         return DBStatus::INVALID_VALUE;
     }
@@ -25597,7 +25721,7 @@ DBStatus StorageEngine::alterSequence(const std::string& dbname,
     if (merged.cache < 1) return DBStatus::INVALID_VALUE;
     // PG replaces storage for every option affecting future generation,
     // even if its value is unchanged. OWNED BY changes only metadata.
-    const bool rewrite = info.startSpecified || info.restartSpecified ||
+    const bool rewrite = info.dataTypeSpecified || info.startSpecified || info.restartSpecified ||
         info.incrementSpecified || info.hasMinValue || info.noMinValue ||
         info.hasMaxValue || info.noMaxValue || info.cacheSpecified || info.cycleSpecified;
     if (!writeSequenceFile(
@@ -25707,10 +25831,98 @@ DBStatus StorageEngine::getSequenceInfo(const std::string& dbname,
         ? DBStatus::OK : DBStatus::CORRUPTED_DATA;
 }
 
+std::optional<std::string> StorageEngine::serialSequenceName(
+    const std::string& dbname, const std::string& tableReference,
+    const std::string& columnName) const {
+    requireDatabaseTransactionOwnership(dbname);
+    CatalogManager::QualifiedName name;
+    if (!CatalogManager::parseQualifiedName(tableReference, name, true))
+        throw DbError("42602", "invalid relation name");
+    const Session* session = currentSession();
+    std::vector<std::string> path;
+    if (!name.schema.empty()) path.push_back(name.schema);
+    else {
+        std::string canonical;
+        if (!session || !parseSessionSearchPath(session->searchPath, path, canonical)) path = {"public"};
+        for (auto& entry : path)
+            if (session) entry = expandSessionSearchPathEntry(entry, session->username);
+        const bool explicitTemp = session && std::any_of(path.begin(), path.end(), [&](const auto& entry) {
+            return entry == "pg_temp" || entry == sessionTempSchemaName(*session);
+        });
+        if (std::find(path.begin(), path.end(), "pg_catalog") == path.end())
+            path.insert(path.begin(), "pg_catalog");
+        if (session && !explicitTemp) path.insert(path.begin(), sessionTempSchemaName(*session));
+    }
+    for (auto& entry : path)
+        if (entry == "pg_temp" && session) entry = sessionTempSchemaName(*session);
+    const auto catalog = catalogService_->acquire(dbname);
+    const auto relation = catalog->resolveRelationSnapshot(SQLParser::quoteIdentifier(name.name), path);
+    if (!relation) throw DbError("42P01", "relation does not exist: " + tableReference);
+    const auto attribute = catalog->getAttribute(relation->oid, columnName);
+    if (!attribute) throw DbError("42703", "column does not exist: " + columnName);
+    for (const auto& edge : catalog->findRefs(PgClassOid_Class, relation->oid, attribute->attnum)) {
+        if (edge.classid != PgClassOid_Class || edge.objsubid != 0 ||
+            edge.refclassid != PgClassOid_Class || edge.refobjsubid != attribute->attnum ||
+            (edge.deptype != 'a' && edge.deptype != 'i')) continue;
+        const auto sequence = catalog->getClass(edge.objid);
+        if (sequence && sequence->relkind == 'S') {
+            const auto ns = catalog->getNamespace(sequence->relnamespace);
+            if (session && ns && sequence->relpersistence == 't' &&
+                ns->nspname == sessionTempSchemaName(*session))
+                return "pg_temp." + SQLParser::quoteIdentifier(sequence->relname);
+            return identitySequenceName(dbname, sequence->oid);
+        }
+    }
+    return std::nullopt;
+}
+
+std::string StorageEngine::identitySequenceName(const std::string& dbname,
+                                                uint32_t sequenceOid) const {
+    if (sequenceOid == 0) throw DbError("XX001", "identity sequence has no catalog identity");
+    requireDatabaseTransactionOwnership(dbname);
+    if (!catalogService_) throw DbError("XX001", "identity sequence catalog is unavailable");
+    const auto catalog = catalogService_->acquire(dbname);
+    const auto sequence = catalog->getClass(sequenceOid);
+    if (!sequence || sequence->relkind != 'S')
+        throw DbError("XX001", "identity sequence catalog identity is missing");
+    const auto schema = catalog->getNamespace(sequence->relnamespace);
+    if (!schema) throw DbError("XX001", "identity sequence namespace is missing");
+    return SQLParser::quoteIdentifier(schema->nspname) + "." +
+        SQLParser::quoteIdentifier(sequence->relname);
+}
+
 int64_t StorageEngine::nextval(const std::string& dbname,
                                 const std::string& seqname) {
-    const ResolvedSequenceReference resolved =
-        resolveSequenceReference(*this, dbname, seqname);
+    return nextvalWithIdentity(dbname, seqname, 0);
+}
+
+int64_t StorageEngine::nextIdentityValue(const std::string& dbname, uint32_t sequenceOid) {
+    return nextvalWithIdentity(dbname, identitySequenceName(dbname, sequenceOid), sequenceOid);
+}
+
+int64_t StorageEngine::nextvalWithIdentity(const std::string& dbname,
+                                          const std::string& seqname,
+                                          uint32_t expectedOid) {
+    const ResolvedSequenceReference resolved = expectedOid == 0
+        ? resolveSequenceReference(*this, dbname, seqname)
+        : [&] {
+            // Embedded INSERT has no SQL session. Resolve its persisted OID
+            // through this engine's real catalog; the legacy native name
+            // resolver deliberately has no catalog OID in that context.
+            requireDatabaseTransactionOwnership(dbname);
+            const auto catalog = catalogService_->acquire(dbname);
+            const auto sequence = catalog->getClass(expectedOid);
+            const auto ns = sequence ? catalog->getNamespace(sequence->relnamespace) : std::nullopt;
+            if (!sequence || sequence->relkind != 'S' || !ns)
+                throw DbError("XX001", "identity sequence catalog binding is missing");
+            const auto name = SQLParser::quoteIdentifier(ns->nspname) + "." +
+                SQLParser::quoteIdentifier(sequence->relname);
+            if (normalizeRegclassText(seqname) != normalizeRegclassText(name))
+                throw DbError("XX001", "identity sequence name refers to a different catalog object");
+            return ResolvedSequenceReference{sequence->oid,
+                sequenceStorageName(ns->nspname, sequence->relname), seqname,
+                sequence->relpersistence};
+        }();
     if (resolved.persistence == 't') noteTemporaryObjectAccess(dbname);
     if (transactionContext().inTransaction &&
         transactionContext().readOnly && resolved.persistence != 't') {
@@ -26252,7 +26464,7 @@ StorageEngine::PredicateTruth StorageEngine::compareValues(
         return result ? PredicateTruth::True : PredicateTruth::False;
     };
 
-    if (!col.isArray && col.dataType == "regtype") {
+    if (!col.isArray && stored_regtype_detail::scalarType(col.dataType)) {
         const Oid l = stored_regtype_detail::rawOid(left);
         const Oid r = stored_regtype_detail::rawOid(right);
         return fromCompare((l > r) - (l < r));
@@ -26499,7 +26711,7 @@ bool StorageEngine::evalConditionOnRowWithSyntax(const Condition& cond,
         }
         Condition bound = cond;
         const std::string comparison = cond.op.substr(9);
-        const bool referenceColumn=column && !column->isArray && column->dataType=="regtype";
+        const bool referenceColumn=column && !column->isArray && stored_regtype_detail::scalarType(column->dataType);
         if (!numericColumn && !referenceColumn && (column || cond.colName.find('(') != std::string::npos)) {
             // Compact API values have historically been decoded literals.
             // Text "1+2" and date "2024-01-01" must not become arithmetic.
@@ -26788,7 +27000,7 @@ bool StorageEngine::evalConditionOnRowWithSyntax(const Condition& cond,
             return false;
         }
     }
-    if (!col.isArray && col.dataType=="regtype" &&
+    if (!col.isArray && stored_regtype_detail::scalarType(col.dataType) &&
         (cond.op=="=" || cond.op=="<>" || cond.op=="!=" || cond.op=="<" ||
          cond.op==">" || cond.op=="<=" || cond.op==">=")) {
         std::string right=cond.referenceInputOid?std::to_string(*cond.referenceInputOid):
@@ -26799,7 +27011,7 @@ bool StorageEngine::evalConditionOnRowWithSyntax(const Condition& cond,
             if(!valueEngine || valueDb.empty())
                 throw DbError("0A000","regtype name predicate requires its actual database context");
             const auto catalog=regtype_detail::metadata(*valueEngine,valueDb);
-            right=stored_regtype_detail::input(right,false,catalog,currentSession());
+            right=stored_regtype_detail::input(right,false,catalog,currentSession(),col.dataType);
         }
         return compareValues(col,val,false,right,false,cond.op)==PredicateTruth::True;
     }
@@ -27356,7 +27568,7 @@ static std::string buildRowBuffer(const TableSchema& tbl,
                 uint8_t bytes[8] = {0};
                 if (!val.empty()) normalizeMacAddr(val, n, bytes);
                 std::memcpy(&rowBuffer[offset], bytes, n);
-            } else if (col.dataType == "regtype" && !col.isArray) {
+            } else if (stored_regtype_detail::scalarType(col.dataType) && !col.isArray) {
                 const uint32_t oid = val.empty() ? 0 : stored_regtype_detail::rawOid(val);
                 std::memcpy(&rowBuffer[offset], &oid, sizeof(oid));
             } else if (col.dataType == "boolean") {
@@ -27385,7 +27597,7 @@ static std::string buildRowBuffer(const TableSchema& tbl,
             std::string val = (it != values.end()) ? it->second : "";
             if (columnIsNull(i)) val.clear();
             if (col.isVariableLength) {
-                size_t maxLen = col.isArray && col.dataType != "regtype" ? 1024 :
+                size_t maxLen = col.isArray && !stored_regtype_detail::scalarType(col.dataType) ? 1024 :
                     characterColumnByteLimit(col);
                 if (val.size() > maxLen) val.resize(maxLen);
                 varDataList.push_back(val);
@@ -27443,7 +27655,7 @@ static std::string buildRowBuffer(const TableSchema& tbl,
                     std::memcpy(&fixedData[fixedOff], &x, sizeof(double));
                     std::memcpy(&fixedData[fixedOff + sizeof(double)], &y,
                                 sizeof(double));
-                } else if (col.dataType == "regtype" && !col.isArray) {
+                } else if (stored_regtype_detail::scalarType(col.dataType) && !col.isArray) {
                     const uint32_t oid = val.empty() ? 0 : stored_regtype_detail::rawOid(val);
                     std::memcpy(&fixedData[fixedOff], &oid, sizeof(oid));
                 } else if (col.dataType == "boolean") {
@@ -27787,7 +27999,9 @@ DBStatus StorageEngine::insertRow(const std::string& dbname,
                                    const SqlRow& sqlValues,
                                    std::vector<SqlRow>* insertedRows,
                                    IdentityOverride identityOverride,
-                                OwningMutationRows* owningRows, bool deferVirtualInputs) {
+                                OwningMutationRows* owningRows, bool deferVirtualInputs,
+                                SqlRow* conflictingRow) {
+    if (conflictingRow) conflictingRow->clear();
     const auto ownershipStatus = ensureDatabaseTransactionOwnership(dbname);
     if (ownershipStatus != DBStatus::OK) return ownershipStatus;
     std::map<std::string, std::string> values;
@@ -27820,12 +28034,12 @@ DBStatus StorageEngine::insertRow(const std::string& dbname,
         } else {
             return insertInternal(
                 dbname, tablename, values, nullColumns, insertedRows,
-                identityOverride,owningRows,deferVirtualInputs);
+                identityOverride,owningRows,deferVirtualInputs,conflictingRow);
         }
         if (usesLegacyPartitionRoute) {
             const DBStatus status = insertInternal(
                 dbname, tablename, values, nullColumns, insertedRows,
-                identityOverride,owningRows,deferVirtualInputs);
+                identityOverride,owningRows,deferVirtualInputs,conflictingRow);
             if (status != DBStatus::OK && insertedRows) {
                 insertedRows->resize(returnedRowStart);
             }
@@ -27838,7 +28052,7 @@ DBStatus StorageEngine::insertRow(const std::string& dbname,
         try {
         const DBStatus insertStatus = insertInternal(
             dbname, tablename, values, nullColumns, insertedRows,
-            identityOverride,owningRows,deferVirtualInputs);
+            identityOverride,owningRows,deferVirtualInputs,conflictingRow);
         if (insertStatus != DBStatus::OK) {
             const DBStatus rollbackStatus = rollbackTransaction();
             if (insertedRows) insertedRows->resize(returnedRowStart);
@@ -27881,7 +28095,7 @@ DBStatus StorageEngine::insertRow(const std::string& dbname,
     try {
     const DBStatus insertStatus =
         insertInternal(dbname, tablename, values, nullColumns, insertedRows,
-                       identityOverride,owningRows,deferVirtualInputs);
+                       identityOverride,owningRows,deferVirtualInputs,conflictingRow);
     if (insertStatus != DBStatus::OK) {
         DBStatus rollbackStatus = DBStatus::OK;
         if (transactionContext().inTransaction && hasStatementSavepoint) {
@@ -27940,7 +28154,8 @@ DBStatus StorageEngine::insertInternal(
                                 const std::set<std::string>& nullColumns,
                                 std::vector<SqlRow>* insertedRows,
                                 IdentityOverride identityOverride,
-                                OwningMutationRows* owningRows, bool deferVirtualInputs) {
+                                OwningMutationRows* owningRows, bool deferVirtualInputs,
+                                SqlRow* conflictingRow) {
     noteTemporaryRelationAccess(dbname, tablename);
     if (transactionContext().inTransaction && dbname == transactionContext().txnDB) {
         if ((transactionContext().txnIsolationLevel == IsolationLevel::READ_COMMITTED ||
@@ -28072,7 +28287,7 @@ DBStatus StorageEngine::insertInternal(
             bool computedNull = false;
             if (evalExpressionSqlValue(col.defaultValue, actualValues,
                                        typeHints, dbname, computed,
-                                       computedNull, nullptr, this, col.dataType=="regtype")) {
+                                       computedNull, nullptr, this, stored_regtype_detail::scalarType(col.dataType))) {
                 actualValues[col.dataName] = computed;
                 if (computedNull) actualNullColumns.insert(col.dataName);
                 else actualNullColumns.erase(col.dataName);
@@ -28090,10 +28305,16 @@ DBStatus StorageEngine::insertInternal(
         if (!col.isAutoIncrement) continue;
         auto it = actualValues.find(col.dataName);
         if (it != actualValues.end()) continue;
-        int64_t nextVal = readNextSeq(dbname, tablename, col.dataName);
-        actualValues[col.dataName] = std::to_string(nextVal);
-        actualNullColumns.erase(col.dataName);
-        writeNextSeq(dbname, tablename, col.dataName, nextVal + 1);
+        if (col.identitySequenceOid != 0) {
+            actualValues[col.dataName] = std::to_string(
+                nextIdentityValue(dbname, col.identitySequenceOid));
+            actualNullColumns.erase(col.dataName);
+        } else {
+            const int64_t nextVal = readNextSeq(dbname, tablename, col.dataName);
+            actualValues[col.dataName] = std::to_string(nextVal);
+            actualNullColumns.erase(col.dataName);
+            writeNextSeq(dbname, tablename, col.dataName, nextVal + 1);
+        }
     }
 
     // Canonicalize packed POINT values before uniqueness/index checks.  The
@@ -28419,11 +28640,11 @@ DBStatus StorageEngine::insertInternal(
         // The NULL marker encodes SQL NULL; type validations below must not
         // try to parse it as a value.
         if (isNullMarker) val.clear();
-        if (hasValue && !isNullMarker && col.dataType == "regtype") {
+        if (hasValue && !isNullMarker && stored_regtype_detail::scalarType(col.dataType)) {
             try {
                 const auto catalog = regtype_detail::metadata(*this, dbname);
                 actualValues[col.dataName] = stored_regtype_detail::input(
-                    val, col.isArray, catalog, currentSession());
+                    val, col.isArray, catalog, currentSession(), col.dataType);
                 val = actualValues[col.dataName];
             } catch (...) {
                 lockManager_.unlock(tablename);
@@ -28800,7 +29021,7 @@ DBStatus StorageEngine::insertInternal(
         bool computedNull = false;
         if (!evalExpressionSqlValue(col.generatedExpr, actualValues,
                                     typeHints, dbname, computed,
-                                    computedNull, nullptr, this, col.dataType=="regtype", &tbl)) {
+                                    computedNull, nullptr, this, stored_regtype_detail::scalarType(col.dataType), &tbl)) {
             lockManager_.unlock(tablename);
             return DBStatus::INVALID_VALUE;
         }
@@ -28838,6 +29059,20 @@ DBStatus StorageEngine::insertInternal(
 
     const DBStatus uniqueStatus = validateFinalUniqueKeys();
     if (uniqueStatus != DBStatus::OK) {
+        if (uniqueStatus == DBStatus::DUPLICATE_KEY && conflictingRow) {
+            // EXCLUDED observes the actual candidate after DEFAULT/identity,
+            // BEFORE triggers, stored generation and input normalization.
+            // Capture only this rejected candidate; it is not an inserted or
+            // RETURNING row, and no value is regenerated after rollback.
+            for (size_t i = 0; i < tbl.len; ++i) {
+                const auto& column = tbl.cols[i];
+                if (column.generatedKind == 'v') continue;
+                const auto found = actualValues.find(column.dataName);
+                (*conflictingRow)[column.dataName] =
+                    found == actualValues.end() || actualNullColumns.count(column.dataName)
+                        ? SqlCell{} : SqlCell{found->second};
+            }
+        }
         lockManager_.unlock(tablename);
         return uniqueStatus;
     }
@@ -30331,11 +30566,11 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
             if(tbl.cols[i].dataName==condition.colName)declared=&tbl.cols[i];
             if(!condition.decodedLiteralRhs && tbl.cols[i].dataName==condition.value)rightIsColumn=true;
         }
-        if(declared && !rightIsColumn && !declared->isArray && declared->dataType=="regtype") {
+        if(declared && !rightIsColumn && !declared->isArray && stored_regtype_detail::scalarType(declared->dataType)) {
             const auto catalog=regtype_detail::metadata(*this,dbname);
             condition.value=condition.referenceInputOid?std::to_string(*condition.referenceInputOid):
                 stored_regtype_detail::input(
-                    decodeSqlLiteral(condition.value),false,catalog,currentSession());
+                    decodeSqlLiteral(condition.value),false,catalog,currentSession(),declared->dataType);
             condition.decodedLiteralRhs=true;
         }
     }
@@ -32264,12 +32499,12 @@ DBStatus StorageEngine::updateInternal(
                         return DBStatus::INVALID_VALUE;
                     }
                     std::string storeVal = kv.second;
-                    if (col.dataType == "regtype" && !isNullMarker) {
+                    if (stored_regtype_detail::scalarType(col.dataType) && !isNullMarker) {
                         const auto catalog = regtype_detail::metadata(*this, dbname);
                         storeVal = stored_regtype_detail::input(
-                            kv.second, col.isArray, catalog, currentSession());
+                            kv.second, col.isArray, catalog, currentSession(), col.dataType);
                     }
-                    if (col.dataType == "regtype") {
+                    if (stored_regtype_detail::scalarType(col.dataType)) {
                         // Already canonicalized once by the actual input owner.
                     } else if (col.storageCodec == Column::StorageCodec::TemporalMicros) {
                         if (!normalizeTemporalColumn(col, kv.second, storeVal)) return DBStatus::INVALID_VALUE;
@@ -32447,7 +32682,7 @@ DBStatus StorageEngine::updateInternal(
                             }
                         }
                     }
-                    const size_t maxLength = col.isArray && col.dataType != "regtype" &&
+                    const size_t maxLength = col.isArray && !stored_regtype_detail::scalarType(col.dataType) &&
                         !character_column::varying(col) ? 1024 :
                         characterColumnByteLimit(col);
                     if (col.isArray && character_column::varying(col)) {
@@ -32761,7 +32996,7 @@ DBStatus StorageEngine::updateInternal(
             bool assignsNull = false;
             if (!evalExpressionSqlValue(
                     col.generatedExpr, rowValues, updateTypeHints, dbname,
-                    computed, assignsNull, nullptr, this, col.dataType=="regtype", &tbl)) {
+                    computed, assignsNull, nullptr, this, stored_regtype_detail::scalarType(col.dataType), &tbl)) {
                 lockManager_.unlock(tablename);
                 return DBStatus::INVALID_VALUE;
             }
@@ -32910,7 +33145,7 @@ DBStatus StorageEngine::updateInternal(
                 bool assignsNull = false;
                 if (!evalExpressionSqlValue(
                         col.generatedExpr, rowValues, updateTypeHints2,
-                        dbname, computed, assignsNull, nullptr, this, col.dataType=="regtype", &tbl)) {
+                        dbname, computed, assignsNull, nullptr, this, stored_regtype_detail::scalarType(col.dataType), &tbl)) {
                     lockManager_.unlock(tablename);
                     return DBStatus::INVALID_VALUE;
                 }
@@ -33135,7 +33370,7 @@ DBStatus StorageEngine::updateInternal(
                 bool computedNull = false;
                 if (!evalExpressionSqlValue(
                         column.generatedExpr, rowValues, updateTypeHints,
-                        dbname, computed, computedNull, nullptr, this, column.dataType=="regtype", &tbl)) {
+                        dbname, computed, computedNull, nullptr, this, stored_regtype_detail::scalarType(column.dataType), &tbl)) {
                     lockManager_.unlock(tablename);
                     return DBStatus::INVALID_VALUE;
                 }
@@ -35247,6 +35482,33 @@ std::shared_ptr<const analyzed_statistics::Column> StorageEngine::getAnalyzedCol
     }
 }
 
+std::vector<std::vector<ExprValue>> StorageEngine::getSequenceCatalogRows(const std::string& dbname) const {
+    const auto ownership=catalogReadOwnership(dbname);
+    if(!ownership.mayReadCurrentFiles)throw DbError("55P03","sequence catalog read conflicts with an active database writer");
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
+    const auto metadata=catalogService_->metadataSnapshot(dbname);
+    sequence_catalog::validateReadDeclaration(metadata);
+    std::map<Oid,std::string> namespaces;
+    for(const auto& row:metadata.namespaces)namespaces.emplace(row.oid,row.nspname);
+    std::vector<std::vector<ExprValue>> rows;
+    for(const auto& relation:metadata.relations) {
+        if(relation.relkind!='S')continue;
+        checkForQueryInterrupt();
+        const auto space=namespaces.find(relation.relnamespace);
+        if(space==namespaces.end())throw DbError("XX001","sequence catalog namespace is missing");
+        SequenceInfo info;
+        if(getSequenceInfo(dbname,sequenceStorageName(space->second,relation.relname),info)!=DBStatus::OK)
+            throw DbError("XX001","sequence catalog declaration cannot be read");
+        if(!SequenceInfo::validDataType(info.dataTypeOid))throw DbError("XX001","invalid persisted sequence type");
+        rows.push_back({ExprValue("oid",std::to_string(relation.oid)),
+            ExprValue("oid",std::to_string(info.dataTypeOid)),ExprValue("bigint",std::to_string(info.start)),
+            ExprValue("bigint",std::to_string(info.increment)),ExprValue("bigint",std::to_string(info.maxValue)),
+            ExprValue("bigint",std::to_string(info.minValue)),ExprValue("bigint",std::to_string(info.cache)),
+            ExprValue("boolean",info.cycle?"t":"f")});
+    }
+    return rows;
+}
+
 // Full database-owned pg_stats source. The separate eight-column native
 // compatibility renderer below retains its existing public API and storage.
 std::vector<std::vector<ExprValue>> StorageEngine::getAnalyzedStatisticsRows(const std::string& dbname) const {
@@ -36683,7 +36945,7 @@ std::string preparedPrimitiveInputType(const std::string& spelling) {
 }
 
 void validatePreparedPrimitiveInput(const QueryOutputColumn& target, const Expr* source,
-    const std::string& database) {
+    const std::string& database,StorageEngine* owner) {
     if (!source || source->preparedSubquery) return;
     const LiteralExpr* input = nullptr;
     if (!target.name.empty()) {
@@ -36713,7 +36975,7 @@ void validatePreparedPrimitiveInput(const QueryOutputColumn& target, const Expr*
     if(array)regtypeSpelling.resize(regtypeSpelling.size()-2);
     CatalogManager::QualifiedName regtypeName;
     if(CatalogManager::parseQualifiedName(regtypeSpelling,regtypeName,true) &&
-       regtypeName.name=="regtype" && (regtypeName.schema.empty() || regtypeName.schema=="pg_catalog"))
+       stored_regtype_detail::scalarType(regtypeName.name) && (regtypeName.schema.empty() || regtypeName.schema=="pg_catalog"))
         type=ExprHelper::canonicalResultTypeName(ExprHelper::declaredTypeInput(target.type,database));
     if (type.empty()) return;
     CastExpr conversion;
@@ -36723,6 +36985,7 @@ void validatePreparedPrimitiveInput(const QueryOutputColumn& target, const Expr*
     conversion.typeName = type; // deliberately no ordinary typmod
     ExprEvaluator evaluator;
     evaluator.setCurrentDB(database);
+    evaluator.bindScalarFunctions(&conversion,owner);
     (void)evaluator.eval(&conversion, RowContext{});
 }
 } // namespace
@@ -36960,8 +37223,8 @@ decltype(auto) StorageEngine::withQueryBindingMetadata(const std::string& dbname
                 QueryRelationMetadata description{schema, requested.name, {}, {}};
                 if (schema == "pg_catalog") {
                     static const std::map<std::string, QueryRowDescriptor> virtualTables = {
-                        {"pg_class", {{"oid","oid"},{"relname","name"},{"relnamespace","oid"},
-                            {"relkind","\"char\""},{"relnatts","smallint"},{"relpersistence","\"char\""},{"relowner","oid"}}},
+                        {"pg_class", system_catalog::classDescriptor()},
+                        {"pg_attribute", system_catalog::attributeDescriptor()},
                         {"pg_namespace", ownedNamespaceCatalogDescriptor()},
                         {"pg_settings", {{"name","text"},{"setting","text"},{"unit","text"}}},
                         {"pg_stat_activity", {{"pid","integer"},{"datname","name"},{"usename","name"},{"state","text"},{"query","text"}}}
@@ -36978,6 +37241,8 @@ decltype(auto) StorageEngine::withQueryBindingMetadata(const std::string& dbname
                         (tableExists(dbname,requested.name) || viewExists(dbname,requested.name));
                     if (found != virtualTables.end() && !physicalShadow) {
                         description.columns = found->second;
+                        if(requested.name=="pg_class")system_catalog::validateRead(catalog,1259,"pg_class",83,273,class_catalog::fields,31);
+                        if(requested.name=="pg_attribute")system_catalog::validateRead(catalog,1249,"pg_attribute",75,270,system_catalog::attributeFields,20);
                         for(auto& column:description.columns) {
                             column.typeOid=mapBuiltinTypeNameToOid(column.type);
                             if(column.typeOid)column.typeMetadata=metadata.datumType(column.type,column.typeOid);
@@ -37033,6 +37298,10 @@ decltype(auto) StorageEngine::withQueryBindingMetadata(const std::string& dbname
                         description.columns.push_back({attribute.attname, typeName,
                             attribute.attgenerated != '\0', attribute.attidentity, attribute.atttypid, attribute.atttypmod,
                             physicalDatum(attribute)});
+                    }
+                    if(schema=="pg_catalog" && relation.relname=="pg_sequence") {
+                        sequence_catalog::validateReadDeclaration(catalog);
+                        return description;
                     }
                     if(schema=="pg_catalog" && relation.relname=="pg_stats") {
                         if(relation.relkind!='v' || description.columns.size()!=analyzed_statistics::fields.size())
@@ -37508,7 +37777,31 @@ decltype(auto) StorageEngine::withQueryBindingMetadata(const std::string& dbname
         metadata.assignmentInput = [&](const QueryOutputColumn& target,
                                       const Expr* source, const std::string& sourceType) {
             validateAssignmentInput(target, source, sourceType);
-            validatePreparedPrimitiveInput(target, source, dbname);
+            validatePreparedPrimitiveInput(target, source, dbname,const_cast<StorageEngine*>(this));
+        };
+        metadata.identityDefault = [&](const std::string& schema,const std::string& name,
+                                       const std::string& column)->std::optional<uint32_t> {
+            if (const_cast<StorageEngine*>(this)->resolveMaterializedView(dbname,schema,name))
+                return std::nullopt;
+            const auto* session = currentSession();
+            const bool temporary = session && (schema == sessionTempSchemaName(*session) || schema == "pg_temp");
+            const auto physical = temporary ? tempTablePrefix(*session,name)
+                : (schema.empty() || schema == "public") ? name : schema + "__" + name;
+            if (!tableExists(dbname,physical)) return std::nullopt;
+            const auto table = getTableSchema(dbname,physical);
+            for (size_t i=0;i<table.len;++i) if (table.cols[i].dataName == column) {
+                const auto& target = table.cols[i];
+                if (target.identityKind == 0) return std::nullopt;
+                if (!target.identitySequenceOid)
+                    throw DbError("0A000", "legacy anonymous identity default requires migration");
+                if (!catalogSnapshot) catalogSnapshot = catalogService_->metadataSnapshot(dbname);
+                const auto sequence = std::find_if(catalogSnapshot->relations.begin(),catalogSnapshot->relations.end(),
+                    [&](const auto& relation) { return relation.oid == target.identitySequenceOid && relation.relkind == 'S'; });
+                if (sequence == catalogSnapshot->relations.end())
+                    throw DbError("XX001", "identity default sequence catalog binding is missing");
+                return target.identitySequenceOid;
+            }
+            throw DbError("XX001", "identity default target column is missing");
         };
         metadata.updateDefault = [&](const std::string& schema,const std::string& name,
                                      const std::string& column)->std::optional<std::string> {
@@ -38343,7 +38636,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                     if(!isNull && tbl.cols[i].generatedKind!='v' &&
                        stored_regtype_detail::columnType(tbl.cols[i].dataType)) {
                         const auto catalog=regtype_detail::metadata(*engine,dbname);
-                        value=stored_regtype_detail::output(value,tbl.cols[i].isArray,catalog,currentSession());
+                        value=stored_regtype_detail::output(value,tbl.cols[i].isArray,catalog,currentSession(),tbl.cols[i].dataType);
                     }
                     return value;
                 }
@@ -42729,7 +43022,7 @@ std::vector<std::string> StorageEngine::queryExpr(
                         if(actual!=outputDatumMetadata->columns.end())actualDeclaration=actual->second;
                     }
                     storedReference=stored_regtype_detail::load(val,tbl.cols[i].isArray,valueIsNull,
-                        catalog,currentSession(),std::move(actualDeclaration));
+                        catalog,currentSession(),std::move(actualDeclaration),tbl.cols[i].dataType);
                     val=storedReference->value;
                 }
                 if(options.owningDeclarations && outputDatumMetadata) {

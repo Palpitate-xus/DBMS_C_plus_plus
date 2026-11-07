@@ -1,6 +1,11 @@
+#include "catalog/SystemAttributeDeclaration.h"
+#include "catalog/BuiltinTypeProperties.h"
+#include "catalog/SystemCatalogCollation.h"
 #include "catalog/CatalogService.h"
 #include "catalog/PgStatsCatalog.h"
 #include "catalog/PgClassCatalog.h"
+#include "catalog/PgSequenceCatalog.h"
+#include "catalog/SystemCatalogDeclaration.h"
 #include "commands/CreatedDatabaseCatalog.h"
 #include "process/StatsPersistence.h"
 #include "commands/TableManage.h"
@@ -9,6 +14,7 @@
 #include "common/DbError.h"
 #include "access/IndexFileUtil.h"
 #include <filesystem>
+#include <fstream>
 #include <stdexcept>
 #include <fcntl.h>
 #include <unistd.h>
@@ -146,9 +152,48 @@ std::shared_ptr<CatalogManager> loadOwnedCatalog(
         throw DbError("58030", "cannot inspect namespace catalog bootstrap state");
     auto catalog = std::make_shared<CatalogManager>(directory.string(), false);
     catalog->bootstrapSystemNamespaces();
+    const bool publishedTypeProperties=builtin_type_properties::published(directory);
+    if(publishedTypeProperties)(void)catalog->bootstrapBuiltinTypeProperties(true);
     catalog->bootstrapSystemTypes();
+    const bool initializedTypeProperties=!publishedTypeProperties && catalog->bootstrapBuiltinTypeProperties(false);
+    const bool publishedCatalogCollations=system_catalog_collation::published(directory);
+    const bool initializedCatalogCollations=catalog->bootstrapSystemCatalogCollations(publishedCatalogCollations);
+    const auto systemMarker=directory/".owned_system_catalog_version";
+    constexpr char systemVersion[]="DBMS_SYSTEM_CATALOG_DECLS1\n";
+    struct stat systemStatus{};
+    const bool publishedSystemCatalog=::lstat(systemMarker.c_str(),&systemStatus)==0;
+    if(!publishedSystemCatalog && errno!=ENOENT)throw DbError("58030","cannot inspect system catalog version");
+    if(publishedSystemCatalog) {
+        if(!S_ISREG(systemStatus.st_mode) || systemStatus.st_size!=sizeof(systemVersion)-1)
+            throw DbError("XX001","invalid system catalog version");
+        std::ifstream input(systemMarker,std::ios::binary);
+        if(!input)throw DbError("58030","cannot read system catalog version");
+        const std::string bytes((std::istreambuf_iterator<char>(input)),std::istreambuf_iterator<char>());
+        if(input.bad() || bytes!=systemVersion || !catalog->getClass(PgClassOid_Class))
+            throw DbError("XX001","invalid published system catalog declaration");
+    }
     const bool initializedClassCatalog=class_catalog::bootstrapRelation(*catalog);
+    const bool initializedOwnedCatalogs=system_catalog::bootstrapRelations(*catalog,publishedSystemCatalog);
+    const auto sequenceMarker=directory/".sequence_catalog_version";
+    constexpr char sequenceVersion[]="DBMS_PG_SEQUENCE_CATALOG1\n";
+    struct stat markerStatus{};
+    const bool publishedSequenceCatalog=::lstat(sequenceMarker.c_str(),&markerStatus)==0;
+    if(!publishedSequenceCatalog && errno!=ENOENT)
+        throw DbError("58030","cannot inspect sequence catalog version");
+    if(publishedSequenceCatalog) {
+        if(!S_ISREG(markerStatus.st_mode) || markerStatus.st_size!=sizeof(sequenceVersion)-1)
+            throw DbError("XX001","invalid sequence catalog version");
+        std::ifstream input(sequenceMarker,std::ios::binary);
+        if(!input)throw DbError("58030","cannot read sequence catalog version");
+        const std::string bytes((std::istreambuf_iterator<char>(input)),std::istreambuf_iterator<char>());
+        if(input.bad() || bytes!=sequenceVersion)
+            throw DbError("XX001","invalid sequence catalog version");
+    }
+    const bool initializedSequenceCatalog=sequence_catalog::bootstrapRelation(*catalog,publishedSequenceCatalog);
     const bool initializedStatisticsView=analyzed_statistics::bootstrapView(*catalog);
+    const bool publishedSystemAttributes=system_attributes::published(directory);
+    const bool initializedSystemAttributes=catalog->bootstrapSystemAttributes(publishedSystemAttributes);
+    (void)catalog->bootstrapSystemCatalogCollations(true);
     // Some legitimate server cluster scaffolds already have tlist.lst and
     // auth metadata, but no namespace catalog. A newly bootstrapped logical
     // public namespace must have the same checked physical marker as CREATE
@@ -173,8 +218,23 @@ std::shared_ptr<CatalogManager> loadOwnedCatalog(
         }
     }
     migrateLegacyPublicDottedSequences(engine, database, *catalog);
-    if((initializedClassCatalog || initializedStatisticsView) && !catalog->persistAll())
+    if((initializedClassCatalog || initializedOwnedCatalogs || initializedSequenceCatalog || initializedStatisticsView || initializedSystemAttributes || initializedTypeProperties || initializedCatalogCollations || !publishedTypeProperties || !publishedCatalogCollations) && !catalog->persistAll())
         throw DbError("58030","could not publish initialized system view identities");
+    if(!publishedSequenceCatalog &&
+       index_file::writeAtomicallyNoReplace(sequenceMarker,sequenceVersion)!=index_file::WriteResult::OK)
+        throw DbError("58030","could not publish sequence catalog version");
+    if(!publishedSystemCatalog &&
+       index_file::writeAtomicallyNoReplace(systemMarker,systemVersion)!=index_file::WriteResult::OK)
+        throw DbError("58030","could not publish system catalog version");
+    if(!publishedSystemAttributes && index_file::writeAtomicallyNoReplace(directory/".system_attribute_version",
+       system_attributes::version)!=index_file::WriteResult::OK)
+        throw DbError("58030","could not publish system attribute version");
+    if(!publishedTypeProperties && index_file::writeAtomicallyNoReplace(directory/".builtin_type_properties_version",
+       builtin_type_properties::version)!=index_file::WriteResult::OK)
+        throw DbError("58030","could not publish builtin type property version");
+    if(!publishedCatalogCollations && index_file::writeAtomicallyNoReplace(directory/".system_catalog_collation_version",
+       system_catalog_collation::version)!=index_file::WriteResult::OK)
+        throw DbError("58030","could not publish system catalog collation version");
     return catalog;
 }
 }

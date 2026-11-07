@@ -60,6 +60,10 @@ struct Column {
     // factories retain Legacy; never infer microseconds from an 8-byte slot.
     enum class StorageCodec : uint8_t { Legacy = 0, TemporalMicros = 1 };
     StorageCodec storageCodec = StorageCodec::Legacy;
+    // Stable catalog identity for SQL identity sequences. Zero preserves the
+    // legacy native/schema counter; never infer a sequence from its name.
+    uint32_t identitySequenceOid = 0;
+
 
     void print() const;
 };
@@ -88,14 +92,30 @@ struct SequenceInfo {
     bool cycleSpecified = false;  // true when CYCLE or NO CYCLE was written
     bool ownedBySpecified = false; // true when OWNED BY was written
 
+    // Persisted sequence declaration, independent of its owner column.
+    // Old declarations were int8 generators. The request flag is transient.
+    uint32_t dataTypeOid = 20;
+    bool dataTypeSpecified = false;
+    bool hasStoredType = false; // V6; preserves an explicit int8 declaration on rewrites
+    static bool validDataType(uint32_t oid) { return oid == 20 || oid == 21 || oid == 23; }
+    static int64_t typeMinimum(uint32_t oid) {
+        return oid == 21 ? std::numeric_limits<int16_t>::min() :
+            oid == 23 ? std::numeric_limits<int32_t>::min() : std::numeric_limits<int64_t>::min();
+    }
+    static int64_t typeMaximum(uint32_t oid) {
+        return oid == 21 ? std::numeric_limits<int16_t>::max() :
+            oid == 23 ? std::numeric_limits<int32_t>::max() : std::numeric_limits<int64_t>::max();
+    }
+
     // Compute PG-compatible defaults based on increment direction.
     void applyDefaults() {
         if (increment > 0) {
             if (!hasMinValue) minValue = 1;
-            if (!hasMaxValue) maxValue = std::numeric_limits<int64_t>::max();
+            if (!hasMaxValue) maxValue = typeMaximum(dataTypeOid);
         } else if (increment < 0) {
             if (!hasMaxValue) maxValue = -1;
-            if (!hasMinValue) minValue = -std::numeric_limits<int64_t>::max();
+            if (!hasMinValue) minValue = dataTypeSpecified || dataTypeOid != 20
+                ? typeMinimum(dataTypeOid) : -std::numeric_limits<int64_t>::max();
         }
     }
 };

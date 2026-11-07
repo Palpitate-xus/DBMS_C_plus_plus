@@ -68,12 +68,18 @@ public:
     static std::vector<std::string> tokenize(const std::string& sql);
     // Complete SQL type envelope, retaining quoted/qualified type identities.
     static ColumnDef parseTypeSpecification(const std::string& sql);
+    // Ordered grammar values only; duplicate/type/value validation belongs
+    // to the declaration owner and never evaluates a generator.
+    static bool parseSequenceParameterList(const std::vector<std::string>& tokens,
+        size_t& position,std::vector<std::pair<std::string,std::string>>& options);
     static bool isKeyword(const std::string& s);
     // PG identifier output: ASCII lexical safety, keyword category and doubled quotes.
     // This renders one identifier; it does not parse a qualified name or SQL literal.
     static std::string quoteIdentifier(const std::string& value);
 
 private:
+    bool parseIdentitySequenceOptions(const std::vector<std::string>& tokens,
+                                     size_t& pos, ColumnDef& column);
     static std::vector<std::string> tokenizeImpl(const std::string& sql, std::string* error);
     // 各命令类型的解析实现
     ParseResult parseSelect(const std::string& sql);

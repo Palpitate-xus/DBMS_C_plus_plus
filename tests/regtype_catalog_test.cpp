@@ -1,3 +1,4 @@
+#include "cold_catalog_fixture.h"
 #include "catalog/CatalogService.h"
 #include "catalog/declared_type.h"
 #include "catalog/systables.h"
@@ -22,7 +23,7 @@ int main() {
         require(resolveDeclaredTypeName("pg_catalog.regtype[]",&metadata,nullptr).typeOid==2211,mode+" array resolution");
     };
     const auto database=testDbPath("regtype_catalog");
-    require(g_engine.createDatabase(database)==DBStatus::OK,"create isolated database");
+    require(dbms::test::createColdCatalogFixture(g_engine,database),"create isolated database");
     CatalogManager::MetadataSnapshot cold;cold.types=CatalogManager::builtinTypeRows();cold.namespaces=CatalogManager::builtinNamespaceRows();
     check(cold,"cold");
     require(!g_engine.catalogService().has(database) && !std::filesystem::exists(g_engine.dbPath(database)/"pg_catalog"),"cold producer performs no cache/disk writes");

@@ -1,5 +1,35 @@
 # 数据库操作性能测试报告（2026-10-30）
 
+<!-- P43-D18 unaccepted draft checkpoint -->
+<a id="identity-sequence-catalog-draft-20261107"></a>
+
+## 2026-11-07 P43/D18：身份序列与目录草稿；正常性能 NOTRUN
+
+本节保存未接受的源代码版本检查点，不关闭功能项。候选为正常 CMake C++17/O2 `e04c8f13c99d8b7ae763d0088e709af43061d56a513a525075bd0bb4d0d32c1a`，相对父提交 `3e40567d2430` 改动39个生产路径，263个生产文件／192个头。默认安装程序仍为 `425165afe19d10ccf9be806c3052e9a09e3875a3826142d2949cde995fdf94d1`；没有默认升级、服务重启或推送。下方 P42 及更早结果保留各自历史口径。
+
+草稿包含身份列DEFAULT／冲突分配需求、序列类型参数、REGCLASS持有真实OID的存储／输出，以及实际目录声明和复制快照读取。新目录有32／25／34个正编号字段的真实声明，值生产者目前只覆盖PG_TYPE28／PG_ATTRIBUTE19／PG_CLASS30个字段；六个堆系统属性有真实存储元数据，不等于已经实现所有SQL系统列值。缺少生产者的字段仍拒绝，不合成短schema或虚构NULL。
+
+按[PG18目录定义](https://www.postgresql.org/docs/18/catalog-pg-attribute.html)和[固定版本genbki源码](https://raw.githubusercontent.com/postgres/postgres/724edf9bde9d356724ad384a2e196edc3c9f80f7/src/backend/catalog/genbki.pl)核对，已有110个内建类型的有限物理属性投影已匹配真实PG18.6；目录6个collatable字段使用C规则950，而普通用户字段与类型自身保留规则100。新启动拥有者只升级已识别的旧字段，完整预检后发布，版本化新目录对变更／损坏拒绝修复；纯冷读不替换旧数据。`pg_type`的来源表OID／字段编号来自实际绑定来源，CTE同名不被冒认为系统目录。
+
+| 验证 | 本批实际结果 | 边界 |
+| --- | --- | --- |
+| 原生 | 39个选定入口actual0；目录规则60项、类型属性50项通过 | full suite=false，不表示全库测试通过 |
+| 正式简单协议 | 身份冲突35条、目录9条；两个脚本及所拥有Main均actual0 | 不重开暂缓的prepared／portal／format策略或R312会话当前值调查 |
+| 主对照 | 1701条PG／D18观察；1979行、11185单元、208NULL、411247字节；48个正常Main；26577个闭库文件与1613个原生夹具文件核验 | 两个独立解码器检查完整值、NULL、T7、错误、NOTICE、tag、Ready；宽范围仍有真实功能和来源差异 |
+| 目录专项 | PG／D17／D18／实际D17旧库升级共67条SQL及1条版本控制；当前17条、升级后16条的全7字段T7和值／状态／tag／Ready匹配PG | D17原17条中的10处差异与2个CTE错误保留；仅为该有限投影和用例的闭环 |
+| 正常性能 | **NOTRUN**；未发布样本或提速数字 | 编译／验证器秒数不是数据库性能样本；P40／P41／P42正常窗口保持关闭，未重采 |
+
+原2405份测试中2399份逐字节不变，6份按实际PG契约改正预期或夹具设置：身份START10、4份合法旧冷目录构造、分别验证34个普通字段和6个真实系统字段。原始失败和旧版控制保留。新增14CPP／2Python／1头，共2422测试文件；注册686个唯一驱动／666份独立E2E通过库存核对。D14缺include编译失败、D15错误xid描述候选及其10个原生失败、D16／D17夹具失败、初版附加审计误把旧D17错误当采集失败的记录都保留，未放宽原始SQL／PG期望。当前D18选定原生首次执行均actual0。
+
+剩余工作仍包括REGCLASS默认早绑定和真实对象依赖、旧元素OID数组元数据／依赖迁移、用户序列3个正编号字段和完整缓存／WAL／恢复、含生成列的ALTER TYPE错误、拒绝CREATE后的空来源函数错误阶段，以及其余未实现目录字段／全行和非暂缓功能。273项状态22／166／70／15及292条原进展记录不变，不以本批通过数替代完整验收。
+
+压缩证据：[identity-sequence-catalog-draft-20261107.json.gz](benchmarks/identity-sequence-catalog-draft-20261107.json.gz)，4,824,208字节，SHA256 `867733bd7463a77de63c6c9feff48e476a507316d98b0e0d21d95bffea5f4ac0`；完整内层JSON 27,252,524字节／SHA256 `f2353535b666a6ffd771e7281635619212a2f508454343fc8fe01c4c80a378fb`。包含完整SQL计划、原始请求回复、全部解码模型、选定原生日志／冻结测试源码、两份独立解码器与校验器。数据库映像与ELF／对象本体仍为本机保留引用，归档只有相应文件清单／模式／大小／SHA，**不能作为可移植数据库备份还原**。可直接用gzip解码JSON并按 `files` 和 `blobs_base64_by_sha256` 复核内嵌内容。
+
+当前候选可用 `DBMS_MAIN=/绝对路径/已构建的dbms_main python3 tests/system_catalog_metadata_protocol_e2e_test.py` 重现9条正式用例；身份脚本为 `tests/identity_conflict_default_protocol_e2e_test.py`。普通 `cmake -S . -B build/review` 与 `cmake --build build/review -j2` 生成候选，测试时明确指定该程序；正常性能及完整P43验收仍待后续工作。
+
+上一轮215个已结束测试可执行文件已逐字节压缩／实际解压验证后归档，精确释放2,002,395,136分配字节；源码、原日志、失败映像、冻结核心和当前程序保留。现有53.45MiB原始报告继续以5.70MiB gzip保存，不改写Git历史。本批完整证据同样仅以gzip入库。
+
+
 <a id="no-effect-transaction-publication-20261107"></a>
 
 ## 2026-11-07 P42：无写入事务减少提交 WAL／CLOG 同步
