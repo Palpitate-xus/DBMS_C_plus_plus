@@ -409,6 +409,20 @@
       "payload_raw_bytes": 2675881552,
       "payload_raw_sha256": "440b2e83a13dc34bbe4818b48a3bbe621eb5150dcb54035507d00b65ad74699b",
       "scope": "P37 physical ordinary VACUUM reference safety; all1500 normal operations/114Main,3diagnostic profiles,original62 pair,fresh28PG/before/current; every prototype/TOAST failure and performance negative retained; partial, no overall/PG speed claim"
+    },
+    {
+      "original_path": "docs/benchmarks/scalar-text-logical-limit-20261107.json",
+      "original_bytes": 65246144,
+      "original_sha256": "3a1a417ba35293bc25870d3225749bfb61cf51b5eb6c6d392d75ae28eda2c6ec",
+      "path": "docs/benchmarks/scalar-text-logical-limit-20261107.json.gz",
+      "bytes": 49147970,
+      "sha256": "eeba9391c2f4be8b8624e4589879a5d8451ed984ba8f2584d25e9fe72d700cc1",
+      "encoding": "gzip",
+      "roundtrip_bytes_exact": true,
+      "payload_encoding": "base64+xz+json-content-addressed-v1",
+      "payload_raw_bytes": 3229936943,
+      "payload_raw_sha256": "f1eb2b7d95fb5052fee8b910a9211fb0362111801bd1c328be04a26632cd68ae",
+      "scope": "P38 scalar TEXT logical length; all1500 normal operations/114Main; original62 byteexact, exact original28 TEXT gaps resolved, fresh72 PG/before/current, ordinary old-schema controls and committed1MiB SIGKILL recovery; failed original FULL cold startup, legacy TOAST assertion and all negative performance retained; partial, no overall/PG speed claim"
     }
   ],
   "total_original_bytes": 1625701048,

@@ -1,5 +1,24 @@
 # 生产化状态
 
+<!-- P38 scalar-text-logical-limit begin -->
+<a id="scalar-text-logical-limit-current"></a>
+## 当前批次：标量TEXT容量（P38-C2）
+
+新增large_text_toast_test在同一冻结源码上形成33检查：旧版21失败／actual1，当前0失败／actual0。全字节覆盖65535、65536、70003、UTF-8 90012字节／30006字符、可压缩131076字节、随机1MiB、NULL、空串、文本NULL及类似marker的普通串；同时验证第二长字段100003字节、旧式和optional更新的完整返回值、事务回滚／提交、普通VACUUM、热态VACUUM FULL、TRUNCATE后重插1MiB，以及有界VARCHAR的字符数和尾空格约束。
+
+本批完整1500次正常计时没有证明全面提速。仅ID查询服务器CPU比旧版首测／回测高1.78%／1.86%；单长字段首次VACUUM CPU高10.98%／13.76%，墙钟高3.66%／9.08%。多长字段首次VACUUM墙钟低18.80%／高3.52%，CPU低0.33%／高3.27%，属于混合结果。全部负向、旧版漂移、首轮与长尾保留，原因OPEN；本批交付为TEXT容量修复，没有用局部结果宣称整体性能改善。
+
+10项相关原生测试在旧版与当前均actual0：vacuum_toast_test、parallel_vacuum_test、vacuum_page_lock_test、vacuum_full_test、bytea_large_toast_test、ordinary_project_toast_demand_test、sorted_projection_null_bitmap_cost_test、view_column_dependency_test、vacuum_toast_physical_reference_test、alter_column_toast_generation_test。旧版前9项使用既有相同源码／对象／ELF的真实终态，第10项重新执行；当前10项均本批执行。既有toast_test两版仍在第604行 `!corruptScan.open()` 断言中止（actual -6），后续检查NOTRUN，未改预期，full suite=false。
+
+新发现的普通VACUUM FULL／WAL恢复缺陷仍OPEN，属于下一项必须处理的非暂缓工作。原始旧模式22条矩阵，两版各完成初开16条并正常退出0；当前16条全值正确，但之后冷启动失败，两版各6条冷开SQL未运行。旧版首次观察器的cleanup断言遮蔽了已退出子进程的wait状态，因此其冷开actual exit未记录；修正观察器后只继续原先未启动的当前角色，实际冷开退出-6，未重跑或补写旧版状态。提前运行的独立审计也因缺少完整receipt实际退出1，失败保留。独立CRC32C核对定位LSN6784528的有效8192字节页镜像：cv_sig、物理身份3、旧块22；FULL后同身份的堆仅18页，重放拒绝跨越4页的缺口。CRC为0xd116b066，名义行宽0是合法format2而非本次原因。本批未修改恢复代码；需要正确的重写物理代次／恢复边界，不能靠忽略错误或无界补页关闭。实际失败快照和正常旧模式混合长值种子均保留在本地。
+
+完整证据压缩为[scalar-text-logical-limit-20261107.json.gz](benchmarks/scalar-text-logical-limit-20261107.json.gz)，49,147,970字节（46.87MiB），SHA256 `eeba9391c2f4be8b8624e4589879a5d8451ed984ba8f2584d25e9fe72d700cc1`；内层完整证据JSON为3,229,936,943字节。59,525个非ELF文件、2,157个目录、3,227个内容块、280个本地ELF引用均在清理前后独立核对。删除55,639个已逐字节归档的生成副本，逻辑文件量5,362,749,517字节（4.994GiB），不等同于独占文件系统释放量。保留源码、ELF、任务stdout/stderr、错误和失败页原始字节、目录、实际失败旧库及普通维护／1MiB长值正常闭库；外部P37 after-DELETE和P36 after-UPDATE种子不动。生成数据目录中的dbms.log副本保存在归档中，旧38个压缩包不动。首轮64MiB字典压缩得到75,818,006字节，被49MiB上限拦截而actual1，没有写入Git或清理数据；512MiB字典得到51,533,706字节，低于GitHub的50MiB建议但仍高于本地49MiB保护线，同样未写入Git或清理数据。两次失败记录已嵌入最终证据，最终使用1024MiB字典压缩完整内容。
+
+正式库存2399个测试文件（1132顶层／1137总C++），注册E2E684／独立E2E664不变。754个Markdown路径、725份保护记录保持，8份既有文档只插入本批说明。原273项、22 complete／166 partial／70 unverified／15 deferred_by_user不变，既有287条历史保持并新增partial第288条，IDX-07仍unverified/evidence[]。
+
+只修复标量TEXT逻辑容量限制，未关闭整个TYPE／STO功能族；大VARCHAR、原62条协议差异、SQL子分区、既有TOAST断言、普通FULL恢复故障及所有历史负向性能继续OPEN。执行图／child-provider生命周期、retained planning／portal、CPU-sort interrupt和用户明确暂缓的故障矩阵保持暂缓；普通FULL恢复没有归入暂缓范围。Goal active，直接master分批提交，未推送或替换默认程序。正常CMake C++17/O2最终C2为84bbadb4，旧版56aad0c0，更早30412452，默认425165af不变。C2只澄清一行注释，真实重新编译后61个对象和完整ELF均与已执行功能测试的C1逐字节一致，保存该复用证明，没有重采功能样本。 [完整报告](performance-report-2026-10-30.md#scalar-text-logical-limit-20261107)。
+<!-- P38 scalar-text-logical-limit end -->
+
 <!-- P37 vacuum-physical-references begin -->
 <a id="vacuum-physical-references-current"></a>
 ## 当前批次：普通VACUUM引用安全（P37-C1）

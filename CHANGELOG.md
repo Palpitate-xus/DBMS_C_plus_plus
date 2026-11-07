@@ -1,5 +1,18 @@
 # Changelog
 
+<!-- P38 scalar-text-logical-limit begin -->
+<a id="scalar-text-logical-limit-current"></a>
+## 2026-11-07：解开标量TEXT逻辑值与名义堆宽度
+
+修复标量TEXT把持久化名义宽度65535误当逻辑值上限的问题：统一的字符字节限制函数对非数组TEXT使用1,073,741,819字节上限，并让旧式UPDATE校验也使用该函数。既有TOAST读回、插入和行构造因此一致处理完整长值；表结构dsize仍为65535，内联引用和存储格式不变。实际验证到1MiB，未进行接近1GiB的端到端容量验证。旧数据可由新程序读取；旧程序不能读取新写入的超64KiB TEXT，不能据此承诺降级后的值兼容。
+
+新增large_text_toast_test在同一冻结源码上形成33检查：旧版21失败／actual1，当前0失败／actual0。全字节覆盖65535、65536、70003、UTF-8 90012字节／30006字符、可压缩131076字节、随机1MiB、NULL、空串、文本NULL及类似marker的普通串；同时验证第二长字段100003字节、旧式和optional更新的完整返回值、事务回滚／提交、普通VACUUM、热态VACUUM FULL、TRUNCATE后重插1MiB，以及有界VARCHAR的字符数和尾空格约束。
+
+本批完整1500次正常计时没有证明全面提速。仅ID查询服务器CPU比旧版首测／回测高1.78%／1.86%；单长字段首次VACUUM CPU高10.98%／13.76%，墙钟高3.66%／9.08%。多长字段首次VACUUM墙钟低18.80%／高3.52%，CPU低0.33%／高3.27%，属于混合结果。全部负向、旧版漂移、首轮与长尾保留，原因OPEN；本批交付为TEXT容量修复，没有用局部结果宣称整体性能改善。
+
+另发现旧／新均存在的普通FULL恢复缺陷，未关闭；273项状态不变，新增partial历史288。[完整报告](docs/performance-report-2026-10-30.md#scalar-text-logical-limit-20261107)。
+<!-- P38 scalar-text-logical-limit end -->
+
 <!-- P37 vacuum-physical-references begin -->
 <a id="vacuum-physical-references-current"></a>
 ## 2026-11-07：使用所属物理元组识别TOAST引用

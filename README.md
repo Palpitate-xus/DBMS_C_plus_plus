@@ -1,5 +1,20 @@
 # DBMS C++
 
+<!-- P38 scalar-text-logical-limit begin -->
+<a id="scalar-text-logical-limit-current"></a>
+## 2026-11-07：TEXT长值容量修复
+
+修复标量TEXT把持久化名义宽度65535误当逻辑值上限的问题：统一的字符字节限制函数对非数组TEXT使用1,073,741,819字节上限，并让旧式UPDATE校验也使用该函数。既有TOAST读回、插入和行构造因此一致处理完整长值；表结构dsize仍为65535，内联引用和存储格式不变。实际验证到1MiB，未进行接近1GiB的端到端容量验证。旧数据可由新程序读取；旧程序不能读取新写入的超64KiB TEXT，不能据此承诺降级后的值兼容。
+
+新增33检查旧版21失败／当前0失败；完整1MiB TEXT已通过提交后强杀恢复与读回。
+
+本批完整1500次正常计时没有证明全面提速。仅ID查询服务器CPU比旧版首测／回测高1.78%／1.86%；单长字段首次VACUUM CPU高10.98%／13.76%，墙钟高3.66%／9.08%。多长字段首次VACUUM墙钟低18.80%／高3.52%，CPU低0.33%／高3.27%，属于混合结果。全部负向、旧版漂移、首轮与长尾保留，原因OPEN；本批交付为TEXT容量修复，没有用局部结果宣称整体性能改善。
+
+普通VACUUM FULL后旧页镜像重放失败仍待修复，未扩大功能完成承诺。用户指出的analyze-reindex-main-costs-20261104原始JSON为56,047,459字节（53.45MiB），当前Git使用5,977,159字节（5.70MiB）的.json.gz保存完整内容，manifest记录原始SHA及逐字节解压验证。原始大JSON不再跟踪，忽略规则拦截后续同目录原始JSON（小manifest除外）；保留压缩证据用于复核实际耗时和错误，未重写历史提交。
+
+[完整测试与性能证据](docs/performance-report-2026-10-30.md#scalar-text-logical-limit-20261107)；Goal active。
+<!-- P38 scalar-text-logical-limit end -->
+
 <!-- P37 vacuum-physical-references begin -->
 <a id="vacuum-physical-references-current"></a>
 ## 2026-11-07：VACUUM长字段数据安全修复

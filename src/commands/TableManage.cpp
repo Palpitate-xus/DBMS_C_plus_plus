@@ -1164,9 +1164,16 @@ static bool variableBlankPaddedCharacterColumn(const Column& column) {
 }
 
 static size_t characterColumnByteLimit(const Column& column) {
+    if (!column.isArray && column.dataType == "text") {
+        // TEXT has no declared character width. Its persisted dsize is a
+        // historical nominal heap width, not the length of a logical TOAST
+        // value. Match PostgreSQL's MaxAllocSize minus the varlena header;
+        // keep the existing schema and compact inline references unchanged.
+        return (size_t{1} << 30) - 1 - sizeof(uint32_t);
+    }
     if (!varyingCharacterColumn(column) &&
         !variableBlankPaddedCharacterColumn(column)) return column.dsize;
-    // The row/TOAST representation still caps character values at 64 KiB.
+    // The existing bounded CHAR/VARCHAR path still has a 64 KiB byte cap.
     // Four bytes per declared character covers valid UTF-8 code points.
     return std::min(column.dsize * size_t(4), size_t(65535));
 }
@@ -32342,7 +32349,8 @@ DBStatus StorageEngine::updateInternal(
                             }
                         }
                     }
-                    const size_t maxLength = col.isArray && col.dataType != "regtype" ? 1024 : col.dsize;
+                    const size_t maxLength = col.isArray && col.dataType != "regtype" ? 1024 :
+                        characterColumnByteLimit(col);
                     if (varyingCharacterColumn(col) ||
                         variableBlankPaddedCharacterColumn(col)) {
                         size_t characters = 0;

@@ -1,5 +1,16 @@
 # 文档索引
 
+<!-- P38 scalar-text-logical-limit begin -->
+<a id="scalar-text-logical-limit-current"></a>
+## 当前批次：TEXT长值与完整性能报告
+
+本批完整1500次正常计时没有证明全面提速。仅ID查询服务器CPU比旧版首测／回测高1.78%／1.86%；单长字段首次VACUUM CPU高10.98%／13.76%，墙钟高3.66%／9.08%。多长字段首次VACUUM墙钟低18.80%／高3.52%，CPU低0.33%／高3.27%，属于混合结果。全部负向、旧版漂移、首轮与长尾保留，原因OPEN；本批交付为TEXT容量修复，没有用局部结果宣称整体性能改善。
+
+原28条SQL中3个确切TEXT缺口已修复；1MiB提交后强杀读回通过。普通FULL恢复缺陷、既有TOAST断言和SQL子分区仍OPEN。[测试报告](test-report.md#scalar-text-logical-limit-current)、[完整成本和归档](performance-report-2026-10-30.md#scalar-text-logical-limit-20261107)。
+
+正式库存2399个测试文件（1132顶层／1137总C++），注册E2E684／独立E2E664不变。754个Markdown路径、725份保护记录保持，8份既有文档只插入本批说明。原273项、22 complete／166 partial／70 unverified／15 deferred_by_user不变，既有287条历史保持并新增partial第288条，IDX-07仍unverified/evidence[]。
+<!-- P38 scalar-text-logical-limit end -->
+
 <!-- P37 vacuum-physical-references begin -->
 <a id="vacuum-physical-references-current"></a>
 ## 当前批次：VACUUM引用安全与完整成本
