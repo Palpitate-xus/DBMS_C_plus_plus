@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-11-07：DEFAULT 对象依赖（P43/D23，未接受草稿）
+
+- 增加独立的持久默认值身份、所属列自动依赖和真实对象常量正常依赖；SET DEFAULT更换身份，DROP DEFAULT／删列／删所属表清理对象，列压缩时重映射所属序号。
+- 绑定REGCLASS／REGTYPE常量及实际内建nextval参数，保留显式TEXT的运行期查找；选定RESTRICT／CASCADE、SERIAL、NULL默认值、回滚和冷读通过新回归。
+- 46项原生入口actual0、两份正式协议脚本通过，正常性能NOTRUN。原始大JSON仍仅跟踪gzip，另清理build冗余副本。[证据和未完项](docs/performance-report-2026-10-30.md#attribute-default-objects-draft-20261107)。
+
+
 <!-- P43-D20 unaccepted draft checkpoint -->
 ## 2026-11-07：旧物理数组目录与首次启动修复（P43/D20，草稿）
 

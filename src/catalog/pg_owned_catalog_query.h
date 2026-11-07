@@ -17,7 +17,7 @@ inline bool pgOwnedCatalogSourceCandidate(const Stmt* root) {
         if(item->type==FromItem::Type::Table) {
             CatalogManager::QualifiedName name;
             return CatalogManager::parseQualifiedName(item->tableName,name,true) &&
-                (name.name=="pg_class" || name.name=="pg_attribute" || name.name=="pg_type") && (name.schema.empty() || name.schema=="pg_catalog");
+                (name.name=="pg_class" || name.name=="pg_attribute" || name.name=="pg_type" || name.name=="pg_attrdef" || name.name=="pg_depend") && (name.schema.empty() || name.schema=="pg_catalog");
         }
         return statement(item->subquery.get(),depth+1) ||
             source(item->left.get(),depth+1) || source(item->right.get(),depth+1);
@@ -40,7 +40,7 @@ inline bool pgOwnedCatalogSourceCandidate(const Stmt* root) {
 
 inline bool ownsPgOwnedCatalogSource(const PreparedQuery& query) {
     for(const auto& range:query.sourceRanges)
-        if(range.relationSchema=="pg_catalog" && (range.relationName=="pg_class" || range.relationName=="pg_attribute" || range.relationName=="pg_type") &&
+        if(range.relationSchema=="pg_catalog" && (range.relationName=="pg_class" || range.relationName=="pg_attribute" || range.relationName=="pg_type" || range.relationName=="pg_attrdef" || range.relationName=="pg_depend") &&
            !range.cteStatement && !range.viewQuery)return true;
     return false;
 }

@@ -9,6 +9,7 @@
 #include "commands/DdlTransaction.h"
 #include "commands/DdlRewrite.h"
 #include "commands/SchemaNamespace.h"
+#include "commands/ColumnDefaultBinding.h"
 #include "commands/SequenceStorageName.h"
 #include "commands/IdentitySequenceOptions.h"
 #include "commands/SequenceParameters.h"
@@ -70,6 +71,13 @@ struct DdlSourceScope {
     DdlSourceScope(const Stmt* statement,const std::string& source) { ddlSourceIdentity={statement,&source}; }
     ~DdlSourceScope() { ddlSourceIdentity=prior; }
 };
+static std::string storedColumnDefault(const Expr* expression) {
+    if (!expression) return {};
+    if (ddlSourceIdentity.source && expression->sourceBegin != std::string::npos &&
+        expression->sourceBegin < expression->sourceEnd && expression->sourceEnd <= ddlSourceIdentity.source->size())
+        return ddlSourceIdentity.source->substr(expression->sourceBegin, expression->sourceEnd - expression->sourceBegin);
+    return expression->toString();
+}
 
 // Definition validation reads existing namespace facts. In particular it
 // must not fabricate public after a cold native DROP or bootstrap a catalog merely
@@ -1571,10 +1579,90 @@ static Oid registerViewInCatalog(
     return relationOid;
 }
 
+static column_default::Bound bindColumnDefault(CatalogManager& catalog,
+    const std::string& database, const std::string& expression, Oid type,
+    StorageEngine& engine, Session* session) {
+    std::unique_ptr<ExprEvaluator> resolver;
+    return column_default::bind(expression, type, catalog.metadataSnapshot(), session,
+        [&](const FunctionCallExpr* call) {
+            if (!resolver) { resolver = std::make_unique<ExprEvaluator>(); resolver->setCurrentDB(database); }
+            return resolver->scalarFunctionIdentity(call, &engine).rfind("builtin", 0) == 0;
+        });
+}
+
+static bool omitsNullColumnDefault(CatalogManager& catalog, const PgAttributeRow& attribute,
+                                   const column_default::Bound& bound) {
+    const auto type = catalog.getType(attribute.atttypid);
+    // A domain coercion is not a NULL Const: its constraints/default context
+    // still belong to the domain. Only a proven, ordinary NULL is omitted.
+    return bound.nullConstant && type && type->typtype != 'd';
+}
+
+static void clearColumnDefaultObject(CatalogManager& catalog, Oid relation, int16_t number) {
+    if (const auto previous = catalog.getAttrdefForColumn(relation, number)) {
+        if (!catalog.dropAttrdef(previous->oid)) throw DbError("XX001", "could not remove the prior default object");
+        return;
+    }
+    auto attributes = catalog.findUserAttributes(relation);
+    for (auto& attribute : attributes) if (attribute.attnum == number) attribute.atthasdef = false;
+    if (!catalog.replaceAttributes(relation, attributes)) throw DbError("XX001", "could not clear the NULL default flag");
+}
+
+static void synchronizeDefaultObjects(CatalogManager& catalog, const std::string& database,
+    const std::string& physicalName, Oid relationOid, const TableSchema& table,
+    StorageEngine& engine, Session* session, const std::set<std::string>& declared = {}) {
+    std::set<int16_t> present;
+    for (size_t i = 0; i < table.len; ++i) {
+        const auto& column = table.cols[i];
+        const auto number = static_cast<int16_t>(i + 1);
+        const bool generated = !column.generatedExpr.empty();
+        const bool explicitDefault = !column.defaultValue.empty() && column.defaultOrigin != Column::DefaultOrigin::Domain;
+        if (!generated && !explicitDefault) continue;
+        present.insert(number);
+        const auto previous = catalog.getAttrdefForColumn(relationOid, number);
+        const std::string expression = generated ? column.generatedExpr : column.defaultValue;
+        // An older database did not retain the declaration's lookup context.
+        // Do not guess its original object identity during unrelated ALTER.
+        if (!previous && !declared.count(column.dataName)) continue;
+        const auto attribute = catalog.getAttribute(relationOid, column.dataName);
+        if (!attribute || attribute->attnum != number) throw DbError("XX001", "default owner field changed while publishing");
+        PgAttrdefRow row; row.adrelid = relationOid; row.adnum = number;
+        std::vector<std::pair<Oid, Oid>> references;
+        if (previous && previous->expression == expression) {
+            row.expression = previous->expression; row.adbin = previous->adbin;
+            for (const auto& edge : catalog.findDepends(PgClassOid_Attrdef, previous->oid))
+                if (edge.deptype == 'n') references.emplace_back(edge.refclassid, edge.refobjid);
+        } else if (generated) {
+            // Generation programs retain their existing execution owner.
+            // Their complete expression dependency/PG-node compiler is a
+            // separate unfinished gate; do not reinterpret their SQL here.
+            row.expression = expression;
+        } else {
+            const auto bound = bindColumnDefault(catalog, database, expression, generated ? 0 : attribute->atttypid, engine, session);
+            if (omitsNullColumnDefault(catalog, *attribute, bound)) {
+                if (engine.alterTableDropDefault(database, physicalName, column.dataName) != DBStatus::OK)
+                    throw DbError("58030", "could not publish the NULL default");
+                clearColumnDefaultObject(catalog, relationOid, number);
+                continue;
+            }
+            row.expression = bound.expression; row.adbin = bound.adbin; references = bound.references;
+            if (bound.expression != expression) {
+                const auto status = engine.alterTableSetDefault(database, physicalName, column.dataName, bound.expression);
+                if (status != DBStatus::OK) throw DbError(sqlstateForDBStatus(status), "could not publish bound column default");
+            }
+        }
+        (void)catalog.storeAttrdef(row, references, false);
+    }
+    for (const auto& definition : catalog.findAttrdefs(relationOid))
+        if (!present.count(definition.adnum) && !catalog.dropAttrdef(definition.oid))
+            throw DbError("XX001", "could not remove obsolete attribute default");
+}
+
 static bool synchronizeTableAttributesInCatalog(
     const std::string& dbname, const std::string& physicalTableName,
     const std::map<std::string, int32_t>* declaredVarcharMods = nullptr,
-    StorageEngine& engine = g_engine, Oid actualRelation = INVALID_OID) {
+    StorageEngine& engine = g_engine, Oid actualRelation = INVALID_OID,
+    const std::set<std::string>& declaredDefaults = {}) {
     try {
         CatalogManager& catalog = engine.catalogService().get(dbname);
         const auto qualifiedName =
@@ -1636,6 +1724,8 @@ static bool synchronizeTableAttributesInCatalog(
         if (!catalog.replaceAttributes(relationOid, replacement)) {
             return false;
         }
+        synchronizeDefaultObjects(catalog, dbname, physicalTableName, relationOid, table,
+                                  engine, currentSession(), declaredDefaults);
         const auto updatedRelation = catalog.getClass(relationOid);
         if (!updatedRelation) return false;
         PgClassRow classReplacement = *updatedRelation;
@@ -2443,6 +2533,15 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                     std::cout << "Invalid column type: " << typeError << std::endl;
                     return true;
                 }
+                if (!column.defaultValue.empty() && column.defaultOrigin != Column::DefaultOrigin::Domain) {
+                    auto& catalog = g_engine.catalogService().get(s.currentDB);
+                    Oid type = column.domainName.empty() ? mapBuiltinTypeNameToOid(column.dataType) : INVALID_OID;
+                    if (column.isArray && type) {
+                        const auto declaration = catalog.getType(type);
+                        if (declaration && declaration->typcategory != 'A') type = declaration->typarray;
+                    }
+                    column.defaultValue = bindColumnDefault(catalog, s.currentDB, column.defaultValue, type, g_engine, &s).expression;
+                }
                 std::vector<PendingIdentitySequence> addedIdentity;
                 if (column.identityKind != 0) {
                     const auto existing = g_engine.getTableSchema(s.currentDB, tableName);
@@ -2487,7 +2586,7 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                     declaredVarcharMods[sub.colDef.name] = varcharModifier;
                 }
                 if (!synchronizeTableAttributesInCatalog(
-                        s.currentDB, tableName, &declaredVarcharMods)) {
+                        s.currentDB, tableName, &declaredVarcharMods, g_engine, INVALID_OID, {sub.colDef.name})) {
                     std::cout << "ALTER TABLE ADD COLUMN catalog update failed"
                               << std::endl;
                     return true;
@@ -2977,8 +3076,29 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                         // schema; it is not a persistent expression codec.
                         definition=ddlSourceIdentity.source->substr(begin,end-begin);
                     }
-                    status = g_engine.alterTableSetDefault(s.currentDB, tableName,
-                                                            sub.name, definition);
+                    auto& catalog = g_engine.catalogService().get(s.currentDB);
+                    const auto logical = CatalogService::logicalName(tableName);
+                    const auto relation = catalog.getClassByName(logical.name,
+                        catalog.getNamespaceByName(logical.schema.empty() ? "public" : logical.schema)
+                            .value_or(PgNamespaceRow{}).oid);
+                    const auto attribute = relation ? catalog.getAttribute(relation->oid, sub.name) : std::nullopt;
+                    std::optional<column_default::Bound> bound;
+                    if (attribute) {
+                        bound = bindColumnDefault(catalog, s.currentDB, definition, attribute->atttypid, g_engine, &s);
+                        definition = bound->expression;
+                    }
+                    const bool emptyDefault = bound && omitsNullColumnDefault(catalog, *attribute, *bound);
+                    status = emptyDefault
+                        ? g_engine.alterTableDropDefault(s.currentDB, tableName, sub.name)
+                        : g_engine.alterTableSetDefault(s.currentDB, tableName, sub.name, definition);
+                    if (status == DBStatus::OK && bound) {
+                        if (emptyDefault) clearColumnDefaultObject(catalog, relation->oid, attribute->attnum);
+                        else {
+                            PgAttrdefRow row; row.adrelid = relation->oid; row.adnum = attribute->attnum;
+                            row.expression = bound->expression; row.adbin = bound->adbin;
+                            (void)catalog.storeAttrdef(row, bound->references, true);
+                        }
+                    }
                 } else if (sub.dropDefault) {
                     status = g_engine.alterTableDropDefault(s.currentDB, tableName, sub.name);
                 } else if (sub.setNotNull) {
@@ -4927,7 +5047,7 @@ bool DdlExecutor::columnDefToColumn(const ColumnDef& cd, const std::string& dbna
     col.isPrimaryKey = cd.isPrimaryKey;
     col.isUnique = cd.isUnique;
     col.isArray = cd.isArray;
-    col.defaultValue = cd.defaultValue ? cd.defaultValue->toString() : "";
+    col.defaultValue = storedColumnDefault(cd.defaultValue.get());
 
     col.isAutoIncrement = cd.isGeneratedIdentity;
     col.identityKind = cd.identityKind;
@@ -5290,7 +5410,7 @@ bool DdlExecutor::columnDefToColumn(const ColumnDef& cd, const std::string& dbna
         col.typeMod = typeMod1;
 
     // Factory functions replace the whole Column; restore metadata they don't set.
-    col.defaultValue = cd.defaultValue ? cd.defaultValue->toString() : "";
+    col.defaultValue = storedColumnDefault(cd.defaultValue.get());
     col.defaultOrigin = cd.defaultValue ? Column::DefaultOrigin::Column : Column::DefaultOrigin::LegacyFrozen;
     col.generatedExpr = cd.generatedExpr;
     col.generatedKind = cd.generatedKind;
@@ -5700,9 +5820,20 @@ static std::vector<std::pair<std::string, std::string>> findDefaultNextvalDeps(
     const std::string canonicalTarget =
         canonicalSequenceReferenceName(seqname);
     std::vector<std::pair<std::string, std::string>> deps;
+    CatalogManager& catalog = engine.catalogService().get(dbname);
     for (const auto& tname : engine.getTableNames(dbname)) {
+        const auto logical = CatalogService::logicalName(tname);
+        const auto relation = catalog.resolveRelationSnapshot(
+            logical.name, {logical.schema.empty() ? "public" : logical.schema});
         dbms::TableSchema tbl = engine.getTableSchema(dbname, tname);
         for (size_t i = 0; i < tbl.len; ++i) {
+            const auto attribute = relation
+                ? catalog.getAttribute(relation->oid, tbl.cols[i].dataName)
+                : std::nullopt;
+            // An owned default has an actual expression dependency graph.
+            // In particular nextval('name'::text) is deliberately late bound
+            // and must not acquire a dependency from this legacy name scan.
+            if (attribute && catalog.getAttrdefForColumn(relation->oid, attribute->attnum)) continue;
             const std::string sequence =
                 extractNextvalSequence(tbl.cols[i].defaultValue);
             if (!sequence.empty() &&
@@ -5773,7 +5904,7 @@ static std::string serialNextvalDefault(const std::string& schema,
         literal += ch;
         if (ch == '\'') literal += '\'';
     }
-    return "nextval(" + literal + "')";
+    return "pg_catalog.nextval(" + literal + "'::pg_catalog.regclass)";
 }
 
 static PendingIdentitySequence createIdentityColumnSequence(
@@ -7043,6 +7174,21 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
     for (const auto& sequence : serialSequences) {
         if (executeCreateSequence(&sequence, s)) return true;
     }
+    try {
+        auto& catalog = g_engine.catalogService().get(s.currentDB);
+        const auto nameSpace = catalog.getNamespaceByName(targetSchema);
+        const auto relation = nameSpace ? catalog.getClassByName(targetName.name, nameSpace->oid) : std::nullopt;
+        if (!relation) throw DbError("XX001", "created default owner has no catalog identity");
+        const auto physical = g_engine.readPersistedSchemaForCatalog(s.currentDB, tname);
+        if (!physical) throw DbError("XX001", "created default owner has no physical schema");
+        std::set<std::string> declared;
+        for (size_t i = 0; i < physical->len; ++i) declared.insert(physical->cols[i].dataName);
+        synchronizeDefaultObjects(catalog, s.currentDB, tname, relation->oid, *physical, g_engine, &s, declared);
+        if (!catalog.persistAll()) throw DbError("58030", "could not persist column default objects");
+    } catch (const DbError& error) {
+        std::cout << "ERROR: " << error.what() << " (SQLSTATE " << error.sqlState() << ")" << std::endl;
+        return true;
+    }
     registerTemporaryTable();
     if (!txn.commit()) return true;
     std::cout << "CREATE TABLE succeeded" << std::endl;
@@ -7050,7 +7196,7 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
 }
 
 struct PhysicalCascadeAction {
-    enum class Kind { Table, Index, Sequence, View, MaterializedView };
+    enum class Kind { Table, Index, Sequence, View, MaterializedView, Default };
 
     Kind kind = Kind::Table;
     std::string name;
@@ -7237,8 +7383,36 @@ static bool buildPhysicalCascadeActions(
     Oid rootOid,
     const CatalogManager::DropPlan& plan,
     std::vector<PhysicalCascadeAction>& actions,
-    std::string& error) {
+    std::string& error,
+    Oid defaultRemovedWithColumn = INVALID_OID) {
     for (const auto& object : plan.objectsToDrop) {
+        if (object.first == PgClassOid_Attrdef) {
+            const auto definition = catalog.getAttrdef(object.second);
+            if (!definition) { error = "dependent attribute default is missing"; return false; }
+            // Its physical column was already removed by this DROP COLUMN;
+            // the combined catalog plan still owns removal of the object.
+            if (definition->oid == defaultRemovedWithColumn) continue;
+            if (std::find(plan.objectsToDrop.begin(), plan.objectsToDrop.end(),
+                std::make_pair(PgClassOid_Class, definition->adrelid)) != plan.objectsToDrop.end()) continue;
+            const auto owner = catalog.getClass(definition->adrelid);
+            const auto attributes = catalog.findAttributes(definition->adrelid);
+            const auto attribute = std::find_if(attributes.begin(), attributes.end(),
+                [&](const auto& row) { return row.attnum == definition->adnum; });
+            if (!owner || attribute == attributes.end() || attribute->attgenerated) {
+                error = "dependent default has no ordinary owning column"; return false;
+            }
+            std::string tableName;
+            if (!catalogTableStorageName(catalog, *owner, tableName, error)) return false;
+            const auto schema = engine.readPersistedSchemaForCatalog(dbname, tableName);
+            bool found = false;
+            if (schema) for (size_t i = 0; i < schema->len; ++i) if (schema->cols[i].dataName == attribute->attname) {
+                found = schema->cols[i].defaultValue == definition->expression;
+                break;
+            }
+            if (!found) { error = "dependent default differs from its physical column"; return false; }
+            actions.push_back({PhysicalCascadeAction::Kind::Default, attribute->attname, tableName, "", ""});
+            continue;
+        }
         if (object.first != PgClassOid_Class || object.second == rootOid) continue;
 
         const auto relation = catalog.getClass(object.second);
@@ -7338,6 +7512,10 @@ static bool dropPhysicalCascadeAction(StorageEngine& engine,
     } else if (action.kind ==
                PhysicalCascadeAction::Kind::MaterializedView) {
         status = engine.dropMaterializedView(dbname, action.name);
+    } else if (action.kind == PhysicalCascadeAction::Kind::Default) {
+        // The catalog plan removes the object afterwards. Synchronizing here
+        // would delete it early and invalidate that already checked plan.
+        return engine.alterTableDropDefault(dbname, action.tableName, action.name) == DBStatus::OK;
     } else {
         status = engine.dropIndexByAccessMethod(dbname, action.tableName,
                                                 action.key, action.accessMethod);
@@ -7509,6 +7687,7 @@ static bool dropOwnedSequencesForColumn(
     std::vector<Target> targets;
     std::set<Oid> targetOids;
     std::set<std::string> targetStorageNames;
+    const auto removedDefault = catalog.getAttrdefForColumn(tableOid, columnNumber);
     for (const auto& dependency :
          catalog.findRefs(PgClassOid_Class, tableOid, -1)) {
         if (dependency.classid != PgClassOid_Class ||
@@ -7573,12 +7752,14 @@ static bool dropOwnedSequencesForColumn(
                       << storageName << std::endl;
             return false;
         }
+        std::vector<std::pair<Oid, Oid>> roots{{PgClassOid_Class, target.oid}};
+        if (removedDefault) roots.emplace_back(PgClassOid_Attrdef, removedDefault->oid);
         target.catalogPlan = catalog.planDrop(
-            PgClassOid_Class, target.oid,
+            roots,
             cascade ? CatalogManager::DropBehavior::Cascade
                     : CatalogManager::DropBehavior::Restrict);
         if (!target.catalogPlan.ok()) {
-            std::cout << "ERROR: " << target.catalogPlan.error << std::endl;
+            std::cout << "ERROR: " << target.catalogPlan.error << " (SQLSTATE 2BP01)" << std::endl;
             return false;
         }
         targetOids.insert(target.oid);
@@ -7602,7 +7783,8 @@ static bool dropOwnedSequencesForColumn(
         std::string error;
         if (!buildPhysicalCascadeActions(
                 catalog, engine, dbname, target.oid,
-                target.catalogPlan, targetActions, error)) {
+                target.catalogPlan, targetActions, error,
+                removedDefault ? removedDefault->oid : INVALID_OID)) {
             std::cout << "ALTER TABLE DROP COLUMN dependency planning failed: "
                       << error << std::endl;
             return false;
@@ -9567,7 +9749,7 @@ bool DdlExecutor::executeDropSequence(const DropStmt* stmt, Session& s) {
                 findDefaultNextvalDeps(s.currentDB, storageName);
             if (!stmt->cascade && !target.defaultDependencies.empty()) {
                 std::cout << "ERROR: cannot drop sequence " << requestedName
-                          << " because other objects depend on it"
+                          << " because other objects depend on it (SQLSTATE 2BP01)"
                           << std::endl;
                 return true;
             }
@@ -9577,7 +9759,7 @@ bool DdlExecutor::executeDropSequence(const DropStmt* stmt, Session& s) {
                               : CatalogManager::DropBehavior::Restrict);
             if (!target.catalogPlan.ok()) {
                 std::cout << "ERROR: " << target.catalogPlan.error
-                          << std::endl;
+                          << " (SQLSTATE 2BP01)" << std::endl;
                 return true;
             }
             targets.push_back(std::move(target));
@@ -10340,6 +10522,31 @@ bool DdlExecutor::executeDropType(const DropStmt* stmt, Session& s) {
         targetType->typcategory == 'A' && elementType->typarray == targetType->oid)
         throw DbError("2BP01", "cannot drop an automatic array type independently of its element type");
 
+    CatalogManager::DropPlan defaultPlan;
+    std::set<std::pair<Oid, Oid>> defaultObjects;
+    if (targetType) {
+        std::vector<Oid> referencedTypes{targetType->oid};
+        if (targetType->typarray) referencedTypes.push_back(targetType->typarray);
+        for (const Oid referencedType : referencedTypes)
+            for (const auto& dependency : typeCatalogOwner->findRefs(PgClassOid_Type, referencedType, -1)) {
+                if (dependency.classid != PgClassOid_Attrdef) continue;
+                if (!stmt->cascade) {
+                    std::cout << "ERROR: cannot drop type because a column default depends on it (SQLSTATE 2BP01)" << std::endl;
+                    return true;
+                }
+                const auto plan = typeCatalogOwner->planDrop(PgClassOid_Attrdef, dependency.objid,
+                    CatalogManager::DropBehavior::Cascade);
+                if (!plan.ok()) throw DbError("2BP01", plan.error);
+                for (const auto& object : plan.objectsToDrop)
+                    if (defaultObjects.insert(object).second) defaultPlan.objectsToDrop.push_back(object);
+            }
+    }
+    std::vector<PhysicalCascadeAction> defaultActions;
+    std::string defaultError;
+    if (!buildPhysicalCascadeActions(*typeCatalogOwner, g_engine, s.currentDB,
+            INVALID_OID, defaultPlan, defaultActions, defaultError))
+        throw DbError("XX001", "cannot plan type default cleanup: " + defaultError);
+
     // Enum dependencies are represented in the physical table schemas.  A
     // previous DROP TYPE path removed only the enum sidecar and left those
     // columns behind with an undeclared type.  Preflight them before touching
@@ -10382,6 +10589,12 @@ bool DdlExecutor::executeDropType(const DropStmt* stmt, Session& s) {
     }
 
     txn.markSnapshotDirty();
+    for (const auto& action : defaultActions)
+        if (!dropPhysicalCascadeAction(g_engine, s.currentDB, action))
+            throw DbError("58030", "could not clear a default depending on the type");
+    if (!defaultPlan.objectsToDrop.empty() &&
+        (!typeCatalogOwner->applyDropPlan(defaultPlan, &defaultError) || !typeCatalogOwner->persistAll()))
+        throw DbError("58030", "could not publish type default cleanup: " + defaultError);
     for (const auto& dependency : enumDependencies) {
         const auto logicalTable =
             CatalogService::logicalName(dependency.tableName);

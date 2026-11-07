@@ -520,7 +520,7 @@ CatalogManager::CatalogManager(const std::string& dbPath, ReadOnlyTag)
 
 CatalogManager::MetadataSnapshot CatalogManager::metadataSnapshot() const {
     std::lock_guard<std::mutex> lock(mutex_);
-    return {namespaces_, classes_, attributes_, types_, procs_, enums_, systemAttributesMaterialized_};
+    return {namespaces_, classes_, attributes_, types_, procs_, enums_, systemAttributesMaterialized_, attrdefs_, depends_};
 }
 
 CatalogManager::MetadataSnapshot CatalogManager::readMetadataSnapshot(const std::string& path) {
@@ -854,6 +854,9 @@ bool CatalogManager::dropClassUnlocked(Oid oid) {
     auto it = classByOid_.find(oid);
     if (it == classByOid_.end() || it->second >= classes_.size()) return false;
     size_t idx = it->second;
+    std::vector<Oid> defaults;
+    for (const auto& row : attrdefs_) if (row.adrelid == oid) defaults.push_back(row.oid);
+    for (Oid id : defaults) (void)dropAttrdefUnlocked(id);
     classByName_.erase(classNameKey(classes_[idx].relnamespace, classes_[idx].relname));
     removeDependRecordsUnlocked(PgClassOid_Class, oid);
     if (idx + 1 < classes_.size()) {
@@ -987,6 +990,9 @@ const PgAttributeRow* CatalogManager::resolveAttribute(
 // ============================================================================
 
 bool CatalogManager::dropAttributesUnlocked(Oid relOid) {
+    std::vector<Oid> defaults;
+    for (const auto& row : attrdefs_) if (row.adrelid == relOid) defaults.push_back(row.oid);
+    for (Oid id : defaults) (void)dropAttrdefUnlocked(id);
     auto it = std::remove_if(attributes_.begin(), attributes_.end(),
                              [relOid](const PgAttributeRow& a) {
                                  return a.attrelid == relOid;
@@ -1134,10 +1140,20 @@ bool CatalogManager::remapColumnMetadataAfterDrop(
         });
     if (!attributeExists) return false;
 
+    auto remappedDefaults = attrdefs_;
+    std::set<Oid> removedDefaults;
+    for (auto& row : remappedDefaults) if (row.adrelid == relOid) {
+        if (row.adnum == droppedAttnum) removedDefaults.insert(row.oid);
+        else if (row.adnum > droppedAttnum) --row.adnum;
+    }
+    remappedDefaults.erase(std::remove_if(remappedDefaults.begin(), remappedDefaults.end(),
+        [&](const auto& row) { return removedDefaults.count(row.oid) != 0; }), remappedDefaults.end());
     std::vector<PgDependRow> remappedDependencies;
     remappedDependencies.reserve(depends_.size());
     for (const auto& current : depends_) {
         PgDependRow dependency = current;
+        if (dependency.classid == PgClassOid_Attrdef && removedDefaults.count(dependency.objid)) continue;
+        if (dependency.refclassid == PgClassOid_Attrdef && removedDefaults.count(dependency.refobjid)) return false;
         const bool droppedColumnOwnsDependency =
             dependency.classid == PgClassOid_Class &&
             dependency.objid == relOid &&
@@ -1181,6 +1197,8 @@ bool CatalogManager::remapColumnMetadataAfterDrop(
 
     depends_ = std::move(remappedDependencies);
     descriptions_ = std::move(remappedDescriptions);
+    attrdefs_.swap(remappedDefaults);
+    for (Oid id : removedDefaults) if (oidGen_) oidGen_->deallocate(id);
     return true;
 }
 
@@ -1648,6 +1666,123 @@ bool CatalogManager::removeAuthMember(Oid roleid, Oid member) {
 // pg_depend
 // ============================================================================
 
+Oid CatalogManager::storeAttrdef(const PgAttrdefRow& row,
+    const std::vector<std::pair<Oid, Oid>>& references, bool replaceIdentity) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto relation = classByOid_.find(row.adrelid);
+    auto attribute = std::find_if(attributes_.begin(), attributes_.end(), [&](const auto& a) {
+        return a.attrelid == row.adrelid && a.attnum == row.adnum && !a.attisdropped;
+    });
+    if (relation == classByOid_.end() || row.adnum <= 0 || attribute == attributes_.end() ||
+        row.expression.empty() || row.expression.find('\0') != std::string::npos ||
+        row.adbin.find('\0') != std::string::npos)
+        throw DbError("XX001", "invalid attribute default ownership or expression");
+    const char kind = classes_[relation->second].relkind;
+    if (kind != 'r' && kind != 'p' && kind != 'f')
+        throw DbError("XX001", "attribute default owner is not a table");
+    std::set<std::pair<Oid, Oid>> targets;
+    for (const auto& target : references) {
+        bool exists = false, pinned = false;
+        if (target.first == PgClassOid_Class) {
+            const auto found = classByOid_.find(target.second);
+            exists = found != classByOid_.end();
+            pinned = exists && classes_[found->second].relnamespace == 11 && target.second < 10000;
+        } else if (target.first == PgClassOid_Type) {
+            const auto found = typeByOid_.find(target.second);
+            exists = found != typeByOid_.end();
+            pinned = exists && types_[found->second].typnamespace == 11 && target.second < 10000;
+        } else if (target.first == PgClassOid_Proc) {
+            exists = procByOid_.count(target.second) != 0;
+        } else if (target.first == PgClassOid_Namespace) {
+            exists = nsByOid_.count(target.second) != 0;
+        }
+        if (!exists) throw DbError("XX001", "attribute default references a missing catalog object");
+        if (!pinned) targets.insert(target);
+    }
+    const auto previous = std::find_if(attrdefs_.begin(), attrdefs_.end(), [&](const auto& d) {
+        return d.adrelid == row.adrelid && d.adnum == row.adnum;
+    });
+    const auto dependenciesFor = [&](Oid oid) {
+        std::vector<PgDependRow> result;
+        PgDependRow owner; owner.classid = PgClassOid_Attrdef; owner.objid = oid;
+        owner.refclassid = PgClassOid_Class; owner.refobjid = row.adrelid;
+        owner.refobjsubid = row.adnum; owner.deptype = attribute->attgenerated ? 'i' : 'a';
+        result.push_back(owner);
+        for (const auto& target : targets) {
+            PgDependRow dependency; dependency.classid = PgClassOid_Attrdef; dependency.objid = oid;
+            dependency.refclassid = target.first; dependency.refobjid = target.second;
+            result.push_back(dependency);
+        }
+        return result;
+    };
+    if (previous != attrdefs_.end() && !replaceIdentity &&
+        previous->expression == row.expression && previous->adbin == row.adbin) {
+        const auto expected = dependenciesFor(previous->oid);
+        const auto actual = findDependsUnlocked(PgClassOid_Attrdef, previous->oid);
+        const auto key = [](const PgDependRow& d) {
+            return std::make_tuple(d.classid, d.objid, d.objsubid, d.refclassid,
+                                   d.refobjid, d.refobjsubid, d.deptype);
+        };
+        std::set<decltype(key(PgDependRow{}))> expectedSet, actualSet;
+        for (const auto& d : expected) expectedSet.insert(key(d));
+        for (const auto& d : actual) actualSet.insert(key(d));
+        if (actual.size() != actualSet.size() || actualSet != expectedSet || !attribute->atthasdef)
+            throw DbError("XX001", "conflicting persisted attribute default dependencies");
+        return previous->oid;
+    }
+    const Oid oldOid = previous == attrdefs_.end() ? INVALID_OID : previous->oid;
+    auto defaults = attrdefs_; auto dependencies = depends_;
+    if (oldOid) {
+        defaults.erase(std::remove_if(defaults.begin(), defaults.end(), [&](const auto& d) { return d.oid == oldOid; }), defaults.end());
+        dependencies.erase(std::remove_if(dependencies.begin(), dependencies.end(), [&](const auto& d) {
+            return (d.classid == PgClassOid_Attrdef && d.objid == oldOid) ||
+                   (d.refclassid == PgClassOid_Attrdef && d.refobjid == oldOid);
+        }), dependencies.end());
+    }
+    PgAttrdefRow replacement = row;
+    replacement.oid = oidGen_->allocate();
+    const auto additions = dependenciesFor(replacement.oid);
+    defaults.push_back(replacement); dependencies.insert(dependencies.end(), additions.begin(), additions.end());
+    attrdefs_.swap(defaults); depends_.swap(dependencies); attribute->atthasdef = true;
+    // SET DEFAULT creates its new identity before the previous identity is
+    // released, including replacement by an otherwise identical expression.
+    if (oldOid) oidGen_->deallocate(oldOid);
+    return replacement.oid;
+}
+
+std::optional<PgAttrdefRow> CatalogManager::getAttrdef(Oid oid) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (const auto& row : attrdefs_) if (row.oid == oid) return row;
+    return std::nullopt;
+}
+
+std::optional<PgAttrdefRow> CatalogManager::getAttrdefForColumn(Oid relation, int16_t column) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (const auto& row : attrdefs_) if (row.adrelid == relation && row.adnum == column) return row;
+    return std::nullopt;
+}
+
+std::vector<PgAttrdefRow> CatalogManager::findAttrdefs(Oid relation) const {
+    std::lock_guard<std::mutex> lock(mutex_); std::vector<PgAttrdefRow> result;
+    for (const auto& row : attrdefs_) if (row.adrelid == relation) result.push_back(row);
+    std::sort(result.begin(), result.end(), [](const auto& a, const auto& b) { return a.adnum < b.adnum; });
+    return result;
+}
+
+bool CatalogManager::dropAttrdefUnlocked(Oid oid) {
+    const auto found = std::find_if(attrdefs_.begin(), attrdefs_.end(), [&](const auto& d) { return d.oid == oid; });
+    if (found == attrdefs_.end()) return false;
+    for (auto& a : attributes_) if (a.attrelid == found->adrelid && a.attnum == found->adnum)
+        a.atthasdef = false;
+    attrdefs_.erase(found); removeDependRecordsUnlocked(PgClassOid_Attrdef, oid);
+    if (oidGen_) oidGen_->deallocate(oid);
+    return true;
+}
+
+bool CatalogManager::dropAttrdef(Oid oid) {
+    std::lock_guard<std::mutex> lock(mutex_); return dropAttrdefUnlocked(oid);
+}
+
 void CatalogManager::addDepend(const PgDependRow& row) {
     std::lock_guard<std::mutex> lock(mutex_);
     depends_.push_back(row);
@@ -1844,15 +1979,35 @@ bool CatalogManager::setComment(const std::string& objType,
 
 CatalogManager::DropPlan CatalogManager::planDropUnlocked(Oid classid, Oid objid,
                                                            DropBehavior behavior) const {
+    return planDropUnlocked(std::vector<std::pair<Oid, Oid>>{{classid, objid}}, behavior);
+}
+
+CatalogManager::DropPlan CatalogManager::planDropUnlocked(
+    const std::vector<std::pair<Oid, Oid>>& roots, DropBehavior behavior) const {
     DropPlan plan;
-    if (classid == PgClassOid_Type) {
+    for (const auto& root : roots) if (root.first == PgClassOid_Type) {
+        const auto objid = root.second;
         const auto type = typeByOid_.find(objid);
-        if (type != typeByOid_.end() && ownedArrayType(types_[type->second], types_, typeByOid_)) {
+        if (type != typeByOid_.end() && ownedArrayType(types_[type->second], types_, typeByOid_) &&
+            std::find(roots.begin(), roots.end(), std::make_pair(PgClassOid_Type, types_[type->second].typelem)) == roots.end()) {
             plan.error = "cannot drop an automatic array type independently of its element type";
             return plan;
         }
     }
 
+    // Establish automatic ownership before checking normal references. A
+    // default may also refer to its own table; that normal edge must not
+    // block deleting the table that already owns the default automatically.
+    std::set<std::pair<Oid, Oid>> automatic(roots.begin(), roots.end());
+    std::vector<std::pair<Oid, Oid>> pending = roots;
+    while (!pending.empty()) {
+        const auto object = pending.back(); pending.pop_back();
+        for (const auto& d : findRefsUnlocked(object.first, object.second, -1)) {
+            if (d.deptype != 'a' && d.deptype != 'i' && d.deptype != 'e') continue;
+            const auto dependent = std::make_pair(d.classid, d.objid);
+            if (automatic.insert(dependent).second) pending.push_back(dependent);
+        }
+    }
     std::vector<std::pair<Oid, Oid>> toDrop;       // 后序遍历结果
     std::set<std::pair<Oid, Oid>> visited;
     std::set<std::pair<Oid, Oid>> inStack;
@@ -1862,6 +2017,18 @@ CatalogManager::DropPlan CatalogManager::planDropUnlocked(Oid classid, Oid objid
         if (visited.count(key)) return true;
         if (inStack.count(key)) return true; // 循环依赖理论上不应发生
         inStack.insert(key);
+
+        if (cid == PgClassOid_Attrdef) {
+            const auto definition = std::find_if(attrdefs_.begin(), attrdefs_.end(),
+                [&](const auto& row) { return row.oid == oid; });
+            if (definition == attrdefs_.end()) { plan.error = "attribute default object is missing"; return false; }
+            for (const auto& a : attributes_) if (a.attrelid == definition->adrelid &&
+                a.attnum == definition->adnum && a.attgenerated &&
+                !automatic.count({PgClassOid_Class, definition->adrelid})) {
+                plan.error = "cannot remove a generated expression without its owning column";
+                return false;
+            }
+        }
 
         auto deps = findRefsUnlocked(cid, oid, -1);
         for (const auto& d : deps) {
@@ -1876,7 +2043,8 @@ CatalogManager::DropPlan CatalogManager::planDropUnlocked(Oid classid, Oid objid
             // same referenced-object behavior as an internal dependency.
             const bool dropsAutomatically =
                 d.deptype == 'a' || d.deptype == 'i' || d.deptype == 'e';
-            if (behavior == DropBehavior::Restrict && !dropsAutomatically) {
+            if (behavior == DropBehavior::Restrict && !dropsAutomatically &&
+                !automatic.count({d.classid, d.objid})) {
                 plan.error = "cannot drop object because other objects depend on it";
                 return false;
             }
@@ -1889,7 +2057,7 @@ CatalogManager::DropPlan CatalogManager::planDropUnlocked(Oid classid, Oid objid
         return true;
     };
 
-    if (!dfs(classid, objid)) return plan;
+    for (const auto& root : roots) if (!dfs(root.first, root.second)) return plan;
 
     plan.objectsToDrop = std::move(toDrop);
     return plan;
@@ -1899,6 +2067,12 @@ CatalogManager::DropPlan CatalogManager::planDrop(Oid classid, Oid objid,
                                                    DropBehavior behavior) const {
     std::lock_guard<std::mutex> lock(mutex_);
     return planDropUnlocked(classid, objid, behavior);
+}
+
+CatalogManager::DropPlan CatalogManager::planDrop(
+    const std::vector<std::pair<Oid, Oid>>& roots, DropBehavior behavior) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return planDropUnlocked(roots, behavior);
 }
 
 bool CatalogManager::executeDropPlanUnlocked(const DropPlan& plan) {
@@ -1914,6 +2088,8 @@ bool CatalogManager::executeDropPlanUnlocked(const DropPlan& plan) {
             ok = dropTypeUnlocked(objid);
         } else if (classid == PgClassOid_Proc) {
             ok = dropProcUnlocked(objid);
+        } else if (classid == PgClassOid_Attrdef) {
+            ok = dropAttrdefUnlocked(objid);
         }
         if (!ok) return false;
     }
@@ -2532,6 +2708,14 @@ std::map<std::string, std::string> CatalogManager::serializeAllLocked() const {
         for(const auto& row:procs_)writeRoutineCatalogRow(out,row);
     });
 
+    // Defaults retain executable bound SQL separately from the optional
+    // PostgreSQL node encoding. Hex fields preserve all original bytes.
+    persist("attrdef", [&](std::ostream& out) {
+        for (const auto& row : attrdefs_)
+            out << "A1," << row.oid << ',' << row.adrelid << ',' << row.adnum
+                << ",X" << hexEncode(row.expression) << ",X" << hexEncode(row.adbin) << '\n';
+    });
+
     // pg_depend
     persist("depend", [&](std::ostream& out) {
         for (const auto& r : depends_) {
@@ -2701,7 +2885,7 @@ void CatalogManager::loadAllLocked() {
         std::move(namespaces_), std::move(classes_), std::move(attributes_),
         std::move(types_), std::move(enums_), std::move(procs_),
         std::move(depends_), std::move(authIds_), std::move(authMembers_),
-        std::move(descriptions_));
+        std::move(descriptions_), std::move(attrdefs_));
     auto priorIndexes = std::make_tuple(
         std::move(nsByOid_), std::move(classByOid_), std::move(typeByOid_),
         std::move(procByOid_), std::move(authIdByOid_), std::move(authMemberByOid_),
@@ -2709,7 +2893,7 @@ void CatalogManager::loadAllLocked() {
     try {
     namespaces_.clear(); classes_.clear(); attributes_.clear(); types_.clear();
     enums_.clear(); procs_.clear(); depends_.clear(); authIds_.clear();
-    authMembers_.clear(); descriptions_.clear();
+    authMembers_.clear(); descriptions_.clear(); attrdefs_.clear();
     std::map<std::string, CatalogFileGeneration> before;
     for (const auto& image : serializeAllLocked()) {
         CatalogFileGeneration generation;
@@ -3060,6 +3244,33 @@ void CatalogManager::loadAllLocked() {
         }
     }
 
+    // pg_attrdef. A missing file is a legitimate older catalog, while an
+    // existing invalid image must never be normalized into an empty set.
+    {
+        auto in = openRelationImage("attrdef");
+        std::string line;
+        std::set<Oid> identities;
+        std::set<std::pair<Oid, int16_t>> owners;
+        while (std::getline(in, line)) {
+            if (line.empty()) throw DbError("XX001", "empty attribute default catalog row");
+            std::istringstream input(line);
+            std::string version, expression, node;
+            PgAttrdefRow row;
+            if (!std::getline(input, version, ',') || version != "A1" ||
+                !readCatalogCsvField(input, row.oid) || !readCatalogCsvField(input, row.adrelid) ||
+                !readCatalogCsvField(input, row.adnum) || !std::getline(input, expression, ',') ||
+                !std::getline(input, node) || expression.empty() || node.empty() ||
+                expression[0] != 'X' || node[0] != 'X' ||
+                !hexDecode(expression.substr(1), row.expression) || !hexDecode(node.substr(1), row.adbin) ||
+                !row.oid || !row.adrelid || row.adnum <= 0 || row.expression.empty() ||
+                row.expression.find('\0') != std::string::npos || row.adbin.find('\0') != std::string::npos ||
+                !identities.insert(row.oid).second || !owners.emplace(row.adrelid, row.adnum).second)
+                throw DbError("XX001", "invalid attribute default catalog row");
+            attrdefs_.push_back(std::move(row));
+        }
+        if (in.bad()) throw DbError("58030", "cannot read attribute default catalog");
+    }
+
     // pg_authid
     {
         std::ifstream in(catalogFilePath("authid"));
@@ -3120,6 +3331,23 @@ void CatalogManager::loadAllLocked() {
     }
 
     rebuildIndexes();
+    for (const auto& row : attrdefs_) {
+        const auto owner = std::find_if(attributes_.begin(), attributes_.end(), [&](const auto& a) {
+            return a.attrelid == row.adrelid && a.attnum == row.adnum && !a.attisdropped;
+        });
+        if (classByOid_.count(row.adrelid) == 0 || owner == attributes_.end() || !owner->atthasdef)
+            throw DbError("XX001", "attribute default has no actual owning field");
+        size_t owners = 0;
+        for (const auto& edge : depends_) if (edge.classid == PgClassOid_Attrdef && edge.objid == row.oid) {
+            if (edge.objsubid != 0) throw DbError("XX001", "invalid attribute default subobject");
+            if (edge.deptype == 'a' || edge.deptype == 'i') {
+                if (++owners != 1 || edge.refclassid != PgClassOid_Class || edge.refobjid != row.adrelid ||
+                    edge.refobjsubid != row.adnum || edge.deptype != (owner->attgenerated ? 'i' : 'a'))
+                    throw DbError("XX001", "conflicting attribute default ownership dependency");
+            }
+        }
+        if (owners != 1) throw DbError("XX001", "missing attribute default ownership dependency");
+    }
     // Upgrade only known storage-width signatures after all rows are parsed.
     // No files/OIDs are changed by a cold read, and cached dirty edits remain
     // observable: snapshots themselves never normalize caller-owned changes.
@@ -3142,7 +3370,7 @@ void CatalogManager::loadAllLocked() {
     systemAttributesMaterialized_=systemAttributesExpected;
     } catch (...) {
         std::tie(namespaces_, classes_, attributes_, types_, enums_, procs_,
-                 depends_, authIds_, authMembers_, descriptions_) = std::move(priorRows);
+                 depends_, authIds_, authMembers_, descriptions_, attrdefs_) = std::move(priorRows);
         std::tie(nsByOid_, classByOid_, typeByOid_, procByOid_, authIdByOid_,
                  authMemberByOid_, nsByName_, authIdByName_, classByName_) =
             std::move(priorIndexes);

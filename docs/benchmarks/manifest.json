@@ -539,6 +539,16 @@
       "sha256": "7d264c25aec5386b1c7ddb6c8167d2cd052cc17bc4675a8dba344eaa3f20932a",
       "encoding": "gzip",
       "roundtrip_bytes_exact": true
+    },
+    {
+      "original_path": "docs/benchmarks/attribute-default-objects-draft-20261107.json",
+      "original_bytes": 59670610,
+      "original_sha256": "9103c5309dcd06e37b1f1b99f05db96d3c47c1dfb47f7ddc863c5f080c90fe9e",
+      "path": "docs/benchmarks/attribute-default-objects-draft-20261107.json.gz",
+      "bytes": 10170752,
+      "sha256": "463061c5c07afeab9ac5703c6078b6ce455305848eeb7243489a013bc702835f",
+      "encoding": "gzip",
+      "roundtrip_bytes_exact": true
     }
   ],
   "total_original_bytes": 2163454045,

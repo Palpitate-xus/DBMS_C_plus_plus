@@ -1,5 +1,35 @@
 # 数据库操作性能测试报告（2026-10-30）
 
+<a id="attribute-default-objects-draft-20261107"></a>
+
+## 2026-11-07 P43/D23：DEFAULT 对象早绑定和依赖；正常性能 NOTRUN
+
+本节是未接受的P43功能草稿。正常CMake C++17/O2候选 `63dc516eeb4aa3596ba1fdc43db9b0737a62d8a5fe76457bda085e544c72a802`，生产266文件／195头，本轮相对D20改13个生产路径、P43累计45个。默认程序425165af…保持，直接在master提交；原273项和292条历史不变。
+
+调研依据为[PG对象标识符类型](https://www.postgresql.org/docs/18/datatype-oid.html)、[pg_attrdef](https://www.postgresql.org/docs/18/catalog-pg-attrdef.html)、[pg_depend](https://www.postgresql.org/docs/18/catalog-pg-depend.html)，以及固定提交724edf9b…的pg_attrdef.c和dependency.c。真实PG18.6参照在实现前冻结SQL及完整协议回复。REGCLASS／REGTYPE标量Const在对象实际存在时建立引用；数组整体Const绑定OID而不生成元素对象依赖，ARRAY中的标量Const保留引用。显式TEXT转换保留运行期查找。
+
+新增独立持久DEFAULT对象和所属列自动依赖，SET DEFAULT产生新身份，DROP／删列／所属表删除和序号压缩同步对象及边。选定CASCADE清除默认表达式，保留其表和列；SERIAL删列把自己的默认对象和序列作为共同删除根。简单NULL和已证明的对象NULL常量省略默认对象，域保留原约束上下文。保留原始表达式来源字节，实际内建nextval使用其REGCLASS参数签名；没有在DDL绑定时执行默认表达式或消耗序列值。
+
+| 检查 | 实际结果 | 范围 |
+| --- | --- | --- |
+| 原生 | 46个选定入口actual0；新检查36／26／61项 | full suite=false |
+| 正式协议 | 身份35条、目录9条，两份脚本actual0 | 暂缓范围保持 |
+| DEFAULT主对照 | 50条；实际目标OID对应后，值／tag／SQLSTATE／Ready无差异 | 完整T7差异单列；不泛化到其他表达式 |
+| 扩展对照 | 32条；保留两处差异 | 缺失晚绑定序列本地22023、PG42P01；删列后的占位／序号策略不同 |
+| 旧库控制 | 61条观察、594行／4018单元／6NULL、41398B、9个正常Main | 真实D16闭库映像；21条数组读写／回滚／索引／重启链按实际表OID对应后全T7相同 |
+| 正常性能 | **NOTRUN**，本批没有提速百分比 | 启动、DDL、普通元数据复制成本及其他P43性能门禁仍需测量；P40／P41／P42窗口保持关闭 |
+
+主／扩展独立审计覆盖214份SQL回复观察（含先前D20主对照50份），双解码器核对12677个实际回复字节；各正常Main终态、原始帧、完整T7及闭库文件模式／大小／SHA均保留。15族既有模型仍有已知差异。D21遗漏后缀cast的早期组件失败、新集成测试缺少parser头文件的编译失败、D22原生类型删除错误通道失败、首版二进制runner输入路径错误，以及复用旧升级审计器对pg_depend整文件不变的错误假设均保留。升级审计随后核实：旧边完整不变，仅增加由两个新目录实际声明导出的21条本地边；不把这21条边称为PG系统图一致。
+
+仍开放：通用adbin／pg_get_expr和完整pg_attrdef行、函数／生成式依赖、其他DROP目标的完整生命周期、普通晚绑定错误传播、旧DEFAULT原声明上下文，以及原其他非暂缓功能／性能门禁。当前只提供pg_attrdef的身份三列及pg_depend的实际七列；不补造未知表达式树或NULL。简单NULL省略也不代表通用常量折叠完成。
+
+压缩原始证据见[本批归档](benchmarks/attribute-default-objects-draft-20261107.json.gz)，10,170,752字节，解压SHA `9103c5309dcd06e37b1f1b99f05db96d3c47c1dfb47f7ddc863c5f080c90fe9e`。保存原始协议、源码、日志、全部失败、模型及闭库文件清单；不含ELF／对象或数据库映像内容，不是可移植数据库备份。48份旧gzip保持。
+
+用户指出的53.45MiB原始JSON仍以5.70MiB gzip保存完整内容，解压SHA及字节数再次核验，当前Git不跟踪原文件且忽略规则有效。本轮还删除build中一份逐字相同、未被打开的56,047,459字节生成副本，释放56,049,664分配字节并保留还原命令。没有重写Git历史。Goal active；下方D20及更早段落是对应版本的历史结果。
+
+另将本轮135份已退出测试程序无损压缩，释放1,282,592,768分配字节；原SHA／权限和还原方法已记录，默认程序、候选及冻结core保持。
+
+
 <!-- P43-D20 unaccepted draft checkpoint -->
 <a id="physical-array-catalog-upgrade-draft-20261107"></a>
 

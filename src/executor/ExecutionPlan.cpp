@@ -1,4 +1,5 @@
 #include "catalog/SystemCatalogRows.h"
+#include "catalog/PgDefaultCatalog.h"
 #include "ExecutionPlan.h"
 #include "expression/StoredRegtypeValue.h"
 #include "expression/ArrayDatumInput.h"
@@ -3889,6 +3890,20 @@ OpPtr QueryPlanner::buildPreparedQueryPlan(StorageEngine* engine,const std::stri
                         const auto metadata=engine->catalogService().metadataSnapshot(database);
                         *rows=attributes?system_catalog::attributeRows(metadata):system_catalog::classRows(metadata);
                     }
+                    if(index>=(**rows).size())return false;
+                    row=(**rows)[index];return true;
+                });
+        } else if(found->relationSchema=="pg_catalog" &&
+                  (found->relationName=="pg_attrdef" || found->relationName=="pg_depend")) {
+            for(const auto& output:found->columns) {
+                Column column;column.dataName=output.name;column.dataType=output.type;
+                column.isVariableLength=true;schema.append(column);
+            }
+            const bool dependencies=found->relationName=="pg_depend";
+            auto rows=std::make_shared<std::optional<PreparedQueryRows>>();
+            source=std::make_unique<PreparedSourceRowsOp>(found->columns,
+                [engine,database,rows,dependencies](size_t index,std::vector<ExprValue>& row) {
+                    if(!*rows)*rows=default_catalog::rows(engine->catalogService().metadataSnapshot(database),dependencies);
                     if(index>=(**rows).size())return false;
                     row=(**rows)[index];return true;
                 });

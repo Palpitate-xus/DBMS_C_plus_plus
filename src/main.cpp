@@ -1,6 +1,7 @@
 #include "catalog/pg_owned_catalog_query.h"
 #include "catalog/type_catalog.h"
 #include "catalog/SystemCatalogRows.h"
+#include "catalog/PgDefaultCatalog.h"
 #include "expression/StoredRegtypeValue.h"
 #include <algorithm>
 #include <charconv>
@@ -20848,6 +20849,10 @@ class PreparedWithDmlRuntime {
                 virtualRows=make_shared<dbms::PreparedQueryRows>();
                 const auto metadata=g_engine.catalogService().metadataSnapshot(session_.currentDB);
                 for(const auto& row:metadata.types)virtualRows->push_back(dbms::ownedTypeCatalogCells(row));
+            } else if(range.relationSchema=="pg_catalog" &&
+                      (range.relationName=="pg_attrdef" || range.relationName=="pg_depend")) {
+                virtualRows=make_shared<dbms::PreparedQueryRows>(dbms::default_catalog::rows(
+                    g_engine.catalogService().metadataSnapshot(session_.currentDB),range.relationName=="pg_depend"));
             } else if(range.relationSchema=="pg_catalog" && range.relationName=="pg_sequence") {
                 virtualRows=make_shared<dbms::PreparedQueryRows>(g_engine.getSequenceCatalogRows(session_.currentDB));
             } else if(range.relationSchema=="pg_catalog" && range.relationName=="pg_stats") {
@@ -22380,7 +22385,7 @@ static bool handlePreparedOwnedCatalogQuery(const string& rawSql,Session& sessio
         return std::search(rawSql.begin(),rawSql.end(),name,name+std::char_traits<char>::length(name),
             [](unsigned char c,char e){return (c>='A'&&c<='Z'?c+('a'-'A'):c)==e;})!=rawSql.end();
     };
-    if(!contains("pg_class") && !contains("pg_attribute") && !contains("pg_type"))return false;
+    if(!contains("pg_class") && !contains("pg_attribute") && !contains("pg_type") && !contains("pg_attrdef") && !contains("pg_depend"))return false;
     dbms::SQLParser parser;const auto parsed=parser.parseForBinding(rawSql);
     if(!parsed.success || !dynamic_cast<const dbms::SelectStmt*>(parsed.stmt.get()) ||
        !dbms::pgOwnedCatalogSourceCandidate(parsed.stmt.get()))return false;

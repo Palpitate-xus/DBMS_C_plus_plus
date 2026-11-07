@@ -3932,7 +3932,7 @@ bool describePreparedOwnedCatalog(const std::string& sql,Session& session,
         return std::search(sql.begin(),sql.end(),name,name+std::char_traits<char>::length(name),
             [](unsigned char c,char e){return (c>='A'&&c<='Z'?c+('a'-'A'):c)==e;})!=sql.end();
     };
-    if(!contains("pg_class") && !contains("pg_attribute") && !contains("pg_type"))return false;
+    if(!contains("pg_class") && !contains("pg_attribute") && !contains("pg_type") && !contains("pg_attrdef") && !contains("pg_depend"))return false;
     SQLParser parser;const auto parsed=parser.parseForBinding(sql);
     if(!parsed.success || !pgOwnedCatalogSourceCandidate(parsed.stmt.get()))return false;
     auto* previous=currentSession();setCurrentSession(&session);

@@ -1,4 +1,5 @@
 #include "catalog/SystemCatalogRows.h"
+#include "catalog/PgDefaultCatalog.h"
 #include "expression/LocalExpressionSyntax.h"
 #include "TableManage.h"
 #include "expression/ArrayDatumInput.h"
@@ -37247,6 +37248,8 @@ decltype(auto) StorageEngine::withQueryBindingMetadata(const std::string& dbname
                     static const std::map<std::string, QueryRowDescriptor> virtualTables = {
                         {"pg_class", system_catalog::classDescriptor()},
                         {"pg_attribute", system_catalog::attributeDescriptor()},
+                        {"pg_attrdef", default_catalog::descriptor()},
+                        {"pg_depend", default_catalog::dependencyDescriptor()},
                         {"pg_namespace", ownedNamespaceCatalogDescriptor()},
                         {"pg_settings", {{"name","text"},{"setting","text"},{"unit","text"}}},
                         {"pg_stat_activity", {{"pid","integer"},{"datname","name"},{"usename","name"},{"state","text"},{"query","text"}}}
@@ -37265,6 +37268,8 @@ decltype(auto) StorageEngine::withQueryBindingMetadata(const std::string& dbname
                         description.columns = found->second;
                         if(requested.name=="pg_class")system_catalog::validateRead(catalog,1259,"pg_class",83,273,class_catalog::fields,31);
                         if(requested.name=="pg_attribute")system_catalog::validateRead(catalog,1249,"pg_attribute",75,270,system_catalog::attributeFields,20);
+                        if(requested.name=="pg_attrdef")default_catalog::validate(catalog,2604,"pg_attrdef",default_catalog::fields);
+                        if(requested.name=="pg_depend")default_catalog::validate(catalog,2608,"pg_depend",default_catalog::dependencyFields);
                         for(auto& column:description.columns) {
                             column.typeOid=mapBuiltinTypeNameToOid(column.type);
                             if(column.typeOid)column.typeMetadata=metadata.datumType(column.type,column.typeOid);

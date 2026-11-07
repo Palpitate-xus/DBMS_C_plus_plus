@@ -50,6 +50,8 @@ public:
         std::vector<PgProcRow> routines;
         std::vector<PgEnumRow> enumLabels;
         bool systemAttributesMaterialized = false;
+        std::vector<PgAttrdefRow> defaults;
+        std::vector<PgDependRow> dependencies;
     };
     // A single-lock copy: callers never retain catalog-owned row pointers.
     MetadataSnapshot metadataSnapshot() const;
@@ -202,6 +204,16 @@ public:
     // 级联/限制删除检查：返回依赖此对象的所有记录
     std::vector<PgDependRow> findAllDependents(Oid refclassid, Oid refobjid) const;
 
+    // pg_attrdef: setting an explicit default creates a new object identity.
+    // Synchronization of an unchanged stored expression may retain its OID.
+    Oid storeAttrdef(const PgAttrdefRow& row,
+                    const std::vector<std::pair<Oid, Oid>>& references,
+                    bool replaceIdentity = true);
+    std::optional<PgAttrdefRow> getAttrdef(Oid oid) const;
+    std::optional<PgAttrdefRow> getAttrdefForColumn(Oid relation, int16_t column) const;
+    std::vector<PgAttrdefRow> findAttrdefs(Oid relation) const;
+    bool dropAttrdef(Oid oid);
+
     // =====================================================================
     // 持久化
     // =====================================================================
@@ -226,6 +238,7 @@ public:
 
     // 生成删除计划（不实际执行删除）
     DropPlan planDrop(Oid classid, Oid objid, DropBehavior behavior) const;
+    DropPlan planDrop(const std::vector<std::pair<Oid, Oid>>& roots, DropBehavior behavior) const;
 
     // 执行 CASCADE / RESTRICT 删除（按 classid + objid）
     bool dropObject(Oid classid, Oid objid, DropBehavior behavior,
@@ -319,6 +332,7 @@ private:
     std::vector<PgEnumRow>       enums_;
     std::vector<PgProcRow>       procs_;
     std::vector<PgDependRow>     depends_;
+    std::vector<PgAttrdefRow>    attrdefs_;
     std::vector<PgAuthIdRow>     authIds_;
     std::vector<PgAuthMembersRow> authMembers_;
     std::vector<PgDescriptionRow> descriptions_;
@@ -353,6 +367,7 @@ private:
     const PgAuthIdRow*    findAuthIdUnlocked(Oid oid) const;
 
     std::vector<PgDependRow> findDependsUnlocked(Oid classid, Oid objid, int32_t objsubid = 0) const;
+    bool dropAttrdefUnlocked(Oid oid);
     std::vector<PgDependRow> findRefsUnlocked(Oid refclassid, Oid refobjid, int32_t refobjsubid = 0) const;
     std::vector<PgDependRow> findAllDependentsUnlocked(Oid refclassid, Oid refobjid) const;
 
@@ -364,6 +379,7 @@ private:
 
     void removeDependRecordsUnlocked(Oid classid, Oid objid);
     DropPlan planDropUnlocked(Oid classid, Oid objid, DropBehavior behavior) const;
+    DropPlan planDropUnlocked(const std::vector<std::pair<Oid, Oid>>& roots, DropBehavior behavior) const;
     bool executeDropPlanUnlocked(const DropPlan& plan);
 
     const PgTypeRow* findTypeByNameUnlocked(const std::string& name, Oid nspOid) const;

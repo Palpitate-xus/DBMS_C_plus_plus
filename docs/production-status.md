@@ -1,5 +1,12 @@
 # 生产化状态
 
+## 当前源代码：P43/D23 未接受草稿（2026-11-07）
+
+正常CMake C++17/O2候选 `63dc516eeb4aa3596ba1fdc43db9b0737a62d8a5fe76457bda085e544c72a802`，266生产文件／195头文件；相对D20改13个生产路径，P43累计45个。46个选定原生入口实际0，新目录／绑定／生命周期分别36／26／61项；正式身份35条及目录9条协议脚本通过。
+
+DEFAULT有真实身份与依赖，选定表／序列／类型删除、SERIAL删列、失败创建、事务及savepoint恢复和冷读通过。可读pg_attrdef身份三列、pg_depend七列；通用adbin／pg_get_expr、完整表达式／其他目标生命周期和旧默认声明上下文仍开放。晚绑定序列缺失SQLSTATE及删列目录占位差异保留。全套未运行、正常性能NOTRUN，默认425165af…保持，Goal active。[完整报告](performance-report-2026-10-30.md#attribute-default-objects-draft-20261107)。
+
+
 <!-- P43-D20 unaccepted draft checkpoint -->
 ## 当前源代码：P43/D20 未接受草稿（2026-11-07）
 

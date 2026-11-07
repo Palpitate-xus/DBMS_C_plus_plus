@@ -15,6 +15,7 @@ constexpr Oid PgClassOid_Namespace = 2615;   // pg_namespace
 constexpr Oid PgClassOid_Class     = 1259;   // pg_class
 constexpr Oid PgClassOid_Attribute = 1249;   // pg_attribute
 constexpr Oid PgClassOid_Type      = 1247;   // pg_type
+constexpr Oid PgClassOid_Attrdef   = 2604;   // pg_attrdef
 constexpr Oid PgClassOid_Proc      = 1255;   // pg_proc
 constexpr Oid PgClassOid_Depend    = 2608;   // pg_depend
 constexpr Oid PgClassOid_Enum      = 3501;   // pg_enum
@@ -202,6 +203,18 @@ struct PgDependRow {
     char     deptype = 'n';            // n=normal, a=auto, i=internal, e=extension, p=pin
 
     std::string toString() const;
+};
+
+// A default is a separate dependency object, not the owning table or column.
+// expression is this engine's bound SQL execution form. adbin is populated
+// only when a genuine PostgreSQL node encoding is available; readers must
+// reject unavailable encodings instead of returning a fabricated NULL/tree.
+struct PgAttrdefRow {
+    Oid oid = INVALID_OID;
+    Oid adrelid = INVALID_OID;
+    int16_t adnum = 0;
+    std::string expression;
+    std::string adbin;
 };
 
 // ---------------------------------------------------------------------------

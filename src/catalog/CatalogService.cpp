@@ -1,6 +1,7 @@
 #include "catalog/SystemAttributeDeclaration.h"
 #include "catalog/BuiltinTypeProperties.h"
 #include "catalog/SystemCatalogCollation.h"
+#include "catalog/PgDefaultCatalog.h"
 #include "catalog/CatalogService.h"
 #include "catalog/PgStatsCatalog.h"
 #include "catalog/PgClassCatalog.h"
@@ -231,6 +232,8 @@ std::shared_ptr<CatalogManager> loadOwnedCatalog(
     }
     const bool initializedClassCatalog=class_catalog::bootstrapRelation(*catalog);
     const bool initializedOwnedCatalogs=system_catalog::bootstrapRelations(*catalog,publishedSystemCatalog);
+    const bool publishedDefaultCatalog = default_catalog::published(directory);
+    const bool initializedDefaultCatalog = default_catalog::bootstrap(*catalog, publishedDefaultCatalog);
     const auto sequenceMarker=directory/".sequence_catalog_version";
     constexpr char sequenceVersion[]="DBMS_PG_SEQUENCE_CATALOG1\n";
     struct stat markerStatus{};
@@ -278,7 +281,7 @@ std::shared_ptr<CatalogManager> loadOwnedCatalog(
         }
     }
     migrateLegacyPublicDottedSequences(engine, database, *catalog);
-    if((initializedClassCatalog || initializedOwnedCatalogs || initializedSequenceCatalog || initializedStatisticsView || initializedSystemAttributes || initializedTypeProperties || initializedCatalogCollations || initializedPhysicalArrays || !publishedTypeProperties || !publishedCatalogCollations || !publishedPhysicalArrays) && !catalog->persistAll())
+    if((initializedClassCatalog || initializedOwnedCatalogs || initializedSequenceCatalog || initializedStatisticsView || initializedSystemAttributes || initializedTypeProperties || initializedCatalogCollations || initializedPhysicalArrays || initializedDefaultCatalog || !publishedDefaultCatalog || !publishedTypeProperties || !publishedCatalogCollations || !publishedPhysicalArrays) && !catalog->persistAll())
         throw DbError("58030","could not publish initialized system view identities");
     if(!publishedSequenceCatalog &&
        index_file::writeAtomicallyNoReplace(sequenceMarker,sequenceVersion)!=index_file::WriteResult::OK)
@@ -299,6 +302,10 @@ std::shared_ptr<CatalogManager> loadOwnedCatalog(
             directory / ".physical_builtin_array_attributes_version", physicalArrayVersion)
             != index_file::WriteResult::OK)
         throw DbError("58030", "could not publish physical array version");
+    if (!publishedDefaultCatalog && index_file::writeAtomicallyNoReplace(
+            directory / ".attribute_default_catalog_version", default_catalog::version)
+            != index_file::WriteResult::OK)
+        throw DbError("58030", "could not publish attribute default catalog version");
     return catalog;
 }
 }
