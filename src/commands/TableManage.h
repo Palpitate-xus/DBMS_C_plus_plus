@@ -1033,6 +1033,10 @@ public:
     // A non-blocking, actual-database read fence. Own transaction locks are
     // recognized directly, including BEGIN before its logical active flag.
     CatalogReadOwnership catalogReadOwnership(const std::string& dbname) const;
+    // Catalog bootstrap already owns the database. Read the persisted schema
+    // directly, without reentering CatalogService or populating schema caches.
+    std::optional<TableSchema> readPersistedSchemaForCatalog(
+        const std::string& dbname, const std::string& physicalName) const;
     bool isReadOnly() const { return transactionContext().readOnly; }
     bool setReadOnly(bool readOnly) {
         auto& context = transactionContext();

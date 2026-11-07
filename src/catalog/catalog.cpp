@@ -2249,6 +2249,90 @@ bool CatalogManager::bootstrapBuiltinTypeProperties(bool requireCurrent) {
     types_.swap(replacementTypes);attributes_.swap(replacementAttributes);return changed;
 }
 
+bool CatalogManager::bootstrapPhysicalArrayAttributes(
+    const std::vector<PhysicalArrayAttribute>& fields, bool requireCurrent) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (fields.empty()) return false;
+    auto attributes = attributes_;
+    auto dependencies = depends_;
+    const auto& definitions = builtinTypeRows();
+    std::set<std::pair<Oid, int16_t>> seen;
+    bool changed = false;
+    for (const auto& field : fields) {
+        if (field.number <= 0 || !seen.emplace(field.relation, field.number).second)
+            throw DbError("XX001", "duplicate physical array attribute witness");
+        const auto relation = std::find_if(classes_.begin(), classes_.end(),
+            [&](const auto& row) { return row.oid == field.relation; });
+        if (relation == classes_.end() || field.number > relation->relnatts || relation->relnamespace == 11 ||
+            (relation->relkind != 'r' && relation->relkind != 'p'))
+            throw DbError("XX001", "physical array has no owning table");
+        const auto definition = std::find_if(definitions.begin(), definitions.end(),
+            [&](const auto& row) { return row.oid == field.elementType; });
+        if (definition == definitions.end() || !definition->typarray ||
+            definition->typcategory == 'A')
+            throw DbError("XX001", "physical array has no builtin element declaration");
+        const auto elementIndex = typeByOid_.find(definition->oid);
+        const auto arrayIndex = typeByOid_.find(definition->typarray);
+        if (elementIndex == typeByOid_.end() || arrayIndex == typeByOid_.end())
+            throw DbError("XX001", "physical array has no actual builtin type pair");
+        const auto& element = types_[elementIndex->second];
+        const auto& array = types_[arrayIndex->second];
+        const auto arrayDefinition = std::find_if(definitions.begin(), definitions.end(),
+            [&](const auto& row) { return row.oid == definition->typarray; });
+        if (arrayDefinition == definitions.end() || element.typnamespace != 11 ||
+            element.typname != definition->typname || element.typtype != definition->typtype ||
+            !element.typisdefined || element.typarray != array.oid ||
+            array.typnamespace != 11 || array.typname != arrayDefinition->typname ||
+            array.typtype != 'b' || array.typcategory != 'A' || !array.typisdefined ||
+            array.typelem != element.oid || array.typlen != -1 || array.typbyval ||
+            !builtin_type_properties::equal(array, *arrayDefinition))
+            throw DbError("XX001", "conflicting physical array type identity");
+        auto attribute = std::find_if(attributes.begin(), attributes.end(),
+            [&](const auto& row) { return row.attrelid == field.relation && row.attnum == field.number; });
+        if (attribute == attributes.end() || attribute->attname != field.name ||
+            attribute->attisdropped || attribute->attndims <= 0 || attribute->attlen != -1 ||
+            (attribute->atttypid != element.oid && attribute->atttypid != array.oid) ||
+            attribute->attbyval ||
+            std::string("pxem").find(attribute->attstorage) == std::string::npos)
+            throw DbError("XX001", "conflicting physical array attribute");
+        if (attribute->atttypid == element.oid) {
+            if (requireCurrent || (attribute->attalign != 'i' && attribute->attalign != element.typalign))
+                throw DbError("XX001", "legacy physical array attribute in published generation");
+            attribute->atttypid = array.oid;
+            attribute->attalign = array.typalign;
+            if (attribute->attstorage == 'p' || attribute->attstorage == 'x')
+                attribute->attstorage = array.typstorage;
+            if (!attribute->attcollation && field.useDefaultCollation)
+                attribute->attcollation = array.typcollation;
+            changed = true;
+        } else if (attribute->attalign != array.typalign) {
+            throw DbError("XX001", "conflicting physical array alignment");
+        }
+        size_t typeEdges = 0;
+        for (auto& edge : dependencies) {
+            if (edge.classid != PgClassOid_Class || edge.objid != field.relation ||
+                edge.objsubid != field.number || edge.refclassid != PgClassOid_Type ||
+                (edge.refobjid != element.oid && edge.refobjid != array.oid))
+                continue;
+            if (++typeEdges > 1 || edge.refobjsubid != 0 || edge.deptype != 'n')
+                throw DbError("XX001", "conflicting physical array type dependency");
+            if (edge.refobjid == element.oid) {
+                if (requireCurrent)
+                    throw DbError("XX001", "legacy physical array dependency in published generation");
+                edge.refobjid = array.oid;
+                changed = true;
+            }
+        }
+        // Builtins are pinned in PostgreSQL: absence of a type edge is valid.
+        // Retarget an existing edge, but never manufacture a missing one.
+    }
+    if (systemAttributesMaterialized_)
+        system_attributes::validateAll(classes_, attributes, types_);
+    attributes_.swap(attributes);
+    depends_.swap(dependencies);
+    return changed;
+}
+
 bool CatalogManager::bootstrapSystemCatalogCollations(bool requireCurrent) {
     std::lock_guard<std::mutex> lock(mutex_);
     const auto fields=system_catalog_collation::inspect(classes_,attributes_,types_,requireCurrent,!requireCurrent);

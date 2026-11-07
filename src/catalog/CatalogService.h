@@ -17,8 +17,8 @@ class StorageEngine;
 // CatalogManager is per-database (constructed with a dbPath). This service
 // lazily creates one CatalogManager per database on first access and bootstraps
 // system namespaces/types. It persists all cached catalogs on shutdown or
-// explicit persistAll(). The catalog format is current-version only; storage
-// files from an older release must be rebuilt from SQL instead of migrated.
+// explicit persistAll(). Mutable startup performs only the checked legacy
+// upgrades implemented here; cold reads expose actual persisted metadata.
 //
 // Thread-safety: actual database ownership precedes the service mutex and
 // each CatalogManager's internal mutex. Engines keep independent models;

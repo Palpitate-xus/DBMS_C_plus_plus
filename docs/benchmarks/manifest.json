@@ -529,8 +529,18 @@
       "sha256": "867733bd7463a77de63c6c9feff48e476a507316d98b0e0d21d95bffea5f4ac0",
       "encoding": "gzip",
       "roundtrip_bytes_exact": true
+    },
+    {
+      "original_path": "docs/benchmarks/physical-array-catalog-upgrade-draft-20261107.json",
+      "original_bytes": 34597510,
+      "original_sha256": "d216bc94b194bc17e308fbc5671f46f9ef59bc6b1bef234aab8f4725dd0fd7f6",
+      "path": "docs/benchmarks/physical-array-catalog-upgrade-draft-20261107.json.gz",
+      "bytes": 6217909,
+      "sha256": "7d264c25aec5386b1c7ddb6c8167d2cd052cc17bc4675a8dba344eaa3f20932a",
+      "encoding": "gzip",
+      "roundtrip_bytes_exact": true
     }
   ],
-  "total_original_bytes": 2128856535,
-  "total_bytes": 609445737
+  "total_original_bytes": 2163454045,
+  "total_bytes": 615663646
 }

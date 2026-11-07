@@ -18381,6 +18381,28 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
     return tbl;
 }
 
+std::optional<TableSchema> StorageEngine::readPersistedSchemaForCatalog(
+    const std::string& dbname, const std::string& physicalName) const {
+    if (dbname.empty() || !validStoredIdentifier(dbname, MAX_TABLE_NAME_LEN) ||
+        physicalName.empty() || !validStoredRelationName(physicalName))
+        throw DbError("XX001", "invalid persisted schema identity");
+    const auto path = schemaPath(dbname, physicalName);
+    std::error_code error;
+    const auto status = std::filesystem::symlink_status(path, error);
+    if (error == std::errc::no_such_file_or_directory ||
+        (!error && !std::filesystem::exists(status))) return std::nullopt;
+    if (error) throw DbError("58030", "cannot inspect persisted table schema");
+    if (!std::filesystem::is_regular_file(status))
+        throw DbError("XX001", "persisted table schema is not a regular file");
+    std::ifstream input(path, std::ios::binary);
+    if (!input) throw DbError("58030", "cannot read persisted table schema");
+    auto schema = readSchema(input, physicalName);
+    if (input.bad()) throw DbError("58030", "cannot read persisted table schema");
+    if (schema.tablename != physicalName)
+        throw DbError("XX001", "invalid persisted table schema");
+    return schema;
+}
+
 // ========================================================================
 // Storage parameters (WITH clause)
 // ========================================================================

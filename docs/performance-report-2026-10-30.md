@@ -1,5 +1,33 @@
 # 数据库操作性能测试报告（2026-10-30）
 
+<!-- P43-D20 unaccepted draft checkpoint -->
+<a id="physical-array-catalog-upgrade-draft-20261107"></a>
+
+## 2026-11-07 P43/D20：真实旧数组目录升级；正常性能 NOTRUN
+
+本节记录未接受的P43功能草稿，候选为正常CMake C++17/O2 `71eb58dd64804bba739d7e4ecde9e43c65139a4f9fdb808585ae234b294f9ad6`；生产263文件／192头，本轮相对D18改7个生产路径。默认程序仍425165af…，没有默认提升或推送；下方D18及更早段落为历史结果。
+
+根据[PG18字段目录](https://www.postgresql.org/docs/18/catalog-pg-attribute.html)和[固定版本依赖源码](https://raw.githubusercontent.com/postgres/postgres/724edf9bde9d356724ad384a2e196edc3c9f80f7/src/backend/catalog/pg_depend.c)，数组字段应记录其真实数组类型，存储策略允许独立设置，内建固定类型可以没有依赖边。实际PG参照同时验证了内建数组零类型边和用户枚举数组的一条正常类型边。
+
+启动拥有者直接读取真实持久schema，避开递归进入目录服务和schema缓存，核实普通物理表字段、内建元素／数组对及已有依赖，再统一替换完整暂存结果。旧元素OID23可升级为1007；保留typmod、统计目标、显式存储／排序规则及其他依赖，自定义逻辑类型按其目录声明保留。不创建缺失的内建依赖。目录持久发布后再写版本标记；已发布的旧值／冲突拒绝修复，纯冷读不归一化旧数据。没有实际物理schema的目录声明及完整自定义数组语义尚未验收。
+
+初版D19的新建夹具46项虽通过，真实D16旧库仍保留元素OID，随后CREATE INDEX关闭连接。实际GDB在全局StorageEngine构造中的首次类型查询取得0，修复后同一路径取得23、实际字段为1007。类型映射现于首次使用初始化并保留至引擎退出，映射条目保持；新正式回归额外exec真实进程，防止仅在main之后测试升级。旧断连回复93B、原SQL、原失败、旧映像及审计器对不完整回复的首次错误均保留。
+
+| 验证 | 实际结果 | 限制 |
+| --- | --- | --- |
+| 原生 | 42个选定入口actual0；新回归56项及一个新进程正常退出 | full suite=false |
+| 正式简单协议 | 身份35条、目录9条，两份脚本及其拥有Main通过 | 暂缓的会话当前值／prepared／portal策略保持 |
+| 旧库专项 | 61条SQL（含参照／控制）、594行／4018单元／6NULL、41398B、9个正常Main；5195个闭库文件核验 | 真实闭库D16映像、完整字节／模式／SHA验证；不是可移植数据库备份 |
+| 旧库完整操作链 | 21条数组插入／查询／更新／删除／回滚／建删索引／重启操作；值、tag、状态、Ready一致，真实表OID对应后全7字段T7一致 | 只按实际查询取得的单表OID对应，不泛化至其他来源 |
+| 正常性能 | **NOTRUN**，没有正常样本或提速结论 | 升级和重复目录验证的启动／DDL成本尚未测量；不重采P40／P41／P42已关闭窗口 |
+
+宽范围15族PG／D20主对照仍保留完整原始观察和既有功能／来源差异；选定通过不代表整库等价。REGCLASS默认绑定／依赖、序列普通字段及完整缓存／WAL／恢复、生成列ALTER TYPE、空来源函数错误和其他非暂缓范围仍开放，原273状态22／166／70／15、292条原历史及暂缓文件保持。
+
+本轮压缩证据：[physical-array-catalog-upgrade-draft-20261107.json.gz](benchmarks/physical-array-catalog-upgrade-draft-20261107.json.gz)，6,217,909B，SHA256 `7d264c25aec5386b1c7ddb6c8167d2cd052cc17bc4675a8dba344eaa3f20932a`；内层JSON 34,597,510B，SHA256 `d216bc94b194bc17e308fbc5671f46f9ef59bc6b1bef234aab8f4725dd0fd7f6`。包含列出的完整原始SQL请求回复、原生源码／日志、独立解码模型、失败前缀和校验器；数据库映像与ELF／对象本体仅有本机清单／哈希引用。可通过gzip解码并按files及blobs_base64_by_sha256检查内嵌字节。
+
+用户指出的原56,047,459B性能JSON继续仅以5,977,159B gzip保留，已再次全量解压核对原SHA256，原始JSON不存在且受忽略规则保护；Git历史未改写。之前两次测试程序归档释放的2,368,126,976分配字节保持有效。重现本轮原生用例可按仓库普通测试构建流程运行 `tests/physical_array_catalog_upgrade_test.cpp`；它包含真实新进程启动检查。
+
+
 <!-- P43-D18 unaccepted draft checkpoint -->
 <a id="identity-sequence-catalog-draft-20261107"></a>
 

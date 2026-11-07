@@ -1,5 +1,13 @@
 # 全部文档检查清单
 
+<!-- P43-D20 unaccepted draft checkpoint -->
+## 最新库存与文档范围（P43/D20，2026-11-07）
+
+生产文件263／头192；测试2423份，顶层CPP1153／全部CPP1158。本轮只新增1份原生回归，D18已有2422份测试逐字节保持；正式登记仍686个唯一驱动／666份独立E2E，库存CLI通过。
+
+保留754个Markdown路径，仅在原8份文档插入本轮说明，不新增Markdown。既有47份gzip保持，新增1份本轮压缩证据，共48份；原始性能JSON仍由忽略规则排除。原273项及292条历史保持，全套未运行、性能NOTRUN；[集中报告](performance-report-2026-10-30.md#physical-array-catalog-upgrade-draft-20261107)。本次没有重新验收所有历史文档的功能声明。
+
+
 <!-- P43-D18 unaccepted draft checkpoint -->
 ## 最新库存与文档范围（P43/D18，2026-11-07）
 

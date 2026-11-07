@@ -277,6 +277,18 @@ public:
     // a published generation validates and never rewrites changed metadata.
     bool bootstrapBuiltinTypeProperties(bool requireCurrent = false);
     bool bootstrapSystemCatalogCollations(bool requireCurrent = false);
+    struct PhysicalArrayAttribute {
+        Oid relation = INVALID_OID;
+        int16_t number = 0;
+        std::string name;
+        Oid elementType = INVALID_OID;
+        bool useDefaultCollation = true;
+    };
+    // Witnesses come from real persisted schemas, not inferred catalog flags.
+    // Stage the complete field/dependency image before changing either vector.
+    bool bootstrapPhysicalArrayAttributes(
+        const std::vector<PhysicalArrayAttribute>& fields,
+        bool requireCurrent = false);
     // The immutable physical rows used by real catalog initialization.
     // Standalone/cold lookup shares these definitions without filesystem I/O,
     // catalog allocation, namespace creation or aliases inventing types.

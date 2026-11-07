@@ -119,6 +119,63 @@ static void migrateLegacyPublicDottedSequences(
 }
 
 namespace {
+constexpr char physicalArrayVersion[] = "DBMS_PHYSICAL_BUILTIN_ARRAY_ATTRIBUTES1\n";
+bool physicalArraysPublished(const fs::path& directory) {
+    const auto path = directory / ".physical_builtin_array_attributes_version";
+    std::error_code error;
+    const auto status = fs::symlink_status(path, error);
+    if (error == std::errc::no_such_file_or_directory ||
+        (!error && !fs::exists(status))) return false;
+    if (error) throw DbError("58030", "cannot inspect physical array version");
+    if (!fs::is_regular_file(status))
+        throw DbError("XX001", "invalid physical array version");
+    std::ifstream input(path, std::ios::binary);
+    if (!input) throw DbError("58030", "cannot read physical array version");
+    const std::string bytes((std::istreambuf_iterator<char>(input)), {});
+    if (input.bad() || bytes != physicalArrayVersion)
+        throw DbError("XX001", "invalid physical array version");
+    return true;
+}
+
+std::vector<CatalogManager::PhysicalArrayAttribute> physicalArrayAttributes(
+    const StorageEngine& engine, const std::string& database,
+    const CatalogManager& catalog) {
+    std::vector<CatalogManager::PhysicalArrayAttribute> fields;
+    for (const auto& relation : catalog.listClasses()) {
+        if (relation.relnamespace == 11 ||
+            (relation.relkind != 'r' && relation.relkind != 'p')) continue;
+        const auto nameSpace = catalog.getNamespace(relation.relnamespace);
+        if (!nameSpace) throw DbError("XX001", "physical table has no namespace");
+        const auto physicalName = nameSpace->nspname == "public" ? relation.relname
+            : nameSpace->nspname + "__" + relation.relname;
+        const auto schema = engine.readPersistedSchemaForCatalog(database, physicalName);
+        // A catalog-only declaration is not evidence of physical array storage.
+        if (!schema) continue;
+        for (size_t i = 0; i < schema->len; ++i) {
+            const auto& column = schema->cols[i];
+            if (!column.isArray || !column.domainName.empty() || !column.enumValues.empty())
+                continue;
+            // Older physical schemas can omit the declared domain identity.
+            // Its real catalog owner takes precedence over a base codec name.
+            const auto attribute = catalog.getAttribute(relation.oid, column.dataName);
+            const auto logicalType = attribute ? catalog.getType(attribute->atttypid) : std::nullopt;
+            if (logicalType && logicalType->typnamespace != 11) continue;
+            std::string elementName = column.dataType;
+            while (elementName.size() >= 2 &&
+                   elementName.compare(elementName.size() - 2, 2, "[]") == 0)
+                elementName.resize(elementName.size() - 2);
+            // Match the existing DDL owner for legacy physical codec spellings.
+            const Oid element = elementName == "float" && column.dsize == sizeof(float) ? 700
+                : elementName == "double" && column.dsize == sizeof(double) ? 701
+                : elementName == "blob" ? 17 : mapBuiltinTypeNameToOid(elementName);
+            if (!element) continue; // User-defined type identity has its own owner.
+            fields.push_back({relation.oid, static_cast<int16_t>(i + 1),
+                column.dataName, element, column.collation.empty()});
+        }
+    }
+    return fields;
+}
+
 struct CatalogDatabaseIdentity { uint64_t device = 0; uint64_t inode = 0; };
 bool databaseIdentity(const std::filesystem::path& path, CatalogDatabaseIdentity& identity,
                       bool reservedCatalogOnly = false) {
@@ -194,6 +251,9 @@ std::shared_ptr<CatalogManager> loadOwnedCatalog(
     const bool publishedSystemAttributes=system_attributes::published(directory);
     const bool initializedSystemAttributes=catalog->bootstrapSystemAttributes(publishedSystemAttributes);
     (void)catalog->bootstrapSystemCatalogCollations(true);
+    const bool publishedPhysicalArrays = physicalArraysPublished(directory);
+    const bool initializedPhysicalArrays = catalog->bootstrapPhysicalArrayAttributes(
+        physicalArrayAttributes(engine, database, *catalog), publishedPhysicalArrays);
     // Some legitimate server cluster scaffolds already have tlist.lst and
     // auth metadata, but no namespace catalog. A newly bootstrapped logical
     // public namespace must have the same checked physical marker as CREATE
@@ -218,7 +278,7 @@ std::shared_ptr<CatalogManager> loadOwnedCatalog(
         }
     }
     migrateLegacyPublicDottedSequences(engine, database, *catalog);
-    if((initializedClassCatalog || initializedOwnedCatalogs || initializedSequenceCatalog || initializedStatisticsView || initializedSystemAttributes || initializedTypeProperties || initializedCatalogCollations || !publishedTypeProperties || !publishedCatalogCollations) && !catalog->persistAll())
+    if((initializedClassCatalog || initializedOwnedCatalogs || initializedSequenceCatalog || initializedStatisticsView || initializedSystemAttributes || initializedTypeProperties || initializedCatalogCollations || initializedPhysicalArrays || !publishedTypeProperties || !publishedCatalogCollations || !publishedPhysicalArrays) && !catalog->persistAll())
         throw DbError("58030","could not publish initialized system view identities");
     if(!publishedSequenceCatalog &&
        index_file::writeAtomicallyNoReplace(sequenceMarker,sequenceVersion)!=index_file::WriteResult::OK)
@@ -235,6 +295,10 @@ std::shared_ptr<CatalogManager> loadOwnedCatalog(
     if(!publishedCatalogCollations && index_file::writeAtomicallyNoReplace(directory/".system_catalog_collation_version",
        system_catalog_collation::version)!=index_file::WriteResult::OK)
         throw DbError("58030","could not publish system catalog collation version");
+    if (!publishedPhysicalArrays && index_file::writeAtomicallyNoReplace(
+            directory / ".physical_builtin_array_attributes_version", physicalArrayVersion)
+            != index_file::WriteResult::OK)
+        throw DbError("58030", "could not publish physical array version");
     return catalog;
 }
 }

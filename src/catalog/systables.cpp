@@ -5,7 +5,11 @@
 
 namespace dbms {
 
-static const std::unordered_map<std::string, Oid> kBuiltinTypeMap = {
+static const auto& builtinTypeMap() {
+    // Existing databases are opened from the global engine's constructor,
+    // before this translation unit's dynamic initialization is guaranteed.
+    // Keep immutable lookup data available through engine shutdown as well.
+    static const auto* entries = new const std::unordered_map<std::string, Oid>{
     {"bool", 16}, {"boolean", 16},
     {"bool[]", 1000}, {"boolean[]", 1000},
     {"bytea", 17},
@@ -89,13 +93,16 @@ static const std::unordered_map<std::string, Oid> kBuiltinTypeMap = {
     {"tstzrange", 3910}, {"tstzrange[]", 3911},
     {"daterange", 3912}, {"daterange[]", 3913},
     {"int8range", 3926}, {"int8range[]", 3927},
-};
+    };
+    return *entries;
+}
 
 Oid mapBuiltinTypeNameToOid(const std::string& typeName) {
     if (typeName == "record") return 2249;
     if (typeName == "record[]") return 2287;
-    auto it = kBuiltinTypeMap.find(typeName);
-    if (it != kBuiltinTypeMap.end()) return it->second;
+    const auto& entries = builtinTypeMap();
+    auto it = entries.find(typeName);
+    if (it != entries.end()) return it->second;
     return INVALID_OID;
 }
 
@@ -104,8 +111,9 @@ bool isBuiltinTypeOid(Oid oid) {
     // OID 18 is PostgreSQL's internal "char" type, distinct from SQL CHAR.
     // It has no unquoted SQL type-name mapping but remains a built-in OID.
     if (oid == 18 || oid == 2249 || oid == 2287) return true;
+    const auto& entries = builtinTypeMap();
     return std::any_of(
-        kBuiltinTypeMap.begin(), kBuiltinTypeMap.end(),
+        entries.begin(), entries.end(),
         [oid](const auto& entry) { return entry.second == oid; });
 }
 

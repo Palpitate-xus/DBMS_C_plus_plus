@@ -1,5 +1,11 @@
 # DBMS C++
 
+<!-- P43-D20 unaccepted draft checkpoint -->
+## 2026-11-07 P43/D20：旧库数组目录升级草稿
+
+已补齐普通物理表旧数组列的真实类型 OID／已有依赖升级，并修复全局引擎首次启动时的类型映射初始化顺序。42个选定原生入口、两份正式协议脚本通过；真实旧库的21条写入／回滚／索引／重启链与PG参照相符。本批仍是P43未接受草稿，正常性能 **NOTRUN**，默认程序未替换。验证、初版失败及剩余工作见[本轮报告](docs/performance-report-2026-10-30.md#physical-array-catalog-upgrade-draft-20261107)；下方D18及更早内容保留各自历史口径。
+
+
 <!-- P43-D18 unaccepted draft checkpoint -->
 ## 2026-11-07 P43：身份序列与系统目录草稿
 

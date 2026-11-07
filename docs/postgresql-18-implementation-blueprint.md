@@ -1,5 +1,13 @@
 # DBMS_C_plus_plus 对标 PostgreSQL 18.6：逐项完整实施蓝图
 
+<!-- P43-D20 unaccepted draft checkpoint -->
+## 当前推进：P43/D20 旧数组目录草稿（2026-11-07）
+
+普通物理表的已识别旧数组OID／已有类型依赖升级已完成选定验证，并修复首次启动的静态初始化顺序；42个选定原生入口及真实旧库操作链通过。原273项未关闭，292条既有进展保持，正常性能NOTRUN。
+
+继续完成REGCLASS默认早绑定和真实对象依赖、序列3个普通字段及缓存／WAL／恢复、生成列ALTER TYPE、空来源函数错误阶段、目录其他声明和全部非暂缓范围；还需测量升级和重复目录验证的启动／DDL成本。用户暂缓范围保持。[本轮事实与证据](performance-report-2026-10-30.md#physical-array-catalog-upgrade-draft-20261107)。
+
+
 <!-- P43-D18 unaccepted draft checkpoint -->
 ## 当前推进：P43/D18 草稿检查点（2026-11-07）
 

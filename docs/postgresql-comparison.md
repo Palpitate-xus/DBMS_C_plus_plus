@@ -1,5 +1,13 @@
 # 与 PostgreSQL 18 的功能和性能差距
 
+<!-- P43-D20 unaccepted draft checkpoint -->
+## 最新 P43/D20（2026-11-07）：普通旧数组目录取得有限闭环
+
+本轮对照真实PG18.6的类型／字段目录和内建类型省略依赖的处理，完成有实际物理schema佐证的普通表数组升级；保留已存在的正常类型边并调整其目标，不补造缺失的内建依赖。真实旧库21条操作链的值、NULL、事务状态和tag一致，按各自真实表OID对应后完整7字段T7也一致；这只覆盖选定用例。
+
+原273项保持22 complete／166 partial／70 unverified／15用户暂缓。REGCLASS默认依赖、完整序列与恢复、目录全行、其他非暂缓功能及性能差距仍开放；正常成本未测，不能据此缩小整库速度差距。[结果和未完项](performance-report-2026-10-30.md#physical-array-catalog-upgrade-draft-20261107)；下方D18及更早数据为对应历史版本。
+
+
 <!-- P43-D18 unaccepted draft checkpoint -->
 ## 最新源代码检查点：P43/D18 仍未接受（2026-11-07）
 

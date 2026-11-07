@@ -1,5 +1,13 @@
 # DBMS 功能测试报告
 
+<!-- P43-D20 unaccepted draft checkpoint -->
+## 最新 P43/D20 草稿验证（2026-11-07；full suite=false）
+
+42个选定原生入口全部actual0。新增数组回归的56项及新进程首次启动通过，覆盖完整预检、已发布冲突拒绝、存储／排序规则和typmod保留、已有依赖及逻辑类型声明。身份35条、目录9条正式协议脚本实际0。
+
+真实闭库D16映像经完整字节／模式／SHA核对后升级；专项共61条SQL观察、594行／4018单元／6NULL、41398请求回复字节和9个正常Main，两个独立解码器核对。旧库21条完整操作链在实际表OID对应后全7字段T7及值／状态／tag／Ready与PG一致；原D19在第10条断连的93B不完整回复原样保留，不补造Ready。宽范围15族对照仍保留既有差异，不能称为全部PG兼容。详见[本轮报告](performance-report-2026-10-30.md#physical-array-catalog-upgrade-draft-20261107)；性能NOTRUN。
+
+
 <!-- P43-D18 unaccepted draft checkpoint -->
 ## 最新 P43/D18 草稿验证（2026-11-07；full suite=false）
 
