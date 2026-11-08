@@ -1,5 +1,11 @@
 # 全部文档检查清单
 
+## 2026-11-08：数值与默认值更新
+
+本轮更新数值范围、精确商与余数，以及 `to_char` DEFAULT 的局部防错写；保留 PostgreSQL 范围差异和其他未结构化回退风险。证据与逐组对照见[测试报告](test-report.md#d35-numeric-tochar-20261108)及[性能报告](performance-report-2026-10-30.md#d35-numeric-tochar-performance-20261108)。旧正文和历史记录保留；新压缩证据不含数据库镜像或 ELF。
+
+
+
 ## 2026-11-08：D30 更新
 
 本轮更新现有状态、比较、蓝图、测试和性能报告；[性能报告](performance-report-2026-10-30.md#d30-catalog-transaction-evidence-20261108)包含 21 组完整墙钟／CPU 对照及局限，新增压缩证据索引在 [manifest](benchmarks/manifest.json)。旧正文保留，原273项与历史292项未改。

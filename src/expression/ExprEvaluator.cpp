@@ -298,22 +298,7 @@ static std::optional<Numeric> tryParseNumeric(const std::string& s) {
 
 static Numeric numericTruncatedQuotient(const Numeric& dividend,
                                         const Numeric& divisor) {
-    const Numeric rounded = dividend / divisor;
-    if (!rounded.isFinite()) return rounded;
-    std::string integral = rounded.toString();
-    const size_t point = integral.find('.');
-    if (point != std::string::npos) integral.resize(point);
-    if (integral.empty() || integral == "-") integral += '0';
-    Numeric quotient(integral);
-    // Division rounds at its selected scale, possibly all the way to the
-    // next integer. Dropping fractional digits alone cannot undo that carry.
-    // Correct the at-most-one-unit overshoot using exact decimal products.
-    const Numeric product = quotient * divisor;
-    const Numeric productMagnitude = product.sign() < 0 ? -product : product;
-    const Numeric dividendMagnitude = dividend.sign() < 0 ? -dividend : dividend;
-    if (productMagnitude > dividendMagnitude)
-        quotient -= Numeric(static_cast<int64_t>(quotient.sign()));
-    return quotient;
+    return dividend.truncDivide(divisor);
 }
 
 static std::optional<Money> tryParseMoney(const std::string& value,
@@ -2701,6 +2686,8 @@ static ExprValue evaluateNumericPowerOperator(const ExprValue& left,
                << std::setprecision(numericPowerDisplayScale(result))
                << result;
         return ExprValue("numeric", output.str(), false);
+    } catch (const NumericRangeError&) {
+        throw DbError("22003", "numeric value out of range");
     } catch (const std::invalid_argument&) {
         throw std::runtime_error(
             "numeric value out of range (SQLSTATE 22003)");
@@ -3073,41 +3060,47 @@ ExprValue ExprEvaluator::applyArithmetic(const std::string& op,
         auto nl = tryParseNumeric(l.value);
         auto nr = tryParseNumeric(r.value);
         if (nl && nr) {
-            if (op == "^") return evaluateNumericPowerOperator(l, r);
-            Numeric res;
-            if (op == "+") res = *nl + *nr;
-            else if (op == "-") res = *nl - *nr;
-            else if (op == "*") res = *nl * *nr;
-            else if (op == "/") {
-                if (nr->isFinite() && nr->sign() == 0)
-                    throw DbError("22012", "division by zero");
-                res = *nl / *nr;
-            }
-            else if (op == "%") {
-                if (nl->isNaN() || nr->isNaN()) {
-                    res = Numeric::nan();
-                } else if (nr->isFinite() && nr->sign() == 0) {
-                    throw DbError("22012", "division by zero");
-                } else if (nl->isInfinite()) {
-                    res = Numeric::nan();
-                } else if (nr->isInfinite()) {
-                    res = *nl;
-                } else {
-                    res = *nl - numericTruncatedQuotient(*nl, *nr) * *nr;
+            try {
+                if (op == "^") return evaluateNumericPowerOperator(l, r);
+                Numeric res;
+                if (op == "+") res = *nl + *nr;
+                else if (op == "-") res = *nl - *nr;
+                else if (op == "*") res = *nl * *nr;
+                else if (op == "/") {
+                    if (nr->isFinite() && nr->sign() == 0)
+                        throw DbError("22012", "division by zero");
+                    res = *nl / *nr;
                 }
+                else if (op == "%") {
+                    if (nl->isNaN() || nr->isNaN()) {
+                        res = Numeric::nan();
+                    } else if (nr->isFinite() && nr->sign() == 0) {
+                        throw DbError("22012", "division by zero");
+                    } else if (nl->isInfinite()) {
+                        res = Numeric::nan();
+                    } else if (nr->isInfinite()) {
+                        res = *nl;
+                    } else {
+                        res = nl->exactRemainder(*nr);
+                    }
+                }
+                else return ExprValue("numeric", "", true);
+                // Exponents contribute to decimal scale, not to the count of
+                // characters after '.'. Preserve zero/trailing-zero scale too.
+                const int tsL = numericTextScale(l.value, *nl);
+                const int tsR = numericTextScale(r.value, *nr);
+                if (op == "/")
+                    return ExprValue("numeric", res.toString(), false);
+                int target = std::max(tsL, tsR);
+                if (op == "*") target = tsL + tsR;
+                // Numeric renders the requested scale itself; appending zeros
+                // here would also corrupt NaN and Infinity spellings.
+                return ExprValue("numeric", res.withScale(target).toString(), false);
+            } catch (const NumericRangeError&) {
+                // Do not lose an arithmetic range failure in the expression
+                // receiver: in particular, DEFAULT must not store its SQL text.
+                throw DbError("22003", "numeric value out of range");
             }
-            else return ExprValue("numeric", "", true);
-            // Exponents contribute to decimal scale, not to the count of
-            // characters after '.'. Preserve zero/trailing-zero scale too.
-            const int tsL = numericTextScale(l.value, *nl);
-            const int tsR = numericTextScale(r.value, *nr);
-            if (op == "/")
-                return ExprValue("numeric", res.toString(), false);
-            int target = std::max(tsL, tsR);
-            if (op == "*") target = tsL + tsR;
-            // Numeric renders the requested scale itself; appending zeros
-            // here would also corrupt NaN and Infinity spellings.
-            return ExprValue("numeric", res.withScale(target).toString(), false);
         }
     }
 
@@ -3124,16 +3117,20 @@ ExprValue ExprEvaluator::applyArithmetic(const std::string& op,
         auto nl2 = tryParseNumeric(l.value);
         auto nr2 = tryParseNumeric(r.value);
         if (nl2 && nr2) {
-            Numeric res;
-            if (op == "+") res = *nl2 + *nr2;
-            else if (op == "-") res = *nl2 - *nr2;
-            else if (op == "*") res = *nl2 * *nr2;
-            else if (op == "/") {
-                if (nr2->isFinite() && nr2->sign() == 0)
-                    throw DbError("22012", "division by zero");
-                res = *nl2 / *nr2;
-            } else return ExprValue("numeric", "", true);
-            return ExprValue("numeric", res.toString(), false);
+            try {
+                Numeric res;
+                if (op == "+") res = *nl2 + *nr2;
+                else if (op == "-") res = *nl2 - *nr2;
+                else if (op == "*") res = *nl2 * *nr2;
+                else if (op == "/") {
+                    if (nr2->isFinite() && nr2->sign() == 0)
+                        throw DbError("22012", "division by zero");
+                    res = *nl2 / *nr2;
+                } else return ExprValue("numeric", "", true);
+                return ExprValue("numeric", res.toString(), false);
+            } catch (const NumericRangeError&) {
+                throw DbError("22003", "numeric value out of range");
+            }
         }
     }
 
@@ -10802,8 +10799,7 @@ void ExprEvaluator::registerStatelessBuiltins() {
                 } else if (right->isInfinite()) {
                     remainder = *left;
                 } else {
-                    remainder = *left -
-                        numericTruncatedQuotient(*left, *right) * *right;
+                    remainder = left->exactRemainder(*right);
                 }
                 const int scale = std::max(
                     numericTextScale(a[0].value, *left),
@@ -11114,8 +11110,14 @@ void ExprEvaluator::registerStatelessBuiltins() {
             throw std::runtime_error(
                 "division by zero (SQLSTATE 22012)");
 
-        return ExprValue("numeric",
-            numericTruncatedQuotient(*dividend, *divisor).toString(), false);
+        try {
+            return ExprValue("numeric",
+                numericTruncatedQuotient(*dividend, *divisor).toString(), false);
+        } catch (const NumericRangeError&) {
+            // The default-value receiver must see this implementation limit
+            // as a failure instead of treating the SQL source as a value.
+            throw DbError("22003", "numeric value out of range");
+        }
     };
     // factorial(n) — n! for small non-negative n
     functions_["factorial"] = [](const std::vector<ExprValue>& a) {
@@ -13817,8 +13819,16 @@ void ExprEvaluator::registerStatelessBuiltins() {
         const bool exactNumeric = tn == "numeric" || tn == "decimal" ||
             tn == "integer" || tn == "int" || tn == "smallint" ||
             tn == "bigint" || tn == "int2" || tn == "int4" || tn == "int8";
+        if (exactNumeric) {
+            try {
+                return ExprValue("text", formatNumeric(scalarDoubleArgument(a[0]), fmt,
+                    vval), false);
+            } catch (const NumericRangeError&) {
+                throw DbError("22003", "numeric value out of range");
+            }
+        }
         return ExprValue("text", formatNumeric(scalarDoubleArgument(a[0]), fmt,
-            exactNumeric ? vval : std::string()), false);
+            std::string()), false);
     };
 
     // ------------------------------------------------------------------------

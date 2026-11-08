@@ -250,7 +250,7 @@ Numeric Numeric::fromString(const std::string& s) {
             const int digit = ch - '0';
             if (magnitude >
                 (std::numeric_limits<int64_t>::max() - digit) / 10) {
-                throw std::invalid_argument("numeric exponent out of range");
+                throw NumericRangeError("numeric exponent out of range");
             }
             magnitude = magnitude * 10 + digit;
         }
@@ -273,7 +273,7 @@ Numeric Numeric::fromString(const std::string& s) {
     if (fracPart.size() > static_cast<size_t>(
                                   std::numeric_limits<int64_t>::max() -
                                   kMaxPrecision)) {
-        throw std::invalid_argument("numeric scale exceeds maximum");
+        throw NumericRangeError("numeric scale exceeds maximum");
     }
     const int64_t fractionalScale =
         static_cast<int64_t>(fracPart.size());
@@ -285,7 +285,7 @@ Numeric Numeric::fromString(const std::string& s) {
     }
     if (exponent > fractionalScale + kMaxPrecision ||
         exponent < fractionalScale - kMaxPrecision) {
-        throw std::invalid_argument("numeric exponent out of range");
+        throw NumericRangeError("numeric exponent out of range");
     }
     const int64_t resultingScale = fractionalScale - exponent;
     if (resultingScale < 0) {
@@ -293,19 +293,19 @@ Numeric Numeric::fromString(const std::string& s) {
         const uint64_t availableDigits = n.digits_.size() < kMaxPrecision
             ? static_cast<uint64_t>(kMaxPrecision - n.digits_.size()) : 0;
         if (zeros > availableDigits) {
-            throw std::invalid_argument("numeric precision exceeds maximum");
+            throw NumericRangeError("numeric precision exceeds maximum");
         }
         n.digits_.insert(n.digits_.end(), static_cast<size_t>(zeros), 0);
         n.scale_ = 0;
     } else {
         if (resultingScale > kMaxPrecision)
-            throw std::invalid_argument("numeric scale exceeds maximum");
+            throw NumericRangeError("numeric scale exceeds maximum");
         n.scale_ = static_cast<int>(resultingScale);
     }
 
     n.normalize();
     if (n.precision_ > kMaxPrecision) {
-        throw std::invalid_argument("numeric precision exceeds maximum");
+        throw NumericRangeError("numeric precision exceeds maximum");
     }
     return n;
 }
@@ -329,7 +329,7 @@ void Numeric::normalize() {
     }
     precision_ = static_cast<int>(digits_.size());
     if (precision_ > kMaxPrecision)
-        throw std::invalid_argument("numeric precision exceeds maximum");
+        throw NumericRangeError("numeric precision exceeds maximum");
 }
 
 int Numeric::sign() const {
@@ -445,6 +445,74 @@ Numeric Numeric::operator*(const Numeric& rhs) const {
     return r;
 }
 
+Numeric Numeric::truncDivide(const Numeric& rhs) const {
+    // Keep the native special-value and zero-divisor behavior of operator/.
+    // SQL callers independently implement their existing division-by-zero rule.
+    if (!isFinite() || !rhs.isFinite() || rhs.sign() == 0)
+        return *this / rhs;
+
+    // |a| / |b| = (a_digits * 10^b_scale) / (b_digits * 10^a_scale).
+    // Apply only the scale difference and divide integer magnitudes once.
+    if (sign() == 0) return Numeric(0);
+    // Native Numeric products may have much larger scales than parsed inputs.
+    // Decide the obvious outcomes by length before allocating shifted digits.
+    const int64_t shift = static_cast<int64_t>(rhs.scale_) - scale_;
+    const int64_t dividendSize = static_cast<int64_t>(digits_.size()) + std::max<int64_t>(shift, 0);
+    const int64_t divisorSize = static_cast<int64_t>(rhs.digits_.size()) + std::max<int64_t>(-shift, 0);
+    if (dividendSize < divisorSize) return Numeric(0);
+    if (dividendSize - divisorSize > kMaxPrecision)
+        throw NumericRangeError("numeric precision exceeds maximum");
+    std::vector<uint8_t> dividend = digits_;
+    std::vector<uint8_t> divisor = rhs.digits_;
+    if (shift > 0) dividend.insert(dividend.end(), static_cast<size_t>(shift), 0);
+    else if (shift < 0) divisor.insert(divisor.end(), static_cast<size_t>(-shift), 0);
+    std::vector<uint8_t> quotient, remainder;
+    divDigitVectors(dividend, divisor, quotient, remainder);
+    Numeric result;
+    result.digits_ = std::move(quotient);
+    result.scale_ = 0;
+    result.sign_ = sign_ * rhs.sign_;
+    result.normalize(); // Reject only an oversized final integer quotient.
+    return result;
+}
+
+Numeric Numeric::exactRemainder(const Numeric& rhs) const {
+    if (isNaN() || rhs.isNaN()) return nan();
+    if (rhs.isFinite() && rhs.sign() == 0)
+        throw std::domain_error("division by zero");
+    if (isInfinite()) return nan();
+    if (rhs.isInfinite()) return *this;
+
+    const int commonScale = std::max(scale_, rhs.scale_);
+    if (sign() == 0) {
+        Numeric zero(0);
+        zero.scale_ = commonScale;
+        return zero;
+    }
+    const int64_t leftShift = static_cast<int64_t>(commonScale) - scale_;
+    const int64_t rightShift = static_cast<int64_t>(commonScale) - rhs.scale_;
+    const int64_t leftSize = static_cast<int64_t>(digits_.size()) + leftShift;
+    const int64_t rightSize = static_cast<int64_t>(rhs.digits_.size()) + rightShift;
+    if (leftSize < rightSize) return withScale(commonScale);
+    // Parsed SQL operands fit this bound. Native callers can construct huge
+    // scales via multiplication; reject rather than allocate unbounded zeros.
+    constexpr int64_t maxAlignedDigits = 2LL * kMaxPrecision;
+    if (leftSize > maxAlignedDigits || rightSize > maxAlignedDigits)
+        throw NumericRangeError("numeric scale exceeds maximum");
+    std::vector<uint8_t> dividend = digits_;
+    std::vector<uint8_t> divisor = rhs.digits_;
+    dividend.insert(dividend.end(), static_cast<size_t>(leftShift), 0);
+    divisor.insert(divisor.end(), static_cast<size_t>(rightShift), 0);
+    std::vector<uint8_t> quotient, remainder;
+    divDigitVectors(dividend, divisor, quotient, remainder);
+    Numeric result;
+    result.digits_ = std::move(remainder);
+    result.scale_ = commonScale;
+    result.sign_ = sign_;
+    result.normalize();
+    return result;
+}
+
 Numeric Numeric::operator/(const Numeric& rhs) const {
     if (nan_ || rhs.nan_) return nan();
     if (inf_ || rhs.inf_) {
@@ -527,9 +595,12 @@ int Numeric::compareMagnitudes(const Numeric& a, const Numeric& b) {
 }
 
 Numeric Numeric::multiplyMagnitudes(const Numeric& a, const Numeric& b) {
+    const int64_t scale = static_cast<int64_t>(a.scale_) + b.scale_;
+    if (scale > std::numeric_limits<int>::max())
+        throw NumericRangeError("numeric scale exceeds maximum");
     Numeric r;
     r.digits_ = mulDigitVectors(a.digits_, b.digits_);
-    r.scale_ = a.scale_ + b.scale_;
+    r.scale_ = static_cast<int>(scale);
     r.normalize();
     return r;
 }
@@ -586,7 +657,7 @@ Numeric Numeric::withScale(int newScale, RoundingMode mode) const {
             static_cast<int64_t>(newScale) - scale_;
         if (addedDigits > kMaxPrecision -
                               static_cast<int64_t>(digits_.size())) {
-            throw std::invalid_argument(
+            throw NumericRangeError(
                 "numeric precision exceeds maximum");
         }
         r.digits_ = digits_;
@@ -607,7 +678,7 @@ Numeric Numeric::withScale(int newScale, RoundingMode mode) const {
             const int64_t integerZeros = -static_cast<int64_t>(newScale);
             if (integerZeros > kMaxPrecision -
                                    static_cast<int64_t>(r.digits_.size())) {
-                throw std::invalid_argument(
+                throw NumericRangeError(
                     "numeric precision exceeds maximum");
             }
             r.digits_.insert(r.digits_.end(),

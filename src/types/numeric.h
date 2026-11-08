@@ -7,6 +7,13 @@
 
 namespace dbms {
 
+// An implementation range limit, distinct from malformed input.  Deriving
+// from invalid_argument preserves existing native callers' exception contract.
+class NumericRangeError : public std::invalid_argument {
+public:
+    using std::invalid_argument::invalid_argument;
+};
+
 // Lightweight arbitrary-precision decimal (numeric/decimal) with NaN and
 // signed Infinity support.  Digits are stored in sign-magnitude form as a
 // sequence of decimal digits; `scale` is the number of digits after the
@@ -38,6 +45,14 @@ public:
     Numeric operator-(const Numeric& rhs) const;
     Numeric operator*(const Numeric& rhs) const;
     Numeric operator/(const Numeric& rhs) const;
+
+    // Exact integer quotient, truncated toward zero, without a rounded
+    // fractional intermediate. Special values match operator/.
+    Numeric truncDivide(const Numeric& rhs) const;
+
+    // Exact remainder with the dividend's sign and common fractional scale.
+    // Native finite division by zero raises std::domain_error.
+    Numeric exactRemainder(const Numeric& rhs) const;
 
     Numeric& operator+=(const Numeric& rhs) { *this = *this + rhs; return *this; }
     Numeric& operator-=(const Numeric& rhs) { *this = *this - rhs; return *this; }
