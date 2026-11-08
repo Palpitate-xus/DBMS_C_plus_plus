@@ -10,6 +10,8 @@
 
 在冻结基线的所测 `replace` 查询中，参数内的序列调用和除零错误被遗漏；实际 PostgreSQL 对照以及严格 UDF、CASE 和 COALESCE 的范围控制见[标量参数副作用对照](test-report.md#ordinary-scalar-effects-20261108)。该结果不能泛化为所有严格函数或所有执行路径，现有功能账目不变。
 
+扩展到 89 条普通 SQL 和冷重启动作后，含页 pin 修复的冻结版本仍有 13 条语义差异，包括非 NULL 参数的序列副作用和一条动态 DDL 重入观察；所测写入及重启值与 PostgreSQL 一致。另在项目私有存储格式中，三个变长字段目录损坏样例虽有有效页校验和，查询仍返回错误成功值；这不是 PostgreSQL 磁盘格式对照，详见[损坏目录验证](test-report.md#row-variable-directory-corruption-20261108)。两项缺口均未修复。
+
 ## 2026-11-08：numeric 十进制对数
 
 `ln`、`log` 和 `log10` 的 numeric 路径改为十进制计算，修复已复现的高精度错误值和默认值冷重启反例；浮点重载保留。最终 CMake 程序、选定 SQL／事务／冷重启与独立原语测试的范围见[测试报告](test-report.md#numeric-log-decimal-20261108)。Numeric 精度和 scale 仍各限 1000 位，部分错误诊断与 PostgreSQL 不同；长除数的所有舍入边界尚未证明完全一致。零列缺陷仍开放。
