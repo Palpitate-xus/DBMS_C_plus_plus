@@ -10602,47 +10602,15 @@ void ExprEvaluator::registerStatelessBuiltins() {
         return boundedFloat8(a, std::acos, -1.0, 1.0);
     };
     functions_["atan"]  = [float8Unary](const auto& a) { return float8Unary(a, std::atan); };
-    // PG presents exp/ln/log/sqrt as numeric with fixed display scales:
-    //   exp: 15 frac digits for integer input, 16 for fractional input;
-    //   ln/log/log10: 16 for fractional or (ln) any input, bare for exact int log of int;
-    // sqrt uses the typed floating/decimal implementations below.
-    // Values are computed in long double to reproduce PG's 16th digit.
-    auto numericFixed = [](long double v, int frac) {
-        std::ostringstream out;
-        out << std::fixed << std::setprecision(frac) << v;
-        return ExprValue("numeric", out.str(), false);
-    };
-    auto argHasDot = [](const std::vector<ExprValue>& a) -> bool {
-        return !a.empty() && !a[0].isNull && a[0].value.find('.') != std::string::npos;
-    };
-    // Keep the permissive public asDouble() contract, but do not turn a
-    // valid SQL numeric outside double range into zero for these functions.
-    auto transcendentalArgument = [](const ExprValue& arg, bool rejectRoundedOne) {
-        if (ExprHelper::canonicalResultTypeName(arg.typeName) != "numeric")
-            return static_cast<long double>(scalarDoubleArgument(arg));
-        Numeric exact;
-        try { exact = Numeric(arg.value); }
-        catch (const NumericRangeError&) { throw DbError("22003", "numeric value out of range"); }
-        catch (const std::invalid_argument&) { throw DbError("22P02", "invalid numeric input"); }
-        if (!exact.isFinite()) return static_cast<long double>(scalarDoubleArgument(arg));
-        errno = 0;
-        char* end = nullptr;
-        const long double parsed = std::strtold(arg.value.c_str(), &end);
-        const bool consumed = end != arg.value.c_str();
-        while (*end && std::isspace(static_cast<unsigned char>(*end))) ++end;
-        if (errno == ERANGE || !consumed || *end != '\0' ||
-            !std::isfinite(parsed) || (parsed == 0.0L && exact.sign() != 0))
-            throw DbError("22003", "numeric value out of range");
-        // Keep the existing ordinary-input computational path. Wider finite
-        // numerics are not returned as new approximate values: without a
-        // decimal transcendental implementation their claimed precision is
-        // unverified, so reject instead of silently substituting zero.
-        const double ordinary = scalarDoubleArgument(arg);
-        if (!std::isfinite(ordinary) || (ordinary == 0.0 && exact.sign() != 0))
-            throw DbError("22003", "numeric precision exceeds transcendental implementation");
-        if (rejectRoundedOne && ordinary == 1.0 && exact != Numeric(1))
-            throw DbError("22003", "numeric precision exceeds logarithm implementation");
-        return static_cast<long double>(ordinary);
+    // Parse the resolved numeric overload without converting through double.
+    auto parseTranscendentalNumeric = [](const ExprValue& input) {
+        try {
+            return Numeric(input.value);
+        } catch (const NumericRangeError& error) {
+            throw DbError("22003", error.what());
+        } catch (const std::invalid_argument&) {
+            throw DbError("22P02", "invalid numeric input");
+        }
     };
     // Exact base-10 powers can be recognized digit-by-digit, without a
     // floating tolerance. Their integer logarithm has no approximation error.
@@ -10673,17 +10641,38 @@ void ExprEvaluator::registerStatelessBuiltins() {
         catch (const NumericRangeError&) { throw DbError("22003", "numeric value out of range"); }
         return ExprValue("numeric", std::move(text), false);
     };
-    auto requireLogarithmArgument = [](long double value) {
-        if (value <= 0) {
-            throw std::runtime_error(
-                "invalid argument for logarithm (SQLSTATE 2201E)");
+    auto numericLogarithm = [exactPowerTenLog](const Numeric& value, const Numeric& base) {
+        // PostgreSQL checks NaN first, then domain errors, then infinity.
+        if (base.isNaN() || value.isNaN()) return ExprValue("numeric", "NaN", false);
+        const auto inputSign = [](const Numeric& n) {
+            return n.isInfinite() ? (n.toString().front() == '-' ? -1 : 1) : n.sign();
+        };
+        const int baseSign = inputSign(base), valueSign = inputSign(value);
+        const auto reject = [](int sign) {
+            if (sign < 0) throw DbError("2201E", "cannot take logarithm of a negative number");
+            if (sign == 0) throw DbError("2201E", "cannot take logarithm of zero");
+        };
+        if (base.isInfinite() || value.isInfinite()) {
+            if (baseSign < 0 || valueSign < 0) reject(-1);
+            if (baseSign == 0 || valueSign == 0) reject(0);
+        } else {
+            reject(baseSign);
+            reject(valueSign);
         }
-    };
-    auto logFixed = [numericFixed](long double value, bool nonzeroExpected) {
-        auto result = numericFixed(value, 16);
-        if (nonzeroExpected && Numeric(result.value).sign() == 0)
-            throw DbError("22003", "numeric precision exceeds logarithm implementation");
-        return result;
+        if (!base.isInfinite() && !value.isInfinite() && base == Numeric(1))
+            throw DbError("22012", "division by zero");
+        // Keep the existing exact power-of-ten fast path, including its scale
+        // and actual Numeric capacity check.
+        if (base.isFinite() && value.isFinite() && base == Numeric(10))
+            if (auto result = exactPowerTenLog(value, base.scale())) return *result;
+        try {
+            return ExprValue("numeric", value.logarithm(base).toString(), false);
+        } catch (const NumericRangeError& error) {
+            throw DbError("22003", error.what());
+        } catch (const std::domain_error& error) {
+            // Base one was handled above, so only a domain failure remains.
+            throw DbError("2201E", error.what());
+        }
     };
     auto floatTranscendental = [float8Text](const ExprValue& input, bool exponential, bool baseTen) {
         const double argument = parseDoubleCastValue(input);
@@ -10718,23 +10707,18 @@ void ExprEvaluator::registerStatelessBuiltins() {
             throw DbError("22003", error.what());
         }
     };
-    functions_["ln"] = [logFixed, requireLogarithmArgument, transcendentalArgument, floatTranscendental](const auto& a) {
+    functions_["ln"] = [parseTranscendentalNumeric, floatTranscendental](const auto& a) {
         const bool decimal = !a.empty() && ExprHelper::canonicalResultTypeName(a[0].typeName) == "numeric";
         if (a.empty() || a[0].isNull) return ExprValue(decimal ? "numeric" : "double precision", "", true);
         if (!decimal) return floatTranscendental(a[0], false, false);
-        const auto exact = tryParseNumeric(a[0].value);
-        if (exact) {
-            if (exact->isNaN()) return ExprValue("numeric", "NaN", false);
-            if (exact->isInfinite()) {
-                if (exact->toString().front() != '-') return ExprValue("numeric", "Infinity", false);
-                throw DbError("2201E", "invalid argument for logarithm");
-            }
-            if (exact->sign() <= 0) throw DbError("2201E", "invalid argument for logarithm");
+        const Numeric value = parseTranscendentalNumeric(a[0]);
+        try {
+            return ExprValue("numeric", value.naturalLogarithm().toString(), false);
+        } catch (const NumericRangeError& error) {
+            throw DbError("22003", error.what());
+        } catch (const std::domain_error& error) {
+            throw DbError("2201E", error.what());
         }
-        const long double value = transcendentalArgument(a[0], true);
-        requireLogarithmArgument(value);
-        return logFixed(logl(value), exact && exact->isFinite() && *exact != Numeric(1) &&
-            ExprHelper::canonicalResultTypeName(a[0].typeName) == "numeric");
     };
     functions_["sqrt"] = [](const auto& a) {
         const bool decimal = !a.empty() &&
@@ -10756,81 +10740,24 @@ void ExprEvaluator::registerStatelessBuiltins() {
         if (input < 0) throw DbError("2201F", "cannot take square root of a negative number");
         return ExprValue(resultType, formatFloatingCastValue(std::sqrt(input)), false);
     };
-    functions_["log"] = [numericFixed, logFixed, argHasDot, exactPowerTenLog,
-                          requireLogarithmArgument, transcendentalArgument, floatTranscendental](
+    functions_["log"] = [parseTranscendentalNumeric, numericLogarithm, floatTranscendental](
                             const std::vector<ExprValue>& a) {
         const bool decimal = a.size() >= 2 || (!a.empty() && ExprHelper::canonicalResultTypeName(a[0].typeName) == "numeric");
         if (a.empty() || a[0].isNull) return ExprValue(decimal ? "numeric" : "double precision", "", true);
         if (!decimal) return floatTranscendental(a[0], false, true);
         if (a.size() >= 2) {
             if (a[1].isNull) return ExprValue("numeric", "", true);
-            const auto base = tryParseNumeric(a[0].value);
-            const auto value = tryParseNumeric(a[1].value);
-            if ((base && base->isNaN()) || (value && value->isNaN()))
-                return ExprValue("numeric", "NaN", false);
-            const auto invalidArgument = [](const std::optional<Numeric>& n) {
-                return n && (n->isInfinite() ? n->toString().front() == '-' : n->sign() <= 0);
-            };
-            if (invalidArgument(base) || invalidArgument(value))
-                throw DbError("2201E", "invalid argument for logarithm");
-            if (base && base->isInfinite()) {
-                if (value && value->isInfinite()) return ExprValue("numeric", "NaN", false);
-                return ExprValue("numeric", "0", false);
-            }
-            if (value && value->isInfinite()) return ExprValue("numeric", "Infinity", false);
-            if (base && *base == Numeric(1)) throw DbError("22012", "division by zero");
-            if (base && value && *base == Numeric(10) &&
-                ExprHelper::canonicalResultTypeName(a[1].typeName) == "numeric")
-                if (auto exactResult = exactPowerTenLog(*value, base->scale())) return *exactResult;
-            const long double b = transcendentalArgument(a[0], true);
-            const long double x = transcendentalArgument(a[1], true);
-            requireLogarithmArgument(b); requireLogarithmArgument(x);
-            if (b == 1.0L) throw DbError("22012", "division by zero");
-            return logFixed(logl(x) / logl(b), value && value->isFinite() && *value != Numeric(1) &&
-                ExprHelper::canonicalResultTypeName(a[1].typeName) == "numeric");
+            const Numeric base = parseTranscendentalNumeric(a[0]);
+            const Numeric value = parseTranscendentalNumeric(a[1]);
+            return numericLogarithm(value, base);
         }
-        const auto exact = tryParseNumeric(a[0].value);
-        if (exact) {
-            if (exact->isNaN()) return ExprValue("numeric", "NaN", false);
-            if (exact->isInfinite()) {
-                if (exact->toString().front() != '-') return ExprValue("numeric", "Infinity", false);
-                throw DbError("2201E", "invalid argument for logarithm");
-            }
-            if (exact->sign() <= 0) throw DbError("2201E", "invalid argument for logarithm");
-        }
-        if (exact && ExprHelper::canonicalResultTypeName(a[0].typeName) == "numeric")
-            if (auto exactResult = exactPowerTenLog(*exact, 0)) return *exactResult;
-        const long double value = transcendentalArgument(a[0], true);
-        requireLogarithmArgument(value);
-        const long double result = log10l(value);
-        if (!argHasDot(a) && result == floorl(result))
-            return ExprValue("numeric", std::to_string(static_cast<long long>(result)), false);
-        return logFixed(result, exact && exact->isFinite() && *exact != Numeric(1) &&
-            ExprHelper::canonicalResultTypeName(a[0].typeName) == "numeric");
+        return numericLogarithm(parseTranscendentalNumeric(a[0]), Numeric(10));
     };
-    functions_["log10"] = [numericFixed, logFixed, argHasDot, exactPowerTenLog,
-                            requireLogarithmArgument, transcendentalArgument, floatTranscendental](const auto& a) {
+    functions_["log10"] = [parseTranscendentalNumeric, numericLogarithm, floatTranscendental](const auto& a) {
         const bool decimal = !a.empty() && ExprHelper::canonicalResultTypeName(a[0].typeName) == "numeric";
         if (a.empty() || a[0].isNull) return ExprValue(decimal ? "numeric" : "double precision", "", true);
         if (!decimal) return floatTranscendental(a[0], false, true);
-        const auto exact = tryParseNumeric(a[0].value);
-        if (exact) {
-            if (exact->isNaN()) return ExprValue("numeric", "NaN", false);
-            if (exact->isInfinite()) {
-                if (exact->toString().front() != '-') return ExprValue("numeric", "Infinity", false);
-                throw DbError("2201E", "invalid argument for logarithm");
-            }
-            if (exact->sign() <= 0) throw DbError("2201E", "invalid argument for logarithm");
-        }
-        if (exact && ExprHelper::canonicalResultTypeName(a[0].typeName) == "numeric")
-            if (auto exactResult = exactPowerTenLog(*exact, 0)) return *exactResult;
-        const long double value = transcendentalArgument(a[0], true);
-        requireLogarithmArgument(value);
-        const long double result = log10l(value);
-        if (!argHasDot(a) && result == floorl(result))
-            return ExprValue("numeric", std::to_string(static_cast<long long>(result)), false);
-        return logFixed(result, exact && exact->isFinite() && *exact != Numeric(1) &&
-            ExprHelper::canonicalResultTypeName(a[0].typeName) == "numeric");
+        return numericLogarithm(parseTranscendentalNumeric(a[0]), Numeric(10));
     };
     auto integralRound = [float8Text](const std::vector<ExprValue>& a,
                                       bool towardPositiveInfinity) {

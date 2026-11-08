@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-11-08：numeric 十进制对数
+
+为 numeric `ln`、`log` 和 `log10` 引入十进制计算，补充协议、默认值、回滚与冷重启回归。已测范围、1000 位限制和诊断差异见[测试报告](docs/test-report.md#numeric-log-decimal-20261108)；新旧查询性能测量波动及负向结果见[性能报告](docs/performance-report-2026-10-30.md#numeric-log-cost-20261108)。
+
 ## 2026-11-08：PostgreSQL 小表查询对照
 
 补充 PostgreSQL 18.6 与 D43 单连接小表查询的有限性能对照，包括未达计时门槛的查询及共享主机限制；原始记录留在本地。[性能报告](docs/performance-report-2026-10-30.md#pg18-d43-cross-20261108)。
@@ -12,13 +16,13 @@
 
 内置函数的固定签名改为只读、进程生命周期的共享声明，避免在绑定和调用时反复创建；数组位置函数的参数相关签名仍逐次生成，同名函数覆盖和参数求值路径保持既有语义。选定回归与异常分配注入的范围见[测试报告](docs/test-report.md#d43-signature-cache-20261108)。
 
-在共享主机上，同项目新旧版本的 64 行查询中，部分函数有改善，但旧版自身漂移较大，不能据此宣称全库提速；逐项结果与限制见[性能报告](docs/performance-report-2026-10-30.md#d43-signature-cache-20261108)。对数精度与零列缺陷仍未修复，详见测试报告。
+在共享主机上，同项目新旧版本的 64 行查询中，部分函数有改善，但旧版自身漂移较大，不能据此宣称全库提速；逐项结果与限制见[性能报告](docs/performance-report-2026-10-30.md#d43-signature-cache-20261108)。D43 的对数精度与零列缺陷当时仍未修复，详见测试报告。
 
 ## 2026-11-08：十进制指数与浮点函数类型
 
 `exp(numeric)` 改用十进制计算，保留 PostgreSQL 18.6 的结果标度与中间舍入行为；`exp`、`ln`、`log` 和 `log10` 按参数类型区分 numeric 与 double precision 重载。此前 `exp(100::numeric)` 和 `exp(-40::integer)` 的错误结果可能被写入默认值，现有针对这些示例的查询及持久化回归用于防止再次发生。
 
-本项目 Numeric 的有效精度和 scale 仍各限 1000 位，部分 PostgreSQL 可计算的结果返回 `22003`；`ln`／`log` 的高精度数值路径仍有差距，D39 的部分 binary Numeric 输入边界在 D40 尚未重新验证。有限测试不代表全面 PostgreSQL 兼容；六条简单 SQL 的新旧测量波动较大，部分变慢，不能宣称全库提速。详见[测试报告](docs/test-report.md#d40-numeric-exp-20261108)及[性能报告](docs/performance-report-2026-10-30.md#d40-numeric-exp-cost-20261108)。
+本项目 Numeric 的有效精度和 scale 仍各限 1000 位，部分 PostgreSQL 可计算的结果返回 `22003`；D40 的 `ln`／`log` 高精度数值路径存在差距（当前状态见上方），D39 的部分 binary Numeric 输入边界在 D40 尚未重新验证。有限测试不代表全面 PostgreSQL 兼容；六条简单 SQL 的新旧测量波动较大，部分变慢，不能宣称全库提速。详见[测试报告](docs/test-report.md#d40-numeric-exp-20261108)及[性能报告](docs/performance-report-2026-10-30.md#d40-numeric-exp-cost-20261108)。
 
 ## 2026-11-08：大数格式与除法（D39 历史）
 

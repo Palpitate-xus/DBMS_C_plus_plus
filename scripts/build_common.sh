@@ -38,6 +38,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/pg_page_compaction_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/numeric_square_root_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/numeric_exponential_default_restart_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/numeric_log_default_restart_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/generate_series_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/pg_typeof_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/enum_array_catalog_protocol_e2e_test.py)

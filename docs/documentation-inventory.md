@@ -2,9 +2,13 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
-## 2026-11-08：函数签名缓存与未解决缺陷
+## 2026-11-08：numeric 十进制对数
 
-同步签名缓存的实现、选定回归和性能记录；[测试报告](test-report.md#d43-signature-cache-20261108)另记录[高精度对数错误](test-report.md#numeric-log-gap-20261108)与[零列差距](test-report.md#zero-column-gap-20261108)。[性能报告](performance-report-2026-10-30.md#d43-signature-cache-20261108)保留同项目测量及其限制，压缩证据保持可核验。
+同步源码状态、PostgreSQL 差距、测试与性能报告；[测试报告](test-report.md#numeric-log-decimal-20261108)列出已测范围及未解决的精度、诊断和零列问题，[性能报告](performance-report-2026-10-30.md#numeric-log-cost-20261108)保留全部测量限制和负向结果。原始数据仅本地保存。
+
+## 2026-11-08：函数签名缓存与缺陷（D43 历史）
+
+同步签名缓存的实现、选定回归和性能记录；[测试报告](test-report.md#d43-signature-cache-20261108)另记录[当时的高精度对数错误](test-report.md#numeric-log-gap-20261108)与[零列差距](test-report.md#zero-column-gap-20261108)。[性能报告](performance-report-2026-10-30.md#d43-signature-cache-20261108)保留同项目测量及其限制；压缩证据仅可能存在于本机，不随仓库分发。
 
 ## 2026-11-08：十进制指数与浮点重载
 

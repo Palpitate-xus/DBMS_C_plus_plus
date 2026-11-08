@@ -2,6 +2,10 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## numeric 对数（2026-11-08）
+
+`ln`、`log` 和 `log10` 的 numeric 路径使用十进制计算；例如高精度数值可用于查询和 DEFAULT。Numeric 的有效精度和 scale 仍各限 1000 位，部分 PostgreSQL 可表示的结果会返回 `22003`；错误诊断字段与 PostgreSQL 尚不完全一致。[测试范围和限制](test-report.md#numeric-log-decimal-20261108)；[性能测量](performance-report-2026-10-30.md#numeric-log-cost-20261108)。
+
 <!-- CURRENT_ORDINARY_PROJECT_BITMAP_20261106 -->
 
 ## 当前行NULL位图复用与按需求捕获（2026-11-06，P30-C2）

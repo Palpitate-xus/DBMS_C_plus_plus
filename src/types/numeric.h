@@ -78,6 +78,8 @@ public:
 
     // PostgreSQL-style decimal exponential; may throw NumericRangeError.
     Numeric exponential() const;
+    Numeric naturalLogarithm() const;
+    Numeric logarithm(const Numeric& base) const;
 
     static constexpr int kMaxPrecision = 1000;
     // Decimal text storage leaves room for sign, decimal point, and a small
@@ -87,7 +89,7 @@ public:
 private:
     bool nan_ = false;
     bool inf_ = false;
-    int sign_ = 1;                       // +1 or -1, valid only when finite
+    int sign_ = 1;                       // +1 or -1 for finite values and infinities; unused for NaN
     std::vector<uint8_t> digits_;        // most significant digit first
     int scale_ = 0;                      // digits after decimal point
     int precision_ = 0;                  // significant digits

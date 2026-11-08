@@ -2,6 +2,29 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-08 PostgreSQL numeric logarithms and persisted defaults",
+      "gap_ids": [
+        "TYPE-01",
+        "TYPE-02"
+      ],
+      "status": "partial",
+      "evidence": [
+        "src/types/numeric.cpp",
+        "src/expression/ExprEvaluator.cpp",
+        "docs/test-report.md",
+        "docs/performance-report-2026-10-30.md"
+      ],
+      "tests": [
+        "tests/numeric_transcendental_range_test.cpp",
+        "tests/numeric_log_default_restart_protocol_e2e_test.py"
+      ],
+      "verification": [
+        "Final clean CMake build and 52 SQL/default/rollback/restart checks passed; 318 SQL replays against captured PostgreSQL 18.6 frames: 316 semantic matches, 2 Numeric capacity limits. 54 mixed-overload checks: 54 semantic, 42 complete-frame matches.",
+        "Final numeric primitives: 1528 normal and 1528 ASan/UBSan integer-oracle cases; 8 selected native tests used prior v2 mixed build. Full test suite not run.",
+        "Numeric precision and scale remain limited to 1000; PostgreSQL approximate-division guard behavior is not proven equivalent for all inputs. Some error diagnostic fields differ; selected performance results vary and do not prove a stable speedup. Raw benchmark data are local only."
+      ]
+    },
+    {
       "issue": "2026-11-07 no-effect transaction commit publication and full621 normal costs",
       "gap_ids": [
         "TXN-01",

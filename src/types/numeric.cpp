@@ -1031,3 +1031,426 @@ Numeric Numeric::exponential() const {
     return Numeric::fromString(out);
 }
 } // namespace dbms
+// Decimal logarithms adapted from PostgreSQL 18.6 numeric.c ln_var/log_var.
+// Copyright (c) 1998-2025 PostgreSQL Global Development Group.
+// PostgreSQL license: repository THIRD_PARTY_NOTICES.
+namespace dbms {
+namespace {
+namespace log_detail {
+using exp_detail::V;
+using exp_detail::B;
+using exp_detail::trim;
+using exp_detail::parse;
+using exp_detail::str;
+using exp_detail::roundscale;
+using exp_detail::pg_mul;
+constexpr int kWorkLimit = 4096;
+struct N {
+    V d{0};
+    int sign = 0;
+};
+
+bool zero(const V& d) {
+    return d.size() == 1 && d[0] == 0;
+}
+
+void normalize(N& n) {
+    trim(n.d);
+    if (zero(n.d)) n.sign = 0;
+}
+
+int compare_abs(const V& a, const V& b) {
+    if (a.size() != b.size()) return a.size() < b.size() ? -1 : 1;
+    for (size_t i = a.size(); i-- > 0;)
+        if (a[i] != b[i]) return a[i] < b[i] ? -1 : 1;
+    return 0;
+}
+
+N plus(N a, const N& b) {
+    if (!b.sign) return a;
+    if (!a.sign) return b;
+    if (a.sign == b.sign) {
+        exp_detail::add(a.d, b.d);
+        return a;
+    }
+    int c = compare_abs(a.d, b.d);
+    if (!c) return N{};
+    if (c > 0) {
+        exp_detail::sub(a.d, b.d);
+        normalize(a);
+        return a;
+    }
+    N r = b;
+    exp_detail::sub(r.d, a.d);
+    normalize(r);
+    return r;
+}
+
+N neg(N a) {
+    a.sign = -a.sign;
+    return a;
+}
+
+N minus(N a, N b) {
+    return plus(std::move(a), neg(std::move(b)));
+}
+
+void pow10(V& a, int n) {
+    if (n < 0) throw NumericRangeError("negative scratch shift");
+    if (zero(a)) return;
+    a.insert(a.begin(), static_cast<size_t>(n / 4), 0);
+    for (int j = 0; j < n % 4; ++j) {
+        uint32_t carry = 0;
+        for (auto& v : a) {
+            uint32_t k = v * 10 + carry;
+            v = k % B;
+            carry = k / B;
+        }
+        if (carry) a.push_back(carry);
+    }
+}
+
+N integer(int n, int work) {
+    N r;
+    if (n == 0) return r;
+    r.sign = n < 0 ? -1 : 1;
+    r.d = parse(std::to_string(n < 0 ? -n : n));
+    pow10(r.d, work);
+    return r;
+}
+
+N input(const Numeric& v, int work) {
+    std::string text = v.toString();
+    N r;
+    if (!text.empty() && text[0] == '-') {
+        r.sign = -1;
+        text.erase(text.begin());
+    } else r.sign = 1;
+    const auto dot = text.find('.');
+    int sc = 0;
+    if (dot != std::string::npos) {
+        sc = static_cast<int>(text.size() - dot - 1);
+        text.erase(dot, 1);
+    }
+    r.d = parse(text);
+    pow10(r.d, work - sc);
+    normalize(r);
+    return r;
+}
+
+int cmp(const N& a, const N& b) {
+    if (a.sign != b.sign) return a.sign < b.sign ? -1 : 1;
+    if (!a.sign) return 0;
+    return a.sign * compare_abs(a.d, b.d);
+}
+
+int weight(const N& n, int work) {
+    return exp_detail::weight(n.d, work);
+}
+
+N multiply(const N& a, const N& b, int work, int scale) {
+    N r;
+    if (!a.sign || !b.sign) return r;
+    r.sign = a.sign * b.sign;
+    r.d = pg_mul(a.d, b.d, work, scale);
+    roundscale(r.d, work, scale);
+    normalize(r);
+    return r;
+}
+// Work buffers use the same little-endian base-10000 limbs as exp_detail.
+// Quotient and square-root primitives below operate on unsigned magnitudes;
+// callers retain the sign and apply PostgreSQL half-away-from-zero rounding.
+V multiplySmall(const V& value, uint32_t factor) {
+    if (!factor || zero(value)) return V{0};
+    V result;
+    result.reserve(value.size() + 2);
+    uint64_t carry = 0;
+    for (uint32_t limb : value) {
+        const uint64_t product = uint64_t(limb) * factor + carry;
+        result.push_back(static_cast<uint32_t>(product % B));
+        carry = product / B;
+    }
+    while (carry) {
+        result.push_back(static_cast<uint32_t>(carry % B));
+        carry /= B;
+    }
+    trim(result);
+    return result;
+}
+
+void addSmall(V& value, uint32_t addend) {
+    uint64_t carry = addend;
+    size_t i = 0;
+    while (carry) {
+        if (i == value.size()) value.push_back(0);
+        const uint64_t sum = value[i] + carry;
+        value[i++] = static_cast<uint32_t>(sum % B);
+        carry = sum / B;
+    }
+}
+
+// Exact unsigned long division, retaining one trial quotient limb at a time.
+// The trial product fits in uint64_t and all operands are work-limit bounded.
+V unsignedDivide(const V& numerator, const V& denominator) {
+    if (zero(denominator)) throw std::domain_error("division by zero");
+    V remainder{0};
+    V quotient(numerator.size(), 0);
+    for (size_t pos = numerator.size(); pos-- > 0;) {
+        if (!zero(remainder)) remainder.insert(remainder.begin(), 0);
+        remainder[0] = numerator[pos];
+        trim(remainder);
+        if (compare_abs(remainder, denominator) < 0) continue;
+        uint32_t lower = 1, upper = B - 1, digit = 0;
+        while (lower <= upper) {
+            const uint32_t mid = lower + (upper - lower) / 2;
+            const V product = multiplySmall(denominator, mid);
+            if (compare_abs(product, remainder) <= 0) {
+                digit = mid;
+                lower = mid + 1;
+            } else {
+                upper = mid - 1;
+            }
+        }
+        quotient[pos] = digit;
+        if (digit) exp_detail::sub(remainder, multiplySmall(denominator, digit));
+    }
+    trim(quotient);
+    return quotient;
+}
+
+N divide(const N& a, const N& b, int work, int scale) {
+    if (!b.sign) throw std::domain_error("division by zero");
+    N result;
+    if (!a.sign) return result;
+    if (scale < 0 || scale + 1 > work)
+        throw NumericRangeError("scratch divide scale limit");
+    V numerator = a.d;
+    pow10(numerator, scale + 1);
+    V denominator = b.d;
+    // Whole base limbs common to numerator and denominator cancel exactly.
+    size_t common = 0;
+    while (common + 1 < numerator.size() && common + 1 < denominator.size() &&
+           numerator[common] == 0 && denominator[common] == 0) ++common;
+    if (common) {
+        numerator.erase(numerator.begin(), numerator.begin() + common);
+        denominator.erase(denominator.begin(), denominator.begin() + common);
+    }
+    V quotient = unsignedDivide(numerator, denominator);
+    const bool roundUp = quotient[0] % 10 >= 5;
+    exp_detail::divsmall(quotient, 10);
+    if (roundUp) addSmall(quotient, 1);
+    pow10(quotient, work - scale);
+    result.d = std::move(quotient);
+    result.sign = a.sign * b.sign;
+    normalize(result);
+    return result;
+}
+
+N divide_small(const N& a, uint32_t n, int work, int scale) {
+    N result = a;
+    if (!result.sign) return result;
+    exp_detail::divsmall(result.d, n);
+    roundscale(result.d, work, scale);
+    normalize(result);
+    return result;
+}
+
+// Discard low decimal digits without rounding, including partial limbs.
+void truncatePowerOfTen(V& value, int digits) {
+    if (digits <= 0 || zero(value)) return;
+    const size_t limbs = static_cast<size_t>(digits / 4);
+    if (limbs >= value.size()) { value = V{0}; return; }
+    value.erase(value.begin(), value.begin() + limbs);
+    uint32_t divisor = 1;
+    for (int i = 0; i < digits % 4; ++i) divisor *= 10;
+    if (divisor != 1) exp_detail::divsmall(value, divisor);
+    trim(value);
+}
+
+// Digit-by-digit integer square root, processing base-10000 limb pairs.
+// For a partial root r and next digit d, (2*r*B + d)*d is the amount
+// subtracted from the remainder. A binary search finds its largest valid d.
+V integerSquareRoot(const V& radicand) {
+    if (zero(radicand)) return V{0};
+    V root{0}, remainder{0};
+    size_t pos = radicand.size();
+    size_t group = pos % 2 ? 1 : 2;
+    while (pos) {
+        if (group == 1) {
+            if (!zero(remainder)) remainder.insert(remainder.begin(), 0);
+            remainder[0] = radicand[pos - 1];
+        } else {
+            if (zero(remainder)) remainder.clear();
+            remainder.insert(remainder.begin(), 2, 0);
+            remainder[0] = radicand[pos - 2];
+            remainder[1] = radicand[pos - 1];
+        }
+        trim(remainder);
+        V twiceShifted = multiplySmall(root, 2);
+        if (!zero(twiceShifted)) twiceShifted.insert(twiceShifted.begin(), 0);
+        uint32_t lower = 0, upper = B - 1, digit = 0;
+        while (lower <= upper) {
+            const uint32_t mid = lower + (upper - lower) / 2;
+            V product = multiplySmall(twiceShifted, mid);
+            addSmall(product, mid * mid);
+            if (compare_abs(product, remainder) <= 0) {
+                digit = mid;
+                lower = mid + 1;
+            } else {
+                if (mid == 0) break;
+                upper = mid - 1;
+            }
+        }
+        V product = multiplySmall(twiceShifted, digit);
+        addSmall(product, digit * digit);
+        exp_detail::sub(remainder, product);
+        if (zero(root)) root[0] = digit;
+        else root.insert(root.begin(), digit);
+        trim(root);
+        pos -= group;
+        group = 2;
+    }
+    return root;
+}
+
+N root(const N& a, int work, int scale) {
+    if (a.sign < 0) throw std::domain_error("negative scratch square root");
+    N result;
+    if (!a.sign) return result;
+    if (scale + 1 > work)
+        throw NumericRangeError("scratch root scale limit");
+    V radicand = a.d;
+    const int shift = 2 * (scale + 1) - work;
+    if (shift >= 0) pow10(radicand, shift);
+    else truncatePowerOfTen(radicand, -shift);
+    V magnitude = integerSquareRoot(radicand);
+    const bool roundUp = magnitude[0] % 10 >= 5;
+    exp_detail::divsmall(magnitude, 10);
+    if (roundUp) addSmall(magnitude, 1);
+    pow10(magnitude, work - scale);
+    result.d = std::move(magnitude);
+    result.sign = 1;
+    normalize(result);
+    return result;
+}
+int estimate(const N& value, int work) {
+    N one = integer(1, work), nine = one;
+    exp_detail::divsmall(nine.d, 10);
+    N lo = minus(one, nine), hi = plus(one, nine);
+    if (cmp(value, lo) >= 0 && cmp(value, hi) <= 0) {
+        N x = minus(value, one);
+        if (!x.sign) return 0;
+        return static_cast<int>(str(x.d).size()) - work - 1;
+    }
+    V d = value.d;
+    trim(d);
+    int w = static_cast<int>(d.size()) - 1 - work / 4;
+    while (d.size() > 1 && d.front() == 0) d.erase(d.begin());
+    std::reverse(d.begin(), d.end());
+    int digits = static_cast<int>(d[0]), dw = w * 4;
+    if (d.size() > 1) {
+        digits = digits * 10000 + static_cast<int>(d[1]);
+        dw -= 4;
+    }
+    double l = std::log(static_cast<double>(digits)) + dw * 2.302585092994046;
+    return static_cast<int>(std::log10(std::fabs(l)));
+}
+
+N ln(N x, int rs, int work) {
+    if (x.sign <= 0) throw std::domain_error("invalid logarithm input");
+    N one = integer(1, work), tenth = one;
+    exp_detail::divsmall(tenth.d, 10);
+    N low = minus(one, tenth), high = plus(one, tenth);
+    int nsqrt = 0, fac = 2;
+    while (cmp(x, low) <= 0 || cmp(x, high) >= 0) {
+        const int local = rs - weight(x, work) * 2 + 8;
+        if (local + 1 > work) throw NumericRangeError("scratch sqrt precision limit");
+        x = root(x, work, local);
+        fac *= 2;
+        if (++nsqrt > 20) throw NumericRangeError("sqrt iteration limit");
+    }
+    const int local = rs + static_cast<int>((nsqrt + 1) * 0.301029995663981) + 8;
+    N numerator = minus(x, one), denominator = plus(x, one);
+    N result = divide(numerator, denominator, work, local), xx = result;
+    N z2 = multiply(result, result, work, local);
+    int n = 1;
+    for (;;) {
+        n += 2;
+        xx = multiply(xx, z2, work, local);
+        N term = divide_small(xx, static_cast<uint32_t>(n), work, local);
+        if (!term.sign) break;
+        result = plus(std::move(result), term);
+        if (weight(term, work) < weight(result, work) - local * 2 / 4) break;
+        if (n > 10000) throw NumericRangeError("ln series iteration limit");
+    }
+    return multiply(result, integer(fac, work), work, rs);
+}
+
+std::string format(const N& n, int work, int scale) {
+    std::string out = str(n.d);
+    if (out.size() <= static_cast<size_t>(work))
+        out.insert(0, static_cast<size_t>(work) + 1 - out.size(), '0');
+    out.resize(out.size() - static_cast<size_t>(work) + static_cast<size_t>(scale));
+    if (scale) out.insert(out.size() - static_cast<size_t>(scale), 1, '.');
+    if (n.sign < 0) out.insert(out.begin(), '-');
+    return out;
+}
+
+int workspace(int a, int b, int c) {
+    int w = std::max({a, b, c, 32}) + 64;
+    w = (w + 3) / 4 * 4;
+    if (w > kWorkLimit) throw NumericRangeError("log scratch precision limit");
+    return w;
+}
+} // log_detail
+} // namespace
+Numeric Numeric::naturalLogarithm() const {
+    using namespace log_detail;
+    if (isNaN()) return Numeric::nan();
+    if (isInfinite()) {
+        if (sign_ < 0) throw std::domain_error("cannot take logarithm of a negative number");
+        return Numeric::infinity();
+    }
+    if (sign() < 0) throw std::domain_error("cannot take logarithm of a negative number");
+    if (sign() == 0) throw std::domain_error("cannot take logarithm of zero");
+    int prelim = (std::max(scale(), 16) + 3) / 4 * 4;
+    N sample = input(*this, prelim);
+    int e = estimate(sample, prelim);
+    int rs = std::min(kMaxPrecision, std::max({0, scale(), 16 - e}));
+    int work = workspace(rs, scale(), rs + std::max(0, -weight(sample, prelim) * 2));
+    N result = ln(input(*this, work), rs, work);
+    return Numeric::fromString(format(result, work, rs));
+}
+
+Numeric Numeric::logarithm(const Numeric& base) const {
+    using namespace log_detail;
+    if (isNaN() || base.isNaN()) return Numeric::nan();
+    const auto inputSign = [](const Numeric& n) { return n.isInfinite() ? n.sign_ : n.sign(); };
+    const int baseSign = inputSign(base), valueSign = inputSign(*this);
+    const auto reject = [](int s) {
+        if (s < 0) throw std::domain_error("cannot take logarithm of a negative number");
+        if (s == 0) throw std::domain_error("cannot take logarithm of zero");
+    };
+    if (isInfinite() || base.isInfinite()) {
+        if (baseSign < 0 || valueSign < 0) reject(-1);
+        if (baseSign == 0 || valueSign == 0) reject(0);
+    } else {
+        reject(baseSign);
+        reject(valueSign);
+    }
+    if (base.isInfinite()) return isInfinite() ? Numeric::nan() : Numeric(int64_t{0});
+    if (isInfinite()) return Numeric::infinity();
+    if (base == Numeric(int64_t{1})) throw std::domain_error("division by zero");
+    int prelim = (std::max({scale(), base.scale(), 16}) + 3) / 4 * 4;
+    N b = input(base, prelim), x = input(*this, prelim);
+    int bd = estimate(b, prelim), xd = estimate(x, prelim), rd = xd - bd;
+    int rs = std::min(kMaxPrecision, std::max({0, scale(), base.scale(), 16 - rd}));
+    int brs = std::max(0, rs + rd - bd + 8), xrs = std::max(0, rs + rd - xd + 8);
+    int work = workspace(std::max(scale(), base.scale()),
+                         brs + std::max(0, -weight(b, prelim) * 2),
+                         xrs + std::max(0, -weight(x, prelim) * 2));
+    N lb = ln(input(base, work), brs, work), lx = ln(input(*this, work), xrs, work);
+    N result = divide(lx, lb, work, rs);
+    return Numeric::fromString(format(result, work, rs));
+}
+} // namespace dbms

@@ -22,7 +22,7 @@ int main() {
         Session session; session.username="admin"; session.permission=1; session.currentDB=db;
         struct Scope { Session* prior=currentSession(); explicit Scope(Session& s){setCurrentSession(&s);} ~Scope(){setCurrentSession(prior);} } scope(session);
         auto eval = [&](const std::string& expr) {return ExprHelper::evalString(expr, {}, {}, db, "", &g_engine);};
-        auto err = [&](const std::string& expr,const std::string& state) {auto r=eval(expr);check(!r.ok && (r.sqlState==state || r.error.find("SQLSTATE "+state)!=std::string::npos),expr);};
+        auto err = [&](const std::string& expr,const std::string& state) {auto r=eval(expr);check(!r.ok && r.sqlState==state,expr);};
         auto value = [&](const std::string& expr,const std::string& expected) {auto r=eval(expr);check(r.ok&&!r.isNull&&r.value==expected,expr);};
         auto null = [&](const std::string& expr) {auto r=eval(expr);check(r.ok&&r.isNull,expr);};
         err("exp('1e999'::numeric)","22003");
@@ -41,11 +41,19 @@ int main() {
         value("exp('-2.30258509299404568401799145468442'::numeric)", "0.09999999999999999999999999999999");
         value("exp('-2.30258509299404568401799145468441'::numeric)", "0.10000000000000000000000000000000");
         value("exp('-0.0000000100000000'::numeric)", "0.9999999900000001");
-        err("ln('1e999'::numeric)","22003");
+        value("ln('1e999'::numeric)", "2300.2825079010516");
         err("ln('1e-999'::numeric)","22003");
-        err("ln('1.0000000000000000001'::numeric)","22003");
-        err("log('1.0000000000000000001'::numeric)","22003");
-        err("log(2::numeric,'1.0000000000000000001'::numeric)","22003");
+        value("ln('1.0000000000000000001'::numeric)", "0.00000000000000000010000000000000000");
+        value("log('1.0000000000000000001'::numeric)", "0.00000000000000000004342944819032518");
+        value("log(2::numeric,'1.0000000000000000001'::numeric)", "0.00000000000000000014426950408889634");
+        value("ln('2.0000000000000000000000000000000001'::numeric)",
+              "0.6931471805599453094172321214581766");
+        value("log('1.00000001'::numeric,'1.00000002000000009'::numeric)",
+              "1.99999999900000001");
+        value("log('1.00000001'::numeric,'1.00000002000000010'::numeric)",
+              "2.00000000000000000");
+        value("log('1.00000001'::numeric,'1.00000002000000011'::numeric)",
+              "2.00000000099999999");
         value("exp('1e-999'::numeric)", "1." + std::string(998, '0') + "1");
         value("exp('-1e-999'::numeric)", "0." + std::string(999, '9'));
         value("log('1e999'::numeric)", "999.0000000000000");
@@ -56,6 +64,9 @@ int main() {
         value("log(10.00::numeric,'1e-100'::numeric)", "-100." + std::string(100, '0'));
         err("log('1e-999'::numeric)","22003");
         err("log(1::numeric,10::numeric)","22012");
+        err("log(1::numeric,0::numeric)","2201E");
+        err("log('Infinity'::numeric,'-Infinity'::numeric)","2201E");
+        err("log('1e-1000'::numeric,'1e-1000'::numeric)","22003");
         err("log(0::numeric,10::numeric)","2201E");
         err("log(-1::numeric,10::numeric)","2201E");
         err("log(2::numeric,0::numeric)","2201E");
@@ -64,6 +75,7 @@ int main() {
         value("log(1::numeric,'Infinity'::numeric)","Infinity");
         value("log('Infinity'::numeric,'Infinity'::numeric)","NaN");
         value("log('Infinity'::numeric,10::numeric)","0");
+        value("log('-Infinity'::numeric,'NaN'::numeric)","NaN");
         value("log('NaN'::numeric,0::numeric)","NaN");
         value("log(0::numeric,'NaN'::numeric)","NaN");
         value("exp('NaN'::numeric)","NaN");

@@ -57,9 +57,9 @@ https://github.com/postgres/postgres/blob/REL_18_6/src/common/sha2.c
  */
 
 
-Numeric exponential implementation
+Numeric exponential and logarithm implementations
 
-Applies to src/types/numeric.cpp. Adapted from exp_var and mul_var in
+Applies to src/types/numeric.cpp. Adapted from exp_var, mul_var, ln_var and log_var in
 PostgreSQL REL_18_6 src/backend/utils/adt/numeric.c:
 https://github.com/postgres/postgres/blob/REL_18_6/src/backend/utils/adt/numeric.c
 Portions Copyright (c) 1998-2025, PostgreSQL Global Development Group.

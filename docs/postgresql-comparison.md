@@ -6,13 +6,19 @@
 
 同机单连接的七项查询中，五项达到预设计时门槛：D43 耗时为 PostgreSQL 18.6 的 23.50～65.52 倍（各项三轮中位数）；另两项因 PostgreSQL CPU 批次过短而未计算倍率。测试仅覆盖指定的 64 行暖运行和常量查询，共享主机负载及前后基线漂移明显，不能外推为全库或生产负载倍率。[测试方法、逐项结果及限制](performance-report-2026-10-30.md#pg18-d43-cross-20261108)。
 
+## 2026-11-08：numeric 十进制对数
+
+`ln`、`log` 和 `log10` 的 numeric 路径改为十进制计算，修复已复现的高精度错误值和默认值冷重启反例；浮点重载保留。最终 CMake 程序、选定 SQL／事务／冷重启与独立原语测试的范围见[测试报告](test-report.md#numeric-log-decimal-20261108)。Numeric 精度和 scale 仍各限 1000 位，部分错误诊断与 PostgreSQL 不同；长除数的所有舍入边界尚未证明完全一致。零列缺陷仍开放。
+
+本次新旧性能对照在共享主机上波动较大，部分查询有变慢结果，后续复测也有正有负，不能宣称稳定提速或没有回退。[逐项结果与限制](performance-report-2026-10-30.md#numeric-log-cost-20261108)。
+
 ## 2026-11-08：内置函数签名缓存
 
 内置函数的固定签名改为只读、进程生命周期的共享声明，避免在绑定和调用时反复创建；数组位置函数的参数相关签名仍逐次生成，同名函数覆盖和参数求值路径保持既有语义。选定回归与异常分配注入的范围见[测试报告](test-report.md#d43-signature-cache-20261108)。
 
-在共享主机上，同项目新旧版本的 64 行查询中，部分函数有改善，但旧版自身漂移较大，不能据此宣称全库提速；逐项结果与限制见[性能报告](performance-report-2026-10-30.md#d43-signature-cache-20261108)。对数精度与零列缺陷仍未修复，详见测试报告。
+在共享主机上，同项目新旧版本的 64 行查询中，部分函数有改善，但旧版自身漂移较大，不能据此宣称全库提速；逐项结果与限制见[性能报告](performance-report-2026-10-30.md#d43-signature-cache-20261108)。D43 的对数精度与零列缺陷当时仍未修复，详见测试报告。
 
-**待修复的数据正确性问题（D40/D42/D43 实测）：** 高精度 `ln`／`log` 可能返回错误成功值，并可通过 DEFAULT 写入、跨重启保留；零列查询可能漏发实际行，零列表部分读写也失败。D43 的零列反例和对数默认值冷重启问题均已复现；不能将隔离原型当作已完成的修复。详见[对数测试](test-report.md#numeric-log-gap-20261108)与[零列测试](test-report.md#zero-column-gap-20261108)。
+**D40/D42/D43 的历史数据正确性问题：** 高精度 `ln`／`log` 可能返回错误成功值，并可通过 DEFAULT 写入、跨重启保留；零列查询可能漏发实际行，零列表部分读写也失败。D43 的零列反例和对数默认值冷重启问题均已复现；该段保留旧版实测；当前对数结果见上方，零列问题仍开放。详见[对数测试](test-report.md#numeric-log-gap-20261108)与[零列测试](test-report.md#zero-column-gap-20261108)。
 
 ## 2026-11-08：十进制指数与浮点函数类型
 
@@ -20,7 +26,7 @@
 
 实现参考 [PostgreSQL 18.6 numeric.c](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/utils/adt/numeric.c) 和 [float.c](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/utils/adt/float.c)。[SQLite 数学函数](https://www.sqlite.org/lang_mathfunc.html)通常返回近似值，[DuckDB 的 exp 实现](https://github.com/duckdb/duckdb/blob/v1.5.6/extension/core_functions/scalar/math/numeric.cpp)使用 double；两者不能替代 PostgreSQL numeric 结果作为精度判据。
 
-本项目 Numeric 的有效精度和 scale 仍各限 1000 位，部分 PostgreSQL 可计算的结果返回 `22003`；`ln`／`log` 的高精度数值路径仍有差距，D39 的部分 binary Numeric 输入边界在 D40 尚未重新验证。有限测试不代表全面 PostgreSQL 兼容；六条简单 SQL 的新旧测量波动较大，部分变慢，不能宣称全库提速。详见[测试报告](test-report.md#d40-numeric-exp-20261108)及[性能报告](performance-report-2026-10-30.md#d40-numeric-exp-cost-20261108)。
+本项目 Numeric 的有效精度和 scale 仍各限 1000 位，部分 PostgreSQL 可计算的结果返回 `22003`；D40 的 `ln`／`log` 高精度数值路径存在差距（当前状态见上方），D39 的部分 binary Numeric 输入边界在 D40 尚未重新验证。有限测试不代表全面 PostgreSQL 兼容；六条简单 SQL 的新旧测量波动较大，部分变慢，不能宣称全库提速。详见[测试报告](test-report.md#d40-numeric-exp-20261108)及[性能报告](performance-report-2026-10-30.md#d40-numeric-exp-cost-20261108)。
 
 ## 2026-11-08：大数和超越函数差距（D39 历史）
 
