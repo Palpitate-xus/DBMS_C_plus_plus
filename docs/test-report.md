@@ -22,6 +22,10 @@
 
 在私有 PostgreSQL 18.6 与较早冻结程序 `70f941e0…` 的 26 条普通 SQL 对照中，所测函数在同一 SELECT 扫描目标表时执行 ALTER、TRUNCATE 或 DROP：PostgreSQL 均返回 `55006`，项目均成功；后续查询分别证实新列出现、数据被清空或表不再存在。对同表 UPDATE、未触发的 CASE 分支及修改另一张表的控制不应被统一拦截：所测两边均成功。独立审核重新解码了 52 组请求／回复并核对进程退出；此次不是对最新程序或并发、冷重启的验证，也未研究用户暂缓的 DROP DATABASE 问题。
 
+随后针对冻结程序 `7d484f5a…` 的 100 个 SQL 动作进行对照并复核保留的 200 组请求／回复：94 项具备可比前置条件，另外 6 项因项目不支持测试所需的 `PARTITION OF` 而不可比。共 20 项响应字段存在差异，其中包括两项分区子表创建、两项 EXPLAIN 计划文本和一项除零错误的 RowDescription 差异，不能把所有差异归因于活动关系。别名、CTE、JOIN 和所测子查询内的同表 ALTER 仍表现不同；空表、LIMIT 0、未执行的 CASE、修改其他表和同表 UPDATE 等控制在所测条件下相符。含函数的主键查询在项目中的计划为 TableScan，未通过运行时追踪证明索引扫描路径已覆盖。
+
+另有 79 个动作检查 DDL 检查顺序和多目标操作，独立解码 158 组请求／回复发现 26 项响应字段差异。例如，活动表上的重复列或缺失列 ALTER 在 PostgreSQL 返回 `55006`，项目分别返回 `42701` 或 `42703`；多表 TRUNCATE 和 DROP 遇到活动表时，PostgreSQL 拒绝操作并保留各表，项目在所测例中成功修改各表。外键依赖的 DROP RESTRICT 两边均返回 `2BP01`，该项仍计入字段差异，因为错误响应前的 RowDescription 不同。以上结果来自私有单连接测试及保留记录的复核，并非对并发 DDL、崩溃恢复或所有分区行为的验证；PostgreSQL 版本由日志和配置记录，版本查询响应帧未单独保留。
+
 独立原型观察到，同线程持有的表共享锁可以升级，ALTER 后 physicalRelationId 不变；事务回滚后声明还可能恢复成原样，简单比较声明或 ID 无法识别中间变化。原型尚未接入产品，也未证明全局类型、排序规则或 TOAST 的生命周期。PostgreSQL 的 [CheckTableNotInUse](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/commands/tablecmds.c) 会检查当前会话的活动关系引用和待处理触发器；项目对应缺口仍未修复。
 
 <a id="row-variable-directory-corruption-20261108"></a>
