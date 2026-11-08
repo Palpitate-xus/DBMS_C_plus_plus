@@ -42,10 +42,13 @@ __t_*/
 *.vm
 *.lst
 
-# Benchmark output is local-only and is not part of the source repository.
-/docs/benchmarks/
-/scripts/benchmark_*.py
-/scripts/extract_benchmark_*.py
+# Benchmark scripts and output are local-only and not part of the repository.
+benchmark*/
+benchmark_*.py
+extract_benchmark_*.py
+*benchmark*.json
+*benchmark*.jsonl
+*benchmark*.csv
 
 # Test/runtime output.
 /ddl_test.log
