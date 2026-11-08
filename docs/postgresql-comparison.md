@@ -8,6 +8,8 @@
 
 **当前查询差距：** 普通表零列投影可能漏发真实行，并受未选大字段故障影响；某些函数参数中的转义引号和拼接会产生错误成功值。所测写入及冷重启控制与 PostgreSQL 一致，不能将查询反例扩展为已证实的持久化错误。[测试与限制](test-report.md#zero-projection-argument-audit-20261108)。
 
+在冻结基线的所测 `replace` 查询中，参数内的序列调用和除零错误被遗漏；实际 PostgreSQL 对照以及严格 UDF、CASE 和 COALESCE 的范围控制见[标量参数副作用对照](test-report.md#ordinary-scalar-effects-20261108)。该结果不能泛化为所有严格函数或所有执行路径，现有功能账目不变。
+
 ## 2026-11-08：numeric 十进制对数
 
 `ln`、`log` 和 `log10` 的 numeric 路径改为十进制计算，修复已复现的高精度错误值和默认值冷重启反例；浮点重载保留。最终 CMake 程序、选定 SQL／事务／冷重启与独立原语测试的范围见[测试报告](test-report.md#numeric-log-decimal-20261108)。Numeric 精度和 scale 仍各限 1000 位，部分错误诊断与 PostgreSQL 不同；长除数的所有舍入边界尚未证明完全一致。零列缺陷仍开放。

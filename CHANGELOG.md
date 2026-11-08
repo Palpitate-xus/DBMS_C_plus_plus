@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-11-08：行读取页帧生命周期
+
+按行号读取时在复制数据结束前保持缓冲页固定，并在普通和可见行读取的异常路径释放 pin。新增针对多页、NULL 和分配失败的原生回归；协议与冷重启对照、尚未解决的并发边界见[测试报告](docs/test-report.md#row-read-page-pin-20261108)。有限查询性能对照波动较大，不能判断性能变化，详见[性能报告](docs/performance-report-2026-10-30.md#row-pin-query-cost-20261108)。
+
 ## 2026-11-08：零宽查询和函数参数诊断
 
 补充与 PostgreSQL 的零宽结果、TOAST 需求及函数参数反例；所测写入／冷重启控制和未完成范围见[测试报告](docs/test-report.md#zero-projection-argument-audit-20261108)。投影语法缓存候选未证明收益并未采纳，计时与限制见[性能报告](docs/performance-report-2026-10-30.md#projection-syntax-rejected-20261108)。

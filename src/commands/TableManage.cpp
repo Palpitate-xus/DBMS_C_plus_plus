@@ -9384,6 +9384,11 @@ bool StorageEngine::readRowByRid(PageAllocator* pa, int64_t rid,
     decodeRid(rid, pageId, slotId);
     char* buf = pa->fetchPage(pageId);
     if (!buf) return false;
+    struct PagePin {
+        PageAllocator& allocator;
+        uint32_t page;
+        ~PagePin() { allocator.unpinPage(page); }
+    } pin{*pa, pageId};
     PageWrapper page(buf, pa->pageSize(), tbl.formatVersion);
     const char* data = nullptr;
     size_t len = 0;
@@ -9399,8 +9404,10 @@ bool StorageEngine::readRowByRid(PageAllocator* pa, int64_t rid,
             }
         }
     }
-    pa->unpinPage(pageId);
     if (!ok) return false;
+    // page.read() returns a pointer into the pinned buffer frame. Copy the
+    // payload before releasing that pin; another reader may reuse the frame
+    // as soon as its pin count reaches zero.
     rowBuffer = stripRowHeader(data, len, tbl.formatVersion, tbl.len);
     return true;
 }
@@ -9423,6 +9430,11 @@ bool StorageEngine::readVisibleRowByRid(const std::string& dbname, PageAllocator
         if (readFailed) *readFailed = true;
         return false;
     }
+    struct PagePin {
+        PageAllocator& allocator;
+        uint32_t page;
+        ~PagePin() { allocator.unpinPage(page); }
+    } pin{*pa, pageId};
     PageWrapper page(buf, pa->pageSize(), tbl.formatVersion);
     const char* data = nullptr;
     size_t len = 0;
@@ -9450,7 +9462,6 @@ bool StorageEngine::readVisibleRowByRid(const std::string& dbname, PageAllocator
     if (visible) {
         rowBuffer = stripRowHeader(data, len, tbl.formatVersion, tbl.len);
     }
-    pa->unpinPage(pageId);
     return visible;
 }
 
