@@ -68,6 +68,8 @@ inline const QueryRowDescriptor& dependencyDescriptor() {
     return value;
 }
 inline std::vector<std::vector<ExprValue>> rows(const CatalogManager::MetadataSnapshot& snapshot, bool dependencies) {
+    if (!snapshot.defaultObjectsIncluded)
+        throw DbError("XX001", "attribute default catalog source requires its actual object snapshot");
     std::vector<std::vector<ExprValue>> result;
     if (dependencies) {
         validate(snapshot, dependencyOid, "pg_depend", dependencyFields);

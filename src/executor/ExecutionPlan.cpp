@@ -3903,7 +3903,7 @@ OpPtr QueryPlanner::buildPreparedQueryPlan(StorageEngine* engine,const std::stri
             auto rows=std::make_shared<std::optional<PreparedQueryRows>>();
             source=std::make_unique<PreparedSourceRowsOp>(found->columns,
                 [engine,database,rows,dependencies](size_t index,std::vector<ExprValue>& row) {
-                    if(!*rows)*rows=default_catalog::rows(engine->catalogService().metadataSnapshot(database),dependencies);
+                    if(!*rows)*rows=default_catalog::rows(engine->catalogService().metadataSnapshot(database,true),dependencies);
                     if(index>=(**rows).size())return false;
                     row=(**rows)[index];return true;
                 });

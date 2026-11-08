@@ -7925,8 +7925,7 @@ static ExprValue evaluateTextSubstring(const std::vector<ExprValue>& args) {
         if (!parseInt64Exact(args[2].value, length))
             return ExprValue("text", "", true);
         if (length < 0) {
-            throw std::runtime_error(
-                "negative substring length not allowed (SQLSTATE 22011)");
+            throw DbError("22011", "negative substring length not allowed");
         }
     }
 

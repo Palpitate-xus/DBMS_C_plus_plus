@@ -1583,7 +1583,7 @@ static column_default::Bound bindColumnDefault(CatalogManager& catalog,
     const std::string& database, const std::string& expression, Oid type,
     StorageEngine& engine, Session* session) {
     std::unique_ptr<ExprEvaluator> resolver;
-    return column_default::bind(expression, type, catalog.metadataSnapshot(), session,
+    return column_default::bind(expression, type, catalog.metadataSnapshot(false), session,
         [&](const FunctionCallExpr* call) {
             if (!resolver) { resolver = std::make_unique<ExprEvaluator>(); resolver->setCurrentDB(database); }
             return resolver->scalarFunctionIdentity(call, &engine).rfind("builtin", 0) == 0;

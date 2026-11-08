@@ -6257,7 +6257,7 @@ bool StorageEngine::schemaExists(const std::string& dbname,
     }
     const auto ownership = catalogReadOwnership(dbname);
     if (!ownership.mayReadCurrentFiles && catalogService_) {
-        for (const auto& row : catalogService_->metadataSnapshot(dbname).namespaces)
+        for (const auto& row : catalogService_->metadataSnapshot(dbname,false).namespaces)
             if (row.nspname == schemaname) return true;
         return false;
     }
@@ -6270,7 +6270,7 @@ std::vector<std::string> StorageEngine::getSchemaNames(const std::string& dbname
     std::vector<std::string> result;
     const auto ownership = catalogReadOwnership(dbname);
     if (!ownership.mayReadCurrentFiles && catalogService_) {
-        for (const auto& row : catalogService_->metadataSnapshot(dbname).namespaces)
+        for (const auto& row : catalogService_->metadataSnapshot(dbname,false).namespaces)
             if (row.nspname != "pg_catalog" && row.nspname != "information_schema" &&
                 row.nspname != "pg_toast") result.push_back(row.nspname);
         return result;
@@ -6321,7 +6321,7 @@ static StorageEngine::UDFInfo readLegacyUdf(const std::filesystem::path& path,
 
 static DeclaredTypeBinding udfDeclaredType(const StorageEngine& engine,
     const std::string& database,const std::string& declaration) {
-    const auto catalog=engine.catalogService().metadataSnapshot(database);
+    const auto catalog=engine.catalogService().metadataSnapshot(database,false);
     return resolveDeclaredTypeName(declaration,
         catalog.namespaces.empty() && catalog.types.empty()?nullptr:&catalog,currentSession());
 }
@@ -7098,7 +7098,7 @@ bool StorageEngine::analyzeTable(const std::string& dbname,
     TableSchema tbl = getTableSchema(dbname, tablename);
     analyzed_statistics::ScalarStatisticsCapture typedAnalysis(
         tbl, tablename, schemaPath(dbname, tablename),
-        catalogService().metadataSnapshot(dbname));
+        catalogService().metadataSnapshot(dbname,false));
 
     TableStats stats;
     stats.rowCount = 0;
@@ -7186,7 +7186,7 @@ bool StorageEngine::analyzeTable(const std::string& dbname,
             return *result;
         };
     });
-    typedAnalysis.verify(catalogService().metadataSnapshot(dbname));
+    typedAnalysis.verify(catalogService().metadataSnapshot(dbname,false));
 
     const size_t HIST_BUCKETS = 10;
     const size_t MCV_TOP_N = 10;
@@ -28306,18 +28306,50 @@ DBStatus StorageEngine::insertInternal(
         // NULL represented by an empty value.  Only an omitted column receives
         // its DEFAULT; this is required to distinguish DEFAULT from NULL.
         if (it == actualValues.end() && !col.defaultValue.empty()) {
-            std::string computed;
-            bool computedNull = false;
-            if (evalExpressionSqlValue(col.defaultValue, actualValues,
-                                       typeHints, dbname, computed,
-                                       computedNull, nullptr, this, stored_regtype_detail::scalarType(col.dataType))) {
-                actualValues[col.dataName] = computed;
-                if (computedNull) actualNullColumns.insert(col.dataName);
-                else actualNullColumns.erase(col.dataName);
-            } else {
-                // Fall back to raw string for simple literal defaults.
-                actualValues[col.dataName] = col.defaultValue;
-                actualNullColumns.erase(col.dataName);
+            try {
+                const bool referenceOutput = stored_regtype_detail::scalarType(col.dataType);
+                auto evaluated = ExprHelper::evalString(col.defaultValue, actualValues,
+                    typeHints, dbname, "", this, referenceOutput);
+                if (!evaluated.ok) {
+                    // The boolean-only helper discarded the original SQL
+                    // error and could even store the SQL text in a TEXT
+                    // column. Preserve typed failures at this DEFAULT owner.
+                    if (!evaluated.sqlState.empty())
+                        throw DbError(evaluated.sqlState, evaluated.error);
+                    // Some legacy evaluators attach SQLSTATE to the error
+                    // message instead of returning it as a separate field.
+                    const auto marker = evaluated.error.rfind("(SQLSTATE ");
+                    if (marker != std::string::npos &&
+                        marker + 16 == evaluated.error.size() &&
+                        evaluated.error.back() == ')') {
+                        const auto state = evaluated.error.substr(marker + 10, 5);
+                        const bool valid = std::all_of(state.begin(), state.end(),
+                            [](char c) { return (c >= '0' && c <= '9') ||
+                                                (c >= 'A' && c <= 'Z'); });
+                        if (valid) {
+                            auto message = evaluated.error.substr(0, marker);
+                            if (!message.empty() && message.back() == ' ')
+                                message.pop_back();
+                            throw DbError(state, message);
+                        }
+                    }
+                    // Retain the legacy native literal representation only
+                    // when evaluation produced no structured SQL failure.
+                    actualValues[col.dataName] = col.defaultValue;
+                    actualNullColumns.erase(col.dataName);
+                } else if (evaluated.isNull) {
+                    actualValues[col.dataName].clear();
+                    actualNullColumns.insert(col.dataName);
+                } else {
+                    if (referenceOutput && !evaluated.owningValue)
+                        throw DbError("XX001", "DEFAULT lost its actual object-reference value");
+                    actualValues[col.dataName] = referenceOutput
+                        ? stored_regtype_detail::storageText(*evaluated.owningValue) : evaluated.value;
+                    actualNullColumns.erase(col.dataName);
+                }
+            } catch (...) {
+                lockManager_.unlock(tablename);
+                throw;
             }
         }
     }
@@ -35509,7 +35541,7 @@ std::vector<std::vector<ExprValue>> StorageEngine::getSequenceCatalogRows(const 
     const auto ownership=catalogReadOwnership(dbname);
     if(!ownership.mayReadCurrentFiles)throw DbError("55P03","sequence catalog read conflicts with an active database writer");
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
-    const auto metadata=catalogService_->metadataSnapshot(dbname);
+    const auto metadata=catalogService_->metadataSnapshot(dbname,false);
     sequence_catalog::validateReadDeclaration(metadata);
     std::map<Oid,std::string> namespaces;
     for(const auto& row:metadata.namespaces)namespaces.emplace(row.oid,row.nspname);
@@ -35540,7 +35572,7 @@ std::vector<std::vector<ExprValue>> StorageEngine::getAnalyzedStatisticsRows(con
     const auto ownership=catalogReadOwnership(dbname);
     if(!ownership.mayReadCurrentFiles)throw DbError("55P03","statistics read conflicts with an active database writer");
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
-    const auto metadata=catalogService_->metadataSnapshot(dbname);
+    const auto metadata=catalogService_->metadataSnapshot(dbname,false);
     const auto snapshot=analyzed_statistics::read(dbPath(dbname)/".analyzed_statistics");
     std::vector<std::vector<ExprValue>> result;if(!snapshot)return result;
     DatumMetadataFactory factory(metadata);
@@ -37056,7 +37088,7 @@ DatumMetadataContextPtr StorageEngine::prepareDatumMetadataContext(
     };
     auto owner=std::make_shared<Owner>();
     owner->nameSpace=freezeDeclaredTypeNamespace(currentSession());
-    if(!dbname.empty())owner->snapshot=catalogService_->metadataSnapshot(dbname);
+    if(!dbname.empty())owner->snapshot=catalogService_->metadataSnapshot(dbname,false);
     if(owner->snapshot.types.empty() && owner->snapshot.namespaces.empty()) {
         // Actual immutable bootstrap identities only; not catalog seeding.
         owner->snapshot.types=CatalogManager::builtinTypeRows();
@@ -37172,7 +37204,7 @@ decltype(auto) StorageEngine::withQueryBindingMetadata(const std::string& dbname
                     return primitiveDatumFactory->type(oid);
                 }
             }
-            if(!catalogSnapshot)catalogSnapshot=catalogService_->metadataSnapshot(dbname);
+            if(!catalogSnapshot)catalogSnapshot=catalogService_->metadataSnapshot(dbname,false);
             if(!datumFactory)datumFactory=std::make_unique<DatumMetadataFactory>(*catalogSnapshot,
                 [&](const std::string& declaration) {
                     const bool empty=catalogSnapshot->types.empty() && catalogSnapshot->namespaces.empty();
@@ -37182,7 +37214,7 @@ decltype(auto) StorageEngine::withQueryBindingMetadata(const std::string& dbname
             catch(const DbError&) {return DatumTypePtr{};}
         };
         const auto physicalDatum=[&](const PgAttributeRow& attribute) -> DatumTypePtr {
-            if(!catalogSnapshot)catalogSnapshot=catalogService_->metadataSnapshot(dbname);
+            if(!catalogSnapshot)catalogSnapshot=catalogService_->metadataSnapshot(dbname,false);
             if(!datumFactory) (void)metadata.datumType("",attribute.atttypid);
             try {return datumFactory?datumFactory->attribute(attribute):DatumTypePtr{};}
             catch(const DbError&) {return DatumTypePtr{};}
@@ -37221,7 +37253,7 @@ decltype(auto) StorageEngine::withQueryBindingMetadata(const std::string& dbname
             // A source-free prepared value does not require a storage read.
             // In particular, preparing CASE must not promote a deferred
             // query transaction just to copy a catalog it will never use.
-            if (!catalogSnapshot) catalogSnapshot = catalogService_->metadataSnapshot(dbname);
+            if (!catalogSnapshot) catalogSnapshot = catalogService_->metadataSnapshot(dbname,false);
             const auto& catalog = *catalogSnapshot;
             std::vector<std::string> schemas;
             const Session* session = currentSession();
@@ -37394,7 +37426,7 @@ decltype(auto) StorageEngine::withQueryBindingMetadata(const std::string& dbname
             throw DbError("42P01", "relation \"" + spelling + "\" does not exist");
         };
         const auto resolveOperatorType = [&](const std::string& spelling,uint32_t typeOid) -> const PgTypeRow* {
-            if(!catalogSnapshot)catalogSnapshot=catalogService_->metadataSnapshot(dbname);
+            if(!catalogSnapshot)catalogSnapshot=catalogService_->metadataSnapshot(dbname,false);
             const auto& catalog=*catalogSnapshot;
             const PgTypeRow* resolved=nullptr;
             if(typeOid) {
@@ -37469,7 +37501,7 @@ decltype(auto) StorageEngine::withQueryBindingMetadata(const std::string& dbname
             // actual namespace after following domains (including an enum or
             // range named text/int4) instead of resolving a search_path alias.
             if(resolved->typnamespace!=11) {
-                if(!catalogSnapshot)catalogSnapshot=catalogService_->metadataSnapshot(dbname);
+                if(!catalogSnapshot)catalogSnapshot=catalogService_->metadataSnapshot(dbname,false);
                 for(const auto& space:catalogSnapshot->namespaces)if(space.oid==resolved->typnamespace) {
                     const auto quote=[](const std::string& name) {
                         std::string value="\"";for(char c:name){value+=c;if(c=='\"')value+=c;}return value+'\"';
@@ -37508,7 +37540,7 @@ decltype(auto) StorageEngine::withQueryBindingMetadata(const std::string& dbname
             return description;
         };
         metadata.declaredType = [&](const std::string& spelling) {
-            if(!catalogSnapshot)catalogSnapshot=catalogService_->metadataSnapshot(dbname);
+            if(!catalogSnapshot)catalogSnapshot=catalogService_->metadataSnapshot(dbname,false);
             // Native storage consumers can use a database before its system
             // catalog has been initialized. In that genuinely empty snapshot
             // only registered builtin input identities exist; lookup remains
@@ -37545,7 +37577,7 @@ decltype(auto) StorageEngine::withQueryBindingMetadata(const std::string& dbname
                 // transforms, before any execution. Quoted case is not a
                 // catalog alias: an absent namespace is 3F000, whereas an
                 // absent routine in an existing namespace is 42883.
-                if (!catalogSnapshot) catalogSnapshot = catalogService_->metadataSnapshot(dbname);
+                if (!catalogSnapshot) catalogSnapshot = catalogService_->metadataSnapshot(dbname,false);
                 auto schema = routine.schema;
                 if (schema == "pg_temp" && currentSession())
                     schema = sessionTempSchemaName(*currentSession());
@@ -37821,7 +37853,7 @@ decltype(auto) StorageEngine::withQueryBindingMetadata(const std::string& dbname
                 if (target.identityKind == 0) return std::nullopt;
                 if (!target.identitySequenceOid)
                     throw DbError("0A000", "legacy anonymous identity default requires migration");
-                if (!catalogSnapshot) catalogSnapshot = catalogService_->metadataSnapshot(dbname);
+                if (!catalogSnapshot) catalogSnapshot = catalogService_->metadataSnapshot(dbname,false);
                 const auto sequence = std::find_if(catalogSnapshot->relations.begin(),catalogSnapshot->relations.end(),
                     [&](const auto& relation) { return relation.oid == target.identitySequenceOid && relation.relkind == 'S'; });
                 if (sequence == catalogSnapshot->relations.end())
@@ -53745,7 +53777,7 @@ std::shared_ptr<SavepointImageReceipt> StorageEngine::sealSavepointImage(
             !wal->XLogFlush(wal->currentWriteLsn()) ||
             !savepointCachesQuiescent(context.txnDB)) return {};
         const auto catalog = catalogService_
-            ? catalogService_->metadataSnapshot(context.txnDB)
+            ? catalogService_->metadataSnapshot(context.txnDB,false)
             : CatalogManager::MetadataSnapshot{};
         return captureSavepointImageReceipt(context.txnDB, backup,
             dbPath(context.txnDB), catalog, wal->currentWriteLsn());
@@ -53770,7 +53802,7 @@ bool StorageEngine::savepointImageUnchanged(
             !wal->XLogFlush(wal->currentWriteLsn()) ||
             !savepointCachesQuiescent(context.txnDB)) return false;
         const auto catalog = catalogService_
-            ? catalogService_->metadataSnapshot(context.txnDB)
+            ? catalogService_->metadataSnapshot(context.txnDB,false)
             : CatalogManager::MetadataSnapshot{};
         return matchesSavepointImageReceipt(*receipt, context.txnDB, backup,
             dbPath(context.txnDB), catalog, wal->currentWriteLsn()) &&

@@ -518,14 +518,20 @@ CatalogManager::CatalogManager(const std::string& dbPath, ReadOnlyTag)
     loadAll();
 }
 
-CatalogManager::MetadataSnapshot CatalogManager::metadataSnapshot() const {
+CatalogManager::MetadataSnapshot CatalogManager::metadataSnapshot(bool includeDefaultObjects) const {
     std::lock_guard<std::mutex> lock(mutex_);
-    return {namespaces_, classes_, attributes_, types_, procs_, enums_, systemAttributesMaterialized_, attrdefs_, depends_};
+    MetadataSnapshot result{namespaces_, classes_, attributes_, types_, procs_, enums_, systemAttributesMaterialized_, {}, {}, includeDefaultObjects};
+    if (includeDefaultObjects) {
+        result.defaults = attrdefs_;
+        result.dependencies = depends_;
+    }
+    return result;
 }
 
-CatalogManager::MetadataSnapshot CatalogManager::readMetadataSnapshot(const std::string& path) {
+CatalogManager::MetadataSnapshot CatalogManager::readMetadataSnapshot(const std::string& path,
+                                                                      bool includeDefaultObjects) {
     CatalogManager catalog(path, ReadOnlyTag{});
-    return catalog.metadataSnapshot();
+    return catalog.metadataSnapshot(includeDefaultObjects);
 }
 
 std::map<std::string, std::string> CatalogManager::domainColumns(
@@ -2129,10 +2135,12 @@ bool CatalogManager::applyDropPlan(const DropPlan& plan, std::string* error) {
 // ============================================================================
 
 const std::vector<PgNamespaceRow>& CatalogManager::builtinNamespaceRows() {
-    static const std::vector<PgNamespaceRow> rows={
+    // Catalog reload can run from the global engine destructor. These
+    // immutable declarations must outlive every catalog and engine owner.
+    static const auto* rows=new const std::vector<PgNamespaceRow>{
         {11,"pg_catalog",10},{99,"pg_toast",10},{2200,"public",10},{1213,"pg_temp_1",10}
     };
-    return rows;
+    return *rows;
 }
 
 void CatalogManager::bootstrapSystemNamespaces() {
@@ -2165,7 +2173,7 @@ namespace {
 // Retain the exact previous declaration signature for a checked, mutable
 // startup upgrade. Cold readers continue to expose their actual stored rows.
 const std::vector<PgTypeRow>& legacyBuiltinTypeRows() {
-    static const auto rows=[] {
+    static const auto* rows=new const std::vector<PgTypeRow>([] {
     std::vector<PgTypeRow> types;
     std::unordered_map<Oid,size_t> typeByOid;
     auto ensureType = [&](Oid oid, const std::string& name, int16_t len,
@@ -2365,13 +2373,13 @@ const std::vector<PgTypeRow>& legacyBuiltinTypeRows() {
         }
     }
     return types;
-    }();
-    return rows;
+    }());
+    return *rows;
 }
 } // namespace
 
 const std::vector<PgTypeRow>& CatalogManager::builtinTypeRows() {
-    static const auto rows=[] {
+    static const auto* rows=new const std::vector<PgTypeRow>([] {
         auto result=legacyBuiltinTypeRows();
         for(const auto& property:builtin_type_properties::properties) {
             const auto row=std::find_if(result.begin(),result.end(),[&](const auto& t){return t.oid==property.oid;});
@@ -2381,8 +2389,8 @@ const std::vector<PgTypeRow>& CatalogManager::builtinTypeRows() {
             row->typstorage=property.storage;row->typcollation=property.collation;
         }
         return result;
-    }();
-    return rows;
+    }());
+    return *rows;
 }
 
 bool CatalogManager::bootstrapBuiltinTypeProperties(bool requireCurrent) {

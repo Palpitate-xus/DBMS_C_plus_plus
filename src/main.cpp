@@ -20852,7 +20852,7 @@ class PreparedWithDmlRuntime {
             } else if(range.relationSchema=="pg_catalog" &&
                       (range.relationName=="pg_attrdef" || range.relationName=="pg_depend")) {
                 virtualRows=make_shared<dbms::PreparedQueryRows>(dbms::default_catalog::rows(
-                    g_engine.catalogService().metadataSnapshot(session_.currentDB),range.relationName=="pg_depend"));
+                    g_engine.catalogService().metadataSnapshot(session_.currentDB,true),range.relationName=="pg_depend"));
             } else if(range.relationSchema=="pg_catalog" && range.relationName=="pg_sequence") {
                 virtualRows=make_shared<dbms::PreparedQueryRows>(g_engine.getSequenceCatalogRows(session_.currentDB));
             } else if(range.relationSchema=="pg_catalog" && range.relationName=="pg_stats") {

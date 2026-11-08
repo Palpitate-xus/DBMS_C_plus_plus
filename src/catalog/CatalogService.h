@@ -53,7 +53,10 @@ public:
 
     // Test/debug: is `dbname` currently cached?
     bool has(const std::string& dbname) const;
-    CatalogManager::MetadataSnapshot metadataSnapshot(const std::string& dbname) const;
+    // Public callers receive a complete snapshot by default. Internal callers
+    // that need only declarations can explicitly omit the object graph.
+    CatalogManager::MetadataSnapshot metadataSnapshot(const std::string& dbname,
+                                                      bool includeDefaultObjects = true) const;
     std::map<std::string, std::string> domainColumns(const std::string& dbname,
                                                     const std::string& physicalTable) const;
 

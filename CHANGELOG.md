@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-11-08：DEFAULT 错误与目录快照（D27，未接受草稿）
+
+本轮修正 INSERT 遗漏列 DEFAULT 求值中已有 SQLSTATE 或有效结尾 SQLSTATE 标记的错误传播，并对 substring 负长度保留 `22011`；目录声明读取按需省去 DEFAULT 对象图复制，公共默认快照仍完整。没有 SQLSTATE 且没有有效标记的旧/native 求值失败仍可退回原始字面量；域、旧数据及全部错误类型不构成全面兼容承诺。
+
+D24 的 `catalog_default_snapshot_demand_test` 实际退出 `-11`，诊断指向进程退出时内置目录声明生命周期问题；D27 的 ASan 只注入运行时库而非全核心插桩，该控制正常退出 0，不能称为完整 ASan 构建。D26 的 `regexp_replace('abc','[','z')` DEFAULT 在热态和冷重启后均错误写入表达式文本；D27 返回 PostgreSQL 的 `2201B` 且未写入行。历史失败记录保留。
+
+最终 D27 49 个常规原生入口加 1 个二进制控制，共 50 个实际退出 0；22 个协议族独立审计覆盖 1,998 SQL、76 个正常结束 Main。五族 DEFAULT 错误独立对照记录 342 SQL、48 个正常结束 Main，所比较语义字段没有候选差异；两个族的原始行描述符 T7 仍有差异，不能称为完整 wire 或 PostgreSQL 等价。未运行完整测试套件，功能仍为未接受草稿。 指定成本测试为共享服务器暖缓存、单连接、32 行热表：D23 与 D27 按每场景旧版前/新版/旧版后各 3 个进程固定顺序执行，共 27 个正常结束 Main、36,720 条 SQL；各场景完整回复字节一致。24 组墙钟和 CPU 结果有正有负，narrow 前后基线波动尤大；没有证明整体加速，也没有 PostgreSQL 速度对比。 [完整证据](docs/performance-report-2026-10-30.md#default-runtime-snapshot-evidence-20261108)。
+
+
 ## 2026-11-07：DEFAULT 对象依赖（P43/D23，未接受草稿）
 
 - 增加独立的持久默认值身份、所属列自动依赖和真实对象常量正常依赖；SET DEFAULT更换身份，DROP DEFAULT／删列／删所属表清理对象，列压缩时重映射所属序号。

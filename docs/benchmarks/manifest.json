@@ -549,8 +549,18 @@
       "sha256": "463061c5c07afeab9ac5703c6078b6ce455305848eeb7243489a013bc702835f",
       "encoding": "gzip",
       "roundtrip_bytes_exact": true
+    },
+    {
+      "original_path": "docs/benchmarks/default-runtime-snapshot-evidence-20261108.json",
+      "original_bytes": 168286360,
+      "original_sha256": "e0ffb09ac72c4db70b16313ef076d5bf229b58fa4949ab06cb50d5cbadac315a",
+      "path": "docs/benchmarks/default-runtime-snapshot-evidence-20261108.json.gz",
+      "bytes": 31078895,
+      "sha256": "30638158bc3aca346b40b81d61bb7d8296718cca86f3bd77239932eb987699be",
+      "encoding": "gzip",
+      "roundtrip_bytes_exact": true
     }
   ],
-  "total_original_bytes": 2163454045,
-  "total_bytes": 615663646
+  "total_original_bytes": 2391411015,
+  "total_bytes": 656913293
 }

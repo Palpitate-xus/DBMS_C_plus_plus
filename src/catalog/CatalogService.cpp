@@ -483,7 +483,8 @@ bool CatalogService::has(const std::string& dbname) const {
     return cache_.find(dbname) != cache_.end();
 }
 
-CatalogManager::MetadataSnapshot CatalogService::metadataSnapshot(const std::string& dbname) const {
+CatalogManager::MetadataSnapshot CatalogService::metadataSnapshot(const std::string& dbname,
+                                                                  bool includeDefaultObjects) const {
     const auto ownership = engine_.catalogReadOwnership(dbname);
     CatalogDatabaseIdentity physical;
     if (!databaseIdentity(engine_.dbPath(dbname), physical, dbname == "info")) return {};
@@ -497,9 +498,9 @@ CatalogManager::MetadataSnapshot CatalogService::metadataSnapshot(const std::str
                 ? found->second.committed : found->second.manager;
     }
     if (model) {
-        if (!ownership.mayReadCurrentFiles) return model->metadataSnapshot();
+        if (!ownership.mayReadCurrentFiles) return model->metadataSnapshot(includeDefaultObjects);
         const auto state = model->publicationState();
-        if (state == CatalogManager::PublicationState::Current) return model->metadataSnapshot();
+        if (state == CatalogManager::PublicationState::Current) return model->metadataSnapshot(includeDefaultObjects);
         if (state == CatalogManager::PublicationState::Conflict)
             throw DbError("58030", "catalog read conflicts with unpublished or missing metadata");
     }
@@ -507,7 +508,7 @@ CatalogManager::MetadataSnapshot CatalogService::metadataSnapshot(const std::str
         throw DbError("55P03", "cold catalog read conflicts with an active DDL owner");
     // Copying committed metadata remains pure: no bootstrap/OID allocation,
     // cache insertion, legacy migration or destructor publication.
-    return CatalogManager::readMetadataSnapshot(catalogDirForDb(engine_, dbname).string());
+    return CatalogManager::readMetadataSnapshot(catalogDirForDb(engine_, dbname).string(), includeDefaultObjects);
 }
 
 std::map<std::string, std::string> CatalogService::domainColumns(

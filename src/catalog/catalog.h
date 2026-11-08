@@ -52,12 +52,14 @@ public:
         bool systemAttributesMaterialized = false;
         std::vector<PgAttrdefRow> defaults;
         std::vector<PgDependRow> dependencies;
+        bool defaultObjectsIncluded = false;
     };
     // A single-lock copy: callers never retain catalog-owned row pointers.
-    MetadataSnapshot metadataSnapshot() const;
+    MetadataSnapshot metadataSnapshot(bool includeDefaultObjects = true) const;
     // Cold metadata reads do not bootstrap, allocate OIDs, migrate files,
     // create directories or persist on destruction.
-    static MetadataSnapshot readMetadataSnapshot(const std::string& dbPath);
+    static MetadataSnapshot readMetadataSnapshot(const std::string& dbPath,
+                                                 bool includeDefaultObjects = true);
     // Narrow, single-lock logical identity copy for schema-cache reads.
     std::map<std::string, std::string> domainColumns(const std::string& schema,
                                                     const std::string& relation) const;
