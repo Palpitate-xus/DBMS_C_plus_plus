@@ -42,6 +42,9 @@ __t_*/
 *.vm
 *.lst
 
-# Benchmark payloads are committed compressed; the small index remains JSON.
-/docs/benchmarks/*.json
-!/docs/benchmarks/manifest.json
+# Benchmark output is local-only and is not part of the source repository.
+/docs/benchmarks/
+
+# Test/runtime output.
+/ddl_test.log
+/checkpoint_buffer_pool.dat.tde

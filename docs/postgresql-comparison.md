@@ -1,5 +1,15 @@
 # 与 PostgreSQL 18 的功能和性能差距
 
+> 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
+
+## 2026-11-08：内置函数签名缓存
+
+内置函数的固定签名改为只读、进程生命周期的共享声明，避免在绑定和调用时反复创建；数组位置函数的参数相关签名仍逐次生成，同名函数覆盖和参数求值路径保持既有语义。选定回归与异常分配注入的范围见[测试报告](test-report.md#d43-signature-cache-20261108)。
+
+在共享主机上，同项目新旧版本的 64 行查询中，部分函数有改善，但旧版自身漂移较大，不能据此宣称全库提速；逐项结果与限制见[性能报告](performance-report-2026-10-30.md#d43-signature-cache-20261108)。对数精度与零列缺陷仍未修复，详见测试报告。
+
+**待修复的数据正确性问题（D40/D42/D43 实测）：** 高精度 `ln`／`log` 可能返回错误成功值，并可通过 DEFAULT 写入、跨重启保留；零列查询可能漏发实际行，零列表部分读写也失败。D43 的零列反例和对数默认值冷重启问题均已复现；不能将隔离原型当作已完成的修复。详见[对数测试](test-report.md#numeric-log-gap-20261108)与[零列测试](test-report.md#zero-column-gap-20261108)。
+
 ## 2026-11-08：十进制指数与浮点函数类型
 
 `exp(numeric)` 改用十进制计算，保留 PostgreSQL 18.6 的结果标度与中间舍入行为；`exp`、`ln`、`log` 和 `log10` 按参数类型区分 numeric 与 double precision 重载。此前 `exp(100::numeric)` 和 `exp(-40::integer)` 的错误结果可能被写入默认值，现有针对这些示例的查询及持久化回归用于防止再次发生。
@@ -234,7 +244,7 @@ The first candidate's12-byte `aclitem` and NULL output labeled TEXT25 are reject
 
 原58个严格协议目标及4个额外冷锚控制全部保留，两代产品各完成62请求、目标各53/58，原9项普通差异未关闭，strict CLI仍为1；全部62请求/响应原始字节一致。每代实际207行/848单元/156个NULL，4个初始/冷Main均取得真实子进程wait0、PID/组消失。复用此前真实PG18.6参考，没有重跑PG，没有把目录来源元数据或选中错误的TEZ/EZ差异改成PASS或暂缓。
 
-本批优化本地普通日志路径，不是PG性能对照；未执行新的PG参考或关闭catalog/CAT02、IDX-07与其他未完成能力。日志字节回归通过不等于全部SQL或事务恢复等价，用户暂停范围保持。[本批完整报告](performance-report-2026-10-30.md#legacy-log-append-20261106)与[可逆原始证据](benchmarks/legacy-log-append-20261106.json.gz)。以下历史保留。
+本批优化本地普通日志路径，不是PG性能对照；未执行新的PG参考或关闭catalog/CAT02、IDX-07与其他未完成能力。日志字节回归通过不等于全部SQL或事务恢复等价，用户暂停范围保持。[本批完整报告](performance-report-2026-10-30.md#legacy-log-append-20261106)与可逆原始证据（可选本地文件 `benchmarks/legacy-log-append-20261106.json.gz`）。以下历史保留。
 
 <!-- CURRENT_ORDINARY_PROJECT_BITMAP_20261106 -->
 
@@ -246,7 +256,7 @@ The first candidate's12-byte `aclitem` and NULL output labeled TEXT25 are reject
 
 原273项仍为22 complete/166 partial/70 unverified/15 deferred_by_user，`IDX-07`保持`unverified`且`evidence=[]`。完整PG参考58/58；三代产品均完成全58目标与4冷控制，目标各53/58，另4冷锚控制仍失败。原9项目录/普通错误帧差异完整保留、没有改为PASS或新增暂缓。仅新增1个正式CPP回归；whole58 known-gap协议草稿未运行、未登记。Goal active，默认程序未替换，无服务重启、分支切换或推送。
 
-完整原始分布、既有差异、许可和验收边界见[本批性能报告](performance-report-2026-10-30.md#ordinary-project-bitmap-20261106)与[可逆压缩证据](benchmarks/ordinary-project-bitmap-20261106.json.gz)。以下P29及更早内容为对应代别的历史记录。
+完整原始分布、既有差异、许可和验收边界见[本批性能报告](performance-report-2026-10-30.md#ordinary-project-bitmap-20261106)与可逆压缩证据（可选本地文件 `benchmarks/ordinary-project-bitmap-20261106.json.gz`）。以下P29及更早内容为对应代别的历史记录。
 
 <!-- CURRENT_MULTILOB_20261106 -->
 
@@ -270,7 +280,7 @@ The first candidate's12-byte `aclitem` and NULL output labeled TEXT25 are reject
 
 这是有限的 partial 进展，Goal active。原 273 项状态保持 22 complete/166 partial/70 unverified/15 deferred_by_user；`IDX-07` 仍为 `unverified`、`evidence=[]`。零列行集、零列表和原 TOAST 损坏夹具的普通缺口仍保留，用户暂缓边界保持。本批不证明完整 PostgreSQL 数据类型上限、文件格式、WAL 或协议等价。
 
-完整定义、首轮失败与测试边界见[本批报告](performance-report-2026-10-30.md#multilob-storage-20261106)和[可逆压缩证据](benchmarks/multilob-storage-20261106.json.gz)。下方 P28 及更早段落是对应代别的历史记录。
+完整定义、首轮失败与测试边界见[本批报告](performance-report-2026-10-30.md#multilob-storage-20261106)和可逆压缩证据（可选本地文件 `benchmarks/multilob-storage-20261106.json.gz`）。下方 P28 及更早段落是对应代别的历史记录。
 
 <!-- CURRENT_CONSTRAINT_VALIDATION_20261106 -->
 
@@ -290,7 +300,7 @@ The first candidate's12-byte `aclitem` and NULL output labeled TEXT25 are reject
 
 本批为有限普通约束生命周期的 partial 进展，Goal active。原 273 项状态保持（22 complete/166 partial/70 unverified/15 deferred_by_user）；`IDX-07` 仍是 `unverified`、`evidence=[]`。本批 GiST 页树资料只是未实现研究，不能将 P27 的 batch partial 记录当作 IDX-07 已部分验证。原用户暂缓边界保持。
 
-完整代别、首轮失败、普通成本全表与范围见[本批报告](performance-report-2026-10-30.md#constraint-validation-20261106)和[压缩原始证据](benchmarks/constraint-validation-20261106.json.gz)。下方 P27 及更早段落保持历史口径。
+完整代别、首轮失败、普通成本全表与范围见[本批报告](performance-report-2026-10-30.md#constraint-validation-20261106)和压缩原始证据（可选本地文件 `benchmarks/constraint-validation-20261106.json.gz`）。下方 P27 及更早段落保持历史口径。
 
 <!-- CURRENT_GIST_PROBE_READER_20261106 -->
 
@@ -347,28 +357,28 @@ GiST 空文本编码、native-only 丢失定义、虚拟 Bloom NEW NULL 和上�
 
 <!-- CURRENT_BRIN_OPERATOR_CONSISTENCY_20261106 -->
 
-最新P24-C2将普通BRIN摘要比较改为运算符专用路径；仍校验min<=max、所有文件/CRC/identity/dirty/snapshot fences与完整heap Filter复核，NULL flags不新增求值，legacy timestamp原路径保留。实际功能门禁及全部首次结果、固定9进程的完整维护/查询wall、CPU、长尾、负数与漂移见[性能报告](performance-report-2026-10-30.md)和[压缩证据](benchmarks/brin-operator-pruning-20261106.json.gz)；不称完整PG BRIN、所有SQL提速或因果已隔离。性能外层runner因label覆盖退出1、九backend正常0，二者分开记录；原source/plan/complete=false回执保留，后续仅离线finalize，不重采样、不当产品故障。默认425保持，partial、Goal active。旧2374测试逐字不变+1 native=2375；679/659 roster、源248/头177、顶层CPP1113/全部1118、754MD/725保护记录保持，历史275，旧23gzip保持+新24。下方P23及更早段落为历史记录。
+最新P24-C2将普通BRIN摘要比较改为运算符专用路径；仍校验min<=max、所有文件/CRC/identity/dirty/snapshot fences与完整heap Filter复核，NULL flags不新增求值，legacy timestamp原路径保留。实际功能门禁及全部首次结果、固定9进程的完整维护/查询wall、CPU、长尾、负数与漂移见[性能报告](performance-report-2026-10-30.md)和压缩证据（可选本地文件 `benchmarks/brin-operator-pruning-20261106.json.gz`）；不称完整PG BRIN、所有SQL提速或因果已隔离。性能外层runner因label覆盖退出1、九backend正常0，二者分开记录；原source/plan/complete=false回执保留，后续仅离线finalize，不重采样、不当产品故障。默认425保持，partial、Goal active。旧2374测试逐字不变+1 native=2375；679/659 roster、源248/头177、顶层CPP1113/全部1118、754MD/725保护记录保持，历史275，旧23gzip保持+新24。下方P23及更早段落为历史记录。
 
 
 <!-- CURRENT_BRIN_MAINTENANCE_OPTIONS_20261106 -->
 
 最新P23-C1修复BRIN在VACUUM FULL、加列、删列和TRUNCATE/reset重建时丢失pages_per_range：健康V3配置在重建前保存，宽度1和SQL默认128均保持；缺失/旧格式/损坏仍沿用64回退。生产只改TableManage.cpp四处捕获/四次传参。新协议42命令/12镜像/4路径检查、25相关原生、6专项协议、3自动统计均正常0；PG18.6共享35SQL/19,327字段、11真实metapage一致；恢复7worker/2477检查。
 
-固定9个正常socket进程测量完整VACUUM FULL及其后7类查询，所有wall/CPU、尾部、控制项和负数见[性能报告](performance-report-2026-10-30.md)及[压缩证据](benchmarks/brin-maintenance-options-20261106.json.gz)。该修复保留用户配置，不代表所有操作均提速；REINDEX仅Btree、完整PG BRIN AM/增量维护/WAL、规划重复验证开销、Bloom/GiST非NULL空文本覆盖和P22数组ROLLBACK间歇超时仍开放。前批密集CPU回测+6.64%负面记录保持。本批partial、Goal active。源248/头177，2373旧测试字节不变+1=2374，679注册/659独立E2E；原273item状态不变、历史274；754MD/725保护记录/22旧gzip保持。下方P22及更早段落为历史记录。
+固定9个正常socket进程测量完整VACUUM FULL及其后7类查询，所有wall/CPU、尾部、控制项和负数见[性能报告](performance-report-2026-10-30.md)及压缩证据（可选本地文件 `benchmarks/brin-maintenance-options-20261106.json.gz`）。该修复保留用户配置，不代表所有操作均提速；REINDEX仅Btree、完整PG BRIN AM/增量维护/WAL、规划重复验证开销、Bloom/GiST非NULL空文本覆盖和P22数组ROLLBACK间歇超时仍开放。前批密集CPU回测+6.64%负面记录保持。本批partial、Goal active。源248/头177，2373旧测试字节不变+1=2374，679注册/659独立E2E；原273item状态不变、历史274；754MD/725保护记录/22旧gzip保持。下方P22及更早段落为历史记录。
 
 
 <!-- CURRENT_BRIN_TYPED_SCAN_20261105 -->
 
 最新 P22-C10 修复 BRIN 数值边界/NULL 状态并接入真实候选页扫描，支持普通 SQL/绑定后五类比较和 NULL 谓词、反向常量及 pages_per_range。23页 extent 的原生候选 cursor 实际只 fetch1页；完整谓词仍复核。格式组件 O2/ASan各5588、新原生1834、新协议101命令/25路径断言、真实PG18.6共享73SQL/10490字段及7恢复worker/2477检查通过。有限81原生80正常0+1父代TOAST中止；旧32协议29正常0+3父代相同失败，全部保留。
 
-固定9个正常socket进程、4096×4、七类查询，服务器CPU减少（首轮／同旧回测）：高端窄范围 41.19%／42.36%；低端窄范围 48.68%／49.29%；非主键等值 25.78%／20.13%；不存在的范围 94.22%／94.12%；密集范围控制 -7.44%／-6.64%；主键控制 30.31%／28.42%；无对应索引列控制 7.79%／4.38%。所有wall/CPU/控制负数、原始帧和尾部见[性能报告](performance-report-2026-10-30.md)与[压缩证据](benchmarks/brin-typed-scan-20261105.json.gz)。新BRIN文件V3，旧1/2只作兼容读取/安全回堆，旧二进制不能读取V3；当前物理heap2保持，暂缓format2仍指wire/output，NetworkServer.cpp未改。REINDEX尚仅Btree、部分重写配置保存、PG opclass/revmap/增量维护/WAL/concurrent、SSI及特殊类型/来源路径等仍开放，不声称全部数据库操作或PG性能等价。本批partial，Goal active。源248/头177、测试2373，678注册/658独立E2E；原273对象状态不变、历史273，754MD/725保护记录和21旧gzip保持。下方P21及更早段落为历史记录。
+固定9个正常socket进程、4096×4、七类查询，服务器CPU减少（首轮／同旧回测）：高端窄范围 41.19%／42.36%；低端窄范围 48.68%／49.29%；非主键等值 25.78%／20.13%；不存在的范围 94.22%／94.12%；密集范围控制 -7.44%／-6.64%；主键控制 30.31%／28.42%；无对应索引列控制 7.79%／4.38%。所有wall/CPU/控制负数、原始帧和尾部见[性能报告](performance-report-2026-10-30.md)与压缩证据（可选本地文件 `benchmarks/brin-typed-scan-20261105.json.gz`）。新BRIN文件V3，旧1/2只作兼容读取/安全回堆，旧二进制不能读取V3；当前物理heap2保持，暂缓format2仍指wire/output，NetworkServer.cpp未改。REINDEX尚仅Btree、部分重写配置保存、PG opclass/revmap/增量维护/WAL/concurrent、SSI及特殊类型/来源路径等仍开放，不声称全部数据库操作或PG性能等价。本批partial，Goal active。源248/头177、测试2373，678注册/658独立E2E；原273对象状态不变、历史273，754MD/725保护记录和21旧gzip保持。下方P21及更早段落为历史记录。
 
 
 <!-- CURRENT_INDEX_BUILD_NULL_OWNER_20261105 -->
 
 最新 P21-C1 让索引构建/REINDEX 复用当前行物理 NULL 位图，并修复 BRIN 将真实 SQL 全 NULL 整数摘要写成 `[0,0]` 的问题；空字符串范围保留。新原生13366检查、新协议40命令、真实PG18.6共享35命令/2250字段及7恢复worker/2477检查通过。有限相关79原生78正常0+1父代相同TOAST中止；旧32协议29正常0+3父代相同失败，全部保留。
 
-正常2048行维护9进程、368640字段核对；相对同旧回测CPU中位数减少：Btree 19.30%，复合 19.02%，写事务 45.10%，回滚 47.67%；BRIN -154.76%（退步）。wall波动大且多项变慢，另9进程完整socket查询控制也没有一致提升，详见[性能报告](performance-report-2026-10-30.md)与[压缩证据](benchmarks/index-build-scan-owner-20261105.json.gz)。BRIN数值排序及SQL执行算子等仍为普通开放缺口，本批partial，Goal active。当前物理heap版本2保持；暂缓format2指协议/输出所有权。源248/头177、测试2370，677注册/657独立E2E；原273状态不变、历史272，754MD/725保护记录与20旧gzip保持。下方P20及更早段落为历史记录。
+正常2048行维护9进程、368640字段核对；相对同旧回测CPU中位数减少：Btree 19.30%，复合 19.02%，写事务 45.10%，回滚 47.67%；BRIN -154.76%（退步）。wall波动大且多项变慢，另9进程完整socket查询控制也没有一致提升，详见[性能报告](performance-report-2026-10-30.md)与压缩证据（可选本地文件 `benchmarks/index-build-scan-owner-20261105.json.gz`）。BRIN数值排序及SQL执行算子等仍为普通开放缺口，本批partial，Goal active。当前物理heap版本2保持；暂缓format2指协议/输出所有权。源248/头177、测试2370，677注册/657独立E2E；原273状态不变、历史272，754MD/725保护记录与20旧gzip保持。下方P20及更早段落为历史记录。
 
 
 <!-- CURRENT_INDEX_CRC32C_20261105 -->
@@ -396,7 +406,7 @@ GiST 空文本编码、native-only 丢失定义、虚拟 Bloom NEW NULL 和上�
 
 最终C6通过新原生310检查、原13068与独立冷读105检查、37个相关原生入口；纯前缀组件O2和ASan/UBSan各72567检查，启用泄漏检测。新123条协议命令含27次实际扫描断言；32个相关旧协议入口29正常0、3项严格失败与父代完整观察相同。真实PG18.6以两个会话重放共享65条SQL，935个完整字段/NULL/OID逐项相同，3个EXPLAIN ANALYZE实际行数相同；未比较PG的AM路径、成本或速度。
 
-详见[性能报告](performance-report-2026-10-30.md)与[压缩原始证据](benchmarks/like-prefix-scan-20261105.json.gz)。本批仍为partial，Goal active。
+详见[性能报告](performance-report-2026-10-30.md)与压缩原始证据（可选本地文件 `benchmarks/like-prefix-scan-20261105.json.gz`）。本批仍为partial，Goal active。
 
 
 <!-- CURRENT_ORDINARY_QUERY_PROFILE_20261105 -->
@@ -409,7 +419,7 @@ GiST 空文本编码、native-only 丢失定义、虚拟 Bloom NEW NULL 和上�
 
 最终C2通过原生13068与独立冷读105检查、32个规划/存储入口和14个语法入口；另2个冷目录原生入口保留父代完全相同的严格失败。新65条协议命令含10个实际扫描断言，原有73条等值协议通过；另30个相关旧协议入口27通过、3个严格失败与父代完整观察相同。实际PG18.6的共享25条SQL仍为7331/7331逻辑单元格、9/9行估计一致，8/9路径相同；不是完整兼容验收。
 
-详见[性能报告](performance-report-2026-10-30.md)与[压缩原始证据](benchmarks/ordinary-query-profile-20261105.json.gz)。本批是普通读取partial进展，Goal active。
+详见[性能报告](performance-report-2026-10-30.md)与压缩原始证据（可选本地文件 `benchmarks/ordinary-query-profile-20261105.json.gz`）。本批是普通读取partial进展，Goal active。
 
 
 <!-- CURRENT_EQUALITY_SCAN_COST_20261105 -->
@@ -423,7 +433,7 @@ GiST 空文本编码、native-only 丢失定义、虚拟 Bloom NEW NULL 和上�
 
 新原生13068检查与独立冷读105检查通过，纯频率组件O2及ASan/UBSan各17检查（启用泄漏检测）。24个相关原生入口实际正常0，含完整7worker恢复1974检查和14份子进程完整输出；这些入口实际链接最终C7的61个核心对象。新73条普通协议命令正常0，验证实际扫描计数、全部行值/NULL及旧快照；26个旧协议入口中23正常0，另3保留与父代一致的严格失败，未称全套通过。真实PG18.6对共享25条命令的7331个逻辑单元格全部逐字相同，9个EXPLAIN行数相同，8个扫描选择相同、1处成本边界扫描选择不同。
 
-原始测量、失败与独立复核见[压缩机器归档](benchmarks/equality-scan-cost-20261105.json.gz)和[性能报告](performance-report-2026-10-30.md)。
+原始测量、失败与独立复核见压缩机器归档（可选本地文件 `benchmarks/equality-scan-cost-20261105.json.gz`）和[性能报告](performance-report-2026-10-30.md)。
 
 
 <!-- CURRENT_PG_STATS_SOURCE_20261105 -->
@@ -437,7 +447,7 @@ GiST 空文本编码、native-only 丢失定义、虚拟 Bloom NEW NULL 和上�
 
 新原生109检查与独立冷读90检查、投影组件O2和ASan/UBSan各548检查通过；34个相关原生入口全部正常0，包含完整7worker恢复1974检查及14份完整子进程输出。普通后端新协议26条SQL及旧标量25/数组19/范围19条自动统计协议通过。真实PG18.6同26条协议命令991个字段值：938逐字相同、53处严格差异保留；17列二进制153项中145相同、8处为实际存储宽度差异，六种范围的24个直接二进制值全部相同。另510个有限float4输入的文本和二进制身份均与PG一致。没有全库SAN或整体PG等价结论。
 
-原始测量、失败及逐字复核见[压缩机器归档](benchmarks/pg-stats-source-20261105.json.gz)与[性能报告](performance-report-2026-10-30.md)。
+原始测量、失败及逐字复核见压缩机器归档（可选本地文件 `benchmarks/pg-stats-source-20261105.json.gz`）与[性能报告](performance-report-2026-10-30.md)。
 
 
 <!-- CURRENT_ANALYZED_RANGE_COLLECTOR_20261105 -->
@@ -451,7 +461,7 @@ GiST 空文本编码、native-only 丢失定义、虚拟 Bloom NEW NULL 和上�
 
 原生范围845检查及冷读262通过；组件O2和ASan/UBSan各43检查（启用泄漏检测，非全库SAN）。21个相关原生入口含完整7worker恢复1574检查全部正常0。原数组786+冷读191、标量641+冷读2、范围19条/数组19条/标量25条协议SQL通过。真实PG18.6同一520条SQL对照18列243项：229相同，14处严格差异保留（13处存储宽度、1处numeric NaN长度排序）。没有PG整体通过结论。
 
-原始测量、失败和复核见[压缩机器归档](benchmarks/analyzed-range-collector-20261105.json.gz)及[性能报告](performance-report-2026-10-30.md)。
+原始测量、失败和复核见压缩机器归档（可选本地文件 `benchmarks/analyzed-range-collector-20261105.json.gz`）及[性能报告](performance-report-2026-10-30.md)。
 
 
 <!-- CURRENT_ANALYZED_ARRAY_COLLECTOR_20261105 -->
@@ -465,7 +475,7 @@ GiST 空文本编码、native-only 丢失定义、虚拟 Bloom NEW NULL 和上�
 
 原生数组786检查及冷读191通过；计算组件O2和ASan/UBSan各32检查（启用泄漏检测，非全库SAN）；17个相关原生入口含完整7worker恢复1574检查全部正常0。原标量641+冷读2、数组19条协议SQL和原标量25条协议SQL通过。真实PG18.6同一554条SQL对照14列325项：301相同，24处严格差异保留（11宽度、11collation OID、2处相同频率元素的截断选择）。没有PG整体通过结论。
 
-原始测量、失败和复核见[压缩机器归档](benchmarks/analyzed-array-collector-20261105.json.gz)及[性能报告](performance-report-2026-10-30.md)。
+原始测量、失败和复核见压缩机器归档（可选本地文件 `benchmarks/analyzed-array-collector-20261105.json.gz`）及[性能报告](performance-report-2026-10-30.md)。
 
 
 <!-- CURRENT_ANALYZED_SCALAR_COLLECTOR_20261105 -->
@@ -487,7 +497,7 @@ GiST 空文本编码、native-only 丢失定义、虚拟 Bloom NEW NULL 和上�
 
 P10完成完整17字段/7类槽的拥有值快照基础，保存真实的关系/属性/继承键、类型声明、操作符和collation身份及可空numbers/values。真实PG18.6确认数组列MCV的元素OID1007、常见元素23、范围长度701，以及多范围bounds使用范围3904；本模型可保存这些不同身份。
 
-SQL侧尚未接入：两条完整17列探针仍0A000，采集算法、真实view/attribute来源、anyarray输出和现有权限消费者接入仍待实现，不以内部组件通过关闭pg_stats或原功能族。编码CPU对照只针对本批新组件，未测PostgreSQL性能或普通SQL提速。[报告](performance-report-2026-10-30.md#完整统计视图的快照基础2026-11-05p10)与[归档](benchmarks/analyzed-statistics-snapshot-20261105.json.gz)。
+SQL侧尚未接入：两条完整17列探针仍0A000，采集算法、真实view/attribute来源、anyarray输出和现有权限消费者接入仍待实现，不以内部组件通过关闭pg_stats或原功能族。编码CPU对照只针对本批新组件，未测PostgreSQL性能或普通SQL提速。[报告](performance-report-2026-10-30.md#完整统计视图的快照基础2026-11-05p10)与归档（可选本地文件 `benchmarks/analyzed-statistics-snapshot-20261105.json.gz`）。
 
 原273项仍为22 complete /166 partial /70 unverified /15 deferred_by_user；Goal active。下方旧节保留各批次当时结果。
 
@@ -498,7 +508,7 @@ SQL侧尚未接入：两条完整17列探针仍0A000，采集算法、真实view
 
 P9-C2 `30c57ca8…` 补的是本项目存储生命周期可靠性：两处实际use-after-free已修复，原七阶段恢复及完整Memcheck本次通过。它不等于PostgreSQL完整恢复/epoch/跨进程准入或所有退出时序等价。正常Main保留5项探针元数据差异，完整17字段pg_stats仍为后续工作。
 
-本批9次完整恢复对照未证明稳定提速；没有重测PostgreSQL速度或全部35操作/36查询。默认425保持。原失败与新版本证据见[报告](performance-report-2026-10-30.md#存储退出期生命周期2026-11-05p9-c2)及[归档](benchmarks/relation-list-engine-lifetime-20261105.json.gz)。
+本批9次完整恢复对照未证明稳定提速；没有重测PostgreSQL速度或全部35操作/36查询。默认425保持。原失败与新版本证据见[报告](performance-report-2026-10-30.md#存储退出期生命周期2026-11-05p9-c2)及归档（可选本地文件 `benchmarks/relation-list-engine-lifetime-20261105.json.gz`）。
 
 原273项仍为22 complete /166 partial /70 unverified /15 deferred_by_user，Goal active。下方旧节保留当时版本的结果。
 
@@ -509,7 +519,7 @@ P9-C2 `30c57ca8…` 补的是本项目存储生命周期可靠性：两处实际
 
 本批P8-C3 `d778afbd…` 参照恢复后事务分配器必须超过导入事务号的原则，补入本项目公开恢复的只读水位扫描和持久推进；这不等于PostgreSQL的WAL恢复、epoch/wrap或并发机制。较早目标首次探针1→4行得到实际验证，正常Main仍有5项探针元数据差异，最终七阶段原生验收仍因advance阶段异常退出而严格失败。
 
-第二轮仅比较本项目旧P7-C1/C2/C3/旧P7-C1：C3 wall p50较两次旧版低4.16%/6.42%，process CPU低2.47%/3.17%。第一轮C2慢项、6.8秒与18.5秒长尾不删除；没有PostgreSQL速度或完整35/36新结论，默认425未提升。跨进程准入、完整恢复失败及完整17字段pg_stats仍开放，不能把少数字段renderer当视图完成。详见[完整报告](performance-report-2026-10-30.md#物理恢复事务号水位2026-11-05p8-c3)和[机器归档](benchmarks/restore-transaction-horizon-20261105.json.gz)。
+第二轮仅比较本项目旧P7-C1/C2/C3/旧P7-C1：C3 wall p50较两次旧版低4.16%/6.42%，process CPU低2.47%/3.17%。第一轮C2慢项、6.8秒与18.5秒长尾不删除；没有PostgreSQL速度或完整35/36新结论，默认425未提升。跨进程准入、完整恢复失败及完整17字段pg_stats仍开放，不能把少数字段renderer当视图完成。详见[完整报告](performance-report-2026-10-30.md#物理恢复事务号水位2026-11-05p8-c3)和机器归档（可选本地文件 `benchmarks/restore-transaction-horizon-20261105.json.gz`）。
 
 原273项仍为22 complete /166 partial /70 unverified /15 deferred_by_user；Goal active。下方旧节保留各批次当时结果，不能覆盖本节的失败与范围。
 
@@ -542,7 +552,7 @@ P9-C2 `30c57ca8…` 补的是本项目存储生命周期可靠性：两处实际
 
 本批是425/C2/425内部实测，没有新PG速度测量或功能族关闭。原273仍22 complete /166 partial /70 unverified /15 deferred_by_user，生成列需求/赋值与更多组合仍开放；Goal active。
 
-详见[完整性能报告](performance-report-2026-10-30.md)和[本批机器归档](benchmarks/analyze-reindex-main-costs-20261104.json.gz)。下方旧批次保留其当时结论，当前以本节与报告首节为准。
+详见[完整性能报告](performance-report-2026-10-30.md)和本批机器归档（可选本地文件 `benchmarks/analyze-reindex-main-costs-20261104.json.gz`）。下方旧批次保留其当时结论，当前以本节与报告首节为准。
 
 ## C4功能与完整成本记录（2026-11-04）
 
@@ -552,7 +562,7 @@ P9-C2 `30c57ca8…` 补的是本项目存储生命周期可靠性：两处实际
 
 固定301仍188匹配/113差异，其他四组结果未变；生成列赋值/需求、历史位图、quoted routine元数据、更多目录/输入/来源形式仍开放。原273为22 complete /166 partial /70 unverified /15 deferred_by_user，251项未标记完成。新数据为内部425/C4/425对照，没有新增PG速度测量或稳定跨版本倍率。
 
-详见[本批报告](performance-report-2026-10-30.md#returning-声明真实行值与操作热路径2026-11-04)及[机器归档](benchmarks/returning-declarations-hotpaths-20261104.json.gz)。以下为历史记录。
+详见[本批报告](performance-report-2026-10-30.md#returning-声明真实行值与操作热路径2026-11-04)及机器归档（可选本地文件 `benchmarks/returning-declarations-hotpaths-20261104.json.gz`）。以下为历史记录。
 
 ## 本批局部能力与距离（2026-11-03）
 
@@ -560,13 +570,13 @@ C3 `425165af…` 在真实RETURNING所有者内保存已经求值的拥有值，
 
 辅助求值循环的请求次数与字节减少，但公开游标512行分配不变、单次冷CPU20.750→35.862ms变慢；没有新的PG速度对照，也不能将局部构造收益解释为整SQL或所有数据库操作加速。
 
-只读共享内置函数注册表用于减少重复构造，同时保留实际实例覆盖、时钟及参数求值期间的回调替换；这属于本项目内部实现，不代表与PG执行器等价。C3原生选取57为56/1，协议选取32为24/8；最终S3/C3/S3全部36组查询p50低于两次S3：相对首/末降低2.05–33.76%/1.76–29.81%，基线漂移−22.57%至+11.58%。另一组C8/C3/C8的35类操作仍为18快/2慢/15居间，保留update_range、reindex慢项及−90.28%至+130.91%漂移；两种对照不拼成跨版本稳定倍率，没有新的PG速度对照或统计显著性结论。完整代别与原失败见[本批报告](performance-report-2026-10-30.md#内置函数注册与复合-returning2026-11-03)。原273仍22 complete /166 partial /70 unverified /15 deferred_by_user；独立机器归档见[全部原始统计](benchmarks/function-registry-returning-20261103.json.gz)。以下C8/C7为历史评估。
+只读共享内置函数注册表用于减少重复构造，同时保留实际实例覆盖、时钟及参数求值期间的回调替换；这属于本项目内部实现，不代表与PG执行器等价。C3原生选取57为56/1，协议选取32为24/8；最终S3/C3/S3全部36组查询p50低于两次S3：相对首/末降低2.05–33.76%/1.76–29.81%，基线漂移−22.57%至+11.58%。另一组C8/C3/C8的35类操作仍为18快/2慢/15居间，保留update_range、reindex慢项及−90.28%至+130.91%漂移；两种对照不拼成跨版本稳定倍率，没有新的PG速度对照或统计显著性结论。完整代别与原失败见[本批报告](performance-report-2026-10-30.md#内置函数注册与复合-returning2026-11-03)。原273仍22 complete /166 partial /70 unverified /15 deferred_by_user；独立机器归档见全部原始统计（可选本地文件 `benchmarks/function-registry-returning-20261103.json.gz`）。以下C8/C7为历史评估。
 
 ## 当前评估（2026-11-03）
 
 C8 `91d339db…` 保留原始类型行物化的局部分配优化，没有扩大类型、目录或DML的兼容范围。26原生/31协议选取集及301/83/111/68/16固定观察与C7连续，301仍有114差异、REGTYPE68仍有11普通缺口；原273状态不变。
 
-512行公开游标累计请求与字节减少，但完整查询36组为5快/18慢/13居间：64kB为0/9/3，4MB为4/2/6，16MB为1/7/4。两次S3基线漂移全部保留，不能用跨窗口数据构造稳定C7→C8倍率，也没有新的PostgreSQL速度采样。源码保留该优化，默认安装仍为S3；详见[本批报告](performance-report-2026-10-30.md#原始类型行物化分配优化2026-11-03)及[机器归档](benchmarks/owned-datum-primitive-20261103.json.gz)。
+512行公开游标累计请求与字节减少，但完整查询36组为5快/18慢/13居间：64kB为0/9/3，4MB为4/2/6，16MB为1/7/4。两次S3基线漂移全部保留，不能用跨窗口数据构造稳定C7→C8倍率，也没有新的PostgreSQL速度采样。源码保留该优化，默认安装仍为S3；详见[本批报告](performance-report-2026-10-30.md#原始类型行物化分配优化2026-11-03)及机器归档（可选本地文件 `benchmarks/owned-datum-primitive-20261103.json.gz`）。
 
 前批C7评估（保留原结论）：
 

@@ -1,9 +1,32 @@
 # 数据库操作性能测试报告（2026-10-30）
 
+> 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
+
+<a id="d43-signature-cache-20261108"></a>
+## 2026-11-08：函数签名缓存的行级 SQL 测量
+
+D40 与 D43 在同一共享主机上，以独立进程按旧／新／旧执行三轮；每个进程在事务中建立相同的 64 行数据。五条查询分别对真实列执行 `upper`、`length`、`abs`、`log` 和 `array_position`，另有两条常量查询。根据 D40 pilot 的 CPU 窗口固定重复次数分别为 4、4、16、4、16、64、64。共 1,548 条计时查询和 63 条预热；所有计时回复在运行时与首个参考协议帧逐字节比较，9 个服务实际 wait 均为 0。PostgreSQL 18.6 对同一数据和七条 SQL 的**功能**预检与 D43 完整帧一致，此处数字仅比较本项目新旧版本。 尝试跨 PostgreSQL 性能 pilot 时，服务尚未就绪导致启动失败（实际退出 1），未执行任何跨库计时；该失败保留在可选本地证据中，不能据此计算 PostgreSQL 性能倍率。
+
+表中墙钟变化为每轮 `新耗时 / ((前旧耗时 + 后旧耗时) / 2) - 1` 的中位数及三轮范围；负数表示新版更快。CPU 中位数使用同一公式，CPU 计数粒度为每秒 100 ticks。
+
+| 查询 | 墙钟中位数 | 墙钟三轮范围 | CPU 中位数 | 旧版前后最大漂移 |
+|---|---:|---:|---:|---:|
+| `upper` 列值 | -6.30% | -17.00%～-1.37% | -5.26% | 13.98% |
+| `length` 列值 | -7.96% | -9.58%～-4.74% | -5.66% | 7.45% |
+| `abs` 列值 | -0.04% | -3.47%～+2.63% | -4.62% | 14.20% |
+| `log` 列值 | -8.68% | -9.62%～-5.81% | -9.43% | 21.44% |
+| `array_position` 列值 | -7.19% | -11.87%～+0.42% | -5.26% | 15.89% |
+| 常量 `log` | +3.70% | -24.65%～+20.21% | -3.57% | 43.97% |
+| 常量 `upper` | -7.50% | -28.98%～+19.93% | -10.57% | 72.20% |
+
+正式计时起止 MemAvailable 约 8.1 GiB、可用 swap 仅 144 KiB，memory PSI avg10 为 0.02→0.00；共享主机、固定顺序、三轮样本和较大基线漂移限制结论。结果显示部分被测查询有改善，常量结果波动尤其大，不能据此声称全库提速。此前高负载下的预解析组件诊断显示签名缓存减少重复分配，但其 CPU 数字仅作诊断；正式计时保存参考帧，逐次校验成功帧，没有保存每次成功帧供独立重放。
+
+设计参考 [PostgreSQL 18.6 表达式执行](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/executor/execExpr.c)、[SQLite VDBE](https://www.sqlite.org/opcode.html) 和 [DuckDB 数学函数](https://github.com/duckdb/duckdb/blob/v1.5.6/extension/core_functions/scalar/math/numeric.cpp)；本次仅缓存进程内不可变内置签名，未将这些实现等同于本项目，也未改变暂缓的 prepared/portal 模块。
+
 <a id="d40-numeric-exp-cost-20261108"></a>
 ## 2026-11-08：指数及对数查询成本对照
 
-比较 D39 与 D40 冻结程序，在同一共享主机上执行三轮“旧／新／旧”，共 9 个独立服务进程，每项每进程预热后运行 64 次简单查询。脚本对每次回复与首个旧版参考帧进行逐字节比较，所有计时回复相同；9 个服务的实际等待退出码均为 0。这里比较端到端单连接查询时间，不是并发吞吐，也不是 PostgreSQL 对比。 原始计时记录、参考帧、服务退出收据和复现脚本见[压缩证据包](benchmarks/numeric-exp-validation-performance-20261108.tar.gz)；包内列出校验所需的既有归档和 Git 对象。旧版 `exp(100::numeric)` 结果错误，因此没有把其运行时间作为等价性能对照。
+比较 D39 与 D40 冻结程序，在同一共享主机上执行三轮“旧／新／旧”，共 9 个独立服务进程，每项每进程预热后运行 64 次简单查询。脚本对每次回复与首个旧版参考帧进行逐字节比较，所有计时回复相同；9 个服务的实际等待退出码均为 0。这里比较端到端单连接查询时间，不是并发吞吐，也不是 PostgreSQL 对比。 原始计时记录、参考帧、服务退出收据和复现脚本见压缩证据包（可选本地文件 `benchmarks/numeric-exp-validation-performance-20261108.tar.gz`）；包内列出校验所需的既有归档和 Git 对象。旧版 `exp(100::numeric)` 结果错误，因此没有把其运行时间作为等价性能对照。
 
 下表为每轮 `新耗时 / ((前旧耗时 + 后旧耗时) / 2) - 1` 的中位数和三轮范围；正数表示 D40 更慢。每批 64 次查询的墙钟范围约 793–2221 ms，进程 CPU 范围 32–62 ticks（100 ticks/秒）。
 
@@ -70,7 +93,7 @@
 | range_count | wall | +22.4% [-0.4%, +26.4%] | +19.1% [-7.4%, +27.9%] | +2.7% [-1.2%, +7.5%] |
 | range_count | CPU | +0.0% [-4.9%, +3.8%] | -1.3% [-4.8%, +10.7%] | -3.7% [-6.2%, +5.1%] |
 
-正式窗口的所有结果与计数已两次独立审核。旧基线同轮最大绝对墙钟漂移约 63.9%；例如 short_div 对前／后旧版中位数分别 +4.3%／−6.5%，long_div 分别 −5.8%／−5.9%，范围计数分别 +22.4%／+19.1%。共享服务器、固定顺序、单连接热缓存和少量轮次限制解释；无 PG 性能对照，不可据此断言整体加速或对任何单项改动归因。此前单轮 hybrid SQL 诊断中的慢项同样保留。原始测量、失败与双重审核均收录于[本轮压缩证据](benchmarks/numeric-func-division-evidence-20261108.tar.gz)，恢复其引用需要此前 D34、D35、D37 三档。
+正式窗口的所有结果与计数已两次独立审核。旧基线同轮最大绝对墙钟漂移约 63.9%；例如 short_div 对前／后旧版中位数分别 +4.3%／−6.5%，long_div 分别 −5.8%／−5.9%，范围计数分别 +22.4%／+19.1%。共享服务器、固定顺序、单连接热缓存和少量轮次限制解释；无 PG 性能对照，不可据此断言整体加速或对任何单项改动归因。此前单轮 hybrid SQL 诊断中的慢项同样保留。原始测量、失败与双重审核均收录于本轮压缩证据（可选本地文件 `benchmarks/numeric-func-division-evidence-20261108.tar.gz`），恢复其引用需要此前 D34、D35、D37 三档。
 
 
 
@@ -78,7 +101,7 @@
 <a id="d37-catalog-scan-20261108"></a>
 ## 2026-11-08：目录扫描系统调用与成本
 
-本轮对目录发布状态的单次文件扫描减少重复路径检查，严格保留每文件核验与结束时目录身份检查；描述符不可用回退旧实现，扫描期间的换出又换回等竞态仍不保证检测。本节只记录选定工作负载，不代表全库或 PostgreSQL 性能。完整原始测量、失败与独立审计见[本轮压缩证据](benchmarks/numeric-catalog-evidence-20261108.json.gz)，还原引用数据需同时保留 D34 和 D35 两份旧证据。
+本轮对目录发布状态的单次文件扫描减少重复路径检查，严格保留每文件核验与结束时目录身份检查；描述符不可用回退旧实现，扫描期间的换出又换回等竞态仍不保证检测。本节只记录选定工作负载，不代表全库或 PostgreSQL 性能。完整原始测量、失败与独立审计见本轮压缩证据（可选本地文件 `benchmarks/numeric-catalog-evidence-20261108.json.gz`），还原引用数据需同时保留 D34 和 D35 两份旧证据。
 
 D35 的单连接点查软件采样中 `fstatat` 占采样 CPU 的约 25.8%，其中 `catalogGeneration` 路径约 15.5%；这是剖析观察，非正式耗时对照。相同隔离种子的 strace 调用计数（每版10次暖机与100次点查，回复一致）中，D35 的 newfstatat 为 62,921 次、早期混合候选为 47,959 次，但后者的 openat／close 各多 1,588 次、fstat 多 1,710 次；混合候选不是正式 D37，不能把 stat 减少直接称作性能提升。正式 D36／D37 的非计时 strace 控制使用相同隔离种子，各 10 次暖机和 100 次点查，回复一致；计数包含启动和退出：newfstatat 63,253→47,347，openat 3,368→4,942，fstat 1,138→2,688，close 3,143→4,717；这四类合计 70,902→59,694，减少约 15.8%。其他系统调用不包括在合计里，此处不是时间基准。
 
@@ -160,7 +183,7 @@ D35 的单连接点查软件采样中 `fstatat` 占采样 CPU 的约 25.8%，其
 | tochar_ordinary | -1.3 [-3.1, +7.6] | +6.1 | +1.7 | -8.5 | -2.2 |
 | sql_default_rollback_transaction | +1.1 [-0.2, +14.0] | -5.7 | +2.5 | -3.6 | +6.4 |
 
-这是共享服务器单连接、固定操作顺序下的短窗口，不是 PostgreSQL 对照、并发吞吐或全数据库基准。三轮样本中同轮前后旧版最大绝对漂移约 29.9%；例如 add 相对前旧版三轮从 -21.2% 到 +6.4%，modulo 从 -4.8% 到 +14.1%，控制查询也波动。因此这些结果不能证明整体提速或把差异归因于某一代码改动。其他长期运行服务未被触碰，其身份、CPU 快照和测试前后主机负载保存在证据中。正式窗口及原始帧收录于 [D35 增量压缩证据](benchmarks/numeric-tochar-performance-increment-20261108.json.gz)，恢复其中引用的旧内容需同时使用 [D34 基准证据](benchmarks/numeric-attribution-evidence-20261108.json.gz)。
+这是共享服务器单连接、固定操作顺序下的短窗口，不是 PostgreSQL 对照、并发吞吐或全数据库基准。三轮样本中同轮前后旧版最大绝对漂移约 29.9%；例如 add 相对前旧版三轮从 -21.2% 到 +6.4%，modulo 从 -4.8% 到 +14.1%，控制查询也波动。因此这些结果不能证明整体提速或把差异归因于某一代码改动。其他长期运行服务未被触碰，其身份、CPU 快照和测试前后主机负载保存在证据中。正式窗口及原始帧收录于 D35 增量压缩证据（可选本地文件 `benchmarks/numeric-tochar-performance-increment-20261108.json.gz`），恢复其中引用的旧内容需同时使用 D34 基准证据（可选本地文件 `benchmarks/numeric-attribution-evidence-20261108.json.gz`）。
 
 ### D27、D29 与 D30 目录只读诊断
 
@@ -186,7 +209,7 @@ D27、D29、D30 的单连接暖缓存诊断共 27 个正常结束进程、27,648
 | verbose | point | +9.97 [-16.18, +29.25] | +13.91 [-7.19, +25.16] | -11.62 [-41.68, -11.51] | -16.49 [-40.95, -16.20] |
 | verbose | range | +4.16 [-11.46, +9.42] | +3.55 [-11.20, +8.21] | -6.72 [-22.17, -6.15] | -5.56 [-14.09, -5.53] |
 
-本表按逐轮配对后取中位数，不能混同于先取各版本中位耗时再计算的比率；例如 ordinary attrdef 在 D27→D29 的墙钟配对改善中位数为 -3.33%，三轮都较慢，而控制项也波动。诊断与旧失败的自包含证据已压缩为[本轮归档](benchmarks/numeric-attribution-evidence-20261108.json.gz)；为控制体积，部分历史通过项逐进程日志已按包内清单省略。
+本表按逐轮配对后取中位数，不能混同于先取各版本中位耗时再计算的比率；例如 ordinary attrdef 在 D27→D29 的墙钟配对改善中位数为 -3.33%，三轮都较慢，而控制项也波动。诊断与旧失败的自包含证据已压缩为本轮归档（可选本地文件 `benchmarks/numeric-attribution-evidence-20261108.json.gz`）；为控制体积，部分历史通过项逐进程日志已按包内清单省略。
 
 
 
@@ -243,7 +266,7 @@ D28 新投影测试因误以为 ALTER 后目录行顺序不变而断言失败，
 | narrow | ssi_read | -6.5% | -3.9% | -6.7% | -3.2% | -2.5% |
 | narrow | ssi_update | +3.8% | -6.6% | +0.0% | +0.0% | +9.7% |
 
-增量包原始内容 53,256,441 字节仅在内存生成，gzip 8,790,520 字节；原始 SHA256 `775dd9efd6bcc906eec775f0afe1ee171d007ee3f58a3b135738b78b950e4d15`，gzip SHA256 `abb8c87afbb9d9fc73547903d4adc5e780084e2a062d459909bd463bd0a8c102`。已校验往返、内嵌文件摘要和原 50 档压缩证据；manifest 现 51 档。包包含本轮 wire、超时与失败、原生结果、SSI、退出和实际成本数据以及源差异，不包含 ELF 或数据库镜像：[增量压缩证据](benchmarks/default-catalog-transaction-evidence-20261108.json.gz)。
+增量包原始内容 53,256,441 字节仅在内存生成，gzip 8,790,520 字节；原始 SHA256 `775dd9efd6bcc906eec775f0afe1ee171d007ee3f58a3b135738b78b950e4d15`，gzip SHA256 `abb8c87afbb9d9fc73547903d4adc5e780084e2a062d459909bd463bd0a8c102`。已校验往返、内嵌文件摘要和原 50 档压缩证据；manifest 现 51 档。包包含本轮 wire、超时与失败、原生结果、SSI、退出和实际成本数据以及源差异，不包含 ELF 或数据库镜像：增量压缩证据（可选本地文件 `benchmarks/default-catalog-transaction-evidence-20261108.json.gz`）。
 
 设计与差距参考 [PostgreSQL 默认值](https://www.postgresql.org/docs/18/ddl-default.html)、[pg_attrdef](https://www.postgresql.org/docs/18/catalog-pg-attrdef.html)、[numeric 范围](https://www.postgresql.org/docs/18/datatype-numeric.html)、[SQLite DEFAULT](https://www.sqlite.org/lang_createtable.html) 和 [DuckDB v1.4.1 默认值绑定实现](https://raw.githubusercontent.com/duckdb/duckdb/v1.4.1/src/planner/binder/statement/bind_insert.cpp)。SQLite 与 DuckDB 行为不等同于 PostgreSQL。 原273项和历史292项未改变。
 
@@ -292,7 +315,7 @@ D24 的 `catalog_default_snapshot_demand_test` 实际退出 `-11`，诊断指向
 
 例如 narrow 的 `attrdef` 相对前基线为 -54.8%、相对后基线为 +24.2%，同时前后漂移达到 -104.2%；不能将其当成可靠加速量。所有正负结果及原始批次均保留。
 
-冻结 D23 程序 SHA256 `63dc516eeb4aa3596ba1fdc43db9b0737a62d8a5fe76457bda085e544c72a802`，D27 程序 SHA256 `4ab6f69c273af499ad31db581d01d21217b6f271512931bbda47b988fd4ae9fa`。原始包长度 168,286,360 字节，gzip 长度 31,078,895 字节，原始 SHA256 `e0ffb09ac72c4db70b16313ef076d5bf229b58fa4949ab06cb50d5cbadac315a`，gzip SHA256 `30638158bc3aca346b40b81d61bb7d8296718cca86f3bd77239932eb987699be`，逐字节往返及各内嵌文件 SHA 校验通过：[完整压缩证据](benchmarks/default-runtime-snapshot-evidence-20261108.json.gz)。其中包含真实请求、回复、失败/缺失记录、回执、脚本、源码差异和两份新测试，不包含数据库镜像或 ELF。原 49 个归档保持，manifest 现 50 项；原 273 项与 292 条历史不变。
+冻结 D23 程序 SHA256 `63dc516eeb4aa3596ba1fdc43db9b0737a62d8a5fe76457bda085e544c72a802`，D27 程序 SHA256 `4ab6f69c273af499ad31db581d01d21217b6f271512931bbda47b988fd4ae9fa`。原始包长度 168,286,360 字节，gzip 长度 31,078,895 字节，原始 SHA256 `e0ffb09ac72c4db70b16313ef076d5bf229b58fa4949ab06cb50d5cbadac315a`，gzip SHA256 `30638158bc3aca346b40b81d61bb7d8296718cca86f3bd77239932eb987699be`，逐字节往返及各内嵌文件 SHA 校验通过：完整压缩证据（可选本地文件 `benchmarks/default-runtime-snapshot-evidence-20261108.json.gz`）。其中包含真实请求、回复、失败/缺失记录、回执、脚本、源码差异和两份新测试，不包含数据库镜像或 ELF。原 49 个归档保持，manifest 现 50 项；原 273 项与 292 条历史不变。
 
 
 <a id="attribute-default-objects-draft-20261107"></a>
@@ -318,7 +341,7 @@ D24 的 `catalog_default_snapshot_demand_test` 实际退出 `-11`，诊断指向
 
 仍开放：通用adbin／pg_get_expr和完整pg_attrdef行、函数／生成式依赖、其他DROP目标的完整生命周期、普通晚绑定错误传播、旧DEFAULT原声明上下文，以及原其他非暂缓功能／性能门禁。当前只提供pg_attrdef的身份三列及pg_depend的实际七列；不补造未知表达式树或NULL。简单NULL省略也不代表通用常量折叠完成。
 
-压缩原始证据见[本批归档](benchmarks/attribute-default-objects-draft-20261107.json.gz)，10,170,752字节，解压SHA `9103c5309dcd06e37b1f1b99f05db96d3c47c1dfb47f7ddc863c5f080c90fe9e`。保存原始协议、源码、日志、全部失败、模型及闭库文件清单；不含ELF／对象或数据库映像内容，不是可移植数据库备份。48份旧gzip保持。
+压缩原始证据见本批归档（可选本地文件 `benchmarks/attribute-default-objects-draft-20261107.json.gz`），10,170,752字节，解压SHA `9103c5309dcd06e37b1f1b99f05db96d3c47c1dfb47f7ddc863c5f080c90fe9e`。保存原始协议、源码、日志、全部失败、模型及闭库文件清单；不含ELF／对象或数据库映像内容，不是可移植数据库备份。48份旧gzip保持。
 
 用户指出的53.45MiB原始JSON仍以5.70MiB gzip保存完整内容，解压SHA及字节数再次核验，当前Git不跟踪原文件且忽略规则有效。本轮还删除build中一份逐字相同、未被打开的56,047,459字节生成副本，释放56,049,664分配字节并保留还原命令。没有重写Git历史。Goal active；下方D20及更早段落是对应版本的历史结果。
 
@@ -348,7 +371,7 @@ D24 的 `catalog_default_snapshot_demand_test` 实际退出 `-11`，诊断指向
 
 宽范围15族PG／D20主对照仍保留完整原始观察和既有功能／来源差异；选定通过不代表整库等价。REGCLASS默认绑定／依赖、序列普通字段及完整缓存／WAL／恢复、生成列ALTER TYPE、空来源函数错误和其他非暂缓范围仍开放，原273状态22／166／70／15、292条原历史及暂缓文件保持。
 
-本轮压缩证据：[physical-array-catalog-upgrade-draft-20261107.json.gz](benchmarks/physical-array-catalog-upgrade-draft-20261107.json.gz)，6,217,909B，SHA256 `7d264c25aec5386b1c7ddb6c8167d2cd052cc17bc4675a8dba344eaa3f20932a`；内层JSON 34,597,510B，SHA256 `d216bc94b194bc17e308fbc5671f46f9ef59bc6b1bef234aab8f4725dd0fd7f6`。包含列出的完整原始SQL请求回复、原生源码／日志、独立解码模型、失败前缀和校验器；数据库映像与ELF／对象本体仅有本机清单／哈希引用。可通过gzip解码并按files及blobs_base64_by_sha256检查内嵌字节。
+本轮压缩证据：physical-array-catalog-upgrade-draft-20261107.json.gz（可选本地文件 `benchmarks/physical-array-catalog-upgrade-draft-20261107.json.gz`），6,217,909B，SHA256 `7d264c25aec5386b1c7ddb6c8167d2cd052cc17bc4675a8dba344eaa3f20932a`；内层JSON 34,597,510B，SHA256 `d216bc94b194bc17e308fbc5671f46f9ef59bc6b1bef234aab8f4725dd0fd7f6`。包含列出的完整原始SQL请求回复、原生源码／日志、独立解码模型、失败前缀和校验器；数据库映像与ELF／对象本体仅有本机清单／哈希引用。可通过gzip解码并按files及blobs_base64_by_sha256检查内嵌字节。
 
 用户指出的原56,047,459B性能JSON继续仅以5,977,159B gzip保留，已再次全量解压核对原SHA256，原始JSON不存在且受忽略规则保护；Git历史未改写。之前两次测试程序归档释放的2,368,126,976分配字节保持有效。重现本轮原生用例可按仓库普通测试构建流程运行 `tests/physical_array_catalog_upgrade_test.cpp`；它包含真实新进程启动检查。
 
@@ -376,7 +399,7 @@ D24 的 `catalog_default_snapshot_demand_test` 实际退出 `-11`，诊断指向
 
 剩余工作仍包括REGCLASS默认早绑定和真实对象依赖、旧元素OID数组元数据／依赖迁移、用户序列3个正编号字段和完整缓存／WAL／恢复、含生成列的ALTER TYPE错误、拒绝CREATE后的空来源函数错误阶段，以及其余未实现目录字段／全行和非暂缓功能。273项状态22／166／70／15及292条原进展记录不变，不以本批通过数替代完整验收。
 
-压缩证据：[identity-sequence-catalog-draft-20261107.json.gz](benchmarks/identity-sequence-catalog-draft-20261107.json.gz)，4,824,208字节，SHA256 `867733bd7463a77de63c6c9feff48e476a507316d98b0e0d21d95bffea5f4ac0`；完整内层JSON 27,252,524字节／SHA256 `f2353535b666a6ffd771e7281635619212a2f508454343fc8fe01c4c80a378fb`。包含完整SQL计划、原始请求回复、全部解码模型、选定原生日志／冻结测试源码、两份独立解码器与校验器。数据库映像与ELF／对象本体仍为本机保留引用，归档只有相应文件清单／模式／大小／SHA，**不能作为可移植数据库备份还原**。可直接用gzip解码JSON并按 `files` 和 `blobs_base64_by_sha256` 复核内嵌内容。
+压缩证据：identity-sequence-catalog-draft-20261107.json.gz（可选本地文件 `benchmarks/identity-sequence-catalog-draft-20261107.json.gz`），4,824,208字节，SHA256 `867733bd7463a77de63c6c9feff48e476a507316d98b0e0d21d95bffea5f4ac0`；完整内层JSON 27,252,524字节／SHA256 `f2353535b666a6ffd771e7281635619212a2f508454343fc8fe01c4c80a378fb`。包含完整SQL计划、原始请求回复、全部解码模型、选定原生日志／冻结测试源码、两份独立解码器与校验器。数据库映像与ELF／对象本体仍为本机保留引用，归档只有相应文件清单／模式／大小／SHA，**不能作为可移植数据库备份还原**。可直接用gzip解码JSON并按 `files` 和 `blobs_base64_by_sha256` 复核内嵌内容。
 
 当前候选可用 `DBMS_MAIN=/绝对路径/已构建的dbms_main python3 tests/system_catalog_metadata_protocol_e2e_test.py` 重现9条正式用例；身份脚本为 `tests/identity_conflict_default_protocol_e2e_test.py`。普通 `cmake -S . -B build/review` 与 `cmake --build build/review -j2` 生成候选，测试时明确指定该程序；正常性能及完整P43验收仍待后续工作。
 
@@ -557,7 +580,7 @@ D24 的 `catalog_default_snapshot_demand_test` 实际退出 `-11`，诊断指向
 
 ### 证据、磁盘和版本
 
-[完整压缩证据](benchmarks/no-effect-transaction-publication-20261107.json.gz) 为38,701,943B，包含采集目录内所有非 ELF 原始字节（失败也包含，不含归档器输出及Python字节码）、完整值／请求回复、源快照、要求、脚本、时钟和闭库映像，ELF为本机路径／SHA引用。完整解码、路径／模式／字节核对55,959项通过后，才清理本批31,326个可重建副本、2,794,000,499逻辑字节；失败映像、日志、源／ELF和可用种子仍保留。不是删除旧测试或全盘缓存。原45份 gzip 字节保持，新增后46份，每个当前跟踪文件均小于49MiB。原 GitHub 提醒的53.45MiB JSON当前不跟踪，5.70MiB gzip解压后仍是56,047,459B、SHA `8e5eb21899e4a864b6db4394832bac5cc98ee85438d43bbb559efb0be3c21910`；历史没有重写。
+完整压缩证据（可选本地文件 `benchmarks/no-effect-transaction-publication-20261107.json.gz`） 为38,701,943B，包含采集目录内所有非 ELF 原始字节（失败也包含，不含归档器输出及Python字节码）、完整值／请求回复、源快照、要求、脚本、时钟和闭库映像，ELF为本机路径／SHA引用。完整解码、路径／模式／字节核对55,959项通过后，才清理本批31,326个可重建副本、2,794,000,499逻辑字节；失败映像、日志、源／ELF和可用种子仍保留。不是删除旧测试或全盘缓存。原45份 gzip 字节保持，新增后46份，每个当前跟踪文件均小于49MiB。原 GitHub 提醒的53.45MiB JSON当前不跟踪，5.70MiB gzip解压后仍是56,047,459B、SHA `8e5eb21899e4a864b6db4394832bac5cc98ee85438d43bbb559efb0be3c21910`；历史没有重写。
 
 提取全部135行比较与原始样本（输出文件必须不存在）：
 
@@ -834,7 +857,7 @@ TOAST每次写入一个长值时，等长2KB分块从本次上一个成功页继
 |long135/reinsert-1MiB|candidate/before-bf9-first-return|client_process_cpu_ns|2.729757|2.361512|2.360430|-13.490%|+0.046%|-13.530%|between_or_equal|
 
 
-完整证据[large-varchar-toast-search-20261107.json.gz](benchmarks/large-varchar-toast-search-20261107.json.gz)：索引25,047字节及3个分片，共84,954,533字节（81.02MiB），单文件均小于49MiB，SHA256 `28406a8e3fae95096263704ae2524a9d8e598b3975db0cca95e3e388f272b90c`；内层JSON 6,484,652,072字节，135,115文件／4,617目录／5,972内容块／544本地ELF引用。完整解码与当前文件名／模式／字节在清理前后核对。仅清理本批119,744个可恢复生成副本，逻辑量9,887,161,418字节（9.208GiB），不等同独占文件系统释放量；源码、ELF、失败日志／失败库映像、初始故障映像与有用种子保留。
+完整证据large-varchar-toast-search-20261107.json.gz（可选本地文件 `benchmarks/large-varchar-toast-search-20261107.json.gz`）：索引25,047字节及3个分片，共84,954,533字节（81.02MiB），单文件均小于49MiB，SHA256 `28406a8e3fae95096263704ae2524a9d8e598b3975db0cca95e3e388f272b90c`；内层JSON 6,484,652,072字节，135,115文件／4,617目录／5,972内容块／544本地ELF引用。完整解码与当前文件名／模式／字节在清理前后核对。仅清理本批119,744个可恢复生成副本，逻辑量9,887,161,418字节（9.208GiB），不等同独占文件系统释放量；源码、ELF、失败日志／失败库映像、初始故障映像与有用种子保留。
 
 GitHub原53.45MiB JSON早已移出当前跟踪树，完整内容保留为5.70MiB gzip，原始大小／SHA及解压验证在manifest；历史未重写。当前HEAD无50MiB以上文件，忽略规则继续阻止同目录原始大JSON（manifest除外）。本次保留有用的压缩证据，不把原始大文件重新放进Git。
 
@@ -1128,7 +1151,7 @@ C1本批重新执行26项相关原生测试：12项WAL／身份／出生／退�
 | direct-hit/single/direct_full_no_order | 5.765 | 5.125 | 5.924 | -11.11% | -13.49% | +2.76% | lower_than_both |
 | direct-hit/single/direct_id_only_no_order | 3.893 | 3.777 | 3.905 | -2.99% | -3.29% | +0.31% | lower_than_both |
 
-完整证据压缩为[vacuum-full-relation-snapshot-20261107.json.gz](benchmarks/vacuum-full-relation-snapshot-20261107.json.gz)，47,044,953字节（44.87MiB），SHA256 `c833252e2069713019be97f05b1186aaa1f5d39a90020fe9c184994618757522`；内层完整JSON 4,154,013,795字节。77,852个非ELF文件／2,810目录／3,397内容块／251个本地ELF引用在清理前后独立核对。只删除71,031个逐字节归档的本批生成副本，逻辑量6,471,891,795字节（6.027GiB），不等同独占文件系统释放量。源码、ELF、stdout/stderr、错误、全部故障初始映像、工作旧库1MiB种子、P38实际损坏库、外部P36／P37种子及旧40个压缩包保留。
+完整证据压缩为vacuum-full-relation-snapshot-20261107.json.gz（可选本地文件 `benchmarks/vacuum-full-relation-snapshot-20261107.json.gz`），47,044,953字节（44.87MiB），SHA256 `c833252e2069713019be97f05b1186aaa1f5d39a90020fe9c184994618757522`；内层完整JSON 4,154,013,795字节。77,852个非ELF文件／2,810目录／3,397内容块／251个本地ELF引用在清理前后独立核对。只删除71,031个逐字节归档的本批生成副本，逻辑量6,471,891,795字节（6.027GiB），不等同独占文件系统释放量。源码、ELF、stdout/stderr、错误、全部故障初始映像、工作旧库1MiB种子、P38实际损坏库、外部P36／P37种子及旧40个压缩包保留。
 
 归档首次快速压缩为54,425,812字节，大小检查actual1，在写入canonical或删除副本前停止；首轮源码／配置／完整stdout与stderr／实际终态已保留。改用更强的正常解析压缩，未删除任何测量结果或重新采样。
 
@@ -1431,7 +1454,7 @@ PYCODE
 | direct-hit/single/direct_full_no_order | 6.121 | 6.393 | 6.300 | +4.44% | +1.48% | +2.92% | higher_than_both |
 | direct-hit/single/direct_id_only_no_order | 3.735 | 3.852 | 3.841 | +3.13% | +0.31% | +2.82% | higher_than_both |
 
-完整证据压缩为[vacuum-full-wal-generation-20261107.json.gz](benchmarks/vacuum-full-wal-generation-20261107.json.gz)，51,060,466字节（48.70MiB），SHA256 `0ae60933438851bedacdc9870c34f238c4d391dd0661a8bf4631a074047385c8`；内层完整JSON 4,159,917,907字节。82,182个非ELF文件／3,167个目录／3,481个内容块／274个本地ELF引用在清理前后独立核对。只删除73,977个已逐字节归档的本批生成副本，逻辑量6,412,778,626字节（5.972GiB），不等同独占文件系统释放量。保留源码、ELF、任务stdout/stderr与错误、全部故障初始映像、当前正常旧库混合1MiB种子和P38实际损坏库，外部P36／P37种子及旧39个压缩包不动。
+完整证据压缩为vacuum-full-wal-generation-20261107.json.gz（可选本地文件 `benchmarks/vacuum-full-wal-generation-20261107.json.gz`），51,060,466字节（48.70MiB），SHA256 `0ae60933438851bedacdc9870c34f238c4d391dd0661a8bf4631a074047385c8`；内层完整JSON 4,159,917,907字节。82,182个非ELF文件／3,167个目录／3,481个内容块／274个本地ELF引用在清理前后独立核对。只删除73,977个已逐字节归档的本批生成副本，逻辑量6,412,778,626字节（5.972GiB），不等同独占文件系统释放量。保留源码、ELF、任务stdout/stderr与错误、全部故障初始映像、当前正常旧库混合1MiB种子和P38实际损坏库，外部P36／P37种子及旧39个压缩包不动。
 
 最初被GitHub提示的53.45MiB原始JSON，目前以5.70MiB gzip保留完整性能原始数据与错误供复核，manifest记录原始长度／SHA和逐字节解压验证。当前版本不再跟踪该原始大JSON，忽略规则拦截同目录未来原始JSON（小manifest除外），不重写历史。
 
@@ -1689,7 +1712,7 @@ PYCODE
 | direct-hit/single/direct_full_no_order | 4.465 | 5.598 | 6.037 | +25.38% | -7.28% | +35.23% | between_or_equal |
 | direct-hit/single/direct_id_only_no_order | 3.418 | 3.767 | 3.839 | +10.22% | -1.87% | +12.32% | between_or_equal |
 
-完整证据压缩为[scalar-text-logical-limit-20261107.json.gz](benchmarks/scalar-text-logical-limit-20261107.json.gz)，49,147,970字节（46.87MiB），SHA256 `eeba9391c2f4be8b8624e4589879a5d8451ed984ba8f2584d25e9fe72d700cc1`；内层完整证据JSON为3,229,936,943字节。59,525个非ELF文件、2,157个目录、3,227个内容块、280个本地ELF引用均在清理前后独立核对。删除55,639个已逐字节归档的生成副本，逻辑文件量5,362,749,517字节（4.994GiB），不等同于独占文件系统释放量。保留源码、ELF、任务stdout/stderr、错误和失败页原始字节、目录、实际失败旧库及普通维护／1MiB长值正常闭库；外部P37 after-DELETE和P36 after-UPDATE种子不动。生成数据目录中的dbms.log副本保存在归档中，旧38个压缩包不动。首轮64MiB字典压缩得到75,818,006字节，被49MiB上限拦截而actual1，没有写入Git或清理数据；512MiB字典得到51,533,706字节，低于GitHub的50MiB建议但仍高于本地49MiB保护线，同样未写入Git或清理数据。两次失败记录已嵌入最终证据，最终使用1024MiB字典压缩完整内容。
+完整证据压缩为scalar-text-logical-limit-20261107.json.gz（可选本地文件 `benchmarks/scalar-text-logical-limit-20261107.json.gz`），49,147,970字节（46.87MiB），SHA256 `eeba9391c2f4be8b8624e4589879a5d8451ed984ba8f2584d25e9fe72d700cc1`；内层完整证据JSON为3,229,936,943字节。59,525个非ELF文件、2,157个目录、3,227个内容块、280个本地ELF引用均在清理前后独立核对。删除55,639个已逐字节归档的生成副本，逻辑文件量5,362,749,517字节（4.994GiB），不等同于独占文件系统释放量。保留源码、ELF、任务stdout/stderr、错误和失败页原始字节、目录、实际失败旧库及普通维护／1MiB长值正常闭库；外部P37 after-DELETE和P36 after-UPDATE种子不动。生成数据目录中的dbms.log副本保存在归档中，旧38个压缩包不动。首轮64MiB字典压缩得到75,818,006字节，被49MiB上限拦截而actual1，没有写入Git或清理数据；512MiB字典得到51,533,706字节，低于GitHub的50MiB建议但仍高于本地49MiB保护线，同样未写入Git或清理数据。两次失败记录已嵌入最终证据，最终使用1024MiB字典压缩完整内容。
 
 用户指出的analyze-reindex-main-costs-20261104原始JSON为56,047,459字节（53.45MiB），当前Git使用5,977,159字节（5.70MiB）的.json.gz保存完整内容，manifest记录原始SHA及逐字节解压验证。原始大JSON不再跟踪，忽略规则拦截后续同目录原始JSON（小manifest除外）；保留压缩证据用于复核实际耗时和错误，未重写历史提交。
 
@@ -1957,7 +1980,7 @@ PY
 
 全部试验失败原样保留：v1因不存在的makeByteaColumn编译actual1；v2/v3用70003字符TEXT建原生数据时拒绝，目标情形NOTRUN；v4较大原生列声明在首行遇IO_ERROR、回滚未完成，退出actual -6／double free，原因OPEN，未调查或修改用户暂缓模块；v5真实SQL声明下原生写TEXT70003仍拒绝。v6的前8个“绑定”控制实际未绑定，不能作为NULL安全证据，后续SQL子分区DDL为0A000并停止。v7改用真实正RID后普通表复现失败，但逻辑分区读取的初始全值前置检查失败，余8种情形NOTRUN；未将其改称通过。v8调用私有路径／行头接口而编译actual1。最终v9改用受控默认路径与既有完整物理解码器作为独立oracle，才完整执行16种情形并形成160／48旧版红测；全部初稿源码、编译／运行终态和首错均留存。
 
-完整证据压缩为[vacuum-physical-references-20261107.json.gz](benchmarks/vacuum-physical-references-20261107.json.gz)，34,381,025字节（32.79MiB），SHA256 `0b4576a981b223747eb97287378931d41e79bbdc27c2ae998211b8149ae01c1e`；内层完整证据JSON为2,675,881,552字节。51,608个非ELF文件、2,014个目录、2,934个内容块和221个本地ELF引用已在清理前后独立逐字节核对。删除48,458个已归档生成副本，逻辑文件量4,625,982,422字节（4.308GiB），不等同于独占文件系统释放量。保留全部源码、ELF、原始PC采样、任务stdout/stderr和错误记录、目录、新after-DELETE实际冷开种子及外部P36 after-UPDATE实际种子；生成数据目录中的dbms.log副本随数据压缩保存。旧37个压缩包保持。
+完整证据压缩为vacuum-physical-references-20261107.json.gz（可选本地文件 `benchmarks/vacuum-physical-references-20261107.json.gz`），34,381,025字节（32.79MiB），SHA256 `0b4576a981b223747eb97287378931d41e79bbdc27c2ae998211b8149ae01c1e`；内层完整证据JSON为2,675,881,552字节。51,608个非ELF文件、2,014个目录、2,934个内容块和221个本地ELF引用已在清理前后独立逐字节核对。删除48,458个已归档生成副本，逻辑文件量4,625,982,422字节（4.308GiB），不等同于独占文件系统释放量。保留全部源码、ELF、原始PC采样、任务stdout/stderr和错误记录、目录、新after-DELETE实际冷开种子及外部P36 after-UPDATE实际种子；生成数据目录中的dbms.log副本随数据压缩保存。旧37个压缩包保持。
 
 用户指出的analyze-reindex-main-costs-20261104原始JSON为56,047,459字节（53.45MiB）；当前版本已使用5,977,159字节（5.70MiB）的.json.gz保存，原始SHA与逐字节解压核对保存在manifest，当前Git不跟踪原始大JSON，忽略规则阻止未来同目录原始JSON误加入（小manifest除外）。该证据用于复核原始耗时与错误，保留压缩内容；未重写旧提交历史。
 
@@ -2144,7 +2167,7 @@ PY
 
 完整失败记录包括：最初测试源码误把 StorageCodec 枚举当指针，编译 actual1；原始编译日志保留，初稿由已记录补丁重建并明确标注，未伪称独立原始快照。初次独立归约 v1 有重复 case 参数，v2 在完整摘要写入后显示时发生变量遮蔽；后续 v3 仅离线核对全部原始828回复并正常完成，没有重采 SQL。旧 TOAST 断言导致的首次控制器停止及仅未启动项的继续均保留。
 
-完整证据压缩为 [physical-row-null-reuse-20261106.json.gz](benchmarks/physical-row-null-reuse-20261106.json.gz)：31,777,550 字节（30.31 MiB），SHA256 `28613515ced123a2f04161749f67e7f0b898e0cf18f7c7dca42a9458121f672d`；内层完整证据 JSON 为 2,933,021,207 字节。38,167 个非 ELF 文件、1,449 个目录、2,285 个内容块及 152 个本地 ELF 引用均独立重建核对。随后删除 34,702 个已备份生成文件，逻辑副本 5.247 GiB；这不是独占文件系统释放量。保留源码、可执行／对象文件、本地 ELF 引用、stdout/stderr 与错误记录、目录和一个最终正常关闭的三表工作数据集；生成数据目录中的运行日志随其副本压缩保存，旧 36 个压缩包保持。
+完整证据压缩为 physical-row-null-reuse-20261106.json.gz（可选本地文件 `benchmarks/physical-row-null-reuse-20261106.json.gz`）：31,777,550 字节（30.31 MiB），SHA256 `28613515ced123a2f04161749f67e7f0b898e0cf18f7c7dca42a9458121f672d`；内层完整证据 JSON 为 2,933,021,207 字节。38,167 个非 ELF 文件、1,449 个目录、2,285 个内容块及 152 个本地 ELF 引用均独立重建核对。随后删除 34,702 个已备份生成文件，逻辑副本 5.247 GiB；这不是独占文件系统释放量。保留源码、可执行／对象文件、本地 ELF 引用、stdout/stderr 与错误记录、目录和一个最终正常关闭的三表工作数据集；生成数据目录中的运行日志随其副本压缩保存，旧 36 个压缩包保持。
 
 可从压缩证据中逐字节提取完整 raw3/min/p50/max 与尾部表：
 
@@ -2310,7 +2333,7 @@ PY
 | drop_unreferenced_column | server_process_cpu_ns | 149.772,172.050,173.166 / 149.772 / 172.050 / 173.166 | 170.174,179.491,137.793 / 137.793 / 170.174 / 179.491 | 154.304,179.689,167.932 / 154.304 / 167.932 / 179.689 | -1.09 | 1.33 | -2.39 |
 | drop_unreferenced_column | client_process_cpu_ns | 0.215,0.286,0.215 / 0.215 / 0.215 / 0.286 | 0.223,0.235,0.167 / 0.167 / 0.223 / 0.235 | 0.228,0.256,0.224 / 0.224 / 0.228 / 0.256 | 3.54 | -2.19 | 5.86 |
 
-新增压缩证据 21,397,678 字节（20.41 MiB），SHA256 `0b906588b6991c839d0355c94a8ae10b60c179286174b026d5e090a7adb43b72`；54,132 个非 ELF 文件、2,771 个目录、3,988 个内容块和 376 个本地 ELF 引用经过独立重建核对。随后清理 50,311 个已备份的生成文件，逻辑副本 2.008 GiB；这不是独占文件系统释放量。源码、原始错误／日志、所有 ELF、一个最终工作数据集和一个真实旧库冷关闭种子保留。 [压缩证据](benchmarks/view-column-dependencies-20261106.json.gz)包含完整 SQL、回复、数据、源代码快照、正常与失败记录。大体积原始 JSON 只在忽略的 build 目录工作，不加入 Git。最初 53.45 MiB 报告仍以 5.70 MiB gzip 保留，用于核对测量和追溯；没有重写历史提交。
+新增压缩证据 21,397,678 字节（20.41 MiB），SHA256 `0b906588b6991c839d0355c94a8ae10b60c179286174b026d5e090a7adb43b72`；54,132 个非 ELF 文件、2,771 个目录、3,988 个内容块和 376 个本地 ELF 引用经过独立重建核对。随后清理 50,311 个已备份的生成文件，逻辑副本 2.008 GiB；这不是独占文件系统释放量。源码、原始错误／日志、所有 ELF、一个最终工作数据集和一个真实旧库冷关闭种子保留。 压缩证据（可选本地文件 `benchmarks/view-column-dependencies-20261106.json.gz`）包含完整 SQL、回复、数据、源代码快照、正常与失败记录。大体积原始 JSON 只在忽略的 build 目录工作，不加入 Git。最初 53.45 MiB 报告仍以 5.70 MiB gzip 保留，用于核对测量和追溯；没有重写历史提交。
 
 在仓库根目录恢复完整普通性能原始表；将 member 改为 `batch/view-ddl-cost9-C4-v1/all-DDL-performance-tables-v1.md` 可恢复 DDL 表：
 
@@ -2463,7 +2486,7 @@ client_process_cpu_ns (milliseconds; medians of all3 raw timings)
 | direct-hit/single/direct_id_only_no_order | 4.280 | 3.792 | 3.655 | -11.39% | +3.75% | -14.59% |
 
 
-原始三样本/min/p50/max、三类 CPU/墙钟、长尾、完整 SQL/帧/数据/源码与两代候选证据均在 [projected-toast-demand-20261106.json.gz](benchmarks/projected-toast-demand-20261106.json.gz)，21,927,356 字节（20.91 MiB），SHA256 `82f53d6ec18f0f194af4d68db48ffa665220f4a730c32d29b71fcb80aa03ae1d`。全部非 ELF 字节独立解码重建并与原件比较后才清理；CPU 诊断、原始 PC 与采样树另存 [catalog-query-profile-20261106.json.gz](benchmarks/catalog-query-profile-20261106.json.gz)，28,037,375 字节（26.74 MiB），SHA256 `6f1cedfa278c53063fbfdf3edf7daff9786fc4350833789a96daafa93a52071d`。两包合并的文件名集合与本批全部输入一致，每包均低于 49 MiB。ELF 为明确 SHA 引用且保留在本机。压缩结构为 gzip JSON→base64/XZ→内容寻址 JSON；没有将大体积原始 JSON 加入 Git。
+原始三样本/min/p50/max、三类 CPU/墙钟、长尾、完整 SQL/帧/数据/源码与两代候选证据均在 projected-toast-demand-20261106.json.gz（可选本地文件 `benchmarks/projected-toast-demand-20261106.json.gz`），21,927,356 字节（20.91 MiB），SHA256 `82f53d6ec18f0f194af4d68db48ffa665220f4a730c32d29b71fcb80aa03ae1d`。全部非 ELF 字节独立解码重建并与原件比较后才清理；CPU 诊断、原始 PC 与采样树另存 catalog-query-profile-20261106.json.gz（可选本地文件 `benchmarks/catalog-query-profile-20261106.json.gz`），28,037,375 字节（26.74 MiB），SHA256 `6f1cedfa278c53063fbfdf3edf7daff9786fc4350833789a96daafa93a52071d`。两包合并的文件名集合与本批全部输入一致，每包均低于 49 MiB。ELF 为明确 SHA 引用且保留在本机。压缩结构为 gzip JSON→base64/XZ→内容寻址 JSON；没有将大体积原始 JSON 加入 Git。
 
 在仓库根目录提取最终完整原始表（将路径里的 C2 改为 C1 可提取首轮表）：
 
@@ -2573,7 +2596,7 @@ Measured server process CPU (milliseconds; candidate percentages relative to eac
 | direct-hit/single/direct_id_only_no_order | 39.059 | 40.536 | 37.946 | +3.78% | +6.83% | -2.85% |
 
 
-The complete raw-three/min/p50/max/client CPU, per-case old drift and long-tail table is retained inside [pg-class-declaration-20261106.json.gz](benchmarks/pg-class-declaration-20261106.json.gz), 16,696,087 bytes (15.92 MiB), SHA256 `0b56d74a328f44120ee1a216c9e323e8317a80b552bdb1d80fc291e7afca67c2`. The archive contains full selected nonELF source/SQL/wire/data/native and rejected-first-attempt bytes, directory modes and symlink texts. Executable/core ELFs are explicit SHA references kept locally, not embedded executable images. The inner content-addressed JSON is XZ-compressed, then base64 JSON and gzip; independent decoding compares every embedded file byte and every kept ELF reference before cleanup. No raw benchmark JSON is added to Git.
+The complete raw-three/min/p50/max/client CPU, per-case old drift and long-tail table is retained inside pg-class-declaration-20261106.json.gz（可选本地文件 `benchmarks/pg-class-declaration-20261106.json.gz`）, 16,696,087 bytes (15.92 MiB), SHA256 `0b56d74a328f44120ee1a216c9e323e8317a80b552bdb1d80fc291e7afca67c2`. The archive contains full selected nonELF source/SQL/wire/data/native and rejected-first-attempt bytes, directory modes and symlink texts. Executable/core ELFs are explicit SHA references kept locally, not embedded executable images. The inner content-addressed JSON is XZ-compressed, then base64 JSON and gzip; independent decoding compares every embedded file byte and every kept ELF reference before cleanup. No raw benchmark JSON is added to Git.
 
 From the repository root, recover the complete table with Python standard library only (the exact stdout bytes are tested against the original table):
 
@@ -2698,7 +2721,7 @@ print(base64.b64decode(bundle["blobs"][record["blob"]]["data"]).decode())
 
 当前仅生产头 `src/common/logs.h` 改动，私有正常C1程序SHA `310a2c01d84c1cd92dcf05ee5a5825fecface8dc0446adc312269be2bd144eb4`；默认安装程序仍为 `425165af…`，现有服务未替换。源248/头177，正式测试2393（顶层CPP1126、含子目录总CPP1131、子目录5），登记684个driver/664个独立E2E；754 Markdown路径、725保护记录不变。原273项状态仍22 complete/166 partial/70 unverified/15 deferred_by_user，旧281条历史原文保持，仅追加第282条partial；IDX-07仍unverified且evidence=[]。不扩用户暂停范围，无分支切换、推送或默认程序晋升，Goal active。
 
-[本批完整报告](performance-report-2026-10-30.md#legacy-log-append-20261106)与[可逆原始证据](benchmarks/legacy-log-append-20261106.json.gz)。以下各批历史原文保持。
+[本批完整报告](performance-report-2026-10-30.md#legacy-log-append-20261106)与可逆原始证据（可选本地文件 `benchmarks/legacy-log-append-20261106.json.gz`）。以下各批历史原文保持。
 
 归档逐文件校验完成后，本轮仅清理13,510个已归档的正常测试生成副本，nlink=1分配空间1,187,860,480字节（约1.11GiB）。独立新进程后验确认，其余2,317个非ELF工件、137个精确引用、780个目录和4个链接/目标保持；`20-candidate/data`完整工作库及全部协议数据保留，源码、程序和对象未删除。
 
@@ -2734,7 +2757,7 @@ print(base64.b64decode(bundle["blobs"][record["blob"]]["data"]).decode())
 
 P30原58个严格目标及9项差异全部保留，未再跑参考或改期望。pg_class自身目录声明和普通来源元数据仍未实现。固定PostgreSQL18.6源码要求34个真实属性、连续attnum1..34及实际类型声明；当前7个可查询字段不能伪装完整34列。调查发现缺失的pg_node_tree/aclitem/数组类型若直接加入当前目录，通用声明解析可能使其进入未知CAST原字节回退，不能仅靠不注册别名阻止。因此本批只保存完整声明矩阵、依赖审计和后续严格验收方案，没有补虚假OID/字段，也未应用生产补丁、测试新类型或扩大暂停范围。[固定pg_class声明](https://raw.githubusercontent.com/postgres/postgres/724edf9bde9d356724ad384a2e196edc3c9f80f7/src/include/catalog/pg_class.h)。
 
-完整驱动、原始profile/maps、同程序尺寸符号表与汇编、全部wire、完整闭库树、首轮工具记录和带许可调研保存在[可逆压缩证据](benchmarks/fixed-id-query-profile-20261106.json.gz)（4.26MiB，SHA `31e2bb007fa648a4133c108e0ecf2bdb54d5eb57f6d40197abb2009b64cea451`）；相同内容按SHA去重，内部JSON使用XZ、外层JSON使用gzip，每个路径的长度、模式与摘要单独保留，旧30份归档保持。ELF及父批源码/依赖按明确SHA引用，未把可重建程序重复装入Git。实际代码/测试/默认程序保持，Goal active。以下P30与更早段落仍是各自代别的真实记录。
+完整驱动、原始profile/maps、同程序尺寸符号表与汇编、全部wire、完整闭库树、首轮工具记录和带许可调研保存在可逆压缩证据（可选本地文件 `benchmarks/fixed-id-query-profile-20261106.json.gz`）（4.26MiB，SHA `31e2bb007fa648a4133c108e0ecf2bdb54d5eb57f6d40197abb2009b64cea451`）；相同内容按SHA去重，内部JSON使用XZ、外层JSON使用gzip，每个路径的长度、模式与摘要单独保留，旧30份归档保持。ELF及父批源码/依赖按明确SHA引用，未把可重建程序重复装入Git。实际代码/测试/默认程序保持，Goal active。以下P30与更早段落仍是各自代别的真实记录。
 
 首次普通gzip触发49,000,000字节上限，发布前拒绝；改用更紧凑的无损容器后通过独立完整解码检查，首轮失败保留。核验后仅清理5,101个已归档生成副本，分配空间243,703,808字节（232.41MiB）；443份其余工件逐字保持，118个目录保留，未删除ELF、对象、源码或父批工作库。
 
@@ -3577,7 +3600,7 @@ Wall/clientCPU include socket envelope framing and raw buffering through ReadyI;
 
 本批实际清单：源248/头177；测试2392，原2391逐字保持，新增1个CPP；顶层CPP1125/全部CPP1130（nested5）；E2E登记684 driver/664 standalone保持；Markdown754/保护725保持；旧29份gzip保持，新归档后总30。原280条历史原文保持，追加第281条partial。
 
-完整原始分布、既有差异、许可和验收边界见[本批性能报告](performance-report-2026-10-30.md#ordinary-project-bitmap-20261106)与[可逆压缩证据](benchmarks/ordinary-project-bitmap-20261106.json.gz)。以下P29及更早内容为对应代别的历史记录。
+完整原始分布、既有差异、许可和验收边界见[本批性能报告](performance-report-2026-10-30.md#ordinary-project-bitmap-20261106)与可逆压缩证据（可选本地文件 `benchmarks/ordinary-project-bitmap-20261106.json.gz`）。以下P29及更早内容为对应代别的历史记录。
 
 <!-- CURRENT_MULTILOB_20261106 -->
 
@@ -3885,7 +3908,7 @@ All negative results and maxima remain in the machine summary; raw process/clien
 
 这是有限的 partial 进展，Goal active。原 273 项状态保持 22 complete/166 partial/70 unverified/15 deferred_by_user；`IDX-07` 仍为 `unverified`、`evidence=[]`。零列行集、零列表和原 TOAST 损坏夹具的普通缺口仍保留，用户暂缓边界保持。本批不证明完整 PostgreSQL 数据类型上限、文件格式、WAL 或协议等价。
 
-完整定义、首轮失败与测试边界见[本批报告](performance-report-2026-10-30.md#multilob-storage-20261106)和[可逆压缩证据](benchmarks/multilob-storage-20261106.json.gz)。下方 P28 及更早段落是对应代别的历史记录。
+完整定义、首轮失败与测试边界见[本批报告](performance-report-2026-10-30.md#multilob-storage-20261106)和可逆压缩证据（可选本地文件 `benchmarks/multilob-storage-20261106.json.gz`）。下方 P28 及更早段落是对应代别的历史记录。
 
 <!-- CURRENT_CONSTRAINT_VALIDATION_20261106 -->
 
@@ -4257,7 +4280,7 @@ DDL wall从普通Simple-Q发送到完整Ready I接收，含原物理回滚快照
 
 本批为有限普通约束生命周期的 partial 进展，Goal active。原 273 项状态保持（22 complete/166 partial/70 unverified/15 deferred_by_user）；`IDX-07` 仍是 `unverified`、`evidence=[]`。本批 GiST 页树资料只是未实现研究，不能将 P27 的 batch partial 记录当作 IDX-07 已部分验证。原用户暂缓边界保持。
 
-[完整可逆原始证据](benchmarks/constraint-validation-20261106.json.gz)。以下 P27 及更早内容是各代历史记录，不把旧计数/旧假验证行为或组件诊断当作当前正常 SQL 性能。
+完整可逆原始证据（可选本地文件 `benchmarks/constraint-validation-20261106.json.gz`）。以下 P27 及更早内容是各代历史记录，不把旧计数/旧假验证行为或组件诊断当作当前正常 SQL 性能。
 
 <!-- CURRENT_GIST_PROBE_READER_20261106 -->
 
@@ -4426,7 +4449,7 @@ C1生命周期回执的source_unchanged=false原样保留；正式源、冻结�
 
 全部首次结果保留：旧版及C1真实SQL零字节索引漏行、同源before reader四断言失败和新协议十二断言失败；最初离线归约参数名冲突、v4计划生成KeyError、C2性能prepare标签guard失败均独立留存，均不记产品验收通过。C1性能计划只有准备，0计时；最终仅C2固定9实际运行一次。
 
-原53.45MB未压缩JSON在当前Git清单中已由约5.7MiB gzip替代，原始字节可精确恢复，历史提交未改写。新证据同样只提交[gzip归档](benchmarks/gist-probe-reader-20261106.json.gz)，文件镜像和捕获流有长度/SHA及独立还原核验；构建对象、ELF和私有数据库目录不进入归档。
+原53.45MB未压缩JSON在当前Git清单中已由约5.7MiB gzip替代，原始字节可精确恢复，历史提交未改写。新证据同样只提交gzip归档（可选本地文件 `benchmarks/gist-probe-reader-20261106.json.gz`），文件镜像和捕获流有长度/SHA及独立还原核验；构建对象、ELF和私有数据库目录不进入归档。
 
 官方设计参考固定版本的[PG18.6 gistScanPage](https://raw.githubusercontent.com/postgres/postgres/724edf9bde9d356724ad384a2e196edc3c9f80f7/src/backend/access/gist/gistget.c)、[SQLite3.50.4 payload读取](https://raw.githubusercontent.com/sqlite/sqlite/8ed5e7365e6f12f427910188bbf6b254daad2ef6/src/btree.c)和[DuckDB1.4.3 ART查找](https://raw.githubusercontent.com/duckdb/duckdb/d1dc88f950d456d72493df452dabdcd13aa413dd/src/execution/index/art/art.cpp)；10份固定源码/3许可证保留。短寿命借用和完整边界验证可借鉴，PG页锁/NSN/recheck、SQLite溢出页协议、ART真正树导航没有因本次缓冲而实现。本地仍每probe完整校验flat sidecar，完整分页GiST/opclass/KNN/WAL/并发和既有普通缺口保持开放，原用户暂缓范围不扩大。
 
@@ -4614,7 +4637,7 @@ wall从普通SimpleQuery发送到完整Ready接收，包含前端、执行、投
 
 当前清单为2383个测试文件：原2378中2374份逐字保持，4份只迁移当前GiST格式断言并加强V2兼容/空串真实RID检查，另增4个CPP及1个协议测试。顶层CPP1119（含链接桩）、全部CPP1124/其中子目录5；登记681个driver/661个独立E2E。源248/头177，754份Markdown、725份保护记录保持；25份旧gzip逐字保持，新增第26份。原273项及22complete/166partial/70unverified/15用户暂缓状态、原276条历史逐字保持，仅prepend第277条partial。
 
-正常CMake C++17/O2最终程序SHA256为`8c76e66f41e10975ebaa97ec94f5d21573bbe797a63cccb6445bf454b1a6aa76`；父代为`99f476a899816ad759cf165817394d3bfca4b4961f56887f07c719871d031e64`。默认根程序仍为425165…，不以候选测试代替部署。所有新旧源码、原始帧、文件镜像、真实失败、计划、三种时钟与独立归约见[第26份压缩证据](benchmarks/gist-empty-bounds-20261106.json.gz)。每一原始流均保长度/SHA并完整还原，25份旧gzip逐字保持；未把压缩或链接检查当作性能/功能验收。
+正常CMake C++17/O2最终程序SHA256为`8c76e66f41e10975ebaa97ec94f5d21573bbe797a63cccb6445bf454b1a6aa76`；父代为`99f476a899816ad759cf165817394d3bfca4b4961f56887f07c719871d031e64`。默认根程序仍为425165…，不以候选测试代替部署。所有新旧源码、原始帧、文件镜像、真实失败、计划、三种时钟与独立归约见第26份压缩证据（可选本地文件 `benchmarks/gist-empty-bounds-20261106.json.gz`）。每一原始流均保长度/SHA并完整还原，25份旧gzip逐字保持；未把压缩或链接检查当作性能/功能验收。
 
 以下 P25 及更早段落均保留当时的实现、计数和未完事项；本轮状态以本节为准。
 
@@ -4699,7 +4722,7 @@ wall从普通SimpleQuery发送计到完整ReadyI接收，包含SQL前端、执�
 - 仍非完整 AM/opclass/catalog/并发 REINDEX 覆盖；REINDEX INDEX/DATABASE/SYSTEM/CONCURRENTLY 不在本批实现。
 - 没有修改既有用户暂缓、安全/TDE、参数帧、retained/portal/format2 或 R65 provider 生命周期。
 
-完整机器证据：[reindex-access-methods-20261106.json.gz](benchmarks/reindex-access-methods-20261106.json.gz)。
+完整机器证据：reindex-access-methods-20261106.json.gz（可选本地文件 `benchmarks/reindex-access-methods-20261106.json.gz`）。
 
 
 ### 实现机制与源码依据
@@ -4799,7 +4822,7 @@ wall从普通SimpleQuery发送计到完整ReadyI接收，包含SQL前端、执�
 
 原2374测试文件字节不变，新增native CPP后2375；顶层CPP含桩1113、全CPP1118（另5子目录）。679注册driver/659独立E2E roster保持，build_common未改。源248/头177、754MD路径、725保护记录保持。原273items/status及274条历史完整保留，只追加第275条partial；23旧gzip保持，新增第24份。用户既有retained/参数/portal/wire2/R151专属与R291通用发布故障等暂缓不扩展。
 
-机器证据：[压缩报告](benchmarks/brin-operator-pruning-20261106.json.gz)、[归档清单](benchmarks/manifest.json)。源、全部首次结果、raw/min/p50/max和原始帧/镜像按v5可恢复；归档生成与门禁另由Root在测量结束后执行。下方P23和更早内容保持当时历史原文。
+机器证据：压缩报告（可选本地文件 `benchmarks/brin-operator-pruning-20261106.json.gz`）、归档清单（可选本地文件 `benchmarks/manifest.json`）。源、全部首次结果、raw/min/p50/max和原始帧/镜像按v5可恢复；归档生成与门禁另由Root在测量结束后执行。下方P23和更早内容保持当时历史原文。
 
 
 <!-- CURRENT_BRIN_MAINTENANCE_OPTIONS_20261106 -->
@@ -4893,7 +4916,7 @@ wall中位数减少（相对首轮／回测，负数为变慢）：VACUUM FULL�
 
 原2373个测试文件字节不变，新增1个协议用例后2374；679唯一注册driver、659独立E2E。源248/头177、顶层CPP含桩1112、另5子目录CPP保持。原273完整item和22/166/70/15状态、273条旧历史保持，只追加第274条partial；8份既有文档、754Markdown路径、725保护记录和22旧gzip保持。
 
-机器证据：[维护配置压缩报告](benchmarks/brin-maintenance-options-20261106.json.gz)、[归档清单](benchmarks/manifest.json)。新报告使用JSON v5完整文件/重复帧共享存储，逐文件可还原原始字节、长度和SHA256；gzip往返及旧档案哈希另验。原始大JSON继续忽略，仅提交gzip。可重建测试ELF和私有临时库在签名/归档核对后清理，保留最终候选及必要缓存。下方P22及更早内容为当时历史记录。
+机器证据：维护配置压缩报告（可选本地文件 `benchmarks/brin-maintenance-options-20261106.json.gz`）、归档清单（可选本地文件 `benchmarks/manifest.json`）。新报告使用JSON v5完整文件/重复帧共享存储，逐文件可还原原始字节、长度和SHA256；gzip往返及旧档案哈希另验。原始大JSON继续忽略，仅提交gzip。可重建测试ELF和私有临时库在签名/归档核对后清理，保留最终候选及必要缓存。下方P22及更早内容为当时历史记录。
 
 
 <!-- CURRENT_BRIN_TYPED_SCAN_20261105 -->
@@ -4992,7 +5015,7 @@ wall 中位数减少（首轮／回测）：高端窄范围 36.54%／36.45%；�
 
 新归档采用 JSON v5：重复 wire frame 以共享表保存，文件中的整数片段指向 wire_frames，字符串片段原样拼接。写入和独立读取均逐文件重建原始字节、校验长度和 SHA256，再检查 gzip 往返；完整测量、失败记录与回复没有删除。
 
-完整机器证据：[brin-typed-scan 压缩归档](benchmarks/brin-typed-scan-20261105.json.gz)，[归档清单](benchmarks/manifest.json)。保留所有样本/失败/源码与来源签名，原始大 JSON 继续忽略，只提交压缩文件；同时修正 manifest 的总字节统计覆盖全部归档。可重建 ELF/objects、私有临时库在签名和归档验证后清理，最终候选/必要构建缓存与父代对照保留。下方 P21 及更早段落均为当时历史记录。
+完整机器证据：brin-typed-scan 压缩归档（可选本地文件 `benchmarks/brin-typed-scan-20261105.json.gz`），归档清单（可选本地文件 `benchmarks/manifest.json`）。保留所有样本/失败/源码与来源签名，原始大 JSON 继续忽略，只提交压缩文件；同时修正 manifest 的总字节统计覆盖全部归档。可重建 ELF/objects、私有临时库在签名和归档验证后清理，最终候选/必要构建缓存与父代对照保留。下方 P21 及更早段落均为当时历史记录。
 
 
 <!-- CURRENT_INDEX_BUILD_NULL_OWNER_20261105 -->
@@ -5111,7 +5134,7 @@ BRIN 仍按字符串比较界限：本轮实测整数值 2、10，`n>=8` 的原�
 
 源248/头177；2368 旧测试逐字节保留，新增2后2370（顶层 CPP 含桩1110、去桩1109，另5个子目录CPP）；677唯一注册/657独立E2E。原273个完整对象及22/166/70/15状态、271条旧历史保留，只追加一条 partial 后272。八份既有 Markdown 更新，路径仍754，725份保护记录和20份旧gzip保持。Goal active。
 
-完整证据：[压缩归档](benchmarks/index-build-scan-owner-20261105.json.gz)，[归档索引和恢复说明](benchmarks/manifest.json)。gzip 保存独立 JSON 字节、全部普通样本与失败观察、源码/构建/程序哈希和离线检查，不把原始大 JSON 放回 Git；ELF/objects/临时库采用哈希和构建记录，清理可重建产物。下方 P20 及更早段落保留其当时记录。
+完整证据：压缩归档（可选本地文件 `benchmarks/index-build-scan-owner-20261105.json.gz`），归档索引和恢复说明（可选本地文件 `benchmarks/manifest.json`）。gzip 保存独立 JSON 字节、全部普通样本与失败观察、源码/构建/程序哈希和离线检查，不把原始大 JSON 放回 Git；ELF/objects/临时库采用哈希和构建记录，清理可重建产物。下方 P20 及更早段落保留其当时记录。
 
 
 <!-- CURRENT_INDEX_CRC32C_20261105 -->
@@ -5187,7 +5210,7 @@ QEMU8.2.2实际执行同一O2组件：qemu64报告hardware=0、35520检查正常
 
 最终私有程序SHA256 `f5f09f8c2ad2efd72914ca0a3de0fafb497d8ccf75a369d557c33639621b0a38`，默认程序仍`425165afe19d10ccf9be806c3052e9a09e3875a3826142d2949cde995fdf94d1`。C1/C2实际CMake正常0，各重编译DataDirectory/TableManage/BloomIndex/HashIndex四个TU，62个真实对象及61 core/显式桩有哈希；类布局和对外CRC API不变。源248/头177；原2367测试逐字保持，新增1个CPP后2368；676注册驱动/656独立E2E，754 Markdown路径/725保护记录保持。原273完整对象、22/166/70/15状态及270历史原文保留，新增partial后271，Goal active。直接master本地提交，无push/default/service promotion。
 
-19份旧gzip和清单项保持，新[压缩机器证据](benchmarks/index-crc32c-20261105.json.gz)采用逐字节roundtrip和内容去重后为第20份；不跟踪原始大JSON、ELF/对象/原始堆镜像。仍未完成：ARM硬件加速、PG完整CPU/算法分派、所有metadata checksum、启停/重写/在线全库校验，以及GiST tree/opclass/KNN/WAL与完整数据库成本/性能校准。B+Tree、heap、WAL及其他独立校验实现未在本批统一重写。所有用户暂缓范围保持，整体Goal继续。
+19份旧gzip和清单项保持，新压缩机器证据（可选本地文件 `benchmarks/index-crc32c-20261105.json.gz`）采用逐字节roundtrip和内容去重后为第20份；不跟踪原始大JSON、ELF/对象/原始堆镜像。仍未完成：ARM硬件加速、PG完整CPU/算法分派、所有metadata checksum、启停/重写/在线全库校验，以及GiST tree/opclass/KNN/WAL与完整数据库成本/性能校准。B+Tree、heap、WAL及其他独立校验实现未在本批统一重写。所有用户暂缓范围保持，整体Goal继续。
 
 
 <!-- CURRENT_GIST_READ_OWNER_20261105 -->
@@ -5261,7 +5284,7 @@ QEMU8.2.2实际执行同一O2组件：qemu64报告hardware=0、35520检查正常
 
 私有候选SHA256 `3474059f19a031d86b55e33e3a5511d3f9f7c8906db7af8e0bd5e847e24f1889`，根目录默认程序仍`425165afe19d10ccf9be806c3052e9a09e3875a3826142d2949cde995fdf94d1`。本批CMake正常C++17构建，C1/C2/C3各实际重编译1个TU，62对象/61 core及显式重编译匹配桩均有哈希。源248/头177，原2365测试逐字保持、新2后2367；676注册驱动/656独立E2E；754 Markdown路径与725保护记录保持。原273完整对象及22/166/70/15状态和269历史保持，新增1条partial后270，Goal active。直接master本地提交，无push/default/service promotion。
 
-原53.45MiB分析/重建证据已按原字节压为5.70MiB，原始大JSON不再跟踪；本批也只新增[压缩机器证据](benchmarks/gist-read-owner-20261105.json.gz)，采用内容去重与逐字节roundtrip，不提交ELF/对象/原始堆镜像。18份旧gzip及清单记录保持，新1后19；Git已有历史未重写。
+原53.45MiB分析/重建证据已按原字节压为5.70MiB，原始大JSON不再跟踪；本批也只新增压缩机器证据（可选本地文件 `benchmarks/gist-read-owner-20261105.json.gz`），采用内容去重与逐字节roundtrip，不提交ELF/对象/原始堆镜像。18份旧gzip及清单记录保持，新1后19；Git已有历史未重写。
 
 仍有提升空间：GiST仍整文件校验/线性解码而非平衡树，当前读每次验证耐久高水位，catalog身份检查、解析与事务开销仍存在；SERIALIZABLE/历史/自身写入不走新文件路径。空文本完整表示、PG tree/opclass/KNN/WAL、跨AM更细谓词依赖、成本校准及未转换typed统计消费者均未完成。用户暂缓模块保持原范围，未把局部改进宣布为PostgreSQL全部功能或性能等价。
 
@@ -5339,7 +5362,7 @@ C4的固定九进程低频LIKE wall中位数（旧首轮／C4／旧回测）为4
 
 ### 版本与范围
 
-最终私有程序 SHA256 `355bbe7c6ba7e9460b4309b5c9969d9454d10dd6f508407caf34b71dbac22f1b`；默认程序仍为 `425165afe19d10ccf9be806c3052e9a09e3875a3826142d2949cde995fdf94d1`。原273完整对象与22/166/70/15状态、268条历史保持，新增1条partial后269；原2361测试逐字保持，新4后2365；源248/头177，754 Markdown 路径/725保护记录不变。675注册驱动/655独立E2E完整。17旧gzip与清单项保留，新1后18；[完整压缩证据](benchmarks/typed-planner-statistics-20261105.json.gz)使用内容去重及逐字节 roundtrip，不提交原始大 JSON/ELF/对象/数据库镜像。
+最终私有程序 SHA256 `355bbe7c6ba7e9460b4309b5c9969d9454d10dd6f508407caf34b71dbac22f1b`；默认程序仍为 `425165afe19d10ccf9be806c3052e9a09e3875a3826142d2949cde995fdf94d1`。原273完整对象与22/166/70/15状态、268条历史保持，新增1条partial后269；原2361测试逐字保持，新4后2365；源248/头177，754 Markdown 路径/725保护记录不变。675注册驱动/655独立E2E完整。17旧gzip与清单项保留，新1后18；完整压缩证据（可选本地文件 `benchmarks/typed-planner-statistics-20261105.json.gz`）使用内容去重及逐字节 roundtrip，不提交原始大 JSON/ELF/对象/数据库镜像。
 
 仍未完成：typed range/array/join/多列统计与大部分 histogram 消费、所有冷读人口后备、任意用户自定义类型/算子、保留参数计划、PG GiST 树/opclass/相关性、完整 SQL/catalog MVCC/成本校准。旧 `.stats` 格式仍可能因分隔符失真，未转换消费者仍有局限。保留原用户暂缓范围；直接 master 本地提交，无 push/default/service promotion，Goal active。
 
@@ -5434,7 +5457,7 @@ Original name257/70failed, timetz2563/314failed and table_structured expression-
 Original273 objects/status22complete166partial70unverified15deferred and267 histories remain exact; append1partial=>268.754MDpaths725protected,16oldgzip preserved. Goal active, direct master, no push/default/service promotion.
 
 原273完整对象和22/166/70/15状态、267条历史保持，追加1条partial后268。原2358测试逐字保持，新3后2361；源246/头175，顶层CPP1104含桩/嵌套5。更新8份现有文档，无新增Markdown；754路径/725保护记录保持。旧16份gzip与清单项保留，新1后17，原大JSON压缩政策继续。直接master本地提交，默认425程序与服务保持；Goal active。
-详见[性能报告](performance-report-2026-10-30.md)与[压缩原始证据](benchmarks/like-prefix-scan-20261105.json.gz)。本批仍为partial，Goal active。
+详见[性能报告](performance-report-2026-10-30.md)与压缩原始证据（可选本地文件 `benchmarks/like-prefix-scan-20261105.json.gz`）。本批仍为partial，Goal active。
 
 
 <!-- CURRENT_ORDINARY_QUERY_PROFILE_20261105 -->
@@ -5559,7 +5582,7 @@ Two original cold-catalog native fixtures and three original protocol entries re
 273 original objects/status22complete166partial70unverified15deferred and266 histories remain exact, append1partial=>267. All user-deferred scopes including R106/R151/R303-R305 retained; original R151341/103 matrix not run. Goal active, direct master, no push/default/service promotion.
 
 原273完整对象和22/166/70/15状态、266条历史保持，追加1条partial后267。原2357测试逐字保持，新1后2358；源245/头174、顶层CPP1102含桩及嵌套5。更新8份现有文档，无新增Markdown，754路径/725保护记录保持；旧15个gzip与清单项保留，新1后16。原53.45MiB JSON已在452fe958无损压缩为5.70MiB，未改写Git历史；本批仍只提交压缩证据，不提交程序、对象或数据库映像。直接master本地提交，默认425程序与服务保持，Goal active。
-详见[性能报告](performance-report-2026-10-30.md)与[压缩原始证据](benchmarks/ordinary-query-profile-20261105.json.gz)。本批是普通读取partial进展，Goal active。
+详见[性能报告](performance-report-2026-10-30.md)与压缩原始证据（可选本地文件 `benchmarks/ordinary-query-profile-20261105.json.gz`）。本批是普通读取partial进展，Goal active。
 
 
 <!-- CURRENT_EQUALITY_SCAN_COST_20261105 -->
@@ -5666,7 +5689,7 @@ All dedicated user pauses and original15 deferred items unchanged. Retained/gene
 
 原273个完整对象与状态22 complete/166 partial/70 unverified/15 deferred_by_user不变；原265条历史逐字保留，只追加1条partial后266。原2354测试仅上述旧NULL契约fixture调整，其余2353逐字保持；新增3后2357，顶层CPP1102含桩、嵌套CPP5。当前源245/头174。更新8份现有入口文档，不新增Markdown；754路径与725份保护记录保持。旧14份gzip归档及清单项逐字保留，新1份后15；原大JSON的452fe958压缩提交保持，不重写历史。直接master本地提交，不推送、不切换默认程序/服务，Goal active。
 
-原始测量、失败与独立复核见[压缩机器归档](benchmarks/equality-scan-cost-20261105.json.gz)和[性能报告](performance-report-2026-10-30.md)。
+原始测量、失败与独立复核见压缩机器归档（可选本地文件 `benchmarks/equality-scan-cost-20261105.json.gz`）和[性能报告](performance-report-2026-10-30.md)。
 
 
 <!-- CURRENT_PG_STATS_SOURCE_20261105 -->
@@ -5725,7 +5748,7 @@ wall中位数降低36.21%／35.45%，基线前后漂移-1.17%。process CPU中�
 
 原273项完整对象和状态22 complete /166 partial /70 unverified /15 deferred_by_user不变；原264条历史逐字保留，新加1条partial后265。原2351个测试文件中2348逐字保持，仅上述3个旧库fixture调整；新增3个测试后2354，顶层CPP1100含桩（去桩1099），另5个子目录CPP。更新8份现有入口文档，Markdown路径仍754，725份保护记录逐字保持，不新增Markdown。旧13份gzip归档逐字保持，本批新增1份后14份；机器证据仅以标准gzip入Git，含原始/压缩哈希，不提交ELF、对象文件或数据库映像。既有大JSON压缩提交452fe958保留，未重写Git历史。直接master本地提交，Goal active，默认程序和既有服务保持。
 
-原始测量、失败及逐字复核见[压缩机器归档](benchmarks/pg-stats-source-20261105.json.gz)与[性能报告](performance-report-2026-10-30.md)。
+原始测量、失败及逐字复核见压缩机器归档（可选本地文件 `benchmarks/pg-stats-source-20261105.json.gz`）与[性能报告](performance-report-2026-10-30.md)。
 
 
 <!-- CURRENT_ANALYZED_RANGE_COLLECTOR_20261105 -->
@@ -5780,7 +5803,7 @@ wall中位数降低43.31%／45.18%，未缓存前后漂移+3.41%。process CPU�
 
 本批新增机器证据使用标准gzip及原始/压缩哈希清单，总计13份；旧12份gzip载荷逐字保持，不提交未压缩大载荷。既有452fe958压缩提交保留，未重写Git历史。Goal保持active；直接在master本地提交，默认程序和现有服务未切换。
 
-原始测量、失败和复核见[压缩机器归档](benchmarks/analyzed-range-collector-20261105.json.gz)及[性能报告](performance-report-2026-10-30.md)。
+原始测量、失败和复核见压缩机器归档（可选本地文件 `benchmarks/analyzed-range-collector-20261105.json.gz`）及[性能报告](performance-report-2026-10-30.md)。
 
 
 <!-- CURRENT_ANALYZED_ARRAY_COLLECTOR_20261105 -->
@@ -5835,7 +5858,7 @@ process CPU中位数降低86.80%/87.34%，调用线程CPU降低86.81%/87.34%，w
 
 本轮另按用户要求以独立提交 `452fe958` 将11份旧机器证据无损压缩；所有解压字节与原哈希一致，旧历史保留。新增证据继续使用标准gzip及原始/压缩哈希清单，避免提交未压缩大载荷。Goal保持active；默认程序和现有服务未切换。
 
-原始测量、失败和复核见[压缩机器归档](benchmarks/analyzed-array-collector-20261105.json.gz)及[性能报告](performance-report-2026-10-30.md)。
+原始测量、失败和复核见压缩机器归档（可选本地文件 `benchmarks/analyzed-array-collector-20261105.json.gz`）及[性能报告](performance-report-2026-10-30.md)。
 
 
 <!-- BENCHMARK_ARCHIVE_COMPRESSION_20261105 -->
@@ -5844,7 +5867,7 @@ process CPU中位数降低86.80%/87.34%，调用线程CPU降低86.81%/87.34%，w
 
 原始测量、失败记录和源码证据有复核价值，现统一保存为标准 `.json.gz`，不删除有效测量。11份机器归档由 154.71 MiB 压缩为 29.50 MiB；触发GitHub警告的ANALYZE/REINDEX档由53.45 MiB压缩为5.70 MiB。每份解压后的长度与SHA-256均和原文件逐字相同，结果、功能状态和273项总账状态不变。
 
-读取可使用Python的 `json.load(gzip.open(path, "rt"))`。原始文件名/哈希和压缩文件名/哈希见[机器归档清单](benchmarks/manifest.json)；历史载荷中的原文件名通过该清单定位。文档和总账的文件链接已更新。新未压缩机器载荷默认被Git忽略，避免再次误提交。当前压缩提交保留已有Git历史，因此旧大对象仍存在于历史中；没有重写共享历史。
+读取可使用Python的 `json.load(gzip.open(path, "rt"))`。原始文件名/哈希和压缩文件名/哈希见机器归档清单（可选本地文件 `benchmarks/manifest.json`）；历史载荷中的原文件名通过该清单定位。文档和总账的文件链接已更新。新未压缩机器载荷默认被Git忽略，避免再次误提交。当前压缩提交保留已有Git历史，因此旧大对象仍存在于历史中；没有重写共享历史。
 
 
 <!-- CURRENT_ANALYZED_SCALAR_COLLECTOR_20261105 -->
@@ -5893,7 +5916,7 @@ process CPU p50较两轮未缓存对照低51.93%/54.81%，调用线程CPU低51.9
 
 9/9进程正常0。每worker在计时外核对4096行、16384单元格、1275个真实NULL和全RID，前后全行不变；旧统计文件字节不变，新快照除已预定generation增长外每字段/值不变。9份189213B全行证明与9份3659B最终快照分别逐字相同。独立脚本重读全部9条计时、每个真实RID/值/NULL及帧长度/版本/FNV/generation6/4列；不只是核对汇总json。
 
-这是这组4类型负载的完整ANALYZE提速，不是任意SELECT、所有数据库操作、冷盘、数据库整体或PostgreSQL速度比较。全部原始源码/配置/哈希、失败与正常结果见[机器归档](benchmarks/analyzed-scalar-collector-20261105.json.gz)。
+这是这组4类型负载的完整ANALYZE提速，不是任意SELECT、所有数据库操作、冷盘、数据库整体或PostgreSQL速度比较。全部原始源码/配置/哈希、失败与正常结果见机器归档（可选本地文件 `benchmarks/analyzed-scalar-collector-20261105.json.gz`）。
 
 已接入真实ANALYZE的标量采集和快照发布；旧优化器/原生8列统计保持。普通服务器四条SQL流程与独立快照读回通过，完整pg_stats查询仍有2项0A000失败。PG对照的3处存储宽度及2处collation OID差异仍开放。
 
@@ -5943,7 +5966,7 @@ codec采用明确小端字段、版本1、长度边界与FNV64完整帧校验；
 
 编码CPU p50较两次本批未优化对照低14.42%/14.41%，解码低4.47%/2.58%。编码对照前后漂移−0.0066%，解码−1.94%；最终解码第2样本CPU395.952ms长尾保留，高于两侧旧样本，未删样本或重采。只有3样本/段，均为描述性组件统计，不证明所有样本占优或统计显著性，更不是数据库查询、ANALYZE、持久化fsync或PostgreSQL速度提升。
 
-9/9进程正常0，18组计时记录及9份完整payload独立重读校验，所有原始min/p50/max、源码/配置/对象哈希、正常和失败记录见[机器归档](benchmarks/analyzed-statistics-snapshot-20261105.json.gz)。最初PG套接字路径过长在启动期终止、组件初版API拼写、参考空值假设及两版SQL结果采集脚本错误均保留；原数据与失败预期没有被改成成功。
+9/9进程正常0，18组计时记录及9份完整payload独立重读校验，所有原始min/p50/max、源码/配置/对象哈希、正常和失败记录见机器归档（可选本地文件 `benchmarks/analyzed-statistics-snapshot-20261105.json.gz`）。最初PG套接字路径过长在启动期终止、组件初版API拼写、参考空值假设及两版SQL结果采集脚本错误均保留；原数据与失败预期没有被改成成功。
 
 ### 后续验收
 
@@ -5999,7 +6022,7 @@ codec采用明确小端字段、版本1、长度边界与FNV64完整帧校验；
 
 ### 证据及剩余范围
 
-工具启动时的缺符号/路径、初版include配置及两个汇总脚本假设错误保留，均未改动数据库样本或原断言。全部实际命令、源码/配置/对象哈希、原失败、worker stdout/stderr、九次原始时间及PID归属记录见[机器归档](benchmarks/relation-list-engine-lifetime-20261105.json.gz)。
+工具启动时的缺符号/路径、初版include配置及两个汇总脚本假设错误保留，均未改动数据库样本或原断言。全部实际命令、源码/配置/对象哈希、原失败、worker stdout/stderr、九次原始时间及PID归属记录见机器归档（可选本地文件 `benchmarks/relation-list-engine-lifetime-20261105.json.gz`）。
 
 正常Main五项元数据、跨服务进程在线准入、完整17字段pg_stats及其他原始功能族仍开放。本批未重测完整35操作/36查询或PostgreSQL性能，未切换默认425。原273对象与22/166/70/15状态、259条历史、725保护记录、8份旧归档和754 Markdown路径保持，仅追加一条partial后历史260；Goal active。
 
@@ -6067,7 +6090,7 @@ C2较同轮C1 wall/CPU p50低14.65%/27.91%，但仍比两旧版wall高7.63%/4.61
 
 C3较同轮C2 wall/CPU p50低10.23%/19.66%；较两次旧版wall低4.16%/6.42%，CPU低2.47%/3.17%。旧版前后wall漂移+2.41%、CPU+0.72%。C2第3次18517.621ms与C3最大2170.976ms全部保留；每段仅三样本，这些是固定夹具的描述性统计，不宣称统计显著性、全部样本占优或所有数据库操作加速。
 
-两轮分别12/12调用、144/144检查通过；每轮12进程正常0且PID/组无残留，36108行输出/144336单元/48个真实NULL均逐值核对，包含全1000+4的前后RID、哨兵真实存在/移除、清单及全部镜像文件字节不变。原命令、配置、来源/目标清单及SHA、各3原始时间、stdout/stderr、PID/startticks与首轮失败保留在[机器归档](benchmarks/restore-transaction-horizon-20261105.json.gz)；两轮成功不覆盖前述七阶段FAIL。
+两轮分别12/12调用、144/144检查通过；每轮12进程正常0且PID/组无残留，36108行输出/144336单元/48个真实NULL均逐值核对，包含全1000+4的前后RID、哨兵真实存在/移除、清单及全部镜像文件字节不变。原命令、配置、来源/目标清单及SHA、各3原始时间、stdout/stderr、PID/startticks与首轮失败保留在机器归档（可选本地文件 `benchmarks/restore-transaction-horizon-20261105.json.gz`）；两轮成功不覆盖前述七阶段FAIL。
 
 ### 剩余范围
 
@@ -6126,7 +6149,7 @@ C3较同轮C2 wall/CPU p50低10.23%/19.66%；较两次旧版wall低4.16%/6.42%�
 
 只有上述完整备份及四DDL对照，本批未重跑全部35操作/36查询、没有新的PG速度样本。旧整体慢项、动作后RSS负值及P6-C8的20项新观察差异/129项旧观察差异不因本批局部通过而清零。原query来源/错误前缀、字符数组声明、表达式索引、LATERAL/EXCLUDED/default/BEFORE及identity语法等仍开放。qualified pg_stats需要真实当前数据库行源与namespace/attribute身份，不能直接挂旧八列文本renderer或删除failclosed守卫。原273项仍22 complete /166 partial /70 unverified /15 deferred_by_user；Goal active。
 
-根目录默认程序仍`425165af…`，现有服务未重启；仅验证私有前缀安装，未提升默认程序。所有研究、构建/ABI、实际SQL/raw、首失败、完整计时、负值、进程身份和独立审查见[机器归档](benchmarks/backup-analyze-20261104.json.gz)；其中嵌入原始文本/二进制记录的精确字节和SHA，数据库与对象/可执行文件本身由实际receipt中的哈希识别。原754个Markdown路径、725保护记录、六份旧归档及273项/257历史原文保留，新partial后历史258。
+根目录默认程序仍`425165af…`，现有服务未重启；仅验证私有前缀安装，未提升默认程序。所有研究、构建/ABI、实际SQL/raw、首失败、完整计时、负值、进程身份和独立审查见机器归档（可选本地文件 `benchmarks/backup-analyze-20261104.json.gz`）；其中嵌入原始文本/二进制记录的精确字节和SHA，数据库与对象/可执行文件本身由实际receipt中的哈希识别。原754个Markdown路径、725保护记录、六份旧归档及273项/257历史原文保留，新partial后历史258。
 
 
 纯静态汇总首次样本索引断言也保留，修正只影响reduce脚本，未重复任何数据库运行。
@@ -6222,7 +6245,7 @@ C5接收器v2在62条已保存观察后，实际执行了第63条但独立1043�
 
 原273项仍为22 complete /166 partial /70 unverified /15 deferred_by_user；Goal active。下方旧批次保留当时事实，当前状态以本节为准。
 
-完整原始数据见[本批机器归档](benchmarks/generated-column-demand-20261104.json.gz)。归档采用UTF8/base64/gzip+base64逐项保存原始字节并校验SHA256，摘要和计数可直接读取；压缩只改变归档表示。新增一份非Markdown归档，既有754个Markdown路径、原273项、原256条历史原文、725保护记录及五份旧归档保持。
+完整原始数据见本批机器归档（可选本地文件 `benchmarks/generated-column-demand-20261104.json.gz`）。归档采用UTF8/base64/gzip+base64逐项保存原始字节并校验SHA256，摘要和计数可直接读取；压缩只改变归档表示。新增一份非Markdown归档，既有754个Markdown路径、原273项、原256条历史原文、725保护记录及五份旧归档保持。
 
 
 ## ANALYZE 与 REINDEX 成本优化（2026-11-04）
@@ -6364,7 +6387,7 @@ PostgreSQL 的自动 ANALYZE 使用后台 worker、变化行数阈值及规模�
 
 本批没有新的 PostgreSQL 速度倍率测量。默认 425 继续保持；下一步对点查、单行写入、DDL、事务及完整 REINDEX 的实际慢路径做正常 Main 分段与分配/CPU 调研，查明原因后继续优化。普通生成列赋值/未选中需求、历史数组位图、quoted stored routine 元数据、更多目录和组合语义仍开放；273 项没有关闭。独立 API 的收益和 normal 全量的负值均须保留。
 
-全部构建、原失败、控制、原始分布及静态核对见[本批机器归档](benchmarks/analyze-reindex-main-costs-20261104.json.gz)。下方为较早批次的历史记录，“当前”仅指其当时版本。
+全部构建、原失败、控制、原始分布及静态核对见本批机器归档（可选本地文件 `benchmarks/analyze-reindex-main-costs-20261104.json.gz`）。下方为较早批次的历史记录，“当前”仅指其当时版本。
 
 ## RETURNING 声明、真实行值与操作热路径（2026-11-04）
 
@@ -6499,7 +6522,7 @@ C3 完整选取148原生为146通过/2个既有SIGABRT；95协议为86通过/9�
 本批下一步继续真实Main修改路径和REINDEX成本调查。性能回退及普通功能差距没有改成用户暂缓；严格失败没有弱化。
 
 
-新增一份非 Markdown [机器归档](benchmarks/returning-declarations-hotpaths-20261104.json.gz)集中保存全量测量、函数/协议/资源结果、原失败、研究来源与复现命令；旧归档字节保持。原2324测试未改，新增5个入口后2329；原754个Markdown路径集合及725保护记录保持。九份既有文档同步，一条partial近期记录追加后255，原273对象/状态及254条历史原文保留。直接在 master 使用 Palpitate-xus <palpitate.xus@outlook.com> 提交，不建分支、不推送、不重启现有服务。
+新增一份非 Markdown 机器归档（可选本地文件 `benchmarks/returning-declarations-hotpaths-20261104.json.gz`）集中保存全量测量、函数/协议/资源结果、原失败、研究来源与复现命令；旧归档字节保持。原2324测试未改，新增5个入口后2329；原754个Markdown路径集合及725保护记录保持。九份既有文档同步，一条partial近期记录追加后255，原273对象/状态及254条历史原文保留。直接在 master 使用 Palpitate-xus <palpitate.xus@outlook.com> 提交，不建分支、不推送、不重启现有服务。
 
 前批记录见[内置函数注册与复合RETURNING](#内置函数注册与复合-returning2026-11-03)：本机默认已更新为C3；固定查询36组p50均低于两次S3，35操作18快/2慢/15居间。PG仍有113/301差异，全部原始数据、负向成本与旧历史保留。
 
@@ -8704,7 +8727,7 @@ C4 的 REGTYPE68 为29差异，C6为13，C7为11。C7 第10项真实文本为 `-
 
 独立资源55项通过：40次完整读取、14次SET/SHOW、1次预期在途只读强杀，完整核对40000行/118000单元格，5个正常进程上下文退出0。64kB普通最终排序实际观察最多2个匿名FD，16MB采样为0（不是硬性无spill保证），EOF无残留，瞬态命名文件均解析完成。仅强杀核对过exe/data/start-ticks且存在真实deleted spool的私有进程（退出−9）；同目录重开再次核对1000×4基础值和1000×3排序值。它不证明窗口预算、硬RSS或任意写入恢复，原R15失败不重写。
 
-同一原生驱动分别编译旧/新、默认分配器/计数器四个程序，使用真实0/1/512行堆表、实际绑定和公开游标，每图首次执行及三次重启。四进程完整3例/0失败，共48次游标调用/8208行；所有值、NULL、类型和保留行的寿命均检查。旧捕获API缺失保留“不可用”，默认分配器的计数字段记为未测量；全部442条wall/process/thread CPU和分配指标见[机器归档](benchmarks/owned-datum-20261103.json.gz)。
+同一原生驱动分别编译旧/新、默认分配器/计数器四个程序，使用真实0/1/512行堆表、实际绑定和公开游标，每图首次执行及三次重启。四进程完整3例/0失败，共48次游标调用/8208行；所有值、NULL、类型和保留行的寿命均检查。旧捕获API缺失保留“不可用”，默认分配器的计数字段记为未测量；全部442条wall/process/thread CPU和分配指标见机器归档（可选本地文件 `benchmarks/owned-datum-20261103.json.gz`）。
 
 | 计数区间 | S3 | C7 | 限定解释 |
 | --- | ---: | ---: | --- |
@@ -8768,7 +8791,7 @@ C4 的 REGTYPE68 为29差异，C6为13，C7为11。C7 第10项真实文本为 `-
 
 ### 可移植数据与后续工作
 
-[owned-datum-20261103.json.gz](benchmarks/owned-datum-20261103.json.gz)保存全部样本、阶段指标、114项残余SQL及实际/期望、三份冻结驱动源码与SHA、固定SQL/Python值预期、夹具清单和依赖哈希。原程序与私有目录留在本机工件区；其他机器可按归档装载函数建立相同逻辑数据，不能声称重现相同文件哈希或延迟。
+owned-datum-20261103.json.gz（可选本地文件 `benchmarks/owned-datum-20261103.json.gz`）保存全部样本、阶段指标、114项残余SQL及实际/期望、三份冻结驱动源码与SHA、固定SQL/Python值预期、夹具清单和依赖哈希。原程序与私有目录留在本机工件区；其他机器可按归档装载函数建立相同逻辑数据，不能声称重现相同文件哈希或延迟。
 
 在仓库根目录提取驱动，再按原参数提供旧/新程序、夹具与新的输出目录；保持 `build/<folder>/` 深度，以保留原依赖定位：
 
@@ -8788,7 +8811,7 @@ for driver in archive["reproduction"]["drivers"]:
 
 ## 原始类型行物化分配优化（2026-11-03）
 
-本轮只修改 `PreparedSelectState::cells`，基于 `745bed31` 的 C8 程序 SHA256 为 `91d339db4bdfb55922e92d853f9a357e10c7c376b4c711cf302c191282ea6115`。实际分配请求减少；完整查询对照为5快/18慢/13居间，仍未通过默认安装性能门，根目录保留 S3 `aa52b5fe…`。C7 的功能源提交、4/23/9结果、慢样本与[原机器归档](benchmarks/owned-datum-20261103.json.gz)继续保留；两个独立测量窗口不能计算因果性的 C7→C8 查询加速倍率。
+本轮只修改 `PreparedSelectState::cells`，基于 `745bed31` 的 C8 程序 SHA256 为 `91d339db4bdfb55922e92d853f9a357e10c7c376b4c711cf302c191282ea6115`。实际分配请求减少；完整查询对照为5快/18慢/13居间，仍未通过默认安装性能门，根目录保留 S3 `aa52b5fe…`。C7 的功能源提交、4/23/9结果、慢样本与原机器归档（可选本地文件 `benchmarks/owned-datum-20261103.json.gz`）继续保留；两个独立测量窗口不能计算因果性的 C7→C8 查询加速倍率。
 
 ### 实现与成本
 
@@ -8817,7 +8840,7 @@ for driver in archive["reproduction"]["drivers"]:
 
 36组 p50 为5低于两旧/18高于两旧/13居间；原common8的24组为4/9/11，额外4项的12组为1/9/2。三档分别0/9/3、4/2/6、1/7/4。分类只表示大小，无统计显著性结论。两次 S3 漂移−49.17%至+9.86%，全部保留；不能把18个慢项统一解释为噪声，也不能用4MB的旧版大漂移宣称新版普遍加速。
 
-最坏中位数比为64kB partition_full_sum：118.624/134.446/114.185ms，C8为两旧的1.133/1.177倍。最大单样本为4MB old-first running_sum index2=1455.411885ms；C8自身最大为4MB partition_full_sum index0=1104.842667ms，均完整值校验通过，未删除。全部108组原始12样本及min/p50/max、1296计时记录、324预热校验见[本轮机器归档](benchmarks/owned-datum-primitive-20261103.json.gz)。
+最坏中位数比为64kB partition_full_sum：118.624/134.446/114.185ms，C8为两旧的1.133/1.177倍。最大单样本为4MB old-first running_sum index2=1455.411885ms；C8自身最大为4MB partition_full_sum index0=1104.842667ms，均完整值校验通过，未删除。全部108组原始12样本及min/p50/max、1296计时记录、324预热校验见本轮机器归档（可选本地文件 `benchmarks/owned-datum-primitive-20261103.json.gz`）。
 
 | work_mem | case | S3 first p50 ms | C8 p50 ms | S3 last p50 ms | C8/S3 first | C8/S3 last | S3 drift % | class |
 |---|---|---:|---:|---:|---:|---:|---:|---|
@@ -8867,7 +8890,7 @@ for driver in archive["reproduction"]["drivers"]:
 
 ## 内置函数注册与复合 RETURNING（2026-11-03）
 
-基于 `7b87f84f` 的最终 C3 程序 SHA256 为 `425165afe19d10ccf9be806c3052e9a09e3875a3826142d2949cde995fdf94d1`。固定1000行、12条查询、三档预算的36组p50均低于前后两次S3；局部辅助求值也减少分配。35类操作对C8为18快/2慢/15居间，仍有慢项。已将同一受测程序原子替换为本地默认，S3回滚副本保留、既有服务未重启。全部原始数据见[本轮机器归档](benchmarks/function-registry-returning-20261103.json.gz)；C7/C8失败性能门、最大样本及两份旧归档按原代别保留。
+基于 `7b87f84f` 的最终 C3 程序 SHA256 为 `425165afe19d10ccf9be806c3052e9a09e3875a3826142d2949cde995fdf94d1`。固定1000行、12条查询、三档预算的36组p50均低于前后两次S3；局部辅助求值也减少分配。35类操作对C8为18快/2慢/15居间，仍有慢项。已将同一受测程序原子替换为本地默认，S3回滚副本保留、既有服务未重启。全部原始数据见本轮机器归档（可选本地文件 `benchmarks/function-registry-returning-20261103.json.gz`）；C7/C8失败性能门、最大样本及两份旧归档按原代别保留。
 
 ### 研究与生产实现
 
@@ -9004,7 +9027,7 @@ C1从零编译62对象；C2、C3各实际重编两个CPP、复用60个有效对�
 
 ### 复现与发布状态
 
-[机器归档](benchmarks/function-registry-returning-20261103.json.gz)保存全部时钟/预热、630操作、局部成本原日志、113残余与新的56对照、来源/fixture/oracle和各次首次测试故障。准确命令在各执行receipt：`run_registry_C3_cost8_v1.py`、`run_operations35_C8_C3_C8_v1.py`、`perf-resource55-registry-C3-executor-v1.py`、`perf-latency1638-registry-C3-executor-v1.py` 均位于 `build/pg-feature-function-registry-45zctwo9`。复现应取新的输出目录，保留原固定驱动/SQL/参数，不能覆盖首次结果。
+机器归档（可选本地文件 `benchmarks/function-registry-returning-20261103.json.gz`）保存全部时钟/预热、630操作、局部成本原日志、113残余与新的56对照、来源/fixture/oracle和各次首次测试故障。准确命令在各执行receipt：`run_registry_C3_cost8_v1.py`、`run_operations35_C8_C3_C8_v1.py`、`perf-resource55-registry-C3-executor-v1.py`、`perf-latency1638-registry-C3-executor-v1.py` 均位于 `build/pg-feature-function-registry-45zctwo9`。复现应取新的输出目录，保留原固定驱动/SQL/参数，不能覆盖首次结果。
 
 资源另行55请求/40000行/118000单元格全部核对：64kB最多两个已删除FD，16MB观察0，EOF/close后剩余严格 `{}`、无命名文件；只读临时排序文件强杀后同私有目录重开值正确，五个正常上下文退出0。它不证明任意写入崩溃恢复、窗口硬预算或RSS峰值。
 

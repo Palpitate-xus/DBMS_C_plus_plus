@@ -1,8 +1,10 @@
 # 文档索引
 
+> 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
+
 ## 当前 P42：无写入事务提交和621次正常成本
 
-最新状态以[本批性能／正确性报告](performance-report-2026-10-30.md#no-effect-transaction-publication-20261107)为准：[完整压缩证据](benchmarks/no-effect-transaction-publication-20261107.json.gz)含所有原始结果、失败和提取方式。新增一个正式回归，保留95条完整SQL旧新字节比较；33个选定原生入口有31个0、2项未通过，全套未跑。源码已更新，默认程序未替换。八份既有文档插入更新，没有新增Markdown；原754路径和725保护记录保持。Goal active；下方为历史索引。
+最新状态以[本批性能／正确性报告](performance-report-2026-10-30.md#no-effect-transaction-publication-20261107)为准：完整压缩证据（可选本地文件 `benchmarks/no-effect-transaction-publication-20261107.json.gz`）含所有原始结果、失败和提取方式。新增一个正式回归，保留95条完整SQL旧新字节比较；33个选定原生入口有31个0、2项未通过，全套未跑。源码已更新，默认程序未替换。八份既有文档插入更新，没有新增Markdown；原754路径和725保护记录保持。Goal active；下方为历史索引。
 
 <!-- P41 large-varchar-toast-search begin -->
 <a id="large-varchar-toast-search-current"></a>
@@ -96,7 +98,7 @@ The [comparison](postgresql-comparison.md#pg-class-declaration-current) and [com
 
 ## 最新验证入口（P32-C1）
 
-普通日志改为逐次O_APPEND/writev追加，新增13组原生检查；当前正式测试2393，本批没有全套重跑。30案例服务器CPU为16低/6高/8居间，多LOB负向保留，未宣称一致提速。完整协议仍有原9项普通差异、默认425未换；见[本批完整报告](performance-report-2026-10-30.md#legacy-log-append-20261106)与[可逆原始证据](benchmarks/legacy-log-append-20261106.json.gz)。下方索引和历史保持。
+普通日志改为逐次O_APPEND/writev追加，新增13组原生检查；当前正式测试2393，本批没有全套重跑。30案例服务器CPU为16低/6高/8居间，多LOB负向保留，未宣称一致提速。完整协议仍有原9项普通差异、默认425未换；见[本批完整报告](performance-report-2026-10-30.md#legacy-log-append-20261106)与可逆原始证据（可选本地文件 `benchmarks/legacy-log-append-20261106.json.gz`）。下方索引和历史保持。
 
 使用项目从 [README](../README.md)、[使用手册](MANUAL.md)和[打包与部署](PACKAGING.md)开始。
 接口范围以[兼容性契约](compatibility-contract.md)为准；命令示例不代表所有组合均已实现。

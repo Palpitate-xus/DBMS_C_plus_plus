@@ -1,5 +1,7 @@
 # 兼容版本契约
 
+> 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
+
 ## P42 当前事务提交补充（2026-11-07）
 
 无写入事务仍保留内部txid、快照、SSI和锁生命周期；同一物理WAL owner位置未变且所有保守条件满足时，不为未被持久变更引用的保留ID写COMMIT或CLOG。不能据READ ONLY或SQL前缀省略写事务同步。目录失效与序列写入单独标记，UNLOGGED DDL／TEMP提交动作及检测到共享WAL推进时保留原路径。没有引入异步写入提交，没有改变磁盘／协议编码或校验。
@@ -151,7 +153,7 @@ The ordinary `pg_class` renderer still implements only `oid, relname, relnamespa
 
 普通日志 `::log` 仍按 time、四个空格、user、四个空格、operation 和换行追加原始字节；每次实际打开当前路径，以 `O_APPEND` 和六段 `writev` 写入，EINTR 重试、正短写继续消费未写后缀，零进展或其他写错误停止并关闭。打开失败仍输出 `error 1` 并返回0；权限、已有前缀、rename/unlink 与真实 symlink 重新解析保持。`getTime`、`auditLog` 正文字节未变，没有持久缓存日志FD或改服务端协议发送。
 
-验证限本地普通文件与默认char-codecvt环境；真实短记录并发、轮转及有限系统调用控制不构成NFS、大记录事务原子性、fsync持久性或完整故障矩阵承诺。本批不改协议、目录/参数帧/retained/provider边界；58目标仍53通过、4冷锚仍失败，共9项普通差异未豁免。产品、PG行为目标和wire格式版本仍分别定义。[本批完整报告](performance-report-2026-10-30.md#legacy-log-append-20261106)与[可逆原始证据](benchmarks/legacy-log-append-20261106.json.gz)。以下原契约不变。
+验证限本地普通文件与默认char-codecvt环境；真实短记录并发、轮转及有限系统调用控制不构成NFS、大记录事务原子性、fsync持久性或完整故障矩阵承诺。本批不改协议、目录/参数帧/retained/provider边界；58目标仍53通过、4冷锚仍失败，共9项普通差异未豁免。产品、PG行为目标和wire格式版本仍分别定义。[本批完整报告](performance-report-2026-10-30.md#legacy-log-append-20261106)与可逆原始证据（可选本地文件 `benchmarks/legacy-log-append-20261106.json.gz`）。以下原契约不变。
 
 [R145](issue-review-r145-search-path-value-identity.md)有限支持SQL SET search_path的
 逐参数list-quote、原样名字数据、空名字及FROM CURRENT真实事务赋值。
