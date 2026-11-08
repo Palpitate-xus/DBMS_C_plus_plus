@@ -44,6 +44,8 @@ __t_*/
 
 # Benchmark output is local-only and is not part of the source repository.
 /docs/benchmarks/
+/scripts/benchmark_*.py
+/scripts/extract_benchmark_*.py
 
 # Test/runtime output.
 /ddl_test.log

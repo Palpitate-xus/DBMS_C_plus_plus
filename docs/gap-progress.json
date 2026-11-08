@@ -44,8 +44,6 @@
         "src/commands/TableManage.cpp",
         "tests/large_varchar_toast_test.cpp",
         "tests/toast_chunk_page_search_test.cpp",
-        "scripts/extract_benchmark_artifact.py",
-        "scripts/extract_benchmark_parts.py",
         "docs/performance-report-2026-10-30.md",
         "docs/benchmarks/large-varchar-toast-search-20261107.json.gz"
       ],
@@ -3119,8 +3117,7 @@
       ],
       "tests": [
         "tests/set_sort_key_cache_test.cpp",
-        "tests/set_sort_integer_key_protocol_e2e_test.py",
-        "scripts/benchmark_set_sort.py"
+        "tests/set_sort_integer_key_protocol_e2e_test.py"
       ],
       "verification": {
         "correctness": "Existing44native0+new19=45pass;old19only6cost-budgetfailures/allmetadata-resourcepass. Existing32wire31pass+newPG/before/C166all0=>33perentry32/1existingBindfull463/40wholelogbyteequal. Integerrealspool/restart/sourcewidthXX000cleanup/Main7/35ops/ownedspoolSIGKILLreopen1000rows4000cells+2000sortpass.",
@@ -3154,8 +3151,7 @@
         "tests/values_query_clause_protocol_e2e_test.py",
         "tests/enum_result_descriptor_protocol_e2e_test.py",
         "tests/values_count_expression_protocol_e2e_test.py",
-        "tests/values_count_type_modifier_protocol_e2e_test.py",
-        "scripts/benchmark_set_sort.py"
+        "tests/values_count_type_modifier_protocol_e2e_test.py"
       ],
       "verification": {
         "correctness": "Final44native0;26+860+63=949newcontrols0, same-finalsource old20/694/63 failures. Fixed112/143/33/59 PG18.6/final0 old8/127/20/51;type52PG/final0. Full31first29pass/2fail; startupconnectbeforeSQLsame-sourceisolatedpass, finalper-entry30/1existingBindfull463/40wholelogbyteequal. New52permanententryseparatelyverified.Final32per-entry31pass/1existingBind. Main7resource0(old4),35ops0,liveglobalspoolSIGKILL/reopen1000rows4000cells+2000unionrows0.",
@@ -3184,8 +3180,7 @@
         "tests/bounded_sort_runs_test.cpp",
         "tests/typed_sort_operator_test.cpp",
         "tests/typed_sort_spill_protocol_e2e_test.py",
-        "tests/prepared_topn_memory_test.cpp",
-        "scripts/benchmark_typed_sort.py"
+        "tests/prepared_topn_memory_test.cpp"
       ],
       "verification": {
         "correctness": "Final39native0;new51+17+17=85controls0;fullselected26wire25pass/1existingdeferredBindfail,full463observationsbyteequal40mismatches. PG18.6/final1080,old2NaNties;original80preserved+28plainadmissioncontrols. ActualMain9/0(old6resourcefail),35ops0,typedspoolSIGKILL/reopen1000rows4000cells0.",

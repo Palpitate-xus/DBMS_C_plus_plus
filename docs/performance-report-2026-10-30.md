@@ -1,6 +1,6 @@
 # 数据库操作性能测试报告（2026-10-30）
 
-> 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
+> 历史基准脚本及原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 和 benchmark 脚本路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
 <a id="d43-signature-cache-20261108"></a>
 ## 2026-11-08：函数签名缓存的行级 SQL 测量
@@ -6719,7 +6719,7 @@ python3 scripts/benchmark_queries.py \
 
 ### 环境、方法和限制
 
-- 复用 [benchmark_operations.py](../scripts/benchmark_operations.py) 的 35 类操作与既有 oracle，新增 [benchmark_postgresql.py](../scripts/benchmark_postgresql.py) 负责两个独立的本地进程及配对计时。没有使用或修改已有数据库；临时服务均已正常退出。
+- 复用 `scripts/benchmark_operations.py` 的 35 类操作与既有 oracle，新增 `scripts/benchmark_postgresql.py` 负责两个独立的本地进程及配对计时。没有使用或修改已有数据库；临时服务均已正常退出。
 - 主表 1,000 行、关联表 100 行，修改批量 20 行、DDL 夹具 5 行；同一主机、同一文件系统、回环 TCP_NODELAY，各复用一个连接，无 TLS。两轮每类各 3 次，固定种子打乱操作顺序；第一轮每项先本项目后 PostgreSQL，第二轮反过来。预热后再测，未清 OS 缓存。
 - PostgreSQL 精确核验为 18.6（`server_version_num=180006`），发行二进制来自 `public.ecr.aws/docker/library/postgres:18.6-bookworm`，提取后以本机进程运行；manifest digest 为 `sha256:5c4783a8cc3f0074912164f94dfa1be4e043438f0f707cf968d7af9a0d31a2c8`，所需额外库仅作用于该进程。
 - PostgreSQL 的 `fsync`、`synchronous_commit`、`full_page_writes`、`data_checksums` 均为 `on`；`shared_buffers=128MB`、`work_mem=4MB`、`checkpoint_timeout=5min`、`jit=on`。本项目使用默认持久化与后台维护，堆/索引池默认 256/128 帧。**未统一两边的内存额度或调优参数**，不能声称完全相同配置。
@@ -7492,7 +7492,7 @@ CMake 共 17 次成功 C++ 对象编译、16 个不同 CPP，最终链接全 62 
 后续仅 ExecutionPlan 的新回调重编译；最终原生 39 和实际 Main 26 使用相同冻结 core/程序。
 最终输入、62 对象、61 core、测试来源和产物 SHA 见本批 `release-binary.json`、`native-release-core-hashes.json`、`final-provenance.json`。
 
-可复现驱动为 [benchmark_typed_sort.py](../scripts/benchmark_typed_sort.py)，沿用 [benchmark_queries.py](../scripts/benchmark_queries.py) 的真实服务/客户端。
+可复现驱动为 `scripts/benchmark_typed_sort.py`，沿用 `scripts/benchmark_queries.py` 的真实服务/客户端。
 计时驱动 `59792eb4…` 与仓库驱动 `9a8d8e0b…` 只因所在目录不同改变 REPO parents[2]→parents[1]；逆替换源码与规范化 AST 全等，--help/py_compile 通过。
 使用冻结旧二进制、同一个已关闭夹具和每次全新输出目录，例如：
 
@@ -7645,7 +7645,7 @@ C3/C4/C5标准CMake target分别523.40/522.38/32.60秒，成功重编17/16/3对�
 最后仅三CPP变化，Main不因此重编；最终44原生与实际Main所有协议/资源使用相同冻结61core/程序。
 全部212输入源码、62对象、61core、测试/驱动及工件SHA保存在`final-provenance.json`；初始const Expr*编译错误及所有候选失败留存。
 
-复现驱动[benchmark_set_sort.py](../scripts/benchmark_set_sort.py)复用[benchmark_queries.py](../scripts/benchmark_queries.py)真实服务/客户端。
+复现驱动`scripts/benchmark_set_sort.py`复用`scripts/benchmark_queries.py`真实服务/客户端。
 计时artifact脚本1099dfa1…与仓库脚本39b1450e…仅REPO.parents[2]→[1]，源码逆替换和AST归一完全相等。
 
 ```bash
