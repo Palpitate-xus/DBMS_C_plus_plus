@@ -9177,12 +9177,78 @@ static std::optional<std::string> formatSimpleScientificNumeric(
     return result;
 }
 
+// Round a finite decimal for a fixed numeric picture without treating
+// display padding or the V shift as extra stored Numeric precision.
+static std::string formatFixedDecimal(const Numeric& value, int scaleShift,
+                                      int fracDigits, bool& negative) {
+    std::string digits = value.toString();
+    negative = value.sign() < 0;
+    if (negative) digits.erase(0, 1);
+    const size_t point = digits.find('.');
+    const size_t integerDigits = point == std::string::npos ? digits.size() : point;
+    if (point != std::string::npos) digits.erase(point, 1);
+    const size_t retained = integerDigits + static_cast<size_t>(scaleShift) +
+                            static_cast<size_t>(fracDigits);
+    const bool roundUp = retained < digits.size() && digits[retained] >= '5';
+    if (retained < digits.size()) digits.resize(retained);
+    else digits.append(retained - digits.size(), '0');
+    if (roundUp) {
+        size_t i = digits.size();
+        while (i && digits[i - 1] == '9') digits[--i] = '0';
+        if (i) ++digits[i - 1];
+        else digits.insert(digits.begin(), '1');
+    }
+    const size_t frac = static_cast<size_t>(fracDigits);
+    if (digits.size() <= frac) digits.insert(0, frac + 1 - digits.size(), '0');
+    const size_t beforePoint = digits.size() - frac;
+    size_t first = 0;
+    while (first + 1 < beforePoint && digits[first] == '0') ++first;
+    if (first) digits.erase(0, first);
+    if (frac) digits.insert(digits.size() - frac, 1, '.');
+    return digits;
+}
+
+// Admit only pictures whose existing simple renderer can faithfully render
+// after a Numeric range failure. Complex pictures keep the previous error.
+static bool supportsFixedRangeRepair(const std::string& picture) {
+    std::string s = picture;
+    if (s.size() >= 2 && (s[0] == 'F' || s[0] == 'f') &&
+        (s[1] == 'M' || s[1] == 'm')) s.erase(0, 2);
+    bool sign = false;
+    if (s.compare(0, 1, "S") == 0) { s.erase(0, 1); sign = true; }
+    else if (s.compare(0, 2, "MI") == 0 || s.compare(0, 2, "PL") == 0) {
+        s.erase(0, 2); sign = true;
+    }
+    if (!sign && !s.empty() && s.back() == 'S') { s.pop_back(); sign = true; }
+    else if (!sign && s.size() >= 2 &&
+             (s.compare(s.size()-2, 2, "MI") == 0 ||
+              s.compare(s.size()-2, 2, "PR") == 0 ||
+              s.compare(s.size()-2, 2, "PL") == 0)) {
+        s.erase(s.size()-2); sign = true;
+    }
+    bool separator = false;
+    size_t before = 0;
+    for (char c : s) {
+        if (c == '9' || c == '0') { if (!separator) ++before; continue; }
+        if (c == '.' || c == 'D' || c == 'V') {
+            if (separator) return false;
+            separator = true;
+            continue;
+        }
+        return false;
+    }
+    return before > 0;
+}
+
 static std::string formatNumeric(double val, const std::string& fmtIn,
                                  const std::string& exactInput = std::string(),
-                                 bool exactScientific = false) {
+                                 bool exactScientific = false,
+                                 const std::string& exactType = std::string()) {
     if (exactScientific)
         if (const auto exact = formatSimpleScientificNumeric(exactInput, fmtIn))
             return *exact;
+    const double originalValue = val;
+    bool repairedRange = false;
     std::string fmt = fmtIn;
     bool fm = false;
     if (fmt.size() >= 2 && (fmt[0] == 'F' || fmt[0] == 'f') &&
@@ -9270,22 +9336,59 @@ static std::string formatNumeric(double val, const std::string& fmtIn,
     if (!exactInput.empty()) {
         Numeric decimal(exactInput);
         if (decimal.isFinite()) {
-            if (scaleShift > 0) {
-                decimal *= Numeric("1" + std::string(static_cast<size_t>(scaleShift), '0'));
-            }
-            decimal = decimal.withScale(fracDigits);
-            neg = decimal.sign() < 0;
-            roundedText = (neg ? -decimal : decimal).toString();
-            if (fracDigits > 0) {
-                size_t point = roundedText.find('.');
-                if (point == std::string::npos) {
-                    roundedText += '.';
-                    point = roundedText.size() - 1;
+            try {
+                if (scaleShift > 0)
+                    decimal *= Numeric("1" + std::string(static_cast<size_t>(scaleShift), '0'));
+                decimal = decimal.withScale(fracDigits);
+                neg = decimal.sign() < 0;
+                roundedText = (neg ? -decimal : decimal).toString();
+                if (fracDigits > 0) {
+                    size_t point = roundedText.find('.');
+                    if (point == std::string::npos) {
+                        roundedText += '.';
+                        point = roundedText.size() - 1;
+                    }
+                    const size_t existing = roundedText.size() - point - 1;
+                    if (existing < static_cast<size_t>(fracDigits))
+                        roundedText.append(static_cast<size_t>(fracDigits) - existing, '0');
                 }
-                const size_t existing = roundedText.size() - point - 1;
-                if (existing < static_cast<size_t>(fracDigits)) {
-                    roundedText.append(static_cast<size_t>(fracDigits) - existing, '0');
+            } catch (const NumericRangeError&) {
+                // PostgreSQL uses different paths for smallint and for V on
+                // integral types. Preserve their old error unless this is a
+                // decimal, or an int4/int8 picture without V.
+                const bool decimalType = exactType == "numeric" || exactType == "decimal";
+                const bool integralType = exactType == "integer" || exactType == "int" ||
+                    exactType == "int4" || exactType == "bigint" || exactType == "int8";
+                if (!decimalType && !(integralType && !hasV)) throw;
+                // An outer quoted literal can be retained without treating its
+                // characters as format directives. Internal quoted runs need
+                // a complete picture parser and remain on the old error path.
+                std::string picture = fmtIn, prefix, suffix, fmPrefix;
+                if (picture.size() >= 2 && (picture[0] == 'F' || picture[0] == 'f') &&
+                    (picture[1] == 'M' || picture[1] == 'm')) {
+                    fmPrefix = picture.substr(0, 2); picture.erase(0, 2);
                 }
+                if (!picture.empty() && picture.front() == '"') {
+                    const size_t end = picture.find('"', 1);
+                    if (end == std::string::npos) throw;
+                    prefix = picture.substr(1, end-1); picture.erase(0, end+1);
+                }
+                if (!picture.empty() && picture.back() == '"') {
+                    const size_t begin = picture.rfind('"', picture.size()-2);
+                    if (begin == std::string::npos) throw;
+                    suffix = picture.substr(begin+1, picture.size()-begin-2);
+                    picture.erase(begin);
+                }
+                if (picture.find('"') != std::string::npos ||
+                    !supportsFixedRangeRepair(fmPrefix + picture)) throw;
+                if (!prefix.empty() || !suffix.empty())
+                    return prefix + formatNumeric(originalValue, fmPrefix + picture,
+                                                  exactInput, exactScientific, exactType) + suffix;
+                // Preserve the original, unshifted value if multiplication
+                // or rescaling already changed the temporary before throwing.
+                const Numeric unshifted(exactInput);
+                roundedText = formatFixedDecimal(unshifted, scaleShift, fracDigits, neg);
+                repairedRange = true;
             }
         }
     }
@@ -9341,7 +9444,25 @@ static std::string formatNumeric(double val, const std::string& fmtIn,
     std::string out;
     std::string currencySuffix;
     std::string signSuffix;
-    if (hasPR && neg) {
+    if (repairedRange && hasPR) {
+        if (neg) {
+            std::string digits = ip;
+            const size_t first = digits.find_first_not_of(' ');
+            if (first != std::string::npos) digits.erase(0, first);
+            std::string body = "<" + digits;
+            const size_t width = static_cast<size_t>(intPlaces) + 1;
+            if (!fm && body.size() < width) body.insert(0, width-body.size(), ' ');
+            out = std::move(body);
+            signSuffix = ">";
+        } else { out = (fm ? "" : " ") + ip; signSuffix = fm ? "" : " "; }
+    } else if (repairedRange && hasPL && fmt.find("PL") > fmt.find_first_of("90")) {
+        if (neg) {
+            size_t first = ip.find_first_not_of(' ');
+            if (first == std::string::npos) first = ip.size();
+            out = ip.substr(0, first) + "-" + ip.substr(first);
+        } else out = (fm ? "" : " ") + ip;
+        signSuffix = neg ? (fm ? "" : " ") : "+";
+    } else if (hasPR && neg) {
         // PR: negatives in angle brackets occupying the sign + digit region.
         std::string trimIp = ip;
     size_t nz = trimIp.find_first_not_of(' ');
@@ -9364,7 +9485,7 @@ static std::string formatNumeric(double val, const std::string& fmtIn,
         if (nz2 != std::string::npos) trimIp2 = trimIp2.substr(nz2);
         std::string body = "-" + trimIp2;
         int width = intPlaces + 2;
-        if (static_cast<int>(body.size()) < width)
+        if (static_cast<int>(body.size()) < width && !(repairedRange && fm))
             body = std::string(width - body.size(), ' ') + body;
         out = body;
     } else if (hasMI) {
@@ -9375,6 +9496,9 @@ static std::string formatNumeric(double val, const std::string& fmtIn,
         size_t firstDig = fmt.find_first_of("90");        
         if (miPos != std::string::npos && firstDig != std::string::npos && miPos < firstDig) {
             out = sgn + ip;
+        } else if (repairedRange) {
+            out = ip;
+            signSuffix = sgn;
         } else {
             out = ip + sgn;
         }
@@ -9399,6 +9523,13 @@ static std::string formatNumeric(double val, const std::string& fmtIn,
             size_t fz = ip.find_first_not_of(' ');
             if (fz == std::string::npos) fz = 0;
             out = ip.substr(0, fz) + sg2 + ip.substr(fz);
+        } else if (repairedRange && fmt.find('V') != std::string::npos) {
+            size_t first = ip.find_first_not_of(' ');
+            if (first == std::string::npos) first = ip.size();
+            out = ip.substr(0, first) + sg2 + ip.substr(first);
+        } else if (repairedRange) {
+            out = ip;
+            signSuffix = sg2;
         } else {
             out = ip + sg2;
         }
@@ -10469,42 +10600,124 @@ void ExprEvaluator::registerStatelessBuiltins() {
     auto argHasDot = [](const std::vector<ExprValue>& a) -> bool {
         return !a.empty() && !a[0].isNull && a[0].value.find('.') != std::string::npos;
     };
-    auto requireLogarithmArgument = [](long double value,
-                                       bool allowOne = true) {
-        if (value <= 0 || (!allowOne && value == 1)) {
+    // Keep the permissive public asDouble() contract, but do not turn a
+    // valid SQL numeric outside double range into zero for these functions.
+    auto transcendentalArgument = [](const ExprValue& arg, bool rejectRoundedOne) {
+        if (ExprHelper::canonicalResultTypeName(arg.typeName) != "numeric")
+            return static_cast<long double>(scalarDoubleArgument(arg));
+        Numeric exact;
+        try { exact = Numeric(arg.value); }
+        catch (const NumericRangeError&) { throw DbError("22003", "numeric value out of range"); }
+        catch (const std::invalid_argument&) { throw DbError("22P02", "invalid numeric input"); }
+        if (!exact.isFinite()) return static_cast<long double>(scalarDoubleArgument(arg));
+        errno = 0;
+        char* end = nullptr;
+        const long double parsed = std::strtold(arg.value.c_str(), &end);
+        const bool consumed = end != arg.value.c_str();
+        while (*end && std::isspace(static_cast<unsigned char>(*end))) ++end;
+        if (errno == ERANGE || !consumed || *end != '\0' ||
+            !std::isfinite(parsed) || (parsed == 0.0L && exact.sign() != 0))
+            throw DbError("22003", "numeric value out of range");
+        // Keep the existing ordinary-input computational path. Wider finite
+        // numerics are not returned as new approximate values: without a
+        // decimal transcendental implementation their claimed precision is
+        // unverified, so reject instead of silently substituting zero.
+        const double ordinary = scalarDoubleArgument(arg);
+        if (!std::isfinite(ordinary) || (ordinary == 0.0 && exact.sign() != 0))
+            throw DbError("22003", "numeric precision exceeds transcendental implementation");
+        if (rejectRoundedOne && ordinary == 1.0 && exact != Numeric(1))
+            throw DbError("22003", "numeric precision exceeds logarithm implementation");
+        return static_cast<long double>(ordinary);
+    };
+    // Exact base-10 powers can be recognized digit-by-digit, without a
+    // floating tolerance. Their integer logarithm has no approximation error.
+    auto exactPowerTenLog = [](const Numeric& number, int baseScale)
+            -> std::optional<ExprValue> {
+        if (!number.isFinite() || number.sign() <= 0) return std::nullopt;
+        std::string digits = number.toString();
+        const size_t point = digits.find('.');
+        const size_t integerDigits = point == std::string::npos ? digits.size() : point;
+        if (point != std::string::npos) digits.erase(point, 1);
+        const size_t first = digits.find_first_not_of('0');
+        if (first == std::string::npos || digits[first] != '1' ||
+            digits.find_first_not_of('0', first + 1) != std::string::npos)
+            return std::nullopt;
+        const int exponent = static_cast<int>(integerDigits) - static_cast<int>(first) - 1;
+        // PostgreSQL log_var estimates ln weights in decimal to select result
+        // scale. For 10^k, ln(10^k) = k * ln(10); k=0 is exact zero.
+        int lnWeight = 0;
+        if (exponent != 0)
+            lnWeight = static_cast<int>(std::log10(std::fabs(static_cast<double>(exponent)) * 2.302585092994046));
+        const int scale = std::min(Numeric::kMaxPrecision,
+            std::max({0, 16 - lnWeight, number.scale(), baseScale}));
+        std::string text = std::to_string(exponent);
+        if (scale) text += "." + std::string(static_cast<size_t>(scale), '0');
+        // The backend's current 1000-digit numeric representation must be
+        // able to carry the same value *and scale* over binary/storage paths.
+        try { (void)Numeric(text); }
+        catch (const NumericRangeError&) { throw DbError("22003", "numeric value out of range"); }
+        return ExprValue("numeric", std::move(text), false);
+    };
+    auto requireLogarithmArgument = [](long double value) {
+        if (value <= 0) {
             throw std::runtime_error(
                 "invalid argument for logarithm (SQLSTATE 2201E)");
         }
     };
-    functions_["exp"] = [numericFixed, argHasDot](const auto& a) {
+    auto logFixed = [numericFixed](long double value, bool nonzeroExpected) {
+        auto result = numericFixed(value, 16);
+        if (nonzeroExpected && Numeric(result.value).sign() == 0)
+            throw DbError("22003", "numeric precision exceeds logarithm implementation");
+        return result;
+    };
+    functions_["exp"] = [numericFixed, argHasDot, transcendentalArgument](const auto& a) {
         if (a.empty() || a[0].isNull) return ExprValue("numeric", "", true);
-        if (const auto exact = tryParseNumeric(a[0].value)) {
+        const auto exact = tryParseNumeric(a[0].value);
+        if (exact) {
             if (exact->isNaN()) return ExprValue("numeric", "NaN", false);
             if (exact->isInfinite()) {
-                return ExprValue(
-                    "numeric",
-                    exact->toString().front() == '-' ? "0" : "Infinity",
-                    false);
+                return ExprValue("numeric", exact->toString().front() == '-' ? "0" : "Infinity", false);
             }
         }
-        const long double result = expl(scalarDoubleArgument(a[0]));
-        if (!std::isfinite(result)) {
-            throw std::runtime_error(
-                "numeric value out of range (SQLSTATE 22003)");
+        // exp(x) rounds to zero at PG's maximum display scale for all
+        // finite numeric x <= -2304: exp(-2304) < 0.5 * 10^-1000.
+        // Compare as Numeric, before any floating conversion.
+        if (exact && exact->isFinite() &&
+            ExprHelper::canonicalResultTypeName(a[0].typeName) == "numeric" &&
+            *exact <= Numeric(-2304)) {
+            std::string zero = "0." + std::string(Numeric::kMaxPrecision, '0');
+            try { (void)Numeric(zero); }
+            catch (const NumericRangeError&) { throw DbError("22003", "numeric value out of range"); }
+            return ExprValue("numeric", std::move(zero), false);
         }
-        return numericFixed(result, argHasDot(a) ? 16 : 15);
+        const long double result = expl(transcendentalArgument(a[0], false));
+        if (!std::isfinite(result)) throw DbError("22003", "numeric value out of range");
+        auto formatted = numericFixed(result, argHasDot(a) ? 16 : 15);
+        if (exact && exact->isFinite() && exact->sign() != 0 &&
+            ExprHelper::canonicalResultTypeName(a[0].typeName) == "numeric") {
+            Numeric displayed;
+            try { displayed = Numeric(formatted.value); }
+            catch (const NumericRangeError&) { throw DbError("22003", "numeric value out of range"); }
+            if (displayed == Numeric(1) || (result != 0.0L && displayed.sign() == 0))
+                throw DbError("22003", "numeric precision exceeds exponential implementation");
+        }
+        return formatted;
     };
-    functions_["ln"] =
-        [numericFixed, requireLogarithmArgument](const auto& a) {
+    functions_["ln"] = [logFixed, requireLogarithmArgument, transcendentalArgument](const auto& a) {
         if (a.empty() || a[0].isNull) return ExprValue("numeric", "", true);
-        if (const auto exact = tryParseNumeric(a[0].value)) {
+        const auto exact = tryParseNumeric(a[0].value);
+        if (exact) {
             if (exact->isNaN()) return ExprValue("numeric", "NaN", false);
-            if (exact->isInfinite() && exact->toString().front() != '-')
-                return ExprValue("numeric", "Infinity", false);
+            if (exact->isInfinite()) {
+                if (exact->toString().front() != '-') return ExprValue("numeric", "Infinity", false);
+                throw DbError("2201E", "invalid argument for logarithm");
+            }
+            if (exact->sign() <= 0) throw DbError("2201E", "invalid argument for logarithm");
         }
-        const long double value = scalarDoubleArgument(a[0]);
+        const long double value = transcendentalArgument(a[0], true);
         requireLogarithmArgument(value);
-        return numericFixed(logl(value), 16);
+        return logFixed(logl(value), exact && exact->isFinite() && *exact != Numeric(1) &&
+            ExprHelper::canonicalResultTypeName(a[0].typeName) == "numeric");
     };
     functions_["sqrt"] = [](const auto& a) {
         const bool decimal = !a.empty() &&
@@ -10526,59 +10739,77 @@ void ExprEvaluator::registerStatelessBuiltins() {
         if (input < 0) throw DbError("2201F", "cannot take square root of a negative number");
         return ExprValue(resultType, formatFloatingCastValue(std::sqrt(input)), false);
     };
-    functions_["log"] = [numericFixed, argHasDot,
-                          requireLogarithmArgument](
+    functions_["log"] = [numericFixed, logFixed, argHasDot, exactPowerTenLog,
+                          requireLogarithmArgument, transcendentalArgument](
                             const std::vector<ExprValue>& a) {
-        // log(x) = base-10 log; log(b, x) = base-b log.
         if (a.empty() || a[0].isNull) return ExprValue("numeric", "", true);
         if (a.size() >= 2) {
             if (a[1].isNull) return ExprValue("numeric", "", true);
-            const auto exactBase = tryParseNumeric(a[0].value);
-            const auto exactValue = tryParseNumeric(a[1].value);
-            if ((exactBase && exactBase->isNaN()) ||
-                (exactValue && exactValue->isNaN())) {
+            const auto base = tryParseNumeric(a[0].value);
+            const auto value = tryParseNumeric(a[1].value);
+            if ((base && base->isNaN()) || (value && value->isNaN()))
                 return ExprValue("numeric", "NaN", false);
-            }
-            long double b = scalarDoubleArgument(a[0]), x = scalarDoubleArgument(a[1]);
-            requireLogarithmArgument(b, false);
-            requireLogarithmArgument(x);
-            if (exactBase && exactBase->isInfinite()) {
-                if (exactValue && exactValue->isInfinite())
-                    return ExprValue("numeric", "NaN", false);
+            const auto invalidArgument = [](const std::optional<Numeric>& n) {
+                return n && (n->isInfinite() ? n->toString().front() == '-' : n->sign() <= 0);
+            };
+            if (invalidArgument(base) || invalidArgument(value))
+                throw DbError("2201E", "invalid argument for logarithm");
+            if (base && base->isInfinite()) {
+                if (value && value->isInfinite()) return ExprValue("numeric", "NaN", false);
                 return ExprValue("numeric", "0", false);
             }
-            if (exactValue && exactValue->isInfinite()) {
-                return ExprValue(
-                    "numeric", b > 1 ? "Infinity" : "-Infinity", false);
+            if (value && value->isInfinite()) return ExprValue("numeric", "Infinity", false);
+            if (base && *base == Numeric(1)) throw DbError("22012", "division by zero");
+            if (base && value && *base == Numeric(10) &&
+                ExprHelper::canonicalResultTypeName(a[1].typeName) == "numeric")
+                if (auto exactResult = exactPowerTenLog(*value, base->scale())) return *exactResult;
+            const long double b = transcendentalArgument(a[0], true);
+            const long double x = transcendentalArgument(a[1], true);
+            requireLogarithmArgument(b); requireLogarithmArgument(x);
+            if (b == 1.0L) throw DbError("22012", "division by zero");
+            return logFixed(logl(x) / logl(b), value && value->isFinite() && *value != Numeric(1) &&
+                ExprHelper::canonicalResultTypeName(a[1].typeName) == "numeric");
+        }
+        const auto exact = tryParseNumeric(a[0].value);
+        if (exact) {
+            if (exact->isNaN()) return ExprValue("numeric", "NaN", false);
+            if (exact->isInfinite()) {
+                if (exact->toString().front() != '-') return ExprValue("numeric", "Infinity", false);
+                throw DbError("2201E", "invalid argument for logarithm");
             }
-            return numericFixed(logl(x) / logl(b), 16);
+            if (exact->sign() <= 0) throw DbError("2201E", "invalid argument for logarithm");
         }
-        if (const auto exact = tryParseNumeric(a[0].value)) {
-            if (exact->isNaN()) return ExprValue("numeric", "NaN", false);
-            if (exact->isInfinite() && exact->toString().front() != '-')
-                return ExprValue("numeric", "Infinity", false);
-        }
-        const long double value = scalarDoubleArgument(a[0]);
+        if (exact && ExprHelper::canonicalResultTypeName(a[0].typeName) == "numeric")
+            if (auto exactResult = exactPowerTenLog(*exact, 0)) return *exactResult;
+        const long double value = transcendentalArgument(a[0], true);
         requireLogarithmArgument(value);
-        long double v = log10l(value);
-        if (!argHasDot(a) && v == floorl(v))
-            return ExprValue("numeric", std::to_string(static_cast<long long>(v)), false);
-        return numericFixed(v, 16);
+        const long double result = log10l(value);
+        if (!argHasDot(a) && result == floorl(result))
+            return ExprValue("numeric", std::to_string(static_cast<long long>(result)), false);
+        return logFixed(result, exact && exact->isFinite() && *exact != Numeric(1) &&
+            ExprHelper::canonicalResultTypeName(a[0].typeName) == "numeric");
     };
-    functions_["log10"] = [numericFixed, argHasDot,
-                             requireLogarithmArgument](const auto& a) {
+    functions_["log10"] = [numericFixed, logFixed, argHasDot, exactPowerTenLog,
+                            requireLogarithmArgument, transcendentalArgument](const auto& a) {
         if (a.empty() || a[0].isNull) return ExprValue("numeric", "", true);
-        if (const auto exact = tryParseNumeric(a[0].value)) {
+        const auto exact = tryParseNumeric(a[0].value);
+        if (exact) {
             if (exact->isNaN()) return ExprValue("numeric", "NaN", false);
-            if (exact->isInfinite() && exact->toString().front() != '-')
-                return ExprValue("numeric", "Infinity", false);
+            if (exact->isInfinite()) {
+                if (exact->toString().front() != '-') return ExprValue("numeric", "Infinity", false);
+                throw DbError("2201E", "invalid argument for logarithm");
+            }
+            if (exact->sign() <= 0) throw DbError("2201E", "invalid argument for logarithm");
         }
-        const long double value = scalarDoubleArgument(a[0]);
+        if (exact && ExprHelper::canonicalResultTypeName(a[0].typeName) == "numeric")
+            if (auto exactResult = exactPowerTenLog(*exact, 0)) return *exactResult;
+        const long double value = transcendentalArgument(a[0], true);
         requireLogarithmArgument(value);
-        long double v = log10l(value);
-        if (!argHasDot(a) && v == floorl(v))
-            return ExprValue("numeric", std::to_string(static_cast<long long>(v)), false);
-        return numericFixed(v, 16);
+        const long double result = log10l(value);
+        if (!argHasDot(a) && result == floorl(result))
+            return ExprValue("numeric", std::to_string(static_cast<long long>(result)), false);
+        return logFixed(result, exact && exact->isFinite() && *exact != Numeric(1) &&
+            ExprHelper::canonicalResultTypeName(a[0].typeName) == "numeric");
     };
     auto integralRound = [float8Text](const std::vector<ExprValue>& a,
                                       bool towardPositiveInfinity) {
@@ -13894,7 +14125,7 @@ void ExprEvaluator::registerStatelessBuiltins() {
             try {
                 return ExprValue("text", formatNumeric(scalarDoubleArgument(a[0]), fmt,
                     vval, tn == "numeric" || tn == "decimal" ||
-                          tn == "bigint" || tn == "int8"), false);
+                          tn == "bigint" || tn == "int8", tn), false);
             } catch (const NumericRangeError&) {
                 throw DbError("22003", "numeric value out of range");
             }

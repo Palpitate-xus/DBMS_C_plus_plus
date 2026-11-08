@@ -1,6 +1,6 @@
 {
   "format_version": 1,
-  "purpose": "Compressed original benchmark evidence, not a database feature acceptance claim. All original JSON bytes remain exactly recoverable.",
+  "purpose": "Compressed original benchmark evidence, not a database feature acceptance claim. Original JSON or tar payload bytes remain exactly recoverable.",
   "compression": "gzip level9, mtime0",
   "historical_payload_paths": "Original uncompressed filenames and hashes inside historical payloads retain their identity; resolve them through original_path below.",
   "archives": [
@@ -611,8 +611,33 @@
           "sha256": "6b8fa6d5369bc5ec130af882955de5696b2db6ffb98d0be6800dd4558a3154c5"
         }
       ]
+    },
+    {
+      "original_path": "docs/benchmarks/numeric-func-division-evidence-20261108.tar",
+      "original_bytes": 105861120,
+      "original_sha256": "8b998169350cbcd8b06e1e13720d35d031c886348a429a4ba0b3be3ded6fbf79",
+      "path": "docs/benchmarks/numeric-func-division-evidence-20261108.tar.gz",
+      "bytes": 17457096,
+      "sha256": "e38a030b4f165f530d1807942790652be18b135635542a31deaefc6f18c71b01",
+      "encoding": "gzip",
+      "archive_format": "tar",
+      "roundtrip_bytes_exact": true,
+      "base_archives": [
+        {
+          "path": "docs/benchmarks/numeric-attribution-evidence-20261108.json.gz",
+          "sha256": "f58db3aec6bcbb5a0da4309bc8c99010c4b87a444153d715c989fe0d44ef0828"
+        },
+        {
+          "path": "docs/benchmarks/numeric-tochar-performance-increment-20261108.json.gz",
+          "sha256": "6b8fa6d5369bc5ec130af882955de5696b2db6ffb98d0be6800dd4558a3154c5"
+        },
+        {
+          "path": "docs/benchmarks/numeric-catalog-evidence-20261108.json.gz",
+          "sha256": "788ec9321d87e402eedc569ebed4fc59dbe495a0aeaea1716660ff8bf65eea11"
+        }
+      ]
     }
   ],
-  "total_original_bytes": 2681975284,
-  "total_bytes": 704403179
+  "total_original_bytes": 2787836404,
+  "total_bytes": 721860275
 }

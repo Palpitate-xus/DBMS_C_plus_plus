@@ -1,5 +1,31 @@
 # DBMS 功能测试报告
 
+<a id="d39-numeric-20261108"></a>
+## 2026-11-08：定点格式、除法和超越函数验证
+
+D39 冻结程序 SHA-256 `3bf6a4eabb9d6ee0a2a3236ec80d69f1a455ad7af7924ba6a5e30e16fd8e31df`，正常构建实际退出 0。61 个选定原生入口和独立审计实际 0；新增 `numeric_division_inplace_test`、`numeric_tochar_fixed_exact_test`、`numeric_transcendental_range_test`，另按真实新语义调整一项既有默认值测试。完整测试套件未运行。
+
+定点格式的 PG18.6／D37／D38／D39 四方对照每版本 1,365 个动作：1,286 个直接格式、51 个既有默认值事务和 28 个 FMPL 写入／回滚／冷重启动作。D38 在 FMPL 等符号边界曾真实产生错误成功值并持久化；D39 的 28 项目标语义与 PG 一致，修正扩展矩阵中 D38 的 11 项错误。51 项中仍有 6 项既有 PG 差异，复杂模板并非全面兼容；历史 D38 结果和原生失败记录均保留，未被新结果覆盖。
+
+超越函数的 8 组 246 项候选对照、32 项额外类型／默认值对照及 5,997 次直接 evaluator 回放已完成。这 5,997 项回放是 1,999 个 10 的整数次幂分别测试 `log`、`log10` 和二参数 `log`；其中 5,991 项可表示结果的整数值与 PG scale 一致，6 项因当前精度限制明确报错；不等于通用精度兼容。早期经 ExprHelper 绑定的回放真实退出 1，376 项出现 `55P03`，原因尚未归因；随后直接 evaluator 回放范围不同，不能替代那次失败。新增旧版／原型中的无穷符号及模板反例和真实失败均保留。
+
+**重要未解决数据正确性问题：** D37 和 D39 均会对部分合法输入产生错误成功值，例如 `exp(100::numeric)` 与 PG 的数值不同，部分 integer／float8 的极小 `exp` 错误地变为零；这些结果可经 DEFAULT 在热态和冷重启后持久化。部分 numeric 输入已改为明确 `22003`，但 PG 可计算非零结果；不能称为已完整修复。PG 的实际数值范围见[数值文档](https://www.postgresql.org/docs/18/datatype-numeric.html)，格式规则见[格式函数](https://www.postgresql.org/docs/18/functions-formatting.html)。
+
+除法原生旧／新对照及独立 Fraction 样本包含长位数、符号、scale、NaN、无穷和零；正式组件回归 10,045 项通过，Numeric 组件完整 ASan／UBSan 插桩通过，不代表整个数据库经插桩。D37→D39 的 27 个既有协议族独立双解码无未解释变化；不代表全部 SQL／客户端兼容。
+
+本轮[压缩证据](benchmarks/numeric-func-division-evidence-20261108.tar.gz)为 17,457,096 字节，SHA-256 `e38a030b4f165f530d1807942790652be18b135635542a31deaefc6f18c71b01`；按内容摘要去重，保留真实回复、失败、源码和测量，不含数据库镜像或 ELF。恢复引用内容需要此前 [D34](benchmarks/numeric-attribution-evidence-20261108.json.gz)、[D35](benchmarks/numeric-tochar-performance-increment-20261108.json.gz) 和 [D37](benchmarks/numeric-catalog-evidence-20261108.json.gz) 三档。三个来源清单未保存历史文件模式，本包只记录生成时的模式；一份旧清单误带且字节已变的无关脚本按包内说明剔除，现行脚本另存。
+
+在仓库根目录校验证据（默认只读，不恢复文件）：
+
+```sh
+verify_script=$(mktemp)
+tar -xOzf docs/benchmarks/numeric-func-division-evidence-20261108.tar.gz blobs/7f520b3a4e59427d64bcf529a4717f0554793c48d3f40a603f7b8371cba29fb2 > "$verify_script"
+python3 "$verify_script" docs/benchmarks/numeric-func-division-evidence-20261108.tar.gz --repo-root .
+rm -- "$verify_script"
+```
+
+
+
 <a id="d37-numeric-catalog-20261108"></a>
 ## 2026-11-08：NaN、科学数字格式和目录扫描验证
 

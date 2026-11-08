@@ -95,7 +95,7 @@ std::vector<uint8_t> mulDigitVectors(const std::vector<uint8_t>& a,
 }
 
 // Divide integer magnitude D by V, returning quotient and remainder.
-// Both D and V are little-endian magnitude vectors (most significant first).
+// Both D and V are most-significant-digit-first magnitude vectors.
 void divDigitVectors(const std::vector<uint8_t>& D,
                      const std::vector<uint8_t>& V,
                      std::vector<uint8_t>& quotient,
@@ -103,19 +103,48 @@ void divDigitVectors(const std::vector<uint8_t>& D,
     if (isAllZero(V)) throw std::runtime_error("division by zero");
     quotient.assign(D.size(), 0);
     std::vector<uint8_t> rem;
+    rem.reserve(std::min(D.size(), V.size() + 1));
+    // Keep the significant suffix in place. Each completed division step has
+    // remainder < V; periodic compaction bounds storage by O(V.size()).
+    size_t head = 0;
+    const auto trim = [&]() {
+        while (head + 1 < rem.size() && rem[head] == 0) ++head;
+    };
+    const auto compare = [&]() {
+        const size_t n = rem.size() - head;
+        if (n != V.size()) return n < V.size() ? -1 : 1;
+        for (size_t i = 0; i < n; ++i)
+            if (rem[head + i] != V[i]) return rem[head + i] < V[i] ? -1 : 1;
+        return 0;
+    };
     for (size_t idx = 0; idx < D.size(); ++idx) {
         rem.push_back(D[idx]);
-        stripLeadingZeros(rem);
-        if (rem.empty()) rem.push_back(0);
+        trim();
+        // The incoming remainder is below V, hence after appending a digit
+        // the quotient digit is at most nine for a normalized nonzero V.
         int q = 0;
-        while (cmpDigitVectors(rem, V) >= 0) {
-            rem = subDigitVectors(rem, V);
+        while (compare() >= 0) {
+            // rem >= V, so borrow cannot propagate before the active suffix.
+            size_t i = rem.size(), j = V.size();
+            int borrow = 0;
+            while (j || borrow) {
+                const int v = static_cast<int>(rem[--i]) - borrow -
+                              (j ? static_cast<int>(V[--j]) : 0);
+                borrow = v < 0;
+                rem[i] = static_cast<uint8_t>(v + (borrow ? 10 : 0));
+            }
+            trim();
             ++q;
-            if (q > 9) break; // safety, should never happen
+            if (q > 9) break;
         }
         quotient[idx] = static_cast<uint8_t>(q);
+        if (head > V.size()) {
+            rem.erase(rem.begin(), rem.begin() + head);
+            head = 0;
+        }
     }
-    remainder = rem.empty() ? std::vector<uint8_t>{0} : rem;
+    if (rem.empty()) remainder = {0};
+    else remainder.assign(rem.begin() + head, rem.end());
     stripLeadingZeros(quotient);
 }
 
