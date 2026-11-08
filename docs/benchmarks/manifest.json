@@ -636,8 +636,52 @@
           "sha256": "788ec9321d87e402eedc569ebed4fc59dbe495a0aeaea1716660ff8bf65eea11"
         }
       ]
+    },
+    {
+      "original_path": "docs/benchmarks/numeric-exp-evidence-20261108.tar",
+      "original_bytes": 5427200,
+      "original_sha256": "40f9913d4c146afe22fb7d5fef321c17be803f951f94a5d03e29ab05d43517bb",
+      "path": "docs/benchmarks/numeric-exp-evidence-20261108.tar.gz",
+      "bytes": 989502,
+      "sha256": "de7c446302218e244a5ce723c6193bcf243cddee85ddca1ac61ba1bc4c33a6c4",
+      "encoding": "gzip",
+      "archive_format": "tar",
+      "roundtrip_bytes_exact": true
+    },
+    {
+      "original_path": "docs/benchmarks/numeric-exp-validation-performance-20261108.tar",
+      "original_bytes": 15779840,
+      "original_sha256": "b8334fb4acdc2da6812e476b8ace99e7efeff8cdffa127b2594fd09563b30557",
+      "path": "docs/benchmarks/numeric-exp-validation-performance-20261108.tar.gz",
+      "bytes": 2525719,
+      "sha256": "1510a46fa9ded5a8ce38fe3ad92eea074d9bbb73c7e5113a7acf45ab86c96af7",
+      "encoding": "gzip",
+      "archive_format": "tar",
+      "roundtrip_bytes_exact": true,
+      "base_archives": [
+        {
+          "path": "docs/benchmarks/numeric-attribution-evidence-20261108.json.gz",
+          "sha256": "f58db3aec6bcbb5a0da4309bc8c99010c4b87a444153d715c989fe0d44ef0828"
+        },
+        {
+          "path": "docs/benchmarks/numeric-catalog-evidence-20261108.json.gz",
+          "sha256": "788ec9321d87e402eedc569ebed4fc59dbe495a0aeaea1716660ff8bf65eea11"
+        },
+        {
+          "path": "docs/benchmarks/numeric-exp-evidence-20261108.tar.gz",
+          "sha256": "de7c446302218e244a5ce723c6193bcf243cddee85ddca1ac61ba1bc4c33a6c4"
+        },
+        {
+          "path": "docs/benchmarks/numeric-func-division-evidence-20261108.tar.gz",
+          "sha256": "e38a030b4f165f530d1807942790652be18b135635542a31deaefc6f18c71b01"
+        },
+        {
+          "path": "docs/benchmarks/numeric-tochar-performance-increment-20261108.json.gz",
+          "sha256": "6b8fa6d5369bc5ec130af882955de5696b2db6ffb98d0be6800dd4558a3154c5"
+        }
+      ]
     }
   ],
-  "total_original_bytes": 2787836404,
-  "total_bytes": 721860275
+  "total_original_bytes": 2809043444,
+  "total_bytes": 725375496
 }

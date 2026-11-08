@@ -2,8 +2,10 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdlib>
 #include <limits>
+#include <iomanip>
 #include <sstream>
 
 namespace dbms {
@@ -788,4 +790,244 @@ Numeric Numeric::squareRoot() const {
     return result;
 }
 
+} // namespace dbms
+
+// Decimal exponential adapted from PostgreSQL REL_18_6 numeric.c.
+// Copyright (c) 1998-2025, PostgreSQL Global Development Group.
+// See THIRD_PARTY_NOTICES for the PostgreSQL license.
+namespace dbms {
+namespace {
+namespace exp_detail {
+
+using V = std::vector<uint32_t>; // little-endian base-10000 digits
+constexpr uint32_t B = 10000;
+
+void trim(V& v) {
+    while (v.size() > 1 && v.back() == 0) v.pop_back();
+}
+
+V parse(const std::string& s) {
+    V v;
+    for (int end = static_cast<int>(s.size()); end > 0; end -= 4) {
+        const int begin = std::max(0, end - 4);
+        v.push_back(static_cast<uint32_t>(std::stoul(s.substr(begin, end - begin))));
+    }
+    if (v.empty()) v.push_back(0);
+    trim(v);
+    return v;
+}
+
+std::string str(const V& v) {
+    std::ostringstream out;
+    out << v.back();
+    for (int i = static_cast<int>(v.size()) - 2; i >= 0; --i)
+        out << std::setw(4) << std::setfill('0') << v[i];
+    return out.str();
+}
+
+void add(V& a, const V& b) {
+    a.resize(std::max(a.size(), b.size()), 0);
+    uint32_t carry = 0;
+    for (size_t i = 0; i < a.size(); ++i) {
+        const uint32_t n = a[i] + (i < b.size() ? b[i] : 0) + carry;
+        a[i] = n % B;
+        carry = n / B;
+    }
+    if (carry) a.push_back(carry);
+}
+
+void sub(V& a, const V& b) {
+    int borrow = 0;
+    for (size_t i = 0; i < a.size(); ++i) {
+        const int n = static_cast<int>(a[i]) - (i < b.size() ? static_cast<int>(b[i]) : 0) - borrow;
+        borrow = n < 0;
+        a[i] = static_cast<uint32_t>(n + (borrow ? static_cast<int>(B) : 0));
+    }
+    if (borrow) throw NumericRangeError("numeric exponential negative intermediate");
+    trim(a);
+}
+
+void divsmall(V& a, uint32_t divisor) {
+    uint64_t remainder = 0;
+    for (size_t i = a.size(); i-- > 0;) {
+        const uint64_t current = remainder * B + a[i];
+        a[i] = current / divisor;
+        remainder = current % divisor;
+    }
+    trim(a);
+}
+
+// PostgreSQL mul_var bounds output in pairs of base-10000 digits, retaining
+// two guard digits. Drop the same cross-products before the final rounding.
+V pg_mul(const V& aa, const V& bb, int work, int rscale) {
+    auto digits = [](const V& v) {
+        V d = v;
+        trim(d);
+        while (d.size() > 1 && d.front() == 0) d.erase(d.begin());
+        std::reverse(d.begin(), d.end());
+        return d;
+    };
+    if ((aa.size() == 1 && aa[0] == 0) || (bb.size() == 1 && bb[0] == 0))
+        return V{0};
+    const size_t limbLimit = static_cast<size_t>((work + 1024) / 4 + 2);
+    if (aa.size() > limbLimit || bb.size() > limbLimit)
+        throw NumericRangeError("numeric exponential operand limit exceeded");
+    V a = digits(aa), b = digits(bb);
+    int aw = static_cast<int>(aa.size()) - 1 - work / 4;
+    int bw = static_cast<int>(bb.size()) - 1 - work / 4;
+    if (a.size() > b.size()) { std::swap(a, b); std::swap(aw, bw); }
+    const int na = static_cast<int>(a.size()), nb = static_cast<int>(b.size());
+    int pa = (na + 1) / 2, pb = (nb + 1) / 2;
+    const int nd = na + nb;
+    int rp = nd / 2 + 1;
+    const int offset = rp - pa - pb + 1;
+    const int rw = aw + bw + 1 + 2 * rp - nd - (na & 1) - (nb & 1);
+    const int maxdigits = rw + 1 + (rscale + 3) / 4 + 2;
+    rp = std::min(rp, maxdigits / 2 + 1);
+    if (rp <= offset) return V{0};
+    pa = std::min(pa, rp - offset);
+    pb = std::min(pb, rp - offset);
+    std::vector<uint64_t> d(rp);
+    for (int i = 0; i < pa; ++i) {
+        const uint64_t av = uint64_t(a[2 * i]) * B + (2 * i + 1 < na ? a[2 * i + 1] : 0);
+        for (int j = 0; j < pb && i + j + offset < rp; ++j) {
+            const uint64_t bv = uint64_t(b[2 * j]) * B + (2 * j + 1 < nb ? b[2 * j + 1] : 0);
+            const uint64_t product = av * bv;
+            uint64_t& cell = d[i + j + offset];
+            if (product > std::numeric_limits<uint64_t>::max() - cell)
+                throw NumericRangeError("numeric exponential accumulator limit exceeded");
+            cell += product;
+        }
+    }
+    uint64_t carry = 0;
+    V out(1, 0);
+    for (int i = rp - 1; i >= 0; --i) {
+        if (carry > std::numeric_limits<uint64_t>::max() - d[i])
+            throw NumericRangeError("numeric exponential carry limit exceeded");
+        uint64_t z = d[i] + carry;
+        carry = z / (uint64_t(B) * B);
+        z %= uint64_t(B) * B;
+        for (int k = 0; k < 2; ++k) {
+            const int j = 2 * i + k, pos = work / 4 + rw - j;
+            const uint32_t limb = k ? z % B : z / B;
+            if (pos >= 0) {
+                if (static_cast<int>(out.size()) <= pos) out.resize(pos + 1);
+                out[pos] = limb;
+            } else if (limb) {
+                throw NumericRangeError("numeric exponential working precision insufficient");
+            }
+        }
+    }
+    if (carry) throw NumericRangeError("numeric exponential carry overflow");
+    trim(out);
+    return out;
+}
+
+void roundscale(V& a, int work, int scale) {
+    if (scale >= work) return;
+    const int n = work - scale, limbs = n / 4, digits = n % 4;
+    uint32_t p = 1;
+    for (int i = 0; i < digits; ++i) p *= 10;
+    bool up = false;
+    if (digits)
+        up = limbs < static_cast<int>(a.size()) && (a[limbs] % p) * 2 >= p;
+    else if (limbs > 0)
+        up = limbs - 1 < static_cast<int>(a.size()) && a[limbs - 1] >= B / 2;
+    for (int i = 0; i < std::min(limbs, static_cast<int>(a.size())); ++i) a[i] = 0;
+    if (digits && limbs < static_cast<int>(a.size())) a[limbs] -= a[limbs] % p;
+    if (up) { V increment(limbs + 1, 0); increment[limbs] = p; add(a, increment); }
+    trim(a);
+}
+
+int weight(const V& a, int work) {
+    const std::string s = str(a);
+    const int dp = static_cast<int>(s.size()) - work - 1;
+    return dp >= 0 ? dp / 4 : -((-dp + 3) / 4);
+}
+
+} // namespace exp_detail
+} // namespace
+} // namespace dbms
+
+namespace dbms {
+Numeric Numeric::exponential() const {
+    using namespace exp_detail;
+    if (nan_) return Numeric::nan();
+    if (inf_) return sign_ < 0 ? Numeric(int64_t{0}) : Numeric::infinity();
+    if (*this <= Numeric(int64_t{-2304}))
+        return Numeric::fromString("0." + std::string(kMaxPrecision, '0'));
+    if (*this >= Numeric(int64_t{2304}))
+        throw NumericRangeError("numeric exponential result exceeds maximum precision");
+
+    // The input is already a validated Numeric, not arbitrary SQL text.
+    // PostgreSQL uses strtod (including underflow to zero) only for scale
+    // selection and range reduction, never to calculate the decimal value.
+    const std::string canonical = toString();
+    char* end = nullptr;
+    const double xd = std::strtod(canonical.c_str(), &end);
+    if (!end || *end != '\0' || !std::isfinite(xd))
+        throw NumericRangeError("numeric exponential scale conversion failed");
+    const int scale = scale_;
+    const int rs = std::min(kMaxPrecision, std::max({0, scale,
+                             16 - static_cast<int>(xd * 0.434294481903252)}));
+    const int dw = static_cast<int>(xd * 0.434294481903252);
+    double v = std::abs(xd);
+    int halves = 0;
+    while (v > 0.01) { v /= 2; ++halves; }
+    const int sig = std::max(1 + dw + rs +
+                           static_cast<int>(halves * 0.301029995663981), 0) + 8;
+    int work = std::max({scale + halves + 4, rs + 8,
+                         sig + std::max(0, -2 * dw) + 32, 32});
+    work = (work + 3) / 4 * 4;
+    // Absolute caps are internal safety limits, not claims of PG coverage.
+    if (work > 4096 || halves > 20)
+        throw NumericRangeError("numeric exponential work limit exceeded");
+    const size_t shift = static_cast<size_t>(work / 4);
+    std::string inputDigits;
+    inputDigits.reserve(digits_.size());
+    for (auto d : digits_) inputDigits.push_back(static_cast<char>('0' + d));
+    V x = parse(inputDigits);
+    x.insert(x.begin(), (work - scale) / 4, 0);
+    for (int j = 0; j < (work - scale) % 4; ++j) {
+        uint32_t c = 0;
+        for (auto& digit : x) {
+            const uint32_t z = digit * 10 + c;
+            digit = z % B; c = z / B;
+        }
+        if (c) x.push_back(c);
+    }
+    if (halves) divsmall(x, 1u << halves);
+    V one(shift + 1); one[shift] = 1;
+    V sum = one;
+    if (sign_ < 0) sub(sum, x); else add(sum, x);
+    int local = sig - 1;
+    V term = pg_mul(x, x, work, local);
+    roundscale(term, work, local);
+    divsmall(term, 2);
+    roundscale(term, work, local);
+    uint32_t n = 2;
+    while (!(term.size() == 1 && term[0] == 0)) {
+        if (sign_ < 0 && n % 2) sub(sum, term); else add(sum, term);
+        term = pg_mul(term, x, work, local);
+        roundscale(term, work, local);
+        ++n;
+        if (n > 2048)
+            throw NumericRangeError("numeric exponential iteration limit exceeded");
+        divsmall(term, n);
+        roundscale(term, work, local);
+    }
+    while (halves--) {
+        local = std::max(0, sig - weight(sum, work) * 8);
+        sum = pg_mul(sum, sum, work, local);
+        roundscale(sum, work, local);
+    }
+    roundscale(sum, work, rs);
+    std::string out = str(sum);
+    if (out.size() <= static_cast<size_t>(work))
+        out.insert(0, static_cast<size_t>(work) + 1 - out.size(), '0');
+    out.resize(out.size() - static_cast<size_t>(work) + static_cast<size_t>(rs));
+    if (rs) out.insert(out.size() - static_cast<size_t>(rs), 1, '.');
+    // fromString enforces the project's 1000 significant-digit limit.
+    return Numeric::fromString(out);
+}
 } // namespace dbms

@@ -683,7 +683,7 @@ std::string inferAstResultType(
         // implicitly converted from NUMERIC. They never return NUMERIC.
         if (name == "sin" || name == "cos" || name == "tan")
             return "double precision";
-        if (name == "exp" || name == "ln" || name == "log" || name == "sqrt")
+        if (name == "exp" || name == "ln" || name == "log" || name == "log10" || name == "sqrt")
             return argType(0) == "numeric" ? "numeric" : "double precision";
         static const std::set<std::string> textFunctions = {
             "lower", "upper", "initcap", "concat", "concat_ws", "substring",

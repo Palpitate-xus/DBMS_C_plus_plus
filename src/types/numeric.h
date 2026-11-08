@@ -76,6 +76,9 @@ public:
     // Negative finite values and -Infinity raise domain_error.
     Numeric squareRoot() const;
 
+    // PostgreSQL-style decimal exponential; may throw NumericRangeError.
+    Numeric exponential() const;
+
     static constexpr int kMaxPrecision = 1000;
     // Decimal text storage leaves room for sign, decimal point, and a small
     // formatting margin while retaining the 1000-digit precision cap.

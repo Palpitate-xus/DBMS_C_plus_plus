@@ -1,5 +1,16 @@
 # DBMS 功能测试报告
 
+<a id="d40-numeric-exp-20261108"></a>
+## 2026-11-08：numeric 指数与浮点重载验证
+
+D40 冻结程序 SHA-256 `25dad0eef51b8af34e628ead2a9633696cf6847ba026a66954ba3b1c1d53fc7e`。62 个冻结对象依 CMake 的链接顺序重新链接，生成程序 SHA 与候选一致。实际运行的 PostgreSQL 18.6 简单查询文本协议矩阵共 317 条：293 条可表示结果的数值、scale 和类型一致，23 条因本项目 1000 位限制返回 `22003`，1 条两端均为 `22003`；非预期差异 0。原始帧分别以两个解码器核验，服务返回码由 `Popen.wait()` 获得且为 0；该采集未保留服务日志或进程组记录，驱动和独立审计的外层 wait 收据也未保存，历史审计中的 `driver_exit` 字段是硬编码，不作为退出码证据。
+
+浮点签名与持久化的独立协议对照包含 272、18、36、15 项动作，检查数据、SQLSTATE、命令标签、事务状态和类型描述，结果与 PG 一致；四项端到端回归分别为 float 重载 130/130、float 默认值重启 15/15、既有 float8 签名 951/951、numeric exp 默认值重启 18/18，覆盖 `DEFAULT`、回滚和冷重启。端到端控制器记录测试子进程退出，部分内部服务输出由旧测试助手丢弃；独立协议对照另行保存服务日志、退出码和原始帧。高精度组件的 1,018 条随机样本中，994 条可表示结果与 PG 文本及 scale 一致，24 条因项目表示限制返回范围错误；组件级 ASan/UBSan 测试通过，不代表整库插桩。 317 项 numeric exp 的原始帧、1,018 个组件样本及 sanitizer 证据经内容去重后保存在[压缩证据包](benchmarks/numeric-exp-evidence-20261108.tar.gz)，约 0.94 MiB；解压后运行 `python3 verify_bundle.py`。
+
+27 组既有协议族对照包含 D39 与 D40 各 1,105 条配对简单查询，双解码独立审计未发现变化。63 项选定原生入口全部实际退出 0，涵盖 61 项既有入口及新增的浮点重载所有权和 decimal exp 组件测试；完整测试套件未运行。 本轮协议帧、原生测试终端记录及性能收据另存于[附加压缩证据包](benchmarks/numeric-exp-validation-performance-20261108.tar.gz)，约 2.41 MiB；包内说明其对既有归档和指定 Git 历史对象的依赖与校验方式。
+
+这些测试是有限样本，numeric 精度/scale 上限仍为 1000；例如 PostgreSQL 可计算 `exp(2303::numeric)`，本项目返回 `22003`。numeric `ln`／`log` 高精度计算仍有差距。D39 曾将一个包含 251 个 base-10000 数字组的合法 binary Numeric 输入拒绝为 `22P03`；D40 尚未重新验证该例，该路径与暂缓的协议范围有交叉。
+
 <a id="d39-numeric-20261108"></a>
 ## 2026-11-08：定点格式、除法和超越函数验证
 
@@ -9,7 +20,7 @@ D39 冻结程序 SHA-256 `3bf6a4eabb9d6ee0a2a3236ec80d69f1a455ad7af7924ba6a5e30e
 
 超越函数的 8 组 246 项候选对照、32 项额外类型／默认值对照及 5,997 次直接 evaluator 回放已完成。这 5,997 项回放是 1,999 个 10 的整数次幂分别测试 `log`、`log10` 和二参数 `log`；其中 5,991 项可表示结果的整数值与 PG scale 一致，6 项因当前精度限制明确报错；不等于通用精度兼容。早期经 ExprHelper 绑定的回放真实退出 1，376 项出现 `55P03`，原因尚未归因；随后直接 evaluator 回放范围不同，不能替代那次失败。新增旧版／原型中的无穷符号及模板反例和真实失败均保留。
 
-**重要未解决数据正确性问题：** D37 和 D39 均会对部分合法输入产生错误成功值，例如 `exp(100::numeric)` 与 PG 的数值不同，部分 integer／float8 的极小 `exp` 错误地变为零；这些结果可经 DEFAULT 在热态和冷重启后持久化。部分 numeric 输入已改为明确 `22003`，但 PG 可计算非零结果；不能称为已完整修复。PG 的实际数值范围见[数值文档](https://www.postgresql.org/docs/18/datatype-numeric.html)，格式规则见[格式函数](https://www.postgresql.org/docs/18/functions-formatting.html)。
+**D37／D39 历史数据正确性问题：** D37 和 D39 均会对部分合法输入产生错误成功值，例如 `exp(100::numeric)` 与 PG 的数值不同，部分 integer／float8 的极小 `exp` 错误地变为零；这些结果可经 DEFAULT 在热态和冷重启后持久化。部分 numeric 输入已改为明确 `22003`，但 PG 可计算非零结果；不能称为已完整修复。PG 的实际数值范围见[数值文档](https://www.postgresql.org/docs/18/datatype-numeric.html)，格式规则见[格式函数](https://www.postgresql.org/docs/18/functions-formatting.html)。
 
 除法原生旧／新对照及独立 Fraction 样本包含长位数、符号、scale、NaN、无穷和零；正式组件回归 10,045 项通过，Numeric 组件完整 ASan／UBSan 插桩通过，不代表整个数据库经插桩。D37→D39 的 27 个既有协议族独立双解码无未解释变化；不代表全部 SQL／客户端兼容。
 

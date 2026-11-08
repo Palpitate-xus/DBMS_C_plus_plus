@@ -105,7 +105,7 @@ static bool isFixedFloat8ScalarName(const std::string& name) {
 }
 
 static bool isCoreOverloadedScalarName(const std::string& name) {
-    return name=="abs" || name=="length" || name=="upper" || name=="lower" || name=="scale" || name=="min_scale" || name=="gcd" || name=="lcm" || name=="factorial";
+    return name=="exp" || name=="ln" || name=="log" || name=="log10" || name=="abs" || name=="length" || name=="upper" || name=="lower" || name=="scale" || name=="min_scale" || name=="gcd" || name=="lcm" || name=="factorial";
 }
 
 static bool isIntegralRoundingScalarName(const std::string& name) {
@@ -6069,6 +6069,11 @@ struct ScalarSignature {
     std::string output;
 };
 std::vector<ScalarSignature> scalarSignatures(const std::string& name) {
+    if(name=="exp" || name=="ln" || name=="log" || name=="log10") {
+        std::vector<ScalarSignature> signatures={{{"double precision"},"double precision"},{{"numeric"},"numeric"}};
+        if(name=="log") signatures.push_back({{"numeric","numeric"},"numeric"});
+        return signatures;
+    }
     if(name=="pg_get_serial_sequence")return {{{"text","text"},"text"}};
     if(name=="scale" || name=="min_scale")return {{{"numeric"},"integer"}};
     if(name=="factorial")return {{{"bigint"},"numeric"}};
@@ -10670,41 +10675,43 @@ void ExprEvaluator::registerStatelessBuiltins() {
             throw DbError("22003", "numeric precision exceeds logarithm implementation");
         return result;
     };
-    functions_["exp"] = [numericFixed, argHasDot, transcendentalArgument](const auto& a) {
-        if (a.empty() || a[0].isNull) return ExprValue("numeric", "", true);
-        const auto exact = tryParseNumeric(a[0].value);
-        if (exact) {
-            if (exact->isNaN()) return ExprValue("numeric", "NaN", false);
-            if (exact->isInfinite()) {
-                return ExprValue("numeric", exact->toString().front() == '-' ? "0" : "Infinity", false);
+    auto floatTranscendental = [float8Text](const ExprValue& input, bool exponential, bool baseTen) {
+        const double argument = parseDoubleCastValue(input);
+        double result;
+        if (exponential) {
+            if (std::isnan(argument)) result = argument;
+            else if (std::isinf(argument)) result = argument > 0 ? argument : 0.0;
+            else {
+                errno = 0;
+                result = std::exp(argument);
+                if (errno == ERANGE || std::isinf(result) || result == 0.0)
+                    throw DbError("22003", "value out of range: overflow or underflow");
             }
+        } else {
+            if (argument <= 0.0) throw DbError("2201E", "invalid argument for logarithm");
+            result = baseTen ? std::log10(argument) : std::log(argument);
+            if ((std::isinf(result) && !std::isinf(argument)) ||
+                (result == 0.0 && argument != 1.0))
+                throw DbError("22003", "value out of range: overflow or underflow");
         }
-        // exp(x) rounds to zero at PG's maximum display scale for all
-        // finite numeric x <= -2304: exp(-2304) < 0.5 * 10^-1000.
-        // Compare as Numeric, before any floating conversion.
-        if (exact && exact->isFinite() &&
-            ExprHelper::canonicalResultTypeName(a[0].typeName) == "numeric" &&
-            *exact <= Numeric(-2304)) {
-            std::string zero = "0." + std::string(Numeric::kMaxPrecision, '0');
-            try { (void)Numeric(zero); }
-            catch (const NumericRangeError&) { throw DbError("22003", "numeric value out of range"); }
-            return ExprValue("numeric", std::move(zero), false);
-        }
-        const long double result = expl(transcendentalArgument(a[0], false));
-        if (!std::isfinite(result)) throw DbError("22003", "numeric value out of range");
-        auto formatted = numericFixed(result, argHasDot(a) ? 16 : 15);
-        if (exact && exact->isFinite() && exact->sign() != 0 &&
-            ExprHelper::canonicalResultTypeName(a[0].typeName) == "numeric") {
-            Numeric displayed;
-            try { displayed = Numeric(formatted.value); }
-            catch (const NumericRangeError&) { throw DbError("22003", "numeric value out of range"); }
-            if (displayed == Numeric(1) || (result != 0.0L && displayed.sign() == 0))
-                throw DbError("22003", "numeric precision exceeds exponential implementation");
-        }
-        return formatted;
+        return ExprValue("double precision", float8Text(result), false);
     };
-    functions_["ln"] = [logFixed, requireLogarithmArgument, transcendentalArgument](const auto& a) {
-        if (a.empty() || a[0].isNull) return ExprValue("numeric", "", true);
+    functions_["exp"] = [floatTranscendental](const auto& a) {
+        const bool decimal = !a.empty() &&
+            ExprHelper::canonicalResultTypeName(a[0].typeName) == "numeric";
+        if (a.empty() || a[0].isNull)
+            return ExprValue(decimal ? "numeric" : "double precision", "", true);
+        if (!decimal) return floatTranscendental(a[0], true, false);
+        try {
+            return ExprValue("numeric", Numeric(a[0].value).exponential().toString(), false);
+        } catch (const NumericRangeError& error) {
+            throw DbError("22003", error.what());
+        }
+    };
+    functions_["ln"] = [logFixed, requireLogarithmArgument, transcendentalArgument, floatTranscendental](const auto& a) {
+        const bool decimal = !a.empty() && ExprHelper::canonicalResultTypeName(a[0].typeName) == "numeric";
+        if (a.empty() || a[0].isNull) return ExprValue(decimal ? "numeric" : "double precision", "", true);
+        if (!decimal) return floatTranscendental(a[0], false, false);
         const auto exact = tryParseNumeric(a[0].value);
         if (exact) {
             if (exact->isNaN()) return ExprValue("numeric", "NaN", false);
@@ -10740,9 +10747,11 @@ void ExprEvaluator::registerStatelessBuiltins() {
         return ExprValue(resultType, formatFloatingCastValue(std::sqrt(input)), false);
     };
     functions_["log"] = [numericFixed, logFixed, argHasDot, exactPowerTenLog,
-                          requireLogarithmArgument, transcendentalArgument](
+                          requireLogarithmArgument, transcendentalArgument, floatTranscendental](
                             const std::vector<ExprValue>& a) {
-        if (a.empty() || a[0].isNull) return ExprValue("numeric", "", true);
+        const bool decimal = a.size() >= 2 || (!a.empty() && ExprHelper::canonicalResultTypeName(a[0].typeName) == "numeric");
+        if (a.empty() || a[0].isNull) return ExprValue(decimal ? "numeric" : "double precision", "", true);
+        if (!decimal) return floatTranscendental(a[0], false, true);
         if (a.size() >= 2) {
             if (a[1].isNull) return ExprValue("numeric", "", true);
             const auto base = tryParseNumeric(a[0].value);
@@ -10790,8 +10799,10 @@ void ExprEvaluator::registerStatelessBuiltins() {
             ExprHelper::canonicalResultTypeName(a[0].typeName) == "numeric");
     };
     functions_["log10"] = [numericFixed, logFixed, argHasDot, exactPowerTenLog,
-                            requireLogarithmArgument, transcendentalArgument](const auto& a) {
-        if (a.empty() || a[0].isNull) return ExprValue("numeric", "", true);
+                            requireLogarithmArgument, transcendentalArgument, floatTranscendental](const auto& a) {
+        const bool decimal = !a.empty() && ExprHelper::canonicalResultTypeName(a[0].typeName) == "numeric";
+        if (a.empty() || a[0].isNull) return ExprValue(decimal ? "numeric" : "double precision", "", true);
+        if (!decimal) return floatTranscendental(a[0], false, true);
         const auto exact = tryParseNumeric(a[0].value);
         if (exact) {
             if (exact->isNaN()) return ExprValue("numeric", "NaN", false);
