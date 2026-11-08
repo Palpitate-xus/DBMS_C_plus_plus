@@ -21,6 +21,12 @@
 
 首次 pilot 因 PostgreSQL 尚未就绪退出，第二次因查询了不支持的配置名退出，均未进入计时；修正后才进行了上述对照。独立复核及原始记录仅保存在本机 `build/perf-float8-investigation-v1/`，不随 Git 分发。
 
+### 查询 CPU 采样线索
+
+对相同 D43 程序的三条查询分别进行受控 CPU 采样，每条使用独立私有服务，响应均与上面的预检帧一致，服务均正常退出。64 行 `upper`、64 行 `array_position` 和常量 `upper` 分别取得 413、127、72 个样本；`resolveScalarFunction` 分别出现在 286、84、37 个调用栈中。对 64 行 `upper`，`functionNamespaceSearchPath` 和 `CatalogService::metadataSnapshot` 分别出现在 273 和 228 个栈中；`publicationState` 与 `catalogReadOwnership` 分别出现在 94 和 89 个栈中。这些累计调用栈彼此重叠，不能相加，也不能换算为墙钟提速。常量查询样本较少。
+
+采样提示逐行函数解析和目录检查值得优化；并发 DDL、函数覆盖、错误顺序及事务可见性必须保留，尚未证明某项代码修改可安全提速。采样使用插桩进程，仅用于定位，不能作为无插桩性能对照。样本及采样脚本留在本机忽略的 `build/` 下。
+
 <a id="d43-signature-cache-20261108"></a>
 ## 2026-11-08：函数签名缓存的行级 SQL 测量
 
