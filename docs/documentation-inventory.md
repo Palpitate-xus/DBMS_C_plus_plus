@@ -2,6 +2,10 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-08：零宽查询与函数参数复核
+
+[测试报告](test-report.md#zero-projection-argument-audit-20261108)记录普通零宽行、未选 TOAST 和函数参数错误的 PostgreSQL 反例及写入控制；[性能报告](performance-report-2026-10-30.md#projection-syntax-rejected-20261108)记录未采纳的语法缓存测量。原始帧与性能数据不随 Git 提供。
+
 ## 2026-11-08：numeric 十进制对数
 
 同步源码状态、PostgreSQL 差距、测试与性能报告；[测试报告](test-report.md#numeric-log-decimal-20261108)列出已测范围及未解决的精度、诊断和零列问题，[性能报告](performance-report-2026-10-30.md#numeric-log-cost-20261108)保留全部测量限制和负向结果。原始数据仅本地保存。

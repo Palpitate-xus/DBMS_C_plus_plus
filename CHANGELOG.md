@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-11-08：零宽查询和函数参数诊断
+
+补充与 PostgreSQL 的零宽结果、TOAST 需求及函数参数反例；所测写入／冷重启控制和未完成范围见[测试报告](docs/test-report.md#zero-projection-argument-audit-20261108)。投影语法缓存候选未证明收益并未采纳，计时与限制见[性能报告](docs/performance-report-2026-10-30.md#projection-syntax-rejected-20261108)。
+
 ## 2026-11-08：numeric 十进制对数
 
 为 numeric `ln`、`log` 和 `log10` 引入十进制计算，补充协议、默认值、回滚与冷重启回归。已测范围、1000 位限制和诊断差异见[测试报告](docs/test-report.md#numeric-log-decimal-20261108)；新旧查询性能测量波动及负向结果见[性能报告](docs/performance-report-2026-10-30.md#numeric-log-cost-20261108)。

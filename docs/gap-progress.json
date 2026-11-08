@@ -2,6 +2,29 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-08 ordinary zero-width results, TOAST demand and scalar argument investigation",
+      "gap_ids": [
+        "SQL-01",
+        "SQL-02",
+        "SQL-04",
+        "STO-06",
+        "P0-16"
+      ],
+      "status": "partial",
+      "evidence": [
+        "src/main.cpp",
+        "src/commands/TableManage.cpp",
+        "docs/test-report.md",
+        "docs/performance-report-2026-10-30.md"
+      ],
+      "tests": [],
+      "verification": [
+        "Private PostgreSQL 18.6 vs clean baseline: 52 zero-width cases, 45 comparable: 12 semantic matches, 33 differences; 7 uncomparable after zero-column insert failure. A private TOAST fault showed zero-width projection fails when an unselected TOAST file is hidden; file identity and hash restored, no post-restore SQL control or syscall trace.",
+        "49 scalar protocol observations include existing quoted/concatenated argument incorrect success values; selected INSERT SELECT, UPDATE and DEFAULT controls remained equal after cold restart. A split-only candidate introduced a real replace regression and was rejected.",
+        "Projection syntax cache candidate passed 49 baseline-frame controls and 193 component allocation-failure points but showed no proven speedup in six-round SQL measurements; it was not integrated. More robust zero-width undo/physical identity and lazy expression ownership remain open. Raw evidence is local only."
+      ]
+    },
+    {
       "issue": "2026-11-08 PostgreSQL numeric logarithms and persisted defaults",
       "gap_ids": [
         "TYPE-01",
