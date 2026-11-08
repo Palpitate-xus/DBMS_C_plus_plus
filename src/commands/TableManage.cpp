@@ -488,34 +488,26 @@ static std::shared_mutex& physicalRestoreTransactionAdmission() {
     return *mutex;
 }
 
+// The registry is intentionally retained until process exit: a global engine
+// can be destroyed after ordinary static objects, while it still has abandoned
+// transactions whose active and SSI entries must be removed.
+StorageEngine::TransactionRegistry& StorageEngine::transactionRegistry() {
+    static auto* const registry = new TransactionRegistry;
+    return *registry;
+}
+
 // Global active transaction tracking
 std::mutex& StorageEngine::globalTxnMutex() {
-    static std::mutex mutex;
-    return mutex;
+    return transactionRegistry().txnMutex;
 }
 
 std::set<uint64_t>& StorageEngine::activeTransactions() {
-    static std::set<uint64_t> transactions;
-    return transactions;
+    return transactionRegistry().active;
 }
 
 std::map<uint64_t, std::string>& StorageEngine::activeTransactionDatabases() {
-    static std::map<uint64_t, std::string> databases;
-    return databases;
+    return transactionRegistry().databases;
 }
-std::mutex StorageEngine::ssiMutex_;
-std::map<uint64_t, std::set<std::string>> StorageEngine::ssiReadSets_;
-std::map<uint64_t, std::set<std::string>> StorageEngine::ssiWriteSets_;
-std::map<uint64_t, std::set<std::string>> StorageEngine::ssiReadRelations_;
-std::map<uint64_t, std::set<std::string>> StorageEngine::ssiWriteRelations_;
-std::map<uint64_t, std::set<std::string>> StorageEngine::ssiReadPages_;
-std::map<uint64_t, std::set<std::string>> StorageEngine::ssiWritePages_;
-std::map<uint64_t, std::set<StorageEngine::SsiIndexPredicate>>
-    StorageEngine::ssiReadIndexPredicates_;
-std::map<uint64_t, std::set<StorageEngine::SsiIndexKey>>
-    StorageEngine::ssiWriteIndexKeys_;
-std::map<uint64_t, std::set<uint64_t>> StorageEngine::ssiOutEdges_;
-std::map<uint64_t, std::set<uint64_t>> StorageEngine::ssiInEdges_;
 
 // Thread-local session pointer for sequence builtins to update currval state.
 thread_local Session* g_currentSession = nullptr;
@@ -2885,20 +2877,20 @@ StorageEngine::~StorageEngine() {
         }
     }
     if (!abandonedXids.empty()) {
-        std::lock_guard<std::mutex> lock(ssiMutex_);
+        std::lock_guard<std::mutex> lock(transactionRegistry().ssiMutex);
         for (uint64_t xid : abandonedXids) {
-            ssiReadSets_.erase(xid);
-            ssiWriteSets_.erase(xid);
-            ssiReadRelations_.erase(xid);
-            ssiWriteRelations_.erase(xid);
-            ssiReadPages_.erase(xid);
-            ssiWritePages_.erase(xid);
-            ssiReadIndexPredicates_.erase(xid);
-            ssiWriteIndexKeys_.erase(xid);
-            ssiOutEdges_.erase(xid);
-            ssiInEdges_.erase(xid);
-            for (auto& entry : ssiInEdges_) entry.second.erase(xid);
-            for (auto& entry : ssiOutEdges_) entry.second.erase(xid);
+            transactionRegistry().ssiReadSets.erase(xid);
+            transactionRegistry().ssiWriteSets.erase(xid);
+            transactionRegistry().ssiReadRelations.erase(xid);
+            transactionRegistry().ssiWriteRelations.erase(xid);
+            transactionRegistry().ssiReadPages.erase(xid);
+            transactionRegistry().ssiWritePages.erase(xid);
+            transactionRegistry().ssiReadIndexPredicates.erase(xid);
+            transactionRegistry().ssiWriteIndexKeys.erase(xid);
+            transactionRegistry().ssiOutEdges.erase(xid);
+            transactionRegistry().ssiInEdges.erase(xid);
+            for (auto& entry : transactionRegistry().ssiInEdges) entry.second.erase(xid);
+            for (auto& entry : transactionRegistry().ssiOutEdges) entry.second.erase(xid);
         }
     }
     } catch (const std::exception& error) {
@@ -8913,17 +8905,17 @@ void StorageEngine::noteScanSiread(const std::string& dbname,
     if (!rid) {
         const auto relation = ssiRelationKey(dbname, tablename);
         tx.txnReadRelations.insert(relation);
-        std::lock_guard<std::mutex> lock(ssiMutex_);
-        ssiReadRelations_[tx.currentTxnId].insert(relation);
+        std::lock_guard<std::mutex> lock(transactionRegistry().ssiMutex);
+        transactionRegistry().ssiReadRelations[tx.currentTxnId].insert(relation);
     } else {
         uint32_t pageId = 0; uint16_t slotId = 0;
         decodeRid(*rid, pageId, slotId);
         auto key = ssiRidKey(dbname, tablename, *rid);
         auto page = ssiPageKey(dbname, tablename, pageId);
         tx.txnReadRids.insert(key); tx.txnReadPages.insert(page);
-        std::lock_guard<std::mutex> lock(ssiMutex_);
-        ssiReadSets_[tx.currentTxnId].insert(std::move(key));
-        ssiReadPages_[tx.currentTxnId].insert(std::move(page));
+        std::lock_guard<std::mutex> lock(transactionRegistry().ssiMutex);
+        transactionRegistry().ssiReadSets[tx.currentTxnId].insert(std::move(key));
+        transactionRegistry().ssiReadPages[tx.currentTxnId].insert(std::move(page));
     }
 }
 
@@ -9574,9 +9566,9 @@ bool StorageEngine::readIndexedRowByRid(const std::string& dbname,
         const std::string page = ssiPageKey(dbname, tablename, pageId);
         transactionContext().txnReadRids.insert(key);
         transactionContext().txnReadPages.insert(page);
-        std::lock_guard<std::mutex> lock(ssiMutex_);
-        ssiReadSets_[transactionContext().currentTxnId].insert(key);
-        ssiReadPages_[transactionContext().currentTxnId].insert(page);
+        std::lock_guard<std::mutex> lock(transactionRegistry().ssiMutex);
+        transactionRegistry().ssiReadSets[transactionContext().currentTxnId].insert(key);
+        transactionRegistry().ssiReadPages[transactionContext().currentTxnId].insert(page);
     }
     return visible;
 }
@@ -30713,8 +30705,8 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
             transactionContext().txnIsolationLevel != IsolationLevel::SERIALIZABLE) return;
         const std::string page = ssiPageKey(dbname, tablename, pageId);
         transactionContext().txnReadPages.insert(page);
-        std::lock_guard<std::mutex> lock(ssiMutex_);
-        ssiReadPages_[transactionContext().currentTxnId].insert(page);
+        std::lock_guard<std::mutex> lock(transactionRegistry().ssiMutex);
+        transactionRegistry().ssiReadPages[transactionContext().currentTxnId].insert(page);
     };
 
     auto finishSerializablePredicateRead = [&]() {
@@ -30730,8 +30722,8 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
             if (hasSsiIndexPredicate) return;
             const std::string relation = ssiRelationKey(dbname, tablename);
             transactionContext().txnReadRelations.insert(relation);
-            std::lock_guard<std::mutex> lock(ssiMutex_);
-            ssiReadRelations_[transactionContext().currentTxnId].insert(relation);
+            std::lock_guard<std::mutex> lock(transactionRegistry().ssiMutex);
+            transactionRegistry().ssiReadRelations[transactionContext().currentTxnId].insert(relation);
             return;
         }
         for (int64_t rid : ids) {
@@ -34677,10 +34669,10 @@ DBStatus StorageEngine::updateInternal(
                 transactionContext().txnWrittenPages.insert(
                     ssiPageKey(dbname, tablename, newPageId));
                 transactionContext().txnWrittenRids.insert(newRidKey);
-                std::lock_guard<std::mutex> ssiLock(ssiMutex_);
-                ssiWriteSets_[transactionContext().currentTxnId].insert(
+                std::lock_guard<std::mutex> ssiLock(transactionRegistry().ssiMutex);
+                transactionRegistry().ssiWriteSets[transactionContext().currentTxnId].insert(
                     newRidKey);
-                ssiWritePages_[transactionContext().currentTxnId].insert(
+                transactionRegistry().ssiWritePages[transactionContext().currentTxnId].insert(
                     ssiPageKey(dbname, tablename, newPageId));
             }
         } else {
@@ -52570,12 +52562,12 @@ bool StorageEngine::recordSsiIndexPredicate(const std::string& dbname,
 
     const SsiIndexPredicate predicateBase{
         dbname, tablename, "", condition.op, predicateValue};
-    std::lock_guard<std::mutex> lock(ssiMutex_);
+    std::lock_guard<std::mutex> lock(transactionRegistry().ssiMutex);
     for (const auto& indexName : indexNames) {
         SsiIndexPredicate predicate = predicateBase;
         predicate.indexName = indexName;
         transactionContext().txnReadIndexPredicates.insert(predicate);
-        ssiReadIndexPredicates_[transactionContext().currentTxnId].insert(std::move(predicate));
+        transactionRegistry().ssiReadIndexPredicates[transactionContext().currentTxnId].insert(std::move(predicate));
     }
     return !indexNames.empty();
 }
@@ -52619,11 +52611,11 @@ void StorageEngine::recordSsiIndexKeys(const std::string& dbname,
     }
 
     if (keys.empty()) return;
-    std::lock_guard<std::mutex> lock(ssiMutex_);
+    std::lock_guard<std::mutex> lock(transactionRegistry().ssiMutex);
     for (const auto& [indexName, value] : keys) {
         SsiIndexKey key{dbname, tablename, indexName, value};
         transactionContext().txnWrittenIndexKeys.insert(key);
-        ssiWriteIndexKeys_[transactionContext().currentTxnId].insert(std::move(key));
+        transactionRegistry().ssiWriteIndexKeys[transactionContext().currentTxnId].insert(std::move(key));
     }
 }
 
@@ -52663,10 +52655,10 @@ void StorageEngine::logTxnInsert(const std::string& tableName, int64_t rowIdx,
         transactionContext().txnWrittenRids.insert(key);
         transactionContext().txnWrittenRelations.insert(relation);
         transactionContext().txnWrittenPages.insert(page);
-        std::lock_guard<std::mutex> lock(ssiMutex_);
-        ssiWriteSets_[transactionContext().currentTxnId].insert(std::move(key));
-        ssiWriteRelations_[transactionContext().currentTxnId].insert(std::move(relation));
-        ssiWritePages_[transactionContext().currentTxnId].insert(std::move(page));
+        std::lock_guard<std::mutex> lock(transactionRegistry().ssiMutex);
+        transactionRegistry().ssiWriteSets[transactionContext().currentTxnId].insert(std::move(key));
+        transactionRegistry().ssiWriteRelations[transactionContext().currentTxnId].insert(std::move(relation));
+        transactionRegistry().ssiWritePages[transactionContext().currentTxnId].insert(std::move(page));
     }
 }
 
@@ -52704,10 +52696,10 @@ void StorageEngine::logTxnUpdate(const std::string& tableName, int64_t rowIdx,
         transactionContext().txnWrittenRids.insert(key);
         transactionContext().txnWrittenRelations.insert(relation);
         transactionContext().txnWrittenPages.insert(page);
-        std::lock_guard<std::mutex> lock(ssiMutex_);
-        ssiWriteSets_[transactionContext().currentTxnId].insert(std::move(key));
-        ssiWriteRelations_[transactionContext().currentTxnId].insert(std::move(relation));
-        ssiWritePages_[transactionContext().currentTxnId].insert(std::move(page));
+        std::lock_guard<std::mutex> lock(transactionRegistry().ssiMutex);
+        transactionRegistry().ssiWriteSets[transactionContext().currentTxnId].insert(std::move(key));
+        transactionRegistry().ssiWriteRelations[transactionContext().currentTxnId].insert(std::move(relation));
+        transactionRegistry().ssiWritePages[transactionContext().currentTxnId].insert(std::move(page));
     }
 }
 
@@ -52743,10 +52735,10 @@ void StorageEngine::logTxnDelete(const std::string& tableName, int64_t rowIdx,
         transactionContext().txnWrittenRids.insert(key);
         transactionContext().txnWrittenRelations.insert(relation);
         transactionContext().txnWrittenPages.insert(page);
-        std::lock_guard<std::mutex> lock(ssiMutex_);
-        ssiWriteSets_[transactionContext().currentTxnId].insert(std::move(key));
-        ssiWriteRelations_[transactionContext().currentTxnId].insert(std::move(relation));
-        ssiWritePages_[transactionContext().currentTxnId].insert(std::move(page));
+        std::lock_guard<std::mutex> lock(transactionRegistry().ssiMutex);
+        transactionRegistry().ssiWriteSets[transactionContext().currentTxnId].insert(std::move(key));
+        transactionRegistry().ssiWriteRelations[transactionContext().currentTxnId].insert(std::move(relation));
+        transactionRegistry().ssiWritePages[transactionContext().currentTxnId].insert(std::move(page));
     }
 }
 
@@ -53224,14 +53216,14 @@ DBStatus StorageEngine::finishDatabaseIndependentTransaction() {
         activeTransactionDatabases().erase(xid);
     }
     {
-        std::lock_guard<std::mutex> lock(ssiMutex_);
-        ssiReadSets_.erase(xid); ssiWriteSets_.erase(xid);
-        ssiReadRelations_.erase(xid); ssiWriteRelations_.erase(xid);
-        ssiReadPages_.erase(xid); ssiWritePages_.erase(xid);
-        ssiReadIndexPredicates_.erase(xid); ssiWriteIndexKeys_.erase(xid);
-        ssiOutEdges_.erase(xid); ssiInEdges_.erase(xid);
-        for (auto& entry : ssiInEdges_) entry.second.erase(xid);
-        for (auto& entry : ssiOutEdges_) entry.second.erase(xid);
+        std::lock_guard<std::mutex> lock(transactionRegistry().ssiMutex);
+        transactionRegistry().ssiReadSets.erase(xid); transactionRegistry().ssiWriteSets.erase(xid);
+        transactionRegistry().ssiReadRelations.erase(xid); transactionRegistry().ssiWriteRelations.erase(xid);
+        transactionRegistry().ssiReadPages.erase(xid); transactionRegistry().ssiWritePages.erase(xid);
+        transactionRegistry().ssiReadIndexPredicates.erase(xid); transactionRegistry().ssiWriteIndexKeys.erase(xid);
+        transactionRegistry().ssiOutEdges.erase(xid); transactionRegistry().ssiInEdges.erase(xid);
+        for (auto& entry : transactionRegistry().ssiInEdges) entry.second.erase(xid);
+        for (auto& entry : transactionRegistry().ssiOutEdges) entry.second.erase(xid);
     }
     lockManager_.unlockAll();
     lockManager_.unlockAllGaps();
@@ -53598,15 +53590,15 @@ DBStatus StorageEngine::beginTransaction(const std::string& dbname, bool ddlSnap
     transactionAdmission.unlock();
     // Initialize SSI tracking
     {
-        std::lock_guard<std::mutex> lock(ssiMutex_);
-        ssiReadSets_[transactionContext().currentTxnId].clear();
-        ssiWriteSets_[transactionContext().currentTxnId].clear();
-        ssiReadRelations_[transactionContext().currentTxnId].clear();
-        ssiWriteRelations_[transactionContext().currentTxnId].clear();
-        ssiReadPages_[transactionContext().currentTxnId].clear();
-        ssiWritePages_[transactionContext().currentTxnId].clear();
-        ssiReadIndexPredicates_[transactionContext().currentTxnId].clear();
-        ssiWriteIndexKeys_[transactionContext().currentTxnId].clear();
+        std::lock_guard<std::mutex> lock(transactionRegistry().ssiMutex);
+        transactionRegistry().ssiReadSets[transactionContext().currentTxnId].clear();
+        transactionRegistry().ssiWriteSets[transactionContext().currentTxnId].clear();
+        transactionRegistry().ssiReadRelations[transactionContext().currentTxnId].clear();
+        transactionRegistry().ssiWriteRelations[transactionContext().currentTxnId].clear();
+        transactionRegistry().ssiReadPages[transactionContext().currentTxnId].clear();
+        transactionRegistry().ssiWritePages[transactionContext().currentTxnId].clear();
+        transactionRegistry().ssiReadIndexPredicates[transactionContext().currentTxnId].clear();
+        transactionRegistry().ssiWriteIndexKeys[transactionContext().currentTxnId].clear();
     }
     transactionContext().txnReadRids.clear();
     transactionContext().txnWrittenRids.clear();
@@ -53883,43 +53875,43 @@ DBStatus StorageEngine::commitTransaction() {
 
     // SSI conflict detection for Serializable isolation
     if (transactionContext().txnIsolationLevel == IsolationLevel::SERIALIZABLE) {
-        std::unique_lock<std::mutex> lock(ssiMutex_);
+        std::unique_lock<std::mutex> lock(transactionRegistry().ssiMutex);
         bool hasOutgoing = false, hasIncoming = false;
 
-        for (const auto& [otherTxId, otherWriteSet] : ssiWriteSets_) {
+        for (const auto& [otherTxId, otherWriteSet] : transactionRegistry().ssiWriteSets) {
             if (otherTxId == transactionContext().currentTxnId) continue;
             for (const auto& rid : transactionContext().txnReadRids) {
                 if (otherWriteSet.count(rid)) {
                     hasOutgoing = true;
-                    ssiOutEdges_[transactionContext().currentTxnId].insert(otherTxId);
-                    ssiInEdges_[otherTxId].insert(transactionContext().currentTxnId);
+                    transactionRegistry().ssiOutEdges[transactionContext().currentTxnId].insert(otherTxId);
+                    transactionRegistry().ssiInEdges[otherTxId].insert(transactionContext().currentTxnId);
                     break;
                 }
             }
             if (hasOutgoing) break;
         }
 
-        for (const auto& [otherTxId, otherWritePages] : ssiWritePages_) {
+        for (const auto& [otherTxId, otherWritePages] : transactionRegistry().ssiWritePages) {
             if (otherTxId == transactionContext().currentTxnId) continue;
             for (const auto& page : transactionContext().txnReadPages) {
                 if (otherWritePages.count(page)) {
                     hasOutgoing = true;
-                    ssiOutEdges_[transactionContext().currentTxnId].insert(otherTxId);
-                    ssiInEdges_[otherTxId].insert(transactionContext().currentTxnId);
+                    transactionRegistry().ssiOutEdges[transactionContext().currentTxnId].insert(otherTxId);
+                    transactionRegistry().ssiInEdges[otherTxId].insert(transactionContext().currentTxnId);
                     break;
                 }
             }
             if (hasOutgoing) break;
         }
 
-        for (const auto& [otherTxId, otherWriteKeys] : ssiWriteIndexKeys_) {
+        for (const auto& [otherTxId, otherWriteKeys] : transactionRegistry().ssiWriteIndexKeys) {
             if (otherTxId == transactionContext().currentTxnId) continue;
             for (const auto& predicate : transactionContext().txnReadIndexPredicates) {
                 for (const auto& key : otherWriteKeys) {
                     if (ssiIndexPredicateMatches(predicate, key)) {
                         hasOutgoing = true;
-                        ssiOutEdges_[transactionContext().currentTxnId].insert(otherTxId);
-                        ssiInEdges_[otherTxId].insert(transactionContext().currentTxnId);
+                        transactionRegistry().ssiOutEdges[transactionContext().currentTxnId].insert(otherTxId);
+                        transactionRegistry().ssiInEdges[otherTxId].insert(transactionContext().currentTxnId);
                         break;
                     }
                 }
@@ -53931,53 +53923,53 @@ DBStatus StorageEngine::commitTransaction() {
         // Relation-level SIREAD coverage catches empty scans and predicates
         // whose result set did not contain a row. It is the conservative
         // fallback; non-empty scans use page coverage above.
-        for (const auto& [otherTxId, otherWriteRelations] : ssiWriteRelations_) {
+        for (const auto& [otherTxId, otherWriteRelations] : transactionRegistry().ssiWriteRelations) {
             if (otherTxId == transactionContext().currentTxnId) continue;
             for (const auto& relation : transactionContext().txnReadRelations) {
                 if (otherWriteRelations.count(relation)) {
                     hasOutgoing = true;
-                    ssiOutEdges_[transactionContext().currentTxnId].insert(otherTxId);
-                    ssiInEdges_[otherTxId].insert(transactionContext().currentTxnId);
+                    transactionRegistry().ssiOutEdges[transactionContext().currentTxnId].insert(otherTxId);
+                    transactionRegistry().ssiInEdges[otherTxId].insert(transactionContext().currentTxnId);
                     break;
                 }
             }
             if (hasOutgoing) break;
         }
 
-        for (const auto& [otherTxId, otherReadSet] : ssiReadSets_) {
+        for (const auto& [otherTxId, otherReadSet] : transactionRegistry().ssiReadSets) {
             if (otherTxId == transactionContext().currentTxnId) continue;
             for (const auto& rid : transactionContext().txnWrittenRids) {
                 if (otherReadSet.count(rid)) {
                     hasIncoming = true;
-                    ssiInEdges_[transactionContext().currentTxnId].insert(otherTxId);
-                    ssiOutEdges_[otherTxId].insert(transactionContext().currentTxnId);
+                    transactionRegistry().ssiInEdges[transactionContext().currentTxnId].insert(otherTxId);
+                    transactionRegistry().ssiOutEdges[otherTxId].insert(transactionContext().currentTxnId);
                     break;
                 }
             }
             if (hasIncoming) break;
         }
 
-        for (const auto& [otherTxId, otherReadPages] : ssiReadPages_) {
+        for (const auto& [otherTxId, otherReadPages] : transactionRegistry().ssiReadPages) {
             if (otherTxId == transactionContext().currentTxnId) continue;
             for (const auto& page : transactionContext().txnWrittenPages) {
                 if (otherReadPages.count(page)) {
                     hasIncoming = true;
-                    ssiInEdges_[transactionContext().currentTxnId].insert(otherTxId);
-                    ssiOutEdges_[otherTxId].insert(transactionContext().currentTxnId);
+                    transactionRegistry().ssiInEdges[transactionContext().currentTxnId].insert(otherTxId);
+                    transactionRegistry().ssiOutEdges[otherTxId].insert(transactionContext().currentTxnId);
                     break;
                 }
             }
             if (hasIncoming) break;
         }
 
-        for (const auto& [otherTxId, otherReadPredicates] : ssiReadIndexPredicates_) {
+        for (const auto& [otherTxId, otherReadPredicates] : transactionRegistry().ssiReadIndexPredicates) {
             if (otherTxId == transactionContext().currentTxnId) continue;
             for (const auto& key : transactionContext().txnWrittenIndexKeys) {
                 for (const auto& predicate : otherReadPredicates) {
                     if (ssiIndexPredicateMatches(predicate, key)) {
                         hasIncoming = true;
-                        ssiInEdges_[transactionContext().currentTxnId].insert(otherTxId);
-                        ssiOutEdges_[otherTxId].insert(transactionContext().currentTxnId);
+                        transactionRegistry().ssiInEdges[transactionContext().currentTxnId].insert(otherTxId);
+                        transactionRegistry().ssiOutEdges[otherTxId].insert(transactionContext().currentTxnId);
                         break;
                     }
                 }
@@ -53986,13 +53978,13 @@ DBStatus StorageEngine::commitTransaction() {
             if (hasIncoming) break;
         }
 
-        for (const auto& [otherTxId, otherReadRelations] : ssiReadRelations_) {
+        for (const auto& [otherTxId, otherReadRelations] : transactionRegistry().ssiReadRelations) {
             if (otherTxId == transactionContext().currentTxnId) continue;
             for (const auto& relation : transactionContext().txnWrittenRelations) {
                 if (otherReadRelations.count(relation)) {
                     hasIncoming = true;
-                    ssiInEdges_[transactionContext().currentTxnId].insert(otherTxId);
-                    ssiOutEdges_[otherTxId].insert(transactionContext().currentTxnId);
+                    transactionRegistry().ssiInEdges[transactionContext().currentTxnId].insert(otherTxId);
+                    transactionRegistry().ssiOutEdges[otherTxId].insert(transactionContext().currentTxnId);
                     break;
                 }
             }
@@ -54002,18 +53994,18 @@ DBStatus StorageEngine::commitTransaction() {
         if (hasOutgoing && hasIncoming) {
             // Dangerous structure detected - must abort
             uint64_t abortedId = transactionContext().currentTxnId;
-            ssiReadSets_.erase(abortedId);
-            ssiWriteSets_.erase(abortedId);
-            ssiReadRelations_.erase(abortedId);
-            ssiWriteRelations_.erase(abortedId);
-            ssiReadPages_.erase(abortedId);
-            ssiWritePages_.erase(abortedId);
-            ssiReadIndexPredicates_.erase(abortedId);
-            ssiWriteIndexKeys_.erase(abortedId);
-            ssiOutEdges_.erase(abortedId);
-            for (auto& [k, v] : ssiInEdges_) v.erase(abortedId);
-            ssiInEdges_.erase(abortedId);
-            for (auto& [k, v] : ssiOutEdges_) v.erase(abortedId);
+            transactionRegistry().ssiReadSets.erase(abortedId);
+            transactionRegistry().ssiWriteSets.erase(abortedId);
+            transactionRegistry().ssiReadRelations.erase(abortedId);
+            transactionRegistry().ssiWriteRelations.erase(abortedId);
+            transactionRegistry().ssiReadPages.erase(abortedId);
+            transactionRegistry().ssiWritePages.erase(abortedId);
+            transactionRegistry().ssiReadIndexPredicates.erase(abortedId);
+            transactionRegistry().ssiWriteIndexKeys.erase(abortedId);
+            transactionRegistry().ssiOutEdges.erase(abortedId);
+            for (auto& [k, v] : transactionRegistry().ssiInEdges) v.erase(abortedId);
+            transactionRegistry().ssiInEdges.erase(abortedId);
+            for (auto& [k, v] : transactionRegistry().ssiOutEdges) v.erase(abortedId);
             transactionContext().txnReadRids.clear();
             transactionContext().txnWrittenRids.clear();
             transactionContext().txnReadRelations.clear();
@@ -54023,7 +54015,7 @@ DBStatus StorageEngine::commitTransaction() {
             transactionContext().txnReadIndexPredicates.clear();
             transactionContext().txnWrittenIndexKeys.clear();
             // rollbackTransaction() performs its own SSI cleanup and must
-            // acquire ssiMutex_.  Release the detection lock first to avoid
+            // acquire transactionRegistry().ssiMutex.  Release the detection lock first to avoid
             // self-deadlocking on the serialization-failure path.
             lock.unlock();
             rollbackTransaction();
@@ -54375,17 +54367,17 @@ DBStatus StorageEngine::commitTransaction() {
         noActiveTransactions = activeTransactions().empty();
     }
     if (noActiveTransactions) {
-        std::lock_guard<std::mutex> lock(ssiMutex_);
-        ssiReadSets_.clear();
-        ssiWriteSets_.clear();
-        ssiReadRelations_.clear();
-        ssiWriteRelations_.clear();
-        ssiReadPages_.clear();
-        ssiWritePages_.clear();
-        ssiReadIndexPredicates_.clear();
-        ssiWriteIndexKeys_.clear();
-        ssiOutEdges_.clear();
-        ssiInEdges_.clear();
+        std::lock_guard<std::mutex> lock(transactionRegistry().ssiMutex);
+        transactionRegistry().ssiReadSets.clear();
+        transactionRegistry().ssiWriteSets.clear();
+        transactionRegistry().ssiReadRelations.clear();
+        transactionRegistry().ssiWriteRelations.clear();
+        transactionRegistry().ssiReadPages.clear();
+        transactionRegistry().ssiWritePages.clear();
+        transactionRegistry().ssiReadIndexPredicates.clear();
+        transactionRegistry().ssiWriteIndexKeys.clear();
+        transactionRegistry().ssiOutEdges.clear();
+        transactionRegistry().ssiInEdges.clear();
     }
     transactionContext().txnLog.clear();
     transactionContext().txnHeapWritebackPages.clear();
@@ -55587,31 +55579,31 @@ DBStatus StorageEngine::rollbackTransaction() {
 
     // Clean up SSI data for aborted transaction
     {
-        std::lock_guard<std::mutex> lock(ssiMutex_);
+        std::lock_guard<std::mutex> lock(transactionRegistry().ssiMutex);
         if (noActiveTransactions) {
-            ssiReadSets_.clear();
-            ssiWriteSets_.clear();
-            ssiReadRelations_.clear();
-            ssiWriteRelations_.clear();
-            ssiReadPages_.clear();
-            ssiWritePages_.clear();
-            ssiReadIndexPredicates_.clear();
-            ssiWriteIndexKeys_.clear();
-            ssiOutEdges_.clear();
-            ssiInEdges_.clear();
+            transactionRegistry().ssiReadSets.clear();
+            transactionRegistry().ssiWriteSets.clear();
+            transactionRegistry().ssiReadRelations.clear();
+            transactionRegistry().ssiWriteRelations.clear();
+            transactionRegistry().ssiReadPages.clear();
+            transactionRegistry().ssiWritePages.clear();
+            transactionRegistry().ssiReadIndexPredicates.clear();
+            transactionRegistry().ssiWriteIndexKeys.clear();
+            transactionRegistry().ssiOutEdges.clear();
+            transactionRegistry().ssiInEdges.clear();
         } else {
-            ssiReadSets_.erase(transactionContext().currentTxnId);
-            ssiWriteSets_.erase(transactionContext().currentTxnId);
-            ssiReadRelations_.erase(transactionContext().currentTxnId);
-            ssiWriteRelations_.erase(transactionContext().currentTxnId);
-            ssiReadPages_.erase(transactionContext().currentTxnId);
-            ssiWritePages_.erase(transactionContext().currentTxnId);
-            ssiReadIndexPredicates_.erase(transactionContext().currentTxnId);
-            ssiWriteIndexKeys_.erase(transactionContext().currentTxnId);
-            ssiOutEdges_.erase(transactionContext().currentTxnId);
-            for (auto& [k, v] : ssiInEdges_) v.erase(transactionContext().currentTxnId);
-            ssiInEdges_.erase(transactionContext().currentTxnId);
-            for (auto& [k, v] : ssiOutEdges_) v.erase(transactionContext().currentTxnId);
+            transactionRegistry().ssiReadSets.erase(transactionContext().currentTxnId);
+            transactionRegistry().ssiWriteSets.erase(transactionContext().currentTxnId);
+            transactionRegistry().ssiReadRelations.erase(transactionContext().currentTxnId);
+            transactionRegistry().ssiWriteRelations.erase(transactionContext().currentTxnId);
+            transactionRegistry().ssiReadPages.erase(transactionContext().currentTxnId);
+            transactionRegistry().ssiWritePages.erase(transactionContext().currentTxnId);
+            transactionRegistry().ssiReadIndexPredicates.erase(transactionContext().currentTxnId);
+            transactionRegistry().ssiWriteIndexKeys.erase(transactionContext().currentTxnId);
+            transactionRegistry().ssiOutEdges.erase(transactionContext().currentTxnId);
+            for (auto& [k, v] : transactionRegistry().ssiInEdges) v.erase(transactionContext().currentTxnId);
+            transactionRegistry().ssiInEdges.erase(transactionContext().currentTxnId);
+            for (auto& [k, v] : transactionRegistry().ssiOutEdges) v.erase(transactionContext().currentTxnId);
         }
     }
     transactionContext().txnReadRids.clear();
@@ -56279,19 +56271,19 @@ DBStatus StorageEngine::prepareTransaction(const std::string& xid) {
     clearCatalogSnapshot();
 
     {
-        std::lock_guard<std::mutex> lock(ssiMutex_);
-        ssiReadSets_.erase(transactionContext().currentTxnId);
-        ssiWriteSets_.erase(transactionContext().currentTxnId);
-        ssiReadRelations_.erase(transactionContext().currentTxnId);
-        ssiWriteRelations_.erase(transactionContext().currentTxnId);
-        ssiReadPages_.erase(transactionContext().currentTxnId);
-        ssiWritePages_.erase(transactionContext().currentTxnId);
-        ssiReadIndexPredicates_.erase(transactionContext().currentTxnId);
-        ssiWriteIndexKeys_.erase(transactionContext().currentTxnId);
-        ssiOutEdges_.erase(transactionContext().currentTxnId);
-        for (auto& [k, v] : ssiInEdges_) v.erase(transactionContext().currentTxnId);
-        ssiInEdges_.erase(transactionContext().currentTxnId);
-        for (auto& [k, v] : ssiOutEdges_) v.erase(transactionContext().currentTxnId);
+        std::lock_guard<std::mutex> lock(transactionRegistry().ssiMutex);
+        transactionRegistry().ssiReadSets.erase(transactionContext().currentTxnId);
+        transactionRegistry().ssiWriteSets.erase(transactionContext().currentTxnId);
+        transactionRegistry().ssiReadRelations.erase(transactionContext().currentTxnId);
+        transactionRegistry().ssiWriteRelations.erase(transactionContext().currentTxnId);
+        transactionRegistry().ssiReadPages.erase(transactionContext().currentTxnId);
+        transactionRegistry().ssiWritePages.erase(transactionContext().currentTxnId);
+        transactionRegistry().ssiReadIndexPredicates.erase(transactionContext().currentTxnId);
+        transactionRegistry().ssiWriteIndexKeys.erase(transactionContext().currentTxnId);
+        transactionRegistry().ssiOutEdges.erase(transactionContext().currentTxnId);
+        for (auto& [k, v] : transactionRegistry().ssiInEdges) v.erase(transactionContext().currentTxnId);
+        transactionRegistry().ssiInEdges.erase(transactionContext().currentTxnId);
+        for (auto& [k, v] : transactionRegistry().ssiOutEdges) v.erase(transactionContext().currentTxnId);
     }
     transactionContext().txnReadRids.clear();
     transactionContext().txnWrittenRids.clear();

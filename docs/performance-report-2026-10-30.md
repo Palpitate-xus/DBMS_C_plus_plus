@@ -1,5 +1,62 @@
 # 数据库操作性能测试报告（2026-10-30）
 
+<a id="d30-catalog-transaction-evidence-20261108"></a>
+## 2026-11-08：D30 目录投影、退出恢复与性能对照
+
+本轮对普通 `pg_attrdef`／`pg_depend` SELECT 使用实际目录字段的按需快照，声明与数据在同一把锁下复制；公共完整快照仍保留默认表达式和依赖。`pg_attrdef.adbin` 的 PostgreSQL 节点树仍未实现，不声称目录完整等价。活动事务与 SSI 登记改为进程寿命，避免全局数据库对象退出时访问已析构的登记容器。
+
+D30 实际通过 52 个选定标准原生入口及 1 个独立二进制入口，合计 53；23 组协议与 D28 的 994 条成对回复在行、tag、SQLSTATE、Ready、T7 和错误／通知上相同。针对投影的 PG／D27／D28／D30 热冷对照共 76 条回复，按实际 OID 对应后选定行、tag、SQLSTATE、Ready 无差异，但 PG 原始行描述符 T7 仍有 4 项差异。完整发现审计的 2,023 条回复包含历史和参照，不能说成 2,023 条新测试；未运行完整测试套件。
+
+D28 新投影测试因误以为 ALTER 后目录行顺序不变而断言失败，原进程真实退出 `-11`；隔离 ASan 运行时拦截重放实际退出 `-6`（未强杀），报告活动事务登记容器在退出时二次释放。D29 修正测试的列身份断言，但未修生产退出问题；D30 对普通及 SERIALIZABLE 活动事务正常退出、重启后未提交行不可见／已提交前缀保留、后续写入提交作了实际控制，普通和 ASan runtime-only 均实际退出 0。后者仅加载 ASan 运行时库，不是全核心插桩；记录保留原有失败。
+
+已知缺陷仍未修复：合法默认表达式 `(('1e500'::numeric * '1e500'::numeric)::text)` 在 PostgreSQL 18.6 得到 1001 位结果，而 D27／D28／D30 会把 SQL 源文写入 TEXT；现有无约束 numeric、持久默认值来源和无 SQLSTATE 回退均需继续修复。并发对照中 PostgreSQL 可在另一会话 DDL 未提交时立即读取旧目录，D27／D28／D30 的同类查询等待超过 5 秒，ROLLBACK 后才返回；未采集线程等待栈，库级锁路径只是依据代码和时间顺序的推断。
+
+仅对选定单连接暖缓存工作负载测量：D27→D30→D27 固定顺序的目录读取窗口为 27 个实际正常退出进程、27,648 条 SQL；事务窗口为 9 个进程、3,456 条计时 SQL，另有 324 条控制 SQL。两窗口完整回复字节一致、无 mismatch。各场景结果有正有负，ordinary `pg_attrdef` 相对前／后基线墙钟分别退化 5.8%／6.5%，两项生产变更同时存在且每角色仅 3 次，不能据此归因或证明投影改善，也不能宣称整体提速或与 PostgreSQL 性能等价。
+
+### 方法、范围及限制
+
+每场景旧版前、新版、旧版后各 3 次，以每进程各批次每 SQL 平均墙钟或 CPU 时间的中位数比较；正数表示相对基线耗时下降，负数表示上升，前后漂移为 `(前基线−后基线)/前基线`。这是共享服务器上的固定次序测量，其他用户任务和批间证据写入可能影响调度与 I/O；CPU 时钟分辨率 10 ms，零分母记 `—`。最大批次均值不等于单条 SQL P95/P99。两窗口都不是 PostgreSQL 性能对照，也不能推断冷盘、并发吞吐或总体速度。
+
+目录窗口使用 32 行热表、单连接，narrow／ordinary／verbose 分别为 0／128／128 张附加表，ordinary／verbose 默认值长度不同；只测 `attrdef`、`depend`、`empty`、`point`、`range`，不测 DDL、写入或事务。
+
+事务窗口仅 narrow 场景，以混合 READ COMMITTED 与 SERIALIZABLE 的读／插入／更新事务批次为单位；不测 DELETE、DDL、冲突并发或冷 I/O，不能把它解释为纯 SSI 开销或单条语句延迟。
+
+### 目录读取：15 组
+
+| 场景 | 操作 | 墙钟相对前基线 | 墙钟相对后基线 | CPU 相对前基线 | CPU 相对后基线 | 前后基线墙钟漂移 |
+|---|---|---:|---:|---:|---:|---:|
+| narrow | attrdef | +0.7% | +3.2% | +3.1% | +2.1% | -2.5% |
+| narrow | depend | +0.4% | -1.5% | +2.5% | +0.0% | +1.9% |
+| narrow | empty | -2.5% | +3.3% | -2.3% | +3.6% | -6.0% |
+| narrow | point | -2.8% | +0.4% | -1.0% | +0.0% | -3.2% |
+| narrow | range | +0.7% | +1.3% | +0.6% | +0.3% | -0.6% |
+| ordinary | attrdef | -5.8% | -6.5% | -3.6% | -3.6% | +0.7% |
+| ordinary | depend | -5.8% | -2.6% | -2.0% | -1.1% | -3.1% |
+| ordinary | empty | -1.7% | -9.4% | +2.9% | -8.2% | +7.0% |
+| ordinary | point | -1.3% | -0.9% | +0.7% | -4.1% | -0.4% |
+| ordinary | range | -6.9% | -4.1% | -3.6% | -3.6% | -2.6% |
+| verbose | attrdef | -5.0% | -0.7% | -3.3% | -0.5% | -4.3% |
+| verbose | depend | -2.0% | -1.9% | -2.8% | -1.9% | -0.1% |
+| verbose | empty | -0.7% | +2.3% | -0.8% | +1.6% | -3.1% |
+| verbose | point | +4.1% | +0.2% | +4.9% | -3.3% | +3.9% |
+| verbose | range | -1.3% | +0.9% | -0.8% | +1.3% | -2.2% |
+
+### 事务批次：6 组
+
+| 场景 | 操作 | 墙钟相对前基线 | 墙钟相对后基线 | CPU 相对前基线 | CPU 相对后基线 | 前后基线墙钟漂移 |
+|---|---|---:|---:|---:|---:|---:|
+| narrow | rc_insert | +5.3% | -3.0% | +0.0% | +0.0% | +8.1% |
+| narrow | rc_read | +1.5% | -1.3% | +3.1% | -3.3% | +2.8% |
+| narrow | rc_update | -1.6% | -0.2% | +0.0% | -2.3% | -1.4% |
+| narrow | ssi_insert | -4.8% | -0.9% | +0.0% | -2.6% | -3.8% |
+| narrow | ssi_read | -6.5% | -3.9% | -6.7% | -3.2% | -2.5% |
+| narrow | ssi_update | +3.8% | -6.6% | +0.0% | +0.0% | +9.7% |
+
+增量包原始内容 53,256,441 字节仅在内存生成，gzip 8,790,520 字节；原始 SHA256 `775dd9efd6bcc906eec775f0afe1ee171d007ee3f58a3b135738b78b950e4d15`，gzip SHA256 `abb8c87afbb9d9fc73547903d4adc5e780084e2a062d459909bd463bd0a8c102`。已校验往返、内嵌文件摘要和原 50 档压缩证据；manifest 现 51 档。包包含本轮 wire、超时与失败、原生结果、SSI、退出和实际成本数据以及源差异，不包含 ELF 或数据库镜像：[增量压缩证据](benchmarks/default-catalog-transaction-evidence-20261108.json.gz)。
+
+设计与差距参考 [PostgreSQL 默认值](https://www.postgresql.org/docs/18/ddl-default.html)、[pg_attrdef](https://www.postgresql.org/docs/18/catalog-pg-attrdef.html)、[numeric 范围](https://www.postgresql.org/docs/18/datatype-numeric.html)、[SQLite DEFAULT](https://www.sqlite.org/lang_createtable.html) 和 [DuckDB v1.4.1 默认值绑定实现](https://raw.githubusercontent.com/duckdb/duckdb/v1.4.1/src/planner/binder/statement/bind_insert.cpp)。SQLite 与 DuckDB 行为不等同于 PostgreSQL。 原273项和历史292项未改变。
+
+
 <a id="default-runtime-snapshot-evidence-20261108"></a>
 ## 2026-11-08：DEFAULT 错误传播与目录快照 D27 成本
 

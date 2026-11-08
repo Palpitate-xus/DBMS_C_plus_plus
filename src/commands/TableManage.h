@@ -2442,21 +2442,6 @@ private:
     static std::mutex& globalTxnMutex();
     static std::set<uint64_t>& activeTransactions();
     static std::map<uint64_t, std::string>& activeTransactionDatabases();
-    // Global SSI conflict tracking: txId -> set of txIds that it has rw-conflict with
-    static std::mutex ssiMutex_;
-    static std::map<uint64_t, std::set<std::string>> ssiReadSets_;   // txId -> relation-qualified RIDs read
-    static std::map<uint64_t, std::set<std::string>> ssiWriteSets_;  // txId -> relation-qualified RIDs written
-    // Coarse-grained SIREAD coverage. A relation marker is retained for the
-    // lifetime of overlapping serializable transactions when a scan has no
-    // row, page, or usable index-predicate coverage. It is the conservative
-    // fallback for empty/unindexed scans.
-    static std::map<uint64_t, std::set<std::string>> ssiReadRelations_;
-    static std::map<uint64_t, std::set<std::string>> ssiWriteRelations_;
-    // Page-level SIREAD coverage for non-empty scans. Relation markers remain
-    // the fallback for empty predicates and callers that cannot expose page
-    // provenance safely.
-    static std::map<uint64_t, std::set<std::string>> ssiReadPages_;
-    static std::map<uint64_t, std::set<std::string>> ssiWritePages_;
     struct SsiIndexPredicate {
         std::string dbname;
         std::string tablename;
@@ -2480,10 +2465,28 @@ private:
                             other.value);
         }
     };
-    static std::map<uint64_t, std::set<SsiIndexPredicate>> ssiReadIndexPredicates_;
-    static std::map<uint64_t, std::set<SsiIndexKey>> ssiWriteIndexKeys_;
-    static std::map<uint64_t, std::set<uint64_t>> ssiOutEdges_; // T1 -> {T2} means T1 read something written by T2
-    static std::map<uint64_t, std::set<uint64_t>> ssiInEdges_;  // T2 -> {T1} means T1 read something written by T2
+    // All global transaction bookkeeping must outlive every StorageEngine,
+    // including a global engine destroyed with an abandoned transaction.
+    // The two mutexes continue to protect their original independent sets.
+    struct TransactionRegistry {
+        std::mutex txnMutex;
+        std::set<uint64_t> active;
+        std::map<uint64_t, std::string> databases;
+        std::mutex ssiMutex;
+        // Relation-qualified row IDs; relation and page sets provide coarser
+        // SIREAD coverage when a more precise predicate is unavailable.
+        std::map<uint64_t, std::set<std::string>> ssiReadSets;
+        std::map<uint64_t, std::set<std::string>> ssiWriteSets;
+        std::map<uint64_t, std::set<std::string>> ssiReadRelations;
+        std::map<uint64_t, std::set<std::string>> ssiWriteRelations;
+        std::map<uint64_t, std::set<std::string>> ssiReadPages;
+        std::map<uint64_t, std::set<std::string>> ssiWritePages;
+        std::map<uint64_t, std::set<SsiIndexPredicate>> ssiReadIndexPredicates;
+        std::map<uint64_t, std::set<SsiIndexKey>> ssiWriteIndexKeys;
+        std::map<uint64_t, std::set<uint64_t>> ssiOutEdges;
+        std::map<uint64_t, std::set<uint64_t>> ssiInEdges;
+    };
+    static TransactionRegistry& transactionRegistry();
 
     // Row-Level Security: per-thread current user (for transparent RLS application)
     inline static thread_local std::string rlsCurrentUser_;

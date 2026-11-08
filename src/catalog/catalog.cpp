@@ -534,6 +534,34 @@ CatalogManager::MetadataSnapshot CatalogManager::readMetadataSnapshot(const std:
     return catalog.metadataSnapshot(includeDefaultObjects);
 }
 
+CatalogManager::DefaultCatalogSnapshot CatalogManager::defaultCatalogSnapshot(DefaultCatalogKind kind) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    DefaultCatalogSnapshot result;
+    result.kind = kind;
+    // validateRead inspects these complete collections to detect conflicting
+    // identities as well as missing or malformed declarations.
+    result.declaration.relations = classes_;
+    result.declaration.attributes = attributes_;
+    result.declaration.types = types_;
+    if (kind == DefaultCatalogKind::Attrdef) {
+        result.defaults.reserve(attrdefs_.size());
+        for (const auto& row : attrdefs_)
+            result.defaults.push_back({row.oid, row.adrelid, row.adnum});
+    } else if (kind == DefaultCatalogKind::Depend) {
+        result.dependencies = depends_;
+    } else {
+        throw DbError("XX000", "unknown attribute default catalog snapshot kind");
+    }
+    result.loaded = true;
+    return result;
+}
+
+CatalogManager::DefaultCatalogSnapshot CatalogManager::readDefaultCatalogSnapshot(
+    const std::string& path, DefaultCatalogKind kind) {
+    CatalogManager catalog(path, ReadOnlyTag{});
+    return catalog.defaultCatalogSnapshot(kind);
+}
+
 std::map<std::string, std::string> CatalogManager::domainColumns(
     const std::string& schema, const std::string& relation) const {
     std::lock_guard<std::mutex> lock(mutex_);

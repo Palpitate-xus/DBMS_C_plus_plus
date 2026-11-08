@@ -1,5 +1,16 @@
 # DBMS_C_plus_plus 对标 PostgreSQL 18.6：逐项完整实施蓝图
 
+## 2026-11-08：D30 进度及后续边界
+
+本轮对普通 `pg_attrdef`／`pg_depend` SELECT 使用实际目录字段的按需快照，声明与数据在同一把锁下复制；公共完整快照仍保留默认表达式和依赖。`pg_attrdef.adbin` 的 PostgreSQL 节点树仍未实现，不声称目录完整等价。活动事务与 SSI 登记改为进程寿命，避免全局数据库对象退出时访问已析构的登记容器。
+
+D30 实际通过 52 个选定标准原生入口及 1 个独立二进制入口，合计 53；23 组协议与 D28 的 994 条成对回复在行、tag、SQLSTATE、Ready、T7 和错误／通知上相同。针对投影的 PG／D27／D28／D30 热冷对照共 76 条回复，按实际 OID 对应后选定行、tag、SQLSTATE、Ready 无差异，但 PG 原始行描述符 T7 仍有 4 项差异。完整发现审计的 2,023 条回复包含历史和参照，不能说成 2,023 条新测试；未运行完整测试套件。
+
+已知缺陷仍未修复：合法默认表达式 `(('1e500'::numeric * '1e500'::numeric)::text)` 在 PostgreSQL 18.6 得到 1001 位结果，而 D27／D28／D30 会把 SQL 源文写入 TEXT；现有无约束 numeric、持久默认值来源和无 SQLSTATE 回退均需继续修复。并发对照中 PostgreSQL 可在另一会话 DDL 未提交时立即读取旧目录，D27／D28／D30 的同类查询等待超过 5 秒，ROLLBACK 后才返回；未采集线程等待栈，库级锁路径只是依据代码和时间顺序的推断。 默认值来源应设计可持久区分字面量、表达式和历史未知的表示，不能从现存目录行或字符串猜测；较大无约束 numeric 还涉及存储与协议兼容。并发目录读取需保留 DDL／恢复一致性，不能仅跳过锁。
+
+设计与差距参考 [PostgreSQL 默认值](https://www.postgresql.org/docs/18/ddl-default.html)、[pg_attrdef](https://www.postgresql.org/docs/18/catalog-pg-attrdef.html)、[numeric 范围](https://www.postgresql.org/docs/18/datatype-numeric.html)、[SQLite DEFAULT](https://www.sqlite.org/lang_createtable.html) 和 [DuckDB v1.4.1 默认值绑定实现](https://raw.githubusercontent.com/duckdb/duckdb/v1.4.1/src/planner/binder/statement/bind_insert.cpp)。SQLite 与 DuckDB 行为不等同于 PostgreSQL。 原273项及历史292项未关闭。
+
+
 ## D27：DEFAULT 求值和目录快照（2026-11-08）
 
 本轮修正 INSERT 遗漏列 DEFAULT 求值中已有 SQLSTATE 或有效结尾 SQLSTATE 标记的错误传播，并对 substring 负长度保留 `22011`；目录声明读取按需省去 DEFAULT 对象图复制，公共默认快照仍完整。没有 SQLSTATE 且没有有效标记的旧/native 求值失败仍可退回原始字面量；域、旧数据及全部错误类型不构成全面兼容承诺。

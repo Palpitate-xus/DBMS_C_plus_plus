@@ -57,6 +57,9 @@ public:
     // that need only declarations can explicitly omit the object graph.
     CatalogManager::MetadataSnapshot metadataSnapshot(const std::string& dbname,
                                                       bool includeDefaultObjects = true) const;
+    // Specialized read-only projection for pg_attrdef/pg_depend scans.
+    CatalogManager::DefaultCatalogSnapshot defaultCatalogSnapshot(
+        const std::string& dbname, CatalogManager::DefaultCatalogKind kind) const;
     std::map<std::string, std::string> domainColumns(const std::string& dbname,
                                                     const std::string& physicalTable) const;
 

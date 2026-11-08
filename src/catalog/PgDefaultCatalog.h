@@ -86,4 +86,28 @@ inline std::vector<std::vector<ExprValue>> rows(const CatalogManager::MetadataSn
     }
     return result;
 }
+inline std::vector<std::vector<ExprValue>> rows(const CatalogManager::DefaultCatalogSnapshot& snapshot,
+                                              bool dependencies) {
+    const auto kind = dependencies ? CatalogManager::DefaultCatalogKind::Depend
+                                   : CatalogManager::DefaultCatalogKind::Attrdef;
+    if (!snapshot.loaded || snapshot.kind != kind ||
+        (dependencies && !snapshot.defaults.empty()) ||
+        (!dependencies && !snapshot.dependencies.empty()))
+        throw DbError("XX001", "attribute default catalog projection is incomplete or mismatched");
+    std::vector<std::vector<ExprValue>> result;
+    if (dependencies) {
+        validate(snapshot.declaration, dependencyOid, "pg_depend", dependencyFields);
+        result.reserve(snapshot.dependencies.size());
+        for (const auto& d : snapshot.dependencies) result.push_back({ExprValue("oid", std::to_string(d.classid)),
+            ExprValue("oid", std::to_string(d.objid)), ExprValue("integer", std::to_string(d.objsubid)),
+            ExprValue("oid", std::to_string(d.refclassid)), ExprValue("oid", std::to_string(d.refobjid)),
+            ExprValue("integer", std::to_string(d.refobjsubid)), ExprValue("\"char\"", std::string(1, d.deptype))});
+    } else {
+        validate(snapshot.declaration, relationOid, "pg_attrdef", fields);
+        result.reserve(snapshot.defaults.size());
+        for (const auto& d : snapshot.defaults) result.push_back({ExprValue("oid", std::to_string(d.oid)),
+            ExprValue("oid", std::to_string(d.adrelid)), ExprValue("smallint", std::to_string(d.adnum))});
+    }
+    return result;
+}
 } // namespace dbms::default_catalog

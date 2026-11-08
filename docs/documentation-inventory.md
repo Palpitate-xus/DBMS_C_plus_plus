@@ -1,5 +1,10 @@
 # 全部文档检查清单
 
+## 2026-11-08：D30 更新
+
+本轮更新现有状态、比较、蓝图、测试和性能报告；[性能报告](performance-report-2026-10-30.md#d30-catalog-transaction-evidence-20261108)包含 21 组完整墙钟／CPU 对照及局限，新增压缩证据索引在 [manifest](benchmarks/manifest.json)。旧正文保留，原273项与历史292项未改。
+
+
 ## 本轮 D27 文档与压缩证据（2026-11-08）
 
 只在既有 8 份 Markdown 添加本轮段落，保留旧正文；原 273 项、292 条历史及用户暂缓范围不变。原 49 个 gzip 按长度及 SHA256 验证未变；新增 1 个 [D27 压缩证据](benchmarks/default-runtime-snapshot-evidence-20261108.json.gz)，manifest 共 50 项。新包 31,078,895 字节，原始 JSON 168,286,360 字节，仅在内存生成并逐字节校验 gzip 往返，未把原始 JSON 写入 Git；不包含数据库镜像及 ELF。归档 SHA256 `30638158bc3aca346b40b81d61bb7d8296718cca86f3bd77239932eb987699be`。本轮没有重新验收全部历史文档。[结果](performance-report-2026-10-30.md#default-runtime-snapshot-evidence-20261108)。
