@@ -6068,53 +6068,62 @@ struct ScalarSignature {
     std::vector<std::string> inputs;
     std::string output;
 };
-std::vector<ScalarSignature> scalarSignatures(const std::string& name) {
+// These declarations are immutable and bounded by the built-in name set.
+// Keep each allocated table alive for the process lifetime, just like the
+// builtin registry: global engine shutdown may still resolve a function after
+// ordinary function-local static destructors have run. Argument-dependent
+// array-search signatures remain local to each resolution below.
+const std::vector<ScalarSignature>& scalarSignatures(const std::string& name) {
     if(name=="exp" || name=="ln" || name=="log" || name=="log10") {
-        std::vector<ScalarSignature> signatures={{{"double precision"},"double precision"},{{"numeric"},"numeric"}};
-        if(name=="log") signatures.push_back({{"numeric","numeric"},"numeric"});
-        return signatures;
+        if(name=="log") {
+            static const auto* const value = new const std::vector<ScalarSignature>{{{"double precision"},"double precision"},{{"numeric"},"numeric"},{{"numeric","numeric"},"numeric"}};
+            return *value;
+        }
+        static const auto* const value = new const std::vector<ScalarSignature>{{{"double precision"},"double precision"},{{"numeric"},"numeric"}};
+        return *value;
     }
-    if(name=="pg_get_serial_sequence")return {{{"text","text"},"text"}};
-    if(name=="scale" || name=="min_scale")return {{{"numeric"},"integer"}};
-    if(name=="factorial")return {{{"bigint"},"numeric"}};
-    if(name=="gcd" || name=="lcm")return {
+    if(name=="pg_get_serial_sequence"){ static const auto* const value = new const std::vector<ScalarSignature>{{{"text","text"},"text"}}; return *value; }
+    if(name=="scale" || name=="min_scale"){ static const auto* const value = new const std::vector<ScalarSignature>{{{"numeric"},"integer"}}; return *value; }
+    if(name=="factorial"){ static const auto* const value = new const std::vector<ScalarSignature>{{{"bigint"},"numeric"}}; return *value; }
+    if(name=="gcd" || name=="lcm"){ static const auto* const value = new const std::vector<ScalarSignature>{
         {{"integer","integer"},"integer"},
         {{"bigint","bigint"},"bigint"},
-        {{"numeric","numeric"},"numeric"}};
-    if(name=="ascii")return {{{"text"},"integer"}};
-    if(name=="chr")return {{{"integer"},"text"}};
-    if(name=="starts_with")return {{{"text","text"},"boolean"}};
-    if(name=="strpos")return {{{"text","text"},"integer"}};
-    if(isTrimScalarName(name))return {{{"text"},"text"},{{"text","text"},"text"},
-        {{"bytea","bytea"},"bytea"}};
-    if(name=="array_positions")return {{{"anycompatiblearray","anycompatible"},"integer[]"}};
-    if(name=="array_position")return {
+        {{"numeric","numeric"},"numeric"}}; return *value; }
+    if(name=="ascii"){ static const auto* const value = new const std::vector<ScalarSignature>{{{"text"},"integer"}}; return *value; }
+    if(name=="chr"){ static const auto* const value = new const std::vector<ScalarSignature>{{{"integer"},"text"}}; return *value; }
+    if(name=="starts_with"){ static const auto* const value = new const std::vector<ScalarSignature>{{{"text","text"},"boolean"}}; return *value; }
+    if(name=="strpos"){ static const auto* const value = new const std::vector<ScalarSignature>{{{"text","text"},"integer"}}; return *value; }
+    if(isTrimScalarName(name)){ static const auto* const value = new const std::vector<ScalarSignature>{{{"text"},"text"},{{"text","text"},"text"},
+        {{"bytea","bytea"},"bytea"}}; return *value; }
+    if(name=="array_positions"){ static const auto* const value = new const std::vector<ScalarSignature>{{{"anycompatiblearray","anycompatible"},"integer[]"}}; return *value; }
+    if(name=="array_position"){ static const auto* const value = new const std::vector<ScalarSignature>{
         {{"anycompatiblearray","anycompatible"},"integer"},
-        {{"anycompatiblearray","anycompatible","integer"},"integer"}};
+        {{"anycompatiblearray","anycompatible","integer"},"integer"}}; return *value; }
     if(name=="abs") {
-        std::vector<ScalarSignature> result;
-        for(const auto* type:{"smallint","integer","bigint","numeric","real","double precision"})
-            result.push_back({{type},type});
-        return result;
+        static const auto* const value = new const std::vector<ScalarSignature>{
+            {{"smallint"},"smallint"}, {{"integer"},"integer"},
+            {{"bigint"},"bigint"}, {{"numeric"},"numeric"},
+            {{"real"},"real"}, {{"double precision"},"double precision"}};
+        return *value;
     }
-    if(name=="length")return {{{"text"},"integer"},{{"bpchar"},"integer"},
+    if(name=="length"){ static const auto* const value = new const std::vector<ScalarSignature>{{{"text"},"integer"},{{"bpchar"},"integer"},
         {{"bytea"},"integer"},{{"bytea","name"},"integer"},{{"bit"},"integer"},
-        {{"tsvector"},"integer"},{{"lseg"},"double precision"},{{"path"},"double precision"}};
+        {{"tsvector"},"integer"},{{"lseg"},"double precision"},{{"path"},"double precision"}}; return *value; }
     if(name=="char_length" || name=="character_length")
-        return {{{"text"},"integer"},{{"bpchar"},"integer"}};
-    if(name=="octet_length")return {{{"text"},"integer"},{{"bpchar"},"integer"},
-        {{"bytea"},"integer"},{{"bit"},"integer"}};
-    if(name=="bit_length")return {{{"text"},"integer"},{{"bytea"},"integer"},{{"bit"},"integer"}};
-    if(name=="upper" || name=="lower")return {{{"text"},"text"},
+        { static const auto* const value = new const std::vector<ScalarSignature>{{{"text"},"integer"},{{"bpchar"},"integer"}}; return *value; }
+    if(name=="octet_length"){ static const auto* const value = new const std::vector<ScalarSignature>{{{"text"},"integer"},{{"bpchar"},"integer"},
+        {{"bytea"},"integer"},{{"bit"},"integer"}}; return *value; }
+    if(name=="bit_length"){ static const auto* const value = new const std::vector<ScalarSignature>{{{"text"},"integer"},{{"bytea"},"integer"},{{"bit"},"integer"}}; return *value; }
+    if(name=="upper" || name=="lower"){ static const auto* const value = new const std::vector<ScalarSignature>{{{"text"},"text"},
         {{"int4range"},"integer"},{{"int8range"},"bigint"},{{"numrange"},"numeric"},
-        {{"daterange"},"date"},{{"tsrange"},"timestamp"},{{"tstzrange"},"timestamptz"}};
-    if(name=="width_bucket")return {
+        {{"daterange"},"date"},{{"tsrange"},"timestamp"},{{"tstzrange"},"timestamptz"}}; return *value; }
+    if(name=="width_bucket"){ static const auto* const value = new const std::vector<ScalarSignature>{
         {{"numeric","numeric","numeric","integer"},"integer"},
-        {{"double precision","double precision","double precision","integer"},"integer"}};
-    if(name=="atan2")return {{{"double precision","double precision"},"double precision"}};
-    if(name=="pi")return {{{},"double precision"}};
-    if(isFixedFloat8ScalarName(name))return {{{"double precision"},"double precision"}};
-    return {};
+        {{"double precision","double precision","double precision","integer"},"integer"}}; return *value; }
+    if(name=="atan2"){ static const auto* const value = new const std::vector<ScalarSignature>{{{"double precision","double precision"},"double precision"}}; return *value; }
+    if(name=="pi"){ static const auto* const value = new const std::vector<ScalarSignature>{{{},"double precision"}}; return *value; }
+    if(isFixedFloat8ScalarName(name)){ static const auto* const value = new const std::vector<ScalarSignature>{{{"double precision"},"double precision"}}; return *value; }
+    { static const auto* const value = new const std::vector<ScalarSignature>{}; return *value; }
 }
 
 std::string scalarSignatureInputType(const std::string& type) {
@@ -6210,7 +6219,8 @@ ResolvedScalarFunction resolveTypedScalar(const std::string& name,
     };
     for(const auto& ns:path) {
         if(ns=="pg_catalog") {
-            const auto signatures=isArraySearchScalarName(name)?arraySearchSignatures(name,inputs,call):scalarSignatures(name);
+            const auto dynamicSignatures=isArraySearchScalarName(name)?arraySearchSignatures(name,inputs,call):std::vector<ScalarSignature>{};
+            const auto& signatures=isArraySearchScalarName(name)?dynamicSignatures:scalarSignatures(name);
             for(const auto& signature:signatures) {
                 ResolvedScalarFunction candidate;candidate.found=true;candidate.name=name;candidate.schema=ns;
                 candidate.polymorphic=isArraySearchScalarName(name);
@@ -6530,7 +6540,7 @@ ResolvedScalarFunction resolveScalarFunction(
                 // result must not become TEXT (or inherit a numeric argument's
                 // type) inside another call. Never infer/evaluate an unbound
                 // argument here, or attach builtin metadata to a stored callee.
-                const auto signatures=scalarSignatures(result.name);
+                const auto& signatures=scalarSignatures(result.name);
                 if(!signatures.empty() && ownsScalarSignatures(result.name,&callback->second) &&
                    std::all_of(signatures.begin(),signatures.end(),
                     [&](const auto& signature){return signature.output==signatures.front().output;}))
