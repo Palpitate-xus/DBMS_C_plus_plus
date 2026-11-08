@@ -9113,8 +9113,76 @@ static std::string formatDateTime(const std::string& src, const std::string& fmt
 // placeholders, a '.' decimal point, and a leading 'FM' (fill mode: suppress
 // the leading sign-position blank). '0' placeholders zero-pad the integer part.
 // Grouping ('G'/','), currency, and sign templates are not implemented.
+// Render simple scientific digit pictures without converting exact decimals
+// to binary floating point. Other picture tokens keep their existing path.
+static std::optional<std::string> formatSimpleScientificNumeric(
+    const std::string& input, const std::string& picture) {
+    if (input.empty() || picture.size() < 4) return std::nullopt;
+    const size_t end = picture.size() - 4;
+    if (picture.compare(end, 4, "EEEE") != 0 &&
+        picture.compare(end, 4, "eeee") != 0)
+        return std::nullopt;
+    size_t pre = 0, post = 0;
+    bool decimalPoint = false;
+    for (size_t i = 0; i < end; ++i) {
+        const char c = picture[i];
+        if (c == '9' || c == '0') {
+            (decimalPoint ? post : pre)++;
+        } else if (c == '.' || c == 'D' || c == 'd') {
+            if (decimalPoint) return std::nullopt;
+            decimalPoint = true;
+        } else return std::nullopt;
+    }
+    const Numeric number(input);
+    if (!number.isFinite()) {
+        std::string result(pre + post + 6, '#');
+        result[0] = ' ';
+        result[pre + 1] = '.';
+        return result;
+    }
+    std::string digits = number.toString();
+    const bool negative = number.sign() < 0;
+    if (!digits.empty() && digits[0] == '-') digits.erase(0, 1);
+    const size_t dot = digits.find('.');
+    const size_t integerDigits = dot == std::string::npos ? digits.size() : dot;
+    if (dot != std::string::npos) digits.erase(dot, 1);
+    const size_t first = digits.find_first_not_of('0');
+    int exponent = 0;
+    std::string significant;
+    if (first == std::string::npos) {
+        significant.assign(post + 1, '0');
+    } else {
+        exponent = static_cast<int>(integerDigits) - static_cast<int>(first) - 1;
+        significant = digits.substr(first, post + 1);
+        significant.resize(post + 1, '0');
+        const size_t roundPosition = first + post + 1;
+        if (roundPosition < digits.size() && digits[roundPosition] >= '5') {
+            size_t cursor = significant.size();
+            while (cursor && significant[cursor - 1] == '9')
+                significant[--cursor] = '0';
+            if (cursor) ++significant[cursor - 1];
+            else significant.insert(significant.begin(), '1');
+        }
+    }
+    // PG rounds the significand without renormalizing exponent on carry.
+    const size_t beforePoint = significant.size() - post;
+    std::string result = negative ? "-" : " ";
+    result += significant.substr(0, beforePoint);
+    if (post) result += "." + significant.substr(beforePoint);
+    result += 'e';
+    result += exponent < 0 ? '-' : '+';
+    std::string exponentDigits = std::to_string(exponent < 0 ? -exponent : exponent);
+    if (exponentDigits.size() < 2) result += '0';
+    result += exponentDigits;
+    return result;
+}
+
 static std::string formatNumeric(double val, const std::string& fmtIn,
-                                 const std::string& exactInput = std::string()) {
+                                 const std::string& exactInput = std::string(),
+                                 bool exactScientific = false) {
+    if (exactScientific)
+        if (const auto exact = formatSimpleScientificNumeric(exactInput, fmtIn))
+            return *exact;
     std::string fmt = fmtIn;
     bool fm = false;
     if (fmt.size() >= 2 && (fmt[0] == 'F' || fmt[0] == 'f') &&
@@ -11106,7 +11174,10 @@ void ExprEvaluator::registerStatelessBuiltins() {
         const auto divisor = tryParseNumeric(a[1].value);
         if (!dividend || !divisor)
             return ExprValue("numeric", "", true);
-        if (divisor->isFinite() && divisor->sign() == 0)
+        // PostgreSQL numeric division propagates NaN before checking for a
+        // zero divisor; infinities and finite values still reject division
+        // by zero.  truncDivide preserves the NaN result below.
+        if (!dividend->isNaN() && divisor->isFinite() && divisor->sign() == 0)
             throw std::runtime_error(
                 "division by zero (SQLSTATE 22012)");
 
@@ -13822,7 +13893,8 @@ void ExprEvaluator::registerStatelessBuiltins() {
         if (exactNumeric) {
             try {
                 return ExprValue("text", formatNumeric(scalarDoubleArgument(a[0]), fmt,
-                    vval), false);
+                    vval, tn == "numeric" || tn == "decimal" ||
+                          tn == "bigint" || tn == "int8"), false);
             } catch (const NumericRangeError&) {
                 throw DbError("22003", "numeric value out of range");
             }

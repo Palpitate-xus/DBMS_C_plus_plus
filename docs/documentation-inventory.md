@@ -1,5 +1,11 @@
 # 全部文档检查清单
 
+## 2026-11-08：数值和目录扫描更新
+
+本轮更新 NaN 除法、简单科学数字格式和 Linux 目录扫描；选定回归与已知差距见[测试报告](test-report.md#d37-numeric-catalog-20261108)，成本测量见[性能报告](performance-report-2026-10-30.md#d37-catalog-scan-20261108)。旧正文及原有总账保留。
+
+
+
 ## 2026-11-08：数值与默认值更新
 
 本轮更新数值范围、精确商与余数，以及 `to_char` DEFAULT 的局部防错写；保留 PostgreSQL 范围差异和其他未结构化回退风险。证据与逐组对照见[测试报告](test-report.md#d35-numeric-tochar-20261108)及[性能报告](performance-report-2026-10-30.md#d35-numeric-tochar-performance-20261108)。旧正文和历史记录保留；新压缩证据不含数据库镜像或 ELF。

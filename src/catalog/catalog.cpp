@@ -66,6 +66,51 @@ bool catalogGeneration(const std::filesystem::path& path,
     return true;
 }
 
+#if defined(__linux__) && defined(O_PATH)
+// A publication check scans many sibling catalog files. Pin their shared
+// directory for one scan, then recheck that its pathname still names it.
+// O_PATH preserves stat/lstat's ability to traverse an execute-only directory.
+class CatalogDirectoryScan {
+public:
+    explicit CatalogDirectoryScan(const std::string& directory)
+        : path_(directory), fd_(::open(directory.c_str(), O_PATH | O_DIRECTORY | O_CLOEXEC)) {
+        valid_ = fd_ >= 0 && ::fstat(fd_, &directory_) == 0 && S_ISDIR(directory_.st_mode);
+    }
+    ~CatalogDirectoryScan() { if (fd_ >= 0) ::close(fd_); }
+    CatalogDirectoryScan(const CatalogDirectoryScan&) = delete;
+    CatalogDirectoryScan& operator=(const CatalogDirectoryScan&) = delete;
+    bool valid() const { return valid_; }
+    bool read(const std::string& name, CatalogFileGeneration& result) const {
+        if (!valid_) return false;
+        result = {};
+        result.directoryDevice = directory_.st_dev;
+        result.directoryInode = directory_.st_ino;
+        struct stat file{};
+        if (::fstatat(fd_, name.c_str(), &file, AT_SYMLINK_NOFOLLOW) != 0)
+            return errno == ENOENT;
+        result.exists = true;
+        result.regular = S_ISREG(file.st_mode);
+        result.device = file.st_dev;
+        result.inode = file.st_ino;
+        result.size = file.st_size;
+        result.modified = file.st_mtim;
+        result.changed = file.st_ctim;
+        return true;
+    }
+    bool stillNamesDirectory() const {
+        struct stat current{};
+        return valid_ && ::stat(path_.c_str(), &current) == 0 &&
+            S_ISDIR(current.st_mode) && current.st_dev == directory_.st_dev &&
+            current.st_ino == directory_.st_ino;
+    }
+private:
+    const std::string& path_;
+    int fd_ = -1;
+    struct stat directory_{};
+    bool valid_ = false;
+};
+#endif
+
 struct CatalogPublicationState {
     std::mutex mutex;
     struct Receipt {
@@ -2819,10 +2864,25 @@ CatalogManager::PublicationState CatalogManager::publicationState() const {
     // empty ones. Their names are independent of row edits. Check physical
     // generations first: a current reader need not serialize all catalog
     // rows merely to prove that no peer replaced an image.
+#if defined(__linux__) && defined(O_PATH)
+    // Preserve the empty-baseline case: the previous loop did not inspect
+    // the filesystem at all when there were no catalog images.
+    if (persistence_->baseline.empty()) return PublicationState::Current;
+    CatalogDirectoryScan directory(dbPath_);
+    // Opening an extra descriptor can fail (for example EMFILE) even though
+    // the previous stat/lstat path can still verify the current generation.
+    const bool useDirectoryFd = directory.valid();
+#endif
     for (const auto& image : persistence_->baseline) {
         CatalogFileGeneration generation;
-        if (!catalogGeneration(catalogFilePath(image.first), generation) ||
-            (generation.exists && !generation.regular))
+#if defined(__linux__) && defined(O_PATH)
+        const bool inspected = useDirectoryFd
+            ? directory.read("pg_" + image.first + ".cat", generation)
+            : catalogGeneration(catalogFilePath(image.first), generation);
+#else
+        const bool inspected = catalogGeneration(catalogFilePath(image.first), generation);
+#endif
+        if (!inspected || (generation.exists && !generation.regular))
             return PublicationState::Conflict;
         const auto observed = persistence_->observed.find(image.first);
         if (observed == persistence_->observed.end() || !(observed->second == generation)) {
@@ -2831,6 +2891,9 @@ CatalogManager::PublicationState CatalogManager::publicationState() const {
             changed = true;
         }
     }
+#if defined(__linux__) && defined(O_PATH)
+    if (useDirectoryFd && !directory.stillNamesDirectory()) return PublicationState::Conflict;
+#endif
     if (!changed) return PublicationState::Current;
     // Only a peer change requires the complete dirty comparison. Keep the
     // byte comparison so edits through borrowed native rows still conflict.

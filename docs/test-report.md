@@ -1,5 +1,22 @@
 # DBMS 功能测试报告
 
+<a id="d37-numeric-catalog-20261108"></a>
+## 2026-11-08：NaN、科学数字格式和目录扫描验证
+
+D37 冻结程序 SHA-256 `7b57e3acdfd9b3f3cce8bfbb2ccccdbfa1943ad43c3c9dbd81e09854f8ca0a4f`，正常 CMake 构建实际 0。58 个选定标准原生入口及独立审核实际 0；新 `catalog_publication_scan_test`／`numeric_tochar_scientific_exact_test`／`numeric_div_nan_precedence_test` 分别通过 34／35／25 项。D36 的 56 个选定入口也实际 0；D35 上新增 NaN 回归曾真实退出 1，25 项中 4 项失败；科学格式回归曾真实退出 1，35 项中 23 项失败。未运行完整测试套件。
+
+`div` 专项在 PG18.6、D35、D36、D37 上各执行 82 个 simple-query 动作，D37 与 PG 的行、SQLSTATE、命令标签及 Ready 状态一致；D35 的 9 个差异动作包括 2 个 NaN／±0 与 7 个默认值／事务／冷态派生结果。表行描述存在 10 项原始 T7 差异，不是全协议等价。另有 11 项失败事务／保存点控制以及 12 项有效格式的扩展协议与二进制数值控制；NaN 的 numeric OID1700、格式1和载荷与 PG 一致，3 项已存在的除零错误描述／帧仍不同，不推断其内部阶段。
+
+简单科学格式按类型选择精确十进制：numeric、decimal、bigint／int8 使用精确舍入，int2／int4 和浮点保持原路径。PG、D35、D36、D37 各 210 项简单模板查询中，D37 与 PG 的行、状态、标签、Ready、T7 均一致；相对 D36 有 151 项行为变化。另有各 47 项默认值、UPDATE、批量插入、ADD 回填、保存点和冷重启控制，D37 目标场景匹配 PG；4 项非目标复杂模板仍有 PG 差异，表描述仍有 17 项原始 T7 差异。G1–G7 的额外研究以及 D35 旧失败均保留。
+
+目录扫描只在 Linux 的 `O_PATH` 可用时使用单次打开目录、逐文件 `fstatat(..., AT_SYMLINK_NOFOLLOW)` 与结束前路径身份核对；打开或 `fstat` 失败回退旧扫描。D35 与 D37 原生控制分别 34／34，D37 的定向扫描切换控制 40／40；涵盖跨进程文件发布、dirty 冲突、缺失／软链／目录替换、可遍历但不可读目录和描述符耗尽。初始原型在描述符耗尽时真实失败，回退方案修正后通过。一次扫描过程中换出又换回目录，以及某文件被检查为不存在后才出现，仍可能本轮未察觉，后续扫描才发现；它不是线性一致的证明。两服务同时打开同一隔离库的尝试被原有独占锁拒绝，单服务三连接、DDL提交／回滚及冷重启对照共34份回复一致。
+
+27 个既有协议族的 D36→D37 1,105 对回复逐动作核对，无未解释变化；记录不等于所有客户端和 SQL 路径均兼容。1000 位内部上限、普通 `to_char` 的超长定点模板、复杂科学模板以及无结构 DEFAULT 回退仍是差距。数值范围参照 [PostgreSQL 18 数值文档](https://www.postgresql.org/docs/18/datatype-numeric.html)，格式语义参照 [PostgreSQL 18 格式函数](https://www.postgresql.org/docs/18/functions-formatting.html)。
+
+本轮[压缩证据](benchmarks/numeric-catalog-evidence-20261108.json.gz)为 12,424,374 字节，SHA-256 `788ec9321d87e402eedc569ebed4fc59dbe495a0aeaea1716660ff8bf65eea11`；包含专项原始帧、失败、源码差异、性能与审计，不含数据库镜像和 ELF。部分内容按摘要引用此前 D34、D35 两档，完整恢复需同时保留 [D34 基准](benchmarks/numeric-attribution-evidence-20261108.json.gz)和 [D35 增量](benchmarks/numeric-tochar-performance-increment-20261108.json.gz)。
+
+
+
 <a id="d35-numeric-tochar-20261108"></a>
 ## 2026-11-08：数值范围、余数和 to_char 默认值验证
 
