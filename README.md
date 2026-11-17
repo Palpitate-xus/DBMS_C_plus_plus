@@ -165,6 +165,15 @@ docs/              # 使用、兼容性与开发文档
 这里只列出最近 3 条记录，点击卡片标题展开。[查看完整更新日志](CHANGELOG.md)。
 
 <details>
+<summary><strong>2026-11-17 · 读取损坏字段时明确报错</strong></summary>
+
+修复字段目录损坏时可能返回空字符串或错误文本的问题，补充查询、事务和重启测试。性能测量波动较大，暂不能确认提速。
+
+[查看测试结果](docs/test-report.md#variable-row-directory-20261117) · [查看性能测量](docs/performance-report-2026-10-30.md#variable-row-directory-cost-20261117)
+
+</details>
+
+<details>
 <summary><strong>2026-11-08 · 检查并发访问中的锁问题</strong></summary>
 
 检查了锁升级、内存不足和事务锁交接时的行为，记录了尚未修复的问题。
@@ -179,15 +188,6 @@ docs/              # 使用、兼容性与开发文档
 检查函数参数的执行和查询期间修改表结构的行为，并与 PostgreSQL 比较结果；另测试了本项目对损坏数据的处理。发现的问题仍待修复。
 
 [查看测试结果和已知问题](docs/test-report.md#ordinary-scalar-effects-20261108)
-
-</details>
-
-<details>
-<summary><strong>2026-11-08 · 修复读取记录时的缓存管理</strong></summary>
-
-读取记录时，让缓存中的数据页保持可用，直到复制完成；读取失败时也会释放相关资源。已补充多页、空值和内存不足的测试，并发访问仍有待验证的情况，性能变化尚无明确结论。
-
-[查看测试结果](docs/test-report.md#row-read-page-pin-20261108) · [查看性能测量](docs/performance-report-2026-10-30.md#row-pin-query-cost-20261108)
 
 </details>
 

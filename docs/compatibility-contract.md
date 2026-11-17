@@ -8,6 +8,10 @@
 
 新95条SQL与旧版回复逐字节一致，完整数据与实际崩溃恢复通过；原PG描述符来源差异仍可见，未声称整体PG等价。仍C++17／O2，根目录默认程序未提升。参见[最新边界、失败和性能证据](performance-report-2026-10-30.md#no-effect-transaction-publication-20261107)；原273和既有暂缓保持，Goal active。
 
+## 2026-11-17：变长字段目录损坏
+
+读取非 NULL 变长字段时，目录不完整、越界、重叠或不符合现有连续布局会返回 `XX001`，不再成功返回空字符串或其他字段字节。检查完整的行内目录，但不为检查而读取未选中的外部大字段。固定字段与由位图确定的 NULL 保留各自读取路径。实现仍使用项目原有磁盘与临时行格式，不与 PostgreSQL 数据目录互通；结构合法的内容替换及其他损坏类型并未全部验证。[测试与限制](test-report.md#variable-row-directory-20261117)。
+
 <!-- P41 large-varchar-toast-search begin -->
 <a id="large-varchar-toast-search-current"></a>
 ## VARCHAR逻辑长度与新旧元数据边界

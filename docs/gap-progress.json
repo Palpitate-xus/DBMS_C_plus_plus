@@ -2,6 +2,30 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-17 variable-length row directory corruption checks",
+      "gap_ids": [
+        "STO-01",
+        "STO-06",
+        "P0-16"
+      ],
+      "status": "partial",
+      "evidence": [
+        "src/storage/VariableRow.h",
+        "src/commands/TableManage.cpp",
+        "docs/test-report.md",
+        "docs/performance-report-2026-10-30.md"
+      ],
+      "tests": [
+        "tests/variable_row_directory_test.cpp",
+        "tests/variable_row_corruption_protocol_e2e_test.py"
+      ],
+      "verification": [
+        "Normal and scoped ASan/UBSan directory tests: 4304 checks each. Five checksum-valid private corruption cases: 51 protocol checks, 11 normal server exits; old baseline fails the same regression.",
+        "PostgreSQL 18.6/old/new: 30/41/41 captured SQL pairs; a second decoder verified 41 complete old/new response matches and 60 PG semantic comparisons. Two project SIGKILL/restart controls retained committed values and removed tested uncommitted updates/inserts.",
+        "24 normal serial timing servers, 6144 timed SQL; all responses equal to their local preflight online. All query types exceeded a 5% drift reference; no stable speedup or no-regression claim. Existing TOAST assertion and 30-column limit remain open. Full suite not run; original 273 item objects unchanged."
+      ]
+    },
+    {
       "issue": "2026-11-08 ordinary zero-width results, TOAST demand and scalar argument investigation",
       "gap_ids": [
         "SQL-01",

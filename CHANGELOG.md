@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-11-17：损坏字段读取明确报错
+
+修复变长字段目录损坏时可能返回空字符串或错误文本的问题，增加真实损坏页、空值、事务与重启回归。正常查询性能对照有快有慢，波动较大；完整测试套件未运行。详见[测试报告](docs/test-report.md#variable-row-directory-20261117)与[性能报告](docs/performance-report-2026-10-30.md#variable-row-directory-cost-20261117)。
+
 ## 2026-11-08：原生锁故障复核
 
 记录锁升级、分配失败及两阶段锁交接的原生测试结果；已发现的缺口尚未修复，测试范围与限制见[测试报告](docs/test-report.md#native-lock-fault-review-20261108)。

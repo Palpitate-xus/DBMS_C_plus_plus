@@ -15,6 +15,7 @@
 #include "catalog/PgSequenceCatalog.h"
 #include "commands/VacuumFullBackup.h"
 #include "common/DbError.h"
+#include "storage/VariableRow.h"
 #include "common/SqlArrayText.h"
 #include "expression/StoredRegtypeValue.h"
 #include "common/BooleanCodec.h"
@@ -415,68 +416,14 @@ static bool resolvedToastEntry(const std::string& rowBuffer,
                                size_t wantedVarIndex,
                                uint32_t* wantedOffset,
                                uint32_t* wantedLength) {
-    const size_t varCount = tbl.varColCount();
-    if (varCount == 0 || wantedVarIndex >= varCount) return false;
     const size_t fixedSize = tbl.fixedDataSize();
-    if (varCount > (std::numeric_limits<size_t>::max() - fixedSize) / 4)
+    const size_t varCount = tbl.varColCount();
+    if (!detail::hasResolvedVariableMarker(rowBuffer, fixedSize, varCount))
         return false;
-    const size_t legacyEnd = fixedSize + varCount * 4;
-    if (legacyEnd > rowBuffer.size()) return false;
-
-    uint16_t sentinelOffset = 0;
-    uint16_t sentinelLength = 0;
-    std::memcpy(&sentinelOffset, rowBuffer.data() + fixedSize,
-                sizeof(sentinelOffset));
-    std::memcpy(&sentinelLength,
-                rowBuffer.data() + fixedSize + sizeof(sentinelOffset),
-                sizeof(sentinelLength));
-    if (sentinelOffset != RESOLVED_TOAST_SENTINEL ||
-        sentinelLength != RESOLVED_TOAST_SENTINEL) {
-        return false;
-    }
-
-    constexpr size_t headerSize = sizeof(uint32_t) * 2;
-    if (legacyEnd > rowBuffer.size() ||
-        rowBuffer.size() - legacyEnd < headerSize) {
-        return false;
-    }
-    uint32_t magic = 0;
-    uint32_t storedCount = 0;
-    std::memcpy(&magic, rowBuffer.data() + legacyEnd, sizeof(magic));
-    std::memcpy(&storedCount, rowBuffer.data() + legacyEnd + sizeof(magic),
-                sizeof(storedCount));
-    if (magic != RESOLVED_TOAST_MAGIC || storedCount != varCount ||
-        varCount > (std::numeric_limits<size_t>::max() - legacyEnd - headerSize) / 8) {
-        return false;
-    }
-
-    const size_t entriesStart = legacyEnd + headerSize;
-    const size_t dataStart = entriesStart + varCount * 8;
-    if (dataStart > rowBuffer.size()) return false;
-    uint64_t expectedOffset = dataStart;
-    uint32_t selectedOffset = 0;
-    uint32_t selectedLength = 0;
-    for (size_t i = 0; i < varCount; ++i) {
-        uint32_t offset = 0;
-        uint32_t length = 0;
-        const size_t entryPos = entriesStart + i * 8;
-        std::memcpy(&offset, rowBuffer.data() + entryPos, sizeof(offset));
-        std::memcpy(&length, rowBuffer.data() + entryPos + sizeof(offset),
-                    sizeof(length));
-        if (offset != expectedOffset ||
-            static_cast<uint64_t>(length) > rowBuffer.size() - offset) {
-            return false;
-        }
-        expectedOffset += length;
-        if (expectedOffset > rowBuffer.size()) return false;
-        if (i == wantedVarIndex) {
-            selectedOffset = offset;
-            selectedLength = length;
-        }
-    }
-    if (expectedOffset != rowBuffer.size()) return false;
-    if (wantedOffset) *wantedOffset = selectedOffset;
-    if (wantedLength) *wantedLength = selectedLength;
+    const auto span = detail::variableFieldSpan(
+        rowBuffer, fixedSize, varCount, wantedVarIndex);
+    if (wantedOffset) *wantedOffset = static_cast<uint32_t>(span.offset);
+    if (wantedLength) *wantedLength = static_cast<uint32_t>(span.length);
     return true;
 }
 
@@ -11440,22 +11387,10 @@ std::string StorageEngine::extractColumnValueStatic(const std::string& rowBuffer
     }
 
     if (col.isVariableLength) {
-        // Variable-length column: look up in var offset array
-        size_t varIdx = tbl.getVarColIndex(colIdx);
-        uint32_t resolvedOffset = 0;
-        uint32_t resolvedLength = 0;
-        if (resolvedToastEntry(rowBuffer, tbl, varIdx, &resolvedOffset,
-                               &resolvedLength)) {
-            return rowBuffer.substr(resolvedOffset, resolvedLength);
-        }
-        size_t fixedSize = tbl.fixedDataSize();
-        size_t arrPos = fixedSize + varIdx * 4;
-        if (arrPos + 4 > rowBuffer.size()) return "";
-        uint16_t dataOffset = 0, dataLen = 0;
-        std::memcpy(&dataOffset, rowBuffer.data() + arrPos, sizeof(uint16_t));
-        std::memcpy(&dataLen, rowBuffer.data() + arrPos + 2, sizeof(uint16_t));
-        if (dataOffset + dataLen > rowBuffer.size()) return "";
-        return rowBuffer.substr(dataOffset, dataLen);
+        const auto span = detail::variableFieldSpan(
+            rowBuffer, tbl.fixedDataSize(), tbl.varColCount(),
+            tbl.getVarColIndex(colIdx));
+        return rowBuffer.substr(span.offset, span.length);
     }
 
     // Fixed-length column
@@ -11687,11 +11622,11 @@ std::string StorageEngine::extractColumnValue(const std::string& rowBuffer,
     }
 
     std::string val = extractColumnValueStatic(rowBuffer, tbl, colIdx);
-    uint32_t ignoredResolvedOffset = 0;
-    uint32_t ignoredResolvedLength = 0;
-    if (col.isVariableLength &&
-        resolvedToastEntry(rowBuffer, tbl, 0, &ignoredResolvedOffset,
-                           &ignoredResolvedLength)) {
+    // The value getter already validated the complete directory. Only its
+    // encoding marker is needed here to avoid interpreting resolved text as
+    // a stored TOAST pointer; do not scan the directory a second time.
+    if (col.isVariableLength && detail::hasResolvedVariableMarker(
+            rowBuffer, tbl.fixedDataSize(), tbl.varColCount())) {
         return val;
     }
     if (!valueDb.empty() && col.isVariableLength) {
