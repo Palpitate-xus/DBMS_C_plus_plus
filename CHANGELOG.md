@@ -1,16 +1,16 @@
 # Changelog
 
-## 2026-11-17：字段读取回归与性能对照
+## 2026-11-17：补充数据读取测试和性能测试结果
 
-新增 22 项字段解码检查。两个优化候选因未能证明稳定收益而未采纳，生产源码保持原实现；完整结果包含慢项和既有 TOAST 失败。[测试报告](docs/test-report.md#row-directory-reuse-20261117)、[性能报告](docs/performance-report-2026-10-30.md#row-directory-reuse-cost-20261117)。
+新增 22 项数据读取检查，覆盖空值、空字符串和部分字段读取等情况。尝试的两种优化未能带来稳定提速，因此保留原来的实现。报告列出了全部结果，包括变慢的查询，以及此前已有、仍未修复的长文本存储测试失败。[测试报告](docs/test-report.md#row-directory-reuse-20261117)、[性能报告](docs/performance-report-2026-10-30.md#row-directory-reuse-cost-20261117)。
 
-## 2026-11-17：损坏字段读取明确报错
+## 2026-11-17：修复损坏数据被当成正常值返回的问题
 
-修复变长字段目录损坏时可能返回空字符串或错误文本的问题，增加真实损坏页、空值、事务与重启回归。正常查询性能对照有快有慢，波动较大；完整测试套件未运行。详见[测试报告](docs/test-report.md#variable-row-directory-20261117)与[性能报告](docs/performance-report-2026-10-30.md#variable-row-directory-cost-20261117)。
+读取字段时，如果记录字段位置的信息已损坏，现在会报错，避免返回空字符串或错误文本。新增损坏数据、空值、事务和重启测试；没有运行完整测试套件。性能测量有快有慢，波动较大，暂不能确认提速。详见[测试报告](docs/test-report.md#variable-row-directory-20261117)与[性能报告](docs/performance-report-2026-10-30.md#variable-row-directory-cost-20261117)。
 
-## 2026-11-08：原生锁故障复核
+## 2026-11-08：记录并发访问中尚未修复的问题
 
-记录锁升级、分配失败及两阶段锁交接的原生测试结果；已发现的缺口尚未修复，测试范围与限制见[测试报告](docs/test-report.md#native-lock-fault-review-20261108)。
+检查了多个事务争用数据、内存不足，以及准备提交的事务移交锁时的行为。发现的问题尚未修复，测试方法、结果和限制见[测试报告](docs/test-report.md#native-lock-fault-review-20261108)。
 
 ## 2026-11-08：普通表达式和行格式差距复核
 

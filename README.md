@@ -1,6 +1,6 @@
 # DBMS C++
 
-一个用 C++ 编写的关系型数据库，提供 SQL 查询、数据增删改、索引和事务，支持命令行操作，也可以通过 PostgreSQL 客户端协议连接。
+一个用 C++ 编写的关系型数据库，支持 SQL 查询、数据增删改、索引和事务。可以在命令行中使用，也可以通过 psql 等 PostgreSQL 客户端连接。
 
 项目仍在开发中，部分 SQL、并发访问和恢复行为存在已知问题。具体范围见[兼容性说明](docs/compatibility-contract.md)和[与 PostgreSQL 的对比](docs/postgresql-comparison.md)。数据库使用自己的存储格式，不能直接读取 PostgreSQL 数据目录。
 
@@ -8,10 +8,10 @@
 
 ## 主要功能
 
-- **查询与数据管理**：建表、查询、插入、更新和删除，包含连接、排序、聚合与窗口函数。
-- **数据存储与索引**：按页存储数据，支持长文本、B+ 树和哈希索引。
-- **事务与恢复**：包含提交、回滚、保存点、多版本并发控制、锁和写入日志恢复。
-- **客户端连接**：提供交互式命令行，以及 PostgreSQL 的简单查询和预备语句协议接口。
+- **查询与数据管理**：建表、查询、插入、更新和删除，支持关联多张表、排序、分组统计和窗口函数。
+- **数据存储与索引**：支持长文本，以及 B+ 树和哈希索引。
+- **事务与恢复**：支持提交、回滚和保存点，提供并发访问控制和日志恢复。
+- **客户端连接**：提供交互式命令行，支持通过 PostgreSQL 客户端执行普通查询和带参数的查询。
 
 功能的支持范围和使用方法见[使用手册](docs/MANUAL.md)，已知问题和测试范围见[测试报告](docs/test-report.md)。
 
@@ -146,10 +146,10 @@ bash scripts/build_one_test.sh window_functions_test
 src/
 ├── main.cpp       # 命令行与服务启动入口
 ├── parser/        # 解析 SQL，检查名称和类型
-├── catalog/       # 类型与系统目录
+├── catalog/       # 数据库结构与类型信息
 ├── commands/      # 建表、查询和数据修改命令
-├── executor/      # 查询计划与执行算子
-├── expression/    # 表达式求值与查询准备
+├── executor/      # 制定并执行查询计划
+├── expression/    # 计算表达式、准备查询
 ├── storage/       # 页面、缓冲池与存储组件
 ├── access/        # 索引与访问方法
 ├── transaction/   # 事务与日志组件
@@ -162,30 +162,30 @@ docs/              # 使用、兼容性与开发文档
 
 ## 最近更新
 
-这里只列出最近 3 条记录，点击卡片标题展开。[查看完整更新日志](CHANGELOG.md)。
+只显示最近 3 条，点击标题展开。[查看完整更新日志](CHANGELOG.md)。
 
 <details>
-<summary><strong>2026-11-17 · 补充字段读取测试和性能对照</strong></summary>
+<summary><strong>2026-11-17 · 补充数据读取测试和性能测试结果</strong></summary>
 
-新增字段读取回归测试。两轮性能实验未证明稳定提速，候选未采纳，完整结果包含慢项。
+增加空值、空字符串和部分字段读取的测试。尝试的两种优化未能带来稳定提速，因此保留原来的实现；报告列出了全部结果，包括变慢的查询。
 
 [查看测试结果](docs/test-report.md#row-directory-reuse-20261117) · [查看完整性能对照](docs/performance-report-2026-10-30.md#row-directory-reuse-cost-20261117)
 
 </details>
 
 <details>
-<summary><strong>2026-11-17 · 读取损坏字段时明确报错</strong></summary>
+<summary><strong>2026-11-17 · 修复损坏数据被当成正常值返回的问题</strong></summary>
 
-修复字段目录损坏时可能返回空字符串或错误文本的问题，补充查询、事务和重启测试。性能测量波动较大，暂不能确认提速。
+读取字段时，如果记录字段位置的信息已损坏，现在会报错，避免返回空字符串或错误文本。已补充查询、事务和重启测试；性能测量波动较大，暂不能确认提速。
 
 [查看测试结果](docs/test-report.md#variable-row-directory-20261117) · [查看性能测量](docs/performance-report-2026-10-30.md#variable-row-directory-cost-20261117)
 
 </details>
 
 <details>
-<summary><strong>2026-11-08 · 检查并发访问中的锁问题</strong></summary>
+<summary><strong>2026-11-08 · 记录并发访问中尚未修复的问题</strong></summary>
 
-检查了锁升级、内存不足和事务锁交接时的行为，记录了尚未修复的问题。
+检查了多个事务争用数据、内存不足等情况下的行为。发现的问题和复现方法已写入测试报告，相关问题尚未修复。
 
 [查看测试结果和已知问题](docs/test-report.md#native-lock-fault-review-20261108)
 
