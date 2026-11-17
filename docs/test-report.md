@@ -2,6 +2,41 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="stored-reference-output-20261117"></a>
+## 2026-11-17：修复类型、表引用的查询显示和数组比较
+
+普通物理列输出现在把 REGTYPE、REGCLASS 的存储编号转换成对应名称，例如类型编号 `23` 显示为 `integer`。排序、去重和内部临时结果继续使用原始编号；最终返回客户端时才转换，同一次输出缓存已经查过的名称。空结果、全 SQL NULL 或已经生成显示文本的字段不会为这个转换额外读取目录。数组保留元素 NULL、OID 0、未知编号、维度和非默认下界。
+
+同时修复引用数组的普通排序与 DISTINCT；补齐无目录属性的内部临时表中引用字段的真实类型信息；父子表的所测普通列查询合并后统一排序、分页，包含隐藏排序字段、别名、序号、重叠 OR 和通配符。`LIMIT 0` 保留原来的类型绑定与空接收路径，序列检查确认 WHERE 未被求值。WITH 的子查询在拆分前保留原始表达式，避免把数组构造误写成取下标操作。所测普通视图和括号查询可以正常展示名称，物化消费者仍接收原有存储值。
+
+### 实际验证
+
+- **构建**：GCC 13.3、C++17、`-O2`、正常 CMake，关闭 OpenSSL。初次重编 13 个受依赖影响的目标，后续按改动增量重编；其余对象逐一核对源码、依赖、选项和哈希。最终程序 SHA-256 为 `e994f74d7d792181550851ac1993cd812f2246a192984872d7bc55535dd2d363`，旧版为 `b31537087e7a377992157670f01874cc1f069f164e93b6535b64401afc075174`。这不是全量清空重建，没有替换根目录程序或重启现有服务。
+- **C++**：29 个选定入口全部通过。新增[文本输出](../tests/stored_reference_output_test.cpp) 88 项、[真实存储及执行计划](../tests/stored_reference_provenance_test.cpp) 347 项、[数组排序与去重](../tests/stored_reference_sort_test.cpp) 527 项、[内部临时表类型](../tests/internal_reference_metadata_test.cpp) 192 项，共 1,154 项新增检查。覆盖真正的元素 OID、原始行不被改写、NULL、错误不部分发布、低内存排序预算及类型来源阴性条件。
+- **既有客户端入口**：14 个中 13 个通过；`cte_window_owner_protocol_e2e_test.py` 的 747 个动作仍有 29 个失败。旧版与各候选的未过滤结果一致，涉及固定来源表编号、错误发生阶段及嵌套 CTE 窗口缺少列描述；未修改预期，也未修复用户暂缓的规划或输出策略。
+- **SQL、事务与恢复**：独立对照保存 PG18.6/旧版/新版 160/159/159 组回复，连同 3 条 PG 启动查询共审计 481 对请求与完整响应。新版通过 156/159，剩下三条都是继承表的 CAST 查询遗漏子表，分别在正常、冷启动和恢复阶段复现。48 个回滚/恢复控制全部通过；7 次正常停止、两个项目版本各一次真正 SIGKILL，客户端在杀进程时仍保持连接。重启后所测已提交引用保留、未提交修改消失。PG 对应控制使用回滚和正常重启。
+
+新增自动协议入口均使用真实 PostgreSQL 18.6 核对，并用另一份解码器复核保留的请求、回应：
+
+| 入口 | 旧版通过 | 最终版通过 | PostgreSQL 18.6 |
+| --- | ---: | ---: | ---: |
+| [类型引用](../tests/regtype_direct_projection_protocol_e2e_test.py) | 61/86 | 86/86 | 86/86 |
+| [表引用](../tests/regclass_direct_projection_protocol_e2e_test.py) | 47/62 | 62/62 | 62/62 |
+| [父子表查询](../tests/regtype_inherited_projection_protocol_e2e_test.py) | 28/60 | 60/60 | 60/60 |
+| [派生表、视图与括号查询](../tests/regtype_materialization_protocol_e2e_test.py) | 32/35 | 35/35 | 35/35 |
+
+合计 243 条检查全部通过并接入脚本测试入口。新克隆可构建后设置 `DBMS_MAIN` 为程序的绝对路径，逐一运行表中的 Python 文件；测试使用独立目录。其检查包含行值、SQL NULL、列名、类型 OID、命令标签和事务状态，不等于全部 PostgreSQL 列来源属性一致。完整 SQL 对照另保留 24 项既有属性序号差异，REGCLASS 专项也保留相同类别的差异。
+
+### 保留的失败和未完成范围
+
+[108 条完整诊断](../tests/regtype_direct_projection_known_gap.py)仍要求数组域及继承组合全部成功：PG108/108；最终版实际执行 51 条，50 通过，数组域建表返回 `0A000`，后 57 条未执行。[40 条完整物化诊断](../tests/regtype_materialization_known_gap.py)仍要求从视图 INSERT SELECT 成功：PG40/40；最终版实际执行 32 条，31 通过，该写入返回 `0A000`，后 8 条未执行。两个脚本保留全部原始正向预期，手动运行仍会失败；它们与自动入口共用用例/运行器，分组后的 SQL、预期、顺序和清理步骤已逐字段核对，没有失败允许名单。
+
+前期候选曾漏掉数组 DISTINCT、继承通配符、全局排序以及临时表数组转文本。私有调用诊断确认，临时标记只在建表时存在、不写入 schema；最终改用实际命令登记、会话、schema 与 heap 验证来源。一个新增测试初用 C++20 默认比较运算符，改为等价 C++17 实现；原编译失败、运行失败、源码和修正记录均保留。测试驱动也曾误列旧文件名，该次未算通过，剩余入口改用实际文件重新执行。
+
+参考 [PG18.6 的结果输出](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/access/common/printtup.c)、[引用名称转换](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/utils/adt/regproc.c)、[数组比较与输出](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/utils/adt/arrayfuncs.c)。SQLite 的[类型值和文本访问](https://github.com/sqlite/sqlite/blob/master/src/vdbeapi.c)、DuckDB 的[有类型的 Value 与文本转换](https://github.com/duckdb/duckdb/blob/main/src/common/types/value.cpp)仅作为数据与显示分离的实现参考，不表示两者实现 PostgreSQL 引用类型。
+
+完整测试套件未运行；数组域、视图写入、继承表达式及来源属性等仍需继续工作。原 273 项事项及用户暂缓范围不变。性能测量见[本批报告](performance-report-2026-10-30.md#stored-reference-output-cost-20261117)，未证明稳定提速。原始源码快照、协议、故障与计时记录只保存在本机忽略目录 `build/stored-reference-output-20261117/`，不进入 Git。
+
 <a id="scalar-storage-demand-20261117"></a>
 ## 2026-11-17：减少未引用字段的转换，并记录函数参数缺口
 
@@ -13,6 +48,8 @@
 - **C++ 回归**：[基础按需读取](../tests/lazy_scalar_columns_test.cpp)通过 27 项检查，[真实存储类型与生成列](../tests/lazy_scalar_metadata_test.cpp)最终通过 163 项检查。覆盖 OID 0、REGTYPE 身份、数组边界与元素 NULL/文本 NULL/空串、返回值寿命、限定列名与重名优先级、未引用损坏输入、已引用转换错误先于副作用，以及生成列/输出强制转换的保守处理。选定的 20 个 C++ 入口最终版本均通过；扩展后的类型测试单独重跑，原 102 项版本和初次失败记录仍保留。
 - **客户端回归**：8 个既有入口通过，包含 REGTYPE、REGTYPE 数组、domain、行构造、numeric 默认值冷启动、复合类型、带引号目录字段和拥有实际类型身份的目录查询。测试驱动曾误列一个不存在的 Python 文件；该次不是通过的测试，改用现有类型目录入口单独完成，原错误日志保留。
 - **实际查询与恢复**：相同性能数据的 PG18.6/旧版/新版保存 46/45/45 组请求和回复。另一份解码器核对 45 组新旧完整回复一致、90 组 PG 语义对照一致（只排除来源表 OID）。7 次服务正常退出，两个项目版本各执行一次真实 SIGKILL 后重启，已提交数据保留，所测未提交文本和 REGTYPE 修改消失。额外的裸 `SELECT id,t,r0,r7` 控制发现旧版与新版仍会显示内部 OID 23/25，而 PG 显示类型名；这个既有缺口单独保留，匹配的恢复控制明确使用 `r0::text`/`r7::text`，没有把不同结果归一化成通过。
+
+这里的“新版”指当时的 `b3153708…`。上方[后续查询输出修复](#stored-reference-output-20261117)已覆盖所测普通引用投影；本段保留该批历史反例和测量，不代表当前仍有相同显示缺陷。
 
 [严格参数对照脚本](../tests/scalar_argument_expression_known_gap.py)保留全部 67 项预期：真实 PG18.6 全部通过；旧版和本版均通过 47 项、失败 20 项。第二解码器复核后，新旧 67 份完整回复逐字节一致，测试对象的随机名称只用于核对 SQL 对应关系。失败涉及转义引号、字符串拼接、带引号字段、遗漏的序列副作用、被忽略的运行时除零，以及失败事务状态。所测 INSERT SELECT、UPDATE、DEFAULT 和正常重启持久化控制通过，不扩大为所有写入已验证。该脚本手动运行会返回非零，未纳入声称通过的测试列表；没有降低预期或添加失败允许名单。
 

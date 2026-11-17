@@ -35942,7 +35942,9 @@ std::vector<std::string> StorageEngine::query(
     std::vector<std::vector<bool>>* structuredNulls,
     std::vector<int64_t>* structuredRowIds,
     const GeneratedRelationPtr& generatedDeclaration,
-    std::vector<std::vector<ExprValue>>* generatedInputs) {
+    std::vector<std::vector<ExprValue>>* generatedInputs,
+    std::vector<StoredReferenceOutputRole>* storedOutputRoles) {
+    if (storedOutputRoles) storedOutputRoles->clear();
     noteTemporaryRelationAccess(dbname, tablename);
     std::vector<std::string> result;
     if (structuredRows) structuredRows->clear();
@@ -36752,6 +36754,30 @@ std::vector<std::string> StorageEngine::query(
             structuredNulls->push_back(std::move(structuredNullRow));
         if (structuredRowIds) structuredRowIds->push_back(mr.first);
     }
+    if (storedOutputRoles) {
+        size_t outputWidth = 0;
+        bool hasStoredReference = false;
+        for (size_t i = 0; i < tbl.len; ++i) {
+            const auto& column = tbl.cols[i];
+            if (!selectCols.empty() && selectCols.count(column.dataName) == 0)
+                continue;
+            ++outputWidth;
+            if (storedReferenceOutputRoleForColumn(column).kind !=
+                StoredReferenceOutputRole::Kind::None)
+                hasStoredReference = true;
+        }
+        if (hasStoredReference) {
+            std::vector<StoredReferenceOutputRole> roles;
+            roles.reserve(outputWidth);
+            for (size_t i = 0; i < tbl.len; ++i) {
+                const auto& column = tbl.cols[i];
+                if (!selectCols.empty() && selectCols.count(column.dataName) == 0)
+                    continue;
+                roles.push_back(storedReferenceOutputRoleForColumn(column));
+            }
+            *storedOutputRoles = std::move(roles);
+        }
+    }
     dbms::recordTableScan(dbname, tablename, matchRows.size(), usedIndex, conds.empty());
     return result;
 }
@@ -37080,6 +37106,54 @@ DatumMetadataContextPtr StorageEngine::prepareDatumMetadataContext(
                 result->storedColumns.insert(row.attname);
                 result->storedColumns.insert(logical.name+"."+row.attname);
                 result->storedColumns.insert(logical.schema+"."+logical.name+"."+row.attname);
+            }
+        }
+        const auto& command = transactionContext();
+        if (!relation && result->columns.empty() && result->storedColumns.empty() &&
+            command.inTransaction && command.txnDB == dbname &&
+            command.readView.commandIdVisibility &&
+            command.commandInternalRelations.count(physicalTable) &&
+            tableExists(dbname, physicalTable)) {
+            const auto table = getTableSchema(dbname, physicalTable);
+            // An internal materializer creates this actual temporary schema
+            // without publishing catalog relation/attribute rows. Recover its
+            // current column declarations, never the upstream source's domain
+            // or a declaration inferred from an expression's display/hints.
+            const auto* session = currentSession();
+            std::error_code heapError;
+            // isTemporary is a create-time marker, not persisted schema data.
+            // The current command's registry and session prefix own this heap.
+            if (table.tablename == physicalTable && session &&
+                physicalTable.rfind(tempTablePrefix(*session, ""), 0) == 0 &&
+                std::filesystem::is_regular_file(dataPath(dbname, physicalTable), heapError) &&
+                !heapError) {
+                for (size_t index = 0; index < table.len; ++index) {
+                    const auto& column = table.cols[index];
+                    if (column.generatedKind == 'v' || !column.domainName.empty() ||
+                        !column.enumValues.empty() ||
+                        !stored_regtype_detail::scalarType(column.dataType)) continue;
+                    const bool regclass = column.dataType == "regclass";
+                    const Oid scalarCodec = regclass ? 2205 : 2206;
+                    const Oid arrayCodec = regclass ? 2210 : 2211;
+                    const std::string spelling = "pg_catalog." + column.dataType +
+                        (column.isArray ? "[]" : "");
+                    const auto declaration = owner->factory->modifier(
+                        owner->factory->declaration(spelling, 0), column.typeMod);
+                    if (!declaration || !declaration->actualOid) continue;
+                    if (column.isArray) {
+                        if (declaration->kind != DatumKind::Array ||
+                            declaration->codecOid != arrayCodec || !declaration->arrayElement ||
+                            !declaration->arrayElement->actualOid ||
+                            declaration->arrayElement->codecOid != scalarCodec) continue;
+                    } else if (declaration->kind != DatumKind::Scalar ||
+                               declaration->codecOid != scalarCodec) continue;
+                    for (const auto& key : {column.dataName,
+                            logical.name + "." + column.dataName,
+                            logical.schema + "." + logical.name + "." + column.dataName}) {
+                        result->columns.emplace(key, declaration);
+                        result->storedColumns.insert(key);
+                    }
+                }
             }
         }
     }
@@ -45680,6 +45754,46 @@ static std::vector<JoinCondition> parseJoinOnConditions(
     return parsed;
 }
 
+// Derive raw output roles from the same locked declarations and selection
+// rules as the join's structured cells, without reading any row values.
+static void collectJoinStoredOutputRoles(
+    const TableSchema& leftTable, const TableSchema& rightTable,
+    const std::string& leftRange, const std::string& rightRange,
+    bool encodedColumns, const std::set<std::string>& selectCols,
+    std::vector<StoredReferenceOutputRole>* storedOutputRoles) {
+    if (!storedOutputRoles) return;
+    const auto included = [&](const std::string& range, const Column& column) {
+        return selectCols.empty() || selectCols.count(column.dataName) != 0 ||
+            selectCols.count(StorageEngine::joinRangeColumnKey(
+                range, column.dataName, encodedColumns)) != 0;
+    };
+    size_t outputWidth = 0;
+    bool hasStoredReference = false;
+    const auto inspect = [&](const TableSchema& table, const std::string& range) {
+        for (size_t i = 0; i < table.len; ++i) {
+            if (!included(range, table.cols[i])) continue;
+            ++outputWidth;
+            if (storedReferenceOutputRoleForColumn(table.cols[i]).kind !=
+                StoredReferenceOutputRole::Kind::None)
+                hasStoredReference = true;
+        }
+    };
+    inspect(leftTable, leftRange);
+    inspect(rightTable, rightRange);
+    if (!hasStoredReference) return;
+    std::vector<StoredReferenceOutputRole> roles;
+    roles.reserve(outputWidth);
+    const auto append = [&](const TableSchema& table, const std::string& range) {
+        for (size_t i = 0; i < table.len; ++i) {
+            if (included(range, table.cols[i]))
+                roles.push_back(storedReferenceOutputRoleForColumn(table.cols[i]));
+        }
+    };
+    append(leftTable, leftRange);
+    append(rightTable, rightRange);
+    *storedOutputRoles = std::move(roles);
+}
+
 std::vector<std::string> StorageEngine::join(
     const std::string& dbname,
     const std::string& leftTable,
@@ -45691,7 +45805,9 @@ std::vector<std::string> StorageEngine::join(
     std::vector<std::vector<std::string>>* structuredRows,
     std::vector<std::vector<bool>>* structuredNulls,
     const std::vector<std::string>& onConditions,
-    const JoinRangeNames& rangeNames) {
+    const JoinRangeNames& rangeNames,
+    std::vector<StoredReferenceOutputRole>* storedOutputRoles) {
+    if (storedOutputRoles) storedOutputRoles->clear();
     const std::string& leftRange = rangeNames.first.empty() ? leftTable : rangeNames.first;
     const std::string& rightRange = rangeNames.second.empty() ? rightTable : rangeNames.second;
     std::vector<std::string> result;
@@ -45707,7 +45823,7 @@ std::vector<std::string> StorageEngine::join(
         }
         filters.insert(filters.end(), conditions.begin(), conditions.end());
         return crossJoin(dbname, leftTable, rightTable, filters, selectCols,
-                         structuredRows, structuredNulls, rangeNames);
+                         structuredRows, structuredNulls, rangeNames, storedOutputRoles);
     }
 
     // Lock both tables in alphabetical order to avoid deadlock
@@ -45993,6 +46109,8 @@ std::vector<std::string> StorageEngine::join(
             }
         }
     }
+    collectJoinStoredOutputRoles(leftTbl, rightTbl, leftRange, rightRange,
+        rangeNames.encodeColumns, selectCols, storedOutputRoles);
     lockManager_.unlock(leftTable);
     lockManager_.unlock(rightTable);
     return result;
@@ -46013,7 +46131,9 @@ std::vector<std::string> StorageEngine::leftJoin(
     std::vector<std::vector<std::string>>* structuredRows,
     std::vector<std::vector<bool>>* structuredNulls,
     const std::vector<std::string>& onConditions,
-    const JoinRangeNames& rangeNames) {
+    const JoinRangeNames& rangeNames,
+    std::vector<StoredReferenceOutputRole>* storedOutputRoles) {
+    if (storedOutputRoles) storedOutputRoles->clear();
     const std::string& leftRange = rangeNames.first.empty() ? leftTable : rangeNames.first;
     const std::string& rightRange = rangeNames.second.empty() ? rightTable : rangeNames.second;
     std::vector<std::string> result;
@@ -46306,6 +46426,8 @@ std::vector<std::string> StorageEngine::leftJoin(
             }
         }
     }
+    collectJoinStoredOutputRoles(leftTbl, rightTbl, leftRange, rightRange,
+        rangeNames.encodeColumns, selectCols, storedOutputRoles);
     lockManager_.unlock(leftTable);
     lockManager_.unlock(rightTable);
     return result;
@@ -46326,7 +46448,9 @@ std::vector<std::string> StorageEngine::rightJoin(
     std::vector<std::vector<std::string>>* structuredRows,
     std::vector<std::vector<bool>>* structuredNulls,
     const std::vector<std::string>& onConditions,
-    const JoinRangeNames& rangeNames) {
+    const JoinRangeNames& rangeNames,
+    std::vector<StoredReferenceOutputRole>* storedOutputRoles) {
+    if (storedOutputRoles) storedOutputRoles->clear();
     const std::string& leftRange = rangeNames.first.empty() ? leftTable : rangeNames.first;
     const std::string& rightRange = rangeNames.second.empty() ? rightTable : rangeNames.second;
     std::vector<std::string> result;
@@ -46585,6 +46709,8 @@ std::vector<std::string> StorageEngine::rightJoin(
             }
         }
     }
+    collectJoinStoredOutputRoles(leftTbl, rightTbl, leftRange, rightRange,
+        rangeNames.encodeColumns, selectCols, storedOutputRoles);
     lockManager_.unlock(leftTable);
     lockManager_.unlock(rightTable);
     return result;
@@ -46601,7 +46727,9 @@ std::vector<std::string> StorageEngine::fullOuterJoin(
     std::vector<std::vector<std::string>>* structuredRows,
     std::vector<std::vector<bool>>* structuredNulls,
     const std::vector<std::string>& onConditions,
-    const JoinRangeNames& rangeNames) {
+    const JoinRangeNames& rangeNames,
+    std::vector<StoredReferenceOutputRole>* storedOutputRoles) {
+    if (storedOutputRoles) storedOutputRoles->clear();
     // Reuse the outer-join matcher in FULL mode. A second/third pass would
     // reevaluate VOLATILE ON operands and could disagree about which input
     // occurrences matched. The private carrier flag adds unmatched rights
@@ -46611,7 +46739,7 @@ std::vector<std::string> StorageEngine::fullOuterJoin(
     fullConditions.push_back("__join_full_once__");
     return leftJoin(
         dbname, leftTable, rightTable, leftCol, rightCol, conditions, selectCols,
-        structuredRows, structuredNulls, fullConditions, rangeNames);
+        structuredRows, structuredNulls, fullConditions, rangeNames, storedOutputRoles);
 }
 
 std::vector<std::string> StorageEngine::crossJoin(
@@ -46622,7 +46750,9 @@ std::vector<std::string> StorageEngine::crossJoin(
     const std::set<std::string>& selectCols,
     std::vector<std::vector<std::string>>* structuredRows,
     std::vector<std::vector<bool>>* structuredNulls,
-    const JoinRangeNames& rangeNames) {
+    const JoinRangeNames& rangeNames,
+    std::vector<StoredReferenceOutputRole>* storedOutputRoles) {
+    if (storedOutputRoles) storedOutputRoles->clear();
     const std::string& leftRange = rangeNames.first.empty() ? leftTable : rangeNames.first;
     const std::string& rightRange = rangeNames.second.empty() ? rightTable : rangeNames.second;
     std::vector<std::string> result;
@@ -46792,6 +46922,8 @@ std::vector<std::string> StorageEngine::crossJoin(
             }
         }
     }
+    collectJoinStoredOutputRoles(leftTbl, rightTbl, leftRange, rightRange,
+        rangeNames.encodeColumns, selectCols, storedOutputRoles);
     lockManager_.unlock(leftTable);
     lockManager_.unlock(rightTable);
     return result;

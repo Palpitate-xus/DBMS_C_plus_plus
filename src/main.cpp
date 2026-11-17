@@ -3,6 +3,7 @@
 #include "catalog/SystemCatalogRows.h"
 #include "catalog/PgDefaultCatalog.h"
 #include "expression/StoredRegtypeValue.h"
+#include "expression/StoredReferenceOutput.h"
 #include <algorithm>
 #include <charconv>
 #include "types/numeric.h"
@@ -213,6 +214,9 @@ static thread_local unsigned storedFunctionHostDepth = 0;
 // normally accepts results only from depth 1; this scoped depth is the one
 // internal metadata-consumer exception.
 static thread_local unsigned metadataCaptureDepth = 0;
+// Captured rows consumed as data retain the legacy physical reference bytes.
+// Transparent wrappers (views/parentheses) still inherit client presentation.
+static thread_local unsigned storedReferenceMaterializationDepth = 0;
 
 // A demand belongs to exactly one executed SQL statement. Derived queries,
 // CTE bodies and nested function commands execute at a different depth and
@@ -331,6 +335,65 @@ static const dbms::ColumnRefExpr* queryDemandPhysicalOrderColumn(
 static bool shouldPublishQueryMetadata() {
     return executeDepth == 1 ||
            (metadataCaptureDepth != 0 && executeDepth == metadataCaptureDepth);
+}
+
+// Only the physical producer may identify raw reference cells. Keep those
+// cells raw through comparisons and slicing, then render the outgoing copy.
+static void renderStoredReferenceRows(
+    const Session& session, const string& database,
+    const vector<dbms::StoredReferenceOutputRole>& roles,
+    vector<vector<string>>& rows, const vector<vector<bool>>& nulls,
+    vector<string>& answers,
+    const map<pair<size_t, size_t>, dbms::StoredReferenceOutputRole>* rowRoleOverrides = nullptr) {
+    if (storedReferenceMaterializationDepth || rows.empty() || roles.empty()) return;
+    const auto isReference = [](const auto& role) {
+        return role.kind != dbms::StoredReferenceOutputRole::Kind::None;
+    };
+    if (!any_of(roles.begin(), roles.end(), isReference) &&
+        (!rowRoleOverrides || none_of(rowRoleOverrides->begin(), rowRoleOverrides->end(),
+            [&](const auto& entry) { return isReference(entry.second); }))) return;
+    if (rows.size() != nulls.size() || rows.size() != answers.size())
+        throw dbms::DbError("XX000", "stored reference output lost its row metadata");
+    std::optional<dbms::CatalogManager::MetadataSnapshot> catalog;
+    std::optional<dbms::StoredReferenceOutputRenderer> renderer;
+    const auto render = [&](vector<string>& cells, const vector<bool>& bitmap,
+                            const vector<dbms::StoredReferenceOutputRole>& actualRoles) {
+        if (cells.size() != bitmap.size() || cells.size() != actualRoles.size())
+            throw dbms::DbError("XX000", "stored reference output width mismatch");
+        for (size_t column = 0; column < cells.size(); ++column) {
+            if (bitmap[column] || !isReference(actualRoles[column])) continue;
+            // NULL and already presented output never acquire a catalog for
+            // this adapter. The first genuine value owns the query snapshot.
+            if (!renderer) {
+                catalog.emplace(g_engine.catalogService().metadataSnapshot(database, false));
+                renderer.emplace(*catalog, &session);
+            }
+            renderer->render(cells, bitmap, actualRoles);
+            break;
+        }
+    };
+    vector<string> rendered;
+    rendered.reserve(rows.size());
+    for (size_t row = 0; row < rows.size(); ++row) {
+        auto first = rowRoleOverrides ? rowRoleOverrides->lower_bound({row, 0})
+                                     : map<pair<size_t, size_t>, dbms::StoredReferenceOutputRole>::const_iterator{};
+        if (rowRoleOverrides && first != rowRoleOverrides->end() && first->first.first == row) {
+            auto actualRoles = roles;
+            for (; first != rowRoleOverrides->end() && first->first.first == row; ++first) {
+                if (first->first.second >= actualRoles.size())
+                    throw dbms::DbError("XX000", "stored reference output override lost its column");
+                actualRoles[first->first.second] = first->second;
+            }
+            render(rows[row], nulls[row], actualRoles);
+        } else render(rows[row], nulls[row], roles);
+        string display;
+        for (size_t column = 0; column < rows[row].size(); ++column) {
+            if (column) display.push_back(' ');
+            display += nulls[row][column] ? "NULL" : rows[row][column];
+        }
+        rendered.push_back(std::move(display));
+    }
+    answers = std::move(rendered);
 }
 
 static void publishStructuredUtilityResult(
@@ -13393,6 +13456,10 @@ static std::vector<std::string> runDerivedSubQueryFull(
     std::string* outFailureText = nullptr,
     bool inheritCtes = true, size_t maxRows = 0,
     std::optional<dbms::PreparedQueryRows>* outOwningRows = nullptr) {
+    struct StoredReferenceMaterializationScope {
+        StoredReferenceMaterializationScope() { ++storedReferenceMaterializationDepth; }
+        ~StoredReferenceMaterializationScope() { --storedReferenceMaterializationDepth; }
+    } storedReferenceMaterializationScope;
     outColNames.clear();
     if (outColTypes) outColTypes->clear();
     if (outStructuredRows) outStructuredRows->clear();
@@ -13567,7 +13634,12 @@ static std::string createTempTableFromRows(Session& s,
     for (size_t index = 0; index < colNames.size(); ++index) {
         const auto& cname = colNames[index];
         Column col;
-        const std::string type = index < colTypes.size() ? colTypes[index] : "";
+        std::string type = index < colTypes.size() ? colTypes[index] : "";
+        bool isArray = false;
+        while (type.size() >= 2 && type.compare(type.size() - 2, 2, "[]") == 0) {
+            isArray = true;
+            type.resize(type.size() - 2);
+        }
         if (type == "smallint" || type == "int2") {
             col = makeIntColumn(cname, true, 0);
         } else if (type == "integer" || type == "int" || type == "int4") {
@@ -13587,6 +13659,7 @@ static std::string createTempTableFromRows(Session& s,
             col = makeVarCharColumn(cname, true, 65535);
             if (!type.empty()) col.dataType = type;
         }
+        col.isArray = isArray;
         tmpTbl.append(col);
     }
     auto res = g_engine.createTable(s.currentDB, tmpTbl);
@@ -20294,6 +20367,17 @@ static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bo
         // aliases retain their established consumers. This plan lowers a
         // single actual base range; no alternate namespace is fabricated.
         if (!g_engine.tableExists(session.currentDB, physical)) return false;
+        // This typed source scans one physical relation. The ordinary plain
+        // projection path below owns the parent/child union and its global
+        // ordering/slicing; do not silently truncate it to the parent heap.
+        if (!session.onlyNext && !(candidate->limit && *candidate->limit == 0) &&
+            !g_engine.getInheritedChildren(session.currentDB, physical).empty() &&
+            all_of(candidate->selectList.begin(), candidate->selectList.end(),
+                [](const auto& target) {
+                    if (dynamic_cast<const dbms::ColumnRefExpr*>(target.expr.get())) return true;
+                    const auto* star = dynamic_cast<const dbms::LiteralExpr*>(target.expr.get());
+                    return star && star->value == "*";
+                })) return false;
         if (!roles.first && !scalarOrder && !possibleArray && !fromlessDemand && !possibleBitNegation && !physicalLimitDemand) {
             const auto schema = g_engine.getTableSchema(session.currentDB, physical);
             typedSortDemand = ordinaryTypedSortDemand(*candidate, schema);
@@ -27714,7 +27798,9 @@ static bool executeInternal(const string& rawSql, Session& s) {
         // the rewritten main query until we know whether it is FROM-less;
         // otherwise TRUE/FALSE becomes 1/0 and loses its bool value/type.
         const bool hasLeadingCte = startsWithKeyword(sql, "with");
-        if (hasLeadingCte) sql = sqlProcessor(effectiveRawSql, false);
+        // Split child queries before legacy expression rewrites. Each child
+        // owns its original AST (not array_get(array, ...) or CASE pseudo-SQL).
+        if (hasLeadingCte) sql = toLowerSql(legacySqlLexicalCopy(effectiveRawSql));
         bool cteFailed = false;
         sql = processCTEs(sql, s, cteFailed);
         if (cteFailed) return true;
@@ -28903,15 +28989,16 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                   const string& type,
                                   const vector<string>& onConditions,
                                   vector<vector<string>>* cells,
-                                  vector<vector<bool>>* nulls) -> vector<string> {
+                                  vector<vector<bool>>* nulls,
+                                  vector<dbms::StoredReferenceOutputRole>* roles) -> vector<string> {
                     if (type == "left")
                         return g_engine.leftJoin(
                             s.currentDB, lt, rt, lc, rc, {}, {}, cells, nulls,
-                            onConditions, stageRanges);
+                            onConditions, stageRanges, roles);
                     if (type == "right")
                         return g_engine.rightJoin(
                             s.currentDB, lt, rt, lc, rc, {}, {}, cells, nulls,
-                            onConditions, stageRanges);
+                            onConditions, stageRanges, roles);
                     if (type == "full" && (lc.empty() || rc.empty()) &&
                         std::any_of(onConditions.begin(), onConditions.end(),
                             [](const string& condition) {
@@ -28921,20 +29008,34 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     if (type == "full")
                         return g_engine.fullOuterJoin(
                             s.currentDB, lt, rt, lc, rc, {}, {}, cells, nulls,
-                            onConditions, stageRanges);
+                            onConditions, stageRanges, roles);
                     if (type == "cross")
                         return g_engine.crossJoin(
                             s.currentDB, lt, rt, onConditions, {}, cells, nulls,
-                            stageRanges);
+                            stageRanges, roles);
                     return g_engine.join(
                         s.currentDB, lt, rt, lc, rc, {}, {}, cells, nulls,
-                        onConditions, stageRanges);
+                        onConditions, stageRanges, roles);
                 };
                 // column names of the first pair's result (left cols + right cols)
                 std::vector<string> interCols;
                 std::vector<string> interTypes;
                 std::vector<std::vector<string>> interCells;
                 std::vector<std::vector<bool>> interNulls;
+                vector<dbms::StoredReferenceOutputRole> interRoles;
+                map<pair<size_t, size_t>, dbms::StoredReferenceOutputRole>
+                    interRoleOverrides;
+                const dbms::StoredReferenceOutputRole noStoredRole;
+                const auto multiJoinColumnType = [](const Column& column) {
+                    return column.dataType + (column.isArray ? "[]" : "");
+                };
+                const auto interRoleAt = [&](size_t row, size_t column)
+                        -> const dbms::StoredReferenceOutputRole& {
+                    const auto overridden = interRoleOverrides.find({row, column});
+                    if (overridden != interRoleOverrides.end())
+                        return overridden->second;
+                    return interRoles.empty() ? noStoredRole : interRoles.at(column);
+                };
                 // original (tableIndex, colName) -> current intermediate
                 // column name (deduplicated on clash)
                 std::map<std::pair<size_t, string>, string> colMap;
@@ -28949,7 +29050,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                             ? cn + "_" + std::to_string(interCols.size())
                             : cn;
                         interCols.push_back(out);
-                        interTypes.push_back(ts2.cols[c].dataType);
+                        interTypes.push_back(multiJoinColumnType(ts2.cols[c]));
                         colMap[{tIdx, cn}] = out;
                     }
                 };
@@ -28959,7 +29060,9 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     vector<vector<bool>>& nulls) {
                     if (!hasUsingJoin) return true;
                     if (stageIndex >= logicalJoinStages.size() ||
-                        cells.size() != nulls.size()) return false;
+                        cells.size() != nulls.size() ||
+                        (!interRoles.empty() && interRoles.size() != interCols.size()))
+                        return false;
                     auto& stageColumns = logicalJoinStages[stageIndex];
                     for (size_t columnIndex = 0;
                          columnIndex < stageColumns.size(); ++columnIndex) {
@@ -28970,26 +29073,49 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         while (std::find(interCols.begin(), interCols.end(),
                                          hiddenName) != interCols.end())
                             hiddenName.push_back('_');
+                        vector<size_t> sourceIndices;
+                        sourceIndices.reserve(column.sources.size());
+                        for (const auto& source : column.sources) {
+                            const auto mapped = colMap.find(source);
+                            if (mapped == colMap.end()) return false;
+                            const auto position = std::find(
+                                interCols.begin(), interCols.end(), mapped->second);
+                            if (position == interCols.end()) return false;
+                            sourceIndices.push_back(static_cast<size_t>(
+                                position - interCols.begin()));
+                        }
+                        if (sourceIndices.empty()) return false;
+                        const auto& firstSource = column.sources.front();
+                        bool foundSourceType = false;
+                        for (size_t sourceColumn = 0;
+                             sourceColumn < pending[firstSource.first].schema.len;
+                             ++sourceColumn) {
+                            const auto& declaration =
+                                pending[firstSource.first].schema.cols[sourceColumn];
+                            if (declaration.dataName != firstSource.second) continue;
+                            column.type = multiJoinColumnType(declaration);
+                            foundSourceType = true;
+                            break;
+                        }
+                        if (!foundSourceType) return false;
+                        const auto defaultRole = interRoles.empty()
+                            ? noStoredRole : interRoles[sourceIndices.front()];
+                        const size_t outputIndex = interCols.size();
                         for (size_t row = 0; row < cells.size(); ++row) {
                             if (cells[row].size() != interCols.size() ||
                                 nulls[row].size() != interCols.size())
                                 return false;
                             string value;
                             bool isNull = true;
-                            for (const auto& source : column.sources) {
-                                const auto mapped = colMap.find(source);
-                                if (mapped == colMap.end()) return false;
-                                const auto position = std::find(
-                                    interCols.begin(), interCols.end(),
-                                    mapped->second);
-                                if (position == interCols.end()) return false;
-                                const size_t sourceIndex = static_cast<size_t>(
-                                    position - interCols.begin());
+                            for (const size_t sourceIndex : sourceIndices) {
                                 if (sourceIndex >= cells[row].size() ||
                                     sourceIndex >= nulls[row].size()) return false;
                                 if (nulls[row][sourceIndex]) continue;
                                 value = cells[row][sourceIndex];
                                 isNull = false;
+                                const auto& sourceRole = interRoleAt(row, sourceIndex);
+                                if (sourceRole != defaultRole)
+                                    interRoleOverrides[{row, outputIndex}] = sourceRole;
                                 break;
                             }
                             cells[row].push_back(std::move(value));
@@ -28997,6 +29123,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         }
                         interCols.push_back(hiddenName);
                         interTypes.push_back(column.type);
+                        if (!interRoles.empty()) interRoles.push_back(defaultRole);
                         column.physicalName = std::move(hiddenName);
                     }
                     return true;
@@ -29239,9 +29366,10 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     pending[bestI].name, pending[bestJ].name,
                     bestLCol, bestRCol, firstJoinType,
                     firstOnConditions,
-                    &interCells, &interNulls);
+                    &interCells, &interNulls, &interRoles);
                 if (interRows.size() != interCells.size() ||
-                    interRows.size() != interNulls.size()) {
+                    interRows.size() != interNulls.size() ||
+                    (!interRoles.empty() && interRoles.size() != interCols.size())) {
                     cout << "ERROR: multi-join returned inconsistent row data "
                             "(SQLSTATE XX000)" << endl;
                     return true;
@@ -29463,6 +29591,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     }
                     vector<vector<string>> newCells;
                     vector<vector<bool>> newNulls;
+                    vector<dbms::StoredReferenceOutputRole> newRoles;
                     vector<size_t> leftSources;
                     for (size_t relation = 0; relation < done.size();
                          ++relation) {
@@ -29490,7 +29619,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         interActual, pending[pickIdx].name,
                         pickLCol, pickRCol, pickJoinType,
                         extraOnConditions,
-                        &newCells, &newNulls);
+                        &newCells, &newNulls, &newRoles);
                     if (newRows.size() != newCells.size() ||
                         newRows.size() != newNulls.size()) {
                         cout << "ERROR: multi-join returned inconsistent row "
@@ -29499,9 +29628,18 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     }
                     // extend columns (de-duplicated the same way)
                     addCols(pickIdx, pending[pickIdx].schema);
+                    if (!newRoles.empty() && newRoles.size() != interCols.size()) {
+                        cout << "ERROR: multi-join returned inconsistent source "
+                                "metadata (SQLSTATE XX000)" << endl;
+                        return true;
+                    }
                     interRows = std::move(newRows);
                     interCells = std::move(newCells);
                     interNulls = std::move(newNulls);
+                    // Materialization turns prior virtual outputs into stored
+                    // inputs. Only this join's producer knows their new roles.
+                    interRoles = std::move(newRoles);
+                    interRoleOverrides.clear();
                     if (!appendLogicalJoinStage(
                             static_cast<size_t>(pickIdx) - 1,
                             interCells, interNulls)) {
@@ -29703,6 +29841,8 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     vector<string> filteredRows;
                     vector<vector<string>> filteredCells;
                     vector<vector<bool>> filteredNulls;
+                    map<pair<size_t, size_t>, dbms::StoredReferenceOutputRole>
+                        filteredRoleOverrides;
                     for (size_t rowIndex = 0; rowIndex < interCells.size();
                          ++rowIndex) {
                         if (interCells[rowIndex].size() != interCols.size() ||
@@ -29743,14 +29883,14 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                     pending[relationIndex].alias + "." + name;
                                 rowValues[qualified] =
                                     interCells[rowIndex][cellIndex];
-                                typeHints[qualified] = pending[relationIndex]
-                                    .schema.cols[column].dataType;
+                                typeHints[qualified] = multiJoinColumnType(
+                                    pending[relationIndex].schema.cols[column]);
                                 if (isNull) nullColumns.insert(qualified);
                                 if (bareNameCounts[name] == 1) {
                                     rowValues[name] =
                                         interCells[rowIndex][cellIndex];
-                                    typeHints[name] = pending[relationIndex]
-                                        .schema.cols[column].dataType;
+                                    typeHints[name] = multiJoinColumnType(
+                                        pending[relationIndex].schema.cols[column]);
                                     if (isNull) nullColumns.insert(name);
                                 }
                             }
@@ -29791,6 +29931,16 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         const string truth = toLower(trim(evaluated.value));
                         if (truth != "true" && truth != "t" && truth != "1")
                             continue;
+                        if (!interRoleOverrides.empty()) {
+                            const size_t filteredIndex = filteredRows.size();
+                            for (auto role = interRoleOverrides.lower_bound({rowIndex, 0});
+                                 role != interRoleOverrides.end() &&
+                                     role->first.first == rowIndex; ++role) {
+                                filteredRoleOverrides.emplace(
+                                    std::make_pair(filteredIndex, role->first.second),
+                                    role->second);
+                            }
+                        }
                         filteredRows.push_back(interRows[rowIndex]);
                         filteredCells.push_back(interCells[rowIndex]);
                         filteredNulls.push_back(interNulls[rowIndex]);
@@ -29798,6 +29948,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     interRows = std::move(filteredRows);
                     interCells = std::move(filteredCells);
                     interNulls = std::move(filteredNulls);
+                    interRoleOverrides = std::move(filteredRoleOverrides);
                 }
 
                 if (isDistinct || groupPos != string::npos ||
@@ -29862,13 +30013,13 @@ static bool executeInternal(const string& rawSql, Session& s) {
                             const string qualified = pending[relationIndex]
                                 .alias + "." + name;
                             rowValues[qualified] = interCells[rowIndex][cellIndex];
-                            typeHints[qualified] = pending[relationIndex]
-                                .schema.cols[column].dataType;
+                            typeHints[qualified] = multiJoinColumnType(
+                                pending[relationIndex].schema.cols[column]);
                             if (isNull) nullColumns.insert(qualified);
                             if (multiJoinBareNameCounts[name] == 1) {
                                 rowValues[name] = interCells[rowIndex][cellIndex];
-                                typeHints[name] = pending[relationIndex]
-                                    .schema.cols[column].dataType;
+                                typeHints[name] = multiJoinColumnType(
+                                    pending[relationIndex].schema.cols[column]);
                                 if (isNull) nullColumns.insert(name);
                             }
                         }
@@ -29902,11 +30053,11 @@ static bool executeInternal(const string& rawSql, Session& s) {
                             const string& name =
                                 relation.schema.cols[column].dataName;
                             hints[relation.alias + "." + name] =
-                                relation.schema.cols[column].dataType;
+                                multiJoinColumnType(relation.schema.cols[column]);
                             if (!hasUsingJoin &&
                                 multiJoinBareNameCounts[name] == 1)
                                 hints[name] =
-                                    relation.schema.cols[column].dataType;
+                                    multiJoinColumnType(relation.schema.cols[column]);
                         }
                     }
                     if (hasUsingJoin && !logicalJoinStages.empty()) {
@@ -29930,7 +30081,8 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     projections.push_back({
                         static_cast<size_t>(position - interCols.begin()),
                         column, header,
-                        pending[relationIndex].schema.cols[columnIndex].dataType,
+                        multiJoinColumnType(
+                            pending[relationIndex].schema.cols[columnIndex]),
                         {}});
                     return true;
                 };
@@ -30308,6 +30460,15 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         }
                     }
                 }
+                vector<dbms::StoredReferenceOutputRole> projectedRoles;
+                if (!interRoles.empty()) {
+                    projectedRoles.resize(projections.size());
+                    for (size_t index = 0; index < projections.size(); ++index) {
+                        if (projections[index].expression.empty())
+                            projectedRoles[index] = interRoles.at(
+                                projections[index].cellIndex);
+                    }
+                }
                 vector<vector<string>> projectionCells(
                     interCells.size(), vector<string>(projections.size()));
                 vector<vector<bool>> projectionNulls(
@@ -30658,10 +30819,13 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 vector<vector<string>> projectedCells;
                 vector<vector<bool>> projectedNulls;
                 vector<string> projectedRows;
+                map<pair<size_t, size_t>, dbms::StoredReferenceOutputRole>
+                    projectedRoleOverrides;
                 projectedCells.reserve(outputRowOrder.size());
                 projectedNulls.reserve(outputRowOrder.size());
                 projectedRows.reserve(outputRowOrder.size());
                 for (const size_t rowIndex : outputRowOrder) {
+                    const size_t outputIndex = projectedCells.size();
                     vector<string> values;
                     vector<bool> nulls;
                     string display;
@@ -30679,6 +30843,15 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         const bool isNull = projectionNulls[rowIndex][projectionIndex];
                         const string value = isNull ? string{} :
                             projectionCells[rowIndex][projectionIndex];
+                        if (!isNull && !interRoleOverrides.empty() &&
+                            projections[projectionIndex].expression.empty()) {
+                            const auto overridden = interRoleOverrides.find(
+                                {rowIndex, projections[projectionIndex].cellIndex});
+                            if (overridden != interRoleOverrides.end())
+                                projectedRoleOverrides.emplace(
+                                    std::make_pair(outputIndex, projectionIndex),
+                                    overridden->second);
+                        }
                         if (projectionIndex != 0) display.push_back(' ');
                         display += isNull ? "NULL" : value;
                         values.push_back(value);
@@ -30688,6 +30861,9 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     projectedNulls.push_back(std::move(nulls));
                     projectedRows.push_back(std::move(display));
                 }
+                renderStoredReferenceRows(s, s.currentDB, projectedRoles,
+                    projectedCells, projectedNulls, projectedRows,
+                    &projectedRoleOverrides);
 
                 // ---- output ----
                 for (const auto& projection : projections)
@@ -31689,11 +31865,13 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 } else if (selectAll) {
                     for (size_t i = 0; i < leftTbl.len; ++i) {
                         joinProtocolResult.columns.push_back(leftTbl.cols[i].dataName);
-                        joinProtocolResult.columnTypes.push_back(leftTbl.cols[i].dataType);
+                        joinProtocolResult.columnTypes.push_back(leftTbl.cols[i].dataType +
+                            (leftTbl.cols[i].isArray ? "[]" : ""));
                     }
                     for (size_t i = 0; i < rightTbl.len; ++i) {
                         joinProtocolResult.columns.push_back(rightTbl.cols[i].dataName);
-                        joinProtocolResult.columnTypes.push_back(rightTbl.cols[i].dataType);
+                        joinProtocolResult.columnTypes.push_back(rightTbl.cols[i].dataType +
+                            (rightTbl.cols[i].isArray ? "[]" : ""));
                     }
                 } else {
                     for (size_t i = 0; i < requestedCols.size(); ++i) {
@@ -31705,9 +31883,11 @@ static bool executeInternal(const string& rawSql, Session& s) {
                             type = dbms::ExprHelper::inferResultType(
                                 requestedExpressions[i], joinTypeHints);
                         else if (position.first == 0 && position.second >= 0)
-                            type = leftTbl.cols[position.second].dataType;
+                            type = leftTbl.cols[position.second].dataType +
+                                (leftTbl.cols[position.second].isArray ? "[]" : "");
                         else if (position.first == 1 && position.second >= 0)
-                            type = rightTbl.cols[position.second].dataType;
+                            type = rightTbl.cols[position.second].dataType +
+                                (rightTbl.cols[position.second].isArray ? "[]" : "");
                         else
                             type = dbms::ExprHelper::inferResultType(
                                 requestedExpressions[i], joinTypeHints);
@@ -31724,30 +31904,44 @@ static bool executeInternal(const string& rawSql, Session& s) {
             vector<string> answers;
             vector<vector<string>> joinRows;
             vector<vector<bool>> joinNulls;
+            vector<dbms::StoredReferenceOutputRole> joinSourceRoles;
+            bool joinRolesObserved = false;
             const set<string> allJoinColumns;
             auto runJoin = [&](const vector<string>& conds,
                                vector<vector<string>>* rows,
                                vector<vector<bool>>* nulls) -> vector<string> {
+                vector<dbms::StoredReferenceOutputRole> branchRoles;
+                vector<string> result;
                 if (jt == JoinType::Left) {
-                    return g_engine.leftJoin(s.currentDB, leftTable, rightTable,
+                    result = g_engine.leftJoin(s.currentDB, leftTable, rightTable,
                                               leftOnCol, rightOnCol, conds, allJoinColumns,
-                                              rows, nulls, onConditions, rangeNames);
+                                              rows, nulls, onConditions, rangeNames, &branchRoles);
                 } else if (jt == JoinType::Right) {
-                    return g_engine.rightJoin(s.currentDB, leftTable, rightTable,
+                    result = g_engine.rightJoin(s.currentDB, leftTable, rightTable,
                                                leftOnCol, rightOnCol, conds, allJoinColumns,
-                                               rows, nulls, onConditions, rangeNames);
+                                               rows, nulls, onConditions, rangeNames, &branchRoles);
                 } else if (jt == JoinType::FullOuter) {
-                    return g_engine.fullOuterJoin(s.currentDB, leftTable, rightTable,
+                    result = g_engine.fullOuterJoin(s.currentDB, leftTable, rightTable,
                                                    leftOnCol, rightOnCol, conds, allJoinColumns,
-                                                   rows, nulls, onConditions, rangeNames);
+                                                   rows, nulls, onConditions, rangeNames, &branchRoles);
                 } else if (jt == JoinType::Cross) {
-                    return g_engine.crossJoin(s.currentDB, leftTable, rightTable,
-                                              conds, allJoinColumns, rows, nulls, rangeNames);
+                    result = g_engine.crossJoin(s.currentDB, leftTable, rightTable,
+                                              conds, allJoinColumns, rows, nulls, rangeNames, &branchRoles);
                 } else {
-                    return g_engine.join(s.currentDB, leftTable, rightTable,
+                    result = g_engine.join(s.currentDB, leftTable, rightTable,
                                           leftOnCol, rightOnCol, conds, allJoinColumns,
-                                          rows, nulls, onConditions, rangeNames);
+                                          rows, nulls, onConditions, rangeNames, &branchRoles);
                 }
+                // An empty/early-return branch cannot discard the provenance
+                // of rows already collected from another OR branch.
+                if (!result.empty()) {
+                    if (!joinRolesObserved) {
+                        joinSourceRoles = std::move(branchRoles);
+                        joinRolesObserved = true;
+                    } else if (branchRoles != joinSourceRoles)
+                        throw dbms::DbError("XX000", "JOIN branches changed stored reference output roles");
+                }
+                return result;
             };
             auto joinRowIdentity = [](const vector<string>& cells,
                                       const vector<bool>& nulls) {
@@ -31915,6 +32109,20 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     return static_cast<int>(leftTbl.len) + position.second;
                 return -1;
             };
+            vector<dbms::StoredReferenceOutputRole> joinOutputRoles;
+            if (!joinSourceRoles.empty()) {
+                if (selectAll) joinOutputRoles = joinSourceRoles;
+                else {
+                    joinOutputRoles.resize(requestedCols.size());
+                    for (size_t column = 0; column < requestedCols.size(); ++column) {
+                        if (joinExpressionProjection[column]) continue;
+                        const int source = sourceCellIndex(requestedCols[column]);
+                        if (source < 0 || static_cast<size_t>(source) >= joinSourceRoles.size())
+                            throw dbms::DbError("XX000", "JOIN stored reference output lost its source");
+                        joinOutputRoles[column] = joinSourceRoles[source];
+                    }
+                }
+            }
             for (size_t rowIndex = 0; rowIndex < sourceRows.size(); ++rowIndex) {
                 if (rowIndex >= sourceNulls.size()) break;
                 map<string, string> expressionRow;
@@ -32225,6 +32433,8 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 }
             };
             applyStructuredJoinLimit();
+            renderStoredReferenceRows(s, s.currentDB, joinOutputRoles,
+                joinRows, joinNulls, answers);
             for (const auto& row : answers) {
                 cout << row << endl;
                 log(s.username, row, getTime());
@@ -34243,7 +34453,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                             size_t pp = rhsC.find('(');
                             string tname = (pp == string::npos) ? rhsC : rhsC.substr(0, pp);
                             for (auto& tc2 : tname) tc2 = static_cast<char>(tolower(static_cast<unsigned char>(tc2)));
-                            static const set<string> castTypes = {"int","integer","bigint","smallint","text","varchar","char","numeric","decimal","float","double","real","boolean","bool","date","timestamp","timestamptz","time","timetz","interval","json","jsonb"};
+                            static const set<string> castTypes = {"int","integer","bigint","smallint","oid","text","varchar","char","numeric","decimal","float","double","real","boolean","bool","date","timestamp","timestamptz","time","timetz","interval","json","jsonb"};
                             bool okLhs = !lhsC.empty();
                             {
                                 int d4 = 0; bool inQ4 = false;
@@ -35138,6 +35348,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
         vector<vector<string>> volcanoStructuredRows;
         vector<vector<bool>> volcanoStructuredNulls;
         bool volcanoStructuredAvailable = false;
+        vector<dbms::StoredReferenceOutputRole> volcanoStoredOutputRoles;
         std::optional<dbms::PreparedQueryRows> volcanoTypedRows;
         auto executeVolcanoSelect = [&](const std::string& tblName,
                                          const std::set<std::string>& projCols,
@@ -35151,6 +35362,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
             volcanoStructuredRows.clear();
             volcanoStructuredNulls.clear();
             volcanoStructuredAvailable = false;
+            volcanoStoredOutputRoles.clear();
             volcanoTypedRows.reset();
             // Fall back when the volcano path cannot yet handle the query.
             if (forUpdate || noWait || skipLocked) return false;
@@ -35260,6 +35472,8 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 volcanoStructuredRows = std::move(execution.structuredRows);
                 volcanoStructuredNulls = std::move(execution.structuredNulls);
                 volcanoStructuredAvailable = true;
+                if (execution.storedOutputRolesAvailable)
+                    volcanoStoredOutputRoles = std::move(execution.storedOutputRoles);
                 if (execution.typedRowsAvailable)
                     volcanoTypedRows = std::move(execution.typedRows);
             }
@@ -35564,6 +35778,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
         vector<string> answers;
         dbms::DmlResult structuredPlainResult;
         bool structuredPlainRows = false;
+        vector<dbms::StoredReferenceOutputRole> plainStoredOutputRoles;
         dbms::DmlResult structuredScalarResult;
         bool structuredScalarRows = false;
         bool structuredScalarOwningComplete = false;
@@ -38958,17 +39173,26 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 condTokens.empty() ||
                 rawWhereClause.find_first_of("()") == string::npos ||
                 hasBooleanGroupParenthesis;
+            bool needsReferenceOutput = false;
+            for (size_t i = 0; i < tbl.len; ++i) {
+                if ((selectCols.empty() || selectCols.count(tbl.cols[i].dataName)) &&
+                    dbms::storedReferenceOutputRoleForColumn(tbl.cols[i]).kind !=
+                        dbms::StoredReferenceOutputRole::Kind::None) {
+                    needsReferenceOutput = true;
+                    break;
+                }
+            }
             const bool captureStructuredPlain =
-                (shouldPublishQueryMetadata() ||
+                queryDb != "information_schema" && queryDb != "pg_catalog" &&
+                (needsReferenceOutput || ((shouldPublishQueryMetadata() ||
                  (isDistinct && distinctOnCols.empty()) ||
                  queryFetchWithTies) &&
                 simpleStructuredPlainPredicate &&
                 semiJoins.empty() && existenceFilters.empty() &&
                 quantifiedSubqueries.empty() &&
                 !forUpdate && !noWait && !skipLocked &&
-                queryDb != "information_schema" && queryDb != "pg_catalog" &&
                 (s.onlyNext ||
-                 g_engine.getInheritedChildren(queryDb, tname).empty());
+                 g_engine.getInheritedChildren(queryDb, tname).empty())));
             if (queryFetchWithTies) {
                 if (!captureStructuredPlain || orderKeyRefs.empty() ||
                     orderKeyRefs.size() != orderBySpecs.size() ||
@@ -39124,13 +39348,234 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 structuredPlainResult.rows = std::move(volcanoStructuredRows);
                 structuredPlainResult.nulls = std::move(volcanoStructuredNulls);
                 structuredPlainResult.typedRows = std::move(volcanoTypedRows);
+                plainStoredOutputRoles = std::move(volcanoStoredOutputRoles);
                 structuredPlainRows = true;
             }
 
             if (!volcanoUsed) {
                 // Fallback: use StorageEngine::query directly.
                 answers.clear();
-                if (condTokens.empty()) {
+                bool inheritedStructuredOrderHandled = false;
+                vector<string> inheritedOrderChildren;
+                if (captureStructuredPlain && needsReferenceOutput && !s.onlyNext &&
+                    distinctOnCols.empty() && !structuredPlainOrderSpecs.empty() &&
+                    exprOrderBySpecs.empty())
+                    inheritedOrderChildren = g_engine.getInheritedChildren(queryDb, tname);
+                if (!inheritedOrderChildren.empty()) {
+                    // Resolve every key before opening a source. Keep an
+                    // unsupported expression on its established path.
+                    vector<StorageEngine::OrderBySpec> physicalOrders;
+                    bool physicalOrder = true;
+                    for (const auto& reference : orderKeyRefs) {
+                        if (reference.first || reference.second >= orderBySpecs.size()) {
+                            physicalOrder = false; break;
+                        }
+                        auto order = orderBySpecs[reference.second];
+                        const auto syntax = orderKeySourceSql.find(reference);
+                        const string original = syntax == orderKeySourceSql.end()
+                            ? string{} : trim(syntax->second);
+                        if (!original.empty() &&
+                            original.find_first_not_of("0123456789") == string::npos) {
+                            size_t ordinal = 0;
+                            const auto parsed = from_chars(original.data(),
+                                original.data() + original.size(), ordinal);
+                            if (parsed.ec != errc{} ||
+                                parsed.ptr != original.data() + original.size() || !ordinal) {
+                                physicalOrder = false; break;
+                            }
+                            if (selectAll && ordinal <= tbl.len)
+                                order.colName = tbl.cols[ordinal - 1].dataName;
+                            else if (!selectAll && ordinal <= selectExprs.size() &&
+                                     !selectExprs[ordinal - 1].isScalar)
+                                order.colName = selectExprs[ordinal - 1].colName;
+                            else { physicalOrder = false; break; }
+                        }
+                        auto column = find_if(tbl.cols, tbl.cols + tbl.len,
+                            [&](const Column& candidate) { return candidate.dataName == order.colName; });
+                        if (column == tbl.cols + tbl.len) {
+                            size_t matches = 0;
+                            const string alias = order.colName;
+                            for (const auto& target : selectExprs) {
+                                if (target.displayName == alias && !target.isScalar) {
+                                    order.colName = target.colName; ++matches;
+                                }
+                            }
+                            if (matches == 1)
+                                column = find_if(tbl.cols, tbl.cols + tbl.len,
+                                    [&](const Column& candidate) { return candidate.dataName == order.colName; });
+                        }
+                        if (order.isExpression || column == tbl.cols + tbl.len ||
+                            column->generatedKind == 'v') {
+                            physicalOrder = false; break;
+                        }
+                        physicalOrders.push_back(std::move(order));
+                    }
+                    physicalOrder = physicalOrder &&
+                        physicalOrders.size() == structuredPlainOrderSpecs.size();
+                    if (physicalOrder) {
+                        set<string> physicalSelectCols = selectCols;
+                        if (selectCols.empty() || selectAll)
+                            for (size_t column = 0; column < tbl.len; ++column)
+                                physicalSelectCols.insert(tbl.cols[column].dataName);
+                        for (const auto& order : physicalOrders)
+                            physicalSelectCols.insert(order.colName);
+                        vector<size_t> parentColumns, selectedColumns;
+                        vector<dbms::StoredReferenceOutputRole> physicalRoles;
+                        for (size_t column = 0; column < tbl.len; ++column) {
+                            if (!physicalSelectCols.count(tbl.cols[column].dataName)) continue;
+                            if (selectCols.empty() || selectAll ||
+                                selectCols.count(tbl.cols[column].dataName))
+                                selectedColumns.push_back(parentColumns.size());
+                            parentColumns.push_back(column);
+                            physicalRoles.push_back(dbms::storedReferenceOutputRoleForColumn(tbl.cols[column]));
+                        }
+                        struct InheritedSortKey {
+                            size_t position;
+                            Column declaration;
+                            bool ascending, nullsFirst;
+                        };
+                        vector<InheritedSortKey> keys;
+                        for (const auto& order : physicalOrders) {
+                            const auto found = find_if(parentColumns.begin(), parentColumns.end(),
+                                [&](size_t column) { return tbl.cols[column].dataName == order.colName; });
+                            if (found == parentColumns.end())
+                                throw dbms::DbError("XX000", "inherited ordering lost its physical key");
+                            Column declaration = tbl.cols[*found];
+                            if (!order.collation.empty()) {
+                                declaration.collation = order.collation;
+                                declaration.resolvedCollation.clear();
+                                declaration.resolvedCollationUsesLocale = false;
+                                declaration.resolvedCollationIsBinary = true;
+                            }
+                            keys.push_back({static_cast<size_t>(found - parentColumns.begin()),
+                                std::move(declaration), order.ascending, order.nullsFirst});
+                        }
+                        vector<vector<string>> mergedCells;
+                        vector<vector<bool>> mergedNulls;
+                        auto groups = vector<vector<string>>{{}};
+                        if (!condTokens.empty()) {
+                            auto copy = condTokens;
+                            copy.insert(copy.begin(), "("); copy.push_back(")");
+                            for (auto& token : copy) token = modifyLogic(token);
+                            groups = breakDownConditions(copy);
+                        }
+                        vector<string> sources{tname};
+                        sources.insert(sources.end(), inheritedOrderChildren.begin(), inheritedOrderChildren.end());
+                        for (const auto& source : sources) {
+                            if (!g_engine.tableExists(queryDb, source)) continue;
+                            const auto declaration = g_engine.getTableSchema(queryDb, source);
+                            vector<size_t> sourceColumns, canonicalColumns;
+                            vector<dbms::StoredReferenceOutputRole> sourceRoles;
+                            for (size_t column = 0; column < declaration.len; ++column) {
+                                if (!physicalSelectCols.count(declaration.cols[column].dataName)) continue;
+                                sourceColumns.push_back(column);
+                                sourceRoles.push_back(dbms::storedReferenceOutputRoleForColumn(declaration.cols[column]));
+                            }
+                            if (sourceColumns.size() != parentColumns.size())
+                                throw dbms::DbError("XX000", "inherited source changed physical projection width");
+                            for (size_t parent : parentColumns) {
+                                const auto& expected = tbl.cols[parent];
+                                const auto found = find_if(sourceColumns.begin(), sourceColumns.end(),
+                                    [&](size_t column) { return declaration.cols[column].dataName == expected.dataName; });
+                                if (found == sourceColumns.end())
+                                    throw dbms::DbError("XX000", "inherited source lost a declared physical column");
+                                const auto& actual = declaration.cols[*found];
+                                if (actual.dataType != expected.dataType || actual.isArray != expected.isArray ||
+                                    actual.isUnsigned != expected.isUnsigned || actual.dsize != expected.dsize ||
+                                    actual.isVariableLength != expected.isVariableLength ||
+                                    actual.storageCodec != expected.storageCodec || actual.typeMod != expected.typeMod ||
+                                    actual.domainName != expected.domainName || actual.enumValues != expected.enumValues ||
+                                    actual.collation != expected.collation || actual.generatedKind != expected.generatedKind)
+                                    throw dbms::DbError("XX000", "inherited source changed its actual column declaration");
+                                const size_t position = static_cast<size_t>(found - sourceColumns.begin());
+                                if (sourceRoles[position] != physicalRoles[canonicalColumns.size()])
+                                    throw dbms::DbError("XX000", "inherited source changed stored reference output roles");
+                                canonicalColumns.push_back(position);
+                            }
+                            set<int64_t> seenRowIds;
+                            for (const auto& group : groups) {
+                                vector<vector<string>> cells;
+                                vector<vector<bool>> nulls;
+                                vector<int64_t> rowIds;
+                                vector<dbms::StoredReferenceOutputRole> actualRoles;
+                                const auto display = g_engine.query(queryDb, source, group,
+                                    physicalSelectCols, {}, forUpdate, noWait, skipLocked,
+                                    s.timezoneOffsetMinutes, {}, &cells, &nulls, &rowIds,
+                                    {}, nullptr, &actualRoles);
+                                if (display.size() != cells.size() || cells.size() != nulls.size() ||
+                                    cells.size() != rowIds.size() ||
+                                    (!cells.empty() && actualRoles != sourceRoles))
+                                    throw dbms::DbError("XX000", "inherited producer lost structured source metadata");
+                                for (size_t row = 0; row < cells.size(); ++row) {
+                                    if (cells[row].size() != sourceColumns.size() ||
+                                        nulls[row].size() != sourceColumns.size())
+                                        throw dbms::DbError("XX000", "inherited producer changed its physical row width");
+                                    if (!seenRowIds.insert(rowIds[row]).second) continue;
+                                    vector<string> ordered;
+                                    vector<bool> orderedNulls;
+                                    ordered.reserve(canonicalColumns.size());
+                                    orderedNulls.reserve(canonicalColumns.size());
+                                    for (size_t column : canonicalColumns) {
+                                        ordered.push_back(std::move(cells[row][column]));
+                                        orderedNulls.push_back(nulls[row][column]);
+                                    }
+                                    mergedCells.push_back(std::move(ordered));
+                                    mergedNulls.push_back(std::move(orderedNulls));
+                                }
+                            }
+                        }
+                        vector<size_t> permutation(mergedCells.size());
+                        iota(permutation.begin(), permutation.end(), 0);
+                        size_t comparisons = 0;
+                        dbms::checkForQueryInterrupt();
+                        stable_sort(permutation.begin(), permutation.end(), [&](size_t left, size_t right) {
+                            if ((comparisons++ & 127U) == 0) dbms::checkForQueryInterrupt();
+                            for (const auto& key : keys) {
+                                const bool aNull = mergedNulls[left][key.position];
+                                const bool bNull = mergedNulls[right][key.position];
+                                if (aNull != bNull) return aNull == key.nullsFirst;
+                                if (aNull) continue;
+                                const auto& a = mergedCells[left][key.position];
+                                const auto& b = mergedCells[right][key.position];
+                                const auto lower = StorageEngine::compareValues(key.declaration, a, false, b, false, "<");
+                                const auto greater = StorageEngine::compareValues(key.declaration, a, false, b, false, ">");
+                                if (lower == StorageEngine::PredicateTruth::Unknown ||
+                                    greater == StorageEngine::PredicateTruth::Unknown)
+                                    throw dbms::DbError("0A000", "inherited physical ORDER BY comparison is not supported");
+                                if (lower == StorageEngine::PredicateTruth::True) return key.ascending;
+                                if (greater == StorageEngine::PredicateTruth::True) return !key.ascending;
+                            }
+                            return false;
+                        });
+                        dbms::checkForQueryInterrupt();
+                        for (size_t row : permutation) {
+                            vector<string> selected;
+                            vector<bool> selectedNulls;
+                            string display;
+                            selected.reserve(selectedColumns.size());
+                            selectedNulls.reserve(selectedColumns.size());
+                            for (size_t column : selectedColumns) {
+                                const bool isNull = mergedNulls[row][column];
+                                auto& value = mergedCells[row][column];
+                                if (!selected.empty()) display.push_back(' ');
+                                display += isNull ? "NULL" : value;
+                                selected.push_back(std::move(value));
+                                selectedNulls.push_back(isNull);
+                            }
+                            answers.push_back(std::move(display));
+                            structuredPlainResult.rows.push_back(std::move(selected));
+                            structuredPlainResult.nulls.push_back(std::move(selectedNulls));
+                        }
+                        for (size_t column : selectedColumns)
+                            plainStoredOutputRoles.push_back(physicalRoles[column]);
+                        structuredPlainRows = true;
+                        inheritedStructuredOrderHandled = true;
+                        // These aliases/ordinals now name the complete global
+                        // physical ordering; do not resort only its alias keys.
+                        orderBySpecs = std::move(physicalOrders);
+                    }
+                }
+                if (!inheritedStructuredOrderHandled && condTokens.empty()) {
                     if (captureStructuredPlain) {
                         answers = g_engine.query(
                             queryDb, tname, {}, selectCols,
@@ -39138,7 +39583,8 @@ static bool executeInternal(const string& rawSql, Session& s) {
                             forUpdate, noWait, skipLocked,
                             s.timezoneOffsetMinutes, distinctOnCols,
                             &structuredPlainResult.rows,
-                            &structuredPlainResult.nulls);
+                            &structuredPlainResult.nulls, nullptr, {}, nullptr,
+                            &plainStoredOutputRoles);
                         structuredPlainRows = true;
                     } else {
                         answers = g_engine.query(
@@ -39146,7 +39592,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                             forUpdate, noWait, skipLocked,
                             s.timezoneOffsetMinutes, distinctOnCols);
                     }
-                } else {
+                } else if (!inheritedStructuredOrderHandled) {
                     condTokens.insert(condTokens.begin(), "(");
                     condTokens.push_back(")");
                     for (auto& t : condTokens) t = modifyLogic(t);
@@ -39158,12 +39604,18 @@ static bool executeInternal(const string& rawSql, Session& s) {
                             vector<vector<string>> branchRows;
                             vector<vector<bool>> branchNulls;
                             vector<int64_t> branchRowIds;
+                            vector<dbms::StoredReferenceOutputRole> branchRoles;
                             auto part = g_engine.query(
                                 queryDb, tname, g, selectCols,
                                 structuredPlainOrderSpecs,
                                 forUpdate, noWait, skipLocked,
                                 s.timezoneOffsetMinutes, distinctOnCols,
-                                &branchRows, &branchNulls, &branchRowIds);
+                                &branchRows, &branchNulls, &branchRowIds, {}, nullptr,
+                                &branchRoles);
+                            if (plainStoredOutputRoles.empty())
+                                plainStoredOutputRoles = std::move(branchRoles);
+                            else if (branchRoles != plainStoredOutputRoles)
+                                throw dbms::DbError("XX000", "query branches changed stored reference output roles");
                             const size_t count = min(
                                 part.size(), min(branchRows.size(),
                                                  branchNulls.size()));
@@ -39250,7 +39702,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 nativePlainExprOrderHandled = !exprOrderBySpecs.empty();
                 // Inheritance: UNION rows from child tables
                 // (SELECT ... FROM ONLY suppresses this — Session::onlyNext)
-                if (!corrAggHandled &&
+                if (!inheritedStructuredOrderHandled && !corrAggHandled &&
                     !s.onlyNext && queryDb != "information_schema" && queryDb != "pg_catalog") {
                     auto children = g_engine.getInheritedChildren(queryDb, tname);
                     if (!children.empty()) {
@@ -39260,9 +39712,36 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         }
                         for (const auto& childName : children) {
                             if (!g_engine.tableExists(queryDb, childName)) continue;
+                            set<int64_t> seenChildRowIds;
+                            const auto appendStructuredChild = [&](const vector<string>& conditions) {
+                                vector<vector<string>> childCells;
+                                vector<vector<bool>> childNulls;
+                                vector<int64_t> childRowIds;
+                                vector<dbms::StoredReferenceOutputRole> childRoles;
+                                auto childAnswers = g_engine.query(
+                                    queryDb, childName, conditions, childSelectCols,
+                                    orderBySpecs, forUpdate, noWait, skipLocked,
+                                    s.timezoneOffsetMinutes, distinctOnCols,
+                                    &childCells, &childNulls, &childRowIds, {}, nullptr, &childRoles);
+                                if (childAnswers.size() != childCells.size() ||
+                                    childCells.size() != childNulls.size() ||
+                                    childCells.size() != childRowIds.size())
+                                    throw dbms::DbError("XX000", "inherited projection lost structured rows");
+                                if (!childCells.empty() && childRoles != plainStoredOutputRoles)
+                                    throw dbms::DbError("XX000", "inherited projection changed stored reference output roles");
+                                for (size_t row = 0; row < childCells.size(); ++row) {
+                                    if (!seenChildRowIds.insert(childRowIds[row]).second) continue;
+                                    answers.push_back(std::move(childAnswers[row]));
+                                    structuredPlainResult.rows.push_back(std::move(childCells[row]));
+                                    structuredPlainResult.nulls.push_back(std::move(childNulls[row]));
+                                }
+                            };
                             if (condTokens.empty()) {
-                                auto childRows = g_engine.query(queryDb, childName, {}, childSelectCols, orderBySpecs, forUpdate, noWait, skipLocked, s.timezoneOffsetMinutes, distinctOnCols);
-                                for (const auto& row : childRows) answers.push_back(row);
+                                if (structuredPlainRows) appendStructuredChild({});
+                                else {
+                                    auto childRows = g_engine.query(queryDb, childName, {}, childSelectCols, orderBySpecs, forUpdate, noWait, skipLocked, s.timezoneOffsetMinutes, distinctOnCols);
+                                    for (const auto& row : childRows) answers.push_back(row);
+                                }
                             } else {
                                 // Re-tokenize conditions for each child (they were modified above)
                                 size_t condEnd = (groupPos != string::npos) ? groupPos
@@ -39280,6 +39759,10 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                 auto childGroups = breakDownConditions(childCondTokens);
                                 set<string> childSeen;
                                 for (const auto& g : childGroups) {
+                                    if (structuredPlainRows) {
+                                        appendStructuredChild(g);
+                                        continue;
+                                    }
                                     auto part = g_engine.query(queryDb, childName, g, childSelectCols, orderBySpecs, forUpdate, noWait, skipLocked, s.timezoneOffsetMinutes, distinctOnCols);
                                     for (const auto& row : part) {
                                         if (childSeen.insert(row).second) answers.push_back(row);
@@ -39891,6 +40374,16 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 }
                 if (structuredPlainRows) {
                     selectCapturedResultColumns(structuredPlainResult, srcIdx);
+                    if (!plainStoredOutputRoles.empty()) {
+                        vector<dbms::StoredReferenceOutputRole> reordered;
+                        reordered.reserve(srcIdx.size());
+                        for (size_t index : srcIdx) {
+                            if (index >= plainStoredOutputRoles.size())
+                                throw dbms::DbError("XX000", "stored reference output lost its column permutation");
+                            reordered.push_back(plainStoredOutputRoles[index]);
+                        }
+                        plainStoredOutputRoles = std::move(reordered);
+                    }
                     for (auto& row : structuredPlainResult.rows) {
                         vector<string> reordered;
                         reordered.reserve(srcIdx.size());
@@ -39912,6 +40405,9 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 }
             }
         }
+        if (structuredPlainRows)
+            renderStoredReferenceRows(s, queryDb, plainStoredOutputRoles,
+                structuredPlainResult.rows, structuredPlainResult.nulls, answers);
         if (structuredAggregateRows) {
             structuredAggregateResult.available = true;
             structuredAggregateResult.metadataOnly = false;

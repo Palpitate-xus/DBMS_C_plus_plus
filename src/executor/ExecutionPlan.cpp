@@ -1095,6 +1095,94 @@ struct TypedSortRowCodec {
     }
 };
 
+// Ordinary reference-array consumers share the actual owning declaration and
+// identity checks. Display text cannot provide either piece of provenance.
+static const CompoundDatum& owningReferenceArray(const ExprValue& value,
+                                                uint32_t elementCodec) {
+    const auto& data = value.compound;
+    if (value.isNull || !data || !data->type ||
+        data->type->kind != DatumKind::Array || !data->type->actualOid ||
+        !data->type->codecOid || !data->type->arrayElement ||
+        data->type->arrayElement->kind != DatumKind::Scalar ||
+        !data->type->arrayElement->actualOid ||
+        data->type->arrayElement->codecOid != elementCodec ||
+        !data->arrayElements)
+        throw DbError("0A000", "reference array requires its actual owning declaration");
+    if (compound_value_detail::elementCount(data->dimensions) !=
+            data->arrayElements->size() ||
+        (!value.elementOids.empty() &&
+         value.elementOids.size() != data->arrayElements->size()))
+        throw DbError("XX000", "reference array lost its owning shape or identities");
+    return *data;
+}
+
+static uint32_t owningReferenceElementOid(const ExprValue& parent,
+    const CompoundDatum& data, const ExprValue& element, size_t index) {
+    if (element.isNull) {
+        if ((data.arrayNullBitmap && !*data.arrayNullBitmap) ||
+            (!parent.elementOids.empty() && parent.elementOids[index]))
+            throw DbError("XX000", "reference array lost its element NULL metadata");
+        return 0;
+    }
+    if (!element.objectOid || (!parent.elementOids.empty() &&
+            parent.elementOids[index] != element.objectOid))
+        throw DbError("XX000", "reference array element lost its actual object identity");
+    return *element.objectOid;
+}
+
+// Compare unsigned identities and the owned row-major shape directly
+// (PostgreSQL REL_18_6 array_cmp ordering), without interpreting output names.
+static int compareOwningReferenceArrays(const ExprValue& left,
+                                        const ExprValue& right) {
+    const auto type = ExprHelper::canonicalResultTypeName(left.typeName);
+    const uint32_t elementCodec = type == "regtype[]" ? 2206 : 2205;
+    const auto& a = owningReferenceArray(left, elementCodec);
+    const auto& b = owningReferenceArray(right, elementCodec);
+    if (a.type->actualOid != b.type->actualOid ||
+        a.type->codecOid != b.type->codecOid ||
+        a.type->arrayElement->actualOid != b.type->arrayElement->actualOid)
+        throw DbError("42804", "cannot compare arrays of different actual element types");
+    const auto& x = *a.arrayElements;
+    const auto& y = *b.arrayElements;
+    for (size_t i = 0; i < std::min(x.size(), y.size()); ++i) {
+        if ((i & 127U) == 0) checkForQueryInterrupt();
+        const uint32_t aOid = owningReferenceElementOid(left, a, x[i], i);
+        const uint32_t bOid = owningReferenceElementOid(right, b, y[i], i);
+        if (x[i].isNull != y[i].isNull) return x[i].isNull ? 1 : -1;
+        if (!x[i].isNull && aOid != bOid) return aOid < bOid ? -1 : 1;
+    }
+    if (x.size() != y.size()) return x.size() < y.size() ? -1 : 1;
+    if (a.dimensions.size() != b.dimensions.size())
+        return a.dimensions.size() < b.dimensions.size() ? -1 : 1;
+    for (size_t i = 0; i < a.dimensions.size(); ++i)
+        if (a.dimensions[i].length != b.dimensions[i].length)
+            return a.dimensions[i].length < b.dimensions[i].length ? -1 : 1;
+    for (size_t i = 0; i < a.dimensions.size(); ++i)
+        if (a.dimensions[i].lower != b.dimensions[i].lower)
+            return a.dimensions[i].lower < b.dimensions[i].lower ? -1 : 1;
+    return 0;
+}
+
+// A complete, framed logical identity for one non-NULL ordinary DISTINCT
+// target. Bitmap retention is physical provenance, not SQL array equality.
+static std::string owningReferenceArrayDistinctKey(const ExprValue& value,
+                                                  uint32_t elementCodec) {
+    const auto& data = owningReferenceArray(value, elementCodec);
+    std::string key = "reference-array:" + std::to_string(data.type->actualOid) + ":" +
+        std::to_string(data.type->codecOid) + ":" +
+        std::to_string(data.type->arrayElement->actualOid) + ":" +
+        std::to_string(elementCodec) + ";" + std::to_string(data.dimensions.size()) + ";";
+    for (const auto& dimension : data.dimensions)
+        key += std::to_string(dimension.length) + ":" + std::to_string(dimension.lower) + ";";
+    const auto& elements = *data.arrayElements;
+    for (size_t i = 0; i < elements.size(); ++i) {
+        if ((i & 127U) == 0) checkForQueryInterrupt();
+        const uint32_t oid = owningReferenceElementOid(value, data, elements[i], i);
+        key += elements[i].isNull ? "N;" : "V" + std::to_string(oid) + ";";
+    }
+    return key;
+}
+
 // Ordinary Sort owns one recent comparison signature per key. Descriptor
 // setup is lazy at the original comparison demand, never at key evaluation.
 // Aggregate/grouped sorting keeps its existing comparison owner above.
@@ -1102,7 +1190,7 @@ class OrdinarySortComparisons {
     struct Entry {
         bool ready=false;
         std::string leftType,rightType,leftCollation,rightCollation;
-        enum class Kind { Storage,Expression,Oid } kind=Kind::Storage;
+        enum class Kind { Storage,Expression,Oid,ReferenceArray } kind=Kind::Storage;
         std::optional<Column> column;
         std::optional<QueryComparisonBinding> binding;
     };
@@ -1124,6 +1212,8 @@ public:
             const auto type=ExprHelper::canonicalResultTypeName(a.typeName);
             const bool same=type==ExprHelper::canonicalResultTypeName(b.typeName);
             if(same && type=="oid")next.kind=Entry::Kind::Oid;
+            else if(same && (type=="regtype[]" || type=="regclass[]"))
+                next.kind=Entry::Kind::ReferenceArray;
             else if(same && (stored_regtype_detail::scalarType(type) || type=="name" || type=="\"char\"" ||
                              type=="real" || type=="double precision")) {
                 next.kind=Entry::Kind::Expression;
@@ -1140,6 +1230,8 @@ public:
             const auto x=preparedOidValue(a.value),y=preparedOidValue(b.value);
             return (x>y)-(x<y);
         }
+        if(entry.kind==Entry::Kind::ReferenceArray)
+            return compareOwningReferenceArrays(a,b);
         if(entry.kind==Entry::Kind::Expression) {
             if(evaluator.comparePrepared(*entry.binding,a,b).asBool())return -1;
             if(evaluator.comparePrepared(*entry.binding,b,a).asBool())return 1;
@@ -1392,8 +1484,18 @@ public:
     }
     std::string typedKey() const {
         std::string key;
+        const auto& select = state_->select();
+        const bool ordinary = state_->aggregates.empty() && !select.having &&
+            select.groupBy.empty() && select.groupByElems.empty();
         for (const auto& value : values_) {
             const auto type=ExprHelper::canonicalResultTypeName(value.typeName);
+            if (ordinary && (type == "regtype[]" || type == "regclass[]")) {
+                if (value.isNull) { key += "N;"; continue; }
+                const auto material = owningReferenceArrayDistinctKey(
+                    value, type == "regtype[]" ? 2206U : 2205U);
+                key += "V" + std::to_string(material.size()) + ":" + material;
+                continue;
+            }
             if(type=="oid" || stored_regtype_detail::scalarType(type) || type=="name" || type=="\"char\"") {
                 if(value.isNull){key+="N;";continue;}
                 std::string material;
@@ -6098,6 +6200,32 @@ bool ProjectOp::lastStructuredRow(std::vector<std::string>& cells,
     return true;
 }
 
+bool ProjectOp::storedOutputRoles(std::vector<StoredReferenceOutputRole>& roles) const {
+    roles.clear();
+    if (typeid(*this) != typeid(ProjectOp) || tbl_.len > MAX_COLUMNS) return false;
+    bool references = false;
+    for (size_t i = 0; i < tbl_.len; ++i) {
+        const auto& column = tbl_.cols[i];
+        if (!selectCols_.empty() && !selectCols_.count(column.dataName)) continue;
+        if (storedReferenceOutputRoleForColumn(column).kind != StoredReferenceOutputRole::Kind::None) {
+            references = true;
+            break;
+        }
+    }
+    // Primitive-only projections retain their existing allocation path.
+    if (!references) return false;
+    std::vector<StoredReferenceOutputRole> result;
+    result.reserve(selectCols_.empty() ? tbl_.len : selectCols_.size());
+    for (size_t i = 0; i < tbl_.len; ++i) {
+        const auto& column = tbl_.cols[i];
+        if (!selectCols_.empty() && !selectCols_.count(column.dataName)) continue;
+        result.push_back(storedReferenceOutputRoleForColumn(column));
+    }
+    if (!selectCols_.empty() && result.size() != selectCols_.size()) return false;
+    roles = std::move(result);
+    return true;
+}
+
 bool ProjectOp::lastTypedRowKey(std::string& key) const {
     if (!lastRowAvailable_ || lastCells_.size() != lastNulls_.size()) return false;
     key.clear();
@@ -7384,6 +7512,21 @@ void OffsetOp::close() {
 // ========================================================================
 // DistinctOp
 // ========================================================================
+
+bool LimitOp::storedOutputRoles(std::vector<StoredReferenceOutputRole>& roles) const {
+    roles.clear();
+    return typeid(*this) == typeid(LimitOp) && child_->storedOutputRoles(roles);
+}
+
+bool OffsetOp::storedOutputRoles(std::vector<StoredReferenceOutputRole>& roles) const {
+    roles.clear();
+    return typeid(*this) == typeid(OffsetOp) && child_->storedOutputRoles(roles);
+}
+
+bool DistinctOp::storedOutputRoles(std::vector<StoredReferenceOutputRole>& roles) const {
+    roles.clear();
+    return typeid(*this) == typeid(DistinctOp) && child_->storedOutputRoles(roles);
+}
 
 DistinctOp::DistinctOp(OpPtr child) : child_(std::move(child)) {}
 
@@ -11127,6 +11270,8 @@ static PlanExecutionResult executePlanResult(OpPtr plan, size_t maxRows, bool re
             try { closePlan(); } catch (...) {}
             return result;
         }
+        if (result.structuredRowsAvailable)
+            result.storedOutputRolesAvailable = plan->storedOutputRoles(result.storedOutputRoles);
         std::string row;
         while ((!maxRows || result.rows.size() < maxRows) && plan->next(row)) {
             checkForQueryInterrupt();
@@ -11139,7 +11284,14 @@ static PlanExecutionResult executePlanResult(OpPtr plan, size_t maxRows, bool re
                     result.structuredRowsAvailable = false;
                     result.structuredRows.clear();
                     result.structuredNulls.clear();
+                    result.storedOutputRolesAvailable = false;
+                    result.storedOutputRoles.clear();
                 } else {
+                    if (result.storedOutputRolesAvailable &&
+                        result.storedOutputRoles.size() != cells.size()) {
+                        result.storedOutputRolesAvailable = false;
+                        result.storedOutputRoles.clear();
+                    }
                     result.structuredRows.push_back(std::move(cells));
                     result.structuredNulls.push_back(std::move(nulls));
                 }
@@ -11187,6 +11339,8 @@ static PlanExecutionResult executePlanResult(OpPtr plan, size_t maxRows, bool re
         result.structuredRowsAvailable = false;
         result.typedRows.clear();
         result.typedRowsAvailable = false;
+        result.storedOutputRoles.clear();
+        result.storedOutputRolesAvailable = false;
     }
     return result;
 }

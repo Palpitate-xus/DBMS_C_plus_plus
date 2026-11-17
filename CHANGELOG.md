@@ -1,8 +1,12 @@
 # Changelog
 
+## 2026-11-17：修复查询结果中的名称显示
+
+类型和表引用的查询结果显示对应名称，保留内部排序、去重和临时结果使用的编号。补齐引用数组比较、临时表字段类型和父子表统一排序分页，增加客户端、事务和重启回归。已知的数组域、视图写入、继承 CAST 和来源属性差异继续保留；本次测量未证明稳定提速。[测试报告](docs/test-report.md#stored-reference-output-20261117)、[性能报告](docs/performance-report-2026-10-30.md#stored-reference-output-cost-20261117)。
+
 ## 2026-11-17：减少查询中未使用字段的处理
 
-表达式省去未引用字段的 REGTYPE/数组转换，保留已引用字段的转换时机；生成列、输出强制转换和未知语法节点采用原有处理。新增按需取列接口、真实类型/生成列测试，以及保留全部预期的函数参数缺口脚本。原有参数和裸 REGTYPE 显示问题尚未修复。[测试报告](docs/test-report.md#scalar-storage-demand-20261117)、[性能报告](docs/performance-report-2026-10-30.md#scalar-storage-demand-cost-20261117)。
+表达式省去未引用字段的 REGTYPE/数组转换，保留已引用字段的转换时机；生成列、输出强制转换和未知语法节点采用原有处理。新增按需取列接口、真实类型/生成列测试，以及保留全部预期的函数参数缺口脚本。原有参数问题仍开放，该次记录的裸引用显示问题见上方后续修复。[测试报告](docs/test-report.md#scalar-storage-demand-20261117)、[性能报告](docs/performance-report-2026-10-30.md#scalar-storage-demand-cost-20261117)。
 
 ## 2026-11-17：减少函数查询的额外开销，修复目录写入故障
 

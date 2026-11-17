@@ -2,6 +2,44 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-17 stored REGTYPE/REGCLASS output provenance, owning array comparisons and inherited physical ordering",
+      "gap_ids": [
+        "TYPE-20",
+        "TYPE-16",
+        "QRY-01",
+        "SQL-01"
+      ],
+      "status": "partial",
+      "evidence": [
+        "src/commands/StoredReferenceOutputRole.h",
+        "src/expression/StoredReferenceOutput.h",
+        "src/executor/ExecutionPlan.cpp",
+        "src/commands/TableManage.cpp",
+        "src/main.cpp",
+        "scripts/build_common.sh",
+        "docs/test-report.md",
+        "docs/performance-report-2026-10-30.md"
+      ],
+      "tests": [
+        "tests/stored_reference_output_test.cpp",
+        "tests/stored_reference_provenance_test.cpp",
+        "tests/stored_reference_sort_test.cpp",
+        "tests/internal_reference_metadata_test.cpp",
+        "tests/regtype_direct_projection_protocol_e2e_test.py",
+        "tests/regclass_direct_projection_protocol_e2e_test.py",
+        "tests/regtype_inherited_projection_protocol_e2e_test.py",
+        "tests/regtype_materialization_protocol_e2e_test.py",
+        "tests/regtype_direct_projection_known_gap.py",
+        "tests/regtype_materialization_known_gap.py"
+      ],
+      "verification": [
+        "Final normal CMake C++17/O2 program e994f74d7d792181550851ac1993cd812f2246a192984872d7bc55535dd2d363. Independent normalized dependency audit verifies all six complete receipts, 62 objects per build, flags, source snapshots and actual recompilation; zero missing dependencies or stale reused objects. Interrupted build, C++20 fixture compile error and unaccepted helper fallback remain local evidence, not passes.",
+        "29 selected native entries pass; four new regressions total1154 checks (88/347/527/192). Four automatic simple-query entries total243 pass on candidate and actual PostgreSQL18.6, baseline168/243. Unchanged complete108 and40 diagnostics retain their original positive expectations and existing domain-array / view INSERT SELECT failures: candidate51 executed50 pass1 fail57 not_run;32 executed31 pass1 fail8 not_run. Test grouping equivalence and all retained protocol bytes independently audited.",
+        "Same SQL/recovery workload PG/old/new160/159/159 plus3 PG startup requests gives481 audited pairs. Candidate156/159 retains three inherited CAST failures and24 source-attribute differences.48 rollback/recovery controls pass,7 normal stops and2 real project SIGKILL/restarts with the pending client still connected.14 existing protocol entries:13 pass; old/final CTE-window747 outcomes retain the same29 failures. Full suite not run and all-functionality gate remains false.",
+        "One fixed performance run: six ABBA/BAAB blocks,24 serial epochs,168 batches of16,2688 complete timed replies plus255 retained setup/preflight captures independently redecoded,27 normal owned stops. Six correct comparable workloads have identical old/new full responses; all exceed predetermined10percent drift, so no stable speedup, slowdown or no-regression claim. Two corrected raw-reference workloads report new absolute timing only; wrong old results never enter speed ratios. Raw data/scripts remain ignored; original273 item objects and user deferrals unchanged."
+      ]
+    },
+    {
       "issue": "2026-11-17 scalar storage conversion demand and strict ordinary argument evidence",
       "gap_ids": [
         "FUNC-01",

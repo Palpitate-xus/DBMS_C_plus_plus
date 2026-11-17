@@ -12,6 +12,7 @@
 
 #include "TableManage.h"
 #include "commands/HeapScanCursor.h"
+#include "commands/StoredReferenceOutputRole.h"
 #include "executor.h"
 #include "parser/query_binding.h"
 #include "common/DbError.h"
@@ -66,6 +67,13 @@ public:
     // including collation, without reconstructing them from display text.
     virtual bool lastStructuredValues(std::vector<ExprValue>& values) const {
         (void)values;
+        return false;
+    }
+    // Stable raw-storage roles from an actual physical output producer.
+    // This is metadata only; it neither reads values nor changes the row's
+    // internal representation. Synthesized outputs do not inherit the role.
+    virtual bool storedOutputRoles(std::vector<StoredReferenceOutputRole>& roles) const {
+        roles.clear();
         return false;
     }
     virtual bool lastStructuredRow(std::vector<std::string>& cells,
@@ -221,6 +229,8 @@ struct PlanExecutionResult {
     // Optional actual row values; disabled for ordinary text receivers.
     PreparedQueryRows typedRows;
     bool typedRowsAvailable = false;
+    std::vector<StoredReferenceOutputRole> storedOutputRoles;
+    bool storedOutputRolesAvailable = false;
 
     void throwIfFailed() const {
         if (!ok) {
@@ -778,6 +788,7 @@ public:
     bool supportsStructuredRows() const override { return true; }
     bool lastStructuredRow(std::vector<std::string>& cells,
                            std::vector<bool>& nulls) const override;
+    bool storedOutputRoles(std::vector<StoredReferenceOutputRole>& roles) const override;
     bool lastTypedRowKey(std::string& key) const;
     void close() override;
     Operator* child() const { return child_.get(); }
@@ -907,6 +918,7 @@ public:
 
     bool open() override;
     bool next(std::string& outRow) override;
+    bool storedOutputRoles(std::vector<StoredReferenceOutputRole>& roles) const override;
     bool supportsStructuredRows() const override {
         return child_->supportsStructuredRows();
     }
@@ -940,6 +952,7 @@ public:
 
     bool open() override;
     bool next(std::string& outRow) override;
+    bool storedOutputRoles(std::vector<StoredReferenceOutputRole>& roles) const override;
     bool supportsStructuredRows() const override {
         return child_->supportsStructuredRows();
     }
@@ -971,6 +984,7 @@ public:
 
     bool open() override;
     bool next(std::string& outRow) override;
+    bool storedOutputRoles(std::vector<StoredReferenceOutputRole>& roles) const override;
     bool supportsStructuredRows() const override {
         return child_->supportsStructuredRows();
     }

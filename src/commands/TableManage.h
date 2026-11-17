@@ -23,6 +23,7 @@
 #include <utility>
 
 #include "DateType.h"
+#include "StoredReferenceOutputRole.h"
 #include "table_schema.h"
 #include "dbms_defs.h"
 #include "PageWrapper.h"
@@ -842,7 +843,9 @@ public:
         // Data-only transport for a caller that reads virtual inputs lazily.
         // Width/real occurrence/presence are carried independently of NULLs.
         const GeneratedRelationPtr& generatedDeclaration = {},
-        std::vector<std::vector<ExprValue>>* generatedInputs = nullptr);
+        std::vector<std::vector<ExprValue>>* generatedInputs = nullptr,
+        // Metadata only: raw stored-reference roles in output schema order.
+        std::vector<StoredReferenceOutputRole>* storedOutputRoles = nullptr);
 
     // Scalar function expression for queryExpr
     struct SelectExpr {
@@ -971,7 +974,8 @@ public:
                                    std::vector<std::vector<std::string>>* structuredRows = nullptr,
                                    std::vector<std::vector<bool>>* structuredNulls = nullptr,
                                    const std::vector<std::string>& onConditions = {},
-                                   const JoinRangeNames& rangeNames = {});
+                                   const JoinRangeNames& rangeNames = {},
+                                   std::vector<StoredReferenceOutputRole>* storedOutputRoles = nullptr);
 
     // LEFT JOIN: preserve all left rows, fill NULL for non-matching right
     std::vector<std::string> leftJoin(const std::string& dbname,
@@ -984,7 +988,8 @@ public:
                                        std::vector<std::vector<std::string>>* structuredRows = nullptr,
                                        std::vector<std::vector<bool>>* structuredNulls = nullptr,
                                        const std::vector<std::string>& onConditions = {},
-                                       const JoinRangeNames& rangeNames = {});
+                                       const JoinRangeNames& rangeNames = {},
+                                       std::vector<StoredReferenceOutputRole>* storedOutputRoles = nullptr);
 
     // RIGHT JOIN: preserve all right rows, fill NULL for non-matching left
     std::vector<std::string> rightJoin(const std::string& dbname,
@@ -997,7 +1002,8 @@ public:
                                         std::vector<std::vector<std::string>>* structuredRows = nullptr,
                                         std::vector<std::vector<bool>>* structuredNulls = nullptr,
                                         const std::vector<std::string>& onConditions = {},
-                                        const JoinRangeNames& rangeNames = {});
+                                        const JoinRangeNames& rangeNames = {},
+                                        std::vector<StoredReferenceOutputRole>* storedOutputRoles = nullptr);
 
     // FULL OUTER JOIN: union of LEFT and RIGHT JOIN
     std::vector<std::string> fullOuterJoin(const std::string& dbname,
@@ -1010,7 +1016,8 @@ public:
                                             std::vector<std::vector<std::string>>* structuredRows = nullptr,
                                             std::vector<std::vector<bool>>* structuredNulls = nullptr,
                                             const std::vector<std::string>& onConditions = {},
-                                            const JoinRangeNames& rangeNames = {});
+                                            const JoinRangeNames& rangeNames = {},
+                                            std::vector<StoredReferenceOutputRole>* storedOutputRoles = nullptr);
 
     // CROSS JOIN: cartesian product
     std::vector<std::string> crossJoin(const std::string& dbname,
@@ -1020,7 +1027,8 @@ public:
                                         const std::set<std::string>& selectCols,
                                         std::vector<std::vector<std::string>>* structuredRows = nullptr,
                                         std::vector<std::vector<bool>>* structuredNulls = nullptr,
-                                        const JoinRangeNames& rangeNames = {});
+                                        const JoinRangeNames& rangeNames = {},
+                                        std::vector<StoredReferenceOutputRole>* storedOutputRoles = nullptr);
 
     // Transaction operations
     bool inTransaction() const { return transactionContext().inTransaction; }

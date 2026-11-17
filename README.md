@@ -156,6 +156,15 @@ docs/              # 使用、兼容性与开发文档
 最近 3 条更新，点击标题展开。[查看完整更新日志](CHANGELOG.md)。
 
 <details>
+<summary><strong>2026-11-17 · 修复查询结果中的名称显示</strong></summary>
+
+修复了部分查询把类型和表名显示成内部编号的问题，补充数组排序、去重和父子表查询测试。实际耗时和仍未解决的问题已写入报告。
+
+[查看测试结果](docs/test-report.md#stored-reference-output-20261117) · [查看性能测试](docs/performance-report-2026-10-30.md#stored-reference-output-cost-20261117)
+
+</details>
+
+<details>
 <summary><strong>2026-11-17 · 减少查询中的多余处理</strong></summary>
 
 查询会跳过未使用字段的部分类型转换，减少额外处理。补充了字段读取、数组和自动计算列的测试。
@@ -170,15 +179,6 @@ docs/              # 使用、兼容性与开发文档
 查找 SQL 函数时只复制需要的信息。修复内存不足时可能保存不完整数据库结构信息的问题，补充查询、回滚、重启和故障测试。
 
 [查看测试结果](docs/test-report.md#namespace-snapshot-20261117) · [查看性能测试](docs/performance-report-2026-10-30.md#namespace-snapshot-cost-20261117)
-
-</details>
-
-<details>
-<summary><strong>2026-11-17 · 补充数据读取测试和性能测试结果</strong></summary>
-
-补充空值、空字符串和只读取部分字段的测试。两种提速方案未能稳定变快，因此未采用；完整结果见性能报告。
-
-[查看测试结果](docs/test-report.md#row-directory-reuse-20261117) · [查看完整性能对照](docs/performance-report-2026-10-30.md#row-directory-reuse-cost-20261117)
 
 </details>
 
