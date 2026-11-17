@@ -737,6 +737,9 @@ ExprValue ExprEvaluator::readBoundColumn(size_t source,size_t column,const RowCo
 }
 ExprValue ExprEvaluator::readNamedColumn(const std::string& key,const RowContext& row) const {
     if(const auto* input=row.generatedNamed(key))return evaluateGenerated(*input,row);
+    if(namedColumnReader_) {
+        if(auto value=namedColumnReader_(key))return std::move(*value);
+    }
     const auto value=row.get(key);return value?*value:ExprValue("unknown","",true);
 }
 ExprValue ExprEvaluator::evaluateGenerated(const GeneratedInputState::Input& input,const RowContext& row) const {

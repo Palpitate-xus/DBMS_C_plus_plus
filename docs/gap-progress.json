@@ -2,6 +2,34 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-17 scalar storage conversion demand and strict ordinary argument evidence",
+      "gap_ids": [
+        "FUNC-01",
+        "TYPE-01",
+        "QRY-01"
+      ],
+      "status": "partial",
+      "evidence": [
+        "src/expression/ExprEvaluator.h",
+        "src/expression/ExprEvaluator.cpp",
+        "src/expression/expr_helper.h",
+        "src/expression/expr_helper.cpp",
+        "docs/test-report.md",
+        "docs/performance-report-2026-10-30.md"
+      ],
+      "tests": [
+        "tests/lazy_scalar_columns_test.cpp",
+        "tests/lazy_scalar_metadata_test.cpp",
+        "tests/scalar_argument_expression_known_gap.py"
+      ],
+      "verification": [
+        "Normal CMake C++17/O2: all 16 header-affected targets rebuilt, then helper rebuilt for static conversion elision; remaining objects source/dependency/flag/hash checked. Basic lazy input regression27 checks; extended actual metadata163 checks.20 selected C++ final-version entries and8 existing protocol entries pass, full suite not run. Two fixture failures and an invalid protocol filename attempt are retained, not counted as passes.",
+        "Current eager expression path skips only statically unreferenced REGTYPE/array storage conversions, preserving original row/type-hint/declaration provenance and selected eager conversion order. Generated sources, output coercion and unknown syntax conservatively retain old conversion. Explicit lazy API is not wired as a replacement for legacy argument dispatch or a storage snapshot/TOAST lease.",
+        "Same workload PG/old/new46/45/45 replies independently audited:45 complete old/new matches,90 PG semantic comparisons except tableOID,7 normal stops and2 actual project SIGKILL/restarts. Direct raw REGTYPE projection still shows OID text; matched recovery controls explicitly cast to text on every system. Strict argument test PG67 pass; old/new47 pass20fail,67 complete old/new reply matches, four normal stops. Existing quote/concat/side-effect/error/failed-transaction differences remain open.",
+        "Final fixed six ABBA/BAAB blocks:24 serial timing servers,1536 timed replies all independently redecoded, two normal seed stops. REGTYPE upper/length/mixed wall median changes -32.46%/-33.31%/-31.18%, plain upper+1.92%; all four exceed predetermined drift diagnostic. First run interrupted by owned port-bind failure with576 retained/audited timed replies; never spliced into final. No stable speedup or no-regression claim. Original273 item objects and user deferrals unchanged."
+      ]
+    },
+    {
       "issue": "2026-11-17 namespace-only function lookup and catalog serialization allocation failures",
       "gap_ids": [
         "CAT-01",

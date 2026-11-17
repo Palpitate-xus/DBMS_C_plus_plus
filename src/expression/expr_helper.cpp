@@ -3088,7 +3088,8 @@ static ExprEvalResult evalStringImpl(
     bool captureOwningValue = false,
     const std::map<std::string, ExprValue>* outputCoercionValues = nullptr,
     const DatumMetadataContext* datumMetadata = nullptr,
-    LocalExpressionSyntax* syntax = nullptr) {
+    LocalExpressionSyntax* syntax = nullptr,
+    const std::function<std::optional<std::string>(const std::string&)>* lazyReader = nullptr) {
 
     // The parser retains the actual declared-type grammar. Rewriting a
     // keyword/string pair into :: changes bare BIT/CHAR length semantics and
@@ -3122,6 +3123,7 @@ static ExprEvalResult evalStringImpl(
     // "F" is not f. Bind this local AST to private datum positions instead of
     // asking RowContext to resolve user identifiers a second time.
     std::vector<ColumnRefExpr*> references;
+    bool completeValueReferences = true;
     std::function<void(Expr*)> visitValueReferences = [&](Expr* expression) {
         if (!expression) return;
         if (auto* column = dynamic_cast<ColumnRefExpr*>(expression)) {
@@ -3179,20 +3181,58 @@ static ExprEvalResult evalStringImpl(
             for (auto& item : array->elements) visitValueReferences(item.get());
         } else if (auto* tuple = dynamic_cast<RowExpr*>(expression)) {
             for (auto& item : tuple->elements) visitValueReferences(item.get());
+        } else if (!dynamic_cast<LiteralExpr*>(expression)) {
+            // Unknown nodes can hide source dependencies. Keep the original
+            // conversion demand until their value children are understood.
+            completeValueReferences = false;
         }
     };
     visitValueReferences(select->selectList[0].expr.get());
+    const auto needsStorageConversion = [&](const std::string& name) {
+        // Generated programs can consume base inputs absent from this AST;
+        // coercion slots also carry their own actual owning-value roles.
+        if (!completeValueReferences || outputCoercionValues ||
+            (datumMetadata && datumMetadata->generatedSource)) return true;
+        for (const auto* reference : references) {
+            auto source = row.find(reference->toString());
+            if (source == row.end() && !reference->schema.empty())
+                source = row.find(reference->table + "." + reference->column);
+            if (source == row.end() && !reference->table.empty())
+                source = row.find(reference->column);
+            if (source != row.end() && source->first == name) return true;
+        }
+        return false;
+    };
     std::set<std::string> occupiedKeys;
     for (const auto* reference : references) {
         occupiedKeys.insert(toLower(reference->column));
         occupiedKeys.insert(toLower(reference->toString()));
     }
-    for (const auto& entry : row) occupiedKeys.insert(toLower(entry.first));
+    const auto& inputs = lazyReader ? typeHints : row;
+    for (const auto& entry : inputs) occupiedKeys.insert(toLower(entry.first));
 
     RowContext ctx;
     std::map<std::string, std::string> bindings;
+    std::map<std::string, std::string> lazyOrigins;
+    std::map<std::string, ExprValue> lazyValues;
     size_t nextPosition = 0;
-    for (const auto& [name, value] : row) {
+    for (const auto& [name, value] : inputs) {
+        if (lazyReader) {
+            const std::string typeName = value.empty() ? "unknown" : canonicalTypeName(value);
+            std::string key;
+            do {
+                key = "\x01helper_value_" + std::to_string(nextPosition++);
+            } while (!occupiedKeys.insert(key).second);
+            ExprValue declaration(typeName, "", true);
+            if (collationHints) {
+                const auto collation = collationHints->find(name);
+                if (collation != collationHints->end()) declaration.collation = collation->second;
+            }
+            ctx.set(key, std::move(declaration));
+            bindings.emplace(name, key);
+            lazyOrigins.emplace(key, name);
+            continue;
+        }
         std::string typeName = inferType(value);
         auto it = typeHints.find(name);
         if (it != typeHints.end() && !it->second.empty()) {
@@ -3219,7 +3259,7 @@ static ExprEvalResult evalStringImpl(
         }
         if(!actualOwningInput && datumMetadata && datumMetadata->sourceColumns &&
            datumMetadata->storedColumns.count(name) &&
-           stored_regtype_detail::columnType(typeName)) {
+            stored_regtype_detail::columnType(typeName) && needsStorageConversion(name)) {
             const auto declaration=datumMetadata->columns.find(name);
             auto* storage=functionEngine?functionEngine:&g_engine;
             const auto catalog=regtype_detail::metadata(*storage,currentDB);
@@ -3231,7 +3271,9 @@ static ExprEvalResult evalStringImpl(
         if(captureOwningValue && !actualOwningInput && datumMetadata &&
            datumMetadata->sourceColumns && datumMetadata->storedColumns.count(name)) {
             const auto declaration=datumMetadata->columns.find(name);
-            if(declaration!=datumMetadata->columns.end())
+            if(declaration!=datumMetadata->columns.end() &&
+               (!declaration->second || declaration->second->kind!=DatumKind::Array ||
+                needsStorageConversion(name)))
                 (void)compound_value_detail::decodeArrayStorageInput(datum,declaration->second);
         }
         ctx.set(key,std::move(datum));
@@ -3352,6 +3394,56 @@ static ExprEvalResult evalStringImpl(
         ExprHelper::prepareArrayTypes(select->selectList[0].expr.get(),preparedHints,currentDB,functionEngine,
             preparedMetadata?&*preparedMetadata:nullptr,captureOwningValue?&outputDeclaration:nullptr);
         evaluator.bindScalarFunctions(select->selectList[0].expr.get(), functionEngine);
+        if (lazyReader) {
+            // Install the value provider only after declaration analysis.
+            // RowContext's private slots stay metadata-only, and generated
+            // reads keep their existing priority in readNamedColumn.
+            evaluator.setNamedColumnReader([&](const std::string& key) -> std::optional<ExprValue> {
+                const auto origin = lazyOrigins.find(key);
+                if (origin == lazyOrigins.end()) return std::nullopt;
+                const auto cached = lazyValues.find(key);
+                if (cached != lazyValues.end()) return cached->second;
+                const auto& name = origin->second;
+                const auto input = (*lazyReader)(name);
+                const bool isNull = !input;
+                const std::string emptyValue;
+                const std::string& value = input ? *input : emptyValue;
+                const std::string typeName = ctx.get(key)->typeName;
+                ExprValue datum(typeName, value, isNull);
+                if (collationHints) {
+                    const auto collation = collationHints->find(name);
+                    if (collation != collationHints->end()) datum.collation = collation->second;
+                }
+                // Retain the eager helper's storage-to-datum conversions,
+                // but only for a value that the expression actually reads.
+                bool actualOwningInput = false;
+                if (outputCoercionValues) {
+                    const auto actual = outputCoercionValues->find(name);
+                    if (actual != outputCoercionValues->end()) {
+                        datum = actual->second;
+                        actualOwningInput = true;
+                    }
+                }
+                if (!actualOwningInput && datumMetadata && datumMetadata->sourceColumns &&
+                    datumMetadata->storedColumns.count(name) && stored_regtype_detail::columnType(typeName)) {
+                    const auto declaration = datumMetadata->columns.find(name);
+                    auto* storage = functionEngine ? functionEngine : &g_engine;
+                    const auto catalog = regtype_detail::metadata(*storage, currentDB);
+                    const bool array = common_type_detail::array(typeName);
+                    datum = stored_regtype_detail::load(value, array, isNull,
+                        catalog, currentSession(), declaration == datumMetadata->columns.end() ?
+                            DatumTypePtr{} : declaration->second, array ? typeName.substr(0, typeName.size()-2) : typeName);
+                }
+                if (captureOwningValue && !actualOwningInput && datumMetadata &&
+                    datumMetadata->sourceColumns && datumMetadata->storedColumns.count(name)) {
+                    const auto declaration = datumMetadata->columns.find(name);
+                    if (declaration != datumMetadata->columns.end())
+                        (void)compound_value_detail::decodeArrayStorageInput(datum, declaration->second);
+                }
+                const auto inserted = lazyValues.emplace(key, std::move(datum));
+                return inserted.first->second;
+            });
+        }
         v = evaluator.eval(select->selectList[0].expr.get(), ctx);
     } catch (const DbError& e) {
         if(dynamic_cast<const GeneratedColumnReadError*>(&e))throw;
@@ -3410,6 +3502,21 @@ ExprEvalResult ExprHelper::evalStringWithNulls(
     return evalStringImpl(
         exprSql, row, typeHints, &nullColumns, currentDB, currentUser, functionEngine,
         &collationHints, captureOwningValue, outputCoercionValues, datumMetadata);
+}
+
+ExprEvalResult ExprHelper::evalStringWithLazyColumns(
+    const std::string& exprSql,
+    const std::map<std::string, std::string>& typeHints,
+    const std::function<std::optional<std::string>(const std::string&)>& columnReader,
+    const std::string& currentDB,
+    const std::string& currentUser,
+    StorageEngine* functionEngine,
+    const std::map<std::string, std::string>& collationHints,
+    bool captureOwningValue,
+    const DatumMetadataContext* datumMetadata) {
+    return evalStringImpl(
+        exprSql, {}, typeHints, nullptr, currentDB, currentUser, functionEngine,
+        &collationHints, captureOwningValue, nullptr, datumMetadata, nullptr, &columnReader);
 }
 
 ExprEvalResult ExprHelper::evalStringWithNullsSyntax(

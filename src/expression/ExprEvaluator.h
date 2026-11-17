@@ -148,6 +148,14 @@ public:
 
     ExprValue readBoundColumn(size_t source,size_t column,const RowContext&) const;
     ExprValue readNamedColumn(const std::string&,const RowContext&) const;
+    // Row-local helpers can provide values only when evaluation reaches a
+    // named column. Presence/type probes still use RowContext declarations;
+    // nullopt preserves its ordinary eager fallback. Datums return by value;
+    // captured sources must remain valid for the duration of evaluation.
+    using NamedColumnReader = std::function<std::optional<ExprValue>(const std::string&)>;
+    void setNamedColumnReader(NamedColumnReader reader) {
+        namedColumnReader_ = std::move(reader);
+    }
     ExprValue evaluateGenerated(const GeneratedInputState::Input&,const RowContext&) const;
     ExprValue assignGenerated(const Expr* actualExpression,const RowContext&,
         const ExprValue&,const GeneratedColumnProgram&) const;
@@ -218,6 +226,7 @@ private:
     std::map<FunctionCallExpr::SqlValue,ScalarFunction> sqlTimeValues_;
     ExprValue evalSqlValue(const FunctionCallExpr*,const RowContext&) const;
     ScalarSubqueryExecutor scalarSubqueryExecutor_;
+    NamedColumnReader namedColumnReader_;
     QuantifiedExecutor quantifiedExecutor_;
     struct GeneratedEvaluationState;
     mutable std::shared_ptr<GeneratedEvaluationState> generatedCompiled_; // metadata only, default null

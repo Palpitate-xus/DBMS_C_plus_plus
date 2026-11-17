@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-11-17：减少查询中未使用字段的处理
+
+表达式省去未引用字段的 REGTYPE/数组转换，保留已引用字段的转换时机；生成列、输出强制转换和未知语法节点采用原有处理。新增按需取列接口、真实类型/生成列测试，以及保留全部预期的函数参数缺口脚本。原有参数和裸 REGTYPE 显示问题尚未修复。[测试报告](docs/test-report.md#scalar-storage-demand-20261117)、[性能报告](docs/performance-report-2026-10-30.md#scalar-storage-demand-cost-20261117)。
+
 ## 2026-11-17：减少函数查询的额外开销，修复目录写入故障
 
 函数查找改为只复制需要的 schema 列表。修复内存不足时可能把不完整目录内容写入文件的问题，新增快照、回滚和内存故障测试。选定查询和重启对照完成；原有函数存储测试失败及与 PostgreSQL 的差异仍保留。[测试报告](docs/test-report.md#namespace-snapshot-20261117)、[性能测试报告](docs/performance-report-2026-10-30.md#namespace-snapshot-cost-20261117)。

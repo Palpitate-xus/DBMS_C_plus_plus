@@ -170,6 +170,22 @@ public:
         const std::map<std::string, ExprValue>* outputCoercionValues = nullptr,
         const DatumMetadataContext* datumMetadata = nullptr);
 
+    // Admit names and types without reading their values. The row-local
+    // reader runs only when execution demands a column, once per supplied
+    // name per call; nullopt is SQL NULL and an empty string remains text.
+    // Unknown names still fail binding. Captured sources must remain valid
+    // until this call returns; no reader or value cache escapes the call.
+    static ExprEvalResult evalStringWithLazyColumns(
+        const std::string& exprSql,
+        const std::map<std::string, std::string>& typeHints,
+        const std::function<std::optional<std::string>(const std::string&)>& columnReader,
+        const std::string& currentDB = "",
+        const std::string& currentUser = "",
+        StorageEngine* functionEngine = nullptr,
+        const std::map<std::string, std::string>& collationHints = {},
+        bool captureOwningValue = false,
+        const DatumMetadataContext* datumMetadata = nullptr);
+
     // Same row-local semantics, with a caller-owned pristine syntax cache.
     static ExprEvalResult evalStringWithNullsSyntax(
         LocalExpressionSyntax& syntax,

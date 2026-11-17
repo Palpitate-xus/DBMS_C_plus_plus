@@ -165,6 +165,15 @@ docs/              # 使用、兼容性与开发文档
 只显示最近 3 条，点击标题展开。[查看完整更新日志](CHANGELOG.md)。
 
 <details>
+<summary><strong>2026-11-17 · 减少查询中未使用字段的处理</strong></summary>
+
+省去未引用字段的 REGTYPE 和数组转换，补充按需取列、类型和生成列测试。原有函数参数问题仍列在报告中，没有当作已修复。
+
+[查看测试结果](docs/test-report.md#scalar-storage-demand-20261117) · [查看性能测试](docs/performance-report-2026-10-30.md#scalar-storage-demand-cost-20261117)
+
+</details>
+
+<details>
 <summary><strong>2026-11-17 · 减少函数查询的额外开销，修复目录写入故障</strong></summary>
 
 函数查找只复制需要的目录信息，减少多余的数据复制。修复内存不足时可能写入不完整目录文件的问题，补充查询、回滚、重启和故障测试。
@@ -179,15 +188,6 @@ docs/              # 使用、兼容性与开发文档
 增加空值、空字符串和部分字段读取的测试。尝试的两种优化未能带来稳定提速，因此保留原来的实现；报告列出了全部结果，包括变慢的查询。
 
 [查看测试结果](docs/test-report.md#row-directory-reuse-20261117) · [查看完整性能对照](docs/performance-report-2026-10-30.md#row-directory-reuse-cost-20261117)
-
-</details>
-
-<details>
-<summary><strong>2026-11-17 · 修复损坏数据被当成正常值返回的问题</strong></summary>
-
-读取字段时，如果记录字段位置的信息已损坏，现在会报错，避免返回空字符串或错误文本。已补充查询、事务和重启测试；性能测量波动较大，暂不能确认提速。
-
-[查看测试结果](docs/test-report.md#variable-row-directory-20261117) · [查看性能测量](docs/performance-report-2026-10-30.md#variable-row-directory-cost-20261117)
 
 </details>
 
