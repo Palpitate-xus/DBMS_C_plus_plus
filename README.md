@@ -1,19 +1,10 @@
 # DBMS C++
 
-一个用 C++ 编写的关系型数据库，支持 SQL 查询、数据增删改、索引和事务。可以在命令行中使用，也可以通过 psql 等 PostgreSQL 客户端连接。
+一个用 C++ 编写的关系型数据库，支持 SQL 查询、数据增删改、索引和事务。可以在命令行中使用，也可以通过 `psql` 等 PostgreSQL 客户端连接。
 
-项目仍在开发中，部分 SQL、并发访问和恢复行为存在已知问题。具体范围见[兼容性说明](docs/compatibility-contract.md)和[与 PostgreSQL 的对比](docs/postgresql-comparison.md)。数据库使用自己的存储格式，不能直接读取 PostgreSQL 数据目录。
+项目仍在开发中，功能范围和已知问题见[兼容性说明](docs/compatibility-contract.md)。
 
 [构建](#构建) · [运行](#运行) · [SQL 示例](#sql-示例) · [测试](#测试) · [最近更新](#最近更新) · [文档](#文档) · [参与贡献](#参与贡献)
-
-## 主要功能
-
-- **查询与数据管理**：建表、查询、插入、更新和删除，支持关联多张表、排序、分组统计和窗口函数。
-- **数据存储与索引**：支持长文本，以及 B+ 树和哈希索引。
-- **事务与恢复**：支持提交、回滚和保存点，提供并发访问控制和日志恢复。
-- **客户端连接**：提供交互式命令行，支持通过 PostgreSQL 客户端执行普通查询和带参数的查询。
-
-功能的支持范围和使用方法见[使用手册](docs/MANUAL.md)，已知问题和测试范围见[测试报告](docs/test-report.md)。
 
 ## 构建
 
@@ -162,21 +153,21 @@ docs/              # 使用、兼容性与开发文档
 
 ## 最近更新
 
-只显示最近 3 条，点击标题展开。[查看完整更新日志](CHANGELOG.md)。
+最近 3 条更新，点击标题展开。[查看完整更新日志](CHANGELOG.md)。
 
 <details>
-<summary><strong>2026-11-17 · 减少查询中未使用字段的处理</strong></summary>
+<summary><strong>2026-11-17 · 减少查询中的多余处理</strong></summary>
 
-省去未引用字段的 REGTYPE 和数组转换，补充按需取列、类型和生成列测试。原有函数参数问题仍列在报告中，没有当作已修复。
+查询会跳过未使用字段的部分类型转换，减少额外处理。补充了字段读取、数组和自动计算列的测试。
 
 [查看测试结果](docs/test-report.md#scalar-storage-demand-20261117) · [查看性能测试](docs/performance-report-2026-10-30.md#scalar-storage-demand-cost-20261117)
 
 </details>
 
 <details>
-<summary><strong>2026-11-17 · 减少函数查询的额外开销，修复目录写入故障</strong></summary>
+<summary><strong>2026-11-17 · 减少函数查找的重复工作，修复数据库信息保存问题</strong></summary>
 
-函数查找只复制需要的目录信息，减少多余的数据复制。修复内存不足时可能写入不完整目录文件的问题，补充查询、回滚、重启和故障测试。
+查找 SQL 函数时只复制需要的信息。修复内存不足时可能保存不完整数据库结构信息的问题，补充查询、回滚、重启和故障测试。
 
 [查看测试结果](docs/test-report.md#namespace-snapshot-20261117) · [查看性能测试](docs/performance-report-2026-10-30.md#namespace-snapshot-cost-20261117)
 
@@ -185,13 +176,15 @@ docs/              # 使用、兼容性与开发文档
 <details>
 <summary><strong>2026-11-17 · 补充数据读取测试和性能测试结果</strong></summary>
 
-增加空值、空字符串和部分字段读取的测试。尝试的两种优化未能带来稳定提速，因此保留原来的实现；报告列出了全部结果，包括变慢的查询。
+补充空值、空字符串和只读取部分字段的测试。两种提速方案未能稳定变快，因此未采用；完整结果见性能报告。
 
 [查看测试结果](docs/test-report.md#row-directory-reuse-20261117) · [查看完整性能对照](docs/performance-report-2026-10-30.md#row-directory-reuse-cost-20261117)
 
 </details>
 
 ## 文档
+
+数据库使用自己的文件格式，不能直接读取 PostgreSQL 数据目录。SQL、并发访问和恢复方面仍有已知问题，支持范围及测试结果见下面的文档。
 
 - [文档索引](docs/README.md)：使用、开发和历史记录的入口。
 - [使用手册](docs/MANUAL.md)：SQL 与操作说明。
