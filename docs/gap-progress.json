@@ -2,6 +2,29 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-17 rejected row directory reuse candidates and accepted decoder regressions",
+      "gap_ids": [
+        "STO-01",
+        "STO-06",
+        "QRY-01"
+      ],
+      "status": "partial",
+      "evidence": [
+        "src/storage/VariableRow.h",
+        "src/commands/TableManage.cpp",
+        "docs/test-report.md",
+        "docs/performance-report-2026-10-30.md"
+      ],
+      "tests": [
+        "tests/variable_row_bulk_decode_test.cpp"
+      ],
+      "verification": [
+        "Final normal CMake incremental build: 1 recompiled, 61 source/flag/hash-checked reused objects. Directory component normal and ASan/UBSan: 8479 each; bulk decode: 22 checks on old and final candidate. 26 existing native entries: 25 pass, existing toast_test assertion retained; 8 protocol entries pass. Full suite not run.",
+        "Final PG18.6/old/new: 32/44/44 retained SQL pairs, independently redecoded with a second decoder; all 44 old/new complete responses match, 64 PG semantic comparisons match with unordered results compared as bags. Two project SIGKILL/restart controls and six normal stops recorded.",
+        "Two distinct implementations each measured 6912 SQL across 24 serial normal service epochs, with predetermined CPU affinity, order and diagnostic thresholds. Timing variation remains above thresholds; no stable speedup or no-regression claim. Candidates were not integrated; all 269 production inputs restored to accepted 624c365f. New 22-check decoder regression passes against that accepted build. Original 273 item objects unchanged; deferred scope unchanged."
+      ]
+    },
+    {
       "issue": "2026-11-17 variable-length row directory corruption checks",
       "gap_ids": [
         "STO-01",

@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-11-17：字段读取回归与性能对照
+
+新增 22 项字段解码检查。两个优化候选因未能证明稳定收益而未采纳，生产源码保持原实现；完整结果包含慢项和既有 TOAST 失败。[测试报告](docs/test-report.md#row-directory-reuse-20261117)、[性能报告](docs/performance-report-2026-10-30.md#row-directory-reuse-cost-20261117)。
+
 ## 2026-11-17：损坏字段读取明确报错
 
 修复变长字段目录损坏时可能返回空字符串或错误文本的问题，增加真实损坏页、空值、事务与重启回归。正常查询性能对照有快有慢，波动较大；完整测试套件未运行。详见[测试报告](docs/test-report.md#variable-row-directory-20261117)与[性能报告](docs/performance-report-2026-10-30.md#variable-row-directory-cost-20261117)。

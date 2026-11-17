@@ -165,6 +165,15 @@ docs/              # 使用、兼容性与开发文档
 这里只列出最近 3 条记录，点击卡片标题展开。[查看完整更新日志](CHANGELOG.md)。
 
 <details>
+<summary><strong>2026-11-17 · 补充字段读取测试和性能对照</strong></summary>
+
+新增字段读取回归测试。两轮性能实验未证明稳定提速，候选未采纳，完整结果包含慢项。
+
+[查看测试结果](docs/test-report.md#row-directory-reuse-20261117) · [查看完整性能对照](docs/performance-report-2026-10-30.md#row-directory-reuse-cost-20261117)
+
+</details>
+
+<details>
 <summary><strong>2026-11-17 · 读取损坏字段时明确报错</strong></summary>
 
 修复字段目录损坏时可能返回空字符串或错误文本的问题，补充查询、事务和重启测试。性能测量波动较大，暂不能确认提速。
@@ -179,15 +188,6 @@ docs/              # 使用、兼容性与开发文档
 检查了锁升级、内存不足和事务锁交接时的行为，记录了尚未修复的问题。
 
 [查看测试结果和已知问题](docs/test-report.md#native-lock-fault-review-20261108)
-
-</details>
-
-<details>
-<summary><strong>2026-11-08 · 检查查询和数据读取问题</strong></summary>
-
-检查函数参数的执行和查询期间修改表结构的行为，并与 PostgreSQL 比较结果；另测试了本项目对损坏数据的处理。发现的问题仍待修复。
-
-[查看测试结果和已知问题](docs/test-report.md#ordinary-scalar-effects-20261108)
 
 </details>
 
