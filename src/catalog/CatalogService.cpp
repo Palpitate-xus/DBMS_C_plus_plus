@@ -511,6 +511,33 @@ CatalogManager::MetadataSnapshot CatalogService::metadataSnapshot(const std::str
     return CatalogManager::readMetadataSnapshot(catalogDirForDb(engine_, dbname).string(), includeDefaultObjects);
 }
 
+std::vector<PgNamespaceRow> CatalogService::namespaceSnapshot(const std::string& dbname) const {
+    const auto ownership = engine_.catalogReadOwnership(dbname);
+    CatalogDatabaseIdentity physical;
+    if (!databaseIdentity(engine_.dbPath(dbname), physical, dbname == "info")) return {};
+    std::shared_ptr<CatalogManager> model;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto found = cache_.find(dbname);
+        if (found != cache_.end() && found->second.databaseDevice == physical.device &&
+            found->second.databaseInode == physical.inode)
+            model = !ownership.mayReadCurrentFiles && found->second.committed
+                ? found->second.committed : found->second.manager;
+    }
+    if (model) {
+        if (!ownership.mayReadCurrentFiles) return model->listNamespaces();
+        const auto state = model->publicationState();
+        if (state == CatalogManager::PublicationState::Current) return model->listNamespaces();
+        if (state == CatalogManager::PublicationState::Conflict)
+            throw DbError("58030", "catalog read conflicts with unpublished or missing metadata");
+    }
+    if (!ownership.mayReadCurrentFiles)
+        throw DbError("55P03", "cold catalog read conflicts with an active DDL owner");
+    // Cold and peer reads still load the complete catalog. Preserve validation
+    // of unrelated catalog files and avoid bootstrap, migration or publication.
+    return CatalogManager::readMetadataSnapshot(catalogDirForDb(engine_, dbname).string()).namespaces;
+}
+
 CatalogManager::DefaultCatalogSnapshot CatalogService::defaultCatalogSnapshot(
     const std::string& dbname, CatalogManager::DefaultCatalogKind kind) const {
     const auto ownership = engine_.catalogReadOwnership(dbname);

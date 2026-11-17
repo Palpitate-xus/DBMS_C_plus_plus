@@ -22,7 +22,7 @@ inline std::vector<std::string> functionNamespaceSearchPath(
     }
     if(std::find(actual.begin(),actual.end(),"pg_catalog")==actual.end())actual.insert(actual.begin(),"pg_catalog");
     if(!database.empty() && engine.databaseExists(database)) {
-        const auto snapshot=engine.catalogService().metadataSnapshot(database);
+        const auto namespaces=engine.catalogService().namespaceSnapshot(database);
         actual.erase(std::remove_if(actual.begin(),actual.end(),[&](const auto& schema) {
             // Native StorageEngine creation persists real schema markers
             // before any catalog is bootstrapped. A pure lookup may read that
@@ -32,7 +32,7 @@ inline std::vector<std::string> functionNamespaceSearchPath(
                 schema.find('\0')==std::string::npos && schema.find('/')==std::string::npos &&
                 schema.find('\\')==std::string::npos && schema!="." && schema!="..";
             if(storedName && std::filesystem::exists(engine.dbPath(database)/(".schema_"+schema)))return false;
-            return schema!="pg_catalog" && std::none_of(snapshot.namespaces.begin(),snapshot.namespaces.end(),
+            return schema!="pg_catalog" && std::none_of(namespaces.begin(),namespaces.end(),
                 [&](const auto& entry){return entry.nspname==schema;});
         }),actual.end());
     }

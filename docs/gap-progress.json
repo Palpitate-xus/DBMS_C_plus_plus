@@ -2,6 +2,32 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-17 namespace-only function lookup and catalog serialization allocation failures",
+      "gap_ids": [
+        "CAT-01",
+        "FUNC-01",
+        "QRY-01"
+      ],
+      "status": "partial",
+      "evidence": [
+        "src/catalog/CatalogService.cpp",
+        "src/catalog/CatalogService.h",
+        "src/catalog/catalog.cpp",
+        "src/expression/function_namespace.h",
+        "docs/test-report.md",
+        "docs/performance-report-2026-10-30.md"
+      ],
+      "tests": [
+        "tests/catalog_namespace_snapshot_test.cpp",
+        "tests/catalog_namespace_exception_test.cpp"
+      ],
+      "verification": [
+        "Normal CMake with matching C++17/O2 flags: 12 dependency-affected objects rebuilt, then catalog.cpp rebuilt for the serialization fix; remaining objects reused only after source, flags, dependencies and hash checks. Namespace regression: 74 checks. Allocation regression: 492 checks, 236 injected sites, including every one of 13 serialization sites through read comparison and publication. Old independent publication control writes a truncated 15-byte pg_namespace.cat; final control preserves files and retries successfully.",
+        "26 selected native entries: 25 pass, schema_routine_namespace_identity_test.cpp:33 exits -6 in both old and final programs; deferred native routine conventions were not repaired. Eight existing protocol entries pass; full suite not run. PG18.6/old/new retain 89/88/88 requests and responses; second decoder verifies 88 complete old/new matches, 82 PG semantic matches per version and six existing differences. Seven normal stops and two real project SIGKILL/restarts retain committed data/function state and remove tested pending changes.",
+        "Fixed plan: 4/128 filler tables, 256 target rows, six alternating ABBA/BAAB blocks per size, 48 serial timing services, 3072 timed SQL; all replies retained and independently redecoded. Same-workload PG preflight has 16 matching semantic comparisons. All timing services and four seed services stop normally. Large-catalog upper/length median wall changes are -45.35%/-45.12%, but all eight groups exceed the predetermined drift diagnostic; small control is +3.55% wall/+5.81% CPU. No stable speedup or no-regression claim. Original 273 item objects and all user deferrals remain unchanged."
+      ]
+    },
+    {
       "issue": "2026-11-17 rejected row directory reuse candidates and accepted decoder regressions",
       "gap_ids": [
         "STO-01",

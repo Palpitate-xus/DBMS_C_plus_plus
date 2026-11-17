@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-11-17：减少函数查询的额外开销，修复目录写入故障
+
+函数查找改为只复制需要的 schema 列表。修复内存不足时可能把不完整目录内容写入文件的问题，新增快照、回滚和内存故障测试。选定查询和重启对照完成；原有函数存储测试失败及与 PostgreSQL 的差异仍保留。[测试报告](docs/test-report.md#namespace-snapshot-20261117)、[性能测试报告](docs/performance-report-2026-10-30.md#namespace-snapshot-cost-20261117)。
+
 ## 2026-11-17：补充数据读取测试和性能测试结果
 
 新增 22 项数据读取检查，覆盖空值、空字符串和部分字段读取等情况。尝试的两种优化未能带来稳定提速，因此保留原来的实现。报告列出了全部结果，包括变慢的查询，以及此前已有、仍未修复的长文本存储测试失败。[测试报告](docs/test-report.md#row-directory-reuse-20261117)、[性能报告](docs/performance-report-2026-10-30.md#row-directory-reuse-cost-20261117)。

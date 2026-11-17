@@ -165,6 +165,15 @@ docs/              # 使用、兼容性与开发文档
 只显示最近 3 条，点击标题展开。[查看完整更新日志](CHANGELOG.md)。
 
 <details>
+<summary><strong>2026-11-17 · 减少函数查询的额外开销，修复目录写入故障</strong></summary>
+
+函数查找只复制需要的目录信息，减少多余的数据复制。修复内存不足时可能写入不完整目录文件的问题，补充查询、回滚、重启和故障测试。
+
+[查看测试结果](docs/test-report.md#namespace-snapshot-20261117) · [查看性能测试](docs/performance-report-2026-10-30.md#namespace-snapshot-cost-20261117)
+
+</details>
+
+<details>
 <summary><strong>2026-11-17 · 补充数据读取测试和性能测试结果</strong></summary>
 
 增加空值、空字符串和部分字段读取的测试。尝试的两种优化未能带来稳定提速，因此保留原来的实现；报告列出了全部结果，包括变慢的查询。
@@ -179,15 +188,6 @@ docs/              # 使用、兼容性与开发文档
 读取字段时，如果记录字段位置的信息已损坏，现在会报错，避免返回空字符串或错误文本。已补充查询、事务和重启测试；性能测量波动较大，暂不能确认提速。
 
 [查看测试结果](docs/test-report.md#variable-row-directory-20261117) · [查看性能测量](docs/performance-report-2026-10-30.md#variable-row-directory-cost-20261117)
-
-</details>
-
-<details>
-<summary><strong>2026-11-08 · 记录并发访问中尚未修复的问题</strong></summary>
-
-检查了多个事务争用数据、内存不足等情况下的行为。发现的问题和复现方法已写入测试报告，相关问题尚未修复。
-
-[查看测试结果和已知问题](docs/test-report.md#native-lock-fault-review-20261108)
 
 </details>
 

@@ -57,6 +57,9 @@ public:
     // that need only declarations can explicitly omit the object graph.
     CatalogManager::MetadataSnapshot metadataSnapshot(const std::string& dbname,
                                                       bool includeDefaultObjects = true) const;
+    // Owned namespace rows, with the transaction and publication checks used
+    // by metadataSnapshot. The complete public snapshot remains unchanged.
+    std::vector<PgNamespaceRow> namespaceSnapshot(const std::string& dbname) const;
     // Specialized read-only projection for pg_attrdef/pg_depend scans.
     CatalogManager::DefaultCatalogSnapshot defaultCatalogSnapshot(
         const std::string& dbname, CatalogManager::DefaultCatalogKind kind) const;

@@ -2658,6 +2658,9 @@ std::map<std::string, std::string> CatalogManager::serializeAllLocked() const {
     auto persist = [&](const char* name,
                        const std::function<void(std::ostream&)>& writer) {
         std::ostringstream image;
+        // A failed buffer allocation must not turn a partial image into a
+        // successful catalog snapshot or a file eligible for publication.
+        image.exceptions(std::ios::badbit | std::ios::failbit);
         writer(image);
         images.emplace(name, image.str());
     };
