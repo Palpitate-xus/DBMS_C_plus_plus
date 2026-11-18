@@ -6203,7 +6203,11 @@ private:
             while(!position->leftComplete) {
                 const auto* leftRow = input(*left,position->left,a);
                 if(!leftRow){position->leftComplete=true;break;}
-                while(const auto* rightRow = input(*right,position->right,b)) {
+                while (true) {
+                    if (arrayFilter)
+                        position->right = arrayFilter->nextRight(position->left,*leftRow,position->right);
+                    const auto* rightRow = input(*right,position->right,b);
+                    if (!rightRow) break;
                     const auto occurrence=position->right++;
                     if(position->rightMatched.size()<=occurrence)position->rightMatched.resize(occurrence+1,false);
                     if (arrayFilter && !arrayFilter->mayMatch(position->left,*leftRow,occurrence,*rightRow)) continue;
@@ -6221,6 +6225,7 @@ private:
                         return emit(std::move(row));
                     }
                 }
+                if (arrayFilter) arrayFilter->finishRightScan();
                 const bool unmatched=!position->matched && leftJoin;
                 ++position->left;position->right=0;position->matched=false;
                 if(unmatched)return emit(combine(leftRow,nullptr));

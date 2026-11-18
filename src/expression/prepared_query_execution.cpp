@@ -2,15 +2,20 @@
 #include <exception>
 #include "commands/TableManage.h"
 #include "catalog/catalog.h"
+#include "common/Config.h"
 #include "common/DbError.h"
 #include "expression/ArrayDatumInput.h"
 #include "expression/expr_helper.h"
 #include "expression/aggregate_type.h"
 #include "parser/parser.h"
+#include "utils/Session.h"
 #include <algorithm>
 #include <charconv>
+#include <new>
 #include <optional>
 #include <limits>
+
+extern dbms::Config g_config;
 
 namespace dbms {
 namespace {
@@ -864,13 +869,17 @@ PreparedArrayJoinFilter::Fingerprint PreparedArrayJoinFilter::fingerprint(const 
     return {Fingerprint::State::Value, hash};
 }
 
-bool PreparedArrayJoinFilter::mayMatch(size_t leftOrdinal, const RowContext& left,
-    size_t rightOrdinal, const RowContext& right) {
-    if ((rightOrdinal & 127U) == 0) checkForQueryInterrupt();
+void PreparedArrayJoinFilter::prepareLeft(size_t leftOrdinal, const RowContext& left) {
     if (leftOrdinal_ != leftOrdinal) {
         left_ = fingerprint(left, true);
         leftOrdinal_ = leftOrdinal;
     }
+}
+
+bool PreparedArrayJoinFilter::mayMatch(size_t leftOrdinal, const RowContext& left,
+    size_t rightOrdinal, const RowContext& right) {
+    if ((rightOrdinal & 127U) == 0) checkForQueryInterrupt();
+    prepareLeft(leftOrdinal, left);
     if (rightOrdinal == right_.size()) right_.push_back(fingerprint(right,false));
     const auto& candidate = right_.at(rightOrdinal);
     if (left_.state == Fingerprint::State::Unavailable || candidate.state == Fingerprint::State::Unavailable)
@@ -879,9 +888,62 @@ bool PreparedArrayJoinFilter::mayMatch(size_t leftOrdinal, const RowContext& lef
            left_.hash == candidate.hash;
 }
 
+void PreparedArrayJoinFilter::finishRightScan() {
+    if (lookupState_ == LookupState::Reading) lookupState_ = LookupState::Complete;
+}
+
+void PreparedArrayJoinFilter::buildLookup() {
+    lookupState_ = LookupState::Unavailable;
+    const auto* session = currentSession();
+    const size_t workMemKb = session ? session->workMem.effective(g_config.workMemKb) : g_config.workMemKb;
+    const auto workMemBytes = workMemKb > std::numeric_limits<size_t>::max() / 1024
+        ? std::numeric_limits<size_t>::max() : workMemKb * 1024;
+    const auto limit = workMemBytes / sizeof(LookupEntry);
+    size_t entries = 0;
+    for (size_t i = 0; i < right_.size(); ++i) {
+        if ((i & 127U) == 0) checkForQueryInterrupt();
+        const auto state = right_[i].state;
+        if (state == Fingerprint::State::Unavailable) return;
+        if (state == Fingerprint::State::Value && ++entries > limit) return;
+    }
+    std::vector<LookupEntry> index;
+    if (entries > index.max_size()) return;
+    try { index.reserve(entries); }
+    catch (const std::bad_alloc&) { return; }
+    for (size_t i = 0; i < right_.size(); ++i) {
+        if ((i & 127U) == 0) checkForQueryInterrupt();
+        if (right_[i].state == Fingerprint::State::Value) index.emplace_back(right_[i].hash,i);
+    }
+    // Sorting by original ordinal within each fingerprint preserves duplicate
+    // order, including when the consumer stops and resumes the current probe.
+    size_t comparisons = 0;
+    std::sort(index.begin(),index.end(),[&](const auto& a, const auto& b) {
+        if ((comparisons++ & 127U) == 0) checkForQueryInterrupt();
+        return a < b;
+    });
+    checkForQueryInterrupt();
+    lookup_ = std::move(index);
+    lookupState_ = LookupState::Ready;
+}
+
+size_t PreparedArrayJoinFilter::nextRight(size_t leftOrdinal, const RowContext& left, size_t next) {
+    if (lookupState_ == LookupState::Reading || lookupState_ == LookupState::Unavailable) return next;
+    if (next == 0) checkForQueryInterrupt();
+    if (right_.empty()) return 0;
+    prepareLeft(leftOrdinal, left);
+    if (left_.state == Fingerprint::State::Unavailable) return next;
+    if (lookupState_ == LookupState::Complete) buildLookup();
+    if (lookupState_ != LookupState::Ready) return next;
+    if (left_.state == Fingerprint::State::Null) return right_.size();
+    const auto match = std::lower_bound(lookup_.begin(),lookup_.end(),LookupEntry{left_.hash,next});
+    return match != lookup_.end() && match->first == left_.hash ? match->second : right_.size();
+}
+
 void PreparedArrayJoinFilter::reset() {
     leftOrdinal_.reset();
     right_.clear();
+    std::vector<LookupEntry>().swap(lookup_);
+    lookupState_ = LookupState::Reading;
 }
 
 ExprValue PreparedQueryExecution::readSourceColumn(const RowContext& row,size_t source,size_t column) const {

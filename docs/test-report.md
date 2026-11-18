@@ -2,6 +2,20 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="array-lookup-20261118"></a>
+## 2026-11-18 · 按整数数组查找联接行
+
+PostgreSQL 的哈希联接根据 `work_mem` 和 `hash_mem_multiplier` 设定内存限额，必要时分批。DuckDB 用哈希值划分输入，暂存尚不能匹配的分区。SQLite 可以为一条查询临时建索引，在预计有多次查找时省去反复扫描。[PostgreSQL 哈希联接源码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/executor/nodeHash.c) · [DuckDB 哈希联接源码](https://github.com/duckdb/duckdb/blob/main/src/execution/join_hashtable.cpp) · [SQLite 临时索引](https://www.sqlite.org/optoverview.html#automatic_query_time_indexes)
+
+本项目读完右侧且确有后续左侧行时，可以按比较摘要定位候选，候选按原来的右侧顺序返回，再逐个比较实际数组。提前停止的查询可以在读完右侧之前返回。新建的查找表以当前会话的 `work_mem` 为上限，超过限制时逐行查找。已读的右侧行和已有的摘要缓存仍有各自的内存开销。每次重新执行相关查询时使用该次读取的数据。
+
+- [协议回归](../tests/array_domain_join_using_protocol_e2e_test.py)从 218 项扩展到 236 项。PostgreSQL 18.6、已提交基线和新版均通过，每版核对 1,025 个回复帧。新用例覆盖重复键、多键、排序后分页，以及右侧为空的内联接、左联接和全联接。注册回归可用 `DBMS_MAIN="$PWD/build/cmake/dbms_main" python3 -B tests/array_domain_join_using_protocol_e2e_test.py` 在仓库根目录运行。
+- 另有 108 项对照，新旧版完整协议回复逐字节一致。三个不同的 `bigint[]` 产生相同的摘要，实际比较仍只返回真正匹配的行。行序检查覆盖同一摘要下交替出现的相等和不等数组，以及多次停止和恢复读取。右侧 4,099 行时，`work_mem='64MB'` 会建查找表，`'64kB'` 使用逐行查找，两种设置均返回同样四行。`LIMIT 0`、提前满足的 `LIMIT 1` 和只有一行左侧输入的控制也已核对。
+- 两组项目崩溃恢复分别通过 29 和 53 项，独立复核 286 和 296 个回复帧。新增的全联接写入控制含重复键、摘要相同的不等数组、非默认下界和 NULL。进程在事务未提交时收到 `SIGKILL`，冷启动后保留已提交的 10 行，未提交批次消失，同一批可重新写入。PostgreSQL 的正常回滚及重启对照分别通过 30 和 54 项。
+- GCC 13.3、C++17、CMake、`-O2`，关闭 OpenSSL。相对已提交基线首先重编七个对象，随后为避免在右侧为空时读取左键又重编一个对象。最终程序 SHA-256 为 `8061258031357b8a03ca8f05fe9bf8ecb6748ef22ca9bb436e15631ccf6dc1ab`。此前的 128、149、218、244 项协议用例和八个选定 C++ 入口复跑通过。149 和 244 项套件首次遇到本地证据路径重名，改用新路径后完成。完整套件待验证。
+
+普通 `RIGHT JOIN` 的已测查询可以执行，部分 `EXPLAIN` 仍返回 `0A000`。需要先排序的派生来源和部分嵌套联接写入仍有既有差异。原始协议和构建记录存于本机。[实际性能](performance-report-2026-10-30.md#array-lookup-cost-20261118)
+
 <a id="integer-array-join-20261118"></a>
 ## 2026-11-18 · 整数数组联接与带域类型的空值
 

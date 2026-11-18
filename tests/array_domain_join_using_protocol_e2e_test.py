@@ -385,6 +385,69 @@ def array_pair_workload(checks, prefix, objects):
     number('nonnull-domain-no-recheck', f"SELECT currval('{sequence}') AS calls", 100)
 
 
+def array_lookup_workload(checks, prefix, objects):
+    q = checks.query
+    relations = {}
+
+    for side, identifier in (('left', 'lid'), ('right', 'rid'), ('empty_right', 'rid')):
+        symbol = f'lookup_{side}'
+        table = f'{prefix}_{symbol}'
+        objects.append(('TABLE', table))
+        q(f'table-{symbol}', f'CREATE TABLE {table}({identifier} integer PRIMARY KEY,k bigint[],m integer[])',
+          tag='CREATE TABLE', require_success=True)
+        oid = q(f'relation-oid-{symbol}', f"SELECT oid FROM pg_class WHERE relname='{table}'",
+                tag='SELECT 1', names=['oid'], oids=[26], capture_oid=True, wire_layout=[[4, -1]])
+        relations[side] = table, int(oid)
+
+    # These distinct bigint[] values have the same integer-array fingerprint.
+    equal_key = '{11,22}'
+    other_key = '{12,6137473909959017}'
+    missing_key = '{13,7094049026230848}'
+    left_rows = {1: (missing_key, '{1}'), 2: (equal_key, '{1}'), 3: (equal_key, '{2}'),
+                 4: (other_key, '{1}'), 5: (None, '{1}')}
+    right_rows = {10: (other_key, '{1}'), 11: (equal_key, '{1}'), 12: ('{99,100}', '{1}'),
+                  13: (other_key, '{2}'), 14: (equal_key, '{2}'), 15: (equal_key, '{1}'), 16: (None, '{1}')}
+    for side, rows in (('left', left_rows), ('right', right_rows)):
+        table, _ = relations[side]
+        entries = []
+        for identifier, (key, second) in rows.items():
+            literal = 'NULL' if key is None else f"'{key}'"
+            entries.append(f"({identifier},{literal},'{second}')")
+        values = ','.join(entries)
+        q(f'lookup-{side}-data', f'INSERT INTO {table} VALUES {values}', tag=f'INSERT 0 {len(rows)}',
+          require_success=True)
+
+    def selected(label, kind, pairs, key_list='k', right='right', tail=''):
+        left_table, left_oid = relations['left']
+        right_table, right_oid = relations[right]
+        sql = (f'SELECT l.lid,r.rid,k FROM {left_table} AS l {kind} JOIN {right_table} AS r USING({key_list}) '
+               f'ORDER BY l.lid NULLS LAST,r.rid DESC NULLS LAST{tail}')
+        rows = [[None if lid is None else str(lid), None if rid is None else str(rid),
+                 right_rows[rid][0] if lid is None else left_rows[lid][0]] for lid,rid in pairs]
+        q(label, sql, tag=f'SELECT {len(rows)}', rows=rows, names=['lid','rid','k'], oids=[23,23,1016],
+          wire_layout=[[4, -1], [4, -1], [-1, -1]])
+        origins = [[left_oid,1], [right_oid,1], [0,0] if kind=='FULL' else [left_oid,2]]
+        record = checks.records[-1]
+        record['expected']['origins'] = origins
+        if [field[1:3] for field in record['fields']] != origins:
+            record['pass'] = False
+            print('ARRAY_DOMAIN_JOIN_ORIGIN_DIFFERENCE', json.dumps(record), flush=True)
+
+    matches = [(2,15),(2,14),(2,11),(3,15),(3,14),(3,11),(4,13),(4,10)]
+    full = [(1,None), *matches, (5,None), (None,16), (None,12)]
+    selected('lookup-collision-inner','INNER',matches)
+    selected('lookup-collision-full','FULL',full)
+    selected('lookup-collision-multiple-keys','INNER',[(2,15),(2,11),(3,14),(4,10)],key_list='k,m')
+    selected('lookup-order-subset','INNER',matches[3:7],tail=' OFFSET 3 LIMIT 4')
+    q('lookup-low-work-mem', "SET work_mem='64kB'", tag='SET')
+    selected('lookup-low-memory-full','FULL',full)
+    q('lookup-reset-work-mem', 'RESET work_mem', tag='RESET')
+    selected('lookup-empty-right-inner','INNER',[],right='empty_right')
+    unmatched = [(identifier,None) for identifier in left_rows]
+    selected('lookup-empty-right-left','LEFT',unmatched,right='empty_right')
+    selected('lookup-empty-right-full','FULL',unmatched,right='empty_right')
+
+
 def main():
     signal.signal(signal.SIGTERM, interrupted)
     signal.signal(signal.SIGINT, interrupted)
@@ -405,6 +468,7 @@ def main():
             checks.sock = reference_connection(client) if reference else server.start()
             workload(checks, prefix, objects)
             array_pair_workload(checks, prefix, objects)
+            array_lookup_workload(checks, prefix, objects)
             failures = [record['label'] for record in checks.records if not record['pass']]
             assert not failures, failures
             complete = True

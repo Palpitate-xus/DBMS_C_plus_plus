@@ -20834,6 +20834,7 @@ class PreparedWithDmlRuntime {
         vector<dbms::Operator*> planChildren;
         string planName="Materialize";
         map<string,string> planAttributes;
+        shared_ptr<const dbms::PreparedArrayJoinFilter> planArrayFilter;
         size_t position=0;
         dbms::RowContext current;
         bool loaded=false,closed=false;
@@ -20853,7 +20854,12 @@ class PreparedWithDmlRuntime {
             row=current;return true;
         }
         string preparedPlanNodeName() const override {return planName;}
-        map<string,string> preparedPlanAttributes() const override {return planAttributes;}
+        map<string,string> preparedPlanAttributes() const override {
+            auto attributes = planAttributes;
+            if (planArrayFilter && planArrayFilter->lookupBuilt())
+                attributes["integerArrayKeyLookupBuilt"] = "true";
+            return attributes;
+        }
         vector<dbms::Operator*> preparedPlanChildren() const override {return planChildren;}
         void rebind(const dbms::RowContext& outer) {
             closeSource();
@@ -21162,7 +21168,11 @@ class PreparedWithDmlRuntime {
         }
         auto arrayFilter = deferMerged && !item->joinCondition
             ? dbms::PreparedArrayJoinFilter::prepare(*query_,*comparisons) : nullptr;
-        if (arrayFilter) node->planAttributes["integerArrayKeyFilter"] = "true";
+        if (arrayFilter) {
+            node->planAttributes["integerArrayKeyFilter"] = "true";
+            node->planAttributes["integerArrayKeyLookup"] = "true";
+            node->planArrayFilter = arrayFilter;
+        }
         struct IntegerJoinKey {
             DmlSourceNode::Cell left,right;
             string type;
@@ -21251,7 +21261,11 @@ class PreparedWithDmlRuntime {
             while(!position->leftComplete) {
                 const auto* leftRow = input(*left,position->left,a);
                 if(!leftRow){position->leftComplete=true;break;}
-                while(const auto* rightRow = input(*right,position->right,b)) {
+                while (true) {
+                    if (arrayFilter)
+                        position->right = arrayFilter->nextRight(position->left,*leftRow,position->right);
+                    const auto* rightRow = input(*right,position->right,b);
+                    if (!rightRow) break;
                     const auto occurrence=position->right++;
                     if(position->rightMatched.size()<=occurrence)position->rightMatched.resize(occurrence+1,false);
                     if (arrayFilter && !arrayFilter->mayMatch(position->left,*leftRow,occurrence,*rightRow)) continue;
@@ -21281,6 +21295,7 @@ class PreparedWithDmlRuntime {
                         return emit(std::move(row));
                     }
                 }
+                if (arrayFilter) arrayFilter->finishRightScan();
                 const bool unmatched=!position->matched && leftJoin;
                 ++position->left;position->right=0;position->matched=false;
                 if(unmatched)return emit(combine(leftRow,nullptr));

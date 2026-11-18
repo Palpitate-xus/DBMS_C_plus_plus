@@ -2,6 +2,24 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-18 ordered candidate lookup for integer-array joins",
+      "gap_ids": ["QRY-01"],
+      "status": "partial",
+      "evidence": [
+        "src/expression/prepared_query_execution.cpp",
+        "src/main.cpp",
+        "src/commands/DmlExecutor.cpp",
+        "docs/test-report.md",
+        "docs/performance-report-2026-10-30.md"
+      ],
+      "tests": ["tests/array_domain_join_using_protocol_e2e_test.py"],
+      "verification": [
+        "Exact candidate, committed baseline and PostgreSQL 18.6 pass 236/236 registered protocol cases, 1025 frames each. The old and new complete replies match on 108 additional collision, duplicate, memory fallback, rebind and demand checks. The candidate builds only after natural right EOF and further left demand. With 4099 right rows, the 64 kB fallback and 64 MB lookup return identical rows.",
+        "Two candidate SIGKILL and reopen checks pass 29/29 and 53/53, with 286 and 296 paired reply frames. The new ordinary INSERT SELECT control preserves duplicate and unmatched committed rows and discards the pending repeat. Existing 128/149/218/244 cases and eight selected native entries pass. The original 273 item records retain their statuses.",
+        "Eight workloads return identical new and old wire bytes. Twelve processes complete 96 batches and 768 timed queries; independent audit verifies 1248 replies and 514176 frames. The 1024-by-1024 CPU medians are 756.676 to 690.581 ms with 11.69 percent maximum drift, above the 10 percent gate. The high-overlap case passes the drift gate with no clear direction. The separate untimed count drops from 1048576 to 1279 successful right-side visits, with 1024 scanned right rows in both versions."
+      ]
+    },
+    {
       "issue": "2026-11-18 avoid repeated integer array work in joins and retain typed NULL on assignment",
       "gap_ids": ["TYPE-19", "TYPE-20", "QRY-01"],
       "status": "partial",

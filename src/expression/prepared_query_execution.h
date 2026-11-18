@@ -36,6 +36,11 @@ public:
         const std::vector<ExprPtr>& comparisons);
     bool mayMatch(size_t leftOrdinal, const RowContext& left,
                   size_t rightOrdinal, const RowContext& right);
+    // Called only once the original right source reports EOF. Later left
+    // rows can seek to a possible match in that same materialized source.
+    void finishRightScan();
+    size_t nextRight(size_t leftOrdinal, const RowContext& left, size_t next);
+    bool lookupBuilt() const { return lookupState_ == LookupState::Ready; }
     void reset();
 
 private:
@@ -53,11 +58,16 @@ private:
     };
     explicit PreparedArrayJoinFilter(std::vector<Key> keys) : keys_(std::move(keys)) {}
     Fingerprint fingerprint(const RowContext&, bool left) const;
+    void prepareLeft(size_t ordinal, const RowContext&);
+    void buildLookup();
 
     std::vector<Key> keys_;
     std::optional<size_t> leftOrdinal_;
     Fingerprint left_;
     std::vector<Fingerprint> right_;
+    using LookupEntry = std::pair<uint64_t, size_t>;
+    enum class LookupState { Reading, Complete, Unavailable, Ready } lookupState_ = LookupState::Reading;
+    std::vector<LookupEntry> lookup_;
 };
 
 // One execution of one wholly prepared statement. The caller must create a

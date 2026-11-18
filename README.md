@@ -19,6 +19,13 @@ cmake --build build/cmake --parallel 2
 ## 最近更新
 
 <details>
+<summary>连接表时直接查找可能匹配的数组 · 2026-11-18</summary>
+
+按整数数组连接表时，右侧读完后可以直接找到可能匹配的行，减少逐行检查。
+
+</details>
+
+<details>
 <summary>用整数数组连接表时少做重复工作 · 2026-11-18</summary>
 
 查询可以更早跳过不匹配的行，减少重复比较和复制。
@@ -29,13 +36,6 @@ cmake --build build/cmake --parallel 2
 <summary>连接表时保留数组类型 · 2026-11-18</summary>
 
 查询结果保留正确的数组类型，可以直接写入另一张表中类型相同的列。
-
-</details>
-
-<details>
-<summary>修复子查询中的数组读写和排序 · 2026-11-18</summary>
-
-子查询里的数组会保留起始下标和空值。排序时按数字大小比较整数数组，例如 `{2}` 排在 `{10}` 前面。
 
 </details>
 

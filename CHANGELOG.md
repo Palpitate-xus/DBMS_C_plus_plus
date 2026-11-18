@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-11-18 · 连接表时直接查找可能匹配的数组
+
+按整数数组连接表时，右侧读完后可以直接查找可能匹配的行，减少逐行检查。重复匹配仍会各自返回。如果查找表超过查询的内存设置，数据库继续逐行查找。[测试](docs/test-report.md#array-lookup-20261118) · [性能](docs/performance-report-2026-10-30.md#array-lookup-cost-20261118)
+
 ## 2026-11-18 · 整数数组连接少做重复工作
 
 用整数数组连接表时，可以更早跳过不匹配的行，省去重复解析数组和复制整行。普通查询写入也可原样复制外联接产生的同域空值，目标列自己的 `NOT NULL` 仍会检查。[测试](docs/test-report.md#integer-array-join-20261118) · [性能](docs/performance-report-2026-10-30.md#integer-array-join-cost-20261118)
