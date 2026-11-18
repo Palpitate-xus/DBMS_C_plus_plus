@@ -132,6 +132,97 @@ void createFixture(StorageEngine& engine) {
     assertIndexed(engine, ridFor(engine, "1"), "alpha", "1,1", "10");
 }
 
+void testSharedDirectoryDiscovery(StorageEngine& engine) {
+    const fs::path root(kDatabase);
+    constexpr const char* plainTable = "plain_rows";
+    const auto plainMarker = root / "plain_rows.specialized_index_dirty";
+    const auto indexedMarker = root / "items.specialized_index_dirty";
+    const std::string contents = "unrelated file";
+    const auto putDecoy = [&](const fs::path& path) {
+        std::ofstream output(path, std::ios::binary | std::ios::trunc);
+        output << contents;
+        assert(output.good());
+    };
+    const auto bytes = [](const fs::path& path) {
+        std::ifstream input(path, std::ios::binary);
+        assert(input.good());
+        std::string value{std::istreambuf_iterator<char>(input),
+                          std::istreambuf_iterator<char>()};
+        assert(!input.bad());
+        return value;
+    };
+
+    TableSchema plain;
+    plain.tablename = plainTable;
+    plain.append(makeIntColumn("id", false, 4, true));
+    assert(engine.createTable(kDatabase, plain) == DBStatus::OK);
+
+    const std::vector<fs::path> decoys = {
+        root / "plain_rows_.spgist", root / "plain_rows_extra.gin.tmp",
+        root / "plain_rows_extra.BRIN", root / "unrelated_body.fti"};
+    for (const auto& path : decoys) putDecoy(path);
+    const auto decoyDirectory = root / "plain_rows_extra.gist";
+    assert(fs::create_directory(decoyDirectory));
+
+    // Another table's real indexes and lookalikes do not dirty this table.
+    assert(engine.beginTransaction(kDatabase) == DBStatus::OK);
+    assert(engine.insert(kDatabase, plainTable, {{"id", "1"}}) == DBStatus::OK);
+    assert(!fs::exists(plainMarker));
+    assert(engine.commitTransaction() == DBStatus::OK);
+    assert(!fs::exists(plainMarker));
+
+    // Four legacy families still recognize an empty column in the filename.
+    // Observe the mutation marker, then remove the malformed file so that
+    // rollback can rebuild the original, index-free table.
+    for (const std::string suffix : {".fti", ".gin", ".gist", ".brin"}) {
+        const auto malformed = root / ("plain_rows_" + suffix);
+        putDecoy(malformed);
+        assert(engine.beginTransaction(kDatabase) == DBStatus::OK);
+        assert(engine.insert(kDatabase, plainTable, {{"id", "2"}}) == DBStatus::OK);
+        assert(bytes(plainMarker) == "DBMS_SPECIALIZED_INDEX_DIRTY_V1\n");
+        assert(fs::remove(malformed));
+        assert(engine.rollbackTransaction() == DBStatus::OK);
+        assert(!fs::exists(plainMarker));
+        assert(engine.query(kDatabase, plainTable, {"=id 2"}, {"id"}).empty());
+    }
+
+    // Discovery errors fail before a heap mutation even when the entry's
+    // name would never qualify as a specialized index.
+    const auto loop = root / "unrelated.loop";
+    fs::create_symlink(loop.filename(), loop);
+    assert(engine.insert(kDatabase, plainTable, {{"id", "2"}}) == DBStatus::IO_ERROR);
+    assert(fs::is_symlink(fs::symlink_status(loop)) && fs::remove(loop));
+    assert(!fs::exists(plainMarker));
+    assert(engine.query(kDatabase, plainTable, {"=id 2"}, {"id"}).empty());
+
+    const std::vector<fs::path> indexes = {
+        root / "items_body.fti", root / "items_body.gin",
+        root / "items_score.gist", root / "items_location.spgist",
+        root / "items_score.brin"};
+    std::map<fs::path, std::string> previous;
+    for (const auto& index : indexes) previous.emplace(index, bytes(index));
+    assert(engine.beginTransaction(kDatabase) == DBStatus::OK);
+    assert(engine.insert(kDatabase, kTable,
+                         {{"id", "6"}, {"body", "grouped"}, {"location", "6,6"},
+                          {"score", "60"}}) == DBStatus::OK);
+    assert(bytes(indexedMarker) == "DBMS_SPECIALIZED_INDEX_DIRTY_V1\n");
+    assert(engine.commitTransaction() == DBStatus::OK);
+    assert(!fs::exists(indexedMarker));
+    for (const auto& [path, before] : previous) assert(bytes(path) != before);
+    assertIndexed(engine, ridFor(engine, "6"), "grouped", "6,6", "60");
+    assert(engine.remove(kDatabase, kTable, {"=id 6"}) == DBStatus::OK);
+    assertTokenAbsent(engine, "grouped");
+    assert(!fs::exists(indexedMarker));
+
+    for (const auto& path : decoys) {
+        assert(bytes(path) == contents);
+        assert(fs::remove(path));
+    }
+    assert(fs::is_directory(decoyDirectory) && fs::remove(decoyDirectory));
+    assert(engine.dropTable(kDatabase, plainTable) == DBStatus::OK);
+    std::cout << "[SPECIALIZED INDEX] shared directory discovery and rollback OK\n";
+}
+
 void testRenameLifecycle(StorageEngine& engine) {
     const fs::path root(kDatabase);
     const int64_t rid1 = ridFor(engine, "1");
@@ -485,6 +576,7 @@ int main() {
     {
         StorageEngine engine;
         createFixture(engine);
+        testSharedDirectoryDiscovery(engine);
         testRenameLifecycle(engine);
         testPartitionInsertVisibility(engine);
         testDmlAndTransactionBoundaries(engine);

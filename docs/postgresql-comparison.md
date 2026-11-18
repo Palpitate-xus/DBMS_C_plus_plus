@@ -2,6 +2,10 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-18 · 写入时查找要维护的索引
+
+PostgreSQL 从系统目录取得索引清单，并通过关系缓存复用清单。本项目现在为五种索引共用一次目录遍历。文件名仍参与识别索引，统一的索引目录与逐行维护是后续差距。[PostgreSQL 18.6 关系缓存](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/utils/cache/relcache.c) · [本项目测试](test-report.md#specialized-index-discovery-20261118)
+
 ## 2026-11-18 · 整数主键按索引顺序分页
 
 PostgreSQL 可以按数值顺序读 B 树并在取够行时结束。本项目在默认表空间的普通单列整数主键索引上也支持这一行为。范围条件由同一整数主键与整数字面量或这次传入的非空有符号整数参数组成时，项目可以按范围定位起点。实际取得有序主键页后，可保留输入顺序，仍会读取和验证这些行。复合键、通用代价选择以及部分未声明参数类型的协议行为仍有差距。[按参数定位](test-report.md#prepared-integer-primary-key-range-20261118) · [复用索引顺序](test-report.md#presorted-integer-primary-key-page-20261118)

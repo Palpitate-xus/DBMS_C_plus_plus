@@ -1730,6 +1730,21 @@ REINDEX INDEX idx_name;
 SHOW INDEX FROM users;
 ```
 
+### 写入后的索引维护
+
+全文、GIN、GiST、SP-GiST 和 BRIN 索引由数据库维护。检查这些索引文件时，数据库把目录遍历合并成一次。下面的 BRIN 索引随表数据变化更新，查询返回 `1, 15`。
+
+```sql
+CREATE TABLE example_index_maintenance (id integer PRIMARY KEY, score integer);
+CREATE INDEX example_score_brin ON example_index_maintenance USING BRIN (score) WITH (pages_per_range = 1);
+INSERT INTO example_index_maintenance VALUES (1, 10), (2, 20);
+UPDATE example_index_maintenance SET score = 15 WHERE id = 1;
+DELETE FROM example_index_maintenance WHERE id = 2;
+SELECT id, score FROM example_index_maintenance WHERE score >= 15 ORDER BY id;
+```
+
+提交后能查到更新的值，回滚后能查到原有值。表重写和清空保留受支持的索引定义。[测试范围](test-report.md#specialized-index-discovery-20261118)
+
 ---
 
 ## 9. 视图与物化视图

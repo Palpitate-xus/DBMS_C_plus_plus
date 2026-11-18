@@ -2,6 +2,28 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-18 discover specialized index files in one relation-directory pass for writes and rewrites",
+      "gap_ids": ["IDX-01", "IDX-15"],
+      "status": "partial",
+      "evidence": [
+        "src/commands/TableManage.cpp",
+        "docs/MANUAL.md",
+        "docs/test-report.md",
+        "docs/performance-report-2026-10-30.md"
+      ],
+      "tests": [
+        "tests/specialized_index_dml_test.cpp",
+        "tests/reindex_access_methods_recovery_test.cpp",
+        "tests/brin_maintenance_options_protocol_e2e_test.py"
+      ],
+      "verification": [
+        "Single-pass discovery preserves file-status errors, per-family filename handling, dirty-marker ordering, tablespace resolution and existing rebuild order. The exact programs pass the five-family raw DML/rollback/SIGKILL/DDL audit and the expanded native test. Seven native entries, four neighboring protocol entries and the manual pass.",
+        "A current BRIN maintenance protocol failure remains open on both exact builds. Thirty-eight non-EXPLAIN replies and all twelve BRIN files match byte for byte. All four executed plans match after removing clock fields, including the first post-VACUUM FULL heap scan.",
+        "Four traced executions of each workload have identical syscall counts per role. Directory getdents64 calls fall 106 to 34 for each INSERT, 92 to 20 for UPDATE, 32 to 8 for DELETE and 22 to 6 for BRIN UPDATE. All ninety-six preflight wire pairs match both project builds and normalize to PostgreSQL 18.6. Original 273 item records remain unchanged.",
+        "The untraced formal run and independent raw audit complete with twelve clean exits, sixty batches, 2880 timed writes, sixty post-state controls and 4272 exact archived exchanges. All five timing shapes exceed the prespecified ten percent drift gate. The observed end-to-end medians rise for DELETE and BRIN UPDATE, with no repeatable timing claim for any workload."
+      ]
+    },
+    {
       "issue": "2026-11-18 reuse the verified output order of integer primary key pages",
       "gap_ids": ["IDX-03", "QRY-10"],
       "status": "partial",

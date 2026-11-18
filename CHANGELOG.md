@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>写入数据时少查几遍目录 · 2026-11-18</summary>
+
+新增、修改和删除数据时，数据库把多类索引文件一起检查。加列、删列和清空表时也减少了重复的目录遍历。
+
+[使用手册](docs/MANUAL.md#写入后的索引维护) · [测试报告](docs/test-report.md#specialized-index-discovery-20261118) · [性能报告](docs/performance-report-2026-10-30.md#specialized-index-discovery-cost-20261118)
+
+</details>
+
+<details>
 <summary>按主键翻页时少排一次序 · 2026-11-18</summary>
 
 索引已经按所需顺序给出一页时，数据库沿用这个顺序。需要写临时文件时，也按这个顺序写入和读取。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>同一条分页查询可以反复用 · 2026-11-18</summary>
+<summary>查看更早的更新</summary>
+
+## 2026-11-18 · 同一条分页查询可以反复用
 
 每次传入上一页最后一个整数主键，数据库就从对应的位置继续查找。
 
 [使用示例](docs/MANUAL.md#重复执行带参数的分页) · [测试报告](docs/test-report.md#prepared-integer-primary-key-range-20261118) · [性能报告](docs/performance-report-2026-10-30.md#prepared-integer-primary-key-range-cost-20261118)
-
-</details>
-
-<details>
-<summary>查看更早的更新</summary>
 
 ## 2026-11-18 · 从上一页最后一个编号接着查
 

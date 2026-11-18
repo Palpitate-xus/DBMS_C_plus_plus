@@ -14951,22 +14951,59 @@ std::vector<int64_t> StorageEngine::fullTextSearch(const std::string& dbname,
     return result;
 }
 
-std::vector<std::string> StorageEngine::getFullTextIndexedColumns(const std::string& dbname,
-                                                                   const std::string& tablename) const {
-    std::vector<std::string> result;
-    auto dir = relationDir(dbname, tablename);
-    if (!std::filesystem::exists(dir)) return result;
-    std::string prefix = tablename + "_";
+namespace {
+enum class SpecializedIndexKind : size_t { FullText, Gin, GiST, SPGiST, Brin, Count };
+constexpr std::array<std::string_view, static_cast<size_t>(SpecializedIndexKind::Count)>
+    specializedIndexSuffixes{".fti", ".gin", ".gist", ".spgist", ".brin"};
+using SpecializedIndexColumns = std::array<std::vector<std::string>, specializedIndexSuffixes.size()>;
+
+template <typename Visit>
+void visitSpecializedIndexColumns(const std::filesystem::path& dir, const std::string& tablename,
+                                  Visit&& visit, std::optional<SpecializedIndexKind> only = {}) {
+    if (!std::filesystem::exists(dir)) return;
+    const std::string prefix = tablename + "_";
+    const size_t first = only ? static_cast<size_t>(*only) : 0;
+    const size_t end = only ? first + 1 : specializedIndexSuffixes.size();
     for (const auto& entry : std::filesystem::directory_iterator(dir)) {
         if (!entry.is_regular_file()) continue;
-        std::string name = entry.path().filename().string();
-        if (name.size() > 4 && name.substr(name.size() - 4) == ".fti" &&
-            name.substr(0, prefix.size()) == prefix) {
-            std::string colname = name.substr(prefix.size(), name.size() - prefix.size() - 4);
-            result.push_back(colname);
+        const auto name = entry.path().filename().string();
+        if (name.compare(0, prefix.size(), prefix) != 0) continue;
+        for (size_t family = first; family < end; ++family) {
+            const auto suffix = specializedIndexSuffixes[family];
+            if (name.size() < prefix.size() + suffix.size() ||
+                name.compare(name.size() - suffix.size(), suffix.size(), suffix) != 0) continue;
+            const auto column = std::string_view(name).substr(prefix.size(),
+                name.size() - prefix.size() - suffix.size());
+            // The existing SP-GiST reader excludes an empty column name.
+            if (!column.empty() || family != static_cast<size_t>(SpecializedIndexKind::SPGiST))
+                visit(family, column);
+            break;
         }
     }
+}
+
+SpecializedIndexColumns collectSpecializedIndexColumns(const std::filesystem::path& dir,
+                                                        const std::string& tablename) {
+    SpecializedIndexColumns result;
+    visitSpecializedIndexColumns(dir, tablename, [&](size_t family, std::string_view column) {
+        result[family].emplace_back(column);
+    });
     return result;
+}
+
+std::vector<std::string> collectSpecializedIndexColumns(const std::filesystem::path& dir,
+        const std::string& tablename, SpecializedIndexKind family) {
+    std::vector<std::string> result;
+    visitSpecializedIndexColumns(dir, tablename, [&](size_t, std::string_view column) {
+        result.emplace_back(column);
+    }, family);
+    return result;
+}
+} // namespace
+
+std::vector<std::string> StorageEngine::getFullTextIndexedColumns(const std::string& dbname,
+                                                                   const std::string& tablename) const {
+    return collectSpecializedIndexColumns(relationDir(dbname, tablename), tablename, SpecializedIndexKind::FullText);
 }
 
 // ========================================================================
@@ -15344,20 +15381,7 @@ std::vector<int64_t> StorageEngine::ginSearch(const std::string& dbname,
 
 std::vector<std::string> StorageEngine::getGinIndexedColumns(const std::string& dbname,
                                                               const std::string& tablename) const {
-    std::vector<std::string> result;
-    auto dir = relationDir(dbname, tablename);
-    if (!std::filesystem::exists(dir)) return result;
-    std::string prefix = tablename + "_";
-    for (const auto& entry : std::filesystem::directory_iterator(dir)) {
-        if (!entry.is_regular_file()) continue;
-        std::string name = entry.path().filename().string();
-        if (name.size() > 4 && name.substr(name.size() - 4) == ".gin" &&
-            name.substr(0, prefix.size()) == prefix) {
-            std::string colname = name.substr(prefix.size(), name.size() - prefix.size() - 4);
-            result.push_back(colname);
-        }
-    }
-    return result;
+    return collectSpecializedIndexColumns(relationDir(dbname, tablename), tablename, SpecializedIndexKind::Gin);
 }
 
 // ========================================================================
@@ -16278,20 +16302,7 @@ std::vector<int64_t> StorageEngine::giSTSearchContainedBy(const std::string& dbn
 
 std::vector<std::string> StorageEngine::getGiSTIndexedColumns(const std::string& dbname,
                                                                const std::string& tablename) const {
-    std::vector<std::string> result;
-    auto dir = relationDir(dbname, tablename);
-    if (!std::filesystem::exists(dir)) return result;
-    std::string prefix = tablename + "_";
-    for (const auto& entry : std::filesystem::directory_iterator(dir)) {
-        if (!entry.is_regular_file()) continue;
-        std::string name = entry.path().filename().string();
-        if (name.size() > 5 && name.substr(name.size() - 5) == ".gist" &&
-            name.substr(0, prefix.size()) == prefix) {
-            std::string colname = name.substr(prefix.size(), name.size() - prefix.size() - 5);
-            result.push_back(colname);
-        }
-    }
-    return result;
+    return collectSpecializedIndexColumns(relationDir(dbname, tablename), tablename, SpecializedIndexKind::GiST);
 }
 
 // ========================================================================
@@ -16616,23 +16627,7 @@ std::vector<int64_t> StorageEngine::spGiSTSearch(const std::string& dbname,
 
 std::vector<std::string> StorageEngine::getSPGiSTIndexedColumns(const std::string& dbname,
                                                                  const std::string& tablename) const {
-    std::vector<std::string> result;
-    auto dir = relationDir(dbname, tablename);
-    if (!std::filesystem::exists(dir)) return result;
-    std::string prefix = tablename + "_";
-    const std::string suffix = ".spgist";
-    for (const auto& entry : std::filesystem::directory_iterator(dir)) {
-        if (!entry.is_regular_file()) continue;
-        std::string name = entry.path().filename().string();
-        if (name.size() > prefix.size() + suffix.size() &&
-            name.compare(name.size() - suffix.size(), suffix.size(), suffix) == 0 &&
-            name.substr(0, prefix.size()) == prefix) {
-            std::string colname = name.substr(
-                prefix.size(), name.size() - prefix.size() - suffix.size());
-            result.push_back(colname);
-        }
-    }
-    return result;
+    return collectSpecializedIndexColumns(relationDir(dbname, tablename), tablename, SpecializedIndexKind::SPGiST);
 }
 
 // ========================================================================
@@ -17079,20 +17074,7 @@ std::vector<std::pair<uint32_t, uint32_t>> StorageEngine::brinSearchRange(
 
 std::vector<std::string> StorageEngine::getBrinIndexedColumns(const std::string& dbname,
                                                                const std::string& tablename) const {
-    std::vector<std::string> result;
-    auto dir = relationDir(dbname, tablename);
-    if (!std::filesystem::exists(dir)) return result;
-    std::string prefix = tablename + "_";
-    for (const auto& entry : std::filesystem::directory_iterator(dir)) {
-        if (!entry.is_regular_file()) continue;
-        std::string name = entry.path().filename().string();
-        if (name.size() > 5 && name.substr(name.size() - 5) == ".brin" &&
-            name.substr(0, prefix.size()) == prefix) {
-            std::string colname = name.substr(prefix.size(), name.size() - prefix.size() - 5);
-            result.push_back(colname);
-        }
-    }
-    return result;
+    return collectSpecializedIndexColumns(relationDir(dbname, tablename), tablename, SpecializedIndexKind::Brin);
 }
 
 DBStatus StorageEngine::stageReindexAuxiliaryIndexes(
@@ -17337,13 +17319,8 @@ bool StorageEngine::rebuildSpecializedIndexes(
         if (!tableExists(dbname, tablename)) return finish(false);
         // These simplified access methods use their sidecar filename as the
         // durable definition. Capture all names before replacing any file.
-        const auto fullTextColumns =
-            getFullTextIndexedColumns(dbname, tablename);
-        const auto ginColumns = getGinIndexedColumns(dbname, tablename);
-        const auto gistColumns = getGiSTIndexedColumns(dbname, tablename);
-        const auto spgistColumns =
-            getSPGiSTIndexedColumns(dbname, tablename);
-        const auto brinColumns = getBrinIndexedColumns(dbname, tablename);
+        const auto [fullTextColumns, ginColumns, gistColumns, spgistColumns, brinColumns] =
+            collectSpecializedIndexColumns(relationDir(dbname, tablename), tablename);
         if (fullTextColumns.empty() && ginColumns.empty() &&
             gistColumns.empty() && spgistColumns.empty() &&
             brinColumns.empty()) {
@@ -17437,12 +17414,8 @@ bool StorageEngine::markSpecializedIndexesBeforeMutation(
 
         bool hasSpecializedIndex = alreadyDirty;
         if (!hasSpecializedIndex) {
-            hasSpecializedIndex =
-                !getFullTextIndexedColumns(dbname, tablename).empty() ||
-                !getGinIndexedColumns(dbname, tablename).empty() ||
-                !getGiSTIndexedColumns(dbname, tablename).empty() ||
-                !getSPGiSTIndexedColumns(dbname, tablename).empty() ||
-                !getBrinIndexedColumns(dbname, tablename).empty();
+            visitSpecializedIndexColumns(relationDir(dbname, tablename), tablename,
+                [&](size_t, std::string_view) { hasSpecializedIndex = true; });
         }
         if (!hasSpecializedIndex) return true;
 
@@ -21008,11 +20981,8 @@ DBStatus StorageEngine::alterTableAddColumn(const std::string& dbname,
     const auto indexedCols = getIndexedColumns(dbname, tablename);
     const auto hashCols = getHashIndexedColumns(dbname, tablename);
     const auto compositeIndexes = getCompositeIndexes(dbname, tablename);
-    const auto fullTextCols = getFullTextIndexedColumns(dbname, tablename);
-    const auto ginCols = getGinIndexedColumns(dbname, tablename);
-    const auto gistCols = getGiSTIndexedColumns(dbname, tablename);
-    const auto spgistCols = getSPGiSTIndexedColumns(dbname, tablename);
-    const auto brinCols = getBrinIndexedColumns(dbname, tablename);
+    const auto [fullTextCols, ginCols, gistCols, spgistCols, brinCols] =
+        collectSpecializedIndexColumns(relationDir(dbname, tablename), tablename);
     std::map<std::string, size_t> brinWidths;
     for (const auto& column : brinCols)
         brinWidths.emplace(column, brinConfiguredRangeWidth(
@@ -21313,11 +21283,8 @@ DBStatus StorageEngine::alterTableDropColumn(const std::string& dbname,
     const auto indexedCols = getIndexedColumns(dbname, tablename);
     const auto hashCols = getHashIndexedColumns(dbname, tablename);
     const auto compositeIndexes = getCompositeIndexes(dbname, tablename);
-    const auto fullTextCols = getFullTextIndexedColumns(dbname, tablename);
-    const auto ginCols = getGinIndexedColumns(dbname, tablename);
-    const auto gistCols = getGiSTIndexedColumns(dbname, tablename);
-    const auto spgistCols = getSPGiSTIndexedColumns(dbname, tablename);
-    const auto brinCols = getBrinIndexedColumns(dbname, tablename);
+    const auto [fullTextCols, ginCols, gistCols, spgistCols, brinCols] =
+        collectSpecializedIndexColumns(relationDir(dbname, tablename), tablename);
     std::map<std::string, size_t> brinWidths;
     for (const auto& column : brinCols)
         brinWidths.emplace(column, brinConfiguredRangeWidth(
@@ -47969,13 +47936,8 @@ bool StorageEngine::resetTableStorage(
         const auto compositeIndexes = getCompositeIndexes(dbname, tablename);
         const auto hashColumns = getHashIndexedColumns(dbname, tablename);
         const auto bloomColumns = getBloomIndexedColumns(dbname, tablename);
-        const auto fullTextColumns =
-            getFullTextIndexedColumns(dbname, tablename);
-        const auto ginColumns = getGinIndexedColumns(dbname, tablename);
-        const auto gistColumns = getGiSTIndexedColumns(dbname, tablename);
-        const auto spgistColumns =
-            getSPGiSTIndexedColumns(dbname, tablename);
-        const auto brinColumns = getBrinIndexedColumns(dbname, tablename);
+        const auto [fullTextColumns, ginColumns, gistColumns, spgistColumns, brinColumns] =
+            collectSpecializedIndexColumns(relationDir(dbname, tablename), tablename);
         // Preserve the definition before any heap/index reset or rewrite.
         std::map<std::string, size_t> brinWidths;
         for (const auto& column : brinColumns)
@@ -52618,11 +52580,8 @@ size_t StorageEngine::vacuumFull(const std::string& dbname,
     const auto compositeIndexes = getCompositeIndexes(dbname, tablename);
     const auto hashColumns = getHashIndexedColumns(dbname, tablename);
     const auto bloomColumns = getBloomIndexedColumns(dbname, tablename);
-    const auto fullTextColumns = getFullTextIndexedColumns(dbname, tablename);
-    const auto ginColumns = getGinIndexedColumns(dbname, tablename);
-    const auto gistColumns = getGiSTIndexedColumns(dbname, tablename);
-    const auto spgistColumns = getSPGiSTIndexedColumns(dbname, tablename);
-    const auto brinColumns = getBrinIndexedColumns(dbname, tablename);
+    const auto [fullTextColumns, ginColumns, gistColumns, spgistColumns, brinColumns] =
+        collectSpecializedIndexColumns(relationDir(dbname, tablename), tablename);
     // Preserve the definition before any heap/index reset or rewrite.
     std::map<std::string, size_t> brinWidths;
     for (const auto& column : brinColumns)

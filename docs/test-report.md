@@ -2,6 +2,17 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="specialized-index-discovery-20261118"></a>
+## 2026-11-18 · 写入时减少重复的索引查找
+
+PostgreSQL 用关系缓存复用从系统目录取得的索引清单。SQLite 从表定义中的索引链表生成打开索引的指令。DuckDB 的文档将维护 ART 索引列为写入额外成本。本项目的这五类索引仍通过磁盘文件查找，因此把重复遍历合并成一次。[PostgreSQL 关系缓存](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/utils/cache/relcache.c) · [SQLite 插入实现](https://raw.githubusercontent.com/sqlite/sqlite/master/src/insert.c) · [DuckDB 索引维护](https://duckdb.org/docs/stable/guides/performance/indexing)
+
+全文、GIN、GiST、SP-GiST 和 BRIN 共用一次目录遍历。插入、更新和删除前仍根据索引文件和已有失效标记决定是否发布失效状态。重建按原先的类型顺序处理。已有索引定义、表空间位置和文件格式继续使用。加列、删列、截断表和 `VACUUM FULL` 在改写前也共用同一份文件清单。目录读取错误沿原路径返回。[使用示例](MANUAL.md#写入后的索引维护)
+
+- 新增原生回归在基线和新版上的完整输出逐字节一致。覆盖同目录中其他表的文件、大小写不同的扩展名、备份文件、目录和空列名。无法取得目录项状态时，写入在添加表行前失败。全部五类实际索引文件随提交更新，回滚保留原值。[索引写入回归](../tests/specialized_index_dml_test.cpp)
+- 新旧版本与 PostgreSQL 18.6 的维护和恢复对照共核对 122 组请求与回复，其中 40 组共同操作同时通过。项目版检查了五类索引的实际文件和失效标记。强制结束进程后，新进程恢复出已提交的值。加列、删列、`VACUUM FULL` 和截断后重新插入也通过所测文件和行检查。
+- 七项 C++ 回归、四项相邻协议测试及手册示例通过。另有一项 BRIN 测试在精确基线和新版均退出 1。两版都在 `VACUUM FULL` 后的第一次窄范围查询使用普通扫描，后续三个用例使用范围摘要。两版 38 组非 `EXPLAIN` 回复及 12 份实际 BRIN 文件逐字节一致，四份计划去掉计时字段后相同。完整回归套件待验证。最终程序 SHA-256 为 `55f726cc3b1b595630d0656e24e8a3171f477d837587b02a90b5ce3f29dd8476`。[BRIN 维护检查](../tests/brin_maintenance_options_protocol_e2e_test.py)
+
 <a id="presorted-integer-primary-key-page-20261118"></a>
 ## 2026-11-18 · 保留整数主键页的已有顺序
 
