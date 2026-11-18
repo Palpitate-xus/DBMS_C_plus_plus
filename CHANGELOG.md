@@ -1,16 +1,34 @@
-# Changelog
+# 更新日志
 
-## 2026-11-18 · 排序时减少不必要的数组转换
+<details>
+<summary>排序时少做数组转换 · 2026-11-18</summary>
 
-部分查询先排序，再转换实际取到的值。按整数主键排序时，后续行的无效数组可以留到读取该行时再报错。需要用转换结果排序的查询仍会提前转换。[使用示例](docs/MANUAL.md#排序后再转换数组) · [测试](docs/test-report.md#ordered-projection-20261118) · [性能](docs/performance-report-2026-10-30.md#ordered-projection-cost-20261118)
+部分查询会先排序，再转换实际需要的数组。比如只取排序后的第一行时，后面行的无效数组不会提前报错。如果排序本身要用到转换结果，仍会先转换。
 
-## 2026-11-18 · 可以从更多子查询写入数据
+[使用示例](docs/MANUAL.md#排序后再转换数组) · [测试报告](docs/test-report.md#ordered-projection-20261118) · [性能报告](docs/performance-report-2026-10-30.md#ordered-projection-cost-20261118)
 
-普通 `INSERT … SELECT` 可从包含表连接的子查询写入，保留数组的下标、类型和空值。查询有 `LIMIT` 时，取够后结束，不再执行后面本来无需读取的连接条件。[示例](docs/MANUAL.md#从包含表连接的子查询写入) · [测试](docs/test-report.md#nested-insert-20261118) · [性能](docs/performance-report-2026-10-30.md#nested-insert-cost-20261118)
+</details>
 
-## 2026-11-18 · 连接表时直接查找可能匹配的数组
+<details>
+<summary>能把更多查询结果写入表 · 2026-11-18</summary>
 
-按整数数组连接表时，右侧读完后可以直接查找可能匹配的行，减少逐行检查。重复匹配仍会各自返回。如果查找表超过查询的内存设置，数据库继续逐行查找。[测试](docs/test-report.md#array-lookup-20261118) · [性能](docs/performance-report-2026-10-30.md#array-lookup-cost-20261118)
+部分 `INSERT … SELECT` 语句现在可以先连接多张表，再写入结果，并保留数组的下标、类型和空值。用 `LIMIT` 指定写入几行时，取够就停止。
+
+[使用示例](docs/MANUAL.md#从包含表连接的子查询写入) · [测试报告](docs/test-report.md#nested-insert-20261118) · [性能报告](docs/performance-report-2026-10-30.md#nested-insert-cost-20261118)
+
+</details>
+
+<details>
+<summary>按整数数组匹配时少检查一些行 · 2026-11-18</summary>
+
+用整数数组连接两张表时，数据库可以先找出可能匹配的行，减少逐行比较。多条记录匹配时仍会各自返回。内存不足时会继续逐行比较。
+
+[测试报告](docs/test-report.md#array-lookup-20261118) · [性能报告](docs/performance-report-2026-10-30.md#array-lookup-cost-20261118)
+
+</details>
+
+<details>
+<summary>查看更早的更新</summary>
 
 ## 2026-11-18 · 整数数组连接少做重复工作
 
@@ -371,6 +389,8 @@ Tag 内容：156 个 `*_test.cpp` 测试源 + 7 个 Python E2E；发布时记录
 
 ## [0.1.0 之前]
 开发期 874+ commits 不在此列，演进细节见 docs/production-status.md 与 docs/all-gaps-todo.md。
+
+</details>
 
 [Unreleased]: https://github.com/Palpitate-xus/DBMS_C_plus_plus/compare/v0.2.0...HEAD
 [0.2.0]: https://github.com/Palpitate-xus/DBMS_C_plus_plus/releases/tag/v0.2.0
