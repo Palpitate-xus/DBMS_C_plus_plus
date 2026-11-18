@@ -2,6 +2,14 @@
 
 Status: partial. Review and focused repair recorded on 2026-10-05.
 
+## 2026-11-18 · Separate the ordinary maintenance phases
+
+`PROCESS_MAIN` and `PROCESS_TOAST` now select ordinary maintenance independently. Both default to true. An explicit `ANALYZE` can still gather statistics with both phases disabled. TOAST cleanup defers work while the database has active transactions. When it inspects the files, the TOAST-only path reports a broken heap/index pair as an error.
+
+PostgreSQL 18.6 rejects `FULL` with `PROCESS_TOAST FALSE` and rewrites only the secondary relation with `FULL, PROCESS_MAIN FALSE`. This project rejects both forms. A durable rewrite of the secondary relation alone remains open. [Usage](MANUAL.md#分开清理主表和长值) · [Verification](test-report.md#vacuum-process-options-20261118) · [PostgreSQL 18 command reference](https://www.postgresql.org/docs/18/sql-vacuum.html)
+
+The following sections describe the earlier repair and its verification.
+
 ## Reproduced behavior
 
 - With automatic analyze disabled, a populated table initially retained the default planner estimate. `VACUUM (ANALYZE)` was accepted but followed the ordinary vacuum path, leaving both persisted row statistics and the EXPLAIN estimate unchanged. The regression was first run against the old production binary and failed because no statistics file was produced.

@@ -19,6 +19,13 @@ cmake --build build/cmake --parallel 2
 ## 最近更新
 
 <details>
+<summary>可以分开清理主表和长值 · 2026-11-18</summary>
+
+普通 `VACUUM` 可以只清理主表，也可以只清理单独存放的长值。还可以只更新统计信息。
+
+</details>
+
+<details>
 <summary>清理表时可以少读一遍数据 · 2026-11-18</summary>
 
 没有额外存放长值时，`VACUUM` 会省掉查找这些值的第二遍扫描。
@@ -29,13 +36,6 @@ cmake --build build/cmake --parallel 2
 <summary>整理表后，范围查询可以少读数据 · 2026-11-18</summary>
 
 运行 `VACUUM FULL` 整理表后，符合条件的查询可以马上用索引跳过无关数据。
-
-</details>
-
-<details>
-<summary>写入数据时少找几遍索引文件 · 2026-11-18</summary>
-
-新增、修改或删除数据时，数据库会一起查找相关的索引文件，少做几次重复查找。
 
 </details>
 

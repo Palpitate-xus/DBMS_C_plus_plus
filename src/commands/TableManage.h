@@ -1218,7 +1218,8 @@ public:
 
     // VACUUM: reclaim space from deleted rows
     size_t vacuum(const std::string& dbname, const std::string& tablename,
-                  bool concurrent = false, int workers = 1);
+                  bool concurrent = false, int workers = 1,
+                  bool processToast = true);
     // VACUUM FULL: rewrite table entirely, reclaiming all dead space
     size_t vacuumFull(const std::string& dbname, const std::string& tablename,
                       bool* succeeded = nullptr);
@@ -1942,7 +1943,8 @@ public:
                             const TableSchema& tbl, std::map<std::string, std::string>& values);
 
     // VACUUM orphaned TOAST files: remove toast entries no longer referenced by any row
-    size_t vacuumToast(const std::string& dbname, const std::string& tablename);
+    size_t vacuumToast(const std::string& dbname, const std::string& tablename,
+                       bool* succeeded = nullptr);
 
     // Resolve TOAST markers in a row buffer back to their actual values.
     std::string resolveToastValues(const std::string& dbname, const std::string& tablename,

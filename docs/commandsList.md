@@ -910,17 +910,21 @@ CHECKPOINT;
 
 **语法**
 ```sql
-VACUUM [(FULL | ANALYZE | VERBOSE | PARALLEL integer [, ...])] [table_name]
+VACUUM [(option [, ...])] [table_name]
 VACUUM FULL [ANALYZE] [table_name]
 VACUUM ANALYZE [table_name]
 ```
 
-**说明** 回收已删除行占用的页空间；`ANALYZE` 在清理后更新统计信息，`FULL` 重写表以回收空闲空间，`VERBOSE` 输出逐表摘要。未指定表名时作用于当前库全部表。`PARALLEL 0` 按串行模式运行。VACUUM 不能在显式事务块中运行；`FREEZE` 目前未实现并返回 `0A000`，不会静默当作普通 VACUUM 执行。VACUUM FULL 的持久化方式仍不是 PostgreSQL 的事务性表交换。
+普通 `VACUUM` 回收已删除行占用的空间。未指定表名时处理当前库的表。常用选项包括 `FULL`、`ANALYZE`、`VERBOSE`、`PARALLEL integer`、`PROCESS_MAIN boolean` 和 `PROCESS_TOAST boolean`。`PARALLEL 0` 按串行模式运行。两个清理选项默认开启，可以独立关闭。`ANALYZE` 仍会更新统计。
+
+`VACUUM FULL` 重写主表。它与 `PROCESS_TOAST FALSE` 组合时返回 `0A000`。只重写长值文件的 `FULL` 模式以及 `FREEZE` 尚未支持。`VACUUM` 应在事务块之外调用。[使用示例与边界](MANUAL.md#分开清理主表和长值)
 
 **示例**
 ```sql
 VACUUM;
 VACUUM users;
+VACUUM (PROCESS_TOAST FALSE) users;
+VACUUM (PROCESS_MAIN FALSE) users;
 ```
 
 ---

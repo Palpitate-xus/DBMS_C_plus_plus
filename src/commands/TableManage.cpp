@@ -51962,7 +51962,8 @@ bool StorageEngine::pitrRestore(const std::string& dbname,
 size_t StorageEngine::vacuum(const std::string& dbname,
                              const std::string& tablename,
                              bool concurrent,
-                             int workers) {
+                             int workers,
+                             bool processToast) {
     if (!databaseExists(dbname) || !tableExists(dbname, tablename)) return 0;
     const auto locksBeforeVacuum = lockManager_.captureCheckpoint();
     struct RestoreVacuumLocks {
@@ -52110,7 +52111,7 @@ size_t StorageEngine::vacuum(const std::string& dbname,
     }
 
     // Clean up orphaned TOAST entries
-    vacuumToast(dbname, tablename);
+    if (processToast) vacuumToast(dbname, tablename);
 
     return freedPages;
 }
@@ -52119,7 +52120,9 @@ size_t StorageEngine::vacuum(const std::string& dbname,
 // VACUUM TOAST: remove orphaned toast files not referenced by any row
 // ========================================================================
 size_t StorageEngine::vacuumToast(const std::string& dbname,
-                                   const std::string& tablename) {
+                                  const std::string& tablename,
+                                  bool* succeeded) {
+    if (succeeded) *succeeded = false;
     if (!databaseExists(dbname) || !tableExists(dbname, tablename)) return 0;
 
     // UPDATE can replace a tuple in place, so its old TOAST marker is no
@@ -52132,7 +52135,10 @@ size_t StorageEngine::vacuumToast(const std::string& dbname,
         for (const auto& [transactionId, activeDatabase] :
              activeTransactionDatabases()) {
             (void)transactionId;
-            if (activeDatabase == dbname) return 0;
+            if (activeDatabase == dbname) {
+                if (succeeded) *succeeded = true;
+                return 0;
+            }
         }
     }
     // Acquiring a stronger mode converts an existing caller token; it
@@ -52152,6 +52158,12 @@ size_t StorageEngine::vacuumToast(const std::string& dbname,
         toastPathError ||
         !std::filesystem::is_regular_file(toastTreePath, toastPathError) ||
         toastPathError) {
+        if (succeeded) {
+            // No TOAST fork pair is valid for a table without external storage.
+            *succeeded = !std::filesystem::exists(toastHeapPath, toastPathError) &&
+                !toastPathError && !std::filesystem::exists(toastTreePath, toastPathError) &&
+                !toastPathError;
+        }
         return 0;
     }
     PageAllocator* toastPages = getToastPageAllocator(dbname, tablename);
@@ -52373,7 +52385,8 @@ size_t StorageEngine::vacuumToast(const std::string& dbname,
         if (!toastValid) return 0;
     }
 
-    auto indexedRids = toastIndex->allValues();
+    std::vector<int64_t> indexedRids;
+    if (!toastIndex->allValuesChecked(indexedRids)) return 0;
     std::sort(heapRids.begin(), heapRids.end());
     std::sort(indexedRids.begin(), indexedRids.end());
     if (heapRids != indexedRids) return 0;
@@ -52395,6 +52408,7 @@ size_t StorageEngine::vacuumToast(const std::string& dbname,
     }
 
     size_t removedObjects = 0;
+    bool reclaimedAll = true;
     for (auto& [toastId, chunks] : chunksById) {
         if (activeToastIds.count(toastId) != 0) continue;
         bool removedObject = true;
@@ -52448,10 +52462,14 @@ size_t StorageEngine::vacuumToast(const std::string& dbname,
             lockManager_.pageUnlock(
                 dbname, tablename + ".toast", chunk.pageId);
         }
-        if (!removedObject) break;
+        if (!removedObject) {
+            reclaimedAll = false;
+            break;
+        }
         ++removedObjects;
     }
     if (!toastPages->flush() || !toastIndex->flush()) return 0;
+    if (succeeded) *succeeded = reclaimedAll;
     return removedObjects;
 }
 

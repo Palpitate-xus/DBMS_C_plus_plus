@@ -2,6 +2,17 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="vacuum-process-options-20261118"></a>
+## 2026-11-18 · 分开清理主表和长值
+
+普通 `VACUUM` 默认清理两种文件。新的选项可关闭任一阶段，`ANALYZE` 的统计收集仍独立运行。只清理长值时，同库有活跃事务会延后回收。实际检查文件时，发现一侧文件缺失会返回 `58030`。原本没有长值文件的定长表仍可正常处理。[使用示例](MANUAL.md#分开清理主表和长值)
+
+PostgreSQL 18.6 的两组参考测试核对了 204 组协议消息。主表和长值附表的维护计数可独立变化。特别是 `FULL, PROCESS_MAIN FALSE` 只重写长值附表，`FULL, PROCESS_TOAST FALSE` 报 `0A000`。SQLite 的 `VACUUM` 重建数据库文件，DuckDB 通过检查点回收一部分已删除数据占用的空间。[PostgreSQL 清理实现](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/commands/vacuum.c) · [SQLite VACUUM](https://www.sqlite.org/lang_vacuum.html) · [DuckDB 空间回收](https://duckdb.org/docs/current/operations_manual/footprint_of_duckdb/reclaiming_space)
+
+- 真实协议回归在同一张表同时准备了主表空闲空间和孤立长值。分别执行主表清理、长值清理和两者一起清理，检查主表可用空间、长值数据块和索引文件。单独清理时，跳过的文件保持逐字节一致。两个阶段都关闭只更新统计时，主表和长值文件保持一致。[协议与磁盘回归](../tests/vacuum_relation_options_protocol_e2e_test.py)
+- 已经读取旧长值的可重复读事务继续读到原值。另测不含长值文件的定长表，以及单独缺失长值索引的表。重新打开同一数据目录后，保留的长值和清理后的文件与关闭前一致。
+- 102 次命令与 PostgreSQL 18.6 比对消息类型、命令标签、事务状态和 SQLSTATE，共 89 次一致。其余 13 次涉及长值单独重写和带列清单的 `VACUUM`。六项 C++ 回归、三项协议回归及九条手册命令均通过，其中包含现有的 `ANALYZE = true` 写法。完整回归套件待验证。受测程序 SHA-256 为 `7e987e0b59234aae202aaa0065896ad8f2028530df8e1fcc037ed036f9efd3b2`。[性能报告](performance-report-2026-10-30.md#vacuum-process-options-cost-20261118)
+
 <a id="vacuum-empty-toast-20261118"></a>
 ## 2026-11-18 · 清理表时跳过无用的扫描
 

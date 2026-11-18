@@ -2,6 +2,10 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-18 · 可分别清理主表和长值
+
+与 PostgreSQL 18.6 一样，普通 `VACUUM` 可分别指定主表和长值清理。`ANALYZE` 可以独立运行。PostgreSQL 可用 `VACUUM (FULL, PROCESS_MAIN FALSE)` 重写长值附表。本项目的该重写方式仍待实现。[PostgreSQL VACUUM](https://www.postgresql.org/docs/18/sql-vacuum.html) · [本项目验证](test-report.md#vacuum-process-options-20261118)
+
 ## 2026-11-18 · 普通清理和长值
 
 PostgreSQL 从关系目录确定是否需要清理长值附表。本项目先确认自己的长值文件存在并含数据页，再扫描主表来确定哪些值被引用。这个改进覆盖无外置长值的情况。列的存储方式、压缩算法和可见性范围仍有差距。[PostgreSQL 清理实现](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/commands/vacuum.c) · [本项目测试](test-report.md#vacuum-empty-toast-20261118)

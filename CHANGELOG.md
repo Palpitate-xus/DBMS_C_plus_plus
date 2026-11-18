@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>可以分开清理主表和长值 · 2026-11-18</summary>
+
+普通 `VACUUM` 可以只清理主表，也可以只清理单独存放的长值。还可以只更新统计信息。
+
+[使用示例](docs/MANUAL.md#分开清理主表和长值) · [测试报告](docs/test-report.md#vacuum-process-options-20261118) · [性能报告](docs/performance-report-2026-10-30.md#vacuum-process-options-cost-20261118)
+
+</details>
+
+<details>
 <summary>清理表时可以少读一遍数据 · 2026-11-18</summary>
 
 没有额外存放长值时，`VACUUM` 会省掉查找这些值的第二遍扫描。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>写入数据时少找几遍索引文件 · 2026-11-18</summary>
+<summary>查看更早的更新</summary>
+
+## 2026-11-18 · 写入数据时少找几遍索引文件
 
 新增、修改或删除数据时，数据库会一起查找相关的索引文件，少做几次重复查找。新增列、删除列和清空表时也有同样的改进。
 
 [使用手册](docs/MANUAL.md#写入后的索引维护) · [测试报告](docs/test-report.md#specialized-index-discovery-20261118) · [性能报告](docs/performance-report-2026-10-30.md#specialized-index-discovery-cost-20261118)
-
-</details>
-
-<details>
-<summary>查看更早的更新</summary>
 
 ## 2026-11-18 · 按编号翻页时少排一次序
 

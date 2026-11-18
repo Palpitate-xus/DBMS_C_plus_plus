@@ -1068,6 +1068,18 @@ SELECT id, note FROM vacuum_example ORDER BY id;
 
 这个查询返回 `1, 保留` 和 `3, NULL`。[验证范围](test-report.md#vacuum-empty-toast-20261118)
 
+### 分开清理主表和长值
+
+普通 `VACUUM` 默认处理主表和单独存放的长值。可以关闭任一阶段。如果只清理长值，数据库仍可能读取主表来确认哪些值在使用，但只回收长值占用的空间。两个阶段都关闭时，仍可用 `ANALYZE` 更新查询统计。
+
+```sql
+VACUUM (PROCESS_TOAST FALSE) vacuum_example;
+VACUUM (PROCESS_MAIN FALSE) vacuum_example;
+VACUUM (PROCESS_MAIN FALSE, PROCESS_TOAST FALSE, ANALYZE) vacuum_example;
+```
+
+`VACUUM FULL` 要求 `PROCESS_TOAST` 保持开启。只重写长值文件的 `FULL` 模式尚未支持。清理应在事务块之外运行。[验证范围](test-report.md#vacuum-process-options-20261118)
+
 ---
 
 ## 5. 数据操作 (DML)

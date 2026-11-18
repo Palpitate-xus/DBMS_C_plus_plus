@@ -4382,13 +4382,40 @@ static bool handleCheckpoint(const string& sql, Session& s) {
     return false;
 }
 
+static bool parseVacuumProcessingOption(const string& option, string value) {
+    if (value.empty()) return true;
+    const bool quoted = value.size() >= 2 &&
+        (value.front() == '\'' || value.front() == '"') &&
+        value.front() == value.back();
+    if (quoted) value = value.substr(1, value.size() - 2);
+    if (value == "true" || value == "on") return true;
+    if (value == "false" || value == "off") return false;
+    if (!quoted && !value.empty()) {
+        const bool negative = value.front() == '-';
+        if (negative || value.front() == '+') value = trim(value.substr(1));
+        std::string_view digits = value;
+        int base = 10;
+        if (digits.size() > 2 && digits.front() == '0') {
+            const char prefix = digits[1];
+            if (prefix == 'b') base = 2;
+            else if (prefix == 'o') base = 8;
+            else if (prefix == 'x') base = 16;
+            if (base != 10) digits.remove_prefix(2);
+        }
+        unsigned number = 0;
+        const auto end = digits.data() + digits.size();
+        const auto parsed = std::from_chars(digits.data(), end, number, base);
+        if (parsed.ec == std::errc{} && parsed.ptr == end &&
+            (number == 0 || (number == 1 && !negative))) {
+            return number == 1;
+        }
+    }
+    throw dbms::DbError("42601", "invalid boolean value for VACUUM option " + option);
+}
+
 static bool handleVacuum(const string& sql, Session& s) {
     if (!checkAdmin(s)) return true;
     if (!checkDB(s)) return true;
-    if (g_engine.inTransaction()) {
-        throw dbms::DbError(
-            "25001", "VACUUM cannot run inside a transaction block");
-    }
 
     string rest = trim(sql.substr(6));
     bool concurrent = false;
@@ -4396,6 +4423,8 @@ static bool handleVacuum(const string& sql, Session& s) {
     bool analyze = false;
     bool verbose = false;
     bool freeze = false;
+    bool processMain = true;
+    bool processToast = true;
     int workers = 1;
 
     const auto parseBoolean = [](const string& option, const string& value) {
@@ -4414,8 +4443,11 @@ static bool handleVacuum(const string& sql, Session& s) {
         if (close == string::npos) {
             throw dbms::DbError("42601", "unterminated VACUUM option list");
         }
-        string opts = toLower(rest.substr(1, close - 1));
+        const string opts = toLower(trim(rest.substr(1, close - 1)));
         rest = trim(rest.substr(close + 1));
+        if (opts.empty() || opts.back() == ',') {
+            throw dbms::DbError("42601", "empty VACUUM option");
+        }
         size_t p = 0;
         while (p < opts.size()) {
             size_t comma = opts.find(',', p);
@@ -4426,12 +4458,12 @@ static bool handleVacuum(const string& sql, Session& s) {
             }
             const size_t equals = tok.find('=');
             const size_t separator = tok.find_first_of(" \t");
-            const size_t split = equals != string::npos ? equals : separator;
+            const size_t split = std::min(equals, separator);
             const string option = split == string::npos
                 ? tok : trim(tok.substr(0, split));
             string value = split == string::npos
                 ? string() : trim(tok.substr(split + 1));
-            if (equals == string::npos && !value.empty() && value[0] == '=') {
+            if (split == separator && !value.empty() && value[0] == '=') {
                 value = trim(value.substr(1));
             }
             if (option.empty()) {
@@ -4463,6 +4495,12 @@ static bool handleVacuum(const string& sql, Session& s) {
                 verbose = parseBoolean(option, value);
             } else if (option == "freeze") {
                 freeze = parseBoolean(option, value);
+            } else if (option == "process_main" || option == "process_toast") {
+                if (equals != string::npos) {
+                    throw dbms::DbError("42601", "unexpected '=' after VACUUM option " + option);
+                }
+                bool& enabled = option == "process_main" ? processMain : processToast;
+                enabled = parseVacuumProcessingOption(option, value);
             } else {
                 throw dbms::DbError(
                     "0A000", "VACUUM option is not supported: " + option);
@@ -4486,6 +4524,16 @@ static bool handleVacuum(const string& sql, Session& s) {
         }
     }
 
+    if (full && !processToast) {
+        throw dbms::DbError("0A000", "PROCESS_TOAST required with VACUUM FULL");
+    }
+    if (g_engine.inTransaction()) {
+        throw dbms::DbError(
+            "25001", "VACUUM cannot run inside a transaction block");
+    }
+    if (full && !processMain) {
+        throw dbms::DbError("0A000", "VACUUM FULL of TOAST alone is not supported");
+    }
     if (freeze) {
         throw dbms::DbError(
             "0A000", "VACUUM FREEZE is not supported by this storage engine");
@@ -4523,12 +4571,22 @@ static bool handleVacuum(const string& sql, Session& s) {
                 cout << "VACUUM FULL: " << table << ": " << processed
                      << " rows rewritten" << endl;
             }
-        } else {
+        } else if (processMain) {
             processed = g_engine.vacuum(
-                s.currentDB, table, concurrent, workers);
+                s.currentDB, table, concurrent, workers, processToast);
             if (verbose) {
                 cout << "VACUUM: " << table << ": " << processed
                      << " pages freed" << endl;
+            }
+        } else if (processToast) {
+            bool succeeded = false;
+            const auto reclaimed = g_engine.vacuumToast(s.currentDB, table, &succeeded);
+            if (!succeeded) {
+                throw dbms::DbError("58030", "could not clean TOAST for relation \"" + table + "\"");
+            }
+            if (verbose) {
+                cout << "VACUUM: " << table << ": " << reclaimed
+                     << " TOAST values reclaimed" << endl;
             }
         }
         if (analyze && !g_engine.analyzeTable(s.currentDB, table)) {
