@@ -19,6 +19,13 @@ cmake --build build/cmake --parallel 2
 ## 最近更新
 
 <details>
+<summary>整数主键翻页时，索引取够就停 · 2026-11-18</summary>
+
+新建或重建的整数主键索引按数字大小排列。只取几行时，可以跳过这页之后的记录。
+
+</details>
+
+<details>
 <summary>按整数主键翻页时少读表数据 · 2026-11-18</summary>
 
 按整数主键排序并只取几行时，数据库可以先从索引找出本次需要的记录，再读取对应的表行。
@@ -29,13 +36,6 @@ cmake --build build/cmake --parallel 2
 <summary>排序时少做数组转换 · 2026-11-18</summary>
 
 部分查询会先排序，再转换实际需要的数组。例如，只取排序后的第一行时，可以只转换这一行的数组。
-
-</details>
-
-<details>
-<summary>能把更多查询结果写入表 · 2026-11-18</summary>
-
-一些查询可以先连接多张表，再把结果写入另一张表。指定只取几行时，取够就停止。
 
 </details>
 

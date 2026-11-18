@@ -2125,7 +2125,7 @@ private:
     BPTree* loadBtreeIndex(
         std::map<std::string, std::shared_ptr<BPTree>>& cache,
         const std::string& key, const std::filesystem::path& path,
-        bool createIfMissing) const;
+        bool createIfMissing, bool signedIntegerKeys = false) const;
     void closeAllIndexes();
 
     // TOAST relation + index caches

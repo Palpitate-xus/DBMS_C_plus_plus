@@ -31,15 +31,19 @@ public:
 
     // Open or create index file
     bool open();
+    // Use signed integer keys when initializing a new file. Existing files
+    // keep the key format identified by their header.
+    bool openWithSignedIntegerKeys();
     // Open an existing index without allowing the buffer pool to create it.
     bool openExisting();
+    bool usesSignedIntegerKeys() const;
     void close();
     // Flush all dirty index pages and fsync the index file.
     bool flush();
 
-    // Insert key-value pair. Keys are normalized to BP_KEY_LEN bytes; values
-    // beyond that boundary are truncated consistently by every public API.
-    // Returns false if the normalized key already exists.
+    // Insert a key-value pair. Legacy keys are truncated or padded to
+    // BP_KEY_LEN bytes. Signed indexes accept decimal integer keys.
+    // Returns false if the stored key already exists.
     bool insert(const std::string& key, int64_t value);
 
     // Remove key. Returns false if key not found.
@@ -67,6 +71,10 @@ public:
         std::array<char, BP_KEY_LEN> key;
         int64_t value;
     };
+    struct IntegerEntry {
+        int64_t key;
+        int64_t value;
+    };
     enum class LeafEntriesResult { Complete, LimitExceeded, Error };
 
     // Copy at most maxEntries fixed-width leaf keys and their values in tree
@@ -74,6 +82,14 @@ public:
     // the copied data after the shared tree latch is released.
     LeafEntriesResult readLeafEntriesChecked(size_t maxEntries,
                                              std::vector<LeafEntry>& entries) const;
+
+    // Read up to count unique keys from one end of a signed integer tree.
+    // A failed or over-limit read clears entries. visitedNodes records the
+    // number of distinct page IDs reached within maxNodes.
+    LeafEntriesResult readSignedIntegerPrefix(size_t count, size_t maxNodes,
+                                              bool descending,
+                                              std::vector<IntegerEntry>& entries,
+                                              size_t& visitedNodes) const;
 
     // Multi-value search: returns all values for a key (allows duplicates)
     std::vector<int64_t> searchMulti(const std::string& key) const;
@@ -131,7 +147,8 @@ public:
     }
 
 private:
-    bool openInternal(bool createIfMissing);
+    bool openInternal(bool createIfMissing,
+                      uint16_t creationFormat = bptree_format::kPageBoundChecksumFormat);
     std::filesystem::path filePath_;
     std::unique_ptr<BufferPool> bp_;
     // Retain the successfully opened file identity even after close(). A
@@ -220,6 +237,7 @@ private:
     static bool deserializeNode(const char* buf, Node& node, uint16_t order);
 
     static std::string normalizeKey(const std::string& s);
+    std::optional<std::string> keyForStorage(const std::string& key) const;
 };
 
 } // namespace dbms

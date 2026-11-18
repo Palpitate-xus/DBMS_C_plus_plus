@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <unistd.h>
@@ -159,6 +160,69 @@ void test_leaf_entry_scan_bounds_sparse_tree() {
     assert(tree.readLeafEntriesChecked(rowCount, entries) == LeafEntriesResult::Complete);
     assert(entries.size() == 2 && entries.front().value == 1 && entries.back().value == rowCount);
     tree.close();
+    std::filesystem::remove_all(directory);
+}
+
+void test_signed_integer_prefix_and_legacy_reopen() {
+    const auto directory = createTempDir();
+    const auto numericPath = directory / "numeric.idx";
+    const auto legacyPath = directory / "legacy.idx";
+    constexpr int64_t low = std::numeric_limits<int64_t>::min();
+    constexpr int64_t high = std::numeric_limits<int64_t>::max();
+    {
+        dbms::BPTree tree(numericPath);
+        assert(tree.openWithSignedIntegerKeys() && tree.usesSignedIntegerKeys());
+        for (int i = 0; i < 420; ++i) {
+            const int key = ((i * 73) % 420) - 210;
+            assert(tree.insert(std::to_string(key) + '\x01', key + 1000));
+        }
+        assert(tree.insert(std::to_string(low), 1));
+        assert(tree.insert(std::to_string(high) + '\x01', 2));
+        assert(!tree.insert("+0", 9999));
+        assert(!tree.insert("1\x01" "2", 3));
+        assert(tree.remove("-208"));
+        assert(tree.insert("-208\x01", 792));
+        assert(tree.flush());
+    }
+    {
+        dbms::BPTree tree(numericPath);
+        assert(tree.openExisting() && tree.usesSignedIntegerKeys());
+        int64_t value = 0;
+        assert(tree.search("-208", value) && value == 792);
+        assert(tree.search(std::to_string(low) + '\x01', value) && value == 1);
+        std::vector<int64_t> values;
+        assert(tree.rangeScanChecked("-2", "+2", values));
+        assert((values == std::vector<int64_t>{998, 999, 1000, 1001, 1002}));
+        assert(tree.allValuesChecked(values) && values.size() == 422);
+        assert(values.front() == 1 && values.back() == 2);
+
+        std::vector<dbms::BPTree::IntegerEntry> entries;
+        size_t visits = 0;
+        assert(tree.readSignedIntegerPrefix(5, 64, false, entries, visits) == LeafEntriesResult::Complete);
+        assert(entries.size() == 5 && entries.front().key == low && entries.back().key == -207);
+        const size_t firstPageVisits = visits;
+        assert(tree.readSignedIntegerPrefix(5, 64, true, entries, visits) == LeafEntriesResult::Complete);
+        assert(entries.size() == 5 && entries.front().key == high && entries.back().key == 206);
+        const size_t lastPageVisits = visits;
+        assert(tree.readSignedIntegerPrefix(160, 64, true, entries, visits) == LeafEntriesResult::Complete);
+        assert(entries.size() == 160 && entries.back().key == 51 && visits > lastPageVisits);
+        assert(tree.readSignedIntegerPrefix(500, 64, false, entries, visits) == LeafEntriesResult::Complete);
+        assert(entries.size() == 422 && visits > firstPageVisits && visits > lastPageVisits);
+        assert(tree.readSignedIntegerPrefix(5, 1, false, entries, visits) == LeafEntriesResult::LimitExceeded);
+        assert(entries.empty());
+    }
+    {
+        dbms::BPTree tree(legacyPath);
+        assert(tree.open() && tree.insert("-2", 11) && tree.insert("2", 22) && tree.insert("10", 33));
+        assert(tree.flush());
+    }
+    {
+        dbms::BPTree tree(legacyPath);
+        assert(tree.openWithSignedIntegerKeys() && !tree.usesSignedIntegerKeys());
+        std::vector<int64_t> values;
+        assert(tree.allValuesChecked(values));
+        assert((values == std::vector<int64_t>{11, 33, 22}));
+    }
     std::filesystem::remove_all(directory);
 }
 
@@ -411,6 +475,7 @@ void test_leaf_entry_scan_validates_sibling_links_and_separators() {
 int main() {
     test_checked_lookup_distinguishes_absence();
     test_leaf_entry_scan_bounds_sparse_tree();
+    test_signed_integer_prefix_and_legacy_reopen();
     test_checksummed_index_page_rejects_corruption();
     test_checksummed_index_rejects_swapped_pages();
     test_previous_checksummed_format_remains_readable();

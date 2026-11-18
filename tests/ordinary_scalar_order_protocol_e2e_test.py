@@ -106,8 +106,14 @@ def main():
                 ascending_page,
                 rows=[['-100','negative'],['-2',None],['0','zero'],['2','']],oids=[23,25])
         selected,scan=page_plan(ascending_page)
-        assert (selected['usedPrimaryKeyPage'],selected['indexEntries'], selected['heapRowsFetched']) == ('true','7','5'),selected
+        assert selected['usedPrimaryKeyPage']=='true' and selected['orderedIndex']=='true',selected
+        assert selected['indexEntries']==selected['heapRowsFetched']=='5',selected
+        assert int(selected['indexNodesVisited'])==1,selected
         assert scan.get('actualRows',0)==0,scan
+        control('fractional primary key equality',
+                'SELECT k FROM scalar_order_pk_int WHERE k=2.5;',rows=[],oids=[23])
+        control('out-of-range primary key equality',
+                'SELECT k FROM scalar_order_pk_int WHERE k=9223372036854775808;',rows=[],oids=[23])
         control('integer primary key descending page',
                 'SELECT p.k,p.payload FROM scalar_order_pk_int AS p ORDER BY p.k DESC LIMIT 3 OFFSET 1;',
                 rows=[['10','ten'],['2',''],['0','zero']],oids=[23,25])

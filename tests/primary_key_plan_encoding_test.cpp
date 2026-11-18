@@ -1,3 +1,4 @@
+#include "access/BPTree.h"
 #include "catalog/type_registry.h"
 #include "commands/TableManage.h"
 #include "executor/ExecutionPlan.h"
@@ -46,6 +47,20 @@ int main() {
     expectRows(database, single.tablename, {{"=", "id", "1"}}, 1, "explicit PK");
     expectRows(database, single.tablename,
                {{"=", "id", "1"}, {"=", "value", "7"}}, 1, "bitmap PK");
+
+    dbms::TableSchema added;
+    added.tablename = "added_primary";
+    added.append(dbms::makeIntColumn("id", false, 4));
+    assert(g_engine.createTable(database, added) == dbms::DBStatus::OK);
+    assert(g_engine.insert(database, added.tablename, {{"id", "-2"}}) == dbms::DBStatus::OK);
+    assert(g_engine.alterTableAddPrimaryKey(database, added.tablename, "added_primary_pk", {"id"})
+           == dbms::DBStatus::OK);
+    {
+        dbms::BPTree persisted(g_engine.dbPath(database) / "added_primary.idx");
+        assert(persisted.openExisting() && persisted.usesSignedIntegerKeys());
+        int64_t rid = 0;
+        assert(persisted.search("-2", rid) && rid > 0);
+    }
 
     dbms::TableSchema empty;
     empty.tablename = "empty_inline";

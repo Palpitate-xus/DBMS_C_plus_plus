@@ -21,6 +21,12 @@ cd dbms-<version>
 
 二进制分发请同时提供仓库根 [THIRD_PARTY_NOTICES](../THIRD_PARTY_NOTICES) 中备份清单摘要实现的第三方版权、许可条件与免责声明。CMake 安装会将该声明放入安装前缀下的 `share/doc/DBMS_C_plus_plus/THIRD_PARTY_NOTICES`；单独复制 `dbms_main` 时也须附带该声明。
 
+## 整数主键索引格式
+
+默认表空间的普通表在创建或重建单列有符号整数主键索引时，记录 `0xC553` 格式标记。索引页仍为 4 KiB，保留页号绑定校验。新版按索引文件记录的格式读取，原有十进制索引可以继续使用。符合条件的表可用 `REINDEX TABLE` 重新生成有序索引。需要重建索引的表结构修改和恢复操作也使用当前创建规则。
+
+早于本次变更的程序在打开 `0xC553` 索引时会拒绝该文件。需要保留回到旧版的能力时，使用重建前的数据目录备份。[验证范围](test-report.md#signed-primary-key-prefix-20261118)
+
 ## 时间列存储与版本边界
 
 新SQL标量TIME/TIMESTAMP/TIMESTAMPTZ列使用schema-D（0x4442000D）与TCM1逐列
@@ -78,7 +84,7 @@ Bloom、GIN、BRIN、GiST 与 SP-GiST 索引校验：
 该命令验证主/分区/TOAST/unlogged init heap，以及 `.idx`/`.idx_*` B+Tree
 索引、`.hidx` Hash、`.bidx` Bloom、`.gin` GIN、`.brin` BRIN、`.gist` GiST
 和 `.spgist` SP-GiST 侧车，包括从 tablespace marker 解析的外置文件；诊断定位到索引文件和 heap block。
-统计会分开列出页号绑定的 `0xC552`、旧内容校验 `0xC551` 与无 checksum 的
+统计会分开列出使用页号绑定校验的 `0xC552` 或 `0xC553`、使用旧内容校验的 `0xC551` 与无 checksum 的
 zero-marker legacy 页，并单列带 checksum 的 Hash V2/Bloom BLM2/GIN V2/BRIN V2/GiST V2
 与未校验的 Hash V1/Bloom BLM1/GIN V1/BRIN V1/GiST V1/SP-GiST V1 文件。GIN V2/BRIN V2/GiST V2/SP-GiST V2
 扫描验证格式头、entry-count 边界与 CRC32C，但不解析 GIN postings、BRIN ranges

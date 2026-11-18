@@ -2902,8 +2902,8 @@ class IntegerPrimaryKeyPageOp final : public Operator {
     bool descending_;
     OpPtr fallback_;
     std::optional<OrderedPrimaryKeyReadPage> page_;
-    size_t position_ = 0, indexEntries_ = 0, heapRows_ = 0;
-    bool fallbackOpen_ = false, usedPage_ = false;
+    size_t position_ = 0, indexEntries_ = 0, indexNodesVisited_ = 0, heapRows_ = 0;
+    bool fallbackOpen_ = false, usedPage_ = false, orderedIndex_ = false;
     int64_t lastRid_ = 0;
     std::vector<bool> lastNulls_;
 public:
@@ -2915,13 +2915,15 @@ public:
         OpenInstrument instrument(this);
         clearError();
         close();
-        usedPage_ = false;
-        indexEntries_ = heapRows_ = 0;
+        usedPage_ = orderedIndex_ = false;
+        indexEntries_ = indexNodesVisited_ = heapRows_ = 0;
         page_ = engine_->tryReadOrderedIntegerPrimaryKey(database_, schema_.tablename, schema_,
             keyColumn_, descending_, count_, sortWorkMemBytes());
         if (page_) {
             usedPage_ = true;
+            orderedIndex_ = page_->orderedIndex;
             indexEntries_ = page_->indexEntries;
+            indexNodesVisited_ = page_->indexNodesVisited;
             heapRows_ = page_->rows.size();
             return true;
         }
@@ -2978,8 +2980,11 @@ public:
     std::vector<Operator*> preparedPlanChildren() const override { return {fallback_.get()}; }
     std::map<std::string, std::string> preparedPlanAttributes() const override {
         if (!usedPage_) return {{"usedPrimaryKeyPage", "false"}};
-        return {{"usedPrimaryKeyPage", "true"}, {"indexEntries", std::to_string(indexEntries_)},
-                {"heapRowsFetched", std::to_string(heapRows_)}};
+        std::map<std::string, std::string> attributes{{"usedPrimaryKeyPage", "true"},
+            {"orderedIndex", orderedIndex_ ? "true" : "false"}, {"indexEntries", std::to_string(indexEntries_)},
+            {"heapRowsFetched", std::to_string(heapRows_)}};
+        if (orderedIndex_) attributes.emplace("indexNodesVisited", std::to_string(indexNodesVisited_));
+        return attributes;
     }
 };
 

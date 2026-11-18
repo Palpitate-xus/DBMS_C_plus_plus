@@ -4,7 +4,7 @@
 
 ## 2026-11-18 · 整数主键分页
 
-默认表空间的普通单表查询按单列有符号整数主键分页时，可以从索引选出前 `OFFSET + LIMIT` 行，只读取这些表行。索引中的十进制键仍需全部检查。旧快照、其他会话有活动写入、外部表空间、索引或内存条件不满足时走原扫描和排序。[测试范围](test-report.md#integer-primary-key-page-20261118) · [实际耗时](performance-report-2026-10-30.md#integer-primary-key-page-cost-20261118)
+默认表空间的普通单表查询按单列有符号整数主键分页时，可以从新格式索引按需要的方向取前 `OFFSET + LIMIT` 个键和表行，然后停止读取。旧格式索引仍遍历全部十进制键。旧快照、活动事务、外部表空间、索引或内存条件不满足时走原扫描和排序。[测试范围](test-report.md#signed-primary-key-prefix-20261118) · [性能报告](performance-report-2026-10-30.md#signed-primary-key-prefix-cost-20261118)
 
 ## 2026-11-18 · 排序后计算查询结果
 

@@ -1800,11 +1800,9 @@ bool verifyBTreeIndex(const std::filesystem::path& root,
         error = shown + ": block 0: invalid B+ tree header";
         return false;
     }
-    bool bindPageId = false;
-    if (header.reserved == kPageBoundChecksumFormat) {
-        bindPageId = true;
-    } else if (header.reserved != kContentChecksumFormat &&
-               header.reserved != 0) {
+    const bool bindPageId = usesPageBoundChecksum(header.reserved);
+    if (!bindPageId && header.reserved != kContentChecksumFormat &&
+        header.reserved != 0) {
         error = shown + ": block 0: unknown B+ tree format marker";
         return false;
     }

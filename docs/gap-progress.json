@@ -2,6 +2,29 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-18 stop signed integer primary key index scans at the requested page",
+      "gap_ids": ["IDX-03", "CONS-01", "P0-04"],
+      "status": "partial",
+      "evidence": [
+        "src/access/BPTree.cpp",
+        "src/common/DataDirectory.cpp",
+        "src/commands/TableManage.cpp",
+        "docs/PACKAGING.md",
+        "docs/test-report.md",
+        "docs/performance-report-2026-10-30.md"
+      ],
+      "tests": [
+        "tests/bptree_topology_corruption_test.cpp",
+        "tests/ordinary_scalar_order_protocol_e2e_test.py",
+        "tests/primary_key_plan_encoding_test.cpp"
+      ],
+      "verification": [
+        "New or rebuilt signed integer primary indexes use C553 and preserve lookup, update, delete, uniqueness, foreign key and savepoint behavior. Existing C552 files retain their format when opened. Exact candidate fresh and upgrade fixtures pass 93 and 123 checks, with clean offline checksum scans after SIGKILL and restart. Nine C++ and six protocol entries pass.",
+        "Three 4096-row pages examine the root and one leaf and collect 8, 12 or 28 candidates, compared with all 4096 in the baseline. Both versions fetch the same corresponding heap rows. Older snapshots, filtered queries and other ineligible shapes keep their existing paths. Acknowledged ADD PRIMARY KEY survives a real SIGKILL with working equality lookup and duplicate rejection. Existing counts for the 273 gap items remain unchanged.",
+        "The frozen comparison completes 3456 measured SELECTs across 72 batches and 12 clean process exits. Independent audit verifies 4560 request/reply pairs and 333720 reply frames; all timed replies match. All six operations exceed the prespecified 10 percent within-block drift limit, so repeatable speed changes remain unverified."
+      ]
+    },
+    {
       "issue": "2026-11-18 read only the heap rows needed for an integer primary key page",
       "gap_ids": ["IDX-03", "QRY-01"],
       "status": "partial",

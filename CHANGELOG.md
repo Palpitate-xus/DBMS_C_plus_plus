@@ -1,6 +1,17 @@
 # 更新日志
 
 <details>
+<summary>整数主键翻页时，索引取够就停 · 2026-11-18</summary>
+
+新建或重建的整数主键索引按数字大小排列。部分分页查询从所需的一端读取，取够行就停。已有索引可以继续使用，符合条件的表可用 `REINDEX TABLE` 更新索引格式。
+
+修复了添加主键成功后，进程突然中断可能导致重启后无法按主键查找的问题。
+
+[使用示例](docs/MANUAL.md#按整数主键翻页) · [测试报告](docs/test-report.md#signed-primary-key-prefix-20261118) · [性能报告](docs/performance-report-2026-10-30.md#signed-primary-key-prefix-cost-20261118)
+
+</details>
+
+<details>
 <summary>按整数主键翻页时少读表数据 · 2026-11-18</summary>
 
 按整数主键排序并只取几行时，数据库可以先从索引找出本次需要的记录，再读取对应的表行。正负整数按数值排列。事务需要读取较早时刻的数据，或索引不可用时，仍用普通扫描和排序分页。
@@ -19,16 +30,13 @@
 </details>
 
 <details>
-<summary>能把更多查询结果写入表 · 2026-11-18</summary>
+<summary>查看更早的更新</summary>
+
+## 2026-11-18 · 能把更多查询结果写入表
 
 部分 `INSERT … SELECT` 语句现在可以先连接多张表，再写入结果，并保留数组的下标、类型和空值。用 `LIMIT` 指定写入几行时，取够就停止。
 
 [使用示例](docs/MANUAL.md#从包含表连接的子查询写入) · [测试报告](docs/test-report.md#nested-insert-20261118) · [性能报告](docs/performance-report-2026-10-30.md#nested-insert-cost-20261118)
-
-</details>
-
-<details>
-<summary>查看更早的更新</summary>
 
 ## 2026-11-18 · 按整数数组匹配时少检查一些行
 

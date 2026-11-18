@@ -12,6 +12,12 @@ constexpr size_t kKeySize = 20;
 constexpr size_t kChecksumOffset = kPageSize - sizeof(uint32_t);
 constexpr uint16_t kContentChecksumFormat = 0xC551;
 constexpr uint16_t kPageBoundChecksumFormat = 0xC552;
+constexpr uint16_t kSignedIntegerKeyFormat = 0xC553;
+
+constexpr bool usesPageBoundChecksum(uint16_t format) {
+    return format == kPageBoundChecksumFormat ||
+           format == kSignedIntegerKeyFormat;
+}
 
 struct FileHeader {
     uint32_t rootPage = 0;

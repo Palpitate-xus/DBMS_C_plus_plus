@@ -9776,7 +9776,7 @@ std::string StorageEngine::extractPKValue(const std::string& rowBuffer,
 BPTree* StorageEngine::loadBtreeIndex(
         std::map<std::string, std::shared_ptr<BPTree>>& cache,
         const std::string& key, const std::filesystem::path& path,
-        bool createIfMissing) const {
+        bool createIfMissing, bool signedIntegerKeys) const {
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     auto it = cache.find(key);
     if (it != cache.end()) {
@@ -9797,8 +9797,9 @@ BPTree* StorageEngine::loadBtreeIndex(
         // Keep the established filePath spelling used by index WAL images
         // and unlogged-relation metadata; only the ownership key canonicalizes.
         tree = std::make_shared<BPTree>(path);
-        if (!(createIfMissing ? tree->open() : tree->openExisting()))
-            return nullptr;
+        const bool opened = !createIfMissing ? tree->openExisting()
+            : signedIntegerKeys ? tree->openWithSignedIntegerKeys() : tree->open();
+        if (!opened) return nullptr;
         slot->owner = tree;
     }
     BPTree* ptr = tree.get();
@@ -9811,15 +9812,75 @@ BPTree* StorageEngine::getPKIndex(const std::string& dbname, const std::string& 
                           indexPath(dbname, tablename), false);
 }
 
+static std::optional<size_t> signedIntegerPrimaryKeyColumn(const TableSchema& schema) {
+    if (!schema.physicalRelationId || !usesHeapTupleHeader(schema.formatVersion) ||
+        (!schema.tablespace.empty() && schema.tablespace != "pg_default") ||
+        schema.partitionType != TableSchema::PartitionType::None) return {};
+
+    size_t column = schema.len;
+    if (!schema.pkColIndices.empty()) {
+        if (schema.pkColIndices.size() != 1) return {};
+        column = schema.pkColIndices.front();
+    } else {
+        for (size_t i = 0; i < schema.len; ++i) {
+            if (!schema.cols[i].isPrimaryKey) continue;
+            if (column != schema.len) return {};
+            column = i;
+        }
+    }
+    if (column >= schema.len) return {};
+    const auto& key = schema.cols[column];
+    if (key.isArray || key.isUnsigned || key.generatedKind || !key.domainName.empty()) return {};
+    const auto type = ExprHelper::canonicalResultTypeName(key.dataType);
+    if (type != "smallint" && type != "integer" && type != "bigint") return {};
+    return column;
+}
+
+static bool readLegacyIntegerIndexKeys(const BPTree& tree, const std::string& type,
+        bool tableConstraint, bool descending, size_t count, size_t maxEntries,
+        std::vector<BPTree::IntegerEntry>& candidates) {
+    std::vector<BPTree::LeafEntry> entries;
+    const auto read = tree.readLeafEntriesChecked(maxEntries, entries);
+    checkForQueryInterrupt();
+    if (read != BPTree::LeafEntriesResult::Complete || count >= entries.size()) return false;
+    candidates.reserve(entries.size());
+    const BPTree::LeafEntry* previous = nullptr;
+    for (const auto& entry : entries) {
+        if ((candidates.size() & 127U) == 0) checkForQueryInterrupt();
+        if (entry.value <= 0 || (previous && previous->key == entry.key)) return false;
+        previous = &entry;
+        const auto end = std::find_if(entry.key.begin(), entry.key.end(),
+            [](char c) { return c == '\0' || c == '\x01'; });
+        int64_t value = 0;
+        const auto parsed = std::from_chars(entry.key.data(), end, value);
+        if (parsed.ec != std::errc{} || parsed.ptr != end ||
+            (type == "smallint" && (value < INT16_MIN || value > INT16_MAX)) ||
+            (type == "integer" && (value < INT32_MIN || value > INT32_MAX))) return false;
+        decltype(entry.key) canonical{};
+        const auto formatted = std::to_chars(canonical.data(), canonical.data() + canonical.size(), value);
+        if (formatted.ec != std::errc{}) return false;
+        if (tableConstraint && formatted.ptr != canonical.data() + canonical.size())
+            *formatted.ptr = '\x01';
+        if (entry.key != canonical) return false;
+        candidates.push_back({value, entry.value});
+    }
+    std::vector<BPTree::LeafEntry>().swap(entries);
+    size_t comparisons = 0;
+    std::partial_sort(candidates.begin(), candidates.begin() + count, candidates.end(),
+        [&](const BPTree::IntegerEntry& left, const BPTree::IntegerEntry& right) {
+            if ((comparisons++ & 127U) == 0) checkForQueryInterrupt();
+            return descending ? left.key > right.key : left.key < right.key;
+        });
+    return true;
+}
+
 std::optional<OrderedPrimaryKeyReadPage> StorageEngine::tryReadOrderedIntegerPrimaryKey(
         const std::string& dbname, const std::string& tablename,
         const TableSchema& expectedSchema, size_t keyColumn, bool descending,
         size_t count, size_t byteBudget) {
     // Only files in the executable's locked data directory have the required
     // instance ownership. An external tablespace can outlive that lock.
-    if (dataDirectory().empty() || !expectedSchema.physicalRelationId || !count ||
-        (!expectedSchema.tablespace.empty() && expectedSchema.tablespace != "pg_default") ||
-        !usesHeapTupleHeader(expectedSchema.formatVersion) ||
+    if (dataDirectory().empty() || !count || signedIntegerPrimaryKeyColumn(expectedSchema) != keyColumn ||
         transactionContext().txnIsolationLevel == IsolationLevel::SERIALIZABLE)
         return {};
     checkForQueryInterrupt();
@@ -9829,8 +9890,8 @@ std::optional<OrderedPrimaryKeyReadPage> StorageEngine::tryReadOrderedIntegerPri
     const auto schema = getTableSchema(dbname, tablename);
     if (schema.physicalRelationId != expectedSchema.physicalRelationId || schema.len != expectedSchema.len ||
         schema.formatVersion != expectedSchema.formatVersion || schema.tablespace != expectedSchema.tablespace ||
-        schema.pkColIndices != expectedSchema.pkColIndices || schema.partitionType != TableSchema::PartitionType::None ||
-        keyColumn >= schema.len || rlsAppliesTo(dbname, tablename) || !getInheritedChildren(dbname, tablename).empty())
+        schema.pkColIndices != expectedSchema.pkColIndices || signedIntegerPrimaryKeyColumn(schema) != keyColumn ||
+        rlsAppliesTo(dbname, tablename) || !getInheritedChildren(dbname, tablename).empty())
         return {};
     for (size_t i = 0; i < schema.len; ++i) {
         const auto layout = [](const Column& c) {
@@ -9840,15 +9901,6 @@ std::optional<OrderedPrimaryKeyReadPage> StorageEngine::tryReadOrderedIntegerPri
         };
         if (layout(schema.cols[i]) != layout(expectedSchema.cols[i])) return {};
     }
-    const auto& key = schema.cols[keyColumn];
-    const auto type = ExprHelper::canonicalResultTypeName(key.dataType);
-    if (key.isArray || key.isUnsigned || key.generatedKind || !key.domainName.empty() ||
-        (type != "smallint" && type != "integer" && type != "bigint")) return {};
-    if (schema.pkColIndices.empty()) {
-        if (!key.isPrimaryKey || std::count_if(schema.cols, schema.cols + schema.len,
-            [](const Column& c) { return c.isPrimaryKey; }) != 1) return {};
-    } else if (schema.pkColIndices.size() != 1 || schema.pkColIndices.front() != keyColumn) return {};
-
     ReadView autocommit, commandView;
     const auto before = indexReadSnapshotFence(dbname);
     // For an existing READ COMMITTED command, the ordinary scan establishes
@@ -9864,46 +9916,22 @@ std::optional<OrderedPrimaryKeyReadPage> StorageEngine::tryReadOrderedIntegerPri
         if (!getPKIndex(dbname, tablename)) return {};
         tree = pkIndexCache_.at(dbname + "/" + tablename);
     }
-    using KeyRid = std::pair<int64_t, int64_t>;
-    // Bound the temporary payload for the copied lexical entries and the
-    // numeric candidates, allowing for vector growth. The cap excludes the
-    // storage engine's existing page cache and tree bookkeeping.
-    std::vector<BPTree::LeafEntry> entries;
-    const size_t maxEntries = byteBudget / (2 * (sizeof(BPTree::LeafEntry) + sizeof(KeyRid)));
-    const auto read = tree->readLeafEntriesChecked(maxEntries, entries);
-    checkForQueryInterrupt();
-    if (read != BPTree::LeafEntriesResult::Complete) return {};
-    if (count >= entries.size()) return {};
-    std::vector<KeyRid> candidates;
-    candidates.reserve(entries.size());
-    const BPTree::LeafEntry* previous = nullptr;
-    for (const auto& entry : entries) {
-        if ((candidates.size() & 127U) == 0) checkForQueryInterrupt();
-        if (entry.value <= 0 || (previous && previous->key == entry.key)) return {};
-        previous = &entry;
-        const auto end = std::find_if(entry.key.begin(), entry.key.end(),
-            [](char c) { return c == '\0' || c == '\x01'; });
-        int64_t value = 0;
-        const auto parsed = std::from_chars(entry.key.data(), end, value);
-        if (parsed.ec != std::errc{} || parsed.ptr != end ||
-            (type == "smallint" && (value < INT16_MIN || value > INT16_MAX)) ||
-            (type == "integer" && (value < INT32_MIN || value > INT32_MAX))) return {};
-        decltype(entry.key) canonical{};
-        const auto formatted = std::to_chars(canonical.data(), canonical.data() + canonical.size(), value);
-        if (formatted.ec != std::errc{}) return {};
-        if (!schema.pkColIndices.empty() && formatted.ptr != canonical.data() + canonical.size())
-            *formatted.ptr = '\x01';
-        if (entry.key != canonical) return {};
-        candidates.emplace_back(value, entry.value);
-    }
-    const size_t examined = entries.size();
-    std::vector<BPTree::LeafEntry>().swap(entries);
-    size_t comparisons = 0;
-    std::partial_sort(candidates.begin(), candidates.begin() + count, candidates.end(),
-        [&](const KeyRid& a, const KeyRid& b) {
-            if ((comparisons++ & 127U) == 0) checkForQueryInterrupt();
-            return descending ? a.first > b.first : a.first < b.first;
-        });
+    OrderedPrimaryKeyReadPage result;
+    std::vector<BPTree::IntegerEntry> candidates;
+    // The working budget covers index keys and copied table rows. An older
+    // index needs room for both its decimal keys and numeric candidates.
+    const size_t maxEntries = byteBudget / (2 * (sizeof(BPTree::LeafEntry) + sizeof(BPTree::IntegerEntry)));
+    if (count > maxEntries) return {};
+    if (tree->usesSignedIntegerKeys()) {
+        const auto read = tree->readSignedIntegerPrefix(count, std::max<size_t>(64, maxEntries),
+            descending, candidates, result.indexNodesVisited);
+        checkForQueryInterrupt();
+        if (read != BPTree::LeafEntriesResult::Complete || candidates.size() != count) return {};
+        result.orderedIndex = true;
+    } else if (!readLegacyIntegerIndexKeys(*tree,
+        ExprHelper::canonicalResultTypeName(schema.cols[keyColumn].dataType),
+        !schema.pkColIndices.empty(), descending, count, maxEntries, candidates)) return {};
+    result.indexEntries = candidates.size();
 
     std::shared_ptr<PageAllocator> allocator;
     {
@@ -9911,10 +9939,8 @@ std::optional<OrderedPrimaryKeyReadPage> StorageEngine::tryReadOrderedIntegerPri
         if (!getPageAllocator(dbname, tablename)) return {};
         allocator = pageAllocators_.at(dbname + "/" + tablename);
     }
-    OrderedPrimaryKeyReadPage result;
-    result.indexEntries = examined;
     result.rows.reserve(count);
-    size_t remaining = byteBudget - candidates.capacity() * sizeof(KeyRid);
+    size_t remaining = byteBudget - candidates.capacity() * sizeof(BPTree::IntegerEntry);
     for (size_t i = 0; i < count; ++i) {
         checkForQueryInterrupt();
         const auto [keyValue, rid] = candidates[i];
@@ -14152,6 +14178,8 @@ DBStatus StorageEngine::reindex(const std::string& dbname,
     }
     const std::filesystem::path reindexRelationRoot =
         relationDir(dbname, tablename);
+    const TableSchema tbl = getTableSchema(dbname, tablename);
+    const bool signedPrimaryKey = signedIntegerPrimaryKeyColumn(tbl).has_value();
 
     struct PendingIndex {
         ReindexSwapEntry swap;
@@ -14241,7 +14269,9 @@ DBStatus StorageEngine::reindex(const std::string& dbname,
             return nullptr;
         }
         index.tree = std::make_unique<BPTree>(index.swap.temporary);
-        if (!index.tree->open()) {
+        const bool opened = primary && signedPrimaryKey
+            ? index.tree->openWithSignedIntegerKeys() : index.tree->open();
+        if (!opened) {
             index.tree->close();
             removeRegularFileIfPresent(index.swap.temporary);
             removeRegularFileIfPresent(
@@ -14278,7 +14308,6 @@ DBStatus StorageEngine::reindex(const std::string& dbname,
         return true;
     };
 
-    const TableSchema tbl = getTableSchema(dbname, tablename);
     std::vector<bool> scanNulls(tbl.len, false);
     const auto secondaryIndexes = getIndexMetadata(dbname, tablename);
     const auto compositeIndexes = getCompositeIndexes(dbname, tablename);
@@ -20185,9 +20214,10 @@ DBStatus StorageEngine::createTable(const std::string& dbname, const TableSchema
         pa->close();
         return initialized ? DBStatus::OK : DBStatus::IO_ERROR;
     };
-    const auto initializeIndex = [&](const std::filesystem::path& path) {
-        BPTree index(path.string());
-        const bool initialized = index.open() && index.flush();
+    const auto initializeIndex = [](const std::filesystem::path& path, bool signedIntegerKeys = false) {
+        BPTree index(path);
+        const bool opened = signedIntegerKeys ? index.openWithSignedIntegerKeys() : index.open();
+        const bool initialized = opened && index.flush();
         index.close();
         return initialized;
     };
@@ -20250,7 +20280,7 @@ DBStatus StorageEngine::createTable(const std::string& dbname, const TableSchema
 
     // Create B+ tree index if table has primary key
     if (tbl.hasPrimaryKey()) {
-        if (!initializeIndex(indexPath(dbname, tbl.tablename)))
+        if (!initializeIndex(indexPath(dbname, tbl.tablename), signedIntegerPrimaryKeyColumn(tblWithVersion).has_value()))
             return failCreate("could not initialize primary key index");
     }
     // Initialize auto-increment sequences
@@ -24061,19 +24091,29 @@ DBStatus StorageEngine::alterTableAddPrimaryKey(const std::string& dbname,
         std::string pkKey = dbname + "/" + tablename;
         auto cit = pkIndexCache_.find(pkKey);
         if (cit != pkIndexCache_.end()) pkIndexCache_.erase(cit);
-        std::filesystem::remove(indexPath(dbname, tablename));
-        BPTree* pkIdx = loadBtreeIndex(pkIndexCache_, pkKey,
-                                      indexPath(dbname, tablename), true);
+        const auto path = indexPath(dbname, tablename);
+        std::filesystem::remove(path);
+        const bool signedPrimaryKey = signedIntegerPrimaryKeyColumn(tbl).has_value();
+        BPTree* pkIdx = loadBtreeIndex(pkIndexCache_, pkKey, path, true, signedPrimaryKey);
         if (!pkIdx) {
             lockManager_.unlock(tablename);
             return DBStatus::IO_ERROR;
         }
+        bool indexWriteOk = true;
         if (!forEachRow(dbname, tablename,
                        [&](uint32_t pageId, uint16_t slotId, const char* data, size_t len) {
+                           if (!indexWriteOk) return;
                            std::string row(data, len);
                            std::string pkVal = extractPKValue(row, tbl);
-                           if (!pkVal.empty()) pkIdx->insert(pkVal, encodeRid(pageId, slotId));
-                       })) {
+                           if (!pkVal.empty() && !pkIdx->insert(pkVal, encodeRid(pageId, slotId)) && signedPrimaryKey)
+                               indexWriteOk = false;
+                       }) || !indexWriteOk) {
+            lockManager_.unlock(tablename);
+            return DBStatus::IO_ERROR;
+        }
+        // A successful ALTER must leave a usable index even if the process
+        // stops before dirty buffers can be flushed by normal shutdown.
+        if (!pkIdx->flush() || !index_file::syncDirectory(path.parent_path())) {
             lockManager_.unlock(tablename);
             return DBStatus::IO_ERROR;
         }

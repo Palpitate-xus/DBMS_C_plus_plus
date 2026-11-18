@@ -18,6 +18,8 @@ struct HeapScanRow {
 struct OrderedPrimaryKeyReadPage {
     std::vector<HeapScanRow> rows;
     std::size_t indexEntries = 0;
+    std::size_t indexNodesVisited = 0;
+    bool orderedIndex = false;
 };
 
 class HeapScanCursor {

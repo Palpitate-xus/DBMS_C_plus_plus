@@ -1,12 +1,14 @@
 #include "BPTree.h"
 
 #include <algorithm>
+#include <charconv>
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <iostream>
+#include <limits>
 
 namespace dbms {
 
@@ -19,10 +21,11 @@ constexpr size_t kMaxNodeOrder =
     kMaxLeafKeys < kMaxInternalKeys ? kMaxLeafKeys : kMaxInternalKeys;
 constexpr uint16_t kLegacyChecksummedIndexFormat =
     bptree_format::kContentChecksumFormat;
-constexpr uint16_t kChecksummedIndexFormat =
-    bptree_format::kPageBoundChecksumFormat;
 constexpr size_t kPageChecksumOffset = bptree_format::kChecksumOffset;
+constexpr size_t kIntegerKeyBytes = sizeof(uint64_t);
+constexpr uint64_t kIntegerSignBias = uint64_t{1} << 63;
 static_assert(BP_PAGE_SIZE == bptree_format::kPageSize);
+static_assert(BP_KEY_LEN == bptree_format::kKeySize);
 static_assert(kMaxNodeOrder >= 2 && kMaxNodeOrder <= UINT16_MAX,
               "invalid B+ tree page layout");
 static_assert(3 + kMaxLeafKeys * (BP_KEY_LEN + sizeof(int64_t)) +
@@ -35,6 +38,23 @@ void writeIndexPageChecksum(char* page, uint32_t pageId) {
 
 bool verifyIndexPageChecksum(const char* page, uint32_t pageId, bool bindPageId) {
     return bptree_format::verifyPageChecksum(page, pageId, bindPageId);
+}
+
+bool validIntegerStoredKey(const std::string& key) {
+    return key.size() == BP_KEY_LEN &&
+           std::all_of(key.begin() + kIntegerKeyBytes, key.end(),
+                       [](char byte) { return byte == '\0'; });
+}
+
+int64_t readIntegerStoredKey(const std::string& key) {
+    uint64_t biased = 0;
+    for (size_t i = 0; i < kIntegerKeyBytes; ++i) {
+        biased = (biased << 8) | static_cast<unsigned char>(key[i]);
+    }
+    if (biased < kIntegerSignBias) {
+        return std::numeric_limits<int64_t>::min() + static_cast<int64_t>(biased);
+    }
+    return static_cast<int64_t>(biased - kIntegerSignBias);
 }
 }  // namespace
 
@@ -68,6 +88,33 @@ std::string BPTree::normalizeKeyForComparison(const std::string& key) {
     return normalizeKey(key);
 }
 
+std::optional<std::string> BPTree::keyForStorage(const std::string& key) const {
+    if (header_.reserved != bptree_format::kSignedIntegerKeyFormat) {
+        return normalizeKey(key);
+    }
+    const char* first = key.data();
+    const char* last = first + key.size();
+    // TableSchema appends one separator after an explicit primary key.
+    if (first != last && last[-1] == '\x01') --last;
+    if (first == last) return std::nullopt;
+    if (*first == '+') {
+        ++first;
+        if (first == last || *first < '0' || *first > '9') return std::nullopt;
+    }
+    int64_t value = 0;
+    const auto parsed = std::from_chars(first, last, value);
+    if (parsed.ec != std::errc{} || parsed.ptr != last) return std::nullopt;
+
+    uint64_t biased = static_cast<uint64_t>(value) ^ kIntegerSignBias;
+    std::string stored(BP_KEY_LEN, '\0');
+    auto* bytes = reinterpret_cast<unsigned char*>(stored.data());
+    for (size_t i = kIntegerKeyBytes; i > 0; --i) {
+        bytes[i - 1] = static_cast<unsigned char>(biased);
+        biased >>= 8;
+    }
+    return stored;
+}
+
 // ========================================================================
 // Node serialization: pack into BP_PAGE_SIZE bytes
 // ========================================================================
@@ -77,8 +124,9 @@ void BPTree::serializeNode(char* buf, const Node& node, uint16_t /*order*/) {
     std::memcpy(buf + 1, &node.numKeys, sizeof(uint16_t));
     size_t pos = 3;
     for (size_t i = 0; i < node.numKeys; ++i) {
-        std::string k = normalizeKey(node.keys[i]);
-        std::memcpy(buf + pos, k.data(), BP_KEY_LEN);
+        // The node already contains encoded bytes, including separators
+        // copied from child nodes during splitting.
+        std::memcpy(buf + pos, node.keys[i].data(), BP_KEY_LEN);
         pos += BP_KEY_LEN;
     }
     if (node.isLeaf) {
@@ -143,12 +191,10 @@ BPTree::BPTree(const std::filesystem::path& indexFile)
           indexFile.string(), indexBufferFrameCount(), BP_PAGE_SIZE)) {
     bp_->setPageValidator([this](uint32_t pageId, const char* data) {
         if (pageId == 0) return true;
-        if (header_.reserved != kChecksummedIndexFormat &&
-            header_.reserved != kLegacyChecksummedIndexFormat) {
+        const bool pageIdBound = bptree_format::usesPageBoundChecksum(header_.reserved);
+        if (!pageIdBound && header_.reserved != kLegacyChecksummedIndexFormat) {
             return true;
         }
-        const bool pageIdBound =
-            header_.reserved == kChecksummedIndexFormat;
         if (verifyIndexPageChecksum(data, pageId, pageIdBound)) return true;
         std::cerr << "[index] invalid B+ tree page checksum in " << filePath_
                   << " at block " << pageId << std::endl;
@@ -176,11 +222,21 @@ bool BPTree::open() {
     return openInternal(true);
 }
 
+bool BPTree::openWithSignedIntegerKeys() {
+    return openInternal(true, bptree_format::kSignedIntegerKeyFormat);
+}
+
 bool BPTree::openExisting() {
     return openInternal(false);
 }
 
-bool BPTree::openInternal(bool createIfMissing) {
+bool BPTree::usesSignedIntegerKeys() const {
+    std::shared_lock<std::shared_mutex> treeLock(treeMutex_);
+    return bp_ && bp_->isOpen() &&
+           header_.reserved == bptree_format::kSignedIntegerKeyFormat;
+}
+
+bool BPTree::openInternal(bool createIfMissing, uint16_t creationFormat) {
     std::unique_lock<std::shared_mutex> treeLock(treeMutex_);
     if (bp_ && bp_->isOpen()) return true;
     if (!bp_) bp_ = std::make_unique<BufferPool>(filePath_.string(), indexBufferFrameCount());
@@ -211,7 +267,7 @@ bool BPTree::openInternal(bool createIfMissing) {
         header_.nextFreePage = 1;
         header_.order = static_cast<uint16_t>(std::min(size_t(100), kMaxNodeOrder));
         if (header_.order < 2) header_.order = 2;
-        header_.reserved = kChecksummedIndexFormat;
+        header_.reserved = creationFormat;
         if (!writeHeader()) {
             bp_->close();
             return false;
@@ -254,7 +310,7 @@ bool BPTree::writeHeader() {
     char* buf = bp_->fetchPage(0);
     if (!buf) return false;
     std::memcpy(buf, &header_, sizeof(FileHeader));
-    if (header_.reserved == kChecksummedIndexFormat) {
+    if (bptree_format::usesPageBoundChecksum(header_.reserved)) {
         writeIndexPageChecksum(buf, 0);
     }
     bp_->markDirty(0);
@@ -272,7 +328,7 @@ bool BPTree::readHeader() {
     if (!buf) return false;
     std::memcpy(&header_, buf, sizeof(FileHeader));
     bool headerChecksumValid = false;
-    if (header_.reserved == kChecksummedIndexFormat) {
+    if (bptree_format::usesPageBoundChecksum(header_.reserved)) {
         headerChecksumValid = verifyIndexPageChecksum(buf, 0, true);
     } else if (header_.reserved == kLegacyChecksummedIndexFormat) {
         headerChecksumValid = verifyIndexPageChecksum(buf, 0, false);
@@ -306,7 +362,7 @@ uint32_t BPTree::allocPage() {
         return 0;
     }
     std::memset(buf, 0, BP_PAGE_SIZE);
-    if (header_.reserved == kChecksummedIndexFormat) {
+    if (bptree_format::usesPageBoundChecksum(header_.reserved)) {
         writeIndexPageChecksum(buf, page);
     }
     bp_->markDirty(page);
@@ -318,7 +374,9 @@ bool BPTree::writeNode(uint32_t pageNum, const Node& node) {
     if (!bp_ || !bp_->isOpen() || pageNum == 0 ||
         pageNum >= header_.nextFreePage || node.isLeaf > 1 ||
         node.numKeys != node.keys.size() || node.numKeys > header_.order ||
-        !std::is_sorted(node.keys.begin(), node.keys.end())) {
+        !std::is_sorted(node.keys.begin(), node.keys.end()) ||
+        !std::all_of(node.keys.begin(), node.keys.end(),
+                     [](const std::string& key) { return key.size() == BP_KEY_LEN; })) {
         return false;
     }
     if ((node.isLeaf &&
@@ -332,7 +390,7 @@ bool BPTree::writeNode(uint32_t pageNum, const Node& node) {
     char* buf = bp_->fetchPage(pageNum);
     if (!buf) return false;
     serializeNode(buf, node, header_.order);
-    if (header_.reserved == kChecksummedIndexFormat) {
+    if (bptree_format::usesPageBoundChecksum(header_.reserved)) {
         writeIndexPageChecksum(buf, pageNum);
     }
     bp_->markDirty(pageNum);
@@ -412,7 +470,11 @@ std::optional<BPTree::Node> BPTree::readNode(uint32_t pageNum) const {
     if (!buf) return std::nullopt;
     const bool valid = deserializeNode(buf, node, header_.order);
     bp_->unpinPage(pageNum);
-    if (!valid) return std::nullopt;
+    if (!valid ||
+        (header_.reserved == bptree_format::kSignedIntegerKeyFormat &&
+         !std::all_of(node.keys.begin(), node.keys.end(), validIntegerStoredKey))) {
+        return std::nullopt;
+    }
     if (node.isLeaf) {
         if (node.nextLeaf != 0 &&
             (node.nextLeaf >= header_.nextFreePage || node.nextLeaf == pageNum)) {
@@ -476,9 +538,12 @@ BPTree::SearchResult BPTree::searchChecked(
         const std::string& key, int64_t& value) const {
     std::shared_lock<std::shared_mutex> treeLock(treeMutex_);
     if (!bp_ || !bp_->isOpen()) return SearchResult::Error;
+    const auto storedKey = keyForStorage(key);
+    // A fractional or out-of-range equality probe cannot match an integer.
+    if (!storedKey) return SearchResult::NotFound;
     if (header_.rootPage == 0) return SearchResult::NotFound;
     TraversalPath visited;
-    return searchNode(header_.rootPage, normalizeKey(key), value, visited);
+    return searchNode(header_.rootPage, *storedKey, value, visited);
 }
 
 BPTree::SearchResult BPTree::searchNode(
@@ -512,7 +577,9 @@ BPTree::SearchResult BPTree::searchNode(
 bool BPTree::insert(const std::string& key, int64_t value) {
     std::unique_lock<std::shared_mutex> treeLock(treeMutex_);
     if (!bp_ || !bp_->isOpen()) return false;
-    const std::string normalizedKey = normalizeKey(key);
+    const auto storedKey = keyForStorage(key);
+    if (!storedKey) return false;
+    const std::string& normalizedKey = *storedKey;
     if (header_.rootPage == 0) {
         // Create root leaf
         uint32_t root = allocPage();
@@ -572,8 +639,9 @@ bool BPTree::searchMultiChecked(const std::string& key,
     values.clear();
     std::vector<int64_t> results;
     if (!bp_ || !bp_->isOpen()) return false;
-    if (header_.rootPage == 0) return true;
-    const std::string normalizedKey = normalizeKey(key);
+    const auto storedKey = keyForStorage(key);
+    if (!storedKey || header_.rootPage == 0) return true;
+    const std::string& normalizedKey = *storedKey;
     std::unordered_set<uint32_t> visited;
     auto nodeOpt = readNode(header_.rootPage);
     if (!nodeOpt) return false;
@@ -611,7 +679,9 @@ bool BPTree::searchMultiChecked(const std::string& key,
 bool BPTree::insertMulti(const std::string& key, int64_t value) {
     std::unique_lock<std::shared_mutex> treeLock(treeMutex_);
     if (!bp_ || !bp_->isOpen()) return false;
-    const std::string normalizedKey = normalizeKey(key);
+    const auto storedKey = keyForStorage(key);
+    if (!storedKey) return false;
+    const std::string& normalizedKey = *storedKey;
     if (header_.rootPage == 0) {
         uint32_t root = allocPage();
         if (root == 0) return false;
@@ -745,16 +815,20 @@ bool BPTree::splitChild(uint32_t parentPage, int childIdx, uint32_t childPage) {
 bool BPTree::remove(const std::string& key) {
     std::unique_lock<std::shared_mutex> treeLock(treeMutex_);
     if (!bp_ || !bp_->isOpen() || header_.rootPage == 0) return false;
+    const auto storedKey = keyForStorage(key);
+    if (!storedKey) return false;
     std::unordered_set<uint32_t> visited;
-    return removeFromNode(header_.rootPage, normalizeKey(key), std::nullopt,
+    return removeFromNode(header_.rootPage, *storedKey, std::nullopt,
                           visited) == RemoveResult::Removed;
 }
 
 bool BPTree::removeMulti(const std::string& key, int64_t value) {
     std::unique_lock<std::shared_mutex> treeLock(treeMutex_);
     if (!bp_ || !bp_->isOpen() || header_.rootPage == 0) return false;
+    const auto storedKey = keyForStorage(key);
+    if (!storedKey) return false;
     std::unordered_set<uint32_t> visited;
-    return removeFromNode(header_.rootPage, normalizeKey(key), value,
+    return removeFromNode(header_.rootPage, *storedKey, value,
                           visited) == RemoveResult::Removed;
 }
 
@@ -811,11 +885,16 @@ bool BPTree::rangeScanChecked(const std::string& startKey,
     values.clear();
     std::vector<int64_t> result;
     if (!bp_ || !bp_->isOpen()) return false;
+    auto lower = startKey.empty()
+        ? std::optional(std::string(BP_KEY_LEN, '\0')) : keyForStorage(startKey);
+    auto upper = endKey.size() == BP_KEY_LEN &&
+                 std::all_of(endKey.begin(), endKey.end(),
+                             [](char byte) { return byte == '\xFF'; })
+        ? std::optional(endKey) : keyForStorage(endKey);
+    if (!lower || !upper) return false;
     if (header_.rootPage == 0) return true;
-    const std::string normalizedStart = normalizeKey(startKey);
-    const std::string normalizedEnd = normalizeKey(endKey);
     std::unordered_set<uint32_t> visited;
-    if (!collectRange(header_.rootPage, normalizedStart, normalizedEnd, result,
+    if (!collectRange(header_.rootPage, *lower, *upper, result,
                       visited)) return false;
     values = std::move(result);
     return true;
@@ -918,6 +997,96 @@ BPTree::LeafEntriesResult BPTree::readLeafEntriesChecked(
     const auto status = collect(collect, header_.rootPage, 0, nullptr, nullptr);
     if (status != LeafEntriesResult::Complete) return status;
     if (!leafDepth || nextLeaf) return LeafEntriesResult::Error;
+    entries = std::move(result);
+    return LeafEntriesResult::Complete;
+}
+
+BPTree::LeafEntriesResult BPTree::readSignedIntegerPrefix(
+        size_t count, size_t maxNodes, bool descending,
+        std::vector<IntegerEntry>& entries, size_t& visitedNodes) const {
+    std::shared_lock<std::shared_mutex> treeLock(treeMutex_);
+    entries.clear();
+    visitedNodes = 0;
+    if (!bp_ || !bp_->isOpen() ||
+        header_.reserved != bptree_format::kSignedIntegerKeyFormat) {
+        return LeafEntriesResult::Error;
+    }
+    if (count == 0 || header_.rootPage == 0) return LeafEntriesResult::Complete;
+
+    std::vector<IntegerEntry> result;
+    std::unordered_set<uint32_t> visited;
+    std::optional<size_t> leafDepth;
+    uint32_t lastLeaf = 0;
+    uint32_t lastNextLeaf = 0;
+    bool unvisitedChild = false;
+    const auto collect = [&](const auto& self, uint32_t page, size_t depth,
+                             const std::string* lower, const std::string* upper)
+            -> LeafEntriesResult {
+        if (depth >= kMaxTraversalDepth || visited.find(page) != visited.end())
+            return LeafEntriesResult::Error;
+        if (visited.size() == maxNodes) return LeafEntriesResult::LimitExceeded;
+        visited.insert(page);
+        visitedNodes = visited.size();
+        const auto node = readNode(page);
+        if (!node) return LeafEntriesResult::Error;
+        // With unique keys, the left child excludes its upper separator.
+        // Removal may leave the right child above its lower separator.
+        if (!node->keys.empty() && ((lower && node->keys.front() < *lower) ||
+                                    (upper && node->keys.back() >= *upper))) {
+            return LeafEntriesResult::Error;
+        }
+        if (!node->isLeaf) {
+            if (std::adjacent_find(node->keys.begin(), node->keys.end()) !=
+                node->keys.end()) return LeafEntriesResult::Error;
+            for (size_t position = 0; position < node->children.size(); ++position) {
+                if (result.size() == count) {
+                    unvisitedChild = true;
+                    break;
+                }
+                const size_t i = descending
+                    ? node->children.size() - 1 - position : position;
+                const auto status = self(self, node->children[i], depth + 1,
+                    i ? &node->keys[i - 1] : lower,
+                    i < node->keys.size() ? &node->keys[i] : upper);
+                if (status != LeafEntriesResult::Complete) return status;
+            }
+            return LeafEntriesResult::Complete;
+        }
+
+        // The existing forward leaf links validate adjacency in either
+        // direction. The first leaf in a reverse scan must end that chain.
+        if ((leafDepth && *leafDepth != depth) ||
+            (descending && node->nextLeaf != lastLeaf) ||
+            (!descending && ((lastLeaf && lastNextLeaf != page) ||
+                             visited.find(node->nextLeaf) != visited.end()))) {
+            return LeafEntriesResult::Error;
+        }
+        leafDepth = depth;
+        lastLeaf = page;
+        lastNextLeaf = node->nextLeaf;
+        const size_t take = std::min(node->keys.size(), count - result.size());
+        const size_t required = result.size() + take;
+        if (required > result.capacity()) {
+            const size_t capacity = result.capacity();
+            const size_t grown = capacity + std::min(capacity, count - capacity);
+            result.reserve(std::max(required, grown));
+        }
+        for (size_t position = 0; position < take; ++position) {
+            const size_t i = descending ? node->keys.size() - 1 - position : position;
+            const int64_t key = readIntegerStoredKey(node->keys[i]);
+            if (!result.empty() && (descending ? key >= result.back().key
+                                               : key <= result.back().key)) {
+                return LeafEntriesResult::Error;
+            }
+            result.push_back({key, node->values[i]});
+        }
+        return LeafEntriesResult::Complete;
+    };
+
+    const auto status = collect(collect, header_.rootPage, 0, nullptr, nullptr);
+    if (status != LeafEntriesResult::Complete) return status;
+    if (!leafDepth || (!descending && (lastNextLeaf != 0) != unvisitedChild))
+        return LeafEntriesResult::Error;
     entries = std::move(result);
     return LeafEntriesResult::Complete;
 }
