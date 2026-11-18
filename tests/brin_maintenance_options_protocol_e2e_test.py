@@ -39,7 +39,9 @@ def main():
         assert values == wanted and types == list(oids), (table, fields, values, wanted, types)
 
     def image(table, phase, wanted_width):
-        raw = (Path(server['dir'])/'info'/(table+'_n.brin')).read_bytes()
+        database = Path(server['dir'])/'info'
+        raw = (database/(table+'_n.brin')).read_bytes()
+        schema = (database/(table+'.stc')).read_bytes()
         assert struct.unpack_from('<II', raw) == (0x5342524e, 3)
         crc = 0xffffffff
         for byte in raw[:-4]:
@@ -49,9 +51,38 @@ def main():
         assert crc ^ 0xffffffff == int.from_bytes(raw[-4:], 'little')
         count = struct.unpack_from('<Q', raw, 8)[0]
         width, extent, flags = struct.unpack_from('<III', raw, 16)
+        physical_relation = struct.unpack_from('<Q', raw, 28)[0]
         length = struct.unpack_from('<Q', raw, 36)[0]
         assert width and extent and not flags and length
         position = 44+length
+        assert position <= len(raw)-4
+
+        identity = raw[44:position]
+        prefix = b'brin-typed-order-v1'
+        assert identity.startswith(prefix), (table, phase)
+        _, _, schema_length = struct.unpack_from('<IQQ', identity, len(prefix))
+        schema_start = len(prefix) + struct.calcsize('<IQQ')
+        assert 0 < schema_length <= len(identity)-schema_start, (table, phase)
+        embedded_schema = identity[schema_start:schema_start+schema_length]
+        schema_rid = None
+        schema_version = struct.unpack_from('<I', schema)[0]
+        if 0x4442000a <= schema_version <= 0x4442000f:
+            # All fixtures are unpartitioned. Their RID extension immediately
+            # follows the range-lower-bounds header with a zero entry count.
+            rid_prefix = b'RLB1\0\0\0\0RID1'
+            assert schema.count(rid_prefix) == 1, (table, phase)
+            schema_rid = struct.unpack_from('<Q', schema, schema.index(rid_prefix)+len(rid_prefix))[0]
+            if physical_relation != schema_rid:
+                trace['failures'].append({'table': table, 'phase': phase,
+                                          'expected_physical_relation': schema_rid,
+                                          'actual_physical_relation': physical_relation})
+        schema_sha = hashlib.sha256(schema).hexdigest()
+        embedded_schema_sha = hashlib.sha256(embedded_schema).hexdigest()
+        if embedded_schema != schema:
+            trace['failures'].append({'table': table, 'phase': phase,
+                                      'expected_schema_sha256': schema_sha,
+                                      'embedded_schema_sha256': embedded_schema_sha})
+
         previous = 0
         for _ in range(count):
             first, last, state = struct.unpack_from('<III', raw, position)
@@ -65,6 +96,8 @@ def main():
         assert position == len(raw)-4
         trace['images'].append({'after_command_index': len(trace['commands'])-1, 'table': table, 'phase': phase, 'expected_width': wanted_width,
                                 'width': width, 'extent': extent, 'ranges': count, 'bytes': len(raw),
+                                'physical_relation': physical_relation, 'schema_physical_relation': schema_rid,
+                                'schema_sha256': schema_sha, 'embedded_schema_sha256': embedded_schema_sha,
                                 'sha256': hashlib.sha256(raw).hexdigest(), 'hex': raw.hex()})
         if width != wanted_width:
             trace['failures'].append({'phase': phase, 'expected_width': wanted_width, 'actual_width': width})

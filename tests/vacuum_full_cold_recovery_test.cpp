@@ -1,3 +1,4 @@
+// test_link_flags: -Wl,--wrap=rename
 #include "catalog/type_registry.h"
 #include "commands/TableManage.h"
 #include "executor/ExecutionPlan.h"
@@ -7,6 +8,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <map>
 #include <optional>
 #include <stdexcept>
@@ -22,8 +24,33 @@ using namespace dbms;
 using Cell = std::optional<std::string>;
 using Rows = std::map<std::string, StorageEngine::SqlRow>;
 const std::string database = "__t_full_cold_recovery";
+enum class BrinRewriteFault { None, WriteError, Crash };
+BrinRewriteFault brinRewriteFault = BrinRewriteFault::None;
+bool observedNewSchemaBeforeBrin = false;
+const auto liveSchema = std::filesystem::path(database) / "items.stc";
+const auto liveBrin = std::filesystem::path(database) / "items_id.brin";
+const auto pendingFull = std::filesystem::path(database) / ".items.vacuum_full_pending";
 void require(bool value, const char* label) {
     if (!value) throw std::runtime_error(label);
+}
+std::string fileBytes(const std::filesystem::path& path) {
+    std::ifstream input(path, std::ios::binary);
+    require(bool(input), "open actual rewrite witness file");
+    std::string bytes{std::istreambuf_iterator<char>(input), {}};
+    require(!input.bad() && !bytes.empty(), "read complete rewrite witness file");
+    return bytes;
+}
+
+void saveRewriteWitness(const std::filesystem::path& source, const char* target) {
+    const auto bytes = fileBytes(source);
+    std::ofstream output(target, std::ios::binary | std::ios::trunc);
+    output.write(bytes.data(), bytes.size());
+    output.close();
+    require(bool(output), "save original rewrite witness");
+}
+
+bool isInterruptedBrinRewrite(const std::string& mode) {
+    return mode == "brin-write-error" || mode == "brin-crash";
 }
 std::string payload(size_t bytes, uint32_t state) {
     static constexpr char alphabet[] = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
@@ -99,6 +126,15 @@ void verifyFinal() {
     require(std::filesystem::file_size(std::filesystem::path(database) / "items.dt") < before,
             "compaction remains real after subsequent writes and recovery");
 }
+void verifyRestoredBrinRewrite() {
+    require(snapshot() == expected(false), "rollback preserves all original visible tuples");
+    require(fileBytes(liveSchema) == fileBytes("original-schema.bin"), "rollback restores original schema bytes");
+    require(fileBytes(liveBrin) == fileBytes("original-brin.bin"), "rollback restores original BRIN bytes");
+    require(!std::filesystem::exists(pendingFull), "completed rollback clears pending rewrite");
+    const auto ranges = g_engine.tryBrinPageRanges(database, "items", "id", ">=", "250", false);
+    require(ranges && !ranges->empty(), "restored BRIN serves the original heap generation");
+}
+
 void setup(const std::string& mode) {
     require(g_engine.createDatabase(database, "utf8") == DBStatus::OK, "create actual database");
     TableSchema schema; schema.tablename = "items"; schema.formatVersion = 2;
@@ -121,8 +157,22 @@ void setup(const std::string& mode) {
         std::ofstream output("original_heap_bytes.txt"); output << before << '\n';
         output.close(); require(bool(output), "persist independent original size");
     }
+    if (isInterruptedBrinRewrite(mode)) {
+        require(g_engine.createBrinIndex(database, "items", "id", 1) == DBStatus::OK,
+                "build original healthy BRIN without a SQL index name");
+        saveRewriteWitness(liveSchema, "original-schema.bin");
+        saveRewriteWitness(liveBrin, "original-brin.bin");
+        brinRewriteFault = mode == "brin-crash" ? BrinRewriteFault::Crash : BrinRewriteFault::WriteError;
+    }
     bool succeeded = false;
     const auto count = g_engine.vacuumFull(database, "items", &succeeded);
+    if (isInterruptedBrinRewrite(mode)) {
+        require(observedNewSchemaBeforeBrin && mode == "brin-write-error",
+                "BRIN publication attempted under the new schema before commit");
+        require(!succeeded && count == 0, "BRIN rename failure aborts actual FULL");
+        verifyRestoredBrinRewrite();
+        return;
+    }
     require(succeeded && count == 16, "FULL actually succeeds with exact live count");
     const auto after = std::filesystem::file_size(heap);
     require(after < before, "FULL actually removes old physical pages");
@@ -172,6 +222,33 @@ int child(const std::string& executable, const std::string& mode, const std::str
     return code;
 }
 }
+
+extern "C" int __real_rename(const char* source, const char* target);
+extern "C" int __wrap_rename(const char* source, const char* target) {
+    if (brinRewriteFault == BrinRewriteFault::None ||
+        std::filesystem::path(target).filename() != liveBrin.filename())
+        return __real_rename(source, target);
+
+    const auto fault = brinRewriteFault;
+    brinRewriteFault = BrinRewriteFault::None;
+    observedNewSchemaBeforeBrin = std::filesystem::is_regular_file(pendingFull) &&
+        fileBytes(liveSchema) != fileBytes("original-schema.bin");
+    if (!observedNewSchemaBeforeBrin) return __real_rename(source, target);
+
+    if (fault == BrinRewriteFault::WriteError) {
+        std::cout << "FULL_BRIN_RENAME_INJECTED new_schema=1 error=EIO\n" << std::flush;
+        errno = EIO;
+        return -1;
+    }
+    const int result = __real_rename(source, target);
+    if (result == 0) {
+        std::cout << "FULL_BRIN_RENAME_INTERRUPTED new_schema=1 replacement_published=1\n" << std::flush;
+        ::kill(::getpid(), SIGKILL);
+        ::_exit(127);
+    }
+    return result;
+}
+
 int main(int argc, char** argv) {
     try {
         TypeRegistry::instance().bootstrap(); g_engine.setBackgroundIntervals(60000, 60000);
@@ -180,18 +257,25 @@ int main(int argc, char** argv) {
             if (phase == "setup") setup(mode);
             else {
                 require(phase == "cold1" || phase == "cold2", "known actual cold phase");
-                verifyFinal(); std::cout << "FULL_COLD_VALUES mode=" << mode
-                    << " phase=" << phase << " all_values_NULLs_keys_and_compaction=exact\n";
+                if (isInterruptedBrinRewrite(mode)) {
+                    verifyRestoredBrinRewrite();
+                    std::cout << "FULL_COLD_BRIN_ROLLBACK mode=" << mode << " phase=" << phase
+                              << " original_schema_index_and_rows=exact\n";
+                } else {
+                    verifyFinal();
+                    std::cout << "FULL_COLD_VALUES mode=" << mode << " phase=" << phase
+                              << " all_values_NULLs_keys_and_compaction=exact\n";
+                }
             }
             return 0;
         }
         require(argc == 1, "known parent arguments");
         const auto executable = std::filesystem::read_symlink("/proc/self/exe").string();
         unsigned failures = 0, executed = 0, notrun = 0;
-        for (const std::string mode : {"closed", "killed"}) {
+        for (const std::string mode : {"closed", "killed", "brin-write-error", "brin-crash"}) {
             require(std::filesystem::create_directory(mode), "fresh actual scenario directory");
             const int setupExit = child(executable, mode, "setup"); ++executed;
-            if (setupExit != (mode == "killed" ? -SIGKILL : 0)) {
+            if (setupExit != (mode == "killed" || mode == "brin-crash" ? -SIGKILL : 0)) {
                 ++failures; notrun += 2;
                 std::cout << "FULL_NOTRUN mode=" << mode << " phases=cold1,cold2 cause=setup_failed\n";
                 continue;

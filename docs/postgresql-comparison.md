@@ -2,6 +2,10 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-18 · 重写后的 BRIN 摘要
+
+PostgreSQL 的 `VACUUM FULL` 用新文件重写表并重建关联索引。本项目已修复该操作完成后 BRIN 仍指向旧表标识的问题。BRIN 使用项目自己的文件格式，自动摘要和完整的索引维护仍有差距。[PostgreSQL 表重写代码](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/commands/cluster.c) · [本项目测试](test-report.md#brin-vacuum-full-generation-20261118)
+
 ## 2026-11-18 · 写入时查找要维护的索引
 
 PostgreSQL 从系统目录取得索引清单，并通过关系缓存复用清单。本项目现在为五种索引共用一次目录遍历。文件名仍参与识别索引，统一的索引目录与逐行维护是后续差距。[PostgreSQL 18.6 关系缓存](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/utils/cache/relcache.c) · [本项目测试](test-report.md#specialized-index-discovery-20261118)

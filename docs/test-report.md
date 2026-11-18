@@ -2,6 +2,17 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="brin-vacuum-full-generation-20261118"></a>
+## 2026-11-18 · 整理表后可立即使用范围索引
+
+`VACUUM FULL` 会重写表。旧版先重建 BRIN，再保存新表标识，导致查询发现索引与表不匹配。新版保存新表标识后重建 BRIN，提交前继续持有表锁和回滚所需文件。[使用示例](MANUAL.md#重写表后的-brin-查询)
+
+PostgreSQL 18.6 更换表文件后重建索引。SQLite 的 `VACUUM` 重建整个数据库文件。DuckDB 使用数据块的最小值和最大值跳过不符合条件的区块，与 BRIN 的范围过滤原理类似。[PostgreSQL 表重写](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/commands/cluster.c) · [SQLite VACUUM](https://www.sqlite.org/lang_vacuum.html) · [DuckDB 范围过滤](https://duckdb.org/docs/stable/guides/performance/indexing)
+
+- BRIN 维护测试执行 42 条 SQL，检查 12 份真实索引文件和 4 份执行计划。38 条非 `EXPLAIN` 回复与旧版逐字节一致。两份重写后的索引文件改为记录新表标识和表定义，其余十份逐字节一致。首次重写后的范围查询依然返回 8 行，扫描行数从 767 降至 24。另一张表连续重写两次，每次查询从扫描 319 行降至 22 行，返回的 6 行相同。[BRIN 维护测试](../tests/brin_maintenance_options_protocol_e2e_test.py)
+- 故障测试在新表定义已写入后让索引文件替换返回 `EIO`，并另测索引文件替换成功后、提交前用 `SIGKILL` 结束进程。两种情形都恢复旧表定义、旧索引的原始字节及原有查询结果。分别用两个新进程再次打开数据，恢复后的索引都可用。旧版通过原有冷启动用例，但无法到达新增测试要求的发布顺序。[冷启动恢复测试](../tests/vacuum_full_cold_recovery_test.cpp)
+- 六项 C++ 回归、四项相邻协议测试及手册示例均通过。另有 42 条共同操作与 PostgreSQL 18.6 对照，并对 27 条性能测试准备和读取操作再次核对结果。完整回归套件待验证。受测程序 SHA-256 为 `e7593c3f28d68c3236d03390ff3dc4b5f656ffaca4d0d96b2262e52fe49e0e9e`。[性能报告](performance-report-2026-10-30.md#brin-vacuum-full-generation-cost-20261118)
+
 <a id="specialized-index-discovery-20261118"></a>
 ## 2026-11-18 · 写入时减少重复的索引查找
 

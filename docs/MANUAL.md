@@ -1745,6 +1745,17 @@ SELECT id, score FROM example_index_maintenance WHERE score >= 15 ORDER BY id;
 
 提交后能查到更新的值，回滚后能查到原有值。表重写和清空保留受支持的索引定义。[测试范围](test-report.md#specialized-index-discovery-20261118)
 
+### 重写表后的 BRIN 查询
+
+`VACUUM FULL` 重写表后，会用新表标识生成 BRIN 摘要。索引继续使用原来的范围宽度。在上面的示例表中，重写后查询仍返回 `1, 15`。
+
+```sql
+VACUUM FULL example_index_maintenance;
+SELECT id, score FROM example_index_maintenance WHERE score >= 15 ORDER BY id;
+```
+
+对较大的表，可用 `EXPLAIN (ANALYZE, FORMAT JSON)` 查看范围查询是否使用 BRIN。较宽的查询可能按代价选择扫描表。旧版重写过的表也可通过 `REINDEX TABLE` 重建摘要。[验证范围](test-report.md#brin-vacuum-full-generation-20261118)
+
 ---
 
 ## 9. 视图与物化视图

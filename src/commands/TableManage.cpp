@@ -53075,12 +53075,6 @@ size_t StorageEngine::vacuumFull(const std::string& dbname,
         if (createSPGiSTIndex(dbname, tablename, column) != DBStatus::OK)
             return failRewrite();
     }
-    for (const auto& column : brinColumns) {
-        if (createBrinIndex(dbname, tablename, column, brinWidths.at(column)) != DBStatus::OK)
-            return failRewrite();
-    }
-    if (!clearSpecializedIndexDirty(*this, dbname, tablename))
-        return failRewrite();
 
     if (!flushTableCaches(dbname, rewriteTables)) return failRewrite();
     std::set<std::filesystem::path> publicationParents{relationRoot, dbPath(dbname)};
@@ -53095,6 +53089,16 @@ size_t StorageEngine::vacuumFull(const std::string& dbname,
     TableSchema rewritten = tbl;
     rewritten.physicalRelationId = backupState.newIdentity;
     if (!writeSchemaFile(dbname, tablename, rewritten)) return failRewrite();
+
+    // BRIN binds ranges to both the relation generation and the persisted
+    // schema image. Build its final, durably replaced files from the new
+    // schema while the rewrite lock and rollback receipt still protect it.
+    for (const auto& column : brinColumns) {
+        if (createBrinIndex(dbname, tablename, column, brinWidths.at(column)) != DBStatus::OK)
+            return failRewrite();
+    }
+    if (!clearSpecializedIndexDirty(*this, dbname, tablename)) return failRewrite();
+
     const auto completionPayload = heap_wal_identity::event(
         backupState.oldIdentity == 0 ? backupState.newIdentity : backupState.oldIdentity,
         tablename);

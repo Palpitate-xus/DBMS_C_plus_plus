@@ -1,34 +1,40 @@
 # 更新日志
 
 <details>
-<summary>写入数据时少查几遍目录 · 2026-11-18</summary>
+<summary>整理表后，范围查询可以少读数据 · 2026-11-18</summary>
 
-新增、修改和删除数据时，数据库把多类索引文件一起检查。加列、删列和清空表时也减少了重复的目录遍历。
+运行 `VACUUM FULL` 整理表后，符合条件的查询可以马上用 BRIN 索引跳过无关数据。
+
+[使用示例](docs/MANUAL.md#重写表后的-brin-查询) · [测试报告](docs/test-report.md#brin-vacuum-full-generation-20261118) · [性能报告](docs/performance-report-2026-10-30.md#brin-vacuum-full-generation-cost-20261118)
+
+</details>
+
+<details>
+<summary>写入数据时少找几遍索引文件 · 2026-11-18</summary>
+
+新增、修改或删除数据时，数据库会一起查找相关的索引文件，少做几次重复查找。新增列、删除列和清空表时也有同样的改进。
 
 [使用手册](docs/MANUAL.md#写入后的索引维护) · [测试报告](docs/test-report.md#specialized-index-discovery-20261118) · [性能报告](docs/performance-report-2026-10-30.md#specialized-index-discovery-cost-20261118)
 
 </details>
 
 <details>
-<summary>按主键翻页时少排一次序 · 2026-11-18</summary>
+<summary>按编号翻页时少排一次序 · 2026-11-18</summary>
 
-索引已经按所需顺序给出一页时，数据库沿用这个顺序。需要写临时文件时，也按这个顺序写入和读取。
+用整数主键翻页时，如果索引给出的记录已经排好，数据库就直接按这个顺序返回。
 
 [使用示例](docs/MANUAL.md#查看分页是否复用索引顺序) · [测试报告](docs/test-report.md#presorted-integer-primary-key-page-20261118) · [性能报告](docs/performance-report-2026-10-30.md#presorted-integer-primary-key-page-cost-20261118)
 
 </details>
 
 <details>
-<summary>翻页时可以跳过空值 · 2026-11-18</summary>
+<summary>查看更早的更新</summary>
+
+## 2026-11-18 · 翻页时可以跳过空值
 
 例如只看有备注的记录，数据库可以按主键顺序查找，凑够一页就停。
 
 [使用示例](docs/MANUAL.md#翻页时跳过空值) · [测试报告](docs/test-report.md#integer-primary-key-null-filter-20261118) · [性能报告](docs/performance-report-2026-10-30.md#integer-primary-key-null-filter-cost-20261118)
-
-</details>
-
-<details>
-<summary>查看更早的更新</summary>
 
 ## 2026-11-18 · 同一条分页查询可以反复用
 

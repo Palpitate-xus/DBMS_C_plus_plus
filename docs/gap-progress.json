@@ -2,6 +2,26 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-18 rebuild BRIN from the persisted table identity before committing VACUUM FULL",
+      "gap_ids": ["IDX-09", "IDX-15"],
+      "status": "partial",
+      "evidence": [
+        "src/commands/TableManage.cpp",
+        "docs/MANUAL.md",
+        "docs/test-report.md",
+        "docs/performance-report-2026-10-30.md"
+      ],
+      "tests": [
+        "tests/brin_maintenance_options_protocol_e2e_test.py",
+        "tests/vacuum_full_cold_recovery_test.cpp"
+      ],
+      "verification": [
+        "The BRIN maintenance check passes 42 commands, 12 on-disk images and four executed plans. The final BRIN contains the new relation identity and exact saved schema bytes. Thirty-eight non-EXPLAIN replies match the old build byte for byte. The first narrow query inspects 24 instead of 767 heap rows and returns the same eight.",
+        "A BRIN rename returning EIO after schema publication and a SIGKILL after BRIN replacement both restore the previous schema, BRIN bytes and rows. Two cold reopens confirm the restored index remains usable. Six native tests, four adjacent protocol checks, and the manual example pass. All original 273 gap records remain unchanged.",
+        "The timed run has 12 clean exits, 60 batches, 2880 measured reads and 3240 archived exchanges checked independently. Narrow, clustered NULL and absent ranges inspect 24, 47 and zero rows instead of 767. Broad and rebuilt-index controls retain their scan counts. All five elapsed-time comparisons exceed the preset CPU drift limit. Twelve separate VACUUM FULL timings are descriptive."
+      ]
+    },
+    {
       "issue": "2026-11-18 discover specialized index files in one relation-directory pass for writes and rewrites",
       "gap_ids": ["IDX-01", "IDX-15"],
       "status": "partial",

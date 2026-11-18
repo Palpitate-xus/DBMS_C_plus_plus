@@ -2,6 +2,10 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-18 · `VACUUM FULL` 后的 BRIN 范围读取
+
+提交前按重写后的身份和表定义生成 BRIN 文件。对所测窄范围，`VACUUM FULL` 后的第一次查询即可沿摘要读候选页。代价选择、当前快照与损坏检查仍适用。[恢复与执行计划](test-report.md#brin-vacuum-full-generation-20261118) · [性能报告](performance-report-2026-10-30.md#brin-vacuum-full-generation-cost-20261118)
+
 ## 2026-11-18 · 维护索引时减少目录读取
 
 插入、更新和删除时，数据库用一次目录遍历查找五类需要另行维护的索引。重建、加列、删列、截断和 `VACUUM FULL` 在收集这些索引定义时也合并遍历。按原有顺序处理文件和失效标记。遇到目录读取错误时，现有错误会继续传到调用方。[维护和恢复测试](test-report.md#specialized-index-discovery-20261118) · [性能报告](performance-report-2026-10-30.md#specialized-index-discovery-cost-20261118)
