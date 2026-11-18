@@ -448,6 +448,91 @@ def array_lookup_workload(checks, prefix, objects):
     selected('lookup-empty-right-full','FULL',unmatched,right='empty_right')
 
 
+def nested_insert_workload(checks, prefix, objects):
+    q = checks.query
+
+    def name(symbol):
+        return f'{prefix}_{symbol}'
+
+    def create(kind, symbol, definition=''):
+        identifier = name(symbol)
+        objects.append((kind, identifier))
+        q(f'nested-create-{symbol}', f'CREATE {kind} {identifier}{definition}',
+          tag=f'CREATE {kind}', require_success=True)
+
+    def value(label, expression, n):
+        q(label, f'SELECT {expression} AS calls', tag='SELECT 1', names=['calls'],
+          rows=[[str(n)]], oids=[20], wire_layout=[[8, -1]])
+
+    create('SEQUENCE', 'nest_domain_tap')
+    create('SEQUENCE', 'nest_on_tap')
+    domain_tap = name('nest_domain_tap')
+    on_tap = name('nest_on_tap')
+    left, same, other, sink, inputs = [name(f'nest_{symbol}') for symbol in
+                                       ('left', 'same', 'other', 'sink', 'inputs')]
+    for symbol in ('nest_d', 'nest_e'):
+        create('DOMAIN', symbol, f" AS integer[] CHECK(nextval('{domain_tap}')>0)")
+    for symbol, id_name, domain in (
+        ('nest_left', 'lid', 'nest_d'), ('nest_same', 'rid', 'nest_d'),
+        ('nest_other', 'rid', 'nest_e'), ('nest_sink', 'id', 'nest_d')
+    ):
+        create('TABLE', symbol, f'({id_name} integer PRIMARY KEY,k {name(domain)})')
+    create('TABLE', 'nest_inputs', '(rid integer PRIMARY KEY, raw text)')
+    for symbol, rows, count in (
+        ('nest_left', "(1,'{2}'),(2,'{10}')", 2),
+        ('nest_same', "(10,'{2}'),(30,'[0:1]={3,NULL}')", 2),
+        ('nest_other', "(10,'{2}'),(30,'[0:1]={3,NULL}')", 2),
+        ('nest_inputs', "(10,'invalid'),(20,'invalid'),(30,'invalid'),(40,'invalid')", 4),
+    ):
+        q(f'nested-seed-{symbol}', f'INSERT INTO {name(symbol)} VALUES {rows}',
+          tag=f'INSERT 0 {count}', require_success=True)
+
+    def current_domain(label, calls):
+        value(label, f"currval('{domain_tap}')", calls)
+
+    value('nested-domain-reset', f"setval('{domain_tap}',1000,true)", 1000)
+    for label, right, wrappers, identifier, calls in (
+        ('same-full', same, False, 1, 1000),
+        ('mixed-full', other, False, 2, 1001),
+        ('same-full-two-wrappers', same, True, 3, 1001),
+        ('mixed-full-two-wrappers', other, True, 4, 1002),
+    ):
+        join = f'SELECT k FROM {left} AS l FULL JOIN {right} AS r USING(k) WHERE r.rid=30'
+        source = f'(SELECT v.k FROM ({join} OFFSET 0) AS v) AS s' if wrappers else f'({join}) AS s'
+        q(f'nested-insert-{label}', f'INSERT INTO {sink} SELECT {identifier},s.k FROM {source}',
+          tag='INSERT 0 1')
+        current_domain(f'nested-domain-{label}', calls)
+
+    value('nested-on-reset', f"setval('{on_tap}',2000,true)", 2000)
+    right_input = f'(SELECT rid,raw FROM {inputs} ORDER BY rid OFFSET 0) AS r'
+    predicate = f"(CASE WHEN r.rid>0 THEN nextval('{on_tap}')>0 ELSE false END)"
+    source = f'FROM {left} AS l LEFT JOIN {right_input} ON {predicate} WHERE l.lid=1'
+
+    def insert(label, identifier, source, tail, count=None, state=None):
+        q(label, f'INSERT INTO {sink} SELECT {identifier},l.k {source}{tail}',
+          tag=None if state else f'INSERT 0 {count}', state=state)
+
+    insert('nested-on-zero', 5, source, ' LIMIT 0', 0)
+    value('nested-on-zero-calls', f"currval('{on_tap}')", 2000)
+    insert('nested-on-one', 5, source, ' LIMIT 1', 1)
+    value('nested-on-one-calls', f"currval('{on_tap}')", 2001)
+    insert('nested-on-offset', 6, source, ' OFFSET 2 LIMIT 1', 1)
+    value('nested-on-offset-calls', f"currval('{on_tap}')", 2004)
+    # Every pair can supply the same output. The ON expression accepts the first
+    # attempt and fails on the second independently of the join's choice of rows.
+    for count, label, identifier, start, calls, state in (
+        (1, 'one', 7, 3000, 3001, None), (2, 'two', 8, 4000, 4002, '22P02'),
+    ):
+        value(f'nested-on-late-error-{label}-reset', f"setval('{on_tap}',{start},true)", start)
+        predicate = f"(CASE WHEN nextval('{on_tap}')={start + 1} THEN true ELSE r.raw::integer[]=l.k END)"
+        source = f'FROM {left} AS l LEFT JOIN {right_input} ON {predicate} WHERE l.lid=1'
+        insert(f'nested-on-late-error-{label}', identifier, source, f' LIMIT {count}', count, state)
+        value(f'nested-on-late-error-{label}-calls', f"currval('{on_tap}')", calls)
+    current_domain('nested-domain-final', 1002)
+    expected = [[str(i), '[0:1]={3,NULL}' if i < 5 else '{2}'] for i in range(1, 8)]
+    q('nested-insert-stored', f'SELECT id,k FROM {sink} ORDER BY id', tag='SELECT 7',
+      rows=expected, names=['id', 'k'], oids=[23, 1007], wire_layout=[[4, -1], [-1, -1]])
+
 def main():
     signal.signal(signal.SIGTERM, interrupted)
     signal.signal(signal.SIGINT, interrupted)
@@ -469,6 +554,7 @@ def main():
             workload(checks, prefix, objects)
             array_pair_workload(checks, prefix, objects)
             array_lookup_workload(checks, prefix, objects)
+            nested_insert_workload(checks, prefix, objects)
             failures = [record['label'] for record in checks.records if not record['pass']]
             assert not failures, failures
             complete = True

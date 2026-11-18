@@ -2,6 +2,19 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="nested-insert-20261118"></a>
+## 2026-11-18 · 从包含联接的子查询写入
+
+PostgreSQL 的普通 `LIMIT` 每次向子计划请求一行，达到上限后返回。SQLite 的部分子查询每算出一行就把控制权交回调用者，按需继续。DuckDB 的流式 `LIMIT` 按批接收行，达到上限后结束。本项目复用已绑定的普通联接计划，每次向写入查询交付它请求的一行，并在查询结束或报错时关闭输入。[PostgreSQL 18.6 LIMIT 源码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/executor/nodeLimit.c) · [SQLite 子查询执行](https://www.sqlite.org/optoverview.html#subquery_co_routines) · [DuckDB 流式 LIMIT 源码](https://github.com/duckdb/duckdb/blob/main/src/execution/operator/helper/physical_streaming_limit.cpp)
+
+- [注册协议回归](../tests/array_domain_join_using_protocol_e2e_test.py)新增 37 项。旧版通过 260/273，新版与 PostgreSQL 18.6 均通过 273/273，分别核对 1,135 个新版和 PostgreSQL 回复帧。覆盖一层和多层来源、数组下界和空元素、同域不重复检查、混合域重查、`LIMIT 0`、`LIMIT 1` 和 `OFFSET 2 LIMIT 1`。原 236 项全部复跑通过。
+- 在真实 PostgreSQL 上核对三个执行计划。所测 `LIMIT 1` 和 `OFFSET 2 LIMIT 1` 分别执行一和三次序列调用，旧版各执行八次。另一个联接条件在第二次调用时报 `22P02`。只取一行会成功，要求第二行时报错并且该语句不留下部分写入。该用例的各个候选行输出相同，错误只取决于调用次数。旧版在只取一行时就报错。
+- 独立的扩展协议对照用一次 Parse 和两次参数绑定执行同一条嵌套写入。新版与 PostgreSQL 均通过 10 项，分别写出同域 NULL 和带下界的数组，再读回两行。旧版两次执行都返回 `0A000`，目标为空。
+- PostgreSQL 正常回滚和重启通过 54 项，项目进程在事务未提交时收到 `SIGKILL` 并以 `-9` 退出。新进程读取同一目录，53 项检查通过，独立比对 346 个回复帧。保留七行已提交数据，移除六行未提交数据，并可重新写入。实际覆盖目标列 `NOT NULL`、混合域 NULL 拒绝，以及延迟除零错误时目标表无部分写入。第一版私有测试夹具过早排除一行，修正筛选后重新对照。
+- GCC 13.3、C++17、CMake、`-O2`，关闭 OpenSSL。重编 `DmlExecutor.cpp`，复用 61 个逐一核对的对象，新版 SHA-256 为 `4fcd987e5699b516aecf7d19d70125d60fff60834db4d78ddddfbe58b18d11bd`。既有 128、149、218、236、244 项协议用例、两组崩溃恢复及八个 C++ 测试入口复跑通过。手册示例执行了十条 SQL，末尾写入并读回预期的一行。完整套件待验证。
+
+本次范围是普通写入 SQL 中直接给出的 `FROM` 子查询。视图、带 `WITH` 的写入、集合操作组合和其他需要不同执行计划的来源仍待验证。原始协议与恢复记录保存在本机。[使用示例](MANUAL.md#从包含表连接的子查询写入) · [实际性能](performance-report-2026-10-30.md#nested-insert-cost-20261118)
+
 <a id="array-lookup-20261118"></a>
 ## 2026-11-18 · 按整数数组查找联接行
 
@@ -14,7 +27,7 @@ PostgreSQL 的哈希联接根据 `work_mem` 和 `hash_mem_multiplier` 设定内�
 - 两组项目崩溃恢复分别通过 29 和 53 项，独立复核 286 和 296 个回复帧。新增的全联接写入控制含重复键、摘要相同的不等数组、非默认下界和 NULL。进程在事务未提交时收到 `SIGKILL`，冷启动后保留已提交的 10 行，未提交批次消失，同一批可重新写入。PostgreSQL 的正常回滚及重启对照分别通过 30 和 54 项。
 - GCC 13.3、C++17、CMake、`-O2`，关闭 OpenSSL。相对已提交基线首先重编七个对象，随后为避免在右侧为空时读取左键又重编一个对象。最终程序 SHA-256 为 `8061258031357b8a03ca8f05fe9bf8ecb6748ef22ca9bb436e15631ccf6dc1ab`。此前的 128、149、218、244 项协议用例和八个选定 C++ 入口复跑通过。149 和 244 项套件首次遇到本地证据路径重名，改用新路径后完成。完整套件待验证。
 
-普通 `RIGHT JOIN` 的已测查询可以执行，部分 `EXPLAIN` 仍返回 `0A000`。需要先排序的派生来源和部分嵌套联接写入仍有既有差异。原始协议和构建记录存于本机。[实际性能](performance-report-2026-10-30.md#array-lookup-cost-20261118)
+普通 `RIGHT JOIN` 的已测查询可以执行，部分 `EXPLAIN` 仍返回 `0A000`。需要先排序的派生来源仍有既有差异。原始协议和构建记录存于本机。[实际性能](performance-report-2026-10-30.md#array-lookup-cost-20261118) · [嵌套写入后续修复](#nested-insert-20261118)
 
 <a id="integer-array-join-20261118"></a>
 ## 2026-11-18 · 整数数组联接与带域类型的空值
@@ -30,7 +43,7 @@ PostgreSQL 在值转换为域时执行域的 `NOT NULL`。普通 `INSERT … SEL
 - 使用 GCC 13.3、C++17、CMake、`-O2` 构建，关闭 OpenSSL。相对于已提交基线重编七个对象，复用并核对 55 个对象。程序 SHA-256 为 `bc8f3f42b11ce6b8a56d68761ef7e95fe58e8e78cac1a7dd67d8afe2449eae4f`。此前的 128、149、244 项协议套件分别复跑通过。另外通过 11 个插入、默认值、约束和触发器协议入口，以及七个选定的 C++ 入口。完整套件待验证。
 - 已提交的同域空值在实际 `SIGKILL` 后保留，未提交的值消失，原键可在冷启动后重新插入。域有无额外 `CHECK` 约束的两种情况均覆盖。项目通过 53 项，PostgreSQL 的正常回滚和重启通过 54 项。独立审计匹配了 53 对请求与回复、296 个回复帧。目标列自身的 `NOT NULL` 和普通无效空输入在重启前后仍返回 `23502`。
 
-需要先排序的派生来源仍有四项取数顺序差异，原失败回复与旧版逐字节相同。两种嵌套联接写入仍需补齐执行入口。普通 `RIGHT JOIN` 的 SQL 对照通过，所测语句的 `EXPLAIN` 仍返回旧有码 `0A000`。原始协议、进程和构建记录保存在本机。[实际性能](performance-report-2026-10-30.md#integer-array-join-cost-20261118)
+当时需要先排序的派生来源仍有四项取数顺序差异，原失败回复与旧版逐字节相同。普通 `RIGHT JOIN` 的 SQL 对照通过，所测语句的 `EXPLAIN` 仍返回 `0A000`。原始协议、进程和构建记录保存在本机。[实际性能](performance-report-2026-10-30.md#integer-array-join-cost-20261118) · [两种嵌套联接写入的后续修复](#nested-insert-20261118)
 
 <a id="array-using-20261118"></a>
 ## 2026-11-18 · 数组列联接后保留类型

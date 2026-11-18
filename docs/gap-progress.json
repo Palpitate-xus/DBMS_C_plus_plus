@@ -2,6 +2,22 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-18 ordinary nested INSERT SELECT keeps array types and reads rows on demand",
+      "gap_ids": ["DML-01", "QRY-01", "TYPE-19"],
+      "status": "partial",
+      "evidence": [
+        "src/commands/DmlExecutor.cpp",
+        "docs/test-report.md",
+        "docs/performance-report-2026-10-30.md"
+      ],
+      "tests": ["tests/array_domain_join_using_protocol_e2e_test.py"],
+      "verification": [
+        "The exact candidate and PostgreSQL 18.6 pass 273/273 registered cases; the accepted baseline passes 260/273. The original 236 all pass. Measured sequences, late error and statement atomicity cover LIMIT and OFFSET; two extended protocol binds with different integer parameters write typed NULL and a bounded array. Three actual PostgreSQL plans validate the tested demand shape.",
+        "The candidate passes 53 owned SIGKILL recovery checks, PostgreSQL 54 normal rollback and restart checks, and the independent comparison covers 346 reply frames. Seven committed rows survive, six pending rows disappear and can be reinserted. Existing 128/149/218/236/244 and eight selected native entries pass. Views, WITH and set combinations remain open; the original 273 item records retain their states.",
+        "Two timing runs each complete 72 batches and 576 autocommit writes across six workloads whose complete replies match. Each audit verifies 1248 exact replies, 5184 frames and every measured sink state. The 128-by-128 LIMIT 1 CPU medians drop from 193.160 to 17.959 ms and 202.094 to 16.224 ms. The second run prospectively changes CPU affinity using three passive windows. All six cases exceed the 10 percent within-block drift limit in both runs."
+      ]
+    },
+    {
       "issue": "2026-11-18 ordered candidate lookup for integer-array joins",
       "gap_ids": ["QRY-01"],
       "status": "partial",

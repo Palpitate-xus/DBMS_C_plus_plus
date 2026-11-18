@@ -1655,6 +1655,17 @@ bool isStarProjection(const Expr* expr) {
     return literal && literal->value == "*";
 }
 
+bool supportsOrdinaryInsertJoinSource(const SelectStmt& select) {
+    const auto* source = select.fromClause.get();
+    if (!source || !select.ctes.empty()) return false;
+    if (source->type == FromItem::Type::Join)
+        return QueryPlanner::supportsPreparedSourceSelectPlan(select);
+    if (source->type != FromItem::Type::Subquery) return false;
+    const auto* derived = dynamic_cast<const SelectStmt*>(source->subquery.get());
+    return derived && supportsOrdinaryInsertJoinSource(*derived) &&
+           QueryPlanner::supportsPreparedSourceSelectPlan(select);
+}
+
 OpPtr buildPreparedInsertJoinSource(const std::shared_ptr<PreparedQuery>& query,
     SelectStmt* select, Session& session,
     const std::shared_ptr<PreparedQueryExecution>& execution);
@@ -3577,7 +3588,8 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback,
                 return rejectAlwaysIdentityValue(i);
             }
         }
-        auto plan = select->fromClause && select->fromClause->type == FromItem::Type::Join
+        const bool directJoin = select->fromClause && select->fromClause->type == FromItem::Type::Join;
+        auto plan = directJoin || supportsOrdinaryInsertJoinSource(*select)
             ? buildPreparedInsertJoinSource(preparedInsert, const_cast<SelectStmt*>(select), s, insertExecution)
             : QueryPlanner::buildPreparedQueryPlan(&g_engine, s.currentDB, preparedInsert, select, insertExecution->context());
         auto cursor = QueryPlanner::makePreparedCursor(std::move(plan), descriptor);
@@ -5984,9 +5996,29 @@ public:
             return rows;
         };
     }
+
+    static OpPtr insertSelectPlan(const std::shared_ptr<NativeBoundDmlSources>& owner,
+            SelectStmt* select, const RowContext& outer,
+            QueryPlanner::PreparedExecutionProvider execution = {}) {
+        // Only textual FROM subqueries of ordinary INSERT use this owner.
+        const bool ordinarySelect = select->ctes.empty() && select->setOp == SetOp::None;
+        const auto nestedOwner = ordinarySelect ? owner : nullptr;
+        auto node = owner->sourceNode(select, select->fromClause.get(), outer, nestedOwner);
+        // A positive LIMIT must request each JOIN row separately. Keep the
+        // owner of the source callbacks alive through early close as well.
+        auto source = std::make_unique<PreparedSourceContextsOp>(
+            [owner, node](size_t index, RowContext& row) {
+                return node->readAt(index, row);
+            },
+            [node] { node->closeSource(); });
+        return QueryPlanner::buildPreparedSelectPlan(&g_engine, owner->session_.currentDB,
+            owner->query_, select, TableSchema{}, std::move(source), outer,
+            {}, owner->cursorFactory(), false, false, std::move(execution));
+    }
 private:
     std::shared_ptr<NativeSourceNode> sourceNode(const dbms::Stmt* owner,const dbms::FromItem* item,
-                                        const dbms::RowContext& outer) {
+            const dbms::RowContext& outer,
+            const std::shared_ptr<NativeBoundDmlSources>& insertOwner = {}) {
         if(!item)throw dbms::DbError("XX000","mutation source has no retained FROM tree");
         auto node=std::make_shared<NativeSourceNode>();
         auto execution=std::make_shared<dbms::PreparedQueryExecution>(query_,&g_engine,session_.currentDB);
@@ -6001,7 +6033,10 @@ private:
             if(item->type==dbms::FromItem::Type::Subquery) {
                 auto* select=dynamic_cast<dbms::SelectStmt*>(item->subquery.get());
                 if(!select)throw dbms::DbError("0A000","mutation derived source requires a SELECT/VALUES plan");
-                cursor=dbms::QueryPlanner::makePreparedCursor(dbms::QueryPlanner::buildPreparedQueryPlan(&g_engine,session_.currentDB,query_,select,outer),query_->statementOutputs.at(select));
+                auto plan = insertOwner && supportsOrdinaryInsertJoinSource(*select)
+                    ? insertSelectPlan(insertOwner, select, outer)
+                    : QueryPlanner::buildPreparedQueryPlan(&g_engine, session_.currentDB, query_, select, outer);
+                cursor = QueryPlanner::makePreparedCursor(std::move(plan), query_->statementOutputs.at(select));
             } else if(range.viewQuery) {
                 if(!checkTablePrivilege(session_,physical(range),dbms::StorageEngine::TablePrivilege::Select))
                     throw dbms::DbError("42501","permission denied for view source");
@@ -6087,8 +6122,8 @@ private:
             };
             return node;
         }
-        auto left=sourceNode(owner,item->left.get(),outer);
-        auto right=sourceNode(owner,item->right.get(),outer);
+        auto left=sourceNode(owner,item->left.get(),outer,insertOwner);
+        auto right=sourceNode(owner,item->right.get(),outer,insertOwner);
         node->close=[left,right] {
             std::exception_ptr failure;
             try{left->closeSource();}catch(...){failure=std::current_exception();}
@@ -6242,21 +6277,12 @@ private:
     }
 };
 
-// Reuse the existing actual source graph for multi-occurrence INSERT SELECT,
-// including JOIN outer NULL extension and USING/NATURAL merged occurrences.
-// Keep its owner alive until the project's cursor releases all source nodes.
 OpPtr buildPreparedInsertJoinSource(const std::shared_ptr<PreparedQuery>& query,
     SelectStmt* select, Session& session,
     const std::shared_ptr<PreparedQueryExecution>& execution) {
     auto owner = std::make_shared<NativeBoundDmlSources>(session, query);
-    auto rows = owner->factory()(select, select->fromClause.get(), execution->context());
-    auto source = std::make_unique<PreparedSourceContextsOp>(
-        [owner, rows = std::move(rows)](size_t index, RowContext& row) {
-            return rows.read(index, row);
-        });
-    return QueryPlanner::buildPreparedSelectPlan(&g_engine, session.currentDB,
-        query, select, TableSchema{}, std::move(source), execution->context(),
-        {}, owner->cursorFactory(), false, false, [execution] { return execution; });
+    return NativeBoundDmlSources::insertSelectPlan(owner, select, execution->context(),
+        [execution] { return execution; });
 }
 
 // Normalize only an owned RETURNING descriptor copy. Source/assignment

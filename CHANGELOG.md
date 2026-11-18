@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-11-18 · 可以从更多子查询写入数据
+
+普通 `INSERT … SELECT` 可从包含表连接的子查询写入，保留数组的下标、类型和空值。查询有 `LIMIT` 时，取够后结束，不再执行后面本来无需读取的连接条件。[示例](docs/MANUAL.md#从包含表连接的子查询写入) · [测试](docs/test-report.md#nested-insert-20261118) · [性能](docs/performance-report-2026-10-30.md#nested-insert-cost-20261118)
+
 ## 2026-11-18 · 连接表时直接查找可能匹配的数组
 
 按整数数组连接表时，右侧读完后可以直接查找可能匹配的行，减少逐行检查。重复匹配仍会各自返回。如果查找表超过查询的内存设置，数据库继续逐行查找。[测试](docs/test-report.md#array-lookup-20261118) · [性能](docs/performance-report-2026-10-30.md#array-lookup-cost-20261118)

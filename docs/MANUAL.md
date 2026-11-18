@@ -1761,6 +1761,26 @@ WHERE a.id = 1;
 
 外联接未找到匹配行时，会给那一侧补上 NULL。这个 NULL 保有原列的类型，可以原样写入同一个数组域，即使域声明了 `NOT NULL`。如果目标列本身声明 `NOT NULL`，写入仍会报 `23502`。这一规则适用于所测普通 `INSERT … SELECT`。[测试范围](test-report.md#integer-array-join-20261118)
 
+#### 从包含表连接的子查询写入
+
+继续使用上面的两张表。把内层查询的匹配结果写入新的表。
+
+```sql
+CREATE TABLE example_scores_backup (id integer PRIMARY KEY, scores small_numbers);
+INSERT INTO example_scores_backup
+SELECT q.id, q.scores
+FROM (
+    SELECT a.id, a.scores
+    FROM example_scores AS a JOIN example_score_labels AS b USING (scores)
+    WHERE a.id = 1
+    OFFSET 0
+) AS q
+LIMIT 1;
+SELECT id, scores FROM example_scores_backup;
+```
+
+结果为 `1`、`{1,2}`。达到 `LIMIT` 后结束取数。如果前面的排序等操作需要全部输入，就先完成这些操作。已有数组类型和检查结果随实际值交给写入操作。[测试范围](test-report.md#nested-insert-20261118)
+
 ---
 
 ## 11. 用户与权限
