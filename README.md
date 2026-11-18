@@ -1,82 +1,51 @@
 # DBMS C++
 
-用 C++ 编写的关系型数据库。支持 SQL 查询、数据增删改、索引和事务，可用命令行或 `psql` 连接。项目仍在开发中，已支持的功能见[兼容性说明](docs/compatibility-contract.md)。
+用 C++ 编写的关系型数据库，支持 SQL 查询、索引和事务。可以在命令行中使用，也可以用 `psql` 连接。
 
-## 构建和运行
+## 快速开始
 
-在 Linux 上构建需要支持 C++17 的编译器。Ubuntu 或 Debian 的依赖安装命令如下。
-
-```bash
-sudo apt-get update
-sudo apt-get install build-essential cmake pkg-config python3 zlib1g-dev libicu-dev libssl-dev
-```
+在 Linux 上用 CMake 构建。编译环境和依赖见[部署说明](docs/PACKAGING.md)。
 
 ```bash
 git clone https://github.com/Palpitate-xus/DBMS_C_plus_plus.git
 cd DBMS_C_plus_plus
 cmake -S . -B build/cmake
 cmake --build build/cmake --parallel 2
+./build/cmake/dbms_main --version
 ```
 
-启动命令行程序前，先准备登录账号和独立的数据目录。 [部署说明](docs/PACKAGING.md#服务端部署形态)
-
-```bash
-./build/cmake/dbms_main -D ./build/demo-data
-```
-
-登录后执行以下 SQL，最后一条查询会返回「SQL 实战」。
-
-```sql
-CREATE DATABASE demo;
-SET compatibility_mode = extended;
-USE DATABASE demo;
-
-CREATE TABLE books (id INTEGER PRIMARY KEY, title TEXT NOT NULL);
-INSERT INTO books VALUES (1, '数据库入门'), (2, 'SQL 实战');
-SELECT title FROM books WHERE id = 2;
-```
-
-也可以启动服务并用 `psql` 连接。 [连接方法](docs/MANUAL.md#18-网络服务)
+准备好登录账号和数据目录后，就可以创建数据库并运行 SQL。[首次登录](docs/MANUAL.md#首次登录) · [用 psql 连接](docs/MANUAL.md#18-网络服务)
 
 ## 最近更新
 
-点击标题展开。[完整更新日志](CHANGELOG.md)
-
 <details>
-<summary>2026-11-18 · 给数组加默认值和检查规则</summary>
+<summary>为数组设置默认值和检查规则 · 2026-11-18</summary>
 
-可以定义一种数组类型，在多张表里共用默认值和检查规则。比如要求每行的数组最多包含三项。
-
-[使用示例](docs/MANUAL.md#给数组设置默认值和约束) · [测试结果](docs/test-report.md#array-domains-20261118) · [性能测试](docs/performance-report-2026-10-30.md#array-domain-cost-20261118)
+多张表可以共用同一套规则，例如要求每个数组最多有三项。
 
 </details>
 
 <details>
-<summary>2026-11-17 · 修复查询结果中的表名和类型名</summary>
+<summary>修复查询结果只显示编号的问题 · 2026-11-17</summary>
 
-修复了部分查询只显示编号、没有显示表名或类型名的问题。
-
-[测试结果](docs/test-report.md#stored-reference-output-20261117) · [性能测试](docs/performance-report-2026-10-30.md#stored-reference-output-cost-20261117)
+受影响的查询现在会显示对应的表名或类型名。
 
 </details>
 
 <details>
-<summary>2026-11-17 · 查询少做一些无用的转换</summary>
+<summary>减少查询中的多余处理 · 2026-11-17</summary>
 
-部分列的值只有在查询用到时才会转换。
-
-[测试结果](docs/test-report.md#scalar-storage-demand-20261117) · [性能测试](docs/performance-report-2026-10-30.md#scalar-storage-demand-cost-20261117)
+部分查询会跳过未用到的列的类型转换。
 
 </details>
+
+[查看完整更新日志](CHANGELOG.md)
 
 ## 文档和贡献
 
-- [使用手册](docs/MANUAL.md) · [部署说明](docs/PACKAGING.md) · [文档索引](docs/README.md)
-- [测试报告](docs/test-report.md) · [性能测试报告](docs/performance-report-2026-10-30.md) · [与 PostgreSQL 的对比](docs/postgresql-comparison.md)
-
-运行已登记的测试可用 `bash scripts/build_tests.sh`，各测试命令见[使用手册](docs/MANUAL.md#测试验证)。
-
-欢迎通过 [Issue](https://github.com/Palpitate-xus/DBMS_C_plus_plus/issues) 报告问题，或通过 [Pull Request](https://github.com/Palpitate-xus/DBMS_C_plus_plus/pulls) 提交改进。报告问题时请附上版本、复现步骤和实际输出。
+- [使用手册](docs/MANUAL.md) · [已支持的功能和限制](docs/compatibility-contract.md) · [全部文档](docs/README.md)
+- [运行测试](docs/MANUAL.md#测试验证) · [测试报告](docs/test-report.md) · [性能报告](docs/performance-report-2026-10-30.md)
+- [报告问题](https://github.com/Palpitate-xus/DBMS_C_plus_plus/issues) · [提交改进](https://github.com/Palpitate-xus/DBMS_C_plus_plus/pulls)
 
 ## 许可证和致谢
 
