@@ -1184,6 +1184,21 @@ SELECT * FROM users ORDER BY AGE NULLS FIRST;
 候选数量与排序预算只约束排序节点：普通非分区 `TableScanOp` 已按页供给，分区/RLS、并行扫描及其他旧分流仍可能全量物化。
 测量与适用范围见[Top-N 性能记录](performance-report-2026-10-30.md#有界排序-top-n2026-11-02)。
 
+#### 排序后再转换数组
+
+以下查询按整数主键排序，只需要第一行的数组。
+
+```sql
+CREATE TABLE example_ordered_arrays (id integer PRIMARY KEY, raw text);
+INSERT INTO example_ordered_arrays VALUES (10, '[0:1]={4,NULL}'), (20, 'invalid');
+SELECT raw::integer[] AS values_array
+FROM example_ordered_arrays
+ORDER BY id
+LIMIT 1;
+```
+
+查询返回 `[0:1]={4,NULL}`。如果改用 `ORDER BY values_array`，排序需要先转换数组。加上 `OFFSET 1` 也会读到第二行。这两种情况下会报告 `22P02`。[测试范围](test-report.md#ordered-projection-20261118)
+
 按页扫描为现有类型化消费者保留固定 MVCC 视图及打开时的堆页范围，每次只保留一页未展开的行，
 释放页锁和 pin 后才执行表达式/展开当前行 TOAST。提前停止时统计实际交付行数，只有读到 EOF 才更新完整行数估计。
 这不表示每种 SELECT 都已进入同一执行器；随后补充的普通单表 `SELECT id FROM t LIMIT 1` 已与数组等投影共用按需执行，

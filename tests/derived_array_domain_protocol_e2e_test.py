@@ -412,6 +412,91 @@ def check_timetz_and_jsonb_array_order(checks, timetz_table, jsonb_table):
              'ORDER BY q.a DESC FETCH FIRST 1 ROW WITH TIES', [1, 1], 'marker')
 
 
+def check_ordered_projection_demand(checks, source, heap, left, sequence):
+    q = checks.query
+    fields = '(id integer{key},raw text,num text)'
+    seed = "(30,'{10}','10'),(10,'{2,NULL}','2'),(20,'late-invalid-array','invalid-integer')"
+    for label, table, key in (('index', source, ' PRIMARY KEY'), ('heap', heap, '')):
+        q(f'ordered-demand-{label}-table', f'CREATE TABLE {table}'+fields.format(key=key),
+          tag='CREATE TABLE', require_success=True)
+        q(f'ordered-demand-{label}-seed', f'INSERT INTO {table} VALUES {seed}',
+          tag='INSERT 0 3', require_success=True)
+    q('ordered-demand-left-table', f'CREATE TABLE {left}(k integer[])',
+      tag='CREATE TABLE', require_success=True)
+    q('ordered-demand-left-seed', f"INSERT INTO {left} VALUES ('{{2,NULL}}')",
+      tag='INSERT 0 1', require_success=True)
+    q('ordered-demand-sequence', f'CREATE SEQUENCE {sequence}',
+      tag='CREATE SEQUENCE', require_success=True)
+
+    def select(label, sql, rows, fields, state=None):
+        q(f'ordered-demand-{label}', sql, tag=None if state else f'SELECT {len(rows)}', rows=rows,
+          names=[name for name, _, _ in fields], oids=[oid for _, oid, _ in fields],
+          wire_layout=[[width, -1] for _, _, width in fields], state=state)
+
+    def count(label, calls, reset=False):
+        expression = f"setval('{sequence}',{calls},true)" if reset else f"currval('{sequence}')"
+        select(label, f'SELECT {expression} AS calls', [[str(calls)]], [('calls', 20, 8)])
+
+    def wrapped(query):
+        return f'SELECT q.id,q.k FROM ({query}) AS q'
+
+    array = [('id', 23, 4), ('k', 1007, -1)]
+    scalar = [('id', 23, 4), ('n', 23, 4)]
+    first, last = [['10', '{2,NULL}']], [['30', '{10}']]
+    direct = f'SELECT id,raw::integer[] AS k FROM {source}'
+    computed = f'SELECT id,CASE WHEN id>0 THEN raw::integer[] END AS k FROM {source}'
+    select('direct-first', direct+' ORDER BY id LIMIT 1', first, array)
+    select('direct-last', direct+' ORDER BY id DESC LIMIT 1', last, array)
+    select('computed-scalar-first', f'SELECT id,CASE WHEN id>0 THEN num::integer END AS n FROM {source} '
+           'ORDER BY id LIMIT 1', [['10', '2']], scalar)
+    select('computed-array-first', wrapped(computed+' ORDER BY id LIMIT 1 OFFSET 0'), first, array)
+    for label, clauses in (
+        ('sort-alias-error', 'ORDER BY k LIMIT 1'),
+        ('sort-ordinal-error', 'ORDER BY 2 LIMIT 1'),
+        ('sort-key-error', 'ORDER BY raw::integer[] LIMIT 1'),
+        ('selected-row-error', 'ORDER BY id LIMIT 1 OFFSET 1'),
+        ('skipped-row-error', 'ORDER BY id LIMIT 1 OFFSET 2'),
+    ):
+        select(label, wrapped(f'{computed} {clauses}'), None, array, '22P02')
+
+    # With a heap sort PostgreSQL evaluates the immutable cast below Sort.
+    select('heap-eager-error', wrapped(f'SELECT id,raw::integer[] AS k FROM {heap} ORDER BY id LIMIT 1'),
+           None, array, '22P02')
+
+    def volatile_projection(table):
+        return f"SELECT id,CASE WHEN nextval('{sequence}')>0 THEN raw::integer[] END AS k FROM {table}"
+
+    volatile = volatile_projection(source)
+    for label, table_query, rows, state, start, calls in (
+        ('limit-zero', volatile+' ORDER BY id LIMIT 0', [], None, 100, 0),
+        ('limit-one', volatile+' ORDER BY id LIMIT 1', first, None, 200, 1),
+        ('offset-good', volatile+' WHERE id<>20 ORDER BY id LIMIT 1 OFFSET 1', last, None, 300, 2),
+        ('offset-bad', volatile+' ORDER BY id LIMIT 1 OFFSET 2', None, '22P02', 400, 2),
+        ('heap-volatile', volatile_projection(heap)+' ORDER BY id LIMIT 1', first, None, 500, 1),
+    ):
+        count(f'{label}-reset', start, reset=True)
+        select(label, wrapped(table_query), rows, array, state)
+        count(f'{label}-calls', start+calls)
+
+    count('join-reset', 600, reset=True)
+    right = f"SELECT id,raw::integer[] AS k,nextval('{sequence}') AS tap FROM {source} ORDER BY id LIMIT 1 OFFSET 0"
+    select('join-input', f'SELECT r.id,r.k,r.tap FROM {left} AS l JOIN ({right}) AS r USING(k)',
+           [['10', '{2,NULL}', '601']], [*array, ('tap', 20, 8)])
+    count('join-calls', 601)
+
+    # PostgreSQL keeps a short cast chain below a heap sort. With LIMIT, it
+    # projects the longer chain on demand unless that chain is the sort key.
+    for conversions, label, clauses, rows, state in (
+        (5, 'heap-five-casts-error', 'ORDER BY id LIMIT 1', None, '22P02'),
+        (7, 'heap-expensive-first', 'ORDER BY id LIMIT 1', first, None),
+        (7, 'heap-expensive-last', 'ORDER BY id DESC LIMIT 1', last, None),
+        (7, 'heap-expensive-key-error', 'ORDER BY k LIMIT 1', None, '22P02'),
+        (7, 'heap-expensive-selected-error', 'ORDER BY id LIMIT 1 OFFSET 1', None, '22P02'),
+        (7, 'heap-expensive-no-limit-error', 'ORDER BY id', None, '22P02'),
+    ):
+        cast = 'raw::integer[]' + '::text::integer[]' * ((conversions - 1) // 2)
+        select(label, wrapped(f'SELECT id,{cast} AS k FROM {heap} {clauses}'), rows, array, state)
+
 def main():
     signal.signal(signal.SIGTERM, interrupted)
     signal.signal(signal.SIGINT, interrupted)
@@ -426,6 +511,7 @@ def main():
     names = {name: f'{prefix}_{name}' for name in (
         'source', 'plain', 'ints', 'refs', 'sequence', 'domain', 'other', 'reference', 'checked', 'width',
         'array_order', 'temporal_order', 'timetz_order', 'jsonb_order',
+        'demand_source', 'demand_heap', 'demand_left', 'demand_sequence',
     )}
     checks = Checks(client, evidence)
     with tempfile.TemporaryDirectory(prefix='dbms-derived-arrays-') as directory:
@@ -449,6 +535,8 @@ def main():
             check_array_value_comparisons(checks)
             check_temporal_array_order(checks, names['temporal_order'])
             check_timetz_and_jsonb_array_order(checks, names['timetz_order'], names['jsonb_order'])
+            check_ordered_projection_demand(checks, names['demand_source'], names['demand_heap'],
+                                            names['demand_left'], names['demand_sequence'])
             failures = [record['label'] for record in checks.records if not record['pass']]
             assert not failures, failures
             complete = True
@@ -460,11 +548,13 @@ def main():
                     try:
                         client.simple_query(checks.sock, 'ROLLBACK')
                         for name in ('source', 'plain', 'ints', 'refs', 'array_order', 'temporal_order',
-                                     'timetz_order', 'jsonb_order'):
+                                     'timetz_order', 'jsonb_order', 'demand_source',
+                                     'demand_heap', 'demand_left'):
                             client.simple_query(checks.sock, f'DROP TABLE IF EXISTS {names[name]}')
                         for name in ('domain', 'other', 'reference', 'checked', 'width'):
                             client.simple_query(checks.sock, f'DROP DOMAIN IF EXISTS {names[name]}')
-                        client.simple_query(checks.sock, f"DROP SEQUENCE IF EXISTS {names['sequence']}")
+                        for name in ('sequence', 'demand_sequence'):
+                            client.simple_query(checks.sock, f'DROP SEQUENCE IF EXISTS {names[name]}')
                     finally:
                         checks.sock.close()
                 stopped = True

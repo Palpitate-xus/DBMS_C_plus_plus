@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-11-18 · 排序时减少不必要的数组转换
+
+部分查询先排序，再转换实际取到的值。按整数主键排序时，后续行的无效数组可以留到读取该行时再报错。需要用转换结果排序的查询仍会提前转换。[使用示例](docs/MANUAL.md#排序后再转换数组) · [测试](docs/test-report.md#ordered-projection-20261118) · [性能](docs/performance-report-2026-10-30.md#ordered-projection-cost-20261118)
+
 ## 2026-11-18 · 可以从更多子查询写入数据
 
 普通 `INSERT … SELECT` 可从包含表连接的子查询写入，保留数组的下标、类型和空值。查询有 `LIMIT` 时，取够后结束，不再执行后面本来无需读取的连接条件。[示例](docs/MANUAL.md#从包含表连接的子查询写入) · [测试](docs/test-report.md#nested-insert-20261118) · [性能](docs/performance-report-2026-10-30.md#nested-insert-cost-20261118)

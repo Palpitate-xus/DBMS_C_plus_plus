@@ -19,6 +19,13 @@ cmake --build build/cmake --parallel 2
 ## 最近更新
 
 <details>
+<summary>排序时减少不必要的数组转换 · 2026-11-18</summary>
+
+一些排序查询会先排好行，再转换实际取到的数组。只取第一行时，后面的无效数组不会提前报错。
+
+</details>
+
+<details>
 <summary>可以从更多子查询写入数据 · 2026-11-18</summary>
 
 子查询里连接了多张表，也能把结果写入另一张表。只取一行时，取够后就停止读取。
@@ -29,13 +36,6 @@ cmake --build build/cmake --parallel 2
 <summary>连接表时直接查找可能匹配的数组 · 2026-11-18</summary>
 
 按整数数组连接表时，右侧读完后可以直接找到可能匹配的行，减少逐行检查。
-
-</details>
-
-<details>
-<summary>用整数数组连接表时少做重复工作 · 2026-11-18</summary>
-
-查询可以更早跳过不匹配的行，减少重复比较和复制。
 
 </details>
 

@@ -2,6 +2,22 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-18 delay selected non-key output expressions until sorted rows are requested",
+      "gap_ids": ["QRY-01", "TYPE-19", "TYPE-20"],
+      "status": "partial",
+      "evidence": [
+        "src/executor/ExecutionPlan.cpp",
+        "docs/test-report.md",
+        "docs/performance-report-2026-10-30.md"
+      ],
+      "tests": ["tests/derived_array_domain_protocol_e2e_test.py"],
+      "verification": [
+        "PostgreSQL 18.6 and the exact candidate pass 190/190 registered checks. Accepted baseline passes 182/190. The candidate passes all 59 original independent join/rebind demand cases, including the four previously failing ordered-source checks. Actual key/alias/ordinal, OFFSET, cheap heap expressions and comparison errors retain their observed demand. Both CAST spellings pass the additional 12-case shape checks. The original 273 ledger item states are unchanged.",
+        "Independent 61-case owned SIGKILL recovery versus 62-case PostgreSQL normal rollback/restart verifies 366 reply frames. Five committed rows survive, including bounds and typed NULL, and five pending rows disappear and can be reinserted. Three previous 29/53/53 cold suites, seven selected native entries, eight adjacent protocol entries and the 149/236/244 prior suites pass.",
+        "A 72-batch run compares 576 timed SELECTs with identical full replies. Independent audit verifies 900 replies and 16440 frames. Two heavy bounded cases pass the predetermined directional threshold, with block CPU ratios of 16.204 to 17.252 across both budgets and within-block drift below 10 percent. At 64 KiB the timed query fixture takes zero sort tapes versus two in the baseline during separate observation. Alias order has no clear direction and three other controls exceed the drift gate."
+      ]
+    },
+    {
       "issue": "2026-11-18 ordinary nested INSERT SELECT keeps array types and reads rows on demand",
       "gap_ids": ["DML-01", "QRY-01", "TYPE-19"],
       "status": "partial",

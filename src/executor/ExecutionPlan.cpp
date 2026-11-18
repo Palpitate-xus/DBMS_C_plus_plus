@@ -1352,9 +1352,9 @@ public:
                 }
             row.targets.resize(state_->targets.size());
             const auto& context = row.context;
-            // Non-volatile targets are part of the sort input projection.
-            // Volatile non-key targets remain above Sort/LIMIT demand; sort
-            // keys, aliases and structurally identical targets share slots.
+            // Keep required input values here. Delayed targets use the
+            // owning context when Project requests the sorted row. Sort keys,
+            // aliases and structurally identical targets still share slots.
             for (size_t i = 0; i < state_->targets.size(); ++i)
                 if (state_->targetOwners[i]==i && state_->targetsBeforeSort[i])
                     row.targets[i] = state_->evaluate(state_->targets[i], context);
@@ -2888,6 +2888,79 @@ OpPtr QueryPlanner::buildPreparedSelectPlan(StorageEngine* engine,
         select, schema, std::move(source));
 }
 
+static bool ordersByIntegerPrimaryKey(const PreparedSelectState& state) {
+    const auto* source = state.select().fromClause.get();
+    if (!source || source->type != FromItem::Type::Table || state.keys.size() != 1) return false;
+    const auto& key = state.keys.front();
+    const auto* column = dynamic_cast<const ColumnRefExpr*>(key.target == PreparedSelectState::noTarget
+        ? key.expression : state.targets.at(key.target));
+    if (!column || !column->binding || column->binding->scopeDepth || column->binding->mergedUsing)
+        return false;
+    const auto& binding = *column->binding;
+    const auto type = ExprHelper::canonicalResultTypeName(binding.declaredType);
+    if (type != "smallint" && type != "integer" && type != "bigint") return false;
+    const auto range = std::find_if(state.query->sourceRanges.begin(), state.query->sourceRanges.end(),
+        [&](const auto& item) {
+            return item.owner == state.statement && item.source == source && item.ordinal == binding.sourceOrdinal;
+        });
+    if (range == state.query->sourceRanges.end() || range->relationName.empty() || range->cteStatement ||
+        range->viewQuery || range->relationSchema == "pg_catalog") return false;
+    const auto* session = currentSession();
+    const bool temporary = session &&
+        (range->relationSchema == sessionTempSchemaName(*session) || range->relationSchema == "pg_temp");
+    const auto table = temporary ? tempTablePrefix(*session, range->relationName)
+        : range->relationSchema.empty() || range->relationSchema == "public" ? range->relationName
+        : range->relationSchema + "__" + range->relationName;
+    const auto matches = [&](const TableSchema& schema) {
+        if (schema.partitionType != TableSchema::PartitionType::None || binding.columnOrdinal >= schema.len)
+            return false;
+        const auto& physical = schema.cols[binding.columnOrdinal];
+        return !physical.isArray && !physical.isUnsigned && !physical.generatedKind && physical.domainName.empty() &&
+            ExprHelper::canonicalResultTypeName(physical.dataType) == type &&
+            isSingleColumnPrimaryKey(schema, physical.dataName);
+    };
+    if (!(state.sourceContexts ? matches(state.engine->getTableSchema(state.dbname, table)) : matches(state.schema)))
+        return false;
+    return state.engine->getInheritedChildren(state.dbname, table).empty();
+}
+
+static bool costlyArrayTextProjection(Expr* expression, const PreparedSelectState& state) {
+    // Coercion through text performs an output and an input conversion. Use
+    // this cost only for recognized integer array I/O, leaving other casts
+    // and unanalyzed costs to their existing placement.
+    constexpr size_t expensiveCost = 10;
+    size_t cost = 0;
+    const auto integerArray = [](const std::string& type) {
+        return type == "smallint[]" || type == "integer[]" || type == "bigint[]";
+    };
+    const auto visit = [&](const auto& self, Expr* node) -> void {
+        if (!node || node->preparedSubquery || cost > expensiveCost) return;
+        const Expr* operand = nullptr;
+        const std::string* declared = nullptr;
+        if (const auto* cast = dynamic_cast<const CastExpr*>(node)) {
+            operand = cast->operand.get();
+            declared = &cast->typeName;
+        } else if (const auto* binary = dynamic_cast<const BinaryOpExpr*>(node); binary && binary->op == "::") {
+            if (const auto* type = dynamic_cast<const LiteralExpr*>(binary->right.get())) {
+                operand = binary->left.get();
+                declared = &type->value;
+            }
+        }
+        if (operand) {
+            const auto result = ExprHelper::canonicalResultTypeName(*declared);
+            if (result == "text" || integerArray(result)) {
+                const auto input = ExprHelper::canonicalResultTypeName(ExprHelper::inferParsedResultType(
+                    operand, {}, state.dbname, state.engine));
+                if ((result == "text" && integerArray(input)) || (integerArray(result) && input == "text"))
+                    cost += 2;
+            }
+        }
+        prepared_window_detail::spec_detail::valueChildren(node, [&](Expr* child) { self(self, child); });
+    };
+    visit(visit, expression);
+    return cost > expensiveCost;
+}
+
 OpPtr QueryPlanner::buildPreparedSelectPlan(StorageEngine* engine,
     const std::string& dbname, std::shared_ptr<PreparedQuery> prepared,
     SelectStmt* select, const TableSchema& sourceSchema, OpPtr source,
@@ -3054,8 +3127,16 @@ OpPtr QueryPlanner::buildPreparedSelectPlan(StorageEngine* engine,
     // All bindings and collation checks precede opening any source or
     // evaluating a volatile expression. The retained parameter cells remain
     // typed, including NULL, and are supplied directly to the evaluator.
-    for (auto* target : state->targets) {
-        state->targetsBeforeSort.push_back(!state->containsVolatile(target));
+    const bool ordinarySort = !state->keys.empty() && !select->distinct && state->windows.empty() &&
+        state->aggregates.empty() && !select->having;
+    const bool primaryKeyOrder = ordinarySort && ordersByIntegerPrimaryKey(*state);
+    for (size_t i = 0; i < state->targets.size(); ++i) {
+        auto* target = state->targets[i];
+        bool beforeSort = !state->containsVolatile(target);
+        if (beforeSort && ordinarySort && state->targetOwners[i] == i &&
+            std::none_of(state->keys.begin(), state->keys.end(), [&](const auto& key) { return key.target == i; }))
+            beforeSort = !primaryKeyOrder && !(select->limit && costlyArrayTextProjection(target, *state));
+        state->targetsBeforeSort.push_back(beforeSort);
     }
     state->prepareWindowInputs();
     state->prepareExecution();
