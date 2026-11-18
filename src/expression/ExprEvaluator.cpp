@@ -658,7 +658,9 @@ static std::string generatedAssignmentDeclaration(const Column& column) {
                   column.dataType=="bit" || column.dataType=="bit varying")
             target+='('+std::to_string(column.dsize)+')';
     }
-    if(column.isArray)target+="[]";
+    // A domain names its complete type, including an array base. Only a
+    // plain array column needs a suffix added to the physical element name.
+    if(column.isArray && column.domainName.empty())target+="[]";
     return target;
 }
 
@@ -3380,6 +3382,17 @@ static ExprValue implicitRuntimeValue(const ExprEvaluator& evaluator,ExprValue v
     return evaluator.eval(&cast,row);
 }
 
+static ExprValue asBaseArray(ExprValue value) {
+    if (!value.compound || !value.compound->type) return value;
+    const auto declaration = compound_value_detail::baseArrayDeclaration(value.compound->type);
+    if (declaration == value.compound->type) return value;
+    auto data = std::make_shared<CompoundDatum>(*value.compound);
+    data->type = declaration;
+    data->validatedArrayDomainOid = 0;
+    value.compound = std::move(data);
+    return value;
+}
+
 ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& ctx) const {
     if (!e || !e->left || !e->right) return ExprValue{};
     std::string op = toLower(e->op);
@@ -3592,9 +3605,9 @@ ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& c
         r = implicitRuntimeValue(*this,std::move(r),binding.rightType);
         if (binding.leftArray && binding.rightArray) {
             if (l.isNull && r.isNull) return ExprValue(binding.elementType+"[]","",true);
-            if (l.isNull) return r;
-            if (r.isNull) return l;
-            return compound_value_detail::concatenated(l,r,binding.elementType+"[]");
+            if (l.isNull) return asBaseArray(std::move(r));
+            if (r.isNull) return asBaseArray(std::move(l));
+            return asBaseArray(compound_value_detail::concatenated(l,r,binding.elementType+"[]"));
         }
         return compound_value_detail::pushed(binding.leftArray?l:r,
             binding.leftArray?r:l,!binding.leftArray,binding.elementType+"[]");
@@ -4087,11 +4100,17 @@ ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& c
     // Array slice (expr[lower:upper]) — PostgreSQL inclusive bounds,
     // 1-based; empty side = open bound; result is an array literal.
     if (op == "[:]") {
-        if (l.isNull) return ExprValue(l.typeName, "", true);
+        const auto sourceType = l.compound ? l.compound->type : DatumTypePtr{};
+        const auto baseDeclaration = compound_value_detail::baseArrayDeclaration(sourceType);
+        const auto resultType = sourceType && baseDeclaration != sourceType && baseDeclaration->arrayElement
+            ? compound_value_detail::storageElementType(ExprValue{}, *baseDeclaration->arrayElement) + "[]"
+            : l.typeName;
+        if (l.isNull) return ExprValue(resultType, "", true);
         auto dimensions=compound_value_detail::arrayDimensions(l);
         if(dimensions.empty()) {
-            ExprValue empty(l.typeName,"{}",false);
-            compound_value_detail::attach(empty,{},{});return empty;
+            ExprValue empty(resultType,"{}",false);
+            compound_value_detail::attach(empty, {}, {}, baseDeclaration);
+            return empty;
         }
         // Bounds literal "lower:upper" (either side may be empty).
         const std::string& b = r.value;
@@ -4144,9 +4163,9 @@ ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& c
             dimensions.front().length=static_cast<int32_t>(hi-lo+1);
             for(auto& dimension:dimensions)dimension.lower=1;
         } else dimensions.clear();
-        ExprValue result(l.typeName,compound_value_detail::render(selected,dimensions),false);
+        ExprValue result(resultType,compound_value_detail::render(selected,dimensions),false);
         compound_value_detail::attach(result,std::move(selected),std::move(dimensions),
-            l.compound?l.compound->type:DatumTypePtr{},count?compound_value_detail::bitmap(l):std::optional<bool>(false),true);
+            baseDeclaration,count?compound_value_detail::bitmap(l):std::optional<bool>(false),true);
         return result;
     }
 
@@ -5401,10 +5420,71 @@ ExprValue ExprEvaluator::castReferenceValue(const ExprValue& v,
     throw DbError("42846", "unsupported resolved scalar reference cast");
 }
 
+std::optional<ExprValue> ExprEvaluator::castToArrayDomain(const Expr* inputExpression,
+    const RowContext& context, const ExprValue& value, const std::string& qualifiedType) const {
+    // The input resolver supplies an exact, schema-qualified custom type.
+    // Builtin aliases and ordinary array casts do not enter this path.
+    if (qualifiedType.empty() || qualifiedType.front() != '"') return std::nullopt;
+    CatalogManager::QualifiedName name;
+    if (!CatalogManager::parseQualifiedName(qualifiedType, name, true) ||
+        name.schema.empty() || name.schema == "pg_catalog") return std::nullopt;
+    const auto* session = currentSession();
+    const auto database = currentDB_.empty() && session ? session->currentDB : currentDB_;
+    auto& engine = sqlValueEngine_ ? *sqlValueEngine_ : g_engine;
+    const auto ancestry = engine.resolveDomainAncestry(database, qualifiedType);
+    if (ancestry.name.empty() || !SQLParser::parseTypeSpecification(ancestry.baseType).isArray)
+        return std::nullopt;
+
+    const auto catalog = regtype_detail::metadata(engine, database);
+    const auto domain = resolveDeclaredTypeName(qualifiedType, &catalog, session);
+    const auto base = resolveDeclaredTypeName(ancestry.baseType, &catalog, session);
+    DatumMetadataFactory factory(catalog, [&](const std::string& spelling) {
+        return resolveDeclaredTypeName(spelling, &catalog, session).typeOid;
+    });
+    const auto declaration = factory.builtinArrayDomain(domain.typeOid, base.typeOid);
+    if (!declaration)
+        throw DbError("XX001", "array domain has no matching catalog declaration");
+    if (value.compound && value.compound->type &&
+        value.compound->type->actualOid == declaration->actualOid &&
+        value.compound->validatedArrayDomainOid == declaration->actualOid &&
+        (value.isNull != value.compound->arrayElements.has_value())) return value;
+
+    auto converted = evalCast(inputExpression, context, value, ancestry.baseType, true);
+    if (!converted.isNull && (!converted.compound || !converted.compound->arrayElements))
+        throw DbError("XX000", "domain conversion lost the converted array");
+    auto payload = converted.compound ? std::make_shared<CompoundDatum>(*converted.compound)
+                                      : std::make_shared<CompoundDatum>();
+    payload->type = declaration;
+    payload->validatedArrayDomainOid = 0;
+    converted.compound = payload;
+
+    DatumMetadataContext metadata;
+    metadata.declaration = [&](const std::string& spelling, uint32_t oid) {
+        return factory.declaration(spelling, oid);
+    };
+    metadata.inputDeclaration = [&](const std::string& spelling) {
+        return resolveDeclaredTypeName(spelling, &catalog, session).inputType;
+    };
+    metadata.modifier = [&](DatumTypePtr type, int32_t modifier) {
+        return factory.modifier(std::move(type), modifier);
+    };
+    metadata.record = [&](const std::vector<DatumTypePtr>& fields) { return factory.record(fields); };
+    engine.validateArrayDomainValue(database, ancestry, converted, metadata);
+    compound_value_detail::retainArrayDomainValidation(*payload, declaration->actualOid);
+    return converted;
+}
+
+ExprValue ExprEvaluator::convertArrayDomainBase(const std::string& declaration, const ExprValue& input) const {
+    return evalCast(nullptr, RowContext{}, input, declaration, true);
+}
+
 // Helper overload used by BinaryOpExpr "::"
-ExprValue ExprEvaluator::evalCast(const Expr* inputExpression, const RowContext&,
-                                  const ExprValue& v, const std::string& targetTypeName) const {
-    std::string target = ExprHelper::declaredTypeInput(targetTypeName,currentDB_);
+ExprValue ExprEvaluator::evalCast(const Expr* inputExpression, const RowContext& context,
+                                  const ExprValue& v, const std::string& targetTypeName,
+                                  bool domainBaseArrayInput) const {
+    std::string target = ExprHelper::declaredTypeInput(targetTypeName,currentDB_,sqlValueEngine_);
+    if (auto domain = castToArrayDomain(inputExpression, context, v, target))
+        return std::move(*domain);
     target=toLower(target);
     {
         // :: type modifier lists arrive space-joined without an opening
@@ -5684,9 +5764,26 @@ ExprValue ExprEvaluator::evalCast(const Expr* inputExpression, const RowContext&
         }
         if(!compound_value_detail::owningElements(v) && !common_type_detail::array(sourceArrayType))
             preserveBitmap=false; // a true scalar textual input constructs a fresh array
+        const auto characterLimit = domainBaseArrayInput
+            ? parseCharacterCastSpec(elementTarget) : CharacterCastSpec{};
+        const auto bitLimit = domainBaseArrayInput ? parseBitCastSpec(elementTarget) : BitCastSpec{};
         for(auto& input:items) {
             // Preserve actual record fields/object identity before coercion.
             // UNKNOWN textual input remains the existing real input codec.
+            if (!input.isNull && characterLimit.hasLength &&
+                utf8CharCount(input.value) > characterLimit.length) {
+                const auto boundary = utf8ByteAt(input.value, characterLimit.length);
+                if (std::any_of(input.value.begin() + boundary, input.value.end(),
+                                [](char character) { return character != ' '; }))
+                    throw DbError("22001", "value too long for array domain element type " + elementTarget);
+            }
+            if (!input.isNull && bitLimit.hasLength && !isIntegerTypeName(input.typeName)) {
+                const auto bits = castToBitString(input, parseBitCastSpec("bit varying"));
+                if (!bitLimit.varying && bits.value.size() != bitLimit.length)
+                    throw DbError("22026", "bit string length does not match array domain element type " + elementTarget);
+                if (bitLimit.varying && bits.value.size() > bitLimit.length)
+                    throw DbError("22001", "bit string too long for array domain element type " + elementTarget);
+            }
             if(intervalElements)input=evalCast(nullptr,RowContext{},input,"interval");
             input=evalCast(nullptr,RowContext{},input,elementTarget);
         }
@@ -5695,7 +5792,8 @@ ExprValue ExprEvaluator::evalCast(const Expr* inputExpression, const RowContext&
         // The genuine receiving declaration supplies the converted array's
         // type. Keeping the old element descriptor here would encode a cast
         // with stale source metadata (e.g. int4[] -> int8[]).
-        const auto retainedType=preserveBitmap && sourceOid==targetOid?sourceDeclaration:DatumTypePtr{};
+        const auto retainedType = preserveBitmap && sourceOid == targetOid
+            ? compound_value_detail::baseArrayDeclaration(sourceDeclaration) : DatumTypePtr{};
         compound_value_detail::attach(result,std::move(items),dimensions,retainedType,
             preserveBitmap?compound_value_detail::bitmap(v):std::optional<bool>{},preserveBitmap);
         return result;
@@ -6948,11 +7046,18 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
             throw DbError("42809","pg_typeof is not an aggregate or window function");
         auto* owner=sqlValueEngine_?sqlValueEngine_:&g_engine;
         const auto catalog=regtype_detail::metadata(*owner,currentDB_);
-        const auto type=arrayExpressionType(e->args.front().get(),ctx,currentDB_,this,true,owner);
         Oid oid=0;
-        if(const auto* column=dynamic_cast<const ColumnRefExpr*>(e->args.front().get());column && column->binding)
-            oid=column->binding->typeOid;
-        if(!oid)oid=resolveDeclaredTypeName(type,&catalog,currentSession()).typeOid;
+        const auto* argument = e->args.front().get();
+        if (const auto* column = dynamic_cast<const ColumnRefExpr*>(argument); column && column->binding)
+            oid = column->binding->typeOid;
+        else if (const auto* conditional = dynamic_cast<const CaseExpr*>(argument))
+            oid = conditional->preservedArrayDomainOid;
+        else if (const auto* call = dynamic_cast<const FunctionCallExpr*>(argument))
+            oid = call->preservedArrayDomainOid;
+        if (!oid) {
+            const auto type = arrayExpressionType(argument,ctx,currentDB_,this,true,owner);
+            oid = resolveDeclaredTypeName(type,&catalog,currentSession()).typeOid;
+        }
         // Non-strict does not mean unevaluated: preserve argument effects and
         // errors, including for a NULL result or an otherwise unused datum.
         (void)eval(e->args.front().get(),ctx);
@@ -7302,12 +7407,15 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
         ExprValue first = args[0];
         first.collation = mergeExplicitCollations(first.collation,
                                                    args[1].collation);
-        if (first.isNull || args[1].isNull) return first;
+        if (first.isNull || args[1].isNull) return asBaseArray(std::move(first));
         if (applyComparison("=", first, args[1]).asBool()) {
-            first.value.clear();
-            first.isNull = true;
+            // NULLIF produces a fresh NULL. Its former object's identity,
+            // elements and validation belong only to the non-NULL value.
+            auto result = ExprValue(first.typeName, "", true);
+            result.collation = std::move(first.collation);
+            return result;
         }
-        return first;
+        return asBaseArray(std::move(first));
     }
     if (name == "greatest") {
         const std::string resultCollation = explicitResultCollation(e);
@@ -12694,7 +12802,7 @@ void ExprEvaluator::registerStatelessBuiltins() {
     // array_cat follows actual dimensions and row-major datums, not display.
     functions_["array_cat"] = [](const std::vector<ExprValue>& a) {
         if(a.size()<2 || (a[0].isNull && a[1].isNull))return ExprValue("ARRAY","",true);
-        return compound_value_detail::concatenated(a[0],a[1],"ARRAY");
+        return asBaseArray(compound_value_detail::concatenated(a[0],a[1],"ARRAY"));
     };
     // array_position(arr, elem) — 1-based index of first matching element, NULL if absent
     // array_dims(arr) — dimensions as PG text, e.g. [1:3].

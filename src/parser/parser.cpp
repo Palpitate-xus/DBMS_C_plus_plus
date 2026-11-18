@@ -369,6 +369,7 @@ static ColumnDef consumeDeclaredType(const std::vector<std::string>& tokens,
         if (pos >= tokens.size() || tokens[pos++] != "]")
             throw DbError("42601", "array type suffix is incomplete");
         definition.isArray = true;
+        ++definition.arrayDimensions;
     }
     return definition;
 }
@@ -8576,6 +8577,7 @@ StmtPtr SQLParser::parseCreateTable(const std::vector<std::string>& tokens, size
                     col.typeName = type.typeName;
                     col.typeMods = type.typeMods;
                     col.isArray = type.isArray;
+                    col.arrayDimensions = type.arrayDimensions;
                 }
                 // Column constraints
                 std::string pendingCheckName;
@@ -11695,6 +11697,7 @@ StmtPtr SQLParser::parseAlterTable(const std::vector<std::string>& tokens, size_
                 sub.colDef.typeName = type.typeName;
                 sub.colDef.typeMods = type.typeMods;
                 sub.colDef.isArray = type.isArray;
+                sub.colDef.arrayDimensions = type.arrayDimensions;
             }
             // Preserve every column modifier the storage layer supports.  An
             // unknown modifier must fail the parse: reporting success after

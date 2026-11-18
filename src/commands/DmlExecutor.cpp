@@ -1890,6 +1890,7 @@ ExprPtr copyReturningExpression(const Expr* expression, const TableSchema& table
         auto target = std::make_unique<CaseExpr>();
         target->simpleComparisonTypes = node->simpleComparisonTypes;
         target->simpleEnumComparisons = node->simpleEnumComparisons;
+        target->preservedArrayDomainOid = node->preservedArrayDomainOid;
         target->switchExpr = copy(node->switchExpr); target->elseExpr = copy(node->elseExpr);
         for (const auto& arm : node->whenClauses)
             target->whenClauses.emplace_back(copy(arm.first), copy(arm.second));
@@ -1902,6 +1903,7 @@ ExprPtr copyReturningExpression(const Expr* expression, const TableSchema& table
         target->sqlValue = node->sqlValue; target->sqlValuePrecision = node->sqlValuePrecision;
         target->setReturning = node->setReturning;
         target->resolvedResultType = node->resolvedResultType;
+        target->preservedArrayDomainOid = node->preservedArrayDomainOid;
         target->identitySequenceOid = node->identitySequenceOid;
         for (const auto& arg : node->args) target->args.push_back(copy(arg));
         result = std::move(target);
@@ -3353,6 +3355,7 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback,
 
     std::vector<bool> generatedTargets;
     std::vector<char> identityTargets;
+    std::set<std::string> arrayDomainTargets;
     generatedTargets.reserve(columns.size());
     identityTargets.reserve(columns.size());
     for (const auto& column : columns) {
@@ -3362,6 +3365,8 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback,
             if (table.cols[i].dataName == column) {
                 generated = !table.cols[i].generatedExpr.empty();
                 identityKind = table.cols[i].identityKind;
+                if (table.cols[i].isArray && !table.cols[i].domainName.empty())
+                    arrayDomainTargets.insert(column);
                 break;
             }
         }
@@ -3540,6 +3545,12 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback,
     }
 
     std::vector<SqlRow> pendingRows;
+    std::map<size_t, StorageEngine::OwningSqlRow> convertedDomainInputs;
+    const auto retainArrayDomainInput = [&](const std::string& target, ExprValue& value) {
+        if (!value.compound || !value.compound->validatedArrayDomainOid ||
+            !arrayDomainTargets.count(target)) return;
+        convertedDomainInputs[pendingRows.size()].emplace(target, std::move(value));
+    };
     if (stmt.selectSource) {
         checkPreparedInsertSources(*preparedInsert, s);
         const auto* typedInsert = dynamic_cast<const InsertStmt*>(preparedInsert->ast.get());
@@ -3579,11 +3590,13 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback,
                 for (size_t i = 0; i < cells.size(); ++i) {
                     if (cells[i].isNull) values[columns[i]] = std::nullopt;
                     else {
-                        auto text = cells[i].value;
+                        auto text = arrayDomainTargets.count(columns[i])
+                            ? stored_regtype_detail::storageText(cells[i]) : cells[i].value;
                         if (ExprHelper::canonicalResultTypeName(cells[i].typeName) == "boolean")
                             text = cells[i].asBool() ? "1" : "0";
                         values[columns[i]] = std::move(text);
                     }
+                    retainArrayDomainInput(columns[i], cells[i]);
                 }
                 pendingRows.push_back(std::move(values));
             }
@@ -3691,7 +3704,7 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback,
                 return rejectAlwaysIdentityValue(i);
             }
             SqlCell value;
-            const auto result = execution.evaluate(row[i].get(),execution.context());
+            auto result = execution.evaluate(row[i].get(),execution.context());
             if (result.isUnknown()) {
                 // Returning false lets the legacy path retain ownership of
                 // expression forms not yet supported by ExprEvaluator.
@@ -3707,6 +3720,7 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback,
                 value = std::move(text);
             }
             values[columns[i]] = std::move(value);
+            retainArrayDomainInput(columns[i], result);
         }
         pendingRows.push_back(std::move(values));
     }
@@ -3738,13 +3752,16 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback,
     }
     int inserted = 0;
     std::vector<ReturningRowImage> returningImages;
-    for (const auto& values : pendingRows) {
+    for (size_t inputIndex = 0; inputIndex < pendingRows.size(); ++inputIndex) {
+        const auto& values = pendingRows[inputIndex];
+        const auto converted = convertedDomainInputs.find(inputIndex);
         SqlRow conflictingRow;
         const DBStatus status = g_engine.insertRow(
             s.currentDB, resolvedTable, values,
             stmt.returning.empty() ? nullptr : &sqlInsertedRows,
             identityOverride,virtualRows.output(),true,
-            conflictUpdate || (ignoreDuplicate && !conflictTarget.empty()) ? &conflictingRow : nullptr);
+            conflictUpdate || (ignoreDuplicate && !conflictTarget.empty()) ? &conflictingRow : nullptr,
+            converted == convertedDomainInputs.end() ? nullptr : &converted->second);
         if (status == DBStatus::DUPLICATE_KEY) {
             if (ignoreDuplicate) {
                 if (conflictTarget.empty()) continue;
@@ -4467,10 +4484,15 @@ bool executePreparedUpdate(const UpdateStmt& stmt, Session& s, bool& fallback,
     const TableSchema table = g_engine.getTableSchema(s.currentDB, resolvedTable);
     CapturedVirtualRows virtualRows(table,!stmt.returning.empty());
     std::vector<std::string> columns;
+    std::set<std::string> arrayDomainTargets;
     for (const auto& assignment : stmt.setClauses) {
         const auto column = identifier(assignment.first);
-        if (!findTableColumn(table, column))
+        const auto* declaration = std::find_if(table.cols, table.cols + table.len,
+            [&](const auto& field) { return field.dataName == column; });
+        if (declaration == table.cols + table.len)
             throw DbError("42703", "column does not exist: " + column);
+        if (declaration->isArray && !declaration->domainName.empty())
+            arrayDomainTargets.insert(column);
         if (std::find(columns.begin(), columns.end(), column) != columns.end())
             throw DbError("42601", "multiple assignments to column " + column);
         columns.push_back(column);
@@ -4560,6 +4582,13 @@ bool executePreparedUpdate(const UpdateStmt& stmt, Session& s, bool& fallback,
             throw DbError("42804", "argument of WHERE must be type boolean");
         execution.prepareExpression(update->whereClause.get());
     }
+    DatumMetadataContextPtr castMetadata;
+    const auto isArrayDomainCast = [&](const std::string& spelling) {
+        if (mapBuiltinTypeNameToOid(ExprHelper::canonicalResultTypeName(spelling))) return false;
+        if (!castMetadata) castMetadata = g_engine.prepareDatumMetadataContext(s.currentDB);
+        const auto target = castMetadata->declaration(spelling, 0);
+        return target && target->kind == DatumKind::Array && target->actualOid != target->codecOid;
+    };
     std::function<bool(const Expr*)> constantExpression = [&](const Expr* expression) {
         if (!expression) return true;
         // A scalar child uses a literal wrapper but is an executable query,
@@ -4568,10 +4597,15 @@ bool executePreparedUpdate(const UpdateStmt& stmt, Session& s, bool& fallback,
         if (dynamic_cast<const LiteralExpr*>(expression)) return true;
         if (const auto* unary = dynamic_cast<const UnaryOpExpr*>(expression))
             return constantExpression(unary->operand.get());
-        if (const auto* binary = dynamic_cast<const BinaryOpExpr*>(expression))
+        if (const auto* binary = dynamic_cast<const BinaryOpExpr*>(expression)) {
+            if (binary->op == "::") {
+                const auto* target = dynamic_cast<const LiteralExpr*>(binary->right.get());
+                if (target && isArrayDomainCast(target->value)) return false;
+            }
             return constantExpression(binary->left.get()) && constantExpression(binary->right.get());
+        }
         if (const auto* cast = dynamic_cast<const CastExpr*>(expression))
-            return constantExpression(cast->operand.get());
+            return !isArrayDomainCast(cast->typeName) && constantExpression(cast->operand.get());
         if (const auto* conditional = dynamic_cast<const CaseExpr*>(expression)) {
             if (!constantExpression(conditional->switchExpr.get()) ||
                 !constantExpression(conditional->elseExpr.get())) return false;
@@ -4600,7 +4634,8 @@ bool executePreparedUpdate(const UpdateStmt& stmt, Session& s, bool& fallback,
         if (item.expr && !isStarProjection(item.expr.get()))
             execution.prepareExpression(item.expr.get());
     }
-    const auto context = [&](const SqlRow& oldValues) {
+    std::optional<CatalogManager::MetadataSnapshot> oldReferenceCatalog;
+    const auto context = [&](const SqlRow& oldValues, bool retainAssignedArrays) {
         RowContext row = execution.context();
         const auto& descriptor = execution.sourceRange(targetOrdinal).columns;
         std::vector<ExprValue> cells;
@@ -4611,30 +4646,62 @@ bool executePreparedUpdate(const UpdateStmt& stmt, Session& s, bool& fallback,
             if (found == oldValues.end())
                 throw DbError("XX000", "UPDATE OLD row has an absent bound column");
             cells.emplace_back(column.type, found->second.value_or(""), !found->second);
+            const auto& declaration = column.typeMetadata;
+            if (retainAssignedArrays && !arrayDomainTargets.empty() && declaration && declaration->kind == DatumKind::Array &&
+                declaration->actualOid != declaration->codecOid && declaration->arrayElement) {
+                auto& cell = cells.back();
+                const auto elementCodec = declaration->arrayElement->codecOid;
+                if (!cell.isNull && (elementCodec == 2206 || elementCodec == 2205)) {
+                    if (!oldReferenceCatalog)
+                        oldReferenceCatalog = regtype_detail::metadata(g_engine, s.currentDB);
+                    cell = stored_regtype_detail::load(cell.value, true, false,
+                        *oldReferenceCatalog, &s, declaration, elementCodec == 2206 ? "regtype" : "regclass",
+                        declaration->actualOid);
+                } else if (!compound_value_detail::decodeArrayStorageInput(
+                    cell, declaration, {}, declaration->actualOid)) {
+                    throw DbError("XX001", "UPDATE could not decode its stored array domain value");
+                }
+            }
         }
         execution.setSourceInputs(row, targetOrdinal, cells,true);
         return row;
     };
     const StorageEngine::SqlUpdateMatcher matcher = [&](const SqlRow& oldValues) {
         if (!update->whereClause) return true;
-        const auto result = execution.evaluate(update->whereClause.get(), context(oldValues));
+        const auto result = execution.evaluate(update->whereClause.get(), context(oldValues, false));
         if (ExprHelper::canonicalResultTypeName(result.typeName) != "boolean")
             throw DbError("42804", "argument of WHERE must be type boolean");
         return !result.isNull && result.asBool();
     };
-    const StorageEngine::SqlUpdateResolver resolver =
-        [&](const SqlRow& oldValues, SqlRow& effectiveUpdates) {
-            const RowContext row = context(oldValues);
-            // Every assignment reads the same OLD image; constants and
-            // volatile writers are evaluated once for each matching row.
-            for (const auto& assignment : update->setClauses) {
-                const auto value = execution.evaluate(assignment.second.get(), row);
-                effectiveUpdates[identifier(assignment.first)] = value.isNull
-                    ? SqlCell{} : SqlCell{stored_regtype_detail::storageText(value)};
-            }
-            validateIntervalTargetInputs(table, effectiveUpdates);
-            return true;
+    const auto resolveAssignments = [&](const SqlRow& oldValues, SqlRow& effectiveUpdates,
+                                        StorageEngine::OwningSqlRow* convertedDomains) {
+        const RowContext row = context(oldValues, convertedDomains != nullptr);
+        // Each assignment reads the same OLD image. A domain cast retains
+        // the converted datum alongside its normal physical input text.
+        for (const auto& assignment : update->setClauses) {
+            auto value = execution.evaluate(assignment.second.get(), row);
+            const auto target = identifier(assignment.first);
+            effectiveUpdates[target] = value.isNull
+                ? SqlCell{} : SqlCell{stored_regtype_detail::storageText(value)};
+            if (convertedDomains && arrayDomainTargets.count(target) &&
+                value.compound && value.compound->validatedArrayDomainOid)
+                convertedDomains->emplace(target, std::move(value));
+        }
+        validateIntervalTargetInputs(table, effectiveUpdates);
+        return true;
+    };
+    StorageEngine::SqlUpdateResolver resolver;
+    StorageEngine::SqlMutationCallbacks arrayDomainCallbacks;
+    if (arrayDomainTargets.empty()) {
+        resolver = [&](const SqlRow& oldValues, SqlRow& updates) {
+            return resolveAssignments(oldValues, updates, nullptr);
         };
+    } else {
+        arrayDomainCallbacks.resolveArrayDomains = [&](int64_t, const SqlRow& oldValues,
+                SqlRow& updates, StorageEngine::OwningSqlRow& convertedDomains) {
+            return resolveAssignments(oldValues, updates, &convertedDomains);
+        };
+    }
     DmlStatementScope statementScope(g_engine, s.currentDB);
     if (!statementScope.ready())
         throw DbError("58030", "UPDATE could not establish an atomic statement boundary");
@@ -4644,7 +4711,8 @@ bool executePreparedUpdate(const UpdateStmt& stmt, Session& s, bool& fallback,
     const DBStatus status = g_engine.updateRows(
         s.currentDB, resolvedTable, constantUpdates, {},
         stmt.returning.empty() ? nullptr : &updatedRows, resolver, matcher,
-        &affectedRows, stmt.returning.empty() ? nullptr : &images,nullptr,virtualRows.output(),true);
+        &affectedRows, stmt.returning.empty() ? nullptr : &images,
+        arrayDomainTargets.empty() ? nullptr : &arrayDomainCallbacks, virtualRows.output(), true);
     if (status != DBStatus::OK)
         throw DbError(sqlstateForDBStatus(status), "UPDATE failed");
     if (!stmt.returning.empty() &&

@@ -74,14 +74,24 @@ inline double scalarFloat(const std::string& text) {
 // to manufacture record fields, array dimensions, elements or NULL flags.
 inline ExprValue outputValue(const ExprValue& input,const DatumTypePtr& type,size_t depth=0) {
     if(depth>128)throw DbError("54001","statistics output nesting limit exceeded");
-    ExprValue result=input;if(result.isNull)return result;
+    ExprValue result=input;
+    if (result.isNull) {
+        if (result.compound && result.compound->validatedArrayDomainOid) {
+            auto data = std::make_shared<CompoundDatum>(*result.compound);
+            data->validatedArrayDomainOid = 0;
+            result.compound = std::move(data);
+        }
+        return result;
+    }
     if(!type)throw DbError("XX001","missing statistics value declaration");
     if(type->kind==DatumKind::Array) {
         const auto& actual=input.compound;
         if(!actual || !actual->type || !actual->arrayElements || !type->arrayElement ||
            actual->type->actualOid!=type->actualOid)
             throw DbError("XX001","missing actual statistics array structure");
-        auto data=std::make_shared<CompoundDatum>(*actual);data->arrayElements->clear();
+        auto data=std::make_shared<CompoundDatum>(*actual);
+        data->validatedArrayDomainOid = 0;
+        data->arrayElements->clear();
         for(const auto& cell:*actual->arrayElements)data->arrayElements->push_back(outputValue(cell,type->arrayElement,depth+1));
         result.value=compound_value_detail::render(*data->arrayElements,data->dimensions);result.compound=std::move(data);
     } else if(type->kind==DatumKind::Scalar && type->codecOid==700)result.value=float4Text(float(scalarFloat(result.value)));

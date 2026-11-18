@@ -27,8 +27,18 @@ inline std::string storageElementType(const ExprValue& parent,const DatumType& e
 }
 
 inline bool decodeArrayStorageInput(ExprValue& input,const DatumTypePtr& declaration,
-                                    std::optional<bool> storedBitmap={}) {
-    if(input.isNull || owningElements(input))return true;
+                                    std::optional<bool> storedBitmap={},
+                                    uint32_t validatedArrayDomainOid=0) {
+    if (input.isNull) {
+        if (validatedArrayDomainOid) {
+            auto data = std::make_shared<CompoundDatum>();
+            data->type = declaration;
+            retainArrayDomainValidation(*data, validatedArrayDomainOid);
+            input.compound = std::move(data);
+        }
+        return true;
+    }
+    if (owningElements(input)) return true;
     if(!declaration || declaration->kind!=DatumKind::Array || !declaration->arrayElement ||
        !declaration->arrayElement->actualOid)return false;
     // Keep unsupported/invalid optional capture from replacing a real datum.
@@ -73,6 +83,8 @@ inline bool decodeArrayStorageInput(ExprValue& input,const DatumTypePtr& declara
             const bool nullItem=std::any_of(values.begin(),values.end(),[](const ExprValue& value){return value.isNull;});
             if(nullItem && job.bitmap && !*job.bitmap)return false;
             auto data=std::make_shared<CompoundDatum>();data->type=job.type;
+            if (job.value == &candidate && validatedArrayDomainOid)
+                retainArrayDomainValidation(*data, validatedArrayDomainOid);
             data->dimensions=dims;data->arrayElements=std::move(values);
             // Legacy storage contains only canonical array input text. NULL
             // presence proves a bitmap; NULL-free text cannot recover whether

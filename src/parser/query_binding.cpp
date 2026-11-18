@@ -256,14 +256,14 @@ public:
 
     void coerceCaseInput(ExprPtr& input, const std::string& sourceType,
                          const std::string& targetType,
-                         const std::vector<std::string>& typeMods = {}) {
+                         const std::vector<std::string>& typeMods = {}, bool forceBase = false) {
         if (!input) {
             auto null = std::make_unique<LiteralExpr>();
             null->value = "null";
             input = std::move(null);
         }
         if(common_type_detail::canonical(sourceType)=="unknown" && inferMetadataInput(input.get(),targetType))return;
-        if (common_type_detail::canonical(sourceType) == targetType) return;
+        if (!forceBase && common_type_detail::canonical(sourceType) == targetType) return;
         auto cast = std::make_unique<CastExpr>();
         cast->typeName = targetType;
         cast->typeMods = typeMods;
@@ -347,6 +347,16 @@ public:
         if (canonical.size() < 2 || canonical.compare(canonical.size()-2,2,"[]") != 0) return {};
         canonical.resize(canonical.size()-2); return canonical;
     }
+    static std::string builtinArrayBase(const DatumTypePtr& domain) {
+        if (!domain || domain->kind != DatumKind::Array ||
+            domain->actualOid == domain->codecOid || !domain->arrayElement) return {};
+        const auto& builtins = CatalogManager::builtinTypeRows();
+        const auto element = std::find_if(builtins.begin(), builtins.end(), [&](const auto& type) {
+            return type.oid == domain->arrayElement->actualOid && type.typarray == domain->codecOid;
+        });
+        if (element == builtins.end()) return {};
+        return ExprHelper::canonicalResultTypeName(element->oid == 18 ? "\"char\"" : element->typname) + "[]";
+    }
     static bool patternOperator(const std::string& op) {
         return op=="LIKE" || op=="NOT LIKE" || op=="ILIKE" || op=="NOT ILIKE" ||
                op=="SIMILAR TO" || op=="NOT SIMILAR TO";
@@ -405,6 +415,39 @@ public:
             if(common_type_detail::canonical(input.first)!=common_type_detail::canonical(common) ||
                expressionTypeModifier(input.second)!=modifier)return -1;
         return modifier;
+    }
+    struct ArrayDomainInputs {
+        std::vector<std::string> baseTypes;
+        std::vector<bool> isDomain;
+        DatumTypePtr commonDomain;
+    };
+    std::optional<ArrayDomainInputs> arrayDomainInputs(
+        const std::vector<std::pair<std::string, const Expr*>>& inputs) {
+        if (!metadata.datumType) return std::nullopt;
+        std::optional<ArrayDomainInputs> result;
+        size_t count = 0;
+        bool sameDomain = true;
+        for (size_t i = 0; i < inputs.size(); ++i) {
+            const auto& [spelling, expression] = inputs[i];
+            const auto actualOid = expressionTypeOid(expression);
+            if (!actualOid || actualOid == mapBuiltinTypeNameToOid(common_type_detail::canonical(spelling))) continue;
+            auto declaration = datumMetadata(spelling, expression);
+            auto base = builtinArrayBase(declaration);
+            if (base.empty()) continue;
+            if (!result) {
+                result.emplace();
+                result->baseTypes.reserve(inputs.size());
+                for (const auto& input : inputs) result->baseTypes.push_back(input.first);
+                result->isDomain.resize(inputs.size(), false);
+            }
+            result->baseTypes[i] = std::move(base);
+            result->isDomain[i] = true;
+            ++count;
+            if (!result->commonDomain) result->commonDomain = std::move(declaration);
+            else if (result->commonDomain->actualOid != declaration->actualOid) sameDomain = false;
+        }
+        if (result && (!sameDomain || count != inputs.size())) result->commonDomain.reset();
+        return result;
     }
     std::string declaredType(const std::string& spelling,const Expr* node) {
         const auto type=[&] {
@@ -831,12 +874,18 @@ public:
                     if(item->op!="[]")break;
                     receiver=item->left.get();
                 }
-                const auto type=ExprHelper::inferParsedResultType(receiver,{});
+                auto type=ExprHelper::inferParsedResultType(receiver,{});
+                const auto declaration=datumMetadata(type,receiver);
+                const bool domainArray = declaration && declaration->kind == DatumKind::Array &&
+                    declaration->actualOid != declaration->codecOid && declaration->arrayElement;
+                if (domainArray && arrayElement(type).empty()) {
+                    const auto base = builtinArrayBase(declaration);
+                    if (!base.empty()) type = base;
+                }
                 const auto element=arrayElement(type);
                 if(element.empty())throw DbError("42804","cannot subscript a non-array value");
                 if(binary->op=="[]") {
                     coerceCaseInput(binary->right,right,"integer");
-                    const auto declaration=datumMetadata(type,receiver);
                     if(declaration && declaration->kind==DatumKind::Array &&
                        declaration->arrayElement && declaration->arrayElement->actualOid) {
                         auto elementDeclaration=declaration->arrayElement;
@@ -857,11 +906,19 @@ public:
                         valueTypeMetadata[binary]=std::move(elementDeclaration);
                     }
                 } else {
-                    // A slice preserves this already-analyzed array's typmod.
-                    // The original receiver owns its immutable declaration;
-                    // do not infer a new type from the delivered value.
+                    // Subscripting a domain uses its base array. The slice
+                    // owns new contents and has the base array's identity.
                     valueTypeModifiers[binary]=expressionTypeModifier(receiver);
-                    const auto declaration=datumMetadata(type,receiver);
+                    if (domainArray && metadata.datumType) {
+                        const auto base = metadata.datumType(type, declaration->codecOid);
+                        if (base && base->kind == DatumKind::Array && base->actualOid == declaration->codecOid) {
+                            auto adjusted = std::make_shared<DatumType>(*base);
+                            adjusted->effectiveTypeMod = declaration->effectiveTypeMod;
+                            valueTypeModifiers[binary] = adjusted->effectiveTypeMod;
+                            valueTypeOids[binary] = adjusted->actualOid;
+                            valueTypeMetadata[binary] = std::move(adjusted);
+                        }
+                    }
                     if(declaration && declaration->kind==DatumKind::Array &&
                        declaration->actualOid==declaration->codecOid) {
                         valueTypeOids[binary]=declaration->actualOid;
@@ -1254,11 +1311,22 @@ public:
                 call->resolvedResultType=declaredType(call->setReturning->elementType,call);
                 return call->resolvedResultType;
             }
-            const auto type = metadata.functionType ? metadata.functionType(call) : std::string();
+            const auto domains = call->schema.empty() && grammarOperation == "coalesce"
+                ? arrayDomainInputs(argumentTypes) : std::nullopt;
+            const auto type = domains ? selectCommonType(domains->baseTypes, "COALESCE")
+                : metadata.functionType ? metadata.functionType(call) : std::string();
             // A callee's static result declaration owns a real catalog type,
             // just like CAST and CASE. Returning only its spelling loses the
             // OID at query-output/child boundaries; never run it to infer one.
             call->resolvedResultType=declaredType(type.empty() ? first : type,call);
+            if (domains && domains->commonDomain) {
+                call->preservedArrayDomainOid = domains->commonDomain->actualOid;
+                valueTypeOids[call] = call->preservedArrayDomainOid;
+                valueTypeMetadata[call] = domains->commonDomain;
+            } else if (domains) {
+                for (size_t i = 0; i < call->args.size(); ++i)
+                    coerceCaseInput(call->args[i], argumentTypes[i].first, type, {}, domains->isDomain[i]);
+            }
             // Resolve the actual routine role before applying WHERE's
             // window restriction. A scalar with OVER owns 42809, while a
             // genuine window is rejected before its enclosing operator.
@@ -1406,10 +1474,11 @@ public:
             for(size_t i=0;i<thenTypes.size();++i)collectEnum(conditional->whenClauses[i].second.get(),thenTypes[i],i+1);
             if(resultEnum)for(size_t i=0;i<resultTypes.size();++i)
                 if(enumInputs[i])resultTypes[i]=resultEnum->typeName;
-            const auto type = selectCommonType(resultTypes,"CASE");
             std::vector<std::pair<std::string,const Expr*>> modifierInputs{{elseType,conditional->elseExpr.get()}};
             for(size_t i=0;i<thenTypes.size();++i)
                 modifierInputs.emplace_back(thenTypes[i],conditional->whenClauses[i].second.get());
+            const auto domains = resultEnum ? std::nullopt : arrayDomainInputs(modifierInputs);
+            const auto type = selectCommonType(domains ? domains->baseTypes : resultTypes,"CASE");
             const auto modifier=commonModifier(modifierInputs,type);
             if(resultEnum) {
                 if(elseType=="unknown")validateEnumLiteral(conditional->elseExpr.get(),*resultEnum);
@@ -1417,9 +1486,16 @@ public:
                     validateEnumLiteral(conditional->whenClauses[i].second.get(),*resultEnum);
                 valueTypeOids[conditional]=resultEnum->typeOid;
             }
-            coerceCaseInput(conditional->elseExpr,elseType,type);
+            if (domains && domains->commonDomain) {
+                conditional->preservedArrayDomainOid = domains->commonDomain->actualOid;
+                valueTypeOids[conditional] = conditional->preservedArrayDomainOid;
+                valueTypeMetadata[conditional] = domains->commonDomain;
+                valueTypeModifiers[conditional] = modifier;
+                return type;
+            }
+            coerceCaseInput(conditional->elseExpr,elseType,type,{},domains && domains->isDomain[0]);
             for (size_t i=0;i<thenTypes.size();++i)
-                coerceCaseInput(conditional->whenClauses[i].second,thenTypes[i],type);
+                coerceCaseInput(conditional->whenClauses[i].second,thenTypes[i],type,{},domains && domains->isDomain[i+1]);
             // The common result owns a real catalog identity too. Preserve
             // the existing enum owner; builtin CASE results must not become
             // descriptor OID0 merely because their root is not a CAST.

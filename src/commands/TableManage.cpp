@@ -1287,6 +1287,197 @@ static std::map<std::string, std::string> buildTypeHints(const dbms::TableSchema
     return hints;
 }
 
+namespace {
+
+struct ArrayDomainCheck {
+    std::string name;
+    std::string expression;
+    DatumMetadataContext input;
+};
+
+struct ArrayDomainProgram {
+    std::string name;
+    DatumTypePtr declaration;
+    std::string baseDeclaration;
+    std::string inputType;
+    bool notNull = false;
+    std::vector<ArrayDomainCheck> checks;
+};
+
+bool hasArrayCodec(const DatumTypePtr& declaration) {
+    return declaration && declaration->kind == DatumKind::Array &&
+        declaration->actualOid && declaration->codecOid &&
+        declaration->arrayElement && declaration->arrayElement->actualOid;
+}
+
+bool sameArrayCodec(const DatumTypePtr& declaration, const DatumTypePtr& base) {
+    return hasArrayCodec(declaration) && declaration->codecOid == base->codecOid &&
+        declaration->arrayElement->actualOid == base->arrayElement->actualOid &&
+        declaration->arrayElement->codecOid == base->arrayElement->codecOid;
+}
+
+ArrayDomainProgram prepareArrayDomainProgram(
+        const StorageEngine::DomainAncestry& ancestry,
+        const DatumMetadataContext& metadata) {
+    if (ancestry.name.empty() || ancestry.domains.empty() || !metadata.declaration)
+        throw DbError("XX001", "array domain lost its declaration");
+    const auto base = metadata.declaration(ancestry.baseType, 0);
+    const auto declaration = metadata.declaration(ancestry.name, 0);
+    if (!hasArrayCodec(base) || base->actualOid != base->codecOid ||
+        !sameArrayCodec(declaration, base) || declaration->actualOid == base->actualOid)
+        throw DbError("XX001", "array domain disagrees with its actual base type");
+
+    ArrayDomainProgram program;
+    program.name = ancestry.name;
+    program.declaration = declaration;
+    program.baseDeclaration = ancestry.baseType;
+    program.notNull = ancestry.notNull;
+    program.inputType = compound_value_detail::storageElementType(ExprValue{}, *base->arrayElement) + "[]";
+
+    // Collect checks from the original declarations. Domain constraints run
+    // immediately, with NOT NULL first and base-domain checks before those
+    // of the derived domain. Each VALUE has that check's own base declaration.
+    for (auto ancestor = ancestry.domains.rbegin(); ancestor != ancestry.domains.rend(); ++ancestor) {
+        if (ancestor->checkExpr.empty()) continue;
+        const auto argument = metadata.declaration(ancestor->baseType, 0);
+        if (!sameArrayCodec(argument, base))
+            throw DbError("XX001", "array domain CHECK lost its base declaration");
+        ArrayDomainCheck check;
+        check.name = ancestor->constraintName;
+        check.expression = ancestor->checkExpr;
+        check.input.declaration = metadata.declaration;
+        check.input.inputDeclaration = metadata.inputDeclaration;
+        check.input.modifier = metadata.modifier;
+        check.input.record = metadata.record;
+        check.input.sourceColumns = true;
+        check.input.columns.emplace("value", argument);
+        program.checks.push_back(std::move(check));
+    }
+    return program;
+}
+
+void evaluateArrayDomainProgram(const std::string& database,
+        const ArrayDomainProgram& program, const ExprValue& value,
+        StorageEngine* engine, LocalExpressionSyntax& syntax) {
+    if (value.isNull && program.notNull)
+        throw DbError("23502", "domain " + program.name + " does not allow null values");
+    if (!value.isNull && (!compound_value_detail::owningElements(value) ||
+            !sameArrayCodec(value.compound->type, program.declaration)))
+        throw DbError("XX001", "array domain lost its converted array value");
+    if (program.checks.empty()) return;
+
+    // The input datum supplies the real typed elements and NULLs. The scalar
+    // helper receives VALUE as a bound column, never SQL assembled from text.
+    StorageEngine::OwningSqlRow argument{{"value", value}};
+    argument.at("value").typeName = program.inputType;
+    const std::map<std::string, std::string> row{{"value", ""}};
+    const std::set<std::string> nulls = value.isNull
+        ? std::set<std::string>{"value"} : std::set<std::string>{};
+    const std::map<std::string, std::string> hints{{"value", program.inputType}};
+    for (const auto& check : program.checks) {
+        const auto result = ExprHelper::evalStringWithNullsSyntax(syntax,
+            check.expression, row, nulls, hints, database, "", engine, {},
+            true, &argument, &check.input);
+        if (!result.ok) throw DbError(result.sqlState.empty() ? "XX000" : result.sqlState,
+            result.error.empty() ? "could not evaluate array domain CHECK" : result.error);
+        if (!result.isNull && !ExprValue("boolean", result.value, false).asBool()) {
+            std::string message = "value for domain " + program.name + " violates check constraint";
+            if (!check.name.empty()) message += " \"" + check.name + "\"";
+            throw DbError("23514", message);
+        }
+    }
+}
+
+// Own the same copied declaration for all assignments of this operation. The
+// catalog is fetched lazily, so ordinary mutations keep their existing path.
+class StoredArrayDomainChecks {
+    DatumMetadataContextPtr metadata_;
+    std::map<size_t, ArrayDomainProgram> programs_;
+    std::unique_ptr<ExprEvaluator> baseConverter_;
+    std::optional<CatalogManager::MetadataSnapshot> referenceCatalog_;
+    LocalExpressionSyntax syntax_;
+public:
+    void add(size_t index, const Column& column,
+            const StorageEngine::DomainAncestry& ancestry,
+            const std::string& database, const std::string& table,
+            StorageEngine* engine, const DatumMetadataContextPtr& existing) {
+        if (!column.isArray || column.generatedKind == 'v') return;
+        if (!metadata_) metadata_ = existing ? existing : engine->prepareDatumMetadataContext(database, table);
+        auto program = prepareArrayDomainProgram(ancestry, *metadata_);
+        const auto field = metadata_->columns.find(column.dataName);
+        if (field == metadata_->columns.end() || !sameArrayCodec(field->second, program.declaration) ||
+            field->second->actualOid != program.declaration->actualOid)
+            throw DbError("XX001", "physical array domain column disagrees with its catalog identity");
+        program.declaration = field->second;
+        programs_.emplace(index, std::move(program));
+    }
+
+    std::string convertBaseInput(size_t index, const std::string& value,
+            const std::string& database, StorageEngine* engine) {
+        const auto program = programs_.find(index);
+        if (program == programs_.end())
+            throw DbError("XX001", "array domain assignment lost its base declaration");
+        if (!baseConverter_) {
+            baseConverter_ = std::make_unique<ExprEvaluator>();
+            baseConverter_->setCurrentDB(database);
+            baseConverter_->bindScalarFunctions(nullptr, engine);
+        }
+        // The physical codec names only the element. The actual base
+        // declaration also supplies its typmod and array input semantics.
+        return baseConverter_->convertArrayDomainBase(program->second.baseDeclaration,
+            ExprValue("unknown", value, false)).value;
+    }
+
+    void validate(const TableSchema& table, const std::map<std::string, std::string>& values,
+            const std::set<std::string>& nulls, const std::string& database,
+            StorageEngine* engine, const std::set<size_t>* assigned = nullptr,
+            const StorageEngine::OwningSqlRow* convertedInputs = nullptr) {
+        for (const auto& [index, program] : programs_) {
+            if (program.checks.empty() || (assigned && !assigned->count(index))) continue;
+            const auto& column = table.cols[index];
+            const auto raw = values.find(column.dataName);
+            if (raw == values.end())
+                throw DbError("XX001", "array domain assignment lost its row value");
+            const bool isNull = nulls.count(column.dataName) != 0;
+            if (convertedInputs) {
+                const auto retained = convertedInputs->find(column.dataName);
+                if (retained != convertedInputs->end()) {
+                    const auto& input = retained->second;
+                    // The exact domain identity and final physical value must
+                    // still match the original typed assignment. A plain
+                    // array with the same element codec still needs conversion.
+                    if (input.isNull == isNull && input.compound &&
+                        sameArrayCodec(input.compound->type, program.declaration) &&
+                        input.compound->validatedArrayDomainOid == program.declaration->actualOid &&
+                        input.compound->type->actualOid == program.declaration->actualOid &&
+                        (isNull || (compound_value_detail::owningElements(input) &&
+                            stored_regtype_detail::storageText(input) == raw->second))) continue;
+                }
+            }
+            ExprValue value(program.inputType, isNull ? std::string{} : raw->second, isNull);
+            value.collation = column.resolvedCollation.empty() ? column.collation : column.resolvedCollation;
+            if (!isNull && stored_regtype_detail::scalarType(column.dataType)) {
+                if (!referenceCatalog_) referenceCatalog_.emplace(regtype_detail::metadata(*engine, database));
+                value = stored_regtype_detail::load(raw->second, true, false, *referenceCatalog_,
+                    currentSession(), program.declaration, column.dataType);
+            } else if (!compound_value_detail::decodeArrayStorageInput(value, program.declaration)) {
+                throw DbError("XX001", "could not decode converted array domain assignment");
+            }
+            evaluateArrayDomainProgram(database, program, value, engine, syntax_);
+        }
+    }
+};
+
+} // namespace
+
+void StorageEngine::validateArrayDomainValue(const std::string& database,
+        const DomainAncestry& ancestry, const ExprValue& value,
+        const DatumMetadataContext& metadata) {
+    auto program = prepareArrayDomainProgram(ancestry, metadata);
+    LocalExpressionSyntax syntax;
+    evaluateArrayDomainProgram(database, program, value, this, syntax);
+}
+
 // CHECK row maps are keyed by the actual raw attribute name, including
 // when their expression uses a qualified reference. Historical validation and
 // later mutations must receive the same resolved source collation metadata.
@@ -10890,29 +11081,40 @@ static DBStatus normalizeVarcharArrayWidth(const Column& column,
     }
 }
 
-static bool normalizeArray(const std::string& in, const std::string& elemType, std::string& out) {
+static std::string canonicalArrayInput(const std::string& input, const std::string& elemType) {
+    auto literal = sql_array_text::parse(input);
+    ExprEvaluator evaluator;
+    CastExpr cast;
+    cast.typeName = ExprHelper::canonicalResultTypeName(elemType);
+    // Older embedded schemas persisted the public full array spelling.
+    // Their scalar elements still cast to the element, never to an array.
+    if (cast.typeName.size() >= 2 && cast.typeName.compare(cast.typeName.size()-2,2,"[]") == 0)
+        cast.typeName.resize(cast.typeName.size()-2);
+    auto parameter = std::make_unique<ParameterExpr>();
+    parameter->declaredType = "unknown";
+    parameter->origin = ParameterOrigin::RuntimeCell;
+    cast.operand = std::move(parameter);
+    const auto convert = [&](const std::string& value) {
+        RowContext row;
+        row.setParameters({ExprValue("unknown", value, false)});
+        return evaluator.eval(&cast, row).value;
+    };
+    ArrayParser parser(literal.body, elemType, convert);
+    size_t count = 0;
+    std::string result;
+    parser.parseValue(result, count);
+    parser.skipWs();
+    if (!parser.ok || parser.i != literal.body.size())
+        throw DbError("22P02", "malformed array literal: " + input);
+    literal.body = std::move(result);
+    return sql_array_text::render(literal);
+}
+
+static bool normalizeArray(const std::string& input, const std::string& elemType, std::string& out) {
     try {
-        auto literal = sql_array_text::parse(in);
-        ExprEvaluator evaluator;
-        CastExpr cast;cast.typeName=ExprHelper::canonicalResultTypeName(elemType);
-        // Older embedded schemas persisted the public full array spelling.
-        // Their scalar elements still cast to the element, never to an array.
-        if (cast.typeName.size() >= 2 && cast.typeName.compare(cast.typeName.size()-2,2,"[]") == 0)
-            cast.typeName.resize(cast.typeName.size()-2);
-        auto parameter=std::make_unique<ParameterExpr>();parameter->declaredType="unknown";
-        parameter->origin=ParameterOrigin::RuntimeCell;
-        cast.operand=std::move(parameter);
-        const auto convert=[&](const std::string& value) {
-            RowContext row;row.setParameters({ExprValue("unknown",value,false)});
-            return evaluator.eval(&cast,row).value;
-        };
-        ArrayParser parser(literal.body,elemType,convert);
-        std::string result;size_t count=0;
-        parser.parseValue(result,count);parser.skipWs();
-        if(!parser.ok || parser.i!=literal.body.size())return false;
-        literal.body=std::move(result);out=sql_array_text::render(literal);
+        out = canonicalArrayInput(input, elemType);
         return true;
-    } catch(const DbError&) {return false;}
+    } catch (const DbError&) { return false; }
 }
 
 // ========================================================================
@@ -11150,26 +11352,26 @@ static bool normalizeInterval(const std::string& value, std::string& normalized)
 
 // One real runtime datum, never interpolated into SQL. Scalar/array input
 // and every storage writer use the same declaration-owned datum cast.
+static std::string modifiedColumnInput(const Column& column, const std::string& value) {
+    CastExpr cast;
+    cast.typeName = column.dataType + std::string(column.isArray ? "[]" : "");
+    cast.typeMods = column.dataType == "numeric" ? numeric_type_detail::unpack(column.typeMod)
+                                               : interval_type_detail::unpack(column.typeMod);
+    auto parameter = std::make_unique<ParameterExpr>();
+    parameter->origin = ParameterOrigin::RuntimeCell;
+    parameter->declaredType = "unknown";
+    cast.operand = std::move(parameter);
+    RowContext context;
+    context.setParameters({ExprValue("unknown", value, false)});
+    ExprEvaluator evaluator;
+    auto normalized = evaluator.eval(&cast, context).value;
+    return column.isArray ? canonicalArrayInput(normalized, column.dataType) : normalized;
+}
+
 static bool normalizeModifiedColumn(const Column& column, const std::string& value,
                                     std::string& normalized) {
     try {
-        CastExpr cast;
-        cast.typeName = column.dataType + std::string(column.isArray ? "[]" : "");
-        cast.typeMods = column.dataType == "numeric" ? numeric_type_detail::unpack(column.typeMod)
-                                                   : interval_type_detail::unpack(column.typeMod);
-        auto parameter = std::make_unique<ParameterExpr>();
-        parameter->origin = ParameterOrigin::RuntimeCell;
-        parameter->declaredType = "unknown";
-        cast.operand = std::move(parameter);
-        RowContext context;
-        context.setParameters({ExprValue("unknown", value, false)});
-        ExprEvaluator evaluator;
-        normalized = evaluator.eval(&cast, context).value;
-        if (column.isArray) {
-            std::string canonical;
-            if (!normalizeArray(normalized, column.dataType, canonical)) return false;
-            normalized = std::move(canonical);
-        }
+        normalized = modifiedColumnInput(column, value);
         return true;
     } catch (const DbError&) { return false; }
 }
@@ -20533,6 +20735,14 @@ DBStatus StorageEngine::alterTableAddColumn(const std::string& dbname,
         return DBStatus::IO_ERROR;
     }
 
+    // A heap rewrite cannot insert rows for a new array domain until it
+    // owns the new column's actual catalog declaration. Empty tables can
+    // publish the schema and its catalog attribute without rewriting rows.
+    if (!rows.empty() && validatedCol.isArray && !validatedCol.domainName.empty()) {
+        lockManager_.unlock(tablename);
+        return DBStatus::FEATURE_NOT_SUPPORTED;
+    }
+
     // ADD COLUMN without a default cannot satisfy NOT NULL for existing rows.
     // Reject before touching schema or data so the DDL remains failure-safe.
     if (!rows.empty() && !col.isNull && col.defaultValue.empty() &&
@@ -21144,6 +21354,15 @@ DBStatus StorageEngine::alterTableAlterColumnType(const std::string& dbname,
     if (!TypeRegistry::instance().validateColumn(target).empty()) {
         lockManager_.unlock(tablename);
         return DBStatus::INVALID_VALUE;
+    }
+    // The generic type rewrite retains the old column's domain ownership.
+    // Refuse this rewrite before reading or modifying rows when that would
+    // publish the wrong logical type or silently bypass a new constraint.
+    const auto& previous = tbl.cols[colIdx];
+    if ((previous.isArray && !previous.domainName.empty()) ||
+        (target.isArray && !target.domainName.empty())) {
+        lockManager_.unlock(tablename);
+        return DBStatus::FEATURE_NOT_SUPPORTED;
     }
     const auto referenceSourceType=ExprHelper::canonicalResultTypeName(tbl.cols[colIdx].dataType);
     const auto referenceTargetType=ExprHelper::canonicalResultTypeName(target.dataType);
@@ -27961,7 +28180,8 @@ DBStatus StorageEngine::insertRow(const std::string& dbname,
                                    std::vector<SqlRow>* insertedRows,
                                    IdentityOverride identityOverride,
                                 OwningMutationRows* owningRows, bool deferVirtualInputs,
-                                SqlRow* conflictingRow) {
+                                SqlRow* conflictingRow,
+                                const OwningSqlRow* arrayDomainInputs) {
     if (conflictingRow) conflictingRow->clear();
     const auto ownershipStatus = ensureDatabaseTransactionOwnership(dbname);
     if (ownershipStatus != DBStatus::OK) return ownershipStatus;
@@ -27995,12 +28215,12 @@ DBStatus StorageEngine::insertRow(const std::string& dbname,
         } else {
             return insertInternal(
                 dbname, tablename, values, nullColumns, insertedRows,
-                identityOverride,owningRows,deferVirtualInputs,conflictingRow);
+                identityOverride,owningRows,deferVirtualInputs,conflictingRow,arrayDomainInputs);
         }
         if (usesLegacyPartitionRoute) {
             const DBStatus status = insertInternal(
                 dbname, tablename, values, nullColumns, insertedRows,
-                identityOverride,owningRows,deferVirtualInputs,conflictingRow);
+                identityOverride,owningRows,deferVirtualInputs,conflictingRow,arrayDomainInputs);
             if (status != DBStatus::OK && insertedRows) {
                 insertedRows->resize(returnedRowStart);
             }
@@ -28013,7 +28233,7 @@ DBStatus StorageEngine::insertRow(const std::string& dbname,
         try {
         const DBStatus insertStatus = insertInternal(
             dbname, tablename, values, nullColumns, insertedRows,
-            identityOverride,owningRows,deferVirtualInputs,conflictingRow);
+            identityOverride,owningRows,deferVirtualInputs,conflictingRow,arrayDomainInputs);
         if (insertStatus != DBStatus::OK) {
             const DBStatus rollbackStatus = rollbackTransaction();
             if (insertedRows) insertedRows->resize(returnedRowStart);
@@ -28056,7 +28276,7 @@ DBStatus StorageEngine::insertRow(const std::string& dbname,
     try {
     const DBStatus insertStatus =
         insertInternal(dbname, tablename, values, nullColumns, insertedRows,
-                       identityOverride,owningRows,deferVirtualInputs,conflictingRow);
+                       identityOverride,owningRows,deferVirtualInputs,conflictingRow,arrayDomainInputs);
     if (insertStatus != DBStatus::OK) {
         DBStatus rollbackStatus = DBStatus::OK;
         if (transactionContext().inTransaction && hasStatementSavepoint) {
@@ -28116,7 +28336,8 @@ DBStatus StorageEngine::insertInternal(
                                 std::vector<SqlRow>* insertedRows,
                                 IdentityOverride identityOverride,
                                 OwningMutationRows* owningRows, bool deferVirtualInputs,
-                                SqlRow* conflictingRow) {
+                                SqlRow* conflictingRow,
+                                const OwningSqlRow* arrayDomainInputs) {
     noteTemporaryRelationAccess(dbname, tablename);
     if (transactionContext().inTransaction && dbname == transactionContext().txnDB) {
         if ((transactionContext().txnIsolationLevel == IsolationLevel::READ_COMMITTED ||
@@ -28165,14 +28386,16 @@ DBStatus StorageEngine::insertInternal(
     const auto compositeIndexMetadata =
         getCompositeIndexes(dbname, tablename);
     std::vector<bool> domainRequired(tbl.len, false);
+    StoredArrayDomainChecks arrayDomainChecks;
     try {
-        for (size_t i = 0; i < tbl.len; ++i)
-            if (!tbl.cols[i].domainName.empty())
-                {
-                    const auto domain = resolveDomainAncestry(dbname, tbl.cols[i].domainName);
-                    if (domain.name.empty()) throw DbError("XX001", "column domain metadata is missing");
-                    domainRequired[i] = domain.notNull;
-                }
+        for (size_t i = 0; i < tbl.len; ++i) {
+            const auto& column = tbl.cols[i];
+            if (column.domainName.empty()) continue;
+            const auto domain = resolveDomainAncestry(dbname, column.domainName);
+            if (domain.name.empty()) throw DbError("XX001", "column domain metadata is missing");
+            domainRequired[i] = domain.notNull;
+            arrayDomainChecks.add(i, column, domain, dbname, tablename, this, generatedMetadata);
+        }
     } catch (...) {
         lockManager_.unlock(tablename);
         throw;
@@ -28207,6 +28430,8 @@ DBStatus StorageEngine::insertInternal(
     std::map<std::string, std::string> actualValues = values;
     std::set<std::string> actualNullColumns = nullColumns;
     auto typeHints = buildTypeHints(tbl);
+    OwningSqlRow convertedDomains;
+    if (arrayDomainInputs) convertedDomains = *arrayDomainInputs;
 
     // Identity input policy is enforced at the storage boundary so embedded
     // callers cannot bypass the SQL executor. OVERRIDING USER VALUE discards
@@ -28246,8 +28471,11 @@ DBStatus StorageEngine::insertInternal(
         if (it == actualValues.end() && !col.defaultValue.empty()) {
             try {
                 const bool referenceOutput = stored_regtype_detail::scalarType(col.dataType);
+                const bool arrayDomain = col.isArray && !col.domainName.empty();
                 auto evaluated = ExprHelper::evalString(col.defaultValue, actualValues,
-                    typeHints, dbname, "", this, referenceOutput);
+                    typeHints, dbname, "", this, referenceOutput || arrayDomain);
+                if (arrayDomain && evaluated.ok && evaluated.owningValue)
+                    convertedDomains.insert_or_assign(col.dataName, *evaluated.owningValue);
                 if (!evaluated.ok) {
                     // The boolean-only helper discarded the original SQL
                     // error and could even store the SQL text in a TEXT
@@ -28625,8 +28853,9 @@ DBStatus StorageEngine::insertInternal(
             lockManager_.unlock(tablename);
             return DBStatus::NULL_NOT_ALLOWED;
         }
+        const bool arrayDomain = col.isArray && !col.domainName.empty();
         if (hasValue && !isNullMarker && val.empty() &&
-            !columnAcceptsEmptyValue(col)) {
+            !arrayDomain && !columnAcceptsEmptyValue(col)) {
             lockManager_.unlock(tablename);
             return DBStatus::INVALID_VALUE;
         }
@@ -28645,6 +28874,17 @@ DBStatus StorageEngine::insertInternal(
             }
             // Reference input is complete; arithmetic/array casts must not
             // interpret the canonical OID as a different SQL input type.
+            continue;
+        }
+        // Domain conversion preserves the real base-type input failure.
+        // The same pass also covers defaults and post-trigger values.
+        if (arrayDomain && hasValue && !isNullMarker) {
+            try {
+                actualValues[col.dataName] = arrayDomainChecks.convertBaseInput(i, val, dbname, this);
+            } catch (...) {
+                lockManager_.unlock(tablename);
+                throw;
+            }
             continue;
         }
         // An array's dataType names its element. Scalar validators must not
@@ -28975,6 +29215,7 @@ DBStatus StorageEngine::insertInternal(
                     for (size_t i = 0; i < tbl.len; ++i) {
                         if (tbl.cols[i].dataName == assignment.column) {
                             actualValues[assignment.column] = val;
+                            convertedDomains.erase(assignment.column);
                             if (evaluatedNull) {
                                 actualNullColumns.insert(assignment.column);
                             } else {
@@ -29019,6 +29260,7 @@ DBStatus StorageEngine::insertInternal(
             return DBStatus::INVALID_VALUE;
         }
         actualValues[col.dataName] = computed;
+        convertedDomains.erase(col.dataName);
         if (computedNull) actualNullColumns.insert(col.dataName);
         else actualNullColumns.erase(col.dataName);
     }
@@ -29048,6 +29290,14 @@ DBStatus StorageEngine::insertInternal(
     if (!variableColumnWidthsValid(tbl, actualValues, &actualNullColumns)) {
         lockManager_.unlock(tablename);
         return DBStatus::INVALID_VALUE;
+    }
+
+    try {
+        arrayDomainChecks.validate(tbl, actualValues, actualNullColumns,
+            dbname, this, nullptr, &convertedDomains);
+    } catch (...) {
+        lockManager_.unlock(tablename);
+        throw;
     }
 
     const DBStatus uniqueStatus = validateFinalUniqueKeys();
@@ -32350,12 +32600,7 @@ DBStatus StorageEngine::updateRows(
             createStatementSavepoint(statementSavepoint) == DBStatus::OK;
     }
 
-    ReferentialActionContext referentialContext;
-    const DBStatus updateStatus = updateInternal(
-        dbname, tablename, updates, updateNullColumns, conditions,
-        updatedRows, updateResolver, updateMatcher, nullptr,
-        referentialContext, affectedRows, rowImages, mutationCallbacks,owningRows,deferVirtualInputs);
-    if (updateStatus != DBStatus::OK) {
+    const auto rollbackStatement = [&]() {
         DBStatus rollbackStatus = DBStatus::OK;
         if (ownsTransaction && transactionContext().inTransaction) {
             rollbackStatus = rollbackTransaction();
@@ -32375,6 +32620,36 @@ DBStatus StorageEngine::updateRows(
         if (rowImages) rowImages->resize(returnedImageStart);
         if (owningRows) owningRows->resize(returnedOwningStart);
         if (affectedRows) *affectedRows = 0;
+        return rollbackStatus;
+    };
+
+    ReferentialActionContext referentialContext;
+    DBStatus updateStatus;
+    try {
+        updateStatus = updateInternal(
+            dbname, tablename, updates, updateNullColumns, conditions,
+            updatedRows, updateResolver, updateMatcher, nullptr,
+            referentialContext, affectedRows, rowImages, mutationCallbacks,owningRows,deferVirtualInputs);
+    } catch (...) {
+        // A typed CHECK error on a later row has the same undo requirement
+        // as a returned error. Preserve its SQLSTATE after statement cleanup.
+        const auto failure = std::current_exception();
+        try {
+            if (rollbackStatement() != DBStatus::OK && transactionContext().inTransaction)
+                (void)rollbackTransaction();
+        } catch (...) {
+            try {
+                if (transactionContext().inTransaction) (void)rollbackTransaction();
+            } catch (...) {}
+            if (updatedRows) updatedRows->resize(returnedRowStart);
+            if (rowImages) rowImages->resize(returnedImageStart);
+            if (owningRows) owningRows->resize(returnedOwningStart);
+            if (affectedRows) *affectedRows = 0;
+        }
+        std::rethrow_exception(failure);
+    }
+    if (updateStatus != DBStatus::OK) {
+        const auto rollbackStatus = rollbackStatement();
         return rollbackStatus == DBStatus::OK ? updateStatus : rollbackStatus;
     }
 
@@ -32447,13 +32722,15 @@ DBStatus StorageEngine::updateInternal(
         return DBStatus::INVALID_VALUE;
     }
     std::vector<bool> domainRequired(tbl.len, false);
-    for (size_t i = 0; i < tbl.len; ++i)
-        if (!tbl.cols[i].domainName.empty())
-            {
-                const auto domain = resolveDomainAncestry(dbname, tbl.cols[i].domainName);
-                if (domain.name.empty()) throw DbError("XX001", "column domain metadata is missing");
-                domainRequired[i] = domain.notNull;
-            }
+    StoredArrayDomainChecks arrayDomainChecks;
+    for (size_t i = 0; i < tbl.len; ++i) {
+        const auto& column = tbl.cols[i];
+        if (column.domainName.empty()) continue;
+        const auto domain = resolveDomainAncestry(dbname, column.domainName);
+        if (domain.name.empty()) throw DbError("XX001", "column domain metadata is missing");
+        domainRequired[i] = domain.notNull;
+        arrayDomainChecks.add(i, column, domain, dbname, tablename, this, generatedMetadata);
+    }
 
     // Validate columns and pre-check values. The same preparation function is
     // reused for row-dependent UPDATE expressions so all update entry points
@@ -32487,8 +32764,9 @@ DBStatus StorageEngine::updateInternal(
                         preparedNullColumns.insert(i);
                         break;
                     }
+                    const bool arrayDomain = col.isArray && !col.domainName.empty();
                     if (kv.second.empty() &&
-                        !columnAcceptsEmptyValue(col)) {
+                        !arrayDomain && !columnAcceptsEmptyValue(col)) {
                         return DBStatus::INVALID_VALUE;
                     }
                     std::string storeVal = kv.second;
@@ -32499,6 +32777,8 @@ DBStatus StorageEngine::updateInternal(
                     }
                     if (stored_regtype_detail::scalarType(col.dataType)) {
                         // Already canonicalized once by the actual input owner.
+                    } else if (arrayDomain) {
+                        storeVal = arrayDomainChecks.convertBaseInput(i, kv.second, dbname, this);
                     } else if (col.storageCodec == Column::StorageCodec::TemporalMicros) {
                         if (!normalizeTemporalColumn(col, kv.second, storeVal)) return DBStatus::INVALID_VALUE;
                     } else if (col.isArray && col.dataType == "numeric") {
@@ -32936,7 +33216,9 @@ DBStatus StorageEngine::updateInternal(
 
         // Rebuild row buffer with updates
         std::map<std::string, std::string> rowValues = oldLogicalValues;
-        if (updateResolver || (mutationCallbacks && mutationCallbacks->resolve)) {
+        OwningSqlRow convertedDomains;
+        const bool typedResolver = mutationCallbacks && mutationCallbacks->resolveArrayDomains;
+        if (typedResolver || updateResolver || (mutationCallbacks && mutationCallbacks->resolve)) {
             SqlRow resolverValues;
             for (size_t i = 0; i < tbl.len; ++i) {
                 if(deferVirtualInputs && tbl.cols[i].generatedKind=='v')continue;
@@ -32950,9 +33232,15 @@ DBStatus StorageEngine::updateInternal(
             }
             SqlRow effectiveSqlUpdates =
                 joinSqlRow(updates, updateNullColumns);
-            if (!(mutationCallbacks && mutationCallbacks->resolve
-                    ? mutationCallbacks->resolve(rid, resolverValues, effectiveSqlUpdates)
-                    : updateResolver(resolverValues, effectiveSqlUpdates))) {
+            bool resolved;
+            if (typedResolver)
+                resolved = mutationCallbacks->resolveArrayDomains(
+                    rid, resolverValues, effectiveSqlUpdates, convertedDomains);
+            else if (mutationCallbacks && mutationCallbacks->resolve)
+                resolved = mutationCallbacks->resolve(rid, resolverValues, effectiveSqlUpdates);
+            else
+                resolved = updateResolver(resolverValues, effectiveSqlUpdates);
+            if (!resolved) {
                 lockManager_.unlock(tablename);
                 return DBStatus::INVALID_VALUE;
             }
@@ -32995,6 +33283,7 @@ DBStatus StorageEngine::updateInternal(
             }
             rowValues[col.dataName] =
                 assignsNull ? std::string() : computed;
+            convertedDomains.erase(col.dataName);
             assignedColumnIndices.insert(i);
             if (assignsNull) assignedNullColumnIndices.insert(i);
             else assignedNullColumnIndices.erase(i);
@@ -33115,6 +33404,7 @@ DBStatus StorageEngine::updateInternal(
                                 const bool assignsNull = evaluatedNull;
                                 rowValues[assignment.column] =
                                     assignsNull ? std::string() : val;
+                                convertedDomains.erase(assignment.column);
                                 assignedColumnIndices.insert(i);
                                 if (assignsNull) {
                                     assignedNullColumnIndices.insert(i);
@@ -33144,6 +33434,7 @@ DBStatus StorageEngine::updateInternal(
                 }
                 rowValues[col.dataName] =
                     assignsNull ? std::string() : computed;
+                convertedDomains.erase(col.dataName);
                 assignedColumnIndices.insert(i);
                 if (assignsNull) assignedNullColumnIndices.insert(i);
                 else assignedNullColumnIndices.erase(i);
@@ -33339,6 +33630,7 @@ DBStatus StorageEngine::updateInternal(
                     preparedActionNullColumns.count(columnIndex) != 0;
                 rowValues[tbl.cols[columnIndex].dataName] =
                     assignsNull ? std::string() : value;
+                convertedDomains.erase(tbl.cols[columnIndex].dataName);
                 assignedColumnIndices.insert(columnIndex);
                 if (assignsNull) {
                     assignedNullColumnIndices.insert(columnIndex);
@@ -33392,6 +33684,7 @@ DBStatus StorageEngine::updateInternal(
                         preparedGeneratedNullColumns.count(columnIndex) != 0;
                     rowValues[tbl.cols[columnIndex].dataName] =
                         assignsNull ? std::string() : value;
+                    convertedDomains.erase(tbl.cols[columnIndex].dataName);
                     assignedColumnIndices.insert(columnIndex);
                     if (assignsNull) {
                         assignedNullColumnIndices.insert(columnIndex);
@@ -33435,6 +33728,14 @@ DBStatus StorageEngine::updateInternal(
                 tbl, rowValues, &finalNullColumnNames)) {
             lockManager_.unlock(tablename);
             return DBStatus::INVALID_VALUE;
+        }
+
+        try {
+            arrayDomainChecks.validate(tbl, rowValues, finalNullColumnNames,
+                dbname, this, &assignedColumnIndices, &convertedDomains);
+        } catch (...) {
+            lockManager_.unlock(tablename);
+            throw;
         }
 
         const auto newColumnIsNull = [&](size_t columnIndex) {

@@ -75,9 +75,18 @@ inline std::string output(const std::string& raw,bool array,
 }
 inline ExprValue load(const std::string& raw,bool array,bool isNull,
                       const CatalogManager::MetadataSnapshot& catalog,
-                      const Session* session,DatumTypePtr declaration={},const std::string& type="regtype") {
+                      const Session* session,DatumTypePtr declaration={},const std::string& type="regtype",
+                      uint32_t validatedArrayDomainOid=0) {
     ExprValue value(type+(array?"[]":""),"",isNull);
-    if(isNull)return value;
+    if (isNull) {
+        if (array && validatedArrayDomainOid) {
+            auto data = std::make_shared<CompoundDatum>();
+            data->type = declaration;
+            compound_value_detail::retainArrayDomainValidation(*data, validatedArrayDomainOid);
+            value.compound = std::move(data);
+        }
+        return value;
+    }
     if(!array) {
         const Oid oid=rawOid(raw);value.objectOid=oid;
         value.value=outputOid(oid,catalog,session,type);
@@ -101,7 +110,8 @@ inline ExprValue load(const std::string& raw,bool array,bool isNull,
     std::vector<DatumArrayDimension> dimensions;
     for(const auto& dimension:parsed.dimensions)dimensions.push_back({dimension.length,dimension.lower});
     value.value=output(raw,true,catalog,session,type);
-    compound_value_detail::attach(value,std::move(elements),std::move(dimensions),std::move(declaration),{},true);
+    compound_value_detail::attach(value,std::move(elements),std::move(dimensions),
+        std::move(declaration),{},true,validatedArrayDomainOid);
     return value;
 }
 // At the existing expression-to-storage boundary retain identity from the

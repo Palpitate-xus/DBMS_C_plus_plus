@@ -76,6 +76,9 @@ struct CompoundDatum {
     // Missing means no physical bitmap provenance; any actual NULL still
     // requires a bitmap. Producers with known provenance retain it explicitly.
     std::optional<bool> arrayNullBitmap;
+    // A successful domain conversion or a genuine stored domain value owns
+    // this proof. New array operations create a new, unchecked payload.
+    uint32_t validatedArrayDomainOid = 0;
 };
 
 // ----------------------------------------------------------------------------
@@ -210,6 +213,10 @@ public:
                                        StorageEngine* engine = nullptr) const;
     void bindScalarFunctions(Expr* expression, StorageEngine* engine = nullptr);
 
+    // Convert through the complete base declaration of an array domain,
+    // including element modifiers. The domain check consumes this value.
+    ExprValue convertArrayDomainBase(const std::string& declaration, const ExprValue& input) const;
+
     // 设置当前数据库，供 nextval/currval/lastval 等内置函数使用
     void setCurrentDB(const std::string& db) { currentDB_ = db; }
     // The caller owns the prepared statement/query context. This callback is
@@ -248,8 +255,12 @@ private:
     ExprValue evalBinaryOp(const BinaryOpExpr* e, const RowContext& ctx) const;
     ExprValue evalCase(const CaseExpr* e, const RowContext& ctx) const;
     ExprValue evalCast(const CastExpr* e, const RowContext& ctx) const;
-    ExprValue evalCast(const Expr* /*unused*/, const RowContext& /*unused*/,
-                       const ExprValue& v, const std::string& targetTypeName) const;
+    ExprValue evalCast(const Expr* inputExpression, const RowContext& context,
+                       const ExprValue& value, const std::string& targetTypeName,
+                       bool domainBaseArrayInput = false) const;
+    std::optional<ExprValue> castToArrayDomain(const Expr* inputExpression,
+        const RowContext& context, const ExprValue& value,
+        const std::string& qualifiedType) const;
     ExprValue evalFunctionCall(const FunctionCallExpr* e, const RowContext& ctx) const;
     ExprValue evalArrayExpr(const ArrayExpr* e, const RowContext& ctx) const;
     ExprValue evalQuantified(const QuantifiedComparisonExpr* e, const RowContext& ctx) const;

@@ -1,5 +1,6 @@
 #include "catalog/SystemAttributeDeclaration.h"
 #include "catalog/declared_type.h"
+#include "catalog/DatumMetadataFactory.h"
 // ============================================================================
 // DDL AST Executor — Phase 4 Wave 0.3
 // ============================================================================
@@ -1200,7 +1201,9 @@ static PgAttributeRow catalogAttributeForColumn(
     // codec width (DATE/TIME/TIMETZ/INTERVAL deliberately use other layouts).
     // Legacy physical arrays can still name their element plus attndims.
     attribute.attlen = column.isArray ? static_cast<int16_t>(-1) : declaredType->typlen;
-    attribute.attndims = column.isArray ? 1 : 0;
+    // A domain's own array envelope is described by pg_type.typbasetype /
+    // typndims. This column was declared D, not D[].
+    attribute.attndims = column.isArray && column.domainName.empty() ? 1 : 0;
     attribute.atttypmod = -1;
     if (column.dataType == "interval" || column.dataType == "numeric" ||
         column.dataType == "time" || column.dataType == "timetz" ||
@@ -1588,6 +1591,28 @@ static column_default::Bound bindColumnDefault(CatalogManager& catalog,
             if (!resolver) { resolver = std::make_unique<ExprEvaluator>(); resolver->setCurrentDB(database); }
             return resolver->scalarFunctionIdentity(call, &engine).rfind("builtin", 0) == 0;
         });
+}
+
+void validateArrayDomainDefaultLiteral(const std::string& database,
+    const std::string& baseType, const std::string& definition) {
+    SQLParser parser;
+    const auto parsed = parser.parseForBinding("SELECT " + definition);
+    const auto* select = parsed.success ? dynamic_cast<const SelectStmt*>(parsed.stmt.get()) : nullptr;
+    if (!select || select->selectList.size() != 1 || select->fromClause || select->whereClause ||
+        !select->selectList.front().alias.empty() || select->setOp != SetOp::None ||
+        !select->groupBy.empty() || select->having || !select->orderBy.empty() ||
+        !select->locking.empty() || select->hasRowCountClause)
+        throw DbError("42601", "invalid array domain default expression");
+    const auto* literal = dynamic_cast<const LiteralExpr*>(select->selectList.front().expr.get());
+    if (!literal || !literal->typeName.empty() || literal->preparedSubquery) return;
+    const auto input = column_default::stringLiteral(literal);
+    if (!input) return;
+
+    // A text literal enters the base array's input codec at declaration
+    // time. The row write still owns evaluation of the domain constraints.
+    ExprEvaluator evaluator;
+    evaluator.setCurrentDB(database);
+    (void)evaluator.convertArrayDomainBase(baseType, ExprValue("unknown", *input));
 }
 
 static bool omitsNullColumnDefault(CatalogManager& catalog, const PgAttributeRow& attribute,
@@ -2339,6 +2364,8 @@ static ColumnDef columnDefFromAlterType(const std::string& name,
 
 static bool alterStatusOk(DBStatus status, const std::string& operation) {
     if (status == DBStatus::OK) return true;
+    if (status == DBStatus::FEATURE_NOT_SUPPORTED)
+        throw DbError(sqlstateForDBStatus(status), operation + " change is not supported");
     if (status == DBStatus::TABLE_NOT_FOUND) std::cout << "Table not found" << std::endl;
     else if (status == DBStatus::TABLE_ALREADY_EXISTS)
         std::cout << operation << " already exists" << std::endl;
@@ -5104,6 +5131,7 @@ bool DdlExecutor::columnDefToColumn(const ColumnDef& cd, const std::string& dbna
         return false;
     }
     std::string domainName;
+    bool storageArray = cd.isArray;
     StorageEngine::DomainAncestry domain;
     std::vector<std::string> domainTypeMods;
     std::string enumTypeName;
@@ -5118,9 +5146,15 @@ bool DdlExecutor::columnDefToColumn(const ColumnDef& cd, const std::string& dbna
             domainName = domain.name;
             ColumnDef domainType = SQLParser::parseTypeSpecification(domain.baseType);
             if (domainType.isArray) {
-                error = "domain over array is not supported (SQLSTATE 0A000)";
-                return false;
+                // The physical array belongs inside this domain, not to an
+                // extra array-of-domain suffix on the column declaration.
+                const auto snapshot = g_engine.catalogService().metadataSnapshot(dbname);
+                const auto base = resolveDeclaredTypeName(domain.baseType, &snapshot, currentSession());
+                const auto declared = resolveDeclaredTypeName(domain.name, &snapshot, currentSession());
+                DatumMetadataFactory factory(snapshot);
+                (void)factory.builtinArrayDomain(declared.typeOid, base.typeOid);
             }
+            storageArray = domainType.isArray;
             baseType = toLower(domainType.typeName);
             domainTypeMods = std::move(domainType.typeMods);
         }
@@ -5291,9 +5325,9 @@ bool DdlExecutor::columnDefToColumn(const ColumnDef& cd, const std::string& dbna
         }
         col.dataName = cd.name;
         col.dataType = baseType;
-        col.dsize = cd.isArray ? size_t(65535) : sizeof(uint32_t);
-        col.isVariableLength = cd.isArray;
-        col.isUnsigned = !cd.isArray;
+        col.dsize = storageArray ? size_t(65535) : sizeof(uint32_t);
+        col.isVariableLength = storageArray;
+        col.isUnsigned = !storageArray;
         col.isNull = cd.isNull;
         col.isPrimaryKey = cd.isPrimaryKey;
     } else if (baseType == "text") {
@@ -5429,7 +5463,7 @@ bool DdlExecutor::columnDefToColumn(const ColumnDef& cd, const std::string& dbna
         col.isNull = false;
     }
     col.isUnique = cd.isUnique;
-    col.isArray = cd.isArray;
+    col.isArray = storageArray;
     // New SQL scalar temporal columns use an explicit microsecond codec.
     // Existing schemas/native factories retain their legacy second layout.
     if (!col.isArray && (col.dataType == "time" || col.dataType == "timestamp" ||
@@ -5452,7 +5486,11 @@ bool DdlExecutor::columnDefToColumn(const ColumnDef& cd, const std::string& dbna
         for (const auto& ancestor : domain.domains) {
             if (ancestor.checkExpr.empty()) continue;
             const auto rewritten = bindDomainCheck(dbname, ancestor.checkExpr,
-                                                    baseType, cd.name);
+                storageArray ? domain.baseType : baseType, cd.name);
+            // Array-domain constraints are applied to the assigned owning
+            // value by the storage/cast owner. Do not persist a second row
+            // CHECK which can be deferred or rerun on unrelated updates.
+            if (storageArray) continue;
             if (!col.checkExpr.empty()) col.checkExpr = "(" + col.checkExpr + ") AND (" + rewritten + ")";
             else col.checkExpr = rewritten;
         }
@@ -9931,7 +9969,9 @@ bool DdlExecutor::executeCreateDomain(const CreateObjectStmt* stmt, Session& s) 
     if (!columnDefToColumn(baseDefinition, s.currentDB, physical, error, s.compatibilityMode))
         throw DbError("42704", error);
     if (!info.checkExpr.empty())
-        (void)bindDomainCheck(s.currentDB, info.checkExpr, physical.dataType, "value");
+        (void)bindDomainCheck(s.currentDB, info.checkExpr,
+            physical.isArray ? (parent.name.empty() ? info.baseType : parent.baseType)
+                             : physical.dataType, "value");
 
     DdlTransaction txn(s);
     txn.enableSnapshotRollback();
@@ -9946,6 +9986,57 @@ bool DdlExecutor::executeCreateDomain(const CreateObjectStmt* stmt, Session& s) 
     if (catalog.getTypeByName(declared.name, namespaceOid))
         throw DbError("42710", "type already exists: " + info.name);
     txn.markSnapshotDirty();
+    Oid baseOid = INVALID_OID;
+    if (!parent.name.empty()) {
+        CatalogManager::QualifiedName parentName;
+        CatalogManager::parseQualifiedName(parent.name, parentName);
+        const auto parentNs = catalog.getNamespaceByName(parentName.schema.empty() ? "public" : parentName.schema);
+        const auto parentType = parentNs ? catalog.getTypeByName(parentName.name, parentNs->oid) : std::nullopt;
+        if (!parentType || parentType->typtype != 'd')
+            throw DbError("XX001", "parent domain has no catalog identity");
+        baseOid = parentType->oid;
+    } else {
+        baseOid = ensureTypeInCatalog(catalog, namespaceOid, physical);
+        if (physical.isArray) {
+            // The heap codec names an element. Follow the actual builtin
+            // pair to the domain's whole-array base, never create a pair.
+            const auto element = catalog.getType(baseOid);
+            const auto array = element ? catalog.getType(element->typarray) : std::nullopt;
+            const auto& builtins = CatalogManager::builtinTypeRows();
+            const auto genuine = [&](const PgTypeRow& row) {
+                return row.typnamespace == 11 && std::any_of(builtins.begin(), builtins.end(),
+                    [&](const auto& builtin) { return builtin.oid == row.oid &&
+                        builtin.typname == row.typname && builtin.typtype == row.typtype; });
+            };
+            if (!element || !array || !genuine(*element) || !genuine(*array) ||
+                array->typelem != element->oid || array->typcategory != 'A' ||
+                array->typlen != -1 || array->typbyval)
+                throw DbError("0A000", "domain base requires an implemented builtin array declaration");
+            baseOid = array->oid;
+            // Anchor new array domain metadata to the identity selected now.
+            // Later search_path changes must not turn its element into a
+            // same-named user domain. Preserve the declared modifiers/dims.
+            info.baseType = domainQuotedIdentifier("pg_catalog") + "." +
+                domainQuotedIdentifier(element->typname);
+            if (element->oid == 1186)
+                info.baseType = interval_type_detail::render(info.baseType, baseDefinition.typeMods);
+            else if (!baseDefinition.typeMods.empty()) {
+                info.baseType += '(';
+                for (size_t i = 0; i < baseDefinition.typeMods.size(); ++i)
+                    info.baseType += (i ? "," : "") + baseDefinition.typeMods[i];
+                info.baseType += ')';
+            }
+            const int32_t dimensions = baseDefinition.arrayDimensions > 0
+                ? baseDefinition.arrayDimensions : 1;
+            for (int32_t dimension = 0; dimension < dimensions; ++dimension)
+                info.baseType += "[]";
+        }
+    }
+    const auto base = catalog.getType(baseOid);
+    if (!base) throw DbError("XX001", "domain base has no catalog identity");
+    if (physical.isArray && info.hasDefault)
+        validateArrayDomainDefaultLiteral(s.currentDB,
+            parent.name.empty() ? info.baseType : parent.baseType, info.defaultValue);
     DBStatus res = g_engine.createDomain(s.currentDB, info);
     if (res == DBStatus::TABLE_ALREADY_EXISTS) {
         std::cout << "Domain " << info.name << " already exists" << std::endl;
@@ -9956,18 +10047,6 @@ bool DdlExecutor::executeCreateDomain(const CreateObjectStmt* stmt, Session& s) 
                   << sqlstateForDBStatus(res) << ")" << std::endl;
         return true;
     }
-    Oid baseOid = INVALID_OID;
-    if (!parent.name.empty()) {
-        CatalogManager::QualifiedName parentName;
-        CatalogManager::parseQualifiedName(parent.name, parentName);
-        const auto parentNs = catalog.getNamespaceByName(parentName.schema.empty() ? "public" : parentName.schema);
-        const auto parentType = parentNs ? catalog.getTypeByName(parentName.name, parentNs->oid) : std::nullopt;
-        if (!parentType || parentType->typtype != 'd')
-            throw DbError("XX001", "parent domain has no catalog identity");
-        baseOid = parentType->oid;
-    } else baseOid = ensureTypeInCatalog(catalog, namespaceOid, physical);
-    const auto base = catalog.getType(baseOid);
-    if (!base) throw DbError("XX001", "domain base has no catalog identity");
     PgTypeRow type = *base;
     type.oid = INVALID_OID;
     type.typname = declared.name;
@@ -9976,9 +10055,20 @@ bool DdlExecutor::executeCreateDomain(const CreateObjectStmt* stmt, Session& s) 
     type.typispreferred = false;
     type.typbasetype = baseOid;
     type.typnotnull = info.notNull;
+    type.typelem = INVALID_OID;
     type.typarray = INVALID_OID;
+    type.typmodin = INVALID_OID;
+    type.typmodout = INVALID_OID;
+    type.typndims = baseDefinition.isArray ?
+        (baseDefinition.arrayDimensions > 0 ? baseDefinition.arrayDimensions : 1) : 0;
     type.typtypmod = -1;
-    (void)declaredColumnTypeMod(baseDefinition, type.typtypmod);
+    if (parent.name.empty()) {
+        // Quoted/qualified declarations still use their real codec's typmod
+        // input; their source spelling is not a different modifier owner.
+        auto modifierDefinition = SQLParser::parseTypeSpecification(info.baseType);
+        modifierDefinition.typeName = physical.dataType;
+        (void)declaredColumnTypeMod(modifierDefinition, type.typtypmod);
+    }
     catalog.createType(type);
     if (!catalog.persistAll()) throw DbError("58030", "could not persist domain catalog identity");
     txn.recordCreate(DdlObjectKind::Domain, info.name);

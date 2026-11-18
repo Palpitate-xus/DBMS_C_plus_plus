@@ -459,6 +459,7 @@ struct FunctionCallExpr : public Expr {
     // inputs reuse this declaration, not protocol output's UNKNOWN fallback
     // or a second reconstruction of the routine's argument context.
     std::string resolvedResultType;
+    uint32_t preservedArrayDomainOid = 0;
 
     // Original typed ORDER expressions for the ordinary SUM/COUNT binding
     // receiver. These are not function arguments or rendered SQL literals.
@@ -505,6 +506,7 @@ struct CaseExpr : public Expr {
     // differently without duplicating the switch expression/effects.
     std::vector<std::pair<std::string,std::string>> simpleComparisonTypes;
     std::vector<std::optional<QueryComparisonBinding>> simpleEnumComparisons;
+    uint32_t preservedArrayDomainOid = 0;
     CaseExpr() { type = ExprType::CaseExpr; }
     std::string toString() const override { return "CASE"; }
 };
@@ -1026,6 +1028,7 @@ struct ColumnDef {
     bool isUnsignedExtension = false;          // MySQL integer UNSIGNED
     std::vector<std::string> constraints;      // GENERATED, IDENTITY 等
     bool isArray = false;
+    int32_t arrayDimensions = 0;              // Number of declared array suffixes
 };
 
 struct TableConstraint {

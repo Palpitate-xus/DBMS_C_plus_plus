@@ -25,6 +25,7 @@
 #include "catalog/CatalogService.h"
 #include "catalog/type_catalog.h"
 #include "catalog/namespace_catalog.h"
+#include "catalog/systables.h"
 #include "Config.h"
 #include "process/RuntimeStats.h"
 #include "types/numeric.h"
@@ -410,18 +411,27 @@ struct PreparedSelectState {
                 (schema.cols[i].generatedKind != 'v' && source.lastColumnIsNull(i));
             values.emplace_back(ExprHelper::canonicalResultTypeName(schema.cols[i].dataType +
                 (schema.cols[i].isArray ? "[]" : "")), value, isNull);
-            if(schema.cols[i].generatedKind!='v' && physicalDeclaration &&
-               i<physicalDeclaration->size() &&
-               stored_regtype_detail::columnType(schema.cols[i].dataType)) {
-                const auto catalog=regtype_detail::metadata(*engine,dbname);
-                values.back()=stored_regtype_detail::load(value,schema.cols[i].isArray,isNull,
-                    catalog,currentSession(),physicalDeclaration->at(i).typeMetadata,schema.cols[i].dataType);
+            const auto& column = schema.cols[i];
+            if (physicalDeclaration && i < physicalDeclaration->size()) {
+                const auto& declaredField = physicalDeclaration->at(i).typeMetadata;
+                // The physical scan, persisted domain column and actual
+                // attribute jointly certify the already typed stored datum.
+                uint32_t validatedArrayDomainOid = 0;
+                if (column.isArray && !column.domainName.empty() && declaredField &&
+                    declaredField->kind == DatumKind::Array &&
+                    declaredField->actualOid != declaredField->codecOid)
+                    validatedArrayDomainOid = declaredField->actualOid;
+                if (stored_regtype_detail::columnType(column.dataType)) {
+                    const auto catalog = regtype_detail::metadata(*engine, dbname);
+                    values.back() = stored_regtype_detail::load(value, column.isArray, isNull,
+                        catalog, currentSession(), declaredField, column.dataType, validatedArrayDomainOid);
+                } else if (column.isArray &&
+                    !compound_value_detail::decodeArrayStorageInput(values.back(), declaredField,
+                        {}, validatedArrayDomainOid) && validatedArrayDomainOid) {
+                    throw DbError("XX001", "could not decode stored array domain value");
+                }
             }
-            values.back().collation = schema.cols[i].collation;
-            if(schema.cols[i].isArray && schema.cols[i].generatedKind!='v' &&
-               physicalDeclaration && i<physicalDeclaration->size())
-                (void)compound_value_detail::decodeArrayStorageInput(
-                    values.back(),physicalDeclaration->at(i).typeMetadata);
+            values.back().collation = column.collation;
         }
         return values;
     }
@@ -11207,10 +11217,27 @@ public:
             if (plan_->lastStructuredValues(row)) {
                 if (row.size() != descriptor_.size())
                     throw DbError("XX000", "prepared cursor plan lost its typed descriptor width");
-                for (size_t i = 0; i < row.size(); ++i)
-                    if (ExprHelper::canonicalResultTypeName(row[i].typeName) !=
-                        ExprHelper::canonicalResultTypeName(descriptor_[i].type))
-                        throw DbError("XX000", "prepared cursor plan changed its declared output type");
+                for (size_t i = 0; i < row.size(); ++i) {
+                    const auto& value = row[i];
+                    const auto& column = descriptor_[i];
+                    const auto physicalType = ExprHelper::canonicalResultTypeName(value.typeName);
+                    if (physicalType == ExprHelper::canonicalResultTypeName(column.type)) continue;
+
+                    // An array domain uses its base type for storage and keeps
+                    // the domain declaration on the owning value.
+                    const auto& declaration = column.typeMetadata;
+                    const auto& data = value.compound;
+                    if (declaration && declaration->kind == DatumKind::Array &&
+                        data && data->type && data->validatedArrayDomainOid &&
+                        column.typeOid == declaration->actualOid &&
+                        data->validatedArrayDomainOid == declaration->actualOid &&
+                        data->type->actualOid == declaration->actualOid &&
+                        data->type->codecOid == declaration->codecOid &&
+                        data->type->effectiveTypeMod == declaration->effectiveTypeMod &&
+                        mapBuiltinTypeNameToOid(physicalType) == declaration->codecOid &&
+                        value.isNull != data->arrayElements.has_value()) continue;
+                    throw DbError("XX000", "prepared cursor plan changed its declared output type");
+                }
                 return true;
             }
             std::vector<std::string> cells;

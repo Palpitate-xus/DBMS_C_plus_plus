@@ -57,7 +57,7 @@ struct GeneratedRegistry {
 // Process-private framing: value/type pointers never appear on disk.
 struct ValueHeader {
     uint64_t type=0,value=0,collation=0,elements=0,fields=0,arrayValues=0,dimensions=0;
-    uint32_t oid=0;
+    uint32_t oid=0,validatedArrayDomainOid=0;
     uint8_t isNull=0,hasOid=0,hasFields=0,hasCompound=0,hasArray=0,hasType=0;
     uint8_t bitmapPresent=0,bitmap=0;
 };
@@ -222,6 +222,7 @@ inline void writeValue(sort_detail::Writer& writer,const ExprValue& value) {
         h.hasCompound=bool(cell.compound);
         if(cell.compound) {
             const auto& data=*cell.compound;h.hasType=bool(data.type);h.hasArray=bool(data.arrayElements);
+            h.validatedArrayDomainOid=data.validatedArrayDomainOid;
             h.arrayValues=data.arrayElements?data.arrayElements->size():0;h.dimensions=data.dimensions.size();
             h.bitmapPresent=data.arrayNullBitmap.has_value();h.bitmap=data.arrayNullBitmap.value_or(false);
         }
@@ -243,7 +244,9 @@ inline ValueNode readNode(sort_detail::Reader& reader) {
     const auto h=reader.scalar<ValueHeader>();
     if(h.isNull>1 || h.hasOid>1 || h.hasFields>1 || h.hasCompound>1 || h.hasArray>1 || h.hasType>1 || h.bitmapPresent>1 || h.bitmap>1 ||
        (!h.hasOid && h.oid) || (!h.hasFields && h.fields) || (!h.hasArray && h.arrayValues) ||
-       (!h.bitmapPresent && h.bitmap) || (!h.hasCompound && (h.hasArray || h.hasType || h.dimensions || h.bitmapPresent)) || h.dimensions>6)
+       (!h.bitmapPresent && h.bitmap) || (!h.hasCompound && (h.hasArray || h.hasType || h.dimensions || h.bitmapPresent)) ||
+       (h.validatedArrayDomainOid && (!h.hasCompound || !h.hasType || h.hasFields ||
+            h.hasOid || h.hasArray==h.isNull)) || h.dimensions>6)
         invalid("value flags");
     uint64_t remaining=reader.remaining();
     for(const auto n:{h.type,h.value,h.collation})requireCount(n,1,std::string{}.max_size(),remaining);
@@ -263,6 +266,13 @@ inline ValueNode readNode(sort_detail::Reader& reader) {
     std::shared_ptr<CompoundDatum> data;
     if(h.hasCompound) {
         data=std::make_shared<CompoundDatum>();if(h.hasType)data->type=readType(reader);
+        if (h.validatedArrayDomainOid &&
+            (data->type->kind != DatumKind::Array ||
+             data->type->actualOid != h.validatedArrayDomainOid || !data->type->codecOid ||
+             data->type->codecOid == h.validatedArrayDomainOid || !data->type->arrayElement ||
+             !data->type->arrayElement->actualOid))
+            invalid("array domain validation identity");
+        data->validatedArrayDomainOid = h.validatedArrayDomainOid;
         data->dimensions.reserve(static_cast<size_t>(h.dimensions));
         uint64_t count=h.dimensions?1:0;
         for(uint64_t i=0;i<h.dimensions;++i) {

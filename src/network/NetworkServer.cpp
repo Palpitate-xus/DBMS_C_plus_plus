@@ -6512,6 +6512,11 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session,
             result.commandTag.clear();
             result.columnDescriptions=ordinarySourceColumns.empty()
                 ? describeProtocolColumns(result,sql,session) : ordinarySourceColumns;
+            if (std::any_of(result.rowDescriptor.begin(), result.rowDescriptor.end(), [](const auto& field) {
+                    return field.typeMetadata && field.typeMetadata->kind == DatumKind::Array &&
+                        field.typeMetadata->actualOid != field.typeMetadata->codecOid;
+                }))
+                applyBoundProtocolDescriptor(result.columnDescriptions, result.rowDescriptor, session);
         }
         if (statementCommitError && structuredDml.available &&
             !structuredDml.metadataOnly) {

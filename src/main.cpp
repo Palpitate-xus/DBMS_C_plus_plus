@@ -2,6 +2,7 @@
 #include "catalog/type_catalog.h"
 #include "catalog/SystemCatalogRows.h"
 #include "catalog/PgDefaultCatalog.h"
+#include "expression/ArrayDatumInput.h"
 #include "expression/StoredRegtypeValue.h"
 #include "expression/StoredReferenceOutput.h"
 #include <algorithm>
@@ -403,7 +404,8 @@ static void publishStructuredUtilityResult(
     std::vector<std::vector<bool>> nulls,
     const std::string& commandTag,
     std::optional<dbms::PreparedQueryRows> typedRows = {},
-    dbms::QueryRowDescriptor descriptor = {}) {
+    dbms::QueryRowDescriptor descriptor = {},
+    bool publishBoundDescriptor = false) {
     if (!shouldPublishQueryMetadata()) return;
     dbms::DmlResult result;
     result.available = true;
@@ -413,6 +415,7 @@ static void publishStructuredUtilityResult(
     result.nulls = std::move(nulls);
     result.commandTag = commandTag;
     result.typedRows=std::move(typedRows);
+    if (publishBoundDescriptor) result.rowDescriptor = descriptor;
     if(dbms::typedResultCaptureRequested())result.typedRowDescriptor=std::move(descriptor);
     dbms::publishLastDmlResult(std::move(result));
 }
@@ -17268,7 +17271,7 @@ static bool domainConstraintMatches(const dbms::StorageEngine::DomainInfo& info,
     return constraintName == info.name + "_check";
 }
 
-static bool handleAlterDomain(const string& sql, Session& s) {
+static bool handleAlterDomain(const string& sql, const string& rawSql, Session& s) {
     if (!checkAdmin(s)) return true;
     if (!checkDB(s)) return true;
     string rest = trim(sql.substr(12)); // after "alter domain"
@@ -17284,6 +17287,16 @@ static bool handleAlterDomain(const string& sql, Session& s) {
         return true;
     }
 
+    // Array-domain constraints are enforced against the original domain
+    // record. Changing that record requires revalidation of dependent data
+    // and catalog publication in the same transaction.
+    const bool setDefault = startsWithKeyword(action, "set default");
+    const bool dropDefault = startsWithKeyword(action, "drop default");
+    const auto ancestry = g_engine.resolveDomainAncestry(s.currentDB, info.name);
+    const bool arrayDomain = dbms::SQLParser::parseTypeSpecification(ancestry.baseType).isArray;
+    if (arrayDomain && !setDefault && !dropDefault)
+        throw dbms::DbError("0A000", "ALTER DOMAIN for array constraints or names is not implemented");
+
     string message;
     bool changesDefault = false;
     if (startsWithKeyword(action, "rename to")) {
@@ -17294,18 +17307,32 @@ static bool handleAlterDomain(const string& sql, Session& s) {
         }
         info.name = newName;
         message = "Domain " + domainName + " renamed to " + newName;
-    } else if (startsWithKeyword(action, "set default")) {
+    } else if (setDefault) {
         string defaultValue = trim(action.substr(11));
+        if (arrayDomain) {
+            // The statement parser preserves ARRAY constructors and nested
+            // expressions before the legacy SQL rewrite for array subscripts.
+            dbms::SQLParser parser;
+            const auto parsed = parser.parseForBinding(rawSql);
+            const auto* alter = parsed.success
+                ? dynamic_cast<const dbms::AlterObjectStmt*>(parsed.stmt.get()) : nullptr;
+            if (!alter || alter->command != dbms::SqlCommand::AlterDomain ||
+                !startsWithKeyword(toLowerSql(alter->subCommand), "set default"))
+                throw dbms::DbError("42601", "invalid array domain default declaration");
+            defaultValue = trim(alter->subCommand.substr(11));
+        }
         if (defaultValue.empty()) {
             cout << "SQL syntax error: ALTER DOMAIN name SET DEFAULT value" << endl;
             return true;
         }
+        if (arrayDomain)
+            dbms::validateArrayDomainDefaultLiteral(s.currentDB, ancestry.baseType, defaultValue);
         info.defaultValue = defaultValue;
         info.hasDefault = true;
         info.defaultResolved = true;
         changesDefault = true;
         message = "Domain " + domainName + " default set";
-    } else if (startsWithKeyword(action, "drop default")) {
+    } else if (dropDefault) {
         info.defaultValue.clear();
         info.hasDefault = false;
         info.defaultResolved = true;
@@ -20268,6 +20295,16 @@ static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bo
     const auto* candidate = parsed.success ? dynamic_cast<const dbms::SelectStmt*>(parsed.stmt.get()) : nullptr;
     if (!candidate || hasCurrentQueryWindows(candidate) ||
         !dbms::QueryPlanner::supportsPreparedSelectPlan(*candidate)) return false;
+    dbms::DatumMetadataContextPtr castMetadata;
+    bool needsDomainCast = false;
+    const auto visitCastTarget = [&](const string& spelling) {
+        if (needsDomainCast || session.currentDB.empty() || dbms::mapBuiltinTypeNameToOid(
+            dbms::ExprHelper::canonicalResultTypeName(spelling))) return;
+        if (!castMetadata) castMetadata = g_engine.prepareDatumMetadataContext(session.currentDB);
+        const auto declaration = castMetadata->declaration(spelling, 0);
+        needsDomainCast = declaration && declaration->kind == dbms::DatumKind::Array &&
+            declaration->actualOid != declaration->codecOid;
+    };
     // ARRAY values and bound JSONB/TSVECTOR concatenations retain this existing
     // structured AST receiver. No new physical ProjectSet/SRF lowering is
     // enabled; planner eligibility and real source/column checks still apply.
@@ -20277,13 +20314,21 @@ static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bo
         if (const auto* column = dynamic_cast<const dbms::ColumnRefExpr*>(value))
             return prepared && column->binding &&
                 dbms::array_detail::isArray(column->binding->declaredType);
-        if(const auto* binary=dynamic_cast<const dbms::BinaryOpExpr*>(value))
+        if(const auto* binary=dynamic_cast<const dbms::BinaryOpExpr*>(value)) {
+            if (binary->op == "::") {
+                if (const auto* target = dynamic_cast<const dbms::LiteralExpr*>(binary->right.get()))
+                    visitCastTarget(target->value);
+            }
             return (binary->op=="||" && (!prepared || binary->arrayConcat.has_value() ||
                 (dbms::ExprHelper::inferParsedResultType(binary,{},session.currentDB,&g_engine)=="jsonb" ||
                 dbms::ExprHelper::inferParsedResultType(binary,{},session.currentDB,&g_engine)=="tsvector"))) ||
                 arrayExpression(binary->left.get(),prepared) || (binary->op!="::" && arrayExpression(binary->right.get(),prepared));
+        }
         if(const auto* unary=dynamic_cast<const dbms::UnaryOpExpr*>(value))return arrayExpression(unary->operand.get(),prepared);
-        if(const auto* cast=dynamic_cast<const dbms::CastExpr*>(value))return arrayExpression(cast->operand.get(),prepared);
+        if(const auto* cast=dynamic_cast<const dbms::CastExpr*>(value)) {
+            visitCastTarget(cast->typeName);
+            return arrayExpression(cast->operand.get(),prepared);
+        }
         if(const auto* call=dynamic_cast<const dbms::FunctionCallExpr*>(value)){
             for(const auto& arg:call->args)if(arrayExpression(arg.get(),prepared))return true;
             for(const auto& arg:call->namedArgs)if(arrayExpression(arg.value.get(),prepared))return true;
@@ -20295,10 +20340,10 @@ static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bo
         return false;
     };
     const auto queryArrays = [&](const dbms::SelectStmt* query,bool prepared) {
-        if(arrayExpression(query->whereClause.get(),prepared))return true;
-        for(const auto& item:query->selectList)if(arrayExpression(item.expr.get(),prepared))return true;
-        for(const auto& item:query->orderBy)if(arrayExpression(item.expr.get(),prepared))return true;
-        return false;
+        bool found = arrayExpression(query->whereClause.get(), prepared);
+        for (const auto& item : query->selectList) found = arrayExpression(item.expr.get(), prepared) || found;
+        for (const auto& item : query->orderBy) found = arrayExpression(item.expr.get(), prepared) || found;
+        return found;
     };
     // A single physical bit-negation target has an existing scalar AST
     // plan. Keep it out of the legacy string/callee adapter, but do not
@@ -20327,7 +20372,7 @@ static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bo
         return type=="bit" || type=="bit varying";
     };
     const bool possibleArray = queryArrays(candidate,false);
-    if(possibleArray && dbms::SQLParser::isDatabaseIndependentQuery(*candidate))return false;
+    if(possibleArray && !needsDomainCast && dbms::SQLParser::isDatabaseIndependentQuery(*candidate))return false;
     const auto roles = scalarQueryRoles(candidate->whereClause.get());
     bool scalarOrder = false;
     for (const auto& item : candidate->orderBy)
@@ -20341,7 +20386,7 @@ static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bo
     // without FROM. Suppressing an already evaluated output is too late
     // for volatile routines and nontransactional sequence allocation.
     const bool fromlessDemand = !candidate->fromClause &&
-        (candidate->whereClause || candidate->limit || candidate->offset);
+        (candidate->whereClause || candidate->limit || candidate->offset || needsDomainCast);
     const bool physicalColumnCandidate = candidate->fromClause &&
         candidate->fromClause->type == dbms::FromItem::Type::Table;
     // LIMIT on a base table controls source and projection demand, with or
@@ -20378,7 +20423,7 @@ static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bo
                     const auto* star = dynamic_cast<const dbms::LiteralExpr*>(target.expr.get());
                     return star && star->value == "*";
                 })) return false;
-        if (!roles.first && !scalarOrder && !possibleArray && !fromlessDemand && !possibleBitNegation && !physicalLimitDemand) {
+        if (!roles.first && !scalarOrder && !possibleArray && !needsDomainCast && !fromlessDemand && !possibleBitNegation && !physicalLimitDemand) {
             const auto schema = g_engine.getTableSchema(session.currentDB, physical);
             typedSortDemand = ordinaryTypedSortDemand(*candidate, schema);
             if (!typedSortDemand && none_of(schema.cols, schema.cols + schema.len,
@@ -20402,7 +20447,7 @@ static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bo
     const bool arrayOutput = any_of(prepared.output.begin(), prepared.output.end(),
         [](const dbms::QueryOutputColumn& column) { return dbms::array_detail::isArray(column.type); });
     const bool bitNegationOutput=possibleBitNegation && bitNegation(select,true);
-    if(!roles.first && !scalarOrder && !queryArrays(select,true) && !arrayOutput && !fromlessDemand && !bitNegationOutput && !physicalLimitDemand && !typedSortDemand)return false;
+    if(!roles.first && !scalarOrder && !queryArrays(select,true) && !arrayOutput && !needsDomainCast && !fromlessDemand && !bitNegationOutput && !physicalLimitDemand && !typedSortDemand)return false;
     // Preserve column grants on precisely the bound source cells used by
     // this query (including correlated child references), not SELECT *.
     if (select->fromClause && !sessionIsAdmin(session)) {
@@ -20494,7 +20539,7 @@ static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bo
     }
     for (auto& type : types) if (type == "unknown") type = "text";
     dbms::QueryRowDescriptor receiverDescriptor;
-    if (dbms::typedResultCaptureRequested()) receiverDescriptor = prepared.output;
+    if (dbms::typedResultCaptureRequested() || needsDomainCast) receiverDescriptor = prepared.output;
     dbms::OpPtr plan;
     if (fromlessDemand) {
         // This execution root owns a genuine one-row, zero-column input.
@@ -20504,7 +20549,7 @@ static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bo
         auto source = make_unique<dbms::PreparedSourceRowsOp>(dbms::QueryRowDescriptor{},
             [](size_t index,vector<dbms::ExprValue>& row) {row.clear();return index==0;});
         plan = dbms::QueryPlanner::buildPreparedSelectPlan(&g_engine,session.currentDB,
-            std::move(query),select,dbms::TableSchema{},std::move(source),{},{},{},true,true);
+            std::move(query),select,dbms::TableSchema{},std::move(source),{},{},{},true,!needsDomainCast);
     } else {
         plan = dbms::QueryPlanner::buildPreparedSelectPlan(&g_engine,session.currentDB,
             physical,std::move(prepared));
@@ -20518,6 +20563,7 @@ static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bo
         prefix.available = true; prefix.runtimeErrorMetadata = true;
         prefix.metadataOnly = !result.structuredRowsAvailable;
         prefix.columns = columns; prefix.columnTypes = types;
+        if (needsDomainCast) prefix.rowDescriptor = receiverDescriptor;
         if(dbms::typedResultCaptureRequested())prefix.typedRowDescriptor=receiverDescriptor;
         if (result.structuredRowsAvailable) {
             prefix.rows = std::move(result.structuredRows);
@@ -20535,7 +20581,7 @@ static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bo
         std::move(result.structuredRows), std::move(result.structuredNulls),
         "SELECT " + std::to_string(result.rows.size()),
         result.typedRowsAvailable ? std::optional<dbms::PreparedQueryRows>{std::move(result.typedRows)} : std::nullopt,
-        std::move(receiverDescriptor));
+        std::move(receiverDescriptor), needsDomainCast);
     handled = true;
     return false;
 }
@@ -20995,18 +21041,33 @@ class PreparedWithDmlRuntime {
                     found=scan->next(raw);
                     if(!found && scan->hasError())throw dbms::DbError("XX000",scan->errorMessage());
                     if(found)for(size_t i=0;i<scanSchema.len;++i) {
-                        if(scanSchema.cols[i].generatedKind=='v'){cells.emplace_back();continue;}
+                        const auto& column=scanSchema.cols[i];
+                        if(column.generatedKind=='v'){cells.emplace_back();continue;}
                         bool computedNull=false;
                         const auto value=g_engine.extractColumnValue(raw,scanSchema,i,session_.currentDB,true,&computedNull);
-                        cells.emplace_back(rangePointer->columns[i].type,value,computedNull ||
-                            (scanSchema.cols[i].generatedKind!='v' && scan->lastColumnIsNull(i)));
-                        if(scanSchema.cols[i].generatedKind!='v' &&
-                           dbms::stored_regtype_detail::columnType(scanSchema.cols[i].dataType)) {
-                            const auto catalog=dbms::regtype_detail::metadata(g_engine,session_.currentDB);
-                            cells.back()=dbms::stored_regtype_detail::load(value,scanSchema.cols[i].isArray,
-                                cells.back().isNull,catalog,&session_,rangePointer->columns[i].typeMetadata,scanSchema.cols[i].dataType);
+                        const auto& field=rangePointer->columns[i];
+                        const bool isNull=computedNull || scan->lastColumnIsNull(i);
+                        cells.emplace_back(field.type,value,isNull);
+                        const auto& declaration=field.typeMetadata;
+                        uint32_t validatedArrayDomainOid=0;
+                        if(column.isArray && !column.domainName.empty() && declaration &&
+                           declaration->kind==dbms::DatumKind::Array &&
+                           declaration->actualOid!=declaration->codecOid) {
+                            const auto origin=scan->scanOrigin();
+                            if(origin.engine==&g_engine && origin.dbname==session_.currentDB &&
+                               origin.tablename==scanSchema.tablename)
+                                validatedArrayDomainOid=declaration->actualOid;
                         }
-                        cells.back().collation=scanSchema.cols[i].collation;
+                        if(dbms::stored_regtype_detail::columnType(column.dataType)) {
+                            const auto catalog=dbms::regtype_detail::metadata(g_engine,session_.currentDB);
+                            cells.back()=dbms::stored_regtype_detail::load(value,column.isArray,
+                                isNull,catalog,&session_,declaration,column.dataType,validatedArrayDomainOid);
+                        } else if(validatedArrayDomainOid &&
+                            !dbms::compound_value_detail::decodeArrayStorageInput(cells.back(),
+                                declaration,{},validatedArrayDomainOid)) {
+                            throw dbms::DbError("XX001","could not decode stored array domain value");
+                        }
+                        cells.back().collation=column.collation;
                     }
                 }
                 if(!found)return false;
@@ -24176,7 +24237,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
             return handleAlterDatabase(sql, s);
         }
         if (tokens[0] == "domain") {
-            return handleAlterDomain(sql, s);
+            return handleAlterDomain(sql, effectiveRawSql, s);
         }
         if (tokens[0] == "type") {
             return handleAlterType(sql, s);
@@ -31607,24 +31668,30 @@ static bool executeInternal(const string& rawSql, Session& s) {
                             comparison->left.get(), 1 - secondSide,
                             firstSide, firstName, firstQualified);
                     }
-                    const auto* firstLiteral = dynamic_cast<
-                        const dbms::LiteralExpr*>(comparison->left.get());
-                    const auto* secondLiteral = dynamic_cast<
-                        const dbms::LiteralExpr*>(comparison->right.get());
+                    const auto literalToken = [](const dbms::Expr* operand) -> optional<string> {
+                        if (const auto* literal = dynamic_cast<const dbms::LiteralExpr*>(operand))
+                            return literal->value;
+                        const auto* sign = dynamic_cast<const dbms::UnaryOpExpr*>(operand);
+                        if (!sign || (sign->op != "+" && sign->op != "-")) return nullopt;
+                        const auto* digits = dynamic_cast<const dbms::LiteralExpr*>(sign->operand.get());
+                        if (!digits || !digits->typeName.empty() || digits->value.empty() ||
+                            !all_of(digits->value.begin(), digits->value.end(),
+                                [](unsigned char c) { return c >= '0' && c <= '9'; })) return nullopt;
+                        return sign->op + digits->value;
+                    };
+                    const auto firstLiteral = literalToken(comparison->left.get());
+                    const auto secondLiteral = literalToken(comparison->right.get());
                     if (firstLiteral && secondLiteral) {
-                        auto parseInteger = [](const dbms::LiteralExpr* literal)
-                            -> optional<long long> {
+                        auto parseInteger = [](const string& token) -> optional<long long> {
                             try {
                                 size_t consumed = 0;
-                                const long long value = stoll(
-                                    literal->value, &consumed, 10);
-                                if (consumed == literal->value.size())
-                                    return value;
+                                const long long value = stoll(token, &consumed, 10);
+                                if (consumed == token.size()) return value;
                             } catch (...) {}
                             return nullopt;
                         };
-                        const auto leftValue = parseInteger(firstLiteral);
-                        const auto rightValue = parseInteger(secondLiteral);
+                        const auto leftValue = parseInteger(*firstLiteral);
+                        const auto rightValue = parseInteger(*secondLiteral);
                         if (!leftValue || !rightValue) {
                             cout << "ERROR: unsupported JOIN ON operand (SQLSTATE 0A000)"
                                  << endl;
@@ -31665,14 +31732,14 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         string operand;
                         if (!firstColumn) {
                             firstQualified = secondQualified;
-                            operand = firstLiteral->value;
+                            operand = *firstLiteral;
                             if (op == "<") op = ">";
                             else if (op == ">") op = "<";
                             else if (op == "<=") op = ">=";
                             else if (op == ">=") op = "<=";
                         } else {
                             operand = secondColumn
-                                ? secondQualified : secondLiteral->value;
+                                ? secondQualified : *secondLiteral;
                         }
                         onConditions.push_back(op + firstQualified + " " + operand);
                     }

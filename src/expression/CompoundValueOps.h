@@ -79,12 +79,23 @@ inline std::optional<bool> bitmap(const ExprValue& value) {
     // Text alone cannot prove that a NULL-free array has no retained bitmap.
     return {};
 }
+inline void retainArrayDomainValidation(CompoundDatum& value, uint32_t validatedOid) {
+    if (validatedOid && (!value.type || value.type->kind != DatumKind::Array ||
+            value.type->actualOid != validatedOid || !value.type->codecOid ||
+            value.type->codecOid == validatedOid || !value.type->arrayElement ||
+            !value.type->arrayElement->actualOid))
+        throw DbError("XX001", "array domain validation does not match the actual declaration");
+    value.validatedArrayDomainOid = validatedOid;
+}
+
 inline void attach(ExprValue& value,std::vector<ExprValue> items,
                    std::vector<DatumArrayDimension> dims,DatumTypePtr type={},
-                   std::optional<bool> sourceBitmap={},bool preserveUnknownBitmap=false) {
+                   std::optional<bool> sourceBitmap={},bool preserveUnknownBitmap=false,
+                   uint32_t validatedArrayDomainOid=0) {
     if(elementCount(dims)!=items.size())throw DbError("XX000","array owning payload cardinality mismatch");
     const bool hasNull=std::any_of(items.begin(),items.end(),[](const ExprValue& x){return x.isNull;});
     auto data=std::make_shared<CompoundDatum>();data->type=std::move(type);
+    if (validatedArrayDomainOid) retainArrayDomainValidation(*data, validatedArrayDomainOid);
     data->arrayNullBitmap=hasNull?std::optional<bool>(true):
         (sourceBitmap?sourceBitmap:(preserveUnknownBitmap?std::optional<bool>{}:std::optional<bool>(false)));
     data->arrayElements=std::move(items);data->dimensions=std::move(dims);
@@ -97,6 +108,14 @@ inline void attach(ExprValue& value,std::vector<ExprValue> items,
     }
     value.compound=std::move(data);
 }
+inline DatumTypePtr baseArrayDeclaration(DatumTypePtr type) {
+    if (!type || type->kind != DatumKind::Array || !type->codecOid ||
+        type->actualOid == type->codecOid) return type;
+    auto base = std::make_shared<DatumType>(*type);
+    base->actualOid = type->codecOid;
+    return base;
+}
+
 inline std::string render(const std::vector<ExprValue>& items,
                           const std::vector<DatumArrayDimension>& dims) {
     if(elementCount(dims)!=items.size())throw DbError("XX000","array render cardinality mismatch");

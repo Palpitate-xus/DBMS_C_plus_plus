@@ -101,4 +101,7 @@ bool tryDdlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
                   Session& s, bool& handled,
                   const std::string& rawSql = {});
 
+void validateArrayDomainDefaultLiteral(const std::string& database,
+    const std::string& baseType, const std::string& definition);
+
 } // namespace dbms

@@ -121,6 +121,38 @@ public:
         types_.emplace(actualOid,result);
         return result;
     }
+    // A domain over a builtin array and an array whose elements are domains
+    // are different declarations. Validate the former against its actual
+    // catalog chain; never repair an old scalar domain from a spelling/value.
+    DatumTypePtr builtinArrayDomain(Oid actualDomainOid, Oid expectedArrayOid) {
+        std::lock_guard<std::recursive_mutex> lock(cacheMutex_);
+        const auto* array=find(expectedArrayOid);
+        const auto* element=array?find(array->typelem):nullptr;
+        if(!array || !genuineBuiltin(*array) || array->typtype!='b' ||
+           array->typcategory!='A' || array->typlen!=-1 || array->typbyval ||
+           !element || !genuineBuiltin(*element) || element->typarray!=array->oid)
+            throw DbError("0A000","domain base requires an implemented builtin array declaration");
+        const auto* current=find(actualDomainOid);
+        if(!current || current->typtype!='d')
+            throw DbError("XX001","array domain has no actual domain declaration");
+        std::set<Oid> seen;
+        while(current->typtype=='d') {
+            if(!seen.insert(current->oid).second || !current->typbasetype ||
+               current->typelem || current->typndims<0 || current->typlen!=array->typlen ||
+               current->typbyval!=array->typbyval || current->typcategory!=array->typcategory)
+                throw DbError("XX001","array domain has inconsistent catalog metadata");
+            current=find(current->typbasetype);
+            if(!current)throw DbError("XX001","array domain base declaration is missing");
+        }
+        if(current->oid!=expectedArrayOid)
+            throw DbError("XX001","array domain base differs from its persisted declaration");
+        auto result=type(actualDomainOid);
+        if(!result || result->kind!=DatumKind::Array || result->codecOid!=expectedArrayOid ||
+           !result->arrayElement || result->arrayElement->actualOid!=element->oid ||
+           result->arrayElement->codecOid!=element->oid)
+            throw DbError("XX001","array domain has no actual builtin element codec");
+        return result;
+    }
     DatumTypePtr modifier(DatumTypePtr declaration,int32_t typeMod) {
         std::lock_guard<std::recursive_mutex> lock(cacheMutex_);
         if(!declaration || typeMod<0 || declaration->effectiveTypeMod==typeMod)return declaration;

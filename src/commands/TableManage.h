@@ -363,6 +363,12 @@ public:
     // Pure, bounded metadata lookup. No catalog allocation or query execution.
     DomainAncestry resolveDomainAncestry(const std::string& dbname,
                                         const std::string& name) const;
+    // Apply constraints to an already converted whole array. The caller owns
+    // the actual declaration and value. Runtime SQL errors propagate intact.
+    void validateArrayDomainValue(const std::string& dbname,
+                                  const DomainAncestry& ancestry,
+                                  const ExprValue& value,
+                                  const DatumMetadataContext& metadata);
     std::vector<std::string> getDomainNames(const std::string& dbname) const;
 
     // Composite types (ROW types)
@@ -691,6 +697,9 @@ public:
         std::function<bool(int64_t, const SqlRow&)> matches;
         std::function<bool(int64_t, const SqlRow&, SqlRow&)> resolve;
         std::function<void(int64_t, const SqlRow&, const SqlRow&)> observed;
+        // An actual typed assignment producer may retain already converted
+        // array-domain values for this row alongside their physical text.
+        std::function<bool(int64_t, const SqlRow&, SqlRow&, OwningSqlRow&)> resolveArrayDomains;
     };
 
     using UpdateResolver = std::function<bool(
@@ -719,7 +728,8 @@ public:
                        IdentityOverride identityOverride = IdentityOverride::None,
                     OwningMutationRows* owningRows = nullptr,
         bool deferVirtualInputs = false,
-        SqlRow* conflictingRow = nullptr);
+        SqlRow* conflictingRow = nullptr,
+        const OwningSqlRow* arrayDomainInputs = nullptr);
     // INSERT INTO t DEFAULT VALUES — uses column defaults or NULL.
     DBStatus insertDefaultValues(const std::string& dbname,
                                  const std::string& tablename,
@@ -2318,7 +2328,8 @@ private:
         IdentityOverride identityOverride,
         OwningMutationRows* owningRows = nullptr,
         bool deferVirtualInputs = false,
-        SqlRow* conflictingRow = nullptr);
+        SqlRow* conflictingRow = nullptr,
+        const OwningSqlRow* arrayDomainInputs = nullptr);
     DBStatus removeInternal(
         const std::string& dbname, const std::string& tablename,
         const std::vector<std::string>& conditions,

@@ -1709,6 +1709,19 @@ CREATE TABLE orders (
 );
 ```
 
+### 给数组设置默认值和约束
+
+用 `CREATE DOMAIN` 定义可在多张表里使用的类型。下面的类型为整个数组提供默认值，并要求数组最多包含三项。
+
+```sql
+CREATE DOMAIN small_numbers AS integer[] DEFAULT '{1,2}' CHECK (cardinality(VALUE) <= 3);
+CREATE TABLE example_scores (id integer PRIMARY KEY, scores small_numbers);
+INSERT INTO example_scores(id) VALUES (1);
+SELECT scores FROM example_scores WHERE id = 1;
+```
+
+查询返回 `{1,2}`。插入四项的数组会报 `23514`。域检查里的 `VALUE` 代表整个数组，`cardinality` 也会计算值为 NULL 的元素。[测试范围](test-report.md#array-domains-20261118)
+
 ---
 
 ## 11. 用户与权限

@@ -2,6 +2,37 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-18 domains over builtin arrays in direct SQL, storage and recovery",
+      "gap_ids": [
+        "TYPE-19",
+        "TYPE-16",
+        "TYPE-20"
+      ],
+      "status": "partial",
+      "evidence": [
+        "src/commands/DdlExecutor.cpp",
+        "src/commands/TableManage.cpp",
+        "src/expression/ExprEvaluator.cpp",
+        "src/executor/ExecutionPlan.cpp",
+        "src/parser/query_binding.cpp",
+        "scripts/build_common.sh",
+        "docs/test-report.md",
+        "docs/performance-report-2026-10-30.md"
+      ],
+      "tests": [
+        "tests/array_domain_declaration_test.cpp",
+        "tests/array_domain_protocol_e2e_test.py",
+        "tests/regtype_direct_projection_known_gap.py",
+        "tests/domain_ancestry_storage_test.cpp",
+        "tests/domain_default_transaction_protocol_e2e_test.py"
+      ],
+      "verification": [
+        "Final CMake GCC13.3 C++17/O2 program 8fd1006f4a76fa11c5d65e5a5e5f5ff8118192288144a2bd74f8709b408fc234. Native 16 and existing protocol 16 pass, including the unchanged 108 direct reference/array-domain expectations. New strict protocol 244/244 on final and actual PostgreSQL18.6; accepted baseline 4/7 with 237 not executed after setup rejection. Complete suite remains unverified.",
+        "30 legacy and crash checks pass, including one actual SIGKILL with a connected client and uncommitted work, 15 memory/spill copy checks pass, and 77 guarded DDL plus 6 malformed-default controls pass. Guarded ALTER operations still differ from PostgreSQL, and derived sources, trigger order, typed NULL assignment and legacy migration remain open. Original 273 items and all earlier history entries remain unchanged.",
+        "One complete measured run of 12 owned epochs, 72 timed batches and 2016 SQL requests. Independent raw audit 2394 complete replies and 26190 frames, identical full replies on four comparable workloads. CPU drift rejects read/insert/update claims, DDL under the effect threshold. Absolute new-feature timings only; no PostgreSQL speed comparison. Initial relative path failure took place before timing; corrected invocation left the plan unchanged."
+      ]
+    },
+    {
       "issue": "2026-11-17 stored REGTYPE/REGCLASS output provenance, owning array comparisons and inherited physical ordering",
       "gap_ids": [
         "TYPE-20",

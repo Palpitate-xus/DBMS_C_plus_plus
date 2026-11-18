@@ -43,6 +43,15 @@ SELECT title FROM books WHERE id = 2;
 点击标题展开。[完整更新日志](CHANGELOG.md)
 
 <details>
+<summary>2026-11-18 · 给数组加默认值和检查规则</summary>
+
+可以定义一种数组类型，在多张表里共用默认值和检查规则。比如要求每行的数组最多包含三项。
+
+[使用示例](docs/MANUAL.md#给数组设置默认值和约束) · [测试结果](docs/test-report.md#array-domains-20261118) · [性能测试](docs/performance-report-2026-10-30.md#array-domain-cost-20261118)
+
+</details>
+
+<details>
 <summary>2026-11-17 · 修复查询结果中的表名和类型名</summary>
 
 修复了部分查询只显示编号、没有显示表名或类型名的问题。
@@ -57,15 +66,6 @@ SELECT title FROM books WHERE id = 2;
 部分列的值只有在查询用到时才会转换。
 
 [测试结果](docs/test-report.md#scalar-storage-demand-20261117) · [性能测试](docs/performance-report-2026-10-30.md#scalar-storage-demand-cost-20261117)
-
-</details>
-
-<details>
-<summary>2026-11-17 · 减少函数查找开销，修复表结构保存问题</summary>
-
-查找 SQL 函数时减少了数据复制。修复了内存不足时可能只保存一部分数据库结构信息的问题。
-
-[测试结果](docs/test-report.md#namespace-snapshot-20261117) · [性能测试](docs/performance-report-2026-10-30.md#namespace-snapshot-cost-20261117)
 
 </details>
 

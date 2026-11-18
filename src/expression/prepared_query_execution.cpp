@@ -66,6 +66,7 @@ ExprPtr copyExpression(const Expr* source, std::map<const Expr*, const Expr*>& s
         auto target = std::make_unique<CaseExpr>();
         target->simpleComparisonTypes = node->simpleComparisonTypes;
         target->simpleEnumComparisons = node->simpleEnumComparisons;
+        target->preservedArrayDomainOid = node->preservedArrayDomainOid;
         target->switchExpr = copy(node->switchExpr); target->elseExpr = copy(node->elseExpr);
         for (const auto& arm : node->whenClauses) target->whenClauses.emplace_back(copy(arm.first),copy(arm.second));
         result = std::move(target);
@@ -75,6 +76,7 @@ ExprPtr copyExpression(const Expr* source, std::map<const Expr*, const Expr*>& s
         target->sqlValue = node->sqlValue; target->sqlValuePrecision = node->sqlValuePrecision;
         target->setReturning = node->setReturning;
         target->resolvedResultType = node->resolvedResultType;
+        target->preservedArrayDomainOid = node->preservedArrayDomainOid;
         target->identitySequenceOid = node->identitySequenceOid;
         target->distinct = node->distinct; target->orderBy = node->orderBy; target->hasOver = node->hasOver;
         for (const auto& key : node->aggregateOrderKeys)

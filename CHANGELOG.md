@@ -1,8 +1,12 @@
 # Changelog
 
+## 2026-11-18 · 给数组加默认值和检查规则
+
+可以把一套数组默认值和检查规则用在多张表里。非法数组默认值会在设置时报错。原样复制已通过检查的数组时会保留检查结果。对现有非空表添加这种列，以及修改域规则，仍属于待实现的操作。[使用示例](docs/MANUAL.md#给数组设置默认值和约束) · [测试](docs/test-report.md#array-domains-20261118) · [性能](docs/performance-report-2026-10-30.md#array-domain-cost-20261118)
+
 ## 2026-11-17：修复查询结果中的名称显示
 
-类型和表引用的查询结果显示对应名称，保留内部排序、去重和临时结果使用的编号。补齐引用数组比较、临时表字段类型和父子表统一排序分页，增加客户端、事务和重启回归。已知的数组域、视图写入、继承 CAST 和来源属性差异继续保留；本次测量未证明稳定提速。[测试报告](docs/test-report.md#stored-reference-output-20261117)、[性能报告](docs/performance-report-2026-10-30.md#stored-reference-output-cost-20261117)。
+类型和表引用的查询结果显示对应名称，保留内部排序、去重和临时结果使用的编号。补齐引用数组比较、临时表字段类型和父子表统一排序分页，增加客户端、事务和重启回归。当时的数组域、视图写入、继承 CAST 和来源属性差异见该批记录；本次测量未证明稳定提速。[测试报告](docs/test-report.md#stored-reference-output-20261117)、[性能报告](docs/performance-report-2026-10-30.md#stored-reference-output-cost-20261117)。
 
 ## 2026-11-17：减少查询中未使用字段的处理
 
