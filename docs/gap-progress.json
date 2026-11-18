@@ -2,6 +2,27 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-18 seek directly to literal range bounds for signed primary key pages",
+      "gap_ids": ["IDX-03", "QRY-01"],
+      "status": "partial",
+      "evidence": [
+        "src/access/BPTree.cpp",
+        "src/commands/TableManage.cpp",
+        "src/executor/ExecutionPlan.cpp",
+        "docs/test-report.md",
+        "docs/performance-report-2026-10-30.md"
+      ],
+      "tests": [
+        "tests/bptree_topology_corruption_test.cpp",
+        "tests/ordinary_scalar_order_protocol_e2e_test.py"
+      ],
+      "verification": [
+        "Both directions accept literal signed integer bounds, reversed operands, and conjunctions. SQL-visible output retains the existing filter and OFFSET evaluation. Exact fresh and legacy fixtures each pass 93 checks, including released and overlapping snapshots, rollback, and real SIGKILL and reopen. Eight native and five protocol entries pass, together with the manual example and independent normal/extended protocol admission checks.",
+        "The four 4096-row cases collect 8, 12, 28 or 8 heap row images and two index nodes each. The 9ea7512b baseline scans 4096 heap rows for each. All seven preflight queries return identical complete project replies, PostgreSQL 18.6 confirms the four accepted result shapes, and the original 273 item records remain unchanged. Bound parameters and extra non-key filters use their original paths.",
+        "The 84-batch timing compares 4032 measured SELECTs with identical replies and 12 normal process exits. Independent audit verifies 5172 replies and 184944 frames. The four range cases exceed the prespecified drift limit even with lower observed medians. Two other controls also exceed it, and the decimal control has mixed directions within the drift limit."
+      ]
+    },
+    {
       "issue": "2026-11-18 stop signed integer primary key index scans at the requested page",
       "gap_ids": ["IDX-03", "CONS-01", "P0-04"],
       "status": "partial",

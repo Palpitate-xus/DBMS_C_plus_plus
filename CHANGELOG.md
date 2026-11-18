@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>可以从上一页最后一个主键接着查 · 2026-11-18</summary>
+
+把上一页最后一个整数主键写进 `WHERE`，数据库可以直接定位到下一页，取够就停。升序和降序都支持，也可以同时设置起点和终点。
+
+[使用示例](docs/MANUAL.md#从上页主键继续读取) · [测试报告](docs/test-report.md#integer-primary-key-range-20261118) · [性能报告](docs/performance-report-2026-10-30.md#integer-primary-key-range-cost-20261118)
+
+</details>
+
+<details>
 <summary>整数主键翻页时，索引取够就停 · 2026-11-18</summary>
 
 新建或重建的整数主键索引按数字大小排列。部分分页查询从所需的一端读取，取够行就停。已有索引可以继续使用，符合条件的表可用 `REINDEX TABLE` 更新索引格式。
@@ -21,16 +30,13 @@
 </details>
 
 <details>
-<summary>排序时少做数组转换 · 2026-11-18</summary>
+<summary>查看更早的更新</summary>
+
+## 2026-11-18 · 排序时少做数组转换
 
 部分查询会先排序，再转换实际需要的数组。比如只取排序后的第一行时，后面行的无效数组不会提前报错。如果排序本身要用到转换结果，仍会先转换。
 
 [使用示例](docs/MANUAL.md#排序后再转换数组) · [测试报告](docs/test-report.md#ordered-projection-20261118) · [性能报告](docs/performance-report-2026-10-30.md#ordered-projection-cost-20261118)
-
-</details>
-
-<details>
-<summary>查看更早的更新</summary>
 
 ## 2026-11-18 · 能把更多查询结果写入表
 

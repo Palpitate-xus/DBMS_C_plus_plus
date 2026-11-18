@@ -9877,7 +9877,8 @@ static bool readLegacyIntegerIndexKeys(const BPTree& tree, const std::string& ty
 std::optional<OrderedPrimaryKeyReadPage> StorageEngine::tryReadOrderedIntegerPrimaryKey(
         const std::string& dbname, const std::string& tablename,
         const TableSchema& expectedSchema, size_t keyColumn, bool descending,
-        size_t count, size_t byteBudget) {
+        size_t count, size_t byteBudget, std::optional<int64_t> lower,
+        std::optional<int64_t> upper) {
     // Only files in the executable's locked data directory have the required
     // instance ownership. An external tablespace can outlive that lock.
     if (dataDirectory().empty() || !count || signedIntegerPrimaryKeyColumn(expectedSchema) != keyColumn ||
@@ -9922,13 +9923,16 @@ std::optional<OrderedPrimaryKeyReadPage> StorageEngine::tryReadOrderedIntegerPri
     // index needs room for both its decimal keys and numeric candidates.
     const size_t maxEntries = byteBudget / (2 * (sizeof(BPTree::LeafEntry) + sizeof(BPTree::IntegerEntry)));
     if (count > maxEntries) return {};
+    const bool bounded = lower.has_value() || upper.has_value();
     if (tree->usesSignedIntegerKeys()) {
-        const auto read = tree->readSignedIntegerPrefix(count, std::max<size_t>(64, maxEntries),
-            descending, candidates, result.indexNodesVisited);
+        if (bounded && !tree->rootPage()) return {};
+        const auto read = tree->readSignedIntegerRange(count, std::max<size_t>(64, maxEntries),
+            descending, lower, upper, candidates, result.indexNodesVisited);
         checkForQueryInterrupt();
-        if (read != BPTree::LeafEntriesResult::Complete || candidates.size() != count) return {};
+        if (read != BPTree::LeafEntriesResult::Complete || (!bounded && candidates.size() != count))
+            return {};
         result.orderedIndex = true;
-    } else if (!readLegacyIntegerIndexKeys(*tree,
+    } else if (bounded || !readLegacyIntegerIndexKeys(*tree,
         ExprHelper::canonicalResultTypeName(schema.cols[keyColumn].dataType),
         !schema.pkColIndices.empty(), descending, count, maxEntries, candidates)) return {};
     result.indexEntries = candidates.size();
@@ -9939,11 +9943,13 @@ std::optional<OrderedPrimaryKeyReadPage> StorageEngine::tryReadOrderedIntegerPri
         if (!getPageAllocator(dbname, tablename)) return {};
         allocator = pageAllocators_.at(dbname + "/" + tablename);
     }
-    result.rows.reserve(count);
+    const size_t rowsToRead = std::min(count, candidates.size());
+    result.rows.reserve(rowsToRead);
     size_t remaining = byteBudget - candidates.capacity() * sizeof(BPTree::IntegerEntry);
-    for (size_t i = 0; i < count; ++i) {
+    for (size_t i = 0; i < rowsToRead; ++i) {
         checkForQueryInterrupt();
         const auto [keyValue, rid] = candidates[i];
+        if ((lower && keyValue < *lower) || (upper && keyValue > *upper)) return {};
         std::string raw;
         std::vector<bool> bitmap(schema.len, false);
         {

@@ -91,6 +91,15 @@ public:
                                               std::vector<IntegerEntry>& entries,
                                               size_t& visitedNodes) const;
 
+    // Seek from either end of the closed interval. An absent bound allows
+    // every key in that direction. Result and page limits match the prefix API.
+    LeafEntriesResult readSignedIntegerRange(size_t count, size_t maxNodes,
+                                             bool descending,
+                                             std::optional<int64_t> lower,
+                                             std::optional<int64_t> upper,
+                                             std::vector<IntegerEntry>& entries,
+                                             size_t& visitedNodes) const;
+
     // Multi-value search: returns all values for a key (allows duplicates)
     std::vector<int64_t> searchMulti(const std::string& key) const;
 

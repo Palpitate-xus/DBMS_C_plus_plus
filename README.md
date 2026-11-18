@@ -19,6 +19,13 @@ cmake --build build/cmake --parallel 2
 ## 最近更新
 
 <details>
+<summary>可以从上一页最后一个主键接着查 · 2026-11-18</summary>
+
+把上一页最后一个整数主键写进 `WHERE`，数据库可以直接定位到下一页，取够就停。
+
+</details>
+
+<details>
 <summary>整数主键翻页时，索引取够就停 · 2026-11-18</summary>
 
 新建或重建的整数主键索引按数字大小排列。只取几行时，可以跳过这页之后的记录。
@@ -29,13 +36,6 @@ cmake --build build/cmake --parallel 2
 <summary>按整数主键翻页时少读表数据 · 2026-11-18</summary>
 
 按整数主键排序并只取几行时，数据库可以先从索引找出本次需要的记录，再读取对应的表行。
-
-</details>
-
-<details>
-<summary>排序时少做数组转换 · 2026-11-18</summary>
-
-部分查询会先排序，再转换实际需要的数组。例如，只取排序后的第一行时，可以只转换这一行的数组。
 
 </details>
 

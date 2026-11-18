@@ -110,6 +110,33 @@ def main():
         assert selected['indexEntries']==selected['heapRowsFetched']=='5',selected
         assert int(selected['indexNodesVisited'])==1,selected
         assert scan.get('actualRows',0)==0,scan
+        for label,sql,rows,fetched in (
+            ('bounded integer page with offset',
+             'SELECT p.k,p.payload FROM scalar_order_pk_int p '
+             'WHERE -100 <= p.k AND p.k < 10 ORDER BY p.k LIMIT 2 OFFSET 1;',
+             [['-2',None],['0','zero']],3),
+            ('descending integer page from reverse comparison',
+             'SELECT k,payload FROM scalar_order_pk_int WHERE 10 > k AND k > -100 ORDER BY k DESC LIMIT 2;',
+             [['2',''],['0','zero']],2),
+            ('short integer page',
+             'SELECT k,payload FROM scalar_order_pk_int WHERE k > 2147483646 ORDER BY k LIMIT 3;',
+             [['2147483647','max']],1),
+            ('contradictory integer range',
+             'SELECT k,payload FROM scalar_order_pk_int WHERE k > 10 AND k < -2 ORDER BY k LIMIT 3;',
+             [],0),
+        ):
+            control(label,sql,rows=rows,oids=[23,25])
+            selected,scan=page_plan(sql)
+            assert selected['indexKeyRange']=='true' and selected['usedPrimaryKeyPage']=='true',selected
+            assert int(selected['indexEntries'])==int(selected['heapRowsFetched'])==fetched,selected
+            assert scan.get('actualRows',0)==0,scan
+        before=calls()
+        control('bounded integer page evaluates offset rows',
+                'SELECT scalar_order_writer(k) FROM scalar_order_pk_int '
+                'WHERE k >= -2 AND k <= 10 ORDER BY k LIMIT 1 OFFSET 1;',rows=[['0']])
+        effect('bounded integer page evaluates offset rows',before,2)
+        ok('SELECT id FROM scalar_order_sink ORDER BY id;',[['-2'],['0']])
+        ok('DELETE FROM scalar_order_sink;')
         control('fractional primary key equality',
                 'SELECT k FROM scalar_order_pk_int WHERE k=2.5;',rows=[],oids=[23])
         control('out-of-range primary key equality',

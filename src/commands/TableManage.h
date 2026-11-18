@@ -1622,7 +1622,8 @@ public:
     std::optional<OrderedPrimaryKeyReadPage> tryReadOrderedIntegerPrimaryKey(
         const std::string& dbname, const std::string& tablename,
         const TableSchema& expectedSchema, size_t keyColumn, bool descending,
-        size_t count, size_t byteBudget);
+        size_t count, size_t byteBudget, std::optional<int64_t> lower = {},
+        std::optional<int64_t> upper = {});
 
     // Schema helpers (public for execution plan use)
     static std::string extractPKValue(const std::string& rowBuffer, const TableSchema& tbl);

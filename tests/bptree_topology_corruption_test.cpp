@@ -208,6 +208,24 @@ void test_signed_integer_prefix_and_legacy_reopen() {
         assert(entries.size() == 160 && entries.back().key == 51 && visits > lastPageVisits);
         assert(tree.readSignedIntegerPrefix(500, 64, false, entries, visits) == LeafEntriesResult::Complete);
         assert(entries.size() == 422 && visits > firstPageVisits && visits > lastPageVisits);
+        const size_t fullVisits = visits;
+        for (const bool descending : {false, true}) {
+            assert(tree.readSignedIntegerRange(200, 64, descending, -99, 12, entries, visits) ==
+                   LeafEntriesResult::Complete);
+            assert(entries.size() == 112 && visits < fullVisits);
+            for (size_t i = 0; i < entries.size(); ++i) {
+                const auto key = descending ? 12 - static_cast<int64_t>(i) : -99 + static_cast<int64_t>(i);
+                assert(entries[i].key == key && entries[i].value == key + 1000);
+            }
+            assert(tree.readSignedIntegerRange(1, 64, descending, low, low, entries, visits) ==
+                   LeafEntriesResult::Complete);
+            assert(entries.size() == 1 && entries.front().key == low);
+            assert(tree.readSignedIntegerRange(1, 64, descending, high, high, entries, visits) ==
+                   LeafEntriesResult::Complete);
+            assert(entries.size() == 1 && entries.front().key == high);
+        }
+        assert(tree.readSignedIntegerRange(10, 64, false, 12, -99, entries, visits) == LeafEntriesResult::Complete);
+        assert(entries.empty() && visits == 0);
         assert(tree.readSignedIntegerPrefix(5, 1, false, entries, visits) == LeafEntriesResult::LimitExceeded);
         assert(entries.empty());
     }

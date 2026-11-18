@@ -1187,6 +1187,16 @@ SELECT id, note FROM example_pk_page ORDER BY id LIMIT 2 OFFSET 1;
 
 结果为 `-2, b` 和 `2, NULL`。升序和降序都按数值排列。默认表空间的新主键索引可以取够记录就停。已有索引仍可继续用，也可以用 `REINDEX TABLE example_pk_page;` 更新其格式。查询需要读取事务早些时候的数据、存在未完成的写入或内存不足时，可以走普通表扫描和排序。[索引格式](PACKAGING.md#整数主键索引格式) · [测试范围](test-report.md#signed-primary-key-prefix-20261118)
 
+#### 从上页主键继续读取
+
+上页最后一个编号是 `-2` 时，把它写成查询条件，直接从下一条记录开始。
+
+```sql
+SELECT id, note FROM example_pk_page WHERE id > -2 ORDER BY id LIMIT 2;
+```
+
+结果为 `2, NULL` 和 `10, d`。按降序翻页可改用 `<` 和 `ORDER BY id DESC`。用 `EXPLAIN (ANALYZE, FORMAT JSON)` 可以查看是否按范围定位，字段为 `indexKeyRange`。[测试范围](test-report.md#integer-primary-key-range-20261118)
+
 2026-11-02 起，类型化执行器中的普通有序 `LIMIT` 优先使用最多 `LIMIT+OFFSET` 个候选的有界堆，
 覆盖执行阶段可接入的单表查询及参数化查询，保留多列方向、NULL 顺序、类型值和原始同行顺序。
 所有必要排序键仍对全部输入求值；不参与排序的 volatile 输出按实际输出需求求值。

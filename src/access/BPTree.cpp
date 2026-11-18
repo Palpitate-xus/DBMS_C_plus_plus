@@ -56,6 +56,17 @@ int64_t readIntegerStoredKey(const std::string& key) {
     }
     return static_cast<int64_t>(biased - kIntegerSignBias);
 }
+
+std::string storeIntegerKey(int64_t value) {
+    uint64_t biased = static_cast<uint64_t>(value) ^ kIntegerSignBias;
+    std::string stored(BP_KEY_LEN, '\0');
+    auto* bytes = reinterpret_cast<unsigned char*>(stored.data());
+    for (size_t i = kIntegerKeyBytes; i > 0; --i) {
+        bytes[i - 1] = static_cast<unsigned char>(biased);
+        biased >>= 8;
+    }
+    return stored;
+}
 }  // namespace
 
 // Index buffer-pool frame count. Overridable with DBMS_INDEX_BUFFER_FRAMES.
@@ -104,15 +115,7 @@ std::optional<std::string> BPTree::keyForStorage(const std::string& key) const {
     int64_t value = 0;
     const auto parsed = std::from_chars(first, last, value);
     if (parsed.ec != std::errc{} || parsed.ptr != last) return std::nullopt;
-
-    uint64_t biased = static_cast<uint64_t>(value) ^ kIntegerSignBias;
-    std::string stored(BP_KEY_LEN, '\0');
-    auto* bytes = reinterpret_cast<unsigned char*>(stored.data());
-    for (size_t i = kIntegerKeyBytes; i > 0; --i) {
-        bytes[i - 1] = static_cast<unsigned char>(biased);
-        biased >>= 8;
-    }
-    return stored;
+    return storeIntegerKey(value);
 }
 
 // ========================================================================
@@ -1004,6 +1007,14 @@ BPTree::LeafEntriesResult BPTree::readLeafEntriesChecked(
 BPTree::LeafEntriesResult BPTree::readSignedIntegerPrefix(
         size_t count, size_t maxNodes, bool descending,
         std::vector<IntegerEntry>& entries, size_t& visitedNodes) const {
+    return readSignedIntegerRange(count, maxNodes, descending, std::nullopt,
+                                  std::nullopt, entries, visitedNodes);
+}
+
+BPTree::LeafEntriesResult BPTree::readSignedIntegerRange(
+        size_t count, size_t maxNodes, bool descending,
+        std::optional<int64_t> lower, std::optional<int64_t> upper,
+        std::vector<IntegerEntry>& entries, size_t& visitedNodes) const {
     std::shared_lock<std::shared_mutex> treeLock(treeMutex_);
     entries.clear();
     visitedNodes = 0;
@@ -1011,16 +1022,20 @@ BPTree::LeafEntriesResult BPTree::readSignedIntegerPrefix(
         header_.reserved != bptree_format::kSignedIntegerKeyFormat) {
         return LeafEntriesResult::Error;
     }
-    if (count == 0 || header_.rootPage == 0) return LeafEntriesResult::Complete;
+    if (count == 0 || header_.rootPage == 0 || (lower && upper && *lower > *upper)) {
+        return LeafEntriesResult::Complete;
+    }
 
+    const auto firstKey = lower ? std::optional(storeIntegerKey(*lower)) : std::nullopt;
+    const auto lastKey = upper ? std::optional(storeIntegerKey(*upper)) : std::nullopt;
     std::vector<IntegerEntry> result;
     std::unordered_set<uint32_t> visited;
     std::optional<size_t> leafDepth;
     uint32_t lastLeaf = 0;
     uint32_t lastNextLeaf = 0;
-    bool unvisitedChild = false;
     const auto collect = [&](const auto& self, uint32_t page, size_t depth,
-                             const std::string* lower, const std::string* upper)
+                             const std::string* lowerFence, const std::string* upperFence,
+                             bool rightEdge)
             -> LeafEntriesResult {
         if (depth >= kMaxTraversalDepth || visited.find(page) != visited.end())
             return LeafEntriesResult::Error;
@@ -1031,40 +1046,48 @@ BPTree::LeafEntriesResult BPTree::readSignedIntegerPrefix(
         if (!node) return LeafEntriesResult::Error;
         // With unique keys, the left child excludes its upper separator.
         // Removal may leave the right child above its lower separator.
-        if (!node->keys.empty() && ((lower && node->keys.front() < *lower) ||
-                                    (upper && node->keys.back() >= *upper))) {
+        if (!node->keys.empty() &&
+            ((lowerFence && node->keys.front() < *lowerFence) ||
+             (upperFence && node->keys.back() >= *upperFence))) {
             return LeafEntriesResult::Error;
         }
         if (!node->isLeaf) {
             if (std::adjacent_find(node->keys.begin(), node->keys.end()) !=
                 node->keys.end()) return LeafEntriesResult::Error;
-            for (size_t position = 0; position < node->children.size(); ++position) {
-                if (result.size() == count) {
-                    unvisitedChild = true;
-                    break;
-                }
-                const size_t i = descending
-                    ? node->children.size() - 1 - position : position;
+            // Equality to a separator belongs to the child on its right.
+            // Include that child when either closed query bound equals it.
+            const size_t first = firstKey
+                ? upperBoundIdx(node->keys, node->numKeys, *firstKey) : 0;
+            const size_t end = lastKey
+                ? upperBoundIdx(node->keys, node->numKeys, *lastKey) + 1
+                : node->children.size();
+            for (size_t offset = 0; offset < end - first && result.size() != count; ++offset) {
+                const size_t i = descending ? end - 1 - offset : first + offset;
                 const auto status = self(self, node->children[i], depth + 1,
-                    i ? &node->keys[i - 1] : lower,
-                    i < node->keys.size() ? &node->keys[i] : upper);
+                    i ? &node->keys[i - 1] : lowerFence,
+                    i < node->keys.size() ? &node->keys[i] : upperFence,
+                    rightEdge && i + 1 == node->children.size());
                 if (status != LeafEntriesResult::Complete) return status;
             }
             return LeafEntriesResult::Complete;
         }
 
-        // The existing forward leaf links validate adjacency in either
-        // direction. The first leaf in a reverse scan must end that chain.
-        if ((leafDepth && *leafDepth != depth) ||
-            (descending && node->nextLeaf != lastLeaf) ||
-            (!descending && ((lastLeaf && lastNextLeaf != page) ||
-                             visited.find(node->nextLeaf) != visited.end()))) {
+        // The selected children form a contiguous traversal. Check the
+        // links between reached leaves and the end of the tree when reached.
+        const bool validNextLeaf = descending && lastLeaf
+            ? node->nextLeaf == lastLeaf
+            : rightEdge == (node->nextLeaf == 0) && visited.find(node->nextLeaf) == visited.end();
+        if ((leafDepth && *leafDepth != depth) || !validNextLeaf ||
+            (!descending && lastLeaf && lastNextLeaf != page)) {
             return LeafEntriesResult::Error;
         }
         leafDepth = depth;
         lastLeaf = page;
         lastNextLeaf = node->nextLeaf;
-        const size_t take = std::min(node->keys.size(), count - result.size());
+        const size_t first = firstKey ? lowerBoundIdx(node->keys, node->numKeys, *firstKey) : 0;
+        const size_t end = lastKey
+            ? upperBoundIdx(node->keys, node->numKeys, *lastKey) : node->keys.size();
+        const size_t take = std::min(end - first, count - result.size());
         const size_t required = result.size() + take;
         if (required > result.capacity()) {
             const size_t capacity = result.capacity();
@@ -1072,7 +1095,7 @@ BPTree::LeafEntriesResult BPTree::readSignedIntegerPrefix(
             result.reserve(std::max(required, grown));
         }
         for (size_t position = 0; position < take; ++position) {
-            const size_t i = descending ? node->keys.size() - 1 - position : position;
+            const size_t i = descending ? end - 1 - position : first + position;
             const int64_t key = readIntegerStoredKey(node->keys[i]);
             if (!result.empty() && (descending ? key >= result.back().key
                                                : key <= result.back().key)) {
@@ -1083,10 +1106,9 @@ BPTree::LeafEntriesResult BPTree::readSignedIntegerPrefix(
         return LeafEntriesResult::Complete;
     };
 
-    const auto status = collect(collect, header_.rootPage, 0, nullptr, nullptr);
+    const auto status = collect(collect, header_.rootPage, 0, nullptr, nullptr, true);
     if (status != LeafEntriesResult::Complete) return status;
-    if (!leafDepth || (!descending && (lastNextLeaf != 0) != unvisitedChild))
-        return LeafEntriesResult::Error;
+    if (!leafDepth) return LeafEntriesResult::Error;
     entries = std::move(result);
     return LeafEntriesResult::Complete;
 }
