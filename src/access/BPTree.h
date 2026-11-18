@@ -63,6 +63,18 @@ public:
                           std::vector<int64_t>& values) const;
     bool allValuesChecked(std::vector<int64_t>& values) const;
 
+    struct LeafEntry {
+        std::array<char, BP_KEY_LEN> key;
+        int64_t value;
+    };
+    enum class LeafEntriesResult { Complete, LimitExceeded, Error };
+
+    // Copy at most maxEntries fixed-width leaf keys and their values in tree
+    // order. A failed or over-limit read clears entries. Callers can process
+    // the copied data after the shared tree latch is released.
+    LeafEntriesResult readLeafEntriesChecked(size_t maxEntries,
+                                             std::vector<LeafEntry>& entries) const;
+
     // Multi-value search: returns all values for a key (allows duplicates)
     std::vector<int64_t> searchMulti(const std::string& key) const;
 

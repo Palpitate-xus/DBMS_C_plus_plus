@@ -854,4 +854,72 @@ bool BPTree::allValuesChecked(std::vector<int64_t>& values) const {
     return rangeScanChecked("", std::string(BP_KEY_LEN, '\xFF'), values);
 }
 
+BPTree::LeafEntriesResult BPTree::readLeafEntriesChecked(
+        size_t maxEntries, std::vector<LeafEntry>& entries) const {
+    std::shared_lock<std::shared_mutex> treeLock(treeMutex_);
+    entries.clear();
+    if (!bp_ || !bp_->isOpen()) return LeafEntriesResult::Error;
+    if (!header_.rootPage) return LeafEntriesResult::Complete;
+
+    std::vector<LeafEntry> result;
+    // Deletion can leave a mostly empty tree. Bound its traversal even
+    // when almost none of the visited pages contribute to the entry limit.
+    const size_t maxNodes = std::max(maxEntries, kMaxTraversalDepth);
+    std::unordered_set<uint32_t> visited;
+    std::optional<size_t> leafDepth;
+    uint32_t nextLeaf = 0;
+    const auto collect = [&](const auto& self, uint32_t page, size_t depth,
+                             const std::string* lower, const std::string* upper)
+            -> LeafEntriesResult {
+        if (visited.size() == maxNodes) return LeafEntriesResult::LimitExceeded;
+        if (depth >= kMaxTraversalDepth || !visited.insert(page).second)
+            return LeafEntriesResult::Error;
+        const auto node = readNode(page);
+        if (!node) return LeafEntriesResult::Error;
+        // Deleted keys may leave a separator that no longer equals the first
+        // key of its right child. Equal keys may also span two children.
+        if (!node->keys.empty() && ((lower && node->keys.front() < *lower) ||
+                                    (upper && node->keys.back() > *upper)))
+            return LeafEntriesResult::Error;
+
+        if (!node->isLeaf) {
+            for (size_t i = 0; i < node->children.size(); ++i) {
+                const auto status = self(self, node->children[i], depth + 1,
+                    i ? &node->keys[i - 1] : lower,
+                    i < node->keys.size() ? &node->keys[i] : upper);
+                if (status != LeafEntriesResult::Complete) return status;
+            }
+            return LeafEntriesResult::Complete;
+        }
+
+        // Both the child graph and the independent leaf chain must name
+        // every reached leaf in the same order, including empty leaves.
+        if (leafDepth && (*leafDepth != depth || nextLeaf != page))
+            return LeafEntriesResult::Error;
+        leafDepth = depth;
+        nextLeaf = node->nextLeaf;
+        if (node->numKeys > maxEntries - result.size())
+            return LeafEntriesResult::LimitExceeded;
+        const size_t required = result.size() + node->numKeys;
+        if (required > result.capacity()) {
+            const size_t capacity = result.capacity();
+            const size_t grown = capacity + std::min(capacity, maxEntries - capacity);
+            result.reserve(std::max(required, grown));
+        }
+        for (size_t i = 0; i < node->numKeys; ++i) {
+            LeafEntry entry;
+            std::copy_n(node->keys[i].data(), BP_KEY_LEN, entry.key.begin());
+            entry.value = node->values[i];
+            result.push_back(entry);
+        }
+        return LeafEntriesResult::Complete;
+    };
+
+    const auto status = collect(collect, header_.rootPage, 0, nullptr, nullptr);
+    if (status != LeafEntriesResult::Complete) return status;
+    if (!leafDepth || nextLeaf) return LeafEntriesResult::Error;
+    entries = std::move(result);
+    return LeafEntriesResult::Complete;
+}
+
 } // namespace dbms

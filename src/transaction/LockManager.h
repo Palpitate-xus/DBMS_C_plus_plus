@@ -36,6 +36,8 @@ public:
     [[nodiscard]] bool lockShared(const std::string& table);
     // Acquire exclusive lock. Returns true on success, false if deadlock detected.
     [[nodiscard]] bool lockExclusive(const std::string& table);
+    // Acquire a new exclusive token once. Existing ownership is never upgraded.
+    [[nodiscard]] bool lockExclusiveNoWait(const std::string& table);
     // Acquire intent shared lock (used before row-level shared locks).
     [[nodiscard]] bool lockIntentShared(const std::string& table);
     // Acquire intent exclusive lock (used before row-level exclusive locks).

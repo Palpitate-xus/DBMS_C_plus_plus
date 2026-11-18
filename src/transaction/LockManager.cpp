@@ -768,6 +768,33 @@ bool LockManager::lockExclusive(const std::string& table) {
     return acquireLock(table, LockMode::Exclusive);
 }
 
+bool LockManager::lockExclusiveNoWait(const std::string& table) {
+    const auto self = std::this_thread::get_id();
+    std::lock_guard<std::mutex> guard(globalMutex_);
+    auto& state = locks_[resourceKey(table)];
+    if (!state.holders.empty() || !state.suspendedTransactions.empty()) return false;
+    std::unique_lock<std::shared_mutex> token(state.mtx, std::try_to_lock);
+    if (!token.owns_lock()) return false;
+    try {
+        if (tryAcquireProcessLock(state, table, LockMode::Exclusive) != ProcessLockResult::Acquired) {
+            releaseProcessLock(state);
+            return false;
+        }
+        state.holders.push_back(self);
+        state.holderModes.emplace(self, LockMode::Exclusive);
+        state.holderCounts.emplace(self, 1);
+    } catch (...) {
+        state.holders.clear();
+        state.holderModes.erase(self);
+        state.holderCounts.erase(self);
+        releaseProcessLock(state);
+        throw;
+    }
+    state.exclusive = true;
+    (void) token.release();
+    return true;
+}
+
 bool LockManager::lockIntentShared(const std::string& table) {
     return acquireLock(table, LockMode::IntentShared);
 }

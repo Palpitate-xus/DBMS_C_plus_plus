@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -12,6 +13,11 @@ struct HeapScanRow {
     int64_t rid = 0;
     std::string data;
     std::vector<bool> nulls;
+};
+
+struct OrderedPrimaryKeyReadPage {
+    std::vector<HeapScanRow> rows;
+    std::size_t indexEntries = 0;
 };
 
 class HeapScanCursor {

@@ -21,6 +21,7 @@ constexpr size_t kPageSize = dbms::BP_PAGE_SIZE;
 constexpr size_t kChecksumOffset = kPageSize - sizeof(uint32_t);
 constexpr uint16_t kLegacyChecksummedFormat = 0xC551;
 constexpr uint16_t kPageBoundChecksummedFormat = 0xC552;
+using LeafEntriesResult = dbms::BPTree::LeafEntriesResult;
 
 uint32_t legacyChecksum(const char* page) {
     uint32_t crc = 0xFFFFFFFFu;
@@ -120,15 +121,45 @@ void test_checked_lookup_distinguishes_absence() {
     assert(tree.searchMultiChecked("missing", values) && values.empty());
     assert(tree.rangeScanChecked("a", "z", values) && values.empty());
     assert(tree.allValuesChecked(values) && values.empty());
+    std::vector<dbms::BPTree::LeafEntry> entries(1);
+    assert(tree.readLeafEntriesChecked(0, entries) == LeafEntriesResult::Complete && entries.empty());
     assert(tree.insert("key", 11));
     assert(tree.searchChecked("key", value) == dbms::BPTree::SearchResult::Found);
     assert(value == 11);
     assert(tree.searchChecked("missing", value) ==
            dbms::BPTree::SearchResult::NotFound);
+    assert(tree.insert("2", 22));
+    assert(tree.insert("10", 33));
+    assert(tree.readLeafEntriesChecked(3, entries) == LeafEntriesResult::Complete);
+    assert(entries.size() == 3);
+    assert(std::string(entries.front().key.data(), dbms::BP_KEY_LEN) ==
+           dbms::BPTree::normalizeKeyForComparison("10"));
+    assert(entries[0].value == 33 && entries[1].value == 22 && entries[2].value == 11);
+    assert(tree.readLeafEntriesChecked(2, entries) == LeafEntriesResult::LimitExceeded && entries.empty());
     tree.close();
     assert(tree.searchChecked("key", value) == dbms::BPTree::SearchResult::Error);
     assert(!tree.searchMultiChecked("key", values));
+    assert(tree.readLeafEntriesChecked(3, entries) == LeafEntriesResult::Error && entries.empty());
     cleanup(path);
+}
+
+void test_leaf_entry_scan_bounds_sparse_tree() {
+    const auto directory = createTempDir();
+    dbms::BPTree tree(directory / "sparse.idx");
+    assert(tree.open());
+    constexpr int rowCount = 4096;
+    for (int i = 0; i < rowCount; ++i)
+        assert(tree.insert(std::to_string(10000 + i), 1 + i));
+    for (int i = 1; i < rowCount - 1; ++i)
+        assert(tree.remove(std::to_string(10000 + i)));
+
+    std::vector<dbms::BPTree::LeafEntry> entries(1);
+    assert(tree.readLeafEntriesChecked(2, entries) == LeafEntriesResult::LimitExceeded);
+    assert(entries.empty());
+    assert(tree.readLeafEntriesChecked(rowCount, entries) == LeafEntriesResult::Complete);
+    assert(entries.size() == 2 && entries.front().value == 1 && entries.back().value == rowCount);
+    tree.close();
+    std::filesystem::remove_all(directory);
 }
 
 void test_checksummed_index_page_rejects_corruption() {
@@ -178,6 +209,11 @@ void test_checksummed_index_rejects_swapped_pages() {
             key.insert(0, 4 - key.size(), '0');
             assert(tree.insert("key-" + key, i));
         }
+        std::vector<dbms::BPTree::LeafEntry> entries;
+        assert(tree.readLeafEntriesChecked(200, entries) == LeafEntriesResult::Complete);
+        assert(entries.size() == 200);
+        for (int i = 0; i < 200; ++i) assert(entries[i].value == i);
+        assert(tree.readLeafEntriesChecked(199, entries) == LeafEntriesResult::LimitExceeded && entries.empty());
         assert(tree.flush());
         tree.close();
     }
@@ -208,6 +244,8 @@ void test_checksummed_index_rejects_swapped_pages() {
             // clean NotFound caused by looking in the swapped sibling page.
             assert(tree.searchChecked("key-0000", value) ==
                    dbms::BPTree::SearchResult::Error);
+            std::vector<dbms::BPTree::LeafEntry> entries(1);
+            assert(tree.readLeafEntriesChecked(200, entries) == LeafEntriesResult::Error && entries.empty());
         }
         tree.close();
     }
@@ -279,6 +317,8 @@ void test_internal_page_cycle_fails_closed() {
     assert(!tree.rangeScanChecked("a", "z", values) && values.empty());
     values = {99};
     assert(!tree.allValuesChecked(values) && values.empty());
+    std::vector<dbms::BPTree::LeafEntry> entries(1);
+    assert(tree.readLeafEntriesChecked(4, entries) == LeafEntriesResult::Error && entries.empty());
     assert(!tree.insert("key", 1));
     assert(!tree.insertMulti("key", 1));
     assert(!tree.remove("key"));
@@ -301,6 +341,8 @@ void test_leaf_chain_cycle_and_type_confusion_fail_closed() {
         assert(tree.searchMulti("key").empty());
         std::vector<int64_t> values{99};
         assert(!tree.searchMultiChecked("key", values) && values.empty());
+        std::vector<dbms::BPTree::LeafEntry> entries(1);
+        assert(tree.readLeafEntriesChecked(4, entries) == LeafEntriesResult::Error && entries.empty());
         tree.close();
     }
 
@@ -320,15 +362,61 @@ void test_leaf_chain_cycle_and_type_confusion_fail_closed() {
     cleanup(path);
 }
 
+void test_leaf_entry_scan_validates_sibling_links_and_separators() {
+    const auto tempDir = createTempDir();
+    const auto path = tempDir / "leaf_entries.idx";
+    std::vector<char> bytes(4 * kPageSize, 0);
+    writeHeader(bytes, 1, 4);
+    putU16(bytes, kPageSize + 1, 1);
+    bytes[kPageSize + 3] = 'b';
+    putU32(bytes, kPageSize + 3 + dbms::BP_KEY_LEN, 2);
+    putU32(bytes, kPageSize + 3 + dbms::BP_KEY_LEN + sizeof(uint32_t), 3);
+    writeLeaf(bytes, 2, "a", 11, 3);
+    writeLeaf(bytes, 3, "c", 22, 0);
+
+    // A separator can still divide its children after the original key
+    // has been deleted from the right-hand leaf.
+    std::vector<dbms::BPTree::LeafEntry> entries;
+    publish(path.string(), bytes);
+    {
+        dbms::BPTree tree(path);
+        assert(tree.openExisting());
+        assert(tree.readLeafEntriesChecked(2, entries) == LeafEntriesResult::Complete);
+        assert(entries.size() == 2 && entries[0].value == 11 && entries[1].value == 22);
+    }
+
+    // The child graph still lists both leaves, but the leaf chain drops one.
+    writeLeaf(bytes, 2, "a", 11, 0);
+    publish(path.string(), bytes);
+    {
+        dbms::BPTree tree(path);
+        assert(tree.openExisting());
+        assert(tree.readLeafEntriesChecked(2, entries) == LeafEntriesResult::Error && entries.empty());
+    }
+
+    // Restore the leaf links and break the boundary between the children.
+    writeLeaf(bytes, 2, "a", 11, 3);
+    bytes[kPageSize + 3] = 'd';
+    publish(path.string(), bytes);
+    {
+        dbms::BPTree tree(path);
+        assert(tree.openExisting());
+        assert(tree.readLeafEntriesChecked(2, entries) == LeafEntriesResult::Error && entries.empty());
+    }
+    std::filesystem::remove_all(tempDir);
+}
+
 }  // namespace
 
 int main() {
     test_checked_lookup_distinguishes_absence();
+    test_leaf_entry_scan_bounds_sparse_tree();
     test_checksummed_index_page_rejects_corruption();
     test_checksummed_index_rejects_swapped_pages();
     test_previous_checksummed_format_remains_readable();
     test_internal_page_cycle_fails_closed();
     test_leaf_chain_cycle_and_type_confusion_fail_closed();
+    test_leaf_entry_scan_validates_sibling_links_and_separators();
     std::cout << "[BPTREE TOPOLOGY] cycles and invalid leaf links rejected OK\n";
     return 0;
 }

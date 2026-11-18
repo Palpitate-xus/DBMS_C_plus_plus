@@ -1175,6 +1175,18 @@ SELECT * FROM users ORDER BY AGE NULLS FIRST;
 序号（例如 ORDER BY 2）。这与 ORDER BY 表达式中按输入列解析名字不同，
 详见[重复别名规则](issue-review-o05-order-by-duplicate-alias.md)。
 
+#### 按整数主键翻页
+
+没有过滤条件时，普通单表查询可以从整数主键索引中找出分页需要的记录。
+
+```sql
+CREATE TABLE example_pk_page (id bigint PRIMARY KEY, note text);
+INSERT INTO example_pk_page VALUES (-10,'a'),(-2,'b'),(2,NULL),(10,'d');
+SELECT id, note FROM example_pk_page ORDER BY id LIMIT 2 OFFSET 1;
+```
+
+结果为 `-2, b` 和 `2, NULL`。升序和降序都按数值排列。数据库在默认表空间中尝试这项优化。查询使用旧快照、存在未完成的事务或需要读取较多数据时，可以走普通表扫描和排序。[测试范围](test-report.md#integer-primary-key-page-20261118)
+
 2026-11-02 起，类型化执行器中的普通有序 `LIMIT` 优先使用最多 `LIMIT+OFFSET` 个候选的有界堆，
 覆盖执行阶段可接入的单表查询及参数化查询，保留多列方向、NULL 顺序、类型值和原始同行顺序。
 所有必要排序键仍对全部输入求值；不参与排序的 volatile 输出按实际输出需求求值。

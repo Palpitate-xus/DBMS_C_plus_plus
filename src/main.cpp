@@ -71,6 +71,7 @@
 #include "commands/DdlExecutor.h"
 #include "commands/DdlTransaction.h"
 #include "commands/DmlExecutor.h"
+#include "commands/StoredRowNull.h"
 #include "catalog/CatalogService.h"
 #include "catalog/namespace_catalog.h"
 #include "catalog/namespace_query.h"
@@ -5948,6 +5949,7 @@ static bool handleExplain(const string& sql, Session& s) {
         };
         captureInteger(select->whereClause.get());
         if (!select->ctes.empty() || explainNeedsTypedPlan(*select) ||
+            dbms::QueryPlanner::mayUseIntegerPrimaryKeyPage(&g_engine,s.currentDB,*prepared,*select) ||
             (directCall && directCall->setReturning))
             // Consume the same owned, bound query on the real execution
             // root, including its source/demand contexts and pure planning.
@@ -21056,6 +21058,9 @@ class PreparedWithDmlRuntime {
                     string raw;
                     found=scan->next(raw);
                     if(!found && scan->hasError())throw dbms::DbError("XX000",scan->errorMessage());
+                    vector<bool> bitmap;
+                    optional<dbms::detail::ScopedStoredRowNullBitmap> nullOwner;
+                    if (found && scan->lastStoredNullBitmap(bitmap)) nullOwner.emplace(scanSchema, bitmap);
                     if(found)for(size_t i=0;i<scanSchema.len;++i) {
                         const auto& column=scanSchema.cols[i];
                         if(column.generatedKind=='v'){cells.emplace_back();continue;}

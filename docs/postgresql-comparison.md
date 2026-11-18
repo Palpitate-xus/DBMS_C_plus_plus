@@ -2,9 +2,13 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-18 · 整数主键分页
+
+PostgreSQL 能按数值顺序读 B 树并在取够行时结束。本项目遍历现有十进制索引键，按数值选出需要的记录，只读取到这一页结束为止的表行。三项小页查询的表读取量从 384 行降为 8、12 和 15 行。索引按数值取够即停仍待实现。本次比较检查了 PostgreSQL 的执行计划和结果，耗时仅对照本项目的新旧版本。[测试范围](test-report.md#integer-primary-key-page-20261118) · [实际性能](performance-report-2026-10-30.md#integer-primary-key-page-cost-20261118)
+
 ## 2026-11-18 · 排序后计算查询结果
 
-PostgreSQL 可以按索引顺序读取，也可以先扫描再排序。实测中，走索引时会按需转换数组，普通堆表排序会先做简单转换，较昂贵的转换可放在排序之后。本批改善项目版的取行行为，使用现有排序节点和已有的行数据。通用有序索引扫描和完整代价模型仍待实现。[测试范围](test-report.md#ordered-projection-20261118) · [实际性能](performance-report-2026-10-30.md#ordered-projection-cost-20261118)
+PostgreSQL 可以按索引顺序读取，也可以先扫描再排序。实测中，走索引时会按需转换数组，普通堆表排序会先做简单转换，较昂贵的转换可放在排序之后。该批改善了项目版的取行行为。[测试范围](test-report.md#ordered-projection-20261118) · [实际性能](performance-report-2026-10-30.md#ordered-projection-cost-20261118) · [随后实现的整数主键分页](test-report.md#integer-primary-key-page-20261118)
 
 ## 2026-11-18 · 从包含联接的子查询写入
 

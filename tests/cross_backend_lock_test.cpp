@@ -75,6 +75,18 @@ int main() {
     gateCv.notify_all();
     holder.join();
 
+    // An optional scan's exclusive token must leave an existing shared
+    // token alone, even when the current thread owns it.
+    first.getLockManager().setResourceNamespace(dbA);
+    second.getLockManager().setResourceNamespace(dbA);
+    assert(first.getLockManager().lockShared("items"));
+    assert(!first.getLockManager().lockExclusiveNoWait("items"));
+    assert(!second.getLockManager().lockExclusiveNoWait("items"));
+    first.getLockManager().unlock("items");
+    assert(second.getLockManager().lockExclusiveNoWait("items"));
+    assert(!second.getLockManager().lockExclusiveNoWait("items"));
+    second.getLockManager().unlock("items");
+
     // Wait policies belong to the backend thread, not to the shared
     // registry. A short timeout configured by one backend must not cause an
     // unconfigured backend to abort its wait before the holder releases.
@@ -126,8 +138,10 @@ int main() {
         dbms::LockManager childManager;
         childManager.setResourceNamespace(dbA);
         childManager.setLockTimeout(75);
+        const bool immediate = childManager.lockExclusiveNoWait("items");
+        if (immediate) childManager.unlock("items");
         const bool acquired = childManager.lockShared("items");
-        ::_exit(acquired ? 1 : 0);
+        ::_exit(immediate || acquired ? 1 : 0);
     }
     int childStatus = 0;
     assert(::waitpid(child, &childStatus, 0) == child);

@@ -1395,6 +1395,8 @@ public:
     // the complete query namespace; this consumes its retained typed AST.
     static bool supportsPreparedSelectPlan(const SelectStmt& select);
     static bool supportsPreparedSourceSelectPlan(const SelectStmt& select, bool selectBodyOnly = false);
+    static bool mayUseIntegerPrimaryKeyPage(StorageEngine* engine, const std::string& database,
+        const PreparedQuery& query, const SelectStmt& select);
     static OpPtr buildPreparedSelectPlan(StorageEngine* engine,
         const std::string& dbname, const std::string& tablename,
         PreparedQuery prepared);

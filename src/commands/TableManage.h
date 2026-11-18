@@ -23,6 +23,7 @@
 #include <utility>
 
 #include "DateType.h"
+#include "commands/HeapScanCursor.h"
 #include "StoredReferenceOutputRole.h"
 #include "table_schema.h"
 #include "dbms_defs.h"
@@ -38,7 +39,6 @@ struct QueryReturningOrigin;
 class LocalExpressionSyntax;
 
 class CatalogService;
-class HeapScanCursor;
 struct SavepointImageReceipt;
 namespace analyzed_statistics { struct Column; class ReadCache; }
 
@@ -1616,6 +1616,13 @@ public:
                              const TableSchema& tbl,
                              const ReadView* readView = nullptr,
                              bool* readFailed = nullptr) const;
+
+    // Own the complete ordered prefix before exposing any row. An unavailable
+    // prefix uses the caller's ordinary heap scan and sort.
+    std::optional<OrderedPrimaryKeyReadPage> tryReadOrderedIntegerPrimaryKey(
+        const std::string& dbname, const std::string& tablename,
+        const TableSchema& expectedSchema, size_t keyColumn, bool descending,
+        size_t count, size_t byteBudget);
 
     // Schema helpers (public for execution plan use)
     static std::string extractPKValue(const std::string& rowBuffer, const TableSchema& tbl);

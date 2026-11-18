@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Ordinary scalar sort children retain errors, typed keys and real sites."""
 import importlib.util
+import json
 from pathlib import Path
 
 
@@ -30,6 +31,15 @@ def main():
     def effect(label,before,count):
         actual=calls()-before
         if actual!=count:failures.append((label,'calls',actual,'expected',count))
+    def page_plan(sql):
+        result=ok('EXPLAIN (ANALYZE TRUE, TIMING FALSE, COSTS FALSE, FORMAT JSON) '+sql)
+        pending=[json.loads(result[0][0][0])['plan']]
+        scans={}
+        while pending:
+            node=pending.pop()
+            scans[node['nodeType']]=node
+            pending.extend(node['children'])
+        return scans['IntegerPrimaryKeyPage'],scans['TableScan']
     try:
         for sql in (
             'CREATE TABLE scalar_order_rows(id INT,"ID" BIGINT,payload TEXT);',
@@ -88,6 +98,35 @@ def main():
         if result[1]!='P0002':failures.append(('explicit ORDER error',result))
         ok('ROLLBACK TO keep;',ready=b'T');ok('SELECT id FROM scalar_order_sink;',[['90']],b'T');ok('ROLLBACK;')
         ok('SELECT id FROM scalar_order_sink;',[])
+        ok('CREATE TABLE scalar_order_pk_int (k INTEGER PRIMARY KEY, payload TEXT);')
+        ok("INSERT INTO scalar_order_pk_int VALUES (10,'ten'),(-2,NULL),(2,''),(0,'zero'),"
+           "(-100,'negative'),('2147483647','max'),('-2147483648','min');")
+        ascending_page='SELECT k,payload FROM scalar_order_pk_int ORDER BY k LIMIT 4 OFFSET 1;'
+        control('integer primary key ascending page',
+                ascending_page,
+                rows=[['-100','negative'],['-2',None],['0','zero'],['2','']],oids=[23,25])
+        selected,scan=page_plan(ascending_page)
+        assert (selected['usedPrimaryKeyPage'],selected['indexEntries'], selected['heapRowsFetched']) == ('true','7','5'),selected
+        assert scan.get('actualRows',0)==0,scan
+        control('integer primary key descending page',
+                'SELECT p.k,p.payload FROM scalar_order_pk_int AS p ORDER BY p.k DESC LIMIT 3 OFFSET 1;',
+                rows=[['10','ten'],['2',''],['0','zero']],oids=[23,25])
+        control('integer primary key zero limit',
+                'SELECT k,payload FROM scalar_order_pk_int ORDER BY k LIMIT 0 OFFSET 3;',
+                rows=[],oids=[23,25])
+        past_end='SELECT k,payload FROM scalar_order_pk_int ORDER BY k DESC LIMIT 3 OFFSET 8;'
+        control('integer primary key page past end',past_end,rows=[],oids=[23,25])
+        selected,scan=page_plan(past_end)
+        assert selected['usedPrimaryKeyPage']=='false' and scan['actualRows']==7,(selected,scan)
+        ok('CREATE TABLE scalar_order_pk_big (k BIGINT, payload TEXT, PRIMARY KEY (k));')
+        ok("INSERT INTO scalar_order_pk_big VALUES ('9223372036854775807','max'),(11,'eleven'),"
+           "('-9223372036854775808','min'),(2,'two'),(-11,'negative');")
+        control('table primary key bigint descending page',
+                'SELECT k,payload FROM scalar_order_pk_big ORDER BY k DESC LIMIT 4;',
+                rows=[['9223372036854775807','max'],['11','eleven'],['2','two'],['-11','negative']],oids=[20,25])
+        control('table primary key bigint expression sort',
+                'SELECT k,payload FROM scalar_order_pk_big ORDER BY k+0 LIMIT 3;',
+                rows=[['-9223372036854775808','min'],['-11','negative'],['2','two']],oids=[20,25])
         assert not failures,failures
         print('[ORDINARY SCALAR ORDER PROTOCOL] passed')
     finally:runner.stop_ours(server)

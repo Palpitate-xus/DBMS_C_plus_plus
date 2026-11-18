@@ -15,6 +15,7 @@
 #include "catalog/PgSequenceCatalog.h"
 #include "commands/VacuumFullBackup.h"
 #include "common/DbError.h"
+#include "common/DataDirectory.h"
 #include "storage/VariableRow.h"
 #include "common/SqlArrayText.h"
 #include "expression/StoredRegtypeValue.h"
@@ -9253,6 +9254,20 @@ bool StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
 }
 
 namespace {
+struct HeapPageReadGuard {
+    LockManager& locks;
+    PageAllocator& allocator;
+    const std::string& db;
+    const std::string& table;
+    uint32_t page;
+    bool pinned = false;
+
+    ~HeapPageReadGuard() {
+        if (pinned) allocator.unpinPage(page);
+        locks.pageUnlock(db, table, page);
+    }
+};
+
 class PageHeapScanCursor final : public HeapScanCursor {
     std::function<bool(std::vector<HeapScanRow>&)> readPage_;
     std::vector<HeapScanRow> rows_;
@@ -9343,15 +9358,7 @@ std::unique_ptr<HeapScanCursor> StorageEngine::beginHeapScan(
             const auto pageId = state->page++;
             if (!lockManager_.pageLockShared(dbname, tablename, pageId))
                 throw DbError("55P03", "could not obtain heap page lock");
-            struct PageRead {
-                LockManager& locks; PageAllocator& allocator;
-                const std::string& db; const std::string& table;
-                uint32_t page; bool pinned = false;
-                ~PageRead() {
-                    if (pinned) allocator.unpinPage(page);
-                    locks.pageUnlock(db, table, page);
-                }
-            } guard{lockManager_, *state->allocator, dbname, tablename, pageId};
+            HeapPageReadGuard guard{lockManager_, *state->allocator, dbname, tablename, pageId};
             char* buffer = state->allocator->fetchPage(pageId);
             if (!buffer) throw DbError("58030", "could not read heap page");
             guard.pinned = true;
@@ -9802,6 +9809,155 @@ BPTree* StorageEngine::loadBtreeIndex(
 BPTree* StorageEngine::getPKIndex(const std::string& dbname, const std::string& tablename) const {
     return loadBtreeIndex(pkIndexCache_, dbname + "/" + tablename,
                           indexPath(dbname, tablename), false);
+}
+
+std::optional<OrderedPrimaryKeyReadPage> StorageEngine::tryReadOrderedIntegerPrimaryKey(
+        const std::string& dbname, const std::string& tablename,
+        const TableSchema& expectedSchema, size_t keyColumn, bool descending,
+        size_t count, size_t byteBudget) {
+    // Only files in the executable's locked data directory have the required
+    // instance ownership. An external tablespace can outlive that lock.
+    if (dataDirectory().empty() || !expectedSchema.physicalRelationId || !count ||
+        (!expectedSchema.tablespace.empty() && expectedSchema.tablespace != "pg_default") ||
+        !usesHeapTupleHeader(expectedSchema.formatVersion) ||
+        transactionContext().txnIsolationLevel == IsolationLevel::SERIALIZABLE)
+        return {};
+    checkForQueryInterrupt();
+    lockManager_.setResourceNamespace(dbname);
+    if (!lockManager_.lockExclusiveNoWait(tablename)) return {};
+    ResourceUnlockGuard relation(lockManager_, tablename);
+    const auto schema = getTableSchema(dbname, tablename);
+    if (schema.physicalRelationId != expectedSchema.physicalRelationId || schema.len != expectedSchema.len ||
+        schema.formatVersion != expectedSchema.formatVersion || schema.tablespace != expectedSchema.tablespace ||
+        schema.pkColIndices != expectedSchema.pkColIndices || schema.partitionType != TableSchema::PartitionType::None ||
+        keyColumn >= schema.len || rlsAppliesTo(dbname, tablename) || !getInheritedChildren(dbname, tablename).empty())
+        return {};
+    for (size_t i = 0; i < schema.len; ++i) {
+        const auto layout = [](const Column& c) {
+            return std::tie(c.dataName, c.dataType, c.dsize, c.isVariableLength, c.isNull, c.isPrimaryKey,
+                            c.isArray, c.isUnsigned, c.typeMod, c.storageCodec, c.domainName, c.generatedKind,
+                            c.generatedExpr, c.collation, c.enumValues);
+        };
+        if (layout(schema.cols[i]) != layout(expectedSchema.cols[i])) return {};
+    }
+    const auto& key = schema.cols[keyColumn];
+    const auto type = ExprHelper::canonicalResultTypeName(key.dataType);
+    if (key.isArray || key.isUnsigned || key.generatedKind || !key.domainName.empty() ||
+        (type != "smallint" && type != "integer" && type != "bigint")) return {};
+    if (schema.pkColIndices.empty()) {
+        if (!key.isPrimaryKey || std::count_if(schema.cols, schema.cols + schema.len,
+            [](const Column& c) { return c.isPrimaryKey; }) != 1) return {};
+    } else if (schema.pkColIndices.size() != 1 || schema.pkColIndices.front() != keyColumn) return {};
+
+    ReadView autocommit, commandView;
+    const auto before = indexReadSnapshotFence(dbname);
+    // For an existing READ COMMITTED command, the ordinary scan establishes
+    // its view first below. Do not allow a current index for an older view.
+    const auto* view = prepareRowScanView(dbname, tablename, nullptr, false, autocommit, commandView);
+    const auto fence = indexReadSnapshotFence(dbname);
+    if (!fence || !view || view == &commandView || view->lowLimitId != *fence + 1 ||
+        (before && before != fence)) return {};
+
+    std::shared_ptr<BPTree> tree;
+    {
+        std::lock_guard<std::recursive_mutex> cache(cacheMutex_);
+        if (!getPKIndex(dbname, tablename)) return {};
+        tree = pkIndexCache_.at(dbname + "/" + tablename);
+    }
+    using KeyRid = std::pair<int64_t, int64_t>;
+    // Bound the temporary payload for the copied lexical entries and the
+    // numeric candidates, allowing for vector growth. The cap excludes the
+    // storage engine's existing page cache and tree bookkeeping.
+    std::vector<BPTree::LeafEntry> entries;
+    const size_t maxEntries = byteBudget / (2 * (sizeof(BPTree::LeafEntry) + sizeof(KeyRid)));
+    const auto read = tree->readLeafEntriesChecked(maxEntries, entries);
+    checkForQueryInterrupt();
+    if (read != BPTree::LeafEntriesResult::Complete) return {};
+    if (count >= entries.size()) return {};
+    std::vector<KeyRid> candidates;
+    candidates.reserve(entries.size());
+    const BPTree::LeafEntry* previous = nullptr;
+    for (const auto& entry : entries) {
+        if ((candidates.size() & 127U) == 0) checkForQueryInterrupt();
+        if (entry.value <= 0 || (previous && previous->key == entry.key)) return {};
+        previous = &entry;
+        const auto end = std::find_if(entry.key.begin(), entry.key.end(),
+            [](char c) { return c == '\0' || c == '\x01'; });
+        int64_t value = 0;
+        const auto parsed = std::from_chars(entry.key.data(), end, value);
+        if (parsed.ec != std::errc{} || parsed.ptr != end ||
+            (type == "smallint" && (value < INT16_MIN || value > INT16_MAX)) ||
+            (type == "integer" && (value < INT32_MIN || value > INT32_MAX))) return {};
+        decltype(entry.key) canonical{};
+        const auto formatted = std::to_chars(canonical.data(), canonical.data() + canonical.size(), value);
+        if (formatted.ec != std::errc{}) return {};
+        if (!schema.pkColIndices.empty() && formatted.ptr != canonical.data() + canonical.size())
+            *formatted.ptr = '\x01';
+        if (entry.key != canonical) return {};
+        candidates.emplace_back(value, entry.value);
+    }
+    const size_t examined = entries.size();
+    std::vector<BPTree::LeafEntry>().swap(entries);
+    size_t comparisons = 0;
+    std::partial_sort(candidates.begin(), candidates.begin() + count, candidates.end(),
+        [&](const KeyRid& a, const KeyRid& b) {
+            if ((comparisons++ & 127U) == 0) checkForQueryInterrupt();
+            return descending ? a.first > b.first : a.first < b.first;
+        });
+
+    std::shared_ptr<PageAllocator> allocator;
+    {
+        std::lock_guard<std::recursive_mutex> cache(cacheMutex_);
+        if (!getPageAllocator(dbname, tablename)) return {};
+        allocator = pageAllocators_.at(dbname + "/" + tablename);
+    }
+    OrderedPrimaryKeyReadPage result;
+    result.indexEntries = examined;
+    result.rows.reserve(count);
+    size_t remaining = byteBudget - candidates.capacity() * sizeof(KeyRid);
+    for (size_t i = 0; i < count; ++i) {
+        checkForQueryInterrupt();
+        const auto [keyValue, rid] = candidates[i];
+        std::string raw;
+        std::vector<bool> bitmap(schema.len, false);
+        {
+            uint32_t pageId = 0;
+            uint16_t slotId = 0;
+            decodeRid(rid, pageId, slotId);
+            if (!pageId || encodeRid(pageId, slotId) != rid ||
+                !lockManager_.pageLockShared(dbname, tablename, pageId)) return {};
+            HeapPageReadGuard guard{lockManager_, *allocator, dbname, tablename, pageId};
+            char* buffer = allocator->fetchPage(pageId);
+            if (!buffer) return {};
+            guard.pinned = true;
+            PageWrapper page(buffer, allocator->pageSize(), schema.formatVersion);
+            const char* tuple = nullptr;
+            size_t length = 0;
+            if (!page.read(slotId, tuple, length) || length < sizeof(HeapTupleHeaderData) ||
+                !view->isVisible(tuple, length, schema.formatVersion)) return {};
+            const auto* header = castHeapHeader(tuple);
+            const size_t minOffset = sizeof(HeapTupleHeaderData) +
+                ((header->t_infomask & HEAP_HASNULL) ? (schema.len + 7) / 8 : 0);
+            if (header->t_hoff < minOffset || header->t_hoff >= length) return {};
+            raw.assign(tuple + header->t_hoff, length - header->t_hoff);
+            for (size_t col = 0; col < schema.len; ++col)
+                if (schema.cols[col].isNull)
+                    bitmap[col] = dbms::isNull(header, static_cast<int>(col));
+        }
+        if (bitmap[keyColumn] ||
+            parseStoredInteger(extractColumnValueStatic(raw, schema, keyColumn)) != keyValue) return {};
+        bool toastOk = false;
+        detail::ScopedStoredRowNullBitmap nullOwner(schema, bitmap);
+        auto value = resolveToastValues(dbname, tablename, raw, schema, &toastOk);
+        const size_t rowOverhead = sizeof(HeapScanRow) + bitmap.capacity() / 8;
+        if (!toastOk || remaining < rowOverhead || value.capacity() > remaining - rowOverhead)
+            return {};
+        remaining -= rowOverhead + value.capacity();
+        result.rows.push_back({rid, std::move(value), std::move(bitmap)});
+    }
+    if (indexReadSnapshotFence(dbname) != fence) return {};
+    recordTableScan(dbname, tablename, result.rows.size(), true, false);
+    return result;
 }
 
 void StorageEngine::closeAllIndexes() {

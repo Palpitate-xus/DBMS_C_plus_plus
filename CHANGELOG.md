@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>按整数主键翻页时少读表数据 · 2026-11-18</summary>
+
+按整数主键排序并只取几行时，数据库可以先从索引找出本次需要的记录，再读取对应的表行。正负整数按数值排列。事务需要读取较早时刻的数据，或索引不可用时，仍用普通扫描和排序分页。
+
+[使用示例](docs/MANUAL.md#按整数主键翻页) · [测试报告](docs/test-report.md#integer-primary-key-page-20261118) · [性能报告](docs/performance-report-2026-10-30.md#integer-primary-key-page-cost-20261118)
+
+</details>
+
+<details>
 <summary>排序时少做数组转换 · 2026-11-18</summary>
 
 部分查询会先排序，再转换实际需要的数组。比如只取排序后的第一行时，后面行的无效数组不会提前报错。如果排序本身要用到转换结果，仍会先转换。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>按整数数组匹配时少检查一些行 · 2026-11-18</summary>
+<summary>查看更早的更新</summary>
+
+## 2026-11-18 · 按整数数组匹配时少检查一些行
 
 用整数数组连接两张表时，数据库可以先找出可能匹配的行，减少逐行比较。多条记录匹配时仍会各自返回。内存不足时会继续逐行比较。
 
 [测试报告](docs/test-report.md#array-lookup-20261118) · [性能报告](docs/performance-report-2026-10-30.md#array-lookup-cost-20261118)
-
-</details>
-
-<details>
-<summary>查看更早的更新</summary>
 
 ## 2026-11-18 · 整数数组连接少做重复工作
 

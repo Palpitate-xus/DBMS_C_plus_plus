@@ -2820,6 +2820,169 @@ static OpPtr literalGiSTTableSource(StorageEngine* engine, const std::string& da
     return {};
 }
 
+static std::optional<QueryColumnBinding> integerPageOrder(const PreparedQuery& query,
+                                                        const SelectStmt& select) {
+    if (!select.fromClause || select.fromClause->type != FromItem::Type::Table || !select.limit || !*select.limit ||
+        select.limitExpr || select.offsetExpr || select.orderBy.size() != 1 || select.orderBy[0].enumComparison ||
+        !select.orderBy[0].usingOp.empty() || select.whereClause || select.distinct || !select.distinctOn.empty() ||
+        select.having || !select.groupBy.empty() || !select.groupByElems.empty() || !select.windowDefs.empty() ||
+        !select.ctes.empty() || select.setOp != SetOp::None || select.setOpLhs || select.setOpRhs ||
+        select.withTies || !select.locking.empty() || select.existsTargetPrunable ||
+        (select.signedFetchCount && *select.signedFetchCount < 0)) return {};
+    const auto cardinalityChanges = [&](const auto& self, Expr* expression) -> bool {
+        if (!expression || expression->preparedSubquery) return false;
+        if (const auto* call = dynamic_cast<const FunctionCallExpr*>(expression);
+            call && (call->hasOver || call->setReturning || !aggregate_type_detail::builtinName(call).empty()))
+            return true;
+        bool changes = false;
+        prepared_window_detail::spec_detail::valueChildren(expression,
+            [&](Expr* child) { if (!changes) changes = self(self, child); });
+        return changes;
+    };
+    for (const auto& target : select.selectList)
+        if (cardinalityChanges(cardinalityChanges, target.expr.get())) return {};
+    const auto& order = select.orderBy.front();
+    const auto output = query.statementOutputs.find(&select);
+    const auto projections = query.projectionBindings.find(&select);
+    if (output == query.statementOutputs.end() || projections == query.projectionBindings.end()) return {};
+    if (const auto* column = dynamic_cast<const ColumnRefExpr*>(order.expr.get())) {
+        if (column->table.empty() && column->schema.empty()) {
+            for (size_t i = 0; i < output->second.size(); ++i)
+                if (output->second[i].name == column->column) return projections->second.at(i).column;
+        }
+        return column->binding;
+    }
+    const auto* literal = dynamic_cast<const LiteralExpr*>(order.expr.get());
+    if (!literal || literal->preparedSubquery) return {};
+    size_t ordinal = 0;
+    const auto end = literal->value.data() + literal->value.size();
+    const auto parsed = std::from_chars(literal->value.data(), end, ordinal);
+    if (parsed.ec != std::errc{} || parsed.ptr != end || !ordinal || ordinal > output->second.size()) return {};
+    return projections->second.at(ordinal - 1).column;
+}
+
+static const PreparedQuery::SourceRange* integerPageRelation(const PreparedQuery& query,
+        const SelectStmt& select, const QueryColumnBinding& key) {
+    if (key.scopeDepth || key.mergedUsing) return nullptr;
+    const auto range = std::find_if(query.sourceRanges.begin(), query.sourceRanges.end(),
+        [&](const auto& item) {
+            return item.owner == &select && item.source == select.fromClause.get() && item.ordinal == key.sourceOrdinal;
+        });
+    if (range == query.sourceRanges.end() || range->relationName.empty() || range->cteStatement || range->viewQuery ||
+        range->relationSchema == "pg_catalog" || range->relationSchema == "pg_temp" ||
+        (currentSession() && range->relationSchema == sessionTempSchemaName(*currentSession()))) return nullptr;
+    return &*range;
+}
+
+static bool eligibleIntegerPageKey(const TableSchema& schema, const QueryColumnBinding& key) {
+    if (schema.partitionType != TableSchema::PartitionType::None || !schema.physicalRelationId ||
+        key.columnOrdinal >= schema.len) return false;
+    const auto& column = schema.cols[key.columnOrdinal];
+    const auto type = ExprHelper::canonicalResultTypeName(column.dataType);
+    return (type == "smallint" || type == "integer" || type == "bigint") &&
+        ExprHelper::canonicalResultTypeName(key.declaredType) == type && !column.isArray && !column.isUnsigned &&
+        !column.generatedKind && column.domainName.empty() && isSingleColumnPrimaryKey(schema, column.dataName);
+}
+
+bool QueryPlanner::mayUseIntegerPrimaryKeyPage(StorageEngine* engine, const std::string& database,
+        const PreparedQuery& query, const SelectStmt& select) {
+    const auto key = integerPageOrder(query, select);
+    const auto* range = key ? integerPageRelation(query, select, *key) : nullptr;
+    if (!range) return false;
+    const auto table = range->relationSchema.empty() || range->relationSchema == "public" ? range->relationName
+        : range->relationSchema + "__" + range->relationName;
+    return eligibleIntegerPageKey(engine->getTableSchema(database, table), *key);
+}
+
+class IntegerPrimaryKeyPageOp final : public Operator {
+    StorageEngine* engine_;
+    std::string database_;
+    TableSchema schema_;
+    size_t keyColumn_, count_;
+    bool descending_;
+    OpPtr fallback_;
+    std::optional<OrderedPrimaryKeyReadPage> page_;
+    size_t position_ = 0, indexEntries_ = 0, heapRows_ = 0;
+    bool fallbackOpen_ = false, usedPage_ = false;
+    int64_t lastRid_ = 0;
+    std::vector<bool> lastNulls_;
+public:
+    IntegerPrimaryKeyPageOp(StorageEngine* engine, std::string database, const TableSchema& schema,
+            size_t keyColumn, size_t count, bool descending, OpPtr fallback)
+        : engine_(engine), database_(std::move(database)), schema_(schema), keyColumn_(keyColumn),
+          count_(count), descending_(descending), fallback_(std::move(fallback)) {}
+    bool open() override {
+        OpenInstrument instrument(this);
+        clearError();
+        close();
+        usedPage_ = false;
+        indexEntries_ = heapRows_ = 0;
+        page_ = engine_->tryReadOrderedIntegerPrimaryKey(database_, schema_.tablename, schema_,
+            keyColumn_, descending_, count_, sortWorkMemBytes());
+        if (page_) {
+            usedPage_ = true;
+            indexEntries_ = page_->indexEntries;
+            heapRows_ = page_->rows.size();
+            return true;
+        }
+        fallbackOpen_ = true;
+        return fallback_->open() || propagateChildError(fallback_.get(), "ordered primary key heap scan failed");
+    }
+    bool next(std::string& raw) override {
+        NextInstrument instrument(this);
+        if (!page_) {
+            if (!fallback_->next(raw)) {
+                if (fallback_->hasError()) return propagateChildError(fallback_.get(), "ordered primary key heap scan failed");
+                return false;
+            }
+        } else {
+            if (position_ == page_->rows.size()) return false;
+            auto& row = page_->rows[position_++];
+            lastRid_ = row.rid;
+            lastNulls_ = std::move(row.nulls);
+            raw = std::move(row.data);
+        }
+        instrument.emitted = true;
+        return true;
+    }
+    void close() override {
+        page_.reset();
+        position_ = 0;
+        lastRid_ = 0;
+        lastNulls_.clear();
+        if (fallbackOpen_) {
+            fallbackOpen_ = false;
+            fallback_->close();
+        }
+    }
+    bool lastColumnIsNull(size_t column) const override {
+        if (!page_) return fallback_->lastColumnIsNull(column);
+        return column < lastNulls_.size() && lastNulls_[column];
+    }
+    bool lastStoredNullBitmap(std::vector<bool>& bitmap) const override {
+        if (!page_) return fallback_->lastStoredNullBitmap(bitmap);
+        if (!lastRid_) return false;
+        bitmap = lastNulls_;
+        return true;
+    }
+    ScanOrigin scanOrigin() const override {
+        if (!page_) return fallback_->scanOrigin();
+        ScanOrigin origin;
+        origin.engine = engine_;
+        origin.dbname = database_;
+        origin.tablename = schema_.tablename;
+        origin.rid = lastRid_;
+        return origin;
+    }
+    std::string preparedPlanNodeName() const override { return "IntegerPrimaryKeyPage"; }
+    std::vector<Operator*> preparedPlanChildren() const override { return {fallback_.get()}; }
+    std::map<std::string, std::string> preparedPlanAttributes() const override {
+        if (!usedPage_) return {{"usedPrimaryKeyPage", "false"}};
+        return {{"usedPrimaryKeyPage", "true"}, {"indexEntries", std::to_string(indexEntries_)},
+                {"heapRowsFetched", std::to_string(heapRows_)}};
+    }
+};
+
 OpPtr makePreparedTableSource(StorageEngine* engine, const std::string& database,
     const std::shared_ptr<PreparedQuery>& query, SelectStmt* select,
     const TableSchema& schema, OpPtr source) {
@@ -2831,6 +2994,15 @@ OpPtr makePreparedTableSource(StorageEngine* engine, const std::string& database
                                                schema, source))
         return narrowed;
     const auto* physical = dynamic_cast<const TableScanOp*>(source.get());
+    if (physical && typeid(*physical) == typeid(TableScanOp) && physical->tableName() == schema.tablename) {
+        const auto key = integerPageOrder(*query, *select);
+        if (key && integerPageRelation(*query, *select, *key) && eligibleIntegerPageKey(schema, *key)) {
+            const size_t offset = select->offset.value_or(0);
+            if (*select->limit <= std::numeric_limits<size_t>::max() - offset)
+                return std::make_unique<IntegerPrimaryKeyPageOp>(engine, database, schema, key->columnOrdinal,
+                    offset + *select->limit, !select->orderBy.front().asc, std::move(source));
+        }
+    }
     const auto* equality = dynamic_cast<const BinaryOpExpr*>(select->whereClause.get());
     if (!physical || !select->fromClause || select->fromClause->type != FromItem::Type::Table ||
         !equality || equality->op != "=" || schema.partitionType != TableSchema::PartitionType::None)

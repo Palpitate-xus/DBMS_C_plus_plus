@@ -19,6 +19,13 @@ cmake --build build/cmake --parallel 2
 ## 最近更新
 
 <details>
+<summary>按整数主键翻页时少读表数据 · 2026-11-18</summary>
+
+按整数主键排序并只取几行时，数据库可以先从索引找出本次需要的记录，再读取对应的表行。
+
+</details>
+
+<details>
 <summary>排序时少做数组转换 · 2026-11-18</summary>
 
 部分查询会先排序，再转换实际需要的数组。例如，只取排序后的第一行时，可以只转换这一行的数组。
@@ -29,13 +36,6 @@ cmake --build build/cmake --parallel 2
 <summary>能把更多查询结果写入表 · 2026-11-18</summary>
 
 一些查询可以先连接多张表，再把结果写入另一张表。指定只取几行时，取够就停止。
-
-</details>
-
-<details>
-<summary>按整数数组匹配时少检查一些行 · 2026-11-18</summary>
-
-用整数数组连接两张表时，数据库可以先找出可能匹配的行，减少逐行比较。
 
 </details>
 
