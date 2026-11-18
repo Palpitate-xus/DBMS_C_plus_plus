@@ -1054,6 +1054,20 @@ TRUNCATE TABLE parent RESTART IDENTITY CASCADE;
 
 `RESTRICT` 是默认行为：如果有外键依赖，语句会在任何表修改前失败；`CASCADE` 会递归截断外键依赖表。`RESTART IDENTITY` 重置被截断表的 identity 序列，`ONLY` 不扩展到继承子表。
 
+### 清理表占用的空间
+
+`VACUUM` 清理删除或更新留下的空间，供这张表后续写入时复用。没有额外存放长值时，可以省掉查找这些值的第二遍扫描。有外置长值时，数据库检查哪些值还被引用，再清理失去引用的值。
+
+```sql
+CREATE TABLE vacuum_example (id integer PRIMARY KEY, note text);
+INSERT INTO vacuum_example VALUES (1, '保留'), (2, '删除'), (3, NULL);
+DELETE FROM vacuum_example WHERE id = 2;
+VACUUM vacuum_example;
+SELECT id, note FROM vacuum_example ORDER BY id;
+```
+
+这个查询返回 `1, 保留` 和 `3, NULL`。[验证范围](test-report.md#vacuum-empty-toast-20261118)
+
 ---
 
 ## 5. 数据操作 (DML)

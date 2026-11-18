@@ -52145,6 +52145,20 @@ size_t StorageEngine::vacuumToast(const std::string& dbname,
     } restoreToastLocks{lockManager_, locksBeforeToast};
     if (!lockManager_.lockExclusive(tablename)) return 0;
 
+    const auto toastHeapPath = toastDataPath(dbname, tablename);
+    const auto toastTreePath = toastIndexPath(dbname, tablename);
+    std::error_code toastPathError;
+    if (!std::filesystem::is_regular_file(toastHeapPath, toastPathError) ||
+        toastPathError ||
+        !std::filesystem::is_regular_file(toastTreePath, toastPathError) ||
+        toastPathError) {
+        return 0;
+    }
+    PageAllocator* toastPages = getToastPageAllocator(dbname, tablename);
+    if (!toastPages) return 0;
+    const uint32_t toastPageCount = toastPages->numPages();
+    if (!toastPageCount) return 0;
+
     const TableSchema tbl = getTableSchema(dbname, tablename);
 
     const auto heapRowWidth = heapHeaderRowWidth(tbl);
@@ -52163,35 +52177,38 @@ size_t StorageEngine::vacuumToast(const std::string& dbname,
     // forEachRow's MVCC-visible subset, so TOAST is never reclaimed ahead of
     // the heap tuple that references it.
     std::vector<std::filesystem::path> heapRelations;
-    if (tbl.partitionType == TableSchema::PartitionType::None) {
-        heapRelations.push_back(dataPath(dbname, tablename));
-    } else {
-        std::vector<std::string> partitionNames;
-        if (tbl.partitionType == TableSchema::PartitionType::Range) {
-            for (const auto& partition : tbl.rangePartitions)
-                partitionNames.push_back(partition.first);
-        } else if (tbl.partitionType == TableSchema::PartitionType::List) {
-            for (const auto& partition : tbl.listPartitions)
-                partitionNames.push_back(partition.first);
-        } else if (tbl.partitionType == TableSchema::PartitionType::Hash) {
-            for (size_t i = 0; i < tbl.hashPartitions; ++i)
-                partitionNames.push_back("p" + std::to_string(i));
-        }
-        if (!tbl.defaultPartitionName.empty() &&
-            std::find(partitionNames.begin(), partitionNames.end(),
-                      tbl.defaultPartitionName) == partitionNames.end()) {
-            partitionNames.push_back(tbl.defaultPartitionName);
-        }
-        for (const auto& partition : partitionNames) {
-            if (tbl.subPartitionType == TableSchema::PartitionType::Hash) {
+    // Page zero is the allocator header. A header-only TOAST heap has no
+    // chunks to reclaim, so there is no reason to visit the main heap.
+    if (toastPageCount > 1) {
+        if (tbl.partitionType == TableSchema::PartitionType::None) {
+            heapRelations.push_back(dataPath(dbname, tablename));
+        } else {
+            std::vector<std::string> partitionNames;
+            if (tbl.partitionType == TableSchema::PartitionType::Range) {
+                for (const auto& partition : tbl.rangePartitions)
+                    partitionNames.push_back(partition.first);
+            } else if (tbl.partitionType == TableSchema::PartitionType::List) {
+                for (const auto& partition : tbl.listPartitions)
+                    partitionNames.push_back(partition.first);
+            } else if (tbl.partitionType == TableSchema::PartitionType::Hash) {
+                for (size_t i = 0; i < tbl.hashPartitions; ++i)
+                    partitionNames.push_back("p" + std::to_string(i));
+            }
+            if (!tbl.defaultPartitionName.empty() &&
+                std::find(partitionNames.begin(), partitionNames.end(),
+                          tbl.defaultPartitionName) == partitionNames.end()) {
+                partitionNames.push_back(tbl.defaultPartitionName);
+            }
+            for (const auto& partition : partitionNames) {
+                if (tbl.subPartitionType != TableSchema::PartitionType::Hash) {
+                    heapRelations.push_back(partitionDataPath(
+                        dbname, tablename, partition));
+                    continue;
+                }
                 for (size_t i = 0; i < tbl.subHashPartitions; ++i) {
                     heapRelations.push_back(partitionDataPath(
-                        dbname, tablename, partition,
-                        "sp" + std::to_string(i)));
+                        dbname, tablename, partition, "sp" + std::to_string(i)));
                 }
-            } else {
-                heapRelations.push_back(partitionDataPath(
-                    dbname, tablename, partition));
             }
         }
     }
@@ -52292,26 +52309,8 @@ size_t StorageEngine::vacuumToast(const std::string& dbname,
         }
     }
 
-    const auto toastHeapPath = toastDataPath(dbname, tablename);
-    const auto toastTreePath = toastIndexPath(dbname, tablename);
-    std::error_code toastPathError;
-    const bool heapExists = std::filesystem::exists(
-        toastHeapPath, toastPathError);
-    if (toastPathError) return 0;
-    const bool indexExists = std::filesystem::exists(
-        toastTreePath, toastPathError);
-    if (toastPathError || heapExists != indexExists) return 0;
-    if (!heapExists) return 0;
-    if (!std::filesystem::is_regular_file(toastHeapPath, toastPathError) ||
-        toastPathError ||
-        !std::filesystem::is_regular_file(toastTreePath, toastPathError) ||
-        toastPathError) {
-        return 0;
-    }
-
-    PageAllocator* toastPages = getToastPageAllocator(dbname, tablename);
     BPTree* toastIndex = getToastIndex(dbname, tablename);
-    if (!toastPages || !toastIndex) return 0;
+    if (!toastIndex) return 0;
 
     struct ToastChunkRef {
         uint64_t toastId = 0;
@@ -52325,7 +52324,6 @@ size_t StorageEngine::vacuumToast(const std::string& dbname,
     std::set<std::string> seenKeys;
     std::vector<int64_t> heapRids;
     bool toastValid = true;
-    const uint32_t toastPageCount = toastPages->numPages();
     for (uint32_t pageId = 1; pageId < toastPageCount; ++pageId) {
         if (!lockManager_.pageLockShared(
                 dbname, tablename + ".toast", pageId)) {

@@ -2,6 +2,10 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-18 · 普通表清理减少重复读取
+
+普通 `VACUUM` 在清理外置长值前检查实际文件。没有长值文件，或者经校验的长值堆只有文件头时，数据库跳过这一阶段的主表扫描。实际存有长值的表仍核对引用及快照。[测试结果](test-report.md#vacuum-empty-toast-20261118) · [性能报告](performance-report-2026-10-30.md#vacuum-empty-toast-cost-20261118)
+
 ## 2026-11-18 · `VACUUM FULL` 后的 BRIN 范围读取
 
 提交前按重写后的身份和表定义生成 BRIN 文件。对所测窄范围，`VACUUM FULL` 后的第一次查询即可沿摘要读候选页。代价选择、当前快照与损坏检查仍适用。[恢复与执行计划](test-report.md#brin-vacuum-full-generation-20261118) · [性能报告](performance-report-2026-10-30.md#brin-vacuum-full-generation-cost-20261118)

@@ -1,10 +1,12 @@
-// test_link_flags: -Wl,--wrap=_ZNK4dbms10BufferPool20refersToCurrentFilesEv
+// test_link_flags: -Wl,--wrap=_ZNK4dbms10BufferPool20refersToCurrentFilesEv -Wl,--wrap=_ZN4dbms13PageAllocator9fetchPageEj
+#include "access/BPTree.h"
 #include "catalog/type_registry.h"
 #include "commands/DdlExecutor.h"
 #include "commands/StoredRowNull.h"
 #include "commands/TableManage.h"
 #include "executor/ExecutionPlan.h"
 #include "storage/BufferPool.h"
+#include "storage/PageAllocator.h"
 #include "test_utils.h"
 #include <filesystem>
 #include <fstream>
@@ -21,11 +23,83 @@ using namespace dbms;
 using Cell = std::optional<std::string>;
 using Row = std::vector<Cell>;
 size_t checks = 0, failures = 0, fileChecks = 0;
+thread_local PageAllocator* watchedHeap = nullptr;
+thread_local size_t heapFetches = 0;
 void check(bool good, const std::string& label) {
     ++checks;
     if (!good) { ++failures; std::cerr << "FAIL " << label << '\n'; }
 }
 void require(bool good, const char* label) { if (!good) throw std::runtime_error(label); }
+DataFileHeader readHeapHeader(const std::filesystem::path& path) {
+    DataFileHeader header{};
+    std::ifstream input(path, std::ios::binary);
+    require(bool(input.read(reinterpret_cast<char*>(&header), sizeof(header))) &&
+            header.magic == DATA_FILE_MAGIC && header.formatVersion == DATA_FILE_FORMAT_VERSION &&
+            header.headerChecksum == computeDataFileHeaderChecksum(header), "actual durable heap header");
+    return header;
+}
+void checkNoToastCandidates() {
+    const auto database = testDbPath("vacuum_reference_no_toast_candidates");
+    require(g_engine.createDatabase(database, "utf8") == DBStatus::OK, "create no-candidate database");
+    for (bool inlineText : {false, true}) {
+        TableSchema schema;
+        schema.tablename = inlineText ? "inline_text" : "fixed_width";
+        schema.formatVersion = DATA_FILE_FORMAT_VERSION;
+        schema.append(makeIntColumn("id", false, 4, true));
+        if (inlineText) schema.append(makeTextColumn("value", true));
+        else schema.append(makeIntColumn("value", true, 4));
+        const auto& table = schema.tablename;
+        require(g_engine.createTable(database, schema) == DBStatus::OK, "create no-candidate table");
+
+        const std::map<std::string, Cell> expected{
+            {"1", inlineText ? "small text" : "-42"}, {"2", std::nullopt}, {"3", inlineText ? "" : "0"}};
+        for (const auto& [id, value] : expected) {
+            require(g_engine.insertRow(database, table, {{"id", id}, {"value", value}}) == DBStatus::OK,
+                    "insert no-candidate row");
+        }
+
+        const auto toastHeap = g_engine.toastDataPath(database, table);
+        const auto toastIndex = g_engine.toastIndexPath(database, table);
+        if (inlineText) {
+            const auto header = readHeapHeader(toastHeap);
+            require(header.rowSize == 0 && header.numPages == 1 && header.freeListHead == 0 &&
+                    std::filesystem::file_size(toastHeap) == StorageEngine::pageSizeForFormatVersion(header.formatVersion),
+                    "inline table has a header-only TOAST heap");
+            BPTree index(toastIndex);
+            std::vector<int64_t> entries;
+            require(index.openExisting() && index.allValuesChecked(entries) && entries.empty(),
+                    "inline table has a valid empty TOAST index");
+        } else {
+            require(!std::filesystem::exists(toastHeap) && !std::filesystem::exists(toastIndex),
+                    "fixed-width table has no TOAST heap or index");
+        }
+
+        auto readRows = [&] {
+            std::map<std::string, Cell> result;
+            require(g_engine.forEachRow(database, table, [&](uint32_t, uint16_t, const char* data, size_t size) {
+                const std::string raw(data, size);
+                const auto id = g_engine.extractColumnValue(raw, schema, 0, database);
+                bool isNull = false;
+                auto value = g_engine.extractColumnValue(raw, schema, 1, database, true, &isNull);
+                check(result.emplace(id, isNull ? Cell{} : Cell{std::move(value)}).second, table + " unique row ID");
+            }), "read no-candidate table");
+            return result;
+        };
+
+        watchedHeap = g_engine.getPageAllocator(database, table);
+        require(watchedHeap && watchedHeap->numPages() > 1, "no-candidate table has real main heap data pages");
+        heapFetches = 0;
+        check(readRows() == expected, table + " rows before TOAST vacuum");
+        require(heapFetches > 0, "real table scan exercises the main heap fetch counter");
+        heapFetches = 0;
+        const size_t removed = g_engine.vacuumToast(database, table);
+        watchedHeap = nullptr;
+        std::cout << "VACUUM_REFERENCE table=" << table << " main_heap_fetches=" << heapFetches << '\n';
+        check(removed == 0, table + " TOAST vacuum removes no objects");
+        check(heapFetches == 0, table + " TOAST vacuum performs no main heap fetches");
+        check(readRows() == expected, table + " rows after TOAST vacuum");
+    }
+}
 bool same(const StorageEngine::NullRowBindingState& a, const StorageEngine::NullRowBindingState& b) {
     return a.engine == b.engine && a.database == b.database && a.table == b.table && a.rid == b.rid && a.natts == b.natts;
 }
@@ -65,11 +139,7 @@ std::map<std::string, Row> rows(Fixture& f, bool capture) {
     // full-value codec. This oracle is independent of the maintenance
     // marker collector and of the legacy logical partition scan provider.
     for (const auto& path : paths) {
-        DataFileHeader fileHeader{};
-        std::ifstream input(path, std::ios::binary);
-        require(bool(input.read(reinterpret_cast<char*>(&fileHeader), sizeof(fileHeader))) &&
-            fileHeader.magic == DATA_FILE_MAGIC && fileHeader.formatVersion == DATA_FILE_FORMAT_VERSION &&
-            fileHeader.headerChecksum == computeDataFileHeaderChecksum(fileHeader), "actual durable heap header");
+        const auto fileHeader = readHeapHeader(path);
         PageAllocator pages(path.string(), fileHeader.rowSize, 8192, fileHeader.formatVersion);
         require(pages.open(), "actual physical heap open");
         for (uint32_t pageId = 1; pageId < pages.numPages(); ++pageId) {
@@ -157,12 +227,20 @@ Fixture fixture(const std::string& name, bool partitioned, const TableSchema* pa
 extern "C" bool realCurrentFiles(const dbms::BufferPool*) asm("__real__ZNK4dbms10BufferPool20refersToCurrentFilesEv");
 extern "C" bool wrapCurrentFiles(const dbms::BufferPool*) asm("__wrap__ZNK4dbms10BufferPool20refersToCurrentFilesEv");
 extern "C" bool wrapCurrentFiles(const dbms::BufferPool* pool) { ++fileChecks; return realCurrentFiles(pool); }
+extern "C" char* realFetch(dbms::PageAllocator*, uint32_t) asm("__real__ZN4dbms13PageAllocator9fetchPageEj");
+extern "C" char* wrapFetch(dbms::PageAllocator*, uint32_t) asm("__wrap__ZN4dbms13PageAllocator9fetchPageEj");
+extern "C" char* wrapFetch(dbms::PageAllocator* allocator, uint32_t pageId) {
+    if (allocator == watchedHeap) ++heapFetches;
+    return realFetch(allocator, pageId);
+}
 
 int main() {
     using namespace dbms;
     try {
         TypeRegistry::instance().bootstrap(); g_engine.setBackgroundIntervals(60000, 60000);
-        StorageEngine::unbindNullRow(); auto caller = fixture("vacuum_reference_caller", false);
+        StorageEngine::unbindNullRow();
+        checkNoToastCandidates();
+        auto caller = fixture("vacuum_reference_caller", false);
         size_t cases = 0;
         for (bool partitioned : {false, true}) for (bool wholeVacuum : {false, true}) for (int binding = 0; binding < 4; ++binding) {
             StorageEngine::unbindNullRow();

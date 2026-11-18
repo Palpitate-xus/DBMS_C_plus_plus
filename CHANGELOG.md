@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>清理表时可以少读一遍数据 · 2026-11-18</summary>
+
+没有额外存放长值时，`VACUUM` 会省掉查找这些值的第二遍扫描。
+
+[使用示例](docs/MANUAL.md#清理表占用的空间) · [测试报告](docs/test-report.md#vacuum-empty-toast-20261118) · [性能报告](docs/performance-report-2026-10-30.md#vacuum-empty-toast-cost-20261118)
+
+</details>
+
+<details>
 <summary>整理表后，范围查询可以少读数据 · 2026-11-18</summary>
 
 运行 `VACUUM FULL` 整理表后，符合条件的查询可以马上用 BRIN 索引跳过无关数据。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>按编号翻页时少排一次序 · 2026-11-18</summary>
+<summary>查看更早的更新</summary>
+
+## 2026-11-18 · 按编号翻页时少排一次序
 
 用整数主键翻页时，如果索引给出的记录已经排好，数据库就直接按这个顺序返回。
 
 [使用示例](docs/MANUAL.md#查看分页是否复用索引顺序) · [测试报告](docs/test-report.md#presorted-integer-primary-key-page-20261118) · [性能报告](docs/performance-report-2026-10-30.md#presorted-integer-primary-key-page-cost-20261118)
-
-</details>
-
-<details>
-<summary>查看更早的更新</summary>
 
 ## 2026-11-18 · 翻页时可以跳过空值
 

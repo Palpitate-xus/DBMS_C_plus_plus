@@ -2,9 +2,15 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-18 · 普通清理和长值
+
+PostgreSQL 从关系目录确定是否需要清理长值附表。本项目先确认自己的长值文件存在并含数据页，再扫描主表来确定哪些值被引用。这个改进覆盖无外置长值的情况。列的存储方式、压缩算法和可见性范围仍有差距。[PostgreSQL 清理实现](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/commands/vacuum.c) · [本项目测试](test-report.md#vacuum-empty-toast-20261118)
+
 ## 2026-11-18 · 重写后的 BRIN 摘要
 
 PostgreSQL 的 `VACUUM FULL` 用新文件重写表并重建关联索引。本项目已修复该操作完成后 BRIN 仍指向旧表标识的问题。BRIN 使用项目自己的文件格式，自动摘要和完整的索引维护仍有差距。[PostgreSQL 表重写代码](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/commands/cluster.c) · [本项目测试](test-report.md#brin-vacuum-full-generation-20261118)
+
+PostgreSQL 18.6 可以清除单个范围的摘要、补建单个范围的摘要，或补建所有缺少的摘要。52 次参考操作覆盖了重复调用、追加数据和事务回滚。去掉一个摘要后，查询仍会读取该范围里的数据页。本项目目前重建整份摘要。要实现按范围维护，需要区分「没有摘要，必须读取原数据」和「该范围确实没有行」。[PostgreSQL BRIN 维护](https://www.postgresql.org/docs/18/brin.html#BRIN-OPERATION) · [维护函数](https://www.postgresql.org/docs/18/functions-admin.html#FUNCTIONS-ADMIN-INDEX)
 
 ## 2026-11-18 · 写入时查找要维护的索引
 

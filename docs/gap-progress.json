@@ -2,6 +2,28 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-18 skip the TOAST reference pass when the TOAST heap has no data pages",
+      "gap_ids": ["STO-06"],
+      "status": "partial",
+      "evidence": [
+        "src/commands/TableManage.cpp",
+        "docs/MANUAL.md",
+        "docs/test-report.md",
+        "docs/performance-report-2026-10-30.md"
+      ],
+      "tests": [
+        "tests/vacuum_toast_physical_reference_test.cpp",
+        "tests/vacuum_toast_test.cpp",
+        "tests/parallel_vacuum_test.cpp",
+        "tests/vacuum_page_lock_test.cpp"
+      ],
+      "verification": [
+        "The ordinary VACUUM TOAST phase exits early with no fork pair, and skips all main-heap references when the validated TOAST allocator has only its header page. Both no-candidate native cases reduce actual main heap fetches from one to zero. Six native regressions pass, including the original sixteen long-value and orphan cases, snapshot checks, parallel vacuum, and page locks.",
+        "The exact old and new executables match 16 manual and cold-reopen wire exchanges after both initial processes are killed following VACUUM. The fixed-width, inline and external workloads each have unchanged on-disk extents and 65 matching preflight exchanges per implementation, with normalized PostgreSQL 18.6 results. The 273 item records remain unchanged.",
+        "All 12 benchmark runs and 36 batches complete. Independent decoding checks 1896 wire exchanges, including 1152 timed VACUUM operations. Both optimized shapes use less median CPU and wall time in this run. All three shapes exceed the preset CPU drift limit, so the timings are descriptive."
+      ]
+    },
+    {
       "issue": "2026-11-18 rebuild BRIN from the persisted table identity before committing VACUUM FULL",
       "gap_ids": ["IDX-09", "IDX-15"],
       "status": "partial",

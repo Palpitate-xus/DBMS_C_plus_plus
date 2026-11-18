@@ -2,6 +2,19 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="vacuum-empty-toast-20261118"></a>
+## 2026-11-18 · 清理表时跳过无用的扫描
+
+普通 `VACUUM` 会先清理主表，然后检查单独存放的长值。新版本在第二步先确认长值文件是否有数据页。两份文件齐全且长值文件只有文件头时，直接核对索引，无需再读取主表。存在长值时，仍会检查主表和分区的所有物理行，确认哪些值可回收。[使用示例](MANUAL.md#清理表占用的空间)
+
+PostgreSQL 18.6 根据表目录中的长值附表标识决定是否另行清理。SQLite 把放不下的数据连到溢出页。DuckDB 的 `VACUUM` 主要更新部分统计信息，删除后的空间回收由检查点处理。[PostgreSQL 清理实现](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/commands/vacuum.c) · [SQLite 溢出页](https://sqlite.org/fileformat2.html#cell_payload_overflow_pages) · [DuckDB VACUUM](https://duckdb.org/docs/stable/sql/statements/vacuum) · [DuckDB CHECKPOINT](https://duckdb.org/docs/stable/sql/statements/checkpoint)
+
+- 回归捕获实际主表页读取。针对不存在长值文件的定长表，以及长值文件只有文件头的短文本表，两种情况都由读取 1 页降至 0 页。整数、短文本、空字符串和 SQL `NULL` 原样读回。旧版只有这两项取页断言失败。[物理读取回归](../tests/vacuum_toast_physical_reference_test.cpp)
+
+- 真正写有长值的 16 个既有用例继续通过。普通表和分区表都只回收失去引用的值，保留仍被引用的字节。历史快照、并行清理和页锁的相邻回归包含在本次验证中。[快照回归](../tests/vacuum_toast_test.cpp) · [并行清理回归](../tests/parallel_vacuum_test.cpp)
+
+- 六项 C++ 回归全部通过。新旧版本执行手册示例并清理实际存有长值的表。在 `VACUUM` 返回后各用 `SIGKILL` 结束进程，重新打开同一数据目录，读取并再次清理。两版 16 组命令和回复逐字节一致。初次和重启后的结果都保留有效行和 `NULL`，已删行未出现。另有 65 组协议操作与 PostgreSQL 18.6 对照。完整回归套件待验证。受测程序 SHA-256 为 `1dcf8e2bad29c4fa7d5f69ffc4fd45d58f1aa7db82327114148833e5a4356fb7`。[性能报告](performance-report-2026-10-30.md#vacuum-empty-toast-cost-20261118)
+
 <a id="brin-vacuum-full-generation-20261118"></a>
 ## 2026-11-18 · 整理表后可立即使用范围索引
 
