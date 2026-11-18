@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>翻页时可以跳过空值 · 2026-11-18</summary>
+
+例如只看有备注的记录，数据库可以按主键顺序查找，凑够一页就停。
+
+[使用示例](docs/MANUAL.md#翻页时跳过空值) · [测试报告](docs/test-report.md#integer-primary-key-null-filter-20261118) · [性能报告](docs/performance-report-2026-10-30.md#integer-primary-key-null-filter-cost-20261118)
+
+</details>
+
+<details>
 <summary>同一条分页查询可以反复用 · 2026-11-18</summary>
 
 每次传入上一页最后一个整数主键，数据库就从对应的位置继续查找。
@@ -19,18 +28,15 @@
 </details>
 
 <details>
-<summary>只查一页，取够就停 · 2026-11-18</summary>
+<summary>查看更早的更新</summary>
+
+## 2026-11-18 · 只查一页，取够就停
 
 按整数主键排序时，新建或重建的索引可以跳过这一页之后的记录。已有索引可以继续用，也可以通过 `REINDEX TABLE` 重建。
 
 修复了添加主键成功后，进程突然中断可能导致重启后无法按主键查找的问题。
 
 [使用示例](docs/MANUAL.md#按整数主键翻页) · [测试报告](docs/test-report.md#signed-primary-key-prefix-20261118) · [性能报告](docs/performance-report-2026-10-30.md#signed-primary-key-prefix-cost-20261118)
-
-</details>
-
-<details>
-<summary>查看更早的更新</summary>
 
 ## 2026-11-18 · 查一页时少读表记录
 

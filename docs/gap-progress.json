@@ -2,6 +2,28 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-18 collect enough matching rows when checking NULLs during integer primary key pagination",
+      "gap_ids": ["IDX-03", "QRY-01"],
+      "status": "partial",
+      "evidence": [
+        "src/commands/TableManage.cpp",
+        "src/executor/ExecutionPlan.cpp",
+        "docs/MANUAL.md",
+        "docs/test-report.md",
+        "docs/performance-report-2026-10-30.md"
+      ],
+      "tests": [
+        "tests/ordinary_scalar_order_protocol_e2e_test.py",
+        "tests/read_owner_index_snapshot_protocol_e2e_test.py",
+        "tests/bptree_topology_corruption_test.cpp"
+      ],
+      "verification": [
+        "A direct IS NULL or IS NOT NULL test on ordinary integer, boolean and text tables counts qualifying rows across checked index batches under one snapshot. The registered refill case reads 80 heap rows. Real sparse multi-leaf, empty and budget fallback cases pass, including preserved OFFSET output evaluation and the existing error diagnostics for excluded expressions.",
+        "Selected scope passes five native and five neighboring protocol entries, the expanded registered entry and the manual. Fresh and legacy crash controls include C552 direct open and recovery to C553, concurrent NULL changes and stale snapshots. The independently audited five workload preflight replies match across both builds and PostgreSQL 18.6, with 512 to 12 and 1024 to 36-39 or 36-40 physical rows examined. Original 273 item records remain unchanged.",
+        "The single frozen 60-batch timing and independent raw audit pass with 12 clean sessions, 2880 measured executions and 3792 byte-matching exchanges. The descending filtered interval reduces median server CPU time by about 73 percent and passes the drift gate. Dense filtering, ascending range filtering and the unfiltered range control exceed the drift gate, while the expression-filter control has mixed directions."
+      ]
+    },
+    {
       "issue": "2026-11-18 seek to the current signed integer parameter for primary key pages",
       "gap_ids": ["IDX-03", "QRY-01"],
       "status": "partial",

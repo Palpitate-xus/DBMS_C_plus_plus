@@ -6,7 +6,9 @@
 
 默认表空间的普通单表查询按单列有符号整数主键分页时，可以从新格式索引按需要的方向取前 `OFFSET + LIMIT` 个键和表行，然后停止读取。旧格式索引仍遍历全部十进制键。旧快照、活动事务、外部表空间、索引或内存条件不满足时走原扫描和排序。[测试范围](test-report.md#signed-primary-key-prefix-20261118) · [性能报告](performance-report-2026-10-30.md#signed-primary-key-prefix-cost-20261118)
 
-如果范围条件只比较同一个主键与整数，可从范围起点读取。重复执行时，数据库使用这次传入的非空有符号整数重新定位。使用旧索引、其他筛选条件、空值或小数时采用原查询计划。[测试范围](test-report.md#prepared-integer-primary-key-range-20261118) · [性能报告](performance-report-2026-10-30.md#prepared-integer-primary-key-range-cost-20261118)
+如果范围条件只比较同一个主键与整数，可从范围起点读取。重复执行时，数据库使用这次传入的非空有符号整数重新定位。使用旧索引、空值参数或小数时采用原查询计划。[范围与参数测试](test-report.md#prepared-integer-primary-key-range-20261118)
+
+对于普通整数、布尔和文本列，筛选 `IS NULL` 或 `IS NOT NULL` 时可以沿主键顺序逐行检查，凑够 `OFFSET + LIMIT` 条符合条件的记录后返回。查询可同时限定主键范围。旧快照、旧索引和超出读取预算的查询使用普通扫描。[空值筛选测试](test-report.md#integer-primary-key-null-filter-20261118) · [性能报告](performance-report-2026-10-30.md#integer-primary-key-null-filter-cost-20261118)
 
 ## 2026-11-18 · 排序后计算查询结果
 

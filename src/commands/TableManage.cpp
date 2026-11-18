@@ -9878,11 +9878,14 @@ std::optional<OrderedPrimaryKeyReadPage> StorageEngine::tryReadOrderedIntegerPri
         const std::string& dbname, const std::string& tablename,
         const TableSchema& expectedSchema, size_t keyColumn, bool descending,
         size_t count, size_t byteBudget, std::optional<int64_t> lower,
-        std::optional<int64_t> upper) {
+        std::optional<int64_t> upper, const std::vector<OrderedPrimaryKeyNullTest>& nullTests) {
     // Only files in the executable's locked data directory have the required
     // instance ownership. An external tablespace can outlive that lock.
     if (dataDirectory().empty() || !count || signedIntegerPrimaryKeyColumn(expectedSchema) != keyColumn ||
-        transactionContext().txnIsolationLevel == IsolationLevel::SERIALIZABLE)
+        transactionContext().txnIsolationLevel == IsolationLevel::SERIALIZABLE ||
+        std::any_of(nullTests.begin(), nullTests.end(), [&](const auto& test) {
+            return test.column >= expectedSchema.len;
+        }))
         return {};
     checkForQueryInterrupt();
     lockManager_.setResourceNamespace(dbname);
@@ -9924,15 +9927,26 @@ std::optional<OrderedPrimaryKeyReadPage> StorageEngine::tryReadOrderedIntegerPri
     const size_t maxEntries = byteBudget / (2 * (sizeof(BPTree::LeafEntry) + sizeof(BPTree::IntegerEntry)));
     if (count > maxEntries) return {};
     const bool bounded = lower.has_value() || upper.has_value();
-    if (tree->usesSignedIntegerKeys()) {
-        if (bounded && !tree->rootPage()) return {};
-        const auto read = tree->readSignedIntegerRange(count, std::max<size_t>(64, maxEntries),
-            descending, lower, upper, candidates, result.indexNodesVisited);
+    const bool filtered = !nullTests.empty();
+    const size_t maxNodes = std::max<size_t>(64, maxEntries);
+    auto batchLower = lower;
+    auto batchUpper = upper;
+    const auto readBatch = [&](size_t size) {
+        size_t nodes = 0;
+        if (result.indexNodesVisited >= maxNodes) return false;
+        const auto read = tree->readSignedIntegerRange(size, maxNodes - result.indexNodesVisited,
+            descending, batchLower, batchUpper, candidates, nodes);
+        result.indexNodesVisited += nodes;
         checkForQueryInterrupt();
-        if (read != BPTree::LeafEntriesResult::Complete || (!bounded && candidates.size() != count))
+        return read == BPTree::LeafEntriesResult::Complete;
+    };
+    const size_t batchSize = filtered ? std::min(maxEntries, std::max(count, size_t{32})) : count;
+    result.orderedIndex = tree->usesSignedIntegerKeys();
+    if (result.orderedIndex) {
+        if (((bounded || filtered) && !tree->rootPage()) || !readBatch(batchSize) ||
+            (!bounded && !filtered && candidates.size() != count))
             return {};
-        result.orderedIndex = true;
-    } else if (bounded || !readLegacyIntegerIndexKeys(*tree,
+    } else if (bounded || filtered || !readLegacyIntegerIndexKeys(*tree,
         ExprHelper::canonicalResultTypeName(schema.cols[keyColumn].dataType),
         !schema.pkColIndices.empty(), descending, count, maxEntries, candidates)) return {};
     result.indexEntries = candidates.size();
@@ -9943,13 +9957,12 @@ std::optional<OrderedPrimaryKeyReadPage> StorageEngine::tryReadOrderedIntegerPri
         if (!getPageAllocator(dbname, tablename)) return {};
         allocator = pageAllocators_.at(dbname + "/" + tablename);
     }
-    const size_t rowsToRead = std::min(count, candidates.size());
-    result.rows.reserve(rowsToRead);
-    size_t remaining = byteBudget - candidates.capacity() * sizeof(BPTree::IntegerEntry);
-    for (size_t i = 0; i < rowsToRead; ++i) {
+    result.rows.reserve(std::min(count, candidates.size()));
+    size_t remaining = byteBudget;
+    const auto readCandidate = [&](const BPTree::IntegerEntry& candidate, size_t keyBufferBytes) {
         checkForQueryInterrupt();
-        const auto [keyValue, rid] = candidates[i];
-        if ((lower && keyValue < *lower) || (upper && keyValue > *upper)) return {};
+        const auto [keyValue, rid] = candidate;
+        if ((lower && keyValue < *lower) || (upper && keyValue > *upper)) return false;
         std::string raw;
         std::vector<bool> bitmap(schema.len, false);
         {
@@ -9957,38 +9970,71 @@ std::optional<OrderedPrimaryKeyReadPage> StorageEngine::tryReadOrderedIntegerPri
             uint16_t slotId = 0;
             decodeRid(rid, pageId, slotId);
             if (!pageId || encodeRid(pageId, slotId) != rid ||
-                !lockManager_.pageLockShared(dbname, tablename, pageId)) return {};
+                !lockManager_.pageLockShared(dbname, tablename, pageId)) return false;
             HeapPageReadGuard guard{lockManager_, *allocator, dbname, tablename, pageId};
             char* buffer = allocator->fetchPage(pageId);
-            if (!buffer) return {};
+            if (!buffer) return false;
             guard.pinned = true;
             PageWrapper page(buffer, allocator->pageSize(), schema.formatVersion);
             const char* tuple = nullptr;
             size_t length = 0;
             if (!page.read(slotId, tuple, length) || length < sizeof(HeapTupleHeaderData) ||
-                !view->isVisible(tuple, length, schema.formatVersion)) return {};
+                !view->isVisible(tuple, length, schema.formatVersion)) return false;
             const auto* header = castHeapHeader(tuple);
             const size_t minOffset = sizeof(HeapTupleHeaderData) +
                 ((header->t_infomask & HEAP_HASNULL) ? (schema.len + 7) / 8 : 0);
-            if (header->t_hoff < minOffset || header->t_hoff >= length) return {};
+            if (header->t_hoff < minOffset || header->t_hoff >= length) return false;
             raw.assign(tuple + header->t_hoff, length - header->t_hoff);
             for (size_t col = 0; col < schema.len; ++col)
                 if (schema.cols[col].isNull)
                     bitmap[col] = dbms::isNull(header, static_cast<int>(col));
         }
         if (bitmap[keyColumn] ||
-            parseStoredInteger(extractColumnValueStatic(raw, schema, keyColumn)) != keyValue) return {};
+            parseStoredInteger(extractColumnValueStatic(raw, schema, keyColumn)) != keyValue) return false;
         bool toastOk = false;
         detail::ScopedStoredRowNullBitmap nullOwner(schema, bitmap);
         auto value = resolveToastValues(dbname, tablename, raw, schema, &toastOk);
+        if (!toastOk) return false;
+        ++result.heapRowsFetched;
+        if (std::any_of(nullTests.begin(), nullTests.end(), [&](const auto& test) {
+            return bitmap[test.column] != test.expectsNull;
+        })) return true;
         const size_t rowOverhead = sizeof(HeapScanRow) + bitmap.capacity() / 8;
-        if (!toastOk || remaining < rowOverhead || value.capacity() > remaining - rowOverhead)
-            return {};
+        if (keyBufferBytes > remaining || rowOverhead > remaining - keyBufferBytes ||
+            value.capacity() > remaining - keyBufferBytes - rowOverhead)
+            return false;
         remaining -= rowOverhead + value.capacity();
         result.rows.push_back({rid, std::move(value), std::move(bitmap)});
+        return true;
+    };
+
+    size_t first = 0;
+    size_t requested = batchSize;
+    size_t nextBatchSize = batchSize;
+    for (;;) {
+        const size_t keyBufferBytes = candidates.capacity() * sizeof(BPTree::IntegerEntry);
+        if (keyBufferBytes > remaining) return {};
+        for (size_t i = first; i < candidates.size() && result.rows.size() < count; ++i)
+            if (!readCandidate(candidates[i], keyBufferBytes)) return {};
+        if (!filtered || result.rows.size() == count || candidates.size() < requested) break;
+        if (result.heapRowsFetched >= maxEntries) return {};
+
+        // Overlap one key so the checked tree traversal still verifies a leaf
+        // link crossing the batch boundary. Only the new RIDs are fetched.
+        const auto tail = candidates.back();
+        if (descending) batchUpper = tail.key;
+        else batchLower = tail.key;
+        if (nextBatchSize < 256) nextBatchSize = std::min<size_t>(256, nextBatchSize * 2);
+        requested = std::min(nextBatchSize, maxEntries - result.heapRowsFetched) + 1;
+        if (requested > remaining / sizeof(BPTree::IntegerEntry)) return {};
+        std::vector<BPTree::IntegerEntry>().swap(candidates);
+        if (!readBatch(requested) || candidates.empty() ||
+            candidates.front().key != tail.key || candidates.front().value != tail.value) return {};
+        first = 1;
+        result.indexEntries += candidates.size() - first;
     }
     if (indexReadSnapshotFence(dbname) != fence) return {};
-    recordTableScan(dbname, tablename, result.rows.size(), true, false);
+    recordTableScan(dbname, tablename, result.heapRowsFetched, true, false);
     return result;
 }
 

@@ -6,6 +6,16 @@ from pathlib import Path
 import struct
 
 
+def plan_nodes(result):
+    pending=[json.loads(result[0][0][0])['plan']]
+    nodes={}
+    while pending:
+        node=pending.pop()
+        nodes[node['nodeType']]=node
+        pending.extend(node['children'])
+    return nodes
+
+
 def parameter_range_controls(runner, client, sock, check_plan=True):
     """Exercise repeated wire Bind inputs on the previously seeded PK tables."""
     def check(messages, rows=None, oids=None, state=None, tag=None):
@@ -102,16 +112,6 @@ def parameter_range_controls(runner, client, sock, check_plan=True):
 
     if check_plan:
         explain='EXPLAIN (ANALYZE TRUE, TIMING FALSE, COSTS FALSE, FORMAT JSON) '
-
-        def plan_nodes(result):
-            pending=[json.loads(result[0][0][0])['plan']]
-            nodes={}
-            while pending:
-                node=pending.pop()
-                nodes[node['nodeType']]=node
-                pending.extend(node['children'])
-            return nodes
-
         prepare('range_plan',explain+ranged,(23,23))
         for values,fetched in (((-100,10),3),((-3,1),2)):
             nodes=plan_nodes(execute('range_plan',values,binary_widths=(4,4)))
@@ -124,6 +124,102 @@ def parameter_range_controls(runner, client, sock, check_plan=True):
         nodes=plan_nodes(execute('range_plan_numeric',('2.5',)))
         assert nodes.get('IntegerPrimaryKeyPage',{}).get('usedPrimaryKeyPage')!='true',nodes
     print('[PREPARED INTEGER RANGE PROTOCOL] passed',flush=True)
+
+
+def null_filter_page_controls(query, check_plan=True):
+    """NULL filtering must count matched rows while keeping its heap-read budget."""
+    def expect(sql,rows=None,oids=None,state=None):
+        result=query(sql)
+        assert result[1]==state,(sql,result)
+        if rows is not None:assert result[0]==rows,(sql,result,rows)
+        if oids is not None:assert result[5]==oids,(sql,result,oids)
+        if state is not None:assert result[4] is None,(sql,result)
+        return result
+
+    def page(sql):
+        explain='EXPLAIN (ANALYZE TRUE, TIMING FALSE, COSTS FALSE, FORMAT JSON) '
+        return plan_nodes(expect(explain+sql))
+
+    def accepted(sql,rows,oids,fetched,bounded):
+        expect(sql,rows,oids)
+        if check_plan:
+            nodes=page(sql)
+            selected=nodes.get('IntegerPrimaryKeyPage',{})
+            assert selected.get('usedPrimaryKeyPage')==selected.get('indexNullFilter')=='true',nodes
+            assert (selected.get('indexKeyRange')=='true')==bounded,nodes
+            assert int(selected['heapRowsFetched'])==fetched,nodes
+            assert nodes['TableScan'].get('actualRows',0)==0,nodes
+
+    def fallback(sql,rows,oids):
+        expect(sql,rows,oids)
+        if check_plan:
+            nodes=page(sql)
+            assert nodes.get('IntegerPrimaryKeyPage',{}).get('usedPrimaryKeyPage')!='true',nodes
+
+    expect('CREATE TABLE scalar_order_null_page(k INTEGER PRIMARY KEY,qty INTEGER,ready BOOLEAN,payload TEXT)')
+    qty={-4:'0',5:'51',13:'130',21:'210'}
+    ready={-6:'FALSE',3:'TRUE',7:'FALSE',11:'TRUE',20:'FALSE'}
+    payload={-7:"'first'",4:"''",14:"'NULL'",23:"'last'"}
+    values=[]
+    for i in range(32):
+        k=(i*13)%32-8
+        values.append(f"({k},{qty.get(k,'NULL')},{ready.get(k,'NULL')},{payload.get(k,'NULL')})")
+    expect('INSERT INTO scalar_order_null_page VALUES '+','.join(values))
+
+    for sql,rows,oids,fetched,bounded in (
+        ('SELECT p.k,p.qty FROM scalar_order_null_page p WHERE p.qty IS NOT NULL '
+         'ORDER BY p.k LIMIT 2 OFFSET 1',
+         [['5','51'],['13','130']],[23,23],22,False),
+        ('SELECT p.k,p.ready FROM scalar_order_null_page p WHERE 20 >= p.k AND p.k > -2 '
+         'AND p.ready IS NULL ORDER BY p.k DESC LIMIT 2 OFFSET 1',
+         [['18',None],['17',None]],[23,16],4,True),
+        ('SELECT p.k AS key_out,p.payload FROM scalar_order_null_page p '
+         'WHERE p.payload IS NOT NULL AND p.k >= -1 ORDER BY key_out LIMIT 3 OFFSET 1',
+         [['14','NULL'],['23','last']],[23,25],25,True),
+        ('SELECT p.k,p.ready FROM scalar_order_null_page p WHERE p.k > 18 '
+         'AND p.ready IS NOT NULL ORDER BY p.k DESC LIMIT 1',
+         [['20','f']],[23,16],4,True),
+        ('SELECT p.k,p.ready FROM scalar_order_null_page p WHERE p.k > 18 '
+         'AND p.ready IS NOT NULL ORDER BY p.k DESC LIMIT 3 OFFSET 1',
+         [],[23,16],5,True),
+    ):
+        accepted(sql,rows,oids,fetched,bounded)
+
+    fallback('SELECT k FROM scalar_order_null_page WHERE k >= 0 AND (qty+0) IS NOT NULL '
+             'ORDER BY k LIMIT 2 OFFSET 1',[['13'],['21']],[23])
+    fallback('SELECT DISTINCT k FROM scalar_order_null_page WHERE qty IS NOT NULL '
+             'ORDER BY k LIMIT 2',[['-4'],['5']],[23])
+
+    expect('CREATE SEQUENCE scalar_order_null_calls')
+    expect("SELECT nextval('scalar_order_null_calls')",[['1']])
+    fallback("SELECT k FROM scalar_order_null_page WHERE qty IS NOT NULL AND "
+             "CASE WHEN k IN (13,21) THEN nextval('scalar_order_null_calls') > 0 ELSE false END "
+             "ORDER BY k LIMIT 1 OFFSET 1",[['21']],[23])
+    expect("SELECT currval('scalar_order_null_calls')",[['5' if check_plan else '3']])
+    expect("SELECT k FROM scalar_order_null_page WHERE qty IS NOT NULL AND "
+           "CASE WHEN k = 21 THEN ('bad' || k::TEXT)::INTEGER > 0 ELSE false END "
+           "ORDER BY k LIMIT 1",[],state='22P02')
+
+    expect('CREATE TABLE scalar_order_null_generated(k INTEGER PRIMARY KEY,n INTEGER,'
+           'g INTEGER GENERATED ALWAYS AS (n+1) STORED)')
+    expect('INSERT INTO scalar_order_null_generated(k,n) VALUES (2,NULL),(1,2),(3,0)')
+    fallback('SELECT k FROM scalar_order_null_generated WHERE g IS NULL ORDER BY k LIMIT 1',[['2']],[23])
+    expect('CREATE DOMAIN scalar_order_null_domain AS INTEGER')
+    expect('CREATE TABLE scalar_order_null_complex(k INTEGER PRIMARY KEY,q INTEGER,'
+           'd scalar_order_null_domain,a INTEGER[])')
+    expect('INSERT INTO scalar_order_null_complex VALUES (3,NULL,NULL,ARRAY[3]),'
+           '(1,4,1,ARRAY[1]),(2,NULL,2,NULL)')
+    fallback('SELECT k FROM scalar_order_null_complex WHERE d IS NOT NULL ORDER BY k LIMIT 1',[['1']],[23])
+    fallback('SELECT k FROM scalar_order_null_complex WHERE a IS NULL ORDER BY k LIMIT 1',[['2']],[23])
+    fallback('SELECT k FROM scalar_order_null_complex WHERE q IS NULL ORDER BY k LIMIT 1',[['2']],[23])
+
+    # k=57, the first match in the range, is outside the first 32 index entries.
+    extra={57:'0',91:'-1',101:'17'}
+    expect('INSERT INTO scalar_order_null_page(k,qty) VALUES '+
+           ','.join(f"({k},{extra.get(k,'NULL')})" for k in range(24,104)))
+    accepted('SELECT k,qty FROM scalar_order_null_page WHERE k >= 22 AND qty IS NOT NULL '
+             'ORDER BY k LIMIT 2 OFFSET 1',[['91','-1'],['101','17']],[23,23],80,True)
+    print('[INTEGER PRIMARY KEY NULL FILTER PROTOCOL] passed',flush=True)
 
 
 def main():
@@ -154,12 +250,7 @@ def main():
         if actual!=count:failures.append((label,'calls',actual,'expected',count))
     def page_plan(sql):
         result=ok('EXPLAIN (ANALYZE TRUE, TIMING FALSE, COSTS FALSE, FORMAT JSON) '+sql)
-        pending=[json.loads(result[0][0][0])['plan']]
-        scans={}
-        while pending:
-            node=pending.pop()
-            scans[node['nodeType']]=node
-            pending.extend(node['children'])
+        scans=plan_nodes(result)
         return scans['IntegerPrimaryKeyPage'],scans['TableScan']
     try:
         for sql in (
@@ -283,6 +374,7 @@ def main():
                 rows=[['-9223372036854775808','min'],['-11','negative'],['2','two']],oids=[20,25])
         assert not failures,failures
         parameter_range_controls(runner,client,server['sock'])
+        null_filter_page_controls(query)
         print('[ORDINARY SCALAR ORDER PROTOCOL] passed')
     finally:runner.stop_ours(server)
 

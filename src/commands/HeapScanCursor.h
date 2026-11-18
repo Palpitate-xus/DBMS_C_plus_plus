@@ -15,10 +15,16 @@ struct HeapScanRow {
     std::vector<bool> nulls;
 };
 
+struct OrderedPrimaryKeyNullTest {
+    std::size_t column;
+    bool expectsNull;
+};
+
 struct OrderedPrimaryKeyReadPage {
     std::vector<HeapScanRow> rows;
     std::size_t indexEntries = 0;
     std::size_t indexNodesVisited = 0;
+    std::size_t heapRowsFetched = 0;
     bool orderedIndex = false;
 };
 

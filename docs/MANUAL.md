@@ -1211,6 +1211,18 @@ DEALLOCATE example_page_after;
 
 第一次返回 `2, NULL` 和 `10, d`，第二次只返回 `10, d`。通过客户端执行时，同样可以传入 `smallint`、`integer` 或 `bigint` 参数，文本和二进制传输都支持。数据库按每次传入的整数查找下一页。[适用条件与测试](test-report.md#prepared-integer-primary-key-range-20261118)
 
+#### 翻页时跳过空值
+
+只想显示有备注的记录时，可以分页筛选 `note IS NOT NULL`。
+
+```sql
+SELECT id, note FROM example_pk_page
+WHERE id > -10 AND note IS NOT NULL
+ORDER BY id LIMIT 2 OFFSET 1;
+```
+
+符合条件的是 `-2, b` 和 `10, d`。`OFFSET 1` 跳过第一条，查询返回 `10, d`。选择 `IS NULL` 可以只找没有备注的记录。用 `EXPLAIN (ANALYZE, FORMAT JSON)` 查看实际读取量，`heapRowsFetched` 包含检查过但被筛掉的记录。[适用条件与测试](test-report.md#integer-primary-key-null-filter-20261118)
+
 2026-11-02 起，类型化执行器中的普通有序 `LIMIT` 优先使用最多 `LIMIT+OFFSET` 个候选的有界堆，
 覆盖执行阶段可接入的单表查询及参数化查询，保留多列方向、NULL 顺序、类型值和原始同行顺序。
 所有必要排序键仍对全部输入求值；不参与排序的 volatile 输出按实际输出需求求值。

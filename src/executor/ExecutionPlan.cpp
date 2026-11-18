@@ -2865,6 +2865,7 @@ static std::optional<QueryColumnBinding> integerPageOrder(const PreparedQuery& q
 struct IntegerPageBounds {
     std::optional<int64_t> lower;
     std::optional<int64_t> upper;
+    std::vector<OrderedPrimaryKeyNullTest> nullTests;
 };
 
 struct IntegerPageEndpoint {
@@ -2915,14 +2916,37 @@ static std::optional<IntegerPageEndpoint> integerPageEndpoint(const Expr* expres
     return input ? parseIntegerPageEndpoint(input->value, std::move(type)) : std::nullopt;
 }
 
+static bool isOrdinaryNullTestColumn(const Column& column) {
+    if (column.generatedKind || column.isArray || column.isUnsigned || !column.domainName.empty() ||
+        !column.enumValues.empty()) return false;
+    const auto type = ExprHelper::canonicalResultTypeName(column.dataType);
+    return type == "smallint" || type == "integer" || type == "bigint" || type == "boolean" ||
+        type == "text" || type == "character varying";
+}
+
 static bool intersectIntegerPageBounds(const Expr* expression, const QueryColumnBinding& key,
-                                       const PreparedQuery& query, IntegerPageBounds& bounds) {
+                                       const TableSchema& schema, const PreparedQuery& query,
+                                       IntegerPageBounds& bounds) {
+    if (!expression || expression->preparedSubquery) return false;
+    if (const auto* test = dynamic_cast<const UnaryOpExpr*>(expression)) {
+        if (test->op != "IS NULL" && test->op != "IS NOT NULL") return false;
+        const auto* column = dynamic_cast<const ColumnRefExpr*>(test->operand.get());
+        if (!column || column->preparedSubquery || !column->binding) return false;
+        const auto& input = *column->binding;
+        if (input.scopeDepth || input.mergedUsing || input.sourceOrdinal != key.sourceOrdinal ||
+            input.columnOrdinal >= schema.len || !input.typeMetadata ||
+            input.typeMetadata->kind != DatumKind::Scalar || input.typeMetadata->enumType ||
+            input.typeMetadata->actualOid != input.typeMetadata->codecOid ||
+            !isOrdinaryNullTestColumn(schema.cols[input.columnOrdinal])) return false;
+        bounds.nullTests.push_back({input.columnOrdinal, test->op == "IS NULL"});
+        return true;
+    }
     const auto* comparison = dynamic_cast<const BinaryOpExpr*>(expression);
-    if (!comparison || comparison->preparedSubquery || comparison->rowComparison) return false;
+    if (!comparison || comparison->rowComparison) return false;
     const auto& op = comparison->op;
     if (op == "AND")
-        return intersectIntegerPageBounds(comparison->left.get(), key, query, bounds) &&
-            intersectIntegerPageBounds(comparison->right.get(), key, query, bounds);
+        return intersectIntegerPageBounds(comparison->left.get(), key, schema, query, bounds) &&
+            intersectIntegerPageBounds(comparison->right.get(), key, schema, query, bounds);
     if (op != "<" && op != "<=" && op != ">" && op != ">=") return false;
 
     const auto* column = dynamic_cast<const ColumnRefExpr*>(comparison->left.get());
@@ -2964,9 +2988,15 @@ static bool intersectIntegerPageBounds(const Expr* expression, const QueryColumn
 }
 
 static std::optional<IntegerPageBounds> integerPageBounds(const PreparedQuery& query, const SelectStmt& select,
-                                                          const QueryColumnBinding& key) {
+                                                          const QueryColumnBinding& key, const TableSchema& schema) {
     IntegerPageBounds bounds;
-    if (select.whereClause && !intersectIntegerPageBounds(select.whereClause.get(), key, query, bounds)) return {};
+    if (select.whereClause && !intersectIntegerPageBounds(select.whereClause.get(), key, schema, query, bounds))
+        return {};
+    // The existing filter eagerly decodes stored inputs. Only use bitmap
+    // rejection if that decoding requires no array/domain/reference handling.
+    if (!bounds.nullTests.empty())
+        for (size_t i = 0; i < schema.len; ++i)
+            if (!isOrdinaryNullTestColumn(schema.cols[i])) return {};
     return bounds;
 }
 
@@ -2997,10 +3027,11 @@ bool QueryPlanner::mayUseIntegerPrimaryKeyPage(StorageEngine* engine, const std:
         const PreparedQuery& query, const SelectStmt& select) {
     const auto key = integerPageOrder(query, select);
     const auto* range = key ? integerPageRelation(query, select, *key) : nullptr;
-    if (!range || !integerPageBounds(query, select, *key)) return false;
+    if (!range) return false;
     const auto table = range->relationSchema.empty() || range->relationSchema == "public" ? range->relationName
         : range->relationSchema + "__" + range->relationName;
-    return eligibleIntegerPageKey(engine->getTableSchema(database, table), *key);
+    const auto schema = engine->getTableSchema(database, table);
+    return eligibleIntegerPageKey(schema, *key) && integerPageBounds(query, select, *key, schema).has_value();
 }
 
 class IntegerPrimaryKeyPageOp final : public Operator {
@@ -3020,7 +3051,7 @@ public:
     IntegerPrimaryKeyPageOp(StorageEngine* engine, std::string database, const TableSchema& schema,
             size_t keyColumn, size_t count, bool descending, IntegerPageBounds bounds, OpPtr fallback)
         : engine_(engine), database_(std::move(database)), schema_(schema), keyColumn_(keyColumn),
-          count_(count), descending_(descending), bounds_(bounds), fallback_(std::move(fallback)) {}
+          count_(count), descending_(descending), bounds_(std::move(bounds)), fallback_(std::move(fallback)) {}
     bool open() override {
         OpenInstrument instrument(this);
         clearError();
@@ -3028,13 +3059,13 @@ public:
         usedPage_ = orderedIndex_ = false;
         indexEntries_ = indexNodesVisited_ = heapRows_ = 0;
         page_ = engine_->tryReadOrderedIntegerPrimaryKey(database_, schema_.tablename, schema_,
-            keyColumn_, descending_, count_, sortWorkMemBytes(), bounds_.lower, bounds_.upper);
+            keyColumn_, descending_, count_, sortWorkMemBytes(), bounds_.lower, bounds_.upper, bounds_.nullTests);
         if (page_) {
             usedPage_ = true;
             orderedIndex_ = page_->orderedIndex;
             indexEntries_ = page_->indexEntries;
             indexNodesVisited_ = page_->indexNodesVisited;
-            heapRows_ = page_->rows.size();
+            heapRows_ = page_->heapRowsFetched;
             return true;
         }
         fallbackOpen_ = true;
@@ -3095,6 +3126,7 @@ public:
             {"heapRowsFetched", std::to_string(heapRows_)}};
         if (orderedIndex_) attributes.emplace("indexNodesVisited", std::to_string(indexNodesVisited_));
         if (bounds_.lower || bounds_.upper) attributes.emplace("indexKeyRange", "true");
+        if (!bounds_.nullTests.empty()) attributes.emplace("indexNullFilter", "true");
         return attributes;
     }
 };
@@ -3113,9 +3145,9 @@ OpPtr makePreparedTableSource(StorageEngine* engine, const std::string& database
     if (physical && typeid(*physical) == typeid(TableScanOp) && physical->tableName() == schema.tablename) {
         const auto key = integerPageOrder(*query, *select);
         if (key && integerPageRelation(*query, *select, *key) && eligibleIntegerPageKey(schema, *key)) {
-            if (const auto bounds = integerPageBounds(*query, *select, *key))
+            if (auto bounds = integerPageBounds(*query, *select, *key, schema))
                 return std::make_unique<IntegerPrimaryKeyPageOp>(engine, database, schema, key->columnOrdinal,
-                    select->offset.value_or(0) + *select->limit, !select->orderBy.front().asc, *bounds,
+                    select->offset.value_or(0) + *select->limit, !select->orderBy.front().asc, std::move(*bounds),
                     std::move(source));
         }
     }
