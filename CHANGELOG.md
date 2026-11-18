@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>按主键翻页时少排一次序 · 2026-11-18</summary>
+
+索引已经按所需顺序给出一页时，数据库沿用这个顺序。需要写临时文件时，也按这个顺序写入和读取。
+
+[使用示例](docs/MANUAL.md#查看分页是否复用索引顺序) · [测试报告](docs/test-report.md#presorted-integer-primary-key-page-20261118) · [性能报告](docs/performance-report-2026-10-30.md#presorted-integer-primary-key-page-cost-20261118)
+
+</details>
+
+<details>
 <summary>翻页时可以跳过空值 · 2026-11-18</summary>
 
 例如只看有备注的记录，数据库可以按主键顺序查找，凑够一页就停。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>从上一页最后一个编号接着查 · 2026-11-18</summary>
+<summary>查看更早的更新</summary>
+
+## 2026-11-18 · 从上一页最后一个编号接着查
 
 如果主键是整数，把上一页最后一个编号写进 `WHERE`，查询就能从下一条开始。可以从小到大或从大到小，也可以同时指定起点和终点。
 
 [使用示例](docs/MANUAL.md#从上页主键继续读取) · [测试报告](docs/test-report.md#integer-primary-key-range-20261118) · [性能报告](docs/performance-report-2026-10-30.md#integer-primary-key-range-cost-20261118)
-
-</details>
-
-<details>
-<summary>查看更早的更新</summary>
 
 ## 2026-11-18 · 只查一页，取够就停
 

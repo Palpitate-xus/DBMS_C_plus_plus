@@ -10,6 +10,8 @@
 
 对于普通整数、布尔和文本列，筛选 `IS NULL` 或 `IS NOT NULL` 时可以沿主键顺序逐行检查，凑够 `OFFSET + LIMIT` 条符合条件的记录后返回。查询可同时限定主键范围。旧快照、旧索引和超出读取预算的查询使用普通扫描。[空值筛选测试](test-report.md#integer-primary-key-null-filter-20261118) · [性能报告](performance-report-2026-10-30.md#integer-primary-key-null-filter-cost-20261118)
 
+整数主键页打开成功后，匹配当前 `ORDER BY` 列和方向的结果直接保持原顺序。内存不足时，按顺序写入一个临时文件。退回普通扫描时，排序与原来一样执行。[排序测试](test-report.md#presorted-integer-primary-key-page-20261118) · [性能报告](performance-report-2026-10-30.md#presorted-integer-primary-key-page-cost-20261118)
+
 ## 2026-11-18 · 排序后计算查询结果
 
 普通查询按单列整数主键排序时，可在实际取行时计算与排序无关的结果表达式。堆表上的一部分高成本数组转换也按需计算。实际排序键先求值，查询仍使用现有排序和临时文件路径。[测试范围](test-report.md#ordered-projection-20261118) · [实际耗时](performance-report-2026-10-30.md#ordered-projection-cost-20261118)

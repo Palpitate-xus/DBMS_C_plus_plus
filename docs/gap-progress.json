@@ -2,6 +2,29 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-18 reuse the verified output order of integer primary key pages",
+      "gap_ids": ["IDX-03", "QRY-10"],
+      "status": "partial",
+      "evidence": [
+        "src/executor/ExecutionPlan.cpp",
+        "src/executor/PreparedTableSource.h",
+        "src/executor/BoundedSortRuns.h",
+        "src/main.cpp",
+        "docs/MANUAL.md",
+        "docs/test-report.md",
+        "docs/performance-report-2026-10-30.md"
+      ],
+      "tests": [
+        "tests/bounded_sort_runs_test.cpp",
+        "tests/ordinary_scalar_order_protocol_e2e_test.py"
+      ],
+      "verification": [
+        "The actual direct or lazily opened base scan certifies its physical key order after first demand. Bound column and direction must agree. The consuming sorter preserves eager input decoding and projection timing, skips heap and comparison work, and uses one framed temporary run when spilling. Exact registered, six adjacent and five native tests and the manual pass, including high bigint keys, OFFSET effects, typed spill integrity and repeatable open/fallback transitions.",
+        "All 50 old/new preflight packets match with equivalent PostgreSQL 18.6 replies. The wider accepted page reads 45 heap rows and creates one temporary tape where the baseline creates two. Correctness and recovery audit covers 325 packets and 64 routes, including C552 and C553 and stale/writer snapshots. Original 273 item records remain unchanged.",
+        "The single frozen 60-batch comparison and independent audit complete with 12 clean sessions, 2880 timed exchanges and 3720 byte-matching archived exchanges. Server CPU uses 28.002 to 26.995 ms per exchange for the filtered spill workload, below the prespecified improvement gate. The remaining four workloads exceed its 10 percent drift ceiling. Timing does not establish repeatable speed changes."
+      ]
+    },
+    {
       "issue": "2026-11-18 collect enough matching rows when checking NULLs during integer primary key pagination",
       "gap_ids": ["IDX-03", "QRY-01"],
       "status": "partial",

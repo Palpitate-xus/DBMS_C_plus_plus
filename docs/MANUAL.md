@@ -1223,6 +1223,17 @@ ORDER BY id LIMIT 2 OFFSET 1;
 
 符合条件的是 `-2, b` 和 `10, d`。`OFFSET 1` 跳过第一条，查询返回 `10, d`。选择 `IS NULL` 可以只找没有备注的记录。用 `EXPLAIN (ANALYZE, FORMAT JSON)` 查看实际读取量，`heapRowsFetched` 包含检查过但被筛掉的记录。[适用条件与测试](test-report.md#integer-primary-key-null-filter-20261118)
 
+#### 查看分页是否复用索引顺序
+
+主键页已经按请求的顺序取得时，查询可以直接沿用这个顺序。
+
+```sql
+EXPLAIN (ANALYZE, COSTS FALSE, TIMING FALSE, FORMAT JSON)
+SELECT id, note FROM example_pk_page ORDER BY id DESC LIMIT 2;
+```
+
+上面的查询按顺序返回 `10, d` 和 `2, NULL`。执行计划中，`TypedSort` 的 `presortedInput` 为 `true` 表示复用了输入顺序，`spilled` 表示是否使用临时文件存放这些行。[适用条件与测试](test-report.md#presorted-integer-primary-key-page-20261118)
+
 2026-11-02 起，类型化执行器中的普通有序 `LIMIT` 优先使用最多 `LIMIT+OFFSET` 个候选的有界堆，
 覆盖执行阶段可接入的单表查询及参数化查询，保留多列方向、NULL 顺序、类型值和原始同行顺序。
 所有必要排序键仍对全部输入求值；不参与排序的 volatile 输出按实际输出需求求值。

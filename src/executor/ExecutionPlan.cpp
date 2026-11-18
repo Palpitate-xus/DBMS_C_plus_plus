@@ -805,6 +805,7 @@ public:
         return child_->lastStructuredRow(cells, nulls);
     }
     ScanOrigin scanOrigin() const override { return child_->scanOrigin(); }
+    const Operator* openedSource() const { return childOpened_ ? child_.get() : nullptr; }
     std::string preparedPlanNodeName() const override {
         const auto children=state_->execution?state_->execution->childPlans(state_->select().whereClause.get()):std::vector<Operator*>{};
         return children.empty()?"TypedFilter":"QuantifiedSubqueryFilter";
@@ -1277,6 +1278,8 @@ public:
     }
 };
 
+bool hasOrderedPrimaryKeyInput(const Operator* source, const PreparedSelectState& state);
+
 class PreparedSortOp final : public Operator {
     using Row=TypedSortRow;
     struct Less {PreparedSortOp* owner;bool operator()(const Row& a,const Row& b) const {return owner->less(a,b);}};
@@ -1288,6 +1291,7 @@ class PreparedSortOp final : public Operator {
     std::optional<size_t> bound_;
     size_t position_=0;
     bool budgeted_=false,opened_=false,available_=false;
+    bool presortedInput_ = false, spilled_ = false;
     Row current_;
     mutable OrdinarySortComparisons comparisons_;
     const Row& current() const {return budgeted_?current_:rows_.at(position_-1);}
@@ -1327,6 +1331,7 @@ public:
     ~PreparedSortOp() override {try{close();}catch(...) {}}
     bool open() override {
         OpenInstrument startup(this);clearError();rows_.clear();runs_.reset();position_=0;available_=false;current_=Row{};
+        presortedInput_ = spilled_ = false;
         const auto& select=state_->select();
         budgeted_=state_->aggregates.empty() && !select.having && select.groupBy.empty() && select.groupByElems.empty();
         comparisons_.reset(budgeted_?state_->keys.size():0);
@@ -1337,7 +1342,14 @@ public:
             if(!child_->open())return fail("prepared sort child could not open");
             uint64_t ordinal=0;
             std::string raw;
-            while(child_->next(raw)) {
+            // A logical table source may open its physical scan lazily at
+            // the first pull. Inspect the chosen path before buffering rows.
+            bool hasRow = child_->next(raw);
+            if (runs_ && hasOrderedPrimaryKeyInput(child_.get(), *state_)) {
+                runs_->usePresortedInput();
+                presortedInput_ = true;
+            }
+            for (; hasRow; hasRow = child_->next(raw)) {
                 if((ordinal&127U)==0)checkForQueryInterrupt();
                 Row row;row.raw=raw;
                 if(ordinal==std::numeric_limits<uint64_t>::max())throw DbError("54000","too many sort input rows");
@@ -1395,7 +1407,10 @@ public:
                 } else rows_.push_back(std::move(row));
             }
             if(child_->hasError())return fail("prepared sort child failed");
-            if(budgeted_)runs_->finish();
+            if (budgeted_) {
+                runs_->finish();
+                spilled_ = runs_->spilled();
+            }
             else interruptibleStableSort(rows_.begin(),rows_.end(),[&](const Row& a,const Row& b){return less(a,b);});
             return true;
         } catch(...) {
@@ -1466,6 +1481,10 @@ public:
         if(opened_){opened_=false;child_->close();}
     }
     std::string preparedPlanNodeName() const override {return "TypedSort";}
+    std::map<std::string, std::string> preparedPlanAttributes() const override {
+        if (!presortedInput_) return {};
+        return {{"presortedInput", "true"}, {"spilled", spilled_ ? "true" : "false"}};
+    }
     std::vector<Operator*> preparedPlanChildren() const override {return {child_.get()};}
 };
 
@@ -3052,6 +3071,12 @@ public:
             size_t keyColumn, size_t count, bool descending, IntegerPageBounds bounds, OpPtr fallback)
         : engine_(engine), database_(std::move(database)), schema_(schema), keyColumn_(keyColumn),
           count_(count), descending_(descending), bounds_(std::move(bounds)), fallback_(std::move(fallback)) {}
+    std::optional<PreparedIntegerKeyOrder> openedKeyOrder() const {
+        // Both signed-key scans and successful legacy numeric prefixes
+        // return checked heap rows in key order. A heap fallback does not.
+        if (!page_) return {};
+        return PreparedIntegerKeyOrder{keyColumn_, !descending_};
+    }
     bool open() override {
         OpenInstrument instrument(this);
         clearError();
@@ -3130,6 +3155,33 @@ public:
         return attributes;
     }
 };
+
+std::optional<PreparedIntegerKeyOrder> openedIntegerPrimaryKeyOrder(const Operator& source) {
+    const auto* page = dynamic_cast<const IntegerPrimaryKeyPageOp*>(&source);
+    return page ? page->openedKeyOrder() : std::nullopt;
+}
+
+namespace {
+bool hasOrderedPrimaryKeyInput(const Operator* source, const PreparedSelectState& state) {
+    if (const auto* filter = dynamic_cast<const PreparedFilterOp*>(source))
+        source = filter->openedSource();
+    if (!source || state.keys.size() != 1) return false;
+
+    const auto& key = state.keys.front();
+    const auto* column = dynamic_cast<const ColumnRefExpr*>(key.target == PreparedSelectState::noTarget
+        ? key.expression : state.targets.at(key.target));
+    if (key.enumComparison || !column || column->preparedSubquery || !column->binding) return false;
+    const auto& binding = *column->binding;
+    if (binding.scopeDepth || binding.mergedUsing) return false;
+
+    std::optional<PreparedIntegerKeyOrder> order;
+    if (const auto* logical = dynamic_cast<const PreparedOrderedTableInput*>(source))
+        order = logical->integerKeyOrder(binding.sourceOrdinal);
+    else if (!state.sourceContexts && binding.sourceOrdinal == state.sourceOrdinal)
+        order = openedIntegerPrimaryKeyOrder(*source);
+    return order && order->columnOrdinal == binding.columnOrdinal && order->ascending == key.asc;
+}
+} // namespace
 
 OpPtr makePreparedTableSource(StorageEngine* engine, const std::string& database,
     const std::shared_ptr<PreparedQuery>& query, SelectStmt* select,

@@ -2,6 +2,19 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="presorted-integer-primary-key-page-20261118"></a>
+## 2026-11-18 · 保留整数主键页的已有顺序
+
+PostgreSQL 和 SQLite 可以用符合 `ORDER BY` 的有序索引省去独立排序。DuckDB 用 `TopN` 减少带 `LIMIT` 的排序工作。本项目在实际取得已经有序的整数主键页后，复用该顺序。[PostgreSQL 索引排序](https://www.postgresql.org/docs/18/indexes-ordering.html) · [SQLite 按索引排序](https://www.sqlite.org/queryplanner.html#sorting_by_index) · [DuckDB TopN](https://duckdb.org/2024/11/14/optimizers#topn-optimizer)
+
+排序节点在首次取行后检查数据源实际打开了哪条路径，并核对绑定的表、列和方向。普通条件筛选保留相对顺序。经过校验的旧索引数字前缀也可交付有序结果。表达式排序、旧快照或索引不可用而回退到表扫描时，按原方式排序。`TypedSort` 仍负责逐行解码和求值，复用顺序时报告 `presortedInput` 和 `spilled`。[使用示例](MANUAL.md#查看分页是否复用索引顺序)
+
+达到排序内存预算后，已排序的批次按同一顺序写入一个临时文件。读取沿用已有的行编码和完整性检查，只读下游需要的行。原有的 `OFFSET` 求值顺序和错误位置保留。[性能报告](performance-report-2026-10-30.md#presorted-integer-primary-key-page-cost-20261118)
+
+- 新增协议回归覆盖升序、降序、别名、序号，以及大于 `2^53` 的相邻主键。验证序列会为 `OFFSET` 跳过的结果行求值，依赖表行的排序转换错误仍返回 `22P02`。24 组功能回复与项目基线逐字节一致，其中 23 组规范化关系编号后与 PostgreSQL 18.6 一致。余下一组的错误代码相同，字段描述帧仍有既有差异。[协议回归](../tests/ordinary_scalar_order_protocol_e2e_test.py)
+- 重新绑定同一条查询覆盖成功取页、空页、可串行化事务改用表扫描、再次成功取页及空参数。一个实际的关联 `ANY` 子查询复用同一计划，在三次重新绑定中按主键顺序交付六行。另核对全新与旧库的 325 组请求和回复及 64 次执行路径。`0xC552` 旧库打开后保持索引字节，成功读取的无条件分页仍可沿用其数值顺序。旧快照与正在写入的会话照常排序。实际强制结束进程后，已提交行可继续查询，需要重建时生成 `0xC553`。
+- 实际跟踪临时文件创建、读写和退出时的清理。五项 C++ 回归、六项相邻协议测试和手册示例通过。排序组件的 20 项检查中，新增三项验证有序页不触发比较、超宽数据使用一个临时文件、损坏的临时文件头报 `58030` 后清理。完整回归套件待验证。最终程序的 SHA-256 为 `f0cd56c2b5278c4b44c88370d74d9e06855f4e536c551d77b5ac3a269f7d4c48`。[排序组件回归](../tests/bounded_sort_runs_test.cpp)
+
 <a id="integer-primary-key-null-filter-20261118"></a>
 ## 2026-11-18 · 翻页时筛选空值
 

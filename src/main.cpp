@@ -20837,6 +20837,7 @@ class PreparedWithDmlRuntime {
         string planName="Materialize";
         map<string,string> planAttributes;
         shared_ptr<const dbms::PreparedArrayJoinFilter> planArrayFilter;
+        optional<dbms::PreparedIntegerKeyOrder> integerKeyOrder;
         size_t position=0;
         dbms::RowContext current;
         bool loaded=false,closed=false;
@@ -20868,6 +20869,7 @@ class PreparedWithDmlRuntime {
             if(!reset)throw dbms::DbError("XX000","materialized source has no rebinder");
             reset(outer);
             rows.clear();current=dbms::RowContext{};position=0;
+            integerKeyOrder.reset();
             loaded=false;closed=false;opened=false;
         }
         void closeSource() {
@@ -20902,7 +20904,7 @@ class PreparedWithDmlRuntime {
         void ensure(){dbms::RowContext ignored;while(readAt(rows.size(),ignored)) {}}
         ~DmlSourceNode(){try{closeSource();}catch(...) {}}
     };
-    class DmlSourceContextsOp final : public dbms::Operator {
+    class DmlSourceContextsOp final : public dbms::Operator, public dbms::PreparedOrderedTableInput {
     public:
         DmlSourceContextsOp(shared_ptr<DmlSourceNode> node,bool rebindable)
             : node_(std::move(node)),rebindable_(rebindable) {}
@@ -20923,6 +20925,11 @@ class PreparedWithDmlRuntime {
             closed_=true;node_->closeSource();
         }
         bool supportsPreparedContexts() const override {return true;}
+        optional<dbms::PreparedIntegerKeyOrder> integerKeyOrder(size_t sourceOrdinal) const override {
+            if (closed_ || node_->occurrences.size() != 1 || node_->occurrences.front() != sourceOrdinal)
+                return {};
+            return node_->integerKeyOrder;
+        }
         bool lastPreparedContext(dbms::RowContext& row) const override {
             if(!position_)return false;
             row=row_;return true;
@@ -21041,7 +21048,7 @@ class PreparedWithDmlRuntime {
             node->reset=[currentOuter,resetExecution](const dbms::RowContext& row) {
                 *currentOuter=row;resetExecution();
             };
-            node->read=[this,executionOwner,currentOuter,frames,rangePointer=&range,cursor,scan,scanSchema,virtualRows,statisticsRows,scanOpened]
+            node->read=[this,executionOwner,currentOuter,frames,rangePointer=&range,cursor,scan,scanSchema,virtualRows,statisticsRows,scanOpened,source=node.get()]
                 (size_t index,dbms::RowContext& row) {
                 vector<dbms::ExprValue> cells;
                 bool found=false;
@@ -21054,7 +21061,11 @@ class PreparedWithDmlRuntime {
                     if(index<virtualRows->size()){cells=virtualRows->at(index);found=true;}
                 } else if(!scan)found=readCte(rangePointer->cteStatement,index,cells,frames);
                 else {
-                    if(!*scanOpened){*scanOpened=true;if(!scan->open())throw dbms::DbError("XX000",scan->errorMessage());}
+                    if (!*scanOpened) {
+                        *scanOpened = true;
+                        if (!scan->open()) throw dbms::DbError("XX000", scan->errorMessage());
+                        source->integerKeyOrder = dbms::openedIntegerPrimaryKeyOrder(*scan);
+                    }
                     string raw;
                     found=scan->next(raw);
                     if(!found && scan->hasError())throw dbms::DbError("XX000",scan->errorMessage());

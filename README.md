@@ -19,6 +19,13 @@ cmake --build build/cmake --parallel 2
 ## 最近更新
 
 <details>
+<summary>按主键翻页时少排一次序 · 2026-11-18</summary>
+
+索引已经按所需顺序给出一页时，数据库沿用这个顺序。
+
+</details>
+
+<details>
 <summary>翻页时可以跳过空值 · 2026-11-18</summary>
 
 例如只看有备注的记录，数据库可以按主键顺序查找，凑够一页就停。
@@ -29,13 +36,6 @@ cmake --build build/cmake --parallel 2
 <summary>同一条分页查询可以反复用 · 2026-11-18</summary>
 
 每次传入上一页最后一个整数主键，数据库就从对应的位置继续查找。
-
-</details>
-
-<details>
-<summary>从上一页最后一个编号接着查 · 2026-11-18</summary>
-
-如果主键是整数，把上一页最后一个编号写进 `WHERE`，查询就能从下一条开始。
 
 </details>
 

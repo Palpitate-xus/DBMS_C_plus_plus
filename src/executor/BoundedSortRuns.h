@@ -35,7 +35,7 @@ private:
     Phase phase_ = Phase::Loading;
     std::vector<Row> rows_;
     size_t dynamicBytes_ = 0, maximumRowBytes_ = 1, position_ = 0, comparisons_ = 0;
-    bool heapReady_ = false, spilled_ = false;
+    bool heapReady_ = false, spilled_ = false, presorted_ = false;
     uint64_t inputTotal_ = 0, spooledTotal_ = 0, runCount_ = 0, extent_ = 0;
     uint64_t remainingRows_ = 0, emitted_ = 0;
     // Readers/writers are destroyed before the descriptors they borrow.
@@ -80,7 +80,7 @@ private:
     }
     void sortBatch() {
         checkForQueryInterrupt();
-        batchSort_(rows_, less_);
+        if (!presorted_) batchSort_(rows_, less_);
         checkForQueryInterrupt();
         heapReady_ = false;
     }
@@ -93,16 +93,20 @@ private:
             writer_ = std::make_unique<Writer>(input_->fd(), bufferSize_);
         }
         const auto start = writer_->position();
-        writer_->scalar(RunHeader{});
+        const bool newRun = !presorted_ || !runCount_;
+        if (newRun) writer_->scalar(RunHeader{});
         for (const auto& row : rows_) {
             checkForQueryInterrupt();
             codec_.write(*writer_, row);
         }
-        const RunHeader header{writer_->position() - start, rows_.size()};
         writer_->flush();
-        writeAt(input_->fd(), start, reinterpret_cast<const char*>(&header), sizeof(header));
-        spooledTotal_ = countSum(spooledTotal_, header.rows);
-        ++runCount_; extent_ = writer_->position();
+        if (!presorted_) {
+            const RunHeader header{writer_->position() - start, rows_.size()};
+            writeAt(input_->fd(), start, reinterpret_cast<const char*>(&header), sizeof(header));
+        }
+        spooledTotal_ = countSum(spooledTotal_, rows_.size());
+        if (newRun) ++runCount_;
+        extent_ = writer_->position();
         std::vector<Row>().swap(rows_);
         dynamicBytes_ = 0;
     }
@@ -112,7 +116,7 @@ private:
         if (inputTotal_ == std::numeric_limits<uint64_t>::max())
             throw DbError("54000", "too many sort input rows");
         ++inputTotal_;
-        if (bound_ && !*bound_) return;
+        if (bound_ && (!*bound_ || (presorted_ && inputTotal_ > *bound_))) return;
         // Rejected TopN rows need no deep capacity traversal. Their original
         // SQL keys and early targets have already been evaluated by the owner.
         if (!input_ && bound_ && heapReady_) {
@@ -150,7 +154,7 @@ private:
             // One oversized incoming row is allowed, then immediately becomes
             // its own run. Do not retain an input-sized list of large rows.
             flushRun();
-        } else if (!input_ && bound_ && rows_.size() == *bound_) {
+        } else if (!presorted_ && !input_ && bound_ && rows_.size() == *bound_) {
             const auto compare = [&](const Row& a, const Row& b) { return checkedLess(a,b); };
             std::make_heap(rows_.begin(), rows_.end(), compare);
             heapReady_ = true;
@@ -229,6 +233,12 @@ private:
             sortBatch();
         } else {
             flushRun(); writer_.reset();
+            if (presorted_) {
+                // Every flushed batch already follows its predecessor, so
+                // publish the one contiguous run using the usual framing.
+                const RunHeader header{extent_, spooledTotal_};
+                writeAt(input_->fd(), 0, reinterpret_cast<const char*>(&header), sizeof(header));
+            }
             // Count buffers, head/index storage and owning row payloads. The
             // minimum two-way merge may exceed work_mem for oversized rows;
             // this is bounded by a fixed number of rows, never input length.
@@ -289,6 +299,12 @@ public:
     ~BoundedRuns() { close(); }
     BoundedRuns(const BoundedRuns&) = delete;
     BoundedRuns& operator=(const BoundedRuns&) = delete;
+    // The caller must prove that input follows Less, including tie order.
+    void usePresortedInput() {
+        if (phase_ != Phase::Loading || inputTotal_)
+            throw DbError("XX000", "cannot change the ordering of a started sort");
+        presorted_ = true;
+    }
     void add(Row row) {
         try { addImpl(std::move(row)); }
         catch (...) { close(); throw; }

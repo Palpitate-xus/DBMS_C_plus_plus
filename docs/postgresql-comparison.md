@@ -4,7 +4,7 @@
 
 ## 2026-11-18 · 整数主键按索引顺序分页
 
-PostgreSQL 可以按数值顺序读 B 树并在取够行时结束。本项目在默认表空间的普通单列整数主键索引上也支持这一行为。范围条件由同一整数主键与整数字面量或这次传入的非空有符号整数参数组成时，项目可以按范围定位起点。原排序步骤仍处理取出的少量行。复合键、通用代价选择以及部分未声明参数类型的协议行为仍有差距。[原有顺序读取](test-report.md#signed-primary-key-prefix-20261118) · [按参数定位](test-report.md#prepared-integer-primary-key-range-20261118)
+PostgreSQL 可以按数值顺序读 B 树并在取够行时结束。本项目在默认表空间的普通单列整数主键索引上也支持这一行为。范围条件由同一整数主键与整数字面量或这次传入的非空有符号整数参数组成时，项目可以按范围定位起点。实际取得有序主键页后，可保留输入顺序，仍会读取和验证这些行。复合键、通用代价选择以及部分未声明参数类型的协议行为仍有差距。[按参数定位](test-report.md#prepared-integer-primary-key-range-20261118) · [复用索引顺序](test-report.md#presorted-integer-primary-key-page-20261118)
 
 PostgreSQL 的有序索引扫描可以在读取行后检查额外的筛选条件，再用 `LIMIT` 控制返回行数。本项目已支持其中直接检查普通整数、布尔和文本列是否为 NULL 的用法。通用筛选表达式和索引选择仍有差距。[测试范围](test-report.md#integer-primary-key-null-filter-20261118) · [性能报告](performance-report-2026-10-30.md#integer-primary-key-null-filter-cost-20261118)
 

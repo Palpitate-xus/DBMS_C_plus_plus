@@ -187,6 +187,61 @@ int main() {
         good = good && count == 12 && !runs.next(value) && observed.creates == 0;
         runs.close(); check("in-memory exact NULLs/binary payload/stable peers",good && cleaned());
     }
+    const auto unexpectedSort = [](std::vector<Row>&, const Less&) {
+        throw dbms::DbError("XX000", "presorted rows entered the sorter");
+    };
+    {
+        reset();
+        observed.comparisonFailure = true;
+        observed.primary = std::make_exception_ptr(dbms::DbError("XX000", "compared presorted rows"));
+        Runs runs(65536, {}, Less{}, size_t{3}, unexpectedSort);
+        runs.usePresortedInput();
+        runs.add(row(-1, 0, 64));
+        runs.add(row(-1, 1, 64));
+        runs.add(row(9, 2, 64));
+        runs.add(row(99, 3, 65536));
+        runs.finish();
+        Row value;
+        bool good = runs.next(value) && same(value, row(-1, 0, 64));
+        good = runs.next(value) && same(value, row(-1, 1, 64)) && good;
+        good = runs.next(value) && same(value, row(9, 2, 64)) && good;
+        good = !runs.next(value) && !runs.spilled() && observed.bytesCalls == 3 && good;
+        runs.close();
+        check("presorted TopN preserves peers without comparing", good && cleaned());
+    }
+    {
+        reset();
+        observed.comparisonFailure = true;
+        observed.primary = std::make_exception_ptr(dbms::DbError("XX000", "compared presorted runs"));
+        Runs runs(1024, {}, Less{}, size_t{6}, unexpectedSort);
+        runs.usePresortedInput();
+        for (size_t i = 0; i < 8; ++i) runs.add(row(i, i));
+        observed.inputDone = true;
+        runs.finish();
+        Row value;
+        bool good = runs.spilled() && descriptors() == 1 && observed.decoded == 1;
+        for (size_t i = 0; i < 6; ++i) good = runs.next(value) && same(value, row(i, i)) && good;
+        const auto reads = observed.reads;
+        good = !runs.next(value) && observed.reads == reads && observed.decoded == 6 && good;
+        good = observed.creates == 1 && observed.truncates == 0 && observed.bytesCalls == 6 &&
+            observed.mergeWritten == sizeof(dbms::sort_detail::RunHeader) && good;
+        runs.close();
+        check("presorted spill uses one run and reads only the requested rows", good && cleaned());
+    }
+    {
+        reset(Fault::BadHeader);
+        Runs runs(1024, {}, Less{}, std::nullopt, unexpectedSort);
+        runs.usePresortedInput();
+        for (size_t i = 0; i < 4; ++i) runs.add(row(i, i));
+        bool rejected = false;
+        try {
+            runs.finish();
+        } catch (const dbms::DbError& error) {
+            rejected = error.sqlState() == "58030";
+        }
+        check("presorted spill validates its run header and closes on error",
+            rejected && observed.triggered && observed.creates == 1 && terminal(runs));
+    }
     {
         reset(); Runs runs(1024,{},Less{},std::nullopt,batchSort); eight(runs); runs.finish();
         Row value; size_t count = 0; bool good = runs.spilled() && descriptors()==1;
@@ -307,7 +362,7 @@ int main() {
         try { eight(runs); runs.finish(); } catch (const dbms::DbError& error) { exact=error.sqlState()=="58030"; }
         check("impossible on-disk run count rejected before allocation",terminal(runs) && exact && observed.triggered);
     }
-    assert(checked==17);
+    assert(checked==20);
     std::cout << "BOUNDED_SORT_RUNS_COMPLETE " << checked << " FAILURES " << failures << '\n';
     return failures?1:0;
 }

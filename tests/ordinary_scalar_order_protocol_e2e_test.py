@@ -16,6 +16,15 @@ def plan_nodes(result):
     return nodes
 
 
+def assert_sort_input_order(nodes, spilled=None):
+    sort=nodes.get('TypedSort',{})
+    if spilled is None:
+        assert 'presortedInput' not in sort and 'spilled' not in sort,nodes
+    else:
+        assert sort.get('presortedInput')=='true',nodes
+        assert sort.get('spilled')==str(spilled).lower(),nodes
+
+
 def parameter_range_controls(runner, client, sock, check_plan=True):
     """Exercise repeated wire Bind inputs on the previously seeded PK tables."""
     def check(messages, rows=None, oids=None, state=None, tag=None):
@@ -120,6 +129,7 @@ def parameter_range_controls(runner, client, sock, check_plan=True):
             assert page['usedPrimaryKeyPage']=='true' and page['indexKeyRange']=='true',page
             assert int(page['indexEntries'])==int(page['heapRowsFetched'])==fetched,page
             assert nodes['TableScan'].get('actualRows',0)==0,nodes
+            assert_sort_input_order(nodes,spilled=False)
         prepare('range_plan_numeric',explain+decimal,(1700,))
         nodes=plan_nodes(execute('range_plan_numeric',('2.5',)))
         assert nodes.get('IntegerPrimaryKeyPage',{}).get('usedPrimaryKeyPage')!='true',nodes
@@ -149,6 +159,7 @@ def null_filter_page_controls(query, check_plan=True):
             assert (selected.get('indexKeyRange')=='true')==bounded,nodes
             assert int(selected['heapRowsFetched'])==fetched,nodes
             assert nodes['TableScan'].get('actualRows',0)==0,nodes
+            assert_sort_input_order(nodes,spilled=False)
 
     def fallback(sql,rows,oids):
         expect(sql,rows,oids)
@@ -222,6 +233,59 @@ def null_filter_page_controls(query, check_plan=True):
     print('[INTEGER PRIMARY KEY NULL FILTER PROTOCOL] passed',flush=True)
 
 
+def presorted_page_controls(query, check_plan=True):
+    def expect(sql,rows=None,oids=None,state=None):
+        result=query(sql)
+        assert result[1]==state,(sql,result)
+        if rows is not None:assert result[0]==rows,(sql,result,rows)
+        if oids is not None:assert result[5]==oids,(sql,result,oids)
+        if state is not None:assert result[4] is None,(sql,result)
+        return result
+
+    def page(sql,spilled):
+        if check_plan:
+            explain='EXPLAIN (ANALYZE TRUE, TIMING FALSE, COSTS FALSE, FORMAT JSON) '
+            nodes=plan_nodes(expect(explain+sql))
+            assert_sort_input_order(nodes,spilled)
+            used=nodes.get('IntegerPrimaryKeyPage',{}).get('usedPrimaryKeyPage')=='true'
+            assert used==(spilled is not None),nodes
+            if used:
+                assert nodes['TableScan'].get('actualRows',0)==0,nodes
+
+    keys=[-9223372036854775808,-9007199254740993]
+    keys+=list(range(9007199254740992,9007199254741029))
+    keys.append(9223372036854775807)
+    payload=[f'{i:02d}/'+chr(97+i%26)*847 for i in range(len(keys))]
+    values=[f"({keys[i]},'{payload[i]}')" for i in (n*17%40 for n in range(40))]
+    expect('CREATE TABLE scalar_order_presorted_wide(k BIGINT PRIMARY KEY,payload TEXT)')
+    expect('INSERT INTO scalar_order_presorted_wide VALUES '+','.join(values))
+    expect('CREATE SEQUENCE scalar_order_presorted_calls')
+    expect("SET work_mem='64kB'")
+
+    # The page buffers 39 narrow heap tuples within work_mem; the owning sort
+    # contexts exceed that budget and must use the ordered temporary run.
+    wide=("SELECT nextval('scalar_order_presorted_calls'),p.k AS key_out,p.payload "
+          "FROM scalar_order_presorted_wide p ORDER BY key_out DESC LIMIT 38 OFFSET 1")
+    expected=[[str(n),str(keys[i]),payload[i]] for n,i in enumerate(range(38,0,-1),2)]
+    expect(wide,expected,[20,20,25])
+    expect("SELECT currval('scalar_order_presorted_calls')",[['39']],[20])
+    page(wide,spilled=True)
+    if check_plan:
+        expect("SELECT currval('scalar_order_presorted_calls')",[['78']],[20])
+
+    ordinal='SELECT k,payload FROM scalar_order_presorted_wide ORDER BY 1 LIMIT 3'
+    expect(ordinal,[[str(keys[i]),payload[i]] for i in range(3)],[20,25])
+    page(ordinal,spilled=False)
+    nonkey=('SELECT k FROM scalar_order_presorted_wide ORDER BY k+0 DESC LIMIT 3')
+    expect(nonkey,[[str(k)] for k in reversed(keys[-3:])],[20])
+    page(nonkey,spilled=None)
+    expect("SELECT k FROM scalar_order_presorted_wide ORDER BY "
+           "CASE WHEN k = 9007199254741028 THEN (payload || 'bad')::BIGINT ELSE k END LIMIT 1",
+           [],state='22P02')
+    expect('RESET work_mem')
+    print('[PRESORTED PRIMARY KEY PROTOCOL] passed',flush=True)
+
+
 def main():
     root=Path(__file__).resolve().parent.parent
     spec=importlib.util.spec_from_file_location('scalar_order_runner',root/'tests/compat/pg_diff_runner.py')
@@ -251,6 +315,7 @@ def main():
     def page_plan(sql):
         result=ok('EXPLAIN (ANALYZE TRUE, TIMING FALSE, COSTS FALSE, FORMAT JSON) '+sql)
         scans=plan_nodes(result)
+        assert_sort_input_order(scans,spilled=False if scans['IntegerPrimaryKeyPage']['usedPrimaryKeyPage']=='true' else None)
         return scans['IntegerPrimaryKeyPage'],scans['TableScan']
     try:
         for sql in (
@@ -375,6 +440,7 @@ def main():
         assert not failures,failures
         parameter_range_controls(runner,client,server['sock'])
         null_filter_page_controls(query)
+        presorted_page_controls(query)
         print('[ORDINARY SCALAR ORDER PROTOCOL] passed')
     finally:runner.stop_ours(server)
 
