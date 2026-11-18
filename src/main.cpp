@@ -21093,6 +21093,9 @@ class PreparedWithDmlRuntime {
         const dbms::PreparedQuery::SourceRange* merged=nullptr;
         for(const auto& range:query_->sourceRanges)
             if(range.owner==owner && range.source==item && range.mergedUsing)merged=&range;
+        bool deferMerged = merged != nullptr;
+        if (merged) for (size_t i = 0; i < merged->columns.size(); ++i)
+            if (!query_->arrayUsingKeys.count({merged->ordinal,i})) deferMerged = false;
         vector<pair<DmlSourceNode::Cell,DmlSourceNode::Cell>> keys;
         if(merged) {
             node->occurrences.push_back(merged->ordinal);
@@ -21196,10 +21199,19 @@ class PreparedWithDmlRuntime {
             if(item->joinCondition)(*executionOwner)->prepareExpression(item->joinCondition.get());
             left->rebind(row);right->rebind(row);*position=JoinPosition{};
         };
-        node->read=[executionOwner,currentOuter,left,right,leftJoin,rightJoin,merged,item,keys,comparisons,position,integerJoinKey,database=session_.currentDB]
+        node->read=[executionOwner,currentOuter,left,right,leftJoin,rightJoin,merged,item,keys,comparisons,position,integerJoinKey,deferMerged,database=session_.currentDB]
             (size_t,dbms::RowContext& output) {
             const auto& execution=*executionOwner;
             dbms::ExprEvaluator comparator;comparator.setCurrentDB(database);
+            const auto materializeUsing = [&](dbms::RowContext& row) {
+                vector<dbms::ExprValue> cells;
+                cells.reserve(keys.size());
+                for (size_t i = 0; i < keys.size(); ++i) {
+                    const auto& operands = static_cast<const dbms::BinaryOpExpr&>(*comparisons->at(i));
+                    cells.push_back(execution->evaluateMergedUsing(*merged,i,operands,row,comparator));
+                }
+                execution->setSourceRow(row,merged->ordinal,cells);
+            };
             const auto combine=[&](const dbms::RowContext* a,const dbms::RowContext* b) {
                 auto row=*currentOuter;
                 const auto fill=[&](const shared_ptr<DmlSourceNode>& side,const dbms::RowContext* input) {
@@ -21209,17 +21221,13 @@ class PreparedWithDmlRuntime {
                     }
                 };
                 fill(left,a);fill(right,b);
-                if(merged) {
-                    vector<dbms::ExprValue> cells;
-                    for(size_t i=0;i<keys.size();++i) {
-                        const auto& key=keys[i];
-                        const auto l=comparator.readBoundColumn(key.first.first,key.first.second,row);
-                        const auto* operands=static_cast<const dbms::BinaryOpExpr*>(comparisons->at(i).get());
-                        cells.push_back(comparator.eval(l.isNull?operands->right.get():operands->left.get(),row));
-                    }
-                    execution->setSourceRow(row,merged->ordinal,cells);
-                }
+                if (merged && !deferMerged) materializeUsing(row);
                 return row;
+            };
+            const auto emit = [&](dbms::RowContext row) {
+                if (deferMerged) materializeUsing(row);
+                output=std::move(row);
+                return true;
             };
             dbms::RowContext a,b;
             while(!position->leftComplete) {
@@ -21250,17 +21258,17 @@ class PreparedWithDmlRuntime {
                     }
                     if(valid) {
                         position->matched=true;position->rightMatched[occurrence]=true;
-                        output=std::move(row);return true;
+                        return emit(std::move(row));
                     }
                 }
                 const bool unmatched=!position->matched && leftJoin;
                 ++position->left;position->right=0;position->matched=false;
-                if(unmatched){output=combine(&a,nullptr);return true;}
+                if(unmatched)return emit(combine(&a,nullptr));
             }
             if(rightJoin)while(right->readAt(position->unmatchedRight,b)) {
                 const auto occurrence=position->unmatchedRight++;
                 if(occurrence>=position->rightMatched.size() || !position->rightMatched[occurrence]) {
-                    output=combine(nullptr,&b);return true;
+                    return emit(combine(nullptr,&b));
                 }
             }
             return false;
@@ -22349,11 +22357,14 @@ static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& 
     };
     required=required || requiresTypedSource(select->fromClause.get());
     bool logicalSource=false;
+    bool usingSource=false;
     function<bool(const dbms::Stmt*)> supportsDerivedQuery;
     const function<bool(const dbms::FromItem*)> supportsDerivedSources=[&](const dbms::FromItem* source) {
         if(!source || source->type==dbms::FromItem::Type::Table)return true;
-        if(source->type==dbms::FromItem::Type::Join)
+        if(source->type==dbms::FromItem::Type::Join) {
+            usingSource=usingSource || !source->usingCols.empty() || toLower(source->joinType).rfind("natural",0)==0;
             return supportsDerivedSources(source->left.get()) && supportsDerivedSources(source->right.get());
+        }
         if(source->type!=dbms::FromItem::Type::Subquery)return false;
         logicalSource=true;
         return supportsDerivedQuery(source->subquery.get());
@@ -22376,11 +22387,27 @@ static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& 
             return false;
         return supportsDerivedSources(body->fromClause.get());
     };
-    const bool derivedProbe=(!select->ctes.empty() ||
+    const bool sourceProbe=(!select->ctes.empty() ||
         (select->fromClause && select->fromClause->type!=dbms::FromItem::Type::Table)) &&
-        supportsDerivedQuery(select) && logicalSource;
+        supportsDerivedQuery(select);
+    const bool derivedProbe=sourceProbe && logicalSource;
     const bool generatedJoinProbe=!required && !comparisonCandidate && plainGeneratedJoinSourceProbe(*select,session);
-    if(!required && !comparisonCandidate && !generatedJoinProbe && !derivedProbe)return false;
+    if(!required && !comparisonCandidate && !generatedJoinProbe && !derivedProbe) {
+        if(!sourceProbe || !usingSource)return false;
+        // Avoid whole-query preparation for existing scalar-only physical
+        // joins. The bound USING key still makes the actual admission decision.
+        const function<bool(const dbms::FromItem*)> hasPhysicalArray=[&](const dbms::FromItem* item) {
+            if(!item)return false;
+            if(item->type==dbms::FromItem::Type::Join)
+                return hasPhysicalArray(item->left.get()) || hasPhysicalArray(item->right.get());
+            if(item->type!=dbms::FromItem::Type::Table)return false;
+            const auto table=resolveTableName(session,item->tableName);
+            if(!g_engine.tableExists(session.currentDB,table))return false;
+            const auto schema=g_engine.getTableSchema(session.currentDB,table);
+            return any_of(schema.cols,schema.cols+schema.len,[](const auto& column){return column.isArray;});
+        };
+        if(!hasPhysicalArray(select->fromClause.get()))return false;
+    }
     if(select->command==dbms::SqlCommand::Values) {
         if(!select->ctes.empty() || !select->orderBy.empty() || select->whereClause || select->limit || select->offset || select->setOp!=dbms::SetOp::None)return false;
     } else {
@@ -22434,11 +22461,12 @@ static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& 
             type->arrayElement && type->arrayElement->kind==dbms::DatumKind::Scalar &&
             dbms::mapBuiltinTypeNameToOid(column.type)==type->codecOid;
     };
-    const bool arraySourceRequired=derivedProbe && any_of(
+    const bool arrayJoinRequired=sourceProbe && usingSource && !query->arrayUsingKeys.empty();
+    const bool arraySourceRequired=arrayJoinRequired || (derivedProbe && any_of(
         query->sourceRanges.begin(),query->sourceRanges.end(),[&](const auto& range) {
             return (range.cteStatement || (range.source && range.source->type==dbms::FromItem::Type::Subquery)) &&
                 any_of(range.columns.begin(),range.columns.end(),arrayColumn);
-        });
+        }));
     const auto isArrayDomain=[&](const dbms::QueryRowDescriptor& columns) {
         return any_of(columns.begin(),columns.end(),[&](const auto& column) {
             return arrayColumn(column) && column.typeOid!=column.typeMetadata->codecOid;

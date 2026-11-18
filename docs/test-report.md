@@ -2,6 +2,17 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="array-using-20261118"></a>
+## 2026-11-18 · 数组列联接后保留类型
+
+`JOIN … USING` 在绑定时分别确定两列怎样比较，以及合并列来自哪一侧。PostgreSQL 在两个输入确实同类型时保留类型，只有两边的类型和长度限制都相同时才沿用该限制。`LEFT JOIN` 取左侧，`RIGHT JOIN` 取右侧，`FULL JOIN` 用有值的一侧。`INNER JOIN` 会优先选无需转换的原列。DuckDB 也在绑定时记录 `USING` 的主侧和两边的来源。SQLite 对左右联接分别取保留侧，`FULL JOIN` 用两边列的 `coalesce`。项目按 PostgreSQL 的规则选择实际数组类型、输出表达式和字段来源。确认联接键全是所支持的数组时，只有要返回的行才生成合并列。[PostgreSQL 18.6 联接绑定](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/parser/parse_clause.c#L1553-L1646) · [PostgreSQL 18.6 类型修饰符](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/parser/parse_coerce.c#L1551-L1576) · [DuckDB 联接绑定](https://github.com/duckdb/duckdb/blob/main/src/planner/binder/tableref/bind_joinref.cpp) · [SQLite 联接规则](https://www.sqlite.org/lang_select.html)
+
+- [新增协议回归](../tests/array_domain_join_using_protocol_e2e_test.py)在 PostgreSQL 18.6 和最终程序上均为 128/128。已提交基线为 69/128，第一版候选为 124/128。两边实际核对各 464 个回复帧，含 46 项严格的字段来源预期。覆盖四种联接、自然联接、限定星号、嵌套查询、同域和不同域、普通数组长度限制，以及两个相等的 `numeric[]` 值带有不同小数位时应返回哪一侧。
+- 已检查的同域值写入允许空值的目标域时省去重复检查。混合域、普通数组和值类型不同的限定列在写入时重新检查。序列计数、实际写入内容和零行插入都已核对。不同基础数组类型在绑定时返回 `42883`，包括 `LIMIT 0`，回复先发错误，随后发客户端可继续使用的状态。显式转换为相同数组类型后联接成功。
+- 最终版使用 GCC 13.3、C++17、CMake、`-O2`，关闭 OpenSSL。最后一轮重编三个对象，复用 59 个逐一核对过的对象，程序 SHA-256 为 `d9c9c5913fc6721a6b5c4b87e6b187f234d808f6f8de5b32db910474b12a92fd`。上一批 149 项派生数组和 244 项数组域回归均通过。九个既有协议入口通过八个，七个选定 C++ 入口通过五个。其余三个入口的原始失败输出与基线逐字节相同，涉及 `pg_settings`、引用字段的返回声明和部分系统目录视图。完整套件待验证。
+- 在客户端仍持有未提交事务时，测试向私有服务进程实际发送 `SIGKILL`，进程退出码为 `-9`。新进程用同一目录启动后保留三条已提交记录，两条未提交记录消失，原主键可以重新插入并提交。项目 32/32，PostgreSQL 的正常回滚重启对照 33/33。独立审计核对了 32 组共同查询的回复和 190 个回复帧。
+- 别名与权限检查保留了原目录实际记录的属性编号。删除列后本项目压缩了字段编号，PostgreSQL 保留原编号。外联接补出的同域 NULL 写入仅由域声明 `NOT NULL` 的目标列时，项目仍报 `23502`，PostgreSQL 接受写入。另有部分嵌套联接写入、跨数组独立比较与 `JOIN ON` 显式转换未通过原有预期。[实际耗时](performance-report-2026-10-30.md#array-using-cost-20261118)
+
 <a id="derived-arrays-20261118"></a>
 ## 2026-11-18 · 派生表里的数组
 

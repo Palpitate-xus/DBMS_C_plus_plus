@@ -6042,18 +6042,38 @@ private:
                     found=scan->next(raw);
                     if(!found && scan->hasError())throw dbms::DbError("XX000",scan->errorMessage());
                     if(found)for(size_t i=0;i<scanSchema.len;++i) {
-                        if(scanSchema.cols[i].generatedKind=='v'){cells.emplace_back();continue;}
+                        const auto& column = scanSchema.cols[i];
+                        if(column.generatedKind=='v'){cells.emplace_back();continue;}
                         bool computedNull=false;
                         const auto value=g_engine.extractColumnValue(raw,scanSchema,i,session_.currentDB,true,&computedNull);
-                        cells.emplace_back(rangePointer->columns[i].type,value,computedNull ||
-                            (scanSchema.cols[i].generatedKind!='v' && scan->lastColumnIsNull(i)));
-                        if(scanSchema.cols[i].generatedKind!='v' &&
-                           stored_regtype_detail::columnType(scanSchema.cols[i].dataType)) {
-                            const auto catalog=dbms::regtype_detail::metadata(g_engine,session_.currentDB);
-                            cells.back()=dbms::stored_regtype_detail::load(value,scanSchema.cols[i].isArray,
-                                cells.back().isNull,catalog,&session_,rangePointer->columns[i].typeMetadata,scanSchema.cols[i].dataType);
+                        const auto& field = rangePointer->columns[i];
+                        const auto& declaration = field.typeMetadata;
+                        const bool isNull = computedNull || scan->lastColumnIsNull(i);
+                        cells.emplace_back(field.type, value, isNull);
+
+                        bool ownsArray = false;
+                        uint32_t validatedDomain = 0;
+                        if (column.isArray && declaration && declaration->kind == DatumKind::Array &&
+                            declaration->actualOid && declaration->codecOid && declaration->arrayElement &&
+                            declaration->arrayElement->kind == DatumKind::Scalar && declaration->arrayElement->actualOid &&
+                            !declaration->arrayElement->enumType &&
+                            mapBuiltinTypeNameToOid(field.type) == declaration->codecOid) {
+                            const auto origin = scan->scanOrigin();
+                            ownsArray = origin.engine == &g_engine && origin.dbname == session_.currentDB &&
+                                        origin.tablename == scanSchema.tablename;
+                            if (ownsArray && !column.domainName.empty() && declaration->actualOid == field.typeOid &&
+                                declaration->actualOid != declaration->codecOid)
+                                validatedDomain = declaration->actualOid;
                         }
-                        cells.back().collation=scanSchema.cols[i].collation;
+                        if(stored_regtype_detail::columnType(column.dataType)) {
+                            const auto catalog=dbms::regtype_detail::metadata(g_engine,session_.currentDB);
+                            cells.back()=dbms::stored_regtype_detail::load(value,column.isArray,
+                                isNull,catalog,&session_,declaration,column.dataType,validatedDomain);
+                        } else if (ownsArray && !compound_value_detail::decodeArrayStorageInput(
+                                       cells.back(), declaration, {}, validatedDomain) && validatedDomain) {
+                            throw DbError("XX001", "could not decode stored array domain value");
+                        }
+                        cells.back().collation=column.collation;
                     }
                 }
                 if(!found)return false;
@@ -6076,6 +6096,9 @@ private:
         const dbms::PreparedQuery::SourceRange* merged=nullptr;
         for(const auto& range:query_->sourceRanges)
             if(range.owner==owner && range.source==item && range.mergedUsing)merged=&range;
+        bool deferMerged = merged != nullptr;
+        if (merged) for (size_t i = 0; i < merged->columns.size(); ++i)
+            if (!query_->arrayUsingKeys.count({merged->ordinal,i})) deferMerged = false;
         std::vector<std::pair<NativeSourceNode::Cell,NativeSourceNode::Cell>> keys;
         if(merged) {
             node->occurrences.push_back(merged->ordinal);
@@ -6136,9 +6159,18 @@ private:
             std::vector<bool> rightMatched;
         };
         auto position=std::make_shared<JoinPosition>();
-        node->read=[execution,outer,left,right,leftJoin,rightJoin,merged,item,keys,comparisons,position,database=session_.currentDB]
+        node->read=[execution,outer,left,right,leftJoin,rightJoin,merged,item,comparisons,position,deferMerged,database=session_.currentDB]
             (size_t,dbms::RowContext& output) {
             dbms::ExprEvaluator comparator;comparator.setCurrentDB(database);
+            const auto materializeUsing = [&](RowContext& row) {
+                std::vector<dbms::ExprValue> cells;
+                cells.reserve(comparisons->size());
+                for (size_t i = 0; i < comparisons->size(); ++i) {
+                    const auto& operands = static_cast<const BinaryOpExpr&>(*comparisons->at(i));
+                    cells.push_back(execution->evaluateMergedUsing(*merged,i,operands,row,comparator));
+                }
+                execution->setSourceRow(row,merged->ordinal,cells);
+            };
             const auto combine=[&](const dbms::RowContext* a,const dbms::RowContext* b) {
                 auto row=outer;
                 const auto fill=[&](const std::shared_ptr<NativeSourceNode>& side,const dbms::RowContext* input) {
@@ -6148,17 +6180,13 @@ private:
                     }
                 };
                 fill(left,a);fill(right,b);
-                if(merged) {
-                    std::vector<dbms::ExprValue> cells;
-                    for(size_t i=0;i<keys.size();++i) {
-                        const auto& key=keys[i];
-                        const auto l=comparator.readBoundColumn(key.first.first,key.first.second,row);
-                        const auto* operands=static_cast<const dbms::BinaryOpExpr*>(comparisons->at(i).get());
-                        cells.push_back(comparator.eval(l.isNull?operands->right.get():operands->left.get(),row));
-                    }
-                    execution->setSourceRow(row,merged->ordinal,cells);
-                }
+                if (merged && !deferMerged) materializeUsing(row);
                 return row;
+            };
+            const auto emit = [&](RowContext row) {
+                if (deferMerged) materializeUsing(row);
+                output=std::move(row);
+                return true;
             };
             dbms::RowContext a,b;
             while(!position->leftComplete) {
@@ -6177,17 +6205,17 @@ private:
                     }
                     if(valid) {
                         position->matched=true;position->rightMatched[occurrence]=true;
-                        output=std::move(row);return true;
+                        return emit(std::move(row));
                     }
                 }
                 const bool unmatched=!position->matched && leftJoin;
                 ++position->left;position->right=0;position->matched=false;
-                if(unmatched){output=combine(&a,nullptr);return true;}
+                if(unmatched)return emit(combine(&a,nullptr));
             }
             if(rightJoin)while(right->readAt(position->unmatchedRight,b)) {
                 const auto occurrence=position->unmatchedRight++;
                 if(occurrence>=position->rightMatched.size() || !position->rightMatched[occurrence]) {
-                    output=combine(nullptr,&b);return true;
+                    return emit(combine(nullptr,&b));
                 }
             }
             return false;

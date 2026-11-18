@@ -2856,7 +2856,12 @@ void visitPreparedProjectionOrigins(size_t width, const PreparedQuery& query,
     std::function<Origin(const PreparedQuery&,const Stmt*,size_t)> output;
     std::function<Origin(const PreparedQuery&,const QueryColumnBinding&)> column;
     column = [&](const PreparedQuery& owner,const QueryColumnBinding& binding) -> Origin {
-        if (binding.mergedUsing) return none;
+        if (binding.mergedUsing) {
+            const auto found = owner.arrayUsingKeys.find({binding.sourceOrdinal,binding.columnOrdinal});
+            if (found == owner.arrayUsingKeys.end() || !found->second.origin ||
+                found->second.origin->sourceOrdinal >= binding.sourceOrdinal) return none;
+            return column(owner,*found->second.origin);
+        }
         const auto range = std::find_if(owner.sourceRanges.begin(),owner.sourceRanges.end(),
             [&](const auto& source) { return source.ordinal == binding.sourceOrdinal; });
         if (range == owner.sourceRanges.end() || range->mergedUsing ||

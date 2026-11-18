@@ -51,6 +51,8 @@ public:
     void setSourceInputs(RowContext&,size_t,const std::vector<ExprValue>&,bool present) const;
     void copySourceInputs(RowContext&,size_t,const RowContext* actual) const;
     ExprValue readSourceColumn(const RowContext&,size_t,size_t) const;
+    ExprValue evaluateMergedUsing(const PreparedQuery::SourceRange& merged, size_t index,
+        const BinaryOpExpr& comparison, const RowContext& row, const ExprEvaluator& evaluator) const;
     GeneratedReadPtr generatedSourceRead(size_t,size_t) const;
     // Call on every executable expression before opening sources/evaluating
     // any expression. Routine registration and collation checks are pure.

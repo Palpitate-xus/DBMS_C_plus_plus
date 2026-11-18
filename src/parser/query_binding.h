@@ -139,6 +139,14 @@ struct PreparedQuery {
     // SELECT expanded output ordinal -> genuine expression/source binding.
     // Compound/parameter outputs retain their expression with no source cell.
     std::map<const SelectStmt*, std::vector<ProjectionBinding>> projectionBindings;
+    struct ArrayUsingKey {
+        enum class Output { Left, Right, Coalesce };
+        Output output;
+        // A merged result has column provenance only if its selected input
+        // appears unchanged as a Var, without coercion or coalescence.
+        std::optional<QueryColumnBinding> origin;
+    };
+    std::map<std::pair<size_t, size_t>, ArrayUsingKey> arrayUsingKeys;
     // ORDER BY may identify equivalent duplicate output names with one
     // actual producer. Other repeated targets retain independent demand.
     std::map<const SelectStmt*,std::vector<size_t>> sortOutputOwners;

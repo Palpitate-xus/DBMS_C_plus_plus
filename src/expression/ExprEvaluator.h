@@ -76,8 +76,9 @@ struct CompoundDatum {
     // Missing means no physical bitmap provenance; any actual NULL still
     // requires a bitmap. Producers with known provenance retain it explicitly.
     std::optional<bool> arrayNullBitmap;
-    // A successful domain conversion or a genuine stored domain value owns
-    // this proof. New array operations create a new, unchecked payload.
+    // A checked conversion, stored domain value, or NULL extension of a
+    // bound domain source can be carried to an assignment of the same type.
+    // New array operations create a new, unchecked payload.
     uint32_t validatedArrayDomainOid = 0;
 };
 

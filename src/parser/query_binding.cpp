@@ -2120,6 +2120,139 @@ public:
         }
         return range;
     }
+    struct UsingField {
+        Range* range = nullptr;
+        size_t column = 0;
+        size_t count = 0;
+        QueryOutputColumn& descriptor() const { return range->columns[column]; }
+    };
+    struct UsingOutput {
+        Range range;
+        std::vector<std::pair<size_t, PreparedQuery::ArrayUsingKey>> arrayKeys;
+    };
+
+    static bool builtinUsingArray(const QueryOutputColumn& field) {
+        const auto& type = field.typeMetadata;
+        if (!type || type->kind != DatumKind::Array || !type->actualOid || !type->arrayElement ||
+            type->arrayElement->kind != DatumKind::Scalar || type->arrayElement->enumType ||
+            type->arrayElement->actualOid != type->arrayElement->codecOid ||
+            !type->arrayElement->actualOid || mapBuiltinTypeNameToOid(field.type) != type->codecOid)
+            return false;
+        // Older ordinary arrays can store a scalar attribute OID with an
+        // attndims declaration. datumType has already verified its backlink.
+        return field.typeOid == type->actualOid || (type->actualOid == type->codecOid &&
+            field.typeOid == type->arrayElement->actualOid);
+    }
+
+    void normalizeUsingArray(const UsingField& field) {
+        auto& column = field.descriptor();
+        if (column.typeOid == column.typeMetadata->actualOid) return;
+        column.typeOid = column.typeMetadata->actualOid;
+        result.sourceRanges.at(field.range->occurrence).columns.at(field.column).typeOid = column.typeOid;
+    }
+
+    void appendUsingColumn(UsingOutput& merged, const std::string& key,
+                           const UsingField& left, const UsingField& right, const std::string& join) {
+        auto& a = left.descriptor();
+        auto& b = right.descriptor();
+        const bool arrays = builtinUsingArray(a) && builtinUsingArray(b);
+        // USING resolves equality on the original inputs before it chooses a
+        // common output. An output cast cannot make different codecs comparable.
+        if (arrays && a.typeMetadata->codecOid != b.typeMetadata->codecOid)
+            throw DbError("42883", "operator does not exist: " + a.type + " = " + b.type);
+        const auto type = selectCommonType({a.type,b.type}, "JOIN/USING");
+        if (!arrays) {
+            merged.range.columns.push_back({key,type,false,0,0,-1,
+                metadata.datumType ? metadata.datumType(type,0) : DatumTypePtr{}});
+            return;
+        }
+        normalizeUsingArray(left);
+        normalizeUsingArray(right);
+        const bool sameType = a.typeOid == b.typeOid;
+        const auto modifier = sameType && a.typeMod == b.typeMod ? a.typeMod : -1;
+        auto declaration = sameType ? a.typeMetadata
+            : metadata.datumType ? metadata.datumType(type, mapBuiltinTypeNameToOid(type)) : DatumTypePtr{};
+        if (!declaration || declaration->kind != DatumKind::Array)
+            throw DbError("XX000", "JOIN USING lost its common array type");
+        if (declaration->actualOid == declaration->codecOid && declaration->effectiveTypeMod != modifier) {
+            auto adjusted = std::make_shared<DatumType>(*declaration);
+            adjusted->effectiveTypeMod = modifier;
+            declaration = std::move(adjusted);
+        }
+        const auto oid = declaration->actualOid;
+        const bool leftVar = a.typeOid == oid && a.typeMod == modifier;
+        const bool rightVar = b.typeOid == oid && b.typeMod == modifier;
+        using Output = PreparedQuery::ArrayUsingKey::Output;
+        auto output = Output::Left;
+        if (join.find("full") != std::string::npos) output = Output::Coalesce;
+        else if (join.find("right") != std::string::npos ||
+            (join.find("left") == std::string::npos && !leftVar && rightVar)) output = Output::Right;
+        std::optional<QueryColumnBinding> origin;
+        if ((output == Output::Left && leftVar) || (output == Output::Right && rightVar)) {
+            const auto& input = output == Output::Left ? left : right;
+            const auto& field = input.descriptor();
+            origin.emplace(QueryColumnBinding{0,input.range->occurrence,input.column,field.type,
+                input.range->mergedUsing,field.typeOid,field.typeMetadata});
+        }
+        merged.arrayKeys.push_back({merged.range.columns.size(), {output, std::move(origin)}});
+        merged.range.columns.push_back({key,type,false,0,oid,modifier,std::move(declaration)});
+    }
+
+    UsingOutput mergeUsing(FromItem* item, Namespace& left, Namespace& right) {
+        const auto join = SQLParser::toLower(item->joinType);
+        std::vector<std::string> keys;
+        std::set<std::string> seen;
+        for (const auto& spelling : item->usingCols) {
+            const auto key = identifier(spelling);
+            if (!seen.insert(key).second)
+                throw DbError("42701", "column \"" + key + "\" appears more than once in USING clause");
+            keys.push_back(key);
+        }
+        if (join.rfind("natural", 0) == 0) {
+            for (const auto& range : left) requireCompleteStar(range);
+            for (const auto& range : right) requireCompleteStar(range);
+            for (const auto& a : left) for (const auto& x : a.columns)
+                for (const auto& b : right) for (const auto& y : b.columns)
+                    if (x.name == y.name && !a.hiddenUnqualified.count(x.name) &&
+                        !b.hiddenUnqualified.count(y.name) && seen.insert(x.name).second) keys.push_back(x.name);
+        }
+        UsingOutput merged;
+        for (const auto& key : keys) {
+            const auto find = [&](Namespace& side) {
+                UsingField found;
+                for (auto& range : side) {
+                    if (key == "nspacl" && incompleteNamespaceCatalog(range))
+                        throw DbError("0A000", "pg_namespace ACL JOIN key is not implemented");
+                    if (range.hiddenUnqualified.count(key)) continue;
+                    for (size_t i = 0; i < range.columns.size(); ++i)
+                        if (range.columns[i].name == key) found = {&range, i, found.count + 1};
+                }
+                return found;
+            };
+            const auto a = find(left), b = find(right);
+            if (!a.count || !b.count)
+                throw DbError("42703", "column \"" + key + "\" specified in USING does not exist");
+            if (a.count > 1 || b.count > 1) throw DbError("42702", "USING column is ambiguous");
+            appendUsingColumn(merged, key, a, b, join);
+            const auto hide = [&](Range& range) {
+                range.hiddenUnqualified.insert(key);
+                result.sourceRanges.at(range.occurrence).hiddenUnqualified.insert(key);
+            };
+            for (auto& range : left) hide(range);
+            for (auto& range : right) hide(range);
+        }
+        return merged;
+    }
+
+    void registerUsingOutput(Namespace& scope, UsingOutput merged, FromItem* item) {
+        if (merged.range.columns.empty()) return;
+        merged.range.mergedUsing = true;
+        auto range = registerSource(std::move(merged.range), item);
+        for (auto& [column, key] : merged.arrayKeys)
+            result.arrayUsingKeys.emplace(std::make_pair(range.occurrence, column), std::move(key));
+        scope.insert(scope.begin(), std::move(range));
+    }
+
     Namespace from(FromItem* item, const std::vector<Namespace>& outer, const Ctes& ctes) {
         if (!item) return {};
         const auto aliases=[&](Range range) {
@@ -2150,59 +2283,11 @@ public:
         auto left = from(item->left.get(), outer, ctes);
         auto right = from(item->right.get(), outer, ctes);
         checkRangeConflicts(left, right);
-        std::vector<std::string> keys;
-        std::set<std::string> seenKeys;
-        for (const auto& spelling : item->usingCols) {
-            const auto key = identifier(spelling);
-            if (!seenKeys.insert(key).second)
-                throw DbError("42701", "column \"" + key + "\" appears more than once in USING clause");
-            keys.push_back(key);
-        }
-        if (SQLParser::toLower(item->joinType).rfind("natural", 0) == 0) {
-            // NATURAL derives join keys from the complete source schema;
-            // omitting the unowned ACL field would change the actual join.
-            for(const auto& range:left)requireCompleteStar(range);
-            for(const auto& range:right)requireCompleteStar(range);
-            for (const auto& a : left) for (const auto& x : a.columns)
-                for (const auto& b : right) for (const auto& y : b.columns)
-                    if (!a.hiddenUnqualified.count(x.name) && !b.hiddenUnqualified.count(y.name) &&
-                        x.name == y.name && seenKeys.insert(x.name).second) keys.push_back(x.name);
-        }
-        Range merged;
-        for (const auto& key : keys) {
-            if(key=="nspacl") {
-                for(const auto& range:left)if(incompleteNamespaceCatalog(range))
-                    throw DbError("0A000","pg_namespace ACL JOIN key is not implemented");
-                for(const auto& range:right)if(incompleteNamespaceCatalog(range))
-                    throw DbError("0A000","pg_namespace ACL JOIN key is not implemented");
-            }
-            size_t leftCount = 0, rightCount = 0; std::string leftType,rightType;
-            for (auto& range : left) for (const auto& col : range.columns)
-                if (col.name == key && !range.hiddenUnqualified.count(key)) { ++leftCount; leftType = col.type; }
-            for (auto& range : right) for (const auto& col : range.columns)
-                if (col.name == key && !range.hiddenUnqualified.count(key)) { ++rightCount; rightType = col.type; }
-            if (!leftCount || !rightCount) throw DbError("42703", "column \"" + key + "\" specified in USING does not exist");
-            if (leftCount > 1 || rightCount > 1) throw DbError("42702", "USING column is ambiguous");
-            const auto hide = [&](Range& range) {
-                range.hiddenUnqualified.insert(key);
-                const auto found = std::find_if(result.sourceRanges.begin(), result.sourceRanges.end(),
-                    [&](const auto& source) { return source.ordinal == range.occurrence; });
-                if (found == result.sourceRanges.end()) throw DbError("XX000", "JOIN lost its source occurrence");
-                found->hiddenUnqualified = range.hiddenUnqualified;
-            };
-            for (auto& range : left) hide(range);
-            for (auto& range : right) hide(range);
-            const auto mergedType=selectCommonType({leftType,rightType},"JOIN/USING");
-            merged.columns.push_back({key,mergedType,false,0,0,-1,
-                metadata.datumType?metadata.datumType(mergedType,0):DatumTypePtr{}});
-        }
+        auto merged = mergeUsing(item, left, right);
         left.insert(left.end(), right.begin(), right.end());
         auto scopes = outer; scopes.insert(scopes.begin(), left);
         expression(item->joinCondition, scopes);
-        if (!merged.columns.empty()) {
-            merged.mergedUsing = true;
-            left.insert(left.begin(), registerSource(std::move(merged), item));
-        }
+        registerUsingOutput(left, std::move(merged), item);
         return left;
     }
     QueryRowDescriptor statement(Stmt& node, const std::vector<Namespace>& outer, Ctes ctes) {
@@ -2976,59 +3061,11 @@ public:
         auto left = declarationFrom(item->left.get(), outer, ctes);
         auto right = declarationFrom(item->right.get(), outer, ctes);
         checkRangeConflicts(left, right);
-        std::vector<std::string> keys;
-        std::set<std::string> seenKeys;
-        for (const auto& spelling : item->usingCols) {
-            const auto key = identifier(spelling);
-            if (!seenKeys.insert(key).second)
-                throw DbError("42701", "column \"" + key + "\" appears more than once in USING clause");
-            keys.push_back(key);
-        }
-        if (SQLParser::toLower(item->joinType).rfind("natural", 0) == 0) {
-            // NATURAL derives join keys from the complete source schema;
-            // omitting the unowned ACL field would change the actual join.
-            for(const auto& range:left)requireCompleteStar(range);
-            for(const auto& range:right)requireCompleteStar(range);
-            for (const auto& a : left) for (const auto& x : a.columns)
-                for (const auto& b : right) for (const auto& y : b.columns)
-                    if (!a.hiddenUnqualified.count(x.name) && !b.hiddenUnqualified.count(y.name) &&
-                        x.name == y.name && seenKeys.insert(x.name).second) keys.push_back(x.name);
-        }
-        Range merged;
-        for (const auto& key : keys) {
-            if(key=="nspacl") {
-                for(const auto& range:left)if(incompleteNamespaceCatalog(range))
-                    throw DbError("0A000","pg_namespace ACL JOIN key is not implemented");
-                for(const auto& range:right)if(incompleteNamespaceCatalog(range))
-                    throw DbError("0A000","pg_namespace ACL JOIN key is not implemented");
-            }
-            size_t leftCount = 0, rightCount = 0; std::string leftType,rightType;
-            for (auto& range : left) for (const auto& col : range.columns)
-                if (col.name == key && !range.hiddenUnqualified.count(key)) { ++leftCount; leftType = col.type; }
-            for (auto& range : right) for (const auto& col : range.columns)
-                if (col.name == key && !range.hiddenUnqualified.count(key)) { ++rightCount; rightType = col.type; }
-            if (!leftCount || !rightCount) throw DbError("42703", "column \"" + key + "\" specified in USING does not exist");
-            if (leftCount > 1 || rightCount > 1) throw DbError("42702", "USING column is ambiguous");
-            const auto hide = [&](Range& range) {
-                range.hiddenUnqualified.insert(key);
-                const auto found = std::find_if(result.sourceRanges.begin(), result.sourceRanges.end(),
-                    [&](const auto& source) { return source.ordinal == range.occurrence; });
-                if (found == result.sourceRanges.end()) throw DbError("XX000", "JOIN lost its source occurrence");
-                found->hiddenUnqualified = range.hiddenUnqualified;
-            };
-            for (auto& range : left) hide(range);
-            for (auto& range : right) hide(range);
-            const auto mergedType=selectCommonType({leftType,rightType},"JOIN/USING");
-            merged.columns.push_back({key,mergedType,false,0,0,-1,
-                metadata.datumType?metadata.datumType(mergedType,0):DatumTypePtr{}});
-        }
+        auto merged = mergeUsing(item, left, right);
         left.insert(left.end(), right.begin(), right.end());
         // Only actual namespace/USING output declarations are needed here.
         // The original ON expression belongs to the whole DML analysis.
-        if (!merged.columns.empty()) {
-            merged.mergedUsing = true;
-            left.insert(left.begin(), registerSource(std::move(merged), item));
-        }
+        registerUsingOutput(left, std::move(merged), item);
         return left;
     }
     std::optional<QueryColumnBinding> declarationColumn(const Expr* value) const {
@@ -3206,7 +3243,13 @@ public:
         while(binding && visited.emplace(binding->sourceOrdinal,binding->columnOrdinal).second) {
             const auto source=std::find_if(result.sourceRanges.begin(),result.sourceRanges.end(),
                 [&](const auto& range){return range.ordinal==binding->sourceOrdinal;});
-            if(source==result.sourceRanges.end() || binding->columnOrdinal>=source->columns.size() || source->mergedUsing)return {};
+            if(source==result.sourceRanges.end() || binding->columnOrdinal>=source->columns.size())return {};
+            if (source->mergedUsing) {
+                const auto merge = result.arrayUsingKeys.find({source->ordinal,binding->columnOrdinal});
+                if (merge == result.arrayUsingKeys.end()) return {};
+                binding = merge->second.origin;
+                continue;
+            }
             if(const auto image=declarationTransitions.find(source->ordinal);image!=declarationTransitions.end()) {
                 binding->sourceOrdinal=image->second;continue;
             }

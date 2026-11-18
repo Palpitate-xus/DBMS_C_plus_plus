@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-11-18 · 连接表时保留数组类型
+
+用 `JOIN … USING` 连接数组列时，结果保留正确的数组类型、长度限制和列来源。两列使用同一种数组规则时，原样复制已经检查过的值可省掉重复检查。不同的基础数组类型需要先显式转换。[使用示例](docs/MANUAL.md#用数组列连接表) · [测试](docs/test-report.md#array-using-20261118) · [性能](docs/performance-report-2026-10-30.md#array-using-cost-20261118)
+
 ## 2026-11-18 · 修复子查询中的数组读写和排序
 
 读取或复制子查询的数组时会保留类型、下界和空值。排序和去重按元素的实际值处理，比如 `{2}` 排在 `{10}` 前面。通过视图复制数组仍有已知问题。[使用示例](docs/MANUAL.md#从子查询读取和复制数组) · [测试](docs/test-report.md#derived-arrays-20261118) · [性能](docs/performance-report-2026-10-30.md#derived-array-cost-20261118)

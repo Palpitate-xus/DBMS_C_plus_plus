@@ -3,6 +3,7 @@
 #include "commands/TableManage.h"
 #include "catalog/catalog.h"
 #include "common/DbError.h"
+#include "expression/ArrayDatumInput.h"
 #include "expression/expr_helper.h"
 #include "expression/aggregate_type.h"
 #include "parser/parser.h"
@@ -721,6 +722,22 @@ GeneratedReadPtr PreparedQueryExecution::generatedSourceRead(size_t source,size_
     auto read=bindGeneratedColumn(range.generatedRelation->columns[column],source);
     generatedReads_->emplace(key,read);return read;
 }
+
+static ExprValue nullExtendedSourceCell(const QueryOutputColumn& field) {
+    ExprValue cell(field.type, "", true);
+    const auto& type = field.typeMetadata;
+    if (type && type->kind == DatumKind::Array && type->actualOid && type->actualOid == field.typeOid &&
+        type->codecOid && type->actualOid != type->codecOid && type->arrayElement &&
+        type->arrayElement->kind == DatumKind::Scalar && type->arrayElement->actualOid &&
+        !type->arrayElement->enumType && mapBuiltinTypeNameToOid(field.type) == type->codecOid) {
+        // An outer join supplies a NULL already of the input's actual type.
+        // An exact-domain assignment may reuse this typed NULL. The storage
+        // owner still applies the target column's own NOT NULL constraint.
+        compound_value_detail::decodeArrayStorageInput(cell, type, {}, type->actualOid);
+    }
+    return cell;
+}
+
 void PreparedQueryExecution::setSourceInputs(RowContext& row,size_t source,
     const std::vector<ExprValue>& cells,bool present) const {
     const auto& range=sourceRange(source);
@@ -730,7 +747,7 @@ void PreparedQueryExecution::setSourceInputs(RowContext& row,size_t source,
     row.clearGeneratedSource(source);
     for(size_t i=0;i<cells.size();++i) {
         if(auto read=generatedSourceRead(source,i)){row.setGeneratedBound(source,i,std::move(read),present);continue;}
-        auto cell=present?cells[i]:ExprValue(range.columns[i].type,"",true);
+        auto cell=present?cells[i]:nullExtendedSourceCell(range.columns[i]);
         const auto declared=ExprHelper::canonicalResultTypeName(range.columns[i].type);
         if(!cell.typeName.empty() && ExprHelper::canonicalResultTypeName(cell.typeName)!=declared)
             throw DbError("XX000","stored generated-source input changed its actual declaration");
@@ -741,13 +758,60 @@ void PreparedQueryExecution::copySourceInputs(RowContext& row,size_t source,cons
     const auto& range=sourceRange(source);std::vector<ExprValue> cells;cells.reserve(range.columns.size());
     for(size_t i=0;i<range.columns.size();++i) {
         if(generatedSourceRead(source,i))cells.emplace_back();
-        else cells.push_back(actual?actual->boundColumn(source,i):ExprValue(range.columns[i].type,"",true));
+        else if(actual)cells.push_back(actual->boundColumn(source,i));
+        else if(range.generatedRelation)cells.emplace_back(); // the generated-source owner supplies the NULL below
+        else cells.push_back(nullExtendedSourceCell(range.columns[i]));
     }
     setSourceInputs(row,source,cells,actual!=nullptr);
     if(actual)row.copyGeneratedSource(*actual,source);
 }
 ExprValue PreparedQueryExecution::readSourceColumn(const RowContext& row,size_t source,size_t column) const {
     return evaluator_.readBoundColumn(source,column,row);
+}
+
+ExprValue PreparedQueryExecution::evaluateMergedUsing(const PreparedQuery::SourceRange& merged,
+    size_t index, const BinaryOpExpr& comparison, const RowContext& row,
+    const ExprEvaluator& evaluator) const {
+    const auto key = query_->arrayUsingKeys.find({merged.ordinal, index});
+    if (key == query_->arrayUsingKeys.end()) {
+        // Legacy comparison operands can coerce either input. Check the raw
+        // left input for NULL before evaluating the selected operand.
+        const Expr* left = comparison.left.get();
+        if (const auto* cast = dynamic_cast<const CastExpr*>(left)) left = cast->operand.get();
+        const auto* column = dynamic_cast<const ColumnRefExpr*>(left);
+        if (!column || !column->binding)
+            throw DbError("XX000", "prepared USING key lost its bound left operand");
+        const auto& binding = *column->binding;
+        const auto input = evaluator.readBoundColumn(binding.sourceOrdinal, binding.columnOrdinal, row);
+        return evaluator.eval(input.isNull ? comparison.right.get() : comparison.left.get(), row);
+    }
+
+    using Output = PreparedQuery::ArrayUsingKey::Output;
+    const auto side = key->second.output;
+    auto value = evaluator.eval(side == Output::Right ? comparison.right.get() : comparison.left.get(), row);
+    if (side == Output::Coalesce && value.isNull)
+        value = evaluator.eval(comparison.right.get(), row);
+
+    const auto& field = merged.columns.at(index);
+    const auto& type = field.typeMetadata;
+    if (!type || type->kind != DatumKind::Array || !type->actualOid ||
+        type->actualOid != field.typeOid || !type->codecOid || !type->arrayElement)
+        throw DbError("XX000", "prepared array USING key lost its common declaration");
+    const auto& payload = value.compound;
+    if (payload && payload->type && (payload->type->kind != DatumKind::Array ||
+        payload->type->codecOid != type->codecOid))
+        throw DbError("XX000", "prepared array USING key has a different value codec");
+    if (payload && payload->type == type && (!payload->validatedArrayDomainOid ||
+        payload->validatedArrayDomainOid == type->actualOid)) return value;
+
+    // Use the declared common type, including its typmod, without evaluating
+    // any domain constraint. A mixed input cannot lend its domain proof.
+    auto relabeled = payload ? std::make_shared<CompoundDatum>(*payload) : std::make_shared<CompoundDatum>();
+    relabeled->type = type;
+    if (relabeled->validatedArrayDomainOid != type->actualOid)
+        relabeled->validatedArrayDomainOid = 0;
+    value.compound = std::move(relabeled);
+    return value;
 }
 
 

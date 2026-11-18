@@ -1743,6 +1743,20 @@ FROM (VALUES (ARRAY[10]), (ARRAY[2]), (ARRAY[2])) AS q(a)
 ORDER BY q.a;
 ```
 
+### 用数组列连接表
+
+沿用 `small_numbers` 和 `example_scores`，用 `USING(scores)` 连接两张表。
+
+```sql
+CREATE TABLE example_score_labels (label text, scores small_numbers);
+INSERT INTO example_score_labels VALUES ('示例', '{1,2}');
+SELECT a.id, b.label, scores
+FROM example_scores AS a JOIN example_score_labels AS b USING (scores)
+WHERE a.id = 1;
+```
+
+结果为 `1`、`示例`、`{1,2}`。合并后的 `scores` 仍属于 `small_numbers`。如果两列使用同一基础数组类型上的不同域，合并结果使用普通数组。不同的基础数组类型需要先转换成同一种类型。[测试范围](test-report.md#array-using-20261118)
+
 ---
 
 ## 11. 用户与权限
