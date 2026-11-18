@@ -9,8 +9,15 @@
 #include <vector>
 
 struct SessionInterruptState;
+struct Session;
 
 namespace dbms {
+
+struct PreparedQuery;
+struct QueryOutputColumn;
+
+void attachPreparedProjectionOrigins(std::vector<QueryOutputColumn>& columns,
+    const PreparedQuery& query, const Session& session);
 
 struct ServerStats {
     std::atomic<int> activeConnections{0};

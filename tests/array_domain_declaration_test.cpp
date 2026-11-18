@@ -57,6 +57,27 @@ int main() {
     assert(declaration && declaration->kind == DatumKind::Array && declaration->actualOid == child.oid);
     assert(declaration->arrayElement && declaration->arrayElement->actualOid == 2206);
     assert(factory.attribute(*refs)->actualOid == child.oid);
+    const auto checkProjection = [&](const std::string& sql, const std::string& type,
+                                     Oid actual, Oid codec) {
+        const auto query = g_engine.prepareBoundQuery(database, sql);
+        assert(query.output.size() == 1);
+        const auto& output = query.output.front();
+        assert(output.type == type && output.typeOid == actual);
+        assert(output.typeMetadata && output.typeMetadata->kind == DatumKind::Array);
+        assert(output.typeMetadata->actualOid == actual && output.typeMetadata->codecOid == codec);
+    };
+    checkProjection("SELECT q.v FROM (SELECT NULL::reference_child AS v) AS q",
+        "regtype[]", child.oid, 2211);
+    checkProjection("SELECT q.v FROM (SELECT CAST(NULL AS reference_child) AS v) AS q",
+        "regtype[]", child.oid, 2211);
+    checkProjection("SELECT q.v FROM (SELECT labels AS v FROM items) AS q",
+        "character varying[]", labels.oid, 1015);
+    checkProjection("SELECT q.v FROM (VALUES(NULL::reference_child),(NULL::reference_child)) AS q(v)",
+        "regtype[]", child.oid, 2211);
+    checkProjection("SELECT q.v FROM (VALUES(NULL::reference_child),(NULL::regtype[])) AS q(v)",
+        "regtype[]", 2211, 2211);
+    checkProjection("SELECT q.v FROM (SELECT NULL::reference_child AS v UNION ALL SELECT NULL::regtype[]) AS q",
+        "regtype[]", 2211, 2211);
     auto ambiguous = *refs;
     ambiguous.attndims = 1;
     assert(!factory.attribute(ambiguous));

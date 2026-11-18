@@ -509,6 +509,22 @@ public:
         }
         return type.type;
     }
+    void validateDeclaredInput(const Expr* source, const std::string& spelling,
+                               const std::string& resolved) {
+        if (!metadata.assignmentInput) return;
+        QueryOutputColumn target{"", spelling};
+        if (!resolved.empty() && resolved.front() == '"') {
+            const auto type = valueTypeMetadata.find(source);
+            if (type != valueTypeMetadata.end() && type->second &&
+                type->second->kind == DatumKind::Array &&
+                type->second->actualOid != type->second->codecOid) {
+                target.type = resolved;
+                target.typeOid = type->second->actualOid;
+                target.typeMetadata = type->second;
+            }
+        }
+        metadata.assignmentInput(target, source, spelling);
+    }
     std::optional<QueryEnumType> enumType(const std::string& spelling,const Expr* node) const {
         return metadata.enumType?metadata.enumType(spelling,expressionTypeOid(node)):std::nullopt;
     }
@@ -719,7 +735,7 @@ public:
                     if (!parseGeometryValue(literal->value, literal->typeName, value))
                         throw DbError("22P02", "invalid input syntax for type " + literal->typeName);
                 }
-                if (metadata.assignmentInput) metadata.assignmentInput({"", literal->typeName}, literal, literal->typeName);
+                validateDeclaredInput(literal, literal->typeName, type);
                 return type;
             }
             if (literal->value == "*") return "record";
@@ -773,7 +789,7 @@ public:
                 network_input_detail::validateCast(input,network);
                 network_input_detail::validateUnknownInput(cast->operand.get(),cast->typeName);
             }
-            if (metadata.assignmentInput) metadata.assignmentInput({"", cast->typeName}, cast, cast->typeName);
+            validateDeclaredInput(cast, cast->typeName, type);
             bindEnumCast(cast,cast->operand.get(),cast->typeName);
             if(const auto geometry=geometric_input_detail::builtinType(cast->typeName);!geometry.empty())
                 return geometry;
@@ -836,7 +852,7 @@ public:
                     network_input_detail::validateCast(left,network);
                     network_input_detail::validateUnknownInput(binary->left.get(),type->value);
                 }
-                if (metadata.assignmentInput) metadata.assignmentInput({"", type->value}, binary, type->value);
+                validateDeclaredInput(binary, type->value, castType);
                 bindEnumCast(binary,binary->left.get(),type->value);
                 if(const auto geometry=geometric_input_detail::builtinType(type->value);!geometry.empty())
                     return geometry;
@@ -1993,8 +2009,18 @@ public:
                 item.alias = quoted;
                 result.projectionAliases.emplace_back(item.sourceExpressionEnd, quoted);
             }
-            columns.push_back({name, type, false, 0, expressionTypeOid(item.expr.get()),
-                expressionTypeModifier(item.expr.get()),datumMetadata(type,item.expr.get())});
+            QueryOutputColumn column{name, type, false, 0, expressionTypeOid(item.expr.get()),
+                expressionTypeModifier(item.expr.get()),datumMetadata(type,item.expr.get())};
+            // Execution carries the base array tag. The actual declared
+            // domain and its modifiers still belong to the output slot.
+            if (column.typeMetadata && column.typeMetadata->actualOid == column.typeOid &&
+                column.typeMetadata->kind == DatumKind::Array &&
+                column.typeMetadata->actualOid != column.typeMetadata->codecOid &&
+                mapBuiltinTypeNameToOid(column.type) != column.typeMetadata->codecOid) {
+                if (auto base = builtinArrayBase(column.typeMetadata); !base.empty())
+                    column.type = std::move(base);
+            }
+            columns.push_back(std::move(column));
             if (leaves) leaves->push_back(item.expr.get());
             if (bindings) {
                 const auto* column = dynamic_cast<const ColumnRefExpr*>(item.expr.get());
@@ -2440,17 +2466,25 @@ public:
                 }
                 for(size_t column=0;column<width;++column) {
                     std::vector<std::string> types;
-                    for(const auto& row:inputs)types.push_back(row[column]);
-                    const auto common=selectCommonType(types,"VALUES");
+                    std::vector<std::pair<std::string,const Expr*>> modifierInputs;
+                    for(size_t row=0;row<inputs.size();++row) {
+                        types.push_back(inputs[row][column]);
+                        modifierInputs.emplace_back(inputs[row][column],select->valuesRows[row][column].get());
+                    }
+                    const auto domains = arrayDomainInputs(modifierInputs);
+                    const auto common = selectCommonType(domains ? domains->baseTypes : types, "VALUES");
                     auto descriptor=metadata.declaredType?metadata.declaredType(common):QueryOutputColumn{"",common};
                     descriptor.name="column"+std::to_string(column+1);
-                    std::vector<std::pair<std::string,const Expr*>> modifierInputs;
-                    for(size_t row=0;row<inputs.size();++row)
-                        modifierInputs.emplace_back(inputs[row][column],select->valuesRows[row][column].get());
                     descriptor.typeMod=commonModifier(modifierInputs,common);
+                    if (domains && domains->commonDomain) {
+                        descriptor.typeOid = domains->commonDomain->actualOid;
+                        descriptor.typeMetadata = domains->commonDomain;
+                    } else {
+                        for(size_t row=0;row<inputs.size();++row)
+                            coerceCaseInput(select->valuesRows[row][column],inputs[row][column],common,
+                                {}, domains && domains->isDomain[row]);
+                    }
                     columns.push_back(std::move(descriptor));
-                    for(size_t row=0;row<inputs.size();++row)
-                        coerceCaseInput(select->valuesRows[row][column],inputs[row][column],common);
                 }
             }
             validateWindowPlacements(*select,scopes);

@@ -21524,7 +21524,8 @@ public:
             return result;
         });
     }
-    dbms::DmlResult runRead(size_t receiverRows = 0, bool captureOwnedRows = false) {
+    dbms::DmlResult runRead(size_t receiverRows = 0, bool captureOwnedRows = false,
+                           bool planRootConstants = true, bool derivedArrayResult = false) {
         if(!readRoot_)throw dbms::DbError("XX000","read runtime requires a genuine SELECT/VALUES");
         const bool captureTyped=captureOwnedRows || dbms::typedResultCaptureRequested();
         Frames frames{definitions(readRoot_->ctes,validation_.context())};
@@ -21538,7 +21539,7 @@ public:
         // Plan every root expression before opening a producer or evaluating
         // a target. Top-level writing CTEs are legal; nested ones still fail
         // through validate(). Do not install the root definitions twice.
-        auto plan=selectPlan(readRoot_,validation_.context(),frames,true,true);
+        auto plan=selectPlan(readRoot_,validation_.context(),frames,true,planRootConstants);
         const auto command=[&] {
             // Ordinary top-level count/window failures happen after analysis
             // established their descriptor. Preserve genuine row prefixes on
@@ -21547,17 +21548,19 @@ public:
                 const auto* select=dynamic_cast<const dbms::SelectStmt*>(item.first);
                 return select && hasCurrentQueryWindows(select);
             });
-            const bool countOutput=executeDepth==1 && !hasWriter && (windowOutput ||
+            const bool preservePrefix=executeDepth==1 && !hasWriter && (derivedArrayResult || windowOutput ||
                 (readRoot_->hasRowCountClause &&
                  (readRoot_->command==dbms::SqlCommand::Values || readRoot_->setOp!=dbms::SetOp::None)));
             const auto demand=receiverRows ? receiverRows : currentQueryRowDemand();
-            auto evaluated=countOutput
+            auto evaluated=preservePrefix
                 ? dbms::QueryPlanner::executePlanWithPrefix(std::move(plan),demand,captureTyped)
                 : dbms::QueryPlanner::executePlanChecked(std::move(plan),demand,captureTyped);
-            if(!evaluated.ok && countOutput) {
+            if(!evaluated.ok && preservePrefix) {
                 dbms::DmlResult prefix;prefix.available=true;prefix.runtimeErrorMetadata=true;
                 prefix.metadataOnly=!evaluated.structuredRowsAvailable;
                 prefix.rowDescriptor=output(readRoot_);
+                if(derivedArrayResult)
+                    dbms::attachPreparedProjectionOrigins(prefix.rowDescriptor,*query_,session_);
                 if(captureTyped)prefix.typedRowDescriptor=prefix.rowDescriptor;
                 for(const auto& column:prefix.rowDescriptor) {
                     prefix.columns.push_back(column.name);
@@ -21573,6 +21576,8 @@ public:
             if(!evaluated.structuredRowsAvailable)throw dbms::DbError("XX000","prepared CASE query lost typed rows");
             dbms::DmlResult result;result.available=true;
             result.rowDescriptor=output(readRoot_);
+            if(derivedArrayResult)
+                dbms::attachPreparedProjectionOrigins(result.rowDescriptor,*query_,session_);
             if(captureTyped)result.typedRowDescriptor=result.rowDescriptor;
             for(const auto& column:output(readRoot_)) {
                 result.columns.push_back(column.name);
@@ -22343,8 +22348,39 @@ static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& 
         return false;
     };
     required=required || requiresTypedSource(select->fromClause.get());
+    bool logicalSource=false;
+    function<bool(const dbms::Stmt*)> supportsDerivedQuery;
+    const function<bool(const dbms::FromItem*)> supportsDerivedSources=[&](const dbms::FromItem* source) {
+        if(!source || source->type==dbms::FromItem::Type::Table)return true;
+        if(source->type==dbms::FromItem::Type::Join)
+            return supportsDerivedSources(source->left.get()) && supportsDerivedSources(source->right.get());
+        if(source->type!=dbms::FromItem::Type::Subquery)return false;
+        logicalSource=true;
+        return supportsDerivedQuery(source->subquery.get());
+    };
+    supportsDerivedQuery=[&](const dbms::Stmt* statement) {
+        const auto* body=dynamic_cast<const dbms::SelectStmt*>(statement);
+        if(!body || hasCurrentQueryWindows(body))return false;
+        if(!body->ctes.empty()) {
+            logicalSource=true;
+            for(const auto& cte:body->ctes)
+                if(cte.recursive || !supportsDerivedQuery(cte.query.get()))return false;
+        }
+        if(body->setOp!=dbms::SetOp::None) {
+            if(body->setOp!=dbms::SetOp::Union || !body->setOpAll ||
+               !supportsDerivedQuery(body->setOpRhs.get()))return false;
+            if(body->setOpLhs)return supportsDerivedQuery(body->setOpLhs.get());
+        }
+        if(body->command!=dbms::SqlCommand::Values &&
+           !dbms::QueryPlanner::supportsPreparedSourceSelectPlan(*body,body->setOpRhs!=nullptr))
+            return false;
+        return supportsDerivedSources(body->fromClause.get());
+    };
+    const bool derivedProbe=(!select->ctes.empty() ||
+        (select->fromClause && select->fromClause->type!=dbms::FromItem::Type::Table)) &&
+        supportsDerivedQuery(select) && logicalSource;
     const bool generatedJoinProbe=!required && !comparisonCandidate && plainGeneratedJoinSourceProbe(*select,session);
-    if(!required && !comparisonCandidate && !generatedJoinProbe)return false;
+    if(!required && !comparisonCandidate && !generatedJoinProbe && !derivedProbe)return false;
     if(select->command==dbms::SqlCommand::Values) {
         if(!select->ctes.empty() || !select->orderBy.empty() || select->whereClause || select->limit || select->offset || select->setOp!=dbms::SetOp::None)return false;
     } else {
@@ -22392,6 +22428,27 @@ static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& 
         }
     }
     auto query=make_shared<dbms::PreparedQuery>(g_engine.prepareBoundQuery(session.currentDB,rawSql));
+    const auto arrayColumn=[](const dbms::QueryOutputColumn& column) {
+        const auto& type=column.typeMetadata;
+        return type && type->kind==dbms::DatumKind::Array && type->actualOid==column.typeOid &&
+            type->arrayElement && type->arrayElement->kind==dbms::DatumKind::Scalar &&
+            dbms::mapBuiltinTypeNameToOid(column.type)==type->codecOid;
+    };
+    const bool arraySourceRequired=derivedProbe && any_of(
+        query->sourceRanges.begin(),query->sourceRanges.end(),[&](const auto& range) {
+            return (range.cteStatement || (range.source && range.source->type==dbms::FromItem::Type::Subquery)) &&
+                any_of(range.columns.begin(),range.columns.end(),arrayColumn);
+        });
+    const auto isArrayDomain=[&](const dbms::QueryRowDescriptor& columns) {
+        return any_of(columns.begin(),columns.end(),[&](const auto& column) {
+            return arrayColumn(column) && column.typeOid!=column.typeMetadata->codecOid;
+        });
+    };
+    const bool arrayDomainRequired=arraySourceRequired && (
+        any_of(query->statementOutputs.begin(),query->statementOutputs.end(),
+               [&](const auto& statement) { return isArrayDomain(statement.second); }) ||
+        any_of(query->setOperationInputs.begin(),query->setOperationInputs.end(),
+               [&](const auto& set) { return isArrayDomain(set.second.left) || isArrayDomain(set.second.right); }));
     if(!required) {
         // The parser only probes a shape. Actual copied type/operator metadata
         // owns this receiver; ordinary builtin comparisons keep their existing
@@ -22410,7 +22467,7 @@ static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& 
             return range.owner==bound && range.source && range.source->type==dbms::FromItem::Type::Table &&
                 !range.mergedUsing && !range.cteStatement && !range.viewQuery && bool(range.generatedRelation);
         });
-        if(!enumRequired && generatedRequired) {
+        if(!enumRequired && !arraySourceRequired && generatedRequired) {
             // This new admission must preserve the connected old receiver
             // when its raw source OID and actual character-array output
             // declaration still name different data carriers. Inspect only
@@ -22433,9 +22490,10 @@ static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& 
                any_of(declaration->second.begin(),declaration->second.end(),
                    legacyCharacterArrayCarrier))return false;
         }
-        if(!enumRequired && !generatedRequired)return false;
+        if(!enumRequired && !generatedRequired && !arraySourceRequired)return false;
     }
-    PreparedWithDmlRuntime runtime(session,std::move(query));auto result=runtime.runRead();
+    PreparedWithDmlRuntime runtime(session,std::move(query));
+    auto result=runtime.runRead(0,false,!arrayDomainRequired,arraySourceRequired);
     for(const auto& name:result.columns)cout<<name<<' ';cout<<'\n';
     for(size_t i=0;i<result.rows.size();++i) {
         for(size_t j=0;j<result.rows[i].size();++j)cout<<(result.nulls[i][j]?"NULL":result.rows[i][j])<<' ';

@@ -821,6 +821,21 @@ public:
 static std::optional<int> comparePreparedIdentityKeys(ExprEvaluator& evaluator,
     const ExprValue& left, const ExprValue& right);
 
+static bool supportsPreparedArrayOrder(const std::string& type) {
+    if (!common_type_detail::array(type)) return false;
+    // These element types have both a typed order and the corresponding
+    // equality. In particular, equality-only types cannot use this for DISTINCT.
+    static const std::set<std::string> orderedTypes{
+        "smallint[]", "integer[]", "bigint[]", "numeric[]", "real[]", "double precision[]",
+        "boolean[]", "oid[]", "name[]", "\"char\"[]", "text[]", "varchar[]", "character varying[]",
+        "bpchar[]", "character[]", "bytea[]", "uuid[]", "money[]", "interval[]",
+        "bit[]", "bit varying[]", "inet[]", "cidr[]", "macaddr[]", "macaddr8[]",
+        "date[]", "time[]", "time without time zone[]", "timetz[]", "time with time zone[]", "jsonb[]",
+        "timestamp[]", "timestamp without time zone[]", "timestamptz[]", "timestamp with time zone[]"
+    };
+    return orderedTypes.count(type) != 0;
+}
+
 // A single typed comparison owner for top-level and inside-aggregate sorting.
 // Callers handle NULL placement/direction; this function never evaluates keys.
 static int comparePreparedOrderValues(ExprEvaluator& evaluator,
@@ -834,8 +849,11 @@ static int comparePreparedOrderValues(ExprEvaluator& evaluator,
     if (const auto comparison = comparePreparedIdentityKeys(evaluator, left, right))
         return *comparison;
     const auto type = ExprHelper::canonicalResultTypeName(left.typeName);
+    const auto rightType = ExprHelper::canonicalResultTypeName(right.typeName);
+    if (type == rightType && supportsPreparedArrayOrder(type))
+        return ExprEvaluator::compareArrayValues(left, right);
     if ((type == "real" || type == "double precision") &&
-        type == ExprHelper::canonicalResultTypeName(right.typeName)) {
+        type == rightType) {
         // Use the expression comparison owner for IEEE special values and
         // float4 width. The generic storage predicate can reject infinities;
         // SQL sorting instead orders NaN above every non-NaN value.
@@ -1200,7 +1218,7 @@ class OrdinarySortComparisons {
     struct Entry {
         bool ready=false;
         std::string leftType,rightType,leftCollation,rightCollation;
-        enum class Kind { Storage,Expression,Oid,ReferenceArray } kind=Kind::Storage;
+        enum class Kind { Storage,Expression,Oid,ReferenceArray,Array } kind=Kind::Storage;
         std::optional<Column> column;
         std::optional<QueryComparisonBinding> binding;
     };
@@ -1224,6 +1242,8 @@ public:
             if(same && type=="oid")next.kind=Entry::Kind::Oid;
             else if(same && (type=="regtype[]" || type=="regclass[]"))
                 next.kind=Entry::Kind::ReferenceArray;
+            else if (same && supportsPreparedArrayOrder(type))
+                next.kind = Entry::Kind::Array;
             else if(same && (stored_regtype_detail::scalarType(type) || type=="name" || type=="\"char\"" ||
                              type=="real" || type=="double precision")) {
                 next.kind=Entry::Kind::Expression;
@@ -1242,6 +1262,8 @@ public:
         }
         if(entry.kind==Entry::Kind::ReferenceArray)
             return compareOwningReferenceArrays(a,b);
+        if (entry.kind == Entry::Kind::Array)
+            return ExprEvaluator::compareArrayValues(a, b);
         if(entry.kind==Entry::Kind::Expression) {
             if(evaluator.comparePrepared(*entry.binding,a,b).asBool())return -1;
             if(evaluator.comparePrepared(*entry.binding,b,a).asBool())return 1;
@@ -1402,6 +1424,11 @@ public:
                 continue;
             }
             if(const auto comparison=comparePreparedIdentityKeys(state_->evaluator,a,b)) {if(*comparison)return false;continue;}
+            const auto type = ExprHelper::canonicalResultTypeName(a.typeName);
+            if (supportsPreparedArrayOrder(type) && type == ExprHelper::canonicalResultTypeName(b.typeName)) {
+                if (ExprEvaluator::compareArrayValues(a, b)) return false;
+                continue;
+            }
             Column column;
             const auto error=TypeRegistry::instance().resolveColumnType(column,a.typeName,{},false);
             if(!error.empty())throw DbError("0A000","unsupported prepared peer type: "+a.typeName);
@@ -1492,7 +1519,7 @@ public:
         for (const auto& value : values_) { cells.push_back(value.value); nulls.push_back(value.isNull); }
         return true;
     }
-    std::string typedKey() const {
+    std::string typedKey(std::vector<ExprValue>& arrays) const {
         std::string key;
         const auto& select = state_->select();
         const bool ordinary = state_->aggregates.empty() && !select.having &&
@@ -1504,6 +1531,17 @@ public:
                 const auto material = owningReferenceArrayDistinctKey(
                     value, type == "regtype[]" ? 2206U : 2205U);
                 key += "V" + std::to_string(material.size()) + ":" + material;
+                continue;
+            }
+            if (ordinary && supportsPreparedArrayOrder(type)) {
+                if (value.isNull) {
+                    key += "N;";
+                } else {
+                    // Keep the position of the array in the framed row key.
+                    // The typed array is compared separately, including its bounds.
+                    key += "A;";
+                    arrays.push_back(value);
+                }
                 continue;
             }
             if(type=="oid" || stored_regtype_detail::scalarType(type) || type=="name" || type=="\"char\"") {
@@ -1655,6 +1693,17 @@ class PreparedDistinctOp final : public Operator {
         std::vector<bool> nulls;
         std::vector<ExprValue> values;
     };
+    using ArrayKey = std::pair<std::string, std::vector<ExprValue>>;
+    struct ArrayKeyLess {
+        bool operator()(const ArrayKey& a, const ArrayKey& b) const {
+            if (a.first != b.first) return a.first < b.first;
+            for (size_t i = 0; i < std::min(a.second.size(), b.second.size()); ++i) {
+                const int comparison = ExprEvaluator::compareArrayValues(a.second[i], b.second[i]);
+                if (comparison) return comparison < 0;
+            }
+            return a.second.size() < b.second.size();
+        }
+    };
     std::vector<Row> rows_;
     size_t position_ = 0;
 public:
@@ -1664,13 +1713,18 @@ public:
         clearError(); rows_.clear(); position_ = 0;
         if (!child_->open()) return false;
         std::set<std::string> seen;
+        std::set<ArrayKey, ArrayKeyLess> seenArrays;
         auto* project = dynamic_cast<PreparedProjectOp*>(child_.get());
         Row row;
         while (child_->next(row.text)) {
             if (!project || !child_->lastStructuredRow(row.cells, row.nulls) ||
                 !child_->lastStructuredValues(row.values))
                 throw DbError("XX000", "prepared DISTINCT lost typed projection");
-            if (seen.insert(project->typedKey()).second) rows_.push_back(row);
+            std::vector<ExprValue> arrays;
+            auto key = project->typedKey(arrays);
+            const bool first = arrays.empty() ? seen.insert(std::move(key)).second
+                : seenArrays.emplace(std::move(key), std::move(arrays)).second;
+            if (first) rows_.push_back(row);
         }
         if (child_->hasError()) return propagateChildError(child_.get(), "prepared DISTINCT child failed");
         return true;
@@ -1906,8 +1960,8 @@ static bool supportsPreparedSelectShape(const SelectStmt& select, bool allowCtes
 bool QueryPlanner::supportsPreparedSelectPlan(const SelectStmt& select) {
     return supportsPreparedSelectShape(select, false);
 }
-bool QueryPlanner::supportsPreparedSourceSelectPlan(const SelectStmt& select) {
-    return supportsPreparedSelectShape(select, true, true);
+bool QueryPlanner::supportsPreparedSourceSelectPlan(const SelectStmt& select, bool selectBodyOnly) {
+    return supportsPreparedSelectShape(select, true, true, selectBodyOnly);
 }
 
 static bool preparedAggregateRole(const FunctionCallExpr* call, const PreparedSelectState& state) {
@@ -3084,6 +3138,12 @@ public:
                         parameter->slot=0;parameter->declaredType=source;cast.operand=std::move(parameter);
                         RowContext row;row.setParameters({values_[i]});
                         values_[i]=evaluator_.eval(&cast,row);
+                    } else {
+                        const auto& data = values_[i].compound;
+                        if (data && data->type && data->type->kind == DatumKind::Array &&
+                            data->type->actualOid != data->type->codecOid &&
+                            output_[i].typeOid == data->type->codecOid)
+                            values_[i] = compound_value_detail::asBaseArray(std::move(values_[i]));
                     }
                     if(ExprHelper::canonicalResultTypeName(values_[i].typeName)!=target)
                         throw DbError("XX000","typed append coercion lost its common output type");
@@ -3960,6 +4020,18 @@ OpPtr QueryPlanner::buildPreparedQueryPlan(StorageEngine* engine,const std::stri
                 throw DbError("0A000","writing CTE requires the statement-owned source provider");
             for(const auto& output:found->columns) {
                 Column column;column.dataName=output.name;
+                const auto& declaration = output.typeMetadata;
+                if (declaration && declaration->kind == DatumKind::Array &&
+                    declaration->actualOid == output.typeOid && declaration->arrayElement &&
+                    common_type_detail::array(output.type)) {
+                    // The child already owns each array and its declaration.
+                    // This schema supplies the slot's shape to the parent.
+                    column.dataType = output.type.substr(0, output.type.size() - 2);
+                    column.isArray = true;
+                    column.isVariableLength = true;
+                    schema.append(column);
+                    continue;
+                }
                 if((output.typeOid==2206 && output.type=="regtype") ||
                    (output.typeOid==2205 && output.type=="regclass")) {
                     // This source owns typed ExprValue cells, not heap bytes.

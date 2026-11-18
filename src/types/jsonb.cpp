@@ -1,4 +1,5 @@
 #include "jsonb.h"
+#include "catalog/collation.h"
 #include "common/DbError.h"
 
 #include <algorithm>
@@ -199,6 +200,45 @@ void quote(std::string& result, const std::string& value) {
     }
     result.push_back('"');
 }
+
+int compareJsonbString(const std::string& left, const std::string& right) {
+    if (left == right) return 0;
+    const auto order = collation::compare(left, right, "default");
+    // The default deterministic collation distinguishes byte-distinct ties.
+    return order ? order : left.compare(right);
+}
+
+int compareJsonbNumber(std::string_view left, std::string_view right) {
+    struct Decimal {
+        bool negative;
+        std::string_view integral;
+        std::string_view fractional;
+    };
+    const auto split = [](std::string_view value) {
+        const bool negative = value.front() == '-';
+        if (negative) value.remove_prefix(1);
+        const auto point = value.find('.');
+        std::string_view fractional;
+        if (point != std::string_view::npos) {
+            fractional = value.substr(point + 1);
+            const auto finalDigit = fractional.find_last_not_of('0');
+            fractional = finalDigit == std::string_view::npos
+                ? std::string_view{} : fractional.substr(0, finalDigit + 1);
+        }
+        return Decimal{negative, value.substr(0, point), fractional};
+    };
+    // JSONB input has already expanded exponents, removed integral leading
+    // zeros and normalized signed zero. Compare its full numeric range.
+    const auto a = split(left);
+    const auto b = split(right);
+    if (a.negative != b.negative) return a.negative ? -1 : 1;
+    int order = (a.integral.size() > b.integral.size()) -
+                (a.integral.size() < b.integral.size());
+    if (!order) order = a.integral.compare(b.integral);
+    if (!order) order = a.fractional.compare(b.fractional);
+    return a.negative ? (order < 0) - (order > 0) : order;
+}
+
 } // namespace
 
 bool JsonbValue::KeyLess::operator()(const std::string& left, const std::string& right) const {
@@ -291,6 +331,94 @@ JsonbValue JsonbValue::concatenate(JsonbValue left, JsonbValue right) {
         left.root_ = left.nodes_.size(); left.nodes_.push_back(std::move(array));
     }
     return left;
+}
+
+int JsonbValue::compare(const JsonbValue& other) const {
+    if (root_ >= nodes_.size() || other.root_ >= other.nodes_.size())
+        throw DbError("XX000", "jsonb value has no owned root");
+
+    enum class Order { EmptyRootArray, Null, String, Number, Boolean, Array, Object };
+    const auto kind = [](const Node& node, bool root) {
+        switch (node.kind) {
+            case Kind::Object: return Order::Object;
+            case Kind::Array:
+                // Root scalars have a one-element wrapper in PostgreSQL.
+                // Only an empty array at the root orders before these scalars.
+                return root && node.elements.empty() ? Order::EmptyRootArray : Order::Array;
+            case Kind::String: return Order::String;
+            case Kind::Scalar:
+                if (node.scalar == "null") return Order::Null;
+                if (node.scalar == "false" || node.scalar == "true") return Order::Boolean;
+                return Order::Number;
+        }
+        throw DbError("XX000", "unknown jsonb node type");
+    };
+    struct Frame {
+        const Node& left;
+        const Node& right;
+        size_t next = 0;
+        Members::const_iterator leftMember;
+        Members::const_iterator rightMember;
+
+        Frame(const Node& a, const Node& b)
+            : left(a), right(b), leftMember(a.members.begin()), rightMember(b.members.begin()) {}
+    };
+    std::vector<Frame> parents;
+    size_t left = root_;
+    size_t right = other.root_;
+    bool root = true;
+    for (;;) {
+        const auto& a = nodes_[left];
+        const auto& b = other.nodes_[right];
+        const auto aKind = kind(a, root);
+        const auto bKind = kind(b, root);
+        if (aKind != bKind) return aKind < bKind ? -1 : 1;
+        switch (aKind) {
+            case Order::EmptyRootArray:
+            case Order::Null:
+                break;
+            case Order::String:
+                if (const int order = compareJsonbString(a.scalar, b.scalar)) return order;
+                break;
+            case Order::Number:
+                if (const int order = compareJsonbNumber(a.scalar, b.scalar)) return order;
+                break;
+            case Order::Boolean:
+                if (a.scalar != b.scalar) return a.scalar == "false" ? -1 : 1;
+                break;
+            case Order::Array:
+                if (a.elements.size() != b.elements.size())
+                    return a.elements.size() < b.elements.size() ? -1 : 1;
+                if (!a.elements.empty()) parents.emplace_back(a, b);
+                break;
+            case Order::Object:
+                if (a.members.size() != b.members.size())
+                    return a.members.size() < b.members.size() ? -1 : 1;
+                if (!a.members.empty()) parents.emplace_back(a, b);
+                break;
+        }
+        // Continue in storage order, comparing each object key before its
+        // value. A frame holds only the current position for each container.
+        while (!parents.empty()) {
+            auto& frame = parents.back();
+            if (frame.left.kind == Kind::Array) {
+                if (frame.next < frame.left.elements.size()) {
+                    left = frame.left.elements[frame.next];
+                    right = frame.right.elements[frame.next++];
+                    break;
+                }
+            } else if (frame.leftMember != frame.left.members.end()) {
+                if (const int order = compareJsonbString(frame.leftMember->first,
+                                                         frame.rightMember->first)) return order;
+                left = frame.leftMember++->second;
+                right = frame.rightMember++->second;
+                break;
+            }
+            parents.pop_back();
+        }
+        if (parents.empty()) return 0;
+        root = false;
+    }
 }
 
 std::string JsonbValue::toString() const {

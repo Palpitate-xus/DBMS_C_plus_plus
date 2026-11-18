@@ -33,18 +33,12 @@ inline std::vector<DatumArrayDimension> dimensions(const sql_array_text::Literal
 inline const std::vector<ExprValue>* owningElements(const ExprValue& value) {
     return value.compound && value.compound->arrayElements?&*value.compound->arrayElements:nullptr;
 }
-inline std::vector<ExprValue> elements(const ExprValue& value) {
-    if(value.isNull)return {};
-    if(const auto* owned=owningElements(value)) {
-        if(elementCount(value.compound->dimensions)!=owned->size())
-            throw DbError("XX000","array owning values lost their dimensions");
-        return *owned;
-    }
+inline std::vector<ExprValue> textElements(const ExprValue& value,
+    const sql_array_text::Literal& literal, const std::vector<DatumArrayDimension>& dims) {
     const auto type=common_type_detail::canonical(value.typeName);
     const auto element=common_type_detail::array(type)?type.substr(0,type.size()-2):std::string("unknown");
-    const auto literal=sql_array_text::parse(value.value);
     std::vector<ExprValue> result;
-    const auto dims=dimensions(literal);result.reserve(elementCount(dims));
+    const auto count=elementCount(dims);result.reserve(count);
     const auto visit=[&](const auto& self,const sql_array_text::Literal& part,size_t depth)->void {
         for(const auto& token:part.elements) {
             if(depth+1<dims.size()){self(self,sql_array_text::parse(token),depth+1);continue;}
@@ -59,8 +53,18 @@ inline std::vector<ExprValue> elements(const ExprValue& value) {
         }
     };
     visit(visit,literal,0);
-    if(result.size()!=elementCount(dims))throw DbError("XX000","array text and dimensions disagree");
+    if(result.size()!=count)throw DbError("XX000","array text and dimensions disagree");
     return result;
+}
+inline std::vector<ExprValue> elements(const ExprValue& value) {
+    if(value.isNull)return {};
+    if(const auto* owned=owningElements(value)) {
+        if(elementCount(value.compound->dimensions)!=owned->size())
+            throw DbError("XX000","array owning values lost their dimensions");
+        return *owned;
+    }
+    const auto literal=sql_array_text::parse(value.value);
+    return textElements(value,literal,dimensions(literal));
 }
 inline std::vector<DatumArrayDimension> arrayDimensions(const ExprValue& value) {
     if(value.isNull)return {};
@@ -114,6 +118,17 @@ inline DatumTypePtr baseArrayDeclaration(DatumTypePtr type) {
     auto base = std::make_shared<DatumType>(*type);
     base->actualOid = type->codecOid;
     return base;
+}
+
+inline ExprValue asBaseArray(ExprValue value) {
+    if (!value.compound || !value.compound->type) return value;
+    const auto declaration = baseArrayDeclaration(value.compound->type);
+    if (declaration == value.compound->type) return value;
+    auto data = std::make_shared<CompoundDatum>(*value.compound);
+    data->type = declaration;
+    data->validatedArrayDomainOid = 0;
+    value.compound = std::move(data);
+    return value;
 }
 
 inline std::string render(const std::vector<ExprValue>& items,

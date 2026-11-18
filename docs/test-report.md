@@ -2,6 +2,26 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="derived-arrays-20261118"></a>
+## 2026-11-18 · 派生表里的数组
+
+派生表把数组值与真正的类型声明一起交给外层查询。客户端收到正确的基础数组类型，`pg_typeof` 仍能区分数组域。直接选取原表字段时，结果描述保留来源表和属性编号。已经验证的同一域的值可以原样复制；混合普通数组、不同域或无类型 NULL 的 `UNION ALL` 和 `VALUES` 会按共同类型绑定，在写回域列时执行应有的检查。
+
+PostgreSQL 会展开符合条件的子查询，将域转换复制到每处引用。带 `OFFSET 0` 或显式物化的来源可以共享转换结果。真实 PostgreSQL 18.6 的计划和序列对照证实了这两种行为。SQLite 可展开子查询、用协程按需提供行或存到临时表。DuckDB 用带类型的列向量传递中间结果。这一批沿用项目现有的带类型子计划，并保留实际依赖的取数顺序。[PostgreSQL 18.6 子查询展开源码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/optimizer/prep/prepjointree.c#L1939-L1948) · [PostgreSQL 域转换的易变性源码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/optimizer/util/clauses.c#L636-L650) · [SQLite 查询优化](https://www.sqlite.org/optoverview.html#subquery_co_routines) · [DuckDB 执行格式](https://www.duckdb.org/docs/preview/internals/vector)
+
+PostgreSQL 先比较数组元素，再比较元素个数、维度和下界，数组内的 NULL 排在非 NULL 值后。DuckDB 的变长列表也按位置和元素类型比较。SQLite 的五种存储类别没有原生数组。项目的数组排序沿用类型各自的比较规则，已解析的元素可直接参与比较。带时区的时间先比较换算后的微秒数，再比较偏移。JSONB 使用自身的类型和结构顺序，嵌套数组先比较元素个数。同一套排序规则用来判断参与 `DISTINCT` 的这些数组是否相等。[PostgreSQL 数组比较源码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/utils/adt/arrayfuncs.c) · [时间偏移比较源码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/utils/adt/date.c#L2368-L2400) · [JSONB 比较源码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/utils/adt/jsonb_util.c#L175-L279) · [DuckDB 列表比较](https://duckdb.org/docs/current/sql/data_types/list#comparison-and-ordering) · [SQLite 存储类别](https://www.sqlite.org/datatype3.html#storage_classes_and_datatypes)
+
+### 实际验证
+
+- GCC 13.3、C++17、`-O2`、CMake、关闭 OpenSSL。最终版重新编译 7 个依赖受影响的对象，复用 55 个逐一核对的对象，程序 SHA-256 为 `abd8c5f1bec6cf69c867ff4635accc27dce3a769db268418e20f93a10e0da960`。第二版因 `Session` 前置声明的命名空间错误未编过，第三版已修正。
+- [新增回归](../tests/derived_array_domain_protocol_e2e_test.py)在 PostgreSQL 18.6 和第三版上均通过 101/101。已提交基线通过 35/101，第一版候选通过 93/101。覆盖普通数组、数组域和引用数组的派生查询与写入，含嵌套、联接、维度、NULL、事务回滚和重启。相邻的 244 项原数组域协议回归全部通过，独立验证的 54 项取数和错误响应、35 项集合及 `VALUES` 对照也全部通过。各组覆盖可能重叠。
+- 第三版的独立测试发现，部分旧版可用的数组 `ORDER BY` 和 `DISTINCT` 在新路径报错。第四版通过整数、精确数值、浮点、字符数组的 129 项扩展回归。第五版加入日期、时间、微秒和 `24:00:00`，通过 136 项。最终版加入带时区的时间及 JSONB，与 PostgreSQL 18.6 均通过 149 项，每边核对了 721 个实际回复帧。144 行排序在 64 kB 的内存设置下实际创建并清理两份临时文件，16 MB 下无此文件，两种设置回复逐字节一致，域检查没有重复执行。
+- 错误响应检查保留了发生阶段。无效数组字面量在绑定时返回 `22P02`，包括 `LIMIT 0`。从实际行转换时发生的错误先返回列描述，再返回错误。成功的 `LIMIT 0`、假条件和空来源保留数组列描述，序列确认这些场景未执行域检查。
+- 三个选定 C++ 入口退出 0。五个既有派生查询协议入口中四个通过。派生 WITH 测试的 139 个动作仍有 96 项失败，最终版与已提交基线的完整输出逐字节一致。另运行八个二进制结果及数组专项入口，七个退出 0。TIMETZ 的 2,563 个动作有 313 项与 PostgreSQL 不同，旧版为 314 项，唯一变化是 `12:34:56Z` 的二进制结果现在与 PostgreSQL 一致。完整套件待验证。
+- 单独的崩溃恢复通过 43 项，PostgreSQL 18.6 的正常回滚和重连对照通过 44 项。测试进程收到 `SIGKILL` 后以 `-9` 退出。重启保留已提交的数组下界、空元素和引用编号，未提交的行消失，原主键可重新写入。独立审计核对了 87 对请求和回复及 282 个回复帧。
+
+原始 106 项派生对照保留完整预期。PostgreSQL 18.6 通过 106 项，已提交基线通过 58 项，这一批通过 95 项。余下差异涉及可展开派生表被多次引用时的检查次数，以及视图结果类型和写入。显式物化与 `OFFSET 0` 的共享转换行为已通过所测控制。补充测试还保留同一数组域 `JOIN … USING` 的类型、两种同类型转换的字段来源、普通 JSON 数组排序的错误码，以及超宽 JSONB 数值的 `array_position` 差异。原始失败、实际回复和计划留在本地。[运行性能](performance-report-2026-10-30.md#derived-array-cost-20261118)
+
 <a id="array-domains-20261118"></a>
 ## 2026-11-18 · 数组域
 
@@ -11,7 +31,7 @@ PostgreSQL 用 `pg_type.typbasetype` 表达域的直接基础类型，并在输�
 
 先前版本可能写入基础类型登记错误的数组域。所测旧错误声明在建表或转换等用途中会返回 `XX001`，原目录字节和所测旧标量域保持可读取。现有非空表添加数组域列、改成或改出数组域、域的约束修改及重命名会返回 `0A000`。数组元素本身为域、触发器前后检查顺序、已带类型的空值写入 `NOT NULL` 域和长数组容量仍有差距。
 
-额外的派生表正向对照在 PostgreSQL 18.6 通过 106 项，同批第六版通过 58 项。部分读出的数组值正确，列类型却声明成文本。部分联接的查询写入在绑定来源类型时失败，原有非联接的普通数组派生写入也会报类型未知。保持这些复现，仍需调整派生来源的类型传递和视图写入。
+当时的派生表正向对照在 PostgreSQL 18.6 通过 106 项，同批第六版通过 58 项。失败涉及列类型、派生来源的绑定和写入。上方的新一轮对照记录了后续修复和剩余差距。
 
 ### 已验证的操作
 

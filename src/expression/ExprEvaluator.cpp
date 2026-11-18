@@ -2139,6 +2139,68 @@ static __int128 preparedIntervalValue(const ExprValue& value) {
     return (static_cast<__int128>(parsed.months)*30+parsed.days)*86400000000LL+parsed.micros;
 }
 
+static int compareOrderedFloats(double left, double right) {
+    if (std::isnan(left)) return std::isnan(right) ? 0 : 1;
+    if (std::isnan(right)) return -1;
+    return (left > right) - (left < right);
+}
+
+int ExprEvaluator::compareArrayValues(const ExprValue& left, const ExprValue& right) {
+    if (left.isNull || right.isNull) return 0; // callers own whole-array NULL ordering
+    const auto contents = [](const ExprValue& value, CompoundDatum& decoded) -> const CompoundDatum& {
+        if (const auto* items = compound_value_detail::owningElements(value)) {
+            if (compound_value_detail::elementCount(value.compound->dimensions) != items->size())
+                throw DbError("XX000", "array owning values lost their dimensions");
+            return *value.compound;
+        }
+        const auto literal = sql_array_text::parse(value.value);
+        decoded.dimensions = compound_value_detail::dimensions(literal);
+        decoded.arrayElements = compound_value_detail::textElements(value, literal, decoded.dimensions);
+        return decoded;
+    };
+    CompoundDatum decodedLeft, decodedRight;
+    const auto& a = contents(left, decodedLeft);
+    const auto& b = contents(right, decodedRight);
+    const auto& x = *a.arrayElements;
+    const auto& y = *b.arrayElements;
+    const auto sameFloatingType = [](const ExprValue& lhs, const ExprValue& rhs) {
+        return lhs.typeName == rhs.typeName && (lhs.typeName == "real" || lhs.typeName == "double precision");
+    };
+    // Compare in row-major order. Shape breaks ties even when the elements agree.
+    for (size_t i = 0; i < std::min(x.size(), y.size()); ++i) {
+        if ((i & 127U) == 0) checkForQueryInterrupt();
+        const auto& lhs = x[i];
+        const auto& rhs = y[i];
+        if (lhs.isNull != rhs.isNull) return lhs.isNull ? 1 : -1;
+        if (lhs.isNull) continue;
+        int comparison;
+        if (sameFloatingType(lhs, rhs)) {
+            comparison = lhs.typeName == "real"
+                ? compareOrderedFloats(parseRealCastValue(lhs), parseRealCastValue(rhs))
+                : compareOrderedFloats(parseDoubleCastValue(lhs), parseDoubleCastValue(rhs));
+        } else if ((!left.collation.empty() && left.collation != lhs.collation) ||
+                   (!right.collation.empty() && right.collation != rhs.collation)) {
+            auto aCell = lhs, bCell = rhs;
+            if (!left.collation.empty()) aCell.collation = left.collation;
+            if (!right.collation.empty()) bCell.collation = right.collation;
+            comparison = compareValues(aCell, bCell);
+        } else {
+            comparison = compareValues(lhs, rhs);
+        }
+        if (comparison) return comparison;
+    }
+    if (x.size() != y.size()) return x.size() < y.size() ? -1 : 1;
+    if (a.dimensions.size() != b.dimensions.size())
+        return a.dimensions.size() < b.dimensions.size() ? -1 : 1;
+    for (size_t i = 0; i < a.dimensions.size(); ++i)
+        if (a.dimensions[i].length != b.dimensions[i].length)
+            return a.dimensions[i].length < b.dimensions[i].length ? -1 : 1;
+    for (size_t i = 0; i < a.dimensions.size(); ++i)
+        if (a.dimensions[i].lower != b.dimensions[i].lower)
+            return a.dimensions[i].lower < b.dimensions[i].lower ? -1 : 1;
+    return 0;
+}
+
 int ExprEvaluator::compareValues(const ExprValue& a, const ExprValue& b) {
     if (a.isNull || b.isNull) return 0; // caller handles NULL
 
@@ -2185,27 +2247,32 @@ int ExprEvaluator::compareValues(const ExprValue& a, const ExprValue& b) {
         const auto left=parseInternalCharByte(a.value),right=parseInternalCharByte(b.value);
         return (left>right)-(left<right);
     }
-    if(common_type_detail::array(ta) && common_type_detail::array(tb)) {
-        const auto left=sql_array_text::parse(a.value),right=sql_array_text::parse(b.value);
-        const auto first=arrayElements(a),second=arrayElements(b);
-        for(size_t i=0;i<std::min(first.size(),second.size());++i) {
-            if(first[i].isNull!=second[i].isNull)return first[i].isNull?1:-1;
-            if(first[i].isNull)continue;
-            const int comparison=compareValues(first[i],second[i]);
-            if(comparison)return comparison;
-        }
-        if(first.size()!=second.size())return first.size()>second.size()?1:-1;
-        if(left.dimensions.size()!=right.dimensions.size())return left.dimensions.size()>right.dimensions.size()?1:-1;
-        for(size_t i=0;i<left.dimensions.size();++i)
-            if(left.dimensions[i].length!=right.dimensions[i].length)return left.dimensions[i].length>right.dimensions[i].length?1:-1;
-        for(size_t i=0;i<left.dimensions.size();++i)
-            if(left.dimensions[i].lower!=right.dimensions[i].lower)return left.dimensions[i].lower>right.dimensions[i].lower?1:-1;
-        return 0;
-    }
+    if(common_type_detail::array(ta) && common_type_detail::array(tb))
+        return compareArrayValues(a,b);
     if(ta=="interval" && tb=="interval") {
         const auto left=preparedIntervalValue(a),right=preparedIntervalValue(b);
         return (left>right)-(left<right);
     }
+    const auto isTime = [](const std::string& type) { return type == "time" || type == "time without time zone"; };
+    if (isTime(ta) && isTime(tb)) {
+        const auto left = temporal_storage_detail::parseClockMicros(a.value);
+        const auto right = temporal_storage_detail::parseClockMicros(b.value);
+        if (!left || !right) throw DbError("22007", "invalid time datum in comparison");
+        return (*left > *right) - (*left < *right);
+    }
+    const auto isZonedTime = [](const std::string& type) { return type == "timetz" || type == "time with time zone"; };
+    if (isZonedTime(ta) && isZonedTime(tb)) {
+        using namespace temporal_storage_detail;
+        const auto left = parseZonedClock(a.value), right = parseZonedClock(b.value);
+        if (!left || !right) throw DbError("22007", "invalid time with time zone datum in comparison");
+        // PostgreSQL breaks ties by seconds west and retains clocks across midnight.
+        const auto leftUtc = left->localMicros + left->secondsWest * MicrosPerSecond;
+        const auto rightUtc = right->localMicros + right->secondsWest * MicrosPerSecond;
+        if (leftUtc != rightUtc) return leftUtc < rightUtc ? -1 : 1;
+        return (left->secondsWest > right->secondsWest) - (left->secondsWest < right->secondsWest);
+    }
+    if (ta == "jsonb" && tb == "jsonb")
+        return JsonbValue::parse(a.value).compare(JsonbValue::parse(b.value));
     if (isBitStringTypeName(ta) && isBitStringTypeName(tb)) {
         // Ordered bits compare lexicographically, then by length. Leading
         // zeroes and empty values are significant, not decimal decoration.
@@ -2353,6 +2420,12 @@ int ExprEvaluator::compareValues(const ExprValue& a, const ExprValue& b) {
     bool dateB = (tb == "date" || tb == "timestamp" || tb == "timestamptz");
     if (dateA || dateB) {
         if (ta == "date" && tb == "date") {
+            const auto infinity = [](const std::string& value) {
+                if (value == "-infinity") return -1;
+                return value == "infinity" ? 1 : 0;
+            };
+            const int left = infinity(a.value), right = infinity(b.value);
+            if (left || right) return (left > right) - (left < right);
             Date da(a.value.c_str()), db(b.value.c_str());
             return (da > db) - (da < db);
         }
@@ -2553,7 +2626,7 @@ ExprValue ExprEvaluator::comparePrepared(const QueryComparisonBinding& binding,
         const double x=binding.leftType=="real"?static_cast<double>(parseRealCastValue(a)):parseDoubleCastValue(a);
         const double y=binding.rightType=="real"?static_cast<double>(parseRealCastValue(b)):parseDoubleCastValue(b);
         // PostgreSQL orders NaN above non-NaN and treats two NaNs as equal.
-        const int comparison=std::isnan(x)?(std::isnan(y)?0:1):std::isnan(y)?-1:(x>y)-(x<y);
+        const int comparison=compareOrderedFloats(x,y);
         const bool truth=binding.op=="="?comparison==0:binding.op=="<>"?comparison!=0:
             binding.op=="<"?comparison<0:binding.op==">"?comparison>0:
             binding.op=="<="?comparison<=0:comparison>=0;
@@ -3382,16 +3455,7 @@ static ExprValue implicitRuntimeValue(const ExprEvaluator& evaluator,ExprValue v
     return evaluator.eval(&cast,row);
 }
 
-static ExprValue asBaseArray(ExprValue value) {
-    if (!value.compound || !value.compound->type) return value;
-    const auto declaration = compound_value_detail::baseArrayDeclaration(value.compound->type);
-    if (declaration == value.compound->type) return value;
-    auto data = std::make_shared<CompoundDatum>(*value.compound);
-    data->type = declaration;
-    data->validatedArrayDomainOid = 0;
-    value.compound = std::move(data);
-    return value;
-}
+using compound_value_detail::asBaseArray;
 
 ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& ctx) const {
     if (!e || !e->left || !e->right) return ExprValue{};

@@ -19,6 +19,7 @@ public:
     JsonbValue& operator=(JsonbValue&&) noexcept = default;
     static JsonbValue parse(std::string_view input);
     static JsonbValue concatenate(JsonbValue left, JsonbValue right);
+    int compare(const JsonbValue& other) const;
     std::string toString() const;
 
 private:

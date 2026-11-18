@@ -1864,6 +1864,10 @@ void applyBoundProtocolDescriptor(std::vector<PgColumnDescription>& columns,
         const auto& field = descriptor[i];
         if (field.typeOid == INVALID_OID) continue;
         auto& column = columns[i];
+        if (field.physicalRelationOid && field.physicalAttributeNumber > 0) {
+            column.tableOid = field.physicalRelationOid;
+            column.attributeNumber = field.physicalAttributeNumber;
+        }
         column.typeOid = field.typeOid;
         column.typeModifier = field.typeMod;
         column.enumType = false;
@@ -2810,25 +2814,27 @@ bool describePreparedOrdinarySourceResult(const std::string& sql, Session& sessi
     return true;
 }
 
-void retainPreparedWindowOrigins(std::vector<PgColumnDescription>& columns,
-    const PreparedQuery& query, Session& session) {
+template<class Recipient>
+void visitPreparedProjectionOrigins(size_t width, const PreparedQuery& query,
+    const Session& session, Recipient receive) {
     using Origin = std::pair<uint32_t,uint16_t>;
     using Site = std::tuple<const PreparedQuery*,const Stmt*,size_t>;
     const Origin none{0,0};
-    const auto catalog = g_engine.catalogService().metadataSnapshot(session.currentDB);
+    std::optional<CatalogManager::MetadataSnapshot> catalog;
     const auto relation = [&](const PreparedQuery::SourceRange& source,size_t ordinal) -> Origin {
         if (source.relationSchema.empty() || source.relationName.empty()) return none;
+        if (!catalog) catalog = g_engine.catalogService().metadataSnapshot(session.currentDB);
         uint32_t namespaceOid = 0, relationOid = 0;
-        for (const auto& space : catalog.namespaces)
+        for (const auto& space : catalog->namespaces)
             if (space.nspname == source.relationSchema) { namespaceOid = space.oid; break; }
         if (!namespaceOid) return none;
-        for (const auto& table : catalog.relations)
+        for (const auto& table : catalog->relations)
             if (table.relnamespace == namespaceOid && table.relname == source.relationName) {
                 relationOid = table.oid; break;
             }
         if (!relationOid) return none;
         std::vector<const PgAttributeRow*> attributes;
-        for (const auto& attribute : catalog.attributes)
+        for (const auto& attribute : catalog->attributes)
             if (attribute.attrelid == relationOid && attribute.attnum > 0 && !attribute.attisdropped)
                 attributes.push_back(&attribute);
         std::sort(attributes.begin(),attributes.end(),
@@ -2884,11 +2890,18 @@ void retainPreparedWindowOrigins(std::vector<PgColumnDescription>& columns,
         // window results, other computations and SQL-child values have none.
         return projection.column ? column(owner,*projection.column) : none;
     };
-    for (size_t i = 0; i < columns.size(); ++i) {
+    for (size_t i = 0; i < width; ++i) {
         const auto origin = output(query,query.ast.get(),i);
-        columns[i].tableOid = origin.first;
-        columns[i].attributeNumber = origin.second;
+        receive(i, origin.first, origin.second);
     }
+}
+
+void retainPreparedWindowOrigins(std::vector<PgColumnDescription>& columns,
+    const PreparedQuery& query, Session& session) {
+    visitPreparedProjectionOrigins(columns.size(),query,session,[&](size_t i, uint32_t relation, uint16_t attribute) {
+        columns[i].tableOid=relation;
+        columns[i].attributeNumber=attribute;
+    });
 }
 
 bool describePreparedWindowHostResult(const std::string& sql, Session& session,
@@ -8993,6 +9006,16 @@ void handleClient(SecureSocket socket, std::string clientHost) {
 }
 
 } // namespace
+
+void attachPreparedProjectionOrigins(QueryRowDescriptor& columns, const PreparedQuery& query,
+    const Session& session) {
+    visitPreparedProjectionOrigins(columns.size(),query,session,[&](size_t i, uint32_t relation, uint16_t attribute) {
+        if (relation && attribute) {
+            columns[i].physicalRelationOid=relation;
+            columns[i].physicalAttributeNumber=static_cast<int16_t>(attribute);
+        }
+    });
+}
 
 namespace {
 

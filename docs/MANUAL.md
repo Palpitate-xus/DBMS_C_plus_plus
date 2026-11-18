@@ -1722,6 +1722,27 @@ SELECT scores FROM example_scores WHERE id = 1;
 
 查询返回 `{1,2}`。插入四项的数组会报 `23514`。域检查里的 `VALUE` 代表整个数组，`cardinality` 也会计算值为 NULL 的元素。[测试范围](test-report.md#array-domains-20261118)
 
+### 从子查询读取和复制数组
+
+继续使用上一例的 `example_scores`。查询和写入都可以使用子查询生成的数组值。
+
+```sql
+SELECT q.scores FROM (SELECT scores FROM example_scores WHERE id = 1) AS q;
+INSERT INTO example_scores(id, scores)
+SELECT 2, q.scores FROM (SELECT scores FROM example_scores WHERE id = 1) AS q;
+SELECT scores FROM example_scores WHERE id = 2;
+```
+
+两次查询都返回 `{1,2}`。子查询已经读出的同一域的值带有原检查结果。把一个普通数组写入域列时，目标列仍会检查它。[测试范围](test-report.md#derived-arrays-20261118)
+
+可以按元素值排序和去重。比如以下查询依次返回 `{2}` 和 `{10}`。
+
+```sql
+SELECT DISTINCT q.a
+FROM (VALUES (ARRAY[10]), (ARRAY[2]), (ARRAY[2])) AS q(a)
+ORDER BY q.a;
+```
+
 ---
 
 ## 11. 用户与权限

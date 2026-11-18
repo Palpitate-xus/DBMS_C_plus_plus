@@ -17,6 +17,7 @@ struct QueryOutputColumn {
     int32_t typeMod = -1; // same-generation physical assignment metadata
     DatumTypePtr typeMetadata;
     int16_t physicalAttributeNumber = 0; // actual catalog attnum, independent of compact owned values
+    uint32_t physicalRelationOid = 0; // protocol origin of a bound projection
 };
 using QueryRowDescriptor = std::vector<QueryOutputColumn>;
 struct QueryRelationMetadata {

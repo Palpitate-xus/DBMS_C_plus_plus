@@ -19,6 +19,13 @@ cmake --build build/cmake --parallel 2
 ## 最近更新
 
 <details>
+<summary>修复子查询中的数组读写和排序 · 2026-11-18</summary>
+
+读取或复制子查询的数组时会保留类型、起始下标和空值。整数数组按值排序，`{2}` 排在 `{10}` 前面。
+
+</details>
+
+<details>
 <summary>为数组设置默认值和检查规则 · 2026-11-18</summary>
 
 多张表可以共用同一套规则，例如要求每个数组最多有三项。
@@ -29,13 +36,6 @@ cmake --build build/cmake --parallel 2
 <summary>修复查询结果只显示编号的问题 · 2026-11-17</summary>
 
 受影响的查询现在会显示对应的表名或类型名。
-
-</details>
-
-<details>
-<summary>减少查询中的多余处理 · 2026-11-17</summary>
-
-部分查询会跳过未用到的列的类型转换。
 
 </details>
 

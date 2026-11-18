@@ -37289,6 +37289,25 @@ void validatePreparedPrimitiveInput(const QueryOutputColumn& target, const Expr*
     const auto literalTokens = SQLParser::tokenize(input->value);
     if (literalTokens.size() != 1 || literalTokens.front().size() < 2 ||
         literalTokens.front().front() != '\'' || literalTokens.front().back() != '\'') return;
+    if (target.name.empty() && target.typeMetadata &&
+        target.typeMetadata->kind == DatumKind::Array &&
+        target.typeMetadata->actualOid == target.typeOid &&
+        target.typeMetadata->actualOid != target.typeMetadata->codecOid) {
+        const auto domain = owner->resolveDomainAncestry(database, target.type);
+        if (domain.name.empty() || !SQLParser::parseTypeSpecification(domain.baseType).isArray)
+            throw DbError("XX001", "array domain input has no matching base declaration");
+        auto leaf = *input;
+        leaf.typeName.clear();
+        ExprEvaluator evaluator;
+        evaluator.setCurrentDB(database);
+        evaluator.bindScalarFunctions(nullptr, owner);
+        auto value = evaluator.eval(&leaf, RowContext{});
+        value.typeName = "unknown";
+        // SQL transforms the string through the base input function when
+        // binding. The actual domain constraint belongs to execution.
+        (void)evaluator.convertArrayDomainBase(domain.baseType, value);
+        return;
+    }
     auto type = preparedPrimitiveInputType(target.type);
     auto regtypeSpelling=target.type;
     const bool array=regtypeSpelling.size()>=2 && regtypeSpelling.compare(regtypeSpelling.size()-2,2,"[]")==0;

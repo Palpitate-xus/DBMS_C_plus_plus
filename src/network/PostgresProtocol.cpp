@@ -1,6 +1,7 @@
 #include "PostgresProtocol.h"
 #include "expression/ExprEvaluator.h"
 #include "common/DateType.h"
+#include "common/TemporalStorageCodec.h"
 #include "PostgresNumeric.h"
 #include "types/bytea.h"
 #include "common/NetworkValue.h"
@@ -332,73 +333,17 @@ bool encodeBinaryValue(const std::string& value, const PgColumnDescription& colu
                 return true;
             }
             case 1083: {
-                // The legacy heap helper stores whole seconds and rejects
-                // 24h. PostgreSQL's wire datum is a microsecond clock instead.
-                const auto first = value.find_first_not_of(" \t\r\n\f\v");
-                if (first == std::string::npos) return false;
-                const auto last = value.find_last_not_of(" \t\r\n\f\v");
-                const std::string clock = value.substr(first, last - first + 1);
-                const size_t colon = clock.find(':');
-                if (colon == std::string::npos) return false;
-                const size_t secondColon = clock.find(':', colon + 1);
-                if (secondColon != std::string::npos &&
-                    clock.find(':', secondColon + 1) != std::string::npos) return false;
-                int hours = 0, minutes = 0, seconds = 0;
-                const size_t minuteEnd = secondColon == std::string::npos ? clock.size() : secondColon;
-                if (!parseTemporalUnsigned(clock.substr(0, colon), 2, hours) ||
-                    !parseTemporalUnsigned(clock.substr(colon + 1, minuteEnd - colon - 1), 2, minutes)) return false;
-                if (secondColon != std::string::npos) {
-                    const std::string tail = clock.substr(secondColon + 1);
-                    const size_t dot = tail.find('.');
-                    if (!parseTemporalUnsigned(tail.substr(0, dot), 2, seconds)) return false;
-                    if (dot != std::string::npos && (dot + 1 == tail.size() ||
-                        tail.find_first_not_of("0123456789", dot + 1) != std::string::npos)) return false;
-                }
-                if (hours > 24 || minutes > 59 || seconds > 60) return false;
-                const auto parts = parseIntervalInput(clock);
-                if (!intervalInputSqlState(parts).empty() || parts.months || parts.days ||
-                    parts.micros < 0 || parts.micros > 86400000000LL) return false;
-                appendRawUInt64(encoded, static_cast<uint64_t>(parts.micros));
+                const auto clock = temporal_storage_detail::parseClockMicros(value);
+                if (!clock) return false;
+                appendRawUInt64(encoded, static_cast<uint64_t>(*clock));
                 return true;
             }
             case 1266: {
-                // timetz_send keeps the local microsecond clock and a signed
-                // seconds-west offset as separate network-order fields. It
-                // must not turn the clock into a UTC timestamp or use double.
-                const auto first = value.find_first_not_of(" \t\r\n\f\v");
-                if (first == std::string::npos) return false;
-                const auto last = value.find_last_not_of(" \t\r\n\f\v");
-                const std::string text = value.substr(first, last - first + 1);
-                const size_t zone = text.find_last_of("+-");
-                if (zone == std::string::npos || zone == 0) return false;
-                const std::string offset = text.substr(zone + 1);
-                int hours = 0, minutes = 0, seconds = 0;
-                const size_t colon = offset.find(':');
-                if (colon == std::string::npos) {
-                    if (offset.size() <= 2) {
-                        if (!parseTemporalUnsigned(offset, 2, hours)) return false;
-                    } else if (offset.size() == 4) {
-                        if (!parseTemporalUnsigned(offset.substr(0, 2), 2, hours) ||
-                            !parseTemporalUnsigned(offset.substr(2, 2), 2, minutes)) return false;
-                    } else return false;
-                } else {
-                    const size_t secondColon = offset.find(':', colon + 1);
-                    const size_t minuteEnd = secondColon == std::string::npos ? offset.size() : secondColon;
-                    if (!parseTemporalUnsigned(offset.substr(0, colon), 2, hours) ||
-                        !parseTemporalUnsigned(offset.substr(colon + 1, minuteEnd - colon - 1), 2, minutes)) return false;
-                    if (secondColon != std::string::npos &&
-                        !parseTemporalUnsigned(offset.substr(secondColon + 1), 2, seconds)) return false;
-                }
-                if (hours > 15 || minutes > 59 || seconds > 59) return false;
-                const int32_t east = (hours * 60 + minutes) * 60 + seconds;
-                const int32_t west = text[zone] == '+' ? -east : east;
-                PgColumnDescription clockColumn = column;
-                clockColumn.typeOid = 1083;
-                std::vector<uint8_t> clock;
-                if (!encodeBinaryValue(text.substr(0, zone), clockColumn, clock) ||
-                    clock.size() != 8) return false;
-                encoded.insert(encoded.end(), clock.begin(), clock.end());
-                appendRawUInt32(encoded, static_cast<uint32_t>(west));
+                const auto clock = temporal_storage_detail::parseZonedClock(value);
+                if (!clock) return false;
+                // timetz_send keeps the local clock and seconds-west offset.
+                appendRawUInt64(encoded, static_cast<uint64_t>(clock->localMicros));
+                appendRawUInt32(encoded, static_cast<uint32_t>(clock->secondsWest));
                 return true;
             }
             case 1114: case 1184: {

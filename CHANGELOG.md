@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-11-18 · 修复子查询中的数组读写和排序
+
+读取或复制子查询的数组时会保留类型、下界和空值。排序和去重按元素的实际值处理，比如 `{2}` 排在 `{10}` 前面。通过视图复制数组仍有已知问题。[使用示例](docs/MANUAL.md#从子查询读取和复制数组) · [测试](docs/test-report.md#derived-arrays-20261118) · [性能](docs/performance-report-2026-10-30.md#derived-array-cost-20261118)
+
 ## 2026-11-18 · 给数组加默认值和检查规则
 
 可以把一套数组默认值和检查规则用在多张表里。非法数组默认值会在设置时报错。原样复制已通过检查的数组时会保留检查结果。对现有非空表添加这种列，以及修改域规则，仍属于待实现的操作。[使用示例](docs/MANUAL.md#给数组设置默认值和约束) · [测试](docs/test-report.md#array-domains-20261118) · [性能](docs/performance-report-2026-10-30.md#array-domain-cost-20261118)

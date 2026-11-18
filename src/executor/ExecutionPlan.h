@@ -1394,7 +1394,7 @@ public:
     // one-row, zero-column Result source. Preparation has already validated
     // the complete query namespace; this consumes its retained typed AST.
     static bool supportsPreparedSelectPlan(const SelectStmt& select);
-    static bool supportsPreparedSourceSelectPlan(const SelectStmt& select);
+    static bool supportsPreparedSourceSelectPlan(const SelectStmt& select, bool selectBodyOnly = false);
     static OpPtr buildPreparedSelectPlan(StorageEngine* engine,
         const std::string& dbname, const std::string& tablename,
         PreparedQuery prepared);

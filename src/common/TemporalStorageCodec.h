@@ -1,6 +1,7 @@
 #pragma once
 
 #include "DateType.h"
+#include "utils/interval.h"
 
 #include <cstdint>
 #include <limits>
@@ -65,6 +66,81 @@ inline std::optional<int64_t> parseTimeMicros(const std::string& value) {
         (hour == 24 && (minute || secondValue || split->micros)))
         return std::nullopt;
     return (hour * 3600LL + minute * 60LL + secondValue) * MicrosPerSecond + split->micros;
+}
+
+// Decimal time text used by the protocol and by arrays with timezone offsets.
+// The clock retains timezone-independent microseconds, including 24:00.
+inline std::optional<int64_t> parseClockMicros(const std::string& text) {
+    if (const auto clock = parseTimeMicros(text)) return clock;
+    const auto first = text.find_first_not_of(" \t\r\n\f\v");
+    if (first == std::string::npos) return std::nullopt;
+    const auto last = text.find_last_not_of(" \t\r\n\f\v");
+    const std::string clock = text.substr(first, last - first + 1);
+    const auto colon = clock.find(':');
+    if (colon == std::string::npos) return std::nullopt;
+    const auto secondColon = clock.find(':', colon + 1);
+    if (secondColon != std::string::npos && clock.find(':', secondColon + 1) != std::string::npos)
+        return std::nullopt;
+    int hours = 0, minutes = 0, seconds = 0;
+    const auto minuteEnd = secondColon == std::string::npos ? clock.size() : secondColon;
+    if (!parseTemporalUnsigned(clock.substr(0, colon), 2, hours) ||
+        !parseTemporalUnsigned(clock.substr(colon + 1, minuteEnd - colon - 1), 2, minutes))
+        return std::nullopt;
+    if (secondColon != std::string::npos) {
+        const auto tail = clock.substr(secondColon + 1);
+        const auto dot = tail.find('.');
+        if (!parseTemporalUnsigned(tail.substr(0, dot), 2, seconds)) return std::nullopt;
+        if (dot != std::string::npos && (dot + 1 == tail.size() ||
+            tail.find_first_not_of("0123456789", dot + 1) != std::string::npos)) return std::nullopt;
+    }
+    if (hours > 24 || minutes > 59 || seconds > 60) return std::nullopt;
+    const auto parts = parseIntervalInput(clock);
+    if (!intervalInputSqlState(parts).empty() || parts.months || parts.days ||
+        parts.micros < 0 || parts.micros > MicrosPerDay) return std::nullopt;
+    return parts.micros;
+}
+
+struct ZonedClock {
+    int64_t localMicros;
+    int32_t secondsWest;
+};
+
+inline std::optional<ZonedClock> parseZonedClock(const std::string& value) {
+    const auto first = value.find_first_not_of(" \t\r\n\f\v");
+    if (first == std::string::npos) return std::nullopt;
+    const auto last = value.find_last_not_of(" \t\r\n\f\v");
+    const std::string_view text(value.data() + first, last - first + 1);
+    if (text.back() == 'Z' || text.back() == 'z') {
+        const auto clock = parseClockMicros(std::string(text.substr(0, text.size() - 1)));
+        if (clock) return ZonedClock{*clock, 0};
+        return std::nullopt;
+    }
+    const auto zone = text.find_last_of("+-");
+    if (zone == std::string_view::npos || zone == 0) return std::nullopt;
+    const auto offset = text.substr(zone + 1);
+    int hours = 0, minutes = 0, seconds = 0;
+    const auto colon = offset.find(':');
+    if (colon == std::string_view::npos) {
+        if (offset.size() <= 2) {
+            if (!parseTemporalUnsigned(offset, 2, hours)) return std::nullopt;
+        } else if (offset.size() == 4) {
+            if (!parseTemporalUnsigned(offset.substr(0, 2), 2, hours) ||
+                !parseTemporalUnsigned(offset.substr(2), 2, minutes)) return std::nullopt;
+        } else return std::nullopt;
+    } else {
+        const auto secondColon = offset.find(':', colon + 1);
+        const auto minuteEnd = secondColon == std::string_view::npos ? offset.size() : secondColon;
+        if (!parseTemporalUnsigned(offset.substr(0, colon), 2, hours) ||
+            !parseTemporalUnsigned(offset.substr(colon + 1, minuteEnd - colon - 1), 2, minutes))
+            return std::nullopt;
+        if (secondColon != std::string_view::npos &&
+            !parseTemporalUnsigned(offset.substr(secondColon + 1), 2, seconds)) return std::nullopt;
+    }
+    if (hours > 15 || minutes > 59 || seconds > 59) return std::nullopt;
+    const auto clock = parseClockMicros(std::string(text.substr(0, zone)));
+    if (!clock) return std::nullopt;
+    const int32_t east = (hours * 60 + minutes) * 60 + seconds;
+    return ZonedClock{*clock, text[zone] == '+' ? -east : east};
 }
 
 inline std::optional<int64_t> parseTimestampMicros(const std::string& value) {

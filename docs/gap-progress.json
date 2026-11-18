@@ -2,6 +2,30 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-18 preserve arrays through derived queries and compare typed array keys",
+      "gap_ids": ["TYPE-16", "TYPE-19", "TYPE-20", "QRY-01"],
+      "status": "partial",
+      "evidence": [
+        "src/parser/query_binding.cpp",
+        "src/executor/ExecutionPlan.cpp",
+        "src/expression/ExprEvaluator.cpp",
+        "src/network/NetworkServer.cpp",
+        "docs/test-report.md",
+        "docs/performance-report-2026-10-30.md"
+      ],
+      "tests": [
+        "tests/derived_array_domain_protocol_e2e_test.py",
+        "tests/array_domain_declaration_test.cpp",
+        "tests/array_domain_protocol_e2e_test.py",
+        "tests/stored_reference_sort_test.cpp"
+      ],
+      "verification": [
+        "Exact CMake GCC 13.3 C++17/O2 executable abd8c5f1bec6cf69c867ff4635accc27dce3a769db268418e20f93a10e0da960. Registered simple-protocol suite 149/149 on the project and PostgreSQL 18.6, prior array-domain suite 244/244, demand and error frames 54/54, set and VALUES descriptors 35/35, actual SIGKILL recovery 43/43. A 144-row order check observed and cleaned two temporary files at 64 kB with byte-identical results to the 16 MB run.",
+        "Three selected C++ entries and eleven existing protocol entries passed. The separate DERIVED WITH and TIMETZ comparisons retain existing differences. The full suite remains unverified. The original 106-case PostgreSQL suite scores 95/106 versus 58/106 on the baseline, with view writes and repeated domain-check demand still open. The original 273 item records retain their existing statuses.",
+        "Independent archive audit verified 12 completed process runs, 96 timed batches and identical full old/new replies for six comparable workloads. One 16-row physical derived-array cast query passes the CPU effect and drift gates (median paired ratio 2.732). Five controls do not establish a stable improvement. Four corrected or new workloads publish new-version costs only. No PostgreSQL performance ratio was measured."
+      ]
+    },
+    {
       "issue": "2026-11-18 domains over builtin arrays in direct SQL, storage and recovery",
       "gap_ids": [
         "TYPE-19",
