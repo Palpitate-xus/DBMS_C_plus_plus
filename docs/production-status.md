@@ -6,7 +6,7 @@
 
 默认表空间的普通单表查询按单列有符号整数主键分页时，可以从新格式索引按需要的方向取前 `OFFSET + LIMIT` 个键和表行，然后停止读取。旧格式索引仍遍历全部十进制键。旧快照、活动事务、外部表空间、索引或内存条件不满足时走原扫描和排序。[测试范围](test-report.md#signed-primary-key-prefix-20261118) · [性能报告](performance-report-2026-10-30.md#signed-primary-key-prefix-cost-20261118)
 
-如果查询带一个或多个同一主键的整数字面量范围比较，可从范围起点读取。带其他筛选条件、绑定参数或使用旧索引的范围查询继续采用原计划。[测试范围](test-report.md#integer-primary-key-range-20261118)
+如果范围条件只比较同一个主键与整数，可从范围起点读取。重复执行时，数据库使用这次传入的非空有符号整数重新定位。使用旧索引、其他筛选条件、空值或小数时采用原查询计划。[测试范围](test-report.md#prepared-integer-primary-key-range-20261118) · [性能报告](performance-report-2026-10-30.md#prepared-integer-primary-key-range-cost-20261118)
 
 ## 2026-11-18 · 排序后计算查询结果
 

@@ -2,6 +2,18 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="prepared-integer-primary-key-range-20261118"></a>
+## 2026-11-18 · 同一条查询用不同的整数主键翻页
+
+PostgreSQL 的 `PREPARE` 支持每次用不同参数执行，也区分可按实参选择的计划和通用计划。SQLite 的翻页示例用参数传入上一页的最后一个键。DuckDB 同样允许应用保留已准备的语句，每次重新绑定参数。[PostgreSQL PREPARE](https://www.postgresql.org/docs/18/sql-prepare.html) · [SQLite 翻页示例](https://www.sqlite.org/rowvalue.html#scrolling_window_queries) · [DuckDB 参数绑定](https://duckdb.org/docs/api/c/prepared)
+
+在默认表空间的普通单列有符号整数主键上，`PREPARE` 后的每次 `EXECUTE` 和网络客户端每次绑定的非空整数都可以确定本次索引起点或终点。支持 `smallint`、`integer` 和 `bigint`，也接受已验证的内置整数常量转换。查询仍使用原有筛选、排序和输出计算。空参数、小数、含列引用或函数的转换、额外筛选条件和不符合索引可见性条件的查询保持原有执行方式。磁盘格式沿用 `0xC553`。[使用示例](MANUAL.md#重复执行带参数的分页)
+
+- 扩展[普通排序协议测试](../tests/ordinary_scalar_order_protocol_e2e_test.py)。同一条语句反复绑定不同值，覆盖三种整数宽度的文本和二进制参数、上下界、反写比较、极大和极小值、空值、非法整数，以及跳过记录时的序列调用。39 组回复与基线逐字节相同，规范化用例中的关系编号后，与 PostgreSQL 18.6 的行、字段描述和协议消息一致。网络测试中的两次实际范围分页从各读 7 行降至 3 行和 2 行，小数条件仍读 7 行。
+- 另用真正的 SQL `PREPARE/EXECUTE` 检查三个整数实参。实际读取 4、2、4 行，基线每次读 10 行。序列参数只求值一次，`EXPLAIN` 不执行带副作用的表达式。两个交错执行的查询各用自己的边界，暂停后继续读取也未再次扫描。独立复核新旧和 PostgreSQL 共 195 组请求与回复。
+- 新数据库和由 `0xC552` 数据目录打开的场景各完成 196 项协议检查和 28 项普通 SQL 检查。正常打开保留旧索引的字节，恢复需要重建时沿用现有格式规则。实际强制结束进程后重启，已提交的记录仍可查询。两个会话交错读写时，旧事务快照和正写入的会话回到普通扫描，新快照恢复范围读取。另有五项 C++ 回归、四项相邻协议测试和本节手册示例通过。
+- PostgreSQL 对照仍有已有差异。客户端未声明参数类型时，本项目的语句描述可能保留 OID 0，二进制绑定返回 `0A000`，非法文本在执行时才报错。暂停后恢复的查询返回相同行，但测试中的完成标签为 `SELECT 3`，PostgreSQL 18.6 为 `SELECT 2`。完整回归套件待验证。最终程序 SHA-256 为 `fc24f96a672692a25f8755651044f5bdeefa422ca1f2c7ce820238b571f8a792`。[性能报告](performance-report-2026-10-30.md#prepared-integer-primary-key-range-cost-20261118)
+
 <a id="integer-primary-key-range-20261118"></a>
 ## 2026-11-18 · 从上页主键继续读取
 

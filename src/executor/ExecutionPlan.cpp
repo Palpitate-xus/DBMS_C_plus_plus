@@ -2867,50 +2867,88 @@ struct IntegerPageBounds {
     std::optional<int64_t> upper;
 };
 
+struct IntegerPageEndpoint {
+    int64_t value;
+    std::string type;
+};
+
+static std::optional<IntegerPageEndpoint> parseIntegerPageEndpoint(const std::string& text,
+                                                                   std::string type) {
+    if (text.empty() || (type != "smallint" && type != "integer" && type != "bigint")) return {};
+    const char* begin = text.data();
+    const char* end = begin + text.size();
+    if (*begin == '+' && (++begin == end || *begin < '0' || *begin > '9')) return {};
+    int64_t value = 0;
+    const auto parsed = std::from_chars(begin, end, value);
+    if (parsed.ec != std::errc{} || parsed.ptr != end ||
+        (type == "smallint" && (value < INT16_MIN || value > INT16_MAX)) ||
+        (type == "integer" && (value < INT32_MIN || value > INT32_MAX))) return {};
+    return IntegerPageEndpoint{value, std::move(type)};
+}
+
+static std::optional<IntegerPageEndpoint> integerPageEndpoint(const Expr* expression,
+                                                            const PreparedQuery& query) {
+    if (!expression || expression->preparedSubquery) return {};
+    if (const auto* parameter = dynamic_cast<const ParameterExpr*>(expression)) {
+        if (parameter->origin != ParameterOrigin::StatementInput ||
+            parameter->slot >= query.parameters.size()) return {};
+        const auto type = ExprHelper::canonicalResultTypeName(parameter->declaredType);
+        const auto& input = query.parameters[parameter->slot];
+        if (input.isNull || ExprHelper::canonicalResultTypeName(input.typeName) != type) return {};
+        return parseIntegerPageEndpoint(input.value, type);
+    }
+
+    const auto* literal = dynamic_cast<const LiteralExpr*>(expression);
+    // Binding absorbs unary signs on bare decimal tokens, including INT64_MIN.
+    if (literal && !literal->analyzedPrimitiveConstant && literal->typeName.empty())
+        return parseIntegerPageEndpoint(literal->value, ExprHelper::inferValuesResultType(literal->value));
+
+    // The wire frontend expands each Bind into a constant with its declared
+    // cast. The equality lookup already proves and decodes these pure inputs.
+    std::string type;
+    if (const auto* cast = dynamic_cast<const CastExpr*>(expression))
+        type = integerIndexCastType(cast->typeName);
+    else if (literal && literal->analyzedPrimitiveConstant)
+        type = integerIndexCastType(literal->typeName);
+    if (type.empty()) return {};
+    const auto input = constantIntegerIndexInput(expression, type);
+    return input ? parseIntegerPageEndpoint(input->value, std::move(type)) : std::nullopt;
+}
+
 static bool intersectIntegerPageBounds(const Expr* expression, const QueryColumnBinding& key,
-                                       IntegerPageBounds& bounds) {
+                                       const PreparedQuery& query, IntegerPageBounds& bounds) {
     const auto* comparison = dynamic_cast<const BinaryOpExpr*>(expression);
     if (!comparison || comparison->preparedSubquery || comparison->rowComparison) return false;
     const auto& op = comparison->op;
     if (op == "AND")
-        return intersectIntegerPageBounds(comparison->left.get(), key, bounds) &&
-            intersectIntegerPageBounds(comparison->right.get(), key, bounds);
+        return intersectIntegerPageBounds(comparison->left.get(), key, query, bounds) &&
+            intersectIntegerPageBounds(comparison->right.get(), key, query, bounds);
     if (op != "<" && op != "<=" && op != ">" && op != ">=") return false;
 
     const auto* column = dynamic_cast<const ColumnRefExpr*>(comparison->left.get());
-    const bool literalFirst = !column;
-    if (literalFirst) column = dynamic_cast<const ColumnRefExpr*>(comparison->right.get());
+    const bool endpointFirst = !column;
+    if (endpointFirst) column = dynamic_cast<const ColumnRefExpr*>(comparison->right.get());
     if (!column || column->preparedSubquery || !column->binding) return false;
     const auto& input = *column->binding;
     if (input.scopeDepth != key.scopeDepth || input.mergedUsing || input.sourceOrdinal != key.sourceOrdinal ||
         input.columnOrdinal != key.columnOrdinal || input.typeOid != key.typeOid ||
         input.declaredType != key.declaredType) return false;
 
-    // Binding absorbs unary signs on bare decimal tokens, including INT64_MIN.
-    // A quoted input can also become a typed constant during binding, so
-    // inspect its AST role as well as its post-binding value.
-    const auto* literal = dynamic_cast<const LiteralExpr*>(
-        literalFirst ? comparison->left.get() : comparison->right.get());
-    if (!literal || literal->preparedSubquery || literal->analyzedPrimitiveConstant ||
-        !literal->typeName.empty() || literal->value.empty()) return false;
-    const auto& text = literal->value;
-    const char* begin = text.data() + (text.front() == '+' ? 1 : 0);
-    const char* end = text.data() + text.size();
-    int64_t value = 0;
-    const auto parsed = std::from_chars(begin, end, value);
-    if (parsed.ec != std::errc{} || parsed.ptr != end) return false;
+    const auto endpoint = integerPageEndpoint(
+        endpointFirst ? comparison->left.get() : comparison->right.get(), query);
+    if (!endpoint) return false;
     if (comparison->comparison) {
         const auto keyType = ExprHelper::canonicalResultTypeName(key.declaredType);
-        const auto literalType = ExprHelper::inferValuesResultType(text);
-        const auto& leftType = literalFirst ? literalType : keyType;
-        const auto& rightType = literalFirst ? keyType : literalType;
+        const auto& leftType = endpointFirst ? endpoint->type : keyType;
+        const auto& rightType = endpointFirst ? keyType : endpoint->type;
         const auto& binding = *comparison->comparison;
         if (!binding.strict || binding.enumTypeOid || binding.op != op ||
             binding.leftType != leftType || binding.rightType != rightType ||
             binding.identity != "builtin-comparison:" + op + "(" + leftType + "," + rightType + ")") return false;
     }
 
-    const bool isLower = (op.front() == '>') != literalFirst;
+    int64_t value = endpoint->value;
+    const bool isLower = (op.front() == '>') != endpointFirst;
     if (op.size() == 1) {
         if ((isLower && value == INT64_MAX) || (!isLower && value == INT64_MIN)) {
             // Both endpoints are representable even though the interval is empty.
@@ -2925,10 +2963,10 @@ static bool intersectIntegerPageBounds(const Expr* expression, const QueryColumn
     return true;
 }
 
-static std::optional<IntegerPageBounds> integerPageBounds(const SelectStmt& select,
+static std::optional<IntegerPageBounds> integerPageBounds(const PreparedQuery& query, const SelectStmt& select,
                                                           const QueryColumnBinding& key) {
     IntegerPageBounds bounds;
-    if (select.whereClause && !intersectIntegerPageBounds(select.whereClause.get(), key, bounds)) return {};
+    if (select.whereClause && !intersectIntegerPageBounds(select.whereClause.get(), key, query, bounds)) return {};
     return bounds;
 }
 
@@ -2959,7 +2997,7 @@ bool QueryPlanner::mayUseIntegerPrimaryKeyPage(StorageEngine* engine, const std:
         const PreparedQuery& query, const SelectStmt& select) {
     const auto key = integerPageOrder(query, select);
     const auto* range = key ? integerPageRelation(query, select, *key) : nullptr;
-    if (!range || !integerPageBounds(select, *key)) return false;
+    if (!range || !integerPageBounds(query, select, *key)) return false;
     const auto table = range->relationSchema.empty() || range->relationSchema == "public" ? range->relationName
         : range->relationSchema + "__" + range->relationName;
     return eligibleIntegerPageKey(engine->getTableSchema(database, table), *key);
@@ -3075,7 +3113,7 @@ OpPtr makePreparedTableSource(StorageEngine* engine, const std::string& database
     if (physical && typeid(*physical) == typeid(TableScanOp) && physical->tableName() == schema.tablename) {
         const auto key = integerPageOrder(*query, *select);
         if (key && integerPageRelation(*query, *select, *key) && eligibleIntegerPageKey(schema, *key)) {
-            if (const auto bounds = integerPageBounds(*select, *key))
+            if (const auto bounds = integerPageBounds(*query, *select, *key))
                 return std::make_unique<IntegerPrimaryKeyPageOp>(engine, database, schema, key->columnOrdinal,
                     select->offset.value_or(0) + *select->limit, !select->orderBy.front().asc, *bounds,
                     std::move(source));

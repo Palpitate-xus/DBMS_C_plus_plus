@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>同一条分页查询可以反复用 · 2026-11-18</summary>
+
+每次传入上一页最后一个整数主键，数据库就从对应的位置继续查找。
+
+[使用示例](docs/MANUAL.md#重复执行带参数的分页) · [测试报告](docs/test-report.md#prepared-integer-primary-key-range-20261118) · [性能报告](docs/performance-report-2026-10-30.md#prepared-integer-primary-key-range-cost-20261118)
+
+</details>
+
+<details>
 <summary>从上一页最后一个编号接着查 · 2026-11-18</summary>
 
 如果主键是整数，把上一页最后一个编号写进 `WHERE`，查询就能从下一条开始。可以从小到大或从大到小，也可以同时指定起点和终点。
@@ -21,16 +30,13 @@
 </details>
 
 <details>
-<summary>查一页时少读表记录 · 2026-11-18</summary>
+<summary>查看更早的更新</summary>
+
+## 2026-11-18 · 查一页时少读表记录
 
 按整数主键排序时，可以先找到当前页的编号，再读取对应的表记录。需要读取较早的数据版本，或索引不可用时，数据库会从表中查找并排序。
 
 [使用示例](docs/MANUAL.md#按整数主键翻页) · [测试报告](docs/test-report.md#integer-primary-key-page-20261118) · [性能报告](docs/performance-report-2026-10-30.md#integer-primary-key-page-cost-20261118)
-
-</details>
-
-<details>
-<summary>查看更早的更新</summary>
 
 ## 2026-11-18 · 排序时少做数组转换
 

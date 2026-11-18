@@ -19,6 +19,13 @@ cmake --build build/cmake --parallel 2
 ## 最近更新
 
 <details>
+<summary>同一条分页查询可以反复用 · 2026-11-18</summary>
+
+每次传入上一页最后一个整数主键，数据库就从对应的位置继续查找。
+
+</details>
+
+<details>
 <summary>从上一页最后一个编号接着查 · 2026-11-18</summary>
 
 如果主键是整数，把上一页最后一个编号写进 `WHERE`，查询就能从下一条开始。
@@ -29,13 +36,6 @@ cmake --build build/cmake --parallel 2
 <summary>只查一页，取够就停 · 2026-11-18</summary>
 
 按整数主键排序时，新建或重建的索引可以跳过这一页之后的记录。
-
-</details>
-
-<details>
-<summary>查一页时少读表记录 · 2026-11-18</summary>
-
-按整数主键排序时，可以先找到当前页的编号，再读取对应的表记录。
 
 </details>
 

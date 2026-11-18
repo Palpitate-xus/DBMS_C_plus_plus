@@ -3,6 +3,127 @@
 import importlib.util
 import json
 from pathlib import Path
+import struct
+
+
+def parameter_range_controls(runner, client, sock, check_plan=True):
+    """Exercise repeated wire Bind inputs on the previously seeded PK tables."""
+    def check(messages, rows=None, oids=None, state=None, tag=None):
+        result=runner.decode_wire_result(messages,include_types=True)
+        assert messages[-1]==(b'Z',b'I') and result[1]==state,(messages[-1],result)
+        if rows is not None:assert result[0]==rows,(result,rows)
+        if oids is not None:assert result[5]==oids,(result,oids)
+        if tag is not None:assert result[4]==tag,(result,tag)
+        return result
+
+    def query(sql,rows=None):
+        return check(client.simple_query(sock,sql),rows)
+
+    def prepare(name,sql,types):
+        label=name.encode()+b'\0'
+        body=label+sql.encode()+b'\0'+struct.pack('!H',len(types))
+        body+=b''.join(struct.pack('!I',oid) for oid in types)
+        sock.sendall(client.typed(b'P',body)+client.typed(b'D',b'S'+label)+client.typed(b'S'))
+        messages=client.read_until_ready(sock)
+        check(messages,[])
+        assert sum(kind==b'1' for kind,_ in messages)==1,messages
+        described=[body for kind,body in messages if kind==b't']
+        expected=struct.pack('!H',len(types))+b''.join(struct.pack('!I',oid) for oid in types)
+        assert described==[expected],(name,described,expected)
+
+    def execute(name,values,rows=None,oids=None,state=None,binary_widths=None):
+        body=b'\0'+name.encode()+b'\0'
+        widths=binary_widths or (0,)*len(values)
+        assert len(widths)==len(values)
+        body+=struct.pack('!H',len(widths))+b''.join(struct.pack('!H',bool(width)) for width in widths)
+        body+=struct.pack('!H',len(values))
+        for value,width in zip(values,widths):
+            raw=None if value is None else (int(value).to_bytes(width,'big',signed=True)
+                                           if width else str(value).encode())
+            body+=struct.pack('!i',-1 if raw is None else len(raw))+(raw or b'')
+        sock.sendall(client.typed(b'B',body+struct.pack('!H',0))+client.typed(b'D',b'P\0')+
+                     client.typed(b'E',b'\0'+struct.pack('!I',0))+client.typed(b'S'))
+        messages=client.read_until_ready(sock)
+        assert sum(kind==b'2' for kind,_ in messages)==(0 if state else 1),messages
+        tag=f'SELECT {len(rows)}' if rows is not None and state is None else None
+        result=check(messages,rows,oids,state,tag)
+        if state:assert result[4] is None,result
+        return result
+
+    ranged=('SELECT p.k,p.payload FROM scalar_order_pk_int p '
+            'WHERE $1 <= p.k AND p.k < $2 ORDER BY p.k LIMIT 2 OFFSET 1')
+    prepare('range_page',ranged,(23,23))
+    execute('range_page',(-100,10),[['-2',None],['0','zero']],[23,25])
+    execute('range_page',(0,2147483647),[['2',''],['10','ten']],[23,25],binary_widths=(4,4))
+    execute('range_page',(-3,1),[['0','zero']],[23,25],binary_widths=(0,4))
+    for pair in ((None,10),(-100,None),(None,None),(10,-2)):
+        execute('range_page',pair,[],[23,25])
+    execute('range_page',('invalid',10),[],state='22P02')
+    execute('range_page',(-100,10),[['-2',None],['0','zero']],[23,25])
+
+    prepare('range_reverse','SELECT k,payload FROM scalar_order_pk_int '
+            'WHERE $1 > k AND k >= -100 ORDER BY k DESC LIMIT 2',(23,))
+    execute('range_reverse',(10,),[['2',''],['0','zero']],[23,25])
+    prepare('range_mixed_widths','SELECT k FROM scalar_order_pk_int '
+            'WHERE $1 <= k AND k < $2 ORDER BY k LIMIT 3',(21,20))
+    execute('range_mixed_widths',(-2,2147483648),[['-2'],['0'],['2']],[23],binary_widths=(2,8))
+
+    prepare('range_big','SELECT k,payload FROM scalar_order_pk_big '
+            'WHERE k >= $1 AND k <= $2 ORDER BY k DESC LIMIT 2',(20,20))
+    execute('range_big',(-9223372036854775808,-11),
+            [['-11','negative'],['-9223372036854775808','min']],[20,25],binary_widths=(8,8))
+    execute('range_big',(11,9223372036854775807),
+            [['9223372036854775807','max'],['11','eleven']],[20,25])
+    prepare('range_strict_max','SELECT k FROM scalar_order_pk_big WHERE k > $1 ORDER BY k LIMIT 1',(20,))
+    execute('range_strict_max',(9223372036854775807,),[],[20],binary_widths=(8,))
+    prepare('range_strict_min','SELECT k FROM scalar_order_pk_big WHERE $1 > k ORDER BY k LIMIT 1',(20,))
+    execute('range_strict_min',(-9223372036854775808,),[],[20])
+
+    query('CREATE TABLE scalar_order_param_small (k SMALLINT PRIMARY KEY)')
+    query('INSERT INTO scalar_order_param_small VALUES (-32768),(-11),(0),(11),(32767)')
+    prepare('range_small','SELECT k FROM scalar_order_param_small '
+            'WHERE k >= $1 AND $2 > k ORDER BY k LIMIT 3',(21,21))
+    execute('range_small',(-32768,32767),[['-32768'],['-11'],['0']],[21],binary_widths=(2,2))
+
+    decimal=('SELECT k FROM scalar_order_pk_int WHERE k > $1 ORDER BY k LIMIT 2')
+    prepare('range_numeric',decimal,(1700,))
+    execute('range_numeric',('2.5',),[['10'],['2147483647']],[23])
+    prepare('range_or','SELECT k FROM scalar_order_pk_int WHERE k < $1 OR k > 2 '
+            'ORDER BY k LIMIT 3',(23,))
+    execute('range_or',(-2,),[['-2147483648'],['-100'],['10']],[23])
+
+    query('CREATE SEQUENCE scalar_order_param_seq')
+    query("SELECT nextval('scalar_order_param_seq')",[['1']])
+    prepare('range_effect','SELECT nextval(\'scalar_order_param_seq\'),k FROM scalar_order_pk_int '
+            'WHERE k >= $1 AND k < $2 ORDER BY k LIMIT 1 OFFSET 1',(23,23))
+    execute('range_effect',(-2,10),[['3','0']],[20,23])
+    execute('range_effect',(None,10),[],[20,23])
+    query("SELECT currval('scalar_order_param_seq')",[['3']])
+
+    if check_plan:
+        explain='EXPLAIN (ANALYZE TRUE, TIMING FALSE, COSTS FALSE, FORMAT JSON) '
+
+        def plan_nodes(result):
+            pending=[json.loads(result[0][0][0])['plan']]
+            nodes={}
+            while pending:
+                node=pending.pop()
+                nodes[node['nodeType']]=node
+                pending.extend(node['children'])
+            return nodes
+
+        prepare('range_plan',explain+ranged,(23,23))
+        for values,fetched in (((-100,10),3),((-3,1),2)):
+            nodes=plan_nodes(execute('range_plan',values,binary_widths=(4,4)))
+            assert 'IntegerPrimaryKeyPage' in nodes,nodes
+            page=nodes['IntegerPrimaryKeyPage']
+            assert page['usedPrimaryKeyPage']=='true' and page['indexKeyRange']=='true',page
+            assert int(page['indexEntries'])==int(page['heapRowsFetched'])==fetched,page
+            assert nodes['TableScan'].get('actualRows',0)==0,nodes
+        prepare('range_plan_numeric',explain+decimal,(1700,))
+        nodes=plan_nodes(execute('range_plan_numeric',('2.5',)))
+        assert nodes.get('IntegerPrimaryKeyPage',{}).get('usedPrimaryKeyPage')!='true',nodes
+    print('[PREPARED INTEGER RANGE PROTOCOL] passed',flush=True)
 
 
 def main():
@@ -161,6 +282,7 @@ def main():
                 'SELECT k,payload FROM scalar_order_pk_big ORDER BY k+0 LIMIT 3;',
                 rows=[['-9223372036854775808','min'],['-11','negative'],['2','two']],oids=[20,25])
         assert not failures,failures
+        parameter_range_controls(runner,client,server['sock'])
         print('[ORDINARY SCALAR ORDER PROTOCOL] passed')
     finally:runner.stop_ours(server)
 
