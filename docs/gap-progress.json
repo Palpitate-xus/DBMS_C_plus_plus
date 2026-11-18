@@ -2,6 +2,25 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-18 avoid repeated integer array work in joins and retain typed NULL on assignment",
+      "gap_ids": ["TYPE-19", "TYPE-20", "QRY-01"],
+      "status": "partial",
+      "evidence": [
+        "src/expression/prepared_query_execution.cpp",
+        "src/main.cpp",
+        "src/commands/DmlExecutor.cpp",
+        "src/commands/TableManage.cpp",
+        "docs/test-report.md",
+        "docs/performance-report-2026-10-30.md"
+      ],
+      "tests": ["tests/array_domain_join_using_protocol_e2e_test.py"],
+      "verification": [
+        "Exact project and PostgreSQL 18.6 pass 218/218 registered protocol cases each. The committed baseline passes 216/218. Previous 128/149/244 checks pass, as do 11 INSERT/default/constraint/trigger protocol entries and seven selected native entries. Held correlation and partial demand controls pass; prior ordered-source and nested INSERT differences remain. The original 273 items and their states are unchanged.",
+        "Same-domain typed NULL recovery passes 53/53 on the project after an owned SIGKILL with a live transaction. PostgreSQL normal rollback/restart passes 54/54. Uncommitted rows disappear; the physical column NOT NULL and fresh invalid NULL controls still reject. Independent raw audit verifies 53 common replies and 296 frames.",
+        "Seven ordinary workloads return identical full old/new bytes. Both 12-process timing runs completed and were independently audited. At 128 by 128 rows, the longer-batch CPU medians were 356.621 to 86.551 ms and 338.242 to 80.856 ms. All four array cases exceeded the 10% within-block drift limit in both runs. Full snapshots and raw measurements stay outside Git."
+      ]
+    },
+    {
       "issue": "2026-11-18 preserve typed arrays and domain assignments in JOIN USING",
       "gap_ids": ["TYPE-16", "TYPE-19", "TYPE-20", "QRY-01"],
       "status": "partial",

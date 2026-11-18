@@ -216,6 +216,175 @@ def workload(checks, prefix, objects):
            [origin(None), origin(left), origin(right)])
 
 
+def array_pair_workload(checks, prefix, objects):
+    q = checks.query
+
+    def name(symbol):
+        return f'{prefix}_{symbol}'
+
+    def create(label, kind, symbol, declaration=''):
+        identifier = name(symbol)
+        objects.append((kind, identifier))
+        q(label, f'CREATE {kind} {identifier}{declaration}',
+          tag=f'CREATE {kind}', require_success=True)
+
+    def identity(label, catalog, column, symbol):
+        return q(label, f"SELECT oid FROM {catalog} WHERE {column}='{name(symbol)}'", tag='SELECT 1',
+                 names=['oid'], oids=[26], capture_oid=True, wire_layout=[[4, -1]])
+
+    def select(label, sql, rows, names, oids, origins=None, state=None):
+        layout = [[8, -1] if oid == 20 else [4, -1] if oid in (23, 26) else [-1, -1]
+                  for oid in oids]
+        q(label, sql, tag=None if state else f'SELECT {len(rows)}', rows=rows, names=names, oids=oids,
+          wire_layout=layout, state=state)
+        if origins is not None:
+            record = checks.records[-1]
+            record['expected']['origins'] = origins
+            if [field[1:3] for field in record['fields']] != origins:
+                record['pass'] = False
+                print('ARRAY_DOMAIN_JOIN_ORIGIN_DIFFERENCE', json.dumps(record), flush=True)
+
+    def literal(value):
+        if value is None:
+            return 'NULL'
+        return f"'{value}'" if isinstance(value, str) else str(value)
+
+    def seed(label, symbol, cells):
+        values = ','.join('(' + ','.join(map(literal, row)) + ')' for row in cells)
+        q(label, f'INSERT INTO {name(symbol)} VALUES {values}', tag=f'INSERT 0 {len(cells)}',
+          require_success=True)
+
+    def number(label, sql, value):
+        select(label, sql, [[str(value)]], ['calls'], [20])
+
+    def relation_oid(symbol):
+        return int(identity(f'relation-oid-{symbol}', 'pg_class', 'relname', symbol))
+
+    matches = ((1, 10), (1, 11), (2, 10), (2, 11), (4, 13), (5, 14), (6, 15),
+               (7, 16), (8, 17), (10, 20))
+    left_only, right_only = ((3, None), (9, None)), ((None, 12), (None, 18), (None, 19))
+    second_key = ((1, 11), (2, 10), (5, 14), (6, 15), (7, 16), (8, 17), (10, 20))
+    for element, letter, oid, point, near, edge in (
+        ('smallint', 's', 1005, -32768, -32767, 32767),
+        ('integer', 'i', 1007, -2147483648, -2147483647, 2147483647),
+        ('bigint', 'b', 1016, 9007199254740992, 9007199254740993, -9223372036854775808),
+    ):
+        left, right = f'p_{letter}_left', f'p_{letter}_right'
+        key = f'{{{point},NULL}}'
+        offset = f'[0:1]={key}'
+        rank_two = '{' + key + '}'
+        boundary = f'{{{edge}}}'
+        long_key = '{' + ','.join([str(point)]*32 + [str(edge)]) + '}'
+        left_keys = (key, key, None, offset, rank_two, boundary, '{}', '{NULL}',
+                     f'{{{near},NULL}}', long_key)
+        right_keys = (key, key, None, offset, rank_two, boundary, '{}', '{NULL}', '{7}',
+                      '{{' + str(point) + '},{NULL}}', long_key)
+        left_second = {2: ('{2}', 2), 4: (None, None)}
+        right_second = {10: ('{2}', 2), 13: (None, None)}
+        left_data = [(i, k, *left_second.get(i, ('{1}', 1))) for i, k in enumerate(left_keys, 1)]
+        right_data = [(i, k, *right_second.get(i, ('{1}', 1))) for i, k in enumerate(right_keys, 10)]
+        for table, identifier, data in ((left, 'lid', left_data), (right, 'rid', right_data)):
+            create(f'table-{table}', 'TABLE', table,
+                   f'({identifier} integer PRIMARY KEY,k {element}[],m {element}[],s integer)')
+            seed(f'seed-{table}', table, data)
+        left_oid, right_oid = relation_oid(left), relation_oid(right)
+        relation = f'{name(left)} AS l {{}} JOIN {name(right)} AS r USING'
+        for kind, unmatched, key_origin in (
+            ('INNER', (), [left_oid, 2]), ('LEFT', left_only, [left_oid, 2]),
+            ('RIGHT', right_only, [right_oid, 2]), ('FULL', left_only+right_only, [0,0]),
+        ):
+            pairs = sorted(matches+unmatched, key=lambda pair: tuple((n is None, n) for n in pair))
+            rows = [[None if lid is None else str(lid), None if rid is None else str(rid),
+                     right_keys[rid-10] if lid is None else left_keys[lid-1]] for lid, rid in pairs]
+            select(f'pair-{letter}-{kind.lower()}', f'SELECT l.lid,r.rid,k FROM {relation.format(kind)}(k) '
+                   'ORDER BY l.lid NULLS LAST,r.rid NULLS LAST', rows, ['lid','rid','k'], [23,23,oid],
+                   [[left_oid,1],[right_oid,1],key_origin])
+        for other in ('m','s'):
+            select(f'pair-{letter}-multiple-{other}', f'SELECT l.lid,r.rid FROM {relation.format("INNER")}(k,{other}) '
+                   'ORDER BY l.lid,r.rid', [[str(l),str(r)] for l,r in second_key], ['lid','rid'], [23,23],
+                   [[left_oid,1],[right_oid,1]])
+
+    int_left, int_right = name('p_i_left'), name('p_i_right')
+    create('pair-copy-table', 'TABLE', 'p_copy', '(id integer PRIMARY KEY,k integer[])')
+    target = name('p_copy')
+    q('pair-copy-duplicates', f'INSERT INTO {target} SELECT r.rid,k FROM {int_left} AS l '
+      f'JOIN {int_right} AS r USING(k) WHERE l.lid=1', tag='INSERT 0 2')
+    copy_oid = relation_oid('p_copy')
+    select('pair-duplicates-persisted', f'SELECT id,k FROM {target} ORDER BY id',
+           [['10','{-2147483648,NULL}'],['11','{-2147483648,NULL}']], ['id','k'], [23,1007],
+           [[copy_oid,1],[copy_oid,2]])
+
+    create('pair-demand-sequence', 'SEQUENCE', 'p_calls')
+    create('pair-demand-source', 'TABLE', 'p_demand', '(rid integer PRIMARY KEY,raw text)')
+    seed('pair-demand-seed', 'p_demand', [(1,'{2,NULL}'), (2,'late-invalid-array')])
+    create('pair-demand-left', 'TABLE', 'p_one', '(k integer[])')
+    seed('pair-demand-left-seed', 'p_one', [('{2,NULL}',)])
+    create('pair-demand-empty', 'TABLE', 'p_empty', '(k integer[])')
+    sequence = name('p_calls')
+    child = f"SELECT rid,raw::integer[] AS k,nextval('{sequence}') AS tap FROM {name('p_demand')}"
+    union = f'({child} WHERE rid=1 UNION ALL {child} WHERE rid=2) AS r'
+    for kind, lhs in (('INNER','p_one'), ('RIGHT','p_empty')):
+        label = f'pair-demand-{kind.lower()}'
+        sql = f'SELECT r.rid,r.tap FROM {name(lhs)} AS l {kind} JOIN {union} USING(k)'
+        number(f'{label}-reset', f"SELECT setval('{sequence}',100,true) AS calls", 100)
+        number_sql = f"SELECT currval('{sequence}') AS calls"
+        select(f'{label}-limit-zero', sql+' LIMIT 0', [], ['rid','tap'], [23,20], [[0,0],[0,0]])
+        number(f'{label}-no-source', number_sql, 100)
+        select(f'{label}-limit-one', sql+' LIMIT 1', [['1','101']], ['rid','tap'], [23,20], [[0,0],[0,0]])
+        number(f'{label}-one-source', number_sql, 101)
+        select(f'{label}-late-error', sql+' LIMIT 1 OFFSET 1', [], ['rid','tap'], [23,20],
+               [[0,0],[0,0]], state='22P02')
+        number(f'{label}-source-before-error', number_sql, 102)
+
+    create('pair-correlated-table', 'TABLE', 'p_outer', '(id integer PRIMARY KEY,lid integer)')
+    seed('pair-correlated-seed', 'p_outer', [(1,1),(2,4),(3,3),(4,2),(5,90)])
+    correlated = (f'SELECT o.id+0 AS id,(SELECT r.rid FROM {int_left} AS l JOIN {int_right} AS r USING(k) '
+                  f'WHERE l.lid=o.lid ORDER BY r.rid OFFSET 1 LIMIT 1) AS picked FROM {name("p_outer")} AS o ORDER BY o.id')
+    for repeat in ('first','again'):
+        select(f'pair-correlated-{repeat}', correlated,
+               [['1','11'],['2',None],['3',None],['4','11'],['5',None]], ['id','picked'], [23,23], [[0,0],[0,0]])
+
+    create('nonnull-domain-sequence', 'SEQUENCE', 'nn_calls')
+    sequence = name('nn_calls')
+    create('nonnull-domain', 'DOMAIN', 'nn_domain', f" AS integer[] NOT NULL CHECK(nextval('{sequence}')>0)")
+    create('nonnull-other-domain', 'DOMAIN', 'nn_other', ' AS integer[]')
+    domain_oid = identity('type-oid-nn_domain', 'pg_type', 'typname', 'nn_domain')
+    other_oid = identity('type-oid-nn_other', 'pg_type', 'typname', 'nn_other')
+    assert domain_oid != other_oid
+    for symbol, domain, column_constraint in (
+        ('nn_left','nn_domain',''), ('nn_right','nn_domain',''), ('nn_mixed','nn_other',''),
+        ('nn_sink','nn_domain',''), ('nn_column','nn_domain',' NOT NULL'),
+    ):
+        create(f'table-{symbol}', 'TABLE', symbol, f'(id integer PRIMARY KEY,k {name(domain)}{column_constraint})')
+    seed('nonnull-left-seed', 'nn_left', [(1,'{2}')])
+    seed('nonnull-right-seed', 'nn_right', [(11,'{1}')])
+    seed('nonnull-mixed-seed', 'nn_mixed', [(21,'{1}')])
+    left = name('nn_left')
+    same = f'{left} AS l LEFT JOIN {name("nn_right")} AS r USING(k)'
+    unrelated = f'{left} AS l LEFT JOIN {name("nn_mixed")} AS r USING(k)'
+    mixed = f'{int_left} AS l LEFT JOIN {name("nn_right")} AS r USING(k) WHERE l.lid=3'
+    for label, source, expression, declared in (
+        ('same',same,'r.k',domain_oid), ('unrelated',unrelated,'r.k',other_oid), ('mixed',mixed,'k','1007'),
+    ):
+        select(f'nonnull-{label}-null-type', f'SELECT {expression} AS v,pg_typeof({expression})::oid AS kt FROM {source}',
+               [[None,declared]], ['v','kt'], [1007,26])
+    number('nonnull-reset', f"SELECT setval('{sequence}',100,true) AS calls", 100)
+    sink = name('nn_sink')
+    q('nonnull-same-null-insert', f'INSERT INTO {sink} SELECT 1,r.k FROM {same}', tag='INSERT 0 1')
+    for label, sql in (
+        ('column', f'INSERT INTO {name("nn_column")} SELECT 9,r.k FROM {same}'),
+        ('unrelated', f'INSERT INTO {sink} SELECT 9,r.k FROM {unrelated}'),
+        ('mixed', f'INSERT INTO {sink} SELECT 9,k FROM {mixed}'),
+        ('base-cast', f'INSERT INTO {sink} SELECT 9,r.k::integer[] FROM {same}'),
+        ('fresh', f'INSERT INTO {sink} VALUES (9,NULL)'),
+    ):
+        q(f'nonnull-{label}-null-rejected', sql, tag=None, state='23502')
+    sink_oid = relation_oid('nn_sink')
+    select('nonnull-stored-null', f'SELECT id,k,pg_typeof(k)::oid AS kt FROM {sink} ORDER BY id',
+           [['1',None,domain_oid]], ['id','k','kt'], [23,1007,26], [[sink_oid,1],[sink_oid,2],[0,0]])
+    number('nonnull-domain-no-recheck', f"SELECT currval('{sequence}') AS calls", 100)
+
+
 def main():
     signal.signal(signal.SIGTERM, interrupted)
     signal.signal(signal.SIGINT, interrupted)
@@ -235,6 +404,7 @@ def main():
         try:
             checks.sock = reference_connection(client) if reference else server.start()
             workload(checks, prefix, objects)
+            array_pair_workload(checks, prefix, objects)
             failures = [record['label'] for record in checks.records if not record['pass']]
             assert not failures, failures
             complete = True

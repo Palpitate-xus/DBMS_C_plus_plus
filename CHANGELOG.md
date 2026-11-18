@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-11-18 · 整数数组连接少做重复工作
+
+用整数数组连接表时，可以更早跳过不匹配的行，省去重复解析数组和复制整行。普通查询写入也可原样复制外联接产生的同域空值，目标列自己的 `NOT NULL` 仍会检查。[测试](docs/test-report.md#integer-array-join-20261118) · [性能](docs/performance-report-2026-10-30.md#integer-array-join-cost-20261118)
+
 ## 2026-11-18 · 连接表时保留数组类型
 
 用 `JOIN … USING` 连接数组列时，结果保留正确的数组类型、长度限制和列来源。两列使用同一种数组规则时，原样复制已经检查过的值可省掉重复检查。不同的基础数组类型需要先显式转换。[使用示例](docs/MANUAL.md#用数组列连接表) · [测试](docs/test-report.md#array-using-20261118) · [性能](docs/performance-report-2026-10-30.md#array-using-cost-20261118)

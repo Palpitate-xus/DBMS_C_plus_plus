@@ -28,6 +28,38 @@ using PreparedQueryRows = std::vector<std::vector<ExprValue>>;
 using PreparedChildExecutor = std::function<PreparedQueryRows(const Stmt*, const RowContext&, size_t)>;
 using PreparedChildCursorFactory = std::function<std::unique_ptr<PreparedQueryCursor>(const Stmt*, const RowContext&)>;
 
+// Execution-local fingerprints of already reached USING inputs. They may
+// discard a pair, but the original equality decides every possible match.
+class PreparedArrayJoinFilter {
+public:
+    static std::shared_ptr<PreparedArrayJoinFilter> prepare(const PreparedQuery&,
+        const std::vector<ExprPtr>& comparisons);
+    bool mayMatch(size_t leftOrdinal, const RowContext& left,
+                  size_t rightOrdinal, const RowContext& right);
+    void reset();
+
+private:
+    using Cell = std::pair<size_t, size_t>;
+    struct Key {
+        Cell left, right;
+        const char* arrayType;
+        const char* elementType;
+        uint32_t codecOid;
+        unsigned bits;
+    };
+    struct Fingerprint {
+        enum class State { Unavailable, Null, Value } state = State::Unavailable;
+        uint64_t hash = 0;
+    };
+    explicit PreparedArrayJoinFilter(std::vector<Key> keys) : keys_(std::move(keys)) {}
+    Fingerprint fingerprint(const RowContext&, bool left) const;
+
+    std::vector<Key> keys_;
+    std::optional<size_t> leftOrdinal_;
+    Fingerprint left_;
+    std::vector<Fingerprint> right_;
+};
+
 // One execution of one wholly prepared statement. The caller must create a
 // new carrier for each execution; initplan values never outlive that execution.
 // AST/raw-byte provenance and parameter cells remain owned by query_.

@@ -19,6 +19,13 @@ cmake --build build/cmake --parallel 2
 ## 最近更新
 
 <details>
+<summary>整数数组连接少做重复工作 · 2026-11-18</summary>
+
+用整数数组连接表时，可以更早跳过不匹配的行，省去重复解析数组和复制数据。
+
+</details>
+
+<details>
 <summary>连接表时保留数组类型 · 2026-11-18</summary>
 
 用数组列连接两张表后，结果会保留正确的类型。同一种数组规则已经检查过的值，原样复制时可以省掉重复检查。
@@ -29,13 +36,6 @@ cmake --build build/cmake --parallel 2
 <summary>修复子查询中的数组读写和排序 · 2026-11-18</summary>
 
 读取或复制子查询的数组时会保留类型、起始下标和空值。整数数组按值排序，`{2}` 排在 `{10}` 前面。
-
-</details>
-
-<details>
-<summary>为数组设置默认值和检查规则 · 2026-11-18</summary>
-
-多张表可以共用同一套规则，例如要求每个数组最多有三项。
 
 </details>
 

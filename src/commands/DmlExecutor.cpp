@@ -5948,6 +5948,11 @@ class NativeBoundDmlSources {
             if(!read(index,row)){loaded=true;closeSource();return false;}
             rows.push_back(row);return true;
         }
+        const RowContext* borrowAt(size_t index) {
+            if (index < rows.size()) return &rows[index];
+            RowContext row;
+            return readAt(index,row) ? &rows[index] : nullptr;
+        }
         void ensure(){RowContext row;while(readAt(rows.size(),row)) {}}
         ~NativeSourceNode(){try{closeSource();}catch(...) {}}
     };
@@ -6153,13 +6158,15 @@ private:
             comparison->left=operand(key.first);comparison->right=operand(key.second);
             comparisons->push_back(std::move(comparison));
         }
+        auto arrayFilter = deferMerged && !item->joinCondition
+            ? PreparedArrayJoinFilter::prepare(*query_,*comparisons) : nullptr;
         struct JoinPosition {
             size_t left=0,right=0,unmatchedRight=0;
             bool matched=false,leftComplete=false;
             std::vector<bool> rightMatched;
         };
         auto position=std::make_shared<JoinPosition>();
-        node->read=[execution,outer,left,right,leftJoin,rightJoin,merged,item,comparisons,position,deferMerged,database=session_.currentDB]
+        node->read=[execution,outer,left,right,leftJoin,rightJoin,merged,item,comparisons,position,deferMerged,arrayFilter,database=session_.currentDB]
             (size_t,dbms::RowContext& output) {
             dbms::ExprEvaluator comparator;comparator.setCurrentDB(database);
             const auto materializeUsing = [&](RowContext& row) {
@@ -6189,12 +6196,18 @@ private:
                 return true;
             };
             dbms::RowContext a,b;
+            const auto input = [&](NativeSourceNode& node, size_t i, RowContext& scratch) {
+                if (arrayFilter) return node.borrowAt(i);
+                return node.readAt(i,scratch) ? static_cast<const RowContext*>(&scratch) : nullptr;
+            };
             while(!position->leftComplete) {
-                if(!left->readAt(position->left,a)){position->leftComplete=true;break;}
-                while(right->readAt(position->right,b)) {
+                const auto* leftRow = input(*left,position->left,a);
+                if(!leftRow){position->leftComplete=true;break;}
+                while(const auto* rightRow = input(*right,position->right,b)) {
                     const auto occurrence=position->right++;
                     if(position->rightMatched.size()<=occurrence)position->rightMatched.resize(occurrence+1,false);
-                    auto row=combine(&a,&b);bool valid=true;
+                    if (arrayFilter && !arrayFilter->mayMatch(position->left,*leftRow,occurrence,*rightRow)) continue;
+                    auto row=combine(leftRow,rightRow);bool valid=true;
                     for(const auto& comparison:*comparisons) {
                         const auto value=comparator.eval(comparison.get(),row);
                         if(value.isNull || !value.asBool()){valid=false;break;}
@@ -6210,7 +6223,7 @@ private:
                 }
                 const bool unmatched=!position->matched && leftJoin;
                 ++position->left;position->right=0;position->matched=false;
-                if(unmatched)return emit(combine(&a,nullptr));
+                if(unmatched)return emit(combine(leftRow,nullptr));
             }
             if(rightJoin)while(right->readAt(position->unmatchedRight,b)) {
                 const auto occurrence=position->unmatchedRight++;

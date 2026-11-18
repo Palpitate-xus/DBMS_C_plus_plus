@@ -1396,6 +1396,21 @@ class StoredArrayDomainChecks {
     std::unique_ptr<ExprEvaluator> baseConverter_;
     std::optional<CatalogManager::MetadataSnapshot> referenceCatalog_;
     LocalExpressionSyntax syntax_;
+
+    static const ExprValue* retainedInput(const ArrayDomainProgram& program,
+            const std::string& column, bool isNull,
+            const StorageEngine::OwningSqlRow* convertedInputs) {
+        if (!convertedInputs) return nullptr;
+        const auto retained = convertedInputs->find(column);
+        if (retained == convertedInputs->end()) return nullptr;
+        const auto& input = retained->second;
+        const auto& payload = input.compound;
+        if (input.isNull != isNull || !payload ||
+            !sameArrayCodec(payload->type, program.declaration) ||
+            payload->validatedArrayDomainOid != program.declaration->actualOid ||
+            payload->type->actualOid != program.declaration->actualOid) return nullptr;
+        return &input;
+    }
 public:
     void add(size_t index, const Column& column,
             const StorageEngine::DomainAncestry& ancestry,
@@ -1428,6 +1443,15 @@ public:
             ExprValue("unknown", value, false)).value;
     }
 
+    bool retainsNullAssignment(size_t index, const std::string& column, const std::string& finalValue,
+            const StorageEngine::OwningSqlRow& convertedInputs) const {
+        const auto program = programs_.find(index);
+        if (program == programs_.end() || !finalValue.empty()) return false;
+        const auto* input = retainedInput(program->second, column, true, &convertedInputs);
+        return input && input->value.empty() && !input->compound->arrayElements &&
+            input->compound->dimensions.empty();
+    }
+
     void validate(const TableSchema& table, const std::map<std::string, std::string>& values,
             const std::set<std::string>& nulls, const std::string& database,
             StorageEngine* engine, const std::set<size_t>* assigned = nullptr,
@@ -1439,21 +1463,10 @@ public:
             if (raw == values.end())
                 throw DbError("XX001", "array domain assignment lost its row value");
             const bool isNull = nulls.count(column.dataName) != 0;
-            if (convertedInputs) {
-                const auto retained = convertedInputs->find(column.dataName);
-                if (retained != convertedInputs->end()) {
-                    const auto& input = retained->second;
-                    // The exact domain identity and final physical value must
-                    // still match the original typed assignment. A plain
-                    // array with the same element codec still needs conversion.
-                    if (input.isNull == isNull && input.compound &&
-                        sameArrayCodec(input.compound->type, program.declaration) &&
-                        input.compound->validatedArrayDomainOid == program.declaration->actualOid &&
-                        input.compound->type->actualOid == program.declaration->actualOid &&
-                        (isNull || (compound_value_detail::owningElements(input) &&
-                            stored_regtype_detail::storageText(input) == raw->second))) continue;
-                }
-            }
+            // A retained conversion must still describe the final value.
+            const auto* input = retainedInput(program, column.dataName, isNull, convertedInputs);
+            if (input && (isNull || (compound_value_detail::owningElements(*input) &&
+                stored_regtype_detail::storageText(*input) == raw->second))) continue;
             ExprValue value(program.inputType, isNull ? std::string{} : raw->second, isNull);
             value.collation = column.resolvedCollation.empty() ? column.collation : column.resolvedCollation;
             if (!isNull && stored_regtype_detail::scalarType(column.dataType)) {
@@ -28848,10 +28861,17 @@ DBStatus StorageEngine::insertInternal(
         const bool isNullMarker = hasValue &&
             actualNullColumns.count(col.dataName) != 0;
         std::string val = hasValue ? it->second : "";
-        if (enforceNotNull && (!col.isNull || domainRequired[i]) &&
-            (!hasValue || isNullMarker)) {
-            lockManager_.unlock(tablename);
-            return DBStatus::NULL_NOT_ALLOWED;
+        if (enforceNotNull && (!hasValue || isNullMarker)) {
+            // Domain NOT NULL checks a conversion. A supplied NULL already
+            // of the exact domain can retain its identity through the final
+            // row. Any BEFORE assignment to this column erased its proof.
+            const bool required = !col.isNull || (domainRequired[i] &&
+                !(isNullMarker && nullColumns.count(col.dataName) && values.count(col.dataName) &&
+                  arrayDomainChecks.retainsNullAssignment(i, col.dataName, it->second, convertedDomains)));
+            if (required) {
+                lockManager_.unlock(tablename);
+                return DBStatus::NULL_NOT_ALLOWED;
+            }
         }
         const bool arrayDomain = col.isArray && !col.domainName.empty();
         if (hasValue && !isNullMarker && val.empty() &&

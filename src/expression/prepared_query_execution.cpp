@@ -8,6 +8,7 @@
 #include "expression/aggregate_type.h"
 #include "parser/parser.h"
 #include <algorithm>
+#include <charconv>
 #include <optional>
 #include <limits>
 
@@ -765,6 +766,124 @@ void PreparedQueryExecution::copySourceInputs(RowContext& row,size_t source,cons
     setSourceInputs(row,source,cells,actual!=nullptr);
     if(actual)row.copyGeneratedSource(*actual,source);
 }
+
+std::shared_ptr<PreparedArrayJoinFilter> PreparedArrayJoinFilter::prepare(const PreparedQuery& query,
+    const std::vector<ExprPtr>& comparisons) {
+    if (comparisons.empty()) return {};
+    std::vector<Key> keys;
+    keys.reserve(comparisons.size());
+    const auto binding = [&](const Expr* expression) -> const QueryColumnBinding* {
+        const auto* column = dynamic_cast<const ColumnRefExpr*>(expression);
+        if (!column || !column->binding || column->preparedSubquery || column->binding->scopeDepth)
+            return nullptr;
+        const auto& bind = *column->binding;
+        const auto& range = query.sourceRanges.at(bind.sourceOrdinal);
+        if (range.ordinal != bind.sourceOrdinal || range.columns.at(bind.columnOrdinal).generated ||
+            (range.generatedRelation && range.generatedRelation->columns.at(bind.columnOrdinal))) return nullptr;
+        return &bind;
+    };
+    for (const auto& expression : comparisons) {
+        const auto* equality = dynamic_cast<const BinaryOpExpr*>(expression.get());
+        if (!equality || equality->op != "=" || equality->comparison) return {};
+        const auto* left = binding(equality->left.get());
+        const auto* right = binding(equality->right.get());
+        if (!left || !right) return {};
+        const auto& a = query.sourceRanges[left->sourceOrdinal].columns[left->columnOrdinal];
+        const auto& b = query.sourceRanges[right->sourceOrdinal].columns[right->columnOrdinal];
+        const auto& type = a.typeMetadata;
+        if (!type || !b.typeMetadata || b.typeMetadata->codecOid != type->codecOid) return {};
+        Key key{{left->sourceOrdinal,left->columnOrdinal}, {right->sourceOrdinal,right->columnOrdinal},
+                "", "", type->codecOid, 0};
+        switch (type->codecOid) {
+        case 1005: key.arrayType = "smallint[]"; key.elementType = "smallint"; key.bits = 16; break;
+        case 1007: key.arrayType = "integer[]"; key.elementType = "integer"; key.bits = 32; break;
+        case 1016: key.arrayType = "bigint[]"; key.elementType = "bigint"; key.bits = 64; break;
+        default: return {};
+        }
+        if (a.type != key.arrayType || b.type != key.arrayType) return {};
+        keys.push_back(key);
+    }
+    return std::shared_ptr<PreparedArrayJoinFilter>(new PreparedArrayJoinFilter(std::move(keys)));
+}
+
+PreparedArrayJoinFilter::Fingerprint PreparedArrayJoinFilter::fingerprint(const RowContext& row, bool left) const {
+    uint64_t hash = 14695981039346656037ULL;
+    const auto mix = [&](uint64_t value) { hash = (hash ^ value) * 1099511628211ULL; };
+    try {
+        for (const auto& key : keys_) {
+            const auto [source,column] = left ? key.left : key.right;
+            if (row.generatedBound(source,column)) return {};
+            const auto& value = row.boundColumn(source,column);
+            if (value.typeName != key.arrayType) return {};
+            if (value.isNull) return {Fingerprint::State::Null, 0};
+            if (value.compound && value.compound->type &&
+                (value.compound->type->kind != DatumKind::Array || value.compound->type->codecOid != key.codecOid))
+                return {};
+
+            std::vector<ExprValue> decoded;
+            std::vector<DatumArrayDimension> bounds;
+            const auto* elements = compound_value_detail::owningElements(value);
+            const auto* dimensions = elements ? &value.compound->dimensions : &bounds;
+            if (!elements) {
+                const auto literal = sql_array_text::parse(value.value);
+                bounds = compound_value_detail::dimensions(literal);
+                decoded = compound_value_detail::textElements(value,literal,bounds);
+                elements = &decoded;
+            } else if (compound_value_detail::elementCount(*dimensions) != elements->size()) return {};
+
+            mix(key.codecOid);
+            mix(dimensions->size());
+            for (const auto& dimension : *dimensions) {
+                mix(static_cast<uint32_t>(dimension.length));
+                mix(static_cast<uint32_t>(dimension.lower));
+            }
+            for (size_t i = 0; i < elements->size(); ++i) {
+                if ((i & 127U) == 0) checkForQueryInterrupt();
+                const auto& element = (*elements)[i];
+                mix(element.isNull);
+                if (element.isNull) continue;
+                if (element.typeName != key.elementType) return {};
+                int64_t number = 0;
+                std::string_view text(element.value);
+                if (!text.empty() && text.front() == '+') text.remove_prefix(1);
+                const auto end = text.data() + text.size();
+                const auto parsed = std::from_chars(text.data(),end,number);
+                if (parsed.ec != std::errc{} || parsed.ptr != end ||
+                    (key.bits == 16 && (number < INT16_MIN || number > INT16_MAX)) ||
+                    (key.bits == 32 && (number < INT32_MIN || number > INT32_MAX))) return {};
+                mix(static_cast<uint64_t>(number));
+            }
+        }
+    } catch (const DbError& error) {
+        // A noncanonical key belongs to the original comparison, including
+        // its NULL/error order. Cancellation is still delivered immediately.
+        if (error.sqlState() == "22P02" || error.sqlState() == "2202E" || error.sqlState() == "54000")
+            return {};
+        throw;
+    }
+    return {Fingerprint::State::Value, hash};
+}
+
+bool PreparedArrayJoinFilter::mayMatch(size_t leftOrdinal, const RowContext& left,
+    size_t rightOrdinal, const RowContext& right) {
+    if ((rightOrdinal & 127U) == 0) checkForQueryInterrupt();
+    if (leftOrdinal_ != leftOrdinal) {
+        left_ = fingerprint(left, true);
+        leftOrdinal_ = leftOrdinal;
+    }
+    if (rightOrdinal == right_.size()) right_.push_back(fingerprint(right,false));
+    const auto& candidate = right_.at(rightOrdinal);
+    if (left_.state == Fingerprint::State::Unavailable || candidate.state == Fingerprint::State::Unavailable)
+        return true;
+    return left_.state == Fingerprint::State::Value && candidate.state == Fingerprint::State::Value &&
+           left_.hash == candidate.hash;
+}
+
+void PreparedArrayJoinFilter::reset() {
+    leftOrdinal_.reset();
+    right_.clear();
+}
+
 ExprValue PreparedQueryExecution::readSourceColumn(const RowContext& row,size_t source,size_t column) const {
     return evaluator_.readBoundColumn(source,column,row);
 }

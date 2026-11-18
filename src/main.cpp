@@ -20881,6 +20881,16 @@ class PreparedWithDmlRuntime {
             if(!read(index,row)){loaded=true;closeSource();return false;}
             rows.push_back(row);instrument.emitted=true;return true;
         }
+        // The caller uses this only until the next demand on this node.
+        const dbms::RowContext* borrowAt(size_t index) {
+            if (index < rows.size()) {
+                NextInstrument instrument(this);
+                instrument.emitted = true;
+                return &rows[index];
+            }
+            dbms::RowContext row;
+            return readAt(index,row) ? &rows[index] : nullptr;
+        }
         void ensure(){dbms::RowContext ignored;while(readAt(rows.size(),ignored)) {}}
         ~DmlSourceNode(){try{closeSource();}catch(...) {}}
     };
@@ -21150,6 +21160,9 @@ class PreparedWithDmlRuntime {
             comparison->left=operand(key.first);comparison->right=operand(key.second);
             comparisons->push_back(std::move(comparison));
         }
+        auto arrayFilter = deferMerged && !item->joinCondition
+            ? dbms::PreparedArrayJoinFilter::prepare(*query_,*comparisons) : nullptr;
+        if (arrayFilter) node->planAttributes["integerArrayKeyFilter"] = "true";
         struct IntegerJoinKey {
             DmlSourceNode::Cell left,right;
             string type;
@@ -21194,12 +21207,13 @@ class PreparedWithDmlRuntime {
             vector<bool> rightMatched;
         };
         auto position=make_shared<JoinPosition>();
-        node->reset=[currentOuter,resetExecution,executionOwner,left,right,item,position](const dbms::RowContext& row) {
+        node->reset=[currentOuter,resetExecution,executionOwner,left,right,item,position,arrayFilter](const dbms::RowContext& row) {
             *currentOuter=row;resetExecution();
             if(item->joinCondition)(*executionOwner)->prepareExpression(item->joinCondition.get());
             left->rebind(row);right->rebind(row);*position=JoinPosition{};
+            if (arrayFilter) arrayFilter->reset();
         };
-        node->read=[executionOwner,currentOuter,left,right,leftJoin,rightJoin,merged,item,keys,comparisons,position,integerJoinKey,deferMerged,database=session_.currentDB]
+        node->read=[executionOwner,currentOuter,left,right,leftJoin,rightJoin,merged,item,keys,comparisons,position,integerJoinKey,deferMerged,arrayFilter,database=session_.currentDB]
             (size_t,dbms::RowContext& output) {
             const auto& execution=*executionOwner;
             dbms::ExprEvaluator comparator;comparator.setCurrentDB(database);
@@ -21230,14 +21244,20 @@ class PreparedWithDmlRuntime {
                 return true;
             };
             dbms::RowContext a,b;
+            const auto input = [&](DmlSourceNode& node, size_t i, dbms::RowContext& scratch) {
+                if (arrayFilter) return node.borrowAt(i);
+                return node.readAt(i,scratch) ? static_cast<const dbms::RowContext*>(&scratch) : nullptr;
+            };
             while(!position->leftComplete) {
-                if(!left->readAt(position->left,a)){position->leftComplete=true;break;}
-                while(right->readAt(position->right,b)) {
+                const auto* leftRow = input(*left,position->left,a);
+                if(!leftRow){position->leftComplete=true;break;}
+                while(const auto* rightRow = input(*right,position->right,b)) {
                     const auto occurrence=position->right++;
                     if(position->rightMatched.size()<=occurrence)position->rightMatched.resize(occurrence+1,false);
+                    if (arrayFilter && !arrayFilter->mayMatch(position->left,*leftRow,occurrence,*rightRow)) continue;
                     if(integerJoinKey) {
-                        const auto l=comparator.readBoundColumn(integerJoinKey->left.first,integerJoinKey->left.second,a);
-                        const auto r=comparator.readBoundColumn(integerJoinKey->right.first,integerJoinKey->right.second,b);
+                        const auto l=comparator.readBoundColumn(integerJoinKey->left.first,integerJoinKey->left.second,*leftRow);
+                        const auto r=comparator.readBoundColumn(integerJoinKey->right.first,integerJoinKey->right.second,*rightRow);
                         if(l.typeName==integerJoinKey->type && r.typeName==integerJoinKey->type) {
                             if(l.isNull || r.isNull)continue;
                             int64_t lk=0,rk=0;
@@ -21247,7 +21267,7 @@ class PreparedWithDmlRuntime {
                                 rp.ec==errc{} && rp.ptr==r.value.data()+r.value.size() && lk!=rk)continue;
                         }
                     }
-                    auto row=combine(&a,&b);bool valid=true;
+                    auto row=combine(leftRow,rightRow);bool valid=true;
                     for(const auto& comparison:*comparisons) {
                         const auto value=comparator.eval(comparison.get(),row);
                         if(value.isNull || !value.asBool()){valid=false;break;}
@@ -21263,7 +21283,7 @@ class PreparedWithDmlRuntime {
                 }
                 const bool unmatched=!position->matched && leftJoin;
                 ++position->left;position->right=0;position->matched=false;
-                if(unmatched)return emit(combine(&a,nullptr));
+                if(unmatched)return emit(combine(leftRow,nullptr));
             }
             if(rightJoin)while(right->readAt(position->unmatchedRight,b)) {
                 const auto occurrence=position->unmatchedRight++;
