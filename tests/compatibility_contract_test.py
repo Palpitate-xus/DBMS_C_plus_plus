@@ -45,7 +45,7 @@ def main():
     assert "scripts/check_gap_progress.py --require-complete" in contract
     for document in (readme, production):
         assert "compatibility-contract.md" in document
-        assert "wire protocol 3.0" in document
+    assert "wire protocol 3.0" in production
     print("[COMPATIBILITY CONTRACT] product/behavior/wire/extended claims separated")
 
 

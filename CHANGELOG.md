@@ -1,29 +1,29 @@
 # 更新日志
 
 <details>
-<summary>按整数主键更新或删除时少读数据 · 2026-11-19</summary>
+<summary>按编号修改或删除记录时少读数据 · 2026-11-19</summary>
 
-数据库能从主键索引确认目标行时，可以直接读取这一行所在的页。
+例如按订单号删除一条订单。如果订单号是整数主键，数据库可以用索引找到这条记录，省去逐页查找。
 
 [使用示例](docs/MANUAL.md#按整数主键更新或删除) · [测试报告](docs/test-report.md#integer-primary-key-mutation-20261119) · [性能报告](docs/performance-report-2026-10-30.md#integer-primary-key-mutation-cost-20261119)
 
 </details>
 
 <details>
-<summary>能看到分区表的统计进度 · 2026-11-19</summary>
+<summary>可以查看分区表的统计更新进度 · 2026-11-19</summary>
 
-更新分区表的统计时，可以查看已经处理了多少个分区，以及当前分区读到了哪里。
+更新分区表的统计信息时，可以看到已经处理了多少个分区，以及当前分区读到了哪里。
 
-指定正数并行工作数时，`VACUUM FULL` 会直接报错，避免意外按串行方式重写整张表。
+如果要求额外的进程一起整理表，`VACUUM FULL` 会提示此选项不受支持。
 
 [使用示例](docs/MANUAL.md#查看表维护进度) · [测试报告](docs/test-report.md#partition-analyze-vacuum-parallel-20261119) · [性能报告](docs/performance-report-2026-10-30.md#partition-analyze-observation-cost-20261119)
 
 </details>
 
 <details>
-<summary>整理表时少反复找空位 · 2026-11-19</summary>
+<summary>整理表时少花时间找空位 · 2026-11-19</summary>
 
-`VACUUM FULL` 整理表时会记住哪里还有空间，搬动记录时省去反复查找。
+用 `VACUUM FULL` 整理表时，数据库会记住哪里还有空位，搬动记录时少找几次。
 
 [使用示例](docs/MANUAL.md#分开清理主表和长值) · [测试报告](docs/test-report.md#vacuum-full-placement-20261119) · [性能报告](docs/performance-report-2026-10-30.md#vacuum-full-placement-cost-20261119)
 

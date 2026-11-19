@@ -32,9 +32,19 @@ def main():
     # README is an evergreen project entry point, not another release/status
     # snapshot. Actual build/header/changelog/package version checks remain in
     # version_consistency_test.py.
-    for section in ("## 构建", "## 运行", "## 测试", "## 文档",
-                    "## 参与贡献", "## 许可证"):
-        assert section in readme, "README omits %s" % section
+    headings = re.findall(r"^## (.+)$", readme, re.MULTILINE)
+    assert headings == ["快速开始", "最近更新"], headings
+    for link in ("docs/PACKAGING.md", "docs/MANUAL.md", "docs/README.md", "CHANGELOG.md"):
+        assert link in readme, "README omits %s" % link
+
+    def card_titles(document):
+        return re.findall(r"^<details>\n<summary>(.+)</summary>$", document, re.MULTILINE)
+
+    latest = card_titles(readme)
+    assert len(latest) == 3, latest
+    assert card_titles(changelog) == [*latest, "更早的更新"]
+    assert readme.count("<details") == readme.count("</details>") == 3
+    assert changelog.count("<details") == changelog.count("</details>") == 4
     for stale_marker in (*canonical, "发行标识为 v", "当前状态（", "性能与并发硬化轮次",
                          "### 并发测试结果", "### 新增功能 (Phase"):
         assert stale_marker not in readme, "README retains %s" % stale_marker
