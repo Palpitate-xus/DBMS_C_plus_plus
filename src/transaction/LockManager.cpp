@@ -1824,7 +1824,9 @@ static std::string makePageKey(const std::string& dbname, const std::string& tab
     return "page:" + dbname + ":" + table + ":" + std::to_string(pageId);
 }
 
-bool LockManager::pageLockShared(const std::string& dbname, const std::string& table, uint32_t pageId) const {
+bool LockManager::pageLockShared(const std::string& dbname, const std::string& table,
+                                 uint32_t pageId, bool* newlyAcquired) const {
+    if (newlyAcquired) *newlyAcquired = false;
     std::thread::id self = std::this_thread::get_id();
     const auto checkInterrupt = [&]() {
         auto& manager = *const_cast<LockManager*>(this);
@@ -1858,6 +1860,7 @@ bool LockManager::pageLockShared(const std::string& dbname, const std::string& t
                     if (current.mtx.try_lock_shared()) {
                         ++current.sharedCount;
                         current.holders.push_back(self);
+                        if (newlyAcquired) *newlyAcquired = true;
                         return true;
                     }
                     if (current.holders.empty()) {
@@ -1898,6 +1901,7 @@ bool LockManager::pageLockShared(const std::string& dbname, const std::string& t
                 ++state->sharedCount;
                 state->holders.push_back(self);
                 const_cast<LockManager*>(this)->removeWaitEdges(self);
+                if (newlyAcquired) *newlyAcquired = true;
                 return true;
             }
             state->mtx.unlock_shared();

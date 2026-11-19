@@ -704,6 +704,9 @@ public:
         // An actual typed assignment producer may retain already converted
         // array-domain values for this row alongside their physical text.
         std::function<bool(int64_t, const SqlRow&, SqlRow&, OwningSqlRow&)> resolveArrayDomains;
+        // The matcher and callbacks can run on the current version of a row
+        // after waiting. Cached source matches or old RIDs cannot opt in.
+        bool recheckOnConcurrentUpdate = false;
     };
 
     using UpdateResolver = std::function<bool(

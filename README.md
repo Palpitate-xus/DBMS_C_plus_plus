@@ -27,6 +27,13 @@ cmake --build build/cmake --parallel 2
 ## 最近更新
 
 <details>
+<summary>同时改一条记录，后一次按新值处理 · 2026-11-19</summary>
+
+默认设置下，如果另一个连接先改了这条记录，等它提交后，更新或删除会用新值再检查条件。记录已被删，或者条件不再成立，就跳过它。
+
+</details>
+
+<details>
 <summary>按编号修改或删除记录时少读数据 · 2026-11-19</summary>
 
 例如按订单号删除一条订单。如果订单号是整数主键，数据库可以用索引找到这条记录，省去逐页查找。
@@ -37,13 +44,6 @@ cmake --build build/cmake --parallel 2
 <summary>可以查看分区表的统计更新进度 · 2026-11-19</summary>
 
 更新分区表的统计信息时，可以看到已经处理了多少个分区，以及当前分区读到了哪里。
-
-</details>
-
-<details>
-<summary>整理表时少花时间找空位 · 2026-11-19</summary>
-
-用 `VACUUM FULL` 整理表时，数据库会记住哪里还有空位，搬动记录时少找几次。
 
 </details>
 

@@ -5420,6 +5420,8 @@ bool StorageEngine::markTupleDeletedByCurrentCommand(
         htup->t_infomask &= ~HEAP_COMBOCID;
     }
     htup->t_fields.t_xmax = static_cast<uint32_t>(context.currentTxnId);
+    htup->t_infomask &= ~(HEAP_XMAX_COMMITTED | HEAP_XMAX_INVALID |
+        HEAP_XMAX_EXCL_LOCK | HEAP_XMAX_KEYSHR_LOCK | HEAP_XMAX_LOCK_ONLY | HEAP_XMAX_IS_MULTI);
     return true;
 }
 
@@ -9187,10 +9189,11 @@ struct HeapPageReadGuard {
     const std::string& table;
     uint32_t page;
     bool pinned = false;
+    bool ownsLock = true;
 
     ~HeapPageReadGuard() {
         if (pinned) allocator.unpinPage(page);
-        locks.pageUnlock(db, table, page);
+        if (ownsLock) locks.pageUnlock(db, table, page);
     }
 };
 } // namespace
@@ -31150,6 +31153,36 @@ bool StorageEngine::anyRowMatches(const std::string& dbname,
                       indexReadFailed).empty();
 }
 
+static void prepareFilterConditions(
+        StorageEngine& engine, const std::string& dbname, const TableSchema& tbl,
+        std::vector<StorageEngine::Condition>& conds) {
+    for (auto& condition : conds) {
+        if (condition.op!="=" && condition.op!="<>" && condition.op!="!=" &&
+            condition.op!="<" && condition.op!=">" && condition.op!="<=" && condition.op!=">=") continue;
+        const Column* declared=nullptr; bool rightIsColumn=false;
+        for(size_t i=0;i<tbl.len;++i) {
+            if(tbl.cols[i].dataName==condition.colName)declared=&tbl.cols[i];
+            if(!condition.decodedLiteralRhs && tbl.cols[i].dataName==condition.value)rightIsColumn=true;
+        }
+        if(declared && !rightIsColumn && !declared->isArray && stored_regtype_detail::scalarType(declared->dataType)) {
+            const auto catalog=regtype_detail::metadata(engine,dbname);
+            condition.value=condition.referenceInputOid?std::to_string(*condition.referenceInputOid):
+                stored_regtype_detail::input(
+                    decodeSqlLiteral(condition.value),false,catalog,currentSession(),declared->dataType);
+            condition.decodedLiteralRhs=true;
+        }
+    }
+    validateStoredPatternConditions(tbl,conds);
+    for (const auto& condition:conds) if (condition.op=="typedexpr") {
+        SQLParser parser;auto parsed=parser.parse("SELECT "+condition.value);
+        auto* select=parsed.success ? dynamic_cast<SelectStmt*>(parsed.stmt.get()) : nullptr;
+        if (!select || select->selectList.size()!=1 || select->fromClause)
+            throw DbError("42601","invalid typed predicate");
+        validateNullWhereColumns(select->selectList[0].expr.get(),tbl);
+        ExprHelper::prepareArrayTypes(select->selectList[0].expr.get(),buildTypeHints(tbl),dbname,&engine);
+    }
+}
+
 std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
                                              const std::string& tablename,
                                              const std::vector<Condition>& inputConditions,
@@ -31179,31 +31212,7 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
     auto conds = prepareStoredUnknownBitScalarInputs(tbl, inputConditions);
     LocalExpressionSyntax predicateSyntax; // parses lazily only when a real row reaches its consumer
     const auto generatedMetadata=freezeGeneratedStorageInput(tbl,dbname,tablename,this);
-    for (auto& condition : conds) {
-        if (condition.op!="=" && condition.op!="<>" && condition.op!="!=" &&
-            condition.op!="<" && condition.op!=">" && condition.op!="<=" && condition.op!=">=") continue;
-        const Column* declared=nullptr; bool rightIsColumn=false;
-        for(size_t i=0;i<tbl.len;++i) {
-            if(tbl.cols[i].dataName==condition.colName)declared=&tbl.cols[i];
-            if(!condition.decodedLiteralRhs && tbl.cols[i].dataName==condition.value)rightIsColumn=true;
-        }
-        if(declared && !rightIsColumn && !declared->isArray && stored_regtype_detail::scalarType(declared->dataType)) {
-            const auto catalog=regtype_detail::metadata(*this,dbname);
-            condition.value=condition.referenceInputOid?std::to_string(*condition.referenceInputOid):
-                stored_regtype_detail::input(
-                    decodeSqlLiteral(condition.value),false,catalog,currentSession(),declared->dataType);
-            condition.decodedLiteralRhs=true;
-        }
-    }
-    validateStoredPatternConditions(tbl,conds);
-    for (const auto& condition:conds) if (condition.op=="typedexpr") {
-        SQLParser parser;auto parsed=parser.parse("SELECT "+condition.value);
-        auto* select=parsed.success ? dynamic_cast<SelectStmt*>(parsed.stmt.get()) : nullptr;
-        if (!select || select->selectList.size()!=1 || select->fromClause)
-            throw DbError("42601","invalid typed predicate");
-        validateNullWhereColumns(select->selectList[0].expr.get(),tbl);
-        ExprHelper::prepareArrayTypes(select->selectList[0].expr.get(),buildTypeHints(tbl),dbname,this);
-    }
+    prepareFilterConditions(*this, dbname, tbl, conds);
     // A strict comparison to the actual SQL NULL datum cannot qualify a
     // row. Admit every signature/input first, then avoid all row/routine
     // execution in this AND branch; quoted/API text NULL is not this datum.
@@ -31683,6 +31692,169 @@ static std::optional<int64_t> matchCurrentIntegerPrimaryKey(
     return rid;
 }
 
+static StorageEngine::SqlRow mutationMatchRow(
+        StorageEngine& engine, const std::string& dbname, const std::string& tablename,
+        const TableSchema& table, int64_t rid, const std::string& row,
+        const std::vector<bool>& nullColumns, bool deferVirtualInputs) {
+    BufferedNullRowBinding nullBinding(table, nullColumns);
+    StorageEngine::SqlRow values;
+    for (size_t i = 0; i < table.len; ++i) {
+        const auto& column = table.cols[i];
+        if (deferVirtualInputs && column.generatedKind == 'v') continue;
+        if (column.generatedKind != 'v' && column.isNull &&
+            detail::storedRowColumnIsNull(engine, dbname, tablename, table, rid, i)) {
+            values[column.dataName] = std::nullopt;
+        } else {
+            bool computedNull = false;
+            auto value = engine.extractColumnValue(row, table, i, dbname, true, &computedNull);
+            values[column.dataName] = computedNull
+                ? StorageEngine::SqlCell{} : StorageEngine::SqlCell{std::move(value)};
+        }
+    }
+    return values;
+}
+
+struct LockedMutationRow {
+    DBStatus status = DBStatus::OK;
+    std::optional<int64_t> rid;
+};
+
+static LockedMutationRow lockMutationRow(
+        LockManager& locks, const std::string& dbname, const std::string& tablename,
+        const TableSchema& table, PageAllocator& allocator,
+        const StorageEngine::ReadView& view, int64_t rid, bool snapshotCandidate,
+        bool followCommittedChanges) {
+    uint32_t expectedInsertXid = 0;
+    std::set<int64_t> visited;
+    for (;;) {
+        if (!locks.rowLockExclusive(tablename, rid)) {
+            return {locks.lastRowLockWasDeadlock()
+                ? DBStatus::DEADLOCK_DETECTED : DBStatus::LOCK_CONFLICT, {}};
+        }
+        if (!usesHeapTupleHeader(table.formatVersion)) return {DBStatus::OK, rid};
+
+        uint32_t pageId = 0;
+        uint16_t slot = 0;
+        StorageEngine::decodeRid(rid, pageId, slot);
+        if (!pageId || pageId >= allocator.numPages() || StorageEngine::encodeRid(pageId, slot) != rid)
+            return {DBStatus::SERIALIZATION_FAILURE, {}};
+        HeapTupleHeaderData header;
+        {
+            bool ownsLock = false;
+            if (!locks.pageLockShared(dbname, tablename, pageId, &ownsLock))
+                return {DBStatus::LOCK_CONFLICT, {}};
+            HeapPageReadGuard pageGuard{locks, allocator, dbname, tablename, pageId, false, ownsLock};
+            auto* buffer = allocator.fetchPage(pageId);
+            if (!buffer) return {DBStatus::IO_ERROR, {}};
+            pageGuard.pinned = true;
+            PageWrapper page(buffer, allocator.pageSize(), table.formatVersion);
+            const char* tuple = nullptr;
+            size_t length = 0;
+            if (!page.read(slot, tuple, length)) return {DBStatus::SERIALIZATION_FAILURE, {}};
+            if (length < sizeof(header)) return {DBStatus::CORRUPTED_DATA, {}};
+            std::memcpy(&header, tuple, sizeof(header));
+            const size_t minOffset = sizeof(header) +
+                ((header.t_infomask & HEAP_HASNULL) ? (table.len + 7) / 8 : 0);
+            if ((header.t_infomask2 & HEAP_NATTS_MASK) != table.len ||
+                header.t_hoff < minOffset || header.t_hoff > length)
+                return {DBStatus::CORRUPTED_DATA, {}};
+        }
+
+        // The original slot was visible to the candidate scan. Reject a
+        // replacement from outside that snapshot unless we reached it through
+        // a verified update link. Page compaction can move the tuple bytes.
+        const uint32_t xmin = header.t_fields.t_xmin;
+        if (xminInvalid(&header) || (expectedInsertXid && xmin != expectedInsertXid) ||
+            (!expectedInsertXid && snapshotCandidate && xmin && xmin != view.creatorTxnId &&
+             (xmin >= view.lowLimitId || view.activeTxnIds.count(xmin) || view.subTxnIds.count(xmin))))
+            return {DBStatus::SERIALIZATION_FAILURE, {}};
+
+        const uint32_t xmax = header.t_fields.t_xmax;
+        if (!xmax || xmaxInvalid(&header)) return {DBStatus::OK, rid};
+        if (header.t_infomask & HEAP_XMAX_IS_MULTI) return {DBStatus::SERIALIZATION_FAILURE, {}};
+        if (xmaxIsLock(&header)) return {DBStatus::OK, rid};
+        if (xmax == view.creatorTxnId || view.subTxnIds.count(xmax)) return {};
+
+        // The writer publishes its final status before releasing the row lock.
+        // Read the commit log, since recovery can make an old hint obsolete.
+        if (!view.commitLog) return {DBStatus::SERIALIZATION_FAILURE, {}};
+        const auto status = view.commitLog->getStatus(static_cast<TxnId>(xmax));
+        if (status == CommitLog::Status::Aborted) return {DBStatus::OK, rid};
+        if (status != CommitLog::Status::Committed || !followCommittedChanges)
+            return {DBStatus::SERIALIZATION_FAILURE, {}};
+        if (!(header.t_infomask & HEAP_UPDATED)) return {}; // the writer deleted it
+
+        const auto next = getCtid(&header);
+        if (!next.pageId || !next.offset || !visited.insert(rid).second)
+            return {DBStatus::SERIALIZATION_FAILURE, {}};
+        rid = StorageEngine::encodeRid(next.pageId, static_cast<uint16_t>(next.offset - 1));
+        expectedInsertXid = xmax;
+    }
+}
+
+static DBStatus lockMutationTargets(
+        StorageEngine& engine, const std::string& dbname, const std::string& tablename,
+        const TableSchema& table, PageAllocator* allocator, const StorageEngine::ReadView& view,
+        bool snapshotCandidates, bool mayRecheck, const std::vector<std::string>& conditions,
+        const StorageEngine::SqlUpdateMatcher& matcher, bool deferVirtualInputs,
+        std::set<int64_t>& targets) {
+    if (targets.empty()) return DBStatus::OK;
+    if (!allocator) return DBStatus::IO_ERROR;
+    const auto isolation = engine.getIsolationLevel();
+    const bool followCommittedChanges = mayRecheck &&
+        (isolation == IsolationLevel::READ_COMMITTED || isolation == IsolationLevel::READ_UNCOMMITTED);
+    LockManager& locks = engine.getLockManager();
+    std::set<int64_t> rechecked;
+    std::optional<std::vector<StorageEngine::Condition>> predicates;
+    LocalExpressionSyntax predicateSyntax;
+    DatumMetadataContextPtr generatedMetadata;
+
+    for (auto it = targets.begin(); it != targets.end();) {
+        const auto locked = lockMutationRow(locks, dbname, tablename, table, *allocator,
+                                            view, *it, snapshotCandidates, followCommittedChanges);
+        if (locked.status != DBStatus::OK) return locked.status;
+        if (locked.rid && *locked.rid == *it) {
+            ++it;
+            continue;
+        }
+        it = targets.erase(it);
+        if (!locked.rid || targets.count(*locked.rid) || rechecked.count(*locked.rid)) continue;
+        const int64_t rid = *locked.rid;
+        // Reuse the statement's predicates, but evaluate them against the
+        // locked successor. Refreshing the whole snapshot could select rows
+        // that never matched when the statement began.
+        if (!predicates) {
+            predicates = prepareStoredUnknownBitScalarInputs(table, StorageEngine::parseConditions(conditions));
+            generatedMetadata = freezeGeneratedStorageInput(table, dbname, tablename, &engine);
+            prepareFilterConditions(engine, dbname, table, *predicates);
+        }
+        if (!predicates->empty() || matcher) {
+            std::string row;
+            std::vector<bool> nullColumns;
+            {
+                uint32_t pageId = 0;
+                uint16_t slot = 0;
+                StorageEngine::decodeRid(rid, pageId, slot);
+                bool ownsLock = false;
+                if (!locks.pageLockShared(dbname, tablename, pageId, &ownsLock)) return DBStatus::LOCK_CONFLICT;
+                HeapPageReadGuard pageGuard{locks, *allocator, dbname, tablename, pageId, false, ownsLock};
+                if (!engine.readRowByRid(allocator, rid, row, table, &nullColumns)) return DBStatus::IO_ERROR;
+            }
+            NullRowBinding rowBinding(&engine, dbname, tablename, rid, table.len);
+            BufferedNullRowBinding nullBinding(table, nullColumns);
+            if (!std::all_of(predicates->begin(), predicates->end(), [&](const auto& predicate) {
+                return StorageEngine::evalConditionOnRowWithSyntax(
+                    predicate, row, table, &predicateSyntax, generatedMetadata.get());
+            })) continue;
+            if (matcher && !matcher(mutationMatchRow(engine, dbname, tablename, table, rid,
+                                                     row, nullColumns, deferVirtualInputs))) continue;
+        }
+        rechecked.insert(rid);
+    }
+    targets.merge(rechecked);
+    return DBStatus::OK;
+}
+
 DBStatus StorageEngine::remove(
     const std::string& dbname, const std::string& tablename,
     const std::vector<std::string>& conditions,
@@ -31943,25 +32115,37 @@ DBStatus StorageEngine::removeInternal(
                 lockManager_.unlock(tablename);
                 return DBStatus::IO_ERROR;
             }
-            BufferedNullRowBinding nullBinding(tbl, nullColumns);
-            SqlRow rowValues;
-            for (size_t i = 0; i < tbl.len; ++i) {
-                if(deferVirtualInputs && tbl.cols[i].generatedKind=='v')continue;
-                if (tbl.cols[i].generatedKind!='v' && tbl.cols[i].isNull &&
-                    dbms::detail::storedRowColumnIsNull(*this, dbname, tablename, tbl, rid, i)) {
-                    rowValues[tbl.cols[i].dataName] = std::nullopt;
-                } else {
-                    bool computedNull=false;
-                    auto value=extractColumnValue(row,tbl,i,dbname,true,&computedNull);
-                    rowValues[tbl.cols[i].dataName]=computedNull
-                        ?SqlCell{}:SqlCell{std::move(value)};
-                }
-            }
+            const SqlRow rowValues = mutationMatchRow(
+                *this, dbname, tablename, tbl, rid, row, nullColumns, deferVirtualInputs);
             if (mutationCallbacks && mutationCallbacks->matches
                     ? mutationCallbacks->matches(rid, rowValues)
                     : deleteMatcher(rowValues)) filteredIds.insert(rid);
         }
         toDelete.swap(filteredIds);
+    }
+
+    // A joined mutation can have source data cached by its original RID.
+    // Only use a successor when the whole row predicate can be evaluated again.
+    const bool mayRecheck = !exactRids && !enforceRls && (mutationCallbacks
+        ? mutationCallbacks->recheckOnConcurrentUpdate : !deleteMatcher);
+    const DBStatus lockStatus = lockMutationTargets(
+        *this, dbname, tablename, tbl, pa, context.readView, !exactRids, mayRecheck,
+        conditions, deleteMatcher, deferVirtualInputs, toDelete);
+    if (lockStatus != DBStatus::OK) {
+        if (lockStatus == DBStatus::LOCK_CONFLICT || lockStatus == DBStatus::DEADLOCK_DETECTED) {
+            // Preserve a user savepoint. Otherwise release all locks so a
+            // surviving transaction can continue after a lock failure.
+            if (context.inTransaction) {
+                if (hasUserSavepoint()) lockManager_.unlock(tablename);
+                else rollbackTransaction();
+            } else {
+                lockManager_.unlockAll();
+                lockManager_.unlockAllGaps();
+            }
+        } else {
+            lockManager_.unlock(tablename);
+        }
+        return lockStatus;
     }
 
     // A cyclic CASCADE can point back to a row already being deleted by an
@@ -31985,25 +32169,6 @@ DBStatus StorageEngine::removeInternal(
     }
     ActiveReferentialRows activeDeleteGuard(
         referentialContext.activeDeletes, std::move(activeDeleteKeys));
-
-    // Acquire row-level exclusive locks on rows to be deleted
-    for (int64_t rid : toDelete) {
-        if (!lockManager_.rowLockExclusive(tablename, rid)) {
-            const DBStatus lockFailure = lockManager_.lastRowLockWasDeadlock()
-                ? DBStatus::DEADLOCK_DETECTED : DBStatus::LOCK_CONFLICT;
-            if (transactionContext().inTransaction) {
-                // A user savepoint can recover this statement. Its public
-                // wrapper rolls back the internal boundary, including locks
-                // acquired here, without discarding earlier transaction work.
-                if (hasUserSavepoint()) lockManager_.unlock(tablename);
-                else rollbackTransaction();
-            } else {
-                lockManager_.unlockAll();
-                lockManager_.unlockAllGaps();
-            }
-            return lockFailure;
-        }
-    }
 
     // Check foreign key references and apply ON DELETE actions
     {
@@ -32576,6 +32741,11 @@ DBStatus StorageEngine::removeInternal(
                 lockManager_.pageUnlock(dbname, tablename, pageId);
                 lockManager_.unlock(tablename);
                 return DBStatus::CORRUPTED_DATA;
+            }
+            auto* header = castHeapHeader(mutableRow.data());
+            if (header->t_infomask & HEAP_UPDATED) {
+                header->t_infomask &= ~HEAP_UPDATED;
+                setCtid(header, {pageId, static_cast<OffsetNumber>(slotId + 1)});
             }
             pageChanged = page.update(
                 slotId, mutableRow.data(), mutableRow.size());
@@ -33558,25 +33728,37 @@ DBStatus StorageEngine::updateInternal(
                 lockManager_.unlock(tablename);
                 return DBStatus::IO_ERROR;
             }
-            BufferedNullRowBinding nullBinding(tbl, nullColumns);
-            SqlRow rowValues;
-            for (size_t i = 0; i < tbl.len; ++i) {
-                if(deferVirtualInputs && tbl.cols[i].generatedKind=='v')continue;
-                if (tbl.cols[i].generatedKind!='v' && tbl.cols[i].isNull &&
-                    dbms::detail::storedRowColumnIsNull(*this, dbname, tablename, tbl, rid, i)) {
-                    rowValues[tbl.cols[i].dataName] = std::nullopt;
-                } else {
-                    bool computedNull=false;
-                    auto value=extractColumnValue(row,tbl,i,dbname,true,&computedNull);
-                    rowValues[tbl.cols[i].dataName]=computedNull
-                        ?SqlCell{}:SqlCell{std::move(value)};
-                }
-            }
+            const SqlRow rowValues = mutationMatchRow(
+                *this, dbname, tablename, tbl, rid, row, nullColumns, deferVirtualInputs);
             if (mutationCallbacks && mutationCallbacks->matches
                     ? mutationCallbacks->matches(rid, rowValues)
                     : updateMatcher(rowValues)) filteredIds.insert(rid);
         }
         matchIds.swap(filteredIds);
+    }
+
+    // A joined mutation can have source data cached by its original RID.
+    // Only use a successor when the whole row predicate can be evaluated again.
+    const bool mayRecheck = !exactRids && !enforceRls && (mutationCallbacks
+        ? mutationCallbacks->recheckOnConcurrentUpdate : !updateMatcher);
+    const DBStatus lockStatus = lockMutationTargets(
+        *this, dbname, tablename, tbl, pa, context.readView, !exactRids, mayRecheck,
+        conditions, updateMatcher, deferVirtualInputs, matchIds);
+    if (lockStatus != DBStatus::OK) {
+        if (lockStatus == DBStatus::LOCK_CONFLICT || lockStatus == DBStatus::DEADLOCK_DETECTED) {
+            // Preserve a user savepoint. Otherwise release all locks so a
+            // surviving transaction can continue after a lock failure.
+            if (context.inTransaction) {
+                if (hasUserSavepoint()) lockManager_.unlock(tablename);
+                else rollbackTransaction();
+            } else {
+                lockManager_.unlockAll();
+                lockManager_.unlockAllGaps();
+            }
+        } else {
+            lockManager_.unlock(tablename);
+        }
+        return lockStatus;
     }
 
     std::vector<std::string> activeUpdateKeys;
@@ -33597,25 +33779,6 @@ DBStatus StorageEngine::updateInternal(
     }
     ActiveReferentialRows activeUpdateGuard(
         referentialContext.activeUpdates, std::move(activeUpdateKeys));
-
-    // Acquire row-level exclusive locks on rows to be updated
-    for (int64_t rid : matchIds) {
-        if (!lockManager_.rowLockExclusive(tablename, rid)) {
-            const DBStatus lockFailure = lockManager_.lastRowLockWasDeadlock()
-                ? DBStatus::DEADLOCK_DETECTED : DBStatus::LOCK_CONFLICT;
-            // Preserve user recovery points. With no user savepoint, abort
-            // the whole transaction so a deadlock survivor can resume. An
-            // internal statement savepoint alone is not a user recovery point.
-            if (transactionContext().inTransaction) {
-                if (hasUserSavepoint()) lockManager_.unlock(tablename);
-                else rollbackTransaction();
-            } else {
-                lockManager_.unlockAll();
-                lockManager_.unlockAllGaps();
-            }
-            return lockFailure;
-        }
-    }
 
     // Pre-fetch indexed column lists (hoisted out of the per-row loop)
     auto hashIndexedCols = getHashIndexedColumns(dbname, tablename);
@@ -35354,10 +35517,6 @@ DBStatus StorageEngine::updateInternal(
                                     static_cast<OffsetNumber>(newSlotId + 1)});
                             auto* oldHeader = castHeapHeader(mutableOld.data());
                             oldHeader->t_infomask |= HEAP_UPDATED;
-                            oldHeader->t_infomask &= ~(
-                                HEAP_XMAX_COMMITTED | HEAP_XMAX_INVALID |
-                                HEAP_XMAX_EXCL_LOCK | HEAP_XMAX_KEYSHR_LOCK |
-                                HEAP_XMAX_LOCK_ONLY | HEAP_XMAX_IS_MULTI);
                             if (retireStatus == DBStatus::OK) {
                                 if (!stagedOldPage.update(
                                         slotId, mutableOld.data(),

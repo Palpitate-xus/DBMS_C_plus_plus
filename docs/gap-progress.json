@@ -2,6 +2,31 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-19 recheck ordinary row writes after waiting on a concurrent writer",
+      "gap_ids": ["TXN-08", "QRY-13"],
+      "status": "partial",
+      "evidence": [
+        "src/commands/TableManage.cpp",
+        "src/commands/DmlExecutor.cpp",
+        "src/main.cpp",
+        "src/transaction/LockManager.cpp",
+        "docs/test-report.md",
+        "docs/performance-report-2026-10-30.md"
+      ],
+      "tests": [
+        "tests/dml_lock_error_savepoint_protocol_e2e_test.py",
+        "tests/dml_row_lock_timeout_protocol_e2e_test.py",
+        "tests/dml_row_deadlock_protocol_e2e_test.py",
+        "tests/mvcc_update_test.cpp",
+        "tests/prepared_transaction_test.cpp"
+      ],
+      "verification": [
+        "After acquiring the row lock, ordinary UPDATE and DELETE check the writer's commit status, follow verified versions for read committed, and reapply the original predicate to a changed target. A concurrent committed change returns 40001 under repeatable read or serializable.",
+        "Fourteen registered protocol suites and eleven native suites passed. The eleven targeted scenarios match PostgreSQL 18.6 and verify rows and primary-key lookups after SIGKILL and reopen. Nine supplemental checks also cover serializable writes, the normal isolation after an explicit transaction, WITH, actual extended execution, and safe failure for joined mutations whose source would need reevaluation. PostgreSQL completes the two joined statements.",
+        "The no-contention comparison includes 1440 timed SQL statements and 1800 audited protocol exchanges across twelve runs from the same dataset. All five workload categories exceed the preset 10 percent CPU drift threshold. The measurements do not establish a sustained speed change."
+      ]
+    },
+    {
       "issue": "2026-11-19 find single integer primary-key mutation targets without a table scan",
       "gap_ids": ["DML-01", "OPT-11"],
       "status": "partial",

@@ -4750,13 +4750,14 @@ bool executePreparedUpdate(const UpdateStmt& stmt, Session& s, bool& fallback,
         return true;
     };
     StorageEngine::SqlUpdateResolver resolver;
-    StorageEngine::SqlMutationCallbacks arrayDomainCallbacks;
+    StorageEngine::SqlMutationCallbacks callbacks;
+    callbacks.recheckOnConcurrentUpdate = true;
     if (arrayDomainTargets.empty()) {
         resolver = [&](const SqlRow& oldValues, SqlRow& updates) {
             return resolveAssignments(oldValues, updates, nullptr);
         };
     } else {
-        arrayDomainCallbacks.resolveArrayDomains = [&](int64_t, const SqlRow& oldValues,
+        callbacks.resolveArrayDomains = [&](int64_t, const SqlRow& oldValues,
                 SqlRow& updates, StorageEngine::OwningSqlRow& convertedDomains) {
             return resolveAssignments(oldValues, updates, &convertedDomains);
         };
@@ -4772,7 +4773,7 @@ bool executePreparedUpdate(const UpdateStmt& stmt, Session& s, bool& fallback,
         boundIntegerPrimaryKeyCandidates(update->whereClause.get(), table, targetOrdinal),
         stmt.returning.empty() ? nullptr : &updatedRows, resolver, matcher,
         &affectedRows, stmt.returning.empty() ? nullptr : &images,
-        arrayDomainTargets.empty() ? nullptr : &arrayDomainCallbacks, virtualRows.output(), true);
+        &callbacks, virtualRows.output(), true);
     if (status != DBStatus::OK)
         throw DbError(sqlstateForDBStatus(status), "UPDATE failed");
     if (!stmt.returning.empty() &&
@@ -6826,6 +6827,8 @@ private:
                 changes[i].generated=virtualRows.get(i,changes.size());
             return result(changes,update?"UPDATE":"DELETE",count,&provenance);
         }
+        StorageEngine::SqlMutationCallbacks callbacks;
+        callbacks.recheckOnConcurrentUpdate = true;
         if(auto* update=dynamic_cast<UpdateStmt*>(statement_)) {
             std::vector<StorageEngine::UpdateRowImage> changes;
             const auto matcher=[&](const SqlRow& old){return matches(update->whereClause.get(),old);};
@@ -6838,13 +6841,13 @@ private:
                 return true;
             };
             const auto status=g_engine.updateRows(session_.currentDB,physical_,{}, integerEqualityCandidates(update->whereClause.get()),returning_->empty()?nullptr:&images,
-                resolver,matcher,&count,returning_->empty()?nullptr:&changes,nullptr,virtualRows.output(),true);
+                resolver,matcher,&count,returning_->empty()?nullptr:&changes,&callbacks,virtualRows.output(),true);
             if(status!=DBStatus::OK)throw DbError(sqlstateForDBStatus(status),"WITH UPDATE failed");
             return result(updatedReturningImages(changes,&virtualRows),"UPDATE",count);
         }
         auto* remove=static_cast<DeleteStmt*>(statement_);
         const auto matcher=[&](const SqlRow& old){return matches(remove->whereClause.get(),old);};
-        const auto status=g_engine.removeRows(session_.currentDB,physical_,integerEqualityCandidates(remove->whereClause.get()),returning_->empty()?nullptr:&images,matcher,&count,nullptr,virtualRows.output(),true);
+        const auto status=g_engine.removeRows(session_.currentDB,physical_,integerEqualityCandidates(remove->whereClause.get()),returning_->empty()?nullptr:&images,matcher,&count,&callbacks,virtualRows.output(),true);
         if(status!=DBStatus::OK)throw DbError(sqlstateForDBStatus(status),"WITH DELETE failed");
         return result(deletedReturningImages(images,&virtualRows),"DELETE",count);
     }

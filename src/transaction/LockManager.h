@@ -172,7 +172,9 @@ public:
     // coordinated across processes when dbname names an existing database)
     // Resource format: "page:dbname:tablename:pageId"
     // ========================================================================
-    [[nodiscard]] bool pageLockShared(const std::string& dbname, const std::string& table, uint32_t pageId) const;
+    // A scoped caller releases the lock only if this call acquired it.
+    [[nodiscard]] bool pageLockShared(const std::string& dbname, const std::string& table,
+                                      uint32_t pageId, bool* newlyAcquired = nullptr) const;
     [[nodiscard]] bool pageLockExclusive(const std::string& dbname, const std::string& table, uint32_t pageId) const;
     void pageUnlock(const std::string& dbname, const std::string& table, uint32_t pageId) const;
     void pageUnlockAll(const std::string& dbname, const std::string& table) const;

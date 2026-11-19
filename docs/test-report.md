@@ -2,6 +2,31 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="same-row-writes-20261119"></a>
+## 2026-11-19 · 两个连接先后修改同一行
+
+测试让第一个连接先写入并继续持有行锁。第二个连接发出写入语句，测试在看到实际的锁等待后，才让第一个连接提交或回滚。PostgreSQL 18.6 使用 `pg_blocking_pids()` 确认阻塞来源，项目测试从 `pg_locks` 检查等待和持锁记录。[协议测试](../tests/dml_lock_error_savepoint_protocol_e2e_test.py)
+
+PostgreSQL 18.6 在默认隔离级别下使用最新记录重查 `WHERE`。提交 `v=20` 后，等待的 `SET v=v+1` 返回 `21`。主键和其他列不再满足条件时跳过该行，删除返回当前版本。先前写好两次再一起提交时，后来的语句可以继续找到最后一个版本。原写入回滚时沿用原值；在 `REPEATABLE READ` 或 `SERIALIZABLE` 下遇到已提交的并发写入时返回 `40001`。[PostgreSQL 隔离级别](https://www.postgresql.org/docs/18/transaction-iso.html) · [PostgreSQL 18.6 的修改执行器](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/executor/nodeModifyTable.c)
+
+旧版 `2e81f67c` 在 11 种同一行的写入顺序中有 10 种返回 `58030`，仅持锁者整笔回滚的用例按预期返回。持锁者改主键或删除的用例中，旧版还会重新显示已经失效的旧记录。旧版先找行、后等待锁，等待结束后仍用原来找到的位置写入，和已经移动的索引条目冲突。
+
+新版在拿到行锁后读取记录头，使用提交日志判断前一个写入是否提交。每次查找新版本都核对它是否由前一个版本记录的事务创建，并对新版本加锁。保留最初选中的候选范围，只对被改过的行重查谓词。没有并发修改的行无需额外查提交日志。
+
+11 个注册用例全部通过。验证了有无显式事务、主键改变后仍满足或不再满足条件、普通列条件变化、删除当前版本、先前删除、隔离级别冲突、回滚和连续更新两次。核对命令标签、返回值和事务状态，并用逐行查询和逐主键查询比对最终值。实际向服务端发送 `SIGKILL` 并用原目录重新启动后，两种查询仍一致。
+
+另外核对了 9 个场景，包括 `SERIALIZABLE` 下的更新、删除和不同记录的写入冲突，持锁者撤消第二次更新，结束显式事务后的默认隔离，`WITH UPDATE` 以及实际扩展协议的参数执行。`UPDATE FROM` 和 `DELETE USING` 仍与 PostgreSQL 有差异。PostgreSQL 成功修改最新版本，受测项目版本返回 `40001` 并保留已经提交的值。
+
+精确候选在 14 套协议测试和 11 套原生测试中通过。原生测试还覆盖日志写入失败、外键动作、保存点、准备提交的事务，以及主键与次级索引保持同步。受测程序 SHA-256 为 `d3147c82d32d6034d6becfaa0d9a1ae0708c21c45ec3ea62064af270ff2845e6`。注册协议、补充协议和原生结果清单的 SHA-256 依次为 `fd8b05f38f29f72e711d6844eefb300a08f5c382794a06f4d7d6a5ebb7e0f201`、`df73b4028faacfbe31c045a880db41cc3101a6ab86fb53955efde5c0e1224ff9`、`a59020822f321bdee99132152b3ea4aa55487677fcce2dd3ab214149417ccbbf`。[性能报告](performance-report-2026-10-30.md#same-row-write-cost-20261119)
+
+在仓库根目录可以用构建好的程序重跑注册用例。
+
+```bash
+DBMS_MAIN="$PWD/build/cmake/dbms_main" python3 tests/dml_lock_error_savepoint_protocol_e2e_test.py
+```
+
+对照端使用同一测试加 `--reference`，通过 `PGREF_HOST`、`PGREF_PORT`、`PGREF_USER`、`PGREF_DATABASE` 和 `PGREF_PASSWORD` 指定 PostgreSQL 18.6 测试库。完整仓库回归和完整的 PostgreSQL 行锁行为待验证。
+
 <a id="integer-primary-key-mutation-20261119"></a>
 ## 2026-11-19 · 按整数主键更新和删除
 
@@ -13,7 +38,7 @@
 
 六项协议回归也通过。注册测试把目标行放在第 1 页，为新版记录预留 261 字节。新增记录需要 41 字节。锁住后面的满页时，正负主键更新及主键删除能够返回结果。未命中、旧快照、已写入的事务、范围、普通列和复合主键用例仍等待该页。回滚保留原主键，强制结束服务进程并重新打开原目录后，提交的更新和删除仍正确。[协议测试](../tests/integer_index_write_protocol_e2e_test.py)
 
-同一行的并发修改仍有已知差异。一个会话提交 `v=20` 后，等待同一行的 `UPDATE ... SET v=v+1` 在 PostgreSQL 18.6 会成功返回 `21`。项目新旧版在这组写入中均返回 `58030`，随后观察连接在读回结果前关闭。该问题属于等待并发写入后的行版本重新检查。[PostgreSQL 修改执行器](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/executor/nodeModifyTable.c)
+本次主键优化验证时，同一行的并发写入仍返回 `58030`，随后观察连接在读回结果前关闭。后续版本已修复受测的普通更新和删除。[并发写入复测](#same-row-writes-20261119)
 
 受测程序 SHA-256 为 `7d2b611d11457b4f53d60253668704eedadd6551b26f136ca941a30afc6f3e97`。完整回归套件待验证。
 

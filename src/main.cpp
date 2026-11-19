@@ -41268,6 +41268,9 @@ static bool executeWithCteInheritance(const std::string& inputSql, Session& s,
     if (statementTransaction) {
         dbms::DBStatus beginStatus;
         try {
+            // A fresh SQL statement uses the same default as BEGIN. The
+            // backend context can still hold the isolation of an ended block.
+            g_engine.setIsolationLevel(dbms::IsolationLevel::READ_COMMITTED);
             beginStatus = g_engine.beginTransaction(s.currentDB);
         } catch (...) {
             --executeDepth;

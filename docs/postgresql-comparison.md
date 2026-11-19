@@ -2,9 +2,17 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-19 · 并发修改同一行时怎样处理
+
+在 `READ COMMITTED` 下，PostgreSQL 先按语句开始时能看到的数据寻找目标行。遇到其他事务正在修改的行时，它等该事务结束，并对最新版本重查条件。较强隔离级别下，另一事务已经提交的修改会导致 `40001`。PostgreSQL 的 `EvalPlanQual` 还能重新检查连接等更复杂的执行计划。[PostgreSQL 隔离级别](https://www.postgresql.org/docs/18/transaction-iso.html) · [PostgreSQL 18.6 修改执行器](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/executor/nodeModifyTable.c)
+
+SQLite 同时只允许一个写事务。在 WAL 模式下，持有旧快照的读事务尝试升级为写事务时，会收到 `SQLITE_BUSY_SNAPSHOT`。DuckDB 1.4 允许不同线程同时写不同的行，两个线程修改同一行时，后一个操作收到冲突错误。[SQLite 隔离说明](https://www.sqlite.org/isolation.html) · [DuckDB 1.4 并发说明](https://duckdb.org/docs/1.4/connect/concurrency)
+
+项目采用 PostgreSQL 的语义处理所测普通更新和删除。在所测的 `UPDATE FROM`、`DELETE USING` 冲突里，PostgreSQL 能重新检查来源并完成操作，项目返回 `40001` 并保留先前提交的数据。完整的执行计划重查、分区行移动和锁级别仍待补齐。[对照结果](test-report.md#same-row-writes-20261119)
+
 ## 2026-11-19 · 用主键找要更新或删除的行
 
-PostgreSQL 可以从执行计划的索引扫描取得要修改的行，并在遇到并发修改后对最新版本重查条件。项目现在可借单列整数主键索引直接定位部分 `UPDATE` 和 `DELETE` 的目标。旧快照、索引未命中及复杂条件仍走表扫描，并发修改同一行后的重新检查仍待补齐。[PostgreSQL 修改执行器](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/executor/nodeModifyTable.c) · [测试报告](test-report.md#integer-primary-key-mutation-20261119)
+PostgreSQL 可以从执行计划的索引扫描取得要修改的行。项目现在可借单列整数主键索引直接定位部分 `UPDATE` 和 `DELETE` 的目标。旧快照、索引未命中及复杂条件仍走表扫描。[PostgreSQL 修改执行器](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/executor/nodeModifyTable.c) · [测试报告](test-report.md#integer-primary-key-mutation-20261119)
 
 ## 2026-11-19 · 分区表统计和重写参数
 

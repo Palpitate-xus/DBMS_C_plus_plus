@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>同时改一条记录，后一次按新值处理 · 2026-11-19</summary>
+
+默认设置下，如果另一个连接先改了这条记录，等它提交后，更新或删除会用新值再检查条件。记录已被删，或者条件不再成立，就跳过它。
+
+[使用说明](docs/MANUAL.md#同时修改同一行) · [测试报告](docs/test-report.md#same-row-writes-20261119) · [性能报告](docs/performance-report-2026-10-30.md#same-row-write-cost-20261119)
+
+</details>
+
+<details>
 <summary>按编号修改或删除记录时少读数据 · 2026-11-19</summary>
 
 例如按订单号删除一条订单。如果订单号是整数主键，数据库可以用索引找到这条记录，省去逐页查找。
@@ -21,16 +30,13 @@
 </details>
 
 <details>
-<summary>整理表时少花时间找空位 · 2026-11-19</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-19 · 整理表时少花时间找空位
 
 用 `VACUUM FULL` 整理表时，数据库会记住哪里还有空位，搬动记录时少找几次。
 
 [使用示例](docs/MANUAL.md#分开清理主表和长值) · [测试报告](docs/test-report.md#vacuum-full-placement-20261119) · [性能报告](docs/performance-report-2026-10-30.md#vacuum-full-placement-cost-20261119)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-19 · 可以查看表清理的进度
 
