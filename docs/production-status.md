@@ -2,6 +2,10 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-18 · 可单独缩小长值文件
+
+`VACUUM (FULL, PROCESS_MAIN FALSE)` 将仍被引用的长值复制到新的文件，并用新位置建立索引。提交前可恢复整组原文件。长值编号、编号计数和主表位置无需改动。[恢复测试](test-report.md#vacuum-toast-full-20261118) · [性能报告](performance-report-2026-10-30.md#vacuum-toast-full-cost-20261118)
+
 ## 2026-11-18 · 可分别清理主表和长值
 
 普通 `VACUUM` 可以独立关闭主表或外置长值清理，也可以只收集统计信息。只清理长值时，继续检查主表引用和活跃快照。发现长值文件和索引不成对时返回错误。[测试范围](test-report.md#vacuum-process-options-20261118) · [性能报告](performance-report-2026-10-30.md#vacuum-process-options-cost-20261118)

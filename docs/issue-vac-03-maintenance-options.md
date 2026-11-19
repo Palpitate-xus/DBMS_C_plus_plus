@@ -6,7 +6,7 @@ Status: partial. Review and focused repair recorded on 2026-10-05.
 
 `PROCESS_MAIN` and `PROCESS_TOAST` now select ordinary maintenance independently. Both default to true. An explicit `ANALYZE` can still gather statistics with both phases disabled. TOAST cleanup defers work while the database has active transactions. When it inspects the files, the TOAST-only path reports a broken heap/index pair as an error.
 
-PostgreSQL 18.6 rejects `FULL` with `PROCESS_TOAST FALSE` and rewrites only the secondary relation with `FULL, PROCESS_MAIN FALSE`. This project rejects both forms. A durable rewrite of the secondary relation alone remains open. [Usage](MANUAL.md#分开清理主表和长值) · [Verification](test-report.md#vacuum-process-options-20261118) · [PostgreSQL 18 command reference](https://www.postgresql.org/docs/18/sql-vacuum.html)
+`FULL, PROCESS_MAIN FALSE` now rebuilds the TOAST heap and index as one transaction, preserving the main files and external object IDs. `FULL` with `PROCESS_TOAST FALSE` still returns `0A000`, as in PostgreSQL 18.6. The ordinary main-table rewrite and the TOAST-only rewrite remain distinct paths. Combined compaction in one default `VACUUM FULL`, targeted column lists, and PITR across the new rewrite remain open. [Usage](MANUAL.md#分开清理主表和长值) · [Verification](test-report.md#vacuum-toast-full-20261118) · [PostgreSQL 18 command reference](https://www.postgresql.org/docs/18/sql-vacuum.html)
 
 The following sections describe the earlier repair and its verification.
 

@@ -2,6 +2,27 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-18 compact only external-value storage with VACUUM FULL and PROCESS_MAIN FALSE",
+      "gap_ids": ["VAC-03", "STO-06"],
+      "status": "partial",
+      "evidence": [
+        "src/commands/TableManage.cpp",
+        "src/commands/VacuumFullBackup.h",
+        "docs/MANUAL.md",
+        "docs/test-report.md",
+        "docs/performance-report-2026-10-30.md"
+      ],
+      "tests": [
+        "tests/vacuum_full_cold_recovery_test.cpp",
+        "tests/vacuum_relation_options_protocol_e2e_test.py"
+      ],
+      "verification": [
+        "Rebuilds the TOAST heap and its index from stable retained references with unchanged IDs. One existing full-rewrite transaction decides the complete file set through its versioned backup receipt. The parent schema, heap and indexes are outside the replacement set.",
+        "PostgreSQL 18.6 physical reference verifies preserved parent bytes, a smaller TOAST heap and index, exact live payloads, continued constraints and new inserts. The candidate matches 100 of 102 syntax and protocol comparisons, with two targeted column list differences. Six native cold reopens across the three new injected failure and interruption cases restore exact old TOAST files and values. All 273 item records remain unchanged. Combined default FULL compaction, targeted column lists, and PITR across this rewrite remain open.",
+        "Eighteen owned benchmark epochs complete 192 timed ordinary sweeps and six first FULL rewrites. All six shrink the TOAST heap by 638976 bytes and its index by 20480 bytes. The independently audited ordinary sweep comparison exceeds the prespecified CPU drift limit."
+      ]
+    },
+    {
       "issue": "2026-11-18 select ordinary VACUUM maintenance for main storage and TOAST independently",
       "gap_ids": ["VAC-03"],
       "status": "partial",

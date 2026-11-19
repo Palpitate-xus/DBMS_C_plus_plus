@@ -2,6 +2,17 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="vacuum-toast-full-20261118"></a>
+## 2026-11-18 · 只重写长值文件
+
+`VACUUM (FULL, PROCESS_MAIN FALSE)` 在排他维护期间检查主表引用。确认记录在当前视图中不可见且事务状态已经确定后，才跳过相应的引用。仍被使用的长值按原编号复制，新索引指向复制后的数据位置。重写只替换长值堆、索引和各自的配套文件，一次提交决定整组保留或恢复。[使用示例](MANUAL.md#分开清理主表和长值)
+
+PostgreSQL 18.6 对照样本有 160 个 6,144 字节的长值。删除其中 156 个后，独立长值重写将数据文件从 1,310,720 字节缩至 32,768 字节，索引从 32,768 字节缩至 16,384 字节。主表和主键文件逐字节一致。相同样本上的普通长值清理保留数据文件长度。SQLite 的 `VACUUM` 重建整个数据库文件，DuckDB 通过检查点整理符合条件的已删除数据。[PostgreSQL 维护实现](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/commands/vacuum.c) · [SQLite VACUUM](https://www.sqlite.org/lang_vacuum.html) · [DuckDB 空间回收](https://duckdb.org/docs/current/operations_manual/footprint_of_duckdb/reclaiming_space)
+
+- 本项目在同样删除 156 行后，主表仍有 160 个物理行槽。只重写长值使数据文件从 663,552 缩至 24,576 字节，索引从 28,672 缩至 8,192 字节。主表和主键文件逐字节一致，4 个保留长值和 2 个新插入长值均原样读回。8 条共同操作与 PostgreSQL 18.6 的结果和错误码一致。总共 102 条语法与协议对照中，100 条一致，差异来自带列清单的两条 `VACUUM`。[性能报告](performance-report-2026-10-30.md#vacuum-toast-full-cost-20261118)
+- 协议回归另测实际删除后的长值空间、没有长值文件的定长表和只有短文本的表。收到命令完成消息后立即用 `SIGKILL` 结束进程，首次冷启动读回相同值，并能写入新的长值。[协议回归](../tests/vacuum_relation_options_protocol_e2e_test.py)
+- 原生故障回归在新数据文件已就位时模拟索引替换返回 `EIO`，并分别在数据文件替换后、索引文件替换后用 `SIGKILL` 结束进程。六次重新打开恢复了原始数据、索引及对应的加密文件，主表、长值编号和内容保持一致。共 21 个子进程阶段通过，另有五项原生回归、三项相邻协议回归和十条手册命令通过。完整回归套件待验证。受测程序 SHA-256 为 `b708ea44cf49d455c6bf5aad8698f3f96912a17890612c2c1c0736ff561b000c`。[恢复回归](../tests/vacuum_full_cold_recovery_test.cpp)
+
 <a id="vacuum-process-options-20261118"></a>
 ## 2026-11-18 · 分开清理主表和长值
 

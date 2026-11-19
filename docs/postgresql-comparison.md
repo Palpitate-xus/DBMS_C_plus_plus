@@ -4,7 +4,7 @@
 
 ## 2026-11-18 · 可分别清理主表和长值
 
-与 PostgreSQL 18.6 一样，普通 `VACUUM` 可分别指定主表和长值清理。`ANALYZE` 可以独立运行。PostgreSQL 可用 `VACUUM (FULL, PROCESS_MAIN FALSE)` 重写长值附表。本项目的该重写方式仍待实现。[PostgreSQL VACUUM](https://www.postgresql.org/docs/18/sql-vacuum.html) · [本项目验证](test-report.md#vacuum-process-options-20261118)
+与 PostgreSQL 18.6 一样，普通 `VACUUM` 可分别指定主表和长值清理。`ANALYZE` 可以独立运行。两者也都支持用 `VACUUM (FULL, PROCESS_MAIN FALSE)` 只重写长值数据和索引。本项目使用自己的文件格式和恢复记录。带列清单的 `VACUUM`、完整的长值重写历史回放和 PostgreSQL 的维护统计仍有差距。[PostgreSQL VACUUM](https://www.postgresql.org/docs/18/sql-vacuum.html) · [本项目验证](test-report.md#vacuum-toast-full-20261118)
 
 ## 2026-11-18 · 普通清理和长值
 

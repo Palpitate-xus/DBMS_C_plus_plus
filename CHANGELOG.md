@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>长值文件可以单独缩小 · 2026-11-18</summary>
+
+删除许多长文本后，可以只整理存放这些内容的文件，把不再使用的空间还给磁盘。
+
+[使用示例](docs/MANUAL.md#分开清理主表和长值) · [恢复测试](docs/test-report.md#vacuum-toast-full-20261118) · [性能报告](docs/performance-report-2026-10-30.md#vacuum-toast-full-cost-20261118)
+
+</details>
+
+<details>
 <summary>可以分开清理主表和长值 · 2026-11-18</summary>
 
 普通 `VACUUM` 可以只清理主表，也可以只清理单独存放的长值。还可以只更新统计信息。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>整理表后，范围查询可以少读数据 · 2026-11-18</summary>
+<summary>查看更早的更新</summary>
+
+## 2026-11-18 · 整理表后，范围查询可以少读数据
 
 运行 `VACUUM FULL` 整理表后，符合条件的查询可以马上用 BRIN 索引跳过无关数据。
 
 [使用示例](docs/MANUAL.md#重写表后的-brin-查询) · [测试报告](docs/test-report.md#brin-vacuum-full-generation-20261118) · [性能报告](docs/performance-report-2026-10-30.md#brin-vacuum-full-generation-cost-20261118)
-
-</details>
-
-<details>
-<summary>查看更早的更新</summary>
 
 ## 2026-11-18 · 写入数据时少找几遍索引文件
 

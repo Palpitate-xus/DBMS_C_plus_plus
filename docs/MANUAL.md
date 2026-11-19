@@ -1078,7 +1078,13 @@ VACUUM (PROCESS_MAIN FALSE) vacuum_example;
 VACUUM (PROCESS_MAIN FALSE, PROCESS_TOAST FALSE, ANALYZE) vacuum_example;
 ```
 
-`VACUUM FULL` 要求 `PROCESS_TOAST` 保持开启。只重写长值文件的 `FULL` 模式尚未支持。清理应在事务块之外运行。[验证范围](test-report.md#vacuum-process-options-20261118)
+`VACUUM FULL` 要求 `PROCESS_TOAST` 保持开启。若只想缩小存放长值的文件，可以关闭主表处理。已有记录、主表位置和主表索引不需要重写。
+
+```sql
+VACUUM (FULL, PROCESS_MAIN FALSE) vacuum_example;
+```
+
+如果表没有长值文件，这条命令正常结束。重写使用排他维护锁，清理应在事务块之外运行。一个数据目录由一个服务端进程管理。[部署说明](PACKAGING.md#服务端部署形态) · [普通清理测试](test-report.md#vacuum-process-options-20261118) · [长值重写测试](test-report.md#vacuum-toast-full-20261118)
 
 ---
 

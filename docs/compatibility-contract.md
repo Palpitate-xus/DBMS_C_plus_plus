@@ -4,7 +4,9 @@
 
 ## 2026-11-18 · 选择普通清理的对象
 
-普通 `VACUUM` 可用 `PROCESS_MAIN FALSE` 跳过主表清理，也可用 `PROCESS_TOAST FALSE` 跳过长值清理。多个同名选项采用最后一个有效值。`ANALYZE` 独立于两个清理选项。只清理长值时，如果当前库内有活跃事务，会延后回收。仅重写长值文件的 `FULL` 方式尚未支持。[使用手册](MANUAL.md#分开清理主表和长值) · [验证范围](test-report.md#vacuum-process-options-20261118)
+普通 `VACUUM` 可用 `PROCESS_MAIN FALSE` 跳过主表清理，也可用 `PROCESS_TOAST FALSE` 跳过长值清理。多个同名选项采用最后一个有效值。`ANALYZE` 独立于两个清理选项。只做普通长值清理时，如果当前库内有活跃事务，会延后回收。
+
+`VACUUM (FULL, PROCESS_MAIN FALSE)` 重写长值文件和对应的索引，保留主表文件、主表索引和长值编号。在替换文件前保留原文件副本，同一次提交决定整组文件的结果。[使用手册](MANUAL.md#分开清理主表和长值) · [验证范围](test-report.md#vacuum-toast-full-20261118)
 
 ## 2026-11-18 · 普通清理的长值处理
 

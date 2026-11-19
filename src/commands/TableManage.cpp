@@ -52119,6 +52119,14 @@ size_t StorageEngine::vacuum(const std::string& dbname,
 // ========================================================================
 // VACUUM TOAST: remove orphaned toast files not referenced by any row
 // ========================================================================
+namespace {
+struct RestoreToastLocks {
+    LockManager& manager;
+    const LockManager::LockCheckpoint& before;
+    ~RestoreToastLocks() { manager.rollbackToCheckpoint(before); }
+};
+} // namespace
+
 size_t StorageEngine::vacuumToast(const std::string& dbname,
                                   const std::string& tablename,
                                   bool* succeeded) {
@@ -52144,13 +52152,17 @@ size_t StorageEngine::vacuumToast(const std::string& dbname,
     // Acquiring a stronger mode converts an existing caller token; it
     // does not necessarily add an acquisition. Do not blindly unlock it.
     const auto locksBeforeToast = lockManager_.captureCheckpoint();
-    struct RestoreToastLocks {
-        LockManager& manager;
-        const LockManager::LockCheckpoint& before;
-        ~RestoreToastLocks() { manager.rollbackToCheckpoint(before); }
-    } restoreToastLocks{lockManager_, locksBeforeToast};
+    RestoreToastLocks restoreToastLocks{lockManager_, locksBeforeToast};
     if (!lockManager_.lockExclusive(tablename)) return 0;
 
+    return vacuumToastLocked(dbname, tablename, succeeded);
+}
+
+size_t StorageEngine::vacuumToastLocked(const std::string& dbname,
+                                        const std::string& tablename,
+                                        bool* succeeded, const ReadView* rewriteView,
+                                        const std::filesystem::path& staging) {
+    if (succeeded) *succeeded = false;
     const auto toastHeapPath = toastDataPath(dbname, tablename);
     const auto toastTreePath = toastIndexPath(dbname, tablename);
     std::error_code toastPathError;
@@ -52191,7 +52203,7 @@ size_t StorageEngine::vacuumToast(const std::string& dbname,
     std::vector<std::filesystem::path> heapRelations;
     // Page zero is the allocator header. A header-only TOAST heap has no
     // chunks to reclaim, so there is no reason to visit the main heap.
-    if (toastPageCount > 1) {
+    if (toastPageCount > 1 || rewriteView) {
         if (tbl.partitionType == TableSchema::PartitionType::None) {
             heapRelations.push_back(dataPath(dbname, tablename));
         } else {
@@ -52252,6 +52264,18 @@ size_t StorageEngine::vacuumToast(const std::string& dbname,
                         header->t_hoff > length) {
                         valid = false;
                         return;
+                    }
+                    // The FULL caller holds exclusive database and table
+                    // ownership. Drop references only with terminal CLOG
+                    // evidence, never just because an insert is invisible.
+                    if (rewriteView && !rewriteView->isVisible(tuple, length, tbl.formatVersion)) {
+                        const auto xmin = static_cast<TxnId>(header->t_fields.t_xmin);
+                        const auto xmax = static_cast<TxnId>(header->t_fields.t_xmax);
+                        const auto* clog = rewriteView->commitLog;
+                        if ((xmin && clog->getStatus(xmin) == CommitLog::Status::Aborted) ||
+                            (xmax && !xmaxInvalid(header) && !xmaxIsLock(header) &&
+                             clog->getStatus(xmax) == CommitLog::Status::Committed))
+                            return;
                     }
                     if (variableColumns.empty()) return;
                     const char* row = tuple + header->t_hoff;
@@ -52324,6 +52348,38 @@ size_t StorageEngine::vacuumToast(const std::string& dbname,
     BPTree* toastIndex = getToastIndex(dbname, tablename);
     if (!toastIndex) return 0;
 
+    std::unique_ptr<PageAllocator> newPages;
+    std::unique_ptr<BPTree> newIndex;
+    uint32_t outputPage = 0;
+    if (rewriteView) {
+        newPages = std::make_unique<PageAllocator>(
+            (staging / toastHeapPath.filename()).string(), 0,
+            toastPages->pageSize(), DATA_FILE_FORMAT_VERSION);
+        newIndex = std::make_unique<BPTree>(staging / toastTreePath.filename());
+        if (!newPages->open() || !newIndex->open()) return 0;
+    }
+    const auto appendChunk = [&](const char* row, size_t length, const std::string& key) {
+        if (length <= TOAST_CHUNK_HEADER_SIZE ||
+            length > TOAST_CHUNK_HEADER_SIZE + TOAST_CHUNK_SIZE) return false;
+        for (;;) {
+            if (!outputPage) outputPage = newPages->allocPage();
+            if (!outputPage) return false;
+            char* buffer = newPages->fetchPage(outputPage);
+            if (!buffer) return false;
+            PageWrapper page(buffer, newPages->pageSize(), DATA_FILE_FORMAT_VERSION);
+            if (!page.canFit(length)) {
+                newPages->unpinPage(outputPage);
+                outputPage = 0;
+                continue;
+            }
+            uint16_t slot = 0;
+            const bool inserted = page.insert(row, length, slot);
+            if (inserted) newPages->markDirty(outputPage);
+            newPages->unpinPage(outputPage);
+            return inserted && newIndex->insert(key, encodeRid(outputPage, slot));
+        }
+    };
+
     struct ToastChunkRef {
         uint64_t toastId = 0;
         uint32_t sequence = 0;
@@ -52336,17 +52392,14 @@ size_t StorageEngine::vacuumToast(const std::string& dbname,
     std::set<std::string> seenKeys;
     std::vector<int64_t> heapRids;
     bool toastValid = true;
+    const std::string toastRelation = tablename + ".toast";
     for (uint32_t pageId = 1; pageId < toastPageCount; ++pageId) {
-        if (!lockManager_.pageLockShared(
-                dbname, tablename + ".toast", pageId)) {
-            return 0;
-        }
+        if (rewriteView) checkForQueryInterrupt();
+        if (!lockManager_.pageLockShared(dbname, toastRelation, pageId)) return 0;
+        HeapPageReadGuard pin{lockManager_, *toastPages, dbname, toastRelation, pageId};
         char* buffer = toastPages->fetchPage(pageId);
-        if (!buffer) {
-            lockManager_.pageUnlock(
-                dbname, tablename + ".toast", pageId);
-            return 0;
-        }
+        if (!buffer) return 0;
+        pin.pinned = true;
         PageWrapper page(
             buffer, toastPages->pageSize(), DATA_FILE_FORMAT_VERSION);
         toastValid = page.isValid();
@@ -52375,13 +52428,16 @@ size_t StorageEngine::vacuumToast(const std::string& dbname,
                     toastValid = false;
                     return;
                 }
+                if (rewriteView && activeToastIds.count(toastId) &&
+                    !appendChunk(row, rowLength, key)) {
+                    toastValid = false;
+                    return;
+                }
                 chunksById[toastId].push_back(
                     {toastId, sequence, pageId, slotId, rid, key});
                 heapRids.push_back(rid);
             });
         }
-        toastPages->unpinPage(pageId);
-        lockManager_.pageUnlock(dbname, tablename + ".toast", pageId);
         if (!toastValid) return 0;
     }
 
@@ -52405,6 +52461,13 @@ size_t StorageEngine::vacuumToast(const std::string& dbname,
         for (size_t i = 0; i < chunks.size(); ++i) {
             if (chunks[i].sequence != i) return 0;
         }
+    }
+
+    if (rewriteView) {
+        if (!newPages->flush() || !newIndex->flush() ||
+            !toastPages->flush() || !toastIndex->flush()) return 0;
+        if (succeeded) *succeeded = true;
+        return activeToastIds.size();
     }
 
     size_t removedObjects = 0;
@@ -52478,7 +52541,7 @@ size_t StorageEngine::vacuumToast(const std::string& dbname,
 // ========================================================================
 size_t StorageEngine::vacuumFull(const std::string& dbname,
                                  const std::string& tablename,
-                                 bool* succeeded) {
+                                 bool* succeeded, bool processMain) {
     if (succeeded) *succeeded = false;
     if (!databaseExists(dbname) || !tableExists(dbname, tablename)) return 0;
     // VACUUM is not transaction-safe and PostgreSQL rejects it inside an
@@ -52524,6 +52587,120 @@ size_t StorageEngine::vacuumFull(const std::string& dbname,
     bool pendingExists = false;
     if (!vacuum_full_backup::regularExists(pendingRewrite, pendingExists) || pendingExists)
         return 0;
+
+    if (!processMain) {
+        const auto heap = toastDataPath(dbname, tablename);
+        const auto index = toastIndexPath(dbname, tablename);
+        bool heapExists = false, indexExists = false;
+        if (!vacuum_full_backup::regularExists(heap, heapExists) ||
+            !vacuum_full_backup::regularExists(index, indexExists) ||
+            heapExists != indexExists) return 0;
+        if (!heapExists) {
+            cacheLock.unlock();
+            fullCommitted = commitTransaction() == DBStatus::OK;
+            if (succeeded) *succeeded = fullCommitted;
+            return 0;
+        }
+        const auto xid = transactionContext().currentTxnId;
+        {
+            std::lock_guard<std::mutex> lock(globalTxnMutex());
+            // Deferred and prepared transactions may still have a read view
+            // without the normal shared database ownership.
+            for (const auto& [otherXid, database] : activeTransactionDatabases())
+                if (otherXid != xid && database == dbname) return 0;
+        }
+        const ReadView view = transactionContext().readView;
+        if (!view.commitLog) return 0;
+        const auto root = heap.parent_path();
+        const auto backup = root / ("." + tablename + ".vacuum_full_backup." + std::to_string(xid));
+        const auto staging = backup / "new";
+        std::error_code error;
+        if (!std::filesystem::create_directory(backup, error) || error) return 0;
+        afterRollback = [backup]() {
+            std::error_code cleanupError;
+            std::filesystem::remove_all(backup, cleanupError);
+        };
+        if (!std::filesystem::create_directory(staging, error) || error) return 0;
+
+        bool built = false;
+        const size_t objects = vacuumToastLocked(dbname, tablename, &built, &view, staging);
+        if (!built) return 0;
+        const std::array<std::filesystem::path, 4> files{
+            heap, heap.string() + ".tde", index, index.string() + ".tde"};
+        vacuum_full_backup::State state;
+        state.database = dbname;
+        state.table = tablename;
+        state.backupLeaf = backup.filename().string();
+        state.xid = xid;
+        state.oldIdentity = state.newIdentity = tbl.physicalRelationId;
+        state.toastOnly = true;
+        for (const auto& live : files) {
+            vacuum_full_backup::File file;
+            file.name = live.filename().string();
+            bool present = false;
+            if (!vacuum_full_backup::regularExists(live, present)) return 0;
+            const auto staged = staging / file.name;
+            if (present) {
+                const auto saved = vacuum_full_backup::backupFile(backup, state.files.size());
+                std::filesystem::create_hard_link(live, saved, error);
+                if (error) {
+                    error.clear();
+                    if (!std::filesystem::copy_file(live, saved, error) || error) return 0;
+                }
+                if (!vacuum_full_backup::syncFile(saved) ||
+                    !vacuum_full_backup::digestFile(saved, file) || !file.present) return 0;
+                std::filesystem::permissions(staged,
+                    static_cast<std::filesystem::perms>(file.mode), error);
+                if (error) return 0;
+            }
+            if (!vacuum_full_backup::syncFile(staged)) return 0;
+            state.files.push_back(std::move(file));
+        }
+        const auto bytes = vacuum_full_backup::encode(state);
+        if (bytes.empty() || !index_file::syncDirectory(staging) ||
+            !vacuum_full_backup::publish(backup / "manifest", bytes, true) ||
+            !index_file::syncDirectory(root)) return 0;
+        auto undone = state;
+        undone.undone = true;
+        const auto undoneBytes = vacuum_full_backup::encode(undone);
+        if (undoneBytes.empty()) return 0;
+        const auto key = dbname + ":" + tablename;
+        const auto evictToast = [this, key]() {
+            toastPageAllocators_.erase(key);
+            toastIndexes_.erase(key);
+        };
+        registerDdlUndo([this, state, bytes, undoneBytes, backup, pendingRewrite, root, evictToast]() {
+            std::lock_guard<std::recursive_mutex> lock(cacheMutex_);
+            bool exists = false;
+            if (!vacuum_full_backup::regularExists(pendingRewrite, exists)) return false;
+            if (!exists) return true;
+            std::string current;
+            if (!vacuum_full_backup::read(pendingRewrite, current) ||
+                (current != bytes && current != undoneBytes)) return false;
+            evictToast();
+            if (current != undoneBytes &&
+                !vacuum_full_backup::restore(state, bytes, backup, {}, root, {})) return false;
+            return vacuum_full_backup::publish(pendingRewrite, undoneBytes);
+        });
+        afterRollback = [pendingRewrite, backup, undoneBytes]() {
+            if (!vacuum_full_backup::discard(pendingRewrite, backup, undoneBytes))
+                std::cerr << "[vacuum full] retained TOAST undo at " << pendingRewrite << std::endl;
+        };
+        if (!vacuum_full_backup::publish(pendingRewrite, bytes, true)) return 0;
+        evictToast();
+        for (const auto& live : files) {
+            if (::rename((staging / live.filename()).c_str(), live.c_str()) != 0) return 0;
+        }
+        // Commit is the only decision for the entire heap/index generation.
+        if (!index_file::syncDirectory(root) || !index_file::syncDirectory(staging)) return 0;
+        cacheLock.unlock();
+        if (commitTransaction() != DBStatus::OK) return 0;
+        fullCommitted = true;
+        if (!vacuum_full_backup::discard(pendingRewrite, backup, bytes))
+            std::cerr << "[vacuum full] retained committed TOAST receipt at " << pendingRewrite << std::endl;
+        if (succeeded) *succeeded = true;
+        return objects;
+    }
 
     const auto heapRowWidth = heapHeaderRowWidth(tbl);
     if (!heapRowWidth) return 0;

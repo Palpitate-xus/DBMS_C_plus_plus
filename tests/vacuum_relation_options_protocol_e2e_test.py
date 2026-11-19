@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Check ordinary VACUUM relation selection through the wire and on disk."""
+"""Check VACUUM relation selection through the wire and on disk."""
 
 import importlib.util
 from pathlib import Path
 import random
+import signal
 import socket
 import struct
 import subprocess
@@ -163,9 +164,6 @@ def main():
         query(f"VACUUM (PROCESS_MAIN FALSE, PROCESS_TOAST FALSE) {table}", ready=b"E", state="25001")
         query("ROLLBACK", "ROLLBACK")
 
-        # A TOAST-only FULL rewrite is a separate operation in PostgreSQL.
-        query(f"VACUUM (FULL, PROCESS_MAIN FALSE) {table}", state="0A000")
-
     def check_toast_fork_admission():
         query("CREATE TABLE vacuum_fixed (id INT PRIMARY KEY, value INT)", "CREATE TABLE")
         query("INSERT INTO vacuum_fixed VALUES (1,42)", "INSERT 0 1")
@@ -196,11 +194,15 @@ def main():
         assert images(table) == before, "failed TOAST-only VACUUM must preserve the existing files"
         read_rows(table, [["1", retained]])
 
-    def cold_restart():
+    def cold_restart(crash=False):
+        if crash:
+            server["process"].kill()
         server["sock"].close()
         server["sock"] = None
-        server["process"].terminate()
-        assert server["process"].wait(timeout=20) == 0, "VACUUM fixture server failed to stop"
+        if not crash:
+            server["process"].terminate()
+        expected_exit = -signal.SIGKILL if crash else 0
+        assert server["process"].wait(timeout=20) == expected_exit, "unexpected VACUUM fixture exit status"
         server["process"] = subprocess.Popen(
             [runner.DBMS_MAIN, "--data-dir", server["dir"], "--server", str(server["port"]), "--insecure"],
             cwd=server["dir"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -212,6 +214,91 @@ def main():
             except ConnectionRefusedError:
                 assert server["process"].poll() is None and time.monotonic() < deadline, "VACUUM fixture server failed to restart"
                 time.sleep(0.05)
+
+    def check_toast_only_full():
+        table = "vacuum_full_toast"
+        query(f"CREATE TABLE {table} (id INT PRIMARY KEY, payload TEXT)", "CREATE TABLE")
+        query(f"INSERT INTO {table} VALUES (97,NULL),(98,''),(99,'inline')", "INSERT 0 3")
+
+        def long_text(id):
+            return random.Random(899 + id).getrandbits(120000).to_bytes(15000, "little").hex()
+
+        def insert_long(id):
+            query(f"INSERT INTO {table} VALUES ({id},'{long_text(id)}')", "INSERT 0 1")
+
+        for id in (1, 2):
+            insert_long(id)
+        checkpoint()
+        remaining = toast_chunks(images(table)[1])
+        assert len({key[0] for key in remaining}) == 2
+        for id in range(3, 9):
+            insert_long(id)
+        query("BEGIN", "BEGIN", b"T")
+        query(f"DELETE FROM {table} WHERE id BETWEEN 3 AND 8", "DELETE 6", b"T")
+        query("COMMIT", "COMMIT")
+        checkpoint()
+
+        expected = [[str(id), long_text(id)] for id in (1, 2)] + [["97", None], ["98", ""], ["99", "inline"]]
+        read_rows(table, expected)
+
+        def main_files():
+            return {path.name: (path.stat().st_ino, path.read_bytes())
+                    for path in database.glob(table + ".*")
+                    if path.is_file() and not path.name.startswith(table + ".toast")}
+
+        before_main = main_files()
+        assert f"{table}.dt" in before_main and f"{table}.idx" in before_main
+        _, before_toast, before_index = images(table)
+        original = toast_chunks(before_toast)
+        assert remaining < original and len({key[0] for key in original}) == 8
+        counter = database / f"{table}.toastmeta"
+        counter_before = counter.read_bytes()
+
+        query(f"VACUUM (FULL, PROCESS_MAIN FALSE) {table}", "VACUUM")
+        _, compacted, after_index = images(table)
+        assert len(compacted) < len(before_toast), "TOAST-only FULL must shrink the physical extent"
+        assert toast_chunks(compacted) == remaining, "TOAST rewrite must preserve exactly the live chunk IDs"
+        assert after_index != before_index
+        assert main_files() == before_main, "TOAST-only FULL must leave all main files and inodes intact"
+        assert counter.read_bytes() == counter_before
+
+        # Cold recovery sees the completed rewrite without a checkpoint or a
+        # graceful server close after VACUUM acknowledges it.
+        cold_restart(crash=True)
+        read_rows(table, expected)
+        assert images(table)[1:] == (compacted, after_index)
+        assert main_files() == before_main and counter.read_bytes() == counter_before
+        assert not (database / f".{table}.vacuum_full_pending").exists()
+        insert_long(9)
+        read_rows(table, expected[:2] + [["9", long_text(9)]] + expected[2:])
+        checkpoint()
+        new_chunks = toast_chunks(images(table)[1])
+        added = new_chunks - remaining
+        assert remaining < new_chunks and len({key[0] for key in added}) == 1
+        assert {key[0] for key in added}.isdisjoint({key[0] for key in original})
+        print(f"[VACUUM TOAST FULL] {len(before_toast)} -> {len(compacted)} bytes, exact cold rows")
+
+    def check_full_without_toast_data():
+        fixed = "vacuum_fixed"
+        fixed_files = [database / f"{fixed}.{suffix}" for suffix in ("dt", "idx")]
+        fixed_before = [path.read_bytes() for path in fixed_files]
+        query(f"VACUUM (FULL, PROCESS_MAIN FALSE) {fixed}", "VACUUM")
+        assert [path.read_bytes() for path in fixed_files] == fixed_before
+        assert not list(database.glob(f"{fixed}.toast*"))
+
+        table = "vacuum_inline_toast"
+        query(f"CREATE TABLE {table} (id INT PRIMARY KEY, payload TEXT)", "CREATE TABLE")
+        query(f"INSERT INTO {table} VALUES (1,'inline'),(2,NULL),(3,'')", "INSERT 0 3")
+        checkpoint()
+        main_before, toast_before, _ = images(table)
+        primary = database / f"{table}.idx"
+        primary_before = primary.read_bytes()
+        assert len(toast_before) == PAGE_SIZE and not toast_chunks(toast_before)
+        query(f"VACUUM (FULL, PROCESS_MAIN FALSE) {table}", "VACUUM")
+        main_after, toast_after, _ = images(table)
+        assert main_after == main_before and primary.read_bytes() == primary_before
+        assert len(toast_after) == PAGE_SIZE and not toast_chunks(toast_after)
+        read_rows(table, [["1", "inline"], ["2", None], ["3", ""]])
 
     cases = (
         ("vacuum_main_only", " (PROCESS_TOAST FALSE)", True, False),
@@ -261,6 +348,8 @@ def main():
         for table, after in post_vacuum.items():
             read_rows(table)
             assert images(table) == after, f"{table} did not retain its VACUUM state after reopening"
+        check_toast_only_full()
+        check_full_without_toast_data()
         print("[VACUUM RELATION OPTIONS PROTOCOL E2E] passed")
     finally:
         runner.stop_ours(server)

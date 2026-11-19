@@ -31,6 +31,7 @@ struct State {
     uint64_t xid = 0, oldIdentity = 0, newIdentity = 0;
     bool undone = false;
     std::vector<File> files;
+    bool toastOnly = false;
 };
 inline bool leaf(const std::string& value) {
     return !value.empty() && value != "." && value != ".." &&
@@ -42,7 +43,9 @@ inline bool validState(const State& s) {
     if (!leaf(s.database) || !leaf(s.table) || !leaf(s.backupLeaf) ||
         s.backupLeaf.rfind(prefix, 0) != 0 || s.backupLeaf.size() == prefix.size() ||
         s.backupLeaf.find_first_not_of("0123456789", prefix.size()) != std::string::npos ||
-        s.xid == 0 || s.newIdentity == 0 || s.newIdentity == s.oldIdentity ||
+        s.xid == 0 ||
+        (s.toastOnly ? s.newIdentity != s.oldIdentity :
+            (s.newIdentity == 0 || s.newIdentity == s.oldIdentity)) ||
         s.newIdentity == std::numeric_limits<uint64_t>::max() ||
         s.files.empty() || s.files.size() > 16384) return false;
     size_t schemas = 0, dirty = 0;
@@ -52,6 +55,11 @@ inline bool validState(const State& s) {
             !names.emplace(static_cast<uint32_t>(f.role), f.name).second) return false;
         if (f.role == Role::Physical) { if (!leaf(f.name)) return false; }
         else if (!f.name.empty()) return false;
+        if (s.toastOnly &&
+            (f.role != Role::Physical ||
+             (f.name != s.table + ".toast.dt" && f.name != s.table + ".toast.idx" &&
+              f.name != s.table + ".toast.dt.tde" && f.name != s.table + ".toast.idx.tde")))
+            return false;
         if (f.role == Role::Schema) { ++schemas; if (!f.present) return false; }
         if (f.role == Role::SpecializedDirty) ++dirty;
         if (f.present) {
@@ -59,7 +67,13 @@ inline bool validState(const State& s) {
                 f.digest.find_first_not_of("0123456789abcdef") != std::string::npos) return false;
         } else if (f.size != 0 || f.mode != 0 || !f.digest.empty()) return false;
     }
-    return schemas == 1 && dirty <= 1;
+    if (!s.toastOnly) return schemas == 1 && dirty <= 1;
+    if (s.files.size() != 4) return false;
+    for (const auto& f : s.files) {
+        if ((f.name == s.table + ".toast.dt" || f.name == s.table + ".toast.idx") &&
+            !f.present) return false;
+    }
+    return true;
 }
 template<class T> inline void append(std::string& bytes, T value) {
     bytes.append(reinterpret_cast<const char*>(&value), sizeof(value));
@@ -71,7 +85,7 @@ inline std::string encode(const State& s) {
     if (!validState(s)) return {};
     std::string b;
     append(b, uint32_t{0x31424656}); // VFB1
-    append(b, uint32_t{1});
+    append(b, uint32_t(s.toastOnly ? 2 : 1));
     appendString(b, s.database); appendString(b, s.table); appendString(b, s.backupLeaf);
     append(b, s.xid); append(b, s.oldIdentity); append(b, s.newIdentity);
     append(b, uint32_t(s.undone));
@@ -101,12 +115,14 @@ inline bool decode(const std::string& bytes, State& result) {
         value.assign(bytes.data() + offset, n); offset += n; return true;
     };
     uint32_t magic = 0, version = 0, count = 0, undone = 0;
-    if (!read(magic) || !read(version) || magic != 0x31424656 || version != 1 ||
+    if (!read(magic) || !read(version) || magic != 0x31424656 ||
+        (version != 1 && version != 2) ||
         !text(result.database) || !text(result.table) || !text(result.backupLeaf) ||
         !read(result.xid) || !read(result.oldIdentity) || !read(result.newIdentity) ||
         !read(undone) || undone > 1 ||
         !read(count) || count == 0 || count > 16384) return false;
     result.undone = undone != 0;
+    result.toastOnly = version == 2;
     result.files.reserve(count);
     for (uint32_t i = 0; i < count; ++i) {
         File f; uint32_t role = 0, present = 0;

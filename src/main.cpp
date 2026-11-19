@@ -4531,9 +4531,6 @@ static bool handleVacuum(const string& sql, Session& s) {
         throw dbms::DbError(
             "25001", "VACUUM cannot run inside a transaction block");
     }
-    if (full && !processMain) {
-        throw dbms::DbError("0A000", "VACUUM FULL of TOAST alone is not supported");
-    }
     if (freeze) {
         throw dbms::DbError(
             "0A000", "VACUUM FREEZE is not supported by this storage engine");
@@ -4561,7 +4558,7 @@ static bool handleVacuum(const string& sql, Session& s) {
         if (full) {
             bool succeeded = false;
             processed = g_engine.vacuumFull(
-                s.currentDB, table, &succeeded);
+                s.currentDB, table, &succeeded, processMain);
             if (!succeeded) {
                 throw dbms::DbError(
                     "XX000", "VACUUM FULL failed for relation \"" +
@@ -4569,7 +4566,7 @@ static bool handleVacuum(const string& sql, Session& s) {
             }
             if (verbose) {
                 cout << "VACUUM FULL: " << table << ": " << processed
-                     << " rows rewritten" << endl;
+                     << (processMain ? " rows rewritten" : " TOAST values rewritten") << endl;
             }
         } else if (processMain) {
             processed = g_engine.vacuum(
@@ -4602,7 +4599,7 @@ static bool handleVacuum(const string& sql, Session& s) {
     if (workers > 1) mode += " (PARALLEL " + to_string(workers) + ")";
     if (full) {
         cout << "VACUUM" << mode << " completed, " << total
-             << " rows rewritten" << endl;
+             << (processMain ? " rows rewritten" : " TOAST values rewritten") << endl;
     } else {
         cout << "VACUUM" << mode << " completed, " << total
              << " pages freed" << endl;

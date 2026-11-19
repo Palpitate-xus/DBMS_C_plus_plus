@@ -19,6 +19,13 @@ cmake --build build/cmake --parallel 2
 ## 最近更新
 
 <details>
+<summary>长值文件可以单独缩小 · 2026-11-18</summary>
+
+删除许多长文本后，可以只整理存放这些内容的文件，把不再使用的空间还给磁盘。
+
+</details>
+
+<details>
 <summary>可以分开清理主表和长值 · 2026-11-18</summary>
 
 普通 `VACUUM` 可以只清理主表，也可以只清理单独存放的长值。还可以只更新统计信息。
@@ -29,13 +36,6 @@ cmake --build build/cmake --parallel 2
 <summary>清理表时可以少读一遍数据 · 2026-11-18</summary>
 
 没有额外存放长值时，`VACUUM` 会省掉查找这些值的第二遍扫描。
-
-</details>
-
-<details>
-<summary>整理表后，范围查询可以少读数据 · 2026-11-18</summary>
-
-运行 `VACUUM FULL` 整理表后，符合条件的查询可以马上用索引跳过无关数据。
 
 </details>
 

@@ -1222,7 +1222,7 @@ public:
                   bool processToast = true);
     // VACUUM FULL: rewrite table entirely, reclaiming all dead space
     size_t vacuumFull(const std::string& dbname, const std::string& tablename,
-                      bool* succeeded = nullptr);
+                      bool* succeeded = nullptr, bool processMain = true);
 
     // Auto-VACUUM: per-table dead tuple tracking and automatic triggering
     void maybeAutoVacuum(const std::string& dbname, const std::string& tablename);
@@ -1967,6 +1967,10 @@ public:
     std::vector<std::string> listTablespaces(const std::string& dbname) const;
 
 private:
+
+    size_t vacuumToastLocked(const std::string& dbname, const std::string& tablename,
+                             bool* succeeded, const ReadView* rewriteView = nullptr,
+                             const std::filesystem::path& staging = {});
 
     enum class GiSTOrderingRole { SqlScalar, BinaryLikePrefix };
     std::optional<std::vector<int64_t>> tryGiSTCandidates(
