@@ -919,7 +919,7 @@ table_target = table_name [(column_name [, ...])]
 
 普通 `VACUUM` 回收已删除行占用的空间。未指定表名时处理当前库的表。常用选项包括 `FULL`、`ANALYZE`、`VERBOSE`、`PARALLEL integer`、`PROCESS_MAIN boolean` 和 `PROCESS_TOAST boolean`。`PARALLEL 0` 按串行模式运行。两个清理选项默认开启，可以独立关闭。`ANALYZE` 仍会更新统计。表名后写列清单时需要启用 `ANALYZE`。
 
-`VACUUM FULL` 默认重写主表、已有的长值数据文件及两者的索引。使用 `PROCESS_MAIN FALSE` 时，只重写长值文件及其索引。`FULL` 与 `PROCESS_TOAST FALSE` 组合时返回 `0A000`。`FREEZE` 尚未支持。`VACUUM` 应在事务块之外调用。[使用示例与边界](MANUAL.md#分开清理主表和长值)
+`VACUUM FULL` 默认重写主表、已有的长值数据文件及两者的索引。使用 `PROCESS_MAIN FALSE` 时，只重写长值文件及其索引。`FULL` 与 `PROCESS_TOAST FALSE` 组合时返回 `0A000`。`FREEZE` 尚未支持。`VACUUM` 应在事务块之外调用。[使用示例与边界](MANUAL.md#分开清理主表和长值) · [查看进度](MANUAL.md#查看表维护进度)
 
 **示例**
 ```sql
@@ -1517,7 +1517,7 @@ ANALYZE TABLE table_name
 ANALYZE TABLE table_name COLUMNS (column1, column2, ...)
 ```
 
-**说明** 收集表和列的统计信息，供查询优化器使用。表名后可以指定各自要更新的列。项目扩展 `ANALYZE TABLE ... COLUMNS` 收集多列联合统计。[使用示例](MANUAL.md#只更新指定列的统计)
+**说明** 收集表和列的统计信息，供查询优化器使用。表名后可以指定各自要更新的列。项目扩展 `ANALYZE TABLE ... COLUMNS` 收集多列联合统计。[使用示例](MANUAL.md#只更新指定列的统计) · [查看进度](MANUAL.md#查看表维护进度)
 
 **示例**
 ```sql

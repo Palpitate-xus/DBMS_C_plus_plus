@@ -76,6 +76,8 @@
 #include "catalog/namespace_catalog.h"
 #include "catalog/namespace_query.h"
 #include "catalog/pg_stats_query.h"
+#include "catalog/MaintenanceProgressView.h"
+#include "process/MaintenanceProgress.h"
 #include "catalog/pg_sequence_query.h"
 #include "catalog/collation.h"
 #include "catalog/systables.h"
@@ -19596,9 +19598,146 @@ static string expandSessionUserVariables(const string& input,
     return output;
 }
 
+// Progress rows come from the independent backend registry, so a monitoring
+// query can run while its target owns the database's physical rewrite lock.
+static bool executeMaintenanceProgressQuery(const string& rawSql, const Session& session, bool& handled) {
+    handled = false;
+    constexpr string_view needle = "pg_stat_progress_";
+    if (std::search(rawSql.begin(), rawSql.end(), needle.begin(), needle.end(),
+            [](unsigned char a, char b) { return std::tolower(a) == b; }) == rawSql.end()) return false;
+    dbms::SQLParser parser;
+    const auto parsed = parser.parse(rawSql);
+    const auto* select = parsed.success ? dynamic_cast<const dbms::SelectStmt*>(parsed.stmt.get()) : nullptr;
+    dbms::maintenance_progress_view::Kind kind;
+    string name;
+    if (!dbms::maintenance_progress_view::source(select, kind, name)) return false;
+    handled = true;
+    const auto projection = dbms::maintenance_progress_view::projection(*select, kind, name);
+    const auto& fields = dbms::maintenance_progress_view::fields(kind);
+    const string qualifier = select->fromClause->alias.empty() ? name :
+        dbms::maintenance_progress_view::unquote(select->fromClause->alias);
+    map<string, string> hints;
+    for (const auto& field : fields) {
+        hints[field.first] = field.second;
+        hints[qualifier + "." + field.first] = field.second;
+        if (select->fromClause->alias.empty()) hints["pg_catalog." + name + "." + field.first] = field.second;
+    }
+    function<void(const dbms::Expr*)> validate = [&](const dbms::Expr* value) {
+        if (!value) return;
+        if (const auto* col = dynamic_cast<const dbms::ColumnRefExpr*>(value)) {
+            if ((!col->table.empty() && col->table != qualifier) ||
+                (!col->schema.empty() && (col->schema != "pg_catalog" || !select->fromClause->alias.empty())))
+                throw dbms::DbError("42P01", "missing FROM-clause entry");
+            if (none_of(fields.begin(), fields.end(), [&](const auto& f) { return f.first == col->column; }))
+                throw dbms::DbError("42703", "column does not exist: " + col->column);
+            return;
+        }
+        if (dynamic_cast<const dbms::LiteralExpr*>(value)) return;
+        if (const auto* unary = dynamic_cast<const dbms::UnaryOpExpr*>(value)) { validate(unary->operand.get()); return; }
+        if (const auto* binary = dynamic_cast<const dbms::BinaryOpExpr*>(value)) {
+            validate(binary->left.get()); validate(binary->right.get()); return;
+        }
+        if (const auto* cast = dynamic_cast<const dbms::CastExpr*>(value)) { validate(cast->operand.get()); return; }
+        throw dbms::DbError("0A000", "progress view predicate is not supported");
+    };
+    validate(select->whereClause.get());
+    if (select->whereClause) {
+        const auto type = dbms::ExprHelper::inferResultType(select->whereClause->toString(), hints);
+        if (type != "boolean" && type != "bool")
+            throw dbms::DbError("42804", "argument of WHERE must be type boolean");
+    }
+    const auto command = kind == dbms::maintenance_progress_view::Kind::Vacuum ? dbms::MaintenanceCommand::Vacuum :
+        kind == dbms::maintenance_progress_view::Kind::Analyze ? dbms::MaintenanceCommand::Analyze : dbms::MaintenanceCommand::VacuumFull;
+    const auto progress = dbms::getMaintenanceProgress(command);
+    const string role = effectiveSessionRole(session);
+    // Read the cluster role model through its committed catalog lease. The
+    // mutable catalogService() would promote an unrelated database snapshot
+    // and block an observer while FULL owns that database exclusively.
+    shared_ptr<dbms::CatalogManager> roles;
+    if (!progress.empty()) {
+        const auto& readEngine = static_cast<const dbms::StorageEngine&>(g_engine);
+        auto& catalogService = const_cast<dbms::CatalogService&>(readEngine.catalogService());
+        try { roles = catalogService.acquire("info"); }
+        catch (const dbms::DbError& error) {
+            if (error.sqlState() != "55P03" && error.sqlState() != "3D000") throw;
+        }
+    }
+    const auto actor = roles ? roles->getAuthIdByName(role) : optional<dbms::PgAuthIdRow>{};
+    const auto hasRole = [&](const string& wanted) {
+        if (!roles || !actor) return false;
+        const auto target = roles->getAuthIdByName(wanted);
+        if (!target) return false;
+        if (actor->oid == target->oid) return true;
+        if (!actor->rolinherit) return false;
+        set<dbms::Oid> visited;
+        function<bool(dbms::Oid)> find = [&](dbms::Oid member) {
+            if (!visited.insert(member).second) return false;
+            for (const auto& membership : roles->findAuthMemberships(member))
+                if (membership.roleid == target->oid || find(membership.roleid)) return true;
+            return false;
+        };
+        return find(actor->oid);
+    };
+    const bool canReadAll = actor && (actor->rolsuper || actor->rolname == "admin" ||
+        hasRole("admin") || hasRole("pg_read_all_stats"));
+    dbms::ExprEvaluator evaluator;
+    evaluator.setCurrentDB(session.currentDB);
+    vector<vector<string>> rows;
+    vector<vector<bool>> nulls;
+    size_t matched = 0;
+    for (const auto& entry : progress) {
+        const bool visible = canReadAll || role == entry.user || hasRole(entry.user);
+        vector<dbms::ExprValue> values;
+        values.reserve(fields.size());
+        values.emplace_back("integer", to_string(entry.pid), false);
+        values.emplace_back("oid", "", true); // database OIDs are not yet represented
+        values.emplace_back("name", entry.database, false);
+        values.emplace_back("oid", to_string(entry.relation), !visible || entry.relation == 0);
+        if (kind == dbms::maintenance_progress_view::Kind::Cluster)
+            values.emplace_back("text", "VACUUM FULL", !visible);
+        values.emplace_back("text", entry.phase ? entry.phase : "", !visible || !entry.phase);
+        const size_t counterStart = values.size();
+        for (size_t i = counterStart; i < fields.size(); ++i) {
+            const size_t counter = i - counterStart;
+            const bool delay = fields[i].first == "delay_time";
+            const uint64_t number = delay ? 0 : entry.counters[counter];
+            if (!delay && fields[i].second == "bigint" && number > uint64_t(numeric_limits<int64_t>::max()))
+                throw dbms::DbError("22003", "maintenance progress counter out of range");
+            values.emplace_back(fields[i].second, to_string(number), !visible);
+        }
+        dbms::RowContext context;
+        for (size_t i = 0; i < fields.size(); ++i) {
+            context.set(fields[i].first, values[i]);
+            context.set(qualifier + "." + fields[i].first, values[i]);
+            if (select->fromClause->alias.empty()) context.set("pg_catalog." + name + "." + fields[i].first, values[i]);
+        }
+        if (select->whereClause) {
+            const auto result = evaluator.eval(select->whereClause.get(), context);
+            if (!result.isNull && result.typeName != "boolean" && result.typeName != "bool")
+                throw dbms::DbError("42804", "argument of WHERE must be type boolean");
+            if (result.isNull || !result.asBool()) continue;
+        }
+        if (matched++ < select->offset.value_or(0)) continue;
+        if (rows.size() >= select->limit.value_or(numeric_limits<size_t>::max())) break;
+        vector<string> row;
+        vector<bool> bitmap;
+        for (const auto& column : projection) { row.push_back(values[column.index].value); bitmap.push_back(values[column.index].isNull); }
+        rows.push_back(std::move(row)); nulls.push_back(std::move(bitmap));
+    }
+    vector<string> headers, types;
+    for (const auto& column : projection) { headers.push_back(column.name); types.push_back(fields[column.index].second); }
+    publishStructuredUtilityResult(headers, types, rows, nulls, "SELECT " + to_string(rows.size()));
+    for (const auto& header : headers) cout << renderLegacyHeader(header) << ' ';
+    cout << '\n';
+    for (size_t i = 0; i < rows.size(); ++i) {
+        for (size_t j = 0; j < rows[i].size(); ++j) cout << (nulls[i][j] ? "NULL" : rows[i][j]) << ' ';
+        cout << '\n';
+    }
+    return false;
+}
+
 // Expose only the activity columns backed by ProcessInfo, with PostgreSQL
-// types and query-text visibility rules.  The old text renderer ignored the
-// caller's projection/filter and exposed every session's SQL to every role.
+// types and query-text visibility rules.
 static bool executePgStatActivityQuery(const string& rawSql,
                                        const Session& session) {
     dbms::SQLParser parser;
@@ -23098,6 +23237,11 @@ static bool executeInternal(const string& rawSql, Session& s) {
         return true;
     }
     string sql = sqlProcessor(effectiveRawSql);
+    {
+        bool handled = false;
+        const bool failed = executeMaintenanceProgressQuery(effectiveRawSql, s, handled);
+        if (handled) return failed;
+    }
     // A query expression may legally start with a parenthesized SELECT. Route
     // such set operations before legacy statement-prefix handlers can mistake
     // the opening parenthesis for an unrecognized command. Ordinary SELECTs
@@ -41080,6 +41224,11 @@ static bool executeWithCteInheritance(const std::string& inputSql, Session& s,
         const auto parsed = parser.parseForBinding(rawSql);
         databaseIndependentQuery = parsed.success && parsed.stmt &&
             dbms::SQLParser::isDatabaseIndependentQuery(*parsed.stmt);
+        dbms::maintenance_progress_view::Kind progressKind;
+        std::string progressName;
+        const auto* select = parsed.success ? dynamic_cast<const dbms::SelectStmt*>(parsed.stmt.get()) : nullptr;
+        databaseIndependentQuery = databaseIndependentQuery ||
+            dbms::maintenance_progress_view::source(select, progressKind, progressName);
     }
     if (outermost && g_engine.databaseTransactionOwnershipDeferred() &&
         !databaseIndependentQuery && command != dbms::SqlCommand::Begin &&

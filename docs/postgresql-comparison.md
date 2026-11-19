@@ -2,6 +2,10 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-19 · 三个表维护进度视图
+
+PostgreSQL 18.6 和本项目都把 `VACUUM FULL` 进度放在 `pg_stat_progress_cluster` 中。普通清理和统计更新各有自己的视图。项目按实际页和已写入的行计数，表编号来自目录。数据库编号、分区统计、限速等待时间、自动维护进程和视图组合查询仍有差距。[PostgreSQL 进度说明](https://www.postgresql.org/docs/18/progress-reporting.html) · [本项目用法](MANUAL.md#查看表维护进度)
+
 ## 2026-11-19 · 指定要分析的列
 
 PostgreSQL 18.6 和本项目都支持在 `ANALYZE` 或 `VACUUM (ANALYZE)` 的表名后指定列。共同检查覆盖按列刷新、多表、重复和缺失列、带引号的列名，以及重写后继续读取未选列的统计。采样实现、统计类型覆盖、继承统计和命令进度视图仍有差距。[PostgreSQL ANALYZE](https://www.postgresql.org/docs/18/sql-analyze.html) · [本项目验证](test-report.md#vacuum-target-columns-20261119)

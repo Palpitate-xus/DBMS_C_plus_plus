@@ -2,6 +2,19 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="maintenance-progress-views-20261119"></a>
+## 2026-11-19 · 实时查看表维护进度
+
+PostgreSQL 18.6 的参考服务完成了 471 组协议交互，独立复核比对列名、类型、计数和权限。普通清理实际进入扫表和清理索引阶段。分析采样读到 600 页。一次 FULL 扫描并写入了 4,500 行，只在重写进度视图中出现。在参考库中，无权查看详情的角色仍能看到进程号和数据库身份。三个命令在等待表锁时以及结束后没有进度行。[PostgreSQL 18.6 视图定义](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/catalog/system_views.sql) · [权限实现](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/utils/adt/pgstatfuncs.c#L235-L301)
+
+项目协议测试用实际页锁暂停三个命令。每次暂停时保留四个数据页，已扫描一页。并行清理可报告其他工作线程完成的三页。另一连接通过简单和扩展协议读取 FULL 进度，校验了真实进程号、表编号、列类型及角色可见性。取消、锁超时、断开和正常完成后，进度行均清除。同名的查询内临时结果保持原有解析。三个手册查询也都通过。[协议回归](../tests/maintenance_progress_protocol_e2e_test.py)
+
+正式测量前还观察了三个无人工暂停的维护命令。所见进度行的表编号与目录一致，命令完成后视图为空。受测程序 SHA-256 为 `5d7b08aa17927b85915b12034b1a7c025aa5823d9e979367b8938d997dbb276f`。[性能报告](performance-report-2026-10-30.md#maintenance-progress-views-cost-20261119)
+
+七项协议回归及三项原生回归通过。原生回归覆盖 33 个冷恢复阶段、并行清理和页锁。较广的协议脚本在对照版和第一版候选中都因既有 `search_path` 用例失败。它预期错误码 `22023`，两版实际都返回 `42601`。完整回归套件待验证。
+
+SQLite 通过连接级回调报告虚拟机指令进度。DuckDB 的连接级接口提供处理行数和百分比。[SQLite 进度回调](https://www.sqlite.org/c3ref/progress_handler.html) · [DuckDB 查询进度](https://duckdb.org/docs/current/clients/c/connect#duckdb_query_progress)
+
 <a id="vacuum-target-columns-20261119"></a>
 ## 2026-11-19 · 只更新指定列的统计
 

@@ -10,6 +10,8 @@ Partial as of 2026-11-19.
 
 Both `ANALYZE` and `VACUUM (ANALYZE)` accept per-table column lists. Only requested column statistics are refreshed. Existing statistics remain visible under either verified schema image after FULL recovery. The command still has gaps in inheritance behavior, the range of supported options and maintenance progress reporting. [Usage](MANUAL.md#只更新指定列的统计) · [Verification](test-report.md#vacuum-target-columns-20261119)
 
+Direct queries now show progress for ordinary VACUUM, ANALYZE and VACUUM FULL. The reported stages correspond to work the project performs, and other users receive the public process and database name with private fields hidden. PostgreSQL database OIDs, additional phases and general queries over these views remain open. [Usage](MANUAL.md#查看表维护进度) · [PostgreSQL progress reporting](https://www.postgresql.org/docs/18/progress-reporting.html)
+
 The following sections describe the earlier repair and its verification.
 
 ## Reproduced behavior

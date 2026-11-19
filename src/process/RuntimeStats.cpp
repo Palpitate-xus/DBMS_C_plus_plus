@@ -1,4 +1,5 @@
 #include "RuntimeStats.h"
+#include "MaintenanceProgress.h"
 #include "StatsPersistence.h"
 
 #include <algorithm>
@@ -14,6 +15,16 @@
 
 namespace dbms {
 namespace {
+
+struct MaintenanceProgressRegistry {
+    std::mutex mutex;
+    std::map<int32_t, MaintenanceProgressRow*> rows;
+};
+
+MaintenanceProgressRegistry& progressRegistry() {
+    static MaintenanceProgressRegistry registry;
+    return registry;
+}
 
 // StorageEngine is a process-global object in the CLI.  It persists runtime
 // statistics from its destructor, so ordinary namespace-scope maps/mutexes
@@ -237,6 +248,67 @@ RuntimeTableStats& tableStatEntry(const std::string& dbname, const std::string& 
 }
 
 } // namespace
+
+ScopedMaintenanceProgress::ScopedMaintenanceProgress(MaintenanceCommand command, uint64_t pid,
+        const std::string& database, const std::string& user, uint32_t relation) noexcept
+    : row_{command, 0, {}, {}, relation, "initializing", {}} {
+    if (!pid || pid > static_cast<uint64_t>(std::numeric_limits<int32_t>::max()) ||
+        database.empty()) return;
+    try {
+        row_.database = database;
+        row_.user = user;
+        auto& registry = progressRegistry();
+        std::lock_guard<std::mutex> lock(registry.mutex);
+        const auto backend = static_cast<int32_t>(pid);
+        auto [entry, inserted] = registry.rows.try_emplace(backend, &row_);
+        if (!inserted) {
+            previous_ = entry->second;
+            entry->second = &row_;
+        }
+        row_.pid = backend;
+    } catch (const std::bad_alloc&) {
+        // Failure to allocate an observation must not stop maintenance.
+    }
+}
+
+ScopedMaintenanceProgress::~ScopedMaintenanceProgress() {
+    if (!row_.pid) return;
+    auto& registry = progressRegistry();
+    std::lock_guard<std::mutex> lock(registry.mutex);
+    const auto entry = registry.rows.find(row_.pid);
+    if (previous_) entry->second = previous_;
+    else registry.rows.erase(entry);
+}
+
+void ScopedMaintenanceProgress::publish(const char* phase, const MaintenanceCounters& counters) {
+    if (!row_.pid) return;
+    std::lock_guard<std::mutex> lock(progressRegistry().mutex);
+    row_.phase = phase;
+    row_.counters = counters;
+}
+
+void ScopedMaintenanceProgress::setPhase(const char* phase) {
+    if (!row_.pid) return;
+    std::lock_guard<std::mutex> lock(progressRegistry().mutex);
+    row_.phase = phase;
+}
+
+void ScopedMaintenanceProgress::addVacuumPages(uint64_t scanned, uint64_t compacted) {
+    if (!row_.pid || !scanned) return;
+    std::lock_guard<std::mutex> lock(progressRegistry().mutex);
+    row_.counters[1] += scanned;
+    row_.counters[2] += compacted;
+}
+
+std::vector<MaintenanceProgressRow> getMaintenanceProgress(MaintenanceCommand command) {
+    auto& registry = progressRegistry();
+    std::lock_guard<std::mutex> lock(registry.mutex);
+    std::vector<MaintenanceProgressRow> rows;
+    for (const auto& entry : registry.rows) {
+        if (entry.second->command == command) rows.push_back(*entry.second);
+    }
+    return rows;
+}
 
 void recordQueryExecution(const std::string& sql, double elapsedMs,
                           const std::string& dbname, bool succeeded,

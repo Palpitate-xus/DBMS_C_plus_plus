@@ -70,6 +70,7 @@
 #include "common/TemporalStorageCodec.h"
 #include "expression/float8_output.inc"
 #include "process/RuntimeStats.h"
+#include "process/MaintenanceProgress.h"
 #include "process/SqlStats.h"
 #include "access/BrinIndexFormat.h"
 #include "access/GiSTIndexFormat.h"
@@ -7231,6 +7232,42 @@ private:
     std::optional<BufferedNullRowBinding> binding_;
 };
 
+namespace {
+const std::string& maintenanceUser(const Session* session) {
+    static const std::string empty;
+    if (!session) return empty;
+    return session->authenticatedUser.empty() ? session->username : session->authenticatedUser;
+}
+
+uint32_t maintenanceRelation(const StorageEngine& engine, const std::string& database,
+                             const std::string& table) {
+    const auto logical = analyzed_statistics::capture_detail::relationName(table);
+    const auto model = engine.catalogService().metadataSnapshot(database, false);
+    const auto ns = std::find_if(model.namespaces.begin(), model.namespaces.end(),
+        [&](const auto& row) { return row.nspname == logical.schema; });
+    if (ns == model.namespaces.end()) return 0;
+    const auto relation = std::find_if(model.relations.begin(), model.relations.end(),
+        [&](const auto& row) {
+            return row.relnamespace == ns->oid && row.relname == logical.name &&
+                (row.relkind == 'r' || row.relkind == 'p' || row.relkind == 'm');
+        });
+    return relation == model.relations.end() ? 0 : relation->oid;
+}
+
+uint32_t maintenanceProgressRelation(const StorageEngine& engine, const std::string& database,
+                                     const std::string& table, const Session* session) {
+    if (!session || !session->pid) return 0;
+    try {
+        return maintenanceRelation(engine, database, table);
+    } catch (const DbError&) {
+        // A missing optional observation does not change maintenance results.
+        return 0;
+    }
+}
+
+constexpr uint32_t maintenancePageInterval = 32;
+} // namespace
+
 bool StorageEngine::analyzeTable(const std::string& dbname,
                                  const std::string& tablename,
                                  const std::vector<std::string>& columns) {
@@ -7279,6 +7316,9 @@ bool StorageEngine::analyzeTable(const std::string& dbname,
     analyzed_statistics::ScalarStatisticsCapture typedAnalysis(
         tbl, tablename, schemaPath(dbname, tablename),
         catalogService().metadataSnapshot(dbname,false), columns.empty() ? nullptr : &selected);
+    const auto* session = currentSession();
+    ScopedMaintenanceProgress progress(MaintenanceCommand::Analyze, session ? session->pid : 0,
+        dbname, maintenanceUser(session), typedAnalysis.relation());
 
     TableStats stats;
     stats.rowCount = 0;
@@ -7339,7 +7379,8 @@ bool StorageEngine::analyzeTable(const std::string& dbname,
             typedAnalysis.cell(i, val, false, row, tbl);
             allVals[tbl.cols[i].dataName].push_back(val);
         }
-    })) return false;
+    }, nullptr, {}, true, false, progress ? &progress : nullptr)) return false;
+    progress.setPhase("computing statistics");
     auto typedStatistics = typedAnalysis.finish([](const Column& column,
         const std::vector<analyzed_statistics::ScalarSample>& sample)
         -> analyzed_statistics::ScalarStatisticsCapture::IndexedComparison {
@@ -7524,6 +7565,7 @@ bool StorageEngine::analyzeTable(const std::string& dbname,
         }
     }
     markTransactionBackupDirty();
+    progress.setPhase("finalizing analyze");
     if (!index_file::writeAtomically(spath, serialized.str())) return false;
     if (refreshColumns && typedAnalysis.hasIdentity()) {
         const auto publication = analyzed_statistics::updateRelation(
@@ -9131,12 +9173,29 @@ void StorageEngine::noteScanSiread(const std::string& dbname,
     }
 }
 
+namespace {
+struct HeapPageReadGuard {
+    LockManager& locks;
+    PageAllocator& allocator;
+    const std::string& db;
+    const std::string& table;
+    uint32_t page;
+    bool pinned = false;
+
+    ~HeapPageReadGuard() {
+        if (pinned) allocator.unpinPage(page);
+        locks.pageUnlock(db, table, page);
+    }
+};
+} // namespace
+
 bool StorageEngine::forEachRow(const std::string& dbname, const std::string& tablename,
                                 const std::function<void(uint32_t, uint16_t, const char*, size_t)>& callback,
                                 const ReadView* readView,
                                 const std::vector<std::string>& targetPartitions,
                                 bool registerSiread,
-                                bool indexMaintenanceView) const {
+                                bool indexMaintenanceView,
+                                ScopedMaintenanceProgress* progress) const {
     ReadView autocommitView, commandInternalView;
     const auto* rv = prepareRowScanView(dbname, tablename, readView,
         indexMaintenanceView, autocommitView, commandInternalView);
@@ -9247,6 +9306,18 @@ bool StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
         g_condNullTable.clear(); g_condNullDb.clear();
     };
 
+    MaintenanceCounters scanCounters{};
+    const auto reportSampleRange = [&](uint32_t pageCount) {
+        if (!progress) return;
+        scanCounters[0] += pageCount > 0 ? pageCount - 1 : 0;
+        progress->publish("acquiring sample rows", scanCounters);
+    };
+    const auto reportSamplePage = [&] {
+        if (!progress) return;
+        const auto scanned = ++scanCounters[1];
+        if (scanned == 1 || scanned == scanCounters[0] || scanned % maintenancePageInterval == 0)
+            progress->publish("acquiring sample rows", scanCounters);
+    };
     if (tbl.partitionType != TableSchema::PartitionType::None) {
         // Iterate physical leaves, including RANGE/LIST DEFAULT partitions
         // and hash subpartitions.  targetPartitions contains top-level names
@@ -9269,15 +9340,15 @@ bool StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
                     (leaf.subPartition.empty() ? "" : "#" + leaf.subPartition));
             if (!ppa) return false;
             const uint32_t pageCount = ppa->numPages();
+            reportSampleRange(pageCount);
             for (uint32_t pageId = 1; pageId < pageCount; ++pageId) {
                 checkForQueryInterrupt();
                 if (!lockManager_.pageLockShared(
                         dbname, tablename, pageId)) return false;
+                HeapPageReadGuard pin{lockManager_, *ppa, dbname, tablename, pageId};
                 char* buffer = ppa->fetchPage(pageId);
-                if (!buffer) {
-                    lockManager_.pageUnlock(dbname, tablename, pageId);
-                    return false;
-                }
+                if (!buffer) return false;
+                pin.pinned = true;
                 PageWrapper page(
                     buffer, ppa->pageSize(), tbl.formatVersion);
                 page.forEachLive(
@@ -9285,8 +9356,7 @@ bool StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
                                        size_t length) {
                         emitRow(pageId, slotId, data, length);
                     });
-                ppa->unpinPage(pageId);
-                lockManager_.pageUnlock(dbname, tablename, pageId);
+                reportSamplePage();
             }
         }
         return true;
@@ -9295,39 +9365,24 @@ bool StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
     PageAllocator* pa = getPageAllocator(dbname, tablename);
     if (!pa) return false;
     uint32_t np = pa->numPages();
+    reportSampleRange(np);
     for (uint32_t pid = 1; pid < np; ++pid) {
         checkForQueryInterrupt();
         if (!lockManager_.pageLockShared(dbname, tablename, pid)) return false;
+        HeapPageReadGuard pin{lockManager_, *pa, dbname, tablename, pid};
         char* buf = pa->fetchPage(pid);
-        if (!buf) {
-            lockManager_.pageUnlock(dbname, tablename, pid);
-            return false;
-        }
+        if (!buf) return false;
+        pin.pinned = true;
         PageWrapper page(buf, pa->pageSize(), tbl.formatVersion);
         page.forEachLive([&emitRow, pid](uint16_t sid, const char* data, size_t len) {
             emitRow(pid, sid, data, len);
         });
-        pa->unpinPage(pid);
-        lockManager_.pageUnlock(dbname, tablename, pid);
+        reportSamplePage();
     }
     return true;
 }
 
 namespace {
-struct HeapPageReadGuard {
-    LockManager& locks;
-    PageAllocator& allocator;
-    const std::string& db;
-    const std::string& table;
-    uint32_t page;
-    bool pinned = false;
-
-    ~HeapPageReadGuard() {
-        if (pinned) allocator.unpinPage(page);
-        locks.pageUnlock(db, table, page);
-    }
-};
-
 class PageHeapScanCursor final : public HeapScanCursor {
     std::function<bool(std::vector<HeapScanRow>&)> readPage_;
     std::vector<HeapScanRow> rows_;
@@ -14278,7 +14333,9 @@ DBStatus StorageEngine::dropCompositeIndex(const std::string& dbname,
 }
 
 DBStatus StorageEngine::reindex(const std::string& dbname,
-                                 const std::string& tablename) {
+                                 const std::string& tablename,
+                                 size_t* rebuiltCount) {
+    if (rebuiltCount) *rebuiltCount = 0;
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     if (!lockManager_.lockMetadata(tablename)) {
         return DBStatus::LOCK_CONFLICT;
@@ -14859,6 +14916,7 @@ DBStatus StorageEngine::reindex(const std::string& dbname,
     if (std::any_of(pending.begin(), pending.end(), [](const auto& index) { return !index.swap.paired; }) &&
         !clearSpecializedIndexDirty(*this, dbname, tablename)) return DBStatus::IO_ERROR;
 
+    if (rebuiltCount) *rebuiltCount = swapEntries.size();
     return DBStatus::OK;
 }
 
@@ -52037,6 +52095,9 @@ size_t StorageEngine::vacuum(const std::string& dbname,
         if (!lockManager_.lockExclusive(tablename)) return 0;
     }
 
+    const auto* session = currentSession();
+    ScopedMaintenanceProgress progress(MaintenanceCommand::Vacuum, session ? session->pid : 0,
+        dbname, maintenanceUser(session), maintenanceProgressRelation(*this, dbname, tablename, session));
     TableSchema tbl = getTableSchema(dbname, tablename);
     PageAllocator* pa = getPageAllocator(dbname, tablename);
     if (!pa) return 0;
@@ -52048,7 +52109,7 @@ size_t StorageEngine::vacuum(const std::string& dbname,
     // allocator's free list.  Disjoint page ranges run concurrently; every
     // storage primitive below (buffer pool pins, FSM/VM updates, page
     // frees) is internally serialized.
-    auto vacuumPage = [&](uint32_t pid) -> bool {
+    auto vacuumPage = [&](uint32_t pid, uint64_t& compacted) -> bool {
         checkForQueryInterrupt();
         // A buffer pin prevents eviction, not concurrent tuple changes.
         // Preserve a caller's pre-existing page mode as well as its locks
@@ -52075,6 +52136,7 @@ size_t StorageEngine::vacuum(const std::string& dbname,
 
         // Compact: move live records together, keep slotIds stable
         page.compact();
+        ++compacted;
         pa->markDirty(pid);
 
         // Update FSM with reclaimed free space
@@ -52102,6 +52164,7 @@ size_t StorageEngine::vacuum(const std::string& dbname,
     };
 
     const uint32_t heapPages = np > 1 ? np - 1 : 0;
+    progress.publish("scanning heap", {heapPages});
     int nWorkers = workers > 1 ? workers : 1;
     if (nWorkers > static_cast<int>(heapPages)) nWorkers = static_cast<int>(heapPages);
     if (nWorkers > 1) {
@@ -52137,9 +52200,16 @@ size_t StorageEngine::vacuum(const std::string& dbname,
                             if (stop.load(std::memory_order_acquire))
                                 throw DbError("57014", "parallel VACUUM stopped after worker failure");
                         });
+                        uint64_t scanned = 0, compacted = 0;
                         for (uint32_t pid = a; pid < b && !stop.load(std::memory_order_acquire); ++pid) {
-                            if (vacuumPage(pid)) freed.fetch_add(1);
+                            if (vacuumPage(pid, compacted)) freed.fetch_add(1);
+                            ++scanned;
+                            if (pid == a || scanned == maintenancePageInterval) {
+                                progress.addVacuumPages(scanned, compacted);
+                                scanned = compacted = 0;
+                            }
                         }
+                        progress.addVacuumPages(scanned, compacted);
                     } catch (...) {
                         recordFailure();
                     }
@@ -52156,11 +52226,19 @@ size_t StorageEngine::vacuum(const std::string& dbname,
         if (failure) std::rethrow_exception(failure);
         freedPages = freed.load();
     } else {
+        uint64_t scanned = 0, compacted = 0;
         for (uint32_t pid = 1; pid < np; ++pid) {
-            if (vacuumPage(pid)) freedPages++;
+            if (vacuumPage(pid, compacted)) freedPages++;
+            ++scanned;
+            if (pid == 1 || scanned == maintenancePageInterval) {
+                progress.addVacuumPages(scanned, compacted);
+                scanned = compacted = 0;
+            }
         }
+        progress.addVacuumPages(scanned, compacted);
     }
 
+    progress.setPhase("performing final cleanup");
     lockManager_.unlock(tablename);
 
     // Reset dead tuple count after successful vacuum
@@ -52171,7 +52249,7 @@ size_t StorageEngine::vacuum(const std::string& dbname,
     }
 
     // Clean up orphaned TOAST entries
-    if (processToast) vacuumToast(dbname, tablename);
+    if (processToast) vacuumToast(dbname, tablename, nullptr, false);
 
     return freedPages;
 }
@@ -52359,7 +52437,7 @@ bool publishToastFiles(const ToastRewritePaths& paths, const std::filesystem::pa
 
 size_t StorageEngine::vacuumToast(const std::string& dbname,
                                   const std::string& tablename,
-                                  bool* succeeded) {
+                                  bool* succeeded, bool reportProgress) {
     if (succeeded) *succeeded = false;
     if (!databaseExists(dbname) || !tableExists(dbname, tablename)) return 0;
 
@@ -52385,6 +52463,10 @@ size_t StorageEngine::vacuumToast(const std::string& dbname,
     RestoreToastLocks restoreToastLocks{lockManager_, locksBeforeToast};
     if (!lockManager_.lockExclusive(tablename)) return 0;
 
+    const auto* session = reportProgress ? currentSession() : nullptr;
+    ScopedMaintenanceProgress progress(MaintenanceCommand::Vacuum, session ? session->pid : 0,
+        dbname, maintenanceUser(session), maintenanceProgressRelation(*this, dbname, tablename, session));
+    progress.setPhase("performing final cleanup");
     return vacuumToastLocked(dbname, tablename, succeeded);
 }
 
@@ -52665,6 +52747,13 @@ size_t StorageEngine::vacuumFull(const std::string& dbname,
     std::unique_lock<std::recursive_mutex> cacheLock(cacheMutex_);
 
     const TableSchema tbl = getTableSchema(dbname, tablename);
+    const auto* session = currentSession();
+    const auto progressRelation = maintenanceProgressRelation(*this, dbname, tablename, session);
+    ScopedMaintenanceProgress progress(MaintenanceCommand::VacuumFull, session ? session->pid : 0,
+        dbname, maintenanceUser(session), progressRelation);
+    MaintenanceCounters counters{};
+    constexpr size_t tuplesScanned = 1, tuplesWritten = 2;
+    constexpr size_t blocksTotal = 3, blocksScanned = 4, rebuildCount = 5;
     const auto pendingRewrite = dbPath(dbname) /
         ("." + tablename + vacuum_full_backup::pendingSuffix);
     bool pendingExists = false;
@@ -52711,6 +52800,7 @@ size_t StorageEngine::vacuumFull(const std::string& dbname,
         };
         if (!std::filesystem::create_directory(staging, error) || error) return 0;
 
+        progress.setPhase("writing new heap");
         bool built = false;
         const size_t objects = vacuumToastLocked(dbname, tablename, &built, &view, staging);
         if (!built) return 0;
@@ -52769,12 +52859,14 @@ size_t StorageEngine::vacuumFull(const std::string& dbname,
                 std::cerr << "[vacuum full] retained TOAST undo at " << pendingRewrite << std::endl;
         };
         if (!vacuum_full_backup::publish(pendingRewrite, bytes, true)) return 0;
+        progress.setPhase("swapping relation files");
         evictToast();
         // Commit is the only decision for the entire heap/index generation.
         if (!publishToastFiles(toastPaths, staging)) return 0;
         cacheLock.unlock();
         if (commitTransaction() != DBStatus::OK) return 0;
         fullCommitted = true;
+        progress.setPhase("performing final cleanup");
         if (!vacuum_full_backup::discard(pendingRewrite, backup, bytes))
             std::cerr << "[vacuum full] retained committed TOAST receipt at " << pendingRewrite << std::endl;
         if (succeeded) *succeeded = true;
@@ -52883,7 +52975,10 @@ size_t StorageEngine::vacuumFull(const std::string& dbname,
     auto scanRelation = [&](RewriteRelation& relation,
                             PageAllocator& allocator) -> bool {
         const uint32_t pageCount = allocator.numPages();
+        counters[blocksTotal] += pageCount ? pageCount - 1 : 0;
+        progress.publish("seq scanning heap", counters);
         for (uint32_t pageId = 1; pageId < pageCount; ++pageId) {
+            checkForQueryInterrupt();
             if (!lockManager_.pageLockShared(dbname, tablename, pageId))
                 return false;
             char* buffer = allocator.fetchPage(pageId);
@@ -52896,6 +52991,7 @@ size_t StorageEngine::vacuumFull(const std::string& dbname,
             if (valid) {
                 page.forEachLive([&](uint16_t, const char* tuple, size_t length) {
                     if (!valid) return;
+                    ++counters[tuplesScanned];
                     if (length < sizeof(HeapTupleHeaderData)) {
                         valid = false;
                         return;
@@ -52923,6 +53019,10 @@ size_t StorageEngine::vacuumFull(const std::string& dbname,
             allocator.unpinPage(pageId);
             lockManager_.pageUnlock(dbname, tablename, pageId);
             if (!valid) return false;
+            const auto scanned = ++counters[blocksScanned];
+            if (scanned == 1 || scanned == counters[blocksTotal] ||
+                scanned % maintenancePageInterval == 0)
+                progress.publish("seq scanning heap", counters);
         }
         return true;
     };
@@ -53213,6 +53313,7 @@ size_t StorageEngine::vacuumFull(const std::string& dbname,
     };
 
     try {
+        progress.publish("writing new heap", counters);
         evictTableCaches();
         for (const auto& path : physicalPaths) {
         if (isToastPath(path)) continue;
@@ -53289,8 +53390,12 @@ size_t StorageEngine::vacuumFull(const std::string& dbname,
         auto destination = destinations.find(relation.path.string());
         if (destination == destinations.end()) return failRewrite();
         for (const auto& tuple : relation.tuples) {
+            if (counters[tuplesWritten] % 256 == 0) checkForQueryInterrupt();
             if (!appendTuple(*destination->second, tuple))
                 return failRewrite();
+            const auto written = ++counters[tuplesWritten];
+            if (written % 256 == 0)
+                progress.publish("writing new heap", counters);
         }
     }
     for (auto& [_, allocator] : destinations) {
@@ -53301,8 +53406,12 @@ size_t StorageEngine::vacuumFull(const std::string& dbname,
 
     // Rebuild every RID-bearing access method before making the new heap
     // observable.  The physical backups make any failure recoverable.
-    if (reindex(dbname, tablename) != DBStatus::OK)
+    progress.publish("rebuilding index", counters);
+    size_t rebuilt = 0;
+    if (reindex(dbname, tablename, &rebuilt) != DBStatus::OK)
         return failRewrite();
+    counters[rebuildCount] = rebuilt;
+    progress.publish("rebuilding index", counters);
 
     bool auxiliaryValid = true;
     for (const auto& column : hashColumns) {
@@ -53336,6 +53445,7 @@ size_t StorageEngine::vacuumFull(const std::string& dbname,
                 }) || !auxiliaryValid || !index->flush()) {
             return failRewrite();
         }
+        ++counters[rebuildCount];
     }
     for (const auto& column : bloomColumns) {
         BloomIndex* index = getBloomIndexForBuild(dbname, tablename, column);
@@ -53372,22 +53482,27 @@ size_t StorageEngine::vacuumFull(const std::string& dbname,
                 }) || !auxiliaryValid || !index->flush()) {
             return failRewrite();
         }
+        ++counters[rebuildCount];
     }
     for (const auto& column : fullTextColumns) {
         if (createFullTextIndex(dbname, tablename, column) != DBStatus::OK)
             return failRewrite();
+        ++counters[rebuildCount];
     }
     for (const auto& column : ginColumns) {
         if (createGinIndex(dbname, tablename, column) != DBStatus::OK)
             return failRewrite();
+        ++counters[rebuildCount];
     }
     for (const auto& column : gistColumns) {
         if (createGiSTIndex(dbname, tablename, column) != DBStatus::OK)
             return failRewrite();
+        ++counters[rebuildCount];
     }
     for (const auto& column : spgistColumns) {
         if (createSPGiSTIndex(dbname, tablename, column) != DBStatus::OK)
             return failRewrite();
+        ++counters[rebuildCount];
     }
 
     if (!flushTableCaches(dbname, rewriteTables)) return failRewrite();
@@ -53405,32 +53520,23 @@ size_t StorageEngine::vacuumFull(const std::string& dbname,
     uint32_t analyzedRelation = 0;
     uint64_t oldSchemaImage = 0;
     if (std::filesystem::exists(analyzedPath)) {
-        const auto logical = analyzed_statistics::capture_detail::relationName(tablename);
-        const auto model = catalogService().metadataSnapshot(dbname, false);
-        const auto ns = std::find_if(model.namespaces.begin(), model.namespaces.end(),
-            [&](const auto& row) { return row.nspname == logical.schema; });
-        if (ns != model.namespaces.end()) {
-            const auto relation = std::find_if(model.relations.begin(), model.relations.end(),
-                [&](const auto& row) {
-                    return row.relnamespace == ns->oid && row.relname == logical.name &&
-                        (row.relkind == 'r' || row.relkind == 'p' || row.relkind == 'm');
-                });
-            if (relation != model.relations.end()) {
-                analyzedRelation = relation->oid;
-                oldSchemaImage = analyzed_statistics::capture_detail::schemaImage(relationSchemaPath);
-            }
-        }
+        analyzedRelation = progressRelation ? progressRelation : maintenanceRelation(*this, dbname, tablename);
+        if (analyzedRelation)
+            oldSchemaImage = analyzed_statistics::capture_detail::schemaImage(relationSchemaPath);
     }
     TableSchema rewritten = tbl;
     rewritten.physicalRelationId = backupState.newIdentity;
+    progress.publish("swapping relation files", counters);
     if (!writeSchemaFile(dbname, tablename, rewritten)) return failRewrite();
 
     // BRIN binds ranges to both the relation generation and the persisted
     // schema image. Build its final, durably replaced files from the new
     // schema while the rewrite lock and rollback receipt still protect it.
     for (const auto& column : brinColumns) {
+        progress.publish("rebuilding index", counters);
         if (createBrinIndex(dbname, tablename, column, brinWidths.at(column)) != DBStatus::OK)
             return failRewrite();
+        ++counters[rebuildCount];
     }
     if (!clearSpecializedIndexDirty(*this, dbname, tablename)) return failRewrite();
 
@@ -53438,6 +53544,7 @@ size_t StorageEngine::vacuumFull(const std::string& dbname,
         // User indexes were rebuilt using the original, complete TOAST
         // pair. The replacement contains the same IDs and value bytes.
         evictToast();
+        progress.publish("swapping relation files", counters);
         if (!publishToastFiles(toastPaths, toastStaging)) return failRewrite();
     }
 
@@ -53468,6 +53575,7 @@ size_t StorageEngine::vacuumFull(const std::string& dbname,
     cacheLock.unlock();
     if (commitTransaction() != DBStatus::OK) return 0;
     fullCommitted = true;
+    progress.publish("performing final cleanup", counters);
     if (!vacuum_full_backup::discard(pendingRewrite, backupDirectory, backupBytes))
         std::cerr << "[vacuum full] committed rewrite cleanup retained at "
                   << pendingRewrite << std::endl;
@@ -53475,6 +53583,11 @@ size_t StorageEngine::vacuumFull(const std::string& dbname,
     if (succeeded) *succeeded = true;
     return rowCount;
     } catch (const std::exception& error) {
+        const auto* dbError = dynamic_cast<const DbError*>(&error);
+        if (dbError && dbError->sqlState() == "57014") {
+            destinations.clear();
+            throw;
+        }
         std::cerr << "[vacuum full] rewrite failed: " << error.what()
                   << std::endl;
         return failRewrite();

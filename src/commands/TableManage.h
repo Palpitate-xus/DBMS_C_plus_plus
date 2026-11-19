@@ -39,6 +39,7 @@ struct QueryReturningOrigin;
 class LocalExpressionSyntax;
 
 class CatalogService;
+class ScopedMaintenanceProgress;
 struct SavepointImageReceipt;
 namespace analyzed_statistics { struct Column; class ReadCache; }
 
@@ -1334,7 +1335,8 @@ public:
                                                          const std::string& tablename) const;
 
     // Reindex: rebuild all indexes for a table
-    DBStatus reindex(const std::string& dbname, const std::string& tablename);
+    DBStatus reindex(const std::string& dbname, const std::string& tablename,
+                     size_t* rebuiltCount = nullptr);
     BPTree* getCompositeIndexTree(const std::string& dbname, const std::string& tablename,
                                   const std::string& indexName) const;
     // Build composite key from row buffer
@@ -1568,7 +1570,8 @@ public:
                     const ReadView* readView = nullptr,
                     const std::vector<std::string>& targetPartitions = {},
                     bool registerSiread = true,
-                    bool indexMaintenanceView = false) const;
+                    bool indexMaintenanceView = false,
+                    ScopedMaintenanceProgress* progress = nullptr) const;
     // Caller holds the relation's shared lock for the complete cursor lifetime.
     // Captures one MVCC view and heap extent, buffers at most one raw page,
     // and releases page locks/pins before returning any owned row. Partitioned
@@ -1947,7 +1950,7 @@ public:
 
     // VACUUM orphaned TOAST files: remove toast entries no longer referenced by any row
     size_t vacuumToast(const std::string& dbname, const std::string& tablename,
-                       bool* succeeded = nullptr);
+                       bool* succeeded = nullptr, bool reportProgress = true);
 
     // Resolve TOAST markers in a row buffer back to their actual values.
     std::string resolveToastValues(const std::string& dbname, const std::string& tablename,

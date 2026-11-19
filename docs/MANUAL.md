@@ -1098,6 +1098,23 @@ VACUUM (ANALYZE) vacuum_example (id, note);
 
 一条命令可接多个以逗号分隔的表。每张表可指定自己的列，省略列名就更新全表列统计。若 `VACUUM (FULL, ANALYZE)` 中某个列名有误，重写阶段仍可能已完成。需要统计多列组合起来的值时，可以用项目扩展 `ANALYZE TABLE ... COLUMNS`。[测试报告](test-report.md#vacuum-target-columns-20261119)
 
+### 查看表维护进度
+
+普通清理、统计更新和重写分别在三个视图中显示。可以在另一个连接执行下面的查询。命令完成后，对应行会消失。
+
+```sql
+SELECT pid, relid, phase, heap_blks_total, heap_blks_scanned
+FROM pg_catalog.pg_stat_progress_vacuum;
+
+SELECT pid, relid, phase, sample_blks_total, sample_blks_scanned
+FROM pg_catalog.pg_stat_progress_analyze;
+
+SELECT pid, relid, command, phase, heap_tuples_written
+FROM pg_catalog.pg_stat_progress_cluster;
+```
+
+`VACUUM FULL` 在第三个视图显示。发起命令的角色、拥有该角色权限的用户、管理员及有 `pg_read_all_stats` 权限的用户可查看详情。其他用户看到进程号和数据库名。项目暂时没有数据库编号，`datid` 返回 SQL `NULL`。可用 `SELECT *`、列投影和简单 `WHERE` 查看这些视图。
+
 ---
 
 ## 5. 数据操作 (DML)

@@ -20,6 +20,7 @@
 #include "catalog/CatalogService.h"
 #include "catalog/namespace_query.h"
 #include "catalog/pg_stats_query.h"
+#include "catalog/MaintenanceProgressView.h"
 #include "catalog/pg_sequence_query.h"
 #include "catalog/systables.h"
 #include "expression/regtype_input.h"
@@ -4259,9 +4260,50 @@ bool describePreparedReturningDeclaration(const std::string& sql,Session& sessio
     }
 }
 
+bool isMaintenanceProgressQuery(const std::string& sql) {
+    constexpr std::string_view needle = "pg_stat_progress_";
+    if (std::search(sql.begin(), sql.end(), needle.begin(), needle.end(),
+            [](unsigned char a, char b) { return std::tolower(a) == b; }) == sql.end()) return false;
+    SQLParser parser;
+    const auto parsed = parser.parseForBinding(sql);
+    const auto* select = parsed.success ? dynamic_cast<const SelectStmt*>(parsed.stmt.get()) : nullptr;
+    maintenance_progress_view::Kind kind;
+    std::string name;
+    return maintenance_progress_view::source(select, kind, name);
+}
+
+bool describeMaintenanceProgress(const std::string& sql, std::vector<PgColumnDescription>& columns) {
+    if (!isMaintenanceProgressQuery(sql)) return false;
+    SQLParser parser;
+    const auto parsed = parser.parseForBinding(sql);
+    const auto* select = parsed.success ? dynamic_cast<const SelectStmt*>(parsed.stmt.get()) : nullptr;
+    maintenance_progress_view::Kind kind;
+    std::string name;
+    if (!maintenance_progress_view::source(select, kind, name)) return false;
+    const auto projection = maintenance_progress_view::projection(*select, kind, name);
+    const auto& fields = maintenance_progress_view::fields(kind);
+    std::vector<PgColumnDescription> output;
+    for (const auto& item : projection) {
+        PgColumnDescription column;
+        column.name = item.name;
+        const auto& type = fields[item.index].second;
+        if (type == "integer") { column.typeOid = 23; column.typeSize = 4; }
+        else if (type == "oid") { column.typeOid = 26; column.typeSize = 4; }
+        else if (type == "name") { column.typeOid = 19; column.typeSize = 64; }
+        else if (type == "text") { column.typeOid = 25; column.typeSize = -1; }
+        else if (type == "bigint") { column.typeOid = 20; column.typeSize = 8; }
+        else if (type == "double precision") { column.typeOid = 701; column.typeSize = 8; }
+        else throw DbError("XX000", "unknown progress field type");
+        output.push_back(std::move(column));
+    }
+    columns = std::move(output);
+    return true;
+}
+
 bool describePreparedResultShape(const std::string& sql, Session& session,
                             std::vector<PgColumnDescription>& columns,
                             const std::vector<uint32_t>& parameterOids = {}) {
+    if (describeMaintenanceProgress(sql, columns)) return true;
     if (describePreparedWindowHostResult(sql,session,columns,parameterOids)) return true;
     if(describePreparedQuantified(sql,session,columns,parameterOids))return true;
     if(describePreparedPgStatsCatalog(sql,session,columns,parameterOids))return true;
@@ -6308,6 +6350,7 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session,
             // loses derived computed typmods. Bind before execution effects,
             // and retain the original portal parameter owner after expansion.
             if (retainOrdinarySourceDeclaration && !typedExplain) {
+                if (!describeMaintenanceProgress(sql,ordinarySourceColumns))
                 if (!describePreparedPgStatsCatalog(sql,session,ordinarySourceColumns,{}))
                     if (!describePreparedOwnedCatalog(sql,session,ordinarySourceColumns,{}))
                     if (!describePreparedPgSequenceCatalog(sql,session,ordinarySourceColumns,{}))
@@ -8265,7 +8308,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 extendedQueryError = true;
                 continue;
             }
-            if (SQLParser::requiresQuerySnapshot(sql) &&
+            if (!isMaintenanceProgressQuery(sql) && SQLParser::requiresQuerySnapshot(sql) &&
                 !prepareExtendedQuerySnapshot(sql)) {
                 continue;
             }
@@ -8284,10 +8327,12 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 // Catalog analysis belongs to Parse, before publishing a
                 // statement. Describe must never be its first validation.
                 std::vector<PgColumnDescription> namespaceDescriptor;
-                (void)describePreparedNamespaceCatalog(sql,session,namespaceDescriptor,parameterTypes);
+                const bool progressQuery = describeMaintenanceProgress(sql,namespaceDescriptor);
+                if(namespaceDescriptor.empty())(void)describePreparedNamespaceCatalog(sql,session,namespaceDescriptor,parameterTypes);
                 if(namespaceDescriptor.empty())(void)describePreparedPgStatsCatalog(sql,session,namespaceDescriptor,parameterTypes);
                 if(namespaceDescriptor.empty())(void)describePreparedOwnedCatalog(sql,session,namespaceDescriptor,parameterTypes);
                 if(namespaceDescriptor.empty())(void)describePreparedPgSequenceCatalog(sql,session,namespaceDescriptor,parameterTypes);
+                if (!progressQuery) {
                 inferProtocolConcatParameters(sql,session,parameterTypes);
                 inferProtocolWholeScalarParameters(sql,session,parameterTypes);
                 validatePreparedAggregateOrderInputs(sql,session,parameterTypes);
@@ -8309,6 +8354,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                     if (!describePreparedSetResult(sql,session,staticColumns) &&
                         !describePreparedQueryHostResult(sql,session,staticColumns))
                         (void)describePreparedOrdinarySourceResult(sql,session,staticColumns);
+                }
                 }
                 std::vector<PgColumnDescription> resultColumns;
                 if(describePreparedResult(sql,session,resultColumns,parameterTypes)) {
@@ -8410,7 +8456,8 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 extendedQueryError = true;
                 continue;
             }
-            if ((valueCount != 0 || SQLParser::requiresQuerySnapshot(preparedSql)) &&
+            if (!isMaintenanceProgressQuery(preparedSql) &&
+                (valueCount != 0 || SQLParser::requiresQuerySnapshot(preparedSql)) &&
                 !prepareExtendedQuerySnapshot(preparedSql)) {
                 continue;
             }
@@ -8710,6 +8757,11 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                     continue;
                 }
                 if (!g_engine.inTransaction() &&
+                    // This owned monitoring source reads only the backend
+                    // registry and committed role state. Starting a physical
+                    // database transaction here would prevent observing a
+                    // FULL rewrite that currently owns that database.
+                    !isMaintenanceProgressQuery(portalState.preparedSql) &&
                     !isTransactionControlStatement(portalState.sql) &&
                     !SQLParser::isSetTransactionStatement(portalState.sql) &&
                     !isStandaloneDiscardAllStatement(portalState.sql) &&

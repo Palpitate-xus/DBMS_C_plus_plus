@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>可以查看表清理和统计更新的进度 · 2026-11-19</summary>
+
+在另一个连接里，可以查看正在处理的表、当前步骤和已读页数。
+
+[使用示例](docs/MANUAL.md#查看表维护进度) · [测试报告](docs/test-report.md#maintenance-progress-views-20261119) · [性能报告](docs/performance-report-2026-10-30.md#maintenance-progress-views-cost-20261119)
+
+</details>
+
+<details>
 <summary>可以只更新几列的查询统计 · 2026-11-19</summary>
 
 数据改动集中在几列时，可以只更新这些列的统计，供数据库选择查询方式。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>删除长文本后，可以单独腾出磁盘空间 · 2026-11-18</summary>
+<summary>查看更早的更新</summary>
+
+## 2026-11-18 · 删除长文本后，可以单独腾出磁盘空间
 
 删除大量单独存放的长文本后，可以只缩小存放这些内容的文件，把空出的空间还给磁盘。
 
 [使用示例](docs/MANUAL.md#分开清理主表和长值) · [恢复测试](docs/test-report.md#vacuum-toast-full-20261118) · [性能报告](docs/performance-report-2026-10-30.md#vacuum-toast-full-cost-20261118)
-
-</details>
-
-<details>
-<summary>查看更早的更新</summary>
 
 ## 2026-11-18 · 清理表时，可以选择清理哪些数据
 

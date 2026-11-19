@@ -19,6 +19,13 @@ cmake --build build/cmake --parallel 2
 ## 最近更新
 
 <details>
+<summary>可以查看表清理和统计更新的进度 · 2026-11-19</summary>
+
+在另一个连接里，可以查看正在处理的表、当前步骤和已读页数。
+
+</details>
+
+<details>
 <summary>可以只更新几列的查询统计 · 2026-11-19</summary>
 
 数据改动集中在几列时，可以只更新这些列的统计，供数据库选择查询方式。
@@ -29,13 +36,6 @@ cmake --build build/cmake --parallel 2
 <summary>一次整理就能收回表和长文本的空间 · 2026-11-19</summary>
 
 运行 `VACUUM FULL` 可以同时收回两处空闲空间，一处在表文件里，另一处在单独存放长文本等大内容的文件里。
-
-</details>
-
-<details>
-<summary>删除长文本后，可以单独腾出磁盘空间 · 2026-11-18</summary>
-
-删除大量单独存放的长文本后，可以只缩小存放这些内容的文件，把空出的空间还给磁盘。
 
 </details>
 

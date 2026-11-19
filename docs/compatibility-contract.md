@@ -2,6 +2,10 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-19 · 查看表维护进度
+
+`VACUUM`、`ANALYZE` 和 `VACUUM FULL` 分别使用 `pg_stat_progress_vacuum`、`pg_stat_progress_analyze` 和 `pg_stat_progress_cluster`。三个视图支持单表投影、`SELECT *`、简单筛选和分页。详情可以由发起角色、有其权限的角色、管理员或 `pg_read_all_stats` 读取。其他角色看到进程号和数据库名。数据库编号及无法确认的表编号以 SQL `NULL` 表示。[使用示例](MANUAL.md#查看表维护进度)
+
 ## 2026-11-19 · 只更新指定列的统计
 
 `ANALYZE` 和 `VACUUM (ANALYZE)` 可按表指定要更新的列。未选列保留原有统计和采样行数。已有的统计能在 `VACUUM FULL` 完成或恢复后继续使用。带引号的列名按原拼写查找，统计的类型覆盖沿用现有收集器。项目的联合统计命令仍可使用。[使用手册](MANUAL.md#只更新指定列的统计) · [验证范围](test-report.md#vacuum-target-columns-20261119)
