@@ -1,27 +1,27 @@
 # 更新日志
 
 <details>
-<summary>修复写过临时表后无法重启的问题 · 2026-11-19</summary>
+<summary>修复临时表导致的重启失败 · 2026-11-19</summary>
 
-恢复时会核对旧临时表的归属。确认后会清理上次连接留下的临时表，已提交的普通表数据可以继续读取。
+数据库异常退出后，重启时会清理确认是上次连接留下的临时表。已提交的普通表数据仍可读取。
 
 [使用手册](docs/MANUAL.md#建表) · [测试报告](docs/test-report.md#temporary-table-crash-recovery-20261119) · [性能报告](docs/performance-report-2026-10-30.md#temporary-table-crash-cost-20261119)
 
 </details>
 
 <details>
-<summary>建表时可以为日后的更新留出空间 · 2026-11-19</summary>
+<summary>建表时为以后更新记录留出空间 · 2026-11-19</summary>
 
-例如，把填充比例设为 90，就会为日后的更新留出约一成页内空间。重启后仍会按这个设置写入。
+用 `WITH (fillfactor = 90)` 建表，写入时会尽量留出约一成空间，方便以后更新记录。这个设置重启后仍然有效。
 
 [使用手册](docs/MANUAL.md#建表) · [测试报告](docs/test-report.md#create-table-fillfactor-20261119) · [性能报告](docs/performance-report-2026-10-30.md#create-table-fillfactor-cost-20261119)
 
 </details>
 
 <details>
-<summary>插入记录时，可以改用别处的空位 · 2026-11-19</summary>
+<summary>插入记录遇到占用时，先试别的空位 · 2026-11-19</summary>
 
-推荐的位置被另一个操作占用时，数据库会先试别处。有合适的空位，就可以继续插入。
+如果原本要写入的位置正被占用，数据库会先试别的空位。有地方可写时，就不用等原来的位置腾出来。
 
 [使用说明](docs/MANUAL.md#插入时如何找空位) · [测试报告](docs/test-report.md#insert-page-choice-20261119) · [性能报告](docs/performance-report-2026-10-30.md#insert-page-choice-cost-20261119)
 
