@@ -6,6 +6,10 @@
 
 截至 2026-11-19，273 项功能要求中有 22 项完成、167 项部分实现、69 项待验证、15 项暂缓。各项结果和剩余范围见功能总账。以下更新报告给出各轮测试的实际范围。[功能总账](gap-progress.json) · [支持的功能和限制](compatibility-contract.md)
 
+## 2026-11-19 · 建表时可为更新预留空间
+
+普通表建表时指定的 `FILLFACTOR` 会随表保存。重启后仍按此值预留页内空间，建表后再用 `ALTER TABLE` 设置也有同样效果。[测试报告](test-report.md#create-table-fillfactor-20261119) · [性能报告](performance-report-2026-10-30.md#create-table-fillfactor-cost-20261119)
+
 ## 2026-11-19 · 插入记录可以改用别处的空位
 
 插入遇到忙页时，可以先试下一条空闲空间记录或表的最后一页，再按顺序查找。数据库在所选物理表的页上核对实际容量，成功写入后照常更新索引和恢复所需的日志。[测试报告](test-report.md#insert-page-choice-20261119) · [性能报告](performance-report-2026-10-30.md#insert-page-choice-cost-20261119)

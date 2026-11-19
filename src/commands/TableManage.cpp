@@ -20369,6 +20369,13 @@ DBStatus StorageEngine::createTable(const std::string& dbname, const TableSchema
         if (!schemaWritten || !out) return failCreate("could not write table schema");
         invalidateCatalogSchema(dbname, tblWithVersion.tablename);
     }
+    if (const auto fillfactor = tblWithVersion.storageParams.find("fillfactor");
+        fillfactor != tblWithVersion.storageParams.end()) {
+        const auto status = setStorageParams(
+            dbname, tblWithVersion.tablename, {*fillfactor});
+        if (status != DBStatus::OK)
+            return failCreate("could not persist table fillfactor", status);
+    }
     {
         std::error_code ec;
         std::filesystem::create_directories(relationDir(dbname, tblWithVersion.tablename), ec);

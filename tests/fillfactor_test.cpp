@@ -3,6 +3,7 @@
 #include "TableManage.h"
 #include "Config.h"
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <cassert>
 
@@ -34,7 +35,27 @@ int main() {
         tbl50.append(makeVarCharColumn("payload", false, 2000, false));
         tbl50.storageParams["fillfactor"] = "50";
         assert(engine.createTable(dbname, tbl50) == DBStatus::OK);
-        assert(engine.setStorageParams(dbname, "t50", tbl50.storageParams) == DBStatus::OK);
+        assert(engine.getStorageParams(dbname, "t50") == tbl50.storageParams);
+
+        // A failed initial options publication must not leave a partial table.
+        TableSchema blocked = tbl50;
+        blocked.tablename = "blocked";
+        const auto home = std::filesystem::path(dbname);
+        const auto blockedOptions = home / "blocked.params";
+        assert(std::filesystem::create_directory(blockedOptions));
+        {
+            std::ofstream marker(blockedOptions / "keep");
+            assert(marker << "existing entry\n");
+        }
+        const auto priorTables = engine.getTableNames(dbname);
+        assert(engine.createTable(dbname, blocked) == DBStatus::IO_ERROR);
+        assert(!engine.tableExists(dbname, "blocked"));
+        assert(engine.getTableNames(dbname) == priorTables);
+        assert(!std::filesystem::exists(home / "blocked.dt"));
+        assert(std::filesystem::is_regular_file(blockedOptions / "keep"));
+        std::filesystem::remove_all(blockedOptions);
+        assert(engine.createTable(dbname, blocked) == DBStatus::OK);
+        assert(engine.getStorageParams(dbname, "blocked") == tbl50.storageParams);
 
         // Insert 4 rows of ~2000 bytes into each table.
         std::string payload(2000, 'x');

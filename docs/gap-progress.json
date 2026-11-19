@@ -2,6 +2,28 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-19 persist and validate heap fillfactor during CREATE TABLE",
+      "gap_ids": ["P0-16", "STO-02", "TXN-05"],
+      "status": "partial",
+      "evidence": [
+        "src/parser/parser.cpp",
+        "src/commands/DdlExecutor.cpp",
+        "src/commands/TableManage.cpp",
+        "docs/test-report.md",
+        "docs/performance-report-2026-10-30.md"
+      ],
+      "tests": [
+        "tests/tablespace_protocol_e2e_test.py",
+        "tests/fillfactor_test.cpp"
+      ],
+      "verification": [
+        "CREATE stores a validated fillfactor before publishing the relation list. CREATE and ALTER validate the numeric value without replacing an existing relation on IF NOT EXISTS. A failed initial options write leaves no new table and allows a retry.",
+        "Twenty-three PostgreSQL 18.6 protocol cases matched the candidate. Normal rollback removed relation files and table options. After clean reopen, CREATE-50 and ALTER-50 used six data pages for 36 rows while the default used three.",
+        "The committed ordinary relation and its fillfactor survived SIGKILL. An uncommitted ordinary CREATE still left an empty relation on both builds and the candidate kept its parameter file. A committed live TEMP table still prevented recovery startup on both builds. These recovery gaps remain open.",
+        "Twelve runs timed 2304 inserts and audited 2496 wire exchanges. For 64 rows the candidate CREATE-50 and both ALTER-50 cases occupied ten data pages, while both defaults occupied five. All three timing lanes exceeded the preset CPU drift limit."
+      ]
+    },
+    {
       "issue": "2026-11-19 try alternate writable pages before waiting during INSERT",
       "gap_ids": ["STO-05", "DML-01"],
       "status": "partial",

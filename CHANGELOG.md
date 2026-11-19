@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>建表时可以为日后的更新留出空间 · 2026-11-19</summary>
+
+例如，把填充比例设为 90，就会为日后的更新留出约一成页内空间。重启后仍会按这个设置写入。
+
+[使用手册](docs/MANUAL.md#建表) · [测试报告](docs/test-report.md#create-table-fillfactor-20261119) · [性能报告](docs/performance-report-2026-10-30.md#create-table-fillfactor-cost-20261119)
+
+</details>
+
+<details>
 <summary>插入记录时，可以改用别处的空位 · 2026-11-19</summary>
 
 推荐的位置被另一个操作占用时，数据库会先试别处。有合适的空位，就可以继续插入。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>用另一张表更新或删除记录时，可以先按编号查找 · 2026-11-19</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-19 · 用另一张表更新或删除记录时，可以先按编号查找
 
 例如，根据付款表更新或删除某笔订单。如果订单号是整数主键，数据库可以先通过索引找到订单，再检查付款表中的条件。
 
 [使用说明](docs/MANUAL.md#按整数主键更新或删除) · [测试报告](docs/test-report.md#joined-primary-key-target-20261119) · [性能报告](docs/performance-report-2026-10-30.md#joined-primary-key-cost-20261119)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-19 · 同时修改同一条记录时，会按新值再检查
 

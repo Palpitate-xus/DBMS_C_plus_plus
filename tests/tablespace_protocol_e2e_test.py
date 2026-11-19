@@ -1,11 +1,91 @@
 #!/usr/bin/env python3
-"""Tablespace SQL must drive the same durable storage metadata as DDL."""
+"""SQL tablespaces and heap options must drive durable storage metadata."""
 
 import importlib.util
 from pathlib import Path
 import socket
 import subprocess
 import time
+
+
+FILLFACTOR_TABLES = ("fillfactor_created", "fillfactor_altered", "fillfactor_default")
+
+
+def assert_fillfactor_params(home):
+    for table in FILLFACTOR_TABLES[:2]:
+        params = home / f"{table}.params"
+        assert params.is_file(), params
+        assert params.read_bytes() == b"fillfactor=50\n", params
+    default = home / "fillfactor_default.params"
+    assert not default.exists() or b"fillfactor=" not in default.read_bytes(), default
+
+
+def assert_rolled_back_fillfactor(execute, home):
+    missing = execute("SELECT id FROM fillfactor_rolled;")
+    assert missing[1] == "42P01", missing
+    for suffix in (".dt", ".stc", ".params"):
+        file = home / ("fillfactor_rolled" + suffix)
+        assert not file.exists(), file
+
+
+def prepare_fillfactor_tables(execute, home):
+    columns = "(id INT, v INT NOT NULL, pad VARCHAR(504))"
+    for table in FILLFACTOR_TABLES:
+        options = " WITH (FILLFACTOR = 50)" if table == "fillfactor_created" else ""
+        result = execute(f"CREATE TABLE {table} {columns}{options};")
+        assert (result[1], result[4]) == (None, "CREATE TABLE"), result
+    altered = execute("ALTER TABLE fillfactor_altered SET (fillfactor = 50);")
+    assert (altered[1], altered[4]) == (None, "ALTER TABLE"), altered
+    assert_fillfactor_params(home)
+
+    for limit in (10, 100):
+        table = f"fillfactor_bound_{limit}"
+        created = execute(f"CREATE TABLE {table} (id INT) WITH (fillfactor = {limit});")
+        assert (created[1], created[4]) == (None, "CREATE TABLE"), created
+        params = home / f"{table}.params"
+        assert params.read_text(encoding="utf-8") == f"fillfactor={limit}\n", params
+    for option, state in (("fillfactor = 9", "22023"), ("fillfactor = 101", "22023"),
+                          ("fillfactor = -1", "22023"), ("fillfactor = 'fifty'", "22023"),
+                          ("fillfactor =", "42601")):
+        rejected = execute(f"CREATE TABLE fillfactor_invalid (id INT) WITH ({option});")
+        assert (rejected[1], rejected[4]) == (state, None), (option, rejected)
+    assert not list(home.glob("fillfactor_invalid.*"))
+
+    for value in (80, 9):
+        existing = execute(
+            f"CREATE TABLE IF NOT EXISTS fillfactor_created {columns} WITH (fillfactor = {value});")
+        assert (existing[1], existing[4]) == (None, "CREATE TABLE"), existing
+        assert_fillfactor_params(home)
+
+    assert execute("BEGIN;")[4] == "BEGIN"
+    rolled = execute("CREATE TABLE fillfactor_rolled (id INT) WITH (FILLFACTOR = 50);")
+    assert (rolled[1], rolled[4]) == (None, "CREATE TABLE"), rolled
+    assert (home / "fillfactor_rolled.params").read_bytes() == b"fillfactor=50\n"
+    assert execute("ROLLBACK;")[4] == "ROLLBACK"
+    assert_rolled_back_fillfactor(execute, home)
+
+
+def verify_fillfactor_after_reopen(execute, home):
+    assert_fillfactor_params(home)
+    assert_rolled_back_fillfactor(execute, home)
+    padding = "x" * 504
+    values = ",".join(f"({key},{3 * key},'{padding}')" for key in range(1, 37))
+    for table in FILLFACTOR_TABLES:
+        inserted = execute(f"INSERT INTO {table} VALUES {values};")
+        assert (inserted[1], inserted[4]) == (None, "INSERT 0 36"), inserted
+    assert execute("CHECKPOINT;")[4] == "CHECKPOINT"
+
+    pages = {}
+    for table in FILLFACTOR_TABLES:
+        actual = execute(f"SELECT id,v FROM {table} ORDER BY id;")
+        expected = [[str(key), str(3 * key)] for key in range(1, 37)]
+        assert actual[1] is None and actual[0] == expected, actual
+        size = (home / f"{table}.dt").stat().st_size
+        assert size % 8192 == 0, (table, size)
+        pages[table] = size // 8192 - 1  # The first page stores allocator metadata.
+    assert pages["fillfactor_created"] == pages["fillfactor_altered"], pages
+    assert pages["fillfactor_altered"] > pages["fillfactor_default"] >= 2, pages
+    print("[CREATE FILLFACTOR] passed")
 
 
 def main():
@@ -43,6 +123,8 @@ def main():
         selected = execute("SELECT id FROM external_items;")
         assert selected[1] is None and selected[0] == [["41"]], selected
         assert (location / "info" / "external_items.dt").is_file()
+        prepare_fillfactor_tables(execute, cluster / "info")
+
         # Offline checksum verification must not bypass the running server's
         # exclusive data-directory lock. Stop it without deleting the runner
         # directory, then restart on the same port after restoring the marker.
@@ -83,6 +165,8 @@ def main():
                 if time.monotonic() >= deadline:
                     raise
                 time.sleep(0.05)
+
+        verify_fillfactor_after_reopen(execute, cluster / "info")
 
         busy = execute("DROP TABLESPACE fast_space;")
         assert busy[1] == "22023", busy

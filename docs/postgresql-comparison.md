@@ -2,6 +2,10 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-19 · 为后续更新预留页内空间
+
+PostgreSQL 和本项目现在都能在普通堆表建表时指定 `FILLFACTOR`，默认值为 100。受测的合法值、越界值、重复设置和跳过已有表的结果一致。PostgreSQL 保存通用关系选项并从 `pg_class.reloptions` 公开；本项目将填充比例保存在表的参数文件里供存储层读取，目录查询和其他表级选项仍有缺口。[PostgreSQL 18 文档](https://www.postgresql.org/docs/18/sql-createtable.html) · [本项目对照](test-report.md#create-table-fillfactor-20261119)
+
 ## 2026-11-19 · 插入记录时怎样查找空位
 
 PostgreSQL 优先尝试上次插入的页，再从分层空闲空间映射取候选，或者在缺少线索时尝试尾页。锁住页后会再次确认实际空间，淘汰不合适的候选时可更新映射。本项目的空闲空间记录按页保存百分比，先尝试最多两条推荐和尾页，然后回退到原有逐页查找。分层搜索、上次插入页缓存和批量写入的缓冲区策略仍有差距。[PostgreSQL 选页源码](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/access/heap/hio.c) · [空闲空间源码](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/storage/freespace/freespace.c) · [本项目验证](test-report.md#insert-page-choice-20261119)

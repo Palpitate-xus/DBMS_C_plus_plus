@@ -26,6 +26,7 @@
 #include "common/FeatureGate.h"
 #include "common/DbError.h"
 #include "common/CharacterColumn.h"
+#include "common/IntegerTextCodec.h"
 #include "common/SqlSyntax.h"
 #include "process/OutputCapture.h"
 #include "common/GeometryValue.h"
@@ -737,6 +738,50 @@ std::string constraintMetadataKey(const std::string& name, const std::string& op
 bool internalConstraintStorageOption(const std::string& spelling) {
     const auto name = toLower(stripQuotes(trim(spelling)));
     return name == "constraint" || name.rfind("constraint.", 0) == 0;
+}
+
+std::optional<int> parseIntegerReloptionText(const std::string& input) {
+    char* end = nullptr;
+    errno = 0;
+    double value = std::strtol(input.c_str(), &end, 0);
+    if (*end == '.' || *end == 'e' || *end == 'E' || errno == ERANGE) {
+        errno = 0;
+        value = std::strtod(input.c_str(), &end);
+    }
+    if (end == input.c_str() || errno == ERANGE || !std::isfinite(value)) return std::nullopt;
+    while (std::isspace(static_cast<unsigned char>(*end))) ++end;
+    value = std::rint(value);
+    if (end != input.c_str() + input.size() ||
+        value < std::numeric_limits<int>::min() || value > std::numeric_limits<int>::max()) {
+        return std::nullopt;
+    }
+    return static_cast<int>(value);
+}
+
+std::string normalizedTableFillfactor(const std::string& token) {
+    auto text = stripQuotes(token);
+    if (text == token) {
+        // The SQL lexer interprets integer literals before reloption checking.
+        // A quoted value instead keeps the text parser's base-zero rules.
+        const auto literal = parsePostgresIntegerText(text, 64);
+        if (literal.error == IntegerTextError::None) {
+            text = std::to_string(literal.value);
+        } else {
+            for (size_t i = 0; i < text.size(); ++i) {
+                if (text[i] == '_' && (i == 0 || i + 1 == text.size() ||
+                    !std::isdigit(static_cast<unsigned char>(text[i - 1])) ||
+                    !std::isdigit(static_cast<unsigned char>(text[i + 1])))) {
+                    throw DbError("22023", "fillfactor requires an integer value");
+                }
+            }
+            text.erase(std::remove(text.begin(), text.end(), '_'), text.end());
+        }
+    }
+    const auto value = parseIntegerReloptionText(text);
+    if (!value) throw DbError("22023", "fillfactor requires an integer value");
+    if (*value < 10 || *value > 100)
+        throw DbError("22023", "fillfactor must be between 10 and 100");
+    return std::to_string(*value);
 }
 
 bool metadataBool(const std::map<std::string, std::string>& params,
@@ -3654,15 +3699,35 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
             }
             case AlterTableStmt::Action::SetOptions:
             case AlterTableStmt::Action::ResetOptions: {
+                const bool reset = sub.action == AlterTableStmt::Action::ResetOptions;
                 std::map<std::string, std::string> params;
-                for (const auto& option : sub.options) {
+                for (const auto& option : sub.storageOptions) {
                     if (internalConstraintStorageOption(option.first)) {
                         // RESET of an unrecognized reloption is a successful
                         // no-op, not permission to erase an internal proof.
-                        if (sub.action == AlterTableStmt::Action::ResetOptions) continue;
+                        if (reset) continue;
                         throw DbError("22023", "unrecognized storage parameter: " + option.first);
                     }
-                    params[option.first] = option.second;
+                    if (option.first == "fillfactor") {
+                        if (reset) {
+                            params[option.first] = "";
+                            continue;
+                        }
+                        if (params.count(option.first) != 0)
+                            throw DbError("22023", "parameter \"fillfactor\" specified more than once");
+                        if (!isExtendedCompatMode(s.compatibilityMode) &&
+                            g_engine.getTableSchema(s.currentDB, tableName).partitionType !=
+                                TableSchema::PartitionType::None) {
+                            throw DbError("42809", "fillfactor is not supported on partitioned tables");
+                        }
+                        params.emplace(option.first, normalizedTableFillfactor(option.second));
+                    } else if (toLower(option.first) != "fillfactor") {
+                        if (!reset && option.second.empty())
+                            throw DbError("42601", "storage parameter value is required");
+                        params[option.first] = option.second;
+                    } else if (!reset) {
+                        throw DbError("22023", "unrecognized storage parameter: " + option.first);
+                    }
                 }
                 status = g_engine.updateStorageParams(s.currentDB, tableName, params);
                 if (!alterStatusOk(status, "Storage option")) return true;
@@ -6312,10 +6377,23 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
     tbl.isTemporary = temporary;
     tbl.isUnlogged = stmt->unlogged;
     tbl.tablespace = stmt->tablespace.empty() ? "pg_default" : stmt->tablespace;
-    for (const auto& option : stmt->options)
-        if (internalConstraintStorageOption(option.first))
+    for (const auto& option : stmt->options) {
+        if (option.first == "oids" && toLower(stripQuotes(option.second)) == "false") continue;
+        // Preserve accepted syntax for these existing declarations. The
+        // current automatic vacuum setting is instance-wide.
+        if (option.first == "autovacuum_enabled" || option.first == "toast.autovacuum_enabled")
+            continue;
+        if (option.first != "fillfactor") {
+            if (isExtendedCompatMode(s.compatibilityMode) &&
+                !internalConstraintStorageOption(option.first)) continue;
             throw DbError("22023", "unrecognized storage parameter: " + option.first);
-    tbl.storageParams = stmt->options;
+        }
+        if (!stmt->partitionType.empty() && !isExtendedCompatMode(s.compatibilityMode))
+            throw DbError("42809", "fillfactor is not supported on partitioned tables");
+        if (tbl.storageParams.count(option.first) != 0)
+            throw DbError("22023", "parameter \"fillfactor\" specified more than once");
+        tbl.storageParams.emplace(option.first, normalizedTableFillfactor(option.second));
+    }
 
     // CREATE TABLE ... (LIKE source [INCLUDING ...]) — copy source columns first.
     // Plain LIKE copies column definitions + NOT NULL + collation only. DEFAULTS,
@@ -8675,22 +8753,10 @@ bool DdlExecutor::executeCreateIndex(const CreateIndexStmt* stmt, Session& s) {
                         input.erase(first, significant-first);
                     }
                 }
-                // Match PostgreSQL 18 parse_int with no unit flags: integer
-                // first, decimal/exponent/overflow as double, ties-to-even
-                // rounding, then bounds. Never cast a nonfinite/out-of-range
-                // value or silently accept a suffix.
-                char* end = nullptr;
-                errno = 0;
-                double value = std::strtol(input.c_str(), &end, 0);
-                if (*end == '.' || *end == 'e' || *end == 'E' || errno == ERANGE) {
-                    errno = 0; value = std::strtod(input.c_str(), &end);
-                }
-                const bool parsed = end != input.c_str() && errno != ERANGE && std::isfinite(value);
-                while (std::isspace(static_cast<unsigned char>(*end))) ++end;
-                value = std::rint(value);
-                if (!parsed || end != input.c_str()+input.size() || value < 1 || value > 131072)
+                const auto value = parseIntegerReloptionText(input);
+                if (!value || *value < 1 || *value > 131072)
                     throw DbError("22023", "pages_per_range must be between 1 and 131072");
-                pagesPerRange = static_cast<size_t>(value);
+                pagesPerRange = static_cast<size_t>(*value);
             }
             res = g_engine.createBrinIndex(s.currentDB, tname, colname, pagesPerRange);
         }

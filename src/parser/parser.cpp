@@ -6632,7 +6632,7 @@ static int timeZoneValueKeywordKind(const std::string& token) {
     return found != end && word == found->word ? found->kind : 0;
 }
 
-static bool timeZoneNumericToken(const std::string& token) {
+static bool postgresNumericLiteralToken(const std::string& token) {
     if (isNumericToken(token)) return true;
     if (token.size() > 2 && token[0] == '0') {
         const char prefix = static_cast<char>(std::tolower(static_cast<unsigned char>(token[1])));
@@ -6942,7 +6942,7 @@ ParseResult SQLParser::parseSet(const std::string& sql) {
                 while (last < end && values[last] != "," && spans[last - 1].second == spans[last].first)
                     ++last;
                 const std::string number = sql.substr(spans[at].first, spans[last - 1].second - spans[at].first);
-                if (!timeZoneNumericToken(number)) return false;
+                if (!postgresNumericLiteralToken(number)) return false;
                 if (workMem) {
                     // SQL numeric constants are normalized before GUC input;
                     // quoted numeric text keeps the GUC's own base/unit rules.
@@ -8103,6 +8103,56 @@ static std::vector<std::string> collectParenthesized(const std::vector<std::stri
     return inner;
 }
 
+// CREATE/ALTER relation options share one grammar. Preserve duplicates and
+// source order so the execution layer can report semantic errors at the
+// appropriate point (for example, after IF NOT EXISTS resolution).
+static bool parseRelationOptions(
+    const std::vector<std::string>& tokens, size_t& pos,
+    std::vector<std::pair<std::string, std::string>>& options,
+    bool reset) {
+    if (pos >= tokens.size() || tokens[pos++] != "(") return false;
+    const auto identifier = [](const std::string& token) {
+        if (token.size() >= 2 && token.front() == '"' && token.back() == '"')
+            return !parseRoutineIdentifier(token).empty();
+        if (token.empty()) return false;
+        const auto first = static_cast<unsigned char>(token.front());
+        if (!std::isalpha(first) && first != '_' && first < 128) return false;
+        for (const unsigned char ch : token)
+            if (!std::isalnum(ch) && ch != '_' && ch != '$' && ch < 128) return false;
+        return true;
+    };
+    for (;;) {
+        if (pos >= tokens.size() || !identifier(tokens[pos])) return false;
+        std::string name = parseRoutineIdentifier(tokens[pos++]);
+        if (pos < tokens.size() && tokens[pos] == ".") {
+            ++pos;
+            if (pos >= tokens.size() || !identifier(tokens[pos])) return false;
+            name += "." + parseRoutineIdentifier(tokens[pos++]);
+        }
+        std::string value;
+        if (pos < tokens.size() && tokens[pos] == "=") {
+            if (reset) return false;
+            ++pos;
+            if (pos >= tokens.size()) return false;
+            if (tokens[pos] == "+" || tokens[pos] == "-") {
+                value = tokens[pos++];
+                if (pos >= tokens.size() || !postgresNumericLiteralToken(tokens[pos])) return false;
+                value += tokens[pos++];
+            } else {
+                const auto& token = tokens[pos];
+                if (!postgresNumericLiteralToken(token) && !isStringLiteralToken(token) && !identifier(token))
+                    return false;
+                value = token;
+                ++pos;
+            }
+        }
+        options.emplace_back(std::move(name), std::move(value));
+        if (pos >= tokens.size()) return false;
+        if (tokens[pos] == ")") { ++pos; return true; }
+        if (tokens[pos++] != ",") return false;
+    }
+}
+
 // Parse an EXCLUDE constraint clause after the EXCLUDE keyword:
 //   [ USING method ] ( elem WITH operator [, ...] ) [ WHERE ( predicate ) ]
 static TableConstraint parseExcludeConstraint(const std::vector<std::string>& tokens, size_t& pos) {
@@ -8816,22 +8866,11 @@ StmtPtr SQLParser::parseCreateTable(const std::vector<std::string>& tokens, size
             if (stmt->partitionBy.empty()) return nullptr;
         } else if (kw == "with") {
             ++pos;
-            if (pos >= tokens.size() || tokens[pos] != "(") return nullptr;
-            auto opts = collectParenthesized(tokens, pos);
-            for (size_t i = 0; i < opts.size(); i += 2) {
-                if (i + 1 < opts.size() && opts[i + 1] == "=") {
-                    if (i + 2 < opts.size()) {
-                        stmt->options[opts[i]] = opts[i + 2];
-                        i += 2;
-                    }
-                } else if (i + 1 < opts.size()) {
-                    stmt->options[opts[i]] = opts[i + 1];
-                }
-            }
+            if (!parseRelationOptions(tokens, pos, stmt->options, false)) return nullptr;
         } else if (kw == "without") {
             ++pos;
             if (pos < tokens.size() && toLower(tokens[pos]) == "oids") {
-                stmt->options["oids"] = "false";
+                stmt->options.emplace_back("oids", "false");
                 ++pos;
             }
         } else if (kw == "tablespace") {
@@ -12154,60 +12193,14 @@ StmtPtr SQLParser::parseAlterTable(const std::vector<std::string>& tokens, size_
             } else if (pos < tokens.size() && tokens[pos] == "(") {
                 sub.action = AlterTableStmt::Action::SetOptions;
                 recognized = true;
-                auto opts = collectParenthesized(tokens, pos);
-                if (opts.empty() || pos == 0 || tokens[pos - 1] != ")")
-                    return nullptr;
-                const auto optionName = [](const std::string& token) {
-                    if (token.size() >= 2 && token.front() == '"' &&
-                        token.back() == '"') return true;
-                    if (token.empty()) return false;
-                    const auto first = static_cast<unsigned char>(token.front());
-                    if (!std::isalpha(first) && first != '_' && first < 128)
-                        return false;
-                    for (const unsigned char c : token)
-                        if (!std::isalnum(c) && c != '_' && c != '$' && c < 128)
-                            return false;
-                    return true;
-                };
-                size_t i = 0;
-                while (i < opts.size()) {
-                    if (!optionName(opts[i])) return nullptr;
-                    std::string name = parseRoutineIdentifier(opts[i++]);
-                    if (name.empty()) return nullptr;
-                    if (i < opts.size() && opts[i] == ".") {
-                        ++i;
-                        if (i >= opts.size() || !optionName(opts[i]))
-                            return nullptr;
-                        name += "." + parseRoutineIdentifier(opts[i++]);
-                    }
-                    if (i >= opts.size() || opts[i++] != "=" ||
-                        i >= opts.size()) return nullptr;
-                    std::string value = opts[i++];
-                    if (value == "," || value == "=" || value == "(" ||
-                        value == ")" || value == ".") return nullptr;
-                    if (value == "+" || value == "-") {
-                        if (i >= opts.size() || opts[i] == "," ||
-                            opts[i] == "=" || opts[i] == "(" ||
-                            opts[i] == ")" || opts[i] == ".") return nullptr;
-                        value += opts[i++];
-                    }
-                    sub.options[name] = std::move(value);
-                    if (i == opts.size()) break;
-                    if (opts[i++] != "," || i == opts.size()) return nullptr;
-                }
-                if (pos < tokens.size() && tokens[pos] != "," &&
-                    tokens[pos] != ";") return nullptr;
+                if (!parseRelationOptions(tokens, pos, sub.storageOptions, false)) return nullptr;
+                if (pos < tokens.size() && tokens[pos] != "," && tokens[pos] != ";") return nullptr;
             } else if (pos + 1 < tokens.size() && toLower(tokens[pos]) == "with" && tokens[pos + 1] == "(") {
-                sub.action = AlterTableStmt::Action::SetOptions; pos += 2;
+                sub.action = AlterTableStmt::Action::SetOptions;
+                ++pos;
                 recognized = true;
-                auto opts = collectParenthesized(tokens, pos);
-                for (size_t i = 0; i < opts.size(); i += 2) {
-                    if (i + 1 < opts.size() && opts[i + 1] == "=") {
-                        if (i + 2 < opts.size()) { sub.options[opts[i]] = opts[i + 2]; i += 2; }
-                    } else if (i + 1 < opts.size()) {
-                        sub.options[opts[i]] = opts[i + 1];
-                    }
-                }
+                if (!parseRelationOptions(tokens, pos, sub.storageOptions, false)) return nullptr;
+                if (pos < tokens.size() && tokens[pos] != "," && tokens[pos] != ";") return nullptr;
             }
         } else if (kw == "replica" && pos + 1 < tokens.size() &&
                    toLower(tokens[pos + 1]) == "identity") {
@@ -12228,10 +12221,8 @@ StmtPtr SQLParser::parseAlterTable(const std::vector<std::string>& tokens, size_
         } else if (kw == "reset") {
             recognized = true;
             sub.action = AlterTableStmt::Action::ResetOptions; ++pos;
-            if (pos < tokens.size() && toLower(tokens[pos]) == "(") {
-                auto opts = collectParenthesized(tokens, pos);
-                for (const auto& o : opts) if (o != ",") sub.options[o] = "";
-            }
+            if (!parseRelationOptions(tokens, pos, sub.storageOptions, true)) return nullptr;
+            if (pos < tokens.size() && tokens[pos] != "," && tokens[pos] != ";") return nullptr;
         } else if (kw == "enable" && pos + 3 < tokens.size() &&
                    toLower(tokens[pos + 1]) == "row" &&
                    toLower(tokens[pos + 2]) == "level" &&

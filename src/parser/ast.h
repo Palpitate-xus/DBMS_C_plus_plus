@@ -1054,7 +1054,9 @@ struct CreateTableStmt : public Stmt {
     std::vector<ColumnDef> columns;
     std::vector<TableConstraint> constraints;
     std::vector<std::string> inherits;         // INHERITS (parent1, parent2)
-    std::map<std::string, std::string> options; // WITH (...) reloptions
+    // Preserve order and duplicate names for execution-time validation.
+    // Names are SQL identifiers; values retain their original token spelling.
+    std::vector<std::pair<std::string, std::string>> options;
     bool ifNotExists = false;
     bool unlogged = false;
     bool temp = false;
@@ -1278,6 +1280,7 @@ struct AlterTableStmt : public Stmt {
         bool dropNotNull = false;
         std::string partitionSpec;
         std::map<std::string, std::string> options;
+        std::vector<std::pair<std::string, std::string>> storageOptions;
         std::string replicaIdentity;
         bool setDeferrable = false;
         bool deferrable = false;

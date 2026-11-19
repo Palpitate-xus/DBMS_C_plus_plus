@@ -929,12 +929,11 @@ CREATE INDEX users_indexes (LIKE src INCLUDING INDEXES);
 CREATE TABLE users_constraints (LIKE src INCLUDING CONSTRAINTS);
 CREATE TABLE users_identity (LIKE src INCLUDING IDENTITY);
 
--- 建表后设置填充比例
-CREATE TABLE t (ID INT);
-ALTER TABLE t SET (FILLFACTOR = 90);
+-- 建表时为后续更新留出页内空间
+CREATE TABLE t (ID INT) WITH (FILLFACTOR = 90);
 ```
 
-当前已验证 `ALTER TABLE ... SET` 会保存 `fillfactor`。受测的 `CREATE TABLE ... WITH (FILLFACTOR = 50)` 建表成功后没有保存该值。[填充比例测试](test-report.md#insert-page-choice-20261119)
+普通表建表时可指定 `FILLFACTOR`，范围是 10 到 100，默认是 100。比如 `90` 会给以后的更新预留约 10% 的页内空间。这个值会随表保存，重启后仍用于插入。已有表可用 `ALTER TABLE ... SET (FILLFACTOR = 90)` 修改，用 `RESET (FILLFACTOR)` 恢复默认值。这些操作影响后续写入，已经写好的页保持原来的布局。[填充比例测试](test-report.md#create-table-fillfactor-20261119)
 
 ### 修改表
 
