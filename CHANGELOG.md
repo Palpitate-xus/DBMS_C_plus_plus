@@ -1,18 +1,18 @@
 # 更新日志
 
 <details>
-<summary>长值文件可以单独缩小 · 2026-11-18</summary>
+<summary>删除长文本后，可以单独腾出磁盘空间 · 2026-11-18</summary>
 
-删除许多长文本后，可以只整理存放这些内容的文件，把不再使用的空间还给磁盘。
+删除大量单独存放的长文本后，可以只缩小存放这些内容的文件，把空出的空间还给磁盘。
 
 [使用示例](docs/MANUAL.md#分开清理主表和长值) · [恢复测试](docs/test-report.md#vacuum-toast-full-20261118) · [性能报告](docs/performance-report-2026-10-30.md#vacuum-toast-full-cost-20261118)
 
 </details>
 
 <details>
-<summary>可以分开清理主表和长值 · 2026-11-18</summary>
+<summary>清理表时，可以选择清理哪些数据 · 2026-11-18</summary>
 
-普通 `VACUUM` 可以只清理主表，也可以只清理单独存放的长值。还可以只更新统计信息。
+用 `VACUUM` 时，可以只清理表里的普通数据，也可以只清理单独存放的长文本。还可以单独更新查询用的统计信息。
 
 [使用示例](docs/MANUAL.md#分开清理主表和长值) · [测试报告](docs/test-report.md#vacuum-process-options-20261118) · [性能报告](docs/performance-report-2026-10-30.md#vacuum-process-options-cost-20261118)
 
@@ -21,7 +21,7 @@
 <details>
 <summary>清理表时可以少读一遍数据 · 2026-11-18</summary>
 
-没有额外存放长值时，`VACUUM` 会省掉查找这些值的第二遍扫描。
+如果表没有单独存放长文本等大内容，`VACUUM` 会省去检查这些内容的一遍读取。
 
 [使用示例](docs/MANUAL.md#清理表占用的空间) · [测试报告](docs/test-report.md#vacuum-empty-toast-20261118) · [性能报告](docs/performance-report-2026-10-30.md#vacuum-empty-toast-cost-20261118)
 

@@ -17,7 +17,15 @@ cd dbms-<version>
 ./scripts/build_tests.sh  # 可选: 全量回归
 ```
 
-依赖：g++ (C++17)、make/cmake（按构建脚本）、Python 3（E2E 测试）、zlib 开发库（TOAST 压缩存储格式必需）、ICU i18n/uc/data 开发库（IANA 时区和夏令时规则必需）。运行时还须安装匹配的 zlib 和 ICU 共享库。OpenSSL 开发库用于网络 TLS；生产部署必须启用真实 TLS。
+## 编译依赖
+
+用 CMake 编译需要 CMake 3.16 或更新版本、支持 C++17 的 g++、make、zlib 和 ICU 的开发包。在 Debian 或 Ubuntu 上可安装以下软件包：
+
+```bash
+sudo apt install cmake g++ make zlib1g-dev libicu-dev
+```
+
+运行程序需要对应的 zlib 和 ICU 共享库。编译支持加密连接的程序还需安装 OpenSSL 开发包（`libssl-dev`），运行端到端测试需要 Python 3。
 
 二进制分发请同时提供仓库根 [THIRD_PARTY_NOTICES](../THIRD_PARTY_NOTICES) 中备份清单摘要实现的第三方版权、许可条件与免责声明。CMake 安装会将该声明放入安装前缀下的 `share/doc/DBMS_C_plus_plus/THIRD_PARTY_NOTICES`；单独复制 `dbms_main` 时也须附带该声明。
 
