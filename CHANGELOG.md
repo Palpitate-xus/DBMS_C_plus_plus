@@ -1,27 +1,27 @@
 # 更新日志
 
 <details>
-<summary>更新记录时，会先在原来的页找空位 · 2026-11-19</summary>
+<summary>更新记录时，先在原来的位置附近找空位 · 2026-11-19</summary>
 
-原来的页放不下新版本时，数据库会先查哪些页还有空位，减少从头查找。
+如果原来的位置附近放不下更新后的记录，数据库会优先尝试之前记下的空位，减少从头查找的次数。
 
 [使用说明](docs/MANUAL.md#更新时如何选择写入位置) · [测试报告](docs/test-report.md#update-version-placement-20261119) · [性能报告](docs/performance-report-2026-10-30.md#update-version-placement-cost-20261119)
 
 </details>
 
 <details>
-<summary>带来源表的更新和删除，也能按主键找记录 · 2026-11-19</summary>
+<summary>用另一张表更新或删除记录时，可以先按编号查找 · 2026-11-19</summary>
 
-如果条件先用整数主键指定一条记录，数据库核对索引命中后，可以直接找到目标，再检查来源表。
+例如，根据付款表更新或删除某笔订单。如果订单号是整数主键，数据库可以先通过索引找到订单，再检查付款表中的条件。
 
 [使用说明](docs/MANUAL.md#按整数主键更新或删除) · [测试报告](docs/test-report.md#joined-primary-key-target-20261119) · [性能报告](docs/performance-report-2026-10-30.md#joined-primary-key-cost-20261119)
 
 </details>
 
 <details>
-<summary>按另一张表更新或删除时，也能处理并发修改 · 2026-11-19</summary>
+<summary>同时修改同一条记录时，会按新值再检查 · 2026-11-19</summary>
 
-默认设置下，如果目标记录被另一个连接先改了，数据库会用新值和原来选中的来源记录重新检查条件。
+默认设置下，按另一张表更新或删除记录时，如果有人先修改并提交了这条记录，数据库会用新值再次检查条件。条件不再成立时，就跳过这条记录。
 
 [使用说明](docs/MANUAL.md#同时修改同一行) · [测试报告](docs/test-report.md#joined-row-writes-20261119) · [性能报告](docs/performance-report-2026-10-30.md#joined-row-write-cost-20261119)
 
