@@ -2,6 +2,10 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-19 · 临时表与崩溃恢复
+
+PostgreSQL 将临时表数据文件绑定到会话，持久表的数据页才进入通常的 WAL 路径。重启回收遗留文件，临时命名空间也有独立的清理过程。本项目现有日志可包含临时表页镜像，恢复时借助创建记录核对其归属并跳过该页，普通表继续按物理关系编号恢复。两边受测的结果包括已提交普通表数据仍可读取，失效会话的临时表消失，表名可以重新使用。[PostgreSQL 存储创建](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/catalog/storage.c) · [PostgreSQL 临时命名空间](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/catalog/namespace.c) · [本项目验证](test-report.md#temporary-table-crash-recovery-20261119)
+
 ## 2026-11-19 · 为后续更新预留页内空间
 
 PostgreSQL 和本项目现在都能在普通堆表建表时指定 `FILLFACTOR`，默认值为 100。受测的合法值、越界值、重复设置和跳过已有表的结果一致。PostgreSQL 保存通用关系选项并从 `pg_class.reloptions` 公开；本项目将填充比例保存在表的参数文件里供存储层读取，目录查询和其他表级选项仍有缺口。[PostgreSQL 18 文档](https://www.postgresql.org/docs/18/sql-createtable.html) · [本项目对照](test-report.md#create-table-fillfactor-20261119)

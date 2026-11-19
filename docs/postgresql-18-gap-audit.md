@@ -2,7 +2,7 @@
 
 ## 当前汇总（2026-11-19）
 
-原始 273 项要求中，22 项完成、167 项部分实现、69 项待验证、15 项暂缓。普通表在建表时保存填充比例，已验证正常回滚、重启和实际写入位置。未提交建表后的崩溃清理、临时表的崩溃恢复以及目录查询仍有缺口。[逐项状态](gap-progress.json) · [建表与恢复测试](test-report.md#create-table-fillfactor-20261119)
+原始 273 项要求中，22 项完成、167 项部分实现、69 项待验证、15 项暂缓。本轮验证了写过临时表后，活动日志或完整归档能够确认其归属时的崩溃恢复。未提交建表后的崩溃清理以及其他恢复场景仍有缺口。[逐项状态](gap-progress.json) · [临时表恢复测试](test-report.md#temporary-table-crash-recovery-20261119)
 
 PostgreSQL 18.6 的行为和性能对照见差距评估，各轮证据适用于报告中列明的版本、数据和场景。[当前差距评估](postgresql-comparison.md)
 
@@ -1929,7 +1929,7 @@ revalidation、其它sets、WALrewrite/PITR及所有剩余273内容继续。总�
 - [ ] **WAL-05** recovery 必须是 redo-based 状态机；当前额外 before-image undo 模型需证明与 steal/no-force、并发 checkpoint 的所有 crash window 一致。（修复启动恢复遍历未初始化活动事务集合导致的 SIGSEGV；真实 `SIGKILL` 矩阵12/12通过。undo/replay与redo状态机、并发checkpoint及所有崩溃窗口仍未证明，见 `docs/issue-wal-05-startup-recovery-crash-matrix.md`。）
 - [ ] **WAL-06** 数据页、所有索引和元数据 checksum；补离线/在线启停与 `pg_checksums`/verify 工具等价物。（heap页及B+Tree子集已有自定义checksum；新B+Tree `0xC552` 将block number纳入CRC，旧 `0xC551` 需REINDEX才具备此保护；Hash/Bloom/GIN/BRIN/GiST/SP-GiST 新格式有自定义checksum、旧版明确列为unchecked；离线 verifier 扫描 `.idx`/`.idx_*`、`.hidx`、`.bidx`、`.gin`、`.brin`、`.gist`、`.spgist` 并单列 legacy 未校验数量，但不解析B+Tree拓扑、GIN postings或BRIN/GiST/SP-GiST entries语义；全部metadata仍缺统一checksum，也无enable/disable/rewrite/progress workflow，见 `docs/issue-wal-06-index-checksum-coverage.md`。）
 - [ ] **WAL-07** 目录/fsync/rename/link/unlink 顺序覆盖 ext4/XFS、跨设备表空间、磁盘满、partial write、torn write 和 power-loss。（补 `CREATE/DROP SCHEMA` 标记失败恢复与持久化、`CREATE/DROP/RENAME DATABASE` 集群父目录同步、`RENAME/DROP SEQUENCE` fsync 失败回滚、`tlist.lst` 原子固定记录发布，以及 LargeObject 目录/空对象创建耐久性；启动清理失败会 fail-closed，相关故障注入回归通过。LOB object file 访问现拒绝符号链接；write/truncate fsync 内容，DROP 先同步 canonical-name 删除，目录 fsync 失败则尝试恢复并同步原名，`large_object_drop_durability_test` 覆盖两种 barrier 结果。持续 EIO 下的 rollback 仍可能是 indeterminate，且事务/WAL 边界未接入。DROP/RENAME 表在目录持久化失败后的多文件 DDL 仍可能是 indeterminate，调用方须重查。ext4/XFS、跨设备全流程、ENOSPC、partial/torn write 与真实 power-loss 仍未覆盖，见 `docs/issue-wal-07-no-replace-schema-marker-durability.md`。）
-- [ ] **WAL-08** unlogged/temp relation、2PC、sequence、DDL、logical slot 在 crash 后的专门恢复规则。（历史专项修复清理前的 session-temp specialized-index 枚举，证据见 `docs/issue-wal-08-stale-temp-startup-recovery.md`；后续 physical-identity 枚举引入后，当前完整原 `stale_temp_startup_recovery_test` 又实际 abort134。真正 temp PAGE WAL、REINDEX 残留、loser CLOG 与 ordinary live-owner 边界继续核实，不能将历史通过当当前窗口闭合。2PC、temp WAL、sequence/DDL、logical slot 的完整 crash 状态机仍缺，最新证据见 `docs/issue-ready-source-integration.md`。）
+- [ ] **WAL-08** unlogged/temp relation、2PC、sequence、DDL、logical slot 在 crash 后的专门恢复规则。（当前临时表页重放使用活动日志或同一时间线的归档创建记录验证归属，支持受测的重复崩溃启动，`stale_temp_startup_recovery_test` 通过。覆盖范围和缺失归档结果见[恢复测试](test-report.md#temporary-table-crash-recovery-20261119)。历史上的临时文件枚举、REINDEX 和其他崩溃状态见[临时表枚举记录](issue-wal-08-stale-temp-startup-recovery.md)与[集成记录](issue-ready-source-integration.md)。）
 - [ ] **STO-07** 大对象补 catalog、ACL、事务、64-bit offset、lo_* API、protocol/libpq 和 vacuum。（存储文件访问现拒绝 object-file 符号链接、拒绝初始化时的 `.lobjects` symlink，并为读写/截断使用验证过的普通文件描述符；该窄项有 `large_object_symlink_guard_test` 覆盖。目录描述符未被 manager 全生命周期固定，父目录并发替换不在覆盖范围内；catalog/ACL、WAL/事务、完整 64-bit/API/protocol/libpq 与 vacuum 仍缺，见 `docs/issue-sto-07-large-object-path-integrity.md`。）
 - [ ] **STO-08** TDE 使用成熟密码库和审计过的 AEAD/KMS 方案；补索引/WAL/temp/backup 全覆盖、密钥轮换、per-database key 和灾难恢复。自研 SHA-256-CTR+EtM 不应直接作为生产加密承诺。
 

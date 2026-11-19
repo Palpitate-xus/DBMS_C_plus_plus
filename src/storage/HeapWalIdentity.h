@@ -3,6 +3,7 @@
 #include "storage/WAL.h"
 #include "commands/RelationNameCodec.h"
 #include <cstring>
+#include <map>
 #include <optional>
 #include <string>
 #include <vector>
@@ -130,5 +131,12 @@ inline bool event(const XLogRecord& record, Event& result) {
     offset += length;
     return relation_name_codec::valid(result.name) && padding(record.data, offset);
 }
+
+// Read the checked chain preceding the first retained record. This is used
+// on demand when recovery needs a relation birth that was archived.
+bool readArchivedCreateNames(const WALManager& wal,
+                             const std::filesystem::path& active,
+                             const std::filesystem::path& archive,
+                             std::map<uint64_t, std::string>& names);
 
 }  // namespace dbms::heap_wal_identity

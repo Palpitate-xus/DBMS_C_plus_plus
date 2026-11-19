@@ -1,4 +1,5 @@
 #include "WAL.h"
+#include "HeapWalIdentity.h"
 #include <fcntl.h>
 #include <sys/file.h>
 #include <sys/stat.h>
@@ -410,6 +411,19 @@ public:
         return record;
     }
 
+    bool zeroPadding(uint32_t timeline, Lsn begin, Lsn end) const {
+        std::array<char, 65536> bytes{};
+        for (Lsn offset = begin; offset < end;) {
+            const auto count = static_cast<size_t>(
+                std::min<Lsn>(bytes.size(), end - offset));
+            if (!readBytes(timeline, offset, bytes.data(), count) ||
+                std::any_of(bytes.begin(), bytes.begin() + count,
+                            [](char byte) { return byte != 0; })) return false;
+            offset += count;
+        }
+        return true;
+    }
+
     std::optional<Lsn> retainedStart(uint32_t timeline,
             const std::filesystem::path& checkpoint, Lsn boundary, Lsn limit) const {
         if (const auto first = readRecord(timeline, boundary, limit)) {
@@ -483,6 +497,47 @@ private:
 };
 } // namespace
 
+bool heap_wal_identity::readArchivedCreateNames(
+    const WALManager& wal, const std::filesystem::path& active,
+    const std::filesystem::path& archive,
+    std::map<uint64_t, std::string>& names) {
+    try {
+        const Lsn anchor = wal.earliestAvailableLsn();
+        if (anchor == 0) return false;
+        auto record = wal.ReadRecord(anchor);
+        if (!record) return false;
+
+        SnapshotWalReader reader;
+        if (!reader.addRoot(active) || !reader.addRoot(archive)) return false;
+        const uint32_t timeline = wal.timelineId();
+        std::map<uint64_t, std::string> result;
+        for (Lsn current = anchor; current != 0;) {
+            const Lsn previous = record->header.xl_prev;
+            if (previous >= current) return false;
+            record = reader.readRecord(timeline, previous, current);
+            if (!record) return false;
+            const Lsn recordEnd = previous + record->header.xl_tot_len;
+            if (recordEnd != current) {
+                // SWITCH WAL may insert zero padding up to the segment edge.
+                if (current % WALManager::kSegmentSize ||
+                    recordEnd <= current - WALManager::kSegmentSize ||
+                    !reader.zeroPadding(timeline, recordEnd, current)) return false;
+            }
+            if (record->rmid() == RM_SMGR_ID && record->info() == XLOG_SMGR_RELATION_CREATE) {
+                Event birth;
+                if (!event(*record, birth) ||
+                    !result.emplace(birth.relationId, std::move(birth.name)).second) return false;
+            }
+            current = previous;
+        }
+        if (record->header.xl_prev != 0) return false;
+        names = std::move(result);
+        return true;
+    } catch (const std::filesystem::filesystem_error&) {
+        return false;
+    }
+}
+
 bool WALManager::readSnapshotTransactionHighWater(
     const std::filesystem::path& walDir, uint64_t& highWater) {
     return readSnapshotTransactionHighWater(
@@ -521,15 +576,7 @@ bool WALManager::readSnapshotTransactionHighWater(
                 if (!record) {
                     const Lsn end = std::min(limit,
                         (lsn / kSegmentSize + 1) * kSegmentSize);
-                    std::array<char, 65536> zeros{};
-                    for (Lsn offset = lsn; offset < end;) {
-                        const size_t count = static_cast<size_t>(
-                            std::min<Lsn>(zeros.size(), end - offset));
-                        if (!reader.readBytes(timeline, offset, zeros.data(), count) ||
-                            std::any_of(zeros.begin(), zeros.begin() + count,
-                                [](char byte) { return byte != 0; })) return false;
-                        offset += count;
-                    }
+                    if (!reader.zeroPadding(timeline, lsn, end)) return false;
                     lsn = end;
                     continue;
                 }

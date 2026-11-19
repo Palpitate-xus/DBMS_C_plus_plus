@@ -21,6 +21,13 @@ cmake --build build/cmake --target dbms_main --parallel 2
 ## 最近更新
 
 <details>
+<summary>修复写过临时表后无法重启的问题 · 2026-11-19</summary>
+
+恢复时会核对旧临时表的归属。确认后会清理上次连接留下的临时表，已提交的普通表数据可以继续读取。
+
+</details>
+
+<details>
 <summary>建表时可以为日后的更新留出空间 · 2026-11-19</summary>
 
 例如，把填充比例设为 90，就会为日后的更新留出约一成页内空间。重启后仍会按这个设置写入。
@@ -31,13 +38,6 @@ cmake --build build/cmake --target dbms_main --parallel 2
 <summary>插入记录时，可以改用别处的空位 · 2026-11-19</summary>
 
 推荐的位置被另一个操作占用时，数据库会先试别处。有合适的空位，就可以继续插入。
-
-</details>
-
-<details>
-<summary>更新记录时，先在原来的位置附近找空位 · 2026-11-19</summary>
-
-如果原来的位置附近放不下更新后的记录，数据库会优先尝试之前记下的空位，减少从头查找的次数。
 
 </details>
 

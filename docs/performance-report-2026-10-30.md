@@ -2,6 +2,24 @@
 
 > 历史基准脚本及原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 和 benchmark 脚本路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="temporary-table-crash-cost-20261119"></a>
+## 2026-11-19 · 写过临时表后的启动耗时
+
+PostgreSQL 把临时文件绑定到会话，单独管理它们的清理。SQLite 用连接私有的临时数据库保存临时表和索引。DuckDB 的临时表也归当前连接，通常保存在内存中，必要时可写入配置的临时目录。本项目从生成的日志中确认旧临时表归属，然后恢复需要保留的普通表。[PostgreSQL 存储创建](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/catalog/storage.c) · [SQLite 临时数据库](https://sqlite.org/tempfiles.html#temp_databases) · [DuckDB 临时表](https://duckdb.org/docs/sql/statements/create_table)
+
+以 `6df19049` 为基线，比较两个测试数据目录。第一个是已经停服的 3,200 行普通表，使用下文整数主键性能对照的数据。第二个是旧版写入临时表和普通表后被强制结束、且曾在旧版重启时失败的历史副本。每次从相同的关闭目录复制，再用独立服务进程启动。计时从创建进程到认证完成，检查监听状态的轮询间隔是 10 毫秒，文件复制和结果校验在计时之外。文件复制后操作系统缓存处于热状态。每次启动后检查普通表记录，历史崩溃副本还检查普通表的物理身份和临时文件清理。[普通表数据生成方法](#integer-primary-key-mutation-cost-20261119) · [崩溃恢复回归](test-report.md#temporary-table-crash-recovery-20261119)
+
+两版使用 GCC 13.3、CMake、C++17 和 `-O2`。客户端和服务端分别固定在 CPU 0 和 CPU 2，按 ABBA、BAAB、ABBA 顺序轮换，每轮分别启动两种目录，共 24 次。普通表启动的同版组内最大波动以 10% 为门槛，计时期间系统 I/O 压力的 60 秒均值为 4.16% 至 6.28%。
+
+| 数据目录 | 旧版 | 新版 |
+| --- | --- | --- |
+| 3,200 行普通表 | 6 次均就绪，中位 1,343 毫秒 | 6 次均就绪，中位 1,312 毫秒 |
+| 旧版临时表崩溃副本 | 6 次均因身份校验退出 | 6 次均就绪，中位 308 毫秒，范围 264 至 404 毫秒 |
+
+普通表启动的最大波动为 22.97%，速度变化暂无法确定。历史副本对照确认了崩溃后的可启动性。归档恢复由功能回归单独验证，耗时还取决于需要检查的归档量。[归档测试](test-report.md#temporary-table-crash-recovery-20261119)
+
+两版程序 SHA-256 分别为 `f544a1430d4dbac25b9964765fe94ac2103dc39c18fa3b8014697bfe25da1653` 和 `50eda0f728e5349f378af075cc25533b7addaf5b966fc84e2c2209db2934055b`。固定计划、原始记录审计和独立复核的 SHA-256 分别为 `9e7c463d304e65e11caea0ed6969e283b99d977c13dce0f04a5fe85e8061560f`、`203b40678054f6eeb79beac0eeebaeeda0486fc9c1c596859cf3d38080ea2b88` 和 `283b5c605af8435b448247a0bab8026894d5323ab78eaa733100a4a40fad822b`。已停止的 24 个计时副本清理后释放约 403 MB。
+
 <a id="create-table-fillfactor-cost-20261119"></a>
 ## 2026-11-19 · 建表时指定填充比例的空间和时间开销
 

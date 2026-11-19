@@ -217,20 +217,24 @@ static std::string unescapeString(const std::string& s) {
 // namespace.  The numeric backend component makes this predicate unambiguous
 // and lets startup remove both catalog entries and orphaned relation forks
 // left behind by a crashed backend.
-static bool isSessionTempPhysicalName(const std::string& name) {
-    constexpr const char* prefix = "__tmp_";
-    constexpr size_t prefixLen = 6;
-    if (name.rfind(prefix, 0) != 0) return false;
+static std::string_view sessionTempPhysicalPrefix(std::string_view name) {
+    constexpr std::string_view prefix = "__tmp_";
+    constexpr size_t prefixLen = prefix.size();
+    if (name.compare(0, prefixLen, prefix) != 0) return {};
 
     const size_t separator = name.find('_', prefixLen);
     if (separator == prefixLen || separator == std::string::npos ||
         separator + 1 >= name.size()) {
-        return false;
+        return {};
     }
     for (size_t i = prefixLen; i < separator; ++i) {
-        if (name[i] < '0' || name[i] > '9') return false;
+        if (name[i] < '0' || name[i] > '9') return {};
     }
-    return true;
+    return name.substr(0, separator + 1);
+}
+
+static bool isSessionTempPhysicalName(const std::string& name) {
+    return !sessionTempPhysicalPrefix(name).empty();
 }
 
 // Physical backups contain a complete database layout but are not active
@@ -49731,6 +49735,7 @@ bool StorageEngine::recoverAllDatabases() {
             }
         }
         std::map<uint64_t, std::pair<uint64_t, Lsn>> relationBirths;
+        std::map<uint64_t, std::string> temporaryBirthPrefixes;
         struct RetirementIntent {
             uint64_t xid;
             Lsn lsn;
@@ -49771,6 +49776,15 @@ bool StorageEngine::recoverAllDatabases() {
                     if (!relationBirths.emplace(event.relationId,
                             std::make_pair(record->header.xl_xid, historyLsn)).second)
                         return false;
+                    const auto prefix = sessionTempPhysicalPrefix(event.name);
+                    if (!prefix.empty()) {
+                        if (physicalRelations.count(event.relationId) != 0) {
+                            std::cerr << "[recovery] temporary relation birth conflicts with "
+                                      << "a persistent identity in " << dbname << '\n';
+                            return false;
+                        }
+                        temporaryBirthPrefixes.emplace(event.relationId, prefix);
+                    }
                 } else if (record->info() == XLOG_SMGR_RELATION_RETIRE) {
                     retirementIntents[event.relationId] = {
                         record->header.xl_xid, historyLsn, event.name};
@@ -49870,6 +49884,7 @@ bool StorageEngine::recoverAllDatabases() {
         // pass below. If one transaction changes a page more than once, its
         // before-images must be applied newest-to-oldest to restore the state
         // that existed before the transaction began.
+        std::optional<std::map<uint64_t, std::string>> archivedCreateNames;
         auto applyImageRecord = [&](const XLogRecord& rec, Lsn recordLsn,
                                     bool undoUncommitted) -> bool {
             const uint8_t rmid = rec.rmid();
@@ -49889,6 +49904,24 @@ bool StorageEngine::recoverAllDatabases() {
                     std::optional<uint64_t> identity;
                     if (!heap_wal_identity::image(rec, identity)) return false;
                     if (identity) {
+                        // Startup will discard the dead session's files. Only
+                        // skip images whose own generation was born in that
+                        // session's reserved namespace, including renames
+                        // within the same backend. An image name alone cannot
+                        // identify a missing relation as temporary.
+                        if (!temporaryBirthPrefixes.empty()) {
+                            const auto temp = temporaryBirthPrefixes.find(*identity);
+                            if (temp != temporaryBirthPrefixes.end()) {
+                                if (recordLsn <= relationBirths.at(*identity).second ||
+                                    sessionTempPhysicalPrefix(tableName) != temp->second ||
+                                    inDoubtPreparedXids.count({dbname, recXid})) {
+                                    std::cerr << "[recovery] conflicting temporary relation image for "
+                                              << *identity << " in " << dbname << '\n';
+                                    return false;
+                                }
+                                return true;
+                            }
+                        }
                         const auto live = physicalRelations.find(*identity);
                         if (live != physicalRelations.end()) {
                             resolvedHeapName = live->second;
@@ -49901,6 +49934,24 @@ bool StorageEngine::recoverAllDatabases() {
                                 birth->second.first == recXid && birth->second.second < recordLsn &&
                                 !committedXids.count(recXid) &&
                                 !inDoubtPreparedXids.count({dbname, recXid})) return true;
+                            const auto tempPrefix = sessionTempPhysicalPrefix(tableName);
+                            if (!tempPrefix.empty() && birth == relationBirths.end() &&
+                                recoveryTarget == 0 && wal->earliestAvailableLsn() != 0 &&
+                                !inDoubtPreparedXids.count({dbname, recXid})) {
+                                if (!archivedCreateNames) {
+                                    archivedCreateNames.emplace();
+                                    if (!heap_wal_identity::readArchivedCreateNames(
+                                            *wal, walPath(dbname), walArchiveDir(dbname),
+                                            *archivedCreateNames)) {
+                                        std::cerr << "[recovery] could not verify archived relation "
+                                                  << "history in " << dbname << '\n';
+                                        return false;
+                                    }
+                                }
+                                const auto archived = archivedCreateNames->find(*identity);
+                                if (archived != archivedCreateNames->end() &&
+                                    sessionTempPhysicalPrefix(archived->second) == tempPrefix) return true;
+                            }
                             std::cerr << "[recovery] missing live physical relation identity "
                                       << *identity << " in " << dbname << '\n';
                             return false;

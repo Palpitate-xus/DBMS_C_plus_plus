@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Real executable cold-start recovery initializes database locks on demand."""
+"""Crash recovery restores durable data and removes stale temporary relations."""
 
 import importlib.util
 from pathlib import Path
@@ -16,16 +16,18 @@ def main():
     spec.loader.exec_module(runner)
     client = runner.load_protocol_client()
 
-    def query(server, sql, expected=None, ready=b"I"):
+    def query(server, sql, expected=None, ready=b"I", state=None, tag=None):
         messages = client.simple_query(server["sock"], sql)
-        rows, state, message, _, _ = runner.decode_wire_result(messages)
-        assert state is None, (sql, state, message)
+        rows, actual_state, message, _, actual_tag = runner.decode_wire_result(messages)
+        assert actual_state == state, (sql, actual_state, message)
         assert messages[-1] == (b"Z", ready), (sql, messages[-1])
         if expected is not None:
             assert rows == expected, (sql, rows, expected)
+        if tag is not None:
+            assert actual_tag == tag, (sql, actual_tag, tag)
         return messages
 
-    def restart_after_sigkill(server):
+    def kill_server(server):
         # Kill only this test-owned, fully started process, retaining its
         # durable transaction/statement images. A new exec (not a native
         # StorageEngine constructed after main) exercises global startup.
@@ -36,21 +38,19 @@ def main():
         # kill, so close the client only after the process is confirmed dead.
         server["sock"].close()
         server["sock"] = None
-        fixture = Path(server["dir"])
-        images = list(fixture.glob("info.txn_backup.*"))
-        assert images, "crash fixture did not contain a transaction image"
-        assert all((image / ".dbms_physical_backup").is_file()
-                   for image in images), images
-        server["process"] = subprocess.Popen(
-            [runner.DBMS_MAIN, "--data-dir", server["dir"],
-             "--server", str(server["port"]), "--insecure"],
-            cwd=server["dir"], stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL)
+
+    def reopen(server):
+        diagnostics = Path(server["dir"]) / "reopen.stderr"
+        with diagnostics.open("wb") as stderr:
+            server["process"] = subprocess.Popen(
+                [runner.DBMS_MAIN, "--data-dir", server["dir"],
+                 "--server", str(server["port"]), "--insecure"],
+                cwd=server["dir"], stdout=subprocess.DEVNULL, stderr=stderr)
         deadline = time.monotonic() + 20
         while True:
             assert server["process"].poll() is None, (
                 "cold-start process exited before accepting clients",
-                server["process"].returncode)
+                server["process"].returncode, diagnostics.read_text(errors="replace"))
             connection = socket.socket()
             connection.settimeout(runner.wire_timeout())
             try:
@@ -63,6 +63,15 @@ def main():
                     raise
                 time.sleep(0.05)
         client.startup(server["sock"], "alice", "info")
+
+    def restart_after_sigkill(server):
+        kill_server(server)
+        fixture = Path(server["dir"])
+        images = list(fixture.glob("info.txn_backup.*"))
+        assert images, "crash fixture did not contain a transaction image"
+        assert all((image / ".dbms_physical_backup").is_file()
+                   for image in images), images
+        reopen(server)
         assert not list(fixture.glob("info.txn_backup.*")), (
             "recovered transaction image was not cleaned up")
         assert not list(fixture.glob("info.ddl_statement_backup.*")), (
@@ -113,6 +122,71 @@ def main():
         finally:
             runner.stop_ours(server)
     print("[COLD START TRANSACTION BACKUP PROTOCOL E2E] passed (create/alter/drop/nested)")
+
+    for archived in (False, True):
+        server = runner.start_ours(client)
+        try:
+            query(server, "CREATE TABLE recovery_durable(id INT PRIMARY KEY, payload TEXT);",
+                  tag="CREATE TABLE")
+            query(server, "INSERT INTO recovery_durable VALUES(1,'before temp');", tag="INSERT 0 1")
+            query(server, "CREATE TEMP TABLE recovery_temp(id INT PRIMARY KEY, payload TEXT);",
+                  tag="CREATE TABLE")
+            query(server, "BEGIN;", ready=b"T", tag="BEGIN")
+            query(server, "INSERT INTO recovery_temp VALUES(9,'temporary');",
+                  ready=b"T", tag="INSERT 0 1")
+            query(server, "INSERT INTO recovery_durable VALUES(2,'with temp');",
+                  ready=b"T", tag="INSERT 0 1")
+            query(server, "COMMIT;", tag="COMMIT")
+            query(server, "SELECT id,payload FROM recovery_temp;", [["9", "temporary"]], tag="SELECT 1")
+
+            query(server, "ALTER TABLE recovery_temp RENAME TO recovery_temp_renamed;",
+                  tag="ALTER TABLE")
+            if archived:
+                home = Path(server["dir"]) / "info"
+                segments = "[0-9A-F]" * 24
+                previous = sorted((home / "pg_wal").glob(segments))
+                assert len(previous) == 1, previous
+                query(server, "SWITCH WAL;")
+                query(server, "CHECKPOINT;", tag="CHECKPOINT")
+                assert not previous[0].exists(), previous
+                assert (home.with_suffix(".archive") / previous[0].name).is_file(), previous
+            query(server, "INSERT INTO recovery_temp_renamed VALUES(10,'renamed');", tag="INSERT 0 1")
+            query(server, "BEGIN;", ready=b"T", tag="BEGIN")
+            query(server, "INSERT INTO recovery_temp_renamed VALUES(11,'uncommitted');",
+                  ready=b"T", tag="INSERT 0 1")
+            query(server, "INSERT INTO recovery_durable VALUES(3,'uncommitted');",
+                  ready=b"T", tag="INSERT 0 1")
+
+            home = Path(server["dir"]) / "info"
+            old_temp = list(home.glob("__tmp_*_recovery_temp_renamed.*"))
+            assert {file.suffix for file in old_temp} >= {".stc", ".dt"}, old_temp
+            kill_server(server)
+            reopen(server)
+            survivors = [["1", "before temp"], ["2", "with temp"]]
+            query(server, "SELECT id,payload FROM recovery_durable ORDER BY id;",
+                  survivors, tag="SELECT 2")
+            query(server, "SELECT payload FROM recovery_durable WHERE id=2;", [["with temp"]],
+                  tag="SELECT 1")
+            query(server, "SELECT payload FROM recovery_durable WHERE id=3;", [], tag="SELECT 0")
+            query(server, "SELECT id FROM recovery_temp;", [], state="42P01")
+            query(server, "SELECT id FROM recovery_temp_renamed;", [], state="42P01")
+            assert not list(home.glob("__tmp_*_recovery_temp*"))
+
+            query(server, "CREATE TABLE recovery_temp(id INT PRIMARY KEY);", tag="CREATE TABLE")
+            query(server, "INSERT INTO recovery_temp VALUES(27);", tag="INSERT 0 1")
+            kill_server(server)
+            checksums = subprocess.run(
+                [runner.DBMS_MAIN, "--data-dir", server["dir"], "--verify-data-checksums"],
+                cwd=server["dir"], capture_output=True, text=True, timeout=10, check=False)
+            assert checksums.returncode == 0, checksums
+            reopen(server)
+            query(server, "SELECT id,payload FROM recovery_durable ORDER BY id;",
+                  survivors, tag="SELECT 2")
+            query(server, "SELECT id FROM recovery_temp;", [["27"]], tag="SELECT 1")
+            assert not list(home.glob("__tmp_*_recovery_temp*"))
+        finally:
+            runner.stop_ours(server)
+    print("[COLD START TEMP WAL RECOVERY PROTOCOL E2E] passed")
 
 
 if __name__ == "__main__":

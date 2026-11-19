@@ -6,6 +6,10 @@
 
 截至 2026-11-19，273 项功能要求中有 22 项完成、167 项部分实现、69 项待验证、15 项暂缓。各项结果和剩余范围见功能总账。以下更新报告给出各轮测试的实际范围。[功能总账](gap-progress.json) · [支持的功能和限制](compatibility-contract.md)
 
+## 2026-11-19 · 写过临时表后可恢复启动
+
+崩溃恢复检查临时表的创建日志和页镜像归属。满足检查时，服务启动后清理上一次连接的临时表，并可读取已提交的普通表记录。[测试报告](test-report.md#temporary-table-crash-recovery-20261119) · [启动性能报告](performance-report-2026-10-30.md#temporary-table-crash-cost-20261119)
+
 ## 2026-11-19 · 建表时可为更新预留空间
 
 普通表建表时指定的 `FILLFACTOR` 会随表保存。重启后仍按此值预留页内空间，建表后再用 `ALTER TABLE` 设置也有同样效果。[测试报告](test-report.md#create-table-fillfactor-20261119) · [性能报告](performance-report-2026-10-30.md#create-table-fillfactor-cost-20261119)

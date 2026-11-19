@@ -935,6 +935,8 @@ CREATE TABLE t (ID INT) WITH (FILLFACTOR = 90);
 
 普通表建表时可指定 `FILLFACTOR`，范围是 10 到 100，默认是 100。比如 `90` 会给以后的更新预留约 10% 的页内空间。这个值会随表保存，重启后仍用于插入。已有表可用 `ALTER TABLE ... SET (FILLFACTOR = 90)` 修改，用 `RESET (FILLFACTOR)` 恢复默认值。这些操作影响后续写入，已经写好的页保持原来的布局。[填充比例测试](test-report.md#create-table-fillfactor-20261119)
 
+临时表只在创建它的连接中使用。实例异常退出后，如果恢复日志能确认旧临时表的归属，启动时会跳过它的页数据并清理遗留文件。恢复后可以用同一个名字建表，已提交的普通表数据可以继续读取。[崩溃恢复测试](test-report.md#temporary-table-crash-recovery-20261119)
+
 ### 修改表
 
 ```sql
