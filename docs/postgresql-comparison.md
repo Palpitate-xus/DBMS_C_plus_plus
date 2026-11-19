@@ -2,6 +2,10 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-19 · 分区表统计和重写参数
+
+两边的父表统计进度都按已完成分区数以及当前分区的采样页数报告。PostgreSQL 可报告当前分区的表编号，默认还会继续更新各个子表自己的统计。项目当前支持父表管理的物理分区，单独的子表编号和统计仍待实现。两边都拒绝指定正数并行工作数的 `VACUUM FULL`，允许 `PARALLEL 0`。[PostgreSQL 进度字段](https://www.postgresql.org/docs/18/progress-reporting.html) · [实测范围](test-report.md#partition-analyze-vacuum-parallel-20261119)
+
 ## 2026-11-19 · 重写表时怎样找空位
 
 PostgreSQL 18.6 的堆重写会在当前页填入记录，达到页空间限制后按页批量提交并切到下一页。项目重写保留原有的放置规则，使用内存里的可用空间记录直接找到第一个够用的页，因此还能回填较早的页。两边都在重写时避开从头查找每个可能的页。文件格式和页空间策略各有不同。[PostgreSQL 堆重写实现](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/access/heap/rewriteheap.c)

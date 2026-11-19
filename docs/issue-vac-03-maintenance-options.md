@@ -14,6 +14,8 @@ Direct queries now show progress for ordinary VACUUM, ANALYZE and VACUUM FULL. T
 
 `VACUUM FULL` now tracks the space in fresh destination pages. It retains the earlier first-fit placement, including packing a short tuple into a previous page, while avoiding reads from pages with insufficient room. [Verification](test-report.md#vacuum-full-placement-20261119)
 
+The partitioned `ANALYZE` progress row now shows the inherited sampling phase, the number of completed physical partitions, and per-partition page counters. `VACUUM FULL` rejects positive `PARALLEL` before a rewrite begins. `PARALLEL 0` still requests a serial operation. Ordinary VACUUM accepts worker counts from 0 to 1024. Independently cataloged partitions and their individual statistics remain open. [Verification](test-report.md#partition-analyze-vacuum-parallel-20261119)
+
 The following sections describe the earlier repair and its verification.
 
 ## Reproduced behavior

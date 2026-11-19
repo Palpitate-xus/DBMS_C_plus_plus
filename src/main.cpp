@@ -4465,7 +4465,7 @@ static bool handleVacuum(const string& sql, Session& s) {
     bool freeze = false;
     bool processMain = true;
     bool processToast = true;
-    int workers = 1;
+    int workers = 0;
 
     const auto parseBoolean = [](const string& option, const string& value) {
         if (value.empty() || value == "true" || value == "on" || value == "1")
@@ -4510,21 +4510,30 @@ static bool handleVacuum(const string& sql, Session& s) {
                 throw dbms::DbError("42601", "invalid VACUUM option");
             }
             if (option == "parallel") {
-                if (value.empty() ||
-                    value.find_first_not_of("0123456789") != string::npos) {
-                    throw dbms::DbError(
-                        "42601", "VACUUM PARALLEL requires a non-negative integer");
+                constexpr unsigned maxWorkers = 1024;
+                const bool negative = !value.empty() && value.front() == '-';
+                if (negative || (!value.empty() && value.front() == '+'))
+                    value = trim(value.substr(1));
+                int base = 10;
+                if (value.size() >= 2 && value.front() == '0') {
+                    if (value[1] == 'b') base = 2;
+                    else if (value[1] == 'o') base = 8;
+                    else if (value[1] == 'x') base = 16;
+                    if (base != 10) value.erase(0, 2);
                 }
-                try {
-                    const long long parsed = std::stoll(value);
-                    if (parsed > std::numeric_limits<int>::max()) {
-                        throw std::out_of_range("parallel worker count");
-                    }
-                    workers = parsed == 0 ? 1 : static_cast<int>(parsed);
-                } catch (const std::exception&) {
-                    throw dbms::DbError(
-                        "22023", "VACUUM PARALLEL value is out of range");
+                if (value.find('_') != string::npos) {
+                    if ((base == 10 && value.front() == '_') || value.back() == '_' ||
+                        value.find("__") != string::npos)
+                        throw dbms::DbError("42601", "VACUUM PARALLEL requires an integer value");
+                    value.erase(std::remove(value.begin(), value.end(), '_'), value.end());
                 }
+                unsigned count = 0;
+                const auto end = value.data() + value.size();
+                const auto parsed = std::from_chars(value.data(), end, count, base);
+                if (parsed.ec != std::errc{} || parsed.ptr != end ||
+                    count > maxWorkers || (negative && count != 0))
+                    throw dbms::DbError("42601", "VACUUM PARALLEL requires an integer between 0 and 1024");
+                workers = static_cast<int>(count);
             } else if (option == "concurrently") {
                 concurrent = parseBoolean(option, value);
             } else if (option == "full") {
@@ -4564,6 +4573,9 @@ static bool handleVacuum(const string& sql, Session& s) {
         }
     }
 
+    if (full && workers > 0) {
+        throw dbms::DbError("0A000", "VACUUM FULL cannot be performed in parallel");
+    }
     if (full && !processToast) {
         throw dbms::DbError("0A000", "PROCESS_TOAST required with VACUUM FULL");
     }
@@ -4606,7 +4618,7 @@ static bool handleVacuum(const string& sql, Session& s) {
             }
         } else if (processMain) {
             processed = g_engine.vacuum(
-                s.currentDB, table, concurrent, workers, processToast);
+                s.currentDB, table, concurrent, std::max(1, workers), processToast);
             if (verbose) {
                 cout << "VACUUM: " << table << ": " << processed
                      << " pages freed" << endl;

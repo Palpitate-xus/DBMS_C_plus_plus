@@ -1085,7 +1085,7 @@ VACUUM FULL vacuum_example;
 VACUUM (FULL, PROCESS_MAIN FALSE) vacuum_example;
 ```
 
-`FULL` 要求 `PROCESS_TOAST` 保持开启。如果表没有长值文件，只整理长值的命令会正常结束。重写需要独占目标表，清理应在事务块之外运行。一个数据目录由一个服务端进程管理。[部署说明](PACKAGING.md#服务端部署形态) · [普通清理测试](test-report.md#vacuum-process-options-20261118) · [合并重写测试](test-report.md#vacuum-combined-full-20261119)
+`FULL` 要求 `PROCESS_TOAST` 保持开启。`PARALLEL 0` 可以和 `FULL` 一起使用，指定正数则会在开始整理前报错。普通清理接受 0 到 1,024 的并行工作数，实际工作数取决于可扫描的数据页。如果表没有长值文件，只整理长值的命令会正常结束。重写需要独占目标表，清理应在事务块之外运行。一个数据目录由一个服务端进程管理。[部署说明](PACKAGING.md#服务端部署形态) · [普通清理测试](test-report.md#vacuum-process-options-20261118) · [合并重写测试](test-report.md#vacuum-combined-full-20261119)
 
 重写时，数据库会记录新文件中各页剩余的空间，按原有的页号顺序选择第一个够用的页。遇到较短的记录，仍能把它放回前面有空位的页。
 
@@ -1108,7 +1108,8 @@ VACUUM (ANALYZE) vacuum_example (id, note);
 SELECT pid, relid, phase, heap_blks_total, heap_blks_scanned
 FROM pg_catalog.pg_stat_progress_vacuum;
 
-SELECT pid, relid, phase, sample_blks_total, sample_blks_scanned
+SELECT pid, relid, phase, child_tables_total, child_tables_done,
+       sample_blks_total, sample_blks_scanned
 FROM pg_catalog.pg_stat_progress_analyze;
 
 SELECT pid, relid, command, phase, heap_tuples_written
@@ -1116,6 +1117,8 @@ FROM pg_catalog.pg_stat_progress_cluster;
 ```
 
 `VACUUM FULL` 在第三个视图显示。发起命令的角色、拥有该角色权限的用户、管理员及有 `pg_read_all_stats` 权限的用户可查看详情。其他用户看到进程号和数据库名。项目暂时没有数据库编号，`datid` 返回 SQL `NULL`。可用 `SELECT *`、列投影和简单 `WHERE` 查看这些视图。
+
+扫描分区表时，`ANALYZE` 的阶段显示为 `acquiring inherited sample rows`。`child_tables_total` 和 `child_tables_done` 是本次要读取和已读完的分区数。两列采样页数统计在开始读取下一个分区时重新计数。项目通过父表管理这些分区文件，`current_child_table_relid` 显示为 `0`。
 
 ---
 

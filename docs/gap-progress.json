@@ -2,6 +2,29 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-19 report partition scans and validate parallel VACUUM FULL options",
+      "gap_ids": ["VAC-03", "MON-08"],
+      "status": "partial",
+      "evidence": [
+        "src/commands/TableManage.cpp",
+        "src/main.cpp",
+        "docs/MANUAL.md",
+        "docs/test-report.md",
+        "docs/performance-report-2026-10-30.md"
+      ],
+      "tests": [
+        "tests/partition_test.cpp",
+        "tests/maintenance_progress_protocol_e2e_test.py",
+        "tests/vacuum_relation_options_protocol_e2e_test.py"
+      ],
+      "verification": [
+        "Partitioned ANALYZE publishes the inherited scan phase and actual physical partition totals and completions. The page counters describe the current partition. Parent-owned storage leaves have no independent catalog OID. Recursive child ANALYZE and persistent database OIDs remain open.",
+        "VACUUM FULL rejects a final positive PARALLEL option before opening a rewrite. Zero retains serial FULL, and valid repeated worker options use the last value. Ordinary VACUUM validates the PostgreSQL worker range. The historical project equals spelling remains accepted.",
+        "PostgreSQL 18.6 references cover 454 partition progress exchanges and 50 option exchanges. Six native and eight protocol tests pass, including 33 cold recovery phases. The baseline partition observer reports ordinary scanning and zero child tables; the candidate reports the inherited phase, counts the empty leaf, resets the block counters and clears the progress row on cancellation. The rejected FULL option leaves the tested heap and external-value files intact.",
+        "Twelve fresh runs complete 144 timed ANALYZE commands and 264 audited protocol exchanges, with byte-identical .stats and heap files. Partitioned command wall medians are 85.72 and 88.99 milliseconds, and ordinary-table medians are 92.27 and 93.42 milliseconds. Both comparisons exceed the preset CPU drift threshold."
+      ]
+    },
+    {
       "issue": "2026-11-19 avoid redundant destination page reads during VACUUM FULL",
       "gap_ids": ["VAC-03"],
       "status": "partial",

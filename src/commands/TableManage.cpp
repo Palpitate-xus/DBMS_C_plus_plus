@@ -9306,29 +9306,44 @@ bool StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
         g_condNullTable.clear(); g_condNullDb.clear();
     };
 
+    constexpr size_t sampleBlocksTotal = 0, sampleBlocksScanned = 1;
+    constexpr size_t childTablesTotal = 4, childTablesDone = 5;
+    const bool partitioned = tbl.partitionType != TableSchema::PartitionType::None;
+    const char* samplePhase = partitioned ? "acquiring inherited sample rows"
+                                          : "acquiring sample rows";
     MaintenanceCounters scanCounters{};
     const auto reportSampleRange = [&](uint32_t pageCount) {
         if (!progress) return;
-        scanCounters[0] += pageCount > 0 ? pageCount - 1 : 0;
-        progress->publish("acquiring sample rows", scanCounters);
+        scanCounters[sampleBlocksTotal] = pageCount > 0 ? pageCount - 1 : 0;
+        scanCounters[sampleBlocksScanned] = 0;
+        progress->publish(samplePhase, scanCounters);
     };
     const auto reportSamplePage = [&] {
         if (!progress) return;
-        const auto scanned = ++scanCounters[1];
-        if (scanned == 1 || scanned == scanCounters[0] || scanned % maintenancePageInterval == 0)
-            progress->publish("acquiring sample rows", scanCounters);
+        const auto scanned = ++scanCounters[sampleBlocksScanned];
+        if (scanned == 1 || scanned == scanCounters[sampleBlocksTotal] ||
+            scanned % maintenancePageInterval == 0)
+            progress->publish(samplePhase, scanCounters);
     };
-    if (tbl.partitionType != TableSchema::PartitionType::None) {
+    if (partitioned) {
         // Iterate physical leaves, including RANGE/LIST DEFAULT partitions
         // and hash subpartitions.  targetPartitions contains top-level names
         // produced by pruning, so all of a selected partition's leaves remain
         // visible.
-        for (const auto& leaf : partitionLeaves(tbl)) {
-            if (!targetPartitions.empty() &&
+        const auto leaves = partitionLeaves(tbl);
+        const auto selectedLeaf = [&](const PartitionLeaf& leaf) {
+            return targetPartitions.empty() ||
                 std::find(targetPartitions.begin(), targetPartitions.end(),
-                          leaf.partition) == targetPartitions.end()) {
-                continue;
-            }
+                          leaf.partition) != targetPartitions.end();
+        };
+        if (progress) {
+            scanCounters[childTablesTotal] = targetPartitions.empty() ? leaves.size()
+                : std::count_if(leaves.begin(), leaves.end(), selectedLeaf);
+            // These are parent-owned heaps, not independently cataloged tables.
+            progress->publish(samplePhase, scanCounters);
+        }
+        for (const auto& leaf : leaves) {
+            if (!selectedLeaf(leaf)) continue;
             const auto path = leaf.subPartition.empty()
                 ? partitionDataPath(dbname, tablename, leaf.partition)
                 : partitionDataPath(dbname, tablename, leaf.partition,
@@ -9357,6 +9372,10 @@ bool StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
                         emitRow(pageId, slotId, data, length);
                     });
                 reportSamplePage();
+            }
+            if (progress) {
+                ++scanCounters[childTablesDone];
+                progress->publish(samplePhase, scanCounters);
             }
         }
         return true;

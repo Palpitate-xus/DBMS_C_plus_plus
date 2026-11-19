@@ -156,11 +156,25 @@ def main():
             ("PROCESS_TOAST = FALSE", "42601"),
             ("FULL, PROCESS_TOAST FALSE", "0A000"),
             ("FULL, PROCESS_MAIN FALSE, PROCESS_TOAST FALSE", "0A000"),
+            ("FULL, PARALLEL 1", "0A000"),
+            ("PARALLEL 2, FULL", "0A000"),
+            ("FULL, PARALLEL 0, PARALLEL 1", "0A000"),
+            ("FULL, PARALLEL 1024", "0A000"),
+            ("PARALLEL", "42601"),
+            ("PARALLEL -1", "42601"),
+            ("PARALLEL 1025", "42601"),
+            ("PARALLEL 2147483648", "42601"),
+            ("PARALLEL '1'", "42601"),
+            ("PARALLEL 1.0", "42601"),
+            ("FULL, PARALLEL 1025, PARALLEL 0", "42601"),
         ):
             query(f"VACUUM ({options}) {table}", state=state)
         query("VACUUM (PROCESS_MAIN FALSE, PROCESS_TOAST FALSE) vacuum_missing_probe", state="42P01")
         query("BEGIN", "BEGIN", b"T")
         query(f"VACUUM (PROCESS_MAIN FALSE, PROCESS_TOAST FALSE) {table}", ready=b"E", state="25001")
+        query("ROLLBACK", "ROLLBACK")
+        query("BEGIN", "BEGIN", b"T")
+        query(f"VACUUM (FULL, PARALLEL 1) {table}", ready=b"E", state="0A000")
         query("ROLLBACK", "ROLLBACK")
 
     def check_toast_fork_admission():
@@ -260,7 +274,8 @@ def main():
         counter = database / f"{table}.toastmeta"
         counter_before = counter.read_bytes()
 
-        command = "VACUUM FULL" if process_main else "VACUUM (FULL, PROCESS_MAIN FALSE)"
+        command = ("VACUUM FULL" if process_main else
+                   "VACUUM (FULL, PROCESS_MAIN FALSE, PARALLEL 1, PARALLEL 0)")
         query(f"{command} {table}", "VACUUM")
         after_heap, compacted, after_index = images(table)
         assert len(compacted) < len(before_toast), f"{command} must shrink the TOAST extent"
@@ -303,6 +318,9 @@ def main():
         query(f"VACUUM (FULL, PROCESS_MAIN FALSE) {fixed}", "VACUUM")
         assert [path.read_bytes() for path in fixed_files] == fixed_before
         assert not list(database.glob(f"{fixed}.toast*"))
+        for workers in ("0", "1", "1024", "+1", "0x1", "0o1", "0b1", "1_0"):
+            query(f"VACUUM (PARALLEL {workers}) {fixed}", "VACUUM")
+        query(f"VACUUM (PARALLEL = 2) {fixed}", "VACUUM")
 
         table = "vacuum_inline_toast"
         query(f"CREATE TABLE {table} (id INT PRIMARY KEY, payload TEXT)", "CREATE TABLE")
@@ -316,6 +334,8 @@ def main():
         main_after, toast_after, _ = images(table)
         assert main_after == main_before and primary.read_bytes() == primary_before
         assert len(toast_after) == PAGE_SIZE and not toast_chunks(toast_after)
+        read_rows(table, [["1", "inline"], ["2", None], ["3", ""]])
+        query(f"VACUUM (FULL, PARALLEL 0) {table}", "VACUUM")
         read_rows(table, [["1", "inline"], ["2", None], ["3", ""]])
 
     cases = (

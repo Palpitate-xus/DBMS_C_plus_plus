@@ -2,6 +2,19 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="partition-analyze-vacuum-parallel-20261119"></a>
+## 2026-11-19 · 分区表统计进度与并行清理选项
+
+在真实 PostgreSQL 18.6 服务上，父表有两个含数据的分区和一个空分区。454 组协议交互确认父表编号在采样期间保持不变，当前分区编号和采样页数随扫描切换。`ANALYZE ONLY` 更新父表继承统计，普通 `ANALYZE` 还更新各分区的统计。另有 50 组协议交互核对清理参数，`VACUUM FULL` 拒绝正数 `PARALLEL`，允许 `PARALLEL 0`。有效的重复选项以最后一个为准。[PostgreSQL 采样实现](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/commands/analyze.c) · [PostgreSQL 清理选项实现](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/commands/vacuum.c)
+
+项目旧版接受 `VACUUM (FULL, PARALLEL 1)`，在所测保留三行的表上将 24,576 字节的堆文件重写为 16,384 字节。新版拒绝时保留测试中的堆和长值文件。先指定正数再指定零时，长值文件仍可从 188,416 缩至 57,344 字节，主表保持 16,384 字节且逐字节一致，冷重启后读取的值全部一致。[清理参数协议测试](../tests/vacuum_relation_options_protocol_e2e_test.py)
+
+分区原生用例用真实页锁控制扫描顺序。第一分区只有一页，第二分区为空，第三分区有多页。旧版在第一页锁处显示普通采样以及零个子表。新版依次报告已完成 0 个和 2 个分区，并从第三分区的第一页开始计数。取消操作以 `57014` 退出，清除进度行。完整读取仍得到 31 行。[分区原生测试](../tests/partition_test.cpp)
+
+在单独的真实客户端对照中，两个版本读取同一个现有格式的三分区表。新版在第一个分区报告已完成 0/3 个分区、已读 1/20 页，到第三个分区时报告已完成 2/3 个分区、已读 0/59 页。旧版第二次观察仍显示普通采样、20/79 页和零个分区。两版成功或取消后都清除了进度行，仍可读出 3,200 行。这个旧格式样本的父表没有目录编号，`relid` 为 SQL `NULL`，当前分区编号为 `0`。
+
+共通过六项原生回归和八项协议回归，包括重写后的 33 个冷恢复阶段。受测程序 SHA-256 为 `125a9ad6a69c821ce2807d01ccae19a24705c9a5dbfcffb94c6292d1e45b5fb9`。完整回归套件待验证。[性能报告](performance-report-2026-10-30.md#partition-analyze-observation-cost-20261119)
+
 <a id="vacuum-full-placement-20261119"></a>
 ## 2026-11-19 · 重写表时减少取页
 

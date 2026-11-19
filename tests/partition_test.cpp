@@ -14,13 +14,18 @@
 #include "executor/ExecutionPlan.h"
 #include "storage/PageAllocator.h"
 #include "storage/PageCrypto.h"
+#include "process/MaintenanceProgress.h"
 #include "Session.h"
 #include <cassert>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <iostream>
 #include <map>
+#include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 #include "test_utils.h"
 
@@ -761,6 +766,130 @@ static void test_partition_wal_routing() {
     std::cout << "[PART] WAL partition routing OK" << std::endl;
 }
 
+// The SQL frontend cannot yet create real partition children, so exercise
+// the parent-owned leaf format through the native storage API. Lock the same
+// physical page tokens used by the scanner to inspect both leaf transitions.
+static void test_analyze_partition_progress() {
+    using namespace std::chrono_literals;
+    const std::string db = testDbPath("part_analyze_progress");
+    const std::string table = "progress_parts";
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+    auto tbl = makeSchema(table, {"id int", "region varchar"});
+    tbl.append(dbms::makeVarCharColumn("payload", false, 1000));
+    tbl.partitionType = dbms::TableSchema::PartitionType::List;
+    tbl.partitionKey = "region";
+    tbl.listPartitions = {{"first", {"a"}}, {"empty", {"b"}}, {"last", {"c"}}};
+    assert(g_engine.createTable(db, tbl) == dbms::DBStatus::OK);
+    assert(g_engine.insert(db, table, {{"id", "1"}, {"region", "a"}, {"payload", "first"}})
+           == dbms::DBStatus::OK);
+    for (int i = 0; i < 30; ++i) {
+        assert(g_engine.insert(db, table,
+            {{"id", std::to_string(i + 2)}, {"region", "c"}, {"payload", std::string(500, 'x')}})
+            == dbms::DBStatus::OK);
+    }
+    assert(g_engine.checkpoint(db));
+    const auto blocks = [&](const char* leaf) {
+        const auto path = std::filesystem::path(db) / (table + "#" + leaf + ".dt");
+        const auto bytes = std::filesystem::file_size(path);
+        assert(bytes >= dbms::PgPage::PAGE_SIZE && bytes % dbms::PgPage::PAGE_SIZE == 0);
+        return bytes / dbms::PgPage::PAGE_SIZE - 1;
+    };
+    assert(blocks("first") == 1);
+    assert(blocks("empty") == 0);
+    const auto lastBlocks = blocks("last");
+    assert(lastBlocks > 1);
+
+    auto& locks = g_engine.getLockManager();
+    assert(locks.pageLockExclusive(db, table, 1));
+    assert(locks.pageLockExclusive(db, table, 2));
+    constexpr int32_t pid = 1234567;
+    auto analyze = std::async(std::launch::async, [&] {
+        Session session;
+        session.username = "partition_progress_user";
+        session.currentDB = db;
+        session.pid = pid;
+        dbms::setCurrentSession(&session);
+        struct RestoreSession {
+            ~RestoreSession() { dbms::setCurrentSession(nullptr); }
+        } restore;
+        return g_engine.analyzeTable(db, table);
+    });
+    const auto observe = [&](uint64_t done, uint64_t total, uint64_t scanned) {
+        const auto deadline = std::chrono::steady_clock::now() + 8s;
+        std::string lastObservation = "no progress row";
+        while (std::chrono::steady_clock::now() < deadline) {
+            const auto rows = dbms::getMaintenanceProgress(dbms::MaintenanceCommand::Analyze);
+            for (const auto& row : rows) {
+                if (row.pid != pid) continue;
+                lastObservation = std::string(row.phase ? row.phase : "<null>") +
+                    " blocks=" + std::to_string(row.counters[1]) + "/" +
+                    std::to_string(row.counters[0]) + " children=" +
+                    std::to_string(row.counters[5]) + "/" + std::to_string(row.counters[4]);
+                if (std::string(row.phase) != "acquiring inherited sample rows" ||
+                    row.counters[5] != done || row.counters[1] != scanned ||
+                    row.counters[0] != total || row.counters[4] != 3) continue;
+                assert(row.database == db && row.user == "partition_progress_user");
+                assert(row.counters[2] == 0 && row.counters[3] == 0);
+                assert(row.counters[6] == 0); // no independent child catalog OID
+                return true;
+            }
+            std::this_thread::sleep_for(5ms);
+        }
+        std::cerr << "[PART] expected inherited progress blocks=" << scanned << "/" << total
+                  << " children=" << done << "/3; observed " << lastObservation << std::endl;
+        return false;
+    };
+    assert(observe(0, 1, 0));
+    locks.pageUnlock(db, table, 1);
+    // The empty middle leaf completes without taking a page lock. The last
+    // leaf then scans page 1 and parks on page 2 until the test releases it.
+    assert(observe(2, lastBlocks, 1));
+    locks.pageUnlock(db, table, 2);
+    assert(analyze.wait_for(8s) == std::future_status::ready && analyze.get());
+    for (const auto& row : dbms::getMaintenanceProgress(dbms::MaintenanceCommand::Analyze))
+        assert(row.pid != pid);
+
+    // Cancellation must remove the progress row while the actual page lock
+    // is still held, just as it does for a blocked protocol worker.
+    assert(locks.pageLockExclusive(db, table, 1));
+    const auto interrupt = std::make_shared<SessionInterruptState>();
+    interrupt->queryActive.store(true);
+    auto cancelAnalyze = std::async(std::launch::async, [&] {
+        Session session;
+        session.username = "partition_progress_user";
+        session.currentDB = db;
+        session.pid = pid;
+        dbms::setCurrentSession(&session);
+        dbms::setCurrentQueryInterruptState(interrupt);
+        locks.setInterruptHandler([] { dbms::checkForQueryInterrupt(); });
+        struct RestoreInterrupt {
+            dbms::LockManager& locks;
+            ~RestoreInterrupt() {
+                locks.clearInterruptHandler();
+                dbms::setCurrentQueryInterruptState(nullptr);
+                dbms::setCurrentSession(nullptr);
+            }
+        } restore{locks};
+        try {
+            (void)g_engine.analyzeTable(db, table);
+        } catch (const dbms::DbError& error) {
+            return error.sqlState();
+        }
+        return std::string{};
+    });
+    assert(observe(0, 1, 0));
+    interrupt->cancelRequested.store(true);
+    assert(cancelAnalyze.wait_for(8s) == std::future_status::ready);
+    assert(cancelAnalyze.get() == "57014");
+    for (const auto& row : dbms::getMaintenanceProgress(dbms::MaintenanceCommand::Analyze))
+        assert(row.pid != pid);
+    locks.pageUnlock(db, table, 1);
+    assert(rowCount(db, table) == 31);
+    cleanup(db);
+    std::cout << "[PART] ANALYZE inherited progress and cleanup OK" << std::endl;
+}
+
 int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_relation_name_storage_collision_guard();
@@ -774,6 +903,7 @@ int main() {
     test_drop_removes_partition_storage();
     test_rename_preserves_partition_storage();
     test_partition_wal_routing();
+    test_analyze_partition_progress();
     std::cout << "[PART] all passed" << std::endl;
     return 0;
 }
