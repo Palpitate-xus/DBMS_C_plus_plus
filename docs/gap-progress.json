@@ -2,6 +2,28 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-19 prefer the old tuple page or a validated space hint for replacement rows",
+      "gap_ids": ["STO-05", "DML-01"],
+      "status": "partial",
+      "evidence": [
+        "src/commands/TableManage.cpp",
+        "src/transaction/LockManager.cpp",
+        "docs/test-report.md",
+        "docs/performance-report-2026-10-30.md"
+      ],
+      "tests": [
+        "tests/integer_index_write_protocol_e2e_test.py",
+        "tests/lock_manager_concurrency_test.cpp",
+        "tests/mvcc_update_test.cpp",
+        "tests/update_wal_failure_test.cpp"
+      ],
+      "verification": [
+        "Versioned UPDATE tries its original page and a free-space-map candidate without waiting on a speculative page lock. The existing in-lock fit check and WAL flow remain authoritative. Missing, stale or busy candidates retain the original ordered fallback.",
+        "Ten protocol suites and ten native suites passed. Isolated page locks distinguish target lookup from placement and show same-page and cross-page version writes without the unrelated page. Tuple links, checksums and key lookups pass after commit, rollback and real crash recovery. Offline verification and cold startup reject the same damaged page in both builds.",
+        "Twelve runs completed 1440 timed commands and audited 1800 protocol exchanges and physical images. The observed late-page primary-key UPDATE wall median is 75.24 to 54.47 ms. All five workloads exceed the preset CPU drift threshold, so the measured speed change is inconclusive."
+      ]
+    },
+    {
       "issue": "2026-11-19 locate joined integer primary-key write targets with a checked index hit",
       "gap_ids": ["DML-01", "OPT-11", "QRY-13"],
       "status": "partial",

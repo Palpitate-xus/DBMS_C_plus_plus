@@ -9182,7 +9182,7 @@ void StorageEngine::noteScanSiread(const std::string& dbname,
 }
 
 namespace {
-struct HeapPageReadGuard {
+struct HeapPageGuard {
     LockManager& locks;
     PageAllocator& allocator;
     const std::string& db;
@@ -9191,7 +9191,7 @@ struct HeapPageReadGuard {
     bool pinned = false;
     bool ownsLock = true;
 
-    ~HeapPageReadGuard() {
+    ~HeapPageGuard() {
         if (pinned) allocator.unpinPage(page);
         if (ownsLock) locks.pageUnlock(db, table, page);
     }
@@ -9369,7 +9369,7 @@ bool StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
                 checkForQueryInterrupt();
                 if (!lockManager_.pageLockShared(
                         dbname, tablename, pageId)) return false;
-                HeapPageReadGuard pin{lockManager_, *ppa, dbname, tablename, pageId};
+                HeapPageGuard pin{lockManager_, *ppa, dbname, tablename, pageId};
                 char* buffer = ppa->fetchPage(pageId);
                 if (!buffer) return false;
                 pin.pinned = true;
@@ -9397,7 +9397,7 @@ bool StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
     for (uint32_t pid = 1; pid < np; ++pid) {
         checkForQueryInterrupt();
         if (!lockManager_.pageLockShared(dbname, tablename, pid)) return false;
-        HeapPageReadGuard pin{lockManager_, *pa, dbname, tablename, pid};
+        HeapPageGuard pin{lockManager_, *pa, dbname, tablename, pid};
         char* buf = pa->fetchPage(pid);
         if (!buf) return false;
         pin.pinned = true;
@@ -9501,7 +9501,7 @@ std::unique_ptr<HeapScanCursor> StorageEngine::beginHeapScan(
             const auto pageId = state->page++;
             if (!lockManager_.pageLockShared(dbname, tablename, pageId))
                 throw DbError("55P03", "could not obtain heap page lock");
-            HeapPageReadGuard guard{lockManager_, *state->allocator, dbname, tablename, pageId};
+            HeapPageGuard guard{lockManager_, *state->allocator, dbname, tablename, pageId};
             char* buffer = state->allocator->fetchPage(pageId);
             if (!buffer) throw DbError("58030", "could not read heap page");
             guard.pinned = true;
@@ -10114,7 +10114,7 @@ std::optional<OrderedPrimaryKeyReadPage> StorageEngine::tryReadOrderedIntegerPri
             decodeRid(rid, pageId, slotId);
             if (!pageId || encodeRid(pageId, slotId) != rid ||
                 !lockManager_.pageLockShared(dbname, tablename, pageId)) return false;
-            HeapPageReadGuard guard{lockManager_, *allocator, dbname, tablename, pageId};
+            HeapPageGuard guard{lockManager_, *allocator, dbname, tablename, pageId};
             char* buffer = allocator->fetchPage(pageId);
             if (!buffer) return false;
             guard.pinned = true;
@@ -31748,7 +31748,7 @@ static LockedMutationRow lockMutationRow(
             bool ownsLock = false;
             if (!locks.pageLockShared(dbname, tablename, pageId, &ownsLock))
                 return {DBStatus::LOCK_CONFLICT, {}};
-            HeapPageReadGuard pageGuard{locks, allocator, dbname, tablename, pageId, false, ownsLock};
+            HeapPageGuard pageGuard{locks, allocator, dbname, tablename, pageId, false, ownsLock};
             auto* buffer = allocator.fetchPage(pageId);
             if (!buffer) return {DBStatus::IO_ERROR, {}};
             pageGuard.pinned = true;
@@ -31807,7 +31807,7 @@ static DBStatus readMutationPayload(
     LockManager& locks = engine.getLockManager();
     bool ownsLock = false;
     if (!locks.pageLockShared(dbname, tablename, pageId, &ownsLock)) return DBStatus::LOCK_CONFLICT;
-    HeapPageReadGuard pageGuard{locks, allocator, dbname, tablename, pageId, false, ownsLock};
+    HeapPageGuard pageGuard{locks, allocator, dbname, tablename, pageId, false, ownsLock};
     return engine.readRowByRid(&allocator, rid, row, table, &nullColumns)
         ? DBStatus::OK : DBStatus::IO_ERROR;
 }
@@ -35384,23 +35384,19 @@ DBStatus StorageEngine::updateInternal(
             // Insert NEW first.  Other snapshots reject its uncommitted xmin,
             // while the writer can see it immediately.  OLD remains intact
             // until its xmax/ctid are changed below.
-            auto tryInsertVersion = [&](uint32_t candidate, bool& inserted,
+            auto* fsm = getFSM(dbname, tablename);
+            auto tryInsertVersion = [&](uint32_t candidate, bool probe, bool& inserted,
                                         uint16_t& insertedSlot) -> DBStatus {
-                if (!lockManager_.pageLockExclusive(
-                        dbname, tablename, candidate)) {
-                    return DBStatus::LOCK_CONFLICT;
-                }
+                const bool locked = probe
+                    ? lockManager_.pageLockExclusiveNoWait(dbname, tablename, candidate)
+                    : lockManager_.pageLockExclusive(dbname, tablename, candidate);
+                if (!locked) return probe ? DBStatus::OK : DBStatus::LOCK_CONFLICT;
+                HeapPageGuard pageGuard{lockManager_, *pa, dbname, tablename, candidate};
                 char* buffer = pa->fetchPage(candidate);
-                if (!buffer) {
-                    lockManager_.pageUnlock(dbname, tablename, candidate);
-                    return DBStatus::IO_ERROR;
-                }
+                if (!buffer) return probe ? DBStatus::OK : DBStatus::IO_ERROR;
+                pageGuard.pinned = true;
                 PageWrapper page(buffer, pa->pageSize(), tbl.formatVersion);
-                if (!page.isValid()) {
-                    pa->unpinPage(candidate);
-                    lockManager_.pageUnlock(dbname, tablename, candidate);
-                    return DBStatus::CORRUPTED_DATA;
-                }
+                if (!page.isValid()) return probe ? DBStatus::OK : DBStatus::CORRUPTED_DATA;
                 DBStatus writeStatus = DBStatus::OK;
                 if (page.canFit(newRow.size())) {
                     const Lsn beforeLsn = walPageImage(
@@ -35451,7 +35447,7 @@ DBStatus StorageEngine::updateInternal(
                                 const size_t freePercent =
                                     stagedPage.freeSpace() * 100 /
                                     pa->pageSize();
-                                getFSM(dbname, tablename)->setFreePercent(
+                                fsm->setFreePercent(
                                     candidate,
                                     static_cast<uint8_t>(freePercent));
                                 getVM(dbname, tablename)->setAllVisible(
@@ -35463,8 +35459,6 @@ DBStatus StorageEngine::updateInternal(
                         }
                     }
                 }
-                pa->unpinPage(candidate);
-                lockManager_.pageUnlock(dbname, tablename, candidate);
                 return writeStatus;
             };
 
@@ -35473,11 +35467,26 @@ DBStatus StorageEngine::updateInternal(
             bool inserted = false;
             DBStatus insertStatus = DBStatus::OK;
             const uint32_t pageCount = pa->numPages();
+            // Try the current page first, then a free-space hint. The page
+            // lock and actual fit check still decide whether we can write.
+            if (pageId > 0 && pageId < pageCount) {
+                insertStatus = tryInsertVersion(pageId, true, inserted, newSlotId);
+                if (inserted) newPageId = pageId;
+            }
+            if (insertStatus == DBStatus::OK && !inserted && pageCount > 1) {
+                const auto minPercent = static_cast<uint8_t>(
+                    std::min<size_t>(100, newRow.size() * 100 / pa->pageSize() + 1));
+                uint32_t hint = fsm->findPage(minPercent);
+                if (hint == pageId) hint = fsm->findPage(minPercent, pageId + 1);
+                if (hint > 0 && hint < pageCount) {
+                    insertStatus = tryInsertVersion(hint, true, inserted, newSlotId);
+                    if (inserted) newPageId = hint;
+                }
+            }
             for (uint32_t candidate = 1;
-                 candidate < pageCount && !inserted; ++candidate) {
+                 insertStatus == DBStatus::OK && candidate < pageCount && !inserted; ++candidate) {
                 insertStatus = tryInsertVersion(
-                    candidate, inserted, newSlotId);
-                if (insertStatus != DBStatus::OK) break;
+                    candidate, false, inserted, newSlotId);
                 if (inserted) newPageId = candidate;
             }
             if (insertStatus == DBStatus::OK && !inserted) {
@@ -35486,7 +35495,7 @@ DBStatus StorageEngine::updateInternal(
                     insertStatus = DBStatus::IO_ERROR;
                 } else {
                     insertStatus = tryInsertVersion(
-                        newPageId, inserted, newSlotId);
+                        newPageId, false, inserted, newSlotId);
                     if (insertStatus == DBStatus::OK && !inserted)
                         insertStatus = DBStatus::INVALID_VALUE;
                 }
@@ -52697,7 +52706,7 @@ bool scanToastStorage(LockManager& locks, const std::string& dbname,
     for (uint32_t pageId = 1; pageId < pageCount; ++pageId) {
         if (writer) checkForQueryInterrupt();
         if (!locks.pageLockShared(dbname, relation, pageId)) return false;
-        HeapPageReadGuard pin{locks, pages, dbname, relation, pageId};
+        HeapPageGuard pin{locks, pages, dbname, relation, pageId};
         char* buffer = pages.fetchPage(pageId);
         if (!buffer) return false;
         pin.pinned = true;

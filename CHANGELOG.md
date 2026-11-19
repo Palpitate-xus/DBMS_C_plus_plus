@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>更新记录时，会先在原来的页找空位 · 2026-11-19</summary>
+
+原来的页放不下新版本时，数据库会先查哪些页还有空位，减少从头查找。
+
+[使用说明](docs/MANUAL.md#更新时如何选择写入位置) · [测试报告](docs/test-report.md#update-version-placement-20261119) · [性能报告](docs/performance-report-2026-10-30.md#update-version-placement-cost-20261119)
+
+</details>
+
+<details>
 <summary>带来源表的更新和删除，也能按主键找记录 · 2026-11-19</summary>
 
 如果条件先用整数主键指定一条记录，数据库核对索引命中后，可以直接找到目标，再检查来源表。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>同时改一条记录，后一次按新值处理 · 2026-11-19</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-19 · 同时改一条记录，后一次按新值处理
 
 默认设置下，如果另一个连接先改了这条记录，等它提交后，更新或删除会用新值再检查条件。记录已被删，或者条件不再成立，就跳过它。
 
 [使用说明](docs/MANUAL.md#同时修改同一行) · [测试报告](docs/test-report.md#same-row-writes-20261119) · [性能报告](docs/performance-report-2026-10-30.md#same-row-write-cost-20261119)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-19 · 按编号修改或删除记录时少读数据
 

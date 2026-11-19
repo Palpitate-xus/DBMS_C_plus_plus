@@ -67,6 +67,7 @@ def main():
         pair = "integer_point_pair"
         source = "integer_point_join_source"
         empty_source = "integer_point_join_empty"
+        placement = "integer_update_placement"
         count = 64
         padding = "x" * 504
         point_keys = {-1, *range(1, 7)}
@@ -83,6 +84,10 @@ def main():
         query(f"INSERT INTO {source} VALUES(3,324),(4,12),(5,15),(6,18)", tag="INSERT 0 4")
         query("CREATE SEQUENCE integer_point_join_calls", tag="CREATE SEQUENCE")
         query("CREATE SEQUENCE integer_point_empty_calls", tag="CREATE SEQUENCE")
+        query(f"CREATE TABLE {placement}(id INT PRIMARY KEY,v INT NOT NULL,pad VARCHAR(504))", tag="CREATE TABLE")
+        wide_values = ",".join(f"({i},{3 * i},'{padding}')" for i in range(1, 46))
+        query(f"INSERT INTO {placement} VALUES {wide_values}", tag="INSERT 0 45")
+        query(f"INSERT INTO {placement} VALUES(101,303,'s'),(102,306,'t')", tag="INSERT 0 2")
         query("CHECKPOINT", tag="CHECKPOINT")
         database = Path(server["dir"], "info")
         page_size = 8192
@@ -117,6 +122,19 @@ def main():
                               if page > 1 and free < replacement_space and sizes.keys().isdisjoint(point_keys)]
             assert full_unrelated, (name, pages)
             protected_pages[name] = max(full_unrelated)
+
+        image = (database / f"{placement}.dt").read_bytes()
+        assert struct.unpack_from("<II", image) == (0x44415441, 5) and len(image) == 5 * page_size
+        placement_pages = [heap_page(image[page * page_size:(page + 1) * page_size]) for page in range(1, 5)]
+        _, early_sizes = placement_pages[1]
+        _, full_sizes = placement_pages[2]
+        late_free, late_sizes = placement_pages[3]
+        assert set(late_sizes) == {101, 102} and 40 in full_sizes and 40 not in early_sizes
+        small_space = max(late_sizes.values()) + slot_size
+        wide_space = full_sizes[40] + slot_size
+        assert all(free < small_space for free, _ in placement_pages[:3])
+        assert late_free >= wide_space + 2 * small_space
+        protected_pages[placement] = 2
 
         @contextmanager
         def locked_page(name):
@@ -164,6 +182,18 @@ def main():
                 work("COMMIT", tag="COMMIT", ready=b"I")
 
             work("SET lock_timeout=800", tag="SET", ready=b"I")
+            work("BEGIN ISOLATION LEVEL READ COMMITTED", tag="BEGIN", ready=b"T")
+            point(f"DELETE FROM {placement} WHERE id=101 RETURNING id,v",
+                  "DELETE 1", [["101", "303"]], b"T", name=placement)
+            work("ROLLBACK", tag="ROLLBACK", ready=b"I")
+            point(f"UPDATE {placement} SET v=v+5 WHERE id=101 RETURNING id,v",
+                  "UPDATE 1", [["101", "308"]], name=placement)
+            point(f"UPDATE {placement} SET v=v+7 WHERE id=40 RETURNING id,v",
+                  "UPDATE 1", [["40", "127"]], name=placement)
+            work("BEGIN ISOLATION LEVEL READ COMMITTED", tag="BEGIN", ready=b"T")
+            point(f"UPDATE {placement} SET v=v+17 WHERE id=102 RETURNING id,v",
+                  "UPDATE 1", [["102", "323"]], b"T", name=placement)
+            work("ROLLBACK", tag="ROLLBACK", ready=b"I")
             point(f"UPDATE {table} SET v=777 WHERE id=1 RETURNING id,v", "UPDATE 1", [["1", "777"]])
             point(f"DELETE FROM {table} WHERE id=2 RETURNING id,v", "DELETE 1", [["2", "6"]])
             point(f"UPDATE {table} SET v=776 WHERE id=-1 RETURNING id,v", "UPDATE 1", [["-1", "776"]])
@@ -256,6 +286,10 @@ def main():
         assert query(f"SELECT id,v FROM {table_key} WHERE id IN (5,6,105,106) ORDER BY id",
                      tag="SELECT 2", ready=b"I") == [["105", "15"], ["106", "18"]]
         assert query(f"SELECT id,v FROM {pair} WHERE id=1 ORDER BY v", tag="SELECT 2", ready=b"I") == [["1", "3"], ["1", "9999"]]
+        for key, value in ((40, 127), (101, 308), (102, 306)):
+            assert query(f"SELECT id,v FROM {placement} WHERE id={key}", tag="SELECT 1", ready=b"I") == [
+                [str(key), str(value)]]
+        print("[UPDATE REPLACEMENT PLACEMENT] same page, late free space and cold recovery passed")
         print("[INTEGER POINT WRITE] hit, miss, fallback and cold recovery passed")
 
     try:

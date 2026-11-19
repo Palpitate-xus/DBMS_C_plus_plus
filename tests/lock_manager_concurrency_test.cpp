@@ -298,6 +298,24 @@ int main() {
     checkpointManager.rowUnlock("checkpoint_rows", 1);
     checkpointManager.pageUnlock("checkpoint_db", "checkpoint_pages", 1);
     checkpointManager.unlock("before_savepoint");
+
+    // A placement probe must leave an existing page lock untouched, even
+    // when the calling thread holds the shared lock itself.
+    assert(checkpointManager.pageLockShared("checkpoint_db", "checkpoint_pages", 3));
+    assert(!checkpointManager.pageLockExclusiveNoWait("checkpoint_db", "checkpoint_pages", 3));
+    std::thread placementProbe([&] {
+        checkpointManager.setLockTimeout(100);
+        assert(!checkpointManager.pageLockExclusiveNoWait("checkpoint_db", "checkpoint_pages", 3));
+    });
+    placementProbe.join();
+    assert(checkpointManager.getLockWaits().empty());
+    checkpointManager.pageUnlock("checkpoint_db", "checkpoint_pages", 3);
+    assert(checkpointManager.pageLockExclusiveNoWait("checkpoint_db", "checkpoint_pages", 3));
+    assert(!checkpointManager.pageLockExclusiveNoWait("checkpoint_db", "checkpoint_pages", 3));
+    checkpointManager.pageUnlock("checkpoint_db", "checkpoint_pages", 3);
+    assert(checkpointManager.pageLockExclusiveNoWait("checkpoint_db", "checkpoint_pages", 3));
+    checkpointManager.pageUnlock("checkpoint_db", "checkpoint_pages", 3);
+
     std::filesystem::remove_all("checkpoint_db");
     std::cout << "[LOCK] savepoint checkpoint releases post-savepoint tokens OK\n";
 

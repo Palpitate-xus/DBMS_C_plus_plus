@@ -2008,6 +2008,29 @@ bool LockManager::pageLockExclusive(const std::string& dbname, const std::string
     }
 }
 
+bool LockManager::pageLockExclusiveNoWait(const std::string& dbname, const std::string& table,
+                                          uint32_t pageId) const {
+    auto& manager = const_cast<LockManager&>(*this);
+    if (const auto& interrupt = manager.threadSettings().interruptHandler; interrupt) interrupt();
+    const auto key = makePageKey(dbname, table, pageId);
+    std::lock_guard<std::mutex> guard(pageMutex_);
+    const auto [entry, added] = pageLocks_.try_emplace(key);
+    auto& state = entry->second;
+    if (state.exclusive || state.sharedCount != 0 || state.waiters != 0) return false;
+    state.holders.reserve(1);
+    if (manager.tryAcquireProcessLock(state, dbname, "page", key, LockMode::Exclusive) ==
+        ProcessLockResult::Acquired) {
+        if (state.mtx.try_lock()) {
+            state.exclusive = true;
+            state.holders.push_back(std::this_thread::get_id());
+            return true;
+        }
+        manager.releaseProcessLock(state);
+    }
+    if (added) pageLocks_.erase(entry);
+    return false;
+}
+
 void LockManager::pageUnlock(const std::string& dbname, const std::string& table, uint32_t pageId) const {
     std::thread::id self = std::this_thread::get_id();
     std::string key = makePageKey(dbname, table, pageId);

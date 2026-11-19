@@ -2,6 +2,10 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-19 · 更新后的新版本写到哪里
+
+PostgreSQL 和本项目都可优先使用原页，并利用空闲空间记录选择其他页。本项目的空闲空间记录仍是按页保存的百分比，推荐失效时回退扫描。PostgreSQL 的分层空闲空间搜索、选择性跳过索引写入和版本链清理仍有差距。[PostgreSQL 选页实现](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/access/heap/hio.c) · [PostgreSQL 更新实现](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/access/heap/heapam.c) · [本项目测试](test-report.md#update-version-placement-20261119)
+
 ## 2026-11-19 · 并发修改同一行时怎样处理
 
 在 `READ COMMITTED` 下，PostgreSQL 先按语句开始时能看到的数据寻找目标行。遇到其他事务正在修改的行时，它等该事务结束，并对最新版本重查条件。较强隔离级别下，另一事务已经提交的修改会导致 `40001`。PostgreSQL 的 `EvalPlanQual` 还能重新检查连接等更复杂的执行计划。[PostgreSQL 隔离级别](https://www.postgresql.org/docs/18/transaction-iso.html) · [PostgreSQL 18.6 修改执行器](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/executor/nodeModifyTable.c)

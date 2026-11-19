@@ -176,6 +176,9 @@ public:
     [[nodiscard]] bool pageLockShared(const std::string& dbname, const std::string& table,
                                       uint32_t pageId, bool* newlyAcquired = nullptr) const;
     [[nodiscard]] bool pageLockExclusive(const std::string& dbname, const std::string& table, uint32_t pageId) const;
+    // Acquires a new exclusive page lock without upgrading or waiting.
+    [[nodiscard]] bool pageLockExclusiveNoWait(const std::string& dbname, const std::string& table,
+                                               uint32_t pageId) const;
     void pageUnlock(const std::string& dbname, const std::string& table, uint32_t pageId) const;
     void pageUnlockAll(const std::string& dbname, const std::string& table) const;
     void pageUnlockAll() const;
