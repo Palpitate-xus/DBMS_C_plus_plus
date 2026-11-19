@@ -2,6 +2,27 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-19 preserve sequence allocations during transaction image recovery",
+      "gap_ids": ["TXN-05", "WAL-08"],
+      "status": "partial",
+      "evidence": [
+        "src/commands/TableManage.cpp",
+        "docs/test-report.md",
+        "docs/performance-report-2026-10-30.md"
+      ],
+      "tests": [
+        "tests/cold_start_transaction_backup_protocol_e2e_test.py",
+        "tests/database_backup_target_guard_test.cpp",
+        "tests/sequence_ddl_rollback_generation_test.cpp",
+        "tests/ddl_rollback_image_retry_test.cpp"
+      ],
+      "verification": [
+        "The old executable reissued 72 after rolling back an interrupted schema change during startup. The accepted executable restores the schema and starts at 73. When the current sequence allocation file is invalid, startup stops and a retry after repair succeeds. A shared transaction cannot publish a database-wide recovery image.",
+        "Six focused native suites and six protocol suites passed on the accepted executable. Explicit point-in-time recovery uses its existing restore behavior.",
+        "Plain uncommitted CREATE TABLE still leaves an empty relation on the baseline. A whole-database-copy prototype passed the tested crash cases but raised single-table explicit transaction latency from 164.44 ms to 1535.52 ms on the measured fixture. The prototype was rejected. Old crash images without transaction backups also retained their empty relation under the prototype."
+      ]
+    },
+    {
       "issue": "2026-11-19 recover durable rows after crashing with a live temporary table",
       "gap_ids": ["CAT-13", "WAL-05", "WAL-08"],
       "status": "partial",

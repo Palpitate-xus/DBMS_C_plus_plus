@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>恢复表结构时保留序列已经给出的编号 · 2026-11-19</summary>
+
+数据库异常退出后，如果需要撤销表结构修改，恢复时会保留仍存在的序列已经给出的编号，避免再次发放同一个值。
+
+[使用手册](docs/MANUAL.md#7-事务控制) · [测试报告](docs/test-report.md#ddl-image-sequence-recovery-20261119) · [性能报告](docs/performance-report-2026-10-30.md#ddl-image-sequence-recovery-cost-20261119)
+
+</details>
+
+<details>
 <summary>修复临时表导致的重启失败 · 2026-11-19</summary>
 
 数据库异常退出后，重启时会清理确认是上次连接留下的临时表。已提交的普通表数据仍可读取。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>插入记录遇到占用时，先试别的空位 · 2026-11-19</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-19 · 插入记录遇到占用时，先试别的空位
 
 如果原本要写入的位置正被占用，数据库会先试别的空位。有地方可写时，就不用等原来的位置腾出来。
 
 [使用说明](docs/MANUAL.md#插入时如何找空位) · [测试报告](docs/test-report.md#insert-page-choice-20261119) · [性能报告](docs/performance-report-2026-10-30.md#insert-page-choice-cost-20261119)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-19 · 更新记录时，先在原来的位置附近找空位
 

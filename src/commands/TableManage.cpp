@@ -49451,10 +49451,21 @@ bool StorageEngine::recoverAllDatabases() {
         }
 
         closeDatabaseCaches(dbname);
-        if (physicalRestore(dbname, backup.string())) {
-            std::error_code ec;
-            std::filesystem::remove_all(backup, ec);
+        const auto restore = [&] {
+            if (recoveryTargetsByDb.count(dbname))
+                return physicalRestore(dbname, backup.string());
+            // Restart is rolling back the DDL, so preserve advances of
+            // existing sequences just as a live ROLLBACK does.
+            SequenceRollbackRestoreScope sequences(dbname);
+            return physicalRestore(dbname, backup.string());
+        };
+        if (!restore()) {
+            std::cerr << "[recovery] could not restore transaction image for "
+                      << dbname << ":" << xid << std::endl;
+            return false;
         }
+        std::error_code ec;
+        std::filesystem::remove_all(backup, ec);
     }
 
     // A statement image is only a nested atomicity aid. After a process
@@ -55171,7 +55182,8 @@ bool StorageEngine::createTransactionBackup() {
     }
     // A database-independent owner has no exclusive physical generation to
     // back up. In particular, do not persist catalogs before this check.
-    if (context.databaseOwnershipDeferred) return false;
+    if (context.databaseOwnershipDeferred || !context.databaseExclusiveLock ||
+        !context.databaseExclusiveLock->owns_lock()) return false;
     if (!context.txnBackupPath.empty()) return true;
     const std::string dbname = context.txnDB;
     if (catalogService_ && !catalogService_->persistAll()) return false;

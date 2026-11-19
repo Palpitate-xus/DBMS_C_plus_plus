@@ -19,6 +19,13 @@ cmake --build build/cmake --target dbms_main --parallel 2
 ## 最近更新
 
 <details>
+<summary>恢复表结构时保留序列已经给出的编号 · 2026-11-19</summary>
+
+数据库异常退出后，如果需要撤销表结构修改，恢复时会保留仍存在的序列已经给出的编号，避免再次发放同一个值。
+
+</details>
+
+<details>
 <summary>修复临时表导致的重启失败 · 2026-11-19</summary>
 
 数据库异常退出后，重启时会清理确认是上次连接留下的临时表。已提交的普通表数据仍可读取。
@@ -29,13 +36,6 @@ cmake --build build/cmake --target dbms_main --parallel 2
 <summary>建表时为以后更新记录留出空间 · 2026-11-19</summary>
 
 用 `WITH (fillfactor = 90)` 建表，写入时会尽量留出约一成空间，方便以后更新记录。这个设置重启后仍然有效。
-
-</details>
-
-<details>
-<summary>插入记录遇到占用时，先试别的空位 · 2026-11-19</summary>
-
-如果原本要写入的位置正被占用，数据库会先试别的空位。有地方可写时，就不用等原来的位置腾出来。
 
 </details>
 

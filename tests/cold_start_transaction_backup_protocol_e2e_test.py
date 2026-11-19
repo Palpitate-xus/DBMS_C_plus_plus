@@ -3,6 +3,7 @@
 
 import importlib.util
 from pathlib import Path
+import resource
 import socket
 import subprocess
 import time
@@ -39,13 +40,16 @@ def main():
         server["sock"].close()
         server["sock"] = None
 
-    def reopen(server):
-        diagnostics = Path(server["dir"]) / "reopen.stderr"
+    def start_from_disk(server, diagnostics):
         with diagnostics.open("wb") as stderr:
             server["process"] = subprocess.Popen(
                 [runner.DBMS_MAIN, "--data-dir", server["dir"],
                  "--server", str(server["port"]), "--insecure"],
                 cwd=server["dir"], stdout=subprocess.DEVNULL, stderr=stderr)
+
+    def reopen(server):
+        diagnostics = Path(server["dir"]) / "reopen.stderr"
+        start_from_disk(server, diagnostics)
         deadline = time.monotonic() + 20
         while True:
             assert server["process"].poll() is None, (
@@ -64,13 +68,30 @@ def main():
                 time.sleep(0.05)
         client.startup(server["sock"], "alice", "info")
 
-    def restart_after_sigkill(server):
+    def restart_after_sigkill(server, check_sequence_recovery=False):
         kill_server(server)
         fixture = Path(server["dir"])
         images = list(fixture.glob("info.txn_backup.*"))
         assert images, "crash fixture did not contain a transaction image"
         assert all((image / ".dbms_physical_backup").is_file()
                    for image in images), images
+        if check_sequence_recovery:
+            # An invalid live sequence state makes restoration unsafe. Keep
+            # the transaction image so startup can retry after repair.
+            [runtime_state] = (fixture / "info" / ".sequence_runtime").iterdir()
+            valid_state = runtime_state.read_bytes()
+            diagnostics = fixture / "sequence-recovery.stderr"
+            _, hard_limit = resource.getrlimit(resource.RLIMIT_CORE)
+            resource.setrlimit(resource.RLIMIT_CORE, (0, hard_limit))
+            try:
+                runtime_state.write_bytes(b"invalid sequence state\n")
+                start_from_disk(server, diagnostics)
+                assert server["process"].wait(timeout=20) != 0
+                assert "could not restore transaction image" in diagnostics.read_text()
+                assert all((image / ".dbms_physical_backup").is_file()
+                           for image in images)
+            finally:
+                runtime_state.write_bytes(valid_state)
         reopen(server)
         assert not list(fixture.glob("info.txn_backup.*")), (
             "recovered transaction image was not cleaned up")
@@ -84,6 +105,10 @@ def main():
         try:
             query(server, "CREATE TABLE recovery_base(id INT PRIMARY KEY,payload TEXT);")
             query(server, "INSERT INTO recovery_base VALUES(1,'survivor'),(2,NULL);")
+            if action == "alter":
+                query(server, "CREATE SEQUENCE recovery_sequence START 71 CACHE 1;",
+                      tag="CREATE SEQUENCE")
+                query(server, "SELECT nextval('recovery_sequence');", [["71"]], tag="SELECT 1")
             query(server, "BEGIN;", ready=b"T")
             if action == "create":
                 # Simple CREATE can use catalog undo without a physical
@@ -103,11 +128,16 @@ def main():
                           ready=b"T")
                     assert list(Path(server["dir"]).glob("info.ddl_statement_backup.*")), (
                         "nested recovery fixture had no statement images")
-            restart_after_sigkill(server)
+            if action == "alter":
+                query(server, "SELECT nextval('recovery_sequence');", [["72"]],
+                      ready=b"T", tag="SELECT 1")
+            restart_after_sigkill(server, check_sequence_recovery=action == "alter")
             messages = query(server, "SELECT * FROM recovery_base ORDER BY id;",
                              [["1", "survivor"], ["2", None]])
             assert [field[0] for field in client.row_description_fields(messages)] == [
                 b"id", b"payload"], action
+            if action == "alter":
+                query(server, "SELECT nextval('recovery_sequence');", [["73"]], tag="SELECT 1")
             if action == "create":
                 messages = client.simple_query(server["sock"], "SELECT id FROM pending_create;")
                 rows, state, message, _, _ = runner.decode_wire_result(messages)

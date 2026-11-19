@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-19 · 未提交建表与崩溃恢复
+
+PostgreSQL 18.6 的受测事务先改写已有表，再建两张表。崩溃后，原有表恢复到已提交状态，两张新表均不可见。PostgreSQL 为持久关系写入物理创建日志，并在事务中按关系身份登记待清理文件。SQLite 将结构定义保存在 `sqlite_schema`，建表走写事务。DuckDB 的事务也隔离未提交修改，并在回滚时撤销修改。[PostgreSQL 关系存储](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/catalog/storage.c) · [SQLite 事务](https://www.sqlite.org/lang_transaction.html) · [SQLite 结构目录](https://www.sqlite.org/schematab.html) · [DuckDB 事务](https://duckdb.org/docs/2.0/sql/statements/transactions)
+
+本项目复现了普通建表在崩溃后留下空表的问题。整库复制原型通过了新表清理测试，成功建表的额外代价过高，未合入。后续的关系级恢复需要能验证目录项和文件属于哪一次建表，并在跨越提交、回滚到保存点、日志回收和同名重建时保留这一证据。[行为对照](test-report.md#ddl-image-sequence-recovery-20261119) · [原型性能](performance-report-2026-10-30.md#ordinary-create-recovery-cost-20261119)
+
 ## 2026-11-19 · 临时表与崩溃恢复
 
 PostgreSQL 将临时表数据文件绑定到会话，持久表的数据页才进入通常的 WAL 路径。重启回收遗留文件，临时命名空间也有独立的清理过程。本项目现有日志可包含临时表页镜像，恢复时借助创建记录核对其归属并跳过该页，普通表继续按物理关系编号恢复。两边受测的结果包括已提交普通表数据仍可读取，失效会话的临时表消失，表名可以重新使用。[PostgreSQL 存储创建](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/catalog/storage.c) · [PostgreSQL 临时命名空间](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/catalog/namespace.c) · [本项目验证](test-report.md#temporary-table-crash-recovery-20261119)

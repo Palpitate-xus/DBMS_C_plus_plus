@@ -1737,6 +1737,8 @@ ROLLBACK PREPARED 'txn_001';
 
 包含跨语句 DDL CREATE undo 的事务暂不支持 `PREPARE TRANSACTION`；请先完成 `COMMIT` 或 `ROLLBACK`。
 
+正常启动时，如果数据库需要用事务备份撤销未提交的表结构修改，仍存在的序列会保留已经发出的编号。恢复备份失败时，数据库会停止启动并保留备份，以便排除故障后重试。普通 `CREATE TABLE` 在显式事务中尚有一项限制。如果进程在提交建表前异常退出，重启后可能还留有一张空表。[重启验证](test-report.md#ddl-image-sequence-recovery-20261119)
+
 ### 顾问锁
 
 顾问锁按当前数据库和 key 隔离；单个 `bigint` 与两个 `integer` 使用不同

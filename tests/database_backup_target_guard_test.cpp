@@ -18,6 +18,15 @@ int main() {
 
     dbms::StorageEngine engine;
     assert(engine.createDatabase(source) == dbms::DBStatus::OK);
+
+    // A shared transaction cannot publish a database-wide recovery image.
+    assert(engine.beginTransaction(source) == dbms::DBStatus::OK);
+    const std::string withoutExclusiveLock = source + ".txn_backup." +
+                                            std::to_string(engine.currentTxnId());
+    assert(!engine.createTransactionBackup());
+    assert(!fs::exists(withoutExclusiveLock));
+    assert(engine.rollbackTransaction() == dbms::DBStatus::OK);
+
     assert(engine.beginTransaction(source, true) == dbms::DBStatus::OK);
     const std::string occupied = source + ".txn_backup." +
                                  std::to_string(engine.currentTxnId());
