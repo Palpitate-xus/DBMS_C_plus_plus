@@ -30094,88 +30094,76 @@ DBStatus StorageEngine::insertInternal(
     uint32_t pageId = 0;
     uint16_t slotId = 0;
     {
-        uint32_t numPages = pa->numPages();
-        bool inserted = false;
-        size_t actualRowSize = rowBuffer.size();
-        uint8_t minPercent = static_cast<uint8_t>(std::min(size_t(100), actualRowSize * 100 / pa->pageSize() + 1));
-        uint8_t fillfactor = getFillFactor(tbl);
-
-        // Try FSM first for fast page lookup
+        const uint32_t numPages = pa->numPages();
+        const size_t actualRowSize = rowBuffer.size();
+        const size_t pageSize = pa->pageSize();
         if (numPages > 1) {
-            FreeSpaceMap* fsm = getFSM(dbname, tablename);
-            uint32_t candidate = fsm->findPage(minPercent, 1);
-            if (candidate > 0 && candidate < numPages) {
-                if (!lockManager_.pageLockExclusive(dbname, tablename, candidate)) {
-                    return failBeforeHeapInsert(DBStatus::LOCK_CONFLICT);
-                }
+            auto& fsm = *getFSM(dbname, tablename);
+            const uint8_t fillfactor = getFillFactor(tbl);
+            const size_t requiredSpace = actualRowSize + pageSize * (100 - fillfactor) / 100;
+            const auto minPercent = static_cast<uint8_t>(
+                std::min<size_t>(100, requiredSpace * 100 / pageSize + 1));
+            enum class PageSearch { FirstHint, Alternative, OrderedScan };
+            const auto tryExistingPage = [&](uint32_t candidate, PageSearch search) -> DBStatus {
+                const bool wait = search == PageSearch::OrderedScan;
+                const bool locked = wait
+                    ? lockManager_.pageLockExclusive(dbname, tablename, candidate)
+                    : lockManager_.pageLockExclusiveNoWait(dbname, tablename, candidate);
+                if (!locked) return wait ? DBStatus::LOCK_CONFLICT : DBStatus::OK;
+
+                HeapPageGuard guard{lockManager_, *pa, dbname, tablename, candidate};
                 char* buf = pa->fetchPage(candidate);
                 if (!buf) {
-                    lockManager_.pageUnlock(dbname, tablename, candidate);
-                    return failBeforeHeapInsert(DBStatus::IO_ERROR);
+                    return search == PageSearch::Alternative ? DBStatus::OK : DBStatus::IO_ERROR;
                 }
-                PageWrapper page(buf, pa->pageSize(), tbl.formatVersion);
-                if (page.canFit(actualRowSize) &&
-                    pageFitsWithFillfactor(page, actualRowSize, pa->pageSize(), fillfactor)) {
-                    const Lsn beforeLsn = walPageImage(
-                        dbname, tablename, candidate, buf,
-                        pa->pageSize(), true, heapFork);
-                    if (beforeLsn == INVALID_LSN) {
-                        pa->unpinPage(candidate);
-                        lockManager_.pageUnlock(
-                            dbname, tablename, candidate);
-                        return failBeforeHeapInsert(DBStatus::IO_ERROR);
-                    }
-                    if (page.insert(rowBuffer.data(), actualRowSize, slotId)) {
-                        pageId = candidate;
-                        inserted = true;
-                        pa->markDirty(candidate);
-                        size_t freePct = page.freeSpace() * 100 / pa->pageSize();
-                        fsm->setFreePercent(candidate, static_cast<uint8_t>(freePct));
-                        getVM(dbname, tablename)->setAllVisible(candidate, false);
-                    }
+                guard.pinned = true;
+                PageWrapper page(buf, pageSize, tbl.formatVersion);
+                if (!page.canFit(actualRowSize) ||
+                    !pageFitsWithFillfactor(page, actualRowSize, pageSize, fillfactor)) {
+                    return DBStatus::OK;
                 }
-                pa->unpinPage(candidate);
-                lockManager_.pageUnlock(dbname, tablename, candidate);
-            }
-        }
-
-        // Fallback: sequential scan
-        for (uint32_t pid = 1; pid < numPages && !inserted; ++pid) {
-            if (!lockManager_.pageLockExclusive(dbname, tablename, pid)) {
-                return failBeforeHeapInsert(DBStatus::LOCK_CONFLICT);
-            }
-            char* buf = pa->fetchPage(pid);
-            if (!buf) {
-                lockManager_.pageUnlock(dbname, tablename, pid);
-                return failBeforeHeapInsert(DBStatus::IO_ERROR);
-            }
-            PageWrapper page(buf, pa->pageSize(), tbl.formatVersion);
-            if (page.canFit(actualRowSize) &&
-                pageFitsWithFillfactor(page, actualRowSize, pa->pageSize(), fillfactor)) {
                 const Lsn beforeLsn = walPageImage(
-                    dbname, tablename, pid, buf, pa->pageSize(),
-                    true, heapFork);
-                if (beforeLsn == INVALID_LSN) {
-                    pa->unpinPage(pid);
-                    lockManager_.pageUnlock(dbname, tablename, pid);
-                    return failBeforeHeapInsert(DBStatus::IO_ERROR);
-                }
+                    dbname, tablename, candidate, buf, pageSize, true, heapFork);
+                if (beforeLsn == INVALID_LSN) return DBStatus::IO_ERROR;
                 if (page.insert(rowBuffer.data(), actualRowSize, slotId)) {
-                    pageId = pid;
-                    inserted = true;
+                    pageId = candidate;
+                    pa->markDirty(candidate);
+                    const auto freePercent = static_cast<uint8_t>(page.freeSpace() * 100 / pageSize);
+                    fsm.setFreePercent(candidate, freePercent);
+                    getVM(dbname, tablename)->setAllVisible(candidate, false);
+                }
+                return DBStatus::OK;
+            };
+
+            // Partitions share the space map. Check each hint on the selected
+            // heap under the page lock, even when the hint reports enough space.
+            const uint32_t lastPage = numPages - 1;
+            const uint32_t firstHint = fsm.findPage(minPercent);
+            uint32_t nextHint = 0;
+            if (firstHint > 0 && firstHint <= lastPage) {
+                const DBStatus status = tryExistingPage(firstHint, PageSearch::FirstHint);
+                if (status != DBStatus::OK) return failBeforeHeapInsert(status);
+                if (pageId == 0 && firstHint < lastPage) {
+                    nextHint = fsm.findPage(minPercent, firstHint + 1);
+                    if (nextHint > 0 && nextHint <= lastPage) {
+                        const DBStatus nextStatus = tryExistingPage(nextHint, PageSearch::Alternative);
+                        if (nextStatus != DBStatus::OK) return failBeforeHeapInsert(nextStatus);
+                    }
                 }
             }
-            if (inserted) {
-                pa->markDirty(pid);
-                size_t freePct = page.freeSpace() * 100 / pa->pageSize();
-                getFSM(dbname, tablename)->setFreePercent(pid, static_cast<uint8_t>(freePct));
-                getVM(dbname, tablename)->setAllVisible(pid, false);
+            // Prefer reusing the last page to scanning the whole table when
+            // the hints are missing, unsuitable, or temporarily busy.
+            if (pageId == 0 && lastPage > 1 && lastPage != firstHint && lastPage != nextHint) {
+                const DBStatus status = tryExistingPage(lastPage, PageSearch::Alternative);
+                if (status != DBStatus::OK) return failBeforeHeapInsert(status);
             }
-            pa->unpinPage(pid);
-            lockManager_.pageUnlock(dbname, tablename, pid);
+            for (uint32_t candidate = 1; candidate < numPages && pageId == 0; ++candidate) {
+                const DBStatus status = tryExistingPage(candidate, PageSearch::OrderedScan);
+                if (status != DBStatus::OK) return failBeforeHeapInsert(status);
+            }
         }
 
-        if (!inserted) {
+        if (pageId == 0) {
             pageId = pa->allocPage();
             if (pageId == 0) {
                 return failBeforeHeapInsert(DBStatus::IO_ERROR);

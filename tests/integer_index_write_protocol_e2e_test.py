@@ -68,6 +68,7 @@ def main():
         source = "integer_point_join_source"
         empty_source = "integer_point_join_empty"
         placement = "integer_update_placement"
+        insert_placement = "integer_insert_placement"
         count = 64
         padding = "x" * 504
         point_keys = {-1, *range(1, 7)}
@@ -88,6 +89,11 @@ def main():
         wide_values = ",".join(f"({i},{3 * i},'{padding}')" for i in range(1, 46))
         query(f"INSERT INTO {placement} VALUES {wide_values}", tag="INSERT 0 45")
         query(f"INSERT INTO {placement} VALUES(101,303,'s'),(102,306,'t')", tag="INSERT 0 2")
+        query(f"CREATE TABLE {insert_placement}(id INT PRIMARY KEY,v INT NOT NULL,pad VARCHAR(504))",
+              tag="CREATE TABLE")
+        query(f"CREATE INDEX {insert_placement}_value ON {insert_placement}(v)", tag="CREATE INDEX")
+        insert_values = ",".join(f"({i},{3 * i},'{padding[:490]}')" for i in range(1, 45))
+        query(f"INSERT INTO {insert_placement} VALUES {insert_values}", tag="INSERT 0 44")
         query("CHECKPOINT", tag="CHECKPOINT")
         database = Path(server["dir"], "info")
         page_size = 8192
@@ -135,6 +141,16 @@ def main():
         assert all(free < small_space for free, _ in placement_pages[:3])
         assert late_free >= wide_space + 2 * small_space
         protected_pages[placement] = 2
+
+        insert_file = database / f"{insert_placement}.dt"
+        image = insert_file.read_bytes()
+        assert struct.unpack_from("<II", image) == (0x44415441, 4) and len(image) == 4 * page_size
+        insert_hints = (database / f"{insert_placement}.fsm").read_bytes()
+        for page in (1, 2):
+            free, sizes = heap_page(image[page * page_size:(page + 1) * page_size])
+            assert free >= small_space and 1 <= insert_hints[page] <= 100
+            assert set(sizes) == set(range(15 * (page - 1) + 1, 15 * page + 1))
+        protected_pages[insert_placement] = 1
 
         @contextmanager
         def locked_page(name):
@@ -193,6 +209,14 @@ def main():
             work("BEGIN ISOLATION LEVEL READ COMMITTED", tag="BEGIN", ready=b"T")
             point(f"UPDATE {placement} SET v=v+17 WHERE id=102 RETURNING id,v",
                   "UPDATE 1", [["102", "323"]], b"T", name=placement)
+            work("ROLLBACK", tag="ROLLBACK", ready=b"I")
+            with locked_page(insert_placement):
+                work(f"INSERT INTO {insert_placement} VALUES(2,999,'s')", expected_state="23505", ready=b"I")
+            point(f"INSERT INTO {insert_placement} VALUES(101,1001,'s') RETURNING id,v",
+                  "INSERT 0 1", [["101", "1001"]], name=insert_placement)
+            work("BEGIN ISOLATION LEVEL READ COMMITTED", tag="BEGIN", ready=b"T")
+            point(f"INSERT INTO {insert_placement} VALUES(102,1002,'t') RETURNING id,v",
+                  "INSERT 0 1", [["102", "1002"]], b"T", name=insert_placement)
             work("ROLLBACK", tag="ROLLBACK", ready=b"I")
             point(f"UPDATE {table} SET v=777 WHERE id=1 RETURNING id,v", "UPDATE 1", [["1", "777"]])
             point(f"DELETE FROM {table} WHERE id=2 RETURNING id,v", "DELETE 1", [["2", "6"]])
@@ -289,6 +313,15 @@ def main():
         for key, value in ((40, 127), (101, 308), (102, 306)):
             assert query(f"SELECT id,v FROM {placement} WHERE id={key}", tag="SELECT 1", ready=b"I") == [
                 [str(key), str(value)]]
+        for predicate, expected in (("id=101", [["101", "1001"]]), ("v=1001", [["101", "1001"]]),
+                                    ("id=102", []), ("v=1002", [])):
+            assert query(f"SELECT id,v FROM {insert_placement} WHERE {predicate}",
+                         tag=f"SELECT {len(expected)}", ready=b"I") == expected
+        image = insert_file.read_bytes()
+        assert len(image) == 4 * page_size
+        assert 101 not in heap_page(image[page_size:2 * page_size])[1]
+        assert 101 in heap_page(image[2 * page_size:3 * page_size])[1]
+        print("[INSERT PAGE PLACEMENT] busy first hint, indexed rows and cold recovery passed")
         print("[UPDATE REPLACEMENT PLACEMENT] same page, late free space and cold recovery passed")
         print("[INTEGER POINT WRITE] hit, miss, fallback and cold recovery passed")
 

@@ -2,6 +2,27 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-19 try alternate writable pages before waiting during INSERT",
+      "gap_ids": ["STO-05", "DML-01"],
+      "status": "partial",
+      "evidence": [
+        "src/commands/TableManage.cpp",
+        "docs/test-report.md",
+        "docs/performance-report-2026-10-30.md"
+      ],
+      "tests": [
+        "tests/integer_index_write_protocol_e2e_test.py",
+        "tests/insert_wal_failure_test.cpp",
+        "tests/partition_test.cpp",
+        "tests/fillfactor_test.cpp"
+      ],
+      "verification": [
+        "INSERT tries up to two space hints and the tail without waiting for their page locks, then uses the ordered scan. It checks actual space and fillfactor on the selected heap. Alternative read failures fall back, while required reads and before-image WAL failures remain errors.",
+        "Eleven protocol and thirteen native suites passed. Physical lock and read-error cases verified selected page and fallback, indexed commit and rollback, and SIGKILL recovery. An ALTER TABLE fillfactor control matched both builds; the tested CREATE TABLE WITH option still had no effect.",
+        "Twelve runs completed 864 timed inserts with 1224 audited protocol exchanges. Inserts following a stale hint showed 28.2 percent lower CPU median on this warmed wide-row dataset. Healthy hints and first inserts with absent or stale hints did not meet the preset evidence thresholds. Inserts following an absent hint showed no clear change."
+      ]
+    },
+    {
       "issue": "2026-11-19 prefer the old tuple page or a validated space hint for replacement rows",
       "gap_ids": ["STO-05", "DML-01"],
       "status": "partial",

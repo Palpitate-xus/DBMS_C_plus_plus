@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>插入记录时，可以改用别处的空位 · 2026-11-19</summary>
+
+推荐的位置被另一个操作占用时，数据库会先试别处。有合适的空位，就可以继续插入。
+
+[使用说明](docs/MANUAL.md#插入时如何找空位) · [测试报告](docs/test-report.md#insert-page-choice-20261119) · [性能报告](docs/performance-report-2026-10-30.md#insert-page-choice-cost-20261119)
+
+</details>
+
+<details>
 <summary>更新记录时，先在原来的位置附近找空位 · 2026-11-19</summary>
 
 如果原来的位置附近放不下更新后的记录，数据库会优先尝试之前记下的空位，减少从头查找的次数。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>同时修改同一条记录时，会按新值再检查 · 2026-11-19</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-19 · 同时修改同一条记录时，会按新值再检查
 
 默认设置下，按另一张表更新或删除记录时，如果有人先修改并提交了这条记录，数据库会用新值再次检查条件。条件不再成立时，就跳过这条记录。
 
 [使用说明](docs/MANUAL.md#同时修改同一行) · [测试报告](docs/test-report.md#joined-row-writes-20261119) · [性能报告](docs/performance-report-2026-10-30.md#joined-row-write-cost-20261119)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-19 · 同时改一条记录，后一次按新值处理
 

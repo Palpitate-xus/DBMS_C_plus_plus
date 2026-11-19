@@ -929,9 +929,12 @@ CREATE INDEX users_indexes (LIKE src INCLUDING INDEXES);
 CREATE TABLE users_constraints (LIKE src INCLUDING CONSTRAINTS);
 CREATE TABLE users_identity (LIKE src INCLUDING IDENTITY);
 
--- 带 storage 参数
-CREATE TABLE t (ID INT) WITH (FILLFACTOR = 90);
+-- 建表后设置填充比例
+CREATE TABLE t (ID INT);
+ALTER TABLE t SET (FILLFACTOR = 90);
 ```
+
+当前已验证 `ALTER TABLE ... SET` 会保存 `fillfactor`。受测的 `CREATE TABLE ... WITH (FILLFACTOR = 50)` 建表成功后没有保存该值。[填充比例测试](test-report.md#insert-page-choice-20261119)
 
 ### 修改表
 
@@ -1153,6 +1156,10 @@ INSERT INTO users (ID, NAME) OVERRIDING SYSTEM VALUE VALUES (10, 'Test');
 -- RETURNING
 INSERT INTO users (ID, NAME) VALUES (100, 'New') RETURNING ID, NAME;
 ```
+
+### 插入时如何找空位
+
+插入记录时，数据库先尝试空闲空间记录推荐的页。推荐页忙或空间不够时，会尝试下一个推荐页和表的最后一页。这些尝试不会等待页锁，拿到锁后会核对实际空间和 `fillfactor` 要为更新预留的空间。找不到合适的页时，继续逐页查找，必要时增加数据页。[锁页与恢复测试](test-report.md#insert-page-choice-20261119)
 
 ### 更新
 

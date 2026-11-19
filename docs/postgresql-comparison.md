@@ -2,6 +2,10 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-19 · 插入记录时怎样查找空位
+
+PostgreSQL 优先尝试上次插入的页，再从分层空闲空间映射取候选，或者在缺少线索时尝试尾页。锁住页后会再次确认实际空间，淘汰不合适的候选时可更新映射。本项目的空闲空间记录按页保存百分比，先尝试最多两条推荐和尾页，然后回退到原有逐页查找。分层搜索、上次插入页缓存和批量写入的缓冲区策略仍有差距。[PostgreSQL 选页源码](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/access/heap/hio.c) · [空闲空间源码](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/storage/freespace/freespace.c) · [本项目验证](test-report.md#insert-page-choice-20261119)
+
 ## 2026-11-19 · 更新后的新版本写到哪里
 
 PostgreSQL 和本项目都可优先使用原页，并利用空闲空间记录选择其他页。本项目的空闲空间记录仍是按页保存的百分比，推荐失效时回退扫描。PostgreSQL 的分层空闲空间搜索、选择性跳过索引写入和版本链清理仍有差距。[PostgreSQL 选页实现](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/access/heap/hio.c) · [PostgreSQL 更新实现](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/access/heap/heapam.c) · [本项目测试](test-report.md#update-version-placement-20261119)
@@ -738,8 +742,8 @@ C7 `f135335e…` 将真实复合值、声明元数据与普通格式 1 的结果
 | 总账状态 | 数量 | 应如何理解 |
 | --- | ---: | --- |
 | `complete` | 22 | 总账已有完成标记及历史引用；本次没有逐项重新验收 |
-| `partial` | 166 | 存在实现或局部验证，仍有语义、边界或验收缺口 |
-| `unverified` | 70 | 未达到该项要求的证据门槛，不等于 70 项全部没有代码 |
+| `partial` | 167 | 存在实现或局部验证，仍有语义、边界或验收缺口 |
+| `unverified` | 69 | 尚待验证是否满足该项要求 |
 | `deferred_by_user` | 15 | 原始总账中的用户暂缓项，仍是兼容性缺口 |
 | 合计 | 273 | 还剩 251 项未标记完成；排除原始 15 项暂缓后仍有 236 项 |
 
@@ -763,7 +767,7 @@ C7 `f135335e…` 将真实复合值、声明元数据与普通格式 1 的结果
 | 复制/备份/HA | 17 | 0 | 12 | 5 | 0 |
 | 协议与客户端 | 14 | 0 | 8 | 6 | 0 |
 | 安全 | 13 | 0 | 0 | 0 | 13 |
-| 监控与运维 | 16 | 0 | 6 | 10 | 0 |
+| 监控与运维 | 16 | 0 | 7 | 9 | 0 |
 | 扩展与FDW | 13 | 0 | 1 | 12 | 0 |
 | 工程与生产验收 | 15 | 3 | 1 | 11 | 0 |
 | 项目语法偏移 | 14 | 13 | 0 | 1 | 0 |
