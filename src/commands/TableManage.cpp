@@ -87,6 +87,7 @@
 #include "CommitLog.h"
 #include "WAL.h"
 #include "storage/HeapWalIdentity.h"
+#include "storage/WalRecordScan.h"
 #include "commands/RelationNameCodec.h"
 #include "commands/AnalyzedStatisticsCapture.h"
 #include "catalog/AnalyzedStatisticsReadCache.h"
@@ -49236,8 +49237,9 @@ bool StorageEngine::recoverAllDatabases() {
         }
         Lsn lsn = wal->earliestAvailableLsn();
         while (true) {
-            auto recOpt = wal->ReadRecord(lsn);
-            if (!recOpt || recOpt->header.xl_tot_len == 0) break;
+            std::optional<XLogRecord> recOpt;
+            if (!readWalRecord(*wal, lsn, recOpt)) return false;
+            if (!recOpt) break;
             const XLogRecord& rec = *recOpt;
             if (rec.rmid() == RM_XACT_ID) {
                 uint64_t xid = 0;
@@ -49442,9 +49444,32 @@ bool StorageEngine::recoverAllDatabases() {
         // disposable too: restoring it on a later startup can erase newer
         // non-transactional sequence advances. A commit excluded by PITR is
         // different and still needs its pre-transaction image restored.
-        if (committedXidsByDb[dbname].count(xid) ||
+        bool discarded = committedXidsByDb[dbname].count(xid) ||
             (abortedXidsByDb[dbname].count(xid) &&
-             !pitrExcludedXidsByDb[dbname].count(xid))) {
+             !pitrExcludedXidsByDb[dbname].count(xid));
+        WALManager* wal = getWAL(dbname);
+        if (!discarded && wal && wal->earliestAvailableLsn() != 0 &&
+            !recoveryTargetsByDb.count(dbname)) {
+            std::vector<XLogRecord> records;
+            const auto coverage = readSnapshotTransactionWal(
+                *wal, backup / "pg_wal", walArchiveDir(dbname), xid, records);
+            if (coverage == SnapshotWalCoverage::Archived) {
+                for (const auto& record : records) {
+                    uint64_t recordXid = 0;
+                    if (!decodeXactWalRecord(record, recordXid) || recordXid != xid || discarded)
+                        return false;
+                    // These snapshots belong to ordinary DDL transactions.
+                    if (record.info() == XLOG_XACT_PREPARE) return false;
+                    discarded = true;
+                }
+            }
+            if (!discarded && coverage != SnapshotWalCoverage::Retained) {
+                std::cerr << "[recovery] cannot verify transaction image after WAL recycling for "
+                          << dbname << ":" << xid << std::endl;
+                return false;
+            }
+        }
+        if (discarded) {
             std::error_code ec;
             std::filesystem::remove_all(backup, ec);
             continue;
@@ -49650,8 +49675,9 @@ bool StorageEngine::recoverAllDatabases() {
         {
             Lsn lsn = redoLsn;
             while (true) {
-                auto recOpt = wal->ReadRecord(lsn);
-                if (!recOpt || recOpt->header.xl_tot_len == 0) break;
+                std::optional<XLogRecord> recOpt;
+                if (!readWalRecord(*wal, lsn, recOpt)) return false;
+                if (!recOpt) break;
                 const XLogRecord& rec = *recOpt;
                 redoRecordLsns.push_back(lsn);
                 uint8_t rmid = rec.rmid();
@@ -49767,8 +49793,9 @@ bool StorageEngine::recoverAllDatabases() {
             relationHighwater = std::max(relationHighwater, identity + 1);
         }
         for (Lsn historyLsn = wal->earliestAvailableLsn();;) {
-            auto record = wal->ReadRecord(historyLsn);
-            if (!record || record->header.xl_tot_len == 0) break;
+            std::optional<XLogRecord> record;
+            if (!readWalRecord(*wal, historyLsn, record)) return false;
+            if (!record) break;
             if (record->rmid() == RM_SMGR_ID &&
                 (record->info() == XLOG_SMGR_RELATION_CREATE ||
                  record->info() == XLOG_SMGR_RELATION_RETIRE ||

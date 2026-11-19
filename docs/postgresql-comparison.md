@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-19 · 从活动日志与归档判定事务结果
+
+PostgreSQL 的连续归档恢复需要保留从备份开始的连续 WAL 段。本项目在普通启动时，也要从活动日志与归档核对遗留事务备份的提交结果。新版继续读过切换段产生的填充，归档回收后则验证备份末段的重叠字节和所需记录链。对旧版生成的部分活动日志，可按物理顺序继续读到最后一条有效记录。完整的时间点分叉恢复和普通建表的持久撤销仍待补齐。[PostgreSQL 18 连续归档](https://www.postgresql.org/docs/18/continuous-archiving.html) · [本项目验证](test-report.md#wal-switch-terminal-recovery-20261119)
+
+SQLite 用每个日志页记录的版本标记和累积校验和区分有效记录与上次检查点留下的内容。DuckDB 的检查点会把日志内容同步到数据库文件，并协调正在运行的事务。本次采用的是本项目自己的段和记录格式。[SQLite 日志文件格式](https://www.sqlite.org/fileformat2.html#the_write_ahead_log) · [DuckDB 检查点](https://duckdb.org/docs/2.0/sql/statements/checkpoint)
+
 ## 2026-11-19 · 建表时先检查是否需要写入
 
 PostgreSQL 先解析创建表的命名空间，`IF NOT EXISTS` 遇到已存在的关系就发提示并返回。SQLite 和 DuckDB 也允许用这个选项跳过已存在的表。本项目把自动提交普通建表的事务备份移到检查之后，避免为跳过或无效的语句复制已有数据。实际创建新表仍使用事务备份，关系级崩溃撤销仍待实现。[PostgreSQL 18.6 创建检查](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/parser/parse_utilcmd.c#L170-L202) · [SQLite 建表](https://www.sqlite.org/lang_createtable.html) · [DuckDB 建表](https://duckdb.org/docs/2.0/sql/statements/create_table#if-not-exists) · [实测结果](performance-report-2026-10-30.md#create-validate-before-backup-cost-20261119)

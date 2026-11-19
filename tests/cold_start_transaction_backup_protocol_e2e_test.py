@@ -2,8 +2,10 @@
 """Crash recovery restores durable data and removes stale temporary relations."""
 
 import importlib.util
+import os
 from pathlib import Path
 import resource
+import shutil
 import socket
 import subprocess
 import time
@@ -217,6 +219,84 @@ def main():
         finally:
             runner.stop_ours(server)
     print("[COLD START TEMP WAL RECOVERY PROTOCOL E2E] passed")
+
+    for recycle, commit in ((False, True), (True, True), (True, False)):
+        server = runner.start_ours(client)
+        try:
+            cluster = Path(server["dir"])
+            query(server, "CREATE TABLE retained_commit(id INT PRIMARY KEY, v INT);",
+                  tag="CREATE TABLE")
+            query(server, "INSERT INTO retained_commit VALUES (1,10);", tag="INSERT 0 1")
+            if not recycle:
+                query(server, "SWITCH WAL;")
+            query(server, "BEGIN;", ready=b"T", tag="BEGIN")
+            query(server, "ALTER TABLE retained_commit ADD COLUMN extra INT;",
+                  ready=b"T", tag="ALTER TABLE")
+            [image] = cluster.glob("info.txn_backup.*")
+            assert (image / ".dbms_physical_backup").is_file()
+            saved = cluster / "saved_rollback_image"
+            shutil.copytree(image, saved)
+            if commit:
+                query(server, "COMMIT;", tag="COMMIT")
+            else:
+                query(server, "ROLLBACK;", tag="ROLLBACK")
+                query(server, "ALTER TABLE retained_commit ADD COLUMN extra INT;",
+                      tag="ALTER TABLE")
+            query(server, "INSERT INTO retained_commit VALUES (2,20,200);", tag="INSERT 0 1")
+            query(server, "UPDATE retained_commit SET extra=111 WHERE id=1;", tag="UPDATE 1")
+            segment = "000000010000000000000000"
+            active = cluster / "info" / "pg_wal" / segment
+            archive = cluster / "info.archive"
+            if recycle:
+                query(server, "SWITCH WAL;")
+                query(server, "CHECKPOINT;", tag="CHECKPOINT")
+                assert not active.exists() and (archive / segment).is_file()
+            else:
+                assert active.is_file()
+            kill_server(server)
+            # Simulate an interrupted cleanup using the exact image that
+            # the finished transaction produced.
+            assert not image.exists()
+            shutil.copytree(saved, image)
+            if recycle and commit:
+                missing_archive = cluster / "withheld_archive"
+                archive.rename(missing_archive)
+                diagnostics = cluster / "unknown-transaction.stderr"
+                try:
+                    start_from_disk(server, diagnostics)
+                    assert server["process"].wait(timeout=20) != 0
+                    assert "cannot verify transaction image after WAL recycling" in diagnostics.read_text()
+                    assert (image / ".dbms_physical_backup").is_file()
+                finally:
+                    missing_archive.rename(archive)
+                archived_segment = archive / segment
+                with archived_segment.open("r+b") as file:
+                    file.seek(-1, os.SEEK_END)
+                    assert file.read(1) == b"\0"
+                    file.seek(-1, os.SEEK_END)
+                    file.write(b"\x01")
+                try:
+                    start_from_disk(server, diagnostics)
+                    assert server["process"].wait(timeout=20) != 0
+                    assert "cannot verify transaction image after WAL recycling" in diagnostics.read_text()
+                    assert (image / ".dbms_physical_backup").is_file()
+                finally:
+                    with archived_segment.open("r+b") as file:
+                        file.seek(-1, os.SEEK_END)
+                        file.write(b"\0")
+            reopen(server)
+            query(server, "SELECT id,v,extra FROM retained_commit ORDER BY id;",
+                  [["1", "10", "111"], ["2", "20", "200"]], tag="SELECT 2")
+            assert not image.exists()
+            query(server, "INSERT INTO retained_commit VALUES (3,30,300);", tag="INSERT 0 1")
+            kill_server(server)
+            reopen(server)
+            query(server, "SELECT id,v,extra FROM retained_commit ORDER BY id;",
+                  [["1", "10", "111"], ["2", "20", "200"], ["3", "30", "300"]],
+                  tag="SELECT 3")
+        finally:
+            runner.stop_ours(server)
+    print("[COLD START COMMITTED IMAGE RETENTION PROTOCOL E2E] passed")
 
 
 if __name__ == "__main__":

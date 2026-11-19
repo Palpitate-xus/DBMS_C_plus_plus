@@ -2,6 +2,29 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-19 preserve completed DDL across WAL switches and recycling",
+      "gap_ids": ["WAL-05", "WAL-08", "CAT-07"],
+      "status": "partial",
+      "evidence": [
+        "src/storage/WAL.cpp",
+        "src/storage/WalRecordScan.h",
+        "src/commands/TableManage.cpp",
+        "docs/test-report.md",
+        "docs/performance-report-2026-10-30.md"
+      ],
+      "tests": [
+        "tests/wal_checkpoint_prefix_test.cpp",
+        "tests/cold_start_transaction_backup_protocol_e2e_test.py",
+        "tests/pitr_recovery_test.cpp",
+        "tests/pitr_forked_backup_archive_test.cpp"
+      ],
+      "verification": [
+        "Ordinary startup follows validated records past switch padding and appends at the actual last record. A deployed legacy skip link with valid CRC was read without modifying the old WAL bytes.",
+        "A preserved transaction image simulated interrupted cleanup. The baseline lost a committed column and a later row after a switch, with either retained or recycled WAL. The candidate preserved the same data on both input copies. Missing or corrupted required archive history stopped startup and retained the image.",
+        "Seven focused native suites, ordinary PITR, and six protocol suites passed. The forked PITR backup test failed at the same restore assertion on both programs. Ordinary uncommitted CREATE recovery remains open."
+      ]
+    },
+    {
       "issue": "2026-11-19 validate ordinary autocommit CREATE before copying the database",
       "gap_ids": ["CAT-07"],
       "status": "partial",

@@ -1,5 +1,6 @@
 #include "WAL.h"
 #include "HeapWalIdentity.h"
+#include "storage/WalRecordScan.h"
 #include <fcntl.h>
 #include <sys/file.h>
 #include <sys/stat.h>
@@ -424,6 +425,14 @@ public:
         return true;
     }
 
+    bool containsPrefix(uint32_t timeline, uint32_t segment, const Segment& prefix) const {
+        const auto chain = timelines.find(timeline);
+        if (chain == timelines.end()) return false;
+        const auto found = chain->second.find(segment);
+        return found != chain->second.end() && found->second.size >= prefix.size &&
+            samePrefix(found->second.path, prefix.path, prefix.size);
+    }
+
     std::optional<Lsn> retainedStart(uint32_t timeline,
             const std::filesystem::path& checkpoint, Lsn boundary, Lsn limit) const {
         if (const auto first = readRecord(timeline, boundary, limit)) {
@@ -497,6 +506,43 @@ private:
 };
 } // namespace
 
+bool readWalRecord(const WALManager& wal, Lsn& lsn,
+                   std::optional<XLogRecord>& record) {
+    const Lsn end = wal.currentWriteLsn();
+    record.reset();
+    if (lsn >= end) return lsn == end;
+    record = wal.ReadRecord(lsn);
+    if (record) return true;
+
+    const auto inSegment = lsn % WALManager::kSegmentSize;
+    const Lsn next = lsn - inSegment + WALManager::kSegmentSize;
+    if (!inSegment || next > end) return false;
+
+    const auto path = wal.segmentPath(static_cast<uint32_t>(lsn / WALManager::kSegmentSize));
+    const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) return false;
+    std::array<char, 65536> padding;
+    bool valid = true;
+    for (auto offset = inSegment; offset < WALManager::kSegmentSize;) {
+        const auto requested = std::min<uint64_t>(padding.size(), WALManager::kSegmentSize - offset);
+        const auto count = ::pread(fd, padding.data(), requested, static_cast<off_t>(offset));
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0 || std::any_of(padding.begin(), padding.begin() + count,
+                                     [](char byte) { return byte != 0; })) {
+            valid = false;
+            break;
+        }
+        offset += static_cast<uint64_t>(count);
+    }
+    ::close(fd);
+    if (!valid) return false;
+
+    lsn = next;
+    if (lsn == end) return true;
+    record = wal.ReadRecord(lsn);
+    return record.has_value();
+}
+
 bool heap_wal_identity::readArchivedCreateNames(
     const WALManager& wal, const std::filesystem::path& active,
     const std::filesystem::path& archive,
@@ -535,6 +581,64 @@ bool heap_wal_identity::readArchivedCreateNames(
         return true;
     } catch (const std::filesystem::filesystem_error&) {
         return false;
+    }
+}
+
+SnapshotWalCoverage readSnapshotTransactionWal(
+    const WALManager& wal, const std::filesystem::path& snapshotWal,
+    const std::filesystem::path& archive, uint64_t xid,
+    std::vector<XLogRecord>& records) {
+    const auto unknown = SnapshotWalCoverage::Unverified;
+    try {
+        const auto timeline = wal.timelineId();
+        SnapshotWalReader saved;
+        if (!saved.addRoot(snapshotWal)) return unknown;
+        const auto history = saved.timelines.find(timeline);
+        if (history == saved.timelines.end() || history->second.empty()) return unknown;
+        const auto& [segment, prefix] = *history->second.rbegin();
+        if (prefix.size == 0) return unknown;
+
+        const Lsn imageEnd = static_cast<Lsn>(segment) * WALManager::kSegmentSize + prefix.size;
+        const Lsn retained = wal.earliestAvailableLsn();
+        if (imageEnd > wal.currentWriteLsn()) return unknown;
+        SnapshotWalReader current;
+        const auto active = wal.segmentPath(segment).parent_path();
+        if (!current.addRoot(active)) return unknown;
+        if (imageEnd >= retained && current.containsPrefix(timeline, segment, prefix))
+            return SnapshotWalCoverage::Retained;
+        if (imageEnd > retained || !current.addRoot(archive) ||
+            !current.containsPrefix(timeline, segment, prefix)) return unknown;
+
+        // The first retained record anchors the archived predecessor chain.
+        // Never treat an older writer's discontinuous link as proof that the
+        // skipped interval contains no transaction decision.
+        Lsn position = retained;
+        auto record = wal.ReadRecord(position);
+        if (!record) return unknown;
+        std::vector<XLogRecord> result;
+        for (;;) {
+            const Lsn previous = record->header.xl_prev;
+            if (previous >= position) return unknown;
+            record = current.readRecord(timeline, previous, position);
+            if (!record) return unknown;
+            const Lsn end = previous + record->header.xl_tot_len;
+            if (end != position && (position % WALManager::kSegmentSize ||
+                    end <= position - WALManager::kSegmentSize ||
+                    !current.zeroPadding(timeline, end, position))) return unknown;
+
+            if (previous < imageEnd) {
+                // The snapshot can end at a record boundary, or exactly at
+                // the end of the padding from a completed switch.
+                if (imageEnd != end && imageEnd != position) return unknown;
+                records = std::move(result);
+                return SnapshotWalCoverage::Archived;
+            }
+            if (record->rmid() == RM_XACT_ID && record->header.xl_xid == xid)
+                result.push_back(*record);
+            position = previous;
+        }
+    } catch (const std::filesystem::filesystem_error&) {
+        return unknown;
     }
 }
 
@@ -672,90 +776,61 @@ bool WALManager::refreshCurrentLsnFromDisk() {
     return true;
 }
 
-// Walk the retained record chain once to determine the last record's LSN and
-// length. This is the only place the chain is walked from the tail side; the
-// hot XLogInsert path keeps the result incrementally in lastRecordLsn_.
-bool WALManager::scanWalTail() {
-    lastRecordLsn_ = 0;
-    hasLastRecord_ = false;
-    lastRecordTotLen_ = 0;
-    Lsn lsn = earliestAvailableLsn();
-    std::optional<Lsn> previous;
-    while (lsn < currentLsn_) {
-        auto rec = ReadRecord(lsn);
-        if (!rec) {
-            // Zero padding from switchWal() legitimately terminates the
-            // record chain before the end of a padded segment: the tail
-            // state is the last real record, and currentLsn_ (the append
-            // position) stands.
-            XLogRecHeader header;
-            if (readBytes(lsn, reinterpret_cast<char*>(&header), sizeof(header)) &&
-                header.xl_prev == 0 && header.xl_tot_len == 0 &&
-                header.xl_info == 0 && header.xl_xid == 0) {
-                break;
-            }
-            return false;
-        }
-        previous = lsn;
-        lastRecordLsn_ = lsn;
-        hasLastRecord_ = true;
-        lastRecordTotLen_ = rec->header.xl_tot_len;
-        const Lsn next = lsn + rec->header.xl_tot_len;
-        if (next <= lsn || next > currentLsn_) return false;
-        lsn = next;
-    }
-    // A padding break means the walk stopped before currentLsn_ by design.
-    return true;
-}
+namespace {
+struct WalTail {
+    std::optional<Lsn> record;
+    uint32_t length = 0;
+};
 
-bool WALManager::validateRecordsOnDisk() const {
-    Lsn lsn = earliestAvailableLsn();
+std::optional<WalTail> readWalTail(const WALManager& wal) {
+    Lsn lsn = wal.earliestAvailableLsn();
     std::optional<Lsn> previous;
-    while (lsn < currentLsn_) {
-        auto rec = ReadRecord(lsn);
-        if (!rec) {
-            // Zero padding from switchWal() ends the record chain before
-            // the end of a padded segment.
-            XLogRecHeader header;
-            if (readBytes(lsn, reinterpret_cast<char*>(&header), sizeof(header)) &&
-                header.xl_prev == 0 && header.xl_tot_len == 0 &&
-                header.xl_info == 0 && header.xl_xid == 0) {
-                break;
-            }
-            return false;
-        }
+    std::optional<Lsn> legacySwitchPredecessor;
+    WalTail tail;
+    while (lsn < wal.currentWriteLsn()) {
+        const Lsn beforePadding = lsn;
+        std::optional<XLogRecord> rec;
+        if (!readWalRecord(wal, lsn, rec)) return std::nullopt;
+        if (!rec) break;
+        // Older writers reopened at the first switched segment and could
+        // link a later append to its predecessor. Accept only that exact,
+        // already validated record while reading the contiguous stream.
+        if (lsn != beforePadding && !legacySwitchPredecessor)
+            legacySwitchPredecessor = previous;
         if (previous) {
-            if (rec->header.xl_prev != *previous) return false;
+            if (rec->header.xl_prev != *previous &&
+                rec->header.xl_prev != legacySwitchPredecessor) return std::nullopt;
         } else if ((lsn == 0 && rec->header.xl_prev != 0) ||
                    (lsn != 0 && rec->header.xl_prev >= lsn)) {
             // The first retained record may point to a segment already
             // truncated from this WAL directory, but never forward into the
             // retained stream.
-            return false;
+            return std::nullopt;
         }
         previous = lsn;
+        tail = {lsn, rec->header.xl_tot_len};
         const Lsn next = lsn + rec->header.xl_tot_len;
-        if (next <= lsn || next > currentLsn_) return false;
+        if (next <= lsn || next > wal.currentWriteLsn()) return std::nullopt;
         lsn = next;
     }
-    // Padding break: the walk may stop before currentLsn_ by design.
+    return tail;
+}
+}  // namespace
+
+bool WALManager::scanWalTail() {
+    const auto tail = readWalTail(*this);
+    if (!tail) return false;
+    lastRecordLsn_ = tail->record.value_or(0);
+    hasLastRecord_ = tail->record.has_value();
+    lastRecordTotLen_ = tail->length;
     return true;
 }
 
+bool WALManager::validateRecordsOnDisk() const { return readWalTail(*this).has_value(); }
+
 std::optional<Lsn> WALManager::lastRecordLsn() const {
-    if (currentLsn_ == 0) return std::nullopt;
-    if (!validateRecordsOnDisk()) return std::nullopt;
-    Lsn lsn = earliestAvailableLsn();
-    std::optional<Lsn> previous;
-    while (lsn < currentLsn_) {
-        auto rec = ReadRecord(lsn);
-        if (!rec) return std::nullopt;
-        previous = lsn;
-        const Lsn next = lsn + rec->header.xl_tot_len;
-        if (next <= lsn || next > currentLsn_) return std::nullopt;
-        lsn = next;
-    }
-    return lsn == currentLsn_ ? previous : std::nullopt;
+    const auto tail = readWalTail(*this);
+    return tail ? tail->record : std::nullopt;
 }
 
 int WALManager::acquireWalFileLock() const {
@@ -1035,9 +1110,22 @@ Lsn WALManager::switchWal() {
     const int walLock = acquireWalFileLock();
     if (walLock < 0) return INVALID_LSN;
 
+    if (!validateAppendOffset()) {
+        earliestSegValid_ = false;
+        if (!refreshCurrentLsnFromDisk() || !scanWalTail()) {
+            releaseWalFileLock(walLock);
+            return INVALID_LSN;
+        }
+    }
     const uint64_t cur = currentLsn_.load(std::memory_order_relaxed);
     const uint32_t curSeg = segmentNumber(cur);
     const uint64_t off = segmentOffset(cur);
+    if (off == 0) {
+        // A switch at the boundary has no segment to close. Advancing would
+        // skip an entire segment without creating any durable history for it.
+        releaseWalFileLock(walLock);
+        return cur;
+    }
     if (off > 0) {
         // Zero-fill the rest of the current segment so its file exists in
         // full and a later reader sees end-of-records at the padding.
@@ -1622,16 +1710,17 @@ std::optional<XLogRecord> WALManager::ReadNextRecord(Lsn lsn) const {
     }
     auto rec = ReadRecord(lsn);
     if (!rec) return std::nullopt;
-    const Lsn next = lsn + rec->header.xl_tot_len;
+    Lsn next = lsn + rec->header.xl_tot_len;
     if (next < lsn) return std::nullopt;
-    return ReadRecord(next);
+    return readWalRecord(*this, next, rec) ? std::move(rec) : std::nullopt;
 }
 
 std::optional<Lsn> WALManager::findLastCheckpointLsn() const {
     Lsn lsn = earliestAvailableLsn();
     std::optional<Lsn> lastCp;
     while (true) {
-        auto rec = ReadRecord(lsn);
+        std::optional<XLogRecord> rec;
+        if (!readWalRecord(*this, lsn, rec)) return std::nullopt;
         if (!rec) break;
         if (rec->rmid() == RM_CHECKPOINT_ID) {
             lastCp = lsn;

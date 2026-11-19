@@ -2342,6 +2342,8 @@ archive_command='dir:/var/dbms/archive'
 归档触发在 checkpoint 边界: 完整写满的段先标记 `archive_status/<seg>.ready`,
 复制成功后翻转为 `.done`; 失败保留 `.ready`,后台维护循环后续重试。
 
+普通重启会跨过日志段尾的零填充，继续读取后续记录。如果已结束的改表事务留下备份，数据库可用连续的同一条归档历史核对提交或回滚结果。需要核对的归档缺失或校验失败时，数据库会停止启动并保留事务备份。[恢复测试](test-report.md#wal-switch-terminal-recovery-20261119)
+
 ### 强制切换段 (pg_switch_wal)
 
 小负载不会自然填满 16 MiB 段。要在关键时刻确保 WAL 已归档:

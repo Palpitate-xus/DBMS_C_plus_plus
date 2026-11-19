@@ -2,7 +2,7 @@
 
 ## 当前汇总（2026-11-19）
 
-原始 273 项要求中，22 项完成、167 项部分实现、69 项待验证、15 项暂缓。自动提交的普通建表现在先检查表名和定义，遇到已有表或可提前发现的错误时省去整库备份。显式事务中未提交普通建表后的崩溃清理仍有缺口。[逐项状态](gap-progress.json) · [建表检查回归](test-report.md#create-validate-before-backup-20261119) · [恢复测试与原型边界](test-report.md#ddl-image-sequence-recovery-20261119)
+原始 273 项要求中，22 项完成、167 项部分实现、69 项待验证、15 项暂缓。普通启动现在会跨段读取 WAL，结合活动日志或归档验证遗留事务备份的结果。显式事务中未提交普通建表后的崩溃清理仍有缺口。[逐项状态](gap-progress.json) · [跨段验证](test-report.md#wal-switch-terminal-recovery-20261119) · [建表恢复差距](test-report.md#ddl-image-sequence-recovery-20261119)
 
 PostgreSQL 18.6 的行为和性能对照见差距评估，各轮证据适用于报告中列明的版本、数据和场景。[当前差距评估](postgresql-comparison.md)
 
