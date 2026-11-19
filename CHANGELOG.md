@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>重复执行建表脚本时减少备份 · 2026-11-19</summary>
+
+用 `CREATE TABLE IF NOT EXISTS` 重跑脚本时，可以直接跳过已有表。数据库也会在备份之前指出填充比例越界等设置错误。
+
+[使用手册](docs/MANUAL.md#建表) · [测试报告](docs/test-report.md#create-validate-before-backup-20261119) · [性能报告](docs/performance-report-2026-10-30.md#create-validate-before-backup-cost-20261119)
+
+</details>
+
+<details>
 <summary>恢复表结构时保留序列已经给出的编号 · 2026-11-19</summary>
 
 数据库异常退出后，如果需要撤销表结构修改，恢复时会保留仍存在的序列已经给出的编号，避免再次发放同一个值。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>建表时为以后更新记录留出空间 · 2026-11-19</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-19 · 建表时为以后更新记录留出空间
 
 用 `WITH (fillfactor = 90)` 建表，写入时会尽量留出约一成空间，方便以后更新记录。这个设置重启后仍然有效。
 
 [使用手册](docs/MANUAL.md#建表) · [测试报告](docs/test-report.md#create-table-fillfactor-20261119) · [性能报告](docs/performance-report-2026-10-30.md#create-table-fillfactor-cost-20261119)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-19 · 插入记录遇到占用时，先试别的空位
 

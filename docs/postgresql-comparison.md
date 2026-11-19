@@ -2,11 +2,17 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-19 · 建表时先检查是否需要写入
+
+PostgreSQL 先解析创建表的命名空间，`IF NOT EXISTS` 遇到已存在的关系就发提示并返回。SQLite 和 DuckDB 也允许用这个选项跳过已存在的表。本项目把自动提交普通建表的事务备份移到检查之后，避免为跳过或无效的语句复制已有数据。实际创建新表仍使用事务备份，关系级崩溃撤销仍待实现。[PostgreSQL 18.6 创建检查](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/parser/parse_utilcmd.c#L170-L202) · [SQLite 建表](https://www.sqlite.org/lang_createtable.html) · [DuckDB 建表](https://duckdb.org/docs/2.0/sql/statements/create_table#if-not-exists) · [实测结果](performance-report-2026-10-30.md#create-validate-before-backup-cost-20261119)
+
 ## 2026-11-19 · 未提交建表与崩溃恢复
 
 PostgreSQL 18.6 的受测事务先改写已有表，再建两张表。崩溃后，原有表恢复到已提交状态，两张新表均不可见。PostgreSQL 为持久关系写入物理创建日志，并在事务中按关系身份登记待清理文件。SQLite 将结构定义保存在 `sqlite_schema`，建表走写事务。DuckDB 的事务也隔离未提交修改，并在回滚时撤销修改。[PostgreSQL 关系存储](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/catalog/storage.c) · [SQLite 事务](https://www.sqlite.org/lang_transaction.html) · [SQLite 结构目录](https://www.sqlite.org/schematab.html) · [DuckDB 事务](https://duckdb.org/docs/2.0/sql/statements/transactions)
 
 本项目复现了普通建表在崩溃后留下空表的问题。整库复制原型通过了新表清理测试，成功建表的额外代价过高，未合入。后续的关系级恢复需要能验证目录项和文件属于哪一次建表，并在跨越提交、回滚到保存点、日志回收和同名重建时保留这一证据。[行为对照](test-report.md#ddl-image-sequence-recovery-20261119) · [原型性能](performance-report-2026-10-30.md#ordinary-create-recovery-cost-20261119)
+
+当前的表、列、默认值和依赖记录分别写入文件。进程可能在只写完部分文件时中断。按新表撤销前，需要在写入前记录物理表和目录对象的身份，恢复时按身份清理已经写出的部分。回滚到保存点还需要记录每张表各自的撤销结果，因为外层事务之后仍可以提交。[实现入口](../src/commands/DdlExecutor.cpp) · [目录写入](../src/catalog/catalog.cpp)
 
 ## 2026-11-19 · 临时表与崩溃恢复
 

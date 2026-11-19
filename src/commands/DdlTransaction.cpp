@@ -132,9 +132,11 @@ void DdlTransaction::markSnapshotDirty() {
     engine_.markTransactionBackupDirty();
 }
 
-bool DdlTransaction::begin() {
+bool DdlTransaction::begin(SnapshotTiming timing) {
+    const bool deferSnapshot = timing == SnapshotTiming::BeforeChange;
+    if (deferSnapshot && (!snapshotRollbackEnabled_ || database_.empty())) return false;
     if (engine_.inTransaction()) {
-        if (engine_.transactionDatabase() != database_) return false;
+        if (deferSnapshot || engine_.transactionDatabase() != database_) return false;
         if (snapshotRollbackEnabled_ && engine_.transactionBackupDirty()) {
             // Keep the transaction's original image reserved for full
             // ROLLBACK. A later file-rewriting statement gets an auxiliary
@@ -175,7 +177,7 @@ bool DdlTransaction::begin() {
     }
     active_ = (st == DBStatus::OK);
     startedByUs_ = active_;
-    if (startedByUs_) {
+    if (startedByUs_ && !deferSnapshot) {
         engine_.preserveTransactionBackupOnRollback(snapshotRollbackEnabled_);
         if (snapshotRollbackEnabled_) {
             snapshotCreatedByThis_ = true;

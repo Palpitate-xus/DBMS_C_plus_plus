@@ -48,8 +48,11 @@ public:
                    Session* sqlSession = nullptr);
     ~DdlTransaction();
 
-    // 尝试进入事务：复用已有事务，或新起一个事务。返回是否成功。
-    bool begin();
+    enum class SnapshotTiming { AtBegin, BeforeChange };
+
+    // BeforeChange keeps the new transaction's exclusive lock during
+    // validation. The caller must take the snapshot before its first change.
+    bool begin(SnapshotTiming timing = SnapshotTiming::AtBegin);
 
     // 记录 DDL 变更（按操作类型）。同时写一条 CATALOG WAL 记录。
     void recordCreate(DdlObjectKind kind, const std::string& name,

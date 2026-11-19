@@ -6140,7 +6140,10 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
         [](const auto& clause) { return clause.includingIdentity; });
     if (!outerTransaction || createsSerialSequence || createsIdentitySequence || temporary)
         txn.enableSnapshotRollback();
-    if (!txn.begin()) {
+    const bool deferSnapshot = !outerTransaction && !temporary &&
+        stmt->partitionOf.empty() && stmt->asSelect.empty();
+    if (!txn.begin(deferSnapshot ? DdlTransaction::SnapshotTiming::BeforeChange
+                                 : DdlTransaction::SnapshotTiming::AtBegin)) {
         std::cout << "DDL transaction begin failed" << std::endl;
         return true;
     }
@@ -7090,6 +7093,13 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
         }
     }
 
+    // Duplicate names and invalid definitions can return without copying the
+    // database. The automatic transaction has held its exclusive lock since
+    // preflight. An identity sequence may be the first persistent change.
+    if (deferSnapshot && !txn.enableSnapshotRollback()) {
+        std::cout << "DDL transaction begin failed" << std::endl;
+        return true;
+    }
     std::vector<PendingIdentitySequence> identitySequences;
     for (size_t i = 0; i < tbl.len; ++i) {
         auto& column = tbl.cols[i];

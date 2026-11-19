@@ -2,6 +2,28 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-19 validate ordinary autocommit CREATE before copying the database",
+      "gap_ids": ["CAT-07"],
+      "status": "partial",
+      "evidence": [
+        "src/commands/DdlExecutor.cpp",
+        "src/commands/DdlTransaction.cpp",
+        "docs/test-report.md",
+        "docs/performance-report-2026-10-30.md"
+      ],
+      "tests": [
+        "tests/ddl_transaction_skeleton_test.cpp",
+        "tests/tablespace_protocol_e2e_test.py",
+        "tests/sequence_rollback_identity_protocol_e2e_test.py",
+        "tests/cold_start_transaction_backup_protocol_e2e_test.py"
+      ],
+      "verification": [
+        "Autocommit ordinary CREATE holds exclusive database ownership through validation and takes its rollback image before creating a relation or an identity sequence.",
+        "On a matched existing database, physical backup publications changed from 12 to 0 for IF NOT EXISTS and invalid fillfactor, and remained 6 for successful CREATE. All 51 preflight wire exchanges matched byte for byte and all existing table and index witnesses matched.",
+        "Six native suites and nine protocol suites passed. A separate PostgreSQL 18.6 fixture checked ten statements. The ordinary explicit CREATE crash cleanup gap remains open."
+      ]
+    },
+    {
       "issue": "2026-11-19 preserve sequence allocations during transaction image recovery",
       "gap_ids": ["TXN-05", "WAL-08"],
       "status": "partial",
