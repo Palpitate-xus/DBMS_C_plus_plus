@@ -1169,6 +1169,17 @@ FROM orders WHERE users.ID = orders.user_id;
 UPDATE users SET AGE = 18 WHERE AGE < 18 RETURNING *;
 ```
 
+### 按整数主键更新或删除
+
+在默认表空间的普通表上，事务的首次写入可以通过单列整数主键定位目标。数据库先查询主键索引，再检查找到的行是否对该语句可见。
+
+```sql
+UPDATE items SET label = '已复核' WHERE id = 42 RETURNING id, label;
+DELETE FROM items WHERE id = 43 RETURNING id;
+```
+
+这一查找方式要求可用的新版主键索引和仍能使用当前索引的语句快照，适用于符合条件的 `READ COMMITTED` 或 `REPEATABLE READ` 事务。索引未命中、事务内已有写入、复合主键、范围条件和旧索引都沿用表扫描。[测试范围](test-report.md#integer-primary-key-mutation-20261119)
+
 ### 删除
 
 ```sql

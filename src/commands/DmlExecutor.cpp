@@ -4478,6 +4478,53 @@ bool rejectDuplicateUpdateAssignments(const UpdateStmt& statement, Session& sess
     throw DbError("42601", "multiple assignments to column \"" + duplicate + "\"");
 }
 
+static std::vector<std::string> boundIntegerPrimaryKeyCandidates(
+        const Expr* where, const TableSchema& table, size_t target) {
+    const auto isolation = g_engine.getIsolationLevel();
+    if (isolation != IsolationLevel::READ_COMMITTED && isolation != IsolationLevel::REPEATABLE_READ)
+        return {};
+    const auto signedType = [](const std::string& type) {
+        return type == "smallint" || type == "integer" || type == "bigint";
+    };
+    const auto* equality = dynamic_cast<const BinaryOpExpr*>(where);
+    if (!equality || equality->op != "=" || equality->preparedSubquery) return {};
+    const auto* column = dynamic_cast<const ColumnRefExpr*>(equality->left.get());
+    const auto* input = equality->right.get();
+    if (!column || column->preparedSubquery || !column->binding || column->binding->scopeDepth ||
+        column->binding->mergedUsing || column->binding->sourceOrdinal != target ||
+        column->binding->columnOrdinal >= table.len || !input || input->preparedSubquery) return {};
+    const size_t position = column->binding->columnOrdinal;
+    const auto& stored = table.cols[position];
+    if (!table.pkColIndices.empty()) {
+        if (table.pkColIndices.size() != 1 || table.pkColIndices.front() != position) return {};
+    } else if (!stored.isPrimaryKey || std::count_if(table.cols, table.cols + table.len,
+                   [](const Column& field) { return field.isPrimaryKey; }) != 1) return {};
+    const auto type = ExprHelper::canonicalResultTypeName(stored.dataType);
+    if (!signedType(type) || stored.isArray || stored.isUnsigned || !stored.domainName.empty() ||
+        stored.generatedKind || ExprHelper::canonicalResultTypeName(column->binding->declaredType) != type)
+        return {};
+    if (equality->comparison) {
+        const auto& comparison = *equality->comparison;
+        if (!comparison.strict || !signedType(comparison.leftType) || !signedType(comparison.rightType) ||
+            comparison.identity != "builtin-comparison:=(" + comparison.leftType + "," + comparison.rightType + ")")
+            return {};
+    }
+    if (const auto* literal = dynamic_cast<const LiteralExpr*>(input);
+        literal && !literal->typeName.empty() &&
+        !signedType(ExprHelper::canonicalResultTypeName(literal->typeName))) return {};
+
+    std::vector<std::string> conditions;
+    if (!appendCondition(where, conditions) || conditions.size() != 1) return {};
+    const std::string prefix = "=" + stored.dataName + " ";
+    const auto& condition = conditions.front();
+    if (condition.compare(0, prefix.size(), prefix) != 0 ||
+        !signedType(ExprHelper::inferValuesResultType(condition.substr(prefix.size())))) return {};
+    // The typed WHERE stays authoritative. This plain integer comparison
+    // can only discard rows that cannot satisfy that bound predicate.
+    conditions.front().insert(0, "apicond ");
+    return conditions;
+}
+
 bool executePreparedUpdate(const UpdateStmt& stmt, Session& s, bool& fallback,
                            const std::string& originalSql) {
     fallback = false;
@@ -4721,7 +4768,8 @@ bool executePreparedUpdate(const UpdateStmt& stmt, Session& s, bool& fallback,
     std::vector<StorageEngine::UpdateRowImage> images;
     size_t affectedRows = 0;
     const DBStatus status = g_engine.updateRows(
-        s.currentDB, resolvedTable, constantUpdates, {},
+        s.currentDB, resolvedTable, constantUpdates,
+        boundIntegerPrimaryKeyCandidates(update->whereClause.get(), table, targetOrdinal),
         stmt.returning.empty() ? nullptr : &updatedRows, resolver, matcher,
         &affectedRows, stmt.returning.empty() ? nullptr : &images,
         arrayDomainTargets.empty() ? nullptr : &arrayDomainCallbacks, virtualRows.output(), true);

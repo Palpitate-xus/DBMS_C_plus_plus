@@ -2895,22 +2895,28 @@ StorageEngine::TransactionContext& StorageEngine::transactionContext() const {
     return *context;
 }
 
-std::optional<uint64_t> StorageEngine::indexReadSnapshotFence(
-        const std::string& dbname) const {
-    const auto& context = transactionContext();
+template<typename Context, typename Registry>
+static std::optional<uint64_t> currentIndexSnapshotFence(
+        const Context& context, const std::string& dbname, bool hadWrites, Registry& registry) {
     const bool currentReader = context.inTransaction && context.txnDB == dbname &&
-        context.currentTxnId != 0 && context.snapshotAcquired && !context.hasWrite &&
+        context.currentTxnId != 0 && context.snapshotAcquired && !hadWrites &&
         context.txnLog.empty() && context.ddlUndoActions.empty() &&
         !context.transactionBackupDirty && context.readView.activeTxnIds.empty();
-    std::lock_guard<std::mutex> lock(globalTxnMutex());
+    std::lock_guard<std::mutex> lock(registry.txnMutex);
     const uint64_t fence = TxnIdGenerator::instance().maxCommittedTxId();
     if (context.inTransaction &&
         (!currentReader || context.readView.lowLimitId != fence + 1))
         return std::nullopt;
-    for (const auto& [xid, database] : activeTransactionDatabases())
+    for (const auto& [xid, database] : registry.databases)
         if (database == dbname && !(currentReader && xid == context.currentTxnId))
             return std::nullopt;
     return fence;
+}
+
+std::optional<uint64_t> StorageEngine::indexReadSnapshotFence(
+        const std::string& dbname) const {
+    const auto& context = transactionContext();
+    return currentIndexSnapshotFence(context, dbname, context.hasWrite, transactionRegistry());
 }
 
 void StorageEngine::endBackendSession() {
@@ -31588,6 +31594,95 @@ DBStatus StorageEngine::insertDefaultValues(const std::string& dbname,
     return insert(dbname, tablename, {}, insertedRows,IdentityOverride::None,owningRows,deferVirtualInputs);
 }
 
+// The ordinary mutation path already holds the target's intention lock.
+// Its write marker is set before matching. Only the original, unmodified
+// command snapshot can use the current index to identify a target.
+template<typename Context, typename Registry>
+static std::optional<int64_t> matchCurrentIntegerPrimaryKey(
+        StorageEngine& engine, const std::string& dbname, const std::string& tablename,
+        const TableSchema& table, const std::vector<StorageEngine::Condition>& conditions,
+        Context& context, uint64_t ownerBeforeWrite, std::recursive_mutex& cacheMutex,
+        PageAllocator* allocator, Registry& registry) {
+    if (!ownerBeforeWrite || context.currentTxnId != ownerBeforeWrite ||
+        (context.txnIsolationLevel != IsolationLevel::READ_COMMITTED &&
+         context.txnIsolationLevel != IsolationLevel::REPEATABLE_READ) ||
+        !context.readView.commandIdVisibility || context.commandInternalRelations.count(tablename) ||
+        !allocator || dataDirectory().empty() || table.isUnlogged || isSessionTemporaryRelation(tablename) ||
+        conditions.size() != 1) return {};
+    const auto& condition = conditions.front();
+    if (condition.op != "=" || condition.patternIsNull || !condition.patternType.empty() ||
+        condition.referenceInputOid) return {};
+    const auto column = signedIntegerPrimaryKeyColumn(table);
+    if (!column) return {};
+    const auto& key = table.cols[*column];
+    if (condition.colName != key.dataName || key.isNull) return {};
+    const auto wanted = parseStoredInteger(condition.value);
+    if (!wanted || !integerValueFitsColumn(key, *wanted)) return {};
+    if (!condition.decodedLiteralRhs) {
+        for (size_t i = 0; i < table.len; ++i)
+            if (table.cols[i].dataName == condition.value) return {};
+    }
+
+    checkForQueryInterrupt();
+    const auto fence = currentIndexSnapshotFence(context, dbname, false, registry);
+    if (!fence) return {};
+    const auto command = context.currentCommandId;
+    int64_t rid = 0;
+    {
+        // Cache retirement cannot destroy the tree while its raw pointer is
+        // in use. Release the cache lock before waiting for a heap page.
+        std::lock_guard<std::recursive_mutex> lock(cacheMutex);
+        const auto* index = engine.getPKIndex(dbname, tablename);
+        if (!index || !index->usesSignedIntegerKeys() || !index->rootPage()) return {};
+        // Use a checked hit. The heap remains authoritative on a miss.
+        if (index->searchChecked(std::to_string(*wanted), rid) != BPTree::SearchResult::Found)
+            return {};
+    }
+
+    uint32_t pageId = 0;
+    uint16_t slot = 0;
+    StorageEngine::decodeRid(rid, pageId, slot);
+    if (!pageId || pageId >= allocator->numPages() || StorageEngine::encodeRid(pageId, slot) != rid)
+        return {};
+    {
+        auto& locks = engine.getLockManager();
+        const auto priorLocks = locks.captureCheckpoint();
+        struct RestoreLocks {
+            LockManager& manager;
+            const LockManager::LockCheckpoint& checkpoint;
+            ~RestoreLocks() { manager.rollbackToCheckpoint(checkpoint); }
+        } restore{locks, priorLocks};
+        if (!locks.pageLockShared(dbname, tablename, pageId)) return {};
+        auto* buffer = allocator->fetchPage(pageId);
+        if (!buffer) return {};
+        struct UnpinPage {
+            PageAllocator& allocator;
+            uint32_t page;
+            ~UnpinPage() { allocator.unpinPage(page); }
+        } pin{*allocator, pageId};
+        PageWrapper page(buffer, allocator->pageSize(), table.formatVersion);
+        const char* tuple = nullptr;
+        size_t length = 0;
+        if (!page.read(slot, tuple, length) || length < sizeof(HeapTupleHeaderData) ||
+            !context.readView.isVisible(tuple, length, table.formatVersion)) return {};
+        const auto* header = castHeapHeader(tuple);
+        const size_t minOffset = sizeof(HeapTupleHeaderData) +
+            ((header->t_infomask & HEAP_HASNULL) ? (table.len + 7) / 8 : 0);
+        if ((header->t_infomask2 & HEAP_NATTS_MASK) != table.len ||
+            header->t_hoff < minOffset || header->t_hoff >= length ||
+            dbms::isNull(header, static_cast<int>(*column))) return {};
+        const std::string row(tuple + header->t_hoff, length - header->t_hoff);
+        if (parseStoredInteger(StorageEngine::extractColumnValueStatic(row, table, *column)) != wanted)
+            return {};
+    }
+    checkForQueryInterrupt();
+    if (context.currentTxnId != ownerBeforeWrite || context.currentCommandId != command ||
+        currentIndexSnapshotFence(context, dbname, false, registry) != fence) return {};
+    context.hasRead = true;
+    context.querySnapshotUsed = true;
+    return rid;
+}
+
 DBStatus StorageEngine::remove(
     const std::string& dbname, const std::string& tablename,
     const std::vector<std::string>& conditions,
@@ -31745,15 +31840,18 @@ DBStatus StorageEngine::removeInternal(
     size_t* affectedRows,
     const SqlMutationCallbacks* mutationCallbacks,
     OwningMutationRows* owningRows, bool deferVirtualInputs) {
-    if (transactionContext().inTransaction && dbname == transactionContext().txnDB) {
-        if ((transactionContext().txnIsolationLevel == IsolationLevel::READ_COMMITTED ||
-             transactionContext().txnIsolationLevel == IsolationLevel::READ_UNCOMMITTED) &&
-            !transactionContext().readView.commandIdVisibility) {
+    auto& context = transactionContext();
+    uint64_t ownerBeforeWrite = 0;
+    if (context.inTransaction && dbname == context.txnDB) {
+        if ((context.txnIsolationLevel == IsolationLevel::READ_COMMITTED ||
+             context.txnIsolationLevel == IsolationLevel::READ_UNCOMMITTED) &&
+            !context.readView.commandIdVisibility) {
             refreshReadView();
         } else {
             ensureTransactionSnapshot();
         }
-        transactionContext().hasWrite = true;
+        if (!context.hasWrite) ownerBeforeWrite = context.currentTxnId;
+        context.hasWrite = true;
     }
     if (transactionContext().readOnly &&
         !isSessionTemporaryRelation(tablename)) {
@@ -31786,7 +31884,13 @@ DBStatus StorageEngine::removeInternal(
         lockManager_.unlock(tablename);
         return DBStatus::CORRUPTED_DATA;
     }
-    PageAllocator* pa = getPageAllocator(dbname, tablename);
+    std::shared_ptr<PageAllocator> heapOwner;
+    {
+        std::lock_guard<std::recursive_mutex> cache(cacheMutex_);
+        if (getPageAllocator(dbname, tablename))
+            heapOwner = pageAllocators_.at(dbname + "/" + tablename);
+    }
+    PageAllocator* pa = heapOwner.get();
     if (!pa) {
         lockManager_.unlock(tablename);
         return DBStatus::IO_ERROR;
@@ -31815,7 +31919,11 @@ DBStatus StorageEngine::removeInternal(
     } else {
         auto conds = parseConditions(conditions);
         bool scanFailed = false;
-        toDelete = filterRows(dbname, tablename, conds, nullptr, &scanFailed);
+        if (const auto target = matchCurrentIntegerPrimaryKey(*this, dbname, tablename,
+                tbl, conds, context, ownerBeforeWrite, cacheMutex_, pa, transactionRegistry()))
+            toDelete.insert(*target);
+        else
+            toDelete = filterRows(dbname, tablename, conds, nullptr, &scanFailed);
         if (scanFailed) {
             lockManager_.unlock(tablename);
             return DBStatus::IO_ERROR;
@@ -33062,15 +33170,18 @@ DBStatus StorageEngine::updateInternal(
     std::vector<UpdateRowImage>* rowImages,
     const SqlMutationCallbacks* mutationCallbacks,
     OwningMutationRows* owningRows, bool deferVirtualInputs) {
-    if (transactionContext().inTransaction && dbname == transactionContext().txnDB) {
-        if ((transactionContext().txnIsolationLevel == IsolationLevel::READ_COMMITTED ||
-             transactionContext().txnIsolationLevel == IsolationLevel::READ_UNCOMMITTED) &&
-            !transactionContext().readView.commandIdVisibility) {
+    auto& context = transactionContext();
+    uint64_t ownerBeforeWrite = 0;
+    if (context.inTransaction && dbname == context.txnDB) {
+        if ((context.txnIsolationLevel == IsolationLevel::READ_COMMITTED ||
+             context.txnIsolationLevel == IsolationLevel::READ_UNCOMMITTED) &&
+            !context.readView.commandIdVisibility) {
             refreshReadView();
         } else {
             ensureTransactionSnapshot();
         }
-        transactionContext().hasWrite = true;
+        if (!context.hasWrite) ownerBeforeWrite = context.currentTxnId;
+        context.hasWrite = true;
     }
     if (transactionContext().readOnly &&
         !isSessionTemporaryRelation(tablename)) {
@@ -33391,7 +33502,13 @@ DBStatus StorageEngine::updateInternal(
         lockManager_.unlock(tablename);
         return DBStatus::CORRUPTED_DATA;
     }
-    PageAllocator* pa = getPageAllocator(dbname, tablename);
+    std::shared_ptr<PageAllocator> heapOwner;
+    {
+        std::lock_guard<std::recursive_mutex> cache(cacheMutex_);
+        if (getPageAllocator(dbname, tablename))
+            heapOwner = pageAllocators_.at(dbname + "/" + tablename);
+    }
+    PageAllocator* pa = heapOwner.get();
 
     const bool enforceRls = exactRids == nullptr &&
         shouldEnforceRLS(tbl, StorageEngine::getRLSUser());
@@ -33420,6 +33537,9 @@ DBStatus StorageEngine::updateInternal(
             if (!forEachRow(dbname, tablename, [&](uint32_t pid, uint16_t sid, const char*, size_t) {
                 matchIds.insert(encodeRid(pid, sid));
             })) scanFailed = true;
+        } else if (const auto target = matchCurrentIntegerPrimaryKey(*this, dbname, tablename,
+                       tbl, conds, context, ownerBeforeWrite, cacheMutex_, pa, transactionRegistry())) {
+            matchIds.insert(*target);
         } else {
             matchIds = filterRows(dbname, tablename, conds, nullptr, &scanFailed);
         }

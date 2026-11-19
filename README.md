@@ -19,6 +19,13 @@ cmake --build build/cmake --parallel 2
 ## 最近更新
 
 <details>
+<summary>按整数主键更新或删除时少读数据 · 2026-11-19</summary>
+
+数据库能从主键索引确认目标行时，可以直接读取这一行所在的页。
+
+</details>
+
+<details>
 <summary>能看到分区表的统计进度 · 2026-11-19</summary>
 
 更新分区表的统计时，可以查看已经处理了多少个分区，以及当前分区读到了哪里。
@@ -29,13 +36,6 @@ cmake --build build/cmake --parallel 2
 <summary>整理表时少反复找空位 · 2026-11-19</summary>
 
 `VACUUM FULL` 整理表时会记住哪里还有空间，搬动记录时省去反复查找。
-
-</details>
-
-<details>
-<summary>可以查看表清理的进度 · 2026-11-19</summary>
-
-清理表或更新查询统计时，可以从另一个连接查看正在处理哪张表、进行到了哪一步。
 
 </details>
 

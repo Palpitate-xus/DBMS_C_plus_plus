@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>按整数主键更新或删除时少读数据 · 2026-11-19</summary>
+
+数据库能从主键索引确认目标行时，可以直接读取这一行所在的页。
+
+[使用示例](docs/MANUAL.md#按整数主键更新或删除) · [测试报告](docs/test-report.md#integer-primary-key-mutation-20261119) · [性能报告](docs/performance-report-2026-10-30.md#integer-primary-key-mutation-cost-20261119)
+
+</details>
+
+<details>
 <summary>能看到分区表的统计进度 · 2026-11-19</summary>
 
 更新分区表的统计时，可以查看已经处理了多少个分区，以及当前分区读到了哪里。
@@ -21,16 +30,13 @@
 </details>
 
 <details>
-<summary>可以查看表清理的进度 · 2026-11-19</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-19 · 可以查看表清理的进度
 
 清理表或更新查询统计时，可以从另一个连接查看正在处理哪张表、进行到了哪一步。
 
 [使用示例](docs/MANUAL.md#查看表维护进度) · [测试报告](docs/test-report.md#maintenance-progress-views-20261119) · [性能报告](docs/performance-report-2026-10-30.md#maintenance-progress-views-cost-20261119)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-19 · 可以单独更新几列的统计
 
