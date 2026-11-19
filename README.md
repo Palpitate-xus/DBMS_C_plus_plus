@@ -19,6 +19,13 @@ cmake --build build/cmake --parallel 2
 ## 最近更新
 
 <details>
+<summary>一次整理就能收回表和长文本的空间 · 2026-11-19</summary>
+
+运行 `VACUUM FULL` 可以同时收回两处空闲空间，一处在表文件里，另一处在单独存放长文本等大内容的文件里。
+
+</details>
+
+<details>
 <summary>删除长文本后，可以单独腾出磁盘空间 · 2026-11-18</summary>
 
 删除大量单独存放的长文本后，可以只缩小存放这些内容的文件，把空出的空间还给磁盘。
@@ -29,13 +36,6 @@ cmake --build build/cmake --parallel 2
 <summary>清理表时，可以选择清理哪些数据 · 2026-11-18</summary>
 
 用 `VACUUM` 时，可以只清理表里的普通数据，也可以只清理单独存放的长文本。还可以单独更新查询用的统计信息。
-
-</details>
-
-<details>
-<summary>清理表时可以少读一遍数据 · 2026-11-18</summary>
-
-如果表没有单独存放长文本等大内容，`VACUUM` 会省去检查这些内容的一遍读取。
 
 </details>
 

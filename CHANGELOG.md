@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>一次整理就能收回表和长文本的空间 · 2026-11-19</summary>
+
+运行 `VACUUM FULL` 可以同时收回两处空闲空间，一处在表文件里，另一处在单独存放长文本等大内容的文件里。
+
+[使用示例](docs/MANUAL.md#分开清理主表和长值) · [恢复测试](docs/test-report.md#vacuum-combined-full-20261119) · [性能报告](docs/performance-report-2026-10-30.md#vacuum-combined-full-cost-20261119)
+
+</details>
+
+<details>
 <summary>删除长文本后，可以单独腾出磁盘空间 · 2026-11-18</summary>
 
 删除大量单独存放的长文本后，可以只缩小存放这些内容的文件，把空出的空间还给磁盘。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>清理表时可以少读一遍数据 · 2026-11-18</summary>
+<summary>查看更早的更新</summary>
+
+## 2026-11-18 · 清理表时可以少读一遍数据
 
 如果表没有单独存放长文本等大内容，`VACUUM` 会省去检查这些内容的一遍读取。
 
 [使用示例](docs/MANUAL.md#清理表占用的空间) · [测试报告](docs/test-report.md#vacuum-empty-toast-20261118) · [性能报告](docs/performance-report-2026-10-30.md#vacuum-empty-toast-cost-20261118)
-
-</details>
-
-<details>
-<summary>查看更早的更新</summary>
 
 ## 2026-11-18 · 整理表后，范围查询可以少读数据
 

@@ -144,13 +144,13 @@ int main() {
             assert(reader.commitTransaction() == DBStatus::OK);
         }
 
-        // VACUUM FULL drops the dead physical tuple.  Objects 1 and 2 are now
-        // orphans eligible for chunk/index removal; object 3 stays live.
+        // Default VACUUM FULL drops the dead tuples and their external
+        // objects together. The new external value remains available.
         assert(writer.vacuumFull(database, "documents") == 1);
-        assert(writer.vacuumToast(database, "documents") == 2);
         assert(writer.readToast(database, "documents", 1).empty());
         assert(writer.readToast(database, "documents", 2).empty());
         assert(writer.readToast(database, "documents", 3) == updatedPayload);
+        assert(writer.vacuumToast(database, "documents") == 0);
         const auto rows = writer.query(
             database, "documents", {"=id 1"}, {"payload"});
         assert(rows.size() == 1);

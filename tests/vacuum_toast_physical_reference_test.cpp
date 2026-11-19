@@ -241,6 +241,11 @@ int main() {
         StorageEngine::unbindNullRow();
         checkNoToastCandidates();
         auto caller = fixture("vacuum_reference_caller", false);
+        g_engine.vacuum(caller.database, caller.schema.tablename, false, 1, false);
+        check(g_engine.readToast(caller.database, caller.schema.tablename, caller.orphan) ==
+              "genuine unreferenced object", "main-only ordinary vacuum preserves a real TOAST orphan");
+        check(g_engine.vacuumToast(caller.database, caller.schema.tablename) == 1,
+              "explicit TOAST vacuum reclaims the preserved orphan");
         size_t cases = 0;
         for (bool partitioned : {false, true}) for (bool wholeVacuum : {false, true}) for (int binding = 0; binding < 4; ++binding) {
             StorageEngine::unbindNullRow();

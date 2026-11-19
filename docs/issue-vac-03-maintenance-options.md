@@ -6,7 +6,7 @@ Status: partial. Review and focused repair recorded on 2026-10-05.
 
 `PROCESS_MAIN` and `PROCESS_TOAST` now select ordinary maintenance independently. Both default to true. An explicit `ANALYZE` can still gather statistics with both phases disabled. TOAST cleanup defers work while the database has active transactions. When it inspects the files, the TOAST-only path reports a broken heap/index pair as an error.
 
-`FULL, PROCESS_MAIN FALSE` now rebuilds the TOAST heap and index as one transaction, preserving the main files and external object IDs. `FULL` with `PROCESS_TOAST FALSE` still returns `0A000`, as in PostgreSQL 18.6. The ordinary main-table rewrite and the TOAST-only rewrite remain distinct paths. Combined compaction in one default `VACUUM FULL`, targeted column lists, and PITR across the new rewrite remain open. [Usage](MANUAL.md#分开清理主表和长值) · [Verification](test-report.md#vacuum-toast-full-20261118) · [PostgreSQL 18 command reference](https://www.postgresql.org/docs/18/sql-vacuum.html)
+`FULL` now rebuilds the main relation and its existing TOAST files in one transaction. `FULL, PROCESS_MAIN FALSE` only rebuilds the TOAST heap and index and preserves the main files. Both forms preserve retained external object IDs. `FULL` with `PROCESS_TOAST FALSE` returns `0A000`, as in PostgreSQL 18.6. Targeted column lists and point-in-time recovery across the rewrite remain open. [Usage](MANUAL.md#分开清理主表和长值) · [Verification](test-report.md#vacuum-combined-full-20261119) · [PostgreSQL 18 command reference](https://www.postgresql.org/docs/18/sql-vacuum.html)
 
 The following sections describe the earlier repair and its verification.
 

@@ -2,6 +2,10 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-19 · 默认重写同时整理主表和长值
+
+PostgreSQL 18.6 默认在一次事务中替换主表、长值附表及其索引。本项目现在也能用同一条 `VACUUM FULL` 重写主表和已有的长值存储。两边都用带实际删除记录的样本验证了文件缩小、剩余值和索引查找。文件格式、维护统计、带列清单的 `VACUUM` 和跨重写时间点恢复仍有差距。[PostgreSQL 重写实现](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/commands/cluster.c) · [本项目验证](test-report.md#vacuum-combined-full-20261119)
+
 ## 2026-11-18 · 可分别清理主表和长值
 
 与 PostgreSQL 18.6 一样，普通 `VACUUM` 可分别指定主表和长值清理。`ANALYZE` 可以独立运行。两者也都支持用 `VACUUM (FULL, PROCESS_MAIN FALSE)` 只重写长值数据和索引。本项目使用自己的文件格式和恢复记录。带列清单的 `VACUUM`、完整的长值重写历史回放和 PostgreSQL 的维护统计仍有差距。[PostgreSQL VACUUM](https://www.postgresql.org/docs/18/sql-vacuum.html) · [本项目验证](test-report.md#vacuum-toast-full-20261118)

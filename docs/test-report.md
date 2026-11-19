@@ -2,6 +2,17 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="vacuum-combined-full-20261119"></a>
+## 2026-11-19 · 默认重写同时整理主表和长值
+
+新版在重写主表时记录保留行引用的长值编号，随后只把仍在使用的值复制到新的数据文件。主表、长值文件、索引和配套的加密文件共享一次提交与恢复记录。[使用示例](MANUAL.md#分开清理主表和长值)
+
+- 协议测试用默认 `VACUUM FULL` 将主表从 57,344 缩至 16,384 字节，长值文件从 188,416 缩至 57,344 字节。收到完成消息后立刻终止服务，重启后逐字检查保留值和主键查找。只重写长值的命令也继续通过。[协议测试](../tests/vacuum_relation_options_protocol_e2e_test.py)
+- 原生恢复测试通过全部 27 个子进程阶段。两项新增场景都在新主表、新 BRIN 索引和新长值数据文件就位后触发。一项让长值索引替换返回 `EIO`，另一项在同一处用 `SIGKILL` 结束进程。每项经过两次独立冷启动，均恢复原始文件、加密配套文件、索引和行内容。普通长值清理的物理引用测试通过 16 组场景、182 项检查。[恢复测试](../tests/vacuum_full_cold_recovery_test.cpp) · [物理引用测试](../tests/vacuum_toast_physical_reference_test.cpp)
+- PostgreSQL 18.6 参考服务完成 217 组协议交互。项目新版与参考服务在八项共同检查上取得相同的结果，核对了保留行、按键查找和已删除的键。新版冷启动后实际使用重建的次级索引读回长文本。两边均观察到主表和长值文件缩小，物理尺寸各自记录。SQLite 通过重建整个数据库文件腾出空间，DuckDB 通过检查点回收符合条件的已删除空间。[PostgreSQL 重写实现](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/commands/cluster.c) · [SQLite VACUUM](https://www.sqlite.org/lang_vacuum.html) · [DuckDB 空间回收](https://duckdb.org/docs/current/operations_manual/footprint_of_duckdb/reclaiming_space) · [性能报告](performance-report-2026-10-30.md#vacuum-combined-full-cost-20261119)
+
+合计通过八项原生回归、四项协议回归和十一条手册命令。相邻测试覆盖主表重写、旧快照、并行清理、锁、统计更新和 BRIN 查询。受测程序 SHA-256 为 `cc9dcba1f6482a436a2c5d75595e2311352771c6dc794ca1d310767413e72d8a`。完整回归套件和跨越该重写的时间点恢复待验证。
+
 <a id="vacuum-toast-full-20261118"></a>
 ## 2026-11-18 · 只重写长值文件
 

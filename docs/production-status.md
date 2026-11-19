@@ -2,6 +2,10 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-19 · 一次重写整理主表和长值
+
+`VACUUM FULL` 在重写主表时记录要保留的长值编号，再复制这些值并重建索引。一次提交决定是否采用两组新文件。测试在替换到一半时模拟写入错误和进程中断，并验证两组旧文件一起恢复。[恢复测试](test-report.md#vacuum-combined-full-20261119) · [耗时与回收空间](performance-report-2026-10-30.md#vacuum-combined-full-cost-20261119)
+
 ## 2026-11-18 · 可单独缩小长值文件
 
 `VACUUM (FULL, PROCESS_MAIN FALSE)` 将仍被引用的长值复制到新的文件，并用新位置建立索引。提交前可恢复整组原文件。长值编号、编号计数和主表位置无需改动。[恢复测试](test-report.md#vacuum-toast-full-20261118) · [性能报告](performance-report-2026-10-30.md#vacuum-toast-full-cost-20261118)

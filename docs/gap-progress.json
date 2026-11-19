@@ -2,6 +2,28 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-19 compact main and external-value storage together with default VACUUM FULL",
+      "gap_ids": ["VAC-03", "STO-06"],
+      "status": "partial",
+      "evidence": [
+        "src/commands/TableManage.cpp",
+        "docs/MANUAL.md",
+        "docs/test-report.md",
+        "docs/performance-report-2026-10-30.md"
+      ],
+      "tests": [
+        "tests/vacuum_full_cold_recovery_test.cpp",
+        "tests/vacuum_relation_options_protocol_e2e_test.py",
+        "tests/vacuum_toast_physical_reference_test.cpp",
+        "tests/vacuum_toast_test.cpp"
+      ],
+      "verification": [
+        "Collects external references while copying retained main tuples, stages the external heap and index, and publishes both generations under the same rollback receipt and commit. Retained external IDs stay stable.",
+        "PostgreSQL 18.6 and the project both shrink main and external-data storage and preserve exact live values in the tested fixture. Twenty-seven native recovery phases pass, including four cold reopens following the two combined publication failures. Targeted column lists and point-in-time recovery across the rewrite remain open. All 273 item records remain unchanged.",
+        "Twelve fresh timing runs complete 24 first-rewrite commands. The mixed-table rewrite frees 659456 additional bytes and takes longer. The fixed-width control exceeds the preset drift threshold, so the comparison cannot establish a speed change for the same amount of work."
+      ]
+    },
+    {
       "issue": "2026-11-18 compact only external-value storage with VACUUM FULL and PROCESS_MAIN FALSE",
       "gap_ids": ["VAC-03", "STO-06"],
       "status": "partial",

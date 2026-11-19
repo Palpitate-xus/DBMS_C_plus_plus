@@ -5,8 +5,10 @@
 #include "executor/ExecutionPlan.h"
 #include "access/BPTree.h"
 #include "storage/PageCrypto.h"
+#include <algorithm>
 #include <cerrno>
 #include <csignal>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -25,6 +27,15 @@ namespace {
 using namespace dbms;
 using Cell = std::optional<std::string>;
 using Rows = std::map<std::string, StorageEngine::SqlRow>;
+constexpr char encryptedFixtureEnv[] = "DBMS_TEST_VACUUM_FULL_TDE";
+
+// Match production's ordering so encrypted pages can be read during WAL
+// recovery in the test stub's StorageEngine constructor.
+__attribute__((constructor(101))) void enableFixtureEncryption() {
+    if (std::getenv(encryptedFixtureEnv) && !PageCrypto::enable(std::string(64, 'a')))
+        std::abort();
+}
+
 const std::string database = "__t_full_cold_recovery";
 enum class BrinRewriteFault { None, WriteError, Crash };
 BrinRewriteFault brinRewriteFault = BrinRewriteFault::None;
@@ -32,8 +43,10 @@ bool observedNewSchemaBeforeBrin = false;
 enum class ToastRewriteFault { None, IndexWriteError, HeapCrash, IndexCrash };
 ToastRewriteFault toastRewriteFault = ToastRewriteFault::None;
 bool observedToastPublication = false;
+bool rewriteMainAlongsideToast = false;
 const auto liveSchema = std::filesystem::path(database) / "items.stc";
 const auto liveBrin = std::filesystem::path(database) / "items_id.brin";
+const auto liveMainHeap = std::filesystem::path(database) / "items.dt";
 const auto pendingFull = std::filesystem::path(database) / ".items.vacuum_full_pending";
 const std::filesystem::path originalToast = "original-toast";
 const auto liveToastHeap = std::filesystem::path(database) / "items.toast.dt";
@@ -65,10 +78,15 @@ bool isInterruptedBrinRewrite(const std::string& mode) {
     return mode == "brin-write-error" || mode == "brin-crash";
 }
 ToastRewriteFault toastFaultForMode(const std::string& mode) {
-    if (mode == "toast-index-write-error") return ToastRewriteFault::IndexWriteError;
+    if (mode == "toast-index-write-error" || mode == "combined-index-write-error")
+        return ToastRewriteFault::IndexWriteError;
     if (mode == "toast-heap-crash") return ToastRewriteFault::HeapCrash;
-    if (mode == "toast-index-crash") return ToastRewriteFault::IndexCrash;
+    if (mode == "toast-index-crash" || mode == "combined-index-crash")
+        return ToastRewriteFault::IndexCrash;
     return ToastRewriteFault::None;
+}
+bool combinedRewriteMode(const std::string& mode) {
+    return mode == "combined-index-write-error" || mode == "combined-index-crash";
 }
 std::string payload(size_t bytes, uint32_t state) {
     static constexpr char alphabet[] = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
@@ -169,13 +187,18 @@ bool matchesOriginalToastFile(const std::filesystem::path& file) {
 void verifyToastMainFiles() {
     for (const auto* file : mainFiles) {
         require(matchesOriginalToastFile(std::filesystem::path(database) / file),
-                "TOAST-only FULL preserves exact main files");
+                "main heap, index, encryption and schema files match the original");
     }
 }
 
-void verifyRestoredToastRewrite() {
+void verifyRestoredToastRewrite(bool processMain) {
     require(snapshot(2) == toastSurvivors(), "TOAST recovery preserves exact visible values and SQL NULLs");
     verifyToastMainFiles();
+    if (processMain) {
+        require(matchesOriginalToastFile(liveBrin), "combined rollback restores the main BRIN bytes");
+        const auto ranges = g_engine.tryBrinPageRanges(database, "items", "id", ">=", "1", false);
+        require(ranges && !ranges->empty(), "restored BRIN serves the original heap generation");
+    }
     for (const auto* file : toastFiles) {
         require(matchesOriginalToastFile(std::filesystem::path(database) / file),
                 "rollback restores the original TOAST pair, TDE companions and counter");
@@ -187,7 +210,7 @@ void verifyRestoredToastRewrite() {
     }
 }
 
-void setupToastRewrite(ToastRewriteFault fault) {
+void setupToastRewrite(ToastRewriteFault fault, bool processMain) {
     require(g_engine.createDatabase(database, "utf8") == DBStatus::OK, "create TOAST rewrite database");
     TableSchema schema;
     schema.tablename = "items";
@@ -200,15 +223,26 @@ void setupToastRewrite(ToastRewriteFault fault) {
         require(g_engine.insertRow(database, "items", toastRow(id, payload(30000, id + 100))) == DBStatus::OK,
                 "insert actual external payload");
     }
+    if (processMain) {
+        for (unsigned id = 100; id < 140; ++id) {
+            require(g_engine.insertRow(database, "items", toastRow(id, payload(1000, id + 500))) == DBStatus::OK,
+                    "populate real main heap pages without adding TOAST objects");
+        }
+    }
     require(g_engine.commitTransaction() == DBStatus::OK, "commit actual TOAST population");
     require(g_engine.beginTransaction(database) == DBStatus::OK, "begin actual deletion");
     require(g_engine.remove(database, "items", {">id 2"}) == DBStatus::OK,
-            "delete six tuples with real external payloads");
+            "delete actual tuples with external and inline payloads");
     require(g_engine.insertRow(database, "items", toastRow(97, Cell{})) == DBStatus::OK &&
             g_engine.insertRow(database, "items", toastRow(98, "")) == DBStatus::OK,
             "insert actual SQL NULL and an empty payload");
     require(g_engine.commitTransaction() == DBStatus::OK, "commit the hot heap population");
     require(snapshot(2) == toastSurvivors(), "verify actual survivor values before rewrite");
+    if (processMain) {
+        require(std::filesystem::file_size(liveMainHeap) > 2 * 8192, "main heap has real removable pages");
+        require(g_engine.createBrinIndex(database, "items", "id", 1) == DBStatus::OK,
+                "build a real BRIN alongside the combined rewrite fixture");
+    }
     require(g_engine.checkpoint(database), "persist the fixture before injecting failure");
 
     require(std::filesystem::file_size(liveToastHeap) > 16 * 8192,
@@ -221,14 +255,17 @@ void setupToastRewrite(ToastRewriteFault fault) {
         saveRewriteWitness(std::filesystem::path(database) / file, originalToast / file);
     for (const auto* file : toastFiles)
         saveRewriteWitness(std::filesystem::path(database) / file, originalToast / file);
+    if (processMain) saveRewriteWitness(liveBrin, originalToast / liveBrin.filename());
 
     toastRewriteFault = fault;
+    rewriteMainAlongsideToast = processMain;
     bool succeeded = false;
-    const auto count = g_engine.vacuumFull(database, "items", &succeeded, false);
+    const auto count = processMain ? g_engine.vacuumFull(database, "items", &succeeded)
+                                   : g_engine.vacuumFull(database, "items", &succeeded, false);
     require(fault == ToastRewriteFault::IndexWriteError && observedToastPublication,
-            "TOAST-only FULL reached the selected fault before commit");
-    require(!succeeded && count == 0, "index publication error aborts TOAST-only FULL");
-    verifyRestoredToastRewrite();
+            "FULL reached the selected TOAST publication fault before commit");
+    require(!succeeded && count == 0, "TOAST index publication error aborts FULL");
+    verifyRestoredToastRewrite(processMain);
 }
 
 void setup(const std::string& mode) {
@@ -295,8 +332,12 @@ void setup(const std::string& mode) {
 int child(const std::string& executable, const std::string& mode, const std::string& phase) {
     std::vector<std::string> entries;
     for (char** e = environ; *e; ++e)
-        if (std::string(*e).rfind("DBMS_DATA_DIR=", 0) != 0) entries.emplace_back(*e);
+        if (std::string(*e).rfind("DBMS_DATA_DIR=", 0) != 0 &&
+            std::string(*e).rfind(std::string(encryptedFixtureEnv) + '=', 0) != 0)
+            entries.emplace_back(*e);
     entries.push_back("DBMS_DATA_DIR=" + std::filesystem::absolute(mode).string());
+    if (toastFaultForMode(mode) != ToastRewriteFault::None)
+        entries.push_back(std::string(encryptedFixtureEnv) + "=1");
     std::vector<char*> env;
     for (auto& e : entries) env.push_back(e.data());
     env.push_back(nullptr);
@@ -331,11 +372,26 @@ extern "C" int __wrap_rename(const char* source, const char* target) {
                 std::filesystem::absolute(live).lexically_normal()) {
             toastRewriteFault = ToastRewriteFault::None;
             vacuum_full_backup::State receipt;
-            require(vacuum_full_backup::decode(fileBytes(pendingFull), receipt) && receipt.toastOnly &&
+            require(vacuum_full_backup::decode(fileBytes(pendingFull), receipt) &&
+                    receipt.toastOnly != rewriteMainAlongsideToast &&
                     !receipt.undone && receipt.database == database && receipt.table == "items" &&
                     staged.parent_path().parent_path().filename() == receipt.backupLeaf,
-                    "matching durable TOAST-only receipt precedes publication");
-            verifyToastMainFiles();
+                    "matching durable rewrite receipt precedes TOAST publication");
+            if (rewriteMainAlongsideToast) {
+                for (const auto& required : {liveToastHeap, liveToastHeapTde, liveToastIndex, liveToastIndexTde}) {
+                    require(std::any_of(receipt.files.begin(), receipt.files.end(), [&](const auto& file) {
+                        return file.role == vacuum_full_backup::Role::Physical && file.present &&
+                               file.name == required.filename();
+                    }), "the same receipt covers every original TOAST file");
+                }
+                require(receipt.oldIdentity != receipt.newIdentity && !matchesOriginalToastFile(liveSchema) &&
+                        !matchesOriginalToastFile(liveBrin) &&
+                        std::filesystem::file_size(liveMainHeap) <
+                            std::filesystem::file_size(originalToast / liveMainHeap.filename()),
+                        "main heap, schema and BRIN replacements precede TOAST index publication");
+            } else {
+                verifyToastMainFiles();
+            }
             require(matchesOriginalToastFile(liveToastIndex) && matchesOriginalToastFile(liveToastIndexTde),
                     "the original index pair is still installed before its replacement");
             const auto originalBytes = std::filesystem::file_size(originalToast / liveToastHeap.filename());
@@ -349,7 +405,8 @@ extern "C" int __wrap_rename(const char* source, const char* target) {
             }
             observedToastPublication = true;
             if (fault == ToastRewriteFault::IndexWriteError) {
-                std::cout << "FULL_TOAST_RENAME_INJECTED compacted_heap=1 original_index=1 error=EIO\n" << std::flush;
+                std::cout << "FULL_TOAST_RENAME_INJECTED compacted_heap=1 original_index=1 error=EIO"
+                          << " rewritten_main=" << rewriteMainAlongsideToast << '\n' << std::flush;
                 errno = EIO;
                 return -1;
             }
@@ -366,7 +423,8 @@ extern "C" int __wrap_rename(const char* source, const char* target) {
                             "interruption after the index file leaves a real replacement index");
                 }
                 std::cout << "FULL_TOAST_RENAME_INTERRUPTED file=" << live.filename().string()
-                          << " replacement_published=1 pending_receipt=1\n" << std::flush;
+                          << " replacement_published=1 pending_receipt=1 rewritten_main="
+                          << rewriteMainAlongsideToast << '\n' << std::flush;
                 ::kill(::getpid(), SIGKILL);
                 ::_exit(127);
             }
@@ -404,11 +462,12 @@ int main(int argc, char** argv) {
             const std::string phase = argv[2], mode = argv[3];
             const auto toastFault = toastFaultForMode(mode);
             if (toastFault != ToastRewriteFault::None) {
-                require(PageCrypto::enable(std::string(64, 'a')), "enable fixture page encryption");
-                if (phase == "setup") setupToastRewrite(toastFault);
+                require(PageCrypto::enabled(), "fixture encryption initialized before recovery");
+                const bool processMain = combinedRewriteMode(mode);
+                if (phase == "setup") setupToastRewrite(toastFault, processMain);
                 else {
                     require(phase == "cold1" || phase == "cold2", "known TOAST cold phase");
-                    verifyRestoredToastRewrite();
+                    verifyRestoredToastRewrite(processMain);
                     std::cout << "FULL_COLD_TOAST_ROLLBACK mode=" << mode << " phase=" << phase
                               << " original_main_toast_and_rows=exact\n";
                 }
@@ -431,7 +490,8 @@ int main(int argc, char** argv) {
         const auto executable = std::filesystem::read_symlink("/proc/self/exe").string();
         unsigned failures = 0, executed = 0, notrun = 0;
         for (const std::string mode : {"closed", "killed", "brin-write-error", "brin-crash",
-                                      "toast-index-write-error", "toast-heap-crash", "toast-index-crash"}) {
+                                      "toast-index-write-error", "toast-heap-crash", "toast-index-crash",
+                                      "combined-index-write-error", "combined-index-crash"}) {
             require(std::filesystem::create_directory(mode), "fresh actual scenario directory");
             const int setupExit = child(executable, mode, "setup"); ++executed;
             const auto toastFault = toastFaultForMode(mode);
