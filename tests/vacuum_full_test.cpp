@@ -1,21 +1,88 @@
+// test_link_flags: -Wl,--wrap=_ZN4dbms13PageAllocator4openEv,--wrap=_ZN4dbms13PageAllocator5closeEv,--wrap=_ZN4dbms13PageAllocator9fetchPageEj
 #include "BPTree.h"
 #include "BloomIndex.h"
 #include "Config.h"
 #include "HashIndex.h"
 #include "TableManage.h"
+#include "storage/HeapTupleHeader.h"
+#include "storage/PageAllocator.h"
 
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
+#include <map>
 #include <string>
+#include <tuple>
 #include <vector>
 
 dbms::Config g_config;
 
 using namespace dbms;
+
+namespace {
+struct DestinationFetches;
+thread_local DestinationFetches* activeDestination = nullptr;
+
+struct DestinationFetches {
+    explicit DestinationFetches(const std::filesystem::path& path, size_t failingFetch = 0)
+        : heapPath(path), failOnFetch(failingFetch) {
+        assert(!activeDestination);
+        activeDestination = this;
+    }
+    ~DestinationFetches() { activeDestination = nullptr; }
+
+    const std::filesystem::path& heapPath;
+    const size_t failOnFetch;
+    PageAllocator* owner = nullptr;
+    size_t opens = 0;
+    size_t closes = 0;
+    size_t fetches = 0;
+    bool failed = false;
+};
+} // namespace
+
+extern "C" bool realOpen(PageAllocator*) asm("__real__ZN4dbms13PageAllocator4openEv");
+extern "C" void realClose(PageAllocator*) asm("__real__ZN4dbms13PageAllocator5closeEv");
+extern "C" char* realFetch(PageAllocator*, uint32_t) asm("__real__ZN4dbms13PageAllocator9fetchPageEj");
+extern "C" bool wrapOpen(PageAllocator*) asm("__wrap__ZN4dbms13PageAllocator4openEv");
+extern "C" void wrapClose(PageAllocator*) asm("__wrap__ZN4dbms13PageAllocator5closeEv");
+extern "C" char* wrapFetch(PageAllocator*, uint32_t) asm("__wrap__ZN4dbms13PageAllocator9fetchPageEj");
+
+extern "C" bool wrapOpen(PageAllocator* owner) {
+    auto* trace = activeDestination;
+    // The open that creates the missing target path owns the fresh heap.
+    // Reindex opens the completed heap after this allocator closes.
+    const bool targetMissing = trace && !std::filesystem::exists(trace->heapPath);
+    const bool opened = realOpen(owner);
+    if (targetMissing && opened && std::filesystem::is_regular_file(trace->heapPath)) {
+        assert(!trace->owner && owner->numPages() == 1);
+        trace->owner = owner;
+        ++trace->opens;
+    }
+    return opened;
+}
+
+extern "C" void wrapClose(PageAllocator* owner) {
+    if (activeDestination && activeDestination->owner == owner) {
+        activeDestination->owner = nullptr;
+        ++activeDestination->closes;
+    }
+    realClose(owner);
+}
+
+extern "C" char* wrapFetch(PageAllocator* owner, uint32_t pageId) {
+    if (activeDestination && activeDestination->owner == owner &&
+        ++activeDestination->fetches == activeDestination->failOnFetch) {
+        activeDestination->failed = true;
+        return nullptr;
+    }
+    return realFetch(owner, pageId);
+}
 
 static std::string makePayload(size_t size) {
     static constexpr char alphabet[] =
@@ -166,6 +233,136 @@ static void testPartitionRewrite(StorageEngine& engine,
     std::cout << "[VACUUM FULL] partition files rewritten without duplicates OK\n";
 }
 
+static void testFirstFitRewrite(StorageEngine& engine, const std::string& database) {
+    TableSchema table;
+    table.tablename = "first_fit";
+    table.formatVersion = DATA_FILE_FORMAT_VERSION;
+    table.append(makeIntColumn("id", false, 4, true));
+    constexpr std::array<const char*, 4> columns{"a", "b", "c", "d"};
+    for (const char* name : columns) table.append(makeVarCharColumn(name, false, 2048));
+    assert(engine.createTable(database, table) == DBStatus::OK);
+
+    constexpr int lastId = 14;
+    constexpr int firstFiller = 99;
+    constexpr int secondFiller = 98;
+    const std::map<int, std::array<size_t, 4>> widths{
+        {1, {1500, 1500, 1500, 1500}},
+        {2, {1600, 1600, 1600, 1600}},
+        {lastId, {1200, 0, 0, 0}},
+        {firstFiller, {1800, 0, 0, 0}},
+        {secondFiller, {1500, 0, 0, 0}},
+    };
+    const auto value = [&](int id, size_t column) {
+        const auto found = widths.find(id);
+        const size_t width = found == widths.end() ? 1800 : found->second[column];
+        return std::string(width, static_cast<char>('A' + id % 26));
+    };
+    const auto insert = [&](int id) {
+        std::map<std::string, std::string> row{{"id", std::to_string(id)}};
+        for (size_t i = 0; i < columns.size(); ++i) row.emplace(columns[i], value(id, i));
+        assert(engine.insert(database, table.tablename, row) == DBStatus::OK);
+    };
+    // Occupy the available space on both early pages until the small row
+    // lands at the end. Once the fillers are deleted, either page can fit it.
+    insert(1);
+    insert(firstFiller);
+    insert(2);
+    insert(secondFiller);
+    for (int id = 3; id <= lastId; ++id) insert(id);
+    for (const auto filler : {firstFiller, secondFiller})
+        assert(engine.remove(database, table.tablename, {"=id " + std::to_string(filler)}) == DBStatus::OK);
+    assert(engine.checkpoint(database));
+
+    using Placement = std::tuple<int, uint32_t, uint16_t>;
+    const auto placements = [&] {
+        std::vector<Placement> result;
+        assert(engine.forEachRow(database, table.tablename,
+            [&](uint32_t page, uint16_t slot, const char* data, size_t length) {
+                const std::string row(data, length);
+                const auto id = std::stoi(engine.extractColumnValue(row, table, 0));
+                assert(id >= 1 && id <= lastId);
+                for (size_t i = 0; i < columns.size(); ++i)
+                    assert(engine.extractColumnValue(row, table, i + 1) == value(id, i));
+                result.emplace_back(id, page, slot);
+            }));
+        return result;
+    };
+    const auto heapPath = std::filesystem::path(database) / (table.tablename + ".dt");
+    const auto indexPath = std::filesystem::path(database) / (table.tablename + ".idx");
+    const size_t pageSize = StorageEngine::pageSizeForFormatVersion(table.formatVersion);
+    std::vector<Placement> expected;
+    for (uint32_t page = 1; page <= lastId; ++page)
+        expected.emplace_back(static_cast<int>(page), page, 0);
+    assert(placements() == expected);
+    assert(std::filesystem::file_size(heapPath) == (lastId + 1) * pageSize);
+
+    const auto readFile = [](const std::filesystem::path& path) {
+        std::ifstream input(path, std::ios::binary);
+        assert(input);
+        std::string bytes{std::istreambuf_iterator<char>(input), {}};
+        assert(!input.bad() && !bytes.empty());
+        return bytes;
+    };
+    const auto originalHeap = readFile(heapPath);
+    const auto originalIndex = readFile(indexPath);
+    {
+        DestinationFetches trace(heapPath, 3);
+        bool succeeded = true;
+        assert(engine.vacuumFull(database, table.tablename, &succeeded) == 0 && !succeeded);
+        assert(trace.opens == 1 && trace.failed);
+    }
+    assert(!engine.inTransaction());
+    const auto receiptPath = heapPath.parent_path() / ("." + table.tablename + ".vacuum_full_pending");
+    assert(!std::filesystem::exists(receiptPath));
+    assert(readFile(heapPath) == originalHeap && readFile(indexPath) == originalIndex);
+    assert(placements() == expected);
+
+    size_t fetches = 0;
+    {
+        DestinationFetches trace(heapPath);
+        bool succeeded = false;
+        assert(engine.vacuumFull(database, table.tablename, &succeeded) == lastId && succeeded);
+        assert(trace.opens == 1 && trace.closes == 1 && !trace.owner);
+        fetches = trace.fetches;
+    }
+    expected.pop_back();
+    expected.insert(expected.begin() + 1, Placement{lastId, 1, 1});
+    assert(placements() == expected);
+    assert(std::filesystem::file_size(heapPath) == lastId * pageSize);
+    BPTree* primary = engine.getPKIndex(database, table.tablename);
+    assert(primary != nullptr);
+    for (const auto& [id, page, slot] : expected) {
+        int64_t rid = -1;
+        assert(primary->search(std::to_string(id), rid));
+        assert(rid == StorageEngine::encodeRid(page, slot));
+    }
+
+    auto* allocator = engine.getPageAllocator(database, table.tablename);
+    assert(allocator && allocator->numPages() == lastId);
+    size_t tupleCount = 0;
+    size_t movedTupleSize = 0;
+    for (uint32_t block = 1; block < lastId; ++block) {
+        char* buffer = allocator->fetchPage(block);
+        assert(buffer != nullptr);
+        PageWrapper page(buffer, pageSize, table.formatVersion);
+        assert(page.isValid(block) && page.verifyChecksum());
+        if (block == 2) assert(movedTupleSize > 0 && page.canFit(movedTupleSize));
+        page.forEachLive([&](uint16_t slot, const char* tuple, size_t length) {
+            assert(length >= sizeof(HeapTupleHeaderData));
+            const auto ctid = getCtid(castHeapHeader(tuple));
+            assert(ctid.pageId == block && ctid.offset == slot + 1);
+            if (block == 1 && slot == 1) movedTupleSize = length;
+            ++tupleCount;
+        });
+        allocator->unpinPage(block);
+    }
+    assert(tupleCount == expected.size());
+
+    std::cout << "[VACUUM FULL] first-fit rows=" << lastId
+              << " destination_fetches=" << fetches << " restored_after_fetch_error=1" << std::endl;
+    assert(fetches > 0 && fetches <= expected.size());
+}
+
 static void testBackupFailureIsNonDestructive(StorageEngine& engine,
                                               const std::string& database) {
     TableSchema table;
@@ -248,6 +445,7 @@ int main() {
         testPartitionRewrite(engine, database);
         testBackupFailureIsNonDestructive(engine, database);
         testRewriteFailureRestoresBackup(engine, database);
+        testFirstFitRewrite(engine, database);
     }
 
     std::filesystem::remove_all(database);

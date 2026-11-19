@@ -1087,6 +1087,8 @@ VACUUM (FULL, PROCESS_MAIN FALSE) vacuum_example;
 
 `FULL` 要求 `PROCESS_TOAST` 保持开启。如果表没有长值文件，只整理长值的命令会正常结束。重写需要独占目标表，清理应在事务块之外运行。一个数据目录由一个服务端进程管理。[部署说明](PACKAGING.md#服务端部署形态) · [普通清理测试](test-report.md#vacuum-process-options-20261118) · [合并重写测试](test-report.md#vacuum-combined-full-20261119)
 
+重写时，数据库会记录新文件中各页剩余的空间，按原有的页号顺序选择第一个够用的页。遇到较短的记录，仍能把它放回前面有空位的页。
+
 ### 只更新指定列的统计
 
 改动集中在某些列时，可以在表名后写出列名。查询用的其他列统计会保留。如果要在清理表之后更新统计，在 `VACUUM` 中打开 `ANALYZE`。

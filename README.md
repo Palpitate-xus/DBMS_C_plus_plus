@@ -1,10 +1,10 @@
 # DBMS C++
 
-用 C++ 编写的关系型数据库，支持 SQL 查询、索引和事务，可以用 `psql` 连接。
+一个用 C++ 编写的关系型数据库。支持 SQL 查询、索引和事务，可用 `psql` 连接。
 
 ## 快速开始
 
-在 Linux 上编译并查看版本。[编译依赖](docs/PACKAGING.md#编译依赖)
+在 Linux 上[安装编译依赖](docs/PACKAGING.md#编译依赖)，然后下载并编译项目。
 
 ```bash
 git clone https://github.com/Palpitate-xus/DBMS_C_plus_plus.git
@@ -14,31 +14,29 @@ cmake --build build/cmake --parallel 2
 ./build/cmake/dbms_main --version
 ```
 
-运行数据库前需要准备数据目录和登录账号。[服务配置](docs/PACKAGING.md#服务端部署形态) · [用 psql 连接](docs/MANUAL.md#18-网络服务)
+[配置和启动服务](docs/PACKAGING.md#服务端部署形态) · [使用手册](docs/MANUAL.md) · [支持的功能和限制](docs/compatibility-contract.md) · [全部文档](docs/README.md) · [报告问题](https://github.com/Palpitate-xus/DBMS_C_plus_plus/issues)
 
 ## 最近更新
 
 <details>
-<summary>可以查看表清理和统计更新的进度 · 2026-11-19</summary>
+<summary>整理表时少反复找空位 · 2026-11-19</summary>
 
-在另一个连接里，可以查看正在处理的表、当前步骤和已读页数。
-
-</details>
-
-<details>
-<summary>可以只更新几列的查询统计 · 2026-11-19</summary>
-
-数据改动集中在几列时，可以只更新这些列的统计，供数据库选择查询方式。
+`VACUUM FULL` 整理表时会记住哪里还有空间，搬动记录时省去反复查找。
 
 </details>
 
 <details>
-<summary>一次整理就能收回表和长文本的空间 · 2026-11-19</summary>
+<summary>可以查看表清理的进度 · 2026-11-19</summary>
 
-运行 `VACUUM FULL` 可以同时收回两处空闲空间，一处在表文件里，另一处在单独存放长文本等大内容的文件里。
+清理表或更新查询统计时，可以从另一个连接查看正在处理哪张表、进行到了哪一步。
+
+</details>
+
+<details>
+<summary>可以单独更新几列的统计 · 2026-11-19</summary>
+
+数据只改了几列时，可以只更新这些列的统计。数据库用这些统计选择怎样查找数据。
 
 </details>
 
 [查看完整更新日志](CHANGELOG.md)
-
-[使用手册](docs/MANUAL.md) · [支持范围](docs/compatibility-contract.md) · [全部文档](docs/README.md) · [报告问题](https://github.com/Palpitate-xus/DBMS_C_plus_plus/issues)

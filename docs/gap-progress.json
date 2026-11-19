@@ -2,6 +2,27 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-19 avoid redundant destination page reads during VACUUM FULL",
+      "gap_ids": ["VAC-03"],
+      "status": "partial",
+      "evidence": [
+        "src/commands/TableManage.cpp",
+        "docs/MANUAL.md",
+        "docs/test-report.md",
+        "docs/performance-report-2026-10-30.md"
+      ],
+      "tests": [
+        "tests/vacuum_full_test.cpp",
+        "tests/vacuum_full_cold_recovery_test.cpp",
+        "tests/vacuum_relation_options_protocol_e2e_test.py"
+      ],
+      "verification": [
+        "Tracks free space in fresh destination pages and selects the earliest page with adequate space. Writes the new CTID into each retained tuple before the insert. The native fixture counts 92 destination fetches on the baseline and 14 in the candidate, with identical positions and a genuine late tuple that can use more than one earlier page.",
+        "An injected destination read failure restores the original heap and index byte for byte. All 33 native cold recovery phases pass. The independent replay of 9335 retained tuples matches real page and slot positions, and both builds emit 13 byte-identical heap, index and TOAST files for the three fixtures. All 273 item records remain unchanged.",
+        "Twelve fresh runs complete 24 timed rewrites and cover 180 independently audited protocol exchanges. Fixed-width command wall time medians are 2093.70 and 1959.22 ms, and variable-width medians are 28793.45 and 1345.96 ms. Both comparisons exceed the preset 10 percent within-block CPU drift threshold."
+      ]
+    },
+    {
       "issue": "2026-11-19 publish live table maintenance progress",
       "gap_ids": ["VAC-03", "MON-08"],
       "status": "partial",

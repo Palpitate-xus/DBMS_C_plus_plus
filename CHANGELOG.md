@@ -1,34 +1,40 @@
 # 更新日志
 
 <details>
-<summary>可以查看表清理和统计更新的进度 · 2026-11-19</summary>
+<summary>整理表时少反复找空位 · 2026-11-19</summary>
 
-在另一个连接里，可以查看正在处理的表、当前步骤和已读页数。
+`VACUUM FULL` 整理表时会记住哪里还有空间，搬动记录时省去反复查找。
+
+[使用示例](docs/MANUAL.md#分开清理主表和长值) · [测试报告](docs/test-report.md#vacuum-full-placement-20261119) · [性能报告](docs/performance-report-2026-10-30.md#vacuum-full-placement-cost-20261119)
+
+</details>
+
+<details>
+<summary>可以查看表清理的进度 · 2026-11-19</summary>
+
+清理表或更新查询统计时，可以从另一个连接查看正在处理哪张表、进行到了哪一步。
 
 [使用示例](docs/MANUAL.md#查看表维护进度) · [测试报告](docs/test-report.md#maintenance-progress-views-20261119) · [性能报告](docs/performance-report-2026-10-30.md#maintenance-progress-views-cost-20261119)
 
 </details>
 
 <details>
-<summary>可以只更新几列的查询统计 · 2026-11-19</summary>
+<summary>可以单独更新几列的统计 · 2026-11-19</summary>
 
-数据改动集中在几列时，可以只更新这些列的统计，供数据库选择查询方式。
+数据只改了几列时，可以只更新这些列的统计。数据库用这些统计选择怎样查找数据。
 
 [使用示例](docs/MANUAL.md#只更新指定列的统计) · [测试报告](docs/test-report.md#vacuum-target-columns-20261119) · [性能报告](docs/performance-report-2026-10-30.md#vacuum-target-columns-cost-20261119)
 
 </details>
 
 <details>
-<summary>一次整理就能收回表和长文本的空间 · 2026-11-19</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-19 · 一次整理就能收回表和长文本的空间
 
 运行 `VACUUM FULL` 可以同时收回两处空闲空间，一处在表文件里，另一处在单独存放长文本等大内容的文件里。
 
 [使用示例](docs/MANUAL.md#分开清理主表和长值) · [恢复测试](docs/test-report.md#vacuum-combined-full-20261119) · [性能报告](docs/performance-report-2026-10-30.md#vacuum-combined-full-cost-20261119)
-
-</details>
-
-<details>
-<summary>查看更早的更新</summary>
 
 ## 2026-11-18 · 删除长文本后，可以单独腾出磁盘空间
 

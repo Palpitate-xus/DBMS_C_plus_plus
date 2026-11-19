@@ -2,6 +2,19 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="vacuum-full-placement-20261119"></a>
+## 2026-11-19 · 重写表时减少取页
+
+`VACUUM FULL` 用内存中的空位记录选择第一个能容纳该行的目标页。每个分区有自己的空位记录。写入前先设置行的新物理位置，然后只写入一次。[使用手册](MANUAL.md#分开清理主表和长值)
+
+PostgreSQL 18.6 把堆重写的记录依次放进当前页，空间不足时批量写出该页。SQLite 将数据复制到临时数据库后替换原文件，DuckDB 通过检查点整理符合条件的已删除数据。[PostgreSQL 堆重写](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/access/heap/rewriteheap.c) · [SQLite VACUUM](https://www.sqlite.org/lang_vacuum.html) · [DuckDB 空间回收](https://duckdb.org/docs/current/operations_manual/footprint_of_duckdb/reclaiming_space)
+
+- 原生测试保留了 14 行不同长度的记录，最后一行能放进两处空位。新旧版都把它从第 14 页移到第 1 页，保留同一槽位顺序。直接拦截取页接口测得，写入这 14 行时，新版访问 14 次目标页，旧版访问 92 次。两版的页校验和、行物理位置和重建后的主键均通过检查。[取页回归](../tests/vacuum_full_test.cpp)
+- 模拟目标堆的第三次取页失败后，原始主表和主键文件逐字节恢复，可以继续读取。另有 33 个原生冷恢复阶段通过，包含长值存储、BRIN 和新旧列统计。[冷恢复回归](../tests/vacuum_full_cold_recovery_test.cpp)
+- 独立检查从三个样本的原始堆页推导出 9,335 行应写入的页和槽。两版的实际结果都与计算一致，13 份重写后的堆、索引和长值文件逐字节相同。两版独立冷启动后，三个样本都实际使用重建的次级索引，返回正确的值。
+
+共通过八项原生回归和五项协议回归。受测程序 SHA-256 为 `0ea3d92b534db10cfa2694aab115ae961d451142978255d5f23ad1c0ff6012dd`。完整回归套件待验证。[性能报告](performance-report-2026-10-30.md#vacuum-full-placement-cost-20261119)
+
 <a id="maintenance-progress-views-20261119"></a>
 ## 2026-11-19 · 实时查看表维护进度
 

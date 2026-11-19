@@ -12,6 +12,8 @@ Both `ANALYZE` and `VACUUM (ANALYZE)` accept per-table column lists. Only reques
 
 Direct queries now show progress for ordinary VACUUM, ANALYZE and VACUUM FULL. The reported stages correspond to work the project performs, and other users receive the public process and database name with private fields hidden. PostgreSQL database OIDs, additional phases and general queries over these views remain open. [Usage](MANUAL.md#查看表维护进度) · [PostgreSQL progress reporting](https://www.postgresql.org/docs/18/progress-reporting.html)
 
+`VACUUM FULL` now tracks the space in fresh destination pages. It retains the earlier first-fit placement, including packing a short tuple into a previous page, while avoiding reads from pages with insufficient room. [Verification](test-report.md#vacuum-full-placement-20261119)
+
 The following sections describe the earlier repair and its verification.
 
 ## Reproduced behavior

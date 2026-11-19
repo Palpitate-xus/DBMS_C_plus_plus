@@ -52701,6 +52701,53 @@ size_t StorageEngine::vacuumToastLocked(const std::string& dbname,
     return removedObjects;
 }
 
+namespace {
+// Leaves are in physical page order. Each parent stores the largest usable
+// space in its subtree, so a later short tuple can still fill an earlier page.
+// A rewrite owns these fresh pages and only inserts into them.
+class RewritePageSpace {
+public:
+    uint32_t firstPage(size_t bytes) const {
+        if (bytes == 0 || maximum_[1] < bytes) return 0;
+        const size_t leaves = maximum_.size() / 2;
+        size_t node = 1;
+        while (node < leaves) {
+            node *= 2;
+            if (maximum_[node] < bytes) ++node;
+        }
+        return static_cast<uint32_t>(node - leaves + 1);
+    }
+
+    void record(uint32_t pageId, size_t freeSpace) {
+        constexpr size_t linePointer = sizeof(PgPage::ItemIdData);
+        static_assert(PgPage::PAGE_SIZE <= std::numeric_limits<uint16_t>::max());
+        if (pageId > maximum_.size() / 2) grow();
+        size_t node = maximum_.size() / 2 + pageId - 1;
+        maximum_[node] = static_cast<uint16_t>(freeSpace > linePointer ? freeSpace - linePointer : 0);
+        while (node > 1) {
+            node /= 2;
+            const auto value = std::max(maximum_[2 * node], maximum_[2 * node + 1]);
+            if (maximum_[node] == value) break;
+            maximum_[node] = value;
+        }
+    }
+
+private:
+    void grow() {
+        const size_t leaves = maximum_.size() / 2;
+        if (maximum_.size() > maximum_.max_size() / 2)
+            throw std::length_error("rewrite page capacity tree exceeds supported size");
+        std::vector<uint16_t> grown(maximum_.size() * 2, 0);
+        std::copy_n(maximum_.begin() + leaves, leaves, grown.begin() + 2 * leaves);
+        for (size_t node = 2 * leaves - 1; node > 0; --node)
+            grown[node] = std::max(grown[node * 2], grown[node * 2 + 1]);
+        maximum_ = std::move(grown);
+    }
+
+    std::vector<uint16_t> maximum_{0, 0};
+};
+} // namespace
+
 // ========================================================================
 // VACUUM FULL: completely rewrite table, reclaiming all dead space
 // ========================================================================
@@ -53329,69 +53376,46 @@ size_t StorageEngine::vacuumFull(const std::string& dbname,
         auto allocator = std::make_unique<PageAllocator>(
             relation.path.string(), *heapRowWidth,
             pageSizeForFormatVersion(tbl.formatVersion), tbl.formatVersion);
-        if (!allocator->open()) return failRewrite();
+        if (!allocator->open() || allocator->numPages() != 1) return failRewrite();
         destinations.emplace(relation.path.string(), std::move(allocator));
     }
 
     const auto appendTuple = [&](PageAllocator& allocator,
-                                 const std::string& sourceTuple) -> bool {
-        std::string tuple = sourceTuple;
-        for (uint32_t pageId = 1; pageId < allocator.numPages(); ++pageId) {
-            char* buffer = allocator.fetchPage(pageId);
-            if (!buffer) return false;
-            PageWrapper page(buffer, allocator.pageSize(), tbl.formatVersion);
-            uint16_t slotId = 0;
-            bool inserted = false;
-            if (page.canFit(tuple.size()) &&
-                page.insert(tuple.data(), tuple.size(), slotId)) {
-                setRowCtid(tuple.data(), tuple.size(), tbl.formatVersion,
-                           ItemPointer{pageId,
-                                       static_cast<OffsetNumber>(slotId + 1)});
-                uint16_t updatedSlot = slotId;
-                inserted = page.update(slotId, tuple.data(), tuple.size(),
-                                       updatedSlot) && updatedSlot == slotId;
-                if (inserted) {
-                    allocator.markDirty(pageId);
-                } else {
-                    page.remove(slotId);
-                    allocator.markDirty(pageId);
-                }
-            }
-            allocator.unpinPage(pageId);
-            if (inserted) return true;
+                                 RewritePageSpace& space, std::string& tuple) -> bool {
+        uint32_t pageId = space.firstPage(tuple.size());
+        if (!pageId) {
+            const uint32_t nextPage = allocator.numPages();
+            pageId = allocator.allocPage();
+            if (!pageId || pageId != nextPage) return false;
         }
-
-        const uint32_t pageId = allocator.allocPage();
-        if (pageId == 0) return false;
         char* buffer = allocator.fetchPage(pageId);
         if (!buffer) return false;
+        struct DestinationPin {
+            PageAllocator& allocator;
+            uint32_t pageId;
+            ~DestinationPin() { allocator.unpinPage(pageId); }
+        } pin{allocator, pageId};
         PageWrapper page(buffer, allocator.pageSize(), tbl.formatVersion);
+        // Append-only pages have no reusable slots. Put the new address in
+        // the retained tuple before the insert so only one page write is needed.
+        const uint16_t expectedSlot = page.slotCount();
+        setRowCtid(tuple.data(), tuple.size(), tbl.formatVersion,
+                   ItemPointer{pageId, static_cast<OffsetNumber>(expectedSlot + 1)});
         uint16_t slotId = 0;
-        bool inserted = page.insert(tuple.data(), tuple.size(), slotId);
-        if (inserted) {
-            setRowCtid(tuple.data(), tuple.size(), tbl.formatVersion,
-                       ItemPointer{pageId,
-                                   static_cast<OffsetNumber>(slotId + 1)});
-            uint16_t updatedSlot = slotId;
-            inserted = page.update(slotId, tuple.data(), tuple.size(),
-                                   updatedSlot) && updatedSlot == slotId;
-            if (inserted) {
-                allocator.markDirty(pageId);
-            } else {
-                page.remove(slotId);
-                allocator.markDirty(pageId);
-            }
-        }
-        allocator.unpinPage(pageId);
-        return inserted;
+        if (!page.insert(tuple.data(), tuple.size(), slotId) || slotId != expectedSlot)
+            return false;
+        allocator.markDirty(pageId);
+        space.record(pageId, page.freeSpace());
+        return true;
     };
 
-    for (const auto& relation : relations) {
+    for (auto& relation : relations) {
         auto destination = destinations.find(relation.path.string());
         if (destination == destinations.end()) return failRewrite();
-        for (const auto& tuple : relation.tuples) {
+        RewritePageSpace space;
+        for (auto& tuple : relation.tuples) {
             if (counters[tuplesWritten] % 256 == 0) checkForQueryInterrupt();
-            if (!appendTuple(*destination->second, tuple))
+            if (!appendTuple(*destination->second, space, tuple))
                 return failRewrite();
             const auto written = ++counters[tuplesWritten];
             if (written % 256 == 0)

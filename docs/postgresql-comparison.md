@@ -2,6 +2,10 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-19 · 重写表时怎样找空位
+
+PostgreSQL 18.6 的堆重写会在当前页填入记录，达到页空间限制后按页批量提交并切到下一页。项目重写保留原有的放置规则，使用内存里的可用空间记录直接找到第一个够用的页，因此还能回填较早的页。两边都在重写时避开从头查找每个可能的页。文件格式和页空间策略各有不同。[PostgreSQL 堆重写实现](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/access/heap/rewriteheap.c)
+
 ## 2026-11-19 · 三个表维护进度视图
 
 PostgreSQL 18.6 和本项目都把 `VACUUM FULL` 进度放在 `pg_stat_progress_cluster` 中。普通清理和统计更新各有自己的视图。项目按实际页和已写入的行计数，表编号来自目录。数据库编号、分区统计、限速等待时间、自动维护进程和视图组合查询仍有差距。[PostgreSQL 进度说明](https://www.postgresql.org/docs/18/progress-reporting.html) · [本项目用法](MANUAL.md#查看表维护进度)
