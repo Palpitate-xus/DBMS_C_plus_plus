@@ -1184,7 +1184,9 @@ DELETE FROM items WHERE id = 43 RETURNING id;
 
 两个连接更新或删除同一行时，先拿到锁的连接先执行。在默认的 `READ COMMITTED` 下，后一个连接等到锁后，用最新已经提交的版本重新检查 `WHERE`。如果先前的修改已回滚，后一个连接从原值继续。记录已被删除或不再符合条件时，受影响行数为零。例如两个连接都执行 `UPDATE items SET n = n + 1 WHERE id = 42 RETURNING n`，第二个连接会在第一个提交后的值上加一。
 
-使用 `REPEATABLE READ` 或 `SERIALIZABLE` 时，如果该行已被其他事务提交修改，语句返回 `40001`。需要等到事务结束后，从头重试。`UPDATE FROM` 和 `DELETE USING` 等依赖其他行的语句，在这类冲突中也可能返回 `40001`。[并发和重启验证](test-report.md#same-row-writes-20261119)
+常用的 `UPDATE ... FROM` 和 `DELETE ... USING` 也会重查。重查时只用一开始匹配的来源记录。假如有两条来源原先都匹配，第一条失效后还能检查第二条。来源记录在等待期间被修改时，赋值和 `RETURNING` 仍使用原来读到的来源值。[带来源表的并发验证](test-report.md#joined-row-writes-20261119)
+
+使用 `REPEATABLE READ` 或 `SERIALIZABLE` 时，如果该行已被其他事务提交修改，语句返回 `40001`，可以回滚后重试。部分写法仍用旧的执行方式，如带来源的 `UPDATE ONLY` 和 `SET DEFAULT`。这类写法遇到冲突时也可能返回 `40001`。[并发和重启验证](test-report.md#same-row-writes-20261119)
 
 ### 删除
 

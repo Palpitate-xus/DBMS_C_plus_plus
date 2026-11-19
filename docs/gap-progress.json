@@ -2,6 +2,27 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-19 retain original source matches when a joined mutation waits for a concurrent writer",
+      "gap_ids": ["TXN-08", "QRY-13"],
+      "status": "partial",
+      "evidence": [
+        "src/commands/DmlExecutor.cpp",
+        "src/commands/TableManage.cpp",
+        "docs/test-report.md",
+        "docs/performance-report-2026-10-30.md"
+      ],
+      "tests": [
+        "tests/update_delete_from_protocol_e2e_test.py",
+        "tests/with_multisource_dml_protocol_e2e_test.py",
+        "tests/delete_bound_returning_protocol_e2e_test.py"
+      ],
+      "verification": [
+        "Bound UPDATE FROM and DELETE USING reapply the condition with the current locked target and the original matching source rows. The first eligible original occurrence determines the rechecked assignments and source projection. Alternate match indexes are retained for one target at a time.",
+        "The PostgreSQL 18.6 and project protocol tests cover sources that only match after the change, surviving alternative original sources, replacement of a source row by another transaction, outer-join nulls, transaction rollback, stronger isolation and cold reopen. Joined legacy execution still requires a full recheck.",
+        "The final program passed thirteen protocol and nine native suites plus a two-target nullable-row case. Twelve timing runs completed 1440 commands and audited 1800 protocol exchanges. All five wall and CPU medians were higher. Four workloads exceeded the CPU drift threshold and the remaining workload did not meet the preset change threshold across all three comparison blocks."
+      ]
+    },
+    {
       "issue": "2026-11-19 recheck ordinary row writes after waiting on a concurrent writer",
       "gap_ids": ["TXN-08", "QRY-13"],
       "status": "partial",

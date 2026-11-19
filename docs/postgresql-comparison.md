@@ -8,7 +8,7 @@
 
 SQLite 同时只允许一个写事务。在 WAL 模式下，持有旧快照的读事务尝试升级为写事务时，会收到 `SQLITE_BUSY_SNAPSHOT`。DuckDB 1.4 允许不同线程同时写不同的行，两个线程修改同一行时，后一个操作收到冲突错误。[SQLite 隔离说明](https://www.sqlite.org/isolation.html) · [DuckDB 1.4 并发说明](https://duckdb.org/docs/1.4/connect/concurrency)
 
-项目采用 PostgreSQL 的语义处理所测普通更新和删除。在所测的 `UPDATE FROM`、`DELETE USING` 冲突里，PostgreSQL 能重新检查来源并完成操作，项目返回 `40001` 并保留先前提交的数据。完整的执行计划重查、分区行移动和锁级别仍待补齐。[对照结果](test-report.md#same-row-writes-20261119)
+项目采用 PostgreSQL 的语义处理所测普通写入，并扩展到使用类型绑定执行的 `UPDATE ... FROM` 和 `DELETE ... USING`。两个数据库都用原先匹配的来源记录重查新目标值。项目的旧版退回路径、完整的执行计划重查、分区行移动和锁级别仍待补齐。[普通写入验证](test-report.md#same-row-writes-20261119) · [带来源表的对照](test-report.md#joined-row-writes-20261119)
 
 ## 2026-11-19 · 用主键找要更新或删除的行
 

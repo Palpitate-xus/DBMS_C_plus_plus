@@ -6774,38 +6774,89 @@ private:
         std::vector<SqlRow> images;size_t count=0;
         if(hasSource_) {
             if(!source_.read)throw DbError("XX000","prepared mutation source has no reader");
-            struct Match {RowContext row;SqlRow updates;};
+            struct Match {
+                RowContext row;
+                SqlRow updates;
+            };
             std::map<int64_t,Match> chosen;
+            std::vector<size_t> alternatives;
+            std::optional<int64_t> originalTarget;
             std::vector<ReturningRowImage> changes;
             std::vector<RowContext> provenance;
             auto* update=dynamic_cast<UpdateStmt*>(statement_);
             auto* remove=dynamic_cast<DeleteStmt*>(statement_);
             const Expr* where=update?update->whereClause.get():remove->whereClause.get();
             const bool oneTimeQualification=where && rowIndependentPredicate(where);
+            const auto qualifies = [&](const RowContext& row) {
+                if (!where || oneTimeQualification) return true;
+                const auto condition = execution_->evaluate(where, row);
+                return !condition.isNull && condition.asBool();
+            };
+            const auto assignments = [&](const RowContext& row) {
+                SqlRow values;
+                if (update) for (const auto& assignment : update->setClauses) {
+                    const auto value = execution_->evaluate(assignment.second.get(), row);
+                    values[identifier(assignment.first)] = value.isNull
+                        ? SqlCell{} : SqlCell{stored_regtype_detail::storageText(value)};
+                }
+                return values;
+            };
             StorageEngine::SqlMutationCallbacks callbacks;
             callbacks.matches=[&](int64_t rid,const SqlRow& old) {
+                originalTarget = rid;
+                alternatives.clear();
                 if(oneTimeQualification) {
                     const auto value=execution_->evaluate(where,context(old));
                     if(value.isNull || !value.asBool())return false;
                 }
-                bool matched=false;
+                Match* match = nullptr;
                 RowContext source;
                 for(size_t i=0;source_.read(i,source);++i) {
                     auto row=context(old,&source);
-                    if(where && !oneTimeQualification) {const auto condition=execution_->evaluate(where,row);if(condition.isNull || !condition.asBool())continue;}
-                    SqlRow values;
-                    if(update)for(const auto& assignment:update->setClauses) {
-                        const auto value=execution_->evaluate(assignment.second.get(),row);
-                        values[identifier(assignment.first)]=value.isNull?SqlCell{}:SqlCell{stored_regtype_detail::storageText(value)};
-                    }
+                    if (!qualifies(row)) continue;
+                    auto values = assignments(row);
                     // Multiple eligible join tuples still evaluate their
                     // projections/errors. The executor modifies each real
                     // target RID once and retains one eligible row version;
                     // SQL does not specify which of those versions wins.
-                    if(!matched)chosen.emplace(rid,Match{std::move(row),std::move(values)});
-                    matched=true;
+                    if (!match)
+                        match = &chosen.emplace(rid, Match{std::move(row), std::move(values)}).first->second;
+                    else
+                        alternatives.push_back(i);
                 }
-                return matched;
+                return match != nullptr;
+            };
+            callbacks.recheckJoinedTarget = [&](int64_t originalRid, int64_t lockedRid, const SqlRow& latest) {
+                const auto original = chosen.find(originalRid);
+                if (originalTarget != originalRid || original == chosen.end())
+                    throw DbError("XX000", "mutation lost its original source match");
+                auto row = context(latest, &original->second.row);
+                if (!qualifies(row)) {
+                    bool matched = false;
+                    RowContext source;
+                    // Only revisit original join results. Source ordinals
+                    // refer to the same rows cached by the statement reader.
+                    for (const auto index : alternatives) {
+                        if (!source_.read(index, source))
+                            throw DbError("XX000", "mutation lost an original source occurrence");
+                        row = context(latest, &source);
+                        if (qualifies(row)) {
+                            matched = true;
+                            break;
+                        }
+                    }
+                    if (!matched) {
+                        chosen.erase(original);
+                        return false;
+                    }
+                }
+                auto values = assignments(row);
+                auto match = chosen.extract(original);
+                match.key() = lockedRid;
+                match.mapped() = {std::move(row), std::move(values)};
+                if (!chosen.insert(std::move(match)).inserted)
+                    throw DbError("XX000", "mutation found a duplicate locked target");
+                return true;
             };
             callbacks.resolve=[&](int64_t rid,const SqlRow&,SqlRow& values) {
                 const auto found=chosen.find(rid);

@@ -31693,16 +31693,15 @@ static std::optional<int64_t> matchCurrentIntegerPrimaryKey(
 }
 
 static StorageEngine::SqlRow mutationMatchRow(
-        StorageEngine& engine, const std::string& dbname, const std::string& tablename,
-        const TableSchema& table, int64_t rid, const std::string& row,
+        StorageEngine& engine, const std::string& dbname,
+        const TableSchema& table, const std::string& row,
         const std::vector<bool>& nullColumns, bool deferVirtualInputs) {
     BufferedNullRowBinding nullBinding(table, nullColumns);
     StorageEngine::SqlRow values;
     for (size_t i = 0; i < table.len; ++i) {
         const auto& column = table.cols[i];
         if (deferVirtualInputs && column.generatedKind == 'v') continue;
-        if (column.generatedKind != 'v' && column.isNull &&
-            detail::storedRowColumnIsNull(engine, dbname, tablename, table, rid, i)) {
+        if (column.generatedKind != 'v' && column.isNull && nullColumns[i]) {
             values[column.dataName] = std::nullopt;
         } else {
             bool computedNull = false;
@@ -31792,17 +31791,36 @@ static LockedMutationRow lockMutationRow(
     }
 }
 
+static DBStatus readMutationPayload(
+        StorageEngine& engine, const std::string& dbname, const std::string& tablename,
+        const TableSchema& table, PageAllocator& allocator, int64_t rid,
+        std::string& row, std::vector<bool>& nullColumns) {
+    uint32_t pageId = 0;
+    uint16_t slot = 0;
+    StorageEngine::decodeRid(rid, pageId, slot);
+    LockManager& locks = engine.getLockManager();
+    bool ownsLock = false;
+    if (!locks.pageLockShared(dbname, tablename, pageId, &ownsLock)) return DBStatus::LOCK_CONFLICT;
+    HeapPageReadGuard pageGuard{locks, allocator, dbname, tablename, pageId, false, ownsLock};
+    return engine.readRowByRid(&allocator, rid, row, table, &nullColumns)
+        ? DBStatus::OK : DBStatus::IO_ERROR;
+}
+
 static DBStatus lockMutationTargets(
         StorageEngine& engine, const std::string& dbname, const std::string& tablename,
         const TableSchema& table, PageAllocator* allocator, const StorageEngine::ReadView& view,
         bool snapshotCandidates, bool mayRecheck, const std::vector<std::string>& conditions,
-        const StorageEngine::SqlUpdateMatcher& matcher, bool deferVirtualInputs,
+        const StorageEngine::SqlUpdateMatcher& matcher,
+        const StorageEngine::SqlMutationCallbacks* callbacks, bool deferVirtualInputs,
         std::set<int64_t>& targets) {
     if (targets.empty()) return DBStatus::OK;
     if (!allocator) return DBStatus::IO_ERROR;
     const auto isolation = engine.getIsolationLevel();
     const bool followCommittedChanges = mayRecheck &&
         (isolation == IsolationLevel::READ_COMMITTED || isolation == IsolationLevel::READ_UNCOMMITTED);
+    const bool recheckJoin = callbacks && callbacks->recheckJoinedTarget;
+    const bool matchBeforeLock = mayRecheck && recheckJoin && callbacks->matches;
+    const bool recheckMatcher = matcher && !(callbacks && callbacks->matches);
     LockManager& locks = engine.getLockManager();
     std::set<int64_t> rechecked;
     std::optional<std::vector<StorageEngine::Condition>> predicates;
@@ -31810,10 +31828,26 @@ static DBStatus lockMutationTargets(
     DatumMetadataContextPtr generatedMetadata;
 
     for (auto it = targets.begin(); it != targets.end();) {
+        const int64_t originalRid = *it;
+        // Keep only the current target's alternate source matches. The
+        // executor can reuse that storage after this target is checked.
+        if (matchBeforeLock) {
+            std::string row;
+            std::vector<bool> nullColumns;
+            const auto status = readMutationPayload(engine, dbname, tablename, table,
+                                                     *allocator, originalRid, row, nullColumns);
+            if (status != DBStatus::OK) return status;
+            const auto values = mutationMatchRow(engine, dbname, table,
+                                                  row, nullColumns, deferVirtualInputs);
+            if (!callbacks->matches(originalRid, values)) {
+                it = targets.erase(it);
+                continue;
+            }
+        }
         const auto locked = lockMutationRow(locks, dbname, tablename, table, *allocator,
-                                            view, *it, snapshotCandidates, followCommittedChanges);
+                                            view, originalRid, snapshotCandidates, followCommittedChanges);
         if (locked.status != DBStatus::OK) return locked.status;
-        if (locked.rid && *locked.rid == *it) {
+        if (locked.rid && *locked.rid == originalRid) {
             ++it;
             continue;
         }
@@ -31828,26 +31862,24 @@ static DBStatus lockMutationTargets(
             generatedMetadata = freezeGeneratedStorageInput(table, dbname, tablename, &engine);
             prepareFilterConditions(engine, dbname, table, *predicates);
         }
-        if (!predicates->empty() || matcher) {
+        if (!predicates->empty() || recheckMatcher || recheckJoin) {
             std::string row;
             std::vector<bool> nullColumns;
-            {
-                uint32_t pageId = 0;
-                uint16_t slot = 0;
-                StorageEngine::decodeRid(rid, pageId, slot);
-                bool ownsLock = false;
-                if (!locks.pageLockShared(dbname, tablename, pageId, &ownsLock)) return DBStatus::LOCK_CONFLICT;
-                HeapPageReadGuard pageGuard{locks, *allocator, dbname, tablename, pageId, false, ownsLock};
-                if (!engine.readRowByRid(allocator, rid, row, table, &nullColumns)) return DBStatus::IO_ERROR;
-            }
+            const auto status = readMutationPayload(engine, dbname, tablename, table,
+                                                     *allocator, rid, row, nullColumns);
+            if (status != DBStatus::OK) return status;
             NullRowBinding rowBinding(&engine, dbname, tablename, rid, table.len);
             BufferedNullRowBinding nullBinding(table, nullColumns);
             if (!std::all_of(predicates->begin(), predicates->end(), [&](const auto& predicate) {
                 return StorageEngine::evalConditionOnRowWithSyntax(
                     predicate, row, table, &predicateSyntax, generatedMetadata.get());
             })) continue;
-            if (matcher && !matcher(mutationMatchRow(engine, dbname, tablename, table, rid,
-                                                     row, nullColumns, deferVirtualInputs))) continue;
+            if (recheckMatcher || recheckJoin) {
+                const auto values = mutationMatchRow(engine, dbname, table,
+                                                     row, nullColumns, deferVirtualInputs);
+                if (recheckMatcher && !matcher(values)) continue;
+                if (recheckJoin && !callbacks->recheckJoinedTarget(originalRid, rid, values)) continue;
+            }
         }
         rechecked.insert(rid);
     }
@@ -32106,7 +32138,9 @@ DBStatus StorageEngine::removeInternal(
     // storage operation.  Keep the final target-row selection inside the
     // storage boundary so RLS, row locks, FK actions, indexes and RETURNING
     // continue to use the same delete path as ordinary DELETE.
-    if (!exactRids && (deleteMatcher || (mutationCallbacks && mutationCallbacks->matches)) && !toDelete.empty()) {
+    const bool joinedMatch = mutationCallbacks && mutationCallbacks->matches;
+    const bool matchBeforeLock = !enforceRls && joinedMatch && mutationCallbacks->recheckJoinedTarget;
+    if (!exactRids && !matchBeforeLock && (deleteMatcher || joinedMatch) && !toDelete.empty()) {
         std::set<int64_t> filteredIds;
         for (int64_t rid : toDelete) {
             std::string row;
@@ -32116,7 +32150,7 @@ DBStatus StorageEngine::removeInternal(
                 return DBStatus::IO_ERROR;
             }
             const SqlRow rowValues = mutationMatchRow(
-                *this, dbname, tablename, tbl, rid, row, nullColumns, deferVirtualInputs);
+                *this, dbname, tbl, row, nullColumns, deferVirtualInputs);
             if (mutationCallbacks && mutationCallbacks->matches
                     ? mutationCallbacks->matches(rid, rowValues)
                     : deleteMatcher(rowValues)) filteredIds.insert(rid);
@@ -32124,13 +32158,13 @@ DBStatus StorageEngine::removeInternal(
         toDelete.swap(filteredIds);
     }
 
-    // A joined mutation can have source data cached by its original RID.
-    // Only use a successor when the whole row predicate can be evaluated again.
+    // Joined mutations need a recheck that also preserves their original sources.
     const bool mayRecheck = !exactRids && !enforceRls && (mutationCallbacks
-        ? mutationCallbacks->recheckOnConcurrentUpdate : !deleteMatcher);
+        ? mutationCallbacks->recheckOnConcurrentUpdate || mutationCallbacks->recheckJoinedTarget
+        : !deleteMatcher);
     const DBStatus lockStatus = lockMutationTargets(
         *this, dbname, tablename, tbl, pa, context.readView, !exactRids, mayRecheck,
-        conditions, deleteMatcher, deferVirtualInputs, toDelete);
+        conditions, deleteMatcher, mutationCallbacks, deferVirtualInputs, toDelete);
     if (lockStatus != DBStatus::OK) {
         if (lockStatus == DBStatus::LOCK_CONFLICT || lockStatus == DBStatus::DEADLOCK_DETECTED) {
             // Preserve a user savepoint. Otherwise release all locks so a
@@ -33719,7 +33753,9 @@ DBStatus StorageEngine::updateInternal(
         }
     }
 
-    if (!exactRids && (updateMatcher || (mutationCallbacks && mutationCallbacks->matches)) && !matchIds.empty()) {
+    const bool joinedMatch = mutationCallbacks && mutationCallbacks->matches;
+    const bool matchBeforeLock = !enforceRls && joinedMatch && mutationCallbacks->recheckJoinedTarget;
+    if (!exactRids && !matchBeforeLock && (updateMatcher || joinedMatch) && !matchIds.empty()) {
         std::set<int64_t> filteredIds;
         for (const int64_t rid : matchIds) {
             std::string row;
@@ -33729,7 +33765,7 @@ DBStatus StorageEngine::updateInternal(
                 return DBStatus::IO_ERROR;
             }
             const SqlRow rowValues = mutationMatchRow(
-                *this, dbname, tablename, tbl, rid, row, nullColumns, deferVirtualInputs);
+                *this, dbname, tbl, row, nullColumns, deferVirtualInputs);
             if (mutationCallbacks && mutationCallbacks->matches
                     ? mutationCallbacks->matches(rid, rowValues)
                     : updateMatcher(rowValues)) filteredIds.insert(rid);
@@ -33737,13 +33773,13 @@ DBStatus StorageEngine::updateInternal(
         matchIds.swap(filteredIds);
     }
 
-    // A joined mutation can have source data cached by its original RID.
-    // Only use a successor when the whole row predicate can be evaluated again.
+    // Joined mutations need a recheck that also preserves their original sources.
     const bool mayRecheck = !exactRids && !enforceRls && (mutationCallbacks
-        ? mutationCallbacks->recheckOnConcurrentUpdate : !updateMatcher);
+        ? mutationCallbacks->recheckOnConcurrentUpdate || mutationCallbacks->recheckJoinedTarget
+        : !updateMatcher);
     const DBStatus lockStatus = lockMutationTargets(
         *this, dbname, tablename, tbl, pa, context.readView, !exactRids, mayRecheck,
-        conditions, updateMatcher, deferVirtualInputs, matchIds);
+        conditions, updateMatcher, mutationCallbacks, deferVirtualInputs, matchIds);
     if (lockStatus != DBStatus::OK) {
         if (lockStatus == DBStatus::LOCK_CONFLICT || lockStatus == DBStatus::DEADLOCK_DETECTED) {
             // Preserve a user savepoint. Otherwise release all locks so a

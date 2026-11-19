@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>按另一张表更新或删除时，也能处理并发修改 · 2026-11-19</summary>
+
+默认设置下，如果目标记录被另一个连接先改了，数据库会用新值和原来选中的来源记录重新检查条件。
+
+[使用说明](docs/MANUAL.md#同时修改同一行) · [测试报告](docs/test-report.md#joined-row-writes-20261119) · [性能报告](docs/performance-report-2026-10-30.md#joined-row-write-cost-20261119)
+
+</details>
+
+<details>
 <summary>同时改一条记录，后一次按新值处理 · 2026-11-19</summary>
 
 默认设置下，如果另一个连接先改了这条记录，等它提交后，更新或删除会用新值再检查条件。记录已被删，或者条件不再成立，就跳过它。
@@ -19,18 +28,15 @@
 </details>
 
 <details>
-<summary>可以查看分区表的统计更新进度 · 2026-11-19</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-19 · 可以查看分区表的统计更新进度
 
 更新分区表的统计信息时，可以看到已经处理了多少个分区，以及当前分区读到了哪里。
 
 如果要求额外的进程一起整理表，`VACUUM FULL` 会提示此选项不受支持。
 
 [使用示例](docs/MANUAL.md#查看表维护进度) · [测试报告](docs/test-report.md#partition-analyze-vacuum-parallel-20261119) · [性能报告](docs/performance-report-2026-10-30.md#partition-analyze-observation-cost-20261119)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-19 · 整理表时少花时间找空位
 

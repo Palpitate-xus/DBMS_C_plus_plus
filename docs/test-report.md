@@ -2,6 +2,27 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="joined-row-writes-20261119"></a>
+## 2026-11-19 · 带来源表的更新和删除遇到并发写入
+
+PostgreSQL 18.6 在重查连接条件时，会将最新的目标记录与原查询已经选中的来源记录组合。第一条组合失效时，可以继续处理原查询中的其他组合。一条只在目标改变之后才匹配的来源记录不会被加入。来源表中的记录在等待期间被更新或删除时，重查仍用原来读到的来源值。[PostgreSQL 执行器说明](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/executor/README)
+
+用两个连接验证了上述区别。持锁连接改变目标主键和连接键。若新连接键只有一条原先不匹配的来源记录，`UPDATE` 和 `DELETE` 都影响零行。若第二条来源在原先就匹配，新记录仍可用它完成写入。测试也在持锁事务中替换已匹配的来源记录，验证更新的赋值和 `RETURNING` 是否保留原来源值。旧版 `430a69ec` 在受测的默认隔离级别冲突中返回 `40001`。[协议测试](../tests/update_delete_from_protocol_e2e_test.py)
+
+正式回归在 PostgreSQL 18.6 和修复版各完成十次实际锁等待。核对命令标签、事务状态、结果列类型、修改前后的目标值和来源值。外连接补出的空值仍以 SQL `NULL` 返回。持锁事务回滚后沿用原值，`REPEATABLE READ` 和 `SERIALIZABLE` 的受测冲突返回 `40001`。向服务端发送 `SIGKILL` 并重新打开原目录后，目标与来源全量结果和原有及新主键的查询结果都一致。
+
+补充的两行更新同时验证了目标值从 SQL `NULL` 改为 `20` 和从 `7` 改为 SQL `NULL` 的情况。等待者用新值计算，得到 `23` 和 `2`，且 `OLD` 保留相应的 SQL 值。执行器只为当前目标保留备用来源位置，并从同一次页读取复制字段与空值位图。
+
+修复版程序 SHA-256 为 `225dabab85cf9b0a89172ece7c4840ccd8f39d05c257b4ccc58df466f3172500`。正式回归、两行空值对照和其他 12 套协议回归的结果清单 SHA-256 依次为 `74332238818cfc7305275efdb43c8cfebff4d9f0339f1dd320e64171541b1c59`、`c4b56ba84b98ddc74df80b126e23d14d32acf244365b57e8388dad33394fe5d0`、`d289244add7ee72d4c94d454648600aadbbe3c31f0e6916507255eec9cd025bb`。[性能测试](performance-report-2026-10-30.md#joined-row-write-cost-20261119)
+
+9 套原生回归同时通过，覆盖来源绑定、`RETURNING`、外键动作、保存点以及更新和删除的日志写入故障。结果清单 SHA-256 为 `e79966fa64ba2bf2c62d77ce9a6548fc9b3178d5dca2d4427b37f35d9a6902b5`。
+
+用构建的程序执行下面的用例。PostgreSQL 对照在专用测试库上用 `--reference18` 运行，连接设置与下节相同。
+
+```bash
+DBMS_MAIN="$PWD/build/cmake/dbms_main" python3 tests/update_delete_from_protocol_e2e_test.py
+```
+
 <a id="same-row-writes-20261119"></a>
 ## 2026-11-19 · 两个连接先后修改同一行
 
@@ -15,7 +36,7 @@ PostgreSQL 18.6 在默认隔离级别下使用最新记录重查 `WHERE`。提�
 
 11 个注册用例全部通过。验证了有无显式事务、主键改变后仍满足或不再满足条件、普通列条件变化、删除当前版本、先前删除、隔离级别冲突、回滚和连续更新两次。核对命令标签、返回值和事务状态，并用逐行查询和逐主键查询比对最终值。实际向服务端发送 `SIGKILL` 并用原目录重新启动后，两种查询仍一致。
 
-另外核对了 9 个场景，包括 `SERIALIZABLE` 下的更新、删除和不同记录的写入冲突，持锁者撤消第二次更新，结束显式事务后的默认隔离，`WITH UPDATE` 以及实际扩展协议的参数执行。`UPDATE FROM` 和 `DELETE USING` 仍与 PostgreSQL 有差异。PostgreSQL 成功修改最新版本，受测项目版本返回 `40001` 并保留已经提交的值。
+另外核对了 9 个场景，包括 `SERIALIZABLE` 下的更新、删除和不同记录的写入冲突，持锁者撤消第二次更新，结束显式事务后的默认隔离，`WITH UPDATE` 以及实际扩展协议的参数执行。当时 `UPDATE FROM` 和 `DELETE USING` 返回 `40001` 并保留已经提交的值，后续已补齐受测写法的重查。[带来源表的复测](#joined-row-writes-20261119)
 
 精确候选在 14 套协议测试和 11 套原生测试中通过。原生测试还覆盖日志写入失败、外键动作、保存点、准备提交的事务，以及主键与次级索引保持同步。受测程序 SHA-256 为 `d3147c82d32d6034d6becfaa0d9a1ae0708c21c45ec3ea62064af270ff2845e6`。注册协议、补充协议和原生结果清单的 SHA-256 依次为 `fd8b05f38f29f72e711d6844eefb300a08f5c382794a06f4d7d6a5ebb7e0f201`、`df73b4028faacfbe31c045a880db41cc3101a6ab86fb53955efde5c0e1224ff9`、`a59020822f321bdee99132152b3ea4aa55487677fcce2dd3ab214149417ccbbf`。[性能报告](performance-report-2026-10-30.md#same-row-write-cost-20261119)
 

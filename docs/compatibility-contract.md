@@ -6,7 +6,7 @@
 
 隐式 SQL 事务从默认的 `READ COMMITTED` 开始。普通表的单目标 `UPDATE` 和 `DELETE` 等到行锁后检查提交状态。先前写入回滚时可沿用原行。对已提交的更新，`READ COMMITTED` 和 `READ UNCOMMITTED` 可找到最新版本，在该版本上重新检查原有条件。已删除的行或条件不再成立的行会跳过。`REPEATABLE READ` 和 `SERIALIZABLE` 遇到其他事务已经提交的改动时返回 `40001`。
 
-当前支持范围包括受测的普通写入、无来源表的 `WITH UPDATE` 和扩展协议执行。依赖缓存来源行的 `UPDATE FROM` 和 `DELETE USING` 在受测冲突中返回 `40001`，同时保留已经提交的写入。复杂连接重新检查、触发器重新写入同一行、分区行移动和更细的行锁级别仍需验证或实现。[使用手册](MANUAL.md#同时修改同一行) · [测试范围](test-report.md#same-row-writes-20261119)
+当前支持范围包括受测的普通写入、无来源表的 `WITH UPDATE` 和扩展协议执行。常用的 `UPDATE ... FROM` 和 `DELETE ... USING` 在重查时会保留最初匹配的来源记录，用最新目标值重新执行条件、赋值和 `RETURNING`。旧的按行值缓存的执行路径遇到这种冲突时仍返回 `40001`。触发器重新写入同一行、分区行移动和更细的行锁级别仍需验证或实现。[使用手册](MANUAL.md#同时修改同一行) · [带来源表的验证](test-report.md#joined-row-writes-20261119)
 
 ## 2026-11-19 · 按整数主键更新和删除
 
