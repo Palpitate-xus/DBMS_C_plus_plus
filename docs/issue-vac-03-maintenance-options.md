@@ -1,8 +1,8 @@
 # VAC-03 — VACUUM option handling and remaining rewrite semantics
 
-Status: partial. Review and focused repair recorded on 2026-10-05.
+Status: partial as of 2026-11-19.
 
-## 2026-11-18 · Separate the ordinary maintenance phases
+## Current behavior
 
 `PROCESS_MAIN` and `PROCESS_TOAST` now select ordinary maintenance independently. Both default to true. An explicit `ANALYZE` can still gather statistics with both phases disabled. TOAST cleanup defers work while the database has active transactions. When it inspects the files, the TOAST-only path reports a broken heap/index pair as an error.
 
@@ -35,7 +35,7 @@ Source/test commit `09611ff0`:
 - `git diff --check` — passed.
 - Full registered test suite and PostgreSQL 18.6 differential were not run for this change.
 
-## Remaining work
+## Remaining work after the 2026-10-05 repair
 
 - `VACUUM FULL` still uses the existing backup-based rewrite; it is not a proven crash-atomic transactional relation swap. Crash windows and concurrent-reader behavior remain open.
 - Tuple freezing, visibility/freeze map semantics, failsafe/wraparound handling, and `VACUUM FREEZE` are not implemented. `FREEZE` now fails explicitly instead of returning false success.
