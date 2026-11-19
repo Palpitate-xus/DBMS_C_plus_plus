@@ -6729,6 +6729,10 @@ std::string SQLParser::quoteIdentifier(const std::string& value) {
     return quoted + '"';
 }
 
+bool SQLParser::isColumnIdentifierKeyword(const std::string& word) {
+    return identifierKeywordKind(word) <= 1;
+}
+
 ParseResult SQLParser::parseSet(const std::string& sql) {
     if (isSetTransactionStatement(sql)) return parseBegin(sql);
     ParseResult r;

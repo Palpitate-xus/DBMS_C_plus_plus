@@ -590,6 +590,8 @@ public:
         std::vector<std::pair<std::string, std::string>> histogram;
         // Most Common Values: (value, frequency), top-N
         std::vector<std::pair<std::string, size_t>> mcv;
+        // The table row estimate can be refreshed independently of this column.
+        std::optional<size_t> analyzedRows;
     };
     struct TableStats {
         size_t rowCount = 0;
@@ -597,7 +599,8 @@ public:
         // Multi-column stats: key = "col1,col2", value = joint stats
         std::map<std::string, ColumnStats> multiColStats;
     };
-    bool analyzeTable(const std::string& dbname, const std::string& tablename);
+    bool analyzeTable(const std::string& dbname, const std::string& tablename,
+                      const std::vector<std::string>& columns = {});
     // pg_stats/pg_statistic rows (schemaname tablename attname null_frac
     // n_distinct most_common_vals most_common_freqs histogram_bounds) built
     // from persisted ANALYZE statistics.  Empty filter = no restriction.

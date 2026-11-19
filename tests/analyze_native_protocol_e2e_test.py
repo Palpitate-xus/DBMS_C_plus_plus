@@ -32,6 +32,7 @@ def main():
         query("CREATE TABLE native_rows (id INT);")
         query("INSERT INTO native_rows VALUES (1),(2),(3);")
         query("ANALYZE native_rows;")
+        query("ANALYZE native_rows(id);")
         assert cardinality("native_rows") == 3
         query('CREATE TABLE "Native,Rows" (id INT);')
         query('INSERT INTO "Native,Rows" VALUES (4),(5);')
@@ -50,8 +51,7 @@ def main():
         assert query("SELECT id FROM native_rows ORDER BY id;") == [["1"], ["2"], ["3"]]
         for sql, expected in (("ANALYZE native_missing;", "42P01"),
                               ("ANALYZE native_rows,;", "42601"),
-                              ("ANALYZE (VERBOSE FALSE) native_rows;", "0A000"),
-                              ("ANALYZE native_rows(id);", "0A000")):
+                              ("ANALYZE (VERBOSE FALSE) native_rows;", "0A000")):
             rows, state, message, _, _ = runner.decode_wire_result(
                 client.simple_query(server["sock"], sql))
             assert state == expected and not rows, (sql, state, message, rows)

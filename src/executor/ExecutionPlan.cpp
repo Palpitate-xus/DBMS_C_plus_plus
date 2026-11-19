@@ -2592,10 +2592,11 @@ static bool densePrefixPrefersHeap(StorageEngine* engine, const std::string& dat
         if (fraction) analyzedPopulation = typed->totalRows;
     }
     if (!fraction) {
-        if (!engine->tryGetTableRowCount(database, table, analyzedRows) || !analyzedRows)
-            return false;
-        analyzedPopulation = analyzedRows;
         const auto statistics = engine->getColumnStats(database, table, column);
+        if (statistics.analyzedRows) analyzedRows = *statistics.analyzedRows;
+        else if (!engine->tryGetTableRowCount(database, table, analyzedRows)) return false;
+        if (!analyzedRows) return false;
+        analyzedPopulation = analyzedRows;
         double common = 0;
         for (const auto& value : statistics.mcv)
             if (value.first.compare(0,prefix.size(),prefix)==0) common += value.second;
@@ -9835,7 +9836,8 @@ static bool canUseBitmapOrScan(
 static std::optional<double> analyzedEqualityFraction(
     const Column& column,const StorageEngine::ColumnStats& statistics,
     double analyzedRows,const std::string& probe) {
-    return planner_statistics::equalityFraction(statistics,analyzedRows,
+    const double sourceRows = statistics.analyzedRows ? *statistics.analyzedRows : analyzedRows;
+    return planner_statistics::equalityFraction(statistics,sourceRows,
         [&](const std::string& value)->std::optional<bool> {
             if(value==probe)return true;
             try {
@@ -10712,7 +10714,8 @@ static double estimateSelectivity(const StorageEngine::Condition& cond,
         }
     }
     auto stats = engine->getColumnStats(dbname, tablename, cond.colName);
-    double totalRows = static_cast<double>(engine->getTableRowCount(dbname, tablename));
+    const double totalRows = static_cast<double>(stats.analyzedRows
+        ? *stats.analyzedRows : engine->getTableRowCount(dbname, tablename));
     // NULL fraction (pg null_frac): 0 when stats predate nullCount.
     double nullFrac = (totalRows > 0 && stats.nullCount > 0)
         ? std::min(1.0, static_cast<double>(stats.nullCount) / totalRows)

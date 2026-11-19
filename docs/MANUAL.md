@@ -1087,6 +1087,17 @@ VACUUM (FULL, PROCESS_MAIN FALSE) vacuum_example;
 
 `FULL` 要求 `PROCESS_TOAST` 保持开启。如果表没有长值文件，只整理长值的命令会正常结束。重写需要独占目标表，清理应在事务块之外运行。一个数据目录由一个服务端进程管理。[部署说明](PACKAGING.md#服务端部署形态) · [普通清理测试](test-report.md#vacuum-process-options-20261118) · [合并重写测试](test-report.md#vacuum-combined-full-20261119)
 
+### 只更新指定列的统计
+
+改动集中在某些列时，可以在表名后写出列名。查询用的其他列统计会保留。如果要在清理表之后更新统计，在 `VACUUM` 中打开 `ANALYZE`。
+
+```sql
+ANALYZE vacuum_example (note);
+VACUUM (ANALYZE) vacuum_example (id, note);
+```
+
+一条命令可接多个以逗号分隔的表。每张表可指定自己的列，省略列名就更新全表列统计。若 `VACUUM (FULL, ANALYZE)` 中某个列名有误，重写阶段仍可能已完成。需要统计多列组合起来的值时，可以用项目扩展 `ANALYZE TABLE ... COLUMNS`。[测试报告](test-report.md#vacuum-target-columns-20261119)
+
 ---
 
 ## 5. 数据操作 (DML)

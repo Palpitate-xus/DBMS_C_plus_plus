@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <set>
 
 namespace dbms::analyzed_statistics {
 
@@ -59,19 +60,49 @@ struct UpdateResult {
 // inherited attributes do not linger. Other relations survive concurrent
 // thread/process producers because reload and merge use the same OFD lock.
 inline UpdateResult updateRelation(const std::filesystem::path& path,uint32_t relation,
-                                   const std::map<Key,Column>& columns) {
+                                   const std::map<Key,Column>& columns,
+                                   const std::set<int16_t>* attributes = nullptr) {
     if(!relation)codec::invalid("relation identity");
-    for(const auto& x:columns)if(x.first.relation!=relation)codec::invalid("replacement relation mismatch");
+    for (const auto& [key, column] : columns) {
+        if (key.relation != relation || (attributes && !attributes->count(key.attribute)))
+            codec::invalid("replacement attribute mismatch");
+    }
     StatsFileLock lock(path);
     if(!lock.ok())throw DbError("58030","could not lock analyzed statistics snapshot");
     auto previous=read(path);Snapshot next=previous?std::move(*previous):Snapshot{};
     if(next.generation==std::numeric_limits<uint64_t>::max())
         throw DbError("54000","analyzed statistics generation exhausted");
     for(auto it=next.columns.begin();it!=next.columns.end();) {
-        if(it->first.relation==relation)it=next.columns.erase(it);else ++it;
+        if (it->first.relation == relation &&
+            (!attributes || attributes->count(it->first.attribute)))
+            it = next.columns.erase(it);
+        else
+            ++it;
     }
     next.columns.insert(columns.begin(),columns.end());++next.generation;
     const auto bytes=encode(next);
     return {store_detail::publish(path,bytes),next.generation};
+}
+
+inline bool preserveRelationStatistics(const std::filesystem::path& path, uint32_t relation,
+                                       uint64_t oldPhysical, uint64_t oldSchema,
+                                       uint64_t newPhysical, uint64_t newSchema) {
+    StatsFileLock lock(path);
+    if (!lock.ok()) throw DbError("58030", "could not lock analyzed statistics snapshot");
+    auto snapshot = read(path);
+    if (!snapshot) return true;
+    bool changed = false;
+    for (auto& [key, column] : snapshot->columns) {
+        if (key.relation != relation || !column.matchesRelation(oldPhysical, oldSchema)) continue;
+        column.physicalRelation = oldPhysical;
+        column.schemaGeneration = oldSchema;
+        column.rewriteImage.emplace(newPhysical, newSchema);
+        changed = true;
+    }
+    if (!changed) return true;
+    if (snapshot->generation == std::numeric_limits<uint64_t>::max())
+        throw DbError("54000", "analyzed statistics generation exhausted");
+    ++snapshot->generation;
+    return store_detail::publish(path, encode(*snapshot)) == StatsSnapshotPublication::Durable;
 }
 } // namespace dbms::analyzed_statistics

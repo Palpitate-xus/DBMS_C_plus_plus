@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>可以只更新几列的查询统计 · 2026-11-19</summary>
+
+数据改动集中在几列时，可以只更新这些列的统计，供数据库选择查询方式。
+
+[使用示例](docs/MANUAL.md#只更新指定列的统计) · [测试报告](docs/test-report.md#vacuum-target-columns-20261119) · [性能报告](docs/performance-report-2026-10-30.md#vacuum-target-columns-cost-20261119)
+
+</details>
+
+<details>
 <summary>一次整理就能收回表和长文本的空间 · 2026-11-19</summary>
 
 运行 `VACUUM FULL` 可以同时收回两处空闲空间，一处在表文件里，另一处在单独存放长文本等大内容的文件里。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>清理表时，可以选择清理哪些数据 · 2026-11-18</summary>
+<summary>查看更早的更新</summary>
+
+## 2026-11-18 · 清理表时，可以选择清理哪些数据
 
 用 `VACUUM` 时，可以只清理表里的普通数据，也可以只清理单独存放的长文本。还可以单独更新查询用的统计信息。
 
 [使用示例](docs/MANUAL.md#分开清理主表和长值) · [测试报告](docs/test-report.md#vacuum-process-options-20261118) · [性能报告](docs/performance-report-2026-10-30.md#vacuum-process-options-cost-20261118)
-
-</details>
-
-<details>
-<summary>查看更早的更新</summary>
 
 ## 2026-11-18 · 清理表时可以少读一遍数据
 

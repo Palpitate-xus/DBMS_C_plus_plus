@@ -76,6 +76,7 @@ public:
     // PG identifier output: ASCII lexical safety, keyword category and doubled quotes.
     // This renders one identifier; it does not parse a qualified name or SQL literal.
     static std::string quoteIdentifier(const std::string& value);
+    static bool isColumnIdentifierKeyword(const std::string& word);
 
 private:
     bool parseIdentitySequenceOptions(const std::vector<std::string>& tokens,

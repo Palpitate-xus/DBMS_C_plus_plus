@@ -2,6 +2,19 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="vacuum-target-columns-20261119"></a>
+## 2026-11-19 · 只更新指定列的统计
+
+分析阶段按表绑定列名，再读取并汇总指定列的数据。未选列继续使用各自上次分析的行数。表重写提交前会为既有统计记录新旧两套表文件的身份和表定义摘要。重启恢复决定哪组表文件生效，两种身份都使用同一份统计值。[使用示例](MANUAL.md#只更新指定列的统计)
+
+- PostgreSQL 18.6 完成两组共 111 次协议交互。已核对指定列、多表、带引号的名字、重复或缺失列、保留其他列统计和空表。参考库中，指定列更新后，所测等值查询的行数估算从 1 变为 540，实际返回 540 行。后续列名无效时，已完成的前一张表分析或当前表重写会保留。[PostgreSQL 分析实现](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/commands/analyze.c)
+- 项目协议测试用两次重写和两次冷启动核对指定列、其余列和实际查询结果。无效列的 FULL 样本实际从 57,344 缩至 16,384 字节，旧统计仍可读。另测显式事务回滚以及表行数从 80 增至 160 后的旧统计回退，未选列仍使用原先 80 行的统计。[协议回归](../tests/legacy_forced_analyze_protocol_e2e_test.py)
+- 原生恢复测试在统计文件目录同步后、事务提交前终止进程，恢复旧表与索引。另一场景在事务提交、清理恢复记录之前终止进程，保留新表与索引。各两次冷启动都读回原样的统计文件内容和正确的剩余行。读取测试同时覆盖两个统计文件版本。[恢复回归](../tests/vacuum_full_cold_recovery_test.cpp) · [统计文件测试](../tests/analyzed_statistics_snapshot_test.cpp)
+
+七项协议回归、572 项统计文件检查、33 个原生恢复阶段和 13 条手册命令通过。持有同一数据库的独占事务时，原生分析返回未完成，统计文件保持原样。受测程序 SHA-256 为 `992ef052e5031af62ec2d59560dbb60003f719d3f25e2c6520570eb6f8e08de7`。完整回归套件待验证。[性能报告](performance-report-2026-10-30.md#vacuum-target-columns-cost-20261119)
+
+SQLite 的 `ANALYZE` 可以指定库、表或索引。DuckDB 的 `ANALYZE` 重算供连接顺序使用的表统计。[SQLite ANALYZE](https://www.sqlite.org/lang_analyze.html) · [DuckDB ANALYZE](https://duckdb.org/docs/current/sql/statements/analyze)
+
 <a id="vacuum-combined-full-20261119"></a>
 ## 2026-11-19 · 默认重写同时整理主表和长值
 

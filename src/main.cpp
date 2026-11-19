@@ -4276,6 +4276,70 @@ static bool handleLockTable(const string& sql, Session& s) {
     return false;
 }
 
+struct MaintenanceTarget {
+    string table;
+    vector<string> columns;
+};
+
+static vector<MaintenanceTarget> parseMaintenanceTargets(
+        const string& input, Session& session, const string& command, bool allowColumns) {
+    const auto tokens = dbms::SQLParser::tokenize(input);
+    size_t next = 0;
+    const auto take = [&](const string& token) {
+        if (next == tokens.size() || tokens[next] != token) return false;
+        ++next;
+        return true;
+    };
+    const auto identifier = [&](bool qualifiedPart = false) -> string {
+        if (next < tokens.size()) {
+            const auto& token = tokens[next];
+            if (token.size() > 2 && token.front() == '"' && token.back() == '"') {
+                ++next;
+                return token;
+            }
+            if (!token.empty()) {
+                const auto first = static_cast<unsigned char>(token.front());
+                if ((std::isalpha(first) || first == '_' || first >= 0x80) &&
+                    (qualifiedPart || dbms::SQLParser::isColumnIdentifierKeyword(token)) &&
+                    std::all_of(token.begin() + 1, token.end(), [](unsigned char ch) {
+                        return std::isalnum(ch) || ch == '_' || ch == '$' || ch >= 0x80;
+                    })) {
+                    ++next;
+                    return token;
+                }
+            }
+        }
+        throw dbms::DbError("42601", "expected identifier in " + command + " target list");
+    };
+
+    vector<MaintenanceTarget> targets;
+    do {
+        MaintenanceTarget target{identifier(), {}};
+        if (take(".")) target.table += "." + identifier(true);
+        if (take("(")) {
+            do {
+                target.columns.push_back(decodeQuotedIdentifier(identifier()));
+            } while (take(","));
+            if (!take(")"))
+                throw dbms::DbError("42601", "expected ')' after " + command + " column list");
+        }
+        targets.push_back(std::move(target));
+    } while (take(","));
+    if (next != tokens.size())
+        throw dbms::DbError("42601", "unexpected token in " + command + " target list");
+
+    if (!allowColumns && std::any_of(targets.begin(), targets.end(),
+            [](const auto& target) { return !target.columns.empty(); }))
+        throw dbms::DbError("0A000", "ANALYZE option must be specified when a column list is provided");
+    for (auto& target : targets) {
+        const string resolved = resolveTableName(session, target.table);
+        if (!g_engine.tableExists(session.currentDB, resolved))
+            throw dbms::DbError("42P01", "relation \"" + target.table + "\" does not exist");
+        target.table = resolved;
+    }
+    return targets;
+}
+
 static bool handleAnalyze(const string& sql, Session& s) {
     if (!checkAdmin(s)) return true;
     if (!checkDB(s)) return true;
@@ -4296,36 +4360,10 @@ static bool handleAnalyze(const string& sql, Session& s) {
         return false;
     }
     if (rest != "table" && rest.compare(0, 6, "table ") != 0) {
-        // PostgreSQL spells the basic command ANALYZE relation[,relation].
-        // Keep the project TABLE/COLUMNS extension separate from native
-        // relation names (including names starting with 'table').
-        vector<string> relationNames;
-        size_t start = 0;
-        bool quoted = false;
-        for (size_t i = 0; i < rest.size(); ++i) {
-            if (rest[i] == '"') {
-                if (quoted && i + 1 < rest.size() && rest[i + 1] == '"') ++i;
-                else quoted = !quoted;
-            } else if (!quoted && (rest[i] == '(' || rest[i] == ')')) {
-                throw dbms::DbError("0A000", "ANALYZE options and column lists are not supported");
-            } else if (!quoted && rest[i] == ',') {
-                relationNames.push_back(trim(rest.substr(start, i - start)));
-                start = i + 1;
-            }
-        }
-        relationNames.push_back(trim(rest.substr(start)));
-        vector<string> tables;
-        for (const auto& name : relationNames) {
-            dbms::CatalogManager::QualifiedName qualified;
-            if (!dbms::CatalogManager::parseQualifiedName(name, qualified))
-                throw dbms::DbError("42601", "invalid ANALYZE relation name");
-            const string table = resolveTableName(s, name);
-            if (!g_engine.tableExists(s.currentDB, table))
-                throw dbms::DbError("42P01", "relation \"" + name + "\" does not exist");
-            tables.push_back(table);
-        }
-        for (const auto& table : tables) {
-            if (!g_engine.analyzeTable(s.currentDB, table))
+        if (rest.front() == '(')
+            throw dbms::DbError("0A000", "ANALYZE options are not supported");
+        for (const auto& [table, columns] : parseMaintenanceTargets(rest, s, "ANALYZE", true)) {
+            if (!g_engine.analyzeTable(s.currentDB, table, columns))
                 throw dbms::DbError("XX000", "ANALYZE failed for relation " + table);
             cout << "Table " << table << " analyzed" << endl;
         }
@@ -4540,20 +4578,16 @@ static bool handleVacuum(const string& sql, Session& s) {
             "0A000", "VACUUM FULL cannot be combined with CONCURRENTLY");
     }
 
-    vector<string> tables;
+    vector<MaintenanceTarget> tables;
     if (rest.empty()) {
-        tables = g_engine.getTableNames(s.currentDB);
+        for (auto& table : g_engine.getTableNames(s.currentDB))
+            tables.push_back({std::move(table), {}});
     } else {
-        const string resolvedName = resolveTableName(s, rest);
-        if (!g_engine.tableExists(s.currentDB, resolvedName)) {
-            throw dbms::DbError(
-                "42P01", "relation \"" + rest + "\" does not exist");
-        }
-        tables.push_back(resolvedName);
+        tables = parseMaintenanceTargets(rest, s, "VACUUM", analyze);
     }
 
     size_t total = 0;
-    for (const auto& table : tables) {
+    for (const auto& [table, columns] : tables) {
         size_t processed = 0;
         if (full) {
             bool succeeded = false;
@@ -4586,7 +4620,7 @@ static bool handleVacuum(const string& sql, Session& s) {
                      << " TOAST values reclaimed" << endl;
             }
         }
-        if (analyze && !g_engine.analyzeTable(s.currentDB, table)) {
+        if (analyze && !g_engine.analyzeTable(s.currentDB, table, columns)) {
             throw dbms::DbError(
                 "XX000", "ANALYZE failed for relation \"" + table + "\"");
         }

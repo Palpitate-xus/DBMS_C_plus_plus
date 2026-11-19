@@ -1912,7 +1912,7 @@ revalidation、其它sets、WALrewrite/PITR及所有剩余273内容继续。总�
 - [x] **TXN-12** LISTEN/NOTIFY 在事务提交后投递、rollback 丢弃、payload/channel 规则、跨 session/backend 队列和协议异步通知。
 - [ ] **VAC-01** VACUUM 的 prune/freeze/index cleanup/truncate、visibility/freeze map、failsafe 和 wraparound 防护。
 - [ ] **VAC-02** autovacuum launcher/worker、per-table thresholds/cost delay、worker slots、anti-wraparound 优先级和冲突取消。
-- [ ] **VAC-03** VACUUM FULL 使用 transactional table rewrite/swap；ANALYZE/VACUUM option 与 progress view 对齐。（截至 2026-11-19，默认 `VACUUM FULL` 已在一次事务中重写主表和长值存储，并通过限定的写入失败和冷启动恢复测试。带列清单的统计更新、跨越重写的时间点恢复、`FREEZE` 和维护进度视图仍待完成。详见 `docs/issue-vac-03-maintenance-options.md`。）
+- [ ] **VAC-03** VACUUM FULL 使用 transactional table rewrite/swap；ANALYZE/VACUUM option 与 progress view 对齐。（截至 2026-11-19，默认 `VACUUM FULL` 可在一次事务中重写主表和长值存储，`ANALYZE` 和 `VACUUM (ANALYZE)` 可指定列清单。跨越重写的时间点恢复、`FREEZE` 和维护进度视图仍待完成。详见 `docs/issue-vac-03-maintenance-options.md`。）
 - [ ] **VAC-04** HOT eligibility 必须考虑所有索引（含 expression/partial）和 page space；chain pruning 与 concurrent snapshot 安全。
 
 ## 14. 存储、WAL、checkpoint 和恢复

@@ -12,6 +12,7 @@
 #include <cstring>
 #include <fstream>
 #include <random>
+#include <set>
 #include <unordered_map>
 
 namespace dbms::analyzed_statistics {
@@ -44,6 +45,18 @@ inline uint64_t schemaImage(const std::filesystem::path& path) {
     std::string bytes{std::istreambuf_iterator<char>(input), {}};
     if (input.bad()) throw DbError("58030", "could not read complete analyzed relation schema");
     return codec::checksum(bytes);
+}
+inline CatalogManager::QualifiedName relationName(const std::string& physical) {
+    auto logical = CatalogService::logicalName(physical);
+    if (const auto* session = currentSession()) {
+        const auto prefix = tempTablePrefix(*session, "");
+        if (physical.rfind(prefix, 0) == 0) {
+            logical.schema = sessionTempSchemaName(*session);
+            logical.name = physical.substr(prefix.size());
+        }
+    }
+    if (logical.schema.empty()) logical.schema = "public";
+    return logical;
 }
 inline std::string attributeImage(const CatalogManager::MetadataSnapshot& snapshot,
                                   uint32_t relation) {
@@ -83,6 +96,7 @@ class ScalarStatisticsCapture {
     std::filesystem::path schemaPath_;
     uint64_t schemaImage_ = 0, seen_ = 0;
     uint32_t relation_ = 0;
+    std::set<int16_t> requestedAttributes_;
     std::string schema_, name_, attributeImage_;
     size_t capacity_ = 0;
     std::optional<size_t> selected_;
@@ -93,16 +107,10 @@ public:
         const dbms::Column&, const std::vector<ScalarSample>&)>;
     ScalarStatisticsCapture(const TableSchema& table, const std::string& physical,
         const std::filesystem::path& schemaPath,
-        const CatalogManager::MetadataSnapshot& snapshot) : schemaPath_(schemaPath) {
-        auto logical = CatalogService::logicalName(physical);
-        if (const auto* session = currentSession()) {
-            const auto prefix = tempTablePrefix(*session, "");
-            if (physical.rfind(prefix, 0) == 0) {
-                logical.schema = sessionTempSchemaName(*session);
-                logical.name = physical.substr(prefix.size());
-            }
-        }
-        schema_ = logical.schema.empty() ? "public" : logical.schema; name_ = logical.name;
+        const CatalogManager::MetadataSnapshot& snapshot,
+        const std::vector<size_t>* columns = nullptr) : schemaPath_(schemaPath) {
+        const auto logical = capture_detail::relationName(physical);
+        schema_ = logical.schema; name_ = logical.name;
         uint32_t ns = 0;
         for (const auto& n : snapshot.namespaces) if (n.nspname == schema_) ns = n.oid;
         for (const auto& r : snapshot.relations)
@@ -113,11 +121,13 @@ public:
         attributeImage_ = capture_detail::attributeImage(snapshot, relation_);
         DatumMetadataFactory factory(snapshot);
         for (size_t i = 0; i < table.len; ++i) {
+            if (columns && !std::binary_search(columns->begin(), columns->end(), i)) continue;
             const auto& storage = table.cols[i];
-            if (storage.generatedKind == 'v') continue;
             for (const auto& a : snapshot.attributes) {
                 if (a.attrelid != relation_ || a.attname != storage.dataName ||
-                    a.attnum <= 0 || a.attisdropped || a.attstattarget == 0) continue;
+                    a.attnum <= 0 || a.attisdropped) continue;
+                if (columns) requestedAttributes_.insert(a.attnum);
+                if (storage.generatedKind == 'v' || a.attstattarget == 0) continue;
                 const auto type = factory.attribute(a);
                 if (!type || type->enumType || type->kind == DatumKind::Record) continue;
                 const bool array = type->kind == DatumKind::Array;
@@ -316,6 +326,7 @@ public:
     }
     bool hasIdentity() const { return relation_ != 0; }
     uint32_t relation() const { return relation_; }
+    const std::set<int16_t>& requestedAttributes() const { return requestedAttributes_; }
     void verify(const CatalogManager::MetadataSnapshot& current) const {
         if (!relation_) return;
         uint32_t ns = 0;

@@ -66,6 +66,14 @@ struct Column {
     int32_t averageWidth = 0;
     float distinctEstimate = 0;
     std::vector<Slot> slots; // At most five used slots, kinds 1..7.
+    // During a physical rewrite the same statistics can match either schema
+    // image. Recovery chooses the live image by committing or undoing FULL.
+    std::optional<std::pair<uint64_t, uint64_t>> rewriteImage;
+
+    bool matchesRelation(uint64_t physical, uint64_t schema) const {
+        return (physicalRelation == physical && schemaGeneration == schema) ||
+               (rewriteImage && rewriteImage->first == physical && rewriteImage->second == schema);
+    }
 };
 struct Snapshot {
     uint64_t generation = 0;

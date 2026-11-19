@@ -29,6 +29,10 @@ sudo apt install cmake g++ make zlib1g-dev libicu-dev
 
 二进制分发请同时提供仓库根 [THIRD_PARTY_NOTICES](../THIRD_PARTY_NOTICES) 中备份清单摘要实现的第三方版权、许可条件与免责声明。CMake 安装会将该声明放入安装前缀下的 `share/doc/DBMS_C_plus_plus/THIRD_PARTY_NOTICES`；单独复制 `dbms_main` 时也须附带该声明。
 
+## 重写后的列统计格式
+
+数据库在已有列统计的表上执行 `VACUUM FULL` 时，可写入新版统计快照，记录重写前后的文件身份。当前程序可读前一版及新版统计快照。只支持前一版的程序无法读取新版 `.analyzed_statistics`。需要切回旧程序时使用升级前的数据目录备份。[恢复验证](test-report.md#vacuum-target-columns-20261119)
+
 ## 整数主键索引格式
 
 默认表空间的普通表在创建或重建单列有符号整数主键索引时，记录 `0xC553` 格式标记。索引页仍为 4 KiB，保留页号绑定校验。新版按索引文件记录的格式读取，原有十进制索引可以继续使用。符合条件的表可用 `REINDEX TABLE` 重新生成有序索引。需要重建索引的表结构修改和恢复操作也使用当前创建规则。

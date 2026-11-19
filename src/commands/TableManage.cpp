@@ -7090,7 +7090,7 @@ static StorageEngine::ColumnStats parseStatsLine(const std::string& line) {
         if (pipe == std::string::npos) break;
         p = pipe + 1;
     }
-    // Positional layout after cardinality: |min|max|hist|mcv|nulls.
+    // Positional layout after cardinality: |min|max|hist|mcv|nulls|analyzedRows.
     // parts[0] is the empty split before min (the | right after the
     // cardinality); min/max may themselves be legitimately empty (an
     // all-NULL column), so leading-empty skipping would misalign fields.
@@ -7132,6 +7132,9 @@ static StorageEngine::ColumnStats parseStatsLine(const std::string& line) {
     if (realParts.size() > 4 && !realParts[4].empty()) {
         try { cs.nullCount = std::stoull(realParts[4]); } catch (...) {}
     }
+    if (realParts.size() > 5 && !realParts[5].empty()) {
+        try { cs.analyzedRows = std::stoull(realParts[5]); } catch (...) {}
+    }
     return cs;
 }
 
@@ -7144,7 +7147,9 @@ static void writeStatsEntry(std::ostream& ofs, const std::string& tname,
         if (i > 0) ofs << ";";
         ofs << cs.histogram[i].first << "," << cs.histogram[i].second;
     }
-    ofs << "|" << mcvToString(cs.mcv) << "|" << cs.nullCount << "\n";
+    ofs << "|" << mcvToString(cs.mcv) << "|" << cs.nullCount;
+    if (cs.analyzedRows) ofs << "|" << *cs.analyzedRows;
+    ofs << "\n";
 }
 
 // Direct physical projection can borrow its current owning bitmap without
@@ -7227,8 +7232,40 @@ private:
 };
 
 bool StorageEngine::analyzeTable(const std::string& dbname,
-                                 const std::string& tablename) {
+                                 const std::string& tablename,
+                                 const std::vector<std::string>& columns) {
+    auto& context = transactionContext();
+    using ReadLock = std::shared_lock<std::shared_mutex>;
+    ReadLock databaseLock;
+    std::optional<PhysicalCatalogOwnership<TransactionContext, ReadLock>> ownership;
+    if (!context.inTransaction) {
+        const auto mutex = databaseTxnLockFor(dbname);
+        const bool alreadyOwned = context.databaseTxnMutex == mutex &&
+            ((context.databaseSharedLock && context.databaseSharedLock->owns_lock()) ||
+             (context.databaseExclusiveLock && context.databaseExclusiveLock->owns_lock()));
+        if (!alreadyOwned) {
+            databaseLock = ReadLock(*mutex, std::try_to_lock);
+            if (!databaseLock.owns_lock()) return false;
+            ownership.emplace(context, mutex, databaseLock);
+        }
+    }
     if (!tableExists(dbname, tablename)) return false;
+    TableSchema tbl = getTableSchema(dbname, tablename);
+    std::vector<size_t> selected;
+    if (columns.empty()) {
+        for (size_t i = 0; i < tbl.len; ++i) selected.push_back(i);
+    } else {
+        std::set<size_t> seen;
+        for (const auto& name : columns) {
+            size_t i = 0;
+            for (; i < tbl.len && tbl.cols[i].dataName != name; ++i) {}
+            if (i == tbl.len)
+                throw DbError("42703", "column \"" + name + "\" of relation \"" + tablename + "\" does not exist");
+            if (!seen.insert(i).second)
+                throw DbError("42701", "column \"" + name + "\" of relation \"" + tablename + "\" appears more than once");
+        }
+        selected.assign(seen.begin(), seen.end());
+    }
     // ANALYZE publishes physical metadata too. In an open transaction use
     // the existing exclusive DDL image owner, so foreign readers cannot
     // consume uncommitted samples and ROLLBACK restores both statistics
@@ -7239,10 +7276,9 @@ bool StorageEngine::analyzeTable(const std::string& dbname,
         if (!hasTransactionBackup()) return false;
         restoreTransactionBackupBeforeRowUndo(true);
     }
-    TableSchema tbl = getTableSchema(dbname, tablename);
     analyzed_statistics::ScalarStatisticsCapture typedAnalysis(
         tbl, tablename, schemaPath(dbname, tablename),
-        catalogService().metadataSnapshot(dbname,false));
+        catalogService().metadataSnapshot(dbname,false), columns.empty() ? nullptr : &selected);
 
     TableStats stats;
     stats.rowCount = 0;
@@ -7257,7 +7293,7 @@ bool StorageEngine::analyzeTable(const std::string& dbname,
         std::vector<bool> capturedNulls;
         std::optional<BufferedNullRowBinding> capturedBinding;
         bool bitmapAttempted = false;
-        for (size_t i = 0; i < tbl.len; ++i) {
+        for (size_t i : selected) {
             if (tbl.cols[i].generatedKind == 'v') continue;
             const std::string& cname = tbl.cols[i].dataName;
             if (g_scanHeapTuple && dbms::isNull(g_scanHeapTuple, static_cast<int>(i))) {
@@ -7334,11 +7370,19 @@ bool StorageEngine::analyzeTable(const std::string& dbname,
 
     const size_t HIST_BUCKETS = 10;
     const size_t MCV_TOP_N = 10;
-    for (size_t i = 0; i < tbl.len; ++i) {
+    const bool refreshColumns = columns.empty() || stats.rowCount > 0;
+    for (size_t i : selected) {
+        if (!refreshColumns) break;
         if (tbl.cols[i].generatedKind == 'v') continue;
         const std::string& cname = tbl.cols[i].dataName;
+        // The old file uses space-delimited names. The typed snapshot uses
+        // catalog identities and can represent names this format cannot.
+        if (!columns.empty() && (cname == "__rows__" || cname == "__multi__" ||
+            std::any_of(cname.begin(), cname.end(), [](unsigned char ch) { return std::isspace(ch); })))
+            continue;
         StorageEngine::ColumnStats cs;
         cs.nullCount = nullCounts[cname];
+        cs.analyzedRows = stats.rowCount;
         auto& vals = allVals[cname];
         const Column& column = tbl.cols[i];
         AnalyzeComparisonCache comparison;
@@ -7416,8 +7460,11 @@ bool StorageEngine::analyzeTable(const std::string& dbname,
     // Load existing stats, update this table's entry (preserve multi-col stats)
     std::map<std::string, TableStats> allStats;
     auto spath = statsPath(dbname);
+    StatsFileLock statisticsLock(spath);
+    if (!statisticsLock.ok()) return false;
     if (std::filesystem::exists(spath)) {
         std::ifstream ifs(spath);
+        if (!ifs) return false;
         std::string line;
         while (std::getline(ifs, line)) {
             if (line.empty()) continue;
@@ -7441,13 +7488,23 @@ bool StorageEngine::analyzeTable(const std::string& dbname,
             }
             allStats[tname].colStats[cname] = parseStatsLine(line);
         }
+        if (ifs.bad()) return false;
     }
     // Preserve multi-col stats from existing entry
     auto it = allStats.find(tablename);
     if (it != allStats.end()) {
-        stats.multiColStats = it->second.multiColStats;
+        auto& previous = it->second;
+        stats.multiColStats = std::move(previous.multiColStats);
+        if (!columns.empty()) {
+            for (auto& [name, column] : previous.colStats) {
+                if (!column.analyzedRows) column.analyzedRows = previous.rowCount;
+                stats.colStats.try_emplace(name, std::move(column));
+            }
+        }
     }
-    allStats[tablename] = stats;
+    const bool legacyTableName = std::none_of(tablename.begin(), tablename.end(),
+        [](unsigned char ch) { return std::isspace(ch); });
+    if (columns.empty() || legacyTableName) allStats[tablename] = std::move(stats);
 
     // Write back
     std::ostringstream serialized;
@@ -7468,9 +7525,10 @@ bool StorageEngine::analyzeTable(const std::string& dbname,
     }
     markTransactionBackupDirty();
     if (!index_file::writeAtomically(spath, serialized.str())) return false;
-    if (typedAnalysis.hasIdentity()) {
+    if (refreshColumns && typedAnalysis.hasIdentity()) {
         const auto publication = analyzed_statistics::updateRelation(
-            dbPath(dbname) / ".analyzed_statistics", typedAnalysis.relation(), typedStatistics);
+            dbPath(dbname) / ".analyzed_statistics", typedAnalysis.relation(), typedStatistics,
+            columns.empty() ? nullptr : &typedAnalysis.requestedAttributes());
         if (publication.publication != StatsSnapshotPublication::Durable) return false;
     }
     return true;
@@ -7529,6 +7587,8 @@ bool StorageEngine::analyzeMultiColumn(const std::string& dbname, const std::str
     // Load existing stats
     std::map<std::string, TableStats> allStats;
     auto spath = statsPath(dbname);
+    StatsFileLock statisticsLock(spath);
+    if (!statisticsLock.ok()) return false;
     if (std::filesystem::exists(spath)) {
         std::ifstream ifs(spath);
         std::string line;
@@ -35996,10 +36056,9 @@ std::shared_ptr<const analyzed_statistics::Column> StorageEngine::getAnalyzedCol
         if (session && !sessionIsAdmin(*session) && !hasColumnPermission(dbname, table,
                 effectiveSessionRole(*session), TablePrivilege::Select, {column})) return {};
         const auto schema = getTableSchema(dbname, table);
-        if (!schema.len || schema.partitionType != TableSchema::PartitionType::None ||
-            schema.physicalRelationId != statistics.physicalRelation) return {};
+        if (!schema.len || schema.partitionType != TableSchema::PartitionType::None) return {};
         const auto digest = analyzedStatisticsReadCache_->schemaDigest(schemaPath(dbname, table));
-        if (!digest || *digest != statistics.schemaGeneration) return {};
+        if (!digest || !statistics.matchesRelation(schema.physicalRelationId, *digest)) return {};
         return std::shared_ptr<const analyzed_statistics::Column>(snapshot, &statistics);
     } catch (const DbError& error) {
         // Optional cost evidence cannot turn corrupt/missing statistics into
@@ -36091,7 +36150,7 @@ std::vector<std::vector<ExprValue>> StorageEngine::getAnalyzedStatisticsRows(con
                 image.schema=analyzed_statistics::capture_detail::schemaImage(schemaPath(dbname,physical));
             }
         }
-        if(!image.present || image.relation!=statistics.physicalRelation || image.schema!=statistics.schemaGeneration)continue;
+        if (!image.present || !statistics.matchesRelation(image.relation, image.schema)) continue;
         const auto declaration=factory.attribute(*attribute);
         if(!declaration || declaration->actualOid!=statistics.attributeType->actualOid ||
            declaration->codecOid!=statistics.attributeType->codecOid || declaration->kind!=statistics.attributeType->kind)continue;
@@ -36120,13 +36179,14 @@ std::vector<std::string> StorageEngine::getPgStatsRows(
             if (!onlyTable.empty() && currentTable != onlyTable) return;
             for (const auto& cv : cols) {
                 if (!onlyColumn.empty() && cv.first != onlyColumn) continue;
+                const size_t analyzedRows = cv.second.analyzedRows.value_or(rowCount);
                 double nDist = 0.0;
-                if (rowCount > 0) {
-                    if (cv.second.cardinality == rowCount) {
+                if (analyzedRows > 0) {
+                    if (cv.second.cardinality == analyzedRows) {
                         nDist = -1.0;
                     } else {
                         nDist = -static_cast<double>(cv.second.cardinality) /
-                                static_cast<double>(rowCount);
+                                static_cast<double>(analyzedRows);
                     }
                 }
                 std::ostringstream mcv, freqs, hist;
@@ -36134,9 +36194,9 @@ std::vector<std::string> StorageEngine::getPgStatsRows(
                     if (i > 0) { mcv << ","; freqs << ","; }
                     mcv << "{" << cv.second.mcv[i].first << "}";
                     freqs << "{"
-                          << (rowCount > 0
+                          << (analyzedRows > 0
                                   ? static_cast<double>(cv.second.mcv[i].second) /
-                                        static_cast<double>(rowCount)
+                                        static_cast<double>(analyzedRows)
                                   : 0.0)
                           << "}";
                 }
@@ -36149,8 +36209,8 @@ std::vector<std::string> StorageEngine::getPgStatsRows(
                     // final upper bound so the catalog spans the full range.
                     hist << ",{" << cv.second.histogram.back().second << "}";
                 }
-                const double nullFraction = rowCount > 0
-                    ? static_cast<double>(cv.second.nullCount) / static_cast<double>(rowCount)
+                const double nullFraction = analyzedRows > 0
+                    ? static_cast<double>(cv.second.nullCount) / static_cast<double>(analyzedRows)
                     : 0.0;
                 result.push_back(dbname + " " + currentTable + " " + cv.first +
                                  " " + std::to_string(nullFraction) + " " +
@@ -53340,6 +53400,27 @@ size_t StorageEngine::vacuumFull(const std::string& dbname,
     }
     for (const auto& parent : publicationParents)
         if (!index_file::syncDirectory(parent)) return failRewrite();
+    const auto analyzedPath = dbPath(dbname) / ".analyzed_statistics";
+    const auto relationSchemaPath = schemaPath(dbname, tablename);
+    uint32_t analyzedRelation = 0;
+    uint64_t oldSchemaImage = 0;
+    if (std::filesystem::exists(analyzedPath)) {
+        const auto logical = analyzed_statistics::capture_detail::relationName(tablename);
+        const auto model = catalogService().metadataSnapshot(dbname, false);
+        const auto ns = std::find_if(model.namespaces.begin(), model.namespaces.end(),
+            [&](const auto& row) { return row.nspname == logical.schema; });
+        if (ns != model.namespaces.end()) {
+            const auto relation = std::find_if(model.relations.begin(), model.relations.end(),
+                [&](const auto& row) {
+                    return row.relnamespace == ns->oid && row.relname == logical.name &&
+                        (row.relkind == 'r' || row.relkind == 'p' || row.relkind == 'm');
+                });
+            if (relation != model.relations.end()) {
+                analyzedRelation = relation->oid;
+                oldSchemaImage = analyzed_statistics::capture_detail::schemaImage(relationSchemaPath);
+            }
+        }
+    }
     TableSchema rewritten = tbl;
     rewritten.physicalRelationId = backupState.newIdentity;
     if (!writeSchemaFile(dbname, tablename, rewritten)) return failRewrite();
@@ -53359,6 +53440,15 @@ size_t StorageEngine::vacuumFull(const std::string& dbname,
         evictToast();
         if (!publishToastFiles(toastPaths, toastStaging)) return failRewrite();
     }
+
+    // Durably record both schema identities before COMMIT. If the rewrite
+    // fails or is interrupted, the existing receipt restores the old schema
+    // and the same statistics still match it without a second recovery write.
+    if (analyzedRelation && !analyzed_statistics::preserveRelationStatistics(
+            analyzedPath, analyzedRelation, tbl.physicalRelationId, oldSchemaImage,
+            rewritten.physicalRelationId,
+            analyzed_statistics::capture_detail::schemaImage(relationSchemaPath)))
+        return failRewrite();
 
     const auto completionPayload = heap_wal_identity::event(
         backupState.oldIdentity == 0 ? backupState.newIdentity : backupState.oldIdentity,

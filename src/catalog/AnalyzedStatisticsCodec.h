@@ -15,6 +15,7 @@ inline constexpr uint64_t maxNodes = 1000000;
 inline constexpr size_t maxDepth = 128;
 inline constexpr char magic[] = "\0DBMS_ANALYZED_STATS";
 inline constexpr uint32_t version = 1;
+inline constexpr uint32_t rewriteVersion = 2;
 static_assert(sizeof(float)==4 && sizeof(double)==8 &&
     std::numeric_limits<float>::is_iec559 && std::numeric_limits<double>::is_iec559,
     "statistics snapshots require IEEE binary32/binary64");
@@ -35,7 +36,9 @@ inline void valid(const Key& key,const Column& c) {
        !std::isfinite(c.totalRows) || c.totalRows<0 || c.target<0 ||
        !std::isfinite(c.nullFraction) || c.nullFraction<0 || c.nullFraction>1 ||
        c.averageWidth<0 || !std::isfinite(c.distinctEstimate) ||
-       c.distinctEstimate < -1 || c.slots.size()>5) invalid("column fields");
+       c.distinctEstimate < -1 || c.slots.size()>5 ||
+       (c.rewriteImage && (!c.rewriteImage->first || c.rewriteImage->first == c.physicalRelation)))
+        invalid("column fields");
     unsigned kinds=0;
     for(const auto& slot:c.slots) {
         const auto kind=static_cast<uint16_t>(slot.kind);
@@ -173,11 +176,21 @@ public:
 } // namespace codec
 
 inline std::string encode(const Snapshot& snapshot) {
+    const bool hasRewrite = std::any_of(snapshot.columns.begin(), snapshot.columns.end(),
+        [](const auto& entry) { return entry.second.rewriteImage.has_value(); });
     codec::Writer body;body.u(snapshot.generation,8);body.count(snapshot.columns.size());
     for(const auto& entry:snapshot.columns) {
         const auto& key=entry.first;const auto& c=entry.second;codec::valid(key,c);
         body.u(key.relation,4);body.u(static_cast<uint16_t>(key.attribute),2);body.flag(key.inherited);
-        body.u(c.physicalRelation,8);body.u(c.schemaGeneration,8);body.type(*c.attributeType);
+        body.u(c.physicalRelation,8);body.u(c.schemaGeneration,8);
+        if (hasRewrite) {
+            body.flag(c.rewriteImage.has_value());
+            if (c.rewriteImage) {
+                body.u(c.rewriteImage->first, 8);
+                body.u(c.rewriteImage->second, 8);
+            }
+        }
+        body.type(*c.attributeType);
         body.u(c.collation,4);body.u(static_cast<uint32_t>(c.target),4);
         body.u(c.sampleRows,8);body.u(c.nullRows,8);body.f8(c.totalRows);
         body.f4(c.nullFraction);body.u(static_cast<uint32_t>(c.averageWidth),4);body.f4(c.distinctEstimate);
@@ -191,7 +204,8 @@ inline std::string encode(const Snapshot& snapshot) {
         }
     }
     const auto payload=body.finish();codec::Writer frame;
-    frame.raw({codec::magic,sizeof(codec::magic)});frame.u(codec::version,4);frame.u(payload.size(),8);frame.raw(payload);
+    frame.raw({codec::magic,sizeof(codec::magic)});frame.u(hasRewrite?codec::rewriteVersion:codec::version,4);
+    frame.u(payload.size(),8);frame.raw(payload);
     auto bytes=frame.finish();const auto hash=codec::checksum(bytes);codec::Writer trailer;trailer.u(hash,8);bytes+=trailer.finish();
     if(bytes.size()>codec::maxBytes)codec::limit("byte limit");
     return bytes;
@@ -200,14 +214,21 @@ inline Snapshot decode(std::string_view bytes) {
     const size_t header=sizeof(codec::magic)+4+8;
     if(bytes.size()>codec::maxBytes || bytes.size()<header+8)codec::invalid("frame size");
     codec::Reader frame(bytes);if(frame.raw(sizeof(codec::magic))!=std::string_view(codec::magic,sizeof(codec::magic)))codec::invalid("magic");
-    if(frame.u(4)!=codec::version)codec::invalid("version");
+    const auto version = frame.u(4);
+    if (version != codec::version && version != codec::rewriteVersion) codec::invalid("version");
     const auto size=frame.u(8);if(size!=frame.remaining()-8)codec::invalid("payload length");
     codec::Reader r(frame.raw(static_cast<size_t>(size)));const auto stored=frame.u(8);
     if(stored!=codec::checksum(bytes.substr(0,bytes.size()-8)))codec::invalid("checksum");
     Snapshot result;result.generation=r.u(8);const auto n=r.count(80);
     for(size_t i=0;i<n;++i) {
         Key key;key.relation=static_cast<uint32_t>(r.u(4));key.attribute=r.i2();key.inherited=r.flag();Column c;
-        c.physicalRelation=r.u(8);c.schemaGeneration=r.u(8);c.attributeType=r.type();
+        c.physicalRelation=r.u(8);c.schemaGeneration=r.u(8);
+        if (version == codec::rewriteVersion && r.flag()) {
+            const auto physical = r.u(8);
+            const auto schema = r.u(8);
+            c.rewriteImage.emplace(physical, schema);
+        }
+        c.attributeType=r.type();
         c.collation=static_cast<uint32_t>(r.u(4));c.target=r.i4();c.sampleRows=r.u(8);c.nullRows=r.u(8);
         c.totalRows=r.f8();c.nullFraction=r.f4();c.averageWidth=r.i4();c.distinctEstimate=r.f4();
         const auto ns=r.count(12,5);c.slots.reserve(ns);
