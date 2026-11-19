@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>带来源表的更新和删除，也能按主键找记录 · 2026-11-19</summary>
+
+如果条件先用整数主键指定一条记录，数据库核对索引命中后，可以直接找到目标，再检查来源表。
+
+[使用说明](docs/MANUAL.md#按整数主键更新或删除) · [测试报告](docs/test-report.md#joined-primary-key-target-20261119) · [性能报告](docs/performance-report-2026-10-30.md#joined-primary-key-cost-20261119)
+
+</details>
+
+<details>
 <summary>按另一张表更新或删除时，也能处理并发修改 · 2026-11-19</summary>
 
 默认设置下，如果目标记录被另一个连接先改了，数据库会用新值和原来选中的来源记录重新检查条件。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>按编号修改或删除记录时少读数据 · 2026-11-19</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-19 · 按编号修改或删除记录时少读数据
 
 例如按订单号删除一条订单。如果订单号是整数主键，数据库可以用索引找到这条记录，省去逐页查找。
 
 [使用示例](docs/MANUAL.md#按整数主键更新或删除) · [测试报告](docs/test-report.md#integer-primary-key-mutation-20261119) · [性能报告](docs/performance-report-2026-10-30.md#integer-primary-key-mutation-cost-20261119)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-19 · 可以查看分区表的统计更新进度
 

@@ -6538,6 +6538,20 @@ class BoundDmlExecution {
         // No expression, routine or child query is evaluated to obtain it.
         return {"="+stored.dataName+" "+std::to_string(number)};
     }
+    std::string joinedTargetPrimaryKeyProbe(const Expr* where) const {
+        // Keep predicates to the right of an effectful expression in their
+        // original order. Virtual target inputs can also execute expressions
+        // when an original row is decoded for the join.
+        if (std::any_of(table_.cols, table_.cols + table_.len,
+                       [](const Column& column) { return column.generatedKind == 'v'; })) return {};
+        while (const auto* binary = dynamic_cast<const BinaryOpExpr*>(where)) {
+            if (binary->op != "AND" || binary->preparedSubquery) break;
+            where = binary->left.get();
+        }
+        auto conditions = integerEqualityCandidates(where);
+        if (conditions.empty()) return {};
+        return std::move(conditions.front());
+    }
     DmlResult result(const std::vector<ReturningRowImage>& rows,const std::string& command,size_t count,
                      const std::vector<RowContext>* sources=nullptr) {
         DmlResult output;output.available=true;
@@ -6802,6 +6816,7 @@ private:
                 return values;
             };
             StorageEngine::SqlMutationCallbacks callbacks;
+            callbacks.targetPrimaryKeyProbe = joinedTargetPrimaryKeyProbe(where);
             callbacks.matches=[&](int64_t rid,const SqlRow& old) {
                 originalTarget = rid;
                 alternatives.clear();

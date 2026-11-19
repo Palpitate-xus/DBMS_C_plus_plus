@@ -710,6 +710,9 @@ public:
         // Recheck a joined target against its original source matches and
         // transfer the qualifying match from the old RID to the locked RID.
         std::function<bool(int64_t, int64_t, const SqlRow&)> recheckJoinedTarget;
+        // A necessary integer key comparison for a checked index hit. A
+        // miss leaves joined source demand and the heap scan unchanged.
+        std::string targetPrimaryKeyProbe;
     };
 
     using UpdateResolver = std::function<bool(

@@ -14,6 +14,8 @@ SQLite 同时只允许一个写事务。在 WAL 模式下，持有旧快照的�
 
 PostgreSQL 可以从执行计划的索引扫描取得要修改的行。项目现在可借单列整数主键索引直接定位部分 `UPDATE` 和 `DELETE` 的目标。旧快照、索引未命中及复杂条件仍走表扫描。[PostgreSQL 修改执行器](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/executor/nodeModifyTable.c) · [测试报告](test-report.md#integer-primary-key-mutation-20261119)
 
+项目把这种查找扩展到带来源表的常见写入。受测的整数主键命中可以绕开与目标无关的数据页。受测主键未命中时，项目仍扫描目标并计算来源，而 PostgreSQL 18.6 的对照语句省去了来源计算。面向连接的通用计划选择仍有差距。[PostgreSQL 执行计划](https://www.postgresql.org/docs/18/using-explain.html) · [对照结果](test-report.md#joined-primary-key-target-20261119)
+
 ## 2026-11-19 · 分区表统计和重写参数
 
 两边的父表统计进度都按已完成分区数以及当前分区的采样页数报告。PostgreSQL 可报告当前分区的表编号，默认还会继续更新各个子表自己的统计。项目当前支持父表管理的物理分区，单独的子表编号和统计仍待实现。两边都拒绝指定正数并行工作数的 `VACUUM FULL`，允许 `PARALLEL 0`。[PostgreSQL 进度字段](https://www.postgresql.org/docs/18/progress-reporting.html) · [实测范围](test-report.md#partition-analyze-vacuum-parallel-20261119)

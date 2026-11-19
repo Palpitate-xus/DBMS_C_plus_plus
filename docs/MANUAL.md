@@ -1180,6 +1180,13 @@ DELETE FROM items WHERE id = 43 RETURNING id;
 
 这一查找方式要求可用的新版主键索引和仍能使用当前索引的语句快照，适用于符合条件的 `READ COMMITTED` 或 `REPEATABLE READ` 事务。索引未命中、事务内已有写入、复合主键、范围条件和旧索引都沿用表扫描。[测试范围](test-report.md#integer-primary-key-mutation-20261119)
 
+带来源表的 `UPDATE ... FROM` 和 `DELETE ... USING` 也可用这个查找方式。条件开头需用同类型的整数值和目标表的主键作等值比较。核实索引命中后，数据库仍计算来源和完整条件。索引未命中时沿用原来的查找方式。[带来源表的测试](test-report.md#joined-primary-key-target-20261119)
+
+```sql
+UPDATE items AS t SET label = s.label FROM proposed_labels AS s
+WHERE t.id = 42 AND t.id = s.item_id;
+```
+
 ### 同时修改同一行
 
 两个连接更新或删除同一行时，先拿到锁的连接先执行。在默认的 `READ COMMITTED` 下，后一个连接等到锁后，用最新已经提交的版本重新检查 `WHERE`。如果先前的修改已回滚，后一个连接从原值继续。记录已被删除或不再符合条件时，受影响行数为零。例如两个连接都执行 `UPDATE items SET n = n + 1 WHERE id = 42 RETURNING n`，第二个连接会在第一个提交后的值上加一。

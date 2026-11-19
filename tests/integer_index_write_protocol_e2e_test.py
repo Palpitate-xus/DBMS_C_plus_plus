@@ -65,6 +65,8 @@ def main():
         table = "integer_point_write"
         table_key = "integer_point_table_key"
         pair = "integer_point_pair"
+        source = "integer_point_join_source"
+        empty_source = "integer_point_join_empty"
         count = 64
         padding = "x" * 504
         point_keys = {-1, *range(1, 7)}
@@ -76,6 +78,11 @@ def main():
         query(f"INSERT INTO {table} VALUES {values}", tag=f"INSERT 0 {len(keys)}")
         query(f"INSERT INTO {table_key} VALUES {values}", tag=f"INSERT 0 {len(keys)}")
         query(f"INSERT INTO {pair} VALUES {values},(1,9999,'{padding}')", tag=f"INSERT 0 {len(keys) + 1}")
+        query(f"CREATE TABLE {source}(id INT PRIMARY KEY,n INT)", tag="CREATE TABLE")
+        query(f"CREATE TABLE {empty_source}(id INT PRIMARY KEY,n INT)", tag="CREATE TABLE")
+        query(f"INSERT INTO {source} VALUES(3,324),(4,12),(5,15),(6,18)", tag="INSERT 0 4")
+        query("CREATE SEQUENCE integer_point_join_calls", tag="CREATE SEQUENCE")
+        query("CREATE SEQUENCE integer_point_empty_calls", tag="CREATE SEQUENCE")
         query("CHECKPOINT", tag="CHECKPOINT")
         database = Path(server["dir"], "info")
         page_size = 8192
@@ -137,6 +144,25 @@ def main():
                 rows = reply(client.read_until_ready(worker), sql, tag=tag, ready=ready, returning=True)
                 assert sorted(rows) == expected, (sql, rows)
 
+            def joined_rekey(sql, key, tag):
+                work("BEGIN ISOLATION LEVEL READ COMMITTED", tag="BEGIN", ready=b"T")
+                query("BEGIN ISOLATION LEVEL READ COMMITTED", tag="BEGIN", ready=b"T")
+                query(f"UPDATE {table_key} SET id={100+key} WHERE id={key}", tag="UPDATE 1", ready=b"T")
+                worker.sendall(client.typed(b"Q", sql.encode() + b"\0"))
+                deadline = time.monotonic() + 5
+                while True:
+                    assert not select.select([worker], [], [], 0)[0] and time.monotonic() < deadline, sql
+                    locks = query("SELECT * FROM pg_locks", ready=b"T")
+                    if any(row[3:] == ["wait", "f"] for row in locks):
+                        assert any(row[2].startswith(f"info\x1f{table_key}:") and row[3:] == ["exclusive", "t"]
+                                   for row in locks), locks
+                        break
+                    time.sleep(0.01)
+                assert not select.select([worker], [], [], 0)[0], sql
+                query("COMMIT", tag="COMMIT", ready=b"I")
+                assert reply(client.read_until_ready(worker), sql, tag=tag, ready=b"T", returning=True) == []
+                work("COMMIT", tag="COMMIT", ready=b"I")
+
             work("SET lock_timeout=800", tag="SET", ready=b"I")
             point(f"UPDATE {table} SET v=777 WHERE id=1 RETURNING id,v", "UPDATE 1", [["1", "777"]])
             point(f"DELETE FROM {table} WHERE id=2 RETURNING id,v", "DELETE 1", [["2", "6"]])
@@ -146,6 +172,17 @@ def main():
                   "UPDATE 1", [["1", "778"]], b"T", name=table_key)
             work("COMMIT", tag="COMMIT", ready=b"I")
             point(f"DELETE FROM {table_key} WHERE id=2 RETURNING id,v", "DELETE 1", [["2", "6"]], name=table_key)
+            point(f"UPDATE {table_key} t SET v=t.v+s.n FROM {source} s "
+                  "WHERE t.id=3 AND t.id=s.id RETURNING t.id,t.v",
+                  "UPDATE 1", [["3", "333"]], name=table_key)
+            point(f"DELETE FROM {table_key} t USING {source} s WHERE t.id=4 AND t.id=s.id RETURNING t.id,t.v",
+                  "DELETE 1", [["4", "12"]], name=table_key)
+            no_source = "AND nextval('integer_point_empty_calls')>0 AND t.id=s.id RETURNING t.id,t.v"
+            point(f"UPDATE {table_key} t SET v=CAST(nextval('integer_point_empty_calls') AS INT) "
+                  f"FROM {empty_source} s WHERE t.id=5 {no_source}", "UPDATE 0", [], name=table_key)
+            point(f"DELETE FROM {table_key} t USING {empty_source} s WHERE t.id=6 {no_source}",
+                  "DELETE 0", [], name=table_key)
+            assert work("SELECT nextval('integer_point_empty_calls')", tag="SELECT 1") == [["1"]]
 
             work("BEGIN ISOLATION LEVEL READ COMMITTED", tag="BEGIN", ready=b"T")
             rekey = f"UPDATE {table} SET id=-3 WHERE id=3 RETURNING id,v"
@@ -154,6 +191,24 @@ def main():
             work("SET lock_timeout=0", tag="SET", ready=b"I")
             fallback(f"UPDATE {table} SET v=5 WHERE id=999 RETURNING id,v", "UPDATE 0", [], ready=b"I")
             fallback(f"DELETE FROM {table} WHERE id=999 RETURNING id,v", "DELETE 0", [], ready=b"I")
+            # A missed probe must still demand the source of the original join.
+            producer = ("WITH p AS MATERIALIZED (SELECT id,CAST(nextval('integer_point_join_calls') AS INT) AS n "
+                        f"FROM {source} ORDER BY id) ")
+            fallback(f"{producer}UPDATE {table_key} t SET v=t.v+p.n FROM p "
+                     "WHERE t.id=999 AND t.id=p.id RETURNING t.id,t.v", "UPDATE 0", [], ready=b"I", name=table_key)
+            assert work("SELECT nextval('integer_point_join_calls')", tag="SELECT 1") == [["5"]]
+            fallback(f"{producer}DELETE FROM {table_key} t USING p "
+                     "WHERE t.id=999 AND t.id=p.id RETURNING t.id,t.v", "DELETE 0", [], ready=b"I", name=table_key)
+            assert work("SELECT nextval('integer_point_join_calls')", tag="SELECT 1") == [["10"]]
+            work("BEGIN ISOLATION LEVEL READ COMMITTED", tag="BEGIN", ready=b"T")
+            fallback(f"UPDATE {table_key} t SET v=t.v+s.n FROM {source} s "
+                     "WHERE t.id=s.id AND t.id=5 RETURNING t.id,t.v",
+                     "UPDATE 1", [["5", "30"]], name=table_key)
+            work("ROLLBACK", tag="ROLLBACK", ready=b"I")
+            work("BEGIN ISOLATION LEVEL READ COMMITTED", tag="BEGIN", ready=b"T")
+            fallback(f"DELETE FROM {table_key} t USING {source} s WHERE s.id=6 AND t.id=s.id RETURNING t.id,t.v",
+                     "DELETE 1", [["6", "18"]], name=table_key)
+            work("ROLLBACK", tag="ROLLBACK", ready=b"I")
 
             work("BEGIN", tag="BEGIN", ready=b"T")
             work(f"UPDATE {table} SET v=501 WHERE id=1", tag="UPDATE 1", ready=b"T")
@@ -179,6 +234,12 @@ def main():
             fallback(f"DELETE FROM {pair} WHERE id=1 RETURNING id,v", "DELETE 2",
                      [["1", "3"], ["1", "9999"]], name=pair)
             work("ROLLBACK", tag="ROLLBACK", ready=b"I")
+            # The replacement still joins to its original source on value.
+            work("SET lock_timeout=8000", tag="SET", ready=b"I")
+            joined_rekey(f"UPDATE {table_key} t SET v=t.v+s.n FROM {source} s "
+                         "WHERE t.id=5 AND t.v=s.n RETURNING t.id,t.v", 5, "UPDATE 0")
+            joined_rekey(f"DELETE FROM {table_key} t USING {source} s "
+                         "WHERE t.id=6 AND t.v=s.n RETURNING t.id,t.v", 6, "DELETE 0")
 
         expected = [["-1", "776"], ["1", "777"], ["3", "9"], ["4", "12"], ["5", "15"], ["6", "18"], [str(count), "909"]]
         statement = f"SELECT id,v FROM {table} WHERE id IN (-3,-1,1,2,3,4,5,6,{count}) ORDER BY id"
@@ -190,6 +251,10 @@ def main():
         assert query(f"SELECT id,v FROM {table} WHERE id=2", tag="SELECT 0", ready=b"I") == []
         assert query(f"SELECT id,v FROM {table_key} WHERE id=1", tag="SELECT 1", ready=b"I") == [["1", "778"]]
         assert query(f"SELECT id,v FROM {table_key} WHERE id=2", tag="SELECT 0", ready=b"I") == []
+        assert query(f"SELECT id,v FROM {table_key} WHERE id=3", tag="SELECT 1", ready=b"I") == [["3", "333"]]
+        assert query(f"SELECT id,v FROM {table_key} WHERE id=4", tag="SELECT 0", ready=b"I") == []
+        assert query(f"SELECT id,v FROM {table_key} WHERE id IN (5,6,105,106) ORDER BY id",
+                     tag="SELECT 2", ready=b"I") == [["105", "15"], ["106", "18"]]
         assert query(f"SELECT id,v FROM {pair} WHERE id=1 ORDER BY v", tag="SELECT 2", ready=b"I") == [["1", "3"], ["1", "9999"]]
         print("[INTEGER POINT WRITE] hit, miss, fallback and cold recovery passed")
 

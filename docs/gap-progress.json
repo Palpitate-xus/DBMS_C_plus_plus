@@ -2,6 +2,27 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-19 locate joined integer primary-key write targets with a checked index hit",
+      "gap_ids": ["DML-01", "OPT-11", "QRY-13"],
+      "status": "partial",
+      "evidence": [
+        "src/commands/DmlExecutor.cpp",
+        "src/commands/TableManage.cpp",
+        "docs/test-report.md",
+        "docs/performance-report-2026-10-30.md"
+      ],
+      "tests": [
+        "tests/integer_index_write_protocol_e2e_test.py",
+        "tests/update_delete_from_protocol_e2e_test.py",
+        "tests/mvcc_update_test.cpp"
+      ],
+      "verification": [
+        "Bound joined writes pass a necessary leading integer target comparison to the existing current-snapshot probe. A verified signed-primary-key hit admits the target to the existing full join matcher. Misses and ineligible snapshots retain the original scan and source demand.",
+        "Thirteen protocol suites and eight native suites passed. Five protected-page cases finish without an unrelated target page, four controls still wait, and fourteen supplemental controls preserve the project's source evaluation. PostgreSQL 18.6 and the project return zero affected rows when a waiting statement's original key no longer matches. Two isolated-source-page tests also verify a concurrent rekey after an actual checked index hit. Crash reopen verifies committed data and key lookups.",
+        "Twelve comparison runs completed 1728 timed writes and audited 2160 protocol exchanges, with identical table and index files. Observed wall medians were lower for all four primary-key hit workloads, but all four exceed the preset 10 percent CPU drift threshold. The miss control has no clear change across the three comparison groups."
+      ]
+    },
+    {
       "issue": "2026-11-19 retain original source matches when a joined mutation waits for a concurrent writer",
       "gap_ids": ["TXN-08", "QRY-13"],
       "status": "partial",

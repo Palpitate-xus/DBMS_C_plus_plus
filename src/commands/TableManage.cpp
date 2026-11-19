@@ -31611,14 +31611,20 @@ static std::optional<int64_t> matchCurrentIntegerPrimaryKey(
         StorageEngine& engine, const std::string& dbname, const std::string& tablename,
         const TableSchema& table, const std::vector<StorageEngine::Condition>& conditions,
         Context& context, uint64_t ownerBeforeWrite, std::recursive_mutex& cacheMutex,
-        PageAllocator* allocator, Registry& registry) {
+        PageAllocator* allocator, Registry& registry,
+        const StorageEngine::SqlMutationCallbacks* callbacks) {
     if (!ownerBeforeWrite || context.currentTxnId != ownerBeforeWrite ||
         (context.txnIsolationLevel != IsolationLevel::READ_COMMITTED &&
          context.txnIsolationLevel != IsolationLevel::REPEATABLE_READ) ||
         !context.readView.commandIdVisibility || context.commandInternalRelations.count(tablename) ||
-        !allocator || dataDirectory().empty() || table.isUnlogged || isSessionTemporaryRelation(tablename) ||
-        conditions.size() != 1) return {};
-    const auto& condition = conditions.front();
+        !allocator || dataDirectory().empty() || table.isUnlogged || isSessionTemporaryRelation(tablename))
+        return {};
+    std::vector<StorageEngine::Condition> probe;
+    if (conditions.empty() && callbacks && !callbacks->targetPrimaryKeyProbe.empty())
+        probe = StorageEngine::parseConditions({callbacks->targetPrimaryKeyProbe});
+    const auto& keyConditions = probe.empty() ? conditions : probe;
+    if (keyConditions.size() != 1) return {};
+    const auto& condition = keyConditions.front();
     if (condition.op != "=" || condition.patternIsNull || !condition.patternType.empty() ||
         condition.referenceInputOid) return {};
     const auto column = signedIntegerPrimaryKeyColumn(table);
@@ -32124,7 +32130,7 @@ DBStatus StorageEngine::removeInternal(
         auto conds = parseConditions(conditions);
         bool scanFailed = false;
         if (const auto target = matchCurrentIntegerPrimaryKey(*this, dbname, tablename,
-                tbl, conds, context, ownerBeforeWrite, cacheMutex_, pa, transactionRegistry()))
+                tbl, conds, context, ownerBeforeWrite, cacheMutex_, pa, transactionRegistry(), mutationCallbacks))
             toDelete.insert(*target);
         else
             toDelete = filterRows(dbname, tablename, conds, nullptr, &scanFailed);
@@ -33737,13 +33743,13 @@ DBStatus StorageEngine::updateInternal(
         }
     } else {
         auto conds = parseConditions(conditions);
-        if (conds.empty()) {
+        if (const auto target = matchCurrentIntegerPrimaryKey(*this, dbname, tablename,
+                       tbl, conds, context, ownerBeforeWrite, cacheMutex_, pa, transactionRegistry(), mutationCallbacks)) {
+            matchIds.insert(*target);
+        } else if (conds.empty()) {
             if (!forEachRow(dbname, tablename, [&](uint32_t pid, uint16_t sid, const char*, size_t) {
                 matchIds.insert(encodeRid(pid, sid));
             })) scanFailed = true;
-        } else if (const auto target = matchCurrentIntegerPrimaryKey(*this, dbname, tablename,
-                       tbl, conds, context, ownerBeforeWrite, cacheMutex_, pa, transactionRegistry())) {
-            matchIds.insert(*target);
         } else {
             matchIds = filterRows(dbname, tablename, conds, nullptr, &scanFailed);
         }
