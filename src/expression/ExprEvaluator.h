@@ -210,6 +210,10 @@ public:
     // Empty for builtins whose result type is inferred from their operands.
     std::string scalarFunctionResultType(const FunctionCallExpr* call,
                                          StorageEngine* engine = nullptr) const;
+    // Typed NULL result for supported strict string calls, after resolving
+    // the actual signature and search-path owner. Empty means no fold.
+    std::string strictStringResultType(const FunctionCallExpr* call,
+                                       StorageEngine* engine) const;
     // Internal metadata identity, not a SQL name or an evaluated datum.
     std::string scalarFunctionIdentity(const FunctionCallExpr* call,
                                        StorageEngine* engine = nullptr) const;

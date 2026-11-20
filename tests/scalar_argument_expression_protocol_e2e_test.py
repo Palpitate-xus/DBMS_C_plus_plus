@@ -27,7 +27,8 @@ def steps(prefix):
     table, saved, defaults = (prefix + suffix for suffix in ('_rows', '_saved', '_defaults'))
     sequences = {name: prefix + '_' + name for name in (
         'null', 'nonnull', 'repeated', 'nested', 'literal', 'conditional',
-        'dead', 'null_error', 'value_error', 'transaction_error')}
+        'dead', 'null_error', 'value_error', 'transaction_error',
+        'folded', 'shadow', 'shadow_body')}
     out = []
 
     def add(label, sql, rows=None, oids=None, state=None, ready='I', setup=False):
@@ -133,7 +134,44 @@ def steps(prefix):
         [[None], ['PREFIX:'], ["PREFIX:A'B, (X)"], ['PREFIX:ABA']], [25])
     counter('null', 4)
     counter('null_error', 3)
-    return out, [table, saved, defaults], list(sequences.values())
+
+    add('qualified-source', 'SELECT upper(q."Odd Name") FROM ' + table + ' AS q ORDER BY id',
+        [[None], [''], ["Q'R"], [' AB ']], [25])
+    add('wrong-range', 'SELECT upper(missing.t) FROM ' + table + ' AS q WHERE false', state='42P01')
+    value = nextval('folded')
+    add('strict-constant-cast', 'SELECT replace(NULL::text,' + value + ',' + value + ')' + one,
+        [[None]], [25])
+    add('strict-text-null-concat', 'SELECT replace(NULL::text||t,' + value + ',' + value + ')' + ordered,
+        [[None], [None], [None], [None]], [25])
+    add('null-hides-row-error', 'SELECT replace(NULL,(1/(id-1))::text,' + value + ')' + null_row,
+        [[None]], [25])
+    for label, condition in (('empty', ' WHERE id<0'), ('limit-zero', ' LIMIT 0')):
+        add('constant-error-' + label,
+            'SELECT replace(NULL,' + value + ',(1/0)::text)' + source + condition, state='22012')
+    add('null-with-unresolved-sibling', 'SELECT replace(NULL,' + value + ',' +
+        prefix + '_missing(t))' + one, state='42883')
+    counter('folded', 1)
+
+    schema = prefix + '_routines'
+    add('routine-schema', 'CREATE SCHEMA ' + schema, setup=True)
+    declaration = ' FUNCTION ' + schema + '.replace(s text, a text, b text) RETURNS text LANGUAGE plpgsql VOLATILE '
+    body = " AS $$ BEGIN PERFORM nextval('public." + sequences['shadow_body'] + "'); RETURN 'called'; END; $$"
+    add('nonstrict-routine', 'CREATE' + declaration + 'CALLED ON NULL INPUT' + body, setup=True)
+    add('routine-first', 'SET search_path TO ' + schema + ',pg_catalog,public', setup=True)
+    value = nextval('shadow')
+    args = '(NULL,' + value + ',' + value + ')' + one
+    add('nonstrict-shadow', 'SELECT replace' + args, [['called']], [25])
+    counter('shadow', 3)
+    counter('shadow_body', 2)
+    add('explicit-builtin', 'SELECT pg_catalog.replace' + args, [[None]], [25])
+    counter('shadow', 4)
+    add('strict-routine', 'CREATE OR REPLACE' + declaration + 'STRICT' + body, setup=True)
+    add('strict-shadow', 'SELECT replace' + args, [[None]], [25])
+    counter('shadow', 5)
+    counter('shadow_body', 3)
+    add('reset-routine-path', 'RESET search_path', setup=True)
+    add('drop-routine-schema', 'DROP SCHEMA ' + schema + ' CASCADE', setup=True)
+    return out, [table, saved, defaults], list(sequences.values()), schema
 
 
 def process_identity(pid):
@@ -192,7 +230,7 @@ def main():
     process = sock = owner = None
     checks = generation = 0
     failures, waits, records = [], [], []
-    commands, tables, sequences = steps('scalar_args_' + uuid.uuid4().hex[:10])
+    commands, tables, sequences, schema = steps('scalar_args_' + uuid.uuid4().hex[:10])
 
     def check(command):
         nonlocal checks
@@ -206,6 +244,8 @@ def main():
         if command['state'] is not None:
             good = (good and value[0] == [] and value[4] is None and
                     sum(kind == b'E' for kind, _ in messages) == 1)
+        elif command['rows'] is not None:
+            good = good and value[4] == f"SELECT {len(command['rows'])}"
         record = {'label': command['label'], 'sql': sql, 'ok': good,
                   'result': value, 'ready': messages[-1][1].decode()}
         records.append(record)
@@ -310,6 +350,8 @@ def main():
             # These unique names belong solely to this run on the explicitly
             # identified private reference; do not touch other objects.
             client.simple_query(sock, 'ROLLBACK')
+            client.simple_query(sock, 'RESET search_path')
+            client.simple_query(sock, 'DROP SCHEMA IF EXISTS ' + schema + ' CASCADE')
             for table in reversed(tables):
                 client.simple_query(sock, 'DROP TABLE IF EXISTS ' + table)
             for sequence in sequences:

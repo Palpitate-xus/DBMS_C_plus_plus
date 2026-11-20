@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>查询函数会保留参数里的引号和拼接 · 2026-11-20</summary>
+
+在单表查询里，`upper('a''b')` 现在返回 `A'B`。给列值加前缀再转大写时，也会保留每一行的值和空值。
+
+[使用手册](docs/MANUAL.md#基础查询) · [测试报告](docs/test-report.md#scalar-string-arguments-20261120)
+
+</details>
+
+<details>
 <summary>重启后会继续清理旧恢复文件 · 2026-11-20</summary>
 
 如果数据库在删除已经用完的建表恢复文件时意外退出，下次启动会接着清理，避免旧文件一直占用空间。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>重启后会清理没有提交的新表 · 2026-11-20</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-20 · 重启后会清理没有提交的新表
 
 如果在事务里新建了普通表，还没提交数据库就意外退出，重启后之前已提交的数据仍可查询，原来的表名也能再次使用。
 
 [使用手册](docs/MANUAL.md#建表) · [测试报告](docs/test-report.md#ordinary-create-durable-undo-20261120) · [性能报告](docs/performance-report-2026-10-30.md#ordinary-create-durable-undo-cost-20261120)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-20 · 保存表清单时可重试一次
 

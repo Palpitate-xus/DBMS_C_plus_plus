@@ -1287,6 +1287,8 @@ SELECT * FROM users ORDER BY AGE NULLS FIRST;
 序号（例如 ORDER BY 2）。这与 ORDER BY 表达式中按输入列解析名字不同，
 详见[重复别名规则](issue-review-o05-order-by-duplicate-alias.md)。
 
+在普通单表查询中，`upper`、`lower`、`length` 和 `replace` 接受完整的表达式。例如，`upper('prefix:' || name)` 会逐行拼接并转成大写。`name` 为 `NULL` 时结果仍为 `NULL`。在 `replace(name, ...)` 中，从表里读到的空值不会跳过其他参数，因此其他参数仍可能推进序列或报错。直接传入能提前确定的 `NULL` 时，严格函数可以在执行前化简。查询准备时仍会检查参数里的名称、类型和受支持的常量错误。[查询测试](test-report.md#scalar-string-arguments-20261120)
+
 #### 按整数主键翻页
 
 没有过滤条件时，普通单表查询可以从整数主键索引中找出分页需要的记录。

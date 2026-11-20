@@ -2,6 +2,10 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-20 · 字符串函数接收完整表达式
+
+PostgreSQL 18.6 会先检查和化简参数。选中的函数声明为严格函数、且某个参数已知为 `NULL` 时，可把调用化简为同类型的 `NULL`。从数据行读到的空值则属于执行阶段，其他参数已按顺序求值。SQLite 的函数语法也接收表达式，DuckDB 提供同名的文本函数。本项目用完整查询的解析结果执行普通单表投影，并在执行前检查所选函数的声明和常量参数。三套数据库的类型选择和副作用仍应分别验证。[PostgreSQL 常量化简](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/optimizer/util/clauses.c) · [PostgreSQL 参数求值](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/executor/execExpr.c) · [SQLite 表达式语法](https://sqlite.org/lang_expr.html) · [DuckDB 字符串函数](https://duckdb.org/docs/stable/sql/functions/text.html) · [对照结果](test-report.md#scalar-string-arguments-20261120)
+
 ## 2026-11-20 · 建表恢复记录的清理可以重试
 
 PostgreSQL 18.6 按物理关系标识登记事务结束时要删除的文件。它的磁盘管理实现还区分立即删除和检查点后删除的文件。SQLite 的回滚日志模式先同步修改后的数据，再删除回滚日志。DuckDB 把目录变更纳入事务。本项目的建表撤销记录由多个文件组成。先把清理凭据同步到数据库目录，再逐项删除用过的记录，下一次启动就能识别剩余文件。[PostgreSQL 关系文件](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/catalog/storage.c) · [PostgreSQL 文件清理](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/storage/smgr/md.c) · [SQLite 回滚日志](https://www.sqlite.org/atomiccommit.html) · [DuckDB 事务](https://duckdb.org/2024/09/25/changing-data-with-confidence-and-acid) · [本项目测试](test-report.md#create-undo-cleanup-20261120)

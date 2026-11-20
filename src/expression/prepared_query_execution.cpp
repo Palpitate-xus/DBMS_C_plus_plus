@@ -175,6 +175,8 @@ struct ConstantPlanningRoles {
     std::function<std::string(const FunctionCallExpr*)> resultType;
     std::function<bool(const FunctionCallExpr*)> patternEscape;
     std::function<std::string(const FunctionCallExpr*)> immutableBuiltin;
+    std::function<std::string(const FunctionCallExpr*)> strictStringResult;
+    std::function<bool(const BinaryOpExpr*)> textConcatenation;
 };
 
 std::optional<ExprValue> simplifyCaseConstants(ExprPtr& expression,
@@ -336,6 +338,13 @@ std::optional<ExprValue> simplifyCaseConstants(ExprPtr& expression,
         }
         const auto right = binary->op=="::" ? std::optional<ExprValue>(ExprValue{})
             : simplifyCaseConstants(binary->right,evaluator,roles);
+        if (roles && op == "||" && ((left && left->isNull) || (right && right->isNull)) &&
+            roles->textConcatenation(binary)) {
+            ExprValue result("text", "", true);
+            result.collation = ExprEvaluator::analyzeExplicitResultCollation(binary);
+            expression = constantExpression(result, binary);
+            return result;
+        }
         constant = left.has_value() && right.has_value();
     } else if (auto* quantified=dynamic_cast<QuantifiedComparisonExpr*>(expression.get())) {
         simplifyCaseConstants(quantified->left,evaluator,roles);
@@ -455,6 +464,16 @@ std::optional<ExprValue> simplifyCaseConstants(ExprPtr& expression,
         }
         for (auto& arg : call->namedArgs) simplifyCaseConstants(arg.value,evaluator,roles);
         for (auto& key : call->aggregateOrderKeys) simplifyCaseConstants(key.expr,evaluator,roles);
+        if (roles && std::any_of(constants.begin(), constants.end(),
+                [](const ExprValue& value) { return value.isNull; })) {
+            const auto type = roles->strictStringResult(call);
+            if (!type.empty()) {
+                ExprValue result(type, "", true);
+                result.collation = ExprEvaluator::analyzeExplicitResultCollation(call);
+                expression = constantExpression(result, call);
+                return result;
+            }
+        }
         const auto builtin=allConstant && roles && roles->immutableBuiltin
             ?roles->immutableBuiltin(call):std::string{};
         if(!builtin.empty()) {
@@ -1350,6 +1369,12 @@ void PreparedQueryExecution::planCompiledConstants(ExprPtr& expression,
             if(!evaluator_.hasScalarFunction(&builtin,engine_) ||
                evaluator_.scalarFunctionIdentity(call,engine_)!=evaluator_.scalarFunctionIdentity(&builtin,engine_))return {};
             return name.name;
+        },
+        [&](const FunctionCallExpr* call) { return evaluator_.strictStringResultType(call, engine_); },
+        [&](const BinaryOpExpr* operation) {
+            return !operation->arrayConcat &&
+                ExprHelper::inferParsedInputType(operation->left.get(), {}, database_, engine_) == "text" &&
+                ExprHelper::inferParsedInputType(operation->right.get(), {}, database_, engine_) == "text";
         }
     };
     simplifyCaseConstants(expression, evaluator_, &roles);

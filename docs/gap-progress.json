@@ -2,6 +2,40 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-20 preserve expression arguments for ordinary string projections",
+      "gap_ids": ["SQL-03", "FUNC-01", "QRY-01"],
+      "status": "partial",
+      "evidence": [
+        "src/main.cpp",
+        "src/expression/ExprEvaluator.cpp",
+        "src/expression/prepared_query_execution.cpp",
+        "docs/test-report.md",
+        "docs/performance-report-2026-10-30.md"
+      ],
+      "tests": [
+        "tests/scalar_argument_expression_protocol_e2e_test.py",
+        "tests/expression_quoted_row_binding_protocol_e2e_test.py",
+        "tests/replace_linear_test.cpp"
+      ],
+      "verification": [
+        "The exact baseline passed 47 of 67 original cases and 66 of 93 expanded cases. The final build and a private PostgreSQL 18.6 reference passed all 93 expectations.",
+        "Ordinary single-table UPPER, LOWER, LENGTH and REPLACE use the original expression, bound source columns and actual callable declaration. Stored or local callbacks do not inherit builtin strictness by spelling.",
+        "Tests check sequence effects, constant versus row NULL, error priority without input rows, runtime 22012 and failed-transaction 25P02, cold re-open and search-path selection of a same-name strict/non-strict routine.",
+        "Seven adjacent protocol suites and six linked native suites passed. The independent decoder found fourteen raw reply differences from PostgreSQL after private name normalization. Broader function families, inheritance and extended-protocol states remain open.",
+        "On a 1,027-row same-seed workload, twelve interleaved processes provided 180 timed exchanges. The input and output of the correct upper(t) control matched and the observed median went from 857.80 to 228.14 ms. Two corrected queries returned different answers on the old build."
+      ],
+      "artifacts": {
+        "exact_build": "build/array-domain-20261117/scalar-string-projection-cmake-v1.json",
+        "baseline_protocol": "build/scalar-argument-20261120-baseline-expanded/evidence/summary.json",
+        "candidate_protocol": "build/scalar-argument-20261120-candidate-v1/evidence/summary.json",
+        "postgres_reference": "build/scalar-argument-protocol-20261117/reference-expanded-v2-20261120/evidence/summary.json",
+        "native_results": "build/ordinary-create-crash-20261119/native-checks-scalar-string-projection-v1/summary.json",
+        "protocol_audit": "build/scalar-argument-protocol-20261117/independent-audit-20261120/summary.json",
+        "timings": "build/scalar-argument-current-20261120-v1/paired-perf-v1/results.json",
+        "timing_audit": "build/scalar-argument-current-20261120-v1/paired-perf-v1/independent-audit-v1.json"
+      }
+    },
+    {
       "issue": "2026-11-20 resume deletion of completed CREATE TABLE undo records",
       "gap_ids": ["CAT-07", "WAL-08"],
       "status": "partial",
@@ -1012,7 +1046,7 @@
       "tests": [
         "tests/lazy_scalar_columns_test.cpp",
         "tests/lazy_scalar_metadata_test.cpp",
-        "tests/scalar_argument_expression_known_gap.py"
+        "tests/scalar_argument_expression_protocol_e2e_test.py"
       ],
       "verification": [
         "Normal CMake C++17/O2: all 16 header-affected targets rebuilt, then helper rebuilt for static conversion elision; remaining objects source/dependency/flag/hash checked. Basic lazy input regression27 checks; extended actual metadata163 checks.20 selected C++ final-version entries and8 existing protocol entries pass, full suite not run. Two fixture failures and an invalid protocol filename attempt are retained, not counted as passes.",

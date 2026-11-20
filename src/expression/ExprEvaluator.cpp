@@ -105,7 +105,7 @@ static bool isFixedFloat8ScalarName(const std::string& name) {
 }
 
 static bool isCoreOverloadedScalarName(const std::string& name) {
-    return name=="exp" || name=="ln" || name=="log" || name=="log10" || name=="abs" || name=="length" || name=="upper" || name=="lower" || name=="scale" || name=="min_scale" || name=="gcd" || name=="lcm" || name=="factorial";
+    return name=="exp" || name=="ln" || name=="log" || name=="log10" || name=="abs" || name=="length" || name=="upper" || name=="lower" || name=="replace" || name=="scale" || name=="min_scale" || name=="gcd" || name=="lcm" || name=="factorial";
 }
 
 static bool isIntegralRoundingScalarName(const std::string& name) {
@@ -6258,6 +6258,7 @@ const std::vector<ScalarSignature>& scalarSignatures(const std::string& name) {
     if(name=="chr"){ static const auto* const value = new const std::vector<ScalarSignature>{{{"integer"},"text"}}; return *value; }
     if(name=="starts_with"){ static const auto* const value = new const std::vector<ScalarSignature>{{{"text","text"},"boolean"}}; return *value; }
     if(name=="strpos"){ static const auto* const value = new const std::vector<ScalarSignature>{{{"text","text"},"integer"}}; return *value; }
+    if(name=="replace"){ static const auto* const value = new const std::vector<ScalarSignature>{{{"text","text","text"},"text"}}; return *value; }
     if(isTrimScalarName(name)){ static const auto* const value = new const std::vector<ScalarSignature>{{{"text"},"text"},{{"text","text"},"text"},
         {{"bytea","bytea"},"bytea"}}; return *value; }
     if(name=="array_positions"){ static const auto* const value = new const std::vector<ScalarSignature>{{{"anycompatiblearray","anycompatible"},"integer[]"}}; return *value; }
@@ -6955,6 +6956,29 @@ std::string ExprEvaluator::scalarFunctionIdentity(const FunctionCallExpr* call,
         key += field(ExprHelper::canonicalResultTypeName(resolved.routine.returnType));
     }
     return key;
+}
+
+std::string ExprEvaluator::strictStringResultType(const FunctionCallExpr* call,
+                                                  StorageEngine* engine) const {
+    CatalogManager::QualifiedName name;
+    if (!call || !CatalogManager::parseQualifiedName(call->funcName, name, true) ||
+        (name.name != "upper" && name.name != "lower" && name.name != "length" &&
+         name.name != "replace") || !call->namedArgs.empty() || call->setReturning ||
+        call->hasOver || call->distinct ||
+        call->filter || !call->orderBy.empty() || !call->aggregateOrderKeys.empty()) return {};
+
+    const auto registry = functionRegistry();
+    const auto resolved = resolveScalarFunction(*this, call, currentDB_, engine, registry);
+    if (!resolved.found) return {};
+    if (resolved.stored) {
+        return resolved.routine.strict &&
+            ExprHelper::canonicalResultTypeName(resolved.routine.returnType) == "text"
+            ? "text" : std::string{};
+    }
+    const auto callback = registry.find(resolved.name);
+    if (resolved.schema != "pg_catalog" || callback == registry.end() ||
+        !ownsScalarSignatures(resolved.name, &callback->second)) return {};
+    return resolved.output;
 }
 
 void ExprEvaluator::bindScalarFunctions(Expr* expression, StorageEngine* engine) {

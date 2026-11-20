@@ -20632,6 +20632,13 @@ static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bo
         (candidate->whereClause || candidate->limit || candidate->offset || needsDomainCast);
     const bool physicalColumnCandidate = candidate->fromClause &&
         candidate->fromClause->type == dbms::FromItem::Type::Table;
+    bool stringProjection = physicalColumnCandidate &&
+        any_of(candidate->selectList.begin(), candidate->selectList.end(), [](const auto& target) {
+            const auto* call = dynamic_cast<const dbms::FunctionCallExpr*>(target.expr.get());
+            dbms::CatalogManager::QualifiedName name;
+            return call && dbms::CatalogManager::parseQualifiedName(call->funcName, name, true) &&
+                (name.name == "upper" || name.name == "lower" || name.name == "length" || name.name == "replace");
+        });
     // LIMIT on a base table controls source and projection demand, with or
     // without sorting, including after protocol parameter expansion.
     // Admit it at execution, without changing Parse/Bind planning phases.
@@ -20658,15 +20665,16 @@ static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bo
         // This typed source scans one physical relation. The ordinary plain
         // projection path below owns the parent/child union and its global
         // ordering/slicing; do not silently truncate it to the parent heap.
-        if (!session.onlyNext && !(candidate->limit && *candidate->limit == 0) &&
-            !g_engine.getInheritedChildren(session.currentDB, physical).empty() &&
-            all_of(candidate->selectList.begin(), candidate->selectList.end(),
+        const bool inheritedScan = !session.onlyNext && !(candidate->limit && *candidate->limit == 0) &&
+            !g_engine.getInheritedChildren(session.currentDB, physical).empty();
+        if (inheritedScan && all_of(candidate->selectList.begin(), candidate->selectList.end(),
                 [](const auto& target) {
                     if (dynamic_cast<const dbms::ColumnRefExpr*>(target.expr.get())) return true;
                     const auto* star = dynamic_cast<const dbms::LiteralExpr*>(target.expr.get());
                     return star && star->value == "*";
                 })) return false;
-        if (!roles.first && !scalarOrder && !possibleArray && !needsDomainCast && !fromlessDemand && !possibleBitNegation && !physicalLimitDemand) {
+        if (inheritedScan) stringProjection = false;
+        if (!roles.first && !scalarOrder && !possibleArray && !needsDomainCast && !fromlessDemand && !possibleBitNegation && !physicalLimitDemand && !stringProjection) {
             const auto schema = g_engine.getTableSchema(session.currentDB, physical);
             typedSortDemand = ordinaryTypedSortDemand(*candidate, schema);
             if (!typedSortDemand && none_of(schema.cols, schema.cols + schema.len,
@@ -20690,7 +20698,7 @@ static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bo
     const bool arrayOutput = any_of(prepared.output.begin(), prepared.output.end(),
         [](const dbms::QueryOutputColumn& column) { return dbms::array_detail::isArray(column.type); });
     const bool bitNegationOutput=possibleBitNegation && bitNegation(select,true);
-    if(!roles.first && !scalarOrder && !queryArrays(select,true) && !arrayOutput && !needsDomainCast && !fromlessDemand && !bitNegationOutput && !physicalLimitDemand && !typedSortDemand)return false;
+    if(!roles.first && !scalarOrder && !queryArrays(select,true) && !arrayOutput && !needsDomainCast && !fromlessDemand && !bitNegationOutput && !physicalLimitDemand && !typedSortDemand && !stringProjection)return false;
     // Preserve column grants on precisely the bound source cells used by
     // this query (including correlated child references), not SELECT *.
     if (select->fromClause && !sessionIsAdmin(session)) {
@@ -20784,15 +20792,21 @@ static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bo
     dbms::QueryRowDescriptor receiverDescriptor;
     if (dbms::typedResultCaptureRequested() || needsDomainCast) receiverDescriptor = prepared.output;
     dbms::OpPtr plan;
-    if (fromlessDemand) {
-        // This execution root owns a genuine one-row, zero-column input.
+    if (fromlessDemand || stringProjection) {
         // Request planning on its actual carrier, never on a discarded
         // preflight or on every recursively constructed child graph.
         auto query = make_shared<dbms::PreparedQuery>(std::move(prepared));
-        auto source = make_unique<dbms::PreparedSourceRowsOp>(dbms::QueryRowDescriptor{},
-            [](size_t index,vector<dbms::ExprValue>& row) {row.clear();return index==0;});
+        dbms::TableSchema sourceSchema;
+        dbms::OpPtr source;
+        if (fromlessDemand) {
+            source = make_unique<dbms::PreparedSourceRowsOp>(dbms::QueryRowDescriptor{},
+                [](size_t index,vector<dbms::ExprValue>& row) {row.clear();return index==0;});
+        } else {
+            sourceSchema = g_engine.getTableSchema(session.currentDB, physical);
+            source = make_unique<dbms::TableScanOp>(&g_engine, session.currentDB, physical);
+        }
         plan = dbms::QueryPlanner::buildPreparedSelectPlan(&g_engine,session.currentDB,
-            std::move(query),select,dbms::TableSchema{},std::move(source),{},{},{},true,!needsDomainCast);
+            std::move(query),select,sourceSchema,std::move(source),{},{},{},true,!needsDomainCast);
     } else {
         plan = dbms::QueryPlanner::buildPreparedSelectPlan(&g_engine,session.currentDB,
             physical,std::move(prepared));
