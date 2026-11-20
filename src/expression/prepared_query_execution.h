@@ -43,7 +43,8 @@ public:
     void finishRightScan();
     size_t nextRight(size_t leftOrdinal, const RowContext& left, size_t next,
                      const std::vector<RowContext>* materializedRight = nullptr);
-    bool lookupBuilt() const { return lookupState_ == LookupState::Ready; }
+    bool lookupBuilt() const { return lookupState_ == LookupState::Sorted || directLookup(); }
+    bool directLookup() const { return lookupState_ == LookupState::Direct; }
     void reset();
 
 private:
@@ -59,17 +60,26 @@ private:
         enum class State { Unavailable, Null, Value } state = State::Unavailable;
         uint64_t hash = 0;
     };
-    explicit PreparedJoinKeyFilter(std::vector<Key> keys) : keys_(std::move(keys)) {}
+    struct IntegerRun {
+        uint64_t first = 0;
+        size_t count = 0;
+        bool ascending = true;
+    };
+    explicit PreparedJoinKeyFilter(std::vector<Key> keys) : keys_(std::move(keys)) {
+        if (!keys_.front().elementType) rightRun_.emplace();
+    }
     Fingerprint fingerprint(const RowContext&, bool left) const;
     void prepareLeft(size_t ordinal, const RowContext&);
+    void observeRightInteger(size_t ordinal, Fingerprint key);
     void buildLookup(const std::vector<RowContext>* materializedRight);
 
     std::vector<Key> keys_;
     std::optional<size_t> leftOrdinal_;
     Fingerprint left_;
     std::vector<Fingerprint> right_;
+    std::optional<IntegerRun> rightRun_;
     using LookupEntry = std::pair<uint64_t, size_t>;
-    enum class LookupState { Reading, Complete, Unavailable, Ready } lookupState_ = LookupState::Reading;
+    enum class LookupState { Reading, Complete, Unavailable, Sorted, Direct } lookupState_ = LookupState::Reading;
     std::vector<LookupEntry> lookup_;
 };
 

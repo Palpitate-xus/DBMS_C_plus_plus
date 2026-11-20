@@ -21170,9 +21170,14 @@ class PreparedWithDmlRuntime {
         string preparedPlanNodeName() const override {return planName;}
         map<string,string> preparedPlanAttributes() const override {
             auto attributes = planAttributes;
-            if (planKeyFilter && planKeyFilter->lookupBuilt())
-                attributes[attributes.count("integerKeyLookup")
-                    ? "integerKeyLookupBuilt" : "integerArrayKeyLookupBuilt"] = "true";
+            if (planKeyFilter && planKeyFilter->lookupBuilt()) {
+                if (attributes.count("integerKeyLookup")) {
+                    attributes["integerKeyLookupBuilt"] = "true";
+                    attributes["integerKeyLookupMode"] = planKeyFilter->directLookup() ? "direct" : "sorted";
+                } else {
+                    attributes["integerArrayKeyLookupBuilt"] = "true";
+                }
+            }
             return attributes;
         }
         vector<dbms::Operator*> preparedPlanChildren() const override {return planChildren;}

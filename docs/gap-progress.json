@@ -2,6 +2,42 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-20 use consecutive integer join keys to locate cached right rows",
+      "gap_ids": ["QRY-03", "OPT-10"],
+      "status": "partial",
+      "evidence": [
+        "src/main.cpp",
+        "src/expression/prepared_query_execution.cpp",
+        "docs/test-report.md",
+        "docs/performance-report-2026-10-30.md"
+      ],
+      "tests": [
+        "tests/integer_join_prefilter_protocol_e2e_test.py",
+        "tests/inherited_nested_source_protocol_e2e_test.py",
+        "tests/array_domain_join_using_protocol_e2e_test.py"
+      ],
+      "verification": [
+        "The first right scan can prove a complete ascending or descending consecutive run. Its first key, direction and row count are enough to locate cached rows for later probes. Original ON checks, early LIMIT and outer completion are preserved.",
+        "83 protocol checks, ten related suites and 138 isolated native checks passed. A private PostgreSQL 18.6 comparison included 41 statements and 33 product EXPLAIN requests. Ordered results matched and unordered LIMIT returned valid subsets with multiplicity.",
+        "With 64 KiB work_mem and 5120 consecutive right keys, the COUNT result stayed 64 while cached right visits changed from 327680 to 5183. The 1024-row sparse projection stayed on the sorted lookup and returned all 512 matches. A 4097-row sparse fixture still fell back to linear comparison at 64 KiB.",
+        "Across 528 timings and 48 clean process exits, the 5120-row COUNT median changed from 92.122 to 60.692 ms and improved in all eight paired rounds. LIMIT 8 in that workload had a higher overall median (44.455 to 47.690 ms). Smaller workloads varied across pairs.",
+        "The auxiliary lookup uses constant storage for a verified consecutive run. Materialized-row memory limits, spill, general join algorithms and other predicates remain open. Ledger statuses remain unchanged."
+      ],
+      "artifacts": {
+        "exact_build": "build/array-domain-20261117/integer-key-direct-cmake-v1.json",
+        "protocol_plan_trace": "build/integer-key-direct-20261120-candidate-v1/traced-test-receipt.json",
+        "postgres_comparison": "build/integer-key-direct-20261120-candidate-v1/summary.json",
+        "protocol_audit": "build/integer-key-direct-20261120-candidate-v1/independent-audit-v1.json",
+        "native_checks": "build/integer-key-direct-native-20261120/summary.json",
+        "related_suites": "build/integer-key-limit-20261120/related-integer-key-direct-cmake-v1/summary.json",
+        "plan_counts": "build/integer-key-limit-20261120/diagnostics-integer-key-direct-cmake-v1.json",
+        "low_memory_plan_counts": "build/integer-key-limit-20261120/diagnostics-integer-key-direct-cmake-v1-dense.json",
+        "timing_128": "build/integer-key-limit-20261120/timing-128-integer-key-direct-cmake-v1.json",
+        "timing_1024": "build/integer-key-limit-20261120/timing-1024-integer-key-direct-cmake-v1.json",
+        "timing_5120": "build/integer-key-limit-20261120/timing-5120-integer-key-direct-cmake-v1.json"
+      }
+    },
+    {
       "issue": "2026-11-20 reuse materialized right rows for integer equality joins",
       "gap_ids": ["QRY-03", "OPT-10"],
       "status": "partial",

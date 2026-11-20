@@ -2,6 +2,10 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-20 · 按连续整数键直接找到连接记录
+
+PostgreSQL 18.6 为归并连接估算成本时，可以利用输入已有的顺序。SQLite 对按 `rowid` 排序的查询也可以沿原有顺序读取，包括反向读取。DuckDB 的连接执行器在单整数键的值域足够小、键无重复时，可以按键计算数组位置。本项目在已有连接扫描上验证另一种情况。右侧整批键按读取顺序连续递增或递减时，编号之差就是缓存中的位置，额外空间只需存下起点、方向和行数。[PostgreSQL 归并连接规划](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/optimizer/path/joinpath.c) · [SQLite 查询规划](https://sqlite.org/queryplanner.html#sorting_by_rowid) · [DuckDB 整数键连接](https://github.com/duckdb/duckdb/blob/main/src/execution/operator/join/perfect_hash_join_executor.cpp) · [本项目实测](test-report.md#integer-join-direct-20261120)
+
 ## 2026-11-20 · 减少整数等值连接的重复比较
 
 PostgreSQL 的哈希连接会先建立右侧的哈希表，之后按左侧的键查找候选行。右连接和全连接还要补回没有匹配的右侧行。DuckDB 的哈希连接也将建立查找表、查找候选和读取未匹配行分成不同阶段，内存不足时还可分批处理。SQLite 发现同一侧会被反复查找时，可以为当前语句建立临时索引。[PostgreSQL 哈希连接](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/executor/nodeHashjoin.c) · [DuckDB 哈希连接](https://github.com/duckdb/duckdb/blob/main/src/execution/operator/join/physical_hash_join.cpp) · [SQLite 临时索引](https://sqlite.org/optoverview.html#automatic_query_time_indexes)

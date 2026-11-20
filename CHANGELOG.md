@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>连接时可以直接找到连续编号的记录 · 2026-11-20</summary>
+
+如果右表读出的编号连续、没有重复，数据库可以用编号直接找到已经读过的记录，省去把编号再存一遍。
+
+[使用手册](docs/MANUAL.md#整数等值连接) · [测试报告](docs/test-report.md#integer-join-direct-20261120) · [性能报告](docs/performance-report-2026-10-30.md#integer-join-direct-cost-20261120)
+
+</details>
+
+<details>
 <summary>用整数列连接时减少重复查找 · 2026-11-20</summary>
 
 例如用订单编号连接两张表。需要反复查找右表时，数据库会利用已经读过的记录找出相同编号。无需排序时，取够结果就停。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>查询父表时也会读到孙表 · 2026-11-20</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-20 · 查询父表时也会读到孙表
 
 统计父表的记录时，会算上各层子表里的记录。排序和分页也会处理这些记录。加上 `ONLY` 就可以只查指定的表。
 
 [使用手册](docs/MANUAL.md#查询继承表) · [测试报告](docs/test-report.md#inherited-table-source-20261120) · [性能报告](docs/performance-report-2026-10-30.md#inherited-table-source-cost-20261120)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-20 · 修复查询中的引号和文字拼接
 

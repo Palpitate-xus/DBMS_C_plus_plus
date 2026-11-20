@@ -936,9 +936,33 @@ void PreparedJoinKeyFilter::prepareLeft(size_t leftOrdinal, const RowContext& le
     }
 }
 
+static uint64_t orderedIntegerKey(uint64_t key) {
+    return key ^ (uint64_t{1} << 63);
+}
+
+void PreparedJoinKeyFilter::observeRightInteger(size_t ordinal, Fingerprint key) {
+    auto& run = *rightRun_;
+    if (key.state != Fingerprint::State::Value || ordinal != run.count) {
+        rightRun_.reset();
+        return;
+    }
+    const uint64_t ordered = orderedIntegerKey(key.hash);
+    if (ordinal == 0) run.first = ordered;
+    if (ordinal == 1) run.ascending = ordered > run.first;
+    // Subtract only in the verified direction, including near signed limits.
+    const bool consecutive = run.ascending
+        ? ordered >= run.first && ordered - run.first == ordinal
+        : ordered <= run.first && run.first - ordered == ordinal;
+    if (consecutive) ++run.count;
+    else rightRun_.reset();
+}
+
 bool PreparedJoinKeyFilter::mayMatch(size_t leftOrdinal, const RowContext& left,
     size_t rightOrdinal, const RowContext& right) {
     if ((rightOrdinal & 127U) == 0) checkForQueryInterrupt();
+    // The scalar lookup already selected the candidates. Unavailable left
+    // keys can still use the sequential path and the original ON comparison.
+    if (!keys_.front().elementType && lookupBuilt()) return true;
     prepareLeft(leftOrdinal, left);
     // The integer path can read the materialized rows directly after EOF.
     // Before then it does not allocate an auxiliary copy of the right keys.
@@ -948,6 +972,8 @@ bool PreparedJoinKeyFilter::mayMatch(size_t leftOrdinal, const RowContext& left,
         candidate = right_.at(rightOrdinal);
     } else {
         candidate = fingerprint(right, false);
+        if (lookupState_ == LookupState::Reading && rightRun_)
+            observeRightInteger(rightOrdinal, candidate);
     }
     if (left_.state == Fingerprint::State::Unavailable || candidate.state == Fingerprint::State::Unavailable)
         return true;
@@ -960,6 +986,12 @@ void PreparedJoinKeyFilter::finishRightScan() {
 }
 
 void PreparedJoinKeyFilter::buildLookup(const std::vector<RowContext>* materializedRight) {
+    // A full, consecutive run maps each value to its actual source ordinal.
+    // No allocation, second decoding pass or sort is required for that run.
+    if (materializedRight && rightRun_ && rightRun_->count == materializedRight->size()) {
+        lookupState_ = LookupState::Direct;
+        return;
+    }
     lookupState_ = LookupState::Unavailable;
     const auto* session = currentSession();
     const size_t workMemKb = session ? session->workMem.effective(g_config.workMemKb) : g_config.workMemKb;
@@ -981,22 +1013,29 @@ void PreparedJoinKeyFilter::buildLookup(const std::vector<RowContext>* materiali
     try { index.reserve(entries); }
     catch (const std::bad_alloc&) { return; }
     const auto rightCount = materializedRight ? materializedRight->size() : right_.size();
+    bool alreadySorted = materializedRight != nullptr;
     for (size_t i = 0; i < rightCount; ++i) {
         if ((i & 127U) == 0) checkForQueryInterrupt();
         const auto key = materializedRight ? fingerprint((*materializedRight)[i], false) : right_[i];
         if (key.state == Fingerprint::State::Unavailable) return;
-        if (key.state == Fingerprint::State::Value) index.emplace_back(key.hash, i);
+        if (key.state == Fingerprint::State::Value) {
+            const LookupEntry entry{key.hash, i};
+            if (alreadySorted && !index.empty() && entry < index.back()) alreadySorted = false;
+            index.push_back(entry);
+        }
     }
     // Sorting by original ordinal within each fingerprint preserves duplicate
     // order, including when the consumer stops and resumes the current probe.
-    size_t comparisons = 0;
-    std::sort(index.begin(),index.end(),[&](const auto& a, const auto& b) {
-        if ((comparisons++ & 127U) == 0) checkForQueryInterrupt();
-        return a < b;
-    });
+    if (!alreadySorted) {
+        size_t comparisons = 0;
+        std::sort(index.begin(), index.end(), [&](const auto& a, const auto& b) {
+            if ((comparisons++ & 127U) == 0) checkForQueryInterrupt();
+            return a < b;
+        });
+    }
     checkForQueryInterrupt();
     lookup_ = std::move(index);
-    lookupState_ = LookupState::Ready;
+    lookupState_ = LookupState::Sorted;
 }
 
 size_t PreparedJoinKeyFilter::nextRight(size_t leftOrdinal, const RowContext& left, size_t next,
@@ -1008,8 +1047,15 @@ size_t PreparedJoinKeyFilter::nextRight(size_t leftOrdinal, const RowContext& le
     prepareLeft(leftOrdinal, left);
     if (left_.state == Fingerprint::State::Unavailable) return next;
     if (lookupState_ == LookupState::Complete) buildLookup(materializedRight);
-    if (lookupState_ != LookupState::Ready) return next;
+    if (!lookupBuilt()) return next;
     if (left_.state == Fingerprint::State::Null) return rightCount;
+    if (directLookup()) {
+        const auto& run = *rightRun_;
+        const uint64_t key = orderedIntegerKey(left_.hash);
+        if ((run.ascending && key < run.first) || (!run.ascending && key > run.first)) return rightCount;
+        const uint64_t ordinal = run.ascending ? key - run.first : run.first - key;
+        return ordinal < rightCount && ordinal >= next ? static_cast<size_t>(ordinal) : rightCount;
+    }
     const auto match = std::lower_bound(lookup_.begin(),lookup_.end(),LookupEntry{left_.hash,next});
     return match != lookup_.end() && match->first == left_.hash ? match->second : rightCount;
 }
@@ -1018,6 +1064,7 @@ void PreparedJoinKeyFilter::reset() {
     leftOrdinal_.reset();
     right_.clear();
     std::vector<LookupEntry>().swap(lookup_);
+    if (!keys_.front().elementType) rightRun_.emplace();
     lookupState_ = LookupState::Reading;
 }
 

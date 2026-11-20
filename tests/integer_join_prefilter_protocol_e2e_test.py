@@ -37,10 +37,11 @@ def main():
             assert "integerKeyLookup" not in joins[0] and "integerKeyLookupBuilt" not in joins[0], document
         return document, joins[0]
 
-    def lookup_plan(sql, *, built, right_min, right_max):
+    def lookup_plan(sql, *, built, right_min, right_max, mode=None):
         document, join = plan(sql, True)
         assert join.get("integerKeyLookup") == "true", document
         assert (join.get("integerKeyLookupBuilt") == "true") == built, document
+        assert join.get("integerKeyLookupMode") == mode, document
         assert len(join.get("children", [])) == 2, document
         right_rows = join["children"][1].get("actualRows", 0)
         assert right_min <= right_rows <= right_max, (sql, right_rows, document)
@@ -73,9 +74,9 @@ def main():
         # Full consumption scans the first right side, then reuses its bounded
         # lookup on subsequent left rows. Five-by-five nested visits are 25.
         lookup_plan("SELECT count(*) FROM integer_join_l l JOIN integer_join_r r ON l.k=r.k",
-                    built=True, right_min=5, right_max=24)
+                    built=True, right_min=5, right_max=24, mode="sorted")
         lookup_plan("SELECT count(*) FROM integer_join_l l JOIN integer_join_r r ON r.k=l.k",
-                    built=True, right_min=5, right_max=24)
+                    built=True, right_min=5, right_max=24, mode="sorted")
         query("SELECT l.id,r.id FROM integer_join_l l JOIN integer_join_r r ON l.k=l.k",
               [[str(l), str(r)] for l in (1, 2, 4, 5) for r in (10, 11, 12, 13, 14)])
         plan("SELECT count(*) FROM integer_join_l l JOIN integer_join_r r ON l.k=l.k", False)
@@ -110,16 +111,46 @@ def main():
         query("SELECT l.id,(SELECT count(*) FROM integer_join_l x JOIN integer_join_r r "
               "ON x.k=r.k WHERE x.id=l.id) FROM integer_join_l l ORDER BY l.id",
               [["1", "2"], ["2", "2"], ["3", "0"], ["4", "1"], ["5", "0"]])
-        # More than 4096 16-byte entries exceed the 64 KiB auxiliary budget.
+        # The completed right scan can prove a dense direct mapping in either
+        # physical direction, including negative, zero and positive values.
+        query("CREATE TABLE integer_join_dense_l(k INTEGER)")
+        query("INSERT INTO integer_join_dense_l VALUES(-2),(-1),(2),(NULL)")
+        for suffix, values, mode in (
+            ("ascending", [-2, -1, 0, 1, 2], "direct"),
+            ("descending", [2, 1, 0, -1, -2], "direct"),
+            ("gap", [-2, -1, 1, 2], "sorted"),
+            ("duplicate", [-2, -1, -1, 0, 1, 2], "sorted"),
+            ("null", [-2, -1, None, 0, 1, 2], "sorted"),
+        ):
+            right = "integer_join_dense_" + suffix
+            query("CREATE TABLE " + right + "(k INTEGER)")
+            literal = lambda value: "NULL" if value is None else str(value)
+            query("INSERT INTO " + right + " VALUES" + ",".join("(" + literal(v) + ")" for v in values))
+            sql = "SELECT count(*) FROM integer_join_dense_l l JOIN " + right + " r ON l.k=r.k"
+            wanted = 4 if suffix == "duplicate" else 3
+            query(sql, [[str(wanted)]])
+            # The first left row visits every right row. Later non-NULL keys
+            # visit each matching ordinal, including both duplicate values.
+            visited = len(values) + wanted - 1
+            lookup_plan(sql, built=True, right_min=visited, right_max=visited, mode=mode)
+        # More than 4096 sparse 16-byte entries exceed the 64 KiB budget.
         # Declining the lookup keeps complete bag semantics and the old scan.
         query("SET work_mem='64kB'")
         query("CREATE TABLE integer_join_budget_l(k INTEGER)")
         query("CREATE TABLE integer_join_budget_r(k INTEGER)")
-        query("INSERT INTO integer_join_budget_l VALUES(0),(4096)")
-        query("INSERT INTO integer_join_budget_r VALUES" + ",".join("(%d)" % i for i in range(4097)))
+        query("INSERT INTO integer_join_budget_l VALUES(0),(8192)")
+        query("INSERT INTO integer_join_budget_r VALUES" + ",".join("(%d)" % (2 * i) for i in range(4097)))
         budget_join = "SELECT count(*) FROM integer_join_budget_l l JOIN integer_join_budget_r r ON l.k=r.k"
         query(budget_join, [["2"]])
         lookup_plan(budget_join, built=False, right_min=8194, right_max=8194)
+        # The same 4097 physical rows become a consecutive sequence through a
+        # derived projection. Direct ordinals need no 16-byte-per-row vector.
+        query("CREATE TABLE integer_join_dense_budget_l(k INTEGER)")
+        query("INSERT INTO integer_join_dense_budget_l VALUES(0),(4096)")
+        dense_budget = ("SELECT count(*) FROM integer_join_dense_budget_l l JOIN "
+                        "(SELECT k/2 AS k FROM integer_join_budget_r) r ON l.k=r.k")
+        query(dense_budget, [["2"]])
+        lookup_plan(dense_budget, built=True, right_min=4098, right_max=4098, mode="direct")
         query("RESET work_mem")
         print("[INTEGER JOIN PREFILTER]", controls, "controls passed", flush=True)
     finally:

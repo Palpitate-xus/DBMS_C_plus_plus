@@ -1561,7 +1561,9 @@ SELECT * FROM users WHERE ID = 1 FOR UPDATE SKIP LOCKED;
 
 #### 整数等值连接
 
-对于使用同类型 `SMALLINT`、`INTEGER` 或 `BIGINT` 列做等值判断的受支持查询，例如 `ON users.id = orders.user_id`，数据库可以记录已读到的右侧编号，减少为后续左行反复扫描的次数。查找表在右侧第一次读完后按需建立，受 `work_mem` 限制。空间不足时继续顺序比较，重复键、空值和外连接的结果保持原语义。[执行计划和测试](test-report.md#integer-join-lookup-20261120)
+对于使用同类型 `SMALLINT`、`INTEGER` 或 `BIGINT` 做等值判断的受支持连接，例如 `ON users.id = orders.user_id`，执行器可以重用已经读过的右侧记录。第一次读完右侧后，如果编号按读取顺序连续递增或递减，且没有空值，就能用编号直接算出记录的位置。直接定位只需记下起点、方向和行数。遇到间隔、重复或空值时，可以按 `work_mem` 上限建立有序查找表，空间不足时继续顺序比较。
+
+每条候选记录仍需满足原连接条件，外连接也会保留该输出的未匹配行。如果 `LIMIT` 在第一次扫描结束前已经取够行，就会提前停止。`EXPLAIN (ANALYZE, FORMAT JSON)` 对已启用查找的节点会显示 `integerKeyLookupMode` 为 `direct`（直接定位）或 `sorted`（有序查找表）。[执行计划和测试](test-report.md#integer-join-direct-20261120)
 
 ### 子查询
 
