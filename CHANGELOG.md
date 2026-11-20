@@ -1,27 +1,27 @@
 # 更新日志
 
 <details>
-<summary>重复查看连接计划时省去重新计算 · 2026-11-20</summary>
+<summary>反复查看查询步骤时，省去重新计算 · 2026-11-20</summary>
 
-再次用 `EXPLAIN` 查看同一条简单连接时，如果上次的计划仍可用，就会直接显示它。用 `EXPLAIN ANALYZE` 时，数据库仍会运行查询，以显示这次处理了多少行。
+用 `EXPLAIN` 再次查看同一条简单的两表查询时，数据库可以沿用上次的执行步骤。想看查询这次实际处理了多少行，可以用 `EXPLAIN ANALYZE`。
 
 [使用手册](docs/MANUAL.md#explain) · [测试报告](docs/test-report.md#legacy-join-explain-reuse-20261120) · [性能报告](docs/performance-report-2026-10-30.md#legacy-join-explain-reuse-cost-20261120)
 
 </details>
 
 <details>
-<summary>带筛选和分页的连接也能查看执行计划 · 2026-11-20</summary>
+<summary>两表查询加了筛选或分页，也能查看执行步骤 · 2026-11-20</summary>
 
-按整数编号连接两张表时，即使查询加了筛选、排序或只取前几条，也能查看数据库怎样查找和合并记录。用 `EXPLAIN ANALYZE` 可以看到实际处理了多少行。
+用整数编号匹配两张表时，即使还要筛选、排序或分批取结果，也可以用 `EXPLAIN` 查看数据库怎样查找和匹配记录。
 
 [使用手册](docs/MANUAL.md#explain) · [测试报告](docs/test-report.md#integer-join-explain-20261120) · [性能报告](docs/performance-report-2026-10-30.md#integer-join-explain-cost-20261120)
 
 </details>
 
 <details>
-<summary>连接时可以直接找到连续编号的记录 · 2026-11-20</summary>
+<summary>两表按连续编号匹配时，可以直接找到记录 · 2026-11-20</summary>
 
-如果右表读出的编号连续、没有重复，数据库可以用编号直接找到已经读过的记录，省去把编号再存一遍。
+按整数编号匹配两张表时，如果右表的编号连续且不重复，数据库可以用编号直接找到已读过的记录，省去另建查找表的步骤。
 
 [使用手册](docs/MANUAL.md#整数等值连接) · [测试报告](docs/test-report.md#integer-join-direct-20261120) · [性能报告](docs/performance-report-2026-10-30.md#integer-join-direct-cost-20261120)
 
