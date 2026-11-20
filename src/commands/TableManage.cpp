@@ -5,6 +5,7 @@
 #include "expression/ArrayDatumInput.h"
 #include "commands/HeapScanCursor.h"
 #include "commands/CreatedDatabaseCatalog.h"
+#include "commands/CreateTableUndo.h"
 #include "commands/StoredRowNull.h"
 #include "commands/DdlRewrite.h"
 #include "commands/DdlTransaction.h"
@@ -15,6 +16,7 @@
 #include "catalog/PgSequenceCatalog.h"
 #include "commands/VacuumFullBackup.h"
 #include "common/DbError.h"
+#include "common/DatabaseMetadataWrite.h"
 #include "common/DataDirectory.h"
 #include "storage/VariableRow.h"
 #include "common/SqlArrayText.h"
@@ -1944,6 +1946,201 @@ static bool writeRelationListAtomically(const std::filesystem::path& path,
     return bytes && index_file::writeAtomically(path, *bytes,
                                                index_file::DirectorySync::RetryOnce);
 }
+
+static bool pathEntryExists(const std::filesystem::path& path, std::error_code& ec);
+static bool renameTablespaceEntryNoReplace(const std::filesystem::path& source,
+    const std::filesystem::path& destination, std::error_code& error);
+
+namespace {
+constexpr const char* kCreateUndo = ".create_table_undo";
+constexpr const char* kRetiredCreateUndo = ".create_table_undo.retired";
+constexpr size_t kCreateUndoImageLimit = 256 * 1024 * 1024;
+// Keep allocator counters out of the undo image. They must never move
+// backwards after recovery even if the objects using those IDs disappear.
+const std::array<const char*, 10> kCreateUndoCatalogPaths = {
+    "tlist.lst", ".inherits", ".comments", ".exclusions", ".permissions",
+    ".grant_chain", "pg_catalog/pg_class.cat", "pg_catalog/pg_attribute.cat",
+    "pg_catalog/pg_attrdef.cat", "pg_catalog/pg_depend.cat"};
+
+std::string createUndoBinding(const std::filesystem::path& database,
+                              const std::string& header) {
+    return SHA256::hash(header + clusterSystemIdentifier() + database.filename().string());
+}
+
+bool readCreateUndoFile(const std::filesystem::path& path, size_t limit,
+                        std::optional<std::string>& bytes) {
+    std::error_code error;
+    bytes.reset();
+    if (!pathEntryExists(path, error)) return !error;
+    if (std::filesystem::symlink_status(path, error).type() !=
+            std::filesystem::file_type::regular || error) return false;
+    const auto size = std::filesystem::file_size(path, error);
+    if (error || size > limit) return false;
+    std::ifstream input(path, std::ios::binary);
+    if (!input) return false;
+    std::string data(static_cast<size_t>(size), '\0');
+    input.read(data.data(), static_cast<std::streamsize>(size));
+    if (!input || input.peek() != std::ifstream::traits_type::eof() || input.bad())
+        return false;
+    bytes = std::move(data);
+    return true;
+}
+
+bool captureCreateUndoCatalog(const std::filesystem::path& database,
+                              const std::string& header, std::string& image) {
+    std::error_code error;
+    if (std::filesystem::symlink_status(database / "pg_catalog", error).type() !=
+            std::filesystem::file_type::directory || error) return false;
+    image = "CTUC2" + createUndoBinding(database, header);
+    for (const char* name : kCreateUndoCatalogPaths) {
+        std::optional<std::string> bytes;
+        if (!readCreateUndoFile(database / name, kCreateUndoImageLimit, bytes)) return false;
+        if (bytes && bytes->size() > kCreateUndoImageLimit - image.size() - 8) return false;
+        relation_name_codec::append(image, bytes ? bytes->size() + 1 : 0, 8);
+        if (bytes) image += *bytes;
+        if (image.size() > kCreateUndoImageLimit - 64) return false;
+    }
+    image += SHA256::hash(image);
+    return true;
+}
+
+bool restoreCreateUndoCatalog(const std::filesystem::path& database,
+                              const std::filesystem::path& journal) {
+    std::optional<std::string> image;
+    std::optional<std::string> header;
+    if (!readCreateUndoFile(journal / "catalog", kCreateUndoImageLimit, image) ||
+        !image || !readCreateUndoFile(journal / "header", create_table_undo::maxRecordBytes, header) ||
+        !header || image->size() < 133 ||
+        image->compare(0, 69, "CTUC2" + createUndoBinding(database, *header)) != 0)
+        return false;
+    std::error_code directoryError;
+    if (std::filesystem::symlink_status(database / "pg_catalog", directoryError).type() !=
+            std::filesystem::file_type::directory || directoryError) return false;
+    const std::string payload = image->substr(0, image->size() - 64);
+    if (SHA256::hash(payload) != image->substr(payload.size())) return false;
+    std::vector<std::optional<std::string>> before;
+    size_t offset = 69;
+    for (size_t i = 0; i < kCreateUndoCatalogPaths.size(); ++i) {
+        uint64_t size = 0;
+        if (!relation_name_codec::read(payload, offset, 8, size) ||
+            (size != 0 && size - 1 > payload.size() - offset)) return false;
+        if (size == 0) {
+            before.emplace_back();
+        } else {
+            before.emplace_back(payload.substr(offset, size - 1));
+            offset += size - 1;
+        }
+    }
+    if (offset != payload.size() || !before.front() ||
+        !relation_name_codec::decode(*before.front())) return false;
+    for (size_t i = 0; i < before.size(); ++i) {
+        const auto path = database / kCreateUndoCatalogPaths[i];
+        std::error_code error;
+        const auto type = std::filesystem::symlink_status(path, error).type();
+        if ((error && error != std::errc::no_such_file_or_directory) ||
+            (type != std::filesystem::file_type::regular &&
+             type != std::filesystem::file_type::not_found)) return false;
+        if (before[i]) {
+            if (!index_file::writeAtomically(path, *before[i],
+                                             index_file::DirectorySync::RetryOnce))
+                return false;
+        } else if (type != std::filesystem::file_type::not_found &&
+                   !index_file::removeDurably(path)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+std::filesystem::path makeCreateUndoStage(const std::filesystem::path& database) {
+    auto path = (database / ".create_table_undo.stage.XXXXXX").string();
+    if (!::mkdtemp(path.data())) return {};
+    return path;
+}
+
+bool readCreateUndoHeader(const std::filesystem::path& journal, std::string& encoded) {
+    std::error_code error;
+    if (std::filesystem::symlink_status(journal, error).type() !=
+            std::filesystem::file_type::directory || error) return false;
+    std::optional<std::string> bytes;
+    create_table_undo::Header header;
+    if (!readCreateUndoFile(journal / "header", create_table_undo::maxRecordBytes, bytes) ||
+        !bytes || !create_table_undo::decodeHeader(*bytes, header)) return false;
+    encoded = std::move(*bytes);
+    return true;
+}
+
+bool removeRetiredCreateUndo(const std::filesystem::path& database) {
+    std::error_code error;
+    const auto retired = database / kRetiredCreateUndo;
+    if (!pathEntryExists(retired, error)) return !error;
+    std::string header;
+    std::optional<std::string> proof;
+    if (!readCreateUndoHeader(retired, header) ||
+        !readCreateUndoFile(retired / "retired", 64, proof) ||
+        !proof || *proof != createUndoBinding(database, header)) return false;
+    for (const auto& entry : std::filesystem::directory_iterator(retired)) {
+        if (entry.symlink_status().type() != std::filesystem::file_type::regular)
+            return false;
+        const auto name = entry.path().filename().string();
+        if (name == "header" || name == "catalog" || name == "retired" ||
+            name.rfind(".dbms_atomic_", 0) == 0) continue;
+        std::optional<std::string> bytes;
+        create_table_undo::Birth birth;
+        if (!readCreateUndoFile(entry.path(), create_table_undo::maxRecordBytes, bytes) ||
+            !bytes || !create_table_undo::decodeBirth(*bytes, birth) ||
+            name != std::to_string(birth.physicalId)) return false;
+    }
+    // The directory rename is the durable retirement boundary. Never
+    // remove individual records while they still occupy the active path.
+    if (!index_file::syncDirectory(database)) return false;
+    const auto stage = makeCreateUndoStage(database);
+    if (stage.empty()) return false;
+    const bool moved = renameTablespaceEntryNoReplace(retired, stage / "records", error);
+    std::error_code cleanupError;
+    std::filesystem::remove_all(stage, cleanupError);
+    return moved && !cleanupError && index_file::syncDirectory(database);
+}
+
+bool retireCreateUndo(const std::filesystem::path& database) {
+    if (!removeRetiredCreateUndo(database)) return false;
+    std::error_code error;
+    const auto journal = database / kCreateUndo;
+    if (!pathEntryExists(journal, error)) return !error;
+    std::string header;
+    std::optional<std::string> proof;
+    if (!readCreateUndoHeader(journal, header) ||
+        !readCreateUndoFile(journal / "retired", 64, proof)) return false;
+    const auto expected = createUndoBinding(database, header);
+    if (proof && *proof != expected) return false;
+    if (!proof && index_file::writeAtomicallyNoReplace(journal / "retired", expected) !=
+                      index_file::WriteResult::OK) return false;
+    return renameTablespaceEntryNoReplace(journal, database / kRetiredCreateUndo, error) &&
+           removeRetiredCreateUndo(database);
+}
+
+bool pendingCreateUndo(const std::filesystem::path& database) {
+    std::error_code error;
+    if (pathEntryExists(database / kCreateUndo, error) || error) return true;
+    return pathEntryExists(database / kRetiredCreateUndo, error) || error;
+}
+
+bool createUndoOwner(const std::filesystem::path& database, uint64_t& xid) {
+    xid = 0;
+    const auto journal = database / kCreateUndo;
+    std::error_code error;
+    if (!pathEntryExists(journal, error)) return !error;
+    if (std::filesystem::symlink_status(journal, error).type() !=
+            std::filesystem::file_type::directory || error) return false;
+    std::optional<std::string> bytes;
+    if (!readCreateUndoFile(journal / "header",
+                            create_table_undo::maxRecordBytes, bytes)) return false;
+    create_table_undo::Header header;
+    if (!bytes || !create_table_undo::decodeHeader(*bytes, header)) return false;
+    xid = header.xid;
+    return true;
+}
+}  // namespace
 
 static std::string primaryKeyConstraintName(const TableSchema& table) {
     if (!table.hasPrimaryKey()) return {};
@@ -4363,6 +4560,8 @@ DBStatus StorageEngine::attachPartition(const std::string& dbname,
                                           const std::string& tablename,
                                           const std::string& partitionName,
                                           const std::string& partitionSpec) {
+    const DatabaseMetadataWrite metadataWrite(dbPath(dbname));
+    if (!metadataWrite.acquired()) return DBStatus::LOCK_CONFLICT;
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     if (tablename == partitionName) return DBStatus::INVALID_VALUE;
     struct RelationLockSet {
@@ -8162,6 +8361,8 @@ std::filesystem::path StorageEngine::tablespaceDir(const std::string& dbname,
 DBStatus StorageEngine::createTablespace(const std::string& dbname,
                                           const std::string& tsName,
                                           const std::string& physicalPath) {
+    const DatabaseMetadataWrite metadataWrite(dbPath(dbname));
+    if (!metadataWrite.acquired()) return DBStatus::LOCK_CONFLICT;
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
     if (!validTablespaceName(tsName) || tsName == "pg_default" ||
@@ -8284,6 +8485,8 @@ DBStatus StorageEngine::createTablespace(const std::string& dbname,
 
 DBStatus StorageEngine::dropTablespace(const std::string& dbname,
                                         const std::string& tsName) {
+    const DatabaseMetadataWrite metadataWrite(dbPath(dbname));
+    if (!metadataWrite.acquired()) return DBStatus::LOCK_CONFLICT;
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
     if (!validTablespaceName(tsName) || tsName == "pg_default" ||
@@ -10406,6 +10609,8 @@ DBStatus StorageEngine::createHashIndex(const std::string& dbname,
                                          const std::string& tablename,
                                          const std::string& colname,
                                          bool /*concurrently*/) {
+    const DatabaseMetadataWrite metadataWrite(dbPath(dbname));
+    if (!metadataWrite.acquired()) return DBStatus::LOCK_CONFLICT;
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     TableSchema tbl = getTableSchema(dbname, tablename);
@@ -10567,6 +10772,8 @@ BloomIndex* StorageEngine::getBloomIndexForBuild(
 DBStatus StorageEngine::createBloomIndex(const std::string& dbname,
                                          const std::string& tablename,
                                          const std::string& colname) {
+    const DatabaseMetadataWrite metadataWrite(dbPath(dbname));
+    if (!metadataWrite.acquired()) return DBStatus::LOCK_CONFLICT;
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     TableSchema tbl = getTableSchema(dbname, tablename);
@@ -12886,6 +13093,8 @@ StorageEngine::ExclusionConstraint StorageEngine::readExclusion(std::istream& in
 }
 
 DBStatus StorageEngine::createExclusionConstraint(const std::string& dbname, const ExclusionConstraint& ec) {
+    const DatabaseMetadataWrite metadataWrite(dbPath(dbname));
+    if (!metadataWrite.acquired()) return DBStatus::LOCK_CONFLICT;
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
     auto existing = getExclusionConstraints(dbname, "");
     for (const auto& e : existing) {
@@ -12903,6 +13112,8 @@ DBStatus StorageEngine::createExclusionConstraint(const std::string& dbname, con
 }
 
 DBStatus StorageEngine::dropExclusionConstraint(const std::string& dbname, const std::string& name) {
+    const DatabaseMetadataWrite metadataWrite(dbPath(dbname));
+    if (!metadataWrite.acquired()) return DBStatus::LOCK_CONFLICT;
     auto existing = getExclusionConstraints(dbname, "");
     bool found = false;
     {
@@ -13783,6 +13994,8 @@ DBStatus StorageEngine::createIndex(const std::string& dbname, const std::string
                                      const std::string& expression,
                                      bool concurrently,
                                      bool unique) {
+    const DatabaseMetadataWrite metadataWrite(dbPath(dbname));
+    if (!metadataWrite.acquired()) return DBStatus::LOCK_CONFLICT;
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     // Concurrent validation and partial/expression uniqueness need predicate
     // locking and expression-specific equality metadata that this access path
@@ -14112,6 +14325,8 @@ DBStatus StorageEngine::createCompositeIndex(const std::string& dbname,
                                               const std::string& whereCondition,
                                               bool concurrently,
                                               bool unique) {
+    const DatabaseMetadataWrite metadataWrite(dbPath(dbname));
+    if (!metadataWrite.acquired()) return DBStatus::LOCK_CONFLICT;
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     if (unique && (concurrently || !whereCondition.empty())) {
         return DBStatus::INVALID_VALUE;
@@ -14984,6 +15199,8 @@ static std::vector<std::string> tokenizeText(const std::string& text) {
 DBStatus StorageEngine::createFullTextIndex(const std::string& dbname,
                                              const std::string& tablename,
                                              const std::string& colname) {
+    const DatabaseMetadataWrite metadataWrite(dbPath(dbname));
+    if (!metadataWrite.acquired()) return DBStatus::LOCK_CONFLICT;
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     TableSchema tbl = getTableSchema(dbname, tablename);
     std::vector<bool> scanNulls(tbl.len, false);
@@ -15257,6 +15474,8 @@ static std::string serializeGinIndex(
 DBStatus StorageEngine::createGinIndex(const std::string& dbname,
                                         const std::string& tablename,
                                         const std::string& colname) {
+    const DatabaseMetadataWrite metadataWrite(dbPath(dbname));
+    if (!metadataWrite.acquired()) return DBStatus::LOCK_CONFLICT;
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     TableSchema tbl = getTableSchema(dbname, tablename);
     std::vector<bool> scanNulls(tbl.len, false);
@@ -15624,6 +15843,8 @@ static bool gistFileOwnerIsUnique(const StorageEngine& engine,
 DBStatus StorageEngine::createGiSTIndex(const std::string& dbname,
                                          const std::string& tablename,
                                          const std::string& colname) {
+    const DatabaseMetadataWrite metadataWrite(dbPath(dbname));
+    if (!metadataWrite.acquired()) return DBStatus::LOCK_CONFLICT;
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     TableSchema tbl = getTableSchema(dbname, tablename);
     std::vector<bool> scanNulls(tbl.len, false);
@@ -16464,6 +16685,8 @@ std::vector<std::string> StorageEngine::getGiSTIndexedColumns(const std::string&
 DBStatus StorageEngine::createSPGiSTIndex(const std::string& dbname,
                                            const std::string& tablename,
                                            const std::string& colname) {
+    const DatabaseMetadataWrite metadataWrite(dbPath(dbname));
+    if (!metadataWrite.acquired()) return DBStatus::LOCK_CONFLICT;
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     TableSchema tbl = getTableSchema(dbname, tablename);
@@ -16920,6 +17143,8 @@ DBStatus StorageEngine::createBrinIndex(const std::string& dbname,
                                          const std::string& tablename,
                                          const std::string& colname,
                                          size_t pagesPerRange) {
+    const DatabaseMetadataWrite metadataWrite(dbPath(dbname));
+    if (!metadataWrite.acquired()) return DBStatus::LOCK_CONFLICT;
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     if (pagesPerRange == 0) pagesPerRange = 64;
     if (pagesPerRange > std::numeric_limits<uint32_t>::max()) return DBStatus::INVALID_VALUE;
@@ -20070,6 +20295,8 @@ DBStatus validateForeignKeyDefinition(
 }  // namespace
 
 DBStatus StorageEngine::createTable(const std::string& dbname, const TableSchema& tbl, std::string* error) {
+    const DatabaseMetadataWrite metadataWrite(dbPath(dbname));
+    if (!metadataWrite.acquired()) return DBStatus::LOCK_CONFLICT;
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (!databaseExists(dbname)) {
         if (error) *error = "database not found";
@@ -20256,6 +20483,7 @@ DBStatus StorageEngine::createTable(const std::string& dbname, const TableSchema
     std::vector<std::string> priorTableNames;
     bool tableListMutationAttempted = false;
     auto cleanupFailedCreate = [&]() {
+        bool cleaned = true;
         const std::string key = dbname + "/" + tbl.tablename;
         pageAllocators_.erase(key);
         pkIndexCache_.erase(key);
@@ -20283,7 +20511,7 @@ DBStatus StorageEngine::createTable(const std::string& dbname, const TableSchema
             ? dbPath(dbname)
             : tablespaceDir(dbname, tblWithVersion.tablespace) / dbname;
         for (const auto& path : {
-                 schemaFile, paramsPath(dbname, tbl.tablename),
+                 paramsPath(dbname, tbl.tablename),
                  dataPath(dbname, tbl.tablename), indexPath(dbname, tbl.tablename),
                  secondaryIndexMetaPath(dbname, tbl.tablename),
                  hashIndexMetaPath(dbname, tbl.tablename),
@@ -20295,10 +20523,12 @@ DBStatus StorageEngine::createTable(const std::string& dbname, const TableSchema
                  toastMetaPath(dbname, tbl.tablename),
                  toastDataPath(dbname, tbl.tablename), toastIndexPath(dbname, tbl.tablename)}) {
             std::filesystem::remove(path, ec);
+            cleaned = !ec && cleaned;
             ec.clear();
         }
         removeSeq(dbname, tbl.tablename);
         std::filesystem::remove_all(toastDir(dbname, tbl.tablename), ec);
+        cleaned = !ec && cleaned;
         ec.clear();
 
         for (const auto& leaf : partitionLeaves(tblWithVersion)) {
@@ -20307,6 +20537,7 @@ DBStatus StorageEngine::createTable(const std::string& dbname, const TableSchema
                      ? "" : "#" + leaf.subPartition);
             std::filesystem::remove(
                 relationRoot / (tbl.tablename + suffix + ".dt"), ec);
+            cleaned = !ec && cleaned;
             ec.clear();
         }
         if (std::filesystem::exists(relationRoot, ec) && !ec) {
@@ -20315,6 +20546,7 @@ DBStatus StorageEngine::createTable(const std::string& dbname, const TableSchema
                 if (isRelationPhysicalFileName(
                         entry.path().filename().string(), tbl.tablename)) {
                     std::filesystem::remove_all(entry.path(), ec);
+                    cleaned = !ec && cleaned;
                     ec.clear();
                 }
             }
@@ -20322,11 +20554,26 @@ DBStatus StorageEngine::createTable(const std::string& dbname, const TableSchema
 
         if (tableListMutationAttempted) {
             if (!writeRelationListAtomically(tableListPath(dbname), priorTableNames)) {
+                cleaned = false;
                 std::cerr << "[catalog] failed to restore table list after "
                           << "CREATE TABLE rollback: " << dbname << std::endl;
             }
             invalidateCatalogTableList(dbname);
         }
+        if (transactionContext().createTableUndoFence) {
+            // The full schema is the durable ownership witness. Retain it
+            // if cleanup is incomplete, so startup can finish after WAL
+            // proves this transaction never committed.
+            if (!cleaned || !index_file::syncDirectory(dbPath(dbname)) ||
+                (relationRoot != dbPath(dbname) &&
+                 pathEntryExists(relationRoot, ec) && !index_file::syncDirectory(relationRoot)) ||
+                ec || !index_file::removeDurably(schemaFile)) {
+                transactionContext().createTableUndoCleanupFailed = true;
+            }
+        } else {
+            std::filesystem::remove(schemaFile, ec);
+        }
+        invalidateCatalogSchema(dbname, tbl.tablename);
     };
     auto failCreate = [&](const std::string& message, DBStatus status = DBStatus::IO_ERROR) {
         if (error) *error = message;
@@ -20347,6 +20594,9 @@ DBStatus StorageEngine::createTable(const std::string& dbname, const TableSchema
         std::ostringstream schema(std::ios::out | std::ios::binary);
         writeSchema(schema, tblWithVersion);
         if (!schema) return failCreate("could not write table schema");
+        if (transactionContext().createTableUndoFence && !hasTransactionBackup() &&
+            !recordCreateTableUndo(dbname, tblWithVersion))
+            return failCreate("could not persist CREATE TABLE undo");
         if (!tblWithVersion.isUnlogged) {
             WALManager* wal = getWAL(dbname);
             const auto payload = heap_wal_identity::event(
@@ -20604,6 +20854,8 @@ private:
 
 DBStatus StorageEngine::dropTable(const std::string& dbname,
                                    const std::string& tablename) {
+    const DatabaseMetadataWrite metadataWrite(dbPath(dbname));
+    if (!metadataWrite.acquired()) return DBStatus::LOCK_CONFLICT;
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     std::string conflictingRelationName;
     const auto relationDirectory = relationDir(dbname, tablename).lexically_normal();
@@ -22078,6 +22330,8 @@ DBStatus StorageEngine::alterTableRenameColumn(const std::string& dbname,
                                                 const std::string& tablename,
                                                 const std::string& oldName,
                                                 const std::string& newName) {
+    const DatabaseMetadataWrite metadataWrite(dbPath(dbname));
+    if (!metadataWrite.acquired()) return DBStatus::LOCK_CONFLICT;
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     if (!validStoredIdentifier(newName, MAX_COL_NAME_LEN)) return DBStatus::INVALID_VALUE;
     if (!lockManager_.lockMetadata(tablename)) return DBStatus::LOCK_CONFLICT;
@@ -22439,6 +22693,8 @@ DBStatus StorageEngine::alterTableRenameColumn(const std::string& dbname,
 DBStatus StorageEngine::alterTableRenameTable(const std::string& dbname,
                                                const std::string& oldName,
                                                const std::string& newName) {
+    const DatabaseMetadataWrite metadataWrite(dbPath(dbname));
+    if (!metadataWrite.acquired()) return DBStatus::LOCK_CONFLICT;
     if (!tableExists(dbname, oldName)) return DBStatus::TABLE_NOT_FOUND;
     if (!validStoredRelationName(newName)) return DBStatus::INVALID_VALUE;
     if (tableExists(dbname, newName)) return DBStatus::TABLE_ALREADY_EXISTS;
@@ -24661,6 +24917,8 @@ DBStatus StorageEngine::alterTableTablespace(const std::string& dbname,
                                               const std::function<void(
                                                   const std::filesystem::path&,
                                                   bool)>& beforeRenameForTesting) {
+    const DatabaseMetadataWrite metadataWrite(dbPath(dbname));
+    if (!metadataWrite.acquired()) return DBStatus::LOCK_CONFLICT;
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     const std::string targetTablespace = tablespace.empty() ? "pg_default" : tablespace;
     if (!lockManager_.lockMetadata(tablename)) return DBStatus::LOCK_CONFLICT;
@@ -25157,6 +25415,8 @@ CommentRewriteGuard::~CommentRewriteGuard() {
 DBStatus StorageEngine::commentOnTable(const std::string& dbname,
                                         const std::string& tablename,
                                         const std::string& comment) {
+    const DatabaseMetadataWrite metadataWrite(dbPath(dbname));
+    if (!metadataWrite.acquired()) return DBStatus::LOCK_CONFLICT;
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     const auto path = commentsPath(dbname);
@@ -25181,6 +25441,8 @@ DBStatus StorageEngine::commentOnColumn(const std::string& dbname,
                                          const std::string& tablename,
                                          const std::string& colname,
                                          const std::string& comment) {
+    const DatabaseMetadataWrite metadataWrite(dbPath(dbname));
+    if (!metadataWrite.acquired()) return DBStatus::LOCK_CONFLICT;
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     const TableSchema table = getTableSchema(dbname, tablename);
@@ -48954,6 +49216,156 @@ static bool parsePreparedLockMode(const std::string& value,
 static bool validPhysicalBackupSource(
     const std::filesystem::path& source, std::string& sourceDatabase);
 
+bool StorageEngine::recordCreateTableUndo(const std::string& dbname, const TableSchema& table) {
+    const auto& context = transactionContext();
+    if (context.txnDB != dbname || !context.databaseExclusiveLock ||
+        !context.databaseExclusiveLock->owns_lock()) return false;
+    const auto directory = dbPath(dbname);
+    const auto journal = directory / kCreateUndo;
+    if (!removeRetiredCreateUndo(directory)) return false;
+    WALManager* wal = getWAL(dbname);
+    if (!wal) return false;
+    std::error_code error;
+    const bool exists = pathEntryExists(journal, error);
+    if (error) return false;
+    if (!exists) {
+        std::string image;
+        const Lsn anchor = wal->currentWriteLsn();
+        const auto header = create_table_undo::encodeHeader(
+            {context.currentTxnId, wal->timelineId(), anchor});
+        if (header.empty() || !captureCreateUndoCatalog(directory, header, image) ||
+            (anchor != 0 && !wal->XLogFlush(anchor))) return false;
+        const auto stage = makeCreateUndoStage(directory);
+        if (stage.empty()) return false;
+        if (index_file::writeAtomicallyNoReplace(stage / "catalog", image) !=
+                index_file::WriteResult::OK ||
+            index_file::writeAtomicallyNoReplace(stage / "header", header) !=
+                index_file::WriteResult::OK ||
+            !renameTablespaceEntryNoReplace(stage, journal, error)) {
+            std::filesystem::remove_all(stage, error);
+            return false;
+        }
+        if (!index_file::syncDirectory(directory)) return false;
+    } else {
+        std::optional<std::string> header;
+        create_table_undo::Header owner;
+        if (std::filesystem::symlink_status(journal, error).type() !=
+                std::filesystem::file_type::directory || error ||
+            !readCreateUndoFile(journal / "header", create_table_undo::maxRecordBytes, header) ||
+            !header || !create_table_undo::decodeHeader(*header, owner) ||
+            owner.xid != context.currentTxnId || owner.timeline != wal->timelineId())
+            return false;
+    }
+    const auto receipt = create_table_undo::encodeBirth(
+        {table.physicalRelationId, table.tablename, table.tablespace});
+    return !receipt.empty() && index_file::writeAtomicallyNoReplace(
+        journal / std::to_string(table.physicalRelationId), receipt) == index_file::WriteResult::OK;
+}
+
+bool StorageEngine::recoverCreateTableUndo(const std::string& dbname,
+                                          const std::set<uint64_t>& committed,
+                                          const std::set<uint64_t>& aborted,
+                                          bool targetedRecovery) {
+    const auto directory = dbPath(dbname);
+    const auto journal = directory / kCreateUndo;
+    if (!removeRetiredCreateUndo(directory)) return false;
+    std::error_code error;
+    if (!pathEntryExists(journal, error)) return !error;
+    if (std::filesystem::symlink_status(journal, error).type() !=
+            std::filesystem::file_type::directory || error || targetedRecovery) return false;
+    std::optional<std::string> header;
+    if (!readCreateUndoFile(journal / "header", create_table_undo::maxRecordBytes, header))
+        return false;
+
+    std::map<std::string, std::map<uint64_t, std::string>> births;
+    for (const auto& entry : std::filesystem::directory_iterator(journal)) {
+        const auto name = entry.path().filename().string();
+        if (name == "header" || name == "catalog" || name == "retired" ||
+            name.rfind(".dbms_atomic_", 0) == 0)
+            continue;
+        std::optional<std::string> bytes;
+        create_table_undo::Birth birth;
+        if (!readCreateUndoFile(entry.path(), create_table_undo::maxRecordBytes, bytes) ||
+            !bytes || !create_table_undo::decodeBirth(*bytes, birth) ||
+            name != std::to_string(birth.physicalId) ||
+            !births[birth.storageName].emplace(birth.physicalId, birth.tablespace).second)
+            return false;
+    }
+    create_table_undo::Header owner;
+    if (!header || !create_table_undo::decodeHeader(*header, owner)) return false;
+    {
+        std::lock_guard<std::mutex> lock(globalTxnMutex());
+        if (activeTransactions().count(owner.xid)) return false;
+    }
+    auto* wal = getWAL(dbname);
+    if (!wal || wal->timelineId() != owner.timeline ||
+        wal->earliestAvailableLsn() > owner.anchorLsn ||
+        wal->currentWriteLsn() < owner.anchorLsn) return false;
+    if (committed.count(owner.xid) || aborted.count(owner.xid)) return retireCreateUndo(directory);
+
+    struct OwnedRelation {
+        std::string name;
+        std::filesystem::path schema;
+        std::filesystem::path storage;
+    };
+    std::vector<OwnedRelation> owned;
+    for (const auto& [name, identities] : births) {
+        const auto schemaFile = schemaPath(dbname, name);
+        if (!pathEntryExists(schemaFile, error)) {
+            if (error) return false;
+            continue;
+        }
+        if (std::filesystem::symlink_status(schemaFile, error).type() !=
+                std::filesystem::file_type::regular || error) return false;
+        std::ifstream input(schemaFile, std::ios::binary);
+        const auto table = readSchema(input, name);
+        const auto identity = identities.find(table.physicalRelationId);
+        if (table.tablename != name || identity == identities.end() ||
+            table.tablespace != identity->second) return false;
+        auto storage = directory;
+        if (table.tablespace != "pg_default") {
+            if (!resolveTablespaceRoot(*this, dbname, table.tablespace, storage)) return false;
+            storage /= dbname;
+        }
+        owned.push_back({name, schemaFile, storage});
+    }
+    auto removeFile = [&](const std::filesystem::path& path) {
+        if (!pathEntryExists(path, error)) return !error;
+        if (std::filesystem::symlink_status(path, error).type() !=
+                std::filesystem::file_type::regular || error) return false;
+        return std::filesystem::remove(path, error) && !error;
+    };
+    if (!restoreCreateUndoCatalog(directory, journal)) return false;
+    for (const auto& table : owned) {
+        // Keep the schema as the identity witness until all owned forks
+        // have been removed and those unlinks are durable.
+        if (pathEntryExists(table.storage, error)) {
+            if (std::filesystem::symlink_status(table.storage, error).type() !=
+                    std::filesystem::file_type::directory || error) return false;
+            for (const auto& entry : std::filesystem::directory_iterator(table.storage)) {
+                if (isRelationPhysicalFileName(entry.path().filename().string(), table.name) &&
+                    !removeFile(entry.path())) return false;
+            }
+            if (!index_file::syncDirectory(table.storage)) return false;
+        } else if (error) {
+            return false;
+        }
+        for (const auto& path : {
+                 paramsPath(dbname, table.name),
+                 secondaryIndexMetaPath(dbname, table.name),
+                 hashIndexMetaPath(dbname, table.name),
+                 bloomIndexMetaPath(dbname, table.name),
+                 namedIndexMetaPath(*this, dbname, table.name),
+                 truncateStatePath(*this, dbname, table.name),
+                 specializedIndexDirtyPath(*this, dbname, table.name)}) {
+            if (!removeFile(path)) return false;
+        }
+        if (!index_file::syncDirectory(directory) || !removeFile(table.schema) ||
+            !index_file::syncDirectory(directory)) return false;
+    }
+    return retireCreateUndo(directory);
+}
+
 bool StorageEngine::recoverAllDatabases() {
     // A second embedded backend is not a process restart. It must not replay
     // an incomplete owner's image while that owner still retains its graph.
@@ -49000,7 +49412,12 @@ bool StorageEngine::recoverAllDatabases() {
             if (!entry.is_directory()) continue;
             dbname = entry.path().filename().string();
         } catch (...) { continue; }
-        if (!isDatabaseDirectory(dbname)) continue;
+        if (!isDatabaseDirectory(dbname)) {
+            std::error_code ec;
+            if (pendingCreateUndo(entry.path()) &&
+                !pathEntryExists(entry.path() / kPhysicalBackupMarker, ec)) return false;
+            continue;
+        }
 
         // Consume the previous process state before any recovery-side file
         // mutation. Missing state belongs to an older build and is treated
@@ -49493,6 +49910,23 @@ bool StorageEngine::recoverAllDatabases() {
         }
         std::error_code ec;
         std::filesystem::remove_all(backup, ec);
+    }
+
+    // A full image can have been taken after an earlier ordinary CREATE.
+    // It restores that earlier journal along with the catalog; remove those
+    // transaction-owned relations before the normal physical-ID/WAL pass.
+    for (const auto& dbname : getDatabaseNames()) {
+        if (!pendingCreateUndo(dbPath(dbname))) continue;
+        uint64_t owner = 0;
+        if (!createUndoOwner(dbPath(dbname), owner) ||
+            inDoubtPreparedXids.count({dbname, owner}) ||
+            !recoverCreateTableUndo(dbname, committedXidsByDb[dbname],
+                                    abortedXidsByDb[dbname],
+                                    recoveryTargetsByDb.count(dbname))) {
+            std::cerr << "[recovery] could not recover CREATE TABLE undo for "
+                      << dbname << std::endl;
+            return false;
+        }
     }
 
     // A statement image is only a nested atomicity aid. After a process
@@ -50527,7 +50961,8 @@ bool StorageEngine::checkpoint(const std::string& dbname) {
     const auto databaseMutex = databaseTxnLockFor(dbname);
     std::unique_lock<std::shared_mutex> checkpointDatabaseLock(
         *databaseMutex, std::try_to_lock);
-    if (!checkpointDatabaseLock.owns_lock() || !databaseExists(dbname)) {
+    if (!checkpointDatabaseLock.owns_lock() || !databaseExists(dbname) ||
+        pendingCreateUndo(dbPath(dbname))) {
         return false;
     }
     PhysicalCatalogOwnership catalogOwnership(
@@ -51535,6 +51970,8 @@ bool StorageEngine::physicalBackup(const std::string& dbname,
 bool StorageEngine::physicalBackupLocked(
     const std::string& dbname, const std::string& backupPath,
     const MaintenanceProgress& progress, bool includeUnloggedMain) {
+    const DatabaseMetadataWrite metadataWrite(dbPath(dbname));
+    if (!metadataWrite.acquired()) return false;
     const auto destination = std::filesystem::path(backupPath);
     const auto destinationParent = destination.parent_path().empty()
         ? std::filesystem::path(".") : destination.parent_path();
@@ -51555,7 +51992,8 @@ bool StorageEngine::physicalBackupLocked(
         if (!destinationNameLock.owns_lock()) return false;
     }
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
-    if (!databaseExists(dbname)) return false;
+    if (!databaseExists(dbname) || (!includeUnloggedMain && pendingCreateUndo(dbPath(dbname))))
+        return false;
     // The lock lives outside the replaceable database generation, so marker
     // creation/drop and relation placement cannot change underneath the
     // snapshot even when another backend is serving the same cluster.
@@ -52030,6 +52468,8 @@ bool StorageEngine::physicalRestore(const std::string& dbname,
 bool StorageEngine::physicalRestoreLocked(
     const std::string& dbname, const std::string& backupPath,
     const MaintenanceProgress& progress, PhysicalRestoreAdmission* admission) {
+    const DatabaseMetadataWrite metadataWrite(dbPath(dbname));
+    if (!metadataWrite.acquired()) return false;
     struct PhysicalSchemaReadScope {
         const StorageEngine* prior = physicalSchemaReader;
         explicit PhysicalSchemaReadScope(const StorageEngine* owner) { physicalSchemaReader = owner; }
@@ -54753,9 +55193,38 @@ void StorageEngine::preserveTransactionBackupOnRollback(bool preserve) {
     context.preserveBackupOnRollback = preserve;
     if (!preserve || !context.inTransaction || !context.txnBackupPath.empty()) return;
 
-    // Legacy direct callers may opt in after BEGIN. Upgrade their shared
-    // database lock before taking the snapshot; the DDL wrapper uses the
-    // exclusive begin overload and therefore does not need an upgrade.
+    lockDatabaseForDdl();
+    if (!createTransactionBackup()) {
+        context.preserveBackupOnRollback = false;
+        if (!context.createTableUndoFence) {
+            context.databaseExclusiveLock.reset();
+            context.databaseSharedLock = std::make_unique<std::shared_lock<std::shared_mutex>>(
+                *context.databaseTxnMutex);
+        }
+    }
+}
+
+bool StorageEngine::beginCreateTableUndo(const std::string& dbname) {
+    const auto status = ensureDatabaseTransactionOwnership(dbname);
+    if (status != DBStatus::OK)
+        throw DbError(sqlstateForDBStatus(status), "could not acquire database transaction ownership");
+    auto& context = transactionContext();
+    if (!context.inTransaction || context.txnDB != dbname ||
+        context.currentTxnId == 0) return false;
+    lockDatabaseForDdl();
+    if (!context.createTableUndoFence) {
+        auto fence = std::make_shared<DatabaseMetadataWrite>(dbPath(dbname));
+        if (!fence->acquired())
+            throw DbError("55P03", "another backend is publishing database metadata");
+        context.createTableUndoFence = std::move(fence);
+    }
+    return true;
+}
+
+void StorageEngine::lockDatabaseForDdl() {
+    auto& context = transactionContext();
+    // A scoped DDL owner may opt in after BEGIN. Hold exclusive ownership
+    // while the undo image is live, including between SQL statements.
     context.databaseSharedLock.reset();
     if (!context.databaseExclusiveLock) {
         auto exclusive = std::make_unique<std::unique_lock<std::shared_mutex>>(
@@ -54786,12 +55255,6 @@ void StorageEngine::preserveTransactionBackupOnRollback(bool preserve) {
             throw DbError("55P03", "could not upgrade database transaction lock");
         }
         context.databaseExclusiveLock = std::move(exclusive);
-    }
-    if (!createTransactionBackup()) {
-        context.preserveBackupOnRollback = false;
-        context.databaseExclusiveLock.reset();
-        context.databaseSharedLock = std::make_unique<std::shared_lock<std::shared_mutex>>(
-            *context.databaseTxnMutex);
     }
 }
 
@@ -55364,6 +55827,10 @@ void StorageEngine::discardDdlStatementBackup(
 }
 
 DBStatus StorageEngine::commitTransaction() {
+    if (transactionContext().createTableUndoCleanupFailed) {
+        (void)rollbackTransaction();
+        return DBStatus::IO_ERROR;
+    }
     if (transactionContext().rollbackPending) return DBStatus::IO_ERROR;
     if (!transactionContext().inTransaction) return DBStatus::OK;
     if (transactionContext().databaseOwnershipDeferred) return finishDatabaseIndependentTransaction();
@@ -55760,6 +56227,7 @@ DBStatus StorageEngine::commitTransaction() {
         committingContext.ddlUndoActions.empty() && committingContext.deferredChecks.empty() &&
         committingContext.txnBackupPath.empty() && !committingContext.transactionBackupDirty &&
         !committingContext.preserveBackupOnRollback && !committingContext.databaseExclusiveLock &&
+        !committingContext.createTableUndoFence &&
         committingContext.savepoints.empty() && committingContext.txnSubTxnIds.empty() &&
         !terminalTempAction;
     const Lsn commitLsn = noEffects ? INVALID_LSN : walXactCommit(committingDb, committingTxnId);
@@ -55851,6 +56319,17 @@ DBStatus StorageEngine::commitTransaction() {
     // this commit can still need those values; removing them here makes that
     // snapshot observe a broken row.  VACUUM TOAST waits for active snapshots
     // and then reclaims objects no current physical tuple references.
+
+    if (committingContext.createTableUndoFence) {
+        uint64_t owner = 0;
+        if (!createUndoOwner(dbPath(committingDb), owner) ||
+            (owner != 0 && owner != committingTxnId) ||
+            !retireCreateUndo(dbPath(committingDb))) {
+            std::cerr << "[transaction] committed with CREATE TABLE undo retained for "
+                      << committingDb << std::endl;
+        }
+        committingContext.createTableUndoFence.reset();
+    }
 
     // Update max committed txId
     TxnIdGenerator::instance().notifyCommit(transactionContext().currentTxnId);
@@ -56957,6 +57436,19 @@ DBStatus StorageEngine::rollbackTransaction() {
         transactionContext().ddlUndoActions = std::move(failedDdlUndoActions);
     }
 
+    if (rollbackContext.createTableUndoCleanupFailed) ddlUndoOk = false;
+    if (snapshotRestoreOk && rowUndoOk && ddlUndoOk && rollbackContext.createTableUndoFence) {
+        uint64_t owner = 0;
+        if (!createUndoOwner(dbPath(rollbackDb), owner) ||
+            (owner != 0 && (owner != rollbackContext.currentTxnId ||
+             !restoreCreateUndoCatalog(dbPath(rollbackDb), dbPath(rollbackDb) / kCreateUndo)))) {
+            ddlUndoOk = false;
+        } else if (owner != 0) {
+            if (catalogService_) catalogService_->evict(rollbackDb);
+            clearCatalogSnapshot();
+        }
+    }
+
     // A commit attempt can already have rebuilt these sidecars with the
     // transaction's NEW versions before a later durability step fails.  Once
     // heap/DDL undo is complete, derive them again from a fresh view that
@@ -57125,6 +57617,18 @@ DBStatus StorageEngine::rollbackTransaction() {
             transactionContext().tempTableOnCommitAtTransactionStart;
         session->tempTablesCreatedInTransaction =
             transactionContext().tempTablesCreatedAtTransactionStart;
+    }
+
+    if (transactionContext().createTableUndoFence) {
+        uint64_t owner = 0;
+        const auto directory = dbPath(rollbackDb);
+        if (!createUndoOwner(directory, owner) ||
+            (owner != 0 && owner != attempt.xid) ||
+            !retireCreateUndo(directory)) {
+            std::cerr << "[transaction] aborted with CREATE TABLE undo retained for "
+                      << rollbackDb << std::endl;
+        }
+        transactionContext().createTableUndoFence.reset();
     }
 
     // A restored dirty image is no longer needed after complete durable
@@ -57591,7 +58095,8 @@ DBStatus StorageEngine::prepareTransaction(const std::string& xid) {
             ? DBStatus::FEATURE_NOT_SUPPORTED : rollbackStatus;
     }
     if (!transactionContext().ddlUndoActions.empty() ||
-        transactionContext().transactionBackupDirty) {
+        transactionContext().transactionBackupDirty ||
+        transactionContext().createTableUndoFence) {
         // DDL undo callbacks are backend-local closures, while a dirty
         // transaction snapshot can only be restored safely while this
         // backend still owns the database-wide transaction lock. PREPARE
@@ -60610,6 +61115,9 @@ void StorageEngine::grant(const std::string& dbname, const std::string& tablenam
                           const std::vector<std::string>& columns,
                           bool withGrantOption,
                           const std::string& grantedBy) {
+    const DatabaseMetadataWrite metadataWrite(dbPath(dbname));
+    if (!metadataWrite.acquired())
+        throw DbError("55P03", "another backend is publishing database metadata");
     auto ppath = permPath(dbname);
     std::map<std::string, std::set<std::string>> perms;
     if (std::filesystem::exists(ppath)) {
@@ -60689,6 +61197,9 @@ bool StorageEngine::revoke(const std::string& dbname, const std::string& tablena
                            const std::string& username, TablePrivilege priv,
                            const std::vector<std::string>& columns, bool cascade,
                            bool grantOptionOnly) {
+    const DatabaseMetadataWrite metadataWrite(dbPath(dbname));
+    if (!metadataWrite.acquired())
+        throw DbError("55P03", "another backend is publishing database metadata");
     auto ppath = permPath(dbname);
     const auto gcp = grantChainPath(dbPath(dbname));
     std::vector<std::string> chainLines;

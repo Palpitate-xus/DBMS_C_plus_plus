@@ -2,6 +2,45 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-20 recover ordinary transactional CREATE from catalog before-images and physical identities",
+      "gap_ids": ["CAT-07", "WAL-08"],
+      "status": "partial",
+      "evidence": [
+        "src/commands/CreateTableUndo.h",
+        "src/commands/DdlExecutor.cpp",
+        "src/commands/TableManage.cpp",
+        "src/common/DatabaseMetadataWrite.h",
+        "docs/test-report.md",
+        "docs/postgresql-comparison.md",
+        "docs/performance-report-2026-10-30.md"
+      ],
+      "tests": [
+        "tests/ordinary_create_transaction_crash_protocol_e2e_test.py",
+        "tests/create_table_undo_format_test.cpp",
+        "tests/create_table_undo_ownership_test.cpp",
+        "tests/table_list_atomicity_test.cpp",
+        "tests/cold_start_transaction_backup_protocol_e2e_test.py"
+      ],
+      "verification": [
+        "Seven of nine registered workload scenarios reproduced the orphan-table bug on the exact baseline. All nine passed on the final build, covering inherited and unlogged tables, savepoint reuse, and CREATE followed by ALTER, INDEX or owned SERIAL.",
+        "Nine neighboring protocol suites and seven linked native suites passed. The PostgreSQL 18.6 reference completed 118 SQL requests and 17 forced process stops.",
+        "The native ownership test verifies writer exclusion, subsequent cold reopen and preservation of unrelated directory contents. The shutdown-time thread-local lifetime regression in earlier candidates passed both the same ASan reproducer and the original table-list fixture on the final build.",
+        "The crash workload stops the server after SQL responses. Fault injection between durable writes, cross-tablespace crash cleanup and recovery combined with a time target remain to be verified.",
+        "All 36 measured rounds completed, covering 360 CREATEs. All five measured scenarios exceeded the preset CPU variation threshold. The paired samples describe the observed cost without proving a stable slowdown ratio or a size trend."
+      ],
+      "artifacts": {
+        "exact_build": "build/array-domain-20261117/create-table-undo-cmake-v4.json",
+        "baseline_protocol": "build/ordinary-create-crash-20261119/mixed-registered-exact-head-v2/summary.json",
+        "primary_protocol": "build/ordinary-create-crash-20261119/protocol-create-undo-primary-v4/summary.json",
+        "neighbor_protocol": "build/ordinary-create-crash-20261119/protocol-create-undo-neighbors-v4/summary.json",
+        "native_companions": "build/ordinary-create-crash-20261119/native-checks-create-undo-v4/summary.json",
+        "postgres_reference": "build/ordinary-create-crash-20261119/pg18-ordinary-mixed-v1/summary.json",
+        "timing_independent_audit": "build/ordinary-create-crash-20261119/create-undo-v4-timing/independent-audit.json",
+        "empty_timing": "build/ordinary-create-crash-20261119/create-undo-bulk-v4-empty-timing/summary.json",
+        "filled_timing": "build/ordinary-create-crash-20261119/create-undo-bulk-v4-filled-timing/summary.json"
+      }
+    },
+    {
       "issue": "2026-11-20 retry relation list directory sync after successful rename",
       "gap_ids": ["CAT-07", "WAL-08"],
       "status": "partial",

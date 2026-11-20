@@ -872,6 +872,8 @@ SHOW DATABASES;
 
 在自动提交模式下，`CREATE TABLE IF NOT EXISTS` 发现已有表时直接跳过。新表的填充比例等设置也会先检查。需要创建新表时，数据库会在写入表文件或创建自增列的序列之前做好事务备份。[行为和性能对照](test-report.md#create-validate-before-backup-20261119)
 
+显式事务里，普通建表会保存需要撤销的目录记录。如果还没提交就意外退出，重启会清理这个事务留下的新表，并保留先前已提交的数据。部分特殊建表仍使用整库事务备份。事务未结束期间，同一数据库里冲突的目录写入可能需要等待或在事务结束后重试。[恢复验证](test-report.md#ordinary-create-durable-undo-20261120)
+
 ```sql
 -- 基本建表
 CREATE TABLE users (

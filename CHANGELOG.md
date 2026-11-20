@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>重启后会清理没有提交的新表 · 2026-11-20</summary>
+
+如果在事务里新建了普通表，还没提交数据库就意外退出，重启后之前已提交的数据仍可查询，原来的表名也能再次使用。
+
+[使用手册](docs/MANUAL.md#建表) · [测试报告](docs/test-report.md#ordinary-create-durable-undo-20261120) · [性能报告](docs/performance-report-2026-10-30.md#ordinary-create-durable-undo-cost-20261120)
+
+</details>
+
+<details>
 <summary>保存表清单时可重试一次 · 2026-11-20</summary>
 
 如果新清单已写好，只是没能确认写入磁盘，数据库会再确认一次。重试仍失败时会报错。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>归档缺失或损坏时，恢复操作会保留当前数据 · 2026-11-20</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-20 · 归档缺失或损坏时，恢复操作会保留当前数据
 
 例如，备份之后新增了一笔订单。如果找不到恢复所需的日志，数据库会报错，订单仍然可以查询。
 
 [使用手册](docs/MANUAL.md#时间点恢复) · [测试报告](docs/test-report.md#pitr-stage-archive-20261120) · [性能报告](docs/performance-report-2026-10-30.md#pitr-stage-archive-cost-20261120)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-19 · 意外退出后保留已提交的表结构修改
 

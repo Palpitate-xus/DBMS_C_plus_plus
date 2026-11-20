@@ -3,6 +3,7 @@
 #include "catalog/SystemCatalogCollation.h"
 #include "catalog.h"
 #include "common/DbError.h"
+#include "common/DatabaseMetadataWrite.h"
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -2910,6 +2911,11 @@ bool CatalogManager::hasUnpublishedChanges() const {
 }
 
 bool CatalogManager::persistAll() {
+    std::error_code pathError;
+    const auto catalogPath = std::filesystem::weakly_canonical(dbPath_, pathError);
+    if (pathError) return false;
+    const DatabaseMetadataWrite writer(catalogPath.parent_path());
+    if (!writer.acquired()) return false;
     std::lock_guard<std::mutex> lock(mutex_);
     std::lock_guard<std::mutex> publicationLock(persistence_->publication->mutex);
     auto images = serializeAllLocked();

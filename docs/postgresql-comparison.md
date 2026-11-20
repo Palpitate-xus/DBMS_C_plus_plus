@@ -2,6 +2,10 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-20 · 撤销事务里新建的表
+
+PostgreSQL 18.6 以关系标识登记需要随事务撤销的文件，并按子事务归属处理保存点。SQLite 的回滚日志保存修改前的数据页。DuckDB 将表结构变更纳入事务。本项目在普通建表前保存受影响的目录文件，并登记新表的物理编号。启动在处理后续整库备份后撤销早先的新表，其他行修改继续由现有日志恢复处理。持有同一数据库的目录写入锁会增加并发建表期间的等待或锁冲突。[PostgreSQL 存储回滚](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/catalog/storage.c) · [SQLite 回滚日志](https://www.sqlite.org/atomiccommit.html) · [DuckDB 事务](https://duckdb.org/2024/09/25/changing-data-with-confidence-and-acid) · [恢复验证](test-report.md#ordinary-create-durable-undo-20261120)
+
 ## 2026-11-20 · 表清单更名后的目录同步
 
 PostgreSQL 18.6 的 `durable_rename` 把写入文件和同步父目录作为持久更名的不同步骤。SQLite 的回滚日志模式先确保数据落盘，再删除日志以结束事务。DuckDB 的表结构变更可以随事务撤销。本项目的表清单已完成文件写入和更名时，才会在目录同步失败后重试。这一步用于确认清单已落盘。撤销整条建表语句还需要记录事务私有文件和目录变更。[PostgreSQL 18.6 文件同步](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/common/file_utils.c) · [SQLite 回滚日志](https://sqlite.org/atomiccommit.html) · [DuckDB 事务](https://duckdb.org/2024/09/25/changing-data-with-confidence-and-acid) · [本项目测试](test-report.md#table-list-directory-sync-20261120)
@@ -16,13 +20,13 @@ PostgreSQL 使用时间线历史文件判断混合归档中的日志属于哪个
 
 ## 2026-11-19 · 从活动日志与归档判定事务结果
 
-PostgreSQL 的连续归档恢复需要保留从备份开始的连续 WAL 段。本项目在普通启动时，也要从活动日志与归档核对遗留事务备份的提交结果。新版继续读过切换段产生的填充，归档回收后则验证备份末段的重叠字节和所需记录链。对旧版生成的部分活动日志，可按物理顺序继续读到最后一条有效记录。完整的时间点分叉恢复和普通建表的持久撤销仍待补齐。[PostgreSQL 18 连续归档](https://www.postgresql.org/docs/18/continuous-archiving.html) · [本项目验证](test-report.md#wal-switch-terminal-recovery-20261119)
+PostgreSQL 的连续归档恢复需要保留从备份开始的连续 WAL 段。本项目在普通启动时，也要从活动日志与归档核对遗留事务备份的提交结果。新版继续读过切换段产生的填充，归档回收后则验证备份末段的重叠字节和所需记录链。对旧版生成的部分活动日志，可按物理顺序继续读到最后一条有效记录。当轮尚未完成完整的时间线历史选择和普通建表的持久撤销。[PostgreSQL 18 连续归档](https://www.postgresql.org/docs/18/continuous-archiving.html) · [本项目验证](test-report.md#wal-switch-terminal-recovery-20261119)
 
 SQLite 用每个日志页记录的版本标记和累积校验和区分有效记录与上次检查点留下的内容。DuckDB 的检查点会把日志内容同步到数据库文件，并协调正在运行的事务。本次采用的是本项目自己的段和记录格式。[SQLite 日志文件格式](https://www.sqlite.org/fileformat2.html#the_write_ahead_log) · [DuckDB 检查点](https://duckdb.org/docs/2.0/sql/statements/checkpoint)
 
 ## 2026-11-19 · 建表时先检查是否需要写入
 
-PostgreSQL 先解析创建表的命名空间，`IF NOT EXISTS` 遇到已存在的关系就发提示并返回。SQLite 和 DuckDB 也允许用这个选项跳过已存在的表。本项目把自动提交普通建表的事务备份移到检查之后，避免为跳过或无效的语句复制已有数据。实际创建新表仍使用事务备份，关系级崩溃撤销仍待实现。[PostgreSQL 18.6 创建检查](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/parser/parse_utilcmd.c#L170-L202) · [SQLite 建表](https://www.sqlite.org/lang_createtable.html) · [DuckDB 建表](https://duckdb.org/docs/2.0/sql/statements/create_table#if-not-exists) · [实测结果](performance-report-2026-10-30.md#create-validate-before-backup-cost-20261119)
+PostgreSQL 先解析创建表的命名空间，`IF NOT EXISTS` 遇到已存在的关系就发提示并返回。SQLite 和 DuckDB 也允许用这个选项跳过已存在的表。本项目把自动提交普通建表的事务备份移到检查之后，避免为跳过或无效的语句复制已有数据。这一轮实际创建新表仍使用整库事务备份。[PostgreSQL 18.6 创建检查](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/parser/parse_utilcmd.c#L170-L202) · [SQLite 建表](https://www.sqlite.org/lang_createtable.html) · [DuckDB 建表](https://duckdb.org/docs/2.0/sql/statements/create_table#if-not-exists) · [实测结果](performance-report-2026-10-30.md#create-validate-before-backup-cost-20261119)
 
 ## 2026-11-19 · 未提交建表与崩溃恢复
 

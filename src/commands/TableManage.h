@@ -1153,6 +1153,7 @@ public:
     // Create the transaction's physical snapshot after the transaction has
     // acquired its database lock. Ordinary row transactions do not need one.
     bool createTransactionBackup();
+    bool beginCreateTableUndo(const std::string& dbname);
 
     // A later file-rewriting DDL statement in the same outer transaction
     // needs its own statement image. The transaction image remains reserved
@@ -2322,6 +2323,13 @@ public:
 private:
     // Copy a physical generation after the caller has acquired the database
     // transaction lock and flushed all durable state.
+    void lockDatabaseForDdl();
+    bool recordCreateTableUndo(const std::string& dbname, const TableSchema& table);
+    bool recoverCreateTableUndo(const std::string& dbname,
+                                const std::set<uint64_t>& committed,
+                                const std::set<uint64_t>& aborted,
+                                bool targetedRecovery);
+
     bool physicalBackupLocked(const std::string& dbname,
                               const std::string& backupPath,
                               const MaintenanceProgress& progress = {},
@@ -2603,6 +2611,8 @@ private:
         bool hasWrite = false;
         std::string txnBackupPath;
         bool transactionBackupDirty = false;
+        std::shared_ptr<void> createTableUndoFence;
+        bool createTableUndoCleanupFailed = false;
         bool restoreBackupBeforeRowUndo = false;
         size_t txnLogSizeAtBackup = 0;
         size_t ddlUndoSizeAtBackup = 0;

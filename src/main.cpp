@@ -43,6 +43,7 @@
 #include "common/version.h"
 #include "common/DataDirectory.h"
 #include "common/DbError.h"
+#include "common/DatabaseMetadataWrite.h"
 #include "common/SqlTrivia.h"
 #include "common/SqlSyntax.h"
 #include "common/SqlConjunction.h"
@@ -24218,6 +24219,9 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 // Record inheritance relationship
                 auto inhPath = std::filesystem::path(g_engine.dbPath(s.currentDB)) / ".inherits";
                 {
+                    const dbms::DatabaseMetadataWrite write(g_engine.dbPath(s.currentDB));
+                    if (!write.acquired())
+                        throw dbms::DbError("55P03", "another backend is publishing database metadata");
                     std::ofstream ofs(inhPath, std::ios::app);
                     if (ofs) ofs << parentName << "|" << tname << "\n";
                 }

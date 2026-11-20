@@ -8,6 +8,7 @@
 #include "commands/DdlExecutor.h"
 #include "commands/DmlExecutor.h"
 #include "commands/DdlTransaction.h"
+#include "common/DatabaseMetadataWrite.h"
 #include "commands/DdlRewrite.h"
 #include "commands/SchemaNamespace.h"
 #include "commands/ColumnDefaultBinding.h"
@@ -3889,6 +3890,9 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                 const auto path =
                     std::filesystem::path(g_engine.dbPath(s.currentDB)) /
                     ".inherits";
+                const DatabaseMetadataWrite write(g_engine.dbPath(s.currentDB));
+                if (!write.acquired())
+                    throw DbError("55P03", "another backend is publishing database metadata");
                 std::ostringstream rewritten;
                 bool edgeFound = false;
                 bool graphChanged = false;
@@ -6138,7 +6142,8 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
         [](const ColumnDef& column) { return column.isGeneratedIdentity; }) ||
         std::any_of(stmt->likeClauses.begin(), stmt->likeClauses.end(),
         [](const auto& clause) { return clause.includingIdentity; });
-    if (!outerTransaction || createsSerialSequence || createsIdentitySequence || temporary)
+    if (!outerTransaction || createsSerialSequence || createsIdentitySequence ||
+        temporary || !stmt->partitionOf.empty())
         txn.enableSnapshotRollback();
     const bool deferSnapshot = !outerTransaction && !temporary &&
         stmt->partitionOf.empty() && stmt->asSelect.empty();
@@ -7040,6 +7045,14 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
         std::cout << "ERROR: " << checkConstraintError << std::endl;
         return true;
     }
+
+    if (outerTransaction && !g_engine.hasTransactionBackup() &&
+        !g_engine.beginCreateTableUndo(s.currentDB)) {
+        throw DbError("58030", "could not prepare recovery for CREATE TABLE");
+    }
+    const DatabaseMetadataWrite metadataWrite(g_engine.dbPath(s.currentDB));
+    if (!metadataWrite.acquired())
+        throw DbError("55P03", "another backend is publishing database metadata");
 
     // Prepare the database-wide inheritance graph before creating any physical
     // relation.  Publishing it is deferred until the child exists, but an
