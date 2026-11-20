@@ -1,9 +1,15 @@
+// test_link_flags: -ldl
+
+#include "access/IndexFileUtil.h"
 #include "commands/TableManage.h"
+#include "common/DataDirectory.h"
+#include "common/sha256.h"
 
 #include <algorithm>
 #include <cerrno>
 #include <chrono>
 #include <cstdlib>
+#include <dlfcn.h>
 #include <filesystem>
 #include <fstream>
 #include <future>
@@ -11,6 +17,7 @@
 #include <spawn.h>
 #include <stdexcept>
 #include <string>
+#include <sys/syscall.h>
 #include <sys/wait.h>
 #include <thread>
 #include <unistd.h>
@@ -22,6 +29,40 @@ namespace {
 namespace fs = std::filesystem;
 using namespace dbms;
 
+thread_local struct stat interruptedCatalog {};
+thread_local bool interruptCatalogUnlink = false;
+thread_local unsigned interruptedUnlinks = 0;
+
+bool failCatalogUnlink(int parent, const char* file) noexcept {
+    if (!interruptCatalogUnlink) return false;
+    struct stat entry {};
+    if (::fstatat(parent, file, &entry, AT_SYMLINK_NOFOLLOW) != 0 ||
+        entry.st_dev != interruptedCatalog.st_dev || entry.st_ino != interruptedCatalog.st_ino)
+        return false;
+    interruptCatalogUnlink = false;
+    ++interruptedUnlinks;
+    errno = EIO;
+    return true;
+}
+}  // namespace
+
+// Only the actual transaction-owned catalog image selected by the private
+// fixture can fail. Old cleanup uses remove_all, while new cleanup unlinks
+// the verified files individually.
+extern "C" int unlinkat(int directory, const char* file, int flags) noexcept {
+    if (failCatalogUnlink(directory, file)) return -1;
+    return static_cast<int>(::syscall(SYS_unlinkat, directory, file, flags));
+}
+
+extern "C" int remove(const char* file) noexcept {
+    if (failCatalogUnlink(AT_FDCWD, file)) return -1;
+    using Remove = int (*)(const char*);
+    static const auto realRemove = reinterpret_cast<Remove>(::dlsym(RTLD_NEXT, "remove"));
+    if (!realRemove) std::abort();
+    return realRemove(file);
+}
+
+namespace {
 void require(bool condition, const char* message) {
     if (!condition) throw std::runtime_error(message);
 }
@@ -92,6 +133,125 @@ void checkUnrelatedDirectory(const std::string& database,
     require(std::distance(fs::directory_iterator(owned), fs::directory_iterator{}) == 1,
             "unrelated directory entries unchanged");
     require(fs::remove(sentinel) && fs::remove(owned), "remove test-owned sentinel");
+}
+
+enum class ResumeRetirement { PartialFiles, EmptyDirectory, StandaloneProof, LegacyProof, Backup };
+
+void checkInterruptedRetirement(const std::string& database, ResumeRetirement resume) {
+    const fs::path home = database;
+    const auto active = home / ".create_table_undo";
+    const auto retired = home / ".create_table_undo.retired";
+    const auto proof = home / ".create_table_undo.cleanup";
+    const bool commit = resume != ResumeRetirement::StandaloneProof;
+    std::string name;
+    switch (resume) {
+    case ResumeRetirement::PartialFiles: name = "interrupted_commit"; break;
+    case ResumeRetirement::EmptyDirectory: name = "interrupted_empty"; break;
+    case ResumeRetirement::StandaloneProof: name = "interrupted_rollback"; break;
+    case ResumeRetirement::LegacyProof: name = "interrupted_legacy"; break;
+    case ResumeRetirement::Backup: name = "interrupted_before_backup"; break;
+    }
+    std::string legacyHeader;
+    {
+        StorageEngine engine;
+        require(engine.beginTransaction(database) == DBStatus::OK, "begin retirement test");
+        require(engine.beginCreateTableUndo(database), "take retirement test ownership");
+        require(engine.createTable(database, table(name)) == DBStatus::OK,
+                "create retirement test table");
+        engine.registerDdlUndo([&engine, database, name] {
+            return engine.dropTable(database, name) == DBStatus::OK;
+        });
+        if (commit) {
+            require(engine.insert(database, name, {{"id", "93"}}) == DBStatus::OK,
+                    "insert retirement test row");
+        }
+        require(::stat((active / "catalog").c_str(), &interruptedCatalog) == 0,
+                "identify real transaction-owned catalog image");
+        if (resume == ResumeRetirement::LegacyProof) legacyHeader = read(active / "header");
+        interruptedUnlinks = 0;
+        interruptCatalogUnlink = true;
+        const auto status = commit ? engine.commitTransaction() : engine.rollbackTransaction();
+        interruptCatalogUnlink = false;
+        require(status == DBStatus::OK, "cleanup failure must preserve terminal transaction status");
+        require(interruptedUnlinks == 1, "fault must hit the owned catalog image once");
+        require(engine.tableExists(database, name) == commit, "table matches transaction outcome");
+        if (resume == ResumeRetirement::Backup) {
+            require(fs::is_directory(retired) && fs::is_regular_file(proof),
+                    "retirement was interrupted before the next transaction");
+            require(engine.beginTransaction(database, true) == DBStatus::OK,
+                    "begin next transaction under the database lock");
+            require(engine.createTransactionBackup(), "take the next transaction backup");
+            require(!fs::exists(retired) && !fs::exists(proof),
+                    "transaction backup must finish earlier retirement before copying");
+            require(engine.rollbackTransaction() == DBStatus::OK, "discard the next transaction backup");
+        }
+    }
+
+    // A failure in the old random parking directory would leave the image
+    // outside the next startup's discovery paths.
+    for (const auto& entry : fs::directory_iterator(home)) {
+        const auto stem = entry.path().filename().string();
+        if (stem.rfind(".create_table_undo.stage.", 0) == 0 &&
+            fs::is_regular_file(entry.path() / "records" / "catalog")) {
+            const auto catalog = entry.path() / "records" / "catalog";
+            struct stat parked {};
+            if (::stat(catalog.c_str(), &parked) == 0 &&
+                parked.st_dev == interruptedCatalog.st_dev && parked.st_ino == interruptedCatalog.st_ino) {
+                StorageEngine reopened;
+                require(reopened.tableExists(database, name) == commit,
+                        "old path still preserved the transaction outcome");
+                require(fs::is_regular_file(catalog), "old path reproduced the retained catalog image");
+                throw std::runtime_error("owned retirement image stranded in a temporary directory");
+            }
+        }
+    }
+    if (resume != ResumeRetirement::Backup) {
+        require(!fs::exists(active) && fs::is_regular_file(proof) && fs::is_directory(retired),
+                "interrupted retirement retained its independent proof and directory");
+        require(fs::is_regular_file(retired / "catalog"), "catalog image survived the injected fault");
+    }
+
+    if (resume == ResumeRetirement::PartialFiles) {
+        // Advance to a partial cleanup in which the header is gone, but the
+        // internal and standalone proofs still identify the same records.
+        const auto header = retired / "header";
+        if (fs::exists(header)) require(index_file::removeDurably(header), "remove test-owned header");
+        require(fs::equivalent(retired / "cleanup", proof), "directory still carries its proof");
+    } else if (resume == ResumeRetirement::EmptyDirectory) {
+        // Advance to the point where the original directory is empty but
+        // removing the directory itself has not finished.
+        std::vector<fs::path> remaining;
+        for (const auto& entry : fs::directory_iterator(retired)) remaining.push_back(entry.path());
+        for (const auto& member : remaining)
+            require(fs::remove(member), "remove test-owned member from the retired directory");
+        require(index_file::syncDirectory(retired), "sync test-owned empty directory");
+    } else if (resume == ResumeRetirement::StandaloneProof) {
+        // Advance to a durable retired-directory removal before the final
+        // proof was unlinked.
+        require(fs::remove_all(retired) != 0 && index_file::syncDirectory(home),
+                "remove only the retired records belonging to the fixture");
+    } else if (resume == ResumeRetirement::LegacyProof) {
+        // Reproduce the older fixed-directory layout using this same
+        // transaction's real header, before-image and retirement binding.
+        require(index_file::removeDurably(proof) && index_file::removeDurably(retired / "cleanup"),
+                "replace the fixture's modern proof with the legacy proof");
+        const auto header = retired / "header";
+        if (!fs::exists(header)) require(index_file::writeAtomically(header, legacyHeader),
+                                         "restore the fixture's actual header");
+        const auto binding = SHA256::hash(legacyHeader + clusterSystemIdentifier() + database);
+        require(index_file::writeAtomically(retired / "retired", binding), "persist legacy retirement proof");
+    }
+    {
+        StorageEngine cold;
+        require(!fs::exists(proof) && !fs::exists(retired), "restart finished retirement");
+        require(cold.tableExists(database, name) == commit, "restart preserved transaction outcome");
+        require(cold.query(database, "peer_after_commit", {"=id 32"}, {"id"}).size() == 1,
+                "restart preserved the committed peer row");
+        if (commit) {
+            require(cold.query(database, name, {"=id 93"}, {"id"}).size() == 1,
+                    "restart preserved the just-committed row");
+        }
+    }
 }
 
 void worker() {
@@ -191,8 +351,14 @@ void worker() {
         require(cold.getTableComment(database, "existing") == "after commit",
                 "peer comment survives reopen");
     }
+    checkInterruptedRetirement(database, ResumeRetirement::PartialFiles);
+    checkInterruptedRetirement(database, ResumeRetirement::EmptyDirectory);
+    checkInterruptedRetirement(database, ResumeRetirement::StandaloneProof);
+    checkInterruptedRetirement(database, ResumeRetirement::LegacyProof);
+    checkInterruptedRetirement(database, ResumeRetirement::Backup);
     checkUnrelatedDirectory(database, ".create_table_undo");
     checkUnrelatedDirectory(database, ".create_table_undo.retired");
+    checkUnrelatedDirectory(database, ".create_table_undo.cleanup");
     {
         StorageEngine cold;
         require(cold.getTableComment(database, "existing") == "after commit",
@@ -206,7 +372,7 @@ int main(int argc, char** argv) {
     try {
         if (argc == 2 && std::string(argv[1]) == "--worker") {
             worker();
-            std::cout << "[CREATE UNDO OWNERSHIP] concurrent CREATE/COMMENT and unrelated directories passed\n";
+            std::cout << "[CREATE UNDO OWNERSHIP] concurrent writes, interrupted retirement and unrelated directories passed\n";
             return 0;
         }
         require(argc == 1, "unexpected arguments");

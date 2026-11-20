@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>重启后会继续清理旧恢复文件 · 2026-11-20</summary>
+
+如果数据库在删除已经用完的建表恢复文件时意外退出，下次启动会接着清理，避免旧文件一直占用空间。
+
+[测试报告](docs/test-report.md#create-undo-cleanup-20261120)
+
+</details>
+
+<details>
 <summary>外部表目录暂时不可用时，保留恢复记录 · 2026-11-20</summary>
 
 如果意外退出后找不到保存表文件的外部目录，数据库会报错并保留清理记录。目录恢复后重新启动，就能继续清理未提交的新表。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>保存表清单时可重试一次 · 2026-11-20</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-20 · 保存表清单时可重试一次
 
 如果新清单已写好，只是没能确认写入磁盘，数据库会再确认一次。重试仍失败时会报错。
 
 [测试报告](docs/test-report.md#table-list-directory-sync-20261120) · [性能报告](docs/performance-report-2026-10-30.md#table-list-directory-sync-cost-20261120)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-20 · 建表时先把表定义完整写入磁盘
 

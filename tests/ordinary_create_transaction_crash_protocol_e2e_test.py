@@ -65,6 +65,8 @@ def main():
     def crash_and_reopen(server):
         crash(server)
         reconnect(server, start_recovery(server))
+        home = Path(server["dir"]) / "info"
+        assert not list(home.glob(".create_table_undo*")), "retirement files survived recovery"
 
     def setup(server):
         query(server, "CREATE TABLE ordinary_durable(id INT PRIMARY KEY, payload TEXT);",

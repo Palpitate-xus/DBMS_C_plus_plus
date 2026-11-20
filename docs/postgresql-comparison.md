@@ -2,6 +2,10 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-20 · 建表恢复记录的清理可以重试
+
+PostgreSQL 18.6 按物理关系标识登记事务结束时要删除的文件。它的磁盘管理实现还区分立即删除和检查点后删除的文件。SQLite 的回滚日志模式先同步修改后的数据，再删除回滚日志。DuckDB 把目录变更纳入事务。本项目的建表撤销记录由多个文件组成。先把清理凭据同步到数据库目录，再逐项删除用过的记录，下一次启动就能识别剩余文件。[PostgreSQL 关系文件](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/catalog/storage.c) · [PostgreSQL 文件清理](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/storage/smgr/md.c) · [SQLite 回滚日志](https://www.sqlite.org/atomiccommit.html) · [DuckDB 事务](https://duckdb.org/2024/09/25/changing-data-with-confidence-and-acid) · [本项目测试](test-report.md#create-undo-cleanup-20261120)
+
 ## 2026-11-20 · 外部表空间暂时不可用时的建表恢复
 
 PostgreSQL 18 的外部表空间与主数据目录一起构成数据库实例。在 PostgreSQL 18.6 实测中，崩溃后能查询已提交表，也能重用未提交的表名。前两次重启后旧文件仍在，同名新表分配了另一个文件编号。本项目按表名组织文件。启动先确认待清理的外部目录可用，核对新表的物理编号并同步文件删除，再移除表定义。目录恢复可用后才能继续清理。[PostgreSQL 表空间](https://www.postgresql.org/docs/18/manage-ag-tablespaces.html) · [两套系统的实测](test-report.md#external-create-recovery-20261120)

@@ -1954,6 +1954,8 @@ static bool renameTablespaceEntryNoReplace(const std::filesystem::path& source,
 namespace {
 constexpr const char* kCreateUndo = ".create_table_undo";
 constexpr const char* kRetiredCreateUndo = ".create_table_undo.retired";
+constexpr const char* kCreateUndoCleanup = ".create_table_undo.cleanup";
+constexpr const char* kCreateUndoCleanupMember = "cleanup";
 constexpr size_t kCreateUndoImageLimit = 256 * 1024 * 1024;
 // Keep allocator counters out of the undo image. They must never move
 // backwards after recovery even if the objects using those IDs disappear.
@@ -2070,36 +2072,125 @@ bool readCreateUndoHeader(const std::filesystem::path& journal, std::string& enc
     return true;
 }
 
+bool createUndoDirectoryInode(const std::filesystem::path& path, uint64_t& inode) {
+    inode = 0;
+    struct stat info {};
+    if (::lstat(path.c_str(), &info) != 0) return errno == ENOENT;
+    if (!S_ISDIR(info.st_mode) || info.st_ino == 0) return false;
+    struct stat parent {};
+    if (::stat(path.parent_path().c_str(), &parent) != 0 ||
+        info.st_dev != parent.st_dev) return false;
+    inode = static_cast<uint64_t>(info.st_ino);
+    return true;
+}
+
+std::string createUndoCleanupRecord(const std::filesystem::path& database,
+                                    uint64_t inode, const std::string& header) {
+    std::string record = "CTUX1";
+    relation_name_codec::append(record, inode, 8);
+    record += header;
+    return record + createUndoBinding(database, record);
+}
+
+bool decodeCreateUndoCleanup(const std::filesystem::path& database,
+                            const std::string& record, uint64_t& inode,
+                            std::string& header) {
+    constexpr size_t digest = create_table_undo::digestBytes;
+    if (record.size() < 13 + digest || record.compare(0, 5, "CTUX1") != 0)
+        return false;
+    const auto payload = record.substr(0, record.size() - digest);
+    size_t offset = 5;
+    if (!relation_name_codec::read(payload, offset, 8, inode) || inode == 0 ||
+        createUndoBinding(database, payload) != record.substr(payload.size())) return false;
+    header = payload.substr(offset);
+    create_table_undo::Header owner;
+    return create_table_undo::decodeHeader(header, owner);
+}
+
 bool removeRetiredCreateUndo(const std::filesystem::path& database) {
     std::error_code error;
     const auto retired = database / kRetiredCreateUndo;
-    if (!pathEntryExists(retired, error)) return !error;
+    const auto marker = database / kCreateUndoCleanup;
+    uint64_t retiredInode = 0;
+    std::optional<std::string> cleanup;
+    if (!createUndoDirectoryInode(retired, retiredInode) ||
+        !readCreateUndoFile(marker, create_table_undo::maxRecordBytes, cleanup)) return false;
+    if (!cleanup && retiredInode == 0) return true;
+
     std::string header;
-    std::optional<std::string> proof;
-    if (!readCreateUndoHeader(retired, header) ||
-        !readCreateUndoFile(retired / "retired", 64, proof) ||
-        !proof || *proof != createUndoBinding(database, header)) return false;
-    for (const auto& entry : std::filesystem::directory_iterator(retired)) {
-        if (entry.symlink_status().type() != std::filesystem::file_type::regular)
+    const auto source = retired / kCreateUndoCleanupMember;
+    std::optional<std::string> inside;
+    if (retiredInode != 0 &&
+        !readCreateUndoFile(source, create_table_undo::maxRecordBytes, inside)) return false;
+    if (cleanup) {
+        uint64_t ownerInode = 0;
+        if (!decodeCreateUndoCleanup(database, *cleanup, ownerInode, header)) return false;
+        if (retiredInode == 0) {
+            // The retired directory is already gone. Confirm that removal
+            // before forgetting the proof that allows a later restart to retry.
+            return index_file::syncDirectory(database) && index_file::removeDurably(marker);
+        }
+        if (ownerInode != retiredInode || (inside && *inside != *cleanup)) return false;
+    } else if (inside) {
+        uint64_t ownerInode = 0;
+        if (!decodeCreateUndoCleanup(database, *inside, ownerInode, header) ||
+            ownerInode != retiredInode) return false;
+    } else {
+        // Older builds left their proof inside the retired directory. Copy
+        // that authorization out before deleting anything, so a further
+        // interruption can resume even after the old proof is gone.
+        std::optional<std::string> oldProof;
+        if (!readCreateUndoHeader(retired, header) ||
+            !readCreateUndoFile(retired / "retired", create_table_undo::digestBytes, oldProof) ||
+            !oldProof || *oldProof != createUndoBinding(database, header)) return false;
+        inside = createUndoCleanupRecord(database, retiredInode, header);
+        if (index_file::writeAtomicallyNoReplace(source, *inside) != index_file::WriteResult::OK)
             return false;
-        const auto name = entry.path().filename().string();
-        if (name == "header" || name == "catalog" || name == "retired" ||
-            name.rfind(".dbms_atomic_", 0) == 0) continue;
-        std::optional<std::string> bytes;
-        create_table_undo::Birth birth;
-        if (!readCreateUndoFile(entry.path(), create_table_undo::maxRecordBytes, bytes) ||
-            !bytes || !create_table_undo::decodeBirth(*bytes, birth) ||
-            name != std::to_string(birth.physicalId)) return false;
     }
-    // The directory rename is the durable retirement boundary. Never
-    // remove individual records while they still occupy the active path.
+
+    std::vector<std::filesystem::path> members;
+    std::filesystem::directory_iterator entry(retired, error);
+    const std::filesystem::directory_iterator end;
+    for (; !error && entry != end; entry.increment(error)) {
+        if (entry->symlink_status(error).type() != std::filesystem::file_type::regular || error)
+            return false;
+        const auto name = entry->path().filename().string();
+        if (name == kCreateUndoCleanupMember) continue;
+        if (name == "header" || name == "retired") {
+            std::optional<std::string> bytes;
+            if (!readCreateUndoFile(entry->path(), create_table_undo::maxRecordBytes, bytes) ||
+                !bytes || *bytes != (name == "header" ? header : createUndoBinding(database, header)))
+                return false;
+        } else if (name != "catalog" && name.rfind(".dbms_atomic_", 0) != 0) {
+            std::optional<std::string> bytes;
+            create_table_undo::Birth birth;
+            if (!readCreateUndoFile(entry->path(), create_table_undo::maxRecordBytes, bytes) ||
+                !bytes || !create_table_undo::decodeBirth(*bytes, birth) ||
+                name != std::to_string(birth.physicalId)) return false;
+        }
+        members.push_back(entry->path());
+    }
+    if (error || (!inside && !members.empty())) return false;
+    if (!cleanup) {
+        // The source is already synced. A hard link publishes the proof in
+        // the parent without leaving temporary files outside the journal.
+        if (::link(source.c_str(), marker.c_str()) != 0) return false;
+    }
     if (!index_file::syncDirectory(database)) return false;
-    const auto stage = makeCreateUndoStage(database);
-    if (stage.empty()) return false;
-    const bool moved = renameTablespaceEntryNoReplace(retired, stage / "records", error);
-    std::error_code cleanupError;
-    std::filesystem::remove_all(stage, cleanupError);
-    return moved && !cleanupError && index_file::syncDirectory(database);
+
+    // The retired name and standalone proof are durable before the first
+    // member is removed. Never make a partially deleted journal active again.
+    for (const auto& member : members) {
+        if (!std::filesystem::remove(member, error) || error) return false;
+    }
+    // Keep the internal proof until the other files are durably absent. A
+    // restarted cleanup may remove files only while it has that proof, even
+    // if the outer marker still refers to a directory with the same inode.
+    if (inside && (!index_file::syncDirectory(retired) ||
+                   !std::filesystem::remove(source, error) || error)) return false;
+    if (!std::filesystem::remove(retired, error) || error ||
+        !index_file::syncDirectory(database)) return false;
+    return index_file::removeDurably(marker);
 }
 
 bool retireCreateUndo(const std::filesystem::path& database) {
@@ -2108,13 +2199,19 @@ bool retireCreateUndo(const std::filesystem::path& database) {
     const auto journal = database / kCreateUndo;
     if (!pathEntryExists(journal, error)) return !error;
     std::string header;
-    std::optional<std::string> proof;
+    std::optional<std::string> oldProof;
+    std::optional<std::string> currentProof;
+    uint64_t inode = 0;
     if (!readCreateUndoHeader(journal, header) ||
-        !readCreateUndoFile(journal / "retired", 64, proof)) return false;
-    const auto expected = createUndoBinding(database, header);
-    if (proof && *proof != expected) return false;
-    if (!proof && index_file::writeAtomicallyNoReplace(journal / "retired", expected) !=
-                      index_file::WriteResult::OK) return false;
+        !createUndoDirectoryInode(journal, inode) || inode == 0 ||
+        !readCreateUndoFile(journal / "retired", create_table_undo::digestBytes, oldProof) ||
+        (oldProof && *oldProof != createUndoBinding(database, header))) return false;
+    const auto proof = createUndoCleanupRecord(database, inode, header);
+    const auto source = journal / kCreateUndoCleanupMember;
+    if (!readCreateUndoFile(source, create_table_undo::maxRecordBytes, currentProof) ||
+        (currentProof && *currentProof != proof)) return false;
+    if (!currentProof && index_file::writeAtomicallyNoReplace(source, proof) !=
+                             index_file::WriteResult::OK) return false;
     return renameTablespaceEntryNoReplace(journal, database / kRetiredCreateUndo, error) &&
            removeRetiredCreateUndo(database);
 }
@@ -2122,7 +2219,8 @@ bool retireCreateUndo(const std::filesystem::path& database) {
 bool pendingCreateUndo(const std::filesystem::path& database) {
     std::error_code error;
     if (pathEntryExists(database / kCreateUndo, error) || error) return true;
-    return pathEntryExists(database / kRetiredCreateUndo, error) || error;
+    if (pathEntryExists(database / kRetiredCreateUndo, error) || error) return true;
+    return pathEntryExists(database / kCreateUndoCleanup, error) || error;
 }
 
 bool createUndoOwner(const std::filesystem::path& database, uint64_t& xid) {
@@ -49281,6 +49379,7 @@ bool StorageEngine::recoverCreateTableUndo(const std::string& dbname,
     for (const auto& entry : std::filesystem::directory_iterator(journal)) {
         const auto name = entry.path().filename().string();
         if (name == "header" || name == "catalog" || name == "retired" ||
+            name == kCreateUndoCleanupMember ||
             name.rfind(".dbms_atomic_", 0) == 0)
             continue;
         std::optional<std::string> bytes;
@@ -52002,8 +52101,16 @@ bool StorageEngine::physicalBackupLocked(
         if (!destinationNameLock.owns_lock()) return false;
     }
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
-    if (!databaseExists(dbname) || (!includeUnloggedMain && pendingCreateUndo(dbPath(dbname))))
-        return false;
+    if (!databaseExists(dbname)) return false;
+    const auto src = dbPath(dbname);
+    if (pendingCreateUndo(src)) {
+        if (!includeUnloggedMain || !removeRetiredCreateUndo(src)) return false;
+        // A transaction image may include its own active CREATE journal.
+        // Retirement is bound to the original directory and cannot be copied.
+        uint64_t owner = 0;
+        if (!createUndoOwner(src, owner) ||
+            (owner != 0 && owner != transactionContext().currentTxnId)) return false;
+    }
     // The lock lives outside the replaceable database generation, so marker
     // creation/drop and relation placement cannot change underneath the
     // snapshot even when another backend is serving the same cluster.
@@ -52021,7 +52128,6 @@ bool StorageEngine::physicalBackupLocked(
             return false;
         }
     }
-    auto src = dbPath(dbname);
     auto dst = std::filesystem::path(backupPath);
     std::filesystem::path stagedBackup;
     const auto discardStagedBackup = [&]() {
