@@ -363,18 +363,21 @@ def run(steps_provider, *, entry_file, cohort, expected_checks):
             expected_tag = keyword + ' ' + words[1].upper()
         else:
             expected_tag = keyword
-        good = (good and value[4] == expected_tag and sum(kind == b'C' for kind, _ in messages) == 1
-                and not any(kind == b'E' for kind, _ in messages))
-        if keyword not in ('SELECT', 'WITH'):
-            good = good and actual_rows == [] and not any(kind in (b'T', b'D') for kind, _ in messages)
+        if command['state'] is None:
+            good = (good and value[4] == expected_tag and sum(kind == b'C' for kind, _ in messages) == 1
+                    and not any(kind == b'E' for kind, _ in messages))
+            if keyword not in ('SELECT', 'WITH'):
+                good = good and actual_rows == [] and not any(kind in (b'T', b'D') for kind, _ in messages)
+        else:
+            expected_tag = None
+            good = (good and actual_rows == [] and value[4] is None and
+                    sum(kind == b'E' for kind, _ in messages) == 1 and
+                    not any(kind in (b'C', b'T', b'D') for kind, _ in messages))
         if command['capture'] is not None:
             valid_oid = value[1] is None and len(actual_rows) == 1 and len(actual_rows[0]) == 1 and actual_rows[0][0].isdigit() and int(actual_rows[0][0]) > 1000
             good = good and valid_oid
             if valid_oid: symbols[command['capture']] = actual_rows[0][0]
             assert valid_oid, ('actual custom type identity', value)
-        if command['state'] is not None:
-            good = (good and value[0] == [] and value[4] is None and
-                    sum(kind == b'E' for kind, _ in messages) == 1)
         record = {'label': command['label'], 'sql': sql, 'ok': good,
                   'result': value, 'ready': messages[-1][1].decode(), 'expected_rows': expected_rows,
                   'expected_tag': expected_tag}

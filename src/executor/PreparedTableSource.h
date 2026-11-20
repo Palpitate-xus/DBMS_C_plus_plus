@@ -35,7 +35,7 @@ std::vector<std::string> inheritedTableDescendants(StorageEngine& engine,
 bool supportsInheritedTableSource(StorageEngine& engine, const std::string& database,
     const TableSchema& parent, const std::vector<std::string>& descendants);
 OpPtr makeInheritedTableSource(StorageEngine& engine, const std::string& database,
-    const TableSchema& parent, const QueryRowDescriptor& declaration,
-    const std::vector<std::string>& descendants);
+    const TableSchema& parent, const PreparedQuery::SourceRange& range,
+    const std::vector<std::string>& descendants, bool allColumns = false);
 
 } // namespace dbms

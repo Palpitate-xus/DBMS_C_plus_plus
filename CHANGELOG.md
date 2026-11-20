@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>连接和子查询也能读取继承表 · 2026-11-20</summary>
+
+在连接或子查询中使用父表时，也能查到多层子表里的记录。同一张表在查询里出现两次时，`ONLY` 只限制写了它的那一次。
+
+[使用手册](docs/MANUAL.md#查询继承表) · [测试报告](docs/test-report.md#nested-inherited-tables-20261120) · [性能报告](docs/performance-report-2026-10-30.md#nested-inherited-tables-cost-20261120)
+
+</details>
+
+<details>
 <summary>查询父表时也会读到孙表 · 2026-11-20</summary>
 
 统计父表的记录时，会算上各层子表里的记录。排序和分页也会处理这些记录。加上 `ONLY` 就可以只查指定的表。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>重启后会继续清理建表留下的旧文件 · 2026-11-20</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-20 · 重启后会继续清理建表留下的旧文件
 
 如果意外退出打断了清理，下次启动会继续删除已经用完的建表恢复文件，避免它们一直占用磁盘空间。
 
 [测试报告](docs/test-report.md#create-undo-cleanup-20261120)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-20 · 找回表文件目录后可以继续恢复
 

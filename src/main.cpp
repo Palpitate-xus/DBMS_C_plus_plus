@@ -20820,7 +20820,7 @@ static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bo
                 if (range == query->sourceRanges.end())
                     throw dbms::DbError("XX000", "inheritance scan has no bound parent range");
                 source = dbms::makeInheritedTableSource(g_engine, session.currentDB, sourceSchema,
-                    range->columns, descendants);
+                    *range, descendants);
             }
         }
         plan = dbms::QueryPlanner::buildPreparedSelectPlan(&g_engine,session.currentDB,
@@ -21004,7 +21004,8 @@ class PreparedWithDmlRuntime {
     static string physical(const dbms::PreparedQuery::SourceRange& range,const Session& session) {
         if(range.relationSchema==sessionTempSchemaName(session) || range.relationSchema=="pg_temp")
             return tempTablePrefix(session,range.relationName);
-        return range.relationSchema=="public"?range.relationName:range.relationSchema+"__"+range.relationName;
+        return range.relationSchema.empty() || range.relationSchema=="public"
+            ? range.relationName : range.relationSchema+"__"+range.relationName;
     }
     void checkPhysicalSourcePermission(const dbms::Stmt* owner,
             const dbms::PreparedQuery::SourceRange& range, const string& table) const {
@@ -21017,23 +21018,31 @@ class PreparedWithDmlRuntime {
                 throw dbms::DbError("42501","permission denied for selected mutation source columns");
         }
     }
+    static bool ordinaryPhysicalRange(const dbms::PreparedQuery::SourceRange& range) {
+        return range.source && range.source->type==dbms::FromItem::Type::Table &&
+            !range.mergedUsing && !range.relationName.empty() && !range.cteStatement && !range.viewQuery &&
+            range.relationSchema!="pg_catalog" && range.relationSchema!="information_schema";
+    }
+    static bool canReadWholeTable(const Session& session,const string& table) {
+        return sessionIsAdmin(session) || g_engine.hasPermission(session.currentDB,table,
+            effectiveSessionRole(session),dbms::StorageEngine::TablePrivilege::Select);
+    }
     dbms::OpPtr ordinaryInheritedSource(const dbms::SelectStmt* select, dbms::TableSchema& schema) {
         const auto* item=select->fromClause.get();
-        if(select!=readRoot_ || select->setOp!=dbms::SetOp::None || !select->ctes.empty() ||
+        if(!readRoot_ || select->setOp!=dbms::SetOp::None || !select->ctes.empty() ||
            !item || item->type!=dbms::FromItem::Type::Table || item->only || hasCurrentQueryWindows(select))
             return {};
         const auto& range=sourceRange(select,item);
-        if(range.relationName.empty() || range.cteStatement || range.viewQuery ||
-           range.relationSchema=="pg_catalog" || range.relationSchema=="information_schema")
-            return {};
+        if(!ordinaryPhysicalRange(range))return {};
         const auto table=physical(range,session_);
+        if(select!=readRoot_ && !canReadWholeTable(session_,table))return {};
         const auto descendants=dbms::inheritedTableDescendants(g_engine,session_.currentDB,table);
         if(descendants.empty())return {};
         auto parent=g_engine.getTableSchema(session_.currentDB,table);
         if(!dbms::supportsInheritedTableSource(g_engine,session_.currentDB,parent,descendants))return {};
         checkPhysicalSourcePermission(select,range,table);
         schema=std::move(parent);
-        return dbms::makeInheritedTableSource(g_engine,session_.currentDB,schema,range.columns,descendants);
+        return dbms::makeInheritedTableSource(g_engine,session_.currentDB,schema,range,descendants);
     }
     dbms::TableSchema logicalSchema(const dbms::QueryRowDescriptor& descriptor) const {
         dbms::TableSchema schema;
@@ -21327,8 +21336,16 @@ class PreparedWithDmlRuntime {
                 checkPhysicalSourcePermission(owner,range,table);
                 scanSchema=g_engine.getTableSchema(session_.currentDB,table);
                 if(scanSchema.len!=range.columns.size())throw dbms::DbError("XX000","mutation source descriptor differs from physical relation");
-                dbms::OpPtr physicalScan=make_unique<dbms::TableScanOp>(&g_engine,session_.currentDB,table);
-                if(auto* select=dynamic_cast<const dbms::SelectStmt*>(owner))
+                dbms::OpPtr physicalScan;
+                const auto* select=dynamic_cast<const dbms::SelectStmt*>(owner);
+                if(readRoot_ && select && !hasCurrentQueryWindows(select) && ordinaryPhysicalRange(range) &&
+                   !item->only && canReadWholeTable(session_,table)) {
+                    const auto descendants=dbms::inheritedTableDescendants(g_engine,session_.currentDB,table);
+                    if(dbms::supportsInheritedTableSource(g_engine,session_.currentDB,scanSchema,descendants))
+                        physicalScan=dbms::makeInheritedTableSource(g_engine,session_.currentDB,scanSchema,range,descendants,true);
+                }
+                if(!physicalScan)physicalScan=make_unique<dbms::TableScanOp>(&g_engine,session_.currentDB,table);
+                if(select)
                     physicalScan=dbms::makePreparedTableSource(&g_engine,session_.currentDB,
                         query_,const_cast<dbms::SelectStmt*>(select),scanSchema,std::move(physicalScan));
                 scan=shared_ptr<dbms::Operator>(std::move(physicalScan));
@@ -21357,6 +21374,8 @@ class PreparedWithDmlRuntime {
                 } else if(!scan)found=readCte(rangePointer->cteStatement,index,cells,frames);
                 else {
                     if (!*scanOpened) {
+                        if(scan->supportsPreparedContexts() && !scan->bindPreparedOuterRow(*currentOuter))
+                            throw dbms::DbError("XX000","inherited source could not bind its outer row");
                         *scanOpened = true;
                         if (!scan->open()) throw dbms::DbError("XX000", scan->errorMessage());
                         source->integerKeyOrder = dbms::openedIntegerPrimaryKeyOrder(*scan);
@@ -21364,6 +21383,11 @@ class PreparedWithDmlRuntime {
                     string raw;
                     found=scan->next(raw);
                     if(!found && scan->hasError())throw dbms::DbError("XX000",scan->errorMessage());
+                    if(found && scan->supportsPreparedContexts()) {
+                        if(!scan->lastPreparedContext(row))
+                            throw dbms::DbError("XX000","inherited source lost its bound row");
+                        return true;
+                    }
                     vector<bool> bitmap;
                     optional<dbms::detail::ScopedStoredRowNullBitmap> nullOwner;
                     if (found && scan->lastStoredNullBitmap(bitmap)) nullOwner.emplace(scanSchema, bitmap);
@@ -21740,6 +21764,31 @@ class PreparedWithDmlRuntime {
         }
     }
 public:
+    static bool readsNestedInheritance(const dbms::PreparedQuery& query,const Session& session) {
+        const auto* root=dynamic_cast<const dbms::SelectStmt*>(query.ast.get());
+        if(!root)return false;
+        bool affected=false;
+        for(const auto& range:query.sourceRanges) {
+            if(!range.source || range.mergedUsing || range.cteStatement ||
+               range.source->type==dbms::FromItem::Type::Subquery)continue;
+            if(!ordinaryPhysicalRange(range))return false;
+            const auto table=physical(range,session);
+            const auto schema=g_engine.getTableSchema(session.currentDB,table);
+            if(schema.tablename!=table || schema.partitionType!=dbms::TableSchema::PartitionType::None ||
+               schema.rowLevelSecurity || schema.forceRowLevelSecurity || table.rfind("__tmp_",0)==0 ||
+               !canReadWholeTable(session,table))return false;
+            if(range.source->only) {
+                affected=affected || range.source!=root->fromClause.get();
+                continue;
+            }
+            const auto descendants=dbms::inheritedTableDescendants(g_engine,session.currentDB,table);
+            if(descendants.empty())continue;
+            if(!dbms::supportsInheritedTableSource(g_engine,session.currentDB,schema,descendants))return false;
+            affected=affected || range.source!=root->fromClause.get();
+        }
+        return affected;
+    }
+
     PreparedWithDmlRuntime(Session& session,shared_ptr<dbms::PreparedQuery> query)
         :session_(session),query_(std::move(query)),root_(dynamic_cast<dbms::WithStmt*>(query_->ast.get())),
          readRoot_(dynamic_cast<dbms::SelectStmt*>(query_->ast.get())),validation_(query_,&g_engine,session.currentDB) {
@@ -22704,9 +22753,20 @@ static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& 
     required=required || requiresTypedSource(select->fromClause.get());
     bool logicalSource=false;
     bool usingSource=false;
+    bool nestedInheritance=false;
     function<bool(const dbms::Stmt*)> supportsDerivedQuery;
     const function<bool(const dbms::FromItem*)> supportsDerivedSources=[&](const dbms::FromItem* source) {
-        if(!source || source->type==dbms::FromItem::Type::Table)return true;
+        if(!source)return true;
+        if(source->type==dbms::FromItem::Type::Table) {
+            if(!nestedInheritance && source!=select->fromClause.get()) {
+                if(source->only)nestedInheritance=true;
+                else {
+                    const auto table=resolveTableName(session,source->tableName,true);
+                    if(!table.empty())nestedInheritance=!g_engine.getInheritedChildren(session.currentDB,table).empty();
+                }
+            }
+            return true;
+        }
         if(source->type==dbms::FromItem::Type::Join) {
             usingSource=usingSource || !source->usingCols.empty() || toLower(source->joinType).rfind("natural",0)==0;
             return supportsDerivedSources(source->left.get()) && supportsDerivedSources(source->right.get());
@@ -22737,8 +22797,9 @@ static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& 
         (select->fromClause && select->fromClause->type!=dbms::FromItem::Type::Table)) &&
         supportsDerivedQuery(select);
     const bool derivedProbe=sourceProbe && logicalSource;
+    const bool inheritanceProbe=sourceProbe && nestedInheritance;
     const bool generatedJoinProbe=!required && !comparisonCandidate && plainGeneratedJoinSourceProbe(*select,session);
-    if(!required && !comparisonCandidate && !generatedJoinProbe && !derivedProbe) {
+    if(!required && !comparisonCandidate && !generatedJoinProbe && !derivedProbe && !inheritanceProbe) {
         if(!sourceProbe || !usingSource)return false;
         // Avoid whole-query preparation for existing scalar-only physical
         // joins. The bound USING key still makes the actual admission decision.
@@ -22801,6 +22862,7 @@ static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& 
         }
     }
     auto query=make_shared<dbms::PreparedQuery>(g_engine.prepareBoundQuery(session.currentDB,rawSql));
+    const bool inheritanceRequired=inheritanceProbe && PreparedWithDmlRuntime::readsNestedInheritance(*query,session);
     const auto arrayColumn=[](const dbms::QueryOutputColumn& column) {
         const auto& type=column.typeMetadata;
         return type && type->kind==dbms::DatumKind::Array && type->actualOid==column.typeOid &&
@@ -22823,7 +22885,7 @@ static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& 
                [&](const auto& statement) { return isArrayDomain(statement.second); }) ||
         any_of(query->setOperationInputs.begin(),query->setOperationInputs.end(),
                [&](const auto& set) { return isArrayDomain(set.second.left) || isArrayDomain(set.second.right); }));
-    if(!required) {
+    if(!required && !inheritanceRequired) {
         // The parser only probes a shape. Actual copied type/operator metadata
         // owns this receiver; ordinary builtin comparisons keep their existing
         // consumer. Never discover enum identity from evaluated datum strings.

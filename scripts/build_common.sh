@@ -191,6 +191,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/regclass_direct_projection_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/regtype_inherited_projection_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/inherited_table_source_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/inherited_nested_source_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/regtype_materialization_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/regtype_identifier_output_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/declared_modifier_owner_protocol_e2e_test.py)

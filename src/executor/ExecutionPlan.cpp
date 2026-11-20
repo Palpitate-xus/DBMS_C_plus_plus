@@ -28,6 +28,7 @@
 #include "catalog/systables.h"
 #include "Config.h"
 #include "process/RuntimeStats.h"
+#include "utils/permissions.h"
 #include "types/numeric.h"
 #include "expression/expr_helper.h"
 #include "expression/ExprEvaluator.h"
@@ -3299,22 +3300,18 @@ class InheritedTableScanOp final : public Operator {
 public:
     InheritedTableScanOp(StorageEngine& engine, std::string database, TableSchema parent,
                          QueryRowDescriptor declaration, std::vector<std::string> names,
-                         std::vector<uint64_t> generations)
+                         std::vector<uint64_t> generations, size_t sourceOrdinal, bool allColumns)
         : engine_(engine), database_(std::move(database)), parent_(std::move(parent)),
           declaration_(std::move(declaration)), names_(std::move(names)),
-          generations_(std::move(generations)) {}
+          generations_(std::move(generations)), sourceOrdinal_(sourceOrdinal) {
+        if (allColumns)
+            for (size_t i = 0; i < parent_.len; ++i) selected_.insert(parent_.cols[i].dataName);
+    }
 
     ~InheritedTableScanOp() override { try { close(); } catch (...) {} }
 
     void prepareDemand(const PreparedSelectState& state) {
-        for (const auto* range : state.visibleRanges) {
-            if (!range->mergedUsing && range->source == state.select().fromClause.get()) {
-                sourceOrdinal_ = range->ordinal;
-                break;
-            }
-        }
-        if (sourceOrdinal_ == PreparedSelectState::noTarget)
-            throw DbError("XX000", "inheritance scan has no bound source occurrence");
+        outer_ = state.outerRow;
         std::vector<bool> demand(parent_.len);
         bool allColumns = !state.windowStages.empty();
         const auto visit = [&](const auto& self, Expr* expression) -> void {
@@ -3415,7 +3412,7 @@ public:
             if (!selected_.empty() && !detail::decodeStoredRowProjection(engine_, database_, row.data, part.schema,
                     row.nulls, selected_, values, nulls))
                 throw DbError("58030", "could not read inherited row values");
-            RowContext context;
+            RowContext context = outer_;
             for (size_t position = 0; position < part.parentOrdinals.size(); ++position) {
                 const auto i = part.parentOrdinals[position];
                 const auto& field = parent_.cols[i];
@@ -3449,6 +3446,14 @@ public:
     }
 
     bool supportsPreparedContexts() const override { return true; }
+
+    bool supportsPreparedOuterRow() const override { return true; }
+
+    bool bindPreparedOuterRow(const RowContext& outer) override {
+        close();
+        outer_ = outer;
+        return true;
+    }
 
     bool lastPreparedContext(RowContext& row) const override {
         if (!hasRow_) return false;
@@ -3490,9 +3495,10 @@ private:
     std::vector<std::string> locked_;
     std::vector<Source> sources_;
     std::unique_ptr<HeapScanCursor> cursor_;
+    RowContext outer_;
     RowContext row_;
     bool hasRow_ = false;
-    size_t sourceOrdinal_ = PreparedSelectState::noTarget;
+    size_t sourceOrdinal_;
     size_t source_ = 0;
     size_t rowsRead_ = 0;
 };
@@ -3512,9 +3518,9 @@ bool supportsInheritedTableSource(StorageEngine& engine, const std::string& data
 }
 
 OpPtr makeInheritedTableSource(StorageEngine& engine, const std::string& database,
-    const TableSchema& parent, const QueryRowDescriptor& declaration,
-    const std::vector<std::string>& descendants) {
-    if (declaration.size() != parent.len)
+    const TableSchema& parent, const PreparedQuery::SourceRange& range,
+    const std::vector<std::string>& descendants, bool allColumns) {
+    if (range.mergedUsing || range.columns.size() != parent.len)
         throw DbError("XX000", "inheritance scan lost its parent column declaration");
     std::vector<std::string> relations{parent.tablename};
     relations.insert(relations.end(), descendants.begin(), descendants.end());
@@ -3523,7 +3529,7 @@ OpPtr makeInheritedTableSource(StorageEngine& engine, const std::string& databas
     for (const auto& name : descendants)
         generations.push_back(engine.getTableSchema(database, name).physicalRelationId);
     return std::make_unique<InheritedTableScanOp>(engine, database, parent,
-        declaration, std::move(relations), std::move(generations));
+        range.columns, std::move(relations), std::move(generations), range.ordinal, allColumns);
 }
 
 OpPtr QueryPlanner::buildPreparedSelectPlan(StorageEngine* engine,
@@ -3613,6 +3619,83 @@ static bool costlyArrayTextProjection(Expr* expression, const PreparedSelectStat
     return cost > expensiveCost;
 }
 
+static bool constantFullJoinCondition(Expr* condition) {
+    const auto constant = [&](const auto& self, Expr* expression) -> bool {
+        if (!expression || expression->preparedSubquery) return false;
+        if (dynamic_cast<const LiteralExpr*>(expression)) return true;
+        if (const auto* cast = dynamic_cast<const CastExpr*>(expression))
+            return self(self, cast->operand.get());
+        if (const auto* unary = dynamic_cast<const UnaryOpExpr*>(expression))
+            return self(self, unary->operand.get());
+        if (const auto* binary = dynamic_cast<const BinaryOpExpr*>(expression))
+            return self(self, binary->left.get()) && self(self, binary->right.get());
+        return false;
+    };
+    if (constant(constant, condition)) return true;
+    // These boolean arms alone determine whether the condition can match.
+    // Inspect the bound literals without running any operand or subquery.
+    const auto* binary = dynamic_cast<const BinaryOpExpr*>(condition);
+    if (!binary) return false;
+    const auto op = SQLParser::toLower(binary->op);
+    if (op != "and" && op != "or") return false;
+    const auto decisive = [&](const Expr* expression) {
+        const auto* literal = dynamic_cast<const LiteralExpr*>(expression);
+        if (!literal || literal->preparedSubquery) return false;
+        const auto value = SQLParser::toLower(literal->value);
+        return op == "and" ? (value == "false" || value == "null") : value == "true";
+    };
+    return decisive(binary->left.get()) || decisive(binary->right.get());
+}
+
+static void validatePreparedFullJoin(const PreparedQuery& query, const SelectStmt& select) {
+    const auto check = [&](const auto& visit, const FromItem* join) -> void {
+        if (!join || join->type != FromItem::Type::Join) return;
+        auto* condition = join->joinCondition.get();
+        if (SQLParser::toLower(join->joinType).find("full") != std::string::npos && condition &&
+            !constantFullJoinCondition(condition)) {
+            std::map<size_t, unsigned> inputs;
+            const auto collect = [&](const auto& self, const FromItem* item, unsigned side) -> void {
+                if (!item) return;
+                for (const auto& range : query.sourceRanges)
+                    if (range.owner == &select && range.source == item) inputs.emplace(range.ordinal, side);
+                self(self, item->left.get(), side);
+                self(self, item->right.get(), side);
+            };
+            collect(collect, join->left.get(), 1);
+            collect(collect, join->right.get(), 2);
+            const auto operandInputs = [&](const auto& self, Expr* expression) -> unsigned {
+                if (!expression) return 0;
+                if (expression->preparedSubquery) return 4;
+                if (const auto* column = dynamic_cast<const ColumnRefExpr*>(expression)) {
+                    if (!column->binding) return 4;
+                    if (column->binding->scopeDepth) return 0;
+                    const auto identity = inputs.find(column->binding->sourceOrdinal);
+                    return identity != inputs.end() ? identity->second : 4;
+                }
+                unsigned sides = 0;
+                prepared_window_detail::spec_detail::valueChildren(expression,
+                    [&](Expr* child) { sides |= self(self, child); });
+                return sides;
+            };
+            const auto hasEquality = [&](const auto& self, Expr* expression) -> bool {
+                const auto* binary = dynamic_cast<const BinaryOpExpr*>(expression);
+                if (!binary) return false;
+                if (SQLParser::toLower(binary->op) == "and")
+                    return self(self, binary->left.get()) || self(self, binary->right.get());
+                if (binary->op != "=") return false;
+                const auto left = operandInputs(operandInputs, binary->left.get());
+                const auto right = operandInputs(operandInputs, binary->right.get());
+                return (left == 1 && right == 2) || (left == 2 && right == 1);
+            };
+            if (!hasEquality(hasEquality, condition))
+                throw DbError("0A000", "FULL JOIN is only supported with merge-joinable or hash-joinable join conditions");
+        }
+        visit(visit, join->left.get());
+        visit(visit, join->right.get());
+    };
+    check(check, select.fromClause.get());
+}
+
 OpPtr QueryPlanner::buildPreparedSelectPlan(StorageEngine* engine,
     const std::string& dbname, std::shared_ptr<PreparedQuery> prepared,
     SelectStmt* select, const TableSchema& sourceSchema, OpPtr source,
@@ -3621,6 +3704,7 @@ OpPtr QueryPlanner::buildPreparedSelectPlan(StorageEngine* engine,
     bool planRootConstants, PreparedExecutionProvider executionProvider, bool selectBodyOnly) {
     if (!prepared || !select || !source || !supportsPreparedSelectShape(*select, true, source->supportsPreparedContexts(),selectBodyOnly))
         throw DbError("0A000", "query requires an additional prepared plan lowering");
+    validatePreparedFullJoin(*prepared, *select);
     const auto output = prepared->statementOutputs.find(select);
     if (output == prepared->statementOutputs.end())
         throw DbError("XX000", "borrowed SELECT has no prepared output descriptor");
@@ -4892,6 +4976,7 @@ OpPtr QueryPlanner::buildPreparedQueryPlan(StorageEngine* engine,const std::stri
             auto table=temporary?tempTablePrefix(*session,found->relationName):
                 found->relationSchema.empty() || found->relationSchema=="public"?found->relationName:
                 found->relationSchema+"__"+found->relationName;
+            bool materializedSource = false;
             if (!temporary) {
                 const auto materialized = engine->resolveMaterializedView(database,
                     found->relationSchema.empty() ? "public" : found->relationSchema,
@@ -4900,10 +4985,21 @@ OpPtr QueryPlanner::buildPreparedQueryPlan(StorageEngine* engine,const std::stri
                     if (!materialized->populated)
                         throw DbError("55000", "materialized view has not been populated");
                     table = materialized->backingTable;
+                    materializedSource = true;
                 }
             }
             schema=engine->getTableSchema(database,table);
-            source=std::make_unique<TableScanOp>(engine,database,table);
+            if (!temporary && !materializedSource && !found->viewQuery && !found->source->only &&
+                select->ctes.empty() && found->relationSchema != "pg_catalog" &&
+                found->relationSchema != "information_schema" && engine->inTransaction() &&
+                engine->transactionDatabase() == database && session &&
+                (sessionIsAdmin(*session) || engine->hasPermission(database, table,
+                    effectiveSessionRole(*session), StorageEngine::TablePrivilege::Select))) {
+                const auto descendants = inheritedTableDescendants(*engine, database, table);
+                if (supportsInheritedTableSource(*engine, database, schema, descendants))
+                    source = makeInheritedTableSource(*engine, database, schema, *found, descendants);
+            }
+            if (!source) source=std::make_unique<TableScanOp>(engine,database,table);
         }
     }
     return buildPreparedSelectPlan(engine,database,std::move(query),select,schema,std::move(source),outer,{},childFactory,false,false,

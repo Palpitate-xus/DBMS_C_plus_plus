@@ -1301,6 +1301,16 @@ SELECT count(*) FROM ONLY products;
 
 这里的 `products` 是通过 `INHERITS` 建立继承关系的父表。第一个查询从父表和后代表的全部记录中按 `id` 取前十行。第二个查询计入后代中的记录，第三个查询只统计父表本身。也可以写作 `FROM ONLY (products)`。[适用范围](compatibility-contract.md#inherited-table-source) · [查询测试](test-report.md#inherited-table-source-20261120)
 
+在连接和子查询里，`ONLY` 也只限制紧跟着的表。例如，下面的 `p` 读取父表及其后代，`base` 只读取父表本身。
+
+```sql
+SELECT p.id, p.name, base.name AS parent_name
+FROM products AS p LEFT JOIN ONLY products AS base ON p.id = base.id
+ORDER BY p.id;
+```
+
+在受支持的 `FULL JOIN` 中，可以用 `USING` 指定等值列，也可以在 `ON` 中用等值条件连接两侧，再加其他筛选条件。`ON 1=1` 允许所有行配对，`ON ... AND FALSE` 保留两侧各自的行并补空值。只有不等式的受测写法返回 `0A000`。[连接和子查询验证](test-report.md#nested-inherited-tables-20261120)
+
 #### 按整数主键翻页
 
 没有过滤条件时，普通单表查询可以从整数主键索引中找出分页需要的记录。
