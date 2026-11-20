@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>保存表清单时可重试一次 · 2026-11-20</summary>
+
+如果新清单已写好，只是没能确认写入磁盘，数据库会再确认一次。重试仍失败时会报错。
+
+[测试报告](docs/test-report.md#table-list-directory-sync-20261120) · [性能报告](docs/performance-report-2026-10-30.md#table-list-directory-sync-cost-20261120)
+
+</details>
+
+<details>
 <summary>建表时先把表定义完整写入磁盘 · 2026-11-20</summary>
 
 如果保存表定义时遇到同名文件，建表会报错并保留原文件。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>意外退出后保留已提交的表结构修改 · 2026-11-19</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-19 · 意外退出后保留已提交的表结构修改
 
 如果数据库切换到新的日志文件后意外退出，重启时会继续读取这个文件，避免用旧备份覆盖已经提交的表结构修改。
 
 [使用手册](docs/MANUAL.md#201-wal-归档与时间点恢复-pitr) · [测试报告](docs/test-report.md#wal-switch-terminal-recovery-20261119) · [性能报告](docs/performance-report-2026-10-30.md#wal-switch-terminal-recovery-cost-20261119)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-19 · 重复运行建表脚本时跳过多余备份
 

@@ -16,6 +16,7 @@
 #include <string>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/wait.h>
 #include <thread>
 #include <unistd.h>
 #include <vector>
@@ -23,7 +24,7 @@
 namespace fs = std::filesystem;
 
 namespace {
-enum class PublicationFault { None, Rename, ParentSync };
+enum class PublicationFault { None, Rename, ParentSync, ParentSyncPersistent };
 enum class PublicationStage { None, InjectFailure, DurableRetry };
 thread_local PublicationFault publicationFault = PublicationFault::None;
 thread_local PublicationStage publicationStage = PublicationStage::None;
@@ -33,6 +34,10 @@ thread_local struct stat publicationDirectory {};
 thread_local unsigned publicationHits = 0;
 thread_local unsigned injectedFailures = 0;
 thread_local unsigned durableRetries = 0;
+thread_local unsigned failedRetries = 0;
+thread_local unsigned persistentLaterFailures = 0;
+thread_local bool failRetry = false;
+thread_local bool continuousFailureActive = false;
 thread_local unsigned successfulDirectorySyncs = 0;
 thread_local unsigned competingThreadSyncs = 0;
 
@@ -46,6 +51,10 @@ void armPublicationFault(const fs::path& path, PublicationFault fault) {
     publicationHits = 0;
     injectedFailures = 0;
     durableRetries = 0;
+    failedRetries = 0;
+    persistentLaterFailures = 0;
+    failRetry = fault == PublicationFault::ParentSyncPersistent;
+    continuousFailureActive = false;
     successfulDirectorySyncs = 0;
     competingThreadSyncs = 0;
     publicationFault = fault;
@@ -111,6 +120,18 @@ extern "C" int fsync(int fd) {
         errno = EIO;
         return -1;
     }
+    if (publicationStage == PublicationStage::DurableRetry && failRetry) {
+        ++failedRetries;
+        continuousFailureActive = true;
+        publicationStage = PublicationStage::None;
+        errno = EIO;
+        return -1;
+    }
+    if (continuousFailureActive && selectedDirectory) {
+        ++persistentLaterFailures;
+        errno = EIO;
+        return -1;
+    }
     const int result = static_cast<int>(::syscall(SYS_fsync, fd));
     if (selectedDirectory && result == 0) {
         ++successfulDirectorySyncs;
@@ -150,11 +171,7 @@ static dbms::TableSchema makeTable(const std::string& name) {
     return table;
 }
 
-int main() {
-    cleanupAllTestData();
-    dbms::TypeRegistry::instance().bootstrap();
-
-    const std::string database = testDbPath("table_list_atomicity");
+static void runTableListScenario(const std::string& database) {
     dbms::StorageEngine engine;
     assert(engine.createDatabase(database, "utf8") == dbms::DBStatus::OK);
     assert(engine.createTable(database, makeTable("alpha")) ==
@@ -226,8 +243,35 @@ int main() {
     assert(competingThreadSyncs == 0 && publicationStage == PublicationStage::None);
     expectUnpublished();
 
+    // The selected directory keeps failing until CREATE returns, including
+    // its first sync, retry and rollback attempts. The published bytes do
+    // not make this a success. Repair the injected I/O failure and sync the
+    // directory before reopening the previous table list and data.
+    armPublicationFault(tableList, PublicationFault::ParentSyncPersistent);
+    std::string persistentError;
+    assert(engine.createTable(database, makeTable("created"), &persistentError) ==
+           dbms::DBStatus::IO_ERROR);
+    assert(persistentError == "could not update table list");
+    assert(publicationFault == PublicationFault::None && publicationHits == 1);
+    assert(injectedFailures == 1 && failedRetries == 1 && durableRetries == 0);
+    assert(persistentLaterFailures >= 1 && failRetry && continuousFailureActive);
+    assert(competingThreadSyncs == 1 && publicationStage == PublicationStage::None);
+    failRetry = false;
+    continuousFailureActive = false;
+    assert(dbms::index_file::syncDirectory(database));
+    expectUnpublished();
+    {
+        dbms::StorageEngine reopened;
+        assert(reopened.getTableNames(database) == originalNames);
+        assert(!reopened.tableExists(database, "created"));
+        assert(reopened.query(database, "alpha", {}, {"id"}) ==
+               std::vector<std::string>{"11 "});
+        assert(reopened.query(database, "omega", {}, {"id"}) ==
+               std::vector<std::string>{"33 "});
+    }
+
     // Fail the actual tlist parent sync only after its successful rename.
-    // CREATE must confirm the exact bytes and perform a real durable retry.
+    // CREATE must retry the actual directory fsync after a successful rename.
     armPublicationFault(tableList, PublicationFault::ParentSync);
     std::ostringstream createDiagnostics;
     auto* previousCerr = std::cerr.rdbuf(createDiagnostics.rdbuf());
@@ -281,8 +325,47 @@ int main() {
         assert(reloaded.query(database, "created", {}, {"id"}) ==
                std::vector<std::string>{"44 "});
     }
+}
 
-    assert(engine.dropDatabase(database) == dbms::DBStatus::OK);
+int main(int argc, char** argv) {
+    if (argc == 2 && std::strcmp(argv[1], "--cold-reopen-check") == 0) {
+        dbms::TypeRegistry::instance().bootstrap();
+        const std::string database = testDbPath("table_list_atomicity");
+        dbms::StorageEngine reopened;
+        assert((reopened.getTableNames(database) ==
+                std::vector<std::string>{"alpha", "omega", "created"}));
+        assert(!reopened.tableExists(database, "remove_me"));
+        assert(reopened.query(database, "alpha", {}, {"id"}) ==
+               std::vector<std::string>{"11 "});
+        assert(reopened.query(database, "omega", {}, {"id"}) ==
+               std::vector<std::string>{"33 "});
+        assert(reopened.query(database, "created", {}, {"id"}) ==
+               std::vector<std::string>{"44 "});
+        std::cout << "[TABLE LIST ATOMICITY] fresh process reopen passed\n";
+        return 0;
+    }
+    assert(argc == 1);
+    cleanupAllTestData();
+    dbms::TypeRegistry::instance().bootstrap();
+    const std::string database = testDbPath("table_list_atomicity");
+    runTableListScenario(database);
+
+    // The original engine has closed its caches; exec creates a fresh
+    // process and performs normal startup recovery before inspecting data.
+    const pid_t child = ::fork();
+    assert(child >= 0);
+    if (child == 0) {
+        ::execl("/proc/self/exe", "table_list_atomicity_test",
+                "--cold-reopen-check", static_cast<char*>(nullptr));
+        ::_exit(127);
+    }
+    int status = 0;
+    assert(::waitpid(child, &status, 0) == child);
+    assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    {
+        dbms::StorageEngine cleanup;
+        assert(cleanup.dropDatabase(database) == dbms::DBStatus::OK);
+    }
     finalCleanupTestData();
     std::cout << "[TABLE LIST ATOMICITY] passed\n";
     return 0;

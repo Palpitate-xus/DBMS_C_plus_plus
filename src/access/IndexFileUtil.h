@@ -56,13 +56,15 @@ inline bool removeDurably(const std::filesystem::path& path) {
 }
 
 enum class WriteResult { OK, ALREADY_EXISTS, IO_ERROR };
+enum class DirectorySync { Once, RetryOnce };
 
 // Publish a fully synced temporary file.  A no-replace publication uses a
 // same-directory hard link so even a dangling symlink at the destination is
 // treated as occupied, without a check-then-rename race.
 inline WriteResult writeAtomicallyImpl(const std::filesystem::path& target,
                                        const std::string& bytes,
-                                       bool noReplace) {
+                                       bool noReplace,
+                                       DirectorySync directorySync = DirectorySync::Once) {
     static std::atomic<uint64_t> sequence{0};
     const auto parent = target.parent_path().empty()
         ? std::filesystem::path(".") : target.parent_path();
@@ -132,16 +134,21 @@ inline WriteResult writeAtomicallyImpl(const std::filesystem::path& target,
         return WriteResult::IO_ERROR;
     }
 
-    return noReplace || syncDirectory(parent) ? WriteResult::OK
-                                               : WriteResult::IO_ERROR;
+    if (noReplace || syncDirectory(parent)) return WriteResult::OK;
+    // Only a successfully renamed, already-synced file can reach this
+    // retry. Never infer publication from the bytes at the target path.
+    if (directorySync == DirectorySync::RetryOnce && syncDirectory(parent))
+        return WriteResult::OK;
+    return WriteResult::IO_ERROR;
 }
 
 // Replace an index file atomically and make both the file and its directory
 // durable.  Indexes are rebuildable, but a partially written file must never
 // be mistaken for a valid index after a crash.
 inline bool writeAtomically(const std::filesystem::path& target,
-                            const std::string& bytes) {
-    return writeAtomicallyImpl(target, bytes, false) == WriteResult::OK;
+                            const std::string& bytes,
+                            DirectorySync directorySync = DirectorySync::Once) {
+    return writeAtomicallyImpl(target, bytes, false, directorySync) == WriteResult::OK;
 }
 
 inline WriteResult writeAtomicallyNoReplace(

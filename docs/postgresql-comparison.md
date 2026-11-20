@@ -2,6 +2,10 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-20 · 表清单更名后的目录同步
+
+PostgreSQL 18.6 的 `durable_rename` 把写入文件和同步父目录作为持久更名的不同步骤。SQLite 的回滚日志模式先确保数据落盘，再删除日志以结束事务。DuckDB 的表结构变更可以随事务撤销。本项目的表清单已完成文件写入和更名时，才会在目录同步失败后重试。这一步用于确认清单已落盘。撤销整条建表语句还需要记录事务私有文件和目录变更。[PostgreSQL 18.6 文件同步](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/common/file_utils.c) · [SQLite 回滚日志](https://sqlite.org/atomiccommit.html) · [DuckDB 事务](https://duckdb.org/2024/09/25/changing-data-with-confidence-and-acid) · [本项目测试](test-report.md#table-list-directory-sync-20261120)
+
 ## 2026-11-20 · 普通建表的文件写入与事务撤销
 
 PostgreSQL 18.6 用物理关系编号登记事务中创建的文件，撤销动作随子事务层级管理。SQLite 在回滚日志模式中先保存将要改写的数据页，再写入数据库文件。DuckDB 把表结构变更纳入事务，可以随事务回滚。本项目先让新表的物理编号和完整定义同时落盘，为恢复时核对归属提供依据。显式事务仍需要记录并撤销整次建表的后续文件和目录变更。[PostgreSQL 18.6 关系文件](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/catalog/storage.c) · [SQLite 回滚日志](https://sqlite.org/atomiccommit.html) · [DuckDB 事务](https://duckdb.org/2024/09/25/changing-data-with-confidence-and-acid) · [实际对照](test-report.md#create-schema-publication-20261120)

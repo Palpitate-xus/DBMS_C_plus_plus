@@ -2,6 +2,44 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-20 retry relation list directory sync after successful rename",
+      "gap_ids": ["CAT-07", "WAL-08"],
+      "status": "partial",
+      "evidence": [
+        "src/access/IndexFileUtil.h",
+        "src/commands/TableManage.cpp",
+        "docs/test-report.md",
+        "docs/postgresql-comparison.md",
+        "docs/performance-report-2026-10-30.md"
+      ],
+      "tests": [
+        "tests/table_list_atomicity_test.cpp",
+        "tests/cold_start_transaction_backup_protocol_e2e_test.py",
+        "tests/schema_namespace_atomicity_protocol_e2e_test.py",
+        "tests/tablespace_protocol_e2e_test.py",
+        "tests/commit_failure_recovery_protocol_e2e_test.py",
+        "tests/restore_parameter_status_protocol_e2e_test.py"
+      ],
+      "verification": [
+        "The exact baseline failed the relation-list directory retry assertion. The candidate retries only after the synced file has been renamed, completes CREATE and DROP after a one-shot fault, and returns an error if the sync keeps failing.",
+        "The persistent I/O fault also prevents the cleanup sync. After the injected fault clears, the fixture syncs the directory, checks the original state and performs a fresh-process reopen after successful CREATE and DROP.",
+        "Six native and five protocol suites passed. Five private crash workloads on the exact baseline show that ordinary CREATE can survive rollback even after a later ALTER, CREATE INDEX, or SERIAL table snapshot. Inheritance and UNLOGGED cases also reproduced it.",
+        "Twelve normal-I/O timing rounds completed 216 CREATEs. All three groups exceeded the preset 10% CPU variation threshold.",
+        "An offline fixture restored 14,208 bytes of prior metadata and removed its known new forks in three private crash copies. Normal startup preserved committed rows, undid prior row writes, and accepted committed same-name recreation. Durable ownership proof, restartable cleanup and ordering with later transaction snapshots remain open."
+      ],
+      "artifacts": {
+        "exact_build": "build/array-domain-20261117/tlist-directory-sync-cmake-v1.json",
+        "native_baseline": "build/ordinary-create-crash-20261119/native-tablelist-head-extended-candidate-v3/summary.json",
+        "native_faults": "build/ordinary-create-crash-20261119/native-tablelist-retry-candidate-v1/summary.json",
+        "native_neighbors": "build/ordinary-create-crash-20261119/native-tablelist-neighbors-candidate-v1/summary.json",
+        "protocols": "build/ordinary-create-crash-20261119/protocol-tlist-directory-sync-v1/summary.json",
+        "mixed_create_crash": "build/ordinary-create-crash-20261119/create-mixed-crash-v1/summary.json",
+        "create_metadata_files": "build/ordinary-create-crash-20261119/create-metadata-survey-v1/summary.json",
+        "offline_before_image_probe": "build/ordinary-create-crash-20261119/create-catalog-before-image-probe-v1/summary.json",
+        "timing_independent_audit": "build/ordinary-create-crash-20261119/tlist-sync-timing/independent-audit.json"
+      }
+    },
+    {
       "issue": "2026-11-20 publish complete CREATE TABLE schemas without replacement",
       "gap_ids": ["CAT-07", "WAL-08"],
       "status": "partial",

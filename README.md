@@ -21,6 +21,13 @@ cmake --build build/cmake --target dbms_main --parallel 2
 ## 最近更新
 
 <details>
+<summary>保存表清单时可重试一次 · 2026-11-20</summary>
+
+如果新清单已写好，只是没能确认写入磁盘，数据库会再确认一次。重试仍失败时会报错。
+
+</details>
+
+<details>
 <summary>建表时先把表定义完整写入磁盘 · 2026-11-20</summary>
 
 如果保存表定义时遇到同名文件，建表会报错并保留原文件。
@@ -31,13 +38,6 @@ cmake --build build/cmake --target dbms_main --parallel 2
 <summary>归档缺失或损坏时，恢复操作会保留当前数据 · 2026-11-20</summary>
 
 例如，备份之后新增了一笔订单。如果找不到恢复所需的日志，数据库会报错，订单仍然可以查询。
-
-</details>
-
-<details>
-<summary>意外退出后保留已提交的表结构修改 · 2026-11-19</summary>
-
-如果数据库切换到新的日志文件后意外退出，重启时会继续读取这个文件，避免用旧备份覆盖已经提交的表结构修改。
 
 </details>
 

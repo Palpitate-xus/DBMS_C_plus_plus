@@ -1941,7 +1941,8 @@ static bool validStoredRelationName(const std::string& value) {
 static bool writeRelationListAtomically(const std::filesystem::path& path,
                                         const std::vector<std::string>& names) {
     const auto bytes = relation_name_codec::encode(names);
-    return bytes && index_file::writeAtomically(path, *bytes);
+    return bytes && index_file::writeAtomically(path, *bytes,
+                                               index_file::DirectorySync::RetryOnce);
 }
 
 static std::string primaryKeyConstraintName(const TableSchema& table) {
