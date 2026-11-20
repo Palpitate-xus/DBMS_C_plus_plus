@@ -791,26 +791,27 @@ void PreparedQueryExecution::copySourceInputs(RowContext& row,size_t source,cons
     if(actual)row.copyGeneratedSource(*actual,source);
 }
 
-std::shared_ptr<PreparedArrayJoinFilter> PreparedArrayJoinFilter::prepare(const PreparedQuery& query,
+static const QueryColumnBinding* joinKeyBinding(const PreparedQuery& query, const Expr* expression) {
+    const auto* column = dynamic_cast<const ColumnRefExpr*>(expression);
+    if (!column || !column->binding || column->preparedSubquery || column->binding->scopeDepth)
+        return nullptr;
+    const auto& bind = *column->binding;
+    const auto& range = query.sourceRanges.at(bind.sourceOrdinal);
+    if (range.ordinal != bind.sourceOrdinal || range.columns.at(bind.columnOrdinal).generated ||
+        (range.generatedRelation && range.generatedRelation->columns.at(bind.columnOrdinal))) return nullptr;
+    return &bind;
+}
+
+std::shared_ptr<PreparedJoinKeyFilter> PreparedJoinKeyFilter::prepareArrayUsing(const PreparedQuery& query,
     const std::vector<ExprPtr>& comparisons) {
     if (comparisons.empty()) return {};
     std::vector<Key> keys;
     keys.reserve(comparisons.size());
-    const auto binding = [&](const Expr* expression) -> const QueryColumnBinding* {
-        const auto* column = dynamic_cast<const ColumnRefExpr*>(expression);
-        if (!column || !column->binding || column->preparedSubquery || column->binding->scopeDepth)
-            return nullptr;
-        const auto& bind = *column->binding;
-        const auto& range = query.sourceRanges.at(bind.sourceOrdinal);
-        if (range.ordinal != bind.sourceOrdinal || range.columns.at(bind.columnOrdinal).generated ||
-            (range.generatedRelation && range.generatedRelation->columns.at(bind.columnOrdinal))) return nullptr;
-        return &bind;
-    };
     for (const auto& expression : comparisons) {
         const auto* equality = dynamic_cast<const BinaryOpExpr*>(expression.get());
         if (!equality || equality->op != "=" || equality->comparison) return {};
-        const auto* left = binding(equality->left.get());
-        const auto* right = binding(equality->right.get());
+        const auto* left = joinKeyBinding(query, equality->left.get());
+        const auto* right = joinKeyBinding(query, equality->right.get());
         if (!left || !right) return {};
         const auto& a = query.sourceRanges[left->sourceOrdinal].columns[left->columnOrdinal];
         const auto& b = query.sourceRanges[right->sourceOrdinal].columns[right->columnOrdinal];
@@ -819,18 +820,59 @@ std::shared_ptr<PreparedArrayJoinFilter> PreparedArrayJoinFilter::prepare(const 
         Key key{{left->sourceOrdinal,left->columnOrdinal}, {right->sourceOrdinal,right->columnOrdinal},
                 "", "", type->codecOid, 0};
         switch (type->codecOid) {
-        case 1005: key.arrayType = "smallint[]"; key.elementType = "smallint"; key.bits = 16; break;
-        case 1007: key.arrayType = "integer[]"; key.elementType = "integer"; key.bits = 32; break;
-        case 1016: key.arrayType = "bigint[]"; key.elementType = "bigint"; key.bits = 64; break;
+        case 1005: key.type = "smallint[]"; key.elementType = "smallint"; key.bits = 16; break;
+        case 1007: key.type = "integer[]"; key.elementType = "integer"; key.bits = 32; break;
+        case 1016: key.type = "bigint[]"; key.elementType = "bigint"; key.bits = 64; break;
         default: return {};
         }
-        if (a.type != key.arrayType || b.type != key.arrayType) return {};
+        if (a.type != key.type || b.type != key.type) return {};
         keys.push_back(key);
     }
-    return std::shared_ptr<PreparedArrayJoinFilter>(new PreparedArrayJoinFilter(std::move(keys)));
+    return std::shared_ptr<PreparedJoinKeyFilter>(new PreparedJoinKeyFilter(std::move(keys)));
 }
 
-PreparedArrayJoinFilter::Fingerprint PreparedArrayJoinFilter::fingerprint(const RowContext& row, bool left) const {
+std::shared_ptr<PreparedJoinKeyFilter> PreparedJoinKeyFilter::prepareIntegerEquality(const PreparedQuery& query,
+    const Expr* condition, const std::vector<size_t>& leftInputs, const std::vector<size_t>& rightInputs) {
+    const auto* equality = dynamic_cast<const BinaryOpExpr*>(condition);
+    if (!equality || equality->preparedSubquery || equality->op != "=") return {};
+    const auto* left = joinKeyBinding(query, equality->left.get());
+    const auto* right = joinKeyBinding(query, equality->right.get());
+    if (!left || !right || left->mergedUsing || right->mergedUsing || left->typeOid != right->typeOid) return {};
+    const auto belongs = [](const std::vector<size_t>& inputs, const QueryColumnBinding& binding) {
+        return std::find(inputs.begin(), inputs.end(), binding.sourceOrdinal) != inputs.end();
+    };
+    if (belongs(rightInputs, *left) && belongs(leftInputs, *right)) std::swap(left, right);
+    if (!belongs(leftInputs, *left) || !belongs(rightInputs, *right)) return {};
+    Key key{{left->sourceOrdinal, left->columnOrdinal}, {right->sourceOrdinal, right->columnOrdinal},
+            nullptr, nullptr, left->typeOid, 0};
+    switch (key.codecOid) {
+    case 21: key.type = "smallint"; key.bits = 16; break;
+    case 23: key.type = "integer"; key.bits = 32; break;
+    case 20: key.type = "bigint"; key.bits = 64; break;
+    default: return {};
+    }
+    const auto matchesType = [&](const QueryColumnBinding& binding) {
+        const auto& field = query.sourceRanges.at(binding.sourceOrdinal).columns.at(binding.columnOrdinal);
+        return field.typeOid == key.codecOid && ExprHelper::canonicalResultTypeName(binding.declaredType) == key.type;
+    };
+    if (!matchesType(*left) || !matchesType(*right)) return {};
+    const auto builtin = ExprEvaluator::resolveComparison("=", key.type, key.type);
+    if (!builtin.strict || !builtin.hashable || builtin.leftType != key.type || builtin.rightType != key.type ||
+        (equality->comparison && (!equality->comparison->strict || equality->comparison->identity != builtin.identity)))
+        return {};
+    return std::shared_ptr<PreparedJoinKeyFilter>(new PreparedJoinKeyFilter({key}));
+}
+
+static bool parseJoinInteger(std::string_view text, unsigned bits, int64_t& number) {
+    if (!text.empty() && text.front() == '+') text.remove_prefix(1);
+    const auto end = text.data() + text.size();
+    const auto parsed = std::from_chars(text.data(), end, number);
+    return parsed.ec == std::errc{} && parsed.ptr == end &&
+        (bits != 16 || (number >= INT16_MIN && number <= INT16_MAX)) &&
+        (bits != 32 || (number >= INT32_MIN && number <= INT32_MAX));
+}
+
+PreparedJoinKeyFilter::Fingerprint PreparedJoinKeyFilter::fingerprint(const RowContext& row, bool left) const {
     uint64_t hash = 14695981039346656037ULL;
     const auto mix = [&](uint64_t value) { hash = (hash ^ value) * 1099511628211ULL; };
     try {
@@ -838,8 +880,13 @@ PreparedArrayJoinFilter::Fingerprint PreparedArrayJoinFilter::fingerprint(const 
             const auto [source,column] = left ? key.left : key.right;
             if (row.generatedBound(source,column)) return {};
             const auto& value = row.boundColumn(source,column);
-            if (value.typeName != key.arrayType) return {};
+            if (value.typeName != key.type) return {};
             if (value.isNull) return {Fingerprint::State::Null, 0};
+            if (!key.elementType) {
+                int64_t number = 0;
+                if (!parseJoinInteger(value.value, key.bits, number)) return {};
+                return {Fingerprint::State::Value, static_cast<uint64_t>(number)};
+            }
             if (value.compound && value.compound->type &&
                 (value.compound->type->kind != DatumKind::Array || value.compound->type->codecOid != key.codecOid))
                 return {};
@@ -868,13 +915,7 @@ PreparedArrayJoinFilter::Fingerprint PreparedArrayJoinFilter::fingerprint(const 
                 if (element.isNull) continue;
                 if (element.typeName != key.elementType) return {};
                 int64_t number = 0;
-                std::string_view text(element.value);
-                if (!text.empty() && text.front() == '+') text.remove_prefix(1);
-                const auto end = text.data() + text.size();
-                const auto parsed = std::from_chars(text.data(),end,number);
-                if (parsed.ec != std::errc{} || parsed.ptr != end ||
-                    (key.bits == 16 && (number < INT16_MIN || number > INT16_MAX)) ||
-                    (key.bits == 32 && (number < INT32_MIN || number > INT32_MAX))) return {};
+                if (!parseJoinInteger(element.value, key.bits, number)) return {};
                 mix(static_cast<uint64_t>(number));
             }
         }
@@ -888,50 +929,63 @@ PreparedArrayJoinFilter::Fingerprint PreparedArrayJoinFilter::fingerprint(const 
     return {Fingerprint::State::Value, hash};
 }
 
-void PreparedArrayJoinFilter::prepareLeft(size_t leftOrdinal, const RowContext& left) {
+void PreparedJoinKeyFilter::prepareLeft(size_t leftOrdinal, const RowContext& left) {
     if (leftOrdinal_ != leftOrdinal) {
         left_ = fingerprint(left, true);
         leftOrdinal_ = leftOrdinal;
     }
 }
 
-bool PreparedArrayJoinFilter::mayMatch(size_t leftOrdinal, const RowContext& left,
+bool PreparedJoinKeyFilter::mayMatch(size_t leftOrdinal, const RowContext& left,
     size_t rightOrdinal, const RowContext& right) {
     if ((rightOrdinal & 127U) == 0) checkForQueryInterrupt();
     prepareLeft(leftOrdinal, left);
-    if (rightOrdinal == right_.size()) right_.push_back(fingerprint(right,false));
-    const auto& candidate = right_.at(rightOrdinal);
+    // The integer path can read the materialized rows directly after EOF.
+    // Before then it does not allocate an auxiliary copy of the right keys.
+    Fingerprint candidate;
+    if (keys_.front().elementType) {
+        if (rightOrdinal == right_.size()) right_.push_back(fingerprint(right, false));
+        candidate = right_.at(rightOrdinal);
+    } else {
+        candidate = fingerprint(right, false);
+    }
     if (left_.state == Fingerprint::State::Unavailable || candidate.state == Fingerprint::State::Unavailable)
         return true;
     return left_.state == Fingerprint::State::Value && candidate.state == Fingerprint::State::Value &&
            left_.hash == candidate.hash;
 }
 
-void PreparedArrayJoinFilter::finishRightScan() {
+void PreparedJoinKeyFilter::finishRightScan() {
     if (lookupState_ == LookupState::Reading) lookupState_ = LookupState::Complete;
 }
 
-void PreparedArrayJoinFilter::buildLookup() {
+void PreparedJoinKeyFilter::buildLookup(const std::vector<RowContext>* materializedRight) {
     lookupState_ = LookupState::Unavailable;
     const auto* session = currentSession();
     const size_t workMemKb = session ? session->workMem.effective(g_config.workMemKb) : g_config.workMemKb;
     const auto workMemBytes = workMemKb > std::numeric_limits<size_t>::max() / 1024
         ? std::numeric_limits<size_t>::max() : workMemKb * 1024;
     const auto limit = workMemBytes / sizeof(LookupEntry);
-    size_t entries = 0;
-    for (size_t i = 0; i < right_.size(); ++i) {
-        if ((i & 127U) == 0) checkForQueryInterrupt();
-        const auto state = right_[i].state;
-        if (state == Fingerprint::State::Unavailable) return;
-        if (state == Fingerprint::State::Value && ++entries > limit) return;
+    size_t entries = materializedRight ? materializedRight->size() : 0;
+    if (entries > limit) return;
+    if (!materializedRight) {
+        for (size_t i = 0; i < right_.size(); ++i) {
+            if ((i & 127U) == 0) checkForQueryInterrupt();
+            const auto state = right_[i].state;
+            if (state == Fingerprint::State::Unavailable) return;
+            if (state == Fingerprint::State::Value && ++entries > limit) return;
+        }
     }
     std::vector<LookupEntry> index;
     if (entries > index.max_size()) return;
     try { index.reserve(entries); }
     catch (const std::bad_alloc&) { return; }
-    for (size_t i = 0; i < right_.size(); ++i) {
+    const auto rightCount = materializedRight ? materializedRight->size() : right_.size();
+    for (size_t i = 0; i < rightCount; ++i) {
         if ((i & 127U) == 0) checkForQueryInterrupt();
-        if (right_[i].state == Fingerprint::State::Value) index.emplace_back(right_[i].hash,i);
+        const auto key = materializedRight ? fingerprint((*materializedRight)[i], false) : right_[i];
+        if (key.state == Fingerprint::State::Unavailable) return;
+        if (key.state == Fingerprint::State::Value) index.emplace_back(key.hash, i);
     }
     // Sorting by original ordinal within each fingerprint preserves duplicate
     // order, including when the consumer stops and resumes the current probe.
@@ -945,20 +999,22 @@ void PreparedArrayJoinFilter::buildLookup() {
     lookupState_ = LookupState::Ready;
 }
 
-size_t PreparedArrayJoinFilter::nextRight(size_t leftOrdinal, const RowContext& left, size_t next) {
+size_t PreparedJoinKeyFilter::nextRight(size_t leftOrdinal, const RowContext& left, size_t next,
+                                       const std::vector<RowContext>* materializedRight) {
     if (lookupState_ == LookupState::Reading || lookupState_ == LookupState::Unavailable) return next;
     if (next == 0) checkForQueryInterrupt();
-    if (right_.empty()) return 0;
+    const auto rightCount = materializedRight ? materializedRight->size() : right_.size();
+    if (rightCount == 0) return 0;
     prepareLeft(leftOrdinal, left);
     if (left_.state == Fingerprint::State::Unavailable) return next;
-    if (lookupState_ == LookupState::Complete) buildLookup();
+    if (lookupState_ == LookupState::Complete) buildLookup(materializedRight);
     if (lookupState_ != LookupState::Ready) return next;
-    if (left_.state == Fingerprint::State::Null) return right_.size();
+    if (left_.state == Fingerprint::State::Null) return rightCount;
     const auto match = std::lower_bound(lookup_.begin(),lookup_.end(),LookupEntry{left_.hash,next});
-    return match != lookup_.end() && match->first == left_.hash ? match->second : right_.size();
+    return match != lookup_.end() && match->first == left_.hash ? match->second : rightCount;
 }
 
-void PreparedArrayJoinFilter::reset() {
+void PreparedJoinKeyFilter::reset() {
     leftOrdinal_.reset();
     right_.clear();
     std::vector<LookupEntry>().swap(lookup_);

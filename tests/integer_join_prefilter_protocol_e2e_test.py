@@ -33,6 +33,17 @@ def main():
         joins = [n for n in nodes(document["plan"]) if n["nodeType"].endswith("Join")]
         assert len(joins) == 1, document
         assert (joins[0].get("integerKeyPrefilter") == "true") == filtered, document
+        if not filtered:
+            assert "integerKeyLookup" not in joins[0] and "integerKeyLookupBuilt" not in joins[0], document
+        return document, joins[0]
+
+    def lookup_plan(sql, *, built, right_min, right_max):
+        document, join = plan(sql, True)
+        assert join.get("integerKeyLookup") == "true", document
+        assert (join.get("integerKeyLookupBuilt") == "true") == built, document
+        assert len(join.get("children", [])) == 2, document
+        right_rows = join["children"][1].get("actualRows", 0)
+        assert right_min <= right_rows <= right_max, (sql, right_rows, document)
 
     try:
         query("CREATE TABLE integer_join_l(id INT,k INT,v TEXT)")
@@ -51,6 +62,20 @@ def main():
                       [[str(len(matched + extra))]])
         plan("SELECT count(*) FROM integer_join_l l JOIN integer_join_r r ON l.k=r.k", True)
         plan("SELECT count(*) FROM integer_join_l l JOIN integer_join_r r ON r.k=l.k", True)
+        # An output alias selects the prepared EXPLAIN graph for LIMIT 1;
+        # the legacy EXPLAIN receiver does not admit that shape.
+        # A zero-demand consumer must not visit the right side, and the first
+        # matching row is found in source order without eagerly building a map.
+        lookup_plan("SELECT l.id AS chosen,r.id FROM (SELECT id,k FROM integer_join_l) l JOIN integer_join_r r ON l.k=r.k LIMIT 0",
+                    built=False, right_min=0, right_max=0)
+        lookup_plan("SELECT l.id AS chosen,r.id FROM (SELECT id,k FROM integer_join_l) l JOIN integer_join_r r ON l.k=r.k LIMIT 1",
+                    built=False, right_min=1, right_max=1)
+        # Full consumption scans the first right side, then reuses its bounded
+        # lookup on subsequent left rows. Five-by-five nested visits are 25.
+        lookup_plan("SELECT count(*) FROM integer_join_l l JOIN integer_join_r r ON l.k=r.k",
+                    built=True, right_min=5, right_max=24)
+        lookup_plan("SELECT count(*) FROM integer_join_l l JOIN integer_join_r r ON r.k=l.k",
+                    built=True, right_min=5, right_max=24)
         query("SELECT l.id,r.id FROM integer_join_l l JOIN integer_join_r r ON l.k=l.k",
               [[str(l), str(r)] for l in (1, 2, 4, 5) for r in (10, 11, 12, 13, 14)])
         plan("SELECT count(*) FROM integer_join_l l JOIN integer_join_r r ON l.k=l.k", False)
@@ -80,6 +105,22 @@ def main():
               [[None, str(x)] for x in (10, 11, 12, 13, 14)])
         query("SELECT l.id,r.id FROM integer_join_l l LEFT JOIN integer_join_empty r ON l.k=r.id",
               [[str(x), None] for x in (1, 2, 3, 4, 5)])
+        # Rebind the correlated source for different outer values, including
+        # a NULL key, and preserve each subquery's bag count.
+        query("SELECT l.id,(SELECT count(*) FROM integer_join_l x JOIN integer_join_r r "
+              "ON x.k=r.k WHERE x.id=l.id) FROM integer_join_l l ORDER BY l.id",
+              [["1", "2"], ["2", "2"], ["3", "0"], ["4", "1"], ["5", "0"]])
+        # More than 4096 16-byte entries exceed the 64 KiB auxiliary budget.
+        # Declining the lookup keeps complete bag semantics and the old scan.
+        query("SET work_mem='64kB'")
+        query("CREATE TABLE integer_join_budget_l(k INTEGER)")
+        query("CREATE TABLE integer_join_budget_r(k INTEGER)")
+        query("INSERT INTO integer_join_budget_l VALUES(0),(4096)")
+        query("INSERT INTO integer_join_budget_r VALUES" + ",".join("(%d)" % i for i in range(4097)))
+        budget_join = "SELECT count(*) FROM integer_join_budget_l l JOIN integer_join_budget_r r ON l.k=r.k"
+        query(budget_join, [["2"]])
+        lookup_plan(budget_join, built=False, right_min=8194, right_max=8194)
+        query("RESET work_mem")
         print("[INTEGER JOIN PREFILTER]", controls, "controls passed", flush=True)
     finally:
         runner.stop_ours(server)

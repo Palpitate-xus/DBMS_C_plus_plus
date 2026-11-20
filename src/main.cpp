@@ -21147,7 +21147,7 @@ class PreparedWithDmlRuntime {
         vector<dbms::Operator*> planChildren;
         string planName="Materialize";
         map<string,string> planAttributes;
-        shared_ptr<const dbms::PreparedArrayJoinFilter> planArrayFilter;
+        shared_ptr<const dbms::PreparedJoinKeyFilter> planKeyFilter;
         optional<dbms::PreparedIntegerKeyOrder> integerKeyOrder;
         size_t position=0;
         dbms::RowContext current;
@@ -21170,8 +21170,9 @@ class PreparedWithDmlRuntime {
         string preparedPlanNodeName() const override {return planName;}
         map<string,string> preparedPlanAttributes() const override {
             auto attributes = planAttributes;
-            if (planArrayFilter && planArrayFilter->lookupBuilt())
-                attributes["integerArrayKeyLookupBuilt"] = "true";
+            if (planKeyFilter && planKeyFilter->lookupBuilt())
+                attributes[attributes.count("integerKeyLookup")
+                    ? "integerKeyLookupBuilt" : "integerArrayKeyLookupBuilt"] = "true";
             return attributes;
         }
         vector<dbms::Operator*> preparedPlanChildren() const override {return planChildren;}
@@ -21501,64 +21502,35 @@ class PreparedWithDmlRuntime {
             comparison->left=operand(key.first);comparison->right=operand(key.second);
             comparisons->push_back(std::move(comparison));
         }
-        auto arrayFilter = deferMerged && !item->joinCondition
-            ? dbms::PreparedArrayJoinFilter::prepare(*query_,*comparisons) : nullptr;
-        if (arrayFilter) {
+        auto keyFilter = deferMerged && !item->joinCondition
+            ? dbms::PreparedJoinKeyFilter::prepareArrayUsing(*query_, *comparisons) : nullptr;
+        bool integerEquality = false;
+        if (keyFilter) {
             node->planAttributes["integerArrayKeyFilter"] = "true";
             node->planAttributes["integerArrayKeyLookup"] = "true";
-            node->planArrayFilter = arrayFilter;
-        }
-        struct IntegerJoinKey {
-            DmlSourceNode::Cell left,right;
-            string type;
-        };
-        optional<IntegerJoinKey> integerJoinKey;
-        // A pure, same-type integer equality can reject a candidate before
-        // copying every bound column into a combined context. Keep source
-        // demand order and the original ON evaluation for surviving pairs.
-        if(!merged)if(const auto* equality=dynamic_cast<const dbms::BinaryOpExpr*>(item->joinCondition.get())) {
-            const auto* a=dynamic_cast<const dbms::ColumnRefExpr*>(equality->left.get());
-            const auto* b=dynamic_cast<const dbms::ColumnRefExpr*>(equality->right.get());
-            if(equality->op=="=" && a && b && !a->preparedSubquery && !b->preparedSubquery &&
-                a->binding && b->binding && !a->binding->scopeDepth && !b->binding->scopeDepth &&
-                !a->binding->mergedUsing && !b->binding->mergedUsing) {
-                const auto type=dbms::ExprHelper::canonicalResultTypeName(a->binding->declaredType);
-                const bool builtin=!equality->comparison || (equality->comparison->strict &&
-                    equality->comparison->identity=="builtin-comparison:=("+type+","+type+")");
-                if(builtin && (type=="smallint" || type=="integer" || type=="bigint") &&
-                    dbms::ExprHelper::canonicalResultTypeName(b->binding->declaredType)==type) {
-                    const auto belongs=[](const shared_ptr<DmlSourceNode>& side,size_t ordinal) {
-                        return find(side->occurrences.begin(),side->occurrences.end(),ordinal)!=side->occurrences.end();
-                    };
-                    if(belongs(right,a->binding->sourceOrdinal) && belongs(left,b->binding->sourceOrdinal))swap(a,b);
-                    const auto generated=[&](const dbms::QueryColumnBinding& binding) {
-                        for(const auto& range:query_->sourceRanges)if(range.ordinal==binding.sourceOrdinal)
-                            return range.generatedRelation && binding.columnOrdinal<range.generatedRelation->columns.size() &&
-                                bool(range.generatedRelation->columns[binding.columnOrdinal]);
-                        return false;
-                    };
-                    if(!generated(*a->binding) && !generated(*b->binding) &&
-                       belongs(left,a->binding->sourceOrdinal) && belongs(right,b->binding->sourceOrdinal)) {
-                        integerJoinKey=IntegerJoinKey{{a->binding->sourceOrdinal,a->binding->columnOrdinal},
-                            {b->binding->sourceOrdinal,b->binding->columnOrdinal},type};
-                        node->planAttributes["integerKeyPrefilter"]="true";
-                    }
-                }
+        } else if (!merged) {
+            keyFilter = dbms::PreparedJoinKeyFilter::prepareIntegerEquality(*query_,
+                item->joinCondition.get(), left->occurrences, right->occurrences);
+            integerEquality = bool(keyFilter);
+            if (integerEquality) {
+                node->planAttributes["integerKeyPrefilter"] = "true";
+                node->planAttributes["integerKeyLookup"] = "true";
             }
         }
+        node->planKeyFilter = keyFilter;
         struct JoinPosition {
             size_t left=0,right=0,unmatchedRight=0;
             bool matched=false,leftComplete=false;
             vector<bool> rightMatched;
         };
         auto position=make_shared<JoinPosition>();
-        node->reset=[currentOuter,resetExecution,executionOwner,left,right,item,position,arrayFilter](const dbms::RowContext& row) {
+        node->reset=[currentOuter,resetExecution,executionOwner,left,right,item,position,keyFilter](const dbms::RowContext& row) {
             *currentOuter=row;resetExecution();
             if(item->joinCondition)(*executionOwner)->prepareExpression(item->joinCondition.get());
             left->rebind(row);right->rebind(row);*position=JoinPosition{};
-            if (arrayFilter) arrayFilter->reset();
+            if (keyFilter) keyFilter->reset();
         };
-        node->read=[executionOwner,currentOuter,left,right,leftJoin,rightJoin,merged,item,keys,comparisons,position,integerJoinKey,deferMerged,arrayFilter,database=session_.currentDB]
+        node->read=[executionOwner,currentOuter,left,right,leftJoin,rightJoin,merged,item,keys,comparisons,position,deferMerged,keyFilter,integerEquality,database=session_.currentDB]
             (size_t,dbms::RowContext& output) {
             const auto& execution=*executionOwner;
             dbms::ExprEvaluator comparator;comparator.setCurrentDB(database);
@@ -21590,32 +21562,21 @@ class PreparedWithDmlRuntime {
             };
             dbms::RowContext a,b;
             const auto input = [&](DmlSourceNode& node, size_t i, dbms::RowContext& scratch) {
-                if (arrayFilter) return node.borrowAt(i);
+                if (keyFilter) return node.borrowAt(i);
                 return node.readAt(i,scratch) ? static_cast<const dbms::RowContext*>(&scratch) : nullptr;
             };
             while(!position->leftComplete) {
                 const auto* leftRow = input(*left,position->left,a);
                 if(!leftRow){position->leftComplete=true;break;}
                 while (true) {
-                    if (arrayFilter)
-                        position->right = arrayFilter->nextRight(position->left,*leftRow,position->right);
+                    if (keyFilter)
+                        position->right = keyFilter->nextRight(position->left, *leftRow, position->right,
+                            integerEquality ? &right->rows : nullptr);
                     const auto* rightRow = input(*right,position->right,b);
                     if (!rightRow) break;
                     const auto occurrence=position->right++;
                     if(position->rightMatched.size()<=occurrence)position->rightMatched.resize(occurrence+1,false);
-                    if (arrayFilter && !arrayFilter->mayMatch(position->left,*leftRow,occurrence,*rightRow)) continue;
-                    if(integerJoinKey) {
-                        const auto l=comparator.readBoundColumn(integerJoinKey->left.first,integerJoinKey->left.second,*leftRow);
-                        const auto r=comparator.readBoundColumn(integerJoinKey->right.first,integerJoinKey->right.second,*rightRow);
-                        if(l.typeName==integerJoinKey->type && r.typeName==integerJoinKey->type) {
-                            if(l.isNull || r.isNull)continue;
-                            int64_t lk=0,rk=0;
-                            const auto lp=from_chars(l.value.data(),l.value.data()+l.value.size(),lk);
-                            const auto rp=from_chars(r.value.data(),r.value.data()+r.value.size(),rk);
-                            if(lp.ec==errc{} && lp.ptr==l.value.data()+l.value.size() &&
-                                rp.ec==errc{} && rp.ptr==r.value.data()+r.value.size() && lk!=rk)continue;
-                        }
-                    }
+                    if (keyFilter && !keyFilter->mayMatch(position->left, *leftRow, occurrence, *rightRow)) continue;
                     auto row=combine(leftRow,rightRow);bool valid=true;
                     for(const auto& comparison:*comparisons) {
                         const auto value=comparator.eval(comparison.get(),row);
@@ -21630,7 +21591,7 @@ class PreparedWithDmlRuntime {
                         return emit(std::move(row));
                     }
                 }
-                if (arrayFilter) arrayFilter->finishRightScan();
+                if (keyFilter) keyFilter->finishRightScan();
                 const bool unmatched=!position->matched && leftJoin;
                 ++position->left;position->right=0;position->matched=false;
                 if(unmatched)return emit(combine(leftRow,nullptr));

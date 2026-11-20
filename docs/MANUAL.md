@@ -1559,6 +1559,10 @@ SELECT * FROM users WHERE ID = 1 FOR UPDATE NOWAIT;
 SELECT * FROM users WHERE ID = 1 FOR UPDATE SKIP LOCKED;
 ```
 
+#### 整数等值连接
+
+对于使用同类型 `SMALLINT`、`INTEGER` 或 `BIGINT` 列做等值判断的受支持查询，例如 `ON users.id = orders.user_id`，数据库可以记录已读到的右侧编号，减少为后续左行反复扫描的次数。查找表在右侧第一次读完后按需建立，受 `work_mem` 限制。空间不足时继续顺序比较，重复键、空值和外连接的结果保持原语义。[执行计划和测试](test-report.md#integer-join-lookup-20261120)
+
 ### 子查询
 
 ```sql

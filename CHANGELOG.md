@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>用整数列连接时减少重复查找 · 2026-11-20</summary>
+
+例如用订单编号连接两张表。需要反复查找右表时，数据库会利用已经读过的记录找出相同编号。无需排序时，取够结果就停。
+
+[使用手册](docs/MANUAL.md#整数等值连接) · [测试报告](docs/test-report.md#integer-join-lookup-20261120) · [性能报告](docs/performance-report-2026-10-30.md#integer-join-lookup-cost-20261120)
+
+</details>
+
+<details>
 <summary>连接和子查询也能读取继承表 · 2026-11-20</summary>
 
 在连接或子查询中使用父表时，也能查到多层子表里的记录。同一张表在查询里出现两次时，`ONLY` 只限制写了它的那一次。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>修复查询中的引号和文字拼接 · 2026-11-20</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-20 · 修复查询中的引号和文字拼接
 
 在单表查询中，`upper('we''ird')` 会保留中间的引号，返回 `WE'IRD`。在文字前加上 `prefix:` 再转成大写，`AbA` 会变成 `PREFIX:ABA`。遇到 SQL 空值（`NULL`），结果仍是空值。
 
 [使用手册](docs/MANUAL.md#基础查询) · [测试报告](docs/test-report.md#scalar-string-arguments-20261120)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-20 · 重启后会继续清理建表留下的旧文件
 

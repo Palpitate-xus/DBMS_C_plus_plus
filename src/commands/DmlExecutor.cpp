@@ -6243,7 +6243,7 @@ private:
             comparisons->push_back(std::move(comparison));
         }
         auto arrayFilter = deferMerged && !item->joinCondition
-            ? PreparedArrayJoinFilter::prepare(*query_,*comparisons) : nullptr;
+            ? PreparedJoinKeyFilter::prepareArrayUsing(*query_,*comparisons) : nullptr;
         struct JoinPosition {
             size_t left=0,right=0,unmatchedRight=0;
             bool matched=false,leftComplete=false;

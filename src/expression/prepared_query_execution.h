@@ -28,18 +28,21 @@ using PreparedQueryRows = std::vector<std::vector<ExprValue>>;
 using PreparedChildExecutor = std::function<PreparedQueryRows(const Stmt*, const RowContext&, size_t)>;
 using PreparedChildCursorFactory = std::function<std::unique_ptr<PreparedQueryCursor>(const Stmt*, const RowContext&)>;
 
-// Execution-local fingerprints of already reached USING inputs. They may
+// Execution-local keys of already reached equality inputs. They may
 // discard a pair, but the original equality decides every possible match.
-class PreparedArrayJoinFilter {
+class PreparedJoinKeyFilter {
 public:
-    static std::shared_ptr<PreparedArrayJoinFilter> prepare(const PreparedQuery&,
+    static std::shared_ptr<PreparedJoinKeyFilter> prepareArrayUsing(const PreparedQuery&,
         const std::vector<ExprPtr>& comparisons);
+    static std::shared_ptr<PreparedJoinKeyFilter> prepareIntegerEquality(const PreparedQuery&,
+        const Expr* condition, const std::vector<size_t>& left, const std::vector<size_t>& right);
     bool mayMatch(size_t leftOrdinal, const RowContext& left,
                   size_t rightOrdinal, const RowContext& right);
     // Called only once the original right source reports EOF. Later left
     // rows can seek to a possible match in that same materialized source.
     void finishRightScan();
-    size_t nextRight(size_t leftOrdinal, const RowContext& left, size_t next);
+    size_t nextRight(size_t leftOrdinal, const RowContext& left, size_t next,
+                     const std::vector<RowContext>* materializedRight = nullptr);
     bool lookupBuilt() const { return lookupState_ == LookupState::Ready; }
     void reset();
 
@@ -47,7 +50,7 @@ private:
     using Cell = std::pair<size_t, size_t>;
     struct Key {
         Cell left, right;
-        const char* arrayType;
+        const char* type;
         const char* elementType;
         uint32_t codecOid;
         unsigned bits;
@@ -56,10 +59,10 @@ private:
         enum class State { Unavailable, Null, Value } state = State::Unavailable;
         uint64_t hash = 0;
     };
-    explicit PreparedArrayJoinFilter(std::vector<Key> keys) : keys_(std::move(keys)) {}
+    explicit PreparedJoinKeyFilter(std::vector<Key> keys) : keys_(std::move(keys)) {}
     Fingerprint fingerprint(const RowContext&, bool left) const;
     void prepareLeft(size_t ordinal, const RowContext&);
-    void buildLookup();
+    void buildLookup(const std::vector<RowContext>* materializedRight);
 
     std::vector<Key> keys_;
     std::optional<size_t> leftOrdinal_;

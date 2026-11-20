@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-20 · 减少整数等值连接的重复比较
+
+PostgreSQL 的哈希连接会先建立右侧的哈希表，之后按左侧的键查找候选行。右连接和全连接还要补回没有匹配的右侧行。DuckDB 的哈希连接也将建立查找表、查找候选和读取未匹配行分成不同阶段，内存不足时还可分批处理。SQLite 发现同一侧会被反复查找时，可以为当前语句建立临时索引。[PostgreSQL 哈希连接](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/executor/nodeHashjoin.c) · [DuckDB 哈希连接](https://github.com/duckdb/duckdb/blob/main/src/execution/operator/join/physical_hash_join.cpp) · [SQLite 临时索引](https://sqlite.org/optoverview.html#automatic_query_time_indexes)
+
+本项目利用连接已有的右侧记录。第一次扫描读到末尾后，下一次查找才按整数键和原行号建立有序索引。候选仍由原连接条件确认。索引受 `work_mem` 限制，输出一小批就停止的查询也能保持原来的读取顺序。
+
 ## 2026-11-20 · 连接或子查询中的表继承
 
 PostgreSQL 将是否读取后代保存在每次表引用的解析结果上。两次引用同一张表时，可以只给其中一次加 `ONLY`。连接和子查询的规划器据各自的表引用展开后代。本项目也按单次表引用使用继承扫描，并在相关子查询重用扫描时更新其外层行。[PostgreSQL 表引用语法](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/parser/gram.y) · [PostgreSQL 绑定](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/parser/parse_relation.c)

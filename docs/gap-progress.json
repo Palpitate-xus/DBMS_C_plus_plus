@@ -2,6 +2,40 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-20 reuse materialized right rows for integer equality joins",
+      "gap_ids": ["QRY-03", "OPT-10"],
+      "status": "partial",
+      "evidence": [
+        "src/main.cpp",
+        "src/expression/prepared_query_execution.cpp",
+        "docs/postgresql-comparison.md",
+        "docs/test-report.md",
+        "docs/performance-report-2026-10-30.md"
+      ],
+      "tests": [
+        "tests/integer_join_prefilter_protocol_e2e_test.py",
+        "tests/inherited_nested_source_protocol_e2e_test.py",
+        "tests/array_domain_join_using_protocol_e2e_test.py"
+      ],
+      "verification": [
+        "A typed join with same-type builtin signed integer equality can use an execution-local lookup after the original first right-side scan reaches EOF. Reuse preserves duplicate ordinals, NULL handling, original ON rechecks, outer-join completion and correlated resets.",
+        "57 registered protocol checks, 47 isolated native checks and ten related suites passed. The 64 KiB control with 4097 right rows correctly kept all 8194 linear visits. LIMIT 0 and 1 visited zero and one right row and did not build the lookup.",
+        "One thousand twenty-four matching pairs yielded 1048576 versus 2047 materialized right visits with 1024 physical right rows in each execution. The 39 existing SQL response pairs remained byte-identical in the product. PostgreSQL 18.6 rows and error states matched, with the existing early RowDescription difference on 22012.",
+        "Across 8 pairs per size and 432 timings, 1024-row inherited join median changed from 318.166 to 73.617 ms, and COUNT from 294.264 to 41.958 ms. Both improved in all 8 paired rounds. Ordinary and short LIMIT controls retain possible regressions.",
+        "Only the auxiliary lookup is bounded by this change. General join algorithms, materialized-row memory limits, spill and other predicates remain separate work. Ledger statuses remain unchanged."
+      ],
+      "artifacts": {
+        "exact_build": "build/array-domain-20261117/integer-key-join-cmake-v1.json",
+        "protocol_plan_trace": "build/integer-join-lookup-20261120-candidate-v1/traced-test-receipt.json",
+        "postgres_comparison": "build/integer-join-lookup-20261120-candidate-v1/summary.json",
+        "protocol_audit": "build/integer-join-lookup-20261120-candidate-v1/independent-audit-v1.json",
+        "native_checks": "build/integer-key-filter-native-v2-20261120/summary.json",
+        "plan_counts": "build/integer-key-join-20261120/plan-counts-integer-key-join-cmake-v1.json",
+        "timing_128": "build/integer-key-join-20261120/timing-128-integer-key-join-cmake-v1.json",
+        "timing_1024": "build/integer-key-join-20261120/timing-1024-integer-key-join-cmake-v1.json"
+      }
+    },
+    {
       "issue": "2026-11-20 read inherited sources inside joins and nested SELECTs",
       "gap_ids": ["QRY-03", "QRY-04", "QRY-05", "QRY-12"],
       "status": "partial",
