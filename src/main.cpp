@@ -5781,7 +5781,7 @@ static bool handleDeallocate(const string& sql, Session& s) {
 
 // Build once, execute once, and render that exact tree only after success.
 // Cached text is a plain-EXPLAIN optimization, never an ANALYZE result.
-static bool publishExplainPlan(dbms::OpPtr plan, const string& inner,
+static bool publishExplainPlan(const function<dbms::OpPtr()>& buildPlan, const string& inner,
     Session& s, const dbms::QueryPlanner::ExplainOptions& opts, bool isJson,
     const string& relationIdentity = {}) {
     const bool usePlanCache = !opts.analyze && !dbms::QueryPlanner::costModel().customCost &&
@@ -5811,6 +5811,7 @@ static bool publishExplainPlan(dbms::OpPtr plan, const string& inner,
             cacheHit = true; ++g_planCacheHits;
         } else ++g_planCacheMisses;
     }
+    auto plan = cacheHit ? dbms::OpPtr{} : buildPlan();
     if (opts.analyze) {
         const auto before = g_engine.getBufferPoolStats();
         const auto start = std::chrono::steady_clock::now();
@@ -5954,6 +5955,13 @@ static bool simpleJoinSelectBody(const dbms::SelectStmt& select) {
 static bool probesPreparedIntegerJoin(const dbms::SelectStmt& select) {
     const auto* join = select.fromClause.get();
     if (!join || join->type != dbms::FromItem::Type::Join || !join->alias.empty()) return false;
+    // This plain INNER JOIN stays on the physical planner. Reject its shape
+    // before doing work for the prepared planner.
+    if (join->joinType == "INNER" && !select.whereClause && select.orderBy.empty() &&
+        !select.hasRowCountClause && select.selectList.size() == 1 &&
+        unqualifiedJoinStar(select.selectList.front().expr.get()) &&
+        join->left && join->left->type == dbms::FromItem::Type::Table &&
+        join->right && join->right->type == dbms::FromItem::Type::Table) return false;
     const auto* equality = dynamic_cast<const dbms::BinaryOpExpr*>(join->joinCondition.get());
     if (!equality || equality->op != "=" || !join->usingCols.empty() ||
         !dynamic_cast<const dbms::ColumnRefExpr*>(equality->left.get()) ||
@@ -5965,13 +5973,7 @@ static bool probesPreparedIntegerJoin(const dbms::SelectStmt& select) {
         return item->type == dbms::FromItem::Type::Subquery && child && child->fromClause &&
             child->fromClause->type == dbms::FromItem::Type::Table && simpleJoinSelectBody(*child);
     };
-    if (!simpleJoinSelectBody(select) || !leaf(join->left.get()) || !leaf(join->right.get())) return false;
-    // Keep the existing physical plan for an unadorned INNER JOIN with SELECT *.
-    const bool bareStar = select.selectList.size() == 1 &&
-        unqualifiedJoinStar(select.selectList.front().expr.get());
-    return join->joinType != "INNER" || !bareStar || select.whereClause || !select.orderBy.empty() ||
-        select.hasRowCountClause || join->left->type != dbms::FromItem::Type::Table ||
-        join->right->type != dbms::FromItem::Type::Table;
+    return simpleJoinSelectBody(select) && leaf(join->left.get()) && leaf(join->right.get());
 }
 
 static bool explainNeedsTypedPlan(const dbms::SelectStmt& select) {
@@ -6178,9 +6180,7 @@ static bool handleExplain(const string& sql, Session& s) {
             throw dbms::DbError("42P01", "relation \"" + bound + "\" does not exist");
         return bound;
     };
-    const bool explainJoin = findTopLevelKeyword(tname, "join", 0) != string::npos;
-    string joinLeftTable, joinRightTable, joinLeftColumn, joinRightColumn;
-    if (explainJoin) {
+    if (findTopLevelKeyword(tname, "join", 0) != string::npos) {
         dbms::SQLParser parser;
         auto parsed = parser.parse(inner);
         auto* select = parsed.success ? dynamic_cast<dbms::SelectStmt*>(parsed.stmt.get()) : nullptr;
@@ -6242,8 +6242,9 @@ static bool handleExplain(const string& sql, Session& s) {
         if (!complete || token != tokens.size())
             throw dbms::DbError("0A000", "unsupported EXPLAIN join query shape");
 
-        joinLeftTable = bindExplainRelation(join->left->tableName);
-        joinRightTable = bindExplainRelation(join->right->tableName);
+        const auto joinLeftTable = bindExplainRelation(join->left->tableName);
+        const auto joinRightTable = bindExplainRelation(join->right->tableName);
+        const bool sameTable = joinLeftTable == joinRightTable;
         dbms::CatalogManager::QualifiedName leftName, rightName;
         dbms::CatalogManager::parseQualifiedName(join->left->tableName, leftName);
         dbms::CatalogManager::parseQualifiedName(join->right->tableName, rightName);
@@ -6264,15 +6265,16 @@ static bool handleExplain(const string& sql, Session& s) {
                 (boundName.schema.empty() ? "public" : boundName.schema);
             return col.schema == schema;
         };
+        optional<TableSchema> leftSchema, rightSchema;
         const auto side = [&](const dbms::ColumnRefExpr& col) {
             const bool left = belongsTo(col, *join->left, leftName, leftAlias, joinLeftTable);
             const bool right = belongsTo(col, *join->right, rightName, rightAlias, joinRightTable);
             if (!left && !right)
                 throw dbms::DbError("42P01", "missing FROM-clause entry for table \"" + col.table + "\"");
-            const auto schema = g_engine.getTableSchema(s.currentDB, left ? joinLeftTable : joinRightTable);
-            bool found = false;
-            for (size_t i = 0; i < schema.len; ++i)
-                found = found || schema.cols[i].dataName == col.column;
+            auto& schema = (left || sameTable) ? leftSchema : rightSchema;
+            if (!schema) schema.emplace(g_engine.getTableSchema(s.currentDB, left ? joinLeftTable : joinRightTable));
+            const bool found = any_of(schema->cols, schema->cols + schema->len,
+                [&](const auto& column) { return column.dataName == col.column; });
             if (!found)
                 throw dbms::DbError("42703", "column \"" + col.toString() + "\" does not exist");
             return left;
@@ -6280,12 +6282,21 @@ static bool handleExplain(const string& sql, Session& s) {
         const bool firstIsLeft = side(*first);
         if (firstIsLeft == side(*second))
             throw dbms::DbError("0A000", "EXPLAIN join keys must reference opposite relations");
-        joinLeftColumn = firstIsLeft ? first->column : second->column;
-        joinRightColumn = firstIsLeft ? second->column : first->column;
-        tname = joinLeftTable;
-    } else {
-        tname = bindExplainRelation(tname);
+        const auto& joinLeftColumn = firstIsLeft ? first->column : second->column;
+        const auto& joinRightColumn = firstIsLeft ? second->column : first->column;
+        const auto& rightInputSchema = sameTable ? *leftSchema : *rightSchema;
+        const string relationIdentity =
+            "L" + std::to_string(joinLeftTable.size()) + ":" + joinLeftTable +
+            "R" + std::to_string(joinRightTable.size()) + ":" + joinRightTable;
+        // Binding and column validation also run for cache hits. Index and
+        // statistics lookups are only needed when a new plan will be used.
+        return publishExplainPlan([&] {
+            return dbms::QueryPlanner::buildJoinPlan(&g_engine, s.currentDB,
+                joinLeftTable, joinRightTable, joinLeftColumn, joinRightColumn, {}, {},
+                &*leftSchema, &rightInputSchema);
+        }, inner, s, opts, isJson, relationIdentity);
     }
+    tname = bindExplainRelation(tname);
     vector<string> conds;
     vector<vector<dbms::StorageEngine::Condition>> explainConditionGroups;
     dbms::QuantifiedSubquerySpec quantifiedSubquery;
@@ -6511,18 +6522,8 @@ static bool handleExplain(const string& sql, Session& s) {
     ctx.havingConds = havingConds;
     if (structuredQuantified) ctx.quantifiedSubqueries.push_back(std::move(quantifiedSubquery));
 
-    const auto buildExplainPlan = [&]() -> dbms::OpPtr {
-        if (explainJoin)
-            return dbms::QueryPlanner::buildJoinPlan(&g_engine, s.currentDB,
-                joinLeftTable, joinRightTable, joinLeftColumn, joinRightColumn, {}, {});
-        return dbms::QueryPlanner::buildSelectPlan(&g_engine, ctx);
-    };
-
-    const string relationIdentity = explainJoin
-        ? "L" + std::to_string(joinLeftTable.size()) + ":" + joinLeftTable +
-          "R" + std::to_string(joinRightTable.size()) + ":" + joinRightTable
-        : tname;
-    return publishExplainPlan(buildExplainPlan(), inner, s, opts, isJson, relationIdentity);
+    auto plan = dbms::QueryPlanner::buildSelectPlan(&g_engine, ctx);
+    return publishExplainPlan([&] { return std::move(plan); }, inner, s, opts, isJson, tname);
 }
 
 // ========================================================================
@@ -23253,7 +23254,7 @@ static bool explainPreparedReadQuery(Session& session,const string& raw,
     auto plan=runtime.queryPlan();
     // Writer completion is part of the exact successful statement. The
     // publication sink remains outer-commit gated by execute().
-    const auto error=publishExplainPlan(std::move(plan),raw,session,options,json);
+    const auto error=publishExplainPlan([&] { return std::move(plan); },raw,session,options,json);
     if(options.analyze && !error)runtime.finishQueryWrites();
     return error;
 }
@@ -23263,7 +23264,7 @@ static bool explainPreparedDmlQuery(Session& session,const string& raw,
     auto query=make_shared<dbms::PreparedQuery>(g_engine.prepareBoundQuery(session.currentDB,raw));
     PreparedWithDmlRuntime runtime(session,std::move(query));
     auto plan=runtime.mutationPlan();
-    return publishExplainPlan(std::move(plan),raw,session,options,json);
+    return publishExplainPlan([&] { return std::move(plan); },raw,session,options,json);
 }
 
 static bool handlePreparedMultirowQuery(const string& raw,Session& session,bool& handled) {

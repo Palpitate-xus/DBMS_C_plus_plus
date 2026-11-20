@@ -6,6 +6,12 @@
 
 截至 2026-11-20，273 项功能要求中有 22 项完成、167 项部分实现、69 项待验证、15 项暂缓。各项结果和剩余范围见功能总账。以下更新报告给出各轮测试的实际范围。[功能总账](gap-progress.json) · [支持的功能和限制](compatibility-contract.md)
 
+## 2026-11-20 · 重复查看两表连接计划时省去重新构建
+
+受测两表等值连接的普通 `EXPLAIN` 命中缓存时，统计文件读取由 4 次降到 0 次。表和连接列仍会核验，遇到删表、同名重建或事务回滚时均得到预期结果。`EXPLAIN ANALYZE` 仍报告当次实际执行的行数。[测试报告](test-report.md#legacy-join-explain-reuse-20261120) · [性能报告](performance-report-2026-10-30.md#legacy-join-explain-reuse-cost-20261120)
+
+在有 2,007 行统计信息的测试库里，缓存命中的普通 `EXPLAIN` 中位耗时由 15.6 ms 降到 11.6 ms，八对中七对更快。原 1,024 行数据的计时快慢各半。[配对测试](performance-report-2026-10-30.md#legacy-join-explain-reuse-cost-20261120)
+
 ## 2026-11-20 · 整数等值连接可以解释带筛选和分页的查询
 
 受支持的普通表与简单派生表的整数等值连接，在普通查询和 `EXPLAIN` 中共用计划构建。七项此前返回 `0A000` 的语句现在可以查看计划。验证覆盖排序、`WHERE`、`LIMIT`、外连接、空表和正常重启后的读取。其余连接条件和执行计划选项仍需要继续验证。[测试报告](test-report.md#integer-join-explain-20261120) · [性能报告](performance-report-2026-10-30.md#integer-join-explain-cost-20261120)

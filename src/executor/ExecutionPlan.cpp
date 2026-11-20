@@ -10932,7 +10932,9 @@ OpPtr QueryPlanner::buildJoinPlan(StorageEngine* engine, const std::string& dbna
                                    const std::string& leftTable, const std::string& rightTable,
                                    const std::string& leftCol, const std::string& rightCol,
                                    const std::vector<StorageEngine::Condition>& conds,
-                                   const std::set<std::string>& selectCols) {
+                                   const std::set<std::string>& selectCols,
+                                   const TableSchema* leftSchema,
+                                   const TableSchema* rightSchema) {
     (void)conds;
     (void)selectCols;
 
@@ -10945,18 +10947,16 @@ OpPtr QueryPlanner::buildJoinPlan(StorageEngine* engine, const std::string& dbna
     auto rightIdxCols = engine->getIndexedColumns(dbname, rightTable);
     bool leftColIndexed = (std::find(leftIdxCols.begin(), leftIdxCols.end(), leftCol) != leftIdxCols.end());
     bool rightColIndexed = (std::find(rightIdxCols.begin(), rightIdxCols.end(), rightCol) != rightIdxCols.end());
-    TableSchema leftTbl = engine->getTableSchema(dbname, leftTable);
-    TableSchema rightTbl = engine->getTableSchema(dbname, rightTable);
-    for (size_t i = 0; i < leftTbl.len; ++i) {
-        if (leftTbl.cols[i].dataName == leftCol && leftTbl.cols[i].isPrimaryKey) {
-            leftColIndexed = true; break;
-        }
-    }
-    for (size_t i = 0; i < rightTbl.len; ++i) {
-        if (rightTbl.cols[i].dataName == rightCol && rightTbl.cols[i].isPrimaryKey) {
-            rightColIndexed = true; break;
-        }
-    }
+    std::optional<TableSchema> loadedLeft, loadedRight;
+    if (!leftSchema) leftSchema = &loadedLeft.emplace(engine->getTableSchema(dbname, leftTable));
+    if (!rightSchema) rightSchema = &loadedRight.emplace(engine->getTableSchema(dbname, rightTable));
+    const auto hasPrimaryKey = [](const TableSchema& schema, const std::string& name) {
+        return std::any_of(schema.cols, schema.cols + schema.len, [&](const auto& column) {
+            return column.dataName == name && column.isPrimaryKey;
+        });
+    };
+    leftColIndexed = leftColIndexed || hasPrimaryKey(*leftSchema, leftCol);
+    rightColIndexed = rightColIndexed || hasPrimaryKey(*rightSchema, rightCol);
 
     // Join selectivity from column statistics: an equality join emits about
     // max(ndistinct(left), ndistinct(right)) groups over the cartesian

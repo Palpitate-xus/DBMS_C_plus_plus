@@ -1459,12 +1459,15 @@ public:
     static OpPtr buildSetOperationPlan(OpPtr left, OpPtr right,
                                        SetOperationType type, bool all);
 
-    // Build operator tree for JOIN
+    // Build operator tree for JOIN. Callers that already read the schemas
+    // for these physical names in this statement may supply them here.
     static OpPtr buildJoinPlan(StorageEngine* engine, const std::string& dbname,
                                 const std::string& leftTable, const std::string& rightTable,
                                 const std::string& leftCol, const std::string& rightCol,
                                 const std::vector<StorageEngine::Condition>& conds,
-                                const std::set<std::string>& selectCols);
+                                const std::set<std::string>& selectCols,
+                                const TableSchema* leftSchema = nullptr,
+                                const TableSchema* rightSchema = nullptr);
 
     struct ExplainOptions {
         bool analyze = false;

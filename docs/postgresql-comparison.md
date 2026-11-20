@@ -2,6 +2,10 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-20 · 重复查看两表连接计划
+
+PostgreSQL 18.6 的 `EXPLAIN` 把已分析的查询交给规划器，随后按选项决定是否执行计划。SQLite 为 `SELECT` 解析表和列名，补充类型后再生成指令。DuckDB 的计划提取也把解析结果交给规划器，再由优化器处理。本项目在构建旧式两表连接计划时复用本次已核验的表结构。普通 `EXPLAIN` 命中缓存时可直接返回已有结果，表和连接列仍按实际引用重新核验。[PostgreSQL 计划生成](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/commands/explain.c) · [SQLite 的 SELECT 准备](https://raw.githubusercontent.com/sqlite/sqlite/master/src/select.c) · [DuckDB 计划提取](https://raw.githubusercontent.com/duckdb/duckdb/main/src/main/client_context.cpp) · [实测结果](test-report.md#legacy-join-explain-reuse-20261120)
+
 ## 2026-11-20 · 查看带筛选或分页的整数等值连接
 
 PostgreSQL 18.6 先规划查询，只有 `EXPLAIN ANALYZE` 才运行查询以取得实际行数等指标。DuckDB 让被分析的计划正常执行，再由性能统计模块生成报告。SQLite 的 `EXPLAIN QUERY PLAN` 主要展示计划结构和索引选择。本项目让受支持的整数等值连接在普通查询和 `EXPLAIN` 中使用同一计划构建器。加入 `ANALYZE` 后，报告真实执行过的节点行数。[PostgreSQL 执行计划](https://www.postgresql.org/docs/18/sql-explain.html) · [DuckDB 执行报告](https://raw.githubusercontent.com/duckdb/duckdb/main/src/execution/operator/helper/physical_explain_analyze.cpp) · [SQLite 查询计划](https://sqlite.org/eqp.html) · [本项目验证](test-report.md#integer-join-explain-20261120)

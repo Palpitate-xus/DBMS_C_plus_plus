@@ -2,6 +2,47 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-20 avoid rebuilding cached EXPLAIN plans for simple two-table joins",
+      "gap_ids": ["OPT-16"],
+      "status": "partial",
+      "evidence": [
+        "src/main.cpp",
+        "src/executor/ExecutionPlan.cpp",
+        "docs/test-report.md",
+        "docs/performance-report-2026-10-30.md"
+      ],
+      "tests": [
+        "tests/explain_json_cache_protocol_e2e_test.py",
+        "tests/explain_join_protocol_e2e_test.py",
+        "tests/planner_runtime_stats_test.cpp",
+        "tests/plan_cache_epoch_test.cpp"
+      ],
+      "verification": [
+        "Plain EXPLAIN still validates the table and join columns before checking its text cache. A legacy two-table cache hit can return before physical planning. A miss and ANALYZE reuse the schemas already read in that statement.",
+        "The registered cache test, 24 related protocol suites and four isolated native tests passed. The private 95-by-two PostgreSQL 18.6 matrix includes aliases, search path, normal restart and error states. Baseline parity confirms identical ordinary replies plus the same successful EXPLAIN structure and ANALYZE row counts. Eight existing PostgreSQL differences remain open.",
+        "On the identical 1024-row private trace fixture, stats-file reads on a plain text cache hit changed from 4 to 0. Cache miss and ANALYZE controls retained 8 and 6 reads. Table rename and rollback, DROP and same-name reuse preserve validation. The pinned CPU diagnostic does not establish a single cause for the previous latency increase.",
+        "In 384 measurements over 32 clean exits, 128-row EXPLAIN cache hits improved in seven of eight pairs. The 1024-row EXPLAIN and ANALYZE paired median changes were +0.54% and +1.68%; long-tail wall times remain and no stable removal of the earlier slowdown has been established on that fixture.",
+        "In a second 1024-row fixture with 2007 real ANALYZE statistics lines, the warm EXPLAIN median changed from 15.592 to 11.551 ms and improved in seven of eight pairs, with 192 samples and 16 clean exits. The accompanying LIMIT 1 control was slower in five pairs, and EXPLAIN ANALYZE was split evenly.",
+        "Ledger statuses remain unchanged."
+      ],
+      "artifacts": {
+        "exact_build": "build/array-domain-20261117/legacy-join-explain-reuse-cmake-v1.json",
+        "registered_cache_test": "build/explain-legacy-binding-20261120-candidate-v1/traced-test-receipt.json",
+        "protocol_audit": "build/explain-legacy-binding-20261120-candidate-v1/independent-audit-v1.json",
+        "baseline_parity": "build/explain-legacy-binding-20261120-candidate-v1/baseline-parity-v1.json",
+        "related_suites": "build/legacy-join-explain-reuse-20261120/related-legacy-join-explain-reuse-cmake-v1/summary.json",
+        "native_checks": "build/legacy-join-explain-reuse-20261120/native-v1/summary.json",
+        "baseline_file_trace": "build/legacy-join-explain-reuse-20261120/trace-baseline-v2.json",
+        "candidate_file_trace": "build/legacy-join-explain-reuse-20261120/trace-legacy-join-explain-reuse-cmake-v1-v2.json",
+        "prior_cpu_diagnostic": "build/explain-cpu-audit-20261120/process-cpu.json",
+        "timing_128": "build/legacy-join-explain-reuse-20261120/paired-128-legacy-join-explain-reuse-cmake-v1.json",
+        "timing_1024": "build/legacy-join-explain-reuse-20261120/paired-1024-legacy-join-explain-reuse-cmake-v1.json",
+        "large_stats_setup": "build/legacy-join-explain-large-stats-20261120-v2/setup.json",
+        "large_stats_timing": "build/legacy-join-explain-large-stats-20261120-v2/paired-1024-legacy-join-explain-reuse-cmake-v1.json",
+        "wide_table_setup_failure": "build/legacy-join-explain-large-stats-20261120/setup.json"
+      }
+    },
+    {
       "issue": "2026-11-20 use the same plan for ordinary integer equality joins and EXPLAIN",
       "gap_ids": ["QRY-03", "OPT-16"],
       "status": "partial",

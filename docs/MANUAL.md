@@ -1741,6 +1741,8 @@ EXPLAIN (ANALYZE, BUFFERS) SELECT * FROM users;
 EXPLAIN (FORMAT JSON) SELECT * FROM users;
 ```
 
+对两张表直接按列等值连接的 `SELECT *`，再次执行普通 `EXPLAIN` 时会重新核对表与连接列。如果上次显示的计划仍可用，就无需再次构建计划。更改表结构后，相关查询会重新生成计划。[缓存和表结构变更验证](test-report.md#legacy-join-explain-reuse-20261120)
+
 受支持的同类型整数等值连接，可以直接查看带筛选、排序或分页的执行计划。下面的例子按用户编号连接，并取排序后的前五条订单。去掉 `ANALYZE` 可以只看计划，保留它则会实际执行并报告各步骤处理的行数。
 
 ```sql
