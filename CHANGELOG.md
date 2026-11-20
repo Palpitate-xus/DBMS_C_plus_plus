@@ -1,34 +1,40 @@
 # 更新日志
 
 <details>
-<summary>修复切换日志后重启丢失已提交修改的问题 · 2026-11-19</summary>
+<summary>归档缺失或损坏时，恢复操作会保留当前数据 · 2026-11-20</summary>
 
-重启时会继续读取切换后的日志。如果已结束的改表事务留下旧备份，数据库会先核对日志里的事务结果，再处理备份。
+例如，备份之后新增了一笔订单。如果找不到恢复所需的日志，数据库会报错，订单仍然可以查询。
+
+[使用手册](docs/MANUAL.md#时间点恢复) · [测试报告](docs/test-report.md#pitr-stage-archive-20261120) · [性能报告](docs/performance-report-2026-10-30.md#pitr-stage-archive-cost-20261120)
+
+</details>
+
+<details>
+<summary>意外退出后保留已提交的表结构修改 · 2026-11-19</summary>
+
+如果数据库切换到新的日志文件后意外退出，重启时会继续读取这个文件，避免用旧备份覆盖已经提交的表结构修改。
 
 [使用手册](docs/MANUAL.md#201-wal-归档与时间点恢复-pitr) · [测试报告](docs/test-report.md#wal-switch-terminal-recovery-20261119) · [性能报告](docs/performance-report-2026-10-30.md#wal-switch-terminal-recovery-cost-20261119)
 
 </details>
 
 <details>
-<summary>重复执行建表脚本时减少备份 · 2026-11-19</summary>
+<summary>重复运行建表脚本时跳过多余备份 · 2026-11-19</summary>
 
-用 `CREATE TABLE IF NOT EXISTS` 重跑脚本时，可以直接跳过已有表。数据库也会在备份之前指出填充比例越界等设置错误。
+用 `CREATE TABLE IF NOT EXISTS` 再运行脚本，遇到已经存在的表会直接跳过。建表选项填错时，数据库会先报错，省去这次备份。
 
 [使用手册](docs/MANUAL.md#建表) · [测试报告](docs/test-report.md#create-validate-before-backup-20261119) · [性能报告](docs/performance-report-2026-10-30.md#create-validate-before-backup-cost-20261119)
 
 </details>
 
 <details>
-<summary>恢复表结构时保留序列已经给出的编号 · 2026-11-19</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-19 · 恢复表结构时保留序列已经给出的编号
 
 数据库异常退出后，如果需要撤销表结构修改，恢复时会保留仍存在的序列已经给出的编号，避免再次发放同一个值。
 
 [使用手册](docs/MANUAL.md#7-事务控制) · [测试报告](docs/test-report.md#ddl-image-sequence-recovery-20261119) · [性能报告](docs/performance-report-2026-10-30.md#ddl-image-sequence-recovery-cost-20261119)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-19 · 修复临时表导致的重启失败
 
