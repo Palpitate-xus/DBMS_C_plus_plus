@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>带筛选和分页的连接也能查看执行计划 · 2026-11-20</summary>
+
+按整数编号连接两张表时，即使查询加了筛选、排序或只取前几条，也能查看数据库怎样查找和合并记录。用 `EXPLAIN ANALYZE` 可以看到实际处理了多少行。
+
+[使用手册](docs/MANUAL.md#explain) · [测试报告](docs/test-report.md#integer-join-explain-20261120) · [性能报告](docs/performance-report-2026-10-30.md#integer-join-explain-cost-20261120)
+
+</details>
+
+<details>
 <summary>连接时可以直接找到连续编号的记录 · 2026-11-20</summary>
 
 如果右表读出的编号连续、没有重复，数据库可以用编号直接找到已经读过的记录，省去把编号再存一遍。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>连接和子查询也能读取继承表 · 2026-11-20</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-20 · 连接和子查询也能读取继承表
 
 在连接或子查询中使用父表时，也能查到多层子表里的记录。同一张表在查询里出现两次时，`ONLY` 只限制写了它的那一次。
 
 [使用手册](docs/MANUAL.md#查询继承表) · [测试报告](docs/test-report.md#nested-inherited-tables-20261120) · [性能报告](docs/performance-report-2026-10-30.md#nested-inherited-tables-cost-20261120)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-20 · 查询父表时也会读到孙表
 

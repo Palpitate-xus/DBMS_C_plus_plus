@@ -2,6 +2,10 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-20 · 查看带筛选或分页的整数等值连接
+
+PostgreSQL 18.6 先规划查询，只有 `EXPLAIN ANALYZE` 才运行查询以取得实际行数等指标。DuckDB 让被分析的计划正常执行，再由性能统计模块生成报告。SQLite 的 `EXPLAIN QUERY PLAN` 主要展示计划结构和索引选择。本项目让受支持的整数等值连接在普通查询和 `EXPLAIN` 中使用同一计划构建器。加入 `ANALYZE` 后，报告真实执行过的节点行数。[PostgreSQL 执行计划](https://www.postgresql.org/docs/18/sql-explain.html) · [DuckDB 执行报告](https://raw.githubusercontent.com/duckdb/duckdb/main/src/execution/operator/helper/physical_explain_analyze.cpp) · [SQLite 查询计划](https://sqlite.org/eqp.html) · [本项目验证](test-report.md#integer-join-explain-20261120)
+
 ## 2026-11-20 · 按连续整数键直接找到连接记录
 
 PostgreSQL 18.6 为归并连接估算成本时，可以利用输入已有的顺序。SQLite 对按 `rowid` 排序的查询也可以沿原有顺序读取，包括反向读取。DuckDB 的连接执行器在单整数键的值域足够小、键无重复时，可以按键计算数组位置。本项目在已有连接扫描上验证另一种情况。右侧整批键按读取顺序连续递增或递减时，编号之差就是缓存中的位置，额外空间只需存下起点、方向和行数。[PostgreSQL 归并连接规划](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/optimizer/path/joinpath.c) · [SQLite 查询规划](https://sqlite.org/queryplanner.html#sorting_by_rowid) · [DuckDB 整数键连接](https://github.com/duckdb/duckdb/blob/main/src/execution/operator/join/perfect_hash_join_executor.cpp) · [本项目实测](test-report.md#integer-join-direct-20261120)

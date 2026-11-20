@@ -1741,6 +1741,19 @@ EXPLAIN (ANALYZE, BUFFERS) SELECT * FROM users;
 EXPLAIN (FORMAT JSON) SELECT * FROM users;
 ```
 
+受支持的同类型整数等值连接，可以直接查看带筛选、排序或分页的执行计划。下面的例子按用户编号连接，并取排序后的前五条订单。去掉 `ANALYZE` 可以只看计划，保留它则会实际执行并报告各步骤处理的行数。
+
+```sql
+EXPLAIN (ANALYZE, FORMAT JSON, TIMING FALSE)
+SELECT u.id, o.id AS order_id
+FROM users AS u JOIN orders AS o ON u.id = o.user_id
+WHERE u.id > 0
+ORDER BY o.id
+LIMIT 5;
+```
+
+此处的连接键为同类型的 `SMALLINT`、`INTEGER` 或 `BIGINT`。范围包括普通源表与简单派生表的内连接和外连接。[验证范围](test-report.md#integer-join-explain-20261120)
+
 ---
 
 ## 7. 事务控制

@@ -5917,6 +5917,63 @@ static bool explainPreparedReadQuery(Session&,const string&,
 static bool explainPreparedDmlQuery(Session&,const string&,
     const dbms::QueryPlanner::ExplainOptions&,bool);
 
+static bool canRunPreparedIntegerJoin(const dbms::PreparedQuery&, const Session&);
+
+static bool simpleJoinFilter(const dbms::Expr* expression) {
+    if (!expression) return true;
+    if (expression->preparedSubquery) return false;
+    if (expression->type == dbms::ExprType::Literal || expression->type == dbms::ExprType::ColumnRef)
+        return true;
+    if (const auto* unary = dynamic_cast<const dbms::UnaryOpExpr*>(expression))
+        return (unary->op == "NOT" || unary->op == "IS NULL" || unary->op == "IS NOT NULL" ||
+                unary->op == "+" || unary->op == "-") && simpleJoinFilter(unary->operand.get());
+    const auto* binary = dynamic_cast<const dbms::BinaryOpExpr*>(expression);
+    static const set<string> operators = {"AND", "OR", "=", "<>", "!=", "<", "<=", ">", ">=",
+                                          "IS DISTINCT FROM", "IS NOT DISTINCT FROM"};
+    return binary && operators.count(binary->op) && simpleJoinFilter(binary->left.get()) &&
+        simpleJoinFilter(binary->right.get());
+}
+
+static bool unqualifiedJoinStar(const dbms::Expr* expression) {
+    const auto* literal = dynamic_cast<const dbms::LiteralExpr*>(expression);
+    return expression && (expression->type == dbms::ExprType::A_Star || (literal && literal->value == "*"));
+}
+
+static bool simpleJoinSelectBody(const dbms::SelectStmt& select) {
+    return select.command == dbms::SqlCommand::Select && select.ctes.empty() && !select.distinct &&
+        !select.having && select.windowDefs.empty() && !select.fetchFirst && !select.withTies &&
+        !select.limitExpr && !select.offsetExpr &&
+        dbms::QueryPlanner::supportsPreparedSourceSelectPlan(select) &&
+        all_of(select.selectList.begin(), select.selectList.end(), [](const auto& item) {
+            return dynamic_cast<const dbms::ColumnRefExpr*>(item.expr.get()) || unqualifiedJoinStar(item.expr.get());
+        }) && all_of(select.orderBy.begin(), select.orderBy.end(), [](const auto& key) {
+            return dynamic_cast<const dbms::ColumnRefExpr*>(key.expr.get());
+        }) && simpleJoinFilter(select.whereClause.get());
+}
+
+static bool probesPreparedIntegerJoin(const dbms::SelectStmt& select) {
+    const auto* join = select.fromClause.get();
+    if (!join || join->type != dbms::FromItem::Type::Join || !join->alias.empty()) return false;
+    const auto* equality = dynamic_cast<const dbms::BinaryOpExpr*>(join->joinCondition.get());
+    if (!equality || equality->op != "=" || !join->usingCols.empty() ||
+        !dynamic_cast<const dbms::ColumnRefExpr*>(equality->left.get()) ||
+        !dynamic_cast<const dbms::ColumnRefExpr*>(equality->right.get())) return false;
+    const auto leaf = [](const dbms::FromItem* item) {
+        if (!item) return false;
+        if (item->type == dbms::FromItem::Type::Table) return true;
+        const auto* child = dynamic_cast<const dbms::SelectStmt*>(item->subquery.get());
+        return item->type == dbms::FromItem::Type::Subquery && child && child->fromClause &&
+            child->fromClause->type == dbms::FromItem::Type::Table && simpleJoinSelectBody(*child);
+    };
+    if (!simpleJoinSelectBody(select) || !leaf(join->left.get()) || !leaf(join->right.get())) return false;
+    // Keep the existing physical plan for an unadorned INNER JOIN with SELECT *.
+    const bool bareStar = select.selectList.size() == 1 &&
+        unqualifiedJoinStar(select.selectList.front().expr.get());
+    return join->joinType != "INNER" || !bareStar || select.whereClause || !select.orderBy.empty() ||
+        select.hasRowCountClause || join->left->type != dbms::FromItem::Type::Table ||
+        join->right->type != dbms::FromItem::Type::Table;
+}
+
 static bool explainNeedsTypedPlan(const dbms::SelectStmt& select) {
     if (containsPreparedQuantifier(select) || !select.fromClause || !select.fromClause->alias.empty() || select.offset ||
         (select.limit && !*select.limit) || select.orderBy.size() > 1) return true;
@@ -6005,10 +6062,13 @@ static bool handleExplain(const string& sql, Session& s) {
         return explainPreparedReadQuery(s,inner,opts,isJson);
     map<string,string> boundIntegerAtoms;
     if (explainedSelect && dbms::QueryPlanner::supportsPreparedSourceSelectPlan(*explainedSelect)) {
+        const bool integerJoinProbe = probesPreparedIntegerJoin(*explainedSelect);
         // Pure preparation must precede any source startup or writer call,
         // including queries that yield no rows and plain EXPLAIN cache hits.
         auto prepared = make_shared<dbms::PreparedQuery>(g_engine.prepareBoundQuery(s.currentDB, inner));
         auto* select = static_cast<dbms::SelectStmt*>(prepared->ast.get());
+        if (integerJoinProbe && canRunPreparedIntegerJoin(*prepared, s))
+            return explainPreparedReadQuery(s,inner,opts,isJson,std::move(prepared));
         // Scalar query children acquire their AST role during pure binding;
         // do not mistake their parser envelope literal for a physical target.
         const auto* directCall = select->selectList.size()==1 ?
@@ -21730,6 +21790,34 @@ class PreparedWithDmlRuntime {
         }
     }
 public:
+    static bool runsIntegerJoin(const dbms::PreparedQuery& query, const Session& session) {
+        const auto* select = dynamic_cast<const dbms::SelectStmt*>(query.ast.get());
+        const auto* join = select ? select->fromClause.get() : nullptr;
+        if (!join || join->type != dbms::FromItem::Type::Join) return false;
+        const dbms::PreparedQuery::SourceRange* left = nullptr;
+        const dbms::PreparedQuery::SourceRange* right = nullptr;
+        for (const auto& range : query.sourceRanges) {
+            if (range.source == join->left.get()) left = &range;
+            if (range.source == join->right.get()) right = &range;
+        }
+        if (!left || !right || !dbms::PreparedJoinKeyFilter::prepareIntegerEquality(
+                query, join->joinCondition.get(), {left->ordinal}, {right->ordinal})) return false;
+
+        for (const auto& range : query.sourceRanges) {
+            if (range.source && range.source->type == dbms::FromItem::Type::Subquery) continue;
+            if (!ordinaryPhysicalRange(range) || range.generatedRelation) return false;
+            const auto table = physical(range, session);
+            const auto schema = g_engine.getTableSchema(session.currentDB, table);
+            if (schema.tablename != table || schema.partitionType != dbms::TableSchema::PartitionType::None ||
+                schema.rowLevelSecurity || schema.forceRowLevelSecurity || table.rfind("__tmp_", 0) == 0 ||
+                !canReadWholeTable(session, table)) return false;
+            if (range.source->only || g_engine.getInheritedChildren(session.currentDB, table).empty()) continue;
+            const auto descendants = dbms::inheritedTableDescendants(g_engine, session.currentDB, table);
+            if (!dbms::supportsInheritedTableSource(g_engine, session.currentDB, schema, descendants)) return false;
+        }
+        return true;
+    }
+
     static bool readsNestedInheritance(const dbms::PreparedQuery& query,const Session& session) {
         const auto* root=dynamic_cast<const dbms::SelectStmt*>(query.ast.get());
         if(!root)return false;
@@ -21969,6 +22057,10 @@ public:
         return hasWriter?dbms::executeAtomicDmlUnit(session_,command):command();
     }
 };
+}
+
+static bool canRunPreparedIntegerJoin(const dbms::PreparedQuery& query, const Session& session) {
+    return PreparedWithDmlRuntime::runsIntegerJoin(query, session);
 }
 
 static void executePreparedWindowReceiver(Session& session,
@@ -22557,6 +22649,7 @@ static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& 
     auto* select=parsed.isValid()?dynamic_cast<dbms::SelectStmt*>(parsed.stmt.get()):nullptr;
     if(!select || hasCurrentQueryWindows(select))return false;
     if(usesInheritedQueryCteSource(*select,session))return false;
+    const bool integerJoinProbe = probesPreparedIntegerJoin(*select);
     // Scalar SQL children and typed unary operators must consume this same
     // retained whole-query AST, not a later legacy parser with another TEMP
     // namespace or a discarded preparation-time operand coercion.
@@ -22765,7 +22858,7 @@ static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& 
     const bool derivedProbe=sourceProbe && logicalSource;
     const bool inheritanceProbe=sourceProbe && nestedInheritance;
     const bool generatedJoinProbe=!required && !comparisonCandidate && plainGeneratedJoinSourceProbe(*select,session);
-    if(!required && !comparisonCandidate && !generatedJoinProbe && !derivedProbe && !inheritanceProbe) {
+    if(!required && !comparisonCandidate && !generatedJoinProbe && !derivedProbe && !inheritanceProbe && !integerJoinProbe) {
         if(!sourceProbe || !usingSource)return false;
         // Avoid whole-query preparation for existing scalar-only physical
         // joins. The bound USING key still makes the actual admission decision.
@@ -22828,7 +22921,8 @@ static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& 
         }
     }
     auto query=make_shared<dbms::PreparedQuery>(g_engine.prepareBoundQuery(session.currentDB,rawSql));
-    const bool inheritanceRequired=inheritanceProbe && PreparedWithDmlRuntime::readsNestedInheritance(*query,session);
+    const bool integerJoinRequired = integerJoinProbe && canRunPreparedIntegerJoin(*query, session);
+    const bool inheritanceRequired=!integerJoinRequired && inheritanceProbe && PreparedWithDmlRuntime::readsNestedInheritance(*query,session);
     const auto arrayColumn=[](const dbms::QueryOutputColumn& column) {
         const auto& type=column.typeMetadata;
         return type && type->kind==dbms::DatumKind::Array && type->actualOid==column.typeOid &&
@@ -22851,7 +22945,7 @@ static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& 
                [&](const auto& statement) { return isArrayDomain(statement.second); }) ||
         any_of(query->setOperationInputs.begin(),query->setOperationInputs.end(),
                [&](const auto& set) { return isArrayDomain(set.second.left) || isArrayDomain(set.second.right); }));
-    if(!required && !inheritanceRequired) {
+    if(!required && !inheritanceRequired && !integerJoinRequired) {
         // The parser only probes a shape. Actual copied type/operator metadata
         // owns this receiver; ordinary builtin comparisons keep their existing
         // consumer. Never discover enum identity from evaluated datum strings.

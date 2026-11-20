@@ -2,6 +2,41 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-20 use the same plan for ordinary integer equality joins and EXPLAIN",
+      "gap_ids": ["QRY-03", "OPT-16"],
+      "status": "partial",
+      "evidence": [
+        "src/main.cpp",
+        "docs/postgresql-comparison.md",
+        "docs/test-report.md",
+        "docs/performance-report-2026-10-30.md"
+      ],
+      "tests": [
+        "tests/explain_join_protocol_e2e_test.py",
+        "tests/integer_join_prefilter_protocol_e2e_test.py",
+        "tests/join_type_protocol_e2e_test.py"
+      ],
+      "verification": [
+        "Seven SELECT shapes executed normally on 563a9617 but failed EXPLAIN with 0A000. Current ordinary execution and EXPLAIN use the same prepared plan for admitted same-type builtin integer equality joins with projection, filtering, ordering, pagination, simple derived sources and outer joins.",
+        "The registered regression passed 88 plan, 4 correlated, 7 negative and 1 health controls. Both builds passed 21 neighboring suites. PostgreSQL 18.6 comparisons included 120 ordinary and EXPLAIN request/response pairs, and another 56 pairs for row metadata, sequence effects and controlled restart.",
+        "In the private table-counter fixture, ordinary LIMIT 0 and non-ANALYZE EXPLAIN scan neither input. Ordinary LIMIT 1 and EXPLAIN ANALYZE LIMIT 1 each scan both inputs once and read one row on each side. The old ordinary join path did not update those counters in this fixture.",
+        "Across 672 initial timings and 192 independent repeat timings, 48 private processes exited normally. The 1024-row ordinary LIMIT 1 improved in every pair in both rounds (81.526 to 11.029 ms initial median, 82.540 to 11.365 ms repeat). The two existing EXPLAIN controls were slower in both rounds overall despite identical returned plans. The cause of that timing difference remains open.",
+        "Observed column-origin metadata gaps and unimplemented EXPLAIN options remain open. Ledger statuses remain unchanged."
+      ],
+      "artifacts": {
+        "exact_build": "build/array-domain-20261117/integer-join-explain-cmake-v2.json",
+        "registered_join_test": "build/explain-join-expanded-20261120/candidate-v2/summary.json",
+        "related_suites": "build/integer-join-explain-20261120/related-integer-join-explain-cmake-v2/summary.json",
+        "baseline_protocol_audit": "build/join-explain-prefix-20261120-v1/independent-audit-v1.json",
+        "candidate_protocol_audit": "build/integer-join-explain-prefix-20261120-candidate-v2/independent-audit-v2.json",
+        "table_stats": "build/integer-join-explain-stats-20261120-candidate-v2/independent-audit-v1.json",
+        "baseline_table_stats": "build/integer-join-explain-stats-20261120-baseline-v2/summary.json",
+        "timing_128": "build/integer-join-explain-20261120/paired-128-integer-join-explain-cmake-v2.json",
+        "timing_1024": "build/integer-join-explain-20261120/paired-1024-integer-join-explain-cmake-v2.json",
+        "timing_1024_repeat": "build/explain-recheck-20261120/paired-1024-integer-join-explain-cmake-v2.json"
+      }
+    },
+    {
       "issue": "2026-11-20 use consecutive integer join keys to locate cached right rows",
       "gap_ids": ["QRY-03", "OPT-10"],
       "status": "partial",
