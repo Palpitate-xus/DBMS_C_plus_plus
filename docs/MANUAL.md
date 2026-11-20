@@ -1289,6 +1289,18 @@ SELECT * FROM users ORDER BY AGE NULLS FIRST;
 
 在普通单表查询中，`upper`、`lower`、`length` 和 `replace` 接受完整的表达式。例如，`upper('prefix:' || name)` 会逐行拼接并转成大写。`name` 为 `NULL` 时结果仍为 `NULL`。在 `replace(name, ...)` 中，从表里读到的空值不会跳过其他参数，因此其他参数仍可能推进序列或报错。直接传入能提前确定的 `NULL` 时，严格函数可以在执行前化简。查询准备时仍会检查参数里的名称、类型和受支持的常量错误。[查询测试](test-report.md#scalar-string-arguments-20261120)
 
+#### 查询继承表
+
+查询普通的父表时，可以读取父表、子表以及更深层后代表中的记录。即使同一张表有多条继承路径，也只读取一次。查询按父表的列名读取各表的数据，再对全部结果排序和分页。`ONLY` 只读取指定的表。
+
+```sql
+SELECT id, upper(name) FROM products ORDER BY id LIMIT 10;
+SELECT count(*) FROM products;
+SELECT count(*) FROM ONLY products;
+```
+
+这里的 `products` 是通过 `INHERITS` 建立继承关系的父表。第一个查询从父表和后代表的全部记录中按 `id` 取前十行。第二个查询计入后代中的记录，第三个查询只统计父表本身。也可以写作 `FROM ONLY (products)`。[适用范围](compatibility-contract.md#inherited-table-source) · [查询测试](test-report.md#inherited-table-source-20261120)
+
 #### 按整数主键翻页
 
 没有过滤条件时，普通单表查询可以从整数主键索引中找出分页需要的记录。

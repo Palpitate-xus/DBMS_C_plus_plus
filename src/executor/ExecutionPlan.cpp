@@ -45,6 +45,7 @@
 #include <cstdio>
 #include <cstring>
 #include <exception>
+#include <fstream>
 #include <iterator>
 #include <iomanip>
 #include <limits>
@@ -3247,6 +3248,284 @@ OpPtr makePreparedTableSource(StorageEngine* engine, const std::string& database
         key.dataName, type, query, parameter->slot, std::move(source));
 }
 
+std::vector<std::string> inheritedTableDescendants(StorageEngine& engine,
+    const std::string& database, const std::string& parent) {
+    const auto path = engine.dbPath(database) / ".inherits";
+    std::error_code error;
+    const auto status = std::filesystem::symlink_status(path, error);
+    if (error == std::errc::no_such_file_or_directory) return {};
+    if (error || !std::filesystem::is_regular_file(status))
+        throw DbError("58030", "could not inspect inheritance links");
+    std::ifstream input(path);
+    if (!input) throw DbError("58030", "could not read inheritance links");
+    std::map<std::string, std::vector<std::string>> edges;
+    std::string line;
+    while (std::getline(input, line)) {
+        const auto separator = line.find('|');
+        if (separator != std::string::npos)
+            edges[line.substr(0, separator)].push_back(line.substr(separator + 1));
+    }
+    if (input.bad()) throw DbError("58030", "could not finish reading inheritance links");
+    std::set<std::string> seen{parent};
+    std::vector<std::string> relations{parent};
+    for (size_t i = 0; i < relations.size(); ++i) {
+        const auto children = edges.find(relations[i]);
+        if (children == edges.end()) continue;
+        for (const auto& name : children->second)
+            if (seen.insert(name).second) relations.push_back(name);
+    }
+    relations.erase(relations.begin());
+    return relations;
+}
+
+namespace {
+bool supportsInheritedHeap(const TableSchema& schema) {
+    return schema.formatVersion == DATA_FILE_FORMAT_VERSION &&
+        schema.partitionType == TableSchema::PartitionType::None &&
+        !schema.rowLevelSecurity && !schema.forceRowLevelSecurity &&
+        schema.tablename.rfind("__tmp_", 0) != 0;
+}
+
+bool compatibleInheritedField(const Column& parent, const Column& child) {
+    return parent.dataType == child.dataType && parent.isArray == child.isArray &&
+        parent.isUnsigned == child.isUnsigned && parent.dsize == child.dsize &&
+        parent.isVariableLength == child.isVariableLength && parent.storageCodec == child.storageCodec &&
+        parent.typeMod == child.typeMod && parent.domainName == child.domainName &&
+        parent.enumValues == child.enumValues && parent.collation == child.collation &&
+        parent.generatedKind == child.generatedKind && parent.generatedKind != 'v';
+}
+
+class InheritedTableScanOp final : public Operator {
+public:
+    InheritedTableScanOp(StorageEngine& engine, std::string database, TableSchema parent,
+                         QueryRowDescriptor declaration, std::vector<std::string> names,
+                         std::vector<uint64_t> generations)
+        : engine_(engine), database_(std::move(database)), parent_(std::move(parent)),
+          declaration_(std::move(declaration)), names_(std::move(names)),
+          generations_(std::move(generations)) {}
+
+    ~InheritedTableScanOp() override { try { close(); } catch (...) {} }
+
+    void prepareDemand(const PreparedSelectState& state) {
+        for (const auto* range : state.visibleRanges) {
+            if (!range->mergedUsing && range->source == state.select().fromClause.get()) {
+                sourceOrdinal_ = range->ordinal;
+                break;
+            }
+        }
+        if (sourceOrdinal_ == PreparedSelectState::noTarget)
+            throw DbError("XX000", "inheritance scan has no bound source occurrence");
+        std::vector<bool> demand(parent_.len);
+        bool allColumns = !state.windowStages.empty();
+        const auto visit = [&](const auto& self, Expr* expression) -> void {
+            if (!expression || allColumns) return;
+            // A subquery can obtain this row's values through a correlated
+            // reference not present among the local expression's children.
+            if (expression->preparedSubquery) {
+                allColumns = true;
+                return;
+            }
+            if (const auto* column = dynamic_cast<const ColumnRefExpr*>(expression)) {
+                if (column->binding && column->binding->sourceOrdinal == sourceOrdinal_) {
+                    const auto ordinal = column->binding->columnOrdinal;
+                    if (ordinal >= parent_.len)
+                        throw DbError("XX000", "inherited column is outside the parent descriptor");
+                    demand[ordinal] = true;
+                }
+                return;
+            }
+            prepared_window_detail::spec_detail::valueChildren(expression,
+                [&](Expr* child) { self(self, child); });
+        };
+        for (auto* target : state.targets) visit(visit, target);
+        for (const auto& key : state.keys)
+            if (key.target == PreparedSelectState::noTarget) visit(visit, key.expression);
+        visit(visit, state.select().whereClause.get());
+        visit(visit, state.select().having.get());
+        for (size_t i = 0; i < parent_.len; ++i)
+            if (allColumns || demand[i]) selected_.insert(parent_.cols[i].dataName);
+    }
+
+    bool open() override {
+        OpenInstrument instrument(this);
+        close();
+        clearError();
+        if (!engine_.inTransaction() || engine_.transactionDatabase() != database_)
+            throw DbError("XX000", "inheritance scan requires its statement snapshot");
+        auto lockOrder = names_;
+        std::sort(lockOrder.begin(), lockOrder.end());
+        locked_.reserve(lockOrder.size());
+        auto& manager = engine_.getLockManager();
+        manager.setResourceNamespace(database_);
+        for (auto& name : lockOrder) {
+            if (!manager.lockShared(name))
+                throw DbError("55P03", "could not lock inherited relation " + name);
+            locked_.push_back(std::move(name));
+        }
+        const auto descendants = inheritedTableDescendants(engine_, database_, parent_.tablename);
+        if (!std::equal(names_.begin() + 1, names_.end(), descendants.begin(), descendants.end()))
+            throw DbError("40001", "inheritance links changed before scan");
+        sources_.reserve(names_.size());
+        for (size_t relation = 0; relation < names_.size(); ++relation) {
+            const auto& name = names_[relation];
+            auto schema = engine_.getTableSchema(database_, name);
+            if (schema.tablename != name || !supportsInheritedHeap(schema) ||
+                schema.physicalRelationId != generations_[relation])
+                throw DbError("40001", "inheritance source changed before scan");
+            std::map<std::string, size_t> fields;
+            for (size_t i = 0; i < schema.len; ++i) fields.emplace(schema.cols[i].dataName, i);
+            std::vector<std::pair<size_t, size_t>> projection;
+            projection.reserve(selected_.size());
+            for (size_t i = 0; i < parent_.len; ++i) {
+                const auto& field = parent_.cols[i];
+                const auto found = fields.find(field.dataName);
+                if (found == fields.end() ||
+                    !compatibleInheritedField(field, schema.cols[found->second]))
+                    throw DbError("42804", "incompatible inherited column " + field.dataName);
+                if (selected_.count(field.dataName)) projection.emplace_back(found->second, i);
+            }
+            // Storage decodes in physical column order; expressions still
+            // address the parent relation's bound ordinals.
+            std::sort(projection.begin(), projection.end());
+            std::vector<size_t> parentOrdinals;
+            parentOrdinals.reserve(projection.size());
+            for (const auto& field : projection) parentOrdinals.push_back(field.second);
+            sources_.push_back({std::move(schema), std::move(parentOrdinals)});
+        }
+        return true;
+    }
+
+    bool next(std::string& raw) override {
+        NextInstrument instrument(this);
+        hasRow_ = false;
+        checkForQueryInterrupt();
+        while (source_ < sources_.size()) {
+            const auto& part = sources_[source_];
+            // The outer SQL command owns the same ReadView for every heap.
+            if (!cursor_) cursor_ = engine_.beginHeapScan(database_, part.schema.tablename, part.schema);
+            HeapScanRow row;
+            if (!cursor_->next(row)) {
+                cursor_.reset();
+                ++source_;
+                recordTableScan(database_, part.schema.tablename, std::exchange(rowsRead_, 0), false, true);
+                continue;
+            }
+            std::vector<std::string> values;
+            std::vector<bool> nulls;
+            if (!selected_.empty() && !detail::decodeStoredRowProjection(engine_, database_, row.data, part.schema,
+                    row.nulls, selected_, values, nulls))
+                throw DbError("58030", "could not read inherited row values");
+            RowContext context;
+            for (size_t position = 0; position < part.parentOrdinals.size(); ++position) {
+                const auto i = part.parentOrdinals[position];
+                const auto& field = parent_.cols[i];
+                const auto& metadata = declaration_[i].typeMetadata;
+                const auto type = ExprHelper::canonicalResultTypeName(field.dataType +
+                    (field.isArray ? "[]" : ""));
+                uint32_t domainOid = 0;
+                if (field.isArray && !field.domainName.empty() && metadata &&
+                    metadata->kind == DatumKind::Array && metadata->actualOid != metadata->codecOid)
+                    domainOid = metadata->actualOid;
+                ExprValue value(type, std::move(values[position]), nulls[position]);
+                if (stored_regtype_detail::columnType(field.dataType)) {
+                    const auto catalog = regtype_detail::metadata(engine_, database_);
+                    value = stored_regtype_detail::load(value.value, field.isArray, value.isNull,
+                        catalog, currentSession(), metadata, field.dataType, domainOid);
+                } else if (field.isArray &&
+                           !compound_value_detail::decodeArrayStorageInput(value, metadata, {}, domainOid) && domainOid) {
+                    throw DbError("XX001", "could not decode inherited array domain value");
+                }
+                value.collation = field.collation;
+                context.setBoundColumn(sourceOrdinal_, i, std::move(value));
+            }
+            row_ = std::move(context);
+            hasRow_ = true;
+            ++rowsRead_;
+            raw.clear();
+            instrument.emitted = true;
+            return true;
+        }
+        return false;
+    }
+
+    bool supportsPreparedContexts() const override { return true; }
+
+    bool lastPreparedContext(RowContext& row) const override {
+        if (!hasRow_) return false;
+        row = row_;
+        return true;
+    }
+
+    void close() override {
+        auto& manager = engine_.getLockManager();
+        manager.setResourceNamespace(database_);
+        cursor_.reset();
+        std::exception_ptr statsFailure;
+        if (rowsRead_ != 0) {
+            try {
+                recordTableScan(database_, sources_[source_].schema.tablename,
+                               std::exchange(rowsRead_, 0), false, false);
+            } catch (...) { statsFailure = std::current_exception(); }
+        }
+        for (auto it = locked_.rbegin(); it != locked_.rend(); ++it) manager.unlock(*it);
+        locked_.clear();
+        sources_.clear();
+        source_ = 0;
+        row_ = {};
+        hasRow_ = false;
+        if (statsFailure) std::rethrow_exception(statsFailure);
+    }
+
+    std::string preparedPlanNodeName() const override { return "Append"; }
+
+private:
+    struct Source { TableSchema schema; std::vector<size_t> parentOrdinals; };
+    StorageEngine& engine_;
+    std::string database_;
+    TableSchema parent_;
+    QueryRowDescriptor declaration_;
+    std::vector<std::string> names_;
+    std::vector<uint64_t> generations_;
+    std::set<std::string> selected_;
+    std::vector<std::string> locked_;
+    std::vector<Source> sources_;
+    std::unique_ptr<HeapScanCursor> cursor_;
+    RowContext row_;
+    bool hasRow_ = false;
+    size_t sourceOrdinal_ = PreparedSelectState::noTarget;
+    size_t source_ = 0;
+    size_t rowsRead_ = 0;
+};
+}  // namespace
+
+bool supportsInheritedTableSource(StorageEngine& engine, const std::string& database,
+    const TableSchema& parent,
+    const std::vector<std::string>& descendants) {
+    if (descendants.empty() || parent.len == 0 || !supportsInheritedHeap(parent) ||
+        std::any_of(parent.cols, parent.cols + parent.len,
+                    [](const Column& column) { return column.generatedKind == 'v'; })) return false;
+    for (const auto& descendant : descendants) {
+        const auto schema = engine.getTableSchema(database, descendant);
+        if (schema.tablename != descendant || !supportsInheritedHeap(schema)) return false;
+    }
+    return true;
+}
+
+OpPtr makeInheritedTableSource(StorageEngine& engine, const std::string& database,
+    const TableSchema& parent, const QueryRowDescriptor& declaration,
+    const std::vector<std::string>& descendants) {
+    if (declaration.size() != parent.len)
+        throw DbError("XX000", "inheritance scan lost its parent column declaration");
+    std::vector<std::string> relations{parent.tablename};
+    relations.insert(relations.end(), descendants.begin(), descendants.end());
+    std::vector<uint64_t> generations{parent.physicalRelationId};
+    generations.reserve(relations.size());
+    for (const auto& name : descendants)
+        generations.push_back(engine.getTableSchema(database, name).physicalRelationId);
+    return std::make_unique<InheritedTableScanOp>(engine, database, parent,
+        declaration, std::move(relations), std::move(generations));
+}
+
 OpPtr QueryPlanner::buildPreparedSelectPlan(StorageEngine* engine,
     const std::string& dbname, const std::string& tablename, PreparedQuery prepared) {
     auto* select = dynamic_cast<SelectStmt*>(prepared.ast.get());
@@ -3497,6 +3776,8 @@ OpPtr QueryPlanner::buildPreparedSelectPlan(StorageEngine* engine,
         keyIdentities.push_back(std::move(identity));
         state->keys.push_back({order.expr.get(), target, priorKey, order.asc, order.nullsFirst,order.enumComparison});
     }
+    if (auto* inherited = dynamic_cast<InheritedTableScanOp*>(source.get()))
+        inherited->prepareDemand(*state);
     // All bindings and collation checks precede opening any source or
     // evaluating a volatile expression. The retained parameter cells remain
     // typed, including NULL, and are supplied directly to the evaluator.

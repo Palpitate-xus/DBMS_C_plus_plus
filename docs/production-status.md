@@ -6,6 +6,10 @@
 
 截至 2026-11-20，273 项功能要求中有 22 项完成、167 项部分实现、69 项待验证、15 项暂缓。各项结果和剩余范围见功能总账。以下更新报告给出各轮测试的实际范围。[功能总账](gap-progress.json) · [支持的功能和限制](compatibility-contract.md)
 
+## 2026-11-20 · 查询父表时也会读到孙表
+
+普通单表查询沿继承关系读取各层后代。统计、筛选和排序分页使用合并后的行，`ONLY` 仍只读取指定表。与 PostgreSQL 18.6 的 69 项对照通过，包含重新建立继承关系和数据库正常重启后的读回。[测试报告](test-report.md#inherited-table-source-20261120) · [性能报告](performance-report-2026-10-30.md#inherited-table-source-cost-20261120)
+
 ## 2026-11-20 · 单表查询保留字符串函数参数
 
 `upper`、`lower`、`length` 和 `replace` 的受测单表查询保留参数里的引号、拼接、运行时空值和错误。新的 93 项协议标准检查与 PostgreSQL 18.6 一致。[测试报告](test-report.md#scalar-string-arguments-20261120)

@@ -28,4 +28,14 @@ OpPtr makePreparedTableSource(StorageEngine* engine, const std::string& database
     const std::shared_ptr<PreparedQuery>& query, SelectStmt* select,
     const TableSchema& schema, OpPtr source);
 
+// Traditional inheritance is one SQL range. Descendants are returned once
+// even when more than one path reaches a relation.
+std::vector<std::string> inheritedTableDescendants(StorageEngine& engine,
+    const std::string& database, const std::string& parent);
+bool supportsInheritedTableSource(StorageEngine& engine, const std::string& database,
+    const TableSchema& parent, const std::vector<std::string>& descendants);
+OpPtr makeInheritedTableSource(StorageEngine& engine, const std::string& database,
+    const TableSchema& parent, const QueryRowDescriptor& declaration,
+    const std::vector<std::string>& descendants);
+
 } // namespace dbms

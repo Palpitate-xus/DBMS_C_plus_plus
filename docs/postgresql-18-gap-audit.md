@@ -6,6 +6,8 @@
 
 受测单表查询的四种字符串函数可处理完整参数，包括拼接和转义引号。与 PostgreSQL 18.6 的 93 项对照都通过，表达式总项仍为部分实现。[函数参数验证](test-report.md#scalar-string-arguments-20261120)
 
+普通父表的顶层查询现在会读取各层子表，统一执行筛选、汇总、排序和分页。带 `ONLY` 的查询只读取指定表。继承查询条目仍为部分实现，连接、分区和嵌套的继承来源仍需补齐。[继承查询验证](test-report.md#inherited-table-source-20261120)
+
 建表恢复文件清理中断后，启动可以从固定位置继续清理。首次创建恢复记录时可能留下的暂存目录仍需单独处理。[清理测试](test-report.md#create-undo-cleanup-20261120)
 
 PostgreSQL 18.6 的行为和性能对照见差距评估，各轮证据适用于报告中列明的版本、数据和场景。[当前差距评估](postgresql-comparison.md)

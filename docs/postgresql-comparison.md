@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-20 · 查询有多层继承的表
+
+PostgreSQL 18.6 在规划时找出父表和所有后代，为每张表加锁。同一张后代表经由多条继承路径找到时，只加入一次。各表的列顺序可以不同，规划器按列名找到对应列，再检查类型、类型修饰值和排序规则。`ONLY` 则把读取范围限定在指定的表。[PostgreSQL 继承说明](https://www.postgresql.org/docs/18/ddl-inherit.html) · [查找后代表](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/catalog/pg_inherits.c) · [列对应关系](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/optimizer/util/appendinfo.c)
+
+SQLite 的 `UNION ALL` 也会合并多个查询结果，由末尾的 `ORDER BY` 和 `LIMIT` 处理完整结果。DuckDB 的 `UNION ALL BY NAME` 支持按列名合并显式指定的输入。本项目的普通继承查询从继承关系确定输入，按父表定义读取各表，再对合并结果执行查询的筛选、汇总、排序和分页。[SQLite SELECT](https://sqlite.org/lang_select.html#compound_select_statements) · [DuckDB 按列名合并](https://duckdb.org/2025/01/10/union-by-name)
+
 ## 2026-11-20 · 字符串函数接收完整表达式
 
 PostgreSQL 18.6 会先检查和化简参数。选中的函数声明为严格函数、且某个参数已知为 `NULL` 时，可把调用化简为同类型的 `NULL`。从数据行读到的空值则属于执行阶段，其他参数已按顺序求值。SQLite 的函数语法也接收表达式，DuckDB 提供同名的文本函数。本项目用完整查询的解析结果执行普通单表投影，并在执行前检查所选函数的声明和常量参数。三套数据库的类型选择和副作用仍应分别验证。[PostgreSQL 常量化简](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/optimizer/util/clauses.c) · [PostgreSQL 参数求值](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/executor/execExpr.c) · [SQLite 表达式语法](https://sqlite.org/lang_expr.html) · [DuckDB 字符串函数](https://duckdb.org/docs/stable/sql/functions/text.html) · [对照结果](test-report.md#scalar-string-arguments-20261120)

@@ -3593,7 +3593,9 @@ static std::unique_ptr<FromItem> parseFromAtom(const std::vector<std::string>& t
     if (pos >= tokens.size()) return nullptr;
 
     auto item = std::make_unique<FromItem>();
-    if (tokens[pos] == "(") {
+    item->only = SQLParser::toLower(tokens[pos]) == "only";
+    if (item->only && ++pos == tokens.size()) return nullptr;
+    if (!item->only && tokens[pos] == "(") {
         const auto nestedTokens = collectParenthesized(tokens, pos);
         SQLParser parser;
         auto nested = parser.parse(joinParserTokens(nestedTokens, 0, nestedTokens.size()));
@@ -3602,7 +3604,15 @@ static std::unique_ptr<FromItem> parseFromAtom(const std::vector<std::string>& t
         item->subquery = std::move(nested.stmt);
     } else {
         item->type = FromItem::Type::Table;
+        const bool parenthesized = item->only && tokens[pos] == "(";
+        if (parenthesized) ++pos;
         if (!parseQualifiedObjectName(tokens, pos, item->tableName)) return nullptr;
+        if (parenthesized) {
+            if (pos >= tokens.size() || tokens[pos] != ")") return nullptr;
+            ++pos;
+        } else if (!item->only && pos < tokens.size() && tokens[pos] == "*") {
+            ++pos;
+        }
     }
 
     // AS alias or implicit alias

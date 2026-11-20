@@ -20654,6 +20654,7 @@ static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bo
     for (const auto& item : candidate->selectList) if (scalarQueryRoles(item.expr.get()).second) return false;
     for (const auto& item : candidate->orderBy) if (scalarQueryRoles(item.expr.get()).second) return false;
     string physical;
+    vector<string> descendants;
     bool typedSortDemand = false;
     if (candidate->fromClause) {
         const string& spelling = candidate->fromClause->tableName;
@@ -20662,19 +20663,24 @@ static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bo
         // aliases retain their established consumers. This plan lowers a
         // single actual base range; no alternate namespace is fabricated.
         if (!g_engine.tableExists(session.currentDB, physical)) return false;
-        // This typed source scans one physical relation. The ordinary plain
-        // projection path below owns the parent/child union and its global
-        // ordering/slicing; do not silently truncate it to the parent heap.
-        const bool inheritedScan = !session.onlyNext && !(candidate->limit && *candidate->limit == 0) &&
-            !g_engine.getInheritedChildren(session.currentDB, physical).empty();
-        if (inheritedScan && all_of(candidate->selectList.begin(), candidate->selectList.end(),
-                [](const auto& target) {
-                    if (dynamic_cast<const dbms::ColumnRefExpr*>(target.expr.get())) return true;
-                    const auto* star = dynamic_cast<const dbms::LiteralExpr*>(target.expr.get());
-                    return star && star->value == "*";
-                })) return false;
-        if (inheritedScan) stringProjection = false;
-        if (!roles.first && !scalarOrder && !possibleArray && !needsDomainCast && !fromlessDemand && !possibleBitNegation && !physicalLimitDemand && !stringProjection) {
+        if (!candidate->fromClause->only)
+            descendants = dbms::inheritedTableDescendants(g_engine, session.currentDB, physical);
+        if (!descendants.empty() && !dbms::supportsInheritedTableSource(g_engine, session.currentDB,
+                g_engine.getTableSchema(session.currentDB, physical), descendants)) {
+            // Partitioned, policy-controlled and virtual column sources
+            // still belong to their established consumers.
+            descendants.clear();
+            if (!(candidate->limit && *candidate->limit == 0)) {
+                if (all_of(candidate->selectList.begin(), candidate->selectList.end(), [](const auto& target) {
+                        if (dynamic_cast<const dbms::ColumnRefExpr*>(target.expr.get())) return true;
+                        const auto* star = dynamic_cast<const dbms::LiteralExpr*>(target.expr.get());
+                        return star && star->value == "*";
+                    })) return false;
+                stringProjection = false;
+            }
+        }
+        if (descendants.empty() && !roles.first && !scalarOrder && !possibleArray && !needsDomainCast &&
+            !fromlessDemand && !possibleBitNegation && !physicalLimitDemand && !stringProjection) {
             const auto schema = g_engine.getTableSchema(session.currentDB, physical);
             typedSortDemand = ordinaryTypedSortDemand(*candidate, schema);
             if (!typedSortDemand && none_of(schema.cols, schema.cols + schema.len,
@@ -20698,7 +20704,7 @@ static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bo
     const bool arrayOutput = any_of(prepared.output.begin(), prepared.output.end(),
         [](const dbms::QueryOutputColumn& column) { return dbms::array_detail::isArray(column.type); });
     const bool bitNegationOutput=possibleBitNegation && bitNegation(select,true);
-    if(!roles.first && !scalarOrder && !queryArrays(select,true) && !arrayOutput && !needsDomainCast && !fromlessDemand && !bitNegationOutput && !physicalLimitDemand && !typedSortDemand && !stringProjection)return false;
+    if(descendants.empty() && !roles.first && !scalarOrder && !queryArrays(select,true) && !arrayOutput && !needsDomainCast && !fromlessDemand && !bitNegationOutput && !physicalLimitDemand && !typedSortDemand && !stringProjection)return false;
     // Preserve column grants on precisely the bound source cells used by
     // this query (including correlated child references), not SELECT *.
     if (select->fromClause && !sessionIsAdmin(session)) {
@@ -20792,7 +20798,7 @@ static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bo
     dbms::QueryRowDescriptor receiverDescriptor;
     if (dbms::typedResultCaptureRequested() || needsDomainCast) receiverDescriptor = prepared.output;
     dbms::OpPtr plan;
-    if (fromlessDemand || stringProjection) {
+    if (fromlessDemand || stringProjection || !descendants.empty()) {
         // Request planning on its actual carrier, never on a discarded
         // preflight or on every recursively constructed child graph.
         auto query = make_shared<dbms::PreparedQuery>(std::move(prepared));
@@ -20803,7 +20809,19 @@ static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bo
                 [](size_t index,vector<dbms::ExprValue>& row) {row.clear();return index==0;});
         } else {
             sourceSchema = g_engine.getTableSchema(session.currentDB, physical);
-            source = make_unique<dbms::TableScanOp>(&g_engine, session.currentDB, physical);
+            if (descendants.empty()) {
+                source = make_unique<dbms::TableScanOp>(&g_engine, session.currentDB, physical);
+            } else {
+                const auto range = find_if(query->sourceRanges.begin(), query->sourceRanges.end(),
+                    [&](const auto& sourceRange) {
+                        return sourceRange.owner == select && sourceRange.source == select->fromClause.get() &&
+                            !sourceRange.mergedUsing;
+                    });
+                if (range == query->sourceRanges.end())
+                    throw dbms::DbError("XX000", "inheritance scan has no bound parent range");
+                source = dbms::makeInheritedTableSource(g_engine, session.currentDB, sourceSchema,
+                    range->columns, descendants);
+            }
         }
         plan = dbms::QueryPlanner::buildPreparedSelectPlan(&g_engine,session.currentDB,
             std::move(query),select,sourceSchema,std::move(source),{},{},{},true,!needsDomainCast);
@@ -20987,6 +21005,35 @@ class PreparedWithDmlRuntime {
         if(range.relationSchema==sessionTempSchemaName(session) || range.relationSchema=="pg_temp")
             return tempTablePrefix(session,range.relationName);
         return range.relationSchema=="public"?range.relationName:range.relationSchema+"__"+range.relationName;
+    }
+    void checkPhysicalSourcePermission(const dbms::Stmt* owner,
+            const dbms::PreparedQuery::SourceRange& range, const string& table) const {
+        if(!checkTablePermission(session_,table,dbms::StorageEngine::TablePrivilege::Select))
+            throw dbms::DbError("42501","permission denied for mutation source");
+        if(!sessionIsAdmin(session_)) {
+            const auto columns=selectedColumns(owner,range);
+            if(!columns.empty() && !g_engine.hasColumnPermission(session_.currentDB,table,
+                effectiveSessionRole(session_),dbms::StorageEngine::TablePrivilege::Select,columns))
+                throw dbms::DbError("42501","permission denied for selected mutation source columns");
+        }
+    }
+    dbms::OpPtr ordinaryInheritedSource(const dbms::SelectStmt* select, dbms::TableSchema& schema) {
+        const auto* item=select->fromClause.get();
+        if(select!=readRoot_ || select->setOp!=dbms::SetOp::None || !select->ctes.empty() ||
+           !item || item->type!=dbms::FromItem::Type::Table || item->only || hasCurrentQueryWindows(select))
+            return {};
+        const auto& range=sourceRange(select,item);
+        if(range.relationName.empty() || range.cteStatement || range.viewQuery ||
+           range.relationSchema=="pg_catalog" || range.relationSchema=="information_schema")
+            return {};
+        const auto table=physical(range,session_);
+        const auto descendants=dbms::inheritedTableDescendants(g_engine,session_.currentDB,table);
+        if(descendants.empty())return {};
+        auto parent=g_engine.getTableSchema(session_.currentDB,table);
+        if(!dbms::supportsInheritedTableSource(g_engine,session_.currentDB,parent,descendants))return {};
+        checkPhysicalSourcePermission(select,range,table);
+        schema=std::move(parent);
+        return dbms::makeInheritedTableSource(g_engine,session_.currentDB,schema,range.columns,descendants);
     }
     dbms::TableSchema logicalSchema(const dbms::QueryRowDescriptor& descriptor) const {
         dbms::TableSchema schema;
@@ -21277,14 +21324,7 @@ class PreparedWithDmlRuntime {
             } else if(item->type==dbms::FromItem::Type::Table && !range.cteStatement) {
                 if(range.relationName.empty())throw dbms::DbError("XX000","mutation base source has no physical identity");
                 const auto table=physical(range,session_);
-                if(!checkTablePermission(session_,table,dbms::StorageEngine::TablePrivilege::Select))
-                    throw dbms::DbError("42501","permission denied for mutation source");
-                if(!sessionIsAdmin(session_)) {
-                    const auto columns=selectedColumns(owner,range);
-                    if(!columns.empty() && !g_engine.hasColumnPermission(session_.currentDB,table,
-                        effectiveSessionRole(session_),dbms::StorageEngine::TablePrivilege::Select,columns))
-                        throw dbms::DbError("42501","permission denied for selected mutation source columns");
-                }
+                checkPhysicalSourcePermission(owner,range,table);
                 scanSchema=g_engine.getTableSchema(session_.currentDB,table);
                 if(scanSchema.len!=range.columns.size())throw dbms::DbError("XX000","mutation source descriptor differs from physical relation");
                 dbms::OpPtr physicalScan=make_unique<dbms::TableScanOp>(&g_engine,session_.currentDB,table);
@@ -21646,7 +21686,7 @@ class PreparedWithDmlRuntime {
             // must not capture the first correlated invocation forever.
             source=make_unique<dbms::PreparedSourceRowsOp>(dbms::QueryRowDescriptor{},
                 [](size_t index,vector<dbms::ExprValue>& row){row.clear();return index==0;});
-        } else {
+        } else if(!(source=ordinaryInheritedSource(select,schema))) {
             auto node=sourceNode(select,select->fromClause.get(),outer,frames,executionProvider);
             const function<bool(const dbms::FromItem*)> physicalSources=[&](const dbms::FromItem* item) {
                 if(!item)return false;
