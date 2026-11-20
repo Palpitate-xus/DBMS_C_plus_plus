@@ -2,6 +2,39 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-20 publish complete CREATE TABLE schemas without replacement",
+      "gap_ids": ["CAT-07", "WAL-08"],
+      "status": "partial",
+      "evidence": [
+        "src/commands/TableManage.cpp",
+        "docs/test-report.md",
+        "docs/performance-report-2026-10-30.md",
+        "docs/postgresql-comparison.md"
+      ],
+      "tests": [
+        "tests/create_table_io_status_test.cpp",
+        "tests/cold_start_transaction_backup_protocol_e2e_test.py",
+        "tests/schema_namespace_atomicity_protocol_e2e_test.py",
+        "tests/tablespace_protocol_e2e_test.py",
+        "tests/serial_owned_sequence_protocol_e2e_test.py",
+        "tests/commit_failure_recovery_protocol_e2e_test.py"
+      ],
+      "verification": [
+        "The baseline removed a new occupant at the schema target during failed CREATE cleanup. The candidate preserves the occupant and passes parent-directory sync failure, cold reload and same-name retry checks.",
+        "Eight of ten native suites and five registered protocol suites passed. Table-list directory-sync retry and sequence rename failed in both the exact baseline and candidate.",
+        "Explicit uncommitted ordinary CREATE still leaves a relation after restart, including with a savepoint. The PostgreSQL 18.6 reference passed the same four scenarios and seven process crashes.",
+        "Twelve matched timing rounds completed 216 CREATEs. CPU dispersion exceeded the preregistered threshold in all three scenarios."
+      ],
+      "artifacts": {
+        "build": "build/array-domain-20261117/ordinary-create-schema-publication-cmake-v1.json",
+        "native_baseline": "build/ordinary-create-crash-20261119/native-schema-publication-baseline-v1/summary.json",
+        "native_candidate": "build/ordinary-create-crash-20261119/native-schema-publication-candidate-v1/summary.json",
+        "protocol_candidate": "build/ordinary-create-crash-20261119/protocol-schema-publication-v1/summary.json",
+        "postgresql_reference": "build/ordinary-create-crash-20261119/pg18-ordinary-registered-v2/summary.json",
+        "timing_independent_audit": "build/ordinary-create-crash-20261119/schema-publication-timing/independent-audit.json"
+      }
+    },
+    {
       "issue": "2026-11-20 stage and validate PITR archive before database replacement",
       "gap_ids": ["BACKUP-04", "WAL-04"],
       "status": "partial",

@@ -20093,9 +20093,16 @@ DBStatus StorageEngine::createTable(const std::string& dbname, const TableSchema
         if (error) *error = "temporary relations must use the session temporary namespace";
         return DBStatus::INVALID_ARGUMENT;
     }
-    if (tableExists(dbname, tbl.tablename)) {
+    lockManager_.setResourceNamespace(dbname);
+    const auto schemaFile = schemaPath(dbname, tbl.tablename);
+    std::error_code schemaError;
+    if (pathEntryExists(schemaFile, schemaError)) {
         if (error) *error = "table already exists";
         return DBStatus::TABLE_ALREADY_EXISTS;
+    }
+    if (schemaError) {
+        if (error) *error = "could not inspect table schema path";
+        return DBStatus::IO_ERROR;
     }
 
     // Wave 0: 通过 TypeRegistry 校验并补齐每列类型元数据
@@ -20275,7 +20282,7 @@ DBStatus StorageEngine::createTable(const std::string& dbname, const TableSchema
             ? dbPath(dbname)
             : tablespaceDir(dbname, tblWithVersion.tablespace) / dbname;
         for (const auto& path : {
-                 schemaPath(dbname, tbl.tablename), paramsPath(dbname, tbl.tablename),
+                 schemaFile, paramsPath(dbname, tbl.tablename),
                  dataPath(dbname, tbl.tablename), indexPath(dbname, tbl.tablename),
                  secondaryIndexMetaPath(dbname, tbl.tablename),
                  hashIndexMetaPath(dbname, tbl.tablename),
@@ -20321,39 +20328,24 @@ DBStatus StorageEngine::createTable(const std::string& dbname, const TableSchema
         }
     };
     auto failCreate = [&](const std::string& message, DBStatus status = DBStatus::IO_ERROR) {
-        cleanupFailedCreate();
         if (error) *error = message;
         return status;
     };
+    bool schemaPublished = false;
     bool createCompleted = false;
     std::unique_ptr<int, std::function<void(int*)>> cleanupGuard(
         reinterpret_cast<int*>(1),
         [&](int*) {
-            if (!createCompleted) cleanupFailedCreate();
+            if (schemaPublished && !createCompleted) cleanupFailedCreate();
         });
-
-    {
-        std::error_code staleStateError;
-        std::filesystem::remove(
-            truncateStatePath(*this, dbname, tbl.tablename),
-            staleStateError);
-        if (staleStateError) {
-            return failCreate("could not remove stale truncate state");
-        }
-        staleStateError.clear();
-        std::filesystem::remove(
-            specializedIndexDirtyPath(*this, dbname, tbl.tablename),
-            staleStateError);
-        if (staleStateError) {
-            return failCreate(
-                "could not remove stale specialized-index state");
-        }
-    }
 
     {
         const auto identityStatus = allocatePhysicalRelationId(*this, dbname, tblWithVersion.physicalRelationId);
         if (identityStatus != DBStatus::OK)
             return failCreate("could not allocate durable physical relation identity", identityStatus);
+        std::ostringstream schema(std::ios::out | std::ios::binary);
+        writeSchema(schema, tblWithVersion);
+        if (!schema) return failCreate("could not write table schema");
         if (!tblWithVersion.isUnlogged) {
             WALManager* wal = getWAL(dbname);
             const auto payload = heap_wal_identity::event(
@@ -20365,14 +20357,23 @@ DBStatus StorageEngine::createTable(const std::string& dbname, const TableSchema
             if (!wal || birthLsn == INVALID_LSN || !wal->XLogFlush(birthLsn))
                 return failCreate("could not persist relation creation identity");
         }
-        std::ofstream out(schemaPath(dbname, tblWithVersion.tablename), std::ios::binary);
-        if (!out) return failCreate("could not create table schema");
-        writeSchema(out, tblWithVersion);
-        out.flush();
-        const bool schemaWritten = out.good();
-        out.close();
-        if (!schemaWritten || !out) return failCreate("could not write table schema");
+        // A visible schema must contain a complete relation identity. Never
+        // replace a destination that appeared after the initial check or let
+        // the failure guard claim it and remove another owner's files.
+        if (index_file::writeAtomicallyNoReplace(schemaFile, schema.str()) !=
+                index_file::WriteResult::OK)
+            return failCreate("could not create table schema");
+        schemaPublished = true;
         invalidateCatalogSchema(dbname, tblWithVersion.tablename);
+    }
+    {
+        std::error_code staleStateError;
+        std::filesystem::remove(
+            truncateStatePath(*this, dbname, tbl.tablename), staleStateError);
+        if (staleStateError) return failCreate("could not remove stale truncate state");
+        std::filesystem::remove(
+            specializedIndexDirtyPath(*this, dbname, tbl.tablename), staleStateError);
+        if (staleStateError) return failCreate("could not remove stale specialized-index state");
     }
     if (const auto fillfactor = tblWithVersion.storageParams.find("fillfactor");
         fillfactor != tblWithVersion.storageParams.end()) {

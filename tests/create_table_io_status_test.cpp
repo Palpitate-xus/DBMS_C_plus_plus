@@ -21,9 +21,9 @@ namespace fs = std::filesystem;
 extern dbms::StorageEngine g_engine;
 
 namespace {
-enum class Fault { None, Identity, Schema, HeapOpen, TableList };
+enum class Fault { None, Identity, SchemaCollision, SchemaSync, HeapOpen, TableList };
 thread_local Fault armed = Fault::None;
-thread_local bool identitySync = false;
+thread_local bool directorySyncArmed = false;
 thread_local struct stat directoryOwner {};
 thread_local std::string faultDatabase, faultTable;
 thread_local unsigned hits = 0;
@@ -80,10 +80,10 @@ extern "C" int rename(const char* from, const char* to) noexcept {
         std::string(to) == faultDatabase + "/.physical_relation_id_highwater") {
         if (armed == Fault::Identity) {
             assert(::stat(faultDatabase.c_str(), &directoryOwner) == 0);
-            identitySync = true;
-        } else if (armed == Fault::Schema || armed == Fault::HeapOpen) {
+            directorySyncArmed = true;
+        } else if (armed == Fault::SchemaCollision || armed == Fault::HeapOpen) {
             const auto blocked = faultDatabase + "/" + faultTable +
-                (armed == Fault::Schema ? ".stc" : ".dt");
+                (armed == Fault::SchemaCollision ? ".stc" : ".dt");
             assert(::syscall(SYS_mkdirat, AT_FDCWD, blocked.c_str(), 0700) == 0);
             armed = Fault::None;
             ++hits;
@@ -92,12 +92,23 @@ extern "C" int rename(const char* from, const char* to) noexcept {
     return status;
 }
 
+extern "C" int link(const char* from, const char* to) noexcept {
+    const int status = static_cast<int>(
+        ::syscall(SYS_linkat, AT_FDCWD, from, AT_FDCWD, to, 0));
+    if (status == 0 && armed == Fault::SchemaSync &&
+        std::string(to) == faultDatabase + "/" + faultTable + ".stc") {
+        assert(::stat(faultDatabase.c_str(), &directoryOwner) == 0);
+        directorySyncArmed = true;
+    }
+    return status;
+}
+
 extern "C" int fsync(int fd) {
-    if (identitySync) {
+    if (directorySyncArmed) {
         struct stat owner {};
         assert(::fstat(fd, &owner) == 0 && S_ISDIR(owner.st_mode) &&
                owner.st_dev == directoryOwner.st_dev && owner.st_ino == directoryOwner.st_ino);
-        identitySync = false;
+        directorySyncArmed = false;
         armed = Fault::None;
         ++hits;
         errno = EIO;
@@ -120,8 +131,11 @@ int main() {
         assert(g_engine.getTableNames(database) == originalNames);
         assert(!g_engine.tableExists(database, "candidate"));
         assert(g_engine.query(database, "survivor", {}, {"id"}) == originalRows);
-        for (const auto& entry : fs::directory_iterator(database))
-            assert(entry.path().filename().string().find("candidate") != 0);
+        for (const auto& entry : fs::directory_iterator(database)) {
+            const auto name = entry.path().filename().string();
+            assert(name.rfind("candidate", 0) != 0);
+            assert(name.rfind(".dbms_atomic_candidate", 0) != 0);
+        }
     };
     auto retry = [&] {
         unchanged();
@@ -140,14 +154,15 @@ int main() {
         unchanged();
     };
 
-    for (const auto fault : {Fault::Identity, Fault::Schema, Fault::HeapOpen, Fault::TableList}) {
+    for (const auto fault : {Fault::Identity, Fault::SchemaCollision, Fault::SchemaSync,
+                             Fault::HeapOpen, Fault::TableList}) {
         faultDatabase = database;
         faultTable = "candidate";
         hits = 0;
         armed = fault;
         std::string message;
         const auto status = g_engine.createTable(database, table(faultTable), &message);
-        assert(hits == 1 && armed == Fault::None && !identitySync);
+        assert(hits == 1 && armed == Fault::None && !directorySyncArmed);
         std::cout << "[CREATE actual I/O] fault=" << static_cast<int>(fault)
                   << " status=" << static_cast<int>(status)
                   << " SQLSTATE=" << dbms::sqlstateForDBStatus(status)
@@ -155,11 +170,26 @@ int main() {
         assert(status == dbms::DBStatus::IO_ERROR);
         assert(std::string(dbms::sqlstateForDBStatus(status)) == "58030");
         const char* expected = fault == Fault::Identity ? "could not allocate durable physical relation identity"
-            : fault == Fault::Schema ? "could not create table schema"
+            : fault == Fault::SchemaCollision || fault == Fault::SchemaSync ? "could not create table schema"
             : fault == Fault::HeapOpen ? "could not initialize table heap" : "could not update table list";
         assert(message == expected);
+        if (fault == Fault::SchemaCollision) {
+            const auto occupied = fs::path(database) / "candidate.stc";
+            assert(fs::is_directory(occupied));
+            assert(fs::remove(occupied));
+        }
         retry();
     }
+
+    const auto occupiedSchema = fs::path(database) / "candidate.stc";
+    const auto linkTarget = fs::path("absent_schema_target");
+    fs::create_symlink(linkTarget, occupiedSchema);
+    assert(g_engine.createTable(database, table("candidate")) ==
+           dbms::DBStatus::TABLE_ALREADY_EXISTS);
+    assert(fs::read_symlink(occupiedSchema) == linkTarget);
+    assert(!fs::exists(occupiedSchema.parent_path() / linkTarget));
+    assert(fs::remove(occupiedSchema));
+    retry();
 
     // Durable counter contents are data, not I/O errors or SQL argument errors.
     const fs::path highwater = fs::path(database) / ".physical_relation_id_highwater";

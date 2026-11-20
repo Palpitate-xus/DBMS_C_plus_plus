@@ -21,6 +21,13 @@ cmake --build build/cmake --target dbms_main --parallel 2
 ## 最近更新
 
 <details>
+<summary>建表时先把表定义完整写入磁盘 · 2026-11-20</summary>
+
+如果保存表定义时遇到同名文件，建表会报错并保留原文件。
+
+</details>
+
+<details>
 <summary>归档缺失或损坏时，恢复操作会保留当前数据 · 2026-11-20</summary>
 
 例如，备份之后新增了一笔订单。如果找不到恢复所需的日志，数据库会报错，订单仍然可以查询。
@@ -31,13 +38,6 @@ cmake --build build/cmake --target dbms_main --parallel 2
 <summary>意外退出后保留已提交的表结构修改 · 2026-11-19</summary>
 
 如果数据库切换到新的日志文件后意外退出，重启时会继续读取这个文件，避免用旧备份覆盖已经提交的表结构修改。
-
-</details>
-
-<details>
-<summary>重复运行建表脚本时跳过多余备份 · 2026-11-19</summary>
-
-用 `CREATE TABLE IF NOT EXISTS` 再运行脚本，遇到已经存在的表会直接跳过。建表选项填错时，数据库会先报错，省去这次备份。
 
 </details>
 

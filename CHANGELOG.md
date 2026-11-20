@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>建表时先把表定义完整写入磁盘 · 2026-11-20</summary>
+
+如果保存表定义时遇到同名文件，建表会报错并保留原文件。
+
+[测试报告](docs/test-report.md#create-schema-publication-20261120) · [性能报告](docs/performance-report-2026-10-30.md#create-schema-publication-cost-20261120)
+
+</details>
+
+<details>
 <summary>归档缺失或损坏时，恢复操作会保留当前数据 · 2026-11-20</summary>
 
 例如，备份之后新增了一笔订单。如果找不到恢复所需的日志，数据库会报错，订单仍然可以查询。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>重复运行建表脚本时跳过多余备份 · 2026-11-19</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-19 · 重复运行建表脚本时跳过多余备份
 
 用 `CREATE TABLE IF NOT EXISTS` 再运行脚本，遇到已经存在的表会直接跳过。建表选项填错时，数据库会先报错，省去这次备份。
 
 [使用手册](docs/MANUAL.md#建表) · [测试报告](docs/test-report.md#create-validate-before-backup-20261119) · [性能报告](docs/performance-report-2026-10-30.md#create-validate-before-backup-cost-20261119)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-19 · 恢复表结构时保留序列已经给出的编号
 
