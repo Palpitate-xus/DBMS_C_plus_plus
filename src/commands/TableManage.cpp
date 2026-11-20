@@ -49309,6 +49309,7 @@ bool StorageEngine::recoverCreateTableUndo(const std::string& dbname,
         std::filesystem::path storage;
     };
     std::vector<OwnedRelation> owned;
+    std::set<std::filesystem::path> externalDirectories;
     for (const auto& [name, identities] : births) {
         const auto schemaFile = schemaPath(dbname, name);
         if (!pathEntryExists(schemaFile, error)) {
@@ -49326,6 +49327,11 @@ bool StorageEngine::recoverCreateTableUndo(const std::string& dbname,
         if (table.tablespace != "pg_default") {
             if (!resolveTablespaceRoot(*this, dbname, table.tablespace, storage)) return false;
             storage /= dbname;
+            // A published schema can outlive an unavailable tablespace. Keep
+            // its ownership proof and the journal until the forks can be checked.
+            if (externalDirectories.insert(storage).second &&
+                (std::filesystem::symlink_status(storage, error).type() !=
+                     std::filesystem::file_type::directory || error)) return false;
         }
         owned.push_back({name, schemaFile, storage});
     }
@@ -49337,19 +49343,13 @@ bool StorageEngine::recoverCreateTableUndo(const std::string& dbname,
     };
     if (!restoreCreateUndoCatalog(directory, journal)) return false;
     for (const auto& table : owned) {
-        // Keep the schema as the identity witness until all owned forks
-        // have been removed and those unlinks are durable.
-        if (pathEntryExists(table.storage, error)) {
-            if (std::filesystem::symlink_status(table.storage, error).type() !=
-                    std::filesystem::file_type::directory || error) return false;
-            for (const auto& entry : std::filesystem::directory_iterator(table.storage)) {
-                if (isRelationPhysicalFileName(entry.path().filename().string(), table.name) &&
-                    !removeFile(entry.path())) return false;
-            }
-            if (!index_file::syncDirectory(table.storage)) return false;
-        } else if (error) {
-            return false;
+        std::filesystem::directory_iterator entry(table.storage, error);
+        const std::filesystem::directory_iterator end;
+        for (; !error && entry != end; entry.increment(error)) {
+            if (isRelationPhysicalFileName(entry->path().filename().string(), table.name) &&
+                !removeFile(entry->path())) return false;
         }
+        if (error) return false;
         for (const auto& path : {
                  paramsPath(dbname, table.name),
                  secondaryIndexMetaPath(dbname, table.name),
@@ -49360,8 +49360,18 @@ bool StorageEngine::recoverCreateTableUndo(const std::string& dbname,
                  specializedIndexDirtyPath(*this, dbname, table.name)}) {
             if (!removeFile(path)) return false;
         }
-        if (!index_file::syncDirectory(directory) || !removeFile(table.schema) ||
-            !index_file::syncDirectory(directory)) return false;
+    }
+    // Sync each storage directory before dropping any schema witness. The
+    // database sync also covers default-space forks and local sidecars.
+    for (const auto& storage : externalDirectories) {
+        if (!index_file::syncDirectory(storage)) return false;
+    }
+    if (!owned.empty()) {
+        if (!index_file::syncDirectory(directory)) return false;
+        for (const auto& table : owned) {
+            if (!removeFile(table.schema)) return false;
+        }
+        if (!index_file::syncDirectory(directory)) return false;
     }
     return retireCreateUndo(directory);
 }

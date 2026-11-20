@@ -2,7 +2,7 @@
 
 ## 当前汇总（2026-11-20）
 
-原始 273 项要求中，22 项完成、167 项部分实现、69 项待验证、15 项暂缓。启动恢复会撤销受测显式事务中未提交的普通建表，包括在同一事务中后接改表或建索引的情况。跨外部表空间和断电时的更多写入阶段仍待验证。时间点恢复已通过两次分叉的用例，完整的时间线历史管理仍有缺口。[逐项状态](gap-progress.json) · [建表恢复验证](test-report.md#ordinary-create-durable-undo-20261120) · [时间点恢复验证](test-report.md#pitr-stage-archive-20261120)
+原始 273 项要求中，22 项完成、167 项部分实现、69 项待验证、15 项暂缓。启动恢复会撤销受测显式事务中未提交的普通建表，包括在同一事务中后接改表或建索引的情况。外部表空间暂时不可用时保留建表恢复记录，原目录恢复后可继续清理。断电仍需验证。时间点恢复已通过两次分叉的用例，完整的时间线历史管理仍有缺口。[逐项状态](gap-progress.json) · [建表恢复验证](test-report.md#ordinary-create-durable-undo-20261120) · [外部表空间验证](test-report.md#external-create-recovery-20261120) · [时间点恢复验证](test-report.md#pitr-stage-archive-20261120)
 
 PostgreSQL 18.6 的行为和性能对照见差距评估，各轮证据适用于报告中列明的版本、数据和场景。[当前差距评估](postgresql-comparison.md)
 

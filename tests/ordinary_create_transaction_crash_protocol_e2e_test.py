@@ -26,19 +26,24 @@ def main():
         if tag is not None:
             assert actual_tag == tag, (sql, actual_tag, tag)
 
-    def crash_and_reopen(server):
+    def crash(server):
         # Do not close the live socket first: EOF would roll back the owner.
         process = server["process"]
         process.kill()
         assert process.wait(timeout=10) == -9
         server["sock"].close()
         server["sock"] = None
+
+    def start_recovery(server):
         diagnostic = Path(server["dir"]) / "ordinary-create-reopen.stderr"
         with diagnostic.open("wb") as stderr:
             server["process"] = subprocess.Popen(
                 [runner.DBMS_MAIN, "--data-dir", server["dir"],
                  "--server", str(server["port"]), "--insecure"],
                 cwd=server["dir"], stdout=subprocess.DEVNULL, stderr=stderr)
+        return diagnostic
+
+    def reconnect(server, diagnostic):
         deadline = time.monotonic() + 20
         while True:
             assert server["process"].poll() is None, (
@@ -56,6 +61,10 @@ def main():
                     raise
                 time.sleep(0.05)
         client.startup(server["sock"], "alice", "info")
+
+    def crash_and_reopen(server):
+        crash(server)
+        reconnect(server, start_recovery(server))
 
     def setup(server):
         query(server, "CREATE TABLE ordinary_durable(id INT PRIMARY KEY, payload TEXT);",
@@ -113,6 +122,78 @@ def main():
         crash_and_reopen(server)
         committed_only(server)
         query(server, "SELECT id,payload FROM ordinary_owned;", [["1", "reused"]], tag="SELECT 1")
+
+    def external_tablespace(server):
+        work = Path(server["dir"])
+        home = work / "info"
+        space = work / "external table space"
+        location = str(space).replace("'", "''")
+        query(server, f"CREATE TABLESPACE recovery_space LOCATION '{location}';")
+        storage = space / "info"
+        unavailable = space / "temporarily-offline"
+        query(server, "CREATE TABLE external_peer(id INT PRIMARY KEY, payload TEXT) "
+              "TABLESPACE recovery_space;", tag="CREATE TABLE")
+        query(server, "INSERT INTO external_peer VALUES(1,'committed');", tag="INSERT 0 1")
+
+        query(server, "BEGIN;", ready=b"T", tag="BEGIN")
+        query(server, "UPDATE external_peer SET payload='uncommitted' WHERE id=1;",
+              ready=b"T", tag="UPDATE 1")
+        # Check both the default storage and multiple tables sharing one external directory.
+        tables = ("default_pending", "external_pending", "external_second")
+        for name in tables:
+            clause = "" if name == "default_pending" else " TABLESPACE recovery_space"
+            query(server, f"CREATE TABLE {name}(id INT PRIMARY KEY,payload TEXT){clause};",
+                  ready=b"T", tag="CREATE TABLE")
+            query(server, f"INSERT INTO {name} VALUES(9,'pending');", ready=b"T", tag="INSERT 0 1")
+            folder = home if not clause else storage
+            assert (folder / f"{name}.dt").is_file(), name
+
+        crash(server)
+        journal = home / ".create_table_undo"
+        receipts_before = {path.name: path.read_bytes() for path in journal.iterdir()}
+        table_list = (home / "tlist.lst").read_bytes()
+        storage.rename(unavailable)
+        try:
+            diagnostic = start_recovery(server)
+            process = server["process"]
+            deadline = time.monotonic() + 15
+            while process.poll() is None:
+                # A baseline that incorrectly opens the database should fail
+                # the test promptly, rather than waiting for a process timeout.
+                try:
+                    with socket.create_connection(("127.0.0.1", server["port"]), timeout=0.2):
+                        pass
+                except OSError:
+                    assert time.monotonic() < deadline, "recovery did not exit"
+                    time.sleep(0.05)
+                else:
+                    process.terminate()
+                    process.wait(timeout=10)
+                    raise AssertionError("startup accepted a missing tablespace directory")
+            log = diagnostic.read_text()
+            assert process.returncode != 0, log
+            assert "could not recover CREATE TABLE undo" in log, log
+            assert receipts_before == {path.name: path.read_bytes() for path in journal.iterdir()}
+            assert (home / "tlist.lst").read_bytes() == table_list
+            for name in tables:
+                assert (home / f"{name}.stc").is_file(), name
+            assert (unavailable / "external_pending.dt").is_file()
+            assert (home / "default_pending.dt").is_file()
+        finally:
+            unavailable.rename(storage)
+
+        reconnect(server, start_recovery(server))
+        query(server, "SELECT id,payload FROM external_peer;", [["1", "committed"]], tag="SELECT 1")
+        for name in tables:
+            query(server, f"SELECT id FROM {name};", [], state="42P01")
+            assert not list(home.glob(f"{name}.*")) and not list(storage.glob(f"{name}.*")), name
+        assert not journal.exists()
+        query(server, "CREATE TABLE external_pending(id INT PRIMARY KEY, payload TEXT) "
+              "TABLESPACE recovery_space;", tag="CREATE TABLE")
+        query(server, "INSERT INTO external_pending VALUES(27,'reused');", tag="INSERT 0 1")
+        crash_and_reopen(server)
+        query(server, "SELECT id,payload FROM external_pending;", [["27", "reused"]], tag="SELECT 1")
+        query(server, "SELECT id,payload FROM external_peer;", [["1", "committed"]], tag="SELECT 1")
 
     def savepoint(server):
         setup(server)
@@ -207,7 +288,8 @@ def main():
 
     failures = []
     cases = [("ordinary", ordinary), ("owned_sequence", owned_sequence),
-             ("savepoint", savepoint), ("savepoint_commit", savepoint_commit)]
+             ("savepoint", savepoint), ("savepoint_commit", savepoint_commit),
+             ("external_tablespace", external_tablespace)]
     for family in ("alter", "index", "serial", "inheritance", "unlogged"):
         cases.append(("mixed_" + family, lambda server, item=family: mixed_create(server, item)))
     for name, case in cases:

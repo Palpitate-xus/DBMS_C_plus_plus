@@ -2,6 +2,34 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-20 preserve CREATE TABLE undo while an external tablespace directory is unavailable",
+      "gap_ids": ["CAT-07", "WAL-08", "STO-02"],
+      "status": "partial",
+      "evidence": [
+        "src/commands/TableManage.cpp",
+        "docs/test-report.md",
+        "docs/postgresql-comparison.md",
+        "docs/performance-report-2026-10-30.md"
+      ],
+      "tests": ["tests/ordinary_create_transaction_crash_protocol_e2e_test.py", "tests/tablespace_protocol_e2e_test.py", "tests/create_table_undo_ownership_test.cpp", "tests/ddl_transaction_skeleton_test.cpp", "tests/tablespace_publish_collision_test.cpp"],
+      "verification": [
+        "The exact baseline discarded the schema and undo journal while the original external per-database directory was unavailable. Once the original directory returned, an abandoned relation file prevented same-name recreation.",
+        "The candidate refuses startup with the journal still present, then removes the three owned relations after storage returns. Ten registered crash scenarios, four neighboring protocol suites and three native suites passed.",
+        "Independent process stops after the first fork unlink, external directory sync and first schema unlink all recover to the committed state after a restart. Physical power loss and interactions with PITR remain unverified.",
+        "PostgreSQL 18.6 completed 28 SQL requests and three forced exits. Old files remained immediately after restart while the uncommitted table was SQL-invisible. A later table with the same name had a new physical locator.",
+        "Paired timings from the same crashed copies cover 24 startups, with one or twelve tables in one external location. The directory sync call-site count for twelve is 36 to 3 and the observed startup median is 372.00 to 243.79 ms. Scope is the measured startup workload."
+      ],
+      "artifacts": {
+        "exact_build": "build/array-domain-20261117/create-table-undo-external-cmake-v1.json",
+        "baseline_missing_storage": "build/create-undo-external-audit-20261120/missing-owned-result.json",
+        "registered_candidate": "build/create-undo-external-audit-20261120/registered-candidate-v2.log",
+        "native_tests": "build/ordinary-create-crash-20261119/native-checks-create-undo-external-v1/summary.json",
+        "repeated_recovery": "build/create-undo-external-fault-20261120/candidate-v1/summary.json",
+        "postgres_reference": "build/ordinary-create-crash-20261119/pg18-external-create-crash-20261120-v2/summary.json",
+        "timing_audit": "build/ordinary-create-crash-20261119/external-group-fsync-recovery-v1/independent-audit-v1.json"
+      }
+    },
+    {
       "issue": "2026-11-20 recover ordinary transactional CREATE from catalog before-images and physical identities",
       "gap_ids": ["CAT-07", "WAL-08"],
       "status": "partial",

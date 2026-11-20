@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>外部表目录暂时不可用时，保留恢复记录 · 2026-11-20</summary>
+
+如果意外退出后找不到保存表文件的外部目录，数据库会报错并保留清理记录。目录恢复后重新启动，就能继续清理未提交的新表。
+
+[使用手册](docs/MANUAL.md#建表) · [测试报告](docs/test-report.md#external-create-recovery-20261120)
+
+</details>
+
+<details>
 <summary>重启后会清理没有提交的新表 · 2026-11-20</summary>
 
 如果在事务里新建了普通表，还没提交数据库就意外退出，重启后之前已提交的数据仍可查询，原来的表名也能再次使用。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>建表时先把表定义完整写入磁盘 · 2026-11-20</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-20 · 建表时先把表定义完整写入磁盘
 
 如果保存表定义时遇到同名文件，建表会报错并保留原文件。
 
 [测试报告](docs/test-report.md#create-schema-publication-20261120) · [性能报告](docs/performance-report-2026-10-30.md#create-schema-publication-cost-20261120)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-20 · 归档缺失或损坏时，恢复操作会保留当前数据
 

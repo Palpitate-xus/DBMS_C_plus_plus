@@ -2,6 +2,10 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-20 · 外部表空间暂时不可用时的建表恢复
+
+PostgreSQL 18 的外部表空间与主数据目录一起构成数据库实例。在 PostgreSQL 18.6 实测中，崩溃后能查询已提交表，也能重用未提交的表名。前两次重启后旧文件仍在，同名新表分配了另一个文件编号。本项目按表名组织文件。启动先确认待清理的外部目录可用，核对新表的物理编号并同步文件删除，再移除表定义。目录恢复可用后才能继续清理。[PostgreSQL 表空间](https://www.postgresql.org/docs/18/manage-ag-tablespaces.html) · [两套系统的实测](test-report.md#external-create-recovery-20261120)
+
 ## 2026-11-20 · 撤销事务里新建的表
 
 PostgreSQL 18.6 以关系标识登记需要随事务撤销的文件，并按子事务归属处理保存点。SQLite 的回滚日志保存修改前的数据页。DuckDB 将表结构变更纳入事务。本项目在普通建表前保存受影响的目录文件，并登记新表的物理编号。启动在处理后续整库备份后撤销早先的新表，其他行修改继续由现有日志恢复处理。持有同一数据库的目录写入锁会增加并发建表期间的等待或锁冲突。[PostgreSQL 存储回滚](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/catalog/storage.c) · [SQLite 回滚日志](https://www.sqlite.org/atomiccommit.html) · [DuckDB 事务](https://duckdb.org/2024/09/25/changing-data-with-confidence-and-acid) · [恢复验证](test-report.md#ordinary-create-durable-undo-20261120)
