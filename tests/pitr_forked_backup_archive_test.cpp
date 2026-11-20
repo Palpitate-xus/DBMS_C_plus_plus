@@ -4,8 +4,10 @@
 #include "storage/CommitLog.h"
 #include "storage/WAL.h"
 
+#include <array>
 #include <cassert>
 #include <chrono>
+#include <cstring>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
@@ -58,23 +60,44 @@ void expectRow(StorageEngine& engine, const std::string& database,
     assert(secondaryRids.size() == 1 && secondaryRids.front() == rid);
 }
 
+std::string readFile(const std::filesystem::path& path) {
+    std::ifstream file(path, std::ios::binary);
+    assert(file);
+    return {std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
+}
+
+void flipByte(const std::filesystem::path& path, std::streamoff offset) {
+    std::fstream file(path, std::ios::in | std::ios::out | std::ios::binary);
+    file.seekg(offset);
+    char byte = '\0';
+    assert(file.get(byte));
+    file.seekp(offset);
+    assert(file.put(byte ^ 1));
+}
+
 } // namespace
 
 void testForkedBackup(bool forkBase, bool initialFork = true) {
     using namespace dbms;
     const std::string database = "pitr_forked_archive_db";
     const std::string backup = "pitr_forked_archive_image";
-    const std::string archive = "pitr_forked_archive_material";
+    const std::string archive = initialFork && !forkBase
+        ? database + ".archive" : "pitr_forked_archive_material";
+    const std::string allocatorDb = "pitr_allocator_control";
+    const bool verifyFailedRestore = forkBase && initialFork;
     std::filesystem::remove_all(database);
     std::filesystem::remove_all(backup);
     std::filesystem::remove_all(archive);
     std::filesystem::remove_all(database + ".txn_backup");
+    std::filesystem::remove_all(allocatorDb);
 
     uint64_t firstDiscardXid = 0;
     uint64_t firstTarget = 0;
     {
         StorageEngine engine;
         assert(engine.createDatabase(database) == DBStatus::OK);
+        if (verifyFailedRestore)
+            assert(engine.createDatabase(allocatorDb) == DBStatus::OK);
         TableSchema table;
         table.tablename = "items";
         table.formatVersion = 2;
@@ -85,6 +108,8 @@ void testForkedBackup(bool forkBase, bool initialFork = true) {
         insert(engine, database, 1, "before_fork");
         if (initialFork) {
             firstTarget = static_cast<uint64_t>(std::time(nullptr));
+            auto* wal = engine.getWAL(database);
+            assert(wal && wal->switchWal() == WALManager::kSegmentSize);
             waitAfter(firstTarget);
             firstDiscardXid = insert(engine, database, 2, "first_discard");
             std::ofstream target(std::filesystem::path(database) / "pg_wal" /
@@ -108,14 +133,11 @@ void testForkedBackup(bool forkBase, bool initialFork = true) {
                    CommitLog::Status::Aborted);
         if (forkBase) insert(forked, database, 6, "fork_base_image");
         if (initialFork) {
-            // Reserve a numerically newer segment name on the abandoned
-            // stream, as the original PITR fixture reserves an unused TLI.
-            // This is explicitly not a valid WAL history record. Only the
-            // actual selected timeline may determine the backup overlap.
-            std::ofstream reserved(std::filesystem::path(database) / "pg_wal" /
-                                       "000000010000000000000100");
-            reserved << "reserved abandoned-stream segment name\n";
-            assert(reserved.good());
+            // This genuine abandoned segment has a higher segment number
+            // than the backup's selected stream. Only the selected timeline
+            // may determine where to merge the external archive.
+            assert(std::filesystem::is_regular_file(
+                std::filesystem::path(database) / "pg_wal" / "000000010000000000000001"));
         }
         // Fork cases use a real durable PITR transition, not a selector edit
         // or synthetic heap copy. The ordinary case retains timeline 1.
@@ -124,6 +146,15 @@ void testForkedBackup(bool forkBase, bool initialFork = true) {
         secondTarget = static_cast<uint64_t>(std::time(nullptr));
         waitAfter(secondTarget);
         discardXid = insert(forked, database, 4, "fork_archive_discard");
+        const uint64_t archiveOnlyXid = discardXid + 65536;
+        if (verifyFailedRestore) {
+            // An archive sourced from a later allocator can have XIDs
+            // beyond anything in the base image or this process's state.
+            const std::array<uint64_t, 2> commit{archiveOnlyXid, secondTarget + 1};
+            const auto* payload = reinterpret_cast<const char*>(commit.data());
+            assert(wal->XLogInsert(RM_XACT_ID, XLOG_XACT_COMMIT, archiveOnlyXid,
+                     std::vector<char>(payload, payload + sizeof(commit))) != INVALID_LSN);
+        }
         assert(wal->XLogFlush(wal->currentWriteLsn()));
         const Lsn sealed = wal->switchWal();
         assert(sealed != INVALID_LSN);
@@ -154,7 +185,57 @@ void testForkedBackup(bool forkBase, bool initialFork = true) {
             unrelated << "not a record in the selected stream\n";
             assert(unrelated.good());
         }
+        const auto selectedName = wal->segmentPath(0).filename();
+        const auto archiveBytes = readFile(std::filesystem::path(archive) / selectedName);
+        if (verifyFailedRestore) {
+            const auto live = std::filesystem::path(database);
+            const auto invalidSegment = live / "pg_wal" / "000000010000000000000100";
+            const auto invalidBackup = backup + "_invalid_wal";
+            {
+                std::ofstream file(invalidSegment);
+                file << "reserved abandoned-stream segment name\n";
+                assert(file.good());
+            }
+            assert(forked.physicalBackup(database, invalidBackup));
+            assert(std::filesystem::remove(invalidSegment));
+            const auto heap = readFile(live / "items.dt");
+            const auto baseManifest = readFile(std::filesystem::path(backup) / ".dbms_backup_manifest");
+            const auto unchanged = [&] {
+                assert(readFile(live / "items.dt") == heap);
+                assert(readFile(std::filesystem::path(backup) / ".dbms_backup_manifest") == baseManifest);
+                assert(!std::filesystem::exists(live / "pg_wal" / "recovery_target"));
+                expectRow(forked, database, 4, "fork_archive_discard");
+            };
+            // The old fixture's fabricated in-backup segment still fails
+            // validation. Real abandoned segments remain in the positive case.
+            assert(!forked.pitrRestore(database, invalidBackup, archive, secondTarget));
+            unchanged();
+            std::filesystem::remove_all(invalidBackup);
+
+            const auto damaged = std::filesystem::path(archive + "_damaged");
+            assert(!std::filesystem::exists(damaged));
+            assert(!forked.pitrRestore(database, backup, damaged.string(), secondTarget));
+            unchanged();
+
+            std::filesystem::create_directory(damaged);
+            const auto segment = damaged / selectedName;
+            for (const auto offset : {std::streamoff(sizeof(XLogRecHeader)),
+                                      std::streamoff(WALManager::kSegmentSize - 1)}) {
+                std::filesystem::copy_file(std::filesystem::path(archive) / selectedName,
+                                           segment, std::filesystem::copy_options::overwrite_existing);
+                flipByte(segment, offset);
+                assert(!forked.pitrRestore(database, backup, damaged.string(), secondTarget));
+                unchanged();
+            }
+            std::filesystem::remove_all(damaged);
+        }
         assert(forked.pitrRestore(database, backup, archive, secondTarget));
+        assert(readFile(std::filesystem::path(archive) / selectedName) == archiveBytes);
+        if (verifyFailedRestore) {
+            assert(forked.beginTransaction(allocatorDb) == DBStatus::OK);
+            assert(forked.currentTxnId() > archiveOnlyXid);
+            assert(forked.rollbackTransaction() == DBStatus::OK);
+        }
         assert(std::filesystem::is_regular_file(
             std::filesystem::path(database) / "pg_wal" / "recovery_target"));
         assert(!std::filesystem::exists(
@@ -203,6 +284,7 @@ void testForkedBackup(bool forkBase, bool initialFork = true) {
     std::filesystem::remove_all(backup);
     std::filesystem::remove_all(archive);
     std::filesystem::remove_all(database + ".txn_backup");
+    std::filesystem::remove_all(allocatorDb);
     std::cout << "[PITR FORKED BACKUP] "
               << (initialFork ? (forkBase ? "populated" : "empty")
                               : "ordinary timeline 1")

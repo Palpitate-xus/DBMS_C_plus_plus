@@ -36,14 +36,14 @@ def main():
         assert len(result[0]) == 1 and result[0][0][1] == 'queued', result
         return int(result[0][0][0])
 
-    def wait_job(job):
+    def wait_job(job, expected='succeeded'):
         deadline = time.monotonic() + 20
         while time.monotonic() < deadline:
             _, result = query('SHOW MAINTENANCE JOB ' + str(job))
             assert len(result[0]) == 1, result
             row = result[0][0]
             if row[4] in ('succeeded', 'failed', 'cancelled'):
-                assert row[4] == 'succeeded', row
+                assert row[4] == expected, row
                 return row
             time.sleep(0.02)
         raise AssertionError(('restore status job did not finish', job))
@@ -57,6 +57,13 @@ def main():
         backup = directory / 'parameter_status.backup'
         wait_job(submit("BACKUP DATABASE info TO '" + str(backup) + "'"))
         query('INSERT INTO restore_status_rows VALUES(99)')
+        missing_archive = directory / 'absent_archive'
+        target = time.strftime('%Y-%m-%d %H:%M:%S')
+        failed = submit(f"RESTORE DATABASE info FROM '{backup}' "
+                        f"PITR '{target}' ARCHIVE '{missing_archive}'")
+        wait_job(failed, expected='failed')
+        assert not missing_archive.exists()
+        query('SELECT id FROM restore_status_rows ORDER BY id', rows=[['1'], ['99']])
         size = sum(path.stat().st_size for path in backup.rglob('*') if path.is_file())
         # Use the real maintenance rate limiter to observe an actual exclusive
         # restore stage. This is not a longer socket/statement timeout.

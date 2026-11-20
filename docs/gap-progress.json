@@ -2,6 +2,47 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-20 stage and validate PITR archive before database replacement",
+      "gap_ids": ["BACKUP-04", "WAL-04"],
+      "status": "partial",
+      "evidence": [
+        "src/commands/TableManage.cpp",
+        "src/storage/WAL.cpp",
+        "src/storage/WalRecordScan.h",
+        "docs/test-report.md",
+        "docs/issue-pitr-forked-backup-selected-archive.md",
+        "docs/performance-report-2026-10-30.md"
+      ],
+      "tests": [
+        "tests/pitr_forked_backup_archive_test.cpp",
+        "tests/pitr_recovery_test.cpp",
+        "tests/physical_restore_validation_test.cpp",
+        "tests/physical_restore_allocator_horizon_test.cpp",
+        "tests/physical_restore_admission_concurrency_test.cpp",
+        "tests/physical_restore_catalog_staging_test.cpp",
+        "tests/physical_restore_consistency_test.cpp",
+        "tests/wal_snapshot_transaction_highwater_test.cpp",
+        "tests/restore_parameter_status_protocol_e2e_test.py"
+      ],
+      "verification": [
+        "With an unavailable archive, the baseline reported a failed PITR job after replacing the database and losing a later row; the candidate reported failure while preserving both rows immediately and after restart.",
+        "A valid twice-forked backup and real abandoned WAL history restored the selected stream; missing, conflicting or corrupt archive controls and an invalid fabricated backup WAL segment were rejected before publication. The native test also checks the XID allocation horizon after importing archive records.",
+        "Eight distinct native suites, a separate rerun of the strengthened forked PITR native test, and five protocol suites exited zero. These are focused tests, not a full-suite pass or full PostgreSQL timeline equivalence.",
+        "In twelve isolated small-dataset PITR job trials, six old and six new, median job wall time was 609.39 ms versus 666.86 ms and median process CPU was 380 ms versus 415 ms; the job measurements include polling and are not query latency."
+      ],
+      "artifacts": {
+        "baseline_missing_archive": "build/pitr-fork-sql-20261119/missing-replay-baseline-v1/summary.json",
+        "candidate_missing_archive": "build/pitr-fork-sql-20261119/missing-replay-candidate-v1/summary.json",
+        "baseline_valid_restore": "build/pitr-fork-sql-20261119/valid-compare-old-pinned-v1/summary.json",
+        "candidate_valid_restore": "build/pitr-fork-sql-20261119/valid-compare-candidate-v1/summary.json",
+        "native_eight": "build/ordinary-create-crash-20261119/native-checks-pitr-stage-v1/summary.json",
+        "forked_native_rerun": "build/array-domain-20261117/native-temp-crash-pitr-stage-archive-cmake-v1/summary.json",
+        "protocol_five": "build/array-domain-20261117/protocol-pitr-stage-archive-pitr-stage-archive-cmake-v1/summary.json",
+        "cmake_receipt": "build/array-domain-20261117/pitr-stage-archive-cmake-v1.json",
+        "timing_independent_audit": "build/pitr-fork-sql-20261119/valid-formal-v1/independent-audit.json"
+      }
+    },
+    {
       "issue": "2026-11-19 preserve completed DDL across WAL switches and recycling",
       "gap_ids": ["WAL-05", "WAL-08", "CAT-07"],
       "status": "partial",

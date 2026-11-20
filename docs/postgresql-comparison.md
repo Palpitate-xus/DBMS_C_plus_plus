@@ -2,6 +2,10 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-20 · 验证时间点恢复的归档输入
+
+PostgreSQL 使用时间线历史文件判断混合归档中的日志属于哪个恢复分支。SQLite 的在线备份提供一致的数据文件快照。DuckDB 的检查点将日志同步到数据库文件。本项目按基础备份选中的时间线合并外部归档，在独立目录核对连续性和重叠字节，再发布恢复后的目录。完整的时间线历史选择以及更多恢复目标仍待实现。[PostgreSQL 时间线](https://www.postgresql.org/docs/18/continuous-archiving.html#BACKUP-TIMELINES) · [SQLite 在线备份](https://sqlite.org/backup.html) · [DuckDB 检查点](https://duckdb.org/docs/2.0/sql/statements/checkpoint) · [本项目恢复验证](test-report.md#pitr-stage-archive-20261120)
+
 ## 2026-11-19 · 从活动日志与归档判定事务结果
 
 PostgreSQL 的连续归档恢复需要保留从备份开始的连续 WAL 段。本项目在普通启动时，也要从活动日志与归档核对遗留事务备份的提交结果。新版继续读过切换段产生的填充，归档回收后则验证备份末段的重叠字节和所需记录链。对旧版生成的部分活动日志，可按物理顺序继续读到最后一条有效记录。完整的时间点分叉恢复和普通建表的持久撤销仍待补齐。[PostgreSQL 18 连续归档](https://www.postgresql.org/docs/18/continuous-archiving.html) · [本项目验证](test-report.md#wal-switch-terminal-recovery-20261119)

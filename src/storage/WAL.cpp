@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <array>
 #include <cerrno>
+#include <charconv>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -265,17 +266,16 @@ bool copyFileAtomically(const std::filesystem::path& source,
 bool parseSegmentName(const std::string& name, uint32_t expectedTli,
                      uint32_t& segNo) {
     if (name.size() != 24) return false;
-    try {
-        const uint32_t tli = static_cast<uint32_t>(
-            std::stoull(name.substr(0, 8), nullptr, 16));
-        const uint32_t log = static_cast<uint32_t>(
-            std::stoull(name.substr(8, 8), nullptr, 16));
-        segNo = static_cast<uint32_t>(
-            std::stoull(name.substr(16, 8), nullptr, 16));
-        return tli == expectedTli && log == 0;
-    } catch (...) {
-        return false;
+    uint32_t fields[3]{};
+    for (size_t i = 0; i < 3; ++i) {
+        const char* first = name.data() + i * 8;
+        const char* last = first + 8;
+        const auto value = std::from_chars(first, last, fields[i], 16);
+        if (value.ec != std::errc{} || value.ptr != last) return false;
     }
+    if (fields[0] != expectedTli || fields[1] != 0) return false;
+    segNo = fields[2];
+    return true;
 }
 
 } // namespace
@@ -490,6 +490,7 @@ private:
         ::close(fd);
         return true;
     }
+public:
     static bool samePrefix(const std::filesystem::path& left,
                            const std::filesystem::path& right, uintmax_t size) {
         std::array<char, 65536> a{}, b{};
@@ -505,6 +506,53 @@ private:
     }
 };
 } // namespace
+
+bool stagePitrArchive(const std::filesystem::path& walDir,
+                      const std::filesystem::path& archive,
+                      const std::function<bool(uint64_t)>& progress) {
+    if (!std::filesystem::is_directory(archive)) return false;
+    WALManager base(walDir);
+    if (!base.ensureOpen()) return false;
+    const Lsn baseEnd = base.currentWriteLsn();
+    const auto firstImport = static_cast<uint32_t>(
+        baseEnd == 0 ? 0 : (baseEnd - 1) / WALManager::kSegmentSize);
+    std::map<uint32_t, std::filesystem::path> selected;
+    for (const auto& entry : std::filesystem::directory_iterator(archive)) {
+        uint32_t segment = 0;
+        if (!parseSegmentName(entry.path().filename().string(), base.timelineId(), segment) ||
+            segment < firstImport) continue;
+        if (entry.is_symlink() || !entry.is_regular_file() ||
+            !selected.emplace(segment, entry.path()).second) return false;
+    }
+    if (baseEnd == 0 && (selected.empty() || selected.begin()->first != 0))
+        return false;
+
+    for (const auto& [segment, source] : selected) {
+        const auto staged = base.segmentPath(segment);
+        const auto incoming = walDir / (staged.filename().string() + ".pitr_import");
+        if (!std::filesystem::copy_file(source, incoming)) return false;
+        const auto size = std::filesystem::file_size(incoming);
+        if (size == 0 || size > WALManager::kSegmentSize) return false;
+        if (std::filesystem::exists(staged)) {
+            const auto savedSize = std::filesystem::file_size(staged);
+            if (!SnapshotWalReader::samePrefix(staged, incoming, std::min(savedSize, size)))
+                return false;
+            if (size <= savedSize) {
+                if (!std::filesystem::remove(incoming)) return false;
+            } else {
+                std::filesystem::rename(incoming, staged);
+            }
+        } else {
+            std::filesystem::rename(incoming, staged);
+        }
+        if (progress && !progress(size)) return false;
+    }
+
+    // Validate exactly the files the next startup will use. The later
+    // admission scan also reserves XIDs across all staged timelines.
+    WALManager merged(walDir);
+    return merged.ensureOpen(false) && merged.currentWriteLsn() != 0;
+}
 
 bool readWalRecord(const WALManager& wal, Lsn& lsn,
                    std::optional<XLogRecord>& record) {

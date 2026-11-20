@@ -20,4 +20,10 @@ SnapshotWalCoverage readSnapshotTransactionWal(
     const std::filesystem::path& archive, uint64_t xid,
     std::vector<XLogRecord>& records);
 
+// Merge the selected timeline into a private restore directory. Keep the
+// longest copy of an overlapping segment only if their common bytes agree.
+bool stagePitrArchive(const std::filesystem::path& walDir,
+                      const std::filesystem::path& archive,
+                      const std::function<bool(uint64_t)>& progress);
+
 }  // namespace dbms

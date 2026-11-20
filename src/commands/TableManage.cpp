@@ -51871,7 +51871,27 @@ bool StorageEngine::physicalBackupLocked(
 }
 
 struct StorageEngine::PhysicalRestoreAdmission {
+    struct RecoveryTarget {
+        std::filesystem::path archive;
+        uint64_t epoch;
+    };
+    std::optional<RecoveryTarget> recovery;
     std::set<uint64_t> activeBeforeRestore;
+
+    bool restore(StorageEngine& engine, const std::string& database,
+                 const std::string& backupPath, const MaintenanceProgress& progress);
+
+    bool stageRecovery(const std::filesystem::path& staged,
+                       const MaintenanceProgress& progress) const {
+        if (!recovery) return true;
+        const auto walDir = staged / "pg_wal";
+        if (!stagePitrArchive(walDir, recovery->archive, progress)) return false;
+        // The old archive status describes the base backup's files. The
+        // next startup must use the actual merged stream and selected target.
+        std::filesystem::remove_all(walDir / "archive_status");
+        return index_file::writeAtomically(walDir / "recovery_target",
+                                           std::to_string(recovery->epoch) + "\n");
+    }
 
     static bool validatePublicSource(const std::filesystem::path& source,
                                      std::string& sourceDatabase) {
@@ -51973,31 +51993,36 @@ struct StorageEngine::PhysicalRestoreAdmission {
     }
 };
 
-bool StorageEngine::physicalRestore(const std::string& dbname,
-                                    const std::string& backupPath,
-                                    const MaintenanceProgress& progress) {
+bool StorageEngine::PhysicalRestoreAdmission::restore(
+    StorageEngine& engine, const std::string& dbname, const std::string& backupPath,
+    const MaintenanceProgress& progress) {
     // Replacing a live database directory must not race a transaction or
     // leave open allocators/indexes/WAL managers attached to the displaced
     // files. A caller already inside any transaction cannot safely acquire
     // this database-wide exclusive lock.
-    if (transactionContext().inTransaction) return false;
+    if (engine.transactionContext().inTransaction) return false;
     const auto databaseMutex = databaseTxnLockFor(dbname);
     std::unique_lock<std::shared_mutex> databaseLock(*databaseMutex);
     std::unique_lock<std::shared_mutex> transactionAdmission(
         physicalRestoreTransactionAdmission());
-    PhysicalRestoreAdmission admission;
     {
         std::lock_guard<std::mutex> activeLock(globalTxnMutex());
-        admission.activeBeforeRestore = activeTransactions();
+        activeBeforeRestore = activeTransactions();
     }
     PhysicalCatalogOwnership catalogOwnership(
-        transactionContext(), databaseMutex, databaseLock);
-    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
+        engine.transactionContext(), databaseMutex, databaseLock);
+    std::lock_guard<std::recursive_mutex> cacheLock(engine.cacheMutex_);
     TablespaceCatalogLock tablespaceLock(
-        tablespaceCatalogLockPath(*this, dbname), true);
+        tablespaceCatalogLockPath(engine, dbname), true);
     if (!tablespaceLock.acquired()) return false;
-    closeDatabaseCaches(dbname);
-    return physicalRestoreLocked(dbname, backupPath, progress, &admission);
+    engine.closeDatabaseCaches(dbname);
+    return engine.physicalRestoreLocked(dbname, backupPath, progress, this);
+}
+
+bool StorageEngine::physicalRestore(const std::string& dbname,
+                                    const std::string& backupPath,
+                                    const MaintenanceProgress& progress) {
+    return PhysicalRestoreAdmission{}.restore(*this, dbname, backupPath, progress);
 }
 
 bool StorageEngine::physicalRestoreLocked(
@@ -52026,6 +52051,17 @@ bool StorageEngine::physicalRestoreLocked(
             restorePathsOverlap(src, dst) ||
             restorePathsOverlap(src, walArchiveDir(dbname))) {
             return false;
+        }
+
+        const auto dstArchive = walArchiveDir(dbname);
+        bool keepRecoveryArchive = false;
+        if (admission && admission->recovery) {
+            const auto& inputArchive = admission->recovery->archive;
+            if (restorePathsOverlap(inputArchive, dst)) return false;
+            std::error_code error;
+            keepRecoveryArchive = std::filesystem::equivalent(inputArchive, dstArchive, error);
+            if (!keepRecoveryArchive && restorePathsOverlap(inputArchive, dstArchive))
+                return false;
         }
 
         const auto markerSourceDir = src / "pg_tblspc";
@@ -52057,7 +52093,9 @@ bool StorageEngine::physicalRestoreLocked(
                 const auto relationRoot = location / dbname;
                 if (restorePathsOverlap(src, relationRoot) ||
                     restorePathsOverlap(dst, relationRoot) ||
-                    restorePathsOverlap(walArchiveDir(dbname), relationRoot)) {
+                    restorePathsOverlap(dstArchive, relationRoot) ||
+                    (admission && admission->recovery &&
+                     restorePathsOverlap(admission->recovery->archive, relationRoot))) {
                     return false;
                 }
                 for (const auto& [existingSource, existingTarget] :
@@ -52147,6 +52185,11 @@ bool StorageEngine::physicalRestoreLocked(
             discardStagedDatabase();
             return false;
         }
+        if (admission && !admission->stageRecovery(stagedDatabase, progress)) {
+            std::cerr << "[pitr] cannot stage the recovery archive for " << dbname << std::endl;
+            discardStagedDatabase();
+            return false;
+        }
         if (!syncPhysicalBackupTree(stagedDatabase)) {
             discardStagedDatabase();
             return false;
@@ -52180,7 +52223,6 @@ bool StorageEngine::physicalRestoreLocked(
         };
 
         const auto srcArchive = src / "wal_archive";
-        const auto dstArchive = walArchiveDir(dbname);
         std::error_code archiveError;
         const bool sourceArchiveExists =
             std::filesystem::exists(srcArchive, archiveError);
@@ -52197,7 +52239,7 @@ bool StorageEngine::physicalRestoreLocked(
             discardUnpublished();
             return false;
         }
-        if (sourceArchiveExists || targetArchiveExists) {
+        if (!keepRecoveryArchive && (sourceArchiveExists || targetArchiveExists)) {
             DurableDirectoryReplacement archiveReplacement;
             const std::filesystem::path* archiveSource =
                 sourceArchiveExists ? &srcArchive : nullptr;
@@ -52387,23 +52429,6 @@ Lsn StorageEngine::switchWal(const std::string& dbname) {
 // PITR: point-in-time recovery
 // ========================================================================
 
-static bool pitrSegmentNumber(const std::string& name,
-                              uint32_t timeline, uint32_t& segment) {
-    if (name.size() != 24) return false;
-    uint32_t parts[3]{};
-    for (size_t i = 0; i < 3; ++i) {
-        const char* begin = name.data() + i * 8;
-        const char* end = begin + 8;
-        const auto parsed = std::from_chars(begin, end, parts[i], 16);
-        if (parsed.ec != std::errc{} || parsed.ptr != end) return false;
-    }
-    // This WAL format uses the final eight digits as its segment number;
-    // the middle log field is always zero (see WALManager::segmentPath).
-    if (parts[0] != timeline || parts[1] != 0) return false;
-    segment = parts[2];
-    return true;
-}
-
 bool StorageEngine::pitrRestore(const std::string& dbname,
                                 const std::string& backupPath,
                                 const std::string& archiveDir,
@@ -52413,96 +52438,14 @@ bool StorageEngine::pitrRestore(const std::string& dbname,
         std::cerr << "[pitr] recovery target epoch is required" << std::endl;
         return false;
     }
-    if (!physicalRestore(dbname, backupPath, progress)) return false;
-
-    // Roll-forward material: archived segments of this database's timeline
-    // that are newer than the backup. The backup carries its own pg_wal up
-    // to the backup checkpoint; the archive holds everything after that.
-    const auto srcArchive = std::filesystem::path(archiveDir);
-    std::error_code ec;
-    if (!std::filesystem::is_directory(srcArchive, ec) || ec) {
-        std::cerr << "[pitr] archive directory not found: " << archiveDir
-                  << std::endl;
+    std::error_code error;
+    if (!std::filesystem::is_directory(archiveDir, error) || error) {
+        std::cerr << "[pitr] archive directory not found: " << archiveDir << std::endl;
         return false;
     }
-    auto walDir = dbPath(dbname) / "pg_wal";
-    std::filesystem::create_directories(walDir, ec);
-    if (ec) return false;
-
-    // A base backup can itself follow an earlier PITR fork. Recover the
-    // timeline selected by that image, not timeline 1 or the highest-named
-    // unrelated segment. Opening the restored WAL uses the same durable
-    // selector/inference and content validation as ordinary startup.
-    uint32_t backupTimeline = 0;
-    {
-        WALManager restoredWal(walDir);
-        if (!restoredWal.ensureOpen(false)) return false;
-        backupTimeline = restoredWal.timelineId();
-    }
-
-    // Only the selected stream determines the overlap boundary. Older
-    // abandoned timelines can retain numerically much newer segments.
-    uint32_t backupMaxSeg = 0;
-    {
-        std::error_code iterEc;
-        std::filesystem::directory_iterator it(walDir, iterEc), end;
-        if (iterEc) return false;
-        for (; it != end; it.increment(iterEc)) {
-            if (iterEc) return false;
-            const auto& entry = *it;
-            const std::string name = entry.path().filename().string();
-            uint32_t segNo = 0;
-            if (!pitrSegmentNumber(name, backupTimeline, segNo)) continue;
-            if (!entry.is_regular_file(iterEc) || iterEc) return false;
-            backupMaxSeg = std::max(backupMaxSeg, segNo);
-        }
-        if (iterEc) return false;
-    }
-
-    size_t copied = 0;
-    {
-        std::error_code iterEc;
-        std::filesystem::directory_iterator it(srcArchive, iterEc), end;
-        if (iterEc) return false;
-        for (; it != end; it.increment(iterEc)) {
-            if (iterEc) return false;
-            const auto& entry = *it;
-            const std::string name = entry.path().filename().string();
-            uint32_t segNo = 0;
-            if (!pitrSegmentNumber(name, backupTimeline, segNo)) continue;
-            if (segNo < backupMaxSeg) continue;
-            if (!entry.is_regular_file(iterEc) || iterEc) return false;
-            std::error_code copyEc;
-            std::filesystem::copy_file(
-                entry.path(), walDir / name,
-                std::filesystem::copy_options::overwrite_existing, copyEc);
-            if (copyEc) {
-                std::cerr << "[pitr] failed to restore archived segment " << name
-                          << ": " << copyEc.message() << std::endl;
-                return false;
-            }
-            if (progress && !progress(maintenancePathBytes(entry.path())))
-                return false;
-            ++copied;
-        }
-        if (iterEc) return false;
-    }
-    // Archived history replaces the ready/done bookkeeping of the backup;
-    // recovery decides from content, not markers.
-    std::filesystem::remove_all(walDir / "archive_status", ec);
-
-    // Persist the target so the NEXT process startup (where recovery
-    // actually replays) sees it — the restore command runs in a different
-    // process than the roll-forward.
-    const auto targetPath = walDir / "recovery_target";
-    if (!index_file::writeAtomically(
-            targetPath, std::to_string(targetEpoch) + "\n")) {
-        std::cerr << "[pitr] cannot persist recovery target" << std::endl;
-        return false;
-    }
-    std::cerr << "[pitr] restored " << copied
-              << " archived segment(s) for " << dbname
-              << "; recovery target epoch " << targetEpoch << std::endl;
+    PhysicalRestoreAdmission admission;
+    admission.recovery = PhysicalRestoreAdmission::RecoveryTarget{archiveDir, targetEpoch};
+    if (!admission.restore(*this, dbname, backupPath, progress)) return false;
     setRecoveryTargetEpoch(targetEpoch);
     return true;
 }

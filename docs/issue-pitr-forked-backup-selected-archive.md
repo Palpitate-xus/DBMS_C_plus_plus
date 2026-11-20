@@ -1,5 +1,7 @@
 # PITR: recover the archive stream selected by the base image
 
+The current [PITR staging verification](test-report.md#pitr-stage-archive-20261120) covers a genuine abandoned WAL segment and separately checks rejection of the fabricated segment described in this historical record.
+
 ## Reproduced loss and the repair
 
 The unchanged `82bf3739` production baseline, linked from all 58 proved
