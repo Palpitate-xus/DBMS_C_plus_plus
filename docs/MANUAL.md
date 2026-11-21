@@ -565,32 +565,41 @@ quoted `"@name"`是参数标识符，不是项目`@变量`赋值；完整语法�
 
 ### 编译
 
+在 Linux 上先安装编译依赖，再下载并编译主程序。最后一条命令会显示版本号。[编译依赖](PACKAGING.md#编译依赖)
+
 ```bash
-# 方式一: 自动构建 (推荐)
-./scripts/build.sh
-
-# 方式二: CMake
-cmake -S . -B build && cmake --build build -j$(nproc)
-
-# CMake 标准完整回归（等价于 scripts/build_tests.sh）
-cmake --build build --target check
-# 或
-ctest --test-dir build --output-on-failure
+git clone https://github.com/Palpitate-xus/DBMS_C_plus_plus.git
+cd DBMS_C_plus_plus
+cmake -S . -B build/cmake
+cmake --build build/cmake --target dbms_main --parallel 2
+./build/cmake/dbms_main --version
 ```
+
+也可以运行 `./scripts/build.sh`，它会在源码目录生成 `./dbms_main`。
+
+如需运行全部测试，可以使用 `./scripts/build_tests.sh` 或以下 CMake 命令。
+
+```bash
+cmake --build build/cmake --target check
+```
+
+也可以用 `ctest --test-dir build/cmake --output-on-failure` 运行。
 
 ### 运行
 
+先按部署说明准备数据目录、登录角色和访问配置，再选择启动方式。使用 `./scripts/build.sh` 编译时，把下方的程序路径换成 `./dbms_main`。[部署说明](PACKAGING.md)
+
 ```bash
 # 交互模式
-./dbms_main -D /srv/dbms/main
+./build/cmake/dbms_main -D /srv/dbms/main
 
 # 网络服务模式
-./dbms_main -D /srv/dbms/main --server 9999
+./build/cmake/dbms_main -D /srv/dbms/main --server 9999
 ```
 
 ### 首次登录
 
-按[部署说明](PACKAGING.md)准备数据目录、登录角色与访问配置后，可在交互模式下创建并选择数据库：
+登录后，可以在交互模式下创建并选择数据库。
 
 ```sql
 CREATE DATABASE mydb;

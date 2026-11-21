@@ -1,27 +1,27 @@
 # 更新日志
 
 <details>
-<summary>筛选时直接比较两列文字 · 2026-11-21</summary>
+<summary>部分查询能更快找出两列文字相同的记录 · 2026-11-21</summary>
 
-如果一列声明为 `C`、另一列沿用数据库默认规则，筛选时可以直接比较这两个值。文字末尾的空格仍参与比较。
+在测试的单表查询中，如果建表时将一列设为按字符编码比较（`COLLATE "C"`），另一列使用数据库默认规则，筛出两列内容相同的记录用时更短。比较 `TEXT` 和 `VARCHAR` 时，末尾空格仍参与比较。
 
 [测试报告](docs/test-report.md#declared-binary-comparison-20261121) · [性能报告](docs/performance-report-2026-10-30.md#declared-binary-comparison-cost-20261121)
 
 </details>
 
 <details>
-<summary>两列的排序规则冲突时会报错 · 2026-11-21</summary>
+<summary>两列文字的比较规则冲突时会提示错误 · 2026-11-21</summary>
 
-两列用不同的规则比较文字时，数据库会提示冲突。可以用 `COLLATE` 指定共同的规则。空表没有文字需要比较，查询会正常返回空结果。
+可以在查询里用 `COLLATE` 为两列指定同一种规则。空表里没有记录需要比较，查询会正常返回空结果。
 
 [使用手册](docs/MANUAL.md#基础查询) · [测试报告](docs/test-report.md#implicit-collation-filter-20261121) · [性能报告](docs/performance-report-2026-10-30.md#implicit-collation-filter-cost-20261121)
 
 </details>
 
 <details>
-<summary>筛选文字时可指定排序规则 · 2026-11-21</summary>
+<summary>筛选文字时可以指定比较规则 · 2026-11-21</summary>
 
-例如 `WHERE title COLLATE "C" < 'm'` 会用 `C` 规则找出排在 `m` 前面的标题。规则名写错时，空表也会提示错误。查询也可以使用自己创建的排序规则。
+例如 `WHERE title COLLATE "C" < 'm'` 会按字符编码比较，找出排在 `m` 前面的标题。也可以使用自己创建的规则。规则名写错时，即使表是空的，也会收到错误提示。
 
 [使用手册](docs/MANUAL.md#基础查询) · [测试报告](docs/test-report.md#explicit-collation-filter-20261121) · [性能报告](docs/performance-report-2026-10-30.md#explicit-collation-filter-cost-20261121)
 
