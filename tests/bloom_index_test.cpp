@@ -9,6 +9,8 @@
 // ============================================================================
 
 #include "access/BloomIndex.h"
+#include "access/HashIndex.h"
+#include "catalog/type_registry.h"
 #include "commands/DdlExecutor.h"
 #include "commands/TableManage.h"
 #include "Session.h"
@@ -311,6 +313,47 @@ static void test_engine_bloom_lifecycle() {
     std::cout << "[BLOOM] engine lifecycle/DML/drop OK" << std::endl;
 }
 
+static void test_distinct_dotted_index_keys() {
+    const std::string db = testDbPath("dotted_index_cache");
+    cleanupTestDb("dotted_index_cache");
+    assert(g_engine.createDatabase(db, "utf8") == dbms::DBStatus::OK);
+    const std::string shortTable = "cache_part";
+    const std::string longTable = "cache_part.branch";
+    const std::string shortColumn = "branch.value";
+    const std::string longColumn = "value";
+
+    auto prepare = [&](const std::string& table, const std::string& column,
+                       const std::string& key) {
+        dbms::TableSchema schema;
+        schema.tablename = table;
+        schema.append(dbms::makeIntColumn("id", false, 4, true));
+        schema.append(dbms::makeVarCharColumn(column, false, 32));
+        assert(g_engine.createTable(db, schema) == dbms::DBStatus::OK);
+        assert(g_engine.insert(db, table, {{"id", "1"}, {column, key}}) == dbms::DBStatus::OK);
+        assert(g_engine.createHashIndex(db, table, column) == dbms::DBStatus::OK);
+        assert(g_engine.createBloomIndex(db, table, column) == dbms::DBStatus::OK);
+    };
+    prepare(shortTable, shortColumn, "short-key");
+    prepare(longTable, longColumn, "long-key");
+
+    // Joining the components with dots used to give these distinct physical
+    // table/column pairs the same in-memory key.
+    auto check = [](const auto* first, const auto* second) {
+        assert(first && second && first != second);
+        assert(first->search("short-key").size() == 1);
+        assert(first->search("long-key").empty());
+        assert(second->search("short-key").empty());
+        assert(second->search("long-key").size() == 1);
+    };
+    check(g_engine.getHashIndex(db, shortTable, shortColumn),
+          g_engine.getHashIndex(db, longTable, longColumn));
+    check(g_engine.getBloomIndex(db, shortTable, shortColumn),
+          g_engine.getBloomIndex(db, longTable, longColumn));
+    g_engine.dropDatabase(db);
+    cleanupTestDb("dotted_index_cache");
+    std::cout << "[BLOOM] dotted hash/bloom cache keys remain independent" << std::endl;
+}
+
 int main() {
     cleanupAllTestData();
     test_bloom_unit();
@@ -318,6 +361,7 @@ int main() {
     test_bloom_grows_geometrically();
     test_bloom_rejects_malformed_lengths_and_layout();
     test_engine_bloom_lifecycle();
+    test_distinct_dotted_index_keys();
     std::cout << "[BLOOM] all tests passed" << std::endl;
     return 0;
 }

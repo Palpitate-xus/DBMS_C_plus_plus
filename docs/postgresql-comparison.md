@@ -2,6 +2,10 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-21 · 建索引时核对文件归属
+
+PostgreSQL 18 用索引自己的文件编号定位物理文件。SQLite 在 `sqlite_schema` 中为索引记录 B 树根页。DuckDB 将索引放在数据库文件内部。这些实现能分别保存表 `a` 的列 `b_c` 和表 `a_b` 的列 `c` 上的索引。本项目按名称拼接文件路径，遇到同一物理路径时会拒绝写入以保留已有索引。消除这类名称冲突仍需要按独立编号定位索引。[PostgreSQL 文件布局](https://www.postgresql.org/docs/18/storage-file-layout.html) · [SQLite 文件格式](https://www.sqlite.org/fileformat.html#storage_of_the_sql_database_schema) · [DuckDB 存储说明](https://duckdb.org/faq#can-duckdb-save-data-to-disk) · [本项目测试](test-report.md#index-file-ownership-20261121)
+
 ## 2026-11-21 · 表改名和旧名重用
 
 PostgreSQL 18.6 在 `pg_class` 中改表名，表和索引文件仍通过各自的编号定位。SQLite 通过改写 `sqlite_schema` 中的 SQL 定义来重命名，表里的数据不必重写。DuckDB 在目录操作中复制并更改表项的名称，同时更新受影响的约束表达式。[PostgreSQL 重命名源码](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/commands/tablecmds.c) · [PostgreSQL 文件布局](https://www.postgresql.org/docs/18/storage-file-layout.html) · [SQLite ALTER TABLE](https://www.sqlite.org/lang_altertable.html) · [DuckDB 目录源码](https://raw.githubusercontent.com/duckdb/duckdb/main/src/catalog/catalog_entry/duck_table_entry.cpp)

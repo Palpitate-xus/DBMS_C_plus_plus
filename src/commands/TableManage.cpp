@@ -3973,8 +3973,18 @@ static DBStatus collectRelationFiles(
     std::vector<std::filesystem::path>& files,
     const TableSchema* creating = nullptr);
 
+static DBStatus checkIndexFileDestination(
+    const StorageEngine& engine, const std::string& dbname,
+    const TableSchema& table, const std::filesystem::path& path,
+    bool btree = false);
+
+static bool ownsSpecializedIndexFile(
+    const StorageEngine& engine, const std::string& dbname,
+    const std::string& tablename, const std::filesystem::path& path,
+    const TableSchema* targetSchema = nullptr);
+
 static bool isDefinitionBearingSpecializedIndexFileName(
-    const std::string& name, const std::string& tablename) {
+    std::string_view name, const std::string& tablename) {
     if (name.rfind(tablename + "_", 0) != 0) return false;
     const std::array<std::string_view, 5> suffixes = {
         ".fti", ".gin", ".gist", ".spgist", ".brin"};
@@ -8865,7 +8875,7 @@ bool StorageEngine::flushSelectedCaches(
     bool heapPages) {
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     const std::string tablePrefix = dbname + "/";
-    const std::string hashPrefix = dbname + ".";
+    const std::string hashPrefix = dbname + "/";
     const std::string toastPrefix = dbname + ":";
     const auto slashKeySelected = [&](const std::string& key) {
         if (!tablenames) return key.rfind(tablePrefix, 0) == 0;
@@ -8884,7 +8894,7 @@ bool StorageEngine::flushSelectedCaches(
     const auto hashKeySelected = [&](const std::string& key) {
         if (!tablenames) return key.rfind(hashPrefix, 0) == 0;
         for (const auto& table : *tablenames) {
-            if (key.rfind(hashPrefix + table + ".", 0) == 0) return true;
+            if (key.rfind(hashPrefix + table + "/", 0) == 0) return true;
         }
         return false;
     };
@@ -9054,7 +9064,7 @@ void StorageEngine::closeDatabaseCaches(const std::string& dbname) {
     eraseTableCaches(secidxLinesCache_);
     eraseTableCaches(hashidxLinesCache_);
     for (auto it = hashIndexCache_.begin(); it != hashIndexCache_.end();) {
-        if (it->first.rfind(dbname + ".", 0) == 0) {
+        if (it->first.rfind(tablePrefix, 0) == 0) {
             it = hashIndexCache_.erase(it);
         } else {
             ++it;
@@ -9062,7 +9072,7 @@ void StorageEngine::closeDatabaseCaches(const std::string& dbname) {
     }
     for (auto it = bloomIndexCache_.begin();
          it != bloomIndexCache_.end();) {
-        if (it->first.rfind(dbname + ".", 0) == 0) {
+        if (it->first.rfind(tablePrefix, 0) == 0) {
             it = bloomIndexCache_.erase(it);
         } else {
             ++it;
@@ -9164,7 +9174,7 @@ bool StorageEngine::refreshPreparedTableCaches(
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     const std::string tableKey = dbname + "/" + tablename;
     const std::string secondaryPrefix = tableKey + "/";
-    const std::string auxiliaryPrefix = dbname + "." + tablename + ".";
+    const std::string auxiliaryPrefix = dbname + "/" + tablename + "/";
     const std::string toastKey = dbname + ":" + tablename;
 
     // PREPARE flushes the producing backend before publishing its durable
@@ -9287,8 +9297,8 @@ void StorageEngine::pruneMissingDatabaseCaches() {
     for (const auto& [key, _] : vmCache_) collectDatabase(key, '/');
     for (const auto& [key, _] : pkIndexCache_) collectDatabase(key, '/');
     for (const auto& [key, _] : secondaryIndexCache_) collectDatabase(key, '/');
-    for (const auto& [key, _] : hashIndexCache_) collectDatabase(key, '.');
-    for (const auto& [key, _] : bloomIndexCache_) collectDatabase(key, '.');
+    for (const auto& [key, _] : hashIndexCache_) collectDatabase(key, '/');
+    for (const auto& [key, _] : bloomIndexCache_) collectDatabase(key, '/');
     for (const auto& [key, _] : toastPageAllocators_) collectDatabase(key, ':');
     for (const auto& [key, _] : toastIndexes_) collectDatabase(key, ':');
     for (const auto& [key, _] : spGiSTCache_) collectDatabase(key, '/');
@@ -10714,7 +10724,7 @@ HashIndex* StorageEngine::getHashIndex(const std::string& dbname,
                                         const std::string& colname) const {
     requireDatabaseTransactionOwnership(dbname);
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
-    std::string key = dbname + "." + tablename + "." + colname;
+    std::string key = dbname + "/" + tablename + "/" + colname;
     auto it = hashIndexCache_.find(key);
     if (it != hashIndexCache_.end()) {
         if (it->second && !it->second->hasStaleFileGeneration())
@@ -10736,7 +10746,10 @@ HashIndex* StorageEngine::getHashIndexForBuild(
         const std::string& colname) const {
     requireDatabaseTransactionOwnership(dbname);
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
-    const std::string key = dbname + "." + tablename + "." + colname;
+    const auto path = hashIndexPath(dbname, tablename, colname);
+    if (checkIndexFileDestination(*this, dbname, getTableSchema(dbname, tablename), path)
+            != DBStatus::OK) return nullptr;
+    const std::string key = dbname + "/" + tablename + "/" + colname;
     auto it = hashIndexCache_.find(key);
     if (it != hashIndexCache_.end()) {
         if (it->second && !it->second->hasStaleFileGeneration())
@@ -10744,8 +10757,7 @@ HashIndex* StorageEngine::getHashIndexForBuild(
         if (it->second) it->second->discard();
         hashIndexCache_.erase(it);
     }
-    auto index = std::make_unique<HashIndex>(
-        hashIndexPath(dbname, tablename, colname));
+    auto index = std::make_unique<HashIndex>(path);
     if (!index->openForBuild()) return nullptr;
     HashIndex* result = index.get();
     hashIndexCache_[key] = std::move(index);
@@ -10775,13 +10787,16 @@ DBStatus StorageEngine::createHashIndex(const std::string& dbname,
         std::string line;
         while (std::getline(in, line)) if (!line.empty()) existing.insert(line);
     }
-    if (existing.count(colname)) return DBStatus::OK; // already exists
+    if (existing.count(colname)) {
+        return checkIndexFileDestination(*this, dbname, tbl,
+                                         hashIndexPath(dbname, tablename, colname));
+    }
     existing.insert(colname);
 
     // Build hash index from existing data
     HashIndex* hidx = getHashIndexForBuild(dbname, tablename, colname);
     if (!hidx) return DBStatus::IO_ERROR;
-    const std::string cacheKey = dbname + "." + tablename + "." + colname;
+    const std::string cacheKey = dbname + "/" + tablename + "/" + colname;
     auto discardIndex = [&]() {
         hidx->close();
         std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
@@ -10826,6 +10841,12 @@ DBStatus StorageEngine::createHashIndex(const std::string& dbname,
 DBStatus StorageEngine::dropHashIndex(const std::string& dbname,
                                        const std::string& tablename,
                                        const std::string& colname) {
+    const DatabaseMetadataWrite metadataWrite(dbPath(dbname));
+    if (!metadataWrite.acquired()) return DBStatus::LOCK_CONFLICT;
+    const auto path = hashIndexPath(dbname, tablename, colname);
+    const auto pathStatus = checkIndexFileDestination(
+        *this, dbname, getTableSchema(dbname, tablename), path);
+    if (pathStatus != DBStatus::OK) return pathStatus;
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     std::filesystem::path meta = hashIndexMetaPath(dbname, tablename);
     std::set<std::string> existing;
@@ -10840,9 +10861,9 @@ DBStatus StorageEngine::dropHashIndex(const std::string& dbname,
         for (const auto& c : existing) out << c << '\n';
     }
     invalidateHashidxCache(dbname, tablename);
-    std::string key = dbname + "." + tablename + "." + colname;
+    std::string key = dbname + "/" + tablename + "/" + colname;
     hashIndexCache_.erase(key);
-    std::filesystem::remove(hashIndexPath(dbname, tablename, colname));
+    std::filesystem::remove(path);
     return DBStatus::OK;
 }
 
@@ -10878,7 +10899,7 @@ BloomIndex* StorageEngine::getBloomIndex(const std::string& dbname,
                                          const std::string& colname) const {
     requireDatabaseTransactionOwnership(dbname);
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
-    std::string key = dbname + "." + tablename + "." + colname;
+    std::string key = dbname + "/" + tablename + "/" + colname;
     auto it = bloomIndexCache_.find(key);
     if (it != bloomIndexCache_.end()) {
         if (it->second && !it->second->hasStaleFileGeneration())
@@ -10900,7 +10921,10 @@ BloomIndex* StorageEngine::getBloomIndexForBuild(
         const std::string& colname) const {
     requireDatabaseTransactionOwnership(dbname);
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
-    const std::string key = dbname + "." + tablename + "." + colname;
+    const auto path = bloomIndexPath(dbname, tablename, colname);
+    if (checkIndexFileDestination(*this, dbname, getTableSchema(dbname, tablename), path)
+            != DBStatus::OK) return nullptr;
+    const std::string key = dbname + "/" + tablename + "/" + colname;
     auto it = bloomIndexCache_.find(key);
     if (it != bloomIndexCache_.end()) {
         if (it->second && !it->second->hasStaleFileGeneration())
@@ -10908,8 +10932,7 @@ BloomIndex* StorageEngine::getBloomIndexForBuild(
         if (it->second) it->second->discard();
         bloomIndexCache_.erase(it);
     }
-    auto index = std::make_unique<BloomIndex>(
-        bloomIndexPath(dbname, tablename, colname));
+    auto index = std::make_unique<BloomIndex>(path);
     if (!index->openForBuild()) return nullptr;
     BloomIndex* result = index.get();
     bloomIndexCache_[key] = std::move(index);
@@ -10938,12 +10961,15 @@ DBStatus StorageEngine::createBloomIndex(const std::string& dbname,
         std::string line;
         while (std::getline(in, line)) if (!line.empty()) existing.insert(line);
     }
-    if (existing.count(colname)) return DBStatus::OK;  // already exists
+    if (existing.count(colname)) {
+        return checkIndexFileDestination(*this, dbname, tbl,
+                                         bloomIndexPath(dbname, tablename, colname));
+    }
     existing.insert(colname);
 
     BloomIndex* bidx = getBloomIndexForBuild(dbname, tablename, colname);
     if (!bidx) return DBStatus::IO_ERROR;
-    const std::string cacheKey = dbname + "." + tablename + "." + colname;
+    const std::string cacheKey = dbname + "/" + tablename + "/" + colname;
     auto discardIndex = [&]() {
         bidx->close();
         std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
@@ -10987,6 +11013,12 @@ DBStatus StorageEngine::createBloomIndex(const std::string& dbname,
 DBStatus StorageEngine::dropBloomIndex(const std::string& dbname,
                                        const std::string& tablename,
                                        const std::string& colname) {
+    const DatabaseMetadataWrite metadataWrite(dbPath(dbname));
+    if (!metadataWrite.acquired()) return DBStatus::LOCK_CONFLICT;
+    const auto path = bloomIndexPath(dbname, tablename, colname);
+    const auto pathStatus = checkIndexFileDestination(
+        *this, dbname, getTableSchema(dbname, tablename), path);
+    if (pathStatus != DBStatus::OK) return pathStatus;
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     std::filesystem::path meta = bloomIndexMetaPath(dbname, tablename);
     std::set<std::string> existing;
@@ -11000,9 +11032,9 @@ DBStatus StorageEngine::dropBloomIndex(const std::string& dbname,
         std::ofstream out(meta, std::ios::trunc);
         for (const auto& c : existing) out << c << '\n';
     }
-    std::string key = dbname + "." + tablename + "." + colname;
+    std::string key = dbname + "/" + tablename + "/" + colname;
     bloomIndexCache_.erase(key);
-    std::filesystem::remove(bloomIndexPath(dbname, tablename, colname));
+    std::filesystem::remove(path);
     return DBStatus::OK;
 }
 
@@ -14220,6 +14252,14 @@ DBStatus StorageEngine::createIndex(const std::string& dbname, const std::string
         return DBStatus::INVALID_VALUE;
     }
 
+    const std::string physicalIndexKey = isExpression ? expression : actualColname;
+    const auto physicalPath = secondaryIndexPath(dbname, tablename, physicalIndexKey);
+    const auto pathStatus = checkIndexFileDestination(*this, dbname, tbl, physicalPath, true);
+    if (pathStatus != DBStatus::OK) {
+        lockManager_.unlock(tablename);
+        return pathStatus;
+    }
+
     // Already indexed? If direction differs, drop and recreate
     auto existing = getIndexedColumns(dbname, tablename);
     bool alreadyIndexed = false;
@@ -14243,10 +14283,9 @@ DBStatus StorageEngine::createIndex(const std::string& dbname, const std::string
     }
 
     // Build index from existing data using page-based iteration
-    const std::string physicalIndexKey = isExpression ? expression : actualColname;
     BPTree* idx = loadBtreeIndex(
         secondaryIndexCache_, dbname + "/" + tablename + "/" + physicalIndexKey,
-        secondaryIndexPath(dbname, tablename, physicalIndexKey), true);
+        physicalPath, true);
     if (!idx) {
         lockManager_.unlock(tablename);
         return DBStatus::INVALID_VALUE;
@@ -14258,7 +14297,7 @@ DBStatus StorageEngine::createIndex(const std::string& dbname, const std::string
             secondaryIndexCache_.erase(dbname + "/" + tablename + "/" + physicalIndexKey);
         }
         std::error_code error;
-        std::filesystem::remove(secondaryIndexPath(dbname, tablename, physicalIndexKey), error);
+        std::filesystem::remove(physicalPath, error);
     };
 
     const std::vector<size_t> uniqueColumns{colIdx};
@@ -14382,6 +14421,8 @@ DBStatus StorageEngine::dropIndexByAccessMethod(
 
 DBStatus StorageEngine::dropIndex(const std::string& dbname, const std::string& tablename,
                                    const std::string& colname) {
+    const DatabaseMetadataWrite metadataWrite(dbPath(dbname));
+    if (!metadataWrite.acquired()) return DBStatus::LOCK_CONFLICT;
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     if (!lockManager_.lockMetadata(tablename)) return DBStatus::LOCK_CONFLICT;
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
@@ -14430,6 +14471,14 @@ DBStatus StorageEngine::dropIndex(const std::string& dbname, const std::string& 
         return DBStatus::TABLE_NOT_FOUND;
     }
 
+    const auto physicalPath = secondaryIndexPath(dbname, tablename, colname);
+    const auto pathStatus = checkIndexFileDestination(
+        *this, dbname, getTableSchema(dbname, tablename), physicalPath, true);
+    if (pathStatus != DBStatus::OK) {
+        lockManager_.unlock(tablename);
+        return pathStatus;
+    }
+
     std::ostringstream retained;
     for (const auto& retainedLine : lines) retained << retainedLine << '\n';
     if (!writeIndexMetadata(meta, retained.str())) {
@@ -14438,7 +14487,6 @@ DBStatus StorageEngine::dropIndex(const std::string& dbname, const std::string& 
     }
     invalidateSecidxCache(dbname, tablename);
 
-    const auto physicalPath = secondaryIndexPath(dbname, tablename, colname);
     std::error_code error;
     if (std::filesystem::exists(physicalPath, error) &&
         !std::filesystem::is_regular_file(physicalPath, error)) {
@@ -14508,6 +14556,13 @@ DBStatus StorageEngine::createCompositeIndex(const std::string& dbname,
         return DBStatus::INVALID_VALUE;
     }
 
+    const auto physicalPath = relationDir(dbname, tablename) / (tablename + ".idx_" + indexName);
+    const auto pathStatus = checkIndexFileDestination(*this, dbname, tbl, physicalPath, true);
+    if (pathStatus != DBStatus::OK) {
+        lockManager_.unlock(tablename);
+        return pathStatus;
+    }
+
     // Check name collision with existing composite indexes
     auto existingComp = getCompositeIndexes(dbname, tablename);
     for (const auto& ci : existingComp) {
@@ -14537,7 +14592,7 @@ DBStatus StorageEngine::createCompositeIndex(const std::string& dbname,
     // Build index from existing data
     BPTree* idx = loadBtreeIndex(
         secondaryIndexCache_, dbname + "/" + tablename + "/C/" + indexName,
-        relationDir(dbname, tablename) / (tablename + ".idx_" + indexName), true);
+        physicalPath, true);
     if (!idx) {
         lockManager_.unlock(tablename);
         return DBStatus::INVALID_VALUE;
@@ -14550,8 +14605,7 @@ DBStatus StorageEngine::createCompositeIndex(const std::string& dbname,
             secondaryIndexCache_.erase(physicalIndexKey);
         }
         std::error_code error;
-        std::filesystem::remove(relationDir(dbname, tablename) /
-                                (tablename + ".idx_" + indexName), error);
+        std::filesystem::remove(physicalPath, error);
     };
 
     const bool needsCollationScan = unique &&
@@ -14667,6 +14721,8 @@ DBStatus StorageEngine::createCompositeIndex(const std::string& dbname,
 DBStatus StorageEngine::dropCompositeIndex(const std::string& dbname,
                                             const std::string& tablename,
                                             const std::string& indexName) {
+    const DatabaseMetadataWrite metadataWrite(dbPath(dbname));
+    if (!metadataWrite.acquired()) return DBStatus::LOCK_CONFLICT;
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     const std::filesystem::path meta = secondaryIndexMetaPath(dbname, tablename);
@@ -14679,6 +14735,12 @@ DBStatus StorageEngine::dropCompositeIndex(const std::string& dbname,
         if (ci.name == indexName) { found = true; break; }
     }
     if (!found) return DBStatus::TABLE_NOT_FOUND;
+
+    const auto physicalPath = relationDir(dbname, tablename) /
+                              (tablename + ".idx_" + indexName);
+    const auto pathStatus = checkIndexFileDestination(
+        *this, dbname, getTableSchema(dbname, tablename), physicalPath, true);
+    if (pathStatus != DBStatus::OK) return pathStatus;
 
     // Preserve every remaining metadata line, including INCLUDE/WHERE
     // options, instead of reconstructing a lossy subset from parsed fields.
@@ -14704,8 +14766,6 @@ DBStatus StorageEngine::dropCompositeIndex(const std::string& dbname,
     }
     invalidateSecidxCache(dbname, tablename);
 
-    const auto physicalPath = relationDir(dbname, tablename) /
-                              (tablename + ".idx_" + indexName);
     std::error_code error;
     if (std::filesystem::exists(physicalPath, error) &&
         !std::filesystem::is_regular_file(physicalPath, error)) {
@@ -14729,6 +14789,8 @@ DBStatus StorageEngine::reindex(const std::string& dbname,
                                  const std::string& tablename,
                                  size_t* rebuiltCount) {
     if (rebuiltCount) *rebuiltCount = 0;
+    const DatabaseMetadataWrite metadataWrite(dbPath(dbname));
+    if (!metadataWrite.acquired()) return DBStatus::LOCK_CONFLICT;
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     if (!lockManager_.lockMetadata(tablename)) {
         return DBStatus::LOCK_CONFLICT;
@@ -14808,6 +14870,9 @@ DBStatus StorageEngine::reindex(const std::string& dbname,
     const auto createPending = [&](const std::filesystem::path& target,
                                    std::string cacheKey,
                                    bool primary) -> BPTree* {
+        if (checkIndexFileDestination(*this, dbname, tbl, target, true) != DBStatus::OK) {
+            return nullptr;
+        }
         PendingIndex index;
         if (!normalizedAbsolutePath(target, index.swap.target)) return nullptr;
         const uint64_t sequence = temporarySequence.fetch_add(1);
@@ -14846,6 +14911,9 @@ DBStatus StorageEngine::reindex(const std::string& dbname,
     const auto reserveAuxiliary = [&](const std::filesystem::path& target,
                                       const std::string& method,
                                       const std::string& column) -> std::optional<std::filesystem::path> {
+        if (checkIndexFileDestination(*this, dbname, tbl, target) != DBStatus::OK) {
+            return {};
+        }
         PendingIndex index;
         if (!normalizedAbsolutePath(target, index.swap.target)) return {};
         const auto sequence = temporarySequence.fetch_add(1);
@@ -14854,7 +14922,7 @@ DBStatus StorageEngine::reindex(const std::string& dbname,
         index.swap.backup = index.swap.target.string() + ".reindex.old." + suffix;
         index.swap.paired = false;
         index.accessMethod = method; index.column = column;
-        index.cacheKey = dbname + "." + tablename + "." + column;
+        index.cacheKey = dbname + "/" + tablename + "/" + column;
         bool targetExists = false;
         if (!inspectRegularFile(index.swap.target, targetExists) ||
             !validReindexSwapEntry(index.swap, reindexRelationRoot, tablename) ||
@@ -15354,6 +15422,9 @@ DBStatus StorageEngine::createFullTextIndex(const std::string& dbname,
     }
     if (colIdx >= tbl.len()) return DBStatus::INVALID_VALUE;
 
+    auto path = fullTextIndexPath(dbname, tablename, colname);
+    const auto pathStatus = checkIndexFileDestination(*this, dbname, tbl, path);
+    if (pathStatus != DBStatus::OK) return pathStatus;
     std::map<std::string, std::set<int64_t>> inverted;
     if (!forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
                                        const char* data, size_t len) {
@@ -15368,7 +15439,6 @@ DBStatus StorageEngine::createFullTextIndex(const std::string& dbname,
         }
     })) return DBStatus::IO_ERROR;
 
-    auto path = fullTextIndexPath(dbname, tablename, colname);
     std::ostringstream out;
     for (const auto& kv : inverted) {
         out << kv.first;
@@ -15384,7 +15454,12 @@ DBStatus StorageEngine::createFullTextIndex(const std::string& dbname,
 DBStatus StorageEngine::dropFullTextIndex(const std::string& dbname,
                                            const std::string& tablename,
                                            const std::string& colname) {
-    auto path = fullTextIndexPath(dbname, tablename, colname);
+    const DatabaseMetadataWrite metadataWrite(dbPath(dbname));
+    if (!metadataWrite.acquired()) return DBStatus::LOCK_CONFLICT;
+    const auto path = fullTextIndexPath(dbname, tablename, colname);
+    const auto pathStatus = checkIndexFileDestination(
+        *this, dbname, getTableSchema(dbname, tablename), path);
+    if (pathStatus != DBStatus::OK) return pathStatus;
     if (std::filesystem::exists(path)) {
         std::filesystem::remove(path);
     }
@@ -15394,7 +15469,9 @@ DBStatus StorageEngine::dropFullTextIndex(const std::string& dbname,
 bool StorageEngine::hasFullTextIndex(const std::string& dbname,
                                       const std::string& tablename,
                                       const std::string& colname) const {
-    return std::filesystem::exists(fullTextIndexPath(dbname, tablename, colname));
+    const auto path = fullTextIndexPath(dbname, tablename, colname);
+    return std::filesystem::exists(path) &&
+        ownsSpecializedIndexFile(*this, dbname, tablename, path);
 }
 
 bool StorageEngine::specializedIndexesNeedHeapFallback(
@@ -15471,7 +15548,8 @@ constexpr std::array<std::string_view, static_cast<size_t>(SpecializedIndexKind:
 using SpecializedIndexColumns = std::array<std::vector<std::string>, specializedIndexSuffixes.size()>;
 
 template <typename Visit>
-void visitSpecializedIndexColumns(const std::filesystem::path& dir, const std::string& tablename,
+void visitSpecializedIndexColumns(const StorageEngine& engine, const std::string& dbname,
+                                  const std::filesystem::path& dir, const std::string& tablename,
                                   Visit&& visit, std::optional<SpecializedIndexKind> only = {}) {
     if (!std::filesystem::exists(dir)) return;
     const std::string prefix = tablename + "_";
@@ -15488,26 +15566,31 @@ void visitSpecializedIndexColumns(const std::filesystem::path& dir, const std::s
             const auto column = std::string_view(name).substr(prefix.size(),
                 name.size() - prefix.size() - suffix.size());
             // The existing SP-GiST reader excludes an empty column name.
-            if (!column.empty() || family != static_cast<size_t>(SpecializedIndexKind::SPGiST))
+            if ((!column.empty() || family != static_cast<size_t>(SpecializedIndexKind::SPGiST)) &&
+                ownsSpecializedIndexFile(engine, dbname, tablename, entry.path())) {
                 visit(family, column);
+            }
             break;
         }
     }
 }
 
-SpecializedIndexColumns collectSpecializedIndexColumns(const std::filesystem::path& dir,
+SpecializedIndexColumns collectSpecializedIndexColumns(const StorageEngine& engine,
+                                                        const std::string& dbname,
+                                                        const std::filesystem::path& dir,
                                                         const std::string& tablename) {
     SpecializedIndexColumns result;
-    visitSpecializedIndexColumns(dir, tablename, [&](size_t family, std::string_view column) {
+    visitSpecializedIndexColumns(engine, dbname, dir, tablename, [&](size_t family, std::string_view column) {
         result[family].emplace_back(column);
     });
     return result;
 }
 
-std::vector<std::string> collectSpecializedIndexColumns(const std::filesystem::path& dir,
+std::vector<std::string> collectSpecializedIndexColumns(const StorageEngine& engine,
+        const std::string& dbname, const std::filesystem::path& dir,
         const std::string& tablename, SpecializedIndexKind family) {
     std::vector<std::string> result;
-    visitSpecializedIndexColumns(dir, tablename, [&](size_t, std::string_view column) {
+    visitSpecializedIndexColumns(engine, dbname, dir, tablename, [&](size_t, std::string_view column) {
         result.emplace_back(column);
     }, family);
     return result;
@@ -15516,7 +15599,7 @@ std::vector<std::string> collectSpecializedIndexColumns(const std::filesystem::p
 
 std::vector<std::string> StorageEngine::getFullTextIndexedColumns(const std::string& dbname,
                                                                    const std::string& tablename) const {
-    return collectSpecializedIndexColumns(relationDir(dbname, tablename), tablename, SpecializedIndexKind::FullText);
+    return collectSpecializedIndexColumns(*this, dbname, relationDir(dbname, tablename), tablename, SpecializedIndexKind::FullText);
 }
 
 // ========================================================================
@@ -15629,6 +15712,9 @@ DBStatus StorageEngine::createGinIndex(const std::string& dbname,
     }
     if (colIdx >= tbl.len()) return DBStatus::INVALID_VALUE;
 
+    auto path = ginIndexPath(dbname, tablename, colname);
+    const auto pathStatus = checkIndexFileDestination(*this, dbname, tbl, path);
+    if (pathStatus != DBStatus::OK) return pathStatus;
     std::map<std::string, std::set<int64_t>> inverted;
     if (!forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
                                        const char* data, size_t len) {
@@ -15643,7 +15729,6 @@ DBStatus StorageEngine::createGinIndex(const std::string& dbname,
         }
     })) return DBStatus::IO_ERROR;
 
-    auto path = ginIndexPath(dbname, tablename, colname);
     const std::string bytes = serializeGinIndex(inverted);
     if (!index_file::writeAtomically(path, bytes)) return DBStatus::IO_ERROR;
     return DBStatus::OK;
@@ -15652,7 +15737,12 @@ DBStatus StorageEngine::createGinIndex(const std::string& dbname,
 DBStatus StorageEngine::dropGinIndex(const std::string& dbname,
                                       const std::string& tablename,
                                       const std::string& colname) {
-    auto path = ginIndexPath(dbname, tablename, colname);
+    const DatabaseMetadataWrite metadataWrite(dbPath(dbname));
+    if (!metadataWrite.acquired()) return DBStatus::LOCK_CONFLICT;
+    const auto path = ginIndexPath(dbname, tablename, colname);
+    const auto pathStatus = checkIndexFileDestination(
+        *this, dbname, getTableSchema(dbname, tablename), path);
+    if (pathStatus != DBStatus::OK) return pathStatus;
     std::error_code ec;
     if (std::filesystem::exists(path, ec) && !std::filesystem::remove(path, ec)) {
         return DBStatus::IO_ERROR;
@@ -15664,7 +15754,9 @@ DBStatus StorageEngine::dropGinIndex(const std::string& dbname,
 bool StorageEngine::hasGinIndex(const std::string& dbname,
                                  const std::string& tablename,
                                  const std::string& colname) const {
-    return std::filesystem::exists(ginIndexPath(dbname, tablename, colname));
+    const auto path = ginIndexPath(dbname, tablename, colname);
+    return std::filesystem::exists(path) &&
+        ownsSpecializedIndexFile(*this, dbname, tablename, path);
 }
 
 static bool readGinIndexForKey(const std::filesystem::path& path,
@@ -15896,7 +15988,7 @@ std::vector<int64_t> StorageEngine::ginSearch(const std::string& dbname,
 
 std::vector<std::string> StorageEngine::getGinIndexedColumns(const std::string& dbname,
                                                               const std::string& tablename) const {
-    return collectSpecializedIndexColumns(relationDir(dbname, tablename), tablename, SpecializedIndexKind::Gin);
+    return collectSpecializedIndexColumns(*this, dbname, relationDir(dbname, tablename), tablename, SpecializedIndexKind::Gin);
 }
 
 // ========================================================================
@@ -15999,6 +16091,8 @@ DBStatus StorageEngine::createGiSTIndex(const std::string& dbname,
     if (colIdx >= tbl.len()) return DBStatus::INVALID_VALUE;
 
     auto path = giSTIndexPath(dbname, tablename, colname);
+    const auto pathStatus = checkIndexFileDestination(*this, dbname, tbl, path);
+    if (pathStatus != DBStatus::OK) return pathStatus;
     std::string entryPayload;
     uint64_t entryCount = 0;
     const bool completeEmptyCoverage = tbl.formatVersion == DATA_FILE_FORMAT_VERSION &&
@@ -16044,7 +16138,12 @@ DBStatus StorageEngine::createGiSTIndex(const std::string& dbname,
 DBStatus StorageEngine::dropGiSTIndex(const std::string& dbname,
                                        const std::string& tablename,
                                        const std::string& colname) {
-    auto path = giSTIndexPath(dbname, tablename, colname);
+    const DatabaseMetadataWrite metadataWrite(dbPath(dbname));
+    if (!metadataWrite.acquired()) return DBStatus::LOCK_CONFLICT;
+    const auto path = giSTIndexPath(dbname, tablename, colname);
+    const auto pathStatus = checkIndexFileDestination(
+        *this, dbname, getTableSchema(dbname, tablename), path);
+    if (pathStatus != DBStatus::OK) return pathStatus;
     if (std::filesystem::exists(path)) std::filesystem::remove(path);
     return DBStatus::OK;
 }
@@ -16052,7 +16151,9 @@ DBStatus StorageEngine::dropGiSTIndex(const std::string& dbname,
 bool StorageEngine::hasGiSTIndex(const std::string& dbname,
                                   const std::string& tablename,
                                   const std::string& colname) const {
-    return std::filesystem::exists(giSTIndexPath(dbname, tablename, colname));
+    const auto path = giSTIndexPath(dbname, tablename, colname);
+    return std::filesystem::exists(path) &&
+        ownsSpecializedIndexFile(*this, dbname, tablename, path);
 }
 
 enum class GistKeyOrdering { Text, ExactNumeric, FloatingPoint };
@@ -16819,7 +16920,7 @@ std::vector<int64_t> StorageEngine::giSTSearchContainedBy(const std::string& dbn
 
 std::vector<std::string> StorageEngine::getGiSTIndexedColumns(const std::string& dbname,
                                                                const std::string& tablename) const {
-    return collectSpecializedIndexColumns(relationDir(dbname, tablename), tablename, SpecializedIndexKind::GiST);
+    return collectSpecializedIndexColumns(*this, dbname, relationDir(dbname, tablename), tablename, SpecializedIndexKind::GiST);
 }
 
 // ========================================================================
@@ -16843,6 +16944,8 @@ DBStatus StorageEngine::createSPGiSTIndex(const std::string& dbname,
         return DBStatus::INVALID_VALUE;
 
     auto path = spGiSTIndexPath(dbname, tablename, colname);
+    const auto pathStatus = checkIndexFileDestination(*this, dbname, tbl, path);
+    if (pathStatus != DBStatus::OK) return pathStatus;
     std::string entryPayload;
     uint64_t entryCount = 0;
     bool valuesValid = true;
@@ -16882,8 +16985,13 @@ DBStatus StorageEngine::createSPGiSTIndex(const std::string& dbname,
 DBStatus StorageEngine::dropSPGiSTIndex(const std::string& dbname,
                                          const std::string& tablename,
                                          const std::string& colname) {
+    const DatabaseMetadataWrite metadataWrite(dbPath(dbname));
+    if (!metadataWrite.acquired()) return DBStatus::LOCK_CONFLICT;
+    const auto path = spGiSTIndexPath(dbname, tablename, colname);
+    const auto pathStatus = checkIndexFileDestination(
+        *this, dbname, getTableSchema(dbname, tablename), path);
+    if (pathStatus != DBStatus::OK) return pathStatus;
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
-    auto path = spGiSTIndexPath(dbname, tablename, colname);
     if (std::filesystem::exists(path)) std::filesystem::remove(path);
     spGiSTCache_.erase(dbname + "/" + tablename + "/" + colname);
     return DBStatus::OK;
@@ -16892,7 +17000,9 @@ DBStatus StorageEngine::dropSPGiSTIndex(const std::string& dbname,
 bool StorageEngine::hasSPGiSTIndex(const std::string& dbname,
                                     const std::string& tablename,
                                     const std::string& colname) const {
-    return std::filesystem::exists(spGiSTIndexPath(dbname, tablename, colname));
+    const auto path = spGiSTIndexPath(dbname, tablename, colname);
+    return std::filesystem::exists(path) &&
+        ownsSpecializedIndexFile(*this, dbname, tablename, path);
 }
 
 template <typename Visitor>
@@ -17146,7 +17256,7 @@ std::vector<int64_t> StorageEngine::spGiSTSearch(const std::string& dbname,
 
 std::vector<std::string> StorageEngine::getSPGiSTIndexedColumns(const std::string& dbname,
                                                                  const std::string& tablename) const {
-    return collectSpecializedIndexColumns(relationDir(dbname, tablename), tablename, SpecializedIndexKind::SPGiST);
+    return collectSpecializedIndexColumns(*this, dbname, relationDir(dbname, tablename), tablename, SpecializedIndexKind::SPGiST);
 }
 
 // ========================================================================
@@ -17300,6 +17410,8 @@ DBStatus StorageEngine::createBrinIndex(const std::string& dbname,
     if (colIdx >= tbl.len()) return DBStatus::INVALID_VALUE;
 
     auto path = brinIndexPath(dbname, tablename, colname);
+    const auto pathStatus = checkIndexFileDestination(*this, dbname, tbl, path);
+    if (pathStatus != DBStatus::OK) return pathStatus;
     brin_index_format::TypedIndex index;
     index.pagesPerRange = static_cast<uint32_t>(pagesPerRange);
     index.heapPages = 1;
@@ -17428,7 +17540,12 @@ DBStatus StorageEngine::createBrinIndex(const std::string& dbname,
 DBStatus StorageEngine::dropBrinIndex(const std::string& dbname,
                                        const std::string& tablename,
                                        const std::string& colname) {
-    auto path = brinIndexPath(dbname, tablename, colname);
+    const DatabaseMetadataWrite metadataWrite(dbPath(dbname));
+    if (!metadataWrite.acquired()) return DBStatus::LOCK_CONFLICT;
+    const auto path = brinIndexPath(dbname, tablename, colname);
+    const auto pathStatus = checkIndexFileDestination(
+        *this, dbname, getTableSchema(dbname, tablename), path);
+    if (pathStatus != DBStatus::OK) return pathStatus;
     std::error_code ec;
     if (std::filesystem::exists(path, ec) && !std::filesystem::remove(path, ec)) {
         return DBStatus::IO_ERROR;
@@ -17440,7 +17557,9 @@ DBStatus StorageEngine::dropBrinIndex(const std::string& dbname,
 bool StorageEngine::hasBrinIndex(const std::string& dbname,
                                   const std::string& tablename,
                                   const std::string& colname) const {
-    return std::filesystem::exists(brinIndexPath(dbname, tablename, colname));
+    const auto path = brinIndexPath(dbname, tablename, colname);
+    return std::filesystem::exists(path) &&
+        ownsSpecializedIndexFile(*this, dbname, tablename, path);
 }
 
 std::optional<std::vector<std::pair<uint32_t, uint32_t>>> StorageEngine::tryBrinPageRanges(
@@ -17595,7 +17714,7 @@ std::vector<std::pair<uint32_t, uint32_t>> StorageEngine::brinSearchRange(
 
 std::vector<std::string> StorageEngine::getBrinIndexedColumns(const std::string& dbname,
                                                                const std::string& tablename) const {
-    return collectSpecializedIndexColumns(relationDir(dbname, tablename), tablename, SpecializedIndexKind::Brin);
+    return collectSpecializedIndexColumns(*this, dbname, relationDir(dbname, tablename), tablename, SpecializedIndexKind::Brin);
 }
 
 DBStatus StorageEngine::stageReindexAuxiliaryIndexes(
@@ -17652,7 +17771,8 @@ DBStatus StorageEngine::stageReindexAuxiliaryIndexes(
                 // persisted named/hash/bloom declarations remain strict.
                 const bool owned = std::any_of(table.cols.begin(), table.cols.end(),
                     [&](const auto& candidate) { return candidate.dataName == column; });
-                if (owned && !add(std::string(file.first), column)) return DBStatus::CORRUPTED_DATA;
+                if (owned && ownsSpecializedIndexFile(*this, dbname, tablename, it->path(), &table) &&
+                    !add(std::string(file.first), column)) return DBStatus::CORRUPTED_DATA;
             }
         }
     }
@@ -17841,7 +17961,7 @@ bool StorageEngine::rebuildSpecializedIndexes(
         // These simplified access methods use their sidecar filename as the
         // durable definition. Capture all names before replacing any file.
         const auto [fullTextColumns, ginColumns, gistColumns, spgistColumns, brinColumns] =
-            collectSpecializedIndexColumns(relationDir(dbname, tablename), tablename);
+            collectSpecializedIndexColumns(*this, dbname, relationDir(dbname, tablename), tablename);
         if (fullTextColumns.empty() && ginColumns.empty() &&
             gistColumns.empty() && spgistColumns.empty() &&
             brinColumns.empty()) {
@@ -17935,7 +18055,7 @@ bool StorageEngine::markSpecializedIndexesBeforeMutation(
 
         bool hasSpecializedIndex = alreadyDirty;
         if (!hasSpecializedIndex) {
-            visitSpecializedIndexColumns(relationDir(dbname, tablename), tablename,
+            visitSpecializedIndexColumns(*this, dbname, relationDir(dbname, tablename), tablename,
                 [&](size_t, std::string_view) { hasSpecializedIndex = true; });
         }
         if (!hasSpecializedIndex) return true;
@@ -20651,7 +20771,7 @@ DBStatus StorageEngine::createTable(const std::string& dbname, const TableSchema
             if (it->first.rfind(secondaryPrefix, 0) == 0) it = secondaryIndexCache_.erase(it);
             else ++it;
         }
-        const std::string hashPrefix = dbname + "." + tbl.tablename + ".";
+        const std::string hashPrefix = dbname + "/" + tbl.tablename + "/";
         for (auto it = hashIndexCache_.begin(); it != hashIndexCache_.end();) {
             if (it->first.rfind(hashPrefix, 0) == 0) it = hashIndexCache_.erase(it);
             else ++it;
@@ -20998,7 +21118,7 @@ private:
 // key can instead belong to another table's name.
 static std::optional<bool> relationClaimsFile(
     const std::filesystem::path& catalogRoot, const TableSchema& table,
-    std::string_view baseName) {
+    std::string_view baseName, bool filePresent = true) {
     const auto remainder = baseName.substr(table.tablename.size());
     if (remainder.front() != '_') return true;
     const auto extension = remainder.rfind('.');
@@ -21024,7 +21144,7 @@ static std::optional<bool> relationClaimsFile(
         // Native specialized indexes may have neither a named definition nor
         // a separate metadata file. Two plausible columns remain ambiguous.
         method = suffix == ".fti" ? "fulltext" : suffix.substr(1);
-        if (std::any_of(table.cols.begin(), table.cols.end(),
+        if (filePresent && std::any_of(table.cols.begin(), table.cols.end(),
                         [key](const Column& column) { return column.dataName == key; })) {
             return true;
         }
@@ -21069,6 +21189,164 @@ static std::optional<bool> relationClaimsFile(
     return false;
 }
 
+static std::optional<TableSchema> readLocalRelationSchema(
+    const StorageEngine& engine, const std::string& dbname,
+    const std::filesystem::path& root, const std::string& name) {
+    auto schema = engine.readPersistedSchemaForCatalog(dbname, name);
+    if (!schema) return {};
+    auto directory = engine.dbPath(dbname);
+    if (!schema->tablespace.empty() && schema->tablespace != "pg_default") {
+        if (!resolveTablespaceRoot(engine, dbname, schema->tablespace, directory)) {
+            throw DbError("58030", "could not resolve competing relation tablespace");
+        }
+        directory /= dbname;
+    }
+    return directory.lexically_normal() == root ? std::move(schema) : std::nullopt;
+}
+
+struct CompetingFileClaims {
+    size_t owners = 0;
+    bool hasNeighbor = false;
+};
+
+template<class LoadSchema>
+static std::optional<CompetingFileClaims> competingFileClaims(
+    const std::filesystem::path& catalogRoot, const std::string& tablename,
+    std::string_view base, bool filePresent, LoadSchema&& loadSchema) {
+    CompetingFileClaims result;
+    for (size_t split = base.find_first_of("_#."); split != std::string_view::npos;
+         split = base.find_first_of("_#.", split + 1)) {
+        const std::string peer(base.substr(0, split));
+        if (peer == tablename || !validStoredRelationName(peer) ||
+            !isRelationPhysicalFileName(base, peer)) continue;
+        const auto& schema = loadSchema(peer);
+        if (!schema) continue;
+        result.hasNeighbor = true;
+        const auto claim = relationClaimsFile(catalogRoot, *schema, base, filePresent);
+        if (!claim) return {};
+        if (*claim) ++result.owners;
+    }
+    return result;
+}
+
+static bool ownsSpecializedIndexFile(
+    const StorageEngine& engine, const std::string& dbname,
+    const std::string& tablename, const std::filesystem::path& path,
+    const TableSchema* targetSchema) {
+    const auto catalogRoot = engine.dbPath(dbname);
+    const auto root = path.parent_path().lexically_normal();
+    const auto filename = path.filename().string();
+    const auto base = relationPhysicalBaseName(filename);
+    const auto load = [&](const std::string& name) {
+        return readLocalRelationSchema(engine, dbname, root, name);
+    };
+    const auto declared = competingFileClaims(catalogRoot, tablename, base, false, load);
+    if (!declared) throw DbError("XX001", "could not read specialized index ownership");
+    if (!declared->hasNeighbor) return true;
+
+    const auto stored = targetSchema ? std::optional<TableSchema>{} : load(tablename);
+    if (!targetSchema && !stored) throw DbError("XX001", "missing specialized index owner");
+    const TableSchema& table = targetSchema ? *targetSchema : *stored;
+    const auto declaredHere = relationClaimsFile(catalogRoot, table, base, false);
+    if (!declaredHere || (*declaredHere && declared->owners != 0) || declared->owners > 1) {
+        throw DbError("XX001", "ambiguous specialized index ownership");
+    }
+    if (declared->owners != 0) return false;
+    if (*declaredHere) return true;
+
+    // Old native indexes can have the filename as their only definition.
+    // In that case a matching column is evidence only if it is unambiguous.
+    const auto inferred = competingFileClaims(catalogRoot, tablename, base, true, load);
+    const auto inferredHere = relationClaimsFile(catalogRoot, table, base);
+    if (!inferred || !inferredHere || inferred->owners > 1 ||
+        (*inferredHere && inferred->owners != 0) ||
+        (!*inferredHere && inferred->owners == 0)) {
+        throw DbError("XX001", "ambiguous native specialized index ownership");
+    }
+    return *inferredHere;
+}
+
+static DBStatus checkIndexFileDestination(
+    const StorageEngine& engine, const std::string& dbname,
+    const TableSchema& table, const std::filesystem::path& path, bool btree) {
+    const auto root = path.parent_path().lexically_normal();
+    const auto catalogRoot = engine.dbPath(dbname);
+    auto storageRoot = catalogRoot;
+    if (!table.tablespace.empty() && table.tablespace != "pg_default") {
+        if (!resolveTablespaceRoot(engine, dbname, table.tablespace, storageRoot)) {
+            return DBStatus::IO_ERROR;
+        }
+        storageRoot /= dbname;
+    }
+    const auto filename = path.filename().string();
+    const auto base = relationPhysicalBaseName(filename);
+    if (table.tablename.empty() || storageRoot.lexically_normal() != root ||
+        !isRelationPhysicalFileName(base, table.tablename)) {
+        return DBStatus::INVALID_VALUE;
+    }
+    auto inspect = [](const std::filesystem::path& entry, bool& exists) -> DBStatus {
+        std::error_code error;
+        const auto status = std::filesystem::symlink_status(entry, error);
+        if (error == std::errc::no_such_file_or_directory) {
+            exists = false;
+            return DBStatus::OK;
+        }
+        if (error) return DBStatus::IO_ERROR;
+        exists = std::filesystem::exists(status);
+        return exists && !std::filesystem::is_regular_file(status)
+            ? DBStatus::INVALID_VALUE : DBStatus::OK;
+    };
+    bool exists = false;
+    const auto status = inspect(path, exists);
+    if (status != DBStatus::OK) return status;
+    bool companionExists = false;
+    if (btree) {
+        const auto companionStatus = inspect(reindexSidecar(path), companionExists);
+        if (companionStatus != DBStatus::OK) return companionStatus;
+    }
+
+    try {
+        if (exists && isDefinitionBearingSpecializedIndexFileName(filename, table.tablename)) {
+            return ownsSpecializedIndexFile(engine, dbname, table.tablename, path, &table)
+                ? DBStatus::OK : DBStatus::INVALID_VALUE;
+        }
+        const auto other = competingFileClaims(
+            catalogRoot, table.tablename, base, exists || companionExists,
+            [&](const std::string& peer) {
+                return readLocalRelationSchema(engine, dbname, root, peer);
+            });
+        if (!other) return DBStatus::CORRUPTED_DATA;
+        if (other->owners != 0) return DBStatus::INVALID_VALUE;
+
+        // Older DROP INDEX leaves an empty authentication companion behind.
+        // With no live tree or competing declaration it need not block reuse.
+        if (!exists && companionExists) {
+            std::error_code error;
+            const auto size = std::filesystem::file_size(reindexSidecar(path), error);
+            if (error) return DBStatus::IO_ERROR;
+            if (size == 0) return DBStatus::OK;
+        }
+        if (exists || companionExists) {
+            const auto suffix = std::string_view(filename).substr(table.tablename.size());
+            if (suffix.substr(0, 5) == ".idx_") {
+                const auto indexes = engine.getCompositeIndexes(dbname, table.tablename);
+                const auto name = suffix.substr(5);
+                if (std::none_of(indexes.begin(), indexes.end(), [&](const auto& index) {
+                        return index.name == name;
+                    })) return DBStatus::INVALID_VALUE;
+            } else {
+                const auto owner = relationClaimsFile(catalogRoot, table, base, exists);
+                if (!owner) return DBStatus::CORRUPTED_DATA;
+                if (!*owner) return DBStatus::INVALID_VALUE;
+            }
+        }
+    } catch (const DbError& failure) {
+        return failure.sqlState() == "58030"
+            ? DBStatus::IO_ERROR : DBStatus::CORRUPTED_DATA;
+    }
+    return DBStatus::OK;
+}
+
 static DBStatus collectRelationFiles(
     const StorageEngine& engine, const std::string& dbname,
     const std::filesystem::path& relationDirectory, const std::string& tablename,
@@ -21081,18 +21359,7 @@ static DBStatus collectRelationFiles(
     auto localSchema = [&](const std::string& name) -> const std::optional<TableSchema>& {
         auto [entry, inserted] = localSchemas.try_emplace(name);
         if (!inserted) return entry->second;
-        auto schema = engine.readPersistedSchemaForCatalog(dbname, name);
-        if (!schema) return entry->second;
-        auto directory = catalogRoot;
-        if (!schema->tablespace.empty() && schema->tablespace != "pg_default") {
-            if (!resolveTablespaceRoot(engine, dbname, schema->tablespace, directory)) {
-                throw DbError("58030", "could not resolve competing relation tablespace");
-            }
-            directory /= dbname;
-        }
-        if (directory.lexically_normal() == relationRoot) {
-            entry->second = std::move(schema);
-        }
+        entry->second = readLocalRelationSchema(engine, dbname, relationRoot, name);
         return entry->second;
     };
 
@@ -21104,21 +21371,16 @@ static DBStatus collectRelationFiles(
             const auto filename = it->path().filename().string();
             if (!isRelationPhysicalFileName(filename, tablename)) continue;
             const auto base = relationPhysicalBaseName(filename);
-            size_t otherClaims = 0;
-            bool hasPeer = false;
-            for (size_t split = base.find_first_of("_#."); split != std::string_view::npos;
-                 split = base.find_first_of("_#.", split + 1)) {
-                const std::string peer(base.substr(0, split));
-                if (peer == tablename || !validStoredRelationName(peer) ||
-                    !isRelationPhysicalFileName(base, peer)) continue;
-                const auto& schema = localSchema(peer);
-                if (!schema) continue;
-                hasPeer = true;
-                const auto claim = relationClaimsFile(catalogRoot, *schema, base);
-                if (!claim) return DBStatus::CORRUPTED_DATA;
-                if (*claim) ++otherClaims;
+            if (isDefinitionBearingSpecializedIndexFileName(base, tablename)) {
+                if (ownsSpecializedIndexFile(engine, dbname, tablename, it->path(), creating)) {
+                    files.push_back(it->path());
+                }
+                continue;
             }
-            if (hasPeer) {
+            const auto other = competingFileClaims(
+                catalogRoot, tablename, base, true, localSchema);
+            if (!other) return DBStatus::CORRUPTED_DATA;
+            if (other->hasNeighbor) {
                 const TableSchema* targetSchema = creating;
                 if (!targetSchema) {
                     const auto& schema = localSchema(tablename);
@@ -21126,7 +21388,7 @@ static DBStatus collectRelationFiles(
                     targetSchema = &*schema;
                 }
                 const auto claim = relationClaimsFile(catalogRoot, *targetSchema, base);
-                if (!claim || otherClaims + static_cast<size_t>(*claim) != 1) {
+                if (!claim || other->owners + static_cast<size_t>(*claim) != 1) {
                     return DBStatus::CORRUPTED_DATA;
                 }
                 if (!*claim) continue;
@@ -21422,7 +21684,7 @@ DBStatus StorageEngine::dropTable(const std::string& dbname,
         if (it->first.rfind(secondaryPrefix, 0) == 0) it = secondaryIndexCache_.erase(it);
         else ++it;
     }
-    const std::string hashPrefix = dbname + "." + tablename + ".";
+    const std::string hashPrefix = dbname + "/" + tablename + "/";
     for (auto it = hashIndexCache_.begin(); it != hashIndexCache_.end();) {
         if (it->first.rfind(hashPrefix, 0) == 0) it = hashIndexCache_.erase(it);
         else ++it;
@@ -21652,7 +21914,7 @@ DBStatus StorageEngine::alterTableAddColumn(const std::string& dbname,
     const auto hashCols = getHashIndexedColumns(dbname, tablename);
     const auto compositeIndexes = getCompositeIndexes(dbname, tablename);
     const auto [fullTextCols, ginCols, gistCols, spgistCols, brinCols] =
-        collectSpecializedIndexColumns(relationDir(dbname, tablename), tablename);
+        collectSpecializedIndexColumns(*this, dbname, relationDir(dbname, tablename), tablename);
     std::map<std::string, size_t> brinWidths;
     for (const auto& column : brinCols)
         brinWidths.emplace(column, brinConfiguredRangeWidth(
@@ -21677,7 +21939,7 @@ DBStatus StorageEngine::alterTableAddColumn(const std::string& dbname,
         else ++it;
     }
     for (const auto& cn : hashCols) {
-        hashIndexCache_.erase(dbname + "." + tablename + "." + cn);
+        hashIndexCache_.erase(dbname + "/" + tablename + "/" + cn);
     }
     {
         std::lock_guard<std::mutex> guard(spGiSTMutex_);
@@ -21954,7 +22216,7 @@ DBStatus StorageEngine::alterTableDropColumn(const std::string& dbname,
     const auto hashCols = getHashIndexedColumns(dbname, tablename);
     const auto compositeIndexes = getCompositeIndexes(dbname, tablename);
     const auto [fullTextCols, ginCols, gistCols, spgistCols, brinCols] =
-        collectSpecializedIndexColumns(relationDir(dbname, tablename), tablename);
+        collectSpecializedIndexColumns(*this, dbname, relationDir(dbname, tablename), tablename);
     std::map<std::string, size_t> brinWidths;
     for (const auto& column : brinCols)
         brinWidths.emplace(column, brinConfiguredRangeWidth(
@@ -22042,7 +22304,7 @@ DBStatus StorageEngine::alterTableDropColumn(const std::string& dbname,
         if (it->first.rfind(key + "/", 0) == 0) it = secondaryIndexCache_.erase(it);
         else ++it;
     }
-    for (const auto& cn : hashCols) hashIndexCache_.erase(dbname + "." + tablename + "." + cn);
+    for (const auto& cn : hashCols) hashIndexCache_.erase(dbname + "/" + tablename + "/" + cn);
     {
         std::lock_guard<std::mutex> guard(spGiSTMutex_);
         for (const auto& cn : spgistCols) spGiSTCache_.erase(key + "/" + cn);
@@ -22840,7 +23102,7 @@ DBStatus StorageEngine::alterTableRenameColumn(const std::string& dbname,
         std::filesystem::path newIdx = hashIndexPath(dbname, tablename, newName);
         if (std::filesystem::exists(oldIdx)) {
             std::filesystem::rename(oldIdx, newIdx);
-            std::string oldKey = dbname + "." + tablename + "." + oldName;
+            std::string oldKey = dbname + "/" + tablename + "/" + oldName;
             auto it = hashIndexCache_.find(oldKey);
             if (it != hashIndexCache_.end()) {
                 hashIndexCache_.erase(it);
@@ -23284,7 +23546,7 @@ DBStatus StorageEngine::alterTableRenameTable(const std::string& dbname,
     {
         std::vector<std::string> keysToRemove;
         for (const auto& p : hashIndexCache_) {
-            if (p.first.rfind(dbname + "." + oldName + ".", 0) == 0) keysToRemove.push_back(p.first);
+            if (p.first.rfind(dbname + "/" + oldName + "/", 0) == 0) keysToRemove.push_back(p.first);
         }
         for (const auto& k : keysToRemove) hashIndexCache_.erase(k);
     }
@@ -48960,7 +49222,7 @@ bool StorageEngine::resetTableStorage(
         const auto hashColumns = getHashIndexedColumns(dbname, tablename);
         const auto bloomColumns = getBloomIndexedColumns(dbname, tablename);
         const auto [fullTextColumns, ginColumns, gistColumns, spgistColumns, brinColumns] =
-            collectSpecializedIndexColumns(relationDir(dbname, tablename), tablename);
+            collectSpecializedIndexColumns(*this, dbname, relationDir(dbname, tablename), tablename);
         // Preserve the definition before any heap/index reset or rewrite.
         std::map<std::string, size_t> brinWidths;
         for (const auto& column : brinColumns)
@@ -48997,7 +49259,7 @@ bool StorageEngine::resetTableStorage(
         const std::string tableKey = dbname + "/" + tablename;
         const std::string secondaryPrefix = tableKey + "/";
         const std::string auxiliaryPrefix =
-            dbname + "." + tablename + ".";
+            dbname + "/" + tablename + "/";
         pageAllocators_.erase(tableKey);
         fsmCache_.erase(tableKey);
         vmCache_.erase(tableKey);
@@ -54051,7 +54313,7 @@ size_t StorageEngine::vacuumFull(const std::string& dbname,
     if (!heapRowWidth) return 0;
     const std::string tableKey = dbname + "/" + tablename;
     const std::string secondaryPrefix = tableKey + "/";
-    const std::string hashPrefix = dbname + "." + tablename + ".";
+    const std::string hashPrefix = dbname + "/" + tablename + "/";
     const std::set<std::string> rewriteTables{tablename};
     const auto deadTupleKey = std::make_pair(dbname, tablename);
     std::optional<size_t> priorDeadCount;
@@ -54119,7 +54381,7 @@ size_t StorageEngine::vacuumFull(const std::string& dbname,
     const auto hashColumns = getHashIndexedColumns(dbname, tablename);
     const auto bloomColumns = getBloomIndexedColumns(dbname, tablename);
     const auto [fullTextColumns, ginColumns, gistColumns, spgistColumns, brinColumns] =
-        collectSpecializedIndexColumns(relationDir(dbname, tablename), tablename);
+        collectSpecializedIndexColumns(*this, dbname, relationDir(dbname, tablename), tablename);
     // Preserve the definition before any heap/index reset or rewrite.
     std::map<std::string, size_t> brinWidths;
     for (const auto& column : brinColumns)
@@ -56000,10 +56262,10 @@ bool StorageEngine::savepointCachesQuiescent(const std::string& dbname) const {
         !checkTrees(pkIndexCache_, prefix) || !checkTrees(secondaryIndexCache_, prefix) ||
         !checkTrees(toastIndexes_, dbname + ":")) return false;
     for (const auto& [key, value] : hashIndexCache_)
-        if (key.rfind(dbname + ".", 0) == 0 && value &&
+        if (key.rfind(prefix, 0) == 0 && value &&
             (!value->isOpen() || value->hasStaleFileGeneration() || value->hasDirtyData())) return false;
     for (const auto& [key, value] : bloomIndexCache_)
-        if (key.rfind(dbname + ".", 0) == 0 && value &&
+        if (key.rfind(prefix, 0) == 0 && value &&
             (!value->isOpen() || value->hasStaleFileGeneration() || value->hasDirtyData())) return false;
     for (const auto& [key, value] : fsmCache_)
         if (key.rfind(prefix, 0) == 0 && value && !value->quiescentForSnapshot()) return false;

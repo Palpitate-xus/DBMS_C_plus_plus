@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>建索引时会保护其他表已有的索引 · 2026-11-21</summary>
+
+如果新索引会用到另一张表的文件，数据库会拒绝创建。原有索引和数据仍可以读取。
+
+[测试报告](docs/test-report.md#index-file-ownership-20261121)
+
+</details>
+
+<details>
 <summary>表改名后可以用原名建一张新表 · 2026-11-21</summary>
 
 例如，把 `orders` 改名为 `orders_archive` 后，可以用 `orders` 新建一张表。两张表可以分别查询，名称相近的其他表也能照常使用。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>部分查询能更快找出两列文字相同的记录 · 2026-11-21</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-21 · 部分查询能更快找出两列文字相同的记录
 
 在测试的单表查询中，如果建表时将一列设为按字符编码比较（`COLLATE "C"`），另一列使用数据库默认规则，筛出两列内容相同的记录用时更短。比较 `TEXT` 和 `VARCHAR` 时，末尾空格仍参与比较。
 
 [测试报告](docs/test-report.md#declared-binary-comparison-20261121) · [性能报告](docs/performance-report-2026-10-30.md#declared-binary-comparison-cost-20261121)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-21 · 两列文字的比较规则冲突时会提示错误
 

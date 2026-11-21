@@ -1,10 +1,16 @@
 # STO-02: relation storage identity and physical-name collision containment
 
+## 2026-11-21 · Index file ownership
+
+Standalone index creation, index deletion, and table reindexing now check that the destination has no other owner. The check uses a persisted definition when present, including declarations for indexes whose files are missing. Specialized maintenance identifies declared index owners before falling back to filename-based native definitions. Hash and Bloom caches use distinct keys for dotted table and column names.
+
+The PostgreSQL comparison covers 132 steps, including seven physical collisions where this project refuses the write to preserve the existing file. Runtime evidence still shows destructive name collisions in `TRUNCATE` and `ALTER TABLE RENAME COLUMN`. Storage based on independent relation and index identifiers remains open. [Test results](test-report.md#index-file-ownership-20261121)
+
 ## 2026-11-21 · Table rename and name reuse
 
 Rename and direct DROP now plan files from the same ownership check. Rename moves each selected fork or catalog sidecar once and refuses to replace any occupied destination. CREATE can reuse a name when the overlapping files have verified neighboring owners. A UNIQUE column that would create a file already used by another table still blocks CREATE. Failed CREATE cleanup and startup undo determine the same ownership before removing relation files.
 
-The recovered and committed cases include both prefix directions, tables with secondary indexes and long values, and reuse after a forced restart. Default and shared external tablespaces pass the focused PostgreSQL comparison. A stable physical locator, exact reservations for independent index creation, and other maintenance paths remain open. [Test results](test-report.md#rename-table-file-ownership-20261121)
+The recovered and committed cases include both prefix directions, tables with secondary indexes and long values, and reuse after a forced restart. Default and shared external tablespaces pass the focused PostgreSQL comparison. [Test results](test-report.md#rename-table-file-ownership-20261121)
 
 ## 2026-11-21 · Direct table drop with shared name prefixes
 

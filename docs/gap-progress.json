@@ -2,6 +2,37 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-21 check ownership when creating, dropping and rebuilding indexes",
+      "gap_ids": ["STO-02", "CAT-07"],
+      "status": "partial",
+      "evidence": [
+        "src/commands/TableManage.cpp",
+        "docs/issue-sto-02-relation-storage-namespace.md",
+        "docs/postgresql-comparison.md",
+        "docs/test-report.md",
+        "docs/performance-report-2026-10-30.md"
+      ],
+      "tests": [
+        "tests/drop_multiple_tables_protocol_e2e_test.py",
+        "tests/gist_owner_collision_test.cpp",
+        "tests/bloom_index_test.cpp"
+      ],
+      "verification": [
+        "Seven physical index collisions refused safely. Another 125 steps matched PostgreSQL 18.6, including independent writes to the table whose attempted BRIN or SP-GiST index was rejected.",
+        "Ten protocol suites and seven native regressions passed. 144 same-result tmpfs timings recorded paired request costs of +3.21% for B-tree creation, +5.71% for REINDEX TABLE and +1.50% for an update with BRIN.",
+        "Independent physical identifiers remain open. The current candidate still reproduces distinct neighbor file corruption on TRUNCATE and ALTER TABLE RENAME COLUMN."
+      ],
+      "artifacts": {
+        "candidate_build": "build/array-domain-20261117/ownership-index-cmake-v3.json",
+        "postgresql_audit": "build/index-file-ownership-20261121/candidate-v3-independent-audit.json",
+        "related_protocol": "build/index-file-ownership-20261121/related-protocol-v3/summary.json",
+        "native_regressions": "build/array-domain-20261117/native-create-fillfactor-ownership-index-cmake-v3/summary.json",
+        "native_bloom_and_registered_protocol": "build/index-file-ownership-20261121/registered-v3-checks/receipt.json",
+        "timing": "build/index-file-ownership-20261121/perf/with-brin-write/paired-tmpfs-v3-1.json",
+        "remaining_maintenance": "build/index-file-ownership-20261121/remaining-maintenance-probe.json"
+      }
+    },
+    {
       "issue": "2026-11-21 preserve neighboring files during table rename and name reuse",
       "gap_ids": ["STO-02", "CAT-07"],
       "status": "partial",

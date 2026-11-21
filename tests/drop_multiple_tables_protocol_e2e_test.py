@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""DROP TABLE retains other relations and rolls back failed target lists."""
+"""DDL preserves neighboring relation files and rolls back failed target lists."""
 
 import importlib.util
 import subprocess
@@ -26,12 +26,7 @@ def main():
         _, state, message, _, _ = runner.decode_wire_result(client.simple_query(server["sock"], sql))
         assert state == expected, (sql, state, message)
 
-    def reopen_after_crash():
-        process = server["process"]
-        process.kill()
-        assert process.wait(timeout=10) == -9
-        server["sock"].close()
-        server["sock"] = None
+    def reopen_server():
         server["process"] = subprocess.Popen(
             [runner.DBMS_MAIN, "--data-dir", server["dir"],
              "--server", str(server["port"]), "--insecure"],
@@ -46,6 +41,14 @@ def main():
                 if time.monotonic() >= deadline:
                     raise
                 time.sleep(0.05)
+
+    def reopen_after_crash():
+        process = server["process"]
+        process.kill()
+        assert process.wait(timeout=10) == -9
+        server["sock"].close()
+        server["sock"] = None
+        reopen_server()
 
     def shared_name_prefix():
         payload = "abcdefghij" * 600
@@ -92,23 +95,18 @@ def main():
         query("CREATE TABLE ownership_claim_child(id INT PRIMARY KEY, v INT);")
         query("INSERT INTO ownership_claim VALUES(100,20);")
         query("INSERT INTO ownership_claim_child VALUES(101,20);")
-        # Both CREATEs can succeed in a legacy database even though their
-        # physical names resolve to the same path.
         query("CREATE INDEX ownership_claim_short_idx ON ownership_claim(child_v);")
-        query("CREATE INDEX ownership_claim_long_idx ON ownership_claim_child(v);")
 
         home = Path(server["dir"]) / "info"
         assert (home / "ownership_claim.secidx").read_text().splitlines() == ["child_v"]
-        assert (home / "ownership_claim_child.secidx").read_text().splitlines() == ["v"]
         assert (home / "ownership_claim_child_v.idx").stat().st_size > 0
 
         catalog_query = (
             "SELECT relname FROM pg_class WHERE relname IN ('ownership_claim', "
             "'ownership_claim_child', 'ownership_claim_short_idx', 'ownership_claim_long_idx') "
             "ORDER BY relname;")
-        catalog_rows = [["ownership_claim"], ["ownership_claim_child"],
-                        ["ownership_claim_long_idx"], ["ownership_claim_short_idx"]]
-        assert query(catalog_query) == (catalog_rows, "SELECT 4")
+        catalog_rows = [["ownership_claim"], ["ownership_claim_child"], ["ownership_claim_short_idx"]]
+        assert query(catalog_query) == (catalog_rows, "SELECT 3")
 
         def snapshot():
             files = list(home.glob("ownership_claim*"))
@@ -117,19 +115,64 @@ def main():
                 "pg_catalog/pg_depend.cat"))
             return {path: path.read_bytes() for path in files}
 
+        query("CHECKPOINT;")
+        before_create = snapshot()
+        error("CREATE INDEX ownership_claim_long_idx ON ownership_claim_child(v);", "XX000")
+        assert snapshot() == before_create, "rejected index publication changed relation or catalog files"
+        assert query(catalog_query) == (catalog_rows, "SELECT 3")
+
+        # Older builds allowed both relations to register this physical path.
+        # Seed the second native B-tree definition in its legacy flat format
+        # while the instance is stopped. Native definitions do not require a
+        # SQL index name or a pg_class row. The actual shared file came from
+        # the first, ordinary CREATE INDEX and remains untouched.
+        server["sock"].close()
+        server["sock"] = None
+        server["process"].terminate()
+        assert server["process"].wait(timeout=10) == 0
+        legacy_definition = home / "ownership_claim_child.secidx"
+        assert not legacy_definition.exists()
+        legacy_definition.write_text("v\n", encoding="utf-8")
+        reopen_server()
+
         before = snapshot()
+        def reject_legacy_change(sql):
+            error(sql, "XX000")
+            after = snapshot()
+            changed = [path.name for path in before.keys() | after.keys()
+                       if before.get(path) != after.get(path)]
+            assert not changed, (sql, "failed DDL changed relation or catalog files", sorted(changed))
+            assert query(catalog_query) == (catalog_rows, "SELECT 3")
+
+        reject_legacy_change("DROP INDEX ownership_claim_short_idx;")
+        reject_legacy_change("REINDEX TABLE ownership_claim;")
+        reject_legacy_change("REINDEX TABLE ownership_claim_child;")
         for table, behavior, expected_id in (
                 ("ownership_claim", "RESTRICT", "100"),
                 ("ownership_claim_child", "RESTRICT", "101"),
                 ("ownership_claim", "CASCADE", "100"),
                 ("ownership_claim_child", "CASCADE", "101")):
-            error(f"DROP TABLE {table} {behavior};", "XX000")
-            after = snapshot()
-            changed = [path.name for path in before.keys() | after.keys()
-                       if before.get(path) != after.get(path)]
-            assert not changed, (table, behavior, "failed DROP changed relation or catalog files", sorted(changed))
-            assert query(catalog_query) == (catalog_rows, "SELECT 4")
+            reject_legacy_change(f"DROP TABLE {table} {behavior};")
             assert query(f"SELECT id FROM {table} WHERE id={expected_id};") == ([[expected_id]], "SELECT 1")
+
+    def reject_toast_index_alias():
+        payload = "committed-toast-value" * 320
+        query("CREATE TABLE ownership_toast_old(id INT PRIMARY KEY, payload TEXT);")
+        query(f"INSERT INTO ownership_toast_old VALUES (7, '{payload}');")
+        query('CREATE TABLE ownership_toast(id INT PRIMARY KEY, "old.toast" INT);')
+        query("INSERT INTO ownership_toast VALUES (1, 9);")
+        query("CHECKPOINT;")
+        assert query("SELECT payload FROM ownership_toast_old WHERE id=7;") == ([[payload]], "SELECT 1")
+
+        home = Path(server["dir"]) / "info"
+        index = home / "ownership_toast_old.toast.idx"
+        before = index.read_bytes()
+        assert before
+        error('CREATE INDEX ownership_toast_alias_idx ON ownership_toast("old.toast");', "XX000")
+        assert index.read_bytes() == before, "rejected CREATE INDEX changed the neighbor's TOAST index"
+        assert not (home / "ownership_toast.secidx").exists()
+        assert query("SELECT relname FROM pg_class WHERE relname='ownership_toast_alias_idx';") == ([], "SELECT 0")
+        assert query("SELECT payload FROM ownership_toast_old WHERE id=7;") == ([[payload]], "SELECT 1")
 
     def preserve_short_name_index():
         query("CREATE TABLE ownership_peer(id INT PRIMARY KEY, child_key INT);")
@@ -144,6 +187,40 @@ def main():
         error("SELECT id FROM ownership_peer_child;", "42P01")
         assert index.read_bytes() == before
         assert query("SELECT id FROM ownership_peer WHERE child_key=30;") == ([["3"]], "SELECT 1")
+
+    def preserve_brin_on_neighbor_update():
+        query("CREATE TABLE ownership_brin(id INT PRIMARY KEY, child_v INT);")
+        query("CREATE TABLE ownership_brin_child(id INT PRIMARY KEY, v INT);")
+        query("INSERT INTO ownership_brin VALUES (1,10);")
+        query("INSERT INTO ownership_brin_child VALUES (2,20);")
+        query("CREATE INDEX ownership_brin_first ON ownership_brin USING brin(child_v);")
+        query("CHECKPOINT;")
+        index = Path(server["dir"]) / "info" / "ownership_brin_child_v.brin"
+        before = index.read_bytes()
+        assert before
+
+        # The same filename would be used by a BRIN definition on the long
+        # table. Its refused CREATE must not make later DML treat the short
+        # table's existing BRIN as an index of the long table.
+        error("CREATE INDEX ownership_brin_second ON ownership_brin_child USING brin(v);", "XX000")
+        assert index.read_bytes() == before
+        query("BEGIN;")
+        assert query("UPDATE ownership_brin_child SET v=21 WHERE id=2;") == ([], "UPDATE 1")
+        query("COMMIT;")
+        query("CHECKPOINT;")
+        assert index.read_bytes() == before, "neighbor UPDATE changed the short table's BRIN"
+        assert query("SELECT child_v FROM ownership_brin WHERE id=1;") == ([["10"]], "SELECT 1")
+
+        query("BEGIN;")
+        assert query("UPDATE ownership_brin SET child_v=11 WHERE id=1;") == ([], "UPDATE 1")
+        query("COMMIT;")
+        query("CHECKPOINT;")
+        assert index.read_bytes(), "owner UPDATE lost its BRIN"
+        assert query("SELECT id FROM ownership_brin WHERE child_v=11;") == ([["1"]], "SELECT 1")
+        assert query("SELECT v FROM ownership_brin_child WHERE id=2;") == ([["21"]], "SELECT 1")
+        assert query("SELECT relname FROM pg_class WHERE relname IN "
+                     "('ownership_brin_first', 'ownership_brin_second');") == (
+            [["ownership_brin_first"]], "SELECT 1")
 
     try:
         query("CREATE TABLE drop_many_a(id INT);")
@@ -192,6 +269,8 @@ def main():
         shared_name_prefix()
         preserve_short_name_index()
         conflicting_index_claims()
+        reject_toast_index_alias()
+        preserve_brin_on_neighbor_update()
         print("[DROP MULTIPLE TABLES PROTOCOL E2E] passed")
     finally:
         runner.stop_ours(server)
