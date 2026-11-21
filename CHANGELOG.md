@@ -1,27 +1,27 @@
 # 更新日志
 
 <details>
-<summary>查询条件能区分数字和带引号的列名 · 2026-11-21</summary>
+<summary>查询时能区分数字和列名 · 2026-11-21</summary>
 
-即使表里有一列叫 `"7"`，`WHERE id = 7` 也会按数字查找。`WHERE id = "7"` 则比较同一行的两列。查看执行计划也能看到这两种条件的实际区别。
+`WHERE id = 7` 查找编号为 7 的记录。`WHERE id = "7"` 比较同一条记录里的 `id` 和名为 `"7"` 的列。
 
 [使用手册](docs/MANUAL.md#基础查询) · [测试报告](docs/test-report.md#narrow-select-20261121) · [性能报告](docs/performance-report-2026-10-30.md#narrow-select-cost-20261121)
 
 </details>
 
 <details>
-<summary>按数字筛选删除时正确区分列名 · 2026-11-21</summary>
+<summary>按编号删除时少读数据 · 2026-11-21</summary>
 
-即使表里有名为 `"7"` 的列，`WHERE id = 7` 也会按数字 7 筛选。按没有索引的整数列删除时，数据库也会少做重复读取。
+按整数编号删除时，即使编号列没有索引，数据库也能减少重复读取。表里有名为 `"7"` 的列时，`DELETE FROM orders WHERE id = 7` 仍按编号 7 删除。
 
 [使用手册](docs/MANUAL.md#删除) · [测试报告](docs/test-report.md#narrow-delete-20261121) · [性能报告](docs/performance-report-2026-10-30.md#narrow-delete-cost-20261121)
 
 </details>
 
 <details>
-<summary>按编号更新时少读无关记录 · 2026-11-21</summary>
+<summary>按编号更新时更早跳过无关记录 · 2026-11-21</summary>
 
-例如按订单编号更新记录。编号列没有索引时，数据库会先在扫描中检查编号，再对可能匹配的记录做完整判断。普通查询也会直接沿用已经确定的列类型。
+例如更新某笔订单时，数据库可以先核对订单号，只对编号符合的记录检查其他条件。
 
 [测试报告](docs/test-report.md#narrow-query-write-20261121) · [性能报告](docs/performance-report-2026-10-30.md#narrow-query-write-cost-20261121)
 
