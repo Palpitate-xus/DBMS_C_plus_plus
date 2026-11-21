@@ -2,11 +2,17 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-21 · 表改名和旧名重用
+
+PostgreSQL 18.6 在 `pg_class` 中改表名，表和索引文件仍通过各自的编号定位。SQLite 通过改写 `sqlite_schema` 中的 SQL 定义来重命名，表里的数据不必重写。DuckDB 在目录操作中复制并更改表项的名称，同时更新受影响的约束表达式。[PostgreSQL 重命名源码](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/commands/tablecmds.c) · [PostgreSQL 文件布局](https://www.postgresql.org/docs/18/storage-file-layout.html) · [SQLite ALTER TABLE](https://www.sqlite.org/lang_altertable.html) · [DuckDB 目录源码](https://raw.githubusercontent.com/duckdb/duckdb/main/src/catalog/catalog_entry/duck_table_entry.cpp)
+
+本项目当前的文件名包含表名。重命名先核对归属，只移动目标表的文件，建表也可以区分旧名留下的冲突文件和仍由邻表使用的文件。默认及共享外部表空间的 64 项对照与 PostgreSQL 18.6 一致。真有两个对象指向同一物理路径时，仍需报错保护已有文件。按编号区分文件的存储设计仍待完成。[测试报告](test-report.md#rename-table-file-ownership-20261121) · [存储布局差距](issue-sto-02-relation-storage-namespace.md)
+
 ## 2026-11-21 · 删除表时核对索引文件归属
 
 PostgreSQL 18 用 `relfilenode` 编号定位普通表和索引的文件，表的 SQL 名称在目录中维护。SQLite 在 `sqlite_schema` 中分别记录对象名和 B 树根页。DuckDB 把多张表及其索引保存在同一个数据库文件里。这三种布局都允许仅因名称有共同前缀的表使用各自的存储空间。[PostgreSQL 文件布局](https://www.postgresql.org/docs/18/storage-file-layout.html) · [PostgreSQL 18.6 重命名源码](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/commands/tablecmds.c) · [SQLite 文件格式](https://www.sqlite.org/fileformat.html#storage_of_the_sql_database_schema) · [DuckDB 持久化说明](https://duckdb.org/faq)
 
-本项目仍按表名和索引键拼接物理文件名。普通删表现在对可能属于多张表的文件核对持久定义，保留属于邻表的文件。两张表声明同一路径时会拒绝删除。直接删表在默认和共享外部表空间的 46 项正常操作均与 PostgreSQL 18.6 对照一致。重命名和按原名重建仍有差距。[测试报告](test-report.md#drop-table-file-ownership-20261121) · [存储布局差距](issue-sto-02-relation-storage-namespace.md)
+本项目仍按表名和索引键拼接物理文件名。普通删表现在对可能属于多张表的文件核对持久定义，保留属于邻表的文件。两张表声明同一路径时会拒绝删除。直接删表在默认和共享外部表空间的 46 项正常操作均与 PostgreSQL 18.6 对照一致。[测试报告](test-report.md#drop-table-file-ownership-20261121) · [存储布局差距](issue-sto-02-relation-storage-namespace.md)
 
 ## 2026-11-21 · 两列文字沿用已确定的比较方式
 

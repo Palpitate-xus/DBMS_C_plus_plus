@@ -103,6 +103,64 @@ def main():
               [["27", "reused"]], tag="SELECT 1")
         assert b"fillfactor=80" in (home / "ordinary_pending.params").read_bytes().splitlines()
 
+    def shared_name_prefix(server):
+        work = Path(server["dir"])
+        home = work / "info"
+        payload = "committed-neighbor" * 360
+        query(server, "CREATE TABLE undo_prefix_neighbor(id INT PRIMARY KEY, v INT, payload TEXT);",
+              tag="CREATE TABLE")
+        query(server, "CREATE INDEX undo_neighbor_lookup ON undo_prefix_neighbor(v);", tag="CREATE INDEX")
+        query(server, f"INSERT INTO undo_prefix_neighbor VALUES(7,70,'{payload}');", tag="INSERT 0 1")
+
+        def read_neighbor():
+            query(server, "SELECT id FROM undo_prefix_neighbor WHERE id=7;", [["7"]], tag="SELECT 1")
+            query(server, "SELECT id,payload FROM undo_prefix_neighbor WHERE v=70;",
+                  [["7", payload]], tag="SELECT 1")
+
+        read_neighbor()
+        query(server, "CHECKPOINT;", tag="CHECKPOINT")
+        neighbor_files = [home / name for name in (
+            "undo_prefix_neighbor.stc", "undo_prefix_neighbor.dt", "undo_prefix_neighbor.idx",
+            "undo_prefix_neighbor.toast.dt", "undo_prefix_neighbor.toast.idx",
+            "undo_prefix_neighbor_v.idx", "undo_prefix_neighbor.secidx")]
+        snapshots = {path: path.read_bytes() for path in neighbor_files}
+        assert all(snapshots.values())
+
+        def check_neighbor_files():
+            for path, before in snapshots.items():
+                assert path.read_bytes() == before, ("neighbor file changed", path.name)
+
+        # An inline UNIQUE constraint would create the same file as the
+        # existing secondary index: undo_prefix_neighbor_v.idx.
+        query(server, "CREATE TABLE undo_prefix(id INT PRIMARY KEY, neighbor_v INT UNIQUE);", [], state="XX000")
+        query(server, "SELECT id FROM undo_prefix;", [], state="42P01")
+        assert not (home / "undo_prefix.stc").exists()
+        check_neighbor_files()
+
+        create = "CREATE TABLE undo_prefix(id INT PRIMARY KEY, code INT UNIQUE, payload TEXT);"
+        query(server, "BEGIN;", ready=b"T", tag="BEGIN")
+        query(server, create, ready=b"T", tag="CREATE TABLE")
+        query(server, "INSERT INTO undo_prefix VALUES(1,10,'pending');", ready=b"T", tag="INSERT 0 1")
+        journal = home / ".create_table_undo"
+        assert (journal / "header").is_file() and (journal / "catalog").is_file()
+        assert len([path for path in journal.iterdir() if path.name.isdigit()]) == 1
+        assert not list(work.glob("info.txn_backup.*")), "fixture used a full transaction image"
+        assert (home / "undo_prefix.stc").is_file() and (home / "undo_prefix_code.idx").is_file()
+
+        crash_and_reopen(server)
+        query(server, "SELECT id FROM undo_prefix;", [], state="42P01")
+        assert not list(home.glob("undo_prefix.*")), "provisional table files survived"
+        assert not list(home.glob("undo_prefix_code.idx*")), "provisional UNIQUE index survived"
+        check_neighbor_files()
+        read_neighbor()
+
+        query(server, create, tag="CREATE TABLE")
+        query(server, "INSERT INTO undo_prefix VALUES(2,20,'reused');", tag="INSERT 0 1")
+        crash_and_reopen(server)
+        query(server, "SELECT id,payload FROM undo_prefix WHERE code=20;", [["2", "reused"]], tag="SELECT 1")
+        check_neighbor_files()
+        read_neighbor()
+
     def owned_sequence(server):
         setup(server)
         query(server, "BEGIN;", ready=b"T", tag="BEGIN")
@@ -289,7 +347,8 @@ def main():
         query(server, "SELECT id,payload FROM ordinary_mixed;", [["27", "reused"]], tag="SELECT 1")
 
     failures = []
-    cases = [("ordinary", ordinary), ("owned_sequence", owned_sequence),
+    cases = [("ordinary", ordinary), ("shared_name_prefix", shared_name_prefix),
+             ("owned_sequence", owned_sequence),
              ("savepoint", savepoint), ("savepoint_commit", savepoint_commit),
              ("external_tablespace", external_tablespace)]
     for family in ("alter", "index", "serial", "inheritance", "unlogged"):

@@ -1,10 +1,16 @@
 # STO-02: relation storage identity and physical-name collision containment
 
+## 2026-11-21 · Table rename and name reuse
+
+Rename and direct DROP now plan files from the same ownership check. Rename moves each selected fork or catalog sidecar once and refuses to replace any occupied destination. CREATE can reuse a name when the overlapping files have verified neighboring owners. A UNIQUE column that would create a file already used by another table still blocks CREATE. Failed CREATE cleanup and startup undo determine the same ownership before removing relation files.
+
+The recovered and committed cases include both prefix directions, tables with secondary indexes and long values, and reuse after a forced restart. Default and shared external tablespaces pass the focused PostgreSQL comparison. A stable physical locator, exact reservations for independent index creation, and other maintenance paths remain open. [Test results](test-report.md#rename-table-file-ownership-20261121)
+
 ## 2026-11-21 · Direct table drop with shared name prefixes
 
 An ordinary `DROP TABLE cut` previously matched the filename pattern of `cut_long` and removed its primary, secondary and long-value indexes. Before unlinking files, direct table drop now checks possible owners' on-disk schemas in the same storage directory and consults their index definitions. The SQL drop plan leaves indexes of tables in the same drop plan to table retirement. Legitimate neighboring files are retained. If both relations claim the same physical index filename, the storage check rejects the drop. Specialized index files without independent ownership metadata can remain ambiguous when both schemas have plausible columns.
 
-The registered drop protocol test covers preservation byte for byte, removal of a true index with a similarly prefixed name, and a forced restart. Separate PostgreSQL 18.6 comparisons cover normal drops in the default and a shared external tablespace. The architectural requirement is still partial. Rename, name reuse, index creation, other prefix scans and a physical layout based on stable identifiers remain open. [Test results](test-report.md#drop-table-file-ownership-20261121)
+The registered drop protocol test covers preservation byte for byte, removal of a true index with a similarly prefixed name, and a forced restart. Separate PostgreSQL 18.6 comparisons cover normal drops in the default and a shared external tablespace. The architectural requirement is still partial. [Test results](test-report.md#drop-table-file-ownership-20261121)
 
 ## Scope
 

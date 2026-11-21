@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>表改名后可以用原名建一张新表 · 2026-11-21</summary>
+
+例如，把 `orders` 改名为 `orders_archive` 后，可以用 `orders` 新建一张表。两张表可以分别查询，名称相近的其他表也能照常使用。
+
+[测试报告](docs/test-report.md#rename-table-file-ownership-20261121)
+
+</details>
+
+<details>
 <summary>删除一张表时保留名称相近的其他表 · 2026-11-21</summary>
 
 例如，删除 `orders` 后，`orders_items` 的索引和长文本仍可以读取。如果两张表已在共用同一个索引文件，数据库会拒绝删除。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>两列文字的比较规则冲突时会提示错误 · 2026-11-21</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-21 · 两列文字的比较规则冲突时会提示错误
 
 可以在查询里用 `COLLATE` 为两列指定同一种规则。空表里没有记录需要比较，查询会正常返回空结果。
 
 [使用手册](docs/MANUAL.md#基础查询) · [测试报告](docs/test-report.md#implicit-collation-filter-20261121) · [性能报告](docs/performance-report-2026-10-30.md#implicit-collation-filter-cost-20261121)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-21 · 筛选文字时可以指定比较规则
 

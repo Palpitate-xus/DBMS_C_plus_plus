@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Crash recovery restores durable data and removes stale temporary relations."""
+"""Cold startup preserves durable relations, names and transaction state."""
 
 import importlib.util
 import os
@@ -99,6 +99,75 @@ def main():
             "recovered transaction image was not cleaned up")
         assert not list(fixture.glob("info.ddl_statement_backup.*")), (
             "stale nested statement images survived transaction recovery")
+
+    def rename_with_shared_prefix(server, old_name, neighbor):
+        new_name = "rename_item_moved"
+        home = Path(server["dir"]) / "info"
+        fixtures = {
+            "rename_item": ("neighbor_key", 1, 11, "short-long-value" * 400),
+            "rename_item_neighbor": ("indexed_value", 2, 22, "neighbor-payload" * 400),
+        }
+        # Establish both names first: the short table's secondary file also
+        # starts with the long name, although only the short table owns it.
+        for table, (column, _, _, _) in fixtures.items():
+            query(server, f"CREATE TABLE {table}(id INT PRIMARY KEY, {column} INT, payload TEXT);",
+                  tag="CREATE TABLE")
+        for table, (column, key, indexed, payload) in fixtures.items():
+            query(server, f"CREATE INDEX {table}_lookup ON {table}({column});", tag="CREATE INDEX")
+            query(server, f"INSERT INTO {table} VALUES({key},{indexed},'{payload}');",
+                  tag="INSERT 0 1")
+
+        def read_record(table, fixture):
+            column, key, indexed, payload = fixture
+            query(server, f"SELECT id FROM {table} WHERE id={key};", [[str(key)]], tag="SELECT 1")
+            query(server, f"SELECT id,payload FROM {table} WHERE {column}={indexed};",
+                  [[str(key), payload]], tag="SELECT 1")
+
+        def read_forks(table, fixture):
+            column = fixture[0]
+            required = (".dt", ".idx", ".toast.dt", ".toast.idx", f"_{column}.idx")
+            return {suffix: (home / (table + suffix)).read_bytes() for suffix in required}
+
+        for table, fixture in fixtures.items():
+            read_record(table, fixture)
+        query(server, "CHECKPOINT;", tag="CHECKPOINT")
+        old_forks = read_forks(old_name, fixtures[old_name])
+        neighbor_forks = read_forks(neighbor, fixtures[neighbor])
+        assert all(old_forks.values()) and all(neighbor_forks.values())
+
+        query(server, "BEGIN;", ready=b"T", tag="BEGIN")
+        query(server, f"ALTER TABLE {old_name} RENAME TO {new_name};",
+              ready=b"T", tag="ALTER TABLE")
+        restart_after_sigkill(server)
+        query(server, f"SELECT id FROM {new_name};", [], state="42P01")
+        assert read_forks(old_name, fixtures[old_name]) == old_forks
+        assert read_forks(neighbor, fixtures[neighbor]) == neighbor_forks
+        read_record(old_name, fixtures[old_name])
+        read_record(neighbor, fixtures[neighbor])
+
+        query(server, f"ALTER TABLE {old_name} RENAME TO {new_name};", tag="ALTER TABLE")
+        query(server, f"SELECT id FROM {old_name};", [], state="42P01")
+        assert not (home / f"{old_name}.stc").exists()
+        assert all(not (home / (old_name + suffix)).exists() for suffix in old_forks)
+        assert read_forks(new_name, fixtures[old_name]) == old_forks, "renamed files differ"
+        assert read_forks(neighbor, fixtures[neighbor]) == neighbor_forks, "neighbor files changed"
+
+        query(server, f"CREATE TABLE {old_name}(id INT PRIMARY KEY, reused INT, payload TEXT);",
+              tag="CREATE TABLE")
+        query(server, f"CREATE INDEX rename_reused_lookup ON {old_name}(reused);", tag="CREATE INDEX")
+        query(server, f"INSERT INTO {old_name} VALUES(3,33,'fresh row');", tag="INSERT 0 1")
+        read_record(old_name, ("reused", 3, 33, "fresh row"))
+        read_record(new_name, fixtures[old_name])
+        read_record(neighbor, fixtures[neighbor])
+
+        query(server, f"DROP TABLE {old_name};", tag="DROP TABLE")
+        assert read_forks(new_name, fixtures[old_name]) == old_forks, "reuse changed renamed files"
+        assert read_forks(neighbor, fixtures[neighbor]) == neighbor_forks, "reuse changed neighbor files"
+        kill_server(server)
+        reopen(server)
+        query(server, f"SELECT id FROM {old_name};", [], state="42P01")
+        read_record(new_name, fixtures[old_name])
+        read_record(neighbor, fixtures[neighbor])
 
     # Every case uses an independently created tiny cluster. No user data,
     # prebuilt copied fixture, or timeout extension is needed to reproduce.
@@ -297,6 +366,15 @@ def main():
         finally:
             runner.stop_ours(server)
     print("[COLD START COMMITTED IMAGE RETENTION PROTOCOL E2E] passed")
+
+    for old_name, neighbor in (("rename_item", "rename_item_neighbor"),
+                               ("rename_item_neighbor", "rename_item")):
+        server = runner.start_ours(client)
+        try:
+            rename_with_shared_prefix(server, old_name, neighbor)
+        finally:
+            runner.stop_ours(server)
+    print("[COLD START RENAME TABLE SHARED PREFIX PROTOCOL E2E] passed")
 
 
 if __name__ == "__main__":

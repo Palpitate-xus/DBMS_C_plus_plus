@@ -2,6 +2,36 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-21 preserve neighboring files during table rename and name reuse",
+      "gap_ids": ["STO-02", "CAT-07"],
+      "status": "partial",
+      "evidence": [
+        "src/commands/TableManage.cpp",
+        "docs/issue-sto-02-relation-storage-namespace.md",
+        "docs/postgresql-comparison.md",
+        "docs/test-report.md",
+        "docs/performance-report-2026-10-30.md"
+      ],
+      "tests": [
+        "tests/cold_start_transaction_backup_protocol_e2e_test.py",
+        "tests/ordinary_create_transaction_crash_protocol_e2e_test.py"
+      ],
+      "verification": [
+        "64 matched PostgreSQL 18.6 steps in the default and shared external tablespaces. Registered crash regressions checked both rename directions, committed and uncommitted states, compact CREATE undo, and the neighboring files and values.",
+        "Seven focused protocol suites and four native regressions passed. The tmpfs comparison had 120 identical measured responses and recorded paired rename elapsed changes of -0.34% without an index and +0.72% with an index.",
+        "Stable physical identities, conflicting standalone index publication, additional maintenance paths, and exhaustive multi-file rename durability remain open."
+      ],
+      "artifacts": {
+        "candidate_build": "build/array-domain-20261117/ownership-rename-cmake-v1.json",
+        "postgresql_default_space": "build/relation-file-ownership-20261121/rename-candidate-v1-independent-audit.json",
+        "postgresql_external_space": "build/relation-file-ownership-20261121/rename-external-candidate-v1-independent-audit.json",
+        "final_cold_start_test": "build/relation-file-ownership-20261121/registered-rename-v1/final-cold.json",
+        "related_protocol": "build/relation-file-ownership-20261121/registered-rename-v1/summary.json",
+        "native_regressions": "build/array-domain-20261117/native-create-fillfactor-ownership-rename-cmake-v1/summary.json",
+        "timing": "build/relation-file-ownership-20261121/rename-perf/paired-tmpfs-v1-1.json"
+      }
+    },
+    {
       "issue": "2026-11-21 preserve neighboring relation files during direct DROP TABLE",
       "gap_ids": ["STO-02"],
       "status": "partial",

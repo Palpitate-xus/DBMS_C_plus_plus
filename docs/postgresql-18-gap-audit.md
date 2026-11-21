@@ -2,7 +2,9 @@
 
 ## 2026-11-21 · 普通删表的文件归属
 
-`STO-02` 仍为部分实现。直接 `DROP TABLE` 核对可能的文件所有者，在默认及共享外部表空间保留名称相近的邻表及其索引。46 项正常操作与 PostgreSQL 18.6 一致，另通过提交后和回滚后重启检查。两张表已经声明同一文件时拒绝删除。按编号定位的存储布局、重命名、索引创建及其他按名称筛选文件的路径仍待完成。[存储布局差距](issue-sto-02-relation-storage-namespace.md) · [测试报告](test-report.md#drop-table-file-ownership-20261121)
+`STO-02` 仍为部分实现。直接 `DROP TABLE` 核对可能的文件所有者，在默认及共享外部表空间保留名称相近的邻表及其索引。46 项正常操作与 PostgreSQL 18.6 一致，另通过提交后和回滚后重启检查。两张表已经声明同一文件时拒绝删除。[删表测试](test-report.md#drop-table-file-ownership-20261121)
+
+直接重命名、旧名重用和未提交建表的撤销共用这项归属检查。默认及外部表空间的 64 项重命名和重用对照与 PostgreSQL 18.6 一致。按编号定位的存储布局、独立创建索引和其他按名称筛选文件的维护路径仍待完成。[重命名测试](test-report.md#rename-table-file-ownership-20261121) · [存储布局差距](issue-sto-02-relation-storage-namespace.md)
 
 ## 当前汇总（2026-11-20）
 
