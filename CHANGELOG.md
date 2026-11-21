@@ -1,25 +1,25 @@
 # 更新日志
 
 <details>
-<summary>筛选文字时可以指定比较规则 · 2026-11-21</summary>
+<summary>筛选文字时可指定排序规则 · 2026-11-21</summary>
 
-例如 `WHERE title COLLATE "C" < 'm'` 会按指定规则比较标题。写错规则名时，即使表是空的，也会收到错误提示。还可以用自己创建的规则，或用 `schema.规则名` 找到指定位置的规则。
+例如 `WHERE title COLLATE "C" < 'm'` 会用 `C` 规则找出排在 `m` 前面的标题。规则名写错时，空表也会提示错误。查询也可以使用自己创建的排序规则。
 
 [使用手册](docs/MANUAL.md#基础查询) · [测试报告](docs/test-report.md#explicit-collation-filter-20261121) · [性能报告](docs/performance-report-2026-10-30.md#explicit-collation-filter-cost-20261121)
 
 </details>
 
 <details>
-<summary>比较同一条记录里的两列时返回正确结果 · 2026-11-21</summary>
+<summary>修复比较同一行两列时的漏查 · 2026-11-21</summary>
 
-例如 `WHERE id = peer_id` 会比较每条记录里的两个值。给 `id` 建索引后，查询仍会找到全部符合条件的记录。两个相差 1 的大整数也能正确区分，文本 `'01'` 和 `'1'` 会保留各自的含义。
+例如 `WHERE id = peer_id` 会查找两列值相等的记录。以前给 `id` 建索引后，这种查询有时会漏掉符合条件的记录。现在也能区分只差 1 的大整数及 `'01'` 和 `'1'` 这样的文本。
 
 [使用手册](docs/MANUAL.md#基础查询) · [测试报告](docs/test-report.md#same-row-select-20261121) · [性能报告](docs/performance-report-2026-10-30.md#same-row-select-cost-20261121)
 
 </details>
 
 <details>
-<summary>查询时能区分数字和列名 · 2026-11-21</summary>
+<summary>修复把数字误当成列名的问题 · 2026-11-21</summary>
 
 `WHERE id = 7` 查找编号为 7 的记录。`WHERE id = "7"` 比较同一条记录里的 `id` 和名为 `"7"` 的列。
 
