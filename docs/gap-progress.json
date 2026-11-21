@@ -2,6 +2,33 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-21 preserve neighboring relation files during direct DROP TABLE",
+      "gap_ids": ["STO-02"],
+      "status": "partial",
+      "evidence": [
+        "src/commands/TableManage.cpp",
+        "src/commands/DdlExecutor.cpp",
+        "docs/issue-sto-02-relation-storage-namespace.md",
+        "docs/postgresql-comparison.md",
+        "docs/test-report.md",
+        "docs/performance-report-2026-10-30.md"
+      ],
+      "tests": ["tests/drop_multiple_tables_protocol_e2e_test.py"],
+      "verification": [
+        "The registered protocol test verifies exact neighboring index bytes, removal of the target's own similarly named index, full 6000-byte text after restart, and unchanged files and catalog after four refused overlapping-index drops.",
+        "All 46 focused PostgreSQL 18.6 steps matched in the default and shared external tablespaces. Dedicated crash probes passed after both a committed drop and a rollback.",
+        "Across 432 matched timings on a 13-table seed, ordinary drop elapsed time changed +1.24% and server CPU changed -1.72% by paired medians. The 44-table measurement is in progress.",
+        "Stable relation file identities, rename and name reuse, index creation and other filename ownership paths remain open."
+      ],
+      "artifacts": {
+        "candidate_build": "build/array-domain-20261117/ownership-cmake-v2.json",
+        "postgresql_audit": "build/relation-file-ownership-20261121/drop-candidate-v2-independent-audit.json",
+        "related_protocol": "build/relation-file-ownership-20261121/related-drop-v2/summary.json",
+        "native_regressions": "build/array-domain-20261117/native-create-fillfactor-ownership-cmake-v2/summary.json",
+        "timing_13_tables": "build/physical-ownership-20261121/perf/paired-formal-v2-1.json"
+      }
+    },
+    {
       "issue": "2026-11-21 compare ordinary binary text columns directly",
       "gap_ids": ["SQL-04", "SQL-10", "OPT-03"],
       "status": "partial",
@@ -10130,7 +10157,7 @@
     {"id":"VAC-03","status":"partial","evidence":["docs/code-review-progress.md","docs/commandsList.md","docs/issue-vac-03-maintenance-options.md","docs/postgresql-18-gap-audit.md","src/main.cpp","src/commands/TableManage.cpp","src/commands/TableManage.h"],"tests":["scripts/build.sh","scripts/build_one_test.sh","tests/legacy_forced_analyze_protocol_e2e_test.py","tests/vacuum_full_test.cpp"],"commits":["09611ff0"]},
     {"id":"VAC-04","status":"unverified","evidence":[]},
     {"id":"STO-01","status":"partial","evidence":["docs/issue-sto-01-control-format-integrity.md","docs/PACKAGING.md","docs/MANUAL.md","src/common/DataDirectory.cpp"],"tests":["tests/data_directory_e2e_test.py","tests/checksum_verification_e2e_test.py","scripts/build_tests.sh"],"commits":["b662ff97"]},
-    {"id":"STO-02","status":"partial","evidence":["docs/issue-sto-02-relation-storage-namespace.md","docs/code-review-progress.md","src/commands/TableManage.cpp"],"tests":["tests/partition_test.cpp","tests/temp_restart_cleanup_test.cpp","tests/create_table_like_test.cpp","scripts/build_tests.sh"],"commits":["1a76a3fb"]},
+    {"id":"STO-02","status":"partial","evidence":["docs/issue-sto-02-relation-storage-namespace.md","docs/code-review-progress.md","src/commands/TableManage.cpp","src/commands/DdlExecutor.cpp"],"tests":["tests/partition_test.cpp","tests/temp_restart_cleanup_test.cpp","tests/create_table_like_test.cpp","tests/drop_multiple_tables_protocol_e2e_test.py","scripts/build_tests.sh"],"commits":["1a76a3fb"]},
     {"id":"STO-03","status":"partial","evidence":["docs/issue-sto-03-page-identity.md","docs/postgresql-18-gap-audit.md","src/storage/PgPage.cpp","src/storage/PageAllocator.cpp","src/common/DataDirectory.cpp"],"tests":["tests/checksum_test.cpp","tests/checksum_verification_e2e_test.py","scripts/build.sh","scripts/build_tests.sh"],"commits":["11d1fa4d"]},
     {"id":"STO-04","status":"partial","evidence":["docs/issue-sto-04-buffer-invalidation-pins.md","docs/postgresql-18-gap-audit.md","src/storage/BufferPool.cpp"],"tests":["tests/buffer_pool_invalidate_all_pins_test.cpp","scripts/build.sh","scripts/build_tests.sh","tests/div14_feature_gate_test.py"],"commits":["019e5ee7"]},
     {"id":"STO-05","status":"partial","evidence":["docs/issue-sto-05-vacuum-visibility-horizon.md","src/commands/TableManage.cpp"],"tests":["tests/parallel_vacuum_test.cpp","scripts/build.sh","scripts/build_one_test.sh"],"commits":["9a29e99a"]},

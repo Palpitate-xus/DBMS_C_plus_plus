@@ -8365,6 +8365,12 @@ static bool executeDropTableSingle(const DropStmt* stmt, Session& s,
         }
     }
     for (const auto& action : physicalCascadeActions) {
+        // Table retirement checks ownership before unlinking its indexes.
+        // Dropping them individually here would bypass that check.
+        if (action.kind == PhysicalCascadeAction::Kind::Index &&
+            droppedTableStorageNames.count(action.tableName) != 0) {
+            continue;
+        }
         if (!dropPhysicalCascadeAction(g_engine, s.currentDB, action)) {
             std::cout << "DROP TABLE dependency cleanup failed for "
                       << action.name << std::endl;

@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>删除一张表时保留名称相近的其他表 · 2026-11-21</summary>
+
+例如，删除 `orders` 后，`orders_items` 的索引和长文本仍可以读取。如果两张表已在共用同一个索引文件，数据库会拒绝删除。
+
+[测试报告](docs/test-report.md#drop-table-file-ownership-20261121)
+
+</details>
+
+<details>
 <summary>部分查询能更快找出两列文字相同的记录 · 2026-11-21</summary>
 
 在测试的单表查询中，如果建表时将一列设为按字符编码比较（`COLLATE "C"`），另一列使用数据库默认规则，筛出两列内容相同的记录用时更短。比较 `TEXT` 和 `VARCHAR` 时，末尾空格仍参与比较。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>筛选文字时可以指定比较规则 · 2026-11-21</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-21 · 筛选文字时可以指定比较规则
 
 例如 `WHERE title COLLATE "C" < 'm'` 会按字符编码比较，找出排在 `m` 前面的标题。也可以使用自己创建的规则。规则名写错时，即使表是空的，也会收到错误提示。
 
 [使用手册](docs/MANUAL.md#基础查询) · [测试报告](docs/test-report.md#explicit-collation-filter-20261121) · [性能报告](docs/performance-report-2026-10-30.md#explicit-collation-filter-cost-20261121)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-21 · 修复比较同一行两列时的漏查
 

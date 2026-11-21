@@ -1,5 +1,11 @@
 # STO-02: relation storage identity and physical-name collision containment
 
+## 2026-11-21 · Direct table drop with shared name prefixes
+
+An ordinary `DROP TABLE cut` previously matched the filename pattern of `cut_long` and removed its primary, secondary and long-value indexes. Before unlinking files, direct table drop now checks possible owners' on-disk schemas in the same storage directory and consults their index definitions. The SQL drop plan leaves indexes of tables in the same drop plan to table retirement. Legitimate neighboring files are retained. If both relations claim the same physical index filename, the storage check rejects the drop. Specialized index files without independent ownership metadata can remain ambiguous when both schemas have plausible columns.
+
+The registered drop protocol test covers preservation byte for byte, removal of a true index with a similarly prefixed name, and a forced restart. Separate PostgreSQL 18.6 comparisons cover normal drops in the default and a shared external tablespace. The architectural requirement is still partial. Rename, name reuse, index creation, other prefix scans and a physical layout based on stable identifiers remain open. [Test results](test-report.md#drop-table-file-ownership-20261121)
+
 ## Scope
 
 The PostgreSQL 18 audit asks for relation locators and fork/segment layout,
@@ -54,6 +60,7 @@ not split into fixed-size segments, and database/tablespace paths are still
 name-based. Temporary relations still use a generated backend prefix rather
 than a locator carrying backend identity. Other prefix-scanning backup,
 tablespace-move, and maintenance paths still need a systematic audit for
-legacy ambiguous catalogs. No PostgreSQL 18.6 differential was run. STO-02
+legacy ambiguous catalogs. The original partition-collision fix predates the
+PostgreSQL 18.6 drop comparison above. STO-02
 therefore remains **partial**; no format migration or broad architecture change
 is claimed here.

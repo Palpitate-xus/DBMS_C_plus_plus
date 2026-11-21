@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-21 · 删除表时核对索引文件归属
+
+PostgreSQL 18 用 `relfilenode` 编号定位普通表和索引的文件，表的 SQL 名称在目录中维护。SQLite 在 `sqlite_schema` 中分别记录对象名和 B 树根页。DuckDB 把多张表及其索引保存在同一个数据库文件里。这三种布局都允许仅因名称有共同前缀的表使用各自的存储空间。[PostgreSQL 文件布局](https://www.postgresql.org/docs/18/storage-file-layout.html) · [PostgreSQL 18.6 重命名源码](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/commands/tablecmds.c) · [SQLite 文件格式](https://www.sqlite.org/fileformat.html#storage_of_the_sql_database_schema) · [DuckDB 持久化说明](https://duckdb.org/faq)
+
+本项目仍按表名和索引键拼接物理文件名。普通删表现在对可能属于多张表的文件核对持久定义，保留属于邻表的文件。两张表声明同一路径时会拒绝删除。直接删表在默认和共享外部表空间的 46 项正常操作均与 PostgreSQL 18.6 对照一致。重命名和按原名重建仍有差距。[测试报告](test-report.md#drop-table-file-ownership-20261121) · [存储布局差距](issue-sto-02-relation-storage-namespace.md)
+
 ## 2026-11-21 · 两列文字沿用已确定的比较方式
 
 PostgreSQL 18.6 在一列使用默认规则、另一列声明了非默认规则时选用后者。比较按 `C` 排序的文本时可以使用字节顺序，定长 `CHAR` 先去掉填充空格。SQLite 也区分按字节比较的 `BINARY` 和忽略尾空格的 `RTRIM`。DuckDB 在选定二进制规则时省去生成排序键的步骤。[PostgreSQL 规则选择](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/parser/parse_collate.c) · [PostgreSQL 文本比较](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/utils/adt/varlena.c) · [PostgreSQL 定长字符比较](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/utils/adt/varchar.c) · [SQLite 比较规则](https://www.sqlite.org/datatype3.html#collation) · [DuckDB 比较规则绑定](https://raw.githubusercontent.com/duckdb/duckdb/main/src/planner/collation_binding.cpp)

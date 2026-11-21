@@ -3878,57 +3878,39 @@ std::filesystem::path StorageEngine::vmPath(const std::string& dbname,
     return relationDir(dbname, tablename) / (tablename + ".vm");
 }
 
-// Relation forks and access-method files share the table-name prefix, while
-// catalog sidecars (for example .stc and .params) remain in dbPath(). Keep
-// this predicate in one place so migration, snapshot filtering and DROP use
-// identical boundaries and never confuse table "t" with table "t2".
-static bool isRelationPhysicalFileName(const std::string& name,
-                                        const std::string& tablename) {
-    static constexpr std::string_view initSuffix = ".init";
-    static constexpr std::string_view tdeSuffix = ".tde";
-    static constexpr std::string_view extentMarkerSuffix =
-        ".extent_pending";
-    static constexpr std::string_view mapPublicationSuffix = ".map_publication";
+static std::string_view relationPhysicalBaseName(std::string_view name) {
     static constexpr std::string_view temporaryReceipt = ".map_publication.tmp.";
     const auto temporaryPosition = name.rfind(temporaryReceipt);
-    if (temporaryPosition != std::string::npos) {
+    if (temporaryPosition != std::string_view::npos) {
         const auto serial = name.substr(temporaryPosition + temporaryReceipt.size());
         const auto dot = serial.find('.');
-        if (dot != std::string::npos && dot != 0 && dot + 1 < serial.size() &&
-            serial.find_first_not_of("0123456789.") == std::string::npos &&
-            serial.find('.', dot + 1) == std::string::npos)
-            return isRelationPhysicalFileName(name.substr(0, temporaryPosition), tablename);
+        if (dot != std::string_view::npos && dot != 0 && dot + 1 < serial.size() &&
+            serial.find_first_not_of("0123456789.") == std::string_view::npos &&
+            serial.find('.', dot + 1) == std::string_view::npos) {
+            return relationPhysicalBaseName(name.substr(0, temporaryPosition));
+        }
     }
-    if (name.size() > mapPublicationSuffix.size() &&
-        name.compare(name.size() - mapPublicationSuffix.size(), mapPublicationSuffix.size(),
-                     mapPublicationSuffix) == 0) {
-        return isRelationPhysicalFileName(
-            name.substr(0, name.size() - mapPublicationSuffix.size()), tablename);
+    constexpr std::string_view companions[] = {
+        ".map_publication", ".init", ".tde", ".extent_pending"};
+    for (const auto suffix : companions) {
+        if (name.size() > suffix.size() &&
+            name.substr(name.size() - suffix.size()) == suffix) {
+            return relationPhysicalBaseName(name.substr(0, name.size() - suffix.size()));
+        }
     }
-    if (name.size() > initSuffix.size() &&
-        name.compare(name.size() - initSuffix.size(), initSuffix.size(),
-                     initSuffix) == 0) {
-        return isRelationPhysicalFileName(
-            name.substr(0, name.size() - initSuffix.size()), tablename);
-    }
-    if (name.size() > tdeSuffix.size() &&
-        name.compare(name.size() - tdeSuffix.size(), tdeSuffix.size(),
-                     tdeSuffix) == 0) {
-        return isRelationPhysicalFileName(
-            name.substr(0, name.size() - tdeSuffix.size()), tablename);
-    }
-    if (name.size() > extentMarkerSuffix.size() &&
-        name.compare(name.size() - extentMarkerSuffix.size(),
-                     extentMarkerSuffix.size(), extentMarkerSuffix) == 0) {
-        return isRelationPhysicalFileName(
-            name.substr(0, name.size() - extentMarkerSuffix.size()),
-            tablename);
-    }
+    return name;
+}
+
+// Recognize on-disk filename shapes. More than one relation can match an
+// index filename, so a match by itself cannot authorize an unlink.
+static bool isRelationPhysicalFileName(std::string_view name,
+                                        const std::string& tablename) {
+    name = relationPhysicalBaseName(name);
     if (name == tablename + ".toast") return true;
-    const std::array<std::string, 11> suffixes = {
+    constexpr std::array<std::string_view, 11> suffixes = {
         ".dt", ".fsm", ".vm", ".idx", ".hidx", ".bidx", ".fti",
         ".gin", ".gist", ".spgist", ".brin"};
-    const auto hasSuffix = [&](const std::string& suffix) {
+    const auto hasSuffix = [&](std::string_view suffix) {
         return name.size() >= suffix.size() &&
                name.compare(name.size() - suffix.size(), suffix.size(),
                             suffix) == 0;
@@ -3946,7 +3928,7 @@ static bool isRelationPhysicalFileName(const std::string& name,
     // Column indexes use `<table>_<column>.<am>`; underscore alone does not
     // make a neighboring table's `.dt` heap part of this relation.
     if (name.rfind(tablename + "_", 0) == 0) {
-        const std::array<std::string, 8> indexSuffixes = {
+        constexpr std::array<std::string_view, 8> indexSuffixes = {
             ".idx", ".hidx", ".bidx", ".fti", ".gin", ".gist",
             ".spgist", ".brin"};
         const size_t prefixLength = tablename.size() + 1;
@@ -3961,9 +3943,14 @@ static bool isRelationPhysicalFileName(const std::string& name,
 
     // Main relation forks and indexes use exact `<table>.<fork>` names. TOAST
     // heaps/indexes are the only multi-component dotted storage names.
+    const auto remainder = name.size() > tablename.size() &&
+            name.substr(0, tablename.size()) == tablename
+        ? name.substr(tablename.size()) : std::string_view{};
     for (const auto& suffix : suffixes) {
-        if (name == tablename + suffix ||
-            name == tablename + ".toast" + suffix) return true;
+        if (remainder == suffix ||
+            (remainder.substr(0, 6) == ".toast" && remainder.substr(6) == suffix)) {
+            return true;
+        }
     }
     const std::string compositeIndexPrefix = tablename + ".idx_";
     return name == tablename + ".toastmeta" ||
@@ -10604,6 +10591,17 @@ bool consumeUniqueIndexMetadataPrefix(std::string& definition) {
                             UNIQUE_INDEX_METADATA_PREFIX));
     return true;
 }
+
+std::string_view secondaryIndexMetadataKey(std::string_view definition) {
+    if (definition.substr(0, 5) == "EXPR:") {
+        definition.remove_prefix(5);
+        return definition.substr(0, std::min(definition.find(":INCLUDE:"),
+                                             definition.find(":WHERE:")));
+    }
+    return definition.substr(0, std::min({definition.find(":DESC"),
+                                           definition.find(":INCLUDE:"),
+                                           definition.find(":WHERE:")}));
+}
 }
 
 bool StorageEngine::registerIndexName(const std::string& dbname,
@@ -11149,6 +11147,7 @@ std::vector<StorageEngine::IndexMetadata> StorageEngine::getIndexMetadata(
         info.isUnique = consumeUniqueIndexMetadataPrefix(line);
         // Composite index lines start with "C:"
         if (line.size() > 2 && line[0] == 'C' && line[1] == ':') continue;
+        info.name = secondaryIndexMetadataKey(line);
 
         // Check for EXPR prefix
         if (line.substr(0, 5) == "EXPR:") {
@@ -11160,7 +11159,6 @@ std::vector<StorageEngine::IndexMetadata> StorageEngine::getIndexMetadata(
             size_t endPos = std::min(
                 incPos != std::string::npos ? incPos : line.size(),
                 wherePos != std::string::npos ? wherePos : line.size());
-            info.name = line.substr(pos, endPos - pos);
             // Extract function from expression like "UPPER(col)"
             size_t lp = info.name.find('(');
             if (lp != std::string::npos) {
@@ -11217,10 +11215,7 @@ std::vector<StorageEngine::IndexMetadata> StorageEngine::getIndexMetadata(
         }
 
         if (descPos != std::string::npos && descPos < colPart.size()) {
-            info.name = colPart.substr(0, descPos);
             info.descending = true;
-        } else {
-            info.name = colPart;
         }
         result.push_back(std::move(info));
     }
@@ -21026,11 +21021,86 @@ private:
     bool rollbackNeeded_ = false;
 };
 
+// The caller has already matched this name against the legacy file layout.
+// Underscore prefixes need independent evidence: part of the apparent index
+// key can instead belong to another table's name.
+static std::optional<bool> relationClaimsFile(
+    const std::filesystem::path& catalogRoot, const TableSchema& table,
+    std::string_view baseName) {
+    const auto remainder = baseName.substr(table.tablename.size());
+    if (remainder.front() != '_') return true;
+    const auto extension = remainder.rfind('.');
+    const auto key = remainder.substr(1, extension - 1);
+    const auto suffix = remainder.substr(extension);
+    std::string_view method;
+    std::string metadataSuffix;
+    if (suffix == ".idx") {
+        method = "btree";
+        metadataSuffix = ".secidx";
+    } else if (suffix == ".hidx") {
+        method = "hash";
+        metadataSuffix = ".hashidx";
+    } else if (suffix == ".bidx") {
+        method = "bloom";
+        metadataSuffix = ".bloomidx";
+    } else {
+        // Native specialized indexes may have neither a named definition nor
+        // a separate metadata file. Two plausible columns remain ambiguous.
+        method = suffix == ".fti" ? "fulltext" : suffix.substr(1);
+        if (std::any_of(table.cols.begin(), table.cols.end(),
+                        [key](const Column& column) { return column.dataName == key; })) {
+            return true;
+        }
+    }
+
+    std::string contents;
+    std::string line;
+    if (!metadataSuffix.empty()) {
+        if (!readIndexMetadata(catalogRoot / (table.tablename + metadataSuffix), contents)) {
+            return std::nullopt;
+        }
+        std::istringstream definitions(contents);
+        while (std::getline(definitions, line)) {
+            if (method == "btree") {
+                (void)consumeUniqueIndexMetadataPrefix(line);
+                if (line.size() > 2 && line.compare(0, 2, "C:") == 0) continue;
+                if (secondaryIndexMetadataKey(line) == key) return true;
+            }
+            if (line == key) return true;
+        }
+    }
+
+    contents.clear();
+    if (!readIndexMetadata(catalogRoot / (table.tablename + ".idxnames"), contents)) {
+        return std::nullopt;
+    }
+    std::istringstream names(contents);
+    while (std::getline(names, line)) {
+        const auto first = line.find('\t');
+        const auto second = first == std::string::npos ? first : line.find('\t', first + 1);
+        if (first == std::string::npos || first == 0 || second == std::string::npos ||
+            second <= first + 1 || second + 1 == line.size() ||
+            line.find('\t', second + 1) != std::string::npos) {
+            return std::nullopt;
+        }
+        const std::string_view entry(line);
+        if (entry.substr(first + 1, second - first - 1) == method &&
+            entry.substr(second + 1) == key) {
+            return true;
+        }
+    }
+    return false;
+}
+
 DBStatus StorageEngine::dropTable(const std::string& dbname,
                                    const std::string& tablename) {
     const DatabaseMetadataWrite metadataWrite(dbPath(dbname));
     if (!metadataWrite.acquired()) return DBStatus::LOCK_CONFLICT;
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
+    noteTemporaryRelationAccess(dbname, tablename);
+    if (!lockManager_.lockMetadata(tablename)) return DBStatus::LOCK_CONFLICT;
+    ResourceUnlockGuard tableLockGuard(lockManager_, tablename);
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     std::string conflictingRelationName;
     const auto relationDirectory = relationDir(dbname, tablename).lexically_normal();
     for (const auto& existingName : getTableNames(dbname)) {
@@ -21048,15 +21118,82 @@ DBStatus StorageEngine::dropTable(const std::string& dbname,
         // another logical relation's heap.
         return DBStatus::INVALID_VALUE;
     }
-    noteTemporaryRelationAccess(dbname, tablename);
-    if (!lockManager_.lockMetadata(tablename)) return DBStatus::LOCK_CONFLICT;
-    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
+
+    const auto relationRoot = relationDirectory;
+    const auto catalogRoot = dbPath(dbname);
+    std::vector<std::filesystem::path> relationFiles;
+    const auto collectFiles = [&]() -> DBStatus {
+        // Load physical schemas only for names that can explain a matched
+        // file. A schema marker can already exist before tlist is published.
+        std::map<std::string, std::optional<TableSchema>> localSchemas;
+        std::optional<TableSchema> targetSchema;
+        std::error_code error;
+        std::filesystem::directory_iterator it(relationRoot, error), end;
+        if (error == std::errc::no_such_file_or_directory) return DBStatus::OK;
+        for (; !error && it != end; it.increment(error)) {
+            const auto filename = it->path().filename().string();
+            if (!isRelationPhysicalFileName(filename, tablename)) continue;
+            const auto base = relationPhysicalBaseName(filename);
+            size_t otherClaims = 0;
+            bool hasPeer = false;
+            for (size_t split = base.find_first_of("_#."); split != std::string_view::npos;
+                 split = base.find_first_of("_#.", split + 1)) {
+                const std::string peer(base.substr(0, split));
+                if (peer == tablename || !validStoredRelationName(peer) ||
+                    !isRelationPhysicalFileName(base, peer)) continue;
+                auto [entry, inserted] = localSchemas.try_emplace(peer);
+                if (inserted) {
+                    const auto marker = schemaPath(dbname, peer);
+                    if (!pathEntryExists(marker, error)) {
+                        if (error) return DBStatus::IO_ERROR;
+                        continue;
+                    }
+                    if (!std::filesystem::is_regular_file(
+                            std::filesystem::symlink_status(marker, error)) || error) {
+                        return DBStatus::IO_ERROR;
+                    }
+                    std::ifstream input(marker, std::ios::binary);
+                    if (!input) return DBStatus::IO_ERROR;
+                    auto schema = readSchema(input, peer);
+                    if (schema.tablename != peer) return DBStatus::CORRUPTED_DATA;
+                    auto peerRoot = tablespaceDir(dbname, schema.tablespace);
+                    if (!schema.tablespace.empty() && schema.tablespace != "pg_default") {
+                        peerRoot /= dbname;
+                    }
+                    if (peerRoot.lexically_normal() == relationRoot) {
+                        entry->second = std::move(schema);
+                    }
+                }
+                if (!entry->second) continue;
+                hasPeer = true;
+                const auto claim = relationClaimsFile(catalogRoot, *entry->second, base);
+                if (!claim) return DBStatus::CORRUPTED_DATA;
+                if (*claim) ++otherClaims;
+            }
+            if (hasPeer) {
+                if (!targetSchema) {
+                    std::ifstream input(schemaPath(dbname, tablename), std::ios::binary);
+                    if (!input) return DBStatus::IO_ERROR;
+                    targetSchema = readSchema(input, tablename);
+                    if (targetSchema->tablename != tablename) return DBStatus::CORRUPTED_DATA;
+                }
+                const auto claim = relationClaimsFile(catalogRoot, *targetSchema, base);
+                if (!claim || otherClaims + static_cast<size_t>(*claim) != 1) {
+                    return DBStatus::CORRUPTED_DATA;
+                }
+                if (!*claim) continue;
+            }
+            relationFiles.push_back(it->path());
+        }
+        return error ? DBStatus::IO_ERROR : DBStatus::OK;
+    };
+    const auto filesStatus = collectFiles();
+    if (filesStatus != DBStatus::OK) return filesStatus;
 
     std::vector<std::string> originalComments;
     DBStatus commentStatus = readCommentRecords(
         commentsPath(dbname), originalComments);
     if (commentStatus != DBStatus::OK) {
-        lockManager_.unlock(tablename);
         return commentStatus;
     }
     std::vector<std::string> filteredComments = originalComments;
@@ -21067,7 +21204,6 @@ DBStatus StorageEngine::dropTable(const std::string& dbname,
         std::move(filteredComments), commentsChanged);
     commentStatus = commentGuard.publish();
     if (commentStatus != DBStatus::OK) {
-        lockManager_.unlock(tablename);
         return commentStatus;
     }
 
@@ -21075,7 +21211,6 @@ DBStatus StorageEngine::dropTable(const std::string& dbname,
     DBStatus securityLabelStatus = readSecurityLabels(
         seclabelPath(dbname), originalSecurityLabels);
     if (securityLabelStatus != DBStatus::OK) {
-        lockManager_.unlock(tablename);
         return securityLabelStatus;
     }
     SecurityLabelMap filteredSecurityLabels = originalSecurityLabels;
@@ -21086,13 +21221,8 @@ DBStatus StorageEngine::dropTable(const std::string& dbname,
         std::move(filteredSecurityLabels), securityLabelsChanged);
     securityLabelStatus = securityLabelGuard.publish();
     if (securityLabelStatus != DBStatus::OK) {
-        lockManager_.unlock(tablename);
         return securityLabelStatus;
     }
-
-    // Keep the schema readable until every physical path has been resolved;
-    // custom tablespace paths are derived from the schema itself.
-    const auto relationRoot = relationDir(dbname, tablename);
 
     // The runtime inheritance graph is keyed by relation names. Retaining an
     // edge after either endpoint is dropped makes a later same-name table
@@ -21106,7 +21236,6 @@ DBStatus StorageEngine::dropTable(const std::string& dbname,
     if (std::filesystem::exists(inheritancePath, inheritanceError)) {
         std::ifstream input(inheritancePath);
         if (!input) {
-            lockManager_.unlock(tablename);
             return DBStatus::IO_ERROR;
         }
         std::ostringstream retained;
@@ -21127,12 +21256,10 @@ DBStatus StorageEngine::dropTable(const std::string& dbname,
             retained << line << '\n';
         }
         if (input.bad()) {
-            lockManager_.unlock(tablename);
             return DBStatus::IO_ERROR;
         }
         filteredInheritance = retained.str();
     } else if (inheritanceError) {
-        lockManager_.unlock(tablename);
         return DBStatus::IO_ERROR;
     }
 
@@ -21154,14 +21281,12 @@ DBStatus StorageEngine::dropTable(const std::string& dbname,
         std::error_code authorizationError;
         if (!std::filesystem::exists(file.path, authorizationError)) {
             if (authorizationError) {
-                lockManager_.unlock(tablename);
                 return DBStatus::IO_ERROR;
             }
             continue;
         }
         std::ifstream input(file.path);
         if (!input) {
-            lockManager_.unlock(tablename);
             return DBStatus::IO_ERROR;
         }
         std::ostringstream retained;
@@ -21176,7 +21301,6 @@ DBStatus StorageEngine::dropTable(const std::string& dbname,
             else file.changed = true;
         }
         if (input.bad()) {
-            lockManager_.unlock(tablename);
             return DBStatus::IO_ERROR;
         }
         file.filtered = retained.str();
@@ -21194,7 +21318,6 @@ DBStatus StorageEngine::dropTable(const std::string& dbname,
                 index_file::writeAtomically(prior.path, prior.original);
             }
         }
-        lockManager_.unlock(tablename);
         return DBStatus::IO_ERROR;
     }
     if (inheritanceChanged &&
@@ -21207,7 +21330,6 @@ DBStatus StorageEngine::dropTable(const std::string& dbname,
                 index_file::writeAtomically(file.path, file.original);
             }
         }
-        lockManager_.unlock(tablename);
         return DBStatus::IO_ERROR;
     }
     std::string originalStatistics;
@@ -21228,7 +21350,6 @@ DBStatus StorageEngine::dropTable(const std::string& dbname,
             index_file::writeAtomically(
                 statsPath(dbname), originalStatistics);
         }
-        lockManager_.unlock(tablename);
         return DBStatus::IO_ERROR;
     }
     std::string publicationError;
@@ -21249,7 +21370,6 @@ DBStatus StorageEngine::dropTable(const std::string& dbname,
         }
         std::cerr << "[publication] table drop failed: "
                   << publicationError << std::endl;
-        lockManager_.unlock(tablename);
         return DBStatus::IO_ERROR;
     }
 
@@ -21269,7 +21389,6 @@ DBStatus StorageEngine::dropTable(const std::string& dbname,
             RM_SMGR_ID, XLOG_SMGR_RELATION_RETIRE, retirementXid, payload) : INVALID_LSN;
         if (!retirementWal || retirementLsn == INVALID_LSN ||
             !retirementWal->XLogFlush(retirementLsn)) {
-            lockManager_.unlock(tablename);
             return DBStatus::IO_ERROR;
         }
     }
@@ -21281,8 +21400,9 @@ DBStatus StorageEngine::dropTable(const std::string& dbname,
     commentGuard.commit();
     securityLabelGuard.commit();
     std::filesystem::remove(paramsPath(dbname, tablename));
-    std::filesystem::remove(dataPath(dbname, tablename));
-    std::filesystem::remove(indexPath(dbname, tablename));
+    for (const auto& path : relationFiles) {
+        std::filesystem::remove_all(path);
+    }
     std::filesystem::remove(secondaryIndexMetaPath(dbname, tablename));
     invalidateSecidxCache(dbname, tablename);
     std::filesystem::remove(hashIndexMetaPath(dbname, tablename));
@@ -21293,21 +21413,11 @@ DBStatus StorageEngine::dropTable(const std::string& dbname,
         truncateStatePath(*this, dbname, tablename));
     std::filesystem::remove(
         specializedIndexDirtyPath(*this, dbname, tablename));
-    std::filesystem::remove(fsmPath(dbname, tablename));
-    std::filesystem::remove(vmPath(dbname, tablename));
     std::filesystem::remove(rlsPath(dbname, tablename));
     std::filesystem::remove(
         std::filesystem::path(dbPath(dbname)) /
         ("." + tablename + ".inherits"));
     removeSeq(dbname, tablename);
-    // Remove TOAST data (legacy directory + proper relation/index)
-    auto tdir = toastDir(dbname, tablename);
-    if (std::filesystem::exists(tdir)) {
-        std::filesystem::remove_all(tdir);
-    }
-    std::filesystem::remove(toastMetaPath(dbname, tablename));
-    std::filesystem::remove(toastDataPath(dbname, tablename));
-    std::filesystem::remove(toastIndexPath(dbname, tablename));
 
     // Drop exclusion constraints defined for this table.
     {
@@ -21337,14 +21447,6 @@ DBStatus StorageEngine::dropTable(const std::string& dbname,
     for (auto it = bloomIndexCache_.begin(); it != bloomIndexCache_.end();) {
         if (it->first.rfind(hashPrefix, 0) == 0) it = bloomIndexCache_.erase(it);
         else ++it;
-    }
-    if (std::filesystem::exists(relationRoot)) {
-        for (const auto& entry : std::filesystem::directory_iterator(relationRoot)) {
-            const std::string filename = entry.path().filename().string();
-            if (isRelationPhysicalFileName(filename, tablename)) {
-                std::filesystem::remove_all(entry.path());
-            }
-        }
     }
     std::filesystem::remove(schemaPath(dbname, tablename));
     const std::string toastKey = dbname + ":" + tablename;
@@ -21384,7 +21486,6 @@ DBStatus StorageEngine::dropTable(const std::string& dbname,
     invalidateCatalogTableList(dbname);
     invalidateCatalogSchema(dbname, tablename);
     dbms::resetRuntimeTableStats(dbname, tablename);
-    lockManager_.unlock(tablename);
     return retirementCompleted ? DBStatus::OK : DBStatus::IO_ERROR;
 }
 

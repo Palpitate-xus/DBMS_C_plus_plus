@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-21 · 普通删表的文件归属
+
+`STO-02` 仍为部分实现。直接 `DROP TABLE` 核对可能的文件所有者，在默认及共享外部表空间保留名称相近的邻表及其索引。46 项正常操作与 PostgreSQL 18.6 一致，另通过提交后和回滚后重启检查。两张表已经声明同一文件时拒绝删除。按编号定位的存储布局、重命名、索引创建及其他按名称筛选文件的路径仍待完成。[存储布局差距](issue-sto-02-relation-storage-namespace.md) · [测试报告](test-report.md#drop-table-file-ownership-20261121)
+
 ## 当前汇总（2026-11-20）
 
 原始 273 项要求中，22 项完成、167 项部分实现、69 项待验证、15 项暂缓。启动恢复会撤销受测显式事务中未提交的普通建表，包括在同一事务中后接改表或建索引的情况。外部表空间暂时不可用时保留建表恢复记录，原目录恢复后可继续清理。断电仍需验证。时间点恢复已通过两次分叉的用例，完整的时间线历史管理仍有缺口。[逐项状态](gap-progress.json) · [建表恢复验证](test-report.md#ordinary-create-durable-undo-20261120) · [外部表空间验证](test-report.md#external-create-recovery-20261120) · [时间点恢复验证](test-report.md#pitr-stage-archive-20261120)
