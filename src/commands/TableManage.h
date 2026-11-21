@@ -1467,6 +1467,14 @@ public:
 
     // Condition parsing (public for execution plan use)
     struct Condition {
+        struct ColumnComparison {
+            enum class Kind { Unbound, SignedInteger, Text };
+            std::string rightColumn;
+            std::string operation;
+            Kind kind = Kind::Unbound;
+            size_t leftIndex = 0;
+            size_t rightIndex = 0;
+        };
         std::string op;  // "<", ">", "=", "<=", ">=", "!=", "like"
         std::string colName;
         std::string value;
@@ -1484,6 +1492,9 @@ public:
         // Only an already evaluated/coerced REGTYPE input may fill this.
         // It is a datum OID, never the column declaration's type OID.
         std::optional<uint32_t> referenceInputOid;
+        // The SQL expression remains a residual predicate. Only the execution
+        // owner binds its column positions against the schema it reads.
+        std::optional<ColumnComparison> columnComparison;
     };
     enum class PredicateTruth { False, True, Unknown };
     // Compare two already decoded values using the column's PostgreSQL-like
@@ -1501,6 +1512,7 @@ public:
                                         const std::string& value,
                                         bool valueIsNull);
     static std::vector<Condition> parseConditions(const std::vector<std::string>& cstr);
+    static void bindColumnComparison(Condition& cond, const TableSchema& tbl);
     static bool evalConditionOnRow(const Condition& cond, const std::string& rowBuffer, const TableSchema& tbl);
     // Execution-local pristine syntax only; original public entry stays uncached.
     static bool evalConditionOnRowWithSyntax(const Condition& cond,

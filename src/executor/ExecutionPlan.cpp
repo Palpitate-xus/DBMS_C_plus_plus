@@ -6428,16 +6428,29 @@ FilterOp::FilterOp(
 
 bool FilterOp::open() {
     validatePredicateTypes(tbl_, conds_);
-    for (const auto& branch : branches_) validatePredicateTypes(tbl_, branch);
+    for (auto& condition : conds_) StorageEngine::bindColumnComparison(condition, tbl_);
+    for (auto& branch : branches_) {
+        validatePredicateTypes(tbl_, branch);
+        for (auto& condition : branch) StorageEngine::bindColumnComparison(condition, tbl_);
+    }
     return child_->open();
 }
 
 bool FilterOp::next(std::string& outRow) {
     NextInstrument rtInstr_(this);  // EXPLAIN ANALYZE per-node stats
+    const auto* scan = dynamic_cast<const TableScanOp*>(child_.get());
+    const bool sameTable = scan && scan->tableName() == tbl_.tablename;
+    std::vector<bool> storedNulls;
     const auto matchesBranch = [&](
         const std::vector<StorageEngine::Condition>& conditions) {
         if (nullPredicateBranch(conditions)) return false;
         for (const auto& c : conditions) {
+            using Kind = StorageEngine::Condition::ColumnComparison::Kind;
+            if (sameTable && c.columnComparison && c.columnComparison->kind != Kind::Unbound &&
+                scan->lastStoredNullBitmap(storedNulls) && storedNulls.size() == tbl_.len()) {
+                if (!StorageEngine::evalConditionOnRow(c, outRow, tbl_, storedNulls)) return false;
+                continue;
+            }
             size_t colIdx = tbl_.len();
             for (size_t i = 0; i < tbl_.len(); ++i) {
                 if (tbl_.cols[i].dataName == c.colName) {

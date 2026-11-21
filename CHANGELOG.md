@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>比较同一条记录里的两列时返回正确结果 · 2026-11-21</summary>
+
+例如 `WHERE id = peer_id` 会比较每条记录里的两个值。给 `id` 建索引后，查询仍会找到全部符合条件的记录。两个相差 1 的大整数也能正确区分，文本 `'01'` 和 `'1'` 会保留各自的含义。
+
+[使用手册](docs/MANUAL.md#基础查询) · [测试报告](docs/test-report.md#same-row-select-20261121) · [性能报告](docs/performance-report-2026-10-30.md#same-row-select-cost-20261121)
+
+</details>
+
+<details>
 <summary>查询时能区分数字和列名 · 2026-11-21</summary>
 
 `WHERE id = 7` 查找编号为 7 的记录。`WHERE id = "7"` 比较同一条记录里的 `id` 和名为 `"7"` 的列。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>按编号更新时更早跳过无关记录 · 2026-11-21</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-21 · 按编号更新时更早跳过无关记录
 
 例如更新某笔订单时，数据库可以先核对订单号，只对编号符合的记录检查其他条件。
 
 [测试报告](docs/test-report.md#narrow-query-write-20261121) · [性能报告](docs/performance-report-2026-10-30.md#narrow-query-write-cost-20261121)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-20 · 普通表最多可以建 1,600 列
 

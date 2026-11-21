@@ -1262,6 +1262,8 @@ REPLACE INTO users (ID, NAME) VALUES (1, 'New Alice');
 
 在 `WHERE id = 7` 中，`7` 是数字。在 `WHERE id = "7"` 中，`"7"` 是列名，查询比较同一行中的两列，即使表上有索引也是如此。[查询测试](test-report.md#narrow-select-20261121)
 
+列名也可以直接写成 `WHERE id = peer_id`。每行使用自己的 `id` 和 `peer_id`，并按列的类型比较。例如两个不相等的大整数仍可区分，文本 `'01'` 和 `'1'` 也分别保留。普通 `=` 比较中，任意一列为 `NULL` 的行不会满足条件。[测试报告](test-report.md#same-row-select-20261121)
+
 ```sql
 SELECT * FROM users;
 SELECT NAME, AGE FROM users;

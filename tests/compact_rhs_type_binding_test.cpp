@@ -43,6 +43,13 @@ int main() {
     const auto taggedSql = dbms::StorageEngine::parseConditions(
         {"apicond typedexpr id = 1+1"});
     assert(taggedSql.size() == 1 && taggedSql.front().op == "typedexpr");
+    assert(!ddl.executeSql("CREATE TABLE rhs_column_name(id INT, code TEXT, peer TEXT)", session));
+    assert(g_engine.insert(database, "rhs_column_name",
+        {{"id", "1"}, {"code", "peer"}, {"peer", "different"}}) == dbms::DBStatus::OK);
+    assert(g_engine.insert(database, "rhs_column_name",
+        {{"id", "2"}, {"code", "equal"}, {"peer", "equal"}}) == dbms::DBStatus::OK);
+    assert(g_engine.query(database, "rhs_column_name", {"=code peer", "=id 1"}, {"id"}).size() == 1);
+    assert(g_engine.query(database, "rhs_column_name", {"=code peer", "=id 2"}, {"id"}).empty());
     std::filesystem::remove_all(database);
     std::cout << "[COMPACT RHS TYPE BINDING] passed" << std::endl;
 }

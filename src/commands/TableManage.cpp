@@ -1032,7 +1032,7 @@ static int compareFloatingValues(Floating left, Floating right) {
     return left < right ? -1 : (right < left ? 1 : 0);
 }
 
-static bool floatingPredicateMatches(const std::string& op, int comparison) {
+static bool comparisonPredicateMatches(const std::string& op, int comparison) {
     if (op == "=") return comparison == 0;
     if (op == "!=" || op == "<>") return comparison != 0;
     if (op == "<") return comparison < 0;
@@ -27605,6 +27605,61 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
     return evalConditionOnRowWithSyntax(cond, rowBuffer, tbl, nullptr);
 }
 
+void StorageEngine::bindColumnComparison(Condition& cond, const TableSchema& tbl) {
+    if (cond.op != "typedexpr" || !cond.columnComparison) return;
+    auto& comparison = *cond.columnComparison;
+    using Kind = Condition::ColumnComparison::Kind;
+    comparison.kind = Kind::Unbound;
+    if (tbl.formatVersion != DATA_FILE_FORMAT_VERSION) return;
+
+    const auto findColumn = [&](const std::string& name) {
+        return std::find_if(tbl.cols.begin(), tbl.cols.end(), [&](const Column& column) {
+            return column.dataName == name;
+        });
+    };
+    const auto left = findColumn(cond.colName);
+    const auto right = findColumn(comparison.rightColumn);
+    const auto isPhysicalBuiltin = [&](const auto& column) {
+        return column != tbl.cols.end() && !column->isArray && !column->isUnsigned &&
+            column->generatedKind != 'v' && column->domainName.empty() && column->enumValues.empty();
+    };
+    if (!isPhysicalBuiltin(left) || !isPhysicalBuiltin(right)) return;
+
+    const auto signedInteger = [](const Column& column) {
+        if (column.isVariableLength || column.storageCodec != Column::StorageCodec::Legacy)
+            return false;
+        const auto type = ExprHelper::canonicalResultTypeName(column.dataType);
+        return (type == "smallint" && column.dsize == sizeof(int16_t)) ||
+            (type == "integer" && column.dsize == sizeof(int32_t)) ||
+            (type == "bigint" && column.dsize == sizeof(int64_t));
+    };
+    if (signedInteger(*left) && signedInteger(*right)) {
+        comparison.kind = Kind::SignedInteger;
+    } else if (left->dataType == "text" && right->dataType == "text" &&
+               left->isVariableLength && right->isVariableLength) {
+        const auto effectiveCollation = [](const Column& column) {
+            return collation::normalizeName(column.resolvedCollation.empty()
+                ? column.collation : column.resolvedCollation);
+        };
+        const auto collationName = effectiveCollation(*left);
+        const bool defaultCollation = collationName.empty() && effectiveCollation(*right).empty();
+        const bool sameBinaryCollation = !collationName.empty() &&
+            collationName == effectiveCollation(*right) && collation::isBinary(collationName) &&
+            columnUsesBinaryCollation(*left) && columnUsesBinaryCollation(*right);
+        if (defaultCollation || sameBinaryCollation) comparison.kind = Kind::Text;
+    }
+    if (comparison.kind != Kind::Unbound) {
+        const auto binding = ExprEvaluator::resolveComparison(comparison.operation,
+            left->dataType, right->dataType);
+        if (!binding.strict || binding.identity.empty()) {
+            comparison.kind = Kind::Unbound;
+            return;
+        }
+        comparison.leftIndex = static_cast<size_t>(left - tbl.cols.begin());
+        comparison.rightIndex = static_cast<size_t>(right - tbl.cols.begin());
+    }
+}
+
 bool StorageEngine::evalConditionOnRowWithSyntax(const Condition& cond,
     const std::string& rowBuffer, const TableSchema& tbl, LocalExpressionSyntax* syntax,
     const DatumMetadataContext* generatedMetadata) {
@@ -27620,6 +27675,36 @@ bool StorageEngine::evalConditionOnRowWithSyntax(const Condition& cond,
     } else if (g_nullRowEngine && tbl.tablename == g_nullRowTable) {
         valueEngine = const_cast<StorageEngine*>(g_nullRowEngine);
         valueDb = g_nullRowDb;
+    }
+
+    // A bound ordinary comparison needs only two stored values. Retain the
+    // general evaluator for other declarations or rows without a NULL owner.
+    using ComparisonKind = Condition::ColumnComparison::Kind;
+    const bool haveBitmap = buffered && g_bufferedConditionNulls->size() == tbl.len();
+    if (const auto& comparison = cond.columnComparison;
+        cond.op == "typedexpr" && comparison && comparison->kind != ComparisonKind::Unbound &&
+        (valueEngine || haveBitmap)) {
+        bool isNull = false;
+        const auto read = [&](size_t index) {
+            if (haveBitmap && (*g_bufferedConditionNulls)[index]) {
+                isNull = true;
+                return std::string{};
+            }
+            return valueEngine
+                ? valueEngine->extractColumnValue(rowBuffer, tbl, index, valueDb, false, &isNull)
+                : extractColumnValueStatic(rowBuffer, tbl, index);
+        };
+        const auto left = read(comparison->leftIndex);
+        if (isNull) return false;
+        const auto right = read(comparison->rightIndex);
+        if (isNull) return false;
+        if (comparison->kind == ComparisonKind::Text)
+            return comparisonPredicateMatches(comparison->operation,
+                compareTextValues(tbl.cols[comparison->leftIndex], left, right));
+        const auto lhs = parseStoredInteger(left);
+        const auto rhs = parseStoredInteger(right);
+        if (lhs && rhs)
+            return comparisonPredicateMatches(comparison->operation, (*lhs > *rhs) - (*lhs < *rhs));
     }
 
     DatumMetadataContextPtr generatedOwner;
@@ -27681,7 +27766,7 @@ bool StorageEngine::evalConditionOnRowWithSyntax(const Condition& cond,
     // ("=UPPER(name) ALICE").  Preserve that representation for index
     // matching, but route a function-shaped left operand through the same
     // scalar evaluator used by infix predicates during a heap fallback.
-    if (cond.op != "scalarexpr" &&
+    if (cond.op != "scalarexpr" && cond.op != "typedexpr" &&
         cond.colName.find('(') != std::string::npos) {
         Condition scalarCondition = cond;
         scalarCondition.op = "scalarexpr";
@@ -28141,7 +28226,7 @@ bool StorageEngine::evalConditionOnRowWithSyntax(const Condition& cond,
             !parseFloatLiteral(cond.value, cmp)) {
             return false;  // Invalid comparison value → UNKNOWN → FALSE in WHERE
         }
-        if (!floatingPredicateMatches(
+        if (!comparisonPredicateMatches(
                 cond.op, compareFloatingValues(num, cmp))) return false;
     } else if (col.dataType == "numeric") {
         if (cond.op == "between" || cond.op == "notbetween") {
@@ -28221,7 +28306,7 @@ bool StorageEngine::evalConditionOnRowWithSyntax(const Condition& cond,
             !parseDoubleLiteral(cond.value, cmp)) {
             return false;  // Invalid comparison value → UNKNOWN → FALSE in WHERE
         }
-        if (!floatingPredicateMatches(
+        if (!comparisonPredicateMatches(
                 cond.op, compareFloatingValues(num, cmp))) return false;
     } else if (col.dataType == "boolean") {
         const auto nv = parsePostgresBoolean(val);
@@ -28382,7 +28467,7 @@ bool StorageEngine::evalConditionOnRowWithSyntax(const Condition& cond,
                 const Numeric integer(num);
                 const int comparison = integer < numeric ? -1 :
                     (integer > numeric ? 1 : 0);
-                return floatingPredicateMatches(cond.op, comparison);
+                return comparisonPredicateMatches(cond.op, comparison);
             } catch (const std::invalid_argument&) {
                 return false;
             }
@@ -31088,8 +31173,13 @@ std::vector<StorageEngine::Condition> StorageEngine::parseConditions(
         condition.value=unquoteTokens(raw,false);
     };
     for (const auto& input : cstr) {
-        const bool apiCondition = input.rfind("apicond ", 0) == 0;
-        const std::string s = apiCondition ? input.substr(8) : input;
+        const bool apiWrapper = input.rfind("apicond ", 0) == 0;
+        const std::string unwrapped = apiWrapper ? input.substr(8) : input;
+        // An SQL owner can preserve provenance through the native query
+        // wrapper. Unmarked compact API values continue to be decoded data.
+        const bool sqlComparison = unwrapped.rfind("sql comparison ", 0) == 0;
+        const bool apiCondition = apiWrapper && !sqlComparison;
+        const std::string s = sqlComparison ? unwrapped.substr(15) : unwrapped;
         if (s.empty()) continue;
         Condition c;
         if (s.rfind("typedexpr ", 0) == 0) {
@@ -31474,12 +31564,13 @@ std::vector<StorageEngine::Condition> StorageEngine::parseConditions(
         const auto* right = operandSelect(parsedRight);
         const auto* expression = right ? right->selectList.front().expr.get() : nullptr;
         if (!apiCondition && right && !right->fromClause &&
-            right->selectList.front().alias.empty() && !rawRight.empty() && rawRight.front() == '"') {
+            right->selectList.front().alias.empty() && !rawRight.empty() &&
+            (sqlComparison || rawRight.front() == '"')) {
             const auto* column = dynamic_cast<const ColumnRefExpr*>(expression);
             if (column && column->table.empty() && column->schema.empty()) {
-                // A quoted RHS is a column reference. Keep its SQL spelling
-                // for exact typed comparison instead of looking up a literal
-                // key in an index or comparing the two values as doubles.
+                // A quoted RHS, or a reference explicitly owned by SQL, is a
+                // column. Preserve its spelling for typed comparison instead
+                // of looking up a literal key or comparing through doubles.
                 c.value = c.colName + " " + c.op + " " + rawRight;
                 const auto* physical = left && !left->fromClause &&
                             left->selectList.front().alias.empty()
@@ -31489,6 +31580,8 @@ std::vector<StorageEngine::Condition> StorageEngine::parseConditions(
                 // typedexpr keeps the whole comparison as a residual filter.
                 if (!physical || !physical->table.empty() || !physical->schema.empty())
                     c.colName.clear();
+                else
+                    c.columnComparison = Condition::ColumnComparison{column->column, c.op};
                 c.op = "typedexpr";
                 conds.push_back(std::move(c));
                 continue;
@@ -31582,13 +31675,14 @@ static void prepareFilterConditions(
         }
     }
     validateStoredPatternConditions(tbl,conds);
-    for (const auto& condition:conds) if (condition.op=="typedexpr") {
+    for (auto& condition:conds) if (condition.op=="typedexpr") {
         SQLParser parser;auto parsed=parser.parse("SELECT "+condition.value);
         auto* select=parsed.success ? dynamic_cast<SelectStmt*>(parsed.stmt.get()) : nullptr;
         if (!select || select->selectList.size()!=1 || select->fromClause)
             throw DbError("42601","invalid typed predicate");
         validateNullWhereColumns(select->selectList[0].expr.get(),tbl);
         ExprHelper::prepareArrayTypes(select->selectList[0].expr.get(),buildTypeHints(tbl),dbname,&engine);
+        StorageEngine::bindColumnComparison(condition, tbl);
     }
 }
 

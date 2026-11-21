@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-21 · 比较同一行的两个列值
+
+PostgreSQL 18.6 检查索引条件中另一侧是否也引用了当前表，用有符号 64 位整数直接比较 `BIGINT`。SQLite 记录比较两侧分别引用了哪些表，用这些信息判断条件能否作为索引查找。DuckDB 先绑定两个操作数，再确定它们的比较类型。[PostgreSQL 索引条件](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/optimizer/path/indxpath.c) · [PostgreSQL BIGINT 比较](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/utils/adt/int8.c) · [SQLite 筛选分析](https://raw.githubusercontent.com/sqlite/sqlite/master/src/whereexpr.c) · [DuckDB 比较绑定](https://raw.githubusercontent.com/duckdb/duckdb/main/src/planner/binder/expression/bind_comparison_expression.cpp)
+
+本项目保留普通查询中列引用的含义。`id = peer_id` 逐行比较，`id = 7` 仍可通过 `id` 的索引查找。当比较两侧是支持的有符号整数列，或使用相同普通比较规则的 `TEXT` 列时，执行前确定两列的位置，每行只读取这两个值进行比较。[测试报告](test-report.md#same-row-select-20261121) · [性能报告](performance-report-2026-10-30.md#same-row-select-cost-20261121)
+
 ## 2026-11-21 · 查询区分数字和带引号的列名
 
 PostgreSQL 18.6 分别处理列引用和常量。SQLite 以表达式节点识别筛选条件实际引用的列。DuckDB 把解析出的列名绑定到当前查询的输入。本项目在普通筛选条件中保留解析得到的右侧含义。数字可以作为索引键。双引号列名保留完整的列对列比较，由运行时读取两个值并按实际类型比较。确定操作数形状和确定字面量类型时可复用同一次解析。[PostgreSQL 表达式分析](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/parser/parse_expr.c) · [SQLite 筛选分析](https://raw.githubusercontent.com/sqlite/sqlite/master/src/whereexpr.c) · [DuckDB 列绑定](https://raw.githubusercontent.com/duckdb/duckdb/main/src/planner/binder/expression/bind_columnref_expression.cpp) · [本项目验证](test-report.md#narrow-select-20261121)

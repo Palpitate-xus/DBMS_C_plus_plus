@@ -2182,7 +2182,7 @@ static bool checkSelectColumnPermission(Session& s, const string& tname,
                                          const string& columns);
 static vector<string> splitConds(const string& s);
 static string normalizeConditionStr(string s);
-static string modifyLogic(const string& logic);
+static string modifyLogic(const string& logic, bool sqlComparison = false);
 static string compactInLists(const string& s);
 // After tokenize(): merge negated predicate token runs into the engine's
 // glued form so per-token modifyLogic cannot shred them:
@@ -6407,7 +6407,8 @@ static bool handleExplain(const string& sql, Session& s) {
                         const auto bound=boundIntegerAtoms.find(atom);
                         const string& physicalAtom=bound==boundIntegerAtoms.end()?atom:bound->second;
                         const auto merged = mergeNegPredTokens(tokenize(physicalAtom));
-                        const string mc = modifyLogic(merged.size() == 1 ? merged.front() : physicalAtom);
+                        const string mc = modifyLogic(
+                            merged.size() == 1 ? merged.front() : physicalAtom, true);
                         const auto parsed = dbms::StorageEngine::parseConditions({mc});
                         if (parsed.size() != 1 || parsed.front().colName.empty())
                             throw dbms::DbError("0A000", "unsupported EXPLAIN predicate: " + atom);
@@ -11113,7 +11114,7 @@ static vector<string> mergeNegPredTokens(const vector<string>& toks) {
     return out;
 }
 
-static string modifyLogic(const string& logic) {
+static string modifyLogic(const string& logic, bool sqlComparison) {
     if (logic == "(" || logic == ")" || logic == "and" || logic == "or") return logic;
     if (logic.rfind("typedexpr ", 0) == 0) return logic;
     if (hasSqlPatternPredicate(logic)) return "typedexpr "+logic;
@@ -11338,6 +11339,12 @@ static string modifyLogic(const string& logic) {
     string op = logic.substr(opStart, opLen);
     string before = logic.substr(0, opStart);
     string after = logic.substr(opStart + opLen);
+    if (sqlComparison && (op == "=" || op == "<>" || op == "!=" ||
+                          op == "<" || op == "<=" || op == ">" || op == ">=")) {
+        // Keep SQL column references distinct from bare values passed to
+        // the native compact API, including through storage scan fallback.
+        return "sql comparison " + op + before + " " + after;
+    }
     return op + before + " " + after;
 }
 
@@ -39177,7 +39184,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     vector<string> condCopy = condTokens;
                     condCopy.insert(condCopy.begin(), "(");
                     condCopy.push_back(")");
-                    for (auto& token : condCopy) token = modifyLogic(token);
+                    for (auto& token : condCopy) token = modifyLogic(token, true);
                     scalarGroups = breakDownConditions(condCopy);
                 }
                 if (scalarGroups.size() <= 1) {
@@ -39470,7 +39477,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
             } else {
                 condTokens.insert(condTokens.begin(), "(");
                 condTokens.push_back(")");
-                for (auto& t : condTokens) t = modifyLogic(t);
+                for (auto& t : condTokens) t = modifyLogic(t, true);
                 auto groups = breakDownConditions(condTokens);
                 vector<dbms::StorageEngine::SelectExpr> mergeExprs =
                     scalarSortExprs;
@@ -39943,7 +39950,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 vector<string> condCopy = condTokens;
                 condCopy.insert(condCopy.begin(), "(");
                 condCopy.push_back(")");
-                for (auto& t : condCopy) t = modifyLogic(t);
+                for (auto& t : condCopy) t = modifyLogic(t, true);
                 auto groups = breakDownConditions(condCopy);
                 volcanoUsed = executeVolcanoSelect(tname, selectCols, groups,
                                                     firstOrderBy, useDistinct,
@@ -40085,7 +40092,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         if (!condTokens.empty()) {
                             auto copy = condTokens;
                             copy.insert(copy.begin(), "("); copy.push_back(")");
-                            for (auto& token : copy) token = modifyLogic(token);
+                            for (auto& token : copy) token = modifyLogic(token, true);
                             groups = breakDownConditions(copy);
                         }
                         vector<string> sources{tname};
@@ -40224,7 +40231,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 } else if (!inheritedStructuredOrderHandled) {
                     condTokens.insert(condTokens.begin(), "(");
                     condTokens.push_back(")");
-                    for (auto& t : condTokens) t = modifyLogic(t);
+                    for (auto& t : condTokens) t = modifyLogic(t, true);
                     auto groups = breakDownConditions(condTokens);
                     if (captureStructuredPlain) {
                         set<int64_t> seenRowIds;
@@ -40384,7 +40391,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                 auto childCondTokens = tokenize(condStr);
                                 childCondTokens.insert(childCondTokens.begin(), "(");
                                 childCondTokens.push_back(")");
-                                for (auto& t : childCondTokens) t = modifyLogic(t);
+                                for (auto& t : childCondTokens) t = modifyLogic(t, true);
                                 auto childGroups = breakDownConditions(childCondTokens);
                                 set<string> childSeen;
                                 for (const auto& g : childGroups) {

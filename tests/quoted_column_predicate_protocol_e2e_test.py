@@ -92,6 +92,44 @@ def main():
             explained = query('EXPLAIN (FORMAT JSON,ANALYZE TRUE,TIMING FALSE) ' + column_filter)
             document = json.loads("\n".join(row[0] for row in explained))
             assert document["actualRows"] == 3, document
+
+        query('CREATE TABLE select_column_pair(rid INT,lhs BIGINT,rhs BIGINT,a TEXT,b TEXT);')
+        error('SELECT rid FROM select_column_pair WHERE lhs=missing;', "42703", ready=b"I")
+        query("INSERT INTO select_column_pair VALUES "
+              "(1,9007199254740992,9007199254740993,'01','1'),"
+              "(2,9007199254740993,9007199254740993,'0.50','0.5'),"
+              "(3,7,7,'same','same'),(4,17,7,'a','b'),"
+              "(5,NULL,7,NULL,'same'),(6,7,NULL,'z',NULL);")
+        for indexed in (False, True):
+            if indexed:
+                query('CREATE INDEX select_column_pair_lhs ON select_column_pair(lhs);')
+            query('SELECT rid FROM select_column_pair WHERE lhs=rhs ORDER BY rid;', [["2"], ["3"]])
+            query('SELECT rid FROM select_column_pair WHERE lhs<>rhs ORDER BY rid;', [["1"], ["4"]])
+            query('SELECT rid FROM select_column_pair WHERE lhs<rhs ORDER BY rid;', [["1"]])
+            query('SELECT rid FROM select_column_pair AS p WHERE p.rhs=p.lhs ORDER BY rid;',
+                  [["2"], ["3"]])
+            query('SELECT rid FROM select_column_pair WHERE a=b ORDER BY rid;', [["3"]])
+            query('SELECT rid FROM select_column_pair WHERE a<b ORDER BY rid;', [["1"], ["4"]])
+            query('SELECT rid FROM select_column_pair WHERE lhs=rhs OR lhs=17 ORDER BY rid;',
+                  [["2"], ["3"], ["4"]])
+            query('SELECT rid FROM select_column_pair WHERE lhs=7 AND lhs=rhs;', [["3"]])
+            query('SELECT rid FROM select_column_pair WHERE lhs=rhs ORDER BY rid LIMIT 1;', [["2"]])
+            explained = query('EXPLAIN (FORMAT JSON,ANALYZE TRUE,TIMING FALSE) '
+                              'SELECT rid FROM select_column_pair WHERE lhs=rhs;')
+            document = json.loads("\n".join(row[0] for row in explained))
+            assert document["actualRows"] == 2, document
+
+        query('CREATE TABLE select_mixed_widths(rid INT,"small(width" SMALLINT, mid INT, wide BIGINT, '
+              'x TEXT COLLATE "C", y TEXT COLLATE "C");')
+        query("INSERT INTO select_mixed_widths VALUES "
+              "(1,-32768,-32768,-32768,'',''),(2,-32768,-32767,-32768,' spaced','spaced'),"
+              "(3,32767,2147483647,9223372036854775807,'A','a'),"
+              "(4,0,0,-9223372036854775808,NULL,''),(5,1,1,1,'',NULL);")
+        query('SELECT rid FROM select_mixed_widths WHERE "small(width"=wide ORDER BY rid;',
+              [["1"], ["2"], ["5"]])
+        query('SELECT rid FROM select_mixed_widths WHERE mid>wide ORDER BY rid;', [["2"], ["4"]])
+        query('SELECT rid FROM select_mixed_widths WHERE x=y;', [["1"]])
+        query('SELECT rid FROM select_mixed_widths WHERE x<y ORDER BY rid;', [["2"], ["3"]])
         print("[QUOTED COLUMN PREDICATE PROTOCOL E2E] passed")
     finally:
         runner.stop_ours(server)

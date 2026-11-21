@@ -2,6 +2,52 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-21 preserve and bind same-row SELECT column comparisons",
+      "gap_ids": [
+        "SQL-04",
+        "SQL-10",
+        "OPT-03",
+        "OPT-16"
+      ],
+      "status": "partial",
+      "evidence": [
+        "src/main.cpp",
+        "src/commands/TableManage.cpp",
+        "src/executor/ExecutionPlan.cpp",
+        "docs/postgresql-comparison.md",
+        "docs/test-report.md",
+        "docs/performance-report-2026-10-30.md"
+      ],
+      "tests": [
+        "tests/quoted_column_predicate_protocol_e2e_test.py",
+        "tests/compact_rhs_type_binding_test.cpp",
+        "tests/integer_reverse_comparison_protocol_e2e_test.py"
+      ],
+      "verification": [
+        "The exact 9161e714 baseline differed from PostgreSQL 18.6 in 18 of 51 checks. The final build matches all 51 across integer and text predicates, NULL, compound predicates, indexed reads, and actual EXPLAIN counts.",
+        "A real secondary index query with id=peer reads eight rows and returns four via Filter and TableScan. id=1 retains IndexScan. A conjunct combining both keeps the original row comparison above IndexScan. Decoded compact C++ API literals retain their original meaning.",
+        "Under matching en_US.utf8 defaults, 51 of 53 extra checks match PostgreSQL, including mixed integer widths and text ordering. SHOW lc_collate and inline COLLATE remain open. Two cold starts after SIGKILL preserve committed data and undo uncommitted writes for the indexed test table.",
+        "All 18 native regressions and 43 of 44 protocol suites passed. The sole known failure reproduces on both builds: the reversed literal predicate '1'=i reports a table scan with correct rows instead of the asserted IndexScan.",
+        "In 1,152 paired timings with identical wire and transaction witnesses, the integer column equality wall median by pair fell 29.00% at 128 rows and 64.59% at 1,024 rows. The 1,024-row server CPU time improved in 16 of 16 pairs. Some 128-row point and DELETE controls took more time.",
+        "In 240 additional timings, cross-width integer and C-collated text equality consumed less server CPU in all eight pairs. Default text had mixed results. A point slowdown in that mixed workload did not reproduce in 96 isolated point timings on the same seed, whose wall and CPU paired medians moved by +0.04% and +0.32%."
+      ],
+      "artifacts": {
+        "exact_build": "build/array-domain-20261117/same-row-select-cmake-v2.json",
+        "postgresql_baseline": "build/select-column-comparison-oracle-20261121-v1/comparison.json",
+        "registered_baseline_failure": "build/same-row-select-20261121/registered-baseline-final/console.log",
+        "original_wire_audit": "build/same-row-select-20261121-v2/independent-audit.json",
+        "additional_wire_and_plan_audit": "build/same-row-select-20261121-v2/extra-independent-audit.json",
+        "recovery": "build/same-row-select-20261121-v1/recovery/same-row-select-cmake-v2/summary.json",
+        "related_suites": "build/same-row-select-20261121/related-same-row-select-cmake-v2/summary.json",
+        "reverse_literal_baseline": "build/same-row-select-20261121/reverse-baseline/console.log",
+        "native_regressions": "build/same-row-select-20261121/native-v2/summary.json",
+        "timing_128": "build/same-row-column-select-perf-20261121/paired-formal-v2-128.json",
+        "timing_1024": "build/same-row-column-select-perf-20261121/paired-formal-v2-1024.json",
+        "timing_types_1024": "build/same-row-typed-perf-20261121/paired-typed-v2-1024.json",
+        "timing_point_only_1024": "build/same-row-typed-perf-20261121/paired-point-only-v2-1024.json"
+      }
+    },
+    {
       "issue": "2026-11-21 retain numeric and quoted-column roles in ordinary SELECT predicates",
       "gap_ids": [
         "SQL-04",
