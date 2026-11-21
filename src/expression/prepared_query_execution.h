@@ -112,6 +112,8 @@ public:
     // Call on every executable expression before opening sources/evaluating
     // any expression. Routine registration and collation checks are pure.
     void prepareExpression(Expr* expression);
+    void setPredicateCollations(const Expr* predicate,
+        std::function<ExpressionCollation(const ColumnRefExpr&)> declaration);
     // A real aggregate operator publishes one typed result cell per original
     // call site. Only execution-owned copies are lowered to those cells.
     QueryColumnBinding registerAggregateColumn(const FunctionCallExpr* call,
@@ -162,6 +164,8 @@ private:
     std::string database_;
     ExprEvaluator evaluator_;
     ExpressionCollationLookup collations_;
+    std::function<ExpressionCollation(const ColumnRefExpr&)> predicateCollation_;
+    std::set<const Expr*> predicateCollationSites_;
     std::map<const Stmt*, const Stmt*> parents_;
     std::map<const Expr*, const Stmt*> owners_;
     std::map<const Expr*, Child> children_;

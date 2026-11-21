@@ -1394,6 +1394,7 @@ public:
     // one-row, zero-column Result source. Preparation has already validated
     // the complete query namespace; this consumes its retained typed AST.
     static bool supportsPreparedSelectPlan(const SelectStmt& select);
+    static bool usesDeclaredFilterCollations(const SelectStmt& select, const TableSchema& schema);
     static bool supportsPreparedSourceSelectPlan(const SelectStmt& select, bool selectBodyOnly = false);
     static bool mayUseIntegerPrimaryKeyPage(StorageEngine* engine, const std::string& database,
         const PreparedQuery& query, const SelectStmt& select);

@@ -1266,6 +1266,8 @@ REPLACE INTO users (ID, NAME) VALUES (1, 'New Alice');
 
 可以给当前比较指定文本规则，例如 `WHERE title COLLATE "C" < 'm'`，也可以把 `COLLATE` 写在右侧的文本后面。指定的规则优先于列声明的规则。`pg_catalog."C"` 和 `"C"` 可以指向同一个内置规则。两侧显式指定不同对象时会报错。通过 `CREATE COLLATION` 建立的 libc 规则可写成 `schema.规则名`。[测试报告](test-report.md#explicit-collation-filter-20261121)
 
+在普通单表筛选中，两列若各自声明了不同的规则，实际比较非空值时会报 `42P22`。例如 `a` 使用 `"C"` 而 `b` 使用 `"POSIX"`，可写 `WHERE a < b COLLATE "C"` 选定比较规则。默认规则可以和非默认规则一起用，此时比较采用非默认规则。空表和 `LIMIT 0` 无需比较，仍可正常查询。[测试报告](test-report.md#implicit-collation-filter-20261121)
+
 ```sql
 SELECT * FROM users;
 SELECT NAME, AGE FROM users;

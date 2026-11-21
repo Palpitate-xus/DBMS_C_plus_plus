@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-21 · 处理两列声明的排序规则冲突
+
+PostgreSQL 18.6 根据规则对象判断两列是否使用同一规则，即使两个规则的排序结果相同。不同的列声明会形成未确定的规则，真正执行需要规则的比较时才报错。文字拼接可以生成结果，规则冲突由外层需要比较时处理。SQLite 的比较采用不同的选择顺序，先看显式指定的规则，再按左右操作数选择列声明。DuckDB 的文档说明，比较两个不同规则的输入时需要显式选定共用的规则。[PostgreSQL 排序规则](https://www.postgresql.org/docs/18/collation.html) · [PostgreSQL 规则推导源码](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/parser/parse_collate.c) · [SQLite 选择顺序](https://www.sqlite.org/datatype3.html#assigning_collating_sequences_from_sql) · [DuckDB 排序规则](https://duckdb.org/docs/preview/sql/expressions/collations)
+
+本项目在普通单表筛选中用已绑定的列位置读取声明规则，分开处理规则对象和实际比较方式。由 `CASE`、`COALESCE` 和 `||` 产生的文字保留外层比较需要的规则信息。显式覆盖仍优先。独立声明的规则采用相同语言设置时，仍能识别两者的冲突。[测试报告](test-report.md#implicit-collation-filter-20261121)
+
 ## 2026-11-21 · 查询可以指定文本的比较规则
 
 PostgreSQL 18.6 先核实类型和排序规则名，再决定比较要使用哪一条规则。语句中指定的规则优先于列的声明，两条显式规则必须指向同一个对象。使用索引时比较和索引的规则也需匹配。SQLite 单独记录比较两侧的显式规则，并按其自身的先左后右顺序选择。DuckDB 在绑定比较时把所选规则接到类型化表达式上。[PostgreSQL 名称和类型检查](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/parser/parse_expr.c) · [PostgreSQL 规则推导](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/parser/parse_collate.c) · [PostgreSQL 索引规则](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/optimizer/path/indxpath.c) · [SQLite 比较](https://raw.githubusercontent.com/sqlite/sqlite/master/src/expr.c) · [DuckDB 比较绑定](https://raw.githubusercontent.com/duckdb/duckdb/main/src/planner/binder/expression/bind_comparison_expression.cpp)

@@ -353,6 +353,13 @@ struct ExpressionCollation {
 };
 using ExpressionCollationLookup = std::function<ExpressionCollation(const std::string&)>;
 
+// Execution-owned collation derivation; a conflict can propagate through a
+// value-producing node until an operation actually needs a collation.
+struct PredicateCollationBinding {
+    ExpressionCollation selected;
+    bool indeterminate = false;
+};
+
 struct UnaryOpExpr : public Expr {
     std::string op;        // +, -, NOT, IS NULL, IS NOT NULL
     ExprPtr operand;
@@ -387,6 +394,8 @@ struct BinaryOpExpr : public Expr {
     ExprPtr right;
     std::optional<ArrayConcatBinding> arrayConcat;
     std::optional<QueryComparisonBinding> comparison;
+    std::unique_ptr<PredicateCollationBinding> predicateCollation;
+    std::vector<PredicateCollationBinding> predicateListCollations;
     bool rowComparison = false;
     // One signature vector for a direct row comparison; one per actual
     // RHS constructor for row IN. No input evaluation is used to prepare it.
@@ -453,6 +462,8 @@ struct FunctionCallExpr : public Expr {
     std::string schema;          // schema-qualified function (pg_catalog.now())
     std::string funcName;
     std::vector<ExprPtr> args;
+    std::unique_ptr<PredicateCollationBinding> predicateCollation;
+    std::vector<PredicateCollationBinding> predicateArgumentCollations;
     bool distinct = false;       // COUNT(DISTINCT col)
     ExprPtr filter;              // FILTER (WHERE ...)
     std::string orderBy;         // 聚合中的 ORDER BY within aggregate
@@ -516,6 +527,8 @@ struct CaseExpr : public Expr {
     // differently without duplicating the switch expression/effects.
     std::vector<std::pair<std::string,std::string>> simpleComparisonTypes;
     std::vector<std::optional<QueryComparisonBinding>> simpleEnumComparisons;
+    // Each WHEN compares the cached switch value using its own rule.
+    std::vector<PredicateCollationBinding> simplePredicateCollations;
     uint32_t preservedArrayDomainOid = 0;
     CaseExpr() { type = ExprType::CaseExpr; }
     std::string toString() const override { return "CASE"; }

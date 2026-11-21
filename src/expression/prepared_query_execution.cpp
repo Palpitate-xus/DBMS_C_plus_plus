@@ -195,6 +195,22 @@ struct ConstantPlanningRoles {
     std::function<bool(const BinaryOpExpr*)> textConcatenation;
 };
 
+bool ownsBuiltinCoalesce(const FunctionCallExpr* call, const ExprEvaluator& evaluator,
+                         StorageEngine* engine) {
+    if (!call->schema.empty() || SQLParser::toLower(call->funcName) != "coalesce" ||
+        !call->namedArgs.empty() || call->hasOver || call->filter || call->distinct ||
+        !call->orderBy.empty() || !evaluator.hasScalarFunction(call, engine)) return false;
+    FunctionCallExpr builtin;
+    builtin.funcName = "coalesce";
+    for (size_t i = 0; i < call->args.size(); ++i) {
+        auto null = std::make_unique<LiteralExpr>();
+        null->value = "NULL";
+        builtin.args.push_back(std::move(null));
+    }
+    return evaluator.scalarFunctionIdentity(call, engine) ==
+        evaluator.scalarFunctionIdentity(&builtin, engine);
+}
+
 std::optional<ExprValue> simplifyCaseConstants(ExprPtr& expression,
     const ExprEvaluator& evaluator, const ConstantPlanningRoles* roles = nullptr) {
     if (!expression || expression->preparedSubquery) return std::nullopt;
@@ -208,6 +224,7 @@ std::optional<ExprValue> simplifyCaseConstants(ExprPtr& expression,
         std::vector<std::pair<ExprPtr,ExprPtr>> remaining;
         std::vector<std::pair<std::string,std::string>> comparisons;
         std::vector<std::optional<QueryComparisonBinding>> enumComparisons;
+        std::vector<PredicateCollationBinding> predicateCollations;
         bool definiteMatch = false;
         for (size_t i=0; i<conditional->whenClauses.size(); ++i) {
             auto& arm = conditional->whenClauses[i];
@@ -225,6 +242,8 @@ std::optional<ExprValue> simplifyCaseConstants(ExprPtr& expression,
                     comparison.simpleComparisonTypes.push_back(conditional->simpleComparisonTypes[i]);
                     if(!conditional->simpleEnumComparisons.empty())
                         comparison.simpleEnumComparisons.push_back(conditional->simpleEnumComparisons.at(i));
+                    if (!conditional->simplePredicateCollations.empty())
+                        comparison.simplePredicateCollations.push_back(conditional->simplePredicateCollations.at(i));
                     auto yes = std::make_unique<LiteralExpr>(); yes->value = "true";
                     auto no = std::make_unique<LiteralExpr>(); no->value = "false";
                     comparison.whenClauses.emplace_back(constantExpression(*conditionValue,nullptr),std::move(yes));
@@ -244,11 +263,14 @@ std::optional<ExprValue> simplifyCaseConstants(ExprPtr& expression,
                 comparisons.push_back(conditional->simpleComparisonTypes.at(i));
             if (!conditional->simpleEnumComparisons.empty())
                 enumComparisons.push_back(conditional->simpleEnumComparisons.at(i));
+            if (!conditional->simplePredicateCollations.empty())
+                predicateCollations.push_back(conditional->simplePredicateCollations.at(i));
         }
         if (!definiteMatch) simplifyCaseConstants(conditional->elseExpr,evaluator,roles);
         conditional->whenClauses = std::move(remaining);
         conditional->simpleComparisonTypes = std::move(comparisons);
         conditional->simpleEnumComparisons = std::move(enumComparisons);
+        conditional->simplePredicateCollations = std::move(predicateCollations);
         if (conditional->whenClauses.empty()) {
             auto fallback = std::move(conditional->elseExpr);
             if (!fallback) fallback = constantExpression(ExprValue("unknown","",true),conditional);
@@ -356,7 +378,8 @@ std::optional<ExprValue> simplifyCaseConstants(ExprPtr& expression,
         }
         const auto right = binary->op=="::" ? std::optional<ExprValue>(ExprValue{})
             : simplifyCaseConstants(binary->right,evaluator,roles);
-        if (roles && op == "||" && ((left && left->isNull) || (right && right->isNull)) &&
+        if (roles && roles->textConcatenation && op == "||" &&
+            ((left && left->isNull) || (right && right->isNull)) &&
             roles->textConcatenation(binary)) {
             ExprValue result("text", "", true);
             const auto collation = ExprEvaluator::explicitCollationOf(binary);
@@ -415,7 +438,7 @@ std::optional<ExprValue> simplifyCaseConstants(ExprPtr& expression,
             }
             return std::nullopt;
         }
-        if (roles && roles->patternEscape(call)) {
+        if (roles && roles->patternEscape && roles->patternEscape(call)) {
             std::vector<std::optional<ExprValue>> inputs;
             for (auto& argument : call->args)
                 inputs.push_back(simplifyCaseConstants(argument,evaluator,roles));
@@ -492,7 +515,7 @@ std::optional<ExprValue> simplifyCaseConstants(ExprPtr& expression,
         }
         for (auto& arg : call->namedArgs) simplifyCaseConstants(arg.value,evaluator,roles);
         for (auto& key : call->aggregateOrderKeys) simplifyCaseConstants(key.expr,evaluator,roles);
-        if (roles && std::any_of(constants.begin(), constants.end(),
+        if (roles && roles->strictStringResult && std::any_of(constants.begin(), constants.end(),
                 [](const ExprValue& value) { return value.isNull; })) {
             const auto type = roles->strictStringResult(call);
             if (!type.empty()) {
@@ -1359,6 +1382,15 @@ bool PreparedQueryExecution::windowInputColumnDemanded(const Expr* expression) c
     return demanded;
 }
 
+void PreparedQueryExecution::setPredicateCollations(const Expr* predicate,
+    std::function<ExpressionCollation(const ColumnRefExpr&)> declaration) {
+    predicateCollation_ = std::move(declaration);
+    predicateCollationSites_.clear();
+    // WHERE may prepare an independently evaluated branch for NULL-aware
+    // short circuit. Every such copy needs the same source declarations.
+    visitStructuredValue(predicate, [&](const Expr* value) { predicateCollationSites_.insert(value); });
+}
+
 void PreparedQueryExecution::prepareExpression(Expr* expression) {
     if (!expression || prepared_.count(expression)) return;
     if (!owners_.count(expression))
@@ -1386,7 +1418,22 @@ void PreparedQueryExecution::prepareExpression(Expr* expression) {
     }
     ExprHelper::prepareArrayTypes(compiled.get(), {}, database_, engine_, nullptr, nullptr, &collations_);
     ExprEvaluator::analyzeExplicitResultCollation(compiled.get());
-    planCaseConstants(compiled,evaluator_);
+    if (predicateCollationSites_.count(expression)) {
+        ExprEvaluator::bindPredicateCollations(compiled.get(), predicateCollation_);
+        // Only a resolved COALESCE can discard unevaluated arguments here.
+        // Comparisons keep the input rule from the complete, unpruned tree.
+        ConstantPlanningRoles roles;
+        roles.coalesce = [&](const FunctionCallExpr* call) {
+            return call->predicateCollation && ownsBuiltinCoalesce(call, evaluator_, engine_);
+        };
+        roles.resultType = [&](const FunctionCallExpr* call) {
+            return ExprHelper::canonicalResultTypeName(
+                ExprHelper::inferParsedResultType(call, {}, database_, engine_));
+        };
+        simplifyCaseConstants(compiled, evaluator_, &roles);
+    } else {
+        planCaseConstants(compiled,evaluator_);
+    }
     if(std::any_of(query_->sourceRanges.begin(),query_->sourceRanges.end(),[](const auto& range){return bool(range.generatedRelation);}))
     visitStructuredValue(compiled.get(),[&](const Expr* value) {
         auto* column=const_cast<ColumnRefExpr*>(dynamic_cast<const ColumnRefExpr*>(value));
@@ -1431,6 +1478,8 @@ void PreparedQueryExecution::planExpressionConstants(Expr* expression,
         }
         ExprHelper::prepareArrayTypes(compiled.get(), {}, database_, engine_, nullptr, nullptr, &collations_);
         ExprEvaluator::analyzeExplicitResultCollation(compiled.get());
+        if (predicateCollationSites_.count(expression))
+            ExprEvaluator::bindPredicateCollations(compiled.get(), predicateCollation_);
         for (const auto& site : sites) originalSites_[site.first] = site.second;
         for (const auto& site : sites)
             if (const auto* quantified = dynamic_cast<const QuantifiedComparisonExpr*>(site.second);
@@ -1450,16 +1499,7 @@ void PreparedQueryExecution::planCompiledConstants(ExprPtr& expression,
     // visitor obtains a child's result or invokes a registered routine.
     const ConstantPlanningRoles roles{
         [&](const FunctionCallExpr* call) {
-            if (!call->schema.empty() || SQLParser::toLower(call->funcName) != "coalesce" ||
-                !call->namedArgs.empty() || call->hasOver || call->filter || call->distinct ||
-                !call->orderBy.empty() || !evaluator_.hasScalarFunction(call,engine_)) return false;
-            FunctionCallExpr builtin; builtin.funcName = "coalesce";
-            for (size_t i=0;i<call->args.size();++i) {
-                auto null = std::make_unique<LiteralExpr>(); null->value = "NULL";
-                builtin.args.push_back(std::move(null));
-            }
-            return evaluator_.scalarFunctionIdentity(call,engine_) ==
-                evaluator_.scalarFunctionIdentity(&builtin,engine_);
+            return ownsBuiltinCoalesce(call, evaluator_, engine_);
         },
         [&](const FunctionCallExpr* call) {
             return ExprHelper::canonicalResultTypeName(ExprHelper::inferParsedResultType(call,{},database_,engine_));

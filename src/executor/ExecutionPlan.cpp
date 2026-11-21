@@ -22,6 +22,7 @@
 #include "access/BloomIndex.h"
 #include "catalog/type_registry.h"
 #include "catalog/catalog.h"
+#include "catalog/collation.h"
 #include "catalog/CatalogService.h"
 #include "catalog/type_catalog.h"
 #include "catalog/namespace_catalog.h"
@@ -153,6 +154,32 @@ bool PreparedSourceRowsOp::lastStructuredRow(std::vector<std::string>& cells, st
 bool PreparedSourceRowsOp::lastColumnIsNull(size_t ordinal) const { return ordinal < row_.size() && row_[ordinal].isNull; }
 
 namespace {
+bool hasColumnCollation(const Column& column) {
+    return !column.isArray && !column.collation.empty();
+}
+
+ExpressionCollation declaredColumnCollation(const Column& column) {
+    if (!hasColumnCollation(column)) return {};
+    std::string identity = column.collation;
+    const auto normalized = collation::normalizeName(identity);
+    if (normalized == "default" || normalized == "pg_catalog.default") return {};
+    if (collation::isValid(identity)) {
+        const auto builtins = collation::listBuiltins();
+        if (identity.size() > 1 && identity.front() == '"' && identity.back() == '"')
+            identity = identity.substr(1, identity.size() - 2);
+        const auto lower = SQLParser::toLower(identity);
+        const auto builtin = std::find_if(builtins.begin(), builtins.end(), [&](const auto& name) {
+            return SQLParser::toLower(name) == lower;
+        });
+        identity = "pg_catalog." + (builtin == builtins.end()
+            ? normalized : *builtin);
+    } else if (identity.find('.') == std::string::npos) {
+        identity = "public." + identity;
+    }
+    return {std::move(identity), column.resolvedCollation.empty() ? column.collation
+        : column.resolvedCollation, column.resolvedCollationUsesLocale};
+}
+
 // VALUES owns the same per-invocation carrier lifetime as SELECT/Append.
 // Keep its actual typed source graph, but never retain an initplan or open
 // quantified child across a root cursor close/restart.
@@ -483,6 +510,19 @@ struct PreparedSelectState {
             for(auto* target:input.targets)
                 input.columns.push_back(execution->registerWindowInputColumn(target,type,true));
         }
+        if (!executionProvider && !sourceContexts && sourceOrdinal != noTarget &&
+            QueryPlanner::usesDeclaredFilterCollations(select(), schema)) {
+            std::vector<ExpressionCollation> declarations;
+            declarations.reserve(schema.len());
+            for (const auto& column : schema.cols)
+                declarations.push_back(declaredColumnCollation(column));
+            execution->setPredicateCollations(select().whereClause.get(),
+                [ordinal = sourceOrdinal, declarations = std::move(declarations)](const ColumnRefExpr& column) {
+                    if (!column.binding || column.binding->scopeDepth ||
+                        column.binding->sourceOrdinal != ordinal) return ExpressionCollation{};
+                    return declarations.at(column.binding->columnOrdinal);
+                });
+        }
         // Only the execution root opts into whole-query planning. Child
         // graph construction must not reacquire outputs that root demand
         // already pruned, or plan a child in a discarded CASE arm.
@@ -710,6 +750,7 @@ static bool preparedStrictNullComparison(const BinaryOpExpr& binary) {
 
 static unsigned preparedWhereTruths(const Expr* expression) {
     // Bit 0 TRUE, bit 1 FALSE, bit 2 UNKNOWN: all runtime possibilities.
+    if (preparedLiteralNull(expression)) return 4;
     if(const auto* unary=dynamic_cast<const UnaryOpExpr*>(expression);unary && unary->op=="NOT") {
         const auto input=preparedWhereTruths(unary->operand.get());
         return ((input&1)<<1) | ((input&2)>>1) | (input&4);
@@ -1976,6 +2017,65 @@ static bool supportsPreparedSelectShape(const SelectStmt& select, bool allowCtes
     for (const auto& target : select.selectList) if (!scalar(target.expr.get())) return false;
     for (const auto& key : select.orderBy) if (!scalar(key.expr.get()) || !key.usingOp.empty()) return false;
     return scalar(select.whereClause.get()) && scalar(select.having.get());
+}
+
+bool QueryPlanner::usesDeclaredFilterCollations(const SelectStmt& select, const TableSchema& schema) {
+    if (!select.whereClause || !select.fromClause || select.fromClause->type != FromItem::Type::Table)
+        return false;
+    const Column* first = nullptr;
+    bool mixedSchema = false;
+    for (const auto& column : schema.cols) {
+        if (!hasColumnCollation(column)) continue;
+        if (!first) first = &column;
+        else if (first->collation != column.collation) { mixedSchema = true; break; }
+    }
+    if (!mixedSchema) return false;
+
+    std::string firstIdentity;
+    const auto& aliases = select.fromClause->columnAliases;
+    const auto inspect = [&](const auto& walk, const Expr* expression) -> bool {
+        if (!expression || expression->preparedSubquery) return false;
+        if (const auto* reference = dynamic_cast<const ColumnRefExpr*>(expression)) {
+            for (size_t i = 0; i < schema.len(); ++i) {
+                if ((i < aliases.size() ? aliases[i] : schema.cols[i].dataName) != reference->column) continue;
+                if (!hasColumnCollation(schema.cols[i])) return false;
+                auto identity = declaredColumnCollation(schema.cols[i]).identity;
+                if (identity.empty()) identity = "pg_catalog.default";
+                if (!firstIdentity.empty()) return firstIdentity != identity;
+                firstIdentity = std::move(identity);
+                break;
+            }
+        } else if (const auto* binary = dynamic_cast<const BinaryOpExpr*>(expression)) {
+            return walk(walk, binary->left.get()) ||
+                (binary->op != "::" && walk(walk, binary->right.get()));
+        } else if (const auto* unary = dynamic_cast<const UnaryOpExpr*>(expression)) {
+            return walk(walk, unary->operand.get());
+        } else if (const auto* cast = dynamic_cast<const CastExpr*>(expression)) {
+            return walk(walk, cast->operand.get());
+        } else if (const auto* call = dynamic_cast<const FunctionCallExpr*>(expression)) {
+            for (const auto& argument : call->args)
+                if (walk(walk, argument.get())) return true;
+        } else if (const auto* row = dynamic_cast<const RowExpr*>(expression)) {
+            for (const auto& element : row->elements)
+                if (walk(walk, element.get())) return true;
+        } else if (const auto* conditional = dynamic_cast<const CaseExpr*>(expression)) {
+            if (walk(walk, conditional->switchExpr.get()) || walk(walk, conditional->elseExpr.get())) return true;
+            for (const auto& arm : conditional->whenClauses)
+                if (walk(walk, arm.first.get()) || walk(walk, arm.second.get())) return true;
+        }
+        return false;
+    };
+    const auto checkConjuncts = [&](const auto& walk, const Expr* expression) -> bool {
+        if (const auto* binary = dynamic_cast<const BinaryOpExpr*>(expression);
+            binary && (binary->op == "AND" || binary->op == "OR"))
+            return walk(walk, binary->left.get()) || walk(walk, binary->right.get());
+        if (const auto* unary = dynamic_cast<const UnaryOpExpr*>(expression);
+            unary && unary->op == "NOT")
+            return walk(walk, unary->operand.get());
+        firstIdentity.clear();
+        return inspect(inspect, expression);
+    };
+    return checkConjuncts(checkConjuncts, select.whereClause.get());
 }
 
 bool QueryPlanner::supportsPreparedSelectPlan(const SelectStmt& select) {

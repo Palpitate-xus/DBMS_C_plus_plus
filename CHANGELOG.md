@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>两列的排序规则冲突时会报错 · 2026-11-21</summary>
+
+两列用不同的规则比较文字时，数据库会提示冲突。可以用 `COLLATE` 指定共同的规则。空表没有文字需要比较，查询会正常返回空结果。
+
+[使用手册](docs/MANUAL.md#基础查询) · [测试报告](docs/test-report.md#implicit-collation-filter-20261121) · [性能报告](docs/performance-report-2026-10-30.md#implicit-collation-filter-cost-20261121)
+
+</details>
+
+<details>
 <summary>筛选文字时可指定排序规则 · 2026-11-21</summary>
 
 例如 `WHERE title COLLATE "C" < 'm'` 会用 `C` 规则找出排在 `m` 前面的标题。规则名写错时，空表也会提示错误。查询也可以使用自己创建的排序规则。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>修复把数字误当成列名的问题 · 2026-11-21</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-21 · 修复把数字误当成列名的问题
 
 `WHERE id = 7` 查找编号为 7 的记录。`WHERE id = "7"` 比较同一条记录里的 `id` 和名为 `"7"` 的列。
 
 [使用手册](docs/MANUAL.md#基础查询) · [测试报告](docs/test-report.md#narrow-select-20261121) · [性能报告](docs/performance-report-2026-10-30.md#narrow-select-cost-20261121)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-21 · 按编号删除时少读数据
 

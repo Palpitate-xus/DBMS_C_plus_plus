@@ -92,6 +92,61 @@ def main():
         expect('SELECT id FROM jc_varying WHERE t COLLATE "C" = \'a \';', [["3"]], [23])
         expect('SELECT id FROM jc_varying WHERE \'01\' COLLATE "C" <> t ORDER BY id;',
                [["2"], ["3"], ["4"]], [23])
+        # Implicitly conflicting collations are reported only when a
+        # collation-sensitive operation actually evaluates a non-NULL pair.
+        command("CREATE COLLATION jc_rules.local_c2 (provider = libc, locale = 'C');")
+        command('CREATE TABLE jc_implicit(id INT, c TEXT COLLATE "C", p TEXT COLLATE "POSIX", '
+                'd TEXT, a TEXT COLLATE jc_rules.local_c, b TEXT COLLATE jc_rules.local_c2, '
+                'v VARCHAR(10) COLLATE jc_rules.local_c, w VARCHAR(10) COLLATE jc_rules.local_c2, '
+                'h CHAR(5) COLLATE jc_rules.local_c, j CHAR(5) COLLATE jc_rules.local_c2);')
+        command('CREATE TABLE jc_implicit_empty(id INT, c TEXT COLLATE "C", p TEXT COLLATE "POSIX");')
+        command('CREATE TABLE jc_implicit_null(id INT, c TEXT COLLATE "C", p TEXT COLLATE "POSIX");')
+        command("INSERT INTO jc_implicit VALUES"
+                "(1,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL),"
+                "(2,'a','A','A','a','A','a','A','a','A'),"
+                "(3,'same','same','same','same','same','same','same','same','same');")
+        command("INSERT INTO jc_implicit_null VALUES(1,NULL,NULL),(2,NULL,'x');")
+
+        def expect_wire(sql, rows, state, kinds):
+            frames = client.simple_query(server["sock"], sql)
+            result = runner.decode_wire_result(frames, include_types=True)
+            assert result[0] == rows and result[1] == state and result[5] == [23], (sql, result)
+            assert [kind.decode("ascii") for kind, _ in frames] == kinds, (sql, frames)
+            assert frames[-1] == (b"Z", b"I"), (sql, frames)
+            if state:
+                assert result[4] is None, (sql, result)
+
+        for predicate in ("c < p", "p < c", "c = p", "a < b", "b = a",
+                          "v = w", "w < v", "h = j", "j < h"):
+            expect_wire(f"SELECT id FROM jc_implicit WHERE {predicate};", [], "42P22", ["T", "E", "Z"])
+        expect_wire('SELECT id FROM jc_implicit_empty WHERE c < p;', [], None, ["T", "C", "Z"])
+        expect_wire('SELECT id FROM jc_implicit_null WHERE c < p;', [], None, ["T", "C", "Z"])
+        expect_wire('SELECT id FROM jc_implicit WHERE c < p LIMIT 0;', [], None, ["T", "C", "Z"])
+        expect_wire('SELECT id FROM jc_implicit WHERE FALSE AND c < p;', [], None, ["T", "C", "Z"])
+        expect_wire('SELECT id FROM jc_implicit WHERE id=1 OR c < p LIMIT 1;', [["1"]], None,
+                    ["T", "D", "C", "Z"])
+        expect_wire('SELECT id FROM jc_implicit WHERE id=1 OR c < p;', [["1"]], "42P22",
+                    ["T", "D", "E", "Z"])
+        expect_wire('SELECT id FROM jc_implicit WHERE id=1 OR c < p LIMIT 2;', [["1"]], "42P22",
+                    ["T", "D", "E", "Z"])
+        expect_wire('SELECT id FROM jc_implicit WHERE CASE c WHEN NULL::text THEN 0 '
+                    'WHEN p THEN 1 ELSE 0 END = 1;', [], "42P22", ["T", "E", "Z"])
+        expect_wire('SELECT id FROM jc_implicit WHERE CASE c COLLATE "C" WHEN p THEN 1 '
+                    'ELSE 0 END = 1;', [], "42P22", ["T", "E", "Z"])
+        expect('SELECT id FROM jc_implicit WHERE CASE c WHEN p COLLATE "C" THEN 1 '
+               'ELSE 0 END = 1 ORDER BY id;', [["3"]], [23])
+        expect('SELECT id FROM jc_implicit WHERE c COLLATE pg_catalog."C" = c COLLATE "C" ORDER BY id;',
+               [["2"], ["3"]], [23])
+        expect('SELECT id FROM jc_implicit WHERE c = d ORDER BY id;', [["3"]], [23])
+        expect('SELECT id FROM jc_implicit WHERE a COLLATE jc_rules.local_c = b ORDER BY id;',
+               [["3"]], [23])
+        error('SELECT id FROM jc_implicit WHERE a COLLATE jc_rules.local_c = '
+              'b COLLATE jc_rules.local_c2;', "42P21")
+        command('CREATE TABLE jc_declared_default(id INT, a TEXT COLLATE "C", '
+                'd TEXT COLLATE "default");')
+        command("INSERT INTO jc_declared_default VALUES (1,'A','a'),(2,'a','A');")
+        expect('SELECT id FROM jc_declared_default WHERE a < d ORDER BY id;', [["1"]], [23])
+
         print("[JOIN COLLATION ROLE PROTOCOL E2E] passed")
     finally:
         runner.stop_ours(server)

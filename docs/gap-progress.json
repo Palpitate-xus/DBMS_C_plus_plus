@@ -2,6 +2,42 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-21 resolve declared collation conflicts in ordinary SELECT filters",
+      "gap_ids": ["SQL-04", "SQL-10", "OPT-03"],
+      "status": "partial",
+      "evidence": [
+        "src/executor/ExecutionPlan.cpp",
+        "src/expression/ExprEvaluator.cpp",
+        "src/expression/prepared_query_execution.cpp",
+        "src/main.cpp",
+        "docs/postgresql-comparison.md",
+        "docs/test-report.md",
+        "docs/performance-report-2026-10-30.md"
+      ],
+      "tests": ["tests/join_collation_role_protocol_e2e_test.py"],
+      "verification": [
+        "Against PostgreSQL 18.6 with en_US.utf8, 181 SQL and protocol steps across four matrices agree on success, error state, row values, type OIDs, message ordering, and streamed prefixes. EXPLAIN comparison includes status and actual row counts. The previous build had 80 differences across those matrices and the first candidate had 22.",
+        "Three prior explicit-rule matrices with 117 total steps also match PostgreSQL. They independently confirm the earlier C/POSIX conflict now reports 42P22 after its result descriptor.",
+        "Passed 36 related protocol suites, 15 native regressions, and a nine-check process-kill recovery probe with persisted named collations and committed and uncommitted index modifications.",
+        "An equality probe over separate C and POSIX columns with independent literal conditions preserves the existing IndexScan and the exact result. The tested scope is ordinary base-table filtering. Multi-constant IN list derivation and rules across other sources remain partial.",
+        "All 1,728 timed responses agree byte-for-byte with the baseline and all 96 database runs exited normally. Timing varied across sizes and repeats. On 1,024 rows the paired elapsed median changed -4.24% for explicit override and +0.50% for declared C with a default column. The 128-row integer scan changed +17.47% initially and -0.75% in the independent repeat."
+      ],
+      "artifacts": {
+        "exact_build": "build/array-domain-20261117/implicit-collation-cmake-v2.json",
+        "baseline_and_first_candidate": "build/implicit-collation-20261121/candidate-v1-independent-audit.json",
+        "candidate_protocol": "build/implicit-collation-20261121/candidate-v2-watcher-receipt.json",
+        "candidate_wire_audit": "build/implicit-collation-20261121/candidate-v2-independent-audit.json",
+        "previous_explicit_rules": "build/implicit-collation-20261121/explicit-replay-v2/audit.json",
+        "mixed_rules_index": "build/implicit-collation-20261121/perf/mixed-two-collations-index-check-v2.json",
+        "recovery": "build/implicit-collation-20261121/perf/recovery-v2.json",
+        "related_suites": "build/expression-collate-20261121/related-implicit-collation-cmake-v2/summary.json",
+        "native_regressions": "build/array-domain-20261117/native-implicit-collation-cmake-v2/summary.json",
+        "timing_128": "build/implicit-collation-20261121/perf/paired-formal-v2-128.json",
+        "timing_1024": "build/implicit-collation-20261121/perf/paired-formal-v2-1024.json",
+        "timing_128_repeat": "build/implicit-collation-20261121/perf/paired-repeat-v2-128.json"
+      }
+    },
+    {
       "issue": "2026-11-21 bind explicit collations in ordinary SELECT filters",
       "gap_ids": ["SQL-04", "SQL-10", "OPT-03"],
       "status": "partial",

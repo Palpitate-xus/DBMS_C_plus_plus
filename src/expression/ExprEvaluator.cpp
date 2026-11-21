@@ -318,6 +318,143 @@ void ExprEvaluator::bindComparisonCollation(BinaryOpExpr& expr, const std::strin
     expr.comparison->collationUsesSystemLocale = selected.usesSystemLocale;
 }
 
+// Bind only an execution-owned predicate. Literal/default collation is
+// neutral, explicit declarations dominate implicit ones, and unequal
+// implicit identities remain indeterminate until a consumer needs a rule.
+void ExprEvaluator::bindPredicateCollations(Expr* expression,
+        const std::function<ExpressionCollation(const ColumnRefExpr&)>& declaration) {
+    enum class Strength { None, Implicit, Conflict, Explicit };
+    struct Derived { Strength strength = Strength::None; ExpressionCollation collation; };
+    const auto merge = [](Derived a, Derived b) {
+        if (a.strength == Strength::Explicit || b.strength == Strength::Explicit) {
+            if (a.strength == Strength::Explicit && b.strength == Strength::Explicit &&
+                a.collation.identity != b.collation.identity)
+                throw DbError("42P21", "collation mismatch between explicit collations");
+            return a.strength == Strength::Explicit ? a : b;
+        }
+        if (a.strength == Strength::Conflict || b.strength == Strength::Conflict)
+            return Derived{Strength::Conflict, {}};
+        if (a.strength == Strength::None) return b;
+        if (b.strength == Strength::None) return a;
+        if (a.collation.identity != b.collation.identity)
+            return Derived{Strength::Conflict, {}};
+        return a;
+    };
+    const auto binding = [](const Derived& value) {
+        return PredicateCollationBinding{value.collation, value.strength == Strength::Conflict};
+    };
+    const auto annotate = [&](auto& node, const Derived& value) {
+        if (value.strength != Strength::None)
+            node.predicateCollation = std::make_unique<PredicateCollationBinding>(binding(value));
+    };
+    std::function<Derived(Expr*)> visit;
+    visit = [&](Expr* node) -> Derived {
+        if (!node || node->preparedSubquery) return {};
+        if (auto* column = dynamic_cast<ColumnRefExpr*>(node)) {
+            auto collation = declaration(*column);
+            if (collation.identity.empty()) return {};
+            return {Strength::Implicit, std::move(collation)};
+        }
+        if (auto* unary = dynamic_cast<UnaryOpExpr*>(node)) {
+            auto child = visit(unary->operand.get());
+            if (toLower(unary->op).rfind("collate ", 0) == 0 && unary->collationBinding)
+                return {Strength::Explicit, *unary->collationBinding};
+            return {};
+        }
+        if (auto* cast = dynamic_cast<CastExpr*>(node)) {
+            auto child = visit(cast->operand.get());
+            return isCollatableCastTarget(cast->typeName) ? child : Derived{};
+        }
+        if (auto* binary = dynamic_cast<BinaryOpExpr*>(node)) {
+            const auto left = visit(binary->left.get());
+            const auto op = toLower(binary->op);
+            if ((op == "in" || op == "not in") && binary->right &&
+                dynamic_cast<RowExpr*>(binary->right.get())) {
+                auto* list = static_cast<RowExpr*>(binary->right.get());
+                binary->predicateListCollations.clear();
+                for (auto& member : list->elements)
+                    binary->predicateListCollations.push_back(binding(merge(left, visit(member.get()))));
+                return {};
+            }
+            const auto right = visit(binary->right.get());
+            if (op == "::") {
+                const auto* target = dynamic_cast<const LiteralExpr*>(binary->right.get());
+                return target && isCollatableCastTarget(target->value) ? left : Derived{};
+            }
+            if (op == "||") {
+                const auto merged = merge(left, right);
+                annotate(*binary, merged);
+                return merged;
+            }
+            static const std::set<std::string> comparisons = {
+                "=", "<>", "!=", "<", ">", "<=", ">=", "is distinct from",
+                "is not distinct from", "like", "not like", "ilike", "not ilike",
+                "similar to", "not similar to", "~", "~*", "!~", "!~*"};
+            if (comparisons.count(op)) annotate(*binary, merge(left, right));
+            return {};
+        }
+        if (auto* conditional = dynamic_cast<CaseExpr*>(node)) {
+            auto switchCollation = visit(conditional->switchExpr.get());
+            // The switch value is materialized once. Each WHEN sees that
+            // value's rule as a declaration; an explicit WHEN can override it.
+            if (switchCollation.strength == Strength::Explicit)
+                switchCollation = switchCollation.collation.identity == "pg_catalog.default"
+                    ? Derived{} : Derived{Strength::Implicit, std::move(switchCollation.collation)};
+            conditional->simplePredicateCollations.clear();
+            Derived result;
+            for (auto& arm : conditional->whenClauses) {
+                const auto condition = visit(arm.first.get());
+                if (conditional->switchExpr)
+                    conditional->simplePredicateCollations.push_back(
+                        binding(merge(switchCollation, condition)));
+                result = merge(result, visit(arm.second.get()));
+            }
+            return merge(result, visit(conditional->elseExpr.get()));
+        }
+        if (auto* call = dynamic_cast<FunctionCallExpr*>(node)) {
+            std::vector<Derived> args;
+            for (auto& arg : call->args) args.push_back(visit(arg.get()));
+            for (auto& arg : call->namedArgs) visit(arg.value.get());
+            visit(call->filter.get());
+            const auto name = toLower(call->funcName);
+            const bool between = name == "between" || name == "not between";
+            const bool pair = name == "nullif" || name == "like escape" ||
+                name == "not like escape" || name == "ilike escape" ||
+                name == "not ilike escape" || name == "similar to escape" ||
+                name == "not similar to escape";
+            if ((between || pair) && args.size() >= 2) {
+                call->predicateArgumentCollations.resize(args.size());
+                for (size_t i = 1; i < args.size(); ++i) {
+                    const size_t lhs = between && i == 2 && args.size() == 4 ? 3 : 0;
+                    call->predicateArgumentCollations[i] = binding(merge(args[lhs], args[i]));
+                }
+            }
+            if (name == "coalesce" || name == "nullif" || name == "greatest" ||
+                name == "least" || ((call->schema.empty() || toLower(call->schema) == "pg_catalog") &&
+                    isTextResultBuiltin(name))) {
+                Derived result;
+                for (auto& arg : args) result = merge(result, arg);
+                annotate(*call, result);
+                return result;
+            }
+            return {};
+        }
+        if (auto* row = dynamic_cast<RowExpr*>(node))
+            for (auto& item : row->elements) visit(item.get());
+        return {};
+    };
+    visit(expression);
+}
+
+static void applyPredicateCollation(const PredicateCollationBinding& binding,
+                                    ExprValue& left, ExprValue& right) {
+    if (left.isNull || right.isNull) return;
+    if (binding.indeterminate)
+        throw DbError("42P22", "could not determine which collation to use for string comparison");
+    applyResultCollation(left, binding.selected);
+    applyResultCollation(right, binding.selected);
+}
+
 static std::string formatUtcClock(std::time_t value, const char* format) {
     std::tm utc{};
     if (::gmtime_r(&value, &utc) == nullptr) return "";
@@ -3725,9 +3862,13 @@ ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& c
         const bool unknownLiteral=literal && literal->typeName.empty() && !literal->preparedSubquery &&
             (toLower(literal->value)=="null" || (!literal->value.empty() && literal->value.front()=='\''));
         bool sawUnknown = l.isNull;
+        size_t candidateIndex = 0;
         for (const auto& element : list->elements) {
-            const ExprValue candidate = eval(element.get(), ctx);
+            ExprValue candidate = eval(element.get(), ctx);
             ExprValue left=l;
+            if (candidateIndex < e->predicateListCollations.size())
+                applyPredicateCollation(e->predicateListCollations[candidateIndex], left, candidate);
+            ++candidateIndex;
             if(unknownLiteral && isBitStringTypeName(candidate.typeName))left.typeName="unknown";
             const ExprValue equal = isBitStringTypeName(left.typeName) || isBitStringTypeName(candidate.typeName)
                 ? comparePrepared(resolveComparison("=",left.typeName,candidate.typeName),left,candidate)
@@ -3838,6 +3979,11 @@ ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& c
         return ExprValue(l.typeName, std::move(result), false);
     }
 
+    // Only a live comparison demands a collation. In particular, a NULL
+    // operand and logical short circuit must not turn conflict into an error.
+    if (e->predicateCollation && op != "||")
+        applyPredicateCollation(*e->predicateCollation, l, r);
+
     // Comparison
     // IS [NOT] DISTINCT FROM: equality that treats NULLs as comparable
     // (never returns NULL).
@@ -3936,7 +4082,9 @@ ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& c
         ExpressionCollation resultCollation;
         if (!byteaResult) {
             resultCollation = resolvedExplicitResultCollation(e);
-            if (resultCollation.identity.empty()) {
+            if (e->predicateCollation) {
+                resultCollation = e->predicateCollation->selected;
+            } else if (resultCollation.identity.empty()) {
                 resultCollation.comparisonName = mergeExplicitCollations(l.collation, r.collation);
                 resultCollation.usesSystemLocale = l.collation.empty()
                     ? r.collationUsesSystemLocale : l.collationUsesSystemLocale;
@@ -4333,6 +4481,8 @@ ExprValue ExprEvaluator::evalCase(const CaseExpr* e, const RowContext& ctx) cons
         if (simpleCase) {
             ExprValue condition = eval(wc.first.get(), ctx);
             ExprValue left = switchValue;
+            if (clauseIndex < e->simplePredicateCollations.size())
+                applyPredicateCollation(e->simplePredicateCollations[clauseIndex], left, condition);
             ExprValue equal;
             if (!e->simpleEnumComparisons.empty() && e->simpleEnumComparisons.at(clauseIndex)) {
                 equal=comparePrepared(*e->simpleEnumComparisons[clauseIndex],left,condition);
@@ -7353,7 +7503,9 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
             }
             // Each logical comparison owns its actual left occurrence. A
             // demanded second pair repeats the left expression, not its value.
-            const auto left = input(bound == 2 && e->args.size() == 4 ? 3 : 0), right = input(bound);
+            auto left = input(bound == 2 && e->args.size() == 4 ? 3 : 0), right = input(bound);
+            if (bound < e->predicateArgumentCollations.size())
+                applyPredicateCollation(e->predicateArgumentCollations[bound], left, right);
             return preparedType(left.typeName) || preparedType(right.typeName)
                 ? comparePrepared(resolveComparison(operation, left.typeName, right.typeName), left, right)
                 : applyComparison(operation, left, right);
@@ -7449,6 +7601,8 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
         }
         validatePatternEscapeInput(args[2]);
         if (args[0].isNull) return ExprValue("boolean", "", true);
+        if (e->predicateArgumentCollations.size() > 1)
+            applyPredicateCollation(e->predicateArgumentCollations[1], args[0], args[1]);
         const bool foldCase = name == "ilike escape" ||
                               name == "not ilike escape";
         const bool bytes = ExprHelper::canonicalResultTypeName(args[0].typeName) == "bytea";
@@ -7469,6 +7623,8 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
         }
         validatePatternEscapeInput(args[2]);
         if (args[0].isNull) return ExprValue("boolean", "", true);
+        if (e->predicateArgumentCollations.size() > 1)
+            applyPredicateCollation(e->predicateArgumentCollations[1], args[0], args[1]);
         const std::string locale = collation::normalizeName(args[0].collation.empty()
             ? args[1].collation : args[0].collation);
         bool m = similarToMatchEscape(args[0].value,args[1].value,args[2].value,
@@ -7541,6 +7697,9 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
     }
     auto it = functionRegistry().find(name);
     if (it != functionRegistry().end()) {
+        if (e->predicateCollation && !args.empty() &&
+            (name == "lower" || name == "upper" || name == "initcap"))
+            applyPredicateCollation(*e->predicateCollation, args.front(), args.front());
         std::string argumentCollation;
         for (const ExprValue& argument : args) {
             if (isCollatableExprType(argument.typeName))
@@ -7568,7 +7727,9 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
         ExprValue first = args[0];
         ExprValue second = args[1];
         const auto collation = resolvedExplicitResultCollation(e);
-        if (collation.identity.empty()) {
+        if (e->predicateArgumentCollations.size() > 1) {
+            applyPredicateCollation(e->predicateArgumentCollations[1], first, second);
+        } else if (collation.identity.empty()) {
             first.collation = mergeExplicitCollations(first.collation, second.collation);
         } else {
             applyResultCollation(first, collation);
@@ -7592,6 +7753,8 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
             if (isCollatableExprType(a.typeName))
                 applyResultCollation(a, resultCollation);
             if (a.isNull) continue;
+            if (!best.isNull && e->predicateCollation)
+                applyPredicateCollation(*e->predicateCollation, a, best);
             if (best.isNull || compareValues(a, best) > 0) best = a;
         }
         if (best.isNull) applyResultCollation(best, resultCollation);
@@ -7604,6 +7767,8 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
             if (isCollatableExprType(a.typeName))
                 applyResultCollation(a, resultCollation);
             if (a.isNull) continue;
+            if (!best.isNull && e->predicateCollation)
+                applyPredicateCollation(*e->predicateCollation, a, best);
             if (best.isNull || compareValues(a, best) < 0) best = a;
         }
         if (best.isNull) applyResultCollation(best, resultCollation);

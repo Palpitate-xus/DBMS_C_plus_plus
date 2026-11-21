@@ -6115,9 +6115,16 @@ static bool handleExplain(const string& sql, Session& s) {
                 name+operation+rawLiteral);
         };
         captureInteger(select->whereClause.get());
+        const auto typedDeclaredFilter = [&] {
+            if (!select->whereClause || !select->fromClause ||
+                select->fromClause->type != dbms::FromItem::Type::Table) return false;
+            const auto physical = resolveTableName(s, select->fromClause->tableName, true);
+            return dbms::QueryPlanner::usesDeclaredFilterCollations(
+                *select, g_engine.getTableSchema(s.currentDB, physical));
+        };
         if (!select->ctes.empty() || explainNeedsTypedPlan(*select) ||
             dbms::QueryPlanner::mayUseIntegerPrimaryKeyPage(&g_engine,s.currentDB,*prepared,*select) ||
-            (directCall && directCall->setReturning))
+            (directCall && directCall->setReturning) || typedDeclaredFilter())
             // Consume the same owned, bound query on the real execution
             // root, including its source/demand contexts and pure planning.
             // Child/VIEW/CTE graph construction keeps the false default.
@@ -20730,6 +20737,7 @@ static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bo
     string physical;
     vector<string> descendants;
     bool typedSortDemand = false;
+    bool declaredPredicateCollations = false;
     if (candidate->fromClause) {
         const string& spelling = candidate->fromClause->tableName;
         physical = resolveTableName(session, spelling, true);
@@ -20758,7 +20766,8 @@ static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bo
             !explicitPredicateCollation) {
             const auto schema = g_engine.getTableSchema(session.currentDB, physical);
             typedSortDemand = ordinaryTypedSortDemand(*candidate, schema);
-            if (!typedSortDemand && none_of(schema.cols.begin(), schema.cols.end(),
+            declaredPredicateCollations = dbms::QueryPlanner::usesDeclaredFilterCollations(*candidate, schema);
+            if (!typedSortDemand && !declaredPredicateCollations && none_of(schema.cols.begin(), schema.cols.end(),
                         [](const dbms::Column& column) { return column.isArray; })) return false;
         }
         dbms::CatalogManager::QualifiedName name;
@@ -20781,7 +20790,10 @@ static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bo
     const bool bitNegationOutput=possibleBitNegation && bitNegation(select,true);
     if(descendants.empty() && !roles.first && !scalarOrder && !queryArrays(select,true) && !arrayOutput &&
         !needsDomainCast && !fromlessDemand && !bitNegationOutput && !physicalLimitDemand &&
-        !typedSortDemand && !stringProjection && !explicitPredicateCollation) return false;
+        !typedSortDemand && !stringProjection && !explicitPredicateCollation && !declaredPredicateCollations) {
+        if (!physicalColumnCandidate || !dbms::QueryPlanner::usesDeclaredFilterCollations(
+                *select, g_engine.getTableSchema(session.currentDB, physical))) return false;
+    }
     // Preserve column grants on precisely the bound source cells used by
     // this query (including correlated child references), not SELECT *.
     if (select->fromClause && !sessionIsAdmin(session)) {
@@ -20996,6 +21008,7 @@ class PreparedWithDmlRuntime {
     vector<shared_ptr<Frame>> frames_;
     dbms::WithStmt* root_;
     dbms::SelectStmt* readRoot_;
+    bool readRootDeclaredCollations_ = false;
     dbms::PreparedQueryExecution validation_;
     Frames queryFrames_;
     vector<shared_ptr<dbms::PreparedQueryCursor>> mutationCursors_;
@@ -21104,20 +21117,31 @@ class PreparedWithDmlRuntime {
         return sessionIsAdmin(session) || g_engine.hasPermission(session.currentDB,table,
             effectiveSessionRole(session),dbms::StorageEngine::TablePrivilege::Select);
     }
-    dbms::OpPtr ordinaryInheritedSource(const dbms::SelectStmt* select, dbms::TableSchema& schema) {
+    dbms::OpPtr ordinaryPhysicalReadSource(const dbms::SelectStmt* select, dbms::TableSchema& schema) {
         const auto* item=select->fromClause.get();
         if(!readRoot_ || select->setOp!=dbms::SetOp::None || !select->ctes.empty() ||
-           !item || item->type!=dbms::FromItem::Type::Table || item->only || hasCurrentQueryWindows(select))
+           !item || item->type!=dbms::FromItem::Type::Table || hasCurrentQueryWindows(select))
             return {};
         const auto& range=sourceRange(select,item);
         if(!ordinaryPhysicalRange(range))return {};
         const auto table=physical(range,session_);
         if(select!=readRoot_ && !canReadWholeTable(session_,table))return {};
-        const auto descendants=dbms::inheritedTableDescendants(g_engine,session_.currentDB,table);
-        if(descendants.empty())return {};
+        const auto descendants=item->only ? vector<string>{}
+            : dbms::inheritedTableDescendants(g_engine,session_.currentDB,table);
+        if (descendants.empty() && (select != readRoot_ || !select->whereClause)) return {};
         auto parent=g_engine.getTableSchema(session_.currentDB,table);
+        const bool declaredFilter = select == readRoot_ &&
+            dbms::QueryPlanner::usesDeclaredFilterCollations(*select, parent);
+        if (descendants.empty()) {
+            if (!declaredFilter) return {};
+            checkPhysicalSourcePermission(select, range, table);
+            readRootDeclaredCollations_ = true;
+            schema = std::move(parent);
+            return make_unique<dbms::TableScanOp>(&g_engine, session_.currentDB, table);
+        }
         if(!dbms::supportsInheritedTableSource(g_engine,session_.currentDB,parent,descendants))return {};
         checkPhysicalSourcePermission(select,range,table);
+        if (declaredFilter) readRootDeclaredCollations_ = true;
         schema=std::move(parent);
         return dbms::makeInheritedTableSource(g_engine,session_.currentDB,schema,range,descendants);
     }
@@ -21753,7 +21777,7 @@ class PreparedWithDmlRuntime {
             // must not capture the first correlated invocation forever.
             source=make_unique<dbms::PreparedSourceRowsOp>(dbms::QueryRowDescriptor{},
                 [](size_t index,vector<dbms::ExprValue>& row){row.clear();return index==0;});
-        } else if(!(source=ordinaryInheritedSource(select,schema))) {
+        } else if(!(source=ordinaryPhysicalReadSource(select,schema))) {
             auto node=sourceNode(select,select->fromClause.get(),outer,frames,executionProvider);
             const function<bool(const dbms::FromItem*)> physicalSources=[&](const dbms::FromItem* item) {
                 if(!item)return false;
@@ -22022,7 +22046,8 @@ public:
                 const auto* select=dynamic_cast<const dbms::SelectStmt*>(item.first);
                 return select && hasCurrentQueryWindows(select);
             });
-            const bool preservePrefix=executeDepth==1 && !hasWriter && (derivedArrayResult || windowOutput ||
+            const bool preservePrefix=executeDepth==1 && !hasWriter &&
+                (readRootDeclaredCollations_ || derivedArrayResult || windowOutput ||
                 (readRoot_->hasRowCountClause &&
                  (readRoot_->command==dbms::SqlCommand::Values || readRoot_->setOp!=dbms::SetOp::None)));
             const auto demand=receiverRows ? receiverRows : currentQueryRowDemand();

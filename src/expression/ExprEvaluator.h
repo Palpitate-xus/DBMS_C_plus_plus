@@ -171,6 +171,8 @@ public:
     static ExpressionCollation explicitCollationOf(const Expr* expr);
     static void bindExplicitCollation(UnaryOpExpr& expr, const std::string& type,
         const ExpressionCollationLookup& lookup);
+    static void bindPredicateCollations(Expr* expression,
+        const std::function<ExpressionCollation(const ColumnRefExpr&)>& declaration);
     static void bindComparisonCollation(BinaryOpExpr& expr, const std::string& leftType,
         const std::string& rightType);
     static QueryComparisonBinding resolveComparison(const std::string& op,
