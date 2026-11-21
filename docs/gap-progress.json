@@ -47,7 +47,7 @@
       "verification": [
         "The registered protocol test verifies exact neighboring index bytes, removal of the target's own similarly named index, full 6000-byte text after restart, and unchanged files and catalog after four refused overlapping-index drops.",
         "All 46 focused PostgreSQL 18.6 steps matched in the default and shared external tablespaces. Dedicated crash probes passed after both a committed drop and a rollback.",
-        "Across 432 matched timings on a 13-table seed, ordinary drop elapsed time changed +1.24% and server CPU changed -1.72% by paired medians. The 44-table measurement is in progress.",
+        "Each of the 13-table and 44-table seeds produced 432 matched timings with 16 clean database exits. Ordinary drop paired medians changed +1.24% elapsed / -1.72% server CPU at 13 tables and -1.17% / -1.05% at 44 tables. The latter had wide elapsed variation, a +6.75% point-read paired change, and concurrent work on other cores; no stable speedup is claimed.",
         "Stable relation file identities, rename and name reuse, index creation and other filename ownership paths remain open."
       ],
       "artifacts": {
@@ -55,7 +55,8 @@
         "postgresql_audit": "build/relation-file-ownership-20261121/drop-candidate-v2-independent-audit.json",
         "related_protocol": "build/relation-file-ownership-20261121/related-drop-v2/summary.json",
         "native_regressions": "build/array-domain-20261117/native-create-fillfactor-ownership-cmake-v2/summary.json",
-        "timing_13_tables": "build/physical-ownership-20261121/perf/paired-formal-v2-1.json"
+        "timing_13_tables": "build/physical-ownership-20261121/perf/paired-formal-v2-1.json",
+        "timing_44_tables": "build/physical-ownership-20261121/perf/paired-formal-v2-32.json"
       }
     },
     {
