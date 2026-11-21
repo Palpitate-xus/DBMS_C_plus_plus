@@ -1,5 +1,9 @@
 # STO-02: relation storage identity and physical-name collision containment
 
+## 2026-11-21 · Publish empty indexes once after table reset
+
+SQL TRUNCATE retains its checked file list across the WAL write under the same metadata and table locks. Startup and restore, which do not have a preflight list, build one before resetting the table. After the empty heap forks have been created, the index builder prepares empty files without a heap scan and publishes them through the existing REINDEX swap plan. It keeps native index definitions and BRIN range settings readable until replacement. The truncate completion record follows index publication and directory synchronization. Populated REINDEX still scans the heap. [Test results](test-report.md#truncate-single-index-rebuild-20261121) · [Timing](performance-report-2026-10-30.md#truncate-single-index-rebuild-cost-20261121)
+
 ## 2026-11-21 · Guarded table reset and column rename
 
 Table reset uses a relation's verified files and checks index destinations that are missing but may still be reserved by other tables. Direct SQL TRUNCATE checks these paths before logging the reset. Column rename plans and checks the index destinations before publishing new definitions. It moves the B-tree companion together with the tree, updates the Bloom definition and cache key, and rewrites expression and partial index definitions. A failed file or metadata publication attempts to restore the original paths and bytes.

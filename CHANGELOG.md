@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>清空表后只重建一次索引 · 2026-11-21</summary>
+
+例如，清空 `orders` 后，订单号和商品名的索引都会变为空。重新插入订单后，可以继续用原来的索引查询。
+
+[测试报告](docs/test-report.md#truncate-single-index-rebuild-20261121) · [性能报告](docs/performance-report-2026-10-30.md#truncate-single-index-rebuild-cost-20261121)
+
+</details>
+
+<details>
 <summary>清空表或改列名时会保护其他表的数据 · 2026-11-21</summary>
 
 例如，清空 `orders` 后，仍能查询 `orders_items`。如果改列名会覆盖另一张表的索引，数据库会拒绝改名。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>表改名后可以用原名建一张新表 · 2026-11-21</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-21 · 表改名后可以用原名建一张新表
 
 例如，把 `orders` 改名为 `orders_archive` 后，可以再建一张 `orders`。旧订单和新订单可以分别查询。
 
 [测试报告](docs/test-report.md#rename-table-file-ownership-20261121)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-21 · 删除一张表时保留名称相近的其他表
 

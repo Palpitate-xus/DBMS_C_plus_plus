@@ -10,6 +10,8 @@
 
 清空表前也核对文件的归属，改列名会同时检查索引原文件和目标位置。113 步对照有 107 步一致，其余六步来自两次拒绝改写同一路径及后续新列名检查。按独立编号定位存储和改名过程中的完整断电验证仍待完成。[清空表和改列名测试](test-report.md#truncate-column-ownership-20261121) · [存储布局差距](issue-sto-02-relation-storage-namespace.md)
 
+清空表后直接生成一次空索引。普通表、外部表空间和 `UNLOGGED` 的提交、回滚和重启共 92 步与 PostgreSQL 18.6 对照一致，也验证了五处索引文件切换中断后的恢复。[单次索引重建测试](test-report.md#truncate-single-index-rebuild-20261121)
+
 ## 当前汇总（2026-11-20）
 
 原始 273 项要求中，22 项完成、167 项部分实现、69 项待验证、15 项暂缓。启动恢复会撤销受测显式事务中未提交的普通建表，包括在同一事务中后接改表或建索引的情况。外部表空间暂时不可用时保留建表恢复记录，原目录恢复后可继续清理。断电仍需验证。时间点恢复已通过两次分叉的用例，完整的时间线历史管理仍有缺口。[逐项状态](gap-progress.json) · [建表恢复验证](test-report.md#ordinary-create-durable-undo-20261120) · [外部表空间验证](test-report.md#external-create-recovery-20261120) · [时间点恢复验证](test-report.md#pitr-stage-archive-20261120)

@@ -273,6 +273,75 @@ def main():
         assert query(f"SELECT id FROM {long};") == ([], "SELECT 0")
         read(short)
 
+    def truncate_indexed_table():
+        home = Path(server["dir"]) / "info"
+        table = "truncate_all_keys"
+        payload = "truncate-out-of-line" * 320
+        first = f"(1,100,10,5,'alpha','{{1,2}}','(1,2)','{payload}')"
+        second = f"(2,200,-10,6,'beta','{{2,3}}','(2,3)','{payload}B')"
+        indexes = (
+            ("unique", "(u)", "_u.idx"),
+            ("ordinary", "(n)", "_n.idx"),
+            ("partial", "(k) INCLUDE (txt) WHERE n>=0", "_k.idx"),
+            ("expression", "(upper(txt))", "_upper(txt).idx"),
+            ("composite", "(k,n) INCLUDE (txt) WHERE n>=0", ".idx_truncate_composite"),
+            ("hash", "USING hash(n)", "_n.hidx"),
+            ("bloom", "USING bloom(txt)", "_txt.bidx"),
+            ("fulltext", "USING fulltext(txt)", "_txt.fti"),
+            ("gin", "USING gin(arr)", "_arr.gin"),
+            ("gist", "USING gist(txt)", "_txt.gist"),
+            ("spgist", "USING spgist(p)", "_p.spgist"),
+            ("brin", "USING brin(n) WITH (pages_per_range=1)", "_n.brin"),
+        )
+        query(f"CREATE TABLE {table}(id INT PRIMARY KEY, u INT, n INT, k INT, txt TEXT, "
+              "arr INT[], p POINT, payload TEXT);")
+        query(f"INSERT INTO {table} VALUES {first},{second};")
+        for name, columns, _ in indexes:
+            unique = "UNIQUE " if name == "unique" else ""
+            assert query(f"CREATE {unique}INDEX truncate_{name} ON {table} {columns};") == ([], "CREATE INDEX")
+
+        def image(suffixes):
+            return {suffix: (home / (table + suffix)).read_bytes() for suffix in suffixes}
+
+        def rows():
+            return query(f"SELECT id,u,n,k,txt,payload FROM {table} ORDER BY id;")[0]
+
+        query("CHECKPOINT;")
+        definitions = (".stc", ".secidx", ".idxnames", ".hashidx", ".bloomidx")
+        declarations = image(definitions)
+        files = (".idx", ".toast.idx") + tuple(suffix for _, _, suffix in indexes)
+        populated = image(files)
+        assert all(populated.values()) and all(declarations.values())
+        original_rows = [["1", "100", "10", "5", "alpha", payload],
+                         ["2", "200", "-10", "6", "beta", payload + "B"]]
+        assert rows() == original_rows
+
+        def truncate():
+            assert query(f"TRUNCATE TABLE {table};") == ([], "TRUNCATE TABLE")
+            assert rows() == []
+            assert image(definitions) == declarations
+            empty = image(files)
+            for suffix in files:
+                assert empty[suffix] != populated[suffix], ("stale index after TRUNCATE", suffix)
+
+        query("BEGIN;")
+        truncate()
+        query("ROLLBACK;")
+        assert rows() == original_rows and image(definitions) == declarations
+
+        truncate()
+        reopen_after_crash()
+        assert rows() == [] and image(definitions) == declarations
+        empty = image(files)
+        assert query(f"INSERT INTO {table} VALUES {first};") == ([], "INSERT 0 1")
+        error(f"INSERT INTO {table}(id,u) VALUES (9,100);", "23505")
+        query("CHECKPOINT;")
+        for suffix, data in image(files).items():
+            assert data != empty[suffix], ("index did not receive reinserted row", suffix)
+        assert rows() == original_rows[:1]
+        reopen_after_crash()
+        assert rows() == original_rows[:1] and image(definitions) == declarations
+
     def rename_column_with_toast_neighbor():
         home = Path(server["dir"]) / "info"
         payload = "preserve-column-toast" * 320
@@ -422,6 +491,7 @@ def main():
         reject_toast_index_alias()
         preserve_brin_on_neighbor_update()
         truncate_shared_name_prefix()
+        truncate_indexed_table()
         rename_column_with_toast_neighbor()
         rename_bloom_index_column()
         rename_index_definition_column()

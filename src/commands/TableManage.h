@@ -2019,10 +2019,18 @@ private:
         const std::string& colname, const GiSTBounds& bounds,
         bool contained, GiSTOrderingRole ordering = GiSTOrderingRole::SqlScalar) const;
 
+    enum class IndexRebuildSource { Heap, EmptyHeap };
+    DBStatus rebuildTableIndexes(const std::string& dbname,
+                                 const TableSchema& table,
+                                 const std::filesystem::path& relationRoot,
+                                 IndexRebuildSource source,
+                                 size_t* rebuiltCount = nullptr);
+
     // Build existing auxiliary AM definitions into private replacement files.
     // The reserving REINDEX owner controls publication and cache invalidation.
     DBStatus stageReindexAuxiliaryIndexes(
-        const std::string& dbname, const std::string& tablename,
+        const std::string& dbname, const TableSchema& table,
+        const std::filesystem::path& relationRoot, IndexRebuildSource source,
         const std::function<std::optional<std::filesystem::path>(
             const std::filesystem::path&, const std::string&, const std::string&)>& reserve);
 
@@ -2090,6 +2098,9 @@ private:
         const std::string& dbname, const std::string& tablename) const;
     bool resetTableStorage(const std::string& dbname,
                            const std::string& tablename);
+    bool resetTableStorage(const std::string& dbname, const TableSchema& table,
+                           const std::filesystem::path& relationRoot,
+                           const std::vector<std::filesystem::path>& storageFiles);
     // Maintain the durable empty init forks used to reset UNLOGGED heaps
     // after an unclean server stop.  A normal shutdown keeps the main forks.
     bool ensureUnloggedInitForks(const std::string& dbname,

@@ -14800,9 +14800,17 @@ DBStatus StorageEngine::reindex(const std::string& dbname,
     if (!tableExists(dbname, tablename)) {
         return DBStatus::TABLE_NOT_FOUND;
     }
-    const std::filesystem::path reindexRelationRoot =
-        relationDir(dbname, tablename);
-    const TableSchema tbl = getTableSchema(dbname, tablename);
+    return rebuildTableIndexes(dbname, getTableSchema(dbname, tablename),
+                               relationDir(dbname, tablename),
+                               IndexRebuildSource::Heap, rebuiltCount);
+}
+
+DBStatus StorageEngine::rebuildTableIndexes(
+    const std::string& dbname, const TableSchema& tbl,
+    const std::filesystem::path& reindexRelationRoot, IndexRebuildSource source,
+    size_t* rebuiltCount) {
+    const auto& tablename = tbl.tablename;
+    const bool emptyHeap = source == IndexRebuildSource::EmptyHeap;
     const bool signedPrimaryKey = signedIntegerPrimaryKeyColumn(tbl).has_value();
 
     struct PendingIndex {
@@ -15001,7 +15009,24 @@ DBStatus StorageEngine::reindex(const std::string& dbname,
         }
     }
 
-    if (singlePassEligible) {
+    if (emptyHeap) {
+        if (!finishTree(createPending(indexPath(dbname, tablename), tableKey, true)))
+            return finishFailure(DBStatus::IO_ERROR);
+        for (const auto& metadata : secondaryIndexes) {
+            if (!finishTree(createPending(
+                    secondaryIndexPath(dbname, tablename, metadata.name),
+                    tableKey + "/" + metadata.name, false))) {
+                return finishFailure(DBStatus::IO_ERROR);
+            }
+        }
+        for (const auto& metadata : compositeIndexes) {
+            if (!finishTree(createPending(
+                    reindexRelationRoot / (tablename + ".idx_" + metadata.name),
+                    tableKey + "/C/" + metadata.name, false))) {
+                return finishFailure(DBStatus::IO_ERROR);
+            }
+        }
+    } else if (singlePassEligible) {
         BPTree* primary = createPending(
             indexPath(dbname, tablename), tableKey, true);
         if (!primary) return finishFailure(DBStatus::IO_ERROR);
@@ -15202,7 +15227,8 @@ DBStatus StorageEngine::reindex(const std::string& dbname,
 
     DBStatus auxiliaryStatus;
     try {
-        auxiliaryStatus = stageReindexAuxiliaryIndexes(dbname, tablename, reserveAuxiliary);
+        auxiliaryStatus = stageReindexAuxiliaryIndexes(
+            dbname, tbl, reindexRelationRoot, source, reserveAuxiliary);
     } catch (...) {
         // No auxiliary file has been published. Preserve the original error
         // after removing this attempt's private replacements.
@@ -15374,7 +15400,8 @@ DBStatus StorageEngine::reindex(const std::string& dbname,
         return finishFailure(DBStatus::IO_ERROR);
     }
     swapMarkerPublished = false;
-    if (std::any_of(pending.begin(), pending.end(), [](const auto& index) { return !index.swap.paired; }) &&
+    if ((emptyHeap || std::any_of(pending.begin(), pending.end(),
+                   [](const auto& index) { return !index.swap.paired; })) &&
         !clearSpecializedIndexDirty(*this, dbname, tablename)) return DBStatus::IO_ERROR;
 
     if (rebuiltCount) *rebuiltCount = swapEntries.size();
@@ -17718,10 +17745,12 @@ std::vector<std::string> StorageEngine::getBrinIndexedColumns(const std::string&
 }
 
 DBStatus StorageEngine::stageReindexAuxiliaryIndexes(
-    const std::string& dbname, const std::string& tablename,
+    const std::string& dbname, const TableSchema& table,
+    const std::filesystem::path& root, IndexRebuildSource source,
     const std::function<std::optional<std::filesystem::path>(
         const std::filesystem::path&, const std::string&, const std::string&)>& reserve) {
-    const auto table = getTableSchema(dbname, tablename);
+    const auto& tablename = table.tablename;
+    const bool emptyHeap = source == IndexRebuildSource::EmptyHeap;
     struct Definition { std::string method, column; size_t ordinal; std::filesystem::path target; };
     std::map<std::pair<std::string, std::string>, Definition> definitions;
     const auto add = [&](const std::string& method, const std::string& column) {
@@ -17747,7 +17776,6 @@ DBStatus StorageEngine::stageReindexAuxiliaryIndexes(
         if (!add("hash", column)) return DBStatus::CORRUPTED_DATA;
     for (const auto& column : getBloomIndexedColumns(dbname, tablename))
         if (!add("bloom", column)) return DBStatus::CORRUPTED_DATA;
-    const auto root = relationDir(dbname, tablename);
     const std::string prefix = tablename + "_";
     constexpr std::pair<std::string_view, std::string_view> files[]{
         {"fulltext", ".fti"}, {"gin", ".gin"}, {"gist", ".gist"},
@@ -17840,7 +17868,8 @@ DBStatus StorageEngine::stageReindexAuxiliaryIndexes(
                 if (!build.bloom->openForBuild()) return DBStatus::IO_ERROR;
             } else if (build.definition.method == "brin") {
                 build.brin.pagesPerRange = static_cast<uint32_t>(brinConfiguredRangeWidth(build.definition.target));
-                build.brin.heapPages = std::max<uint32_t>(1, tableNumPages(dbname, tablename));
+                build.brin.heapPages = emptyHeap ? 1 :
+                    std::max<uint32_t>(1, tableNumPages(dbname, tablename));
                 build.brin.physicalRelation = table.physicalRelationId;
                 if (table.partitionType != TableSchema::PartitionType::None)
                     build.brin.flags = brin_index_format::kPartitioned;
@@ -17852,7 +17881,7 @@ DBStatus StorageEngine::stageReindexAuxiliaryIndexes(
         }
         DBStatus status = DBStatus::OK;
         std::vector<bool> nulls(table.len(), false);
-        if (!forEachRow(dbname, tablename,
+        if (!emptyHeap && !forEachRow(dbname, tablename,
             [&](uint32_t page, uint16_t slot, const char* data, size_t length) {
                 if (status != DBStatus::OK) return;
                 ScannedNullRowBinding nullOwner(table, nulls, data, length);
@@ -21816,9 +21845,9 @@ DBStatus StorageEngine::truncateTable(const std::string& dbname,
         return DBStatus::IO_ERROR;
     }
 
+    const auto relationRoot = relationDir(dbname, tablename);
     std::vector<std::filesystem::path> files;
-    const auto storage = planTableResetFiles(*this, dbname, table,
-                                            relationDir(dbname, tablename), files);
+    const auto storage = planTableResetFiles(*this, dbname, table, relationRoot, files);
     if (storage != DBStatus::OK) return storage;
 
     Lsn truncateLsn = INVALID_LSN;
@@ -21837,7 +21866,7 @@ DBStatus StorageEngine::truncateTable(const std::string& dbname,
     // Heap tuples and every RID-bearing auxiliary structure form one
     // physical identity.  Rebuild them together so no index or TOAST fork
     // can retain references into the pre-TRUNCATE heap.
-    if (!resetTableStorage(dbname, tablename)) {
+    if (!resetTableStorage(dbname, table, relationRoot, files)) {
         return DBStatus::IO_ERROR;
     }
     if (walLogged && !persistTruncateState(
@@ -49382,66 +49411,40 @@ bool StorageEngine::redoXactAbort(uint64_t xid) {
 
 bool StorageEngine::resetTableStorage(
     const std::string& dbname, const std::string& tablename) {
-    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
+    const DatabaseMetadataWrite metadataWrite(dbPath(dbname));
+    if (!metadataWrite.acquired()) return false;
     try {
+        if (!tableExists(dbname, tablename) || !lockManager_.lockMetadata(tablename)) return false;
+        ResourceUnlockGuard tableLockGuard(lockManager_, tablename);
+        std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
         const TableSchema table = getTableSchema(dbname, tablename);
-        const auto heapRowWidth = heapHeaderRowWidth(table);
-        if (!heapRowWidth) return false;
         const auto relationRoot = relationDir(dbname, tablename);
         std::vector<std::filesystem::path> storageFiles;
         if (planTableResetFiles(*this, dbname, table, relationRoot, storageFiles) !=
-                DBStatus::OK) return false;
+            DBStatus::OK) return false;
+        return resetTableStorage(dbname, table, relationRoot, storageFiles);
+    } catch (const std::exception& error) {
+        std::cerr << "[storage] could not plan table reset for " << dbname << "/"
+                  << tablename << ": " << error.what() << std::endl;
+        return false;
+    }
+}
+
+bool StorageEngine::resetTableStorage(
+    const std::string& dbname, const TableSchema& table,
+    const std::filesystem::path& relationRoot,
+    const std::vector<std::filesystem::path>& storageFiles) {
+    const auto& tablename = table.tablename;
+    try {
+        const auto heapRowWidth = heapHeaderRowWidth(table);
+        if (!heapRowWidth) return false;
         if (table.isUnlogged &&
             !ensureUnloggedInitForks(dbname, tablename)) {
             return false;
         }
 
-        // Several simplified access methods use their physical sidecar as
-        // the only definition catalog. Capture every definition before
-        // removing stale row identifiers.
-        const auto secondaryIndexes = getIndexMetadata(dbname, tablename);
-        const auto compositeIndexes = getCompositeIndexes(dbname, tablename);
-        const auto hashColumns = getHashIndexedColumns(dbname, tablename);
-        const auto bloomColumns = getBloomIndexedColumns(dbname, tablename);
-        const auto [fullTextColumns, ginColumns, gistColumns, spgistColumns, brinColumns] =
-            collectSpecializedIndexColumns(*this, dbname, relationDir(dbname, tablename), tablename);
-        // Preserve the definition before any heap/index reset or rewrite.
-        std::map<std::string, size_t> brinWidths;
-        for (const auto& column : brinColumns)
-            brinWidths.emplace(column, brinConfiguredRangeWidth(
-                brinIndexPath(dbname, tablename, column)));
-
-        // These access methods currently use the index file itself as their
-        // durable definition.  Leave the old file in place until the empty
-        // replacement has been published atomically below.  If recovery is
-        // interrupted, the next startup can still discover the definition
-        // and retry the reset instead of silently losing the index.
-        std::set<std::filesystem::path> definitionBearingIndexes;
-        for (const auto& column : fullTextColumns) {
-            definitionBearingIndexes.insert(
-                fullTextIndexPath(dbname, tablename, column));
-        }
-        for (const auto& column : ginColumns) {
-            definitionBearingIndexes.insert(
-                ginIndexPath(dbname, tablename, column));
-        }
-        for (const auto& column : gistColumns) {
-            definitionBearingIndexes.insert(
-                giSTIndexPath(dbname, tablename, column));
-        }
-        for (const auto& column : spgistColumns) {
-            definitionBearingIndexes.insert(
-                spGiSTIndexPath(dbname, tablename, column));
-        }
-        for (const auto& column : brinColumns) {
-            definitionBearingIndexes.insert(
-                brinIndexPath(dbname, tablename, column));
-        }
-
         const std::string tableKey = dbname + "/" + tablename;
         const std::string secondaryPrefix = tableKey + "/";
-        const std::string auxiliaryPrefix =
-            dbname + "/" + tablename + "/";
         pageAllocators_.erase(tableKey);
         fsmCache_.erase(tableKey);
         vmCache_.erase(tableKey);
@@ -49457,14 +49460,14 @@ bool StorageEngine::resetTableStorage(
         }
         for (auto it = hashIndexCache_.begin();
              it != hashIndexCache_.end();) {
-            if (it->first.rfind(auxiliaryPrefix, 0) == 0)
+            if (it->first.rfind(secondaryPrefix, 0) == 0)
                 it = hashIndexCache_.erase(it);
             else
                 ++it;
         }
         for (auto it = bloomIndexCache_.begin();
              it != bloomIndexCache_.end();) {
-            if (it->first.rfind(auxiliaryPrefix, 0) == 0)
+            if (it->first.rfind(secondaryPrefix, 0) == 0)
                 it = bloomIndexCache_.erase(it);
             else
                 ++it;
@@ -49490,8 +49493,12 @@ bool StorageEngine::resetTableStorage(
                 return filename.size() > suffix.size() &&
                     filename.compare(filename.size() - suffix.size(), suffix.size(), suffix) == 0;
             };
-            if ((table.isUnlogged && (endsWith(".init") || endsWith(".init.tde"))) ||
-                definitionBearingIndexes.count(path) != 0) continue;
+            if (table.isUnlogged && (endsWith(".init") || endsWith(".init.tde"))) continue;
+            // Native indexes can store their only definition or options in
+            // this file. Keep it until the recoverable swap publishes its
+            // empty replacement, so an interrupted reset can retry.
+            if (isDefinitionBearingSpecializedIndexFileName(filename, tablename) &&
+                std::filesystem::is_regular_file(path)) continue;
             std::filesystem::remove_all(path, fileError);
             if (fileError) return false;
         }
@@ -49516,7 +49523,7 @@ bool StorageEngine::resetTableStorage(
                 path.string(), rowSize,
                 pageSizeForFormatVersion(table.formatVersion),
                 table.formatVersion);
-            if (!pages.open() || !pages.flush()) return false;
+            if (!pages.open() || pages.numPages() != 1 || !pages.flush()) return false;
             pages.close();
             return true;
         };
@@ -49576,62 +49583,10 @@ bool StorageEngine::resetTableStorage(
             }
         }
 
-        if (reindex(dbname, tablename) != DBStatus::OK) return false;
-        if (table.hasPrimaryKey()) {
-            BPTree* index = getPKIndex(dbname, tablename);
-            if (!index || !index->flush()) return false;
-        }
-        for (const auto& metadata : secondaryIndexes) {
-            BPTree* index = getSecondaryIndex(
-                dbname, tablename, metadata.name);
-            if (!index || !index->flush()) return false;
-        }
-        for (const auto& metadata : compositeIndexes) {
-            BPTree* index = getCompositeIndexTree(
-                dbname, tablename, metadata.name);
-            if (!index || !index->flush()) return false;
-        }
-        for (const auto& column : hashColumns) {
-            HashIndex* index = getHashIndexForBuild(dbname, tablename, column);
-            if (!index) return false;
-            index->clear();
-            if (!index->flush()) return false;
-        }
-        for (const auto& column : bloomColumns) {
-            BloomIndex* index = getBloomIndexForBuild(dbname, tablename, column);
-            if (!index) return false;
-            index->clear();
-            if (!index->flush()) return false;
-        }
-        for (const auto& column : fullTextColumns) {
-            if (createFullTextIndex(dbname, tablename, column) !=
-                DBStatus::OK) {
-                return false;
-            }
-        }
-        for (const auto& column : ginColumns) {
-            if (createGinIndex(dbname, tablename, column) != DBStatus::OK)
-                return false;
-        }
-        for (const auto& column : gistColumns) {
-            if (createGiSTIndex(dbname, tablename, column) != DBStatus::OK)
-                return false;
-        }
-        for (const auto& column : spgistColumns) {
-            if (createSPGiSTIndex(dbname, tablename, column) !=
-                DBStatus::OK) {
-                return false;
-            }
-        }
-        for (const auto& column : brinColumns) {
-            if (createBrinIndex(dbname, tablename, column, brinWidths.at(column)) !=
-                DBStatus::OK) {
-                return false;
-            }
-        }
-        if (!clearSpecializedIndexDirty(*this, dbname, tablename)) {
-            return false;
-        }
+        // The new heap forks contain only their headers. Publish each empty
+        // index once, using the same durable swap as a populated REINDEX.
+        if (rebuildTableIndexes(dbname, table, relationRoot,
+                                IndexRebuildSource::EmptyHeap) != DBStatus::OK) return false;
         if (!syncDirectoryDurably(relationRoot)) return false;
 
         dbms::resetRuntimeTableStats(dbname, tablename);
