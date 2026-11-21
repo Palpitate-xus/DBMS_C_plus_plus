@@ -51865,15 +51865,20 @@ static bool digestBackupFile(const std::filesystem::path& path,
     return true;
 }
 
-static bool syncPhysicalBackupFile(const std::filesystem::path& path) {
-    const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
-    if (fd < 0) return false;
+static bool syncPhysicalBackupDescriptor(int fd) {
     int result;
     do {
         result = ::fsync(fd);
     } while (result != 0 && errno == EINTR);
+    return result == 0;
+}
+
+static bool syncPhysicalBackupFile(const std::filesystem::path& path) {
+    const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return false;
+    const bool synced = syncPhysicalBackupDescriptor(fd);
     const bool closeOk = (::close(fd) == 0);
-    return result == 0 && closeOk;
+    return synced && closeOk;
 }
 
 static bool syncPhysicalBackupTree(const std::filesystem::path& root) {
@@ -52109,10 +52114,9 @@ static bool collectPhysicalBackupEntries(
         if (error) return false;
         const auto& entry = *iterator;
         if (entry.is_symlink(error) || error) return false;
-        const auto relative =
-            std::filesystem::relative(entry.path(), root, error);
-        if (error) return false;
-        const std::string name = relative.generic_string();
+        // The iterator already yields children of root and rejects symlinks.
+        // Manifest names do not need a filesystem lookup for each component.
+        const std::string name = entry.path().lexically_relative(root).generic_string();
         if (name == kPhysicalBackupMarker ||
             name == kPhysicalBackupManifest) {
             if (entry.is_directory(error) || error) return false;
@@ -52133,25 +52137,32 @@ static bool collectPhysicalBackupEntries(
     return !error;
 }
 
-static bool digestManifestCreationFile(const std::filesystem::path& path,
-                             PhysicalBackupFileEntry& entry) {
-    std::error_code error;
-    if (!std::filesystem::is_regular_file(path, error) || error) return false;
-    entry.size = std::filesystem::file_size(path, error);
-    if (error) return false;
-
-    std::ifstream input(path, std::ios::binary);
-    if (!input) return false;
+static bool digestManifestFile(const std::filesystem::path& path,
+                               PhysicalBackupFileEntry& entry, bool syncFile) {
+    const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    if (fd < 0) return false;
+    struct stat file{};
+    bool valid = ::fstat(fd, &file) == 0 && S_ISREG(file.st_mode) && file.st_size >= 0;
+    uint64_t remaining = valid ? static_cast<uint64_t>(file.st_size) : 0;
     dbms::backup_manifest_detail::ManifestCreationSha256 digest;
-    std::array<char, 64 * 1024> buffer{};
-    while (input) {
-        input.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
-        const auto count = input.gcount();
-        if (count > 0) {
-            digest.append(buffer.data(), static_cast<size_t>(count));
+    std::array<char, 64 * 1024> buffer;
+    while (valid) {
+        const ssize_t count = ::read(fd, buffer.data(), buffer.size());
+        if (count < 0 && errno == EINTR) continue;
+        if (count == 0) break;
+        if (count < 0 || static_cast<uint64_t>(count) > remaining) {
+            valid = false;
+            break;
         }
+        digest.append(buffer.data(), static_cast<size_t>(count));
+        remaining -= static_cast<uint64_t>(count);
     }
-    if (!input.eof()) return false;
+    const bool complete = valid && remaining == 0 &&
+        (!syncFile || syncPhysicalBackupDescriptor(fd));
+    const bool closed = ::close(fd) == 0;
+    if (!complete || !closed) return false;
+
+    entry.size = static_cast<uint64_t>(file.st_size);
     entry.digest = digest.finishHex();
     return true;
 }
@@ -52159,7 +52170,7 @@ static bool digestManifestCreationFile(const std::filesystem::path& path,
 static bool collectManifestCreationEntries(
     const std::filesystem::path& root,
     PhysicalBackupDirectories& directories,
-    PhysicalBackupFiles& files) {
+    PhysicalBackupFiles& files, bool syncFiles) {
     directories.clear();
     files.clear();
     std::error_code error;
@@ -52172,10 +52183,7 @@ static bool collectManifestCreationEntries(
         if (error) return false;
         const auto& entry = *iterator;
         if (entry.is_symlink(error) || error) return false;
-        const auto relative =
-            std::filesystem::relative(entry.path(), root, error);
-        if (error) return false;
-        const std::string name = relative.generic_string();
+        const std::string name = entry.path().lexically_relative(root).generic_string();
         if (name == kPhysicalBackupMarker ||
             name == kPhysicalBackupManifest) {
             if (entry.is_directory(error) || error) return false;
@@ -52188,7 +52196,7 @@ static bool collectManifestCreationEntries(
         }
         if (error || !entry.is_regular_file(error) || error) return false;
         PhysicalBackupFileEntry file;
-        if (!digestManifestCreationFile(entry.path(), file) ||
+        if (!digestManifestFile(entry.path(), file, syncFiles) ||
             !files.emplace(name, std::move(file)).second) {
             return false;
         }
@@ -52200,7 +52208,14 @@ static bool writePhysicalBackupManifest(const std::filesystem::path& root,
                                         const std::string& database) {
     PhysicalBackupDirectories directories;
     PhysicalBackupFiles files;
-    if (!collectManifestCreationEntries(root, directories, files)) return false;
+    if (!collectManifestCreationEntries(root, directories, files, /*syncFiles=*/true))
+        return false;
+
+    // Children follow their parents in this ordered set of relative names.
+    // Sync them first. Publishing the manifest later syncs the root itself.
+    for (auto dir = directories.rbegin(); dir != directories.rend(); ++dir) {
+        if (!index_file::syncDirectory(root / *dir)) return false;
+    }
 
     std::ostringstream output;
     output << "DBMS_PHYSICAL_BACKUP_MANIFEST_V2\n";
@@ -52761,6 +52776,14 @@ bool StorageEngine::physicalBackupLocked(
             }
         }
         if (stagedBackup.empty()) return false;
+        // A copied table list makes the staging directory look like a live
+        // database. Exclude it from startup before copying any files. Restore
+        // accepts only the final marker written after the contents are synced.
+        const auto marker = stagedBackup / kPhysicalBackupMarker;
+        if (!index_file::writeAtomically(marker, "DBMS_PHYSICAL_BACKUP_STAGING_V1\n")) {
+            discardStagedBackup();
+            return false;
+        }
         if (progress && !progress(0)) {
             discardStagedBackup();
             return false;
@@ -52914,12 +52937,7 @@ bool StorageEngine::physicalBackupLocked(
             discardStagedBackup();
             return false;
         }
-        const auto marker = stagedBackup / kPhysicalBackupMarker;
         if (!index_file::writeAtomically(marker, "DBMS_PHYSICAL_BACKUP_V3\n")) {
-            discardStagedBackup();
-            return false;
-        }
-        if (!syncPhysicalBackupTree(stagedBackup)) {
             discardStagedBackup();
             return false;
         }
@@ -53045,7 +53063,7 @@ struct StorageEngine::PhysicalRestoreAdmission {
         return readPhysicalBackupManifest(
                    source, sourceDatabase, expectedDirectories, expectedFiles) &&
                collectManifestCreationEntries(
-                   source, actualDirectories, actualFiles) &&
+                   source, actualDirectories, actualFiles, /*syncFiles=*/false) &&
                expectedDirectories == actualDirectories &&
                expectedFiles == actualFiles;
     }

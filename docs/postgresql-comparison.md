@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-21 · 清空表时保存回滚数据的成本
+
+PostgreSQL 18.6 可以为既有表创建新的空存储，把旧文件留到提交后回收。SQLite 通过回滚日志保存即将修改的原始页面。DuckDB 用撤销缓冲区记录发生变化的数据，并用预写日志恢复已提交的更改。这些做法将事务记录限制在有关的数据。[PostgreSQL 源码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/commands/tablecmds.c#L2105-L2131) · [SQLite 原子提交](https://www.sqlite.org/atomiccommit.html#creating_a_rollback_journal_file) · [DuckDB 的事务实现](https://duckdb.org/2024/10/30/analytics-optimized-concurrent-transactions)
+
+本项目的 SQL `TRUNCATE` 仍保存全库备份，其中包括无关表和外部表空间。启动恢复会直接重做底层清空记录。要改用只保留目标表旧文件的方案，还要让恢复能识别该次清空的事务结果。当前先减少现有备份的文件遍历，读文件计算校验值时，在同一文件描述符上同步数据。[测试报告](test-report.md#backup-manifest-sync-20261121) · [性能报告](performance-report-2026-10-30.md#backup-manifest-sync-cost-20261121)
+
 ## 2026-11-21 · 清空表后只生成一份空索引
 
 PostgreSQL 18.6 对既有表切换到新的空存储后，重建一次表索引和长值索引。SQLite 在满足条件的整表 `DELETE` 中免去逐行访问。DuckDB 的无条件 `DELETE` 和 `TRUNCATE` 走同一路径，部分空间可以在检查点回收。[PostgreSQL 源码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/commands/tablecmds.c#L2105-L2131) · [SQLite 的清空优化](https://www.sqlite.org/lang_delete.html#the_truncate_optimization) · [DuckDB TRUNCATE](https://duckdb.org/docs/lts/sql/statements/delete#the-truncate-statement)

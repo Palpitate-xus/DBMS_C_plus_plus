@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>生成备份时少走一遍文件目录 · 2026-11-21</summary>
+
+数据库核对备份文件时，也会确认它已写到磁盘，省去重新打开文件的步骤。重启时会跳过还在写入的备份目录。
+
+[测试报告](docs/test-report.md#backup-manifest-sync-20261121) · [性能报告](docs/performance-report-2026-10-30.md#backup-manifest-sync-cost-20261121)
+
+</details>
+
+<details>
 <summary>清空表后只重建一次索引 · 2026-11-21</summary>
 
 例如，清空 `orders` 后，订单号和商品名的索引都会变为空。重新插入订单后，可以继续用原来的索引查询。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>建索引时会保留其他表已有的索引 · 2026-11-21</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-21 · 建索引时会保留其他表已有的索引
 
 如果新索引会覆盖另一张表已有的索引，数据库会拒绝创建，原来的数据仍能查询。
 
 [测试报告](docs/test-report.md#index-file-ownership-20261121)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-21 · 表改名后可以用原名建一张新表
 

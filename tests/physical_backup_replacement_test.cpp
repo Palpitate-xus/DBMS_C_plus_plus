@@ -4,8 +4,11 @@
 #include "test_utils.h"
 
 #include <cassert>
+#include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <iterator>
 #include <string>
 
 int main() {
@@ -39,14 +42,39 @@ int main() {
 
     // Fail the parent-directory sync immediately after the atomic exchange.
     // The old generation must be exchanged back before failure is reported.
-    unsigned backupDirectoryCount = 1;
-    for (const auto& entry :
-         std::filesystem::recursive_directory_iterator(backup)) {
-        if (entry.is_directory()) ++backupDirectoryCount;
-    }
-    dbms::index_file::failDirectorySyncAfterForTesting(
-        2 + backupDirectoryCount);
-    assert(!engine.physicalBackup(database, backup));
+    bool sawIncompleteStaging = false;
+    bool armed = false;
+    const auto stagingPrefix = "." + backup + ".backup_staging.";
+    const auto failAtPublication = [&](uint64_t bytesCopied) {
+        for (const auto& entry : std::filesystem::directory_iterator(".")) {
+            const auto name = entry.path().filename().string();
+            if (name.rfind(stagingPrefix, 0) != 0) continue;
+            const auto marker = entry.path() / ".dbms_physical_backup";
+            std::ifstream markerInput(marker, std::ios::binary);
+            const std::string markerBytes{std::istreambuf_iterator<char>(markerInput), {}};
+            if (markerBytes != "DBMS_PHYSICAL_BACKUP_V3\n") {
+                if (std::filesystem::is_regular_file(entry.path() / "tlist.lst")) {
+                    assert(!engine.databaseExists(name));
+                    sawIncompleteStaging = true;
+                }
+                continue;
+            }
+            if (bytesCopied != 0 ||
+                !std::filesystem::is_regular_file(entry.path() / ".dbms_backup_manifest")) {
+                continue;
+            }
+            assert(!armed && "the operation has exactly one completed staging directory");
+            assert(std::filesystem::is_regular_file(entry.path() / "current_table.stc"));
+            assert(std::filesystem::is_regular_file(
+                std::filesystem::path(backup) / "obsolete_table.stc"));
+            armed = true;
+            dbms::index_file::failNextDirectorySyncForTesting();
+        }
+        return true;
+    };
+    assert(!engine.physicalBackup(database, backup, failAtPublication));
+    assert(sawIncompleteStaging && "observed the copied table list before backup completion");
+    assert(armed && "the new generation reached the final progress callback");
     assert(std::filesystem::is_regular_file(
         std::filesystem::path(backup) / "obsolete_table.stc"));
     assert(!std::filesystem::exists(
