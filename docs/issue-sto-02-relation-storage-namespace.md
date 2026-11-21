@@ -1,10 +1,16 @@
 # STO-02: relation storage identity and physical-name collision containment
 
+## 2026-11-21 · Guarded table reset and column rename
+
+Table reset uses a relation's verified files and checks index destinations that are missing but may still be reserved by other tables. Direct SQL TRUNCATE checks these paths before logging the reset. Column rename plans and checks the index destinations before publishing new definitions. It moves the B-tree companion together with the tree, updates the Bloom definition and cache key, and rewrites expression and partial index definitions. A failed file or metadata publication attempts to restore the original paths and bytes.
+
+Registered checks cover two-way prefix preservation, default-space restart, real target collision, and column renames with B-tree, Bloom, expression, partial and composite indexes. Ordinary operations and rollback in the focused PostgreSQL comparison agreed. Both systems still differ when two logically independent indexes would share a filename in this project. Stable physical locators and broader maintenance checks remain open. [Test results](test-report.md#truncate-column-ownership-20261121)
+
 ## 2026-11-21 · Index file ownership
 
 Standalone index creation, index deletion, and table reindexing now check that the destination has no other owner. The check uses a persisted definition when present, including declarations for indexes whose files are missing. Specialized maintenance identifies declared index owners before falling back to filename-based native definitions. Hash and Bloom caches use distinct keys for dotted table and column names.
 
-The PostgreSQL comparison covers 132 steps, including seven physical collisions where this project refuses the write to preserve the existing file. Runtime evidence still shows destructive name collisions in `TRUNCATE` and `ALTER TABLE RENAME COLUMN`. Storage based on independent relation and index identifiers remains open. [Test results](test-report.md#index-file-ownership-20261121)
+The PostgreSQL comparison covers 132 steps, including seven physical collisions where this project refuses the write to preserve the existing file. [Test results](test-report.md#index-file-ownership-20261121)
 
 ## 2026-11-21 · Table rename and name reuse
 

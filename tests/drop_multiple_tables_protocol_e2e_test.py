@@ -222,6 +222,157 @@ def main():
                      "('ownership_brin_first', 'ownership_brin_second');") == (
             [["ownership_brin_first"]], "SELECT 1")
 
+    def truncate_shared_name_prefix():
+        home = Path(server["dir"]) / "info"
+        short = "ownership_truncate"
+        long = "ownership_truncate_child"
+        fixtures = {
+            short: ("child_key", 1, 10, "short-toast-value" * 400),
+            long: ("v", 2, 20, "long-toast-value" * 400),
+        }
+        for table, (column, _, _, _) in fixtures.items():
+            query(f"CREATE TABLE {table}(id INT PRIMARY KEY, {column} INT, payload TEXT);")
+        for table, (column, _, _, _) in fixtures.items():
+            query(f"CREATE INDEX {table}_lookup ON {table}({column});")
+
+        def insert(table):
+            _, key, indexed, payload = fixtures[table]
+            assert query(f"INSERT INTO {table} VALUES({key},{indexed},'{payload}');") == ([], "INSERT 0 1")
+
+        def read(table):
+            column, key, indexed, payload = fixtures[table]
+            assert query(f"SELECT id FROM {table} WHERE id={key};") == ([[str(key)]], "SELECT 1")
+            assert query(f"SELECT id,payload FROM {table} WHERE {column}={indexed};") == (
+                [[str(key), payload]], "SELECT 1")
+
+        for table in fixtures:
+            insert(table)
+            read(table)
+
+        for target, neighbor in ((short, long), (long, short)):
+            query("CHECKPOINT;")
+            neighbor_column = fixtures[neighbor][0]
+            forks = (".dt", ".idx", ".toast.dt", ".toast.idx", f"_{neighbor_column}.idx")
+            before = {home / (neighbor + fork): (home / (neighbor + fork)).read_bytes() for fork in forks}
+            assert all(before.values())
+
+            assert query(f"TRUNCATE TABLE {target};") == ([], "TRUNCATE TABLE")
+            assert query(f"SELECT id FROM {target};") == ([], "SELECT 0")
+            missing = [path.name for path in before if not path.is_file()]
+            assert not missing, (target, "TRUNCATE deleted neighboring files", missing)
+            for path, data in before.items():
+                assert path.read_bytes() == data, (target, "TRUNCATE changed neighboring file", path.name)
+            read(neighbor)
+            if target == short:
+                # Refill the first target, then reverse the role. Its
+                # secondary path starts with the second target's name.
+                insert(short)
+                read(short)
+
+        reopen_after_crash()
+        assert query(f"SELECT id FROM {long};") == ([], "SELECT 0")
+        read(short)
+
+    def rename_column_with_toast_neighbor():
+        home = Path(server["dir"]) / "info"
+        payload = "preserve-column-toast" * 320
+        query("CREATE TABLE ownership_column_old(id INT PRIMARY KEY, payload TEXT);")
+        query(f"INSERT INTO ownership_column_old VALUES (7, '{payload}');")
+        query("CREATE TABLE ownership_column(id INT PRIMARY KEY, indexed_value INT);")
+        query("INSERT INTO ownership_column VALUES (1, 9);")
+        query("CREATE INDEX ownership_column_lookup ON ownership_column(indexed_value);")
+        query("CHECKPOINT;")
+
+        def read_neighbor():
+            assert query("SELECT payload FROM ownership_column_old WHERE id=7;") == ([[payload]], "SELECT 1")
+
+        read_neighbor()
+        original = home / "ownership_column_indexed_value.idx"
+        renamed = home / "ownership_column_moved_value.idx"
+        toast_index = home / "ownership_column_old.toast.idx"
+        assert original.is_file() and toast_index.is_file()
+
+        def snapshot():
+            paths = list(home.glob("ownership_column*"))
+            paths.extend(home / name for name in (
+                "tlist.lst", "pg_catalog/pg_class.cat", "pg_catalog/pg_attribute.cat",
+                "pg_catalog/pg_depend.cat"))
+            return {path: path.read_bytes() for path in paths}
+
+        before = snapshot()
+        error('ALTER TABLE ownership_column RENAME COLUMN indexed_value TO "old.toast";', "XX000")
+        assert snapshot() == before, "rejected column rename changed relation or catalog bytes"
+        assert query("SELECT indexed_value FROM ownership_column WHERE indexed_value=9;") == ([["9"]], "SELECT 1")
+        read_neighbor()
+
+        assert query("ALTER TABLE ownership_column RENAME COLUMN indexed_value TO moved_value;") == ([], "ALTER TABLE")
+        assert not original.exists() and renamed.read_bytes() == before[original]
+        original_companion = original.with_suffix(".idx.tde")
+        if original_companion in before:
+            assert not original_companion.exists()
+            assert renamed.with_suffix(".idx.tde").read_bytes() == before[original_companion]
+        assert toast_index.read_bytes() == before[toast_index]
+        assert query("SELECT moved_value FROM ownership_column WHERE moved_value=9;") == ([["9"]], "SELECT 1")
+        read_neighbor()
+        reopen_after_crash()
+        assert query("SELECT moved_value FROM ownership_column WHERE moved_value=9;") == ([["9"]], "SELECT 1")
+        read_neighbor()
+
+    def rename_bloom_index_column():
+        home = Path(server["dir"]) / "info"
+        query("CREATE TABLE ownership_bloom_rename(id INT PRIMARY KEY, token TEXT);")
+        query("INSERT INTO ownership_bloom_rename VALUES (1,'alpha');")
+        query("CREATE INDEX ownership_bloom_lookup ON ownership_bloom_rename USING bloom(token);")
+        query("CHECKPOINT;")
+        source = home / "ownership_bloom_rename_token.bidx"
+        destination = home / "ownership_bloom_rename_moved_token.bidx"
+        initial = source.read_bytes()
+        assert initial
+
+        assert query("ALTER TABLE ownership_bloom_rename RENAME COLUMN token TO moved_token;") == ([], "ALTER TABLE")
+        assert not source.exists() and destination.read_bytes() == initial
+        assert (home / "ownership_bloom_rename.bloomidx").read_text().splitlines() == ["moved_token"]
+        assert (home / "ownership_bloom_rename.idxnames").read_text().splitlines() == [
+            "ownership_bloom_lookup\tbloom\tmoved_token"]
+
+        assert query("UPDATE ownership_bloom_rename SET moved_token='beta' WHERE id=1;") == ([], "UPDATE 1")
+        query("CHECKPOINT;")
+        assert destination.read_bytes() != initial, "UPDATE did not maintain the renamed Bloom index"
+        generation = destination.stat().st_ino
+        assert query("REINDEX TABLE ownership_bloom_rename;") == ([], "REINDEX")
+        assert not source.exists() and destination.stat().st_ino != generation
+        assert query("SELECT id FROM ownership_bloom_rename WHERE moved_token='beta';") == ([["1"]], "SELECT 1")
+        assert query("SELECT id FROM ownership_bloom_rename WHERE moved_token='alpha';") == ([], "SELECT 0")
+
+    def rename_index_definition_column():
+        home = Path(server["dir"]) / "info"
+        query("CREATE TABLE col_meta(id INT PRIMARY KEY, source TEXT, k INT);")
+        query("INSERT INTO col_meta VALUES (1,'alpha',10),(2,'beta',20);")
+        query("CREATE INDEX meta_expr ON col_meta(upper(source));")
+        query("CREATE INDEX meta_partial ON col_meta(k) INCLUDE(source) WHERE source='alpha';")
+        query("CREATE INDEX meta_composite ON col_meta(source,k) INCLUDE(id) WHERE source='alpha';")
+        assert query("ALTER TABLE col_meta RENAME COLUMN source TO label;") == ([], "ALTER TABLE")
+        assert query("INSERT INTO col_meta VALUES (3,'alpha',30);") == ([], "INSERT 0 1")
+
+        old_expression = home / "col_meta_upper(source).idx"
+        expression = home / "col_meta_upper(label).idx"
+        assert not old_expression.exists()
+        for path in (expression, home / "col_meta_k.idx", home / "col_meta.idx_meta_composite"):
+            assert path.read_bytes(), path.name
+        assert (home / "col_meta.secidx").read_text().splitlines() == [
+            "EXPR:upper(label)",
+            "k:INCLUDE:label:WHERE:label = 'alpha'",
+            "C:meta_composite:label:k:INCLUDE:id:WHERE:label = 'alpha'",
+        ]
+
+        assert query("REINDEX TABLE col_meta;") == ([], "REINDEX")
+        assert query("SELECT id FROM col_meta WHERE upper(label)='ALPHA' ORDER BY id;") == (
+            [["1"], ["3"]], "SELECT 2")
+        assert query("SELECT id,label FROM col_meta WHERE label='alpha' AND k>0 ORDER BY id;") == (
+            [["1", "alpha"], ["3", "alpha"]], "SELECT 2")
+        assert query("DROP INDEX meta_expr;") == ([], "DROP INDEX")
+        assert not expression.exists()
+
     try:
         query("CREATE TABLE drop_many_a(id INT);")
         query("CREATE TABLE drop_many_b(id INT);")
@@ -268,9 +419,15 @@ def main():
         assert query("INSERT INTO drop_many_owned(code) VALUES('next') RETURNING id;")[0] == [["2"]]
         shared_name_prefix()
         preserve_short_name_index()
-        conflicting_index_claims()
         reject_toast_index_alias()
         preserve_brin_on_neighbor_update()
+        truncate_shared_name_prefix()
+        rename_column_with_toast_neighbor()
+        rename_bloom_index_column()
+        rename_index_definition_column()
+        # Run the deliberately ambiguous legacy fixture after the cases
+        # that expect recovery of a healthy database.
+        conflicting_index_claims()
         print("[DROP MULTIPLE TABLES PROTOCOL E2E] passed")
     finally:
         runner.stop_ours(server)

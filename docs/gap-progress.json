@@ -2,6 +2,34 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-21 preserve neighboring indexes during truncate and column rename",
+      "gap_ids": ["STO-02", "CAT-07"],
+      "status": "partial",
+      "evidence": [
+        "src/commands/TableManage.cpp",
+        "docs/issue-sto-02-relation-storage-namespace.md",
+        "docs/postgresql-comparison.md",
+        "docs/test-report.md",
+        "docs/performance-report-2026-10-30.md"
+      ],
+      "tests": [
+        "tests/drop_multiple_tables_protocol_e2e_test.py"
+      ],
+      "verification": [
+        "107 of 113 common protocol steps matched PostgreSQL 18.6. Two physical index collisions were refused safely. Four follow-up reads using the new column name differed, and two candidate-only checks confirmed the old name still worked.",
+        "Nine protocol suites and seven C++ regressions passed, including cold restart checks. Across 96 same-result measurements, the paired median request time for TRUNCATE increased by 2.10% on tmpfs. The other workloads varied across rounds.",
+        "Independent physical identifiers and complete crash coverage for multi-file publication remain open."
+      ],
+      "artifacts": {
+        "candidate_build": "build/array-domain-20261117/ownership-truncate-column-cmake-v1.json",
+        "postgresql_audit": "build/index-truncate-col-ownership-20261121/candidate-v1-independent-audit.json",
+        "registered_protocol": "build/relation-file-ownership-20261121/registered-truncate-column-v1/expression-inclusive-receipt.json",
+        "related_protocol": "build/index-truncate-col-ownership-20261121/related-protocol-v1/summary.json",
+        "native_regressions": "build/array-domain-20261117/native-create-fillfactor-ownership-truncate-column-cmake-v1/summary.json",
+        "timing": "build/index-truncate-col-ownership-20261121/perf/paired-tmpfs-v1-1.json"
+      }
+    },
+    {
       "issue": "2026-11-21 check ownership when creating, dropping and rebuilding indexes",
       "gap_ids": ["STO-02", "CAT-07"],
       "status": "partial",
@@ -20,7 +48,7 @@
       "verification": [
         "Seven physical index collisions refused safely. Another 125 steps matched PostgreSQL 18.6, including independent writes to the table whose attempted BRIN or SP-GiST index was rejected.",
         "Ten protocol suites and seven native regressions passed. 144 same-result tmpfs timings recorded paired request costs of +3.21% for B-tree creation, +5.71% for REINDEX TABLE and +1.50% for an update with BRIN.",
-        "Independent physical identifiers remain open. The current candidate still reproduces distinct neighbor file corruption on TRUNCATE and ALTER TABLE RENAME COLUMN."
+        "Independent physical identifiers remain open. This version still reproduced neighbor index corruption during TRUNCATE and ALTER TABLE RENAME COLUMN."
       ],
       "artifacts": {
         "candidate_build": "build/array-domain-20261117/ownership-index-cmake-v3.json",

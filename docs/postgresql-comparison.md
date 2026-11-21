@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-21 · 清空表和改列名时保护索引
+
+PostgreSQL 18.6 对既有表执行事务性的 `TRUNCATE` 时，分配空的物理存储，重建索引，并在提交时处置旧文件。SQLite 可在符合条件的全表 `DELETE` 中清空表内的数据，免去逐行访问。DuckDB 将 `TRUNCATE` 作为无条件 `DELETE` 处理，磁盘空间通常到检查点才回收。[PostgreSQL 源码](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/commands/tablecmds.c) · [SQLite 的清空优化](https://www.sqlite.org/lang_delete.html#the_truncate_optimization) · [DuckDB TRUNCATE](https://duckdb.org/docs/lts/sql/statements/delete#the-truncate-statement)
+
+本项目在清空表前检查会删除和重建的文件，保留邻表的所有文件。改列名前也检查索引目标路径，并按计划更新文件和索引定义。两次实际文件路径冲突仍被拒绝，PostgreSQL 能分别保存两个索引。默认和外部共享表空间的普通操作以及事务回滚对照一致。[测试报告](test-report.md#truncate-column-ownership-20261121)
+
 ## 2026-11-21 · 建索引时核对文件归属
 
 PostgreSQL 18 用索引自己的文件编号定位物理文件。SQLite 在 `sqlite_schema` 中为索引记录 B 树根页。DuckDB 将索引放在数据库文件内部。这些实现能分别保存表 `a` 的列 `b_c` 和表 `a_b` 的列 `c` 上的索引。本项目按名称拼接文件路径，遇到同一物理路径时会拒绝写入以保留已有索引。消除这类名称冲突仍需要按独立编号定位索引。[PostgreSQL 文件布局](https://www.postgresql.org/docs/18/storage-file-layout.html) · [SQLite 文件格式](https://www.sqlite.org/fileformat.html#storage_of_the_sql_database_schema) · [DuckDB 存储说明](https://duckdb.org/faq#can-duckdb-save-data-to-disk) · [本项目测试](test-report.md#index-file-ownership-20261121)

@@ -21402,6 +21402,52 @@ static DBStatus collectRelationFiles(
     return error ? DBStatus::IO_ERROR : DBStatus::OK;
 }
 
+static DBStatus planTableResetFiles(
+    const StorageEngine& engine, const std::string& dbname,
+    const TableSchema& table, const std::filesystem::path& root,
+    std::vector<std::filesystem::path>& files) {
+    std::error_code error;
+    if (!std::filesystem::is_directory(root, error) || error) {
+        return DBStatus::IO_ERROR;
+    }
+    const auto status = collectRelationFiles(engine, dbname, root, table.tablename, files);
+    if (status != DBStatus::OK) return status;
+
+    // A missing index may still be claimed by a neighboring table. Validate
+    // destinations that will be recreated even if no file could be scanned.
+    std::set<std::string> present;
+    for (const auto& file : files) present.insert(file.filename().string());
+    auto reserve = [&](const std::string& filename, bool btree) {
+        if (present.count(filename) != 0) return DBStatus::OK;
+        return checkIndexFileDestination(engine, dbname, table, root / filename, btree);
+    };
+    const auto& name = table.tablename;
+    const auto primary = reserve(name + ".idx", true);
+    if (primary != DBStatus::OK) return primary;
+    if (std::any_of(table.cols.begin(), table.cols.end(),
+                    [](const Column& column) { return column.isVariableLength; })) {
+        const auto toast = reserve(name + ".toast.idx", true);
+        if (toast != DBStatus::OK) return toast;
+    }
+    for (const auto& index : engine.getIndexMetadata(dbname, name)) {
+        const auto checked = reserve(name + "_" + index.name + ".idx", true);
+        if (checked != DBStatus::OK) return checked;
+    }
+    for (const auto& index : engine.getCompositeIndexes(dbname, name)) {
+        const auto checked = reserve(name + ".idx_" + index.name, true);
+        if (checked != DBStatus::OK) return checked;
+    }
+    for (const auto& column : engine.getHashIndexedColumns(dbname, name)) {
+        const auto checked = reserve(name + "_" + column + ".hidx", false);
+        if (checked != DBStatus::OK) return checked;
+    }
+    for (const auto& column : engine.getBloomIndexedColumns(dbname, name)) {
+        const auto checked = reserve(name + "_" + column + ".bidx", false);
+        if (checked != DBStatus::OK) return checked;
+    }
+    return DBStatus::OK;
+}
+
 DBStatus StorageEngine::dropTable(const std::string& dbname,
                                    const std::string& tablename) {
     const DatabaseMetadataWrite metadataWrite(dbPath(dbname));
@@ -21736,6 +21782,8 @@ DBStatus StorageEngine::dropTable(const std::string& dbname,
 
 DBStatus StorageEngine::truncateTable(const std::string& dbname,
                                        const std::string& tablename) {
+    const DatabaseMetadataWrite metadataWrite(dbPath(dbname));
+    if (!metadataWrite.acquired()) return DBStatus::LOCK_CONFLICT;
     noteTemporaryRelationAccess(dbname, tablename);
     if (transactionContext().inTransaction && dbname == transactionContext().txnDB) {
         if ((transactionContext().txnIsolationLevel == IsolationLevel::READ_COMMITTED ||
@@ -21749,10 +21797,10 @@ DBStatus StorageEngine::truncateTable(const std::string& dbname,
     }
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     if (!lockManager_.lockMetadata(tablename)) return DBStatus::LOCK_CONFLICT;
+    ResourceUnlockGuard tableLockGuard(lockManager_, tablename);
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     const TableSchema table = getTableSchema(dbname, tablename);
     if (!heapHeaderRowWidth(table)) {
-        lockManager_.unlock(tablename);
         return DBStatus::INVALID_VALUE;
     }
 
@@ -21765,14 +21813,13 @@ DBStatus StorageEngine::truncateTable(const std::string& dbname,
                 dbname, tablename, LogicalChange::Op::Truncate);
     } catch (const DbError& error) {
         if (error.sqlState() != "58030") throw;
-        lockManager_.unlock(tablename);
         return DBStatus::IO_ERROR;
     }
 
-    const auto finish = [&](DBStatus status) {
-        lockManager_.unlock(tablename);
-        return status;
-    };
+    std::vector<std::filesystem::path> files;
+    const auto storage = planTableResetFiles(*this, dbname, table,
+                                            relationDir(dbname, tablename), files);
+    if (storage != DBStatus::OK) return storage;
 
     Lsn truncateLsn = INVALID_LSN;
     const bool walLogged =
@@ -21783,7 +21830,7 @@ DBStatus StorageEngine::truncateTable(const std::string& dbname,
         WALManager* wal = getWAL(dbname);
         if (truncateLsn == INVALID_LSN || !wal ||
             !wal->XLogFlush(truncateLsn)) {
-            return finish(DBStatus::IO_ERROR);
+            return DBStatus::IO_ERROR;
         }
     }
 
@@ -21791,20 +21838,20 @@ DBStatus StorageEngine::truncateTable(const std::string& dbname,
     // physical identity.  Rebuild them together so no index or TOAST fork
     // can retain references into the pre-TRUNCATE heap.
     if (!resetTableStorage(dbname, tablename)) {
-        return finish(DBStatus::IO_ERROR);
+        return DBStatus::IO_ERROR;
     }
     if (walLogged && !persistTruncateState(
                          *this, dbname, tablename, truncateLsn)) {
-        return finish(DBStatus::IO_ERROR);
+        return DBStatus::IO_ERROR;
     }
 
     if (!removeTableStatistics(statsPath(dbname), tablename)) {
-        return finish(DBStatus::IO_ERROR);
+        return DBStatus::IO_ERROR;
     }
 
     // SQL defaults to CONTINUE IDENTITY. DdlExecutor invokes
     // resetSequence() separately only for an explicit RESTART IDENTITY.
-    return finish(DBStatus::OK);
+    return DBStatus::OK;
 }
 
 void StorageEngine::bufferLogicalTruncate(const std::string& dbname,
@@ -22854,6 +22901,7 @@ DBStatus StorageEngine::alterTableRenameColumn(const std::string& dbname,
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     if (!validStoredIdentifier(newName, MAX_COL_NAME_LEN)) return DBStatus::INVALID_VALUE;
     if (!lockManager_.lockMetadata(tablename)) return DBStatus::LOCK_CONFLICT;
+    ResourceUnlockGuard tableLockGuard(lockManager_, tablename);
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
 
     TableSchema tbl = getTableSchema(dbname, tablename);
@@ -22862,16 +22910,13 @@ DBStatus StorageEngine::alterTableRenameColumn(const std::string& dbname,
         if (tbl.cols[i].dataName == oldName) { colIdx = i; break; }
     }
     if (colIdx >= tbl.len()) {
-        lockManager_.unlock(tablename);
         return DBStatus::INVALID_VALUE;
     }
     if (oldName == newName) {
-        lockManager_.unlock(tablename);
         return DBStatus::OK;
     }
     for (size_t i = 0; i < tbl.len(); ++i) {
         if (tbl.cols[i].dataName == newName) {
-            lockManager_.unlock(tablename);
             return DBStatus::TABLE_ALREADY_EXISTS;
         }
     }
@@ -22897,14 +22942,12 @@ DBStatus StorageEngine::alterTableRenameColumn(const std::string& dbname,
                 std::numeric_limits<uint16_t>::max() ||
             column.generatedExpr.size() >
                 std::numeric_limits<uint16_t>::max()) {
-            lockManager_.unlock(tablename);
             return DBStatus::INVALID_VALUE;
         }
     }
     for (CheckConstraint& check : tbl.additionalCheckConstraints) {
         if (!rewriteExpression(check.expression) ||
             check.expression.size() > MAX_PERSISTED_CHECK_EXPRESSION) {
-            lockManager_.unlock(tablename);
             return DBStatus::INVALID_VALUE;
         }
     }
@@ -22947,11 +22990,246 @@ DBStatus StorageEngine::alterTableRenameColumn(const std::string& dbname,
         }
     }
 
+    const auto relationRoot = relationDir(dbname, tablename);
+    struct Rewrite {
+        std::filesystem::path path;
+        std::string before;
+        std::string after;
+    };
+    std::vector<Rewrite> rewrites;
+    std::vector<std::pair<std::filesystem::path, std::filesystem::path>> moves;
+    std::set<std::filesystem::path> movedDestinations;
+    std::map<std::string, std::string> renamedBtreeKeys;
+    const std::array<std::pair<std::string_view, std::string_view>, 8> fileKinds{{
+        {"btree", ".idx"}, {"hash", ".hidx"}, {"bloom", ".bidx"},
+        {"fulltext", ".fti"}, {"gin", ".gin"}, {"gist", ".gist"},
+        {"spgist", ".spgist"}, {"brin", ".brin"}
+    }};
+    const auto makePath = [&](const std::string& key, std::string_view extension) {
+        return relationRoot / (tablename + "_" + key + std::string(extension));
+    };
+    const auto planMove = [&](std::string_view extension, const std::string& oldKey,
+                              const std::string& newKey) -> DBStatus {
+        const auto source = makePath(oldKey, extension);
+        const auto destination = makePath(newKey, extension);
+        if (source == destination) return DBStatus::OK;
+
+        const bool btree = extension == ".idx";
+        for (const auto& path : {source, destination}) {
+            const auto status = checkIndexFileDestination(*this, dbname, tbl, path, btree);
+            if (status != DBStatus::OK) return status;
+        }
+        auto add = [&](const std::filesystem::path& from,
+                       const std::filesystem::path& to) {
+            std::error_code error;
+            const bool occupied = pathEntryExists(to, error);
+            if (error) return DBStatus::IO_ERROR;
+            if (occupied) return DBStatus::INVALID_VALUE;
+            const bool exists = pathEntryExists(from, error);
+            if (error) return DBStatus::IO_ERROR;
+            if (exists) {
+                if (!std::filesystem::is_regular_file(
+                        std::filesystem::symlink_status(from, error)) || error) {
+                    return DBStatus::IO_ERROR;
+                }
+                if (!movedDestinations.insert(to).second) return DBStatus::INVALID_VALUE;
+                moves.emplace_back(from, to);
+            }
+            return DBStatus::OK;
+        };
+        const auto status = add(source, destination);
+        if (status != DBStatus::OK || !btree) return status;
+        return add(reindexSidecar(source), reindexSidecar(destination));
+    };
+
+    // Prepare exact metadata rewrites before moving any physical file.
+    const auto stageLines = [&](const std::filesystem::path& path, auto&& rewrite) {
+        std::string original;
+        if (!readIndexMetadata(path, original)) return DBStatus::IO_ERROR;
+        std::istringstream input(original);
+        std::ostringstream output;
+        bool changed = false;
+        std::string line;
+        while (std::getline(input, line)) {
+            auto before = line;
+            const auto status = rewrite(line);
+            if (status != DBStatus::OK) return status;
+            changed = changed || line != before;
+            output << line << '\n';
+        }
+        if (changed) rewrites.push_back({path, std::move(original), output.str()});
+        return DBStatus::OK;
+    };
+    const auto rewriteColumnList = [&](std::string_view list, char delimiter,
+                                       std::string& updated) {
+        size_t start = 0;
+        while (start < list.size()) {
+            const auto end = list.find(delimiter, start);
+            const auto item = list.substr(start, end == std::string_view::npos
+                ? std::string_view::npos : end - start);
+            if (item == oldName) {
+                if (newName.find(delimiter) != std::string::npos ||
+                    newName.find_first_of("\r\n\t") != std::string::npos) return false;
+                updated.append(newName);
+            } else {
+                updated.append(item);
+            }
+            if (end == std::string_view::npos) break;
+            updated.push_back(delimiter);
+            start = end + 1;
+        }
+        return true;
+    };
+    const auto secondaryStatus = stageLines(
+        secondaryIndexMetaPath(dbname, tablename), [&](std::string& line) {
+            if (line.empty()) return DBStatus::OK;
+            const bool unique = consumeUniqueIndexMetadataPrefix(line);
+            const auto where = line.find(":WHERE:");
+            const auto include = line.find(":INCLUDE:");
+            const auto keyEnd = std::min({where, include, line.size()});
+            std::string updated = unique ? UNIQUE_INDEX_METADATA_PREFIX : "";
+            if (line.compare(0, 2, "C:") == 0) {
+                const auto nameEnd = line.find(':', 2);
+                if (nameEnd == std::string::npos || nameEnd >= keyEnd)
+                    return DBStatus::CORRUPTED_DATA;
+                updated.append(line, 0, nameEnd + 1);
+                if (!rewriteColumnList(std::string_view(line).substr(
+                            nameEnd + 1, keyEnd - nameEnd - 1), ':', updated)) {
+                    return DBStatus::INVALID_VALUE;
+                }
+            } else {
+                const std::string oldKey(secondaryIndexMetadataKey(line));
+                if (oldKey.empty()) return DBStatus::CORRUPTED_DATA;
+                std::string newKey = oldKey;
+                const bool expression = line.compare(0, 5, "EXPR:") == 0;
+                const size_t keyStart = expression ? 5 : 0;
+                if (expression) {
+                    const auto left = oldKey.find('(');
+                    const auto right = oldKey.rfind(')');
+                    if (left == std::string::npos || right == std::string::npos || right <= left)
+                        return DBStatus::CORRUPTED_DATA;
+                    // The current expression builder persists a unary
+                    // UPPER/LOWER key whose argument is a stored column name.
+                    if (trim(oldKey.substr(left + 1, right - left - 1)) == oldName)
+                        newKey.replace(left + 1, right - left - 1, newName);
+                } else if (oldKey == oldName) {
+                    newKey = newName;
+                }
+                if (newKey != oldKey) {
+                    if (newName.find_first_of(":\r\n\t") != std::string::npos)
+                        return DBStatus::INVALID_VALUE;
+                    renamedBtreeKeys.emplace(oldKey, newKey);
+                }
+                updated.append(line, 0, keyStart);
+                updated += newKey;
+                const auto flags = keyStart + oldKey.size();
+                if (flags > keyEnd) return DBStatus::CORRUPTED_DATA;
+                updated.append(line, flags, keyEnd - flags);
+            }
+            if (include < where) {
+                updated += ":INCLUDE:";
+                const auto end = std::min(where, line.size());
+                if (!rewriteColumnList(std::string_view(line).substr(
+                            include + 9, end - include - 9), ',', updated)) {
+                    return DBStatus::INVALID_VALUE;
+                }
+            }
+            if (where != std::string::npos) {
+                auto predicate = line.substr(where + 7);
+                if (!rewriteExpression(predicate)) return DBStatus::INVALID_VALUE;
+                updated += ":WHERE:" + predicate;
+            }
+            line = std::move(updated);
+            return DBStatus::OK;
+        });
+    if (secondaryStatus != DBStatus::OK) return secondaryStatus;
+
+    std::array<bool, 8> renameSimple{};
+    for (const auto& [oldKey, newKey] : renamedBtreeKeys) {
+        const auto status = planMove(".idx", oldKey, newKey);
+        if (status != DBStatus::OK) return status;
+    }
+    const auto namedStatus = stageLines(namedIndexMetaPath(*this, dbname, tablename),
+        [&](std::string& line) {
+            const auto first = line.find('\t');
+            const auto second = first == std::string::npos ? first : line.find('\t', first + 1);
+            if (first == std::string::npos || second == std::string::npos ||
+                first == 0 || second <= first + 1 || second + 1 >= line.size() ||
+                line.find('\t', second + 1) != std::string::npos)
+                return DBStatus::CORRUPTED_DATA;
+            const auto method = std::string_view(line).substr(first + 1, second - first - 1);
+            const auto key = line.substr(second + 1);
+            if (method == "btree") {
+                const auto renamed = renamedBtreeKeys.find(key);
+                if (renamed != renamedBtreeKeys.end()) {
+                    line.replace(second + 1, std::string::npos, renamed->second);
+                    return DBStatus::OK;
+                }
+            }
+            if (key != oldName || method == "composite") return DBStatus::OK;
+            if (newName.find_first_of("\r\n\t") != std::string::npos)
+                return DBStatus::INVALID_VALUE;
+            const auto family = std::find_if(fileKinds.begin(), fileKinds.end(),
+                [&](const auto& kind) { return kind.first == method; });
+            if (family == fileKinds.end()) return DBStatus::CORRUPTED_DATA;
+            renameSimple[static_cast<size_t>(family - fileKinds.begin())] = true;
+            line.replace(second + 1, std::string::npos, newName);
+            return DBStatus::OK;
+        });
+    if (namedStatus != DBStatus::OK) return namedStatus;
+
+    for (size_t kind = 1; kind <= 2; ++kind) {
+        const auto path = kind == 1 ? hashIndexMetaPath(dbname, tablename)
+                                    : bloomIndexMetaPath(dbname, tablename);
+        const auto status = stageLines(path, [&](std::string& line) {
+            if (line != oldName) return DBStatus::OK;
+            if (newName.find_first_of("\r\n") != std::string::npos)
+                return DBStatus::INVALID_VALUE;
+            renameSimple[kind] = true;
+            line = newName;
+            return DBStatus::OK;
+        });
+        if (status != DBStatus::OK) return status;
+    }
+    for (size_t kind = 3; kind < fileKinds.size(); ++kind) {
+        if (renameSimple[kind]) continue;
+        const auto path = makePath(oldName, fileKinds[kind].second);
+        std::error_code error;
+        const bool exists = pathEntryExists(path, error);
+        if (error) return DBStatus::IO_ERROR;
+        if (!exists) continue;
+        try {
+            renameSimple[kind] = ownsSpecializedIndexFile(*this, dbname, tablename, path, &tbl);
+        } catch (const DbError& failure) {
+            return failure.sqlState() == "58030" ? DBStatus::IO_ERROR : DBStatus::CORRUPTED_DATA;
+        }
+    }
+    for (size_t kind = 0; kind < fileKinds.size(); ++kind) {
+        if (!renameSimple[kind]) continue;
+        const auto status = planMove(fileKinds[kind].second, oldName, newName);
+        if (status != DBStatus::OK) return status;
+    }
+
+    const auto stageSchema = [&](const std::string& name, const TableSchema& schema) {
+        const auto path = schemaPath(dbname, name);
+        std::string before;
+        if (!readIndexMetadata(path, before) || before.empty()) return false;
+        std::ostringstream after(std::ios::out | std::ios::binary);
+        writeSchema(after, schema);
+        if (!after) return false;
+        rewrites.push_back({path, std::move(before), after.str()});
+        return true;
+    };
+    tbl.cols[colIdx].dataName = newName;
+    if (!stageSchema(tablename, tbl)) return DBStatus::IO_ERROR;
+    for (const auto& [name, schema] : referencingSchemas) {
+        if (!stageSchema(name, schema)) return DBStatus::IO_ERROR;
+    }
+
     std::vector<std::string> originalComments;
     DBStatus commentStatus = readCommentRecords(
         commentsPath(dbname), originalComments);
     if (commentStatus != DBStatus::OK) {
-        lockManager_.unlock(tablename);
         return commentStatus;
     }
     std::vector<std::string> renamedComments = originalComments;
@@ -22962,7 +23240,6 @@ DBStatus StorageEngine::alterTableRenameColumn(const std::string& dbname,
         std::move(renamedComments), commentsChanged);
     commentStatus = commentGuard.publish();
     if (commentStatus != DBStatus::OK) {
-        lockManager_.unlock(tablename);
         return commentStatus;
     }
 
@@ -22970,7 +23247,6 @@ DBStatus StorageEngine::alterTableRenameColumn(const std::string& dbname,
     DBStatus securityLabelStatus = readSecurityLabels(
         seclabelPath(dbname), originalSecurityLabels);
     if (securityLabelStatus != DBStatus::OK) {
-        lockManager_.unlock(tablename);
         return securityLabelStatus;
     }
     SecurityLabelMap renamedSecurityLabels = originalSecurityLabels;
@@ -22981,174 +23257,77 @@ DBStatus StorageEngine::alterTableRenameColumn(const std::string& dbname,
         std::move(renamedSecurityLabels), securityLabelsChanged);
     securityLabelStatus = securityLabelGuard.publish();
     if (securityLabelStatus != DBStatus::OK) {
-        lockManager_.unlock(tablename);
         return securityLabelStatus;
     }
 
-    // Update schema
-    tbl.cols[colIdx].dataName = newName;
-    if (!writeSchemaFile(dbname, tablename, tbl)) {
-        lockManager_.unlock(tablename);
+    const std::string cachePrefix = dbname + "/" + tablename + "/";
+    const auto flushAndEvict = [&](auto& cache, const std::string& key) {
+        const auto found = cache.find(cachePrefix + key);
+        if (found == cache.end()) return true;
+        if (found->second && !found->second->flush()) return false;
+        cache.erase(found);
+        return true;
+    };
+    for (const auto& [oldKey, newKey] : renamedBtreeKeys) {
+        if (!flushAndEvict(secondaryIndexCache_, oldKey) ||
+            !flushAndEvict(secondaryIndexCache_, newKey)) return DBStatus::IO_ERROR;
+    }
+    if ((renameSimple[0] && !flushAndEvict(secondaryIndexCache_, oldName)) ||
+        (renameSimple[1] && !flushAndEvict(hashIndexCache_, oldName)) ||
+        (renameSimple[2] && !flushAndEvict(bloomIndexCache_, oldName))) {
         return DBStatus::IO_ERROR;
     }
-    for (const auto& [otherTableName, otherTable] : referencingSchemas) {
-        if (!writeSchemaFile(dbname, otherTableName, otherTable)) {
-            lockManager_.unlock(tablename);
-            return DBStatus::IO_ERROR;
-        }
+    if (renameSimple[6]) {
+        std::lock_guard<std::mutex> guard(spGiSTMutex_);
+        spGiSTCache_.erase(cachePrefix + oldName);
+        spGiSTCache_.erase(cachePrefix + newName);
     }
+
+    size_t moved = 0;
+    size_t published = 0;
+    const auto rollback = [&](int*) noexcept {
+        bool restored = true;
+        try {
+            while (published > 0) {
+                const auto& rewrite = rewrites[--published];
+                if (!index_file::writeAtomically(rewrite.path, rewrite.before)) restored = false;
+            }
+            std::error_code error;
+            for (size_t i = moved; i > 0; --i) {
+                const auto& [from, to] = moves[i - 1];
+                if (!renameTablespaceEntryNoReplace(to, from, error)) restored = false;
+            }
+            if (moved != 0 && !index_file::syncDirectory(relationRoot)) restored = false;
+        } catch (...) {
+            restored = false;
+        }
+        if (!restored) {
+            std::cerr << "[catalog] could not restore all files after column rename: "
+                      << dbname << "/" << tablename << std::endl;
+        }
+    };
+    std::unique_ptr<int, decltype(rollback)> rollbackGuard(reinterpret_cast<int*>(1), rollback);
+    std::error_code moveError;
+    for (; moved < moves.size(); ++moved) {
+        const auto& [from, to] = moves[moved];
+        if (!renameTablespaceEntryNoReplace(from, to, moveError)) return DBStatus::IO_ERROR;
+    }
+    if (moved != 0 && !index_file::syncDirectory(relationRoot)) return DBStatus::IO_ERROR;
+    while (published < rewrites.size()) {
+        const auto& rewrite = rewrites[published++];
+        // Atomic write can replace the path even when directory sync fails.
+        if (!index_file::writeAtomically(rewrite.path, rewrite.after)) return DBStatus::IO_ERROR;
+    }
+
+    rollbackGuard.release();
     invalidateCatalogSchema(dbname, tablename);
-    // The schema now exposes the new column name.  Later index-sidecar work
-    // must not roll auxiliary metadata back to a name the table no longer has.
+    for (const auto& [name, schema] : referencingSchemas) {
+        invalidateCatalogSchema(dbname, name);
+    }
+    invalidateSecidxCache(dbname, tablename);
+    invalidateHashidxCache(dbname, tablename);
     commentGuard.commit();
     securityLabelGuard.commit();
-
-    auto dbDir = dbPath(dbname);
-
-    // Update secondary index meta (.secidx)
-    {
-        std::filesystem::path meta = secondaryIndexMetaPath(dbname, tablename);
-        if (std::filesystem::exists(meta)) {
-            std::ifstream in(meta);
-            std::vector<std::string> lines;
-            std::string line;
-            while (std::getline(in, line)) {
-                if (!line.empty()) {
-                    // Replace old column name with new in each line
-                    // Simple token replacement by splitting on ':'
-                    std::string updated;
-                    size_t pos = 0;
-                    while (pos < line.size()) {
-                        size_t next = line.find(':', pos);
-                        std::string token = (next == std::string::npos) ? line.substr(pos) : line.substr(pos, next - pos);
-                        if (token == oldName) token = newName;
-                        updated += token;
-                        if (next == std::string::npos) break;
-                        updated += ':';
-                        pos = next + 1;
-                    }
-                    lines.push_back(updated);
-                }
-            }
-            std::ofstream out(meta, std::ios::trunc);
-            for (const auto& l : lines) out << l << '\n';
-        }
-        invalidateSecidxCache(dbname, tablename);
-    }
-
-    // Keep the SQL-name to physical-key map aligned with a column rename.
-    // Composite entries use the index name as their key and must not change.
-    {
-        const auto path = namedIndexMetaPath(*this, dbname, tablename);
-        if (std::filesystem::exists(path)) {
-            std::ifstream in(path);
-            std::vector<NamedIndexInfo> entries;
-            std::string name;
-            while (std::getline(in, name, '\t')) {
-                NamedIndexInfo entry;
-                entry.name = name;
-                if (!std::getline(in, entry.accessMethod, '\t') ||
-                    !std::getline(in, entry.key)) break;
-                if (entry.accessMethod != "composite" && entry.key == oldName) {
-                    entry.key = newName;
-                }
-                entries.push_back(std::move(entry));
-            }
-            std::ofstream out(path, std::ios::trunc);
-            for (const auto& entry : entries) {
-                out << entry.name << '\t' << entry.accessMethod << '\t' << entry.key << '\n';
-            }
-        }
-    }
-
-    // Update hash index meta (.hashidx)
-    {
-        std::filesystem::path meta = hashIndexMetaPath(dbname, tablename);
-        if (std::filesystem::exists(meta)) {
-            std::ifstream in(meta);
-            std::vector<std::string> lines;
-            std::string line;
-            while (std::getline(in, line)) {
-                if (!line.empty()) {
-                    if (line == oldName) line = newName;
-                    lines.push_back(line);
-                }
-            }
-            std::ofstream out(meta, std::ios::trunc);
-            for (const auto& l : lines) out << l << '\n';
-        }
-        invalidateHashidxCache(dbname, tablename);
-    }
-
-    // Rename secondary index file if exists
-    {
-        std::filesystem::path oldIdx = secondaryIndexPath(dbname, tablename, oldName);
-        std::filesystem::path newIdx = secondaryIndexPath(dbname, tablename, newName);
-        if (std::filesystem::exists(oldIdx)) {
-            std::filesystem::rename(oldIdx, newIdx);
-            std::string oldKey = dbname + "/" + tablename + "/" + oldName;
-            std::string newKey = dbname + "/" + tablename + "/" + newName;
-            auto it = secondaryIndexCache_.find(oldKey);
-            if (it != secondaryIndexCache_.end()) {
-                secondaryIndexCache_[newKey] = std::move(it->second);
-                secondaryIndexCache_.erase(it);
-            }
-        }
-    }
-
-    // Rename hash index file if exists
-    {
-        std::filesystem::path oldIdx = hashIndexPath(dbname, tablename, oldName);
-        std::filesystem::path newIdx = hashIndexPath(dbname, tablename, newName);
-        if (std::filesystem::exists(oldIdx)) {
-            std::filesystem::rename(oldIdx, newIdx);
-            std::string oldKey = dbname + "/" + tablename + "/" + oldName;
-            auto it = hashIndexCache_.find(oldKey);
-            if (it != hashIndexCache_.end()) {
-                hashIndexCache_.erase(it);
-            }
-        }
-    }
-
-    // Rename fulltext index file if exists
-    {
-        std::filesystem::path oldIdx = fullTextIndexPath(dbname, tablename, oldName);
-        std::filesystem::path newIdx = fullTextIndexPath(dbname, tablename, newName);
-        if (std::filesystem::exists(oldIdx)) {
-            std::filesystem::rename(oldIdx, newIdx);
-        }
-    }
-
-    // Rename GIN/GiST/SP-GiST/BRIN index files if present.
-    {
-        std::filesystem::path oldIdx = ginIndexPath(dbname, tablename, oldName);
-        std::filesystem::path newIdx = ginIndexPath(dbname, tablename, newName);
-        if (std::filesystem::exists(oldIdx)) std::filesystem::rename(oldIdx, newIdx);
-    }
-    {
-        std::filesystem::path oldIdx = giSTIndexPath(dbname, tablename, oldName);
-        std::filesystem::path newIdx = giSTIndexPath(dbname, tablename, newName);
-        if (std::filesystem::exists(oldIdx)) std::filesystem::rename(oldIdx, newIdx);
-    }
-    {
-        std::filesystem::path oldIdx =
-            spGiSTIndexPath(dbname, tablename, oldName);
-        std::filesystem::path newIdx =
-            spGiSTIndexPath(dbname, tablename, newName);
-        if (std::filesystem::exists(oldIdx)) {
-            std::filesystem::rename(oldIdx, newIdx);
-        }
-        std::lock_guard<std::mutex> guard(spGiSTMutex_);
-        spGiSTCache_.erase(
-            dbname + "/" + tablename + "/" + oldName);
-        spGiSTCache_.erase(
-            dbname + "/" + tablename + "/" + newName);
-    }
-    {
-        std::filesystem::path oldIdx = brinIndexPath(dbname, tablename, oldName);
-        std::filesystem::path newIdx = brinIndexPath(dbname, tablename, newName);
-        if (std::filesystem::exists(oldIdx)) std::filesystem::rename(oldIdx, newIdx);
-    }
 
     // Update sequence file (.seq)
     {
@@ -23205,7 +23384,6 @@ DBStatus StorageEngine::alterTableRenameColumn(const std::string& dbname,
         }
     }
 
-    lockManager_.unlock(tablename);
     return DBStatus::OK;
 }
 
@@ -49209,6 +49387,10 @@ bool StorageEngine::resetTableStorage(
         const TableSchema table = getTableSchema(dbname, tablename);
         const auto heapRowWidth = heapHeaderRowWidth(table);
         if (!heapRowWidth) return false;
+        const auto relationRoot = relationDir(dbname, tablename);
+        std::vector<std::filesystem::path> storageFiles;
+        if (planTableResetFiles(*this, dbname, table, relationRoot, storageFiles) !=
+                DBStatus::OK) return false;
         if (table.isUnlogged &&
             !ensureUnloggedInitForks(dbname, tablename)) {
             return false;
@@ -49301,31 +49483,15 @@ bool StorageEngine::resetTableStorage(
             }
         }
 
-        const auto relationRoot = relationDir(dbname, tablename);
         std::error_code fileError;
-        if (!std::filesystem::is_directory(relationRoot, fileError) ||
-            fileError) {
-            return false;
-        }
-        std::vector<std::filesystem::path> staleFiles;
-        for (const auto& entry : std::filesystem::directory_iterator(
-                 relationRoot,
-                 std::filesystem::directory_options::skip_permission_denied,
-                 fileError)) {
-            if (fileError) break;
-            const std::string filename =
-                entry.path().filename().string();
-            const bool isInitFork = filename.size() > 5 &&
-                filename.compare(filename.size() - 5, 5, ".init") == 0;
-            if (isRelationPhysicalFileName(filename, tablename) &&
-                !(table.isUnlogged && isInitFork) &&
-                definitionBearingIndexes.count(entry.path()) == 0) {
-                staleFiles.push_back(entry.path());
-            }
-        }
-        if (fileError) return false;
-        for (const auto& path : staleFiles) {
-            fileError.clear();
+        for (const auto& path : storageFiles) {
+            const auto filename = path.filename().string();
+            const auto endsWith = [&](std::string_view suffix) {
+                return filename.size() > suffix.size() &&
+                    filename.compare(filename.size() - suffix.size(), suffix.size(), suffix) == 0;
+            };
+            if ((table.isUnlogged && (endsWith(".init") || endsWith(".init.tde"))) ||
+                definitionBearingIndexes.count(path) != 0) continue;
             std::filesystem::remove_all(path, fileError);
             if (fileError) return false;
         }

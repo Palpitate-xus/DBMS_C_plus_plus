@@ -1,12 +1,14 @@
 # PostgreSQL 18 功能差距审计
 
-## 2026-11-21 · 普通删表的文件归属
+## 2026-11-21 · 表和索引文件的归属检查
 
 `STO-02` 仍为部分实现。直接 `DROP TABLE` 核对可能的文件所有者，在默认及共享外部表空间保留名称相近的邻表及其索引。46 项正常操作与 PostgreSQL 18.6 一致，另通过提交后和回滚后重启检查。两张表已经声明同一文件时拒绝删除。[删表测试](test-report.md#drop-table-file-ownership-20261121)
 
 直接重命名、旧名重用和未提交建表的撤销共用这项归属检查。默认及外部表空间的 64 项重命名和重用对照与 PostgreSQL 18.6 一致。[重命名测试](test-report.md#rename-table-file-ownership-20261121)
 
-独立建索引、删索引及 `REINDEX TABLE` 会在文件有其他归属时拒绝写入。对同一物理路径的 7 次保护性拒绝仍与 PostgreSQL 的允许行为有差异，其余 125 个步骤已对照一致。按编号定位的存储布局、清空表和改列名的文件风险仍待处理。[索引测试](test-report.md#index-file-ownership-20261121) · [存储布局差距](issue-sto-02-relation-storage-namespace.md)
+独立建索引、删索引及 `REINDEX TABLE` 会在文件有其他归属时拒绝写入。对同一物理路径的 7 次保护性拒绝仍与 PostgreSQL 的允许行为有差异，其余 125 个步骤已对照一致。[索引测试](test-report.md#index-file-ownership-20261121)
+
+清空表前也核对文件的归属，改列名会同时检查索引原文件和目标位置。113 步对照有 107 步一致，其余六步来自两次拒绝改写同一路径及后续新列名检查。按独立编号定位存储和改名过程中的完整断电验证仍待完成。[清空表和改列名测试](test-report.md#truncate-column-ownership-20261121) · [存储布局差距](issue-sto-02-relation-storage-namespace.md)
 
 ## 当前汇总（2026-11-20）
 

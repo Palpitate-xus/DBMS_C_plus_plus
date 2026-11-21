@@ -2,6 +2,17 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="truncate-column-ownership-20261121"></a>
+## 2026-11-21 · 清空表和改列名时保留邻表数据
+
+旧版 `c87d6425` 清空一张表时会误删名称相近的表的索引。改列名如果碰到另一张表的长文本索引，也会覆盖文件，导致后续查询失败。普通改名还可能漏移索引的附属文件，Bloom 索引及表达式索引也出现过改名后无法重建或插入的情况。
+
+在默认表空间及两个表共用的外部表空间，用 PostgreSQL 18.6 对照了 113 步，其中 107 步的查询结果、列类型、命令状态和协议顺序一致。两次改列名会覆盖已有索引时，本项目返回 `XX000`，两个索引逐字节保留。PostgreSQL 允许改名，双方随后各两步访问新列名的结果因此不同。新版另外检查了两处原列名仍能使用。228 份协议回复的独立审计 SHA-256 为 `69eec2df255b938d6516f56ad20565578bfbd57a0b20c1a36cc9e7240847e185`。
+
+九套定向协议测试和七项 C++ 回归通过。清空短表名或长表名都验证了邻表的主键、二级索引、长文本查询和文件内容，强制重启后再次读取。改列名覆盖 B-tree 主文件和附属文件、Bloom、表达式索引、部分索引及复合索引。用例按对应类型核对了重启读取、更新、插入或重建索引。[协议回归](../tests/drop_multiple_tables_protocol_e2e_test.py)
+
+受测 CMake 程序 SHA-256 为 `d20acaaf0acd4776ba2e1c41f0dca9a4f160f26e98a9316622b488b3781c02e3`。这轮验证覆盖上述操作，完整测试和改名途中每个文件写入点的断电验证仍待完成。[性能报告](performance-report-2026-10-30.md#truncate-column-ownership-cost-20261121) · [存储布局差距](issue-sto-02-relation-storage-namespace.md)
+
 <a id="index-file-ownership-20261121"></a>
 ## 2026-11-21 · 建索引时保留其他表的文件
 
@@ -11,7 +22,7 @@
 
 十套定向协议测试和七项定向 C++ 测试通过。旧库已有两份索引定义指向同一路径时，删表、删索引和重建索引会拒绝修改，保留双方的文件和目录记录。另核对错误归属的 GiST 文件会回退到读取真实表行，以及含点号的表名和列名使用独立的 Hash 和 Bloom 缓存。[删表和索引冲突协议测试](../tests/drop_multiple_tables_protocol_e2e_test.py) · [GiST 回退](../tests/gist_owner_collision_test.cpp) · [Hash 和 Bloom 缓存](../tests/bloom_index_test.cpp)
 
-最终 CMake 程序 SHA-256 为 `7dd560f463c955fd4f313c39d3b6e58530c95a040513688bc1212e72076f0eec`。直接建索引、删索引及 `REINDEX TABLE` 共用归属检查。清空表和重命名已有索引的列仍有独立的文件风险。在该程序上，私有测试确认分别会删除或改写邻表长文本索引，之后的长值读取失败。复现回执 SHA-256 为 `5f01583c72ba1649cd0bd50163bac1b7158efbce83f6f94ee03b406e95c13244`。全量回归尚未运行。[性能对照](performance-report-2026-10-30.md#index-file-ownership-cost-20261121)
+该轮 CMake 程序 SHA-256 为 `7dd560f463c955fd4f313c39d3b6e58530c95a040513688bc1212e72076f0eec`。直接建索引、删索引及 `REINDEX TABLE` 共用归属检查。该版仍能复现清空表或改列名破坏邻表长文本索引，复现回执 SHA-256 为 `5f01583c72ba1649cd0bd50163bac1b7158efbce83f6f94ee03b406e95c13244`。后续已修复这两条操作路径。[清空表和改列名测试](#truncate-column-ownership-20261121) · [性能对照](performance-report-2026-10-30.md#index-file-ownership-cost-20261121)
 
 <a id="rename-table-file-ownership-20261121"></a>
 ## 2026-11-21 · 表改名和旧名重用
