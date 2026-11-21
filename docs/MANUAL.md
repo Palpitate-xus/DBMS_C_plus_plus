@@ -1268,6 +1268,8 @@ REPLACE INTO users (ID, NAME) VALUES (1, 'New Alice');
 
 在普通单表筛选中，两列若各自声明了不同的规则，实际比较非空值时会报 `42P22`。例如 `a` 使用 `"C"` 而 `b` 使用 `"POSIX"`，可写 `WHERE a < b COLLATE "C"` 选定比较规则。默认规则可以和非默认规则一起用，此时比较采用非默认规则。空表和 `LIMIT 0` 无需比较，仍可正常查询。[测试报告](test-report.md#implicit-collation-filter-20261121)
 
+普通表内比较 `TEXT` 或 `VARCHAR` 列时，如果选用按字节排序的规则，筛选可以直接比较两个文字值。例如一列声明为 `"C"`，另一列使用默认规则，左右互换仍按 `"C"` 比较。两种文本类型都保留尾部空格。定长 `CHAR` 比较时忽略填充空格。[测试报告](test-report.md#declared-binary-comparison-20261121)
+
 ```sql
 SELECT * FROM users;
 SELECT NAME, AGE FROM users;

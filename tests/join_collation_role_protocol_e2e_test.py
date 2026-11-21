@@ -147,6 +147,51 @@ def main():
         command("INSERT INTO jc_declared_default VALUES (1,'A','a'),(2,'a','A');")
         expect('SELECT id FROM jc_declared_default WHERE a < d ORDER BY id;', [["1"]], [23])
 
+        # C-declared and default text columns must use C's byte order in
+        # either operand order, while CHAR retains blank-padding semantics.
+        command('CREATE TABLE jc_binary_columns(id INT, c TEXT COLLATE "C", d TEXT, '
+                'v VARCHAR(10) COLLATE "C", w VARCHAR(10), '
+                'h CHAR(5) COLLATE "C", j CHAR(5));')
+        command("INSERT INTO jc_binary_columns VALUES"
+                "(1,'01','1','01','1','a','a '),"
+                "(2,'a','A','a','A','a ','a'),"
+                "(3,'Z','a','Z','a','Z','a'),"
+                "(4,'é','z','é','z','é','z'),"
+                "(5,'','a','','a','','a'),"
+                "(6,NULL,'a',NULL,'a',NULL,'a'),"
+                "(7,'a',NULL,'a',NULL,'a',NULL),"
+                "(8,'same','same','same','same','same','same'),"
+                "(9,'a ','a','a ','a','a ','a');")
+        for left, right in (("c", "d"), ("v", "w")):
+            expect(f'SELECT id FROM jc_binary_columns WHERE {left}={right} ORDER BY id;',
+                   [["8"]], [23])
+            expect(f'SELECT id FROM jc_binary_columns WHERE {left}<{right} ORDER BY id;',
+                   [["1"], ["3"], ["5"]], [23])
+            expect(f'SELECT id FROM jc_binary_columns WHERE {right}<{left} ORDER BY id;',
+                   [["2"], ["4"], ["9"]], [23])
+        expect('SELECT id FROM jc_binary_columns WHERE h=j ORDER BY id;',
+               [["1"], ["2"], ["8"], ["9"]], [23])
+        expect('SELECT id FROM jc_binary_columns WHERE h<j ORDER BY id;', [["3"], ["5"]], [23])
+        expect('SELECT id FROM jc_binary_columns WHERE j<h ORDER BY id;', [["4"]], [23])
+        expect('SELECT id FROM jc_binary_columns WHERE w<v ORDER BY id LIMIT 2;',
+               [["2"], ["4"]], [23])
+        expect('SELECT id FROM jc_binary_columns WHERE c<>d ORDER BY id LIMIT 0;', [], [23])
+
+        # The 6000-byte values use the real out-of-line text storage path.
+        command('CREATE TABLE jc_binary_long(id INT, c TEXT COLLATE "C", d TEXT);')
+        long_text = "x" * 6000
+        command(f"INSERT INTO jc_binary_long VALUES(1,'{long_text}','{long_text}');")
+        command(f"INSERT INTO jc_binary_long VALUES(2,'{long_text}A','{long_text}z');")
+        command(f"INSERT INTO jc_binary_long VALUES(3,'{long_text}z','{long_text}A');")
+        command(f"INSERT INTO jc_binary_long VALUES(4,NULL,'{long_text}');")
+        expect('SELECT id FROM jc_binary_long WHERE c=d ORDER BY id;', [["1"]], [23])
+        expect('SELECT id FROM jc_binary_long WHERE c<d ORDER BY id;', [["2"]], [23])
+        expect('SELECT id FROM jc_binary_long WHERE d<c ORDER BY id;', [["3"]], [23])
+        expect('SELECT id FROM jc_binary_long WHERE c<>d ORDER BY id LIMIT 1;', [["2"]], [23])
+        expect('SELECT id,length(c),length(d) FROM jc_binary_long ORDER BY id;',
+               [["1", "6000", "6000"], ["2", "6001", "6001"],
+                ["3", "6001", "6001"], ["4", None, "6000"]], [23, 23, 23])
+
         print("[JOIN COLLATION ROLE PROTOCOL E2E] passed")
     finally:
         runner.stop_ours(server)

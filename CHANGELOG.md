@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>筛选时直接比较两列文字 · 2026-11-21</summary>
+
+如果一列声明为 `C`、另一列沿用数据库默认规则，筛选时可以直接比较这两个值。文字末尾的空格仍参与比较。
+
+[测试报告](docs/test-report.md#declared-binary-comparison-20261121) · [性能报告](docs/performance-report-2026-10-30.md#declared-binary-comparison-cost-20261121)
+
+</details>
+
+<details>
 <summary>两列的排序规则冲突时会报错 · 2026-11-21</summary>
 
 两列用不同的规则比较文字时，数据库会提示冲突。可以用 `COLLATE` 指定共同的规则。空表没有文字需要比较，查询会正常返回空结果。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>修复比较同一行两列时的漏查 · 2026-11-21</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-21 · 修复比较同一行两列时的漏查
 
 例如 `WHERE id = peer_id` 会查找两列值相等的记录。以前给 `id` 建索引后，这种查询有时会漏掉符合条件的记录。现在也能区分只差 1 的大整数及 `'01'` 和 `'1'` 这样的文本。
 
 [使用手册](docs/MANUAL.md#基础查询) · [测试报告](docs/test-report.md#same-row-select-20261121) · [性能报告](docs/performance-report-2026-10-30.md#same-row-select-cost-20261121)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-21 · 修复把数字误当成列名的问题
 

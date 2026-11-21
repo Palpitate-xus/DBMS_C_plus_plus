@@ -27692,18 +27692,35 @@ void StorageEngine::bindColumnComparison(Condition& cond, const TableSchema& tbl
     };
     if (signedInteger(*left) && signedInteger(*right)) {
         comparison.kind = Kind::SignedInteger;
-    } else if (left->dataType == "text" && right->dataType == "text" &&
-               left->isVariableLength && right->isVariableLength) {
-        const auto effectiveCollation = [](const Column& column) {
-            return collation::normalizeName(column.resolvedCollation.empty()
-                ? column.collation : column.resolvedCollation);
+    } else {
+        const auto varyingText = [](const Column& column) {
+            return column.isVariableLength && (column.dataType == "text" ||
+                column.dataType == "varchar" || column.dataType == "character varying");
         };
-        const auto collationName = effectiveCollation(*left);
-        const bool defaultCollation = collationName.empty() && effectiveCollation(*right).empty();
-        const bool sameBinaryCollation = !collationName.empty() &&
-            collationName == effectiveCollation(*right) && collation::isBinary(collationName) &&
-            columnUsesBinaryCollation(*left) && columnUsesBinaryCollation(*right);
-        if (defaultCollation || sameBinaryCollation) comparison.kind = Kind::Text;
+        if (!varyingText(*left) || !varyingText(*right)) return;
+        const auto defaultRule = [](const Column& column) {
+            return column.collation.empty() && column.resolvedCollation.empty();
+        };
+        const auto binaryRule = [](const Column& column) {
+            const auto& rule = column.resolvedCollation.empty()
+                ? column.collation : column.resolvedCollation;
+            return !rule.empty() && !column.resolvedCollationUsesLocale &&
+                columnUsesBinaryCollation(column) && collation::isBinary(rule);
+        };
+        const bool leftDefault = defaultRule(*left), rightDefault = defaultRule(*right);
+        if (leftDefault || rightDefault) {
+            // A declared rule takes precedence over the database default.
+            if ((leftDefault && rightDefault) || binaryRule(leftDefault ? *right : *left))
+                comparison.kind = Kind::Text;
+        } else if (binaryRule(*left) && binaryRule(*right)) {
+            // Different stored objects can use the same binary locale.
+            // Treat only identical declarations or builtin spellings as one rule.
+            const auto& leftName = left->collation;
+            const auto& rightName = right->collation;
+            if (leftName == rightName || (collation::isValid(leftName) && collation::isValid(rightName) &&
+                    collation::normalizeName(leftName) == collation::normalizeName(rightName)))
+                comparison.kind = Kind::Text;
+        }
     }
     if (comparison.kind != Kind::Unbound) {
         const auto binding = ExprEvaluator::resolveComparison(comparison.operation,
@@ -27755,9 +27772,14 @@ bool StorageEngine::evalConditionOnRowWithSyntax(const Condition& cond,
         if (isNull) return false;
         const auto right = read(comparison->rightIndex);
         if (isNull) return false;
-        if (comparison->kind == ComparisonKind::Text)
-            return comparisonPredicateMatches(comparison->operation,
-                compareTextValues(tbl.cols[comparison->leftIndex], left, right));
+        if (comparison->kind == ComparisonKind::Text) {
+            const auto& leftColumn = tbl.cols[comparison->leftIndex];
+            const auto& rightColumn = tbl.cols[comparison->rightIndex];
+            // This binding admits only the database default or a binary rule.
+            const int order = leftColumn.collation.empty() && rightColumn.collation.empty()
+                ? compareTextValues(leftColumn, left, right) : left.compare(right);
+            return comparisonPredicateMatches(comparison->operation, order);
+        }
         const auto lhs = parseStoredInteger(left);
         const auto rhs = parseStoredInteger(right);
         if (lhs && rhs)

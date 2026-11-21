@@ -807,24 +807,98 @@ static ExprValue evaluatePreparedWhere(const PreparedSelectState& state,const Ex
 class PreparedFilterOp final : public Operator {
     OpPtr child_;
     std::shared_ptr<PreparedSelectState> state_;
+    std::optional<StorageEngine::Condition> storedTextPredicate_;
     bool childOpened_ = false, empty_ = false;
+
+    std::optional<StorageEngine::Condition> bindStoredTextPredicate() const {
+        const auto* comparison = dynamic_cast<const BinaryOpExpr*>(state_->select().whereClause.get());
+        if (!comparison || comparison->rowComparison || comparison->preparedSubquery ||
+            state_->sourceContexts || state_->executionProvider || typeid(*child_) != typeid(TableScanOp))
+            return {};
+        if (comparison->comparison &&
+            (!comparison->comparison->strict || !comparison->comparison->collation.empty() ||
+             comparison->comparison->identity.rfind("builtin-comparison:", 0) != 0))
+            return {};
+        static const std::set<std::string> operations = {"=", "<>", "!=", "<", ">", "<=", ">="};
+        if (!operations.count(comparison->op)) return {};
+
+        const auto& planned = state_->schema;
+        const auto ordinal = [&](const Expr* expression) -> std::optional<size_t> {
+            const auto* column = dynamic_cast<const ColumnRefExpr*>(expression);
+            if (!column || column->preparedSubquery || !column->binding || column->generatedRead)
+                return {};
+            const auto& binding = *column->binding;
+            if (binding.scopeDepth || binding.mergedUsing ||
+                binding.sourceOrdinal != state_->sourceOrdinal || binding.columnOrdinal >= planned.len())
+                return {};
+            return binding.columnOrdinal;
+        };
+        const auto left = ordinal(comparison->left.get());
+        const auto right = ordinal(comparison->right.get());
+        if (!left || !right || (planned.cols[*left].collation.empty() && planned.cols[*right].collation.empty()))
+            return {};
+
+        const auto origin = child_->scanOrigin();
+        if (origin.engine != state_->engine || origin.dbname != state_->dbname ||
+            origin.tablename != planned.tablename) return {};
+        // The scan now holds its relation lock. Verify its current declaration
+        // before using the prepared query's physical field positions.
+        const auto current = origin.engine->getTableSchema(origin.dbname, origin.tablename);
+        if (!planned.physicalRelationId || current.physicalRelationId != planned.physicalRelationId ||
+            current.formatVersion != planned.formatVersion || current.len() != planned.len() ||
+            !std::equal(planned.cols.begin(), planned.cols.end(), current.cols.begin(),
+                [](const Column& a, const Column& b) {
+                    return !a.isArray && !b.isArray && a.generatedKind != 'v' && b.generatedKind != 'v' &&
+                        a.domainName.empty() && b.domainName.empty() &&
+                        !stored_regtype_detail::columnType(a.dataType) &&
+                        a.dataName == b.dataName && a.dataType == b.dataType && a.dsize == b.dsize &&
+                        a.isVariableLength == b.isVariableLength && a.isNull == b.isNull &&
+                        a.storageCodec == b.storageCodec && a.generatedKind == b.generatedKind &&
+                        a.collation == b.collation && a.resolvedCollation == b.resolvedCollation &&
+                        a.resolvedCollationUsesLocale == b.resolvedCollationUsesLocale &&
+                        a.resolvedCollationIsBinary == b.resolvedCollationIsBinary;
+                }))
+            return {};
+
+        StorageEngine::Condition condition;
+        condition.op = "typedexpr";
+        condition.colName = planned.cols[*left].dataName;
+        condition.columnComparison = StorageEngine::Condition::ColumnComparison{
+            planned.cols[*right].dataName, comparison->op};
+        StorageEngine::bindColumnComparison(condition, planned);
+        using Kind = StorageEngine::Condition::ColumnComparison::Kind;
+        if (condition.columnComparison->kind != Kind::Text) return {};
+        return condition;
+    }
 public:
     PreparedFilterOp(OpPtr child, std::shared_ptr<PreparedSelectState> state)
         : child_(std::move(child)), state_(std::move(state)) {}
     bool open() override {
         OpenInstrument startup(this); clearError(); childOpened_ = false; empty_ = false;
+        storedTextPredicate_.reset();
         if(!(preparedWhereTruths(state_->select().whereClause.get())&1)) { empty_=true;return true; }
         if (PreparedSelectState::rowIndependent(state_->select().whereClause.get())) {
             auto row = state_->execution->context(state_->outerRow);
             const auto value = state_->evaluate(state_->select().whereClause.get(), row);
             if (value.isNull || !value.asBool()) { empty_ = true; return true; }
         }
-        childOpened_ = true; return child_->open();
+        childOpened_ = true;
+        if (!child_->open()) return false;
+        storedTextPredicate_ = bindStoredTextPredicate();
+        return true;
     }
     bool next(std::string& row) override {
         NextInstrument instrumentation(this);
         if (empty_) return false;
+        std::vector<bool> nulls;
         while (child_->next(row)) {
+            if (storedTextPredicate_ && child_->lastStoredNullBitmap(nulls) &&
+                nulls.size() == state_->schema.len()) {
+                if (!StorageEngine::evalConditionOnRow(*storedTextPredicate_, row, state_->schema, nulls))
+                    continue;
+                instrumentation.emitted = true;
+                return true;
+            }
             const auto value = evaluatePreparedWhere(*state_,state_->select().whereClause.get(),
                 state_->context(*child_, row));
             if (!value.isNull && value.asBool()) { instrumentation.emitted = true; return true; }
