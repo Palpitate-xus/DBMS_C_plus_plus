@@ -3,15 +3,20 @@
 #include "access/BPTree.h"
 #include "access/BloomIndex.h"
 #include "access/HashIndex.h"
+#include "access/IndexFileUtil.h"
 #include "catalog/type_registry.h"
 #include "storage/HeapWalIdentity.h"
 #include "storage/WAL.h"
+#include "transaction/TxnIdGenerator.h"
 
 #include <cassert>
 #include <cstdint>
+#include <cstring>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <map>
 #include <optional>
 #include <stdexcept>
@@ -68,25 +73,26 @@ size_t rowCount(StorageEngine& engine, const std::string& database) {
     return count;
 }
 
-void assertFreshState(StorageEngine& engine, const std::string& payload) {
-    assert(rowCount(engine, kCompletedDatabase) == 1);
+void assertFreshState(StorageEngine& engine, const std::string& payload,
+                      const std::string& database = kCompletedDatabase) {
+    assert(rowCount(engine, database) == 1);
     const auto fresh = engine.query(
-        kCompletedDatabase, "items", {"=id 999"}, {"payload", "tag"});
+        database, "items", {"=id 999"}, {"payload", "tag"});
     assert(fresh.size() == 1);
     assert(fresh.front().find(payload) != std::string::npos);
     assert(fresh.front().find("fresh") != std::string::npos);
     assert(engine.query(
-               kCompletedDatabase, "items", {"=id 1"}, {"id"})
+               database, "items", {"=id 1"}, {"id"})
                .empty());
 
     int64_t rid = -1;
-    BPTree* primary = engine.getPKIndex(kCompletedDatabase, "items");
+    BPTree* primary = engine.getPKIndex(database, "items");
     BPTree* secondary =
-        engine.getSecondaryIndex(kCompletedDatabase, "items", "tag");
+        engine.getSecondaryIndex(database, "items", "tag");
     HashIndex* hash =
-        engine.getHashIndex(kCompletedDatabase, "items", "tag");
+        engine.getHashIndex(database, "items", "tag");
     BloomIndex* bloom =
-        engine.getBloomIndex(kCompletedDatabase, "items", "tag");
+        engine.getBloomIndex(database, "items", "tag");
     assert(primary && secondary && hash && bloom);
     assert(primary->search("999", rid));
     assert(secondary->searchMulti("fresh") == std::vector<int64_t>{rid});
@@ -110,17 +116,182 @@ std::vector<char> truncatePayload(const std::string& tableName,
 }
 
 void assertTruncateRecord(WALManager& wal, Lsn lsn,
-                          uint64_t physicalRelationId) {
+                          uint64_t physicalRelationId, uint64_t xid = 0) {
     const auto record = wal.ReadRecord(lsn);
     assert(record && record->rmid() == RM_SMGR_ID);
     assert(record->info() == XLOG_SMGR_TRUNCATE);
-    assert(record->header.xl_xid == 0);
+    assert(record->header.xl_xid == xid);
     std::string name;
     std::optional<uint64_t> identity;
     assert(heap_wal_identity::nameIdentity(record->data, name, identity));
     assert(name == "items");
     if (physicalRelationId == 0) assert(!identity);
     else assert(identity && *identity == physicalRelationId);
+}
+
+enum class Decision { Pending, Abort, Commit };
+
+Lsn appendTransactionalTruncate(WALManager& wal, uint64_t physicalRelationId,
+                               Decision decision, uint64_t commitEpoch = 0) {
+    const uint64_t xid = TxnIdGenerator::instance().nextTxId();
+    assert(xid != 0);
+    const Lsn truncateLsn = wal.XLogInsert(
+        RM_SMGR_ID, XLOG_SMGR_TRUNCATE, xid,
+        truncatePayload("items", physicalRelationId));
+    assert(truncateLsn != INVALID_LSN);
+    Lsn flushLsn = truncateLsn;
+    const bool commit = decision == Decision::Commit;
+    const uint8_t info = commit ? XLOG_XACT_COMMIT : XLOG_XACT_ABORT;
+    if (decision != Decision::Pending) {
+        const uint64_t words[] = {xid, commitEpoch};
+        const auto* first = reinterpret_cast<const char*>(words);
+        const auto* last = first + (commit ? sizeof(words) : sizeof(xid));
+        flushLsn = wal.XLogInsert(RM_XACT_ID, info, xid, std::vector<char>(first, last));
+        assert(flushLsn != INVALID_LSN);
+    }
+    assert(wal.XLogFlush(flushLsn));
+    if (decision != Decision::Pending) {
+        const auto record = wal.ReadRecord(flushLsn);
+        assert(record && record->rmid() == RM_XACT_ID &&
+               record->info() == info && record->header.xl_xid == xid);
+    }
+    assertTruncateRecord(wal, truncateLsn, physicalRelationId, xid);
+    return truncateLsn;
+}
+
+std::string readBytes(const fs::path& path) {
+    std::ifstream input(path, std::ios::binary);
+    assert(input.good());
+    return {std::istreambuf_iterator<char>(input), {}};
+}
+
+void assertEmptyState(StorageEngine& engine, const std::string& database) {
+    assert(rowCount(engine, database) == 0);
+    int64_t rid = -1;
+    auto* primary = engine.getPKIndex(database, "items");
+    auto* secondary = engine.getSecondaryIndex(database, "items", "tag");
+    auto* hash = engine.getHashIndex(database, "items", "tag");
+    auto* bloom = engine.getBloomIndex(database, "items", "tag");
+    assert(primary && secondary && hash && bloom);
+    assert(!primary->search("999", rid));
+    assert(secondary->allValues().empty());
+    assert(hash->search("fresh").empty());
+    assert(bloom->search("fresh").empty());
+}
+
+void testTransactionalTruncate(const std::string& database, Decision decision,
+                               bool excludedByTarget = false) {
+    fs::remove_all(database);
+    const auto state = fs::path(database) / "items.truncate_state";
+    const auto target = fs::path(database) / "pg_wal" / "recovery_target";
+    const std::string before = "committed before truncate " + makePayload(9000);
+    const std::string after = "committed after truncate " + makePayload(9000);
+    const bool accepted = decision == Decision::Commit && !excludedByTarget;
+    assert(!excludedByTarget || decision == Decision::Commit);
+    uint64_t relationId = 0;
+    uint32_t originalTimeline = 0;
+    Lsn truncateLsn = INVALID_LSN;
+    {
+        StorageEngine engine;
+        createTable(engine, database);
+        relationId = engine.getTableSchema(database, "items").physicalRelationId;
+        assert(relationId != 0);
+        assert(engine.insert(database, "items",
+                    {{"id", "999"}, {"payload", before}, {"tag", "fresh"}}) == DBStatus::OK);
+        assertFreshState(engine, before, database);
+        WALManager* wal = engine.getWAL(database);
+        assert(wal);
+        originalTimeline = wal->timelineId();
+        const auto now = std::time(nullptr);
+        assert(now > 0);
+        const auto epoch = static_cast<uint64_t>(now);
+        // Persist only WAL. Matching old heap/index bytes deliberately remain
+        // on disk, and no local completion marker is created by the fixture.
+        truncateLsn = appendTransactionalTruncate(
+            *wal, relationId, decision, epoch + static_cast<uint64_t>(excludedByTarget));
+        assert(!fs::exists(state));
+        if (excludedByTarget) {
+            assert(index_file::writeAtomically(target, std::to_string(epoch) + "\n"));
+        }
+    }
+
+    std::string completedState;
+    {
+        StorageEngine recovered;
+        assert(recovered.getTableSchema(database, "items").physicalRelationId == relationId);
+        if (accepted) {
+            assertEmptyState(recovered, database);
+            completedState = readBytes(state);
+            assert(completedState.size() == 24);
+            // Two 32-bit format words precede the applied LSN on disk.
+            Lsn appliedLsn = INVALID_LSN;
+            std::memcpy(&appliedLsn, completedState.data() + 2 * sizeof(uint32_t), sizeof(appliedLsn));
+            assert(appliedLsn == truncateLsn);
+            assert(recovered.insert(database, "items",
+                    {{"id", "999"}, {"payload", after}, {"tag", "fresh"}}) == DBStatus::OK);
+            assertFreshState(recovered, after, database);
+            WALManager* wal = recovered.getWAL(database);
+            assert(wal);
+            // A more recent pending or aborted record for this identity must
+            // leave the earlier accepted cutoff and the later tuple intact.
+            appendTransactionalTruncate(*wal, relationId, Decision::Pending);
+            appendTransactionalTruncate(*wal, relationId, Decision::Abort);
+        } else {
+            assertFreshState(recovered, before, database);
+            assert(!fs::exists(state));
+            if (excludedByTarget) {
+                assert(!fs::exists(target));
+                assert(recovered.getWAL(database)->timelineId() > originalTimeline);
+            }
+        }
+    }
+    {
+        StorageEngine restarted;
+        assertFreshState(restarted, accepted ? after : before, database);
+        if (accepted) assert(readBytes(state) == completedState);
+        else assert(!fs::exists(state));
+    }
+    fs::remove_all(database);
+    std::cout << "[TRUNCATE RECOVERY] " << database << " OK\n";
+}
+
+void testExcludedTruncateCompletion() {
+    const std::string database = "truncate_excluded_completion_db";
+    const auto statePath = fs::path(database) / "items.truncate_state";
+    fs::remove_all(database);
+    {
+        StorageEngine engine;
+        createTable(engine, database);
+        assert(engine.insert(database, "items",
+                    {{"id", "999"}, {"payload", "committed"}, {"tag", "fresh"}}) == DBStatus::OK);
+        auto* wal = engine.getWAL(database);
+        assert(wal);
+        const auto identity = engine.getTableSchema(database, "items").physicalRelationId;
+        const Lsn rejected = appendTransactionalTruncate(*wal, identity, Decision::Pending);
+
+        // A complete sidecar for an uncommitted reset cannot establish that
+        // rollback restored the previous generation.
+        const uint32_t header[] = {0x314e5254u, 1};
+        std::string bytes(reinterpret_cast<const char*>(header), sizeof(header));
+        bytes.append(reinterpret_cast<const char*>(&rejected), sizeof(rejected));
+        uint64_t checksum = 1469598103934665603ULL;
+        for (unsigned char byte : bytes) {
+            checksum ^= byte;
+            checksum *= 1099511628211ULL;
+        }
+        bytes.append(reinterpret_cast<const char*>(&checksum), sizeof(checksum));
+        assert(index_file::writeAtomically(statePath, bytes));
+    }
+    const auto heap = fs::path(database) / "items.dt";
+    const auto previousHeap = readBytes(heap);
+    bool rejected = false;
+    try {
+        StorageEngine restarted;
+    } catch (const std::runtime_error&) {
+        rejected = true;
+    }
+    assert(rejected && readBytes(heap) == previousHeap);
+    fs::remove_all(database);
 }
 
 void testCompletedTruncate() {
@@ -225,7 +396,7 @@ void testPendingTruncate() {
     fs::remove_all(kPendingDatabase);
 }
 
-void testNameOnlyMarkerCannotTargetCurrentGeneration() {
+void testNameOnlyMarkerCannotTargetCurrentGeneration(bool transactional = false) {
     fs::remove_all(kNameOnlyDatabase);
     {
         StorageEngine engine;
@@ -238,15 +409,23 @@ void testNameOnlyMarkerCannotTargetCurrentGeneration() {
                DBStatus::OK);
         WALManager* wal = engine.getWAL(kNameOnlyDatabase);
         assert(wal);
-        const Lsn truncateLsn = wal->XLogInsert(
-            RM_SMGR_ID, XLOG_SMGR_TRUNCATE, 0, truncatePayload("items", 0));
-        assert(truncateLsn != INVALID_LSN);
-        assert(wal->XLogFlush(truncateLsn));
-        assertTruncateRecord(*wal, truncateLsn, 0);
+        if (transactional) {
+            appendTransactionalTruncate(*wal, 0, Decision::Commit);
+        } else {
+            const Lsn truncateLsn = wal->XLogInsert(
+                RM_SMGR_ID, XLOG_SMGR_TRUNCATE, 0, truncatePayload("items", 0));
+            assert(truncateLsn != INVALID_LSN);
+            assert(wal->XLogFlush(truncateLsn));
+            assertTruncateRecord(*wal, truncateLsn, 0);
+        }
         assert(rowCount(engine, kNameOnlyDatabase) == 1);
         assert(!fs::exists(
             fs::path(kNameOnlyDatabase) / "items.truncate_state"));
     }
+    const auto heap = fs::path(kNameOnlyDatabase) / "items.dt";
+    const auto index = fs::path(kNameOnlyDatabase) / "items.idx";
+    const auto oldHeap = readBytes(heap);
+    const auto oldIndex = readBytes(index);
     bool rejected = false;
     try {
         StorageEngine recovered;
@@ -254,6 +433,7 @@ void testNameOnlyMarkerCannotTargetCurrentGeneration() {
         rejected = true;
     }
     assert(rejected);
+    assert(readBytes(heap) == oldHeap && readBytes(index) == oldIndex);
     assert(!fs::exists(fs::path(kNameOnlyDatabase) / "items.truncate_state"));
     fs::remove_all(kNameOnlyDatabase);
 }
@@ -307,6 +487,14 @@ int main() {
     std::cout << "[TRUNCATE RECOVERY] corrupt state fails closed OK\n";
     testNameOnlyMarkerCannotTargetCurrentGeneration();
     std::cout << "[TRUNCATE RECOVERY] name-only marker rejects current generation OK\n";
+    testTransactionalTruncate("truncate_transaction_pending_db", Decision::Pending);
+    testTransactionalTruncate("truncate_transaction_aborted_db", Decision::Abort);
+    testTransactionalTruncate("truncate_transaction_committed_db", Decision::Commit);
+    testTransactionalTruncate("truncate_transaction_post_target_db", Decision::Commit, true);
+    testExcludedTruncateCompletion();
+    std::cout << "[TRUNCATE RECOVERY] unresolved completion fails closed OK\n";
+    testNameOnlyMarkerCannotTargetCurrentGeneration(true);
+    std::cout << "[TRUNCATE RECOVERY] transactional name-only marker rejected OK\n";
 
     fs::remove_all(kCompletedDatabase);
     fs::remove_all(kPendingDatabase);

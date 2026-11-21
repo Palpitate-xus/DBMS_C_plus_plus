@@ -113,7 +113,11 @@ public:
     DBStatus createTable(const std::string& dbname, const TableSchema& tbl, std::string* error = nullptr);
     DBStatus createTable(const std::string& dbname, const std::string& tablename, const TableSchema& tbl, std::string* error = nullptr);
     DBStatus dropTable(const std::string& dbname, const std::string& tablename);
-    DBStatus truncateTable(const std::string& dbname, const std::string& tablename);
+    // Autocommit applies only to a standalone SQL statement with a durable
+    // transaction before-image. Native maintenance uses immediate redo.
+    enum class TruncateWalMode { Immediate, Autocommit };
+    DBStatus truncateTable(const std::string& dbname, const std::string& tablename,
+                           TruncateWalMode mode = TruncateWalMode::Immediate);
     void bufferLogicalTruncate(const std::string& dbname,
                                const std::string& tablename);
     DBStatus alterTableAddColumn(const std::string& dbname, const std::string& tablename,
@@ -2146,7 +2150,7 @@ private:
     Lsn walXactPrepare(const std::string& dbname, uint64_t xid);
     Lsn walCheckpoint(const std::string& dbname, uint64_t nextXid);
     Lsn walSmgrTruncate(const std::string& dbname,
-                        const std::string& tablename);
+                        const TableSchema& table, uint64_t xid);
     Lsn walIndexFileImage(const std::string& dbname,
                           const std::filesystem::path& indexPath,
                           const std::vector<char>& image,

@@ -21810,7 +21810,8 @@ DBStatus StorageEngine::dropTable(const std::string& dbname,
 }
 
 DBStatus StorageEngine::truncateTable(const std::string& dbname,
-                                       const std::string& tablename) {
+                                       const std::string& tablename,
+                                       TruncateWalMode mode) {
     const DatabaseMetadataWrite metadataWrite(dbPath(dbname));
     if (!metadataWrite.acquired()) return DBStatus::LOCK_CONFLICT;
     noteTemporaryRelationAccess(dbname, tablename);
@@ -21855,7 +21856,20 @@ DBStatus StorageEngine::truncateTable(const std::string& dbname,
         !table.isUnlogged && !table.isTemporary &&
         !isSessionTempPhysicalName(tablename);
     if (walLogged) {
-        truncateLsn = walSmgrTruncate(dbname, tablename);
+        uint64_t xid = 0;
+        if (mode == TruncateWalMode::Autocommit && table.physicalRelationId != 0) {
+            const auto& context = transactionContext();
+            // The transaction owner must be able to restore the old heap,
+            // indexes and completion state if this reset never commits.
+            if (!context.inTransaction || context.txnDB != dbname ||
+                !context.currentTxnId || !context.savepoints.empty() ||
+                context.txnBackupPath.empty() || !context.transactionBackupDirty ||
+                !context.databaseExclusiveLock || !context.databaseExclusiveLock->owns_lock()) {
+                return DBStatus::INVALID_VALUE;
+            }
+            xid = context.currentTxnId;
+        }
+        truncateLsn = walSmgrTruncate(dbname, table, xid);
         WALManager* wal = getWAL(dbname);
         if (truncateLsn == INVALID_LSN || !wal ||
             !wal->XLogFlush(truncateLsn)) {
@@ -49242,8 +49256,9 @@ Lsn StorageEngine::walCheckpoint(const std::string& dbname, uint64_t nextXid) {
 }
 
 Lsn StorageEngine::walSmgrTruncate(const std::string& dbname,
-                                   const std::string& tablename) {
+                                   const TableSchema& table, uint64_t xid) {
     WALManager* wal = getWAL(dbname);
+    const auto& tablename = table.tablename;
     if (!wal || tablename.empty() ||
         !validStoredRelationName(tablename)) {
         return INVALID_LSN;
@@ -49254,11 +49269,9 @@ Lsn StorageEngine::walSmgrTruncate(const std::string& dbname,
     payload.insert(payload.end(), reinterpret_cast<const char*>(&length),
                    reinterpret_cast<const char*>(&length) + sizeof(length));
     payload.insert(payload.end(), tablename.begin(), tablename.end());
-    heap_wal_identity::appendImage(payload, getTableSchema(dbname, tablename).physicalRelationId);
-    // TRUNCATE is currently an immediate storage operation (the SQL DDL
-    // bridge commits first), so its redo boundary is non-transactional.
+    heap_wal_identity::appendImage(payload, table.physicalRelationId);
     return wal->XLogInsert(
-        RM_SMGR_ID, XLOG_SMGR_TRUNCATE, 0, payload);
+        RM_SMGR_ID, XLOG_SMGR_TRUNCATE, xid, payload);
 }
 
 Lsn StorageEngine::walCatalogChange(const std::string& dbname, uint8_t info,
@@ -50400,6 +50413,11 @@ bool StorageEngine::recoverAllDatabases() {
                     committedXidsByDb[dbname].erase(xid);
                     preparedWalXidsByDb[dbname].erase(xid);
                 }
+            } else if (rec.rmid() == RM_SMGR_ID && rec.info() == XLOG_SMGR_TRUNCATE &&
+                       rec.header.xl_xid != 0 && xactWalStateByDb[dbname].count(rec.header.xl_xid)) {
+                std::cerr << "[recovery] TRUNCATE WAL follows a transaction decision for "
+                          << dbname << ":" << rec.header.xl_xid << '\n';
+                return false;
             }
             lsn += rec.header.xl_tot_len;
         }
@@ -50792,6 +50810,7 @@ bool StorageEngine::recoverAllDatabases() {
         std::vector<Lsn> redoRecordLsns;
         std::map<std::string, Lsn> latestTruncateLsns;
         std::map<uint64_t, Lsn> latestIdentityTruncateLsns;
+        std::map<uint64_t, std::set<Lsn>> excludedTruncates;
         bool needsIndexRebuild = false;
         {
             Lsn lsn = redoLsn;
@@ -50841,16 +50860,23 @@ bool StorageEngine::recoverAllDatabases() {
                            info == XLOG_SMGR_TRUNCATE) {
                     std::string tableName;
                     std::optional<uint64_t> identity;
-                    if (rec.header.xl_xid != 0 ||
-                        !decodeTruncateWalPayload(rec.data, tableName, identity)) {
+                    const uint64_t xid = rec.header.xl_xid;
+                    if (!decodeTruncateWalPayload(rec.data, tableName, identity) ||
+                        (xid != 0 && !identity)) {
                         std::cerr
                             << "[recovery] malformed TRUNCATE WAL record in "
                             << dbname << " at LSN " << lsn << std::endl;
                         return false;
                     }
-                    if (identity) latestIdentityTruncateLsns[*identity] = lsn;
-                    else latestTruncateLsns[tableName] = lsn;
-                    needsIndexRebuild = true;
+                    // The preliminary WAL scan has already decided which
+                    // transactions committed within the recovery target.
+                    if (xid != 0 && !committedXidsByDb[dbname].count(xid)) {
+                        excludedTruncates[*identity].insert(lsn);
+                    } else {
+                        if (identity) latestIdentityTruncateLsns[*identity] = lsn;
+                        else latestTruncateLsns[tableName] = lsn;
+                        needsIndexRebuild = true;
+                    }
                 }
                 if (rec.header.xl_xid != 0 &&
                     (rmid == RM_HEAP_ID || rmid == RM_INDEX_ID) &&
@@ -50997,6 +51023,20 @@ bool StorageEngine::recoverAllDatabases() {
         for (const auto& [name, boundary] : latestTruncateLsns) {
             (void)boundary;
             if (getTableSchema(dbname, name).physicalRelationId != 0) return false;
+        }
+        // Snapshot undo runs before this pass. A remaining completion file
+        // for a rejected record means that the old storage was not restored.
+        for (const auto& [identity, rejected] : excludedTruncates) {
+            const auto live = physicalRelations.find(identity);
+            if (live == physicalRelations.end()) continue;
+            Lsn appliedLsn = INVALID_LSN;
+            const auto state = readTruncateState(*this, dbname, live->second, appliedLsn);
+            if (state == TruncateStateRead::Invalid ||
+                (state == TruncateStateRead::Valid && rejected.count(appliedLsn))) {
+                std::cerr << "[recovery] unresolved transactional TRUNCATE state for "
+                          << dbname << "/" << live->second << '\n';
+                return false;
+            }
         }
         for (const auto& [identity, truncateLsn] : latestIdentityTruncateLsns) {
             const auto live = physicalRelations.find(identity);

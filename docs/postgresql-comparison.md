@@ -2,11 +2,17 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-21 · 清空表日志与事务结果
+
+PostgreSQL 18.6 清空既有表时分配新的文件编号，并按事务结果清理多余的文件代。SQLite 的 WAL 模式把修改后的页面追加到日志，用提交记录确定生效位置。DuckDB 用 WAL 恢复已提交的数据变更，并用撤销缓冲区保存事务涉及的变化。[PostgreSQL 18.6 清空表源码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/commands/tablecmds.c#L2079-L2131) · [PostgreSQL 提交及中止时的文件清理](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/catalog/storage.c#L613-L684) · [SQLite WAL](https://www.sqlite.org/wal.html#how_wal_works) · [DuckDB 并发事务](https://duckdb.org/2024/10/30/analytics-optimized-concurrent-transactions)
+
+本项目对独立执行、具有持久物理编号的 SQL `TRUNCATE` 记录事务号。恢复只为有提交记录且在恢复时间点内的清空建立重做边界。旧日志和原生维护仍可按原协议恢复。显式事务中的清空沿用全库事务备份和原日志格式，保存点仍由既有路径复原。将备份范围缩到目标表以前，还要解决恢复途中如何保留表的旧文件及其附属状态。[测试报告](test-report.md#transactional-truncate-wal-20261121)
+
 ## 2026-11-21 · 清空表时保存回滚数据的成本
 
 PostgreSQL 18.6 可以为既有表创建新的空存储，把旧文件留到提交后回收。SQLite 通过回滚日志保存即将修改的原始页面。DuckDB 用撤销缓冲区记录发生变化的数据，并用预写日志恢复已提交的更改。这些做法将事务记录限制在有关的数据。[PostgreSQL 源码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/commands/tablecmds.c#L2105-L2131) · [SQLite 原子提交](https://www.sqlite.org/atomiccommit.html#creating_a_rollback_journal_file) · [DuckDB 的事务实现](https://duckdb.org/2024/10/30/analytics-optimized-concurrent-transactions)
 
-本项目的 SQL `TRUNCATE` 仍保存全库备份，其中包括无关表和外部表空间。启动恢复会直接重做底层清空记录。要改用只保留目标表旧文件的方案，还要让恢复能识别该次清空的事务结果。当前先减少现有备份的文件遍历，读文件计算校验值时，在同一文件描述符上同步数据。[测试报告](test-report.md#backup-manifest-sync-20261121) · [性能报告](performance-report-2026-10-30.md#backup-manifest-sync-cost-20261121)
+本项目的 SQL `TRUNCATE` 仍保存全库备份，其中包括无关表和外部表空间。这里的测试减少了备份内的文件遍历，读文件计算校验值时，在同一文件描述符上同步数据。底层清空日志的提交归属在后续一轮加入。[测试报告](test-report.md#backup-manifest-sync-20261121) · [性能报告](performance-report-2026-10-30.md#backup-manifest-sync-cost-20261121) · [清空表日志](#2026-11-21--清空表日志与事务结果)
 
 ## 2026-11-21 · 清空表后只生成一份空索引
 

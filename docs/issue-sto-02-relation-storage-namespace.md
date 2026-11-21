@@ -1,5 +1,9 @@
 # STO-02: relation storage identity and physical-name collision containment
 
+## 2026-11-21 · Commit-aware truncate recovery
+
+A standalone SQL truncate with a physical relation ID records its transaction ID. The existing rollback image still protects the heap, indexes and truncate completion file. Recovery first decides which transactions committed within the target, then skips other truncate records when choosing an LSN boundary. A completion file that names a skipped LSN fails closed because startup could not establish that the older storage was restored. Historical zero-XID records and outer transactions that use the existing savepoint path retain immediate redo. Generational storage with a per-table rollback image remains open. [Recovery tests](test-report.md#transactional-truncate-wal-20261121)
+
 ## 2026-11-21 · Publish empty indexes once after table reset
 
 SQL TRUNCATE retains its checked file list across the WAL write under the same metadata and table locks. Startup and restore, which do not have a preflight list, build one before resetting the table. After the empty heap forks have been created, the index builder prepares empty files without a heap scan and publishes them through the existing REINDEX swap plan. It keeps native index definitions and BRIN range settings readable until replacement. The truncate completion record follows index publication and directory synchronization. Populated REINDEX still scans the heap. [Test results](test-report.md#truncate-single-index-rebuild-20261121) · [Timing](performance-report-2026-10-30.md#truncate-single-index-rebuild-cost-20261121)

@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>重启时核对清空表是否已提交 · 2026-11-21</summary>
+
+单独执行清空表时，数据库会在日志里记下对应的事务。重启后会核对提交结果，再决定是否补做清空。
+
+[测试报告](docs/test-report.md#transactional-truncate-wal-20261121) · [性能报告](docs/performance-report-2026-10-30.md#transactional-truncate-wal-cost-20261121)
+
+</details>
+
+<details>
 <summary>生成备份时少走一遍文件目录 · 2026-11-21</summary>
 
 数据库核对备份文件时，也会确认它已写到磁盘，省去重新打开文件的步骤。重启时会跳过还在写入的备份目录。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>清空表或改列名时会保护其他表的数据 · 2026-11-21</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-21 · 清空表或改列名时会保护其他表的数据
 
 例如，清空 `orders` 后，仍能查询 `orders_items`。如果改列名会覆盖另一张表的索引，数据库会拒绝改名。
 
 [测试报告](docs/test-report.md#truncate-column-ownership-20261121)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-21 · 建索引时会保留其他表已有的索引
 

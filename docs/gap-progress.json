@@ -2,6 +2,40 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-21 recover standalone truncate using its transaction decision",
+      "gap_ids": ["STO-02", "WAL-05", "WAL-08"],
+      "status": "partial",
+      "evidence": [
+        "src/commands/DdlExecutor.cpp",
+        "src/commands/TableManage.cpp",
+        "docs/postgresql-comparison.md",
+        "docs/test-report.md",
+        "docs/performance-report-2026-10-30.md"
+      ],
+      "tests": [
+        "tests/truncate_recovery_test.cpp",
+        "tests/truncate_owned_sequence_restart_protocol_e2e_test.py",
+        "tests/cold_start_transaction_backup_protocol_e2e_test.py"
+      ],
+      "verification": [
+        "Eleven protocol suites and twelve native regressions passed. All 92 PostgreSQL 18.6 lifecycle steps matched. WAL independently decoded from real SQL shows one shared XID for all targets and the later COMMIT; savepoint statements still use legacy immediate redo.",
+        "A kill after resetting storage and before the COMMIT restored the prior indexed row. A kill after durable COMMIT and before snapshot cleanup kept the table empty and allowed key reuse across restart.",
+        "384 same-result SQL timings on tmpfs show no stable improvement. Paired elapsed in the 15-table repeat was +0.29% for single-index truncate and +1.29% for multi-index truncate. The full database before-image remains required. Per-table rollback and full power-loss coverage remain open."
+      ],
+      "artifacts": {
+        "candidate_build": "build/array-domain-20261117/truncate-txn-wal-cmake-v1.json",
+        "protocol": "build/truncate-single-rebuild-20261121/protocol/truncate-txn-wal-cmake-v1/summary.json",
+        "native_regressions": "build/array-domain-20261117/native-truncate-txn-wal-cmake-v1/summary.json",
+        "before_and_after_commit_faults": "build/truncate-txn-wal-20261121/fault/truncate-txn-wal-cmake-v1/receipt.json",
+        "postgresql_lifecycle_audit": "build/truncate-lifecycle-20261121/txn-wal-lifecycle-candidate-v1/candidate-independent-audit.json",
+        "postgresql_commit_audit": "build/truncate-lifecycle-20261121/txn-wal-commit-candidate-v1/candidate-independent-audit.json",
+        "sql_wal_witness": "build/truncate-lifecycle-20261121/txn-wal-witness-candidate-v1/independent-wal-audit.json",
+        "sql_timing_15_tables": "build/truncate-txn-wal-20261121/perf/paired-formal-v1-12.json",
+        "sql_timing_43_tables": "build/truncate-txn-wal-20261121/perf/paired-formal-v1-40.json",
+        "sql_timing_repeat": "build/truncate-txn-wal-20261121/perf/paired-repeat-v1-12.json"
+      }
+    },
+    {
       "issue": "2026-11-21 check and sync staged backup files in one pass",
       "gap_ids": ["P0-05", "WAL-07", "WAL-08"],
       "status": "partial",

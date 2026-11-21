@@ -4609,6 +4609,12 @@ bool DdlExecutor::executeTruncate(const TruncateStmt* stmt, Session& s) {
         }
     }
 
+    // A standalone statement has a single transaction decision. An outer
+    // transaction can roll this statement back to a savepoint and later
+    // commit, so it continues to use the snapshot's existing WAL boundary.
+    const auto walMode = g_engine.inTransaction()
+        ? StorageEngine::TruncateWalMode::Immediate
+        : StorageEngine::TruncateWalMode::Autocommit;
     DdlTransaction txn(s);
     txn.enableSnapshotRollback();
     if (!txn.begin()) {
@@ -4620,7 +4626,7 @@ bool DdlExecutor::executeTruncate(const TruncateStmt* stmt, Session& s) {
         // snapshot before the first physical change so a failure in any
         // target restores every earlier target in this statement.
         txn.markSnapshotDirty();
-        const DBStatus result = g_engine.truncateTable(s.currentDB, name);
+        const DBStatus result = g_engine.truncateTable(s.currentDB, name, walMode);
         if (result != DBStatus::OK) {
             txn.rollback();
             std::cout << "TRUNCATE failed for table " << name << std::endl;
