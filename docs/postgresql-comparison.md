@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-21 · 删除时筛选记录并保留数字常量
+
+PostgreSQL 18.6 将筛选后的行交给删除步骤，并在并发事务已更新该行时按需要重新检查。SQLite 根据查询和约束选择在扫描中直接删行，或先收集标识再删除。DuckDB 把筛选放在删行节点之前。本项目继续先收集候选行，然后加锁并执行删除。对受测有符号整数等值条件，可在首次扫描时借用已经读取的空值信息，省去按行重复查找。[PostgreSQL 删除执行](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/executor/nodeModifyTable.c) · [SQLite 删除执行](https://raw.githubusercontent.com/sqlite/sqlite/master/src/delete.c) · [DuckDB 删除绑定](https://raw.githubusercontent.com/duckdb/duckdb/main/src/planner/binder/statement/bind_delete.cpp)
+
+数字常量通过筛选步骤时保留为数值，避免 `id = 7` 被误当成 `id = "7"`。首次筛选和等待其他事务后的重查都已核对。外键的另一处差异仍待处理。显式 `ON DELETE RESTRICT` 阻止删除时，本项目返回 `23503`，PostgreSQL 18.6 返回 `23001`。项目的旧表定义会把 `RESTRICT` 和 `NO ACTION` 归为同一种动作，处理错误码前需要能保留两者的区别。[本项目验证](test-report.md#narrow-delete-20261121) · [PostgreSQL 外键错误](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/utils/adt/ri_triggers.c)
+
 ## 2026-11-21 · 更新时筛选记录，查询时复用列类型
 
 PostgreSQL 18.6 的扫描节点先检查条件，再把匹配记录交给后续步骤。SQLite 用 `WHERE` 扫描逻辑生成要更新的记录。DuckDB 先绑定实际目标表，将条件作为筛选步骤放在更新之前。本项目在受支持的普通整数等值更新中也先筛选，可以省去重新读取明显不匹配的整行。原 SQL 比较仍负责最终决定，并在并发修改后对锁定的新行重新检查。[PostgreSQL 扫描](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/include/executor/execScan.h) · [SQLite 更新](https://raw.githubusercontent.com/sqlite/sqlite/master/src/update.c) · [DuckDB 更新绑定](https://raw.githubusercontent.com/duckdb/duckdb/main/src/planner/binder/statement/bind_update.cpp)

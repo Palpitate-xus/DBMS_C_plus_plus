@@ -103,11 +103,31 @@ def main():
         query("INSERT INTO delete_bound_outer_nullable VALUES(1,'right'),(99,'excluded');")
         query('DELETE FROM delete_bound_outer_target AS victim USING delete_bound_outer_source AS producer LEFT JOIN delete_bound_outer_nullable AS nullable ON producer.id=nullable.id WHERE victim.id=producer.id AND nullable.id IS NULL RETURNING abs(victim.id),victim.v,producer.id,nullable.id,nullable.v;',rows=[['2',None,'2',None,None]],oids=[23,25,23,23,25],tag='DELETE 1')
         query('SELECT id,v FROM delete_bound_outer_target ORDER BY id;',rows=[['1','matched'],['3','']],oids=[23,25])
+
+        query('CREATE TABLE delete_bound_numeric_name(id INT,"7" INT,note TEXT);', tag='CREATE TABLE')
+        query("INSERT INTO delete_bound_numeric_name VALUES(7,99,'first'),(7,NULL,'second'),"
+              "(17,7,'literal-miss'),(42,42,'column-match'),(NULL,7,'null-id');", tag='INSERT 0 5')
+        read_numeric_name = 'SELECT id,"7",note FROM delete_bound_numeric_name ORDER BY note;'
+        original = [['42','42','column-match'],['7','99','first'],['17','7','literal-miss'],
+                    [None,'7','null-id'],['7',None,'second']]
+        for isolation, predicate in (('READ COMMITTED', 'id=7'),
+                                     ('SERIALIZABLE', '7=d.id')):
+            query(f'BEGIN ISOLATION LEVEL {isolation};', tag='BEGIN', ready=b'T')
+            query(f'DELETE FROM delete_bound_numeric_name AS d WHERE {predicate} RETURNING d.id,d."7",d.note;',
+                  rows=[['7','99','first'],['7',None,'second']], oids=[23,23,25],
+                  tag='DELETE 2', ready=b'T', unordered=True)
+            query(read_numeric_name, rows=[original[i] for i in (0,2,3)], ready=b'T')
+            query('ROLLBACK;', tag='ROLLBACK')
+        query('BEGIN;', tag='BEGIN', ready=b'T')
+        query('DELETE FROM delete_bound_numeric_name WHERE id="7" RETURNING id,note;',
+              rows=[['42','column-match']], oids=[23,25], tag='DELETE 1', ready=b'T')
+        query('ROLLBACK;', tag='ROLLBACK')
+        query(read_numeric_name, rows=original, oids=[23,23,25])
         print('DELETE_BOUND_FAILURES',failures,flush=True)
         assert not failures,failures
     finally:
         try:
-            for sql in ['ROLLBACK;','DROP FUNCTION IF EXISTS delete_bound_fail(INT);','DROP FUNCTION IF EXISTS delete_bound_where(INT);','DROP TABLE IF EXISTS delete_bound_audit;','DROP TABLE IF EXISTS delete_bound_source;','DROP TABLE IF EXISTS delete_bound_rows;','DROP TABLE IF EXISTS delete_bound_outer_target;','DROP TABLE IF EXISTS delete_bound_outer_source;','DROP TABLE IF EXISTS delete_bound_outer_nullable;','DROP SEQUENCE IF EXISTS delete_bound_seq;','DROP SEQUENCE IF EXISTS delete_bound_native_seq;']:
+            for sql in ['ROLLBACK;','DROP FUNCTION IF EXISTS delete_bound_fail(INT);','DROP FUNCTION IF EXISTS delete_bound_where(INT);','DROP TABLE IF EXISTS delete_bound_audit;','DROP TABLE IF EXISTS delete_bound_source;','DROP TABLE IF EXISTS delete_bound_rows;','DROP TABLE IF EXISTS delete_bound_outer_target;','DROP TABLE IF EXISTS delete_bound_outer_source;','DROP TABLE IF EXISTS delete_bound_outer_nullable;','DROP TABLE IF EXISTS delete_bound_numeric_name;','DROP SEQUENCE IF EXISTS delete_bound_seq;','DROP SEQUENCE IF EXISTS delete_bound_native_seq;']:
                 client.simple_query(sock,sql)
         finally:
             if server: runner.stop_ours(server)

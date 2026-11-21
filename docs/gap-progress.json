@@ -2,6 +2,51 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-21 retain integer DELETE literal identity and share heap candidate selection",
+      "gap_ids": [
+        "QRY-11",
+        "QRY-13",
+        "OPT-11"
+      ],
+      "status": "partial",
+      "evidence": [
+        "src/commands/DmlExecutor.cpp",
+        "src/commands/TableManage.cpp",
+        "docs/test-report.md",
+        "docs/postgresql-comparison.md",
+        "docs/performance-report-2026-10-30.md"
+      ],
+      "tests": [
+        "tests/delete_bound_returning_protocol_e2e_test.py",
+        "tests/delete_only_qualified_returning_protocol_e2e_test.py",
+        "tests/delete_trigger_failure_test.cpp",
+        "tests/delete_wal_failure_test.cpp"
+      ],
+      "verification": [
+        "The exact 470b83a6 baseline misread id=7 as a column comparison in the presence of an identifier named 7. The new build matches PostgreSQL 18.6 across the frozen 45 cases, including READ COMMITTED, SERIALIZABLE, reversed literal, aliases, true column comparison, RETURNING, and Bind controls. The registered test catches wrong affected rows and leftover tuples.",
+        "The same existing mutation heap scan now supplies candidate row IDs for admitted ordinary non-primary-key integer UPDATE and DELETE. Both keep the bound matcher and checks against a locked successor. Two-session RC checks verify both a numeric-name change and a genuine filter-key change.",
+        "A separate 65-label comparison covers duplicates, NULL, signed bounds, partial index, savepoint, trigger effects and FK actions. ON DELETE RESTRICT still returns 23503 instead of the reference 23001. The persisted definition has no distinction between explicit RESTRICT and NO ACTION.",
+        "Exact SIGKILL after committed and uncommitted DELETE, INSERT and UPDATE preserved the committed deletes and trigger effects through two cold starts. Twenty-four related protocol suites and thirteen native tests passed.",
+        "Two pinned sizes produced 960 matched timing samples and 64 clean exits. Both 1024-row DELETE shapes improved in all sixteen wall and CPU pairs. The matched 1024 DELETE wall median changed from 21.975 to 5.888 ms. Two 128-row read controls slowed in the mixed run. The 192-sample read-only repeat showed +1.81% and -0.66% paired wall medians with broad ranges. No cause has been established.",
+        "A three-way comparison reproduced a separate non-LIMIT SELECT discrepancy with the same numeric column name in both project builds. That route remains open."
+      ],
+      "artifacts": {
+        "exact_build": "build/array-domain-20261117/narrow-delete-cmake-v1.json",
+        "registered_baseline_failure": "build/narrow-delete-20261121/registered-baseline/console.log",
+        "independent_wire_audit": "build/narrow-delete-20261121/independent-audit.json",
+        "two_client_baseline_failure": "build/narrow-delete-rc-20261121/baseline.json",
+        "two_client_candidate": "build/narrow-delete-rc-20261121/candidate.json",
+        "two_client_candidate_filter_change": "build/narrow-delete-rc-20261121/candidate-changed-id.json",
+        "candidate_recovery": "build/narrow-delete-20261121/recovery-v1/candidate/summary.json",
+        "related_suites": "build/narrow-delete-20261121/related-narrow-delete-cmake-v1/summary.json",
+        "native_regressions": "build/narrow-delete-20261121/native/summary.json",
+        "next_select_probe": "build/numeric-name-shadow-cross-command-20261121-v1/independent-audit.json",
+        "timings_128": "build/narrow-delete-perf-20261121/paired-candidate-128.json",
+        "timings_1024": "build/narrow-delete-perf-20261121/paired-candidate-1024.json",
+        "read_only_repeat_128": "build/narrow-delete-perf-20261121/paired-readonly-candidate-128.json"
+      }
+    },
+    {
       "issue": "2026-11-21 avoid repeat schema type inference and unnecessary integer UPDATE row reads",
       "gap_ids": [
         "QRY-01",

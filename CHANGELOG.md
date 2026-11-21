@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>按数字筛选删除时正确区分列名 · 2026-11-21</summary>
+
+即使表里有名为 `"7"` 的列，`WHERE id = 7` 也会按数字 7 筛选。按没有索引的整数列删除时，数据库也会少做重复读取。
+
+[使用手册](docs/MANUAL.md#删除) · [测试报告](docs/test-report.md#narrow-delete-20261121) · [性能报告](docs/performance-report-2026-10-30.md#narrow-delete-cost-20261121)
+
+</details>
+
+<details>
 <summary>按编号更新时少读无关记录 · 2026-11-21</summary>
 
 例如按订单编号更新记录。编号列没有索引时，数据库会先在扫描中检查编号，再对可能匹配的记录做完整判断。普通查询也会直接沿用已经确定的列类型。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>反复查看查询步骤时，省去重新计算 · 2026-11-20</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-20 · 反复查看查询步骤时，省去重新计算
 
 用 `EXPLAIN` 再次查看同一条简单的两表查询时，数据库可以沿用上次的执行步骤。想看查询这次实际处理了多少行，可以用 `EXPLAIN ANALYZE`。
 
 [使用手册](docs/MANUAL.md#explain) · [测试报告](docs/test-report.md#legacy-join-explain-reuse-20261120) · [性能报告](docs/performance-report-2026-10-30.md#legacy-join-explain-reuse-cost-20261120)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-20 · 两表查询加了筛选或分页，也能查看执行步骤
 

@@ -1219,6 +1219,8 @@ WHERE t.id = 42 AND t.id = s.item_id;
 
 ### 删除
 
+数字常量和带双引号的列名含义不同。`WHERE id = 7` 按数字 7 筛选，`WHERE id = "7"` 则比较同一行里的两列。普通表按有符号整数值删行时，数据库可在扫描时筛掉不匹配的行，符合条件的行仍会完成加锁、外键和触发器处理。[删除测试](test-report.md#narrow-delete-20261121)
+
 ```sql
 DELETE FROM users WHERE ID = 1;
 DELETE FROM users WHERE AGE < 18;

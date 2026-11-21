@@ -4539,9 +4539,13 @@ boundIntegerHeapEquality(const Expr* where, const TableSchema& table, size_t tar
     const auto* equality = dynamic_cast<const BinaryOpExpr*>(where);
     if (!equality || equality->op != "=" || equality->preparedSubquery) return {};
     const auto* column = dynamic_cast<const ColumnRefExpr*>(equality->left.get());
+    const bool columnOnLeft = column != nullptr;
     const Expr* input = equality->right.get();
-    if (!column || !column->schema.empty() || !column->table.empty() ||
-        column->preparedSubquery || !column->binding || column->binding->scopeDepth ||
+    if (!columnOnLeft) {
+        column = dynamic_cast<const ColumnRefExpr*>(equality->right.get());
+        input = equality->left.get();
+    }
+    if (!column || column->preparedSubquery || !column->binding || column->binding->scopeDepth ||
         column->binding->mergedUsing || column->binding->sourceOrdinal != target ||
         column->binding->columnOrdinal >= table.len() || !input || input->preparedSubquery) return {};
     const size_t ordinal = column->binding->columnOrdinal;
@@ -4585,7 +4589,8 @@ boundIntegerHeapEquality(const Expr* where, const TableSchema& table, size_t tar
     QueryComparisonBinding comparison;
     try {
         comparison = equality->comparison ? *equality->comparison :
-            ExprEvaluator::resolveComparison("=", type, inputType);
+            ExprEvaluator::resolveComparison("=", columnOnLeft ? type : inputType,
+                                                 columnOnLeft ? inputType : type);
     } catch (const DbError&) { return {}; }
     if (!comparison.strict || comparison.op != "=" || !integer(comparison.leftType) ||
         !integer(comparison.rightType) || comparison.identity !=
@@ -6609,7 +6614,9 @@ class BoundDmlExecution {
         // This is only a necessary heap predicate. The typed WHERE matcher
         // below still owns evaluation and the engine retains MVCC/RLS/SSI.
         // No expression, routine or child query is evaluated to obtain it.
-        return {"="+stored.dataName+" "+std::to_string(number)};
+        // The RHS is already bound data. Keep it distinct from a quoted
+        // column whose name happens to match the number.
+        return {"apicond ="+stored.dataName+" "+std::to_string(number)};
     }
     std::string joinedTargetPrimaryKeyProbe(const Expr* where) const {
         // Keep predicates to the right of an effectful expression in their
@@ -6986,6 +6993,8 @@ private:
         }
         auto* remove=static_cast<DeleteStmt*>(statement_);
         const auto matcher=[&](const SqlRow& old){return matches(remove->whereClause.get(),old);};
+        callbacks.integerHeapEquality = boundIntegerHeapEquality(
+            remove->whereClause.get(), table_, target_->ordinal);
         const auto status=g_engine.removeRows(session_.currentDB,physical_,integerEqualityCandidates(remove->whereClause.get()),returning_->empty()?nullptr:&images,matcher,&count,&callbacks,virtualRows.output(),true);
         if(status!=DBStatus::OK)throw DbError(sqlstateForDBStatus(status),"WITH DELETE failed");
         return result(deletedReturningImages(images,&virtualRows),"DELETE",count);
