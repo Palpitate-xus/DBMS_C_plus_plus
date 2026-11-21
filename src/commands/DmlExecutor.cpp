@@ -4525,6 +4525,75 @@ static std::vector<std::string> boundIntegerPrimaryKeyCandidates(
     return conditions;
 }
 
+// A necessary predicate only: storage scans the heap and the original bound
+// WHERE remains authoritative for every candidate and every locked successor.
+static std::optional<StorageEngine::IntegerHeapEqualityCandidate>
+boundIntegerHeapEquality(const Expr* where, const TableSchema& table, size_t target) {
+    const auto isolation = g_engine.getIsolationLevel();
+    if ((isolation != IsolationLevel::READ_COMMITTED && isolation != IsolationLevel::REPEATABLE_READ) ||
+        !table.physicalRelationId || table.isUnlogged ||
+        table.formatVersion != DATA_FILE_FORMAT_VERSION ||
+        table.partitionType != TableSchema::PartitionType::None ||
+        std::any_of(table.cols.begin(), table.cols.end(),
+                    [](const Column& field) { return field.generatedKind == 'v'; })) return {};
+    const auto* equality = dynamic_cast<const BinaryOpExpr*>(where);
+    if (!equality || equality->op != "=" || equality->preparedSubquery) return {};
+    const auto* column = dynamic_cast<const ColumnRefExpr*>(equality->left.get());
+    const Expr* input = equality->right.get();
+    if (!column || !column->schema.empty() || !column->table.empty() ||
+        column->preparedSubquery || !column->binding || column->binding->scopeDepth ||
+        column->binding->mergedUsing || column->binding->sourceOrdinal != target ||
+        column->binding->columnOrdinal >= table.len() || !input || input->preparedSubquery) return {};
+    const size_t ordinal = column->binding->columnOrdinal;
+    const auto& stored = table.cols[ordinal];
+    // Preserve the existing primary-key probe and its fallback unchanged.
+    if (stored.isPrimaryKey || std::find(table.pkColIndices.begin(), table.pkColIndices.end(), ordinal)
+            != table.pkColIndices.end() || stored.isArray || stored.isUnsigned ||
+        stored.isVariableLength || !stored.domainName.empty() || stored.generatedKind ||
+        !stored.generatedExpr.empty() || stored.dataName != column->column) return {};
+    const auto type = ExprHelper::canonicalResultTypeName(stored.dataType);
+    const size_t width = type == "smallint" ? 2 : type == "integer" ? 4 : type == "bigint" ? 8 : 0;
+    if (!width || stored.dsize != width ||
+        ExprHelper::canonicalResultTypeName(column->binding->declaredType) != type ||
+        column->binding->typeOid != mapBuiltinTypeNameToOid(type)) return {};
+
+    std::string text;
+    if (const auto* literal = dynamic_cast<const LiteralExpr*>(input)) {
+        if (!literal->typeName.empty()) return {};
+        text = literal->value;
+    } else if (const auto* unary = dynamic_cast<const UnaryOpExpr*>(input)) {
+        const auto* literal = dynamic_cast<const LiteralExpr*>(unary->operand.get());
+        if ((unary->op != "+" && unary->op != "-") || !literal ||
+            literal->preparedSubquery || !literal->typeName.empty() || literal->value.empty() ||
+            !std::all_of(literal->value.begin(), literal->value.end(),
+                         [](unsigned char c) { return c >= '0' && c <= '9'; })) return {};
+        text = unary->op + literal->value;
+    } else return {};
+    const auto inputType = ExprHelper::canonicalResultTypeName(ExprHelper::inferValuesResultType(text));
+    if (inputType != "integer" && inputType != "bigint") return {};
+    const char* first = text.data();
+    const char* last = first + text.size();
+    if (first != last && *first == '+') ++first;
+    int64_t value = 0;
+    const auto parsed = std::from_chars(first, last, value);
+    if (first == last || parsed.ec != std::errc{} || parsed.ptr != last ||
+        (type == "smallint" && (value < INT16_MIN || value > INT16_MAX)) ||
+        (type == "integer" && (value < INT32_MIN || value > INT32_MAX))) return {};
+    const auto integer = [](const std::string& valueType) {
+        return valueType == "smallint" || valueType == "integer" || valueType == "bigint";
+    };
+    QueryComparisonBinding comparison;
+    try {
+        comparison = equality->comparison ? *equality->comparison :
+            ExprEvaluator::resolveComparison("=", type, inputType);
+    } catch (const DbError&) { return {}; }
+    if (!comparison.strict || comparison.op != "=" || !integer(comparison.leftType) ||
+        !integer(comparison.rightType) || comparison.identity !=
+            "builtin-comparison:=(" + comparison.leftType + "," + comparison.rightType + ")") return {};
+    return StorageEngine::IntegerHeapEqualityCandidate{
+        ordinal, stored.dataName, type, table.physicalRelationId, value};
+}
+
 bool executePreparedUpdate(const UpdateStmt& stmt, Session& s, bool& fallback,
                            const std::string& originalSql) {
     fallback = false;
@@ -4768,9 +4837,13 @@ bool executePreparedUpdate(const UpdateStmt& stmt, Session& s, bool& fallback,
     std::vector<SqlRow> updatedRows;
     std::vector<StorageEngine::UpdateRowImage> images;
     size_t affectedRows = 0;
+    const auto primaryCandidates =
+        boundIntegerPrimaryKeyCandidates(update->whereClause.get(), table, targetOrdinal);
+    if (primaryCandidates.empty())
+        callbacks.integerHeapEquality = boundIntegerHeapEquality(update->whereClause.get(), table, targetOrdinal);
     const DBStatus status = g_engine.updateRows(
         s.currentDB, resolvedTable, constantUpdates,
-        boundIntegerPrimaryKeyCandidates(update->whereClause.get(), table, targetOrdinal),
+        primaryCandidates,
         stmt.returning.empty() ? nullptr : &updatedRows, resolver, matcher,
         &affectedRows, stmt.returning.empty() ? nullptr : &images,
         &callbacks, virtualRows.output(), true);

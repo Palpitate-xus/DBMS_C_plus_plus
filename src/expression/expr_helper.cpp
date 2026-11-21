@@ -2150,6 +2150,13 @@ std::string ExprHelper::inferParsedInputType(
     const std::map<std::string, std::string>& typeHints,
     const std::string& currentDB,
     StorageEngine* functionEngine,const ExprEvaluator* functionEvaluator) {
+    // A bound column has no routine or child declarations to resolve.
+    // Keep the same AST inference and protocol type normalization as below.
+    if (const auto* column = dynamic_cast<const ColumnRefExpr*>(expression);
+        column && column->binding) {
+        const std::string type = protocolTypeName(inferAstResultType(expression, typeHints));
+        return type.empty() ? "unknown" : type;
+    }
     const auto routineTypes = collectRoutineResultTypes(expression, currentDB, functionEngine,functionEvaluator,&typeHints);
     const std::string type = protocolTypeName(inferAstResultType(expression, typeHints, &routineTypes));
     return type.empty() ? "unknown" : type;

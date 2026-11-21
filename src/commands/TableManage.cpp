@@ -34123,9 +34123,65 @@ DBStatus StorageEngine::updateInternal(
                        tbl, conds, context, ownerBeforeWrite, cacheMutex_, pa, transactionRegistry(), mutationCallbacks)) {
             matchIds.insert(*target);
         } else if (conds.empty()) {
-            if (!forEachRow(dbname, tablename, [&](uint32_t pid, uint16_t sid, const char*, size_t) {
-                matchIds.insert(encodeRid(pid, sid));
-            })) scanFailed = true;
+            bool filtered = false;
+            if (mutationCallbacks && mutationCallbacks->integerHeapEquality && updateMatcher &&
+                !mutationCallbacks->matches && !mutationCallbacks->recheckJoinedTarget &&
+                context.inTransaction && context.txnDB == dbname &&
+                (context.txnIsolationLevel == IsolationLevel::READ_COMMITTED ||
+                 context.txnIsolationLevel == IsolationLevel::REPEATABLE_READ) &&
+                !tbl.isUnlogged && !isSessionTemporaryRelation(tablename) &&
+                tbl.formatVersion == DATA_FILE_FORMAT_VERSION &&
+                tbl.partitionType == TableSchema::PartitionType::None &&
+                std::none_of(tbl.cols.begin(), tbl.cols.end(),
+                             [](const Column& column) { return column.generatedKind == 'v'; })) {
+                const auto& candidate = *mutationCallbacks->integerHeapEquality;
+                if (candidate.physicalRelationId && candidate.physicalRelationId == tbl.physicalRelationId &&
+                    candidate.columnOrdinal < tbl.len()) {
+                    const auto& column = tbl.cols[candidate.columnOrdinal];
+                    const auto type = ExprHelper::canonicalResultTypeName(column.dataType);
+                    const size_t width = type == "smallint" ? 2 : type == "integer" ? 4 : type == "bigint" ? 8 : 0;
+                    size_t offset = 0;
+                    bool shapeValid = width && column.dataName == candidate.columnName &&
+                        type == candidate.declaredType && column.dsize == width &&
+                        !column.isArray && !column.isUnsigned && !column.isVariableLength &&
+                        !column.generatedKind && column.generatedExpr.empty() && column.domainName.empty() &&
+                        !column.isPrimaryKey &&
+                        std::find(tbl.pkColIndices.begin(), tbl.pkColIndices.end(), candidate.columnOrdinal)
+                            == tbl.pkColIndices.end();
+                    for (size_t i = 0; shapeValid && i < candidate.columnOrdinal; ++i) {
+                        if (tbl.cols[i].isVariableLength) continue;
+                        if (tbl.cols[i].dsize > std::numeric_limits<size_t>::max() - offset)
+                            shapeValid = false;
+                        else offset += tbl.cols[i].dsize;
+                    }
+                    if (shapeValid) {
+                        Condition condition;
+                        condition.op = "=";
+                        condition.colName = candidate.columnName;
+                        condition.value = std::to_string(candidate.value);
+                        condition.decodedLiteralRhs = true;
+                        std::vector<bool> nulls(tbl.len(), false);
+                        bool usable = true;
+                        const bool scanOk = forEachRow(dbname, tablename,
+                            [&](uint32_t pid, uint16_t sid, const char* data, size_t len) {
+                                if (!usable) return;
+                                if (offset > len || width > len - offset) { usable = false; return; }
+                                ScannedNullRowBinding nullOwner(tbl, nulls, data, len);
+                                if (!nullOwner.active()) { usable = false; return; }
+                                const std::string row(data, len);
+                                if (evalConditionOnRowWithSyntax(condition, row, tbl, nullptr))
+                                    matchIds.insert(encodeRid(pid, sid));
+                            });
+                        if (!scanOk) scanFailed = true;
+                        else if (usable) filtered = true;
+                        else matchIds.clear();
+                    }
+                }
+            }
+            if (!filtered && !scanFailed &&
+                !forEachRow(dbname, tablename, [&](uint32_t pid, uint16_t sid, const char*, size_t) {
+                    matchIds.insert(encodeRid(pid, sid));
+                })) scanFailed = true;
         } else {
             matchIds = filterRows(dbname, tablename, conds, nullptr, &scanFailed);
         }

@@ -693,6 +693,15 @@ public:
         const SqlRow&, SqlRow&)>;
     using SqlUpdateMatcher = std::function<bool(const SqlRow&)>;
     using SqlDeleteMatcher = std::function<bool(const SqlRow&)>;
+    // A pure necessary predicate for an ordinary UPDATE's heap scan. The
+    // typed matcher remains authoritative, including after a row-lock wait.
+    struct IntegerHeapEqualityCandidate {
+        size_t columnOrdinal = 0;
+        std::string columnName;
+        std::string declaredType;
+        uint64_t physicalRelationId = 0;
+        int64_t value = 0;
+    };
     // The physical target occurrence remains distinct even when two tuples
     // have identical nullable values. Optional callbacks preserve the legacy
     // mutation path (RLS/FKs/triggers/locks/indexes) and are never inherited by
@@ -713,6 +722,7 @@ public:
         // A necessary integer key comparison for a checked index hit. A
         // miss leaves joined source demand and the heap scan unchanged.
         std::string targetPrimaryKeyProbe;
+        std::optional<IntegerHeapEqualityCandidate> integerHeapEquality;
     };
 
     using UpdateResolver = std::function<bool(

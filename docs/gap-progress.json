@@ -2,6 +2,51 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-21 avoid repeat schema type inference and unnecessary integer UPDATE row reads",
+      "gap_ids": [
+        "QRY-01",
+        "QRY-11",
+        "OPT-11"
+      ],
+      "status": "partial",
+      "evidence": [
+        "src/expression/expr_helper.cpp",
+        "src/commands/DmlExecutor.cpp",
+        "src/commands/TableManage.cpp",
+        "docs/test-report.md",
+        "docs/performance-report-2026-10-30.md"
+      ],
+      "tests": [
+        "tests/update_typed_predicate_protocol_e2e_test.py",
+        "tests/query_root_fetch_protocol_e2e_test.py",
+        "tests/redo_crash_recovery_test.cpp"
+      ],
+      "verification": [
+        "A previously bound ColumnRef reuses the same declared-type inference without constructing the routine declaration evaluator. Exact base and candidate runs both read one row for ordinary LIMIT 1 and zero for LIMIT 0.",
+        "An ordinary non-primary-key built-in signed integer equality UPDATE can prefilter in the existing heap visibility scan. The original typed match and successor recheck still run. Coverage includes variable-width neighboring columns, NULL, signed extremes, duplicates, a partial secondary index, prior in-transaction writes and savepoint rollback.",
+        "The exact baseline, PostgreSQL 18.6 and the candidate agreed in 41 wire cases on values, NULLs, SQLSTATE, names, type OIDs, command tags and Ready state. Twenty-eight related protocol suites and eight native tests passed, including a successful retry with the required fsync wrapper.",
+        "Two clients verified a wait followed by UPDATE 0 after the first transaction committed a key change. Fresh old and new cases survived SIGKILL with three committed duplicate-key updates retained and all uncommitted changes discarded. Seventeen full requests and responses matched on the two project builds.",
+        "Across 16 pairs and 480 timings with identical response and transaction witness frames, the selective non-indexed UPDATE wall median went from 15.925 to 5.996 ms. All 16 UPDATE pairs improved in wall and server CPU time. The four wall-clock controls were split eight to eight.",
+        "The independent 480-sample pinned recheck of the previous schema change did not repeat the first-round increases for LIMIT 1 and explicit UPDATE. The initial reporting driver exited 1 after writing its complete results and all 32 servers exited normally."
+      ],
+      "artifacts": {
+        "exact_build": "build/array-domain-20261117/narrow-query-write-cmake-v1.json",
+        "previous_update_repeat": "build/wide-narrow-recheck-20261121/paired.json",
+        "previous_repeat_driver": "build/wide-narrow-recheck-20261121/driver-exit.json",
+        "independent_wire_comparison": "build/narrow-query-write-20261121/filter-independent-audit.json",
+        "update_exact_baseline": "build/narrow-query-write-20261121/final-test-wide-table-cmake-v2/console.log",
+        "update_exact_candidate": "build/narrow-query-write-20261121/final-test-narrow-query-write-cmake-v1/console.log",
+        "limit_row_demand_baseline": "build/narrow-query-write-20261121/row-demand-wide-table-cmake-v2.json",
+        "limit_row_demand_candidate": "build/narrow-query-write-20261121/row-demand-narrow-query-write-cmake-v1.json",
+        "lock_successor_comparison": "build/narrow-write-recheck-20261121/candidate.json",
+        "cold_recovery": "build/narrow-query-write-20261121/recovery-v1/candidate/summary.json",
+        "related_suites": "build/narrow-query-write-20261121/related-narrow-query-write-cmake-v1/summary.json",
+        "native_checks": "build/narrow-query-write-20261121/native/summary.json",
+        "native_publication_retry": "build/narrow-query-write-20261121/native/read-transaction-publication-retry/summary.json",
+        "paired_timing": "build/wide-narrow-future-20261121/paired-candidate-v1.json"
+      }
+    },
+    {
       "issue": "2026-11-20 allow wider ordinary tables and recover unflushed transaction pages",
       "gap_ids": [
         "CAT-10",

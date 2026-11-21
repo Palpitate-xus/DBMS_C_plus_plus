@@ -1,9 +1,18 @@
 # 更新日志
 
 <details>
+<summary>按编号更新时少读无关记录 · 2026-11-21</summary>
+
+例如按订单编号更新记录。编号列没有索引时，数据库会先在扫描中检查编号，再对可能匹配的记录做完整判断。普通查询也会直接沿用已经确定的列类型。
+
+[测试报告](docs/test-report.md#narrow-query-write-20261121) · [性能报告](docs/performance-report-2026-10-30.md#narrow-query-write-cost-20261121)
+
+</details>
+
+<details>
 <summary>普通表最多可以建 1,600 列 · 2026-11-20</summary>
 
-列数上限从 30 提高到 1,600。实际能用多少列还取决于列的类型和每行数据的大小。 同时修复了某些大批写入尚未提交时意外退出、导致数据库无法重启的问题。
+列数上限从 30 提高到 1,600。实际能用多少列还取决于列的类型和每行数据的大小。同时修复了某些大批写入尚未提交时意外退出、导致数据库无法重启的问题。
 
 [使用手册](docs/MANUAL.md#建表) · [测试报告](docs/test-report.md#wide-table-20261120) · [性能报告](docs/performance-report-2026-10-30.md#wide-table-narrow-cost-20261120)
 
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>两表查询加了筛选或分页，也能查看执行步骤 · 2026-11-20</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-20 · 两表查询加了筛选或分页，也能查看执行步骤
 
 用整数编号匹配两张表时，即使还要筛选、排序或分批取结果，也可以用 `EXPLAIN` 查看数据库怎样查找和匹配记录。
 
 [使用手册](docs/MANUAL.md#explain) · [测试报告](docs/test-report.md#integer-join-explain-20261120) · [性能报告](docs/performance-report-2026-10-30.md#integer-join-explain-cost-20261120)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-20 · 两表按连续编号匹配时，可以直接找到记录
 

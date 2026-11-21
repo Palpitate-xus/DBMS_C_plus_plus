@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-21 · 更新时筛选记录，查询时复用列类型
+
+PostgreSQL 18.6 的扫描节点先检查条件，再把匹配记录交给后续步骤。SQLite 用 `WHERE` 扫描逻辑生成要更新的记录。DuckDB 先绑定实际目标表，将条件作为筛选步骤放在更新之前。本项目在受支持的普通整数等值更新中也先筛选，可以省去重新读取明显不匹配的整行。原 SQL 比较仍负责最终决定，并在并发修改后对锁定的新行重新检查。[PostgreSQL 扫描](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/include/executor/execScan.h) · [SQLite 更新](https://raw.githubusercontent.com/sqlite/sqlite/master/src/update.c) · [DuckDB 更新绑定](https://raw.githubusercontent.com/duckdb/duckdb/main/src/planner/binder/statement/bind_update.cpp)
+
+PostgreSQL 把已打开的表登记在本次执行的数据结构里供后续步骤使用，`LIMIT` 也会在取够后停止向子节点取行。本项目的普通表 `LIMIT 1` 本来就会停止读行。这轮省去的是查询为直接列引用准备输出时，重复初始化函数类型推断的工作。[PostgreSQL 表绑定](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/executor/execUtils.c) · [PostgreSQL LIMIT](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/executor/nodeLimit.c)
+
 ## 2026-11-20 · 普通表支持更多列
 
 PostgreSQL 18.6 规定表最多 1,600 列，实际还受行大小限制，并用行头的位图区分空值。SQLite 默认最多 2,000 列，也提醒宽列声明可能增加语句准备成本。DuckDB 的列式存储把同一列的值放在一起，并用单独的位图记录空值。本项目把内存里的表定义改为按实际列数保存，沿用原有的磁盘定义和空值位图。普通表的列数上限可到 1,600，某些列组合仍受固定字段占用和单页行宽约束。[PostgreSQL 限制](https://www.postgresql.org/docs/18/limits.html) · [PostgreSQL 行头定义](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/include/access/htup_details.h) · [SQLite 限制](https://sqlite.org/limits.html) · [DuckDB 列式数据](https://duckdb.org/docs/2.0/clients/c/vector) · [本项目验证](test-report.md#wide-table-20261120)
