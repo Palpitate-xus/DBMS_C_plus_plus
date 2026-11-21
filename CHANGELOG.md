@@ -1,27 +1,27 @@
 # 更新日志
 
 <details>
-<summary>重启时核对清空表是否已提交 · 2026-11-21</summary>
+<summary>重启时会检查清空表是否已提交 · 2026-11-21</summary>
 
-单独执行清空表时，数据库会在日志里记下对应的事务。重启后会核对提交结果，再决定是否补做清空。
+对新建的普通表，单独执行 `TRUNCATE` 时如果数据库意外退出，重启后会根据这次清空是否已提交，保留空表或恢复原来的数据。
 
 [测试报告](docs/test-report.md#transactional-truncate-wal-20261121) · [性能报告](docs/performance-report-2026-10-30.md#transactional-truncate-wal-cost-20261121)
 
 </details>
 
 <details>
-<summary>生成备份时少走一遍文件目录 · 2026-11-21</summary>
+<summary>备份时减少重复打开文件 · 2026-11-21</summary>
 
-数据库核对备份文件时，也会确认它已写到磁盘，省去重新打开文件的步骤。重启时会跳过还在写入的备份目录。
+核对备份文件和把它写到磁盘时，只需打开一次文件。备份做到一半中断后，数据库重启时会跳过那份备份。
 
 [测试报告](docs/test-report.md#backup-manifest-sync-20261121) · [性能报告](docs/performance-report-2026-10-30.md#backup-manifest-sync-cost-20261121)
 
 </details>
 
 <details>
-<summary>清空表后只重建一次索引 · 2026-11-21</summary>
+<summary>清空表时只重建一次索引 · 2026-11-21</summary>
 
-例如，清空 `orders` 后，订单号和商品名的索引都会变为空。重新插入订单后，可以继续用原来的索引查询。
+清空订单表后，可以照常写入新订单，继续用原来的索引按订单号查询。
 
 [测试报告](docs/test-report.md#truncate-single-index-rebuild-20261121) · [性能报告](docs/performance-report-2026-10-30.md#truncate-single-index-rebuild-cost-20261121)
 
