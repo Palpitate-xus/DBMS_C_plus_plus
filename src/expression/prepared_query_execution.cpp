@@ -53,6 +53,7 @@ ExprPtr copyExpression(const Expr* source, std::map<const Expr*, const Expr*>& s
     else if (const auto* node = dynamic_cast<const ParameterExpr*>(source)) result = std::make_unique<ParameterExpr>(*node);
     else if (const auto* node = dynamic_cast<const UnaryOpExpr*>(source)) {
         auto target = std::make_unique<UnaryOpExpr>(); target->op = node->op;
+        target->collationBinding = node->collationBinding;
         target->operand = copy(node->operand); result = std::move(target);
     } else if (const auto* node = dynamic_cast<const BinaryOpExpr*>(source)) {
         auto target = std::make_unique<BinaryOpExpr>(); target->op = node->op;
@@ -135,6 +136,19 @@ ExprPtr copyExpression(const Expr* source, std::map<const Expr*, const Expr*>& s
     return result;
 }
 
+ExprPtr withResultCollation(ExprPtr expression, ExpressionCollation collation) {
+    if (collation.comparisonName.empty()) return expression;
+    if (!collation.identity.empty() &&
+        ExprEvaluator::explicitCollationOf(expression.get()).identity == collation.identity) return expression;
+    auto collate = std::make_unique<UnaryOpExpr>();
+    collate->op = "COLLATE " + quoteIdentifier(collation.comparisonName);
+    collate->collationBinding = std::move(collation);
+    collate->sourceBegin = expression->sourceBegin;
+    collate->sourceEnd = expression->sourceEnd;
+    collate->operand = std::move(expression);
+    return collate;
+}
+
 ExprPtr constantExpression(const ExprValue& value, const Expr* source) {
     auto literal = std::make_unique<LiteralExpr>();
     literal->typeName = value.typeName;
@@ -157,11 +171,13 @@ ExprPtr constantExpression(const ExprValue& value, const Expr* source) {
         cast->typeName = value.typeName; cast->operand = std::move(result);
         result = std::move(cast);
     }
-    if (!value.collation.empty()) {
-        auto collate = std::make_unique<UnaryOpExpr>();
-        collate->op = "COLLATE " + quoteIdentifier(value.collation);
-        collate->operand = std::move(result); result = std::move(collate);
+    // A folded datum carries its original collation identity and comparator.
+    auto collation = ExprEvaluator::explicitCollationOf(source);
+    if (collation.identity.empty()) {
+        collation.comparisonName = value.collation;
+        collation.usesSystemLocale = value.collationUsesSystemLocale;
     }
+    result = withResultCollation(std::move(result), std::move(collation));
     if (source) { result->sourceBegin = source->sourceBegin; result->sourceEnd = source->sourceEnd; }
     return result;
 }
@@ -187,6 +203,7 @@ std::optional<ExprValue> simplifyCaseConstants(ExprPtr& expression,
         return evaluator.eval(literal, RowContext{});
     }
     if (auto* conditional = dynamic_cast<CaseExpr*>(expression.get())) {
+        const auto collation = ExprEvaluator::explicitCollationOf(conditional);
         const auto switchValue = simplifyCaseConstants(conditional->switchExpr, evaluator, roles);
         std::vector<std::pair<ExprPtr,ExprPtr>> remaining;
         std::vector<std::pair<std::string,std::string>> comparisons;
@@ -235,9 +252,10 @@ std::optional<ExprValue> simplifyCaseConstants(ExprPtr& expression,
         if (conditional->whenClauses.empty()) {
             auto fallback = std::move(conditional->elseExpr);
             if (!fallback) fallback = constantExpression(ExprValue("unknown","",true),conditional);
-            expression = std::move(fallback);
+            expression = withResultCollation(std::move(fallback), collation);
             return simplifyCaseConstants(expression,evaluator,roles);
         }
+        expression = withResultCollation(std::move(expression), collation);
         return std::nullopt;
     }
     bool constant = false;
@@ -341,7 +359,9 @@ std::optional<ExprValue> simplifyCaseConstants(ExprPtr& expression,
         if (roles && op == "||" && ((left && left->isNull) || (right && right->isNull)) &&
             roles->textConcatenation(binary)) {
             ExprValue result("text", "", true);
-            result.collation = ExprEvaluator::analyzeExplicitResultCollation(binary);
+            const auto collation = ExprEvaluator::explicitCollationOf(binary);
+            result.collation = collation.comparisonName;
+            result.collationUsesSystemLocale = collation.usesSystemLocale;
             expression = constantExpression(result, binary);
             return result;
         }
@@ -424,6 +444,7 @@ std::optional<ExprValue> simplifyCaseConstants(ExprPtr& expression,
         // qualified stored function must retain ordinary argument demand.
         if (roles && roles->coalesce(call)) {
             const auto type = roles->resultType(call); // full, unpruned metadata
+            const auto collation = ExprEvaluator::explicitCollationOf(call);
             bool knownPrefix = true;
             for (size_t i = 0; i < call->args.size(); ++i) {
                 const auto value = simplifyCaseConstants(call->args[i],evaluator,roles);
@@ -436,6 +457,10 @@ std::optional<ExprValue> simplifyCaseConstants(ExprPtr& expression,
                         conversion.operand = constantExpression(datum,nullptr);
                         datum = evaluator.eval(&conversion,RowContext{});
                     }
+                    if (!collation.identity.empty()) {
+                        datum.collation = collation.comparisonName;
+                        datum.collationUsesSystemLocale = collation.usesSystemLocale;
+                    }
                     expression = constantExpression(datum,expression.get());
                     return datum;
                 }
@@ -445,10 +470,13 @@ std::optional<ExprValue> simplifyCaseConstants(ExprPtr& expression,
                     auto cast = std::make_unique<CastExpr>(); cast->typeName = type; cast->implicit = true;
                     cast->operand = std::move(argument); argument = std::move(cast);
                 }
+                expression = withResultCollation(std::move(expression), collation);
                 return std::nullopt;
             }
             if (knownPrefix) {
-                const ExprValue result(type,"",true);
+                ExprValue result(type,"",true);
+                result.collation = collation.comparisonName;
+                result.collationUsesSystemLocale = collation.usesSystemLocale;
                 expression = constantExpression(result,expression.get()); return result;
             }
             return std::nullopt;
@@ -469,7 +497,9 @@ std::optional<ExprValue> simplifyCaseConstants(ExprPtr& expression,
             const auto type = roles->strictStringResult(call);
             if (!type.empty()) {
                 ExprValue result(type, "", true);
-                result.collation = ExprEvaluator::analyzeExplicitResultCollation(call);
+                const auto collation = ExprEvaluator::explicitCollationOf(call);
+                result.collation = collation.comparisonName;
+                result.collationUsesSystemLocale = collation.usesSystemLocale;
                 expression = constantExpression(result, call);
                 return result;
             }
@@ -1333,7 +1363,6 @@ void PreparedQueryExecution::prepareExpression(Expr* expression) {
     if (!expression || prepared_.count(expression)) return;
     if (!owners_.count(expression))
         throw DbError("XX000", "expression does not belong to this prepared execution");
-    ExprEvaluator::analyzeExplicitResultCollation(expression);
     if (const auto planned = compiled_.find(expression); planned != compiled_.end()) {
         // Explicit pure planning does not bind runtime callbacks or give an
         // aggregate/window/SRF a scalar execution role. The actual consumer
@@ -1355,7 +1384,8 @@ void PreparedQueryExecution::prepareExpression(Expr* expression) {
         memo_.erase(child.first);
         sites[child.first] = child.first;
     }
-    ExprHelper::prepareArrayTypes(compiled.get(), {}, database_, engine_);
+    ExprHelper::prepareArrayTypes(compiled.get(), {}, database_, engine_, nullptr, nullptr, &collations_);
+    ExprEvaluator::analyzeExplicitResultCollation(compiled.get());
     planCaseConstants(compiled,evaluator_);
     if(std::any_of(query_->sourceRanges.begin(),query_->sourceRanges.end(),[](const auto& range){return bool(range.generatedRelation);}))
     visitStructuredValue(compiled.get(),[&](const Expr* value) {
@@ -1388,7 +1418,6 @@ void PreparedQueryExecution::planExpressionConstants(Expr* expression,
     if (!owners_.count(expression))
         throw DbError("XX000", "constant planning requires a genuine prepared expression owner");
     if (!compiled_.count(expression)) {
-        ExprEvaluator::analyzeExplicitResultCollation(expression);
         std::map<const Expr*, const Expr*> sites;
         std::map<const Expr*, const Expr*> independentChildren;
         auto compiled = copyExpression(expression, sites, independentChildren);
@@ -1400,7 +1429,8 @@ void PreparedQueryExecution::planExpressionConstants(Expr* expression,
             memo_.erase(child.first);
             sites[child.first] = child.first;
         }
-        ExprHelper::prepareArrayTypes(compiled.get(), {}, database_, engine_);
+        ExprHelper::prepareArrayTypes(compiled.get(), {}, database_, engine_, nullptr, nullptr, &collations_);
+        ExprEvaluator::analyzeExplicitResultCollation(compiled.get());
         for (const auto& site : sites) originalSites_[site.first] = site.second;
         for (const auto& site : sites)
             if (const auto* quantified = dynamic_cast<const QuantifiedComparisonExpr*>(site.second);

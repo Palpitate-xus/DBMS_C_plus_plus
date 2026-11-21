@@ -22,6 +22,13 @@ cmake --build build/cmake --target dbms_main --parallel 2
 ## 最近更新
 
 <details>
+<summary>筛选文字时可以指定比较规则 · 2026-11-21</summary>
+
+例如 `WHERE title COLLATE "C" < 'm'` 会按指定规则比较标题。写错规则名时，即使表是空的，也会收到错误提示。
+
+</details>
+
+<details>
 <summary>比较同一条记录里的两列时返回正确结果 · 2026-11-21</summary>
 
 例如 `WHERE id = peer_id` 会比较每条记录里的两个值。给 `id` 建索引后，查询仍会找到全部符合条件的记录。两个相差 1 的大整数也能正确区分。
@@ -32,13 +39,6 @@ cmake --build build/cmake --target dbms_main --parallel 2
 <summary>查询时能区分数字和列名 · 2026-11-21</summary>
 
 `WHERE id = 7` 查找编号为 7 的记录。`WHERE id = "7"` 比较同一条记录里的 `id` 和名为 `"7"` 的列。
-
-</details>
-
-<details>
-<summary>按编号删除时少读数据 · 2026-11-21</summary>
-
-按整数编号删除时，即使编号列没有索引，数据库也能减少重复读取。
 
 </details>
 

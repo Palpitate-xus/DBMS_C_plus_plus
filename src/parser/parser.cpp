@@ -2608,6 +2608,7 @@ static ExprPtr parseAtTimeZoneExpr(const std::vector<std::string>& tokens, size_
 }
 
 static ExprPtr parseCastExpr(const std::vector<std::string>& tokens, size_t& pos) {
+    const size_t begin = pos;
     auto left = parsePostfixExpr(tokens, pos);
     while (pos < tokens.size() && tokens[pos] == "::") {
         ++pos;
@@ -2632,9 +2633,12 @@ static ExprPtr parseCastExpr(const std::vector<std::string>& tokens, size_t& pos
         ++pos;
         if (pos >= tokens.size() || tokens[pos] == ")" || tokens[pos] == ",")
             return nullptr;
+        std::string name;
+        if (!parseQualifiedObjectName(tokens, pos, name)) return nullptr;
         auto collated = std::make_unique<UnaryOpExpr>();
-        collated->op = "COLLATE " + tokens[pos++];
+        collated->op = "COLLATE " + name;
         collated->operand = std::move(left);
+        markSource(collated.get(), tokens, begin, pos);
         left = std::move(collated);
     }
     return left;

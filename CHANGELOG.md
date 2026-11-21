@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>筛选文字时可以指定比较规则 · 2026-11-21</summary>
+
+例如 `WHERE title COLLATE "C" < 'm'` 会按指定规则比较标题。写错规则名时，即使表是空的，也会收到错误提示。还可以用自己创建的规则，或用 `schema.规则名` 找到指定位置的规则。
+
+[使用手册](docs/MANUAL.md#基础查询) · [测试报告](docs/test-report.md#explicit-collation-filter-20261121) · [性能报告](docs/performance-report-2026-10-30.md#explicit-collation-filter-cost-20261121)
+
+</details>
+
+<details>
 <summary>比较同一条记录里的两列时返回正确结果 · 2026-11-21</summary>
 
 例如 `WHERE id = peer_id` 会比较每条记录里的两个值。给 `id` 建索引后，查询仍会找到全部符合条件的记录。两个相差 1 的大整数也能正确区分，文本 `'01'` 和 `'1'` 会保留各自的含义。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>按编号删除时少读数据 · 2026-11-21</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-21 · 按编号删除时少读数据
 
 按整数编号删除时，即使编号列没有索引，数据库也能减少重复读取。表里有名为 `"7"` 的列时，`DELETE FROM orders WHERE id = 7` 仍按编号 7 删除。
 
 [使用手册](docs/MANUAL.md#删除) · [测试报告](docs/test-report.md#narrow-delete-20261121) · [性能报告](docs/performance-report-2026-10-30.md#narrow-delete-cost-20261121)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-21 · 按编号更新时更早跳过无关记录
 

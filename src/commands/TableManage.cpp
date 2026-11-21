@@ -5187,7 +5187,8 @@ DBStatus resolveCollationReference(const StorageEngine& engine,
                                    const std::string& dbname,
                                    const std::string& reference,
                                    ResolvedCollation& resolved,
-                                   std::string* error = nullptr) {
+                                   std::string* error = nullptr,
+                                   const std::vector<StoredCollation>* snapshot = nullptr) {
     resolved = {};
     auto reject = [&](DBStatus status, const std::string& message) {
         if (error) *error = message;
@@ -5195,7 +5196,7 @@ DBStatus resolveCollationReference(const StorageEngine& engine,
     };
 
     if (reference.empty()) return DBStatus::OK;
-    if (collation::isValid(reference)) {
+    if (!snapshot && collation::isValid(reference)) {
         resolved.comparisonName = collation::normalizeName(reference);
         resolved.isBinary = collation::isBinary(reference);
         return DBStatus::OK;
@@ -5206,18 +5207,18 @@ DBStatus resolveCollationReference(const StorageEngine& engine,
         return reject(DBStatus::INVALID_VALUE,
                       "invalid collation name: " + reference);
     }
-    std::vector<StoredCollation> collations;
-    if (!loadStoredCollations(
-            engine.dbPath(dbname) / ".collations", collations)) {
-        return reject(DBStatus::CORRUPTED_DATA,
-                      "could not read collation metadata");
+    std::vector<StoredCollation> current;
+    if (!snapshot) {
+        if (!loadStoredCollations(engine.dbPath(dbname) / ".collations", current))
+            return reject(DBStatus::CORRUPTED_DATA, "could not read collation metadata");
+        snapshot = &current;
     }
     const auto found = std::find_if(
-        collations.begin(), collations.end(),
+        snapshot->begin(), snapshot->end(),
         [&](const StoredCollation& candidate) {
             return candidate.name == physicalName;
         });
-    if (found == collations.end()) {
+    if (found == snapshot->end()) {
         return reject(DBStatus::INVALID_VALUE,
                       "collation does not exist: " + reference);
     }
@@ -6727,6 +6728,62 @@ bool StorageEngine::schemaExists(const std::string& dbname,
     std::error_code error;
     return std::filesystem::is_regular_file(std::filesystem::symlink_status(
         schemaMarkerPath(dbname, schemaname), error)) && !error;
+}
+
+ExpressionCollationLookup StorageEngine::freezeExpressionCollations(const std::string& dbname) const {
+    std::vector<std::string> searchPath;
+    const auto* session = currentSession();
+    std::string canonical;
+    if (!session || !parseSessionSearchPath(session->searchPath, searchPath, canonical))
+        searchPath = {"public"};
+    if (session) for (auto& schema : searchPath)
+        schema = expandSessionSearchPathEntry(schema, session->username);
+    if (std::find(searchPath.begin(), searchPath.end(), "pg_catalog") == searchPath.end())
+        searchPath.insert(searchPath.begin(), "pg_catalog");
+
+    // The first custom lookup copies the atomically published catalog. All
+    // explicit names in this execution then see the same definition of it.
+    return [this, dbname, searchPath = std::move(searchPath), builtins = collation::listBuiltins(),
+            stored = std::optional<std::vector<StoredCollation>>{}]
+        (const std::string& spelling) mutable -> ExpressionCollation {
+        CatalogManager::QualifiedName name;
+        if (!CatalogManager::parseQualifiedName(spelling, name, true))
+            throw DbError("42601", "invalid collation name: " + spelling);
+        if (!name.schema.empty() && name.schema != "pg_catalog" && name.schema != "public" &&
+            (dbname.empty() || !schemaExists(dbname, name.schema)))
+            throw DbError("3F000", "schema does not exist: " + name.schema);
+
+        const auto lookup = [&](const std::string& schema) -> ExpressionCollation {
+            if (schema == "pg_catalog") {
+                if (std::find(builtins.begin(), builtins.end(), name.name) != builtins.end())
+                    return {"pg_catalog." + name.name, collation::normalizeName(name.name), false};
+                return {};
+            }
+            if (dbname.empty()) return {};
+            if (!stored) {
+                std::vector<StoredCollation> snapshot;
+                if (!loadStoredCollations(dbPath(dbname) / ".collations", snapshot))
+                    throw DbError("XX001", "could not read collation metadata");
+                stored = std::move(snapshot);
+            }
+            const std::string reference = schema + "." + name.name;
+            ResolvedCollation resolved;
+            if (resolveCollationReference(*this, dbname, reference, resolved, nullptr, &*stored) == DBStatus::OK)
+                return {reference, std::move(resolved.comparisonName), resolved.usesSystemLocale};
+            return {};
+        };
+
+        if (!name.schema.empty()) {
+            auto result = lookup(name.schema);
+            if (!result.identity.empty()) return result;
+        } else {
+            for (const auto& schema : searchPath) {
+                auto result = lookup(schema);
+                if (!result.identity.empty()) return result;
+            }
+        }
+        throw DbError("42704", "collation does not exist: " + spelling);
+    };
 }
 
 std::vector<std::string> StorageEngine::getSchemaNames(const std::string& dbname) const {

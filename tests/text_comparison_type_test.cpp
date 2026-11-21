@@ -1,4 +1,5 @@
 #include "catalog/type_registry.h"
+#include "expression/ExprEvaluator.h"
 #include "expression/expr_helper.h"
 
 #include <cassert>
@@ -24,5 +25,13 @@ int main() {
         const auto result = dbms::ExprHelper::evalString(item.first, {});
         assert(result.ok && result.value == item.second);
     }
+    dbms::ExprEvaluator evaluator;
+    auto binding = dbms::ExprEvaluator::resolveComparison("=", "text", "character varying");
+    binding.collation = "NOCASE";
+    const dbms::ExprValue upper("text", "A"), lower("character varying", "a");
+    assert(evaluator.comparePrepared(binding, upper, lower).asBool());
+    binding.collation = "C";
+    assert(!evaluator.comparePrepared(binding, upper, lower).asBool());
+    assert(evaluator.comparePrepared(binding, upper, dbms::ExprValue("text", "", true)).isNull);
     std::cout << "[TEXT COMPARISON TYPE] passed\n";
 }

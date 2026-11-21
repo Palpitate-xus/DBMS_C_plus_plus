@@ -43,7 +43,8 @@ struct ExprValue {
     std::string typeName;   // 规范类型名（如 "integer" / "character varying"）
     std::string value;      // 文本表示；空字符串与 NULL 用 isNull 区分
     bool isNull = false;
-    std::string collation;  // Explicit COLLATE on this expression, if any.
+    std::string collation;
+    bool collationUsesSystemLocale = false;
     // An object-reference datum retains its physical identity independently
     // of its text output. A rendered type name is not an integer/OID value.
     std::optional<uint32_t> objectOid;
@@ -167,6 +168,11 @@ public:
     // Analyze collation-bearing result arms without executing the expression.
     // Conflicting explicit collations raise SQLSTATE 42P21 even for zero rows.
     static std::string analyzeExplicitResultCollation(const Expr* expr);
+    static ExpressionCollation explicitCollationOf(const Expr* expr);
+    static void bindExplicitCollation(UnaryOpExpr& expr, const std::string& type,
+        const ExpressionCollationLookup& lookup);
+    static void bindComparisonCollation(BinaryOpExpr& expr, const std::string& leftType,
+        const std::string& rightType);
     static QueryComparisonBinding resolveComparison(const std::string& op,
         const std::string& leftType, const std::string& rightType);
     static std::vector<ExprValue> arrayElements(const ExprValue& array);

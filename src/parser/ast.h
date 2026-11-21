@@ -3,6 +3,7 @@
 
 #include "dbms_defs.h"
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -345,9 +346,17 @@ struct ColumnRefExpr : public Expr {
 };
 
 // 一元操作符
+struct ExpressionCollation {
+    std::string identity;
+    std::string comparisonName;
+    bool usesSystemLocale = false;
+};
+using ExpressionCollationLookup = std::function<ExpressionCollation(const std::string&)>;
+
 struct UnaryOpExpr : public Expr {
     std::string op;        // +, -, NOT, IS NULL, IS NOT NULL
     ExprPtr operand;
+    std::optional<ExpressionCollation> collationBinding;
     UnaryOpExpr() { type = ExprType::UnaryOp; }
     std::string toString() const override {
         return op + " " + (operand ? operand->toString() : "?");
@@ -368,6 +377,7 @@ struct QueryComparisonBinding {
     bool hashable = false;
     uint32_t enumTypeOid = 0;
     std::vector<std::string> enumLabels;
+    bool collationUsesSystemLocale = false;
 };
 
 // 二元操作符

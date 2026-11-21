@@ -2203,9 +2203,12 @@ std::optional<ArrayConcatBinding> ExprHelper::resolveArrayConcatTypes(
 
 void ExprHelper::prepareArrayTypes(Expr* expression,
     const std::map<std::string, std::string>& hints, const std::string& database,
-    StorageEngine* owner,const DatumMetadataContext* datumMetadata,DatumTypePtr* resultMetadata) {
+    StorageEngine* owner,const DatumMetadataContext* datumMetadata,DatumTypePtr* resultMetadata,
+    ExpressionCollationLookup* statementCollations) {
     if(resultMetadata)resultMetadata->reset();
     const auto routines = collectRoutineResultTypes(expression, database, owner,nullptr,&hints,datumMetadata);
+    ExpressionCollationLookup localCollations;
+    auto& collations = statementCollations ? *statementCollations : localCollations;
     std::map<const Expr*,std::string> analyzedTypes;
     const auto type = [&](const Expr* node) {
         const auto result=inferAstResultType(node,hints,&routines);
@@ -2282,6 +2285,9 @@ void ExprHelper::prepareArrayTypes(Expr* expression,
                                   rightType=="bit" || rightType=="bit varying";
             static const std::set<std::string> comparisons={"=","<>","!=","<",">","<=",">="};
             if (binary->rowComparison) return; // actual binder-owned signatures win
+            if (comparisons.count(operation) || operation == "is distinct from" ||
+                operation == "is not distinct from")
+                ExprEvaluator::bindComparisonCollation(*binary, leftType, rightType);
             auto* lhsRow = dynamic_cast<RowExpr*>(binary->left.get());
             auto* rhsRow = dynamic_cast<RowExpr*>(binary->right.get());
             if (lhsRow && lhsRow->constructor && rhsRow) {
@@ -2446,7 +2452,14 @@ void ExprHelper::prepareArrayTypes(Expr* expression,
             for (const auto& item : array->elements) validateConst(item.get(),array->elementType);
             return;
         }
-        if (auto* unary = dynamic_cast<UnaryOpExpr*>(node)) visit(unary->operand.get(),{});
+        if (auto* unary = dynamic_cast<UnaryOpExpr*>(node)) {
+            visit(unary->operand.get(),{});
+            if (unary->op.rfind("COLLATE ",0) == 0) {
+                if (!collations) collations = (owner ? *owner : g_engine).freezeExpressionCollations(database);
+                ExprEvaluator::bindExplicitCollation(*unary,
+                    canonicalResultTypeName(type(unary->operand.get())), collations);
+            }
+        }
         else if (auto* conditional = dynamic_cast<CaseExpr*>(node)) {
             visit(conditional->switchExpr.get(),{}); visit(conditional->elseExpr.get(),{});
             for (auto& arm : conditional->whenClauses) { visit(arm.first.get(),{}); visit(arm.second.get(),{}); }

@@ -161,6 +161,7 @@ private:
     StorageEngine* engine_;
     std::string database_;
     ExprEvaluator evaluator_;
+    ExpressionCollationLookup collations_;
     std::map<const Stmt*, const Stmt*> parents_;
     std::map<const Expr*, const Stmt*> owners_;
     std::map<const Expr*, Child> children_;

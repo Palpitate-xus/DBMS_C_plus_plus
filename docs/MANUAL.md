@@ -1264,6 +1264,8 @@ REPLACE INTO users (ID, NAME) VALUES (1, 'New Alice');
 
 列名也可以直接写成 `WHERE id = peer_id`。每行使用自己的 `id` 和 `peer_id`，并按列的类型比较。例如两个不相等的大整数仍可区分，文本 `'01'` 和 `'1'` 也分别保留。普通 `=` 比较中，任意一列为 `NULL` 的行不会满足条件。[测试报告](test-report.md#same-row-select-20261121)
 
+可以给当前比较指定文本规则，例如 `WHERE title COLLATE "C" < 'm'`，也可以把 `COLLATE` 写在右侧的文本后面。指定的规则优先于列声明的规则。`pg_catalog."C"` 和 `"C"` 可以指向同一个内置规则。两侧显式指定不同对象时会报错。通过 `CREATE COLLATION` 建立的 libc 规则可写成 `schema.规则名`。[测试报告](test-report.md#explicit-collation-filter-20261121)
+
 ```sql
 SELECT * FROM users;
 SELECT NAME, AGE FROM users;

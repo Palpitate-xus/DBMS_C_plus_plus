@@ -35,6 +35,7 @@ struct Session;
 struct SessionInterruptState;
 
 namespace dbms {
+struct ExpressionCollation;
 struct QueryReturningOrigin;
 class LocalExpressionSyntax;
 
@@ -322,6 +323,8 @@ public:
     DBStatus renameSchema(const std::string& dbname, const std::string& oldname,
                           const std::string& newname);
     bool schemaExists(const std::string& dbname, const std::string& schemaname) const;
+    std::function<ExpressionCollation(const std::string&)> freezeExpressionCollations(
+        const std::string& dbname) const;
     std::vector<std::string> getSchemaNames(const std::string& dbname) const;
     std::vector<std::string> getTablesInSchema(const std::string& dbname,
                                                const std::string& schemaname) const;

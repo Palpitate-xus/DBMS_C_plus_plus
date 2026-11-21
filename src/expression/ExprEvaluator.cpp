@@ -123,10 +123,12 @@ static bool isCharacterCodeScalarName(const std::string& name) {
 
 static int compareTextWithCollation(const std::string& left,
                                     const std::string& right,
-                                    const std::string& requested) {
+                                    const std::string& requested,
+                                    bool usesSystemLocale = false) {
     const std::string effective = requested.empty()
         ? "en_US.utf8" : requested;
-    const int compared = collation::compare(left, right, effective);
+    const int compared = usesSystemLocale ? collation::compareLocale(left, right, effective)
+                                          : collation::compare(left, right, effective);
     if (effective == "nocase") return compared;
     // PostgreSQL's deterministic libc collation distinguishes byte-distinct
     // strings even when the locale reports equal collation weights.
@@ -171,22 +173,41 @@ static std::string mergeExplicitCollations(const std::string& left,
     return a.empty() ? b : a;
 }
 
+static ExpressionCollation mergeResolvedCollations(const ExpressionCollation& left,
+                                                   const ExpressionCollation& right) {
+    if (!left.identity.empty() && !right.identity.empty() && left.identity != right.identity)
+        throw DbError("42P21", "collation mismatch between explicit collations");
+    return left.identity.empty() ? right : left;
+}
+
+static void applyResultCollation(ExprValue& result, const ExpressionCollation& collation) {
+    if (collation.comparisonName.empty()) return;
+    result.collation = collation.comparisonName;
+    result.collationUsesSystemLocale = collation.usesSystemLocale;
+}
+
 // CASE and COALESCE choose a value lazily, but PostgreSQL resolves their
 // result collation from every result arm before executing any arm.  Inspect
 // only the result-bearing AST nodes here; evaluating an unused arm would
 // violate their short-circuit and side-effect behavior.
-static std::string explicitResultCollation(const Expr* expression,
+static ExpressionCollation resolvedExplicitResultCollation(const Expr* expression,
                                            bool validateName = true) {
     if (!expression) return {};
     switch (expression->type) {
         case ExprType::UnaryOp: {
             const auto* unary = static_cast<const UnaryOpExpr*>(expression);
             if (toLower(unary->op).rfind("collate ", 0) == 0) {
-                const std::string name =
-                    collation::normalizeName(unary->op.substr(8));
+                if (unary->collationBinding) return *unary->collationBinding;
+                const auto spelling = unary->op.substr(8);
+                CatalogManager::QualifiedName reference;
+                if (!CatalogManager::parseQualifiedName(spelling, reference, true))
+                    return {};
+                const bool builtinNamespace = reference.schema.empty() || reference.schema == "pg_catalog";
+                const auto name = builtinNamespace && collation::isValid(reference.name)
+                    ? collation::normalizeName(reference.name) : spelling;
                 if (validateName && !collation::isValid(name))
                     throw DbError("42704", "collation does not exist: " + name);
-                return name;
+                return {name, name, false};
             }
             return {};
         }
@@ -195,13 +216,13 @@ static std::string explicitResultCollation(const Expr* expression,
             std::string target=cast->typeName;
             if(target.size()>=2 && target.compare(target.size()-2,2,"[]")==0)target.resize(target.size()-2);
             return isCollatableCastTarget(target)
-                ? explicitResultCollation(cast->operand.get(), validateName)
-                : std::string{};
+                ? resolvedExplicitResultCollation(cast->operand.get(), validateName)
+                : ExpressionCollation{};
         }
         case ExprType::ArrayExpr: {
-            std::string result;
+            ExpressionCollation result;
             for(const auto& item:static_cast<const ArrayExpr*>(expression)->elements)
-                result=mergeExplicitCollations(result,explicitResultCollation(item.get(),validateName));
+                result=mergeResolvedCollations(result,resolvedExplicitResultCollation(item.get(),validateName));
             return result;
         }
         case ExprType::Literal: {
@@ -209,48 +230,48 @@ static std::string explicitResultCollation(const Expr* expression,
             // datum or a token whose spelling can supply a collation.
             const auto* select=dynamic_cast<const SelectStmt*>(expression->preparedSubquery.get());
             if(!select || select->selectList.size()!=1)return {};
-            return explicitResultCollation(select->selectList.front().expr.get(),validateName);
+            return resolvedExplicitResultCollation(select->selectList.front().expr.get(),validateName);
         }
         case ExprType::BinaryOp: {
             const auto* binary = static_cast<const BinaryOpExpr*>(expression);
             if (binary->op == "||")
-                return mergeExplicitCollations(
-                    explicitResultCollation(binary->left.get(), validateName),
-                    explicitResultCollation(binary->right.get(), validateName));
+                return mergeResolvedCollations(
+                    resolvedExplicitResultCollation(binary->left.get(), validateName),
+                    resolvedExplicitResultCollation(binary->right.get(), validateName));
             if (binary->op == "::") {
                 const auto* target = binary->right &&
                     binary->right->type == ExprType::Literal
                     ? static_cast<const LiteralExpr*>(binary->right.get())
                     : nullptr;
                 return target && isCollatableCastTarget(target->value)
-                    ? explicitResultCollation(binary->left.get(), validateName)
-                    : std::string{};
+                    ? resolvedExplicitResultCollation(binary->left.get(), validateName)
+                    : ExpressionCollation{};
             }
             return {};
         }
         case ExprType::CaseExpr: {
             const auto* conditional = static_cast<const CaseExpr*>(expression);
-            std::string result;
+            ExpressionCollation result;
             for (const auto& arm : conditional->whenClauses)
-                result = mergeExplicitCollations(
-                    result, explicitResultCollation(arm.second.get(),
+                result = mergeResolvedCollations(
+                    result, resolvedExplicitResultCollation(arm.second.get(),
                                                     validateName));
-            return mergeExplicitCollations(
-                result, explicitResultCollation(
+            return mergeResolvedCollations(
+                result, resolvedExplicitResultCollation(
                     conditional->elseExpr.get(), validateName));
         }
         case ExprType::FunctionCall: {
             const auto* function = static_cast<const FunctionCallExpr*>(expression);
             const std::string name = toLower(function->funcName);
-            if (name != "coalesce" && name != "greatest" &&
+            if (name != "coalesce" && name != "nullif" && name != "greatest" &&
                 name != "least" &&
                 !((function->schema.empty() ||
                    toLower(function->schema) == "pg_catalog") &&
                   isTextResultBuiltin(name))) return {};
-            std::string result;
+            ExpressionCollation result;
             for (const auto& argument : function->args)
-                result = mergeExplicitCollations(
-                    result, explicitResultCollation(argument.get(),
+                result = mergeResolvedCollations(
+                    result, resolvedExplicitResultCollation(argument.get(),
                                                     validateName));
             return result;
         }
@@ -259,10 +280,42 @@ static std::string explicitResultCollation(const Expr* expression,
     }
 }
 
+static std::string explicitResultCollation(const Expr* expression) {
+    return resolvedExplicitResultCollation(expression).comparisonName;
+}
+
 std::string ExprEvaluator::analyzeExplicitResultCollation(const Expr* expr) {
     // The storage layer resolves built-in and user-defined collation names
     // against the current database after this syntax-only conflict analysis.
-    return explicitResultCollation(expr, false);
+    return explicitCollationOf(expr).comparisonName;
+}
+
+ExpressionCollation ExprEvaluator::explicitCollationOf(const Expr* expr) {
+    return resolvedExplicitResultCollation(expr, false);
+}
+
+void ExprEvaluator::bindExplicitCollation(UnaryOpExpr& expr, const std::string& type,
+        const ExpressionCollationLookup& lookup) {
+    if (!isCollatableExprType(type))
+        throw DbError("42804", "collations are not supported by type " + type);
+    if (!expr.collationBinding) expr.collationBinding = lookup(expr.op.substr(8));
+}
+
+void ExprEvaluator::bindComparisonCollation(BinaryOpExpr& expr, const std::string& leftType,
+                                            const std::string& rightType) {
+    const auto selected = mergeResolvedCollations(
+        resolvedExplicitResultCollation(expr.left.get(), false),
+        resolvedExplicitResultCollation(expr.right.get(), false));
+    if (selected.identity.empty() || common_type_detail::array(leftType) ||
+        common_type_detail::array(rightType)) return;
+
+    const std::string op = toLower(expr.op);
+    if (!expr.comparison)
+        expr.comparison = resolveComparison(
+            op == "is distinct from" || op == "is not distinct from" ? "=" : op,
+            leftType, rightType);
+    expr.comparison->collation = selected.comparisonName;
+    expr.comparison->collationUsesSystemLocale = selected.usesSystemLocale;
 }
 
 static std::string formatUtcClock(std::time_t value, const char* format) {
@@ -1872,6 +1925,10 @@ ExprValue ExprEvaluator::evalUnaryOp(const UnaryOpExpr* e, const RowContext& ctx
     std::string op = toLower(e->op);
 
     if (op.rfind("collate ", 0) == 0) {
+        if (e->collationBinding) {
+            applyResultCollation(v, *e->collationBinding);
+            return v;
+        }
         const std::string name = collation::normalizeName(
             trimStr(e->op.substr(std::string("COLLATE ").size())));
         if (!collation::isValid(name))
@@ -2348,6 +2405,7 @@ int ExprEvaluator::compareValues(const ExprValue& a, const ExprValue& b) {
     const bool textualA = blankPaddedA || varyingA || ta == "text" || ta == "name";
     const bool textualB = blankPaddedB || varyingB || tb == "text" || tb == "name";
     std::string textCollation;
+    bool usesSystemLocale = false;
     if (textualA && textualB) {
         const std::string leftCollation =
             collation::normalizeName(a.collation);
@@ -2357,8 +2415,10 @@ int ExprEvaluator::compareValues(const ExprValue& a, const ExprValue& b) {
             leftCollation != rightCollation) {
             throw DbError("42P21", "collation mismatch between explicit collations");
         }
-        textCollation = leftCollation.empty()
-            ? rightCollation : leftCollation;
+        const auto& source = leftCollation.empty() ? b : a;
+        usesSystemLocale = source.collationUsesSystemLocale;
+        textCollation = usesSystemLocale ? source.collation
+            : (leftCollation.empty() ? rightCollation : leftCollation);
         // NAME's implicit type collation is C, not the database's default
         // text locale. A supplied expression/source collation still wins.
         if(textCollation.empty() && (ta=="name" || tb=="name"))textCollation="C";
@@ -2371,14 +2431,14 @@ int ExprEvaluator::compareValues(const ExprValue& a, const ExprValue& b) {
         };
         if (blankPaddedA || (blankPaddedB && varyingA)) trimPadding(left);
         if (blankPaddedB || (blankPaddedA && varyingB)) trimPadding(right);
-        return compareTextWithCollation(left, right, textCollation);
+        return compareTextWithCollation(left, right, textCollation, usesSystemLocale);
     }
 
     // A pair of text values stays textual even when both strings contain
     // digits. Numeric coercion here changes ORDER BY, comparisons and
     // GREATEST/LEAST (for example, text '10' must precede text '2').
     if (textualA && textualB) {
-        return compareTextWithCollation(a.value, b.value, textCollation);
+        return compareTextWithCollation(a.value, b.value, textCollation, usesSystemLocale);
     }
 
     if (ta == "money" || tb == "money") {
@@ -2519,6 +2579,17 @@ static std::optional<bool> compareGeometricEquality(const std::string& op,
     return op == "=" ? equal : !equal;
 }
 
+static ExprValue comparisonResult(const std::string& op, int comparison) {
+    bool result = false;
+    if (op == "=") result = comparison == 0;
+    else if (op == "<>" || op == "!=") result = comparison != 0;
+    else if (op == "<") result = comparison < 0;
+    else if (op == ">") result = comparison > 0;
+    else if (op == "<=") result = comparison <= 0;
+    else if (op == ">=") result = comparison >= 0;
+    return ExprValue("boolean", result ? "t" : "f", false);
+}
+
 ExprValue ExprEvaluator::applyComparison(const std::string& op,
                                          const ExprValue& l,
                                          const ExprValue& r) {
@@ -2536,16 +2607,7 @@ ExprValue ExprEvaluator::applyComparison(const std::string& op,
     if (const auto equal = compareGeometricEquality(cmp,l,r))
         return ExprValue("boolean", *equal ? "t" : "f", false);
 
-    int c = compareValues(l, r);
-    bool result = false;
-    if (cmp == "=")  result = c == 0;
-    else if (cmp == "<>") result = c != 0;
-    else if (cmp == "<")  result = c < 0;
-    else if (cmp == ">")  result = c > 0;
-    else if (cmp == "<=") result = c <= 0;
-    else if (cmp == ">=") result = c >= 0;
-
-    return ExprValue("boolean", result ? "t" : "f", false);
+    return comparisonResult(cmp, compareValues(l, r));
 }
 
 QueryComparisonBinding ExprEvaluator::resolveComparison(const std::string& rawOp,
@@ -2602,11 +2664,29 @@ ExprValue ExprEvaluator::coerceComparison(const QueryComparisonBinding& binding,
         else result=evalCast(nullptr,RowContext{},value,target);
     }
     result.typeName=target;
-    if (!binding.collation.empty()) result.collation=binding.collation;
+    if (!binding.collation.empty()) {
+        result.collation = binding.collation;
+        result.collationUsesSystemLocale = binding.collationUsesSystemLocale;
+    }
     return result;
 }
 ExprValue ExprEvaluator::comparePrepared(const QueryComparisonBinding& binding,
     const ExprValue& left, const ExprValue& right) const {
+    const auto hasTextRepresentation = [](const ExprValue& value) {
+        return value.isNull || value.typeName == "text" || value.typeName == "varchar" ||
+            value.typeName == "character varying";
+    };
+    if (!binding.collation.empty() && binding.strict && binding.identity.rfind("builtin-comparison:", 0) == 0 &&
+        !binding.enumTypeOid && binding.leftType == "text" && binding.rightType == "text" &&
+        hasTextRepresentation(left) && hasTextRepresentation(right)) {
+        // TEXT and VARCHAR have the same text representation. A bound
+        // comparator already supplies the effective collation for both.
+        if (left.isNull || right.isNull) return ExprValue("boolean", "", true);
+        const auto collation = binding.collationUsesSystemLocale
+            ? binding.collation : collation::normalizeName(binding.collation);
+        return comparisonResult(binding.op, compareTextWithCollation(left.value, right.value,
+            collation, binding.collationUsesSystemLocale));
+    }
     const auto a=coerceComparison(binding,left,true),b=coerceComparison(binding,right,false);
     if(a.isNull || b.isNull)return ExprValue("boolean","",true);
     if(binding.enumTypeOid) {
@@ -3853,23 +3933,18 @@ ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& c
         }
         const bool byteaResult = isCanonicalByteaType(l.typeName) &&
                                  isCanonicalByteaType(r.typeName);
-        std::string resultCollation;
+        ExpressionCollation resultCollation;
         if (!byteaResult) {
-            const std::string leftCollation =
-                collation::normalizeName(l.collation);
-            const std::string rightCollation =
-                collation::normalizeName(r.collation);
-            if (!leftCollation.empty() && !rightCollation.empty() &&
-                leftCollation != rightCollation) {
-                throw DbError("42P21",
-                              "collation mismatch between explicit collations");
+            resultCollation = resolvedExplicitResultCollation(e);
+            if (resultCollation.identity.empty()) {
+                resultCollation.comparisonName = mergeExplicitCollations(l.collation, r.collation);
+                resultCollation.usesSystemLocale = l.collation.empty()
+                    ? r.collationUsesSystemLocale : l.collationUsesSystemLocale;
             }
-            resultCollation = leftCollation.empty()
-                ? rightCollation : leftCollation;
         }
         if (l.isNull || r.isNull) {
             ExprValue result(byteaResult ? "bytea" : "text", "", true);
-            result.collation = std::move(resultCollation);
+            applyResultCollation(result, resultCollation);
             return result;
         }
         if (byteaResult) {
@@ -3894,7 +3969,7 @@ ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& c
         ExprValue result(
             "text", textOutput(l) + textOutput(r),
             false);
-        result.collation = std::move(resultCollation);
+        applyResultCollation(result, resultCollation);
         return result;
     }
 
@@ -4242,10 +4317,9 @@ ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& c
 
 ExprValue ExprEvaluator::evalCase(const CaseExpr* e, const RowContext& ctx) const {
     if (!e) return ExprValue{};
-    const std::string resultCollation = explicitResultCollation(e);
+    const auto resultCollation = resolvedExplicitResultCollation(e);
     auto withResultCollation = [&](ExprValue value) {
-        value.collation = mergeExplicitCollations(value.collation,
-                                                    resultCollation);
+        applyResultCollation(value, resultCollation);
         return value;
     };
     const bool simpleCase = static_cast<bool>(e->switchExpr);
@@ -7195,7 +7269,7 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
     // COALESCE is syntax-like in SQL: stop as soon as the first non-NULL
     // argument is found, so unused arguments are never evaluated.
     if (name == "coalesce") {
-        const std::string resultCollation = explicitResultCollation(e);
+        const auto resultCollation = resolvedExplicitResultCollation(e);
         const auto target=common_type_detail::canonical(declaredResult);
         const bool legacyAddressTarget=e->resolvedResultType.empty() &&
             (target=="macaddr" || target=="macaddr8" || target=="inet" || target=="cidr");
@@ -7209,8 +7283,7 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
             ExprValue value = eval(argument.get(), ctx);
             if (!value.isNull) {
                 value=commonResultValue(std::move(value));
-                value.collation = mergeExplicitCollations(
-                    value.collation, resultCollation);
+                applyResultCollation(value, resultCollation);
                 // Preserve the legacy address conversion contract without
                 // extending inferred-type coercion to other unbound calls.
                 if (legacyAddressTarget && common_type_detail::canonical(value.typeName)!=target)
@@ -7220,7 +7293,7 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
         }
         ExprValue result=commonResultValue(ExprValue("unknown", "", true));
         if (legacyAddressTarget) result.typeName=target;
-        result.collation = resultCollation;
+        applyResultCollation(result, resultCollation);
         return result;
     }
 
@@ -7493,42 +7566,47 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
     if (name == "nullif") {
         if (args.size() < 2) return ExprValue("unknown", "", true);
         ExprValue first = args[0];
-        first.collation = mergeExplicitCollations(first.collation,
-                                                   args[1].collation);
-        if (first.isNull || args[1].isNull) return asBaseArray(std::move(first));
-        if (applyComparison("=", first, args[1]).asBool()) {
+        ExprValue second = args[1];
+        const auto collation = resolvedExplicitResultCollation(e);
+        if (collation.identity.empty()) {
+            first.collation = mergeExplicitCollations(first.collation, second.collation);
+        } else {
+            applyResultCollation(first, collation);
+            applyResultCollation(second, collation);
+        }
+        if (first.isNull || second.isNull) return asBaseArray(std::move(first));
+        if (applyComparison("=", first, second).asBool()) {
             // NULLIF produces a fresh NULL. Its former object's identity,
             // elements and validation belong only to the non-NULL value.
             auto result = ExprValue(first.typeName, "", true);
             result.collation = std::move(first.collation);
+            result.collationUsesSystemLocale = first.collationUsesSystemLocale;
             return result;
         }
         return asBaseArray(std::move(first));
     }
     if (name == "greatest") {
-        const std::string resultCollation = explicitResultCollation(e);
+        const auto resultCollation = resolvedExplicitResultCollation(e);
         ExprValue best=commonResultValue(ExprValue("unknown", "", true));
         for (auto a : args) {
             if (isCollatableExprType(a.typeName))
-                a.collation = mergeExplicitCollations(a.collation,
-                                                        resultCollation);
+                applyResultCollation(a, resultCollation);
             if (a.isNull) continue;
             if (best.isNull || compareValues(a, best) > 0) best = a;
         }
-        if (best.isNull) best.collation = resultCollation;
+        if (best.isNull) applyResultCollation(best, resultCollation);
         return best;
     }
     if (name == "least") {
-        const std::string resultCollation = explicitResultCollation(e);
+        const auto resultCollation = resolvedExplicitResultCollation(e);
         ExprValue best=commonResultValue(ExprValue("unknown", "", true));
         for (auto a : args) {
             if (isCollatableExprType(a.typeName))
-                a.collation = mergeExplicitCollations(a.collation,
-                                                        resultCollation);
+                applyResultCollation(a, resultCollation);
             if (a.isNull) continue;
             if (best.isNull || compareValues(a, best) < 0) best = a;
         }
-        if (best.isNull) best.collation = resultCollation;
+        if (best.isNull) applyResultCollation(best, resultCollation);
         return best;
     }
     // PG 42883: function <name>(<argtypes>) does not exist.

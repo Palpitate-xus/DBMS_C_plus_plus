@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-21 · 查询可以指定文本的比较规则
+
+PostgreSQL 18.6 先核实类型和排序规则名，再决定比较要使用哪一条规则。语句中指定的规则优先于列的声明，两条显式规则必须指向同一个对象。使用索引时比较和索引的规则也需匹配。SQLite 单独记录比较两侧的显式规则，并按其自身的先左后右顺序选择。DuckDB 在绑定比较时把所选规则接到类型化表达式上。[PostgreSQL 名称和类型检查](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/parser/parse_expr.c) · [PostgreSQL 规则推导](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/parser/parse_collate.c) · [PostgreSQL 索引规则](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/optimizer/path/indxpath.c) · [SQLite 比较](https://raw.githubusercontent.com/sqlite/sqlite/master/src/expr.c) · [DuckDB 比较绑定](https://raw.githubusercontent.com/duckdb/duckdb/main/src/planner/binder/expression/bind_comparison_expression.cpp)
+
+本项目保留 `WHERE` 中的完整比较，先解析规则身份，再把所选规则用于文本比较。普通筛选支持内置规则和现有 libc 自定义规则，包括用 schema 限定的名称。规则的名称和它实际使用的语言设置分别处理。这样，两个都使用 `C` 设置的不同规则仍可识别为冲突。[测试报告](test-report.md#explicit-collation-filter-20261121)
+
 ## 2026-11-21 · 比较同一行的两个列值
 
 PostgreSQL 18.6 检查索引条件中另一侧是否也引用了当前表，用有符号 64 位整数直接比较 `BIGINT`。SQLite 记录比较两侧分别引用了哪些表，用这些信息判断条件能否作为索引查找。DuckDB 先绑定两个操作数，再确定它们的比较类型。[PostgreSQL 索引条件](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/optimizer/path/indxpath.c) · [PostgreSQL BIGINT 比较](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/utils/adt/int8.c) · [SQLite 筛选分析](https://raw.githubusercontent.com/sqlite/sqlite/master/src/whereexpr.c) · [DuckDB 比较绑定](https://raw.githubusercontent.com/duckdb/duckdb/main/src/planner/binder/expression/bind_comparison_expression.cpp)

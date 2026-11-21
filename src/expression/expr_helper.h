@@ -62,7 +62,8 @@ public:
         const std::map<std::string, std::string>& typeHints = {},
         const std::string& currentDB = "", StorageEngine* owner = nullptr,
         const DatumMetadataContext* datumMetadata = nullptr,
-        DatumTypePtr* resultMetadata = nullptr);
+        DatumTypePtr* resultMetadata = nullptr,
+        ExpressionCollationLookup* statementCollations = nullptr);
     // Metadata-only structural identity. The consumer supplies already
     // validated source occurrence/column ordinal/type/collation identities.
     static std::string scalarExpressionIdentity(

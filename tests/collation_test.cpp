@@ -4,6 +4,7 @@
 #include "Session.h"
 #include "catalog/type_registry.h"
 #include "common/DbError.h"
+#include "parser/ast.h"
 #include <cassert>
 #include <filesystem>
 #include <fstream>
@@ -983,6 +984,26 @@ static void test_drop_collation_protects_table_dependencies() {
     std::cout << "[COLLATION] DROP dependency protection OK" << std::endl;
 }
 
+static void test_expression_collation_catalog_snapshot() {
+    using dbms::DBStatus;
+    const auto db = testDbPath("expression_collation_catalog_snapshot");
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == DBStatus::OK);
+    assert(g_engine.createCollation(db, "local_order", "libc", "C") == DBStatus::OK);
+
+    auto first = g_engine.freezeExpressionCollations(db);
+    const auto prior = first("local_order");
+    assert(prior.comparisonName == "c");
+    assert(g_engine.dropCollation(db, "local_order") == DBStatus::OK);
+    assert(g_engine.createCollation(db, "local_order", "libc", "POSIX") == DBStatus::OK);
+
+    const auto sameExecution = first("public.local_order");
+    assert(sameExecution.identity == prior.identity && sameExecution.comparisonName == "c");
+    auto later = g_engine.freezeExpressionCollations(db);
+    assert(later("public.local_order").comparisonName == "posix");
+    assert(g_engine.dropDatabase(db) == DBStatus::OK);
+}
+
 int main() {
     dbms::TypeRegistry::instance().bootstrap();
     test_collation_provider();
@@ -1003,6 +1024,7 @@ int main() {
     test_custom_collation_runtime_resolution();
     test_collation_aware_unique_constraints();
     test_drop_collation_protects_table_dependencies();
+    test_expression_collation_catalog_snapshot();
     std::cout << "[COLLATION] all passed" << std::endl;
     return 0;
 }

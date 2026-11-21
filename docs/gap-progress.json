@@ -2,6 +2,48 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-21 bind explicit collations in ordinary SELECT filters",
+      "gap_ids": ["SQL-04", "SQL-10", "OPT-03"],
+      "status": "partial",
+      "evidence": [
+        "src/parser/parser.cpp",
+        "src/commands/TableManage.cpp",
+        "src/expression/ExprEvaluator.cpp",
+        "src/expression/prepared_query_execution.cpp",
+        "docs/postgresql-comparison.md",
+        "docs/test-report.md",
+        "docs/performance-report-2026-10-30.md"
+      ],
+      "tests": ["tests/join_collation_role_protocol_e2e_test.py", "tests/collation_test.cpp"],
+      "verification": [
+        "With matched en_US.utf8 defaults, the original build had 29 differences in a 56-case ordinary WHERE matrix and 12 in a 28-case named collation matrix. The final build matches all 84 across query filters, EXPLAIN, simple and extended responses, LIMIT, explicit conflicts and catalog-qualified names.",
+        "The final build matches 195 of 197 recorded protocol observations across all matrices, including the constant and dynamic CASE reduction witness. The two mismatches reproduce the same preexisting pure implicit collation issue: PostgreSQL reports 42P22 with row metadata and this project reports 42P21 without it. This does not close full collation support or provider coverage.",
+        "A rule is resolved before use and the execution reuses the same custom-rule definitions. A native test verifies that an existing resolver sees the prior declaration when a new resolver sees a dropped and recreated rule. CASE and COALESCE preserve collation metadata when unreachable arms are removed.",
+        "All 36 related protocol suites and 15 native regressions passed. Real process-kill and reopen checks used a declared C index and a persisted custom rule. Committed and uncommitted key modifications and actual index use were checked.",
+        "In 1,344 matched timings, the inline COLLATE LIMIT case's paired wall median fell 1.98% at 128 rows and 7.15% at 1,024 rows against the original. A previous correct candidate used a per-row generic cast and was much slower in both sizes. The original's no-LIMIT response was wrong and remains separate correctness evidence.",
+        "In the focused comparison of two corrected builds, removing the per-row cast reduced paired wall and CPU medians by 77.50% and 79.12% respectively for the inline filter over 1,024 rows. All eight pairs improved on that filter and all 192 responses matched. Some control cases were slower."
+      ],
+      "artifacts": {
+        "exact_build": "build/array-domain-20261117/expression-collate-cmake-v6.json",
+        "baseline_protocol": "build/collate-where-oracle-20261121-v1/comparison.json",
+        "baseline_named_collation": "build/collate-where-named-schema-20261121-v1/comparison.json",
+        "candidate_protocol": "build/expression-collate-20261121-v6/verify-watcher-receipt.json",
+        "candidate_wire_audit": "build/expression-collate-20261121-v6/independent-audit.json",
+        "candidate_extended_controls": "build/expression-collate-20261121-v6/witness-independent-audit.json",
+        "recovery": "build/expression-collate-perf-20261121/recovery-v6.json",
+        "named_collation_recovery": "build/expression-collate-perf-20261121/recovery-named-v6.json",
+        "related_suites": "build/expression-collate-20261121/related-expression-collate-cmake-v6/summary.json",
+        "native_regressions": "build/expression-collate-20261121/native-v6/summary.json",
+        "earlier_cost_128": "build/expression-collate-perf-20261121/paired-inline-formal-v4-128.json",
+        "earlier_cost_1024": "build/expression-collate-perf-20261121/paired-inline-formal-v4-1024.json",
+        "timing_128": "build/expression-collate-perf-20261121/paired-inline-formal-v6-128.json",
+        "timing_1024_first_startup_failure": "build/expression-collate-perf-20261121/paired-inline-formal-v6-1024.json",
+        "timing_1024_launch_records": "build/expression-collate-perf-20261121/launch-retry-v6-1024.json",
+        "timing_1024": "build/expression-collate-perf-20261121/paired-inline-formal-v6-retry-1024.json",
+        "timing_corrected_builds_1024": "build/expression-collate-perf-20261121/paired-v4-v6-focused-1024.json"
+      }
+    },
+    {
       "issue": "2026-11-21 preserve and bind same-row SELECT column comparisons",
       "gap_ids": [
         "SQL-04",

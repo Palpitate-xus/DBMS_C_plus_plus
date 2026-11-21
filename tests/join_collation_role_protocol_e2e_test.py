@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""JOIN serialization keeps COLLATE labels postfix, separate from value bindings."""
+"""Query filters keep COLLATE labels separate from value bindings."""
 import importlib.util
+import json
 from pathlib import Path
 
 
@@ -23,6 +24,10 @@ def main():
         result = query(sql)
         assert result[1] is None and result[0] == rows and result[5] == types, (sql, result)
 
+    def error(sql, state):
+        result = query(sql)
+        assert result[1] == state and result[0] == [], (sql, result)
+
     try:
         command('CREATE TABLE jc_l(id INT,t TEXT,"C" TEXT);')
         command('CREATE TABLE jc_r(id INT,t TEXT,"C" TEXT);')
@@ -36,9 +41,57 @@ def main():
         command("CREATE TABLE jc_empty(id INT,t TEXT);")
         for table in ("jc_l", "jc_empty"):
             sql = f'SELECT l.id FROM {table} l JOIN jc_r r ON (l.t COLLATE "missing_join_collation") IS NOT DISTINCT FROM r.t;'
-            result = query(sql)
-            assert result[1] == "42704" and result[0] == [], (sql, result)
+            error(sql, "42704")
         expect('SELECT l.id,r.id FROM jc_l l JOIN jc_r r ON (l.t COLLATE "C") IS NOT DISTINCT FROM (r.t COLLATE "C") ORDER BY l.id;', [["1", "10"], ["2", "20"], ["3", "30"]], [23, 23])
+
+        expect('SELECT id FROM jc_l WHERE t COLLATE "C" = \'a\';', [["1"]], [23])
+        expect('SELECT id FROM jc_l WHERE t < \'a\' COLLATE "C";', [["3"]], [23])
+        expect('SELECT id FROM jc_l WHERE t COLLATE pg_catalog."C" = \'a\' COLLATE "C";',
+               [["1"]], [23])
+        expect('SELECT l.id FROM jc_l AS l WHERE l.t IS NULL OR l.t < \'a\' COLLATE "C" ORDER BY l.id;',
+               [["2"], ["3"]], [23])
+        for table in ("jc_l", "jc_empty"):
+            error(f'SELECT id FROM {table} WHERE t COLLATE unavailable = \'x\';', "42704")
+            error(f'SELECT id FROM {table} WHERE t COLLATE "C" = \'x\' COLLATE "POSIX";', "42P21")
+            error(f'SELECT id FROM {table} WHERE id COLLATE "C" = 1;', "42804")
+        error('SELECT id FROM jc_l WHERE FALSE AND t COLLATE unavailable = \'x\' LIMIT 0;', "42704")
+        error('SELECT id FROM jc_l WHERE t COLLATE C = \'x\';', "42704")
+
+        command('CREATE SCHEMA jc_rules;')
+        command('CREATE COLLATION jc_rules.local_c (provider = libc, locale = \'C\');')
+        command('CREATE TABLE jc_declared(id INT, t TEXT COLLATE "POSIX");')
+        command("INSERT INTO jc_declared VALUES(1,'a'),(2,'A'),(3,NULL);")
+        expect('SELECT id FROM jc_declared WHERE t < \'a\' COLLATE jc_rules.local_c;', [["2"]], [23])
+        expect('SELECT id FROM jc_declared WHERE COALESCE(t, \'a\' COLLATE "C") = \'a\' ORDER BY id;',
+               [["1"], ["3"]], [23])
+        expect('SELECT id FROM jc_declared WHERE (t || \'z\' COLLATE "C") < \'az\';', [["2"]], [23])
+        expect('SELECT id FROM jc_declared WHERE GREATEST(t, \'a\' COLLATE "C") = \'a\' ORDER BY id;',
+               [["1"], ["2"], ["3"]], [23])
+        expect('SELECT id FROM jc_declared WHERE LEAST(t, \'a\' COLLATE "C") = \'A\';', [["2"]], [23])
+        expect('SELECT id FROM jc_declared WHERE NULLIF(t, \'a\' COLLATE "C") IS NULL ORDER BY id;',
+               [["1"], ["3"]], [23])
+        expect('SELECT id FROM jc_l WHERE t COLLATE "C" = \'a\' FOR UPDATE;', [["1"]], [23])
+        error('SELECT id FROM jc_l WHERE t COLLATE C = \'a\' FOR UPDATE;', "42704")
+        error('SELECT id FROM jc_declared WHERE t COLLATE jc_rules.local_c = \'a\' COLLATE "C";', "42P21")
+        result = query('EXPLAIN (ANALYZE, FORMAT JSON, TIMING FALSE) '
+                       'SELECT id FROM jc_declared WHERE t < \'a\' COLLATE jc_rules.local_c;')
+        assert result[1] is None and result[5] == [114], result
+        assert json.loads("\n".join(row[0] for row in result[0]))["actualRows"] == 1
+        command('SET search_path TO jc_rules, public;')
+        expect('SELECT COALESCE(t COLLATE jc_rules.local_c, \'a\' COLLATE local_c) AS label '
+               'FROM jc_declared ORDER BY id LIMIT 3;', [["a"], ["A"], ["a"]], [25])
+        expect('SELECT CASE WHEN id <> 3 THEN t COLLATE jc_rules.local_c ELSE \'a\' COLLATE local_c END '
+               'AS label FROM jc_declared ORDER BY id LIMIT 3;', [["a"], ["A"], ["a"]], [25])
+        command("INSERT INTO jc_declared VALUES(4,'B');")
+        expect('SELECT id FROM jc_declared WHERE id = 4 AND '
+               'GREATEST(CASE WHEN TRUE THEN t ELSE \'unused\' COLLATE nocase END, \'a\') = \'a\';', [], [23])
+        expect('SELECT id FROM jc_declared WHERE id = 4 AND '
+               'GREATEST(COALESCE(t, \'z\', \'unused\' COLLATE nocase), \'a\') = \'a\';', [], [23])
+        command('CREATE TABLE jc_varying(id INT, t VARCHAR(8));')
+        command("INSERT INTO jc_varying VALUES(1,'01'),(2,'1'),(3,'a '),(4,'a'),(5,NULL);")
+        expect('SELECT id FROM jc_varying WHERE t COLLATE "C" = \'a \';', [["3"]], [23])
+        expect('SELECT id FROM jc_varying WHERE \'01\' COLLATE "C" <> t ORDER BY id;',
+               [["2"], ["3"], ["4"]], [23])
         print("[JOIN COLLATION ROLE PROTOCOL E2E] passed")
     finally:
         runner.stop_ours(server)

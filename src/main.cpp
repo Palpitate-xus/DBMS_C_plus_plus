@@ -5985,7 +5985,8 @@ static bool explainNeedsTypedPlan(const dbms::SelectStmt& select) {
             expression->type == dbms::ExprType::FunctionCall || expression->type == dbms::ExprType::CastExpr ||
             expression->type == dbms::ExprType::CaseExpr || expression->type == dbms::ExprType::Parameter) return true;
         if (auto* unary = dynamic_cast<const dbms::UnaryOpExpr*>(expression))
-            return unary->op=="+" || unary->op=="-" || typed(unary->operand.get());
+            return unary->op=="+" || unary->op=="-" || unary->op.rfind("COLLATE ",0)==0 ||
+                typed(unary->operand.get());
         if (auto* binary = dynamic_cast<const dbms::BinaryOpExpr*>(expression)) {
             if (binary->op == "::" || binary->op == "COLLATE" || binary->op == "+" ||
                 binary->op == "-" || binary->op == "*" || binary->op == "/" || binary->op == "%") return true;
@@ -10575,8 +10576,9 @@ static bool hasComputedPredicate(const string& sql, bool* immutableConstant = nu
             inspect(binary->left.get());
             inspect(binary->right.get());
         } else if (const auto* unary = dynamic_cast<const dbms::UnaryOpExpr*>(node)) {
-            if ((unary->op == "+" || unary->op == "-") &&
-                !dynamic_cast<const dbms::LiteralExpr*>(unary->operand.get()))
+            if (unary->op.rfind("COLLATE ", 0) == 0 ||
+                ((unary->op == "+" || unary->op == "-") &&
+                 !dynamic_cast<const dbms::LiteralExpr*>(unary->operand.get())))
                 computed = true;
             inspect(unary->operand.get());
         } else if (const auto* cast = dynamic_cast<const dbms::CastExpr*>(node)) {
@@ -20521,7 +20523,8 @@ static bool executePgClassQuery(const string& rawSql,Session& session,const stri
 // This is a grammar-role detector, not an executor or a result fingerprint.
 // The parser's legacy Literal child envelope becomes preparedSubquery during
 // whole-query binding. IN/ANY/ALL/EXISTS retain their multirow consumers.
-static pair<bool, bool> scalarQueryRoles(const dbms::Expr* expression, bool scalar = true) {
+static pair<bool, bool> scalarQueryRoles(const dbms::Expr* expression, bool scalar = true,
+                                       bool* explicitCollation = nullptr) {
     if (!expression) return {};
     if (const auto* literal = dynamic_cast<const dbms::LiteralExpr*>(expression)) {
         const auto tokens = dbms::SQLParser::tokenize(literal->value);
@@ -20534,7 +20537,7 @@ static pair<bool, bool> scalarQueryRoles(const dbms::Expr* expression, bool scal
     }
     pair<bool, bool> result{};
     const auto add = [&](const dbms::Expr* child, bool role = true) {
-        const auto uses = scalarQueryRoles(child, role);
+        const auto uses = scalarQueryRoles(child, role, explicitCollation);
         result.first = result.first || uses.first;
         result.second = result.second || uses.second;
     };
@@ -20542,7 +20545,10 @@ static pair<bool, bool> scalarQueryRoles(const dbms::Expr* expression, bool scal
         add(binary->left.get());
         const string op = dbms::SQLParser::toLower(binary->op);
         add(binary->right.get(), op != "in" && op != "not in");
-    } else if (const auto* unary = dynamic_cast<const dbms::UnaryOpExpr*>(expression)) add(unary->operand.get());
+    } else if (const auto* unary = dynamic_cast<const dbms::UnaryOpExpr*>(expression)) {
+        if (explicitCollation && unary->op.rfind("COLLATE ", 0) == 0) *explicitCollation = true;
+        add(unary->operand.get());
+    }
     else if (const auto* cast = dynamic_cast<const dbms::CastExpr*>(expression)) add(cast->operand.get());
     else if (const auto* call = dynamic_cast<const dbms::FunctionCallExpr*>(expression)) {
         dbms::CatalogManager::QualifiedName routine;
@@ -20683,7 +20689,8 @@ static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bo
     };
     const bool possibleArray = queryArrays(candidate,false);
     if(possibleArray && !needsDomainCast && dbms::SQLParser::isDatabaseIndependentQuery(*candidate))return false;
-    const auto roles = scalarQueryRoles(candidate->whereClause.get());
+    bool explicitPredicateCollation = false;
+    const auto roles = scalarQueryRoles(candidate->whereClause.get(), true, &explicitPredicateCollation);
     bool scalarOrder = false;
     for (const auto& item : candidate->orderBy)
         scalarOrder = scalarOrder || scalarQueryRoles(item.expr.get()).first;
@@ -20747,7 +20754,8 @@ static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bo
             }
         }
         if (descendants.empty() && !roles.first && !scalarOrder && !possibleArray && !needsDomainCast &&
-            !fromlessDemand && !possibleBitNegation && !physicalLimitDemand && !stringProjection) {
+            !fromlessDemand && !possibleBitNegation && !physicalLimitDemand && !stringProjection &&
+            !explicitPredicateCollation) {
             const auto schema = g_engine.getTableSchema(session.currentDB, physical);
             typedSortDemand = ordinaryTypedSortDemand(*candidate, schema);
             if (!typedSortDemand && none_of(schema.cols.begin(), schema.cols.end(),
@@ -20771,7 +20779,9 @@ static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bo
     const bool arrayOutput = any_of(prepared.output.begin(), prepared.output.end(),
         [](const dbms::QueryOutputColumn& column) { return dbms::array_detail::isArray(column.type); });
     const bool bitNegationOutput=possibleBitNegation && bitNegation(select,true);
-    if(descendants.empty() && !roles.first && !scalarOrder && !queryArrays(select,true) && !arrayOutput && !needsDomainCast && !fromlessDemand && !bitNegationOutput && !physicalLimitDemand && !typedSortDemand && !stringProjection)return false;
+    if(descendants.empty() && !roles.first && !scalarOrder && !queryArrays(select,true) && !arrayOutput &&
+        !needsDomainCast && !fromlessDemand && !bitNegationOutput && !physicalLimitDemand &&
+        !typedSortDemand && !stringProjection && !explicitPredicateCollation) return false;
     // Preserve column grants on precisely the bound source cells used by
     // this query (including correlated child references), not SELECT *.
     if (select->fromClause && !sessionIsAdmin(session)) {

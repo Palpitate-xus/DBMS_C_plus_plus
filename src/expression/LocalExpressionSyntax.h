@@ -36,6 +36,7 @@ inline ExprPtr cloneSyntaxExpression(const Expr* source) {
     else if (const auto* node = dynamic_cast<const ParameterExpr*>(source)) result = std::make_unique<ParameterExpr>(*node);
     else if (const auto* node = dynamic_cast<const UnaryOpExpr*>(source)) {
         auto target = std::make_unique<UnaryOpExpr>(); target->op = node->op;
+        target->collationBinding = node->collationBinding;
         target->operand = copy(node->operand); result = std::move(target);
     } else if (const auto* node = dynamic_cast<const BinaryOpExpr*>(source)) {
         auto target = std::make_unique<BinaryOpExpr>(); target->op = node->op;
