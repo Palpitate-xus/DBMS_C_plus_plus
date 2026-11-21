@@ -37,7 +37,7 @@ int main() {
     assert(g_engine.alterTableDropColumn(database, "items", "obsolete") ==
            dbms::DBStatus::OK);
     dbms::TableSchema changed = g_engine.getTableSchema(database, "items");
-    assert(changed.len == 3);
+    assert(changed.len() == 3);
     assert((changed.pkColIndices == std::vector<size_t>{0}));
     assert((changed.uniqueConstraints ==
             std::vector<std::vector<size_t>>{{1, 2}}));
@@ -64,7 +64,7 @@ int main() {
     assert(g_engine.alterTableDropColumn(database, "items", "tenant") ==
            dbms::DBStatus::INVALID_VALUE);
     changed = g_engine.getTableSchema(database, "items");
-    assert(changed.len == 3);
+    assert(changed.len() == 3);
     assert(changed.cols[1].dataName == "tenant");
 
     // The remapped metadata must survive a schema reload.

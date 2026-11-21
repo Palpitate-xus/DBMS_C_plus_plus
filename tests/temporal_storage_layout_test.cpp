@@ -85,19 +85,19 @@ int main() {
     g_engine.forEachRow(database, "legacy", [&](uint32_t, uint16_t, const char* data, size_t size) {
         const std::string row(data, size);
         std::vector<std::string> cells;
-        for (size_t i = 0; i < legacy.len; ++i)
+        for (size_t i = 0; i < legacy.len(); ++i)
             cells.push_back(StorageEngine::extractColumnValueStatic(row, legacy, i));
         rawLegacyRows.push_back(std::move(cells));
     });
     for (const auto& image : {old9, oldA, oldB, oldC}) {
         publish(legacyPath, image);
         const auto schema = g_engine.getTableSchema(database, "legacy");
-        check(schema.len == 4, "legacy format " + std::to_string(version(image)) + " read");
-        check(schema.len == 4 && schema.cols[1].dsize == 4 &&
-            std::all_of(schema.cols, schema.cols + schema.len, [](const Column& c) {
+        check(schema.len() == 4, "legacy format " + std::to_string(version(image)) + " read");
+        check(schema.len() == 4 && schema.cols[1].dsize == 4 &&
+            std::all_of(schema.cols.begin(), schema.cols.end(), [](const Column& c) {
                 return c.storageCodec == Column::StorageCodec::Legacy;
             }), "old units are never inferred from width");
-        if (schema.len != 4) continue;
+        if (schema.len() != 4) continue;
         {
             // These are parser images, not new crash-recovery databases. In
             // particular, 9 has no RID1 while this fixture's modern WAL does.
@@ -107,7 +107,7 @@ int main() {
             g_engine.forEachRow(database, "legacy", [&](uint32_t, uint16_t, const char* data, size_t size) {
                 const std::string row(data, size);
                 std::vector<std::string> cells;
-                for (size_t i = 0; i < schema.len; ++i)
+                for (size_t i = 0; i < schema.len(); ++i)
                     cells.push_back(StorageEngine::extractColumnValueStatic(row, schema, i));
                 check(index < rawLegacyRows.size() && cells == rawLegacyRows[index++],
                       "legacy 9/A/B/C parser/raw datum codec preserves seconds");
@@ -128,10 +128,10 @@ int main() {
     const auto tagged = readBytes(taggedPath);
     check(version(tagged) == 0x4442000D, "tagged schema D");
     auto schema = g_engine.getTableSchema(database, "tagged");
-    check(schema.len == 5 && schema.cols[0].storageCodec == Column::StorageCodec::Legacy &&
+    check(schema.len() == 5 && schema.cols[0].storageCodec == Column::StorageCodec::Legacy &&
         schema.cols[4].storageCodec == Column::StorageCodec::Legacy, "non-temporal codec unchanged");
     for (size_t i = 1; i < 4; ++i)
-        check(schema.len == 5 && schema.cols[i].storageCodec == Column::StorageCodec::TemporalMicros &&
+        check(schema.len() == 5 && schema.cols[i].storageCodec == Column::StorageCodec::TemporalMicros &&
             schema.cols[i].dsize == 8, "fixed int64 microsecond slot");
     check(g_engine.insertRow(database, "tagged", {{"id", std::string("1")}, {"t", std::string("00:00:00.000001")},
         {"p", std::string("1999-12-31 23:59:59.999999")},
@@ -161,19 +161,19 @@ int main() {
         if (corruption == 6) bytes.append(1, '\0');
         if (corruption == 7) for (size_t i = tail + 6; i < bytes.size(); ++i) bytes[i] = 0;
         publish(taggedPath, bytes);
-        check(parser.getTableSchema(database, "tagged").len == 0, "D corrupt tail fails closed");
+        check(parser.getTableSchema(database, "tagged").len() == 0, "D corrupt tail fails closed");
     }
     for (const auto* extension : {"CHK2", "IDN1", "DFT1", "RLB1", "RID1", "DSO1", "ITM1", "TCM1"}) {
         const auto position = tagged.find(extension);
         check(position != std::string::npos, std::string("required D extension ") + extension);
         if (position != std::string::npos) {
             publish(taggedPath, tagged.substr(0, position));
-            check(parser.getTableSchema(database, "tagged").len == 0,
+            check(parser.getTableSchema(database, "tagged").len() == 0,
                   std::string("D prefix truncation before ") + extension + " fails closed");
         }
     }
     publish(taggedPath, tagged);
-    check(parser.getTableSchema(database, "tagged").len == 5, "valid D readable after restoration");
+    check(parser.getTableSchema(database, "tagged").len() == 5, "valid D readable after restoration");
     // Same SQL type and same timestamp width still require a unit conversion.
     for (const auto& nameType : std::vector<std::pair<std::string,std::string>>{
             {"t","time"},{"p","timestamp"},{"z","timestamptz"}}) {
@@ -200,7 +200,7 @@ int main() {
     check(!ddl.executeSql("CREATE TABLE micro_inherited(t time) INHERITS(legacy_parent)", session),
         "new child accepts same SQL type with old parent units");
     const auto child = g_engine.getTableSchema(database, "micro_inherited");
-    check(child.len == 1 && child.cols[0].storageCodec == Column::StorageCodec::TemporalMicros,
+    check(child.len() == 1 && child.cols[0].storageCodec == Column::StorageCodec::TemporalMicros,
         "new child uses its own microsecond heap");
     check(g_engine.insertRow(database, "micro_inherited", {{"t", std::string("00:00:00.000001")}}) == DBStatus::OK,
           "inherited fractional insert");

@@ -25,7 +25,7 @@ int main() {
         assert(g_engine.insertRow(db,"args",{{"id",values[0]},{"n",values[1]},{"t",values[2]},{"b",values[3]}})==DBStatus::OK);
     }
     const auto schema=g_engine.getTableSchema(db,"args");
-    assert(schema.len==4);
+    assert(schema.len()==4);
     std::cout<<"AGGREGATE_DEFAULT_TEXT_COLUMN_COLLATION="<<schema.cols[2].collation
              <<" RESOLVED="<<schema.cols[2].resolvedCollation<<std::endl;
     StorageEngine::SelectExpr textColumn;textColumn.colName="t";

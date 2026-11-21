@@ -149,10 +149,10 @@ std::map<std::string, Row> rows(Fixture& f, bool capture) {
             page.forEachLive([&](uint16_t, const char* tuple, size_t length) {
             require(length >= sizeof(HeapTupleHeaderData), "actual tuple header");
             const auto* header = castHeapHeader(tuple);
-            require(header->t_hoff >= sizeof(HeapTupleHeaderData) + (f.schema.len + 7) / 8 && header->t_hoff <= length, "actual tuple body span");
+            require(header->t_hoff >= sizeof(HeapTupleHeaderData) + (f.schema.len() + 7) / 8 && header->t_hoff <= length, "actual tuple body span");
             std::string raw(tuple + header->t_hoff, length - header->t_hoff);
-            std::vector<bool> storedNulls(f.schema.len, false), nulls;
-            for (size_t i = 0; i < f.schema.len; ++i) storedNulls[i] = dbms::isNull(header, int(i));
+            std::vector<bool> storedNulls(f.schema.len(), false), nulls;
+            for (size_t i = 0; i < f.schema.len(); ++i) storedNulls[i] = dbms::isNull(header, int(i));
             std::vector<std::string> cells;
             detail::decodeStoredRowValues(g_engine, f.database, raw, f.schema, storedNulls, cells, nulls);
             auto id = cells[0];

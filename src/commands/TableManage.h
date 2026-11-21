@@ -2122,7 +2122,8 @@ private:
     // Redo a single WAL record.
     bool redoPageImage(const std::string& dbname, const std::string& tablename,
                        uint32_t pageId, const char* pageData, size_t pageLen,
-                       Lsn recordLsn, bool force, uint32_t forkNum = 0);
+                       Lsn recordLsn, bool beforeImage, uint32_t forkNum,
+                       bool undoUncommitted);
     bool redoXactCommit(uint64_t xid);
     bool redoXactAbort(uint64_t xid);
     bool redoIndexFileImage(const std::filesystem::path& indexPath,

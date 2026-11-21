@@ -1769,10 +1769,10 @@ ProtocolPhysicalSource protocolPhysicalSourceFromQuery(const std::string& sql,
     }
     // Native/legacy physical relations may lack catalog registration. They
     // can still provide type metadata, but never a fabricated relation OID.
-    if (result.table.len == 0 && source.schema.empty() &&
+    if (result.table.len() == 0 && source.schema.empty() &&
         g_engine.tableExists(session.currentDB, source.name))
         result.table = g_engine.getTableSchema(session.currentDB, source.name);
-    if (result.table.len == 0) return result;
+    if (result.table.len() == 0) return result;
     std::string alias;
     CatalogManager::QualifiedName parsedAlias;
     if (CatalogManager::parseQualifiedName(sourceAlias, parsedAlias, true)) alias = parsedAlias.name;
@@ -1801,7 +1801,7 @@ ProtocolPhysicalSource protocolPhysicalSourceFromQuery(const std::string& sql,
         const auto* column = dynamic_cast<const ColumnRefExpr*>(item.expr.get());
         if ((literal && literal->value == "*") ||
             (column && column->column == "*" && ownsReference(*column))) {
-            for (size_t i = 0; i < result.table.len; ++i)
+            for (size_t i = 0; i < result.table.len(); ++i)
                 result.projections.push_back(result.table.cols[i].dataName);
         } else if (column && ownsReference(*column)) {
             result.projections.push_back(column->column);
@@ -2261,7 +2261,7 @@ std::vector<PgColumnDescription> describeProtocolColumns(const QueryResult& resu
             description.typeSize = protocolTypeSize(description.typeOid, declared);
             description.typeModifier = field.typeMod;
         }
-        for (size_t i = 0; i < table.len; ++i) {
+        for (size_t i = 0; i < table.len(); ++i) {
             const Column& column = table.cols[i];
             // Schema/output names are already canonical SQL identities. A
             // delimited F and an unquoted f are different physical columns.
@@ -3575,7 +3575,7 @@ void validatePreparedIntegerInputs(const std::string& sql,Session& session,
        !select->groupByElems.empty() || select->having || !select->windowDefs.empty() ||
        !select->locking.empty() || !select->distinctOn.empty())return;
     const auto physical=protocolPhysicalSourceFromQuery(sql,session);
-    if(!physical.table.len)return;
+    if(!physical.table.len())return;
     const auto unknown=[](const Expr* value) {
         const auto* literal=dynamic_cast<const LiteralExpr*>(value);
         return literal && !literal->preparedSubquery && literal->typeName.empty() &&
@@ -3584,7 +3584,7 @@ void validatePreparedIntegerInputs(const std::string& sql,Session& session,
     const auto integerColumn=[&](const Expr* value) {
         const auto* column=dynamic_cast<const ColumnRefExpr*>(value);
         if(!column)return false;
-        for(size_t i=0;i<physical.table.len;++i) {
+        for(size_t i=0;i<physical.table.len();++i) {
             const auto& candidate=physical.table.cols[i];
             const auto type=ExprHelper::canonicalResultTypeName(candidate.dataType);
             if(candidate.dataName==column->column && !candidate.isArray &&
@@ -3657,7 +3657,7 @@ void validatePreparedBitScalarParameters(const std::string& sql, Session& sessio
     const auto bitColumn = [&](const Expr* node) {
         const auto* column = dynamic_cast<const ColumnRefExpr*>(node);
         if (!column) return false;
-        for (size_t i = 0; i < physical.table.len; ++i) {
+        for (size_t i = 0; i < physical.table.len(); ++i) {
             const auto& descriptor = physical.table.cols[i];
             if (descriptor.dataName == column->column && !descriptor.isArray &&
                 (descriptor.dataType == "bit" || descriptor.dataType == "bit varying")) return true;
@@ -4584,12 +4584,12 @@ bool describePreparedResultShape(const std::string& sql, Session& session,
                 Column column;
                 column.dataName = field.first;
                 column.dataType = field.second;
-                schema.cols[schema.len++] = std::move(column);
+                schema.append(std::move(column));
             }
             relation = virtualPgClass ? "pg_class"
                 : virtualPgSettings ? "pg_settings" : "pg_stat_activity";
         }
-        for (size_t i = 0; i < schema.len; ++i) {
+        for (size_t i = 0; i < schema.len(); ++i) {
             const Column& column = schema.cols[i];
             const auto declaredType = protocolPhysicalTypeName(column);
             typeHints[column.dataName] = declaredType;
@@ -4615,7 +4615,7 @@ bool describePreparedResultShape(const std::string& sql, Session& session,
     std::vector<std::optional<int32_t>> projectionTypeModifiers;
     std::vector<uint32_t> projectionTemporalTypeOids;
     const auto appendPhysicalColumns = [&]() {
-        for (size_t i = 0; i < schema.len; ++i) {
+        for (size_t i = 0; i < schema.len(); ++i) {
             shape.columns.push_back(schema.cols[i].dataName);
             shape.columnTypes.push_back(protocolPhysicalTypeName(schema.cols[i]));
             outputNames.push_back(schema.cols[i].dataName);
@@ -4651,7 +4651,7 @@ bool describePreparedResultShape(const std::string& sql, Session& session,
         if (reference && !relation.empty()) {
             if (!qualifierMatches(*reference)) return false;
             bool found = false;
-            for (size_t i = 0; i < schema.len; ++i) {
+            for (size_t i = 0; i < schema.len(); ++i) {
                 if (schema.cols[i].dataName != reference->column) continue;
                 shape.columns.push_back(schema.cols[i].dataName);
                 shape.columnTypes.push_back(protocolPhysicalTypeName(schema.cols[i]));
@@ -5057,7 +5057,7 @@ std::string whereUnknownFunctionError(const std::string& sql,
                 if (physical.empty()) throw;
             }
             const TableSchema schema = g_engine.getTableSchema(session.currentDB, physical);
-            for (size_t i = 0; i < schema.len; ++i) {
+            for (size_t i = 0; i < schema.len(); ++i) {
                 if (schema.cols[i].dataName != arg->column) continue;
                 const auto dt = SQLParser::toLower(schema.cols[i].dataType);
                 if (dt.find("int") != std::string::npos) type = "integer";
@@ -5508,7 +5508,7 @@ bool validateCopyWirePlan(CopyWirePlan& plan, Session& session) {
 
     std::set<size_t> selected;
     if (plan.requestedColumns.empty()) {
-        for (size_t index = 0; index < table.len; ++index) {
+        for (size_t index = 0; index < table.len(); ++index) {
             if (plan.direction == CopyWireDirection::FromStdin &&
                 !table.cols[index].generatedExpr.empty()) {
                 continue;
@@ -5517,14 +5517,14 @@ bool validateCopyWirePlan(CopyWirePlan& plan, Session& session) {
         }
     } else {
         for (const auto& requested : plan.requestedColumns) {
-            size_t found = table.len;
-            for (size_t index = 0; index < table.len; ++index) {
+            size_t found = table.len();
+            for (size_t index = 0; index < table.len(); ++index) {
                 if (table.cols[index].dataName == requested) {
                     found = index;
                     break;
                 }
             }
-            if (found == table.len) {
+            if (found == table.len()) {
                 copyError(plan, "42703",
                           "column \"" + requested + "\" does not exist");
                 return false;
@@ -6115,7 +6115,7 @@ CopyStreamResult sendCopyOut(PostgresProtocol& protocol,
                 const int64_t rid = StorageEngine::encodeRid(pageId, slotId);
                 StorageEngine::bindNullRow(
                     &g_engine, session.currentDB, plan.physicalTable, rid,
-                    table.len);
+                    table.len());
                 struct NullBindingGuard {
                     ~NullBindingGuard() { StorageEngine::unbindNullRow(); }
                 } nullBindingGuard;

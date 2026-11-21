@@ -82,14 +82,14 @@ int main() {
             check(status == DBStatus::OK && returned.size() == 1 && returned[0].count(item.target) && value == item.expected,
                 label + " returned=" + (value ? "[" + *value + "]" : "<SQL-NULL>"));
             const auto actualSchema = owner.getTableSchema(database, tableName);
-            size_t targetIndex = actualSchema.len;
-            for (size_t i = 0; i < actualSchema.len; ++i)
+            size_t targetIndex = actualSchema.len();
+            for (size_t i = 0; i < actualSchema.len(); ++i)
                 if (actualSchema.cols[i].dataName == item.target) targetIndex = i;
             size_t rows = 0; bool nullBitMatches = true;
             const bool scanned = owner.forEachRow(database, tableName,
                 [&](uint32_t page, uint16_t slot, const char*, size_t) {
                     ++rows;
-                    nullBitMatches = nullBitMatches && targetIndex < actualSchema.len &&
+                    nullBitMatches = nullBitMatches && targetIndex < actualSchema.len() &&
                         owner.isColumnNullByRid(database, tableName,
                             StorageEngine::encodeRid(page, slot), targetIndex) == !item.expected.has_value();
                 });

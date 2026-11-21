@@ -113,7 +113,7 @@ static void test_varbit_alias() {
 
     dbms::TableSchema tbl = g_engine.getTableSchema(db, "b");
     bool found = false;
-    for (size_t i = 0; i < tbl.len; ++i) {
+    for (size_t i = 0; i < tbl.len(); ++i) {
         if (tbl.cols[i].dataName == "v") {
             found = true;
             assert(tbl.cols[i].dataType == "bit varying");
@@ -168,7 +168,7 @@ static void test_default_typmods_and_empty_varbit() {
         s));
     const dbms::TableSchema table = g_engine.getTableSchema(db, "defaults");
     const auto findColumn = [&table](const std::string& name) {
-        for (size_t i = 0; i < table.len; ++i) {
+        for (size_t i = 0; i < table.len(); ++i) {
             if (table.cols[i].dataName == name) return &table.cols[i];
         }
         return static_cast<const dbms::Column*>(nullptr);

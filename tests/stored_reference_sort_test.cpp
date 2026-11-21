@@ -58,7 +58,7 @@ Input actualInput(const std::string& database, const std::string& type,
          result.arrayDeclaration->arrayElement &&
          result.arrayDeclaration->arrayElement->codecOid == (type == "regtype" ? 2206U : 2205U),
          "array element codec comes from the real declared column");
-    for (size_t i = 0; i < result.schema.len; ++i) {
+    for (size_t i = 0; i < result.schema.len(); ++i) {
         const auto& column = result.schema.cols[i];
         const auto declaration = metadata->columns.at(column.dataName);
         result.descriptor.push_back({column.dataName,
@@ -75,7 +75,7 @@ Input actualInput(const std::string& database, const std::string& type,
          "physical producer returned every actual row");
     const auto catalog = regtype_detail::metadata(g_engine, database);
     for (size_t row = 0; row < cells.size(); ++row) {
-        need(cells[row].size() == result.schema.len && nulls[row].size() == result.schema.len,
+        need(cells[row].size() == result.schema.len() && nulls[row].size() == result.schema.len(),
              "physical source has exact cell/NULL width");
         result.rows.push_back({ExprValue("integer", cells[row][0], nulls[row][0]),
             stored_regtype_detail::load(cells[row][1], true, nulls[row][1],

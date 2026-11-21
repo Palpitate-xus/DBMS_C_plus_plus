@@ -12,7 +12,7 @@ int main() {
     const auto database=testDbPath("order_by_duplicate_alias");
     cleanupTestDb("order_by_duplicate_alias");
     assert(g_engine.createDatabase(database,"utf8")==DBStatus::OK);
-    TableSchema schema;schema.len=3;
+    TableSchema schema;schema.cols.resize(3);
     for(size_t i=0;i<3;++i) {
         schema.cols[i].dataName=i==0?"id":i==1?"v":"word";
         schema.cols[i].dataType=i==2?"text":"int";

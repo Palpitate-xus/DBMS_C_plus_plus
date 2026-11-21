@@ -114,7 +114,7 @@ static void test_commit_failure_is_propagated_and_restored() {
     txn.markSnapshotDirty();
     dbms::Column extra = dbms::makeIntColumn("extra", false, 0, false);
     assert(g_engine.alterTableAddColumn(db, "deferred_tbl", extra) == dbms::DBStatus::OK);
-    assert(g_engine.getTableSchema(db, "deferred_tbl").len == 3);
+    assert(g_engine.getTableSchema(db, "deferred_tbl").len() == 3);
     assert(g_engine.insert(db, "deferred_tbl", {{"id", "1"}, {"price", "0"},
                                                   {"extra", "7"}}) == dbms::DBStatus::OK);
 
@@ -125,7 +125,7 @@ static void test_commit_failure_is_propagated_and_restored() {
     assert(!txn.isActive());
     assert(!txn.isCommitted());
     assert(!g_engine.inTransaction());
-    assert(g_engine.getTableSchema(db, "deferred_tbl").len == 2);
+    assert(g_engine.getTableSchema(db, "deferred_tbl").len() == 2);
     assert(g_engine.query(db, "deferred_tbl", {"=id 1"}, {"price"}).empty());
 
     cleanup(db);
@@ -310,14 +310,14 @@ static void test_unfinished_snapshot_recovers_on_restart() {
         assert(source.alterTableAddColumn(
                    db, "recovery_tbl", dbms::makeIntColumn("after_crash", true, 0, false)) ==
                dbms::DBStatus::OK);
-        assert(source.getTableSchema(db, "recovery_tbl").len == 2);
+        assert(source.getTableSchema(db, "recovery_tbl").len() == 2);
     }
 
     // No COMMIT record exists for the synthetic snapshot xid, so startup
     // recovery must restore the pre-DDL image and remove the snapshot.
     {
         dbms::StorageEngine restarted;
-        assert(restarted.getTableSchema(db, "recovery_tbl").len == 1);
+        assert(restarted.getTableSchema(db, "recovery_tbl").len() == 1);
         assert(!std::filesystem::exists(backup));
         assert(!std::filesystem::exists(statementBackup));
     }
@@ -566,7 +566,7 @@ static void test_alter_statement_rollback() {
         "ALTER TABLE alter_atomic ADD COLUMN first_value INT, DROP COLUMN missing_value", s);
     assert(err);
     const auto table = g_engine.getTableSchema(db, "alter_atomic");
-    assert(table.len == 1);
+    assert(table.len() == 1);
     assert(table.cols[0].dataName == "id");
     assert(!fs::exists(db + ".txn_backup"));
     assert(!g_engine.inTransaction());
@@ -595,7 +595,7 @@ static void test_alter_and_truncate_join_outer_transaction() {
     assert(g_engine.inTransaction());
     assert(g_engine.rollbackTransaction() == dbms::DBStatus::OK);
     auto schema = g_engine.getTableSchema(db, "rewrite_target");
-    assert(schema.len == 1 && schema.cols[0].dataName == "id");
+    assert(schema.len() == 1 && schema.cols[0].dataName == "id");
     assert(g_engine.query(db, "rewrite_target", {}, {"id"}) ==
            std::vector<std::string>{"1 "});
 
@@ -610,7 +610,7 @@ static void test_alter_and_truncate_join_outer_transaction() {
     assert(g_engine.rollbackToSavepoint("before_rewrite") ==
            dbms::DBStatus::OK);
     schema = g_engine.getTableSchema(db, "rewrite_target");
-    assert(schema.len == 1 && schema.cols[0].dataName == "id");
+    assert(schema.len() == 1 && schema.cols[0].dataName == "id");
     assert(g_engine.query(db, "rewrite_target", {}, {"id"}) ==
            std::vector<std::string>{"1 "});
     assert(g_engine.commitTransaction() == dbms::DBStatus::OK);
@@ -626,20 +626,20 @@ static void test_alter_and_truncate_join_outer_transaction() {
     assert(g_engine.rollbackToSavepoint("after_rewrite") ==
            dbms::DBStatus::OK);
     schema = g_engine.getTableSchema(db, "rewrite_target");
-    assert(schema.len == 2);
+    assert(schema.len() == 2);
     assert(schema.cols[1].dataName == "kept_by_savepoint");
     assert(!ddl.executeSql(
         "ALTER TABLE rewrite_target ADD COLUMN removed_twice INT", s));
     assert(g_engine.rollbackToSavepoint("after_rewrite") ==
            dbms::DBStatus::OK);
     schema = g_engine.getTableSchema(db, "rewrite_target");
-    assert(schema.len == 2);
+    assert(schema.len() == 2);
     assert(schema.cols[1].dataName == "kept_by_savepoint");
     assert(g_engine.releaseSavepoint("after_rewrite") == dbms::DBStatus::OK);
     assert(!pathExistsWithPrefix(db + ".ddl_statement_backup."));
     assert(g_engine.rollbackTransaction() == dbms::DBStatus::OK);
     schema = g_engine.getTableSchema(db, "rewrite_target");
-    assert(schema.len == 1 && schema.cols[0].dataName == "id");
+    assert(schema.len() == 1 && schema.cols[0].dataName == "id");
 
     // Row changes made after the DDL snapshot are already removed by the
     // physical restore. They must not be replayed against the older schema.
@@ -651,7 +651,7 @@ static void test_alter_and_truncate_join_outer_transaction() {
            dbms::DBStatus::OK);
     assert(g_engine.rollbackTransaction() == dbms::DBStatus::OK);
     schema = g_engine.getTableSchema(db, "rewrite_target");
-    assert(schema.len == 1 && schema.cols[0].dataName == "id");
+    assert(schema.len() == 1 && schema.cols[0].dataName == "id");
     assert(g_engine.query(db, "rewrite_target", {}, {"id"}) ==
            std::vector<std::string>{"1 "});
 
@@ -662,10 +662,10 @@ static void test_alter_and_truncate_join_outer_transaction() {
     assert(!ddl.executeSql(
         "ALTER TABLE rewrite_target ADD COLUMN second_change INT", s));
     schema = g_engine.getTableSchema(db, "rewrite_target");
-    assert(schema.len == 3);
+    assert(schema.len() == 3);
     assert(g_engine.rollbackTransaction() == dbms::DBStatus::OK);
     schema = g_engine.getTableSchema(db, "rewrite_target");
-    assert(schema.len == 1 && schema.cols[0].dataName == "id");
+    assert(schema.len() == 1 && schema.cols[0].dataName == "id");
     assert(!pathExistsWithPrefix(db + ".ddl_statement_backup."));
 
     // COMMIT keeps both schema changes and removes both the outer and
@@ -678,7 +678,7 @@ static void test_alter_and_truncate_join_outer_transaction() {
         "ALTER TABLE rewrite_target ADD COLUMN committed_second INT", s));
     assert(g_engine.commitTransaction() == dbms::DBStatus::OK);
     schema = g_engine.getTableSchema(db, "rewrite_target");
-    assert(schema.len == 3);
+    assert(schema.len() == 3);
     assert(schema.cols[1].dataName == "committed_first");
     assert(schema.cols[2].dataName == "committed_second");
     assert(!pathExistsWithPrefix(db + ".txn_backup."));
@@ -693,11 +693,11 @@ static void test_alter_and_truncate_join_outer_transaction() {
         "ALTER TABLE rewrite_target ADD COLUMN leaked_change INT, "
         "DROP COLUMN missing_change", s));
     schema = g_engine.getTableSchema(db, "rewrite_target");
-    assert(schema.len == 4);
+    assert(schema.len() == 4);
     assert(schema.cols[3].dataName == "retained_change");
     assert(g_engine.rollbackTransaction() == dbms::DBStatus::OK);
     schema = g_engine.getTableSchema(db, "rewrite_target");
-    assert(schema.len == 3);
+    assert(schema.len() == 3);
     assert(schema.cols[1].dataName == "committed_first");
     assert(schema.cols[2].dataName == "committed_second");
 

@@ -52,7 +52,7 @@ int main() {
     assert(g_engine.alterTableAddFKConstraint(
                database, "child", "child_parent_code_fk", {"parent_code"},
                "parent", {"code"}) == dbms::DBStatus::INVALID_VALUE);
-    assert(g_engine.getTableSchema(database, "child").fkLen == 0);
+    assert(g_engine.getTableSchema(database, "child").fkLen() == 0);
 
     assert(g_engine.update(database, "child", {{"parent_code", "10"}},
                            {"=id 1"}) == dbms::DBStatus::OK);
@@ -87,7 +87,7 @@ int main() {
                database, "invalid_child", "incompatible_type_fk",
                {"parent_text"}, "parent", {"code"}) ==
            dbms::DBStatus::INVALID_VALUE);
-    assert(g_engine.getTableSchema(database, "invalid_child").fkLen == 0);
+    assert(g_engine.getTableSchema(database, "invalid_child").fkLen() == 0);
 
     dbms::TableSchema defaultColumnsChild = keyedTable("default_columns_child");
     defaultColumnsChild.append(
@@ -99,7 +99,7 @@ int main() {
                {"parent_id"}, "parent", {}) == dbms::DBStatus::OK);
     const dbms::TableSchema defaultColumnsSchema =
         g_engine.getTableSchema(database, "default_columns_child");
-    assert(defaultColumnsSchema.fkLen == 1);
+    assert(defaultColumnsSchema.fkLen() == 1);
     assert(defaultColumnsSchema.fks[0].refCols ==
            std::vector<std::string>{"id"});
     assert(g_engine.insert(database, "default_columns_child",

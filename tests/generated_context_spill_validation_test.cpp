@@ -92,7 +92,7 @@ int main() {
     std::vector<size_t> sources;
     for(const auto& source:query->sourceRanges)
         if(source.relationName=="gcs_heap")sources.push_back(source.ordinal);
-    if(sources.size()!=2 || schema.len!=3)return 2;
+    if(sources.size()!=2 || schema.len()!=3)return 2;
     const auto column=[&](size_t source,const std::string& name) {
         const auto& columns=execution->sourceRange(source).columns;
         for(size_t i=0;i<columns.size();++i)if(columns[i].name==name)return i;
@@ -106,7 +106,7 @@ int main() {
         const std::string raw(bytes,length);const auto rid=StorageEngine::encodeRid(page,slot);
         for(const auto source:sources) {
             std::vector<ExprValue> cells;
-            for(size_t i=0;i<schema.len;++i) {
+            for(size_t i=0;i<schema.len();++i) {
                 if(schema.cols[i].generatedKind=='v'){cells.emplace_back();continue;}
                 const auto null=g_engine.isColumnNullByRid(db,"gcs_heap",rid,i);
                 cells.emplace_back(execution->sourceRange(source).columns[i].type,
@@ -139,7 +139,7 @@ int main() {
     // Keep those real registered recipes, then serialize one demanded recipe
     // with the same actual tuple's physical cells; no synthetic program/owner.
     RowContext one=execution->context();
-    for(const auto source:sources)for(size_t i=0;i<schema.len;++i)
+    for(const auto source:sources)for(size_t i=0;i<schema.len();++i)
         if(schema.cols[i].generatedKind!='v')one.setBoundColumn(source,i,actual.boundColumn(source,i));
     one.setGeneratedBound(left,v,readV,true);
     written.write(one);const auto frames=written.frames();if(frames.size()!=1)return 2;

@@ -152,7 +152,7 @@ std::vector<CatalogManager::PhysicalArrayAttribute> physicalArrayAttributes(
         const auto schema = engine.readPersistedSchemaForCatalog(database, physicalName);
         // A catalog-only declaration is not evidence of physical array storage.
         if (!schema) continue;
-        for (size_t i = 0; i < schema->len; ++i) {
+        for (size_t i = 0; i < schema->len(); ++i) {
             const auto& column = schema->cols[i];
             if (!column.isArray || !column.domainName.empty() || !column.enumValues.empty())
                 continue;

@@ -40,7 +40,7 @@ int main() {
     }
     StorageEngine engine;const std::string name="unary_interval_value",db=testDbPath(name);
     assert(engine.createDatabase(db)==DBStatus::OK);
-    TableSchema schema;schema.len=1;schema.cols[0].dataName="v";schema.cols[0].dataType="interval";schema.cols[0].dsize=128;
+    TableSchema schema;schema.cols.resize(1);schema.cols[0].dataName="v";schema.cols[0].dataType="interval";schema.cols[0].dsize=128;
     assert(engine.createTable(db,"unary_interval_rows",schema)==DBStatus::OK);
     auto prepared=std::make_shared<PreparedQuery>(engine.prepareBoundQuery(db,"SELECT -v FROM unary_interval_rows"));
     auto* select=dynamic_cast<SelectStmt*>(prepared->ast.get());assert(select);

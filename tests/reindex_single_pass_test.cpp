@@ -236,7 +236,7 @@ int main() {
     check("numeric canonical values C collation NULL and empty keys",[&] {
         Table t(db,"numeric_values");t.auxiliary("tag");t.auxiliary("amount");
         const auto before=g_engine.getTableSchema(db,t.name);standard(t,3);const auto after=g_engine.getTableSchema(db,t.name);
-        require(before.len==after.len && before.cols[1].collation==after.cols[1].collation &&
+        require(before.len()==after.len() && before.cols[1].collation==after.cols[1].collation &&
             before.cols[1].resolvedCollation==after.cols[1].resolvedCollation && before.cols[3].dataType==after.cols[3].dataType,
             "original catalog type/collation identity preserved");
     });
@@ -275,7 +275,7 @@ int main() {
         auto row=makeRow(999);t.insert(row);t.model.push_back(row);standard(t,3);
         require(g_engine.commitTransaction()==DBStatus::OK && g_engine.checkpoint(db),"durable commit/checkpoint");
         StorageEngine cold;t.verify(cold);
-        require(cold.getTableSchema(db,t.name).len==g_engine.getTableSchema(db,t.name).len,"real source schema after cold open");
+        require(cold.getTableSchema(db,t.name).len()==g_engine.getTableSchema(db,t.name).len(),"real source schema after cold open");
     });
     check("first private data open failure leaves all live indexes unchanged",[&] {
         Table t(db,"fail_first");t.auxiliary("tag");t.composite();const auto before=t.indexOrder();

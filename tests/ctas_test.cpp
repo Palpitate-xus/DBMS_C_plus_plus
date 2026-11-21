@@ -23,7 +23,7 @@ static void setupSession(Session& s, const std::string& db) {
 }
 
 static const dbms::Column* findCol(const dbms::TableSchema& t, const std::string& name) {
-    for (size_t i = 0; i < t.len; ++i)
+    for (size_t i = 0; i < t.len(); ++i)
         if (t.cols[i].dataName == name) return &t.cols[i];
     return nullptr;
 }
@@ -48,10 +48,10 @@ static std::vector<dbms::StorageEngine::SqlRow> readStructuredRows(
             const int64_t rid =
                 dbms::StorageEngine::encodeRid(pageId, slotId);
             dbms::StorageEngine::bindNullRow(
-                &g_engine, db, tableName, rid, schema.len);
+                &g_engine, db, tableName, rid, schema.len());
             dbms::StorageEngine::SqlRow row;
             const std::string buffer(data, length);
-            for (size_t column = 0; column < schema.len; ++column) {
+            for (size_t column = 0; column < schema.len(); ++column) {
                 bool isNull = false;
                 std::string value = g_engine.extractColumnValue(
                     buffer, schema, column, db, true, &isNull);
@@ -88,7 +88,7 @@ static void test_ctas_star() {
     assert(!ddl.executeSql("CREATE TABLE cp AS SELECT * FROM src", s));
     auto sc = g_engine.getTableSchema(db, "cp");
     auto src = g_engine.getTableSchema(db, "src");
-    assert(sc.len == 3);
+    assert(sc.len() == 3);
 
     // Precise types copied from source (not all coerced to varchar).
     const dbms::Column* id = findCol(sc, "id");
@@ -184,8 +184,8 @@ static void test_ctas_drops_source_column_constraints() {
     assert(!ddl.executeSql(
         "CREATE TABLE plain_copy AS SELECT * FROM constrained_source", s));
     const auto copy = g_engine.getTableSchema(db, "plain_copy");
-    assert(copy.len == 4);
-    for (size_t column = 0; column < copy.len; ++column) {
+    assert(copy.len() == 4);
+    for (size_t column = 0; column < copy.len(); ++column) {
         assert(copy.cols[column].isNull);
         assert(!copy.cols[column].isPrimaryKey);
         assert(!copy.cols[column].isUnique);
@@ -292,7 +292,7 @@ static void test_ctas_with_no_data() {
 
     assert(!ddl.executeSql("CREATE TABLE cp AS SELECT * FROM src WITH NO DATA", s));
     auto sc = g_engine.getTableSchema(db, "cp");
-    assert(sc.len == 3);                 // structure created
+    assert(sc.len() == 3);                 // structure created
     assert(rowCount(db, "cp") == 0);     // but no rows
 
     cleanup(db);
@@ -325,7 +325,7 @@ static void test_ctas_projection() {
     // Projection with WHERE: only id,name for rows with age > 26.
     assert(!ddl.executeSql("CREATE TABLE cp AS SELECT id, name FROM src WHERE age > 26", s));
     auto sc = g_engine.getTableSchema(db, "cp");
-    assert(sc.len == 2);
+    assert(sc.len() == 2);
     assert(findCol(sc, "id") && findCol(sc, "name"));
     assert(rowCount(db, "cp") == 2);     // alice(30), carol(40)
     auto rows = rowSet(db, "cp");
@@ -346,7 +346,7 @@ static void test_ctas_no_data_with_projection() {
 
     assert(!ddl.executeSql("CREATE TABLE cp AS SELECT id, age FROM src WITH NO DATA", s));
     auto sc = g_engine.getTableSchema(db, "cp");
-    assert(sc.len == 2);
+    assert(sc.len() == 2);
     assert(findCol(sc, "id") && findCol(sc, "age"));
     assert(rowCount(db, "cp") == 0);
 

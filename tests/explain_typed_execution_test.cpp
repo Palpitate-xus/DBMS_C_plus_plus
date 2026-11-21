@@ -47,13 +47,13 @@ int main() {
     assert(!owner.databaseExists(db));
     assert(owner.createDatabase(db, "utf8") == DBStatus::OK);
     TableSchema schema;
-    schema.len = 2;
+    schema.cols.resize(2);
     schema.cols[0].dataName = "id"; schema.cols[0].dataType = "int"; schema.cols[0].dsize = 4;
     schema.cols[1] = schema.cols[0]; schema.cols[1].dataName = "ID";
     assert(owner.createTable(db, "source", schema) == DBStatus::OK);
     assert(owner.insertRow(db, "source", {{"id","1"},{"ID","7"}}) == DBStatus::OK);
     assert(owner.insertRow(db, "source", {{"id","2"},{"ID","8"}}) == DBStatus::OK);
-    schema.len = 1;
+    schema.cols.resize(1);
     assert(owner.createTable(db, "sink", schema) == DBStatus::OK);
     schema.cols[0].isNull = true;
     assert(owner.createTable(db, "caller_null", schema) == DBStatus::OK);
@@ -136,7 +136,7 @@ int main() {
     assert(generatedRows == std::vector<std::vector<std::string>>({{"2"}}));
     auto nullDistinct = plan("SELECT DISTINCT NULL AS missing FROM source");
     assert(execute(nullDistinct) == std::vector<std::vector<std::string>>({{""}}));
-    TableSchema arraySchema; arraySchema.len = 1;
+    TableSchema arraySchema; arraySchema.cols.resize(1);
     arraySchema.cols[0].dataName = "items";
     assert(TypeRegistry::instance().resolveColumnType(arraySchema.cols[0], "integer", {}, true).empty());
     assert(owner.createTable(db, "array_source", arraySchema) == DBStatus::OK);

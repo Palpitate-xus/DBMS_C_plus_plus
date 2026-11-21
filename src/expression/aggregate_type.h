@@ -14,7 +14,7 @@ public:
     BooleanArgument(const TableSchema& table, StorageEngine* engine,
                     const std::string& database, std::string sql)
         : engine_(engine), database_(database), sql_(std::move(sql)) {
-        for (size_t i = 0; i < table.len; ++i) {
+        for (size_t i = 0; i < table.len(); ++i) {
             const auto& column = table.cols[i];
             std::vector<std::string> names{column.dataName};
             if (!table.tablename.empty()) names.push_back(table.tablename + "." + column.dataName);

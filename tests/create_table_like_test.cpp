@@ -21,7 +21,7 @@ static void setupSession(Session& s, const std::string& db) {
 }
 
 static const dbms::Column* findCol(const dbms::TableSchema& t, const std::string& name) {
-    for (size_t i = 0; i < t.len; ++i)
+    for (size_t i = 0; i < t.len(); ++i)
         if (t.cols[i].dataName == name) return &t.cols[i];
     return nullptr;
 }
@@ -38,7 +38,7 @@ static void test_like_basic() {
     assert(!ddl.executeSql("CREATE TABLE cpy (LIKE src)", s));
 
     auto schema = g_engine.getTableSchema(db, "cpy");
-    assert(schema.len == 2);
+    assert(schema.len() == 2);
     const dbms::Column* id = findCol(schema, "id");
     const dbms::Column* name = findCol(schema, "name");
     assert(id && name);
@@ -217,7 +217,7 @@ static void test_like_plus_extra_column() {
     assert(!ddl.executeSql("CREATE TABLE cpy (LIKE src, c VARCHAR(10))", s));
 
     auto schema = g_engine.getTableSchema(db, "cpy");
-    assert(schema.len == 3);
+    assert(schema.len() == 3);
     assert(findCol(schema, "a") && findCol(schema, "b") && findCol(schema, "c"));
     cleanup(db);
     std::cout << "[LIKE] LIKE + extra column OK" << std::endl;

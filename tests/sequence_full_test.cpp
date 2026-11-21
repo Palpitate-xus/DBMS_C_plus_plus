@@ -394,7 +394,7 @@ static void test_sequence_owned_by_drop_column() {
         "ALTER TABLE owner_table DROP COLUMN id", s));
     assert(!g_engine.sequenceExists(db, "owned_seq"));
     const auto ownerStorage = g_engine.getTableSchema(db, "owner_table");
-    assert(ownerStorage.len == 1);
+    assert(ownerStorage.len() == 1);
     assert(ownerStorage.cols[0].dataName == "keep");
     assert(s.sequenceLastValues.count("owned_seq") == 0);
     assert(s.sequenceLastValues.count("public.owned_seq") == 0);
@@ -437,7 +437,7 @@ static void test_sequence_owned_by_drop_column() {
     assert(s.sequenceLastValues.count("app.legacy_owned") == 0);
     const auto legacyOwnerStorage =
         g_engine.getTableSchema(db, "app__legacy_owner");
-    assert(legacyOwnerStorage.len == 1);
+    assert(legacyOwnerStorage.len() == 1);
     assert(legacyOwnerStorage.cols[0].dataName == "keep");
 
     // A DEFAULT on another column is a normal dependency. RESTRICT must
@@ -462,7 +462,7 @@ static void test_sequence_owned_by_drop_column() {
     assert(g_engine.sequenceExists(db, "shared_seq"));
     const auto restrictedOwner =
         g_engine.getTableSchema(db, "shared_owner");
-    assert(restrictedOwner.len == 2);
+    assert(restrictedOwner.len() == 2);
     assert(restrictedOwner.cols[0].dataName == "id");
     assert(!restrictedOwner.cols[1].defaultValue.empty());
     assert(!g_engine.getTableSchema(
@@ -475,7 +475,7 @@ static void test_sequence_owned_by_drop_column() {
     assert(s.sequenceLastValues.count("shared_seq") == 0);
     const auto cascadedOwner =
         g_engine.getTableSchema(db, "shared_owner");
-    assert(cascadedOwner.len == 1);
+    assert(cascadedOwner.len() == 1);
     assert(cascadedOwner.cols[0].dataName == "keep");
     assert(cascadedOwner.cols[0].defaultValue.empty());
     assert(g_engine.getTableSchema(

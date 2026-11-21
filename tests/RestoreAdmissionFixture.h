@@ -88,12 +88,12 @@ void printRows(const std::string& phase,const std::string& table,const std::vect
         for(size_t c=0;c<row.values.size();++c)std::cout<<' '<<row.nulls[c]<<' '<<std::quoted(row.values[c]);std::cout<<'\n';}
 }
 std::vector<Row> snapshot(const std::string& table) {
-    const auto schema=g_engine.getTableSchema(DB,table);check(schema.tablename==table&&schema.len==3,"actual three-column schema");
+    const auto schema=g_engine.getTableSchema(DB,table);check(schema.tablename==table&&schema.len()==3,"actual three-column schema");
     TableScanOp scan(&g_engine,DB,table);check(scan.open(),"real scan open");std::string raw;std::vector<Row> rows;std::set<int64_t> rids;
     while(scan.next(raw)) {const auto origin=scan.scanOrigin();const auto rid=scan.lastRid();
         check(origin.engine==&g_engine&&origin.dbname==DB&&origin.tablename==table&&origin.rid==rid&&rid>0&&rids.insert(rid).second,"real unique scan occurrence/RID");
-        std::vector<bool> bits;check(scan.lastStoredNullBitmap(bits)&&bits.size()==schema.len,"actual full physical NULL bitmap");Row row;row.rid=rid;
-        for(size_t c=0;c<schema.len;++c){const bool null=scan.lastColumnIsNull(c);check(null==bits[c],"actual NULL accessor agreement");row.nulls.push_back(null);row.values.push_back(null?std::string{}:StorageEngine::extractColumnValueStatic(raw,schema,c));}
+        std::vector<bool> bits;check(scan.lastStoredNullBitmap(bits)&&bits.size()==schema.len(),"actual full physical NULL bitmap");Row row;row.rid=rid;
+        for(size_t c=0;c<schema.len();++c){const bool null=scan.lastColumnIsNull(c);check(null==bits[c],"actual NULL accessor agreement");row.nulls.push_back(null);row.values.push_back(null?std::string{}:StorageEngine::extractColumnValueStatic(raw,schema,c));}
         check(!row.nulls[0],"actual primary key nonNULL");size_t used=0;row.id=std::stoi(row.values[0],&used);check(used==row.values[0].size(),"complete actual key parse");rows.push_back(std::move(row));
     }check(!scan.hasError(),"scan complete without suppressed error");scan.close();std::sort(rows.begin(),rows.end(),[](const Row&a,const Row&b){return a.id<b.id;});return rows;
 }

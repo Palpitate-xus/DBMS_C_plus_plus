@@ -65,7 +65,7 @@ int main() {
     verify("reloaded");
     check(g_engine.query(db,"widths",{}, {"d","t","renamed"},{})==beforeRows,"metadata change preserves stored values");
     const auto afterSchema=g_engine.getTableSchema(db,"widths");
-    for(size_t i=0;i<beforeSchema.len;++i)
+    for(size_t i=0;i<beforeSchema.len();++i)
         check(beforeSchema.cols[i].dsize==afterSchema.cols[i].dsize &&
               beforeSchema.cols[i].isVariableLength==afterSchema.cols[i].isVariableLength &&
               beforeSchema.cols[i].storageCodec==afterSchema.cols[i].storageCodec,
@@ -107,7 +107,7 @@ int main() {
     check(!ddl.executeSql("ALTER TABLE legacy_time RENAME COLUMN t TO renamed",session),
           "legacy metadata synchronization succeeds");
     const auto legacyTimeAfter=g_engine.getTableSchema(db,"legacy_time");
-    check(legacyTimeAfter.len==2 && legacyTimeAfter.cols[0].dataName=="renamed" &&
+    check(legacyTimeAfter.len()==2 && legacyTimeAfter.cols[0].dataName=="renamed" &&
           legacyTimeAfter.cols[0].dsize==4 && legacyTimeAfter.cols[0].storageCodec==Column::StorageCodec::Legacy,
           "unrelated ALTER never migrates legacy TIME width or units");
     check(g_engine.query(db,"legacy_time",{},{"renamed"},{})==legacyTimeRows,
@@ -122,7 +122,7 @@ int main() {
     {
         StorageEngine cold;
         const auto schema=cold.getTableSchema(db,"legacy_time");
-        check(schema.len==2 && schema.cols[0].dsize==4 && schema.cols[0].storageCodec==Column::StorageCodec::Legacy,
+        check(schema.len()==2 && schema.cols[0].dsize==4 && schema.cols[0].storageCodec==Column::StorageCodec::Legacy,
               "cold schema retains explicit legacy TIME units");
         check(cold.query(db,"legacy_time",{},{"renamed"},{})==legacyTimeRows,
               "cold legacy TIME value survives without migration");

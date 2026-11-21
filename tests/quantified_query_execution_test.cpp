@@ -183,7 +183,7 @@ int main() {
     // qualified/quoted names. Storage APIs take the stored identifier.
     const auto database=testDbPath("quantified_physical_child");
     assert(owner.createDatabase(database,"utf8")==DBStatus::OK);
-    TableSchema physical;physical.len=1;physical.cols[0].dataName="id";
+    TableSchema physical;physical.cols.resize(1);physical.cols[0].dataName="id";
     physical.cols[0].dataType="int";physical.cols[0].dsize=4;
     Session session;session.pid=991;session.tempTables.insert("trows");
     struct RestoreSession { Session* previous;~RestoreSession(){setCurrentSession(previous);} } restore{currentSession()};

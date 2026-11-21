@@ -13,7 +13,7 @@ int main() {
     const std::string name="delete_where_boolean_context",db=testDbPath(name);
     cleanupTestDb(name);
     assert(g_engine.createDatabase(db)==DBStatus::OK);
-    TableSchema table{};table.tablename="target";table.len=2;
+    TableSchema table{};table.tablename="target";table.cols.resize(2);
     table.cols[0].dataName="id";table.cols[0].dataType="int";
     table.cols[1].dataName="flag";table.cols[1].dataType="text";
     assert(g_engine.createTable(db,table)==DBStatus::OK);

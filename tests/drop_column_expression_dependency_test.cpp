@@ -56,7 +56,7 @@ int main() {
            dbms::DBStatus::INVALID_VALUE);
     dbms::TableSchema generated =
         g_engine.getTableSchema(database, "generated_values");
-    assert(generated.len == 4);
+    assert(generated.len() == 4);
     assert(generated.cols[1].dataName == "base");
     assert(rowCount(database, "generated_values") == 1);
 
@@ -64,7 +64,7 @@ int main() {
                database, "generated_values", "spare") ==
            dbms::DBStatus::OK);
     generated = g_engine.getTableSchema(database, "generated_values");
-    assert(generated.len == 3);
+    assert(generated.len() == 3);
     assert(rowCount(database, "generated_values") == 1);
     assert(g_engine.insert(database, "generated_values",
                            {{"id", "2"}, {"base", "10"}}) ==
@@ -92,7 +92,7 @@ int main() {
            dbms::DBStatus::INVALID_VALUE);
     dbms::TableSchema checked =
         g_engine.getTableSchema(database, "checked_values");
-    assert(checked.len == 3);
+    assert(checked.len() == 3);
     assert(checked.cols[1].dataName == "checked");
     assert(rowCount(database, "checked_values") == 1);
 

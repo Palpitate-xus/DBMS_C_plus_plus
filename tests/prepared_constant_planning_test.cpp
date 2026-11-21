@@ -13,7 +13,7 @@ int main() {
     cleanupTestDb(name);
     const auto db = testDbPath(name);
     assert(engine.createDatabase(db,"utf8") == DBStatus::OK);
-    TableSchema schema; schema.len = 1;
+    TableSchema schema; schema.cols.resize(1);
     schema.cols[0].dataName = "id"; schema.cols[0].dataType = "int"; schema.cols[0].dsize = 4;
     assert(engine.createTable(db,"plan_constant_rows",schema) == DBStatus::OK);
     assert(engine.insert(db,"plan_constant_rows",{{"id","1"}}) == DBStatus::OK);

@@ -51,7 +51,7 @@ static void test_composite_column() {
     // Column is recognized as the composite type (not silently varchar).
     dbms::TableSchema tbl = g_engine.getTableSchema(db, "t");
     bool found = false;
-    for (size_t i = 0; i < tbl.len; ++i) {
+    for (size_t i = 0; i < tbl.len(); ++i) {
         if (tbl.cols[i].dataName == "a") { found = true; assert(tbl.cols[i].dataType == "addr"); }
     }
     assert(found);

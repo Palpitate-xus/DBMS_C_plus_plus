@@ -40,10 +40,10 @@ static std::vector<dbms::StorageEngine::SqlRow> readStructuredRows(
             const int64_t rid =
                 dbms::StorageEngine::encodeRid(pageId, slotId);
             dbms::StorageEngine::bindNullRow(
-                &g_engine, db, tableName, rid, schema.len);
+                &g_engine, db, tableName, rid, schema.len());
             dbms::StorageEngine::SqlRow row;
             const std::string buffer(data, length);
-            for (size_t column = 0; column < schema.len; ++column) {
+            for (size_t column = 0; column < schema.len(); ++column) {
                 bool isNull = false;
                 std::string value = g_engine.extractColumnValue(
                     buffer, schema, column, db, true, &isNull);
@@ -80,7 +80,7 @@ static void test_create_matview_select_star() {
     assert(!g_engine.getMaterializedViewSQL(db, "mv").empty());
 
     const auto backingSchema = g_engine.getTableSchema(db, backing);
-    assert(backingSchema.len == 2);
+    assert(backingSchema.len() == 2);
     assert(backingSchema.cols[0].dataName == "id");
     assert(backingSchema.cols[0].dataType == "int");
     assert(backingSchema.cols[0].isNull);
@@ -141,7 +141,7 @@ static void test_create_matview_select_columns() {
     // Verify name column is not present in backing table schema.
     auto schema = g_engine.getTableSchema(db, backing);
     bool hasName = false;
-    for (size_t i = 0; i < schema.len; ++i) {
+    for (size_t i = 0; i < schema.len(); ++i) {
         if (schema.cols[i].dataName == "name") hasName = true;
     }
     assert(!hasName);
@@ -284,7 +284,7 @@ static void test_create_matview_with_no_data() {
     std::string backing = dbms::StorageEngine::materializedViewPrefix("mv");
     assert(g_engine.tableExists(db, backing));         // structure created
     auto schema = g_engine.getTableSchema(db, backing);
-    assert(schema.len == 2);                            // both columns present
+    assert(schema.len() == 2);                            // both columns present
     auto rows = g_engine.query(db, backing, {}, {}, {});
     assert(rows.empty());                               // but no rows
 

@@ -95,7 +95,7 @@ struct ProjectResult {
 std::vector<size_t> ordinals(const dbms::TableSchema& schema,
                              const std::set<std::string>& selected) {
     std::vector<size_t> out;
-    for (size_t i = 0; i < schema.len; ++i)
+    for (size_t i = 0; i < schema.len(); ++i)
         if (selected.empty() || selected.count(schema.cols[i].dataName)) out.push_back(i);
     return out;
 }
@@ -149,7 +149,7 @@ ProjectResult project(const std::string& db, const dbms::TableSchema& schema,
         need(origin.engine == &g_engine && origin.dbname == db && origin.tablename == schema.tablename && origin.rid > 0,
              label + " actual heap origin");
         std::vector<bool> bitmap;
-        need(actualScan->lastStoredNullBitmap(bitmap) && bitmap.size() == schema.len,
+        need(actualScan->lastStoredNullBitmap(bitmap) && bitmap.size() == schema.len(),
              label + " actual owned bitmap exported");
         std::vector<Cell> row;
         for (size_t i = 0; i < cells.size(); ++i) row.push_back(nulls[i] ? Cell{} : Cell{cells[i]});
@@ -197,7 +197,7 @@ std::vector<OwnedRow> ownRows(const std::string& db, const dbms::TableSchema& sc
         OwnedRow row;
         row.key = std::stoi(Engine::extractColumnValueStatic(raw, schema, 0));
         row.rid = source.lastRid(); row.raw = raw;
-        need(source.lastStoredNullBitmap(row.nulls) && row.nulls.size() == schema.len && row.rid > 0,
+        need(source.lastStoredNullBitmap(row.nulls) && row.nulls.size() == schema.len() && row.rid > 0,
              "physical row/bitmap/RID captured from same true next");
         rows.push_back(std::move(row));
     }
@@ -208,7 +208,7 @@ std::vector<OwnedRow> ownRows(const std::string& db, const dbms::TableSchema& sc
 }
 
 void bind(const std::string& db, const dbms::TableSchema& schema, const OwnedRow& row) {
-    Engine::bindNullRow(&g_engine, db, schema.tablename, row.rid, schema.len);
+    Engine::bindNullRow(&g_engine, db, schema.tablename, row.rid, schema.len());
 }
 
 void checkCell(const std::string& db, const dbms::TableSchema& schema,

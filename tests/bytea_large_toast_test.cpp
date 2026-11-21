@@ -83,7 +83,7 @@ int main() {
         reopened.setBackgroundIntervals(60000, 60000);
         const dbms::TableSchema schema =
             reopened.getTableSchema(database, "payloads");
-        assert(schema.len == 2);
+        assert(schema.len() == 2);
         assert(schema.cols[1].dsize == static_cast<size_t>(
             std::numeric_limits<int32_t>::max()));
         const auto rows = reopened.query(

@@ -58,7 +58,7 @@ int main(int argc, char** argv) {
     }
     assert(retained);
     StorageEngine restarted;
-    assert(restarted.getTableSchema(database, "rows").len == 1);
+    assert(restarted.getTableSchema(database, "rows").len() == 1);
     assert(restarted.query(database, "rows", {}, {"id"}) == std::vector<std::string>{"7 "});
     for (const auto& entry : fs::directory_iterator(".")) {
         assert(entry.path().filename().string().rfind(database + ".txn_backup.", 0) != 0);

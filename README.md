@@ -24,6 +24,13 @@ cmake --build build/cmake --target dbms_main --parallel 2
 ## 最近更新
 
 <details>
+<summary>普通表最多可以建 1,600 列 · 2026-11-20</summary>
+
+列数上限从 30 提高到 1,600。实际能用多少列还取决于列的类型和每行数据的大小。 同时修复了某些大批写入尚未提交时意外退出、导致数据库无法重启的问题。
+
+</details>
+
+<details>
 <summary>反复查看查询步骤时，省去重新计算 · 2026-11-20</summary>
 
 用 `EXPLAIN` 再次查看同一条简单的两表查询时，数据库可以沿用上次的执行步骤。想看查询这次实际处理了多少行，可以用 `EXPLAIN ANALYZE`。
@@ -34,13 +41,6 @@ cmake --build build/cmake --target dbms_main --parallel 2
 <summary>两表查询加了筛选或分页，也能查看执行步骤 · 2026-11-20</summary>
 
 用整数编号匹配两张表时，即使还要筛选、排序或分批取结果，也可以用 `EXPLAIN` 查看数据库怎样查找和匹配记录。
-
-</details>
-
-<details>
-<summary>两表按连续编号匹配时，可以直接找到记录 · 2026-11-20</summary>
-
-按整数编号匹配两张表时，如果右表的编号连续且不重复，数据库可以用编号直接找到已读过的记录，省去另建查找表的步骤。
 
 </details>
 

@@ -70,11 +70,11 @@ int main() {
     std::cerr << "DOMAIN_ORIGIN_FORMAT_GUARDS\n";
     assert(decode(image).physicalRelationId==relationId);
     assert(decode(image).cols[1].defaultOrigin==Column::DefaultOrigin::Domain);
-    assert(decode(image.substr(0,image.size()-1)).len==0);
-    assert(decode(image+"junk").len==0);
+    assert(decode(image.substr(0,image.size()-1)).len()==0);
+    assert(decode(image+"junk").len()==0);
     auto corrupt=image;const auto extension=corrupt.rfind("DSO1");assert(extension!=std::string::npos);
-    corrupt[extension+6]=3;assert(decode(corrupt).len==0);
-    corrupt=image;corrupt[extension+4]=0;assert(decode(corrupt).len==0);
+    corrupt[extension+6]=3;assert(decode(corrupt).len()==0);
+    corrupt=image;corrupt[extension+4]=0;assert(decode(corrupt).len()==0);
     // Old formats retain their default bytes without comparing them to the
     // domain's value. Both same-value explicit and copied legacy sources are
     // frozen. Their RID1 remains intact and new readers don't auto-migrate.

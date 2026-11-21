@@ -257,7 +257,7 @@ static void test_add_column_preserves_modifiers() {
         "ALTER TABLE modifier_target ADD COLUMN score INT DEFAULT 5 "
         "NOT NULL CONSTRAINT score_positive CHECK (score > 0)", s));
     auto schema = g_engine.getTableSchema(db, "modifier_target");
-    assert(schema.len == 2);
+    assert(schema.len() == 2);
     assert(schema.cols[1].dataName == "score");
     assert(!schema.cols[1].isNull);
     assert(schema.cols[1].defaultValue == "5");
@@ -273,7 +273,7 @@ static void test_add_column_preserves_modifiers() {
         "ALTER TABLE modifier_target ADD COLUMN doubled INT "
         "GENERATED ALWAYS AS (score * 2) VIRTUAL", s));
     schema = g_engine.getTableSchema(db, "modifier_target");
-    assert(schema.len == 3);
+    assert(schema.len() == 3);
     assert(schema.cols[2].generatedExpr == "score * 2");
     assert(schema.cols[2].generatedKind == 'v');
 

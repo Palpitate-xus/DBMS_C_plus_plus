@@ -100,7 +100,7 @@ RowContext actualFirstInput(Fixture& f,const std::string& db,const std::string& 
     if(!g_engine.forEachVisibleRow(db,table,"SELECT",[&](uint32_t page,uint16_t slot,const char* data,size_t size){
         if(found)return;found=true;std::vector<ExprValue> cells;const auto rid=StorageEngine::encodeRid(page,slot);
         const std::string raw(data,size);
-        for(size_t i=0;i<schema.len;++i){if(schema.cols[i].generatedKind=='v'){cells.emplace_back();continue;}
+        for(size_t i=0;i<schema.len();++i){if(schema.cols[i].generatedKind=='v'){cells.emplace_back();continue;}
             const auto null=g_engine.isColumnNullByRid(db,table,rid,i);
             cells.emplace_back(source->columns.at(i).type,null?std::string{}:g_engine.extractColumnValue(raw,schema,i,db,false),null);}
         f.owner->setSourceInputs(context,source->ordinal,cells,true);
@@ -130,11 +130,13 @@ int main() {
     for(const auto& sql:{"INSERT INTO gd_over VALUES(40000)","INSERT INTO gd_char VALUES(1)","INSERT INTO gd_num VALUES(3)","INSERT INTO gd_error VALUES(1)","INSERT INTO gd_native VALUES(1)"})
         if(!mutate(sql,session,false).good)throw DbError("XX000","actual seed failed");
     for(size_t id=1;id<=128;++id)if(g_engine.insertRow(db,"gd_spill",{{"id",std::to_string(id)},{"padding",std::string(1536,'x')}})!=DBStatus::OK)return 2;
-    TableSchema callback;callback.tablename="gd_callback";callback.cols[callback.len++]=makeIntColumn("id",true,4);
-    callback.cols[callback.len]=makeIntColumn("v",true,4);callback.cols[callback.len].generatedKind='v';
-    callback.cols[callback.len++].generatedExpr="gd_outer(gd_inner(id))";
-    callback.cols[callback.len]=makeIntColumn("w",true,4);callback.cols[callback.len].generatedKind='v';
-    callback.cols[callback.len++].generatedExpr="gd_outer(gd_inner(id))";
+    TableSchema callback;callback.tablename="gd_callback";callback.append(makeIntColumn("id",true,4));
+    for (const auto* name : {"v", "w"}) {
+        auto column = makeIntColumn(name, true, 4);
+        column.generatedKind = 'v';
+        column.generatedExpr = "gd_outer(gd_inner(id))";
+        callback.append(std::move(column));
+    }
     if(g_engine.createTable(db,callback)!=DBStatus::OK || g_engine.insertRow(db,"gd_callback",{{"id","5"}})!=DBStatus::OK)return 2;
     size_t count=0,failed=0;
     const auto check=[&](const std::string& label,const std::function<bool()>& action){++count;bool good=false;

@@ -30,7 +30,7 @@ static void setupSession(Session& s, const std::string& db) {
 }
 
 static std::string colType(const dbms::TableSchema& tbl, const std::string& col) {
-    for (size_t i = 0; i < tbl.len; ++i)
+    for (size_t i = 0; i < tbl.len(); ++i)
         if (tbl.cols[i].dataName == col) return tbl.cols[i].dataType;
     return "";
 }
@@ -44,7 +44,7 @@ readRowsByKey(const std::string& db, const std::string& tbl, const std::string& 
     g_engine.forEachRow(db, tbl, [&](uint32_t, uint16_t, const char* data, size_t len) {
         std::string row(data, len);
         std::map<std::string, std::string> m;
-        for (size_t i = 0; i < schema.len; ++i)
+        for (size_t i = 0; i < schema.len(); ++i)
             m[schema.cols[i].dataName] = g_engine.extractColumnValue(row, schema, i);
         out[m[keyCol]] = m;
     });

@@ -667,7 +667,7 @@ static std::string generatedAssignmentDeclaration(const Column& column) {
 GeneratedRelationPtr makeGeneratedRelation(const TableSchema& table,const std::string& db,
     StorageEngine* engine,const std::vector<DatumTypePtr>& types,
     std::shared_ptr<const DatumMetadataContext> metadata,const std::string& schema,const std::string& sourceName) {
-    bool any=false;for(size_t i=0;i<table.len;++i)any=any||table.cols[i].generatedKind=='v';
+    bool any=false;for(size_t i=0;i<table.len();++i)any=any||table.cols[i].generatedKind=='v';
     if(!any)return {};
     std::vector<DatumTypePtr> declarations=types;
     if(declarations.empty()) {
@@ -684,7 +684,7 @@ GeneratedRelationPtr makeGeneratedRelation(const TableSchema& table,const std::s
         context->modifier=[owner](DatumTypePtr type,int32_t mod){return owner->factory->modifier(std::move(type),mod);};
         context->record=[owner](const std::vector<DatumTypePtr>& fields){return owner->factory->record(fields);};
         context->sourceColumns=true;
-        for(size_t i=0;i<table.len;++i) {
+        for(size_t i=0;i<table.len();++i) {
             const auto& column=table.cols[i];DatumTypePtr type;
             if(column.domainName.empty()) {
                 uint32_t oid=mapBuiltinTypeNameToOid(column.dataType);
@@ -702,11 +702,11 @@ GeneratedRelationPtr makeGeneratedRelation(const TableSchema& table,const std::s
         metadata=std::move(context);
     }
     auto relation=std::make_shared<GeneratedRelationDeclaration>();relation->relation=table.tablename;
-    relation->columns.resize(table.len);
-    for(size_t i=0;i<table.len;++i) {
+    relation->columns.resize(table.len());
+    for(size_t i=0;i<table.len();++i) {
         if(table.cols[i].generatedKind!='v')continue;
         auto program=std::make_shared<GeneratedColumnProgram>();program->target=table.cols[i];
-        program->inputs.assign(table.cols,table.cols+table.len);program->inputTypes=declarations;
+        program->inputs.assign(table.cols.begin(),table.cols.end());program->inputTypes=declarations;
         if(i<declarations.size())program->resultType=declarations[i];
         program->database=db;program->engine=engine;program->metadata=metadata;
         program->sourceSchema=schema;program->sourceName=sourceName.empty()?table.tablename:sourceName;

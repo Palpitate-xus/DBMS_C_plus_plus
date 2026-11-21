@@ -85,7 +85,7 @@ int main() {
 
     // Schema helper
     TableSchema ts = unnestTableSchema();
-    assert(ts.len == 1);
+    assert(ts.len() == 1);
     assert(ts.cols[0].dataName == "unnest");
 
     std::cout << "[UNNEST] all UnnestOp tests passed" << std::endl;

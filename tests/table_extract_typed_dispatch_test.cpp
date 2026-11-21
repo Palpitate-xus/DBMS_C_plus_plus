@@ -22,7 +22,7 @@ int main() {
     table.append(makeDateColumn("D", false));
     table.append(makeDateColumn("day", false));
     table.append(makeIntColumn("year", false, 2));
-    for (size_t column = 1; column < table.len; ++column) table.cols[column].isNull = true;
+    for (size_t column = 1; column < table.len(); ++column) table.cols[column].isNull = true;
     assert(g_engine.createTable(db, table) == DBStatus::OK);
     assert(g_engine.insertRow(db, "dates_", {{"id", "1"}, {"D", "2026-10-06"}, {"day", "2026-10-06"}, {"year", "9999"}}) == DBStatus::OK);
     assert(g_engine.insertRow(db, "dates_", {{"id", "2"}, {"D", "2026-10-06"}, {"day", "2026-10-06"}, {"year", std::nullopt}}) == DBStatus::OK);

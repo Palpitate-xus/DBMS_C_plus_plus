@@ -148,7 +148,7 @@ void positive(Fixture& f) {
     positives += fetches; std::cout << "GIST_READER_HEAP_POSITIVE table=" << f.table << " fetches=" << fetches << '\n';
 }
 void verifyHeap(Fixture& f, bool first) {
-    const auto schema = g_engine.getTableSchema(db, f.table); need(schema.len == 3, "genuine id/key/payload declaration");
+    const auto schema = g_engine.getTableSchema(db, f.table); need(schema.len() == 3, "genuine id/key/payload declaration");
     auto cursor = g_engine.beginHeapScan(db, f.table, schema); HeapScanRow row;
     std::map<int64_t, Cell> rows; std::set<int> ids;
     while (cursor->next(row)) {

@@ -38,10 +38,10 @@ int main() {
             StorageEngine::unbindNullRow();
             const int id = std::stoi(StorageEngine::extractColumnValueStatic(row, schema, 0));
             const auto rid = StorageEngine::encodeRid(page, slot);
-            StorageEngine::bindNullRow(&g_engine, database, schema.tablename, rid, schema.len);
+            StorageEngine::bindNullRow(&g_engine, database, schema.tablename, rid, schema.len());
             std::vector<std::string> scalarValues;
             std::vector<bool> scalarNulls;
-            for (size_t column = 0; column < schema.len; ++column) {
+            for (size_t column = 0; column < schema.len(); ++column) {
                 const bool expected = column == 0 ? false : column < 3 ? id == 1
                     : (static_cast<int>(column - 3) + id) % 2 != 0;
                 assert(detail::storedRowColumnIsNull(g_engine, database, schema.tablename,
@@ -83,7 +83,7 @@ int main() {
             assert(rejected);
             assert(g_engine.extractColumnValue(row, schema, 0, database) == std::to_string(id));
             assert(!detail::storedRowColumnIsNull(g_engine, database, schema.tablename,
-                                                 schema, rid, schema.len));
+                                                 schema, rid, schema.len()));
             ++rows;
             StorageEngine::unbindNullRow();
         });

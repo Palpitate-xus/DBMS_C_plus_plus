@@ -129,7 +129,7 @@ void test_prepare_rejects_physical_ddl_snapshot() {
 
     const dbms::TableSchema restored =
         g_engine.getTableSchema(db, "accounts");
-    assert(restored.len == 1);
+    assert(restored.len() == 1);
     assert(restored.cols[0].dataName == "id");
     const auto prepared = g_engine.listPreparedTransactions();
     assert(std::find(prepared.begin(), prepared.end(),

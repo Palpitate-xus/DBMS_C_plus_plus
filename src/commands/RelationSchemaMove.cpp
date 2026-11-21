@@ -198,7 +198,7 @@ DBStatus moveTableSchema(StorageEngine& engine,const std::string& database,
         auto schema=engine.getTableSchema(database,name);bool changed=false;
         const auto logical=CatalogService::logicalName(name);
         const std::string ns=logical.schema.empty()?"public":logical.schema;
-        for(size_t i=0;i<schema.len;++i) {
+        for(size_t i=0;i<schema.len();++i) {
             const auto value=rewriteSequenceCalls(schema.cols[i].defaultValue,engine,database,ns,catalog,sequenceReferences);
             if(value!=schema.cols[i].defaultValue){schema.cols[i].defaultValue=value;changed=true;}
         }
@@ -230,8 +230,8 @@ DBStatus moveTableSchema(StorageEngine& engine,const std::string& database,
         // The rename primitive may have rewritten inbound/self FKs. Preserve
         // that current schema, changing only the planned default expressions.
         auto current=engine.getTableSchema(database,schema.tablename);
-        if(current.len!=schema.len)throw DbError("XX001","moved schema declaration changed unexpectedly");
-        for(size_t i=0;i<current.len;++i)current.cols[i].defaultValue=schema.cols[i].defaultValue;
+        if(current.len()!=schema.len())throw DbError("XX001","moved schema declaration changed unexpectedly");
+        for(size_t i=0;i<current.len();++i)current.cols[i].defaultValue=schema.cols[i].defaultValue;
         if(!persistSchema(current))throw DbError("58030","cannot publish moved sequence default references");
     }
     if(!catalog.persistAll())throw DbError("58030","cannot publish namespace move catalog");

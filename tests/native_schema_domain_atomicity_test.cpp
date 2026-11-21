@@ -46,7 +46,7 @@ int main() {
     assert(!g_engine.catalogService().get(database).resolveRelation(raw.tablename, {"public"}));
     const auto unchanged = [&] {
         const auto table = g_engine.getTableSchema(database, physical);
-        assert(table.len == 5);
+        assert(table.len() == 5);
         assert(g_engine.schemaExists(database, "domain_chain"));
         assert(g_engine.query(database, physical, {}, {"id", "second_value", "wide"}) == before);
         assert(!g_engine.getDomain(database, "public.child_int").name.empty());
@@ -58,7 +58,7 @@ int main() {
             ++rows;
         }));
         assert(rows == 1);
-        assert(g_engine.getTableSchema(database, raw.tablename).len == 3);
+        assert(g_engine.getTableSchema(database, raw.tablename).len() == 3);
         assert(g_engine.query(database, raw.tablename, {}, {"id", "first_value"}) == std::vector<std::string>{"2 8 "});
     };
     unchanged();
@@ -66,7 +66,7 @@ int main() {
     unchanged();
     assert(g_engine.beginTransaction(database, true) == DBStatus::OK);
     assert(g_engine.dropSchema(database, "domain_chain", true) == DBStatus::OK);
-    assert(g_engine.getTableSchema(database, physical).len == 3);
+    assert(g_engine.getTableSchema(database, physical).len() == 3);
     assert(g_engine.rollbackTransaction() == DBStatus::OK);
     unchanged();
     assert(g_engine.beginTransaction(database, true) == DBStatus::OK);
@@ -84,18 +84,18 @@ int main() {
     unchanged();
     assert(g_engine.dropSchema(database, "domain_chain", true) == DBStatus::OK);
     const auto after = g_engine.getTableSchema(database, physical);
-    assert(after.len == 3 && after.cols[0].dataName == "id" &&
+    assert(after.len() == 3 && after.cols[0].dataName == "id" &&
            after.cols[1].dataName == "wide" && after.cols[2].dataName == "note");
     assert(g_engine.query(database, physical, {}, {"id", "wide"}) == std::vector<std::string>{"1 2147483648 "});
-    assert(g_engine.getTableSchema(database, raw.tablename).len == 2);
+    assert(g_engine.getTableSchema(database, raw.tablename).len() == 2);
     assert(g_engine.query(database, raw.tablename, {}, {"id"}) == std::vector<std::string>{"2 "});
     assert(g_engine.getDomain(database, "public.child_int").name.empty());
     assert(!g_engine.schemaExists(database, "domain_chain"));
     {
         StorageEngine restarted;
-        assert(restarted.getTableSchema(database, physical).len == 3);
+        assert(restarted.getTableSchema(database, physical).len() == 3);
         assert(restarted.query(database, physical, {}, {"id", "wide"}) == std::vector<std::string>{"1 2147483648 "});
-        assert(restarted.getTableSchema(database, raw.tablename).len == 2);
+        assert(restarted.getTableSchema(database, raw.tablename).len() == 2);
         assert(restarted.query(database, raw.tablename, {}, {"id"}) == std::vector<std::string>{"2 "});
         const auto lease = restarted.catalogService().acquire(database);
         const auto* publicNamespace = lease->findNamespaceByName("public");

@@ -78,7 +78,7 @@ static void test_enum_basic() {
     {
         dbms::StorageEngine reopened;
         const auto schema = reopened.getTableSchema(db, "t");
-        assert(schema.len == 2);
+        assert(schema.len() == 2);
         assert(schema.cols[1].dataType == "mood");
         assert((schema.cols[1].enumValues ==
                 std::vector<std::string>{"happy", "sad", "neutral"}));
@@ -388,7 +388,7 @@ static void test_enum_drop_dependencies_and_catalog_cleanup() {
     // RESTRICT must leave all three representations untouched.
     assert(ddl.executeSql("DROP TYPE lifecycle", s));
     assert(!g_engine.getEnumType(db, "lifecycle").name.empty());
-    assert(g_engine.getTableSchema(db, "jobs").len == 2);
+    assert(g_engine.getTableSchema(db, "jobs").len() == 2);
     assert(catalog().findType(lifecycleTypeOid));
 
     // CASCADE removes the dependent column through ALTER TABLE, preserving
@@ -397,7 +397,7 @@ static void test_enum_drop_dependencies_and_catalog_cleanup() {
     assert(!ddl.executeSql("DROP TYPE lifecycle CASCADE", s));
     assert(g_engine.getEnumType(db, "lifecycle").name.empty());
     const auto jobs = g_engine.getTableSchema(db, "jobs");
-    assert(jobs.len == 1);
+    assert(jobs.len() == 1);
     assert(jobs.cols[0].dataName == "id");
     assert((g_engine.query(db, "jobs", {}, {"id"}) ==
             std::vector<std::string>{"1 "}));

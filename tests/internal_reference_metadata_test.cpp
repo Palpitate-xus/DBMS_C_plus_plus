@@ -100,10 +100,10 @@ std::map<int, RawRow> actualRows(const std::string& database, const TableSchema&
     auto cursor = g_engine.beginHeapScan(database, schema.tablename, schema);
     HeapScanRow row;
     while (cursor->next(row)) {
-        need(row.rid >= 0 && row.nulls.size() == schema.len, "actual heap RID and NULL bitmap");
+        need(row.rid >= 0 && row.nulls.size() == schema.len(), "actual heap RID and NULL bitmap");
         detail::ScopedStoredRowNullBitmap bitmap(schema, row.nulls);
         RawRow raw;
-        for (size_t index = 0; index < schema.len; ++index) {
+        for (size_t index = 0; index < schema.len(); ++index) {
             const auto& name = schema.cols[index].dataName;
             if (row.nulls[index]) {
                 raw.nulls.insert(name);
@@ -270,7 +270,7 @@ int main() {
             "actual unknown maximum unsigned OIDs");
         schema = g_engine.getTableSchema(database, physical);
         std::map<std::string,std::string> hints;
-        for (size_t index = 0; index < schema.len; ++index)
+        for (size_t index = 0; index < schema.len(); ++index)
             hints.emplace(schema.cols[index].dataName, schema.cols[index].dataType + (schema.cols[index].isArray ? "[]" : ""));
         const auto rows = actualRows(database, schema);
         need(rows.size() == 4 && rows.at(1).values.at("r") == "23" && rows.at(1).values.at("ra") == "[0:2]={23,NULL,0}" &&

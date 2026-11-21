@@ -25,12 +25,12 @@ int main() {
     DdlExecutor ddl;
     assert(!ddl.executeSql("CREATE TABLE t(id INT PRIMARY KEY,v NUMERIC(5,2),n NUMERIC(3,-2),a NUMERIC(4,1)[],u NUMERIC)", session));
     const auto schema = g_engine.getTableSchema(db, "t");
-    assert(schema.len == 5 && schema.cols[1].typeMod == (5 << 16) + 6 &&
+    assert(schema.len() == 5 && schema.cols[1].typeMod == (5 << 16) + 6 &&
         schema.cols[2].typeMod == (3 << 16) + 2050 &&
         schema.cols[3].typeMod == (4 << 16) + 5 && schema.cols[4].typeMod == -1);
     StorageEngine cold;
     const auto loaded = cold.getTableSchema(db, "t");
-    assert(loaded.len == 5 && loaded.cols[1].typeMod == schema.cols[1].typeMod &&
+    assert(loaded.len() == 5 && loaded.cols[1].typeMod == schema.cols[1].typeMod &&
         loaded.cols[2].typeMod == schema.cols[2].typeMod &&
         loaded.cols[3].typeMod == schema.cols[3].typeMod && loaded.cols[4].typeMod == -1);
     assert(g_engine.insert(db, "t", {{"id","1"},{"v","12.345"},{"n","12345"},{"a","{12.35,NULL,-12.35}"},{"u","12"}}) == DBStatus::OK);

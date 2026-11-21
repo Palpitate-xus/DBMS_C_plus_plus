@@ -59,14 +59,14 @@ int main() {
            dbms::DBStatus::INVALID_VALUE);
     dbms::TableSchema unchanged =
         g_engine.getTableSchema(database, "events");
-    assert(unchanged.len == 4);
+    assert(unchanged.len() == 4);
     assert(unchanged.partitionKey == "bucket");
     assert(rowCount(database, "events") == 2);
 
     assert(g_engine.alterTableDropColumn(database, "events", "tag") ==
            dbms::DBStatus::INVALID_VALUE);
     unchanged = g_engine.getTableSchema(database, "events");
-    assert(unchanged.len == 4);
+    assert(unchanged.len() == 4);
     assert(unchanged.subPartitionKey == "tag");
     assert(rowCount(database, "events") == 2);
 
@@ -99,7 +99,7 @@ int main() {
         dbms::StorageEngine restarted;
         const dbms::TableSchema reloaded =
             restarted.getTableSchema(database, "events");
-        assert(reloaded.len == 3);
+        assert(reloaded.len() == 3);
         assert(reloaded.partitionKey == "route");
         assert(reloaded.subPartitionKey == "label");
     }

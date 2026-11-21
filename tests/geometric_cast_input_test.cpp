@@ -57,7 +57,7 @@ int main() {
     StorageEngine engine;
     const std::string name="geometric_cast_input",db=testDbPath(name);
     cleanupTestDb(name);assert(engine.createDatabase(db)==DBStatus::OK);
-    TableSchema table;table.len=1;table.cols[0].dataName="id";
+    TableSchema table;table.cols.resize(1);table.cols[0].dataName="id";
     table.cols[0].dataType="integer";table.cols[0].dsize=4;
     assert(engine.createTable(db,"geometry_cast_rows",table)==DBStatus::OK);
     assert(engine.insertRow(db,"geometry_cast_rows",{{"id","1"}})==DBStatus::OK);

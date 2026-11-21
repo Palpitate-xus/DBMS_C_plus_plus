@@ -99,7 +99,7 @@ static void test_unknown_column_type_fails_closed() {
     assert(!ddl.executeSql("CREATE TABLE good_type (id INT)", s));
     assert(ddl.executeSql("ALTER TABLE good_type ADD COLUMN broken definitely_not_a_type", s));
     const auto schema = g_engine.getTableSchema(db, "good_type");
-    assert(schema.len == 1);
+    assert(schema.len() == 1);
     assert(schema.cols[0].dataName == "id");
 
     cleanup(db);
@@ -192,7 +192,7 @@ static void test_supported_serial_type_mapping() {
         "CREATE TABLE serial_t (id SERIAL PRIMARY KEY, label NCHAR(4), raw BINARY(4))", s));
 
     const auto schema = g_engine.getTableSchema(db, "serial_t");
-    assert(schema.len == 3);
+    assert(schema.len() == 3);
     // SERIAL is now an owned named sequence and a nextval DEFAULT, not the
     // legacy anonymous auto-increment counter (nor an IDENTITY column).
     assert(!schema.cols[0].isAutoIncrement);
@@ -260,7 +260,7 @@ static void test_bridge_handles_typed_alter_table() {
     run("CREATE TABLE alter_t (id INT, name VARCHAR(20))");
     run("ALTER TABLE alter_t ADD COLUMN score INT");
     run("ALTER TABLE alter_t ADD COLUMN IF NOT EXISTS score INT");
-    assert(g_engine.getTableSchema(db, "alter_t").len == 3);
+    assert(g_engine.getTableSchema(db, "alter_t").len() == 3);
     run("ALTER TABLE alter_t ALTER COLUMN score SET DEFAULT 10");
     run("ALTER TABLE alter_t ALTER COLUMN score SET NOT NULL");
     run("ALTER TABLE alter_t ADD PRIMARY KEY (id)");

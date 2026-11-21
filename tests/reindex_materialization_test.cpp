@@ -66,7 +66,7 @@ struct Fixture {
             const auto model=std::find_if(rows.begin(),rows.end(),[&](const Row& r){return r.at("id")==Cell(id);});
             require(model!=rows.end(),"real heap occurrence has independent expected id");
             require(rids.emplace(id,StorageEngine::encodeRid(page,slot)).second,"unique real heap id");
-            for(size_t col=0;col<schema.len;++col){bool isNull=false;const auto actual=engine.extractColumnValue(raw,schema,col,db,true,&isNull);const auto& expected=model->at(schema.cols[col].dataName);
+            for(size_t col=0;col<schema.len();++col){bool isNull=false;const auto actual=engine.extractColumnValue(raw,schema,col,db,true,&isNull);const auto& expected=model->at(schema.cols[col].dataName);
                 require(isNull==!expected,"true NULL distinct from empty: "+schema.cols[col].dataName);
                 require(actual==expected.value_or(""),"complete original stored values: "+schema.cols[col].dataName);
             }

@@ -2,6 +2,54 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-20 allow wider ordinary tables and recover unflushed transaction pages",
+      "gap_ids": [
+        "CAT-10",
+        "SQL-11",
+        "STO-03",
+        "WAL-05"
+      ],
+      "status": "partial",
+      "evidence": [
+        "src/interfaces/table_schema.h",
+        "src/commands/DdlExecutor.cpp",
+        "src/commands/TableManage.cpp",
+        "src/storage/HeapTupleHeader.h",
+        "docs/test-report.md",
+        "docs/performance-report-2026-10-30.md"
+      ],
+      "tests": [
+        "tests/wide_table_protocol_e2e_test.py",
+        "tests/redo_crash_recovery_test.cpp",
+        "tests/schema_format_test.cpp",
+        "tests/heap_wal_table_generation_crash_test.cpp"
+      ],
+      "verification": [
+        "Ordinary table definitions now use sized column metadata, with a ceiling of 1600 columns and the existing row-fit constraint. The registered 47 checks passed. Values, nulls, column names, types, result tags, SQLSTATE and Ready state matched for the 41 common PostgreSQL 18.6 cases. The 31st foreign key fails explicitly instead of being silently omitted.",
+        "An actual old 29-to-30-column data directory opened without changing its schema bytes before ALTER. The 31-column upgrade, writes and restart passed. A separate 40-column fixture passed mixed text reads and oversize-row rejection.",
+        "Both the prior candidate and the exact narrow-table baseline reproduced recovery failure on undo of pages beyond the persisted extent. The final build recovered both saved incidents on copies and both fresh SIGKILL fixtures. The targeted native WAL witness failed on the prior candidate and passed on the final build.",
+        "The 576 narrow-table timings used 32 clean private exits, matching query frames and transaction witnesses. The 1024-row LIMIT 1 and statement-only UPDATE paired median delays rose 6.31% and 10.15%, with mixed per-pair outcomes. These results need independent remeasurement.",
+        "Thirty other protocol suites and fifteen other native tests passed. Wide row capacity remains subject to the 8 KiB page layout. Existing ledger classifications still apply."
+      ],
+      "artifacts": {
+        "exact_build": "build/array-domain-20261117/wide-table-cmake-v2.json",
+        "registered_protocol": "build/wide-table-candidate-20261120-v2/protocol/summary.json",
+        "independent_wire_comparison": "build/wide-table-candidate-20261120-v2/independent-audit-v1.json",
+        "legacy_schema": "build/wide-table-old-compat-20261120-v1/candidate-v2/summary.json",
+        "variable_width_checks": "build/wide-table-text-boundary-20261120-v1/summary.json",
+        "related_suites": "build/wide-table-20261120/related-wide-table-cmake-v2/summary.json",
+        "native_checks": "build/wide-table-20261120/native-v2/summary.json",
+        "native_recovery_prior_candidate": "build/wide-table-20261120/native-redo-v1/summary.json",
+        "native_recovery_final": "build/wide-table-20261120/native-redo-v2/summary.json",
+        "fresh_wide_recovery": "build/wide-table-20261120/recovery-prep-v1/run-v2/summary.json",
+        "fresh_narrow_recovery": "build/wide-table-20261120/recovery-prep-v1/run-growth-v2-candidate/summary.json",
+        "saved_wide_recovery": "build/wide-table-20261120/recovery-prep-v1/recover-existing-wide-v2/summary.json",
+        "saved_narrow_recovery": "build/wide-table-20261120/recovery-prep-v1/recover-existing-narrow-v2/summary.json",
+        "timing_128": "build/table-schema-audit-20261120/narrow-128-wide-table-cmake-v2.json",
+        "timing_1024": "build/table-schema-audit-20261120/narrow-1024-wide-table-cmake-v2.json"
+      }
+    },
+    {
       "issue": "2026-11-20 avoid rebuilding cached EXPLAIN plans for simple two-table joins",
       "gap_ids": ["OPT-16"],
       "status": "partial",

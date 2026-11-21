@@ -69,7 +69,7 @@ int main() {
     // first engine's schema cache or a borrowed catalog descriptor.
     StorageEngine cold;
     const auto loaded = cold.getTableSchema(db, "t");
-    assert(loaded.len == 4 && loaded.cols[1].typeMod == precise &&
+    assert(loaded.len() == 4 && loaded.cols[1].typeMod == precise &&
            loaded.cols[2].typeMod == years && loaded.cols[3].typeMod == arrayPrecise);
 
     assert(g_engine.insert(db, "t", {{"id","1"},{"v","2.3456 seconds"},{"y","2"},
@@ -91,6 +91,6 @@ int main() {
     assert(!ddl.executeSql("CREATE TABLE legacy_interval(v INTERVAL)", session));
     StorageEngine oldFormatReader;
     const auto legacy = oldFormatReader.getTableSchema(db, "legacy_interval");
-    assert(legacy.len == 1 && legacy.cols[0].typeMod == -1);
+    assert(legacy.len() == 1 && legacy.cols[0].typeMod == -1);
     std::cout << "[INTERVAL COLUMN MODIFIER] metadata/cold schema/native insert-update/rewrite/legacy controls passed\n";
 }

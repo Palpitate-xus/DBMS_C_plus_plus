@@ -40,7 +40,7 @@ Rows physical(const std::string& db,const std::string& name){
     require(scan.open(),"actual heap scan opens");Rows result;std::string raw;
     while(scan.next(raw)){
         std::vector<Cell> row;
-        for(size_t i=0;i<table.len;++i){
+        for(size_t i=0;i<table.len();++i){
             if(table.cols[i].generatedKind=='v')continue;
             row.push_back(scan.lastColumnIsNull(i)?Cell{}:Cell{g_engine.extractColumnValue(raw,table,i,db,false)});
         }
@@ -104,7 +104,7 @@ int main(){
         require(mutate("INSERT INTO av_allnull(id,p) VALUES(40000,NULL),(40001,NULL)",session),"actual allNULL seed");
         require(mutate("INSERT INTO av_control(id,p) VALUES(1,3),(2,NULL),(3,3)",session),"actual control seed");
         const std::set<std::string> ordinary{"id","p","s"};
-        check("real-schema-virtual-and-stored-roles",[&]{const auto t=g_engine.getTableSchema(db,"av_stats");return t.len==5&&t.cols[2].generatedKind=='s'&&t.cols[3].generatedKind=='v'&&t.cols[4].generatedKind=='v';});
+        check("real-schema-virtual-and-stored-roles",[&]{const auto t=g_engine.getTableSchema(db,"av_stats");return t.len()==5&&t.cols[2].generatedKind=='s'&&t.cols[3].generatedKind=='v'&&t.cols[4].generatedKind=='v';});
         check("before-analyze-no-persisted-statistics",[&]{return attributes(g_engine,db,"av_stats").empty()&&persistedAttributes(db,"av_stats").empty();});
         check("actual-physical-and-stored-before",[&]{return physical(db,"av_stats")==Rows{{"40000","2","4"},{"40001",std::nullopt,std::nullopt},{"40002","2","4"},{"40003","4","8"}};});
         check("analyze-does-not-read-bad-virtual",[&]{return g_engine.analyzeTable(db,"av_stats")&&g_engine.getTableRowCount(db,"av_stats")==4;});

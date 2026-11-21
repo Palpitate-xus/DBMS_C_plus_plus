@@ -60,13 +60,13 @@ int main() {
         const auto space=catalog.getNamespaceByName("public");
         for(size_t group=0;group<tables.size();++group) {
           const auto schema=engine.getTableSchema(database,tables[group]);
-          check(schema.len==16,phase+" schema count "+tables[group]);
+          check(schema.len()==16,phase+" schema count "+tables[group]);
           const auto relation=space?catalog.getClassByName(tables[group],space->oid):std::nullopt;
           for(size_t i=0;i<16;++i) {
             const auto& field=fields[group*16+i];
             const auto attribute=relation?catalog.getAttribute(relation->oid,field.name):std::nullopt;
-            const Column* column=i<schema.len?&schema.cols[i]:nullptr;
-            const Column* omitted=field.defaultIndex<schema.len?&schema.cols[field.defaultIndex]:nullptr;
+            const Column* column=i<schema.len()?&schema.cols[i]:nullptr;
+            const Column* omitted=field.defaultIndex<schema.len()?&schema.cols[field.defaultIndex]:nullptr;
             check(column && column->typeMod==field.precision,phase+" schema modifier "+field.name);
             check(column && omitted && column->dsize==omitted->dsize &&
                 column->isVariableLength==omitted->isVariableLength && column->isArray==field.array &&
@@ -108,7 +108,7 @@ int main() {
     {
         StorageEngine cold;
         const auto legacy=cold.getTableSchema(database,"legacy_defaults");
-        check(legacy.len==8 && std::all_of(legacy.cols,legacy.cols+legacy.len,
+        check(legacy.len()==8 && std::all_of(legacy.cols.begin(),legacy.cols.end(),
             [](const auto& column){return column.typeMod==-1;}),"omitted modifiers remain -1 after cold load");
     }
     const auto format=[&](const std::string& table) {

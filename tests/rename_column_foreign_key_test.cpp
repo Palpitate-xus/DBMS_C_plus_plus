@@ -24,9 +24,9 @@ ForeignKeyValue findForeignKeyValue(
     const std::string& foreignKeyColumn) {
     const dbms::TableSchema table =
         g_engine.getTableSchema(database, tableName);
-    size_t idIndex = table.len;
-    size_t foreignKeyIndex = table.len;
-    for (size_t columnIndex = 0; columnIndex < table.len; ++columnIndex) {
+    size_t idIndex = table.len();
+    size_t foreignKeyIndex = table.len();
+    for (size_t columnIndex = 0; columnIndex < table.len(); ++columnIndex) {
         if (table.cols[columnIndex].dataName == idColumn) {
             idIndex = columnIndex;
         }
@@ -34,7 +34,7 @@ ForeignKeyValue findForeignKeyValue(
             foreignKeyIndex = columnIndex;
         }
     }
-    assert(idIndex < table.len && foreignKeyIndex < table.len);
+    assert(idIndex < table.len() && foreignKeyIndex < table.len());
 
     ForeignKeyValue result;
     assert(g_engine.forEachRow(
@@ -102,7 +102,7 @@ int main() {
            dbms::DBStatus::OK);
     dbms::TableSchema local =
         g_engine.getTableSchema(database, "local_child");
-    assert(local.fkLen == 1);
+    assert(local.fkLen() == 1);
     assert(local.fks[0].colNames ==
            std::vector<std::string>{"parent_key"});
     assert(g_engine.insert(database, "local_child",
@@ -176,7 +176,7 @@ int main() {
            dbms::DBStatus::OK);
     const dbms::TableSchema node =
         g_engine.getTableSchema(database, "node");
-    assert(node.fkLen == 1);
+    assert(node.fkLen() == 1);
     assert(node.fks[0].colNames ==
            std::vector<std::string>{"parent_node_id"});
     assert(node.fks[0].refCols ==

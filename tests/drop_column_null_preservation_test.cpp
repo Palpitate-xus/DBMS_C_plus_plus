@@ -14,7 +14,7 @@ void assertNullAndEmptyRemainDistinct(dbms::StorageEngine& engine,
                                       const std::string& database) {
     const dbms::TableSchema table =
         engine.getTableSchema(database, "values_t");
-    assert(table.len == 3);
+    assert(table.len() == 3);
     assert(table.cols[0].dataName == "id");
     assert(table.cols[1].dataName == "nullable_value");
     assert(table.cols[2].dataName == "empty_value");

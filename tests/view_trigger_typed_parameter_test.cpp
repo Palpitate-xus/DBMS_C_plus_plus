@@ -12,7 +12,7 @@ int main() {
     const auto database = testDbPath("view_trigger_typed_parameter");
     assert(!owner.databaseExists(database));
     assert(owner.createDatabase(database, "utf8") == DBStatus::OK);
-    TableSchema table; table.len = 4;
+    TableSchema table; table.cols.resize(4);
     const std::vector<std::string> names = {"id", "val", "wide", "nums"};
     const std::vector<std::string> types = {"integer", "text", "bigint", "integer"};
     for (size_t i = 0; i < names.size(); ++i) {

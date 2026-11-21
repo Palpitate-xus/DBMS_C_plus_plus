@@ -22,7 +22,7 @@ using Engine=dbms::StorageEngine;using Cell=std::optional<std::string>;using Row
 void require(bool value,const char* message){if(!value)throw std::runtime_error(message);}
 Rows snapshot(const std::string& db,const dbms::TableSchema& table){
  dbms::TableScanOp scan(&g_engine,db,table.tablename);require(scan.open(),"real scan open");Rows rows;std::string raw;
- while(scan.next(raw)){std::vector<Cell> row;for(size_t i=0;i<table.len;++i)row.push_back(scan.lastColumnIsNull(i)?Cell{}:Cell(Engine::extractColumnValueStatic(raw,table,i)));rows.push_back(std::move(row));}
+ while(scan.next(raw)){std::vector<Cell> row;for(size_t i=0;i<table.len();++i)row.push_back(scan.lastColumnIsNull(i)?Cell{}:Cell(Engine::extractColumnValueStatic(raw,table,i)));rows.push_back(std::move(row));}
  require(!scan.hasError(),"real scan error");scan.close();return rows;
 }
 // Independent existing comparator oracle: sort the actual stored values, not
@@ -63,17 +63,17 @@ int main(){
   auto padded=makeStringColumn("padded",true,8);padded.collation="C";t.append(padded);
   auto system=makeVarCharColumn("system_locale",true,128);system.collation="caller_utf";t.append(system);
   t.append(makeUuidColumn("uuid",true));t.append(makeTextColumn("all_null",true));t.append(makeTextColumn("long_text",true));
-  require(t.len==15&&g_engine.createTable(db,t)==DBStatus::OK,"real fifteen-column table");require(g_engine.beginTransaction(db)==DBStatus::OK,"actual fixture transaction");
+  require(t.len()==15&&g_engine.createTable(db,t)==DBStatus::OK,"real fifteen-column table");require(g_engine.beginTransaction(db)==DBStatus::OK,"actual fixture transaction");
   for(size_t row=0;row<n;++row){const auto k=(row*23+n*7)%29;const auto value=text[k%text.size()];std::ostringstream uuid;uuid<<"00000000-0000-0000-0000-"<<std::hex<<std::setfill('0')<<std::setw(12)<<k;
    Engine::SqlRow input{{"precise",std::to_string(9007199254740992LL+static_cast<long long>(k))},{"integer",std::to_string(static_cast<int>(k)-14)},{"floating",floating[k%floating.size()]},{"boolean",k%2?"true":"false"},{"exact",row%5==4?(row%2?"0.50":"0.500"):"123456789012345678901234567890."+std::to_string(k+10)},{"implicit_default",value},{"explicit_default",value},{"binary",value},{"reversed",value},{"folded",value},{"padded",k%3==0?"a":k%3==1?"a   ":"b"},{"system_locale",value},{"uuid",uuid.str()},{"all_null",std::nullopt},{"long_text",std::string(4096,'x')+std::to_string(k%4)}};
    if(row%7==6){input["implicit_default"]=std::nullopt;input["system_locale"]=std::nullopt;input["boolean"]=std::nullopt;}if(row%11==10)input["floating"]=std::nullopt;
    require(g_engine.insertRow(db,t.tablename,input)==DBStatus::OK,"actual stored input");
   }
   require(g_engine.commitTransaction()==DBStatus::OK,"actual durable input commit");const auto stored=g_engine.getTableSchema(db,t.tablename);require(stored.cols[11].resolvedCollationUsesLocale,"actual explicit facet path, not pseudo C normalization");
-  const auto before=snapshot(db,stored);require(before.size()==n,"all actual rows");std::vector<Engine::ColumnStats> expected;for(size_t i=0;i<stored.len;++i)expected.push_back(reference(stored.cols[i],before,i));
+  const auto before=snapshot(db,stored);require(before.size()==n,"all actual rows");std::vector<Engine::ColumnStats> expected;for(size_t i=0;i<stored.len();++i)expected.push_back(reference(stored.cols[i],before,i));
   std::string first;
   for(int invocation=0;invocation<2;++invocation){require(g_engine.analyzeTable(db,t.tablename),"actual analyze success");require(g_engine.getTableRowCount(db,t.tablename)==n,"actual row stats");require(snapshot(db,stored)==before,"all original owning heap values unchanged");
-   for(size_t i=0;i<stored.len;++i){const auto a=g_engine.getColumnStats(db,t.tablename,stored.cols[i].dataName);const auto& b=expected[i];require(a.nullCount==b.nullCount&&a.cardinality==b.cardinality&&a.minVal==b.minVal&&a.maxVal==b.maxVal&&a.histogram==b.histogram&&a.mcv==b.mcv,"full original column stats including raw representative and stable MCV frequency ties");++fields;}
+   for(size_t i=0;i<stored.len();++i){const auto a=g_engine.getColumnStats(db,t.tablename,stored.cols[i].dataName);const auto& b=expected[i];require(a.nullCount==b.nullCount&&a.cardinality==b.cardinality&&a.minVal==b.minVal&&a.maxVal==b.maxVal&&a.histogram==b.histogram&&a.mcv==b.mcv,"full original column stats including raw representative and stable MCV frequency ties");++fields;}
    const auto bytes=readFile(db+"/.stats");if(invocation==0)first=bytes;else require(bytes==first,"same graph-free repeated ANALYZE exact complete persistent .stats bytes");
    std::cout<<"ANALYZE_CACHE_STATS table="<<t.tablename<<" invocation="<<invocation<<" bytes="<<bytes.size()<<" hex="<<hex(bytes)<<'\n';
   }

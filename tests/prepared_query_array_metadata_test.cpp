@@ -19,7 +19,7 @@ int main() {
     const auto database = testDbPath("prepared_query_array_metadata");
     assert(!owner.databaseExists(database));
     assert(owner.createDatabase(database, "utf8") == DBStatus::OK);
-    TableSchema schema; schema.len = 1; schema.cols[0].dataName = "items";
+    TableSchema schema; schema.cols.resize(1); schema.cols[0].dataName = "items";
     assert(TypeRegistry::instance().resolveColumnType(schema.cols[0], "integer", {}, true).empty());
     auto& catalog = owner.catalogService().get(database);
     const auto* publicNamespace = catalog.findNamespaceByName("public");

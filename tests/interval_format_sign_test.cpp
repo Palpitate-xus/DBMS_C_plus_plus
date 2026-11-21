@@ -8,7 +8,7 @@ int main() {
     using namespace dbms;
     StorageEngine engine;const std::string name="interval_format_sign",db=testDbPath(name);
     assert(engine.createDatabase(db)==DBStatus::OK);
-    TableSchema schema;schema.len=2;
+    TableSchema schema;schema.cols.resize(2);
     schema.cols[0].dataName="id";schema.cols[0].dataType="integer";schema.cols[0].dsize=4;
     schema.cols[1].dataName="v";schema.cols[1].dataType="interval";schema.cols[1].dsize=128;
     assert(engine.createTable(db,"format_rows",schema)==DBStatus::OK);

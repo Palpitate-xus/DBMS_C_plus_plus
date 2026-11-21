@@ -13,7 +13,7 @@ int main() {
     const std::string name="prepared_projectset_query_execution",db=testDbPath(name);
     cleanupTestDb(name);
     assert(engine.createDatabase(db)==DBStatus::OK);
-    TableSchema schema;schema.len=1;schema.cols[0].dataName="id";schema.cols[0].dataType="int";
+    TableSchema schema;schema.cols.resize(1);schema.cols[0].dataName="id";schema.cols[0].dataType="int";
     assert(engine.createTable(db,"source",schema)==DBStatus::OK);
     assert(engine.insertRow(db,"source",{{"id","1"}})==DBStatus::OK);
     assert(engine.insertRow(db,"source",{{"id","2"}})==DBStatus::OK);

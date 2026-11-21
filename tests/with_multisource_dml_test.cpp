@@ -54,7 +54,7 @@ int main() {
                     std::string raw;
                     if(scan->next(raw)) {
                         std::vector<ExprValue> cells;
-                        for(size_t i=0;i<schema.len;++i) {
+                        for(size_t i=0;i<schema.len();++i) {
                             bool computedNull=false;
                             const auto value=g_engine.extractColumnValue(raw,schema,i,db,true,&computedNull);
                             cells.emplace_back(source->columns[i].type,value,computedNull || scan->lastColumnIsNull(i));

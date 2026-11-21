@@ -69,9 +69,9 @@ int main() {
     // still force the original physical rollback and restore the old shape.
     const Column extra = makeIntColumn("extra", true, 0);
     assert(engine.alterTableAddColumn(db, "items", extra) == DBStatus::OK);
-    assert(engine.getTableSchema(db, "items").len == 2);
+    assert(engine.getTableSchema(db, "items").len() == 2);
     assert(engine.rollbackToSavepoint("read_only_image") == DBStatus::OK);
-    assert(engine.getTableSchema(db, "items").len == 1);
+    assert(engine.getTableSchema(db, "items").len() == 1);
     assert(engine.query(db, "items", {}, {"id"}).size() == 1);
 
     // A physical write invisible to all transaction log-size/epoch counters

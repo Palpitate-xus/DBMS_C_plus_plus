@@ -2,6 +2,10 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-20 · 普通表支持更多列
+
+PostgreSQL 18.6 规定表最多 1,600 列，实际还受行大小限制，并用行头的位图区分空值。SQLite 默认最多 2,000 列，也提醒宽列声明可能增加语句准备成本。DuckDB 的列式存储把同一列的值放在一起，并用单独的位图记录空值。本项目把内存里的表定义改为按实际列数保存，沿用原有的磁盘定义和空值位图。普通表的列数上限可到 1,600，某些列组合仍受固定字段占用和单页行宽约束。[PostgreSQL 限制](https://www.postgresql.org/docs/18/limits.html) · [PostgreSQL 行头定义](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/include/access/htup_details.h) · [SQLite 限制](https://sqlite.org/limits.html) · [DuckDB 列式数据](https://duckdb.org/docs/2.0/clients/c/vector) · [本项目验证](test-report.md#wide-table-20261120)
+
 ## 2026-11-20 · 重复查看两表连接计划
 
 PostgreSQL 18.6 的 `EXPLAIN` 把已分析的查询交给规划器，随后按选项决定是否执行计划。SQLite 为 `SELECT` 解析表和列名，补充类型后再生成指令。DuckDB 的计划提取也把解析结果交给规划器，再由优化器处理。本项目在构建旧式两表连接计划时复用本次已核验的表结构。普通 `EXPLAIN` 命中缓存时可直接返回已有结果，表和连接列仍按实际引用重新核验。[PostgreSQL 计划生成](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/commands/explain.c) · [SQLite 的 SELECT 准备](https://raw.githubusercontent.com/sqlite/sqlite/master/src/select.c) · [DuckDB 计划提取](https://raw.githubusercontent.com/duckdb/duckdb/main/src/main/client_context.cpp) · [实测结果](test-report.md#legacy-join-explain-reuse-20261120)

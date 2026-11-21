@@ -86,10 +86,10 @@ Rows rows(const std::string& table) {
     need(bool(scan), "real heap cursor " + table);
     Rows actual; HeapScanRow row;
     while (scan->next(row)) {
-        need(row.nulls.size() == schema.len, "real schema-width NULL bitmap");
+        need(row.nulls.size() == schema.len(), "real schema-width NULL bitmap");
         ActualRow value; value.rid = row.rid; value.rawBytes = row.data.size();
         detail::decodeStoredRowValues(g_engine, database, row.data, schema, row.nulls, value.values, value.nulls);
-        need(value.values.size() == schema.len && value.nulls == row.nulls && !value.nulls.front(),
+        need(value.values.size() == schema.len() && value.nulls == row.nulls && !value.nulls.front(),
              "physical decoder agrees with actual cursor NULL owner");
         size_t used = 0; const int id = std::stoi(value.values.front(), &used);
         need(used == value.values.front().size() && value.rid > 0 && actual.emplace(id, value).second,
@@ -157,7 +157,7 @@ void flags(const std::string& table, const std::string& constraint, bool validat
 }
 PageAllocator* target(const std::string& table) {
     const auto schema = g_engine.getTableSchema(database, table);
-    need(schema.len > 0, "warm actual schema");
+    need(schema.len() > 0, "warm actual schema");
     auto* allocator = g_engine.getPageAllocator(database, table);
     need(allocator != nullptr, "actual target allocator"); return allocator;
 }

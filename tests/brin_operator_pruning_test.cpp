@@ -141,7 +141,7 @@ struct ActualRow {
 };
 std::vector<ActualRow> actualRows(const InputCase& input, size_t repetitions, size_t padWidth) {
     const auto schema = g_engine.getTableSchema(db, input.name);
-    require(schema.len == 3, "actual id/value/pad schema width: " + input.name);
+    require(schema.len() == 3, "actual id/value/pad schema width: " + input.name);
     std::vector<ActualRow> rows;
     auto cursor = g_engine.beginHeapScan(db, input.name, schema);
     HeapScanRow row;

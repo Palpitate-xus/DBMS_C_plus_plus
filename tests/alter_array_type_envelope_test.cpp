@@ -43,7 +43,7 @@ int main() {
     assert(!ddl.executeSql("CREATE TABLE t(a NUMERIC(6,2)[],b VARCHAR(4)[])", session));
     assert(!ddl.executeSql("ALTER TABLE t ALTER COLUMN a TYPE NUMERIC(8,3)[], ALTER COLUMN b SET DATA TYPE VARCHAR(7)[]", session));
     const auto schema = g_engine.getTableSchema(database, "t");
-    assert(schema.len == 2 && schema.cols[0].isArray && schema.cols[1].isArray);
+    assert(schema.len() == 2 && schema.cols[0].isArray && schema.cols[1].isArray);
     assert(schema.cols[0].dataType == "numeric");
     assert(schema.cols[1].dataType == "varchar" && schema.cols[1].dsize == 7);
     assert(!ddl.executeSql("DROP TABLE t", session));

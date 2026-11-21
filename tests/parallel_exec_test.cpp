@@ -114,7 +114,7 @@ static bool testDeclaredMinMaxComparison() {
     assert(!declarations.executeSql("CREATE TABLE enum_declaration_probe(declared_value r192_enum)", declarationSession));
     const auto declared = g_engine.getTableSchema(database, "enum_declaration_probe");
     const std::vector<std::string> enumLabels{"z", "a", ""};
-    assert(declared.len == 1 && declared.cols[0].enumValues == enumLabels);
+    assert(declared.len() == 1 && declared.cols[0].enumValues == enumLabels);
     Column enumColumn = declared.cols[0];
     enumColumn.dataName = "enum_order";
     assert(enumColumn.isNull && !enumColumn.isArray);
@@ -171,8 +171,8 @@ static bool testDeclaredMinMaxComparison() {
     assert(cases[3].column.dsize == 8 && cases[5].column.dataType == "numeric");
     assert(g_engine.createTable(database, schema) == DBStatus::OK);
     schema = g_engine.getTableSchema(database, schema.tablename);
-    assert(schema.len == 16 && schema.cols[schema.len - 1].enumValues == enumLabels);
-    assert(schema.cols[schema.len - 2].isArray);
+    assert(schema.len() == 16 && schema.cols[schema.len() - 1].enumValues == enumLabels);
+    assert(schema.cols[schema.len() - 2].isArray);
     for (size_t id = 0; id < 4; ++id) {
         std::map<std::string, Value> row{{"id", std::to_string(id)}, {"grp", std::to_string(id % 2)}};
         for (const auto& item : cases) row[item.column.dataName] = item.inputs[id];
@@ -467,7 +467,7 @@ int main() {
     std::vector<std::string> all;
     for (int k = 0; k < 7; ++k) {
         std::string row;
-        for (size_t c = 0; c < dimTbl.len; ++c) {
+        for (size_t c = 0; c < dimTbl.len(); ++c) {
             if (c > 0) row.push_back(' ');
             row += (c == 0) ? std::to_string(k) : ("L" + std::to_string(k));
         }

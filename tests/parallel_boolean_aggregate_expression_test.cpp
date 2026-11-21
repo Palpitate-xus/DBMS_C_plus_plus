@@ -273,11 +273,11 @@ int main() {
         }
 
         const auto table = g_engine.getTableSchema(database, tableName);
-        for (size_t ci = 0; ci < table.len; ++ci)
+        for (size_t ci = 0; ci < table.len(); ++ci)
             std::cout << "SOURCE_COLUMN " << ci << " declaration=" << table.cols[ci].dataType
                       << " canonical=" << ExprHelper::canonicalResultTypeName(table.cols[ci].dataType)
                       << " bytes=" << table.cols[ci].dsize << " nullable=" << table.cols[ci].isNull << '\n';
-        bool sourceOk = table.len == 4 &&
+        bool sourceOk = table.len() == 4 &&
             table.cols[0].dsize == 4 && table.cols[1].dsize == 4 &&
             table.cols[2].dsize == 4 && table.cols[3].dsize == 1 &&
             ExprHelper::canonicalResultTypeName(table.cols[0].dataType) == "integer" &&

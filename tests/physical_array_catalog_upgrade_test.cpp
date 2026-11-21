@@ -90,7 +90,7 @@ int main(int argc, char** argv) {
         catalog.reset(); g_engine.catalogService().evict(database);
         const auto beforeRead = bytes(database);
         const auto physical = g_engine.readPersistedSchemaForCatalog(database, "legacy_arrays");
-        need(physical && physical->len == 5 && physical->cols[1].isArray &&
+        need(physical && physical->len() == 5 && physical->cols[1].isArray &&
              physical->cols[1].dataType == "int", "independent persisted array witness");
         need(!g_engine.readPersistedSchemaForCatalog(database, "absent") &&
              !g_engine.catalogService().has(database) && bytes(database) == beforeRead,

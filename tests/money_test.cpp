@@ -190,7 +190,7 @@ void testDdlAndCatalog(const std::string& database) {
     assert(!ddl.executeSql("CREATE TABLE ledger (amount money)", session));
     const dbms::TableSchema table =
         g_engine.getTableSchema(database, "ledger");
-    assert(table.len == 1);
+    assert(table.len() == 1);
     assert(table.cols[0].dataType == "money");
     assert(table.cols[0].dsize == sizeof(int64_t));
     assert(!table.cols[0].isVariableLength);

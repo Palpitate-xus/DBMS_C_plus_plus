@@ -42,7 +42,7 @@ static void setupSession(Session& s, const std::string& db) {
 
 static const dbms::Column* findColumn(const dbms::TableSchema& table,
                                       const std::string& name) {
-    for (size_t i = 0; i < table.len; ++i) {
+    for (size_t i = 0; i < table.len(); ++i) {
         if (table.cols[i].dataName == name) return &table.cols[i];
     }
     return nullptr;
@@ -386,7 +386,7 @@ static void test_create_inherits_merges_columns_and_constraints() {
         "PRIMARY KEY (local_a, local_b)) INHERITS (parent)", s));
 
     const auto child = g_engine.getTableSchema(db, "child");
-    assert(child.len == 5);
+    assert(child.len() == 5);
     const dbms::Column* id = findColumn(child, "id");
     const dbms::Column* inheritedDefault =
         findColumn(child, "inherited_default");
@@ -431,7 +431,7 @@ static void test_create_inherits_merges_columns_and_constraints() {
     const auto mergedChecks =
         g_engine.getTableSchema(db, "merged_checks");
     size_t mergedCheckCount = mergedChecks.additionalCheckConstraints.size();
-    for (size_t columnIndex = 0; columnIndex < mergedChecks.len;
+    for (size_t columnIndex = 0; columnIndex < mergedChecks.len();
          ++columnIndex) {
         if (!mergedChecks.cols[columnIndex].checkExpr.empty()) {
             ++mergedCheckCount;

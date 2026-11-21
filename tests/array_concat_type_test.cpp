@@ -51,7 +51,7 @@ int main() {
     StorageEngine owner;
     const std::string db=testDbPath("array_concat_type");
     assert(!owner.databaseExists(db) && owner.createDatabase(db,"utf8")==DBStatus::OK);
-    TableSchema schema;schema.len=1;schema.cols[0].dataName="id";
+    TableSchema schema;schema.cols.resize(1);schema.cols[0].dataName="id";
     schema.cols[0].dataType="int";schema.cols[0].dsize=4;
     assert(owner.createTable(db,"sink",schema)==DBStatus::OK);
     assert(owner.createUDF(db,"array_writer",{"arg"},{"int"},

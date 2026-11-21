@@ -79,7 +79,7 @@ int main() {
     assert(imageCount(database) == 1);
     assert(engine.rollbackTransaction() == DBStatus::OK);
     assert(imageCount(database) == 0);
-    assert(engine.getTableSchema(database, "items").len == 1);
+    assert(engine.getTableSchema(database, "items").len() == 1);
     assert(engine.query(database, "items", {}, {"id"}).size() == 1);
 
     // Equal logical boundaries alone are not proof that the physical image
@@ -116,7 +116,7 @@ int main() {
     assert(engine.rollbackToSavepoint("inner") == DBStatus::IO_ERROR);
     assert(!engine.inTransaction());
     assert(imageCount(database) == 0);
-    assert(engine.getTableSchema(database, "items").len == 1);
+    assert(engine.getTableSchema(database, "items").len() == 1);
     assert(engine.query(database, "items", {}, {"id"}).size() == 1);
     std::cout << "shared savepoint images retain aliases and clean up once\n";
 }

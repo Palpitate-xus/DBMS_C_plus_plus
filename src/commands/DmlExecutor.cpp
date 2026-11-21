@@ -738,14 +738,14 @@ bool referencesColumn(const Expr* expr);
 bool findTableColumn(const TableSchema& table, const std::string& column) {
     // Callers already pass the canonical column identity. Folding it again
     // would make a quoted uppercase target resolve to a different SQL name.
-    for (size_t i = 0; i < table.len; ++i) {
+    for (size_t i = 0; i < table.len(); ++i) {
         if (table.cols[i].dataName == column) return true;
     }
     return false;
 }
 
 std::string conflictAssignmentType(const TableSchema& table, const std::string& column) {
-    for (size_t i=0;i<table.len;++i)
+    for (size_t i=0;i<table.len();++i)
         if (table.cols[i].dataName==column) return table.cols[i].dataType;
     return {};
 }
@@ -757,7 +757,7 @@ std::string intervalTargetInputState(const TableSchema& table,
                                     const std::string& column,
                                     const SqlCell& value) {
     if (!value) return {};
-    for (size_t i = 0; i < table.len; ++i) {
+    for (size_t i = 0; i < table.len(); ++i) {
         const auto& target = table.cols[i];
         const auto targetType = canonicalSetType(target.dataType);
         if (target.dataName == column &&
@@ -977,7 +977,7 @@ bool resolveConflictTarget(const InsertStmt& stmt, const TableSchema& table,
 
         std::vector<size_t> primaryKey = table.pkColIndices;
         if (primaryKey.empty()) {
-            for (size_t i = 0; i < table.len; ++i) {
+            for (size_t i = 0; i < table.len(); ++i) {
                 if (table.cols[i].isPrimaryKey) primaryKey.push_back(i);
             }
         }
@@ -991,7 +991,7 @@ bool resolveConflictTarget(const InsertStmt& stmt, const TableSchema& table,
         if (!primaryKey.empty() && identifier(primaryName) == requested) {
             if (namedConstraintFound) *namedConstraintFound = true;
             for (const size_t index : primaryKey) {
-                if (index >= table.len) return false;
+                if (index >= table.len()) return false;
                 targetColumns.push_back(table.cols[index].dataName);
             }
             return true;
@@ -1008,7 +1008,7 @@ bool resolveConflictTarget(const InsertStmt& stmt, const TableSchema& table,
             if (name.empty()) {
                 name = table.tablename;
                 for (const size_t index : columns) {
-                    if (index >= table.len) {
+                    if (index >= table.len()) {
                         name.clear();
                         break;
                     }
@@ -1019,14 +1019,14 @@ bool resolveConflictTarget(const InsertStmt& stmt, const TableSchema& table,
             if (!name.empty() && identifier(name) == requested) {
                 if (namedConstraintFound) *namedConstraintFound = true;
                 for (const size_t index : columns) {
-                    if (index >= table.len) return false;
+                    if (index >= table.len()) return false;
                     targetColumns.push_back(table.cols[index].dataName);
                 }
                 return !targetColumns.empty();
             }
         }
 
-        for (size_t columnIndex = 0; columnIndex < table.len; ++columnIndex) {
+        for (size_t columnIndex = 0; columnIndex < table.len(); ++columnIndex) {
             if (!table.cols[columnIndex].isUnique) continue;
             const std::string defaultName = table.tablename + "_" +
                 table.cols[columnIndex].dataName + "_key";
@@ -1040,7 +1040,7 @@ bool resolveConflictTarget(const InsertStmt& stmt, const TableSchema& table,
         const auto matches = [&](const std::string& name) {
             return !name.empty() && identifier(name) == requested;
         };
-        for (size_t i = 0; i < table.len; ++i) {
+        for (size_t i = 0; i < table.len(); ++i) {
             if (matches(table.cols[i].checkConstraintName)) {
                 if (namedConstraintFound) *namedConstraintFound = true;
                 return false;
@@ -1052,7 +1052,7 @@ bool resolveConflictTarget(const InsertStmt& stmt, const TableSchema& table,
                 return false;
             }
         }
-        for (size_t i = 0; i < table.fkLen; ++i) {
+        for (size_t i = 0; i < table.fkLen(); ++i) {
             if (matches(table.fks[i].name)) {
                 if (namedConstraintFound) *namedConstraintFound = true;
                 return false;
@@ -1076,14 +1076,14 @@ bool resolveConflictTarget(const InsertStmt& stmt, const TableSchema& table,
     for (const auto& rawColumn : stmt.conflictTarget) {
         const std::string column = identifier(rawColumn);
         if (column.empty() || !seen.insert(column).second) return false;
-        size_t index = table.len;
-        for (size_t i = 0; i < table.len; ++i) {
+        size_t index = table.len();
+        for (size_t i = 0; i < table.len(); ++i) {
             if (table.cols[i].dataName == column) {
                 index = i;
                 break;
             }
         }
-        if (index >= table.len) return false;
+        if (index >= table.len()) return false;
         targetColumns.push_back(column);
         targetIndices.push_back(index);
     }
@@ -1092,7 +1092,7 @@ bool resolveConflictTarget(const InsertStmt& stmt, const TableSchema& table,
     if (!table.pkColIndices.empty()) {
         primaryKey = table.pkColIndices;
     } else {
-        for (size_t i = 0; i < table.len; ++i) {
+        for (size_t i = 0; i < table.len(); ++i) {
             if (table.cols[i].isPrimaryKey) primaryKey.push_back(i);
         }
     }
@@ -1118,7 +1118,7 @@ bool resolveConflictTarget(const InsertStmt& stmt, const TableSchema& table,
             !index.whereCondition.empty()) {
             continue;
         }
-        for (size_t columnIndex = 0; columnIndex < table.len;
+        for (size_t columnIndex = 0; columnIndex < table.len();
              ++columnIndex) {
             if (table.cols[columnIndex].dataName == index.name &&
                 targetIndices.size() == 1 &&
@@ -1132,14 +1132,14 @@ bool resolveConflictTarget(const InsertStmt& stmt, const TableSchema& table,
         if (!index.isUnique || !index.whereCondition.empty()) continue;
         std::vector<size_t> indexColumns;
         for (const auto& columnName : index.columns) {
-            size_t columnIndex = table.len;
-            for (size_t candidate = 0; candidate < table.len; ++candidate) {
+            size_t columnIndex = table.len();
+            for (size_t candidate = 0; candidate < table.len(); ++candidate) {
                 if (table.cols[candidate].dataName == columnName) {
                     columnIndex = candidate;
                     break;
                 }
             }
-            if (columnIndex >= table.len) {
+            if (columnIndex >= table.len()) {
                 indexColumns.clear();
                 break;
             }
@@ -1379,7 +1379,7 @@ class CapturedVirtualRows {
 public:
     explicit CapturedVirtualRows(const TableSchema& table,bool hasReturning=true) {
         if(!hasReturning || !typedResultCaptureRequested())return;
-        for(size_t i=0;i<table.len;++i)
+        for(size_t i=0;i<table.len();++i)
             if(table.cols[i].generatedKind=='v' && !table.cols[i].generatedExpr.empty()) {
                 enabled_=true;break;
             }
@@ -1493,7 +1493,7 @@ bool supportsReturningExpression(const Expr* expr, const TableSchema& table,
         if (!ref->schema.empty() ||
             !returningSourceForQualifier(ref->table, binding)) return false;
         const std::string& column = ref->column;
-        for (size_t i = 0; i < table.len; ++i) {
+        for (size_t i = 0; i < table.len(); ++i) {
             if (table.cols[i].dataName == column) return true;
         }
         return false;
@@ -1584,7 +1584,7 @@ bool buildReturningProjections(const std::vector<SelectItem>& returning,
     ExprEvaluator evaluator;
     DatumMetadataContextPtr metadata;
     const auto metadataOwner=[&]() -> DatumMetadataContextPtr {
-        if((typedResultCaptureRequested() || std::any_of(table.cols,table.cols+table.len,[](const Column& c){return c.generatedKind=='v';})) && !metadata)
+        if((typedResultCaptureRequested() || std::any_of(table.cols.begin(),table.cols.end(),[](const Column& c){return c.generatedKind=='v';})) && !metadata)
             metadata=g_engine.prepareDatumMetadataContext(currentDB,table.tablename);
         return metadata;
     };
@@ -1598,7 +1598,7 @@ bool buildReturningProjections(const std::vector<SelectItem>& returning,
         const auto* star = item.expr ? dynamic_cast<const LiteralExpr*>(item.expr.get()) : nullptr;
         if (star && star->value == "*") {
             if (!item.alias.empty()) return false;
-            for (size_t i = 0; i < table.len; ++i) {
+            for (size_t i = 0; i < table.len(); ++i) {
                 projections.push_back({nullptr, table.cols[i].dataName,
                                        table.cols[i].dataName,
                                        table.cols[i].dataType + (table.cols[i].isArray ? "[]" : ""),
@@ -1612,7 +1612,7 @@ bool buildReturningProjections(const std::vector<SelectItem>& returning,
             if (!item.alias.empty()) return false;
             const auto source = returningSourceForQualifier(ref->table, binding);
             if (!ref->schema.empty() || !source) return false;
-            for (size_t i = 0; i < table.len; ++i) {
+            for (size_t i = 0; i < table.len(); ++i) {
                 projections.push_back({nullptr, table.cols[i].dataName,
                                        table.cols[i].dataName,
                                        table.cols[i].dataType + (table.cols[i].isArray ? "[]" : ""), *source,
@@ -1766,7 +1766,7 @@ void addReturningRowToContext(RowContext& context, const SqlRow& source,
                               const TableSchema& table, size_t sourceOrdinal,
                               const DatumMetadataContext* datumMetadata,
                               const StorageEngine::OwningSqlRow* generated = nullptr,bool present=true) {
-    for (size_t i = 0; i < table.len; ++i) {
+    for (size_t i = 0; i < table.len(); ++i) {
         const Column& column = table.cols[i];
         if(column.generatedKind=='v') {
             if(!datumMetadata || !datumMetadata->generatedSource || i>=datumMetadata->generatedSource->columns.size())
@@ -1872,8 +1872,8 @@ ExprPtr copyReturningExpression(const Expr* expression, const TableSchema& table
             }
         }
         size_t ordinal = 0;
-        while (ordinal < table.len && table.cols[ordinal].dataName != node->column) ++ordinal;
-        if (!source || !node->schema.empty() || ordinal == table.len)
+        while (ordinal < table.len() && table.cols[ordinal].dataName != node->column) ++ordinal;
+        if (!source || !node->schema.empty() || ordinal == table.len())
             throw DbError("XX000", "validated RETURNING column has no row-image binding");
         const auto& descriptor = table.cols[ordinal];
         column->binding = QueryColumnBinding{0, static_cast<size_t>(*source), ordinal,
@@ -2010,24 +2010,24 @@ std::vector<ReturningRowImage> deletedReturningImages(
 // installed on TableSchema, and this owner never contains row values.
 static GeneratedRelationPtr freezeGeneratedInput(const TableSchema& table,
     const std::string& database,const std::string& physicalRelation) {
-    if(!std::any_of(table.cols,table.cols+table.len,
+    if(!std::any_of(table.cols.begin(),table.cols.end(),
         [](const Column& column){return column.generatedKind=='v';}))return {};
     const auto metadata=g_engine.prepareDatumMetadataContext(database,physicalRelation);
     if(!metadata || !metadata->generatedSource ||
-       metadata->generatedSource->columns.size()!=table.len)
+       metadata->generatedSource->columns.size()!=table.len())
         throw DbError("XX000","generated input lost its frozen relation declaration");
-    for(size_t i=0;i<table.len;++i)
+    for(size_t i=0;i<table.len();++i)
         if((table.cols[i].generatedKind=='v')!=bool(metadata->generatedSource->columns[i]))
             throw DbError("XX000","generated input changed its authoritative omitted-column set");
-    for(size_t i=0;i<table.len;++i)if(const auto& program=metadata->generatedSource->columns[i]) {
+    for(size_t i=0;i<table.len();++i)if(const auto& program=metadata->generatedSource->columns[i]) {
         if(program->target.dataName!=table.cols[i].dataName ||
            program->target.generatedExpr!=table.cols[i].generatedExpr ||
            program->target.dataType!=table.cols[i].dataType || program->target.domainName!=table.cols[i].domainName ||
            program->target.isArray!=table.cols[i].isArray || program->target.typeMod!=table.cols[i].typeMod ||
            program->target.dsize!=table.cols[i].dsize ||
-           program->inputs.size()!=table.len)
+           program->inputs.size()!=table.len())
             throw DbError("XX000","generated input declaration differs from its actual schema");
-        for(size_t j=0;j<table.len;++j)
+        for(size_t j=0;j<table.len();++j)
             if(program->inputs[j].dataName!=table.cols[j].dataName ||
                program->inputs[j].dataType!=table.cols[j].dataType ||
                program->inputs[j].isArray!=table.cols[j].isArray)
@@ -2053,7 +2053,7 @@ RowContext updateContext(const SqlRow& source,
                          const TableSchema& table,
                          const std::string& targetTable,const GeneratedRelationPtr& generation) {
     RowContext context;
-    for (size_t i = 0; i < table.len; ++i) {
+    for (size_t i = 0; i < table.len(); ++i) {
         const Column& column = table.cols[i];
         if(generation && column.generatedKind=='v')continue;
         const auto it = source.find(column.dataName);
@@ -2284,10 +2284,10 @@ RowContext structuredRelationContext(
                          const std::vector<std::string>& qualifiers,
                          bool unqualified,bool present,const GeneratedRelationPtr& generation,size_t sourceOrdinal) {
         const auto& actualGeneration=generation;
-        if(!actualGeneration && std::any_of(table.cols,table.cols+table.len,
+        if(!actualGeneration && std::any_of(table.cols.begin(),table.cols.end(),
             [](const Column& column){return column.generatedKind=='v';}))
             throw DbError("XX000","generated relation consumer has no statement declaration");
-        for (size_t i = 0; i < table.len; ++i) {
+        for (size_t i = 0; i < table.len(); ++i) {
             const std::string& column = table.cols[i].dataName;
             if(actualGeneration && table.cols[i].generatedKind=='v')continue;
             const auto it = values.find(column);
@@ -2347,7 +2347,7 @@ bool collectTableRows(const std::string& currentDB, const std::string& tableName
         const std::string row(data, len);
         std::map<std::string, std::string> values;
         ReturningSourceRow cells;
-        for (size_t i = 0; i < table.len; ++i) {
+        for (size_t i = 0; i < table.len(); ++i) {
             bool isNull = false;
             const bool requested=returningRows && returningColumns && returningColumns->count(i);
             if(table.cols[i].generatedKind=='v')continue;
@@ -2419,10 +2419,10 @@ StructuredRelationResult collectStructuredRelations(
             return StructuredRelationResult::Unsupported;
         }
         source.schema = g_engine.getTableSchema(s.currentDB, resolvedName);
-        if(std::any_of(source.schema.cols,source.schema.cols+source.schema.len,[](const Column& c){return c.generatedKind=='v';}))
+        if(std::any_of(source.schema.cols.begin(),source.schema.cols.end(),[](const Column& c){return c.generatedKind=='v';}))
             source.generation=freezeGeneratedInput(source.schema,s.currentDB,resolvedName);
         std::set<size_t> returned;
-        if(returningStore)for(size_t i=0;i<source.schema.len;++i)
+        if(returningStore)for(size_t i=0;i<source.schema.len();++i)
             if(returningStore->references.count({"",source.qualifier,source.schema.cols[i].dataName}))returned.insert(i);
         MergeReturningSourceRows* capture=nullptr;
         if(!returned.empty()) {
@@ -2432,7 +2432,7 @@ StructuredRelationResult collectStructuredRelations(
             capture->schema=source.schema;capture->inputColumns=capture->columns;
             bool generatedRead=false;
             for(const auto ordinal:capture->columns)generatedRead=generatedRead||source.schema.cols[ordinal].generatedKind=='v';
-            if(generatedRead)for(size_t ordinal=0;ordinal<source.schema.len;++ordinal)
+            if(generatedRead)for(size_t ordinal=0;ordinal<source.schema.len();++ordinal)
                 if(source.schema.cols[ordinal].generatedKind!='v')capture->inputColumns.insert(ordinal);
         }
         // Capture only requested true attribute ordinals, in either format.
@@ -2730,8 +2730,8 @@ bool publishReturning(const std::vector<ReturningProjection>& projections,
                         image, projection.source);
                     const auto it = source.find(projection.column);
                     size_t generatedOrdinal=0;
-                    while(generatedOrdinal<table.len && table.cols[generatedOrdinal].dataName!=projection.column)++generatedOrdinal;
-                    const bool virtualColumn=generatedOrdinal<table.len && table.cols[generatedOrdinal].generatedKind=='v';
+                    while(generatedOrdinal<table.len() && table.cols[generatedOrdinal].dataName!=projection.column)++generatedOrdinal;
+                    const bool virtualColumn=generatedOrdinal<table.len() && table.cols[generatedOrdinal].generatedKind=='v';
                     isNull = it == source.end() || !it->second;
                     value = isNull ? "NULL" : *it->second;
                     if(virtualColumn) {
@@ -2743,7 +2743,7 @@ bool publishReturning(const std::vector<ReturningProjection>& projections,
                     if(!virtualColumn && stored_regtype_detail::columnType(projection.typeName)) {
                         // Star projections consume the same genuine stored source
                         // as expression projections, before rendering its value.
-                        for(size_t ordinal=0;ordinal<table.len;++ordinal) {
+                        for(size_t ordinal=0;ordinal<table.len();++ordinal) {
                             const auto& column=table.cols[ordinal];
                             if(column.dataName!=projection.column)continue;
                             if(column.generatedKind!='v' &&
@@ -2781,8 +2781,8 @@ bool publishReturning(const std::vector<ReturningProjection>& projections,
                         owned=ExprValue("text",value,isNull);
                     else if(!loadedStoredReference) {
                         size_t ordinal=0;
-                        while(ordinal<table.len && table.cols[ordinal].dataName!=projection.column)++ordinal;
-                        if(ordinal==table.len)throw DbError("XX000","RETURNING source column lost its ordinal");
+                        while(ordinal<table.len() && table.cols[ordinal].dataName!=projection.column)++ordinal;
+                        if(ordinal==table.len())throw DbError("XX000","RETURNING source column lost its ordinal");
                         const auto context=returningContext(image,table,projection.datumMetadata.get());
                         ExprEvaluator reader;reader.setCurrentDB(currentDB);
                         owned=reader.readBoundColumn(static_cast<size_t>(projection.source),ordinal,context);
@@ -2900,7 +2900,7 @@ public:
                     // These are the original stored target/OLD/NEW cells, not
                     // rendered query outputs. Bind the actual reference datum
                     // once before evaluating the original RETURNING expression.
-                    if(ordinal<table_.len && table_.cols[ordinal].dataName==column.name &&
+                    if(ordinal<table_.len() && table_.cols[ordinal].dataName==column.name &&
                        table_.cols[ordinal].generatedKind!='v' &&
                        stored_regtype_detail::columnType(table_.cols[ordinal].dataType)) {
                         const auto catalog=regtype_detail::metadata(g_engine,currentDB_);
@@ -2910,7 +2910,7 @@ public:
                     // Only this genuine stored OLD/NEW source may decode
                     // its declared array input. An already owning datum is
                     // retained by the helper; VIRTUAL display is never storage.
-                    if(captureTyped && ordinal<table_.len &&
+                    if(captureTyped && ordinal<table_.len() &&
                        table_.cols[ordinal].dataName==column.name &&
                        table_.cols[ordinal].generatedKind!='v' && table_.cols[ordinal].isArray)
                         (void)compound_value_detail::decodeArrayStorageInput(value,column.typeMetadata);
@@ -3139,7 +3139,7 @@ bool evaluateConflictExpression(
     ExprEvaluator evaluator;
     evaluator.setCurrentDB(currentDB);
     RowContext context;
-    for (size_t i = 0; i < table.len; ++i) {
+    for (size_t i = 0; i < table.len(); ++i) {
         const std::string& column = table.cols[i].dataName;
         const auto excluded = values.find(column);
         if (targetRow) {
@@ -3183,8 +3183,8 @@ bool conflictTargetMatches(const TableSchema& table,
                            const SqlRow& targetValues,
                            const SqlRow& candidate) {
     for (const auto& targetColumn : targetColumns) {
-        size_t columnIndex = table.len;
-        for (size_t i = 0; i < table.len; ++i) {
+        size_t columnIndex = table.len();
+        for (size_t i = 0; i < table.len(); ++i) {
             if (table.cols[i].dataName == targetColumn) {
                 columnIndex = i;
                 break;
@@ -3192,7 +3192,7 @@ bool conflictTargetMatches(const TableSchema& table,
         }
         const auto expected = targetValues.find(targetColumn);
         const auto actual = candidate.find(targetColumn);
-        if (columnIndex >= table.len || expected == targetValues.end() ||
+        if (columnIndex >= table.len() || expected == targetValues.end() ||
             actual == candidate.end() || !expected->second ||
             !actual->second ||
             StorageEngine::compareValues(
@@ -3218,15 +3218,15 @@ bool loadConflictTargetRow(const std::string& currentDB,
     std::vector<size_t> targetIndices;
     targetIndices.reserve(targetColumns.size());
     for (const auto& targetColumn : targetColumns) {
-        size_t targetIndex = table.len;
-        for (size_t i = 0; i < table.len; ++i) {
+        size_t targetIndex = table.len();
+        for (size_t i = 0; i < table.len(); ++i) {
             if (table.cols[i].dataName == targetColumn) {
                 targetIndex = i;
                 break;
             }
         }
         const auto value = targetValues.find(targetColumn);
-        if (targetIndex >= table.len || value == targetValues.end() ||
+        if (targetIndex >= table.len() || value == targetValues.end() ||
             !value->second) {
             return false;
         }
@@ -3235,7 +3235,7 @@ bool loadConflictTargetRow(const std::string& currentDB,
 
     auto captureRow = [&](const std::string& rowBuffer, SqlRow& output) {
         output.clear();
-        for (size_t i = 0; i < table.len; ++i) {
+        for (size_t i = 0; i < table.len(); ++i) {
             bool isNull = false;
             std::string value = g_engine.extractColumnValue(
                 rowBuffer, table, i, currentDB, true, &isNull);
@@ -3318,7 +3318,7 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback,
 
     const TableSchema table = g_engine.getTableSchema(s.currentDB, resolvedTable);
     CapturedVirtualRows virtualRows(table,!stmt.returning.empty());
-    if (table.len == 0) {
+    if (table.len() == 0) {
         std::cout << "Table has no columns" << std::endl;
         return true;
     }
@@ -3333,8 +3333,8 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback,
 
     std::vector<std::string> columns;
     if (stmt.columns.empty()) {
-        columns.reserve(table.len);
-        for (size_t i = 0; i < table.len; ++i) {
+        columns.reserve(table.len());
+        for (size_t i = 0; i < table.len(); ++i) {
             columns.push_back(table.cols[i].dataName);
         }
     } else {
@@ -3348,7 +3348,7 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback,
                 return true;
             }
             bool found = false;
-            for (size_t i = 0; i < table.len; ++i) {
+            for (size_t i = 0; i < table.len(); ++i) {
                 if (table.cols[i].dataName == column) {
                     found = true;
                     break;
@@ -3372,7 +3372,7 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback,
     for (const auto& column : columns) {
         bool generated = false;
         char identityKind = 0;
-        for (size_t i = 0; i < table.len; ++i) {
+        for (size_t i = 0; i < table.len(); ++i) {
             if (table.cols[i].dataName == column) {
                 generated = !table.cols[i].generatedExpr.empty();
                 identityKind = table.cols[i].identityKind;
@@ -3748,7 +3748,7 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback,
         for (const auto& assignment : conflictExpressionSources)
             inputs.insert(assignment.second.begin(),assignment.second.end());
         for (const auto& input : inputs) {
-            for (size_t index = 0; index < table.len; ++index)
+            for (size_t index = 0; index < table.len(); ++index)
                 if (table.cols[index].dataName == input && table.cols[index].generatedKind == 'v') {
                     fallback = true;
                     return false;
@@ -4492,12 +4492,12 @@ static std::vector<std::string> boundIntegerPrimaryKeyCandidates(
     const auto* input = equality->right.get();
     if (!column || column->preparedSubquery || !column->binding || column->binding->scopeDepth ||
         column->binding->mergedUsing || column->binding->sourceOrdinal != target ||
-        column->binding->columnOrdinal >= table.len || !input || input->preparedSubquery) return {};
+        column->binding->columnOrdinal >= table.len() || !input || input->preparedSubquery) return {};
     const size_t position = column->binding->columnOrdinal;
     const auto& stored = table.cols[position];
     if (!table.pkColIndices.empty()) {
         if (table.pkColIndices.size() != 1 || table.pkColIndices.front() != position) return {};
-    } else if (!stored.isPrimaryKey || std::count_if(table.cols, table.cols + table.len,
+    } else if (!stored.isPrimaryKey || std::count_if(table.cols.begin(), table.cols.end(),
                    [](const Column& field) { return field.isPrimaryKey; }) != 1) return {};
     const auto type = ExprHelper::canonicalResultTypeName(stored.dataType);
     if (!signedType(type) || stored.isArray || stored.isUnsigned || !stored.domainName.empty() ||
@@ -4546,9 +4546,9 @@ bool executePreparedUpdate(const UpdateStmt& stmt, Session& s, bool& fallback,
     std::set<std::string> arrayDomainTargets;
     for (const auto& assignment : stmt.setClauses) {
         const auto column = identifier(assignment.first);
-        const auto* declaration = std::find_if(table.cols, table.cols + table.len,
+        const auto declaration = std::find_if(table.cols.begin(), table.cols.end(),
             [&](const auto& field) { return field.dataName == column; });
-        if (declaration == table.cols + table.len)
+        if (declaration == table.cols.end())
             throw DbError("42703", "column does not exist: " + column);
         if (declaration->isArray && !declaration->domainName.empty())
             arrayDomainTargets.insert(column);
@@ -6111,7 +6111,7 @@ private:
                     }
                 }
                 scanSchema=g_engine.getTableSchema(session_.currentDB,scanTable);
-                if(scanSchema.len!=range.columns.size())throw dbms::DbError("XX000","mutation source descriptor differs from physical relation");
+                if(scanSchema.len()!=range.columns.size())throw dbms::DbError("XX000","mutation source descriptor differs from physical relation");
                 scan=std::make_shared<dbms::TableScanOp>(&g_engine,session_.currentDB,scanTable);
             } else
                 throw dbms::DbError("0A000","mutation source requires additional std::function-range lowering");
@@ -6130,7 +6130,7 @@ private:
                     std::string raw;
                     found=scan->next(raw);
                     if(!found && scan->hasError())throw dbms::DbError("XX000",scan->errorMessage());
-                    if(found)for(size_t i=0;i<scanSchema.len;++i) {
+                    if(found)for(size_t i=0;i<scanSchema.len();++i) {
                         const auto& column = scanSchema.cols[i];
                         if(column.generatedKind=='v'){cells.emplace_back();continue;}
                         bool computedNull=false;
@@ -6428,13 +6428,13 @@ class BoundDmlExecution {
             if(found==values.end())throw DbError("XX000","DML row has no bound target column: "+column.name);
             cells.emplace_back(column.type,found->second.value_or(""),!found->second);
             const auto position=cells.size()-1;
-            if(position<table_.len && table_.cols[position].generatedKind!='v' &&
+            if(position<table_.len() && table_.cols[position].generatedKind!='v' &&
                stored_regtype_detail::columnType(table_.cols[position].dataType)) {
                 const auto catalog=regtype_detail::metadata(g_engine,session_.currentDB);
                 cells.back()=stored_regtype_detail::load(found->second.value_or(""),
                     table_.cols[position].isArray,!found->second,catalog,&session_,column.typeMetadata,table_.cols[position].dataType);
             }
-            if(captureReturningArrays && position<table_.len &&
+            if(captureReturningArrays && position<table_.len() &&
                table_.cols[position].dataName==column.name &&
                table_.cols[position].generatedKind!='v' && table_.cols[position].isArray)
                 (void)compound_value_detail::decodeArrayStorageInput(cells.back(),column.typeMetadata);
@@ -6468,7 +6468,7 @@ class BoundDmlExecution {
                 const bool isNull=found==values.end() || !found->second;
                 cells.emplace_back(column.type,isNull?std::string{}:*found->second,isNull);
                 const auto position=cells.size()-1;
-                if(position<table_.len && table_.cols[position].dataName==column.name &&
+                if(position<table_.len() && table_.cols[position].dataName==column.name &&
                    table_.cols[position].generatedKind!='v') {
                     // OLD/NEW aliases are original stored row versions, not
                     // strings rendered by a query or a new parameter frame.
@@ -6507,7 +6507,7 @@ class BoundDmlExecution {
         if(!column) {column=dynamic_cast<const ColumnRefExpr*>(equality->right.get());input=equality->left.get();}
         if(!column || column->preparedSubquery || !column->binding || column->binding->scopeDepth ||
             column->binding->mergedUsing || column->binding->sourceOrdinal!=target_->ordinal ||
-            column->binding->columnOrdinal>=table_.len || !input || input->preparedSubquery)return {};
+            column->binding->columnOrdinal>=table_.len() || !input || input->preparedSubquery)return {};
         const auto& stored=table_.cols[column->binding->columnOrdinal];
         const auto type=ExprHelper::canonicalResultTypeName(stored.dataType);
         if((type!="smallint" && type!="integer" && type!="bigint") || stored.isArray || stored.isUnsigned ||
@@ -6542,7 +6542,7 @@ class BoundDmlExecution {
         // Keep predicates to the right of an effectful expression in their
         // original order. Virtual target inputs can also execute expressions
         // when an original row is decoded for the join.
-        if (std::any_of(table_.cols, table_.cols + table_.len,
+        if (std::any_of(table_.cols.begin(), table_.cols.end(),
                        [](const Column& column) { return column.generatedKind == 'v'; })) return {};
         while (const auto* binary = dynamic_cast<const BinaryOpExpr*>(where)) {
             if (binary->op != "AND" || binary->preparedSubquery) break;
@@ -6615,8 +6615,8 @@ public:
             throw DbError("25006","cannot execute DML in a read-only transaction");
         rejectPreparedMaterializedTarget(statement_,session_,query_);
         table_=g_engine.getTableSchema(session_.currentDB,physical_);
-        if(!table_.len || table_.len!=target_->columns.size())throw DbError("0A000","prepared DML target requires additional view/virtual lowering");
-        for(size_t i=0;i<table_.len;++i)if(table_.cols[i].dataName!=target_->columns[i].name)
+        if(!table_.len() || table_.len()!=target_->columns.size())throw DbError("0A000","prepared DML target requires additional view/virtual lowering");
+        for(size_t i=0;i<table_.len();++i)if(table_.cols[i].dataName!=target_->columns[i].name)
             throw DbError("XX000","physical DML target differs from its prepared descriptor");
         StorageEngine::TablePrivilege privilege;
         const ReturningOptions* options=nullptr;

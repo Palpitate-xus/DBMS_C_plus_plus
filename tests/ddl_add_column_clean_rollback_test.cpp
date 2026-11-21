@@ -43,7 +43,7 @@ int main() {
         assert(failed && output.str().find("SQLSTATE 42601")!=std::string::npos);
     };
     {PinnedHeap heap(db+"/target.dt");invalid("ALTER TABLE target ADD COLUMN id SERIAL NULL");heap.unchanged();}
-    assert(!g_engine.inTransaction());assert(g_engine.getTableSchema(db,"target").len==1);
+    assert(!g_engine.inTransaction());assert(g_engine.getTableSchema(db,"target").len()==1);
     assert(g_engine.query(db,"target",{}, {"base"})==std::vector<std::string>{"7 "});
 
     assert(g_engine.beginTransaction(db)==DBStatus::OK);
@@ -60,16 +60,16 @@ int main() {
     assert(g_engine.hasTransactionBackup() && g_engine.transactionBackupDirty());
     {PinnedHeap heap(db+"/target.dt");invalid("ALTER TABLE target ADD COLUMN id SMALLSERIAL NULL");heap.unchanged();}
     assert(g_engine.inTransaction() && g_engine.hasTransactionBackup() && g_engine.transactionBackupDirty());
-    assert(g_engine.getTableSchema(db,"target").len==2);
+    assert(g_engine.getTableSchema(db,"target").len()==2);
     invalid("ALTER TABLE target ADD COLUMN leaked INT, ADD COLUMN id SERIAL NULL");
     auto schema=g_engine.getTableSchema(db,"target");
-    assert(schema.len==2 && schema.cols[1].dataName=="kept");
+    assert(schema.len()==2 && schema.cols[1].dataName=="kept");
     assert(g_engine.rollbackTransaction()==DBStatus::OK);
-    assert(g_engine.getTableSchema(db,"target").len==1);
+    assert(g_engine.getTableSchema(db,"target").len()==1);
     invalid("ALTER TABLE target ADD COLUMN leaked INT, ADD COLUMN id SERIAL NULL");
-    assert(!g_engine.inTransaction() && g_engine.getTableSchema(db,"target").len==1);
+    assert(!g_engine.inTransaction() && g_engine.getTableSchema(db,"target").len()==1);
     assert(!ddl.executeSql("ALTER TABLE target ADD COLUMN nullable INT NULL",session));
-    schema=g_engine.getTableSchema(db,"target");assert(schema.len==2 && schema.cols[1].isNull);
+    schema=g_engine.getTableSchema(db,"target");assert(schema.len()==2 && schema.cols[1].isNull);
     assert(g_engine.getLockManager().captureCheckpoint().tableCounts.empty());
     assert(g_engine.dropDatabase(db)==DBStatus::OK);cleanupTestDb(name);
     std::cout<<"[DDL CLEAN ADD] pure validation preserves heap identity and dirty outer/multiaction rollback\n";

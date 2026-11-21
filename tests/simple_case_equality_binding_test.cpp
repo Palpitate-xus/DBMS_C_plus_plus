@@ -75,7 +75,7 @@ int main() {
     check("switch evaluated once",value.value,"1");
     check("switch exact effects",std::to_string(g_engine.nextval(db,"case_switch_sequence")),"2");
     assert(g_engine.createSequence(db,"case_null_rhs_sequence",1,1)==DBStatus::OK);
-    TableSchema nullSchema; nullSchema.len=1;
+    TableSchema nullSchema; nullSchema.cols.resize(1);
     nullSchema.cols[0].dataName="v"; nullSchema.cols[0].dataType="integer"; nullSchema.cols[0].dsize=4;
     assert(g_engine.createTable(db,"case_null_source",nullSchema)==DBStatus::OK);
     auto nullPrepared=std::make_shared<PreparedQuery>(g_engine.prepareBoundQuery(db,

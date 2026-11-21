@@ -21,7 +21,7 @@ static Rows snapshot(const std::string& database, const std::string& name) {
     assert(g_engine.forEachRow(database,name,[&](uint32_t page,uint16_t slot,const char* data,size_t length) {
         StorageEngine::SqlRow row;
         const auto rid = StorageEngine::encodeRid(page,slot);
-        for(size_t i=0;i<table.len;++i) {
+        for(size_t i=0;i<table.len();++i) {
             if(g_engine.isColumnNullByRid(database,name,rid,i)) row[table.cols[i].dataName]=std::nullopt;
             else row[table.cols[i].dataName]=g_engine.extractColumnValue(std::string(data,length),table,i,database);
         }
@@ -81,7 +81,7 @@ static void failure(bool outerTransaction) {
     g_engine.setTriggerExecutor({});
     assert(caught && calls==3);
     assert(snapshot(database,"rows")==fixture.original);
-    assert(g_engine.getTableSchema(database,"rows").len==3);
+    assert(g_engine.getTableSchema(database,"rows").len()==3);
     assert(!detail::ownsDdlRewrite(g_engine,database,"rows"));
     if(outerTransaction) {
         assert(g_engine.inTransaction());

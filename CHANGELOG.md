@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>普通表最多可以建 1,600 列 · 2026-11-20</summary>
+
+列数上限从 30 提高到 1,600。实际能用多少列还取决于列的类型和每行数据的大小。 同时修复了某些大批写入尚未提交时意外退出、导致数据库无法重启的问题。
+
+[使用手册](docs/MANUAL.md#建表) · [测试报告](docs/test-report.md#wide-table-20261120) · [性能报告](docs/performance-report-2026-10-30.md#wide-table-narrow-cost-20261120)
+
+</details>
+
+<details>
 <summary>反复查看查询步骤时，省去重新计算 · 2026-11-20</summary>
 
 用 `EXPLAIN` 再次查看同一条简单的两表查询时，数据库可以沿用上次的执行步骤。想看查询这次实际处理了多少行，可以用 `EXPLAIN ANALYZE`。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>两表按连续编号匹配时，可以直接找到记录 · 2026-11-20</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-20 · 两表按连续编号匹配时，可以直接找到记录
 
 按整数编号匹配两张表时，如果右表的编号连续且不重复，数据库可以用编号直接找到已读过的记录，省去另建查找表的步骤。
 
 [使用手册](docs/MANUAL.md#整数等值连接) · [测试报告](docs/test-report.md#integer-join-direct-20261120) · [性能报告](docs/performance-report-2026-10-30.md#integer-join-direct-cost-20261120)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-20 · 用整数列连接时减少重复查找
 

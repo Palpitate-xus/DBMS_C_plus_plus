@@ -138,7 +138,7 @@ static void test_collate_persists_and_applies() {
     assert(!err);
 
     dbms::TableSchema schema = g_engine.getTableSchema(db, "t");
-    assert(schema.len == 2);
+    assert(schema.len() == 2);
     assert(schema.cols[0].collation == "C");
     assert(schema.cols[1].collation == "nocase" || schema.cols[1].collation == "NOCASE");
 
@@ -256,7 +256,7 @@ static void test_collate_binary_collations() {
         "CREATE TABLE t (c_default VARCHAR(50), c_c VARCHAR(50) COLLATE C, c_posix VARCHAR(50) COLLATE POSIX, c_ucs VARCHAR(50) COLLATE ucs_basic)", s));
 
     dbms::TableSchema schema = g_engine.getTableSchema(db, "t");
-    assert(schema.len == 4);
+    assert(schema.len() == 4);
 
     // No explicit collation remains an empty schema marker; SQL uses the
     // database default locale for comparisons and ordering.
@@ -534,7 +534,7 @@ static void test_custom_collation_runtime_resolution() {
         "CREATE TABLE words (v VARCHAR(50) COLLATE app.casefold)", s));
 
     dbms::TableSchema schema = g_engine.getTableSchema(db, "words");
-    assert(schema.len == 1);
+    assert(schema.len() == 1);
     assert(schema.cols[0].collation == "app.casefold");
     assert(schema.cols[0].resolvedCollation == "nocase");
     assert(!schema.cols[0].resolvedCollationUsesLocale);
@@ -719,7 +719,7 @@ static void test_custom_collation_runtime_resolution() {
         "ALTER TABLE alter_target ADD COLUMN "
         "v VARCHAR(20) COLLATE app.casefold", s));
     schema = g_engine.getTableSchema(db, "alter_target");
-    assert(schema.len == 2);
+    assert(schema.len() == 2);
     assert(schema.cols[1].collation == "app.casefold");
     assert(schema.cols[1].resolvedCollation == "nocase");
 
@@ -944,7 +944,7 @@ static void test_drop_collation_protects_table_dependencies() {
     assert(ddl.executeSql("DROP COLLATION app.casefold", s));
     assert(ddl.executeSql("DROP COLLATION app.casefold CASCADE", s));
     assert(readBytes(metadata) == originalBytes);
-    assert(g_engine.getTableSchema(db, "public_words").len == 1);
+    assert(g_engine.getTableSchema(db, "public_words").len() == 1);
     assert(g_engine.query(
                db, "public_words", {"=v hello"}, {"v"}).size() == 1);
 

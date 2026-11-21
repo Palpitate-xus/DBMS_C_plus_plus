@@ -24,7 +24,7 @@ static Rows snapshot(const std::string& database, const dbms::TableSchema& table
     std::string raw;
     while (scan.next(raw)) {
         std::vector<Cell> row;
-        for (size_t i = 0; i < table.len; ++i) {
+        for (size_t i = 0; i < table.len(); ++i) {
             if (scan.lastColumnIsNull(i)) row.push_back(std::nullopt);
             else row.push_back(Engine::extractColumnValueStatic(raw, table, i));
         }
@@ -124,14 +124,14 @@ int main() {
         const auto before = snapshot(database, stored);
         assert(before.size() == population);
         std::vector<Engine::ColumnStats> expected;
-        for (size_t ordinal = 0; ordinal < stored.len; ++ordinal)
+        for (size_t ordinal = 0; ordinal < stored.len(); ++ordinal)
             expected.push_back(reference(stored.cols[ordinal], before, ordinal));
         // Repeated ANALYZE must not retain indexes/flags from a previous run.
         for (int repeat = 0; repeat < 2; ++repeat) {
             assert(g_engine.analyzeTable(database, table.tablename));
             assert(g_engine.getTableRowCount(database, table.tablename) == population);
             assert(snapshot(database, stored) == before);
-            for (size_t ordinal = 0; ordinal < stored.len; ++ordinal) {
+            for (size_t ordinal = 0; ordinal < stored.len(); ++ordinal) {
                 const auto actual = g_engine.getColumnStats(database,
                     table.tablename, stored.cols[ordinal].dataName);
                 const auto& wanted = expected[ordinal];

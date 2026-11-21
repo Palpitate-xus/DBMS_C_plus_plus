@@ -107,7 +107,7 @@ static bool rawColumnIsNull(const std::string& row, const TableSchema& tbl,
     // TableScanOp deliberately strips the MVCC/null bitmap header before
     // exposing rows.  The payload format uses the same empty-value sentinel
     // as extractColumnValueStatic for nullable fixed-width values.
-    return colIdx < tbl.len && tbl.cols[colIdx].isNull &&
+    return colIdx < tbl.len() && tbl.cols[colIdx].isNull &&
            StorageEngine::extractColumnValueStatic(row, tbl, colIdx).empty();
 }
 
@@ -319,7 +319,7 @@ struct PreparedSelectState {
         const auto& binding = *column.binding;
         if (binding.scopeDepth || binding.sourceOrdinal != sourceOrdinal || binding.mergedUsing)
             throw DbError("0A000", "prepared source reference requires additional range lowering");
-        if (binding.columnOrdinal >= schema.len)
+        if (binding.columnOrdinal >= schema.len())
             throw DbError("XX000", "prepared source ordinal is outside its descriptor");
         return binding.columnOrdinal;
     }
@@ -348,7 +348,7 @@ struct PreparedSelectState {
     std::vector<ExprValue> cells(Operator& source, const std::string& raw) const {
         std::vector<ExprValue> values;
         if (source.lastStructuredValues(values)) {
-            if (values.size() != schema.len)
+            if (values.size() != schema.len())
                 throw DbError("XX000","prepared source lost its typed descriptor width");
             for (size_t i = 0; i < values.size(); ++i) {
                 const auto declared = ExprHelper::canonicalResultTypeName(schema.cols[i].dataType +
@@ -382,7 +382,7 @@ struct PreparedSelectState {
         }
         const QueryRowDescriptor* physicalDeclaration=nullptr;
         bool needsPhysicalDatum=false;
-        for(size_t i=0;i<schema.len;++i)
+        for(size_t i=0;i<schema.len();++i)
             if(schema.cols[i].generatedKind!='v' &&
                (schema.cols[i].isArray || stored_regtype_detail::columnType(schema.cols[i].dataType))) {
                 needsPhysicalDatum=true;break;
@@ -401,10 +401,10 @@ struct PreparedSelectState {
         }
         // Reserve only after the original source supplied a complete row.
         // Unavailable/malformed fallback keeps its original allocation/errors.
-        if(!needsPhysicalDatum && schema.len<=MAX_COLUMNS && values.empty() &&
-           available && structured.size()==schema.len && nulls.size()==schema.len)
-            values.reserve(schema.len);
-        for (size_t i = 0; i < schema.len; ++i) {
+        if(!needsPhysicalDatum && schema.len()<=MAX_COLUMNS && values.empty() &&
+           available && structured.size()==schema.len() && nulls.size()==schema.len())
+            values.reserve(schema.len());
+        for (size_t i = 0; i < schema.len(); ++i) {
             if(schema.cols[i].generatedKind=='v'){values.emplace_back();continue;}
             bool computedNull = false;
             const std::string value = available ? structured.at(i) :
@@ -1464,14 +1464,14 @@ public:
         values.clear();
         if(!budgeted_)values=current().cells;
         else if(state_->sourceOrdinal!=PreparedSelectState::noTarget)
-            for(size_t i=0;i<state_->schema.len;++i)values.push_back(state_->execution->readSourceColumn(current().context,state_->sourceOrdinal,i));
+            for(size_t i=0;i<state_->schema.len();++i)values.push_back(state_->execution->readSourceColumn(current().context,state_->sourceOrdinal,i));
         return true;
     }
     bool lastStructuredRow(std::vector<std::string>& cells,std::vector<bool>& nulls) const override {
         if(!available_)return false;
         cells.clear();nulls.clear();
         if(budgeted_ && !state_->sourceContexts && state_->sourceOrdinal!=PreparedSelectState::noTarget) {
-            for(size_t i=0;i<state_->schema.len;++i) {
+            for(size_t i=0;i<state_->schema.len();++i) {
                 const auto value=state_->execution->readSourceColumn(current().context,state_->sourceOrdinal,i);
                 cells.push_back(value.value);nulls.push_back(value.isNull);
             }
@@ -2157,8 +2157,8 @@ class BrinScanOp final : public Operator {
         std::string out;
         const auto field = [&](const std::string& text) { out += std::to_string(text.size())+":"+text; };
         field(std::to_string(schema.physicalRelationId)); field(std::to_string(schema.formatVersion));
-        field(std::to_string(schema.len));
-        for (size_t i = 0; i < schema.len; ++i) {
+        field(std::to_string(schema.len()));
+        for (size_t i = 0; i < schema.len(); ++i) {
             const auto& c = schema.cols[i];
             for (const auto& text : {c.dataName,c.dataType,c.domainName,c.collation,c.resolvedCollation,c.generatedExpr}) field(text);
             for (const auto n : {int64_t(c.dsize),int64_t(c.typeMod),int64_t(c.storageCodec),int64_t(c.isArray),int64_t(c.isNull),int64_t(c.generatedKind),int64_t(c.isUnsigned)}) field(std::to_string(n));
@@ -2223,7 +2223,7 @@ public:
             HeapScanRow row;
             if (!cursor_ || !cursor_->next(row)) { record(); return false; }
             rid_ = row.rid; lastNulls_ = std::move(row.nulls);
-            StorageEngine::bindNullRow(engine_, database_, table_, rid_, schema_.len);
+            StorageEngine::bindNullRow(engine_, database_, table_, rid_, schema_.len());
             bool ok = false;
             out = engine_->resolveToastValues(database_, table_, row.data, schema_, &ok);
             if (!ok) { setError("BRIN heap TOAST read failed"); return false; }
@@ -2344,7 +2344,7 @@ static OpPtr literalBrinTableSource(StorageEngine* engine, const std::string& da
             }
         }
         if (!column || !column->binding || column->binding->scopeDepth ||
-            column->binding->mergedUsing || column->binding->columnOrdinal >= schema.len) continue;
+            column->binding->mergedUsing || column->binding->columnOrdinal >= schema.len()) continue;
         bool sameRange = false;
         for (const auto& range : query->sourceRanges)
             if (range.owner == select && range.source == select->fromClause.get() &&
@@ -2414,7 +2414,7 @@ class PreparedParameterIndexScanOp final : public Operator {
     bool sameKey(const TableSchema& schema) const {
         if (schema.partitionType != TableSchema::PartitionType::None ||
             !isSingleColumnPrimaryKey(schema, column_)) return false;
-        for (size_t i = 0; i < schema.len; ++i) {
+        for (size_t i = 0; i < schema.len(); ++i) {
             if (schema.cols[i].generatedKind == 'v') return false;
             if (schema.cols[i].dataName == column_ &&
                 (schema.cols[i].isArray || schema.cols[i].isUnsigned || !schema.cols[i].domainName.empty() ||
@@ -2557,7 +2557,7 @@ static std::optional<std::string> nativeLikePrefix(
         condition.patternEscapeIsNull || !condition.patternEscapeColumn.empty())
         return std::nullopt;
     const Column* key = nullptr;
-    for (size_t i = 0; i < schema.len; ++i) {
+    for (size_t i = 0; i < schema.len(); ++i) {
         if (schema.cols[i].dataName == condition.colName) key = &schema.cols[i];
         if (!condition.decodedLiteralRhs && schema.cols[i].dataName == condition.value)
             return std::nullopt;
@@ -2661,7 +2661,7 @@ static OpPtr literalLikeTableSource(StorageEngine* engine, const std::string& da
         } else continue;
         const auto* column = dynamic_cast<const ColumnRefExpr*>(left);
         if (!column || !column->binding || column->binding->scopeDepth ||
-            column->binding->mergedUsing || column->binding->columnOrdinal >= schema.len)
+            column->binding->mergedUsing || column->binding->columnOrdinal >= schema.len())
             continue;
         bool sameRange = false;
         for (const auto& range : query->sourceRanges)
@@ -2757,7 +2757,7 @@ static OpPtr literalGiSTTableSource(StorageEngine* engine, const std::string& da
         }
         if (!column || !column->binding || column->binding->scopeDepth ||
             column->binding->mergedUsing ||
-            column->binding->columnOrdinal >= schema.len) continue;
+            column->binding->columnOrdinal >= schema.len()) continue;
         bool sameRange = false;
         for (const auto& range : query->sourceRanges)
             if (range.owner == select && range.source == select->fromClause.get() &&
@@ -2956,7 +2956,7 @@ static bool intersectIntegerPageBounds(const Expr* expression, const QueryColumn
         if (!column || column->preparedSubquery || !column->binding) return false;
         const auto& input = *column->binding;
         if (input.scopeDepth || input.mergedUsing || input.sourceOrdinal != key.sourceOrdinal ||
-            input.columnOrdinal >= schema.len || !input.typeMetadata ||
+            input.columnOrdinal >= schema.len() || !input.typeMetadata ||
             input.typeMetadata->kind != DatumKind::Scalar || input.typeMetadata->enumType ||
             input.typeMetadata->actualOid != input.typeMetadata->codecOid ||
             !isOrdinaryNullTestColumn(schema.cols[input.columnOrdinal])) return false;
@@ -3017,7 +3017,7 @@ static std::optional<IntegerPageBounds> integerPageBounds(const PreparedQuery& q
     // The existing filter eagerly decodes stored inputs. Only use bitmap
     // rejection if that decoding requires no array/domain/reference handling.
     if (!bounds.nullTests.empty())
-        for (size_t i = 0; i < schema.len; ++i)
+        for (size_t i = 0; i < schema.len(); ++i)
             if (!isOrdinaryNullTestColumn(schema.cols[i])) return {};
     return bounds;
 }
@@ -3037,7 +3037,7 @@ static const PreparedQuery::SourceRange* integerPageRelation(const PreparedQuery
 
 static bool eligibleIntegerPageKey(const TableSchema& schema, const QueryColumnBinding& key) {
     if (schema.partitionType != TableSchema::PartitionType::None || !schema.physicalRelationId ||
-        key.columnOrdinal >= schema.len) return false;
+        key.columnOrdinal >= schema.len()) return false;
     const auto& column = schema.cols[key.columnOrdinal];
     const auto type = ExprHelper::canonicalResultTypeName(column.dataType);
     return (type == "smallint" || type == "integer" || type == "bigint") &&
@@ -3218,7 +3218,7 @@ OpPtr makePreparedTableSource(StorageEngine* engine, const std::string& database
     }
     const auto* parameter = dynamic_cast<const ParameterExpr*>(input);
     if (!column || !column->binding || column->binding->scopeDepth ||
-        column->binding->mergedUsing || column->binding->columnOrdinal >= schema.len)
+        column->binding->mergedUsing || column->binding->columnOrdinal >= schema.len())
         return source;
     bool sameRange = false;
     for (const auto& range : query->sourceRanges)
@@ -3305,14 +3305,14 @@ public:
           declaration_(std::move(declaration)), names_(std::move(names)),
           generations_(std::move(generations)), sourceOrdinal_(sourceOrdinal) {
         if (allColumns)
-            for (size_t i = 0; i < parent_.len; ++i) selected_.insert(parent_.cols[i].dataName);
+            for (size_t i = 0; i < parent_.len(); ++i) selected_.insert(parent_.cols[i].dataName);
     }
 
     ~InheritedTableScanOp() override { try { close(); } catch (...) {} }
 
     void prepareDemand(const PreparedSelectState& state) {
         outer_ = state.outerRow;
-        std::vector<bool> demand(parent_.len);
+        std::vector<bool> demand(parent_.len());
         bool allColumns = !state.windowStages.empty();
         const auto visit = [&](const auto& self, Expr* expression) -> void {
             if (!expression || allColumns) return;
@@ -3325,7 +3325,7 @@ public:
             if (const auto* column = dynamic_cast<const ColumnRefExpr*>(expression)) {
                 if (column->binding && column->binding->sourceOrdinal == sourceOrdinal_) {
                     const auto ordinal = column->binding->columnOrdinal;
-                    if (ordinal >= parent_.len)
+                    if (ordinal >= parent_.len())
                         throw DbError("XX000", "inherited column is outside the parent descriptor");
                     demand[ordinal] = true;
                 }
@@ -3339,7 +3339,7 @@ public:
             if (key.target == PreparedSelectState::noTarget) visit(visit, key.expression);
         visit(visit, state.select().whereClause.get());
         visit(visit, state.select().having.get());
-        for (size_t i = 0; i < parent_.len; ++i)
+        for (size_t i = 0; i < parent_.len(); ++i)
             if (allColumns || demand[i]) selected_.insert(parent_.cols[i].dataName);
     }
 
@@ -3370,10 +3370,10 @@ public:
                 schema.physicalRelationId != generations_[relation])
                 throw DbError("40001", "inheritance source changed before scan");
             std::map<std::string, size_t> fields;
-            for (size_t i = 0; i < schema.len; ++i) fields.emplace(schema.cols[i].dataName, i);
+            for (size_t i = 0; i < schema.len(); ++i) fields.emplace(schema.cols[i].dataName, i);
             std::vector<std::pair<size_t, size_t>> projection;
             projection.reserve(selected_.size());
-            for (size_t i = 0; i < parent_.len; ++i) {
+            for (size_t i = 0; i < parent_.len(); ++i) {
                 const auto& field = parent_.cols[i];
                 const auto found = fields.find(field.dataName);
                 if (found == fields.end() ||
@@ -3507,8 +3507,8 @@ private:
 bool supportsInheritedTableSource(StorageEngine& engine, const std::string& database,
     const TableSchema& parent,
     const std::vector<std::string>& descendants) {
-    if (descendants.empty() || parent.len == 0 || !supportsInheritedHeap(parent) ||
-        std::any_of(parent.cols, parent.cols + parent.len,
+    if (descendants.empty() || parent.len() == 0 || !supportsInheritedHeap(parent) ||
+        std::any_of(parent.cols.begin(), parent.cols.end(),
                     [](const Column& column) { return column.generatedKind == 'v'; })) return false;
     for (const auto& descendant : descendants) {
         const auto schema = engine.getTableSchema(database, descendant);
@@ -3520,7 +3520,7 @@ bool supportsInheritedTableSource(StorageEngine& engine, const std::string& data
 OpPtr makeInheritedTableSource(StorageEngine& engine, const std::string& database,
     const TableSchema& parent, const PreparedQuery::SourceRange& range,
     const std::vector<std::string>& descendants, bool allColumns) {
-    if (range.mergedUsing || range.columns.size() != parent.len)
+    if (range.mergedUsing || range.columns.size() != parent.len())
         throw DbError("XX000", "inheritance scan lost its parent column declaration");
     std::vector<std::string> relations{parent.tablename};
     relations.insert(relations.end(), descendants.begin(), descendants.end());
@@ -3570,7 +3570,7 @@ static bool ordersByIntegerPrimaryKey(const PreparedSelectState& state) {
         : range->relationSchema.empty() || range->relationSchema == "public" ? range->relationName
         : range->relationSchema + "__" + range->relationName;
     const auto matches = [&](const TableSchema& schema) {
-        if (schema.partitionType != TableSchema::PartitionType::None || binding.columnOrdinal >= schema.len)
+        if (schema.partitionType != TableSchema::PartitionType::None || binding.columnOrdinal >= schema.len())
             return false;
         const auto& physical = schema.cols[binding.columnOrdinal];
         return !physical.isArray && !physical.isUnsigned && !physical.generatedKind && physical.domainName.empty() &&
@@ -3749,7 +3749,7 @@ OpPtr QueryPlanner::buildPreparedSelectPlan(StorageEngine* engine,
         for (const auto& range : state->query->sourceRanges) {
             if (range.owner != select || range.source != select->fromClause.get() || range.mergedUsing) continue;
             state->sourceOrdinal = range.ordinal;
-            if (range.columns.size() != state->schema.len)
+            if (range.columns.size() != state->schema.len())
                 throw DbError("0A000", "prepared plan requires a virtual or view source lowering");
             for (size_t i = 0; i < range.columns.size(); ++i)
                 if (range.columns[i].name != state->schema.cols[i].dataName &&
@@ -5163,14 +5163,14 @@ bool TableScanOp::nextForProjection(std::string& raw, const TableSchema& schema,
     // bypass that virtual method or a filtered/indexed/buffered source.
     // A full projection cannot avoid any source field. Keep its existing
     // materialization path without building an extra selected-field plan.
-    if (selected.empty() || selected.size() >= schema.len ||
+    if (selected.empty() || selected.size() >= schema.len() ||
         typeid(*this) != typeid(TableScanOp) || !cursor_ ||
         tbl_.formatVersion != DATA_FILE_FORMAT_VERSION ||
-        schema.formatVersion != tbl_.formatVersion || schema.len != tbl_.len ||
+        schema.formatVersion != tbl_.formatVersion || schema.len() != tbl_.len() ||
         schema.tablename != tablename_ || tbl_.tablename != tablename_)
         return next(raw);
     size_t matched = 0;
-    for (size_t i = 0; i < tbl_.len; ++i) {
+    for (size_t i = 0; i < tbl_.len(); ++i) {
         const auto& source = tbl_.cols[i];
         const auto& consumer = schema.cols[i];
         if (source.dataName != consumer.dataName || source.dataType != consumer.dataType ||
@@ -5205,7 +5205,7 @@ bool TableScanOp::nextRow(std::string& outRow, const TableSchema* projection,
             return false;
         }
         lastRid_ = row.rid; lastNulls_ = std::move(row.nulls);
-        StorageEngine::bindNullRow(engine_, dbname_, tablename_, lastRid_, tbl_.len);
+        StorageEngine::bindNullRow(engine_, dbname_, tablename_, lastRid_, tbl_.len());
         bool ok = false;
         if (projection) {
             ok = detail::decodeStoredRowProjection(*engine_, dbname_, row.data,
@@ -5227,7 +5227,7 @@ bool TableScanOp::nextRow(std::string& outRow, const TableSchema* projection,
     ++pos_;
     // Bind stored-NULL visibility for the row handed upstream so
     // projections see the heap null bitmap instead of zero values.
-    StorageEngine::bindNullRow(engine_, dbname_, tablename_, lastRid_, tbl_.len);
+    StorageEngine::bindNullRow(engine_, dbname_, tablename_, lastRid_, tbl_.len());
     rtInstr_.emitted = true;
     return true;
 }
@@ -5432,12 +5432,12 @@ static bool isSingleColumnPrimaryKey(const TableSchema& table,
                                      const std::string& column) {
     if (!table.pkColIndices.empty()) {
         return table.pkColIndices.size() == 1 &&
-               table.pkColIndices.front() < table.len &&
+               table.pkColIndices.front() < table.len() &&
                table.cols[table.pkColIndices.front()].dataName == column;
     }
     size_t primaryColumns = 0;
     bool matches = false;
-    for (size_t i = 0; i < table.len; ++i) {
+    for (size_t i = 0; i < table.len(); ++i) {
         if (table.cols[i].isPrimaryKey) {
             ++primaryColumns;
             matches = table.cols[i].dataName == column;
@@ -5451,7 +5451,7 @@ static std::string integerEqualityValue(const TableSchema& table,
                                        const std::string& value,
                                        StorageEngine* engine=nullptr,
                                        const std::string& database={}) {
-    for (size_t i = 0; i < table.len; ++i) {
+    for (size_t i = 0; i < table.len(); ++i) {
         if (table.cols[i].dataName != column) continue;
         const auto& type = table.cols[i].dataType;
         if(stored_regtype_detail::scalarType(type) && !table.cols[i].isArray && engine) {
@@ -5499,7 +5499,7 @@ static std::string integerEqualityValue(const TableSchema& table,
 static bool equalityIndexKeyIsEmpty(const TableSchema& table,
                                     const StorageEngine::Condition& condition) {
     if (condition.op != "=") return false;
-    for(size_t i=0;i<table.len;++i)
+    for(size_t i=0;i<table.len();++i)
         if(table.cols[i].dataName==condition.colName && stored_regtype_detail::scalarType(table.cols[i].dataType) &&
            !table.cols[i].isArray)return false; // Every genuine OID key is nonempty.
     const auto value = integerEqualityValue(table, condition.colName, condition.value);
@@ -5550,7 +5550,7 @@ bool IndexScanOp::open() {
     }
     tableLockHeld_ = true;
     tbl_ = engine_->getTableSchema(dbname_, tablename_);
-    for(size_t i=0;i<tbl_.len;++i)
+    for(size_t i=0;i<tbl_.len();++i)
         if(tbl_.cols[i].dataName==colname_ && !tbl_.cols[i].isArray &&
            stored_regtype_detail::scalarType(tbl_.cols[i].dataType)) {
             try {
@@ -5575,14 +5575,14 @@ bool IndexScanOp::open() {
     rids_.clear();
     lastRid_ = 0;
     // Check if this is a PK scan
-    size_t pkIdx = tbl_.len;
-    for (size_t i = 0; i < tbl_.len; ++i) {
+    size_t pkIdx = tbl_.len();
+    for (size_t i = 0; i < tbl_.len(); ++i) {
         if (tbl_.cols[i].isPrimaryKey && tbl_.cols[i].dataName == colname_) {
             pkIdx = i; break;
         }
     }
     isPK_ = isSingleColumnPrimaryKey(tbl_, colname_);
-    if (pkIdx < tbl_.len && !isPK_) {
+    if (pkIdx < tbl_.len() && !isPK_) {
         const auto indexedColumns = engine_->getIndexedColumns(dbname_, tablename_);
         if (std::find(indexedColumns.begin(), indexedColumns.end(), colname_) ==
             indexedColumns.end()) {
@@ -5683,15 +5683,15 @@ bool IndexScanOp::next(std::string& outRow) {
         }
         lastRid_ = rid;
         StorageEngine::bindNullRow(
-            engine_, dbname_, tablename_, lastRid_, tbl_.len);
+            engine_, dbname_, tablename_, lastRid_, tbl_.len());
         // Fixed-width B-tree keys can share a truncated prefix. The heap
         // tuple is only a candidate until the complete SQL value matches.
         // Keep the recheck inside IndexScan: the planner consumes its indexed
         // equality condition and does not retain a Filter above this node.
-        size_t columnIndex = tbl_.len;
-        for (size_t i = 0; i < tbl_.len; ++i)
+        size_t columnIndex = tbl_.len();
+        for (size_t i = 0; i < tbl_.len(); ++i)
             if (tbl_.cols[i].dataName == colname_) { columnIndex = i; break; }
-        if (columnIndex == tbl_.len) {
+        if (columnIndex == tbl_.len()) {
             setError("indexed column does not exist");
             referenceEqualityOid_.reset();
                 return false;
@@ -5715,7 +5715,7 @@ bool IndexScanOp::next(std::string& outRow) {
 }
 
 bool IndexScanOp::lastColumnIsNull(size_t colIdx) const {
-    return lastRid_ > 0 && colIdx < tbl_.len &&
+    return lastRid_ > 0 && colIdx < tbl_.len() &&
         detail::storedRowColumnIsNull(*engine_, dbname_, tablename_, tbl_, lastRid_, colIdx);
 }
 
@@ -5739,7 +5739,7 @@ static bool collectEqualityIndexCandidates(
     std::set<int64_t>& candidates) {
     if (condition.op != "=" || equalityIndexKeyIsEmpty(tbl, condition)) return false;
     std::string value; bool reference=false;
-    for(size_t i=0;i<tbl.len;++i)
+    for(size_t i=0;i<tbl.len();++i)
         if(tbl.cols[i].dataName==condition.colName && !tbl.cols[i].isArray &&
            stored_regtype_detail::scalarType(tbl.cols[i].dataType))reference=true;
     if(reference && condition.referenceInputOid)value=std::to_string(*condition.referenceInputOid);
@@ -5936,13 +5936,13 @@ bool BitmapHeapScanOp::next(std::string& outRow) {
     lastRid_ = rids_[pos_];
     outRow = rows_[pos_++];
     StorageEngine::bindNullRow(
-        engine_, dbname_, tablename_, lastRid_, tbl_.len);
+        engine_, dbname_, tablename_, lastRid_, tbl_.len());
     rtInstr_.emitted = true;
     return true;
 }
 
 bool BitmapHeapScanOp::lastColumnIsNull(size_t colIdx) const {
-    return lastRid_ > 0 && colIdx < tbl_.len &&
+    return lastRid_ > 0 && colIdx < tbl_.len() &&
         engine_->isColumnNullByRid(dbname_, tablename_, lastRid_, colIdx);
 }
 
@@ -5967,8 +5967,8 @@ static std::string gistScanSchemaShape(const TableSchema& schema) {
     std::string out;
     const auto field = [&](const std::string& text) { out += std::to_string(text.size())+":"+text; };
     field(std::to_string(schema.physicalRelationId)); field(std::to_string(schema.formatVersion));
-    field(std::to_string(schema.len));
-    for (size_t i = 0; i < schema.len; ++i) {
+    field(std::to_string(schema.len()));
+    for (size_t i = 0; i < schema.len(); ++i) {
         const auto& c = schema.cols[i];
         for (const auto& text : {c.dataName,c.dataType,c.domainName,c.collation,c.resolvedCollation,c.generatedExpr}) field(text);
         for (const auto n : {int64_t(c.dsize),int64_t(c.typeMod),int64_t(c.storageCodec),int64_t(c.isArray),int64_t(c.isNull),int64_t(c.generatedKind),int64_t(c.isUnsigned)}) field(std::to_string(n));
@@ -6029,7 +6029,7 @@ bool GiSTScanOp::open() {
         return std::find(gistColumns.begin(), gistColumns.end(), column) != gistColumns.end();
     };
     const auto literalRhs = [&](const StorageEngine::Condition& condition) {
-        return condition.decodedLiteralRhs || !std::any_of(tbl_.cols, tbl_.cols + tbl_.len,
+        return condition.decodedLiteralRhs || !std::any_of(tbl_.cols.begin(), tbl_.cols.end(),
             [&](const auto& column) { return column.dataName == condition.value; });
     };
     StorageEngine::GiSTBounds bounds;
@@ -6097,7 +6097,7 @@ bool GiSTScanOp::next(std::string& outRow) {
     } else {
         if (pos_ >= rows_.size()) return false;
         lastRid_ = rids_[pos_]; outRow = rows_[pos_++];
-        StorageEngine::bindNullRow(engine_, dbname_, tablename_, lastRid_, tbl_.len);
+        StorageEngine::bindNullRow(engine_, dbname_, tablename_, lastRid_, tbl_.len());
     }
     instrumentation.emitted = true;
     return true;
@@ -6105,7 +6105,7 @@ bool GiSTScanOp::next(std::string& outRow) {
 
 bool GiSTScanOp::lastColumnIsNull(size_t ordinal) const {
     if (fallbackOpen_) return fallback_->lastColumnIsNull(ordinal);
-    return lastRid_ > 0 && ordinal < tbl_.len &&
+    return lastRid_ > 0 && ordinal < tbl_.len() &&
         engine_->isColumnNullByRid(dbname_, tablename_, lastRid_, ordinal);
 }
 
@@ -6226,7 +6226,7 @@ bool BitmapOrHeapScanOp::open() {
                 StorageEngine::restoreNullRowBinding(std::move(saved));
             }
         } nullBinding{StorageEngine::captureNullRowBinding()};
-        StorageEngine::bindNullRow(engine_, dbname_, tablename_, rid, tbl_.len);
+        StorageEngine::bindNullRow(engine_, dbname_, tablename_, rid, tbl_.len());
         bool matches = false;
         for (const auto& branch : branches_) {
             bool branchMatches = true;
@@ -6262,14 +6262,14 @@ bool BitmapOrHeapScanOp::next(std::string& outRow) {
     ++pos_;
     if (lastRid_ > 0) {
         StorageEngine::bindNullRow(
-            engine_, dbname_, tablename_, lastRid_, tbl_.len);
+            engine_, dbname_, tablename_, lastRid_, tbl_.len());
     }
     rtInstr_.emitted = true;
     return true;
 }
 
 bool BitmapOrHeapScanOp::lastColumnIsNull(size_t colIdx) const {
-    if (lastRid_ <= 0 || colIdx >= tbl_.len) return false;
+    if (lastRid_ <= 0 || colIdx >= tbl_.len()) return false;
     return engine_->isColumnNullByRid(dbname_, tablename_, lastRid_, colIdx);
 }
 
@@ -6297,7 +6297,7 @@ static std::vector<StorageEngine::Condition> prepareUnknownBitPredicateInputs(
         if (condition.patternType != "unknown" || !condition.decodedLiteralRhs ||
             !(condition.op == "=" || condition.op == "<>" || condition.op == "!=" ||
               condition.op == "<" || condition.op == ">" || condition.op == "<=" || condition.op == ">=")) continue;
-        for (size_t i = 0; i < table.len; ++i) {
+        for (size_t i = 0; i < table.len(); ++i) {
             const auto& column = table.cols[i];
             if (column.dataName != condition.colName) continue;
             if (column.isArray || (column.dataType != "bit" && column.dataType != "bit varying")) break;
@@ -6336,7 +6336,7 @@ static void validateNullPredicateColumns(const Expr* expression,const TableSchem
     const auto* reference=isNull(binary->right.get())?dynamic_cast<const ColumnRefExpr*>(binary->left.get()):
         isNull(binary->left.get())?dynamic_cast<const ColumnRefExpr*>(binary->right.get()):nullptr;
     if(!reference || !reference->table.empty() || !reference->schema.empty()) return;
-    for(size_t i=0;i<table.len;++i) if(table.cols[i].dataName==reference->column) return;
+    for(size_t i=0;i<table.len();++i) if(table.cols[i].dataName==reference->column) return;
     throw DbError("42703","column does not exist: "+reference->column);
 }
 
@@ -6346,7 +6346,7 @@ static void validatePredicateTypes(const TableSchema& table,
     for (const auto& condition : conditions) {
         if (nullScalarPredicate(condition) && condition.op!="typedexpr") {
             bool found=false;
-            for(size_t i=0;i<table.len;++i) if(table.cols[i].dataName==condition.colName) {
+            for(size_t i=0;i<table.len();++i) if(table.cols[i].dataName==condition.colName) {
                 found=true;
                 (void)ExprEvaluator::resolveComparison(condition.op,table.cols[i].dataType+
                     (table.cols[i].isArray?"[]":""),"unknown");
@@ -6365,7 +6365,7 @@ static void validatePredicateTypes(const TableSchema& table,
                 throw DbError("42601", "invalid typed filter predicate");
             validateNullPredicateColumns(select->selectList.front().expr.get(),table);
             std::map<std::string, std::string> hints;
-            for (size_t i = 0; i < table.len; ++i)
+            for (size_t i = 0; i < table.len(); ++i)
                 hints[table.cols[i].dataName] = table.cols[i].dataType +
                     (table.cols[i].isArray ? "[]" : "");
             ExprHelper::prepareArrayTypes(select->selectList.front().expr.get(),
@@ -6376,7 +6376,7 @@ static void validatePredicateTypes(const TableSchema& table,
         static const std::set<std::string> comparisons = {
             "=", "<>", "!=", "<", ">", "<=", ">=", "in", "notin", "between", "notbetween"};
         if (!comparisons.count(condition.op)) continue;
-        for (size_t i = 0; i < table.len; ++i) {
+        for (size_t i = 0; i < table.len(); ++i) {
             if (table.cols[i].dataName != condition.colName) continue;
             const auto& column = table.cols[i];
             (void)ExprEvaluator::resolveComparison("=", column.dataType +
@@ -6387,7 +6387,7 @@ static void validatePredicateTypes(const TableSchema& table,
                 const bool range=condition.op=="between" || condition.op=="notbetween";
                 if(range && tokens.size()!=2)throw DbError("42601","BIT BETWEEN requires two operands");
                 std::map<std::string,std::string> hints;
-                for(size_t c=0;c<table.len;++c)
+                for(size_t c=0;c<table.len();++c)
                     hints[table.cols[c].dataName]=table.cols[c].dataType+(table.cols[c].isArray?"[]":"");
                 ExprEvaluator evaluator;
                 for(size_t member=0;member<tokens.size();++member) {
@@ -6438,14 +6438,14 @@ bool FilterOp::next(std::string& outRow) {
         const std::vector<StorageEngine::Condition>& conditions) {
         if (nullPredicateBranch(conditions)) return false;
         for (const auto& c : conditions) {
-            size_t colIdx = tbl_.len;
-            for (size_t i = 0; i < tbl_.len; ++i) {
+            size_t colIdx = tbl_.len();
+            for (size_t i = 0; i < tbl_.len(); ++i) {
                 if (tbl_.cols[i].dataName == c.colName) {
                     colIdx = i;
                     break;
                 }
             }
-            const bool physicalColumn = colIdx < tbl_.len &&
+            const bool physicalColumn = colIdx < tbl_.len() &&
                 tbl_.cols[colIdx].generatedKind != 'v';
             const bool isNull = physicalColumn && child_->lastColumnIsNull(colIdx);
             const bool conditionMatches =
@@ -6513,8 +6513,8 @@ bool SemiJoinOp::open() {
     const auto rememberOuterRow = [&](const std::string& row) {
         rows_.push_back(row);
         origins_.push_back(outer_->scanOrigin());
-        std::vector<bool> nulls(outerTbl_.len, false);
-        for (size_t i = 0; i < outerTbl_.len; ++i) {
+        std::vector<bool> nulls(outerTbl_.len(), false);
+        for (size_t i = 0; i < outerTbl_.len(); ++i) {
             nulls[i] = outer_->lastColumnIsNull(i);
         }
         nullRows_.push_back(std::move(nulls));
@@ -6530,12 +6530,12 @@ bool SemiJoinOp::open() {
         // test but treat UNKNOWN as a non-match, as a WHERE clause does.
         std::vector<size_t> outerIdxs, innerIdxs;
         for (const auto& k : keys_) {
-            size_t oi = outerTbl_.len, ii = innerTbl_.len;
-            for (size_t i = 0; i < outerTbl_.len; ++i)
+            size_t oi = outerTbl_.len(), ii = innerTbl_.len();
+            for (size_t i = 0; i < outerTbl_.len(); ++i)
                 if (outerTbl_.cols[i].dataName == k.first) { oi = i; break; }
-            for (size_t i = 0; i < innerTbl_.len; ++i)
+            for (size_t i = 0; i < innerTbl_.len(); ++i)
                 if (innerTbl_.cols[i].dataName == k.second) { ii = i; break; }
-            if (oi >= outerTbl_.len || ii >= innerTbl_.len) return false;
+            if (oi >= outerTbl_.len() || ii >= innerTbl_.len()) return false;
             outerIdxs.push_back(oi);
             innerIdxs.push_back(ii);
         }
@@ -6610,21 +6610,21 @@ bool SemiJoinOp::open() {
         return true;
     }
 
-    size_t outerIdx = outerTbl_.len;
-    size_t innerIdx = innerTbl_.len;
-    for (size_t i = 0; i < outerTbl_.len; ++i) {
+    size_t outerIdx = outerTbl_.len();
+    size_t innerIdx = innerTbl_.len();
+    for (size_t i = 0; i < outerTbl_.len(); ++i) {
         if (outerTbl_.cols[i].dataName == outerColumn_) {
             outerIdx = i;
             break;
         }
     }
-    for (size_t i = 0; i < innerTbl_.len; ++i) {
+    for (size_t i = 0; i < innerTbl_.len(); ++i) {
         if (innerTbl_.cols[i].dataName == innerColumn_) {
             innerIdx = i;
             break;
         }
     }
-    if (outerIdx >= outerTbl_.len || innerIdx >= innerTbl_.len) return false;
+    if (outerIdx >= outerTbl_.len() || innerIdx >= innerTbl_.len()) return false;
     if (!inner_->open()) return false;
 
     std::unordered_set<std::string> innerKeys;
@@ -6675,7 +6675,7 @@ bool SemiJoinOp::next(std::string& outRow) {
     if (origin.engine && origin.rid > 0) {
         StorageEngine::bindNullRow(
             origin.engine, origin.dbname, origin.tablename, origin.rid,
-            outerTbl_.len);
+            outerTbl_.len());
     } else {
         StorageEngine::unbindNullRow();
     }
@@ -6708,21 +6708,21 @@ void SemiJoinOp::close() {
 bool QuantifiedSubqueryFilterOp::open() {
     values_.clear();
 
-    size_t outerIdx = outerTbl_.len;
-    size_t innerIdx = innerTbl_.len;
-    for (size_t i = 0; i < outerTbl_.len; ++i) {
+    size_t outerIdx = outerTbl_.len();
+    size_t innerIdx = innerTbl_.len();
+    for (size_t i = 0; i < outerTbl_.len(); ++i) {
         if (outerTbl_.cols[i].dataName == outerColumn_) {
             outerIdx = i;
             break;
         }
     }
-    for (size_t i = 0; i < innerTbl_.len; ++i) {
+    for (size_t i = 0; i < innerTbl_.len(); ++i) {
         if (innerTbl_.cols[i].dataName == innerColumn_) {
             innerIdx = i;
             break;
         }
     }
-    if (outerIdx >= outerTbl_.len || innerIdx >= innerTbl_.len) return false;
+    if (outerIdx >= outerTbl_.len() || innerIdx >= innerTbl_.len()) return false;
     if (!inner_->open()) return false;
 
     std::string row;
@@ -6738,14 +6738,14 @@ bool QuantifiedSubqueryFilterOp::open() {
 
 bool QuantifiedSubqueryFilterOp::next(std::string& outRow) {
     NextInstrument rtInstr_(this);  // EXPLAIN ANALYZE per-node stats
-    size_t outerIdx = outerTbl_.len;
-    for (size_t i = 0; i < outerTbl_.len; ++i) {
+    size_t outerIdx = outerTbl_.len();
+    for (size_t i = 0; i < outerTbl_.len(); ++i) {
         if (outerTbl_.cols[i].dataName == outerColumn_) {
             outerIdx = i;
             break;
         }
     }
-    if (outerIdx >= outerTbl_.len) return false;
+    if (outerIdx >= outerTbl_.len()) return false;
 
     while (outer_->next(outRow)) {
         const std::string left = StorageEngine::extractColumnValueStatic(
@@ -6870,14 +6870,14 @@ bool ScalarSubqueryProjectOp::open() {
     lastCells_.clear();
     lastNulls_.clear();
 
-    size_t innerIdx = innerTbl_.len;
-    for (size_t i = 0; i < innerTbl_.len; ++i) {
+    size_t innerIdx = innerTbl_.len();
+    for (size_t i = 0; i < innerTbl_.len(); ++i) {
         if (innerTbl_.cols[i].dataName == innerColumn_) {
             innerIdx = i;
             break;
         }
     }
-    if (innerIdx >= innerTbl_.len) {
+    if (innerIdx >= innerTbl_.len()) {
         setError("scalar subquery column does not exist");
         return false;
     }
@@ -6940,14 +6940,14 @@ bool ScalarSubqueryProjectOp::next(std::string& outRow) {
             isNull = scalarIsNull_;
             value = isNull ? "NULL" : scalarValue_;
         } else {
-            size_t outerIdx = outerTbl_.len;
-            for (size_t i = 0; i < outerTbl_.len; ++i) {
+            size_t outerIdx = outerTbl_.len();
+            for (size_t i = 0; i < outerTbl_.len(); ++i) {
                 if (outerTbl_.cols[i].dataName == target.column) {
                     outerIdx = i;
                     break;
                 }
             }
-            if (outerIdx >= outerTbl_.len) {
+            if (outerIdx >= outerTbl_.len()) {
                 setError("scalar projection column does not exist");
                 return false;
             }
@@ -7017,7 +7017,7 @@ bool ProjectOp::next(std::string& outRow) {
     const auto origin = child_->scanOrigin();
     if (origin.engine && origin.rid > 0)
         StorageEngine::bindNullRow(origin.engine, origin.dbname, origin.tablename,
-                                  origin.rid, tbl_.len);
+                                  origin.rid, tbl_.len());
     if (decoded) {
         lastCells_ = std::move(projectedCells);
         lastNulls_ = std::move(projectedNulls);
@@ -7040,7 +7040,7 @@ bool ProjectOp::next(std::string& outRow) {
     // Nonnullable physical targets never ask the stored-NULL fallback. A
     // selected virtual target can still demand nullable physical inputs.
     const auto needsStoredNulls = [&] {
-        for (size_t i = 0; i < tbl_.len; ++i) {
+        for (size_t i = 0; i < tbl_.len(); ++i) {
             const auto& column = tbl_.cols[i];
             if ((column.isNull || column.generatedKind == 'v') &&
                 (selectCols_.empty() || selectCols_.count(column.dataName)))
@@ -7052,9 +7052,9 @@ bool ProjectOp::next(std::string& outRow) {
         if (typeid(*child_) != typeid(SortOp)) return nullptr;
         auto* sort = static_cast<SortOp*>(child_.get());
         const auto& source = sort->tbl_;
-        if (source.tablename != tbl_.tablename || source.len != tbl_.len ||
+        if (source.tablename != tbl_.tablename || source.len() != tbl_.len() ||
             source.formatVersion != tbl_.formatVersion) return nullptr;
-        for (size_t i = 0; i < tbl_.len; ++i) {
+        for (size_t i = 0; i < tbl_.len(); ++i) {
             const auto& a = source.cols[i];
             const auto& b = tbl_.cols[i];
             if (a.dataName != b.dataName || a.dataType != b.dataType ||
@@ -7073,17 +7073,17 @@ bool ProjectOp::next(std::string& outRow) {
         tbl_.formatVersion == DATA_FILE_FORMAT_VERSION &&
         needsStoredNulls() &&
         physicalScan->lastStoredNullBitmap(storedNulls) &&
-        storedNulls.size() == tbl_.len) {
+        storedNulls.size() == tbl_.len()) {
         storedNullOwner.emplace(tbl_, storedNulls);
     } else if (!physicalScan && origin.engine && !origin.dbname.empty() &&
                origin.rid > 0 && origin.tablename == tbl_.tablename &&
                tbl_.formatVersion == DATA_FILE_FORMAT_VERSION && needsStoredNulls()) {
         if (auto* sort = matchingSort(); sort &&
-            sort->lastStoredNullBitmap(storedNulls) && storedNulls.size() == tbl_.len)
+            sort->lastStoredNullBitmap(storedNulls) && storedNulls.size() == tbl_.len())
             storedNullOwner.emplace(tbl_, storedNulls);
     }
     outRow.clear();
-    for (size_t i = 0; i < tbl_.len; ++i) {
+    for (size_t i = 0; i < tbl_.len(); ++i) {
         if (!selectCols_.empty() && !selectCols_.count(tbl_.cols[i].dataName))
             continue;
         bool computedNull = false;
@@ -7115,9 +7115,9 @@ bool ProjectOp::lastStructuredRow(std::vector<std::string>& cells,
 
 bool ProjectOp::storedOutputRoles(std::vector<StoredReferenceOutputRole>& roles) const {
     roles.clear();
-    if (typeid(*this) != typeid(ProjectOp) || tbl_.len > MAX_COLUMNS) return false;
+    if (typeid(*this) != typeid(ProjectOp) || tbl_.len() > MAX_COLUMNS) return false;
     bool references = false;
-    for (size_t i = 0; i < tbl_.len; ++i) {
+    for (size_t i = 0; i < tbl_.len(); ++i) {
         const auto& column = tbl_.cols[i];
         if (!selectCols_.empty() && !selectCols_.count(column.dataName)) continue;
         if (storedReferenceOutputRoleForColumn(column).kind != StoredReferenceOutputRole::Kind::None) {
@@ -7128,8 +7128,8 @@ bool ProjectOp::storedOutputRoles(std::vector<StoredReferenceOutputRole>& roles)
     // Primitive-only projections retain their existing allocation path.
     if (!references) return false;
     std::vector<StoredReferenceOutputRole> result;
-    result.reserve(selectCols_.empty() ? tbl_.len : selectCols_.size());
-    for (size_t i = 0; i < tbl_.len; ++i) {
+    result.reserve(selectCols_.empty() ? tbl_.len() : selectCols_.size());
+    for (size_t i = 0; i < tbl_.len(); ++i) {
         const auto& column = tbl_.cols[i];
         if (!selectCols_.empty() && !selectCols_.count(column.dataName)) continue;
         result.push_back(storedReferenceOutputRoleForColumn(column));
@@ -7143,7 +7143,7 @@ bool ProjectOp::lastTypedRowKey(std::string& key) const {
     if (!lastRowAvailable_ || lastCells_.size() != lastNulls_.size()) return false;
     key.clear();
     size_t projected = 0;
-    for (size_t i = 0; i < tbl_.len; ++i) {
+    for (size_t i = 0; i < tbl_.len(); ++i) {
         if (!selectCols_.empty() && !selectCols_.count(tbl_.cols[i].dataName)) continue;
         if (projected >= lastCells_.size()) return false;
         key += StorageEngine::groupingValueKey(
@@ -7173,10 +7173,10 @@ struct WindowInputRow {
 };
 
 static size_t sortColIndex(const TableSchema& tbl, const std::string& name) {
-    for (size_t i = 0; i < tbl.len; ++i) {
+    for (size_t i = 0; i < tbl.len(); ++i) {
         if (tbl.cols[i].dataName == name) return i;
     }
-    return tbl.len;
+    return tbl.len();
 }
 
 // PG float8 output: shortest representation that round-trips
@@ -7292,10 +7292,10 @@ static int compareWindowCell(const std::string& left, bool leftIsNull,
 }
 
 static size_t windowColumnIndex(const TableSchema& tbl, const std::string& name) {
-    for (size_t i = 0; i < tbl.len; ++i) {
+    for (size_t i = 0; i < tbl.len(); ++i) {
         if (tbl.cols[i].dataName == name) return i;
     }
-    return tbl.len;
+    return tbl.len();
 }
 
 static int compareDeclaredWindowCell(const Column& column,
@@ -7325,7 +7325,7 @@ static bool sameWindowPeer(const WindowInputRow& left,
                            const WindowInputRow& right,
     size_t orderColumn,
     const TableSchema& schema) {
-    return orderColumn >= schema.len ||
+    return orderColumn >= schema.len() ||
            compareDeclaredWindowCell(schema.cols[orderColumn], left.values[orderColumn], left.nulls[orderColumn],
                              right.values[orderColumn], right.nulls[orderColumn]) == 0;
 }
@@ -7386,9 +7386,9 @@ bool WindowOp::open() {
     while (child_->next(raw)) {
         WindowInputRow row;
         row.raw = std::move(raw);
-        row.values.reserve(tbl_.len);
-        row.nulls.reserve(tbl_.len);
-        for (size_t i = 0; i < tbl_.len; ++i) {
+        row.values.reserve(tbl_.len());
+        row.nulls.reserve(tbl_.len());
+        for (size_t i = 0; i < tbl_.len(); ++i) {
             row.values.push_back(StorageEngine::extractColumnValueStatic(row.raw, tbl_, i));
             row.nulls.push_back(child_->lastColumnIsNull(i));
         }
@@ -7406,27 +7406,27 @@ bool WindowOp::open() {
         std::vector<size_t> partitionColumns;
         for (const auto& name : function.partitionBy) {
             const size_t column = windowColumnIndex(tbl_, name);
-            if (column >= tbl_.len) return false;
+            if (column >= tbl_.len()) return false;
             partitionColumns.push_back(column);
         }
         const size_t orderColumn = function.orderBy.empty()
-            ? tbl_.len : windowColumnIndex(tbl_, function.orderBy);
-        if (!function.orderBy.empty() && orderColumn >= tbl_.len) return false;
+            ? tbl_.len() : windowColumnIndex(tbl_, function.orderBy);
+        if (!function.orderBy.empty() && orderColumn >= tbl_.len()) return false;
 
         const size_t argumentColumn = (function.argument.empty() || function.argument == "*")
-            ? tbl_.len : windowColumnIndex(tbl_, function.argument);
+            ? tbl_.len() : windowColumnIndex(tbl_, function.argument);
         // Boolean aggregates accept comparison expressions ("v > 5") as
         // arguments; evaluated per row instead of a direct column read.
         const bool boolAggWithExpr =
             (function.name == "bool_and" || function.name == "bool_or" || function.name == "every") &&
-            argumentColumn >= tbl_.len && !function.argument.empty() &&
+            argumentColumn >= tbl_.len() && !function.argument.empty() &&
             function.argument != "*";
         const bool argumentRequired = function.name == "lag" || function.name == "lead" ||
             function.name == "sum" || function.name == "avg" || function.name == "min" ||
             function.name == "max" || function.name == "first_value" ||
             function.name == "last_value" || function.name == "bool_and" ||
             function.name == "bool_or" || function.name == "every";
-        if (argumentRequired && argumentColumn >= tbl_.len && !boolAggWithExpr) return false;
+        if (argumentRequired && argumentColumn >= tbl_.len() && !boolAggWithExpr) return false;
 
         std::vector<size_t> order(input.size());
         for (size_t i = 0; i < order.size(); ++i) order[i] = i;
@@ -7439,7 +7439,7 @@ bool WindowOp::open() {
                     rightRow.values[column], rightRow.nulls[column]);
                 if (cmp != 0) return cmp < 0;
             }
-            if (orderColumn < tbl_.len) {
+            if (orderColumn < tbl_.len()) {
                 const bool leftNull=leftRow.nulls[orderColumn];
                 const bool rightNull=rightRow.nulls[orderColumn];
                 if (leftNull!=rightNull) {
@@ -7511,13 +7511,13 @@ bool WindowOp::open() {
                 return function.preparedFrame.bounds(position,partitionStart,partitionEnd,
                     [&](size_t row){return std::make_pair(groupStartAt[row],groupEndAt[row]);},
                     [&](size_t row){
-                        if(orderColumn>=tbl_.len)throw DbError("XX000","RANGE frame has no ORDER BY key");
+                        if(orderColumn>=tbl_.len())throw DbError("XX000","RANGE frame has no ORDER BY key");
                         return ExprValue(tbl_.cols[orderColumn].dataType,input[order[row]].values[orderColumn],
                             input[order[row]].nulls[orderColumn]);
                     },function.orderAscending,function.hasExplicitOrderNulls?function.orderByNullsFirst:!function.orderAscending);
             }
             if (!function.hasFrame) {
-                if (orderColumn < tbl_.len) return {partitionStart, groupEndAt[position]};
+                if (orderColumn < tbl_.len()) return {partitionStart, groupEndAt[position]};
                 return {partitionStart, partitionEnd};
             }
             if (function.frameType == WindowFunctionSpec::FrameType::GROUPS) {
@@ -7542,7 +7542,7 @@ bool WindowOp::open() {
                 return {begin, end};
             }
             if (function.frameType == WindowFunctionSpec::FrameType::RANGE &&
-                orderColumn < tbl_.len) {
+                orderColumn < tbl_.len()) {
                 double currentKey = 0.0;
                 if (!parseWindowNumber(input[order[position]].values[orderColumn], currentKey)) {
                     // NULL current row: PG treats the RANGE frame end as the
@@ -7730,9 +7730,9 @@ bool WindowOp::open() {
                         auto flushTok = [&]() {
                             if (token.empty()) return;
                             size_t ci3 = 0;
-                            for (; ci3 < tbl_.len; ++ci3)
+                            for (; ci3 < tbl_.len(); ++ci3)
                                 if (tbl_.cols[ci3].dataName == token) break;
-                            if (ci3 < tbl_.len) { synth += rowVals[ci3]; token.clear(); return; }
+                            if (ci3 < tbl_.len()) { synth += rowVals[ci3]; token.clear(); return; }
                             synth += token;
                             token.clear();
                         };
@@ -7873,11 +7873,11 @@ bool WindowOp::open() {
     // rows ordered by the window PARTITION BY then ORDER BY when
     // the query itself has no outer ORDER BY.
     std::vector<size_t> finalPartitionColumns;
-    size_t finalOrderColumn = tbl_.len;
+    size_t finalOrderColumn = tbl_.len();
     if (finalOrderBy_.empty() && !functions_.empty()) {
         for (const auto& pc : functions_.front().partitionBy) {
             const size_t c = windowColumnIndex(tbl_, pc);
-            if (c < tbl_.len) finalPartitionColumns.push_back(c);
+            if (c < tbl_.len()) finalPartitionColumns.push_back(c);
         }
         if (!functions_.front().orderBy.empty()) {
             finalOrderColumn = windowColumnIndex(tbl_, functions_.front().orderBy);
@@ -7889,7 +7889,7 @@ bool WindowOp::open() {
         finalOrderColumn = windowColumnIndex(tbl_, finalOrderBy_);
     }
     finalOrderAscending_ = finalAsc;
-    if (!finalOrderBy_.empty() && finalOrderColumn >= tbl_.len) return false;
+    if (!finalOrderBy_.empty() && finalOrderColumn >= tbl_.len()) return false;
     for (size_t rowIndex = 0; rowIndex < input.size(); ++rowIndex) {
         std::string line;
         std::vector<std::string> cells;
@@ -7906,7 +7906,7 @@ bool WindowOp::open() {
                 isNull = computedNulls[rowIndex][target.windowIndex];
             } else {
                 const size_t column = windowColumnIndex(tbl_, target.column);
-                if (column >= tbl_.len) return false;
+                if (column >= tbl_.len()) return false;
                 value = input[rowIndex].values[column];
                 isNull = input[rowIndex].nulls[column];
             }
@@ -7919,7 +7919,7 @@ bool WindowOp::open() {
         row.text = std::move(line);
         row.cells = std::move(cells);
         row.nulls = std::move(nulls);
-        if (finalOrderColumn < tbl_.len) {
+        if (finalOrderColumn < tbl_.len()) {
             row.sortKey = input[rowIndex].values[finalOrderColumn];
             row.sortKeyNull = input[rowIndex].nulls[finalOrderColumn];
         }
@@ -7927,7 +7927,7 @@ bool WindowOp::open() {
         row.keyNulls = input[rowIndex].nulls;
         output.push_back(std::move(row));
     }
-    if (finalOrderColumn < tbl_.len || !finalPartitionColumns.empty()) {
+    if (finalOrderColumn < tbl_.len() || !finalPartitionColumns.empty()) {
         interruptibleStableSort(output.begin(), output.end(), [&](const OutputRow& left, const OutputRow& right) {
             for (size_t column : finalPartitionColumns) {
                 const int cmp = compareDeclaredWindowCell(tbl_.cols[column],
@@ -7935,7 +7935,7 @@ bool WindowOp::open() {
                     right.keys[column], right.keyNulls[column]);
                 if (cmp != 0) return cmp < 0;
             }
-            if (finalOrderColumn >= tbl_.len) return false;
+            if (finalOrderColumn >= tbl_.len()) return false;
             if (left.sortKeyNull!=right.sortKeyNull)
                 return left.sortKeyNull==finalOrderNullsFirst_;
             const int cmp = compareDeclaredWindowCell(tbl_.cols[finalOrderColumn],
@@ -8033,7 +8033,7 @@ struct SortOp::State {
     State(const TableSchema& schema, size_t ordinal, bool asc, bool first)
         : budget(sortWorkMemBytes()),
           bufferSize(std::max<size_t>(64, std::min<size_t>(65536, budget / 16))),
-          nullBytes((schema.len + 7) / 8), haveColumn(ordinal < schema.len),
+          nullBytes((schema.len() + 7) / 8), haveColumn(ordinal < schema.len()),
           ascending(asc), nullsFirst(first),
           callerNullBinding(StorageEngine::captureNullRowBinding()) {
         if (haveColumn) column = schema.cols[ordinal];
@@ -8270,8 +8270,8 @@ SortOp::~SortOp() { try { close(); } catch (...) {} }
 bool SortOp::open() {
     OpenInstrument startup(this);
     close(); clearError();
-    size_t sortIndex = tbl_.len;
-    for (size_t i = 0; i < tbl_.len; ++i)
+    size_t sortIndex = tbl_.len();
+    for (size_t i = 0; i < tbl_.len(); ++i)
         if (tbl_.cols[i].dataName == orderByCol_) { sortIndex = i; break; }
     state_ = std::make_unique<State>(tbl_,sortIndex,asc_,nullsFirst_);
     try {
@@ -8286,18 +8286,18 @@ bool SortOp::open() {
             checkForQueryInterrupt();
             State::Row row; row.raw = std::move(raw); row.origin = child_->scanOrigin();
             if (!row.origin.engine) StorageEngine::unbindNullRow();
-            else StorageEngine::bindNullRow(row.origin.engine,row.origin.dbname,row.origin.tablename,row.origin.rid,tbl_.len);
+            else StorageEngine::bindNullRow(row.origin.engine,row.origin.dbname,row.origin.tablename,row.origin.rid,tbl_.len());
             std::vector<bool> nulls;
-            if (!child_->lastStoredNullBitmap(nulls) || nulls.size() != tbl_.len) {
-                nulls.assign(tbl_.len,false);
-                for (size_t i = 0; i < tbl_.len; ++i)
+            if (!child_->lastStoredNullBitmap(nulls) || nulls.size() != tbl_.len()) {
+                nulls.assign(tbl_.len(),false);
+                for (size_t i = 0; i < tbl_.len(); ++i)
                     nulls[i] = row.origin.engine ? child_->lastColumnIsNull(i) :
                         child_->lastColumnIsNull(i) || rawColumnIsNull(row.raw,tbl_,i);
             }
             row.nulls.assign(state_->nullBytes,'\0');
             for (size_t i = 0; i < nulls.size(); ++i)
                 if (nulls[i]) row.nulls[i/8] |= static_cast<char>(1U << (i%8));
-            if (sortIndex < tbl_.len) {
+            if (sortIndex < tbl_.len()) {
                 row.isNull = nulls[sortIndex];
                 state_->key(row,StorageEngine::extractColumnValueStatic(row.raw,tbl_,sortIndex));
             }
@@ -8326,11 +8326,11 @@ bool SortOp::next(std::string& outRow) {
     checkForQueryInterrupt();
     State::Row row;
     if (!state_ || !state_->next(row)) return false;
-    lastOrigin_ = std::move(row.origin); lastNulls_.assign(tbl_.len,false);
-    for (size_t i = 0; i < tbl_.len; ++i)
+    lastOrigin_ = std::move(row.origin); lastNulls_.assign(tbl_.len(),false);
+    for (size_t i = 0; i < tbl_.len(); ++i)
         lastNulls_[i] = (static_cast<unsigned char>(row.nulls[i/8]) & (1U << (i%8))) != 0;
     if (lastOrigin_.engine && lastOrigin_.rid > 0)
-        StorageEngine::bindNullRow(lastOrigin_.engine,lastOrigin_.dbname,lastOrigin_.tablename,lastOrigin_.rid,tbl_.len);
+        StorageEngine::bindNullRow(lastOrigin_.engine,lastOrigin_.dbname,lastOrigin_.tablename,lastOrigin_.rid,tbl_.len());
     else StorageEngine::unbindNullRow();
     outRow = std::move(row.raw); rowAvailable_ = true; instrumentation.emitted = true;
     return true;
@@ -8572,10 +8572,10 @@ void SetOperationOp::close() {
 
 static size_t findJoinColumnIndex(const TableSchema& tbl,
                                   const std::string& colName) {
-    for (size_t i = 0; i < tbl.len; ++i) {
+    for (size_t i = 0; i < tbl.len(); ++i) {
         if (tbl.cols[i].dataName == colName) return i;
     }
-    return tbl.len;
+    return tbl.len();
 }
 
 NestedLoopJoinOp::NestedLoopJoinOp(StorageEngine* engine, const std::string& dbname,
@@ -8594,7 +8594,7 @@ bool NestedLoopJoinOp::open() {
     rightTbl_ = engine_->getTableSchema(dbname_, rightTable_);
     leftColIdx_ = findJoinColumnIndex(leftTbl_, leftCol_);
     rightColIdx_ = findJoinColumnIndex(rightTbl_, rightCol_);
-    if (leftColIdx_ >= leftTbl_.len || rightColIdx_ >= rightTbl_.len) {
+    if (leftColIdx_ >= leftTbl_.len() || rightColIdx_ >= rightTbl_.len()) {
         setError("nested-loop join column does not exist");
         return false;
     }
@@ -8642,7 +8642,7 @@ void NestedLoopJoinOp::close() {
 // ========================================================================
 static std::string extractJoinKey(const std::string& row, const TableSchema& tbl, const std::string& colName) {
     size_t colIdx = findJoinColumnIndex(tbl, colName);
-    if (colIdx >= tbl.len) return "";
+    if (colIdx >= tbl.len()) return "";
     return StorageEngine::extractColumnValueStatic(row, tbl, colIdx);
 }
 
@@ -8664,7 +8664,7 @@ bool HashJoinOp::open() {
     rightTbl_ = engine_->getTableSchema(dbname_, rightTable_);
     leftColIdx_ = findJoinColumnIndex(leftTbl_, leftCol_);
     rightColIdx_ = findJoinColumnIndex(rightTbl_, rightCol_);
-    if (leftColIdx_ >= leftTbl_.len || rightColIdx_ >= rightTbl_.len) {
+    if (leftColIdx_ >= leftTbl_.len() || rightColIdx_ >= rightTbl_.len()) {
         setError("hash join column does not exist");
         return false;
     }
@@ -8737,9 +8737,9 @@ static std::string collectionAggregate(
         bool passes = true;
         for (const auto& filter : filters) {
             size_t column = 0;
-            while (column < table.len && table.cols[column].dataName != filter.colName)
+            while (column < table.len() && table.cols[column].dataName != filter.colName)
                 ++column;
-            const bool isNull = column < table.len && row.nulls[column];
+            const bool isNull = column < table.len() && row.nulls[column];
             const bool matched = filter.op == "isnull" ? isNull :
                 filter.op == "isnotnull" ? !isNull :
                 !isNull && StorageEngine::evalConditionOnRow(filter, row.raw, table);
@@ -8750,7 +8750,7 @@ static std::string collectionAggregate(
         }
         if (!passes) continue;
         RowContext context;
-        for (size_t i = 0; i < table.len; ++i) {
+        for (size_t i = 0; i < table.len(); ++i) {
             const ExprValue value(table.cols[i].dataType, row.values[i], row.nulls[i]);
             context.set(table.cols[i].dataName, value);
             context.set(table.tablename + "." + table.cols[i].dataName, value);
@@ -8879,7 +8879,7 @@ static std::vector<std::vector<ExprValue>> materializeGroupingKeys(
     result.reserve(input.size());
     for (const auto& row : input) {
         RowContext context;
-        for (size_t i = 0; i < table.len; ++i) {
+        for (size_t i = 0; i < table.len(); ++i) {
             const ExprValue value(table.cols[i].dataType, row.values[i], row.nulls[i]);
             context.set(table.cols[i].dataName, value);
             context.set(table.tablename + "." + table.cols[i].dataName, value);
@@ -8909,7 +8909,7 @@ static std::string encodeGroupingKey(const ExprValue& value) {
 // ParallelGroupAggregateOp
 // ========================================================================
 static bool exactAggregateColumn(const TableSchema& table, size_t index) {
-    if (index >= table.len || table.cols[index].isArray) return false;
+    if (index >= table.len() || table.cols[index].isArray) return false;
     const auto* type = TypeRegistry::instance().findType(table.cols[index].dataType);
     if (!type) return false;
     const std::string& name = type->canonicalName;
@@ -8947,8 +8947,8 @@ bool ParallelGroupAggregateOp::open() try {
     while (child_->next(raw)) {
         InputRow row;
         row.raw = std::move(raw);
-        row.values.reserve(tbl_.len);
-        for (size_t i = 0; i < tbl_.len; ++i) {
+        row.values.reserve(tbl_.len());
+        for (size_t i = 0; i < tbl_.len(); ++i) {
             row.values.push_back(StorageEngine::extractColumnValueStatic(row.raw, tbl_, i));
             row.nulls.push_back(child_->lastColumnIsNull(i));
         }
@@ -8958,10 +8958,10 @@ bool ParallelGroupAggregateOp::open() try {
     child_->close();
 
     auto columnIndex = [&](const std::string& name) {
-        for (size_t i = 0; i < tbl_.len; ++i) {
+        for (size_t i = 0; i < tbl_.len(); ++i) {
             if (tbl_.cols[i].dataName == name) return i;
         }
-        return tbl_.len;
+        return tbl_.len();
     };
     const auto groupingKeys = materializeGroupingKeys(tbl_, input, groupByCols_);
     const auto groupKeyValue = [&](size_t rowId, size_t keyPos) -> const ExprValue& {
@@ -9062,14 +9062,14 @@ bool ParallelGroupAggregateOp::open() try {
         const bool distinct = func == "count" && item.arg.size() > 9 &&
             item.arg.substr(0, 9) == "distinct ";
         std::string arg = distinct ? item.arg.substr(9) : item.arg;
-        const size_t argIndex = arg == "*" ? tbl_.len : columnIndex(arg);
+        const size_t argIndex = arg == "*" ? tbl_.len() : columnIndex(arg);
         std::optional<aggregate_type_detail::BooleanArgument> booleanArgument;
-        if (argIndex >= tbl_.len && arg != "*" && !arg.empty() &&
+        if (argIndex >= tbl_.len() && arg != "*" && !arg.empty() &&
             (func == "bool_and" || func == "bool_or" || func == "every"))
             booleanArgument.emplace(tbl_, expressionOrigin.engine, expressionOrigin.dbname, arg);
         // Aggregate over an arithmetic expression ("sum(amt * 2)"): resolve
         // operands per row when the arg is not a bare column.
-        const bool argIsExpr = argIndex >= tbl_.len && arg != "*" &&
+        const bool argIsExpr = argIndex >= tbl_.len() && arg != "*" &&
             (func == "sum" || func == "avg" || func == "min" ||
              func == "max" || func == "count") && !arg.empty();
         auto exprVal = [&](const std::string& raw,
@@ -9079,7 +9079,7 @@ bool ParallelGroupAggregateOp::open() try {
             char pendingOp = 0;
             std::string token;
             auto resolve = [&](const std::string& tok) -> std::string {
-                for (size_t ci = 0; ci < tbl_.len; ++ci)
+                for (size_t ci = 0; ci < tbl_.len(); ++ci)
                     if (tbl_.cols[ci].dataName == tok) return rowVals[ci];
                 if (tok.size() >= 2 && tok.front() == '\'' && tok.back() == '\'')
                     return tok.substr(1, tok.size() - 2);
@@ -9140,7 +9140,7 @@ bool ParallelGroupAggregateOp::open() try {
         bool boolSeen = false;
         bool boolValue = func == "bool_and" || func == "every";
         std::optional<DeclaredAggregateLess> declaredOrder;
-        if ((func == "min" || func == "max") && argIndex < tbl_.len)
+        if ((func == "min" || func == "max") && argIndex < tbl_.len())
             declaredOrder.emplace(tbl_.cols[argIndex], aggregateComparator);
         for (size_t rowId : rowIds) {
             const auto& row = input[rowId];
@@ -9160,13 +9160,13 @@ bool ParallelGroupAggregateOp::open() try {
                 value = exprVal(arg, row.values);
                 valueIsNull = value.empty();
             } else {
-                value = argIndex < tbl_.len ? row.values[argIndex] : "";
+                value = argIndex < tbl_.len() ? row.values[argIndex] : "";
                 valueIsNull = argIndex < row.nulls.size() && row.nulls[argIndex];
             }
             if (func == "count") {
                 if (distinct) {
                     if (!valueIsNull)
-                        distinctValues.insert(argIndex < tbl_.len
+                        distinctValues.insert(argIndex < tbl_.len()
                             ? tbl_.columnIndexKey(tbl_.cols[argIndex].dataName, value)
                             : value);
                 } else if (arg == "*" || !valueIsNull) {
@@ -9346,7 +9346,7 @@ bool ParallelHashJoinOp::open() {
     rightTbl_ = engine_->getTableSchema(dbname_, rightTable_);
     leftColIdx_ = findJoinColumnIndex(leftTbl_, leftCol_);
     rightColIdx_ = findJoinColumnIndex(rightTbl_, rightCol_);
-    if (leftColIdx_ >= leftTbl_.len || rightColIdx_ >= rightTbl_.len) {
+    if (leftColIdx_ >= leftTbl_.len() || rightColIdx_ >= rightTbl_.len()) {
         setError("parallel hash join column does not exist");
         return false;
     }
@@ -9500,8 +9500,8 @@ void ParallelHashJoinOp::close() {
 GatherMergeOp::GatherMergeOp(std::vector<OpPtr> children, const TableSchema& tbl,
                              const std::string& sortCol, bool asc)
     : children_(std::move(children)), tbl_(tbl), sortCol_(sortCol), asc_(asc) {
-    colIdx_ = tbl_.len;
-    for (size_t i = 0; i < tbl_.len; ++i) {
+    colIdx_ = tbl_.len();
+    for (size_t i = 0; i < tbl_.len(); ++i) {
         if (tbl_.cols[i].dataName == sortCol_) { colIdx_ = i; break; }
     }
 }
@@ -9624,7 +9624,7 @@ bool MergeJoinOp::open() {
     rightTbl_ = engine_->getTableSchema(dbname_, rightTable_);
     const size_t leftColIdx = findJoinColumnIndex(leftTbl_, leftCol_);
     const size_t rightColIdx = findJoinColumnIndex(rightTbl_, rightCol_);
-    if (leftColIdx >= leftTbl_.len || rightColIdx >= rightTbl_.len) {
+    if (leftColIdx >= leftTbl_.len() || rightColIdx >= rightTbl_.len()) {
         setError("merge join column does not exist");
         return false;
     }
@@ -9758,9 +9758,9 @@ bool GroupAggregateOp::open() try {
     while (child_->next(raw)) {
         InputRow row;
         row.raw = std::move(raw);
-        row.values.reserve(tbl_.len);
-        row.nulls.reserve(tbl_.len);
-        for (size_t i = 0; i < tbl_.len; ++i) {
+        row.values.reserve(tbl_.len());
+        row.nulls.reserve(tbl_.len());
+        for (size_t i = 0; i < tbl_.len(); ++i) {
             row.values.push_back(StorageEngine::extractColumnValueStatic(row.raw, tbl_, i));
             row.nulls.push_back(child_->lastColumnIsNull(i));
         }
@@ -9770,10 +9770,10 @@ bool GroupAggregateOp::open() try {
     child_->close();
 
     auto columnIndex = [&](const std::string& name) {
-        for (size_t i = 0; i < tbl_.len; ++i) {
+        for (size_t i = 0; i < tbl_.len(); ++i) {
             if (tbl_.cols[i].dataName == name) return i;
         }
-        return tbl_.len;
+        return tbl_.len();
     };
     // GROUP BY expressions: non-column keys are evaluated per row
     // (same semantics as GroupAggregateOp).
@@ -9831,10 +9831,10 @@ bool GroupAggregateOp::open() try {
         const bool distinct = func == "count" && item.arg.size() > 9 &&
             item.arg.substr(0, 9) == "distinct ";
         std::string arg = distinct ? item.arg.substr(9) : item.arg;
-        const size_t argIndex = arg == "*" ? tbl_.len : columnIndex(arg);
+        const size_t argIndex = arg == "*" ? tbl_.len() : columnIndex(arg);
         const auto filters = StorageEngine::parseConditions(item.filterConds);
         std::optional<aggregate_type_detail::BooleanArgument> booleanArgument;
-        if (argIndex >= tbl_.len && arg != "*" && !arg.empty() &&
+        if (argIndex >= tbl_.len() && arg != "*" && !arg.empty() &&
             (func == "bool_and" || func == "bool_or" || func == "every"))
             booleanArgument.emplace(tbl_, expressionOrigin.engine, expressionOrigin.dbname, arg);
         if (func == "string_agg" || func == "array_agg")
@@ -9851,7 +9851,7 @@ bool GroupAggregateOp::open() try {
         bool boolSeen = false;
         bool boolValue = func == "bool_and" || func == "every";
         std::optional<DeclaredAggregateLess> declaredOrder;
-        if ((func == "min" || func == "max") && argIndex < tbl_.len)
+        if ((func == "min" || func == "max") && argIndex < tbl_.len())
             declaredOrder.emplace(tbl_.cols[argIndex], aggregateComparator);
 
         for (size_t rowId : rowIds) {
@@ -9871,14 +9871,14 @@ bool GroupAggregateOp::open() try {
                 const auto evaluated = booleanArgument->evaluate(row);
                 value = evaluated.value; valueIsNull = evaluated.isNull;
             } else {
-                value = argIndex < tbl_.len ? row.values[argIndex] : std::string{};
-                valueIsNull = argIndex < tbl_.len
+                value = argIndex < tbl_.len() ? row.values[argIndex] : std::string{};
+                valueIsNull = argIndex < tbl_.len()
                     ? (argIndex < row.nulls.size() && row.nulls[argIndex]) : value.empty();
             }
             if (func == "count") {
                 if (distinct) {
                     if (!valueIsNull)
-                        distinctValues.insert(argIndex < tbl_.len
+                        distinctValues.insert(argIndex < tbl_.len()
                             ? tbl_.columnIndexKey(tbl_.cols[argIndex].dataName, value)
                             : value);
                 } else if (arg == "*") {
@@ -10152,8 +10152,8 @@ static bool canUseGiSTScan(PlanningRelationMetadata& relation) {
         // not an independent reason to replace the heap with a full index
         // traversal. Other useful conjuncts can still select this source.
         if (condition.op == ">=" && condition.value.empty()) {
-            const auto* end = relation.table.cols + relation.table.len;
-            const auto* key = std::find_if(relation.table.cols, end,
+            const auto end = relation.table.cols.end();
+            const auto key = std::find_if(relation.table.cols.begin(), end,
                 [&](const auto& c) { return c.dataName == condition.colName; });
             if (key != end && !key->isArray && key->domainName.empty() &&
                 key->enumValues.empty() && !key->collation.empty() &&
@@ -10277,7 +10277,7 @@ static std::optional<size_t> chooseEqualityIndexCondition(
     for(const auto position:candidates) {
         const auto& condition=context.conds[position];
         const Column* column=nullptr;
-        for(size_t i=0;i<table.len;++i)if(table.cols[i].dataName==condition.colName){column=&table.cols[i];break;}
+        for(size_t i=0;i<table.len();++i)if(table.cols[i].dataName==condition.colName){column=&table.cols[i];break;}
         if(!column)return fallback;
         double matches=rows>0?1.0:0;
         // A genuine single-column primary key already proves at most one
@@ -10370,7 +10370,7 @@ static OpPtr ordinaryBrinTableSource(StorageEngine* engine, const PlanContext& c
     Probe best; size_t bestPages = 0;
     for (const auto& probe : probes) {
         const Column* key = nullptr;
-        for (size_t i = 0; i < schema.len; ++i)
+        for (size_t i = 0; i < schema.len(); ++i)
             if (schema.cols[i].dataName == probe.column) { key = &schema.cols[i]; break; }
         if (!key || key->generatedKind || !key->domainName.empty() || !key->enumValues.empty()) continue;
         const bool nullTest = probe.op == "IS NULL" || probe.op == "IS NOT NULL";
@@ -10488,7 +10488,7 @@ OpPtr QueryPlanner::buildSelectPlan(StorageEngine* engine, const PlanContext& in
                 if (!column) { column = dynamic_cast<const ColumnRefExpr*>(equality->right.get()); input = equality->left.get(); }
                 if (column && column->schema.empty() && column->table.empty() &&
                     isSingleColumnPrimaryKey(table, column->column)) {
-                    for (size_t i = 0; i < table.len; ++i) {
+                    for (size_t i = 0; i < table.len(); ++i) {
                         const auto& key = table.cols[i];
                         const auto type = ExprHelper::canonicalResultTypeName(key.dataType);
                         if (key.dataName != column->column || key.isArray || key.generatedKind ||
@@ -10951,7 +10951,7 @@ OpPtr QueryPlanner::buildJoinPlan(StorageEngine* engine, const std::string& dbna
     if (!leftSchema) leftSchema = &loadedLeft.emplace(engine->getTableSchema(dbname, leftTable));
     if (!rightSchema) rightSchema = &loadedRight.emplace(engine->getTableSchema(dbname, rightTable));
     const auto hasPrimaryKey = [](const TableSchema& schema, const std::string& name) {
-        return std::any_of(schema.cols, schema.cols + schema.len, [&](const auto& column) {
+        return std::any_of(schema.cols.begin(), schema.cols.end(), [&](const auto& column) {
             return column.dataName == name && column.isPrimaryKey;
         });
     };
@@ -11081,7 +11081,7 @@ static double estimateSelectivity(const StorageEngine::Condition& cond,
             if(cond.op=="isnull")return typed->nullFraction;
             if(cond.op=="isnotnull")return 1.0-typed->nullFraction;
             const auto schema=engine->getTableSchema(dbname,tablename);
-            for(size_t i=0;i<schema.len;++i)if(schema.cols[i].dataName==cond.colName) {
+            for(size_t i=0;i<schema.len();++i)if(schema.cols[i].dataName==cond.colName) {
                 const auto probe=cond.referenceInputOid?std::to_string(*cond.referenceInputOid):cond.value;
                 if(const auto fraction=analyzedEqualityFraction(schema.cols[i],*typed,
                         plannerRowEstimate(engine,dbname,tablename),probe))
@@ -11136,7 +11136,7 @@ static double estimateSelectivity(const StorageEngine::Condition& cond,
         double rows = totalRows;
         const auto schema = engine->getTableSchema(dbname, tablename);
         const Column* column = nullptr;
-        for (size_t i = 0; i < schema.len; ++i) {
+        for (size_t i = 0; i < schema.len(); ++i) {
             if (schema.cols[i].dataName == cond.colName) {
                 column = &schema.cols[i];
                 break;
@@ -11293,7 +11293,7 @@ static double estimateEqualityIndexRows(StorageEngine* engine,const std::string&
     const double rows=plannerRowEstimate(engine,database,index.tableName());
     if(!isSingleColumnPrimaryKey(table,index.colName()))
         if(const auto typed=engine->getAnalyzedColumnStatistics(database,index.tableName(),index.colName()))
-            for(size_t i=0;i<table.len;++i)if(table.cols[i].dataName==index.colName()) {
+            for(size_t i=0;i<table.len();++i)if(table.cols[i].dataName==index.colName()) {
                 if(const auto fraction=analyzedEqualityFraction(table.cols[i],*typed,rows,index.value()))
                     return rows>0?std::max(1.0,rows**fraction):0;
                 break;
@@ -11302,7 +11302,7 @@ static double estimateEqualityIndexRows(StorageEngine* engine,const std::string&
     size_t analyzedRows=0;
     const bool analyzed=engine->tryGetTableRowCount(database,index.tableName(),analyzedRows);
     double fallback=index.colName().empty()?1.0:5.0;
-    for(size_t i=0;i<table.len;++i)if(table.cols[i].dataName==index.colName()) {
+    for(size_t i=0;i<table.len();++i)if(table.cols[i].dataName==index.colName()) {
         if(table.cols[i].isPrimaryKey)fallback=1.0;
         if(analyzed)if(const auto fraction=analyzedEqualityFraction(table.cols[i],statistics,analyzedRows,index.value()))
             return rows>0?std::max(1.0,rows**fraction):0;
@@ -12291,7 +12291,7 @@ static bool indexProvidesOrdering(StorageEngine* engine, const std::string& dbna
                                    const std::string& orderCol) {
     // Primary key index provides ordering on PK columns.
     TableSchema tbl = engine->getTableSchema(dbname, tablename);
-    for (size_t i = 0; i < tbl.len; ++i) {
+    for (size_t i = 0; i < tbl.len(); ++i) {
         if (tbl.cols[i].dataName == orderCol && tbl.cols[i].isPrimaryKey)
             return true;
     }

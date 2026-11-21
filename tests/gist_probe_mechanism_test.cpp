@@ -211,7 +211,7 @@ void verifyImage(const std::string& bytes, const std::vector<Actual>& rows) {
     std::cout << "GIST_PROBE_IMAGE bytes=" << bytes.size() << " entries=" << count << " empty=" << empty << " long=" << longKeys << '\n';
 }
 std::vector<Actual> heapOracle(const std::vector<Model>& model, bool print) {
-    const auto schema = g_engine.getTableSchema(database, table); require(schema.len == 4, "actual four-column source");
+    const auto schema = g_engine.getTableSchema(database, table); require(schema.len() == 4, "actual four-column source");
     auto cursor = g_engine.beginHeapScan(database, table, schema); HeapScanRow row;
     std::vector<Actual> result; std::set<int> ids; std::set<int64_t> rids;
     while (cursor->next(row)) {
@@ -279,7 +279,7 @@ int main() try {
     for (const auto& row : model) require(g_engine.insertRow(database, table, StorageEngine::SqlRow{{"id", std::to_string(row.id)}, {"k", row.key}, {"n", row.number}, {"pad", row.padding}}) == DBStatus::OK, "real physical insert");
     require(g_engine.commitTransaction() == DBStatus::OK, "actual durable seed commit");
     const auto rows = heapOracle(model, true); const auto schema = g_engine.getTableSchema(database, table);
-    require(schema.len == 4 && schema.cols[1].dataType == "text" && schema.cols[1].resolvedCollationIsBinary && !schema.cols[1].resolvedCollationUsesLocale, "actual C text, no forged type/owner");
+    require(schema.len() == 4 && schema.cols[1].dataType == "text" && schema.cols[1].resolvedCollationIsBinary && !schema.cols[1].resolvedCollationUsesLocale, "actual C text, no forged type/owner");
     auto* allocator = g_engine.getPageAllocator(database, table); require(allocator != nullptr, "actual target heap allocator");
     require(g_engine.createGiSTIndex(database, table, "k") == DBStatus::OK, "actual public GiST producer");
     const auto index = g_engine.dbPath(database) / "gist_cost_k.gist"; const auto original = readBytes(index); verifyImage(original, rows);

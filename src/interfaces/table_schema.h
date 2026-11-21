@@ -8,7 +8,8 @@
 
 namespace dbms {
 
-constexpr size_t MAX_COLUMNS = 30;
+constexpr size_t MAX_COLUMNS = 1600;
+constexpr size_t MAX_TABLE_FOREIGN_KEYS = 30;
 // PostgreSQL stores at most NAMEDATALEN-1 bytes for identifiers.  The
 // current format reserves the full 64-byte field (including the terminator)
 // so logical names are never silently truncated at the old 15-byte limit.
@@ -147,10 +148,11 @@ struct CheckConstraint {
 struct TableSchema {
     std::string tablename;
     std::string owner; // role that owns the relation; empty for engine-internal tables
-    Column cols[MAX_COLUMNS];
-    size_t len = 0;
-    ForeignKey fks[MAX_COLUMNS];
-    size_t fkLen = 0;
+    std::vector<Column> cols;
+    std::vector<ForeignKey> fks;
+
+    size_t len() const { return cols.size(); }
+    size_t fkLen() const { return fks.size(); }
 
     // Composite primary key column indices (empty = use single-column isPrimaryKey)
     std::vector<size_t> pkColIndices;
@@ -192,8 +194,8 @@ struct TableSchema {
     // preserved by a rename. Zero denotes a legacy name-only schema.
     uint64_t physicalRelationId = 0;
 
-    void append(const Column& ncol);
-    void appendFK(const ForeignKey& fk);
+    void append(Column column);
+    void appendFK(ForeignKey fk);
     void print() const;
     size_t rowSize() const;
 

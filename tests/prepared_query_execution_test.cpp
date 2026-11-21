@@ -14,7 +14,7 @@ int main() {
     const auto db = testDbPath(name);
     cleanupTestDb(name);
     assert(engine.createDatabase(db, "utf8") == DBStatus::OK);
-    TableSchema schema; schema.len = 3;
+    TableSchema schema; schema.cols.resize(3);
     schema.cols[0].dataName = "id"; schema.cols[0].dataType = "int"; schema.cols[0].dsize = 4;
     schema.cols[1].dataName = "ID"; schema.cols[1].dataType = "bigint"; schema.cols[1].dsize = 8;
     schema.cols[2].dataName = "payload"; schema.cols[2].dataType = "text"; schema.cols[2].dsize = 128;

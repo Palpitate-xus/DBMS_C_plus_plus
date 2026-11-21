@@ -46,7 +46,7 @@ int main() {
         assert(!g_engine.inTransaction());
     }
     TableSchema table;
-    table.len = 1;
+    table.cols.resize(1);
     table.cols[0].dataName = "id";
     table.cols[0].dataType = "int";
     table.cols[0].dsize = 4;

@@ -26,7 +26,7 @@ int main() {
     assert(!ddl.executeSql("CREATE TABLE t (n NUMERIC)", session));
 
     const dbms::TableSchema schema = g_engine.getTableSchema(db, "t");
-    assert(schema.len == 1);
+    assert(schema.len() == 1);
     assert(schema.cols[0].dataType == "numeric");
     assert(schema.cols[0].isVariableLength);
 

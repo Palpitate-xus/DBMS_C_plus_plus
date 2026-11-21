@@ -10,7 +10,7 @@ int main() {
     StorageEngine owner;
     const std::string db=testDbPath("ordinary_scalar_order_plan");
     assert(owner.createDatabase(db,"utf8")==DBStatus::OK);
-    TableSchema schema;schema.len=3;
+    TableSchema schema;schema.cols.resize(3);
     schema.cols[0].dataName="id";schema.cols[0].dataType="int";schema.cols[0].dsize=4;
     schema.cols[1]=schema.cols[0];schema.cols[1].dataName="ID";schema.cols[1].dataType="bigint";schema.cols[1].dsize=8;
     schema.cols[2].dataName="payload";schema.cols[2].dataType="text";schema.cols[2].dsize=64;schema.cols[2].isNull=true;

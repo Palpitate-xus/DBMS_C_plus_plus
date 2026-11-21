@@ -157,7 +157,7 @@ int main(int argc, char** argv) {
         const bool partition = schema.partitionType != dbms::TableSchema::PartitionType::None;
         if (!partition) assert(g_engine.beginTransaction(database) == dbms::DBStatus::OK);
         std::map<std::string, std::string> row{{"id", "29"}};
-        if (schema.len == 2) row["payload"] = "kept";
+        if (schema.len() == 2) row["payload"] = "kept";
         if (partition) {
             // The supported nontransactional partition writer uses a real
             // exec, not another live engine sharing the parent's caches.

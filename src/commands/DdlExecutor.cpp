@@ -657,7 +657,7 @@ bool inspectLikeSourceIndexes(const std::string& dbname,
          g_engine.getIndexMetadata(dbname, tableName)) {
         const Column* indexedColumn = nullptr;
         if (!metadata.isExpression) {
-            for (size_t column = 0; column < table.len; ++column) {
+            for (size_t column = 0; column < table.len(); ++column) {
                 if (table.cols[column].dataName == metadata.name) {
                     indexedColumn = &table.cols[column];
                     break;
@@ -698,7 +698,7 @@ bool tableConstraintExists(const std::string& dbname,
                            const std::string& constraintName) {
     if (!g_engine.tableExists(dbname, tableName)) return false;
     const auto table = g_engine.getTableSchema(dbname, tableName);
-    for (size_t i = 0; i < table.len; ++i) {
+    for (size_t i = 0; i < table.len(); ++i) {
         if (table.cols[i].checkConstraintName == constraintName) return true;
     }
     for (const auto& check : table.additionalCheckConstraints) {
@@ -707,7 +707,7 @@ bool tableConstraintExists(const std::string& dbname,
     for (const auto& name : table.uniqueConstraintNames) {
         if (name == constraintName) return true;
     }
-    for (size_t i = 0; i < table.fkLen; ++i) {
+    for (size_t i = 0; i < table.fkLen(); ++i) {
         if (table.fks[i].name == constraintName) return true;
     }
     const auto exclusions = g_engine.getExclusionConstraints(dbname, tableName);
@@ -720,7 +720,7 @@ bool checkConstraintExists(const std::string& dbname,
                            const std::string& constraintName) {
     if (!g_engine.tableExists(dbname, tableName)) return false;
     const auto table = g_engine.getTableSchema(dbname, tableName);
-    for (size_t i = 0; i < table.len; ++i) {
+    for (size_t i = 0; i < table.len(); ++i) {
         if (table.cols[i].checkConstraintName == constraintName) return true;
     }
     for (const auto& check : table.additionalCheckConstraints) {
@@ -1318,7 +1318,7 @@ using CatalogInheritanceColumns =
 
 static int16_t tableCheckConstraintCount(const TableSchema& table) {
     size_t count = 0;
-    for (size_t column = 0; column < table.len; ++column) {
+    for (size_t column = 0; column < table.len(); ++column) {
         if (!table.cols[column].checkExpr.empty()) ++count;
     }
     for (const auto& check : table.additionalCheckConstraints) {
@@ -1353,7 +1353,7 @@ static bool normalizeNamedCheckConstraints(TableSchema& table,
         return 0;
     };
 
-    for (size_t columnIndex = 0; columnIndex < table.len; ++columnIndex) {
+    for (size_t columnIndex = 0; columnIndex < table.len(); ++columnIndex) {
         Column& column = table.cols[columnIndex];
         if (column.checkExpr.empty()) continue;
         const int result = record(
@@ -1384,7 +1384,7 @@ static bool normalizeNamedCheckConstraints(TableSchema& table,
 
 static bool tableSchemaHasImplicitIndex(const TableSchema& table) {
     if (table.hasPrimaryKey()) return true;
-    for (size_t column = 0; column < table.len; ++column) {
+    for (size_t column = 0; column < table.len(); ++column) {
         if (table.cols[column].isUnique) return true;
     }
     return false;
@@ -1442,7 +1442,7 @@ static void registerTableInCatalog(CatalogManager& cat, const TableSchema& tbl,
     cls.relname = logicalName;
     cls.relnamespace = nspOid;
     cls.relkind = 'r';
-    cls.relnatts = static_cast<int16_t>(tbl.len);
+    cls.relnatts = static_cast<int16_t>(tbl.len());
     cls.relchecks = tableCheckConstraintCount(tbl);
     cls.relhasindex = tableSchemaHasImplicitIndex(tbl);
     cls.relhassubclass = tableSchemaHasPartitionChildren(tbl);
@@ -1453,7 +1453,7 @@ static void registerTableInCatalog(CatalogManager& cat, const TableSchema& tbl,
     }
     Oid classOid = cat.createClass(cls);
 
-    for (size_t i = 0; i < tbl.len; ++i) {
+    for (size_t i = 0; i < tbl.len(); ++i) {
         PgAttributeRow attribute = catalogAttributeForColumn(
             cat, classOid, nspOid, tbl.cols[i], i);
         if (declaredVarcharMods) {
@@ -1474,7 +1474,7 @@ static void registerTableInCatalog(CatalogManager& cat, const TableSchema& tbl,
         cat.addAttribute(attribute);
     }
 
-    for (size_t i = 0; i < tbl.fkLen; ++i) {
+    for (size_t i = 0; i < tbl.fkLen(); ++i) {
         PgDependRow dep;
         dep.classid = PgClassOid_Class;
         dep.objid = classOid;
@@ -1505,14 +1505,14 @@ static Oid registerMaterializedViewInCatalog(
     relation.relname = logicalName;
     relation.relnamespace = namespaceOid;
     relation.relkind = 'm';
-    relation.relnatts = static_cast<int16_t>(output.len);
+    relation.relnatts = static_cast<int16_t>(output.len());
     relation.relispopulated = populated;
     if (!output.owner.empty()) {
         const auto owner = authCatalog().getAuthIdByName(output.owner);
         if (owner) relation.relowner = owner->oid;
     }
     const Oid relationOid = catalog.createClass(relation);
-    for (size_t column = 0; column < output.len; ++column) {
+    for (size_t column = 0; column < output.len(); ++column) {
         catalog.addAttribute(catalogAttributeForColumn(
             catalog, relationOid, namespaceOid, output.cols[column],
             column));
@@ -1683,7 +1683,7 @@ static void synchronizeDefaultObjects(CatalogManager& catalog, const std::string
     const std::string& physicalName, Oid relationOid, const TableSchema& table,
     StorageEngine& engine, Session* session, const std::set<std::string>& declared = {}) {
     std::set<int16_t> present;
-    for (size_t i = 0; i < table.len; ++i) {
+    for (size_t i = 0; i < table.len(); ++i) {
         const auto& column = table.cols[i];
         const auto number = static_cast<int16_t>(i + 1);
         const bool generated = !column.generatedExpr.empty();
@@ -1757,12 +1757,12 @@ static bool synchronizeTableAttributesInCatalog(
 
         const TableSchema table =
             engine.getTableSchema(dbname, physicalTableName);
-        if (table.len == 0) return false;
+        if (table.len() == 0) return false;
         const std::vector<PgAttributeRow> previous =
             catalog.findUserAttributes(relationOid);
         std::vector<PgAttributeRow> replacement;
-        replacement.reserve(table.len);
-        for (size_t columnIndex = 0; columnIndex < table.len;
+        replacement.reserve(table.len());
+        for (size_t columnIndex = 0; columnIndex < table.len();
              ++columnIndex) {
             const Column& column = table.cols[columnIndex];
             const PgAttributeRow* retained = nullptr;
@@ -1972,7 +1972,7 @@ static bool updateInheritanceColumnsInCatalog(
         }
         const TableSchema parent =
             g_engine.getTableSchema(dbname, candidate);
-        for (size_t column = 0; column < parent.len; ++column) {
+        for (size_t column = 0; column < parent.len(); ++column) {
             ++directParentCounts[parent.cols[column].dataName];
         }
     }
@@ -1983,7 +1983,7 @@ static bool updateInheritanceColumnsInCatalog(
     if (!adding) {
         const TableSchema removedParent =
             g_engine.getTableSchema(dbname, physicalParentName);
-        for (size_t parentColumn = 0; parentColumn < removedParent.len;
+        for (size_t parentColumn = 0; parentColumn < removedParent.len();
              ++parentColumn) {
             const auto attribute = std::find_if(
                 attributes.begin(), attributes.end(),
@@ -2029,7 +2029,7 @@ static bool columnHasInheritanceParents(
                 }
                 const TableSchema parent =
                     g_engine.getTableSchema(dbname, candidate);
-                for (size_t column = 0; column < parent.len; ++column) {
+                for (size_t column = 0; column < parent.len(); ++column) {
                     if (parent.cols[column].dataName == columnName) {
                         inherited = true;
                         break;
@@ -2454,7 +2454,7 @@ static void dropColumnDependentViews(
     int32_t attribute, bool cascade, DdlTransaction& transaction);
 
 static bool generatedVirtualName(const TableSchema& table,const std::string& name) {
-    for(size_t i=0;i<table.len;++i)if(table.cols[i].dataName==name)return table.cols[i].generatedKind=='v';
+    for(size_t i=0;i<table.len();++i)if(table.cols[i].dataName==name)return table.cols[i].generatedKind=='v';
     return false;
 }
 static bool generatedVirtualReference(const Expr* expression,const TableSchema& table) {
@@ -2618,13 +2618,13 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                 std::vector<PendingIdentitySequence> addedIdentity;
                 if (column.identityKind != 0) {
                     const auto existing = g_engine.getTableSchema(s.currentDB, tableName);
-                    const auto duplicate = std::find_if(existing.cols, existing.cols + existing.len,
+                    const auto duplicate = std::find_if(existing.cols.begin(), existing.cols.end(),
                         [&](const Column& c) { return c.dataName == column.dataName; });
-                    if (duplicate != existing.cols + existing.len && sub.ifNotExists) {
+                    if (duplicate != existing.cols.end() && sub.ifNotExists) {
                         emitNotice("column already exists, skipping");
                         break;
                     }
-                    if (duplicate != existing.cols + existing.len)
+                    if (duplicate != existing.cols.end())
                         throw DbError("42701", "column already exists: " + column.dataName);
                     auto& catalog = g_engine.catalogService().get(s.currentDB);
                     const auto name = CatalogService::logicalName(tableName);
@@ -2731,7 +2731,7 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                     const TableSchema currentSchema =
                         g_engine.getTableSchema(s.currentDB, tableName);
                     bool columnExists = false;
-                    for (size_t i = 0; i < currentSchema.len; ++i) {
+                    for (size_t i = 0; i < currentSchema.len(); ++i) {
                         if (currentSchema.cols[i].dataName == sub.name) {
                             columnExists = true;
                             break;
@@ -2827,7 +2827,7 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                     const TableSchema currentSchema =
                         g_engine.getTableSchema(s.currentDB, tableName);
                     bool sourceColumnExists = false;
-                    for (size_t i = 0; i < currentSchema.len; ++i) {
+                    for (size_t i = 0; i < currentSchema.len(); ++i) {
                         if (currentSchema.cols[i].dataName == sub.name) {
                             sourceColumnExists = true;
                             break;
@@ -3027,9 +3027,9 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                 std::map<std::string, int32_t> declaredVarcharMods;
                 if (!sub.identityAction.empty()) {
                     const auto table = g_engine.getTableSchema(s.currentDB, tableName);
-                    auto found = std::find_if(table.cols, table.cols + table.len,
+                    auto found = std::find_if(table.cols.begin(), table.cols.end(),
                         [&](const Column& c) { return c.dataName == sub.name; });
-                    if (found == table.cols + table.len) {
+                    if (found == table.cols.end()) {
                         std::cout << "ERROR: " << DbError("42703", "column does not exist: " + sub.name).what() << std::endl;
                         return true;
                     }
@@ -3226,7 +3226,7 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                 const TableSchema table =
                     g_engine.getTableSchema(s.currentDB, tableName);
                 bool columnExists = false;
-                for (size_t column = 0; column < table.len; ++column) {
+                for (size_t column = 0; column < table.len(); ++column) {
                     if (table.cols[column].dataName == sub.name) {
                         columnExists = true;
                         break;
@@ -3544,7 +3544,7 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                     }
                     const auto table = g_engine.getTableSchema(s.currentDB, tableName);
                     bool nameExists = false;
-                    for (size_t i = 0; i < table.len && !nameExists; ++i) {
+                    for (size_t i = 0; i < table.len() && !nameExists; ++i) {
                         nameExists = table.cols[i].checkConstraintName == constraintName;
                     }
                     for (const auto& check : table.additionalCheckConstraints) {
@@ -3556,7 +3556,7 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                     for (const auto& name : table.uniqueConstraintNames) {
                         if (name == constraintName) { nameExists = true; break; }
                     }
-                    for (size_t i = 0; i < table.fkLen && !nameExists; ++i) {
+                    for (size_t i = 0; i < table.fkLen() && !nameExists; ++i) {
                         nameExists = table.fks[i].name == constraintName;
                     }
                     const auto exclusions = g_engine.getExclusionConstraints(s.currentDB, tableName);
@@ -3763,11 +3763,11 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                     const TableSchema parentSchema =
                         g_engine.getTableSchema(s.currentDB, parentName);
                     for (size_t parentColumn = 0;
-                         parentColumn < parentSchema.len; ++parentColumn) {
+                         parentColumn < parentSchema.len(); ++parentColumn) {
                         const Column& expected = parentSchema.cols[parentColumn];
                         const Column* actual = nullptr;
                         for (size_t childColumn = 0;
-                             childColumn < childSchema.len; ++childColumn) {
+                             childColumn < childSchema.len(); ++childColumn) {
                             if (childSchema.cols[childColumn].dataName ==
                                 expected.dataName) {
                                 actual = &childSchema.cols[childColumn];
@@ -3823,7 +3823,7 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                     const auto collectChecks = [](const TableSchema& table) {
                         std::vector<InheritableCheck> checks;
                         for (size_t columnIndex = 0;
-                             columnIndex < table.len; ++columnIndex) {
+                             columnIndex < table.len(); ++columnIndex) {
                             const Column& column = table.cols[columnIndex];
                             if (column.checkExpr.empty()) continue;
                             checks.push_back({
@@ -4535,7 +4535,7 @@ bool DdlExecutor::executeTruncate(const TruncateStmt* stmt, Session& s) {
             if (targets.count(candidate)) continue;
             const TableSchema table = g_engine.getTableSchema(s.currentDB, candidate);
             bool dependsOnTarget = false;
-            for (size_t i = 0; i < table.fkLen; ++i) {
+            for (size_t i = 0; i < table.fkLen(); ++i) {
                 if (targets.count(table.fks[i].refTable)) {
                     dependsOnTarget = true;
                     break;
@@ -4628,7 +4628,7 @@ bool DdlExecutor::executeTruncate(const TruncateStmt* stmt, Session& s) {
         }
         if (stmt->restartIdentity) {
             const TableSchema table = g_engine.getTableSchema(s.currentDB, name);
-            for (size_t i = 0; i < table.len; ++i) {
+            for (size_t i = 0; i < table.len(); ++i) {
                 if (table.cols[i].isAutoIncrement && table.cols[i].identitySequenceOid == 0) {
                     g_engine.resetSequence(s.currentDB, name, table.cols[i].dataName, 1);
                 }
@@ -4953,7 +4953,7 @@ SchemaNamespaceResult dropSchemaNamespace(StorageEngine& engine,
         if (!catalogTableStorageName(catalog, *relation, physical, error))
             return {DBStatus::CORRUPTED_DATA, error, {}};
         const auto table = engine.getTableSchema(database, physical);
-        if (attribute.attnum <= 0 || static_cast<size_t>(attribute.attnum) > table.len ||
+        if (attribute.attnum <= 0 || static_cast<size_t>(attribute.attnum) > table.len() ||
             table.cols[attribute.attnum - 1].dataName != attribute.attname)
             return {DBStatus::CORRUPTED_DATA, "dependent column has inconsistent physical ordinal", {}};
         columns.push_back({physical, attribute.attname, attribute.attrelid, attribute.attnum});
@@ -4974,7 +4974,7 @@ SchemaNamespaceResult dropSchemaNamespace(StorageEngine& engine,
             (registeredRelation != registeredRelations.end() && droppedRelations.count(registeredRelation->second)))
             continue;
         const auto table = engine.getTableSchema(database, physical);
-        for (size_t i = 0; i < table.len; ++i) {
+        for (size_t i = 0; i < table.len(); ++i) {
             const auto& column = table.cols[i];
             if (column.domainName.empty()) continue;
             CatalogManager::QualifiedName domain;
@@ -5732,14 +5732,14 @@ static bool executeCreateTableAs(const CreateTableStmt* stmt, Session& s,
 
     std::vector<size_t> selectedSourceColumns;
     if (selectCols.size() == 1 && selectCols[0] == "*") {
-        for (size_t i = 0; i < srcTbl.len; ++i) {
+        for (size_t i = 0; i < srcTbl.len(); ++i) {
             newTbl.append(makeColumnFromSource(srcTbl.cols[i], srcTbl.cols[i].dataName));
             selectedSourceColumns.push_back(i);
         }
     } else {
         for (const auto& cname : selectCols) {
             bool found = false;
-            for (size_t i = 0; i < srcTbl.len; ++i) {
+            for (size_t i = 0; i < srcTbl.len(); ++i) {
                 if (toLower(srcTbl.cols[i].dataName) == cname) {
                     newTbl.append(makeColumnFromSource(srcTbl.cols[i], srcTbl.cols[i].dataName));
                     selectedSourceColumns.push_back(i);
@@ -5777,7 +5777,7 @@ static bool executeCreateTableAs(const CreateTableStmt* stmt, Session& s,
                 const int64_t rid =
                     StorageEngine::encodeRid(pageId, slotId);
                 StorageEngine::bindNullRow(
-                    &g_engine, s.currentDB, srcTable, rid, srcTbl.len);
+                    &g_engine, s.currentDB, srcTable, rid, srcTbl.len());
                 struct BindingGuard {
                     ~BindingGuard() { StorageEngine::unbindNullRow(); }
                 } bindingGuard;
@@ -5933,7 +5933,7 @@ static std::vector<std::pair<std::string, std::string>> findDefaultNextvalDeps(
         const auto relation = catalog.resolveRelationSnapshot(
             logical.name, {logical.schema.empty() ? "public" : logical.schema});
         dbms::TableSchema tbl = engine.getTableSchema(dbname, tname);
-        for (size_t i = 0; i < tbl.len; ++i) {
+        for (size_t i = 0; i < tbl.len(); ++i) {
             const auto attribute = relation
                 ? catalog.getAttribute(relation->oid, tbl.cols[i].dataName)
                 : std::nullopt;
@@ -6455,20 +6455,14 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
                 return true;
             }
         }
-        const size_t destinationOffset = tbl.len;
-        for (size_t i = 0; i < srcSchema.len; ++i) {
+        const size_t destinationOffset = tbl.len();
+        for (size_t i = 0; i < srcSchema.len(); ++i) {
             if (!locallyDeclaredColumnNames.insert(
                     srcSchema.cols[i].dataName).second) {
-                std::cout << "ERROR: column \""
-                          << srcSchema.cols[i].dataName
-                          << "\" specified more than once" << std::endl;
-                return true;
+                throw DbError("42701", "column \"" + srcSchema.cols[i].dataName + "\" specified more than once");
             }
-            if (tbl.len >= MAX_COLUMNS) {
-                std::cout << "ERROR: table cannot have more than "
-                          << MAX_COLUMNS << " columns" << std::endl;
-                return true;
-            }
+            if (tbl.len() >= MAX_COLUMNS)
+                throw DbError("54011", "tables can have at most " + std::to_string(MAX_COLUMNS) + " columns");
             Column c = srcSchema.cols[i];
             if (!lc.includingDefaults && c.defaultOrigin != Column::DefaultOrigin::Domain) {
                 c.defaultValue.clear();
@@ -6503,7 +6497,7 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
         if (lc.includingIndexes) {
             std::vector<size_t> sourcePrimaryKey = srcSchema.pkColIndices;
             if (sourcePrimaryKey.empty()) {
-                for (size_t i = 0; i < srcSchema.len; ++i) {
+                for (size_t i = 0; i < srcSchema.len(); ++i) {
                     if (srcSchema.cols[i].isPrimaryKey) {
                         sourcePrimaryKey.push_back(i);
                     }
@@ -6515,7 +6509,7 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
                 return true;
             }
             for (const size_t sourceIndex : sourcePrimaryKey) {
-                if (sourceIndex >= srcSchema.len) {
+                if (sourceIndex >= srcSchema.len()) {
                     std::cout << "ERROR: LIKE source has invalid primary key metadata"
                               << std::endl;
                     return true;
@@ -6529,7 +6523,7 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
                 std::vector<size_t> targetUnique;
                 targetUnique.reserve(sourceUnique.size());
                 for (const size_t sourceIndex : sourceUnique) {
-                    if (sourceIndex >= srcSchema.len) {
+                    if (sourceIndex >= srcSchema.len()) {
                         std::cout << "ERROR: LIKE source has invalid unique "
                                      "constraint metadata"
                                   << std::endl;
@@ -6556,9 +6550,7 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
     for (const auto& cd : stmt->columns) {
         if(system_attributes::reserved(cd.name))throw DbError("42701","column name conflicts with a system column: "+cd.name);
         if (!locallyDeclaredColumnNames.insert(cd.name).second) {
-            std::cout << "ERROR: column \"" << cd.name
-                      << "\" specified more than once" << std::endl;
-            return true;
+            throw DbError("42701", "column \"" + cd.name + "\" specified more than once");
         }
         Column column;
         std::string typeError;
@@ -6567,11 +6559,8 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
             std::cout << "Invalid column type: " << typeError << std::endl;
             return true;
         }
-        if (tbl.len >= MAX_COLUMNS) {
-            std::cout << "ERROR: table cannot have more than "
-                      << MAX_COLUMNS << " columns" << std::endl;
-            return true;
-        }
+        if (tbl.len() >= MAX_COLUMNS)
+            throw DbError("54011", "tables can have at most " + std::to_string(MAX_COLUMNS) + " columns");
         tbl.append(column);
         for (size_t checkIndex = 1; checkIndex < cd.checkExprs.size();
              ++checkIndex) {
@@ -6593,8 +6582,8 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
     if (!stmt->inherits.empty()) {
         const TableSchema localSchema = tbl;
         TableSchema merged = localSchema;
-        merged.len = 0;
-        merged.fkLen = 0;
+        merged.cols.clear();
+        merged.fks.clear();
         merged.pkColIndices.clear();
         merged.uniqueConstraints.clear();
         merged.uniqueConstraintNames.clear();
@@ -6604,13 +6593,13 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
         std::set<std::string> resolvedParents;
         std::set<std::string> inheritedColumnNames;
         std::set<std::string> localDefaultOverrides;
-        for (size_t i = 0; i < localSchema.len; ++i) {
+        for (size_t i = 0; i < localSchema.len(); ++i) {
             if (!localSchema.cols[i].defaultValue.empty()) {
                 localDefaultOverrides.insert(localSchema.cols[i].dataName);
             }
         }
         std::vector<size_t> localColumnMap(
-            localSchema.len, std::numeric_limits<size_t>::max());
+            localSchema.len(), std::numeric_limits<size_t>::max());
         std::string mergeError;
         const auto columnsHaveCompatibleTypes = [](const Column& left,
                                                    const Column& right) {
@@ -6716,7 +6705,7 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
             }
             inheritedParents.push_back(parent);
             TableSchema parentSchema = g_engine.getTableSchema(s.currentDB, parent);
-            for (size_t i = 0; i < parentSchema.len; ++i) {
+            for (size_t i = 0; i < parentSchema.len(); ++i) {
                 Column inherited = parentSchema.cols[i];
                 auto& provenance =
                     inheritanceCatalogColumns[inherited.dataName];
@@ -6740,12 +6729,9 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
                     }
                     continue;
                 }
-                if (merged.len >= MAX_COLUMNS) {
-                    std::cout << "ERROR: inherited table has too many columns"
-                              << std::endl;
-                    return true;
-                }
-                mergedColumns[inherited.dataName] = merged.len;
+                if (merged.len() >= MAX_COLUMNS)
+                    throw DbError("54011", "tables can have at most " + std::to_string(MAX_COLUMNS) + " columns");
+                mergedColumns[inherited.dataName] = merged.len();
                 merged.append(inherited);
             }
             merged.additionalCheckConstraints.insert(
@@ -6754,14 +6740,12 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
                 parentSchema.additionalCheckConstraints.end());
         }
 
-        for (size_t i = 0; i < localSchema.len; ++i) {
+        for (size_t i = 0; i < localSchema.len(); ++i) {
             const Column& local = localSchema.cols[i];
             const auto existing = mergedColumns.find(local.dataName);
             if (existing != mergedColumns.end()) {
                 if (inheritedColumnNames.count(local.dataName) == 0) {
-                    std::cout << "ERROR: column \"" << local.dataName
-                              << "\" specified more than once" << std::endl;
-                    return true;
+                    throw DbError("42701", "column \"" + local.dataName + "\" specified more than once");
                 }
                 if (!mergeColumn(
                         merged.cols[existing->second], local, true)) {
@@ -6771,13 +6755,10 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
                 localColumnMap[i] = existing->second;
                 continue;
             }
-            if (merged.len >= MAX_COLUMNS) {
-                std::cout << "ERROR: inherited table has too many columns"
-                          << std::endl;
-                return true;
-            }
-            localColumnMap[i] = merged.len;
-            mergedColumns[local.dataName] = merged.len;
+            if (merged.len() >= MAX_COLUMNS)
+                throw DbError("54011", "tables can have at most " + std::to_string(MAX_COLUMNS) + " columns");
+            localColumnMap[i] = merged.len();
+            mergedColumns[local.dataName] = merged.len();
             merged.append(local);
         }
         for (const size_t localIndex : localSchema.pkColIndices) {
@@ -6801,7 +6782,7 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
             merged.uniqueConstraints.push_back(std::move(remapped));
         }
         merged.uniqueConstraintNames = localSchema.uniqueConstraintNames;
-        for (size_t i = 0; i < localSchema.fkLen; ++i) {
+        for (size_t i = 0; i < localSchema.fkLen(); ++i) {
             merged.appendFK(localSchema.fks[i]);
         }
         merged.additionalCheckConstraints.insert(
@@ -6810,7 +6791,7 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
             localSchema.additionalCheckConstraints.end());
         // This is a new child heap: inherited SQL types need not inherit the
         // parent's physical units. Each parent's existing rows keep its codec.
-        for (size_t i = 0; i < merged.len; ++i) {
+        for (size_t i = 0; i < merged.len(); ++i) {
             auto& column = merged.cols[i];
             if (!column.isArray && (column.dataType == "time" ||
                 column.dataType == "timestamp" || column.dataType == "timestamptz")) {
@@ -6832,11 +6813,8 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
             return true;
         }
         for (const auto& f : ct.fields) {
-            if (tbl.len >= MAX_COLUMNS) {
-                std::cout << "ERROR: table cannot have more than "
-                          << MAX_COLUMNS << " columns" << std::endl;
-                return true;
-            }
+            if (tbl.len() >= MAX_COLUMNS)
+                throw DbError("54011", "tables can have at most " + std::to_string(MAX_COLUMNS) + " columns");
             ColumnDef cd;
             cd.name = f.first;
             cd.isNull = true;
@@ -6878,7 +6856,7 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
         else if (pt == "hash") tbl.partitionType = TableSchema::PartitionType::Hash;
     }
 
-    for(size_t i=0;i<tbl.len;++i)if(tbl.cols[i].generatedKind=='v' &&
+    for(size_t i=0;i<tbl.len();++i)if(tbl.cols[i].generatedKind=='v' &&
         (tbl.cols[i].isPrimaryKey || tbl.cols[i].isUnique))
         throw DbError("0A000","indexes on virtual generated columns are not supported");
 
@@ -6890,7 +6868,7 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
     if (hasPrimaryKeyDefinition) {
         std::set<size_t> representedPrimaryColumns(
             tbl.pkColIndices.begin(), tbl.pkColIndices.end());
-        for (size_t i = 0; i < tbl.len; ++i) {
+        for (size_t i = 0; i < tbl.len(); ++i) {
             if (tbl.cols[i].isPrimaryKey &&
                 representedPrimaryColumns.count(i) == 0) {
                 std::cout << "ERROR: multiple primary keys for table are not allowed"
@@ -6901,7 +6879,7 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
     }
     if (!hasPrimaryKeyDefinition) {
         size_t inlinePrimaryKeys = 0;
-        for (size_t i = 0; i < tbl.len; ++i) {
+        for (size_t i = 0; i < tbl.len(); ++i) {
             if (tbl.cols[i].isPrimaryKey) ++inlinePrimaryKeys;
         }
         if (inlinePrimaryKeys > 1) {
@@ -6939,14 +6917,14 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
             std::vector<size_t> primaryColumns;
             std::set<size_t> distinctColumns;
             for (const auto& cname : tc.columns) {
-                size_t columnIndex = tbl.len;
-                for (size_t i = 0; i < tbl.len; ++i) {
+                size_t columnIndex = tbl.len();
+                for (size_t i = 0; i < tbl.len(); ++i) {
                     if (tbl.cols[i].dataName == cname) {
                         columnIndex = i;
                         break;
                     }
                 }
-                if (columnIndex >= tbl.len) {
+                if (columnIndex >= tbl.len()) {
                     std::cout << "ERROR: PRIMARY KEY column \"" << cname
                               << "\" does not exist" << std::endl;
                     return true;
@@ -6974,14 +6952,14 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
             std::vector<size_t> idxs;
             std::set<size_t> distinctColumns;
             for (const auto& cname : tc.columns) {
-                size_t columnIndex = tbl.len;
-                for (size_t i = 0; i < tbl.len; ++i) {
+                size_t columnIndex = tbl.len();
+                for (size_t i = 0; i < tbl.len(); ++i) {
                     if (tbl.cols[i].dataName == cname) {
                         columnIndex = i;
                         break;
                     }
                 }
-                if (columnIndex >= tbl.len) {
+                if (columnIndex >= tbl.len()) {
                     std::cout << "ERROR: UNIQUE column \"" << cname
                               << "\" does not exist" << std::endl;
                     return true;
@@ -7016,7 +6994,7 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
             }
             tbl.appendFK(fk);
         } else if (t == "check") {
-            if (tbl.len == 0 || !tc.checkExpr) {
+            if (tbl.len() == 0 || !tc.checkExpr) {
                 std::cout << "ERROR: CHECK constraint requires an expression"
                           << std::endl;
                 return true;
@@ -7114,7 +7092,7 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
         return true;
     }
     std::vector<PendingIdentitySequence> identitySequences;
-    for (size_t i = 0; i < tbl.len; ++i) {
+    for (size_t i = 0; i < tbl.len(); ++i) {
         auto& column = tbl.cols[i];
         if (column.identityKind == 0) continue;
         std::vector<std::pair<std::string, std::string>> options;
@@ -7159,7 +7137,7 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
                 }
             }
             reservedSequenceNames.insert(sequenceName);
-            for (size_t i = 0; i < tbl.len; ++i) {
+            for (size_t i = 0; i < tbl.len(); ++i) {
                 if (tbl.cols[i].dataName != definition.name) continue;
                 tbl.cols[i].isNull = false;
                 tbl.cols[i].isAutoIncrement = false;
@@ -7181,7 +7159,7 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
     }
 
     txn.markSnapshotDirty();
-    for(size_t i=0;i<tbl.len;++i)if(system_attributes::reserved(tbl.cols[i].dataName))
+    for(size_t i=0;i<tbl.len();++i)if(system_attributes::reserved(tbl.cols[i].dataName))
         throw DbError("42701","column name conflicts with a system column: "+tbl.cols[i].dataName);
     DBStatus res = g_engine.createTable(s.currentDB, tbl);
     if (res != DBStatus::OK) {
@@ -7248,7 +7226,7 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
                 s.currentDB, tname, tc.name, !tc.notValid, tc.notValid,
                 tc.deferrable, tc.initiallyDeferred), "Constraint")) return true;
     }
-    for (size_t i = 0; i < tbl.fkLen; ++i) {
+    for (size_t i = 0; i < tbl.fkLen(); ++i) {
         const auto& fk = tbl.fks[i];
         if (fk.name.empty() || std::any_of(
                 stmt->constraints.begin(), stmt->constraints.end(),
@@ -7321,7 +7299,7 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
         const auto physical = g_engine.readPersistedSchemaForCatalog(s.currentDB, tname);
         if (!physical) throw DbError("XX001", "created default owner has no physical schema");
         std::set<std::string> declared;
-        for (size_t i = 0; i < physical->len; ++i) declared.insert(physical->cols[i].dataName);
+        for (size_t i = 0; i < physical->len(); ++i) declared.insert(physical->cols[i].dataName);
         synchronizeDefaultObjects(catalog, s.currentDB, tname, relation->oid, *physical, g_engine, &s, declared);
         if (!catalog.persistAll()) throw DbError("58030", "could not persist column default objects");
     } catch (const DbError& error) {
@@ -7544,7 +7522,7 @@ static bool buildPhysicalCascadeActions(
             if (!catalogTableStorageName(catalog, *owner, tableName, error)) return false;
             const auto schema = engine.readPersistedSchemaForCatalog(dbname, tableName);
             bool found = false;
-            if (schema) for (size_t i = 0; i < schema->len; ++i) if (schema->cols[i].dataName == attribute->attname) {
+            if (schema) for (size_t i = 0; i < schema->len(); ++i) if (schema->cols[i].dataName == attribute->attname) {
                 found = schema->cols[i].defaultValue == definition->expression;
                 break;
             }
@@ -7698,7 +7676,7 @@ static bool executeSchemaPhysicalDropPlan(
     for (const auto& childName : engine.getTableNames(dbname)) {
         if (droppedTableStorageNames.count(childName) != 0) continue;
         const TableSchema child = engine.getTableSchema(dbname, childName);
-        for (size_t i = 0; i < child.fkLen; ++i) {
+        for (size_t i = 0; i < child.fkLen(); ++i) {
             const auto& fk = child.fks[i];
             bool referencesDroppedTable =
                 droppedTableStorageNames.count(fk.refTable) != 0;
@@ -8150,7 +8128,7 @@ static bool executeDropTableSingle(const DropStmt* stmt, Session& s,
         if (plannedTables.count(candidate) != 0) continue;
         const TableSchema child =
             g_engine.getTableSchema(s.currentDB, candidate);
-        for (size_t i = 0; i < child.fkLen; ++i) {
+        for (size_t i = 0; i < child.fkLen(); ++i) {
             const std::string& storedReference = child.fks[i].refTable;
             const bool exactReference = storedReference == tname ||
                 (storedReference.find('.') != std::string::npos &&
@@ -9640,14 +9618,14 @@ bool DdlExecutor::executeAlterSequence(const AlterObjectStmt* stmt, Session& s) 
         for (const auto& [tableName, columnName] : dependencies) {
             const auto table =
                 g_engine.getTableSchema(s.currentDB, tableName);
-            size_t columnIndex = table.len;
-            for (size_t i = 0; i < table.len; ++i) {
+            size_t columnIndex = table.len();
+            for (size_t i = 0; i < table.len(); ++i) {
                 if (table.cols[i].dataName == columnName) {
                     columnIndex = i;
                     break;
                 }
             }
-            if (columnIndex >= table.len) {
+            if (columnIndex >= table.len()) {
                 std::cout << "ALTER SEQUENCE RENAME dependency update failed"
                           << std::endl;
                 return true;
@@ -10744,11 +10722,11 @@ bool DdlExecutor::executeDropType(const DropStmt* stmt, Session& s) {
              g_engine.getTableNames(s.currentDB)) {
             const TableSchema table =
                 g_engine.getTableSchema(s.currentDB, tableName);
-            if (table.len == 0) {
+            if (table.len() == 0) {
                 std::cout << "DROP TYPE dependency scan failed" << std::endl;
                 return true;
             }
-            for (size_t columnIndex = 0; columnIndex < table.len;
+            for (size_t columnIndex = 0; columnIndex < table.len();
                  ++columnIndex) {
                 const Column& column = table.cols[columnIndex];
                 if (toLower(column.dataType) == toLower(name) &&
@@ -11645,21 +11623,21 @@ static bool buildMaterializedRefreshRows(
     std::vector<size_t> sourceColumnIndexes;
     std::vector<std::string> outputColumnNames;
     if (selectColumns.size() == 1 && selectColumns.front() == "*") {
-        for (size_t index = 0; index < sourceSchema.len; ++index) {
+        for (size_t index = 0; index < sourceSchema.len(); ++index) {
             sourceColumnIndexes.push_back(index);
             outputColumnNames.push_back(sourceSchema.cols[index].dataName);
         }
     } else {
         for (const auto& requestedColumn : selectColumns) {
-            size_t sourceIndex = sourceSchema.len;
-            for (size_t index = 0; index < sourceSchema.len; ++index) {
+            size_t sourceIndex = sourceSchema.len();
+            for (size_t index = 0; index < sourceSchema.len(); ++index) {
                 if (toLower(sourceSchema.cols[index].dataName) ==
                     requestedColumn) {
                     sourceIndex = index;
                     break;
                 }
             }
-            if (sourceIndex == sourceSchema.len) {
+            if (sourceIndex == sourceSchema.len()) {
                 error = "column \"" + requestedColumn +
                     "\" does not exist in materialized-view source";
                 sqlstate = "42703";
@@ -11671,12 +11649,12 @@ static bool buildMaterializedRefreshRows(
         }
     }
 
-    if (sourceColumnIndexes.size() != backingSchema.len) {
+    if (sourceColumnIndexes.size() != backingSchema.len()) {
         error = "stored materialized-view query no longer matches its row type";
         sqlstate = "42804";
         return false;
     }
-    for (size_t index = 0; index < backingSchema.len; ++index) {
+    for (size_t index = 0; index < backingSchema.len(); ++index) {
         if (toLower(backingSchema.cols[index].dataName) !=
             toLower(outputColumnNames[index])) {
             error = "stored materialized-view query no longer matches its row type";
@@ -11694,7 +11672,7 @@ static bool buildMaterializedRefreshRows(
             const int64_t rid = StorageEngine::encodeRid(pageId, slotId);
             StorageEngine::bindNullRow(
                 &g_engine, session.currentDB, sourceTable, rid,
-                sourceSchema.len);
+                sourceSchema.len());
             struct BindingGuard {
                 ~BindingGuard() { StorageEngine::unbindNullRow(); }
             } bindingGuard;
@@ -11830,14 +11808,14 @@ bool DdlExecutor::executeCreateMaterializedView(const CreateViewStmt* stmt, Sess
     std::vector<size_t> selectedSourceColumns;
 
     if (selectCols.size() == 1 && selectCols[0] == "*") {
-        for (size_t i = 0; i < srcTbl.len; ++i) {
+        for (size_t i = 0; i < srcTbl.len(); ++i) {
             colNames.push_back(srcTbl.cols[i].dataName);
             selectedSourceColumns.push_back(i);
         }
     } else {
         for (const auto& cname : selectCols) {
             bool found = false;
-            for (size_t i = 0; i < srcTbl.len; ++i) {
+            for (size_t i = 0; i < srcTbl.len(); ++i) {
                 if (toLower(srcTbl.cols[i].dataName) == cname) {
                     colNames.push_back(srcTbl.cols[i].dataName);
                     selectedSourceColumns.push_back(i);
@@ -11890,7 +11868,7 @@ bool DdlExecutor::executeCreateMaterializedView(const CreateViewStmt* stmt, Sess
                 const char* data, size_t length) {
                 const int64_t rid = StorageEngine::encodeRid(pageId, slotId);
                 StorageEngine::bindNullRow(
-                    &g_engine, s.currentDB, srcTable, rid, srcTbl.len);
+                    &g_engine, s.currentDB, srcTable, rid, srcTbl.len());
                 struct BindingGuard {
                     ~BindingGuard() { StorageEngine::unbindNullRow(); }
                 } bindingGuard;
@@ -13271,7 +13249,7 @@ bool DdlExecutor::executeComment(const CommentStmt* stmt, Session& s) {
                         catalog->getNamespaceByName(logicalSchema);
                     const TableSchema table = g_engine.getTableSchema(
                         s.currentDB, physicalName);
-                    if (!nameSpace || table.len == 0) {
+                    if (!nameSpace || table.len() == 0) {
                         std::cout << "ERROR: relation \""
                                   << stmt->objectName
                                   << "\" has incomplete catalog migration "

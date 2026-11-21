@@ -86,7 +86,7 @@ int main() {
         session));
     const dbms::TableSchema implicitSchema =
         g_engine.getTableSchema(database, "implicit_target");
-    assert(implicitSchema.fkLen == 1);
+    assert(implicitSchema.fkLen() == 1);
     assert(implicitSchema.fks[0].refCols ==
            std::vector<std::string>{"id"});
 

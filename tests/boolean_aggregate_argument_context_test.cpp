@@ -97,7 +97,7 @@ int main() {
     }
     assert(owner.commitTransaction() == DBStatus::OK);
     const auto schema = owner.getTableSchema(database, "source");
-    assert(schema.len == 3 && schema.cols[0].dsize == 4 && schema.cols[1].dsize == 4);
+    assert(schema.len() == 3 && schema.cols[0].dsize == 4 && schema.cols[1].dsize == 4);
     std::cout << "BOOLEAN_CONTEXT_COLLATION declaration=" << schema.cols[2].collation
               << " resolved=" << schema.cols[2].resolvedCollation
               << " binary=" << schema.cols[2].resolvedCollationIsBinary << std::endl;

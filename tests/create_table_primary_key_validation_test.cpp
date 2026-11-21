@@ -103,7 +103,7 @@ int main() {
     }
     maximumColumnsSql += ")";
     assert(!ddl.executeSql(maximumColumnsSql, session));
-    assert(g_engine.getTableSchema(database, "maximum_columns").len ==
+    assert(g_engine.getTableSchema(database, "maximum_columns").len() ==
            dbms::MAX_COLUMNS);
 
     std::string tooManyColumnsSql = "CREATE TABLE too_many_columns (";
@@ -140,7 +140,7 @@ int main() {
         session));
     const dbms::TableSchema schema =
         g_engine.getTableSchema(database, "valid_pk");
-    assert(schema.len == 2);
+    assert(schema.len() == 2);
     assert(schema.cols[0].isPrimaryKey);
     assert(!schema.cols[0].isNull);
     assert(g_engine.insert(

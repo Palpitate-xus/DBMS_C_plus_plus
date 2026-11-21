@@ -180,13 +180,13 @@ struct ActualRow { int id; int64_t rid; Cell key, payload; std::string opaque; }
 using Population = std::map<int, std::pair<Cell, Cell>>;
 std::vector<ActualRow> heapOracle(const Population& population) {
     const auto schema = g_engine.getTableSchema(db, table);
-    require(schema.len == 4, "genuine id/key/jsonb/payload width");
+    require(schema.len() == 4, "genuine id/key/jsonb/payload width");
     std::vector<ActualRow> result;
     std::set<int64_t> rids;
     auto cursor = g_engine.beginHeapScan(db, table, schema);
     HeapScanRow row;
     while (cursor->next(row)) {
-        require(row.nulls.size() == schema.len, "actual cursor owns all physical NULL flags");
+        require(row.nulls.size() == schema.len(), "actual cursor owns all physical NULL flags");
         std::vector<std::string> values;
         std::vector<bool> nulls;
         detail::decodeStoredRowValues(g_engine, db, row.data, schema, row.nulls, values, nulls);
@@ -256,7 +256,7 @@ void observe(PageAllocator* allocator, bool contained, const std::string& column
     // These metadata/owner warmups are intentionally outside the watch. The
     // API call itself must not fetch any page of the genuine user heap.
     const auto schema = g_engine.getTableSchema(db, table);
-    require(schema.len == 4 && g_engine.getPageAllocator(db, table) == allocator,
+    require(schema.len() == 4 && g_engine.getPageAllocator(db, table) == allocator,
             "same actual physical allocator before typed probe");
     std::optional<Rids> result;
     {
@@ -327,7 +327,7 @@ void defaultLocaleLikePrefixGroup(DdlExecutor& ddl, Session& session) {
             "real default-locale physical INSERT: PK "+std::to_string(row.first));
     require(g_engine.commitTransaction()==DBStatus::OK,"commit real default-locale population");
     const auto schema=g_engine.getTableSchema(db,localTable);
-    require(schema.len==4 && schema.cols[1].dataType=="text" &&
+    require(schema.len()==4 && schema.cols[1].dataType=="text" &&
             schema.cols[1].collation.empty() && schema.cols[1].domainName.empty() &&
             !schema.cols[1].isArray && !schema.cols[1].generatedKind,
             "actual stored default-locale declaration, not a forged binary column");
@@ -339,7 +339,7 @@ void defaultLocaleLikePrefixGroup(DdlExecutor& ddl, Session& session) {
         auto cursor=g_engine.beginHeapScan(db,localTable,schema);
         HeapScanRow row;
         while(cursor->next(row)) {
-            require(row.nulls.size()==schema.len,"default-locale actual full NULL bitmap");
+            require(row.nulls.size()==schema.len(),"default-locale actual full NULL bitmap");
             std::vector<std::string> values;
             std::vector<bool> nulls;
             detail::decodeStoredRowValues(g_engine,db,row.data,schema,row.nulls,values,nulls);
@@ -392,7 +392,7 @@ void defaultLocaleLikePrefixGroup(DdlExecutor& ddl, Session& session) {
                           bool engaged,const std::string& label) {
         ++probes;
         require(g_engine.getPageAllocator(db,localTable)==localAllocator &&
-                g_engine.getTableSchema(db,localTable).len==4,
+                g_engine.getTableSchema(db,localTable).len()==4,
                 "same actual default-locale physical owner outside observation");
         Rids expected;
         if(role==Role::Prefix && engaged) {

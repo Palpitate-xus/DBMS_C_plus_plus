@@ -72,20 +72,20 @@ DataFileHeader header(const fs::path& path,uint64_t logical,uint32_t wanted){
 uint32_t wantedWidth(const TableSchema& schema){
  const auto nominal=schema.rowSize();if(nominal<=UINT32_MAX)return static_cast<uint32_t>(nominal);
  need(schema.formatVersion==2&&schema.hasVariableLength(),"only current true var schema overflow role");
- const size_t minimum=computeHeapHeaderSize(static_cast<int>(schema.len))+schema.fixedDataSize()+4*schema.varColCount();
+ const size_t minimum=computeHeapHeaderSize(static_cast<int>(schema.len()))+schema.fixedDataSize()+4*schema.varColCount();
  need(minimum<=PgPage::PAGE_SIZE-sizeof(PgPage::PageHeaderData)-sizeof(PgPage::ItemIdData)-sizeof(uint32_t),"real custom tuple minimum fits page");return 0;
 }
 struct Actual{int64_t rid;Row row;};using ActualRows=std::map<int,Actual>;
 ActualRows verify(const std::string& table,const Model& wanted,bool requireLarge=false){
- const auto schema=g_engine.getTableSchema(db,table);need(schema.len>0,"actual schema exists");
+ const auto schema=g_engine.getTableSchema(db,table);need(schema.len()>0,"actual schema exists");
  auto* allocator=g_engine.getPageAllocator(db,table);need(allocator&&allocator->rowSize()==wantedWidth(schema),"actual cached allocator agrees with immutable width role");
  flush(table);header(fs::path(db)/(table+".dt"),schema.rowSize(),wantedWidth(schema));
  auto scan=g_engine.beginHeapScan(db,table,schema);need(bool(scan),"actual public visible heap cursor");HeapScanRow item;ActualRows actual;size_t largePointers=0;
  while(scan->next(item)){
-  need(item.rid>0&&item.nulls.size()==schema.len,"actual RID and NULL owner width");
+  need(item.rid>0&&item.nulls.size()==schema.len(),"actual RID and NULL owner width");
   std::vector<std::string> values;std::vector<bool> nulls;detail::decodeStoredRowValues(g_engine,db,item.data,schema,item.nulls,values,nulls);
-  need(values.size()==schema.len&&nulls==item.nulls,"full actual value/NULL decode");Row row;
-  for(size_t i=0;i<schema.len;++i)row[schema.cols[i].dataName]=nulls[i]?std::nullopt:std::optional<std::string>{values[i]};
+  need(values.size()==schema.len()&&nulls==item.nulls,"full actual value/NULL decode");Row row;
+  for(size_t i=0;i<schema.len();++i)row[schema.cols[i].dataName]=nulls[i]?std::nullopt:std::optional<std::string>{values[i]};
   need(row.count("id")&&row.at("id"),"actual ID datum");int id=std::stoi(*row.at("id"));need(actual.emplace(id,Actual{item.rid,row}).second,"unique actual fixture ID");
   auto expected=wanted.find(id);need(expected!=wanted.end()&&expected->second==row,"all original fields/NULL/empty exact, id="+std::to_string(id));
   uint32_t pageId;uint16_t slot;StorageEngine::decodeRid(item.rid,pageId,slot);need(allocator->pageExistsOnDisk(pageId)==std::optional<bool>{true},"actual durable header agrees with requested width and RID extent");char* buffer=allocator->fetchPage(pageId);need(buffer,"actual RID page is fetched");
@@ -93,10 +93,10 @@ ActualRows verify(const std::string& table,const Model& wanted,bool requireLarge
   PageWrapper page(buffer,allocator->pageSize(),schema.formatVersion);const char* tuple=nullptr;size_t length=0;
   need(page.isValid(pageId)&&page.read(slot,tuple,length),"actual page identity/checksum and slot");
   need(length<=PgPage::PAGE_SIZE-sizeof(PgPage::PageHeaderData)-sizeof(PgPage::ItemIdData)-sizeof(uint32_t)&&length>=sizeof(HeapTupleHeaderData),"actual tuple length fits physical page");
-  const auto* ht=reinterpret_cast<const HeapTupleHeaderData*>(tuple);need((ht->t_infomask2&HEAP_NATTS_MASK)==schema.len&&ht->t_hoff<=length,"actual tuple header attributes/hoff");
+  const auto* ht=reinterpret_cast<const HeapTupleHeaderData*>(tuple);need((ht->t_infomask2&HEAP_NATTS_MASK)==schema.len()&&ht->t_hoff<=length,"actual tuple header attributes/hoff");
   need(std::string(tuple+ht->t_hoff,length-ht->t_hoff)==item.data,"cursor bytes are exact owned original tuple payload");
   std::set<uint64_t> rowPointers;
-  for(size_t i=0;i<schema.len;++i){
+  for(size_t i=0;i<schema.len();++i){
    need(nulls[i]==(schema.cols[i].isNull&&dbms::isNull(ht,static_cast<int>(i))),"actual physical bitmap agrees with visible row");
    std::cout<<"MULTILOB_CELL "<<std::quoted(table)<<' '<<id<<' '<<item.rid<<' '<<std::quoted(schema.cols[i].dataName)<<' '<<nulls[i]<<' '<<hex(values[i])<<'\n';
    if(nulls[i]||!schema.cols[i].isVariableLength)continue;
@@ -163,8 +163,8 @@ void partitionVerify(bool final){
    std::array<char,PgPage::PAGE_SIZE> bytes{};input.clear();input.seekg(uint64_t(pageId)*bytes.size());input.read(bytes.data(),bytes.size());need(input.gcount()==static_cast<std::streamsize>(bytes.size()),"actual leaf RID fullpage read");
    PageWrapper page(bytes.data(),bytes.size(),schema.formatVersion);const char* tuple=nullptr;size_t n=0;need(page.isValid(pageId)&&page.read(slot,tuple,n)&&n>=sizeof(HeapTupleHeaderData),"actual leaf page checksum/RID");
    const auto* ht=castHeapHeader(tuple);need(ht->t_hoff<=n&&std::string(tuple+ht->t_hoff,n-ht->t_hoff)==std::string(raw,rawlen),"logical visible row matches its actual physical fork tuple");
-   std::vector<bool> bitmap(schema.len);for(size_t i=0;i<schema.len;++i)bitmap[i]=schema.cols[i].isNull&&dbms::isNull(ht,static_cast<int>(i));std::vector<std::string> values;std::vector<bool> nulls;
-   detail::decodeStoredRowValues(g_engine,db,std::string(raw,rawlen),schema,bitmap,values,nulls);need(values.size()==schema.len&&nulls==bitmap,"actual partition NULL owner captured from actual fork");Row row;for(size_t i=0;i<schema.len;++i)row[schema.cols[i].dataName]=nulls[i]?std::nullopt:std::optional<std::string>{values[i]};
+   std::vector<bool> bitmap(schema.len());for(size_t i=0;i<schema.len();++i)bitmap[i]=schema.cols[i].isNull&&dbms::isNull(ht,static_cast<int>(i));std::vector<std::string> values;std::vector<bool> nulls;
+   detail::decodeStoredRowValues(g_engine,db,std::string(raw,rawlen),schema,bitmap,values,nulls);need(values.size()==schema.len()&&nulls==bitmap,"actual partition NULL owner captured from actual fork");Row row;for(size_t i=0;i<schema.len();++i)row[schema.cols[i].dataName]=nulls[i]?std::nullopt:std::optional<std::string>{values[i]};
    const int id=std::stoi(*row.at("id"));need(seen.insert(id).second&&expected.count(id)&&expected.at(id)==row,"complete visible leaf values/NULL without RID alias across forks");
    const std::string actualLeaf=*row.at("region")=="NY"?"east":(*row.at("region")=="CA"?"west":"other");need(actualLeaf==leaf,"true partition routing");physical.emplace(id,std::make_pair(path.string(),StorageEngine::encodeRid(pageId,slot)));
    std::cout<<"MULTILOB_PARTITION "<<std::quoted(path.string())<<' '<<id<<' '<<StorageEngine::encodeRid(pageId,slot)<<" payload="<<hex(std::string(raw,rawlen))<<'\n';
@@ -203,7 +203,7 @@ void unloggedFinal(){beginGroup("UNLOGGED-representable-normal-cold-no-migration
 void multi(){
  pageBoundary();beginGroup("original-seven-column-DDL-and-physical-policy");need(g_engine.createDatabase(db)==DBStatus::OK,"real multiLOB database");
  ddl("CREATE TABLE cv_sig(id INT PRIMARY KEY,n INT,tag TEXT,other_tag TEXT,bytes BYTEA,other_bytes BYTEA,\"select\" INT)");
- auto schema=g_engine.getTableSchema(db,"cv_sig");need(schema.len==7&&schema.cols[4].dsize==INT32_MAX&&schema.cols[5].dsize==INT32_MAX&&schema.rowSize()>UINT32_MAX,"original logical maxima remain unchanged");
+ auto schema=g_engine.getTableSchema(db,"cv_sig");need(schema.len()==7&&schema.cols[4].dsize==INT32_MAX&&schema.cols[5].dsize==INT32_MAX&&schema.rowSize()>UINT32_MAX,"original logical maxima remain unchanged");
  Model model=original();for(const auto& row:model)insert("cv_sig",row.second);
  beginGroup("actual-NULL-empty-two-large-TOAST-binary");auto initial=verify("cv_sig",model,true);
  beginGroup("real-mutation-and-normal-transaction-rollback");
@@ -221,7 +221,7 @@ void multi(){
  Row final=original().at(3);final["id"]="99";final["n"]="7";insert("cv_sig",final);verify("cv_sig",{{99,final}},true);
  beginGroup("actual-MAX_COLUMNS-metadata-no-huge-allocation");TableSchema many;many.tablename="max_lobs";many.append(makeIntColumn("id",false,4,true));Row nullrow={{"id","777"}};
  for(int i=1;i<MAX_COLUMNS;++i){const auto name="b"+std::to_string(i);many.append(makeBlobColumn(name,true));nullrow[name]=std::nullopt;}
- need(many.len==MAX_COLUMNS&&many.rowSize()>UINT32_MAX,"actual supported maximum column metadata");need(g_engine.createTable(db,many)==DBStatus::OK,"many logical LOBs actual empty heap");insert("max_lobs",nullrow);verify("max_lobs",{{777,nullrow}});partitions();
+ need(many.len()==MAX_COLUMNS&&many.rowSize()>UINT32_MAX,"actual supported maximum column metadata");need(g_engine.createTable(db,many)==DBStatus::OK,"many logical LOBs actual empty heap");insert("max_lobs",nullrow);verify("max_lobs",{{777,nullrow}});partitions();
 }
 void multiCold(){beginGroup("true-fresh-process-cold");Row row=original().at(3);row["id"]="99";row["n"]="7";verify("cv_sig",{{99,row}},true);const auto schema=g_engine.getTableSchema(db,"cv_sig");need(schema.cols[4].dsize==INT32_MAX&&schema.cols[5].dsize==INT32_MAX&&schema.cols[1].dataType=="bigint","cold full logical schema survives rewrites");Row many={{"id","777"}};for(int i=1;i<MAX_COLUMNS;++i)many["b"+std::to_string(i)]=std::nullopt;verify("max_lobs",{{777,many}});partitionVerify(true);}
 }

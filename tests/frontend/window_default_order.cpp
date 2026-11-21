@@ -12,8 +12,8 @@
 
 int main() {
     TableSchema table;
-    table.len = 3;
-    for (size_t i = 0; i < table.len; ++i) {
+    table.cols.resize(3);
+    for (size_t i = 0; i < table.len(); ++i) {
         table.cols[i].dataName = std::array<std::string, 3>{"g", "v", "k"}[i];
         table.cols[i].dataType = "int";
     }

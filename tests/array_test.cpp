@@ -49,7 +49,7 @@ static void test_array_recognized() {
     assert(!ddl.executeSql("CREATE TABLE t (id INT PRIMARY KEY, a INT[], b VARCHAR(20)[])", s));
 
     dbms::TableSchema tbl = g_engine.getTableSchema(db, "t");
-    for (size_t i = 0; i < tbl.len; ++i) {
+    for (size_t i = 0; i < tbl.len(); ++i) {
         if (tbl.cols[i].dataName == "a" || tbl.cols[i].dataName == "b") {
             assert(tbl.cols[i].isArray);
             assert(tbl.cols[i].isVariableLength);

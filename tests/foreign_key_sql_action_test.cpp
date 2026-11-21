@@ -22,7 +22,7 @@ ChildReference childReference(const std::string& database,
                               const std::string& id) {
     const dbms::TableSchema table =
         g_engine.getTableSchema(database, tableName);
-    assert(table.len == 2);
+    assert(table.len() == 2);
     ChildReference result;
     assert(g_engine.forEachRow(
         database, tableName,
@@ -69,7 +69,7 @@ int main() {
         session));
     const dbms::TableSchema child =
         g_engine.getTableSchema(database, "table_child");
-    assert(child.fkLen == 1);
+    assert(child.fkLen() == 1);
     assert(child.fks[0].onDelete == "setnull");
     assert(child.fks[0].onUpdate == "cascade");
 
@@ -95,7 +95,7 @@ int main() {
         session));
     const dbms::TableSchema inlineChild =
         g_engine.getTableSchema(database, "inline_child");
-    assert(inlineChild.fkLen == 1);
+    assert(inlineChild.fkLen() == 1);
     assert(inlineChild.fks[0].onDelete == "setnull");
     assert(inlineChild.fks[0].onUpdate == "cascade");
     assert(g_engine.insert(database, "parent", {{"id", "3"}}) ==
@@ -125,7 +125,7 @@ int main() {
         session));
     const dbms::TableSchema alteredChild =
         g_engine.getTableSchema(database, "alter_child");
-    assert(alteredChild.fkLen == 1);
+    assert(alteredChild.fkLen() == 1);
     assert(alteredChild.fks[0].onDelete == "setnull");
     assert(alteredChild.fks[0].onUpdate == "cascade");
     assert(g_engine.update(database, "parent", {{"id", "6"}}, {"=id 5"}) ==
@@ -143,7 +143,7 @@ int main() {
         session));
     const dbms::TableSchema noActionChild =
         g_engine.getTableSchema(database, "no_action_child");
-    assert(noActionChild.fkLen == 1);
+    assert(noActionChild.fkLen() == 1);
     assert(noActionChild.fks[0].onDelete == "restrict");
     assert(noActionChild.fks[0].onUpdate == "restrict");
 
@@ -156,7 +156,7 @@ int main() {
            dbms::DBStatus::OK);
     const dbms::TableSchema apiChild =
         g_engine.getTableSchema(database, "api_child");
-    assert(apiChild.fkLen == 1);
+    assert(apiChild.fkLen() == 1);
     assert(apiChild.fks[0].onDelete == "setnull");
     assert(apiChild.fks[0].onUpdate == "restrict");
 

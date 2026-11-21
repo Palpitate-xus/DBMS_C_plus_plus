@@ -89,7 +89,7 @@ int main() try {
             const bool found=g_engine.readIndexedRowByRid(db,table,rid,row,schema,nullptr,&failed);
             need(!failed&&found,"every candidate is a visible complete tuple");
             const auto bitmap=detail::storedRowNullBitmap(g_engine,db,table,schema,rid);
-            need(bitmap&&bitmap->size()==schema.len,"actual physical bitmap belongs to candidate RID");
+            need(bitmap&&bitmap->size()==schema.len(),"actual physical bitmap belongs to candidate RID");
             const int id=std::stoi(g_engine.extractColumnValue(row,schema,0,db));
             const auto cell=[&](size_t column)->std::optional<std::string> {
                 if((*bitmap)[column])return {};

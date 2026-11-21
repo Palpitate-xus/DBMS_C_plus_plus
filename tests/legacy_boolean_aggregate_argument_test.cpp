@@ -44,7 +44,7 @@ int main() {
             {{"g", "3"}, {"v", "1"}, {"b", "false"}, {"t", "zeta"}}})
         assert(owner.insertRow(database, "source", row) == DBStatus::OK);
     const auto actual = owner.getTableSchema(database, "source");
-    assert(actual.len == 4 && actual.cols[0].dsize == 4 && actual.cols[1].dsize == 4 && actual.cols[2].dsize == 1);
+    assert(actual.len() == 4 && actual.cols[0].dsize == 4 && actual.cols[1].dsize == 4 && actual.cols[2].dsize == 1);
     assert(owner.createUDF(database, "argument_truth", {"arg"}, {"int"},
         "BEGIN INSERT INTO effects(v) VALUES(arg); RETURN arg > 5; END;",
         'v', "plpgsql", "boolean") == DBStatus::OK);

@@ -79,9 +79,9 @@ int main(int argc, char** argv) {
                 need(expected == 0 && error.sqlState() == "XX001", "only schema corruption is accepted rejection");
                 return 0;
             }
-            if (expected == 0) need(table.len == 0, "corrupt binding metadata fails closed");
+            if (expected == 0) need(table.len() == 0, "corrupt binding metadata fails closed");
             else {
-                need(table.len == 2 && table.cols[0].identitySequenceOid == expected, "actual cold OID binding");
+                need(table.len() == 2 && table.cols[0].identitySequenceOid == expected, "actual cold OID binding");
                 need(table.cols[0].identityKind == 'a' && table.cols[0].isAutoIncrement && table.cols[0].isPrimaryKey,
                      "all actual old physical flags retained");
                 need(table.cols[1].identitySequenceOid == 0, "nonidentity column stays unbound");

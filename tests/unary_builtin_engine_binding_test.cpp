@@ -10,7 +10,7 @@ int main() {
     StorageEngine engine;
     const std::string name="unary_builtin_engine_binding",db=testDbPath(name);
     assert(engine.createDatabase(db)==DBStatus::OK);
-    TableSchema schema;schema.len=2;
+    TableSchema schema;schema.cols.resize(2);
     schema.cols[0].dataName="m";schema.cols[0].dataType="money";schema.cols[0].dsize=8;
     schema.cols[1].dataName="i";schema.cols[1].dataType="integer";schema.cols[1].dsize=4;
     assert(engine.createTable(db,"unary_rows",schema)==DBStatus::OK);

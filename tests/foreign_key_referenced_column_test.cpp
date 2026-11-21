@@ -20,14 +20,14 @@ RowValue valueById(const std::string& database, const std::string& tableName,
                    const std::string& id, const std::string& columnName) {
     const dbms::TableSchema table =
         g_engine.getTableSchema(database, tableName);
-    size_t valueColumn = table.len;
-    for (size_t column = 0; column < table.len; ++column) {
+    size_t valueColumn = table.len();
+    for (size_t column = 0; column < table.len(); ++column) {
         if (table.cols[column].dataName == columnName) {
             valueColumn = column;
             break;
         }
     }
-    assert(valueColumn < table.len);
+    assert(valueColumn < table.len());
 
     RowValue result;
     assert(g_engine.forEachRow(

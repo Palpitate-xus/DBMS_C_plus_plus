@@ -144,10 +144,10 @@ std::map<int, int64_t> physical(const Model& wanted, const std::string& phase) {
     need(g_engine.forEachRow(database, table, [&](uint32_t page, uint16_t slot, const char* data, size_t length) {
         const auto rid = StorageEngine::encodeRid(page, slot);
         const auto nulls = detail::storedRowNullBitmap(g_engine, database, table, schema, rid);
-        need(nulls && nulls->size() == schema.len, "real tuple/RID bitmap");
+        need(nulls && nulls->size() == schema.len(), "real tuple/RID bitmap");
         Row row; const std::string value(data, length);
         for (size_t i = 0; i < 3; ++i) row.push_back((*nulls)[i] ? Cell{} : Cell(g_engine.extractColumnValue(value, schema, i, database)));
-        if (schema.len == 4 && schema.cols[3].dataName == "extra") {
+        if (schema.len() == 4 && schema.cols[3].dataName == "extra") {
             check(!(*nulls)[3] && g_engine.extractColumnValue(value, schema, 3, database).empty(), phase + ":real added-column empty DEFAULT distinct from NULL");
         }
         need(bool(row[0]), "actual nonNULL primary identity"); const int id = std::stoi(*row[0]);

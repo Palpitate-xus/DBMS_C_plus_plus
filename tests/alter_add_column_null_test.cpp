@@ -30,7 +30,7 @@ int main() {
 
     const dbms::TableSchema rewritten =
         g_engine.getTableSchema(db, "null_rewrite");
-    assert(rewritten.len == 3);
+    assert(rewritten.len() == 3);
     bool found = false;
     assert(g_engine.forEachRow(
         db, "null_rewrite",

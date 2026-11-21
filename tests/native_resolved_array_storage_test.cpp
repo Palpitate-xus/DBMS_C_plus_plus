@@ -38,7 +38,7 @@ int main() {
         assert(owner.createDatabase(db, "utf8") == DBStatus::OK);
         // These are the exact original public helper/create/insert inputs.
         // resolveColumnType's public full type spelling must remain unchanged.
-        TableSchema arraySchema; arraySchema.len = 1;
+        TableSchema arraySchema; arraySchema.cols.resize(1);
         arraySchema.cols[0].dataName = "items";
         assert(TypeRegistry::instance().resolveColumnType(arraySchema.cols[0], "integer", {}, true).empty());
         assert(arraySchema.cols[0].dataType == "integer[]" && arraySchema.cols[0].isArray &&
@@ -80,7 +80,7 @@ int main() {
         assert(owner.rollbackTransaction() == DBStatus::OK);
         expectRows(owner, db, "array_source", positive);
         // The factory's already element-shaped representation is unchanged.
-        TableSchema factory; factory.len = 1; factory.cols[0] = makeIntColumn("items", false, 4);
+        TableSchema factory; factory.cols.resize(1); factory.cols[0] = makeIntColumn("items", false, 4);
         factory.cols[0].isArray = true; factory.cols[0].isVariableLength = true;
         assert(owner.createTable(db, "factory_source", factory) == DBStatus::OK);
         assert(owner.insertRow(db, "factory_source", {{"items", "{1,2}"}}) == DBStatus::OK);
@@ -93,7 +93,7 @@ int main() {
         expectRows(owner, db, "nullable_source", {{"", true}, {"{NULL}", false}, {"{}", false}});
         // Primitive aliases/element widths remain real scalar element metadata.
         for (const auto& pair : std::vector<std::pair<std::string, std::string>>{{"smallint", "{32767,NULL}"}, {"bigint", "{9223372036854775807,NULL}"}, {"text", "{\"NULL\",NULL,\"\",\"é😀\"}"}}) {
-            TableSchema metadata; metadata.len = 1; metadata.cols[0].dataName = "items";
+            TableSchema metadata; metadata.cols.resize(1); metadata.cols[0].dataName = "items";
             assert(TypeRegistry::instance().resolveColumnType(metadata.cols[0], pair.first, {}, true).empty());
             const auto table = "source_" + pair.first;
             assert(owner.createTable(db, table, metadata) == DBStatus::OK);

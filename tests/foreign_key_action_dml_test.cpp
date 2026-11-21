@@ -184,7 +184,7 @@ std::map<std::string, std::string> rowById(
                     row, schema, 0, kDatabase, true) != wantedId) {
                 return;
             }
-            for (size_t column = 0; column < schema.len; ++column) {
+            for (size_t column = 0; column < schema.len(); ++column) {
                 result[schema.cols[column].dataName] =
                     engine.extractColumnValue(
                         row, schema, column, kDatabase, true);
@@ -329,7 +329,7 @@ void createRenameFixture(StorageEngine& engine) {
 
     const TableSchema childAfterRename =
         engine.getTableSchema(kRenameDatabase, "child");
-    assert(childAfterRename.fkLen == 1);
+    assert(childAfterRename.fkLen() == 1);
     assert(childAfterRename.fks[0].refTable == "renamed_parent");
     assert(engine.insert(
                kRenameDatabase, "child",
@@ -352,7 +352,7 @@ void testRenamedReferenceAfterRestart() {
     StorageEngine restarted;
     const TableSchema child =
         restarted.getTableSchema(kRenameDatabase, "child");
-    assert(child.fkLen == 1);
+    assert(child.fkLen() == 1);
     assert(child.fks[0].refTable == "renamed_parent");
     assert(restarted.insert(
                kRenameDatabase, "renamed_parent", {{"id", "2"}}) ==

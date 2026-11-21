@@ -53,7 +53,7 @@ int main() {
         check(sql+" effects",calls,item.calls);
     }
     assert(g_engine.createSequence(db,"runtime_null_demand",1,1)==DBStatus::OK);
-    TableSchema schema;schema.len=1;schema.cols[0].dataName="v";schema.cols[0].dataType="integer";schema.cols[0].dsize=4;
+    TableSchema schema;schema.cols.resize(1);schema.cols[0].dataName="v";schema.cols[0].dataType="integer";schema.cols[0].dsize=4;
     assert(g_engine.createTable(db,"runtime_null_source",schema)==DBStatus::OK);
     auto query=std::make_shared<PreparedQuery>(g_engine.prepareBoundQuery(db,
         "SELECT CASE v WHEN CAST(nextval('runtime_null_demand') AS INT) THEN 1 WHEN CAST(nextval('runtime_null_demand') AS INT) THEN 2 ELSE 3 END FROM runtime_null_source"));

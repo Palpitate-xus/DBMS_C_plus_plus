@@ -289,7 +289,7 @@ static const dbms::ColumnRefExpr* queryDemandPhysicalOrderColumn(
         orders.size() != 1 || structuredOrders.size() != 1 ||
         orders.front().isExpression || !orders.front().collation.empty() ||
         find(conditions.begin(),conditions.end(),"or") != conditions.end() ||
-        any_of(table.cols,table.cols+table.len,
+        any_of(table.cols.begin(),table.cols.end(),
             [](const auto& column) { return column.generatedKind == 'v'; })) return false;
     dbms::SQLParser parser;
     const auto syntax = parser.parseForBinding(sql);
@@ -301,7 +301,7 @@ static const dbms::ColumnRefExpr* queryDemandPhysicalOrderColumn(
     static const set<string> types = {"smallint","integer","bigint","real",
         "double precision","text","character","character varying","date",
         "time without time zone","timestamp without time zone","time","timestamp"};
-    for (size_t column = 0; column < table.len; ++column) {
+    for (size_t column = 0; column < table.len(); ++column) {
         const auto& physical = table.cols[column];
         if (physical.dataName != key->column || physical.isArray || !physical.enumValues.empty() ||
             !types.count(dbms::ExprHelper::canonicalResultTypeName(physical.dataType))) continue;
@@ -325,7 +325,7 @@ static const dbms::ColumnRefExpr* queryDemandPhysicalOrderColumn(
        table.partitionType!=dbms::TableSchema::PartitionType::None)return false;
     for(const auto& condition:conditions)
         if(condition=="typedexpr" || condition.rfind("typedexpr ",0)==0)return false;
-    for(size_t i=0;i<table.len;++i) {
+    for(size_t i=0;i<table.len();++i) {
         const auto& column=table.cols[i];
         // Preserve the paused enum/domain and existing compound/virtual
         // source owners. Only genuine native builtin scalar declarations
@@ -2396,7 +2396,7 @@ static bool publishDumpFile(
         const TableSchema table =
             g_engine.getTableSchema(spec.database, tableName);
         output << "CREATE TABLE " << quoteDumpIdentifier(tableName) << " (";
-        for (size_t columnIndex = 0; columnIndex < table.len; ++columnIndex) {
+        for (size_t columnIndex = 0; columnIndex < table.len(); ++columnIndex) {
             if (columnIndex != 0) output << ", ";
             const auto& column = table.cols[columnIndex];
             output << quoteDumpIdentifier(column.dataName) << ' '
@@ -2428,14 +2428,14 @@ static bool publishDumpFile(
                 output << "INSERT INTO " << quoteDumpIdentifier(tableName)
                        << " (";
                 for (size_t columnIndex = 0;
-                     columnIndex < table.len; ++columnIndex) {
+                     columnIndex < table.len(); ++columnIndex) {
                     if (columnIndex != 0) output << ", ";
                     output << quoteDumpIdentifier(
                         table.cols[columnIndex].dataName);
                 }
                 output << ") VALUES (";
                 for (size_t columnIndex = 0;
-                     columnIndex < table.len; ++columnIndex) {
+                     columnIndex < table.len(); ++columnIndex) {
                     if (columnIndex != 0) output << ", ";
                     const bool isNull = g_engine.isColumnNullByRid(
                         spec.database, tableName, rid, columnIndex);
@@ -5287,13 +5287,13 @@ static bool handleCopy(const string& sql, Session& s) {
         while (getline(csvIn, line)) {
             if (trim(line).empty()) continue;
             auto fields = parseCSVLine(line);
-            if (fields.size() != tbl.len) {
+            if (fields.size() != tbl.len()) {
                 importStatus = DBStatus::INVALID_VALUE;
                 importSqlState = "22P04";
                 break;
             }
             map<string, string> values;
-            for (size_t i = 0; i < tbl.len; ++i) {
+            for (size_t i = 0; i < tbl.len(); ++i) {
                 values[tbl.cols[i].dataName] = fields[i];
             }
             auto res = g_engine.insert(s.currentDB, tname, values);
@@ -5385,7 +5385,7 @@ static bool handleCopy(const string& sql, Session& s) {
             cout << "Cannot write file: " << filename << endl;
             return true;
         }
-        for (size_t i = 0; i < tbl.len; ++i) {
+        for (size_t i = 0; i < tbl.len(); ++i) {
             if (i > 0) csvOut << ",";
             csvOut << tbl.cols[i].dataName;
         }
@@ -5393,7 +5393,7 @@ static bool handleCopy(const string& sql, Session& s) {
         size_t exported = 0;
         g_engine.forEachRow(s.currentDB, tname, [&](uint32_t, uint16_t, const char* data, size_t len) {
             std::string row(data, len);
-            for (size_t i = 0; i < tbl.len; ++i) {
+            for (size_t i = 0; i < tbl.len(); ++i) {
                 if (i > 0) csvOut << ",";
                 string val = dbms::StorageEngine::extractColumnValueStatic(row, tbl, i);
                 if(tbl.cols[i].generatedKind!='v' &&
@@ -6273,7 +6273,7 @@ static bool handleExplain(const string& sql, Session& s) {
                 throw dbms::DbError("42P01", "missing FROM-clause entry for table \"" + col.table + "\"");
             auto& schema = (left || sameTable) ? leftSchema : rightSchema;
             if (!schema) schema.emplace(g_engine.getTableSchema(s.currentDB, left ? joinLeftTable : joinRightTable));
-            const bool found = any_of(schema->cols, schema->cols + schema->len,
+            const bool found = any_of(schema->cols.begin(), schema->cols.end(),
                 [&](const auto& column) { return column.dataName == col.column; });
             if (!found)
                 throw dbms::DbError("42703", "column \"" + col.toString() + "\" does not exist");
@@ -6735,7 +6735,7 @@ static bool convertToVolcanoWindowSpec(const WindowFunc& wf,
 
     auto isColumn = [&](const string& name) {
         if (!isSimpleWindowIdentifier(name)) return false;
-        for (size_t i = 0; i < tbl.len; ++i) {
+        for (size_t i = 0; i < tbl.len(); ++i) {
             if (tbl.cols[i].dataName == name) return true;
         }
         return false;
@@ -6766,7 +6766,7 @@ static bool convertToVolcanoWindowSpec(const WindowFunc& wf,
     if (!spec.orderBy.empty() && !isColumn(spec.orderBy)) return false;
     if (wf.hasFrame && wf.frameType == WindowFunc::FrameType::RANGE) {
         if (spec.orderBy.empty()) return false;
-        for (size_t i = 0; i < tbl.len; ++i) {
+        for (size_t i = 0; i < tbl.len(); ++i) {
             if (tbl.cols[i].dataName != spec.orderBy) continue;
             string type = toLower(tbl.cols[i].dataType);
             const bool numeric = type == "smallint" || type == "tinyint" ||
@@ -7615,7 +7615,7 @@ struct StructuredSetOperand {
             if (column.empty() || column.find_first_of(" \t") != string::npos ||
                 column.find('.') != string::npos) return false;
             bool found = false;
-            for (size_t i = 0; i < table.len; ++i) {
+            for (size_t i = 0; i < table.len(); ++i) {
                 if (table.cols[i].dataName == column) {
                     found = true;
                     selectCols.insert(column);
@@ -7655,7 +7655,7 @@ struct StructuredSetOperand {
             else if (orderTokens[1] != "asc") return false;
         }
         bool found = false;
-        for (size_t i = 0; i < table.len; ++i) {
+        for (size_t i = 0; i < table.len(); ++i) {
             if (table.cols[i].dataName == orderByCol) { found = true; break; }
         }
         if (!found) return false;
@@ -7683,8 +7683,8 @@ struct StructuredSetOperand {
     context.limit = limit;
     context.distinct = distinct;
     out.plan = dbms::QueryPlanner::buildSelectPlan(&g_engine, context);
-    out.columnCount = columns == "*" ? table.len : selectedNames.size();
-    for (size_t i = 0; i < table.len; ++i) {
+    out.columnCount = columns == "*" ? table.len() : selectedNames.size();
+    for (size_t i = 0; i < table.len(); ++i) {
         if (columns != "*" && selectCols.find(table.cols[i].dataName) == selectCols.end()) continue;
         out.header += table.cols[i].dataName + ' ';
     }
@@ -10477,9 +10477,9 @@ static bool handleSelectIntoTable(const string& sql, Session& s, bool& handled) 
 
 static bool tableHasColumns(const string& dbname, const string& tablename, const vector<string>& columns) {
     TableSchema tbl = g_engine.getTableSchema(dbname, tablename);
-    if (tbl.len == 0) return false;
+    if (tbl.len() == 0) return false;
     set<string> existing;
-    for (size_t i = 0; i < tbl.len; ++i) existing.insert(tbl.cols[i].dataName);
+    for (size_t i = 0; i < tbl.len(); ++i) existing.insert(tbl.cols[i].dataName);
     for (string col : columns) {
         size_t dotPos = col.find('.');
         if (dotPos != string::npos) col = trim(col.substr(dotPos + 1));
@@ -12008,7 +12008,7 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd, const st
                              << (isUnsigned ? " unsigned" : "")
                              << " does not exist; use " << canonical
                              << " (SQLSTATE 42704)" << endl;
-                        tbl.len = 0;
+                        tbl.cols.clear();
                         return tbl;
                     }
                     {
@@ -12023,7 +12023,7 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd, const st
                         cout << "ERROR: type " << ctype
                              << " unsigned does not exist; UNSIGNED is not "
                                 "PostgreSQL syntax (SQLSTATE 42601)" << endl;
-                        tbl.len = 0;
+                        tbl.cols.clear();
                         return tbl;
                     }
                     {
@@ -12318,7 +12318,7 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd, const st
     }
     // Resolve composite PRIMARY KEY column names to indices
     for (const auto& cname : pkColNames) {
-        for (size_t i = 0; i < tbl.len; ++i) {
+        for (size_t i = 0; i < tbl.len(); ++i) {
             if (tbl.cols[i].dataName == cname) {
                 tbl.pkColIndices.push_back(i);
                 break;
@@ -12329,7 +12329,7 @@ static TableSchema parseTableColumns(const string& sql, size_t nameEnd, const st
     for (const auto& ucols : uniqueColNames) {
         std::vector<size_t> indices;
         for (const auto& cname : ucols) {
-            for (size_t i = 0; i < tbl.len; ++i) {
+            for (size_t i = 0; i < tbl.len(); ++i) {
                 if (tbl.cols[i].dataName == cname) {
                     indices.push_back(i);
                     break;
@@ -12387,7 +12387,7 @@ static std::string inferSubQueryResultType(
 
     const TableSchema schema = g_engine.getTableSchema(s.currentDB, relation);
     std::map<std::string, std::string> hints;
-    for (size_t i = 0; i < schema.len; ++i) {
+    for (size_t i = 0; i < schema.len(); ++i) {
         hints[schema.cols[i].dataName] = schema.cols[i].dataType;
         hints[relation + "." + schema.cols[i].dataName] =
             schema.cols[i].dataType;
@@ -12640,7 +12640,7 @@ static bool tryCorrelatedScalarAggFilter(
     std::string corrOuter = trim(rhs.substr(dot + 1));
     std::string corrInner = lhs;
     auto hasCol = [](const TableSchema& t, const std::string& n) {
-        for (size_t i = 0; i < t.len; ++i) if (t.cols[i].dataName == n) return true;
+        for (size_t i = 0; i < t.len(); ++i) if (t.cols[i].dataName == n) return true;
         return false;
     };
     if (!hasCol(outerTbl, corrOuter) || !hasCol(outerTbl, outerCol)) return false;
@@ -12654,7 +12654,7 @@ static bool tryCorrelatedScalarAggFilter(
     std::vector<std::string> innerRows = g_engine.query(dbname, innerTable, {}, {}, {});
     std::vector<std::string> outerRows = g_engine.query(dbname, outerTable, {}, {}, {});
     auto colIndex = [](const TableSchema& t, const std::string& n) -> int {
-        for (size_t i = 0; i < t.len; ++i) if (t.cols[i].dataName == n) return (int)i;
+        for (size_t i = 0; i < t.len(); ++i) if (t.cols[i].dataName == n) return (int)i;
         return -1;
     };
     auto splitCells = [](const std::string& row) {
@@ -12674,7 +12674,7 @@ static bool tryCorrelatedScalarAggFilter(
         std::map<std::string, std::vector<std::string>> groups;
         for (const auto& r : innerRows) {
             auto cells = splitCells(r);
-            if ((int)cells.size() < innerTbl.len) continue;
+            if ((int)cells.size() < innerTbl.len()) continue;
             groups[cells[corrInnerIdx]].push_back(r);
         }
         auto isNullV = [](const std::string& v) {
@@ -12726,7 +12726,7 @@ static bool tryCorrelatedScalarAggFilter(
     answers.clear();
     for (const auto& r : outerRows) {
         auto cells = splitCells(r);
-        if ((int)cells.size() < outerTbl.len) continue;
+        if ((int)cells.size() < outerTbl.len()) continue;
         const std::string& corrVal = cells[corrOuterIdx];
         const std::string& colVal = cells[outerColIdx];
         auto it = groupResult.find(corrVal);
@@ -12746,7 +12746,7 @@ static bool tryCorrelatedScalarAggFilter(
             // Project to the requested columns (engine row layout).
             std::string out;
             auto rcells = splitCells(r);
-            for (size_t i = 0; i < outerTbl.len; ++i) {
+            for (size_t i = 0; i < outerTbl.len(); ++i) {
                 if (!selectAll && selectCols.find(outerTbl.cols[i].dataName) == selectCols.end())
                     continue;
                 if (i < rcells.size()) out += rcells[i] + " ";
@@ -12808,17 +12808,17 @@ static bool tryCorrelatedExistsFilter(
         }
     }
     auto outerHas = [&](const std::string& n) {
-        for (size_t i = 0; i < outerTbl.len; ++i)
+        for (size_t i = 0; i < outerTbl.len(); ++i)
             if (outerTbl.cols[i].dataName == n) return true;
         return false;
     };
     auto innerHas = [&](const std::string& n) {
-        for (size_t i = 0; i < innerTbl.len; ++i)
+        for (size_t i = 0; i < innerTbl.len(); ++i)
             if (innerTbl.cols[i].dataName == n) return true;
         return false;
     };
     auto isNumericCol = [](const TableSchema& t, const std::string& n) {
-        for (size_t i = 0; i < t.len; ++i) {
+        for (size_t i = 0; i < t.len(); ++i) {
             if (t.cols[i].dataName == n) {
                 std::string dt = t.cols[i].dataType;
                 for (auto& c : dt) c = (char)tolower((unsigned char)c);
@@ -12858,7 +12858,7 @@ static bool tryCorrelatedExistsFilter(
     if (refs.empty()) return false;
     std::vector<std::string> outerRows = g_engine.query(dbname, outerTable, {}, {}, {});
     auto colIndex = [](const TableSchema& t, const std::string& n) -> int {
-        for (size_t i = 0; i < t.len; ++i) if (t.cols[i].dataName == n) return (int)i;
+        for (size_t i = 0; i < t.len(); ++i) if (t.cols[i].dataName == n) return (int)i;
         return -1;
     };
     auto splitCells = [](const std::string& row) {
@@ -12869,7 +12869,7 @@ static bool tryCorrelatedExistsFilter(
     answers.clear();
     for (const auto& r : outerRows) {
         auto cells = splitCells(r);
-        if ((int)cells.size() < (int)outerTbl.len) continue;
+        if ((int)cells.size() < (int)outerTbl.len()) continue;
         std::string sql = inner;
         for (const auto& ref : refs) {
             int idx = colIndex(outerTbl, ref.col);
@@ -12916,7 +12916,7 @@ static bool tryCorrelatedExistsFilter(
         if (keep) {
             std::string out;
             auto rcells = splitCells(r);
-            for (size_t i = 0; i < outerTbl.len; ++i) {
+            for (size_t i = 0; i < outerTbl.len(); ++i) {
                 if (!selectAll && selectCols.find(outerTbl.cols[i].dataName) == selectCols.end())
                     continue;
                 if (i < rcells.size()) out += rcells[i] + " ";
@@ -13028,7 +13028,7 @@ static bool parseSimpleSemiJoinSubquery(
     const TableSchema outerSchema = g_engine.getTableSchema(outerDb, outerTable);
     const TableSchema innerSchema = g_engine.getTableSchema(outerDb, innerTable);
     auto hasColumn = [](const TableSchema& schema, const std::string& name) {
-        for (size_t i = 0; i < schema.len; ++i) {
+        for (size_t i = 0; i < schema.len(); ++i) {
             if (schema.cols[i].dataName == name) return true;
         }
         return false;
@@ -13149,14 +13149,14 @@ static bool parseSimpleQuantifiedSubquery(
     const TableSchema outerSchema = g_engine.getTableSchema(dbname, outerTable);
     const TableSchema innerSchema = g_engine.getTableSchema(dbname, table);
     auto findColumn = [](const TableSchema& schema, const std::string& name) {
-        for (size_t i = 0; i < schema.len; ++i) {
+        for (size_t i = 0; i < schema.len(); ++i) {
             if (schema.cols[i].dataName == name) return i;
         }
-        return schema.len;
+        return schema.len();
     };
     const size_t outerIdx = findColumn(outerSchema, outerColumn);
     const size_t innerIdx = findColumn(innerSchema, innerColumn);
-    if (outerIdx >= outerSchema.len || innerIdx >= innerSchema.len) return false;
+    if (outerIdx >= outerSchema.len() || innerIdx >= innerSchema.len()) return false;
 
     // Restrict the first structured implementation to compatible scalar
     // families; comparing an integer to an arbitrary encoded type would be
@@ -13187,7 +13187,7 @@ static bool parseSimpleQuantifiedSubquery(
         innerConds = dbms::StorageEngine::parseConditions(groups.front());
         if (innerConds.empty() || innerConds.size() != groups.front().size()) return false;
         for (const auto& condition : innerConds) {
-            if (findColumn(innerSchema, condition.colName) >= innerSchema.len) return false;
+            if (findColumn(innerSchema, condition.colName) >= innerSchema.len()) return false;
         }
     }
 
@@ -13267,12 +13267,12 @@ static bool parseSimpleExistenceSubquery(
     const TableSchema outerSchema = outerTable.empty()
         ? TableSchema{} : g_engine.getTableSchema(dbname, outerTable);
     auto outerHasColumn = [&outerSchema](const std::string& name) {
-        for (size_t i = 0; i < outerSchema.len; ++i)
+        for (size_t i = 0; i < outerSchema.len(); ++i)
             if (outerSchema.cols[i].dataName == name) return true;
         return false;
     };
     auto innerHasColumn = [&innerSchema](const std::string& name) {
-        for (size_t i = 0; i < innerSchema.len; ++i)
+        for (size_t i = 0; i < innerSchema.len(); ++i)
             if (innerSchema.cols[i].dataName == name) return true;
         return false;
     };
@@ -13391,7 +13391,7 @@ static bool parseSimpleScalarSubquery(
     const TableSchema innerSchema = g_engine.getTableSchema(dbname, table);
 
     bool selectedColumnExists = false;
-    for (size_t i = 0; i < innerSchema.len; ++i) {
+    for (size_t i = 0; i < innerSchema.len(); ++i) {
         if (innerSchema.cols[i].dataName == innerColumn) {
             selectedColumnExists = true;
             break;
@@ -13413,7 +13413,7 @@ static bool parseSimpleScalarSubquery(
         if (innerConds.empty() || innerConds.size() != groups.front().size()) return false;
         for (const auto& condition : innerConds) {
             bool found = false;
-            for (size_t i = 0; i < innerSchema.len; ++i) {
+            for (size_t i = 0; i < innerSchema.len(); ++i) {
                 if (innerSchema.cols[i].dataName == condition.colName) {
                     found = true;
                     break;
@@ -13458,7 +13458,7 @@ static std::vector<std::string> runDerivedSubQuery(const std::string& rawSql, Se
     outColNames.clear();
     if (columns == "*") {
         TableSchema tbl = g_engine.getTableSchema(s.currentDB, tname);
-        for (size_t i = 0; i < tbl.len; ++i) outColNames.push_back(tbl.cols[i].dataName);
+        for (size_t i = 0; i < tbl.len(); ++i) outColNames.push_back(tbl.cols[i].dataName);
     } else {
         for (const auto& itemRaw : splitSelectColumns(columns)) {
             std::string item = trim(itemRaw);
@@ -14768,7 +14768,7 @@ static void substituteLateralBareScalarTargets(
                     }
                     const TableSchema schema =
                         g_engine.getTableSchema(s.currentDB, resolved);
-                    for (size_t ci = 0; ci < schema.len; ++ci)
+                    for (size_t ci = 0; ci < schema.len(); ++ci)
                         localColumnNames.insert(schema.cols[ci].dataName);
                     return;
                 }
@@ -14813,10 +14813,10 @@ static void substituteLateralBareScalarTargets(
     if (listEnd < listStart) return;
 
     auto findOuterColumn = [&](const std::string& name) {
-        size_t found = leftSchema.len;
-        for (size_t ci = 0; ci < leftSchema.len; ++ci) {
+        size_t found = leftSchema.len();
+        for (size_t ci = 0; ci < leftSchema.len(); ++ci) {
             if (leftSchema.cols[ci].dataName != name) continue;
-            if (found != leftSchema.len)
+            if (found != leftSchema.len())
                 throw dbms::DbError("42702", "column reference \"" + name +
                     "\" is ambiguous");
             found = ci;
@@ -15007,7 +15007,7 @@ static void substituteLateralBareScalarTargets(
             // FROM-less SELECT. Quoted identifiers remain untouched below.
             if (isSpecialValue(name) || localColumnNames.count(name)) continue;
             const size_t columnIndex = findOuterColumn(name);
-            if (columnIndex == leftSchema.len) continue;
+            if (columnIndex == leftSchema.len()) continue;
             std::string literal = makeOuterLiteral(columnIndex);
             if (!literal.empty()) replacements[name] = std::move(literal);
         }
@@ -15110,11 +15110,11 @@ static void substituteLateralBareScalarTargets(
                 return std::isalnum(c) || c == '_' || c == '$';
             });
         const size_t columnIndex = isBareIdentifier
-            ? (isSpecialValue(bareName) ? leftSchema.len
-                : localColumnNames.count(bareName) ? leftSchema.len
+            ? (isSpecialValue(bareName) ? leftSchema.len()
+                : localColumnNames.count(bareName) ? leftSchema.len()
                                                    : findOuterColumn(bareName))
-            : leftSchema.len;
-        if (columnIndex != leftSchema.len) {
+            : leftSchema.len();
+        if (columnIndex != leftSchema.len()) {
             std::string literal = makeOuterLiteral(columnIndex);
             if (literal.empty()) continue;
             std::string alias = asPos == std::string::npos
@@ -15455,7 +15455,7 @@ static bool lateralJoinPredicateMatches(
     std::map<std::string, std::string> typeHints;
     std::set<std::string> nullColumns;
     std::map<std::string, size_t> bareCounts;
-    for (size_t ci = 0; ci < leftSchema.len; ++ci) {
+    for (size_t ci = 0; ci < leftSchema.len(); ++ci) {
         const std::string& name = leftSchema.cols[ci].dataName;
         const std::string value = ci < leftValues.size()
             ? leftValues[ci] : std::string();
@@ -15477,11 +15477,11 @@ static bool lateralJoinPredicateMatches(
         if (ci < rightTypes.size()) typeHints[key] = rightTypes[ci];
         if (rightNulls[ci]) nullColumns.insert(key);
     }
-    for (size_t ci = 0; ci < leftVisibleSchema.len; ++ci)
+    for (size_t ci = 0; ci < leftVisibleSchema.len(); ++ci)
         ++bareCounts[toLower(leftVisibleSchema.cols[ci].dataName)];
     for (size_t ci = 0; ci < rightNames.size(); ++ci)
         ++bareCounts[toLower(rightNames[ci])];
-    for (size_t ci = 0; ci < leftVisibleSchema.len; ++ci) {
+    for (size_t ci = 0; ci < leftVisibleSchema.len(); ++ci) {
         const std::string name =
             toLower(leftVisibleSchema.cols[ci].dataName);
         if (bareCounts[name] != 1) continue;
@@ -16189,24 +16189,23 @@ static std::string processLateralJoins(const std::string& sql, Session& s,
                 ? relation.tableName : relation.alias;
             relation.schema = g_engine.getTableSchema(
                 s.currentDB, relation.resolvedName);
-            relation.columnOffset = leftTbl.len;
-            if (relation.schema.len > dbms::MAX_COLUMNS - leftTbl.len) {
+            relation.columnOffset = leftTbl.len();
+            if (relation.schema.len() > dbms::MAX_COLUMNS - leftTbl.len()) {
                 cout << "ERROR: LATERAL CROSS input has too many columns "
                         "(SQLSTATE 54011)" << endl;
                 failed = true;
                 return result;
             }
-            for (size_t ci = 0; ci < relation.schema.len; ++ci) {
+            for (size_t ci = 0; ci < relation.schema.len(); ++ci) {
                 const auto cached = materializedScopes.find(relation.tableName);
                 if (cached != materializedScopes.end()) {
                     hasMaterializedLeftRelation = true;
-                    leftTbl.cols[leftTbl.len++] =
-                        cached->second.physicalColumns.at(ci);
+                    leftTbl.append(cached->second.physicalColumns.at(ci));
                     leftColumnQualifiers.push_back(
                         cached->second.qualifiers.at(ci));
                     continue;
                 }
-                leftTbl.cols[leftTbl.len++] = relation.schema.cols[ci];
+                leftTbl.append(relation.schema.cols[ci]);
                 std::vector<std::string> qualifiers = {relation.prefix};
                 if (relation.alias.empty()) {
                     const auto path = lateralIdentifierPath(relation.tableName);
@@ -16240,7 +16239,7 @@ static std::string processLateralJoins(const std::string& sql, Session& s,
         LateralMaterializedScope leftBindingScope;
         leftBindingScope.qualifiers = leftColumnQualifiers;
         for (const LateralLeftRelation& relation : leftRelations) {
-            for (size_t ci = 0; ci < relation.schema.len; ++ci) {
+            for (size_t ci = 0; ci < relation.schema.len(); ++ci) {
                 leftBindingScope.physicalNames.push_back(
                     relation.prefix + "." +
                     quoteLeafIdentifier(relation.schema.cols[ci].dataName));
@@ -16310,7 +16309,7 @@ static std::string processLateralJoins(const std::string& sql, Session& s,
                     }
                     return columns;
                 }
-                for (size_t ci = 0; ci < relation.schema.len; ++ci) {
+                for (size_t ci = 0; ci < relation.schema.len(); ++ci) {
                     LateralVisibleColumn visible;
                     visible.column = relation.schema.cols[ci];
                     visible.leafIndices = {relation.columnOffset + ci};
@@ -16443,7 +16442,7 @@ static std::string processLateralJoins(const std::string& sql, Session& s,
             return result;
         }
         for (const LateralVisibleColumn& visible : leftVisibleColumns)
-            leftVisibleTbl.cols[leftVisibleTbl.len++] = visible.column;
+            leftVisibleTbl.append(visible.column);
 
         struct LateralLeftRow {
             std::vector<std::string> values;
@@ -16477,7 +16476,7 @@ static std::string processLateralJoins(const std::string& sql, Session& s,
                         ? relation.tableName
                         : quoteIdentifier(
                               normalizeLateralIdentifier(relation.alias));
-                    for (size_t ci = 0; ci < relation.schema.len; ++ci) {
+                    for (size_t ci = 0; ci < relation.schema.len(); ++ci) {
                         if (!leafProjection.empty()) leafProjection += ", ";
                         leafProjection += qualifier + "." +
                             quoteIdentifier(relation.schema.cols[ci].dataName) +
@@ -16503,7 +16502,7 @@ static std::string processLateralJoins(const std::string& sql, Session& s,
                 failed = true;
                 return result;
             }
-            if (leftColumnNames.size() != leftTbl.len ||
+            if (leftColumnNames.size() != leftTbl.len() ||
                 leftStructuredRows.size() != leftStructuredNulls.size() ||
                 (!leftStructuredAvailable && !leftDisplayRows.empty())) {
                 cout << "ERROR: LATERAL left JOIN did not produce aligned "
@@ -16514,8 +16513,8 @@ static std::string processLateralJoins(const std::string& sql, Session& s,
             if (leftStructuredAvailable) {
                 for (size_t rowIndex = 0;
                      rowIndex < leftStructuredRows.size(); ++rowIndex) {
-                    if (leftStructuredRows[rowIndex].size() != leftTbl.len ||
-                        leftStructuredNulls[rowIndex].size() != leftTbl.len) {
+                    if (leftStructuredRows[rowIndex].size() != leftTbl.len() ||
+                        leftStructuredNulls[rowIndex].size() != leftTbl.len()) {
                         cout << "ERROR: malformed structured LATERAL left "
                                 "JOIN row (SQLSTATE XX000)" << endl;
                         failed = true;
@@ -16548,7 +16547,7 @@ static std::string processLateralJoins(const std::string& sql, Session& s,
                     for (const LateralLeftRow& prefix : leftRows) {
                         for (const LateralStoredRow& sourceRow : sourceRows) {
                             LateralLeftRow product = prefix;
-                            for (size_t ci = 0; ci < relation.schema.len; ++ci) {
+                            for (size_t ci = 0; ci < relation.schema.len(); ++ci) {
                                 product.values.push_back(
                                     g_engine.extractColumnValue(
                                         sourceRow.data, relation.schema, ci));
@@ -16567,8 +16566,8 @@ static std::string processLateralJoins(const std::string& sql, Session& s,
         }
 
         for (LateralLeftRow& row : leftRows) {
-            if (row.values.size() != leftTbl.len ||
-                row.nulls.size() != leftTbl.len) {
+            if (row.values.size() != leftTbl.len() ||
+                row.nulls.size() != leftTbl.len()) {
                 cout << "ERROR: malformed LATERAL visible row "
                         "(SQLSTATE XX000)" << endl;
                 failed = true;
@@ -16617,8 +16616,8 @@ static std::string processLateralJoins(const std::string& sql, Session& s,
         for (const auto& leftRow : leftRows) {
             if (foldingTail) break;
             std::string replacedSql = innerSelect;
-            if (leftRow.values.size() != leftTbl.len ||
-                leftRow.nulls.size() != leftTbl.len) {
+            if (leftRow.values.size() != leftTbl.len() ||
+                leftRow.nulls.size() != leftTbl.len()) {
                 cout << "ERROR: malformed structured LATERAL left row "
                         "(SQLSTATE XX000)" << endl;
                 failed = true;
@@ -16627,7 +16626,7 @@ static std::string processLateralJoins(const std::string& sql, Session& s,
             const std::vector<std::string>& outerValues = leftRow.values;
             const std::vector<bool>& outerNulls = leftRow.nulls;
             // Replace left table column references with literal values
-            for (size_t ci = 0; ci < leftTbl.len; ++ci) {
+            for (size_t ci = 0; ci < leftTbl.len(); ++ci) {
                 const dbms::Column& column = leftTbl.cols[ci];
                 const std::string& val = outerValues[ci];
                 std::string escVal;
@@ -16834,9 +16833,9 @@ static std::string processLateralJoins(const std::string& sql, Session& s,
         // parser to misread as a relation name.
         if (leftRows.empty() && !foldingTail) {
             std::string probeSql = innerSelect;
-            std::vector<std::string> nullVisibleValues(leftVisibleTbl.len);
-            std::vector<bool> nullVisibleColumns(leftVisibleTbl.len, true);
-            for (size_t ci = 0; ci < leftTbl.len; ++ci) {
+            std::vector<std::string> nullVisibleValues(leftVisibleTbl.len());
+            std::vector<bool> nullVisibleColumns(leftVisibleTbl.len(), true);
+            for (size_t ci = 0; ci < leftTbl.len(); ++ci) {
                 replaceLateralQualifiedColumn(
                     probeSql, leftColumnQualifiers[ci],
                     leftTbl.cols[ci].dataName, "null");
@@ -16859,7 +16858,7 @@ static std::string processLateralJoins(const std::string& sql, Session& s,
 
         std::vector<std::string> combinedColNames;
         std::vector<std::string> combinedColTypes;
-        for (size_t ci = 0; ci < leftTbl.len; ++ci) {
+        for (size_t ci = 0; ci < leftTbl.len(); ++ci) {
             combinedColNames.push_back("__lat_l_" + std::to_string(ci));
             combinedColTypes.push_back(leftTbl.cols[ci].dataType);
         }
@@ -16893,20 +16892,20 @@ static std::string processLateralJoins(const std::string& sql, Session& s,
         combinedScope.physicalNames = combinedColNames;
         combinedScope.qualifiers = leftColumnQualifiers;
         combinedScope.visibleColumns = leftVisibleColumns;
-        for (size_t ci = 0; ci < leftTbl.len; ++ci)
+        for (size_t ci = 0; ci < leftTbl.len(); ++ci)
             combinedScope.physicalColumns.push_back(leftTbl.cols[ci]);
         const TableSchema physicalSchema =
             g_engine.getTableSchema(s.currentDB, tempTablePrefix(s, tmpName));
-        if (physicalSchema.len != combinedColNames.size()) {
+        if (physicalSchema.len() != combinedColNames.size()) {
             throw dbms::DbError("54011", "LATERAL materialized input has too many columns");
         }
         for (size_t ci = 0; ci < rightColNames.size(); ++ci) {
-            dbms::Column column = physicalSchema.cols[leftTbl.len + ci];
+            dbms::Column column = physicalSchema.cols[leftTbl.len() + ci];
             column.dataName = rightColNames[ci];
             combinedScope.physicalColumns.push_back(column);
             combinedScope.qualifiers.push_back({alias});
             combinedScope.visibleColumns.push_back(
-                {column, {leftTbl.len + ci}});
+                {column, {leftTbl.len() + ci}});
         }
         materializedScopes[tmpName] = std::move(combinedScope);
         finalScopeName = tmpName;
@@ -19127,9 +19126,9 @@ static bool checkSelectColumnPermission(Session& s, const string& tname,
                                      dbms::StorageEngine::TablePrivilege::Select)) {
             // Check if ALL columns of the table are individually allowed
             auto schema = g_engine.getTableSchema(s.currentDB, tname);
-            if (schema.len == 0) return true; // no columns = no restriction
+            if (schema.len() == 0) return true; // no columns = no restriction
             vector<string> allCols;
-            for (size_t i = 0; i < schema.len; ++i) allCols.push_back(schema.cols[i].dataName);
+            for (size_t i = 0; i < schema.len(); ++i) allCols.push_back(schema.cols[i].dataName);
             if (!g_engine.hasColumnPermission(s.currentDB, tname, effectiveSessionRole(s),
                                                dbms::StorageEngine::TablePrivilege::Select, allCols)) {
                 cout << "permission denied: SELECT * requires access to all columns on table " << tname << " (SQLSTATE 42501)" << endl;
@@ -19201,9 +19200,9 @@ static bool checkInsertColumnPermission(Session& s, const string& tname,
     if (cols.empty()) {
         // INSERT INTO t VALUES (...) - check all columns
         auto schema = g_engine.getTableSchema(s.currentDB, tname);
-        if (schema.len == 0) return true;
+        if (schema.len() == 0) return true;
         vector<string> allCols;
-        for (size_t i = 0; i < schema.len; ++i) allCols.push_back(schema.cols[i].dataName);
+        for (size_t i = 0; i < schema.len(); ++i) allCols.push_back(schema.cols[i].dataName);
         if (!g_engine.hasColumnPermission(s.currentDB, tname, effectiveSessionRole(s),
                                            dbms::StorageEngine::TablePrivilege::Insert, allCols)) {
             cout << "permission denied: INSERT requires access to all columns on table " << tname << endl;
@@ -20565,7 +20564,7 @@ static pair<bool, bool> scalarQueryRoles(const dbms::Expr* expression, bool scal
     if (currentQueryRowDemand() || select.limit || select.orderBy.empty() ||
         !select.ctes.empty() || select.setOp != dbms::SetOp::None ||
         !select.groupBy.empty() || !select.groupByElems.empty() || select.having ||
-        any_of(table.cols, table.cols + table.len,
+        any_of(table.cols.begin(), table.cols.end(),
             [](const auto& column) { return column.generatedKind == 'v'; })) return false;
     bool aggregate = false;
     function<void(const dbms::Expr*)> inspect = [&](const dbms::Expr* expression) {
@@ -20583,7 +20582,7 @@ static pair<bool, bool> scalarQueryRoles(const dbms::Expr* expression, bool scal
     static const set<string> physicalTypes = {"smallint","integer","bigint","real",
         "double precision","text","character","character varying","date",
         "time without time zone","timestamp without time zone","time","timestamp"};
-    for (size_t i = 0; i < table.len; ++i) {
+    for (size_t i = 0; i < table.len(); ++i) {
         const auto& column = table.cols[i];
         if (column.dataName == key->column)
             return column.isArray || !column.enumValues.empty() ||
@@ -20744,7 +20743,7 @@ static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bo
             !fromlessDemand && !possibleBitNegation && !physicalLimitDemand && !stringProjection) {
             const auto schema = g_engine.getTableSchema(session.currentDB, physical);
             typedSortDemand = ordinaryTypedSortDemand(*candidate, schema);
-            if (!typedSortDemand && none_of(schema.cols, schema.cols + schema.len,
+            if (!typedSortDemand && none_of(schema.cols.begin(), schema.cols.end(),
                         [](const dbms::Column& column) { return column.isArray; })) return false;
         }
         dbms::CatalogManager::QualifiedName name;
@@ -21120,7 +21119,7 @@ class PreparedWithDmlRuntime {
             if(!error.empty())throw dbms::DbError("0A000","WITH source type is not lowered: "+column.type);
             schema.append(cell);
         }
-        if(schema.len!=descriptor.size())throw dbms::DbError("54011","WITH source has too many columns");
+        if(schema.len()!=descriptor.size())throw dbms::DbError("54011","WITH source has too many columns");
         return schema;
     }
     const dbms::PreparedQuery::SourceRange& range(const dbms::SelectStmt* select) const {
@@ -21402,7 +21401,7 @@ class PreparedWithDmlRuntime {
                 const auto table=physical(range,session_);
                 checkPhysicalSourcePermission(owner,range,table);
                 scanSchema=g_engine.getTableSchema(session_.currentDB,table);
-                if(scanSchema.len!=range.columns.size())throw dbms::DbError("XX000","mutation source descriptor differs from physical relation");
+                if(scanSchema.len()!=range.columns.size())throw dbms::DbError("XX000","mutation source descriptor differs from physical relation");
                 dbms::OpPtr physicalScan;
                 const auto* select=dynamic_cast<const dbms::SelectStmt*>(owner);
                 if(readRoot_ && select && !hasCurrentQueryWindows(select) && ordinaryPhysicalRange(range) &&
@@ -21458,7 +21457,7 @@ class PreparedWithDmlRuntime {
                     vector<bool> bitmap;
                     optional<dbms::detail::ScopedStoredRowNullBitmap> nullOwner;
                     if (found && scan->lastStoredNullBitmap(bitmap)) nullOwner.emplace(scanSchema, bitmap);
-                    if(found)for(size_t i=0;i<scanSchema.len;++i) {
+                    if(found)for(size_t i=0;i<scanSchema.len();++i) {
                         const auto& column=scanSchema.cols[i];
                         if(column.generatedKind=='v'){cells.emplace_back();continue;}
                         bool computedNull=false;
@@ -22636,7 +22635,7 @@ static bool plainGeneratedJoinSourceProbe(const dbms::SelectStmt& select,Session
         const auto table=resolveTableName(session,item->tableName);
         if(!g_engine.tableExists(session.currentDB,table))return false;
         const auto schema=g_engine.getTableSchema(session.currentDB,table);
-        return any_of(schema.cols,schema.cols+schema.len,[](const auto& column){return column.generatedKind=='v';});
+        return any_of(schema.cols.begin(),schema.cols.end(),[](const auto& column){return column.generatedKind=='v';});
     };
     return hasPhysicalVirtual(select.fromClause.get());
 }
@@ -22871,7 +22870,7 @@ static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& 
             const auto table=resolveTableName(session,item->tableName);
             if(!g_engine.tableExists(session.currentDB,table))return false;
             const auto schema=g_engine.getTableSchema(session.currentDB,table);
-            return any_of(schema.cols,schema.cols+schema.len,[](const auto& column){return column.isArray;});
+            return any_of(schema.cols.begin(),schema.cols.end(),[](const auto& column){return column.isArray;});
         };
         if(!hasPhysicalArray(select->fromClause.get()))return false;
     }
@@ -24198,7 +24197,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
 
                     vector<string> colNames;
                     if (selectAll) {
-                        for (size_t i = 0; i < srcTbl.len; ++i)
+                        for (size_t i = 0; i < srcTbl.len(); ++i)
                             colNames.push_back(srcTbl.cols[i].dataName);
                     } else {
                         stringstream css(columns);
@@ -24372,7 +24371,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 TableSchema parentTbl = g_engine.getTableSchema(s.currentDB, parentName);
                 // Prepend parent columns (skip duplicates by name)
                 std::set<string> childCols;
-                for (size_t i = 0; i < tbl.len; ++i) childCols.insert(tbl.cols[i].dataName);
+                for (size_t i = 0; i < tbl.len(); ++i) childCols.insert(tbl.cols[i].dataName);
                 TableSchema merged;
                 merged.tablename = tbl.tablename;
                 merged.isUnlogged = tbl.isUnlogged;
@@ -24386,12 +24385,12 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 merged.defaultPartitionName = tbl.defaultPartitionName;
                 merged.pkColIndices = tbl.pkColIndices;
                 merged.uniqueConstraints = tbl.uniqueConstraints;
-                for (size_t i = 0; i < parentTbl.len; ++i) {
+                for (size_t i = 0; i < parentTbl.len(); ++i) {
                     if (childCols.count(parentTbl.cols[i].dataName)) continue;
                     merged.append(parentTbl.cols[i]);
                 }
-                for (size_t i = 0; i < tbl.len; ++i) merged.append(tbl.cols[i]);
-                for (size_t i = 0; i < tbl.fkLen; ++i) merged.appendFK(tbl.fks[i]);
+                for (size_t i = 0; i < tbl.len(); ++i) merged.append(tbl.cols[i]);
+                for (size_t i = 0; i < tbl.fkLen(); ++i) merged.appendFK(tbl.fks[i]);
                 tbl = merged;
                 // Record inheritance relationship
                 auto inhPath = std::filesystem::path(g_engine.dbPath(s.currentDB)) / ".inherits";
@@ -25009,7 +25008,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     } else {
                         const string baseTable = g_engine.getViewBaseTable(s.currentDB, tname);
                         TableSchema baseSchema = g_engine.getTableSchema(s.currentDB, baseTable);
-                        for (size_t i = 0; i < baseSchema.len; ++i) {
+                        for (size_t i = 0; i < baseSchema.len(); ++i) {
                             columns.push_back(baseSchema.cols[i].dataName);
                         }
                     }
@@ -25178,11 +25177,11 @@ static bool executeInternal(const string& rawSql, Session& s) {
         } else {
             // Omit column list: use all columns from table schema
             TableSchema tbl = g_engine.getTableSchema(s.currentDB, resolvedName);
-            if (tbl.len == 0) {
+            if (tbl.len() == 0) {
                 cout << "Table has no columns" << endl;
                 return true;
             }
-            for (size_t i = 0; i < tbl.len; ++i) {
+            for (size_t i = 0; i < tbl.len(); ++i) {
                 if (i > 0) colsStr += ",";
                 colsStr += tbl.cols[i].dataName;
             }
@@ -25266,11 +25265,11 @@ static bool executeInternal(const string& rawSql, Session& s) {
 
                 std::map<string, string> values;
                 for (size_t i = 0; i < cols.size(); ++i) {
-                    size_t colIdx = srcTbl.len;
-                    for (size_t j = 0; j < srcTbl.len; ++j) {
+                    size_t colIdx = srcTbl.len();
+                    for (size_t j = 0; j < srcTbl.len(); ++j) {
                         if (srcTbl.cols[j].dataName == selectCols[i]) { colIdx = j; break; }
                     }
-                    if (colIdx < srcTbl.len) {
+                    if (colIdx < srcTbl.len()) {
                         values[cols[i]] = dbms::StorageEngine::extractColumnValueStatic(row, srcTbl, colIdx);
                     }
                 }
@@ -25410,7 +25409,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
             // Validate ENUM constraints
             {
                 TableSchema tbl = g_engine.getTableSchema(s.currentDB, resolvedName);
-                for (size_t ci = 0; ci < tbl.len; ++ci) {
+                for (size_t ci = 0; ci < tbl.len(); ++ci) {
                     if (tbl.cols[ci].enumValues.empty()) continue;
                     auto it = values.find(tbl.cols[ci].dataName);
                     if (it == values.end()) continue;
@@ -25443,12 +25442,12 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     set<vector<size_t>> uniqueKeys;
                     vector<size_t> primaryKey = tbl.pkColIndices;
                     if (primaryKey.empty()) {
-                        for (size_t ci = 0; ci < tbl.len; ++ci) {
+                        for (size_t ci = 0; ci < tbl.len(); ++ci) {
                             if (tbl.cols[ci].isPrimaryKey) primaryKey.push_back(ci);
                         }
                     }
                     if (!primaryKey.empty()) uniqueKeys.insert(primaryKey);
-                    for (size_t ci = 0; ci < tbl.len; ++ci) {
+                    for (size_t ci = 0; ci < tbl.len(); ++ci) {
                         if (tbl.cols[ci].isUnique) uniqueKeys.insert({ci});
                     }
                     for (const auto& key : tbl.uniqueConstraints) {
@@ -25458,7 +25457,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                          g_engine.getIndexMetadata(s.currentDB, resolvedName)) {
                         if (!index.isUnique || index.isExpression ||
                             !index.whereCondition.empty()) continue;
-                        for (size_t ci = 0; ci < tbl.len; ++ci) {
+                        for (size_t ci = 0; ci < tbl.len(); ++ci) {
                             if (tbl.cols[ci].dataName == index.name) {
                                 uniqueKeys.insert({ci});
                                 break;
@@ -25470,14 +25469,14 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         if (!index.isUnique || !index.whereCondition.empty()) continue;
                         vector<size_t> columns;
                         for (const auto& columnName : index.columns) {
-                            auto found = tbl.len;
-                            for (size_t ci = 0; ci < tbl.len; ++ci) {
+                            auto found = tbl.len();
+                            for (size_t ci = 0; ci < tbl.len(); ++ci) {
                                 if (tbl.cols[ci].dataName == columnName) {
                                     found = ci;
                                     break;
                                 }
                             }
-                            if (found == tbl.len) {
+                            if (found == tbl.len()) {
                                 columns.clear();
                                 break;
                             }
@@ -25490,7 +25489,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         vector<string> whereConds;
                         bool completeKey = true;
                         for (const size_t ci : key) {
-                            if (ci >= tbl.len) {
+                            if (ci >= tbl.len()) {
                                 completeKey = false;
                                 break;
                             }
@@ -25708,11 +25707,11 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 return false;
             }
             TableSchema targetTbl = g_engine.getTableSchema(s.currentDB, resolvedTarget);
-            size_t pkIdx = targetTbl.len;
-            for (size_t i = 0; i < targetTbl.len; ++i) {
+            size_t pkIdx = targetTbl.len();
+            for (size_t i = 0; i < targetTbl.len(); ++i) {
                 if (targetTbl.cols[i].isPrimaryKey) { pkIdx = i; break; }
             }
-            if (pkIdx >= targetTbl.len) {
+            if (pkIdx >= targetTbl.len()) {
                 cout << "DELETE USING requires target table to have a primary key" << endl;
                 return true;
             }
@@ -26015,11 +26014,11 @@ static bool executeInternal(const string& rawSql, Session& s) {
             }
             // Get PK column of target table
             TableSchema targetTbl = g_engine.getTableSchema(s.currentDB, resolvedTarget);
-            size_t pkIdx = targetTbl.len;
-            for (size_t i = 0; i < targetTbl.len; ++i) {
+            size_t pkIdx = targetTbl.len();
+            for (size_t i = 0; i < targetTbl.len(); ++i) {
                 if (targetTbl.cols[i].isPrimaryKey) { pkIdx = i; break; }
             }
-            if (pkIdx >= targetTbl.len) {
+            if (pkIdx >= targetTbl.len()) {
                 cout << "UPDATE FROM requires target table to have a primary key" << endl;
                 return true;
             }
@@ -26537,7 +26536,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 for (const auto& tbl : allTables) {
                     if (tbl == name) continue;
                     auto schema = g_engine.getTableSchema(s.currentDB, tbl);
-                    for (size_t i = 0; i < schema.fkLen; ++i) {
+                    for (size_t i = 0; i < schema.fkLen(); ++i) {
                         if (schema.fks[i].refTable == name) {
                             cout << "Cannot drop table " << name
                                  << ": referenced by foreign key in table " << tbl << endl;
@@ -27422,12 +27421,12 @@ static bool executeInternal(const string& rawSql, Session& s) {
             else tname = colsRest;
             tname = resolveTableName(s, tname);
             TableSchema tbl = g_engine.getTableSchema(s.currentDB, tname);
-            if (tbl.len == 0) {
+            if (tbl.len() == 0) {
                 cout << "Table not exist" << endl;
                 return true;
             }
             cout << "field type null key default extra" << endl;
-            for (size_t i = 0; i < tbl.len; ++i) {
+            for (size_t i = 0; i < tbl.len(); ++i) {
                 const auto& c = tbl.cols[i];
                 cout << c.dataName << ' '
                      << c.dataType << ' '
@@ -27524,7 +27523,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
             size_t rowCount = g_engine.getTableRowCount(s.currentDB, tname);
             cout << "table: " << tname << "  rows: " << rowCount << endl;
             TableSchema tbl = g_engine.getTableSchema(s.currentDB, tname);
-            for (size_t i = 0; i < tbl.len; ++i) {
+            for (size_t i = 0; i < tbl.len(); ++i) {
                 auto cs = g_engine.getColumnStats(s.currentDB, tname, tbl.cols[i].dataName);
                 cout << "  column: " << tbl.cols[i].dataName
                      << "  cardinality: " << cs.cardinality
@@ -27573,12 +27572,12 @@ static bool executeInternal(const string& rawSql, Session& s) {
             string tname = trim(rest.substr(12));
             tname = resolveTableName(s, tname);
             TableSchema tbl = g_engine.getTableSchema(s.currentDB, tname);
-            if (tbl.len == 0) {
+            if (tbl.len() == 0) {
                 cout << "Table not exist" << endl;
                 return true;
             }
             string ddl = "CREATE TABLE " + tname + " (";
-            for (size_t i = 0; i < tbl.len; ++i) {
+            for (size_t i = 0; i < tbl.len(); ++i) {
                 if (i > 0) ddl += ", ";
                 const auto& c = tbl.cols[i];
                 ddl += c.dataName + " " + c.dataType;
@@ -27590,7 +27589,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
             }
             // Primary key
             vector<string> pkCols;
-            for (size_t i = 0; i < tbl.len; ++i) {
+            for (size_t i = 0; i < tbl.len(); ++i) {
                 if (tbl.cols[i].isPrimaryKey) pkCols.push_back(tbl.cols[i].dataName);
             }
             if (!pkCols.empty()) {
@@ -27602,7 +27601,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 ddl += ")";
             }
             // Foreign keys
-            for (size_t fi = 0; fi < tbl.fkLen; ++fi) {
+            for (size_t fi = 0; fi < tbl.fkLen(); ++fi) {
                 const auto& fk = tbl.fks[fi];
                 ddl += ", FOREIGN KEY (";
                 for (size_t i = 0; i < fk.colNames.size(); ++i) {
@@ -28712,7 +28711,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
             if (!g_engine.tableExists(s.currentDB, physical)) return false;
             const TableSchema schema = g_engine.getTableSchema(
                 s.currentDB, physical);
-            for (size_t index = 0; index < schema.len; ++index) {
+            for (size_t index = 0; index < schema.len(); ++index) {
                 if (schema.cols[index].dataName == column) return true;
             }
             return false;
@@ -29157,7 +29156,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 vector<vector<LogicalJoinColumn>> logicalJoinStages;
                 if (hasUsingJoin) {
                     for (size_t column = 0;
-                         column < pending.front().schema.len; ++column) {
+                         column < pending.front().schema.len(); ++column) {
                         logicalJoinColumns.push_back({
                             pending.front().schema.cols[column].dataName,
                             pending.front().schema.cols[column].dataType,
@@ -29173,7 +29172,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                             for (const auto& leftColumn : logicalJoinColumns) {
                                 bool existsOnRight = false;
                                 for (size_t column = 0;
-                                     column < pending[rightRelation].schema.len;
+                                     column < pending[rightRelation].schema.len();
                                      ++column) {
                                     existsOnRight = existsOnRight ||
                                         pending[rightRelation].schema.cols[column]
@@ -29204,10 +29203,10 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                 if (logicalJoinColumns[column].name == name)
                                     leftMatches.push_back(column);
                             }
-                            size_t rightColumn = pending[rightRelation].schema.len;
+                            size_t rightColumn = pending[rightRelation].schema.len();
                             size_t rightMatches = 0;
                             for (size_t column = 0;
-                                 column < pending[rightRelation].schema.len;
+                                 column < pending[rightRelation].schema.len();
                                  ++column) {
                                 if (pending[rightRelation].schema.cols[column]
                                         .dataName == name) {
@@ -29250,7 +29249,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                 nextColumns.push_back(column);
                         }
                         for (size_t column = 0;
-                             column < pending[rightRelation].schema.len;
+                             column < pending[rightRelation].schema.len();
                              ++column) {
                             const auto& schemaColumn =
                                 pending[rightRelation].schema.cols[column];
@@ -29319,7 +29318,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         if (!qualifierMatches) continue;
                         bool columnExists = false;
                         for (size_t index = 0;
-                             index < pending[relation].schema.len; ++index) {
+                             index < pending[relation].schema.len(); ++index) {
                             columnExists = columnExists ||
                                 pending[relation].schema.cols[index].dataName ==
                                     ref->column;
@@ -29664,7 +29663,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 // column name (deduplicated on clash)
                 std::map<std::pair<size_t, string>, string> colMap;
                 auto addCols = [&](size_t tIdx, const TableSchema& ts2) {
-                    for (size_t c = 0; c < ts2.len; ++c) {
+                    for (size_t c = 0; c < ts2.len(); ++c) {
                         string cn = ts2.cols[c].dataName;
                         bool clash = false;
                         for (const auto& existing : interCols) {
@@ -29712,7 +29711,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         const auto& firstSource = column.sources.front();
                         bool foundSourceType = false;
                         for (size_t sourceColumn = 0;
-                             sourceColumn < pending[firstSource.first].schema.len;
+                             sourceColumn < pending[firstSource.first].schema.len();
                              ++sourceColumn) {
                             const auto& declaration =
                                 pending[firstSource.first].schema.cols[sourceColumn];
@@ -30339,7 +30338,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                 } else {
                                     for (const auto& relation : pending) {
                                         for (size_t column = 0;
-                                             column < relation.schema.len;
+                                             column < relation.schema.len();
                                              ++column) {
                                             if (relation.schema.cols[column]
                                                     .dataName == ref->column)
@@ -30385,7 +30384,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                         ref->table + "\"", "42P01");
                             }
                             for (size_t column = 0;
-                                 column < pending[relationIndex].schema.len;
+                                 column < pending[relationIndex].schema.len();
                                  ++column) {
                                 if (pending[relationIndex].schema.cols[column].dataName ==
                                     ref->column) return true;
@@ -30456,7 +30455,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     } else {
                         for (const auto& relation : pending) {
                             for (size_t column = 0;
-                                 column < relation.schema.len; ++column) {
+                                 column < relation.schema.len(); ++column) {
                                 ++bareNameCounts[
                                     relation.schema.cols[column].dataName];
                             }
@@ -30481,7 +30480,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         for (size_t relationIndex = 0;
                              relationIndex < pending.size(); ++relationIndex) {
                             for (size_t column = 0;
-                                 column < pending[relationIndex].schema.len;
+                                 column < pending[relationIndex].schema.len();
                                  ++column) {
                                 const string& name = pending[relationIndex]
                                     .schema.cols[column].dataName;
@@ -30603,7 +30602,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 } else {
                     for (const auto& relation : pending) {
                         for (size_t column = 0;
-                             column < relation.schema.len; ++column)
+                             column < relation.schema.len(); ++column)
                             ++multiJoinBareNameCounts[
                                 relation.schema.cols[column].dataName];
                     }
@@ -30620,7 +30619,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     for (size_t relationIndex = 0;
                          relationIndex < pending.size(); ++relationIndex) {
                         for (size_t column = 0;
-                             column < pending[relationIndex].schema.len;
+                             column < pending[relationIndex].schema.len();
                              ++column) {
                             const string& name = pending[relationIndex]
                                 .schema.cols[column].dataName;
@@ -30673,7 +30672,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     map<string, string> hints;
                     for (const auto& relation : pending) {
                         for (size_t column = 0;
-                             column < relation.schema.len; ++column) {
+                             column < relation.schema.len(); ++column) {
                             const string& name =
                                 relation.schema.cols[column].dataName;
                             hints[relation.alias + "." + name] =
@@ -30729,7 +30728,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         for (size_t relationIndex = 0;
                              relationIndex < pending.size(); ++relationIndex) {
                             for (size_t columnIndex = 0;
-                                 columnIndex < pending[relationIndex].schema.len;
+                                 columnIndex < pending[relationIndex].schema.len();
                                  ++columnIndex) {
                                 const string& name = pending[relationIndex]
                                     .schema.cols[columnIndex].dataName;
@@ -30779,7 +30778,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                 return true;
                             }
                             for (size_t column = 0;
-                                 column < pending[relationIndex].schema.len;
+                                 column < pending[relationIndex].schema.len();
                                  ++column) {
                                 if (!addProjection(
                                         relationIndex, column,
@@ -30863,7 +30862,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                     }
                                     for (size_t column = 0;
                                          column < pending[relationIndex]
-                                                      .schema.len;
+                                                      .schema.len();
                                          ++column) {
                                         if (pending[relationIndex]
                                                 .schema.cols[column].dataName ==
@@ -31016,7 +31015,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                             size_t matches = 0;
                             for (size_t index = 0; index < pending.size(); ++index) {
                                 for (size_t column = 0;
-                                     column < pending[index].schema.len; ++column) {
+                                     column < pending[index].schema.len(); ++column) {
                                     if (pending[index].schema.cols[column].dataName ==
                                         reference->column) {
                                         relationIndex = index;
@@ -31057,9 +31056,9 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                  << endl;
                             return true;
                         }
-                        size_t columnIndex = pending[relationIndex].schema.len;
+                        size_t columnIndex = pending[relationIndex].schema.len();
                         for (size_t column = 0;
-                             column < pending[relationIndex].schema.len;
+                             column < pending[relationIndex].schema.len();
                              ++column) {
                             if (pending[relationIndex].schema.cols[column].dataName ==
                                 reference->column) {
@@ -31067,7 +31066,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                 break;
                             }
                         }
-                        if (columnIndex == pending[relationIndex].schema.len) {
+                        if (columnIndex == pending[relationIndex].schema.len()) {
                             cout << "ERROR: column \""
                                  << reference->toString()
                                  << "\" does not exist (SQLSTATE 42703)"
@@ -31286,7 +31285,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                          ++relationIndex) {
                                         for (size_t columnIndex = 0;
                                              columnIndex < pending[relationIndex]
-                                                               .schema.len;
+                                                               .schema.len();
                                              ++columnIndex) {
                                             if (pending[relationIndex]
                                                     .schema.cols[columnIndex]
@@ -31340,7 +31339,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                 }
                                 for (size_t columnIndex = 0;
                                      columnIndex < pending[relationIndex]
-                                                       .schema.len;
+                                                       .schema.len();
                                      ++columnIndex) {
                                     if (pending[relationIndex]
                                             .schema.cols[columnIndex].dataName !=
@@ -31725,7 +31724,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         auto appendRangeStar = [&](const TableSchema& table,
                                                    const string& prefix,
                                                    const string& range) {
-                            for (size_t i = 0; i < table.len; ++i) {
+                            for (size_t i = 0; i < table.len(); ++i) {
                                 const string& name = table.cols[i].dataName;
                                 requestedCols.push_back(dbms::StorageEngine::joinRangeColumnKey(range, name, true));
                                 requestedHeaders.push_back(name);
@@ -31922,9 +31921,9 @@ static bool executeInternal(const string& rawSql, Session& s) {
             if (forUpdate) { cout << "FOR UPDATE not supported with JOIN" << endl; return true; }
 
             map<string, size_t> joinBareNameCounts;
-            for (size_t i = 0; i < leftTbl.len; ++i)
+            for (size_t i = 0; i < leftTbl.len(); ++i)
                 ++joinBareNameCounts[leftTbl.cols[i].dataName];
-            for (size_t i = 0; i < rightTbl.len; ++i)
+            for (size_t i = 0; i < rightTbl.len(); ++i)
                 ++joinBareNameCounts[rightTbl.cols[i].dataName];
             if (wherePos != string::npos) {
                 const size_t whereEnd = min({groupPos, havingPos, windowPos,
@@ -31959,13 +31958,13 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                     "missing FROM-clause entry for table \"" +
                                         ref->table + "\"", "42P01");
                             const bool inLeft = [&] {
-                                for (size_t i = 0; i < leftTbl.len; ++i)
+                                for (size_t i = 0; i < leftTbl.len(); ++i)
                                     if (leftTbl.cols[i].dataName == ref->column)
                                         return true;
                                 return false;
                             }();
                             const bool inRight = [&] {
-                                for (size_t i = 0; i < rightTbl.len; ++i)
+                                for (size_t i = 0; i < rightTbl.len(); ++i)
                                     if (rightTbl.cols[i].dataName == ref->column)
                                         return true;
                                 return false;
@@ -32020,7 +32019,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
             auto addJoinTypeHints = [&](const TableSchema& table,
                                         const string& prefix,
                                         const string& physicalName) {
-                for (size_t i = 0; i < table.len; ++i) {
+                for (size_t i = 0; i < table.len(); ++i) {
                     const string& name = table.cols[i].dataName;
                     const string& type = table.cols[i].dataType;
                     if (joinBareNameCounts[name] == 1) {
@@ -32042,10 +32041,10 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 }
                 bool inLeft = false;
                 bool inRight = false;
-                for (size_t index = 0; index < leftTbl.len; ++index) {
+                for (size_t index = 0; index < leftTbl.len(); ++index) {
                     inLeft = inLeft || leftTbl.cols[index].dataName == column;
                 }
-                for (size_t index = 0; index < rightTbl.len; ++index) {
+                for (size_t index = 0; index < rightTbl.len(); ++index) {
                     inRight = inRight || rightTbl.cols[index].dataName == column;
                 }
                 if (inLeft != inRight) return inLeft ? 0 : 1;
@@ -32136,7 +32135,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     if (side < 0) return false;
                     const TableSchema& table = side == 0 ? leftTbl : rightTbl;
                     bool found = false;
-                    for (size_t index = 0; index < table.len; ++index)
+                    for (size_t index = 0; index < table.len(); ++index)
                         found = found || table.cols[index].dataName == ref->column;
                     if (!found) return false;
                     name = ref->column;
@@ -32160,10 +32159,10 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     }
                     if (ref->table.empty()) {
                         bool inLeft = false, inRight = false;
-                        for (size_t index = 0; index < leftTbl.len; ++index)
+                        for (size_t index = 0; index < leftTbl.len(); ++index)
                             inLeft = inLeft ||
                                 leftTbl.cols[index].dataName == ref->column;
-                        for (size_t index = 0; index < rightTbl.len; ++index)
+                        for (size_t index = 0; index < rightTbl.len(); ++index)
                             inRight = inRight ||
                                 rightTbl.cols[index].dataName == ref->column;
                         if (inLeft && inRight) {
@@ -32331,9 +32330,9 @@ static bool executeInternal(const string& rawSql, Session& s) {
             // Qualified names resolve to their table; bare names prefer
             // the left table (the engine's colMap does the same).
             map<string, pair<int, int>> rangePositions;
-            for (size_t i = 0; i < leftTbl.len; ++i)
+            for (size_t i = 0; i < leftTbl.len(); ++i)
                 rangePositions[dbms::StorageEngine::joinRangeColumnKey(leftRange, leftTbl.cols[i].dataName, true)] = {0, static_cast<int>(i)};
-            for (size_t i = 0; i < rightTbl.len; ++i)
+            for (size_t i = 0; i < rightTbl.len(); ++i)
                 rangePositions[dbms::StorageEngine::joinRangeColumnKey(rightRange, rightTbl.cols[i].dataName, true)] = {1, static_cast<int>(i)};
             auto enginePos = [&](const string& col) -> pair<int,int> {
                 // returns {which: 0 left/1 right, idx}; {-1,-1} unknown
@@ -32341,9 +32340,9 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     const auto found = rangePositions.find(col);
                     return found == rangePositions.end() ? pair<int,int>{-1, -1} : found->second;
                 }
-                for (size_t i = 0; i < leftTbl.len; ++i)
+                for (size_t i = 0; i < leftTbl.len(); ++i)
                     if (leftTbl.cols[i].dataName == col) return {0, (int)i};
-                for (size_t i = 0; i < rightTbl.len; ++i)
+                for (size_t i = 0; i < rightTbl.len(); ++i)
                     if (rightTbl.cols[i].dataName == col) return {1, (int)i};
                 return {-1, -1};
             };
@@ -32358,7 +32357,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 };
                 auto hasJoinColumn = [](const TableSchema& table,
                                         const string& name) {
-                    for (size_t i = 0; i < table.len; ++i)
+                    for (size_t i = 0; i < table.len(); ++i)
                         if (table.cols[i].dataName == name) return true;
                     return false;
                 };
@@ -32471,9 +32470,9 @@ static bool executeInternal(const string& rawSql, Session& s) {
             } else if (selectAll) {
                 // PG names SELECT * join columns unqualified (bare column
                 // names, left columns then right columns).
-                for (size_t i = 0; i < leftTbl.len; ++i)
+                for (size_t i = 0; i < leftTbl.len(); ++i)
                     cout << leftTbl.cols[i].dataName << ' ';
-                for (size_t i = 0; i < rightTbl.len; ++i)
+                for (size_t i = 0; i < rightTbl.len(); ++i)
                     cout << rightTbl.cols[i].dataName << ' ';
             } else {
                 for (const auto& name : requestedHeaders) cout << name << ' ';
@@ -32493,12 +32492,12 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                 joinPhysicalTypeHints));
                     }
                 } else if (selectAll) {
-                    for (size_t i = 0; i < leftTbl.len; ++i) {
+                    for (size_t i = 0; i < leftTbl.len(); ++i) {
                         joinProtocolResult.columns.push_back(leftTbl.cols[i].dataName);
                         joinProtocolResult.columnTypes.push_back(leftTbl.cols[i].dataType +
                             (leftTbl.cols[i].isArray ? "[]" : ""));
                     }
-                    for (size_t i = 0; i < rightTbl.len; ++i) {
+                    for (size_t i = 0; i < rightTbl.len(); ++i) {
                         joinProtocolResult.columns.push_back(rightTbl.cols[i].dataName);
                         joinProtocolResult.columnTypes.push_back(rightTbl.cols[i].dataType +
                             (rightTbl.cols[i].isArray ? "[]" : ""));
@@ -32635,7 +32634,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                             cellIdx = position.second;
                             inputColumn = &leftTbl.cols[position.second];
                         } else if (position.first == 1 && position.second >= 0) {
-                            cellIdx = static_cast<int>(leftTbl.len) + position.second;
+                            cellIdx = static_cast<int>(leftTbl.len()) + position.second;
                             inputColumn = &rightTbl.cols[position.second];
                         }
                     }
@@ -32736,7 +32735,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 if (position.first == 0 && position.second >= 0)
                     return position.second;
                 if (position.first == 1 && position.second >= 0)
-                    return static_cast<int>(leftTbl.len) + position.second;
+                    return static_cast<int>(leftTbl.len()) + position.second;
                 return -1;
             };
             vector<dbms::StoredReferenceOutputRole> joinOutputRoles;
@@ -32769,7 +32768,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                               size_t offset,
                                               const string& prefix) {
                         for (size_t columnIndex = 0;
-                             columnIndex < table.len; ++columnIndex) {
+                             columnIndex < table.len(); ++columnIndex) {
                             const string& name =
                                 table.cols[columnIndex].dataName;
                             const size_t at = offset + columnIndex;
@@ -32782,7 +32781,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         }
                     };
                     addTableValues(leftTbl, 0, leftPrefix);
-                    addTableValues(rightTbl, leftTbl.len, rightPrefix);
+                    addTableValues(rightTbl, leftTbl.len(), rightPrefix);
                 }
                 vector<string> cells;
                 vector<bool> nulls;
@@ -32929,7 +32928,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         const size_t ordinal = stoull(part, &consumed);
                         if (consumed == part.size() && ordinal > 0 &&
                             ordinal <= (selectAll
-                                ? leftTbl.len + rightTbl.len
+                                ? leftTbl.len() + rightTbl.len()
                                 : requestedCols.size())) {
                             key.projected = true;
                             key.index = ordinal - 1;
@@ -32971,9 +32970,9 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         else if (position.first == 1 && position.second >= 0)
                             key.column = &rightTbl.cols[position.second];
                     } else if (key.projected && selectAll) {
-                        key.column = key.index < leftTbl.len
+                        key.column = key.index < leftTbl.len()
                             ? &leftTbl.cols[key.index]
-                            : &rightTbl.cols[key.index - leftTbl.len];
+                            : &rightTbl.cols[key.index - leftTbl.len()];
                     }
                     if (isDistinct && !key.projected) {
                         bool appearsInOutput = false;
@@ -33232,7 +33231,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 for (const auto& t : g_engine.getTableNames(cat)) {
                     auto sch = g_engine.getTableSchema(cat, t);
                     size_t ord = 1;
-                    for (size_t ci = 0; ci < sch.len; ++ci, ++ord)
+                    for (size_t ci = 0; ci < sch.len(); ++ci, ++ord)
                         catRows.push_back({cat, "public", t,
                                            sch.cols[ci].dataName,
                                            std::to_string(ord),
@@ -33672,7 +33671,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
             }
         }
         set<string> visibleColumns;
-        for (size_t i = 0; i < tbl.len; ++i) {
+        for (size_t i = 0; i < tbl.len(); ++i) {
             visibleColumns.insert(tbl.cols[i].dataName);
             sourceRange.columns.emplace(tbl.cols[i].dataName, i);
         }
@@ -33771,7 +33770,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 throw dbms::DbError(state, error);
             return dbms::ExprHelper::scalarExpressionIdentity(expression,
                 [&](const dbms::ColumnRefExpr& column) -> string {
-                    for (size_t i = 0; i < tbl.len; ++i) {
+                    for (size_t i = 0; i < tbl.len(); ++i) {
                         if (tbl.cols[i].dataName != column.column) continue;
                         const auto field = [](const string& value) {
                             return to_string(value.size()) + ":" + value;
@@ -34290,7 +34289,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
         if (!groupByCols.empty()) {
             size_t primaryKeyColumns = 0;
             size_t groupedPrimaryKeyColumns = 0;
-            for (size_t i = 0; i < tbl.len; ++i) {
+            for (size_t i = 0; i < tbl.len(); ++i) {
                 if (!tbl.cols[i].isPrimaryKey) continue;
                 ++primaryKeyColumns;
                 if (find(groupByCols.begin(), groupByCols.end(),
@@ -34693,7 +34692,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
         }
         nestedWindowProjection = prepareNestedWindowProjection(s, effectiveRawSql, namedWindows);
         if (nestedWindowProjection) {
-            if (nestedWindowProjection->source->columns.size() != tbl.len)
+            if (nestedWindowProjection->source->columns.size() != tbl.len())
                 throw dbms::DbError("XX000", "window projection source descriptor changed");
             windowFuncs = nestedWindowProjection->windows;
             hasWindow = true;
@@ -34705,7 +34704,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 const bool sourceColumn = bindings[i].column.has_value();
                 if (sourceColumn) {
                     const auto& binding = *bindings[i].column;
-                    if (binding.sourceOrdinal != nestedWindowProjection->source->ordinal || binding.columnOrdinal >= tbl.len)
+                    if (binding.sourceOrdinal != nestedWindowProjection->source->ordinal || binding.columnOrdinal >= tbl.len())
                         throw dbms::DbError("XX000", "window projection column escaped its source owner");
                     item.arg = tbl.cols[binding.columnOrdinal].dataName;
                     target.colName = item.arg;
@@ -34826,7 +34825,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     selectExprs.push_back(std::move(expression));
                     hasScalar = true;
                     exprTypes.push_back(3);
-                    for (size_t column = 0; column < tbl.len; ++column) {
+                    for (size_t column = 0; column < tbl.len(); ++column) {
                         const auto referenced = dbms::ExprHelper::referencesColumn(item, tbl.cols[column].dataName);
                         if (!referenced || *referenced) selectCols.insert(tbl.cols[column].dataName);
                     }
@@ -34844,7 +34843,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     selectExprs.push_back(std::move(expression));
                     hasScalar = true;
                     exprTypes.push_back(3);
-                    for (size_t column = 0; column < tbl.len; ++column) {
+                    for (size_t column = 0; column < tbl.len(); ++column) {
                         const auto referenced = dbms::ExprHelper::referencesColumn(
                             item, tbl.cols[column].dataName);
                         if (!referenced || *referenced) selectCols.insert(tbl.cols[column].dataName);
@@ -34870,7 +34869,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     selectExprs.push_back(std::move(expr));
                     hasScalar = true;
                     exprTypes.push_back(3);
-                    for (size_t ci = 0; ci < tbl.len; ++ci) {
+                    for (size_t ci = 0; ci < tbl.len(); ++ci) {
                         const auto referenced = dbms::ExprHelper::referencesColumn(
                             item, tbl.cols[ci].dataName);
                         if (!referenced || *referenced) selectCols.insert(tbl.cols[ci].dataName);
@@ -35017,12 +35016,12 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         if (bare.find('(') != string::npos) {
                             string inner = bare.substr(bare.find('(') + 1);
                             inner = inner.substr(0, inner.rfind(')'));
-                            for (size_t ci = 0; ci < tbl.len; ++ci)
+                            for (size_t ci = 0; ci < tbl.len(); ++ci)
                                 if (inner == tbl.cols[ci].dataName) { selectCols.insert(inner); break; }
                             continue;
                         }
                         if (bare.size() >= 2 && bare.front() == 39) continue;
-                        for (size_t ci = 0; ci < tbl.len; ++ci) {
+                        for (size_t ci = 0; ci < tbl.len(); ++ci) {
                             if (tbl.cols[ci].dataName == bare) { selectCols.insert(bare); break; }
                         }
                     }
@@ -35362,7 +35361,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                             for (const auto& a : expr.funcArgs) {
                                 string ta = trim(a);
                                 if (ta.size() >= 2 && ta.front() == '\'' && ta.back() == '\'') continue;
-                                for (size_t ci = 0; ci < tbl.len; ++ci) {
+                                for (size_t ci = 0; ci < tbl.len(); ++ci) {
                                     if (tbl.cols[ci].dataName == ta) {
                                         selectCols.insert(ta);
                                         break;
@@ -35535,7 +35534,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                             arithRawText[(size_t)(selectExprs.size() - 1)] = item;
                             // fetch operand columns
                             for (const auto& a : expr.funcArgs) {
-                                for (size_t ci = 0; ci < tbl.len; ++ci) {
+                                for (size_t ci = 0; ci < tbl.len(); ++ci) {
                                     if (tbl.cols[ci].dataName == a) { selectCols.insert(a); break; }
                                 }
                             }
@@ -35554,7 +35553,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         selectExprs.push_back(expr);
                         if (!selectAll) {
                             bool found = false;
-                            for (size_t i = 0; i < tbl.len; ++i) {
+                            for (size_t i = 0; i < tbl.len(); ++i) {
                                 if (tbl.cols[i].dataName == item) { found = true; break; }
                             }
                             if (!found) {
@@ -35633,7 +35632,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                     }
                                     if (!exprTypes.empty()) exprTypes.back() = 3;
                                     hasScalar = true;
-                                    for (size_t ci2 = 0; ci2 < tbl.len; ++ci2) {
+                                    for (size_t ci2 = 0; ci2 < tbl.len(); ++ci2) {
                                         if (item.find(tbl.cols[ci2].dataName) != string::npos)
                                             selectCols.insert(tbl.cols[ci2].dataName);
                                     }
@@ -35743,7 +35742,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         break;
                     }
                     bool found = false;
-                    for (size_t i = 0; i < tbl.len; ++i) {
+                    for (size_t i = 0; i < tbl.len(); ++i) {
                         if (tbl.cols[i].dataName == item) {
                             found = true;
                             break;
@@ -35952,7 +35951,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         if(!select || select->selectList.size()!=1 || select->fromClause)
                             throw dbms::DbError("42601","invalid literal IN predicate");
                         map<string,string> hints;
-                        for(size_t i=0;i<tbl.len;++i)
+                        for(size_t i=0;i<tbl.len();++i)
                             hints[tbl.cols[i].dataName]=tbl.cols[i].dataType+(tbl.cols[i].isArray?"[]":"");
                         dbms::ExprHelper::prepareArrayTypes(select->selectList.front().expr.get(),hints,queryDb,&g_engine);
                     }
@@ -36017,7 +36016,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 // ordinals belong to the structured post-projection sorter;
                 // passing them down creates an invalid physical sort key.
                 const auto orderTable = g_engine.getTableSchema(ctx.dbname, tblName);
-                for (size_t i = 0; i < orderTable.len; ++i) {
+                for (size_t i = 0; i < orderTable.len(); ++i) {
                     if (orderTable.cols[i].dataName == orderBy->colName) {
                         ctx.orderByCol = orderBy->colName;
                         ctx.orderByAsc = orderBy->ascending;
@@ -36137,7 +36136,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
             // to its decoded native key. A literal dot or :: in that real
             // physical name must not become qualification/cast syntax again.
             if(legacyOrderedSumCount && func=="sum")
-                for(size_t i=0;i<tbl.len;++i)
+                for(size_t i=0;i<tbl.len();++i)
                     if(tbl.cols[i].dataName==arg){inputType=tbl.cols[i].dataType;break;}
             // A PostgreSQL-style cast controls the aggregate overload.
             size_t castAt = inputType.empty()?arg.rfind("::"):string::npos;
@@ -36153,7 +36152,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 column = trim(column);
                 if (column.size() >= 2 && column.front() == 34 && column.back() == 34)
                     column = decodeQuotedIdentifier(column);
-                for (size_t i = 0; i < tbl.len; ++i) {
+                for (size_t i = 0; i < tbl.len(); ++i) {
                     if (tbl.cols[i].dataName == column) {
                         inputType = tbl.cols[i].dataType;
                         break;
@@ -36225,7 +36224,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 return 0;
             };
             int best = 0;
-            for (size_t ci = 0; ci < tbl.len; ++ci) {
+            for (size_t ci = 0; ci < tbl.len(); ++ci) {
                 const string& name = tbl.cols[ci].dataName;
                 size_t pos = expr.find(name);
                 bool referenced = false;
@@ -36284,7 +36283,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 size_t dot = source.rfind('.');
                 if (dot != string::npos) source = source.substr(dot + 1);
                 source = trim(source);
-                for (size_t ci = 0; ci < tbl.len; ++ci)
+                for (size_t ci = 0; ci < tbl.len(); ++ci)
                     if (tbl.cols[ci].dataName == source)
                         return tbl.cols[ci].dataType;
             }
@@ -36339,7 +36338,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 string source = item;
                 size_t dot = source.rfind('.');
                 if (dot != string::npos) source = source.substr(dot + 1);
-                for (size_t ci = 0; ci < tbl.len; ++ci)
+                for (size_t ci = 0; ci < tbl.len(); ++ci)
                     if (tbl.cols[ci].dataName == source) {
                         type = tbl.cols[ci].dataType;
                         break;
@@ -36378,7 +36377,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 searchAt = subqueryAt + replacement.size();
             }
             map<string, string> hints;
-            for (size_t ci = 0; ci < tbl.len; ++ci) {
+            for (size_t ci = 0; ci < tbl.len(); ++ci) {
                 hints[tbl.cols[ci].dataName] = tbl.cols[ci].dataType;
                 hints[tname + "." + tbl.cols[ci].dataName] =
                     tbl.cols[ci].dataType;
@@ -36710,7 +36709,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 if (keyIndex < groupByCols.size()) {
                     const string& key = groupByCols[keyIndex];
                     string type = groupExpressionProtocolType(key);
-                    for (size_t ci = 0; ci < tbl.len; ++ci) {
+                    for (size_t ci = 0; ci < tbl.len(); ++ci) {
                         if (tbl.cols[ci].dataName == key) {
                             type = tbl.cols[ci].dataType;
                             break;
@@ -36727,7 +36726,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     const string& column = selectExprs[ei].colName;
                     groupProtocolColumns.push_back(
                         selectExprs[ei].displayName);
-                    for (size_t ci = 0; ci < tbl.len; ++ci) {
+                    for (size_t ci = 0; ci < tbl.len(); ++ci) {
                         if (tbl.cols[ci].dataName == column) {
                             groupProtocolTypes.push_back(
                                 tbl.cols[ci].dataType);
@@ -36745,7 +36744,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     ei < rawGroupBodies.size() &&
                     rawGroupBodies[ei].find('(') == string::npos) {
                     map<string, string> typeHints;
-                    for (size_t ci = 0; ci < tbl.len; ++ci)
+                    for (size_t ci = 0; ci < tbl.len(); ++ci)
                         typeHints[tbl.cols[ci].dataName] =
                             tbl.cols[ci].dataType;
                     groupProtocolColumns.push_back(
@@ -36875,7 +36874,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 }
             }
             auto hasColumn = [&](const string& name) {
-                for (size_t i = 0; i < tbl.len; ++i) {
+                for (size_t i = 0; i < tbl.len(); ++i) {
                     if (tbl.cols[i].dataName == name) return true;
                 }
                 return false;
@@ -37094,7 +37093,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
             if (structuredAggregateRows &&
                 !derivedGroupExpressions.empty()) {
                 map<string, string> typeHints;
-                for (size_t ci = 0; ci < tbl.len; ++ci)
+                for (size_t ci = 0; ci < tbl.len(); ++ci)
                     typeHints[tbl.cols[ci].dataName] =
                         tbl.cols[ci].dataType;
                 for (size_t ri = 0;
@@ -37224,7 +37223,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                     // Numeric group columns substitute
                                     // unquoted (text needs quotes).
                                     bool colIsNumeric = false;
-                                    for (size_t ci = 0; ci < tbl.len; ++ci) {
+                                    for (size_t ci = 0; ci < tbl.len(); ++ci) {
                                         if (tbl.cols[ci].dataName == col) {
                                             string dt = tbl.cols[ci].dataType;
                                             for (auto& dc : dt) dc = static_cast<char>(tolower(static_cast<unsigned char>(dc)));
@@ -37327,7 +37326,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                      const string& col = groupByCols[gi];
                                      const string& val = cells[gi];
                                      bool colIsNumeric = false;
-                                     for (size_t ci = 0; ci < tbl.len; ++ci) {
+                                     for (size_t ci = 0; ci < tbl.len(); ++ci) {
                                          if (tbl.cols[ci].dataName == col) {
                                              string dt = tbl.cols[ci].dataType;
                                              for (auto& dc : dt) dc = static_cast<char>(tolower(static_cast<unsigned char>(dc)));
@@ -37356,7 +37355,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                          const string& col = groupByCols[gi];
                                          const string& val = cells[gi];
                                          bool colIsNumeric = false;
-                                         for (size_t ci = 0; ci < tbl.len; ++ci) {
+                                         for (size_t ci = 0; ci < tbl.len(); ++ci) {
                                              if (tbl.cols[ci].dataName == col) {
                                                  string dt = tbl.cols[ci].dataType;
                                                  for (auto& dc : dt) dc = static_cast<char>(tolower(static_cast<unsigned char>(dc)));
@@ -37683,7 +37682,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                             string source = aggItems[ai].arg;
                             size_t dot = source.rfind('.');
                             if (dot != string::npos) source = source.substr(dot + 1);
-                            for (size_t ci = 0; ci < tbl.len; ++ci) {
+                            for (size_t ci = 0; ci < tbl.len(); ++ci) {
                                 if (tbl.cols[ci].dataName == source) {
                                     type = tbl.cols[ci].dataType;
                                     break;
@@ -37723,7 +37722,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 !hasWindow && !hasScalar && distinctOnCols.empty() &&
                 exprOrderBySpecs.empty();
             auto hasAggregateColumn = [&](const string& name) {
-                for (size_t i = 0; i < tbl.len; ++i) {
+                for (size_t i = 0; i < tbl.len(); ++i) {
                     if (tbl.cols[i].dataName == name) return true;
                 }
                 return false;
@@ -37967,7 +37966,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 argument.filter=call->filter.get();
                 const auto source = find_if(argument.query->sourceRanges.begin(), argument.query->sourceRanges.end(),
                     [&](const auto& range) { return range.owner == select; });
-                if (source == argument.query->sourceRanges.end() || source->columns.size() != tbl.len)
+                if (source == argument.query->sourceRanges.end() || source->columns.size() != tbl.len())
                     throw dbms::DbError("XX000", "window arguments lost their actual source descriptor");
                 argument.sourceOrdinal = source->ordinal; argument.descriptor = source->columns;
                 {
@@ -38044,7 +38043,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 if(previous==initializedFrames.end())initializedFrames.emplace(argument.frameIdentity,
                     make_pair(function.preparedFrame.startOffset,function.preparedFrame.endOffset));
             }
-            const bool generatedPhysicalInput=any_of(tbl.cols,tbl.cols+tbl.len,
+            const bool generatedPhysicalInput=any_of(tbl.cols.begin(),tbl.cols.end(),
                 [](const dbms::Column& column){return column.generatedKind=='v';});
             // This older raw-row WindowOp has no generated-input receiver;
             // its existing semantic fallback below now owns that transport.
@@ -38063,9 +38062,9 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     }
                     if (wf.name == "lag" || wf.name == "lead") {
                         const auto& argument=windowArguments[volcanoWindowFunctions.size()];
-                        const auto input=find_if(tbl.cols,tbl.cols+tbl.len,
+                        const auto input=find_if(tbl.cols.begin(),tbl.cols.end(),
                             [&](const auto& column){return column.dataName==spec.argument;});
-                        if(input==tbl.cols+tbl.len ||
+                        if(input==tbl.cols.end() ||
                            dbms::ExprHelper::canonicalResultTypeName(input->dataType)!=
                            dbms::ExprHelper::canonicalResultTypeName(argument.query->output.front().type)) {
                             // A real common-type promotion must be executed
@@ -38098,7 +38097,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         break;
                     }
                     bool found = false;
-                    for (size_t ci = 0; ci < tbl.len; ++ci) {
+                    for (size_t ci = 0; ci < tbl.len(); ++ci) {
                         if (tbl.cols[ci].dataName == item) {
                             found = true;
                             break;
@@ -38118,7 +38117,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                       spec.collation.empty();
                 if (canUseVolcanoWindow) {
                     bool found = false;
-                    for (size_t ci = 0; ci < tbl.len; ++ci) {
+                    for (size_t ci = 0; ci < tbl.len(); ++ci) {
                         if (tbl.cols[ci].dataName == spec.colName) {
                             found = true;
                             break;
@@ -38233,19 +38232,19 @@ static bool executeInternal(const string& rawSql, Session& s) {
             };
             vector<LegacyWindowRow> rows;
             dbms::DatumMetadataContextPtr windowInputMetadata;
-            if(any_of(tbl.cols,tbl.cols+tbl.len,[](const dbms::Column& column){return column.generatedKind=='v';}))
+            if(any_of(tbl.cols.begin(),tbl.cols.end(),[](const dbms::Column& column){return column.generatedKind=='v';}))
                 windowInputMetadata=g_engine.prepareDatumMetadataContext(queryDb,tname);
             const auto windowGeneration=windowInputMetadata?windowInputMetadata->generatedSource:dbms::GeneratedRelationPtr{};
-            vector<dbms::GeneratedReadPtr> windowReads(tbl.len);
+            vector<dbms::GeneratedReadPtr> windowReads(tbl.len());
             if(windowGeneration) {
-                if(windowGeneration->columns.size()!=tbl.len)throw dbms::DbError("XX000","window generated source lost its actual declaration");
-                map<string,string> names;for(size_t i=0;i<tbl.len;++i)names.emplace(tbl.cols[i].dataName,tbl.cols[i].dataName);
-                for(size_t i=0;i<tbl.len;++i)if(windowGeneration->columns[i])
+                if(windowGeneration->columns.size()!=tbl.len())throw dbms::DbError("XX000","window generated source lost its actual declaration");
+                map<string,string> names;for(size_t i=0;i<tbl.len();++i)names.emplace(tbl.cols[i].dataName,tbl.cols[i].dataName);
+                for(size_t i=0;i<tbl.len();++i)if(windowGeneration->columns[i])
                     windowReads[i]=dbms::bindGeneratedColumn(windowGeneration->columns[i],0,names,true);
             }
             dbms::ExprEvaluator generatedWindowReader;generatedWindowReader.setCurrentDB(queryDb);
             const auto windowValue=[&](const LegacyWindowRow& row,const string& name)->dbms::ExprValue {
-                for(size_t i=0;i<tbl.len;++i)if(tbl.cols[i].dataName==name) {
+                for(size_t i=0;i<tbl.len();++i)if(tbl.cols[i].dataName==name) {
                     if(windowReads[i]) {
                         if(!row.generatedInput)throw dbms::DbError("XX000","window row lost its explicit generated-input presence");
                         return generatedWindowReader.readNamedColumn(name,*row.generatedInput);
@@ -38258,8 +38257,8 @@ static bool executeInternal(const string& rawSql, Session& s) {
             };
             const auto windowInputs=[&](const LegacyWindowRow& row,const dbms::QueryRowDescriptor& descriptor) {
                 if(row.storedInputs)return *row.storedInputs;
-                vector<dbms::ExprValue> cells;cells.reserve(tbl.len);
-                for(size_t column=0;column<tbl.len;++column) {
+                vector<dbms::ExprValue> cells;cells.reserve(tbl.len());
+                for(size_t column=0;column<tbl.len();++column) {
                     const auto cell=row.find(tbl.cols[column].dataName);
                     cells.emplace_back(descriptor[column].type,cell==row.end()?string():cell->second,cell==row.end());
                     cells.back().collation=tbl.cols[column].collation;
@@ -38267,7 +38266,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 return cells;
             };
             const auto partitionColumn = [&](const string& name) -> const dbms::Column& {
-                for (size_t column = 0; column < tbl.len; ++column)
+                for (size_t column = 0; column < tbl.len(); ++column)
                     if (tbl.cols[column].dataName == name) return tbl.cols[column];
                 throw dbms::DbError("42703", "window column does not exist: " + name);
             };
@@ -38312,7 +38311,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         key.ownedExpression=projection.orderOwners.at(index);
                         const auto* column=dynamic_cast<const dbms::ColumnRefExpr*>(projection.orderExpressions.at(index));
                         if(column && column->binding && column->binding->sourceOrdinal==projection.source->ordinal &&
-                           column->binding->columnOrdinal<tbl.len) {
+                           column->binding->columnOrdinal<tbl.len()) {
                             key.sourceColumn=tbl.cols[column->binding->columnOrdinal].dataName;
                             key.column=partitionColumn(key.sourceColumn);
                         }
@@ -38401,7 +38400,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 if (!select) throw dbms::DbError("XX000", "window sort lost its prepared SELECT");
                 const auto source = find_if(scalarWindowQuery->sourceRanges.begin(), scalarWindowQuery->sourceRanges.end(),
                     [&](const auto& range) { return range.owner == select; });
-                if (source == scalarWindowQuery->sourceRanges.end() || source->columns.size() != tbl.len)
+                if (source == scalarWindowQuery->sourceRanges.end() || source->columns.size() != tbl.len())
                     throw dbms::DbError("XX000", "window sort lost its actual source descriptor");
                 const auto descriptor = source->columns;
                 auto input = make_unique<dbms::PreparedSourceRowsOp>(descriptor,
@@ -38433,16 +38432,16 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     throw dbms::DbError("XX000", "window source lost its structured row identity");
                 for (size_t index = 0; index < cells.size(); ++index) {
                     if (deduplicate && !windowRowIds.insert(ids[index]).second) continue;
-                    if (cells[index].size() != tbl.len || nulls[index].size() != tbl.len)
+                    if (cells[index].size() != tbl.len() || nulls[index].size() != tbl.len())
                         throw dbms::DbError("XX000", "window source lost its declared row width");
                     LegacyWindowRow row;
                     row.windowValues.resize(windowFuncs.size());
-                    for (size_t column = 0; column < tbl.len; ++column)
+                    for (size_t column = 0; column < tbl.len(); ++column)
                         if (!windowReads[column] && !nulls[index][column])row[tbl.cols[column].dataName]=cells[index][column];
                     if(windowGeneration) {
-                        if(generatedInputs[index].size()!=tbl.len)throw dbms::DbError("XX000","window generated stored input width changed");
+                        if(generatedInputs[index].size()!=tbl.len())throw dbms::DbError("XX000","window generated stored input width changed");
                         auto context=make_shared<dbms::RowContext>();
-                        for(size_t column=0;column<tbl.len;++column) {
+                        for(size_t column=0;column<tbl.len();++column) {
                             if(windowReads[column])context->setGeneratedNamed(tbl.cols[column].dataName,windowReads[column],true);
                             else context->set(tbl.cols[column].dataName,generatedInputs[index][column]);
                         }
@@ -38655,7 +38654,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                     auto column=sortColumn(value.typeName);
                                     const auto* argument=windowArguments[wi].expressions.front();
                                     if(const auto* bound=dynamic_cast<const dbms::ColumnRefExpr*>(argument);
-                                            bound && bound->binding && bound->binding->columnOrdinal<tbl.len)
+                                            bound && bound->binding && bound->binding->columnOrdinal<tbl.len())
                                         column=tbl.cols[bound->binding->columnOrdinal];
                                     if(!value.collation.empty())column.collation=value.collation;
                                     const auto better=state.selected?dbms::StorageEngine::compareValues(column,
@@ -39120,7 +39119,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                             preparedScalarTypes.push_back(column.type);
                     }
                     map<string, string> typeHints;
-                    for (size_t ci = 0; ci < tbl.len; ++ci) {
+                    for (size_t ci = 0; ci < tbl.len(); ++ci) {
                         const string& name = tbl.cols[ci].dataName;
                         const string type = tbl.cols[ci].isArray
                             ? dbms::ExprHelper::canonicalResultTypeName(tbl.cols[ci].dataType + "[]")
@@ -39228,7 +39227,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         want.push_back(wantName);
                     }
                     vector<string> have;
-                    for (size_t i = 0; i < tbl.len; ++i)
+                    for (size_t i = 0; i < tbl.len(); ++i)
                         if (selectCols.count(tbl.cols[i].dataName)) have.push_back(tbl.cols[i].dataName);
                     vector<size_t> srcIdx;
                     bool needsPermute = false;
@@ -39289,7 +39288,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
             vector<string> scalarSortTypes = structuredScalarResult.columnTypes;
             scalarSortTypes.resize(selectExprs.size(), "text");
             map<string, string> scalarSortTypeHints;
-            for (size_t i = 0; i < tbl.len; ++i) {
+            for (size_t i = 0; i < tbl.len(); ++i) {
                 scalarSortTypeHints[tbl.cols[i].dataName] = tbl.cols[i].dataType;
                 if (!tableAlias.empty())
                     scalarSortTypeHints[tableAlias + "." + tbl.cols[i].dataName] = tbl.cols[i].dataType;
@@ -39368,7 +39367,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         }
                         if (!mapped) {
                             bool tableColumn = false;
-                            for (size_t i = 0; i < tbl.len; ++i)
+                            for (size_t i = 0; i < tbl.len(); ++i)
                                 tableColumn |= tbl.cols[i].dataName == spec.colName;
                             if (tableColumn) {
                                 for (size_t i = 0; i < scalarSortHiddenExprs.size(); ++i) {
@@ -39419,7 +39418,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     const auto* column = queryDemandPhysicalOrderColumn(
                         *demandSelect, demandSelect->orderBy[key]);
                     physicalSortKeys = column &&
-                        any_of(tbl.cols, tbl.cols + tbl.len,
+                        any_of(tbl.cols.begin(), tbl.cols.end(),
                             [&](const auto& physical) { return physical.dataName == column->column; });
                     if (physicalSortKeys) scalarReceiverOrder[key].colName = column->column;
                 }
@@ -39485,14 +39484,14 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 bool hasOutputOrderKey = false;
                 for (const auto& spec : orderBySpecs) {
                     if (canSortScalarProjected) break;
-                    size_t tableIndex = tbl.len;
-                    for (size_t i = 0; i < tbl.len; ++i) {
+                    size_t tableIndex = tbl.len();
+                    for (size_t i = 0; i < tbl.len(); ++i) {
                         if (tbl.cols[i].dataName == spec.colName) {
                             tableIndex = i;
                             break;
                         }
                     }
-                    if (tableIndex == tbl.len) {
+                    if (tableIndex == tbl.len()) {
                         hasOutputOrderKey = true;
                         continue;
                     }
@@ -39752,7 +39751,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     const string source = sep == string::npos ? po : po.substr(sep + 1);
                     protocolColumns.push_back(header);
                     string type = "text";
-                    for (size_t i = 0; i < tbl.len; ++i) {
+                    for (size_t i = 0; i < tbl.len(); ++i) {
                         if (tbl.cols[i].dataName == source) {
                             type = tbl.cols[i].isArray
                                 ? dbms::ExprHelper::canonicalResultTypeName(tbl.cols[i].dataType + "[]")
@@ -39764,7 +39763,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     cout << renderLegacyHeader(header) << ' ';
                 }
             } else {
-                for (size_t i = 0; i < tbl.len; ++i) {
+                for (size_t i = 0; i < tbl.len(); ++i) {
                     if (!selectAll && selectCols.find(tbl.cols[i].dataName) == selectCols.end()) continue;
                     protocolColumns.push_back(tbl.cols[i].dataName);
                     protocolTypes.push_back(tbl.cols[i].isArray
@@ -39804,7 +39803,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 rawWhereClause.find_first_of("()") == string::npos ||
                 hasBooleanGroupParenthesis;
             bool needsReferenceOutput = false;
-            for (size_t i = 0; i < tbl.len; ++i) {
+            for (size_t i = 0; i < tbl.len(); ++i) {
                 if ((selectCols.empty() || selectCols.count(tbl.cols[i].dataName)) &&
                     dbms::storedReferenceOutputRoleForColumn(tbl.cols[i]).kind !=
                         dbms::StoredReferenceOutputRole::Kind::None) {
@@ -39833,19 +39832,19 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                  "plain-column ordering");
                 }
                 vector<size_t> selectedSchemaColumns;
-                for (size_t column = 0; column < tbl.len; ++column) {
+                for (size_t column = 0; column < tbl.len(); ++column) {
                     if (selectAll || selectCols.count(tbl.cols[column].dataName))
                         selectedSchemaColumns.push_back(column);
                 }
                 for (const auto& order : orderBySpecs) {
-                    size_t schemaColumn = tbl.len;
-                    for (size_t column = 0; column < tbl.len; ++column) {
+                    size_t schemaColumn = tbl.len();
+                    for (size_t column = 0; column < tbl.len(); ++column) {
                         if (tbl.cols[column].dataName == order.colName) {
                             schemaColumn = column;
                             break;
                         }
                     }
-                    if (order.isExpression || schemaColumn == tbl.len) {
+                    if (order.isExpression || schemaColumn == tbl.len()) {
                         throw dbms::DbError(
                             "0A000", "FETCH WITH TIES ORDER BY keys must be "
                                      "plain projected columns");
@@ -39966,7 +39965,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
 
             if (volcanoUsed && !corrAggHandled && volcanoStructuredAvailable) {
                 size_t width = 0;
-                for (size_t i = 0; i < tbl.len; ++i)
+                for (size_t i = 0; i < tbl.len(); ++i)
                     if (selectCols.empty() || selectCols.count(tbl.cols[i].dataName)) ++width;
                 bool exact = volcanoStructuredRows.size() == answers.size() &&
                     volcanoStructuredNulls.size() == answers.size();
@@ -40013,16 +40012,16 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                 parsed.ptr != original.data() + original.size() || !ordinal) {
                                 physicalOrder = false; break;
                             }
-                            if (selectAll && ordinal <= tbl.len)
+                            if (selectAll && ordinal <= tbl.len())
                                 order.colName = tbl.cols[ordinal - 1].dataName;
                             else if (!selectAll && ordinal <= selectExprs.size() &&
                                      !selectExprs[ordinal - 1].isScalar)
                                 order.colName = selectExprs[ordinal - 1].colName;
                             else { physicalOrder = false; break; }
                         }
-                        auto column = find_if(tbl.cols, tbl.cols + tbl.len,
+                        auto column = find_if(tbl.cols.begin(), tbl.cols.end(),
                             [&](const Column& candidate) { return candidate.dataName == order.colName; });
-                        if (column == tbl.cols + tbl.len) {
+                        if (column == tbl.cols.end()) {
                             size_t matches = 0;
                             const string alias = order.colName;
                             for (const auto& target : selectExprs) {
@@ -40031,10 +40030,10 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                 }
                             }
                             if (matches == 1)
-                                column = find_if(tbl.cols, tbl.cols + tbl.len,
+                                column = find_if(tbl.cols.begin(), tbl.cols.end(),
                                     [&](const Column& candidate) { return candidate.dataName == order.colName; });
                         }
-                        if (order.isExpression || column == tbl.cols + tbl.len ||
+                        if (order.isExpression || column == tbl.cols.end() ||
                             column->generatedKind == 'v') {
                             physicalOrder = false; break;
                         }
@@ -40045,13 +40044,13 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     if (physicalOrder) {
                         set<string> physicalSelectCols = selectCols;
                         if (selectCols.empty() || selectAll)
-                            for (size_t column = 0; column < tbl.len; ++column)
+                            for (size_t column = 0; column < tbl.len(); ++column)
                                 physicalSelectCols.insert(tbl.cols[column].dataName);
                         for (const auto& order : physicalOrders)
                             physicalSelectCols.insert(order.colName);
                         vector<size_t> parentColumns, selectedColumns;
                         vector<dbms::StoredReferenceOutputRole> physicalRoles;
-                        for (size_t column = 0; column < tbl.len; ++column) {
+                        for (size_t column = 0; column < tbl.len(); ++column) {
                             if (!physicalSelectCols.count(tbl.cols[column].dataName)) continue;
                             if (selectCols.empty() || selectAll ||
                                 selectCols.count(tbl.cols[column].dataName))
@@ -40096,7 +40095,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                             const auto declaration = g_engine.getTableSchema(queryDb, source);
                             vector<size_t> sourceColumns, canonicalColumns;
                             vector<dbms::StoredReferenceOutputRole> sourceRoles;
-                            for (size_t column = 0; column < declaration.len; ++column) {
+                            for (size_t column = 0; column < declaration.len(); ++column) {
                                 if (!physicalSelectCols.count(declaration.cols[column].dataName)) continue;
                                 sourceColumns.push_back(column);
                                 sourceRoles.push_back(dbms::storedReferenceOutputRoleForColumn(declaration.cols[column]));
@@ -40338,7 +40337,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     if (!children.empty()) {
                         set<string> childSelectCols = selectCols;
                         if (selectAll) {
-                            for (size_t i = 0; i < tbl.len; ++i) childSelectCols.insert(tbl.cols[i].dataName);
+                            for (size_t i = 0; i < tbl.len(); ++i) childSelectCols.insert(tbl.cols[i].dataName);
                         }
                         for (const auto& childName : children) {
                             if (!g_engine.tableExists(queryDb, childName)) continue;
@@ -40445,7 +40444,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
             };
             for (const auto& spec : orderBySpecs) {
                 bool isTableCol = false;
-                for (size_t ci = 0; ci < tbl.len; ++ci)
+                for (size_t ci = 0; ci < tbl.len(); ++ci)
                     if (tbl.cols[ci].dataName == spec.colName) { isTableCol = true; break; }
                 if (isTableCol) continue;
                 size_t idx = 0;
@@ -40464,7 +40463,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 vector<size_t> plainOutputToStorage;
                 if (structuredPlainRows && !projectionOrder.empty()) {
                     vector<string> storageColumns;
-                    for (size_t ci = 0; ci < tbl.len; ++ci) {
+                    for (size_t ci = 0; ci < tbl.len(); ++ci) {
                         if (selectCols.count(tbl.cols[ci].dataName))
                             storageColumns.push_back(tbl.cols[ci].dataName);
                     }
@@ -40777,7 +40776,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 // SELECT-list permutation occurs below, after DISTINCT and
                 // LIMIT/OFFSET; its wire metadata cannot type these cells yet.
                 vector<string> plainKeyTypes;
-                for (size_t i = 0; i < tbl.len; ++i) {
+                for (size_t i = 0; i < tbl.len(); ++i) {
                     if (selectCols.empty() || selectCols.count(tbl.cols[i].dataName))
                         plainKeyTypes.push_back(tbl.cols[i].dataType);
                 }
@@ -40931,7 +40930,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
             std::vector<std::pair<std::string, std::string>> projCols;
             if (g_engine.tableExists(queryDb, tname)) {
                 TableSchema tbl = g_engine.getTableSchema(queryDb, tname);
-                for (size_t i = 0; i < tbl.len; ++i) {
+                for (size_t i = 0; i < tbl.len(); ++i) {
                     if (selectCols.empty() || selectCols.count(tbl.cols[i].dataName)) {
                         projCols.emplace_back(tbl.cols[i].dataName,
                             tbl.cols[i].dataType + (tbl.cols[i].isArray ? "[]" : ""));
@@ -40958,7 +40957,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 want.push_back(wantName);
             }
             vector<string> have;
-            for (size_t i = 0; i < tbl.len; ++i)
+            for (size_t i = 0; i < tbl.len(); ++i)
                 if (selectCols.count(tbl.cols[i].dataName)) have.push_back(tbl.cols[i].dataName);
             vector<size_t> srcIdx;
             bool needsPermute = false;
@@ -41091,7 +41090,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                                            : trim(sql.substr(9));
         string tname = resolveTableName(s, requestedName);
         TableSchema tbl = g_engine.getTableSchema(s.currentDB, tname);
-        if (tbl.len == 0) {
+        if (tbl.len() == 0) {
             cout << "ERROR: relation \"" << requestedName
                  << "\" does not exist (SQLSTATE 42P01)" << endl;
             return true;
@@ -41104,7 +41103,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
         }
         vector<vector<string>> rows;
         vector<vector<bool>> nulls;
-        for (size_t i = 0; i < tbl.len; ++i) {
+        for (size_t i = 0; i < tbl.len(); ++i) {
             const auto& c = tbl.cols[i];
             rows.push_back({c.dataName, c.dataType,
                             c.isNull ? "yes" : "no",
@@ -41150,7 +41149,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
             const string requestedName = tokens[1];
             string tname = resolveTableName(s, requestedName);
             TableSchema tbl = g_engine.getTableSchema(s.currentDB, tname);
-            if (tbl.len == 0) {
+            if (tbl.len() == 0) {
                 cout << "ERROR: relation \"" << requestedName
                      << "\" does not exist (SQLSTATE 42P01)" << endl;
                 return true;
@@ -41163,7 +41162,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
             }
             vector<vector<string>> rows;
             vector<vector<bool>> nulls;
-            for (size_t i = 0; i < tbl.len; ++i) {
+            for (size_t i = 0; i < tbl.len(); ++i) {
                 const auto& c = tbl.cols[i];
                 rows.push_back({c.dataName, c.dataType,
                                 c.isNull ? "yes" : "no",

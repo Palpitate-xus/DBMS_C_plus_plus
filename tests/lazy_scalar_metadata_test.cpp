@@ -115,7 +115,7 @@ int main() {
             "actual NULL/empty stored row");
         const auto schema = g_engine.getTableSchema(database, "rich_inputs");
         std::map<std::string, std::string> types;
-        for (size_t i = 0; i < schema.len; ++i)
+        for (size_t i = 0; i < schema.len(); ++i)
             types.emplace(schema.cols[i].dataName, ExprHelper::canonicalResultTypeName(
                 schema.cols[i].dataType + (schema.cols[i].isArray ? "[]" : "")));
         std::map<int, Frozen> rows;
@@ -123,10 +123,10 @@ int main() {
             auto cursor = g_engine.beginHeapScan(database, "rich_inputs", schema);
             HeapScanRow item;
             while (cursor->next(item)) {
-                need(item.rid > 0 && item.nulls.size() == schema.len, "actual owned heap row and bitmap");
+                need(item.rid > 0 && item.nulls.size() == schema.len(), "actual owned heap row and bitmap");
                 detail::ScopedStoredRowNullBitmap bitmap(schema, item.nulls);
                 Frozen row;
-                for (size_t i = 0; i < schema.len; ++i) {
+                for (size_t i = 0; i < schema.len(); ++i) {
                     if (schema.cols[i].generatedKind == 'v') continue;
                     row.emplace(schema.cols[i].dataName, item.nulls[i] ? Cell{} :
                         Cell{g_engine.extractColumnValue(item.data, schema, i, database, false)});
@@ -226,9 +226,9 @@ int main() {
         {
             auto cursor = g_engine.beginHeapScan(database, "eager_inputs", eagerSchema);
             HeapScanRow item;
-            need(cursor->next(item) && item.nulls.size() == eagerSchema.len, "actual eager heap row and bitmap");
+            need(cursor->next(item) && item.nulls.size() == eagerSchema.len(), "actual eager heap row and bitmap");
             detail::ScopedStoredRowNullBitmap bitmap(eagerSchema, item.nulls);
-            for (size_t i = 0; i < eagerSchema.len; ++i) {
+            for (size_t i = 0; i < eagerSchema.len(); ++i) {
                 need(!item.nulls[i], "eager fixture contains actual non-NULL stored fields");
                 eagerRow.emplace(eagerSchema.cols[i].dataName,
                     g_engine.extractColumnValue(item.data, eagerSchema, i, database, false));

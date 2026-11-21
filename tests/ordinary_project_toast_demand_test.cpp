@@ -62,7 +62,7 @@ Model project(const Model& rows,const TableSchema& schema,const std::set<std::st
  Model result;
  for(const auto& row:rows) {
   Row out;
-  for(size_t i=0;i<schema.len;++i)if(selected.empty()||selected.count(schema.cols[i].dataName))out.push_back(row.at(i));
+  for(size_t i=0;i<schema.len();++i)if(selected.empty()||selected.count(schema.cols[i].dataName))out.push_back(row.at(i));
   result.push_back(std::move(out));
  }
  return result;

@@ -22,7 +22,7 @@ int main() {
         DdlExecutor ddl;
         need(!ddl.executeSql("CREATE TABLE candidate(k integer PRIMARY KEY,id smallint GENERATED ALWAYS AS IDENTITY(START 10 INCREMENT 2),n text DEFAULT 'fallback',nullable text,derived integer GENERATED ALWAYS AS(k*3) STORED)",session),"actual named identity and stored generation");
         const auto table=g_engine.getTableSchema(database,"candidate");
-        need(table.len==5 && table.cols[1].identitySequenceOid!=0,"real persisted identity binding");
+        need(table.len()==5 && table.cols[1].identitySequenceOid!=0,"real persisted identity binding");
         StorageEngine::SqlRow candidate{{"stale","must clear"}};
         std::vector<StorageEngine::SqlRow> returned;
         const auto insert=[&](const StorageEngine::SqlRow& input) {

@@ -60,7 +60,7 @@ int main() {
     const auto checkRejected = [&](const std::string& image) {
         { std::ofstream output(schema, std::ios::binary | std::ios::trunc); output.write(image.data(), image.size()); assert(output); }
         std::filesystem::last_write_time(schema, std::filesystem::file_time_type::clock::now() + std::chrono::seconds(++revision));
-        assert(parserOwner.getTableSchema(database, "defaults").len == 0);
+        assert(parserOwner.getTableSchema(database, "defaults").len() == 0);
     };
     checkRejected(original.substr(0, original.size() - 1));
     auto corrupt = original;

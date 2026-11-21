@@ -122,12 +122,12 @@ Rows expected(bool other) {
 }
 Rows scan(const std::string& table) {
     const auto s = g_engine.getTableSchema(database, table);
-    need(s.len == 4, "actual complete four-column schema");
+    need(s.len() == 4, "actual complete four-column schema");
     TableScanOp op(&g_engine, database, table); need(op.open(), "actual complete scan opens");
     Rows result; std::string raw;
     while (op.next(raw)) {
         StorageEngine::SqlRow value;
-        for (size_t j = 0; j < s.len; ++j) value[s.cols[j].dataName] = op.lastColumnIsNull(j) ?
+        for (size_t j = 0; j < s.len(); ++j) value[s.cols[j].dataName] = op.lastColumnIsNull(j) ?
             std::optional<std::string>{} :
             std::optional<std::string>{g_engine.extractColumnValue(raw, s, j, database)};
         need(value["id"].has_value(), "actual nonNULL key"); const auto id = *value["id"];

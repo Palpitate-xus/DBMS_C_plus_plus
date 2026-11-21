@@ -47,7 +47,7 @@ int main() {
     const auto setup = [&](const std::string& sql) { assert(!execute(sql).first); };
     const auto columnExists = [&](const std::string& table, const std::string& column) {
         const auto schema = g_engine.getTableSchema(db, table);
-        for (size_t i = 0; i < schema.len; ++i)
+        for (size_t i = 0; i < schema.len(); ++i)
             if (schema.cols[i].dataName == column) return true;
         return false;
     };

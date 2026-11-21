@@ -63,12 +63,12 @@ std::map<std::string, std::string> clogImage() {
     return result;
 }
 Rows scan(const std::string& phase) {
-    const auto schema = g_engine.getTableSchema(database, "items"); need(schema.len == 3, "complete actual schema");
+    const auto schema = g_engine.getTableSchema(database, "items"); need(schema.len() == 3, "complete actual schema");
     TableScanOp cursor(&g_engine, database, "items"); need(cursor.open(), "actual scan opens");
     Rows rows; std::string data;
     while (cursor.next(data)) {
         StorageEngine::SqlRow row;
-        for (size_t i = 0; i < schema.len; ++i)
+        for (size_t i = 0; i < schema.len(); ++i)
             row[schema.cols[i].dataName] = cursor.lastColumnIsNull(i) ? Cell{} :
                 Cell{g_engine.extractColumnValue(data, schema, i, database)};
         need(row["id"].has_value(), "actual nonNULL ID"); auto key = *row["id"];

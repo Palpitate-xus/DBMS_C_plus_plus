@@ -26,7 +26,7 @@ static void setupSession(Session& s, const std::string& db) {
 }
 
 static bool hasCheckName(const dbms::TableSchema& tbl, const std::string& n) {
-    for (size_t i = 0; i < tbl.len; ++i)
+    for (size_t i = 0; i < tbl.len(); ++i)
         if (tbl.cols[i].checkConstraintName == n) return true;
     return false;
 }
@@ -35,7 +35,7 @@ static bool hasUniqueName(const dbms::TableSchema& tbl, const std::string& n) {
     return false;
 }
 static bool hasFkName(const dbms::TableSchema& tbl, const std::string& n) {
-    for (size_t i = 0; i < tbl.fkLen; ++i) if (tbl.fks[i].name == n) return true;
+    for (size_t i = 0; i < tbl.fkLen(); ++i) if (tbl.fks[i].name == n) return true;
     return false;
 }
 

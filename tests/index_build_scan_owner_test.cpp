@@ -40,8 +40,8 @@ std::map<int,int64_t> inspect() {
         const int id=std::stoi(g_engine.extractColumnValue(row,schema,0,db));
         need(result.emplace(id,rid).second&&model.count(id),"every logical row once");
         const auto nulls=detail::storedRowNullBitmap(g_engine,db,table,schema,rid);
-        need(nulls&&nulls->size()==schema.len,"full physical bitmap");
-        for(size_t i=0;i<schema.len;++i) {
+        need(nulls&&nulls->size()==schema.len(),"full physical bitmap");
+        for(size_t i=0;i<schema.len();++i) {
             const auto& wanted=model.at(id).at(schema.cols[i].dataName);
             need((*nulls)[i]==!wanted.has_value(),"complete independent SQL NULL map");
             bool isNull=false;auto value=g_engine.extractColumnValue(row,schema,i,db,true,&isNull);

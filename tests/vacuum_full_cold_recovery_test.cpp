@@ -143,13 +143,13 @@ Rows expected(bool final) {
 }
 Rows snapshot(size_t columnCount = 10) {
     const auto schema = g_engine.getTableSchema(database, "items");
-    require(schema.len == columnCount, "real complete schema");
+    require(schema.len() == columnCount, "real complete schema");
     TableScanOp scan(&g_engine, database, "items");
     require(scan.open(), "real complete scan opens");
     Rows result; std::string raw;
     while (scan.next(raw)) {
         StorageEngine::SqlRow value;
-        for (size_t j = 0; j < schema.len; ++j)
+        for (size_t j = 0; j < schema.len(); ++j)
             value[schema.cols[j].dataName] = scan.lastColumnIsNull(j) ? Cell{} :
                 Cell{g_engine.extractColumnValue(raw, schema, j, database)};
         require(value.at("id").has_value(), "real nonNULL id");

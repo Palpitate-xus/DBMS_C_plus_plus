@@ -73,7 +73,7 @@ int main() {
             const auto label="PG case "+std::to_string(item.id)+": ";
             need(!ddl("CREATE TABLE "+table+"(id smallint GENERATED ALWAYS AS IDENTITY(START 10 INCREMENT 2 MINVALUE 1 MAXVALUE 100),note text)",session).error,label+"definition");
             const auto before=g_engine.getTableSchema(database,table);
-            need(before.len==2 && before.cols[0].identitySequenceOid!=0,label+"real OID binding");
+            need(before.len()==2 && before.cols[0].identitySequenceOid!=0,label+"real OID binding");
             need(g_engine.insert(database,table,{{"note","before"}})==DBStatus::OK,label+"actual first allocation");
             const auto reply=ddl(item.sql,session);
             need(reply.error==!item.state.empty(),label+"actual statement success/error");

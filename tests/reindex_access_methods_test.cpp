@@ -152,7 +152,7 @@ Heap heap(StorageEngine& engine, const Model& expected) {
     require(locks.lockShared(table), "actual heap cursor relation lock");
     struct Unlock { LockManager& locks; ~Unlock() { locks.unlock(table); } } unlock{locks};
     const auto schema = engine.getTableSchema(db, table);
-    require(schema.len == 7, "actual complete heap declaration");
+    require(schema.len() == 7, "actual complete heap declaration");
     auto cursor = engine.beginHeapScan(db, table, schema);
     HeapScanRow input;
     Heap result;

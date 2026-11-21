@@ -19,7 +19,7 @@ int main() {
     assert(local.createDatabase(db, "utf8") == DBStatus::OK);
     assert(g_engine.createDatabase(other, "utf8") == DBStatus::OK);
     TableSchema table;
-    table.len = 1;
+    table.cols.resize(1);
     table.cols[0].dataName = "id";
     table.cols[0].dataType = "int";
     table.cols[0].dsize = 4;
@@ -90,7 +90,7 @@ int main() {
         "DECLARE n INT; BEGIN SELECT id INTO n FROM sink; RETURN n; END;",
         'i', "plpgsql", "int") == DBStatus::OK);
     TableSchema generatedTable = table;
-    generatedTable.len = 2;
+    generatedTable.cols.resize(2);
     generatedTable.cols[1] = table.cols[0];
     generatedTable.cols[1].dataName = "computed";
     generatedTable.cols[1].generatedKind = 's';

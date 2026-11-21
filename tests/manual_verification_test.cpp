@@ -104,7 +104,7 @@ static void test_ch4_table_ops() {
 
     // 4.9 验证 schema
     auto schema = g_engine.getTableSchema(db, "users");
-    assert(schema.len >= 3);
+    assert(schema.len() >= 3);
 
     // 4.10 DROP TABLE
     assert(!ddl.executeSql("DROP TABLE users", s));

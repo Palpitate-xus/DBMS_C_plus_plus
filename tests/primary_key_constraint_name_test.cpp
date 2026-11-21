@@ -29,7 +29,7 @@ Session makeSession(const std::string& database) {
 
 bool hasPrimaryKey(const dbms::TableSchema& table) {
     if (!table.pkColIndices.empty()) return true;
-    for (size_t column = 0; column < table.len; ++column) {
+    for (size_t column = 0; column < table.len(); ++column) {
         if (table.cols[column].isPrimaryKey) return true;
     }
     return false;

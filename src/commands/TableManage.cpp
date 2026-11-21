@@ -1057,7 +1057,7 @@ static bool normalizePointLiteral(const std::string& input, std::string& output,
 static bool normalizePointColumns(const TableSchema& table,
                                   std::map<std::string, std::string>& values,
                                   const std::set<std::string>* nullColumns = nullptr) {
-    for (size_t i = 0; i < table.len; ++i) {
+    for (size_t i = 0; i < table.len(); ++i) {
         const Column& column = table.cols[i];
         if (column.dataType != "point") continue;
         auto value = values.find(column.dataName);
@@ -1081,7 +1081,7 @@ static bool variableColumnWidthsValid(
     const TableSchema& table,
     const std::map<std::string, std::string>& values,
     const std::set<std::string>* nullColumns = nullptr) {
-    for (size_t i = 0; i < table.len; ++i) {
+    for (size_t i = 0; i < table.len(); ++i) {
         const Column& column = table.cols[i];
         if (!column.isVariableLength) continue;
         const auto value = values.find(column.dataName);
@@ -1176,7 +1176,7 @@ static DBStatus normalizeCharacterColumnWidths(
     const TableSchema& table,
     std::map<std::string, std::string>& values,
     const std::set<std::string>* nullColumns = nullptr) {
-    for (size_t i = 0; i < table.len; ++i) {
+    for (size_t i = 0; i < table.len(); ++i) {
         const Column& column = table.cols[i];
         auto value = values.find(column.dataName);
         if (value == values.end() ||
@@ -1257,7 +1257,7 @@ static std::string valueFromRowMap(
 static std::string canonicalKeyValueFromRowMap(
     const std::map<std::string, std::string>& values,
     const TableSchema& table, const std::string& columnName) {
-    for (size_t i = 0; i < table.len; ++i) {
+    for (size_t i = 0; i < table.len(); ++i) {
         if (table.cols[i].dataName == columnName) {
             return canonicalColumnKeyValue(
                 table.cols[i], valueFromRowMap(values, columnName));
@@ -1273,7 +1273,7 @@ static std::string buildCompositeKeyFromRowMap(
     std::string key;
     for (const auto& columnName : columnNames) {
         const Column* column = nullptr;
-        for (size_t i = 0; i < table.len; ++i) {
+        for (size_t i = 0; i < table.len(); ++i) {
             if (table.cols[i].dataName == columnName) {
                 column = &table.cols[i];
                 break;
@@ -1290,7 +1290,7 @@ static std::string buildCompositeKeyFromRowMap(
 // Build a column-name -> data-type map from a TableSchema for expression eval.
 static std::map<std::string, std::string> buildTypeHints(const dbms::TableSchema& tbl) {
     std::map<std::string, std::string> hints;
-    for (size_t i = 0; i < tbl.len; ++i) {
+    for (size_t i = 0; i < tbl.len(); ++i) {
         hints[tbl.cols[i].dataName] = tbl.cols[i].dataType + (tbl.cols[i].isArray ? "[]" : "");
     }
     return hints;
@@ -1505,7 +1505,7 @@ void StorageEngine::validateArrayDomainValue(const std::string& database,
 // later mutations must receive the same resolved source collation metadata.
 static std::map<std::string, std::string> storedCheckCollations(const TableSchema& table) {
     std::map<std::string, std::string> result;
-    for (size_t i = 0; i < table.len; ++i) {
+    for (size_t i = 0; i < table.len(); ++i) {
         const auto& column = table.cols[i];
         const auto& effective = column.resolvedCollation.empty() ? column.collation : column.resolvedCollation;
         if (!effective.empty()) result.emplace(column.dataName, effective);
@@ -1561,22 +1561,22 @@ static bool evalExpressionSqlValue(
 // is never inserted in schemaCache/catalog metadata or persisted across calls.
 static DatumMetadataContextPtr freezeGeneratedStorageInput(const TableSchema& table,
     const std::string& database,const std::string& physical,StorageEngine* engine) {
-    if(!std::any_of(table.cols,table.cols+table.len,
+    if(!std::any_of(table.cols.begin(),table.cols.end(),
         [](const Column& column){return column.generatedKind=='v';}))return {};
     auto metadata=engine->prepareDatumMetadataContext(database,physical);
-    if(!metadata || !metadata->generatedSource || metadata->generatedSource->columns.size()!=table.len)
+    if(!metadata || !metadata->generatedSource || metadata->generatedSource->columns.size()!=table.len())
         throw DbError("XX000","generated storage input lost its actual declaration");
-    for(size_t i=0;i<table.len;++i)
+    for(size_t i=0;i<table.len();++i)
         if((table.cols[i].generatedKind=='v')!=bool(metadata->generatedSource->columns[i]))
             throw DbError("XX000","generated input changed its authoritative omitted-column set");
-    for(size_t i=0;i<table.len;++i)if(const auto& program=metadata->generatedSource->columns[i]) {
+    for(size_t i=0;i<table.len();++i)if(const auto& program=metadata->generatedSource->columns[i]) {
         if(program->target.dataName!=table.cols[i].dataName ||
            program->target.generatedExpr!=table.cols[i].generatedExpr ||
            program->target.dataType!=table.cols[i].dataType || program->target.domainName!=table.cols[i].domainName ||
            program->target.isArray!=table.cols[i].isArray || program->target.typeMod!=table.cols[i].typeMod ||
-           program->target.dsize!=table.cols[i].dsize || program->inputs.size()!=table.len)
+           program->target.dsize!=table.cols[i].dsize || program->inputs.size()!=table.len())
             throw DbError("XX000","generated storage declaration differs from its actual schema");
-        for(size_t j=0;j<table.len;++j)
+        for(size_t j=0;j<table.len();++j)
             if(program->inputs[j].dataName!=table.cols[j].dataName || program->inputs[j].dataType!=table.cols[j].dataType ||
                program->inputs[j].isArray!=table.cols[j].isArray)
                 throw DbError("XX000","generated storage declaration lost an actual attribute");
@@ -1592,11 +1592,11 @@ static ExprValue generatedValueFromMap(const TableSchema& table,size_t requested
     const std::string& database,StorageEngine* engine,const DatumMetadataContext* frozen=nullptr) {
     DatumMetadataContextPtr owner;
     if(!frozen){owner=freezeGeneratedStorageInput(table,database,table.tablename,engine);frozen=owner.get();}
-    if(!frozen || !frozen->generatedSource || frozen->generatedSource->columns.size()!=table.len || requested>=table.len)
+    if(!frozen || !frozen->generatedSource || frozen->generatedSource->columns.size()!=table.len() || requested>=table.len())
         throw DbError("XX000","generated constraint source lost its frozen declaration");
     const auto& declaration=*frozen->generatedSource;
     RowContext row;std::map<std::string,std::string> names;
-    for(size_t i=0;i<table.len;++i) {
+    for(size_t i=0;i<table.len();++i) {
         const std::string key="\x01generated_constraint_"+std::to_string(i);
         names.emplace(table.cols[i].dataName,key);
         if(table.cols[i].generatedKind=='v')continue;
@@ -1614,7 +1614,7 @@ static bool generatedCheckInput(const std::string& expression,const TableSchema&
     const std::map<std::string,std::string>& values,const std::set<std::string>& nulls,
     const std::map<std::string,std::string>& hints,const std::string& database,
     StorageEngine* engine,std::string* error,const DatumMetadataContext* frozen=nullptr) {
-    const bool virtuals=std::any_of(table.cols,table.cols+table.len,[](const Column& column){return column.generatedKind=='v';});
+    const bool virtuals=std::any_of(table.cols.begin(),table.cols.end(),[](const Column& column){return column.generatedKind=='v';});
     DatumMetadataContextPtr owner;
     if(virtuals && !frozen){owner=freezeGeneratedStorageInput(table,database,table.tablename,engine);frozen=owner.get();}
     if(virtuals && (!frozen || !frozen->generatedSource))throw DbError("XX000","CHECK source lost its actual virtual declaration");
@@ -1674,7 +1674,7 @@ static StorageEngine::Condition bindStoredPatternTypes(
     auto condition = input;
     if (storedPatternOperator(condition.op).empty()) return condition;
     const Column* left = nullptr;
-    for (size_t i=0;i<table.len;++i) {
+    for (size_t i=0;i<table.len();++i) {
         const auto& column = table.cols[i];
         const auto type = column.dataType + (column.isArray ? "[]" : "");
         if (column.dataName == condition.colName) left = &column;
@@ -1710,7 +1710,7 @@ static std::vector<StorageEngine::Condition> prepareStoredUnknownBitScalarInputs
             !(condition.op == "=" || condition.op == "<>" || condition.op == "!=" ||
               condition.op == "<" || condition.op == ">" || condition.op == "<=" ||
               condition.op == ">=")) continue;
-        for (size_t i = 0; i < table.len; ++i) {
+        for (size_t i = 0; i < table.len(); ++i) {
             const auto& column = table.cols[i];
             if (column.dataName != condition.colName) continue;
             // Storage publishes the actual base representation. A TEXT
@@ -1770,7 +1770,7 @@ static void validateNullWhereColumns(const Expr* expression,const TableSchema& t
     if(!nullWhereComparison(expression)) return;
     const auto* column=dynamic_cast<const ColumnRefExpr*>(binary->left.get());
     if(!column) column=dynamic_cast<const ColumnRefExpr*>(binary->right.get());
-    for(size_t i=0;i<table.len;++i) if(table.cols[i].dataName==column->column) return;
+    for(size_t i=0;i<table.len();++i) if(table.cols[i].dataName==column->column) return;
     throw DbError("42703","column does not exist: "+column->column);
 }
 
@@ -1783,7 +1783,7 @@ static void validateStoredPatternConditions(
     for (const auto& condition : conditions) {
         if (nullScalarComparison(condition) && condition.op!="typedexpr") {
             bool found=false;
-            for(size_t i=0;i<table.len;++i) if(table.cols[i].dataName==condition.colName) {
+            for(size_t i=0;i<table.len();++i) if(table.cols[i].dataName==condition.colName) {
                 found=true;
                 (void)ExprEvaluator::resolveComparison(condition.op,table.cols[i].dataType+
                     (table.cols[i].isArray?"[]":""),"unknown");
@@ -1796,7 +1796,7 @@ static void validateStoredPatternConditions(
         // of its decoded bytes. The existing right-operand type slot also
         // carries this metadata for non-pattern scalar/list predicates.
         if (condition.patternType != "bit" || !storedPatternOperator(condition.op).empty()) continue;
-        for (size_t i=0;i<table.len;++i) if (table.cols[i].dataName==condition.colName) {
+        for (size_t i=0;i<table.len();++i) if (table.cols[i].dataName==condition.colName) {
             const auto& column=table.cols[i];
             (void)ExprEvaluator::resolveComparison("=",column.dataType+(column.isArray?"[]":""),"bit");
             if (condition.op=="in" || condition.op=="notin" ||
@@ -2307,6 +2307,11 @@ static bool normalizeForeignKeyAction(const std::string& action,
     return false;
 }
 
+constexpr size_t MAX_SCHEMA_KEY_COLUMNS = 30;
+constexpr size_t MAX_SCHEMA_UNIQUE_CONSTRAINTS = 30;
+constexpr size_t MAX_SCHEMA_PARTITIONS = 30;
+constexpr size_t MAX_COMPOSITE_FIELDS = 30;
+
 static bool validateTableSchemaIdentifiers(const TableSchema& tbl, std::string* error) {
     auto reject = [&](const std::string& value, size_t fieldSize, const char* kind) {
         if (validStoredIdentifier(value, fieldSize)) return false;
@@ -2317,12 +2322,12 @@ static bool validateTableSchemaIdentifiers(const TableSchema& tbl, std::string* 
         if (error) *error = "invalid table storage identity (each SQL identifier is limited to 63 bytes)";
         return false;
     }
-    if (tbl.len > MAX_COLUMNS || tbl.fkLen > MAX_COLUMNS) {
+    if (tbl.len() > MAX_COLUMNS || tbl.fkLen() > MAX_TABLE_FOREIGN_KEYS) {
         if (error) *error = "table exceeds the current column or constraint limit";
         return false;
     }
     std::set<std::string> columnNames;
-    for (size_t i = 0; i < tbl.len; ++i) {
+    for (size_t i = 0; i < tbl.len(); ++i) {
         if (reject(tbl.cols[i].dataName, MAX_COL_NAME_LEN, "column name") ||
             reject(tbl.cols[i].dataType, MAX_TYPE_NAME_LEN, "type name") ||
             reject(tbl.cols[i].checkConstraintName, MAX_COL_NAME_LEN, "constraint name")) {
@@ -2342,18 +2347,18 @@ static bool validateTableSchemaIdentifiers(const TableSchema& tbl, std::string* 
     }
     std::set<size_t> primaryKeyColumns;
     if (!tbl.pkColIndices.empty()) {
-        if (tbl.pkColIndices.size() > tbl.len) {
+        if (tbl.pkColIndices.size() > tbl.len() || tbl.pkColIndices.size() > MAX_SCHEMA_KEY_COLUMNS) {
             if (error) *error = "invalid primary key column metadata";
             return false;
         }
         for (const size_t columnIndex : tbl.pkColIndices) {
-            if (columnIndex >= tbl.len ||
+            if (columnIndex >= tbl.len() ||
                 !primaryKeyColumns.insert(columnIndex).second) {
                 if (error) *error = "invalid primary key column metadata";
                 return false;
             }
         }
-        for (size_t columnIndex = 0; columnIndex < tbl.len;
+        for (size_t columnIndex = 0; columnIndex < tbl.len();
              ++columnIndex) {
             if (tbl.cols[columnIndex].isPrimaryKey &&
                 primaryKeyColumns.count(columnIndex) == 0) {
@@ -2367,19 +2372,19 @@ static bool validateTableSchemaIdentifiers(const TableSchema& tbl, std::string* 
     for (const auto& name : tbl.uniqueConstraintNames) {
         if (reject(name, MAX_TABLE_NAME_LEN, "constraint name")) return false;
     }
-    if (tbl.uniqueConstraints.size() > MAX_COLUMNS ||
+    if (tbl.uniqueConstraints.size() > MAX_SCHEMA_UNIQUE_CONSTRAINTS ||
         tbl.uniqueConstraintNames.size() > tbl.uniqueConstraints.size()) {
         if (error) *error = "invalid UNIQUE constraint metadata";
         return false;
     }
     for (const auto& constraint : tbl.uniqueConstraints) {
-        if (constraint.empty() || constraint.size() > tbl.len) {
+        if (constraint.empty() || constraint.size() > tbl.len() || constraint.size() > MAX_SCHEMA_KEY_COLUMNS) {
             if (error) *error = "UNIQUE constraint requires valid columns";
             return false;
         }
         std::set<size_t> distinctColumns;
         for (const size_t columnIndex : constraint) {
-            if (columnIndex >= tbl.len ||
+            if (columnIndex >= tbl.len() ||
                 !distinctColumns.insert(columnIndex).second) {
                 if (error) *error = "invalid UNIQUE constraint column metadata";
                 return false;
@@ -2399,7 +2404,7 @@ static bool validateTableSchemaIdentifiers(const TableSchema& tbl, std::string* 
             return false;
         }
     }
-    for (size_t i = 0; i < tbl.fkLen; ++i) {
+    for (size_t i = 0; i < tbl.fkLen(); ++i) {
         std::string normalizedDelete;
         std::string normalizedUpdate;
         if (reject(tbl.fks[i].name, MAX_TABLE_NAME_LEN, "constraint name") ||
@@ -2434,24 +2439,24 @@ void Column::print() const {
     std::cout << "DataSize: " << dsize << "\n\n";
 }
 
-void TableSchema::append(const Column& ncol) {
-    if (len < MAX_COLUMNS) {
-        cols[len++] = ncol;
-    }
+void TableSchema::append(Column column) {
+    if (len() >= MAX_COLUMNS)
+        throw DbError("54011", "tables can have at most " + std::to_string(MAX_COLUMNS) + " columns");
+    cols.push_back(std::move(column));
 }
 
-void TableSchema::appendFK(const ForeignKey& fk) {
-    if (fkLen < MAX_COLUMNS) {
-        fks[fkLen++] = fk;
-    }
+void TableSchema::appendFK(ForeignKey fk) {
+    if (fkLen() >= MAX_TABLE_FOREIGN_KEYS)
+        throw DbError("54000", "too many foreign key constraints on table");
+    fks.push_back(std::move(fk));
 }
 
 void TableSchema::print() const {
     std::cout << tablename << "\n\n";
-    for (size_t i = 0; i < len; ++i) cols[i].print();
-    if (fkLen > 0) {
+    for (const auto& column : cols) column.print();
+    if (!fks.empty()) {
         std::cout << "Foreign Keys:\n";
-        for (size_t i = 0; i < fkLen; ++i) {
+        for (size_t i = 0; i < fkLen(); ++i) {
             std::cout << "  ";
             for (size_t ci = 0; ci < fks[i].colNames.size(); ++ci) {
                 if (ci > 0) std::cout << ",";
@@ -2472,8 +2477,27 @@ void TableSchema::print() const {
 
 size_t TableSchema::rowSize() const {
     size_t total = 0;
-    for (size_t i = 0; i < len; ++i) total += cols[i].dsize;
-    return total + rowHeaderSize(formatVersion, len);
+    for (const auto& column : cols) total += column.dsize;
+    return total + rowHeaderSize(formatVersion, len());
+}
+
+static_assert(MAX_COLUMNS <= HEAP_NATTS_MASK && computeHeapHeaderSize(MAX_COLUMNS) <= UINT8_MAX,
+              "supported schemas must fit the heap tuple header");
+constexpr size_t LEGACY_COLUMN_LIMIT = 30;
+constexpr size_t MAX_HEAP_TUPLE_BYTES = PgPage::PAGE_SIZE -
+    sizeof(PgPage::PageHeaderData) - sizeof(PgPage::ItemIdData) - sizeof(uint32_t);
+
+static std::optional<size_t> minimumHeapTupleSize(const TableSchema& table) {
+    size_t size = rowHeaderSize(table.formatVersion, table.len());
+    if (size > MAX_HEAP_TUPLE_BYTES) return std::nullopt;
+    // Each fixed slot is present even for NULL. Variable fields start with
+    // a pair of uint16_t offset/length entries before any inline data.
+    for (const auto& column : table.cols) {
+        const size_t width = column.isVariableLength ? 2 * sizeof(uint16_t) : column.dsize;
+        if (width > MAX_HEAP_TUPLE_BYTES - size) return std::nullopt;
+        size += width;
+    }
+    return size;
 }
 
 // The allocator header records a nominal schema width, not a tuple stride.
@@ -2482,13 +2506,14 @@ size_t TableSchema::rowSize() const {
 // its tuples still carry their actual lengths and the ordinary heap headers.
 // Failure is explicit: no platform-sized invalid-width sentinel reaches PA.
 static std::optional<uint32_t> heapHeaderRowWidth(const TableSchema& table) {
-    if (table.len > MAX_COLUMNS) return std::nullopt;
+    if (table.len() > MAX_COLUMNS) return std::nullopt;
+    if (table.len() > LEGACY_COLUMN_LIMIT && !minimumHeapTupleSize(table)) return std::nullopt;
     constexpr size_t maximumHeaderWidth = std::numeric_limits<uint32_t>::max();
-    const size_t header = rowHeaderSize(table.formatVersion, table.len);
+    const size_t header = rowHeaderSize(table.formatVersion, table.len());
     size_t nominal = header;
     bool nominalOverflow = nominal > maximumHeaderWidth;
     bool variableWidth = false;
-    for (size_t i = 0; i < table.len; ++i) {
+    for (size_t i = 0; i < table.len(); ++i) {
         const Column& column = table.cols[i];
         variableWidth |= column.isVariableLength;
         if (!nominalOverflow) {
@@ -2502,44 +2527,26 @@ static std::optional<uint32_t> heapHeaderRowWidth(const TableSchema& table) {
     if (table.formatVersion != DATA_FILE_FORMAT_VERSION || !variableWidth)
         return std::nullopt;
 
-    // buildRowBuffer keeps each fixed slot even for NULL, plus one pair of
-    // uint16 offset/length entries per variable column. Use the same actual
-    // natts header; a logical varlen maximum is not an inline reservation.
-    // PgPage::init reserves its uint32 next-page link in special space.
-    constexpr size_t maximumTuple = PgPage::PAGE_SIZE -
-        sizeof(PgPage::PageHeaderData) - sizeof(PgPage::ItemIdData) -
-        sizeof(uint32_t);
-    size_t minimumTuple = header;
-    if (minimumTuple > maximumTuple) return std::nullopt;
-    for (size_t i = 0; i < table.len; ++i) {
-        const Column& column = table.cols[i];
-        const size_t inlineWidth = column.isVariableLength
-            ? 2 * sizeof(uint16_t) : column.dsize;
-        if (inlineWidth > maximumTuple - minimumTuple) return std::nullopt;
-        minimumTuple += inlineWidth;
-    }
+    if (!minimumHeapTupleSize(table)) return std::nullopt;
     return uint32_t{0};
 }
 
 bool TableSchema::hasVariableLength() const {
-    for (size_t i = 0; i < len; ++i) {
-        if (cols[i].isVariableLength) return true;
-    }
-    return false;
+    return std::any_of(cols.begin(), cols.end(), [](const auto& column) { return column.isVariableLength; });
 }
 
 size_t TableSchema::fixedDataSize() const {
     size_t total = 0;
-    for (size_t i = 0; i < len; ++i) {
-        if (!cols[i].isVariableLength) total += cols[i].dsize;
+    for (const auto& column : cols) {
+        if (!column.isVariableLength) total += column.dsize;
     }
     return total;
 }
 
 size_t TableSchema::varColCount() const {
     size_t count = 0;
-    for (size_t i = 0; i < len; ++i) {
-        if (cols[i].isVariableLength) ++count;
+    for (const auto& column : cols) {
+        if (column.isVariableLength) ++count;
     }
     return count;
 }
@@ -3773,7 +3780,7 @@ bool StorageEngine::ensureUnloggedInitForks(
             }
         }
         const bool hasVariableLength = std::any_of(
-            table.cols, table.cols + table.len,
+            table.cols.begin(), table.cols.end(),
             [](const Column& column) { return column.isVariableLength; });
         if (hasVariableLength) {
             heaps.emplace_back(toastDataPath(dbname, tablename), 0);
@@ -4545,7 +4552,7 @@ static int comparePartitionValues(const TableSchema& table,
     }
 
     const Column* keyColumn = nullptr;
-    for (size_t index = 0; index < table.len; ++index) {
+    for (size_t index = 0; index < table.len(); ++index) {
         if (table.cols[index].dataName == table.partitionKey) {
             keyColumn = &table.cols[index];
             break;
@@ -4814,15 +4821,15 @@ DBStatus StorageEngine::attachPartition(const std::string& dbname,
                 }
             }
             if (!tbl.defaultPartitionName.empty()) {
-                size_t partitionKeyIndex = tbl.len;
-                for (size_t columnIndex = 0; columnIndex < tbl.len;
+                size_t partitionKeyIndex = tbl.len();
+                for (size_t columnIndex = 0; columnIndex < tbl.len();
                      ++columnIndex) {
                     if (tbl.cols[columnIndex].dataName == tbl.partitionKey) {
                         partitionKeyIndex = columnIndex;
                         break;
                     }
                 }
-                if (partitionKeyIndex == tbl.len) {
+                if (partitionKeyIndex == tbl.len()) {
                     return DBStatus::CORRUPTED_DATA;
                 }
 
@@ -5246,7 +5253,7 @@ DBStatus resolveTableCollations(const StorageEngine& engine,
                                 const std::string& dbname,
                                 TableSchema& table,
                                 std::string* error = nullptr) {
-    for (size_t columnIndex = 0; columnIndex < table.len; ++columnIndex) {
+    for (size_t columnIndex = 0; columnIndex < table.len(); ++columnIndex) {
         Column& column = table.cols[columnIndex];
         column.resolvedCollation.clear();
         column.resolvedCollationUsesLocale = false;
@@ -5378,7 +5385,7 @@ bool constraintKeyValuesEqual(const TableSchema& table,
     }
     for (size_t valueIndex = 0; valueIndex < columns.size(); ++valueIndex) {
         const size_t columnIndex = columns[valueIndex];
-        if (columnIndex >= table.len ||
+        if (columnIndex >= table.len() ||
             !constraintColumnValuesEqual(
                 table.cols[columnIndex], left[valueIndex],
                 right[valueIndex])) {
@@ -5392,7 +5399,7 @@ bool constraintNeedsCollationScan(const TableSchema& table,
                                   const std::vector<size_t>& columns) {
     return std::any_of(
         columns.begin(), columns.end(), [&](size_t columnIndex) {
-            return columnIndex >= table.len ||
+            return columnIndex >= table.len() ||
                    !columnUsesBinaryCollation(table.cols[columnIndex]);
         });
 }
@@ -5512,7 +5519,7 @@ DBStatus StorageEngine::dropCollation(const std::string& dbname,
         // readSchema preserves the requested name on a successful zero-column
         // schema and returns a value-initialized object on malformed input.
         if (table.tablename != tableName) return DBStatus::CORRUPTED_DATA;
-        for (size_t columnIndex = 0; columnIndex < table.len; ++columnIndex) {
+        for (size_t columnIndex = 0; columnIndex < table.len(); ++columnIndex) {
             const std::string& reference = table.cols[columnIndex].collation;
             if (reference.empty()) continue;
             std::string physicalReference;
@@ -5632,7 +5639,7 @@ static bool usesHeapTupleHeader(uint32_t formatVersion) {
 }
 
 static size_t heapTupleHeaderSize(const TableSchema& tbl) {
-    return computeHeapHeaderSize(static_cast<int>(tbl.len));
+    return computeHeapHeaderSize(tbl.len());
 }
 
 static size_t rowHeaderSize(const TableSchema& tbl) {
@@ -5641,7 +5648,7 @@ static size_t rowHeaderSize(const TableSchema& tbl) {
 
 static size_t rowHeaderSize(uint32_t formatVersion, size_t natts) {
     (void)formatVersion;
-    return computeHeapHeaderSize(static_cast<int>(natts));
+    return computeHeapHeaderSize(natts);
 }
 
 static size_t dataOffset(const TableSchema& tbl) {
@@ -5662,7 +5669,7 @@ static std::string buildHeapTupleHeader(const TableSchema& tbl,
     auto* htup = castHeapHeader(header.data());
     initHeapTupleHeader(htup,
                         static_cast<uint32_t>(creatorTxnId),
-                        static_cast<uint16_t>(tbl.len),
+                        static_cast<uint16_t>(tbl.len()),
                         hasNull,
                         hasVarWidth);
     return header;
@@ -6030,7 +6037,7 @@ bool StorageEngine::validateViewCheckOption(
 
     // Build simulated row buffer and strip MVCC header
     std::string rowBuffer = buildRowBuffer(tbl, colValues, 0);
-    std::string dataOnly = stripRowHeader(rowBuffer, tbl.formatVersion, tbl.len);
+    std::string dataOnly = stripRowHeader(rowBuffer, tbl.formatVersion, tbl.len());
 
     // Get view SQL and extract WHERE clause
     std::string viewSql = getViewSQL(dbname, viewname);
@@ -6947,7 +6954,7 @@ add("old.", oldVals);
 // every column to null so old.col in an INSERT trigger reads as NULL rather
 // than surviving as literal text.
 if (ctxCols) {
-    for (size_t i = 0; i < ctxCols->len; ++i) {
+    for (size_t i = 0; i < ctxCols->len(); ++i) {
         std::string col = ctxCols->cols[i].dataName;
         for (auto& ch : col) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
         if (!newVals) ctx.vars["new." + col] = "null";
@@ -7473,7 +7480,7 @@ detail::ScopedStoredRowNullBitmap::ScopedStoredRowNullBitmap(
     : oldSchema_(g_bufferedConditionSchema),
       oldNulls_(g_bufferedConditionNulls),
       active_(schema.formatVersion == DATA_FILE_FORMAT_VERSION &&
-              nulls.size() == schema.len) {
+              nulls.size() == schema.len()) {
     if (active_) {
         g_bufferedConditionSchema = &schema;
         g_bufferedConditionNulls = &nulls;
@@ -7497,7 +7504,7 @@ public:
         : oldSchema_(g_bufferedConditionSchema),
           oldNulls_(g_bufferedConditionNulls),
           active_(usesHeapTupleHeader(schema.formatVersion) &&
-                  nulls.size() == schema.len) {
+                  nulls.size() == schema.len()) {
         if (active_) {
             g_bufferedConditionSchema = &schema;
             g_bufferedConditionNulls = &nulls;
@@ -7529,12 +7536,12 @@ public:
                           const char* payload, size_t payloadLength,
                           const HeapTupleHeaderData* tuple = g_scanHeapTuple) {
         if (schema.formatVersion != DATA_FILE_FORMAT_VERSION || !tuple ||
-            schema.len > MAX_COLUMNS || scratch.size() != schema.len ||
-            (tuple->t_infomask2 & HEAP_NATTS_MASK) != schema.len ||
-            tuple->t_hoff < computeHeapHeaderSize(schema.len) ||
+            schema.len() > MAX_COLUMNS || scratch.size() != schema.len() ||
+            (tuple->t_infomask2 & HEAP_NATTS_MASK) != schema.len() ||
+            tuple->t_hoff < computeHeapHeaderSize(schema.len()) ||
             payload != reinterpret_cast<const char*>(tuple) + tuple->t_hoff ||
             payloadLength == 0) return;
-        for (size_t i = 0; i < schema.len; ++i)
+        for (size_t i = 0; i < schema.len(); ++i)
             scratch[i] = schema.cols[i].isNull && dbms::isNull(tuple, i);
         binding_.emplace(schema, scratch);
     }
@@ -7601,13 +7608,13 @@ bool StorageEngine::analyzeTable(const std::string& dbname,
     TableSchema tbl = getTableSchema(dbname, tablename);
     std::vector<size_t> selected;
     if (columns.empty()) {
-        for (size_t i = 0; i < tbl.len; ++i) selected.push_back(i);
+        for (size_t i = 0; i < tbl.len(); ++i) selected.push_back(i);
     } else {
         std::set<size_t> seen;
         for (const auto& name : columns) {
             size_t i = 0;
-            for (; i < tbl.len && tbl.cols[i].dataName != name; ++i) {}
-            if (i == tbl.len)
+            for (; i < tbl.len() && tbl.cols[i].dataName != name; ++i) {}
+            if (i == tbl.len())
                 throw DbError("42703", "column \"" + name + "\" of relation \"" + tablename + "\" does not exist");
             if (!seen.insert(i).second)
                 throw DbError("42701", "column \"" + name + "\" of relation \"" + tablename + "\" appears more than once");
@@ -7675,8 +7682,8 @@ bool StorageEngine::analyzeTable(const std::string& dbname,
                         if (page.read(slotId, tuple, length) &&
                             length >= sizeof(HeapTupleHeaderData) &&
                             tuple == reinterpret_cast<const char*>(g_scanHeapTuple)) {
-                            capturedNulls.assign(tbl.len, false);
-                            for (size_t column = 0; column < tbl.len; ++column)
+                            capturedNulls.assign(tbl.len(), false);
+                            for (size_t column = 0; column < tbl.len(); ++column)
                                 capturedNulls[column] = dbms::isNull(
                                     castHeapHeader(tuple), static_cast<int>(column));
                             capturedBinding.emplace(tbl, capturedNulls);
@@ -7895,7 +7902,7 @@ bool StorageEngine::analyzeMultiColumn(const std::string& dbname, const std::str
 
     // Build column index map
     std::map<std::string, size_t> colIdx;
-    for (size_t i = 0; i < tbl.len; ++i) {
+    for (size_t i = 0; i < tbl.len(); ++i) {
         colIdx[tbl.cols[i].dataName] = i;
     }
     for (const auto& c : colnames) {
@@ -7994,7 +8001,7 @@ std::map<std::string, double> StorageEngine::computeFunctionalDependencies(
     TableSchema tbl = getTableSchema(dbname, tablename);
 
     std::map<std::string, size_t> colIdx;
-    for (size_t i = 0; i < tbl.len; ++i) colIdx[tbl.cols[i].dataName] = i;
+    for (size_t i = 0; i < tbl.len(); ++i) colIdx[tbl.cols[i].dataName] = i;
     for (const auto& c : colnames) {
         if (colIdx.find(c) == colIdx.end()) return result;
     }
@@ -8045,7 +8052,7 @@ std::map<std::string, int64_t> StorageEngine::computeNDistinct(
     if (!tableExists(dbname, tablename) || colnames.size() < 2) return result;
     TableSchema tbl = getTableSchema(dbname, tablename);
     std::map<std::string, size_t> colIdx;
-    for (size_t i = 0; i < tbl.len; ++i) colIdx[tbl.cols[i].dataName] = i;
+    for (size_t i = 0; i < tbl.len(); ++i) colIdx[tbl.cols[i].dataName] = i;
     for (const auto& c : colnames)
         if (colIdx.find(c) == colIdx.end()) return result;
 
@@ -8091,7 +8098,7 @@ std::vector<std::pair<std::string, int64_t>> StorageEngine::computeMCVCombinatio
     if (!tableExists(dbname, tablename) || colnames.empty()) return result;
     TableSchema tbl = getTableSchema(dbname, tablename);
     std::map<std::string, size_t> colIdx;
-    for (size_t i = 0; i < tbl.len; ++i) colIdx[tbl.cols[i].dataName] = i;
+    for (size_t i = 0; i < tbl.len(); ++i) colIdx[tbl.cols[i].dataName] = i;
     for (const auto& c : colnames)
         if (colIdx.find(c) == colIdx.end()) return result;
 
@@ -9589,7 +9596,7 @@ bool StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
     auto emitRow = [
         &callback, rv, this, dbname, tablename, registerSiread,
         indexMaintenanceView, &belongsInPhysicalIndex,
-        fmtVer = tbl.formatVersion, natts = tbl.len
+        fmtVer = tbl.formatVersion, natts = tbl.len()
     ](uint32_t pid, uint16_t sid, const char* data, size_t len) {
         checkForQueryInterrupt();
         if (len == 0) return;
@@ -9816,18 +9823,18 @@ std::unique_ptr<HeapScanCursor> StorageEngine::beginHeapScan(
             PageWrapper page(buffer, state->allocator->pageSize(), table.formatVersion);
             page.forEachLive([&](uint16_t slotId, const char* bytes, size_t length) {
                 checkForQueryInterrupt();
-                if (length <= rowHeaderSize(table.formatVersion, table.len) ||
+                if (length <= rowHeaderSize(table.formatVersion, table.len()) ||
                     !state->view.isVisible(bytes, length, table.formatVersion)) return;
                 const size_t offset = usesHeapTupleHeader(table.formatVersion)
-                    ? castHeapHeader(bytes)->t_hoff : dataOffset(table.formatVersion, table.len);
+                    ? castHeapHeader(bytes)->t_hoff : dataOffset(table.formatVersion, table.len());
                 if (offset >= length) return;
                 HeapScanRow row;
                 row.rid = encodeRid(pageId, slotId);
                 noteScanSiread(dbname, tablename, row.rid);
                 row.data.assign(bytes + offset, length - offset);
-                row.nulls.assign(table.len, false);
+                row.nulls.assign(table.len(), false);
                 if (usesHeapTupleHeader(table.formatVersion))
-                    for (size_t i = 0; i < table.len; ++i)
+                    for (size_t i = 0; i < table.len(); ++i)
                         if (table.cols[i].isNull)
                             row.nulls[i] = dbms::isNull(castHeapHeader(bytes), static_cast<int>(i));
                 rows.push_back(std::move(row));
@@ -9870,7 +9877,7 @@ bool StorageEngine::forEachVisibleRow(
         const std::string row(data, len);
         std::map<std::string, std::string> values;
         std::map<std::string, std::string> typeHints;
-        for (size_t i = 0; i < tbl.len; ++i) {
+        for (size_t i = 0; i < tbl.len(); ++i) {
             const std::string value = extractColumnValueStatic(row, tbl, i);
             values[tbl.cols[i].dataName] = value;
             typeHints[tbl.cols[i].dataName] = tbl.cols[i].dataType;
@@ -9944,7 +9951,7 @@ bool StorageEngine::forEachRowPageRange(
     const uint32_t pageCount = allocator->numPages();
     const uint32_t lastPage = std::min(endPage, pageCount);
     const uint32_t fmtVer = tbl.formatVersion;
-    const size_t natts = tbl.len;
+    const size_t natts = tbl.len();
 
     auto emitRow = [&callback, rv, fmtVer, natts](uint32_t pid, uint16_t sid,
                                                    const char* data, size_t len) {
@@ -10002,11 +10009,11 @@ bool StorageEngine::readRowByRid(PageAllocator* pa, int64_t rid,
     size_t len = 0;
     bool ok = page.read(slotId, data, len);
     if (ok && nullColumns) {
-        nullColumns->assign(tbl.len, false);
+        nullColumns->assign(tbl.len(), false);
         if (usesHeapTupleHeader(tbl.formatVersion) &&
             len >= sizeof(HeapTupleHeaderData)) {
             const auto* header = castHeapHeader(data);
-            for (size_t i = 0; i < tbl.len; ++i) {
+            for (size_t i = 0; i < tbl.len(); ++i) {
                 (*nullColumns)[i] =
                     dbms::isNull(header, static_cast<int>(i));
             }
@@ -10016,7 +10023,7 @@ bool StorageEngine::readRowByRid(PageAllocator* pa, int64_t rid,
     // page.read() returns a pointer into the pinned buffer frame. Copy the
     // payload before releasing that pin; another reader may reuse the frame
     // as soon as its pin count reaches zero.
-    rowBuffer = stripRowHeader(data, len, tbl.formatVersion, tbl.len);
+    rowBuffer = stripRowHeader(data, len, tbl.formatVersion, tbl.len());
     return true;
 }
 
@@ -10068,7 +10075,7 @@ bool StorageEngine::readVisibleRowByRid(const std::string& dbname, PageAllocator
         visible = rv->isVisible(data, len, tbl.formatVersion);
     }
     if (visible) {
-        rowBuffer = stripRowHeader(data, len, tbl.formatVersion, tbl.len);
+        rowBuffer = stripRowHeader(data, len, tbl.formatVersion, tbl.len());
     }
     return visible;
 }
@@ -10134,7 +10141,7 @@ bool StorageEngine::readCurrentRowByRid(
             !view || view->isVisible(data, length, tbl.formatVersion);
         if (visible) {
             rowBuffer = stripRowHeader(
-                data, length, tbl.formatVersion, tbl.len);
+                data, length, tbl.formatVersion, tbl.len());
             allocator->unpinPage(pageId);
             return true;
         }
@@ -10203,7 +10210,7 @@ std::string StorageEngine::extractPKValue(const std::string& rowBuffer, const Ta
     if (g_condNullEngine && tbl.tablename == g_condNullTable) {
         std::map<std::string, std::string> values;
         auto* engine = const_cast<StorageEngine*>(g_condNullEngine);
-        for (size_t i = 0; i < tbl.len; ++i) {
+        for (size_t i = 0; i < tbl.len(); ++i) {
             values[tbl.cols[i].dataName] =
                 engine->extractColumnValue(rowBuffer, tbl, i, g_condNullDb);
         }
@@ -10216,7 +10223,7 @@ std::string StorageEngine::extractPKValue(const std::string& rowBuffer,
                                           const TableSchema& tbl,
                                           const std::string& dbname) {
     std::map<std::string, std::string> values;
-    for (size_t i = 0; i < tbl.len; ++i) {
+    for (size_t i = 0; i < tbl.len(); ++i) {
         values[tbl.cols[i].dataName] =
             extractColumnValue(rowBuffer, tbl, i, dbname);
     }
@@ -10267,18 +10274,18 @@ static std::optional<size_t> signedIntegerPrimaryKeyColumn(const TableSchema& sc
         (!schema.tablespace.empty() && schema.tablespace != "pg_default") ||
         schema.partitionType != TableSchema::PartitionType::None) return {};
 
-    size_t column = schema.len;
+    size_t column = schema.len();
     if (!schema.pkColIndices.empty()) {
         if (schema.pkColIndices.size() != 1) return {};
         column = schema.pkColIndices.front();
     } else {
-        for (size_t i = 0; i < schema.len; ++i) {
+        for (size_t i = 0; i < schema.len(); ++i) {
             if (!schema.cols[i].isPrimaryKey) continue;
-            if (column != schema.len) return {};
+            if (column != schema.len()) return {};
             column = i;
         }
     }
-    if (column >= schema.len) return {};
+    if (column >= schema.len()) return {};
     const auto& key = schema.cols[column];
     if (key.isArray || key.isUnsigned || key.generatedKind || !key.domainName.empty()) return {};
     const auto type = ExprHelper::canonicalResultTypeName(key.dataType);
@@ -10334,7 +10341,7 @@ std::optional<OrderedPrimaryKeyReadPage> StorageEngine::tryReadOrderedIntegerPri
     if (dataDirectory().empty() || !count || signedIntegerPrimaryKeyColumn(expectedSchema) != keyColumn ||
         transactionContext().txnIsolationLevel == IsolationLevel::SERIALIZABLE ||
         std::any_of(nullTests.begin(), nullTests.end(), [&](const auto& test) {
-            return test.column >= expectedSchema.len;
+            return test.column >= expectedSchema.len();
         }))
         return {};
     checkForQueryInterrupt();
@@ -10342,12 +10349,12 @@ std::optional<OrderedPrimaryKeyReadPage> StorageEngine::tryReadOrderedIntegerPri
     if (!lockManager_.lockExclusiveNoWait(tablename)) return {};
     ResourceUnlockGuard relation(lockManager_, tablename);
     const auto schema = getTableSchema(dbname, tablename);
-    if (schema.physicalRelationId != expectedSchema.physicalRelationId || schema.len != expectedSchema.len ||
+    if (schema.physicalRelationId != expectedSchema.physicalRelationId || schema.len() != expectedSchema.len() ||
         schema.formatVersion != expectedSchema.formatVersion || schema.tablespace != expectedSchema.tablespace ||
         schema.pkColIndices != expectedSchema.pkColIndices || signedIntegerPrimaryKeyColumn(schema) != keyColumn ||
         rlsAppliesTo(dbname, tablename) || !getInheritedChildren(dbname, tablename).empty())
         return {};
-    for (size_t i = 0; i < schema.len; ++i) {
+    for (size_t i = 0; i < schema.len(); ++i) {
         const auto layout = [](const Column& c) {
             return std::tie(c.dataName, c.dataType, c.dsize, c.isVariableLength, c.isNull, c.isPrimaryKey,
                             c.isArray, c.isUnsigned, c.typeMod, c.storageCodec, c.domainName, c.generatedKind,
@@ -10414,7 +10421,7 @@ std::optional<OrderedPrimaryKeyReadPage> StorageEngine::tryReadOrderedIntegerPri
         const auto [keyValue, rid] = candidate;
         if ((lower && keyValue < *lower) || (upper && keyValue > *upper)) return false;
         std::string raw;
-        std::vector<bool> bitmap(schema.len, false);
+        std::vector<bool> bitmap(schema.len(), false);
         {
             uint32_t pageId = 0;
             uint16_t slotId = 0;
@@ -10432,10 +10439,10 @@ std::optional<OrderedPrimaryKeyReadPage> StorageEngine::tryReadOrderedIntegerPri
                 !view->isVisible(tuple, length, schema.formatVersion)) return false;
             const auto* header = castHeapHeader(tuple);
             const size_t minOffset = sizeof(HeapTupleHeaderData) +
-                ((header->t_infomask & HEAP_HASNULL) ? (schema.len + 7) / 8 : 0);
+                ((header->t_infomask & HEAP_HASNULL) ? (schema.len() + 7) / 8 : 0);
             if (header->t_hoff < minOffset || header->t_hoff >= length) return false;
             raw.assign(tuple + header->t_hoff, length - header->t_hoff);
-            for (size_t col = 0; col < schema.len; ++col)
+            for (size_t col = 0; col < schema.len(); ++col)
                 if (schema.cols[col].isNull)
                     bitmap[col] = dbms::isNull(header, static_cast<int>(col));
         }
@@ -10712,9 +10719,9 @@ DBStatus StorageEngine::createHashIndex(const std::string& dbname,
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     TableSchema tbl = getTableSchema(dbname, tablename);
-    std::vector<bool> scanNulls(tbl.len, false);
+    std::vector<bool> scanNulls(tbl.len(), false);
     bool found = false;
-    for (size_t i = 0; i < tbl.len; ++i) {
+    for (size_t i = 0; i < tbl.len(); ++i) {
         if (tbl.cols[i].dataName == colname) { found = true; break; }
     }
     if (!found) return DBStatus::INVALID_VALUE;
@@ -10744,7 +10751,7 @@ DBStatus StorageEngine::createHashIndex(const std::string& dbname,
                                        const char* data, size_t len) {
         ScannedNullRowBinding scanNullOwner(tbl, scanNulls, data, len);
         std::string row(data, len);
-        for (size_t i = 0; i < tbl.len; ++i) {
+        for (size_t i = 0; i < tbl.len(); ++i) {
             if (tbl.cols[i].dataName == colname) {
                 bool isNull = false;
                 std::string val = canonicalColumnKeyValue(
@@ -10875,9 +10882,9 @@ DBStatus StorageEngine::createBloomIndex(const std::string& dbname,
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     TableSchema tbl = getTableSchema(dbname, tablename);
-    std::vector<bool> scanNulls(tbl.len, false);
+    std::vector<bool> scanNulls(tbl.len(), false);
     bool found = false;
-    for (size_t i = 0; i < tbl.len; ++i) {
+    for (size_t i = 0; i < tbl.len(); ++i) {
         if (tbl.cols[i].dataName == colname) { found = true; break; }
     }
     if (!found) return DBStatus::INVALID_VALUE;
@@ -10906,7 +10913,7 @@ DBStatus StorageEngine::createBloomIndex(const std::string& dbname,
                                            const char* data, size_t len) {
         ScannedNullRowBinding scanNullOwner(tbl, scanNulls, data, len);
         std::string row(data, len);
-        for (size_t i = 0; i < tbl.len; ++i) {
+        for (size_t i = 0; i < tbl.len(); ++i) {
             if (tbl.cols[i].dataName == colname) {
                 bool isNull = false;
                 std::string val = canonicalColumnKeyValue(
@@ -12217,12 +12224,12 @@ void detail::decodeStoredRowValues(StorageEngine& engine,
                                   const std::vector<bool>& storedNulls,
                                   std::vector<std::string>& values,
                                   std::vector<bool>& nulls) {
-    if (storedNulls.size() != schema.len)
+    if (storedNulls.size() != schema.len())
         throw DbError("XX000", "stored row NULL bitmap width mismatch");
     BufferedNullRowBinding binding(schema, storedNulls);
     values.clear(); nulls.clear();
-    values.reserve(schema.len); nulls.reserve(schema.len);
-    for (size_t i = 0; i < schema.len; ++i) {
+    values.reserve(schema.len()); nulls.reserve(schema.len());
+    for (size_t i = 0; i < schema.len(); ++i) {
         bool computedNull = false;
         values.push_back(engine.extractColumnValue(raw, schema, i,
                                                    database, true, &computedNull));
@@ -12240,12 +12247,12 @@ void detail::decodeStoredRowInputs(StorageEngine& engine,
                                   const std::vector<bool>& storedNulls,
                                   std::vector<std::string>& values,
                                   std::vector<bool>& nulls) {
-    if (storedNulls.size() != schema.len)
+    if (storedNulls.size() != schema.len())
         throw DbError("XX000", "stored row NULL bitmap width mismatch");
     BufferedNullRowBinding binding(schema, storedNulls);
     values.clear(); nulls.clear();
-    values.reserve(schema.len); nulls.reserve(schema.len);
-    for (size_t i = 0; i < schema.len; ++i) {
+    values.reserve(schema.len()); nulls.reserve(schema.len());
+    for (size_t i = 0; i < schema.len(); ++i) {
         if (schema.cols[i].generatedKind == 'v') {
             // The prepared consumer skips both placeholder lanes, then
             // attaches its real read recipe/presence with setSourceInputs.
@@ -12262,7 +12269,7 @@ void detail::decodeStoredRowInputs(StorageEngine& engine,
 
 std::string StorageEngine::extractColumnValueStatic(const std::string& rowBuffer,
                                                      const TableSchema& tbl, size_t colIdx) {
-    if (colIdx >= tbl.len) return "";
+    if (colIdx >= tbl.len()) return "";
     const Column& col = tbl.cols[colIdx];
 
     // Stored-NULL visibility (see NullRowBinding above): when a scan
@@ -12453,7 +12460,7 @@ std::string StorageEngine::extractColumnValue(const std::string& rowBuffer,
                                                std::optional<ExprValue>* owningValue,GeneratedRelationPtr declaredSource) {
     if (owningValue) owningValue->reset();
     if (valueIsNull) *valueIsNull = false;
-    if (colIdx >= tbl.len) return "";
+    if (colIdx >= tbl.len()) return "";
     const Column& col = tbl.cols[colIdx];
 
     // Stored-NULL visibility: when a scan loop has bound the current
@@ -12505,7 +12512,7 @@ std::string StorageEngine::extractColumnValue(const std::string& rowBuffer,
         if(!declaration || colIdx>=declaration->columns.size())
             throw DbError("XX000","virtual source lost its frozen physical declaration");
         RowContext context;std::map<std::string,std::string> names;
-        for(size_t i=0;i<tbl.len;++i) {
+        for(size_t i=0;i<tbl.len();++i) {
             names.emplace(tbl.cols[i].dataName,tbl.cols[i].dataName);
             if(tbl.cols[i].generatedKind=='v')continue;
             bool isNull=false;
@@ -12551,11 +12558,11 @@ std::string StorageEngine::buildCompositeKey(const std::string& rowBuffer,
                                                const std::vector<std::string>& colNames) {
     std::string key;
     for (const auto& cname : colNames) {
-        size_t colIdx = tbl.len;
-        for (size_t i = 0; i < tbl.len; ++i) {
+        size_t colIdx = tbl.len();
+        for (size_t i = 0; i < tbl.len(); ++i) {
             if (tbl.cols[i].dataName == cname) { colIdx = i; break; }
         }
-        if (colIdx < tbl.len) {
+        if (colIdx < tbl.len()) {
             if (!key.empty()) key += '\x01';
             if (g_condNullEngine && tbl.tablename == g_condNullTable) {
                 key += const_cast<StorageEngine*>(g_condNullEngine)->extractColumnValue(
@@ -12572,7 +12579,7 @@ std::string StorageEngine::buildCompositeKey(
     const std::string& rowBuffer, const TableSchema& tbl,
     const std::vector<std::string>& colNames, const std::string& dbname) {
     std::map<std::string, std::string> values;
-    for (size_t i = 0; i < tbl.len; ++i) {
+    for (size_t i = 0; i < tbl.len(); ++i) {
         values[tbl.cols[i].dataName] =
             extractColumnValue(rowBuffer, tbl, i, dbname);
     }
@@ -12686,7 +12693,7 @@ static bool evalTriggerRowAssignment(
         std::string& value, bool& isNull) {
     std::map<std::string, std::string> values, types, collations;
     std::set<std::string> nulls;
-    for (size_t i = 0; i < table.len; ++i) {
+    for (size_t i = 0; i < table.len(); ++i) {
         const auto& column = table.cols[i];
         const auto bind = [&](const std::string& prefix,
                               const std::map<std::string, std::string>* row,
@@ -13325,7 +13332,7 @@ bool StorageEngine::checkExclusionConflict(const std::string& dbname, const std:
     if (ec.elements.empty()) return false;
     TableSchema tbl = getTableSchema(dbname, tablename);
     std::map<std::string, std::string> newValues;
-    for (size_t i = 0; i < tbl.len; ++i) {
+    for (size_t i = 0; i < tbl.len(); ++i) {
         newValues[tbl.cols[i].dataName] =
             const_cast<StorageEngine*>(this)->extractColumnValue(
                 newRowBuffer, tbl, i, dbname);
@@ -13339,11 +13346,11 @@ bool StorageEngine::checkExclusionConflict(const std::string& dbname, const std:
     }
     std::vector<size_t> colIdxs;
     for (const auto& elem : ec.elements) {
-        size_t idx = tbl.len;
-        for (size_t i = 0; i < tbl.len; ++i) {
+        size_t idx = tbl.len();
+        for (size_t i = 0; i < tbl.len(); ++i) {
             if (tbl.cols[i].dataName == elem.first) { idx = i; break; }
         }
-        if (idx >= tbl.len) return false;
+        if (idx >= tbl.len()) return false;
         colIdxs.push_back(idx);
     }
 
@@ -13366,7 +13373,7 @@ bool StorageEngine::checkExclusionConflict(const std::string& dbname, const std:
         if (rid == excludeRid) return;
         std::string row(data, len);
         std::map<std::string, std::string> oldValues;
-        for (size_t i = 0; i < tbl.len; ++i) {
+        for (size_t i = 0; i < tbl.len(); ++i) {
             oldValues[tbl.cols[i].dataName] =
                 const_cast<StorageEngine*>(this)->extractColumnValue(
                     row, tbl, i, dbname);
@@ -13519,7 +13526,7 @@ bool StorageEngine::runDeferredCheck(const DeferredCheck& dc) const {
         if (!tableExists(dc.dbname, dc.tablename)) return true;
         const TableSchema tbl = getTableSchema(dc.dbname, dc.tablename);
         int colIdx = -1;
-        for (size_t i = 0; i < tbl.len; ++i) {
+        for (size_t i = 0; i < tbl.len(); ++i) {
             if (tbl.cols[i].dataName == dc.uniqueCol) { colIdx = static_cast<int>(i); break; }
         }
         if (colIdx < 0) return false;
@@ -13652,14 +13659,14 @@ bool StorageEngine::runDeferredCheck(const DeferredCheck& dc) const {
         std::vector<std::string> payloadValues;
         payloadValues.reserve(localNames.size());
         for (const auto& name : localNames) {
-            size_t columnIndex = localTbl.len;
-            for (size_t candidate = 0; candidate < localTbl.len; ++candidate) {
+            size_t columnIndex = localTbl.len();
+            for (size_t candidate = 0; candidate < localTbl.len(); ++candidate) {
                 if (localTbl.cols[candidate].dataName == name) {
                     columnIndex = candidate;
                     break;
                 }
             }
-            if (columnIndex >= localTbl.len) return false;
+            if (columnIndex >= localTbl.len()) return false;
             if (dbms::detail::storedRowColumnIsNull(*this, dc.dbname, dc.tablename, localTbl, currentRid, columnIndex)) {
                 return true; // MATCH SIMPLE ignores real SQL NULL, not empty text.
             }
@@ -13673,14 +13680,14 @@ bool StorageEngine::runDeferredCheck(const DeferredCheck& dc) const {
         std::vector<size_t> referencedColumns;
         referencedColumns.reserve(referencedNames.size());
         for (const auto& name : referencedNames) {
-            size_t columnIndex = refTbl.len;
-            for (size_t candidate = 0; candidate < refTbl.len; ++candidate) {
+            size_t columnIndex = refTbl.len();
+            for (size_t candidate = 0; candidate < refTbl.len(); ++candidate) {
                 if (refTbl.cols[candidate].dataName == name) {
                     columnIndex = candidate;
                     break;
                 }
             }
-            if (columnIndex >= refTbl.len) return false;
+            if (columnIndex >= refTbl.len()) return false;
             referencedColumns.push_back(columnIndex);
         }
 
@@ -13728,7 +13735,7 @@ bool StorageEngine::runDeferredCheck(const DeferredCheck& dc) const {
         }
         expression = current->expression;
     } else {
-        if (dc.colIdx >= tbl.len) return true;
+        if (dc.colIdx >= tbl.len()) return true;
         expression = tbl.cols[dc.colIdx].checkExpr;
     }
     if (expression.empty()) return true;
@@ -13743,13 +13750,13 @@ bool StorageEngine::runDeferredCheck(const DeferredCheck& dc) const {
         // must fail closed instead of silently bypassing the constraint.
         return !readFailed;
     }
-    if(std::any_of(tbl.cols,tbl.cols+tbl.len,[](const Column& column){return column.generatedKind=='v';})) {
+    if(std::any_of(tbl.cols.begin(),tbl.cols.end(),[](const Column& column){return column.generatedKind=='v';})) {
         const auto generatedMetadata=freezeGeneratedStorageInput(tbl,dc.dbname,dc.tablename,const_cast<StorageEngine*>(this));
         const auto bitmap=detail::storedRowNullBitmap(*this,dc.dbname,dc.tablename,tbl,currentRid);
-        if(!bitmap || bitmap->size()!=tbl.len)throw DbError("XX001","deferred CHECK lost its actual stored NULL bitmap");
+        if(!bitmap || bitmap->size()!=tbl.len())throw DbError("XX001","deferred CHECK lost its actual stored NULL bitmap");
         std::map<std::string,std::string> values;std::set<std::string> nulls;
         BufferedNullRowBinding binding(tbl,*bitmap);
-        for(size_t i=0;i<tbl.len;++i) {
+        for(size_t i=0;i<tbl.len();++i) {
             if(tbl.cols[i].generatedKind=='v')continue;
             values[tbl.cols[i].dataName]=const_cast<StorageEngine*>(this)->extractColumnValue(row,tbl,i,dc.dbname,false);
             if((*bitmap)[i])nulls.insert(tbl.cols[i].dataName);
@@ -13758,7 +13765,7 @@ bool StorageEngine::runDeferredCheck(const DeferredCheck& dc) const {
         return generatedCheckInput(expression,tbl,values,nulls,buildTypeHints(tbl),dc.dbname,const_cast<StorageEngine*>(this),&error,generatedMetadata.get());
     }
     std::map<std::string, std::string> rowValues;
-    for (size_t i = 0; i < tbl.len; ++i) {
+    for (size_t i = 0; i < tbl.len(); ++i) {
         rowValues[tbl.cols[i].dataName] =
             const_cast<StorageEngine*>(this)->extractColumnValue(
                 row, tbl, i, dc.dbname);
@@ -13772,7 +13779,7 @@ bool StorageEngine::runDeferredCheck(const DeferredCheck& dc) const {
 // TableSchema PK helpers (defined here because they use StorageEngine::extractColumnValue)
 std::string TableSchema::columnIndexKey(const std::string& column,
                                         const std::string& value) const {
-    for (size_t i = 0; i < len; ++i) {
+    for (size_t i = 0; i < len(); ++i) {
         if (cols[i].dataName == column) {
             return canonicalColumnKeyValue(cols[i], value);
         }
@@ -13782,7 +13789,7 @@ std::string TableSchema::columnIndexKey(const std::string& column,
 
 bool TableSchema::hasPrimaryKey() const {
     if (!pkColIndices.empty()) return true;
-    for (size_t i = 0; i < len; ++i) if (cols[i].isPrimaryKey) return true;
+    for (size_t i = 0; i < len(); ++i) if (cols[i].isPrimaryKey) return true;
     return false;
 }
 
@@ -13790,7 +13797,7 @@ std::string TableSchema::buildPKValue(const std::string& rowBuffer) const {
     std::string key;
     if (!pkColIndices.empty()) {
         for (size_t idx : pkColIndices) {
-            if (idx < len) {
+            if (idx < len()) {
                 key += canonicalColumnKeyValue(
                     cols[idx], StorageEngine::extractColumnValueStatic(
                                    rowBuffer, *this, idx)) + "\x01";
@@ -13800,7 +13807,7 @@ std::string TableSchema::buildPKValue(const std::string& rowBuffer) const {
         // Collect all columns marked as primary key (composite PK support)
         bool first = true;
         size_t primaryColumnCount = 0;
-        for (size_t i = 0; i < len; ++i) {
+        for (size_t i = 0; i < len(); ++i) {
             if (cols[i].isPrimaryKey) {
                 ++primaryColumnCount;
                 if (!first) key += "\x01";
@@ -13825,7 +13832,7 @@ std::string TableSchema::buildPKValue(const std::map<std::string, std::string>& 
     std::string key;
     if (!pkColIndices.empty()) {
         for (size_t idx : pkColIndices) {
-            if (idx < len) {
+            if (idx < len()) {
                 auto it = values.find(cols[idx].dataName);
                 key += canonicalColumnKeyValue(
                     cols[idx], it != values.end() ? it->second : "") +
@@ -13835,7 +13842,7 @@ std::string TableSchema::buildPKValue(const std::map<std::string, std::string>& 
     } else {
         bool first = true;
         size_t primaryColumnCount = 0;
-        for (size_t i = 0; i < len; ++i) {
+        for (size_t i = 0; i < len(); ++i) {
             if (cols[i].isPrimaryKey) {
                 ++primaryColumnCount;
                 if (!first) key += "\x01";
@@ -13924,7 +13931,7 @@ static bool expressionIndexEntry(
     const std::string columnName = trim(metadata.name.substr(
         leftParen + 1, rightParen - leftParen - 1));
     bool columnExists = false;
-    for (size_t i = 0; i < table.len; ++i) {
+    for (size_t i = 0; i < table.len(); ++i) {
         if (table.cols[i].dataName == columnName) {
             columnExists = true;
             break;
@@ -13960,7 +13967,7 @@ static bool secondaryIndexEntry(
     }
 
     const Column* column = nullptr;
-    for (size_t i = 0; i < table.len; ++i) {
+    for (size_t i = 0; i < table.len(); ++i) {
         if (table.cols[i].dataName == metadata.name) {
             column = &table.cols[i];
             break;
@@ -14008,7 +14015,7 @@ static bool indexExpressionMayReadVirtual(const std::string& source,const TableS
         if(const auto* column=dynamic_cast<const ColumnRefExpr*>(node)) {
             if(column->column=="*"){reads=true;return;}
             bool found=false;
-            for(size_t i=0;i<table.len;++i)if(table.cols[i].dataName==column->column) {
+            for(size_t i=0;i<table.len();++i)if(table.cols[i].dataName==column->column) {
                 found=true;reads=reads||table.cols[i].generatedKind=='v';
             }
             if(!found)reads=true; // Preserve original handling of unknown roles.
@@ -14032,7 +14039,7 @@ static bool indexExpressionMayReadVirtual(const std::string& source,const TableS
     visit(root.get());return reads;
 }
 static bool indexColumnIsVirtual(const std::string& name,const TableSchema& table) {
-    for(size_t i=0;i<table.len;++i)if(table.cols[i].dataName==name)return table.cols[i].generatedKind=='v';
+    for(size_t i=0;i<table.len();++i)if(table.cols[i].dataName==name)return table.cols[i].generatedKind=='v';
     return true; // unknown metadata retains the exact full-map fallback
 }
 static bool secondaryMayReadVirtual(const StorageEngine::IndexMetadata& metadata,const TableSchema& table) {
@@ -14051,7 +14058,7 @@ static std::map<std::string, std::string> indexRowValuesFromBuffer(
     const std::string& rowBuffer,
     const std::string& dbname,bool omitVirtual=false) {
     std::map<std::string, std::string> values;
-    for (size_t i = 0; i < table.len; ++i) {
+    for (size_t i = 0; i < table.len(); ++i) {
         if(omitVirtual && table.cols[i].generatedKind=='v')continue;
         values[table.cols[i].dataName] = engine.extractColumnValue(
             rowBuffer, table, i, dbname, true);
@@ -14109,7 +14116,7 @@ DBStatus StorageEngine::createIndex(const std::string& dbname, const std::string
         if (!lockManager_.lockMetadata(tablename)) return DBStatus::LOCK_CONFLICT;
     }
     TableSchema tbl = getTableSchema(dbname, tablename);
-    std::vector<bool> scanNulls(tbl.len, false);
+    std::vector<bool> scanNulls(tbl.len(), false);
     if (unique &&
         tbl.partitionType != TableSchema::PartitionType::None) {
         lockManager_.unlock(tablename);
@@ -14119,7 +14126,7 @@ DBStatus StorageEngine::createIndex(const std::string& dbname, const std::string
     bool isExpression = !expression.empty();
     std::string actualColname = colname;
     std::string exprFunc;
-    size_t colIdx = tbl.len;
+    size_t colIdx = tbl.len();
 
     if (isExpression) {
         // Parse expression like "UPPER(name)"
@@ -14140,15 +14147,15 @@ DBStatus StorageEngine::createIndex(const std::string& dbname, const std::string
             return DBStatus::INVALID_VALUE;
         }
         actualColname = trim(expression.substr(lp + 1, rp - lp - 1));
-        for (size_t i = 0; i < tbl.len; ++i) {
+        for (size_t i = 0; i < tbl.len(); ++i) {
             if (tbl.cols[i].dataName == actualColname) { colIdx = i; break; }
         }
     } else {
-        for (size_t i = 0; i < tbl.len; ++i) {
+        for (size_t i = 0; i < tbl.len(); ++i) {
             if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
         }
     }
-    if (colIdx >= tbl.len) {
+    if (colIdx >= tbl.len()) {
         lockManager_.unlock(tablename);
         return DBStatus::INVALID_VALUE;
     }
@@ -14164,7 +14171,7 @@ DBStatus StorageEngine::createIndex(const std::string& dbname, const std::string
     candidateMetadata.exprFunc = exprFunc;
     candidateMetadata.whereCondition = whereCondition;
     std::map<std::string, std::string> nullValues;
-    for (size_t i = 0; i < tbl.len; ++i) {
+    for (size_t i = 0; i < tbl.len(); ++i) {
         nullValues[tbl.cols[i].dataName] = "";
     }
     bool ignoredMembership = false;
@@ -14435,7 +14442,7 @@ DBStatus StorageEngine::createCompositeIndex(const std::string& dbname,
         if (!lockManager_.lockMetadata(tablename)) return DBStatus::LOCK_CONFLICT;
     }
     TableSchema tbl = getTableSchema(dbname, tablename);
-    std::vector<bool> scanNulls(tbl.len, false);
+    std::vector<bool> scanNulls(tbl.len(), false);
     if (unique &&
         tbl.partitionType != TableSchema::PartitionType::None) {
         lockManager_.unlock(tablename);
@@ -14446,11 +14453,11 @@ DBStatus StorageEngine::createCompositeIndex(const std::string& dbname,
     std::vector<size_t> columnIndices;
     std::set<size_t> distinctColumns;
     for (const auto& cname : colnames) {
-        size_t found = tbl.len;
-        for (size_t i = 0; i < tbl.len; ++i) {
+        size_t found = tbl.len();
+        for (size_t i = 0; i < tbl.len(); ++i) {
             if (tbl.cols[i].dataName == cname) { found = i; break; }
         }
-        if (found >= tbl.len || !distinctColumns.insert(found).second ||
+        if (found >= tbl.len() || !distinctColumns.insert(found).second ||
             (unique && tbl.cols[found].generatedKind == 'v')) {
             lockManager_.unlock(tablename);
             return DBStatus::INVALID_VALUE;
@@ -14478,7 +14485,7 @@ DBStatus StorageEngine::createCompositeIndex(const std::string& dbname,
     candidateMetadata.whereCondition = whereCondition;
     candidateMetadata.isUnique = unique;
     std::map<std::string, std::string> nullValues;
-    for (size_t i = 0; i < tbl.len; ++i) {
+    for (size_t i = 0; i < tbl.len(); ++i) {
         nullValues[tbl.cols[i].dataName] = "";
     }
     bool ignoredMembership = false;
@@ -14824,7 +14831,7 @@ DBStatus StorageEngine::reindex(const std::string& dbname,
         return true;
     };
 
-    std::vector<bool> scanNulls(tbl.len, false);
+    std::vector<bool> scanNulls(tbl.len(), false);
     const auto secondaryIndexes = getIndexMetadata(dbname, tablename);
     const auto compositeIndexes = getCompositeIndexes(dbname, tablename);
     const std::string tableKey = dbname + "/" + tablename;
@@ -14846,7 +14853,7 @@ DBStatus StorageEngine::reindex(const std::string& dbname,
         compositeIndexes.size() < maxSinglePassTrees &&
         1 + secondaryIndexes.size() + compositeIndexes.size() <= maxSinglePassTrees &&
         (!secondaryIndexes.empty() || !compositeIndexes.empty());
-    for (size_t i = 0; i < tbl.len; ++i) {
+    for (size_t i = 0; i < tbl.len(); ++i) {
         if (tbl.cols[i].generatedKind == 'v') singlePassEligible = false;
     }
     for (const auto& metadata : secondaryIndexes) {
@@ -14861,17 +14868,17 @@ DBStatus StorageEngine::reindex(const std::string& dbname,
     // column still takes its original decoder/NULL/TOAST path in schema order.
     // Bad or ambiguous dependency metadata keeps the exact current full-map
     // callback in this same single-pass branch; no alternate scan is retried.
-    std::array<bool, MAX_COLUMNS> retainedIndexColumns{};
+    std::vector<bool> retainedIndexColumns(tbl.len());
     bool projectIndexMap = singlePassEligible;
     if (projectIndexMap) {
         const auto requireColumn = [&](const std::string& name) {
-            size_t ordinal = tbl.len;
-            for (size_t i = 0; i < tbl.len; ++i) {
+            size_t ordinal = tbl.len();
+            for (size_t i = 0; i < tbl.len(); ++i) {
                 if (tbl.cols[i].dataName != name) continue;
-                if (ordinal != tbl.len) return false;
+                if (ordinal != tbl.len()) return false;
                 ordinal = i;
             }
-            if (ordinal == tbl.len) return false;
+            if (ordinal == tbl.len()) return false;
             retainedIndexColumns[ordinal] = true;
             return true;
         };
@@ -14931,7 +14938,7 @@ DBStatus StorageEngine::reindex(const std::string& dbname,
                 if (!projectIndexMap)
                     return indexRowValuesFromBuffer(*this, tbl, row, dbname);
                 std::map<std::string, std::string> retained;
-                for (size_t ordinal = 0; ordinal < tbl.len; ++ordinal) {
+                for (size_t ordinal = 0; ordinal < tbl.len(); ++ordinal) {
                     auto value = extractColumnValue(row, tbl, ordinal, dbname, true);
                     if (retainedIndexColumns[ordinal])
                         retained[tbl.cols[ordinal].dataName] = std::move(value);
@@ -15301,12 +15308,12 @@ DBStatus StorageEngine::createFullTextIndex(const std::string& dbname,
     if (!metadataWrite.acquired()) return DBStatus::LOCK_CONFLICT;
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     TableSchema tbl = getTableSchema(dbname, tablename);
-    std::vector<bool> scanNulls(tbl.len, false);
-    size_t colIdx = tbl.len;
-    for (size_t i = 0; i < tbl.len; ++i) {
+    std::vector<bool> scanNulls(tbl.len(), false);
+    size_t colIdx = tbl.len();
+    for (size_t i = 0; i < tbl.len(); ++i) {
         if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
     }
-    if (colIdx >= tbl.len) return DBStatus::INVALID_VALUE;
+    if (colIdx >= tbl.len()) return DBStatus::INVALID_VALUE;
 
     std::map<std::string, std::set<int64_t>> inverted;
     if (!forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
@@ -15374,14 +15381,14 @@ std::vector<int64_t> StorageEngine::fullTextSearch(const std::string& dbname,
     for (char& c : searchWord) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     if (specializedIndexesNeedHeapFallback(dbname, tablename)) {
         const TableSchema table = getTableSchema(dbname, tablename);
-        size_t columnIndex = table.len;
-        for (size_t i = 0; i < table.len; ++i) {
+        size_t columnIndex = table.len();
+        for (size_t i = 0; i < table.len(); ++i) {
             if (table.cols[i].dataName == colname) {
                 columnIndex = i;
                 break;
             }
         }
-        if (columnIndex >= table.len) return result;
+        if (columnIndex >= table.len()) return result;
         const bool scanned = forEachRow(
             dbname, tablename,
             [&](uint32_t pageId, uint16_t slotId,
@@ -15576,12 +15583,12 @@ DBStatus StorageEngine::createGinIndex(const std::string& dbname,
     if (!metadataWrite.acquired()) return DBStatus::LOCK_CONFLICT;
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     TableSchema tbl = getTableSchema(dbname, tablename);
-    std::vector<bool> scanNulls(tbl.len, false);
-    size_t colIdx = tbl.len;
-    for (size_t i = 0; i < tbl.len; ++i) {
+    std::vector<bool> scanNulls(tbl.len(), false);
+    size_t colIdx = tbl.len();
+    for (size_t i = 0; i < tbl.len(); ++i) {
         if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
     }
-    if (colIdx >= tbl.len) return DBStatus::INVALID_VALUE;
+    if (colIdx >= tbl.len()) return DBStatus::INVALID_VALUE;
 
     std::map<std::string, std::set<int64_t>> inverted;
     if (!forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
@@ -15819,14 +15826,14 @@ std::vector<int64_t> StorageEngine::ginSearch(const std::string& dbname,
         return result;
     if (specializedIndexesNeedHeapFallback(dbname, tablename)) {
         const TableSchema table = getTableSchema(dbname, tablename);
-        size_t columnIndex = table.len;
-        for (size_t i = 0; i < table.len; ++i) {
+        size_t columnIndex = table.len();
+        for (size_t i = 0; i < table.len(); ++i) {
             if (table.cols[i].dataName == colname) {
                 columnIndex = i;
                 break;
             }
         }
-        if (columnIndex >= table.len) return result;
+        if (columnIndex >= table.len()) return result;
         const bool scanned = forEachRow(
             dbname, tablename,
             [&](uint32_t pageId, uint16_t slotId,
@@ -15883,7 +15890,7 @@ static bool gistBuildKey(StorageEngine& engine, const std::string& database,
         value = engine.extractColumnValue(row, table, ordinal, database, true, &isNull);
         return true;
     }
-    if (physicalNulls->size() != table.len) return false;
+    if (physicalNulls->size() != table.len()) return false;
     isNull = (*physicalNulls)[ordinal];
     value.clear();
     if (isNull) return true;
@@ -15922,7 +15929,7 @@ static bool gistFileOwnerIsUnique(const StorageEngine& engine,
             if (otherTable == table && otherColumn == column) continue;
             if (!engine.tableExists(database, otherTable)) continue;
             const auto schema = engine.getTableSchema(database, otherTable);
-            if (!std::any_of(schema.cols, schema.cols + schema.len,
+            if (!std::any_of(schema.cols.begin(), schema.cols.end(),
                     [&](const auto& key) { return key.dataName == otherColumn; })) continue;
             const auto alternate = resolvePath(otherTable, otherColumn);
             if (alternate.lexically_normal() == target.lexically_normal()) return false;
@@ -15945,12 +15952,12 @@ DBStatus StorageEngine::createGiSTIndex(const std::string& dbname,
     if (!metadataWrite.acquired()) return DBStatus::LOCK_CONFLICT;
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     TableSchema tbl = getTableSchema(dbname, tablename);
-    std::vector<bool> scanNulls(tbl.len, false);
-    size_t colIdx = tbl.len;
-    for (size_t i = 0; i < tbl.len; ++i) {
+    std::vector<bool> scanNulls(tbl.len(), false);
+    size_t colIdx = tbl.len();
+    for (size_t i = 0; i < tbl.len(); ++i) {
         if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
     }
-    if (colIdx >= tbl.len) return DBStatus::INVALID_VALUE;
+    if (colIdx >= tbl.len()) return DBStatus::INVALID_VALUE;
 
     auto path = giSTIndexPath(dbname, tablename, colname);
     std::string entryPayload;
@@ -16450,10 +16457,10 @@ std::optional<std::vector<int64_t>> StorageEngine::tryGiSTCandidates(
     const auto table = getTableSchema(database, tableName);
     if (table.partitionType != TableSchema::PartitionType::None ||
         !getInheritedChildren(database, tableName).empty()) return {};
-    size_t ordinal = table.len;
-    for (size_t i = 0; i < table.len; ++i)
+    size_t ordinal = table.len();
+    for (size_t i = 0; i < table.len(); ++i)
         if (table.cols[i].dataName == column) { ordinal = i; break; }
-    if (ordinal == table.len) return {};
+    if (ordinal == table.len()) return {};
     const auto& key = table.cols[ordinal];
     std::string type;
     if (ordering == GiSTOrderingRole::BinaryLikePrefix) {
@@ -16575,14 +16582,14 @@ std::vector<int64_t> StorageEngine::giSTSearchOverlap(const std::string& dbname,
                                                        const std::string& high) const {
     std::vector<int64_t> result;
     const TableSchema table = getTableSchema(dbname, tablename);
-    size_t columnIndex = table.len;
-    for (size_t i = 0; i < table.len; ++i) {
+    size_t columnIndex = table.len();
+    for (size_t i = 0; i < table.len(); ++i) {
         if (table.cols[i].dataName == colname) {
             columnIndex = i;
             break;
         }
     }
-    if (columnIndex >= table.len) return result;
+    if (columnIndex >= table.len()) return result;
     const GistKeyOrdering ordering =
         gistKeyOrdering(table.cols[columnIndex]);
     if (!gistQueryRangeIsValid(ordering, low, high)) return result;
@@ -16590,7 +16597,7 @@ std::vector<int64_t> StorageEngine::giSTSearchOverlap(const std::string& dbname,
     const auto scanHeap = [&]() -> std::vector<int64_t> {
         result.clear();
         bool valuesValid = true;
-        std::vector<bool> visibleNulls(table.len, false);
+        std::vector<bool> visibleNulls(table.len(), false);
         const bool scanned = forEachRow(
             dbname, tablename,
             [&](uint32_t pageId, uint16_t slotId,
@@ -16604,7 +16611,7 @@ std::vector<int64_t> StorageEngine::giSTSearchOverlap(const std::string& dbname,
                         valuesValid = false;
                         return;
                     }
-                    for (size_t i = 0; i < table.len; ++i)
+                    for (size_t i = 0; i < table.len(); ++i)
                         visibleNulls[i] = table.cols[i].isNull &&
                             dbms::isNull(g_scanHeapTuple, static_cast<int>(i));
                 }
@@ -16677,14 +16684,14 @@ std::vector<int64_t> StorageEngine::giSTSearchContainedBy(const std::string& dbn
                                                            const std::string& high) const {
     std::vector<int64_t> result;
     const TableSchema table = getTableSchema(dbname, tablename);
-    size_t columnIndex = table.len;
-    for (size_t i = 0; i < table.len; ++i) {
+    size_t columnIndex = table.len();
+    for (size_t i = 0; i < table.len(); ++i) {
         if (table.cols[i].dataName == colname) {
             columnIndex = i;
             break;
         }
     }
-    if (columnIndex >= table.len) return result;
+    if (columnIndex >= table.len()) return result;
     const GistKeyOrdering ordering =
         gistKeyOrdering(table.cols[columnIndex]);
     if (!gistQueryRangeIsValid(ordering, low, high)) return result;
@@ -16692,7 +16699,7 @@ std::vector<int64_t> StorageEngine::giSTSearchContainedBy(const std::string& dbn
     const auto scanHeap = [&]() -> std::vector<int64_t> {
         result.clear();
         bool valuesValid = true;
-        std::vector<bool> visibleNulls(table.len, false);
+        std::vector<bool> visibleNulls(table.len(), false);
         const bool scanned = forEachRow(
             dbname, tablename,
             [&](uint32_t pageId, uint16_t slotId,
@@ -16706,7 +16713,7 @@ std::vector<int64_t> StorageEngine::giSTSearchContainedBy(const std::string& dbn
                         valuesValid = false;
                         return;
                     }
-                    for (size_t i = 0; i < table.len; ++i)
+                    for (size_t i = 0; i < table.len(); ++i)
                         visibleNulls[i] = table.cols[i].isNull &&
                             dbms::isNull(g_scanHeapTuple, static_cast<int>(i));
                 }
@@ -16788,12 +16795,12 @@ DBStatus StorageEngine::createSPGiSTIndex(const std::string& dbname,
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     TableSchema tbl = getTableSchema(dbname, tablename);
-    std::vector<bool> scanNulls(tbl.len, false);
-    size_t colIdx = tbl.len;
-    for (size_t i = 0; i < tbl.len; ++i) {
+    std::vector<bool> scanNulls(tbl.len(), false);
+    size_t colIdx = tbl.len();
+    for (size_t i = 0; i < tbl.len(); ++i) {
         if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
     }
-    if (colIdx >= tbl.len || tbl.cols[colIdx].dataType != "point")
+    if (colIdx >= tbl.len() || tbl.cols[colIdx].dataType != "point")
         return DBStatus::INVALID_VALUE;
 
     auto path = spGiSTIndexPath(dbname, tablename, colname);
@@ -17035,14 +17042,14 @@ std::vector<int64_t> StorageEngine::spGiSTSearch(const std::string& dbname,
 
     const auto scanHeap = [&]() {
         const TableSchema table = getTableSchema(dbname, tablename);
-        size_t columnIndex = table.len;
-        for (size_t i = 0; i < table.len; ++i) {
+        size_t columnIndex = table.len();
+        for (size_t i = 0; i < table.len(); ++i) {
             if (table.cols[i].dataName == colname) {
                 columnIndex = i;
                 break;
             }
         }
-        if (columnIndex >= table.len ||
+        if (columnIndex >= table.len() ||
             table.cols[columnIndex].dataType != "point") return result;
         SPGiSTIndex heapIndex(-1e9, -1e9, 1e9, 1e9);
         bool valid = true;
@@ -17247,11 +17254,11 @@ DBStatus StorageEngine::createBrinIndex(const std::string& dbname,
     if (pagesPerRange == 0) pagesPerRange = 64;
     if (pagesPerRange > std::numeric_limits<uint32_t>::max()) return DBStatus::INVALID_VALUE;
     TableSchema tbl = getTableSchema(dbname, tablename);
-    size_t colIdx = tbl.len;
-    for (size_t i = 0; i < tbl.len; ++i) {
+    size_t colIdx = tbl.len();
+    for (size_t i = 0; i < tbl.len(); ++i) {
         if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
     }
-    if (colIdx >= tbl.len) return DBStatus::INVALID_VALUE;
+    if (colIdx >= tbl.len()) return DBStatus::INVALID_VALUE;
 
     auto path = brinIndexPath(dbname, tablename, colname);
     brin_index_format::TypedIndex index;
@@ -17284,7 +17291,7 @@ DBStatus StorageEngine::createBrinIndex(const std::string& dbname,
     }
 
     auto scanAllocator = [&](PageAllocator& allocator, const TableSchema& t) -> bool {
-        std::vector<bool> scanNulls(t.len, false);
+        std::vector<bool> scanNulls(t.len(), false);
         const uint32_t np = allocator.numPages();
         index.heapPages = std::max(index.heapPages, np);
         for (uint64_t start = 1; start < np; start += rangeWidth) {
@@ -17304,13 +17311,13 @@ DBStatus StorageEngine::createBrinIndex(const std::string& dbname,
                             data, len, t.formatVersion)) {
                         return;
                     }
-                    if (len < rowHeaderSize(t.formatVersion, t.len)) return;
-                    std::string row = stripRowHeader(data, len, t.formatVersion, t.len);
+                    if (len < rowHeaderSize(t.formatVersion, t.len())) return;
+                    std::string row = stripRowHeader(data, len, t.formatVersion, t.len());
                     if (row.empty()) return;
                     const auto* tuple = usesHeapTupleHeader(t.formatVersion)
                         ? reinterpret_cast<const HeapTupleHeaderData*>(data)
                         : nullptr;
-                    const size_t headerLength = rowHeaderSize(t.formatVersion, t.len);
+                    const size_t headerLength = rowHeaderSize(t.formatVersion, t.len());
                     ScannedNullRowBinding scanNullOwner(
                         t, scanNulls, data + headerLength, len - headerLength, tuple);
                     bool valueIsNull = false;
@@ -17412,10 +17419,10 @@ std::optional<std::vector<std::pair<uint32_t, uint32_t>>> StorageEngine::tryBrin
     const auto table = getTableSchema(dbname, tablename);
     if (table.partitionType != TableSchema::PartitionType::None ||
         !table.physicalRelationId || table.formatVersion != DATA_FILE_FORMAT_VERSION) return {};
-    size_t column = table.len;
-    for (size_t i = 0; i < table.len; ++i)
+    size_t column = table.len();
+    for (size_t i = 0; i < table.len(); ++i)
         if (table.cols[i].dataName == colname) { column = i; break; }
-    if (column == table.len) return {};
+    if (column == table.len()) return {};
     std::ifstream in(brinIndexPath(dbname, tablename, colname), std::ios::binary);
     if (!in) return {};
     const std::string bytes{std::istreambuf_iterator<char>(in), {}};
@@ -17510,11 +17517,11 @@ std::vector<std::pair<uint32_t, uint32_t>> StorageEngine::brinSearchRange(
     // V1/V2 extrema cannot prove typed pruning; obtain visible candidates
     // from the real heap. Never reinterpret their lexical bounds as numeric.
     const auto table = getTableSchema(dbname, tablename);
-    size_t column = table.len;
-    for (size_t i = 0; i < table.len; ++i)
+    size_t column = table.len();
+    for (size_t i = 0; i < table.len(); ++i)
         if (table.cols[i].dataName == colname) { column = i; break; }
-    if (column == table.len) return result;
-    std::vector<bool> nulls(table.len, false);
+    if (column == table.len()) return result;
+    std::vector<bool> nulls(table.len(), false);
     std::set<uint32_t> pages;
     const bool scanned = forEachRow(dbname, tablename,
         [&](uint32_t page, uint16_t, const char* payload, size_t length) {
@@ -17560,10 +17567,10 @@ DBStatus StorageEngine::stageReindexAuxiliaryIndexes(
     struct Definition { std::string method, column; size_t ordinal; std::filesystem::path target; };
     std::map<std::pair<std::string, std::string>, Definition> definitions;
     const auto add = [&](const std::string& method, const std::string& column) {
-        size_t ordinal = table.len;
-        for (size_t i = 0; i < table.len; ++i)
+        size_t ordinal = table.len();
+        for (size_t i = 0; i < table.len(); ++i)
             if (table.cols[i].dataName == column) { ordinal = i; break; }
-        if (ordinal == table.len) return false;
+        if (ordinal == table.len()) return false;
         std::filesystem::path path;
         if (method == "hash") path = hashIndexPath(dbname, tablename, column);
         else if (method == "bloom") path = bloomIndexPath(dbname, tablename, column);
@@ -17604,7 +17611,7 @@ DBStatus StorageEngine::stageReindexAuxiliaryIndexes(
                 // A longer table name can share this filename prefix. Only
                 // this schema's actual columns are native definitions here;
                 // persisted named/hash/bloom declarations remain strict.
-                const bool owned = std::any_of(table.cols, table.cols + table.len,
+                const bool owned = std::any_of(table.cols.begin(), table.cols.end(),
                     [&](const auto& candidate) { return candidate.dataName == column; });
                 if (owned && !add(std::string(file.first), column)) return DBStatus::CORRUPTED_DATA;
             }
@@ -17648,7 +17655,7 @@ DBStatus StorageEngine::stageReindexAuxiliaryIndexes(
     // Like the existing Btree fast path, bound live builders. Virtual values
     // keep index-major evaluation; no new provider/row context is retained.
     size_t fanout = 8;
-    for (size_t i = 0; i < table.len; ++i)
+    for (size_t i = 0; i < table.len(); ++i)
         if (table.cols[i].generatedKind == 'v') fanout = 1;
     for (size_t start = 0; start < ordered.size(); start += fanout) {
         std::vector<Build> batch;
@@ -17685,7 +17692,7 @@ DBStatus StorageEngine::stageReindexAuxiliaryIndexes(
             batch.push_back(std::move(build));
         }
         DBStatus status = DBStatus::OK;
-        std::vector<bool> nulls(table.len, false);
+        std::vector<bool> nulls(table.len(), false);
         if (!forEachRow(dbname, tablename,
             [&](uint32_t page, uint16_t slot, const char* data, size_t length) {
                 if (status != DBStatus::OK) return;
@@ -18292,14 +18299,14 @@ static bool isValidColumnStorageCodec(const Column& column) {
 }
 
 void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
-    if (tbl.len > MAX_COLUMNS) {
+    if (tbl.len() > MAX_COLUMNS) {
         out.setstate(std::ios::failbit);
         return;
     }
 
     bool hasIdentitySequences = false;
     std::set<uint32_t> identitySequenceIds;
-    for (size_t i = 0; i < tbl.len; ++i) {
+    for (size_t i = 0; i < tbl.len(); ++i) {
         const auto& column = tbl.cols[i];
         if (column.identitySequenceOid == 0) continue;
         if ((column.identityKind != 'a' && column.identityKind != 'd') ||
@@ -18309,7 +18316,7 @@ void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
         hasIdentitySequences = true;
     }
 
-    if (tbl.rangePartitions.size() > MAX_COLUMNS) {
+    if (tbl.rangePartitions.size() > MAX_SCHEMA_PARTITIONS) {
         out.setstate(std::ios::failbit);
         return;
     }
@@ -18334,7 +18341,7 @@ void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
             return;
         }
     }
-    for (size_t i = 0; i < tbl.len; ++i) {
+    for (size_t i = 0; i < tbl.len(); ++i) {
         const auto& expression = tbl.cols[i].defaultValue;
         if (expression.size() > MAX_PERSISTED_DEFAULT_EXPRESSION ||
             expression.find('\0') != std::string::npos) {
@@ -18343,7 +18350,7 @@ void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
         }
     }
     bool longReferences = hasIdentitySequences;
-    for (size_t i = 0; i < tbl.fkLen; ++i) {
+    for (size_t i = 0; i < tbl.fkLen(); ++i) {
         if (!validStoredRelationName(tbl.fks[i].refTable)) {
             out.setstate(std::ios::failbit); return;
         }
@@ -18352,7 +18359,7 @@ void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
     bool hasDefaultOrigins = false;
     bool hasColumnTypeMods = false;
     bool hasTemporalCodecs = false;
-    for (size_t i = 0; i < tbl.len; ++i) {
+    for (size_t i = 0; i < tbl.len(); ++i) {
         if (!isValidColumnStorageCodec(tbl.cols[i])) {
             out.setstate(std::ios::failbit); return;
         }
@@ -18386,9 +18393,9 @@ void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
     const int32_t schemaFormat = hasIdentitySequences ? SCHEMA_IDENTITY_SEQUENCE_FORMAT_VERSION : longReferences ? SCHEMA_LONG_RELATION_FORMAT_VERSION : hasTemporalCodecs ? SCHEMA_TEMPORAL_CODEC_FORMAT_VERSION : hasColumnTypeMods ? SCHEMA_COLUMN_TYPEMOD_FORMAT_VERSION : hasDefaultOrigins ? SCHEMA_DEFAULT_ORIGIN_FORMAT_VERSION : tbl.physicalRelationId == 0
         ? SCHEMA_FORMAT_VERSION : SCHEMA_PHYSICAL_ID_FORMAT_VERSION;
     out.write(reinterpret_cast<const char*>(&schemaFormat), sizeof(schemaFormat));
-    int32_t len = static_cast<int32_t>(tbl.len);
+    int32_t len = static_cast<int32_t>(tbl.len());
     out.write(reinterpret_cast<const char*>(&len), 4);
-    for (size_t i = 0; i < tbl.len; ++i) {
+    for (size_t i = 0; i < tbl.len(); ++i) {
         uint8_t flags = (tbl.cols[i].isNull ? 1 : 0) | (tbl.cols[i].isPrimaryKey ? 2 : 0) | (tbl.cols[i].isVariableLength ? 4 : 0) | (tbl.cols[i].isUnique ? 8 : 0) | (!tbl.cols[i].defaultValue.empty() ? 16 : 0) | (tbl.cols[i].isAutoIncrement ? 32 : 0) | (!tbl.cols[i].checkExpr.empty() ? 64 : 0) | (!tbl.cols[i].generatedExpr.empty() ? 128 : 0);
         out.write(reinterpret_cast<const char*>(&flags), 1);
         writeFixedString(out, tbl.cols[i].dataType, MAX_TYPE_NAME_LEN);
@@ -18426,9 +18433,9 @@ void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
         out.write(reinterpret_cast<const char*>(&arrFlag), 1);
     }
     // Write foreign keys (multi-column support: version 1 format)
-    int32_t fkLen = static_cast<int32_t>(tbl.fkLen);
+    int32_t fkLen = static_cast<int32_t>(tbl.fkLen());
     out.write(reinterpret_cast<const char*>(&fkLen), 4);
-    for (size_t i = 0; i < tbl.fkLen; ++i) {
+    for (size_t i = 0; i < tbl.fkLen(); ++i) {
         int32_t numCols = static_cast<int32_t>(tbl.fks[i].colNames.size());
         out.write(reinterpret_cast<const char*>(&numCols), 4);
         for (int32_t ci = 0; ci < numCols; ++ci) {
@@ -18497,11 +18504,11 @@ void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
 
     // Named constraint names.
     int32_t namedCheckCount = 0;
-    for (size_t i = 0; i < tbl.len; ++i) {
+    for (size_t i = 0; i < tbl.len(); ++i) {
         if (!tbl.cols[i].checkConstraintName.empty()) namedCheckCount++;
     }
     out.write(reinterpret_cast<const char*>(&namedCheckCount), 4);
-    for (size_t i = 0; i < tbl.len; ++i) {
+    for (size_t i = 0; i < tbl.len(); ++i) {
         if (!tbl.cols[i].checkConstraintName.empty()) {
             int32_t cidx = static_cast<int32_t>(i);
             out.write(reinterpret_cast<const char*>(&cidx), 4);
@@ -18516,11 +18523,11 @@ void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
     }
 
     int32_t namedFkCount = 0;
-    for (size_t i = 0; i < tbl.fkLen; ++i) {
+    for (size_t i = 0; i < tbl.fkLen(); ++i) {
         if (!tbl.fks[i].name.empty()) namedFkCount++;
     }
     out.write(reinterpret_cast<const char*>(&namedFkCount), 4);
-    for (size_t i = 0; i < tbl.fkLen; ++i) {
+    for (size_t i = 0; i < tbl.fkLen(); ++i) {
         if (!tbl.fks[i].name.empty()) {
             int32_t fidx = static_cast<int32_t>(i);
             out.write(reinterpret_cast<const char*>(&fidx), 4);
@@ -18543,11 +18550,11 @@ void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
     if (tsLen > 0) out.write(tbl.tablespace.data(), tsLen);
     // Column collations: count + (cidx, name-len, name).
     int32_t collCount = 0;
-    for (size_t i = 0; i < tbl.len; ++i) {
+    for (size_t i = 0; i < tbl.len(); ++i) {
         if (!tbl.cols[i].collation.empty()) collCount++;
     }
     out.write(reinterpret_cast<const char*>(&collCount), 4);
-    for (size_t i = 0; i < tbl.len; ++i) {
+    for (size_t i = 0; i < tbl.len(); ++i) {
         if (tbl.cols[i].collation.empty()) continue;
         int32_t cidx = static_cast<int32_t>(i);
         out.write(reinterpret_cast<const char*>(&cidx), 4);
@@ -18590,24 +18597,24 @@ void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
     // the physical sequence flag and is also used by SERIAL/extensions.
     out.write(reinterpret_cast<const char*>(&SCHEMA_IDENTITY_KIND_MAGIC),
               sizeof(SCHEMA_IDENTITY_KIND_MAGIC));
-    const uint16_t identityKindCount = static_cast<uint16_t>(tbl.len);
+    const uint16_t identityKindCount = static_cast<uint16_t>(tbl.len());
     out.write(reinterpret_cast<const char*>(&identityKindCount),
               sizeof(identityKindCount));
-    for (size_t columnIndex = 0; columnIndex < tbl.len; ++columnIndex) {
+    for (size_t columnIndex = 0; columnIndex < tbl.len(); ++columnIndex) {
         const char kind = tbl.cols[columnIndex].identityKind;
         out.write(&kind, sizeof(kind));
     }
     // Keep the existing fixed-width payload and short-default files intact.
     // An optional extension carries full SQL expressions that do not fit it.
     uint16_t longDefaultCount = 0;
-    for (size_t i = 0; i < tbl.len; ++i)
+    for (size_t i = 0; i < tbl.len(); ++i)
         if (tbl.cols[i].defaultValue.size() > MAX_COL_NAME_LEN) ++longDefaultCount;
     if (longDefaultCount != 0 || !tbl.rangePartitions.empty() || tbl.physicalRelationId != 0 || hasDefaultOrigins || hasColumnTypeMods || hasTemporalCodecs || longReferences || hasIdentitySequences) {
         out.write(reinterpret_cast<const char*>(&SCHEMA_LONG_DEFAULT_MAGIC),
                   sizeof(SCHEMA_LONG_DEFAULT_MAGIC));
         out.write(reinterpret_cast<const char*>(&longDefaultCount),
                   sizeof(longDefaultCount));
-        for (uint16_t i = 0; i < tbl.len; ++i) {
+        for (uint16_t i = 0; i < tbl.len(); ++i) {
             const auto& expression = tbl.cols[i].defaultValue;
             if (expression.size() <= MAX_COL_NAME_LEN) continue;
             const uint32_t length = static_cast<uint32_t>(expression.size());
@@ -18642,9 +18649,9 @@ void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
     }
     if (hasDefaultOrigins || hasColumnTypeMods || hasTemporalCodecs || longReferences) {
         out.write(reinterpret_cast<const char*>(&SCHEMA_DEFAULT_ORIGIN_MAGIC),sizeof(SCHEMA_DEFAULT_ORIGIN_MAGIC));
-        const uint16_t count = static_cast<uint16_t>(tbl.len);
+        const uint16_t count = static_cast<uint16_t>(tbl.len());
         out.write(reinterpret_cast<const char*>(&count),sizeof(count));
-        for (size_t i = 0; i < tbl.len; ++i) {
+        for (size_t i = 0; i < tbl.len(); ++i) {
             const auto origin = static_cast<uint8_t>(tbl.cols[i].defaultOrigin);
             const uint16_t length = static_cast<uint16_t>(tbl.cols[i].domainName.size());
             if (tbl.cols[i].domainName.size() > 256 || tbl.cols[i].domainName.find('\0') != std::string::npos) {
@@ -18657,25 +18664,25 @@ void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
     }
     if (hasColumnTypeMods || hasTemporalCodecs || longReferences) {
         out.write(reinterpret_cast<const char*>(&SCHEMA_COLUMN_TYPEMOD_MAGIC), sizeof(SCHEMA_COLUMN_TYPEMOD_MAGIC));
-        const uint16_t count = static_cast<uint16_t>(tbl.len);
+        const uint16_t count = static_cast<uint16_t>(tbl.len());
         out.write(reinterpret_cast<const char*>(&count), sizeof(count));
-        for (size_t i = 0; i < tbl.len; ++i)
+        for (size_t i = 0; i < tbl.len(); ++i)
             out.write(reinterpret_cast<const char*>(&tbl.cols[i].typeMod), sizeof(tbl.cols[i].typeMod));
     }
     if (hasTemporalCodecs || longReferences) {
         out.write(reinterpret_cast<const char*>(&SCHEMA_TEMPORAL_CODEC_MAGIC), sizeof(SCHEMA_TEMPORAL_CODEC_MAGIC));
-        const uint16_t count = static_cast<uint16_t>(tbl.len);
+        const uint16_t count = static_cast<uint16_t>(tbl.len());
         out.write(reinterpret_cast<const char*>(&count), sizeof(count));
-        for (size_t i = 0; i < tbl.len; ++i) {
+        for (size_t i = 0; i < tbl.len(); ++i) {
             const auto codec = static_cast<uint8_t>(tbl.cols[i].storageCodec);
             out.write(reinterpret_cast<const char*>(&codec), sizeof(codec));
         }
     }
     if (hasIdentitySequences) {
         out.write(reinterpret_cast<const char*>(&SCHEMA_IDENTITY_SEQUENCE_MAGIC), sizeof(SCHEMA_IDENTITY_SEQUENCE_MAGIC));
-        const uint16_t count = static_cast<uint16_t>(tbl.len);
+        const uint16_t count = static_cast<uint16_t>(tbl.len());
         out.write(reinterpret_cast<const char*>(&count), sizeof(count));
-        for (size_t i = 0; i < tbl.len; ++i)
+        for (size_t i = 0; i < tbl.len(); ++i)
             out.write(reinterpret_cast<const char*>(&tbl.cols[i].identitySequenceOid), sizeof(uint32_t));
     }
 }
@@ -18695,8 +18702,8 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
     int32_t len = 0;
     in.read(reinterpret_cast<char*>(&len), 4);
     if (!in || len < 0 || len > static_cast<int32_t>(MAX_COLUMNS)) return {};
-    tbl.len = static_cast<size_t>(len);
-    for (size_t i = 0; i < tbl.len; ++i) {
+    tbl.cols.resize(static_cast<size_t>(len));
+    for (size_t i = 0; i < tbl.len(); ++i) {
         uint8_t flags = 0;
         in.read(reinterpret_cast<char*>(&flags), 1);
         tbl.cols[i].isNull = (flags & 1) != 0;
@@ -18773,13 +18780,13 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
     // Read foreign keys
     int32_t fkLen = 0;
     in.read(reinterpret_cast<char*>(&fkLen), 4);
-    if (!in || fkLen < 0 || fkLen > static_cast<int32_t>(MAX_COLUMNS)) return {};
+    if (!in || fkLen < 0 || fkLen > static_cast<int32_t>(MAX_TABLE_FOREIGN_KEYS)) return {};
     if (fkLen > 0) {
-        tbl.fkLen = static_cast<size_t>(fkLen);
-        for (size_t i = 0; i < tbl.fkLen; ++i) {
+        tbl.fks.resize(static_cast<size_t>(fkLen));
+        for (size_t i = 0; i < tbl.fkLen(); ++i) {
             int32_t numCols = 0;
             in.read(reinterpret_cast<char*>(&numCols), 4);
-            if (!in || numCols <= 0 || numCols > static_cast<int32_t>(MAX_COLUMNS)) return {};
+            if (!in || numCols <= 0 || numCols > static_cast<int32_t>(MAX_SCHEMA_KEY_COLUMNS)) return {};
             tbl.fks[i].colNames.reserve(numCols);
             tbl.fks[i].refCols.reserve(numCols);
             for (int32_t ci = 0; ci < numCols; ++ci) {
@@ -18796,13 +18803,13 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
     // Read composite primary key column indices.
     int32_t pkCount = 0;
     in.read(reinterpret_cast<char*>(&pkCount), 4);
-    if (!in || pkCount < 0 || pkCount > static_cast<int32_t>(MAX_COLUMNS)) return {};
+    if (!in || pkCount < 0 || pkCount > static_cast<int32_t>(MAX_SCHEMA_KEY_COLUMNS)) return {};
     if (pkCount > 0) {
         tbl.pkColIndices.reserve(pkCount);
         for (int32_t i = 0; i < pkCount; ++i) {
             int32_t cidx = 0;
             in.read(reinterpret_cast<char*>(&cidx), 4);
-            if (in && cidx >= 0 && cidx < static_cast<int32_t>(tbl.len)) {
+            if (in && cidx >= 0 && cidx < static_cast<int32_t>(tbl.len())) {
                 tbl.pkColIndices.push_back(static_cast<size_t>(cidx));
             }
         }
@@ -18810,19 +18817,19 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
     // Read composite UNIQUE constraints.
     int32_t ucCount = 0;
     in.read(reinterpret_cast<char*>(&ucCount), 4);
-    if (!in || ucCount < 0 || ucCount > static_cast<int32_t>(MAX_COLUMNS)) return {};
+    if (!in || ucCount < 0 || ucCount > static_cast<int32_t>(MAX_SCHEMA_UNIQUE_CONSTRAINTS)) return {};
     if (ucCount > 0) {
         tbl.uniqueConstraints.reserve(ucCount);
         for (int32_t i = 0; i < ucCount; ++i) {
             int32_t cc = 0;
             in.read(reinterpret_cast<char*>(&cc), 4);
-            if (!in || cc <= 0 || cc > static_cast<int32_t>(MAX_COLUMNS)) break;
+            if (!in || cc <= 0 || cc > static_cast<int32_t>(MAX_SCHEMA_KEY_COLUMNS)) break;
             std::vector<size_t> constraint;
             constraint.reserve(cc);
             for (int32_t j = 0; j < cc; ++j) {
                 int32_t cidx = 0;
                 in.read(reinterpret_cast<char*>(&cidx), 4);
-                if (in && cidx >= 0 && cidx < static_cast<int32_t>(tbl.len)) {
+                if (in && cidx >= 0 && cidx < static_cast<int32_t>(tbl.len())) {
                     constraint.push_back(static_cast<size_t>(cidx));
                 }
             }
@@ -18840,7 +18847,7 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
         if (tbl.partitionType == TableSchema::PartitionType::Range) {
             int32_t rpCount = 0;
             in.read(reinterpret_cast<char*>(&rpCount), 4);
-            if (!in || rpCount < 0 || rpCount > static_cast<int32_t>(MAX_COLUMNS)) return {};
+            if (!in || rpCount < 0 || rpCount > static_cast<int32_t>(MAX_SCHEMA_PARTITIONS)) return {};
             if (rpCount > 0) {
                 for (int32_t i = 0; i < rpCount; ++i) {
                     std::string pname = readFixedString(in, MAX_TABLE_NAME_LEN);
@@ -18855,13 +18862,13 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
         } else if (tbl.partitionType == TableSchema::PartitionType::List) {
             int32_t lpCount = 0;
             in.read(reinterpret_cast<char*>(&lpCount), 4);
-            if (!in || lpCount < 0 || lpCount > static_cast<int32_t>(MAX_COLUMNS)) return {};
+            if (!in || lpCount < 0 || lpCount > static_cast<int32_t>(MAX_SCHEMA_PARTITIONS)) return {};
             if (lpCount > 0) {
                 for (int32_t i = 0; i < lpCount; ++i) {
                     std::string pname = readFixedString(in, MAX_TABLE_NAME_LEN);
                     int32_t vcount = 0;
                     in.read(reinterpret_cast<char*>(&vcount), 4);
-                    if (!in || vcount < 0 || vcount > static_cast<int32_t>(MAX_COLUMNS)) return {};
+                    if (!in || vcount < 0 || vcount > static_cast<int32_t>(MAX_SCHEMA_PARTITIONS)) return {};
                     std::vector<std::string> values;
                     for (int32_t j = 0; j < vcount; ++j) {
                         values.push_back(readFixedString(in, MAX_COL_NAME_LEN));
@@ -18872,7 +18879,7 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
         } else if (tbl.partitionType == TableSchema::PartitionType::Hash) {
             int32_t hcount = 0;
             in.read(reinterpret_cast<char*>(&hcount), 4);
-            if (!in || hcount < 0 || hcount > static_cast<int32_t>(MAX_COLUMNS * MAX_COLUMNS)) return {};
+            if (!in || hcount < 0 || hcount > static_cast<int32_t>(MAX_SCHEMA_PARTITIONS * MAX_SCHEMA_PARTITIONS)) return {};
             if (hcount > 0) tbl.hashPartitions = static_cast<size_t>(hcount);
         }
     }
@@ -18889,7 +18896,7 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
             if (tbl.subPartitionType == TableSchema::PartitionType::Hash) {
                 int32_t shcount = 0;
                 in.read(reinterpret_cast<char*>(&shcount), 4);
-                if (!in || shcount < 0 || shcount > static_cast<int32_t>(MAX_COLUMNS * MAX_COLUMNS)) return {};
+                if (!in || shcount < 0 || shcount > static_cast<int32_t>(MAX_SCHEMA_PARTITIONS * MAX_SCHEMA_PARTITIONS)) return {};
                 if (shcount > 0) tbl.subHashPartitions = static_cast<size_t>(shcount);
             }
         }
@@ -18903,7 +18910,7 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
         for (int32_t i = 0; i < namedCheckCount; ++i) {
             int32_t cidx = 0;
             in.read(reinterpret_cast<char*>(&cidx), 4);
-            if (in && cidx >= 0 && cidx < static_cast<int32_t>(tbl.len)) {
+            if (in && cidx >= 0 && cidx < static_cast<int32_t>(tbl.len())) {
                 tbl.cols[cidx].checkConstraintName = readFixedString(in, MAX_COL_NAME_LEN);
             } else if (in) {
                 readFixedString(in, MAX_COL_NAME_LEN); // skip
@@ -18914,7 +18921,7 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
     // Read named UNIQUE constraints.
     int32_t namedUniqueCount = 0;
     in.read(reinterpret_cast<char*>(&namedUniqueCount), 4);
-    if (!in || namedUniqueCount < 0 || namedUniqueCount > static_cast<int32_t>(MAX_COLUMNS)) return {};
+    if (!in || namedUniqueCount < 0 || namedUniqueCount > static_cast<int32_t>(MAX_SCHEMA_UNIQUE_CONSTRAINTS)) return {};
     {
         tbl.uniqueConstraintNames.reserve(namedUniqueCount);
         for (int32_t i = 0; i < namedUniqueCount; ++i) {
@@ -18925,12 +18932,12 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
     // Read named FK constraints.
     int32_t namedFkCount = 0;
     in.read(reinterpret_cast<char*>(&namedFkCount), 4);
-    if (!in || namedFkCount < 0 || namedFkCount > static_cast<int32_t>(MAX_COLUMNS)) return {};
+    if (!in || namedFkCount < 0 || namedFkCount > static_cast<int32_t>(MAX_TABLE_FOREIGN_KEYS)) return {};
     if (namedFkCount > 0) {
         for (int32_t i = 0; i < namedFkCount; ++i) {
             int32_t fidx = 0;
             in.read(reinterpret_cast<char*>(&fidx), 4);
-            if (in && fidx >= 0 && fidx < static_cast<int32_t>(tbl.fkLen)) {
+            if (in && fidx >= 0 && fidx < static_cast<int32_t>(tbl.fkLen())) {
                 tbl.fks[fidx].name = readFixedString(in, MAX_TABLE_NAME_LEN);
             } else if (in) {
                 readFixedString(in, MAX_TABLE_NAME_LEN); // skip
@@ -18980,7 +18987,7 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
             std::string cname(clLen, '\0');
             in.read(cname.data(), clLen);
             if (!in) break;
-            if (cidx >= 0 && cidx < static_cast<int32_t>(tbl.len)) {
+            if (cidx >= 0 && cidx < static_cast<int32_t>(tbl.len())) {
                 tbl.cols[cidx].collation = std::move(cname);
             }
         }
@@ -19055,8 +19062,8 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
     uint16_t identityKindCount = 0;
     in.read(reinterpret_cast<char*>(&identityKindCount),
             sizeof(identityKindCount));
-    if (!in || identityKindCount != tbl.len) return {};
-    for (size_t columnIndex = 0; columnIndex < tbl.len; ++columnIndex) {
+    if (!in || identityKindCount != tbl.len()) return {};
+    for (size_t columnIndex = 0; columnIndex < tbl.len(); ++columnIndex) {
         char kind = 0;
         in.read(&kind, sizeof(kind));
         if (!in || (kind != 0 && kind != 'a' && kind != 'd')) return {};
@@ -19074,14 +19081,14 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
     in.read(reinterpret_cast<char*>(&defaultMagic), sizeof(defaultMagic));
     in.read(reinterpret_cast<char*>(&defaultCount), sizeof(defaultCount));
     if (!in || defaultMagic != SCHEMA_LONG_DEFAULT_MAGIC ||
-        defaultCount > tbl.len) return {};
+        defaultCount > tbl.len()) return {};
     std::set<uint16_t> defaultColumns;
     for (uint16_t i = 0; i < defaultCount; ++i) {
         uint16_t column = 0;
         uint32_t length = 0;
         in.read(reinterpret_cast<char*>(&column), sizeof(column));
         in.read(reinterpret_cast<char*>(&length), sizeof(length));
-        if (!in || column >= tbl.len || !defaultColumns.insert(column).second ||
+        if (!in || column >= tbl.len() || !defaultColumns.insert(column).second ||
             length <= MAX_COL_NAME_LEN || length > MAX_PERSISTED_DEFAULT_EXPRESSION)
             return {};
         std::string expression(length, '\0');
@@ -19143,8 +19150,8 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
         uint32_t magic = 0; uint16_t count = 0;
         in.read(reinterpret_cast<char*>(&magic),sizeof(magic));
         in.read(reinterpret_cast<char*>(&count),sizeof(count));
-        if (!in || magic != SCHEMA_DEFAULT_ORIGIN_MAGIC || count != tbl.len) return {};
-        for (size_t i = 0; i < tbl.len; ++i) {
+        if (!in || magic != SCHEMA_DEFAULT_ORIGIN_MAGIC || count != tbl.len()) return {};
+        for (size_t i = 0; i < tbl.len(); ++i) {
             uint8_t origin = 0; uint16_t length = 0;
             in.read(reinterpret_cast<char*>(&origin),sizeof(origin));
             in.read(reinterpret_cast<char*>(&length),sizeof(length));
@@ -19165,8 +19172,8 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
         uint32_t magic = 0; uint16_t count = 0;
         in.read(reinterpret_cast<char*>(&magic), sizeof(magic));
         in.read(reinterpret_cast<char*>(&count), sizeof(count));
-        if (!in || magic != SCHEMA_COLUMN_TYPEMOD_MAGIC || count != tbl.len) return {};
-        for (size_t i = 0; i < tbl.len; ++i) {
+        if (!in || magic != SCHEMA_COLUMN_TYPEMOD_MAGIC || count != tbl.len()) return {};
+        for (size_t i = 0; i < tbl.len(); ++i) {
             in.read(reinterpret_cast<char*>(&tbl.cols[i].typeMod), sizeof(tbl.cols[i].typeMod));
             if (!in) return {};
             if (tbl.cols[i].typeMod != -1) {
@@ -19184,9 +19191,9 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
         uint32_t magic = 0; uint16_t count = 0;
         in.read(reinterpret_cast<char*>(&magic), sizeof(magic));
         in.read(reinterpret_cast<char*>(&count), sizeof(count));
-        if (!in || magic != SCHEMA_TEMPORAL_CODEC_MAGIC || count != tbl.len) return {};
+        if (!in || magic != SCHEMA_TEMPORAL_CODEC_MAGIC || count != tbl.len()) return {};
         bool hasTemporalCodec = false;
-        for (size_t i = 0; i < tbl.len; ++i) {
+        for (size_t i = 0; i < tbl.len(); ++i) {
             uint8_t codec = 0;
             in.read(reinterpret_cast<char*>(&codec), sizeof(codec));
             if (!in) return {};
@@ -19201,9 +19208,9 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
         uint32_t magic = 0; uint16_t count = 0;
         in.read(reinterpret_cast<char*>(&magic), sizeof(magic));
         in.read(reinterpret_cast<char*>(&count), sizeof(count));
-        if (!in || magic != SCHEMA_IDENTITY_SEQUENCE_MAGIC || count != tbl.len) return {};
+        if (!in || magic != SCHEMA_IDENTITY_SEQUENCE_MAGIC || count != tbl.len()) return {};
         bool any = false; std::set<uint32_t> ids;
-        for (size_t i = 0; i < tbl.len; ++i) {
+        for (size_t i = 0; i < tbl.len(); ++i) {
             auto& column = tbl.cols[i];
             in.read(reinterpret_cast<char*>(&column.identitySequenceOid), sizeof(uint32_t));
             if (!in) return {};
@@ -19983,7 +19990,7 @@ void StorageEngine::deleteToastForRow(const std::string& dbname,
                                        const std::string& tablename,
                                        const std::string& rowBuffer) {
     const TableSchema tbl = getTableSchema(dbname, tablename);
-    for (size_t i = 0; i < tbl.len; ++i) {
+    for (size_t i = 0; i < tbl.len(); ++i) {
         if (!tbl.cols[i].isVariableLength) continue;
         const std::string val = extractColumnValue(rowBuffer, tbl, i);
         uint64_t toastId = 0;
@@ -19999,14 +20006,14 @@ void StorageEngine::deleteToastForRowExcept(const std::string& dbname,
                                              const std::string& preservedRowBuffer) {
     const TableSchema tbl = getTableSchema(dbname, tablename);
     std::set<uint64_t> preservedIds;
-    for (size_t i = 0; i < tbl.len; ++i) {
+    for (size_t i = 0; i < tbl.len(); ++i) {
         if (!tbl.cols[i].isVariableLength) continue;
         uint64_t toastId = 0;
         if (parseToastMarker(extractColumnValue(preservedRowBuffer, tbl, i), toastId)) {
             preservedIds.insert(toastId);
         }
     }
-    for (size_t i = 0; i < tbl.len; ++i) {
+    for (size_t i = 0; i < tbl.len(); ++i) {
         if (!tbl.cols[i].isVariableLength) continue;
         uint64_t toastId = 0;
         if (parseToastMarker(extractColumnValue(rowBuffer, tbl, i), toastId) &&
@@ -20019,6 +20026,11 @@ void StorageEngine::deleteToastForRowExcept(const std::string& dbname,
 bool StorageEngine::prepareToastValues(const std::string& dbname, const std::string& tablename,
                                        const TableSchema& tbl,
                                        std::map<std::string, std::string>& values) {
+    std::optional<size_t> inlineBytes;
+    if (tbl.len() > LEGACY_COLUMN_LIMIT) {
+        inlineBytes = minimumHeapTupleSize(tbl);
+        if (!inlineBytes) return false;
+    }
     size_t threshold = toastThreshold(tbl.formatVersion);
     std::vector<uint64_t> allocatedIds;
     const auto discardAllocated = [&]() {
@@ -20026,7 +20038,7 @@ bool StorageEngine::prepareToastValues(const std::string& dbname, const std::str
             deleteToast(dbname, tablename, *it);
         }
     };
-    for (size_t i = 0; i < tbl.len; ++i) {
+    for (size_t i = 0; i < tbl.len(); ++i) {
         const Column& col = tbl.cols[i];
         if (!col.isVariableLength) continue;
         auto it = values.find(col.dataName);
@@ -20048,6 +20060,13 @@ bool StorageEngine::prepareToastValues(const std::string& dbname, const std::str
                 return false;
             }
             it->second = std::string(TOAST_PREFIX) + std::to_string(toastId);
+        }
+        if (inlineBytes) {
+            if (it->second.size() > MAX_HEAP_TUPLE_BYTES - *inlineBytes) {
+                discardAllocated();
+                return false;
+            }
+            *inlineBytes += it->second.size();
         }
     }
     return true;
@@ -20078,7 +20097,7 @@ std::string StorageEngine::resolveToastValues(const std::string& dbname,
     std::vector<std::string> values;
     values.reserve(tbl.varColCount());
     bool foundMarker = false;
-    for (size_t i = 0; i < tbl.len; ++i) {
+    for (size_t i = 0; i < tbl.len(); ++i) {
         if (!tbl.cols[i].isVariableLength) continue;
         std::string val = extractColumnValueStatic(rowBuffer, tbl, i);
         uint64_t toastId = 0;
@@ -20155,9 +20174,9 @@ bool detail::decodeStoredRowProjection(StorageEngine& engine,
                                       std::vector<std::string>& values,
                                       std::vector<bool>& nulls) {
     if (schema.formatVersion != DATA_FILE_FORMAT_VERSION ||
-        storedNulls.size() != schema.len) return false;
+        storedNulls.size() != schema.len()) return false;
     std::vector<size_t> indexes;
-    for (size_t i = 0; i < schema.len; ++i) {
+    for (size_t i = 0; i < schema.len(); ++i) {
         if (!selected.empty() && !selected.count(schema.cols[i].dataName)) continue;
         if (schema.cols[i].generatedKind == 'v') return false;
         indexes.push_back(i);
@@ -20209,7 +20228,7 @@ bool collectPrimaryKeyColumns(const TableSchema& table,
                               std::vector<size_t>& columns) {
     columns = table.pkColIndices;
     if (columns.empty()) {
-        for (size_t columnIndex = 0; columnIndex < table.len; ++columnIndex) {
+        for (size_t columnIndex = 0; columnIndex < table.len(); ++columnIndex) {
             if (table.cols[columnIndex].isPrimaryKey) {
                 columns.push_back(columnIndex);
             }
@@ -20217,7 +20236,7 @@ bool collectPrimaryKeyColumns(const TableSchema& table,
     }
     std::set<size_t> distinct;
     for (const size_t columnIndex : columns) {
-        if (columnIndex >= table.len || !distinct.insert(columnIndex).second) {
+        if (columnIndex >= table.len() || !distinct.insert(columnIndex).second) {
             return false;
         }
     }
@@ -20286,21 +20305,21 @@ DBStatus validateForeignKeyDefinition(
         if (diagnostic) *diagnostic = {state, message};
         return DBStatus::INVALID_VALUE;
     };
-    if (localColumnNames.empty() || localColumnNames.size() > MAX_COLUMNS) {
+    if (localColumnNames.empty() || localColumnNames.size() > MAX_SCHEMA_KEY_COLUMNS) {
         return reject("foreign key requires at least one local column");
     }
 
     result = {};
     std::set<size_t> distinctLocalColumns;
     for (const auto& columnName : localColumnNames) {
-        size_t columnIndex = localTable.len;
-        for (size_t candidate = 0; candidate < localTable.len; ++candidate) {
+        size_t columnIndex = localTable.len();
+        for (size_t candidate = 0; candidate < localTable.len(); ++candidate) {
             if (localTable.cols[candidate].dataName == columnName) {
                 columnIndex = candidate;
                 break;
             }
         }
-        if (columnIndex >= localTable.len) {
+        if (columnIndex >= localTable.len()) {
             return reject("foreign key local column does not exist: " +
                           columnName, "42703");
         }
@@ -20334,15 +20353,15 @@ DBStatus validateForeignKeyDefinition(
 
     std::set<size_t> distinctReferencedColumns;
     for (const auto& columnName : result.referencedColumnNames) {
-        size_t columnIndex = referencedTable.len;
-        for (size_t candidate = 0; candidate < referencedTable.len;
+        size_t columnIndex = referencedTable.len();
+        for (size_t candidate = 0; candidate < referencedTable.len();
              ++candidate) {
             if (referencedTable.cols[candidate].dataName == columnName) {
                 columnIndex = candidate;
                 break;
             }
         }
-        if (columnIndex >= referencedTable.len) {
+        if (columnIndex >= referencedTable.len()) {
             return reject("foreign key referenced column does not exist: " +
                           columnName, "42703");
         }
@@ -20365,7 +20384,7 @@ DBStatus validateForeignKeyDefinition(
     }
     for (const auto& uniqueColumns : referencedTable.uniqueConstraints) {
         for (const size_t columnIndex : uniqueColumns) {
-            if (columnIndex >= referencedTable.len) {
+            if (columnIndex >= referencedTable.len()) {
                 return reject("referenced unique-key metadata is invalid", "XX001");
             }
         }
@@ -20445,7 +20464,7 @@ DBStatus StorageEngine::createTable(const std::string& dbname, const TableSchema
             tblWithVersion.cols[columnIndex].isNull = false;
         }
     } else {
-        for (size_t columnIndex = 0; columnIndex < tblWithVersion.len;
+        for (size_t columnIndex = 0; columnIndex < tblWithVersion.len();
              ++columnIndex) {
             if (tblWithVersion.cols[columnIndex].isPrimaryKey) {
                 tblWithVersion.cols[columnIndex].isNull = false;
@@ -20507,7 +20526,7 @@ DBStatus StorageEngine::createTable(const std::string& dbname, const TableSchema
         if (error) *error = "could not inspect physical relation namespace";
         return DBStatus::IO_ERROR;
     }
-    for (size_t i = 0; i < tblWithVersion.len; ++i) {
+    for (size_t i = 0; i < tblWithVersion.len(); ++i) {
         std::string typeErr = TypeRegistry::instance().validateColumn(tblWithVersion.cols[i]);
         if (!typeErr.empty()) {
             if (error) *error = typeErr;
@@ -20520,7 +20539,7 @@ DBStatus StorageEngine::createTable(const std::string& dbname, const TableSchema
     // all definition validation before creating the first relation file, and
     // materialize an omitted referenced-column list as the parent's PK.
     for (size_t foreignKeyIndex = 0;
-         foreignKeyIndex < tblWithVersion.fkLen; ++foreignKeyIndex) {
+         foreignKeyIndex < tblWithVersion.fkLen(); ++foreignKeyIndex) {
         ForeignKey& foreignKey = tblWithVersion.fks[foreignKeyIndex];
         std::string normalizedDelete;
         std::string normalizedUpdate;
@@ -20789,7 +20808,7 @@ DBStatus StorageEngine::createTable(const std::string& dbname, const TableSchema
     invalidateCatalogSchema(dbname, tbl.tablename);
     // Create TOAST relation and index if table has variable-length columns
     bool hasVarLen = false;
-    for (size_t i = 0; i < tbl.len; ++i) {
+    for (size_t i = 0; i < tbl.len(); ++i) {
         if (tbl.cols[i].isVariableLength) { hasVarLen = true; break; }
     }
     if (hasVarLen) {
@@ -20817,13 +20836,13 @@ DBStatus StorageEngine::createTable(const std::string& dbname, const TableSchema
             return failCreate("could not initialize primary key index");
     }
     // Initialize auto-increment sequences
-    for (size_t i = 0; i < tbl.len; ++i) {
+    for (size_t i = 0; i < tbl.len(); ++i) {
         if (tbl.cols[i].isAutoIncrement && tbl.cols[i].identitySequenceOid == 0) {
             writeNextSeq(dbname, tbl.tablename, tbl.cols[i].dataName, 1);
         }
     }
     // Auto-create secondary index for UNIQUE columns
-    for (size_t i = 0; i < tbl.len; ++i) {
+    for (size_t i = 0; i < tbl.len(); ++i) {
         if (tbl.cols[i].isUnique) {
             const auto indexStatus = createIndex(dbname, tbl.tablename, tbl.cols[i].dataName);
             if (indexStatus != DBStatus::OK) {
@@ -21423,7 +21442,7 @@ DBStatus StorageEngine::alterTableAddColumn(const std::string& dbname,
     }
     {
         TableSchema collationProbe;
-        collationProbe.len = 1;
+        collationProbe.cols.resize(1);
         collationProbe.cols[0] = validatedCol;
         const DBStatus collationStatus = resolveTableCollations(
             *this, dbname, collationProbe);
@@ -21433,13 +21452,13 @@ DBStatus StorageEngine::alterTableAddColumn(const std::string& dbname,
         }
         validatedCol = std::move(collationProbe.cols[0]);
     }
-    for (size_t i = 0; i < tbl.len; ++i) {
+    for (size_t i = 0; i < tbl.len(); ++i) {
         if (tbl.cols[i].dataName == col.dataName) {
             lockManager_.unlock(tablename);
             return DBStatus::TABLE_ALREADY_EXISTS;
         }
     }
-    if (tbl.len >= MAX_COLUMNS) {
+    if (tbl.len() >= MAX_COLUMNS) {
         lockManager_.unlock(tablename);
         return DBStatus::INVALID_VALUE;
     }
@@ -21453,7 +21472,7 @@ DBStatus StorageEngine::alterTableAddColumn(const std::string& dbname,
         std::string row(data, len);
         SqlRow values;
         const int64_t rid = encodeRid(pageId, slotId);
-        for (size_t i = 0; i < tbl.len; ++i) {
+        for (size_t i = 0; i < tbl.len(); ++i) {
             if (!tbl.cols[i].generatedExpr.empty()) continue;
             if (tbl.cols[i].isNull &&
                 dbms::detail::storedRowColumnIsNull(*this, dbname, tablename, tbl, rid, i)) {
@@ -21617,7 +21636,7 @@ DBStatus StorageEngine::alterTableAddColumn(const std::string& dbname,
         }
     }
     bool hasVarLen = false;
-    for (size_t i = 0; i < tbl.len; ++i) hasVarLen |= tbl.cols[i].isVariableLength;
+    for (size_t i = 0; i < tbl.len(); ++i) hasVarLen |= tbl.cols[i].isVariableLength;
     if (hasVarLen) {
         auto toastPa = std::make_unique<PageAllocator>(
             toastDataPath(dbname, tablename).string(), 0, 8192, DATA_FILE_FORMAT_VERSION);
@@ -21661,11 +21680,11 @@ DBStatus StorageEngine::alterTableAddColumn(const std::string& dbname,
         if (!hidx) return DBStatus::IO_ERROR;
         hidx->clear();
         TableSchema rebuilt = getTableSchema(dbname, tablename);
-        size_t colIdx = rebuilt.len;
-        for (size_t i = 0; i < rebuilt.len; ++i) {
+        size_t colIdx = rebuilt.len();
+        for (size_t i = 0; i < rebuilt.len(); ++i) {
             if (rebuilt.cols[i].dataName == cn) { colIdx = i; break; }
         }
-        if (colIdx >= rebuilt.len) return DBStatus::INVALID_VALUE;
+        if (colIdx >= rebuilt.len()) return DBStatus::INVALID_VALUE;
         if (!forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
                                            const char* data, size_t len) {
             std::string row(data, len);
@@ -21682,12 +21701,12 @@ DBStatus StorageEngine::alterTableAddColumn(const std::string& dbname,
         if (!bidx) return DBStatus::IO_ERROR;
         bidx->clear();
         TableSchema rebuilt = getTableSchema(dbname, tablename);
-        size_t colIdx = rebuilt.len;
-        for (size_t i = 0; i < rebuilt.len; ++i) {
+        size_t colIdx = rebuilt.len();
+        for (size_t i = 0; i < rebuilt.len(); ++i) {
             if (rebuilt.cols[i].dataName == cn) { colIdx = i; break; }
         }
-        if (colIdx >= rebuilt.len) return DBStatus::INVALID_VALUE;
-        std::vector<bool> scanNulls(rebuilt.len, false);
+        if (colIdx >= rebuilt.len()) return DBStatus::INVALID_VALUE;
+        std::vector<bool> scanNulls(rebuilt.len(), false);
         if (!forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
                                                const char* data, size_t len) {
             ScannedNullRowBinding nullOwner(rebuilt, scanNulls, data, len);
@@ -21722,16 +21741,16 @@ DBStatus StorageEngine::alterTableDropColumn(const std::string& dbname,
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
 
     TableSchema tbl = getTableSchema(dbname, tablename);
-    size_t dropIdx = tbl.len;
-    for (size_t i = 0; i < tbl.len; ++i) {
+    size_t dropIdx = tbl.len();
+    for (size_t i = 0; i < tbl.len(); ++i) {
         if (tbl.cols[i].dataName == colName) { dropIdx = i; break; }
     }
-    if (dropIdx >= tbl.len) {
+    if (dropIdx >= tbl.len()) {
         lockManager_.unlock(tablename);
         return DBStatus::INVALID_VALUE;
     }
 
-    if (tbl.len <= 1 || tbl.cols[dropIdx].isPrimaryKey || tbl.cols[dropIdx].isUnique) {
+    if (tbl.len() <= 1 || tbl.cols[dropIdx].isPrimaryKey || tbl.cols[dropIdx].isUnique) {
         lockManager_.unlock(tablename);
         return DBStatus::INVALID_VALUE;
     }
@@ -21742,7 +21761,7 @@ DBStatus StorageEngine::alterTableDropColumn(const std::string& dbname,
         lockManager_.unlock(tablename);
         return DBStatus::INVALID_VALUE;
     }
-    for (size_t columnIndex = 0; columnIndex < tbl.len; ++columnIndex) {
+    for (size_t columnIndex = 0; columnIndex < tbl.len(); ++columnIndex) {
         if (columnIndex == dropIdx) continue;
         const Column& column = tbl.cols[columnIndex];
         if (ExprHelper::referencesColumn(
@@ -21768,7 +21787,7 @@ DBStatus StorageEngine::alterTableDropColumn(const std::string& dbname,
     // and every surviving position to its right must shift with the row
     // layout. Validate the persisted positions before touching heap files.
     for (const size_t columnIndex : tbl.pkColIndices) {
-        if (columnIndex >= tbl.len) {
+        if (columnIndex >= tbl.len()) {
             lockManager_.unlock(tablename);
             return DBStatus::CORRUPTED_DATA;
         }
@@ -21779,7 +21798,7 @@ DBStatus StorageEngine::alterTableDropColumn(const std::string& dbname,
     }
     for (const auto& constraint : tbl.uniqueConstraints) {
         for (const size_t columnIndex : constraint) {
-            if (columnIndex >= tbl.len) {
+            if (columnIndex >= tbl.len()) {
                 lockManager_.unlock(tablename);
                 return DBStatus::CORRUPTED_DATA;
             }
@@ -21826,7 +21845,7 @@ DBStatus StorageEngine::alterTableDropColumn(const std::string& dbname,
         return DBStatus::INVALID_VALUE;
     }
 
-    for (size_t i = 0; i < tbl.fkLen; ++i) {
+    for (size_t i = 0; i < tbl.fkLen(); ++i) {
         if (std::find(tbl.fks[i].colNames.begin(), tbl.fks[i].colNames.end(), colName) != tbl.fks[i].colNames.end()) {
             lockManager_.unlock(tablename);
             return DBStatus::INVALID_VALUE;
@@ -21841,7 +21860,7 @@ DBStatus StorageEngine::alterTableDropColumn(const std::string& dbname,
         std::string row(data, len);
         SqlRow values;
         const int64_t rid = encodeRid(pageId, slotId);
-        for (size_t i = 0; i < tbl.len; ++i) {
+        for (size_t i = 0; i < tbl.len(); ++i) {
             if (i == dropIdx || !tbl.cols[i].generatedExpr.empty()) continue;
             if (tbl.cols[i].generatedKind != 'v' && tbl.cols[i].isNull &&
                 dbms::detail::storedRowColumnIsNull(*this, dbname, tablename, tbl, rid, i)) {
@@ -21865,8 +21884,7 @@ DBStatus StorageEngine::alterTableDropColumn(const std::string& dbname,
             if (columnIndex > dropIdx) --columnIndex;
         }
     }
-    for (size_t i = dropIdx; i + 1 < tbl.len; ++i) tbl.cols[i] = tbl.cols[i + 1];
-    tbl.len--;
+    tbl.cols.erase(tbl.cols.begin() + dropIdx);
 
     const auto heapRowWidth = heapHeaderRowWidth(tbl);
     if (!heapRowWidth) {
@@ -21948,7 +21966,7 @@ DBStatus StorageEngine::alterTableDropColumn(const std::string& dbname,
         }
     }
     bool hasVarLen = false;
-    for (size_t i = 0; i < tbl.len; ++i) hasVarLen |= tbl.cols[i].isVariableLength;
+    for (size_t i = 0; i < tbl.len(); ++i) hasVarLen |= tbl.cols[i].isVariableLength;
     if (hasVarLen) {
         auto toastPa = std::make_unique<PageAllocator>(
             toastDataPath(dbname, tablename).string(), 0, 8192, DATA_FILE_FORMAT_VERSION);
@@ -21987,11 +22005,11 @@ DBStatus StorageEngine::alterTableDropColumn(const std::string& dbname,
         if (!hidx) return DBStatus::IO_ERROR;
         hidx->clear();
         TableSchema rebuilt = getTableSchema(dbname, tablename);
-        size_t colIdx = rebuilt.len;
-        for (size_t i = 0; i < rebuilt.len; ++i) {
+        size_t colIdx = rebuilt.len();
+        for (size_t i = 0; i < rebuilt.len(); ++i) {
             if (rebuilt.cols[i].dataName == cn) { colIdx = i; break; }
         }
-        if (colIdx >= rebuilt.len) return DBStatus::INVALID_VALUE;
+        if (colIdx >= rebuilt.len()) return DBStatus::INVALID_VALUE;
         if (!forEachRow(dbname, tablename, [&](uint32_t pageId, uint16_t slotId,
                                            const char* data, size_t len) {
             std::string row(data, len);
@@ -22070,11 +22088,11 @@ DBStatus StorageEngine::alterTableAlterColumnType(const std::string& dbname,
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
 
     TableSchema tbl = getTableSchema(dbname, tablename);
-    size_t colIdx = tbl.len;
-    for (size_t i = 0; i < tbl.len; ++i) {
+    size_t colIdx = tbl.len();
+    for (size_t i = 0; i < tbl.len(); ++i) {
         if (tbl.cols[i].dataName == colName) { colIdx = i; break; }
     }
-    if (colIdx >= tbl.len) {
+    if (colIdx >= tbl.len()) {
         lockManager_.unlock(tablename);
         return DBStatus::INVALID_VALUE;
     }
@@ -22151,7 +22169,7 @@ DBStatus StorageEngine::alterTableAlterColumnType(const std::string& dbname,
         std::string row(data, len);
         SqlRow values;
         const int64_t rid = encodeRid(pageId, slotId);
-        for (size_t i = 0; i < tbl.len; ++i) {
+        for (size_t i = 0; i < tbl.len(); ++i) {
             if (tbl.cols[i].generatedKind != 'v' && tbl.cols[i].isNull &&
                 dbms::detail::storedRowColumnIsNull(*this, dbname, tablename, tbl, rid, i)) {
                 values[tbl.cols[i].dataName] = std::nullopt;
@@ -22317,7 +22335,7 @@ DBStatus StorageEngine::alterTableAlterColumnType(const std::string& dbname,
 
     // 3. Swap the column's type fields; preserve its name + constraints.
     const bool hadVariableLength = std::any_of(
-        tbl.cols, tbl.cols + tbl.len,
+        tbl.cols.begin(), tbl.cols.end(),
         [](const Column& column) { return column.isVariableLength; });
     Column updated = tbl.cols[colIdx];
     updated.dataType = target.dataType;
@@ -22436,11 +22454,11 @@ DBStatus StorageEngine::alterTableRenameColumn(const std::string& dbname,
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
 
     TableSchema tbl = getTableSchema(dbname, tablename);
-    size_t colIdx = tbl.len;
-    for (size_t i = 0; i < tbl.len; ++i) {
+    size_t colIdx = tbl.len();
+    for (size_t i = 0; i < tbl.len(); ++i) {
         if (tbl.cols[i].dataName == oldName) { colIdx = i; break; }
     }
-    if (colIdx >= tbl.len) {
+    if (colIdx >= tbl.len()) {
         lockManager_.unlock(tablename);
         return DBStatus::INVALID_VALUE;
     }
@@ -22448,7 +22466,7 @@ DBStatus StorageEngine::alterTableRenameColumn(const std::string& dbname,
         lockManager_.unlock(tablename);
         return DBStatus::OK;
     }
-    for (size_t i = 0; i < tbl.len; ++i) {
+    for (size_t i = 0; i < tbl.len(); ++i) {
         if (tbl.cols[i].dataName == newName) {
             lockManager_.unlock(tablename);
             return DBStatus::TABLE_ALREADY_EXISTS;
@@ -22466,7 +22484,7 @@ DBStatus StorageEngine::alterTableRenameColumn(const std::string& dbname,
         expression = *rewritten;
         return true;
     };
-    for (size_t columnIndex = 0; columnIndex < tbl.len; ++columnIndex) {
+    for (size_t columnIndex = 0; columnIndex < tbl.len(); ++columnIndex) {
         Column& column = tbl.cols[columnIndex];
         if (!rewriteExpression(column.defaultValue) ||
             !rewriteExpression(column.checkExpr) ||
@@ -22492,7 +22510,7 @@ DBStatus StorageEngine::alterTableRenameColumn(const std::string& dbname,
     // Rewrite both the renamed table's local/self-referencing bindings and
     // every inbound reference before publishing the new column name.
     for (size_t foreignKeyIndex = 0;
-         foreignKeyIndex < tbl.fkLen; ++foreignKeyIndex) {
+         foreignKeyIndex < tbl.fkLen(); ++foreignKeyIndex) {
         ForeignKey& foreignKey = tbl.fks[foreignKeyIndex];
         for (std::string& localColumn : foreignKey.colNames) {
             if (localColumn == oldName) localColumn = newName;
@@ -22511,7 +22529,7 @@ DBStatus StorageEngine::alterTableRenameColumn(const std::string& dbname,
         TableSchema otherTable = getTableSchema(dbname, otherTableName);
         bool changed = false;
         for (size_t foreignKeyIndex = 0;
-             foreignKeyIndex < otherTable.fkLen; ++foreignKeyIndex) {
+             foreignKeyIndex < otherTable.fkLen(); ++foreignKeyIndex) {
             ForeignKey& foreignKey = otherTable.fks[foreignKeyIndex];
             if (foreignKey.refTable != tablename) continue;
             for (std::string& referencedColumn : foreignKey.refCols) {
@@ -22968,7 +22986,7 @@ DBStatus StorageEngine::alterTableRenameTable(const std::string& dbname,
     // inbound reference (and a possible self-reference) together with the
     // parent, otherwise valid child writes fail as soon as the old name is
     // removed and referential actions can no longer find their target.
-    for (size_t fkIndex = 0; fkIndex < renamedSchema.fkLen; ++fkIndex) {
+    for (size_t fkIndex = 0; fkIndex < renamedSchema.fkLen(); ++fkIndex) {
         if (renamedSchema.fks[fkIndex].refTable == oldName) {
             renamedSchema.fks[fkIndex].refTable = newName;
         }
@@ -22992,7 +23010,7 @@ DBStatus StorageEngine::alterTableRenameTable(const std::string& dbname,
         const TableSchema originalSchema = getTableSchema(dbname, tableName);
         TableSchema updatedSchema = originalSchema;
         bool changed = false;
-        for (size_t fkIndex = 0; fkIndex < updatedSchema.fkLen; ++fkIndex) {
+        for (size_t fkIndex = 0; fkIndex < updatedSchema.fkLen(); ++fkIndex) {
             if (updatedSchema.fks[fkIndex].refTable != oldName) continue;
             updatedSchema.fks[fkIndex].refTable = newName;
             changed = true;
@@ -23610,11 +23628,11 @@ DBStatus StorageEngine::alterTableSetDefault(const std::string& dbname,
     if (!lockManager_.lockMetadata(tablename)) return DBStatus::LOCK_CONFLICT;
 
     TableSchema tbl = getTableSchema(dbname, tablename);
-    size_t colIdx = tbl.len;
-    for (size_t i = 0; i < tbl.len; ++i) {
+    size_t colIdx = tbl.len();
+    for (size_t i = 0; i < tbl.len(); ++i) {
         if (tbl.cols[i].dataName == colName) { colIdx = i; break; }
     }
-    if (colIdx >= tbl.len) {
+    if (colIdx >= tbl.len()) {
         lockManager_.unlock(tablename);
         return DBStatus::INVALID_VALUE;
     }
@@ -23636,11 +23654,11 @@ DBStatus StorageEngine::alterTableDropDefault(const std::string& dbname,
     if (!lockManager_.lockMetadata(tablename)) return DBStatus::LOCK_CONFLICT;
 
     TableSchema tbl = getTableSchema(dbname, tablename);
-    size_t colIdx = tbl.len;
-    for (size_t i = 0; i < tbl.len; ++i) {
+    size_t colIdx = tbl.len();
+    for (size_t i = 0; i < tbl.len(); ++i) {
         if (tbl.cols[i].dataName == colName) { colIdx = i; break; }
     }
-    if (colIdx >= tbl.len) {
+    if (colIdx >= tbl.len()) {
         lockManager_.unlock(tablename);
         return DBStatus::INVALID_VALUE;
     }
@@ -23673,14 +23691,14 @@ DBStatus StorageEngine::alterTableIdentity(const std::string& dbname,
     if (!lockManager_.lockMetadata(tablename)) return DBStatus::LOCK_CONFLICT;
 
     TableSchema tbl = getTableSchema(dbname, tablename);
-    size_t colIdx = tbl.len;
-    for (size_t i = 0; i < tbl.len; ++i) {
+    size_t colIdx = tbl.len();
+    for (size_t i = 0; i < tbl.len(); ++i) {
         if (tbl.cols[i].dataName == colName) {
             colIdx = i;
             break;
         }
     }
-    if (colIdx >= tbl.len) {
+    if (colIdx >= tbl.len()) {
         lockManager_.unlock(tablename);
         return DBStatus::INVALID_VALUE;
     }
@@ -23869,8 +23887,8 @@ DBStatus StorageEngine::alterTableSetConstraintDeferrability(
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     if (!lockManager_.lockMetadata(tablename)) return DBStatus::LOCK_CONFLICT;
     TableSchema tbl = getTableSchema(dbname, tablename);
-    size_t match = tbl.len;
-    for (size_t i = 0; i < tbl.len; ++i) {
+    size_t match = tbl.len();
+    for (size_t i = 0; i < tbl.len(); ++i) {
         if (tbl.cols[i].checkConstraintName == constraintName) {
             match = i;
             break;
@@ -23882,12 +23900,12 @@ DBStatus StorageEngine::alterTableSetConstraintDeferrability(
         [&](const CheckConstraint& check) {
             return check.name == constraintName;
         });
-    if (match == tbl.len &&
+    if (match == tbl.len() &&
         additionalMatch == tbl.additionalCheckConstraints.end()) {
         lockManager_.unlock(tablename);
         return DBStatus::INVALID_VALUE;
     }
-    if (match != tbl.len) {
+    if (match != tbl.len()) {
         tbl.cols[match].deferrable = deferrable;
         tbl.cols[match].initiallyDeferred = initiallyDeferred;
     } else {
@@ -23909,11 +23927,11 @@ DBStatus StorageEngine::alterTableSetNotNull(const std::string& dbname,
     if (!lockManager_.lockMetadata(tablename)) return DBStatus::LOCK_CONFLICT;
 
     TableSchema tbl = getTableSchema(dbname, tablename);
-    size_t colIdx = tbl.len;
-    for (size_t i = 0; i < tbl.len; ++i) {
+    size_t colIdx = tbl.len();
+    for (size_t i = 0; i < tbl.len(); ++i) {
         if (tbl.cols[i].dataName == colName) { colIdx = i; break; }
     }
-    if (colIdx >= tbl.len) {
+    if (colIdx >= tbl.len()) {
         lockManager_.unlock(tablename);
         return DBStatus::INVALID_VALUE;
     }
@@ -23952,11 +23970,11 @@ DBStatus StorageEngine::alterTableDropNotNull(const std::string& dbname,
     if (!lockManager_.lockMetadata(tablename)) return DBStatus::LOCK_CONFLICT;
 
     TableSchema tbl = getTableSchema(dbname, tablename);
-    size_t colIdx = tbl.len;
-    for (size_t i = 0; i < tbl.len; ++i) {
+    size_t colIdx = tbl.len();
+    for (size_t i = 0; i < tbl.len(); ++i) {
         if (tbl.cols[i].dataName == colName) { colIdx = i; break; }
     }
-    if (colIdx >= tbl.len) {
+    if (colIdx >= tbl.len()) {
         lockManager_.unlock(tablename);
         return DBStatus::INVALID_VALUE;
     }
@@ -24047,7 +24065,7 @@ StoredCheckDefinition prepareStoredCheckDefinition(StorageEngine& engine,
     const TableSchema& table, const std::string& expression) {
     rejectStoredCheckQueryHeads(expression);
     auto root = GeneratedColumnProgram::parseDefinition(expression);
-    StoredCheckDefinition result{buildTypeHints(table), storedCheckCollations(table), table.len};
+    StoredCheckDefinition result{buildTypeHints(table), storedCheckCollations(table), table.len()};
     const auto logical = CatalogService::logicalName(relation);
     ExprEvaluator evaluator;
     evaluator.setCurrentDB(database);
@@ -24136,8 +24154,8 @@ StoredCheckDefinition prepareStoredCheckDefinition(StorageEngine& engine,
                 (!column->schema.empty() && column->schema != logical.schema))
                 throw DbError("42P01", "invalid reference to relation in check constraint: " + column->toString());
             size_t index = 0;
-            while (index < table.len && table.cols[index].dataName != column->column) ++index;
-            if (index == table.len)
+            while (index < table.len() && table.cols[index].dataName != column->column) ++index;
+            if (index == table.len())
                 throw DbError("42703", "column does not exist: " + column->toString());
             result.firstReferencedColumn = std::min(result.firstReferencedColumn, index);
             const std::string type = result.hints.at(column->column);
@@ -24233,7 +24251,7 @@ DBStatus validateStoredCheckRows(StorageEngine& engine, const std::string& datab
     const auto generated = freezeGeneratedStorageInput(table, database, relation, &engine);
     LocalExpressionSyntax syntax;
     DBStatus status = DBStatus::OK;
-    std::vector<bool> capturedNulls(table.len);
+    std::vector<bool> capturedNulls(table.len());
     const bool ok = forEachConstraintRow(engine, database, relation,
         [&](uint32_t, uint16_t, const char* data, size_t length) {
             if (status != DBStatus::OK) return;
@@ -24241,7 +24259,7 @@ DBStatus validateStoredCheckRows(StorageEngine& engine, const std::string& datab
             const std::string row(data, length);
             std::map<std::string, std::string> values;
             std::set<std::string> nulls;
-            for (size_t i = 0; i < table.len; ++i) {
+            for (size_t i = 0; i < table.len(); ++i) {
                 if (table.cols[i].generatedKind == 'v') continue;
                 bool isNull = false;
                 values[table.cols[i].dataName] = engine.extractColumnValue(row, table, i, database, true, &isNull);
@@ -24279,7 +24297,7 @@ DBStatus validateStoredForeignKeyRows(StorageEngine& engine, const std::string& 
     }
     std::set<std::vector<std::string>> canonicalKeys;
     std::vector<std::vector<std::string>> comparisonKeys;
-    std::vector<bool> parentNulls(parent.len), childNulls(child.len);
+    std::vector<bool> parentNulls(parent.len()), childNulls(child.len());
     const bool parentOk = forEachConstraintRow(engine, database, parentName,
         [&](uint32_t, uint16_t, const char* data, size_t length) {
             ScannedNullRowBinding binding(parent, parentNulls, data, length);
@@ -24377,11 +24395,11 @@ DBStatus StorageEngine::alterTableAddCheckConstraint(const std::string& database
     if (!locks.acquire()) return DBStatus::LOCK_CONFLICT;
     const auto before = getTableSchema(database, relation);
     auto table = before;
-    for (size_t i = 0; i < table.len; ++i)
+    for (size_t i = 0; i < table.len(); ++i)
         if (table.cols[i].checkConstraintName == name) return DBStatus::TABLE_ALREADY_EXISTS;
     for (const auto& check : table.additionalCheckConstraints)
         if (check.name == name) return DBStatus::TABLE_ALREADY_EXISTS;
-    for (size_t i = 0; i < table.fkLen; ++i)
+    for (size_t i = 0; i < table.fkLen(); ++i)
         if (table.fks[i].name == name) return DBStatus::TABLE_ALREADY_EXISTS;
     const auto definition = prepareStoredCheckDefinition(*this, database, relation, table, expression);
     if (validateExisting) {
@@ -24389,7 +24407,7 @@ DBStatus StorageEngine::alterTableAddCheckConstraint(const std::string& database
         if (status != DBStatus::OK) return status;
     }
     const size_t target = definition.firstReferencedColumn;
-    if (target < table.len && table.cols[target].checkExpr.empty()) {
+    if (target < table.len() && table.cols[target].checkExpr.empty()) {
         table.cols[target].checkExpr = expression;
         table.cols[target].checkConstraintName = name;
         table.cols[target].deferrable = false;
@@ -24420,7 +24438,7 @@ DBStatus StorageEngine::alterTableAddUniqueConstraint(const std::string& dbname,
     std::set<size_t> distinctColumns;
     for (const auto& cname : colNames) {
         bool found = false;
-        for (size_t i = 0; i < tbl.len; ++i) {
+        for (size_t i = 0; i < tbl.len(); ++i) {
             if (tbl.cols[i].dataName == cname) {
                 if (!distinctColumns.insert(i).second) {
                     lockManager_.unlock(tablename);
@@ -24520,7 +24538,7 @@ DBStatus StorageEngine::alterTableAddPrimaryKey(const std::string& dbname,
 
     // A table may have at most one primary key.
     bool hasPk = !tbl.pkColIndices.empty();
-    for (size_t i = 0; i < tbl.len && !hasPk; ++i)
+    for (size_t i = 0; i < tbl.len() && !hasPk; ++i)
         if (tbl.cols[i].isPrimaryKey) hasPk = true;
     if (hasPk) {
         lockManager_.unlock(tablename);
@@ -24532,7 +24550,7 @@ DBStatus StorageEngine::alterTableAddPrimaryKey(const std::string& dbname,
     std::set<size_t> distinctColumns;
     for (const auto& cname : colNames) {
         bool found = false;
-        for (size_t i = 0; i < tbl.len; ++i) {
+        for (size_t i = 0; i < tbl.len(); ++i) {
             if (tbl.cols[i].dataName == cname) {
                 if (!distinctColumns.insert(i).second) {
                     lockManager_.unlock(tablename);
@@ -24702,10 +24720,10 @@ DBStatus StorageEngine::alterTableAddFKConstraint(const std::string& database,
     const auto before = getTableSchema(database, relation);
     auto table = before;
     const auto parent = getTableSchema(database, parentName);
-    if (table.fkLen >= MAX_COLUMNS) return DBStatus::INVALID_VALUE;
-    for (size_t i = 0; i < table.fkLen; ++i)
+    if (table.fkLen() >= MAX_TABLE_FOREIGN_KEYS) return DBStatus::INVALID_VALUE;
+    for (size_t i = 0; i < table.fkLen(); ++i)
         if (table.fks[i].name == name) return DBStatus::TABLE_ALREADY_EXISTS;
-    for (size_t i = 0; i < table.len; ++i)
+    for (size_t i = 0; i < table.len(); ++i)
         if (table.cols[i].checkConstraintName == name) return DBStatus::TABLE_ALREADY_EXISTS;
     for (const auto& check : table.additionalCheckConstraints)
         if (check.name == name) return DBStatus::TABLE_ALREADY_EXISTS;
@@ -24736,7 +24754,7 @@ DBStatus StorageEngine::validateTableConstraint(const std::string& database,
     // unprotected parent or silently validate a different constraint.
     const auto initial = getTableSchema(database, relation);
     std::string parentName;
-    for (size_t i = 0; i < initial.fkLen; ++i)
+    for (size_t i = 0; i < initial.fkLen(); ++i)
         if (initial.fks[i].name == name) parentName = initial.fks[i].refTable;
     std::vector<std::string> relations{relation};
     if (!parentName.empty()) relations.push_back(parentName);
@@ -24747,7 +24765,7 @@ DBStatus StorageEngine::validateTableConstraint(const std::string& database,
     const auto flag = validationParams.find("constraint." + name + ".validated");
     const bool alreadyValidated = flag == validationParams.end() || flag->second == "1";
     std::string expression;
-    for (size_t i = 0; i < table.len; ++i)
+    for (size_t i = 0; i < table.len(); ++i)
         if (table.cols[i].checkConstraintName == name) expression = table.cols[i].checkExpr;
     for (const auto& check : table.additionalCheckConstraints)
         if (check.name == name) expression = check.expression;
@@ -24757,7 +24775,7 @@ DBStatus StorageEngine::validateTableConstraint(const std::string& database,
         const auto status = validateStoredCheckRows(*this, database, relation, table, expression, definition);
         return status == DBStatus::OK ? publishConstraintValidation(database, relation, name, true) : status;
     }
-    for (size_t i = 0; i < table.fkLen; ++i) if (table.fks[i].name == name) {
+    for (size_t i = 0; i < table.fkLen(); ++i) if (table.fks[i].name == name) {
         const auto& key = table.fks[i];
         if (key.refTable != parentName) return DBStatus::LOCK_CONFLICT;
         if (alreadyValidated) return DBStatus::OK;
@@ -24796,7 +24814,7 @@ DBStatus StorageEngine::alterTableDropConstraint(const std::string& dbname,
     bool droppedPrimaryKey = false;
 
     // Search CHECK constraints
-    for (size_t i = 0; i < tbl.len; ++i) {
+    for (size_t i = 0; i < tbl.len(); ++i) {
         if (tbl.cols[i].checkConstraintName == name) {
             tbl.cols[i].checkExpr.clear();
             tbl.cols[i].checkConstraintName.clear();
@@ -24833,13 +24851,9 @@ DBStatus StorageEngine::alterTableDropConstraint(const std::string& dbname,
 
     // Search FK constraints
     if (!found) {
-        for (size_t i = 0; i < tbl.fkLen; ++i) {
+        for (size_t i = 0; i < tbl.fkLen(); ++i) {
             if (tbl.fks[i].name == name) {
-                // Shift left
-                for (size_t j = i; j + 1 < tbl.fkLen; ++j) {
-                    tbl.fks[j] = tbl.fks[j + 1];
-                }
-                tbl.fkLen--;
+                tbl.fks.erase(tbl.fks.begin() + i);
                 found = true;
                 break;
             }
@@ -24854,7 +24868,7 @@ DBStatus StorageEngine::alterTableDropConstraint(const std::string& dbname,
         primaryKeyConstraintName(tbl);
     if (!found && tbl.hasPrimaryKey() && name == effectivePrimaryKeyName) {
         tbl.pkColIndices.clear();
-        for (size_t i = 0; i < tbl.len; ++i) tbl.cols[i].isPrimaryKey = false;
+        for (size_t i = 0; i < tbl.len(); ++i) tbl.cols[i].isPrimaryKey = false;
         std::string pkKey = dbname + "/" + tablename;
         auto cit = pkIndexCache_.find(pkKey);
         if (cit != pkIndexCache_.end()) pkIndexCache_.erase(cit);
@@ -24900,13 +24914,13 @@ DBStatus StorageEngine::alterTableRenameConstraint(const std::string& dbname,
     // Reject if the new name already names a constraint.
     auto nameInUse = [&](const std::string& n) {
         if (!primaryKeyName.empty() && primaryKeyName == n) return true;
-        for (size_t i = 0; i < tbl.len; ++i)
+        for (size_t i = 0; i < tbl.len(); ++i)
             if (tbl.cols[i].checkConstraintName == n) return true;
         for (const auto& check : tbl.additionalCheckConstraints)
             if (check.name == n) return true;
         for (const auto& un : tbl.uniqueConstraintNames)
             if (un == n) return true;
-        for (size_t i = 0; i < tbl.fkLen; ++i)
+        for (size_t i = 0; i < tbl.fkLen(); ++i)
             if (tbl.fks[i].name == n) return true;
         return false;
     };
@@ -24921,7 +24935,7 @@ DBStatus StorageEngine::alterTableRenameConstraint(const std::string& dbname,
     }
 
     bool found = false;
-    for (size_t i = 0; i < tbl.len && !found; ++i) {
+    for (size_t i = 0; i < tbl.len() && !found; ++i) {
         if (tbl.cols[i].checkConstraintName == oldName) {
             tbl.cols[i].checkConstraintName = newName;
             found = true;
@@ -24939,7 +24953,7 @@ DBStatus StorageEngine::alterTableRenameConstraint(const std::string& dbname,
             found = true;
         }
     }
-    for (size_t i = 0; i < tbl.fkLen && !found; ++i) {
+    for (size_t i = 0; i < tbl.fkLen() && !found; ++i) {
         if (tbl.fks[i].name == oldName) {
             tbl.fks[i].name = newName;
             found = true;
@@ -25545,7 +25559,7 @@ DBStatus StorageEngine::commentOnColumn(const std::string& dbname,
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     const TableSchema table = getTableSchema(dbname, tablename);
     bool columnExists = false;
-    for (size_t i = 0; i < table.len; ++i) {
+    for (size_t i = 0; i < table.len(); ++i) {
         if (table.cols[i].dataName == colname) {
             columnExists = true;
             break;
@@ -27214,9 +27228,9 @@ TableSchema StorageEngine::getTableSchema(const std::string& dbname,
         // durable identity is the real pg_attribute domain OID; reconstruct
         // only this logical field from copied catalog metadata on every path,
         // including a schema cache hit, without modifying physical bytes.
-        if (schema.len == 0 || !catalogService_) return schema;
+        if (schema.len() == 0 || !catalogService_) return schema;
         const auto domains = catalogService_->domainColumns(dbname, tablename);
-        for (size_t i = 0; i < schema.len; ++i) {
+        for (size_t i = 0; i < schema.len(); ++i) {
             const auto domain = domains.find(schema.cols[i].dataName);
             if (domain != domains.end()) schema.cols[i].domainName = domain->second;
             if (schema.cols[i].defaultOrigin == Column::DefaultOrigin::Domain && physicalSchemaReader != this) {
@@ -27258,7 +27272,7 @@ TableSchema StorageEngine::getTableSchema(const std::string& dbname,
     TableSchema tbl = readSchema(in, tablename);
     tbl.storageParams = getStorageParams(dbname, tablename);
 
-    if (tbl.len > 0) {
+    if (tbl.len() > 0) {
         std::string collationError;
         const DBStatus collationStatus = resolveTableCollations(
             *this, dbname, tbl, &collationError);
@@ -27271,7 +27285,7 @@ TableSchema StorageEngine::getTableSchema(const std::string& dbname,
 
     // Do not cache a missing/unparsed schema (readSchema returns len == 0):
     // a CREATE TABLE that follows would be masked by the cached empty entry.
-    if (tbl.len > 0) {
+    if (tbl.len() > 0) {
         std::error_code mtEc;
         const auto mtime = std::filesystem::last_write_time(
             schemaPath(dbname, tablename), mtEc);
@@ -27571,7 +27585,7 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
                                       const std::string& rowBuffer,
                                       const TableSchema& tbl,
                                       const std::vector<bool>& nulls) {
-    if (nulls.size() != tbl.len)
+    if (nulls.size() != tbl.len())
         throw DbError("XX000", "materialized predicate NULL bitmap width mismatch");
     struct Binding {
         const TableSchema* schema;
@@ -27610,14 +27624,14 @@ bool StorageEngine::evalConditionOnRowWithSyntax(const Condition& cond,
 
     DatumMetadataContextPtr generatedOwner;
     if(!generatedMetadata && valueEngine && !valueDb.empty() &&
-       std::any_of(tbl.cols,tbl.cols+tbl.len,[](const Column& column){return column.generatedKind=='v';})) {
+       std::any_of(tbl.cols.begin(),tbl.cols.end(),[](const Column& column){return column.generatedKind=='v';})) {
         generatedOwner=freezeGeneratedStorageInput(tbl,valueDb,tbl.tablename,valueEngine);
         generatedMetadata=generatedOwner.get();
     }
 
     if (cond.op.rfind("typedrhs ", 0) == 0) {
         const Column* column = nullptr;
-        for (size_t i = 0; i < tbl.len; ++i) {
+        for (size_t i = 0; i < tbl.len(); ++i) {
             if (tbl.cols[i].dataName == cond.colName) {
                 column = &tbl.cols[i];
                 break;
@@ -27722,7 +27736,7 @@ bool StorageEngine::evalConditionOnRowWithSyntax(const Condition& cond,
         std::map<std::string, std::string> rowValues;
         std::map<std::string, std::string> collations;
         std::set<std::string> nullColumns;
-        for (size_t i = 0; i < tbl.len; ++i) {
+        for (size_t i = 0; i < tbl.len(); ++i) {
             if(generatedMetadata && tbl.cols[i].generatedKind=='v')continue;
             bool isNull = false;
             std::string value = extractValue(i, &isNull);
@@ -27817,15 +27831,15 @@ bool StorageEngine::evalConditionOnRowWithSyntax(const Condition& cond,
         }
         if (parts.size() == 4) {
             auto findCol = [&](const std::string& name) -> size_t {
-                for (size_t i = 0; i < tbl.len; ++i)
+                for (size_t i = 0; i < tbl.len(); ++i)
                     if (tbl.cols[i].dataName == name) return i;
-                return tbl.len;
+                return tbl.len();
             };
             size_t s1i = findCol(parts[0]);
             size_t e1i = findCol(parts[1]);
             size_t s2i = findCol(parts[2]);
             size_t e2i = findCol(parts[3]);
-            if (s1i < tbl.len && e1i < tbl.len && s2i < tbl.len && e2i < tbl.len) {
+            if (s1i < tbl.len() && e1i < tbl.len() && s2i < tbl.len() && e2i < tbl.len()) {
                 std::string s1 = extractValue(s1i);
                 std::string e1 = extractValue(e1i);
                 std::string s2 = extractValue(s2i);
@@ -27837,8 +27851,8 @@ bool StorageEngine::evalConditionOnRowWithSyntax(const Condition& cond,
     }
 
     size_t ci = 0;
-    for (; ci < tbl.len && tbl.cols[ci].dataName != cond.colName; ++ci) {}
-    if (ci >= tbl.len) return false;
+    for (; ci < tbl.len() && tbl.cols[ci].dataName != cond.colName; ++ci) {}
+    if (ci >= tbl.len()) return false;
 
     bool computedNull = false;
     std::string val = extractValue(ci, &computedNull);
@@ -27858,7 +27872,7 @@ bool StorageEngine::evalConditionOnRowWithSyntax(const Condition& cond,
         std::string right = cond.value;
         bool rightNull = cond.patternIsNull;
         if (!cond.decodedLiteralRhs && !cond.patternIsNull) {
-            for (size_t i=0;i<tbl.len;++i) if (tbl.cols[i].dataName == cond.value) {
+            for (size_t i=0;i<tbl.len();++i) if (tbl.cols[i].dataName == cond.value) {
                 right = extractValue(i,&rightNull);
                 if (buffered) rightNull = (*g_bufferedConditionNulls)[i];
                 pattern.patternType = tbl.cols[i].isArray ? tbl.cols[i].dataType+"[]" : tbl.cols[i].dataType;
@@ -27867,7 +27881,7 @@ bool StorageEngine::evalConditionOnRowWithSyntax(const Condition& cond,
         }
         if (!cond.patternEscapeColumn.empty()) {
             bool found = false;
-            for (size_t i=0;i<tbl.len;++i) if (tbl.cols[i].dataName == cond.patternEscapeColumn) {
+            for (size_t i=0;i<tbl.len();++i) if (tbl.cols[i].dataName == cond.patternEscapeColumn) {
                 bool escapeNull = false;
                 pattern.patternEscape = extractValue(i,&escapeNull);
                 pattern.patternEscapeIsNull = buffered ? (*g_bufferedConditionNulls)[i] : escapeNull;
@@ -27892,8 +27906,8 @@ bool StorageEngine::evalConditionOnRowWithSyntax(const Condition& cond,
     // a physically-NULL right column makes the comparison UNKNOWN.
     if (!cond.decodedLiteralRhs) {
         size_t rci = 0;
-        for (; rci < tbl.len && tbl.cols[rci].dataName != cond.value; ++rci) {}
-        if (rci < tbl.len) {
+        for (; rci < tbl.len() && tbl.cols[rci].dataName != cond.value; ++rci) {}
+        if (rci < tbl.len()) {
             bool rNull = buffered && (*g_bufferedConditionNulls)[rci];
             if (!buffered && tbl.cols[rci].generatedKind != 'v' &&
                 g_condNullEngine && g_condNullRid >= 0 &&
@@ -28401,7 +28415,7 @@ static std::string buildRowBuffer(const TableSchema& tbl,
         return value->second == "NULL";
     };
     bool hasNull = false;
-    for (size_t i = 0; i < tbl.len; ++i) {
+    for (size_t i = 0; i < tbl.len(); ++i) {
         if (columnIsNull(i)) {
             hasNull = true;
             break;
@@ -28411,7 +28425,7 @@ static std::string buildRowBuffer(const TableSchema& tbl,
     std::string rowBuffer = buildHeapTupleHeader(tbl, creatorTxnId, hasNull, tbl.hasVariableLength());
     if (hasNull) {
         auto* header = castHeapHeader(rowBuffer.data());
-        for (size_t i = 0; i < tbl.len; ++i) {
+        for (size_t i = 0; i < tbl.len(); ++i) {
             // An empty-string value is a real empty value (bit set); only the
             // explicit NULL state (or an omitted column) leaves the bit clear.
             if (!columnIsNull(i)) {
@@ -28423,7 +28437,7 @@ static std::string buildRowBuffer(const TableSchema& tbl,
     if (!tbl.hasVariableLength()) {
         rowBuffer.resize(tbl.rowSize(), '\0');
         size_t offset = dataOffset(tbl);
-        for (size_t i = 0; i < tbl.len; ++i) {
+        for (size_t i = 0; i < tbl.len(); ++i) {
             const Column& col = tbl.cols[i];
             auto it = values.find(col.dataName);
             std::string val = (it != values.end()) ? it->second : "";
@@ -28519,7 +28533,7 @@ static std::string buildRowBuffer(const TableSchema& tbl,
         std::string fixedData(fixedSize, '\0');
         std::vector<std::string> varDataList;
         size_t fixedOff = 0;
-        for (size_t i = 0; i < tbl.len; ++i) {
+        for (size_t i = 0; i < tbl.len(); ++i) {
             const Column& col = tbl.cols[i];
             auto it = values.find(col.dataName);
             std::string val = (it != values.end()) ? it->second : "";
@@ -29133,10 +29147,10 @@ DBStatus StorageEngine::insertInternal(
         getIndexMetadata(dbname, tablename);
     const auto compositeIndexMetadata =
         getCompositeIndexes(dbname, tablename);
-    std::vector<bool> domainRequired(tbl.len, false);
+    std::vector<bool> domainRequired(tbl.len(), false);
     StoredArrayDomainChecks arrayDomainChecks;
     try {
-        for (size_t i = 0; i < tbl.len; ++i) {
+        for (size_t i = 0; i < tbl.len(); ++i) {
             const auto& column = tbl.cols[i];
             if (column.domainName.empty()) continue;
             const auto domain = resolveDomainAncestry(dbname, column.domainName);
@@ -29184,7 +29198,7 @@ DBStatus StorageEngine::insertInternal(
     // Identity input policy is enforced at the storage boundary so embedded
     // callers cannot bypass the SQL executor. OVERRIDING USER VALUE discards
     // even explicit NULL; the absence then invokes the identity sequence.
-    for (size_t i = 0; i < tbl.len; ++i) {
+    for (size_t i = 0; i < tbl.len(); ++i) {
         const Column& col = tbl.cols[i];
         if (col.identityKind == 0) continue;
         const bool supplied = values.find(col.dataName) != values.end();
@@ -29201,7 +29215,7 @@ DBStatus StorageEngine::insertInternal(
     // Reject user-supplied values for GENERATED ALWAYS columns.  Presence is
     // what matters here: SQL NULL and an empty string are still explicit
     // values, while DEFAULT has already been represented by an omitted key.
-    for (size_t i = 0; i < tbl.len; ++i) {
+    for (size_t i = 0; i < tbl.len(); ++i) {
         const Column& col = tbl.cols[i];
         if (!col.generatedExpr.empty() &&
             values.find(col.dataName) != values.end()) {
@@ -29210,7 +29224,7 @@ DBStatus StorageEngine::insertInternal(
         }
     }
 
-    for (size_t i = 0; i < tbl.len; ++i) {
+    for (size_t i = 0; i < tbl.len(); ++i) {
         const Column& col = tbl.cols[i];
         auto it = actualValues.find(col.dataName);
         // Presence means the caller supplied the column, including an explicit
@@ -29269,7 +29283,7 @@ DBStatus StorageEngine::insertInternal(
     }
 
     // Apply AUTO_INCREMENT values
-    for (size_t i = 0; i < tbl.len; ++i) {
+    for (size_t i = 0; i < tbl.len(); ++i) {
         const Column& col = tbl.cols[i];
         if (!col.isAutoIncrement) continue;
         auto it = actualValues.find(col.dataName);
@@ -29359,7 +29373,7 @@ DBStatus StorageEngine::insertInternal(
         // Check single-column UNIQUE constraints (use B+ tree index if
         // available). Deferred constraints queue their final value for the
         // commit-time validation below.
-        for (size_t i = 0; i < tbl.len; ++i) {
+        for (size_t i = 0; i < tbl.len(); ++i) {
             const Column& col = tbl.cols[i];
             if (!col.isUnique) continue;
             const auto value = actualValues.find(col.dataName);
@@ -29436,7 +29450,7 @@ DBStatus StorageEngine::insertInternal(
             if (uniqueIndex < tbl.uniqueConstraintNames.size()) {
                 constraintName = tbl.uniqueConstraintNames[uniqueIndex];
             }
-            if (constraintName.empty() && columns.front() < tbl.len) {
+            if (constraintName.empty() && columns.front() < tbl.len()) {
                 constraintName = tablename + "_" +
                     tbl.cols[columns.front()].dataName + "_key";
             }
@@ -29451,7 +29465,7 @@ DBStatus StorageEngine::insertInternal(
             std::vector<std::string> compositeKey;
             bool containsNull = false;
             for (const size_t columnIndex : columns) {
-                if (columnIndex >= tbl.len) return DBStatus::CORRUPTED_DATA;
+                if (columnIndex >= tbl.len()) return DBStatus::CORRUPTED_DATA;
                 const auto value = actualValues.find(
                     tbl.cols[columnIndex].dataName);
                 if (value == actualValues.end() ||
@@ -29498,7 +29512,7 @@ DBStatus StorageEngine::insertInternal(
             std::vector<std::string> candidateValues;
             candidateValues.reserve(columns.size());
             for (const size_t columnIndex : columns) {
-                if (columnIndex >= tbl.len) return DBStatus::CORRUPTED_DATA;
+                if (columnIndex >= tbl.len()) return DBStatus::CORRUPTED_DATA;
                 const std::string& columnName =
                     tbl.cols[columnIndex].dataName;
                 const auto value = actualValues.find(columnName);
@@ -29543,14 +29557,14 @@ DBStatus StorageEngine::insertInternal(
                 !metadata.whereCondition.empty()) {
                 return DBStatus::CORRUPTED_DATA;
             }
-            size_t columnIndex = tbl.len;
-            for (size_t candidate = 0; candidate < tbl.len; ++candidate) {
+            size_t columnIndex = tbl.len();
+            for (size_t candidate = 0; candidate < tbl.len(); ++candidate) {
                 if (tbl.cols[candidate].dataName == metadata.name) {
                     columnIndex = candidate;
                     break;
                 }
             }
-            if (columnIndex >= tbl.len) return DBStatus::CORRUPTED_DATA;
+            if (columnIndex >= tbl.len()) return DBStatus::CORRUPTED_DATA;
             const DBStatus status =
                 validateStandaloneUniqueIndex({columnIndex});
             if (status != DBStatus::OK) return status;
@@ -29563,15 +29577,15 @@ DBStatus StorageEngine::insertInternal(
             std::vector<size_t> columns;
             std::set<size_t> distinctColumns;
             for (const auto& columnName : metadata.columns) {
-                size_t columnIndex = tbl.len;
-                for (size_t candidate = 0; candidate < tbl.len;
+                size_t columnIndex = tbl.len();
+                for (size_t candidate = 0; candidate < tbl.len();
                      ++candidate) {
                     if (tbl.cols[candidate].dataName == columnName) {
                         columnIndex = candidate;
                         break;
                     }
                 }
-                if (columnIndex >= tbl.len ||
+                if (columnIndex >= tbl.len() ||
                     !distinctColumns.insert(columnIndex).second) {
                     return DBStatus::CORRUPTED_DATA;
                 }
@@ -29589,7 +29603,7 @@ DBStatus StorageEngine::insertInternal(
     // columns. NOT NULL belongs only to that final pass so a BEFORE trigger
     // can supply an omitted required value.
     const auto validateRowValues = [&](bool enforceNotNull) -> DBStatus {
-    for (size_t i = 0; i < tbl.len; ++i) {
+    for (size_t i = 0; i < tbl.len(); ++i) {
         const Column& col = tbl.cols[i];
         auto it = actualValues.find(col.dataName);
         const bool hasValue = it != actualValues.end();
@@ -29967,7 +29981,7 @@ DBStatus StorageEngine::insertInternal(
                         lockManager_.unlock(tablename);
                         return DBStatus::INVALID_VALUE;
                     }
-                    for (size_t i = 0; i < tbl.len; ++i) {
+                    for (size_t i = 0; i < tbl.len(); ++i) {
                         if (tbl.cols[i].dataName == assignment.column) {
                             actualValues[assignment.column] = val;
                             convertedDomains.erase(assignment.column);
@@ -29991,7 +30005,7 @@ DBStatus StorageEngine::insertInternal(
     const bool legacyFullImage=shouldEnforceRLS(tbl,StorageEngine::getRLSUser()) ||
         !filterTriggers(operationTriggers,tablename,"before","insert").empty() ||
         !filterTriggers(operationTriggers,tablename,"after","insert").empty();
-    for (size_t i = 0; i < tbl.len; ++i) {
+    for (size_t i = 0; i < tbl.len(); ++i) {
         const auto& column = tbl.cols[i];
         if(deferVirtualInputs && column.generatedKind=='v' && !legacyFullImage)continue;
         if (actualValues.emplace(column.dataName, std::string{}).second)
@@ -30003,7 +30017,7 @@ DBStatus StorageEngine::insertInternal(
     // so heap data, constraints, RETURNING, and every index derive from the
     // same row image. A catalog expression that cannot be evaluated must not
     // silently turn into a NULL/empty stored value.
-    for (size_t i = 0; i < tbl.len; ++i) {
+    for (size_t i = 0; i < tbl.len(); ++i) {
         const Column& col = tbl.cols[i];
         if (col.generatedExpr.empty() || col.generatedKind == 'v') continue;
         std::string computed;
@@ -30020,7 +30034,7 @@ DBStatus StorageEngine::insertInternal(
         else actualNullColumns.erase(col.dataName);
     }
 
-    for(size_t i=0;i<tbl.len;++i)if(tbl.cols[i].generatedKind=='v' && (!tbl.cols[i].isNull || domainRequired[i])) {
+    for(size_t i=0;i<tbl.len();++i)if(tbl.cols[i].generatedKind=='v' && (!tbl.cols[i].isNull || domainRequired[i])) {
         ExprValue value;
         try {value=generatedValueFromMap(tbl,i,actualValues,actualNullColumns,dbname,this,generatedMetadata.get());}
         catch(...){lockManager_.unlock(tablename);throw;}
@@ -30062,7 +30076,7 @@ DBStatus StorageEngine::insertInternal(
             // BEFORE triggers, stored generation and input normalization.
             // Capture only this rejected candidate; it is not an inserted or
             // RETURNING row, and no value is regenerated after rollback.
-            for (size_t i = 0; i < tbl.len; ++i) {
+            for (size_t i = 0; i < tbl.len(); ++i) {
                 const auto& column = tbl.cols[i];
                 if (column.generatedKind == 'v') continue;
                 const auto found = actualValues.find(column.dataName);
@@ -30110,7 +30124,7 @@ DBStatus StorageEngine::insertInternal(
     // Check CHECK constraints before writing; collect deferrable deferred checks for commit-time validation.
     std::vector<size_t> deferredCheckCols;
     std::vector<const CheckConstraint*> deferredAdditionalChecks;
-    for (size_t i = 0; i < tbl.len; ++i) {
+    for (size_t i = 0; i < tbl.len(); ++i) {
         const Column& col = tbl.cols[i];
         if (col.checkExpr.empty()) continue;
         const bool deferred = transactionContext().inTransaction &&
@@ -30168,7 +30182,7 @@ DBStatus StorageEngine::insertInternal(
 
     // Check foreign key references. DEFERRABLE FKs currently deferred skip
     // the immediate existence check and queue it for commit time.
-    for (size_t fi = 0; fi < tbl.fkLen; ++fi) {
+    for (size_t fi = 0; fi < tbl.fkLen(); ++fi) {
         const ForeignKey& fk = tbl.fks[fi];
         // Check if any FK column value is NULL (NULL is allowed in FKs)
         bool hasNull = false;
@@ -30209,14 +30223,14 @@ DBStatus StorageEngine::insertInternal(
         std::vector<size_t> referencedColumns;
         referencedColumns.reserve(fk.refCols.size());
         for (const auto& referencedName : fk.refCols) {
-            size_t referencedColumn = refTbl.len;
-            for (size_t candidate = 0; candidate < refTbl.len; ++candidate) {
+            size_t referencedColumn = refTbl.len();
+            for (size_t candidate = 0; candidate < refTbl.len(); ++candidate) {
                 if (refTbl.cols[candidate].dataName == referencedName) {
                     referencedColumn = candidate;
                     break;
                 }
             }
-            if (referencedColumn >= refTbl.len) {
+            if (referencedColumn >= refTbl.len()) {
                 lockManager_.unlock(tablename);
                 return DBStatus::CORRUPTED_DATA;
             }
@@ -30251,7 +30265,7 @@ DBStatus StorageEngine::insertInternal(
 
         std::vector<size_t> primaryColumns = refTbl.pkColIndices;
         if (primaryColumns.empty()) {
-            for (size_t candidate = 0; candidate < refTbl.len; ++candidate) {
+            for (size_t candidate = 0; candidate < refTbl.len(); ++candidate) {
                 if (refTbl.cols[candidate].isPrimaryKey) {
                     primaryColumns.push_back(candidate);
                 }
@@ -30385,7 +30399,7 @@ DBStatus StorageEngine::insertInternal(
     const uint64_t creatorTxnId = transactionContext().inTransaction
         ? transactionContext().currentTxnId : 0;
     std::set<size_t> physicalNullColumns;
-    for (size_t i = 0; i < tbl.len; ++i) {
+    for (size_t i = 0; i < tbl.len(); ++i) {
         if (storedValues.find(tbl.cols[i].dataName) == storedValues.end() ||
             actualNullColumns.count(tbl.cols[i].dataName) != 0) {
             physicalNullColumns.insert(i);
@@ -30398,9 +30412,9 @@ DBStatus StorageEngine::insertInternal(
                   transactionContext().currentCommandId);
     }
     std::string strippedRow = stripRowHeader(
-        rowBuffer, tbl.formatVersion, tbl.len);
+        rowBuffer, tbl.formatVersion, tbl.len());
     const auto insertedColumnIsNull = [&](size_t columnIndex) {
-        if (columnIndex >= tbl.len ||
+        if (columnIndex >= tbl.len() ||
             tbl.cols[columnIndex].generatedKind == 'v' ||
             !usesHeapTupleHeader(tbl.formatVersion) ||
             rowBuffer.size() < sizeof(HeapTupleHeaderData)) {
@@ -30661,7 +30675,7 @@ DBStatus StorageEngine::insertInternal(
     // Queue deferred FK existence checks after the row has a stable RID.
     if (transactionContext().inTransaction && !deferredFkEntries.empty()) {
         for (const auto& e : deferredFkEntries) {
-            if (e.fkIndex >= tbl.fkLen) continue;
+            if (e.fkIndex >= tbl.fkLen()) continue;
             const ForeignKey& fk = tbl.fks[e.fkIndex];
             DeferredCheck check;
             check.kind = DeferredCheck::Kind::ForeignKey;
@@ -30687,7 +30701,7 @@ DBStatus StorageEngine::insertInternal(
     if (transactionContext().inTransaction && dbname == transactionContext().txnDB) {
         std::vector<bool> bloomNulls;
         if (!getBloomIndexedColumns(dbname, tablename).empty()) {
-            bloomNulls.assign(tbl.len, false);
+            bloomNulls.assign(tbl.len(), false);
             for (const size_t column : physicalNullColumns)
                 bloomNulls[column] = true;
         }
@@ -30737,11 +30751,11 @@ DBStatus StorageEngine::insertInternal(
             }
         }
         for (const auto& colname : getHashIndexedColumns(dbname, tablename)) {
-            size_t colIdx = tbl.len;
-            for (size_t i = 0; i < tbl.len; ++i) {
+            size_t colIdx = tbl.len();
+            for (size_t i = 0; i < tbl.len(); ++i) {
                 if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
             }
-            if (colIdx >= tbl.len) continue;
+            if (colIdx >= tbl.len()) continue;
             if (HashIndex* idx = getHashIndex(dbname, tablename, colname); idx) {
                 const std::string val = canonicalKeyValueFromRowMap(
                     actualValues, tbl, colname);
@@ -30751,11 +30765,11 @@ DBStatus StorageEngine::insertInternal(
             }
         }
         for (const auto& colname : getBloomIndexedColumns(dbname, tablename)) {
-            size_t colIdx = tbl.len;
-            for (size_t i = 0; i < tbl.len; ++i) {
+            size_t colIdx = tbl.len();
+            for (size_t i = 0; i < tbl.len(); ++i) {
                 if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
             }
-            if (colIdx >= tbl.len) continue;
+            if (colIdx >= tbl.len()) continue;
             if (BloomIndex* idx = getBloomIndex(
                     dbname, tablename, colname); idx) {
                 const std::string val = canonicalKeyValueFromRowMap(
@@ -30863,11 +30877,11 @@ DBStatus StorageEngine::insertInternal(
     {
         auto hashCols = getHashIndexedColumns(dbname, tablename);
         for (const auto& colname : hashCols) {
-            size_t colIdx = tbl.len;
-            for (size_t i = 0; i < tbl.len; ++i) {
+            size_t colIdx = tbl.len();
+            for (size_t i = 0; i < tbl.len(); ++i) {
                 if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
             }
-            if (colIdx >= tbl.len) return abortIndexUpdate();
+            if (colIdx >= tbl.len()) return abortIndexUpdate();
             HashIndex* hidx = getHashIndex(dbname, tablename, colname);
             std::string val = canonicalKeyValueFromRowMap(
                 actualValues, tbl, colname);
@@ -30882,11 +30896,11 @@ DBStatus StorageEngine::insertInternal(
     {
         auto bloomCols = getBloomIndexedColumns(dbname, tablename);
         for (const auto& colname : bloomCols) {
-            size_t colIdx = tbl.len;
-            for (size_t i = 0; i < tbl.len; ++i) {
+            size_t colIdx = tbl.len();
+            for (size_t i = 0; i < tbl.len(); ++i) {
                 if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
             }
-            if (colIdx >= tbl.len) return abortIndexUpdate();
+            if (colIdx >= tbl.len()) return abortIndexUpdate();
             BloomIndex* bidx = getBloomIndex(dbname, tablename, colname);
             std::string val = canonicalKeyValueFromRowMap(
                 actualValues, tbl, colname);
@@ -30911,12 +30925,12 @@ DBStatus StorageEngine::insertInternal(
         if (txn.inTransaction) {
             // Retain the row's own NULL bitmap, including dependencies of
             // virtual generated columns; text bytes never imply SQL NULL.
-            std::vector<bool> nulls(tbl.len, false);
+            std::vector<bool> nulls(tbl.len(), false);
             for (const size_t column : physicalNullColumns) nulls[column] = true;
             BufferedNullRowBinding binding(tbl, nulls);
             std::vector<LogicalDecoder::Cell> cells;
-            cells.reserve(tbl.len);
-            for (size_t i = 0; i < tbl.len; ++i) {
+            cells.reserve(tbl.len());
+            for (size_t i = 0; i < tbl.len(); ++i) {
                 bool isNull = false;
                 const auto value = extractColumnValue(
                     strippedRow, tbl, i, dbname, true, &isNull);
@@ -30935,7 +30949,7 @@ DBStatus StorageEngine::insertInternal(
     if (insertedRows || owningRows) {
         SqlRow returnedValues;
         std::shared_ptr<OwningRowImage> owning;
-        for (size_t i = 0; i < tbl.len; ++i) {
+        for (size_t i = 0; i < tbl.len(); ++i) {
             if(deferVirtualInputs && tbl.cols[i].generatedKind=='v')continue;
             if (insertedColumnIsNull(i)) {
                 returnedValues[tbl.cols[i].dataName] = std::nullopt;
@@ -31522,7 +31536,7 @@ static void prepareFilterConditions(
         if (condition.op!="=" && condition.op!="<>" && condition.op!="!=" &&
             condition.op!="<" && condition.op!=">" && condition.op!="<=" && condition.op!=">=") continue;
         const Column* declared=nullptr; bool rightIsColumn=false;
-        for(size_t i=0;i<tbl.len;++i) {
+        for(size_t i=0;i<tbl.len();++i) {
             if(tbl.cols[i].dataName==condition.colName)declared=&tbl.cols[i];
             if(!condition.decodedLiteralRhs && tbl.cols[i].dataName==condition.value)rightIsColumn=true;
         }
@@ -31636,7 +31650,7 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
     // Helper: a column with a non-binary collation cannot use binary indexes
     // for equality/range lookup because the index keys are stored binary.
     auto columnNeedsCollation = [&](const std::string& colName) -> bool {
-        for (size_t i = 0; i < tbl.len; ++i) {
+        for (size_t i = 0; i < tbl.len(); ++i) {
             if (tbl.cols[i].dataName == colName) {
                 return !columnUsesBinaryCollation(tbl.cols[i]);
             }
@@ -31705,7 +31719,7 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
             if (columnNeedsCollation(c.colName)) continue;
             const Column* searchColumn = nullptr;
             bool hasPK = false;
-            for (size_t i = 0; i < tbl.len; ++i) {
+            for (size_t i = 0; i < tbl.len(); ++i) {
                 if (tbl.cols[i].dataName == c.colName) {
                     searchColumn = &tbl.cols[i];
                 }
@@ -31816,7 +31830,7 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
     for (const auto& c : conds) {
         if (columnNeedsCollation(c.colName)) continue;
         if (hasGiSTIndex(dbname, tablename, c.colName)) {
-            if (!c.decodedLiteralRhs && std::any_of(tbl.cols, tbl.cols + tbl.len,
+            if (!c.decodedLiteralRhs && std::any_of(tbl.cols.begin(), tbl.cols.end(),
                     [&](const auto& key) { return key.dataName == c.value; })) continue;
             GiSTBounds bounds;
             if (c.op == "=") {
@@ -31879,7 +31893,7 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
                 for (const auto& candidate : candidateRows) {
                     const int64_t rid = candidate.rid;
                     const auto& row = candidate.value;
-                    NullRowBinding rowBinding(this, dbname, tablename, rid, tbl.len);
+                    NullRowBinding rowBinding(this, dbname, tablename, rid, tbl.len());
                     BufferedNullRowBinding nullBinding(tbl, candidate.nulls);
                     bool match = true;
                     for (const auto& condition : conds) {
@@ -31996,7 +32010,7 @@ static std::optional<int64_t> matchCurrentIntegerPrimaryKey(
     const auto wanted = parseStoredInteger(condition.value);
     if (!wanted || !integerValueFitsColumn(key, *wanted)) return {};
     if (!condition.decodedLiteralRhs) {
-        for (size_t i = 0; i < table.len; ++i)
+        for (size_t i = 0; i < table.len(); ++i)
             if (table.cols[i].dataName == condition.value) return {};
     }
 
@@ -32044,8 +32058,8 @@ static std::optional<int64_t> matchCurrentIntegerPrimaryKey(
             !context.readView.isVisible(tuple, length, table.formatVersion)) return {};
         const auto* header = castHeapHeader(tuple);
         const size_t minOffset = sizeof(HeapTupleHeaderData) +
-            ((header->t_infomask & HEAP_HASNULL) ? (table.len + 7) / 8 : 0);
-        if ((header->t_infomask2 & HEAP_NATTS_MASK) != table.len ||
+            ((header->t_infomask & HEAP_HASNULL) ? (table.len() + 7) / 8 : 0);
+        if ((header->t_infomask2 & HEAP_NATTS_MASK) != table.len() ||
             header->t_hoff < minOffset || header->t_hoff >= length ||
             dbms::isNull(header, static_cast<int>(*column))) return {};
         const std::string row(tuple + header->t_hoff, length - header->t_hoff);
@@ -32066,7 +32080,7 @@ static StorageEngine::SqlRow mutationMatchRow(
         const std::vector<bool>& nullColumns, bool deferVirtualInputs) {
     BufferedNullRowBinding nullBinding(table, nullColumns);
     StorageEngine::SqlRow values;
-    for (size_t i = 0; i < table.len; ++i) {
+    for (size_t i = 0; i < table.len(); ++i) {
         const auto& column = table.cols[i];
         if (deferVirtualInputs && column.generatedKind == 'v') continue;
         if (column.generatedKind != 'v' && column.isNull && nullColumns[i]) {
@@ -32121,8 +32135,8 @@ static LockedMutationRow lockMutationRow(
             if (length < sizeof(header)) return {DBStatus::CORRUPTED_DATA, {}};
             std::memcpy(&header, tuple, sizeof(header));
             const size_t minOffset = sizeof(header) +
-                ((header.t_infomask & HEAP_HASNULL) ? (table.len + 7) / 8 : 0);
-            if ((header.t_infomask2 & HEAP_NATTS_MASK) != table.len ||
+                ((header.t_infomask & HEAP_HASNULL) ? (table.len() + 7) / 8 : 0);
+            if ((header.t_infomask2 & HEAP_NATTS_MASK) != table.len() ||
                 header.t_hoff < minOffset || header.t_hoff > length)
                 return {DBStatus::CORRUPTED_DATA, {}};
         }
@@ -32236,7 +32250,7 @@ static DBStatus lockMutationTargets(
             const auto status = readMutationPayload(engine, dbname, tablename, table,
                                                      *allocator, rid, row, nullColumns);
             if (status != DBStatus::OK) return status;
-            NullRowBinding rowBinding(&engine, dbname, tablename, rid, table.len);
+            NullRowBinding rowBinding(&engine, dbname, tablename, rid, table.len());
             BufferedNullRowBinding nullBinding(table, nullColumns);
             if (!std::all_of(predicates->begin(), predicates->end(), [&](const auto& predicate) {
                 return StorageEngine::evalConditionOnRowWithSyntax(
@@ -32610,7 +32624,7 @@ DBStatus StorageEngine::removeInternal(
                     if (otherTable == tablename) continue;
                     const TableSchema otherTbl =
                         getTableSchema(dbname, otherTable);
-                    for (size_t fi = 0; fi < otherTbl.fkLen; ++fi) {
+                    for (size_t fi = 0; fi < otherTbl.fkLen(); ++fi) {
                         if (otherTbl.fks[fi].refTable == tablename) {
                             cascadeTables.insert(otherTable);
                             break;
@@ -32638,7 +32652,7 @@ DBStatus StorageEngine::removeInternal(
                 for (const auto& otherTable : allTables) {
                     if (dependencyScanStatus != DBStatus::OK) break;
                     TableSchema otherTbl = getTableSchema(dbname, otherTable);
-                    for (size_t fi = 0; fi < otherTbl.fkLen; ++fi) {
+                    for (size_t fi = 0; fi < otherTbl.fkLen(); ++fi) {
                         const ForeignKey& fk = otherTbl.fks[fi];
                         if (fk.refTable != tablename) continue;
 
@@ -32780,7 +32794,7 @@ DBStatus StorageEngine::removeInternal(
                     TableSchema child = getTableSchema(dbname, sa.table);
                     ReferentialValues nullValues;
                     for (const size_t columnIndex : sa.colIndices) {
-                        if (columnIndex < child.len) {
+                        if (columnIndex < child.len()) {
                             nullValues[child.cols[columnIndex].dataName] =
                                 std::nullopt;
                         }
@@ -32893,7 +32907,7 @@ DBStatus StorageEngine::removeInternal(
                                         std::optional<ExprValue>* owningValue = nullptr,
                                         bool* valueIsNull = nullptr) {
         if (rowIndex >= logicalRowsToDelete.size() ||
-            columnIndex >= tbl.len) {
+            columnIndex >= tbl.len()) {
             return std::string{};
         }
         if (!(computeVirtual && tbl.cols[columnIndex].generatedKind == 'v') &&
@@ -32913,7 +32927,7 @@ DBStatus StorageEngine::removeInternal(
     for (size_t rowIndex = 0; rowIndex < logicalRowsToDelete.size(); ++rowIndex) {
         if (logicalRowsToDelete[rowIndex].empty()) continue;
         NullRowBinding nullBinding(
-            this, dbname, tablename, rowRids[rowIndex], tbl.len);
+            this, dbname, tablename, rowRids[rowIndex], tbl.len());
         for (const auto& metadata : deleteIndexMetadata) {
             EvaluatedIndexEntry entry;
             if (!secondaryIndexEntryFromBuffer(
@@ -32931,7 +32945,7 @@ DBStatus StorageEngine::removeInternal(
     for (size_t rowIndex = 0; rowIndex < logicalRowsToDelete.size(); ++rowIndex) {
         if (logicalRowsToDelete[rowIndex].empty()) continue;
         NullRowBinding nullBinding(
-            this, dbname, tablename, rowRids[rowIndex], tbl.len);
+            this, dbname, tablename, rowRids[rowIndex], tbl.len());
         for (const auto& metadata : deleteCompositeMetadata) {
             EvaluatedIndexEntry entry;
             if (!compositeIndexEntryFromBuffer(
@@ -32956,7 +32970,7 @@ DBStatus StorageEngine::removeInternal(
             if (row.empty()) continue;
             SqlRow values;
             std::shared_ptr<OwningRowImage> owning;
-            for (size_t i = 0; i < tbl.len; ++i) {
+            for (size_t i = 0; i < tbl.len(); ++i) {
                 if(deferVirtualInputs && tbl.cols[i].generatedKind=='v')continue;
                 const bool physicallyNull =
                     tbl.cols[i].generatedKind != 'v' &&
@@ -32996,7 +33010,7 @@ DBStatus StorageEngine::removeInternal(
                     const auto& row = logicalRowsToDelete[rowIndex];
                     if (row.empty()) continue;
                     std::map<std::string, std::string> oldValues;
-                    for (size_t i = 0; i < tbl.len; ++i) {
+                    for (size_t i = 0; i < tbl.len(); ++i) {
                         oldValues[tbl.cols[i].dataName] =
                             deletedColumnValue(rowIndex, i);
                     }
@@ -33114,7 +33128,7 @@ DBStatus StorageEngine::removeInternal(
         const char* currentData = nullptr;
         size_t currentLen = 0;
         if (!page.read(slotId, currentData, currentLen) ||
-            currentLen < rowHeaderSize(tbl.formatVersion, tbl.len)) {
+            currentLen < rowHeaderSize(tbl.formatVersion, tbl.len())) {
             pa->unpinPage(pageId);
             lockManager_.pageUnlock(dbname, tablename, pageId);
             lockManager_.unlock(tablename);
@@ -33264,11 +33278,11 @@ DBStatus StorageEngine::removeInternal(
     {
         auto hashCols = getHashIndexedColumns(dbname, tablename);
         for (const auto& colname : hashCols) {
-            size_t colIdx = tbl.len;
-            for (size_t i = 0; i < tbl.len; ++i) {
+            size_t colIdx = tbl.len();
+            for (size_t i = 0; i < tbl.len(); ++i) {
                 if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
             }
-            if (colIdx >= tbl.len) {
+            if (colIdx >= tbl.len()) {
                 lockManager_.unlock(tablename);
                 return DBStatus::CORRUPTED_DATA;
             }
@@ -33314,11 +33328,11 @@ DBStatus StorageEngine::removeInternal(
     {
         auto bloomCols = getBloomIndexedColumns(dbname, tablename);
         for (const auto& colname : bloomCols) {
-            size_t colIdx = tbl.len;
-            for (size_t i = 0; i < tbl.len; ++i) {
+            size_t colIdx = tbl.len();
+            for (size_t i = 0; i < tbl.len(); ++i) {
                 if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
             }
-            if (colIdx >= tbl.len) {
+            if (colIdx >= tbl.len()) {
                 lockManager_.unlock(tablename);
                 return DBStatus::CORRUPTED_DATA;
             }
@@ -33373,8 +33387,8 @@ DBStatus StorageEngine::removeInternal(
                     !logicalRowsToDelete[di].empty()) {
                     BufferedNullRowBinding binding(tbl, nullColumnsToDelete[di]);
                     std::vector<LogicalDecoder::Cell> cells;
-                    cells.reserve(tbl.len);
-                    for (size_t i = 0; i < tbl.len; ++i) {
+                    cells.reserve(tbl.len());
+                    for (size_t i = 0; i < tbl.len(); ++i) {
                         bool isNull = false;
                         const auto value = extractColumnValue(
                             logicalRowsToDelete[di], tbl, i, dbname, true, &isNull);
@@ -33401,7 +33415,7 @@ DBStatus StorageEngine::removeInternal(
                     const auto& row = logicalRowsToDelete[rowIndex];
                     if (row.empty()) continue;
                     std::map<std::string, std::string> oldValues;
-                    for (size_t i = 0; i < tbl.len; ++i) {
+                    for (size_t i = 0; i < tbl.len(); ++i) {
                         oldValues[tbl.cols[i].dataName] =
                             deletedColumnValue(rowIndex, i);
                     }
@@ -33486,7 +33500,7 @@ DBStatus StorageEngine::removeInternal(
                             const auto& row = logicalRowsToDelete[rowIndex];
                             if (row.empty()) continue;
                             std::map<std::string, std::string> m;
-                            for (size_t i = 0; i < tbl.len; ++i) {
+                            for (size_t i = 0; i < tbl.len(); ++i) {
                                 m[tbl.cols[i].dataName] =
                                     deletedColumnValue(rowIndex, i);
                             }
@@ -33776,9 +33790,9 @@ DBStatus StorageEngine::updateInternal(
     if (tbl.partitionType != TableSchema::PartitionType::None) {
         return DBStatus::INVALID_VALUE;
     }
-    std::vector<bool> domainRequired(tbl.len, false);
+    std::vector<bool> domainRequired(tbl.len(), false);
     StoredArrayDomainChecks arrayDomainChecks;
-    for (size_t i = 0; i < tbl.len; ++i) {
+    for (size_t i = 0; i < tbl.len(); ++i) {
         const auto& column = tbl.cols[i];
         if (column.domainName.empty()) continue;
         const auto domain = resolveDomainAncestry(dbname, column.domainName);
@@ -33800,7 +33814,7 @@ DBStatus StorageEngine::updateInternal(
         preparedNullColumns.clear();
         for (const auto& kv : source) {
             bool found = false;
-            for (size_t i = 0; i < tbl.len; ++i) {
+            for (size_t i = 0; i < tbl.len(); ++i) {
                 if (tbl.cols[i].dataName == kv.first) {
                     found = true;
                     const Column& col = tbl.cols[i];
@@ -34195,8 +34209,8 @@ DBStatus StorageEngine::updateInternal(
     for(const auto& metadata:compositeIndexMetadata)fullGeneratedRow=fullGeneratedRow||compositeMayReadVirtual(metadata,tbl);
     for(const auto& name:hashIndexedCols)fullGeneratedRow=fullGeneratedRow||indexColumnIsVirtual(name,tbl);
     for(const auto& name:getBloomIndexedColumns(dbname,tablename))fullGeneratedRow=fullGeneratedRow||indexColumnIsVirtual(name,tbl);
-    for(size_t i=0;i<tbl.len;++i)if(tbl.cols[i].generatedKind=='v' && (tbl.cols[i].isPrimaryKey || tbl.cols[i].isUnique))fullGeneratedRow=true;
-    for(const auto& key:tbl.uniqueConstraints)for(const auto i:key)if(i<tbl.len && tbl.cols[i].generatedKind=='v')fullGeneratedRow=true;
+    for(size_t i=0;i<tbl.len();++i)if(tbl.cols[i].generatedKind=='v' && (tbl.cols[i].isPrimaryKey || tbl.cols[i].isUnique))fullGeneratedRow=true;
+    for(const auto& key:tbl.uniqueConstraints)for(const auto i:key)if(i<tbl.len() && tbl.cols[i].generatedKind=='v')fullGeneratedRow=true;
 
     // For each matching row, read old data, update, write back, update indexes
     // Pre-update row images keyed by rid: AFTER UPDATE triggers expose OLD
@@ -34211,6 +34225,7 @@ DBStatus StorageEngine::updateInternal(
     std::map<std::vector<size_t>,
              std::vector<std::pair<int64_t, std::vector<std::string>>>>
         statementImmediateUniqueKeys;
+    std::vector<bool> oldVirtualNulls(tbl.len());
     for (int64_t rid : matchIds) {
         std::string row;
         std::vector<bool> oldNullColumns;
@@ -34227,9 +34242,9 @@ DBStatus StorageEngine::updateInternal(
             return DBStatus::CORRUPTED_DATA;
         }
         std::map<std::string, std::string> oldLogicalValues;
-        std::array<bool,MAX_COLUMNS> oldVirtualNulls{};
+        std::fill(oldVirtualNulls.begin(), oldVirtualNulls.end(), false);
         std::shared_ptr<OwningRowImage> owning;
-        for (size_t i = 0; i < tbl.len; ++i) {
+        for (size_t i = 0; i < tbl.len(); ++i) {
             if(!fullGeneratedRow && tbl.cols[i].generatedKind=='v')continue;
             BufferedNullRowBinding binding(tbl, oldNullColumns);
             if (tbl.cols[i].generatedKind != 'v' &&
@@ -34252,22 +34267,22 @@ DBStatus StorageEngine::updateInternal(
         std::map<std::string, std::string> oldIdxVals;
         // Also save hash-indexed column values
         for (const auto& colname : hashIndexedCols) {
-            size_t colIdx = tbl.len;
-            for (size_t i = 0; i < tbl.len; ++i) {
+            size_t colIdx = tbl.len();
+            for (size_t i = 0; i < tbl.len(); ++i) {
                 if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
             }
-            if (colIdx < tbl.len) {
+            if (colIdx < tbl.len()) {
                 oldIdxVals[colname] = canonicalKeyValueFromRowMap(
                     oldLogicalValues, tbl, colname);
             }
         }
         // Also save bloom-indexed column values
         for (const auto& colname : getBloomIndexedColumns(dbname, tablename)) {
-            size_t colIdx = tbl.len;
-            for (size_t i = 0; i < tbl.len; ++i) {
+            size_t colIdx = tbl.len();
+            for (size_t i = 0; i < tbl.len(); ++i) {
                 if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
             }
-            if (colIdx < tbl.len) {
+            if (colIdx < tbl.len()) {
                 oldIdxVals[colname] = canonicalKeyValueFromRowMap(
                     oldLogicalValues, tbl, colname);
             }
@@ -34279,7 +34294,7 @@ DBStatus StorageEngine::updateInternal(
         const bool typedResolver = mutationCallbacks && mutationCallbacks->resolveArrayDomains;
         if (typedResolver || updateResolver || (mutationCallbacks && mutationCallbacks->resolve)) {
             SqlRow resolverValues;
-            for (size_t i = 0; i < tbl.len; ++i) {
+            for (size_t i = 0; i < tbl.len(); ++i) {
                 if(deferVirtualInputs && tbl.cols[i].generatedKind=='v')continue;
                 if ((tbl.cols[i].generatedKind=='v' && oldVirtualNulls[i]) ||
                     (tbl.cols[i].generatedKind!='v' && i<oldNullColumns.size() && oldNullColumns[i])) {
@@ -34329,7 +34344,7 @@ DBStatus StorageEngine::updateInternal(
         auto updateTypeHints = buildTypeHints(tbl);
 
         // Recompute STORED generated columns after updates (VIRTUAL are query-time only).
-        for (size_t i = 0; i < tbl.len; ++i) {
+        for (size_t i = 0; i < tbl.len(); ++i) {
             const Column& col = tbl.cols[i];
             if (col.generatedExpr.empty() || col.generatedKind == 'v') continue;
             std::string computed;
@@ -34368,7 +34383,7 @@ DBStatus StorageEngine::updateInternal(
         // They can modify NEW column values via "SET col = val" in the trigger action.
         if (triggerExecutor_) {
             std::set<std::string> oldTriggerNulls, newTriggerNulls;
-            for (size_t i = 0; i < tbl.len; ++i) {
+            for (size_t i = 0; i < tbl.len(); ++i) {
                 const bool wasNull = i < oldNullColumns.size() && oldNullColumns[i];
                 if (wasNull) oldTriggerNulls.insert(tbl.cols[i].dataName);
                 const bool isNull = assignedColumnIndices.count(i)
@@ -34458,7 +34473,7 @@ DBStatus StorageEngine::updateInternal(
                             lockManager_.unlock(tablename);
                             return DBStatus::INVALID_VALUE;
                         }
-                        for (size_t i = 0; i < tbl.len; ++i) {
+                        for (size_t i = 0; i < tbl.len(); ++i) {
                             if (tbl.cols[i].dataName == assignment.column) {
                                 const bool assignsNull = evaluatedNull;
                                 rowValues[assignment.column] =
@@ -34480,7 +34495,7 @@ DBStatus StorageEngine::updateInternal(
             }
             // Re-apply generated column computation after BEFORE trigger modifications
             auto updateTypeHints2 = buildTypeHints(tbl);
-            for (size_t i = 0; i < tbl.len; ++i) {
+            for (size_t i = 0; i < tbl.len(); ++i) {
                 const Column& col = tbl.cols[i];
                 if (col.generatedExpr.empty() || col.generatedKind == 'v') continue;
                 std::string computed;
@@ -34508,7 +34523,7 @@ DBStatus StorageEngine::updateInternal(
         std::map<std::string, std::string> finalAssignedValues;
         std::set<std::string> finalAssignedNullColumns;
         for (const size_t columnIndex : assignedColumnIndices) {
-            if (columnIndex >= tbl.len) {
+            if (columnIndex >= tbl.len()) {
                 lockManager_.unlock(tablename);
                 return DBStatus::CORRUPTED_DATA;
             }
@@ -34542,7 +34557,7 @@ DBStatus StorageEngine::updateInternal(
         // DML cannot update this same active RID, so fold CASCADE/SET NULL
         // into the pending row image before constraints are evaluated.
         const auto pendingColumnIsNull = [&](size_t columnIndex) {
-            return columnIndex < tbl.len &&
+            return columnIndex < tbl.len() &&
                 tbl.cols[columnIndex].generatedKind != 'v' &&
                 (assignedNullColumnIndices.count(columnIndex) != 0 ||
                  (columnIndex < oldNullColumns.size() &&
@@ -34551,7 +34566,7 @@ DBStatus StorageEngine::updateInternal(
         };
         SqlRow selfReferentialAssignments;
         for (size_t foreignKeyIndex = 0;
-             foreignKeyIndex < tbl.fkLen; ++foreignKeyIndex) {
+             foreignKeyIndex < tbl.fkLen(); ++foreignKeyIndex) {
             const ForeignKey& foreignKey = tbl.fks[foreignKeyIndex];
             if (foreignKey.refTable != tablename) continue;
 
@@ -34704,7 +34719,7 @@ DBStatus StorageEngine::updateInternal(
             std::map<std::string, std::string> generatedActionValues;
             std::set<std::string> generatedActionNullColumns;
             for (size_t columnIndex = 0;
-                 columnIndex < tbl.len; ++columnIndex) {
+                 columnIndex < tbl.len(); ++columnIndex) {
                 const Column& column = tbl.cols[columnIndex];
                 if (column.generatedExpr.empty() ||
                     column.generatedKind == 'v') {
@@ -34755,14 +34770,14 @@ DBStatus StorageEngine::updateInternal(
         }
 
         std::set<std::string> finalNullColumnNames;
-        for (size_t i = 0; i < tbl.len; ++i) {
+        for (size_t i = 0; i < tbl.len(); ++i) {
             if (assignedNullColumnIndices.count(i) != 0 ||
                 (i < oldNullColumns.size() && oldNullColumns[i] &&
                  assignedColumnIndices.count(i) == 0)) {
                 finalNullColumnNames.insert(tbl.cols[i].dataName);
             }
         }
-        for(size_t i=0;i<tbl.len;++i)if(tbl.cols[i].generatedKind=='v' && !tbl.cols[i].isNull) {
+        for(size_t i=0;i<tbl.len();++i)if(tbl.cols[i].generatedKind=='v' && !tbl.cols[i].isNull) {
             ExprValue value;
             try {value=generatedValueFromMap(tbl,i,rowValues,finalNullColumnNames,dbname,this,generatedMetadata.get());}
             catch(...){lockManager_.unlock(tablename);throw;}
@@ -34798,7 +34813,7 @@ DBStatus StorageEngine::updateInternal(
         }
 
         const auto newColumnIsNull = [&](size_t columnIndex) {
-            return columnIndex < tbl.len &&
+            return columnIndex < tbl.len() &&
                 tbl.cols[columnIndex].generatedKind != 'v' &&
                 (assignedNullColumnIndices.count(columnIndex) != 0 ||
                 (columnIndex < oldNullColumns.size() &&
@@ -34854,13 +34869,13 @@ DBStatus StorageEngine::updateInternal(
         // without leaving newly allocated external values behind.
         uint64_t updateTxnId = transactionContext().inTransaction ? transactionContext().currentTxnId : 0;
         std::set<size_t> physicalNullColumns;
-        for (size_t i = 0; i < tbl.len; ++i) {
+        for (size_t i = 0; i < tbl.len(); ++i) {
             if (newColumnIsNull(i)) physicalNullColumns.insert(i);
         }
         std::string newRow = buildRowBuffer(
             tbl, rowValues, updateTxnId, &physicalNullColumns);
-        std::string strippedNewRow = stripRowHeader(newRow, tbl.formatVersion, tbl.len);
-        std::vector<bool> newRowNulls(tbl.len, false);
+        std::string strippedNewRow = stripRowHeader(newRow, tbl.formatVersion, tbl.len());
+        std::vector<bool> newRowNulls(tbl.len(), false);
         for (const size_t index : physicalNullColumns) newRowNulls[index] = true;
         const auto withNewRowNulls = [&](auto&& action) -> decltype(auto) {
             BufferedNullRowBinding binding(tbl, newRowNulls);
@@ -34880,10 +34895,10 @@ DBStatus StorageEngine::updateInternal(
 
         // The tuple builder's genuine NULL bitmap also describes CHECK inputs.
         std::set<std::string> checkNulls;
-        for(size_t i=0;i<tbl.len;++i)if(tbl.cols[i].generatedKind!='v' && newRowNulls[i])checkNulls.insert(tbl.cols[i].dataName);
+        for(size_t i=0;i<tbl.len();++i)if(tbl.cols[i].generatedKind!='v' && newRowNulls[i])checkNulls.insert(tbl.cols[i].dataName);
         // Check CHECK constraints before writing; collect deferrable deferred checks for commit-time validation.
         std::vector<size_t> deferredCheckCols;
-        for (size_t i = 0; i < tbl.len; ++i) {
+        for (size_t i = 0; i < tbl.len(); ++i) {
             const Column& col = tbl.cols[i];
             if (col.checkExpr.empty()) continue;
             const bool deferred = transactionContext().inTransaction &&
@@ -34991,7 +35006,7 @@ DBStatus StorageEngine::updateInternal(
         std::vector<DeferredCheck> pendingDeferredForeignKeyChecks;
         if (!exactRids) {
             for (size_t foreignKeyIndex = 0;
-                 foreignKeyIndex < tbl.fkLen; ++foreignKeyIndex) {
+                 foreignKeyIndex < tbl.fkLen(); ++foreignKeyIndex) {
                 const ForeignKey& foreignKey = tbl.fks[foreignKeyIndex];
                 if (foreignKey.colNames.empty() ||
                     foreignKey.colNames.size() != foreignKey.refCols.size()) {
@@ -35004,15 +35019,15 @@ DBStatus StorageEngine::updateInternal(
                 std::vector<std::string> localValues;
                 localValues.reserve(foreignKey.colNames.size());
                 for (const auto& columnName : foreignKey.colNames) {
-                    size_t localColumnIndex = tbl.len;
+                    size_t localColumnIndex = tbl.len();
                     for (size_t columnIndex = 0;
-                         columnIndex < tbl.len; ++columnIndex) {
+                         columnIndex < tbl.len(); ++columnIndex) {
                         if (tbl.cols[columnIndex].dataName == columnName) {
                             localColumnIndex = columnIndex;
                             break;
                         }
                     }
-                    if (localColumnIndex == tbl.len) {
+                    if (localColumnIndex == tbl.len()) {
                         lockManager_.unlock(tablename);
                         return DBStatus::CORRUPTED_DATA;
                     }
@@ -35038,15 +35053,15 @@ DBStatus StorageEngine::updateInternal(
                 std::vector<size_t> referencedColumns;
                 referencedColumns.reserve(foreignKey.refCols.size());
                 for (const auto& columnName : foreignKey.refCols) {
-                    size_t columnIndex = referenced.len;
+                    size_t columnIndex = referenced.len();
                     for (size_t candidate = 0;
-                         candidate < referenced.len; ++candidate) {
+                         candidate < referenced.len(); ++candidate) {
                         if (referenced.cols[candidate].dataName == columnName) {
                             columnIndex = candidate;
                             break;
                         }
                     }
-                    if (columnIndex >= referenced.len) {
+                    if (columnIndex >= referenced.len()) {
                         lockManager_.unlock(tablename);
                         return DBStatus::CORRUPTED_DATA;
                     }
@@ -35057,8 +35072,8 @@ DBStatus StorageEngine::updateInternal(
                 for (size_t valueIndex = 0; valueIndex < foreignKey.colNames.size(); ++valueIndex) {
                     const auto& columnName = foreignKey.colNames[valueIndex];
                     size_t local = 0;
-                    while (local < tbl.len && tbl.cols[local].dataName != columnName) ++local;
-                    if (local == tbl.len || local >= oldNullColumns.size() || oldNullColumns[local] ||
+                    while (local < tbl.len() && tbl.cols[local].dataName != columnName) ++local;
+                    if (local == tbl.len() || local >= oldNullColumns.size() || oldNullColumns[local] ||
                         !foreignKeyColumnValuesEqual(referenced.cols[referencedColumns[valueIndex]],
                             valueFromRowMap(oldLogicalValues, columnName), localValues[valueIndex])) {
                         equalKey = false;
@@ -35149,7 +35164,7 @@ DBStatus StorageEngine::updateInternal(
             newValues.reserve(columns.size());
             bool keyChanged = false;
             for (const size_t columnIndex : columns) {
-                if (columnIndex >= tbl.len) return DBStatus::CORRUPTED_DATA;
+                if (columnIndex >= tbl.len()) return DBStatus::CORRUPTED_DATA;
                 // UNIQUE permits multiple SQL NULLs. Empty non-NULL strings
                 // are ordinary values and must still be compared.
                 if (newColumnIsNull(columnIndex)) return DBStatus::OK;
@@ -35260,14 +35275,14 @@ DBStatus StorageEngine::updateInternal(
                 lockManager_.unlock(tablename);
                 return DBStatus::CORRUPTED_DATA;
             }
-            size_t columnIndex = tbl.len;
-            for (size_t candidate = 0; candidate < tbl.len; ++candidate) {
+            size_t columnIndex = tbl.len();
+            for (size_t candidate = 0; candidate < tbl.len(); ++candidate) {
                 if (tbl.cols[candidate].dataName == metadata.name) {
                     columnIndex = candidate;
                     break;
                 }
             }
-            if (columnIndex >= tbl.len) {
+            if (columnIndex >= tbl.len()) {
                 lockManager_.unlock(tablename);
                 return DBStatus::CORRUPTED_DATA;
             }
@@ -35287,15 +35302,15 @@ DBStatus StorageEngine::updateInternal(
             std::vector<size_t> columns;
             std::set<size_t> distinctColumns;
             for (const auto& columnName : metadata.columns) {
-                size_t columnIndex = tbl.len;
-                for (size_t candidate = 0; candidate < tbl.len;
+                size_t columnIndex = tbl.len();
+                for (size_t candidate = 0; candidate < tbl.len();
                      ++candidate) {
                     if (tbl.cols[candidate].dataName == columnName) {
                         columnIndex = candidate;
                         break;
                     }
                 }
-                if (columnIndex >= tbl.len ||
+                if (columnIndex >= tbl.len() ||
                     !distinctColumns.insert(columnIndex).second) {
                     lockManager_.unlock(tablename);
                     return DBStatus::CORRUPTED_DATA;
@@ -35310,7 +35325,7 @@ DBStatus StorageEngine::updateInternal(
             }
         }
 
-        for (size_t columnIndex = 0; columnIndex < tbl.len; ++columnIndex) {
+        for (size_t columnIndex = 0; columnIndex < tbl.len(); ++columnIndex) {
             if (!tbl.cols[columnIndex].isUnique) continue;
             const std::string constraintName =
                 tablename + "_" + tbl.cols[columnIndex].dataName + "_key";
@@ -35330,7 +35345,7 @@ DBStatus StorageEngine::updateInternal(
                 constraintName = tbl.uniqueConstraintNames[constraintIndex];
             }
             if (constraintName.empty() && !columns.empty() &&
-                columns.front() < tbl.len) {
+                columns.front() < tbl.len()) {
                 constraintName = tablename + "_" +
                     tbl.cols[columns.front()].dataName + "_key";
             }
@@ -35363,14 +35378,14 @@ DBStatus StorageEngine::updateInternal(
         // updates, but enter the action path whenever any candidate key
         // column changes.
         std::set<size_t> referencedKeyCandidates;
-        for (size_t columnIndex = 0; columnIndex < tbl.len; ++columnIndex) {
+        for (size_t columnIndex = 0; columnIndex < tbl.len(); ++columnIndex) {
             if (tbl.cols[columnIndex].isPrimaryKey ||
                 tbl.cols[columnIndex].isUnique) {
                 referencedKeyCandidates.insert(columnIndex);
             }
         }
         for (const size_t columnIndex : tbl.pkColIndices) {
-            if (columnIndex >= tbl.len) {
+            if (columnIndex >= tbl.len()) {
                 lockManager_.unlock(tablename);
                 return DBStatus::CORRUPTED_DATA;
             }
@@ -35378,7 +35393,7 @@ DBStatus StorageEngine::updateInternal(
         }
         for (const auto& uniqueColumns : tbl.uniqueConstraints) {
             for (const size_t columnIndex : uniqueColumns) {
-                if (columnIndex >= tbl.len) {
+                if (columnIndex >= tbl.len()) {
                     lockManager_.unlock(tablename);
                     return DBStatus::CORRUPTED_DATA;
                 }
@@ -35430,7 +35445,7 @@ DBStatus StorageEngine::updateInternal(
                     if (otherTable == tablename) continue;
                     const TableSchema otherTbl =
                         getTableSchema(dbname, otherTable);
-                    for (size_t fi = 0; fi < otherTbl.fkLen; ++fi) {
+                    for (size_t fi = 0; fi < otherTbl.fkLen(); ++fi) {
                         if (otherTbl.fks[fi].refTable == tablename) {
                             referencingTables.insert(otherTable);
                             break;
@@ -35457,7 +35472,7 @@ DBStatus StorageEngine::updateInternal(
                 for (const auto& otherTable : allTables) {
                     if (dependencyScanStatus != DBStatus::OK) break;
                     TableSchema otherTbl = getTableSchema(dbname, otherTable);
-                    for (size_t fi = 0; fi < otherTbl.fkLen; ++fi) {
+                    for (size_t fi = 0; fi < otherTbl.fkLen(); ++fi) {
                         const ForeignKey& fk = otherTbl.fks[fi];
                         if (fk.refTable != tablename) continue;
 
@@ -35628,7 +35643,7 @@ DBStatus StorageEngine::updateInternal(
                 TableSchema child = getTableSchema(dbname, sa.table);
                 auto& values = rowUpdates[sa.table][sa.rid];
                 for (const size_t columnIndex : sa.colIndices) {
-                    if (columnIndex < child.len) {
+                    if (columnIndex < child.len()) {
                         values[child.cols[columnIndex].dataName] = std::nullopt;
                     }
                 }
@@ -35722,7 +35737,7 @@ DBStatus StorageEngine::updateInternal(
             setRowCid(newRow.data(), newRow.size(), tbl.formatVersion,
                       transactionContext().currentCommandId);
         }
-        strippedNewRow = stripRowHeader(newRow, tbl.formatVersion, tbl.len);
+        strippedNewRow = stripRowHeader(newRow, tbl.formatVersion, tbl.len());
 
         int64_t actualRid = rid;
         const bool versionedUpdate =
@@ -35901,7 +35916,7 @@ DBStatus StorageEngine::updateInternal(
                     if (!oldPage.isValid() ||
                         !oldPage.read(slotId, oldData, oldLength) ||
                         stripRowHeader(oldData, oldLength, tbl.formatVersion,
-                                       tbl.len) != row) {
+                                       tbl.len()) != row) {
                         retireStatus = DBStatus::CORRUPTED_DATA;
                     } else {
                         const Lsn beforeLsn = walPageImage(
@@ -36258,11 +36273,11 @@ DBStatus StorageEngine::updateInternal(
         // Update hash indexes
         auto hashIdxCols = getHashIndexedColumns(dbname, tablename);
         for (const auto& colname : hashIdxCols) {
-            size_t colIdx = tbl.len;
-            for (size_t i = 0; i < tbl.len; ++i) {
+            size_t colIdx = tbl.len();
+            for (size_t i = 0; i < tbl.len(); ++i) {
                 if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
             }
-            if (colIdx >= tbl.len) {
+            if (colIdx >= tbl.len()) {
                 lockManager_.unlock(tablename);
                 return DBStatus::CORRUPTED_DATA;
             }
@@ -36306,11 +36321,11 @@ DBStatus StorageEngine::updateInternal(
         // Update bloom indexes (same old/new swap semantics).
         auto bloomIdxCols = getBloomIndexedColumns(dbname, tablename);
         for (const auto& colname : bloomIdxCols) {
-            size_t colIdx = tbl.len;
-            for (size_t i = 0; i < tbl.len; ++i) {
+            size_t colIdx = tbl.len();
+            for (size_t i = 0; i < tbl.len(); ++i) {
                 if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
             }
-            if (colIdx >= tbl.len) {
+            if (colIdx >= tbl.len()) {
                 lockManager_.unlock(tablename);
                 return DBStatus::CORRUPTED_DATA;
             }
@@ -36375,8 +36390,8 @@ DBStatus StorageEngine::updateInternal(
             auto& txn = transactionContext();
             if (txn.inTransaction) {
                 std::vector<LogicalDecoder::Cell> oldCells, newCells;
-                oldCells.reserve(tbl.len); newCells.reserve(tbl.len);
-                for (size_t i = 0; i < tbl.len; ++i) {
+                oldCells.reserve(tbl.len()); newCells.reserve(tbl.len());
+                for (size_t i = 0; i < tbl.len(); ++i) {
                     bool oldIsNull = false, newIsNull = false;
                     std::string oldValue;
                     {
@@ -36406,7 +36421,7 @@ DBStatus StorageEngine::updateInternal(
         if (updatedRows || rowImages || owningRows || (mutationCallbacks && mutationCallbacks->observed)) {
             SqlRow oldValues;
             SqlRow newValues;
-            for (size_t i = 0; i < tbl.len; ++i) {
+            for (size_t i = 0; i < tbl.len(); ++i) {
                 if(deferVirtualInputs && tbl.cols[i].generatedKind=='v')continue;
                 if ((tbl.cols[i].generatedKind=='v' && oldVirtualNulls[i]) ||
                     (tbl.cols[i].generatedKind!='v' && i<oldNullColumns.size() && oldNullColumns[i])) {
@@ -36468,8 +36483,8 @@ DBStatus StorageEngine::updateInternal(
                     }
                     std::map<std::string, std::string> newValues;
                     NullRowBinding nullBinding(
-                        this, dbname, tbl.tablename, triggerRid, tbl.len);
-                    for (size_t i = 0; i < tbl.len; ++i) {
+                        this, dbname, tbl.tablename, triggerRid, tbl.len());
+                    for (size_t i = 0; i < tbl.len(); ++i) {
                         newValues[tbl.cols[i].dataName] =
                             extractColumnValue(newRow, tbl, i, dbname, true);
                     }
@@ -36595,7 +36610,7 @@ std::vector<std::string> StorageEngine::queryInformationSchema(
         for (const auto& dbname : getDatabaseNames()) {
             for (const auto& tname : getTableNames(dbname)) {
                 TableSchema tbl = getTableSchema(dbname, tname);
-                for (size_t i = 0; i < tbl.len; ++i) {
+                for (size_t i = 0; i < tbl.len(); ++i) {
                     const Column& col = tbl.cols[i];
                     std::string nullable = col.isNull ? "YES" : "NO";
                     std::string row = dbname + " " + tname + " " + col.dataName + " " + col.dataType + " " + nullable + " ";
@@ -36723,7 +36738,7 @@ std::vector<std::string> StorageEngine::queryInformationSchema(
             for (const auto& tname : getTableNames(dbname)) {
                 TableSchema tbl = getTableSchema(dbname, tname);
                 // Primary key columns
-                for (size_t i = 0; i < tbl.len; ++i) {
+                for (size_t i = 0; i < tbl.len(); ++i) {
                     if (!tbl.cols[i].isPrimaryKey) continue;
                     std::string row = dbname + " " + tname + " " + tbl.cols[i].dataName + " PRIMARY ";
                     bool match = true;
@@ -36735,7 +36750,7 @@ std::vector<std::string> StorageEngine::queryInformationSchema(
                     if (match) result.push_back(row);
                 }
                 // Foreign key columns
-                for (size_t i = 0; i < tbl.fkLen; ++i) {
+                for (size_t i = 0; i < tbl.fkLen(); ++i) {
                     for (const auto& colName : tbl.fks[i].colNames) {
                         std::string row = dbname + " " + tname + " " + colName + " FOREIGN ";
                         bool match = true;
@@ -36748,7 +36763,7 @@ std::vector<std::string> StorageEngine::queryInformationSchema(
                     }
                 }
                 // Unique columns
-                for (size_t i = 0; i < tbl.len; ++i) {
+                for (size_t i = 0; i < tbl.len(); ++i) {
                     if (!tbl.cols[i].isUnique || tbl.cols[i].isPrimaryKey) continue;
                     std::string row = dbname + " " + tname + " " + tbl.cols[i].dataName + " UNIQUE ";
                     bool match = true;
@@ -36825,7 +36840,7 @@ std::shared_ptr<const analyzed_statistics::Column> StorageEngine::getAnalyzedCol
         if (session && !sessionIsAdmin(*session) && !hasColumnPermission(dbname, table,
                 effectiveSessionRole(*session), TablePrivilege::Select, {column})) return {};
         const auto schema = getTableSchema(dbname, table);
-        if (!schema.len || schema.partitionType != TableSchema::PartitionType::None) return {};
+        if (!schema.len() || schema.partitionType != TableSchema::PartitionType::None) return {};
         const auto digest = analyzedStatisticsReadCache_->schemaDigest(schemaPath(dbname, table));
         if (!digest || !statistics.matchesRelation(schema.physicalRelationId, *digest)) return {};
         return std::shared_ptr<const analyzed_statistics::Column>(snapshot, &statistics);
@@ -36914,7 +36929,7 @@ std::vector<std::vector<ExprValue>> StorageEngine::getAnalyzedStatisticsRows(con
         auto& image=inserted.first->second;
         if(inserted.second) {
             const auto schema=getTableSchema(dbname,physical);
-            if(schema.len && std::filesystem::exists(schemaPath(dbname,physical))) {
+            if(schema.len() && std::filesystem::exists(schemaPath(dbname,physical))) {
                 image.present=true;image.relation=schema.physicalRelationId;
                 image.schema=analyzed_statistics::capture_detail::schemaImage(schemaPath(dbname,physical));
             }
@@ -37053,7 +37068,7 @@ std::vector<std::string> StorageEngine::queryPgCatalog(
         for (const auto& dbname : getDatabaseNames()) {
             for (const auto& tname : getTableNames(dbname)) {
                 TableSchema tbl = getTableSchema(dbname, tname);
-                for (size_t i = 0; i < tbl.len; ++i) {
+                for (size_t i = 0; i < tbl.len(); ++i) {
                     const Column& col = tbl.cols[i];
                     std::string notnull = col.isNull ? "f" : "t";
                     int attlen = col.isVariableLength ? -1 : col.dsize;
@@ -37109,7 +37124,7 @@ std::vector<std::string> StorageEngine::queryPgCatalog(
                 for (const auto& cname : idxCols) {
                     std::string isUnique = "f";
                     std::string isPrimary = "f";
-                    for (size_t i = 0; i < tbl.len; ++i) {
+                    for (size_t i = 0; i < tbl.len(); ++i) {
                         if (tbl.cols[i].dataName == cname) {
                             if (tbl.cols[i].isUnique) isUnique = "t";
                             if (tbl.cols[i].isPrimaryKey) isPrimary = "t";
@@ -37381,9 +37396,9 @@ std::vector<std::string> StorageEngine::query(
         (generatedMetadata?generatedMetadata->generatedSource:GeneratedRelationPtr{});
     const bool transportGenerated=generatedInputs && generation;
     if(transportGenerated) {
-        if(!selectCols.empty() || generation->columns.size()!=tbl.len)
+        if(!selectCols.empty() || generation->columns.size()!=tbl.len())
             throw DbError("XX000","generated row transport lost the actual full input declaration");
-        for(size_t i=0;i<tbl.len;++i)if(const auto& program=generation->columns[i])
+        for(size_t i=0;i<tbl.len();++i)if(const auto& program=generation->columns[i])
             if(program->target.dataName!=tbl.cols[i].dataName || program->target.generatedExpr!=tbl.cols[i].generatedExpr)
                 throw DbError("XX000","generated row transport changed its actual source declaration");
     }
@@ -37413,7 +37428,7 @@ std::vector<std::string> StorageEngine::query(
                         if ((!column.schema.empty() && column.schema != "public") ||
                             (!column.table.empty() && column.table != tablename))
                             throw DbError("42P01", "missing FROM-clause entry: " + column.table);
-                        for (size_t i = 0; i < tbl.len; ++i) {
+                        for (size_t i = 0; i < tbl.len(); ++i) {
                             if (column.column != tbl.cols[i].dataName) continue;
                             const auto field = [](const std::string& value) {
                                 return std::to_string(value.size()) + ":" + value;
@@ -37561,11 +37576,11 @@ std::vector<std::string> StorageEngine::query(
 
     // ORDER BY (multi-column)
     if (!orderBy.empty()) {
-        std::vector<size_t> sortColumnIndices(orderBy.size(), tbl.len);
+        std::vector<size_t> sortColumnIndices(orderBy.size(), tbl.len());
         std::vector<Column> sortComparisonColumns(orderBy.size());
         for (size_t orderIndex = 0; orderIndex < orderBy.size(); ++orderIndex) {
             const auto& spec = orderBy[orderIndex];
-            for (size_t columnIndex = 0; columnIndex < tbl.len;
+            for (size_t columnIndex = 0; columnIndex < tbl.len();
                  ++columnIndex) {
                 if (tbl.cols[columnIndex].dataName == spec.colName) {
                     sortColumnIndices[orderIndex] = columnIndex;
@@ -37573,12 +37588,12 @@ std::vector<std::string> StorageEngine::query(
                     break;
                 }
             }
-            if (sortColumnIndices[orderIndex] >= tbl.len ||
+            if (sortColumnIndices[orderIndex] >= tbl.len() ||
                 spec.collation.empty()) {
                 // The SQL-facing default ordering follows the en_US locale
                 // used by the other SELECT sort paths.  An empty column
                 // collation is a storage detail, not a request for C order.
-                if (sortColumnIndices[orderIndex] < tbl.len &&
+                if (sortColumnIndices[orderIndex] < tbl.len() &&
                     sortComparisonColumns[orderIndex].collation.empty()) {
                     sortComparisonColumns[orderIndex].collation = "en_US.utf8";
                 }
@@ -37589,7 +37604,7 @@ std::vector<std::string> StorageEngine::query(
                 collation::normalizeName(spec.collation) == "binary"
                     ? "C" : spec.collation;
             TableSchema collationProbe;
-            collationProbe.len = 1;
+            collationProbe.cols.resize(1);
             collationProbe.cols[0] = comparisonColumn;
             if (resolveTableCollations(
                     *this, dbname, collationProbe) != DBStatus::OK) {
@@ -37608,11 +37623,11 @@ std::vector<std::string> StorageEngine::query(
         for (size_t rowIndex = 0; rowIndex < matchRows.size(); ++rowIndex) {
             auto& mr = matchRows[rowIndex];
             SortKey k{rowIndex, {}, {}};
-            NullRowBinding nbS(this, dbname, tbl.tablename, mr.first, tbl.len);
+            NullRowBinding nbS(this, dbname, tbl.tablename, mr.first, tbl.len());
             for (size_t orderIndex = 0; orderIndex < orderBy.size();
                  ++orderIndex) {
                 const size_t sortIdx = sortColumnIndices[orderIndex];
-                if (sortIdx < tbl.len) {
+                if (sortIdx < tbl.len()) {
                     bool valueIsNull = false;
                     std::string val = extractColumnValue(
                         mr.second,tbl,sortIdx,dbname,true,&valueIsNull,nullptr,generation);
@@ -37684,7 +37699,7 @@ std::vector<std::string> StorageEngine::query(
             for (size_t i = 0; i < orderBy.size(); ++i) {
                 const auto& spec = orderBy[i];
                 const size_t sortIdx = sortColumnIndices[i];
-                if (sortIdx >= tbl.len) continue;
+                if (sortIdx >= tbl.len()) continue;
                 // NULL handling: NULLS FIRST or NULLS LAST (default)
                 bool aNull = a.isNulls[i];
                 bool bNull = b.isNulls[i];
@@ -37753,7 +37768,7 @@ std::vector<std::string> StorageEngine::query(
             comparisonColumn.isVariableLength = true;
             if (!spec.isExpression || spec.exprFunc == "upper" ||
                 spec.exprFunc == "lower" || spec.exprFunc.empty()) {
-                for (size_t columnIndex = 0; columnIndex < tbl.len;
+                for (size_t columnIndex = 0; columnIndex < tbl.len();
                      ++columnIndex) {
                     if (tbl.cols[columnIndex].dataName ==
                         (spec.isExpression ? spec.exprArg : spec.colName)) {
@@ -37768,7 +37783,7 @@ std::vector<std::string> StorageEngine::query(
             }
             if (isEvaluatedNumericSort(spec)) {
                 std::map<std::string, std::string> typeHints;
-                for (size_t ci = 0; ci < tbl.len; ++ci)
+                for (size_t ci = 0; ci < tbl.len(); ++ci)
                     typeHints[tbl.cols[ci].dataName] = tbl.cols[ci].dataType;
                 const std::string resultType = ExprHelper::inferResultType(
                     spec.expressionSql, typeHints);
@@ -37781,7 +37796,7 @@ std::vector<std::string> StorageEngine::query(
                     comparisonColumn.dataType == "numeric";
             } else if (isEvaluatedPolymorphicSort(spec)) {
                 std::map<std::string, std::string> typeHints;
-                for (size_t ci = 0; ci < tbl.len; ++ci)
+                for (size_t ci = 0; ci < tbl.len(); ++ci)
                     typeHints[tbl.cols[ci].dataName] = tbl.cols[ci].dataType;
                 setPolymorphicSortType(
                     comparisonColumn,
@@ -37791,7 +37806,7 @@ std::vector<std::string> StorageEngine::query(
                         spec.exprFunc == "to_date" ||
                         spec.exprFunc == "to_timestamp")) {
                 std::map<std::string, std::string> typeHints;
-                for (size_t ci = 0; ci < tbl.len; ++ci)
+                for (size_t ci = 0; ci < tbl.len(); ++ci)
                     typeHints[tbl.cols[ci].dataName] = tbl.cols[ci].dataType;
                 const std::string resultType = ExprHelper::inferResultType(
                     spec.expressionSql, typeHints);
@@ -37807,7 +37822,7 @@ std::vector<std::string> StorageEngine::query(
                     collation::normalizeName(spec.collation) == "binary"
                         ? "C" : spec.collation;
                 TableSchema collationProbe;
-                collationProbe.len = 1;
+                collationProbe.cols.resize(1);
                 collationProbe.cols[0] = comparisonColumn;
                 if (resolveTableCollations(
                         *this, dbname, collationProbe) != DBStatus::OK) {
@@ -37827,7 +37842,7 @@ std::vector<std::string> StorageEngine::query(
         std::vector<ExprKey> ekeys;
         ekeys.reserve(matchRows.size());
         std::map<std::string, std::string> expressionTypeHints;
-        for (size_t ci = 0; ci < tbl.len; ++ci)
+        for (size_t ci = 0; ci < tbl.len(); ++ci)
             expressionTypeHints[tbl.cols[ci].dataName] =
                 tbl.cols[ci].dataType;
         // PostgreSQL resolves explicit collation conflicts during analysis,
@@ -37847,7 +37862,7 @@ std::vector<std::string> StorageEngine::query(
             auto& comparisonColumn = expressionComparisonColumns[keyIndex];
             comparisonColumn.collation = resultCollation;
             TableSchema collationProbe;
-            collationProbe.len = 1;
+            collationProbe.cols.resize(1);
             collationProbe.cols[0] = comparisonColumn;
             if (resolveTableCollations(*this, dbname, collationProbe) !=
                 DBStatus::OK) {
@@ -37858,11 +37873,11 @@ std::vector<std::string> StorageEngine::query(
         for (size_t ri = 0; ri < matchRows.size(); ++ri) {
             ExprKey ek{ri, {}, {}};
             NullRowBinding nullBinding(
-                this, dbname, tbl.tablename, matchRows[ri].first, tbl.len);
+                this, dbname, tbl.tablename, matchRows[ri].first, tbl.len());
             // Build column value map for expression evaluation
             std::map<std::string, std::string> rowData;
             std::map<std::string, bool> rowNulls;
-            for (size_t ci = 0; ci < tbl.len; ++ci) {
+            for (size_t ci = 0; ci < tbl.len(); ++ci) {
                 if(generation && tbl.cols[ci].generatedKind=='v')continue;
                 bool valueIsNull = false;
                 rowData[tbl.cols[ci].dataName] = extractColumnValue(
@@ -37873,7 +37888,7 @@ std::vector<std::string> StorageEngine::query(
                      dbms::detail::storedRowColumnIsNull(*this, dbname, tbl.tablename, tbl, matchRows[ri].first, ci));
             }
             const auto actualSortColumn=[&](const std::string& name)->ExprValue {
-                for(size_t i=0;i<tbl.len;++i)if(tbl.cols[i].dataName==name && generation && generation->columns[i]) {
+                for(size_t i=0;i<tbl.len();++i)if(tbl.cols[i].dataName==name && generation && generation->columns[i]) {
                     bool null=false;std::optional<ExprValue> actual;
                     (void)extractColumnValue(matchRows[ri].second,tbl,i,dbname,true,&null,&actual,generation);
                     if(!actual)throw DbError("XX000","generated sort input lost its actual value");
@@ -37943,7 +37958,7 @@ std::vector<std::string> StorageEngine::query(
                             comparisonColumn.collation =
                                 evaluated.collation;
                             TableSchema collationProbe;
-                            collationProbe.len = 1;
+                            collationProbe.cols.resize(1);
                             collationProbe.cols[0] = comparisonColumn;
                             if (resolveTableCollations(
                                     *this, dbname, collationProbe) !=
@@ -38021,7 +38036,7 @@ std::vector<std::string> StorageEngine::query(
     if (!distinctOnCols.empty()) {
         std::vector<size_t> distinctIdxs;
         for (const auto& colName : distinctOnCols) {
-            for (size_t i = 0; i < tbl.len; ++i) {
+            for (size_t i = 0; i < tbl.len(); ++i) {
                 if (tbl.cols[i].dataName == colName) { distinctIdxs.push_back(i); break; }
             }
         }
@@ -38031,7 +38046,7 @@ std::vector<std::string> StorageEngine::query(
             std::vector<std::pair<int64_t, std::string>> deduped;
             for (auto& mr : matchRows) {
                 NullRowBinding nullBinding(
-                    this, dbname, tbl.tablename, mr.first, tbl.len);
+                    this, dbname, tbl.tablename, mr.first, tbl.len());
                 std::vector<std::string> keyValues;
                 std::vector<bool> keyNulls;
                 for (size_t idx : distinctIdxs) {
@@ -38057,13 +38072,13 @@ std::vector<std::string> StorageEngine::query(
 
     for (auto& mr : matchRows) {
         NullRowBinding nullBinding(
-            this, dbname, tbl.tablename, mr.first, tbl.len);
+            this, dbname, tbl.tablename, mr.first, tbl.len());
         std::string rowStr;
         std::vector<std::string> structuredRow;
         std::vector<bool> structuredNullRow;
         std::vector<ExprValue> actualInputs;
-        if(transportGenerated)actualInputs.reserve(tbl.len);
-        for (size_t i = 0; i < tbl.len; ++i) {
+        if(transportGenerated)actualInputs.reserve(tbl.len());
+        for (size_t i = 0; i < tbl.len(); ++i) {
             const Column& col = tbl.cols[i];
             if (!selectCols.empty() && selectCols.find(col.dataName) == selectCols.end())
                 continue;
@@ -38122,7 +38137,7 @@ std::vector<std::string> StorageEngine::query(
     if (storedOutputRoles) {
         size_t outputWidth = 0;
         bool hasStoredReference = false;
-        for (size_t i = 0; i < tbl.len; ++i) {
+        for (size_t i = 0; i < tbl.len(); ++i) {
             const auto& column = tbl.cols[i];
             if (!selectCols.empty() && selectCols.count(column.dataName) == 0)
                 continue;
@@ -38134,7 +38149,7 @@ std::vector<std::string> StorageEngine::query(
         if (hasStoredReference) {
             std::vector<StoredReferenceOutputRole> roles;
             roles.reserve(outputWidth);
-            for (size_t i = 0; i < tbl.len; ++i) {
+            for (size_t i = 0; i < tbl.len(); ++i) {
                 const auto& column = tbl.cols[i];
                 if (!selectCols.empty() && selectCols.count(column.dataName) == 0)
                     continue;
@@ -38511,7 +38526,7 @@ DatumMetadataContextPtr StorageEngine::prepareDatumMetadataContext(
                 physicalTable.rfind(tempTablePrefix(*session, ""), 0) == 0 &&
                 std::filesystem::is_regular_file(dataPath(dbname, physicalTable), heapError) &&
                 !heapError) {
-                for (size_t index = 0; index < table.len; ++index) {
+                for (size_t index = 0; index < table.len(); ++index) {
                     const auto& column = table.cols[index];
                     if (column.generatedKind == 'v' || !column.domainName.empty() ||
                         !column.enumValues.empty() ||
@@ -38543,10 +38558,10 @@ DatumMetadataContextPtr StorageEngine::prepareDatumMetadataContext(
     }
     if(!physicalTable.empty()) {
         const auto table=getTableSchema(dbname,physicalTable);
-        bool virtuals=false;for(size_t i=0;i<table.len;++i)virtuals=virtuals||table.cols[i].generatedKind=='v';
+        bool virtuals=false;for(size_t i=0;i<table.len();++i)virtuals=virtuals||table.cols[i].generatedKind=='v';
         if(virtuals) {
             std::vector<DatumTypePtr> declarations;
-            for(size_t i=0;i<table.len;++i) {
+            for(size_t i=0;i<table.len();++i) {
                 const auto field=result->columns.find(table.cols[i].dataName);
                 declarations.push_back(field==result->columns.end()?DatumTypePtr{}:field->second);
             }
@@ -38781,9 +38796,9 @@ decltype(auto) StorageEngine::withQueryBindingMetadata(const std::string& dbname
                             const std::string actual=temporary?tempTablePrefix(*session,requested.name):
                                 schema=="public"?requested.name:schema+"__"+requested.name;
                             const auto table=getTableSchema(dbname,actual);
-                            if(table.len!=description.columns.size())throw DbError("XX000","generated binding source descriptor width changed");
+                            if(table.len()!=description.columns.size())throw DbError("XX000","generated binding source descriptor width changed");
                             std::vector<DatumTypePtr> types;
-                            for(size_t i=0;i<table.len;++i) {
+                            for(size_t i=0;i<table.len();++i) {
                                 if(table.cols[i].dataName!=description.columns[i].name)throw DbError("XX000","generated binding source attribute identity changed");
                                 types.push_back(description.columns[i].typeMetadata);
                             }
@@ -38799,7 +38814,7 @@ decltype(auto) StorageEngine::withQueryBindingMetadata(const std::string& dbname
                 std::ifstream input(schemaPath(dbname, physical), std::ios::binary);
                 if (input) {
                     const auto table = readSchema(input, physical);
-                    for (size_t i = 0; i < table.len; ++i)
+                    for (size_t i = 0; i < table.len(); ++i)
                         description.columns.push_back({table.cols[i].dataName,
                             ExprHelper::canonicalResultTypeName(table.cols[i].dataType + (table.cols[i].isArray ? "[]" : "")),
                             !table.cols[i].generatedExpr.empty(), table.cols[i].identityKind, 0,
@@ -39244,7 +39259,7 @@ decltype(auto) StorageEngine::withQueryBindingMetadata(const std::string& dbname
                 : (schema.empty() || schema == "public") ? name : schema + "__" + name;
             if (!tableExists(dbname,physical)) return std::nullopt;
             const auto table = getTableSchema(dbname,physical);
-            for (size_t i=0;i<table.len;++i) if (table.cols[i].dataName == column) {
+            for (size_t i=0;i<table.len();++i) if (table.cols[i].dataName == column) {
                 const auto& target = table.cols[i];
                 if (target.identityKind == 0) return std::nullopt;
                 if (!target.identitySequenceOid)
@@ -39273,7 +39288,7 @@ decltype(auto) StorageEngine::withQueryBindingMetadata(const std::string& dbname
             // resolves only a proven Domain origin to the direct domain's
             // current own default. The definition is copied before runtime.
             const auto table=getTableSchema(dbname,physical);
-            for(size_t i=0;i<table.len;++i)if(table.cols[i].dataName==column) {
+            for(size_t i=0;i<table.len();++i)if(table.cols[i].dataName==column) {
                 if(table.cols[i].defaultValue.empty())return std::nullopt;
                 return table.cols[i].defaultValue;
             }
@@ -40004,7 +40019,7 @@ static bool scalarArgColumnIsNull(const std::string& arg,
                                   StorageEngine* engine,
                                   const std::string& dbname) {
     if (arg.empty() || arg.front() == 0x27) return false;  // literal
-    for (size_t i = 0; i < tbl.len; ++i) {
+    for (size_t i = 0; i < tbl.len(); ++i) {
         if (tbl.cols[i].dataName != arg) continue;
         if (!engine || dbname.empty()) return false;
         if (tbl.cols[i].generatedKind == 'v') {
@@ -40078,7 +40093,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
     auto getVal = [&](const std::string& arg) -> std::string {
         if (arg.size() >= 2 && ((arg.front() == '\'' && arg.back() == '\'') || (arg.front() == '"' && arg.back() == '"')))
             return arg.substr(1, arg.size() - 2);
-        for (size_t i = 0; i < tbl.len; ++i) {
+        for (size_t i = 0; i < tbl.len(); ++i) {
             if (tbl.cols[i].dataName == arg) {
                 if (engine && !dbname.empty()) {
                     bool isNull=false;
@@ -40169,7 +40184,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                 auto resolve2 = [&](const std::string& piece) -> std::string {
                     if (piece.size() >= 2 && piece.front() == 39 && piece.back() == 39)
                         return piece.substr(1, piece.size() - 2);
-                    for (size_t ci = 0; ci < tbl.len; ++ci) {
+                    for (size_t ci = 0; ci < tbl.len(); ++ci) {
                         if (tbl.cols[ci].dataName == piece) {
                             return (engine && !dbname.empty())
                                 ? engine->extractColumnValue(rowBuffer, tbl, ci, dbname, true)
@@ -40217,7 +40232,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                 auto resolve = [&](const std::string& piece, std::string& outv) {
                     std::string tp = trim(piece);
                     if (tp.size() >= 2 && tp.front() == 39 && tp.back() == 39) { outv = tp.substr(1, tp.size() - 2); return; }
-                    for (size_t ci = 0; ci < tbl.len; ++ci) {
+                    for (size_t ci = 0; ci < tbl.len(); ++ci) {
                         if (tbl.cols[ci].dataName == tp) {
                             outv = (engine && !dbname.empty())
                                 ? engine->extractColumnValue(rowBuffer, tbl, ci, dbname, true)
@@ -40253,7 +40268,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                 const bool isNull=alreadyRead->second;generatedArgumentNulls->erase(alreadyRead);return isNull;
             }
         }
-        for (size_t i = 0; i < tbl.len; ++i) {
+        for (size_t i = 0; i < tbl.len(); ++i) {
             if (tbl.cols[i].dataName == arg) {
                 return scalarArgColumnIsNull(
                     arg, rowBuffer, tbl, engine, dbname);
@@ -40280,7 +40295,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         std::map<std::string, std::string> rowContext;
         std::map<std::string, std::string> typeHints;
         std::set<std::string> nullColumns;
-        for (size_t i = 0; i < tbl.len; ++i) {
+        for (size_t i = 0; i < tbl.len(); ++i) {
             if(tbl.cols[i].generatedKind=='v')continue;
             bool valueIsNull = false;
             const std::string columnValue = engine && !dbname.empty()
@@ -40312,7 +40327,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
 
     if (expr.funcName == "abs" && expr.funcArgs.size() == 1) {
         std::map<std::string, std::string> types;
-        for (size_t i = 0; i < tbl.len; ++i)
+        for (size_t i = 0; i < tbl.len(); ++i)
             types[tbl.cols[i].dataName] = tbl.cols[i].dataType +
                 (tbl.cols[i].isArray ? "[]" : "");
         // This is a declaration probe, never a value/effect probe. Keep
@@ -40326,7 +40341,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                 select->selectList.front().expr.get(), types, dbname, engine)) == "double precision") {
             std::map<std::string, std::string> values;
             std::set<std::string> nulls;
-            for (size_t i = 0; i < tbl.len; ++i) {
+            for (size_t i = 0; i < tbl.len(); ++i) {
             if(tbl.cols[i].generatedKind=='v')continue;
                 bool isNull = false;
                 const auto value = engine && !dbname.empty()
@@ -40413,13 +40428,13 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         size_t remainingOffset = select->offset.value_or(0);
 
         std::set<std::string> innerColumnNames;
-        for (size_t i = 0; i < innerSch.len; ++i)
+        for (size_t i = 0; i < innerSch.len(); ++i)
             innerColumnNames.insert(innerSch.cols[i].dataName);
 
         std::map<std::string, std::string> outerContext;
         std::map<std::string, std::string> outerTypes;
         std::set<std::string> outerNulls;
-        for (size_t i = 0; i < tbl.len; ++i) {
+        for (size_t i = 0; i < tbl.len(); ++i) {
             bool valueIsNull = false;
             const std::string value = engine->extractColumnValue(
                 rowBuffer, tbl, i, dbname, true, &valueIsNull);
@@ -40454,7 +40469,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             }
             NullRowBinding nullBinding(
                 engine, dbname, innerTbl,
-                StorageEngine::encodeRid(pageId, slotId), innerSch.len);
+                StorageEngine::encodeRid(pageId, slotId), innerSch.len());
             bool toastOk = false;
             const std::string innerRow = engine->resolveToastValues(
                 dbname, innerTbl, std::string(data, len), innerSch, &toastOk);
@@ -40465,7 +40480,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             auto rowContext = outerContext;
             auto typeHints = outerTypes;
             auto nullColumns = outerNulls;
-            for (size_t i = 0; i < innerSch.len; ++i) {
+            for (size_t i = 0; i < innerSch.len(); ++i) {
                 bool valueIsNull = false;
                 const std::string value = engine->extractColumnValue(
                     innerRow, innerSch, i, dbname, true, &valueIsNull);
@@ -40527,7 +40542,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         std::map<std::string, std::string> rowContext;
         std::map<std::string, std::string> typeHints;
         std::set<std::string> nullColumns;
-        for (size_t i = 0; i < tbl.len; ++i) {
+        for (size_t i = 0; i < tbl.len(); ++i) {
             if(tbl.cols[i].generatedKind=='v')continue;
             bool valueIsNull = false;
             const std::string value = engine && !dbname.empty()
@@ -40572,7 +40587,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         std::map<std::string, std::string> rowContext;
         std::map<std::string, std::string> typeHints;
         std::set<std::string> nullColumns;
-        for (size_t i = 0; i < tbl.len; ++i) {
+        for (size_t i = 0; i < tbl.len(); ++i) {
             if(tbl.cols[i].generatedKind=='v')continue;
             bool valueIsNull = false;
             const std::string value = engine && !dbname.empty()
@@ -40610,7 +40625,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         std::map<std::string, std::string> rowCtx;
         const auto typeHints = buildTypeHints(tbl);
         std::set<std::string> nullColumns;
-        for (size_t i = 0; i < tbl.len; ++i) {
+        for (size_t i = 0; i < tbl.len(); ++i) {
             bool valueIsNull = false;
             std::string v = engine && !dbname.empty()
                 ? engine->extractColumnValue(
@@ -40911,7 +40926,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         std::map<std::string, std::string> values;
         std::map<std::string, std::string> types;
         std::set<std::string> nulls;
-        for (size_t column = 0; column < tbl.len; ++column) {
+        for (size_t column = 0; column < tbl.len(); ++column) {
             bool isNull = false;
             const auto value = engine && !dbname.empty()
                 ? engine->extractColumnValue(rowBuffer, tbl, column, dbname, true, &isNull)
@@ -40949,7 +40964,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                    dt == "int8" || dt == "bigint" || dt == "smallint" || dt == "tinyint";
         };
         auto colTypeOf = [&](const std::string& a) -> std::string {
-            for (size_t i = 0; i < tbl.len; ++i)
+            for (size_t i = 0; i < tbl.len(); ++i)
                 if (tbl.cols[i].dataName == a) {
                     std::string dt = tbl.cols[i].dataType;
                     for (auto& c : dt) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
@@ -40986,7 +41001,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             return v.size() >= 10 && v[4] == '-' && v[7] == '-';
         };
         auto colType = [&](const std::string& a) -> std::string {
-            for (size_t i = 0; i < tbl.len; ++i)
+            for (size_t i = 0; i < tbl.len(); ++i)
                 if (tbl.cols[i].dataName == a) {
                     std::string dt = tbl.cols[i].dataType;
                     for (auto& c : dt) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
@@ -41103,7 +41118,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             if (argument == "||") concatExpression = true;
             const std::string operand = trim(argument.substr(
                 0, argument.find("::")));
-            for (size_t columnIndex = 0; columnIndex < tbl.len;
+            for (size_t columnIndex = 0; columnIndex < tbl.len();
                  ++columnIndex) {
                 if (tbl.cols[columnIndex].dataName == operand &&
                     tbl.cols[columnIndex].dataType == "money") {
@@ -41136,7 +41151,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             std::map<std::string, std::string> rowContext;
             std::map<std::string, std::string> typeHints;
             std::set<std::string> nullColumns;
-            for (size_t i = 0; i < tbl.len; ++i) {
+            for (size_t i = 0; i < tbl.len(); ++i) {
             if(tbl.cols[i].generatedKind=='v')continue;
                 bool valueIsNull = false;
                 const std::string value = engine && !dbname.empty()
@@ -41273,7 +41288,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                 prevVal = v;
                 {
                     bool isIntCol = false;
-                    for (size_t ci = 0; ci < tbl.len; ++ci)
+                    for (size_t ci = 0; ci < tbl.len(); ++ci)
                         if (tbl.cols[ci].dataName == a) {
                             std::string dt = tbl.cols[ci].dataType;
                             for (auto& ch : dt) ch = static_cast<char>(tolower(static_cast<unsigned char>(ch)));
@@ -41400,7 +41415,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         std::map<std::string, std::string> rowContext;
         std::map<std::string, std::string> typeHints;
         std::set<std::string> nullColumns;
-        for (size_t i = 0; i < tbl.len; ++i) {
+        for (size_t i = 0; i < tbl.len(); ++i) {
             if(tbl.cols[i].generatedKind=='v')continue;
             bool valueIsNull = false;
             const std::string value = engine && !dbname.empty()
@@ -41429,7 +41444,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
          expr.funcName == "initcap") && !expr.funcArgs.empty()) {
         std::map<std::string, std::string> rowContext, typeHints, collationHints;
         std::set<std::string> nullColumns;
-        for (size_t i = 0; i < tbl.len; ++i) {
+        for (size_t i = 0; i < tbl.len(); ++i) {
             if(tbl.cols[i].generatedKind=='v')continue;
             bool valueIsNull = false;
             const std::string value = engine && !dbname.empty()
@@ -41458,7 +41473,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         std::map<std::string, std::string> rowContext;
         std::map<std::string, std::string> typeHints;
         std::set<std::string> nullColumns;
-        for (size_t i = 0; i < tbl.len; ++i) {
+        for (size_t i = 0; i < tbl.len(); ++i) {
             if(tbl.cols[i].generatedKind=='v')continue;
             bool valueIsNull = false;
             const std::string value = engine && !dbname.empty()
@@ -41493,7 +41508,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         std::map<std::string, std::string> rowContext;
         std::map<std::string, std::string> typeHints;
         std::set<std::string> nullColumns;
-        for (size_t i = 0; i < tbl.len; ++i) {
+        for (size_t i = 0; i < tbl.len(); ++i) {
             if(tbl.cols[i].generatedKind=='v')continue;
             bool valueIsNull = false;
             const std::string value = engine && !dbname.empty()
@@ -41527,7 +41542,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         std::map<std::string, std::string> rowContext;
         std::map<std::string, std::string> typeHints;
         std::set<std::string> nullColumns;
-        for (size_t i = 0; i < tbl.len; ++i) {
+        for (size_t i = 0; i < tbl.len(); ++i) {
             if(tbl.cols[i].generatedKind=='v')continue;
             bool valueIsNull = false;
             const std::string value = engine && !dbname.empty()
@@ -41622,7 +41637,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         std::map<std::string, std::string> rowContext;
         std::map<std::string, std::string> typeHints;
         std::set<std::string> nullColumns;
-        for (size_t i = 0; i < tbl.len; ++i) {
+        for (size_t i = 0; i < tbl.len(); ++i) {
             if(tbl.cols[i].generatedKind=='v')continue;
             bool valueIsNull = false;
             const std::string value = engine && !dbname.empty()
@@ -41662,7 +41677,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         std::map<std::string, std::string> rowContext;
         std::map<std::string, std::string> typeHints;
         std::set<std::string> nullColumns;
-        for (size_t i = 0; i < tbl.len; ++i) {
+        for (size_t i = 0; i < tbl.len(); ++i) {
             if(tbl.cols[i].generatedKind=='v')continue;
             bool valueIsNull = false;
             const std::string value = engine && !dbname.empty()
@@ -41697,7 +41712,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         std::map<std::string, std::string> rowContext;
         std::map<std::string, std::string> typeHints;
         std::set<std::string> nullColumns;
-        for (size_t i = 0; i < tbl.len; ++i) {
+        for (size_t i = 0; i < tbl.len(); ++i) {
             if(tbl.cols[i].generatedKind=='v')continue;
             bool valueIsNull = false;
             const std::string value = engine && !dbname.empty()
@@ -41727,7 +41742,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         std::map<std::string, std::string> rowContext;
         std::map<std::string, std::string> typeHints;
         std::set<std::string> nullColumns;
-        for (size_t i = 0; i < tbl.len; ++i) {
+        for (size_t i = 0; i < tbl.len(); ++i) {
             if(tbl.cols[i].generatedKind=='v')continue;
             bool valueIsNull = false;
             const std::string value = engine && !dbname.empty()
@@ -41757,7 +41772,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         std::map<std::string, std::string> rowContext;
         std::map<std::string, std::string> typeHints;
         std::set<std::string> nullColumns;
-        for (size_t i = 0; i < tbl.len; ++i) {
+        for (size_t i = 0; i < tbl.len(); ++i) {
             if(tbl.cols[i].generatedKind=='v')continue;
             bool valueIsNull = false;
             const std::string value = engine && !dbname.empty()
@@ -41889,7 +41904,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             throw DbError("42601", "invalid EXTRACT expression");
         std::map<std::string, std::string> values, types;
         std::set<std::string> nulls;
-        for (size_t column = 0; column < tbl.len; ++column) {
+        for (size_t column = 0; column < tbl.len(); ++column) {
             bool isNull = false;
             const auto value = engine && !dbname.empty()
                 ? engine->extractColumnValue(rowBuffer, tbl, column, dbname, true, &isNull)
@@ -41911,7 +41926,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
     if ((expr.funcName == "year" || expr.funcName == "month" || expr.funcName == "day") && !expr.funcArgs.empty()) {
         std::string val = getVal(expr.funcArgs[0]);
         std::string sourceType;
-        for (size_t i = 0; i < tbl.len; ++i) {
+        for (size_t i = 0; i < tbl.len(); ++i) {
             if (tbl.cols[i].dataName == expr.funcArgs[0]) {
                 sourceType = tbl.cols[i].dataType;
                 break;
@@ -42077,7 +42092,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         std::map<std::string, std::string> rowContext;
         std::map<std::string, std::string> typeHints;
         std::set<std::string> nullColumns;
-        for (size_t i = 0; i < tbl.len; ++i) {
+        for (size_t i = 0; i < tbl.len(); ++i) {
             if(tbl.cols[i].generatedKind=='v')continue;
             bool valueIsNull = false;
             const std::string value = engine && !dbname.empty()
@@ -42332,7 +42347,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         std::map<std::string, std::string> rowContext;
         std::map<std::string, std::string> typeHints;
         std::set<std::string> nullColumns;
-        for (size_t i = 0; i < tbl.len; ++i) {
+        for (size_t i = 0; i < tbl.len(); ++i) {
             if(tbl.cols[i].generatedKind=='v')continue;
             bool valueIsNull = false;
             const std::string value = engine && !dbname.empty()
@@ -42366,7 +42381,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         std::map<std::string, std::string> rowContext;
         std::map<std::string, std::string> typeHints;
         std::set<std::string> nullColumns;
-        for (size_t i = 0; i < tbl.len; ++i) {
+        for (size_t i = 0; i < tbl.len(); ++i) {
             if(tbl.cols[i].generatedKind=='v')continue;
             bool valueIsNull = false;
             const std::string value = engine && !dbname.empty()
@@ -42427,7 +42442,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         std::map<std::string, std::string> rowContext;
         std::map<std::string, std::string> typeHints;
         std::set<std::string> nullColumns;
-        for (size_t i = 0; i < tbl.len; ++i) {
+        for (size_t i = 0; i < tbl.len(); ++i) {
             if(tbl.cols[i].generatedKind=='v')continue;
             bool valueIsNull = false;
             const std::string value = engine && !dbname.empty()
@@ -42480,7 +42495,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         std::map<std::string, std::string> rowContext;
         std::map<std::string, std::string> typeHints;
         std::set<std::string> nullColumns;
-        for (size_t i = 0; i < tbl.len; ++i) {
+        for (size_t i = 0; i < tbl.len(); ++i) {
             if(tbl.cols[i].generatedKind=='v')continue;
             bool valueIsNull = false;
             const std::string value = engine && !dbname.empty()
@@ -42515,7 +42530,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         std::map<std::string, std::string> rowContext;
         std::map<std::string, std::string> typeHints;
         std::set<std::string> nullColumns;
-        for (size_t i = 0; i < tbl.len; ++i) {
+        for (size_t i = 0; i < tbl.len(); ++i) {
             if(tbl.cols[i].generatedKind=='v')continue;
             bool valueIsNull = false;
             const std::string value = engine && !dbname.empty()
@@ -42615,7 +42630,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         std::map<std::string, std::string> rowContext;
         std::map<std::string, std::string> typeHints;
         std::set<std::string> nullColumns;
-        for (size_t i = 0; i < tbl.len; ++i) {
+        for (size_t i = 0; i < tbl.len(); ++i) {
             if(tbl.cols[i].generatedKind=='v')continue;
             bool valueIsNull = false;
             const std::string value = engine && !dbname.empty()
@@ -42647,7 +42662,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         std::map<std::string, std::string> rowContext;
         std::map<std::string, std::string> typeHints;
         std::set<std::string> nullColumns;
-        for (size_t i = 0; i < tbl.len; ++i) {
+        for (size_t i = 0; i < tbl.len(); ++i) {
             if(tbl.cols[i].generatedKind=='v')continue;
             bool valueIsNull = false;
             const std::string value = engine && !dbname.empty()
@@ -42726,7 +42741,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         // fractional seconds, double-negate time and turn NULL into zero.
         std::map<std::string, std::string> values, types;
         std::set<std::string> nulls;
-        for (size_t column = 0; column < tbl.len; ++column) {
+        for (size_t column = 0; column < tbl.len(); ++column) {
             bool isNull = false;
             const auto value = engine && !dbname.empty()
                 ? engine->extractColumnValue(rowBuffer, tbl, column, dbname, true, &isNull)
@@ -43140,19 +43155,19 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                         qualifier = tbl.tablename;
                     }
                 }
-                if (expandedSchema->len != 1) {
+                if (expandedSchema->len() != 1) {
                     throw DbError("42601", "subquery must return only one column");
                 }
                 wildcardColumn = qualifier + "." + expandedSchema->cols[0].dataName;
             }
             std::set<std::string> innerColumnNames;
-            for (size_t i = 0; i < innerSchema.len; ++i)
+            for (size_t i = 0; i < innerSchema.len(); ++i)
                 innerColumnNames.insert(innerSchema.cols[i].dataName);
 
             std::map<std::string, std::string> outerContext;
             std::map<std::string, std::string> outerTypes;
             std::set<std::string> outerNulls;
-            for (size_t i = 0; i < tbl.len; ++i) {
+            for (size_t i = 0; i < tbl.len(); ++i) {
                 bool valueIsNull = false;
                 const std::string value = engine->extractColumnValue(
                     rowBuffer, tbl, i, dbname, true, &valueIsNull);
@@ -43221,7 +43236,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                     NullRowBinding nullBinding(
                         engine, dbname, subTname,
                         StorageEngine::encodeRid(pageId, slotId),
-                        innerSchema.len);
+                        innerSchema.len());
                     bool toastOk = false;
                     const std::string innerRow = engine->resolveToastValues(
                         dbname, subTname, std::string(data, len), innerSchema,
@@ -43233,7 +43248,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
                     auto rowContext = outerContext;
                     auto typeHints = outerTypes;
                     auto nullColumns = outerNulls;
-                    for (size_t i = 0; i < innerSchema.len; ++i) {
+                    for (size_t i = 0; i < innerSchema.len(); ++i) {
                         bool valueIsNull = false;
                         const std::string value = engine->extractColumnValue(
                             innerRow, innerSchema, i, dbname, true,
@@ -43415,7 +43430,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         std::map<std::string, std::string> rowContext;
         const auto typeHints = buildTypeHints(tbl);
         std::set<std::string> nullColumns;
-        for (size_t i = 0; i < tbl.len; ++i) {
+        for (size_t i = 0; i < tbl.len(); ++i) {
             if(tbl.cols[i].generatedKind=='v')continue;
             bool valueIsNull = false;
             const std::string value = engine && !dbname.empty()
@@ -43476,7 +43491,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         std::map<std::string, std::string> rowContext;
         const auto typeHints = buildTypeHints(tbl);
         std::set<std::string> nullColumns;
-        for (size_t i = 0; i < tbl.len; ++i) {
+        for (size_t i = 0; i < tbl.len(); ++i) {
             if(tbl.cols[i].generatedKind=='v')continue;
             bool valueIsNull = false;
             const std::string value = engine && !dbname.empty()
@@ -43540,7 +43555,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
         std::map<std::string, std::string> rowContext;
         std::map<std::string, std::string> typeHints;
         std::set<std::string> nullColumns;
-        for (size_t i = 0; i < tbl.len; ++i) {
+        for (size_t i = 0; i < tbl.len(); ++i) {
             if(tbl.cols[i].generatedKind=='v')continue;
             bool valueIsNull = false;
             const std::string value = engine && !dbname.empty()
@@ -43601,7 +43616,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
     if (engine && !dbname.empty()) {
         std::map<std::string, std::string> values, types;
         std::set<std::string> nulls;
-        for (size_t i = 0; i < tbl.len; ++i) {
+        for (size_t i = 0; i < tbl.len(); ++i) {
             if(tbl.cols[i].generatedKind=='v')continue;
             bool isNull = false;
             const auto& column = tbl.cols[i];
@@ -43636,7 +43651,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
             const std::string& an = expr.funcArgs[ai];
             bool isCol = false;
             std::string ct;
-            for (size_t ci = 0; ci < tbl.len; ++ci)
+            for (size_t ci = 0; ci < tbl.len(); ++ci)
                 if (tbl.cols[ci].dataName == an) { isCol = true; ct = tbl.cols[ci].dataType; break; }
             if (isCol) {
                 for (auto& ch : ct) ch = static_cast<char>(tolower(static_cast<unsigned char>(ch)));
@@ -43829,9 +43844,9 @@ void prepareAggregateExpression(ExprPtr& expression, bool input,
     if (const auto* parameter = dynamic_cast<const ParameterExpr*>(expression.get()))
         throw DbError("42P02", "there is no parameter $" + std::to_string(parameter->slot + 1));
     if (const auto* column = dynamic_cast<const ColumnRefExpr*>(expression.get())) {
-        size_t index = table.len;
-        for (size_t i = 0; i < table.len; ++i) if (table.cols[i].dataName == column->column) { index = i; break; }
-        if (index == table.len) {
+        size_t index = table.len();
+        for (size_t i = 0; i < table.len(); ++i) if (table.cols[i].dataName == column->column) { index = i; break; }
+        if (index == table.len()) {
             if (column->schema.empty() && column->table.empty() &&
                 (column->column == "current_user" || column->column == "session_user")) return;
             throw DbError("42703", "column \"" + column->column + "\" does not exist");
@@ -43887,7 +43902,7 @@ void prepareAggregateExpression(ExprPtr& expression, bool input,
                 throw DbError("42883", "aggregate function does not exist for type " + state.argumentType);
             if ((aggregate == "bool_and" || aggregate == "bool_or" || aggregate == "every") && state.argumentType != "boolean")
                 throw DbError("42883", "boolean aggregate requires a boolean argument");
-            state.slot = table.len + states.size();
+            state.slot = table.len() + states.size();
             state.value = ExprValue(state.resultType, "", true);
             auto result = std::make_unique<ParameterExpr>(); result->slot = state.slot; result->declaredType = state.resultType;
             result->origin = ParameterOrigin::RuntimeCell;
@@ -44052,11 +44067,11 @@ std::vector<std::string> StorageEngine::queryExpr(
 
     TableSchema tbl = getTableSchema(dbname, tablename);
     DatumMetadataContextPtr outputDatumMetadata;
-    const bool storedReferenceColumns=std::any_of(tbl.cols,tbl.cols+tbl.len,
+    const bool storedReferenceColumns=std::any_of(tbl.cols.begin(),tbl.cols.end(),
         [](const Column& column){return column.generatedKind!='v' &&
             stored_regtype_detail::columnType(column.dataType);});
     if(options.owningRows || options.owningDeclarations || storedReferenceColumns ||
-       std::any_of(tbl.cols,tbl.cols+tbl.len,[](const Column& c){return c.generatedKind=='v';}))
+       std::any_of(tbl.cols.begin(),tbl.cols.end(),[](const Column& c){return c.generatedKind=='v';}))
         outputDatumMetadata=prepareDatumMetadataContext(dbname,tablename);
     PageAllocator* pa = getPageAllocator(dbname, tablename);
     std::vector<AggregateExpressionProjection> aggregateProjections;
@@ -44108,7 +44123,7 @@ std::vector<std::string> StorageEngine::queryExpr(
             ExprEvaluator::analyzeExplicitResultCollation(root.get());
         }
         for (const auto& state : aggregateStates)
-            collectAggregateInputSlots(state.call.get(), tbl.len, aggregateInputSlots);
+            collectAggregateInputSlots(state.call.get(), tbl.len(), aggregateInputSlots);
     }
     auto conds = prepareStoredUnknownBitScalarInputs(tbl, parseConditions(conditions));
     // Receiver caps and OR alternatives constrain execution demand, not
@@ -44194,8 +44209,8 @@ std::vector<std::string> StorageEngine::queryExpr(
         std::vector<std::vector<ExprValue>> inputs;
         inputs.reserve(matchRows.size());
         for (const auto& matched : matchRows) {
-            NullRowBinding binding(this, dbname, tablename, matched.first, tbl.len);
-            std::vector<ExprValue> cells(tbl.len);
+            NullRowBinding binding(this, dbname, tablename, matched.first, tbl.len());
+            std::vector<ExprValue> cells(tbl.len());
             for (size_t column : aggregateInputSlots) {
                 bool isNull = false;
                 const auto value = extractColumnValue(matched.second, tbl, column, dbname, true, &isNull);
@@ -44211,7 +44226,7 @@ std::vector<std::string> StorageEngine::queryExpr(
             context.set("session_user", ExprValue("name", aggregateUser, aggregateUser.empty()));
             for (auto& state : aggregateStates) advanceAggregateExpression(state, aggregateEvaluator, context);
         }
-        std::vector<ExprValue> aggregateCells(tbl.len);
+        std::vector<ExprValue> aggregateCells(tbl.len());
         for (auto& state : aggregateStates) aggregateCells.push_back(finishAggregateExpression(state, aggregateEvaluator));
         RowContext context;
         context.setParameters(std::move(aggregateCells));
@@ -44252,13 +44267,13 @@ std::vector<std::string> StorageEngine::queryExpr(
         for (size_t input = 0; input < matchRows.size(); ++input) {
             auto& mr = matchRows[input];
             SortKey k{input, {}, {}};
-            NullRowBinding nbS(this, dbname, tbl.tablename, mr.first, tbl.len);
+            NullRowBinding nbS(this, dbname, tbl.tablename, mr.first, tbl.len());
             for (const auto& spec : orderBy) {
-                size_t sortIdx = tbl.len;
-                for (size_t i = 0; i < tbl.len; ++i) {
+                size_t sortIdx = tbl.len();
+                for (size_t i = 0; i < tbl.len(); ++i) {
                     if (tbl.cols[i].dataName == spec.colName) { sortIdx = i; break; }
                 }
-                if (sortIdx < tbl.len) {
+                if (sortIdx < tbl.len()) {
                     std::string val = extractColumnValue(
                         mr.second, tbl, sortIdx, dbname, true);
                     const Column& scol = tbl.cols[sortIdx];
@@ -44325,11 +44340,11 @@ std::vector<std::string> StorageEngine::queryExpr(
         std::sort(keys.begin(), keys.end(), [&](const SortKey& a, const SortKey& b) {
             for (size_t i = 0; i < orderBy.size(); ++i) {
                 const auto& spec = orderBy[i];
-                size_t sortIdx = tbl.len;
-                for (size_t j = 0; j < tbl.len; ++j) {
+                size_t sortIdx = tbl.len();
+                for (size_t j = 0; j < tbl.len(); ++j) {
                     if (tbl.cols[j].dataName == spec.colName) { sortIdx = j; break; }
                 }
-                if (sortIdx >= tbl.len) continue;
+                if (sortIdx >= tbl.len()) continue;
                 bool aNull = a.isNulls[i];
                 bool bNull = b.isNulls[i];
                 if (aNull && bNull) continue;
@@ -44425,7 +44440,7 @@ std::vector<std::string> StorageEngine::queryExpr(
                 std::map<std::string, std::string> rowContext;
                 const auto typeHints = buildTypeHints(tbl);
                 std::set<std::string> nullColumns;
-                for (size_t i = 0; i < tbl.len; ++i) {
+                for (size_t i = 0; i < tbl.len(); ++i) {
                     if(tbl.cols[i].generatedKind=='v')continue;
                     bool columnIsNull = false;
                     const std::string value = extractColumnValue(
@@ -44462,7 +44477,7 @@ std::vector<std::string> StorageEngine::queryExpr(
                 } else valueIsNull = true;
             }
         } else {
-            for (size_t i = 0; i < tbl.len; ++i) {
+            for (size_t i = 0; i < tbl.len(); ++i) {
                 if (tbl.cols[i].dataName != expr.colName) continue;
                 val = extractColumnValue(mr.second,tbl,i,dbname,true,&valueIsNull,
                     tbl.cols[i].generatedKind=='v'?owningCell:nullptr,
@@ -44525,7 +44540,7 @@ std::vector<std::string> StorageEngine::queryExpr(
         for (size_t row : inputToSorted) {
             if (row == std::numeric_limits<size_t>::max()) continue;
             NullRowBinding binding(this, dbname, tbl.tablename,
-                                   matchRows[row].first, tbl.len);
+                                   matchRows[row].first, tbl.len());
             for (size_t col = 0; col < exprs.size(); ++col) {
                 if (!options.deferredSortProjections.count(col))
                     earlySortProjection[row][col] = evaluateCell(exprs[col], matchRows[row],
@@ -44537,7 +44552,7 @@ std::vector<std::string> StorageEngine::queryExpr(
         if (options.maxProjectionRows && result.size() >= *options.maxProjectionRows) break;
         auto& mr = matchRows[rowIndex];
         // Bind stored-NULL visibility for the row being projected.
-        NullRowBinding nbP(this, dbname, tbl.tablename, mr.first, tbl.len);
+        NullRowBinding nbP(this, dbname, tbl.tablename, mr.first, tbl.len());
         if (streamingQualification && !std::any_of(
                 qualificationBranches.begin(), qualificationBranches.end(),
                 [&](const auto& branch) {
@@ -44563,7 +44578,7 @@ std::vector<std::string> StorageEngine::queryExpr(
                 } else {
                     std::string v;
                     bool valueIsNull = false;
-                    for (size_t ci = 0; ci < tbl.len; ++ci) {
+                    for (size_t ci = 0; ci < tbl.len(); ++ci) {
                         if (tbl.cols[ci].dataName == expr.colName) {
                             v = extractColumnValue(
                                 mr.second, tbl, ci, dbname, true,
@@ -44851,12 +44866,12 @@ std::vector<std::string> StorageEngine::aggregate(
         dbms::Numeric exactSum(0);
         bool exactSumOk = true;
         int64_t exactCount = 0;
-        size_t colIdx = tbl.len;
+        size_t colIdx = tbl.len();
         std::string groupConcat;
         std::unordered_set<std::string> groupSeen;
         std::vector<std::pair<std::string, std::string>> groupOrdered;
         std::vector<std::pair<std::string, std::string>> arrayOrderedVals;
-        size_t orderKeyIdx = tbl.len;
+        size_t orderKeyIdx = tbl.len();
         bool orderDesc = false;
         if (!item.orderBy.empty()) {
             std::string keyCol = item.orderBy;
@@ -44871,7 +44886,7 @@ std::vector<std::string> StorageEngine::aggregate(
             if (keyCol.size() > 3 && keyCol.compare(keyCol.size() - 3, 3, "asc") == 0 &&
                 isspace(static_cast<unsigned char>(keyCol[keyCol.size() - 4])))
                 keyCol = trim(keyCol.substr(0, keyCol.size() - 3));
-            for (size_t i = 0; i < tbl.len; ++i)
+            for (size_t i = 0; i < tbl.len(); ++i)
                 if (tbl.cols[i].dataName == keyCol) { orderKeyIdx = i; break; }
         }
         bool groupConcatFirst = true;
@@ -44909,7 +44924,7 @@ std::unordered_set<std::string> arraySeen;
 
         if (func != "count" || actualColName != "*") {
             std::string lookupCol = isPercentile ? pctColName : actualColName;
-            for (size_t i = 0; i < tbl.len; ++i) {
+            for (size_t i = 0; i < tbl.len(); ++i) {
                 if (tbl.cols[i].dataName == lookupCol) {
                     colIdx = i;
                     // Fixed-width numeric storage is obvious, but numeric/
@@ -44929,7 +44944,7 @@ std::unordered_set<std::string> arraySeen;
                 }
             }
         }
-        if ((isBoolAnd || isBoolOr) && colIdx >= tbl.len) {
+        if ((isBoolAnd || isBoolOr) && colIdx >= tbl.len()) {
             try {
                 aggregate_type_detail::BooleanArgument argument(tbl, this, dbname, actualColName);
                 const auto parsedFilters = parseConditions(item.filterConds);
@@ -44937,14 +44952,14 @@ std::unordered_set<std::string> arraySeen;
                 for (const auto rid : matchIds) {
                     std::string row;
                     if (!readRowByRid(pa, rid, row, tbl)) continue;
-                    NullRowBinding binding(this, dbname, tablename, rid, tbl.len);
+                    NullRowBinding binding(this, dbname, tablename, rid, tbl.len());
                     bool passes = true;
                     for (const auto& filter : parsedFilters) {
                         if (!evalConditionOnRow(filter, row, tbl)) { passes = false; break; }
                     }
                     if (!passes) continue;
                     ArgumentRow input;
-                    for (size_t i = 0; i < tbl.len; ++i) {
+                    for (size_t i = 0; i < tbl.len(); ++i) {
                         bool isNull = false;
                         input.values.push_back(logicalValue(row, i, &isNull));
                         input.nulls.push_back(isNull);
@@ -44965,7 +44980,7 @@ std::unordered_set<std::string> arraySeen;
         }
         // Aggregate over an arithmetic expression ("sum(amt * 2)"):
         // resolve operands per row; numeric aggregation semantics.
-        const bool aggArgExpr = (colIdx >= tbl.len) && !isPercentile &&
+        const bool aggArgExpr = (colIdx >= tbl.len()) && !isPercentile &&
             (func == "sum" || func == "avg" || func == "min" || func == "max" ||
              func == "count") &&
             aggArgIsExpression(isPercentile ? pctColName : actualColName);
@@ -44981,7 +44996,7 @@ std::unordered_set<std::string> arraySeen;
             for (int64_t rid : matchIds) {
                 std::string row;
                 if (!readRowByRid(pa, rid, row, tbl)) continue;
-                NullRowBinding nbD(this, dbname, tablename, rid, tbl.len);
+                NullRowBinding nbD(this, dbname, tablename, rid, tbl.len());
                 // Check FILTER condition
                 if (!filterConds.empty()) {
                     bool pass = true;
@@ -44990,7 +45005,7 @@ std::unordered_set<std::string> arraySeen;
                     }
                     if (!pass) continue;
                 }
-                if (colIdx >= tbl.len) continue;
+                if (colIdx >= tbl.len()) continue;
                 bool valueIsNull = false;
                 std::string val = logicalValue(
                     row, colIdx, &valueIsNull);
@@ -45002,7 +45017,7 @@ std::unordered_set<std::string> arraySeen;
             for (int64_t rid : matchIds) {
                 std::string row;
                 if (!readRowByRid(pa, rid, row, tbl)) continue;
-                NullRowBinding nb(this, dbname, tablename, rid, tbl.len);
+                NullRowBinding nb(this, dbname, tablename, rid, tbl.len());
                 // Check FILTER condition
                 if (!filterConds.empty()) {
                     bool pass = true;
@@ -45014,7 +45029,7 @@ std::unordered_set<std::string> arraySeen;
                 if (func == "count") {
                     // PG count(col) skips only NULL rows; an empty string
                     // counts.  The stored null bit is the authoritative test.
-                    if (colIdx < tbl.len &&
+                    if (colIdx < tbl.len() &&
                         tbl.cols[colIdx].generatedKind != 'v' &&
                         dbms::detail::storedRowColumnIsNull(*this, dbname, tablename, tbl, rid, colIdx)) {
                         continue;
@@ -45024,7 +45039,7 @@ std::unordered_set<std::string> arraySeen;
                     bool valueIsNull = false;
                     if (aggArgExpr) {
                         auto getValC = [&](const std::string& tok) -> std::string {
-                            for (size_t ci2 = 0; ci2 < tbl.len; ++ci2)
+                            for (size_t ci2 = 0; ci2 < tbl.len(); ++ci2)
                                 if (tbl.cols[ci2].dataName == tok)
                                     return logicalValue(row, ci2);
                             if (tok.size() >= 2 && tok.front() == '\'' && tok.back() == '\'')
@@ -45033,18 +45048,18 @@ std::unordered_set<std::string> arraySeen;
                         };
                         val = evalAggArgExpr(aggExprText, getValC);
                     } else {
-                        if (colIdx >= tbl.len) continue;
+                        if (colIdx >= tbl.len()) continue;
                         val = logicalValue(row, colIdx, &valueIsNull);
                     }
                     if (valueIsNull) continue;
                     count++;  // null rows were skipped above; empty strings count
                 } else if (func == "group_concat" || func == "string_agg") {
-                    if (colIdx >= tbl.len) continue;
+                    if (colIdx >= tbl.len()) continue;
                     std::string val = logicalValue(row, colIdx);
                     if (val.empty()) continue;
                     if (aggDistinct && groupSeen.count(val)) continue;
                     groupSeen.insert(val);
-                    if (orderKeyIdx < tbl.len) {
+                    if (orderKeyIdx < tbl.len()) {
                         groupOrdered.emplace_back(
                             logicalValue(row, orderKeyIdx), val);
                         groupConcatFirst = false;
@@ -45054,15 +45069,15 @@ std::unordered_set<std::string> arraySeen;
                     groupConcat += val;
                     groupConcatFirst = false;
                 } else if (isJsonAgg) {
-                    if (colIdx >= tbl.len) continue;
+                    if (colIdx >= tbl.len()) continue;
                     std::string val = logicalValue(row, colIdx);
                     jsonAggVals.push_back(val);
                 } else if (isArrayAgg) {
-                    if (colIdx >= tbl.len) continue;
+                    if (colIdx >= tbl.len()) continue;
                     std::string val = logicalValue(row, colIdx);
                     if (aggDistinct && arraySeen.count(val)) continue;
                     arraySeen.insert(val);
-                    if (orderKeyIdx < tbl.len) {
+                    if (orderKeyIdx < tbl.len()) {
                         arrayOrderedVals.emplace_back(
                             logicalValue(row, orderKeyIdx), val);
                         continue;
@@ -45072,7 +45087,7 @@ std::unordered_set<std::string> arraySeen;
                 std::string val;
                 if (aggArgExpr) {
                     auto getVal = [&](const std::string& tok) -> std::string {
-                        for (size_t ci2 = 0; ci2 < tbl.len; ++ci2)
+                        for (size_t ci2 = 0; ci2 < tbl.len(); ++ci2)
                             if (tbl.cols[ci2].dataName == tok)
                                 return logicalValue(row, ci2);
                         if (tok.size() >= 2 && tok.front() == '\'' && tok.back() == '\'')
@@ -45081,7 +45096,7 @@ std::unordered_set<std::string> arraySeen;
                     };
                     val = evalAggArgExpr(aggExprText, getVal);
                 } else {
-                    if (colIdx >= tbl.len) {
+                    if (colIdx >= tbl.len()) {
                         // Bare numeric literal aggregate argument (avg(10.5)):
                         // the constant is the value for every row.
                         if (actualColName.empty()) continue;
@@ -45461,7 +45476,7 @@ std::vector<std::string> StorageEngine::groupAggregate(
     // Find group-by column indices
     std::vector<size_t> groupIdxs;
     for (const auto& gcol : groupByCols) {
-        for (size_t i = 0; i < tbl.len; ++i) {
+        for (size_t i = 0; i < tbl.len(); ++i) {
             if (tbl.cols[i].dataName == gcol) { groupIdxs.push_back(i); break; }
         }
     }
@@ -45502,7 +45517,7 @@ std::vector<std::string> StorageEngine::groupAggregate(
     auto readGroupKey = [&](int64_t rid) -> std::string {
         std::string row;
         if (!readRowByRid(pa, rid, row, tbl)) return "";
-        NullRowBinding nbk(this, dbname, tablename, rid, tbl.len);
+        NullRowBinding nbk(this, dbname, tablename, rid, tbl.len());
         std::string key;
         for (size_t idx : groupIdxs) {
             bool isNull = false;
@@ -45547,7 +45562,7 @@ std::vector<std::string> StorageEngine::groupAggregate(
         bool boolSeen = false;
         std::vector<std::string> orderedVals;
         std::unordered_map<std::string, int64_t> freqMap;
-        size_t colIdx = tbl.len;
+        size_t colIdx = tbl.len();
         bool isInt = false, isDate = false;
         // Exact-decimal accumulation for numeric columns (PG avg/sum of
         // numeric must not lose fraction digits).
@@ -45556,7 +45571,7 @@ std::vector<std::string> StorageEngine::groupAggregate(
         int64_t exactCount = 0;
         if (func != "count" || actualColName != "*") {
             std::string lookupCol = isPercentile ? pctColName : actualColName;
-            for (size_t i = 0; i < tbl.len; ++i) {
+            for (size_t i = 0; i < tbl.len(); ++i) {
                 if (tbl.cols[i].dataName == lookupCol) {
                     colIdx = i;
                     // Fixed-width numeric storage is obvious, but numeric/
@@ -45576,7 +45591,7 @@ std::vector<std::string> StorageEngine::groupAggregate(
                 }
             }
         }
-        if ((isBoolAnd || isBoolOr) && colIdx >= tbl.len) {
+        if ((isBoolAnd || isBoolOr) && colIdx >= tbl.len()) {
             try {
                 aggregate_type_detail::BooleanArgument argument(tbl, this, dbname, actualColName);
                 const auto parsedFilters = parseConditions(filterConds);
@@ -45584,14 +45599,14 @@ std::vector<std::string> StorageEngine::groupAggregate(
                 for (const auto rid : gids) {
                     std::string row;
                     if (!readRowByRid(pa, rid, row, tbl)) continue;
-                    NullRowBinding binding(this, dbname, tablename, rid, tbl.len);
+                    NullRowBinding binding(this, dbname, tablename, rid, tbl.len());
                     bool passes = true;
                     for (const auto& filter : parsedFilters) {
                         if (!evalConditionOnRow(filter, row, tbl)) { passes = false; break; }
                     }
                     if (!passes) continue;
                     ArgumentRow input;
-                    for (size_t i = 0; i < tbl.len; ++i) {
+                    for (size_t i = 0; i < tbl.len(); ++i) {
                         bool isNull = false;
                         input.values.push_back(logicalValue(row, i, &isNull));
                         input.nulls.push_back(isNull);
@@ -45610,7 +45625,7 @@ std::vector<std::string> StorageEngine::groupAggregate(
             }
         }
         // Aggregate over an arithmetic expression (see aggregate()).
-        const bool aggArgExpr = (colIdx >= tbl.len) && !isPercentile &&
+        const bool aggArgExpr = (colIdx >= tbl.len()) && !isPercentile &&
             (func == "sum" || func == "avg" || func == "min" || func == "max" ||
              func == "count") &&
             aggArgIsExpression(isPercentile ? pctColName : actualColName);
@@ -45634,7 +45649,7 @@ std::unordered_set<std::string> arraySeen;
             for (int64_t rid : gids) {
                 std::string row;
                 if (!readRowByRid(pa, rid, row, tbl)) continue;
-                NullRowBinding nbD(this, dbname, tablename, rid, tbl.len);
+                NullRowBinding nbD(this, dbname, tablename, rid, tbl.len());
                 bool passes = true;
                 for (const auto& filter : parsedFilters) {
                     if (!evalConditionOnRow(filter, row, tbl)) {
@@ -45643,7 +45658,7 @@ std::unordered_set<std::string> arraySeen;
                     }
                 }
                 if (!passes) continue;
-                if (colIdx >= tbl.len) continue;
+                if (colIdx >= tbl.len()) continue;
                 bool valueIsNull = false;
                 std::string val = logicalValue(
                     row, colIdx, &valueIsNull);
@@ -45657,7 +45672,7 @@ std::unordered_set<std::string> arraySeen;
             for (int64_t rid : gids) {
                 std::string row;
                 if (!readRowByRid(pa, rid, row, tbl)) continue;
-                NullRowBinding nbG(this, dbname, tablename, rid, tbl.len);
+                NullRowBinding nbG(this, dbname, tablename, rid, tbl.len());
                 // Check FILTER condition
                 if (!parsedFilters.empty()) {
                     bool pass = true;
@@ -45670,14 +45685,14 @@ std::unordered_set<std::string> arraySeen;
                 if (func == "count") {
                     // PG count(col) skips only NULL rows; an empty string
                     // counts.  The stored null bit is the authoritative test.
-                    if (colIdx < tbl.len &&
+                    if (colIdx < tbl.len() &&
                         tbl.cols[colIdx].generatedKind != 'v' &&
                         dbms::detail::storedRowColumnIsNull(*this, dbname, tablename, tbl, rid, colIdx)) {
                         continue;
                     }
                     // PG count(col) skips only NULL rows; an empty string
                     // counts.  The stored null bit is the authoritative test.
-                    if (colIdx < tbl.len &&
+                    if (colIdx < tbl.len() &&
                         tbl.cols[colIdx].generatedKind != 'v' &&
                         dbms::detail::storedRowColumnIsNull(*this, dbname, tablename, tbl, rid, colIdx)) {
                         continue;
@@ -45687,7 +45702,7 @@ std::unordered_set<std::string> arraySeen;
                     bool valueIsNull = false;
                     if (aggArgExpr) {
                         auto getValC = [&](const std::string& tok) -> std::string {
-                            for (size_t ci2 = 0; ci2 < tbl.len; ++ci2)
+                            for (size_t ci2 = 0; ci2 < tbl.len(); ++ci2)
                                 if (tbl.cols[ci2].dataName == tok)
                                     return logicalValue(row, ci2);
                             if (tok.size() >= 2 && tok.front() == '\'' && tok.back() == '\'')
@@ -45696,13 +45711,13 @@ std::unordered_set<std::string> arraySeen;
                         };
                         val = evalAggArgExpr(aggExprText, getValC);
                     } else {
-                        if (colIdx >= tbl.len) continue;
+                        if (colIdx >= tbl.len()) continue;
                         val = logicalValue(row, colIdx, &valueIsNull);
                     }
                     if (valueIsNull) continue;
                     count++;  // null rows were skipped above; empty strings count
                 } else if (func == "group_concat" || func == "string_agg") {
-                    if (colIdx >= tbl.len) continue;
+                    if (colIdx >= tbl.len()) continue;
                     std::string val = logicalValue(row, colIdx);
                     if (val.empty()) continue;
                     if (aggDistinct && groupSeen.count(val)) continue;
@@ -45711,11 +45726,11 @@ std::unordered_set<std::string> arraySeen;
                     groupConcat += val;
                     groupConcatFirst = false;
                 } else if (isJsonAgg) {
-                    if (colIdx >= tbl.len) continue;
+                    if (colIdx >= tbl.len()) continue;
                     std::string val = logicalValue(row, colIdx);
                     jsonAggVals.push_back(val);
                 } else if (isArrayAgg) {
-                    if (colIdx >= tbl.len) continue;
+                    if (colIdx >= tbl.len()) continue;
                     std::string val = logicalValue(row, colIdx);
                     if (aggDistinct && arraySeen.count(val)) continue;
                     arraySeen.insert(val);
@@ -45724,7 +45739,7 @@ std::unordered_set<std::string> arraySeen;
                 std::string val;
                 if (aggArgExpr) {
                     auto getVal = [&](const std::string& tok) -> std::string {
-                        for (size_t ci2 = 0; ci2 < tbl.len; ++ci2)
+                        for (size_t ci2 = 0; ci2 < tbl.len(); ++ci2)
                             if (tbl.cols[ci2].dataName == tok)
                                 return logicalValue(row, ci2);
                         if (tok.size() >= 2 && tok.front() == '\'' && tok.back() == '\'')
@@ -45733,7 +45748,7 @@ std::unordered_set<std::string> arraySeen;
                     };
                     val = evalAggArgExpr(aggExprText, getVal);
                 } else {
-                    if (colIdx >= tbl.len) {
+                    if (colIdx >= tbl.len()) {
                         // Bare numeric literal aggregate argument (avg(10.5)):
                         // the constant is the value for every row.
                         if (actualColName.empty()) continue;
@@ -45968,7 +45983,7 @@ std::unordered_set<std::string> arraySeen;
             }
             const auto* literal = dynamic_cast<const LiteralExpr*>(input);
             if (!literal || literal->preparedSubquery || !literal->typeName.empty()) continue;
-            for (size_t i = 0; i < tbl.len; ++i) {
+            for (size_t i = 0; i < tbl.len(); ++i) {
                 if (tbl.cols[i].dataName != colName) continue;
                 std::string value = sign + literal->value;
                 const bool valueIsNull = SQLParser::toLower(value) == "null";
@@ -46021,7 +46036,7 @@ std::unordered_set<std::string> arraySeen;
                 pass = false;
             } else {
                 NullRowBinding binding(this, dbname, tablename,
-                                       gids.front(), tbl.len);
+                                       gids.front(), tbl.len());
                 for (const auto& h : groupHavings) {
                     bool leftIsNull = false;
                     const std::string left =
@@ -46043,7 +46058,7 @@ std::unordered_set<std::string> arraySeen;
         if (!groupIdxs.empty()) {
             std::string sourceRow;
             if (gids.empty() || !readRowByRid(pa, gids.front(), sourceRow, tbl)) continue;
-            NullRowBinding binding(this, dbname, tablename, gids.front(), tbl.len);
+            NullRowBinding binding(this, dbname, tablename, gids.front(), tbl.len());
             for (size_t i = 0; i < groupIdxs.size(); ++i) {
                 if (i > 0) row += ' ';
                 bool isNull = false;
@@ -46081,7 +46096,7 @@ std::vector<std::string> StorageEngine::groupAggregateSets(
     // Map all GROUP BY columns to indices
     std::vector<size_t> allGroupIdxs;
     for (const auto& gcol : allGroupByCols) {
-        for (size_t i = 0; i < tbl.len; ++i) {
+        for (size_t i = 0; i < tbl.len(); ++i) {
             if (tbl.cols[i].dataName == gcol) { allGroupIdxs.push_back(i); break; }
         }
     }
@@ -46146,7 +46161,7 @@ std::vector<std::string> StorageEngine::groupAggregateSets(
         bool boolSeen = false;
         std::vector<std::string> orderedVals;
         std::unordered_map<std::string, int64_t> freqMap;
-        size_t colIdx = tbl.len;
+        size_t colIdx = tbl.len();
         bool isInt = false, isDate = false;
         // Exact-decimal accumulation for numeric columns (PG avg/sum of
         // numeric must not lose fraction digits).
@@ -46155,7 +46170,7 @@ std::vector<std::string> StorageEngine::groupAggregateSets(
         int64_t exactCount = 0;
         if (func != "count" || actualColName != "*") {
             std::string lookupCol = isPercentile ? pctColName : actualColName;
-            for (size_t i = 0; i < tbl.len; ++i) {
+            for (size_t i = 0; i < tbl.len(); ++i) {
                 if (tbl.cols[i].dataName == lookupCol) {
                     colIdx = i;
                     // Fixed-width numeric storage is obvious, but numeric/
@@ -46176,7 +46191,7 @@ std::vector<std::string> StorageEngine::groupAggregateSets(
             }
         }
         // Aggregate over an arithmetic expression (see aggregate()).
-        const bool aggArgExpr = (colIdx >= tbl.len) && !isPercentile &&
+        const bool aggArgExpr = (colIdx >= tbl.len()) && !isPercentile &&
             (func == "sum" || func == "avg" || func == "min" || func == "max" ||
              func == "count") &&
             aggArgIsExpression(isPercentile ? pctColName : actualColName);
@@ -46199,7 +46214,7 @@ std::unordered_set<std::string> arraySeen;
             for (int64_t rid : gids) {
                 std::string row;
                 if (!readRowByRid(pa, rid, row, tbl)) continue;
-                NullRowBinding nbD(this, dbname, tablename, rid, tbl.len);
+                NullRowBinding nbD(this, dbname, tablename, rid, tbl.len());
                 bool passes = true;
                 for (const auto& filter : parsedFilters) {
                     if (!evalConditionOnRow(filter, row, tbl)) {
@@ -46208,7 +46223,7 @@ std::unordered_set<std::string> arraySeen;
                     }
                 }
                 if (!passes) continue;
-                if (colIdx >= tbl.len) continue;
+                if (colIdx >= tbl.len()) continue;
                 bool valueIsNull = false;
                 std::string val = logicalValue(
                     row, colIdx, &valueIsNull);
@@ -46222,7 +46237,7 @@ std::unordered_set<std::string> arraySeen;
                 std::string row;
                 if (!readRowByRid(pa, rid, row, tbl)) continue;
                 NullRowBinding nullBinding(
-                    this, dbname, tablename, rid, tbl.len);
+                    this, dbname, tablename, rid, tbl.len());
                 if (!parsedFilters.empty()) {
                     bool pass = true;
                     for (const auto& fc : parsedFilters) {
@@ -46232,7 +46247,7 @@ std::unordered_set<std::string> arraySeen;
                 }
                 if (func == "count") {
                     if (colName == "*") { count++; continue; }
-                    if (colIdx >= tbl.len) continue;
+                    if (colIdx >= tbl.len()) continue;
                     // PG count(col) skips only NULL rows; empty strings count.
                     if (tbl.cols[colIdx].generatedKind != 'v' &&
                         dbms::detail::storedRowColumnIsNull(*this, dbname, tablename, tbl, rid, colIdx)) continue;
@@ -46241,7 +46256,7 @@ std::unordered_set<std::string> arraySeen;
                     if (valueIsNull) continue;
                     count++;
                 } else if (func == "group_concat" || func == "string_agg") {
-                    if (colIdx >= tbl.len) continue;
+                    if (colIdx >= tbl.len()) continue;
                     std::string val = logicalValue(row, colIdx);
                     if (val.empty()) continue;
                     if (aggDistinct && groupSeen.count(val)) continue;
@@ -46250,11 +46265,11 @@ std::unordered_set<std::string> arraySeen;
                     groupConcat += val;
                     groupConcatFirst = false;
                 } else if (isJsonAgg) {
-                    if (colIdx >= tbl.len) continue;
+                    if (colIdx >= tbl.len()) continue;
                     std::string val = logicalValue(row, colIdx);
                     jsonAggVals.push_back(val);
                 } else if (isArrayAgg) {
-                    if (colIdx >= tbl.len) continue;
+                    if (colIdx >= tbl.len()) continue;
                     std::string val = logicalValue(row, colIdx);
                     if (aggDistinct && arraySeen.count(val)) continue;
                     arraySeen.insert(val);
@@ -46263,7 +46278,7 @@ std::unordered_set<std::string> arraySeen;
                     std::string val;
                     if (aggArgExpr) {
                         auto getVal = [&](const std::string& tok) -> std::string {
-                            for (size_t ci2 = 0; ci2 < tbl.len; ++ci2)
+                            for (size_t ci2 = 0; ci2 < tbl.len(); ++ci2)
                                 if (tbl.cols[ci2].dataName == tok)
                                     return logicalValue(row, ci2);
                             if (tok.size() >= 2 && tok.front() == '\'' && tok.back() == '\'')
@@ -46272,7 +46287,7 @@ std::unordered_set<std::string> arraySeen;
                         };
                         val = evalAggArgExpr(aggExprText, getVal);
                     } else {
-                        if (colIdx >= tbl.len) continue;
+                        if (colIdx >= tbl.len()) continue;
                         val = logicalValue(row, colIdx);
                     }
                     if (isInt || aggArgExpr) {
@@ -46446,7 +46461,7 @@ std::unordered_set<std::string> arraySeen;
     for (const auto& gset : groupingSets) {
         std::vector<size_t> setIdxs;
         for (const auto& col : gset) {
-            for (size_t i = 0; i < tbl.len; ++i) {
+            for (size_t i = 0; i < tbl.len(); ++i) {
                 if (tbl.cols[i].dataName == col) { setIdxs.push_back(i); break; }
             }
         }
@@ -46455,7 +46470,7 @@ std::unordered_set<std::string> arraySeen;
             std::string row;
             if (!readRowByRid(pa, rid, row, tbl)) return "";
             NullRowBinding nullBinding(
-                this, dbname, tablename, rid, tbl.len);
+                this, dbname, tablename, rid, tbl.len());
             std::string key;
             for (size_t idx : setIdxs) {
                 bool isNull = false;
@@ -46483,7 +46498,7 @@ std::unordered_set<std::string> arraySeen;
             if (!setIdxs.empty()) {
                 std::string sourceRow;
                 if (gids.empty() || !readRowByRid(pa, gids.front(), sourceRow, tbl)) continue;
-                NullRowBinding binding(this, dbname, tablename, gids.front(), tbl.len);
+                NullRowBinding binding(this, dbname, tablename, gids.front(), tbl.len());
                 for (size_t idx : setIdxs) {
                     bool isNull = false;
                     const std::string value = logicalValue(sourceRow, idx, &isNull);
@@ -46556,7 +46571,7 @@ std::vector<std::string> StorageEngine::sortByExpression(
     if (rows.empty() || exprSpecs.empty()) return rows;
     TableSchema tbl = getTableSchema(dbname, tablename);
     std::map<std::string, std::string> expressionTypeHints;
-    for (size_t ci = 0; ci < tbl.len; ++ci)
+    for (size_t ci = 0; ci < tbl.len(); ++ci)
         expressionTypeHints[tbl.cols[ci].dataName] = tbl.cols[ci].dataType;
     std::vector<int64_t> sliceCounts(exprSpecs.size(), 0);
     for (size_t i = 0; i < exprSpecs.size(); ++i) {
@@ -46574,7 +46589,7 @@ std::vector<std::string> StorageEngine::sortByExpression(
         comparisonColumn.isVariableLength = true;
         if (spec.exprFunc == "upper" || spec.exprFunc == "lower" ||
             spec.exprFunc.empty()) {
-            for (size_t columnIndex = 0; columnIndex < tbl.len;
+            for (size_t columnIndex = 0; columnIndex < tbl.len();
                  ++columnIndex) {
                 if (tbl.cols[columnIndex].dataName == spec.exprArg) {
                     comparisonColumn = tbl.cols[columnIndex];
@@ -46615,7 +46630,7 @@ std::vector<std::string> StorageEngine::sortByExpression(
                 collation::normalizeName(spec.collation) == "binary"
                     ? "C" : spec.collation;
             TableSchema collationProbe;
-            collationProbe.len = 1;
+            collationProbe.cols.resize(1);
             collationProbe.cols[0] = comparisonColumn;
             if (resolveTableCollations(
                     *this, dbname, collationProbe) != DBStatus::OK) {
@@ -46639,7 +46654,7 @@ std::vector<std::string> StorageEngine::sortByExpression(
         std::map<std::string, std::string> rowData;
         std::stringstream ss(rowStr);
         std::string val;
-        for (size_t i = 0; i < tbl.len && ss >> val; ++i) {
+        for (size_t i = 0; i < tbl.len() && ss >> val; ++i) {
             rowData[tbl.cols[i].dataName] = val;
         }
         for (size_t keyIndex = 0; keyIndex < exprSpecs.size(); ++keyIndex) {
@@ -46670,7 +46685,7 @@ std::vector<std::string> StorageEngine::sortByExpression(
                     if (comparisonColumn.collation.empty()) {
                         comparisonColumn.collation = evaluated.collation;
                         TableSchema collationProbe;
-                        collationProbe.len = 1;
+                        collationProbe.cols.resize(1);
                         collationProbe.cols[0] = comparisonColumn;
                         if (resolveTableCollations(
                                 *this, dbname, collationProbe) !=
@@ -46871,7 +46886,7 @@ static void prepareJoinExpressions(
                 for (int side=0;side<2;++side) {
                     const auto& table=side==0 ? left : right;
                     const auto& range=side==0 ? leftRange : rightRange;
-                    for (size_t i=0;i<table.len;++i)
+                    for (size_t i=0;i<table.len();++i)
                         if (key==table.cols[i].dataName ||
                             key==StorageEngine::joinRangeColumnKey(range,table.cols[i].dataName,encoded))
                             return &table.cols[i];
@@ -46909,7 +46924,7 @@ static void prepareJoinExpressions(
                 for (int side = 0; side < 2; ++side) {
                     const auto& table = side == 0 ? left : right;
                     const auto& range = side == 0 ? leftRange : rightRange;
-                    for (size_t column = 0; column < table.len; ++column) {
+                    for (size_t column = 0; column < table.len(); ++column) {
                         const auto& name = table.cols[column].dataName;
                         const bool resolvedCarrier = reference->table.empty() &&
                             reference->column == StorageEngine::joinRangeColumnKey(range, name, encoded);
@@ -47154,7 +47169,7 @@ static void collectJoinStoredOutputRoles(
     size_t outputWidth = 0;
     bool hasStoredReference = false;
     const auto inspect = [&](const TableSchema& table, const std::string& range) {
-        for (size_t i = 0; i < table.len; ++i) {
+        for (size_t i = 0; i < table.len(); ++i) {
             if (!included(range, table.cols[i])) continue;
             ++outputWidth;
             if (storedReferenceOutputRoleForColumn(table.cols[i]).kind !=
@@ -47168,7 +47183,7 @@ static void collectJoinStoredOutputRoles(
     std::vector<StoredReferenceOutputRole> roles;
     roles.reserve(outputWidth);
     const auto append = [&](const TableSchema& table, const std::string& range) {
-        for (size_t i = 0; i < table.len; ++i) {
+        for (size_t i = 0; i < table.len(); ++i) {
             if (included(range, table.cols[i]))
                 roles.push_back(storedReferenceOutputRoleForColumn(table.cols[i]));
         }
@@ -47271,7 +47286,7 @@ std::vector<std::string> StorageEngine::join(
                                   size_t columnIndex,
                                   bool* valueIsNull = nullptr) {
         NullRowBinding nullBinding(
-            this, dbname, tableName, row.rid, table.len);
+            this, dbname, tableName, row.rid, table.len());
         return extractColumnValue(
             row.data, table, columnIndex, dbname, true, valueIsNull);
     };
@@ -47279,11 +47294,11 @@ std::vector<std::string> StorageEngine::join(
     // Build column map for condition evaluation: colName -> {isLeft, colIdx}
     struct ColInfo { bool isLeft; size_t colIdx; };
     std::map<std::string, ColInfo> colMap;
-    for (size_t i = 0; i < leftTbl.len; ++i) {
+    for (size_t i = 0; i < leftTbl.len(); ++i) {
         colMap[leftTbl.cols[i].dataName] = {true, i};
         colMap[joinRangeColumnKey(leftRange, leftTbl.cols[i].dataName, rangeNames.encodeColumns)] = {true, i};
     }
-    for (size_t i = 0; i < rightTbl.len; ++i) {
+    for (size_t i = 0; i < rightTbl.len(); ++i) {
         std::string simple = rightTbl.cols[i].dataName;
         if (colMap.find(simple) == colMap.end()) {
             colMap[simple] = {false, i};
@@ -47399,23 +47414,23 @@ std::vector<std::string> StorageEngine::join(
     }
 
     // Find left and right column indices for ON condition
-    size_t leftColIdx = leftTbl.len;
-    for (size_t i = 0; i < leftTbl.len; ++i) {
+    size_t leftColIdx = leftTbl.len();
+    for (size_t i = 0; i < leftTbl.len(); ++i) {
         if (leftTbl.cols[i].dataName == leftCol) { leftColIdx = i; break; }
     }
-    size_t rightColIdx = rightTbl.len;
-    for (size_t i = 0; i < rightTbl.len; ++i) {
+    size_t rightColIdx = rightTbl.len();
+    for (size_t i = 0; i < rightTbl.len(); ++i) {
         if (rightTbl.cols[i].dataName == rightCol) { rightColIdx = i; break; }
     }
 
-    if (leftColIdx < leftTbl.len) {
+    if (leftColIdx < leftTbl.len()) {
         for (auto& row : leftRows) {
             row.joinKey = canonicalColumnKeyValue(
                 leftTbl.cols[leftColIdx], logicalValue(
                     row, leftTbl, leftTable, leftColIdx, &row.joinKeyNull));
         }
     }
-    if (rightColIdx < rightTbl.len) {
+    if (rightColIdx < rightTbl.len()) {
         for (auto& row : rightRows) {
             row.joinKey = canonicalColumnKeyValue(
                 rightTbl.cols[rightColIdx], logicalValue(
@@ -47425,7 +47440,7 @@ std::vector<std::string> StorageEngine::join(
 
     // JOIN optimization: build hash table on right table's join column
     std::unordered_map<std::string, std::vector<const JoinRow*>> rightHash;
-    if (rightColIdx < rightTbl.len) {
+    if (rightColIdx < rightTbl.len()) {
         for (const auto& rr : rightRows) {
             if (rr.joinKeyNull) continue;
             rightHash[rr.joinKey].push_back(&rr);
@@ -47434,7 +47449,7 @@ std::vector<std::string> StorageEngine::join(
 
     for (const auto& lr : leftRows) {
         // ON condition via hash probe
-        if (leftColIdx >= leftTbl.len || rightColIdx >= rightTbl.len) continue;
+        if (leftColIdx >= leftTbl.len() || rightColIdx >= rightTbl.len()) continue;
         if (lr.joinKeyNull) continue;
         auto it = rightHash.find(lr.joinKey);
         if (it == rightHash.end()) continue;
@@ -47454,7 +47469,7 @@ std::vector<std::string> StorageEngine::join(
             std::string rowStr;
             std::vector<std::string> cells;
             std::vector<bool> nulls;
-            for (size_t i = 0; i < leftTbl.len; ++i) {
+            for (size_t i = 0; i < leftTbl.len(); ++i) {
                 std::string fullName = joinRangeColumnKey(leftRange, leftTbl.cols[i].dataName, rangeNames.encodeColumns);
                 bool include = selectCols.empty();
                 if (!include) {
@@ -47470,7 +47485,7 @@ std::vector<std::string> StorageEngine::join(
                 cells.push_back(valueIsNull ? std::string{} : val);
                 nulls.push_back(valueIsNull);
             }
-            for (size_t i = 0; i < rightTbl.len; ++i) {
+            for (size_t i = 0; i < rightTbl.len(); ++i) {
                 std::string fullName = joinRangeColumnKey(rightRange, rightTbl.cols[i].dataName, rangeNames.encodeColumns);
                 bool include = selectCols.empty();
                 if (!include) {
@@ -47579,18 +47594,18 @@ std::vector<std::string> StorageEngine::leftJoin(
                                   size_t columnIndex,
                                   bool* valueIsNull = nullptr) {
         NullRowBinding nullBinding(
-            this, dbname, tableName, row.rid, table.len);
+            this, dbname, tableName, row.rid, table.len());
         return extractColumnValue(
             row.data, table, columnIndex, dbname, true, valueIsNull);
     };
 
     struct ColInfo { bool isLeft; size_t colIdx; };
     std::map<std::string, ColInfo> colMap;
-    for (size_t i = 0; i < leftTbl.len; ++i) {
+    for (size_t i = 0; i < leftTbl.len(); ++i) {
         colMap[leftTbl.cols[i].dataName] = {true, i};
         colMap[joinRangeColumnKey(leftRange, leftTbl.cols[i].dataName, rangeNames.encodeColumns)] = {true, i};
     }
-    for (size_t i = 0; i < rightTbl.len; ++i) {
+    for (size_t i = 0; i < rightTbl.len(); ++i) {
         std::string simple = rightTbl.cols[i].dataName;
         if (colMap.find(simple) == colMap.end()) colMap[simple] = {false, i};
         colMap[joinRangeColumnKey(rightRange, simple, rangeNames.encodeColumns)] = {false, i};
@@ -47662,23 +47677,23 @@ std::vector<std::string> StorageEngine::leftJoin(
     prepareJoinExpressions(onConds, leftTbl, rightTbl, leftRange, rightRange,
                            rangeNames.encodeColumns, dbname, this);
 
-    size_t leftColIdx = leftTbl.len;
-    for (size_t i = 0; i < leftTbl.len; ++i) {
+    size_t leftColIdx = leftTbl.len();
+    for (size_t i = 0; i < leftTbl.len(); ++i) {
         if (leftTbl.cols[i].dataName == leftCol) { leftColIdx = i; break; }
     }
-    size_t rightColIdx = rightTbl.len;
-    for (size_t i = 0; i < rightTbl.len; ++i) {
+    size_t rightColIdx = rightTbl.len();
+    for (size_t i = 0; i < rightTbl.len(); ++i) {
         if (rightTbl.cols[i].dataName == rightCol) { rightColIdx = i; break; }
     }
 
-    if (leftColIdx < leftTbl.len) {
+    if (leftColIdx < leftTbl.len()) {
         for (auto& row : leftRows) {
             row.joinKey = canonicalColumnKeyValue(
                 leftTbl.cols[leftColIdx], logicalValue(
                     row, leftTbl, leftTable, leftColIdx, &row.joinKeyNull));
         }
     }
-    if (rightColIdx < rightTbl.len) {
+    if (rightColIdx < rightTbl.len()) {
         for (auto& row : rightRows) {
             row.joinKey = canonicalColumnKeyValue(
                 rightTbl.cols[rightColIdx], logicalValue(
@@ -47693,7 +47708,7 @@ std::vector<std::string> StorageEngine::leftJoin(
                          bool rightNull, std::vector<std::string>& cells,
                          std::vector<bool>& nulls) -> std::string {
         std::string rowStr;
-        for (size_t i = 0; i < leftTbl.len; ++i) {
+        for (size_t i = 0; i < leftTbl.len(); ++i) {
             std::string fullName = joinRangeColumnKey(leftRange, leftTbl.cols[i].dataName, rangeNames.encodeColumns);
             bool include = selectCols.empty() || selectCols.find(leftTbl.cols[i].dataName) != selectCols.end() || selectCols.find(fullName) != selectCols.end();
             if (!include) continue;
@@ -47711,7 +47726,7 @@ std::vector<std::string> StorageEngine::leftJoin(
             cells.push_back(valueIsNull ? std::string{} : val);
             nulls.push_back(valueIsNull);
         }
-        for (size_t i = 0; i < rightTbl.len; ++i) {
+        for (size_t i = 0; i < rightTbl.len(); ++i) {
             std::string fullName = joinRangeColumnKey(rightRange, rightTbl.cols[i].dataName, rangeNames.encodeColumns);
             bool include = selectCols.empty() || selectCols.find(rightTbl.cols[i].dataName) != selectCols.end() || selectCols.find(fullName) != selectCols.end();
             if (!include) continue;
@@ -47736,7 +47751,7 @@ std::vector<std::string> StorageEngine::leftJoin(
         bool hasOnMatch = false;
         for (const auto& rr : rightRows) {
             if (!leftCol.empty() && !rightCol.empty()) {
-                if (leftColIdx >= leftTbl.len || rightColIdx >= rightTbl.len) continue;
+                if (leftColIdx >= leftTbl.len() || rightColIdx >= rightTbl.len()) continue;
                 if (lr.joinKeyNull || rr.joinKeyNull) continue;
                 if (lr.joinKey != rr.joinKey) continue;
             } else if (onConds.empty()) continue;
@@ -47896,18 +47911,18 @@ std::vector<std::string> StorageEngine::rightJoin(
                                   size_t columnIndex,
                                   bool* valueIsNull = nullptr) {
         NullRowBinding nullBinding(
-            this, dbname, tableName, row.rid, table.len);
+            this, dbname, tableName, row.rid, table.len());
         return extractColumnValue(
             row.data, table, columnIndex, dbname, true, valueIsNull);
     };
 
     struct ColInfo { bool isLeft; size_t colIdx; };
     std::map<std::string, ColInfo> colMap;
-    for (size_t i = 0; i < leftTbl.len; ++i) {
+    for (size_t i = 0; i < leftTbl.len(); ++i) {
         colMap[leftTbl.cols[i].dataName] = {true, i};
         colMap[joinRangeColumnKey(leftRange, leftTbl.cols[i].dataName, rangeNames.encodeColumns)] = {true, i};
     }
-    for (size_t i = 0; i < rightTbl.len; ++i) {
+    for (size_t i = 0; i < rightTbl.len(); ++i) {
         std::string simple = rightTbl.cols[i].dataName;
         if (colMap.find(simple) == colMap.end()) colMap[simple] = {false, i};
         colMap[joinRangeColumnKey(rightRange, simple, rangeNames.encodeColumns)] = {false, i};
@@ -47979,23 +47994,23 @@ std::vector<std::string> StorageEngine::rightJoin(
     prepareJoinExpressions(onConds, leftTbl, rightTbl, leftRange, rightRange,
                            rangeNames.encodeColumns, dbname, this);
 
-    size_t leftColIdx = leftTbl.len;
-    for (size_t i = 0; i < leftTbl.len; ++i) {
+    size_t leftColIdx = leftTbl.len();
+    for (size_t i = 0; i < leftTbl.len(); ++i) {
         if (leftTbl.cols[i].dataName == leftCol) { leftColIdx = i; break; }
     }
-    size_t rightColIdx = rightTbl.len;
-    for (size_t i = 0; i < rightTbl.len; ++i) {
+    size_t rightColIdx = rightTbl.len();
+    for (size_t i = 0; i < rightTbl.len(); ++i) {
         if (rightTbl.cols[i].dataName == rightCol) { rightColIdx = i; break; }
     }
 
-    if (leftColIdx < leftTbl.len) {
+    if (leftColIdx < leftTbl.len()) {
         for (auto& row : leftRows) {
             row.joinKey = canonicalColumnKeyValue(
                 leftTbl.cols[leftColIdx], logicalValue(
                     row, leftTbl, leftTable, leftColIdx, &row.joinKeyNull));
         }
     }
-    if (rightColIdx < rightTbl.len) {
+    if (rightColIdx < rightTbl.len()) {
         for (auto& row : rightRows) {
             row.joinKey = canonicalColumnKeyValue(
                 rightTbl.cols[rightColIdx], logicalValue(
@@ -48007,7 +48022,7 @@ std::vector<std::string> StorageEngine::rightJoin(
                          bool leftNull, std::vector<std::string>& cells,
                          std::vector<bool>& nulls) -> std::string {
         std::string rowStr;
-        for (size_t i = 0; i < leftTbl.len; ++i) {
+        for (size_t i = 0; i < leftTbl.len(); ++i) {
             std::string fullName = joinRangeColumnKey(leftRange, leftTbl.cols[i].dataName, rangeNames.encodeColumns);
             bool include = selectCols.empty() || selectCols.find(leftTbl.cols[i].dataName) != selectCols.end() || selectCols.find(fullName) != selectCols.end();
             if (!include) continue;
@@ -48025,7 +48040,7 @@ std::vector<std::string> StorageEngine::rightJoin(
             cells.push_back(valueIsNull ? std::string{} : val);
             nulls.push_back(valueIsNull);
         }
-        for (size_t i = 0; i < rightTbl.len; ++i) {
+        for (size_t i = 0; i < rightTbl.len(); ++i) {
             std::string fullName = joinRangeColumnKey(rightRange, rightTbl.cols[i].dataName, rangeNames.encodeColumns);
             bool include = selectCols.empty() || selectCols.find(rightTbl.cols[i].dataName) != selectCols.end() || selectCols.find(fullName) != selectCols.end();
             if (!include) continue;
@@ -48044,7 +48059,7 @@ std::vector<std::string> StorageEngine::rightJoin(
         bool hasOnMatch = false;
         for (const auto& lr : leftRows) {
             if (!leftCol.empty() && !rightCol.empty()) {
-                if (leftColIdx >= leftTbl.len || rightColIdx >= rightTbl.len) continue;
+                if (leftColIdx >= leftTbl.len() || rightColIdx >= rightTbl.len()) continue;
                 if (lr.joinKeyNull || rr.joinKeyNull) continue;
                 if (lr.joinKey != rr.joinKey) continue;
             } else if (onConds.empty()) continue;
@@ -48196,7 +48211,7 @@ std::vector<std::string> StorageEngine::crossJoin(
                                   size_t columnIndex,
                                   bool* valueIsNull = nullptr) {
         NullRowBinding nullBinding(
-            this, dbname, tableName, row.rid, table.len);
+            this, dbname, tableName, row.rid, table.len());
         return extractColumnValue(
             row.data, table, columnIndex, dbname, true, valueIsNull);
     };
@@ -48207,11 +48222,11 @@ std::vector<std::string> StorageEngine::crossJoin(
     prepareJoinExpressions(conds, leftTbl, rightTbl, leftRange, rightRange,
                            rangeNames.encodeColumns, dbname, this);
     std::map<std::string, ColInfo> colMap;
-    for (size_t i = 0; i < leftTbl.len; ++i) {
+    for (size_t i = 0; i < leftTbl.len(); ++i) {
         colMap[leftTbl.cols[i].dataName] = {true, i};
         colMap[joinRangeColumnKey(leftRange, leftTbl.cols[i].dataName, rangeNames.encodeColumns)] = {true, i};
     }
-    for (size_t i = 0; i < rightTbl.len; ++i) {
+    for (size_t i = 0; i < rightTbl.len(); ++i) {
         std::string simple = rightTbl.cols[i].dataName;
         if (colMap.find(simple) == colMap.end()) colMap[simple] = {false, i};
         colMap[joinRangeColumnKey(rightRange, simple, rangeNames.encodeColumns)] = {false, i};
@@ -48275,7 +48290,7 @@ std::vector<std::string> StorageEngine::crossJoin(
             std::string rowStr;
             std::vector<std::string> cells;
             std::vector<bool> nulls;
-            for (size_t i = 0; i < leftTbl.len; ++i) {
+            for (size_t i = 0; i < leftTbl.len(); ++i) {
                 std::string fullName = joinRangeColumnKey(leftRange, leftTbl.cols[i].dataName, rangeNames.encodeColumns);
                 bool include = selectCols.empty() || selectCols.find(leftTbl.cols[i].dataName) != selectCols.end() || selectCols.find(fullName) != selectCols.end();
                 if (!include) continue;
@@ -48287,7 +48302,7 @@ std::vector<std::string> StorageEngine::crossJoin(
                 cells.push_back(valueIsNull ? std::string{} : val);
                 nulls.push_back(valueIsNull);
             }
-            for (size_t i = 0; i < rightTbl.len; ++i) {
+            for (size_t i = 0; i < rightTbl.len(); ++i) {
                 std::string fullName = joinRangeColumnKey(rightRange, rightTbl.cols[i].dataName, rangeNames.encodeColumns);
                 bool include = selectCols.empty() || selectCols.find(rightTbl.cols[i].dataName) != selectCols.end() || selectCols.find(fullName) != selectCols.end();
                 if (!include) continue;
@@ -48636,8 +48651,8 @@ void StorageEngine::markPageDirtyAndLsn(PageAllocator* pa, uint32_t pageId, Lsn 
 
 bool StorageEngine::redoPageImage(const std::string& dbname, const std::string& tablename,
                                   uint32_t pageId, const char* pageData, size_t pageLen,
-                                  Lsn recordLsn, bool force,
-                                  uint32_t forkNum) {
+                                  Lsn recordLsn, bool beforeImage,
+                                  uint32_t forkNum, bool undoUncommitted) {
     const TableSchema table = getTableSchema(dbname, tablename);
 
     const auto heapRowWidth = heapHeaderRowWidth(table);
@@ -48691,10 +48706,17 @@ bool StorageEngine::redoPageImage(const std::string& dbname, const std::string& 
     if (!pa) return false;
     if (pageId == 0 || pa->pageSize() != pageLen || !pageData) return false;
     PgPage image(const_cast<char*>(pageData));
-    if (!image.isValid()) return false;
+    if (!(image.hasBoundPageId() ? image.isValid(pageId) : image.isValid())) return false;
 
-    // Skip if page already has a newer or equal LSN, unless forced (undo).
-    if (!force && pageId < pa->numPages()) {
+    const auto pageCount = pa->numPages();
+    // The forward pass has already replayed durable page allocations. A
+    // validated undo image outside the current extent has no page to undo.
+    // Abandoned allocations may appear in reverse order, so recreating them
+    // here would manufacture holes or resurrect rows from the loser.
+    if (undoUncommitted && pageId >= pageCount) return true;
+
+    // Before-images must be applied even if the page has a newer LSN.
+    if (!beforeImage && pageId < pageCount) {
         char* buf = pa->fetchPage(pageId);
         if (buf) {
             Lsn currentLsn = 0;
@@ -48708,8 +48730,8 @@ bool StorageEngine::redoPageImage(const std::string& dbname, const std::string& 
 
     // WAL page images are emitted by the sequential allocator.  A gap would
     // require an unbounded allocation loop and indicates missing/corrupt WAL.
-    if (pageId > pa->numPages()) return false;
-    if (pageId == pa->numPages() && pa->allocPage() != pageId) {
+    if (pageId > pageCount) return false;
+    if (pageId == pageCount && pa->allocPage() != pageId) {
         return false;
     }
 
@@ -48937,7 +48959,7 @@ bool StorageEngine::resetTableStorage(
         }
 
         const bool hasVariableLength = std::any_of(
-            table.cols, table.cols + table.len,
+            table.cols.begin(), table.cols.end(),
             [](const Column& column) { return column.isVariableLength; });
         if (hasVariableLength) {
             PageAllocator toastPages(
@@ -49133,20 +49155,20 @@ bool StorageEngine::rebuildIndexesAfterRecovery(
             if (reindex(dbname, tableName) != DBStatus::OK) return false;
 
             const auto findColumn = [&](const std::string& columnName) {
-                for (size_t i = 0; i < table.len; ++i) {
+                for (size_t i = 0; i < table.len(); ++i) {
                     if (table.cols[i].dataName == columnName) return i;
                 }
-                return table.len;
+                return table.len();
             };
             const auto populate = [&](auto* index,
                                       const std::string& columnName,
                                       bool includeEmptyHash = false) {
                 if (!index) return false;
                 const size_t columnIndex = findColumn(columnName);
-                if (columnIndex >= table.len) return false;
+                if (columnIndex >= table.len()) return false;
                 index->clear();
                 bool indexValid = true;
-                std::vector<bool> scanNulls(table.len, false);
+                std::vector<bool> scanNulls(table.len(), false);
                 const bool scanOk = forEachRow(
                     dbname, tableName,
                     [&](uint32_t pageId, uint16_t slotId,
@@ -50682,15 +50704,15 @@ bool StorageEngine::recoverAllDatabases() {
                 return true;
             }
 
-            const bool force = info == XLOG_HEAP_PAGE_BEFORE;
+            const bool beforeImage = info == XLOG_HEAP_PAGE_BEFORE;
             const bool applied = RedoApplyRecord(rec,
-                [&, force, recordLsn](const std::string& tableName, uint32_t blockNum,
+                [&, beforeImage, recordLsn](const std::string& tableName, uint32_t blockNum,
                                       uint32_t forkNum, const char* pageData,
                                       size_t pageLen) {
                     return redoPageImage(dbname,
                                          resolvedHeapName.empty() ? tableName : resolvedHeapName,
                                          blockNum, pageData,
-                                         pageLen, recordLsn, force, forkNum);
+                                         pageLen, recordLsn, beforeImage, forkNum, undoUncommitted);
                 },
                 [](const std::string&, uint32_t, uint32_t, uint16_t,
                    const char*, size_t) { return true; },
@@ -52924,7 +52946,7 @@ bool StorageEngine::physicalRestoreLocked(
                 return false;
             }
             if (anyMainFork && std::any_of(
-                    table.cols, table.cols + table.len,
+                    table.cols.begin(), table.cols.end(),
                     [](const Column& column) {
                         return column.isVariableLength;
                     })) {
@@ -53201,7 +53223,7 @@ struct ToastReferenceColumns {
     explicit ToastReferenceColumns(const TableSchema& table)
         : fixedSize(table.fixedDataSize()) {
         columns.reserve(table.varColCount());
-        for (size_t i = 0; i < table.len; ++i)
+        for (size_t i = 0; i < table.len(); ++i)
             if (table.cols[i].isVariableLength) columns.push_back(i);
     }
 
@@ -53434,7 +53456,7 @@ size_t StorageEngine::vacuumToastLocked(const std::string& dbname,
     const auto heapRowWidth = heapHeaderRowWidth(tbl);
     if (!heapRowWidth) return 0;
     std::set<uint64_t> activeToastIds;
-    const size_t minimumHeader = rowHeaderSize(tbl.formatVersion, tbl.len);
+    const size_t minimumHeader = rowHeaderSize(tbl.formatVersion, tbl.len());
     const ToastReferenceColumns referenceColumns(tbl);
 
     // A tuple can be invisible to the vacuuming transaction while an older
@@ -53979,7 +54001,7 @@ size_t StorageEngine::vacuumFull(const std::string& dbname,
                     }
                     const auto* header = castHeapHeader(tuple);
                     const size_t minimumHeader = rowHeaderSize(
-                        tbl.formatVersion, tbl.len);
+                        tbl.formatVersion, tbl.len());
                     if (header->t_hoff < minimumHeader ||
                         header->t_hoff > length) {
                         valid = false;
@@ -54381,14 +54403,14 @@ size_t StorageEngine::vacuumFull(const std::string& dbname,
                     const char* data, size_t length) {
                     if (!auxiliaryValid) return;
                     const std::string row(data, length);
-                    size_t columnIndex = tbl.len;
-                    for (size_t i = 0; i < tbl.len; ++i) {
+                    size_t columnIndex = tbl.len();
+                    for (size_t i = 0; i < tbl.len(); ++i) {
                         if (tbl.cols[i].dataName == column) {
                             columnIndex = i;
                             break;
                         }
                     }
-                    if (columnIndex >= tbl.len) {
+                    if (columnIndex >= tbl.len()) {
                         auxiliaryValid = false;
                         return;
                     }
@@ -54410,7 +54432,7 @@ size_t StorageEngine::vacuumFull(const std::string& dbname,
         if (!index) return failRewrite();
         index->clear();
         auxiliaryValid = true;
-        std::vector<bool> scanNulls(tbl.len, false);
+        std::vector<bool> scanNulls(tbl.len(), false);
         if (!forEachRow(dbname, tablename,
                 [&](uint32_t pageId, uint16_t slotId,
                     const char* data, size_t length) {
@@ -54418,14 +54440,14 @@ size_t StorageEngine::vacuumFull(const std::string& dbname,
                     ScannedNullRowBinding nullOwner(
                         tbl, scanNulls, data, length);
                     const std::string row(data, length);
-                    size_t columnIndex = tbl.len;
-                    for (size_t i = 0; i < tbl.len; ++i) {
+                    size_t columnIndex = tbl.len();
+                    for (size_t i = 0; i < tbl.len(); ++i) {
                         if (tbl.cols[i].dataName == column) {
                             columnIndex = i;
                             break;
                         }
                     }
-                    if (columnIndex >= tbl.len) {
+                    if (columnIndex >= tbl.len()) {
                         auxiliaryValid = false;
                         return;
                     }
@@ -54588,14 +54610,14 @@ bool StorageEngine::recordSsiIndexPredicate(const std::string& dbname,
         return false;
     }
 
-    size_t columnIndex = tbl.len;
-    for (size_t i = 0; i < tbl.len; ++i) {
+    size_t columnIndex = tbl.len();
+    for (size_t i = 0; i < tbl.len(); ++i) {
         if (tbl.cols[i].dataName == condition.colName) {
             columnIndex = i;
             break;
         }
     }
-    if (columnIndex >= tbl.len ||
+    if (columnIndex >= tbl.len() ||
         !columnUsesBinaryCollation(tbl.cols[columnIndex])) {
         return false;
     }
@@ -54635,7 +54657,7 @@ void StorageEngine::recordSsiIndexKeys(const std::string& dbname,
     std::vector<std::pair<std::string, std::string>> keys;
     if (tbl.pkColIndices.size() == 1) {
         const size_t columnIndex = tbl.pkColIndices.front();
-        if (columnIndex < tbl.len) {
+        if (columnIndex < tbl.len()) {
             const std::string value = canonicalColumnKeyValue(
                 tbl.cols[columnIndex], extractColumnValue(
                     rowData, tbl, columnIndex, dbname));
@@ -54647,14 +54669,14 @@ void StorageEngine::recordSsiIndexKeys(const std::string& dbname,
     for (const auto& columnName : getIndexedColumns(dbname, tablename)) {
         BPTree* index = getSecondaryIndex(dbname, tablename, columnName);
         if (!index) continue;
-        size_t columnIndex = tbl.len;
-        for (size_t i = 0; i < tbl.len; ++i) {
+        size_t columnIndex = tbl.len();
+        for (size_t i = 0; i < tbl.len(); ++i) {
             if (tbl.cols[i].dataName == columnName) {
                 columnIndex = i;
                 break;
             }
         }
-        if (columnIndex >= tbl.len) continue;
+        if (columnIndex >= tbl.len()) continue;
         const std::string value = canonicalColumnKeyValue(
             tbl.cols[columnIndex], extractColumnValue(
                 rowData, tbl, columnIndex, dbname));
@@ -54865,14 +54887,14 @@ bool StorageEngine::restoreDeletedRowIndexes(
 
     for (const auto& columnName :
          getHashIndexedColumns(dbname, tablename)) {
-        size_t columnIndex = tbl.len;
-        for (size_t index = 0; index < tbl.len; ++index) {
+        size_t columnIndex = tbl.len();
+        for (size_t index = 0; index < tbl.len(); ++index) {
             if (tbl.cols[index].dataName == columnName) {
                 columnIndex = index;
                 break;
             }
         }
-        if (columnIndex >= tbl.len) {
+        if (columnIndex >= tbl.len()) {
             ok = false;
             continue;
         }
@@ -54893,19 +54915,19 @@ bool StorageEngine::restoreDeletedRowIndexes(
 
     for (const auto& columnName :
          getBloomIndexedColumns(dbname, tablename)) {
-        size_t columnIndex = tbl.len;
-        for (size_t index = 0; index < tbl.len; ++index) {
+        size_t columnIndex = tbl.len();
+        for (size_t index = 0; index < tbl.len(); ++index) {
             if (tbl.cols[index].dataName == columnName) {
                 columnIndex = index;
                 break;
             }
         }
-        if (columnIndex >= tbl.len) {
+        if (columnIndex >= tbl.len()) {
             ok = false;
             continue;
         }
         const auto& keyNulls = bloomNulls ? *bloomNulls : nullColumns;
-        if (keyNulls.size() != tbl.len) {
+        if (keyNulls.size() != tbl.len()) {
             // A stripped undo payload has no bitmap of its own. Never
             // manufacture a SQL NULL decision when both owners are lost.
             ok = false;
@@ -54962,10 +54984,10 @@ bool StorageEngine::undoDeletedRow(
             if (page.isValid() &&
                 page.read(slotId, currentData, currentLength) &&
                 currentLength >=
-                    rowHeaderSize(tbl.formatVersion, tbl.len) &&
+                    rowHeaderSize(tbl.formatVersion, tbl.len()) &&
                 stripRowHeader(
                     currentData, currentLength, tbl.formatVersion,
-                    tbl.len) == entry.rowData) {
+                    tbl.len()) == entry.rowData) {
                 std::vector<char> stagedBuffer(
                     pageBuffer, pageBuffer + pa->pageSize());
                 PageWrapper staged(
@@ -54973,7 +54995,7 @@ bool StorageEngine::undoDeletedRow(
                     tbl.formatVersion);
                 std::string restored = replaceRowData(
                     std::string(currentData, currentLength),
-                    entry.rowData, tbl.formatVersion, tbl.len);
+                    entry.rowData, tbl.formatVersion, tbl.len());
                 setRowXmax(
                     restored.data(), restored.size(), tbl.formatVersion, 0);
                 uint16_t restoredSlot = slotId;
@@ -55455,21 +55477,21 @@ DBStatus StorageEngine::validateImmediateForeignKeyChecks() {
             const TableSchema table = getTableSchema(check.dbname, check.tablename);
             std::vector<size_t> primary = table.pkColIndices;
             if (primary.empty()) {
-                for (size_t i = 0; i < table.len; ++i) {
+                for (size_t i = 0; i < table.len(); ++i) {
                     if (table.cols[i].isPrimaryKey) primary.push_back(i);
                 }
             }
-            if (primary.size() == 1 && primary.front() < table.len &&
+            if (primary.size() == 1 && primary.front() < table.len() &&
                 table.cols[primary.front()].dataName == check.fkRefCols.front()) {
                 primaryLookup = true;
-                size_t localColumn = table.len;
-                for (size_t i = 0; i < table.len; ++i) {
+                size_t localColumn = table.len();
+                for (size_t i = 0; i < table.len(); ++i) {
                     if (table.cols[i].dataName == check.fkLocalCols.front()) {
                         localColumn = i;
                         break;
                     }
                 }
-                if (localColumn == table.len) return DBStatus::CORRUPTED_DATA;
+                if (localColumn == table.len()) return DBStatus::CORRUPTED_DATA;
                 int64_t localRid = check.rid;
                 std::string localRow;
                 bool readFailed = false;
@@ -56615,16 +56637,16 @@ bool StorageEngine::undoVersionedUpdate(const TxnLogEntry& entry) {
     }
 
     auto columnIndex = [&](const std::string& columnName) {
-        for (size_t i = 0; i < tbl.len; ++i) {
+        for (size_t i = 0; i < tbl.len(); ++i) {
             if (tbl.cols[i].dataName == columnName) return i;
         }
-        return tbl.len;
+        return tbl.len();
     };
     std::map<std::string, std::pair<std::optional<std::string>,
                                     std::optional<std::string>>> hashValues;
     for (const auto& columnName : getHashIndexedColumns(dbname, tablename)) {
         const size_t index = columnIndex(columnName);
-        if (index >= tbl.len) {
+        if (index >= tbl.len()) {
             indexesOk = false;
             continue;
         }
@@ -56647,14 +56669,14 @@ bool StorageEngine::undoVersionedUpdate(const TxnLogEntry& entry) {
                                     std::optional<std::string>>> bloomValues;
     for (const auto& columnName : getBloomIndexedColumns(dbname, tablename)) {
         const size_t index = columnIndex(columnName);
-        if (index >= tbl.len) {
+        if (index >= tbl.len()) {
             indexesOk = false;
             continue;
         }
         const auto keyForImage = [&](const std::string& image,
                                      const std::vector<bool>& nulls)
                 -> std::optional<std::string> {
-            if (nulls.size() != tbl.len) {
+            if (nulls.size() != tbl.len()) {
                 indexesOk = false;
                 return std::nullopt;
             }
@@ -56719,9 +56741,9 @@ bool StorageEngine::undoVersionedUpdate(const TxnLogEntry& entry) {
             size_t tupleLength = 0;
             if (page.isValid() &&
                 page.read(previousSlotId, tuple, tupleLength) &&
-                tupleLength >= rowHeaderSize(tbl.formatVersion, tbl.len) &&
+                tupleLength >= rowHeaderSize(tbl.formatVersion, tbl.len()) &&
                 stripRowHeader(
-                    tuple, tupleLength, tbl.formatVersion, tbl.len) ==
+                    tuple, tupleLength, tbl.formatVersion, tbl.len()) ==
                     entry.rowData) {
                 std::vector<char> stagedBuffer(
                     previousPageBuffer,
@@ -56731,7 +56753,7 @@ bool StorageEngine::undoVersionedUpdate(const TxnLogEntry& entry) {
                     tbl.formatVersion);
                 std::string restored = replaceRowData(
                     std::string(tuple, tupleLength), entry.rowData,
-                    tbl.formatVersion, tbl.len);
+                    tbl.formatVersion, tbl.len());
                 auto* header = castHeapHeader(restored.data());
                 header->t_fields.t_xmax = 0;
                 header->t_infomask &= ~(
@@ -56775,10 +56797,10 @@ bool StorageEngine::undoVersionedUpdate(const TxnLogEntry& entry) {
                     currentRemoved = true;
                 } else if (
                     tupleLength >=
-                        rowHeaderSize(tbl.formatVersion, tbl.len) &&
+                        rowHeaderSize(tbl.formatVersion, tbl.len()) &&
                     stripRowHeader(
                         tuple, tupleLength, tbl.formatVersion,
-                        tbl.len) == currentRow) {
+                        tbl.len()) == currentRow) {
                     std::vector<char> stagedBuffer(
                         currentPageBuffer,
                         currentPageBuffer + pa->pageSize());
@@ -57063,14 +57085,14 @@ DBStatus StorageEngine::rollbackTransaction() {
                 }
                 for (const auto& colname : getHashIndexedColumns(
                          transactionContext().txnDB, it->tableName)) {
-                    size_t colIdx = tbl.len;
-                    for (size_t i = 0; i < tbl.len; ++i) {
+                    size_t colIdx = tbl.len();
+                    for (size_t i = 0; i < tbl.len(); ++i) {
                         if (tbl.cols[i].dataName == colname) {
                             colIdx = i;
                             break;
                         }
                     }
-                    if (colIdx < tbl.len) {
+                    if (colIdx < tbl.len()) {
                         bool isNull = false;
                         std::string value = canonicalColumnKeyValue(
                             tbl.cols[colIdx], extractColumnValue(
@@ -57084,17 +57106,17 @@ DBStatus StorageEngine::rollbackTransaction() {
                 }
                 for (const auto& colname : getBloomIndexedColumns(
                          transactionContext().txnDB, it->tableName)) {
-                    size_t colIdx = tbl.len;
-                    for (size_t i = 0; i < tbl.len; ++i) {
+                    size_t colIdx = tbl.len();
+                    for (size_t i = 0; i < tbl.len(); ++i) {
                         if (tbl.cols[i].dataName == colname) {
                             colIdx = i;
                             break;
                         }
                     }
-                    if (colIdx < tbl.len) {
+                    if (colIdx < tbl.len()) {
                         const auto& keyNulls = it->bloomNulls
                             ? it->bloomNulls->row : nullColumns;
-                        if (keyNulls.size() != tbl.len) {
+                        if (keyNulls.size() != tbl.len()) {
                             rowUndoOk = false;
                             continue;
                         }
@@ -57140,7 +57162,7 @@ DBStatus StorageEngine::rollbackTransaction() {
                         // safe.
                     } else if (stripRowHeader(
                                    currentData, currentLength,
-                                   tbl.formatVersion, tbl.len) != insertedRow) {
+                                   tbl.formatVersion, tbl.len()) != insertedRow) {
                         // Never delete a different tuple if a damaged or
                         // reused RID points at an occupied slot.
                         rowUndoOk = false;
@@ -57308,15 +57330,15 @@ DBStatus StorageEngine::rollbackTransaction() {
                 const char* currentData = nullptr;
                 size_t currentLen = 0;
                 bool got = page.read(slotId, currentData, currentLen);
-                if (got && currentLen >= rowHeaderSize(tbl.formatVersion, tbl.len)) {
-                    currentRow = stripRowHeader(currentData, currentLen, tbl.formatVersion, tbl.len);
+                if (got && currentLen >= rowHeaderSize(tbl.formatVersion, tbl.len())) {
+                    currentRow = stripRowHeader(currentData, currentLen, tbl.formatVersion, tbl.len());
                     foundCurrent = true;
                 } else if (!got) {
                     std::string targetPk = extractPKValue(
                         it->rowData, tbl, transactionContext().txnDB);
                     page.forEachLive([&]([[maybe_unused]] uint16_t sid, const char* data, size_t len) {
-                        if (foundCurrent || len <= rowHeaderSize(tbl.formatVersion, tbl.len)) return;
-                        std::string rowData = stripRowHeader(data, len, tbl.formatVersion, tbl.len);
+                        if (foundCurrent || len <= rowHeaderSize(tbl.formatVersion, tbl.len())) return;
+                        std::string rowData = stripRowHeader(data, len, tbl.formatVersion, tbl.len());
                         std::string pk = extractPKValue(
                             rowData, tbl, transactionContext().txnDB);
                         if (pk == targetPk) {
@@ -57326,9 +57348,9 @@ DBStatus StorageEngine::rollbackTransaction() {
                     });
                 }
                 // Restore old row data
-                if (got && currentLen >= rowHeaderSize(tbl.formatVersion, tbl.len)) {
+                if (got && currentLen >= rowHeaderSize(tbl.formatVersion, tbl.len())) {
                     std::string fullRow = replaceRowData(
-                        std::string(currentData, currentLen), it->rowData, tbl.formatVersion, tbl.len);
+                        std::string(currentData, currentLen), it->rowData, tbl.formatVersion, tbl.len());
                     setRowXmin(fullRow.data(), fullRow.size(), tbl.formatVersion, 0);
                     setRowXmax(fullRow.data(), fullRow.size(), tbl.formatVersion, 0);
                     page.update(slotId, fullRow.data(), fullRow.size());
@@ -57337,13 +57359,13 @@ DBStatus StorageEngine::rollbackTransaction() {
                         it->rowData, tbl, transactionContext().txnDB);
                     bool restored = false;
                     page.forEachLive([&]([[maybe_unused]] uint16_t sid, const char* data, size_t len) {
-                        if (restored || len <= rowHeaderSize(tbl.formatVersion, tbl.len)) return;
-                        std::string rowData = stripRowHeader(data, len, tbl.formatVersion, tbl.len);
+                        if (restored || len <= rowHeaderSize(tbl.formatVersion, tbl.len())) return;
+                        std::string rowData = stripRowHeader(data, len, tbl.formatVersion, tbl.len());
                         std::string pk = extractPKValue(
                             rowData, tbl, transactionContext().txnDB);
                         if (pk == targetPk) {
                             std::string fullRow = replaceRowData(
-                                std::string(data, len), it->rowData, tbl.formatVersion, tbl.len);
+                                std::string(data, len), it->rowData, tbl.formatVersion, tbl.len());
                             setRowXmin(fullRow.data(), fullRow.size(), tbl.formatVersion, 0);
                             setRowXmax(fullRow.data(), fullRow.size(), tbl.formatVersion, 0);
                             page.update(sid, fullRow.data(), fullRow.size());
@@ -57429,11 +57451,11 @@ DBStatus StorageEngine::rollbackTransaction() {
                 }
             }
             for (const auto& colname : getHashIndexedColumns(transactionContext().txnDB, it->tableName)) {
-                size_t colIdx = tbl.len;
-                for (size_t i = 0; i < tbl.len; ++i) {
+                size_t colIdx = tbl.len();
+                for (size_t i = 0; i < tbl.len(); ++i) {
                     if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
                 }
-                if (colIdx >= tbl.len) continue;
+                if (colIdx >= tbl.len()) continue;
                 HashIndex* hashIdx = getHashIndex(
                     transactionContext().txnDB, it->tableName, colname);
                 if (!hashIdx) continue;
@@ -57452,14 +57474,14 @@ DBStatus StorageEngine::rollbackTransaction() {
             }
             for (const auto& colname : getBloomIndexedColumns(
                      transactionContext().txnDB, it->tableName)) {
-                size_t colIdx = tbl.len;
-                for (size_t i = 0; i < tbl.len; ++i) {
+                size_t colIdx = tbl.len();
+                for (size_t i = 0; i < tbl.len(); ++i) {
                     if (tbl.cols[i].dataName == colname) {
                         colIdx = i;
                         break;
                     }
                 }
-                if (colIdx >= tbl.len) {
+                if (colIdx >= tbl.len()) {
                     rowUndoOk = false;
                     continue;
                 }
@@ -57471,13 +57493,13 @@ DBStatus StorageEngine::rollbackTransaction() {
                 }
                 bloomUndoIndexes.insert(bloomIdx);
                 const std::vector<bool> legacyNulls(
-                    usesHeapTupleHeader(tbl.formatVersion) ? 0 : tbl.len, false);
+                    usesHeapTupleHeader(tbl.formatVersion) ? 0 : tbl.len(), false);
                 const auto& currentKeyNulls = it->bloomNulls
                     ? it->bloomNulls->next : legacyNulls;
                 const auto& previousKeyNulls = it->bloomNulls
                     ? it->bloomNulls->row : legacyNulls;
-                if (currentKeyNulls.size() != tbl.len ||
-                    previousKeyNulls.size() != tbl.len) {
+                if (currentKeyNulls.size() != tbl.len() ||
+                    previousKeyNulls.size() != tbl.len()) {
                     rowUndoOk = false;
                     continue;
                 }
@@ -58994,11 +59016,11 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
             }
             for (const auto& colname : getHashIndexedColumns(transactionContext().txnDB, entry.tableName)) {
                 if (insertedRow.empty()) continue;
-                size_t colIdx = tbl.len;
-                for (size_t j = 0; j < tbl.len; ++j) {
+                size_t colIdx = tbl.len();
+                for (size_t j = 0; j < tbl.len(); ++j) {
                     if (tbl.cols[j].dataName == colname) { colIdx = j; break; }
                 }
-                if (colIdx >= tbl.len) {
+                if (colIdx >= tbl.len()) {
                     rowUndoOk = false;
                     continue;
                 }
@@ -59017,20 +59039,20 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
             for (const auto& colname : getBloomIndexedColumns(
                      transactionContext().txnDB, entry.tableName)) {
                 if (insertedRow.empty()) continue;
-                size_t colIdx = tbl.len;
-                for (size_t j = 0; j < tbl.len; ++j) {
+                size_t colIdx = tbl.len();
+                for (size_t j = 0; j < tbl.len(); ++j) {
                     if (tbl.cols[j].dataName == colname) {
                         colIdx = j;
                         break;
                     }
                 }
-                if (colIdx >= tbl.len) {
+                if (colIdx >= tbl.len()) {
                     rowUndoOk = false;
                     continue;
                 }
                 const auto& keyNulls = entry.bloomNulls
                     ? entry.bloomNulls->row : nullColumns;
-                if (keyNulls.size() != tbl.len) {
+                if (keyNulls.size() != tbl.len()) {
                     rowUndoOk = false;
                     continue;
                 }
@@ -59140,15 +59162,15 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
                 // Read current row data before restoring (needed to remove stale index entries)
                 const char* currentData = nullptr;
                 size_t currentLen = 0;
-                if (page.read(slotId, currentData, currentLen) && currentLen >= rowHeaderSize(tbl.formatVersion, tbl.len)) {
-                    currentRow = stripRowHeader(currentData, currentLen, tbl.formatVersion, tbl.len);
+                if (page.read(slotId, currentData, currentLen) && currentLen >= rowHeaderSize(tbl.formatVersion, tbl.len())) {
+                    currentRow = stripRowHeader(currentData, currentLen, tbl.formatVersion, tbl.len());
                     foundCurrent = true;
                 } else {
                     std::string targetPk = extractPKValue(
                         entry.rowData, tbl, transactionContext().txnDB);
                     page.forEachLive([&]([[maybe_unused]] uint16_t sid, const char* data, size_t len) {
-                        if (foundCurrent || len <= rowHeaderSize(tbl.formatVersion, tbl.len)) return;
-                        std::string rowData = stripRowHeader(data, len, tbl.formatVersion, tbl.len);
+                        if (foundCurrent || len <= rowHeaderSize(tbl.formatVersion, tbl.len())) return;
+                        std::string rowData = stripRowHeader(data, len, tbl.formatVersion, tbl.len());
                         std::string pk = extractPKValue(
                             rowData, tbl, transactionContext().txnDB);
                         if (pk == targetPk) {
@@ -59158,9 +59180,9 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
                     });
                 }
                 // Restore old row data
-                if (page.read(slotId, currentData, currentLen) && currentLen >= rowHeaderSize(tbl.formatVersion, tbl.len)) {
+                if (page.read(slotId, currentData, currentLen) && currentLen >= rowHeaderSize(tbl.formatVersion, tbl.len())) {
                     std::string fullRow = replaceRowData(
-                        std::string(currentData, currentLen), entry.rowData, tbl.formatVersion, tbl.len);
+                        std::string(currentData, currentLen), entry.rowData, tbl.formatVersion, tbl.len());
                     setRowXmin(fullRow.data(), fullRow.size(), tbl.formatVersion, 0);
                     setRowXmax(fullRow.data(), fullRow.size(), tbl.formatVersion, 0);
                     page.update(slotId, fullRow.data(), fullRow.size());
@@ -59169,13 +59191,13 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
                         entry.rowData, tbl, transactionContext().txnDB);
                     bool restored = false;
                     page.forEachLive([&]([[maybe_unused]] uint16_t sid, const char* data, size_t len) {
-                        if (restored || len <= rowHeaderSize(tbl.formatVersion, tbl.len)) return;
-                        std::string rowData = stripRowHeader(data, len, tbl.formatVersion, tbl.len);
+                        if (restored || len <= rowHeaderSize(tbl.formatVersion, tbl.len())) return;
+                        std::string rowData = stripRowHeader(data, len, tbl.formatVersion, tbl.len());
                         std::string pk = extractPKValue(
                             rowData, tbl, transactionContext().txnDB);
                         if (pk == targetPk) {
                             std::string fullRow = replaceRowData(
-                                std::string(data, len), entry.rowData, tbl.formatVersion, tbl.len);
+                                std::string(data, len), entry.rowData, tbl.formatVersion, tbl.len());
                             setRowXmin(fullRow.data(), fullRow.size(), tbl.formatVersion, 0);
                             setRowXmax(fullRow.data(), fullRow.size(), tbl.formatVersion, 0);
                             page.update(sid, fullRow.data(), fullRow.size());
@@ -59272,11 +59294,11 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
                 }
             }
             for (const auto& colname : getHashIndexedColumns(transactionContext().txnDB, entry.tableName)) {
-                size_t colIdx = tbl.len;
-                for (size_t i = 0; i < tbl.len; ++i) {
+                size_t colIdx = tbl.len();
+                for (size_t i = 0; i < tbl.len(); ++i) {
                     if (tbl.cols[i].dataName == colname) { colIdx = i; break; }
                 }
-                if (colIdx >= tbl.len) continue;
+                if (colIdx >= tbl.len()) continue;
                 HashIndex* hashIdx = getHashIndex(
                     transactionContext().txnDB, entry.tableName, colname);
                 if (!hashIdx) continue;
@@ -59295,14 +59317,14 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
             }
             for (const auto& colname : getBloomIndexedColumns(
                      transactionContext().txnDB, entry.tableName)) {
-                size_t colIdx = tbl.len;
-                for (size_t i = 0; i < tbl.len; ++i) {
+                size_t colIdx = tbl.len();
+                for (size_t i = 0; i < tbl.len(); ++i) {
                     if (tbl.cols[i].dataName == colname) {
                         colIdx = i;
                         break;
                     }
                 }
-                if (colIdx >= tbl.len) {
+                if (colIdx >= tbl.len()) {
                     rowUndoOk = false;
                     continue;
                 }
@@ -59314,13 +59336,13 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
                 }
                 bloomUndoIndexes.insert(bloomIdx);
                 const std::vector<bool> legacyNulls(
-                    usesHeapTupleHeader(tbl.formatVersion) ? 0 : tbl.len, false);
+                    usesHeapTupleHeader(tbl.formatVersion) ? 0 : tbl.len(), false);
                 const auto& currentKeyNulls = entry.bloomNulls
                     ? entry.bloomNulls->next : legacyNulls;
                 const auto& previousKeyNulls = entry.bloomNulls
                     ? entry.bloomNulls->row : legacyNulls;
-                if (currentKeyNulls.size() != tbl.len ||
-                    previousKeyNulls.size() != tbl.len) {
+                if (currentKeyNulls.size() != tbl.len() ||
+                    previousKeyNulls.size() != tbl.len()) {
                     rowUndoOk = false;
                     continue;
                 }
@@ -60345,7 +60367,7 @@ static std::filesystem::path compositeTypePath(const std::string& dbname) {
 static bool validCompositeTypeDefinition(
     const StorageEngine::CompositeType& type) {
     if (!validMetadataObjectName(type.name) || type.fields.empty() ||
-        type.fields.size() > MAX_COLUMNS) {
+        type.fields.size() > MAX_COMPOSITE_FIELDS) {
         return false;
     }
     if (type.schema.empty() != type.localName.empty()) return false;
@@ -60781,7 +60803,7 @@ DBStatus StorageEngine::updateEnumType(const std::string& dbname, const EnumType
     const auto tableNames = getTableNames(dbname);
     for (const auto& tableName : tableNames) {
         const TableSchema schema = getTableSchema(dbname, tableName);
-        if (schema.len == 0) return DBStatus::CORRUPTED_DATA;
+        if (schema.len() == 0) return DBStatus::CORRUPTED_DATA;
         std::string originalSchemaBytes;
         if (!serializeSchema(schema, originalSchemaBytes)) return DBStatus::IO_ERROR;
         observedSchemas.emplace_back(tableName, std::move(originalSchemaBytes));
@@ -60789,7 +60811,7 @@ DBStatus StorageEngine::updateEnumType(const std::string& dbname, const EnumType
         rewrite.tableName = tableName;
         rewrite.original = schema;
         rewrite.updated = schema;
-        for (size_t columnIndex = 0; columnIndex < schema.len; ++columnIndex) {
+        for (size_t columnIndex = 0; columnIndex < schema.len(); ++columnIndex) {
             const Column& column = schema.cols[columnIndex];
             const bool namedDependency =
                 column.dataType == et.name && !column.enumValues.empty();
@@ -60852,7 +60874,7 @@ DBStatus StorageEngine::updateEnumType(const std::string& dbname, const EnumType
         if (!unchanged) break;
         const TableSchema currentSchema = getTableSchema(dbname, tableName);
         std::string currentSchemaBytes;
-        unchanged = currentSchema.len != 0 &&
+        unchanged = currentSchema.len() != 0 &&
             serializeSchema(currentSchema, currentSchemaBytes) &&
             currentSchemaBytes == originalSchemaBytes;
     }
@@ -61590,11 +61612,11 @@ static std::pair<bool, size_t> nativePlpgsqlExecSql(
             return {false, 0};
         if (!ins->tableName.empty()) {
             TableSchema tbl = engine.getTableSchema(dbname, ins->tableName);
-            if (tbl.len == 0)
+            if (tbl.len() == 0)
                 throw DbError("42P01", "native function INSERT table does not exist");
             std::vector<std::string> columns;
             if (ins->columns.empty()) {
-                for (size_t i = 0; i < tbl.len; ++i) columns.push_back(tbl.cols[i].dataName);
+                for (size_t i = 0; i < tbl.len(); ++i) columns.push_back(tbl.cols[i].dataName);
             } else {
                 std::set<std::string> seen;
                 for (const auto& raw : ins->columns) {
@@ -61603,7 +61625,7 @@ static std::pair<bool, size_t> nativePlpgsqlExecSql(
                         throw DbError("42601", "invalid native INSERT column");
                     if (!seen.insert(name.name).second)
                         throw DbError("42701", "native INSERT column specified more than once");
-                    if (std::none_of(tbl.cols, tbl.cols + tbl.len, [&](const Column& column) {
+                    if (std::none_of(tbl.cols.begin(), tbl.cols.end(), [&](const Column& column) {
                             return column.dataName == name.name;
                         })) throw DbError("42703", "native INSERT column does not exist: " + name.name);
                     columns.push_back(name.name);
@@ -61834,7 +61856,7 @@ PlPgsqlQueryResult StorageEngine::plpgsqlQueryNative(
                 return fail("42P01", "relation does not exist: " + from.tableName);
             schema = getTableSchema(dbname, table);
             visibleRange = from.alias.empty() ? relation.name : identifier(from.alias);
-            for (size_t i = 0; i < schema.len; ++i) {
+            for (size_t i = 0; i < schema.len(); ++i) {
                 columnPositions.emplace(schema.cols[i].dataName, i);
                 const std::string key = "__dbms_plpgsql_col_" + std::to_string(i);
                 columnKeys.push_back(key);
@@ -61946,7 +61968,7 @@ PlPgsqlQueryResult StorageEngine::plpgsqlQueryNative(
                 if (!select->fromClause) return fail("42601", "SELECT * requires a relation");
                 if (column && !validRange(*column))
                     return fail("42P01", "missing FROM-clause entry for star qualifier");
-                for (size_t i = 0; i < schema.len; ++i) {
+                for (size_t i = 0; i < schema.len(); ++i) {
                     SelectItem expanded;
                     auto reference = std::make_unique<ColumnRefExpr>();
                     reference->column = columnKeys[i];

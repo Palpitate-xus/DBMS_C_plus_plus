@@ -35,7 +35,7 @@ static void setupSession(Session& s, const std::string& db) {
 }
 
 static const dbms::Column* findCol(const dbms::TableSchema& t, const std::string& name) {
-    for (size_t i = 0; i < t.len; ++i)
+    for (size_t i = 0; i < t.len(); ++i)
         if (t.cols[i].dataName == name) return &t.cols[i];
     return nullptr;
 }

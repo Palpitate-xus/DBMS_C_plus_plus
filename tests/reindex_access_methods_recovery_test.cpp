@@ -212,17 +212,17 @@ Expected loadExpected(const fs::path& path) {
 Expected verify(bool mixed, const Expected* original = nullptr) {
     need(!g_engine.inTransaction(), "verification has no current native transaction");
     const auto schema = g_engine.getTableSchema(DB, TABLE);
-    need(schema.len == 6 && schema.physicalRelationId, "genuine complete physical schema");
+    need(schema.len() == 6 && schema.physicalRelationId, "genuine complete physical schema");
     Expected result; result.relation = schema.physicalRelationId; result.metadata = metadata();
     need(g_engine.forEachRow(DB, TABLE, [&](uint32_t page, uint16_t slot, const char* data, size_t length) {
         const auto rid = StorageEngine::encodeRid(page, slot); const std::string raw(data, length);
         const int id = std::stoi(g_engine.extractColumnValue(raw, schema, 0, DB));
         need(id >= 1 && id <= ROWS && result.rids.emplace(id, rid).second, "actual unique complete heap row");
         const auto bitmap = detail::storedRowNullBitmap(g_engine, DB, TABLE, schema, rid);
-        need(bitmap && bitmap->size() == schema.len, "actual heap-owned NULL bitmap");
+        need(bitmap && bitmap->size() == schema.len(), "actual heap-owned NULL bitmap");
         const auto wanted = cells(model(id));
         std::cout << "REINDEX_AM_ROW " << id << " rid=" << rid;
-        for (size_t col = 0; col < schema.len; ++col) {
+        for (size_t col = 0; col < schema.len(); ++col) {
             bool isNull = false; const auto actual = g_engine.extractColumnValue(raw, schema, col, DB, true, &isNull);
             need(isNull == !wanted[col] && isNull == (*bitmap)[col], "true NULL distinct from empty");
             need(actual == wanted[col].value_or(""), "full stored cell exact " + schema.cols[col].dataName);

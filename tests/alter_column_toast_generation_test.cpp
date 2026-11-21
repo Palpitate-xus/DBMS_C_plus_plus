@@ -20,7 +20,7 @@ static Rows snapshot(const std::string& database) {
             dbms::StorageEngine::SqlRow row;
             const auto rid = dbms::StorageEngine::encodeRid(page, slot);
             const std::string bytes(data, length);
-            for (size_t i = 0; i < schema.len; ++i) {
+            for (size_t i = 0; i < schema.len(); ++i) {
                 if (g_engine.isColumnNullByRid(database, "items", rid, i))
                     row[schema.cols[i].dataName] = std::nullopt;
                 else row[schema.cols[i].dataName] =

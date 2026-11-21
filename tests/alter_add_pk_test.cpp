@@ -28,7 +28,7 @@ static void setupSession(Session& s, const std::string& db) {
 }
 
 static bool colIsPk(const dbms::TableSchema& tbl, const std::string& col) {
-    for (size_t i = 0; i < tbl.len; ++i)
+    for (size_t i = 0; i < tbl.len(); ++i)
         if (tbl.cols[i].dataName == col) return tbl.cols[i].isPrimaryKey;
     return false;
 }

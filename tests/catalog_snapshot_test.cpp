@@ -88,7 +88,7 @@ int main() {
         assert(r == DBStatus::OK);
 
         TableSchema schemaBefore = engine.getTableSchema(dbname, "base");
-        assert(schemaBefore.len == 2);
+        assert(schemaBefore.len() == 2);
 
         // Alter table from the concurrent engine instance
         r = engine2.beginTransaction(dbname);
@@ -101,7 +101,7 @@ int main() {
 
         // engine1 still sees old schema
         TableSchema schemaDuring = engine.getTableSchema(dbname, "base");
-        assert(schemaDuring.len == 2);
+        assert(schemaDuring.len() == 2);
 
         r = engine.commitTransaction();
         assert(r == DBStatus::OK);
@@ -110,7 +110,7 @@ int main() {
         r = engine.beginTransaction(dbname);
         assert(r == DBStatus::OK);
         TableSchema schemaAfter = engine.getTableSchema(dbname, "base");
-        assert(schemaAfter.len == 3);
+        assert(schemaAfter.len() == 3);
         engine.commitTransaction();
 
         std::cout << "[CATALOG SNAPSHOT] getTableSchema isolation OK\n";
@@ -122,7 +122,7 @@ int main() {
         assert(r == DBStatus::OK);
 
         TableSchema snap = engine.getTableSchema(dbname, "base");
-        assert(snap.len == 3);
+        assert(snap.len() == 3);
 
         Column another = makeIntColumn("score", true, 0, false);
         r = engine.alterTableAddColumn(dbname, "base", another);
@@ -130,7 +130,7 @@ int main() {
 
         // Within same transaction, own DDL is visible (cache miss on modified schema)
         TableSchema withOwn = engine.getTableSchema(dbname, "base");
-        assert(withOwn.len == 4);
+        assert(withOwn.len() == 4);
 
         r = engine.rollbackTransaction();
         assert(r == DBStatus::OK);
@@ -141,7 +141,7 @@ int main() {
         r = engine.beginTransaction(dbname);
         assert(r == DBStatus::OK);
         TableSchema afterRollback = engine.getTableSchema(dbname, "base");
-        assert(afterRollback.len == 4); // snapshot was cleared, read from disk
+        assert(afterRollback.len() == 4); // snapshot was cleared, read from disk
         engine.commitTransaction();
 
         std::cout << "[CATALOG SNAPSHOT] rollback clears snapshot OK\n";

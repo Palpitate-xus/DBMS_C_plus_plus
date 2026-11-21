@@ -36,7 +36,7 @@ Rows snapshot(const std::string& database, const std::string& table) {
     Rows rows; std::string raw;
     while (scan.next(raw)) {
         StorageEngine::SqlRow row;
-        for (size_t i = 0; i < schema.len; ++i)
+        for (size_t i = 0; i < schema.len(); ++i)
             row[schema.cols[i].dataName] = scan.lastColumnIsNull(i) ? Cell{} :
                 Cell{g_engine.extractColumnValue(raw, schema, i, database)};
         require(row.at("id").has_value() && rows.emplace(*row.at("id"), std::move(row)).second,

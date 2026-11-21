@@ -57,7 +57,7 @@ static void test_ddl_alias_columns() {
     assert(g_engine.tableExists(db, "t"));
 
     dbms::TableSchema schema = g_engine.getTableSchema(db, "t");
-    assert(schema.len == 5);
+    assert(schema.len() == 5);
     assert(schema.cols[0].dataType == "smallint" || schema.cols[0].dataType == "int2");
     assert(schema.cols[1].dataType == "timestamp");
     assert(schema.cols[2].dataType == "blob" || schema.cols[2].dataType == "bytea");

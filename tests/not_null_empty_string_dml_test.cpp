@@ -56,16 +56,16 @@ void testNotNullEmptyValues() {
 
     const dbms::TableSchema table =
         g_engine.getTableSchema(database, "values_table");
-    size_t textColumn = table.len;
-    size_t bytesColumn = table.len;
-    for (size_t column = 0; column < table.len; ++column) {
+    size_t textColumn = table.len();
+    size_t bytesColumn = table.len();
+    for (size_t column = 0; column < table.len(); ++column) {
         if (table.cols[column].dataName == "required_text") {
             textColumn = column;
         } else if (table.cols[column].dataName == "required_bytes") {
             bytesColumn = column;
         }
     }
-    assert(textColumn < table.len && bytesColumn < table.len);
+    assert(textColumn < table.len() && bytesColumn < table.len());
     size_t rowCount = 0;
     assert(g_engine.forEachRow(
         database, "values_table",

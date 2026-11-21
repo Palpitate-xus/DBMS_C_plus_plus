@@ -20,7 +20,7 @@ static void setupSession(Session& s, const std::string& db) {
 }
 
 static const dbms::Column* findCol(const dbms::TableSchema& t, const std::string& name) {
-    for (size_t i = 0; i < t.len; ++i)
+    for (size_t i = 0; i < t.len(); ++i)
         if (t.cols[i].dataName == name) return &t.cols[i];
     return nullptr;
 }
@@ -36,7 +36,7 @@ static void test_of_type_basic() {
     assert(!ddl.executeSql("CREATE TABLE people OF person", s));
 
     auto schema = g_engine.getTableSchema(db, "people");
-    assert(schema.len == 2);
+    assert(schema.len() == 2);
     const dbms::Column* name = findCol(schema, "name");
     const dbms::Column* age = findCol(schema, "age");
     assert(name && age);
@@ -56,7 +56,7 @@ static void test_of_type_numeric() {
     assert(!ddl.executeSql("CREATE TABLE wallet OF money_t", s));
 
     auto schema = g_engine.getTableSchema(db, "wallet");
-    assert(schema.len == 2);
+    assert(schema.len() == 2);
     assert(findCol(schema, "amount") && findCol(schema, "code"));
     cleanup(db);
     std::cout << "[OF TYPE] numeric(p,s) field OK" << std::endl;

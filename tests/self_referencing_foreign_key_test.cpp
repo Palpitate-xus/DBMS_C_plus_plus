@@ -20,7 +20,7 @@ NodeRow nodeById(const std::string& database, const std::string& tableName,
                  const std::string& id) {
     const dbms::TableSchema table =
         g_engine.getTableSchema(database, tableName);
-    assert(table.len == 2);
+    assert(table.len() == 2);
     NodeRow result;
     assert(g_engine.forEachRow(
         database, tableName,

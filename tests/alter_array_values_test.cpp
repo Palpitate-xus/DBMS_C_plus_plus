@@ -34,7 +34,7 @@ int main() {
             const std::string row(data,length);
             const std::string id = g_engine.extractColumnValue(row,schema,0,database,true);
             const int64_t rid = dbms::StorageEngine::encodeRid(page,slot);
-            for (size_t column=0;column<schema.len;++column)
+            for (size_t column=0;column<schema.len();++column)
                 rows[id][schema.cols[column].dataName] = g_engine.isColumnNullByRid(database,"t",rid,column)
                     ? std::nullopt : std::optional<std::string>(g_engine.extractColumnValue(row,schema,column,database,true));
         }));

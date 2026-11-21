@@ -93,14 +93,11 @@ inline void setCtid(HeapTupleHeaderData* htup, const ItemPointer& ctid) {
 }
 
 // 计算 header 总大小（包括 null bitmap）
-inline uint8_t computeHeapHeaderSize(int natts) {
-    size_t size = sizeof(HeapTupleHeaderData);
-    if (natts > 0) {
-        size += (natts + 7) / 8; // null bitmap
-    }
+inline constexpr size_t computeHeapHeaderSize(size_t natts) {
+    const size_t bitmapBytes = natts / 8 + (natts % 8 != 0);
+    const size_t size = sizeof(HeapTupleHeaderData) + bitmapBytes;
     // 对齐到 MAXALIGN (8)
-    size = (size + MAXALIGN - 1) & ~(MAXALIGN - 1);
-    return static_cast<uint8_t>(size);
+    return (size + MAXALIGN - 1) & ~(MAXALIGN - 1);
 }
 
 // 初始化 HeapTupleHeader
@@ -116,7 +113,7 @@ inline void initHeapTupleHeader(HeapTupleHeaderData* htup, uint32_t xmin,
     htup->t_infomask = 0;
     if (hasNull) htup->t_infomask |= HEAP_HASNULL;
     if (hasVarWidth) htup->t_infomask |= HEAP_HASVARWIDTH;
-    htup->t_hoff = computeHeapHeaderSize(static_cast<int>(natts));
+    htup->t_hoff = static_cast<uint8_t>(computeHeapHeaderSize(natts));
 }
 
 // 获取 null bitmap 指针（紧跟在固定 header 之后）

@@ -13,7 +13,7 @@ int main() {
     {
         StorageEngine owner;
         assert(owner.createDatabase(db, "utf8") == DBStatus::OK);
-        TableSchema schema; schema.len = 1; schema.cols[0].dataName = "items";
+        TableSchema schema; schema.cols.resize(1); schema.cols[0].dataName = "items";
         assert(TypeRegistry::instance().resolveColumnType(schema.cols[0], "integer", {}, true).empty());
         schema.cols[0].isNull = true;
         assert(owner.createTable(db, "old_source", schema) == DBStatus::OK);

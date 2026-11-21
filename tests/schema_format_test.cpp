@@ -26,7 +26,7 @@ int main() {
         tbl.tablename = "t";
         tbl.append(makeIntColumn("id", false, 0, true));
         assert(engine.createTable(dbname, tbl) == DBStatus::OK);
-        assert(engine.getTableSchema(dbname, "t").len == 1);
+        assert(engine.getTableSchema(dbname, "t").len() == 1);
     }
 
     const auto schemaPath = std::filesystem::path(dbname) / "t.stc";
@@ -82,7 +82,7 @@ int main() {
         assert(out);
     }
     {
-        assert(parserOwner.getTableSchema(dbname, "t").len == 1);
+        assert(parserOwner.getTableSchema(dbname, "t").len() == 1);
     }
     {
         std::ofstream out(schemaPath, std::ios::binary | std::ios::trunc);
@@ -93,7 +93,7 @@ int main() {
         assert(out);
     }
     {
-        assert(parserOwner.getTableSchema(dbname, "t").len == 1);
+        assert(parserOwner.getTableSchema(dbname, "t").len() == 1);
     }
     int corruptionVersion = 0;
     const auto writeCorruptDsize = [&](int32_t dsize) {
@@ -121,20 +121,20 @@ int main() {
     writeCorruptDsize(-1);
     {
         // A negative on-disk width must not wrap to SIZE_MAX.
-        assert(parserOwner.getTableSchema(dbname, "t").len == 0);
+        assert(parserOwner.getTableSchema(dbname, "t").len() == 0);
     }
 
     writeCorruptDsize(65536);
     {
         // Current column types never persist widths above the format limit.
-        assert(parserOwner.getTableSchema(dbname, "t").len == 0);
+        assert(parserOwner.getTableSchema(dbname, "t").len() == 0);
     }
 
     std::filesystem::resize_file(schemaPath, 8);
     {
         // A truncated current-format schema must not become a partially parsed
         // schema that callers could accidentally use for writes.
-        assert(parserOwner.getTableSchema(dbname, "t").len == 0);
+        assert(parserOwner.getTableSchema(dbname, "t").len() == 0);
     }
 
     {
@@ -143,7 +143,7 @@ int main() {
         out.write(reinterpret_cast<const char*>(&unsupportedMagic), sizeof(unsupportedMagic));
     }
     {
-        assert(parserOwner.getTableSchema(dbname, "t").len == 0);
+        assert(parserOwner.getTableSchema(dbname, "t").len() == 0);
     }
     bool coldRejected=false;
     try { StorageEngine cold; }

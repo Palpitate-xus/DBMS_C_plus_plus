@@ -16,7 +16,7 @@ int main() {
     cleanupTestDb(name);
     assert(g_engine.createDatabase(db, "utf8") == DBStatus::OK);
     TableSchema table;
-    table.len = 1;
+    table.cols.resize(1);
     table.cols[0].dataName = "id";
     table.cols[0].dataType = "int";
     table.cols[0].dsize = 4;

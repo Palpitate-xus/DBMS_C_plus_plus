@@ -47,7 +47,7 @@ int main() {
     assert(result.firstRow==std::vector<std::optional<std::string>>{"23"});
     result=owner.plpgsqlQuery(db,"SELECT native_failure() WHERE other.coalesce(1,2)>0");
     assert(!result.ok && result.sqlState=="42883");
-    TableSchema schema; schema.len=1;
+    TableSchema schema; schema.cols.resize(1);
     schema.cols[0].dataName="id"; schema.cols[0].dataType="int"; schema.cols[0].dsize=4;
     assert(owner.createTable(db,"source",schema)==DBStatus::OK);
     for (int id : {1,2,3})

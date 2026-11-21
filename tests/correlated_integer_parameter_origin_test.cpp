@@ -47,7 +47,7 @@ int main() {
             "BEGIN INSERT INTO calls VALUES(1); RETURN p; END;", 'v', "plpgsql", "integer"),
             "create integer writer")) return 2;
     const auto stored = g_engine.getTableSchema(database, "rows");
-    require(stored.len == 2 && stored.cols[1].dataName == "i" &&
+    require(stored.len() == 2 && stored.cols[1].dataName == "i" &&
             ExprHelper::canonicalResultTypeName(stored.cols[1].dataType) == "integer" && stored.cols[1].dsize == 4,
             "persisted physical input is true INTEGER, not a labelled BIGINT datum");
     for (int id = 1; id <= 3; ++id)

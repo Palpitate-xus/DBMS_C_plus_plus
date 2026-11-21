@@ -1088,7 +1088,7 @@ static void test_long_identifiers_round_trip() {
         "CREATE TABLE " + tableName + " (" + columnName + " INT)", s));
     auto schema = g_engine.getTableSchema(db, tableName);
     assert(schema.tablename == tableName);
-    assert(schema.len == 1 && schema.cols[0].dataName == columnName);
+    assert(schema.len() == 1 && schema.cols[0].dataName == columnName);
     assert(!ddl.executeSql(
         "ALTER TABLE " + tableName + " ADD CONSTRAINT " + constraintName +
         " CHECK (" + columnName + " > 0)", s));

@@ -50,8 +50,8 @@ inline std::optional<std::vector<bool>> storedRowNullBitmap(
     size_t length = 0;
     if (!page.read(slotId, tuple, length) || length < sizeof(HeapTupleHeaderData))
         return std::nullopt;
-    std::vector<bool> nulls(schema.len, false);
-    for (size_t i = 0; i < schema.len; ++i)
+    std::vector<bool> nulls(schema.len(), false);
+    for (size_t i = 0; i < schema.len(); ++i)
         if (schema.cols[i].isNull)
             nulls[i] = dbms::isNull(castHeapHeader(tuple), static_cast<int>(i));
     return nulls;
@@ -97,7 +97,7 @@ inline bool storedRowColumnIsNull(const StorageEngine& engine,
                                  const std::string& table,
                                  const TableSchema& schema,
                                  int64_t rid, size_t column) {
-    if (column >= schema.len || !schema.cols[column].isNull) return false;
+    if (column >= schema.len() || !schema.cols[column].isNull) return false;
     auto* allocator = engine.getPageAllocator(database, table);
     if (!allocator) return false;
     uint32_t pageId = 0;

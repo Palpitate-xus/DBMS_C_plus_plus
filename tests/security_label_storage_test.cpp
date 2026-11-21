@@ -137,7 +137,7 @@ static void testStorageFailures(StorageEngine& engine) {
 }
 
 static bool hasColumn(const TableSchema& table, const std::string& name) {
-    for (size_t i = 0; i < table.len; ++i) {
+    for (size_t i = 0; i < table.len(); ++i) {
         if (table.cols[i].dataName == name) return true;
     }
     return false;

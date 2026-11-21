@@ -37,7 +37,7 @@ int main() {
     table.append(makeIntColumn("s", false, 0));
     table.append(makeIntColumn("b", false, 8));
     table.append(makeVarCharColumn("t", false, 16));
-    for (size_t column = 1; column < table.len; ++column) table.cols[column].isNull = true;
+    for (size_t column = 1; column < table.len(); ++column) table.cols[column].isNull = true;
     assert(engine.createTable(db, table) == DBStatus::OK);
     assert(engine.insertRow(db, "values_", {{"id","1"},{"f","16777216"},{"g","1"},{"d","9007199254740992"},{"e","1"},{"i","2147483647"},{"s","32767"},{"b","9223372036854775807"},{"t",""}}) == DBStatus::OK);
     assert(engine.insertRow(db, "values_", {{"id","2"},{"f",std::nullopt},{"g",std::nullopt},{"d",std::nullopt},{"e",std::nullopt},{"i",std::nullopt},{"s",std::nullopt},{"b",std::nullopt},{"t",std::nullopt}}) == DBStatus::OK);

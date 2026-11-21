@@ -45,7 +45,7 @@ int main() {
     // it correctly rejects a directory because file_size() fails.
     assert(g_engine.beginTransaction(db) == dbms::DBStatus::OK);
     const auto originalSchema = g_engine.getTableSchema(db, "items");
-    assert(originalSchema.len == 1);
+    assert(originalSchema.len() == 1);
     fs::rename(schemaPath, savedPath);
     assert(fs::create_directory(schemaPath));
 
@@ -61,14 +61,14 @@ int main() {
 
     dbms::StorageEngine reloaded;
     const auto afterFailure = reloaded.getTableSchema(db, "items");
-    assert(afterFailure.len == 1);
+    assert(afterFailure.len() == 1);
     assert(afterFailure.cols[0].defaultValue.empty());
 
     assert(g_engine.alterTableSetDefault(
                db, "items", "id", "42") == dbms::DBStatus::OK);
     dbms::StorageEngine persisted;
     const auto afterSuccess = persisted.getTableSchema(db, "items");
-    assert(afterSuccess.len == 1);
+    assert(afterSuccess.len() == 1);
     assert(afterSuccess.cols[0].defaultValue == "42");
 
     // ALTER CONSTRAINT used to bypass the common schema publisher and open

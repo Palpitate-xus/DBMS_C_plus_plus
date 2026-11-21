@@ -26,7 +26,7 @@ int main() {
     assert(!ddl.executeSql("CREATE TABLE ranks (id INT PRIMARY KEY, r rank_type)", session));
     const auto schema = g_engine.getTableSchema(db, "ranks");
     std::cout << "ENUM_EMPTY_SCHEMA_LABEL_COUNT=" << schema.cols[1].enumValues.size() << std::endl;
-    assert(schema.len == 2 && schema.cols[1].enumValues == labels);
+    assert(schema.len() == 2 && schema.cols[1].enumValues == labels);
     assert(schema.cols[1].dataType == "rank_type" && schema.cols[1].isNull);
     const auto& catalog = g_engine.catalogService().get(db);
     const auto* ns = catalog.findNamespaceByName("public");
@@ -53,7 +53,7 @@ int main() {
     {
         StorageEngine reopened;
         const auto cold = reopened.getTableSchema(db, "ranks");
-        assert(cold.len == 2 && cold.cols[1].dataType == "rank_type" && cold.cols[1].enumValues == labels);
+        assert(cold.len() == 2 && cold.cols[1].dataType == "rank_type" && cold.cols[1].enumValues == labels);
         auto prepared = reopened.prepareBoundQuery(db, "SELECT id,r,r IS NULL FROM ranks ORDER BY id");
         auto plan = QueryPlanner::buildPreparedSelectPlan(&reopened, db, "ranks", std::move(prepared));
         const auto result = QueryPlanner::executePlanChecked(std::move(plan)); result.throwIfFailed();

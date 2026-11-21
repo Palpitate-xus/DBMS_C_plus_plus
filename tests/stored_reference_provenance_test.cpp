@@ -263,11 +263,11 @@ void actualJoins(const std::string& database, const TableSchema& left, const Tab
         for (const auto& a : lhs) {
             bool matched = false;
             for (const auto& b : rhs) if (mode == 4 || a[0] == b[0]) { append(a, b); matched = true; }
-            if (!matched && (mode == 1 || mode == 3)) append(a, Row(right.len));
+            if (!matched && (mode == 1 || mode == 3)) append(a, Row(right.len()));
         }
         if (mode == 2 || mode == 3) for (const auto& b : rhs) {
             const bool matched = std::any_of(lhs.begin(), lhs.end(), [&](const Row& a) { return a[0] == b[0]; });
-            if (!matched) append(Row(left.len), b);
+            if (!matched) append(Row(left.len()), b);
         }
         const auto actual = run(true), legacy = run(false);
         need(unordered(actual.rows()) == unordered(expected), "actual JOIN mode " + std::to_string(mode) + " retains raw cells and outer NULLs");

@@ -28,7 +28,7 @@ int main() {
     assert(fs::is_directory(image));
     transaction.markSnapshotDirty();
     assert(g_engine.alterTableAddColumn(database, "rows", makeIntColumn("added", true, 2)) == DBStatus::OK);
-    assert(g_engine.getTableSchema(database, "rows").len == 2);
+    assert(g_engine.getTableSchema(database, "rows").len() == 2);
 
     // Temporarily unavailable, otherwise valid normal backup directory.
     // Restore the very same image for the explicit healthy retry.
@@ -41,7 +41,7 @@ int main() {
     transaction.rollback();
     assert(!transaction.isActive() && !g_engine.inTransaction());
     assert(!fs::exists(image));
-    assert(g_engine.getTableSchema(database, "rows").len == 1);
+    assert(g_engine.getTableSchema(database, "rows").len() == 1);
     assert(g_engine.query(database, "rows", {}, {"id"}) == std::vector<std::string>{"7 "});
 
     bool healthy = false;
@@ -72,7 +72,7 @@ int main() {
     // The wrapper has unwound, but the engine still owns the image and undo.
     g_engine.discardTransactionBackup(database);
     assert(calls == 2 && !fs::exists(laterImage));
-    assert(g_engine.getTableSchema(database, "rows").len == 1);
+    assert(g_engine.getTableSchema(database, "rows").len() == 1);
     assert(g_engine.query(database, "rows", {}, {"id"}) == std::vector<std::string>{"7 "});
     assert(g_engine.insert(database, "rows", {{"id", "8"}}) == DBStatus::OK);
     assert(g_engine.dropDatabase(database) == DBStatus::OK);

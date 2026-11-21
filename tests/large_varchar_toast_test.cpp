@@ -83,12 +83,12 @@ Rows afterTruncate(const std::string& mode) {
 }
 Rows scan(const std::string& phase) {
     const auto schema = g_engine.getTableSchema(database, "items");
-    need(schema.len == 3, "actual complete three-column schema");
+    need(schema.len() == 3, "actual complete three-column schema");
     TableScanOp cursor(&g_engine, database, "items"); need(cursor.open(), "actual scan opens");
     Rows rows; std::string raw;
     while (cursor.next(raw)) {
         StorageEngine::SqlRow row;
-        for (size_t i = 0; i < schema.len; ++i)
+        for (size_t i = 0; i < schema.len(); ++i)
             row[schema.cols[i].dataName] = cursor.lastColumnIsNull(i) ? Cell{} :
                 Cell{g_engine.extractColumnValue(raw, schema, i, database)};
         need(row["id"].has_value(), "actual nonNULL ID"); const auto id = *row["id"];

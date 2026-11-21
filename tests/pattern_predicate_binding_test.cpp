@@ -13,11 +13,11 @@ int main() {
     const std::string name = "pattern_predicate_binding", database = testDbPath(name);
     cleanupTestDb(name);
     assert(g_engine.createDatabase(database) == DBStatus::OK);
-    TableSchema schema{}; schema.tablename = "pattern_rows"; schema.len = 2;
+    TableSchema schema{}; schema.tablename = "pattern_rows"; schema.cols.resize(2);
     schema.cols[0].dataName = "id"; schema.cols[0].dataType = "integer";
     schema.cols[1].dataName = "name"; schema.cols[1].dataType = "text";
     assert(g_engine.createTable(database, schema) == DBStatus::OK);
-    TableSchema arrays{}; arrays.tablename="pattern_arrays"; arrays.len=3;
+    TableSchema arrays{}; arrays.tablename="pattern_arrays"; arrays.cols.resize(3);
     const std::vector<std::string> arrayTypes={"text","character","bytea"};
     for(size_t i=0;i<arrayTypes.size();++i) {
         arrays.cols[i].dataName=std::string(1,static_cast<char>('a'+i));

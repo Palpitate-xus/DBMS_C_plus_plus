@@ -12,7 +12,7 @@
 extern dbms::StorageEngine g_engine;
 
 static bool hasCheck(const dbms::TableSchema& table, const std::string& name) {
-    for (size_t column = 0; column < table.len; ++column)
+    for (size_t column = 0; column < table.len(); ++column)
         if (table.cols[column].checkConstraintName == name) return true;
     for (const auto& check : table.additionalCheckConstraints)
         if (check.name == name) return true;
@@ -84,7 +84,7 @@ int main() {
     assert(g_engine.finishSqlCommand());
     assert(g_engine.query(database, "checked_rows", {}, {"id"}).size() == 3);
     assert(g_engine.rollbackTransaction() == DBStatus::OK);
-    assert(g_engine.getTableSchema(database, "checked_rows").len == 2);
+    assert(g_engine.getTableSchema(database, "checked_rows").len() == 2);
     assert(g_engine.query(database, "checked_rows", {}, {"id"}).size() == 3);
     assert(g_engine.beginTransaction(database, true) == DBStatus::OK);
     assert(g_engine.savepoint("failed_add") == DBStatus::OK);
@@ -99,11 +99,11 @@ int main() {
     // Verify the immediate statement restore, then the user's subsequent
     // savepoint restore. Neither may keep the rejected column or undo rows
     // that the physical image has already restored.
-    assert(g_engine.getTableSchema(database, "checked_rows").len == 2);
+    assert(g_engine.getTableSchema(database, "checked_rows").len() == 2);
     assert(g_engine.query(database, "checked_rows", {}, {"id"}).size() == 3);
     assert(g_engine.finishSqlCommand());
     assert(g_engine.rollbackToSavepoint("failed_add") == DBStatus::OK);
-    assert(g_engine.getTableSchema(database, "checked_rows").len == 2);
+    assert(g_engine.getTableSchema(database, "checked_rows").len() == 2);
     assert(g_engine.query(database, "checked_rows", {}, {"id"}).size() == 3);
     assert(g_engine.commitTransaction() == DBStatus::OK);
     {

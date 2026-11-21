@@ -15,7 +15,7 @@ int main() {
     const std::string db = testDbPath(name);
     cleanupTestDb(name);
     assert(engine.createDatabase(db, "utf8") == DBStatus::OK);
-    TableSchema table; table.len = 1;
+    TableSchema table; table.cols.resize(1);
     table.cols[0].dataName = "id"; table.cols[0].dataType = "int";
     table.cols[0].dsize = 4;
     assert(engine.createTable(db, "preparation_writes", table) == DBStatus::OK);

@@ -120,7 +120,7 @@ public:
         schemaImage_ = capture_detail::schemaImage(schemaPath_);
         attributeImage_ = capture_detail::attributeImage(snapshot, relation_);
         DatumMetadataFactory factory(snapshot);
-        for (size_t i = 0; i < table.len; ++i) {
+        for (size_t i = 0; i < table.len(); ++i) {
             if (columns && !std::binary_search(columns->begin(), columns->end(), i)) continue;
             const auto& storage = table.cols[i];
             for (const auto& a : snapshot.attributes) {
