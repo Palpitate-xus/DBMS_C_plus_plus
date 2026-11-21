@@ -1260,6 +1260,8 @@ REPLACE INTO users (ID, NAME) VALUES (1, 'New Alice');
 
 ### 基础查询
 
+在 `WHERE id = 7` 中，`7` 是数字。在 `WHERE id = "7"` 中，`"7"` 是列名，查询比较同一行中的两列，即使表上有索引也是如此。[查询测试](test-report.md#narrow-select-20261121)
+
 ```sql
 SELECT * FROM users;
 SELECT NAME, AGE FROM users;

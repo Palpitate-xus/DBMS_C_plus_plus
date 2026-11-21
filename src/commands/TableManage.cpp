@@ -31362,15 +31362,16 @@ std::vector<StorageEngine::Condition> StorageEngine::parseConditions(
         c.colName = s.substr(opEnd, sp - opEnd);
         // Computed operands are not physical column names. Preserve the
         // original RHS before literal decoding for typed comparison/coercion.
-        const auto computedOperand = [](const std::string& operand, bool constantOnly,
+        const auto untypedNumber = [](const Expr* expression) -> const LiteralExpr* {
+            const auto* literal = dynamic_cast<const LiteralExpr*>(expression);
+            if (!literal || literal->preparedSubquery || !literal->typeName.empty() ||
+                literal->value.empty()) return nullptr;
+            const auto first = static_cast<unsigned char>(literal->value.front());
+            return std::isdigit(first) || first == '.' ? literal : nullptr;
+        };
+        const auto computedOperand = [&](const Expr* expression, bool constantOnly,
                                         bool* numericArithmetic = nullptr) {
             if (numericArithmetic) *numericArithmetic = false;
-            SQLParser parser;
-            const auto parsed = parser.parse("SELECT " + operand);
-            const auto* select = parsed.success
-                ? dynamic_cast<const SelectStmt*>(parsed.stmt.get()) : nullptr;
-            if (!select || select->selectList.size() != 1) return false;
-            const auto* expression = select->selectList.front().expr.get();
             if (const auto* unary = dynamic_cast<const UnaryOpExpr*>(expression)) {
                 if ((unary->op == "+" || unary->op == "-") &&
                     dynamic_cast<const LiteralExpr*>(unary->operand.get())) return false;
@@ -31378,13 +31379,7 @@ std::vector<StorageEngine::Condition> StorageEngine::parseConditions(
             if (numericArithmetic) {
                 std::function<bool(const Expr*)> pureNumeric =
                     [&](const Expr* node) -> bool {
-                    if (const auto* literal = dynamic_cast<const LiteralExpr*>(node)) {
-                        // The parser preserves untyped number tokens verbatim;
-                        // strings, typed literals and special constants are not numbers.
-                        return literal->typeName.empty() && !literal->value.empty() &&
-                            (std::isdigit(static_cast<unsigned char>(literal->value[0])) ||
-                             literal->value[0] == '.');
-                    }
+                    if (untypedNumber(node)) return true;
                     if (const auto* binary = dynamic_cast<const BinaryOpExpr*>(node)) {
                         const auto& op = binary->op;
                         return (op == "+" || op == "-" || op == "*" || op == "/" ||
@@ -31460,15 +31455,47 @@ std::vector<StorageEngine::Condition> StorageEngine::parseConditions(
                 conds.push_back(std::move(c)); continue;
             }
         }
-        if (computedOperand(c.colName, false)) {
+        const auto operandSelect = [](const ParseResult& parsed) -> const SelectStmt* {
+            const auto* select = parsed.success
+                ? dynamic_cast<const SelectStmt*>(parsed.stmt.get()) : nullptr;
+            return select && select->selectList.size() == 1 ? select : nullptr;
+        };
+        SQLParser parser;
+        const auto parsedLeft = parser.parse("SELECT " + c.colName);
+        const auto* left = operandSelect(parsedLeft);
+        if (left && computedOperand(left->selectList.front().expr.get(), false)) {
             c.value = c.colName + " " + c.op + " " + rawRight;
             c.colName.clear();
             c.op = "typedexpr";
             conds.push_back(std::move(c));
             continue;
         }
+        const auto parsedRight = parser.parse("SELECT " + rawRight);
+        const auto* right = operandSelect(parsedRight);
+        const auto* expression = right ? right->selectList.front().expr.get() : nullptr;
+        if (!apiCondition && right && !right->fromClause &&
+            right->selectList.front().alias.empty() && !rawRight.empty() && rawRight.front() == '"') {
+            const auto* column = dynamic_cast<const ColumnRefExpr*>(expression);
+            if (column && column->table.empty() && column->schema.empty()) {
+                // A quoted RHS is a column reference. Keep its SQL spelling
+                // for exact typed comparison instead of looking up a literal
+                // key in an index or comparing the two values as doubles.
+                c.value = c.colName + " " + c.op + " " + rawRight;
+                const auto* physical = left && !left->fromClause &&
+                            left->selectList.front().alias.empty()
+                    ? dynamic_cast<const ColumnRefExpr*>(left->selectList.front().expr.get())
+                    : nullptr;
+                // EXPLAIN recognizes the same physical left column, while
+                // typedexpr keeps the whole comparison as a residual filter.
+                if (!physical || !physical->table.empty() || !physical->schema.empty())
+                    c.colName.clear();
+                c.op = "typedexpr";
+                conds.push_back(std::move(c));
+                continue;
+            }
+        }
         bool numericArithmetic = false;
-        if (computedOperand(rawRight, true, &numericArithmetic)) {
+        if (computedOperand(expression, true, &numericArithmetic)) {
             if (apiCondition && numericArithmetic) {
                 // Only legacy read API values need schema-based disambiguation.
                 // SQL expressions and explicit casts retain expression semantics.
@@ -31496,13 +31523,19 @@ std::vector<StorageEngine::Condition> StorageEngine::parseConditions(
         c.value = decodeSqlLiteral(s.substr(sp + 1));
         c.decodedLiteralRhs = apiCondition || (!rawRight.empty() && rawRight.front()=='\'');
         if (!apiCondition && !rawRight.empty() && rawRight.front()=='\'') c.patternType = "unknown";
-        if (!apiCondition) {
-            SQLParser parser; const auto parsed=parser.parse("SELECT "+rawRight);
-            const auto* select=parsed.success?dynamic_cast<const SelectStmt*>(parsed.stmt.get()):nullptr;
-            const auto* literal=select && select->selectList.size()==1 && !select->fromClause
-                ?dynamic_cast<const LiteralExpr*>(select->selectList.front().expr.get()):nullptr;
+        if (!apiCondition && right && !right->fromClause && right->selectList.front().alias.empty()) {
+            const auto* literal=dynamic_cast<const LiteralExpr*>(expression);
             if(literal && !literal->preparedSubquery && literal->typeName.empty() && literal->value=="null") {
                 c.patternIsNull=true;c.patternType="unknown";c.decodedLiteralRhs=true;c.value.clear();
+            } else if (const auto* number = untypedNumber(expression)) {
+                c.value = number->value;
+                c.decodedLiteralRhs = true;
+            } else if (const auto* sign = dynamic_cast<const UnaryOpExpr*>(expression);
+                       sign && (sign->op == "+" || sign->op == "-")) {
+                if (const auto* number = untypedNumber(sign->operand.get())) {
+                    c.value = sign->op + number->value;
+                    c.decodedLiteralRhs = true;
+                }
             }
         }
         conds.push_back(c);

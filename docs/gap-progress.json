@@ -2,6 +2,49 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-21 retain numeric and quoted-column roles in ordinary SELECT predicates",
+      "gap_ids": [
+        "SQL-04",
+        "OPT-03",
+        "OPT-16"
+      ],
+      "status": "partial",
+      "evidence": [
+        "src/commands/TableManage.cpp",
+        "docs/test-report.md",
+        "docs/postgresql-comparison.md",
+        "docs/performance-report-2026-10-30.md"
+      ],
+      "tests": [
+        "tests/quoted_column_predicate_protocol_e2e_test.py",
+        "tests/integer_index_plan_protocol_e2e_test.py",
+        "tests/explain_boolean_protocol_e2e_test.py",
+        "tests/redo_crash_recovery_test.cpp"
+      ],
+      "verification": [
+        "The exact b85cc036 baseline differed from PostgreSQL 18.6 in nine of 45 frozen checks when a numeric literal overlapped a quoted column name or a quoted RHS carried a real column. Final build matched all 45 on rows, names, types, SQLSTATE, tags and transaction status.",
+        "The first build fixed query rows but rejected EXPLAIN on an explicit column comparison. The final version retains the analyzed left column for the plan admission boundary and preserves the full typed comparison for runtime without making the RHS an index key.",
+        "Two independent 1030-row heap/index tables passed 16 result checks and 12 plan checks across a cold restart. Actual B-tree search remains available for id=7 and EXPLAIN/ANALYZE preserve a row filter for id=\"7\". Adjacent BIGINT values above binary64's exact range are correctly distinguished.",
+        "Thirty-six related protocol suites and thirteen native regressions passed, including the newly registered protocol assertions, earlier mutation fixes, and crash recovery.",
+        "Both pinned sizes completed 960 paired statement timings and 64 clean exits with identical wire frames and transaction witnesses. Non-index point medians moved in opposite directions at 128 and 1024 rows. Timing variability remains."
+      ],
+      "artifacts": {
+        "exact_build": "build/array-domain-20261117/narrow-select-cmake-v2.json",
+        "postgresql_baseline": "build/select-quoted-literal-oracle-20261121-v1/comparison.json",
+        "registered_baseline_failure": "build/narrow-select-20261121/registered-baseline/console.log",
+        "registered_v1_explain_failure": "build/narrow-select-20261121/registered-v1/console.log",
+        "v1_physical": "build/narrow-select-20261121/physical-witness-v1/candidate/summary.json",
+        "final_protocol": "build/select-quoted-literal-oracle-20261121-v1/candidate-narrow-select-cmake-v2/summary.json",
+        "final_explain": "build/narrow-select-20261121-v2/explain-independent-audit.json",
+        "final_restart_and_index": "build/narrow-select-20261121/physical-witness-v2/candidate/summary.json",
+        "related_suites": "build/narrow-select-20261121/related-narrow-select-cmake-v2/summary.json",
+        "native_regressions": "build/narrow-select-20261121/native-v2/summary.json",
+        "timing_128": "build/narrow-select-perf-20261121/paired-candidate-v2-128.json",
+        "timing_1024": "build/narrow-select-perf-20261121/paired-candidate-v2-1024.json",
+        "timed_seed_actual_plans": "build/narrow-select-perf-20261121/plan-witness-v2.json"
+      }
+    },
+    {
       "issue": "2026-11-21 retain integer DELETE literal identity and share heap candidate selection",
       "gap_ids": [
         "QRY-11",

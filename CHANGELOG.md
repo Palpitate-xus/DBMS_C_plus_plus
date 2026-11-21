@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>查询条件能区分数字和带引号的列名 · 2026-11-21</summary>
+
+即使表里有一列叫 `"7"`，`WHERE id = 7` 也会按数字查找。`WHERE id = "7"` 则比较同一行的两列。查看执行计划也能看到这两种条件的实际区别。
+
+[使用手册](docs/MANUAL.md#基础查询) · [测试报告](docs/test-report.md#narrow-select-20261121) · [性能报告](docs/performance-report-2026-10-30.md#narrow-select-cost-20261121)
+
+</details>
+
+<details>
 <summary>按数字筛选删除时正确区分列名 · 2026-11-21</summary>
 
 即使表里有名为 `"7"` 的列，`WHERE id = 7` 也会按数字 7 筛选。按没有索引的整数列删除时，数据库也会少做重复读取。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>普通表最多可以建 1,600 列 · 2026-11-20</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-20 · 普通表最多可以建 1,600 列
 
 列数上限从 30 提高到 1,600。实际能用多少列还取决于列的类型和每行数据的大小。同时修复了某些大批写入尚未提交时意外退出、导致数据库无法重启的问题。
 
 [使用手册](docs/MANUAL.md#建表) · [测试报告](docs/test-report.md#wide-table-20261120) · [性能报告](docs/performance-report-2026-10-30.md#wide-table-narrow-cost-20261120)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-20 · 反复查看查询步骤时，省去重新计算
 

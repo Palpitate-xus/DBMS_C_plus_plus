@@ -2,6 +2,10 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-21 · 查询区分数字和带引号的列名
+
+PostgreSQL 18.6 分别处理列引用和常量。SQLite 以表达式节点识别筛选条件实际引用的列。DuckDB 把解析出的列名绑定到当前查询的输入。本项目在普通筛选条件中保留解析得到的右侧含义。数字可以作为索引键。双引号列名保留完整的列对列比较，由运行时读取两个值并按实际类型比较。确定操作数形状和确定字面量类型时可复用同一次解析。[PostgreSQL 表达式分析](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/parser/parse_expr.c) · [SQLite 筛选分析](https://raw.githubusercontent.com/sqlite/sqlite/master/src/whereexpr.c) · [DuckDB 列绑定](https://raw.githubusercontent.com/duckdb/duckdb/main/src/planner/binder/expression/bind_columnref_expression.cpp) · [本项目验证](test-report.md#narrow-select-20261121)
+
 ## 2026-11-21 · 删除时筛选记录并保留数字常量
 
 PostgreSQL 18.6 将筛选后的行交给删除步骤，并在并发事务已更新该行时按需要重新检查。SQLite 根据查询和约束选择在扫描中直接删行，或先收集标识再删除。DuckDB 把筛选放在删行节点之前。本项目继续先收集候选行，然后加锁并执行删除。对受测有符号整数等值条件，可在首次扫描时借用已经读取的空值信息，省去按行重复查找。[PostgreSQL 删除执行](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/executor/nodeModifyTable.c) · [SQLite 删除执行](https://raw.githubusercontent.com/sqlite/sqlite/master/src/delete.c) · [DuckDB 删除绑定](https://raw.githubusercontent.com/duckdb/duckdb/main/src/planner/binder/statement/bind_delete.cpp)

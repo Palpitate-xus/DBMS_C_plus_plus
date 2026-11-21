@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Quoted UPDATE/DELETE predicate identifiers survive the engine bridge."""
+"""Quoted predicate identifiers and literals survive the engine bridge."""
 
 import importlib.util
+import json
 import struct
 from pathlib import Path
 
@@ -32,6 +33,7 @@ def main():
             assert rows == expected, (sql, rows, expected)
         if tag is not None:
             assert command_tag == tag, (sql, command_tag, tag)
+        return rows
 
     def error(sql, expected, ready=b"E"):
         messages = client.simple_query(server["sock"], sql)
@@ -62,6 +64,34 @@ def main():
         query('SELECT "child id","parent id" FROM quoted_child;', [["1", "1"]], ready=b"T")
         query("COMMIT;")
         query('DELETE FROM quoted_child WHERE "child id">=1 AND "child id"<=1 RETURNING "child id";', [["1"]], "DELETE 1")
+
+        query('CREATE TABLE quoted_select_predicate(rid INT,id BIGINT,"7" BIGINT,"-7" BIGINT,"q""r" BIGINT);')
+        error('SELECT rid FROM quoted_select_predicate WHERE id="missing";', "42703", ready=b"I")
+        query('INSERT INTO quoted_select_predicate VALUES '
+              '(1,7,99,7,0),(2,17,7,17,0),(3,42,42,0,42),'
+              '(4,9007199254740992,9007199254740993,0,1),'
+              '(5,9007199254740993,9007199254740993,0,1),'
+              '(6,NULL,7,0,0),(7,-7,-7,88,NULL),(8,-9223372036854775808,NULL,0,0);')
+        for indexed in (False, True):
+            if indexed:
+                query('CREATE INDEX quoted_select_id ON quoted_select_predicate(id);')
+            query('SELECT rid FROM quoted_select_predicate WHERE id=7;', [["1"]])
+            query('SELECT rid FROM quoted_select_predicate WHERE id=+7 ORDER BY rid;', [["1"]])
+            query('SELECT rid FROM quoted_select_predicate WHERE id=-7;', [["7"]])
+            query('SELECT rid FROM quoted_select_predicate WHERE id=-9223372036854775808;', [["8"]])
+            query('SELECT rid FROM quoted_select_predicate WHERE id="7" ORDER BY rid;',
+                  [["3"], ["5"], ["7"]])
+            query('SELECT rid FROM quoted_select_predicate WHERE id<"7" ORDER BY rid;',
+                  [["1"], ["4"]])
+            query('SELECT rid FROM quoted_select_predicate WHERE id="q""r";', [["3"]])
+            query('SELECT rid FROM quoted_select_predicate WHERE id="7" OR id=7 ORDER BY rid;',
+                  [["1"], ["3"], ["5"], ["7"]])
+            query('SELECT rid FROM quoted_select_predicate WHERE id=7 LIMIT 1;', [["1"]])
+            column_filter = 'SELECT rid FROM quoted_select_predicate WHERE id="7";'
+            query('EXPLAIN ' + column_filter)
+            explained = query('EXPLAIN (FORMAT JSON,ANALYZE TRUE,TIMING FALSE) ' + column_filter)
+            document = json.loads("\n".join(row[0] for row in explained))
+            assert document["actualRows"] == 3, document
         print("[QUOTED COLUMN PREDICATE PROTOCOL E2E] passed")
     finally:
         runner.stop_ours(server)
