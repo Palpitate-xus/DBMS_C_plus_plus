@@ -1,38 +1,41 @@
 # DBMS C++
 
-用 C++ 编写的关系型数据库，支持 SQL、索引和事务，可用 `psql` 连接。
+用 C++ 编写的关系型数据库，支持 SQL 和事务，可以用 `psql` 连接。
 
 ## 快速开始
 
-在 Linux 上安装依赖后，在源码目录编译。[下载源码](docs/MANUAL.md#编译) · [编译依赖](docs/PACKAGING.md#编译依赖)
+在 Linux 上装好依赖后，下载源码并编译。最后一行会显示版本号。[编译依赖](docs/PACKAGING.md#编译依赖)
 
 ```bash
+git clone https://github.com/Palpitate-xus/DBMS_C_plus_plus.git
+cd DBMS_C_plus_plus
 cmake -S . -B build/cmake
 cmake --build build/cmake --target dbms_main --parallel 2
+./build/cmake/dbms_main --version
 ```
 
-[启动数据库](docs/MANUAL.md#运行) · [用 psql 连接](docs/MANUAL.md#18-网络服务) · [功能和限制](docs/compatibility-contract.md) · [文档索引](docs/README.md)
+[启动数据库并连接](docs/MANUAL.md#18-网络服务) · [支持哪些功能](docs/compatibility-contract.md) · [全部文档](docs/README.md)
 
 ## 最近更新
 
 <details>
-<summary>按编号查询系统类型更快 · 2026-11-22</summary>
+<summary>按编号查数据类型更快 · 2026-11-22</summary>
 
-例如，查 `pg_type` 中编号为 23 的类型时，数据库只为匹配的记录生成查询结果。
-
-</details>
-
-<details>
-<summary>修复复制 pg_type 时选错表的问题 · 2026-11-22</summary>
-
-导入和导出 `pg_type` 时会按当前连接的查找顺序选表。也可以指定列来导出系统类型列表。
+例如，查编号 23 对应的类型名时，数据库会先按编号找到对应的类型，再返回名称。
 
 </details>
 
 <details>
-<summary>修复查询或写入 pg_type 时选错表的问题 · 2026-11-22</summary>
+<summary>修复导入和导出时选错表的问题 · 2026-11-22</summary>
 
-数据库按连接的搜索顺序选择 `pg_type`。你可以用 `public.pg_type` 明确指定自己的表。
+如果你建了一张叫 `pg_type` 的表，用 `COPY` 导入或导出时，数据库会按当前连接的设置在你的表和自带的类型表之间选择。导出自带的类型表时，可以只取类型名等需要的列。
+
+</details>
+
+<details>
+<summary>查询和写入时会区分自带的类型表和同名表 · 2026-11-22</summary>
+
+如果你在 `public` 下建了一张叫 `pg_type` 的表，可以用 `public.pg_type` 明确指定它。只写表名时，数据库会按当前连接设置的查找顺序选表。
 
 </details>
 

@@ -1,27 +1,27 @@
 # 更新日志
 
 <details>
-<summary>按编号查询系统类型更快 · 2026-11-22</summary>
+<summary>按编号查数据类型更快 · 2026-11-22</summary>
 
-例如，查 `pg_type` 中编号为 23 的类型时，数据库只为匹配的记录生成查询结果。
+例如，查编号 23 对应的类型名时，数据库会先按编号找到对应的类型，再返回名称。
 
 [测试报告](docs/test-report.md#pg-type-oid-source-20261122) · [性能报告](docs/performance-report-2026-10-30.md#pg-type-oid-source-cost-20261122)
 
 </details>
 
 <details>
-<summary>修复复制 pg_type 时选错表的问题 · 2026-11-22</summary>
+<summary>修复导入和导出时选错表的问题 · 2026-11-22</summary>
 
-导入和导出 `pg_type` 时会按当前连接的查找顺序选表。也可以指定列来导出系统类型列表。
+如果你建了一张叫 `pg_type` 的表，用 `COPY` 导入或导出时，数据库会按当前连接的设置在你的表和自带的类型表之间选择。导出自带的类型表时，可以只取类型名等需要的列。
 
 [使用说明](docs/MANUAL.md#用客户端复制数据) · [测试报告](docs/test-report.md#copy-relation-selection-20261122)
 
 </details>
 
 <details>
-<summary>修复查询或写入 pg_type 时选错表的问题 · 2026-11-22</summary>
+<summary>查询和写入时会区分自带的类型表和同名表 · 2026-11-22</summary>
 
-数据库按连接的搜索顺序选择 `pg_type`。你可以用 `public.pg_type` 明确指定自己的表。
+如果你在 `public` 下建了一张叫 `pg_type` 的表，可以用 `public.pg_type` 明确指定它。只写表名时，数据库会按当前连接设置的查找顺序选表。
 
 [使用说明](docs/MANUAL.md#查找与系统表同名的-pg_type) · [测试报告](docs/test-report.md#pg-type-search-path-20261122)
 
