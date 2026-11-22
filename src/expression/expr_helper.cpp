@@ -30,6 +30,7 @@
 #include <functional>
 #include <memory>
 #include <sstream>
+#include <string_view>
 #include <vector>
 
 extern dbms::StorageEngine g_engine;
@@ -909,9 +910,10 @@ RoutineResultTypes collectRoutineResultTypes(
     return routineTypes;
 }
 
-bool countParsedColumnReferences(
-    const Expr* expression, const std::string& columnName, size_t& count) {
+template <typename Visitor>
+bool visitStoredColumnReferences(const Expr* expression, const Visitor& visit) {
     if (!expression) return true;
+    if (expression->preparedSubquery) return false;
     switch (expression->type) {
         case ExprType::Literal:
         case ExprType::Parameter:
@@ -921,89 +923,99 @@ bool countParsedColumnReferences(
             const auto* column =
                 dynamic_cast<const ColumnRefExpr*>(expression);
             if (!column) return false;
-            if (column->column == columnName) ++count;
-            return true;
+            return visit(*column);
         }
         case ExprType::UnaryOp: {
             const auto* unary =
                 dynamic_cast<const UnaryOpExpr*>(expression);
-            return unary && countParsedColumnReferences(
-                unary->operand.get(), columnName, count);
+            return unary && visitStoredColumnReferences(
+                unary->operand.get(), visit);
         }
         case ExprType::BinaryOp: {
             const auto* binary =
                 dynamic_cast<const BinaryOpExpr*>(expression);
             return binary &&
-                countParsedColumnReferences(
-                    binary->left.get(), columnName, count) &&
-                countParsedColumnReferences(
-                    binary->right.get(), columnName, count);
+                visitStoredColumnReferences(
+                    binary->left.get(), visit) &&
+                visitStoredColumnReferences(
+                    binary->right.get(), visit);
         }
         case ExprType::QuantifiedComparison: {
             const auto* quantified = static_cast<const QuantifiedComparisonExpr*>(expression);
-            return countParsedColumnReferences(quantified->left.get(),columnName,count) &&
-                countParsedColumnReferences(quantified->right.get(),columnName,count);
+            // The parser may retain query operands as parenthesized SQL.
+            const auto* query = dynamic_cast<const LiteralExpr*>(quantified->right.get());
+            if (query && !query->value.empty() && query->value.front() == '(')
+                return false;
+            return visitStoredColumnReferences(quantified->left.get(), visit) &&
+                   visitStoredColumnReferences(quantified->right.get(), visit);
         }
         case ExprType::FunctionCall: {
             const auto* function =
                 dynamic_cast<const FunctionCallExpr*>(expression);
-            if (!function) return false;
-            for (const auto& argument : function->args) {
-                if (!countParsedColumnReferences(
-                        argument.get(), columnName, count)) return false;
+            if (!function || function->funcName == "EXISTS") return false;
+            for (size_t i = 0; i < function->args.size(); ++i) {
+                const auto* argument = function->args[i].get();
+                // EXTRACT's field is a grammar label, not a column read.
+                if (i == 0 && function->schema.empty() &&
+                    toLower(function->funcName) == "extract") {
+                    const auto* field = dynamic_cast<const ColumnRefExpr*>(argument);
+                    if (field && field->schema.empty() && field->table.empty())
+                        continue;
+                }
+                if (!visitStoredColumnReferences(argument, visit)) return false;
             }
             for (const auto& argument : function->namedArgs) {
-                if (!countParsedColumnReferences(
-                        argument.value.get(), columnName, count)) return false;
+                if (!visitStoredColumnReferences(
+                        argument.value.get(), visit)) return false;
             }
             for (const auto& order : function->aggregateOrderKeys)
-                if (!countParsedColumnReferences(order.expr.get(), columnName, count)) return false;
-            if (!countParsedColumnReferences(
-                    function->filter.get(), columnName, count)) return false;
+                if (!visitStoredColumnReferences(order.expr.get(), visit)) return false;
+            if (!visitStoredColumnReferences(
+                    function->filter.get(), visit)) return false;
             for (const auto& partition : function->over.partitionBy) {
-                if (!countParsedColumnReferences(
-                        partition.get(), columnName, count)) return false;
+                if (!visitStoredColumnReferences(
+                        partition.get(), visit)) return false;
             }
             for (const auto& order : function->over.orderBy) {
-                if (!countParsedColumnReferences(
-                        order.first.get(), columnName, count)) return false;
+                if (!visitStoredColumnReferences(
+                        order.first.get(), visit)) return false;
             }
-            return countParsedColumnReferences(
-                       function->over.frameStart.get(), columnName, count) &&
-                   countParsedColumnReferences(
-                       function->over.frameEnd.get(), columnName, count);
+            return visitStoredColumnReferences(
+                       function->over.frameStart.get(), visit) &&
+                   visitStoredColumnReferences(
+                       function->over.frameEnd.get(), visit);
         }
         case ExprType::CastExpr: {
             const auto* cast = dynamic_cast<const CastExpr*>(expression);
-            return cast && countParsedColumnReferences(
-                cast->operand.get(), columnName, count);
+            return cast && visitStoredColumnReferences(
+                cast->operand.get(), visit);
         }
         case ExprType::CaseExpr: {
             const auto* caseExpression =
                 dynamic_cast<const CaseExpr*>(expression);
             if (!caseExpression ||
-                !countParsedColumnReferences(
-                    caseExpression->switchExpr.get(), columnName, count)) {
+                !visitStoredColumnReferences(
+                    caseExpression->switchExpr.get(), visit)) {
                 return false;
             }
             for (const auto& clause : caseExpression->whenClauses) {
-                if (!countParsedColumnReferences(
-                        clause.first.get(), columnName, count) ||
-                    !countParsedColumnReferences(
-                        clause.second.get(), columnName, count)) {
+                if (!visitStoredColumnReferences(
+                        clause.first.get(), visit) ||
+                    !visitStoredColumnReferences(
+                        clause.second.get(), visit)) {
                     return false;
                 }
             }
-            return countParsedColumnReferences(
-                caseExpression->elseExpr.get(), columnName, count);
+            return visitStoredColumnReferences(
+                caseExpression->elseExpr.get(), visit);
         }
         case ExprType::ArrayExpr: {
             const auto* array =
                 dynamic_cast<const ArrayExpr*>(expression);
             if (!array) return false;
             for (const auto& element : array->elements) {
-                if (!countParsedColumnReferences(
-                        element.get(), columnName, count)) return false;
+                if (!visitStoredColumnReferences(
+                        element.get(), visit)) return false;
             }
             return true;
         }
@@ -1011,8 +1023,8 @@ bool countParsedColumnReferences(
             const auto* row = dynamic_cast<const RowExpr*>(expression);
             if (!row) return false;
             for (const auto& element : row->elements) {
-                if (!countParsedColumnReferences(
-                        element.get(), columnName, count)) return false;
+                if (!visitStoredColumnReferences(
+                        element.get(), visit)) return false;
             }
             return true;
         }
@@ -1023,10 +1035,13 @@ bool countParsedColumnReferences(
     return false;
 }
 
+constexpr char storedExpressionPrefix[] = "SELECT ";
+
 const Expr* parseStoredExpression(
-    const std::string& expression, ParseResult& parsed) {
+    const std::string& expression, ParseResult& parsed, bool withSource = false) {
     SQLParser parser;
-    parsed = parser.parse("SELECT " + expression);
+    const std::string sql = storedExpressionPrefix + expression;
+    parsed = withSource ? parser.parseForBinding(sql) : parser.parse(sql);
     if (!parsed.success || !parsed.stmt) return nullptr;
     const auto* select = dynamic_cast<const SelectStmt*>(parsed.stmt.get());
     if (!select || select->selectList.size() != 1 ||
@@ -1036,240 +1051,14 @@ const Expr* parseStoredExpression(
     return select->selectList.front().expr.get();
 }
 
-enum class SourceTokenKind { Identifier, String, Symbol };
-
-struct SourceToken {
-    size_t begin = 0;
-    size_t end = 0;
-    SourceTokenKind kind = SourceTokenKind::Symbol;
-    std::string text;
-};
-
-bool isExpressionSymbol(char c) {
-    switch (c) {
-        case '(':
-        case ')':
-        case ',':
-        case ';':
-        case '*':
-        case '=':
-        case '<':
-        case '>':
-        case '+':
-        case '-':
-        case '/':
-        case '%':
-        case '^':
-        case '~':
-        case '!':
-        case '|':
-        case '&':
-        case '#':
-        case '@':
-        case '?':
-        case ':':
-        case '[':
-        case ']':
-        case '.':
-            return true;
-        default:
-            return false;
-    }
+std::string forceIdentifierQuotes(const std::string& spelling) {
+    if (!spelling.empty() && spelling.front() == '"') return spelling;
+    return '"' + spelling + '"';
 }
 
-std::optional<std::vector<SourceToken>> lexExpressionSource(
-    const std::string& expression) {
-    std::vector<SourceToken> tokens;
-    const auto append = [&](size_t begin, size_t end, SourceTokenKind kind) {
-        tokens.push_back(
-            {begin, end, kind, expression.substr(begin, end - begin)});
-    };
-
-    for (size_t index = 0; index < expression.size();) {
-        const unsigned char current =
-            static_cast<unsigned char>(expression[index]);
-        if (std::isspace(current)) {
-            ++index;
-            continue;
-        }
-        if (expression.compare(index, 2, "--") == 0) {
-            const size_t newline = expression.find('\n', index + 2);
-            index = newline == std::string::npos
-                ? expression.size() : newline + 1;
-            continue;
-        }
-        if (expression.compare(index, 2, "/*") == 0) {
-            const size_t close = expression.find("*/", index + 2);
-            if (close == std::string::npos) return std::nullopt;
-            index = close + 2;
-            continue;
-        }
-
-        if (expression[index] == '$') {
-            size_t delimiterEnd = index + 1;
-            bool validTag = true;
-            if (delimiterEnd < expression.size() &&
-                std::isdigit(static_cast<unsigned char>(
-                    expression[delimiterEnd]))) {
-                validTag = false;
-            }
-            while (validTag && delimiterEnd < expression.size() &&
-                   (std::isalnum(static_cast<unsigned char>(
-                        expression[delimiterEnd])) ||
-                    expression[delimiterEnd] == '_')) {
-                ++delimiterEnd;
-            }
-            if (validTag && delimiterEnd < expression.size() &&
-                expression[delimiterEnd] == '$') {
-                const std::string delimiter = expression.substr(
-                    index, delimiterEnd - index + 1);
-                const size_t close = expression.find(
-                    delimiter, delimiterEnd + 1);
-                if (close == std::string::npos) return std::nullopt;
-                const size_t end = close + delimiter.size();
-                append(index, end, SourceTokenKind::String);
-                index = end;
-                continue;
-            }
-        }
-
-        if (expression[index] == '\'') {
-            const size_t begin = index++;
-            bool closed = false;
-            while (index < expression.size()) {
-                if (expression[index] != '\'') {
-                    ++index;
-                    continue;
-                }
-                if (index + 1 < expression.size() &&
-                    expression[index + 1] == '\'') {
-                    index += 2;
-                    continue;
-                }
-                size_t backslashCount = 0;
-                for (size_t cursor = index;
-                     cursor > begin + 1 && expression[cursor - 1] == '\\';
-                     --cursor) {
-                    ++backslashCount;
-                }
-                if (backslashCount % 2 != 0) {
-                    ++index;
-                    continue;
-                }
-                ++index;
-                closed = true;
-                break;
-            }
-            if (!closed) return std::nullopt;
-            append(begin, index, SourceTokenKind::String);
-            continue;
-        }
-
-        if (expression[index] == '"') {
-            const size_t begin = index++;
-            bool closed = false;
-            while (index < expression.size()) {
-                if (expression[index] != '"') {
-                    ++index;
-                    continue;
-                }
-                if (index + 1 < expression.size() &&
-                    expression[index + 1] == '"') {
-                    index += 2;
-                    continue;
-                }
-                ++index;
-                closed = true;
-                break;
-            }
-            if (!closed) return std::nullopt;
-            append(begin, index, SourceTokenKind::Identifier);
-            continue;
-        }
-
-        if (isExpressionSymbol(expression[index])) {
-            const size_t begin = index;
-            size_t length = 1;
-            if (index + 1 < expression.size()) {
-                const std::string two = expression.substr(index, 2);
-                if (two == "<=" || two == ">=" || two == "<>" ||
-                    two == "!=" || two == "::" || two == "||" ||
-                    two == "->" || two == "~*" || two == "!~" ||
-                    two == "@@" || two == "&&" || two == "<<" ||
-                    two == ">>" || two == "=>" || two == "#>" ||
-                    two == "@>" || two == "<@") {
-                    length = 2;
-                }
-            }
-            if (index + 2 < expression.size()) {
-                const std::string three = expression.substr(index, 3);
-                if (three == "->>" || three == "#>>" || three == "!~*") {
-                    length = 3;
-                }
-            }
-            index += length;
-            append(begin, index, SourceTokenKind::Symbol);
-            continue;
-        }
-
-        const size_t begin = index;
-        while (index < expression.size() &&
-               !std::isspace(static_cast<unsigned char>(expression[index])) &&
-               expression[index] != '\'' && expression[index] != '"' &&
-               !isExpressionSymbol(expression[index])) {
-            ++index;
-        }
-        if (begin == index) return std::nullopt;
-        append(begin, index, SourceTokenKind::Identifier);
-    }
-    return tokens;
-}
-
-bool tokenIs(const SourceToken& token, const std::string& text) {
-    return token.text == text;
-}
-
-bool tokenIsKeyword(const SourceToken& token, const std::string& keyword) {
-    return token.kind == SourceTokenKind::Identifier &&
-           toLower(token.text) == keyword;
-}
-
-std::vector<size_t> columnReferenceSourceTokens(
-    const std::vector<SourceToken>& tokens, const std::string& columnName) {
-    std::vector<size_t> references;
-    for (size_t index = 0; index < tokens.size(); ++index) {
-        if (tokens[index].kind != SourceTokenKind::Identifier ||
-            tokens[index].text != columnName) {
-            continue;
-        }
-        const SourceToken* previous =
-            index > 0 ? &tokens[index - 1] : nullptr;
-        const SourceToken* next =
-            index + 1 < tokens.size() ? &tokens[index + 1] : nullptr;
-
-        // A name before '.' is a schema/table qualifier. A name before '('
-        // is a function, and a name before '=>' is a named argument.
-        if (next && (tokenIs(*next, ".") || tokenIs(*next, "(") ||
-                     tokenIs(*next, "=>"))) {
-            continue;
-        }
-        if (next && tokenIs(*next, "=") && index + 2 < tokens.size() &&
-            tokenIs(tokens[index + 2], ">")) {
-            continue;
-        }
-
-        // These grammar positions name types/collations rather than row
-        // values. If a more exotic construct remains ambiguous, the AST
-        // reference-count check below rejects the whole rewrite safely.
-        if (previous &&
-            (tokenIs(*previous, "::") ||
-             tokenIsKeyword(*previous, "as") ||
-             tokenIsKeyword(*previous, "collate"))) {
-            continue;
-        }
-        references.push_back(index);
-    }
-    return references;
+bool sameUnquotedIdentifier(char source, char canonical) {
+    return std::tolower(static_cast<unsigned char>(source)) ==
+           static_cast<unsigned char>(canonical);
 }
 
 } // namespace
@@ -3023,13 +2812,13 @@ std::optional<bool> ExprHelper::referencesColumn(
     ParseResult parsed;
     const Expr* expression = parseStoredExpression(exprSql, parsed);
     if (!expression) return std::nullopt;
-    size_t count = 0;
-    if (!countParsedColumnReferences(expression, columnName, count)) {
-        // Unsupported AST shapes remain conservative for DDL dependency
-        // checks: callers must not remove a possibly referenced column.
+    bool found = false;
+    const auto record = [&](const ColumnRefExpr& ref) {
+        found |= ref.column == columnName;
         return true;
-    }
-    return count != 0;
+    };
+    // Unknown AST shapes may still contain a dependency.
+    return !visitStoredColumnReferences(expression, record) || found;
 }
 
 std::optional<std::string> ExprHelper::renameColumnReferences(
@@ -3037,60 +2826,81 @@ std::optional<std::string> ExprHelper::renameColumnReferences(
     const std::string& newName) {
     if (exprSql.empty() || oldName == newName) return exprSql;
 
-    const auto sourceTokens = lexExpressionSource(exprSql);
-    if (!sourceTokens) return std::nullopt;
-    const bool containsOldIdentifier = std::any_of(
-        sourceTokens->begin(), sourceTokens->end(),
-        [&](const SourceToken& token) {
-            return token.kind == SourceTokenKind::Identifier &&
-                   token.text == oldName;
-        });
-    if (!containsOldIdentifier) return exprSql;
+    const std::string oldQuoted =
+        forceIdentifierQuotes(SQLParser::quoteIdentifier(oldName));
+    const bool canBeUnquoted = toLower(oldName) == oldName;
+    const bool possibleUnquotedReference = canBeUnquoted &&
+        (exprSql.find(oldName) != std::string::npos ||
+         std::search(exprSql.begin(), exprSql.end(), oldName.begin(), oldName.end(),
+                     sameUnquotedIdentifier) != exprSql.end());
+    if (!possibleUnquotedReference && exprSql.find(oldQuoted) == std::string::npos)
+        return exprSql;
 
+    constexpr size_t selectPrefix = sizeof(storedExpressionPrefix) - 1;
     ParseResult parsed;
-    const Expr* expression = parseStoredExpression(exprSql, parsed);
-    if (!expression) return std::nullopt;
-    size_t oldReferenceCount = 0;
-    size_t existingNewReferenceCount = 0;
-    if (!countParsedColumnReferences(
-            expression, oldName, oldReferenceCount) ||
-        !countParsedColumnReferences(
-            expression, newName, existingNewReferenceCount)) {
-        return std::nullopt;
+    const Expr* expression = parseStoredExpression(exprSql, parsed, true);
+    std::vector<std::pair<size_t, size_t>> references;
+    size_t existingNewReferences = 0;
+    const auto record = [&](const ColumnRefExpr& ref) {
+        if (ref.column == newName) ++existingNewReferences;
+        if (ref.column != oldName) return true;
+        if (ref.sourceBegin < selectPrefix ||
+            ref.sourceBegin >= ref.sourceEnd ||
+            ref.sourceEnd > exprSql.size() + selectPrefix) return false;
+
+        // The final identifier ends at sourceEnd, even after a qualifier
+        // separated from it by whitespace or comments.
+        const size_t end = ref.sourceEnd - selectPrefix;
+        const bool quoted = exprSql[end - 1] == '"';
+        const std::string& spelling = quoted ? oldQuoted : oldName;
+        if (ref.sourceEnd - ref.sourceBegin < spelling.size()) return false;
+        const size_t begin = end - spelling.size();
+        const auto raw = std::string_view(exprSql).substr(begin, spelling.size());
+        const bool matches = quoted
+            ? raw == spelling
+            : std::equal(raw.begin(), raw.end(), spelling.begin(),
+                         sameUnquotedIdentifier);
+        if (!matches) return false;
+        references.emplace_back(begin, end);
+        return true;
+    };
+    if (!expression || !visitStoredColumnReferences(expression, record)) {
+        // Preserve unrelated legacy expressions if the name occurred only
+        // in a literal or comment. Refuse ambiguous edits to opaque SQL.
+        const auto tokens = SQLParser::tokenize(exprSql);
+        for (const auto& token : tokens) {
+            if (token == oldQuoted || (canBeUnquoted && toLower(token) == oldName))
+                return std::nullopt;
+        }
+        return exprSql;
     }
-    if (oldReferenceCount == 0) return exprSql;
+    if (references.empty()) return exprSql;
 
-    const std::vector<size_t> referenceTokens =
-        columnReferenceSourceTokens(*sourceTokens, oldName);
-    if (referenceTokens.size() != oldReferenceCount) return std::nullopt;
-
+    const std::string newSpelling = SQLParser::quoteIdentifier(newName);
+    const std::string newQuoted = forceIdentifierQuotes(newSpelling);
+    std::sort(references.begin(), references.end());
     std::string rewritten;
-    rewritten.reserve(exprSql.size() +
-        oldReferenceCount *
-            (newName.size() > oldName.size()
-                 ? newName.size() - oldName.size() : 0));
+    rewritten.reserve(exprSql.size());
     size_t cursor = 0;
-    for (const size_t tokenIndex : referenceTokens) {
-        const SourceToken& token = sourceTokens->at(tokenIndex);
-        rewritten.append(exprSql, cursor, token.begin - cursor);
-        rewritten += newName;
-        cursor = token.end;
+    for (const auto& [begin, end] : references) {
+        if (begin < cursor) return std::nullopt;
+        rewritten.append(exprSql, cursor, begin - cursor);
+        rewritten += exprSql[begin] == '"' ? newQuoted : newSpelling;
+        cursor = end;
     }
     rewritten.append(exprSql, cursor, std::string::npos);
 
     ParseResult rewrittenParse;
     const Expr* rewrittenExpression =
-        parseStoredExpression(rewritten, rewrittenParse);
-    if (!rewrittenExpression) return std::nullopt;
-    size_t remainingOldReferences = 0;
+        parseStoredExpression(rewritten, rewrittenParse, true);
     size_t rewrittenNewReferences = 0;
-    if (!countParsedColumnReferences(
-            rewrittenExpression, oldName, remainingOldReferences) ||
-        !countParsedColumnReferences(
-            rewrittenExpression, newName, rewrittenNewReferences) ||
-        remainingOldReferences != 0 ||
-        rewrittenNewReferences !=
-            existingNewReferenceCount + oldReferenceCount) {
+    const auto verify = [&](const ColumnRefExpr& ref) {
+        if (ref.column == newName) ++rewrittenNewReferences;
+        return ref.column != oldName;
+    };
+    if (!rewrittenExpression ||
+        !visitStoredColumnReferences(rewrittenExpression, verify) ||
+        rewrittenNewReferences != existingNewReferences + references.size()) {
         return std::nullopt;
     }
     return rewritten;

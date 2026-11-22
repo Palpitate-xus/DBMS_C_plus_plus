@@ -347,8 +347,10 @@ def main():
         payload = "preserve-column-toast" * 320
         query("CREATE TABLE ownership_column_old(id INT PRIMARY KEY, payload TEXT);")
         query(f"INSERT INTO ownership_column_old VALUES (7, '{payload}');")
-        query("CREATE TABLE ownership_column(id INT PRIMARY KEY, indexed_value INT);")
-        query("INSERT INTO ownership_column VALUES (1, 9);")
+        query('CREATE TABLE ownership_column(id INT PRIMARY KEY, indexed_value INT '
+              'CHECK ("indexed_value" > 0 AND indexed_value < 20), '
+              'doubled INT GENERATED ALWAYS AS ("indexed_value" * 2) STORED);')
+        query("INSERT INTO ownership_column(id, indexed_value) VALUES (1, 9);")
         query("CREATE INDEX ownership_column_lookup ON ownership_column(indexed_value);")
         query("CHECKPOINT;")
 
@@ -385,6 +387,10 @@ def main():
         read_neighbor()
         reopen_after_crash()
         assert query("SELECT moved_value FROM ownership_column WHERE moved_value=9;") == ([["9"]], "SELECT 1")
+        assert query("INSERT INTO ownership_column(id, moved_value) VALUES (2, 10) "
+                     "RETURNING doubled;") == ([["20"]], "INSERT 0 1")
+        error("INSERT INTO ownership_column(id, moved_value) VALUES (3, 0);", "23514")
+        error("INSERT INTO ownership_column(id, moved_value) VALUES (3, 20);", "23514")
         read_neighbor()
 
     def rename_bloom_index_column():

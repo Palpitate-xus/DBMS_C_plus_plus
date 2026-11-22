@@ -19,6 +19,13 @@ cmake --build build/cmake --target dbms_main --parallel 2
 ## 最近更新
 
 <details>
+<summary>列改名后，数据检查规则也会更新 · 2026-11-22</summary>
+
+把「数量」改成「订购数量」后，要求数量为正数的规则仍会生效，自动计算的列也会使用新列名。
+
+</details>
+
+<details>
 <summary>导入时可以跳过数值超出自定义范围的行 · 2026-11-22</summary>
 
 例如，给数量定义了「必须为正数」的类型后，可以设置跳过数量为负的行。如果遇到重复的订单号，整批订单仍会撤销。
@@ -29,13 +36,6 @@ cmake --build build/cmake --target dbms_main --parallel 2
 <summary>数字列误填文字时，导入可以继续 · 2026-11-22</summary>
 
 例如，把「三件」填进整数列时，可以只跳过这一行。也可以设定最多跳过多少行，超出上限就撤销整批导入。
-
-</details>
-
-<details>
-<summary>导入失败后，已取过的编号不会重用 · 2026-11-22</summary>
-
-例如，导入订单时先生成了订单号 40，随后因数量填错而撤销这批订单。下次导入会从 41 继续。
 
 </details>
 

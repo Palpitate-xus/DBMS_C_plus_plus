@@ -958,6 +958,8 @@ CREATE TABLE t (ID INT) WITH (FILLFACTOR = 90);
 
 ### 修改表
 
+用 `ALTER TABLE ... RENAME COLUMN` 改列名时，已有的检查约束和生成列表达式会使用新列名。比如把 `"数量"` 改成 `"订购数量"` 后，正数检查和用数量计算的列仍会生效。双引号保留大小写，`"D"` 和 `d` 可以是不同的列。[改名和回滚测试](test-report.md#rename-quoted-column-references-20261122)
+
 ```sql
 -- 添加列
 ALTER TABLE users ADD COLUMN PHONE VARCHAR(20);

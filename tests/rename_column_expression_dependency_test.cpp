@@ -1,5 +1,6 @@
 #include "catalog/type_registry.h"
 #include "commands/TableManage.h"
+#include "expression/expr_helper.h"
 #include "test_utils.h"
 
 #include <cassert>
@@ -20,6 +21,19 @@ std::string trimRight(std::string value) {
 }  // namespace
 
 int main() {
+    using dbms::ExprHelper;
+    const auto mixedSpelling = ExprHelper::renameColumnReferences(
+        R"(abs(ABS) + "abs" + "abs" /* abs /* "abs" */ */ . "abs" + length('abs'))",
+        "abs", "select");
+    assert(mixedSpelling && *mixedSpelling ==
+        R"(abs("select") + "select" + "abs" /* abs /* "abs" */ */ . "select" + length('abs'))");
+    const auto cast = ExprHelper::renameColumnReferences(
+        R"(CAST(n AS app."n") + "n")", "n", "new_name");
+    assert(cast && *cast == R"(CAST(new_name AS app."n") + "new_name")");
+    const auto collation = ExprHelper::renameColumnReferences(
+        R"("C" COLLATE "C" = 'C')", "C", "renamed");
+    assert(collation && *collation == R"("renamed" COLLATE "C" = 'C')");
+
     dbms::TypeRegistry::instance().bootstrap();
     cleanupAllTestData();
 

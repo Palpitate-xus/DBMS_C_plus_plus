@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-22 · 改列名后保留检查和计算
+
+PostgreSQL 18.6 保留列编号，只更新目录中的名称。保存的表达式用列编号定位，显示时读取新名字。SQLite 保留建表 SQL，从已解析的列引用找到需要修改的原文位置。DuckDB 修改检查表达式中的列引用，再绑定新的表定义。[PostgreSQL 改名](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/commands/tablecmds.c#L3618) · [PostgreSQL 表达式显示](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/utils/adt/ruleutils.c#L7161) · [SQLite 改名实现](https://github.com/sqlite/sqlite/blob/master/src/alter.c#L1037) · [DuckDB 改名实现](https://github.com/duckdb/duckdb/blob/main/src/catalog/catalog_entry/duck_table_entry.cpp#L391)
+
+本项目的表结构保存表达式文本。改名从已解析的列引用定位原文，保留字符串、函数名和表名等其他内容，再解析改写后的表达式进行核对。普通表的检查、生成列、事务和重启已分别验证。[测试范围](test-report.md#rename-quoted-column-references-20261122)
+
 ## 2026-11-22 · 导入时检查自定义类型的约束
 
 PostgreSQL 18.6 先把字段转换成域的基础类型，再执行域约束。约束拒绝了该值时可跳过该行。检查表达式执行出错时会中止导入。DuckDB 可以用 `CREATE TYPE` 为基础类型起别名，其 CSV 读取也提供跳过转换错误的选项。SQLite 的 `STRICT` 表会拒绝无法无损转换的值。[PostgreSQL 域输入实现](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/utils/adt/domains.c) · [DuckDB 类型别名](https://duckdb.org/docs/2.0/sql/statements/create_type) · [DuckDB CSV 错误处理](https://duckdb.org/docs/2.0/data/csv/reading_faulty_csv_files) · [SQLite STRICT](https://www.sqlite.org/stricttables.html)

@@ -2,6 +2,18 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-22 update quoted column references in stored expressions on rename",
+      "gap_ids": ["CAT-10"],
+      "status": "partial",
+      "evidence": ["src/expression/expr_helper.cpp", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/compat/cases/quoted_alter_rename_column.sql", "tests/rename_column_expression_dependency_test.cpp", "tests/drop_multiple_tables_protocol_e2e_test.py"],
+      "verification": [
+        "Rename uses parser source spans for actual column references, including quoted, qualified, and differently cased column names.",
+        "The quoted-check and generated-column fixture matches PostgreSQL 18.6 in both protocol modes. Recovery retained committed renames and reverted an uncommitted rename.",
+        "The broader DDL dependency and multiple-action gaps remain open."
+      ]
+    },
+    {
       "issue": "2026-11-22 enforce domain checks during client COPY field conversion",
       "gap_ids": ["DML-06", "PROTO-06"],
       "status": "partial",

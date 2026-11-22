@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>列改名后，数据检查规则也会更新 · 2026-11-22</summary>
+
+把「数量」改成「订购数量」后，要求数量为正数的规则仍会生效，自动计算的列也会使用新列名。
+
+[用法](docs/MANUAL.md#修改表) · [测试报告](docs/test-report.md#rename-quoted-column-references-20261122) · [性能报告](docs/performance-report-2026-10-30.md#rename-quoted-column-references-cost-20261122)
+
+</details>
+
+<details>
 <summary>导入时可以跳过数值超出自定义范围的行 · 2026-11-22</summary>
 
 例如，给数量定义了「必须为正数」的类型后，可以设置跳过数量为负的行。如果遇到重复的订单号，整批订单仍会撤销。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>导入失败后，已取过的编号不会重用 · 2026-11-22</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-22 · 导入失败后，已取过的编号不会重用
 
 例如，导入订单时先生成了订单号 40，随后因数量填错而撤销这批订单。下次导入会从 41 继续。
 
 [用法](docs/MANUAL.md#用客户端复制数据) · [测试报告](docs/test-report.md#copy-default-evaluation-order-20261122) · [性能报告](docs/performance-report-2026-10-30.md#copy-default-evaluation-order-cost-20261122)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-22 · 导入旧数据时可以保留原来的编号
 
