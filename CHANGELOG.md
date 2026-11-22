@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>表改名后，原来的报表还能用 · 2026-11-22</summary>
+
+例如，订单表从销售区移到归档区后，原来的报表仍会查询这张表。即使用旧名字新建一张表，报表也会继续读原来的订单。
+
+[用法](docs/MANUAL.md#9-视图与物化视图) · [测试报告](docs/test-report.md#view-table-rename-20261122) · [性能报告](docs/performance-report-2026-10-30.md#view-table-rename-cost-20261122)
+
+</details>
+
+<details>
 <summary>同名表不会让新建的视图读错数据 · 2026-11-22</summary>
 
 例如，报表创建时用的是销售部门的订单表。即使后来有人建了同名的临时表，报表仍会读取原来的订单。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>表里的列改名后，已有视图照常可用 · 2026-11-22</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-22 · 表里的列改名后，已有视图照常可用
 
 例如，订单表把「数量」改成「订购数量」后，已有视图里的这一列仍叫「数量」。
 
 [用法](docs/MANUAL.md#9-视图与物化视图) · [测试报告](docs/test-report.md#rename-dependent-views-20261122) · [性能报告](docs/performance-report-2026-10-30.md#rename-dependent-views-cost-20261122)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-22 · 列改名后，原来的检查规则仍然生效
 

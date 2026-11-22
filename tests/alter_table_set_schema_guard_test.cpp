@@ -24,17 +24,18 @@ int main() {
     assert(engine.createTable(source, table) == DBStatus::OK);
     assert(engine.insert(source, "items", {{"id", "7"}}) == DBStatus::OK);
 
-    // A schema is a namespace within source, never a second database. Until
-    // the storage and catalog migration is implemented together, reject it
-    // rather than move relation forks into a same-named database.
-    assert(engine.alterTableSetSchema(source, "items", target) ==
-           DBStatus::FEATURE_NOT_SUPPORTED);
-    assert(engine.tableExists(source, "items"));
+    // A schema move only relocates the table within its current database.
+    const std::string moved = target + "__items";
+    assert(engine.alterTableSetSchema(source, "items", target) == DBStatus::OK);
+    assert(!engine.tableExists(source, "items"));
+    assert(engine.tableExists(source, moved));
     assert(!engine.tableExists(target, "items"));
-    assert(fs::exists(fs::path(source) / "items.stc"));
+    assert(!engine.tableExists(target, moved));
+    assert(!fs::exists(fs::path(source) / "items.stc"));
+    assert(fs::exists(fs::path(source) / (moved + ".stc")));
     assert(!fs::exists(fs::path(target) / "items.stc"));
     size_t rows = 0;
-    engine.forEachRow(source, "items",
+    engine.forEachRow(source, moved,
                       [&](uint32_t, uint16_t, const char*, size_t) { ++rows; });
     assert(rows == 1);
 

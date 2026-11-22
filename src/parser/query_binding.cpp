@@ -3545,6 +3545,7 @@ void Binder::rebase(Stmt& root, size_t offset) {
     from = [&](FromItem* source) {
         if (!source) return;
         if (source->tableNameBegin != std::string::npos) source->tableNameBegin += offset;
+        if (source->tableNameEnd != std::string::npos) source->tableNameEnd += offset;
         from(source->left.get()); from(source->right.get()); expr(source->joinCondition);
         if (source->subquery) stmt(*source->subquery);
     };

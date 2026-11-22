@@ -2000,6 +2000,8 @@ SELECT id, score FROM example_index_maintenance WHERE score >= 15 ORDER BY id;
 
 ## 9. 视图与物化视图
 
+给普通表改名或用 `ALTER TABLE ... SET SCHEMA` 移动它时，数据库会更新已记录依赖的普通视图。视图继续读取原来的表，并保留结果列名。例如，把 `sales.orders` 移到 `archive` 后，读取该表的视图会随之改读 `archive.orders`。[对照与恢复](test-report.md#view-table-rename-20261122)
+
 新建或替换普通视图时，数据库会记录它读取的表所在的 schema。比如创建报表视图时选中了 `sales.orders`，后来连接优先查找 `archive`，报表仍读 `sales.orders`。同名临时表也不会改变这个选择。旧视图可用写明 schema 的查询重新定义。[对照与恢复测试](test-report.md#view-source-identity-20261122)
 
 查询可以把普通视图与表或另一普通视图连接起来。例如 `SELECT v.total, o.status FROM order_totals v JOIN orders o ON v.id = o.id` 会按订单号匹配金额和状态。受支持的连接视图可以直接输出查询结果，省去写临时表的步骤。[验证范围](test-report.md#join-ordinary-views-20261122)

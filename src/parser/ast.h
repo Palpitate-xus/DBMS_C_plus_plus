@@ -804,6 +804,7 @@ struct FromItem {
     Type type = Type::Table;
     std::string tableName;
     size_t tableNameBegin = std::string::npos;
+    size_t tableNameEnd = std::string::npos;
     bool only = false;
     std::string alias;
     // Canonical SQL source-column aliases are metadata, not expressions.

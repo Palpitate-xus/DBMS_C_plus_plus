@@ -2,11 +2,17 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-22 · 表改名或迁移后的视图
+
+PostgreSQL 按原对象编号更新表名，视图保存的引用仍指向同一张表。SQLite 会更新受影响的视图定义文本。DuckDB 的表改名条款说明引用该表的视图需要另行更新。[PostgreSQL 改表名实现](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/commands/tablecmds.c#L4022) · [SQLite ALTER TABLE](https://www.sqlite.org/lang_altertable.html#alter_table_rename) · [DuckDB ALTER TABLE](https://www.duckdb.org/docs/current/sql/statements/alter_table#rename-table)
+
+本项目通过原对象编号找到依赖视图，再更新定义中绑定到它的表名和列前缀。重新绑定会校验引用的对象、列和输出类型。视图更新与改表名或移动表一起提交。[行为和恢复](test-report.md#view-table-rename-20261122) · [性能](performance-report-2026-10-30.md#view-table-rename-cost-20261122)
+
 ## 2026-11-22 · 创建视图时确定来源
 
 PostgreSQL 在创建或替换视图时查找其来源，保存绑定后的查询。SQLite 把持久视图的读取范围限制在同一个数据库。DuckDB 读取视图时用独立的绑定器，并优先查找视图所在的 catalog 和 schema。[PostgreSQL CREATE VIEW](https://www.postgresql.org/docs/18/sql-createview.html) · [SQLite 来源绑定](https://github.com/sqlite/sqlite/blob/master/src/attach.c) · [DuckDB 视图绑定](https://github.com/duckdb/duckdb/blob/main/src/planner/binder/tableref/bind_basetableref.cpp)
 
-本项目保存新建或替换视图时选中的来源 schema，查询时不再用调用者的查找顺序重新选择这些表。表和 schema 改名后按对象编号追踪、补齐旧定义和视图的权限规则仍待完成。[正确性与恢复](test-report.md#view-source-identity-20261122) · [性能](performance-report-2026-10-30.md#view-source-identity-cost-20261122)
+本项目保存新建或替换视图时选中的来源 schema。查询按保存的 schema 找表。schema 本身改名、缺少依赖记录的旧视图和视图的权限规则仍待完成。[正确性与恢复](test-report.md#view-source-identity-20261122) · [性能](performance-report-2026-10-30.md#view-source-identity-cost-20261122)
 
 ## 2026-11-22 · 查询时连接普通视图
 

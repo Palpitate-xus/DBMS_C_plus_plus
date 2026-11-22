@@ -18,6 +18,13 @@ cmake --build build/cmake --target dbms_main --parallel 2
 ## 最近更新
 
 <details>
+<summary>表改名后，原来的报表还能用 · 2026-11-22</summary>
+
+例如，订单表从销售区移到归档区后，原来的报表仍会查询这张表。即使用旧名字新建一张表，报表也会继续读原来的订单。
+
+</details>
+
+<details>
 <summary>同名表不会让新建的视图读错数据 · 2026-11-22</summary>
 
 例如，报表创建时用的是销售部门的订单表。即使后来有人建了同名的临时表，报表仍会读取原来的订单。
@@ -28,13 +35,6 @@ cmake --build build/cmake --target dbms_main --parallel 2
 <summary>可以把表和视图里的数据合起来查 · 2026-11-22</summary>
 
 例如，销售汇总视图里只有产品编号和金额。用产品编号匹配产品表，就能同时查出产品名称和销售总额。
-
-</details>
-
-<details>
-<summary>表里的列改名后，已有视图照常可用 · 2026-11-22</summary>
-
-例如，订单表把「数量」改成「订购数量」后，已有视图里的这一列仍叫「数量」。
 
 </details>
 
