@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-22 · COPY 按实际表导入和导出
+
+PostgreSQL 为 `COPY` 打开实际表并取得相应的锁，然后检查列和权限。SQLite 的命令行工具用 `.import --schema` 指定导入位置，导出时执行查询。DuckDB 在绑定 `COPY` 时确定导入表或导出查询，支持将数据导出到多个文件格式。[PostgreSQL 18.6 COPY 源码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/commands/copy.c#L123-L206) · [SQLite 导入导出](https://www.sqlite.org/cli.html#csv_import) · [DuckDB COPY](https://duckdb.org/docs/stable/sql/statements/copy)
+
+本项目让客户端的 `COPY` 先取得事务的数据访问权，再绑定实际表和输出列。对同名 `pg_type`，系统表、用户表和临时表按连接设置选择。系统表已能按列输出部分数据，系统表导入、查询形式和更多文件格式仍有差距。[测试报告](test-report.md#copy-relation-selection-20261122) · [性能报告](performance-report-2026-10-30.md#copy-relation-selection-cost-20261122)
+
 ## 2026-11-22 · 查找已经存在的同名表
 
 PostgreSQL 18.6 按顺序查找 `search_path`，自动补上省略的 `pg_catalog` 和当前连接的临时模式。两者可通过显式写出改变位置。SQLite 使用固定的临时库、主库、附加库顺序。DuckDB 先查临时表和配置指定的路径，再查默认系统目录。[PostgreSQL 18.6 查找实现](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/catalog/namespace.c#L65-L86) · [SQLite 对象查找](https://sqlite.org/lang_naming.html) · [DuckDB 查找实现](https://github.com/duckdb/duckdb/blob/v1.4.3/src/catalog/catalog_search_path.cpp#L254-L270)

@@ -6,6 +6,10 @@
 
 截至 2026-11-22，273 项功能要求中有 22 项完成、167 项部分实现、69 项待验证、15 项暂缓。各项结果和剩余范围见功能总账。以下更新报告给出各轮测试的实际范围。[功能总账](gap-progress.json) · [支持的功能和限制](compatibility-contract.md)
 
+## 2026-11-22 · COPY 按实际表导入和导出
+
+`COPY` 遇到同名 `pg_type` 时按连接的搜索顺序选择目标。在客户端复制数据时先取得数据库的事务访问权，再检查和使用表结构。另一连接未提交的删列操作不会让复制请求先读到暂时的表结构。[测试报告](test-report.md#copy-relation-selection-20261122) · [性能报告](performance-report-2026-10-30.md#copy-relation-selection-cost-20261122)
+
 ## 2026-11-22 · 修复 `pg_type` 同名表的读写
 
 如果系统表、用户表或当前连接的临时表都叫 `pg_type`，查询和普通写入会按连接的搜索路径选表。普通查询、预编译查询、合并写入、事务回滚和强制退出后的结果均已核对。[测试报告](test-report.md#pg-type-search-path-20261122) · [性能报告](performance-report-2026-10-30.md#pg-type-search-path-cost-20261122)

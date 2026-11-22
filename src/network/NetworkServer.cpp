@@ -1,5 +1,7 @@
 #include "catalog/pg_owned_catalog_query.h"
 #include "catalog/RelationSearchPath.h"
+#include "catalog/type_catalog.h"
+#include "catalog/SystemCatalogRows.h"
 #include "expression/StoredRegtypeValue.h"
 #include "NetworkServer.h"
 #include "common/version.h"
@@ -7,6 +9,7 @@
 #include "common/CharacterColumn.h"
 #include "common/SqlTrivia.h"
 #include "commands/DmlExecutor.h"
+#include "commands/CopyRelation.h"
 #include "executor/ExecutionPlan.h"
 #include "TableManage.h"
 #include "permissions.h"
@@ -5167,6 +5170,7 @@ struct CopyWirePlan {
     CopyWireDirection direction = CopyWireDirection::None;
     std::string relation;
     std::string physicalTable;
+    bool systemPgType = false;
     std::vector<std::string> requestedColumns;
     std::vector<size_t> columnIndexes;
     char delimiter = '\t';
@@ -5371,7 +5375,7 @@ CopyWirePlan parseCopyWirePlan(const std::string& sql) {
         copyError(plan, "42601", "COPY requires a relation name");
         return plan;
     }
-    plan.relation = token.text;
+    plan.relation = token.quoted ? SQLParser::quoteIdentifier(token.text) : token.text;
     if (scanner.peek().kind == CopyToken::Kind::Dot) {
         (void)scanner.next();
         const CopyToken table = scanner.next();
@@ -5379,7 +5383,7 @@ CopyWirePlan parseCopyWirePlan(const std::string& sql) {
             copyError(plan, "42601", "malformed qualified relation name in COPY");
             return plan;
         }
-        plan.relation += "." + table.text;
+        plan.relation += "." + (table.quoted ? SQLParser::quoteIdentifier(table.text) : table.text);
         if (scanner.peek().kind == CopyToken::Kind::Dot) {
             copyUnsupported(plan, "three-part relation names");
             return plan;
@@ -5552,31 +5556,55 @@ CopyWirePlan parseCopyWirePlan(const std::string& sql) {
     return plan;
 }
 
-bool copyTableIsTemporary(const Session& session,
-                          const std::string& relation) {
-    const size_t dot = relation.rfind('.');
-    const std::string name = dot == std::string::npos
-                                 ? relation
-                                 : relation.substr(dot + 1);
-    return session.tempTables.count(name) != 0 ||
-           session.transientTempTables.count(name) != 0;
-}
-
-bool validateCopyWirePlan(CopyWirePlan& plan, Session& session) {
-    if (!plan.error.empty() || !plan.wire) return plan.error.empty();
-    try {
-        plan.physicalTable = resolveTableName(session, plan.relation);
-    } catch (const DbError& error) {
-        copyError(plan, error.sqlState(), error.message());
+bool validateCopySystemPgType(CopyWirePlan& plan) {
+    const auto& descriptor = ownedTypeCatalogDescriptor();
+    std::set<size_t> selected;
+    for (const auto& requested : plan.requestedColumns) {
+        const auto column = std::find_if(descriptor.begin(), descriptor.end(),
+            [&](const auto& field) { return field.name == requested; });
+        if (column == descriptor.end()) {
+            if (system_catalog::unownedColumn("pg_type", descriptor, requested))
+                copyUnsupported(plan, "on unimplemented pg_type column \"" + requested + "\"");
+            else
+                copyError(plan, "42703", "column \"" + requested + "\" does not exist");
+            return false;
+        }
+        const size_t index = static_cast<size_t>(column - descriptor.begin());
+        if (!selected.insert(index).second) {
+            copyError(plan, "42701", "column \"" + requested + "\" specified more than once");
+            return false;
+        }
+        plan.columnIndexes.push_back(index);
+    }
+    if (plan.direction == CopyWireDirection::FromStdin) {
+        copyUnsupported(plan, "FROM on pg_catalog.pg_type");
         return false;
     }
+    if (plan.columnIndexes.empty()) {
+        copyUnsupported(plan, "TO with the complete pg_type schema");
+        return false;
+    }
+    for (const size_t index : plan.columnIndexes) {
+        if (descriptor[index].type == "regproc") {
+            copyUnsupported(plan, "TO on pg_type procedure-reference columns");
+            return false;
+        }
+    }
+    return true;
+}
+
+bool validateCopyWirePlan(CopyWirePlan& plan, Session& session, TableSchema& table) {
+    if (!plan.error.empty() || !plan.wire) return plan.error.empty();
+    auto relation = resolveCopyRelation(g_engine, session, plan.relation, resolveTableName);
+    plan.systemPgType = relation.systemPgType;
+    if (plan.systemPgType) return validateCopySystemPgType(plan);
+    plan.physicalTable = std::move(relation.physicalName);
     if (!g_engine.tableExists(session.currentDB, plan.physicalTable)) {
         copyError(plan, "42P01",
                   "relation \"" + plan.relation + "\" does not exist");
         return false;
     }
-    const TableSchema table =
-        g_engine.getTableSchema(session.currentDB, plan.physicalTable);
+    table = g_engine.getTableSchema(session.currentDB, plan.physicalTable);
     if (table.partitionType != TableSchema::PartitionType::None) {
         copyUnsupported(plan, "partitioned relations");
         return false;
@@ -5645,7 +5673,7 @@ bool validateCopyWirePlan(CopyWirePlan& plan, Session& session) {
             return false;
         }
     }
-    const bool temporary = copyTableIsTemporary(session, plan.relation);
+    const bool temporary = relation.temporary;
     const auto privilege = plan.direction == CopyWireDirection::FromStdin
         ? StorageEngine::TablePrivilege::Insert
         : StorageEngine::TablePrivilege::Select;
@@ -6186,8 +6214,51 @@ CopyStreamResult sendCopyOut(PostgresProtocol& protocol,
         }
         dbms::checkForQueryInterrupt();
     };
+    const auto sendRecord = [&](std::string& output) {
+        output.push_back('\n');
+        if (output.size() > kMaxCopyRecordBytes) {
+            result.sqlState = "54000";
+            result.error = "COPY output row exceeds 16 MiB limit";
+            return;
+        }
+        const auto interrupt = session.interruptState;
+        const ProtocolMessageWriteResult writeResult = protocol.sendCopyDataUntil(
+            output, deadline, [interrupt]() {
+                return interrupt->terminateRequested.load(std::memory_order_acquire) ||
+                       interrupt->cancelRequested.load(std::memory_order_acquire);
+            });
+        if (writeResult != ProtocolMessageWriteResult::Complete) {
+            if (writeResult == ProtocolMessageWriteResult::TimedOut ||
+                interrupt->timeoutRequested.load(std::memory_order_acquire)) {
+                result.sqlState = "57014";
+                result.error = "canceling statement due to statement timeout";
+            } else if (writeResult == ProtocolMessageWriteResult::Interrupted) {
+                const bool terminated = interrupt->terminateRequested.load(std::memory_order_acquire);
+                result.sqlState = terminated ? "57P01" : "57014";
+                result.error = terminated ? "terminating connection due to administrator command"
+                                          : "canceling COPY due to user request";
+            }
+            result.transportOk = false;
+            return;
+        }
+        ++result.rows;
+    };
     try {
-        const bool scanned = g_engine.forEachVisibleRow(
+        if (plan.systemPgType) {
+            const auto metadata = g_engine.catalogService().metadataSnapshot(session.currentDB, false);
+            for (const auto& row : metadata.types) {
+                if (!result.transportOk || !result.error.empty()) break;
+                checkCopyInterrupt();
+                const auto cells = ownedTypeCatalogCells(row);
+                std::string output;
+                for (size_t selected = 0; selected < plan.columnIndexes.size(); ++selected) {
+                    if (selected != 0) output.push_back(plan.delimiter);
+                    const auto& cell = cells[plan.columnIndexes[selected]];
+                    output += cell.isNull ? plan.nullMarker : encodeCopyTextField(cell.value, plan.delimiter);
+                }
+                sendRecord(output);
+            }
+        } else if (!g_engine.forEachVisibleRow(
             session.currentDB, plan.physicalTable, "SELECT",
             [&](uint32_t pageId, uint16_t slotId, const char* data,
                 size_t length) {
@@ -6218,44 +6289,8 @@ CopyStreamResult sendCopyOut(PostgresProtocol& protocol,
                         ? plan.nullMarker
                         : encodeCopyTextField(value, plan.delimiter);
                 }
-                output.push_back('\n');
-                if (output.size() > kMaxCopyRecordBytes) {
-                    result.sqlState = "54000";
-                    result.error = "COPY output row exceeds 16 MiB limit";
-                    return;
-                }
-                const auto interrupt = session.interruptState;
-                const ProtocolMessageWriteResult writeResult =
-                    protocol.sendCopyDataUntil(
-                        output, deadline, [interrupt]() {
-                            return interrupt->terminateRequested.load(
-                                       std::memory_order_acquire) ||
-                                   interrupt->cancelRequested.load(
-                                       std::memory_order_acquire);
-                        });
-                if (writeResult != ProtocolMessageWriteResult::Complete) {
-                    if (writeResult == ProtocolMessageWriteResult::TimedOut ||
-                        interrupt->timeoutRequested.load(
-                            std::memory_order_acquire)) {
-                        result.sqlState = "57014";
-                        result.error =
-                            "canceling statement due to statement timeout";
-                    } else if (writeResult ==
-                               ProtocolMessageWriteResult::Interrupted) {
-                        const bool terminated =
-                            interrupt->terminateRequested.load(
-                                std::memory_order_acquire);
-                        result.sqlState = terminated ? "57P01" : "57014";
-                        result.error = terminated
-                            ? "terminating connection due to administrator command"
-                            : "canceling COPY due to user request";
-                    }
-                    result.transportOk = false;
-                    return;
-                }
-                ++result.rows;
-            });
-        if (!scanned && result.error.empty() && result.transportOk) {
+                sendRecord(output);
+            }) && result.error.empty() && result.transportOk) {
             result.sqlState = "XX001";
             result.error = "COPY TO could not read the relation";
         }
@@ -7810,15 +7845,6 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             }
             return cleaned;
         };
-        if (!validateCopyWirePlan(plan, session)) {
-            if (outcome.failedInExistingTransaction)
-                (void)abortCopyTransaction();
-            outcome.connectionOk = protocol.sendErrorResponse(
-                "ERROR", plan.sqlState.empty() ? "XX000" : plan.sqlState,
-                plan.error);
-            return outcome;
-        }
-
         QueryResult boundaryError;
         if (!beginCopyBoundary(boundary, boundaryError)) {
             (void)abortCopyTransaction();
@@ -7830,8 +7856,24 @@ void handleClient(SecureSocket socket, std::string clientHost) {
         outcome.failedInExistingTransaction =
             boundary.originallyInTransaction;
 
-        const TableSchema table =
-            g_engine.getTableSchema(session.currentDB, plan.physicalTable);
+        // The statement boundary owns the database before binding column
+        // positions. Use that same schema until the COPY finishes.
+        TableSchema table;
+        bool planValid = false;
+        try {
+            planValid = validateCopyWirePlan(plan, session, table);
+        } catch (const DbError& error) {
+            copyError(plan, error.sqlState(), error.message());
+        } catch (const std::exception& error) {
+            copyError(plan, "XX000", error.what());
+        }
+        if (!planValid) {
+            (void)abortCopyTransaction();
+            outcome.connectionOk = protocol.sendErrorResponse(
+                "ERROR", plan.sqlState.empty() ? "XX000" : plan.sqlState,
+                plan.error);
+            return outcome;
+        }
         const std::vector<uint16_t> formats(plan.columnIndexes.size(), 0);
         if (plan.direction == CopyWireDirection::FromStdin) {
             CopyStreamResult stream;

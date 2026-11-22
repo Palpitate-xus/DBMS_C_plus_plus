@@ -2454,6 +2454,19 @@ SHOW MAINTENANCE JOB 1;
 CANCEL MAINTENANCE JOB 1;
 ```
 
+### 用客户端复制数据
+
+`COPY ... FROM STDIN` 和 `COPY ... TO STDOUT` 通过当前连接传输数据。表名可以写出所属模式。`pg_type` 有同名表时，`COPY` 按 `search_path` 选择系统、用户或当前连接的临时表。在只读事务中，导入只能写到实际选中的临时表。
+
+```sql
+COPY public.users (id, name) FROM STDIN;
+COPY pg_catalog.pg_type (oid, typname) TO STDOUT;
+```
+
+导出系统 `pg_type` 时需要列出受支持的列。函数引用列、整张系统表导出以及系统表导入仍不支持。服务器文件复制遵循同一选表顺序，系统表文件复制会在打开文件前报错。[验证范围](test-report.md#copy-relation-selection-20261122)
+
+### 备份与恢复作业
+
 `DUMP` 产生逻辑 SQL 文件；`RESTORE DATABASE` 只接受 `BACKUP DATABASE`
 产生的物理备份，不能读取 DUMP 文件。后台作业状态持久化为
 `queued/running/succeeded/failed/cancelled`，进程异常退出时遗留的 running

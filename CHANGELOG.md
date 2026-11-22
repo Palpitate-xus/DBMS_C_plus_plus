@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>修复复制 pg_type 时选错表的问题 · 2026-11-22</summary>
+
+导入和导出 `pg_type` 时会按当前连接的查找顺序选表。也可以指定列来导出系统类型列表。
+
+[使用说明](docs/MANUAL.md#用客户端复制数据) · [测试报告](docs/test-report.md#copy-relation-selection-20261122)
+
+</details>
+
+<details>
 <summary>修复查询或写入 pg_type 时选错表的问题 · 2026-11-22</summary>
 
 数据库按连接的搜索顺序选择 `pg_type`。你可以用 `public.pg_type` 明确指定自己的表。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>开始事务时少做一轮表结构检查 · 2026-11-22</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-22 · 开始事务时少做一轮表结构检查
 
 测试中，执行 `BEGIN` 少了 22 次文件或目录状态检查。
 
 [测试报告](docs/test-report.md#catalog-publication-one-scan-20261122) · [性能报告](docs/performance-report-2026-10-30.md#catalog-publication-one-scan-cost-20261122)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-22 · 别人改表时，仍可查看和调整自己的连接设置
 

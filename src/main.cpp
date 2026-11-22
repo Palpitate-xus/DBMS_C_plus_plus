@@ -1,5 +1,6 @@
 #include "catalog/pg_owned_catalog_query.h"
 #include "catalog/RelationSearchPath.h"
+#include "commands/CopyRelation.h"
 #include "catalog/type_catalog.h"
 #include "catalog/SystemCatalogRows.h"
 #include "catalog/PgDefaultCatalog.h"
@@ -5249,13 +5250,14 @@ static bool handleCopy(const string& sql, Session& s) {
     if (!checkAdmin(s)) return true;
     if (!checkDB(s)) return true;
     string rest = trim(sql.substr(4));
-    size_t fromPos = rest.find(" from ");
-    size_t toPos = rest.find(" to ");
+    const size_t fromPos = findTopLevelKeyword(rest, "from", 0);
+    const size_t toPos = findTopLevelKeyword(rest, "to", 0);
     if (fromPos != string::npos) {
-        string tname = trim(rest.substr(0, fromPos));
-        const bool temporaryTarget = s.tempTables.count(tname) != 0;
-        tname = resolveTableName(s, tname);
-        string fileRest = trim(rest.substr(fromPos + 6));
+        const auto target = dbms::resolveCopyRelation(
+            g_engine, s, trim(rest.substr(0, fromPos)), resolveTableName);
+        if (target.systemPgType) dbms::requireWritablePgTypeRelation("pg_catalog", "pg_type");
+        const auto& tname = target.physicalName;
+        string fileRest = trim(rest.substr(fromPos + 4));
         size_t q1 = fileRest.find('\'');
         size_t q2 = fileRest.find('\'', q1 + 1);
         if (q1 == string::npos || q2 == string::npos) {
@@ -5268,7 +5270,7 @@ static bool handleCopy(const string& sql, Session& s) {
             return true;
         }
         if (g_engine.inTransaction() && g_engine.isReadOnly() &&
-            !temporaryTarget) {
+            !target.temporary) {
             cout << "ERROR: cannot execute COPY FROM in a read-only "
                     "transaction (SQLSTATE 25006)" << endl;
             return true;
@@ -5395,9 +5397,12 @@ static bool handleCopy(const string& sql, Session& s) {
         return false;
     }
     if (toPos != string::npos) {
-        string tname = trim(rest.substr(0, toPos));
-        tname = resolveTableName(s, tname);
-        string fileRest = trim(rest.substr(toPos + 4));
+        const auto source = dbms::resolveCopyRelation(
+            g_engine, s, trim(rest.substr(0, toPos)), resolveTableName);
+        if (source.systemPgType)
+            throw dbms::DbError("0A000", "COPY TO file requires the complete pg_type schema");
+        const auto& tname = source.physicalName;
+        string fileRest = trim(rest.substr(toPos + 2));
         size_t q1 = fileRest.find('\'');
         size_t q2 = fileRest.find('\'', q1 + 1);
         if (q1 == string::npos || q2 == string::npos) {

@@ -67,6 +67,130 @@ def copy_out(client, sock, sql, columns):
             return messages
 
 
+def check_pg_type_copy_selection(client, runner, sock):
+    sync = client.typed(b"S")
+
+    def command(sql, tag, ready=b"I"):
+        messages, sqlstate = simple(client, sock, sql)
+        assert (sqlstate, command_tags(messages), messages[-1]) == (
+            None, [tag], (b"Z", ready)), (sql, messages)
+
+    def send_extended(sql, flush=False):
+        request = (client.typed(b"P", parse("", sql)) +
+                   client.typed(b"B", bind("", "")) +
+                   client.typed(b"E", execute()))
+        if flush:
+            request += client.typed(b"H")
+        sock.sendall(request)
+        assert client.read_message(sock) == (b"1", b""), sql
+        assert client.read_message(sock) == (b"2", b""), sql
+
+    def reject(sql, expected, extended, ready=b"I"):
+        if extended:
+            send_extended(sql, flush=True)
+        else:
+            sock.sendall(client.typed(b"Q", sql.encode() + b"\0"))
+        first = client.read_message(sock)
+        assert first[0] == b"E", (sql, first)
+        if extended:
+            sock.sendall(sync)
+        messages = [first, *client.read_until_ready(sock)]
+        assert [kind for kind, _ in messages] == [b"E", b"Z"], (sql, messages)
+        assert state(messages) == expected and messages[-1] == (b"Z", ready), (sql, messages)
+
+    def out_rows(sql, columns, extended):
+        if extended:
+            send_extended(sql, flush=True)
+            kind, body = client.read_message(sock)
+            assert kind == b"H", (sql, kind, body)
+            expect_copy_response(body, columns)
+            sock.sendall(sync)
+            messages = client.read_until_ready(sock)
+        else:
+            messages = copy_out(client, sock, sql, columns)
+        rows = [body for kind, body in messages if kind == b"d"]
+        assert [kind for kind, _ in messages] == [b"d"] * len(rows) + [b"c", b"C", b"Z"], (sql, messages)
+        assert command_tags(messages) == [f"COPY {len(rows)}".encode()], (sql, messages)
+        assert messages[-1] == (b"Z", b"I"), (sql, messages)
+        return rows
+
+    def insert_row(sql, row, extended):
+        if extended:
+            send_extended(sql)
+            kind, body = client.read_message(sock)
+            assert kind == b"G", (sql, kind, body)
+            expect_copy_response(body, 1)
+        else:
+            begin_copy(client, sock, sql, columns=1)
+        completion = client.typed(b"d", row) + client.typed(b"c")
+        sock.sendall(completion + (sync if extended else b""))
+        assert finish_simple_copy(client, sock) == [(b"C", b"COPY 1\0"), (b"Z", b"I")], sql
+
+    def table_rows(sql, expected):
+        messages = client.simple_query(sock, sql)
+        rows, sqlstate, _, _, tag = runner.decode_wire_result(messages)
+        assert (rows, sqlstate, tag, messages[-1]) == (
+            [[value] for value in expected], None, f"SELECT {len(expected)}", (b"Z", b"I")), (sql, messages)
+
+    for extended in (False, True):
+        command("RESET search_path", b"RESET")
+        command("CREATE TABLE public.pg_type (id INT)", b"CREATE TABLE")
+        command("INSERT INTO public.pg_type VALUES (11)", b"INSERT 0 1")
+        reject("COPY pg_type (id) TO STDOUT", "42703", extended)
+        reject("COPY pg_type (id) FROM STDIN", "42703", extended)
+        builtin = out_rows("COPY pg_type (oid, typname) TO STDOUT", 2, extended)
+        assert builtin.count(b"23\tint4\n") == builtin.count(b"25\ttext\n") == 1, builtin
+        assert all(row.endswith(b"\n") and row.count(b"\t") == 1 for row in builtin), builtin
+        reject("COPY pg_catalog.pg_type (oid, typname) FROM STDIN", "0A000", extended)
+
+        command("CREATE TEMP TABLE pg_type (id INT)", b"CREATE TABLE")
+        command("INSERT INTO pg_temp.pg_type VALUES (31)", b"INSERT 0 1")
+        command("SET search_path = public, pg_catalog, pg_temp", b"SET")
+        insert_row("COPY pg_type (id) FROM STDIN", b"17\n", extended)
+        assert sorted(out_rows("COPY pg_type (id) TO STDOUT", 1, extended)) == [b"11\n", b"17\n"]
+        for relation in ("pg_type", "public.pg_type"):
+            command("BEGIN READ ONLY", b"BEGIN", b"T")
+            reject(f"COPY {relation} (id) FROM STDIN", "25006", extended, b"E")
+            command("ROLLBACK", b"ROLLBACK")
+
+        command("SET search_path = pg_catalog, pg_temp, public", b"SET")
+        reject("COPY pg_type (id) TO STDOUT", "42703", extended)
+        command("SET search_path = pg_temp, pg_catalog, public", b"SET")
+        insert_row("COPY pg_type (id) FROM STDIN", b"47\n", extended)
+        assert sorted(out_rows("COPY pg_type (id) TO STDOUT", 1, extended)) == [b"31\n", b"47\n"]
+        table_rows("SELECT id FROM public.pg_type ORDER BY id", ["11", "17"])
+        table_rows("SELECT id FROM pg_temp.pg_type ORDER BY id", ["31", "47"])
+        command("DROP TABLE pg_temp.pg_type", b"DROP TABLE")
+        command("DROP TABLE public.pg_type", b"DROP TABLE")
+        command("RESET search_path", b"RESET")
+    print("COPY_PG_TYPE_RELATION_MODES_COMPLETE 2")
+
+
+def check_copy_schema_lock(client, owner, reader):
+    def command(sock, sql, tag, ready=b"I"):
+        messages, sqlstate = simple(client, sock, sql)
+        assert (sqlstate, command_tags(messages), messages[-1]) == (
+            None, [tag], (b"Z", ready)), (sql, messages)
+
+    command(owner, "CREATE TABLE copy_schema_lock (id INT, marker INT)", b"CREATE TABLE")
+    command(owner, "INSERT INTO copy_schema_lock VALUES (1, 29)", b"INSERT 0 1")
+    command(reader, "SET lock_timeout = 50", b"SET")
+    command(owner, "BEGIN", b"BEGIN", b"T")
+    sql = "COPY copy_schema_lock (marker) TO STDOUT"
+    try:
+        command(owner, "ALTER TABLE copy_schema_lock DROP COLUMN marker", b"ALTER TABLE", b"T")
+        messages, sqlstate = simple(client, reader, sql)
+        assert [kind for kind, _ in messages] == [b"E", b"Z"], (sql, messages)
+        assert (sqlstate, messages[-1]) == ("55P03", (b"Z", b"I")), (sql, messages)
+    finally:
+        command(owner, "ROLLBACK", b"ROLLBACK")
+
+    exported = copy_out(client, reader, sql, 1)
+    assert exported == [(b"d", b"29\n"), (b"c", b""), (b"C", b"COPY 1\0"), (b"Z", b"I")], exported
+    command(owner, "DROP TABLE copy_schema_lock", b"DROP TABLE")
+    print("COPY_SCHEMA_LOCK_CHECK_COMPLETE 1")
+
+
 def main():
     root = Path(__file__).resolve().parent.parent
     spec = importlib.util.spec_from_file_location(
@@ -78,6 +202,10 @@ def main():
     sock = server["sock"]
     slow_reader = None
     try:
+        check_pg_type_copy_selection(client, runner, sock)
+        with socket.create_connection(("127.0.0.1", server["port"]), 15) as peer:
+            client.startup(peer, "alice", "info")
+            check_copy_schema_lock(client, sock, peer)
         _, sqlstate = simple(
             client, sock,
             "CREATE TABLE copy_wire (id INT PRIMARY KEY, payload TEXT, optional TEXT DEFAULT 'fallback');")
