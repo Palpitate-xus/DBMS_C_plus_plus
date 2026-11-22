@@ -2168,6 +2168,8 @@ bool DdlExecutor::execute(const StmtPtr& stmt, Session& s) {
             return executeDropDatabase(dynamic_cast<const DropStmt*>(stmt.get()), s);
         case SqlCommand::CreateSchema:
             return executeCreateSchema(dynamic_cast<const CreateObjectStmt*>(stmt.get()), s);
+        case SqlCommand::AlterSchema:
+            return executeAlterSchema(dynamic_cast<const AlterObjectStmt*>(stmt.get()), s);
         case SqlCommand::CreateRole:
             return executeCreateRole(dynamic_cast<const CreateRoleStmt*>(stmt.get()), s);
         case SqlCommand::AlterRole:
@@ -2246,6 +2248,7 @@ bool tryDdlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
         case dbms::SqlCommand::DropDatabase:
         case dbms::SqlCommand::CreateSchema:
         case dbms::SqlCommand::DropSchema:
+        case dbms::SqlCommand::AlterSchema:
         case dbms::SqlCommand::CreateCollation:
         case dbms::SqlCommand::DropCollation:
         case dbms::SqlCommand::CreateRole:
@@ -2280,6 +2283,7 @@ bool tryDdlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
         parsedCmd == dbms::SqlCommand::DropProcedure ||
         parsedCmd == dbms::SqlCommand::DropRoutine ||
         parsedCmd == dbms::SqlCommand::CreateView ||
+        parsedCmd == dbms::SqlCommand::AlterSchema ||
         parsedCmd == dbms::SqlCommand::AlterTable ||
         parsedCmd == dbms::SqlCommand::CreateTable;
     const std::string& parseInput = preservesLiteralText && !rawSql.empty()
@@ -2458,6 +2462,8 @@ static void dropColumnDependentViews(
 
 using ViewRelationDependencies = std::set<std::pair<Oid, int32_t>>;
 using ViewSourceBinding = std::tuple<size_t, size_t, size_t>;
+using ViewSourceRenames = std::map<std::pair<std::string, std::string>,
+                                   std::pair<std::string, std::string>>;
 struct ViewRenamePlan {
     std::string name;
     std::string definition;
@@ -2476,9 +2482,13 @@ static std::vector<ViewRenamePlan> planViewSourceRename(
     CatalogManager& catalog, const std::string& database,
     const std::string& oldSchema, const std::string& oldName,
     const std::string& newSchema, const std::string& newName);
+static std::vector<ViewRenamePlan> planViewSourceRenames(
+    StorageEngine& engine, CatalogManager& catalog, const std::string& database,
+    const ViewSourceRenames& renames);
 static void publishDependentViewRenames(
     CatalogManager& catalog, const std::string& database,
-    const std::vector<ViewRenamePlan>& plans, DdlTransaction& transaction);
+    const std::vector<ViewRenamePlan>& plans, DdlTransaction& transaction,
+    StorageEngine& engine = g_engine);
 
 static bool generatedVirtualName(const TableSchema& table,const std::string& name) {
     for(size_t i=0;i<table.len();++i)if(table.cols[i].dataName==name)return table.cols[i].generatedKind=='v';
@@ -5199,6 +5209,30 @@ bool DdlExecutor::executeCreateSchema(const CreateObjectStmt* stmt, Session& s) 
         return true;
     }
     std::cout << "CREATE SCHEMA succeeded" << std::endl;
+    return false;
+}
+
+bool DdlExecutor::executeAlterSchema(const AlterObjectStmt* stmt, Session& s) {
+    if (!stmt) return rejectMalformedDdlAst();
+    const auto tokens = SQLParser::tokenize(stmt->subCommand);
+    if (!tokens.empty() && SQLParser::toLower(tokens.front()) == "owner")
+        throw DbError("0A000", "changing the owner of a schema is not supported");
+    CatalogManager::QualifiedName oldName, newName;
+    if (stmt->ifExists || stmt->only || !stmt->schema.empty() || tokens.size() != 3 ||
+        SQLParser::toLower(tokens[0]) != "rename" || SQLParser::toLower(tokens[1]) != "to" ||
+        !CatalogManager::parseQualifiedName(stmt->objectName, oldName, true) ||
+        !CatalogManager::parseQualifiedName(tokens[2], newName, true) ||
+        !oldName.schema.empty() || !newName.schema.empty())
+        throw DbError("42601", "invalid ALTER SCHEMA RENAME syntax");
+    if (!checkDB(s)) return true;
+    if (!sessionIsAdmin(s))
+        throw DbError("42501", "permission denied to rename schema");
+    const auto result = renameSchemaNamespace(g_engine, s.currentDB, oldName.name, newName.name, &s);
+    if (result.status != DBStatus::OK)
+        throw DbError(result.status == DBStatus::TABLE_NOT_FOUND ? "3F000"
+            : result.status == DBStatus::TABLE_ALREADY_EXISTS ? "42P06"
+            : sqlstateForDBStatus(result.status), result.error);
+    std::cout << "ALTER SCHEMA succeeded" << std::endl;
     return false;
 }
 
@@ -10973,7 +11007,8 @@ bool DdlExecutor::executeDropType(const DropStmt* stmt, Session& s) {
 // expanded stars and lexical children must never become name guesses here.
 static ViewRelationDependencies boundViewRelationDependencies(
     const CatalogManager& catalog, const std::string& database, const PreparedQuery& prepared,
-    const std::function<void(const ColumnRefExpr&)>& onColumn = {}) {
+    const std::function<void(const ColumnRefExpr&)>& onColumn = {},
+    StorageEngine& engine = g_engine) {
     ViewRelationDependencies dependencies;
     std::map<size_t, const PreparedQuery::SourceRange*> sources;
     std::map<size_t, std::vector<PgAttributeRow>> attributes;
@@ -11004,7 +11039,7 @@ static ViewRelationDependencies boundViewRelationDependencies(
             // A compiled catalog can expose a reordered subset. Recover its
             // unaliased descriptor with a pure source declaration: SELECT 1
             // reads no values and does not require a complete SELECT * shape.
-            const auto declaration = g_engine.prepareBoundQuery(database,
+            const auto declaration = engine.prepareBoundQuery(database,
                 "SELECT 1 FROM " + domainQuotedIdentifier(source.relationSchema) + "." +
                     domainQuotedIdentifier(source.relationName), {}, true);
             const PreparedQuery::SourceRange* original = nullptr;
@@ -11192,7 +11227,8 @@ static auto viewJoinKeys(const PreparedQuery& query) {
 static ViewRelationDependencies inspectViewBindings(
     const CatalogManager& catalog, const std::string& database,
     const PreparedQuery& query, std::vector<ViewSourceBinding>& references,
-    const std::function<void(const ColumnRefExpr&)>& onColumn = {}) {
+    const std::function<void(const ColumnRefExpr&)>& onColumn = {},
+    StorageEngine& engine = g_engine) {
     std::vector<std::pair<ViewEditSpan, ViewSourceBinding>> ordered;
     auto dependencies = boundViewRelationDependencies(
         catalog, database, query, [&](const ColumnRefExpr& ref) {
@@ -11200,7 +11236,7 @@ static ViewRelationDependencies inspectViewBindings(
             ordered.emplace_back(ViewEditSpan{ref.sourceBegin, ref.sourceEnd},
                 ViewSourceBinding{binding.sourceOrdinal, binding.columnOrdinal, binding.scopeDepth});
             if (onColumn) onColumn(ref);
-        });
+        }, engine);
     std::sort(ordered.begin(), ordered.end());
     references.reserve(ordered.size());
     for (const auto& site : ordered) references.push_back(site.second);
@@ -11228,16 +11264,24 @@ static std::vector<ViewRenamePlan> planViewSourceRename(
     CatalogManager& catalog, const std::string& database,
     const std::string& oldSchema, const std::string& oldName,
     const std::string& newSchema, const std::string& newName) {
-    const auto schema = catalog.getNamespaceByName(oldSchema);
-    const auto relation = schema ? catalog.getClassByName(oldName, schema->oid) : std::nullopt;
-    if (!relation) return {};
+    return planViewSourceRenames(g_engine, catalog, database,
+        {{{oldSchema, oldName}, {newSchema, newName}}});
+}
 
+static std::vector<ViewRenamePlan> planViewSourceRenames(
+    StorageEngine& engine, CatalogManager& catalog, const std::string& database,
+    const ViewSourceRenames& renames) {
     std::set<Oid> views;
-    for (const auto& edge : catalog.findAllDependents(PgClassOid_Class, relation->oid))
-        if (edge.classid == PgClassOid_Class) views.insert(edge.objid);
+    for (const auto& [source, _] : renames) {
+        const auto& [oldSchema, oldName] = source;
+        const auto schema = catalog.getNamespaceByName(oldSchema);
+        const auto relation = schema ? catalog.getClassByName(oldName, schema->oid) : std::nullopt;
+        if (!relation) continue;
+        for (const auto& edge : catalog.findAllDependents(PgClassOid_Class, relation->oid))
+            if (edge.classid == PgClassOid_Class) views.insert(edge.objid);
+    }
 
     const auto quote = SQLParser::quoteIdentifier;
-    const std::string target = quote(newSchema) + "." + quote(newName);
     std::vector<ViewRenamePlan> plans;
     for (const auto oid : views) {
         const auto view = catalog.getClass(oid);
@@ -11246,11 +11290,11 @@ static std::vector<ViewRenamePlan> planViewSourceRename(
         std::string error;
         if (!catalogViewStorageName(catalog, *view, plan.name, error))
             throw DbError("XX001", error);
-        const auto stored = g_engine.getViewSQL(database, plan.name);
+        const auto stored = engine.getViewSQL(database, plan.name);
         plan.query = viewDefinitionQuery(stored);
         if (plan.query.empty()) throw DbError("XX001", "view definition is missing");
         auto suffix = stored.substr(plan.query.size());
-        const auto prepared = g_engine.prepareBoundQuery(database, plan.query, {}, true);
+        const auto prepared = engine.prepareBoundQuery(database, plan.query, {}, true);
         const auto* root = dynamic_cast<const SelectStmt*>(prepared.ast.get());
         std::map<ViewEditSpan, std::string> edits;
         const auto edit = [&](size_t begin, size_t end, const std::string& replacement) {
@@ -11262,24 +11306,27 @@ static std::vector<ViewRenamePlan> planViewSourceRename(
         };
         std::set<std::string> usedNames;
         for (const auto& source : prepared.sourceRanges) usedNames.insert(source.name);
-        const bool renameCollides = newName != oldName && usedNames.count(newName);
-        const auto protectedBytes = renameCollides ? sqlProtectedBytes(plan.query) : std::vector<bool>{};
+        std::optional<std::vector<bool>> protectedBytes;
         std::map<size_t, std::string> qualifiers;
         for (const auto& source : prepared.sourceRanges) {
             const auto* item = source.source;
-            if (!item || item->type != FromItem::Type::Table ||
-                source.relationSchema != oldSchema || source.relationName != oldName) continue;
+            if (!item || item->type != FromItem::Type::Table) continue;
+            const auto moved = renames.find({source.relationSchema, source.relationName});
+            if (moved == renames.end()) continue;
+            const auto& [newSchema, newName] = moved->second;
+            const auto target = quote(newSchema) + "." + quote(newName);
             auto end = item->tableNameEnd;
             auto replacement = target;
             if (item->alias.empty()) {
                 auto qualifier = target;
-                if (renameCollides) {
+                if (newName != source.relationName && usedNames.count(newName)) {
                     if (item->tableNameBegin >= end || end > plan.query.size())
                         throw DbError("0A000", "view table alias has no source position");
                     auto alias = "__view_source_" + std::to_string(source.ordinal);
                     while (!usedNames.insert(alias).second) alias += '_';
                     qualifier = quote(alias);
-                    end = viewTableAliasPosition(plan.query, *item, protectedBytes);
+                    if (!protectedBytes) protectedBytes = sqlProtectedBytes(plan.query);
+                    end = viewTableAliasPosition(plan.query, *item, *protectedBytes);
                     replacement += plan.query.substr(item->tableNameEnd, end - item->tableNameEnd) +
                         " AS " + qualifier;
                 }
@@ -11305,7 +11352,7 @@ static std::vector<ViewRenamePlan> planViewSourceRename(
             edit(ref.sourceBegin, ref.sourceEnd, qualifier->second + "." + tokens.back());
         };
         plan.dependencies = inspectViewBindings(catalog, database, prepared, plan.references,
-            [&](const ColumnRefExpr& ref) { updateQualifier(ref, ref.binding->sourceOrdinal); });
+            [&](const ColumnRefExpr& ref) { updateQualifier(ref, ref.binding->sourceOrdinal); }, engine);
         for (const auto& projection : prepared.projectionBindings)
             for (const auto& field : projection.second) {
                 const auto* star = dynamic_cast<const ColumnRefExpr*>(field.expression);
@@ -11454,20 +11501,21 @@ static std::vector<ViewRenamePlan> planDependentViewRenames(
 
 static void publishDependentViewRenames(
     CatalogManager& catalog, const std::string& database,
-    const std::vector<ViewRenamePlan>& plans, DdlTransaction& transaction) {
+    const std::vector<ViewRenamePlan>& plans, DdlTransaction& transaction,
+    StorageEngine& engine) {
     // A view can use both the table and another changed view. Publish all
     // within the DDL snapshot before checking their new bindings together.
     for (const auto& plan : plans) {
         if (!plan.changed) continue;
-        if (!g_engine.viewExists(database, plan.name) ||
-            !index_file::writeAtomically(g_engine.viewPath(database, plan.name), plan.definition))
+        if (!engine.viewExists(database, plan.name) ||
+            !index_file::writeAtomically(engine.viewPath(database, plan.name), plan.definition))
             throw DbError("58030", "could not save the dependent view definition");
         transaction.recordUpdate(DdlObjectKind::View, plan.name);
     }
     for (const auto& plan : plans) {
-        const auto updated = g_engine.prepareBoundQuery(database, plan.query, {}, true);
+        const auto updated = engine.prepareBoundQuery(database, plan.query, {}, true);
         std::vector<ViewSourceBinding> references;
-        const auto dependencies = inspectViewBindings(catalog, database, updated, references);
+        const auto dependencies = inspectViewBindings(catalog, database, updated, references, {}, engine);
         const auto sameType = [](const QueryOutputColumn& a, const QueryOutputColumn& b) {
             return a.type == b.type && a.typeOid == b.typeOid && a.typeMod == b.typeMod;
         };
@@ -11477,6 +11525,211 @@ static void publishDependentViewRenames(
                         plan.output.begin(), plan.output.end(), sameType))
             throw DbError("0A000", "alter table changes the binding of a dependent view");
     }
+}
+
+static std::map<std::filesystem::path, std::string> planSchemaRenameGrants(
+    StorageEngine& engine, const std::string& database,
+    const std::string& oldName, const std::string& newName) {
+    const auto path = engine.dbPath(database);
+    std::map<std::filesystem::path, std::string> edits;
+    for (const auto& file : {engine.permPath(database), path / ".grant_chain", path / ".default_privs"}) {
+        std::error_code error;
+        const auto status = std::filesystem::symlink_status(file, error);
+        if (error == std::errc::no_such_file_or_directory ||
+            status.type() == std::filesystem::file_type::not_found) continue;
+        if (error || !std::filesystem::is_regular_file(status))
+            throw DbError("58030", "cannot inspect schema privileges");
+        std::ifstream input(file, std::ios::binary);
+        if (!input) throw DbError("58030", "cannot read schema privileges");
+        const bool isDefault = file.filename() == ".default_privs";
+        const auto oldKey = isDefault ? oldName : "schema:" + oldName;
+        const auto newKey = isDefault ? newName : "schema:" + newName;
+        const bool spaces = std::any_of(newName.begin(), newName.end(),
+            [](unsigned char c) { return std::isspace(c); });
+        bool changed = false;
+        std::string content;
+        for (std::string line; std::getline(input, line);) {
+            constexpr const char* whitespace = " \t\r\n\f\v";
+            const auto principal = line.find_first_not_of(whitespace);
+            const auto separator = line.find_first_of(whitespace, principal);
+            const auto begin = line.find_first_not_of(whitespace, separator);
+            if (begin != std::string::npos) {
+                const auto end = line.find_first_of(whitespace, begin);
+                const auto key = line.substr(begin, end - begin);
+                if (key == newKey || (!isDefault && key.rfind(newName + "__", 0) == 0))
+                    throw DbError("42P06", "destination contains privileges for another object");
+                if (spaces && (key == oldKey || (!isDefault && key.rfind(oldName + "__", 0) == 0)))
+                    throw DbError("0A000", "schema name cannot be represented in stored privileges");
+                if (key == oldKey) {
+                    line.replace(begin, key.size(), newKey);
+                    changed = true;
+                }
+            }
+            content += line;
+            if (!input.eof()) content += '\n';
+        }
+        if (input.bad()) throw DbError("58030", "cannot read schema privileges");
+        if (changed) edits.emplace(file, std::move(content));
+    }
+    return edits;
+}
+
+SchemaNamespaceResult renameSchemaNamespace(StorageEngine& engine,
+    const std::string& database, const std::string& oldName,
+    const std::string& newName, Session* sqlSession) {
+    if (!engine.databaseExists(database))
+        return {DBStatus::DATABASE_NOT_FOUND, "database does not exist", {}};
+    if (!validNamespaceName(oldName) || !validNamespaceName(newName))
+        return {DBStatus::INVALID_ARGUMENT, "invalid schema name", {}};
+    if (engine.isReadOnly()) throw DbError("25006", "cannot rename a schema in a read-only transaction");
+    if (engine.inTransaction() && engine.transactionDatabase() != database)
+        throw DbError("25001", "schema rename belongs to another database transaction");
+
+    DdlTransaction transaction(engine, database, sqlSession);
+    if (!transaction.enableSnapshotRollback() || !transaction.begin())
+        return {DBStatus::IO_ERROR, "schema rename transaction begin failed", {}};
+    (void)engine.catalogService().get(database);
+    const auto owner = engine.catalogService().acquire(database);
+    auto& catalog = *owner;
+    const auto schema = catalog.getNamespaceByName(oldName);
+    if (!schema)
+        return {DBStatus::TABLE_NOT_FOUND, "schema does not exist", {}};
+    if (catalog.getNamespaceByName(newName) || engine.schemaExists(database, newName))
+        return {DBStatus::TABLE_ALREADY_EXISTS, "destination schema already exists", {}};
+    if (newName.rfind("pg_", 0) == 0)
+        throw DbError("42939", "schema names beginning with pg_ are reserved");
+    if (oldName == "public" || oldName == "information_schema" ||
+        oldName.rfind("pg_", 0) == 0 || oldName.find("__") != std::string::npos ||
+        newName.find("__") != std::string::npos)
+        return {DBStatus::FEATURE_NOT_SUPPORTED, "schema name has a reserved physical layout", {}};
+    if (!engine.schemaExists(database, oldName))
+        return {DBStatus::CORRUPTED_DATA, "schema marker is missing", {}};
+
+    const auto metadata = catalog.metadataSnapshot(false);
+    ViewSourceRenames renames;
+    std::map<std::string, std::string> tables, views;
+    std::set<Oid> rowTypes;
+    std::set<Oid> materializedViews;
+    for (const auto& relation : metadata.relations)
+        if (relation.relkind == 'm') materializedViews.insert(relation.oid);
+    const auto oldTablePrefix = oldName + "__";
+    const auto newTablePrefix = newName + "__";
+    const auto oldViewPrefix = oldName + ".";
+    const auto newViewPrefix = newName + ".";
+    for (const auto& relation : metadata.relations) {
+        if (relation.relnamespace != schema->oid) continue;
+        switch (relation.relkind) {
+            case 'r': case 'p':
+                tables.emplace(oldTablePrefix + relation.relname, newTablePrefix + relation.relname);
+                break;
+            case 'v':
+                views.emplace(oldViewPrefix + relation.relname, newViewPrefix + relation.relname);
+                break;
+            case 'i': case 'I':
+                continue;
+            default:
+                return {DBStatus::FEATURE_NOT_SUPPORTED, "schema contains an unsupported relation kind", {}};
+        }
+        renames.emplace(std::make_pair(oldName, relation.relname), std::make_pair(newName, relation.relname));
+        if (relation.reltype) rowTypes.insert(relation.reltype);
+        if (!materializedViews.empty()) {
+            for (const auto& edge : catalog.findAllDependents(PgClassOid_Class, relation.oid))
+                if (edge.classid == PgClassOid_Class && materializedViews.count(edge.objid))
+                    return {DBStatus::FEATURE_NOT_SUPPORTED, "schema has a dependent materialized view", {}};
+        }
+    }
+    for (const auto& name : engine.getTableNames(database)) {
+        if (name.rfind(newTablePrefix, 0) == 0)
+            return {DBStatus::TABLE_ALREADY_EXISTS, "destination table prefix is already occupied", {}};
+        if (name.rfind(oldTablePrefix, 0) == 0 && !tables.count(name))
+            return {DBStatus::FEATURE_NOT_SUPPORTED, "source table prefix contains an unregistered object", {}};
+    }
+    for (const auto& name : engine.getViewNames(database)) {
+        if (name.rfind(newViewPrefix, 0) == 0)
+            return {DBStatus::TABLE_ALREADY_EXISTS, "destination view prefix is already occupied", {}};
+        if (name.rfind(oldViewPrefix, 0) == 0 && !views.count(name))
+            return {DBStatus::FEATURE_NOT_SUPPORTED, "source view prefix contains an unregistered object", {}};
+    }
+    const auto hasSchemaPrefix = [](const std::vector<std::string>& names,
+                                    const std::string& schemaName, const std::string& prefix) {
+        return std::any_of(names.begin(), names.end(), [&](const auto& name) {
+            CatalogManager::QualifiedName parsed;
+            return name.rfind(prefix, 0) == 0 ||
+                (CatalogManager::parseQualifiedName(name, parsed, true) && parsed.schema == schemaName);
+        });
+    };
+    std::vector<std::string> shells;
+    std::vector<UdtMeta> udts;
+    if (loadShellTypes(database, shells) != DBStatus::OK || loadUdtMeta(database, udts) != DBStatus::OK)
+        return {DBStatus::IO_ERROR, "cannot read auxiliary type definitions", {}};
+    std::vector<std::string> udtNames;
+    for (const auto& type : udts) udtNames.push_back(type.name);
+    const std::vector<std::vector<std::string>> auxiliaryNames{
+        engine.getMaterializedViewNames(database), engine.getSequenceNames(database),
+        engine.getDomainNames(database), engine.getEnumTypeNames(database),
+        engine.getCompositeTypeNames(database), engine.getTVFNames(database),
+        std::move(shells), std::move(udtNames)
+    };
+    const auto collations = engine.getCollationNames(database);
+    const auto hasAuxiliary = [&](const std::string& schemaName, const std::string& viewPrefix,
+                                  const std::string& tablePrefix) {
+        return !engine.getUDFNames(database, schemaName).empty() ||
+            !engine.getProcedureNames(database, schemaName).empty() ||
+            hasSchemaPrefix(collations, schemaName, tablePrefix) ||
+            std::any_of(auxiliaryNames.begin(), auxiliaryNames.end(), [&](const auto& names) {
+                return hasSchemaPrefix(names, schemaName, viewPrefix);
+            });
+    };
+    if (hasAuxiliary(newName, newViewPrefix, newTablePrefix))
+        return {DBStatus::TABLE_ALREADY_EXISTS, "destination contains another object's metadata", {}};
+    if (hasAuxiliary(oldName, oldViewPrefix, oldTablePrefix) ||
+        std::any_of(metadata.types.begin(), metadata.types.end(), [&](const auto& type) {
+            return type.typnamespace == schema->oid && !rowTypes.count(type.oid) &&
+                !rowTypes.count(type.typelem);
+        }) || std::any_of(metadata.routines.begin(), metadata.routines.end(),
+            [&](const auto& routine) { return routine.pronamespace == schema->oid; }))
+        return {DBStatus::FEATURE_NOT_SUPPORTED, "schema contains unsupported auxiliary objects", {}};
+
+    const auto grants = planSchemaRenameGrants(engine, database, oldName, newName);
+    auto viewPlans = planViewSourceRenames(engine, catalog, database, renames);
+    std::map<std::string, std::string> viewDefinitions;
+    for (const auto& [from, _] : views) {
+        auto definition = engine.getViewSQL(database, from);
+        if (definition.empty())
+            return {DBStatus::CORRUPTED_DATA, "schema view definition is missing", {}};
+        viewDefinitions.emplace(from, std::move(definition));
+    }
+
+    transaction.markSnapshotDirty();
+    const auto marker = engine.createSchemaMarker(database, newName);
+    if (marker != DBStatus::OK) return {marker, "cannot publish destination schema marker", {}};
+    for (const auto& [file, content] : grants)
+        if (!index_file::writeAtomically(file, content))
+            return {DBStatus::IO_ERROR, "cannot publish schema privileges", {}};
+    for (const auto& [from, to] : tables) {
+        const auto status = engine.alterTableRenameTable(database, from, to);
+        if (status != DBStatus::OK) return {status, "cannot rename schema table", {}};
+        transaction.recordUpdate(DdlObjectKind::Table, from, to);
+    }
+    for (const auto& [from, to] : views) {
+        auto status = engine.createView(database, to, viewDefinitions.at(from));
+        if (status != DBStatus::OK) return {status, "cannot publish moved view definition", {}};
+        status = engine.dropView(database, from);
+        if (status != DBStatus::OK) return {status, "cannot remove previous view definition", {}};
+        transaction.recordUpdate(DdlObjectKind::View, from, to);
+    }
+    const auto removed = engine.dropSchemaMarker(database, oldName);
+    if (removed != DBStatus::OK) return {removed, "cannot remove previous schema marker", {}};
+    if (!catalog.renameNamespace(schema->oid, newName) || !catalog.persistAll())
+        return {DBStatus::IO_ERROR, "cannot publish schema catalog", {}};
+    for (auto& plan : viewPlans) {
+        const auto renamed = views.find(plan.name);
+        if (renamed != views.end()) plan.name = renamed->second;
+    }
+    publishDependentViewRenames(catalog, database, viewPlans, transaction, engine);
+    transaction.recordUpdate(DdlObjectKind::Schema, oldName, newName);
+    if (!transaction.commit()) return {DBStatus::IO_ERROR, "cannot commit schema rename", {}};
+    return {};
 }
 
 static void dropColumnDependentViews(

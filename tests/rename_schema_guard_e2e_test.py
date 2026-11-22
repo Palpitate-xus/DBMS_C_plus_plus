@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""ALTER SCHEMA RENAME must fail closed until namespace migration is atomic."""
+"""Check successful schema rename and preservation on rejected moves."""
 
 import importlib.util
 from pathlib import Path
@@ -27,6 +27,7 @@ def main():
         expect("CREATE SCHEMA old_space;", None)
         expect("CREATE TABLE old_space.items (id INT);", None)
         expect("INSERT INTO old_space.items VALUES (7);", None)
+        expect("CREATE SEQUENCE old_space.unsupported_seq;", None)
         expect("ALTER SCHEMA old_space RENAME TO new_space;", "0A000")
         assert expect("SELECT id FROM old_space.items;", None) == [["7"]]
         data_dir = Path(server["dir"])
@@ -34,8 +35,33 @@ def main():
         assert not (data_dir / "info" / ".schema_new_space").exists()
         assert (data_dir / "info" / "old_space__items.stc").exists()
         assert not (data_dir / "info" / "new_space__items.stc").exists()
-        expect("DROP TABLE old_space.items;", None)
-        expect("DROP SCHEMA old_space;", None)
+        expect("DROP SEQUENCE old_space.unsupported_seq;", None)
+        expect("CREATE MATERIALIZED VIEW public.schema_move_mv AS SELECT id FROM old_space.items;", None)
+        expect("ALTER SCHEMA old_space RENAME TO new_space;", "0A000")
+        assert expect("SELECT id FROM public.schema_move_mv;", None) == [["7"]]
+        expect("DROP MATERIALIZED VIEW public.schema_move_mv;", None)
+        expect('CREATE TABLE public."new_space__items" (id INT);', None)
+        expect('INSERT INTO public."new_space__items" VALUES (9);', None)
+        expect("ALTER SCHEMA old_space RENAME TO new_space;", "42P06")
+        assert expect('SELECT id FROM public."new_space__items";', None) == [["9"]]
+        assert expect("SELECT id FROM old_space.items;", None) == [["7"]]
+        expect('DROP TABLE public."new_space__items";', None)
+        expect("CREATE TABLE schema_move_seed (id INT);", None)
+        expect("INSERT INTO schema_move_seed VALUES (19);", None)
+        expect('CREATE MATERIALIZED VIEW public."new_space.reserved" AS SELECT id FROM schema_move_seed;', None)
+        expect("ALTER SCHEMA old_space RENAME TO new_space;", "42P06")
+        assert expect('SELECT id FROM public."new_space.reserved";', None) == [["19"]]
+        assert expect("SELECT id FROM old_space.items;", None) == [["7"]]
+        expect('DROP MATERIALIZED VIEW public."new_space.reserved";', None)
+        expect("DROP TABLE schema_move_seed;", None)
+        expect("ALTER SCHEMA old_space RENAME TO new_space;", None)
+        assert expect("SELECT id FROM new_space.items;", None) == [["7"]]
+        assert not (data_dir / "info" / ".schema_old_space").exists()
+        assert (data_dir / "info" / ".schema_new_space").exists()
+        assert not (data_dir / "info" / "old_space__items.stc").exists()
+        assert (data_dir / "info" / "new_space__items.stc").exists()
+        expect("DROP TABLE new_space.items;", None)
+        expect("DROP SCHEMA new_space;", None)
         print("[RENAME SCHEMA GUARD E2E] passed")
     finally:
         runner.stop_ours(server)

@@ -25040,31 +25040,6 @@ static bool executeInternal(const string& rawSql, Session& s,
             cout << "User password updated" << endl;
             return false;
         }
-        if (tokens[0] == "schema") {
-            if (!checkDB(s)) return true;
-            if (tokens.size() < 5 || tokens[2] != "rename" || tokens[3] != "to") {
-                cout << "SQL syntax error: ALTER SCHEMA name RENAME TO newname" << endl;
-                return true;
-            }
-            string oldName = tokens[1];
-            string newName = tokens[4];
-            auto res = g_engine.renameSchema(s.currentDB, oldName, newName);
-            if (res == DBStatus::TABLE_NOT_FOUND) {
-                cout << "Schema " << oldName << " not exist" << endl;
-                return true;
-            }
-            if (res == DBStatus::FEATURE_NOT_SUPPORTED) {
-                cout << "ERROR: ALTER SCHEMA RENAME is not supported "
-                     << "(SQLSTATE 0A000)" << endl;
-                return true;
-            }
-            if (res != DBStatus::OK) {
-                cout << "Rename schema failed" << endl;
-                return true;
-            }
-            cout << "Schema " << oldName << " renamed to " << newName << endl;
-            return false;
-        }
         if (tokens[0] == "view") {
             // ALTER VIEW viewname RENAME TO newname
             // ALTER VIEW viewname SET SCHEMA dbname

@@ -6948,18 +6948,7 @@ DBStatus StorageEngine::dropSchemaMarker(const std::string& dbname,
 DBStatus StorageEngine::renameSchema(const std::string& dbname,
                                      const std::string& oldname,
                                      const std::string& newname) {
-    if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
-    if (oldname.empty() || newname.empty() ||
-        !validStoredIdentifier(oldname, MAX_TABLE_NAME_LEN) ||
-        !validStoredIdentifier(newname, MAX_TABLE_NAME_LEN)) {
-        return DBStatus::INVALID_ARGUMENT;
-    }
-    auto oldPath = schemaMarkerPath(dbname, oldname);
-    if (!std::filesystem::exists(oldPath)) return DBStatus::TABLE_NOT_FOUND;
-    // A namespace rename changes catalog identities, relation sidecars,
-    // dependencies and tablespace paths together. The former file-only move
-    // could overwrite an unrelated relation with the target physical prefix.
-    return DBStatus::FEATURE_NOT_SUPPORTED;
+    return renameSchemaNamespace(*this, dbname, oldname, newname).status;
 }
 
 DBStatus StorageEngine::alterTableSetSchema(const std::string& dbname,

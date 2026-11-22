@@ -873,6 +873,17 @@ DROP DATABASE dbname CASCADE;
 SHOW DATABASES;
 ```
 
+### schema 改名
+
+管理员可以给空 schema 或包含普通表、索引和普通视图的 schema 改名。表和视图用新名字访问，目录里的对象编号和已记录的视图引用继续沿用。
+
+```sql
+ALTER SCHEMA sales RENAME TO sales_archive;
+SELECT * FROM sales_archive.orders;
+```
+
+包含序列、用户定义的类型或例程，以及有受影响的物化视图时，数据库会拒绝改名。表权限、schema 权限和按 schema 设置的默认权限随受支持的改名保留。会话的 `search_path` 仍保留原来设置的文本。[兼容范围](compatibility-contract.md#schema-rename-contract) · [恢复验证](test-report.md#schema-rename-20261122)
+
 ---
 
 ## 4. 表操作

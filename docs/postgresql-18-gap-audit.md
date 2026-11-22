@@ -1,12 +1,16 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-22 · schema 改名
+
+`ALTER SCHEMA ... RENAME TO` 支持空 schema 及只含受支持表、视图和索引的用户 schema。目录编号不变，数据文件、外键、普通视图与权限一起更新或恢复。序列、物化视图、自定义类型和完整的权限模型仍有差距。`P0-03`、`P0-04`、`CAT-02`、`CAT-07` 与 `SQL-11` 保持部分实现。[测试范围](test-report.md#schema-rename-20261122)
+
 ## 2026-11-22 · 表改名或迁移后保留普通视图
 
-普通表改名或移动 schema 时，数据库沿已有目录依赖更新普通视图，并保留已绑定的来源和结果列。已覆盖同名表、别名冲突、事务恢复和旧库上的升级验证。缺少依赖记录的旧定义、schema 本身改名及更广的依赖类型仍有差距。`CAT-07`、`CAT-10` 与 `QRY-12` 保持部分实现。[验证范围](test-report.md#view-table-rename-20261122)
+普通表改名或移动 schema 时，数据库沿已有目录依赖更新普通视图，并保留已绑定的来源和结果列。已覆盖同名表、别名冲突、事务恢复和旧库上的升级验证。缺少依赖记录的旧定义及更广的依赖类型仍有差距。`CAT-07`、`CAT-10` 与 `QRY-12` 保持部分实现。[验证范围](test-report.md#view-table-rename-20261122)
 
 ## 2026-11-22 · 新建视图固定其来源
 
-普通视图新建或替换时保存已绑定来源的 schema。同名对象可在其他 schema 或临时表中存在，受测的直接查询和连接仍读取原先选中的来源。旧定义与表和 schema 本身改名后的对象追踪仍有差距，`QRY-12`、`CAT-07` 和 `CAT-10` 保持部分实现。视图权限仍在 `SEC-06` 与 `SEC-10` 的范围内。[对照范围](test-report.md#view-source-identity-20261122)
+普通视图新建或替换时保存已绑定来源的 schema。同名对象可在其他 schema 或临时表中存在，受测的直接查询和连接仍读取原先选中的来源。缺少依赖记录的旧定义仍有差距，`QRY-12`、`CAT-07` 和 `CAT-10` 保持部分实现。视图权限仍在 `SEC-06` 与 `SEC-10` 的范围内。[对照范围](test-report.md#view-source-identity-20261122)
 
 ## 2026-11-22 · 查询时连接普通视图
 
@@ -1898,7 +1902,8 @@ revalidation、其它sets、WALrewrite/PITR及所有剩余273内容继续。总�
 |---|---|---|
 | `P` | `ALTER COLLATION`, `ALTER DATABASE`, `ALTER DEFAULT PRIVILEGES`, `ALTER DOMAIN`, `ALTER GROUP`, `ALTER POLICY`, `ALTER ROLE`, `ALTER SEQUENCE`, `ALTER STATISTICS`, `ALTER SYSTEM`, `ALTER TABLE`, `ALTER TABLESPACE`, `ALTER TYPE`, `ALTER USER` | 有具体 handler，但只覆盖选项子集；owner/ACL、依赖、并发锁、事务回滚、catalog 一致性和 PostgreSQL 错误语义不完整 |
 | `S` | `ALTER AGGREGATE`, `ALTER CONVERSION`, `ALTER EVENT TRIGGER`, `ALTER EXTENSION`, `ALTER FOREIGN DATA WRAPPER`, `ALTER FOREIGN TABLE`, `ALTER FUNCTION`, `ALTER INDEX`, `ALTER LANGUAGE`, `ALTER LARGE OBJECT`, `ALTER MATERIALIZED VIEW`, `ALTER OPERATOR`, `ALTER OPERATOR CLASS`, `ALTER OPERATOR FAMILY`, `ALTER PROCEDURE`, `ALTER PUBLICATION`, `ALTER ROUTINE`, `ALTER RULE`, `ALTER SERVER`, `ALTER SUBSCRIPTION`, `ALTER TEXT SEARCH CONFIGURATION`, `ALTER TEXT SEARCH DICTIONARY`, `ALTER TEXT SEARCH PARSER`, `ALTER TEXT SEARCH TEMPLATE`, `ALTER TRIGGER`, `ALTER USER MAPPING` | 多数只修改 `.pg_compat_objects` 定义/owner/name，未改变对应运行时能力 |
-| `X` | `ALTER SCHEMA`, `ALTER VIEW` | parser 枚举存在，但当前主执行入口没有可确认的 PostgreSQL 语义实现 |
+| `P` | `ALTER SCHEMA` | 支持受测的用户 schema 改名。所有者变更、更多对象种类及权限规则仍待补齐 |
+| `X` | `ALTER VIEW` | parser 枚举存在，但当前主执行入口没有可确认的 PostgreSQL 语义实现 |
 
 ### 5.2 CREATE 命令（42/42 已列）
 

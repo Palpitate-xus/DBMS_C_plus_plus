@@ -70,6 +70,7 @@ private:
     bool executeCreateDatabase(const CreateDatabaseStmt* stmt, Session& s);
     bool executeDropDatabase(const DropStmt* stmt, Session& s);
     bool executeCreateSchema(const CreateObjectStmt* stmt, Session& s);
+    bool executeAlterSchema(const AlterObjectStmt* stmt, Session& s);
     bool executeCreateRole(const CreateRoleStmt* stmt, Session& s);
     bool executeAlterRole(const AlterObjectStmt* stmt, Session& s);
     bool executeAlterDefaultPrivileges(const AlterDefaultPrivilegesStmt* stmt, Session& s);

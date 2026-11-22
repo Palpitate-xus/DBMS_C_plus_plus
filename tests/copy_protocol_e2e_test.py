@@ -234,7 +234,7 @@ def check_query_copy_output(client, sock):
     sock.sendall(client.typed(b"d", seed) + client.typed(b"c"))
     assert finish_simple_copy(client, sock) == [(b"C", b"COPY 6\0"), (b"Z", b"I")]
     command("CREATE ROLE copy_query_reader", b"CREATE ROLE")
-    command("GRANT SELECT(id) ON copy_query_fixture TO copy_query_reader", b"GRANT SELECT(ID)")
+    command("GRANT SELECT(id) ON copy_query_fixture TO copy_query_reader", b"GRANT")
 
     ordered = ("COPY (SELECT id+10 AS n, payload FROM copy_query_fixture "
                "WHERE id>=2 AND id<=5 ORDER BY id DESC) TO STDOUT")

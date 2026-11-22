@@ -789,6 +789,18 @@ bool CatalogManager::dropNamespace(Oid oid) {
     return dropNamespaceUnlocked(oid);
 }
 
+bool CatalogManager::renameNamespace(Oid oid, const std::string& name) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto entry = nsByOid_.find(oid);
+    if (name.empty() || entry == nsByOid_.end() || nsByName_.count(name)) return false;
+    auto& row = namespaces_.at(entry->second);
+    std::string replacement = name;
+    nsByName_.emplace(name, oid);
+    row.nspname.swap(replacement);
+    nsByName_.erase(replacement);
+    return true;
+}
+
 std::vector<PgNamespaceRow> CatalogManager::listNamespaces() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return namespaces_;

@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>表和视图所在的 schema 可以改名 · 2026-11-22</summary>
+
+例如，把「销售」改成「销售归档」后，其中的表和视图可以用新名字访问，外部报表也能继续查到原来的数据。
+
+[用法](docs/MANUAL.md#schema-改名) · [测试报告](docs/test-report.md#schema-rename-20261122) · [性能报告](docs/performance-report-2026-10-30.md#schema-rename-cost-20261122)
+
+</details>
+
+<details>
 <summary>表改名后，原来的报表还能用 · 2026-11-22</summary>
 
 例如，订单表从销售区移到归档区后，原来的报表仍会查询这张表。即使用旧名字新建一张表，报表也会继续读原来的订单。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>可以把表和视图里的数据合起来查 · 2026-11-22</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-22 · 可以把表和视图里的数据合起来查
 
 例如，销售汇总视图里只有产品编号和金额。用产品编号匹配产品表，就能同时查出产品名称和销售总额。
 
 [用法](docs/MANUAL.md#9-视图与物化视图) · [测试报告](docs/test-report.md#join-ordinary-views-20261122) · [性能报告](docs/performance-report-2026-10-30.md#join-ordinary-views-cost-20261122)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-22 · 表里的列改名后，已有视图照常可用
 

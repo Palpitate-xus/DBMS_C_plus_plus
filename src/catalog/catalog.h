@@ -99,6 +99,7 @@ public:
     std::optional<PgNamespaceRow> getNamespace(Oid oid) const;
     std::optional<PgNamespaceRow> getNamespaceByName(const std::string& name) const;
     bool dropNamespace(Oid oid);
+    bool renameNamespace(Oid oid, const std::string& name);
     std::vector<PgNamespaceRow> listNamespaces() const;
 
     // =====================================================================

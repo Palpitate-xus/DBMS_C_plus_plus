@@ -21,5 +21,8 @@ SchemaNamespaceResult createSchemaNamespace(StorageEngine& engine,
 SchemaNamespaceResult dropSchemaNamespace(StorageEngine& engine,
     const std::string& database, const std::string& schema, bool cascade,
     Session* sqlSession = nullptr);
+SchemaNamespaceResult renameSchemaNamespace(StorageEngine& engine,
+    const std::string& database, const std::string& oldName,
+    const std::string& newName, Session* sqlSession = nullptr);
 
 } // namespace dbms

@@ -4913,6 +4913,15 @@ bool describePreparedResult(const std::string& sql,Session& session,
 std::string commandTagFor(const std::string& sql, const std::vector<std::string>& lines,
                           size_t rowCount) {
     std::string keyword = firstSqlKeyword(sql);
+    if (keyword == "grant" || keyword == "revoke") {
+        const auto tokens = SQLParser::tokenize(sql);
+        const bool objectPrivileges = std::any_of(tokens.begin(), tokens.end(),
+            [](const auto& token) { return SQLParser::toLower(token) == "on"; });
+        if (keyword == "grant") return objectPrivileges ? "GRANT" : "GRANT ROLE";
+        return objectPrivileges ? "REVOKE" : "REVOKE ROLE";
+    }
+    if (startsWithSqlPhrase(sql, "alter default privileges")) return "ALTER DEFAULT PRIVILEGES";
+    if (startsWithSqlPhrase(sql, "alter schema")) return "ALTER SCHEMA";
     if (keyword == "create") {
         SQLParser parser;
         const auto parsed = parser.parseForBinding(sql);
@@ -5027,8 +5036,7 @@ std::string commandTagFor(const std::string& sql, const std::vector<std::string>
     if (keyword == "set") return "SET";
     if (keyword == "truncate") return "TRUNCATE TABLE";
     if (keyword == "lock") return "LOCK TABLE";
-    if (keyword == "create" || keyword == "alter" || keyword == "drop" ||
-        keyword == "grant" || keyword == "revoke") {
+    if (keyword == "create" || keyword == "alter" || keyword == "drop") {
         std::vector<std::string> words = splitProtocolFields(trimText(sql));
         if (words.size() >= 2) {
             std::string tag = words[0] + " " + words[1];
