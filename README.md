@@ -19,6 +19,13 @@ cmake --build build/cmake --target dbms_main --parallel 2
 ## 最近更新
 
 <details>
+<summary>导入时可以跳过无法转换的行 · 2026-11-22</summary>
+
+例如，数量列误填了文字时，可以跳过这一行。也可以设置上限，坏行太多时整批撤销。
+
+</details>
+
+<details>
 <summary>修复导入时自动取号的顺序 · 2026-11-22</summary>
 
 如果一行先读到自动编号，再读到无法转换的字段，数据库会记住已经取过的编号，并撤销这一批导入的记录。
@@ -29,13 +36,6 @@ cmake --build build/cmake --target dbms_main --parallel 2
 <summary>导入旧数据时可以保留原来的编号 · 2026-11-22</summary>
 
 例如，迁移订单时可以保留旧订单号。文件里省略编号时，数据库可以自动生成。
-
-</details>
-
-<details>
-<summary>导入数据时可以使用列的默认值 · 2026-11-22</summary>
-
-例如，导入订单时可以用一个约定的标记，让数据库填上默认状态。
 
 </details>
 

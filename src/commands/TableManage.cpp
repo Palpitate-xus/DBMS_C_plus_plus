@@ -1,3 +1,4 @@
+#include "commands/CopyInputOrder.h"
 #include "catalog/SystemCatalogRows.h"
 #include "catalog/PgDefaultCatalog.h"
 #include "catalog/RelationSearchPath.h"
@@ -31398,14 +31399,39 @@ DBStatus StorageEngine::insertInternal(
     try {
         if (copyInput) {
             convertedCopyInputs.resize(tbl.len());
-            // Markers are expressions in the input column order. An earlier
-            // conversion failure must leave later markers unevaluated.
+            // Only failures of an input conversion can reject a row. Errors
+            // from defaults, constraints and the storage write remain fatal.
+            const auto convertCopyField = [&](const CopyInputOrder::Field& input,
+                                              const Column& col,
+                                              std::string& value, bool marker) -> DBStatus {
+                if (!marker && input.integerBits != 0) {
+                    const auto parsed = parsePostgresIntegerText(value, input.integerBits);
+                    if (parsed.error != IntegerTextError::None) {
+                        if (copyInput->rejectedField) return DBStatus::INVALID_VALUE;
+                        if (parsed.error == IntegerTextError::InvalidSyntax)
+                            throw DbError("22P02", "invalid input syntax for type " +
+                                col.dataType + ": \"" + value + "\"");
+                        throw DbError("22003", "value out of range for type " +
+                            col.dataType + ": \"" + value + "\"");
+                    }
+                    value = std::to_string(parsed.value);
+                }
+                const auto status = validateRowValue(input.index, false);
+                if (status != DBStatus::OK) return status;
+                if (col.dataType == "point" && !col.isArray && !value.empty()) {
+                    std::string canonical;
+                    if (!normalizePointLiteral(value, canonical)) return DBStatus::INVALID_VALUE;
+                    value = std::move(canonical);
+                }
+                return normalizeCharacterColumnWidth(col, value);
+            };
+
+            std::optional<size_t> rejected;
             for (size_t field = 0; field < copyInput->columns.size(); ++field) {
                 const auto& input = copyInput->columns[field];
                 const auto& col = tbl.cols.at(input.index);
-                if (field >= copyInput->fieldCount) {
+                if (field >= copyInput->fieldCount)
                     throw DbError("22P04", "missing data for column \"" + col.dataName + "\"");
-                }
                 auto supplied = actualValues.find(col.dataName);
                 const bool marker = supplied == actualValues.end();
                 if (marker) {
@@ -31414,43 +31440,47 @@ DBStatus StorageEngine::insertInternal(
                     supplied = actualValues.find(col.dataName);
                 }
                 if (supplied != actualValues.end() && !actualNullColumns.count(col.dataName)) {
-                    auto& value = supplied->second;
-                    if (!marker && input.integerBits != 0) {
-                        const auto parsed = parsePostgresIntegerText(value, input.integerBits);
-                        if (parsed.error == IntegerTextError::InvalidSyntax) {
-                            throw DbError("22P02", "invalid input syntax for type " +
-                                col.dataType + ": \"" + value + "\"");
-                        }
-                        if (parsed.error == IntegerTextError::OutOfRange) {
-                            throw DbError("22003", "value out of range for type " +
-                                col.dataType + ": \"" + value + "\"");
-                        }
-                        value = std::to_string(parsed.value);
+                    DBStatus status;
+                    try {
+                        status = convertCopyField(input, col, supplied->second, marker);
+                    } catch (const DbError& error) {
+                        const auto& state = error.sqlState();
+                        const bool invalidValue = state == "22P02" || state == "22003" ||
+                            state == "22001" || state == "22007" || state == "22008";
+                        const bool invalidReference =
+                            (col.dataType == "regtype" &&
+                             (state == "42704" || state == "42601" || state == "3F000")) ||
+                            (col.dataType == "regclass" && (state == "42P01" || state == "42602"));
+                        if (marker || !copyInput->rejectedField || (!invalidValue && !invalidReference))
+                            throw;
+                        status = DBStatus::INVALID_VALUE;
                     }
-                    const auto status = validateRowValue(input.index, false);
                     if (status != DBStatus::OK) {
-                        unlockTable();
-                        return status;
-                    }
-                    if (col.dataType == "point" && !col.isArray && !value.empty()) {
-                        std::string canonical;
-                        if (!normalizePointLiteral(value, canonical)) {
+                        if (marker || !copyInput->rejectedField) {
                             unlockTable();
-                            return DBStatus::INVALID_VALUE;
+                            return status;
                         }
-                        value = std::move(canonical);
-                    }
-                    const auto widthStatus = normalizeCharacterColumnWidth(col, value);
-                    if (widthStatus != DBStatus::OK) {
-                        unlockTable();
-                        return widthStatus;
+                        rejected = field;
+                        break;
                     }
                 }
                 convertedCopyInputs[input.index] = true;
             }
-            for (const auto& col : tbl.cols) {
-                applyDefaultExpression(col);
-                applyAutoIncrement(col);
+            // Defaults of unlisted columns run even on a row being skipped.
+            // Markers later in the input did not take part in this row.
+            if (rejected) {
+                *copyInput->rejectedField = rejected;
+                for (const auto& input : copyInput->columns)
+                    convertedCopyInputs[input.index] = true;
+            }
+            for (size_t i = 0; i < tbl.len(); ++i) {
+                if (rejected && convertedCopyInputs[i]) continue;
+                applyDefaultExpression(tbl.cols[i]);
+                applyAutoIncrement(tbl.cols[i]);
+            }
+            if (rejected) {
+                unlockTable();
+                return DBStatus::OK;
             }
         } else {
             for (const auto& col : tbl.cols) applyDefaultExpression(col);

@@ -755,16 +755,7 @@ public:
                     IdentityOverride identityOverride = IdentityOverride::None,
                     OwningMutationRows* owningRows = nullptr,
         bool deferVirtualInputs = false);
-    struct CopyInputColumn {
-        size_t index;
-        unsigned integerBits;
-    };
-    // COPY binds selected columns before starting the stream. An absent key
-    // within fieldCount represents a DEFAULT marker for that input field.
-    struct CopyInputOrder {
-        const std::vector<CopyInputColumn>& columns;
-        size_t fieldCount;
-    };
+    struct CopyInputOrder;
     // Optional conflictingRow is cleared on entry. On DUPLICATE_KEY it owns
     // the rejected candidate's normalized base/stored values, including real
     // defaults and identities; virtual columns keep their separate read owner.

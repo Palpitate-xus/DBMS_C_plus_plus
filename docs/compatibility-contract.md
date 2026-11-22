@@ -2,9 +2,13 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-22 · 客户端导入的坏行处理
+
+文本和 CSV `COPY … FROM STDIN` 接受 `ON_ERROR stop`、`ON_ERROR ignore`、`REJECT_LIMIT` 和 `LOG_VERBOSITY`。所测的整数和布尔转换错误可跳过，主键、表约束、格式及默认值错误会撤销导入。自定义域约束仍由写入阶段检查，可能使整次导入失败。[用法](MANUAL.md#用客户端复制数据) · [对照范围](test-report.md#copy-ignore-bad-rows-20261122)
+
 ## 2026-11-22 · 导入默认值的求值顺序
 
-客户端文本和 CSV 导入按列清单的顺序处理行中的默认值标记。后续字段出现转换错误或缺列时，已取过的序列编号会保留，导入记录随语句回滚。域约束的检查顺序、`ON_ERROR ignore` 和部分类型转换的错误码仍有差距。[对照范围](test-report.md#copy-default-evaluation-order-20261122)
+客户端文本和 CSV 导入按列清单的顺序处理行中的默认值标记。在默认的遇错停止模式中，后续字段出现转换错误或缺列时，已取过的序列编号会保留，导入记录随语句回滚。域约束的检查顺序和部分类型转换的错误码仍有差距。[对照范围](test-report.md#copy-default-evaluation-order-20261122)
 
 ## 2026-11-22 · 导入已有编号
 
@@ -16,7 +20,7 @@ CSV 和文本 `COPY … FROM STDIN` 支持 `DEFAULT '标记'`。遇到标记时�
 
 ## 2026-11-22 · CSV 导入
 
-`COPY … FROM STDIN` 支持 UTF-8 CSV，包括带换行的字段、`HEADER`、`HEADER MATCH`、自定义分隔符与空值、`FORCE_NULL` 和 `FORCE_NOT_NULL`。每次导入沿用已有的列、写入权限和事务限制。跳过坏行、二进制及服务器文件的 CSV 选项仍待实现。[用法](MANUAL.md#用客户端复制数据) · [验证范围](test-report.md#copy-csv-in-20261122)
+`COPY … FROM STDIN` 支持 UTF-8 CSV，包括带换行的字段、`HEADER`、`HEADER MATCH`、自定义分隔符与空值、`FORCE_NULL` 和 `FORCE_NOT_NULL`。每次导入沿用已有的列、写入权限和事务限制。二进制及服务器文件的 CSV 选项仍待实现。[用法](MANUAL.md#用客户端复制数据) · [验证范围](test-report.md#copy-csv-in-20261122)
 
 ## 2026-11-22 · CSV 导出
 

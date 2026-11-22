@@ -327,7 +327,7 @@ def check_csv_copy_input(client, runner, sock):
         assert (sqlstate, command_tags(messages), messages[-1]) == (
             None, [tag], (b"Z", ready)), (sql, messages)
 
-    def load(sql, data, extended, *, count=None, error=None, ready=b"I", columns=3):
+    def load(sql, data, extended, *, count=None, error=None, ready=b"I", columns=3, notices=()):
         if extended:
             sock.sendall(client.typed(b"P", parse("", sql)) + client.typed(b"B", bind("", "")) +
                          client.typed(b"E", execute()))
@@ -343,12 +343,15 @@ def check_csv_copy_input(client, runner, sock):
         payload = b"".join(client.typed(b"d", data[i:i + 1]) for i in range(len(data)))
         sock.sendall(payload + client.typed(b"c") + (client.typed(b"S") if extended else b""))
         reply = client.read_until_ready(sock)
-        kinds = [kind for kind, _ in reply]
+        fields = [client.diagnostic_fields(body) for kind, body in reply if kind == b"N"]
+        assert [(field[b"C"], field[b"M"]) for field in fields] == [
+            (b"00000", notice.encode()) for notice in notices], (sql, reply)
         assert (state(reply), reply[-1]) == (error, (b"Z", ready)), (sql, reply)
+        terminal = [(b"C", f"COPY {count}\0".encode()), (b"Z", ready)]
         if error is None:
-            assert reply == [(b"C", f"COPY {count}\0".encode()), (b"Z", ready)], (sql, reply)
+            assert reply[len(notices):] == terminal, (sql, reply)
         else:
-            assert kinds == [b"E", b"Z"], (sql, reply)
+            assert [kind for kind, _ in reply[len(notices):]] == [b"E", b"Z"], (sql, reply)
 
     for extended in (False, True):
         command("CREATE TABLE copy_csv_input (id INT PRIMARY KEY, payload TEXT, aux TEXT)", b"CREATE TABLE")
@@ -517,6 +520,96 @@ def check_csv_copy_input(client, runner, sock):
         ]), (sqlstate, tag, rows)
         command("DROP TABLE copy_eval", b"DROP TABLE")
         command("DROP SEQUENCE copy_eval_seq", b"DROP SEQUENCE")
+
+        command("CREATE SEQUENCE copy_skip_seq START WITH 10", b"CREATE SEQUENCE")
+        command("CREATE TABLE copy_skip (id INT PRIMARY KEY, payload TEXT, n SMALLINT CHECK (n > 0), "
+                "active BOOLEAN NOT NULL, first_value INT DEFAULT nextval('copy_skip_seq'), "
+                "later_value INT DEFAULT nextval('copy_skip_seq'), tail INT DEFAULT nextval('copy_skip_seq'))",
+                b"CREATE TABLE")
+        skip = "COPY copy_skip (id, payload, n, active) FROM STDIN"
+        csv = skip + " (FORMAT csv, ON_ERROR ignore)"
+        one_skipped = "1 row was skipped due to data type incompatibility"
+        load(skip + " (FORMAT csv, HEADER MATCH, ON_ERROR ignore, LOG_VERBOSITY verbose, REJECT_LIMIT 2)",
+             b'id,payload,n,active\n1,"two\nlines",2,true\n2,"bad\nline",bad,true\n'
+             b'3,wrong,3,unknown\n4,ok,2,true\n', extended, columns=4, count=2, notices=(
+                 'skipping row due to data type incompatibility at line 5 for column "n": "bad"',
+                 'skipping row due to data type incompatibility at line 6 for column "active": "unknown"',
+                 '2 rows were skipped due to data type incompatibility'))
+        load("COPY copy_skip (id, first_value, n, later_value, active) FROM STDIN "
+             r"(DEFAULT '\G', ON_ERROR ignore, LOG_VERBOSITY silent)",
+             b"5\t\\G\tbad\t\\G\ttrue\n6\t\\G\t6\t\\G\ttrue", extended, columns=5, count=1)
+        load(csv, b"7,all skipped,32768,true\n", extended, columns=4, count=0, notices=(one_skipped,))
+        load(csv, b"bad\n", extended, columns=4, count=0, notices=(one_skipped,))
+        load(csv, b"7,all good,4,true\n", extended, columns=4, count=1)
+
+        rows, sqlstate, _, _, tag = runner.decode_wire_result(client.simple_query(
+            sock, "SELECT id,n,first_value,later_value,tail FROM copy_skip ORDER BY id"))
+        assert (sqlstate, tag, rows) == (None, "SELECT 4", [
+            ["1", "2", "10", "11", "12"], ["4", "2", "19", "20", "21"],
+            ["6", "6", "24", "25", "26"], ["7", "4", "33", "34", "35"],
+        ]), (sqlstate, tag, rows)
+
+        command("BEGIN", b"BEGIN", b"T")
+        load(skip + " (FORMAT csv, ON_ERROR ignore, REJECT_LIMIT 1, LOG_VERBOSITY verbose)",
+             b"8,valid,2,true\n9,invalid,no,true\n10,invalid,2,maybe\n11,valid,1,true\n",
+             extended, columns=4, error="22P02", ready=b"E", notices=(
+                 'skipping row due to data type incompatibility at line 2 for column "n": "no"',
+                 'skipping row due to data type incompatibility at line 3 for column "active": "maybe"'))
+        command("ROLLBACK", b"ROLLBACK")
+        for data, code in ((b"8,row,2,true\n4,duplicate,1,true\n", "23505"),
+                           (b"8,row,0,true\n", "23514"), (b"8,required,1,\n", "23502"),
+                           (b"8,missing,1\n", "22P04"), (b"bad,extra,1,true,extra\n", "22P04"),
+                           (b"8,encoding,1,\xff\n", "22021")):
+            load(csv, data, extended, columns=4, error=code)
+        load(skip + " (FORMAT csv, ON_ERROR stop)", b"8,explicit stop,not_int,true\n",
+             extended, columns=4, error="22P02")
+        rows, sqlstate, _, _, tag = runner.decode_wire_result(client.simple_query(
+            sock, "SELECT id FROM copy_skip ORDER BY id"))
+        assert (sqlstate, tag, rows) == (None, "SELECT 4", [["1"], ["4"], ["6"], ["7"]]), rows
+
+        for sql, code in (
+            (skip + " (ON_ERROR invalid)", "22023"),
+            (skip + " (REJECT_LIMIT 3)", "22023"),
+            (skip + " (ON_ERROR ignore, REJECT_LIMIT -1)", "22023"),
+            (skip + " (ON_ERROR ignore, REJECT_LIMIT 0)", "22023"),
+            (skip + " (ON_ERROR ignore, REJECT_LIMIT 9223372036854775808)", "22003"),
+            (skip + " (ON_ERROR ignore, REJECT_LIMIT 'banana')", "22P02"),
+            (skip + " (LOG_VERBOSITY invalid)", "22023"),
+            ("COPY copy_skip TO STDOUT (ON_ERROR stop)", "22023"),
+        ):
+            if extended:
+                sock.sendall(client.typed(b"P", parse("", sql)) + client.typed(b"B", bind("", "")) +
+                             client.typed(b"E", execute()) + client.typed(b"S"))
+                reply = client.read_until_ready(sock)
+            else:
+                reply = client.simple_query(sock, sql)
+            assert (state(reply), reply[-1]) == (code, (b"Z", b"I")), (sql, reply)
+            assert all(kind not in (b"G", b"H") for kind, _ in reply), (sql, reply)
+        command("DROP TABLE copy_skip", b"DROP TABLE")
+        command("DROP SEQUENCE copy_skip_seq", b"DROP SEQUENCE")
+
+        command("CREATE SEQUENCE copy_skip_max START WITH 1 MINVALUE 0 MAXVALUE 1", b"CREATE SEQUENCE")
+        command("CREATE TABLE copy_skip_exhaust (id INT, n INT, tail INT DEFAULT nextval('copy_skip_max'))",
+                b"CREATE TABLE")
+        load("COPY copy_skip_exhaust (id, n) FROM STDIN (FORMAT csv, ON_ERROR ignore, "
+             "REJECT_LIMIT 1, LOG_VERBOSITY verbose)", b"1,bad\n2,worse\n", extended, columns=2,
+             error="2200H", notices=(
+                 'skipping row due to data type incompatibility at line 1 for column "n": "bad"',
+                 'skipping row due to data type incompatibility at line 2 for column "n": "worse"'))
+        load("COPY copy_skip_exhaust FROM STDIN (FORMAT csv, DEFAULT 'DF', ON_ERROR ignore, "
+             "LOG_VERBOSITY verbose)", b"1,9,DF\n", extended, error="2200H")
+        command("DROP TABLE copy_skip_exhaust", b"DROP TABLE")
+        command("DROP SEQUENCE copy_skip_max", b"DROP SEQUENCE")
+
+        command("CREATE TABLE copy_skip_reference (id INT PRIMARY KEY, typ REGTYPE, rel REGCLASS)", b"CREATE TABLE")
+        load("COPY copy_skip_reference FROM STDIN (FORMAT csv, ON_ERROR ignore)",
+             b"1,int4,pg_catalog.pg_type\n2,invalid_copy_type,pg_catalog.pg_type\n"
+             b"3,text,invalid_copy_relation\n4,text,pg_catalog.pg_class\n", extended, count=2,
+             notices=("2 rows were skipped due to data type incompatibility",))
+        rows, sqlstate, _, _, tag = runner.decode_wire_result(client.simple_query(
+            sock, "SELECT id FROM copy_skip_reference ORDER BY id"))
+        assert (sqlstate, tag, rows) == (None, "SELECT 2", [["1"], ["4"]]), rows
+        command("DROP TABLE copy_skip_reference", b"DROP TABLE")
     print("COPY_CSV_INPUT_MODES_COMPLETE 2")
 
 
@@ -625,7 +718,6 @@ def main():
             "COPY copy_wire FROM STDIN WITH (FORMAT binary)",
             "COPY copy_wire FROM PROGRAM 'producer'",
             "COPY copy_wire FROM STDIN WITH (FREEZE true)",
-            "COPY copy_wire FROM STDIN WITH (ON_ERROR ignore)",
             "COPY copy_wire FROM STDIN WITH (HEADER true)",
             "COPY copy_wire FROM '/tmp/copy.csv' WITH (FORMAT csv)",
         ):

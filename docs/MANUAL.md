@@ -2498,7 +2498,13 @@ COPY public.users (id, name) FROM STDIN WITH (FORMAT csv, DEFAULT 'USE_DEFAULT')
 
 如果表用身份列自动编号，文本和 CSV 导入可以直接写入已有编号，包括 `GENERATED ALWAYS AS IDENTITY` 的列。省略整列时，序列会为每行取号。在列清单里包含该列时，也可以在单个字段中使用 `DEFAULT` 标记取号。导入显式编号后，序列仍从它自己的当前位置取号。显式空值会触发身份列的非空约束。[例子和回滚测试](test-report.md#copy-identity-input-20261122)
 
-一行里有多个默认值标记时，按导入列清单的顺序求值。后面的字段出错时，已取过的序列编号仍然保留，这次导入的记录会撤销。[对照测试](test-report.md#copy-default-evaluation-order-20261122)
+一行里有多个默认值标记时，按导入列清单的顺序求值。在遇错停止模式下，后面的字段出错时，已取过的序列编号仍然保留，这次导入的记录会撤销。[对照测试](test-report.md#copy-default-evaluation-order-20261122)
+
+客户端文本和 CSV 导入可以用 `ON_ERROR ignore` 跳过无法转换的行，例如整数列里写了文字。`REJECT_LIMIT` 接受正整数，超过上限时整批撤销。默认返回跳过的行数，`LOG_VERBOSITY verbose` 还会报告行号、列名和截短的原值，`LOG_VERBOSITY silent` 隐藏这些提示。字段格式错误、表约束失败和默认表达式报错时，导入会按错误处理。自定义域约束的处理仍有差异。[测试范围](test-report.md#copy-ignore-bad-rows-20261122)
+
+```sql
+COPY public.users (id, name) FROM STDIN WITH (FORMAT csv, ON_ERROR ignore, REJECT_LIMIT 10);
+```
 
 ### 备份与恢复作业
 

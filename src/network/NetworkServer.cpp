@@ -1,3 +1,4 @@
+#include "commands/CopyInputOrder.h"
 #include "catalog/pg_owned_catalog_query.h"
 #include "catalog/RelationSearchPath.h"
 #include "catalog/type_catalog.h"
@@ -5179,6 +5180,8 @@ struct CopyColumnFlags {
     }
 };
 
+enum class CopyVerbosity { Default, Verbose, Silent };
+
 struct CopyWirePlan {
     bool matched = false;
     bool wire = false;
@@ -5201,6 +5204,9 @@ struct CopyWirePlan {
     char escape = '"';
     std::string nullMarker = "\\N";
     std::optional<std::string> defaultMarker;
+    bool ignoreConversionErrors = false;
+    uint64_t rejectLimit = 0;
+    CopyVerbosity verbosity = CopyVerbosity::Default;
     std::string sqlState;
     std::string error;
 };
@@ -5219,6 +5225,7 @@ struct CopyToken {
         Comma,
         Dot,
         Equal,
+        Sign,
         Star,
         Semicolon,
         Invalid,
@@ -5249,6 +5256,7 @@ public:
             case ',': return {CopyToken::Kind::Comma, ",", false};
             case '.': return {CopyToken::Kind::Dot, ".", false};
             case '=': return {CopyToken::Kind::Equal, "=", false};
+            case '+': case '-': return {CopyToken::Kind::Sign, std::string(1, ch), false};
             case '*': return {CopyToken::Kind::Star, "*", false};
             case ';': return {CopyToken::Kind::Semicolon, ";", false};
             case '"': return quotedToken('"', CopyToken::Kind::Word);
@@ -5405,9 +5413,18 @@ void copyUnsupported(CopyWirePlan& plan, const std::string& feature) {
 }
 
 bool parseCopyOptionValue(CopySqlScanner& scanner, CopyToken& value,
-                          CopyWirePlan& plan) {
+                          CopyWirePlan& plan, bool allowSign) {
     if (scanner.peek().kind == CopyToken::Kind::Equal) (void)scanner.next();
     value = scanner.next();
+    if (allowSign && value.kind == CopyToken::Kind::Sign) {
+        const auto sign = std::move(value.text);
+        value = scanner.next();
+        if (value.kind != CopyToken::Kind::Word || value.quoted) {
+            copyError(plan, "42601", "COPY REJECT_LIMIT requires a number after the sign");
+            return false;
+        }
+        value.text.insert(0, sign);
+    }
     if (value.kind == CopyToken::Kind::Word ||
         value.kind == CopyToken::Kind::String) {
         return true;
@@ -5577,8 +5594,6 @@ CopyWirePlan parseCopyWirePlan(const std::string& sql) {
         }
         const bool force = option == "force_quote" || option == "force_not_null" || option == "force_null";
         if (option == "binary" || option == "csv" || option == "freeze" ||
-            option == "on_error" ||
-            option == "reject_limit" || option == "log_verbosity" ||
             option == "oids" || (option.rfind("force_", 0) == 0 && !force) ||
             (from && option == "force_quote")) {
             copyUnsupported(plan, option);
@@ -5598,7 +5613,7 @@ CopyWirePlan parseCopyWirePlan(const std::string& sql) {
         } else if (option == "header" && (scanner.peek().kind == CopyToken::Kind::Comma ||
                                           scanner.peek().kind == CopyToken::Kind::RightParen)) {
             plan.header = true;
-        } else if (!parseCopyOptionValue(scanner, value, plan)) return plan;
+        } else if (!parseCopyOptionValue(scanner, value, plan, option == "reject_limit")) return plan;
         else if (option == "header") {
             if (lowerAscii(value.text) == "match") {
                 if (to) {
@@ -5657,6 +5672,41 @@ CopyWirePlan parseCopyWirePlan(const std::string& sql) {
                 return plan;
             }
             plan.defaultMarker = std::move(value.text);
+        } else if (option == "on_error") {
+            const auto action = lowerAscii(value.text);
+            if (to || (action != "ignore" && action != "stop")) {
+                copyError(plan, "22023", to ? "COPY ON_ERROR cannot be used with COPY TO" :
+                    "COPY ON_ERROR requires STOP or IGNORE");
+                return plan;
+            }
+            plan.ignoreConversionErrors = action == "ignore";
+        } else if (option == "reject_limit") {
+            if (to) {
+                copyError(plan, "22023", "COPY REJECT_LIMIT cannot be used with COPY TO");
+                return plan;
+            }
+            const auto limit = parsePostgresIntegerText(value.text, 64);
+            if (limit.error == IntegerTextError::OutOfRange) {
+                copyError(plan, "22003", "COPY REJECT_LIMIT is out of range for bigint");
+                return plan;
+            }
+            if (limit.error == IntegerTextError::InvalidSyntax) {
+                copyError(plan, "22P02", "COPY REJECT_LIMIT requires a positive bigint");
+                return plan;
+            }
+            if (limit.value <= 0) {
+                copyError(plan, "22023", "COPY REJECT_LIMIT must be greater than zero");
+                return plan;
+            }
+            plan.rejectLimit = static_cast<uint64_t>(limit.value);
+        } else if (option == "log_verbosity") {
+            const auto verbosity = lowerAscii(value.text);
+            if (verbosity == "verbose") plan.verbosity = CopyVerbosity::Verbose;
+            else if (verbosity == "silent") plan.verbosity = CopyVerbosity::Silent;
+            else if (verbosity != "default") {
+                copyError(plan, "22023", "COPY LOG_VERBOSITY requires DEFAULT, VERBOSE or SILENT");
+                return plan;
+            }
         } else if (option == "encoding") {
             std::string encoding = lowerAscii(value.text);
             encoding.erase(std::remove_if(
@@ -5678,6 +5728,10 @@ CopyWirePlan parseCopyWirePlan(const std::string& sql) {
             copyError(plan, "42601", "malformed COPY option list");
             return plan;
         }
+    }
+    if (plan.rejectLimit != 0 && !plan.ignoreConversionErrors) {
+        copyError(plan, "22023", "COPY REJECT_LIMIT requires ON_ERROR IGNORE");
+        return plan;
     }
     if (plan.csv) {
         if (!seenOptions.count("delimiter")) plan.delimiter = ',';
@@ -6034,7 +6088,8 @@ bool decodeCopyTextRecord(
     const auto expected = plan.columnIndexes.size();
     const bool shortMarkedRecord = rawFields.size() < expected && plan.defaultMarker &&
         std::find(rawFields.begin(), rawFields.end(), *plan.defaultMarker) != rawFields.end();
-    if (rawFields.size() != expected && !shortMarkedRecord) {
+    if (rawFields.size() > expected ||
+        (rawFields.size() < expected && !shortMarkedRecord && !plan.ignoreConversionErrors)) {
         error = "COPY row has " + std::to_string(rawFields.size()) +
                 " fields but expected " +
                 std::to_string(plan.columnIndexes.size());
@@ -6178,6 +6233,10 @@ public:
                 continue;
             }
 
+            if (plan_.verbosity == CopyVerbosity::Verbose && inQuote_ &&
+                ch == (eol_ == Eol::Lf ? '\n' : '\r')) {
+                ++lineNumber_;
+            }
             countByte();
             if (inQuote_ && ch == plan_.escape) {
                 pendingEscape_ = true;
@@ -6248,7 +6307,8 @@ private:
         endField();
         if (!header_ || plan_.matchHeader) {
             if (fields_.size() != plan_.columnIndexes.size() &&
-                (header_ || !plan_.defaultMarker || !hasCopyDefaultMarker(fields_))) {
+                (header_ || (!plan_.ignoreConversionErrors &&
+                    (!plan_.defaultMarker || !hasCopyDefaultMarker(fields_))))) {
                 throw DbError("22P04", "missing data for expected CSV column");
             }
         }
@@ -6256,7 +6316,8 @@ private:
             !std::equal(fields_.begin(), fields_.end(), plan_.columnNames.begin(),
                 [](const auto& field, const auto& column) { return field.value == column; }))
             throw DbError("22P04", "CSV header does not match selected column names");
-        if (!header_) insert(fields_);
+        ++lineNumber_;
+        if (!header_) insert(fields_, lineNumber_);
         header_ = false;
         fields_.clear();
         recordBytes_ = 0;
@@ -6269,6 +6330,7 @@ private:
     bool pendingEscape_ = false;
     bool pendingCr_ = false;
     size_t recordBytes_ = 0;
+    uint64_t lineNumber_ = 0;
     Eol eol_ = Eol::Unknown;
     CopyFields fields_;
     std::string field_;
@@ -6280,9 +6342,18 @@ struct CopyStreamResult {
     bool syncConsumed = false;
     bool errorSent = false;
     size_t rows = 0;
+    uint64_t rejectedRows = 0;
     std::string sqlState;
     std::string error;
 };
+
+std::string copyInputPreview(const std::string& value) {
+    constexpr size_t maxBytes = 100;
+    if (value.size() <= maxBytes) return value;
+    size_t end = maxBytes;
+    while ((static_cast<unsigned char>(value[end]) & 0xc0) == 0x80) --end;
+    return value.substr(0, end) + "...";
+}
 
 class CopyInterruptGuard {
 public:
@@ -6373,7 +6444,7 @@ CopyStreamResult receiveCopyIn(PostgresProtocol& protocol,
     std::string pending;
     std::optional<CopyCsvInput> csv;
     if (plan.csv) csv.emplace(plan);
-    std::vector<StorageEngine::CopyInputColumn> copyColumns;
+    std::vector<StorageEngine::CopyInputOrder::Field> copyColumns;
     copyColumns.reserve(plan.columnIndexes.size());
     for (const size_t index : plan.columnIndexes) {
         const Column& column = table.cols[index];
@@ -6415,8 +6486,9 @@ CopyStreamResult receiveCopyIn(PostgresProtocol& protocol,
         if (!result.errorSent) result.transportOk = false;
         pending.clear();
     };
-    const auto insertFields = [&](CopyFields& fields) {
-        const bool hasMarkers = plan.defaultMarker && hasCopyDefaultMarker(fields);
+    const auto insertFields = [&](CopyFields& fields, uint64_t lineNumber) {
+        const bool orderedInput = plan.ignoreConversionErrors ||
+            (plan.defaultMarker && hasCopyDefaultMarker(fields));
         StorageEngine::SqlRow values;
         for (size_t field = 0; field < fields.size(); ++field) {
             const Column& column = table.cols[copyColumns[field].index];
@@ -6430,7 +6502,7 @@ CopyStreamResult receiveCopyIn(PostgresProtocol& protocol,
             }
             auto value = std::move(fields[field].value);
             const unsigned bits = copyColumns[field].integerBits;
-            if (!hasMarkers && value && bits != 0) {
+            if (!orderedInput && value && bits != 0) {
                 const auto parsed = parsePostgresIntegerText(*value, bits);
                 if (parsed.error == IntegerTextError::InvalidSyntax) {
                     throw DbError("22P02", "invalid input syntax for type " +
@@ -6446,14 +6518,43 @@ CopyStreamResult receiveCopyIn(PostgresProtocol& protocol,
         }
         // COPY FROM accepts explicit identity values, including for ALWAYS.
         // Omitted keys still invoke the target column's generator.
-        const StorageEngine::CopyInputOrder order{copyColumns, fields.size()};
-        const DBStatus status = g_engine.insertRow(
-            session.currentDB, plan.physicalTable, values, nullptr,
-            StorageEngine::IdentityOverride::System, nullptr, false, nullptr, nullptr,
-            hasMarkers ? &order : nullptr);
+        std::optional<size_t> rejectedField;
+        const StorageEngine::CopyInputOrder order{copyColumns, fields.size(),
+            plan.ignoreConversionErrors ? &rejectedField : nullptr};
+        const auto sendRejectedNotice = [&] {
+            if (!rejectedField || plan.verbosity != CopyVerbosity::Verbose) return;
+            const auto& column = table.cols[copyColumns[*rejectedField].index].dataName;
+            const auto& value = values.at(column);
+            if (!protocol.sendNoticeResponse(
+                    "skipping row due to data type incompatibility at line " +
+                    std::to_string(lineNumber) + " for column \"" + column + "\": " +
+                    (value ? "\"" + copyInputPreview(*value) + "\"" : "null input"))) {
+                result.transportOk = false;
+                throw DbError("08006", "could not send COPY notice");
+            }
+        };
+        DBStatus status;
+        try {
+            status = g_engine.insertRow(
+                session.currentDB, plan.physicalTable, values, nullptr,
+                StorageEngine::IdentityOverride::System, nullptr, false, nullptr, nullptr,
+                orderedInput ? &order : nullptr);
+        } catch (...) {
+            sendRejectedNotice();
+            throw;
+        }
+        sendRejectedNotice();
         if (status != DBStatus::OK) {
             throw DbError(sqlstateForDBStatus(status),
                 "COPY FROM failed while inserting row " + std::to_string(result.rows + 1));
+        }
+        if (rejectedField) {
+            ++result.rejectedRows;
+            if (plan.rejectLimit != 0 && result.rejectedRows > plan.rejectLimit) {
+                throw DbError("22P02", "skipped more than REJECT_LIMIT (" +
+                    std::to_string(plan.rejectLimit) + ") rows due to data type incompatibility");
+            }
+            return;
         }
         ++result.rows;
     };
@@ -6467,18 +6568,19 @@ CopyStreamResult receiveCopyIn(PostgresProtocol& protocol,
             fail("XX000", error.what());
         }
     };
+    uint64_t textLineNumber = 0;
     const auto insertRecord = [&](std::string record) {
         handleInput([&] {
             CopyFields fields;
             std::string decodeError;
             if (!decodeCopyTextRecord(std::move(record), plan, fields, decodeError))
                 throw DbError("22P04", std::move(decodeError));
-            insertFields(fields);
+            insertFields(fields, ++textLineNumber);
         });
     };
-    const auto insertCsv = [&](CopyFields& fields) {
+    const auto insertCsv = [&](CopyFields& fields, uint64_t lineNumber) {
         checkCopyInterrupt();
-        insertFields(fields);
+        insertFields(fields, lineNumber);
     };
 
     while (result.transportOk) {
@@ -8363,6 +8465,14 @@ void handleClient(SecureSocket socket, std::string clientHost, CopyQueryFactory 
                     "ERROR", finishError.sqlState,
                     trimText(finishError.errorMessage));
                 return outcome;
+            }
+            if (stream.rejectedRows != 0 && plan.verbosity != CopyVerbosity::Silent) {
+                if (!protocol.sendNoticeResponse(std::to_string(stream.rejectedRows) +
+                        (stream.rejectedRows == 1 ? " row was skipped" : " rows were skipped") +
+                        " due to data type incompatibility")) {
+                    outcome.connectionOk = false;
+                    return outcome;
+                }
             }
             outcome.success = protocol.sendCommandComplete(
                 "COPY " + std::to_string(stream.rows));

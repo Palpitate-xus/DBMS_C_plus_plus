@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-22 · 跳过字段转换失败的行
+
+PostgreSQL 18.6 的 `ON_ERROR ignore` 可以跳过字段类型转换失败的记录，超过 `REJECT_LIMIT` 时会报错并撤销导入。参考测试中，整数域的检查失败也被跳过，两个被跳过的记录仍调用了列清单之外的序列默认值。DuckDB 的 CSV 读取还可跳过结构错误，并选择把坏行记入临时表。SQLite 命令行通过 `.import` 按 CSV 格式读取数据，可为表启用 `STRICT` 类型检查。本项目支持了转换错误、坏行上限和通知。整数域的检查失败仍会中止本项目的导入。[PostgreSQL 导入实现](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/commands/copyfromparse.c) · [DuckDB 错误处理](https://duckdb.org/docs/2.0/data/csv/reading_faulty_csv_files) · [SQLite 导入](https://www.sqlite.org/cli.html#importing_files_as_csv_or_other_formats) · [SQLite STRICT](https://www.sqlite.org/stricttables.html)
+
+本项目在启动写入前处理字段转换。跳过一行后，列清单之外的默认值仍会求值。超过上限、默认表达式失败或表约束失败时，整批导入会撤销。[对照测试](test-report.md#copy-ignore-bad-rows-20261122)
+
 ## 2026-11-22 · 字段中的默认值先于后续字段求值
 
 PostgreSQL 18.6 在转换文本或 CSV 记录时处理字段中的默认值标记，随后计算列清单之外的默认值。SQLite 的 `INSERT` 按位置匹配列清单和 `VALUES` 中的值，省略的列采用默认值。DuckDB 的 `INSERT` 也区分显式 `DEFAULT` 和未提供的列。本项目使用现有的写入转换处理带标记的导入行，并核对了序列与整数、字符长度错误的先后顺序。[PostgreSQL 导入实现](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/commands/copyfromparse.c) · [SQLite INSERT](https://www.sqlite.org/lang_insert.html) · [DuckDB INSERT](https://duckdb.org/docs/2.0/sql/statements/insert) · [测试范围](test-report.md#copy-default-evaluation-order-20261122)
@@ -10,19 +16,17 @@ PostgreSQL 18.6 在转换文本或 CSV 记录时处理字段中的默认值标�
 
 PostgreSQL 18.6 的 `COPY FROM` 直接采用文件中的身份列值。导入时省略该列，或者为该字段使用默认值标记，会从序列取号。本项目在普通表的客户端文本和 CSV 导入中接入了这条规则，并对比了显式编号、序列取号和回滚结果。[PostgreSQL COPY](https://www.postgresql.org/docs/18/sql-copy.html) · [对照报告](test-report.md#copy-identity-input-20261122)
 
-PostgreSQL 18.6 的 `ON_ERROR ignore` 可以跳过字段类型转换失败的记录，超过 `REJECT_LIMIT` 时会报错并撤销导入。参考测试中，整数域的检查失败也被跳过，两个被跳过的记录仍调用了列清单之外的序列默认值。DuckDB 的 CSV 读取还可跳过结构错误，并选择把坏行记入临时表。SQLite 命令行通过 `.import` 按 CSV 格式读取数据，可为表启用 `STRICT` 类型检查。本项目的跳行选项仍待实现。[PostgreSQL 导入实现](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/commands/copyfromparse.c) · [DuckDB 错误处理](https://duckdb.org/docs/2.0/data/csv/reading_faulty_csv_files) · [SQLite 导入](https://www.sqlite.org/cli.html#importing_files_as_csv_or_other_formats) · [SQLite STRICT](https://www.sqlite.org/stricttables.html)
-
 ## 2026-11-22 · 导入时使用列默认值
 
 PostgreSQL 18.6 在解析 COPY 字段时识别默认值标记，再调用当前列默认表达式。DuckDB 的 `INSERT` 支持省略列或显式写 `DEFAULT`。SQLite 的 `INSERT` 也支持通过省略列或使用 `DEFAULT VALUES` 来采用默认值。[PostgreSQL COPY](https://www.postgresql.org/docs/18/sql-copy.html) · [PostgreSQL 导入实现](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/commands/copyfromparse.c) · [DuckDB INSERT](https://duckdb.org/docs/2.0/sql/statements/insert) · [SQLite INSERT](https://www.sqlite.org/lang_insert.html)
 
-本项目用原有的写入代码求取默认值。所测的列默认值、域默认值及序列均可通过标记写入，`DEFAULT NULL::text` 的定义存储仍有差异。跳过坏行、二进制和服务器文件的更多选项仍待实现。[正确性](test-report.md#copy-default-marker-20261122) · [性能](performance-report-2026-10-30.md#copy-default-marker-cost-20261122)
+本项目用原有的写入代码求取默认值。所测的列默认值、域默认值及序列均可通过标记写入，`DEFAULT NULL::text` 的定义存储仍有差异。二进制和服务器文件的更多选项仍待实现。[正确性](test-report.md#copy-default-marker-20261122) · [性能](performance-report-2026-10-30.md#copy-default-marker-cost-20261122)
 
 ## 2026-11-22 · CSV 导入
 
 PostgreSQL 18.6 读取完整的 CSV 记录，再解释字段和空值。引号内换行会保留，`HEADER MATCH` 按导入列的顺序核对列名。DuckDB 可自动识别 CSV 格式，也支持指定空值标记并行读取文件。SQLite 的命令行通过 `.import` 读取带引号的 CSV。[PostgreSQL 导入实现](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/commands/copyfromparse.c) · [DuckDB CSV 导入](https://duckdb.org/docs/2.0/data/csv/overview) · [SQLite 导入](https://www.sqlite.org/cli.html#importing_files_as_csv_or_other_formats)
 
-本项目在解析当前记录时保留引号、转义和换行状态，同一条记录可以跨多个客户端数据消息。写入仍使用现有的 COPY 事务。并行读取服务器文件、错误跳过和更多编码仍有差距。[导入测试](test-report.md#copy-csv-in-20261122) · [性能报告](performance-report-2026-10-30.md#copy-csv-in-cost-20261122)
+本项目在解析当前记录时保留引号、转义和换行状态，同一条记录可以跨多个客户端数据消息。写入仍使用现有的 COPY 事务。并行读取服务器文件和更多编码仍有差距。[导入测试](test-report.md#copy-csv-in-20261122) · [性能报告](performance-report-2026-10-30.md#copy-csv-in-cost-20261122)
 
 ## 2026-11-22 · CSV 导出
 

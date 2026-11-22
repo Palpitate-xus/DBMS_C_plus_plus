@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>导入时可以跳过无法转换的行 · 2026-11-22</summary>
+
+例如，数量列误填了文字时，可以跳过这一行。也可以设置上限，坏行太多时整批撤销。
+
+[用法](docs/MANUAL.md#用客户端复制数据) · [测试报告](docs/test-report.md#copy-ignore-bad-rows-20261122) · [性能报告](docs/performance-report-2026-10-30.md#copy-ignore-bad-rows-cost-20261122)
+
+</details>
+
+<details>
 <summary>修复导入时自动取号的顺序 · 2026-11-22</summary>
 
 如果一行先读到自动编号，再读到无法转换的字段，数据库会记住已经取过的编号，并撤销这一批导入的记录。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>导入数据时可以使用列的默认值 · 2026-11-22</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-22 · 导入数据时可以使用列的默认值
 
 例如，导入订单时可以用一个约定的标记，让数据库填上默认状态。
 
 [用法](docs/MANUAL.md#用客户端复制数据) · [测试报告](docs/test-report.md#copy-default-marker-20261122) · [性能报告](docs/performance-report-2026-10-30.md#copy-default-marker-cost-20261122)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-22 · 从 CSV 导入数据
 
