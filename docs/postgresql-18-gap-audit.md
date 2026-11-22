@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-22 · 用文本函数筛选行
+
+普通单表查询支持在扫描前绑定受测文本函数和列。`substring` 的关键字写法使用系统函数，逗号写法按查询的函数查找顺序解析。两种协议共 92 条响应与 PostgreSQL 18.6 一致。新路径限于受支持的普通表查询，完整 SQL 执行管线和函数清单仍有差距。`P0-01`、`FUNC-01` 保持部分实现。[测试](test-report.md#ordinary-text-function-filter-20261122) · [性能](performance-report-2026-10-30.md#ordinary-text-function-filter-cost-20261122)
+
 ## 2026-11-22 · 文本相等比较
 
 确定性内置规则下的文本相等和不等比较直接检查字节，减少按文本筛选时逐行创建区域设置的开销。明确指定的系统区域设置、大小写不敏感规则、文本大小比较和 `NULL` 行为继续走各自的原有路径。`SQL-10` 和 `TYPE-04` 保持部分实现。[测试](test-report.md#text-equality-deterministic-20261122) · [性能](performance-report-2026-10-30.md#text-equality-deterministic-cost-20261122)

@@ -14,9 +14,16 @@ cmake --build build/cmake --target dbms_main --parallel 2
 ./build/cmake/dbms_main --version
 ```
 
-[启动数据库](docs/MANUAL.md#运行) · [用 psql 连接](docs/MANUAL.md#18-网络服务) · [全部文档](docs/README.md)
+[启动数据库](docs/MANUAL.md#运行) · [用 psql 连接](docs/MANUAL.md#18-网络服务) · [支持的功能](docs/compatibility-contract.md) · [全部文档](docs/README.md)
 
 ## 最近更新
+
+<details>
+<summary>截取文字再筛选更快了 · 2026-11-22</summary>
+
+比如取姓名的第一个字，再找出所有姓张的人。把名称转成小写再比较也更快了。
+
+</details>
 
 <details>
 <summary>按名称查找更快了 · 2026-11-22</summary>
@@ -29,13 +36,6 @@ cmake --build build/cmake --target dbms_main --parallel 2
 <summary>可以把几项数据库设置放在一起比较 · 2026-11-22</summary>
 
 比如列出两项超时设置，按各自的毫秒数排序。
-
-</details>
-
-<details>
-<summary>改了订单表的分组名，订单号仍会接着生成 · 2026-11-22</summary>
-
-比如订单号已经发到 42。把订单表所在的「销售」改名为「销售归档」后，下一笔订单仍是 43。
 
 </details>
 

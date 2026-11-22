@@ -7498,6 +7498,8 @@ static bool nullStatementInput(const Expr* expression, const RowContext& ctx,
     return false;
 }
 
+static ExprValue evaluateTextSubstring(const std::vector<ExprValue>& args);
+
 ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowContext& ctx) const {
     if (!e) return ExprValue{};
     if (identity_value_detail::bound(e)) {
@@ -7554,10 +7556,21 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
         // scalar evaluation/cardinality or the legacy text-table parser.
         return scalarSubqueryExecutor_(e, ctx);
     }
-    // Keep polymorphic array builtin results typed at the same boundary as
-    // ARRAY constructors. The descriptor is read before any argument runs;
-    // a brace-looking TEXT value never determines the result type.
-    const auto declaredResult=arrayExpressionType(e,ctx,currentDB_,this);
+    // The bound text routines have a scalar result and the actual callback
+    // identity is known. Reuse the bound declaration during row evaluation;
+    // a stored routine or a native replacement still owns its own type.
+    bool useBoundResult = false;
+    if (!e->resolvedResultType.empty() && e->resolvedResultType != "unknown" &&
+        !common_type_detail::array(e->resolvedResultType) && callback != functionRegistry().end()) {
+        const auto* substring = callback->second.target<decltype(&evaluateTextSubstring)>();
+        useBoundResult = (substring && *substring == &evaluateTextSubstring) ||
+            ((name == "upper" || name == "lower" || name == "length" || name == "replace" ||
+              name == "starts_with" || name == "strpos") && ownsScalarSignatures(name, &callback->second));
+    }
+    // Polymorphic and unbound calls still infer the type before any argument
+    // runs. A brace-looking text value cannot supply an array declaration.
+    const auto declaredResult = useBoundResult ? e->resolvedResultType
+        : arrayExpressionType(e, ctx, currentDB_, this);
     const auto* arrayPush=callback==functionRegistry().end()?nullptr:
         callback->second.target<DeclaredArrayPushScalarFunction>();
     std::optional<std::string> pushElement;

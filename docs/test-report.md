@@ -2,6 +2,21 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="ordinary-text-function-filter-20261122"></a>
+## 2026-11-22 · 用文本函数筛选行
+
+普通和扩展协议各执行 46 条语句。新版的 92 条响应全部与 PostgreSQL 18.6 一致，基线 `9a2f5b24` 为 82 条。对照核对返回行、列名、类型编号、完成标签、错误码、消息顺序和事务状态。用例涵盖多字节字符、列别名、`NULL`、`LIMIT 0`、负长度、无效列名、同名用户函数、表达式索引和主键筛选。[对照 SQL](../tests/compat/cases/ordinary_text_function_filter.sql)
+
+命名预编译语句接收二进制整数和文本参数，按参数筛选后分别返回整数 7、19 和空结果。二进制返回值、输出类型和协议消息均与 PostgreSQL 一致。描述中的表编号和列位置随实例而异，比较前排除这两个来源字段。匹配记录 SHA-256 为 `ff94ce22baa3954676eb72ff4fc1989489afab59dabd39dc4eed9e19b8318ba7`。
+
+从旧版创建的数据目录启动并完成 25 个恢复步骤。用文本函数检查已读行，分别在提交前、提交后强制结束进程。重启后只保留已提交的修改，已保存的同名用户函数仍可调用，新连接恢复默认查找顺序。恢复记录 SHA-256 为 `c64fa5920591821263666388c7b4c2ca9844926508084bf64654fa53be85bd14`。
+
+八组既有 SQL 用例的 346 条响应与基线一致。另通过六个原生测试及十一个客户端回归，涵盖解析器、文本截取、表达式索引、普通表筛选、字符串函数、区域设置、数组类型、设置视图、连接、导入导出和完整协议。`starts_with` 与 `strpos` 专项分别通过 444 和 294 项客户端检查。[解析器](../tests/parser_phase1_test.cpp) · [表达式索引](../tests/expression_index_test.cpp) · [普通表筛选](../tests/ordinary_scalar_where_protocol_e2e_test.py) · [starts_with](../tests/starts_with_signature_protocol_e2e_test.py) · [strpos](../tests/strpos_signature_protocol_e2e_test.py)
+
+自定义函数声明专项的 956 条响应在新旧两版一致，均有 162 条检查失败。带复合类型的声明首先出现 `42704` 类型找不到，后续调用也受影响。仅替换测试随机标识后的两版记录 SHA-256 均为 `be08892e4561a461134de3f94001560f6a4b03296b0a8d7f560882f197f4ed05`。[自定义函数声明测试](../tests/custom_scalar_routine_declaration_protocol_e2e_test.py)
+
+新版程序 SHA-256 为 `1dd82fd52ef08e17276da77ae38067d53004de55e3810ba6b7f3d2568b9c080b`。PostgreSQL、基线和新版对照记录的 SHA-256 分别为 `b1fdd04bac00581c01044a883181a684359c236494cd987fffdd60791ba9d3af`、`889d71ccf474fc3ae82a4a093993effae9f5073514b5e27505cf93ae654d307e` 和 `18358f8a4db0777935f03489d5b8dd1dd6f58bfaf3a85a61cfdae547bf502e05`。[性能报告](performance-report-2026-10-30.md#ordinary-text-function-filter-cost-20261122)
+
 <a id="text-equality-deterministic-20261122"></a>
 ## 2026-11-22 · 文本相等比较
 

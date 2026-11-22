@@ -2,6 +2,13 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="ordinary-text-function-filter-contract"></a>
+## 2026-11-22 · 按文字的一部分查找记录
+
+普通表可用 `WHERE substring(label FROM 1 FOR 1) = '张'` 按名称的第一个字符查找。`FROM` 和 `FOR` 接受整数表达式，按字符计数。输入为空值时返回 `NULL`，负长度返回 `22011`。
+
+这种关键字写法调用系统函数。用逗号传参时，数据库按当前的 `search_path` 查找函数。可用 `pg_catalog.substring(label, 1, 1)` 明确指定系统函数。[测试范围](test-report.md#ordinary-text-function-filter-20261122)
+
 <a id="pg-settings-expressions-contract"></a>
 ## 2026-11-22 · 查询当前设置
 

@@ -3407,6 +3407,8 @@ static ExprPtr parsePrimaryExprImpl(const std::vector<std::string>& tokens, size
                  SQLParser::toLower(func->funcName) == "overlay" ||
                  SQLParser::toLower(func->funcName) == "position" ||
                  SQLParser::toLower(func->funcName) == "strpos")) {
+                if (func->schema.empty() && SQLParser::toLower(func->funcName) == "substring")
+                    func->schema = "pg_catalog";
                 ++pos;
                 auto arg2 = parseExpr(tokens, pos);
                 parseArg(std::move(arg2));

@@ -2,6 +2,14 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-22 · 用文本函数筛选行
+
+PostgreSQL 在初始化表达式时，根据已解析的函数编号准备可重复调用的函数和参数空间。SQLite 在编译表达式时把函数定义写入虚拟机指令。DuckDB 在执行已绑定的函数时按数据块计算参数和结果。[PostgreSQL 表达式执行](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/executor/execExpr.c#L2557) · [SQLite 表达式编译](https://github.com/sqlite/sqlite/blob/master/src/expr.c#L5550) · [DuckDB 函数执行](https://github.com/duckdb/duckdb/blob/main/src/execution/expression_executor/execute_function.cpp)
+
+本项目将受支持的普通文本函数筛选交给已绑定的查询执行器，扫描时直接计算每行的参数。PostgreSQL 的 `substring(... FROM ... FOR ...)` 专用语法指定系统函数。本项目也按此处理，逗号参数形式仍按 `search_path` 解析。[PostgreSQL 语法](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/parser/gram.y#L15019)
+
+同样查找 512 行，新版的截取筛选约需 12–15 毫秒，PostgreSQL 18.6 约需 0.22–0.36 毫秒。普通 `label = ...` 对照在本项目还是 22–24 毫秒。[测试报告](test-report.md#ordinary-text-function-filter-20261122) · [性能报告](performance-report-2026-10-30.md#ordinary-text-function-filter-cost-20261122)
+
 ## 2026-11-22 · 文本相等比较
 
 PostgreSQL 18.6 对确定性排序规则下的文本相等和不等比较使用字节比较，大小顺序则使用对应的排序规则。SQLite 区分逐字节比较的 `BINARY`、忽略大小写的 `NOCASE` 和忽略末尾空格的 `RTRIM`。DuckDB 默认逐字节比较，并提供忽略大小写、重音和规范化后比较的选项。[PostgreSQL 文本比较代码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/utils/adt/varlena.c#L1628) · [SQLite 排序规则](https://www.sqlite.org/datatype3.html#collating_sequences) · [DuckDB 排序规则](https://www.duckdb.org/docs/2.0/sql/expressions/collations)

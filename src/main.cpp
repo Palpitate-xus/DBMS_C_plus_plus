@@ -20416,7 +20416,8 @@ static bool executePgClassQuery(const string& rawSql,Session& session,const stri
 // The parser's legacy Literal child envelope becomes preparedSubquery during
 // whole-query binding. IN/ANY/ALL/EXISTS retain their multirow consumers.
 static pair<bool, bool> scalarQueryRoles(const dbms::Expr* expression, bool scalar = true,
-                                       bool* explicitCollation = nullptr) {
+                                       bool* explicitCollation = nullptr,
+                                       bool* stringPredicate = nullptr) {
     if (!expression) return {};
     if (const auto* literal = dynamic_cast<const dbms::LiteralExpr*>(expression)) {
         const auto tokens = dbms::SQLParser::tokenize(literal->value);
@@ -20429,7 +20430,7 @@ static pair<bool, bool> scalarQueryRoles(const dbms::Expr* expression, bool scal
     }
     pair<bool, bool> result{};
     const auto add = [&](const dbms::Expr* child, bool role = true) {
-        const auto uses = scalarQueryRoles(child, role, explicitCollation);
+        const auto uses = scalarQueryRoles(child, role, explicitCollation, stringPredicate);
         result.first = result.first || uses.first;
         result.second = result.second || uses.second;
     };
@@ -20444,10 +20445,24 @@ static pair<bool, bool> scalarQueryRoles(const dbms::Expr* expression, bool scal
     else if (const auto* cast = dynamic_cast<const dbms::CastExpr*>(expression)) add(cast->operand.get());
     else if (const auto* call = dynamic_cast<const dbms::FunctionCallExpr*>(expression)) {
         dbms::CatalogManager::QualifiedName routine;
-        const bool special = dbms::CatalogManager::parseQualifiedName(
+        const bool catalogCandidate = dbms::CatalogManager::parseQualifiedName(
             call->schema.empty() ? call->funcName : call->schema + "." + call->funcName, routine, true) &&
-            (routine.schema.empty() || routine.schema == "pg_catalog") &&
+            (routine.schema.empty() || routine.schema == "pg_catalog");
+        const bool special = catalogCandidate &&
             (routine.name == "exists" || routine.name == "any" || routine.name == "all");
+        if (stringPredicate && catalogCandidate && call->namedArgs.empty() &&
+            !call->setReturning && !call->hasOver && !call->distinct && !call->filter &&
+            call->orderBy.empty() && call->aggregateOrderKeys.empty()) {
+            // Recognize ordinary scalar syntax for dispatch. The binder
+            // still resolves the call's actual schema and declaration.
+            const auto size = call->args.size();
+            if (((routine.name == "substring" || routine.name == "substr") &&
+                 (size == 2 || size == 3)) ||
+                ((routine.name == "upper" || routine.name == "lower" || routine.name == "length") && size == 1) ||
+                (routine.name == "replace" && size == 3) ||
+                ((routine.name == "starts_with" || routine.name == "strpos") && size == 2))
+                *stringPredicate = true;
+        }
         for (const auto& argument : call->args) add(argument.get(), !special);
         for (const auto& argument : call->namedArgs) add(argument.value.get(), !special);
     } else if (const auto* conditional = dynamic_cast<const dbms::CaseExpr*>(expression)) {
@@ -20582,7 +20597,8 @@ static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bo
     const bool possibleArray = queryArrays(candidate,false);
     if(possibleArray && !needsDomainCast && dbms::SQLParser::isDatabaseIndependentQuery(*candidate))return false;
     bool explicitPredicateCollation = false;
-    const auto roles = scalarQueryRoles(candidate->whereClause.get(), true, &explicitPredicateCollation);
+    bool stringPredicate = false;
+    const auto roles = scalarQueryRoles(candidate->whereClause.get(), true, &explicitPredicateCollation, &stringPredicate);
     bool scalarOrder = false;
     for (const auto& item : candidate->orderBy)
         scalarOrder = scalarOrder || scalarQueryRoles(item.expr.get()).first;
@@ -20630,6 +20646,22 @@ static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bo
         // aliases retain their established consumers. This plan lowers a
         // single actual base range; no alternate namespace is fabricated.
         if (!g_engine.tableExists(session.currentDB, physical)) return false;
+        if (stringPredicate) {
+            const auto table = g_engine.getTableSchema(session.currentDB, physical);
+            const auto indexes = g_engine.getIndexMetadata(session.currentDB, physical);
+            const auto* predicate = dynamic_cast<const dbms::BinaryOpExpr*>(candidate->whereClause.get());
+            const bool combined = predicate && (predicate->op == "AND" || predicate->op == "OR");
+            // Keep access paths that can use an expression index or narrow a
+            // combined predicate before evaluating the remaining expression.
+            const bool indexedFilter = any_of(indexes.begin(), indexes.end(),
+                [](const auto& index) { return index.isExpression; }) ||
+                (combined && (table.hasPrimaryKey() || !indexes.empty() ||
+                 !g_engine.getCompositeIndexes(session.currentDB, physical).empty()));
+            stringPredicate = table.partitionType == dbms::TableSchema::PartitionType::None &&
+                !table.rowLevelSecurity && !table.forceRowLevelSecurity && !indexedFilter &&
+                none_of(table.cols.begin(), table.cols.end(),
+                    [](const auto& column) { return column.generatedKind == 'v'; });
+        }
         if (!candidate->fromClause->only)
             descendants = dbms::inheritedTableDescendants(g_engine, session.currentDB, physical);
         if (!descendants.empty() && !dbms::supportsInheritedTableSource(g_engine, session.currentDB,
@@ -20648,7 +20680,7 @@ static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bo
         }
         if (descendants.empty() && !roles.first && !scalarOrder && !possibleArray && !needsDomainCast &&
             !fromlessDemand && !possibleBitNegation && !physicalLimitDemand && !stringProjection &&
-            !explicitPredicateCollation) {
+            !stringPredicate && !explicitPredicateCollation) {
             const auto schema = g_engine.getTableSchema(session.currentDB, physical);
             typedSortDemand = ordinaryTypedSortDemand(*candidate, schema);
             declaredPredicateCollations = dbms::QueryPlanner::usesDeclaredFilterCollations(*candidate, schema);
@@ -20675,7 +20707,8 @@ static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bo
     const bool bitNegationOutput=possibleBitNegation && bitNegation(select,true);
     if(descendants.empty() && !roles.first && !scalarOrder && !queryArrays(select,true) && !arrayOutput &&
         !needsDomainCast && !fromlessDemand && !bitNegationOutput && !physicalLimitDemand &&
-        !typedSortDemand && !stringProjection && !explicitPredicateCollation && !declaredPredicateCollations) {
+        !typedSortDemand && !stringProjection && !stringPredicate &&
+        !explicitPredicateCollation && !declaredPredicateCollations) {
         if (!physicalColumnCandidate || !dbms::QueryPlanner::usesDeclaredFilterCollations(
                 *select, g_engine.getTableSchema(session.currentDB, physical))) return false;
     }

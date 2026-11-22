@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>截取文字再筛选更快了 · 2026-11-22</summary>
+
+比如取姓名的第一个字，再找出所有姓张的人。把名称转成小写再比较也更快了。
+
+[测试报告](docs/test-report.md#ordinary-text-function-filter-20261122) · [性能报告](docs/performance-report-2026-10-30.md#ordinary-text-function-filter-cost-20261122)
+
+</details>
+
+<details>
 <summary>按名称查找更快了 · 2026-11-22</summary>
 
 比如按名称查一项数据库设置，或在表里查找名称完全相同的记录。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>改了订单表的分组名，订单号仍会接着生成 · 2026-11-22</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-22 · 改了订单表的分组名，订单号仍会接着生成
 
 比如订单号已经发到 42。把订单表所在的「销售」改名为「销售归档」后，下一笔订单仍是 43。
 
 [用法](docs/MANUAL.md#schema-改名) · [测试报告](docs/test-report.md#schema-rename-sequences-20261122) · [性能报告](docs/performance-report-2026-10-30.md#schema-rename-sequences-cost-20261122)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-22 · 可以改一组表共用的名称前缀
 
