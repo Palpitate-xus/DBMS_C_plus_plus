@@ -2000,6 +2000,8 @@ SELECT id, score FROM example_index_maintenance WHERE score >= 15 ORDER BY id;
 
 ## 9. 视图与物化视图
 
+普通表改列名后，受支持的普通视图仍会读取同一列，并保留创建视图时的输出列名。比如订单表的 `quantity` 改成 `order_quantity` 后，查询原视图仍可使用 `quantity`。若改名会改变连接键或绑定到另一张表，数据库会撤销这次改名。[验证范围](test-report.md#rename-dependent-views-20261122)
+
 普通视图的 `CREATE OR REPLACE` 保留既有列名、类型和类型修饰符，允许末尾追加
 列；不兼容替换返回 `42P16` 并保留旧定义。创建时静态绑定输出，不提前执行
 查询或消耗序列。物化视图的支持范围独立于普通视图替换。

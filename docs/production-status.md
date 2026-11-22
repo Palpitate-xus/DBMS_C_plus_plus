@@ -6,6 +6,10 @@
 
 截至 2026-11-22，273 项功能要求中有 22 项完成、167 项部分实现、69 项待验证、15 项暂缓。各项结果和剩余范围见功能总账。以下更新报告给出各轮测试的实际范围。[功能总账](gap-progress.json) · [支持的功能和限制](compatibility-contract.md)
 
+## 2026-11-22 · 基础表改列名后保留已有视图
+
+依赖已登记的普通视图可以跟随基础表改列名，保留原输出名称。回滚和强制重启会恢复对应版本的表结构及视图定义。连接键及同名表查找仍有受限情形。[测试报告](test-report.md#rename-dependent-views-20261122) · [性能报告](performance-report-2026-10-30.md#rename-dependent-views-cost-20261122)
+
 ## 2026-11-22 · 改列名后保留数据检查和计算
 
 普通表改列名时，列级检查、表级检查及生成列表达式可以引用带双引号的新列名。更新和导入仍执行原有检查，并核对了旧版建立的表、事务回滚及强制重启。[测试报告](test-report.md#rename-quoted-column-references-20261122) · [性能报告](performance-report-2026-10-30.md#rename-quoted-column-references-cost-20261122)

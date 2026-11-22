@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-22 · 基础表改列名后保留已有视图
+
+PostgreSQL 18.6 更新目录中的列名，视图仍按原表和列编号读取。SQLite 在解析时标出引用的位置，改相关建表 SQL 后检查是否仍能解析。DuckDB 的列改名重新绑定修改后的表定义和约束。[PostgreSQL 改列名](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/commands/tablecmds.c#L3618) · [PostgreSQL 视图规则](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/rewrite/rewriteDefine.c) · [SQLite 改列名](https://www.sqlite.org/lang_altertable.html#alter_table_rename_column) · [DuckDB 改列名](https://github.com/duckdb/duckdb/blob/main/src/catalog/catalog_entry/duck_table_entry.cpp#L391)
+
+本项目按目录里的依赖查找相关普通视图，从绑定结果识别同名列的来源。改写后再次绑定，检查物理依赖、列引用、连接键和输出类型。原有视图目录保留其输出列名，修改后的文件随改名一起提交。[验证范围](test-report.md#rename-dependent-views-20261122)
+
 ## 2026-11-22 · 改列名后保留检查和计算
 
 PostgreSQL 18.6 保留列编号，只更新目录中的名称。保存的表达式用列编号定位，显示时读取新名字。SQLite 保留建表 SQL，从已解析的列引用找到需要修改的原文位置。DuckDB 修改检查表达式中的列引用，再绑定新的表定义。[PostgreSQL 改名](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/commands/tablecmds.c#L3618) · [PostgreSQL 表达式显示](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/utils/adt/ruleutils.c#L7161) · [SQLite 改名实现](https://github.com/sqlite/sqlite/blob/master/src/alter.c#L1037) · [DuckDB 改名实现](https://github.com/duckdb/duckdb/blob/main/src/catalog/catalog_entry/duck_table_entry.cpp#L391)

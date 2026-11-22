@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>表改列名后，已有视图仍可查询 · 2026-11-22</summary>
+
+例如，订单表把「数量」改成「订购数量」后，已有视图仍用原来的列名显示数量和合计。
+
+[用法](docs/MANUAL.md#9-视图与物化视图) · [测试报告](docs/test-report.md#rename-dependent-views-20261122) · [性能报告](docs/performance-report-2026-10-30.md#rename-dependent-views-cost-20261122)
+
+</details>
+
+<details>
 <summary>列改名后，数据检查规则也会更新 · 2026-11-22</summary>
 
 把「数量」改成「订购数量」后，要求数量为正数的规则仍会生效，自动计算的列也会使用新列名。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>数字列误填文字时，导入可以继续 · 2026-11-22</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-22 · 数字列误填文字时，导入可以继续
 
 例如，把「三件」填进整数列时，可以只跳过这一行。也可以设定最多跳过多少行，超出上限就撤销整批导入。
 
 [用法](docs/MANUAL.md#用客户端复制数据) · [测试报告](docs/test-report.md#copy-ignore-bad-rows-20261122) · [性能报告](docs/performance-report-2026-10-30.md#copy-ignore-bad-rows-cost-20261122)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-22 · 导入失败后，已取过的编号不会重用
 

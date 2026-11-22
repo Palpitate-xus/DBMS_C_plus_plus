@@ -53,6 +53,7 @@
 #include <set>
 #include <sstream>
 #include <stdexcept>
+#include <tuple>
 
 extern dbms::StorageEngine g_engine;
 
@@ -2455,6 +2456,26 @@ static void dropColumnDependentViews(
     CatalogManager& catalog, const std::string& database, Oid relation,
     int32_t attribute, bool cascade, DdlTransaction& transaction);
 
+using ViewRelationDependencies = std::set<std::pair<Oid, int32_t>>;
+using ViewSourceBinding = std::tuple<size_t, size_t, size_t>;
+struct ViewRenamePlan {
+    std::string name;
+    std::string definition;
+    std::string query;
+    bool changed = false;
+    ViewRelationDependencies dependencies;
+    std::vector<ViewSourceBinding> references;
+    std::map<size_t, std::set<std::string>> joinKeys;
+    QueryRowDescriptor output;
+};
+static std::vector<ViewRenamePlan> planDependentViewRenames(
+    CatalogManager& catalog, const std::string& database,
+    const PgClassRow& relation, const PgAttributeRow& attribute,
+    const std::string& newName);
+static void publishDependentViewRenames(
+    CatalogManager& catalog, const std::string& database,
+    const std::vector<ViewRenamePlan>& plans, DdlTransaction& transaction);
+
 static bool generatedVirtualName(const TableSchema& table,const std::string& name) {
     for(size_t i=0;i<table.len();++i)if(table.cols[i].dataName==name)return table.cols[i].generatedKind=='v';
     return false;
@@ -2592,7 +2613,8 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
         // must not turn a clean snapshot into a database-wide physical
         // restore; successful earlier actions still keep the snapshot dirty.
         if (sub.action != AlterTableStmt::Action::AddColumn &&
-            sub.action != AlterTableStmt::Action::DropColumn)
+            sub.action != AlterTableStmt::Action::DropColumn &&
+            sub.action != AlterTableStmt::Action::RenameColumn)
             txn.markSnapshotDirty();
         DBStatus status = DBStatus::OK;
         switch (sub.action) {
@@ -2806,7 +2828,7 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                     }
                 }
                 break;
-            case AlterTableStmt::Action::RenameColumn:
+            case AlterTableStmt::Action::RenameColumn: {
                 if (sub.name.empty() || sub.newName.empty()) {
                     std::cout << "SQL syntax error: RENAME COLUMN requires two names" << std::endl;
                     return true;
@@ -2823,6 +2845,26 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                         return true;
                     }
                 }
+                std::vector<ViewRenamePlan> viewRenames;
+                try {
+                    auto& catalog = g_engine.catalogService().get(s.currentDB);
+                    const auto name = CatalogService::logicalName(tableName);
+                    const auto relation = catalog.resolveRelationSnapshot(
+                        name.name, {name.schema.empty() ? "public" : name.schema});
+                    if (relation && sub.name != sub.newName &&
+                        !catalog.getAttribute(relation->oid, sub.newName)) {
+                        const auto attribute = catalog.getAttribute(relation->oid, sub.name);
+                        const auto owner = catalog.getClass(relation->oid);
+                        if (attribute && owner)
+                            viewRenames = planDependentViewRenames(
+                                catalog, s.currentDB, *owner, *attribute, sub.newName);
+                    }
+                } catch (const DbError& error) {
+                    std::cout << "ALTER TABLE RENAME COLUMN: " << error.what()
+                              << " (SQLSTATE " << error.sqlState() << ")" << std::endl;
+                    return true;
+                }
+                txn.markSnapshotDirty();
                 status = g_engine.alterTableRenameColumn(s.currentDB, tableName,
                                                          sub.name, sub.newName);
                 if (status == DBStatus::INVALID_VALUE) {
@@ -2896,6 +2938,11 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                                 return true;
                             }
                         }
+                        publishDependentViewRenames(catalog, s.currentDB, viewRenames, txn);
+                    } catch (const DbError& error) {
+                        std::cout << "ALTER TABLE RENAME COLUMN: " << error.what()
+                                  << " (SQLSTATE " << error.sqlState() << ")" << std::endl;
+                        return true;
                     } catch (const std::exception& e) {
                         std::cerr
                             << "ALTER TABLE RENAME COLUMN catalog update failed: "
@@ -2904,6 +2951,7 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                     }
                 }
                 break;
+            }
             case AlterTableStmt::Action::RenameConstraint:
                 if (sub.name.empty() || sub.newName.empty()) {
                     std::cout << "SQL syntax error: RENAME CONSTRAINT requires two names" << std::endl;
@@ -10900,11 +10948,9 @@ bool DdlExecutor::executeDropType(const DropStmt* stmt, Session& s) {
 // A view stores parse-time dependencies, independently of execution demand.
 // Use bound occurrence/column ordinals: aliases, repeated table occurrences,
 // expanded stars and lexical children must never become name guesses here.
-using ViewRelationDependencies = std::set<std::pair<Oid, int32_t>>;
-
 static ViewRelationDependencies boundViewRelationDependencies(
-    const CatalogManager& catalog, const std::string& database,
-    const PreparedQuery& prepared) {
+    const CatalogManager& catalog, const std::string& database, const PreparedQuery& prepared,
+    const std::function<void(const ColumnRefExpr&)>& onColumn = {}) {
     ViewRelationDependencies dependencies;
     std::map<size_t, const PreparedQuery::SourceRange*> sources;
     std::map<size_t, std::vector<PgAttributeRow>> attributes;
@@ -10986,7 +11032,10 @@ static ViewRelationDependencies boundViewRelationDependencies(
     expression = [&](const Expr* node) {
         if (!node || node->preparedSubquery) return; // child is in statementOutputs
         if (const auto* column = dynamic_cast<const ColumnRefExpr*>(node)) {
-            if (column->binding) bindingDependency(*column->binding);
+            if (column->binding) {
+                bindingDependency(*column->binding);
+                if (onColumn) onColumn(*column);
+            }
         } else if (const auto* unary = dynamic_cast<const UnaryOpExpr*>(node)) {
             expression(unary->operand.get());
         } else if (const auto* binary = dynamic_cast<const BinaryOpExpr*>(node)) {
@@ -11077,6 +11126,179 @@ static std::string viewDefinitionQuery(std::string definition) {
     }
     definition.resize(end);
     return definition;
+}
+
+using ViewEditSpan = std::pair<size_t, size_t>;
+
+static auto viewJoinKeys(const PreparedQuery& query) {
+    std::map<size_t, std::set<std::string>> keys;
+    for (const auto& source : query.sourceRanges) {
+        if (!source.mergedUsing) continue;
+        for (const auto& column : source.columns)
+            keys[source.ordinal].insert(column.name);
+    }
+    return keys;
+}
+
+static ViewRelationDependencies inspectViewBindings(
+    const CatalogManager& catalog, const std::string& database,
+    const PreparedQuery& query, std::vector<ViewSourceBinding>& references,
+    const std::function<void(const ColumnRefExpr&)>& onColumn = {}) {
+    std::vector<std::pair<ViewEditSpan, ViewSourceBinding>> ordered;
+    auto dependencies = boundViewRelationDependencies(
+        catalog, database, query, [&](const ColumnRefExpr& ref) {
+            const auto& binding = *ref.binding;
+            ordered.emplace_back(ViewEditSpan{ref.sourceBegin, ref.sourceEnd},
+                ViewSourceBinding{binding.sourceOrdinal, binding.columnOrdinal, binding.scopeDepth});
+            if (onColumn) onColumn(ref);
+        });
+    std::sort(ordered.begin(), ordered.end());
+    references.reserve(ordered.size());
+    for (const auto& site : ordered) references.push_back(site.second);
+    return dependencies;
+}
+
+static std::vector<ViewRenamePlan> planDependentViewRenames(
+    CatalogManager& catalog, const std::string& database,
+    const PgClassRow& relation, const PgAttributeRow& attribute,
+    const std::string& newName) {
+    std::set<Oid> dependents;
+    for (const auto& edge : catalog.findAllDependents(PgClassOid_Class, relation.oid))
+        if (edge.classid == PgClassOid_Class) dependents.insert(edge.objid);
+    if (dependents.empty()) return {};
+
+    const auto schema = catalog.getNamespace(relation.relnamespace);
+    if (!schema) throw DbError("XX001", "renamed relation has no namespace");
+    std::vector<ViewRenamePlan> plans;
+    const auto quote = SQLParser::quoteIdentifier;
+    for (const auto oid : dependents) {
+        const auto view = catalog.getClass(oid);
+        if (!view || view->relkind != 'v') continue;
+        ViewRenamePlan plan;
+        std::string error;
+        if (!catalogViewStorageName(catalog, *view, plan.name, error))
+            throw DbError("XX001", error);
+        const std::string stored = g_engine.getViewSQL(database, plan.name);
+        plan.query = viewDefinitionQuery(stored);
+        if (plan.query.empty()) throw DbError("XX001", "view definition is missing");
+
+        const size_t definitionSuffix = plan.query.size();
+        const auto prepared = g_engine.prepareBoundQuery(database, plan.query, {}, true);
+        std::map<ViewEditSpan, std::string> edits;
+        std::set<const Expr*> renamedReferences;
+        const auto edit = [&](size_t begin, size_t end, const std::string& replacement) {
+            if (begin > end || end > plan.query.size())
+                throw DbError("0A000", "view column reference has no source position");
+            const auto [entry, inserted] = edits.emplace(ViewEditSpan{begin, end}, replacement);
+            if (!inserted && entry->second != replacement)
+                throw DbError("0A000", "view column reference rewrite is ambiguous");
+        };
+        const auto conflictingInput = [&](const PreparedQuery::SourceRange& source) {
+            return std::any_of(prepared.sourceRanges.begin(), prepared.sourceRanges.end(),
+                [&](const auto& other) {
+                    return other.ordinal != source.ordinal &&
+                        std::any_of(other.columns.begin(), other.columns.end(),
+                            [&](const auto& field) { return field.name == newName; });
+                });
+        };
+        const auto updateReference = [&](const ColumnRefExpr& ref) {
+            const auto& binding = *ref.binding;
+            const auto& source = prepared.sourceRanges.at(binding.sourceOrdinal);
+            const auto& column = source.columns.at(binding.columnOrdinal);
+            const bool target = source.relationSchema == schema->nspname &&
+                source.relationName == relation.relname &&
+                (column.physicalAttributeNumber == attribute.attnum ||
+                 (column.physicalAttributeNumber == 0 && column.name == attribute.attname)) &&
+                (!source.source || binding.columnOrdinal >= source.source->columnAliases.size());
+            // A different unqualified input with the new name must keep its
+            // binding even if the renamed table now exposes the same name.
+            if (!target && (ref.column != newName || !ref.table.empty() || source.name.empty()))
+                return;
+            if (ref.sourceBegin >= ref.sourceEnd || ref.sourceEnd > plan.query.size())
+                throw DbError("0A000", "view column reference has no source position");
+            const bool needsQualifier = ref.table.empty() && !source.name.empty() &&
+                (!target || conflictingInput(source));
+            std::string replacement = quote(target ? newName : ref.column);
+            if (needsQualifier) {
+                replacement = quote(source.name) + "." + replacement;
+                if (!source.schema.empty()) replacement = quote(source.schema) + "." + replacement;
+            }
+            // Only replace the leaf name in a qualified reference.
+            const bool quoted = plan.query[ref.sourceEnd - 1] == '"';
+            std::string original = quoted ? quote(ref.column) : ref.column;
+            if (quoted && original.front() != '"') original = '"' + original + '"';
+            const size_t length = original.size();
+            if (length > ref.sourceEnd - ref.sourceBegin)
+                throw DbError("0A000", "view column reference does not match its source");
+            const size_t begin = ref.sourceEnd - length;
+            const auto actual = plan.query.substr(begin, length);
+            if ((quoted ? actual : SQLParser::toLower(actual)) != original)
+                throw DbError("0A000", "view column reference does not match its source");
+            edit(begin, ref.sourceEnd, replacement);
+            if (target) renamedReferences.insert(&ref);
+        };
+        plan.dependencies = inspectViewBindings(catalog, database, prepared,
+                                                plan.references, updateReference);
+        // Older definitions still resolve unqualified source names at read
+        // time. Do not rewrite a different relation if the current path
+        // shadows the source recorded when the view was created.
+        for (const auto& edge : catalog.findDepends(PgClassOid_Class, oid)) {
+            if (edge.refclassid == PgClassOid_Class &&
+                !plan.dependencies.count({edge.refobjid, edge.refobjsubid}))
+                throw DbError("0A000", "view source no longer matches its recorded dependency");
+        }
+        for (const auto& statement : prepared.statementOutputs) {
+            const auto* select = dynamic_cast<const SelectStmt*>(statement.first);
+            if (!select) continue;
+            for (const auto& target : select->selectList) {
+                if (!target.alias.empty() || !renamedReferences.count(target.expr.get())) continue;
+                const auto* column = static_cast<const ColumnRefExpr*>(target.expr.get());
+                edit(target.sourceExpressionEnd, target.sourceExpressionEnd,
+                     " AS " + quote(column->column));
+            }
+        }
+        plan.output = prepared.output;
+        plan.joinKeys = viewJoinKeys(prepared);
+        size_t previous = plan.query.size();
+        for (auto entry = edits.rbegin(); entry != edits.rend(); ++entry) {
+            const auto [begin, end] = entry->first;
+            if (end > previous)
+                throw DbError("0A000", "view column reference source ranges overlap");
+            plan.query.replace(begin, end - begin, entry->second);
+            previous = begin;
+        }
+        plan.changed = !edits.empty();
+        if (plan.changed) plan.definition = plan.query + stored.substr(definitionSuffix);
+        plans.push_back(std::move(plan));
+    }
+    return plans;
+}
+
+static void publishDependentViewRenames(
+    CatalogManager& catalog, const std::string& database,
+    const std::vector<ViewRenamePlan>& plans, DdlTransaction& transaction) {
+    // A view can use both the table and another changed view. Publish all
+    // within the DDL snapshot before checking their new bindings together.
+    for (const auto& plan : plans) {
+        if (!plan.changed) continue;
+        if (!g_engine.viewExists(database, plan.name) ||
+            !index_file::writeAtomically(g_engine.viewPath(database, plan.name), plan.definition))
+            throw DbError("58030", "could not save the dependent view definition");
+        transaction.recordUpdate(DdlObjectKind::View, plan.name);
+    }
+    for (const auto& plan : plans) {
+        const auto updated = g_engine.prepareBoundQuery(database, plan.query, {}, true);
+        std::vector<ViewSourceBinding> references;
+        const auto dependencies = inspectViewBindings(catalog, database, updated, references);
+        const auto sameType = [](const QueryOutputColumn& a, const QueryOutputColumn& b) {
+            return a.type == b.type && a.typeOid == b.typeOid && a.typeMod == b.typeMod;
+        };
+        if (dependencies != plan.dependencies || references != plan.references ||
+            viewJoinKeys(updated) != plan.joinKeys ||
+            !std::equal(updated.output.begin(), updated.output.end(),
+                        plan.output.begin(), plan.output.end(), sameType))
+            throw DbError("0A000", "column rename changes the binding of a dependent view");
+    }
 }
 
 static void dropColumnDependentViews(

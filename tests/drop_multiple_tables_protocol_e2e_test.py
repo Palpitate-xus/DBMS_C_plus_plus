@@ -352,6 +352,8 @@ def main():
               'doubled INT GENERATED ALWAYS AS ("indexed_value" * 2) STORED);')
         query("INSERT INTO ownership_column(id, indexed_value) VALUES (1, 9);")
         query("CREATE INDEX ownership_column_lookup ON ownership_column(indexed_value);")
+        query("CREATE VIEW ownership_column_reader AS SELECT id, indexed_value * 2 AS total "
+              "FROM ownership_column WHERE indexed_value > 0;")
         query("CHECKPOINT;")
 
         def read_neighbor():
@@ -384,11 +386,14 @@ def main():
             assert renamed.with_suffix(".idx.tde").read_bytes() == before[original_companion]
         assert toast_index.read_bytes() == before[toast_index]
         assert query("SELECT moved_value FROM ownership_column WHERE moved_value=9;") == ([["9"]], "SELECT 1")
+        assert query("SELECT total FROM ownership_column_reader;") == ([["18"]], "SELECT 1")
         read_neighbor()
         reopen_after_crash()
         assert query("SELECT moved_value FROM ownership_column WHERE moved_value=9;") == ([["9"]], "SELECT 1")
         assert query("INSERT INTO ownership_column(id, moved_value) VALUES (2, 10) "
                      "RETURNING doubled;") == ([["20"]], "INSERT 0 1")
+        assert query("SELECT total FROM ownership_column_reader ORDER BY id;") == (
+            [["18"], ["20"]], "SELECT 2")
         error("INSERT INTO ownership_column(id, moved_value) VALUES (3, 0);", "23514")
         error("INSERT INTO ownership_column(id, moved_value) VALUES (3, 20);", "23514")
         read_neighbor()
