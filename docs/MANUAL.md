@@ -2227,9 +2227,11 @@ WHERE id = 4 OR id = 9
 ORDER BY event_time NULLS LAST;
 ```
 
+对于按 `SMALLINT`、`INT` 或 `BIGINT` 列划分范围的表，直接筛选该列时，数据库可以跳过确定没有匹配行的分区。例如，若订单按 `order_no` 划分范围，`WHERE order_no >= 100 AND order_no < 200 ORDER BY order_no` 只读取可能包含 100 到 199 号订单的分区。组合条件和空值检查也可以缩小读取范围。默认分区在条件可能匹配未被其他分区覆盖的值或空值时参加查询。需要应用行级访问策略、显式锁行，或者旧数据的分区位置无法从边界推断时，数据库会保留可能含有结果的分区。[测试范围](test-report.md#integer-range-pruning-20261122)
+
 通过数据库服务查询一张分区表的普通列时，`LIMIT` 可以让数据库取够匹配行后停止读取。没有排序或去重，也无需显式行锁或执行行级访问策略的查询可以使用这个优化。例如 `LIMIT 2 OFFSET 5` 会取至多七条符合筛选条件的记录，再跳过前五条。需要固定的分页顺序时，可以用 `ORDER BY` 加上能区分每一行的列。[测试范围](test-report.md#partition-limit-prefix-20261122)
 
-符合条件的分区查询使用 `ORDER BY id LIMIT 10 OFFSET 100` 时，可以在排序后先跳过前 100 条，再读取当前页的长字段。排序仍读取各分区的排序列。用长文本作排序键时，数据库需要读取它们才能比较。[分页测试](test-report.md#partition-offset-output-20261122)
+符合条件的分区查询使用 `ORDER BY id LIMIT 10 OFFSET 100` 时，可以在排序后先跳过前 100 条，再读取当前页的长字段。排序仍读取需要参与查询的分区中的排序列。用长文本作排序键时，数据库需要读取它们才能比较。[分页测试](test-report.md#partition-offset-output-20261122)
 
 ---
 

@@ -338,6 +338,15 @@ private:
     std::vector<std::vector<bool>> bufferedNulls_;
     std::unique_ptr<HeapScanCursor> cursor_;
     std::vector<bool> lastNulls_;
+    struct RangePruning {
+        uint64_t relationId;
+        std::string column;
+        size_t columnOrdinal;
+        std::pair<int64_t, int64_t> domain;
+        StorageEngine::IntegerPartitionFilter filter;
+    };
+    std::optional<RangePruning> rangePruning_;
+    bool prunedPartitions_ = false;
     bool scanPartitionsOnDemand_ = false;
     bool lastBufferedNullsValid_ = false;
     size_t pos_ = 0;

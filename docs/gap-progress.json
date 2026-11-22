@@ -2,6 +2,27 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-22 skip irrelevant partitions for integer range queries",
+      "gap_ids": ["CAT-11", "QRY-01", "STO-02"],
+      "status": "partial",
+      "evidence": [
+        "src/commands/TableManage.cpp",
+        "src/executor/ExecutionPlan.cpp",
+        "docs/postgresql-comparison.md",
+        "docs/test-report.md",
+        "docs/performance-report-2026-10-30.md"
+      ],
+      "tests": [
+        "tests/partition_test.cpp",
+        "tests/table_scan_statistics_test.cpp"
+      ],
+      "verification": [
+        "31 PostgreSQL 18.6 comparisons, three mixed predicates, 14 legacy integer boundaries, and 26 transaction and cold-restart checks passed. Native controls verified old partition bounds and integer values.",
+        "The 60-leaf fixture required two leaf opens for selective ordered equality and range filters, and zero for an empty result. Eight traced replies and 480 timing replies matched the baseline byte for byte.",
+        "Two timing rounds reduced selective query latency, with slowdowns for the already-pruned unordered equality and the all-match control. Independent leaf relations and general pruning remain partial."
+      ]
+    },
+    {
       "issue": "2026-11-22 read long partition values after skipping the ordered offset",
       "gap_ids": ["CAT-11", "QRY-01", "STO-02"],
       "status": "partial",

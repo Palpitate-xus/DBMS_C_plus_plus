@@ -18,6 +18,7 @@
 #include "Session.h"
 #include <cassert>
 #include <chrono>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <future>
@@ -300,6 +301,106 @@ static void test_range_default_partition() {
 
     cleanup(db);
     std::cout << "[PART] range default partition OK" << std::endl;
+}
+
+static void test_integer_range_query_pruning() {
+    using dbms::DBStatus;
+    const std::string db = testDbPath("part_range_query_pruning");
+    const std::string table = "events";
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == DBStatus::OK);
+    auto schema = makeSchema(table, {"k int"});
+    schema.partitionType = dbms::TableSchema::PartitionType::Range;
+    schema.partitionKey = "k";
+    schema.rangePartitions = {{"early", "10"}, {"later", "20"}};
+    schema.rangePartitionLowerBounds = {"5", "15"};
+    schema.defaultPartitionName = "fallback";
+    assert(g_engine.createTable(db, schema) == DBStatus::OK);
+    for (const std::string value : {"5", "9", "10", "15", "19", "20"})
+        assert(g_engine.insert(db, table, {{"k", value}}) == DBStatus::OK);
+    assert(g_engine.checkpoint(db));
+
+    const auto prepared = [&](const std::string& relation, const std::string& predicate) {
+        auto query = g_engine.prepareBoundQuery(db,
+            "SELECT k FROM " + relation + " WHERE " + predicate + " ORDER BY k LIMIT 10");
+        return dbms::QueryPlanner::executePlanWithPrefix(
+            dbms::QueryPlanner::buildPreparedSelectPlan(&g_engine, db, relation, std::move(query)));
+    };
+    const auto lateHeap = std::filesystem::path(db) / "events#later.dt";
+    const auto saved = std::filesystem::path(db) / "events#later.saved";
+    std::filesystem::rename(lateHeap, saved);
+    std::ofstream(lateHeap, std::ios::binary).put('x');
+
+    const auto early = prepared(table, "5 <= k AND k < 10");
+    assert(early.ok && (early.structuredRows == std::vector<std::vector<std::string>>{{"5"}, {"9"}}));
+    const auto gap = prepared(table, "k >= 10 AND k < 15");
+    assert(gap.ok && (gap.structuredRows == std::vector<std::vector<std::string>>{{"10"}}));
+    const auto empty = prepared(table, "k >= 20 AND k < 20");
+    assert(empty.ok && empty.structuredRows.empty());
+    const auto included = prepared(table, "k >= 15 AND k < 20");
+    assert(!included.ok && included.errorSqlState == "58030");
+
+    std::vector<std::vector<std::string>> directRows;
+    std::vector<std::vector<bool>> directNulls;
+    const std::vector<std::vector<std::string>> branches{{">=k 5", "<k 10"}, {"=k 20"}};
+    g_engine.query(db, table, branches.front(), {"k"}, {}, false, false, false, 0, {},
+        &directRows, &directNulls, nullptr, {}, nullptr, nullptr, branches);
+    assert((directRows == std::vector<std::vector<std::string>>{{"5"}, {"9"}, {"20"}}));
+    assert(std::filesystem::file_size(lateHeap) == 1);
+
+    std::filesystem::rename(saved, lateHeap);
+    const auto restored = prepared(table, "k >= 15 AND k < 20");
+    assert(restored.ok && (restored.structuredRows == std::vector<std::vector<std::string>>{{"15"}, {"19"}}));
+
+    auto oldBounds = makeSchema("old_bounds", {"k int"});
+    oldBounds.partitionType = dbms::TableSchema::PartitionType::Range;
+    oldBounds.partitionKey = "k";
+    oldBounds.rangePartitions = {{"low", "20 "}};
+    oldBounds.defaultPartitionName = "fallback";
+    assert(g_engine.createTable(db, oldBounds) == DBStatus::OK);
+    assert(g_engine.insert(db, "old_bounds", {{"k", "3"}}) == DBStatus::OK);
+    assert(rowCountInPartitions(db, "old_bounds", {"fallback"}) == 1);
+    const auto legacyBounds = prepared("old_bounds", "k > 2 AND k < 4");
+    assert(legacyBounds.ok && (legacyBounds.structuredRows == std::vector<std::vector<std::string>>{{"3"}}));
+    assert(g_engine.query(db, "old_bounds", {">k 2", "<k 4"}, {"k"}).size() == 1);
+
+    auto oldRows = makeSchema("old_rows", {"k int"});
+    oldRows.partitionType = dbms::TableSchema::PartitionType::Range;
+    oldRows.partitionKey = "k";
+    oldRows.rangePartitions = {{"low", "-10"}, {"middle", "0"}, {"high", "10"}};
+    oldRows.defaultPartitionName = "fallback";
+    assert(g_engine.createTable(db, oldRows) == DBStatus::OK);
+    assert(g_engine.insert(db, "old_rows", {{"k", "+-3"}}) == DBStatus::OK);
+    assert(g_engine.insert(db, "old_rows", {{"k", "0000000000000000000020"}}) == DBStatus::OK);
+    const auto legacySign = prepared("old_rows", "k >= -5 AND k < -2");
+    assert(legacySign.ok && (legacySign.structuredRows == std::vector<std::vector<std::string>>{{"-3"}}));
+    assert(g_engine.query(db, "old_rows", {">=k -5", "<k -2"}, {"k"}).size() == 1);
+    assert(rowCountInPartitions(db, "old_rows", {"fallback"}) == 1);
+    // A long spelling is encoded using the first bytes of the legacy
+    // integer sentinel. Verify the stored value despite its routed location.
+    int32_t encodedFailure;
+    const auto failure = dbms::INF;
+    std::memcpy(&encodedFailure, &failure, sizeof(encodedFailure));
+    const auto value = std::to_string(encodedFailure);
+    const auto legacyLong = prepared("old_rows", "k = " + value);
+    assert(legacyLong.ok && (legacyLong.structuredRows == std::vector<std::vector<std::string>>{{value}}));
+    assert(g_engine.query(db, "old_rows", {"=k " + value}, {"k"}).size() == 1);
+
+    dbms::TableSchema oldZero;
+    oldZero.tablename = "old_zero";
+    oldZero.append(dbms::makeIntColumn("k", true, 4));
+    oldZero.partitionType = dbms::TableSchema::PartitionType::Range;
+    oldZero.partitionKey = "k";
+    oldZero.rangePartitions = {{"low", "10"}};
+    oldZero.rangePartitionLowerBounds = {"-10"};
+    oldZero.defaultPartitionName = "fallback";
+    assert(g_engine.createTable(db, oldZero) == DBStatus::OK);
+    assert(g_engine.insert(db, "old_zero", {{"k", "+-0"}}) == DBStatus::OK);
+    assert(rowCountInPartitions(db, "old_zero", {"fallback"}) == 1);
+    const auto legacyZero = prepared("old_zero", "k = 0");
+    assert(legacyZero.ok && (legacyZero.structuredRows == std::vector<std::vector<std::string>>{{"0"}}));
+    assert(g_engine.query(db, "old_zero", {"=k 0"}, {"k"}).size() == 1);
+    cleanup(db);
 }
 
 // Attaching a range must not strand already-routed DEFAULT rows outside the
@@ -1155,6 +1256,7 @@ int main() {
     test_range_partitioning();
     test_list_partitioning();
     test_range_default_partition();
+    test_integer_range_query_pruning();
     test_range_attach_validates_default_rows();
     test_typed_range_routing_and_predicates();
     test_hash_partitioning();

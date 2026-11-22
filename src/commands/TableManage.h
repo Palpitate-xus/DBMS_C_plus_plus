@@ -11,6 +11,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <atomic>
@@ -1765,6 +1766,21 @@ public:
     std::vector<std::string> getTargetPartitions(const TableSchema& tbl,
                                                   const std::vector<Condition>& conds) const;
 
+    // Possible matching values for an ordinary signed integral partition key.
+    // Intervals are inclusive, in value order and disjoint.
+    struct IntegerPartitionFilter {
+        std::vector<std::pair<int64_t, int64_t>> intervals;
+        bool matchesNull = false;
+        static std::optional<IntegerPartitionFilter> comparison(std::string_view op, int64_t value);
+        void intersect(const IntegerPartitionFilter& other);
+        void unite(const IntegerPartitionFilter& other);
+    };
+    static std::optional<std::pair<int64_t, int64_t>> integerPartitionDomain(const TableSchema& table);
+    // nullopt means the original scan is required. An engaged empty result
+    // proves no partition can match, including the default partition.
+    static std::optional<std::vector<std::string>> pruneIntegerPartitions(
+        const TableSchema& table, const IntegerPartitionFilter& filter);
+
     // Declarative partition management (ATTACH/DETACH PARTITION)
     DBStatus attachPartition(const std::string& dbname, const std::string& tablename,
                               const std::string& partitionName,
@@ -1920,7 +1936,7 @@ private:
         const std::string& dbname, const std::string& tablename,
         const TableSchema& schema,
         const std::vector<std::pair<uint32_t, uint32_t>>* inclusivePageRanges,
-        bool scanPartitions) const;
+        bool scanPartitions, const std::vector<std::string>* partitions = nullptr) const;
     // A scan with an existing relation lock can reuse the schema obtained
     // under that lock for visibility, policy and leaf path resolution.
     bool forEachRowUsingSchema(

@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>按编号查找时，跳过无关分区 · 2026-11-22</summary>
+
+比如订单按编号区间分开存放。查找 100 到 199 号订单时，数据库可以跳过不可能包含这些订单的分区。
+
+[使用说明](docs/MANUAL.md#15-分区表) · [测试报告](docs/test-report.md#integer-range-pruning-20261122) · [性能报告](docs/performance-report-2026-10-30.md#integer-range-pruning-cost-20261122)
+
+</details>
+
+<details>
 <summary>翻到后面的页面时，少读长文本 · 2026-11-22</summary>
 
 给分区表按编号排序后，比如翻到第 5 页，符合条件的查询只读取这一页的长文本。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>只取几条记录时，读够就停 · 2026-11-22</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-22 · 只取几条记录时，读够就停
 
 查询分区表时，如果只取一条且不要求排序，读到符合条件的记录就可以停。测试中，需要打开的分区文件从 60 个减少到 1 个。
 
 [使用说明](docs/MANUAL.md#15-分区表) · [测试报告](docs/test-report.md#partition-limit-prefix-20261122) · [性能报告](docs/performance-report-2026-10-30.md#partition-limit-prefix-cost-20261122)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-22 · 分区较多的表，重复查询用时缩短
 

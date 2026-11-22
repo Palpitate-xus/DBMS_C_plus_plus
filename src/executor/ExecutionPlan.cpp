@@ -3242,6 +3242,71 @@ static bool isOrdinaryNullTestColumn(const Column& column) {
         type == "text" || type == "character varying";
 }
 
+static std::optional<StorageEngine::IntegerPartitionFilter> integerPartitionPredicate(
+    const Expr* expression, const PreparedQuery& query, size_t source, size_t key,
+    const std::string& keyType, bool ownsStatementInputs) {
+    using Filter = StorageEngine::IntegerPartitionFilter;
+    if (!expression || expression->preparedSubquery) return std::nullopt;
+    const auto oid = mapBuiltinTypeNameToOid(keyType);
+    const auto isKey = [&](const Expr* operand) {
+        const auto* column = dynamic_cast<const ColumnRefExpr*>(operand);
+        if (!column || column->preparedSubquery || column->generatedRead || !column->binding) return false;
+        const auto& binding = *column->binding;
+        // Physical scans can lack a catalog OID in the binder. Here the caller
+        // has already proved the declared type and width of this exact slot.
+        const auto& declaration = binding.typeMetadata;
+        return !binding.scopeDepth && !binding.mergedUsing && binding.sourceOrdinal == source &&
+            binding.columnOrdinal == key &&
+            ExprHelper::canonicalResultTypeName(binding.declaredType) == keyType &&
+            (!binding.typeOid || binding.typeOid == oid) &&
+            (!declaration || (declaration->actualOid == oid && declaration->codecOid == oid &&
+                declaration->kind == DatumKind::Scalar && !declaration->enumType));
+    };
+    if (const auto* test = dynamic_cast<const UnaryOpExpr*>(expression)) {
+        if (!isKey(test->operand.get())) return std::nullopt;
+        if (test->op == "IS NULL") return Filter{{}, true};
+        if (test->op == "IS NOT NULL") return Filter{{{INT64_MIN, INT64_MAX}}, false};
+        return std::nullopt;
+    }
+    const auto* binary = dynamic_cast<const BinaryOpExpr*>(expression);
+    if (!binary || binary->rowComparison || binary->predicateCollation) return std::nullopt;
+    if (binary->op == "AND" || binary->op == "OR") {
+        auto left = integerPartitionPredicate(binary->left.get(), query, source, key, keyType, ownsStatementInputs);
+        if (!left) return std::nullopt;
+        const auto right = integerPartitionPredicate(binary->right.get(), query, source, key, keyType, ownsStatementInputs);
+        if (!right) return std::nullopt;
+        if (binary->op == "AND") left->intersect(*right);
+        else left->unite(*right);
+        return left;
+    }
+    std::string_view op = binary->op;
+    if (op != "=" && op != "<>" && op != "!=" && op != "<" && op != "<=" && op != ">" && op != ">=")
+        return std::nullopt;
+    const bool keyOnLeft = isKey(binary->left.get());
+    if (!keyOnLeft && !isKey(binary->right.get())) return std::nullopt;
+    const auto* input = keyOnLeft ? binary->right.get() : binary->left.get();
+    // An external execution provider may supply a different parameter owner.
+    if (!ownsStatementInputs && dynamic_cast<const ParameterExpr*>(input)) return std::nullopt;
+    const auto endpoint = integerPageEndpoint(input, query);
+    if (!endpoint) return std::nullopt;
+    if (binary->comparison) {
+        const auto& binding = *binary->comparison;
+        const auto& leftType = keyOnLeft ? keyType : endpoint->type;
+        const auto& rightType = keyOnLeft ? endpoint->type : keyType;
+        if (!binding.strict || binding.enumTypeOid || !binding.collation.empty() ||
+            binding.op != binary->op || binding.leftType != leftType || binding.rightType != rightType ||
+            binding.identity != "builtin-comparison:" + binary->op + "(" + leftType + "," + rightType + ")")
+            return std::nullopt;
+    }
+    if (!keyOnLeft) {
+        if (op == "<") op = ">";
+        else if (op == "<=") op = ">=";
+        else if (op == ">") op = "<";
+        else if (op == ">=") op = "<=";
+    }
+    return Filter::comparison(op, endpoint->value);
+}
+
 static bool intersectIntegerPageBounds(const Expr* expression, const QueryColumnBinding& key,
                                        const TableSchema& schema, const PreparedQuery& query,
                                        IntegerPageBounds& bounds) {
@@ -4187,6 +4252,21 @@ OpPtr QueryPlanner::buildPreparedSelectPlan(StorageEngine* engine,
     prepareWindowResultSharing(*state,!state->keys.empty() && !orderedWindow);
     source = makePreparedTableSource(engine, dbname, state->query, select,
                                     sourceSchema, std::move(source));
+    if (select->whereClause && select->locking.empty() && sourceSchema.physicalRelationId &&
+        state->sourceOrdinal != PreparedSelectState::noTarget && typeid(*source) == typeid(TableScanOp)) {
+        if (const auto domain = StorageEngine::integerPartitionDomain(sourceSchema)) {
+            for (size_t i = 0; i < sourceSchema.len(); ++i) {
+                const auto& column = sourceSchema.cols[i];
+                if (column.dataName != sourceSchema.partitionKey) continue;
+                const auto keyType = ExprHelper::canonicalResultTypeName(column.dataType);
+                auto filter = integerPartitionPredicate(select->whereClause.get(), *state->query,
+                    state->sourceOrdinal, i, keyType, !state->executionProvider);
+                if (filter) static_cast<TableScanOp&>(*source).rangePruning_ = TableScanOp::RangePruning{
+                    sourceSchema.physicalRelationId, column.dataName, i, *domain, std::move(*filter)};
+                break;
+            }
+        }
+    }
     OpPtr root = std::move(source);
     if (select->whereClause) root = std::make_unique<PreparedFilterOp>(std::move(root), state);
     if (!state->aggregates.empty() || select->having)
@@ -5335,9 +5415,20 @@ bool TableScanOp::open() {
     lastRid_ = 0;
     pos_ = 0; lastNulls_.clear(); cursor_.reset();
     const bool partitioned = tbl_.partitionType != TableSchema::PartitionType::None;
-    if ((!partitioned || scanPartitionsOnDemand_) && !engine_->rlsAppliesTo(tbl_)) {
+    const bool mayStream = !partitioned || scanPartitionsOnDemand_ || rangePruning_.has_value();
+    const bool enforcePolicy = mayStream && engine_->rlsAppliesTo(tbl_);
+    std::optional<std::vector<std::string>> partitions;
+    if (rangePruning_ && !enforcePolicy && tbl_.physicalRelationId == rangePruning_->relationId &&
+        tbl_.partitionKey == rangePruning_->column &&
+        rangePruning_->columnOrdinal < tbl_.len() &&
+        tbl_.cols[rangePruning_->columnOrdinal].dataName == rangePruning_->column &&
+        StorageEngine::integerPartitionDomain(tbl_) == rangePruning_->domain) {
+        partitions = StorageEngine::pruneIntegerPartitions(tbl_, rangePruning_->filter);
+    }
+    prunedPartitions_ = partitions.has_value();
+    if ((!partitioned || scanPartitionsOnDemand_ || partitions) && !enforcePolicy) {
         cursor_ = engine_->beginHeapScanUsingSchema(dbname_, tablename_, tbl_,
-                                                   nullptr, scanPartitionsOnDemand_);
+            nullptr, partitioned, partitions ? &*partitions : nullptr);
         return true;
     }
     bool toastFailed = false;
@@ -5530,7 +5621,7 @@ bool TableScanOp::nextRow(std::string& outRow, const TableSchema* projection,
         HeapScanRow row;
         if (!cursor_->next(row)) {
             if (!statsRecorded_) {
-                recordTableScan(dbname_, tablename_, pos_, false, true);
+                recordTableScan(dbname_, tablename_, pos_, false, !prunedPartitions_);
                 statsRecorded_ = true;
             }
             return false;
