@@ -1181,7 +1181,7 @@ INSERT INTO users (ID, NAME) VALUES (100, 'New') RETURNING ID, NAME;
 
 对于已准备好各个分区的持久表，可以对父表执行 `INSERT`。数据库按分区键把每行写入对应的分区。单独执行的插入会自动提交，也可以用 `BEGIN`、`COMMIT`、`ROLLBACK` 和 `ROLLBACK TO SAVEPOINT` 管理一批写入。一行找不到匹配的范围或列表分区，且没有默认分区时，整条插入语句失败并返回 `23514`。
 
-目前适用于记录写入日志且无索引、主键、唯一约束、外键、排斥约束或可延迟约束的分区表。独立子表的 `CREATE TABLE ... PARTITION OF`、分区表的 `UPDATE` 以及含分区写入的两阶段提交仍待支持。[插入测试](test-report.md#transactional-partition-insert-20261122) · [删除分区表中的记录](#删除分区表中的记录)
+目前适用于记录写入日志且无索引、主键、唯一约束、外键、排斥约束或可延迟约束的分区表。独立子表的 `CREATE TABLE ... PARTITION OF` 和含分区写入的两阶段提交仍待支持。[插入测试](test-report.md#transactional-partition-insert-20261122) · [修改分区表中的记录](#修改分区表中的记录) · [删除分区表中的记录](#删除分区表中的记录)
 
 ### 插入时如何找空位
 
@@ -1201,6 +1201,21 @@ FROM orders WHERE users.ID = orders.user_id;
 -- RETURNING
 UPDATE users SET AGE = 18 WHERE AGE < 18 RETURNING *;
 ```
+
+### 修改分区表中的记录
+
+已有范围、列表或哈希分区的部分持久表可以执行单表 `UPDATE`。修改分区键后，数据库会把记录移到对应的分区。找不到目标分区时，整条语句回滚并返回 `23514`。假如 `events` 已经按 `bucket` 建好分区，可以用下面的语句修改编号为 7 的记录，并查看修改前后的分区键。
+
+```sql
+UPDATE events SET bucket = 15 WHERE id = 7
+RETURNING OLD.bucket AS previous_bucket, NEW.bucket AS bucket;
+```
+
+`UPDATE ONLY events` 只指定父表，返回零行。更新及移动都可以回滚到保存点。并发写入等待了另一笔更新时，同分区的修改在默认的 `READ COMMITTED` 下会用新值重新检查条件。遇到已提交的跨分区移动会返回 `40001`。
+
+此路径要求记录写入日志，且没有索引、主键、唯一约束、外键、排斥约束、可延迟约束、生成列或身份列。需要应用行级访问规则或相关触发器的表、使用自定义域的表、发布更新、`UPDATE ... FROM` 和含分区写入的 `PREPARE TRANSACTION` 仍有限制。[测试范围](test-report.md#partition-update-20261122)
+
+已有持久分区表上的普通单表 `SELECT ... FOR UPDATE` 会锁定实际分区中的记录。共享行锁 `FOR SHARE` 仍可能放过并发分区写入。[行锁测试](test-report.md#partition-update-20261122)
 
 ### 更新时如何选择写入位置
 
@@ -2210,7 +2225,7 @@ DROP TRIGGER update_modified ON users;
 
 ## 15. 分区表
 
-下面的语句声明父表的分区方式。当前可通过原生接口准备父表管理的数据分区。用 `CREATE TABLE ... PARTITION OF` 定义独立子表，或者用 `ALTER TABLE ... ATTACH PARTITION` 挂载已有表时，数据库会返回 `0A000`。[原生分区示例](../tests/partition_test.cpp) · [向已有分区表写入](#向分区表写入) · [从已有分区表删除记录](#删除分区表中的记录)
+下面的语句声明父表的分区方式。当前可通过原生接口准备父表管理的数据分区。用 `CREATE TABLE ... PARTITION OF` 定义独立子表，或者用 `ALTER TABLE ... ATTACH PARTITION` 挂载已有表时，数据库会返回 `0A000`。[原生分区示例](../tests/partition_test.cpp) · [插入](#向分区表写入) · [更新](#修改分区表中的记录) · [删除](#删除分区表中的记录)
 
 ```sql
 -- RANGE 分区

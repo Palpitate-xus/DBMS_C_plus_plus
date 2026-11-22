@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>改了分区键，记录会移到对应分区 · 2026-11-22</summary>
+
+部分分区表现在可以修改记录。比如把一笔订单的编号从 5 改为 15，数据库会按新编号把它放到对应的分区。提交前可以撤销。
+
+[适用范围和示例](docs/MANUAL.md#修改分区表中的记录) · [测试报告](docs/test-report.md#partition-update-20261122) · [性能报告](docs/performance-report-2026-10-30.md#partition-update-cost-20261122)
+
+</details>
+
+<details>
 <summary>部分分区表现在可以删记录 · 2026-11-22</summary>
 
 可以按条件删除记录、查看删掉了哪些行，也可以在提交前撤销。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>按编号范围查找时，跳过无关分区 · 2026-11-22</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-22 · 按编号范围查找时，跳过无关分区
 
 比如订单按编号分段存放。查找 100 到 199 号订单时，数据库可以跳过肯定没有这些订单的分区。
 
 [使用说明](docs/MANUAL.md#15-分区表) · [测试报告](docs/test-report.md#integer-range-pruning-20261122) · [性能报告](docs/performance-report-2026-10-30.md#integer-range-pruning-cost-20261122)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-22 · 翻到后面的页面时，少读长文本
 

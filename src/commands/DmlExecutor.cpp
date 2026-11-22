@@ -4533,7 +4533,6 @@ boundIntegerHeapEquality(const Expr* where, const TableSchema& table, size_t tar
     if ((isolation != IsolationLevel::READ_COMMITTED && isolation != IsolationLevel::REPEATABLE_READ) ||
         !table.physicalRelationId || table.isUnlogged ||
         table.formatVersion != DATA_FILE_FORMAT_VERSION ||
-        table.partitionType != TableSchema::PartitionType::None ||
         std::any_of(table.cols.begin(), table.cols.end(),
                     [](const Column& field) { return field.generatedKind == 'v'; })) return {};
     const auto* equality = dynamic_cast<const BinaryOpExpr*>(where);
@@ -4799,8 +4798,8 @@ bool executePreparedUpdate(const UpdateStmt& stmt, Session& s, bool& fallback,
         execution.setSourceInputs(row, targetOrdinal, cells,true);
         return row;
     };
-    const StorageEngine::SqlUpdateMatcher matcher = [&](const SqlRow& oldValues) {
-        if (!update->whereClause) return true;
+    StorageEngine::SqlUpdateMatcher matcher;
+    if (update->whereClause) matcher = [&](const SqlRow& oldValues) {
         const auto result = execution.evaluate(update->whereClause.get(), context(oldValues, false));
         if (ExprHelper::canonicalResultTypeName(result.typeName) != "boolean")
             throw DbError("42804", "argument of WHERE must be type boolean");
@@ -4842,18 +4841,28 @@ bool executePreparedUpdate(const UpdateStmt& stmt, Session& s, bool& fallback,
     std::vector<SqlRow> updatedRows;
     std::vector<StorageEngine::UpdateRowImage> images;
     size_t affectedRows = 0;
-    const auto primaryCandidates =
-        boundIntegerPrimaryKeyCandidates(update->whereClause.get(), table, targetOrdinal);
-    if (primaryCandidates.empty())
-        callbacks.integerHeapEquality = boundIntegerHeapEquality(update->whereClause.get(), table, targetOrdinal);
-    const DBStatus status = g_engine.updateRows(
-        s.currentDB, resolvedTable, constantUpdates,
-        primaryCandidates,
-        stmt.returning.empty() ? nullptr : &updatedRows, resolver, matcher,
-        &affectedRows, stmt.returning.empty() ? nullptr : &images,
-        &callbacks, virtualRows.output(), true);
-    if (status != DBStatus::OK)
-        throw DbError(sqlstateForDBStatus(status), "UPDATE failed");
+    // The partition root has no tuples of its own. Keep binding and
+    // RETURNING metadata, but leave all leaves untouched for ONLY.
+    if (!update->only || table.partitionType == TableSchema::PartitionType::None) {
+        auto candidates = boundIntegerPrimaryKeyCandidates(update->whereClause.get(), table, targetOrdinal);
+        if (candidates.empty()) {
+            callbacks.integerHeapEquality = boundIntegerHeapEquality(update->whereClause.get(), table, targetOrdinal);
+            const auto& equality = callbacks.integerHeapEquality;
+            if (table.partitionType == TableSchema::PartitionType::Range && equality &&
+                equality->columnName == table.partitionKey &&
+                std::all_of(table.partitionKey.begin(), table.partitionKey.end(),
+                    [](unsigned char ch) { return std::isalnum(ch) || ch == '_'; })) {
+                candidates.push_back("apicond =" + table.partitionKey + " " + std::to_string(equality->value));
+            }
+        }
+        const DBStatus status = g_engine.updateRows(
+            s.currentDB, resolvedTable, constantUpdates, candidates,
+            stmt.returning.empty() ? nullptr : &updatedRows, resolver, matcher,
+            &affectedRows, stmt.returning.empty() ? nullptr : &images,
+            &callbacks, virtualRows.output(), true);
+        if (status != DBStatus::OK)
+            throw DbError(sqlstateForDBStatus(status), "UPDATE failed");
+    }
     if (!stmt.returning.empty() &&
         !returningExecution.publish(updatedReturningImages(images,&virtualRows), "UPDATE")) return true;
     if (!statementScope.finish()) {
@@ -6822,6 +6831,10 @@ public:
     }
 private:
     DmlResult executeRows(const PreparedChildExecutor& reader) {
+        if (const auto* update = dynamic_cast<const UpdateStmt*>(statement_);
+            update && update->only && table_.partitionType != TableSchema::PartitionType::None) {
+            return result({}, "UPDATE", 0);
+        }
         if (const auto* remove = dynamic_cast<const DeleteStmt*>(statement_);
             remove && remove->only && table_.partitionType != TableSchema::PartitionType::None) {
             // ONLY addresses the partitioned root, which owns no rows.

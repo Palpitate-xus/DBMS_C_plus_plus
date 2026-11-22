@@ -194,8 +194,7 @@ static void test_range_partitioning() {
     assert(rows["3"] == "2030");
 
     // The existing primary-key index does not retain the leaf identity.
-    // UPDATE and indexed DELETE must reject the operation instead of
-    // targeting an unrelated tuple.
+    // Writes using this index must reject the operation before touching a row.
     auto matches = g_engine.query(db, "logs", {"=id 2"}, {});
     assert(matches.size() == 1);
     dbms::PlanContext planContext;
@@ -212,7 +211,7 @@ static void test_range_partitioning() {
     assert(!plan->next(plannedRow));
     plan->close();
     assert(g_engine.update(db, "logs", {{"id", "20"}}, {"=id 2"}) ==
-           dbms::DBStatus::INVALID_VALUE);
+           dbms::DBStatus::FEATURE_NOT_SUPPORTED);
     rows = readRowKeyedById(db, "logs");
     assert(rows["2"] == "2022");
     assert(rows.count("20") == 0);
@@ -1084,6 +1083,237 @@ static void test_transactional_partition_deletes() {
     std::cout << "[PART] Transactional partition deletes OK" << std::endl;
 }
 
+static void test_transactional_partition_updates() {
+    using dbms::DBStatus;
+    using Engine = dbms::StorageEngine;
+    using SqlRow = Engine::SqlRow;
+    using UpdateRowImage = Engine::UpdateRowImage;
+    const std::string db = testDbPath("part_txn_update");
+    const std::string table = "events";
+    const std::string longText = incompressiblePayload(9000);
+    cleanup(db);
+
+    const auto read = [&](Engine& engine) {
+        auto query = engine.prepareBoundQuery(db,
+            "SELECT id, bucket, payload FROM events ORDER BY id");
+        auto result = dbms::QueryPlanner::executePlanWithPrefix(
+            dbms::QueryPlanner::buildPreparedSelectPlan(
+                &engine, db, table, std::move(query)));
+        assert(result.ok && result.structuredRowsAvailable);
+        assert(result.structuredRows.size() == result.structuredNulls.size());
+        std::map<std::string, SqlRow> rows;
+        for (size_t i = 0; i < result.structuredRows.size(); ++i) {
+            const auto& row = result.structuredRows[i];
+            const auto& nulls = result.structuredNulls[i];
+            assert(row.size() == 3 && nulls.size() == 3 && !nulls[0] && !nulls[1]);
+            SqlRow values{{"id", row[0]}, {"bucket", row[1]}};
+            values["payload"] = nulls[2] ? std::nullopt
+                                           : std::optional<std::string>(row[2]);
+            assert(rows.emplace(row[0], std::move(values)).second);
+        }
+        return rows;
+    };
+
+    {
+        Engine writer;
+        assert(writer.createDatabase(db, "utf8") == DBStatus::OK);
+        auto schema = makeSchema(table, {"id int", "bucket int", "payload text"});
+        schema.partitionType = dbms::TableSchema::PartitionType::Range;
+        schema.partitionKey = "bucket";
+        schema.rangePartitions = {{"low", "10"}, {"high", "20"}};
+        assert(writer.createTable(db, schema) == DBStatus::OK);
+        assert(writer.beginTransaction(db) == DBStatus::OK);
+        assert(writer.insertRow(db, table, {{"id", "1"}, {"bucket", "5"},
+                                            {"payload", std::nullopt}}) == DBStatus::OK);
+        assert(writer.insertRow(db, table, {{"id", "2"}, {"bucket", "15"},
+                                            {"payload", ""}}) == DBStatus::OK);
+        assert(writer.insertRow(db, table, {{"id", "3"}, {"bucket", "6"},
+                                            {"payload", longText}}) == DBStatus::OK);
+        assert(writer.insertRow(db, table, {{"id", "4"}, {"bucket", "16"},
+                                            {"payload", "keep"}}) == DBStatus::OK);
+        assert(writer.commitTransaction() == DBStatus::OK);
+
+        const auto localRid = [&](const std::string& leaf, const std::string& id) {
+            int64_t rid = -1;
+            assert(writer.forEachRow(db, table,
+                [&](uint32_t page, uint16_t slot, const char* data, size_t length) {
+                    if (writer.extractColumnValue(std::string(data, length), schema, 0, db) == id)
+                        rid = Engine::encodeRid(page, slot);
+                }, nullptr, {leaf}));
+            assert(rid >= 0);
+            return rid;
+        };
+        assert(localRid("low", "1") == localRid("high", "2"));
+
+        // A concurrent FOR UPDATE NOWAIT must conflict with this UPDATE's
+        // leaf-qualified row lock, while the same local RID in the other
+        // leaf remains independently lockable. No timing or sleeps are
+        // needed: the writer's transaction is held until the reader exits.
+        assert(writer.beginTransaction(db) == DBStatus::OK);
+        size_t lockedUpdateCount = 0;
+        assert(writer.updateRows(db, table, {{"payload", "locked"}}, {"=id 1"},
+            nullptr, {}, {}, &lockedUpdateCount) == DBStatus::OK && lockedUpdateCount == 1);
+        std::exception_ptr readerFailure;
+        std::thread reader([&] {
+            try {
+                assert(writer.beginTransaction(db) == DBStatus::OK);
+                bool conflict = false;
+                try {
+                    (void)writer.query(db, table, {"=id 1"}, {"id"}, {}, true, true);
+                } catch (const dbms::DbError& error) {
+                    conflict = error.sqlState() == "55P03";
+                }
+                assert(conflict);
+                const auto other = writer.query(db, table, {"=id 2"}, {"id"}, {}, true, true);
+                assert((other == std::vector<std::string>{"2 "}));
+                assert(writer.rollbackTransaction() == DBStatus::OK);
+            } catch (...) {
+                readerFailure = std::current_exception();
+                if (writer.inTransaction()) (void)writer.rollbackTransaction();
+            }
+        });
+        reader.join();
+        if (readerFailure) std::rethrow_exception(readerFailure);
+        assert(writer.rollbackTransaction() == DBStatus::OK);
+
+        // One statement sees distinct physical rows whose local RIDs match.
+        // Each assignment and both RETURNING images retain that row's NULL.
+        assert(writer.beginTransaction(db) == DBStatus::OK);
+        assert(writer.savepoint("before_pair") == DBStatus::OK);
+        std::vector<SqlRow> updated;
+        std::vector<UpdateRowImage> images;
+        size_t count = 0;
+        assert(writer.updateRows(db, table, {{"payload", "changed"}}, {}, &updated, {},
+            [](const SqlRow& row) { return row.at("id") == "1" || row.at("id") == "2"; },
+            &count, &images) == DBStatus::OK);
+        assert(count == 2 && updated.size() == 2 && images.size() == 2);
+        std::map<std::string, UpdateRowImage> byId;
+        for (const auto& image : images) {
+            assert(image.oldRow.at("id").has_value());
+            assert(byId.emplace(*image.oldRow.at("id"), image).second);
+            assert(image.newRow.at("id") == image.oldRow.at("id"));
+            assert(image.newRow.at("payload") == "changed");
+        }
+        assert(byId.size() == 2 && !byId.at("1").oldRow.at("payload").has_value());
+        assert(byId.at("2").oldRow.at("payload") == "");
+        auto rows = read(writer);
+        assert(rows.size() == 4 && rows.at("1").at("payload") == "changed" &&
+               rows.at("2").at("payload") == "changed" &&
+               rows.at("3").at("payload") == longText && rows.at("4").at("payload") == "keep");
+        assert(writer.rollbackToSavepoint("before_pair") == DBStatus::OK);
+        rows = read(writer);
+        assert(!rows.at("1").at("payload").has_value() && rows.at("2").at("payload") == "");
+        assert(writer.commitTransaction() == DBStatus::OK);
+
+        // The new range key 7 is still in the original low leaf. Verify OLD
+        // and NEW separately, then roll back a second update to a savepoint.
+        assert(writer.beginTransaction(db) == DBStatus::OK);
+        updated.clear(); images.clear(); count = 0;
+        assert(writer.updateRows(db, table, {{"bucket", "7"}, {"payload", longText}},
+            {"=id 1"}, &updated, {}, {}, &count, &images) == DBStatus::OK);
+        assert(count == 1 && updated.size() == 1 && images.size() == 1);
+        assert(images[0].oldRow.at("bucket") == "5" &&
+               !images[0].oldRow.at("payload").has_value());
+        assert(images[0].newRow.at("bucket") == "7" &&
+               images[0].newRow.at("payload") == longText);
+        assert(updated[0] == images[0].newRow);
+        assert(writer.savepoint("keep_first") == DBStatus::OK);
+        updated.clear(); images.clear(); count = 0;
+        assert(writer.updateRows(db, table, {{"payload", std::nullopt}},
+            {"=id 3"}, &updated, {}, {}, &count, &images) == DBStatus::OK);
+        assert(count == 1 && images.size() == 1 && images[0].oldRow.at("payload") == longText &&
+               !images[0].newRow.at("payload").has_value());
+        assert(writer.rollbackToSavepoint("keep_first") == DBStatus::OK);
+        rows = read(writer);
+        assert(rows.at("1").at("bucket") == "7" && rows.at("1").at("payload") == longText &&
+               rows.at("3").at("payload") == longText);
+        assert(writer.commitTransaction() == DBStatus::OK);
+
+        const auto leafHasId = [&](const std::string& leaf, const std::string& id) {
+            bool found = false;
+            assert(writer.forEachRow(db, table,
+                [&](uint32_t, uint16_t, const char* data, size_t length) {
+                    found = found || writer.extractColumnValue(
+                        std::string(data, length), schema, 0, db) == id;
+                }, nullptr, {leaf}));
+            return found;
+        };
+        // A change from 15 to 8 physically moves the row from high to low.
+        // Rolling it back restores both the source and destination views.
+        assert(writer.beginTransaction(db) == DBStatus::OK);
+        assert(writer.savepoint("before_move") == DBStatus::OK);
+        const auto moveToLow = [&]() {
+            updated.clear(); images.clear(); count = 0;
+            assert(writer.updateRows(db, table, {{"bucket", "8"}, {"payload", "moved"}},
+                {"=id 2"}, &updated, {}, {}, &count, &images) == DBStatus::OK);
+            assert(count == 1 && updated.size() == 1 && images.size() == 1);
+            assert(images[0].oldRow.at("bucket") == "15" &&
+                   images[0].oldRow.at("payload") == "");
+            assert(images[0].newRow.at("bucket") == "8" &&
+                   images[0].newRow.at("payload") == "moved");
+            assert(updated[0] == images[0].newRow);
+            assert(leafHasId("low", "2") && !leafHasId("high", "2"));
+        };
+        moveToLow();
+        assert(writer.rollbackToSavepoint("before_move") == DBStatus::OK);
+        assert(!leafHasId("low", "2") && leafHasId("high", "2"));
+        assert(read(writer).at("2").at("payload") == "");
+        moveToLow();
+        assert(writer.commitTransaction() == DBStatus::OK);
+
+        // No RANGE destination accepts 99. The failing multi-row statement
+        // must restore every earlier row and output container while keeping
+        // the successful UPDATE that preceded it in the transaction.
+        assert(writer.beginTransaction(db) == DBStatus::OK);
+        count = 0;
+        assert(writer.updateRows(db, table, {{"payload", "prior"}},
+            {"=id 4"}, nullptr, {}, {}, &count) == DBStatus::OK && count == 1);
+        const auto beforeFailure = read(writer);
+        updated = {SqlRow{{"sentinel", "unchanged"}}};
+        images = {UpdateRowImage{SqlRow{{"sentinel", "old"}}, SqlRow{{"sentinel", "new"}}}};
+        count = 99;
+        const auto destinationById = [](const SqlRow& old, SqlRow& values) {
+            values["bucket"] = old.at("id") == "1" ? "7" : "99";
+            return true;
+        };
+        const auto firstTwo = [](const SqlRow& row) {
+            return row.at("id") == "1" || row.at("id") == "2";
+        };
+        assert(writer.updateRows(db, table, {}, {}, &updated, destinationById,
+                                 firstTwo, &count, &images) == DBStatus::CHECK_VIOLATION);
+        assert(count == 0 && updated.size() == 1 && updated[0].at("sentinel") == "unchanged");
+        assert(images.size() == 1 && images[0].oldRow.at("sentinel") == "old" &&
+               images[0].newRow.at("sentinel") == "new");
+        assert(read(writer) == beforeFailure);
+        assert(writer.commitTransaction() == DBStatus::OK);
+
+        // An own INSERT updated later must still be undone completely when
+        // the transaction rolls back.
+        assert(writer.beginTransaction(db) == DBStatus::OK);
+        assert(writer.insertRow(db, table, {{"id", "5"}, {"bucket", "15"},
+                                            {"payload", "own"}}) == DBStatus::OK);
+        count = 0;
+        assert(writer.updateRows(db, table, {{"payload", "changed own"}},
+            {"=id 5"}, nullptr, {}, {}, &count) == DBStatus::OK && count == 1);
+        assert(read(writer).at("5").at("payload") == "changed own");
+        assert(writer.rollbackTransaction() == DBStatus::OK);
+        assert(!read(writer).count("5"));
+    }
+
+    {
+        Engine reopened;
+        const auto rows = read(reopened);
+        assert(rows.size() == 4 && rows.at("1").at("bucket") == "7" &&
+               rows.at("1").at("payload") == longText &&
+               rows.at("2").at("bucket") == "8" &&
+               rows.at("2").at("payload") == "moved" &&
+               rows.at("3").at("payload") == longText &&
+               rows.at("4").at("payload") == "prior");
+    }
+    cleanup(db);
+    std::cout << "[PART] Transactional partition updates OK" << std::endl;
+}
+
 static void test_partition_scan_uses_leaf_nulls() {
     using dbms::DBStatus;
     const std::string db = testDbPath("part_scan_nulls");
@@ -1409,6 +1639,7 @@ int main() {
     test_partition_wal_routing();
     test_transactional_partition_inserts();
     test_transactional_partition_deletes();
+    test_transactional_partition_updates();
     test_partition_scan_uses_leaf_nulls();
     test_partition_sort_reads_long_values_for_output_rows();
     test_analyze_partition_progress();

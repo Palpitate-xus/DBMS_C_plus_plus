@@ -30637,6 +30637,15 @@ DBStatus StorageEngine::insertRow(const std::string& dbname,
     }
 }
 
+static bool hasUnsupportedPartitionInsertConstraints(const TableSchema& table) {
+    return table.hasPrimaryKey() || !table.uniqueConstraints.empty() || !table.fks.empty() ||
+        std::any_of(table.cols.begin(), table.cols.end(), [](const Column& column) {
+            return column.isUnique || column.deferrable;
+        }) ||
+        std::any_of(table.additionalCheckConstraints.begin(), table.additionalCheckConstraints.end(),
+            [](const CheckConstraint& check) { return check.deferrable; });
+}
+
 DBStatus StorageEngine::insertInternal(
                                 const std::string& dbname,
                                 const std::string& tablename,
@@ -30646,9 +30655,10 @@ DBStatus StorageEngine::insertInternal(
                                 IdentityOverride identityOverride,
                                 OwningMutationRows* owningRows, bool deferVirtualInputs,
                                 SqlRow* conflictingRow,
-                                const OwningSqlRow* arrayDomainInputs) {
+                                const OwningSqlRow* arrayDomainInputs,
+                                PartitionReplacement* replacement) {
     noteTemporaryRelationAccess(dbname, tablename);
-    if (transactionContext().inTransaction && dbname == transactionContext().txnDB) {
+    if (!replacement && transactionContext().inTransaction && dbname == transactionContext().txnDB) {
         if ((transactionContext().txnIsolationLevel == IsolationLevel::READ_COMMITTED ||
              transactionContext().txnIsolationLevel == IsolationLevel::READ_UNCOMMITTED) &&
             !transactionContext().readView.commandIdVisibility) {
@@ -30662,38 +30672,43 @@ DBStatus StorageEngine::insertInternal(
         !isSessionTemporaryRelation(tablename)) {
         return DBStatus::INVALID_VALUE;
     }
-    if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
+    if (!replacement && !tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     // Intention lock instead of a full table X lock: concurrent inserts into
     // different pages (and readers) proceed in parallel. Physical page state
     // is guarded by the per-page exclusive locks below plus the allocator /
     // FSM / VM internal mutexes, mirroring how UPDATE already sequences.
-    if (!lockManager_.lockIntentExclusive(tablename)) return DBStatus::LOCK_CONFLICT;
+    if (!replacement && !lockManager_.lockIntentExclusive(tablename)) return DBStatus::LOCK_CONFLICT;
 
-    TableSchema tbl;
+    // Partition UPDATE already owns the intent lock and read view.
+    const auto unlockTable = [&] {
+        if (!replacement) lockManager_.unlock(tablename);
+    };
+    TableSchema loaded;
+    const TableSchema& tbl = replacement ? replacement->table : loaded;
     DatumMetadataContextPtr generatedMetadata;
     try {
-        tbl = getTableSchema(dbname, tablename);
+        if (!replacement) loaded = getTableSchema(dbname, tablename);
         generatedMetadata=freezeGeneratedStorageInput(tbl,dbname,tablename,this);
-    } catch (...) { lockManager_.unlock(tablename); throw; }
+    } catch (...) { unlockTable(); throw; }
 
     const auto heapRowWidth = heapHeaderRowWidth(tbl);
     if (!heapRowWidth) {
-        lockManager_.unlock(tablename);
+        unlockTable();
         return DBStatus::INVALID_VALUE;
     }
     bool captureLogicalInsert = false;
     try {
-        captureLogicalInsert = !tbl.isUnlogged && PublicationCatalog::instance().publishes(
+        captureLogicalInsert = !replacement && !tbl.isUnlogged && PublicationCatalog::instance().publishes(
             dbname, tablename, LogicalChange::Op::Insert);
     } catch (const DbError& error) {
         if (error.sqlState() != "58030") throw;
-        lockManager_.unlock(tablename);
+        unlockTable();
         return DBStatus::IO_ERROR;
     }
-    const auto secondaryIndexMetadata =
-        getIndexMetadata(dbname, tablename);
-    const auto compositeIndexMetadata =
-        getCompositeIndexes(dbname, tablename);
+    const auto secondaryIndexMetadata = replacement
+        ? std::vector<IndexMetadata>{} : getIndexMetadata(dbname, tablename);
+    const auto compositeIndexMetadata = replacement
+        ? std::vector<CompositeIndexInfo>{} : getCompositeIndexes(dbname, tablename);
     std::vector<bool> domainRequired(tbl.len(), false);
     StoredArrayDomainChecks arrayDomainChecks;
     try {
@@ -30706,13 +30721,13 @@ DBStatus StorageEngine::insertInternal(
             arrayDomainChecks.add(i, column, domain, dbname, tablename, this, generatedMetadata);
         }
     } catch (...) {
-        lockManager_.unlock(tablename);
+        unlockTable();
         throw;
     }
     const bool partitionTxn = tbl.partitionType != TableSchema::PartitionType::None &&
         transactionContext().inTransaction &&
         dbname == transactionContext().txnDB;
-    if (partitionTxn) {
+    if (partitionTxn && !replacement) {
         // Persisted index RIDs and deferred-constraint entries still carry
         // only page/slot. Two different leaves can use the same RID.
         bool specialized = false;
@@ -30721,23 +30736,18 @@ DBStatus StorageEngine::insertInternal(
         if (tbl.physicalRelationId == 0 || tbl.isTemporary || tbl.isUnlogged ||
             isSessionTempPhysicalName(tablename) ||
             !transactionContext().txnBackupPath.empty() ||
-            tbl.hasPrimaryKey() || !tbl.uniqueConstraints.empty() || !tbl.fks.empty() ||
-            std::any_of(tbl.cols.begin(), tbl.cols.end(), [](const Column& column) {
-                return column.isUnique || column.deferrable;
-            }) ||
-            std::any_of(tbl.additionalCheckConstraints.begin(), tbl.additionalCheckConstraints.end(),
-                [](const CheckConstraint& check) { return check.deferrable; }) ||
+            hasUnsupportedPartitionInsertConstraints(tbl) ||
             !secondaryIndexMetadata.empty() || !compositeIndexMetadata.empty() ||
             !getHashIndexedColumns(dbname, tablename).empty() ||
             !getBloomIndexedColumns(dbname, tablename).empty() ||
             !getExclusionConstraints(dbname, tablename).empty() || specialized) {
-            lockManager_.unlock(tablename);
+            unlockTable();
             return DBStatus::FEATURE_NOT_SUPPORTED;
         }
     }
     std::vector<Trigger> operationTriggers;
-    if (triggerExecutor_ && !tryGetAllTriggers(dbname, operationTriggers)) {
-        lockManager_.unlock(tablename);
+    if (!replacement && triggerExecutor_ && !tryGetAllTriggers(dbname, operationTriggers)) {
+        unlockTable();
         return DBStatus::CORRUPTED_DATA;
     }
 
@@ -30769,7 +30779,7 @@ DBStatus StorageEngine::insertInternal(
             actualNullColumns.erase(col.dataName);
         } else if (col.identityKind == 'a' && supplied &&
                    identityOverride != IdentityOverride::System) {
-            lockManager_.unlock(tablename);
+            unlockTable();
             return DBStatus::INVALID_VALUE;
         }
     }
@@ -30781,7 +30791,7 @@ DBStatus StorageEngine::insertInternal(
         const Column& col = tbl.cols[i];
         if (!col.generatedExpr.empty() &&
             values.find(col.dataName) != values.end()) {
-            lockManager_.unlock(tablename);
+            unlockTable();
             return DBStatus::INVALID_VALUE;
         }
     }
@@ -30838,7 +30848,7 @@ DBStatus StorageEngine::insertInternal(
                     actualNullColumns.erase(col.dataName);
                 }
             } catch (...) {
-                lockManager_.unlock(tablename);
+                unlockTable();
                 throw;
             }
         }
@@ -30866,7 +30876,7 @@ DBStatus StorageEngine::insertInternal(
     // prior writer silently turned malformed input into (0,0), and its
     // default stream precision could make distinct coordinates share a key.
     if (!normalizePointColumns(tbl, actualValues, &actualNullColumns)) {
-        lockManager_.unlock(tablename);
+        unlockTable();
         return DBStatus::INVALID_VALUE;
     }
     // Uniqueness must be checked against the final NEW row, after BEFORE
@@ -31180,14 +31190,14 @@ DBStatus StorageEngine::insertInternal(
                 !(isNullMarker && nullColumns.count(col.dataName) && values.count(col.dataName) &&
                   arrayDomainChecks.retainsNullAssignment(i, col.dataName, it->second, convertedDomains)));
             if (required) {
-                lockManager_.unlock(tablename);
+                unlockTable();
                 return DBStatus::NULL_NOT_ALLOWED;
             }
         }
         const bool arrayDomain = col.isArray && !col.domainName.empty();
         if (hasValue && !isNullMarker && val.empty() &&
             !arrayDomain && !columnAcceptsEmptyValue(col)) {
-            lockManager_.unlock(tablename);
+            unlockTable();
             return DBStatus::INVALID_VALUE;
         }
         // The NULL marker encodes SQL NULL; type validations below must not
@@ -31200,7 +31210,7 @@ DBStatus StorageEngine::insertInternal(
                     val, col.isArray, catalog, currentSession(), col.dataType);
                 val = actualValues[col.dataName];
             } catch (...) {
-                lockManager_.unlock(tablename);
+                unlockTable();
                 throw;
             }
             // Reference input is complete; arithmetic/array casts must not
@@ -31213,7 +31223,7 @@ DBStatus StorageEngine::insertInternal(
             try {
                 actualValues[col.dataName] = arrayDomainChecks.convertBaseInput(i, val, dbname, this);
             } catch (...) {
-                lockManager_.unlock(tablename);
+                unlockTable();
                 throw;
             }
             continue;
@@ -31224,7 +31234,7 @@ DBStatus StorageEngine::insertInternal(
             if (!val.empty()) {
                 std::string canonical;
                 if (!(col.dataType == "interval" || col.dataType == "numeric" ? normalizeModifiedColumn(col, val, canonical) : normalizeArray(val, col.dataType, canonical))) {
-                    lockManager_.unlock(tablename);
+                    unlockTable();
                     return DBStatus::INVALID_VALUE;
                 }
                 actualValues[col.dataName] = std::move(canonical);
@@ -31235,7 +31245,7 @@ DBStatus StorageEngine::insertInternal(
             if (!val.empty()) {
                 std::string canonical;
                 if (!normalizeTemporalColumn(col, val, canonical)) {
-                    lockManager_.unlock(tablename);
+                    unlockTable();
                     return DBStatus::INVALID_VALUE;
                 }
                 actualValues[col.dataName] = std::move(canonical);
@@ -31245,28 +31255,28 @@ DBStatus StorageEngine::insertInternal(
         if (!col.isVariableLength && col.dataType == "date" && !val.empty()) {
             Date d(val.c_str());
             if (d.year == 0) {
-                lockManager_.unlock(tablename);
+                unlockTable();
                 return DBStatus::INVALID_VALUE;
             }
         }
         if (!col.isVariableLength && (col.dataType == "timestamp" || col.dataType == "timestamptz" || col.dataType == "datetime") && !val.empty()) {
             int64_t ts = parseTimestampToSeconds(val);
             if (ts == 0) {
-                lockManager_.unlock(tablename);
+                unlockTable();
                 return DBStatus::INVALID_VALUE;
             }
         }
         if (!col.isVariableLength && col.dataType == "time" && !val.empty()) {
             int32_t ts = parseTimeToSeconds(val);
             if (ts < 0) {
-                lockManager_.unlock(tablename);
+                unlockTable();
                 return DBStatus::INVALID_VALUE;
             }
         }
         if (!col.isVariableLength && col.dataType == "float" && !val.empty()) {
             float parsed = 0.0f;
             if (!parseFloatLiteral(val, parsed)) {
-                lockManager_.unlock(tablename);
+                unlockTable();
                 return DBStatus::INVALID_VALUE;
             }
             actualValues[col.dataName] = formatFloatingValue(parsed);
@@ -31275,21 +31285,21 @@ DBStatus StorageEngine::insertInternal(
             int64_t minorUnits = 0;
             std::string canonical;
             if (!parseMoneyLiteral(val, minorUnits, &canonical)) {
-                lockManager_.unlock(tablename);
+                unlockTable();
                 return DBStatus::INVALID_VALUE;
             }
             actualValues[col.dataName] = canonical;
         } else if (col.dataType == "numeric" && !val.empty()) {
             std::string canonical;
             if (!normalizeModifiedColumn(col, val, canonical)) {
-                lockManager_.unlock(tablename);
+                unlockTable();
                 return DBStatus::INVALID_VALUE;
             }
             actualValues[col.dataName] = std::move(canonical);
         } else if (!col.isVariableLength && (col.dataType == "double" || col.dataType == "decimal") && !val.empty()) {
             double parsed = 0.0;
             if (!parseDoubleLiteral(val, parsed)) {
-                lockManager_.unlock(tablename);
+                unlockTable();
                 return DBStatus::INVALID_VALUE;
             }
             actualValues[col.dataName] = formatFloatingValue(parsed);
@@ -31297,7 +31307,7 @@ DBStatus StorageEngine::insertInternal(
         if (!col.isVariableLength && col.dataType == "boolean" && !val.empty()) {
             const auto parsed = parsePostgresBoolean(val);
             if (!parsed) {
-                lockManager_.unlock(tablename);
+                unlockTable();
                 return DBStatus::INVALID_VALUE;
             }
             actualValues[col.dataName] = postgresBooleanOutput(*parsed);
@@ -31306,7 +31316,7 @@ DBStatus StorageEngine::insertInternal(
             int n = (col.dataType == "macaddr8") ? 8 : 6;
             uint8_t bytes[8];
             if (!normalizeMacAddr(val, n, bytes)) {
-                lockManager_.unlock(tablename);
+                unlockTable();
                 return DBStatus::INVALID_VALUE;
             }
         }
@@ -31315,7 +31325,7 @@ DBStatus StorageEngine::insertInternal(
         if ((col.dataType == "bit" || col.dataType == "bit varying") && !val.empty()) {
             std::string canon;
             if (!normalizeBitString(val, col.dataType, col.dsize, canon)) {
-                lockManager_.unlock(tablename);
+                unlockTable();
                 return DBStatus::INVALID_VALUE;
             }
             actualValues[col.dataName] = canon;
@@ -31325,7 +31335,7 @@ DBStatus StorageEngine::insertInternal(
         if (isGeometricTextType(col.dataType) && !val.empty()) {
             std::string canon;
             if (!normalizeGeometry(val, col.dataType, canon)) {
-                lockManager_.unlock(tablename);
+                unlockTable();
                 return DBStatus::INVALID_VALUE;
             }
             actualValues[col.dataName] = canon;
@@ -31334,7 +31344,7 @@ DBStatus StorageEngine::insertInternal(
         if (col.dataType == "uuid" && !val.empty()) {
             std::string canon;
             if (!normalizeUuid(val, canon)) {
-                lockManager_.unlock(tablename);
+                unlockTable();
                 return DBStatus::INVALID_VALUE;
             }
             actualValues[col.dataName] = canon;
@@ -31343,7 +31353,7 @@ DBStatus StorageEngine::insertInternal(
         if (col.dataType == "blob" && !val.empty()) {
             std::string canon;
             if (!normalizeBytea(val, canon)) {
-                lockManager_.unlock(tablename);
+                unlockTable();
                 return DBStatus::INVALID_VALUE;
             }
             actualValues[col.dataName] = canon;
@@ -31353,7 +31363,7 @@ DBStatus StorageEngine::insertInternal(
             uint8_t family = 0, prefix = 0, addr[16];
             if (!parseInetAddr(val, family, prefix, addr,
                                col.dataType == "cidr")) {
-                lockManager_.unlock(tablename);
+                unlockTable();
                 return DBStatus::INVALID_VALUE;
             }
         }
@@ -31362,7 +31372,7 @@ DBStatus StorageEngine::insertInternal(
         if (isRangeType(col.dataType) && !val.empty()) {
             std::string canon;
             if (!normalizeRange(val, col.dataType, canon)) {
-                lockManager_.unlock(tablename);
+                unlockTable();
                 return DBStatus::INVALID_VALUE;
             }
             actualValues[col.dataName] = canon;
@@ -31372,7 +31382,7 @@ DBStatus StorageEngine::insertInternal(
         if (col.isArray && !val.empty()) {
             std::string canon;
             if (!(col.dataType == "interval" || col.dataType == "numeric" ? normalizeModifiedColumn(col, val, canon) : normalizeArray(val, col.dataType, canon))) {
-                lockManager_.unlock(tablename);
+                unlockTable();
                 return DBStatus::INVALID_VALUE;
             }
             actualValues[col.dataName] = canon;
@@ -31380,7 +31390,7 @@ DBStatus StorageEngine::insertInternal(
         // Validate XML well-formedness (stored verbatim, no canonicalization).
         if (col.dataType == "xml" && !col.isArray) {
             if (!validateXml(val, XmlParseMode::Content).ok) {
-                lockManager_.unlock(tablename);
+                unlockTable();
                 return DBStatus::INVALID_VALUE;
             }
         }
@@ -31388,21 +31398,21 @@ DBStatus StorageEngine::insertInternal(
         if (col.dataType == "tsvector" && !col.isArray && !val.empty()) {
             std::string canon;
             if (!normalizeTsVectorImpl(val, canon)) {
-                lockManager_.unlock(tablename);
+                unlockTable();
                 return DBStatus::INVALID_VALUE;
             }
             actualValues[col.dataName] = canon;
         }
         if (col.dataType == "tsquery" && !col.isArray && !val.empty()) {
             if (!isValidTsQuery(val)) {
-                lockManager_.unlock(tablename);
+                unlockTable();
                 return DBStatus::INVALID_VALUE;
             }
         }
         // Validate jsonpath structure (stored verbatim).
         if (col.dataType == "jsonpath" && !col.isArray && !val.empty()) {
             if (!isValidJsonPath(val)) {
-                lockManager_.unlock(tablename);
+                unlockTable();
                 return DBStatus::INVALID_VALUE;
             }
         }
@@ -31410,7 +31420,7 @@ DBStatus StorageEngine::insertInternal(
         if (col.dataType == "interval" && !col.isArray && !val.empty()) {
             std::string canon;
             if (!normalizeModifiedColumn(col, val, canon)) {
-                lockManager_.unlock(tablename);
+                unlockTable();
                 return DBStatus::INVALID_VALUE;
             }
             actualValues[col.dataName] = canon;
@@ -31423,7 +31433,7 @@ DBStatus StorageEngine::insertInternal(
             if (!ct.name.empty()) {
                 std::string canon;
                 if (!normalizeComposite(val, ct, canon)) {
-                    lockManager_.unlock(tablename);
+                    unlockTable();
                     return DBStatus::INVALID_VALUE;
                 }
                 actualValues[col.dataName] = canon;
@@ -31432,7 +31442,7 @@ DBStatus StorageEngine::insertInternal(
         // Validate JSON / JSONB columns
         if ((col.dataType == "json" || col.dataType == "jsonb") && !val.empty()) {
             if (!isValidJson(val, col.dataType == "jsonb")) {
-                lockManager_.unlock(tablename);
+                unlockTable();
                 return DBStatus::INVALID_VALUE;
             }
         }
@@ -31443,7 +31453,7 @@ DBStatus StorageEngine::insertInternal(
                 if (label == val) { valid = true; break; }
             }
             if (!valid) {
-                lockManager_.unlock(tablename);
+                unlockTable();
                 return DBStatus::INVALID_VALUE;
             }
         }
@@ -31451,7 +31461,7 @@ DBStatus StorageEngine::insertInternal(
             const auto num = parseStoredInteger(val);
             if (!num || !integerValueFitsColumn(col, *num) ||
                 (*num == INF && col.isNull && !usesHeapTupleHeader(tbl.formatVersion))) {
-                lockManager_.unlock(tablename);
+                unlockTable();
                 return DBStatus::INVALID_VALUE;
             }
         }
@@ -31466,11 +31476,11 @@ DBStatus StorageEngine::insertInternal(
     const DBStatus characterWidthStatus =
         normalizeCharacterColumnWidths(tbl, actualValues, &actualNullColumns);
     if (characterWidthStatus != DBStatus::OK) {
-        lockManager_.unlock(tablename);
+        unlockTable();
         return characterWidthStatus;
     }
     if (!variableColumnWidthsValid(tbl, actualValues, &actualNullColumns)) {
-        lockManager_.unlock(tablename);
+        unlockTable();
         return DBStatus::INVALID_VALUE;
     }
 
@@ -31526,7 +31536,7 @@ DBStatus StorageEngine::insertInternal(
                               "INSERT", trg.tableName,
                               trg.forEachRow, &actualValues, nullptr, &tbl);
             if (triggerExecutor_(action)) {
-                lockManager_.unlock(tablename);
+                unlockTable();
                 return DBStatus::IO_ERROR;
             }
             // Parse only the storage layer's explicit row-assignment syntax.
@@ -31540,7 +31550,7 @@ DBStatus StorageEngine::insertInternal(
                     if (!evalTriggerRowAssignment(*this, dbname, tbl,
                             assignment.expression, actualValues,
                             actualNullColumns, nullptr, nullptr, val, evaluatedNull)) {
-                        lockManager_.unlock(tablename);
+                        unlockTable();
                         return DBStatus::INVALID_VALUE;
                     }
                     for (size_t i = 0; i < tbl.len(); ++i) {
@@ -31587,7 +31597,7 @@ DBStatus StorageEngine::insertInternal(
         if (!evalExpressionSqlValue(col.generatedExpr, actualValues,
                                     typeHints, dbname, computed,
                                     computedNull, nullptr, this, stored_regtype_detail::scalarType(col.dataType), &tbl)) {
-            lockManager_.unlock(tablename);
+            unlockTable();
             return DBStatus::INVALID_VALUE;
         }
         actualValues[col.dataName] = computed;
@@ -31599,7 +31609,7 @@ DBStatus StorageEngine::insertInternal(
     for(size_t i=0;i<tbl.len();++i)if(tbl.cols[i].generatedKind=='v' && (!tbl.cols[i].isNull || domainRequired[i])) {
         ExprValue value;
         try {value=generatedValueFromMap(tbl,i,actualValues,actualNullColumns,dbname,this,generatedMetadata.get());}
-        catch(...){lockManager_.unlock(tablename);throw;}
+        catch(...){unlockTable();throw;}
         actualValues[tbl.cols[i].dataName]=value.isNull?std::string{}:stored_regtype_detail::storageText(value);
         if(value.isNull)actualNullColumns.insert(tbl.cols[i].dataName);else actualNullColumns.erase(tbl.cols[i].dataName);
     }
@@ -31609,17 +31619,17 @@ DBStatus StorageEngine::insertInternal(
     // BEFORE triggers and generated expressions can replace POINT values
     // after the initial input pass; validate their final row image too.
     if (!normalizePointColumns(tbl, actualValues, &actualNullColumns)) {
-        lockManager_.unlock(tablename);
+        unlockTable();
         return DBStatus::INVALID_VALUE;
     }
     const DBStatus finalCharacterWidthStatus =
         normalizeCharacterColumnWidths(tbl, actualValues, &actualNullColumns);
     if (finalCharacterWidthStatus != DBStatus::OK) {
-        lockManager_.unlock(tablename);
+        unlockTable();
         return finalCharacterWidthStatus;
     }
     if (!variableColumnWidthsValid(tbl, actualValues, &actualNullColumns)) {
-        lockManager_.unlock(tablename);
+        unlockTable();
         return DBStatus::INVALID_VALUE;
     }
 
@@ -31627,7 +31637,7 @@ DBStatus StorageEngine::insertInternal(
         arrayDomainChecks.validate(tbl, actualValues, actualNullColumns,
             dbname, this, nullptr, &convertedDomains);
     } catch (...) {
-        lockManager_.unlock(tablename);
+        unlockTable();
         throw;
     }
 
@@ -31647,7 +31657,7 @@ DBStatus StorageEngine::insertInternal(
                         ? SqlCell{} : SqlCell{found->second};
             }
         }
-        lockManager_.unlock(tablename);
+        unlockTable();
         return uniqueStatus;
     }
 
@@ -31655,7 +31665,7 @@ DBStatus StorageEngine::insertInternal(
     // BEFORE-trigger changes, matching the final row that will be written.
     if (!rowPassesRLS(this, dbname, tablename, tbl, "INSERT", actualValues,
                       typeHints, true)) {
-        lockManager_.unlock(tablename);
+        unlockTable();
         return DBStatus::INVALID_VALUE;
     }
 
@@ -31667,7 +31677,7 @@ DBStatus StorageEngine::insertInternal(
         EvaluatedIndexEntry entry;
         if (!secondaryIndexEntry(
                 metadata, tbl, actualValues, dbname, entry, this)) {
-            lockManager_.unlock(tablename);
+            unlockTable();
             return DBStatus::CORRUPTED_DATA;
         }
         secondaryIndexValues.push_back(std::move(entry));
@@ -31677,7 +31687,7 @@ DBStatus StorageEngine::insertInternal(
         EvaluatedIndexEntry entry;
         if (!compositeIndexEntry(
                 metadata, tbl, actualValues, dbname, entry, this)) {
-            lockManager_.unlock(tablename);
+            unlockTable();
             return DBStatus::CORRUPTED_DATA;
         }
         compositeIndexValues.push_back(std::move(entry));
@@ -31699,9 +31709,9 @@ DBStatus StorageEngine::insertInternal(
         std::string err;
         bool accepted;
         try {accepted=generatedCheckInput(col.checkExpr,tbl,actualValues,actualNullColumns,typeHints,dbname,this,&err,generatedMetadata.get());}
-        catch(...){lockManager_.unlock(tablename);throw;}
+        catch(...){unlockTable();throw;}
         if (!accepted) {
-            lockManager_.unlock(tablename);
+            unlockTable();
             return err.empty() ? DBStatus::CHECK_VIOLATION
                                : DBStatus::INVALID_VALUE;
         }
@@ -31719,9 +31729,9 @@ DBStatus StorageEngine::insertInternal(
         std::string err;
         bool accepted;
         try {accepted=generatedCheckInput(check.expression,tbl,actualValues,actualNullColumns,typeHints,dbname,this,&err,generatedMetadata.get());}
-        catch(...){lockManager_.unlock(tablename);throw;}
+        catch(...){unlockTable();throw;}
         if (!accepted) {
-            lockManager_.unlock(tablename);
+            unlockTable();
             return err.empty() ? DBStatus::CHECK_VIOLATION
                                : DBStatus::INVALID_VALUE;
         }
@@ -31730,14 +31740,15 @@ DBStatus StorageEngine::insertInternal(
     // Check EXCLUDE constraints before writing.  DEFERRABLE EXCLUDE
     // constraints currently deferred skip the immediate scan and queue a
     // commit-time re-check instead.
-    const auto excludeConstraints = getExclusionConstraints(dbname, tablename);
+    const auto excludeConstraints = replacement
+        ? std::vector<ExclusionConstraint>{} : getExclusionConstraints(dbname, tablename);
     std::vector<const ExclusionConstraint*> deferredExcludes;
 
     // Check gap lock conflict (if any transaction holds a gap lock covering PK)
     if (tbl.hasPrimaryKey()) {
         std::string pkVal = tbl.buildPKValue(actualValues);
         if (!pkVal.empty() && lockManager_.isGapLocked(tablename, pkVal)) {
-            lockManager_.unlock(tablename);
+            unlockTable();
             return DBStatus::LOCK_CONFLICT;
         }
     }
@@ -31772,13 +31783,13 @@ DBStatus StorageEngine::insertInternal(
             continue;
         }
         if (!tableExists(dbname, fk.refTable)) {
-            lockManager_.unlock(tablename);
+            unlockTable();
             return DBStatus::TABLE_NOT_FOUND;
         }
         TableSchema refTbl = getTableSchema(dbname, fk.refTable);
         if (fk.colNames.empty() ||
             fk.colNames.size() != fk.refCols.size()) {
-            lockManager_.unlock(tablename);
+            unlockTable();
             return DBStatus::CORRUPTED_DATA;
         }
 
@@ -31793,7 +31804,7 @@ DBStatus StorageEngine::insertInternal(
                 }
             }
             if (referencedColumn >= refTbl.len()) {
-                lockManager_.unlock(tablename);
+                unlockTable();
                 return DBStatus::CORRUPTED_DATA;
             }
             referencedColumns.push_back(referencedColumn);
@@ -31842,7 +31853,7 @@ DBStatus StorageEngine::insertInternal(
             // UNIQUE non-PK column, in which case the PK index is unrelated.
             BPTree* refIdx = getPKIndex(dbname, fk.refTable);
             if (!refIdx) {
-                lockManager_.unlock(tablename);
+                unlockTable();
                 return DBStatus::IO_ERROR;
             }
             std::map<std::string, std::string> referencedKeyValues;
@@ -31852,11 +31863,11 @@ DBStatus StorageEngine::insertInternal(
             const auto lookup = refIdx->searchChecked(
                 refTbl.buildPKValue(referencedKeyValues), referencedRid);
             if (lookup == BPTree::SearchResult::Error) {
-                lockManager_.unlock(tablename);
+                unlockTable();
                 return DBStatus::IO_ERROR;
             }
             if (lookup == BPTree::SearchResult::NotFound) {
-                lockManager_.unlock(tablename);
+                unlockTable();
                 return DBStatus::FOREIGN_KEY_VIOLATION;
             }
             // A physical B+Tree key is a 20-byte prefix, not proof of SQL
@@ -31868,14 +31879,14 @@ DBStatus StorageEngine::insertInternal(
                 ? &context.readView : nullptr;
             if (!readIndexedRowByRid(dbname, fk.refTable, referencedRid,
                     referencedRow, refTbl, view, &readFailed)) {
-                lockManager_.unlock(tablename);
+                unlockTable();
                 return readFailed ? DBStatus::IO_ERROR : DBStatus::FOREIGN_KEY_VIOLATION;
             }
             const size_t referencedColumn = referencedColumns.front();
             if (!foreignKeyColumnValuesEqual(refTbl.cols[referencedColumn],
                     extractColumnValue(referencedRow, refTbl, referencedColumn, dbname),
                     actualValues.at(fk.colNames.front()))) {
-                lockManager_.unlock(tablename);
+                unlockTable();
                 return DBStatus::FOREIGN_KEY_VIOLATION;
             }
         } else {
@@ -31905,11 +31916,11 @@ DBStatus StorageEngine::insertInternal(
                 }
                 found = true;
             })) {
-                lockManager_.unlock(tablename);
+                unlockTable();
                 return DBStatus::IO_ERROR;
             }
             if (!found) {
-                lockManager_.unlock(tablename);
+                unlockTable();
                 return DBStatus::FOREIGN_KEY_VIOLATION;
             }
         }
@@ -31918,9 +31929,23 @@ DBStatus StorageEngine::insertInternal(
     // Determine target partition for partitioned tables
     std::string targetPartition;
     std::string targetSubPartition;
+    const auto unchangedPartitionKey = [&](const std::string& key) {
+        if (!replacement) return false;
+        const auto& oldValue = replacement->previous.at(key);
+        const auto value = actualValues.find(key);
+        if (value == actualValues.end() || actualNullColumns.count(key)) return !oldValue;
+        if (!oldValue) return false;
+        const auto column = std::find_if(tbl.cols.begin(), tbl.cols.end(), [&](const Column& candidate) {
+            return candidate.dataName == key;
+        });
+        return column != tbl.cols.end() &&
+            canonicalColumnKeyValue(*column, *oldValue) == canonicalColumnKeyValue(*column, value->second);
+    };
     if (tbl.partitionType != TableSchema::PartitionType::None) {
         auto pit = actualValues.find(tbl.partitionKey);
-        if (pit != actualValues.end() &&
+        if (unchangedPartitionKey(tbl.partitionKey)) {
+            targetPartition = replacement->partition;
+        } else if (pit != actualValues.end() &&
             actualNullColumns.count(tbl.partitionKey) == 0) {
             targetPartition = getPartitionName(tbl, pit->second);
         } else if (partitionTxn) {
@@ -31930,13 +31955,15 @@ DBStatus StorageEngine::insertInternal(
                 targetPartition = tbl.defaultPartitionName;
         }
         if (targetPartition.empty()) {
-            lockManager_.unlock(tablename);
+            unlockTable();
             return partitionTxn ? DBStatus::CHECK_VIOLATION : DBStatus::INVALID_VALUE;
         }
     }
     if (tbl.subPartitionType != TableSchema::PartitionType::None) {
         auto spit = actualValues.find(tbl.subPartitionKey);
-        if (spit != actualValues.end() &&
+        if (unchangedPartitionKey(tbl.subPartitionKey)) {
+            targetSubPartition = replacement->subPartition;
+        } else if (spit != actualValues.end() &&
             actualNullColumns.count(tbl.subPartitionKey) == 0) {
             targetSubPartition = getSubPartitionName(tbl, spit->second);
         } else if (partitionTxn && tbl.subPartitionType == TableSchema::PartitionType::Hash &&
@@ -31944,17 +31971,17 @@ DBStatus StorageEngine::insertInternal(
             targetSubPartition = "sp0";
         }
         if (targetSubPartition.empty()) {
-            lockManager_.unlock(tablename);
+            unlockTable();
             return partitionTxn ? DBStatus::CHECK_VIOLATION : DBStatus::INVALID_VALUE;
         }
     }
     const uint32_t heapFork = targetPartition.empty()
         ? 0
         : partitionForkNumber(targetPartition, targetSubPartition);
-    if (!targetPartition.empty() &&
+    if (!replacement && !targetPartition.empty() &&
         !partitionForkIsUnique(
             tbl, targetPartition, targetSubPartition)) {
-        lockManager_.unlock(tablename);
+        unlockTable();
         return DBStatus::INVALID_VALUE;
     }
 
@@ -31963,7 +31990,7 @@ DBStatus StorageEngine::insertInternal(
     // heap tuple becomes reachable clean up those allocations.
     std::map<std::string, std::string> storedValues = actualValues;
     if (!prepareToastValues(dbname, tablename, tbl, storedValues)) {
-        lockManager_.unlock(tablename);
+        unlockTable();
         return DBStatus::IO_ERROR;
     }
     const uint64_t creatorTxnId = transactionContext().inTransaction
@@ -31995,7 +32022,7 @@ DBStatus StorageEngine::insertInternal(
     };
     const auto failBeforeHeapInsert = [&](DBStatus status) {
         deleteToastForRow(dbname, tablename, strippedRow);
-        lockManager_.unlock(tablename);
+        unlockTable();
         return status;
     };
 
@@ -32015,6 +32042,28 @@ DBStatus StorageEngine::insertInternal(
         }
         if (scanFailed) return failBeforeHeapInsert(DBStatus::IO_ERROR);
     }
+
+    const auto captureInsertedValues = [&] {
+        if (insertedRows || owningRows) {
+            SqlRow returnedValues;
+            std::shared_ptr<OwningRowImage> owning;
+            for (size_t i = 0; i < tbl.len(); ++i) {
+                if(deferVirtualInputs && tbl.cols[i].generatedKind=='v')continue;
+                if (insertedColumnIsNull(i)) {
+                    returnedValues[tbl.cols[i].dataName] = std::nullopt;
+                } else {
+                    std::optional<ExprValue> value;
+                    bool computedNull=false;
+                    auto text=extractColumnValue(strippedRow,tbl,i,dbname,true,&computedNull,
+                        owningRows && tbl.cols[i].generatedKind=='v'?&value:nullptr);
+                    returnedValues[tbl.cols[i].dataName]=computedNull?SqlCell{}:SqlCell{std::move(text)};
+                    retainGeneratedValue(owning,false,tbl.cols[i].dataName,value);
+                }
+            }
+            if (insertedRows) insertedRows->push_back(std::move(returnedValues));
+            if (owningRows) owningRows->push_back(std::move(owning));
+        }
+    };
 
     // Check if row fits in a page (page capacity = PAGE_SIZE - header - slot)
     constexpr size_t MAX_ROW_SIZE = PgPage::PAGE_SIZE -
@@ -32273,7 +32322,7 @@ DBStatus StorageEngine::insertInternal(
     // Log for transaction rollback
     if (transactionContext().inTransaction && dbname == transactionContext().txnDB) {
         std::vector<bool> bloomNulls;
-        if (!getBloomIndexedColumns(dbname, tablename).empty()) {
+        if (!replacement && !getBloomIndexedColumns(dbname, tablename).empty()) {
             bloomNulls.assign(tbl.len(), false);
             for (const size_t column : physicalNullColumns)
                 bloomNulls[column] = true;
@@ -32291,7 +32340,7 @@ DBStatus StorageEngine::insertInternal(
             // The INSERT is already in txnLog. The public insert() wrapper
             // owns a statement savepoint, so leave earlier transaction work
             // intact and let it undo this partially completed index update.
-            lockManager_.unlock(tablename);
+            unlockTable();
             return DBStatus::IO_ERROR;
         }
 
@@ -32301,7 +32350,7 @@ DBStatus StorageEngine::insertInternal(
         // acquired, leave the tuple and indexes untouched rather than
         // returning with a partially cleaned row.
         if (!lockManager_.pageLockExclusive(dbname, tablename, pageId)) {
-            lockManager_.unlock(tablename);
+            unlockTable();
             return DBStatus::LOCK_CONFLICT;
         }
         const std::string pkVal = tbl.buildPKValue(actualValues);
@@ -32374,7 +32423,7 @@ DBStatus StorageEngine::insertInternal(
         // underlying I/O error persists, its dirty marker keeps reads on the
         // safe heap-scan path.
         (void)rebuildSpecializedIndexes(dbname, tablename);
-        lockManager_.unlock(tablename);
+        unlockTable();
         return DBStatus::IO_ERROR;
     };
 
@@ -32420,6 +32469,13 @@ DBStatus StorageEngine::insertInternal(
         }
         lockManager_.pageUnlock(dbname, tablename, pageId);
         if (!finalized) return abortIndexUpdate();
+    }
+
+    if (replacement) {
+        captureInsertedValues();
+        replacement->destination = {pageId, static_cast<OffsetNumber>(slotId + 1)};
+        replacement->fork = heapFork;
+        return DBStatus::OK;
     }
 
     // Update B+ tree PK index.
@@ -32514,30 +32570,12 @@ DBStatus StorageEngine::insertInternal(
                 {tablename, 0, "", LogicalDecoder::encodeRow(cells)});
         }
     }
-    lockManager_.unlock(tablename);
+    unlockTable();
 
     // INSERT RETURNING observes the tuple after BEFORE INSERT triggers and
     // generated columns have been applied, but before AFTER triggers run.
     // Capture the logical values here so callers do not need a second query.
-    if (insertedRows || owningRows) {
-        SqlRow returnedValues;
-        std::shared_ptr<OwningRowImage> owning;
-        for (size_t i = 0; i < tbl.len(); ++i) {
-            if(deferVirtualInputs && tbl.cols[i].generatedKind=='v')continue;
-            if (insertedColumnIsNull(i)) {
-                returnedValues[tbl.cols[i].dataName] = std::nullopt;
-            } else {
-                std::optional<ExprValue> value;
-                bool computedNull=false;
-                auto text=extractColumnValue(strippedRow,tbl,i,dbname,true,&computedNull,
-                    owningRows && tbl.cols[i].generatedKind=='v'?&value:nullptr);
-                returnedValues[tbl.cols[i].dataName]=computedNull?SqlCell{}:SqlCell{std::move(text)};
-                retainGeneratedValue(owning,false,tbl.cols[i].dataName,value);
-            }
-        }
-        if (insertedRows) insertedRows->push_back(std::move(returnedValues));
-        if (owningRows) owningRows->push_back(std::move(owning));
-    }
+    captureInsertedValues();
 
     // Fire AFTER INSERT triggers
     if (triggerExecutor_) {
@@ -33780,16 +33818,24 @@ struct LockedMutationRow {
     std::optional<int64_t> rid;
 };
 
+// A tuple slot is local to its leaf. A waiting writer can follow a local
+// successor, but must retry its transaction after movement to another leaf.
+constexpr ItemPointer kMovedPartition{INVALID_PAGE_ID, 0xfffd};
+
 static LockedMutationRow lockMutationRow(
         LockManager& locks, const std::string& dbname, const std::string& tablename,
         const TableSchema& table, PageAllocator& allocator,
         const StorageEngine::ReadView& view, int64_t rid, bool snapshotCandidate,
-        bool followCommittedChanges, const std::string* rowLockRelation = nullptr) {
+        bool followCommittedChanges, const std::string* rowLockRelation = nullptr,
+        bool noWait = false) {
     uint32_t expectedInsertXid = 0;
     std::set<int64_t> visited;
     for (;;) {
-        if (!locks.rowLockExclusive(rowLockRelation ? *rowLockRelation : tablename, rid)) {
-            return {locks.lastRowLockWasDeadlock()
+        const auto& relation = rowLockRelation ? *rowLockRelation : tablename;
+        const bool acquired = noWait ? locks.rowLockExclusiveNoWait(relation, rid)
+                                     : locks.rowLockExclusive(relation, rid);
+        if (!acquired) {
+            return {!noWait && locks.lastRowLockWasDeadlock()
                 ? DBStatus::DEADLOCK_DETECTED : DBStatus::LOCK_CONFLICT, {}};
         }
         if (!usesHeapTupleHeader(table.formatVersion)) return {DBStatus::OK, rid};
@@ -33846,6 +33892,8 @@ static LockedMutationRow lockMutationRow(
         if (!(header.t_infomask & HEAP_UPDATED)) return {}; // the writer deleted it
 
         const auto next = getCtid(&header);
+        if (next == kMovedPartition)
+            return {DBStatus::SERIALIZATION_FAILURE, {}};
         if (!next.pageId || !next.offset || !visited.insert(rid).second)
             return {DBStatus::SERIALIZATION_FAILURE, {}};
         rid = StorageEngine::encodeRid(next.pageId, static_cast<uint16_t>(next.offset - 1));
@@ -34097,19 +34145,24 @@ DBStatus StorageEngine::removeRows(
     return commitStatus;
 }
 
-DBStatus StorageEngine::removePartitionRows(
+DBStatus StorageEngine::mutatePartitionRows(
     const std::string& dbname, const TableSchema& table,
     const std::vector<std::string>& conditions, std::vector<SqlRow>* deletedRows,
-    const SqlDeleteMatcher& deleteMatcher, bool mayRecheck, size_t* affectedRows) {
+    const SqlUpdateMatcher& matcher, bool mayRecheck, size_t* affectedRows,
+    const PartitionUpdate* update) {
     const auto& tablename = table.tablename;
     auto& txn = transactionContext();
     if (!txn.inTransaction || txn.txnDB != dbname || !txn.txnBackupPath.empty() ||
         !table.physicalRelationId || table.formatVersion != DATA_FILE_FORMAT_VERSION ||
         table.isTemporary || table.isUnlogged || isSessionTempPhysicalName(tablename) ||
         !unambiguousTruncatePartitionLayout(table) || shouldEnforceRLS(table, getRLSUser()) ||
-        std::any_of(table.cols.begin(), table.cols.end(), [](const Column& column) {
-            return column.generatedKind == 'v';
+        std::any_of(table.cols.begin(), table.cols.end(), [&](const Column& column) {
+            return column.generatedKind == 'v' || (update &&
+                (!column.generatedExpr.empty() || column.identityKind || !column.domainName.empty()));
         })) return DBStatus::FEATURE_NOT_SUPPORTED;
+
+    if (update && hasUnsupportedPartitionInsertConstraints(table))
+        return DBStatus::FEATURE_NOT_SUPPORTED;
 
     // Parent-level index entries and RI actions do not carry a leaf identity.
     bool specialized = false;
@@ -34127,9 +34180,20 @@ DBStatus StorageEngine::removePartitionRows(
     }
     std::vector<Trigger> triggers;
     if (triggerExecutor_ && !tryGetAllTriggers(dbname, triggers)) return DBStatus::CORRUPTED_DATA;
-    if (!filterTriggers(triggers, tablename, "before", "delete").empty() ||
-        !filterTriggers(triggers, tablename, "after", "delete").empty())
+    const auto hasTriggers = [&](const char* event) {
+        return !filterTriggers(triggers, tablename, "before", event).empty() ||
+               !filterTriggers(triggers, tablename, "after", event).empty();
+    };
+    if (hasTriggers("delete") || (update && (hasTriggers("update") || hasTriggers("insert"))))
         return DBStatus::FEATURE_NOT_SUPPORTED;
+    const auto validAssignments = [&](const SqlRow& assignments) {
+        return std::all_of(assignments.begin(), assignments.end(), [&](const auto& assignment) {
+            return std::any_of(table.cols.begin(), table.cols.end(), [&](const Column& column) {
+                return column.dataName == assignment.first;
+            });
+        });
+    };
+    if (update && !validAssignments(update->values)) return DBStatus::INVALID_VALUE;
 
     auto predicates = prepareStoredUnknownBitScalarInputs(table, parseConditions(conditions));
     prepareFilterConditions(*this, dbname, table, predicates);
@@ -34143,16 +34207,22 @@ DBStatus StorageEngine::removePartitionRows(
         return DBStatus::OK;
     }
 
+    struct ReplacementPlan {
+        SqlRow previous;
+        SqlRow assignments;
+        ItemPointer successor{};
+    };
     struct LeafTargets {
         uint32_t fork;
         std::string name;
         std::shared_ptr<PageAllocator> heap;
         std::set<int64_t> rows;
+        std::map<int64_t, ReplacementPlan> replacements;
     };
     std::vector<LeafTargets> leaves;
     const PartitionScanStart startLeaf = [&](uint32_t fork, const std::string& name,
             const std::shared_ptr<PageAllocator>& heap) {
-        leaves.push_back({fork, name, heap, {}});
+        leaves.push_back({fork, name, heap, {}, {}});
     };
     const auto view = txn.readView;
     LocalExpressionSyntax predicateSyntax;
@@ -34186,19 +34256,64 @@ DBStatus StorageEngine::removePartitionRows(
     // Evaluate the typed predicate before changing any leaf. It may read the
     // target again, so no leaf page is pinned while evaluating it.
     for (auto& leaf : leaves) {
-        if (!deleteMatcher) continue;
+        if (!matcher) continue;
         for (auto it = leaf.rows.begin(); it != leaf.rows.end();) {
             SqlRow values;
             const auto status = readValues(*leaf.heap, *it, values);
             if (status != DBStatus::OK) return status;
-            if (deleteMatcher(values)) ++it;
+            if (matcher(values)) ++it;
             else it = leaf.rows.erase(it);
         }
     }
     for (auto& leaf : leaves) {
         const auto status = lockMutationTargets(*this, dbname, tablename, table, leaf.heap.get(),
-            view, true, mayRecheck, conditions, deleteMatcher, nullptr, false, leaf.rows, &leaf.name);
+            view, true, mayRecheck, conditions, matcher, nullptr, false, leaf.rows, &leaf.name);
         if (status != DBStatus::OK) return status;
+    }
+
+    if (update) {
+        // Evaluate SET against the locked old versions before publishing any
+        // new tuple, including for native statements without command IDs.
+        for (auto& leaf : leaves) {
+            for (const auto rid : leaf.rows) {
+                auto& plan = leaf.replacements[rid];
+                const auto status = readValues(*leaf.heap, rid, plan.previous);
+                if (status != DBStatus::OK) return status;
+                plan.assignments = update->values;
+                if (update->resolve && !update->resolve(plan.previous, plan.assignments))
+                    return DBStatus::INVALID_VALUE;
+                if (!validAssignments(plan.assignments)) return DBStatus::INVALID_VALUE;
+            }
+        }
+        // Insert successors outside source page locks. The destination may
+        // share the very page whose source versions will be linked below.
+        for (auto& leaf : leaves) {
+            if (leaf.replacements.empty()) continue;
+            PartitionLeaf source;
+            bool collision = false;
+            if (!resolvePartitionFork(table, leaf.fork, source, collision)) return DBStatus::CORRUPTED_DATA;
+            for (auto& entry : leaf.replacements) {
+                auto& plan = entry.second;
+                auto proposed = plan.previous;
+                for (auto& [name, value] : plan.assignments) proposed.at(name) = std::move(value);
+                std::map<std::string, std::string> values;
+                std::set<std::string> nulls;
+                splitSqlRow(proposed, values, nulls);
+                PartitionReplacement replacement{table, plan.previous, source.partition, source.subPartition};
+                std::vector<SqlRow> stored;
+                const auto status = insertInternal(dbname, tablename, values, nulls, &stored,
+                    IdentityOverride::None, nullptr, false, nullptr, nullptr, &replacement);
+                if (status != DBStatus::OK) return status;
+                auto& current = stored.front();
+                for (const auto& [name, value] : plan.previous) {
+                    if (!plan.assignments.count(name) && current.at(name) != value)
+                        return DBStatus::FEATURE_NOT_SUPPORTED;
+                }
+                plan.successor = replacement.fork == leaf.fork ? replacement.destination : kMovedPartition;
+                if (update->updatedRows) update->updatedRows->push_back(current);
+                if (update->rowImages) update->rowImages->push_back({std::move(plan.previous), std::move(current)});
+            }
+        }
     }
 
     size_t affected = 0;
@@ -34238,8 +34353,13 @@ DBStatus StorageEngine::removePartitionRows(
                 if (!markTupleDeletedByCurrentCommand(changed.data(), changed.size(), table.formatVersion))
                     return DBStatus::CORRUPTED_DATA;
                 auto* header = castHeapHeader(changed.data());
-                header->t_infomask &= ~HEAP_UPDATED;
-                setCtid(header, {pageId, static_cast<OffsetNumber>(slot + 1)});
+                if (update) {
+                    header->t_infomask |= HEAP_UPDATED;
+                    setCtid(header, leaf.replacements.at(*row).successor);
+                } else {
+                    header->t_infomask &= ~HEAP_UPDATED;
+                    setCtid(header, {pageId, static_cast<OffsetNumber>(slot + 1)});
+                }
                 uint16_t updatedSlot = slot;
                 if (!staged.update(slot, changed.data(), changed.size(), updatedSlot) || updatedSlot != slot)
                     return DBStatus::CORRUPTED_DATA;
@@ -34309,7 +34429,7 @@ DBStatus StorageEngine::removeInternal(
             return DBStatus::FEATURE_NOT_SUPPORTED;
         const bool mayRecheck = !deleteMatcher ||
             (mutationCallbacks && mutationCallbacks->recheckOnConcurrentUpdate);
-        return removePartitionRows(dbname, tbl, conditions, deletedRows, deleteMatcher, mayRecheck, affectedRows);
+        return mutatePartitionRows(dbname, tbl, conditions, deletedRows, deleteMatcher, mayRecheck, affectedRows);
     }
     std::vector<Trigger> operationTriggers;
     if (triggerExecutor_ && !tryGetAllTriggers(dbname, operationTriggers)) {
@@ -35629,7 +35749,16 @@ DBStatus StorageEngine::updateInternal(
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
 
     TableSchema tbl = getTableSchema(dbname, tablename);
-    const auto generatedMetadata=freezeGeneratedStorageInput(tbl,dbname,tablename,this);
+    std::optional<ResourceUnlockGuard> partitionLock;
+    if (tbl.partitionType != TableSchema::PartitionType::None) {
+        if (!lockManager_.lockIntentExclusive(tablename)) return DBStatus::LOCK_CONFLICT;
+        partitionLock.emplace(lockManager_, tablename);
+        auto lockedTable = getTableSchema(dbname, tablename);
+        if (lockedTable.physicalRelationId != tbl.physicalRelationId ||
+            lockedTable.partitionType == TableSchema::PartitionType::None)
+            return DBStatus::SERIALIZATION_FAILURE;
+        tbl = std::move(lockedTable);
+    }
     bool captureLogicalUpdate = false;
     try {
         captureLogicalUpdate = !tbl.isUnlogged && PublicationCatalog::instance().publishes(
@@ -35638,11 +35767,28 @@ DBStatus StorageEngine::updateInternal(
         if (error.sqlState() != "58030") throw;
         return DBStatus::IO_ERROR;
     }
-    // See removeInternal(): the current UPDATE machinery re-opens every RID
-    // through the parent heap and cannot safely identify a partition tuple.
-    if (tbl.partitionType != TableSchema::PartitionType::None) {
-        return DBStatus::INVALID_VALUE;
+    if (partitionLock) {
+        if (exactRids || owningRows || captureLogicalUpdate || (mutationCallbacks &&
+            (mutationCallbacks->matches || mutationCallbacks->resolve || mutationCallbacks->resolveArrayDomains ||
+             mutationCallbacks->recheckJoinedTarget || mutationCallbacks->observed)))
+            return DBStatus::FEATURE_NOT_SUPPORTED;
+        const bool mayRecheck = mutationCallbacks ? mutationCallbacks->recheckOnConcurrentUpdate : !updateMatcher;
+        const auto values = joinSqlRow(updates, updateNullColumns);
+        const PartitionUpdate operation{values, updateResolver, updatedRows, rowImages};
+        size_t updated = 0;
+        const auto status = mutatePartitionRows(dbname, tbl, conditions, nullptr, updateMatcher,
+                                                mayRecheck, &updated, &operation);
+        partitionLock.reset();
+        if (status != DBStatus::OK) return status;
+        if (updated) {
+            recordModification(dbname, tablename, updated);
+            dbms::recordTableMutation(dbname, tablename, dbms::TableMutation::Update, updated);
+            maybeAutoAnalyze(dbname, tablename);
+        }
+        if (affectedRows) *affectedRows = updated;
+        return DBStatus::OK;
     }
+    const auto generatedMetadata=freezeGeneratedStorageInput(tbl,dbname,tablename,this);
     std::vector<bool> domainRequired(tbl.len(), false);
     StoredArrayDomainChecks arrayDomainChecks;
     for (size_t i = 0; i < tbl.len(); ++i) {
@@ -39337,6 +39483,9 @@ std::vector<std::string> StorageEngine::query(
     // relation-aware scan below; converting a policy such as
     // `owner = current_user` to the old textual condition format is unsafe.
     const bool enforceRls = shouldEnforceRLS(tbl, StorageEngine::getRLSUser());
+    if (forUpdate && tbl.partitionType != TableSchema::PartitionType::None &&
+        (enforceRls || !usesHeapTupleHeader(tbl.formatVersion)))
+        throw DbError("0A000", "FOR UPDATE is not supported for this partitioned relation");
     auto conds = parseConditions(conditions);
     struct MatchedRow {
         int64_t rid;
@@ -39360,8 +39509,22 @@ std::vector<std::string> StorageEngine::query(
     bool usedIndex = false;
     bool scanFailed = false;
     bool indexReadFailed = false;
+    std::vector<std::vector<Condition>> partitionBranches;
+    struct PartitionLockTarget {
+        std::string relation;
+        std::shared_ptr<PageAllocator> heap;
+    };
+    std::vector<PartitionLockTarget> partitionLockTargets;
+    PartitionLockTarget currentPartition;
+    std::optional<PartitionScanStart> startPartition;
+    if (forUpdate && capturePartitionNulls) {
+        startPartition.emplace([&](uint32_t, const std::string& relation,
+                const std::shared_ptr<PageAllocator>& heap) {
+            currentPartition = {relation, heap};
+        });
+    }
     if (capturePartitionNulls || !conditionAlternatives.empty()) {
-        std::vector<std::vector<Condition>> branches;
+        auto& branches = partitionBranches;
         if (conditionAlternatives.empty()) {
             branches.push_back(conds);
         } else {
@@ -39428,7 +39591,12 @@ std::vector<std::string> StorageEngine::query(
                         });
                 });
             if (!matches) return;
+            if (forUpdate && capturePartitionNulls &&
+                (currentPartition.relation.empty() || !currentPartition.heap))
+                throw DbError("XX001", "partition row lost its physical identity");
             matchRows.push_back({rid, std::move(row), partitionNulls.size()});
+            if (forUpdate && capturePartitionNulls)
+                partitionLockTargets.push_back(currentPartition);
             if (capturePartitionNulls)
                 partitionNulls.push_back(std::move(bitmap));
         };
@@ -39438,7 +39606,8 @@ std::vector<std::string> StorageEngine::query(
             const auto& partitions = integerTargets ? *integerTargets : targetParts;
             scanFailed = !(enforceRls
                 ? forEachVisibleRowUsingSchema(dbname, tablename, "SELECT", collect, queryView, partitions, scanSchema)
-                : forEachRowUsingSchema(dbname, tablename, collect, queryView, partitions, true, false, nullptr, scanSchema));
+                : forEachRowUsingSchema(dbname, tablename, collect, queryView, partitions, true, false, nullptr, scanSchema,
+                    startPartition ? &*startPartition : nullptr));
         }
     } else if (enforceRls) {
         const auto targetParts = tbl.partitionType == TableSchema::PartitionType::None
@@ -39510,6 +39679,46 @@ std::vector<std::string> StorageEngine::query(
     if (transactionContext().inTransaction) {
         std::vector<MatchedRow> lockedRows;
         for (auto& mr : matchRows) {
+            if (forUpdate && capturePartitionNulls) {
+                const auto isolation = getIsolationLevel();
+                const bool follow = isolation == IsolationLevel::READ_COMMITTED ||
+                                    isolation == IsolationLevel::READ_UNCOMMITTED;
+                const auto& target = partitionLockTargets.at(mr.nullBitmapIndex);
+                const auto locked = lockMutationRow(lockManager_, dbname, tablename,
+                    tbl, *target.heap, *queryView, mr.rid, true, follow,
+                    &target.relation, noWait || skipLocked);
+                if (locked.status != DBStatus::OK) {
+                    if (skipLocked && locked.status == DBStatus::LOCK_CONFLICT) continue;
+                    throw DbError(sqlstateForDBStatus(locked.status),
+                        "could not lock partition row in relation \"" + tablename + "\"");
+                }
+                if (!locked.rid) continue;
+                if (*locked.rid != mr.rid) {
+                    std::string row;
+                    std::vector<bool> bitmap;
+                    const auto status = readMutationPayload(*this, dbname, tablename, tbl,
+                        *target.heap, *locked.rid, row, bitmap);
+                    if (status != DBStatus::OK)
+                        throw DbError(sqlstateForDBStatus(status), "could not read locked partition row");
+                    detail::ScopedStoredRowNullBitmap binding(tbl, bitmap);
+                    LocalExpressionSyntax syntax;
+                    const bool matches = std::any_of(partitionBranches.begin(), partitionBranches.end(),
+                        [&](const auto& branch) {
+                            return std::all_of(branch.begin(), branch.end(), [&](const auto& predicate) {
+                                return evalConditionOnRowWithSyntax(predicate, row, tbl, &syntax, generatedMetadata.get());
+                            });
+                        });
+                    if (!matches) continue;
+                    bool toastOk = false;
+                    auto resolved = resolveToastValues(dbname, tablename, row, tbl, &toastOk);
+                    if (!toastOk) throw DbError("58030", "could not read long value in locked partition row");
+                    mr.rid = *locked.rid;
+                    mr.payload = std::move(resolved);
+                    partitionNulls[mr.nullBitmapIndex] = std::move(bitmap);
+                }
+                lockedRows.push_back(std::move(mr));
+                continue;
+            }
             bool locked;
             if (noWait || skipLocked) {
                 locked = forUpdate

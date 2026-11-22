@@ -2467,6 +2467,14 @@ private:
         std::set<std::string> activeDeletes;
         std::set<std::string> activeUpdates;
     };
+    struct PartitionReplacement {
+        const TableSchema& table;
+        const SqlRow& previous;
+        const std::string& partition;
+        const std::string& subPartition;
+        ItemPointer destination{};
+        uint32_t fork = 0;
+    };
     DBStatus insertInternal(
         const std::string& dbname, const std::string& tablename,
         const std::map<std::string, std::string>& values,
@@ -2476,7 +2484,8 @@ private:
         OwningMutationRows* owningRows = nullptr,
         bool deferVirtualInputs = false,
         SqlRow* conflictingRow = nullptr,
-        const OwningSqlRow* arrayDomainInputs = nullptr);
+        const OwningSqlRow* arrayDomainInputs = nullptr,
+        PartitionReplacement* replacement = nullptr);
     DBStatus removeInternal(
         const std::string& dbname, const std::string& tablename,
         const std::vector<std::string>& conditions,
@@ -2488,10 +2497,17 @@ private:
         const SqlMutationCallbacks* mutationCallbacks = nullptr,
         OwningMutationRows* owningRows = nullptr,
         bool deferVirtualInputs = false);
-    DBStatus removePartitionRows(
+    struct PartitionUpdate {
+        const SqlRow& values;
+        const SqlUpdateResolver& resolve;
+        std::vector<SqlRow>* updatedRows;
+        std::vector<UpdateRowImage>* rowImages;
+    };
+    DBStatus mutatePartitionRows(
         const std::string& dbname, const TableSchema& table,
         const std::vector<std::string>& conditions, std::vector<SqlRow>* deletedRows,
-        const SqlDeleteMatcher& deleteMatcher, bool mayRecheck, size_t* affectedRows);
+        const SqlUpdateMatcher& matcher, bool mayRecheck, size_t* affectedRows,
+        const PartitionUpdate* update = nullptr);
     DBStatus updateInternal(
         const std::string& dbname, const std::string& tablename,
         const std::map<std::string, std::string>& updates,
