@@ -1,5 +1,6 @@
 #pragma once
 
+#include "SessionSetting.h"
 #include <cerrno>
 #include <cctype>
 #include <climits>
@@ -61,53 +62,15 @@ inline std::string formatWorkMemKb(size_t value) {
 // A missing override inherits the startup option, or the current instance
 // default if there was no startup option. Never freeze that default in a SET
 // snapshot: RESET and an aborted transaction must still inherit later reloads.
-class SessionWorkMem {
-    using Setting = std::optional<size_t>;
-    struct Savepoint { std::string name; Setting visible, persistent; };
-    Setting startup_, visible_, original_, persistent_;
-    bool active_ = false;
-    std::vector<Savepoint> savepoints_;
+class SessionWorkMem : public SessionSetting<std::optional<size_t>> {
+    std::optional<size_t> startup_;
 public:
     size_t effective(size_t instanceDefault) const {
-        return visible_.value_or(startup_.value_or(instanceDefault));
-    }
-    void assign(Setting value, bool local) {
-        if (local && !active_) return;
-        visible_ = value;
-        if (active_ && !local) persistent_ = value;
+        return get().value_or(startup_.value_or(instanceDefault));
     }
     void setStartup(size_t value) {
+        *this = SessionWorkMem{};
         startup_ = value;
-        visible_.reset(); original_.reset(); persistent_.reset();
-        active_ = false; savepoints_.clear();
-    }
-    void begin() {
-        if (active_) return;
-        original_ = persistent_ = visible_;
-        active_ = true; savepoints_.clear();
-    }
-    void finish(bool commit) {
-        if (!active_) return;
-        visible_ = commit ? persistent_ : original_;
-        active_ = false;
-        original_.reset(); persistent_.reset(); savepoints_.clear();
-    }
-    void save(std::string name) {
-        begin(); savepoints_.push_back({std::move(name), visible_, persistent_});
-    }
-    void rollback(std::string name) {
-        for (size_t index = savepoints_.size(); index; --index)
-            if (savepoints_[index - 1].name == name) {
-                visible_ = savepoints_[index - 1].visible;
-                persistent_ = savepoints_[index - 1].persistent;
-                savepoints_.resize(index); return;
-            }
-    }
-    void release(std::string name) {
-        for (size_t index = savepoints_.size(); index; --index)
-            if (savepoints_[index - 1].name == name) {
-                savepoints_.resize(index - 1); return;
-            }
     }
 };
 

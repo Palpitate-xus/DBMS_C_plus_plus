@@ -9,6 +9,7 @@
 #include <string>
 #include <vector>
 #include "common/WorkMemSetting.h"
+#include "common/TimeoutSetting.h"
 
 namespace dbms {
 
@@ -196,10 +197,6 @@ struct Session {
     std::set<std::string> transientTempTables; // query-local CTE/derived table names
     std::map<std::string, std::string> tempTableOnCommit; // logical name -> preserve/delete/drop
     std::set<std::string> tempTablesCreatedInTransaction;
-    int statementTimeoutMs = 0; // 0 = disabled
-    int defaultStatementTimeoutMs = 0; // RESET statement_timeout target
-    int lockTimeoutMs = 0; // 0 = no timeout
-    int deadlockTimeoutMs = 1000; // milliseconds before deadlock detection
     int timezoneOffsetMinutes = 0; // Session timezone offset from UTC (e.g. +480 for Asia/Shanghai)
     std::string currentRole;      // SET ROLE target (empty = use original user)
     std::string originalRole;     // Session user's role (set at login)
@@ -259,6 +256,7 @@ struct Session {
     // Runtime work_mem belongs to this connection; an unset value follows
     // its startup option or the current reloaded instance default.
     dbms::SessionWorkMem workMem;
+    dbms::SessionTimeouts timeouts;
 };
 
 inline std::string tempTablePrefix(const Session& session, const std::string& name) {

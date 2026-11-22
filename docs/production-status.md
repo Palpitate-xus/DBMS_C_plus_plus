@@ -6,9 +6,13 @@
 
 截至 2026-11-22，273 项功能要求中有 22 项完成、167 项部分实现、69 项待验证、15 项暂缓。各项结果和剩余范围见功能总账。以下更新报告给出各轮测试的实际范围。[功能总账](gap-progress.json) · [支持的功能和限制](compatibility-contract.md)
 
+## 2026-11-22 · 回滚时恢复原有的超时设置
+
+语句超时、锁等待超时和死锁检查时间可按事务临时调整。保存点、回滚和准备事务时会恢复或保留相应的值。连接设置可以覆盖服务器默认值，连接继承的默认值可以随服务器配置更新。交互式命令行开启语句超时后仍使用原线程执行 SQL，可继续操作之前开启的事务。[测试报告](test-report.md#transactional-timeouts-20261122) · [性能报告](performance-report-2026-10-30.md#transactional-timeouts-cost-20261122)
+
 ## 2026-11-22 · 表锁和页锁在升级失败后保留
 
-等待加强表锁或数据页锁时，原来的锁继续生效。升级超时或取消时仍保留原锁，升级成功后回滚到保存点会恢复原模式。单表 `LOCK TABLE` 支持 `NOWAIT` 和省略模式。其余 PostgreSQL 表锁模式、跨进程死锁检测和事务回滚时恢复 `lock_timeout` 仍待补齐。[测试报告](test-report.md#table-page-lock-upgrade-20261122) · [性能报告](performance-report-2026-10-30.md#table-page-lock-upgrade-cost-20261122)
+等待加强表锁或数据页锁时，原来的锁继续生效。升级超时或取消时仍保留原锁，升级成功后回滚到保存点会恢复原模式。单表 `LOCK TABLE` 支持 `NOWAIT` 和省略模式。其余 PostgreSQL 表锁模式和跨进程死锁检测仍待补齐。[测试报告](test-report.md#table-page-lock-upgrade-20261122) · [性能报告](performance-report-2026-10-30.md#table-page-lock-upgrade-cost-20261122)
 
 ## 2026-11-22 · 写锁升级失败时保留共享行锁
 

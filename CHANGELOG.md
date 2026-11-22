@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>回滚事务时，会恢复之前的超时设置 · 2026-11-22</summary>
+
+可以只为当前事务缩短锁等待时间，结束后恢复原来的设置。用 `SHOW` 可以随时查看当前值。
+
+[使用示例](docs/MANUAL.md#在事务里临时调整超时) · [测试报告](docs/test-report.md#transactional-timeouts-20261122) · [性能报告](docs/performance-report-2026-10-30.md#transactional-timeouts-cost-20261122)
+
+</details>
+
+<details>
 <summary>等不到更严格的表锁，原来的锁会保留 · 2026-11-22</summary>
 
 如果你已锁住一张表，再请求更严格的锁时遇到超时或取消，原来的锁仍然有效。也可以让数据库一遇到冲突就报错。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>多人可以同时核对分区表里的同一条记录 · 2026-11-22</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-22 · 多人可以同时核对分区表里的同一条记录
 
 核对时可以锁住记录，让其他人也能查看。要修改这条记录，得等核对的人都结束各自的事务。
 
 [使用示例](docs/MANUAL.md#查询时锁住分区表记录) · [测试报告](docs/test-report.md#partition-share-20261122) · [性能报告](docs/performance-report-2026-10-30.md#partition-share-cost-20261122)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-22 · 改了分区键，记录会移到对应分区
 

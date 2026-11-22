@@ -1,7 +1,9 @@
 #include "LockManager.h"
+#include "common/TimeoutSetting.h"
 #include "common/sha256.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cerrno>
 #include <fcntl.h>
 #include <filesystem>
@@ -489,6 +491,56 @@ int LockManager::getLockTimeout() const {
 
 void LockManager::setDeadlockTimeout(int ms) {
     threadSettings().deadlockTimeoutMs = ms > 0 ? ms : 0;
+}
+
+namespace {
+struct PublishedTimeoutDefaults {
+    std::mutex mutex;
+    std::array<int, timeoutNames.size()> values{0, 0, 1000};
+    std::atomic<std::uint64_t> version{0};
+};
+
+PublishedTimeoutDefaults& timeoutDefaults() {
+    static PublishedTimeoutDefaults defaults;
+    return defaults;
+}
+} // namespace
+
+void publishTimeoutDefaults(int statement, int lock, int deadlock) {
+    auto& state = timeoutDefaults();
+    std::lock_guard<std::mutex> guard(state.mutex);
+    const std::array<int, timeoutNames.size()> next{statement, lock, deadlock};
+    if (next == state.values) return;
+    state.values = next;
+    state.version.fetch_add(1, std::memory_order_release);
+}
+
+void SessionTimeouts::refreshDefaults(LockManager& locks) {
+    auto& state = timeoutDefaults();
+    // On ordinary requests the generation check avoids taking the mutex.
+    if (defaultsVersion_ == state.version.load(std::memory_order_acquire)) return;
+    {
+        std::lock_guard<std::mutex> guard(state.mutex);
+        instanceDefaults_ = state.values;
+        defaultsVersion_ = state.version.load(std::memory_order_relaxed);
+    }
+    syncLocks(locks);
+}
+
+void SessionTimeouts::syncLocks(LockManager& locks) const {
+    locks.setLockTimeout(get(TimeoutParameter::Lock));
+    locks.setDeadlockTimeout(get(TimeoutParameter::Deadlock));
+}
+
+void SessionTimeouts::finish(bool commit, LockManager& locks) {
+    const auto previous = settings_.get();
+    settings_.finish(commit);
+    if (previous != settings_.get()) syncLocks(locks);
+}
+
+void SessionTimeouts::rollback(const std::string& name, LockManager& locks) {
+    settings_.rollback(name);
+    syncLocks(locks);
 }
 
 void LockManager::setInterruptHandler(std::function<void()> handler) {

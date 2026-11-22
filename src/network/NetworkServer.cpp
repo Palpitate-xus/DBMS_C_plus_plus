@@ -28,6 +28,7 @@
 #include "common/TimeZoneRules.h"
 #include "common/BooleanCodec.h"
 #include "common/WorkMemUtilityContext.h"
+#include "transaction/StatementInterruptGuard.h"
 #include "common/IntegerTextCodec.h"
 #include "common/NetworkValue.h"
 #include "common/GeometryValue.h"
@@ -590,23 +591,19 @@ bool applyStartupRuntimeParameter(Session& session,
         }
         return true;
     }
-    if (name == "statement_timeout" || name == "statement_timeout_ms" ||
-        name == "lock_timeout" || name == "lock_timeout_ms" ||
-        name == "deadlock_timeout" || name == "deadlock_timeout_ms") {
-        Config candidate = g_config;
-        if (!candidate.setParameter(name, value)) {
+    if (const auto parameter = findTimeoutParameter(name)) {
+        if (*parameter == TimeoutParameter::Deadlock && !sessionIsAdmin(session)) {
+            sqlState = "42501";
+            error = "permission denied to set parameter \"" + rawName + "\"";
+            return false;
+        }
+        const auto valueMs = parseTimeoutMs(value, timeoutMinimum(*parameter, name));
+        if (!valueMs) {
             sqlState = "22023";
             error = "invalid value for parameter \"" + rawName + "\"";
             return false;
         }
-        if (name == "statement_timeout" || name == "statement_timeout_ms") {
-            session.statementTimeoutMs = candidate.statementTimeoutMs;
-            session.defaultStatementTimeoutMs = candidate.statementTimeoutMs;
-        } else if (name == "lock_timeout" || name == "lock_timeout_ms") {
-            session.lockTimeoutMs = candidate.lockTimeoutMs;
-        } else {
-            session.deadlockTimeoutMs = candidate.deadlockTimeoutMs;
-        }
+        session.timeouts.setStartup(*parameter, *valueMs);
         return true;
     }
     sqlState = "42704";
@@ -4347,7 +4344,7 @@ bool describePreparedResultShape(const std::string& sql, Session& session,
                               name == "max_parallel_workers_per_gather" ||
                               name == "application_name" || name == "client_encoding" ||
                               name == "search_path" || name == "lc_monetary" ||
-                              name == "work_mem")) {
+                              name == "work_mem" || findTimeoutParameter(name))) {
             // These scalar GUCs have a fixed text schema. Describe must not
             // execute SHOW, sample its value, or infer columns from stdout.
             QueryResult shape;
@@ -6263,73 +6260,9 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session,
     bool statementCommitError = false;
     std::string outputText;
     auto start = std::chrono::steady_clock::now();
-    struct QueryInterruptGuard {
-        std::shared_ptr<SessionInterruptState> state;
-        dbms::LockManager& lockManager;
-        std::mutex timeoutMutex;
-        std::condition_variable timeoutCv;
-        bool queryComplete = false;
-        std::thread timeoutThread;
-        explicit QueryInterruptGuard(
-            std::shared_ptr<SessionInterruptState> interruptState,
-            dbms::LockManager& manager, int statementTimeoutMs)
-            : state(std::move(interruptState)), lockManager(manager) {
-            state->cancelRequested.store(false, std::memory_order_release);
-            state->timeoutRequested.store(false, std::memory_order_release);
-            state->queryActive.store(true, std::memory_order_release);
-            dbms::setCurrentQueryInterruptState(state);
-            lockManager.setInterruptHandler([interruptState = state]() {
-                if (interruptState->terminateRequested.load(
-                        std::memory_order_acquire)) {
-                    throw dbms::DbError(
-                        "57P01",
-                        "terminating connection due to administrator command");
-                }
-                if (interruptState->cancelRequested.load(
-                        std::memory_order_acquire)) {
-                    if (interruptState->timeoutRequested.load(
-                            std::memory_order_acquire)) {
-                        throw dbms::DbError(
-                            "57014",
-                            "canceling statement due to statement timeout");
-                    }
-                    throw dbms::DbError(
-                        "57014", "canceling statement due to user request");
-                }
-            });
-            if (statementTimeoutMs > 0) {
-                timeoutThread = std::thread([this, statementTimeoutMs]() {
-                    std::unique_lock<std::mutex> lock(timeoutMutex);
-                    const bool completed = timeoutCv.wait_for(
-                        lock, std::chrono::milliseconds(statementTimeoutMs),
-                        [this]() { return queryComplete; });
-                    if (!completed && state->queryActive.load(
-                                          std::memory_order_acquire)) {
-                        state->timeoutRequested.store(
-                            true, std::memory_order_release);
-                        state->cancelRequested.store(
-                            true, std::memory_order_release);
-                    }
-                });
-            }
-        }
-        ~QueryInterruptGuard() {
-            {
-                std::lock_guard<std::mutex> lock(timeoutMutex);
-                queryComplete = true;
-            }
-            timeoutCv.notify_all();
-            if (timeoutThread.joinable()) timeoutThread.join();
-            lockManager.clearInterruptHandler();
-            dbms::setCurrentQueryInterruptState(nullptr);
-            state->queryActive.store(false, std::memory_order_release);
-            state->cancelRequested.store(false, std::memory_order_release);
-            state->timeoutRequested.store(false, std::memory_order_release);
-        }
-    } interruptGuard(session.interruptState, g_engine.getLockManager(),
-                     statementTimeoutOverrideMs >= 0
-                         ? statementTimeoutOverrideMs
-                         : session.statementTimeoutMs);
+    StatementInterruptGuard interruptGuard(session.interruptState, g_engine.getLockManager());
+    interruptGuard.startTimer(statementTimeoutOverrideMs >= 0
+        ? statementTimeoutOverrideMs : session.timeouts.get(TimeoutParameter::Statement));
     {
         std::ostringstream output;
         dbms::ScopedOutputCapture capture(output);
@@ -7240,10 +7173,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
     session.currentDB = (dbIt == startup.parameters.end() || dbIt->second.empty())
                             ? username : dbIt->second;
     session.originalRole = username;
-    session.statementTimeoutMs = g_config.statementTimeoutMs;
-    session.defaultStatementTimeoutMs = g_config.statementTimeoutMs;
-    session.lockTimeoutMs = g_config.lockTimeoutMs;
-    session.deadlockTimeoutMs = g_config.deadlockTimeoutMs;
+    session.timeouts.refreshDefaults(g_engine.getLockManager());
     std::string startupSqlState = "22023";
     std::string startupError;
     if (!applyStartupParameters(startup, session, startupSqlState,
@@ -7252,8 +7182,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
         return;
     }
     g_engine.getLockManager().setResourceNamespace(session.currentDB);
-    g_engine.getLockManager().setLockTimeout(session.lockTimeoutMs);
-    g_engine.getLockManager().setDeadlockTimeout(session.deadlockTimeoutMs);
+    session.timeouts.syncLocks(g_engine.getLockManager());
 
     if (!g_engine.databaseExists(session.currentDB)) {
         protocol.sendErrorResponse("FATAL", "3D000", "database \"" + session.currentDB + "\" does not exist");
@@ -7393,11 +7322,11 @@ void handleClient(SecureSocket socket, std::string clientHost) {
         extendedQueryTimeoutActive = false;
     };
     const auto startExtendedQueryTimeout = [&]() {
-        if (extendedQueryTimeoutActive || session.statementTimeoutMs <= 0)
+        if (extendedQueryTimeoutActive || session.timeouts.get(TimeoutParameter::Statement) <= 0)
             return;
         extendedQueryTimeoutActive = true;
         extendedQueryDeadline = std::chrono::steady_clock::now() +
-            std::chrono::milliseconds(session.statementTimeoutMs);
+            std::chrono::milliseconds(session.timeouts.get(TimeoutParameter::Statement));
     };
     const auto remainingExtendedQueryTimeoutMs = [&]() -> int {
         if (!extendedQueryTimeoutActive) return -1;
@@ -7440,6 +7369,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 return false;
             session.searchPathTransaction.rollback(*recovery,session.searchPath);
             session.workMem.rollback(*recovery);
+            session.timeouts.rollback(*recovery, g_engine.getLockManager());
             (void)notificationManager().rollbackToSavepoint(
                 session.pid, *recovery);
             if (session.advisoryOwnerId != 0) {
@@ -7454,6 +7384,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
         if (g_engine.inTransaction()) return false;
         session.searchPathTransaction.finish(session.searchPath,false);
         session.workMem.finish(false);
+        session.timeouts.finish(false, g_engine.getLockManager());
         notificationManager().rollbackTransaction(session.pid);
         if (session.advisoryOwnerId != 0) {
             advisoryLockManager().releaseTransaction(session.advisoryOwnerId);
@@ -7561,10 +7492,11 @@ void handleClient(SecureSocket socket, std::string clientHost) {
         }
         QueryResult result;
         {
-            // A protocol-owned implicit transaction is not a user BEGIN
-            // block for a top-level SET LOCAL work_mem utility statement.
-            ScopedWorkMemUtilityContext workMemContext(
-                wasInTransaction && !extendedImplicitTransaction);
+            // Parse/Bind can open a transaction for planning alone. A
+            // completed Execute also gives SET LOCAL a SQL block to continue.
+            ScopedWorkMemUtilityContext settingsContext(
+                wasInTransaction && !extendedImplicitTransaction,
+                extendedImplicitTransaction && extendedImplicitExecuted);
             result = executeProtocolQuery(
                 effectiveSql, *execSession,
                 remainingExtendedQueryTimeoutMs(), !typeDeclarationsAnalyzed,
@@ -7778,9 +7710,9 @@ void handleClient(SecureSocket socket, std::string clientHost) {
         CopyExecutionOutcome outcome;
         const auto copyDeadline = extendedQueryTimeoutActive
             ? extendedQueryDeadline
-            : session.statementTimeoutMs > 0
+            : session.timeouts.get(TimeoutParameter::Statement) > 0
                 ? std::chrono::steady_clock::now() +
-                    std::chrono::milliseconds(session.statementTimeoutMs)
+                    std::chrono::milliseconds(session.timeouts.get(TimeoutParameter::Statement))
                 : std::chrono::steady_clock::time_point::max();
         outcome.failedInExistingTransaction = g_engine.inTransaction();
         if (transactionFailed) {
@@ -7997,6 +7929,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
         }
         PgFrontendMessage message;
         if (!protocol.readMessage(message, protocolError)) break;
+        session.timeouts.refreshDefaults(g_engine.getLockManager());
         if (!extendedQueryError &&
             (message.type == 'P' || message.type == 'B' ||
              message.type == 'D' || message.type == 'E')) {
@@ -8174,6 +8107,8 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             }
             if (!batchError) {
                 for (const auto& statement : statements) {
+                    if (statements.size() > 1)
+                        session.timeouts.refreshDefaults(g_engine.getLockManager());
                     updateProcessInfo(pid, "Query", "active", trimText(statement));
                     results.push_back(executeForProtocol(statement));
                     if (results.back().error) {
@@ -8797,7 +8732,6 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                     extendedImplicitTransaction = true;
                     extendedImplicitExecuted = false;
                 }
-                if (extendedImplicitTransaction) extendedImplicitExecuted = true;
                 updateProcessInfo(pid, "Query", "active",
                                   trimText(portalState.sql));
                 // Extended Parse already analyzed direct type declarations.
@@ -8810,6 +8744,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                         [](uint16_t format){return format==1;}) &&
                     (!portalState.result.resultSet || portalState.resultFormats.size()<=1 ||
                         portalState.resultFormats.size()==portalState.result.columns.size()));
+                if (extendedImplicitTransaction) extendedImplicitExecuted = true;
                 updateProcessIdle();
                 portalState.executed = true;
             }

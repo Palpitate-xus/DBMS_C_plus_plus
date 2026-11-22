@@ -16,7 +16,6 @@
 #include <exception>
 #include <filesystem>
 #include <functional>
-#include <future>
 #include <iomanip>
 #include <iostream>
 #include <iterator>
@@ -34,6 +33,7 @@
 #include "utils/prepared_stmts.h"
 #include "utils/PlanCacheEpoch.h"
 #include "common/WorkMemUtilityContext.h"
+#include "transaction/StatementInterruptGuard.h"
 #include "ExecutionPlan.h"
 #include "executor/PreparedTableSource.h"
 #include "NetworkServer.h"
@@ -183,6 +183,8 @@ const bool g_initialConfigLoadOk = [] {
         std::cerr << "FATAL: invalid dbms.conf; refusing to start" << std::endl;
         return false;
     }
+    dbms::publishTimeoutDefaults(g_config.statementTimeoutMs, g_config.lockTimeoutMs,
+                                 g_config.deadlockTimeoutMs);
     dbms::setSqlStatsMaxEntries(g_config.sqlStatsMaxEntries);
     if (!dbms::notificationManager().configureMaxQueueBytes(
             g_config.maxNotifyQueuePages * static_cast<size_t>(8192))) {
@@ -517,6 +519,8 @@ static bool installReloadedConfig(const dbms::Config& next) {
         return false;
     }
     g_config = applied;
+    dbms::publishTimeoutDefaults(applied.statementTimeoutMs, applied.lockTimeoutMs,
+                                 applied.deadlockTimeoutMs);
     g_slowQueryThresholdMs = applied.slowQueryThresholdMs;
     g_checkpointInterval = applied.checkpointInterval;
     dbms::QueryPlanner::setParallelWorkers(
@@ -3188,6 +3192,7 @@ static bool handleBeginTransaction(const string& sql, Session& s) {
     if (!hadTransaction) {
         s.searchPathTransaction.begin(s.searchPath);
         s.workMem.begin();
+        s.timeouts.begin();
         s.transactionChainOrigin = false;
         s.transactionChainReadOnly = false;
     }
@@ -3214,6 +3219,7 @@ static bool commitBeforeLegacyDdl(Session& s) {
         (void)g_engine.rollbackTransaction();
         s.searchPathTransaction.finish(s.searchPath,false);
         s.workMem.finish(false);
+        s.timeouts.finish(false, g_engine.getLockManager());
         rollbackNotificationTransaction(s);
         dbms::advisoryLockManager().releaseTransaction(advisoryOwner(s));
         return false;
@@ -3221,7 +3227,11 @@ static bool commitBeforeLegacyDdl(Session& s) {
 
     const DBStatus status = g_engine.commitTransaction();
     if (status != DBStatus::OK) {
-        if(!g_engine.inTransaction()){ s.searchPathTransaction.finish(s.searchPath,false); s.workMem.finish(false); }
+        if (!g_engine.inTransaction()) {
+            s.searchPathTransaction.finish(s.searchPath, false);
+            s.workMem.finish(false);
+            s.timeouts.finish(false, g_engine.getLockManager());
+        }
         if (!g_engine.inTransaction())
             dbms::advisoryLockManager().releaseTransaction(advisoryOwner(s));
         if (!g_engine.inTransaction()) rollbackNotificationTransaction(s);
@@ -3231,6 +3241,7 @@ static bool commitBeforeLegacyDdl(Session& s) {
     }
     s.searchPathTransaction.finish(s.searchPath,true);
     s.workMem.finish(true);
+    s.timeouts.finish(true, g_engine.getLockManager());
     dbms::advisoryLockManager().releaseTransaction(advisoryOwner(s));
     if (!commitNotificationTransaction(s)) return false;
     cout << "Note: DDL caused implicit commit of open transaction" << endl;
@@ -3262,6 +3273,7 @@ static bool handleCommitTransaction(const string& sql, Session& s) {
         (void)g_engine.rollbackTransaction();
         s.searchPathTransaction.finish(s.searchPath,false);
         s.workMem.finish(false);
+        s.timeouts.finish(false, g_engine.getLockManager());
         rollbackNotificationTransaction(s);
         dbms::advisoryLockManager().releaseTransaction(advisoryOwner(s));
         return true;
@@ -3271,6 +3283,7 @@ static bool handleCommitTransaction(const string& sql, Session& s) {
         if (!g_engine.inTransaction()) {
             s.searchPathTransaction.finish(s.searchPath,false);
             s.workMem.finish(false);
+            s.timeouts.finish(false, g_engine.getLockManager());
             rollbackNotificationTransaction(s);
             dbms::advisoryLockManager().releaseTransaction(advisoryOwner(s));
         }
@@ -3280,6 +3293,7 @@ static bool handleCommitTransaction(const string& sql, Session& s) {
     }
     s.searchPathTransaction.finish(s.searchPath,true);
     s.workMem.finish(true);
+    s.timeouts.finish(true, g_engine.getLockManager());
     if (hadTransaction)
         dbms::advisoryLockManager().releaseTransaction(advisoryOwner(s));
     if (hadTransaction && !commitNotificationTransaction(s)) return true;
@@ -3346,6 +3360,7 @@ static bool handleRollbackTransaction(const string& sql, Session& s) {
     }
     s.searchPathTransaction.finish(s.searchPath,false);
     s.workMem.finish(false);
+    s.timeouts.finish(false, g_engine.getLockManager());
     if (hadTransaction) {
         rollbackNotificationTransaction(s);
         dbms::advisoryLockManager().releaseTransaction(advisoryOwner(s));
@@ -3425,6 +3440,7 @@ static bool handleSavepoint(const string& sql, Session& s) {
     dbms::advisoryLockManager().savepoint(advisoryOwner(s), name);
     s.searchPathTransaction.save(name,s.searchPath);
     s.workMem.save(name);
+    s.timeouts.save(name);
     cout << "Savepoint " << name << " created" << endl;
     log(s.username, "savepoint " + name, getTime());
     return false;
@@ -3453,6 +3469,7 @@ static bool handleReleaseSavepoint(const string& sql, Session& s) {
     dbms::advisoryLockManager().releaseSavepoint(advisoryOwner(s), name);
     s.searchPathTransaction.release(name);
     s.workMem.release(name);
+    s.timeouts.release(name);
     cout << "Savepoint " << name << " released" << endl;
     log(s.username, "release savepoint " + name, getTime());
     return false;
@@ -3482,6 +3499,7 @@ static bool handleRollbackToSavepoint(const string& sql, Session& s) {
     dbms::advisoryLockManager().rollbackToSavepoint(advisoryOwner(s), name);
     s.searchPathTransaction.rollback(name,s.searchPath);
     s.workMem.rollback(name);
+    s.timeouts.rollback(name, g_engine.getLockManager());
     cout << "Rolled back to savepoint " << name << endl;
     log(s.username, "rollback to savepoint " + name, getTime());
     return false;
@@ -3596,6 +3614,12 @@ static bool restoreSessionTimeZone(Session& s) {
     return false;
 }
 
+static void checkTimeoutPrivilege(const Session& s, dbms::TimeoutParameter parameter,
+                                  const string& name) {
+    if (parameter == dbms::TimeoutParameter::Deadlock && !sessionIsAdmin(s))
+        throw dbms::DbError("42501", "permission denied to set parameter \"" + name + "\"");
+}
+
 static bool handleResetCommand(const string& sql, Session& s) {
     // RESET ROLE
     if (sql == "reset role") {
@@ -3620,13 +3644,23 @@ static bool handleResetCommand(const string& sql, Session& s) {
     };
     string rest = (sql == "reset all") ? "all" : trim(sql.substr(6));
     const auto resetTokens = dbms::SQLParser::tokenize(sql);
-    if (resetTokens.size() > 1 &&
-        toLower(decodeQuotedIdentifier(resetTokens[1])) == "work_mem" &&
-        (resetTokens.size() == 2 || resetTokens[2] != ".")) {
+    const auto name = resetTokens.size() > 1
+        ? toLower(decodeQuotedIdentifier(resetTokens[1])) : string{};
+    const auto timeout = dbms::findTimeoutParameter(name);
+    if ((name == "work_mem" || timeout) &&
+        (resetTokens.size() == 2 || resetTokens[2].front() != '.')) {
         dbms::SQLParser parser;
         const auto syntax = parser.parseForBinding(sql);
         if (!syntax.success)
-            throw dbms::DbError("42601", syntax.error.empty() ? "invalid RESET work_mem" : syntax.error);
+            throw dbms::DbError("42601", syntax.error.empty() ? "invalid RESET " + name : syntax.error);
+        if (timeout) {
+            checkTimeoutPrivilege(s, *timeout, name);
+            if (g_engine.inTransaction()) s.timeouts.begin();
+            s.timeouts.set(*timeout, std::nullopt, false);
+            s.timeouts.syncLocks(g_engine.getLockManager());
+            cout << "RESET" << endl;
+            return false;
+        }
         rest = "work_mem";
     }
     if (rest == "all") {
@@ -3642,13 +3676,13 @@ static bool handleResetCommand(const string& sql, Session& s) {
         s.clientEncoding = s.defaultClientEncoding;
         s.searchPathTransaction.assign(s.searchPath,s.defaultSearchPath,false);
         s.lcMonetary = s.defaultLcMonetary;
-        s.statementTimeoutMs = s.defaultStatementTimeoutMs;
-        if (g_engine.inTransaction()) s.workMem.begin();
+        if (g_engine.inTransaction()) {
+            s.workMem.begin();
+            s.timeouts.begin();
+        }
         s.workMem.assign(std::nullopt, false);
-        s.lockTimeoutMs = g_config.lockTimeoutMs;
-        s.deadlockTimeoutMs = g_config.deadlockTimeoutMs;
-        g_engine.getLockManager().setLockTimeout(s.lockTimeoutMs);
-        g_engine.getLockManager().setDeadlockTimeout(s.deadlockTimeoutMs);
+        s.timeouts.resetAll();
+        s.timeouts.syncLocks(g_engine.getLockManager());
         s.constraintsDeferred = false;
         resetIsolation();
         cout << "RESET ALL" << endl;
@@ -3679,27 +3713,10 @@ static bool handleResetCommand(const string& sql, Session& s) {
         cout << "RESET " << rest << endl;
         return false;
     }
-    if (rest == "statement_timeout" || rest == "statement_timeout_ms") {
-        s.statementTimeoutMs = s.defaultStatementTimeoutMs;
-        cout << "RESET " << rest << endl;
-        return false;
-    }
     if (toLower(decodeQuotedIdentifier(rest)) == "work_mem") {
         if (g_engine.inTransaction()) s.workMem.begin();
         s.workMem.assign(std::nullopt, false);
         cout << "RESET" << endl;
-        return false;
-    }
-    if (rest == "lock_timeout" || rest == "lock_timeout_ms") {
-        s.lockTimeoutMs = g_config.lockTimeoutMs;
-        g_engine.getLockManager().setLockTimeout(s.lockTimeoutMs);
-        cout << "RESET " << rest << endl;
-        return false;
-    }
-    if (rest == "deadlock_timeout" || rest == "deadlock_timeout_ms") {
-        s.deadlockTimeoutMs = g_config.deadlockTimeoutMs;
-        g_engine.getLockManager().setDeadlockTimeout(s.deadlockTimeoutMs);
-        cout << "RESET " << rest << endl;
         return false;
     }
     if (rest == "transaction_isolation" || rest == "transaction isolation") {
@@ -3756,21 +3773,9 @@ static bool applyConfigParam(const string& param, const string& val, bool isGlob
             cout << "Set " << param << " = " << val << " (session)" << endl;
             return false;
         }
-        if (param == "statement_timeout_ms" || param == "statement_timeout") {
-            s.statementTimeoutMs = candidate.statementTimeoutMs;
-        } else if (param == "lock_timeout_ms" || param == "lock_timeout") {
-            s.lockTimeoutMs = candidate.lockTimeoutMs;
-            g_engine.getLockManager().setLockTimeout(s.lockTimeoutMs);
-        } else if (param == "deadlock_timeout_ms" || param == "deadlock_timeout") {
-            s.deadlockTimeoutMs = candidate.deadlockTimeoutMs;
-            g_engine.getLockManager().setDeadlockTimeout(s.deadlockTimeoutMs);
-        } else {
-            cout << "Parameter " << param
-                 << " is process-global; use SET GLOBAL or ALTER SYSTEM" << endl;
-            return true;
-        }
-        cout << "Set " << param << " = " << val << " (session)" << endl;
-        return false;
+        cout << "Parameter " << param
+             << " is process-global; use SET GLOBAL or ALTER SYSTEM" << endl;
+        return true;
     }
 
     // ALTER SYSTEM semantics: build from the persisted file so consecutive
@@ -4175,27 +4180,55 @@ static std::optional<bool> handleSearchPathSetCommand(const string& rawSql, Sess
 
 // Parse the original scalar SET spelling, so quoted units, signed numbers,
 // DEFAULT and FROM CURRENT retain their distinct SQL meanings.
-static std::optional<bool> handleWorkMemSetCommand(const string& rawSql, Session& s) {
+static std::optional<bool> handleScalarSessionSetting(const string& rawSql, Session& s) {
     const auto tokens = dbms::SQLParser::tokenize(rawSql);
     size_t target = 1;
     if (target < tokens.size() &&
         (dbms::SQLParser::toLower(tokens[target]) == "session" ||
          dbms::SQLParser::toLower(tokens[target]) == "local")) ++target;
     if (target >= tokens.size() ||
-        dbms::SQLParser::toLower(decodeQuotedIdentifier(tokens[target])) != "work_mem" ||
-        (target + 1 < tokens.size() && tokens[target + 1] == ".")) return std::nullopt;
+        (target + 1 < tokens.size() && tokens[target + 1].front() == '.')) return std::nullopt;
+    const auto name = dbms::SQLParser::toLower(decodeQuotedIdentifier(tokens[target]));
+    const auto timeout = dbms::findTimeoutParameter(name);
+    if (name != "work_mem" && !timeout) return std::nullopt;
     dbms::SQLParser parser;
     const auto parsed = parser.parseForBinding(rawSql);
     const auto* setting = parsed.success ? dynamic_cast<const dbms::SetStmt*>(parsed.stmt.get()) : nullptr;
-    if (!setting || setting->name != "work_mem")
-        throw dbms::DbError("42601", parsed.error.empty() ? "invalid SET work_mem" : parsed.error);
+    if (!setting || setting->name != name)
+        throw dbms::DbError("42601", parsed.error.empty() ? "invalid SET " + name : parsed.error);
     const bool local = setting->scope == dbms::SetStmt::Scope::Local;
+    const bool localAllowed = timeout ? dbms::ScopedWorkMemUtilityContext::insideBlock()
+                                      : dbms::ScopedWorkMemUtilityContext::localAllowed();
     const bool outsideBlock = local && (!g_engine.inTransaction() ||
-        (executeDepth == 1 && !dbms::ScopedWorkMemUtilityContext::localAllowed()));
+        (executeDepth == 1 && !localAllowed));
     // PostgreSQL warns before flattening/checking the value, even when that
     // check subsequently raises an error. Syntax errors remain parse errors.
     if (outsideBlock)
         dbms::emitDiagnostic({"WARNING", "25P01", "SET LOCAL can only be used in transaction blocks"});
+    if (timeout) {
+        checkTimeoutPrivilege(s, *timeout, name);
+        std::optional<int> value;
+        if (setting->values.empty()) {
+            value = s.timeouts.get(*timeout);
+        } else if (setting->values.size() != 1) {
+            throw dbms::DbError("22023", "SET " + name + " takes only one argument");
+        } else if (setting->values.front() != "default") {
+            const auto& datum = setting->values.front();
+            const auto duration = dbms::parseTimeoutMs(!datum.empty() && datum.front() == '"'
+                ? decodeQuotedIdentifier(datum) : stripQuotes(datum),
+                dbms::timeoutMinimum(*timeout, name));
+            if (!duration)
+                throw dbms::DbError("22023", "invalid value for parameter \"" + name + "\"");
+            value = *duration;
+        }
+        if (g_engine.inTransaction()) s.timeouts.begin();
+        // A first Extended Execute warns, but its value is visible to later
+        // commands before Sync ends the implicit transaction.
+        s.timeouts.set(*timeout, value, local);
+        s.timeouts.syncLocks(g_engine.getLockManager());
+        cout << "SET" << endl;
+        return false;
+    }
     std::optional<size_t> value;
     if (setting->values.empty()) value = s.workMem.effective(g_config.workMemKb);
     else if (setting->values.size() != 1)
@@ -5523,6 +5556,7 @@ static bool handlePrepare(const string& sql, Session& s) {
         if(res!=DBStatus::OK && !g_engine.inTransaction()) {
             s.searchPathTransaction.finish(s.searchPath,false);
             s.workMem.finish(false);
+            s.timeouts.finish(false, g_engine.getLockManager());
         }
         if (res == DBStatus::OK) {
             if (!dbms::advisoryLockManager().prepareTransaction(
@@ -5533,6 +5567,7 @@ static bool handlePrepare(const string& sql, Session& s) {
                 rollbackNotificationTransaction(s);
                 s.searchPathTransaction.finish(s.searchPath,false);
                 s.workMem.finish(false);
+                s.timeouts.finish(false, g_engine.getLockManager());
                 cout << "ERROR: advisory lock ownership could not be "
                         "transferred to prepared transaction (SQLSTATE "
                         "XX000)" << endl;
@@ -5540,6 +5575,7 @@ static bool handlePrepare(const string& sql, Session& s) {
             }
             s.searchPathTransaction.finish(s.searchPath,true);
             s.workMem.finish(true);
+            s.timeouts.finish(true, g_engine.getLockManager());
             rollbackNotificationTransaction(s);
             cout << "PREPARE TRANSACTION " << xid << endl;
             log(s.username, "prepare transaction " + xid, getTime());
@@ -20072,9 +20108,9 @@ static dbms::PreparedQueryRows preparedPgSettingsRows(const Session& session) {
     add("max_notify_queue_pages",
                to_string(dbms::notificationManager().queueCapacityBytes() / 8192));
     add("checkpoint_timeout", to_string(g_config.checkpointInterval), "s");
-    add("statement_timeout", to_string(session.statementTimeoutMs), "ms");
-    add("lock_timeout", to_string(session.lockTimeoutMs), "ms");
-    add("deadlock_timeout", to_string(session.deadlockTimeoutMs), "ms");
+    add("statement_timeout", to_string(session.timeouts.get(dbms::TimeoutParameter::Statement)), "ms");
+    add("lock_timeout", to_string(session.timeouts.get(dbms::TimeoutParameter::Lock)), "ms");
+    add("deadlock_timeout", to_string(session.timeouts.get(dbms::TimeoutParameter::Deadlock)), "ms");
     add("lc_monetary", session.lcMonetary);
     add("slow_query_threshold_ms", to_string(g_config.slowQueryThresholdMs), "ms");
     add("enable_seq_scan", g_config.enableSeqScan ? "on" : "off");
@@ -23963,8 +23999,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
             s.currentDB = dbname;
             s.tempNamespaceCreated = false;
             g_engine.getLockManager().setResourceNamespace(dbname);
-            g_engine.getLockManager().setLockTimeout(s.lockTimeoutMs);
-            g_engine.getLockManager().setDeadlockTimeout(s.deadlockTimeoutMs);
+            s.timeouts.syncLocks(g_engine.getLockManager());
             cout << "set Database to " << dbname << endl;
             log(s.username, "use database success", getTime());
             return false;
@@ -24090,8 +24125,8 @@ static bool executeInternal(const string& rawSql, Session& s) {
             return handleRollbackToSavepoint(sql, s);
 
         case dbms::SqlCommand::Set:
-            if (const auto memoryResult = handleWorkMemSetCommand(effectiveRawSql, s))
-                return *memoryResult;
+            if (const auto settingResult = handleScalarSessionSetting(effectiveRawSql, s))
+                return *settingResult;
             if (const auto pathResult = handleSearchPathSetCommand(effectiveRawSql, s))
                 return *pathResult;
             [[fallthrough]];
@@ -26946,6 +26981,14 @@ static bool executeInternal(const string& rawSql, Session& s) {
             cout << shown->name << endl << value << endl;
             return false;
         }
+        if (shown && shown->isShow) {
+            if (const auto timeout = dbms::findTimeoutParameter(shown->name)) {
+                const auto value = dbms::formatTimeoutMs(s.timeouts.get(*timeout));
+                publishStructuredUtilityResult({shown->name}, {"text"}, {{value}}, {{false}}, "SHOW");
+                cout << shown->name << endl << value << endl;
+                return false;
+            }
+        }
         if (shown && shown->isShow && shown->name == "work_mem") {
             const auto value = dbms::formatWorkMemKb(s.workMem.effective(g_config.workMemKb));
             publishStructuredUtilityResult({"work_mem"}, {"text"}, {{value}}, {{false}}, "SHOW");
@@ -28205,11 +28248,8 @@ static bool executeInternal(const string& rawSql, Session& s) {
         // Reset session variables
         s.workMem.assign(std::nullopt, false);
         s.timezoneOffsetMinutes = 0;
-        s.statementTimeoutMs = s.defaultStatementTimeoutMs;
-        s.lockTimeoutMs = g_config.lockTimeoutMs;
-        s.deadlockTimeoutMs = g_config.deadlockTimeoutMs;
-        g_engine.getLockManager().setLockTimeout(s.lockTimeoutMs);
-        g_engine.getLockManager().setDeadlockTimeout(s.deadlockTimeoutMs);
+        s.timeouts.resetAll();
+        s.timeouts.syncLocks(g_engine.getLockManager());
         s.isolationLevel = 2; // REPEATABLE READ default
         cout << "Session state discarded" << endl;
         return false;
@@ -41500,17 +41540,23 @@ static bool executeWithCteInheritance(const std::string& inputSql, Session& s,
     // A calling statement can execute SET in a SQL function before it fails.
     // Own the GUC transaction independently of the storage transaction so
     // utility-only statements and a failed implicit BEGIN also unwind it.
-    struct WorkMemStatementScope {
+    struct SessionSettingStatementScope {
         Session& session;
         bool owns, success = false;
-        WorkMemStatementScope(Session& value, bool outer)
+        SessionSettingStatementScope(Session& value, bool outer)
             : session(value), owns(outer && !g_engine.inTransaction()) {
-            if (owns) session.workMem.begin();
+            if (owns) {
+                session.workMem.begin();
+                session.timeouts.begin();
+            }
         }
-        ~WorkMemStatementScope() {
-            if (owns && !g_engine.inTransaction()) session.workMem.finish(success);
+        ~SessionSettingStatementScope() {
+            if (owns && !g_engine.inTransaction()) {
+                session.workMem.finish(success);
+                session.timeouts.finish(success, g_engine.getLockManager());
+            }
         }
-    } workMemStatementScope(s, outermost);
+    } settingStatementScope(s, outermost);
     // A successfully consumed tree is not yet a successful calling statement:
     // immediate FK validation or durable commit can still fail. Defer only
     // this public EXPLAIN result; nested SPI captures keep their own output.
@@ -41696,7 +41742,7 @@ static bool executeWithCteInheritance(const std::string& inputSql, Session& s,
                                         "statement transaction commit failed");
     }
     if (!error && !explainPublication.empty()) cout << explainPublication;
-    workMemStatementScope.success = !error;
+    settingStatementScope.success = !error;
     return error;
 }
 
@@ -42104,12 +42150,8 @@ int main(int argc, char* argv[]) {
     });
     Session s;
     s.compatibilityMode = dbms::defaultCompatibilityMode();
-    s.statementTimeoutMs = g_config.statementTimeoutMs;
-    s.defaultStatementTimeoutMs = g_config.statementTimeoutMs;
-    s.lockTimeoutMs = g_config.lockTimeoutMs;
-    s.deadlockTimeoutMs = g_config.deadlockTimeoutMs;
-    g_engine.getLockManager().setLockTimeout(s.lockTimeoutMs);
-    g_engine.getLockManager().setDeadlockTimeout(s.deadlockTimeoutMs);
+    s.timeouts.refreshDefaults(g_engine.getLockManager());
+    s.timeouts.syncLocks(g_engine.getLockManager());
     // Register WHEN condition evaluator for triggers
     g_engine.setWhenConditionEvaluator(
         [&](const std::string& condition,
@@ -42203,93 +42245,32 @@ int main(int argc, char* argv[]) {
             string sql;
             if (!getline(cin, sql)) break;
             if (trim(sql) == "exit") break;
+            s.timeouts.refreshDefaults(g_engine.getLockManager());
             checkNotifications(s);
             dbms::updateProcessInfo(pid, "Query", "executing", sql);
             auto start = std::chrono::steady_clock::now();
             bool ok = false;
-            bool timedOut = false;
-            try {
-                const auto executeWithInterruptContext = [&]() {
-                    struct CliInterruptGuard {
-                        Session& session;
-                        dbms::LockManager& lockManager;
-                        std::shared_ptr<SessionInterruptState> state;
-
-                        CliInterruptGuard(Session& activeSession,
-                                          dbms::LockManager& manager)
-                            : session(activeSession), lockManager(manager),
-                              state(activeSession.interruptState) {
-                            state->cancelRequested.store(
-                                false, std::memory_order_release);
-                            state->timeoutRequested.store(
-                                false, std::memory_order_release);
-                            state->queryActive.store(
-                                true, std::memory_order_release);
-                            dbms::setCurrentSession(&session);
-                            dbms::setCurrentQueryInterruptState(state);
-                            lockManager.setInterruptHandler(
-                                [interruptState = state]() {
-                                    if (interruptState->terminateRequested.load(
-                                            std::memory_order_acquire)) {
-                                        throw dbms::DbError(
-                                            "57P01",
-                                            "terminating connection due to administrator command");
-                                    }
-                                    if (interruptState->cancelRequested.load(
-                                            std::memory_order_acquire)) {
-                                        if (interruptState->timeoutRequested.load(
-                                                std::memory_order_acquire)) {
-                                            throw dbms::DbError(
-                                                "57014",
-                                                "canceling statement due to statement timeout");
-                                        }
-                                        throw dbms::DbError(
-                                            "57014",
-                                            "canceling statement due to user request");
-                                    }
-                                });
-                        }
-
-                        ~CliInterruptGuard() {
-                            lockManager.clearInterruptHandler();
-                            dbms::setCurrentQueryInterruptState(nullptr);
-                            state->queryActive.store(
-                                false, std::memory_order_release);
-                            state->cancelRequested.store(
-                                false, std::memory_order_release);
-                            state->timeoutRequested.store(
-                                false, std::memory_order_release);
-                        }
-                    } interruptGuard(s, g_engine.getLockManager());
-                    return execute(sql, s);
-                };
-                if (s.statementTimeoutMs > 0) {
-                    auto future = std::async(
-                        std::launch::async, executeWithInterruptContext);
-                    if (future.wait_for(std::chrono::milliseconds(s.statementTimeoutMs))
-                        == std::future_status::timeout) {
-                        timedOut = true;
-                        s.interruptState->timeoutRequested.store(
-                            true, std::memory_order_release);
-                        s.interruptState->cancelRequested.store(
-                            true, std::memory_order_release);
-                        cout << "ERROR: statement timeout" << endl;
-                    } else {
-                        ok = future.get();
-                    }
-                } else {
-                    ok = executeWithInterruptContext();
+            bool timedOut;
+            {
+                dbms::setCurrentSession(&s);
+                dbms::StatementInterruptGuard interruptGuard(s.interruptState,
+                                                              g_engine.getLockManager());
+                try {
+                    interruptGuard.startTimer(s.timeouts.get(dbms::TimeoutParameter::Statement));
+                    ok = execute(sql, s);
+                } catch (const dbms::DbError& error) {
+                    cout << "ERROR: " << error.message() << " (SQLSTATE "
+                         << error.sqlState() << ")" << endl;
+                    ok = true;
+                } catch (const std::exception& error) {
+                    cout << "ERROR: " << error.what() << " (SQLSTATE XX000)" << endl;
+                    ok = true;
+                } catch (...) {
+                    cout << "ERROR: unhandled statement failure (SQLSTATE XX000)" << endl;
+                    ok = true;
                 }
-            } catch (const dbms::DbError& error) {
-                cout << "ERROR: " << error.message() << " (SQLSTATE "
-                     << error.sqlState() << ")" << endl;
-                ok = true;
-            } catch (const std::exception& error) {
-                cout << "ERROR: " << error.what() << " (SQLSTATE XX000)" << endl;
-                ok = true;
-            } catch (...) {
-                cout << "ERROR: unhandled statement failure (SQLSTATE XX000)" << endl;
-                ok = true;
+                timedOut = interruptGuard.finishTimer();
+                if (timedOut) cout << "ERROR: statement timeout" << endl;
             }
             dbms::updateProcessDb(pid, s.currentDB);
             dbms::updateProcessInfo(pid, "Sleep", "", "");

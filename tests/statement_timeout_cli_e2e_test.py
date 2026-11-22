@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The interactive CLI must stop a cooperative long query at its timeout."""
+"""Timeouts interrupt long queries without moving an interactive transaction."""
 
 import importlib.util
 import os
@@ -25,6 +25,15 @@ def main():
             "SET statement_timeout = 100\n"
             "SELECT 1 FROM generate_series(1, 9223372036854775807) g\n"
             "SELECT 1\n"
+            "SET statement_timeout = '5s'\n"
+            "BEGIN\n"
+            "SAVEPOINT timeout_value\n"
+            "SET LOCAL statement_timeout = 0\n"
+            "SHOW statement_timeout\n"
+            "ROLLBACK TO timeout_value\n"
+            "SHOW statement_timeout\n"
+            "COMMIT\n"
+            "SHOW statement_timeout\n"
             "exit\n"
         )
         binary = Path(os.environ.get("DBMS_MAIN", str(root / "dbms_main"))).resolve()
@@ -36,6 +45,10 @@ def main():
         assert "?column? \n1 \n" in result.stdout, result.stdout
         assert result.stdout.find("ERROR: statement timeout") < \
             result.stdout.rfind("?column?"), result.stdout
+        assert "Not in transaction" not in result.stdout, result.stdout
+        assert result.stdout.count("statement_timeout\n0\n") == 1, result.stdout
+        assert result.stdout.count("statement_timeout\n5s\n") == 2, result.stdout
+        assert "Transaction committed" in result.stdout, result.stdout
     print("[STATEMENT TIMEOUT CLI E2E] timeout and recovery passed")
 
 

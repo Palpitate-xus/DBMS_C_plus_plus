@@ -2624,6 +2624,24 @@ SET compatibility_mode = postgresql18;       -- 回到 PostgreSQL 18 语义
 SHOW dbms.extensions;                        -- 审计当前会话启用的偏移
 ```
 
+### 在事务里临时调整超时
+
+`statement_timeout` 限制一条语句的执行时间。`lock_timeout` 限制一次锁等待的时间。`deadlock_timeout` 决定等待多久后检查是否有事务互相等待，修改它需要管理员权限。数字按毫秒处理，也可写带单位的字符串，例如 `'150ms'` 或 `'2s'`。前两个参数设为 `0` 会关闭对应的超时。
+
+`SET` 在提交后继续生效，事务回滚会撤销它。`SET LOCAL` 只在当前事务里有效。`ROLLBACK TO` 恢复保存点时的设置。`RESET`、`SET ... DEFAULT`、`RESET ALL` 和 `DISCARD ALL` 可以恢复连接的默认值。连接通过 `options` 指定的值优先于服务器默认值。重新加载服务器配置后，继承服务器默认值的连接会在接收后续请求时采用新值。
+
+```sql
+SET lock_timeout = '2s';
+BEGIN;
+SET LOCAL lock_timeout = '150ms';
+SAVEPOINT before_change;
+SET lock_timeout = '5s';
+ROLLBACK TO before_change;
+SHOW lock_timeout;                       -- 150ms
+COMMIT;
+SHOW lock_timeout;                       -- 2s
+```
+
 ### 配置值与实际运行资源的边界
 
 参数能写入配置或出现在 `pg_settings` 中，并不表示已实现 PostgreSQL 的同名调度或资源语义。

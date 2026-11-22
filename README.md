@@ -19,6 +19,13 @@ cmake --build build/cmake --target dbms_main --parallel 2
 ## 最近更新
 
 <details>
+<summary>回滚事务时，会恢复之前的超时设置 · 2026-11-22</summary>
+
+可以只为当前事务缩短锁等待时间，结束后恢复原来的设置。用 `SHOW` 可以随时查看当前值。[使用示例](docs/MANUAL.md#在事务里临时调整超时)
+
+</details>
+
+<details>
 <summary>等不到更严格的表锁，原来的锁会保留 · 2026-11-22</summary>
 
 如果你已锁住一张表，再请求更严格的锁时遇到超时或取消，原来的锁仍然有效。也可以让数据库一遇到冲突就报错。[使用示例](docs/MANUAL.md#在事务里锁住一张表)
@@ -29,13 +36,6 @@ cmake --build build/cmake --target dbms_main --parallel 2
 <summary>改记录时等不到锁，原来的锁会保留 · 2026-11-22</summary>
 
 如果你先锁住一条记录来核对，之后尝试修改时等到超时，回到保存点后，其他人仍要等你的事务结束才能修改这条记录。[使用说明](docs/MANUAL.md#查询时锁住分区表记录)
-
-</details>
-
-<details>
-<summary>多人可以同时核对分区表里的同一条记录 · 2026-11-22</summary>
-
-核对时可以锁住记录，让其他人也能查看。要修改这条记录，得等核对的人都结束各自的事务。[使用示例](docs/MANUAL.md#查询时锁住分区表记录)
 
 </details>
 

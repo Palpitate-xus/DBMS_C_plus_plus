@@ -1,8 +1,12 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-22 · 事务中的超时设置和配置重载
+
+三种会话超时支持 `SET LOCAL`、事务回滚、保存点、启动默认值和配置重载。实际表锁等待使用恢复后的值。`SHOW` 返回相应时间单位，`deadlock_timeout` 支持管理员权限检查。更广的参数授权、完整 `pg_settings`、跨进程等待图和长 I/O 中断仍有差距。`OPS-02`、`TXN-05`、`TXN-07` 和 `PROTO-07` 保持部分实现。[验证范围](test-report.md#transactional-timeouts-20261122)
+
 ## 2026-11-22 · 表锁与页锁的转换
 
-升级表锁或页锁时保留原锁，保存点可以恢复原模式。同一进程内可检测两个共享持有者同时升级造成的死锁。单表 `LOCK TABLE` 支持 `ACCESS SHARE`、`ACCESS EXCLUSIVE`、省略模式和 `NOWAIT`。其余表锁模式、跨进程等待图和 `lock_timeout` 的事务回滚仍有差距。`TXN-05`、`TXN-07` 和 `TXN-08` 保持部分实现。[验证范围](test-report.md#table-page-lock-upgrade-20261122)
+升级表锁或页锁时保留原锁，保存点可以恢复原模式。同一进程内可检测两个共享持有者同时升级造成的死锁。单表 `LOCK TABLE` 支持 `ACCESS SHARE`、`ACCESS EXCLUSIVE`、省略模式和 `NOWAIT`。其余表锁模式和跨进程等待图仍有差距。`TXN-05`、`TXN-07` 和 `TXN-08` 保持部分实现。[验证范围](test-report.md#table-page-lock-upgrade-20261122)
 
 ## 2026-11-22 · 共享行锁升级保留原锁
 

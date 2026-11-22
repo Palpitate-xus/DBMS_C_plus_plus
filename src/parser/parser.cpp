@@ -3,6 +3,7 @@
 #include "common/SqlTrivia.h"
 #include "common/DbError.h"
 #include "common/IntegerTextCodec.h"
+#include "common/TimeoutSetting.h"
 #include "expression/sql_value.h"
 #include "utils/interval_type.h"
 #include <charconv>
@@ -2072,13 +2073,24 @@ std::optional<std::string> SQLParser::parseRawSyntax(const std::string& sql) {
         "dump","pg_switch_wal","switch"};
     size_t head = 0;
     while (head < tokens.size() && tokens[head] == "(") ++head;
-    if (head == tokens.size() ||
-        std::find(commandHeads.begin(),commandHeads.end(),toLower(tokens[head])) == commandHeads.end())
+    if (head == tokens.size()) return std::string("unknown SQL command");
+    const auto command = toLower(tokens[head]);
+    if (std::find(commandHeads.begin(), commandHeads.end(), command) == commandHeads.end())
         return std::string("unknown SQL command");
+    if (head != 0) return std::nullopt;
     // The regular classifier needs a target token. Recognize this raw
     // grammar head even when its required target is missing.
-    if (tokens.size() < 2 || toLower(tokens[0]) != "drop" ||
-        toLower(tokens[1]) != "domain") return std::nullopt;
+    const bool dropDomain = tokens.size() >= 2 && command == "drop" &&
+                            toLower(tokens[1]) == "domain";
+    size_t parameter = 1;
+    if (command == "set" && parameter < tokens.size() &&
+        (toLower(tokens[parameter]) == "local" || toLower(tokens[parameter]) == "session"))
+        ++parameter;
+    const bool timeoutUtility = (command == "set" || command == "show" || command == "reset") &&
+        parameter < tokens.size() &&
+        findTimeoutParameter(toLower(parseRoutineIdentifier(tokens[parameter]))) &&
+        (parameter + 1 == tokens.size() || tokens[parameter + 1].rfind('.', 0) != 0);
+    if (!dropDomain && !timeoutUtility) return std::nullopt;
     // This audited owner only parses the target envelope/tail. It leaves
     // namespace existence, domain-kind checks and dependencies to execution.
     // A general 42601 catch is not a raw-phase proof: CREATE DOMAIN's NULL
@@ -6833,9 +6845,12 @@ ParseResult SQLParser::parseSet(const std::string& sql) {
     const bool workMem = pos < tokens.size() &&
         toLower(parseRoutineIdentifier(tokens[pos])) == "work_mem" &&
         (pos + 1 == tokens.size() || tokens[pos + 1] != ".");
+    const auto timeoutName = pos < tokens.size()
+        ? toLower(parseRoutineIdentifier(tokens[pos])) : std::string{};
+    const bool timeout = findTimeoutParameter(timeoutName).has_value();
     const bool dedicatedTimeZone = pos + 1 < tokens.size() &&
         toLower(tokens[pos]) == "time" && toLower(tokens[pos + 1]) == "zone";
-    if (genericTimeZone || dedicatedTimeZone || workMem) {
+    if (genericTimeZone || dedicatedTimeZone || workMem || timeout) {
         // Only this statement's scalar SET grammar needs local raw spans.
         // Preserve newline string continuation; normalized execution SQL has
         // already collapsed precisely the whitespace that matters here.
@@ -6848,14 +6863,14 @@ ParseResult SQLParser::parseSet(const std::string& sql) {
         size_t end = values.size();
         if (end && values[end - 1] == ";") --end;
         size_t value = pos + (dedicatedTimeZone ? 2 : 1);
-        const auto syntax = [workMem](const char* message) {
+        const auto syntax = [&](const char* message) {
             ParseResult failed;
-            failed.error = workMem ? "invalid SET work_mem syntax" : message;
+            failed.error = workMem || timeout ? "invalid SET " + stmt->name + " syntax" : message;
             failed.sqlState = "42601";
             return failed;
         };
-        stmt->name = workMem ? "work_mem" : "timezone";
-        if (genericTimeZone || workMem) {
+        stmt->name = timeout ? timeoutName : workMem ? "work_mem" : "timezone";
+        if (genericTimeZone || workMem || timeout) {
             if (value + 2 == end && toLower(values[value]) == "from" &&
                 toLower(values[value + 1]) == "current") {
                 r.success = true; r.stmt = std::move(stmt); return r;
@@ -6957,7 +6972,7 @@ ParseResult SQLParser::parseSet(const std::string& sql) {
                     ++last;
                 const std::string number = sql.substr(spans[at].first, spans[last - 1].second - spans[at].first);
                 if (!postgresNumericLiteralToken(number)) return false;
-                if (workMem) {
+                if (workMem || timeout) {
                     // SQL numeric constants are normalized before GUC input;
                     // quoted numeric text keeps the GUC's own base/unit rules.
                     const auto integer = parsePostgresIntegerText(number, 64);
@@ -7166,6 +7181,9 @@ ParseResult SQLParser::parseShow(const std::string& sql) {
     const bool parallelName = parameter == "max_parallel_workers_per_gather" ||
                               parameter == "\"max_parallel_workers_per_gather\"";
     const bool workMemName = parameter == "work_mem" || parameter == "\"work_mem\"";
+    const auto timeoutName = toLower(parseRoutineIdentifier(stmt->name));
+    const bool timeout = findTimeoutParameter(timeoutName).has_value() &&
+        (pos == tokens.size() || tokens[pos].rfind('.', 0) != 0);
     if (parameter == "transaction") {
         if (pos + 1 >= tokens.size() ||
             toLower(tokens[pos]) != "isolation" ||
@@ -7175,12 +7193,13 @@ ParseResult SQLParser::parseShow(const std::string& sql) {
         }
         pos += 2;
     }
-    if (isolationName || parameter == "transaction" || parallelName || workMemName) {
-        stmt->name = workMemName ? "work_mem" : parallelName ? "max_parallel_workers_per_gather" : "transaction_isolation";
+    if (isolationName || parameter == "transaction" || parallelName || workMemName || timeout) {
+        stmt->name = timeout ? timeoutName : workMemName ? "work_mem" :
+            parallelName ? "max_parallel_workers_per_gather" : "transaction_isolation";
         if (pos < tokens.size() && tokens[pos] == ";") ++pos;
         if (pos != tokens.size()) {
             r.error = "unexpected input after SHOW " + stmt->name;
-            if (workMemName) r.sqlState = "42601";
+            if (workMemName || timeout) r.sqlState = "42601";
             return r;
         }
     }
@@ -7205,11 +7224,12 @@ ParseResult SQLParser::parseReset(const std::string& sql) {
         stmt->name = tokens[pos++];
     }
     const auto name = toLower(parseRoutineIdentifier(stmt->name));
-    if (name == "work_mem") {
+    if (name == "work_mem" || (findTimeoutParameter(name) &&
+                              (pos == tokens.size() || tokens[pos].rfind('.', 0) != 0))) {
         stmt->name = name;
         if (pos < tokens.size() && tokens[pos] == ";") ++pos;
         if (pos != tokens.size()) {
-            r.error = "unexpected input after RESET work_mem";
+            r.error = "unexpected input after RESET " + name;
             r.sqlState = "42601";
             return r;
         }

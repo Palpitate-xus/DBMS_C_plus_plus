@@ -2,6 +2,10 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-22 · 锁等待时间与事务设置
+
+PostgreSQL 为事务中的参数变更保存可回滚的历史，普通 `SET` 在提交后保留，`SET LOCAL` 在事务结束时恢复。SQLite 的 `busy_timeout` 属于连接，按等待时间累计决定是否返回 `SQLITE_BUSY`。DuckDB 支持会话级设置，并用乐观并发控制处理对同一行的冲突写入。本项目复用保存点的设置快照，并用版本号在服务器更新三项超时默认值后刷新连接。普通请求只需查看一次版本号，无需为每次读取默认值加锁。[PostgreSQL SET](https://www.postgresql.org/docs/18/sql-set.html) · [PostgreSQL 18.6 参数实现](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/utils/misc/guc.c) · [SQLite busy timeout](https://www.sqlite.org/c3ref/busy_timeout.html) · [DuckDB 并发](https://duckdb.org/docs/2.0/connect/concurrency)
+
 ## 2026-11-22 · 表锁和数据页锁升级
 
 PostgreSQL 18.6 的表锁按模式检查冲突，并保留同一事务已持有的锁。页内读写由缓冲区锁协调。SQLite 的写入锁按数据库文件管理，DuckDB 用乐观并发控制处理同一行写入。本项目在转换表锁和数据页锁时保留原锁，在 Linux 上原子转换底层文件锁。当前 SQL 对照覆盖单表 `ACCESS SHARE` 和 `ACCESS EXCLUSIVE`，数据页锁由本项目原生用例验证。[PostgreSQL 表锁](https://www.postgresql.org/docs/18/sql-lock.html) · [PostgreSQL 18.6 缓冲区源码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/storage/buffer/bufmgr.c) · [SQLite 锁机制](https://www.sqlite.org/lockingv3.html) · [DuckDB 并发](https://duckdb.org/docs/current/connect/concurrency)

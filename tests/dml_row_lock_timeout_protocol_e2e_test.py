@@ -40,7 +40,7 @@ def main():
         query(first, "BEGIN;")
         assert query(first, "SELECT id FROM update_row_timeout FOR UPDATE;") == [["1"]]
         query(second, "BEGIN;")
-        query(second, "SET lock_timeout = 50;")
+        query(second, "SET LOCAL lock_timeout = 50;")
         _, state, message, _, _, _ = wire_query(
             second, "UPDATE update_row_timeout SET v = 2 WHERE id = 1;")
         assert state == "55P03", (state, message)
@@ -53,6 +53,7 @@ def main():
         query(first, "BEGIN;")
         assert query(first, "SELECT id FROM update_row_timeout FOR UPDATE;") == [["1"]]
         query(second, "BEGIN;")
+        query(second, "SET LOCAL lock_timeout = 50;")
         _, state, message, _, _, _ = wire_query(
             second, "DELETE FROM update_row_timeout WHERE id = 1;")
         assert state == "55P03", (state, message)

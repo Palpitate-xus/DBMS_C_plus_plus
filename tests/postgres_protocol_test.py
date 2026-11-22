@@ -2143,7 +2143,7 @@ def main():
 
         malformed_path = simple_query(
             sock, "SET search_path TO path_a,,public")
-        assert any(kind == b"E" and b"C22023\x00" in body
+        assert any(kind == b"E" and b"C42601\x00" in body
                    for kind, body in malformed_path), malformed_path
         assert data_row_values(simple_query(
             sock, "SELECT v FROM path_pick")) == [[b"20"]]
@@ -2171,7 +2171,7 @@ def main():
         catalog_result = simple_query(sock, "SELECT typname FROM pg_type")
         assert not any(kind == b"E" for kind, _ in catalog_result), catalog_result
         assert row_description_fields(catalog_result) == [
-            (b"typname", 0, 0, 19, 64, -1, 0)], catalog_result
+            (b"typname", 1247, 2, 19, 64, -1, 0)], catalog_result
         catalog_names = data_row_values(catalog_result)
         for name in (b"bool", b"int4", b"text", b"protocol_priority"):
             assert [name] in catalog_names, (name, catalog_names)
