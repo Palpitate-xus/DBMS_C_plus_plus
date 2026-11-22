@@ -2473,6 +2473,15 @@ COPY (SELECT id, name FROM public.users WHERE id > 0 ORDER BY id) TO STDOUT;
 
 可以用 `WITH (DELIMITER '|', NULL 'NUL')` 自定义字段分隔符和空值标记。默认用制表符分隔字段，用 `\N` 表示 SQL 空值。查询没有结果时仍会返回列数，结束时报告 `COPY 0`。[查询导出测试](test-report.md#copy-query-stdout-20261122)
 
+给整张表或查询结果加上 `WITH (FORMAT csv, HEADER)`，客户端就会收到带列名的 CSV。
+
+```sql
+COPY (SELECT id, name FROM public.users WHERE id > 0 ORDER BY id)
+    TO STDOUT WITH (FORMAT csv, HEADER);
+```
+
+CSV 默认用逗号分隔字段。SQL 空值写成空字段，空字符串写成 `""`。包含逗号、引号或换行的字段会加引号。可用 `DELIMITER`、`NULL`、`QUOTE` 和 `ESCAPE` 调整格式，`FORCE_QUOTE (name)` 可给 `name` 列的非空值加引号。`HEADER` 生成的列名行不计入 `COPY` 返回的行数，也可以用于默认文本格式。[CSV 导出测试](test-report.md#copy-csv-out-20261122)
+
 ### 备份与恢复作业
 
 `DUMP` 产生逻辑 SQL 文件；`RESTORE DATABASE` 只接受 `BACKUP DATABASE`

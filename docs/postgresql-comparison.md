@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-22 · CSV 导出
+
+PostgreSQL 18.6 对文本值是否需要加引号单独判断。CSV 的空值和同字样的文本用引号区分，列名行单独发送。DuckDB 支持设置 CSV 文件的分隔符、空值与强制加引号的列。SQLite 在命令行用 CSV 模式格式化查询结果。[PostgreSQL 18.6 实现](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/commands/copyto.c) · [DuckDB COPY](https://duckdb.org/docs/2.0/sql/statements/copy) · [SQLite 导出](https://www.sqlite.org/cli.html#export_to_csv)
+
+本项目已将 CSV 输出接入已有的逐行导出。编码时复用一行的输出空间，列名和数据都使用所选格式。CSV 导入、二进制格式及服务器端文件选项仍有差距。[协议测试](test-report.md#copy-csv-out-20261122) · [性能报告](performance-report-2026-10-30.md#copy-csv-out-cost-20261122)
+
 ## 2026-11-22 · 并发事务和目录写入
 
 PostgreSQL 按查询访问的表取得相应的锁，普通 `SELECT` 使用 `ACCESS SHARE`。SQLite 在事务无法取得文件访问权时可返回 `SQLITE_BUSY`，应用可设置最长等待时间。DuckDB 在单个进程内用多版本数据和乐观并发控制，发生实际写入冲突时返回事务冲突。[PostgreSQL 锁](https://www.postgresql.org/docs/18/explicit-locking.html) · [SQLite 事务](https://www.sqlite.org/lang_transaction.html) · [DuckDB 并发](https://duckdb.org/docs/current/connect/concurrency)

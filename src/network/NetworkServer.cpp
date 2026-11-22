@@ -5179,7 +5179,15 @@ struct CopyWirePlan {
     bool systemPgType = false;
     std::vector<std::string> requestedColumns;
     std::vector<size_t> columnIndexes;
+    bool csv = false;
+    bool header = false;
+    bool forceQuoteAll = false;
+    std::vector<std::string> forceQuoteColumns;
+    std::vector<bool> forceQuote;
+    std::vector<std::string> outputNames;
     char delimiter = '\t';
+    char quote = '"';
+    char escape = '"';
     std::string nullMarker = "\\N";
     std::string sqlState;
     std::string error;
@@ -5199,6 +5207,7 @@ struct CopyToken {
         Comma,
         Dot,
         Equal,
+        Star,
         Semicolon,
         Invalid,
     } kind = Kind::End;
@@ -5228,10 +5237,23 @@ public:
             case ',': return {CopyToken::Kind::Comma, ",", false};
             case '.': return {CopyToken::Kind::Dot, ".", false};
             case '=': return {CopyToken::Kind::Equal, "=", false};
+            case '*': return {CopyToken::Kind::Star, "*", false};
             case ';': return {CopyToken::Kind::Semicolon, ";", false};
             case '"': return quotedToken('"', CopyToken::Kind::Word);
             case '\'': return quotedToken('\'', CopyToken::Kind::String);
             default: break;
+        }
+        if ((ch == 'E' || ch == 'e') && offset_ < sql_.size() && sql_[offset_] == '\'') {
+            const size_t begin = offset_ - 1;
+            ++offset_;
+            const auto literal = quotedToken('\'', CopyToken::Kind::String, true);
+            if (literal.kind == CopyToken::Kind::Invalid) return literal;
+            const auto tokens = SQLParser::tokenize(sql_.substr(begin, offset_ - begin));
+            if (tokens.size() == 1 && !tokens[0].empty() && tokens[0].front() == '\'') {
+                CopySqlScanner normalized(tokens[0]);
+                return normalized.next();
+            }
+            return {CopyToken::Kind::Invalid, "invalid COPY escape string", false};
         }
         if (std::isalnum(static_cast<unsigned char>(ch)) || ch == '_' ||
             ch == '$') {
@@ -5324,10 +5346,14 @@ private:
         return true;
     }
 
-    CopyToken quotedToken(char quote, CopyToken::Kind kind) {
+    CopyToken quotedToken(char quote, CopyToken::Kind kind, bool escaped = false) {
         std::string text;
         while (offset_ < sql_.size()) {
             const char ch = sql_[offset_++];
+            if (escaped && ch == '\\' && offset_ < sql_.size()) {
+                ++offset_;
+                continue;
+            }
             if (ch != quote) {
                 text.push_back(ch);
                 continue;
@@ -5378,6 +5404,19 @@ bool parseCopyOptionValue(CopySqlScanner& scanner, CopyToken& value,
     return false;
 }
 
+bool parseCopyColumns(CopySqlScanner& scanner, std::vector<std::string>& columns, CopyWirePlan& plan) {
+    while (true) {
+        auto column = scanner.next();
+        if (column.kind != CopyToken::Kind::Word) break;
+        columns.push_back(std::move(column.text));
+        const auto separator = scanner.next().kind;
+        if (separator == CopyToken::Kind::RightParen) return true;
+        if (separator != CopyToken::Kind::Comma) break;
+    }
+    copyError(plan, "42601", "malformed COPY column list");
+    return false;
+}
+
 bool parseCopyTable(CopySqlScanner& scanner, CopyToken token, CopyWirePlan& plan) {
     if (copyKeyword(token, "only")) token = scanner.next();
     if (token.kind != CopyToken::Kind::Word) {
@@ -5401,24 +5440,7 @@ bool parseCopyTable(CopySqlScanner& scanner, CopyToken token, CopyWirePlan& plan
 
     if (scanner.peek().kind == CopyToken::Kind::LeftParen) {
         (void)scanner.next();
-        while (true) {
-            const CopyToken column = scanner.next();
-            if (column.kind != CopyToken::Kind::Word) {
-                copyError(plan, "42601", "malformed COPY column list");
-                return false;
-            }
-            plan.requestedColumns.push_back(column.text);
-            token = scanner.next();
-            if (token.kind == CopyToken::Kind::RightParen) break;
-            if (token.kind != CopyToken::Kind::Comma) {
-                copyError(plan, "42601", "malformed COPY column list");
-                return false;
-            }
-        }
-        if (plan.requestedColumns.empty()) {
-            copyError(plan, "42601", "COPY column list cannot be empty");
-            return false;
-        }
+        return parseCopyColumns(scanner, plan.requestedColumns, plan);
     }
     return true;
 }
@@ -5506,11 +5528,21 @@ CopyWirePlan parseCopyWirePlan(const std::string& sql) {
         copyUnsupported(plan, "WHERE");
         return plan;
     }
-    if (!copyKeyword(token, "with")) {
-        copyUnsupported(plan, "legacy option syntax");
+    if (copyKeyword(token, "with")) token = scanner.next();
+    if (to && copyKeyword(token, "csv")) {
+        plan.csv = true;
+        plan.delimiter = ',';
+        plan.nullMarker.clear();
+        token = scanner.next();
+        if (copyKeyword(token, "header")) {
+            plan.header = true;
+            token = scanner.next();
+        }
+        if (token.kind == CopyToken::Kind::Semicolon) token = scanner.next();
+        if (token.kind != CopyToken::Kind::End) copyUnsupported(plan, "legacy option syntax");
         return plan;
     }
-    if (scanner.next().kind != CopyToken::Kind::LeftParen) {
+    if (token.kind != CopyToken::Kind::LeftParen) {
         copyUnsupported(plan, "legacy option syntax");
         return plan;
     }
@@ -5530,30 +5562,57 @@ CopyWirePlan parseCopyWirePlan(const std::string& sql) {
             return plan;
         }
         if (option == "binary" || option == "csv" || option == "freeze" ||
-            option == "header" || option == "on_error" ||
+            option == "on_error" ||
             option == "reject_limit" || option == "log_verbosity" ||
-            option == "oids" || option.rfind("force_", 0) == 0) {
+            option == "oids" || (option.rfind("force_", 0) == 0 && option != "force_quote") ||
+            (from && (option == "header" || option == "quote" || option == "escape" || option == "force_quote"))) {
             copyUnsupported(plan, option);
             return plan;
         }
 
         CopyToken value;
-        if (!parseCopyOptionValue(scanner, value, plan)) return plan;
-        if (option == "format") {
+        if (option == "force_quote") {
+            const auto list = scanner.next();
+            if (list.kind == CopyToken::Kind::Star) plan.forceQuoteAll = true;
+            else if (list.kind != CopyToken::Kind::LeftParen) {
+                copyError(plan, "42601", "COPY FORCE_QUOTE requires a column list or *");
+                return plan;
+            } else if (!parseCopyColumns(scanner, plan.forceQuoteColumns, plan)) return plan;
+        } else if (option == "header" && (scanner.peek().kind == CopyToken::Kind::Comma ||
+                                          scanner.peek().kind == CopyToken::Kind::RightParen)) {
+            plan.header = true;
+        } else if (!parseCopyOptionValue(scanner, value, plan)) return plan;
+        else if (option == "header") {
+            if (lowerAscii(value.text) == "match") {
+                copyError(plan, "0A000", "COPY TO does not support HEADER MATCH");
+                return plan;
+            }
+            const auto header = parsePostgresBoolean(value.text);
+            if (!header) {
+                copyError(plan, "22023", "COPY TO HEADER requires a boolean value");
+                return plan;
+            }
+            plan.header = *header;
+        } else if (option == "format") {
             std::string format = lowerAscii(value.text);
-            if (format != "text") {
+            if (format == "csv" && to) plan.csv = true;
+            else if (format != "text") {
                 copyUnsupported(plan, "FORMAT " + value.text);
                 return plan;
             }
-        } else if (option == "delimiter") {
+        } else if (option == "delimiter" || option == "quote" || option == "escape") {
             if (value.text.size() != 1 || value.text[0] == '\0' ||
-                value.text[0] == '\n' || value.text[0] == '\r' ||
-                value.text[0] == '\\') {
-                copyError(plan, "22023",
-                          "COPY delimiter must be one non-newline, non-backslash byte");
+                static_cast<unsigned char>(value.text[0]) >= 0x80) {
+                copyError(plan, "0A000", "COPY " + option + " must be one byte");
                 return plan;
             }
-            plan.delimiter = value.text[0];
+            if (option == "delimiter" && (value.text[0] == '\n' || value.text[0] == '\r')) {
+                copyError(plan, "22023", "COPY delimiter cannot be a newline or carriage return");
+                return plan;
+            }
+            if (option == "delimiter") plan.delimiter = value.text[0];
+            else if (option == "quote") plan.quote = value.text[0];
+            else plan.escape = value.text[0];
         } else if (option == "null") {
             if (value.text.size() > 1024 ||
                 value.text.find('\0') != std::string::npos ||
@@ -5584,6 +5643,21 @@ CopyWirePlan parseCopyWirePlan(const std::string& sql) {
             copyError(plan, "42601", "malformed COPY option list");
             return plan;
         }
+    }
+    if (plan.csv) {
+        if (!seenOptions.count("delimiter")) plan.delimiter = ',';
+        if (!seenOptions.count("null")) plan.nullMarker.clear();
+        if (!seenOptions.count("escape")) plan.escape = plan.quote;
+        if (plan.delimiter == plan.quote || plan.nullMarker.find(plan.quote) != std::string::npos) {
+            copyError(plan, "22023", "CSV quote character conflicts with the delimiter or null marker");
+            return plan;
+        }
+    } else if (seenOptions.count("quote") || seenOptions.count("escape") || seenOptions.count("force_quote")) {
+        copyError(plan, "0A000", "COPY QUOTE, ESCAPE and FORCE_QUOTE require CSV format");
+        return plan;
+    } else if (plan.delimiter == '\\') {
+        copyError(plan, "22023", "COPY text delimiter cannot be a backslash");
+        return plan;
     }
     if (plan.nullMarker.find(plan.delimiter) != std::string::npos) {
         copyError(plan, "22023", "COPY null marker cannot contain the delimiter");
@@ -5924,9 +5998,7 @@ bool decodeCopyTextRecord(
     return true;
 }
 
-std::string encodeCopyTextField(const std::string& value, char delimiter) {
-    std::string encoded;
-    encoded.reserve(value.size());
+void appendCopyTextField(std::string& encoded, const std::string& value, char delimiter) {
     for (const unsigned char byte : value) {
         switch (byte) {
             case '\b': encoded += "\\b"; break;
@@ -5945,7 +6017,65 @@ std::string encodeCopyTextField(const std::string& value, char delimiter) {
                 break;
         }
     }
-    return encoded;
+}
+
+void appendCopyOutputField(std::string& output, const std::string& value,
+        bool isNull, const CopyWirePlan& plan, bool singleColumn, bool forceQuote = false) {
+    if (isNull) {
+        output += plan.nullMarker;
+        return;
+    }
+    if (!plan.csv) {
+        appendCopyTextField(output, value, plan.delimiter);
+        return;
+    }
+    if (!forceQuote && value != plan.nullMarker && !(singleColumn && value == "\\.") &&
+        std::none_of(value.begin(), value.end(), [&](char ch) {
+            return ch == plan.delimiter || ch == plan.quote || ch == '\r' || ch == '\n';
+        })) {
+        output += value;
+        return;
+    }
+    output.push_back(plan.quote);
+    for (char ch : value) {
+        if (ch == plan.quote || ch == plan.escape) output.push_back(plan.escape);
+        output.push_back(ch);
+    }
+    output.push_back(plan.quote);
+}
+
+bool bindCopyOutputOptions(CopyWirePlan& plan, const TableSchema& table,
+        const PreparedQueryCursor* cursor) {
+    if (!plan.header && plan.forceQuoteColumns.empty()) return true;
+    const auto& types = ownedTypeCatalogDescriptor();
+    if (cursor) {
+        for (const auto& column : cursor->descriptor()) plan.outputNames.push_back(column.name);
+    } else {
+        for (const auto index : plan.columnIndexes)
+            plan.outputNames.push_back(plan.systemPgType ? types[index].name : table.cols[index].dataName);
+    }
+    if (plan.forceQuoteColumns.empty()) return true;
+    plan.forceQuote.resize(plan.outputNames.size());
+    for (const auto& column : plan.forceQuoteColumns) {
+        const auto output = std::find(plan.outputNames.begin(), plan.outputNames.end(), column);
+        if (output == plan.outputNames.end()) {
+            bool exists = false;
+            if (plan.systemPgType) {
+                exists = std::any_of(types.begin(), types.end(), [&](const auto& item) { return item.name == column; });
+            } else if (!cursor) {
+                for (size_t i = 0; i < table.len(); ++i) exists |= table.cols[i].dataName == column;
+            }
+            copyError(plan, exists ? "42P10" : "42703", "COPY FORCE_QUOTE column \"" + column + "\" is not in the output");
+            return false;
+        }
+        const auto index = static_cast<size_t>(output - plan.outputNames.begin());
+        if (plan.forceQuote[index]) {
+            copyError(plan, "42701", "COPY FORCE_QUOTE column \"" + column + "\" specified more than once");
+            return false;
+        }
+        plan.forceQuote[index] = true;
+    }
+    return true;
 }
 
 struct CopyStreamResult {
@@ -6243,7 +6373,7 @@ CopyStreamResult sendCopyOut(PostgresProtocol& protocol,
         }
         dbms::checkForQueryInterrupt();
     };
-    const auto sendRecord = [&](std::string& output) {
+    const auto sendRecord = [&](std::string& output, bool header = false) {
         output.push_back('\n');
         if (output.size() > kMaxCopyRecordBytes) {
             result.sqlState = "54000";
@@ -6270,18 +6400,32 @@ CopyStreamResult sendCopyOut(PostgresProtocol& protocol,
             result.transportOk = false;
             return;
         }
-        ++result.rows;
+        if (!header) ++result.rows;
+    };
+    const size_t width = queryCursor ? queryCursor->descriptor().size() : plan.columnIndexes.size();
+    const auto appendField = [&](std::string& output, size_t index, const std::string& value, bool isNull) {
+        if (index != 0) output.push_back(plan.delimiter);
+        appendCopyOutputField(output, value, isNull, plan, width == 1,
+            plan.forceQuoteAll || (!plan.forceQuote.empty() && plan.forceQuote[index]));
     };
     try {
+        std::string output;
+        if (plan.header) {
+            checkCopyInterrupt();
+            for (size_t i = 0; i < plan.outputNames.size(); ++i) {
+                if (i != 0) output.push_back(plan.delimiter);
+                appendCopyOutputField(output, plan.outputNames[i], false, plan, width == 1);
+            }
+            sendRecord(output, true);
+            if (!result.transportOk || !result.error.empty()) return result;
+        }
         if (queryCursor) {
             const auto& columns = queryCursor->descriptor();
             std::vector<ExprValue> row;
-            std::string output;
             while (result.transportOk && result.error.empty() && queryCursor->next(row)) {
                 checkCopyInterrupt();
                 output.clear();
                 for (size_t i = 0; i < columns.size(); ++i) {
-                    if (i != 0) output.push_back(plan.delimiter);
                     auto& cell = row[i];
                     if (!cell.isNull) {
                         if (columns[i].typeOid == 1184) {
@@ -6293,7 +6437,7 @@ CopyStreamResult sendCopyOut(PostgresProtocol& protocol,
                             cell.value = std::move(text);
                         }
                     }
-                    output += cell.isNull ? plan.nullMarker : encodeCopyTextField(cell.value, plan.delimiter);
+                    appendField(output, i, cell.value, cell.isNull);
                 }
                 sendRecord(output);
             }
@@ -6304,11 +6448,10 @@ CopyStreamResult sendCopyOut(PostgresProtocol& protocol,
                 if (!result.transportOk || !result.error.empty()) break;
                 checkCopyInterrupt();
                 const auto cells = ownedTypeCatalogCells(row);
-                std::string output;
+                output.clear();
                 for (size_t selected = 0; selected < plan.columnIndexes.size(); ++selected) {
-                    if (selected != 0) output.push_back(plan.delimiter);
                     const auto& cell = cells[plan.columnIndexes[selected]];
-                    output += cell.isNull ? plan.nullMarker : encodeCopyTextField(cell.value, plan.delimiter);
+                    appendField(output, selected, cell.value, cell.isNull);
                 }
                 sendRecord(output);
             }
@@ -6326,10 +6469,9 @@ CopyStreamResult sendCopyOut(PostgresProtocol& protocol,
                     ~NullBindingGuard() { StorageEngine::unbindNullRow(); }
                 } nullBindingGuard;
                 const std::string row(data, length);
-                std::string output;
+                output.clear();
                 for (size_t selected = 0;
                      selected < plan.columnIndexes.size(); ++selected) {
-                    if (selected != 0) output.push_back(plan.delimiter);
                     const size_t column = plan.columnIndexes[selected];
                     bool isNull = false;
                     std::string value = g_engine.extractColumnValue(
@@ -6339,9 +6481,7 @@ CopyStreamResult sendCopyOut(PostgresProtocol& protocol,
                         const auto catalog=dbms::regtype_detail::metadata(g_engine,session.currentDB);
                         value=dbms::stored_regtype_detail::output(value,table.cols[column].isArray,catalog,&session,table.cols[column].dataType);
                     }
-                    output += isNull
-                        ? plan.nullMarker
-                        : encodeCopyTextField(value, plan.delimiter);
+                    appendField(output, selected, value, isNull);
                 }
                 sendRecord(output);
             }) && result.error.empty() && result.transportOk) {
@@ -7932,6 +8072,7 @@ void handleClient(SecureSocket socket, std::string clientHost, CopyQueryFactory 
                 planValid = validateCopyWirePlan(plan, session, table);
                 columnCount = plan.columnIndexes.size();
             }
+            if (planValid) planValid = bindCopyOutputOptions(plan, table, queryCursor.get());
         } catch (const DbError& error) {
             copyError(plan, error.sqlState(), error.message());
         } catch (const std::exception& error) {

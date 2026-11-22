@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""PostgreSQL COPY text-mode wire flow, recovery, and atomicity."""
+"""PostgreSQL COPY wire flow, export formats, recovery, and atomicity."""
 
 import importlib.util
 import socket
@@ -214,12 +214,13 @@ def check_query_copy_output(client, sock):
         assert first[0] in (b"H", b"E"), (sql, first)
         return [first, *client.read_until_ready(sock)]
 
-    def exported(sql, width, rows, extended, ready=b"I"):
+    def exported(sql, width, rows, extended, ready=b"I", header=None):
         messages = request(sql, extended)
         assert messages[0][0] == b"H", (sql, messages)
         expect_copy_response(messages[0][1], width)
         ending = [(b"c", b""), (b"C", f"COPY {len(rows)}\0".encode()), (b"Z", ready)]
-        assert messages[1:] == [(b"d", row) for row in rows] + ending, (sql, messages)
+        payload = rows if header is None else [header, *rows]
+        assert messages[1:] == [(b"d", row) for row in payload] + ending, (sql, messages)
 
     def rejected(sql, sqlstate, extended, ready=b"I"):
         messages = request(sql, extended)
@@ -241,6 +242,34 @@ def check_query_copy_output(client, sock):
     zero = "COPY (SELECT id, payload, NULL::text AS extra FROM copy_query_fixture WHERE id<0) TO STDOUT"
     missing = "COPY (SELECT missing FROM copy_query_fixture) TO STDOUT"
     for extended in (False, True):
+        exported("COPY copy_query_fixture (payload,id) TO STDOUT WITH CSV HEADER", 2,
+                 [b"outside,1\n", b",2\n", b'"",3\n', b'"left\tright\\slash\nnext\rend|marker",4\n',
+                  b"NULL,5\n", b"NULL,6\n"], extended, header=b"payload,id\n")
+        exported('COPY (SELECT id AS "key,col", payload FROM copy_query_fixture WHERE id<0) '
+                 'TO STDOUT (FORMAT csv, HEADER)', 2, [], extended, header=b'"key,col",payload\n')
+        exported("COPY (SELECT id, payload FROM copy_query_fixture WHERE id BETWEEN 2 AND 5 ORDER BY id) "
+                 "TO STDOUT (NULL 'NULL', DELIMITER '|', FORCE_QUOTE (id), FORMAT CSV)", 2,
+                 [b'"2"|NULL\n', b'"3"|\n', b'"4"|"left\tright\\slash\nnext\rend|marker"\n',
+                  b'"5"|"NULL"\n'], extended)
+        exported(r"""COPY (VALUES ('a!b^c'::text), ('^'::text), (NULL::text)) TO STDOUT
+                    (QUOTE '!', ESCAPE '^', FORMAT csv, FORCE_QUOTE *)""", 1,
+                 [b"!a^!b^^c!\n", b"!^^!\n", b"\n"], extended)
+        exported("COPY (VALUES ('a!b'::text), ('a^b'::text)) TO STDOUT (FORMAT csv, QUOTE '!')", 1,
+                 [b"!a!!b!\n", b"a^b\n"], extended)
+        exported(r"""COPY (VALUES ('\.'::text), ('a"b'::text)) TO STDOUT (FORMAT csv)""",
+                 1, [b'"\\."\n', b'"a""b"\n'], extended)
+        exported(r"COPY (VALUES (7, 'a,b'::text)) TO STDOUT (FORMAT csv, DELIMITER E'\t', HEADER false)",
+                 2, [b"7\ta,b\n"], extended)
+        exported(zero + " (HEADER on)", 3, [], extended, header=b"id\tpayload\textra\n")
+        rejected("COPY copy_query_fixture TO STDOUT (FORMAT csv, QUOTE ',')", "22023", extended)
+        rejected("COPY copy_query_fixture TO STDOUT (FORMAT csv, NULL 'x,y')", "22023", extended)
+        rejected("COPY copy_query_fixture TO STDOUT (FORMAT csv, HEADER MATCH)", "0A000", extended)
+        rejected("COPY copy_query_fixture TO STDOUT (FORCE_QUOTE *)", "0A000", extended)
+        rejected("COPY copy_query_fixture TO STDOUT (FORMAT csv, QUOTE 'é')", "0A000", extended)
+        rejected("COPY copy_query_fixture (id) TO STDOUT (FORMAT csv, FORCE_QUOTE (payload))", "42P10", extended)
+        rejected("COPY copy_query_fixture TO STDOUT (FORMAT csv, FORCE_QUOTE (absent))", "42703", extended)
+        rejected("COPY copy_query_fixture TO STDOUT (FORMAT csv, FORCE_QUOTE (id,id))", "42701", extended)
+
         exported(ordered, 2, ordered_rows, extended)
         exported(zero, 3, [], extended)
         exported("COPY (SELECT payload FROM copy_query_fixture WHERE id>=5 ORDER BY id) TO STDOUT",
@@ -394,6 +423,7 @@ def main():
         # Unsupported semantics fail before CopyInResponse and before writes.
         for sql in (
             "COPY copy_wire FROM STDIN WITH (FORMAT binary)",
+            "COPY copy_wire FROM STDIN WITH (FORMAT csv)",
             "COPY copy_wire FROM PROGRAM 'producer'",
             "COPY copy_wire FROM STDIN WITH (FREEZE true)",
             "COPY copy_wire FROM STDIN WITH (ON_ERROR ignore)",

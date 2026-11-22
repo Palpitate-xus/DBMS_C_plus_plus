@@ -2,6 +2,18 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-22 stream CSV COPY output with headers and column quoting",
+      "gap_ids": ["DML-06", "PROTO-06"],
+      "status": "partial",
+      "evidence": ["src/network/NetworkServer.cpp", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/copy_protocol_e2e_test.py"],
+      "verification": [
+        "Table and read-query COPY TO STDOUT emit CSV through the existing per-row receiver.",
+        "CSV and text output can emit a header independently of the reported data row count.",
+        "CSV input, binary COPY and server-file format controls remain open."
+      ]
+    },
+    {
       "issue": "2026-11-22 distinguish catalog publication waits from I/O failures at transaction entry",
       "gap_ids": ["CAT-07", "TXN-07"],
       "status": "partial",

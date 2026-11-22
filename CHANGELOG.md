@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>可以导出 CSV · 2026-11-22</summary>
+
+可以导出整张表，也可以先筛选、排序再导出。第一行可以带上列名，方便用表格软件打开。
+
+[使用说明](docs/MANUAL.md#用客户端复制数据) · [测试报告](docs/test-report.md#copy-csv-out-20261122) · [性能报告](docs/performance-report-2026-10-30.md#copy-csv-out-cost-20261122)
+
+</details>
+
+<details>
 <summary>有连接正在保存表结构时，其他查询可以等待 · 2026-11-22</summary>
 
 多个连接同时开始事务时，短暂的保存工作完成后，等待中的查询可以继续。超过设定的等待时间会报告锁超时。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>按编号查数据类型更快 · 2026-11-22</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-22 · 按编号查数据类型更快
 
 例如，查编号 23 对应的类型名时，数据库会先按编号找到对应的类型，再返回名称。
 
 [测试报告](docs/test-report.md#pg-type-oid-source-20261122) · [性能报告](docs/performance-report-2026-10-30.md#pg-type-oid-source-cost-20261122)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-22 · 修复导入和导出时选错表的问题
 
