@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-22 · 查询时锁住分区表记录
+
+PostgreSQL 18.6 的 `LockRows` 按实际目标关系和记录位置取得指定强度的锁。多笔事务可同时持有共享行锁，更新和删除需等待。`LIMIT` 达到读取数量后停止加锁，经过 `OFFSET` 跳过的记录仍被锁住。SQLite 的写入协调以数据库事务为单位。DuckDB 的并发写入采用乐观冲突检测。[PostgreSQL 锁机制](https://www.postgresql.org/docs/18/explicit-locking.html#LOCKING-ROWS) · [PostgreSQL 18.6 行锁源码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/executor/nodeLockRows.c) · [SQLite 事务](https://sqlite.org/lang_transaction.html) · [DuckDB 并发](https://duckdb.org/docs/current/connect/concurrency)
+
+本项目在普通单表查询中采用实际分区的共享或排他行锁。并发修改提交后，默认隔离级别可继续检查同一分区的新版本。发生跨分区移动时返回 `40001`。共享锁升级、较弱的 PostgreSQL 行锁模式以及复杂查询组合仍有差距。[测试报告](test-report.md#partition-share-20261122)
+
 ## 2026-11-22 · 更新分区表中的记录
 
 PostgreSQL 18.6 在记录不再符合原分区条件时，删除旧版本，再把新版本写入匹配的分区。它把跨分区移动记在旧版本的行指针上，等待这条记录的另一笔写入据此返回 `40001`。SQLite 和 DuckDB 的 `UPDATE` 文档同样允许用原来的列值计算新值。本项目用锁定后的原记录计算本行的全部赋值，同分区保留新旧行的关联，跨分区则保留实际的来源和写入位置。[PostgreSQL UPDATE](https://www.postgresql.org/docs/18/sql-update.html) · [PostgreSQL 18.6 执行源码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/executor/nodeModifyTable.c) · [SQLite UPDATE](https://sqlite.org/lang_update.html) · [DuckDB UPDATE](https://duckdb.org/docs/2.0/sql/statements/update)

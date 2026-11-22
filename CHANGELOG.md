@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>核对分区表记录时，可以让修改先等一等 · 2026-11-22</summary>
+
+用共享锁查看分区表时，多个连接可以同时核对同一条记录。要改动这条记录的连接会等先前的事务结束。
+
+[使用示例](docs/MANUAL.md#查询时锁住分区表记录) · [测试报告](docs/test-report.md#partition-share-20261122) · [性能报告](docs/performance-report-2026-10-30.md#partition-share-cost-20261122)
+
+</details>
+
+<details>
 <summary>改了分区键，记录会移到对应分区 · 2026-11-22</summary>
 
 部分分区表现在可以修改记录。比如把一笔订单的编号从 5 改为 15，数据库会按新编号把它放到对应的分区。提交前可以撤销。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>查整张分区表时，少做重复工作 · 2026-11-22</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-22 · 查整张分区表时，少做重复工作
 
 读取不同分区时，数据库会共用已经查到的表结构。在一张有 60 个分区的测试表上，查询整张表比上一个版本少花了约 13% 到 18% 的时间。
 
 [使用说明](docs/MANUAL.md#15-分区表) · [测试报告](docs/test-report.md#partition-scan-reuse-20261122) · [性能报告](docs/performance-report-2026-10-30.md#partition-scan-reuse-cost-20261122)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-22 · 按编号范围查找时，跳过无关分区
 

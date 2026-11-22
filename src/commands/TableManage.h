@@ -865,6 +865,10 @@ public:
         bool hasExplicitNullOrder = false;
         std::string collation = "";    // explicit override; empty uses SQL default
     };
+    struct RowLockOptions {
+        bool shared;
+        std::optional<size_t> maxRows;
+    };
     std::vector<std::string> query(const std::string& dbname, const std::string& tablename,
                                    const std::vector<std::string>& conditions,
                                    const std::set<std::string>& selectCols,
@@ -895,7 +899,8 @@ public:
         // Metadata only: raw stored-reference roles in output schema order.
         std::vector<StoredReferenceOutputRole>* storedOutputRoles = nullptr,
         // When provided, a row qualifies if any conjunction matches.
-        const std::vector<std::vector<std::string>>& conditionAlternatives = {});
+        const std::vector<std::vector<std::string>>& conditionAlternatives = {},
+        const RowLockOptions& rowLock = {});
 
     // Scalar function expression for queryExpr
     struct SelectExpr {

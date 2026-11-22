@@ -1215,7 +1215,19 @@ RETURNING OLD.bucket AS previous_bucket, NEW.bucket AS bucket;
 
 此路径要求记录写入日志，且没有索引、主键、唯一约束、外键、排斥约束、可延迟约束、生成列或身份列。需要应用行级访问规则或相关触发器的表、使用自定义域的表、发布更新、`UPDATE ... FROM` 和含分区写入的 `PREPARE TRANSACTION` 仍有限制。[测试范围](test-report.md#partition-update-20261122)
 
-已有持久分区表上的普通单表 `SELECT ... FOR UPDATE` 会锁定实际分区中的记录。共享行锁 `FOR SHARE` 仍可能放过并发分区写入。[行锁测试](test-report.md#partition-update-20261122)
+### 查询时锁住分区表记录
+
+`SELECT ... FOR SHARE` 让多个连接同时锁住同一条记录，更新和删除这条记录会等持锁的事务结束。`SELECT ... FOR UPDATE` 请求排他锁。两种方式都按记录实际所在的分区加锁。以下查询即使在两个分区内找到相同页槽的位置，也能分别锁定各自的记录。
+
+```sql
+BEGIN;
+SELECT id, bucket FROM events WHERE id = 7 FOR SHARE;
+COMMIT;
+```
+
+`NOWAIT` 在碰到冲突时立即返回 `55P03`。`SKIP LOCKED` 跳过冲突的记录，并继续读取后面的记录。有限的 `LIMIT` 只锁住查询取到的记录，`OFFSET` 越过的记录也会加锁。`LIMIT 0` 不访问记录。这一用法适用于符合条件的现有持久分区表的单表列查询。需要应用行级访问规则时会返回 `0A000`。[行锁测试](test-report.md#partition-share-20261122)
+
+从共享锁升级为写锁仍有限制。持有共享锁后尝试更新同一行，若遇到锁超时，回滚到保存点可能丢失先前的共享锁。[锁升级对照](test-report.md#partition-share-20261122)
 
 ### 更新时如何选择写入位置
 

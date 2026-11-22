@@ -19,6 +19,13 @@ cmake --build build/cmake --target dbms_main --parallel 2
 ## 最近更新
 
 <details>
+<summary>核对分区表记录时，可以让修改先等一等 · 2026-11-22</summary>
+
+用共享锁查看分区表时，多个连接可以同时核对同一条记录。要改动这条记录的连接会等先前的事务结束。 [使用示例](docs/MANUAL.md#查询时锁住分区表记录)
+
+</details>
+
+<details>
 <summary>改了分区键，记录会移到对应分区 · 2026-11-22</summary>
 
 部分分区表现在可以修改记录。比如把一笔订单的编号从 5 改为 15，数据库会按新编号把它放到对应的分区。提交前可以撤销。 [适用范围和示例](docs/MANUAL.md#修改分区表中的记录)
@@ -29,13 +36,6 @@ cmake --build build/cmake --target dbms_main --parallel 2
 <summary>部分分区表现在可以删记录 · 2026-11-22</summary>
 
 可以按条件删除记录、查看删掉了哪些行，也可以在提交前撤销。[适用范围和示例](docs/MANUAL.md#删除分区表中的记录)
-
-</details>
-
-<details>
-<summary>查整张分区表时，少做重复工作 · 2026-11-22</summary>
-
-在一张有 60 个分区的测试表上，查询整张表比上一个版本少花了约 13% 到 18% 的时间。[测试结果](docs/performance-report-2026-10-30.md#partition-scan-reuse-cost-20261122)
 
 </details>
 

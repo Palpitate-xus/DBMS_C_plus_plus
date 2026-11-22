@@ -33827,13 +33827,14 @@ static LockedMutationRow lockMutationRow(
         const TableSchema& table, PageAllocator& allocator,
         const StorageEngine::ReadView& view, int64_t rid, bool snapshotCandidate,
         bool followCommittedChanges, const std::string* rowLockRelation = nullptr,
-        bool noWait = false) {
+        bool noWait = false, bool shared = false) {
     uint32_t expectedInsertXid = 0;
     std::set<int64_t> visited;
     for (;;) {
         const auto& relation = rowLockRelation ? *rowLockRelation : tablename;
-        const bool acquired = noWait ? locks.rowLockExclusiveNoWait(relation, rid)
-                                     : locks.rowLockExclusive(relation, rid);
+        const bool acquired = shared
+            ? (noWait ? locks.rowLockSharedNoWait(relation, rid) : locks.rowLockShared(relation, rid))
+            : (noWait ? locks.rowLockExclusiveNoWait(relation, rid) : locks.rowLockExclusive(relation, rid));
         if (!acquired) {
             return {!noWait && locks.lastRowLockWasDeadlock()
                 ? DBStatus::DEADLOCK_DETECTED : DBStatus::LOCK_CONFLICT, {}};
@@ -39329,7 +39330,8 @@ std::vector<std::string> StorageEngine::query(
     const GeneratedRelationPtr& generatedDeclaration,
     std::vector<std::vector<ExprValue>>* generatedInputs,
     std::vector<StoredReferenceOutputRole>* storedOutputRoles,
-    const std::vector<std::vector<std::string>>& conditionAlternatives) {
+    const std::vector<std::vector<std::string>>& conditionAlternatives,
+    const RowLockOptions& rowLock) {
     if (storedOutputRoles) storedOutputRoles->clear();
     noteTemporaryRelationAccess(dbname, tablename);
     std::vector<std::string> result;
@@ -39483,14 +39485,17 @@ std::vector<std::string> StorageEngine::query(
     // relation-aware scan below; converting a policy such as
     // `owner = current_user` to the old textual condition format is unsafe.
     const bool enforceRls = shouldEnforceRLS(tbl, StorageEngine::getRLSUser());
-    if (forUpdate && tbl.partitionType != TableSchema::PartitionType::None &&
-        (enforceRls || !usesHeapTupleHeader(tbl.formatVersion)))
-        throw DbError("0A000", "FOR UPDATE is not supported for this partitioned relation");
+    const bool partitionRowLock = (forUpdate || rowLock.shared) &&
+        tbl.partitionType != TableSchema::PartitionType::None &&
+        transactionContext().inTransaction;
+    if (partitionRowLock && (enforceRls || !usesHeapTupleHeader(tbl.formatVersion)))
+        throw DbError("0A000", "row locking is not supported for this partitioned relation");
     auto conds = parseConditions(conditions);
     struct MatchedRow {
         int64_t rid;
         std::string payload;
         size_t nullBitmapIndex = 0;
+        size_t partitionLockIndex = 0;
     };
     std::vector<MatchedRow> matchRows;
     std::vector<std::vector<bool>> partitionNulls;
@@ -39515,12 +39520,11 @@ std::vector<std::string> StorageEngine::query(
         std::shared_ptr<PageAllocator> heap;
     };
     std::vector<PartitionLockTarget> partitionLockTargets;
-    PartitionLockTarget currentPartition;
     std::optional<PartitionScanStart> startPartition;
-    if (forUpdate && capturePartitionNulls) {
+    if (partitionRowLock) {
         startPartition.emplace([&](uint32_t, const std::string& relation,
                 const std::shared_ptr<PageAllocator>& heap) {
-            currentPartition = {relation, heap};
+            partitionLockTargets.push_back({relation, heap});
         });
     }
     if (capturePartitionNulls || !conditionAlternatives.empty()) {
@@ -39535,7 +39539,8 @@ std::vector<std::string> StorageEngine::query(
                 branches.push_back(std::move(branch));
             }
         }
-        const TableSchema* scanSchema = capturePartitionNulls && !forUpdate && !noWait && !skipLocked
+        const TableSchema* scanSchema = capturePartitionNulls &&
+            (partitionRowLock || (!forUpdate && !noWait && !skipLocked))
             ? &tbl : nullptr;
         const auto integerFilter = scanSchema && !enforceRls ? integerPartitionConditions(tbl, branches) : std::nullopt;
         const auto integerTargets = integerFilter ? pruneIntegerPartitions(tbl, *integerFilter) : std::nullopt;
@@ -39591,16 +39596,18 @@ std::vector<std::string> StorageEngine::query(
                         });
                 });
             if (!matches) return;
-            if (forUpdate && capturePartitionNulls &&
-                (currentPartition.relation.empty() || !currentPartition.heap))
-                throw DbError("XX001", "partition row lost its physical identity");
             matchRows.push_back({rid, std::move(row), partitionNulls.size()});
-            if (forUpdate && capturePartitionNulls)
-                partitionLockTargets.push_back(currentPartition);
+            if (partitionRowLock) {
+                if (partitionLockTargets.empty())
+                    throw DbError("XX001", "partition row lost its physical identity");
+                matchRows.back().partitionLockIndex = partitionLockTargets.size() - 1;
+            }
             if (capturePartitionNulls)
                 partitionNulls.push_back(std::move(bitmap));
         };
-        if (integerTargets && integerTargets->empty()) {
+        if (partitionRowLock && rowLock.maxRows == 0) {
+            // LIMIT 0 does not request any rows from the locking scan.
+        } else if (integerTargets && integerTargets->empty()) {
             noteScanSiread(dbname, tablename);
         } else {
             const auto& partitions = integerTargets ? *integerTargets : targetParts;
@@ -39658,67 +39665,28 @@ std::vector<std::string> StorageEngine::query(
         return result;
     }
 
-    // Resolve TOAST markers in matched rows so downstream formatting sees
-    // actual values instead of __TOAST__ markers.
-    for (auto& mr : matchRows) {
+    const auto resolveMatch = [&](MatchedRow& row) {
         std::optional<detail::ScopedStoredRowNullBitmap> nullBinding;
-        bindPartitionNulls(mr, nullBinding);
+        bindPartitionNulls(row, nullBinding);
         bool toastOk = false;
-        std::string resolved = resolveToastValues(
-            dbname, tablename, mr.payload, tbl, &toastOk);
-        if (!toastOk) {
-            if (capturePartitionNulls)
-                throw DbError("58030", "could not read long value in partitioned relation \"" +
-                    tablename + "\"");
-            return result;
+        auto resolved = resolveToastValues(dbname, tablename, row.payload, tbl, &toastOk);
+        if (!toastOk && capturePartitionNulls)
+            throw DbError("58030", "could not read long value in partitioned relation \"" + tablename + "\"");
+        row.payload = std::move(resolved);
+        return toastOk;
+    };
+    // An unordered locking query only needs to expand the selected rows.
+    const bool resolveBeforeLocking = !partitionRowLock || !orderBy.empty();
+    if (resolveBeforeLocking) {
+        for (auto& row : matchRows) {
+            if (!resolveMatch(row)) return result;
         }
-        mr.payload = std::move(resolved);
     }
 
     // Row-level locks within transaction
-    if (transactionContext().inTransaction) {
+    if (transactionContext().inTransaction && !partitionRowLock) {
         std::vector<MatchedRow> lockedRows;
         for (auto& mr : matchRows) {
-            if (forUpdate && capturePartitionNulls) {
-                const auto isolation = getIsolationLevel();
-                const bool follow = isolation == IsolationLevel::READ_COMMITTED ||
-                                    isolation == IsolationLevel::READ_UNCOMMITTED;
-                const auto& target = partitionLockTargets.at(mr.nullBitmapIndex);
-                const auto locked = lockMutationRow(lockManager_, dbname, tablename,
-                    tbl, *target.heap, *queryView, mr.rid, true, follow,
-                    &target.relation, noWait || skipLocked);
-                if (locked.status != DBStatus::OK) {
-                    if (skipLocked && locked.status == DBStatus::LOCK_CONFLICT) continue;
-                    throw DbError(sqlstateForDBStatus(locked.status),
-                        "could not lock partition row in relation \"" + tablename + "\"");
-                }
-                if (!locked.rid) continue;
-                if (*locked.rid != mr.rid) {
-                    std::string row;
-                    std::vector<bool> bitmap;
-                    const auto status = readMutationPayload(*this, dbname, tablename, tbl,
-                        *target.heap, *locked.rid, row, bitmap);
-                    if (status != DBStatus::OK)
-                        throw DbError(sqlstateForDBStatus(status), "could not read locked partition row");
-                    detail::ScopedStoredRowNullBitmap binding(tbl, bitmap);
-                    LocalExpressionSyntax syntax;
-                    const bool matches = std::any_of(partitionBranches.begin(), partitionBranches.end(),
-                        [&](const auto& branch) {
-                            return std::all_of(branch.begin(), branch.end(), [&](const auto& predicate) {
-                                return evalConditionOnRowWithSyntax(predicate, row, tbl, &syntax, generatedMetadata.get());
-                            });
-                        });
-                    if (!matches) continue;
-                    bool toastOk = false;
-                    auto resolved = resolveToastValues(dbname, tablename, row, tbl, &toastOk);
-                    if (!toastOk) throw DbError("58030", "could not read long value in locked partition row");
-                    mr.rid = *locked.rid;
-                    mr.payload = std::move(resolved);
-                    partitionNulls[mr.nullBitmapIndex] = std::move(bitmap);
-                }
-                lockedRows.push_back(std::move(mr));
-                continue;
-            }
             bool locked;
             if (noWait || skipLocked) {
                 locked = forUpdate
@@ -40211,6 +40179,53 @@ std::vector<std::string> StorageEngine::query(
     }
 
     // DISTINCT ON: keep first row for each distinct combination of specified columns
+    if (partitionRowLock) {
+        const auto isolation = getIsolationLevel();
+        const bool follow = isolation == IsolationLevel::READ_COMMITTED ||
+                            isolation == IsolationLevel::READ_UNCOMMITTED;
+        const auto maxRows = rowLock.maxRows.value_or(matchRows.size());
+        std::vector<MatchedRow> lockedRows;
+        lockedRows.reserve(std::min(maxRows, matchRows.size()));
+        LocalExpressionSyntax recheckSyntax;
+        for (auto& row : matchRows) {
+            // ORDER BY uses the snapshot values. At READ COMMITTED, a row
+            // changed by another transaction can have different output values.
+            if (lockedRows.size() == maxRows) break;
+            const auto& target = partitionLockTargets.at(row.partitionLockIndex);
+            const auto locked = lockMutationRow(lockManager_, dbname, tablename,
+                tbl, *target.heap, *queryView, row.rid, true, follow, &target.relation,
+                noWait || skipLocked, !forUpdate);
+            if (locked.status != DBStatus::OK) {
+                if (skipLocked && locked.status == DBStatus::LOCK_CONFLICT) continue;
+                throw DbError(sqlstateForDBStatus(locked.status),
+                    "could not lock partition row in relation \"" + tablename + "\"");
+            }
+            if (!locked.rid) continue;
+            const bool changed = *locked.rid != row.rid;
+            if (changed) {
+                std::vector<bool> bitmap;
+                const auto status = readMutationPayload(*this, dbname, tablename, tbl,
+                    *target.heap, *locked.rid, row.payload, bitmap);
+                if (status != DBStatus::OK)
+                    throw DbError(sqlstateForDBStatus(status), "could not read locked partition row");
+                detail::ScopedStoredRowNullBitmap binding(tbl, bitmap);
+                const bool matches = std::any_of(partitionBranches.begin(), partitionBranches.end(),
+                    [&](const auto& branch) {
+                        return std::all_of(branch.begin(), branch.end(), [&](const auto& predicate) {
+                            return evalConditionOnRowWithSyntax(
+                                predicate, row.payload, tbl, &recheckSyntax, generatedMetadata.get());
+                        });
+                    });
+                if (!matches) continue;
+                row.rid = *locked.rid;
+                partitionNulls[row.nullBitmapIndex] = std::move(bitmap);
+            }
+            if (changed || !resolveBeforeLocking) resolveMatch(row);
+            lockedRows.push_back(std::move(row));
+        }
+        matchRows = std::move(lockedRows);
+    }
+
     if (!distinctOnCols.empty()) {
         std::vector<size_t> distinctIdxs;
         for (const auto& colName : distinctOnCols) {

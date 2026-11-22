@@ -1145,6 +1145,23 @@ static void test_transactional_partition_updates() {
         };
         assert(localRid("low", "1") == localRid("high", "2"));
 
+        const auto shareQuery = [&](const std::vector<std::string>& conditions,
+                                    bool noWait, bool skipLocked,
+                                    std::optional<size_t> maxRows = std::nullopt) {
+            std::vector<std::vector<std::string>> cells;
+            std::vector<std::vector<bool>> nulls;
+            Engine::RowLockOptions lockOptions;
+            lockOptions.shared = true;
+            lockOptions.maxRows = maxRows;
+            Engine::OrderBySpec order;
+            order.colName = "id";
+            (void)writer.query(db, table, conditions, {"id"}, {order}, false, noWait,
+                skipLocked, 0, {}, &cells, &nulls, nullptr, {}, nullptr, nullptr,
+                {}, lockOptions);
+            assert(cells.size() == nulls.size());
+            return cells;
+        };
+
         // A concurrent FOR UPDATE NOWAIT must conflict with this UPDATE's
         // leaf-qualified row lock, while the same local RID in the other
         // leaf remains independently lockable. No timing or sleeps are
@@ -1164,8 +1181,18 @@ static void test_transactional_partition_updates() {
                     conflict = error.sqlState() == "55P03";
                 }
                 assert(conflict);
+                conflict = false;
+                try {
+                    (void)shareQuery({"=id 1"}, true, false);
+                } catch (const dbms::DbError& error) {
+                    conflict = error.sqlState() == "55P03";
+                }
+                assert(conflict);
+                assert(shareQuery({"=id 1"}, false, true).empty());
                 const auto other = writer.query(db, table, {"=id 2"}, {"id"}, {}, true, true);
                 assert((other == std::vector<std::string>{"2 "}));
+                assert((shareQuery({}, false, true, size_t{1}) ==
+                        std::vector<std::vector<std::string>>{{"2"}}));
                 assert(writer.rollbackTransaction() == DBStatus::OK);
             } catch (...) {
                 readerFailure = std::current_exception();
@@ -1173,6 +1200,41 @@ static void test_transactional_partition_updates() {
             }
         });
         reader.join();
+        if (readerFailure) std::rethrow_exception(readerFailure);
+        assert(writer.rollbackTransaction() == DBStatus::OK);
+
+        // LIMIT 0 must not acquire row locks. Two real FOR SHARE readers on
+        // the same leaf are compatible, but their lock blocks an exclusive
+        // writer while the equal RID in another leaf remains independent.
+        assert(writer.beginTransaction(db) == DBStatus::OK);
+        assert(writer.getLockManager().captureCheckpoint().rowLocks.empty());
+        assert(shareQuery({}, false, false, size_t{0}).empty());
+        assert(writer.getLockManager().captureCheckpoint().rowLocks.empty());
+        assert((shareQuery({}, true, false, size_t{1}) ==
+                std::vector<std::vector<std::string>>{{"1"}}));
+        assert((shareQuery({"=id 1"}, true, false) ==
+                std::vector<std::vector<std::string>>{{"1"}}));
+        readerFailure = nullptr;
+        std::thread sharedReader([&] {
+            try {
+                assert(writer.beginTransaction(db) == DBStatus::OK);
+                assert((shareQuery({"=id 1"}, true, false) ==
+                        std::vector<std::vector<std::string>>{{"1"}}));
+                auto& locks = writer.getLockManager();
+                const auto rid = localRid("low", "1");
+                assert(!locks.rowLockExclusiveNoWait(table + "#low", rid));
+                assert(locks.rowLockExclusiveNoWait(table + "#high", rid));
+                locks.rowUnlock(table + "#high", rid);
+                const auto later = localRid("low", "3");
+                assert(locks.rowLockExclusiveNoWait(table + "#low", later));
+                locks.rowUnlock(table + "#low", later);
+                assert(writer.rollbackTransaction() == DBStatus::OK);
+            } catch (...) {
+                readerFailure = std::current_exception();
+                if (writer.inTransaction()) (void)writer.rollbackTransaction();
+            }
+        });
+        sharedReader.join();
         if (readerFailure) std::rethrow_exception(readerFailure);
         assert(writer.rollbackTransaction() == DBStatus::OK);
 

@@ -2,6 +2,24 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-22 lock shared rows and apply row limits in partition queries",
+      "gap_ids": ["CAT-11", "TXN-05", "TXN-08"],
+      "status": "partial",
+      "evidence": [
+        "src/main.cpp",
+        "src/commands/TableManage.cpp",
+        "docs/compatibility-contract.md",
+        "docs/test-report.md",
+        "docs/performance-report-2026-10-30.md"
+      ],
+      "tests": ["tests/partition_test.cpp", "tests/for_share_nowait_protocol_e2e_test.py", "tests/row_lock_timeout_protocol_e2e_test.py"],
+      "verification": [
+        "Thirteen PostgreSQL 18.6 concurrency scenarios matched wait, row and transaction behavior. Three lock errors differed in whether a row description preceded the error.",
+        "LIMIT, OFFSET, SKIP LOCKED and bound parameters passed their targeted controls. An abrupt exit released the locks and preserved all 60 heap files byte for byte.",
+        "A failed write lock upgrade can still lose a shared lock held before a savepoint. Additional lock modes and complete query combinations remain partial."
+      ]
+    },
+    {
       "issue": "2026-11-22 update and move rows in existing partitioned tables",
       "gap_ids": ["CAT-11", "DML-01", "TXN-05", "WAL-05"],
       "status": "partial",

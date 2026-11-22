@@ -28495,6 +28495,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
 
         // Parse FOR UPDATE / FOR SHARE / NOWAIT / SKIP LOCKED
         bool forUpdate = false;
+        bool forShare = false;
         bool noWait = false;
         bool skipLocked = false;
         {
@@ -28515,9 +28516,11 @@ static bool executeInternal(const string& rawSql, Session& s) {
             }
             size_t fsPos = findTopLevelKeyword(sql, "for share");
             if (fsPos != string::npos) {
+                forShare = true;
                 sql = trim(sql.substr(0, fsPos));
             }
         }
+        const bool lockingRows = forUpdate || forShare;
 
         // Check for INTO OUTFILE clause
         size_t intoPos = findTopLevelKeyword(sql, "into outfile");
@@ -31961,7 +31964,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 condTokens = mergeNegPredTokens(tokenize(condStr));
             }
 
-            if (forUpdate) { cout << "FOR UPDATE not supported with JOIN" << endl; return true; }
+            if (lockingRows) throw dbms::DbError("0A000", "row locking is not supported with JOIN");
 
             map<string, size_t> joinBareNameCounts;
             for (size_t i = 0; i < leftTbl.len(); ++i)
@@ -36037,7 +36040,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
             volcanoStoredOutputRoles.clear();
             volcanoTypedRows.reset();
             // Fall back when the volcano path cannot yet handle the query.
-            if (forUpdate || noWait || skipLocked) return false;
+            if (lockingRows || noWait || skipLocked) return false;
             if (!distinctOnCols.empty()) return false;
             // Inheritance: volcano path only scans one table; under
             // ONLY that is exactly the requested semantics, so no fallback.
@@ -36679,7 +36682,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
             return true;
         }
         if (!groupByCols.empty()) {
-            if (forUpdate) { cout << "FOR UPDATE not supported with GROUP BY" << endl; return true; }
+            if (lockingRows) throw dbms::DbError("0A000", "row locking is not allowed with GROUP BY");
             vector<string> groupProtocolColumns;
             vector<string> groupProtocolTypes;
             vector<dbms::StorageEngine::AggItem> pureAgg;
@@ -37760,7 +37763,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 cout << "SQL syntax error" << endl;
                 return true;
             }
-            if (forUpdate) { cout << "FOR UPDATE not supported with aggregate" << endl; return true; }
+            if (lockingRows) throw dbms::DbError("0A000", "row locking is not allowed with aggregate functions");
             bool canUseVolcanoAggregate = !noWait && !skipLocked &&
                 !hasWindow && !hasScalar && distinctOnCols.empty() &&
                 exprOrderBySpecs.empty();
@@ -37931,7 +37934,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 }
             }
         } else if (hasWindow) {
-            if (forUpdate) { cout << "FOR UPDATE not supported with window functions" << endl; return true; }
+            if (lockingRows) throw dbms::DbError("0A000", "row locking is not allowed with window functions");
 
             // Route the supported window subset through the structured
             // Volcano executor.  Unsupported expressions and syntax retain
@@ -39135,7 +39138,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
             if (structuredOutput) dbms::publishLastDmlResult(std::move(windowResult));
             return false;
         } else if (hasScalar) {
-            if (forUpdate) { cout << "FOR UPDATE not supported with scalar functions" << endl; return true; }
+            if (lockingRows) throw dbms::DbError("0A000", "row locking with scalar functions is not supported");
 
             if (shouldPublishQueryMetadata()) {
                 const vector<string> rawTargets = typedAggregateTargets.empty()
@@ -39788,6 +39791,25 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 structuredScalarExprOrderHandled = true;
             }
         } else {
+            const bool lockPartitions = lockingRows &&
+                tbl.partitionType != dbms::TableSchema::PartitionType::None;
+            if (lockPartitions && !tbl.isTemporary) {
+                if (g_engine.isReadOnly())
+                    throw dbms::DbError("25006", "cannot lock rows in a read-only transaction");
+                if (!checkTablePermission(s, tname, dbms::StorageEngine::TablePrivilege::Update))
+                    return true;
+            }
+            StorageEngine::RowLockOptions rowLock{forShare, std::nullopt};
+            if (lockPartitions && finiteParsedLimit && !queryFetchWithTies) {
+                if (parsedLimit == 0) rowLock.maxRows = 0;
+                else if (parsedOffset <= std::numeric_limits<size_t>::max() - parsedLimit)
+                    rowLock.maxRows = parsedOffset + parsedLimit;
+            }
+            if (lockingRows && isDistinct)
+                throw dbms::DbError("0A000", "row locking is not allowed with DISTINCT");
+            if (lockPartitions && queryFetchWithTies)
+                throw dbms::DbError("0A000", "FETCH WITH TIES with partition row locking is not supported");
+
             // PG header order follows the SELECT list for plain columns.
             vector<string> protocolColumns;
             vector<string> protocolTypes;
@@ -39866,7 +39888,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                 simpleStructuredPlainPredicate &&
                 semiJoins.empty() && existenceFilters.empty() &&
                 quantifiedSubqueries.empty() &&
-                !forUpdate && !noWait && !skipLocked &&
+                (lockPartitions || (!lockingRows && !noWait && !skipLocked)) &&
                 (s.onlyNext ||
                  g_engine.getInheritedChildren(queryDb, tname).empty())));
             if (queryFetchWithTies) {
@@ -40260,13 +40282,14 @@ static bool executeInternal(const string& rawSql, Session& s) {
                             s.timezoneOffsetMinutes, distinctOnCols,
                             &structuredPlainResult.rows,
                             &structuredPlainResult.nulls, nullptr, {}, nullptr,
-                            &plainStoredOutputRoles);
+                            &plainStoredOutputRoles, {}, rowLock);
                         structuredPlainRows = true;
                     } else {
                         answers = g_engine.query(
                             queryDb, tname, {}, selectCols, structuredPlainOrderSpecs,
                             forUpdate, noWait, skipLocked,
-                            s.timezoneOffsetMinutes, distinctOnCols);
+                            s.timezoneOffsetMinutes, distinctOnCols,
+                            nullptr, nullptr, nullptr, {}, nullptr, nullptr, {}, rowLock);
                     }
                 } else if (!inheritedStructuredOrderHandled) {
                     condTokens.insert(condTokens.begin(), "(");
@@ -40282,7 +40305,7 @@ static bool executeInternal(const string& rawSql, Session& s) {
                             captureStructuredPlain ? &structuredPlainResult.rows : nullptr,
                             captureStructuredPlain ? &structuredPlainResult.nulls : nullptr,
                             nullptr, {}, nullptr,
-                            captureStructuredPlain ? &plainStoredOutputRoles : nullptr, groups);
+                            captureStructuredPlain ? &plainStoredOutputRoles : nullptr, groups, rowLock);
                         structuredPlainRows = captureStructuredPlain;
                     } else if (captureStructuredPlain) {
                         set<int64_t> seenRowIds;
