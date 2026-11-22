@@ -2,6 +2,10 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-22 · 单独查询连接设置的开销
+
+PostgreSQL 先给事务分配虚拟编号，持久编号通常在第一次写入时分配。SQLite 在 SQL 实际访问数据库时开启相应的读写事务，部分连接级 `PRAGMA` 可以直接执行。DuckDB 也提供读取当前连接设置的 `current_setting` 函数。本项目在确认调用属于 `pg_catalog` 且参数为基础类型后，直接读写连接设置。单条普通查询使用已有的语句设置快照，扩展请求以自身的同步周期提交或撤销设置。[PostgreSQL 事务编号](https://www.postgresql.org/docs/18/transaction-id.html) · [SQLite 事务](https://www.sqlite.org/lang_transaction.html) · [DuckDB 设置](https://duckdb.org/docs/2.0/configuration/overview)
+
 ## 2026-11-22 · 通过查询读写连接设置
 
 PostgreSQL 通过 `current_setting` 读取运行中的设置，`set_config` 使用与 `SET` 相同的事务机制。DuckDB 也有 `current_setting`，用 `SET` 或 `PRAGMA` 更改设置。SQLite 为部分只读 `PRAGMA` 提供可查询的表函数。本项目将两种 SQL 函数接入原有标量函数和事务设置处理，覆盖工作内存和三项超时。预编译时只确定输入和输出类型，执行时才读取或更改当前连接。[PostgreSQL 函数文档](https://www.postgresql.org/docs/18/functions-admin.html#FUNCTIONS-ADMIN-SET) · [PostgreSQL 18.6 实现](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/utils/misc/guc_funcs.c) · [DuckDB 配置](https://duckdb.org/docs/2.0/configuration/overview) · [SQLite PRAGMA 表函数](https://www.sqlite.org/pragma.html#pragma_functions)

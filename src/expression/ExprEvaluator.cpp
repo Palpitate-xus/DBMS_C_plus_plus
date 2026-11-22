@@ -16,7 +16,8 @@
 #include "function_namespace.h"
 #include "common/QueryHostProvider.h"
 #include "common/Config.h"
-#include "common/TrackedSessionSettings.h"
+#include "expression/SessionSettingProjection.h"
+#include "common/SqlSyntax.h"
 #include "utils/interval.h"
 #include "utils/interval_type.h"
 #include "commands/TableManage.h"
@@ -84,6 +85,108 @@ extern dbms::StorageEngine g_engine;
 extern dbms::Config g_config;
 
 namespace dbms {
+static bool settingProjectionArgumentsComplete(std::string_view source, size_t count) {
+    const auto tokens = SQLParser::tokenize(std::string(source));
+    auto token = std::find(tokens.begin(), tokens.end(), "(");
+    if (token == tokens.end()) return false;
+    unsigned depth = 1;
+    size_t arguments = 1;
+    bool hasInput = false;
+    for (++token; token != tokens.end(); ++token) {
+        if (depth == 1) {
+            if (*token == ")") return hasInput && arguments == count && token + 1 == tokens.end();
+            if (*token == ",") {
+                if (!hasInput) return false;
+                ++arguments;
+                hasInput = false;
+                continue;
+            }
+            hasInput = true;
+        }
+        if (*token == "(") ++depth;
+        else if (*token == ")") --depth;
+    }
+    return false;
+}
+
+static bool settingProjectionAliasToken(std::string_view token) {
+    if (token.size() >= 2 && token.front() == '"' && token.back() == '"') return true;
+    if (token.empty()) return false;
+    const auto first = static_cast<unsigned char>(token.front());
+    return (std::isalpha(first) || first == '_' || first >= 0x80) &&
+           std::all_of(token.begin() + 1, token.end(), sqlIdentifierContinuation);
+}
+
+std::optional<SessionSettingProjection> findSessionSettingProjection(
+        const Stmt* statement, std::string_view sql) {
+    const auto* select = dynamic_cast<const SelectStmt*>(statement);
+    if (!select || select->command != SqlCommand::Select || select->selectList.size() != 1 ||
+        select->fromClause || select->whereClause || select->having || !select->ctes.empty() ||
+        select->setOp != SetOp::None || select->setOpLhs || select->setOpRhs ||
+        !select->valuesRows.empty() || !select->groupBy.empty() || !select->groupByElems.empty() ||
+        select->distinct || !select->distinctOn.empty() || !select->orderBy.empty() ||
+        !select->locking.empty() || !select->windowDefs.empty() || select->hasRowCountClause ||
+        select->limit || select->offset || select->limitExpr || select->offsetExpr ||
+        select->signedLimitCount || select->signedOffsetCount || select->signedFetchCount ||
+        select->fetchFirst || select->withTies) return std::nullopt;
+
+    const auto& item = select->selectList.front();
+    const auto* call = dynamic_cast<const FunctionCallExpr*>(item.expr.get());
+    CatalogManager::QualifiedName name;
+    if (!call || call->preparedSubquery || call->schema.empty() ||
+        !CatalogManager::parseQualifiedName(call->schema + "." + call->funcName, name, true) ||
+        name.schema != "pg_catalog" || !isSessionSettingFunction(name.name) ||
+        call->sqlValue != FunctionCallExpr::SqlValue::None || call->setReturning || call->hasOver ||
+        call->distinct || call->filter || !call->orderBy.empty() || !call->aggregateOrderKeys.empty() ||
+        !call->namedArgs.empty()) return std::nullopt;
+    const bool write = name.name == "set_config";
+    // The legacy expression parser can leave a bare comma as an argument
+    // node. It represents an empty input position, never an expression.
+    const bool emptyArgument = std::any_of(call->args.begin(), call->args.end(), [&](const auto& input) {
+        const auto* column = dynamic_cast<const ColumnRefExpr*>(input.get());
+        // A quoted column named "," is a real expression; only the single
+        // unquoted separator byte denotes an empty argument.
+        return column && column->column == "," && column->sourceBegin < sql.size() &&
+               column->sourceEnd == column->sourceBegin + 1 && sql[column->sourceBegin] == ',';
+    });
+    if (!emptyArgument) {
+        if (!sessionSettingArity(write, call->args.size())) return std::nullopt;
+        for (size_t i = 0; i < call->args.size(); ++i) {
+            const auto* input = call->args[i].get();
+            if (!dynamic_cast<const ParameterExpr*>(input) &&
+                !settingProjectionLiteral(input, sessionSettingBooleanInput(write, i))) return std::nullopt;
+        }
+    }
+
+    // Preserve the whole SELECT envelope. A parser that recognized the
+    // call but left a tail may not turn an invalid query into an assignment.
+    if (call->sourceBegin > sql.size() || item.sourceExpressionEnd > sql.size() ||
+        item.sourceExpressionEnd <= call->sourceBegin) return std::nullopt;
+    const auto prefix = SQLParser::tokenize(std::string(sql.substr(0, call->sourceBegin)));
+    if (prefix.size() != 1 || SQLParser::toLower(prefix.front()) != "select") return std::nullopt;
+    auto tail = SQLParser::tokenize(std::string(sql.substr(item.sourceExpressionEnd)));
+    if (!tail.empty() && tail.back() == ";") tail.pop_back();
+    const auto arguments = sql.substr(call->sourceBegin, item.sourceExpressionEnd - call->sourceBegin);
+    bool syntaxError = emptyArgument || !settingProjectionArgumentsComplete(arguments, call->args.size());
+    std::string column = name.name;
+    if (tail.size() == 1 && SQLParser::toLower(tail.front()) == "as") {
+        // The parser can record a trailing semicolon as the alias after AS.
+        syntaxError = true;
+    } else if (!item.alias.empty()) {
+        if (tail.size() == 2 && SQLParser::toLower(tail.front()) == "as") tail.erase(tail.begin());
+        if (tail.size() != 1) return std::nullopt;
+        CatalogManager::QualifiedName alias;
+        if (!settingProjectionAliasToken(tail.front()) ||
+            !CatalogManager::parseQualifiedName(tail.front(), alias, true) || !alias.schema.empty())
+            syntaxError = true;
+        else
+            column = std::move(alias.name);
+    } else if (!tail.empty()) {
+        return std::nullopt;
+    }
+    return SessionSettingProjection{call, std::move(column), write, syntaxError};
+}
+
 static bool parseArrayElements(const std::string&, std::vector<std::string>&);
 static std::string arrayElemUnquote(const std::string&);
 static float parseRealCastValue(const ExprValue& value);
@@ -6399,30 +6502,7 @@ struct SqlSessionSettingFunction {
     }
 
     ExprValue invoke(const std::vector<ExprValue>& args, StorageEngine& engine) const {
-        if (write ? args.size() != 3 : args.empty() || args.size() > 2)
-            throw DbError("42883", "configuration function does not accept these arguments");
-        if (!write && (args[0].isNull || (args.size() == 2 && args[1].isNull)))
-            return ExprValue("text", "", true);
-        if (args[0].isNull) throw DbError("22004", "SET requires parameter name");
-        auto* session = currentSession();
-        if (!session) throw DbError("XX000", "configuration function requires a session");
-
-        const auto name = toLower(args[0].value);
-        // Utility commands also accept project-specific _ms aliases. These
-        // SQL functions expose the standard parameter names.
-        if (name != "work_mem" && std::find(timeoutNames.begin(), timeoutNames.end(), name) == timeoutNames.end()) {
-            if (!write && args.size() == 2 && args[1].asBool()) return ExprValue("text", "", true);
-            throw DbError("42704", "unrecognized configuration parameter \"" + args[0].value + "\"");
-        }
-        const auto defaultWorkMemKb = g_config.workMemKb;
-        if (write) {
-            const auto value = args[1].isNull ? std::nullopt : std::optional<std::string>(args[1].value);
-            const auto scope = !args[2].isNull && args[2].asBool()
-                ? SettingChangeScope::Local : SettingChangeScope::Session;
-            assignTrackedSetting(*session, engine, name, defaultWorkMemKb, value, scope);
-        }
-        const auto value = showTrackedSetting(*session, name, defaultWorkMemKb);
-        return ExprValue("text", value.value());
+        return invokeSessionSetting(currentSession(), engine, g_config, write, args);
     }
 };
 bool ownsScalarSignatures(const std::string& name,const ScalarFunction* callback) {

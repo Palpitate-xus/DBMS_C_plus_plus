@@ -19,6 +19,15 @@ cmake --build build/cmake --target dbms_main --parallel 2
 ## 最近更新
 
 <details>
+<summary>有人改表时，其他连接仍可查看和修改自己的设置 · 2026-11-22</summary>
+
+例如，另一连接正在改表时，单独查询当前连接的锁等待时间，无需等改表结束。手册列出了适用的 SQL 写法。
+
+[使用说明](docs/MANUAL.md#在-sql-表达式里读取和修改设置)
+
+</details>
+
+<details>
 <summary>查询里也能查看和修改连接设置 · 2026-11-22</summary>
 
 可以在 SQL 查询里查看或调整当前连接的锁等待时间。也可以只为当前事务调整。
@@ -33,15 +42,6 @@ cmake --build build/cmake --target dbms_main --parallel 2
 例如，事务中临时缩短了锁等待时间，回滚后就会恢复到事务开始前的值。
 
 [使用示例](docs/MANUAL.md#在事务里临时调整超时)
-
-</details>
-
-<details>
-<summary>等不到更严格的表锁，原来的锁会保留 · 2026-11-22</summary>
-
-如果你已锁住一张表，再请求更严格的锁时遇到超时或取消，原来的锁仍然有效。也可以让数据库一遇到冲突就报错。
-
-[使用示例](docs/MANUAL.md#在事务里锁住一张表)
 
 </details>
 

@@ -6,6 +6,10 @@
 
 截至 2026-11-22，273 项功能要求中有 22 项完成、167 项部分实现、69 项待验证、15 项暂缓。各项结果和剩余范围见功能总账。以下更新报告给出各轮测试的实际范围。[功能总账](gap-progress.json) · [支持的功能和限制](compatibility-contract.md)
 
+## 2026-11-22 · 单独查询设置时减少数据库访问
+
+在普通查询、命令行和预编译请求里，带 `pg_catalog` 限定的单个设置函数可直接读取和修改当前连接的值。普通请求使用语句设置快照，预编译请求使用自身的事务边界。改表竞争下的设置查询和实际读表分别验证。[测试报告](test-report.md#session-setting-path-20261122) · [性能报告](performance-report-2026-10-30.md#session-setting-path-cost-20261122)
+
 ## 2026-11-22 · 查询可以读写内存和超时设置
 
 应用可以通过 `current_setting()` 查看当前的工作内存和三项超时设置，通过 `set_config()` 修改它们。预编译查询可以绑定参数。修改会随事务提交或撤销，参数解析和结果类型查询不会先执行修改。[测试报告](test-report.md#session-setting-functions-20261122) · [性能报告](performance-report-2026-10-30.md#session-setting-functions-cost-20261122)

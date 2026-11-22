@@ -2657,6 +2657,8 @@ SELECT set_config('work_mem', NULL, false);
 
 两个函数可以带 `pg_catalog` 限定，也可以使用查询参数。更改 `deadlock_timeout` 需要管理员权限。[测试范围](test-report.md#session-setting-functions-20261122)
 
+单独查询一个带 `pg_catalog` 限定的设置函数时，可以直接处理连接设置。这条路径支持文本、布尔值、空值和相应的绑定参数。另一连接正在修改表结构时，这类查询也可完成。设置会按事务提交或撤销。包含表数据或复合表达式的查询经常规路径分析和加锁。[并发与耗时测试](test-report.md#session-setting-path-20261122)
+
 ### 配置值与实际运行资源的边界
 
 参数能写入配置或出现在 `pg_settings` 中，并不表示已实现 PostgreSQL 的同名调度或资源语义。

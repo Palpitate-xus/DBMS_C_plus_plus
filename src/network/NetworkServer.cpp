@@ -29,6 +29,7 @@
 #include "common/BooleanCodec.h"
 #include "common/WorkMemUtilityContext.h"
 #include "common/TrackedSessionSettings.h"
+#include "expression/SessionSettingProjection.h"
 #include "transaction/StatementInterruptGuard.h"
 #include "common/IntegerTextCodec.h"
 #include "common/NetworkValue.h"
@@ -4331,9 +4332,46 @@ bool describeMaintenanceProgress(const std::string& sql, std::vector<PgColumnDes
     return true;
 }
 
+struct ProtocolSessionSettingQuery {
+    ParseResult syntax;
+    SessionSettingProjection projection;
+    std::vector<uint32_t> parameterOids;
+};
+
+static std::optional<ProtocolSessionSettingQuery> protocolSessionSettingQuery(
+        const std::string& sql, std::vector<uint32_t> parameterOids) {
+    if (!mayContainSettingProjection(sql)) return std::nullopt;
+    SQLParser parser;
+    try {
+        auto syntax = parser.parseForBinding(sql);
+        if (!syntax.isValid()) return std::nullopt;
+        auto projection = findSessionSettingProjection(syntax.stmt.get(), sql);
+        if (projection && (projection->syntaxError ||
+                           inferSessionSettingProjectionParameters(*projection, parameterOids)))
+            return ProtocolSessionSettingQuery{std::move(syntax), std::move(*projection),
+                                               std::move(parameterOids)};
+    } catch (const DbError&) {
+        // Retain the ordinary analysis phase for statements we cannot prove.
+    }
+    return std::nullopt;
+}
+
+static PgColumnDescription sessionSettingProtocolColumn(const SessionSettingProjection& query) {
+    if (query.syntaxError) throw DbError("42601", sessionSettingSyntaxError);
+    PgColumnDescription column;
+    column.name = query.column;
+    column.typeOid = 25;
+    column.typeSize = -1;
+    return column;
+}
+
 bool describePreparedResultShape(const std::string& sql, Session& session,
                             std::vector<PgColumnDescription>& columns,
                             const std::vector<uint32_t>& parameterOids = {}) {
+    if (const auto setting = protocolSessionSettingQuery(sql, parameterOids)) {
+        columns = {sessionSettingProtocolColumn(setting->projection)};
+        return true;
+    }
     if (describeMaintenanceProgress(sql, columns)) return true;
     if (describePreparedWindowHostResult(sql,session,columns,parameterOids)) return true;
     if(describePreparedQuantified(sql,session,columns,parameterOids))return true;
@@ -6285,13 +6323,14 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session,
         std::vector<dbms::StatementNotice> statementNotices;
         dbms::ScopedStatementNoticeCapture noticeCapture(statementNotices, output);
         try {
-            if (emitTimeDeclarationNotices) {
+            const bool sessionSetting = protocolSessionSettingQuery(sql, {}).has_value();
+            if (!sessionSetting && emitTimeDeclarationNotices) {
                 const auto notices = protocolTimePrecisionNotices(sql, session);
                 result.notices.insert(result.notices.end(), notices.begin(), notices.end());
             }
             // Bind EXPLAIN's actual output and inner input types before any
             // analyzed effects; keep this descriptor through execution.
-            const bool typedExplain=describePreparedExplainResult(sql,session,explainColumns);
+            const bool typedExplain = !sessionSetting && describePreparedExplainResult(sql, session, explainColumns);
             // Catalog/type analysis can itself throw a structured error.
             // Keep it inside the same protocol exception boundary as execution
             // so a metadata failure never terminates the client connection.
@@ -6308,7 +6347,7 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session,
                     ? dynamic_cast<const InsertStmt*>(parsed.stmt.get()) : nullptr;
                 typedInsertSelect = insert && insert->selectSource;
             }
-            if (!typedInsertSelect && !typedExplain) {
+            if (!sessionSetting && !typedInsertSelect && !typedExplain) {
                 const auto functionError = whereUnknownFunctionError(sql, session);
                 if (!functionError.empty()) throw DbError("42883", functionError);
             }
@@ -6316,7 +6355,7 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session,
             // and genuinely parameter-free portals. The legacy value carrier
             // loses derived computed typmods. Bind before execution effects,
             // and retain the original portal parameter owner after expansion.
-            if (retainOrdinarySourceDeclaration && !typedExplain) {
+            if (!sessionSetting && retainOrdinarySourceDeclaration && !typedExplain) {
                 if (!describeMaintenanceProgress(sql,ordinarySourceColumns))
                 if (!describePreparedPgStatsCatalog(sql,session,ordinarySourceColumns,{}))
                     if (!describePreparedOwnedCatalog(sql,session,ordinarySourceColumns,{}))
@@ -7581,16 +7620,19 @@ void handleClient(SecureSocket socket, std::string clientHost) {
         renderProtocolTimestamptzRows(result, session);
         return result;
     };
-    const auto prepareExtendedQuerySnapshot = [&](const std::string& sql) -> bool {
+    const auto prepareExtendedQuerySnapshot = [&](const std::string& sql,
+                                                    bool sessionSetting) -> bool {
         // Parse analysis and Bind planning may take the first snapshot
         // before Execute. Keep an implicit block alive until Sync.
         // Existing failed blocks must not be silently restarted here.
         if (transactionFailed) return true;
         try {
-            SQLParser parser;
-            const auto parsed = parser.parseForBinding(sql);
-            const bool databaseIndependent = parsed.success && parsed.stmt &&
-                SQLParser::isDatabaseIndependentQuery(*parsed.stmt);
+            bool databaseIndependent = sessionSetting;
+            if (!databaseIndependent) {
+                SQLParser parser;
+                const auto parsed = parser.parseForBinding(sql);
+                databaseIndependent = parsed.isValid() && SQLParser::isDatabaseIndependentQuery(*parsed.stmt);
+            }
             if (!g_engine.inTransaction()) {
                 std::unique_ptr<StorageEngine::DatabaseIndependentBeginScope> deferredBegin;
                 if (databaseIndependent)
@@ -8015,6 +8057,11 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             for (const auto& statement : statements) {
                 rawSyntaxError = rawParser.parseRawSyntax(statement);
                 if (rawSyntaxError) break;
+                const auto setting = protocolSessionSettingQuery(statement, {});
+                if (setting && setting->projection.syntaxError) {
+                    rawSyntaxError = sessionSettingSyntaxError;
+                    break;
+                }
             }
             if (rawSyntaxError) {
                 // Match the existing Q lexical-error boundary, without
@@ -8277,8 +8324,13 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 extendedQueryError = true;
                 continue;
             }
+            const auto sessionSetting = protocolSessionSettingQuery(sql, parameterTypes);
+            if (sessionSetting && sessionSetting->projection.syntaxError) {
+                sendExtendedProtocolError("42601", sessionSettingSyntaxError);
+                continue;
+            }
             if (!isMaintenanceProgressQuery(sql) && SQLParser::requiresQuerySnapshot(sql) &&
-                !prepareExtendedQuerySnapshot(sql)) {
+                !prepareExtendedQuerySnapshot(sql, sessionSetting.has_value())) {
                 continue;
             }
             if (const auto duplicate = SQLParser::duplicateCteName(sql)) {
@@ -8292,46 +8344,56 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 continue;
             }
             try {
-                notePreparedTemporaryObjectAccess(sql, session);
-                // Catalog analysis belongs to Parse, before publishing a
-                // statement. Describe must never be its first validation.
-                std::vector<PgColumnDescription> namespaceDescriptor;
-                const bool progressQuery = describeMaintenanceProgress(sql,namespaceDescriptor);
-                if(namespaceDescriptor.empty())(void)describePreparedNamespaceCatalog(sql,session,namespaceDescriptor,parameterTypes);
-                if(namespaceDescriptor.empty())(void)describePreparedPgStatsCatalog(sql,session,namespaceDescriptor,parameterTypes);
-                if(namespaceDescriptor.empty())(void)describePreparedOwnedCatalog(sql,session,namespaceDescriptor,parameterTypes);
-                if(namespaceDescriptor.empty())(void)describePreparedPgSequenceCatalog(sql,session,namespaceDescriptor,parameterTypes);
-                if (!progressQuery) {
-                inferProtocolConcatParameters(sql,session,parameterTypes);
-                inferProtocolWholeScalarParameters(sql,session,parameterTypes);
-                validatePreparedAggregateOrderInputs(sql,session,parameterTypes);
-                validatePreparedStoredSignatures(sql,session,parameterTypes);
-                validatePreparedScalarArithmetic(sql,session,parameterTypes);
-                validatePreparedIntegerInputs(sql,session,parameterTypes);
-                validatePreparedBitScalarParameters(sql,session,parameterTypes);
-                std::vector<PgColumnDescription> explainDescriptor;
-                (void)describePreparedHavingResult(sql, session, explainDescriptor, parameterTypes);
-                (void)describePreparedConflictPredicateResult(sql, session, explainDescriptor, parameterTypes);
-                (void)describePreparedRecursiveCteResult(sql,session,explainDescriptor,parameterTypes);
-                (void)describePreparedExplainResult(sql,session,explainDescriptor,parameterTypes);
-                (void)prepareProtocolBitBetween(sql, session, parameterTypes);
-                if(parameterTypes.empty()) {
-                    // Whole provider analysis precedes publishing a prepared
-                    // statement. A failed call never leaves a named object
-                    // behind or turns its next Parse into spurious 42P05.
-                    std::vector<PgColumnDescription> staticColumns;
-                    if (!describePreparedSetResult(sql,session,staticColumns) &&
-                        !describePreparedQueryHostResult(sql,session,staticColumns))
-                        (void)describePreparedOrdinarySourceResult(sql,session,staticColumns);
-                }
-                }
-                std::vector<PgColumnDescription> resultColumns;
-                if(describePreparedResult(sql,session,resultColumns,parameterTypes)) {
+                if (sessionSetting) {
+                    // Pure conversions belong to Parse. The setting callback
+                    // remains owned by Execute even when every argument is known.
+                    (void)sessionSettingProjectionArguments(sessionSetting->projection, true);
+                    parameterTypes = sessionSetting->parameterOids;
+                    const auto column = sessionSettingProtocolColumn(sessionSetting->projection);
                     resultIdentity.emplace();
-                    for(const auto& column:resultColumns)resultIdentity->emplace_back(column.typeOid,column.typeModifier);
+                    resultIdentity->emplace_back(column.typeOid, column.typeModifier);
+                } else {
+                    notePreparedTemporaryObjectAccess(sql, session);
+                    // Catalog analysis belongs to Parse, before publishing a
+                    // statement. Describe must never be its first validation.
+                    std::vector<PgColumnDescription> namespaceDescriptor;
+                    const bool progressQuery = describeMaintenanceProgress(sql,namespaceDescriptor);
+                    if(namespaceDescriptor.empty())(void)describePreparedNamespaceCatalog(sql,session,namespaceDescriptor,parameterTypes);
+                    if(namespaceDescriptor.empty())(void)describePreparedPgStatsCatalog(sql,session,namespaceDescriptor,parameterTypes);
+                    if(namespaceDescriptor.empty())(void)describePreparedOwnedCatalog(sql,session,namespaceDescriptor,parameterTypes);
+                    if(namespaceDescriptor.empty())(void)describePreparedPgSequenceCatalog(sql,session,namespaceDescriptor,parameterTypes);
+                    if (!progressQuery) {
+                        inferProtocolConcatParameters(sql,session,parameterTypes);
+                        inferProtocolWholeScalarParameters(sql,session,parameterTypes);
+                        validatePreparedAggregateOrderInputs(sql,session,parameterTypes);
+                        validatePreparedStoredSignatures(sql,session,parameterTypes);
+                        validatePreparedScalarArithmetic(sql,session,parameterTypes);
+                        validatePreparedIntegerInputs(sql,session,parameterTypes);
+                        validatePreparedBitScalarParameters(sql,session,parameterTypes);
+                        std::vector<PgColumnDescription> explainDescriptor;
+                        (void)describePreparedHavingResult(sql, session, explainDescriptor, parameterTypes);
+                        (void)describePreparedConflictPredicateResult(sql, session, explainDescriptor, parameterTypes);
+                        (void)describePreparedRecursiveCteResult(sql,session,explainDescriptor,parameterTypes);
+                        (void)describePreparedExplainResult(sql,session,explainDescriptor,parameterTypes);
+                        (void)prepareProtocolBitBetween(sql, session, parameterTypes);
+                        if(parameterTypes.empty()) {
+                            // Whole provider analysis precedes publishing a prepared
+                            // statement. A failed call never leaves a named object
+                            // behind or turns its next Parse into spurious 42P05.
+                            std::vector<PgColumnDescription> staticColumns;
+                            if (!describePreparedSetResult(sql,session,staticColumns) &&
+                                !describePreparedQueryHostResult(sql,session,staticColumns))
+                                (void)describePreparedOrdinarySourceResult(sql,session,staticColumns);
+                        }
+                    }
+                    std::vector<PgColumnDescription> resultColumns;
+                    if(describePreparedResult(sql,session,resultColumns,parameterTypes)) {
+                        resultIdentity.emplace();
+                        for(const auto& column:resultColumns)resultIdentity->emplace_back(column.typeOid,column.typeModifier);
+                    }
+                    for (const auto& notice : protocolTimePrecisionNotices(sql, session))
+                        protocol.sendNoticeResponse(notice.message, notice.severity, notice.sqlState);
                 }
-                for (const auto& notice : protocolTimePrecisionNotices(sql, session))
-                    protocol.sendNoticeResponse(notice.message, notice.severity, notice.sqlState);
             } catch (const DbError& error) {
                 sendExtendedProtocolError(error.sqlState(), error.message());
                 continue;
@@ -8376,9 +8438,16 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             }
             const std::string& preparedSql = statementIt->second;
             const std::vector<uint32_t>& preparedParameterTypes = oidIt->second;
+            const auto sessionSetting = protocolSessionSettingQuery(preparedSql, preparedParameterTypes);
+            if (sessionSetting && sessionSetting->projection.syntaxError) {
+                sendExtendedProtocolError("42601", sessionSettingSyntaxError);
+                continue;
+            }
             auto betweenParameterTypes = preparedParameterTypes;
             bool bitBetween = false;
-            try {bitBetween = prepareProtocolBitBetween(preparedSql, session, betweenParameterTypes);}
+            try {
+                if (!sessionSetting) bitBetween = prepareProtocolBitBetween(preparedSql, session, betweenParameterTypes);
+            }
             catch (const DbError& error) {
                 sendExtendedProtocolError(error.sqlState(), error.message());
                 extendedQueryError = true;
@@ -8427,7 +8496,7 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             }
             if (!isMaintenanceProgressQuery(preparedSql) &&
                 (valueCount != 0 || SQLParser::requiresQuerySnapshot(preparedSql)) &&
-                !prepareExtendedQuerySnapshot(preparedSql)) {
+                !prepareExtendedQuerySnapshot(preparedSql, sessionSetting.has_value())) {
                 continue;
             }
             if (!portal.empty() && portals.count(portal) != 0) {
@@ -8493,7 +8562,10 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                 // for every Bind datum, not only NULL or bare VALUES. A
                 // numeric spelling must not turn SMALLINT into INTEGER, and
                 // NULL VARCHAR/array inputs must not become UNKNOWN.
-                if (preparedParameterTypes[i]) {
+                if (sessionSetting) {
+                    const char* type = preparedParameterTypes[i] == 16 ? "bool" : "text";
+                    literals.back() = "CAST(" + literals.back() + " AS \"pg_catalog\".\"" + type + "\")";
+                } else if (preparedParameterTypes[i]) {
                     try {
                         const auto catalog=regtype_detail::metadata(g_engine,session.currentDB);
                         const auto oid=preparedParameterTypes[i];

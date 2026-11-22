@@ -34,6 +34,7 @@
 #include "utils/PlanCacheEpoch.h"
 #include "common/WorkMemUtilityContext.h"
 #include "common/TrackedSessionSettings.h"
+#include "expression/SessionSettingProjection.h"
 #include "transaction/StatementInterruptGuard.h"
 #include "ExecutionPlan.h"
 #include "executor/PreparedTableSource.h"
@@ -23468,7 +23469,8 @@ static bool handlePreparedQuantifiedDml(const string& rawSql,Session& session,bo
     dbms::publishLastDmlResult(std::move(result));return false;
 }
 
-static bool executeInternal(const string& rawSql, Session& s) {
+static bool executeInternal(const string& rawSql, Session& s,
+                            const dbms::SessionSettingProjection* settingProjection) {
     // Check for pg_terminate_backend / pg_cancel_backend flags
     if (s.terminateRequested) {
         cout << "ERROR: session terminated" << endl;
@@ -23480,6 +23482,25 @@ static bool executeInternal(const string& rawSql, Session& s) {
         return true;
     }
     dbms::checkForQueryInterrupt();
+    if (settingProjection) {
+        const auto arguments = dbms::sessionSettingProjectionArguments(*settingProjection, false);
+        auto value = dbms::invokeSessionSetting(&s, g_engine, g_config, settingProjection->write, arguments);
+        const auto& column = settingProjection->column;
+        cout << column << " \n" << (value.isNull ? "NULL" : value.value) << " \n";
+        std::optional<dbms::PreparedQueryRows> typedRows;
+        dbms::QueryRowDescriptor descriptor;
+        if (dbms::typedResultCaptureRequested()) {
+            typedRows = dbms::PreparedQueryRows{{value}};
+            dbms::QueryOutputColumn field;
+            field.name = column;
+            field.type = "text";
+            field.typeOid = 25;
+            descriptor.push_back(std::move(field));
+        }
+        publishStructuredUtilityResult({column}, {"text"}, {{std::move(value.value)}}, {{value.isNull}},
+                                       "SELECT 1", std::move(typedRows), std::move(descriptor));
+        return false;
+    }
     g_engine.setRLSUser(effectiveSessionRole(s));
     g_engine.setMoneyLocale(s.lcMonetary);
     dbms::setCurrentSession(&s);
@@ -41525,14 +41546,24 @@ static bool executeWithCteInheritance(const std::string& inputSql, Session& s,
         pendingExplainDepth = executeDepth + (command == dbms::SqlCommand::Execute ? 2 : 1);
     }
     bool databaseIndependentQuery = false;
+    dbms::ParseResult selectSyntax;
+    std::optional<dbms::SessionSettingProjection> settingProjection;
     if (outermost && command == dbms::SqlCommand::Select) {
         dbms::SQLParser parser;
-        const auto parsed = parser.parseForBinding(rawSql);
-        databaseIndependentQuery = parsed.success && parsed.stmt &&
-            dbms::SQLParser::isDatabaseIndependentQuery(*parsed.stmt);
+        selectSyntax = parser.parseForBinding(rawSql);
+        if (selectSyntax.isValid()) {
+            settingProjection = dbms::findSessionSettingProjection(selectSyntax.stmt.get(), rawSql);
+            if (settingProjection && settingProjection->syntaxError)
+                throw dbms::DbError("42601", dbms::sessionSettingSyntaxError);
+            std::vector<uint32_t> noParameterTypes;
+            if (settingProjection && !dbms::inferSessionSettingProjectionParameters(
+                    *settingProjection, noParameterTypes)) settingProjection.reset();
+        }
+        databaseIndependentQuery = settingProjection || (selectSyntax.isValid() &&
+            dbms::SQLParser::isDatabaseIndependentQuery(*selectSyntax.stmt));
         dbms::maintenance_progress_view::Kind progressKind;
         std::string progressName;
-        const auto* select = parsed.success ? dynamic_cast<const dbms::SelectStmt*>(parsed.stmt.get()) : nullptr;
+        const auto* select = selectSyntax.success ? dynamic_cast<const dbms::SelectStmt*>(selectSyntax.stmt.get()) : nullptr;
         databaseIndependentQuery = databaseIndependentQuery ||
             dbms::maintenance_progress_view::source(select, progressKind, progressName);
     }
@@ -41546,7 +41577,7 @@ static bool executeWithCteInheritance(const std::string& inputSql, Session& s,
             throw dbms::DbError(dbms::sqlstateForDBStatus(status),
                                "could not acquire database transaction ownership");
     }
-    const bool statementTransaction = outermost &&
+    const bool statementTransaction = outermost && !settingProjection &&
         !g_engine.inTransaction() &&
         g_engine.databaseExists(s.currentDB) &&
         ((dbms::SQLParser::requiresQuerySnapshot(rawSql) && !databaseIndependentQuery) ||
@@ -41614,7 +41645,7 @@ static bool executeWithCteInheritance(const std::string& inputSql, Session& s,
         if (dbms::SQLParser::requiresQuerySnapshot(rawSql)) {
             g_engine.noteQuerySnapshot();
         }
-        error = executeInternal(rawSql, s);
+        error = executeInternal(rawSql, s, settingProjection ? &*settingProjection : nullptr);
     } catch (...) {
         if (statementTransaction) {
             g_engine.rollbackTransaction();

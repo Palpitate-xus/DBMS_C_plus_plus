@@ -2,9 +2,12 @@
 """Exercise configuration functions through real SQL and the wire protocol."""
 
 from contextlib import closing
+from pathlib import Path
 import select
 import socket
 import struct
+import subprocess
+import tempfile
 
 from compat import pg_diff_runner as runner
 
@@ -35,13 +38,14 @@ class Wire:
         body += b"".join(struct.pack("!I", oid) for oid in oids)
         return self.packet(b"P", body)
 
-    def bind(self, name=b"", arguments=()):
+    def bind(self, name=b"", arguments=(), result_format=None):
         body = b"\0" + name + b"\0" + struct.pack("!HH", 0, len(arguments))
         for argument in arguments:
             body += struct.pack("!i", -1 if argument is None else len(argument))
             if argument is not None:
                 body += argument
-        return self.packet(b"B", body + struct.pack("!H", 0))
+        formats = struct.pack("!H", 0) if result_format is None else struct.pack("!HH", 1, result_format)
+        return self.packet(b"B", body + formats)
 
     def describe_portal(self):
         return self.packet(b"D", b"P\0")
@@ -163,8 +167,8 @@ def transaction_controls(wire, peer):
         wire.command(f"RESET {name}", "RESET")
         wire.setting(name, default)
 
-    setter = "SELECT set_config('lock_timeout', '2s', true) AS v"
-    getter = "SELECT current_setting('lock_timeout') AS v"
+    setter = "SELECT pg_catalog.set_config('lock_timeout', '2s', true) AS v"
+    getter = "SELECT pg_catalog.current_setting('lock_timeout') AS v"
     wire.check("temporary change in a query batch", wire.send_statements(setter, getter),
                rows=[("2s",), ("2s",)])
     wire.setting("lock_timeout", "0")
@@ -173,7 +177,7 @@ def transaction_controls(wire, peer):
     fails = "SELECT CAST(set_config('lock_timeout', '7s', false) AS INTEGER) AS v"
     wire.query(fails, tag=None, state="22P02")
     wire.setting("lock_timeout", "0")
-    persistent_change = "SELECT set_config('lock_timeout', '7s', false) AS v"
+    persistent_change = "SELECT pg_catalog.set_config('lock_timeout', '7s', false) AS v"
     wire.check("failed query batch", wire.send_statements(persistent_change, "SELECT 1/0"),
                rows=[("7s",)], state="22012")
     wire.setting("lock_timeout", "0")
@@ -212,8 +216,15 @@ def prepared_controls(wire, peer):
     wire.run_prepared(b"settings_get", (b"no_such_setting", b"false"), None, state="42704")
 
     # Resolve the requested setting only when the expression executes.
-    wire.prepare(b"settings_unknown", "SELECT current_setting('no_such_setting') AS v", (), ())
+    wire.prepare(b"settings_unknown", "SELECT pg_catalog.current_setting('no_such_setting') AS v", (), ())
     wire.run_prepared(b"settings_unknown", (), None, state="42704")
+
+    wire.prepare(b"settings_binary", "SELECT pg_catalog.current_setting('lock_timeout') AS v", (), ())
+    messages = wire.exchange(wire.bind(b"settings_binary", result_format=1) +
+                             wire.describe_portal() + wire.execute() + wire.packet(b"S"))
+    assert [kind for kind, _ in messages] == [b"2", b"T", b"D", b"C", b"Z"], messages
+    assert wire.client.row_description_fields(messages) == [(b"v", 0, 0, TEXT, -1, -1, 1)], messages
+    wire.check("binary getter result", messages, rows=[("0",)], fields=[("v", TEXT)])
 
     # The bound NULL is available as a constant for this execution.
     wire.prepare(b"settings_null_name", "SELECT current_setting($1, "
@@ -224,6 +235,103 @@ def prepared_controls(wire, peer):
     wire.show("lock_timeout", "0")
     wire.run_prepared(b"settings_null_flag", (None,), None)
     wire.show("lock_timeout", "0")
+
+
+def qualified_snapshot_controls(wire):
+    begin = "BEGIN ISOLATION LEVEL READ COMMITTED READ ONLY"
+    isolation = "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE"
+    wire.command(begin, "BEGIN", b"T")
+    wire.assign("lock_timeout", "37ms", ready=b"T")
+    wire.setting("lock_timeout", "37ms", b"T")
+    wire.query(isolation, tag=None, state="25001", ready=b"E")
+    wire.command("ROLLBACK", "ROLLBACK")
+    wire.show("lock_timeout", "0")
+
+    for sql, state in (
+            ("SELECT pg_catalog.set_config('lock_timeout', 'invalid unit', false) AS v", "22023"),
+            ("SELECT pg_catalog.set_config('lock_timeout', '73ms', false) AS ;", "42601")):
+        wire.command("BEGIN", "BEGIN", b"T")
+        wire.assign("lock_timeout", "37ms", ready=b"T")
+        wire.query(sql, tag=None, state=state, ready=b"E")
+        wire.query("SHOW lock_timeout", tag=None, state="25P02", ready=b"E")
+        wire.command("ROLLBACK", "ROLLBACK")
+        wire.show("lock_timeout", "0")
+
+    if not wire.extended:
+        return
+    # Parse and Bind each establish a query snapshot without running a setter.
+    sql = "SELECT pg_catalog.set_config('lock_timeout', '37ms', false) AS v"
+    wire.command(begin, "BEGIN", b"T")
+    reply = wire.exchange(wire.parse(sql, b"snapshot_set_parse") + wire.packet(b"S"))
+    assert reply == [(b"1", b""), (b"Z", b"T")], reply
+    wire.show("lock_timeout", "0", b"T")
+    wire.query(isolation, tag=None, state="25001", ready=b"E")
+    wire.command("ROLLBACK", "ROLLBACK")
+
+    wire.prepare(b"snapshot_set_bind", sql, (), ())
+    wire.command(begin, "BEGIN", b"T")
+    reply = wire.exchange(wire.bind(b"snapshot_set_bind") + wire.packet(b"S"))
+    assert reply == [(b"2", b""), (b"Z", b"T")], reply
+    wire.show("lock_timeout", "0", b"T")
+    wire.query(isolation, tag=None, state="25001", ready=b"E")
+    wire.command("ROLLBACK", "ROLLBACK")
+
+
+def setting_dispatch_controls(wire, sequence):
+    wire.query("SELECT \"pg_catalog\".\"current_setting\"('lock_timeout')",
+               rows=[("0",)], fields=[("current_setting", TEXT)])
+    wire.query("SELECT pg_catalog.set_config('lock_timeout', \",\", false)",
+               tag=None, state="42703")
+
+    # A nested value must execute once, and a zero-row query must skip it.
+    wire.command(f"CREATE SEQUENCE {sequence}", "CREATE SEQUENCE")
+    setter = ("SELECT pg_catalog.set_config('lock_timeout', "
+              f"CAST(nextval('{sequence}') AS TEXT) || 'ms', false) AS v")
+    wire.query(setter + " LIMIT 0", tag="SELECT 0", fields=[("v", TEXT)])
+    wire.show("lock_timeout", "0")
+    wire.query(setter, rows=[("1ms",)], fields=[("v", TEXT)])
+    wire.show("lock_timeout", "1ms")
+    wire.query(f"SELECT currval('{sequence}') AS v", rows=[("1",)], fields=[("v", 20)])
+    wire.command("RESET lock_timeout", "RESET")
+
+    # The exact INTEGER overload wins even with pg_catalog implicitly first.
+    wire.command("SET search_path = setting_function_shadow, public", "SET")
+    wire.value("current_setting('lock_timeout')", "0")
+    wire.value("current_setting(42)", "shadow-int")
+    wire.command("SET search_path = setting_function_shadow, pg_catalog, public", "SET")
+    wire.value("current_setting('lock_timeout')", "shadow-text")
+    wire.value("set_config('lock_timeout', '37ms', false)", "shadow-set")
+    wire.show("lock_timeout", "0")
+    wire.assign("lock_timeout", "37ms")
+    wire.setting("lock_timeout", "37ms")
+    wire.command("RESET lock_timeout", "RESET")
+    wire.command("SET search_path = public", "SET")
+
+
+def setting_projection_syntax_controls(wire, original_timeout):
+    setter = "SELECT pg_catalog.set_config("
+    arguments = "'lock_timeout', '73ms', false"
+    for tail in (arguments + ") 3", arguments + ") AS 3", arguments + ") AS 'q'",
+                 arguments + ") AS", arguments + ") AS ;", arguments + ") AS /* missing alias */ ;",
+                 arguments + ",)", arguments + ", /* unused slot */ )",
+                 ", " + arguments + ")", "'lock_timeout', , '73ms', false)"):
+        sql = setter + tail
+        reply = wire.send_statements(sql)
+        assert [kind for kind, _ in reply] == [b"E", b"Z"], (sql, reply)
+        wire.check(sql, reply, tag=None, state="42601")
+        wire.setting("lock_timeout", original_timeout)
+
+    getter = "SELECT pg_catalog.current_setting('lock_timeout')"
+    for alias in (' AS "as";', ' "as";', ' AS AS;'):
+        wire.query(getter + alias, rows=[(original_timeout,)], fields=[("as", TEXT)])
+
+    if not wire.extended:
+        # A malformed later statement prevents the first setter from running.
+        for tail in (",)", ") AS ;"):
+            reply = wire.send_statements(setter + arguments + ")", setter + arguments + tail)
+            assert [kind for kind, _ in reply] == [b"E", b"Z"], reply
+            wire.check("malformed setting batch", reply, tag=None, state="42601")
+            wire.setting("lock_timeout", original_timeout)
 
 
 def strict_arguments(wire):
@@ -257,7 +365,7 @@ def role_controls(wire):
     wire.command("SET ROLE setting_function_reader", "SET")
     wire.setting("deadlock_timeout", "1s")
     for operand in ("'9s'", "NULL"):
-        wire.query(f"SELECT set_config('deadlock_timeout', {operand}, false) AS v",
+        wire.query(f"SELECT pg_catalog.set_config('deadlock_timeout', {operand}, false) AS v",
                    tag=None, state="42501")
     wire.assign("lock_timeout", "3s")
     wire.command("RESET lock_timeout", "RESET")
@@ -298,11 +406,22 @@ def exercise(client, primary, peer, startup):
     setup.command("CREATE TABLE setting_function_null_input (setting_name TEXT, missing_ok BOOLEAN)",
                   "CREATE TABLE")
     setup.command("INSERT INTO setting_function_null_input VALUES (NULL, NULL)", "INSERT 0 1")
+    setup.command("CREATE SCHEMA setting_function_shadow", "CREATE SCHEMA")
+    for argument, value in (("p TEXT", "shadow-text"), ("p INTEGER", "shadow-int")):
+        setup.command("CREATE FUNCTION setting_function_shadow.current_setting(" + argument +
+                      ") RETURNS TEXT LANGUAGE SQL IMMUTABLE STRICT AS "
+                      f"$$ SELECT '{value}'::TEXT $$", "CREATE FUNCTION")
+    setup.command("CREATE FUNCTION setting_function_shadow.set_config(p TEXT, v TEXT, l BOOLEAN) "
+                  "RETURNS TEXT LANGUAGE SQL IMMUTABLE STRICT AS $$ SELECT 'shadow-set'::TEXT $$",
+                  "CREATE FUNCTION")
     for extended in (False, True):
         wire = Wire(client, primary, extended)
         function_arguments(wire)
         strict_arguments(wire)
         transaction_controls(wire, observer)
+        qualified_snapshot_controls(wire)
+        setting_projection_syntax_controls(wire, "0")
+        setting_dispatch_controls(wire, "setting_function_seq_ext" if extended else "setting_function_seq_simple")
         role_controls(wire)
         table_controls(wire, observer)
     prepared_controls(Wire(client, primary, True), observer)
@@ -334,8 +453,80 @@ def legacy_trigger_timeout_isolation(wire, blocker):
                fields=[("id", 23)])
 
 
+def database_owner_controls(wire, blocker):
+    blocker.command("CREATE TABLE setting_function_owner (id INTEGER PRIMARY KEY)", "CREATE TABLE")
+    blocker.command("INSERT INTO setting_function_owner VALUES (1)", "INSERT 0 1")
+    wire.command("SET lock_timeout = '70ms'", "SET")
+    extended = Wire(wire.client, wire.sock, extended=True)
+    setter = b"owner_setting_setter"
+    extended.prepare(setter, "SELECT pg_catalog.set_config($1, $2, $3) AS v",
+                     (), (TEXT, TEXT, BOOLEAN))
+    blocker.command("BEGIN", "BEGIN", b"T")
+    blocker.command("ALTER TABLE setting_function_owner ADD COLUMN payload INTEGER",
+                    "ALTER TABLE", b"T")
+    try:
+        # The catalog owner blocks relation access, while these builtin calls
+        # read or update only the caller's session.
+        wire.setting("lock_timeout", "70ms")
+        wire.assign("work_mem", "128kB", local=True)
+        wire.show("work_mem", "4MB")
+        setting_projection_syntax_controls(wire, "70ms")
+        setting_projection_syntax_controls(extended, "70ms")
+        read_table = "SELECT id FROM setting_function_owner"
+        wire.query(read_table, tag=None, state="55P03")
+
+        getter = b"owner_setting_getter"
+        extended.prepare(getter, "SELECT pg_catalog.current_setting($1, $2) AS v",
+                         (), (TEXT, BOOLEAN))
+        extended.run_prepared(getter, (b"lock_timeout", b"false"), "70ms")
+        extended.run_prepared(setter, (b"work_mem", b"128kB", b"true"), "128kB")
+        wire.show("work_mem", "4MB")
+
+        # A real table access must acquire ownership in the same request
+        # group. Its timeout rolls back the successful session assignment.
+        reply = extended.exchange(extended.bind(setter, (b"work_mem", b"256kB", b"false")) +
+                                  extended.describe_portal() + extended.execute() +
+                                  extended.parse(read_table) + extended.packet(b"S"))
+        extended.check("failed ownership promotion", reply, rows=[("256kB",)], state="55P03")
+        wire.show("work_mem", "4MB")
+    finally:
+        blocker.command("ROLLBACK", "ROLLBACK")
+    wire.query("SELECT id FROM setting_function_owner", rows=[("1",)])
+    wire.command("RESET lock_timeout", "RESET")
+
+
 STARTUP_OPTIONS = {"options": "-c lock_timeout=3s -c statement_timeout=4s "
                               "-c deadlock_timeout=5s -c work_mem=8MB"}
+
+
+def cli_controls(client):
+    binary = Path(runner.DBMS_MAIN).resolve(strict=True)
+    with tempfile.TemporaryDirectory(prefix="dbms-setting-functions-cli-") as work:
+        info = Path(work, "info")
+        info.mkdir()
+        (info / "tlist.lst").touch()
+        client.write_auth_catalog(work, "alice", "secret")
+        commands = (
+            "alice\nsecret\n"
+            "SELECT pg_catalog.set_config('lock_timeout', '37ms', true) AS local_value\n"
+            "SELECT pg_catalog.current_setting('lock_timeout') AS after_statement\n"
+            "BEGIN\n"
+            "SELECT pg_catalog.set_config('lock_timeout', '41ms', false) AS transaction_value\n"
+            "ROLLBACK\n"
+            "SELECT pg_catalog.current_setting('lock_timeout') AS after_rollback\n"
+            "SELECT pg_catalog.current_setting('lock_timeout') AS \"Quoted Alias\"\n"
+            "SELECT pg_catalog.current_setting('no_such_setting', true) AS \"NULL Column\"\n"
+            "SELECT pg_catalog.current_setting('lock_timeout')\n"
+            "exit\n"
+        )
+        result = subprocess.run([str(binary), "--data-dir", work], input=commands,
+                                text=True, capture_output=True, cwd=work, timeout=15)
+        assert result.returncode == 0, (result.returncode, result.stdout, result.stderr)
+        for label, value in (("local_value", "37ms"), ("after_statement", "0"),
+                             ("transaction_value", "41ms"), ("after_rollback", "0"),
+                             ("Quoted Alias", "0"), ("NULL Column", "NULL"),
+                             ("current_setting", "0")):
+            assert f"{label} \n{value} \n" in result.stdout, (label, result.stdout)
 
 
 def main():
@@ -349,8 +540,10 @@ def main():
             client.startup(startup, "alice", "info", startup_parameters=STARTUP_OPTIONS)
             exercise(client, server["sock"], peer, startup)
             legacy_trigger_timeout_isolation(Wire(client, server["sock"]), Wire(client, peer))
+            database_owner_controls(Wire(client, server["sock"]), Wire(client, peer))
     finally:
         runner.stop_ours(server)
+    cli_controls(client)
     print("[SESSION SETTING FUNCTIONS PROTOCOL E2E] function, transaction and protocol checks passed")
 
 

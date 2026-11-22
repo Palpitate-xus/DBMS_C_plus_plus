@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>有人改表时，其他连接仍可查看和修改自己的设置 · 2026-11-22</summary>
+
+例如，另一连接正在改表时，单独查询当前连接的锁等待时间，无需等改表结束。手册列出了适用的 SQL 写法。
+
+[使用说明](docs/MANUAL.md#在-sql-表达式里读取和修改设置) · [并发测试](docs/test-report.md#session-setting-path-20261122) · [性能报告](docs/performance-report-2026-10-30.md#session-setting-path-cost-20261122)
+
+</details>
+
+<details>
 <summary>查询里也能查看和修改连接设置 · 2026-11-22</summary>
 
 可以在 SQL 查询里查看或调整当前连接的锁等待时间。也可以只为当前事务调整。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>等不到更严格的表锁，原来的锁会保留 · 2026-11-22</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-22 · 等不到更严格的表锁，原来的锁会保留
 
 如果你已锁住一张表，再请求更严格的锁时遇到超时或取消，原来的锁仍然有效。也可以让数据库一遇到冲突就报错。
 
 [使用示例](docs/MANUAL.md#在事务里锁住一张表) · [测试报告](docs/test-report.md#table-page-lock-upgrade-20261122) · [性能报告](docs/performance-report-2026-10-30.md#table-page-lock-upgrade-cost-20261122)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-22 · 改记录时等不到锁，原来的锁会保留
 
