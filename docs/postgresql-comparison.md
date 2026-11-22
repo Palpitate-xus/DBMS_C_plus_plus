@@ -2,11 +2,15 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-22 · 共享行锁升级
+
+PostgreSQL 18 在多笔事务要升级互相冲突的行锁时会检测死锁。回滚到保存点时，保存点前的锁仍有效。SQLite 以数据库文件为单位协调写入，DuckDB 用乐观并发控制处理对同一行的写入冲突。本项目保留等待升级的原共享锁，连接间的死锁由同一个服务进程识别。Linux 进程间的行锁也在原有文件描述上转换，使失败的升级不释放原锁。[PostgreSQL 锁机制](https://www.postgresql.org/docs/18/explicit-locking.html#LOCKING-ROWS) · [SQLite 锁机制](https://www.sqlite.org/lockingv3.html) · [DuckDB 并发](https://duckdb.org/docs/current/connect/concurrency) · [Linux 行锁文档](https://man7.org/linux/man-pages/man2/fcntl_locking.2.html)
+
 ## 2026-11-22 · 查询时锁住分区表记录
 
 PostgreSQL 18.6 的 `LockRows` 按实际目标关系和记录位置取得指定强度的锁。多笔事务可同时持有共享行锁，更新和删除需等待。`LIMIT` 达到读取数量后停止加锁，经过 `OFFSET` 跳过的记录仍被锁住。SQLite 的写入协调以数据库事务为单位。DuckDB 的并发写入采用乐观冲突检测。[PostgreSQL 锁机制](https://www.postgresql.org/docs/18/explicit-locking.html#LOCKING-ROWS) · [PostgreSQL 18.6 行锁源码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/executor/nodeLockRows.c) · [SQLite 事务](https://sqlite.org/lang_transaction.html) · [DuckDB 并发](https://duckdb.org/docs/current/connect/concurrency)
 
-本项目在普通单表查询中采用实际分区的共享或排他行锁。并发修改提交后，默认隔离级别可继续检查同一分区的新版本。发生跨分区移动时返回 `40001`。共享锁升级、较弱的 PostgreSQL 行锁模式以及复杂查询组合仍有差距。[测试报告](test-report.md#partition-share-20261122)
+本项目在普通单表查询中采用实际分区的共享或排他行锁。并发修改提交后，默认隔离级别可继续检查同一分区的新版本。发生跨分区移动时返回 `40001`。较弱的 PostgreSQL 行锁模式以及复杂查询组合仍有差距。[测试报告](test-report.md#partition-share-20261122)
 
 ## 2026-11-22 · 更新分区表中的记录
 

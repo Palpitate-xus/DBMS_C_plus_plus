@@ -265,6 +265,7 @@ private:
 
     // Internal acquire with mode
     bool acquireLock(const std::string& table, LockMode mode);
+    bool acquireRowLock(const std::string& table, int64_t rid, LockMode mode, bool noWait);
 
     std::string resourceKey(const std::string& resource) const;
     static std::string resourceKeyForNamespace(const std::string& resourceNamespace,

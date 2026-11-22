@@ -2,6 +2,23 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-22 retain shared row locks during write lock upgrades",
+      "gap_ids": ["TXN-05", "TXN-07", "TXN-08"],
+      "status": "partial",
+      "evidence": [
+        "src/transaction/LockManager.cpp",
+        "docs/compatibility-contract.md",
+        "docs/test-report.md",
+        "docs/performance-report-2026-10-30.md"
+      ],
+      "tests": ["tests/lock_manager_concurrency_test.cpp", "tests/cross_backend_lock_test.cpp", "tests/lock_upgrade_process_test.cpp"],
+      "verification": [
+        "On ordinary and partitioned tables the recorded PostgreSQL 18.6 cases matched row lock retention after timeout, checkpoint downgrade, NOWAIT, and deadlock between two upgrading holders.",
+        "All 76 row diagnostics passed and three crash roles retained or undid the expected rows. A prepared shared lock remains tracked after another local holder leaves.",
+        "The broader diagnostic still has the same 36 table and page lock failures. Cross-process wait graph, other row lock strengths and error frame parity remain partial."
+      ]
+    },
+    {
       "issue": "2026-11-22 lock shared rows and apply row limits in partition queries",
       "gap_ids": ["CAT-11", "TXN-05", "TXN-08"],
       "status": "partial",

@@ -11,6 +11,8 @@
 #include <mutex>
 #include <thread>
 #include <vector>
+#include <sys/wait.h>
+#include <unistd.h>
 
 using namespace dbms;
 
@@ -232,6 +234,156 @@ int main() {
     manager.rowUnlock("compatible_nowait_rows", 1);
     assert(manager.lockedRows("compatible_nowait_rows").empty());
     std::cout << "[LOCK] compatible shared row NOWAIT OK\n";
+
+    // A timed-out upgrade must retain the original shared token even when
+    // the caller restores an earlier savepoint-style lock checkpoint.
+    LockManager upgradeManager;
+    upgradeManager.setLockTimeout(75);
+    assert(upgradeManager.rowLockShared("upgrade_timeout_rows", 1));
+    const auto sharedCheckpoint = upgradeManager.captureCheckpoint();
+    std::mutex upgradeMutex;
+    std::condition_variable upgradeCv;
+    bool competingShareHeld = false;
+    bool releaseCompetingShare = false;
+    std::thread competingShare([&] {
+        assert(upgradeManager.rowLockShared("upgrade_timeout_rows", 1));
+        {
+            std::lock_guard<std::mutex> lock(upgradeMutex);
+            competingShareHeld = true;
+        }
+        upgradeCv.notify_all();
+        std::unique_lock<std::mutex> lock(upgradeMutex);
+        upgradeCv.wait(lock, [&] { return releaseCompetingShare; });
+        lock.unlock();
+        upgradeManager.rowUnlock("upgrade_timeout_rows", 1);
+    });
+    {
+        std::unique_lock<std::mutex> lock(upgradeMutex);
+        upgradeCv.wait(lock, [&] { return competingShareHeld; });
+    }
+    assert(!upgradeManager.rowLockExclusiveNoWait("upgrade_timeout_rows", 1));
+    assert(!upgradeManager.rowLockExclusive("upgrade_timeout_rows", 1));
+    assert(!upgradeManager.lastRowLockWasDeadlock());
+    upgradeManager.rollbackToCheckpoint(sharedCheckpoint);
+    const auto afterFailedUpgrade = upgradeManager.captureCheckpoint();
+    assert(afterFailedUpgrade.rowLocks == sharedCheckpoint.rowLocks);
+    assert(afterFailedUpgrade.rowModes == sharedCheckpoint.rowModes);
+    {
+        std::lock_guard<std::mutex> lock(upgradeMutex);
+        releaseCompetingShare = true;
+    }
+    upgradeCv.notify_all();
+    competingShare.join();
+    std::atomic<bool> failedUpgradeKeptShare{false};
+    std::thread exclusiveProbe([&] {
+        const bool acquired = upgradeManager.rowLockExclusiveNoWait("upgrade_timeout_rows", 1);
+        failedUpgradeKeptShare = !acquired;
+        if (acquired) upgradeManager.rowUnlock("upgrade_timeout_rows", 1);
+    });
+    exclusiveProbe.join();
+    assert(failedUpgradeKeptShare.load());
+    upgradeManager.rowUnlock("upgrade_timeout_rows", 1);
+    assert(upgradeManager.lockedRows("upgrade_timeout_rows").empty());
+    std::cout << "[LOCK] failed row upgrade preserves checkpoint SHARE OK\n";
+
+    // Two upgraders retain their shared tokens while waiting; therefore the
+    // wait graph has a real cycle and selects exactly one deadlock victim.
+    LockManager upgradeDeadlockManager;
+    std::mutex upgradeDeadlockMutex;
+    std::condition_variable upgradeDeadlockCv;
+    int upgradeReaders = 0;
+    bool attemptUpgrade = false;
+    std::atomic<int> upgradeSuccesses{0};
+    std::atomic<int> upgradeDeadlocks{0};
+    auto upgradeWorker = [&] {
+        upgradeDeadlockManager.setLockTimeout(5000);
+        assert(upgradeDeadlockManager.rowLockShared("upgrade_deadlock_rows", 1));
+        {
+            std::lock_guard<std::mutex> lock(upgradeDeadlockMutex);
+            ++upgradeReaders;
+        }
+        upgradeDeadlockCv.notify_all();
+        {
+            std::unique_lock<std::mutex> lock(upgradeDeadlockMutex);
+            upgradeDeadlockCv.wait(lock, [&] { return attemptUpgrade; });
+        }
+        if (upgradeDeadlockManager.rowLockExclusive("upgrade_deadlock_rows", 1)) {
+            ++upgradeSuccesses;
+        } else if (upgradeDeadlockManager.lastRowLockWasDeadlock()) {
+            ++upgradeDeadlocks;
+        }
+        upgradeDeadlockManager.rowUnlock("upgrade_deadlock_rows", 1);
+    };
+    std::thread upgraderA(upgradeWorker);
+    std::thread upgraderB(upgradeWorker);
+    {
+        std::unique_lock<std::mutex> lock(upgradeDeadlockMutex);
+        upgradeDeadlockCv.wait(lock, [&] { return upgradeReaders == 2; });
+        attemptUpgrade = true;
+    }
+    upgradeDeadlockCv.notify_all();
+    upgraderA.join();
+    upgraderB.join();
+    assert(upgradeSuccesses.load() == 1 && upgradeDeadlocks.load() == 1);
+    assert(upgradeDeadlockManager.lockedRows("upgrade_deadlock_rows").empty());
+    assert(upgradeDeadlockManager.getLockWaits().empty());
+    std::cout << "[LOCK] shared row upgrade deadlock detection OK\n";
+
+    // Checkpoint restoration must not wait on a competing local SHARE while
+    // holding the row registry mutex. Use a child watchdog so a regression
+    // cannot hang the entire suite; no timing determines the expected result.
+    const pid_t checkpointChild = ::fork();
+    assert(checkpointChild >= 0);
+    if (checkpointChild == 0) {
+        ::alarm(8);
+        LockManager restoreManager;
+        assert(restoreManager.rowLockExclusive("restore_exclusive_rows", 1));
+        const auto exclusiveCheckpoint = restoreManager.captureCheckpoint();
+        restoreManager.rowUnlock("restore_exclusive_rows", 1);
+        assert(restoreManager.rowLockShared("restore_exclusive_rows", 1));
+        const auto sharedCheckpoint = restoreManager.captureCheckpoint();
+
+        std::mutex mutex;
+        std::condition_variable cv;
+        bool peerHeld = false;
+        bool releasePeer = false;
+        std::thread peer([&] {
+            assert(restoreManager.rowLockShared("restore_exclusive_rows", 1));
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                peerHeld = true;
+            }
+            cv.notify_all();
+            std::unique_lock<std::mutex> lock(mutex);
+            cv.wait(lock, [&] { return releasePeer; });
+            lock.unlock();
+            restoreManager.rowUnlock("restore_exclusive_rows", 1);
+        });
+        {
+            std::unique_lock<std::mutex> lock(mutex);
+            cv.wait(lock, [&] { return peerHeld; });
+        }
+        restoreManager.rollbackToCheckpoint(exclusiveCheckpoint);
+        const auto whileCompeting = restoreManager.captureCheckpoint();
+        assert(whileCompeting.rowLocks == sharedCheckpoint.rowLocks &&
+               whileCompeting.rowModes == sharedCheckpoint.rowModes);
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            releasePeer = true;
+        }
+        cv.notify_all();
+        peer.join();
+        restoreManager.rollbackToCheckpoint(exclusiveCheckpoint);
+        const auto restored = restoreManager.captureCheckpoint();
+        assert(restored.rowLocks == exclusiveCheckpoint.rowLocks &&
+               restored.rowModes == exclusiveCheckpoint.rowModes);
+        restoreManager.rowUnlock("restore_exclusive_rows", 1);
+        ::_exit(0);
+    }
+    int checkpointStatus = 0;
+    assert(::waitpid(checkpointChild, &checkpointStatus, 0) == checkpointChild);
+    assert(WIFEXITED(checkpointStatus) && WEXITSTATUS(checkpointStatus) == 0);
+    std::cout << "[LOCK] checkpoint promotion with competing SHARE OK\n";
 
     // Savepoint-style lock checkpoints retain pre-savepoint locks but release
     // every table/row/page/gap token acquired afterward.

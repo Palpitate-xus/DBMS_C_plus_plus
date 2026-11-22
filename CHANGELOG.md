@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>更新等不到写锁时，会保留原来的共享锁 · 2026-11-22</summary>
+
+如果你已经锁住一条记录来核对，后来尝试修改时等到超时，回滚到保存点仍会保留原来的锁。
+
+[使用说明](docs/MANUAL.md#查询时锁住分区表记录) · [测试报告](docs/test-report.md#row-lock-upgrade-20261122) · [性能报告](docs/performance-report-2026-10-30.md#row-lock-upgrade-cost-20261122)
+
+</details>
+
+<details>
 <summary>核对分区表记录时，可以让修改先等一等 · 2026-11-22</summary>
 
 用共享锁查看分区表时，多个连接可以同时核对同一条记录。要改动这条记录的连接会等先前的事务结束。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>部分分区表现在可以删记录 · 2026-11-22</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-22 · 部分分区表现在可以删记录
 
 可以按条件删除记录、查看删掉了哪些行，也可以在提交前撤销。
 
 [适用范围和示例](docs/MANUAL.md#删除分区表中的记录) · [测试报告](docs/test-report.md#partition-delete-20261122) · [性能报告](docs/performance-report-2026-10-30.md#partition-delete-cost-20261122)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-22 · 查整张分区表时，少做重复工作
 

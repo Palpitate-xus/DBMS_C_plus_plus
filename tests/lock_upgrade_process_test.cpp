@@ -84,6 +84,10 @@ int main() {
     };
     for (auto kind : {Kind::Table, Kind::Row, Kind::Page})
         for (const std::string policy : {"timeout", "cancel", "success", "conversion_gap", "gate_error"}) {
+            // Row locks use OFD conversions, whose failed conversion keeps
+            // the original lock atomically. Exercise them below with real
+            // competing processes instead of injecting flock faults.
+            if (kind == Kind::Row) continue;
             ++cases;
             const std::string database = "upgrade_process_private_" + std::to_string(cases);
             const bool owned = std::filesystem::create_directory(database);
@@ -170,8 +174,114 @@ int main() {
             check(::waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0, "child completes all original coordination commands");
             std::filesystem::remove_all(database);
         }
+
+    const size_t rowControlsBefore = controls;
+    const size_t rowFailuresBefore = failures;
+    for (const std::string policy : {"timeout", "cancel", "success", "retain", "nowait"}) {
+        ++cases;
+        const std::string database = "upgrade_process_private_" + std::to_string(cases);
+        const bool owned = std::filesystem::create_directory(database);
+        check(owned, "row " + policy + " create private namespace");
+        if (!owned) return 2;
+        int requests[2], replies[2];
+        const bool pipes = ::pipe(requests) == 0 && ::pipe(replies) == 0;
+        check(pipes, "row " + policy + " create coordination pipes");
+        if (!pipes) return 2;
+        const pid_t child = ::fork();
+        check(child >= 0, "row " + policy + " fork real peer");
+        if (child < 0) return 2;
+        if (child == 0) {
+            ::alarm(10); ::close(requests[1]); ::close(replies[0]); observation.armed = false;
+            LockManager peer; peer.setResourceNamespace(database); peer.setLockTimeout(30);
+            bool held = false;
+            for (;;) {
+                const char command = readByte(requests[0]);
+                if (command == 'S') {
+                    held = peer.rowLockShared("resource", 7);
+                    if (!sendByte(replies[1], held ? '1' : '0')) ::_exit(3);
+                } else if (command == 'D') {
+                    if (held) peer.rowUnlock("resource", 7);
+                    held = false;
+                    if (!sendByte(replies[1], '1')) ::_exit(3);
+                } else if (command == 'X') {
+                    const bool got = peer.rowLockExclusive("resource", 7);
+                    if (got) peer.rowUnlock("resource", 7);
+                    if (!sendByte(replies[1], got ? '1' : '0')) ::_exit(3);
+                } else if (command == 'Z') {
+                    if (held) peer.rowUnlock("resource", 7);
+                    ::_exit(0);
+                } else ::_exit(4);
+            }
+        }
+        ::close(requests[0]); ::close(replies[1]);
+        {
+            LockManager manager; manager.setResourceNamespace(database);
+            manager.setLockTimeout(policy == "success" ? 1000 : 60);
+            check(manager.rowLockShared("resource", 7), "row " + policy + " parent holds SHARE");
+            const auto original = manager.captureCheckpoint();
+            check(sendByte(requests[1], 'S') && readByte(replies[0]) == '1',
+                  "row " + policy + " peer holds actual SHARE");
+            bool peerReleased = false, during = true;
+            unsigned ticks = 0;
+            manager.setInterruptHandler([&] {
+                ++ticks;
+                during &= same(original, manager.captureCheckpoint());
+                // Each blocking attempt calls the hook before trying the
+                // kernel. The second tick proves one real conflict occurred.
+                if (ticks >= 2 && policy == "cancel")
+                    throw dbms::DbError("57014", "row upgrade cancellation");
+                if (ticks >= 2 && policy == "success" && !peerReleased)
+                    peerReleased = sendByte(requests[1], 'D') && readByte(replies[0]) == '1';
+            });
+            bool upgraded = false;
+            std::string state;
+            try {
+                upgraded = policy == "nowait"
+                    ? manager.rowLockExclusiveNoWait("resource", 7)
+                    : manager.rowLockExclusive("resource", 7);
+            } catch (const dbms::DbError& error) { state = error.sqlState(); }
+            manager.clearInterruptHandler();
+            check(policy == "nowait" || ticks >= 2,
+                  "row " + policy + " real kernel conflict reached");
+            check(policy == "success" ? upgraded && state.empty() : policy == "cancel"
+                      ? !upgraded && state == "57014" : !upgraded && state.empty(),
+                  "row " + policy + " exact outcome");
+            check(during, "row " + policy + " checkpoint retained while waiting");
+            if (policy != "success")
+                check(same(original, manager.captureCheckpoint()),
+                      "row " + policy + " failed upgrade retains SHARE");
+            if (policy == "retain") {
+                check(sendByte(requests[1], 'X') && readByte(replies[0]) == '0',
+                      "row retain peer cannot promote between failed calls");
+                check(!manager.rowLockExclusive("resource", 7),
+                      "row retain second attempt remains blocked");
+                check(same(original, manager.captureCheckpoint()),
+                      "row retain second failure preserves SHARE");
+            }
+            manager.rollbackToCheckpoint(original);
+            check(same(original, manager.captureCheckpoint()),
+                  "row " + policy + " checkpoint restores SHARE");
+            if (!peerReleased)
+                check(sendByte(requests[1], 'D') && readByte(replies[0]) == '1',
+                      "row " + policy + " release competing peer");
+            check(sendByte(requests[1], 'X') && readByte(replies[0]) == '0',
+                  "row " + policy + " parent SHARE blocks remote writer");
+            manager.rowUnlock("resource", 7);
+            check(sendByte(requests[1], 'X') && readByte(replies[0]) == '1',
+                  "row " + policy + " remote writer enters after release");
+            check(manager.getLockHolds().empty() && manager.getLockWaits().empty(),
+                  "row " + policy + " local lock state cleaned");
+        }
+        (void)sendByte(requests[1], 'Z'); ::close(requests[1]); ::close(replies[0]);
+        int status = 0;
+        check(::waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0,
+              "row " + policy + " peer exits cleanly");
+        std::filesystem::remove_all(database);
+    }
+    std::cout << "LOCK_UPGRADE_ROW_COMPLETE " << controls - rowControlsBefore
+              << " FAILURES " << failures - rowFailuresBefore << '\n';
     check(cases == 15, "all table/row/page external and transition fault schedules reached");
-    if (controls != 232) { ++failures; std::cerr << "LOCK_UPGRADE_PROCESS_BAD_REACH " << controls << '\n'; }
+    if (controls != 231) { ++failures; std::cerr << "LOCK_UPGRADE_PROCESS_BAD_REACH " << controls << '\n'; }
     std::cout << "LOCK_UPGRADE_PROCESS_NATIVE_COMPLETE " << controls << " FAILURES " << failures << '\n';
     return failures ? 1 : 0;
 }

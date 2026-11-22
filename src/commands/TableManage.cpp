@@ -40178,7 +40178,6 @@ std::vector<std::string> StorageEngine::query(
         matchRows = std::move(sorted);
     }
 
-    // DISTINCT ON: keep first row for each distinct combination of specified columns
     if (partitionRowLock) {
         const auto isolation = getIsolationLevel();
         const bool follow = isolation == IsolationLevel::READ_COMMITTED ||
@@ -40226,6 +40225,7 @@ std::vector<std::string> StorageEngine::query(
         matchRows = std::move(lockedRows);
     }
 
+    // DISTINCT ON: keep first row for each distinct combination of specified columns
     if (!distinctOnCols.empty()) {
         std::vector<size_t> distinctIdxs;
         for (const auto& colName : distinctOnCols) {

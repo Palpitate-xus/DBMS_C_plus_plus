@@ -227,7 +227,16 @@ int main() {
     assert(::read(sharedReady[0], &sharedSignal, 1) == 1);
     assert(sharedSignal == '1');
     assert(first.getLockManager().rowLockShared("items", 8));
+    const auto sharedCheckpoint = first.getLockManager().captureCheckpoint();
     const bool upgradeBlocked = !first.getLockManager().rowLockExclusiveNoWait("items", 8);
+    first.getLockManager().setLockTimeout(75);
+    const bool waitingUpgradeBlocked = !first.getLockManager().rowLockExclusive("items", 8);
+    first.getLockManager().setLockTimeout(0);
+    first.getLockManager().rollbackToCheckpoint(sharedCheckpoint);
+    const auto afterFailedUpgrade = first.getLockManager().captureCheckpoint();
+    const bool checkpointSharePreserved =
+        afterFailedUpgrade.rowLocks == sharedCheckpoint.rowLocks &&
+        afterFailedUpgrade.rowModes == sharedCheckpoint.rowModes;
     const auto heldRows = first.getLockManager().lockedRows("items");
     const bool retainedShared = heldRows.size() == 1 && heldRows.front() == 8;
     const char releaseSignal = '1';
@@ -248,7 +257,32 @@ int main() {
     assert(::waitpid(child, &childStatus, 0) == child);
     const bool retainedProcessLock = WIFEXITED(childStatus) && WEXITSTATUS(childStatus) == 0;
     first.getLockManager().rowUnlock("items", 8);
-    assert(upgradeBlocked && retainedShared && retainedProcessLock);
+    assert(upgradeBlocked && waitingUpgradeBlocked && checkpointSharePreserved &&
+           retainedShared && retainedProcessLock);
+
+    // A sole namespaced reader can upgrade NOWAIT. Restoring a checkpoint
+    // must downgrade it to a process-visible shared lock, not drop it.
+    assert(first.getLockManager().rowLockShared("items", 9));
+    const auto beforeUpgrade = first.getLockManager().captureCheckpoint();
+    assert(first.getLockManager().rowLockExclusiveNoWait("items", 9));
+    first.getLockManager().rollbackToCheckpoint(beforeUpgrade);
+    const auto afterDowngrade = first.getLockManager().captureCheckpoint();
+    assert(afterDowngrade.rowLocks == beforeUpgrade.rowLocks &&
+           afterDowngrade.rowModes == beforeUpgrade.rowModes);
+    child = ::fork();
+    assert(child >= 0);
+    if (child == 0) {
+        dbms::LockManager childManager;
+        childManager.setResourceNamespace(dbA);
+        const bool shared = childManager.rowLockSharedNoWait("items", 9);
+        if (shared) childManager.rowUnlock("items", 9);
+        const bool exclusive = childManager.rowLockExclusiveNoWait("items", 9);
+        if (exclusive) childManager.rowUnlock("items", 9);
+        ::_exit(shared && !exclusive ? 0 : 1);
+    }
+    assert(::waitpid(child, &childStatus, 0) == child);
+    assert(WIFEXITED(childStatus) && WEXITSTATUS(childStatus) == 0);
+    first.getLockManager().rowUnlock("items", 9);
 
     // An isolated in-process sole reader can still upgrade without waiting.
     dbms::LockManager localUpgradeManager;
@@ -256,6 +290,34 @@ int main() {
     assert(localUpgradeManager.rowLockExclusiveNoWait("local_upgrade", 8));
     localUpgradeManager.rowUnlock("local_upgrade", 8);
     assert(localUpgradeManager.lockedRows("local_upgrade").empty());
+
+    // A local compatible SHARE can come and go while PREPARE owns the
+    // advisory row lock. Releasing the last local holder must not orphan
+    // the prepared owner or make its file descriptor impossible to release.
+    for (int cleanup = 0; cleanup < 4; ++cleanup) {
+        dbms::LockManager preparedManager;
+        dbms::LockManager remoteManager;
+        preparedManager.setResourceNamespace(dbA);
+        remoteManager.setResourceNamespace(dbA);
+        const std::string resource = "prepared_share_" + std::to_string(cleanup);
+        const uint64_t preparedXid = 710 + static_cast<uint64_t>(cleanup);
+        assert(preparedManager.rowLockShared(resource, 1));
+        assert(preparedManager.suspendCurrentLocksForPrepared(preparedXid));
+        const auto beforeLocal = preparedManager.captureCheckpoint();
+        assert(preparedManager.rowLockSharedNoWait(resource, 1));
+        switch (cleanup) {
+            case 0: preparedManager.rowUnlock(resource, 1); break;
+            case 1: preparedManager.rowUnlockAll(resource); break;
+            case 2: preparedManager.unlockAll(); break;
+            case 3: preparedManager.rollbackToCheckpoint(beforeLocal); break;
+        }
+        assert(remoteManager.rowLockSharedNoWait(resource, 1));
+        remoteManager.rowUnlock(resource, 1);
+        assert(!remoteManager.rowLockExclusiveNoWait(resource, 1));
+        preparedManager.releasePreparedLocks(preparedXid);
+        assert(remoteManager.rowLockExclusiveNoWait(resource, 1));
+        remoteManager.rowUnlock(resource, 1);
+    }
 
     assert(first.getLockManager().pageLockExclusive(dbA, "items", 3));
     child = ::fork();
