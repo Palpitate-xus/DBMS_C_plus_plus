@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-22 · 清空分区表的恢复范围
+
+PostgreSQL 的各个叶分区有自己的关系编号。清空父表时会处理各叶分区，单独清空一个叶分区时保留兄弟分区的数据。PostgreSQL 为需要回滚的关系切换文件编号。SQLite 可以直接清空符合条件的无条件 `DELETE`，DuckDB 为批量修改记录撤销信息。[PostgreSQL TRUNCATE](https://www.postgresql.org/docs/18/sql-truncate.html) · [PostgreSQL 18.6 源码](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/commands/tablecmds.c#L2079-L2131) · [SQLite DELETE](https://www.sqlite.org/lang_delete.html#the_truncate_optimization) · [DuckDB 事务实现](https://duckdb.org/2024/10/30/analytics-optimized-concurrent-transactions)
+
+本项目的叶分区文件由父表管理。符合条件的父表可以一起保存各分区的恢复文件，清空会释放对应的缓存，重放日志时核对要写的文件。对照使用原生接口准备本项目的实际数据分区，用 SQL 比较父表的查询和清空。通过 SQL 创建独立叶分区、在事务中写入分区表，以及为重用名称的分区分配独立文件身份，仍有差距。[验证范围](test-report.md#truncate-partition-undo-20261122)
+
 ## 2026-11-22 · 一次清空多张普通表
 
 PostgreSQL 可以在一条 `TRUNCATE` 里清空多张表，整组由事务决定是否生效。SQLite 在回滚日志模式下以一份共同记录决定多个数据库文件的事务结果。DuckDB 用事务的撤销记录找回原来的数据，再由提交决定哪些修改生效。[PostgreSQL 18 的 TRUNCATE](https://www.postgresql.org/docs/18/sql-truncate.html) · [SQLite 多文件原子提交](https://www.sqlite.org/atomiccommit.html#multi_file_commit) · [DuckDB 事务实现](https://duckdb.org/2024/10/30/analytics-optimized-concurrent-transactions)

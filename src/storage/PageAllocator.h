@@ -39,6 +39,7 @@ public:
 
     size_t pageSize() const { return pageSize_; }
     uint32_t formatVersion() const { return formatVersion_; }
+    const std::string& filePath() const { return filename_; }
 
     // Allocate a new data page (pageId >= 1).
     // Reuses a page from the free list if available.

@@ -566,6 +566,77 @@ void testStandaloneMultiTableUndo() {
     fs::remove_all(root);
 }
 
+void testPartitionedTruncateRecovery() {
+    const std::string database = "truncate_partition_undo_db";
+    const fs::path root(database);
+    const std::string name = "range_items";
+    const auto pending = root / ".truncate_undo" / "pending";
+    const auto mode = StorageEngine::TruncateWalMode::Autocommit;
+    const std::string oldValue = makePayload(9250);
+    const std::string newValue = makePayload(10200);
+    const std::map<std::string, std::string> prior{{"2", oldValue}, {"40", oldValue}};
+    const std::map<std::string, std::string> reinserted{{"11", newValue}, {"45", newValue}};
+    const auto rows = [&](StorageEngine& engine) {
+        const auto table = engine.getTableSchema(database, name);
+        std::map<std::string, std::string> result;
+        assert(engine.forEachRow(
+            database, name,
+            [&](uint32_t, uint16_t, const char* data, size_t size) {
+                const std::string row(data, size);
+                const auto key = engine.extractColumnValue(row, table, 0, database);
+                const auto value = engine.extractColumnValue(row, table, 1, database);
+                assert(result.emplace(key, value).second);
+            }));
+        return result;
+    };
+    fs::remove_all(root);
+    {
+        StorageEngine engine;
+        assert(engine.createDatabase(database) == DBStatus::OK);
+        TableSchema range;
+        range.tablename = name;
+        range.partitionType = TableSchema::PartitionType::Range;
+        range.partitionKey = "id";
+        range.rangePartitions = {{"early", "20"}};
+        range.rangePartitionLowerBounds = {"0"};
+        range.defaultPartitionName = "outside";
+        range.append(makeIntColumn("id", false, 4, false));
+        range.append(makeVarCharColumn("payload", false, 12000, false));
+        assert(engine.createTable(database, range) == DBStatus::OK);
+        for (const auto& [id, value] : prior)
+            assert(engine.insert(database, name, {{"id", id}, {"payload", value}}) == DBStatus::OK);
+        assert(rows(engine) == prior);
+
+        assert(engine.beginTransaction(database, true) == DBStatus::OK);
+        assert(engine.beginStandaloneTruncateUndo(database, name) ==
+               StorageEngine::TruncateUndoResult::Ready);
+        assert(fs::is_regular_file(pending) && !engine.hasTransactionBackup());
+        assert(engine.truncateTable(database, name, mode) == DBStatus::OK);
+        assert(rows(engine).empty());
+        assert(engine.rollbackTransaction() == DBStatus::OK);
+        assert(!fs::exists(pending) && rows(engine) == prior);
+
+        assert(engine.beginTransaction(database, true) == DBStatus::OK);
+        assert(engine.beginStandaloneTruncateUndo(database, name) ==
+               StorageEngine::TruncateUndoResult::Ready);
+        assert(engine.truncateTable(database, name, mode) == DBStatus::OK);
+        assert(engine.commitTransaction() == DBStatus::OK);
+        assert(rows(engine).empty());
+        for (const auto& [id, value] : reinserted)
+            assert(engine.insert(database, name, {{"id", id}, {"payload", value}}) == DBStatus::OK);
+        assert(rows(engine) == reinserted);
+    }
+    // Force WAL to recreate the range leaf. Images from before the
+    // committed truncate must not resurrect its original row.
+    assert(fs::remove(root / "range_items#early.dt"));
+    fs::remove(root / "range_items#early.dt.tde");
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        StorageEngine recovered;
+        assert(rows(recovered) == reinserted);
+    }
+    fs::remove_all(root);
+}
+
 }  // namespace
 
 int main() {
@@ -596,6 +667,8 @@ int main() {
     std::cout << "[TRUNCATE RECOVERY] table undo restores an earlier truncate state OK\n";
     testStandaloneMultiTableUndo();
     std::cout << "[TRUNCATE RECOVERY] incomplete multi-table reset cannot commit OK\n";
+    testPartitionedTruncateRecovery();
+    std::cout << "[TRUNCATE RECOVERY] partition rollback and post-truncate WAL replay OK\n";
 
     fs::remove_all(kCompletedDatabase);
     fs::remove_all(kPendingDatabase);

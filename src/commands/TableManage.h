@@ -2112,7 +2112,8 @@ private:
     bool resetTableStorage(const std::string& dbname, const TableSchema& table,
                            const std::filesystem::path& relationRoot,
                            const std::vector<std::filesystem::path>& storageFiles);
-    void evictTableResetCaches(const std::string& dbname, const std::string& tablename);
+    void evictTableResetCaches(const std::string& dbname, const TableSchema& table,
+                               const std::filesystem::path& relationRoot);
     struct TruncateUndoContext;
     bool restoreStandaloneTruncate(const TruncateUndoContext& undo);
     bool recoverStandaloneTruncate(const std::string& dbname,

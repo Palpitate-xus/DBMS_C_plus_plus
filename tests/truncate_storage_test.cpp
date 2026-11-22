@@ -12,6 +12,7 @@
 #include <fstream>
 #include <iostream>
 #include <string>
+#include <string_view>
 #include <vector>
 
 extern dbms::StorageEngine g_engine;
@@ -44,6 +45,19 @@ size_t rowCount(const std::string& table) {
         kDatabase, table,
         [&](uint32_t, uint16_t, const char*, size_t) { ++count; }));
     return count;
+}
+
+bool hasOpenDeletedPartition(const fs::path& relationRoot, const std::string& table) {
+    const auto prefix = (fs::canonical(relationRoot) / (table + "#")).string();
+    constexpr std::string_view deletedHeap = ".dt (deleted)";
+    for (const auto& fd : fs::directory_iterator("/proc/self/fd")) {
+        std::error_code error;
+        const auto target = fs::read_symlink(fd.path(), error).string();
+        if (!error && target.rfind(prefix, 0) == 0 && target.size() >= deletedHeap.size() &&
+            target.compare(target.size() - deletedHeap.size(), deletedHeap.size(), deletedHeap) == 0)
+            return true;
+    }
+    return false;
 }
 
 bool contains(const std::vector<std::string>& values,
@@ -251,6 +265,7 @@ int main() {
     assert(g_engine.truncateTable(kDatabase, "items") == DBStatus::OK);
     assert(g_engine.truncateTable(kDatabase, "partitioned_items") ==
            DBStatus::OK);
+    assert(!hasOpenDeletedPartition(relationRoot, "partitioned_items"));
     assert(rowCount("items") == 0);
     assert(rowCount("partitioned_items") == 0);
     assertTruncatedIndexes();

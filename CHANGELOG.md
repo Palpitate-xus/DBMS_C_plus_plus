@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>清空分区表时及时释放旧文件 · 2026-11-22</summary>
+
+清空分区表时，数据库会释放已打开的旧分区文件，并为这张表保存恢复用的备份。
+
+[测试报告](docs/test-report.md#truncate-partition-undo-20261122) · [性能报告](docs/performance-report-2026-10-30.md#truncate-partition-undo-cost-20261122)
+
+</details>
+
+<details>
 <summary>一次清空多张表时少复制文件 · 2026-11-22</summary>
 
 一次清空多张普通表时，数据库只为涉及的表保存恢复用的备份。提交前中途出错，整次清空都会撤销。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>重启时会检查清空表是否已提交 · 2026-11-21</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-21 · 重启时会检查清空表是否已提交
 
 对新建的普通表，单独执行 `TRUNCATE` 时如果数据库意外退出，重启后会根据这次清空是否已提交，保留空表或恢复原来的数据。
 
 [测试报告](docs/test-report.md#transactional-truncate-wal-20261121) · [性能报告](docs/performance-report-2026-10-30.md#transactional-truncate-wal-cost-20261121)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-21 · 备份时减少重复打开文件
 

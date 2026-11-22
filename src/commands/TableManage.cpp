@@ -21444,6 +21444,54 @@ static DBStatus collectRelationFiles(
     return error ? DBStatus::IO_ERROR : DBStatus::OK;
 }
 
+static std::vector<std::string> tableResetHeapNames(const TableSchema& table) {
+    std::set<std::string> partitions;
+    switch (table.partitionType) {
+        case TableSchema::PartitionType::None: break;
+        case TableSchema::PartitionType::Range:
+            for (const auto& entry : table.rangePartitions) partitions.insert(entry.first);
+            break;
+        case TableSchema::PartitionType::List:
+            for (const auto& entry : table.listPartitions) partitions.insert(entry.first);
+            break;
+        case TableSchema::PartitionType::Hash:
+            for (size_t i = 0; i < table.hashPartitions; ++i) {
+                partitions.insert("p" + std::to_string(i));
+            }
+            break;
+    }
+    if (!table.defaultPartitionName.empty()) partitions.insert(table.defaultPartitionName);
+    std::vector<std::string> names;
+    if (table.partitionType == TableSchema::PartitionType::None) names.push_back(table.tablename);
+    for (const auto& partition : partitions) {
+        const std::string name = table.tablename + "#" + partition;
+        names.push_back(name);
+        if (table.subPartitionType == TableSchema::PartitionType::Hash) {
+            for (size_t i = 0; i < table.subHashPartitions; ++i) {
+                names.push_back(name + "#sp" + std::to_string(i));
+            }
+        }
+    }
+    return names;
+}
+
+static bool unambiguousTruncatePartitionLayout(const TableSchema& table) {
+    if (table.partitionType == TableSchema::PartitionType::None) return true;
+    const auto backups = tableResetHeapNames(table);
+    std::set<std::string> heapNames;
+    for (const auto& name : backups) {
+        if (!vacuum_full_backup::leaf(name + ".dt") ||
+            !heapNames.insert(name).second) return false;
+    }
+    std::set<uint32_t> forks;
+    for (const auto& leaf : partitionLeaves(table)) {
+        if (leaf.partition.empty() ||
+            !forks.insert(partitionForkNumber(leaf.partition, leaf.subPartition)).second)
+            return false;
+    }
+    return true;
+}
+
 static DBStatus planTableResetFiles(
     const StorageEngine& engine, const std::string& dbname,
     const TableSchema& table, const std::filesystem::path& root,
@@ -21466,6 +21514,14 @@ static DBStatus planTableResetFiles(
         return checkIndexFileDestination(engine, dbname, table, root / filename, btree);
     };
     const auto& name = table.tablename;
+    if (table.partitionType != TableSchema::PartitionType::None) {
+        for (const auto& heap : tableResetHeapNames(table)) {
+            // Heap replacements share the same physical-name ownership
+            // rules, including an existing TDE companion without the heap.
+            const auto checked = reserve(heap + ".dt", true);
+            if (checked != DBStatus::OK) return checked;
+        }
+    }
     const auto primary = reserve(name + ".idx", true);
     if (primary != DBStatus::OK) return primary;
     if (std::any_of(table.cols.begin(), table.cols.end(),
@@ -21773,7 +21829,7 @@ StorageEngine::TruncateUndoResult StorageEngine::beginStandaloneTruncateUndo(
         auto table = getTableSchema(dbname, name);
         if (table.tablename != name) return TruncateUndoResult::Error;
         if (table.isTemporary || table.isUnlogged || isSessionTempPhysicalName(name) ||
-            table.physicalRelationId == 0 || table.partitionType != TableSchema::PartitionType::None ||
+            table.physicalRelationId == 0 || !unambiguousTruncatePartitionLayout(table) ||
             relationDir(dbname, name).lexically_normal() != root.lexically_normal())
             return TruncateUndoResult::Unsupported;
         schemas.push_back(std::move(table));
@@ -21901,14 +21957,17 @@ bool StorageEngine::restoreStandaloneTruncate(const TruncateUndoContext& undo) {
     before.emplace(statsFile, std::string_view{});
     live.emplace(statsFile, std::string_view{});
     size_t fileIndex = 0;
+    std::vector<TableSchema> tables;
+    tables.reserve(image.relations.size());
     for (const auto& relation : image.relations) {
         const auto& name = relation.table;
         if (!tableExists(image.database, name)) return false;
-        const auto table = getTableSchema(image.database, name);
+        auto table = getTableSchema(image.database, name);
         if (table.physicalRelationId != relation.identity || table.isUnlogged || table.isTemporary ||
-            table.partitionType != TableSchema::PartitionType::None ||
+            !unambiguousTruncatePartitionLayout(table) ||
             relationDir(image.database, name).lexically_normal() != root.lexically_normal())
             return false;
+        tables.push_back(std::move(table));
 
         const auto stateFile = truncateStatePath(*this, image.database, name).filename().string();
         const auto dirtyFile = specializedIndexDirtyPath(*this, image.database, name).filename().string();
@@ -21957,8 +22016,8 @@ bool StorageEngine::restoreStandaloneTruncate(const TruncateUndoContext& undo) {
         if (!vacuum_full_backup::regularExists(root / entry.first, exists)) return false;
     }
 
-    for (const auto& relation : image.relations)
-        evictTableResetCaches(image.database, relation.table);
+    for (const auto& table : tables)
+        evictTableResetCaches(image.database, table, root);
     std::error_code error;
     for (const auto& entry : live) {
         if (before.count(entry.first)) continue;
@@ -49936,21 +49995,23 @@ bool StorageEngine::redoPageImage(const std::string& dbname, const std::string& 
         const std::string physicalName = tablename + "#" + leaf.partition +
             (leaf.subPartition.empty() ? "" : "#" + leaf.subPartition);
         const std::string key = dbname + "/" + physicalName;
-        auto cached = pageAllocators_.find(key);
-        if (cached != pageAllocators_.end()) {
+        const std::filesystem::path path = leaf.subPartition.empty()
+            ? partitionDataPath(dbname, tablename, leaf.partition)
+            : partitionDataPath(dbname, tablename, leaf.partition,
+                                leaf.subPartition);
+        const auto cached = pageAllocators_.find(key);
+        if (cached != pageAllocators_.end() && cached->second &&
+            cached->second->isOpen() &&
+            cached->second->filePath() == canonicalStoragePath(path) &&
+            cached->second->bufferPool()->refersToCurrentFiles()) {
             pa = cached->second.get();
         } else {
-            const std::filesystem::path path = leaf.subPartition.empty()
-                ? partitionDataPath(dbname, tablename, leaf.partition)
-                : partitionDataPath(dbname, tablename, leaf.partition,
-                                    leaf.subPartition);
             auto allocator = acquireSharedHeap(
                 dbname, path, *heapRowWidth,
                 pageSizeForFormatVersion(table.formatVersion),
-                table.formatVersion);
+                table.formatVersion, key);
             if (!allocator) return false;
             pa = allocator.get();
-            pageAllocators_[key] = std::move(allocator);
         }
     }
     if (!pa) return false;
@@ -50040,10 +50101,23 @@ bool StorageEngine::resetTableStorage(
 }
 
 void StorageEngine::evictTableResetCaches(
-    const std::string& dbname, const std::string& tablename) {
+    const std::string& dbname, const TableSchema& table,
+    const std::filesystem::path& relationRoot) {
+    const auto& tablename = table.tablename;
     const std::string tableKey = dbname + "/" + tablename;
     const std::string secondaryPrefix = tableKey + "/";
     pageAllocators_.erase(tableKey);
+    if (table.partitionType != TableSchema::PartitionType::None) {
+        const std::filesystem::path canonicalRoot(canonicalStoragePath(relationRoot));
+        for (const auto& name : tableResetHeapNames(table)) {
+            const auto cached = pageAllocators_.find(dbname + "/" + name);
+            // A quoted table name can contain '#'. A cache key alone
+            // cannot distinguish a same-named heap in another tablespace.
+            if (cached != pageAllocators_.end() && cached->second &&
+                cached->second->filePath() == (canonicalRoot / (name + ".dt")).string())
+                pageAllocators_.erase(cached);
+        }
+    }
     fsmCache_.erase(tableKey);
     vmCache_.erase(tableKey);
     pkIndexCache_.erase(tableKey);
@@ -50098,7 +50172,7 @@ bool StorageEngine::resetTableStorage(
             return false;
         }
 
-        evictTableResetCaches(dbname, tablename);
+        evictTableResetCaches(dbname, table, relationRoot);
 
         std::error_code fileError;
         for (const auto& path : storageFiles) {
@@ -50141,42 +50215,8 @@ bool StorageEngine::resetTableStorage(
             pages.close();
             return true;
         };
-        std::set<std::string> partitionNames;
-        if (table.partitionType == TableSchema::PartitionType::None) {
-            if (!createEmptyHeap(
-                    dataPath(dbname, tablename), *heapRowWidth)) {
-                return false;
-            }
-        } else if (table.partitionType == TableSchema::PartitionType::Range) {
-            for (const auto& partition : table.rangePartitions)
-                partitionNames.insert(partition.first);
-        } else if (table.partitionType == TableSchema::PartitionType::List) {
-            for (const auto& partition : table.listPartitions)
-                partitionNames.insert(partition.first);
-        } else if (table.partitionType == TableSchema::PartitionType::Hash) {
-            for (size_t i = 0; i < table.hashPartitions; ++i)
-                partitionNames.insert("p" + std::to_string(i));
-        }
-        if (!table.defaultPartitionName.empty())
-            partitionNames.insert(table.defaultPartitionName);
-        for (const auto& partition : partitionNames) {
-            if (!createEmptyHeap(
-                    partitionDataPath(dbname, tablename, partition),
-                    *heapRowWidth)) {
-                return false;
-            }
-            if (table.subPartitionType ==
-                TableSchema::PartitionType::Hash) {
-                for (size_t i = 0; i < table.subHashPartitions; ++i) {
-                    if (!createEmptyHeap(
-                            partitionDataPath(
-                                dbname, tablename, partition,
-                                "sp" + std::to_string(i)),
-                            *heapRowWidth)) {
-                        return false;
-                    }
-                }
-            }
+        for (const auto& name : tableResetHeapNames(table)) {
+            if (!createEmptyHeap(relationRoot / (name + ".dt"), *heapRowWidth)) return false;
         }
 
         const bool hasVariableLength = std::any_of(

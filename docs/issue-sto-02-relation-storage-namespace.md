@@ -1,5 +1,9 @@
 # STO-02: relation storage identity and physical-name collision containment
 
+## 2026-11-22 · Partition files when truncating the parent
+
+The reset plan checks the existing heap paths and the paths that will be recreated. Cache eviction uses the declared partition name and physical file path. WAL replay verifies the cached file against the resolved leaf before writing. A standalone truncate of the entire parent can include those files in the existing transaction image. Partition-name reuse with earlier WAL still needs independent leaf generations. [Recovery tests](test-report.md#truncate-partition-undo-20261122)
+
 ## 2026-11-22 · Rollback for a group of tables
 
 Standalone `TRUNCATE` can save the affected files for every supported target together. The journal identifies each physical relation and includes one copy of the shared statistics file. Recovery verifies every target and before-image before replacing an original file. A single durable transaction decision applies to the group. Generational file switching and independent index locators remain open. [Recovery tests](test-report.md#truncate-multi-table-undo-20261122)

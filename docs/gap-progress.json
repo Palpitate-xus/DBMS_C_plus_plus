@@ -2,6 +2,27 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-22 scope parent partition truncate and evict old leaf files",
+      "gap_ids": ["CAT-11", "STO-02", "WAL-05", "WAL-08"],
+      "status": "partial",
+      "evidence": [
+        "src/commands/TableManage.cpp",
+        "docs/postgresql-comparison.md",
+        "docs/test-report.md",
+        "docs/performance-report-2026-10-30.md"
+      ],
+      "tests": [
+        "tests/truncate_storage_test.cpp",
+        "tests/truncate_recovery_test.cpp",
+        "tests/partition_test.cpp"
+      ],
+      "verification": [
+        "Fifteen native regressions, eleven protocol suites and all 92 earlier PostgreSQL truncate lifecycle comparisons passed. Native partition PITR matched the complete rows in each leaf before and after the truncate commit, including cold restart.",
+        "Twenty-six fault checks verified rollback and restart across RANGE, HASH, LIST, DEFAULT and hash subpartitions. The warm deleted leaf descriptors fell from 6, 2 and 2 to zero. Missing-leaf replay recovered only rows inserted after the last committed truncate.",
+        "Paired partition truncate elapsed fell 85.05% to 86.52% on tmpfs and 82.95% and 90.10% in two ext4 rounds. The ext4 ordinary-table controls rose 10.50% and 1.97%. Transactional SQL partition inserts, separate leaf identities and actual power-loss coverage remain open."
+      ]
+    },
+    {
       "issue": "2026-11-22 share rollback and recovery across standalone truncate targets",
       "gap_ids": ["STO-02", "WAL-05", "WAL-08"],
       "status": "partial",

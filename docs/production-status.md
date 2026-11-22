@@ -6,6 +6,12 @@
 
 截至 2026-11-22，273 项功能要求中有 22 项完成、167 项部分实现、69 项待验证、15 项暂缓。各项结果和剩余范围见功能总账。以下更新报告给出各轮测试的实际范围。[功能总账](gap-progress.json) · [支持的功能和限制](compatibility-contract.md)
 
+## 2026-11-22 · 分区表清空时释放旧文件
+
+清空同一父表管理下的分区时，会在重建前释放这些分区的旧缓存。独立清空默认位置的持久分区父表使用该表的恢复文件。叶分区写入的 SQL 事务和独立分区文件编号仍待补齐。[测试报告](test-report.md#truncate-partition-undo-20261122) · [性能报告](performance-report-2026-10-30.md#truncate-partition-undo-cost-20261122)
+
+受测三分区小表的清空耗时在内存盘下降 85.05%–86.52%，在两轮 ext4 对照分别下降 82.95% 和 90.10%。ext4 普通表清空对照的配对中位耗时分别增加 10.50% 和 1.97%，两轮结果均已记录。[完整计时](performance-report-2026-10-30.md#truncate-partition-undo-cost-20261122)
+
 ## 2026-11-22 · 多表清空减少需要复制的文件
 
 一条独立语句清空多张符合条件的普通表时，数据库先保存这几张表的恢复文件，最后更新一次共享统计。中途失败时以整条语句为单位恢复。[测试报告](test-report.md#truncate-multi-table-undo-20261122) · [性能报告](performance-report-2026-10-30.md#truncate-multi-table-undo-cost-20261122)
