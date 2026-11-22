@@ -1,27 +1,27 @@
 # 更新日志
 
 <details>
-<summary>按文字精确查找更快了 · 2026-11-22</summary>
+<summary>按名称查找更快了 · 2026-11-22</summary>
 
-例如，按名字找一项数据库设置，或筛出名称完全相同的几行。
+比如按名称查一项数据库设置，或在表里查找名称完全相同的记录。
 
 [测试报告](docs/test-report.md#text-equality-deterministic-20261122) · [性能报告](docs/performance-report-2026-10-30.md#text-equality-deterministic-cost-20261122)
 
 </details>
 
 <details>
-<summary>可以用 SQL 比较数据库的当前设置 · 2026-11-22</summary>
+<summary>可以把几项数据库设置放在一起比较 · 2026-11-22</summary>
 
-例如，把两种超时设置列在一起，再按毫秒数排序。
+比如列出两项超时设置，按各自的毫秒数排序。
 
 [用法](docs/MANUAL.md#查询当前设置) · [测试报告](docs/test-report.md#pg-settings-expressions-20261122) · [性能报告](docs/performance-report-2026-10-30.md#pg-settings-expressions-cost-20261122)
 
 </details>
 
 <details>
-<summary>改名后，订单号会接着生成 · 2026-11-22</summary>
+<summary>改了订单表的分组名，订单号仍会接着生成 · 2026-11-22</summary>
 
-例如，订单号已经发到 42。把订单表所在的「销售」改名为「销售归档」后，下一笔订单仍从 43 开始。
+比如订单号已经发到 42。把订单表所在的「销售」改名为「销售归档」后，下一笔订单仍是 43。
 
 [用法](docs/MANUAL.md#schema-改名) · [测试报告](docs/test-report.md#schema-rename-sequences-20261122) · [性能报告](docs/performance-report-2026-10-30.md#schema-rename-sequences-cost-20261122)
 
