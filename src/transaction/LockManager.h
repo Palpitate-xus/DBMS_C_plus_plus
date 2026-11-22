@@ -36,6 +36,8 @@ public:
     [[nodiscard]] bool lockShared(const std::string& table);
     // Acquire exclusive lock. Returns true on success, false if deadlock detected.
     [[nodiscard]] bool lockExclusive(const std::string& table);
+    [[nodiscard]] bool lockTable(const std::string& table, LockMode mode, bool noWait = false);
+    [[nodiscard]] bool lastTableLockWasDeadlock() const;
     // Acquire a new exclusive token once. Existing ownership is never upgraded.
     [[nodiscard]] bool lockExclusiveNoWait(const std::string& table);
     // Acquire intent shared lock (used before row-level shared locks).
@@ -191,6 +193,7 @@ private:
         int lockTimeoutMs = 0;
         int deadlockTimeoutMs = 0;
         bool lastRowLockDeadlock = false;
+        bool lastTableLockDeadlock = false;
         std::function<void()> interruptHandler;
     };
 
@@ -207,9 +210,6 @@ private:
         // executor paths. Keep one underlying mutex token per thread and
         // balance nested calls with this count.
         std::map<std::thread::id, size_t> holderCounts;
-        // Prevent row/page lock entries from being erased while a waiter
-        // still owns a pointer to the state outside the registry mutex.
-        size_t waiters = 0;
         // One process-wide advisory lock protects all local holders of this
         // resource. It is acquired on first local ownership and released
         // after the last local token leaves the state.
@@ -263,9 +263,11 @@ private:
     inline static thread_local std::unordered_map<uint64_t, ThreadSettings>
         threadSettings_;
 
-    // Internal acquire with mode
-    bool acquireLock(const std::string& table, LockMode mode);
     bool acquireRowLock(const std::string& table, int64_t rid, LockMode mode, bool noWait);
+    enum class SimpleLockResource { Row, Page };
+    bool acquireSimpleLock(SimpleLockResource resource, const std::string& dbname,
+                           const std::string& key, LockMode mode, bool noWait,
+                           bool* newlyAcquired = nullptr);
 
     std::string resourceKey(const std::string& resource) const;
     static std::string resourceKeyForNamespace(const std::string& resourceNamespace,

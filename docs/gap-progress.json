@@ -2,6 +2,25 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-22 preserve table and page locks during upgrades",
+      "gap_ids": ["TXN-05", "TXN-07", "TXN-08"],
+      "status": "partial",
+      "evidence": [
+        "src/transaction/LockManager.cpp",
+        "src/main.cpp",
+        "src/network/NetworkServer.cpp",
+        "docs/compatibility-contract.md",
+        "docs/test-report.md",
+        "docs/performance-report-2026-10-30.md"
+      ],
+      "tests": ["tests/lock_upgrade_process_test.cpp", "tests/lock_manager_concurrency_test.cpp", "tests/lock_upgrade_depth_test.cpp"],
+      "verification": [
+        "Shared table and page locks survive failed upgrades. Successful upgrades retain ownership depth and savepoints restore the preceding lock mode.",
+        "Table lock timeouts, NOWAIT, savepoint downgrade and two-session deadlock matched the recorded PostgreSQL 18.6 controls. Native process controls exercised the actual storage page and file locks.",
+        "Additional PostgreSQL lock modes, cross-process wait graphs and transactional restoration of lock_timeout remain open."
+      ]
+    },
+    {
       "issue": "2026-11-22 retain shared row locks during write lock upgrades",
       "gap_ids": ["TXN-05", "TXN-07", "TXN-08"],
       "status": "partial",

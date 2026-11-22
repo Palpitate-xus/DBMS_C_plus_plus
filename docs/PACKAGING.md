@@ -148,7 +148,7 @@ mkdir /srv/dbms-instance
 **约束（务必遵守）**：
 
 - **一个数据目录只能跑一个服务端进程**。多进程共享目录会出现 XID 冲突，恢复时报 contradictory COMMIT。多用户并发 = 单 `--server` 进程 + N 个客户端连接（thread-per-connection）。
-- 新版在 Linux 上使用 `F_OFD_SETLK` 保护行锁升级。切换版本时，先停止旧服务和访问同一数据目录的旧版进程，再启动新版。Linux 上的新旧行锁机制无法互相识别。[Linux 行锁文档](https://man7.org/linux/man-pages/man2/fcntl_locking.2.html) · [旧机制](https://man7.org/linux/man-pages/man2/flock.2.html)
+- 新版在 Linux 上使用 `F_OFD_SETLK` 保护表锁、行锁和数据页锁的转换。切换版本时，先停止旧服务和访问同一数据目录的旧版进程，再启动新版。Linux 上的新旧锁机制无法互相识别。[Linux 锁文档](https://man7.org/linux/man-pages/man2/fcntl_locking.2.html) · [旧机制](https://man7.org/linux/man-pages/man2/flock.2.html)
 - CLI 交互模式（stdin 输 SQL）适合单人运维，与运行中的服务端**不要**同时操作同一数据库目录。
 - TDE：`tde_keyring=` 指向密钥文件（0600）；keyring 丢失 = 数据不可恢复（设计如此）。
 

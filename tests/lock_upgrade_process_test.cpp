@@ -3,12 +3,10 @@
 
 #include <cerrno>
 #include <csignal>
+#include <fcntl.h>
 #include <filesystem>
 #include <iostream>
 #include <string>
-#include <sys/file.h>
-#include <sys/stat.h>
-#include <sys/syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -19,269 +17,256 @@ bool sendByte(int fd, char value) noexcept {
     return n == 1;
 }
 char readByte(int fd) noexcept {
-    char value = '?'; ssize_t n;
+    char value = '?';
+    ssize_t n;
     do { n = ::read(fd, &value, 1); } while (n < 0 && errno == EINTR);
     return n == 1 ? value : '?';
 }
-struct Observation {
-    bool armed = false, gapFault = false, gateFault = false, fired = false;
-    dev_t device = 0; ino_t inode = 0;
-    unsigned actualResourceAttempts = 0;
-    int request = -1, reply = -1;
-    char gapWriterResult = '?';
-};
-thread_local Observation observation;
-}
-
-// All normal calls execute the real Linux syscall. A selected conversion
-// reproduces flock's documented remove-old-lock/failed-new-lock window;
-// an actual child process probes it, rather than a mocked lock registry.
-extern "C" int flock(int fd, int operation) noexcept {
-    if (observation.armed && (operation & LOCK_EX) != 0) {
-        struct stat status {};
-        const bool resource = ::fstat(fd, &status) == 0 && status.st_dev == observation.device && status.st_ino == observation.inode;
-        if (resource) {
-            ++observation.actualResourceAttempts;
-            if (observation.gapFault && !observation.fired) {
-                observation.fired = true;
-                (void)::syscall(SYS_flock, fd, LOCK_UN);
-                if (sendByte(observation.request, 'G')) observation.gapWriterResult = readByte(observation.reply);
-                errno = EWOULDBLOCK; return -1;
-            }
-        } else if (observation.gateFault && !observation.fired) {
-            observation.fired = true;
-            errno = EIO; return -1;
-        }
-    }
-    return static_cast<int>(::syscall(SYS_flock, fd, operation));
-}
-
-namespace {
 using dbms::LockManager;
 enum class Kind { Table, Row, Page };
-bool acquire(LockManager& manager, Kind kind, const std::string& database, bool exclusive) {
+const char* label(Kind kind) {
+    return kind == Kind::Table ? "table" : kind == Kind::Row ? "row" : "page";
+}
+bool acquire(LockManager& manager, Kind kind, const std::string& db, bool exclusive) {
     if (kind == Kind::Table) return exclusive ? manager.lockExclusive("resource") : manager.lockShared("resource");
     if (kind == Kind::Row) return exclusive ? manager.rowLockExclusive("resource", 7) : manager.rowLockShared("resource", 7);
-    return exclusive ? manager.pageLockExclusive(database, "resource", 3) : manager.pageLockShared(database, "resource", 3);
+    return exclusive ? manager.pageLockExclusive(db, "resource", 3) : manager.pageLockShared(db, "resource", 3);
 }
-void release(LockManager& manager, Kind kind, const std::string& database, size_t depth) {
+// The former donor only exposes the opportunistic fresh-token API; retain
+// its baseline while exercising the explicit SQL NOWAIT API when present.
+template <class Manager>
+auto acquireTableExclusiveNoWait(Manager& manager, int)
+    -> decltype(manager.lockTable("resource", LockManager::LockMode::Exclusive, true)) {
+    return manager.lockTable("resource", LockManager::LockMode::Exclusive, true);
+}
+template <class Manager>
+bool acquireTableExclusiveNoWait(Manager& manager, long) {
+    return manager.lockExclusiveNoWait("resource");
+}
+template <class Manager>
+auto supportsTableUpgradeNoWait(Manager& manager, int)
+    -> decltype(manager.lockTable("resource", LockManager::LockMode::Exclusive, true), bool{}) {
+    return true;
+}
+template <class Manager>
+bool supportsTableUpgradeNoWait(Manager&, long) { return false; }
+bool acquireExclusiveNoWait(LockManager& manager, Kind kind, const std::string& db) {
+    if (kind == Kind::Table) return acquireTableExclusiveNoWait(manager, 0);
+    if (kind == Kind::Row) return manager.rowLockExclusiveNoWait("resource", 7);
+    return manager.pageLockExclusiveNoWait(db, "resource", 3);
+}
+void release(LockManager& manager, Kind kind, const std::string& db, size_t depth) {
     if (kind == Kind::Table) for (size_t n = 0; n < depth; ++n) manager.unlock("resource");
     else if (kind == Kind::Row) manager.rowUnlock("resource", 7);
-    else manager.pageUnlock(database, "resource", 3);
+    else manager.pageUnlock(db, "resource", 3);
 }
 bool same(const LockManager::LockCheckpoint& a, const LockManager::LockCheckpoint& b) {
     return a.tableCounts == b.tableCounts && a.tableModes == b.tableModes &&
         a.rowLocks == b.rowLocks && a.rowModes == b.rowModes && a.pageLocks == b.pageLocks && a.pageModes == b.pageModes;
+}
+bool setOfdLock(int fd, short type) {
+    struct flock lock{};
+    lock.l_type = type;
+    lock.l_whence = SEEK_SET;
+    lock.l_len = 1;
+    return ::fcntl(fd, F_OFD_SETLK, &lock) == 0;
 }
 }
 
 int main() {
     std::signal(SIGPIPE, SIG_IGN);
     size_t controls = 0, failures = 0, cases = 0;
-    const auto check = [&](bool good, const std::string& label) {
+    const auto check = [&](bool good, const std::string& description) {
         ++controls;
-        if (!good) { ++failures; std::cerr << "LOCK_UPGRADE_PROCESS_FAIL " << label << '\n'; }
+        if (!good) { ++failures; std::cerr << "LOCK_UPGRADE_PROCESS_FAIL " << description << '\n'; }
     };
-    for (auto kind : {Kind::Table, Kind::Row, Kind::Page})
-        for (const std::string policy : {"timeout", "cancel", "success", "conversion_gap", "gate_error"}) {
-            // Row locks use OFD conversions, whose failed conversion keeps
-            // the original lock atomically. Exercise them below with real
-            // competing processes instead of injecting flock faults.
-            if (kind == Kind::Row) continue;
+
+    // Previous versions interposed flock to force a conversion gap or gate
+    // error. Those injected faults cannot target OFD locks; the preserved
+    // legacy diagnostic is separate. Here every participant uses a real
+    // process lock and failed conversion, without interposing variadic fcntl.
+    for (const auto kind : {Kind::Table, Kind::Row, Kind::Page}) {
+        const size_t kindControls = controls, kindFailures = failures;
+        for (const std::string policy : {"timeout", "cancel", "success", "retain", "nowait"}) {
             ++cases;
-            const std::string database = "upgrade_process_private_" + std::to_string(cases);
-            const bool owned = std::filesystem::create_directory(database);
-            check(owned, "create exact private namespace");
+            const std::string description = std::string(label(kind)) + " " + policy;
+            const std::string db = "upgrade_process_private_" + std::to_string(cases);
+            const bool owned = std::filesystem::create_directory(db);
+            check(owned, description + " create private namespace");
             if (!owned) return 2;
             int requests[2], replies[2];
             const bool pipes = ::pipe(requests) == 0 && ::pipe(replies) == 0;
-            check(pipes, "create real child coordination pipes");
+            check(pipes, description + " create coordination pipes");
             if (!pipes) return 2;
             const pid_t child = ::fork();
-            check(child >= 0, "fork separate advisory-lock participant before parent acquires");
+            check(child >= 0, description + " fork real peer");
             if (child < 0) return 2;
             if (child == 0) {
-                ::alarm(10); ::close(requests[1]); ::close(replies[0]); observation.armed = false;
-                LockManager peer; peer.setResourceNamespace(database); peer.setLockTimeout(30);
+                ::alarm(10); ::close(requests[1]); ::close(replies[0]);
+                LockManager peer; peer.setResourceNamespace(db); peer.setLockTimeout(30);
                 bool held = false;
                 for (;;) {
                     const char command = readByte(requests[0]);
-                    if (command == 'S') { held = acquire(peer, kind, database, false); if (!sendByte(replies[1], held ? '1' : '0')) ::_exit(3); }
-                    else if (command == 'D') { if (held) release(peer, kind, database, 1); held = false; if (!sendByte(replies[1], '1')) ::_exit(3); }
-                    else if (command == 'G' || command == 'X') {
-                        const bool got = acquire(peer, kind, database, true);
-                        if (got) release(peer, kind, database, 1);
+                    if (command == 'S') {
+                        held = acquire(peer, kind, db, false);
+                        if (!sendByte(replies[1], held ? '1' : '0')) ::_exit(3);
+                    } else if (command == 'D') {
+                        if (held) release(peer, kind, db, 1);
+                        held = false;
+                        if (!sendByte(replies[1], '1')) ::_exit(3);
+                    } else if (command == 'X') {
+                        const bool got = acquire(peer, kind, db, true);
+                        if (got) release(peer, kind, db, 1);
+                        if (!sendByte(replies[1], got ? '1' : '0')) ::_exit(3);
+                    } else if (command == 'N') {
+                        // An independent manager has no local token to
+                        // upgrade, so this probes the actual remote lock.
+                        LockManager observer; observer.setResourceNamespace(db);
+                        const bool got = acquireExclusiveNoWait(observer, kind, db);
+                        if (got) release(observer, kind, db, 1);
                         if (!sendByte(replies[1], got ? '1' : '0')) ::_exit(3);
                     } else if (command == 'Z') {
-                        if (held) release(peer, kind, database, 1);
+                        if (held) release(peer, kind, db, 1);
                         ::_exit(0);
                     } else ::_exit(4);
                 }
             }
             ::close(requests[0]); ::close(replies[1]);
             {
-                LockManager manager; manager.setResourceNamespace(database);
-                manager.setLockTimeout(policy == "timeout" ? 50 : 1000);
+                LockManager manager; manager.setResourceNamespace(db);
+                manager.setLockTimeout(policy == "success" ? 1000 : 60);
                 const size_t depth = kind == Kind::Table ? 3 : 1;
-                bool good = true;
-                for (size_t n = 0; n < depth; ++n) good &= acquire(manager, kind, database, false);
-                check(good, "parent owns actual shared kernel token");
+                bool held = true;
+                for (size_t n = 0; n < depth; ++n) held &= acquire(manager, kind, db, false);
+                check(held, description + " parent holds SHARE");
                 const auto original = manager.captureCheckpoint();
-                const std::string prefix = kind == Kind::Table ? "table-" : kind == Kind::Row ? "row-" : "page-";
-                std::filesystem::path resource;
-                for (const auto& entry : std::filesystem::directory_iterator(std::filesystem::path(database)/".lockmgr"))
-                    if (entry.path().filename().string().rfind(prefix, 0) == 0) resource = entry.path();
-                struct stat identity {};
-                check(!resource.empty() && ::stat(resource.c_str(), &identity) == 0, "observe real resource inode, not transition gate");
-                const bool sharedPeer = policy != "conversion_gap";
-                if (sharedPeer) check(sendByte(requests[1], 'S') && readByte(replies[0]) == '1', "other process holds genuine compatible shared token");
-                observation = Observation{};
-                observation.armed = true; observation.device = identity.st_dev; observation.inode = identity.st_ino;
-                observation.gapFault = policy == "conversion_gap"; observation.gateFault = policy == "gate_error";
-                observation.request = requests[1]; observation.reply = replies[0];
-                bool peerReleased = !sharedPeer, during = true;
+                check(sendByte(requests[1], 'S') && readByte(replies[0]) == '1',
+                      description + " peer holds actual SHARE");
+                bool peerReleased = false, during = true;
+                unsigned ticks = 0;
                 manager.setInterruptHandler([&] {
-                    if (observation.actualResourceAttempts != 0) {
-                        during &= same(original, manager.captureCheckpoint());
-                        if (policy == "cancel" || policy == "conversion_gap")
-                            throw dbms::DbError("57014", "process upgrade cancellation");
-                        if (policy == "success" && !peerReleased) {
-                            peerReleased = sendByte(requests[1], 'D') && readByte(replies[0]) == '1';
-                        }
-                    }
+                    ++ticks;
+                    during &= same(original, manager.captureCheckpoint());
+                    // The second loop tick follows a real attempt against
+                    // the peer's kernel-held shared lock.
+                    if (ticks >= 2 && policy == "cancel")
+                        throw dbms::DbError("57014", "upgrade cancellation");
+                    if (ticks >= 2 && policy == "success" && !peerReleased)
+                        peerReleased = sendByte(requests[1], 'D') && readByte(replies[0]) == '1';
                 });
-                bool upgraded = false; std::string state;
-                try { upgraded = acquire(manager, kind, database, true); }
-                catch (const dbms::DbError& error) { state = error.sqlState(); }
-                observation.armed = false; manager.clearInterruptHandler();
-                check(policy == "gate_error" ? observation.fired : observation.actualResourceAttempts != 0,
-                      "selected real kernel/transition-failure path reached");
-                check(policy == "success" ? upgraded && state.empty() : (policy == "cancel" || policy == "conversion_gap") ?
-                      !upgraded && state == "57014" : !upgraded && state.empty(), "exact outcome after real external contention/fault");
-                check(during, "logical old checkpoint remains during external kernel wait");
-                if (policy == "conversion_gap") check(observation.fired && observation.gapWriterResult == '0', "cooperating real child writer excluded inside forced conversion gap");
-                if (policy != "success") check(same(original, manager.captureCheckpoint()), "failure retains exact original logical weak owner");
+                bool upgraded = false;
+                std::string state;
+                try {
+                    upgraded = policy == "nowait"
+                        ? acquireExclusiveNoWait(manager, kind, db)
+                        : acquire(manager, kind, db, true);
+                } catch (const dbms::DbError& error) { state = error.sqlState(); }
+                manager.clearInterruptHandler();
+                check(policy == "nowait" || ticks >= 2, description + " actual conflict reached");
+                check(policy == "success" ? upgraded && state.empty() : policy == "cancel"
+                          ? !upgraded && state == "57014" : !upgraded && state.empty(),
+                      description + " exact outcome");
+                if (policy == "nowait") {
+                    check(sendByte(requests[1], 'N') && readByte(replies[0]) == '0',
+                          description + " independent NOWAIT respects remote SHARE");
+                } else {
+                    check(during, description + " original checkpoint retained while waiting");
+                }
+                if (policy != "success")
+                    check(same(original, manager.captureCheckpoint()), description + " failure retains SHARE");
+                if (policy == "retain") {
+                    check(sendByte(requests[1], 'X') && readByte(replies[0]) == '0',
+                          description + " peer cannot promote between failed calls");
+                    check(!acquire(manager, kind, db, true), description + " second attempt remains blocked");
+                    check(same(original, manager.captureCheckpoint()), description + " second failure retains SHARE");
+                }
                 manager.rollbackToCheckpoint(original);
-                check(same(original, manager.captureCheckpoint()), "checkpoint restores original mode/depth after conversion");
-                if (!peerReleased) check(sendByte(requests[1], 'D') && readByte(replies[0]) == '1', "release competing process before probing parent ownership");
-                check(sendByte(requests[1], 'X') && readByte(replies[0]) == '0', "parent alone still excludes actual cross-process writer");
-                release(manager, kind, database, depth);
-                check(sendByte(requests[1], 'X') && readByte(replies[0]) == '1', "cross-process writer enters only after explicit original owner release");
-                check(manager.getLockHolds().empty() && manager.getLockWaits().empty(), "local state fully cleaned");
+                bool checkpointRestored = same(original, manager.captureCheckpoint());
+                if (kind == Kind::Table && policy == "success" && supportsTableUpgradeNoWait(manager, 0)) {
+                    // The SQL-oriented API can upgrade a sole holder NOWAIT;
+                    // the older opportunistic placement API intentionally cannot.
+                    const bool soleUpgrade = acquireTableExclusiveNoWait(manager, 0);
+                    if (soleUpgrade) manager.rollbackToCheckpoint(original);
+                    checkpointRestored = checkpointRestored && soleUpgrade &&
+                        same(original, manager.captureCheckpoint());
+                }
+                check(checkpointRestored, description + " checkpoint restores SHARE and depth");
+                if (!peerReleased)
+                    check(sendByte(requests[1], 'D') && readByte(replies[0]) == '1', description + " release peer");
+                check(sendByte(requests[1], 'X') && readByte(replies[0]) == '0', description + " parent blocks remote writer");
+                release(manager, kind, db, depth);
+                check(sendByte(requests[1], 'X') && readByte(replies[0]) == '1', description + " writer enters after release");
+                check(manager.getLockHolds().empty() && manager.getLockWaits().empty(), description + " local state cleaned");
             }
             (void)sendByte(requests[1], 'Z'); ::close(requests[1]); ::close(replies[0]);
             int status = 0;
-            check(::waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0, "child completes all original coordination commands");
-            std::filesystem::remove_all(database);
+            check(::waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0,
+                  description + " peer exits cleanly");
+            std::filesystem::remove_all(db);
         }
-
-    const size_t rowControlsBefore = controls;
-    const size_t rowFailuresBefore = failures;
-    for (const std::string policy : {"timeout", "cancel", "success", "retain", "nowait"}) {
-        ++cases;
-        const std::string database = "upgrade_process_private_" + std::to_string(cases);
-        const bool owned = std::filesystem::create_directory(database);
-        check(owned, "row " + policy + " create private namespace");
-        if (!owned) return 2;
-        int requests[2], replies[2];
-        const bool pipes = ::pipe(requests) == 0 && ::pipe(replies) == 0;
-        check(pipes, "row " + policy + " create coordination pipes");
-        if (!pipes) return 2;
-        const pid_t child = ::fork();
-        check(child >= 0, "row " + policy + " fork real peer");
-        if (child < 0) return 2;
-        if (child == 0) {
-            ::alarm(10); ::close(requests[1]); ::close(replies[0]); observation.armed = false;
-            LockManager peer; peer.setResourceNamespace(database); peer.setLockTimeout(30);
-            bool held = false;
-            for (;;) {
-                const char command = readByte(requests[0]);
-                if (command == 'S') {
-                    held = peer.rowLockShared("resource", 7);
-                    if (!sendByte(replies[1], held ? '1' : '0')) ::_exit(3);
-                } else if (command == 'D') {
-                    if (held) peer.rowUnlock("resource", 7);
-                    held = false;
-                    if (!sendByte(replies[1], '1')) ::_exit(3);
-                } else if (command == 'X') {
-                    const bool got = peer.rowLockExclusive("resource", 7);
-                    if (got) peer.rowUnlock("resource", 7);
-                    if (!sendByte(replies[1], got ? '1' : '0')) ::_exit(3);
-                } else if (command == 'Z') {
-                    if (held) peer.rowUnlock("resource", 7);
-                    ::_exit(0);
-                } else ::_exit(4);
-            }
-        }
-        ::close(requests[0]); ::close(replies[1]);
-        {
-            LockManager manager; manager.setResourceNamespace(database);
-            manager.setLockTimeout(policy == "success" ? 1000 : 60);
-            check(manager.rowLockShared("resource", 7), "row " + policy + " parent holds SHARE");
-            const auto original = manager.captureCheckpoint();
-            check(sendByte(requests[1], 'S') && readByte(replies[0]) == '1',
-                  "row " + policy + " peer holds actual SHARE");
-            bool peerReleased = false, during = true;
-            unsigned ticks = 0;
-            manager.setInterruptHandler([&] {
-                ++ticks;
-                during &= same(original, manager.captureCheckpoint());
-                // Each blocking attempt calls the hook before trying the
-                // kernel. The second tick proves one real conflict occurred.
-                if (ticks >= 2 && policy == "cancel")
-                    throw dbms::DbError("57014", "row upgrade cancellation");
-                if (ticks >= 2 && policy == "success" && !peerReleased)
-                    peerReleased = sendByte(requests[1], 'D') && readByte(replies[0]) == '1';
-            });
-            bool upgraded = false;
-            std::string state;
-            try {
-                upgraded = policy == "nowait"
-                    ? manager.rowLockExclusiveNoWait("resource", 7)
-                    : manager.rowLockExclusive("resource", 7);
-            } catch (const dbms::DbError& error) { state = error.sqlState(); }
-            manager.clearInterruptHandler();
-            check(policy == "nowait" || ticks >= 2,
-                  "row " + policy + " real kernel conflict reached");
-            check(policy == "success" ? upgraded && state.empty() : policy == "cancel"
-                      ? !upgraded && state == "57014" : !upgraded && state.empty(),
-                  "row " + policy + " exact outcome");
-            check(during, "row " + policy + " checkpoint retained while waiting");
-            if (policy != "success")
-                check(same(original, manager.captureCheckpoint()),
-                      "row " + policy + " failed upgrade retains SHARE");
-            if (policy == "retain") {
-                check(sendByte(requests[1], 'X') && readByte(replies[0]) == '0',
-                      "row retain peer cannot promote between failed calls");
-                check(!manager.rowLockExclusive("resource", 7),
-                      "row retain second attempt remains blocked");
-                check(same(original, manager.captureCheckpoint()),
-                      "row retain second failure preserves SHARE");
-            }
-            manager.rollbackToCheckpoint(original);
-            check(same(original, manager.captureCheckpoint()),
-                  "row " + policy + " checkpoint restores SHARE");
-            if (!peerReleased)
-                check(sendByte(requests[1], 'D') && readByte(replies[0]) == '1',
-                      "row " + policy + " release competing peer");
-            check(sendByte(requests[1], 'X') && readByte(replies[0]) == '0',
-                  "row " + policy + " parent SHARE blocks remote writer");
-            manager.rowUnlock("resource", 7);
-            check(sendByte(requests[1], 'X') && readByte(replies[0]) == '1',
-                  "row " + policy + " remote writer enters after release");
-            check(manager.getLockHolds().empty() && manager.getLockWaits().empty(),
-                  "row " + policy + " local lock state cleaned");
-        }
-        (void)sendByte(requests[1], 'Z'); ::close(requests[1]); ::close(replies[0]);
-        int status = 0;
-        check(::waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0,
-              "row " + policy + " peer exits cleanly");
-        std::filesystem::remove_all(database);
+        std::cout << "LOCK_UPGRADE_" << label(kind) << "_COMPLETE " << controls - kindControls
+                  << " FAILURES " << failures - kindFailures << '\n';
     }
-    std::cout << "LOCK_UPGRADE_ROW_COMPLETE " << controls - rowControlsBefore
-              << " FAILURES " << failures - rowFailuresBefore << '\n';
-    check(cases == 15, "all table/row/page external and transition fault schedules reached");
-    if (controls != 231) { ++failures; std::cerr << "LOCK_UPGRADE_PROCESS_BAD_REACH " << controls << '\n'; }
+
+    // Directly witness the kernel property used by the production path:
+    // a failed OFD read-to-write conversion does not release the read lock.
+    // The peer is forked before either independent description is opened.
+    const std::string kernelDb = "upgrade_kernel_private";
+    const bool owned = std::filesystem::create_directory(kernelDb);
+    check(owned, "kernel create private namespace");
+    if (!owned) return 2;
+    const auto path = std::filesystem::path(kernelDb) / "resource.lock";
+    int requests[2], replies[2];
+    const bool pipes = ::pipe(requests) == 0 && ::pipe(replies) == 0;
+    check(pipes, "kernel create coordination pipes");
+    if (!pipes) return 2;
+    const pid_t child = ::fork();
+    check(child >= 0, "kernel fork independent description");
+    if (child < 0) return 2;
+    if (child == 0) {
+        ::alarm(10); ::close(requests[1]); ::close(replies[0]);
+        const int fd = ::open(path.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+        if (fd < 0) ::_exit(3);
+        for (;;) {
+            const char command = readByte(requests[0]);
+            if (command == 'S') {
+                if (!sendByte(replies[1], setOfdLock(fd, F_RDLCK) ? '1' : '0')) ::_exit(3);
+            } else if (command == 'D') {
+                if (!sendByte(replies[1], setOfdLock(fd, F_UNLCK) ? '1' : '0')) ::_exit(3);
+            } else if (command == 'X') {
+                const bool acquired = setOfdLock(fd, F_WRLCK);
+                if (acquired) (void)setOfdLock(fd, F_UNLCK);
+                if (!sendByte(replies[1], acquired ? '1' : '0')) ::_exit(3);
+            } else if (command == 'Z') {
+                ::close(fd); ::_exit(0);
+            } else ::_exit(4);
+        }
+    }
+    ::close(requests[0]); ::close(replies[1]);
+    const int fd = ::open(path.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+    check(fd >= 0, "kernel open parent description");
+    if (fd < 0) return 2;
+    check(setOfdLock(fd, F_RDLCK), "kernel parent SHARE");
+    check(sendByte(requests[1], 'S') && readByte(replies[0]) == '1', "kernel peer SHARE");
+    errno = 0;
+    const bool promoted = setOfdLock(fd, F_WRLCK);
+    const int conversionError = errno;
+    check(!promoted && (conversionError == EAGAIN || conversionError == EACCES),
+          "kernel conflicting OFD conversion fails");
+    check(sendByte(requests[1], 'D') && readByte(replies[0]) == '1', "kernel release peer SHARE");
+    check(sendByte(requests[1], 'X') && readByte(replies[0]) == '0',
+          "kernel failed conversion retains parent SHARE");
+    check(setOfdLock(fd, F_UNLCK), "kernel release parent SHARE");
+    check(sendByte(requests[1], 'X') && readByte(replies[0]) == '1', "kernel peer enters after release");
+    ::close(fd);
+    (void)sendByte(requests[1], 'Z'); ::close(requests[1]); ::close(replies[0]);
+    int childStatus = 0;
+    check(::waitpid(child, &childStatus, 0) == child && WIFEXITED(childStatus) && WEXITSTATUS(childStatus) == 0,
+          "kernel peer exits cleanly");
+    std::filesystem::remove_all(kernelDb);
+
+    check(cases == 15, "all real table/row/page external schedules reached");
+    if (controls != 241) { ++failures; std::cerr << "LOCK_UPGRADE_PROCESS_BAD_REACH " << controls << '\n'; }
     std::cout << "LOCK_UPGRADE_PROCESS_NATIVE_COMPLETE " << controls << " FAILURES " << failures << '\n';
     return failures ? 1 : 0;
 }

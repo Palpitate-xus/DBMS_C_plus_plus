@@ -4252,31 +4252,67 @@ static bool handleCommentOn(const string& sql, Session& s, const string& rawSql)
 
 static bool handleLockTable(const string& sql, Session& s) {
     if (!checkDB(s)) return true;
-    string rest = trim(sql.substr(4));
-    if (rest.substr(0, 5) == "table") rest = trim(rest.substr(5));
-    vector<string> tokens = tokenize(rest);
-    if (tokens.size() < 4) {
-        cout << "SQL syntax error: LOCK TABLE tname IN SHARE|EXCLUSIVE MODE" << endl;
-        return true;
+    const auto tokens = tokenize(trim(sql.substr(4)));
+    size_t pos = 0;
+    if (pos < tokens.size() && tokens[pos] == "table") ++pos;
+    const auto syntaxError = []() -> void {
+        throw dbms::DbError("42601", "invalid LOCK TABLE syntax");
+    };
+    if (pos == tokens.size()) syntaxError();
+    const string requestedName = tokens[pos++];
+    bool canonical = false;
+    bool noWait = false;
+    auto mode = dbms::LockManager::LockMode::Exclusive;
+    if (pos == tokens.size() || tokens[pos] == "nowait") {
+        // The SQL default is ACCESS EXCLUSIVE, optionally followed by NOWAIT.
+        canonical = true;
+        if (pos < tokens.size()) {
+            noWait = true;
+            ++pos;
+        }
+    } else {
+        if (tokens[pos++] != "in") syntaxError();
+        if (pos < tokens.size() && tokens[pos] == "access") {
+            canonical = true;
+            ++pos;
+        }
+        if (pos == tokens.size()) syntaxError();
+        if (tokens[pos] == "share") {
+            mode = dbms::LockManager::LockMode::Shared;
+        } else if (tokens[pos] == "exclusive") {
+            mode = dbms::LockManager::LockMode::Exclusive;
+        } else {
+            syntaxError();
+        }
+        ++pos;
+        if (pos == tokens.size() || tokens[pos++] != "mode") syntaxError();
+        if (pos < tokens.size() && tokens[pos] == "nowait") {
+            noWait = true;
+            ++pos;
+        }
     }
-    string tname = resolveTableName(s, tokens[0]);
-    if (!g_engine.tableExists(s.currentDB, tname)) {
-        cout << "Table " << tname << " not exist" << endl;
-        return true;
+    if (pos != tokens.size()) syntaxError();
+    if (canonical && !g_engine.inTransaction()) {
+        throw dbms::DbError("25P01", "LOCK TABLE can only be used in transaction blocks");
     }
-    string mode = tokens[2];
-    for (auto& c : mode) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
-    bool ok = false;
-    if (mode == "share") {
-        ok = g_engine.getLockManager().lockShared(tname);
-    } else if (mode == "exclusive") {
-        ok = g_engine.getLockManager().lockExclusive(tname);
+
+    const string tableName = resolveTableName(s, requestedName);
+    if (!g_engine.tableExists(s.currentDB, tableName)) {
+        throw dbms::DbError("42P01", "relation \"" + requestedName + "\" does not exist");
     }
-    if (!ok) {
-        cout << "Lock acquisition failed (deadlock detected)" << endl;
-        return true;
+    auto& locks = g_engine.getLockManager();
+    if (!locks.lockTable(tableName, mode, noWait)) {
+        if (!noWait && locks.lastTableLockWasDeadlock()) {
+            throw dbms::DbError("40P01", "deadlock detected while locking relation \"" +
+                requestedName + "\"");
+        }
+        throw dbms::DbError("55P03", "could not obtain lock on relation \"" +
+            requestedName + "\"");
     }
-    cout << "Table " << tname << " locked in " << mode << " mode" << endl;
+    cout << "Table " << tableName << " locked in "
+         << (canonical ? "access " : "")
+         << (mode == dbms::LockManager::LockMode::Shared ? "share" : "exclusive")
+         << " mode" << endl;
     return false;
 }
 

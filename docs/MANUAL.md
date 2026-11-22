@@ -1858,6 +1858,19 @@ ROLLBACK PREPARED 'txn_001';
 
 正常启动时，如果数据库需要用事务备份撤销未提交的表结构修改，仍存在的序列会保留已经发出的编号。恢复备份失败时，数据库会停止启动并保留备份，以便排除故障后重试。普通 `CREATE TABLE` 在显式事务中尚有一项限制。如果进程在提交建表前异常退出，重启后可能还留有一张空表。[重启验证](test-report.md#ddl-image-sequence-recovery-20261119)
 
+### 在事务里锁住一张表
+
+`ACCESS SHARE` 可与其他事务的普通读写并存，`ACCESS EXCLUSIVE` 会阻挡其他事务访问该表。省略模式时请求排他锁。可以在已持有共享表锁的事务里请求排他锁。
+
+```sql
+BEGIN;
+LOCK TABLE orders IN ACCESS SHARE MODE;
+SAVEPOINT before_write;
+LOCK TABLE orders IN ACCESS EXCLUSIVE MODE NOWAIT;
+```
+
+如果碰到冲突，`NOWAIT` 立即返回 `55P03`。回滚到 `before_write` 会保留原来的共享锁。即使升级成功，再回滚到该保存点也能恢复共享模式。示例中的新写法用于单表，并要求处于事务内。旧的简写 `SHARE` 和 `EXCLUSIVE` 仍分别对应本项目的共享和排他模式。[测试范围](test-report.md#table-page-lock-upgrade-20261122)
+
 ### 顾问锁
 
 顾问锁按当前数据库和 key 隔离；单个 `bigint` 与两个 `integer` 使用不同

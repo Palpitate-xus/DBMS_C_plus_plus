@@ -154,8 +154,7 @@ void LockManager::releasePreparedLocks(uint64_t txnId) {
             it->second.suspendedTransactions.erase(txnId);
             if (it->second.suspendedTransactions.empty() && it->second.holders.empty()) {
                 releaseProcessLock(it->second);
-                if (it->second.waiters == 0) it = pageLocks_.erase(it);
-                else ++it;
+                it = pageLocks_.erase(it);
             } else {
                 ++it;
             }
@@ -318,9 +317,7 @@ std::string LockManager::processLockPath(const std::string& resourceNamespace,
     return path.string();
 }
 
-static int setProcessLock(int fd, const std::string& kind, int operation) {
-    if (kind != "row") return ::flock(fd, operation | LOCK_NB);
-
+static int setProcessLock(int fd, int operation) {
     // An unsuccessful flock conversion may drop the original shared lock.
     // Converting the same open-file-description lock keeps it on conflict.
     struct flock lock{};
@@ -351,20 +348,19 @@ LockManager::ProcessLockResult LockManager::tryAcquireProcessLock(
         const bool processExclusive =
             !lockModeUsesSharedPhysicalToken(state.processLockMode);
         if (!processExclusive && exclusive) {
-            // Row upgrades reach this point only for the sole local holder.
+            // Upgrades reach this point only for the sole local holder.
             if (!state.holders.empty() &&
-                (kind != "row" || state.holders.size() != 1 ||
-                 state.holders.front() != std::this_thread::get_id()))
+                (state.holders.size() != 1 || state.holders.front() != std::this_thread::get_id()))
                 return ProcessLockResult::Busy;
-            if (setProcessLock(state.processLockFd, kind, LOCK_EX) != 0) {
-                if (errno == EWOULDBLOCK || errno == EAGAIN || (kind == "row" && errno == EACCES))
+            if (setProcessLock(state.processLockFd, LOCK_EX) != 0) {
+                if (errno == EAGAIN || errno == EACCES)
                     return ProcessLockResult::Busy;
                 return ProcessLockResult::Error;
             }
             state.processLockMode = LockMode::Exclusive;
         } else if (processExclusive && !exclusive) {
-            if (setProcessLock(state.processLockFd, kind, LOCK_SH) != 0) {
-                if (errno == EWOULDBLOCK || errno == EAGAIN) return ProcessLockResult::Busy;
+            if (setProcessLock(state.processLockFd, LOCK_SH) != 0) {
+                if (errno == EAGAIN || errno == EACCES) return ProcessLockResult::Busy;
                 return ProcessLockResult::Error;
             }
             state.processLockMode = LockMode::Shared;
@@ -385,8 +381,8 @@ LockManager::ProcessLockResult LockManager::tryAcquireProcessLock(
     const int fd = ::open(path.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0644);
     if (fd < 0) return ProcessLockResult::Error;
     const int operation = exclusive ? LOCK_EX : LOCK_SH;
-    if (setProcessLock(fd, kind, operation) != 0) {
-        const bool busy = errno == EWOULDBLOCK || errno == EAGAIN || (kind == "row" && errno == EACCES);
+    if (setProcessLock(fd, operation) != 0) {
+        const bool busy = errno == EAGAIN || errno == EACCES;
         ::close(fd);
         return busy ? ProcessLockResult::Busy : ProcessLockResult::Error;
     }
@@ -410,7 +406,7 @@ void LockManager::releaseProcessLock(LockState& state) {
     // PREPARED may release it.
     if (!state.suspendedTransactions.empty()) return;
     if (state.processLockFd < 0) return;
-    (void)setProcessLock(state.processLockFd, state.processLockKind, LOCK_UN);
+    (void)setProcessLock(state.processLockFd, LOCK_UN);
     ::close(state.processLockFd);
     state.processLockFd = -1;
     state.processLockNamespace.clear();
@@ -603,12 +599,14 @@ static const char* modeToStr(LockManager::LockMode mode) {
     return "";
 }
 
-bool LockManager::acquireLock(const std::string& table, LockMode mode) {
+bool LockManager::lockTable(const std::string& table, LockMode mode, bool noWait) {
+    auto& settings = threadSettings();
+    settings.lastTableLockDeadlock = false;
     const std::thread::id self = std::this_thread::get_id();
     const auto checkInterrupt = [&]() {
-        if (!threadSettings().interruptHandler) return;
+        if (!settings.interruptHandler) return;
         try {
-            threadSettings().interruptHandler();
+            settings.interruptHandler();
         } catch (...) {
             removeWaitEdges(self);
             throw;
@@ -628,10 +626,8 @@ bool LockManager::acquireLock(const std::string& table, LockMode mode) {
         return isSharedMode(held) && isSharedMode(requested);
     };
 
-    auto releasePhysical = [&](LockState& state) {
-        auto modeIt = state.holderModes.find(self);
-        if (modeIt == state.holderModes.end()) return;
-        switch (modeIt->second) {
+    auto releasePhysical = [](LockState& state, LockMode held) {
+        switch (held) {
             case LockMode::Shared:
                 state.mtx.unlock_shared();
                 --state.sharedCount;
@@ -653,13 +649,8 @@ bool LockManager::acquireLock(const std::string& table, LockMode mode) {
                 state.metadata = false;
                 break;
         }
-        state.holders.erase(std::remove(state.holders.begin(), state.holders.end(), self),
-                            state.holders.end());
-        state.holderModes.erase(modeIt);
-        state.holderCounts.erase(self);
     };
 
-    size_t upgradeDepth = 0;
     auto acquirePhysical = [&](LockState& state) {
         switch (mode) {
             case LockMode::Shared:
@@ -683,11 +674,6 @@ bool LockManager::acquireLock(const std::string& table, LockMode mode) {
                 state.metadata = true;
                 break;
         }
-        state.holders.push_back(self);
-        state.holderModes[self] = mode;
-        // An upgrade converts the existing token rather than adding one.
-        // Preserve every prior re-entrant acquisition across that conversion.
-        state.holderCounts[self] = upgradeDepth ? upgradeDepth : 1;
         removeWaitEdges(self);
     };
 
@@ -704,7 +690,7 @@ bool LockManager::acquireLock(const std::string& table, LockMode mode) {
                 ? LockMode::Shared : it->second;
             if (!isCompatible(mode, held, false)) {
                 compatible = false;
-                addWaitEdge(self, holder);
+                if (!noWait) addWaitEdge(self, holder);
             }
         }
         return compatible;
@@ -712,7 +698,7 @@ bool LockManager::acquireLock(const std::string& table, LockMode mode) {
 
     const auto waitStart = std::chrono::steady_clock::now();
     const auto deadlockCheckAt = waitStart +
-        std::chrono::milliseconds(std::max(0, threadSettings().deadlockTimeoutMs));
+        std::chrono::milliseconds(std::max(0, settings.deadlockTimeoutMs));
     while (true) {
         checkInterrupt();
         bool cycle = false;
@@ -724,19 +710,25 @@ bool LockManager::acquireLock(const std::string& table, LockMode mode) {
             if (selfMode != state.holderModes.end()) {
                 if (isReusable(selfMode->second, mode)) {
                     ++state.holderCounts[self];
+                    removeWaitEdges(self);
                     return true;
                 }
-                upgradeDepth = state.holderCounts.at(self);
-                // Upgrade from a shared/intent lock. Drop this thread's
-                // physical token before waiting for the stronger mode so it
-                // cannot wait on itself.
-                releasePhysical(state);
-                if (state.holders.empty()) releaseProcessLock(state);
             }
 
             if (inspect(state)) {
                 const auto processResult = tryAcquireProcessLock(state, table, mode);
                 if (processResult == ProcessLockResult::Acquired) {
+                    if (selfMode != state.holderModes.end()) {
+                        // Keep the old lock and its depth until the stronger
+                        // process lock is granted. Both modes are installed
+                        // under the same local registry mutex.
+                        releasePhysical(state, selfMode->second);
+                        selfMode->second = mode;
+                    } else {
+                        state.holders.push_back(self);
+                        state.holderModes.emplace(self, mode);
+                        state.holderCounts.emplace(self, 1);
+                    }
                     acquirePhysical(state);
                     return true;
                 }
@@ -746,10 +738,14 @@ bool LockManager::acquireLock(const std::string& table, LockMode mode) {
                     return false;
                 }
             }
-            cycle = std::chrono::steady_clock::now() >= deadlockCheckAt &&
-                    hasCycle(self);
+            if (noWait) {
+                removeWaitEdges(self);
+                return false;
+            }
+            cycle = std::chrono::steady_clock::now() >= deadlockCheckAt && hasCycle(self);
         }
         if (cycle) {
+            settings.lastTableLockDeadlock = true;
             removeWaitEdges(self);
             std::lock_guard<std::mutex> guard(globalMutex_);
             auto it = locks_.find(resourceKey(table));
@@ -759,10 +755,10 @@ bool LockManager::acquireLock(const std::string& table, LockMode mode) {
             return false;
         }
 
-        if (threadSettings().lockTimeoutMs > 0) {
+        if (settings.lockTimeoutMs > 0) {
             const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - waitStart).count();
-            if (elapsed >= threadSettings().lockTimeoutMs) {
+            if (elapsed >= settings.lockTimeoutMs) {
                 removeWaitEdges(self);
                 std::lock_guard<std::mutex> guard(globalMutex_);
                 auto it = locks_.find(resourceKey(table));
@@ -776,12 +772,16 @@ bool LockManager::acquireLock(const std::string& table, LockMode mode) {
     }
 }
 
+bool LockManager::lastTableLockWasDeadlock() const {
+    return threadSettings().lastTableLockDeadlock;
+}
+
 bool LockManager::lockShared(const std::string& table) {
-    return acquireLock(table, LockMode::Shared);
+    return lockTable(table, LockMode::Shared);
 }
 
 bool LockManager::lockExclusive(const std::string& table) {
-    return acquireLock(table, LockMode::Exclusive);
+    return lockTable(table, LockMode::Exclusive);
 }
 
 bool LockManager::lockExclusiveNoWait(const std::string& table) {
@@ -812,11 +812,11 @@ bool LockManager::lockExclusiveNoWait(const std::string& table) {
 }
 
 bool LockManager::lockIntentShared(const std::string& table) {
-    return acquireLock(table, LockMode::IntentShared);
+    return lockTable(table, LockMode::IntentShared);
 }
 
 bool LockManager::lockIntentExclusive(const std::string& table) {
-    return acquireLock(table, LockMode::IntentExclusive);
+    return lockTable(table, LockMode::IntentExclusive);
 }
 
 bool LockManager::lockIntentExclusiveForPrepared(
@@ -865,13 +865,13 @@ bool LockManager::lockIntentExclusiveForPrepared(
         }
     }
     if (!hasPreparedOwnership) {
-        return acquireLock(table, LockMode::IntentExclusive);
+        return lockTable(table, LockMode::IntentExclusive);
     }
     return false;
 }
 
 bool LockManager::lockMetadata(const std::string& table) {
-    return acquireLock(table, LockMode::Metadata);
+    return lockTable(table, LockMode::Metadata);
 }
 
 // ========================================================================
@@ -1008,7 +1008,7 @@ void LockManager::unlockAll() {
             }
             if (state.holders.empty()) releaseProcessLock(state);
             if (state.sharedCount == 0 && !state.exclusive &&
-                state.holders.empty() && state.waiters == 0) {
+                state.holders.empty() && state.suspendedTransactions.empty()) {
                 it = pageLocks_.erase(it);
             } else {
                 ++it;
@@ -1063,15 +1063,26 @@ bool LockManager::lastRowLockWasDeadlock() const {
 }
 
 bool LockManager::acquireRowLock(const std::string& table, int64_t rid, LockMode mode, bool noWait) {
+    return acquireSimpleLock(SimpleLockResource::Row, threadSettings().resourceNamespace,
+                             rowResourceKey(table, rid), mode, noWait);
+}
+
+bool LockManager::acquireSimpleLock(SimpleLockResource resource, const std::string& dbname,
+                                    const std::string& key, LockMode mode, bool noWait,
+                                    bool* newlyAcquired) {
     auto& settings = threadSettings();
-    settings.lastRowLockDeadlock = false;
+    const bool page = resource == SimpleLockResource::Page;
+    auto& registry = page ? pageLocks_ : rowLocks_;
+    auto& mutex = page ? pageMutex_ : rowMutex_;
+    const std::string kind = page ? "page" : "row";
+    if (!page) settings.lastRowLockDeadlock = false;
+    if (newlyAcquired) *newlyAcquired = false;
     const auto self = std::this_thread::get_id();
-    const auto key = rowResourceKey(table, rid);
     const bool shared = mode == LockMode::Shared;
     const auto started = std::chrono::steady_clock::now();
 
     for (;;) {
-        if (!noWait && settings.interruptHandler) {
+        if ((!noWait || page) && settings.interruptHandler) {
             try {
                 settings.interruptHandler();
             } catch (...) {
@@ -1081,23 +1092,26 @@ bool LockManager::acquireRowLock(const std::string& table, int64_t rid, LockMode
         }
 
         {
-            // Row mutex transitions all occur inside the registry mutex, so
-            // promoting the only local holder has no local ownership gap.
-            std::lock_guard<std::mutex> guard(rowMutex_);
-            auto entry = rowLocks_.try_emplace(key).first;
+            // All transitions happen under the registry mutex. A polling
+            // waiter holds no reference or physical token outside it.
+            std::lock_guard<std::mutex> guard(mutex);
+            auto entry = registry.try_emplace(key).first;
             auto& state = entry->second;
             removeWaitEdges(self);
-            const bool ownsRow = std::find(state.holders.begin(), state.holders.end(), self) !=
+            // Page placement probes must take a fresh token. Existing
+            // ownership is handled through the blocking page API.
+            if (page && noWait && !state.holders.empty()) return false;
+            const bool ownsLock = std::find(state.holders.begin(), state.holders.end(), self) !=
                 state.holders.end();
-            if (ownsRow && (shared || state.exclusive)) return true;
+            if (ownsLock && (shared || state.exclusive)) return true;
 
             const bool compatible = shared ? !state.exclusive :
-                !state.exclusive && (state.holders.empty() || (ownsRow && state.holders.size() == 1));
+                !state.exclusive && (state.holders.empty() || (ownsLock && state.holders.size() == 1));
             auto result = ProcessLockResult::Busy;
             if (compatible) {
-                result = tryAcquireProcessLock(state, settings.resourceNamespace, "row", key, mode);
+                result = tryAcquireProcessLock(state, dbname, kind, key, mode);
                 if (result == ProcessLockResult::Acquired) {
-                    if (ownsRow) {
+                    if (ownsLock) {
                         state.mtx.unlock_shared();
                         --state.sharedCount;
                     } else {
@@ -1110,6 +1124,7 @@ bool LockManager::acquireRowLock(const std::string& table, int64_t rid, LockMode
                         state.mtx.lock();
                         state.exclusive = true;
                     }
+                    if (newlyAcquired) *newlyAcquired = true;
                     return true;
                 }
             }
@@ -1122,14 +1137,14 @@ bool LockManager::acquireRowLock(const std::string& table, int64_t rid, LockMode
                     if (holder != self) addWaitEdge(self, holder);
                 }
                 if (hasCycle(self)) {
-                    settings.lastRowLockDeadlock = true;
+                    if (!page) settings.lastRowLockDeadlock = true;
                     removeWaitEdges(self);
                     return false;
                 }
             }
             if (state.holders.empty() && state.suspendedTransactions.empty()) {
                 releaseProcessLock(state);
-                rowLocks_.erase(entry);
+                registry.erase(entry);
             }
             if (noWait || result == ProcessLockResult::Error) return false;
         }
@@ -1523,6 +1538,8 @@ void LockManager::rollbackToCheckpoint(const LockCheckpoint& checkpoint) {
                 // If a later operation upgraded the logical mode, restore the
                 // savepoint's mode before retaining its original depth.
                 if (modeIt->second != targetMode) {
+                    if (!lockModeUsesSharedPhysicalToken(targetMode) && state.holders.size() != 1)
+                        continue;
                     const auto processResult = tryAcquireProcessLock(
                         state, state.processLockNamespace, state.processLockKind,
                         state.processLockResource, targetMode);
@@ -1617,6 +1634,10 @@ void LockManager::rollbackToCheckpoint(const LockCheckpoint& checkpoint) {
                 const LockMode currentMode = state.exclusive ? LockMode::Exclusive : LockMode::Shared;
                 const LockMode targetMode = checkpoint.pageModes.at(it->first);
                 if (currentMode != targetMode) {
+                    if (targetMode == LockMode::Exclusive && state.holders.size() != 1) {
+                        ++it;
+                        continue;
+                    }
                     const auto processResult = tryAcquireProcessLock(
                         state, state.processLockNamespace, state.processLockKind,
                         state.processLockResource, targetMode);
@@ -1648,7 +1669,7 @@ void LockManager::rollbackToCheckpoint(const LockCheckpoint& checkpoint) {
             }
             if (state.holders.empty()) releaseProcessLock(state);
             if (state.sharedCount == 0 && !state.exclusive && state.holders.empty() &&
-                state.waiters == 0) it = pageLocks_.erase(it);
+                state.suspendedTransactions.empty()) it = pageLocks_.erase(it);
             else ++it;
         }
     }
@@ -1689,209 +1710,20 @@ static std::string makePageKey(const std::string& dbname, const std::string& tab
 
 bool LockManager::pageLockShared(const std::string& dbname, const std::string& table,
                                  uint32_t pageId, bool* newlyAcquired) const {
-    if (newlyAcquired) *newlyAcquired = false;
-    std::thread::id self = std::this_thread::get_id();
-    const auto checkInterrupt = [&]() {
-        auto& manager = *const_cast<LockManager*>(this);
-        if (!manager.threadSettings().interruptHandler) return;
-        try {
-            manager.threadSettings().interruptHandler();
-        } catch (...) {
-            manager.removeWaitEdges(self);
-            throw;
-        }
-    };
-    std::string key = makePageKey(dbname, table, pageId);
-    const auto started = std::chrono::steady_clock::now();
-    while (true) {
-        checkInterrupt();
-        LockState* state = nullptr;
-        {
-            std::lock_guard<std::mutex> guard(pageMutex_);
-            auto& current = const_cast<LockManager*>(this)->pageLocks_[key];
-            const_cast<LockManager*>(this)->removeWaitEdges(self);
-            if (std::find(current.holders.begin(), current.holders.end(), self) !=
-                current.holders.end()) return true;
-            if (!current.exclusive) {
-                const auto processResult = const_cast<LockManager*>(this)->tryAcquireProcessLock(
-                    current, dbname, "page", key, LockMode::Shared);
-                if (processResult == ProcessLockResult::Error) return false;
-                if (processResult == ProcessLockResult::Acquired) {
-                    // Never block on the physical mutex while holding
-                    // pageMutex_: a waiter may own it while trying to enter
-                    // the same critical section to publish its ownership.
-                    if (current.mtx.try_lock_shared()) {
-                        ++current.sharedCount;
-                        current.holders.push_back(self);
-                        if (newlyAcquired) *newlyAcquired = true;
-                        return true;
-                    }
-                    if (current.holders.empty()) {
-                        const_cast<LockManager*>(this)->releaseProcessLock(current);
-                    }
-                }
-            }
-            for (const auto& holder : current.holders) {
-                if (holder != self) const_cast<LockManager*>(this)->addWaitEdge(self, holder);
-            }
-            if (const_cast<LockManager*>(this)->hasCycle(self)) {
-                const_cast<LockManager*>(this)->removeWaitEdges(self);
-                return false;
-            }
-            ++current.waiters;
-            state = &current;
-        }
-        if (!state->mtx.try_lock_shared()) {
-            {
-                std::lock_guard<std::mutex> guard(pageMutex_);
-                --state->waiters;
-            }
-            const auto timeout = const_cast<LockManager*>(this)->threadSettings().lockTimeoutMs;
-            if (timeout > 0 && std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - started).count() >= timeout) {
-                const_cast<LockManager*>(this)->removeWaitEdges(self);
-                return false;
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            continue;
-        }
-        {
-            std::lock_guard<std::mutex> guard(pageMutex_);
-            --state->waiters;
-            const auto processResult = const_cast<LockManager*>(this)->tryAcquireProcessLock(
-                *state, dbname, "page", key, LockMode::Shared);
-            if (processResult == ProcessLockResult::Acquired) {
-                ++state->sharedCount;
-                state->holders.push_back(self);
-                const_cast<LockManager*>(this)->removeWaitEdges(self);
-                if (newlyAcquired) *newlyAcquired = true;
-                return true;
-            }
-            state->mtx.unlock_shared();
-            if (state->holders.empty()) const_cast<LockManager*>(this)->releaseProcessLock(*state);
-            const_cast<LockManager*>(this)->removeWaitEdges(self);
-            if (processResult == ProcessLockResult::Error) return false;
-        }
-        const auto timeout = const_cast<LockManager*>(this)->threadSettings().lockTimeoutMs;
-        if (timeout > 0 && std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - started).count() >= timeout) return false;
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
+    return const_cast<LockManager*>(this)->acquireSimpleLock(SimpleLockResource::Page,
+        dbname, makePageKey(dbname, table, pageId), LockMode::Shared, false, newlyAcquired);
 }
 
-bool LockManager::pageLockExclusive(const std::string& dbname, const std::string& table, uint32_t pageId) const {
-    std::thread::id self = std::this_thread::get_id();
-    const auto checkInterrupt = [&]() {
-        auto& manager = *const_cast<LockManager*>(this);
-        if (!manager.threadSettings().interruptHandler) return;
-        try {
-            manager.threadSettings().interruptHandler();
-        } catch (...) {
-            manager.removeWaitEdges(self);
-            throw;
-        }
-    };
-    std::string key = makePageKey(dbname, table, pageId);
-    const auto started = std::chrono::steady_clock::now();
-    while (true) {
-        checkInterrupt();
-        LockState* state = nullptr;
-        {
-            std::lock_guard<std::mutex> guard(pageMutex_);
-            auto& current = const_cast<LockManager*>(this)->pageLocks_[key];
-            const_cast<LockManager*>(this)->removeWaitEdges(self);
-            if (current.exclusive && current.holders.size() == 1 && current.holders[0] == self) return true;
-            auto selfHolder = std::find(current.holders.begin(), current.holders.end(), self);
-            if (!current.exclusive && selfHolder != current.holders.end()) {
-                current.mtx.unlock_shared();
-                --current.sharedCount;
-                current.holders.erase(selfHolder);
-                if (current.holders.empty()) const_cast<LockManager*>(this)->releaseProcessLock(current);
-            }
-            if (current.sharedCount == 0 && !current.exclusive) {
-                const auto processResult = const_cast<LockManager*>(this)->tryAcquireProcessLock(
-                    current, dbname, "page", key, LockMode::Exclusive);
-                if (processResult == ProcessLockResult::Error) return false;
-                if (processResult == ProcessLockResult::Acquired) {
-                    if (current.mtx.try_lock()) {
-                        current.exclusive = true;
-                        current.holders.push_back(self);
-                        const_cast<LockManager*>(this)->removeWaitEdges(self);
-                        return true;
-                    }
-                    if (current.holders.empty()) {
-                        const_cast<LockManager*>(this)->releaseProcessLock(current);
-                    }
-                }
-            }
-            for (const auto& holder : current.holders) {
-                if (holder != self) const_cast<LockManager*>(this)->addWaitEdge(self, holder);
-            }
-            if (const_cast<LockManager*>(this)->hasCycle(self)) {
-                const_cast<LockManager*>(this)->removeWaitEdges(self);
-                return false;
-            }
-            ++current.waiters;
-            state = &current;
-        }
-        if (!state->mtx.try_lock()) {
-            {
-                std::lock_guard<std::mutex> guard(pageMutex_);
-                --state->waiters;
-            }
-            const auto timeout = const_cast<LockManager*>(this)->threadSettings().lockTimeoutMs;
-            if (timeout > 0 && std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - started).count() >= timeout) {
-                const_cast<LockManager*>(this)->removeWaitEdges(self);
-                return false;
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            continue;
-        }
-        {
-            std::lock_guard<std::mutex> guard(pageMutex_);
-            --state->waiters;
-            const auto processResult = const_cast<LockManager*>(this)->tryAcquireProcessLock(
-                *state, dbname, "page", key, LockMode::Exclusive);
-            if (processResult == ProcessLockResult::Acquired) {
-                state->exclusive = true;
-                state->holders.push_back(self);
-                const_cast<LockManager*>(this)->removeWaitEdges(self);
-                return true;
-            }
-            state->mtx.unlock();
-            if (state->holders.empty()) const_cast<LockManager*>(this)->releaseProcessLock(*state);
-            const_cast<LockManager*>(this)->removeWaitEdges(self);
-            if (processResult == ProcessLockResult::Error) return false;
-        }
-        const auto timeout = const_cast<LockManager*>(this)->threadSettings().lockTimeoutMs;
-        if (timeout > 0 && std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - started).count() >= timeout) return false;
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
+bool LockManager::pageLockExclusive(const std::string& dbname, const std::string& table,
+                                    uint32_t pageId) const {
+    return const_cast<LockManager*>(this)->acquireSimpleLock(SimpleLockResource::Page,
+        dbname, makePageKey(dbname, table, pageId), LockMode::Exclusive, false);
 }
 
 bool LockManager::pageLockExclusiveNoWait(const std::string& dbname, const std::string& table,
                                           uint32_t pageId) const {
-    auto& manager = const_cast<LockManager&>(*this);
-    if (const auto& interrupt = manager.threadSettings().interruptHandler; interrupt) interrupt();
-    const auto key = makePageKey(dbname, table, pageId);
-    std::lock_guard<std::mutex> guard(pageMutex_);
-    const auto [entry, added] = pageLocks_.try_emplace(key);
-    auto& state = entry->second;
-    if (state.exclusive || state.sharedCount != 0 || state.waiters != 0) return false;
-    state.holders.reserve(1);
-    if (manager.tryAcquireProcessLock(state, dbname, "page", key, LockMode::Exclusive) ==
-        ProcessLockResult::Acquired) {
-        if (state.mtx.try_lock()) {
-            state.exclusive = true;
-            state.holders.push_back(std::this_thread::get_id());
-            return true;
-        }
-        manager.releaseProcessLock(state);
-    }
-    if (added) pageLocks_.erase(entry);
-    return false;
+    return const_cast<LockManager*>(this)->acquireSimpleLock(SimpleLockResource::Page,
+        dbname, makePageKey(dbname, table, pageId), LockMode::Exclusive, true);
 }
 
 void LockManager::pageUnlock(const std::string& dbname, const std::string& table, uint32_t pageId) const {
@@ -1914,7 +1746,7 @@ void LockManager::pageUnlock(const std::string& dbname, const std::string& table
     }
     if (state.holders.empty()) const_cast<LockManager*>(this)->releaseProcessLock(state);
     if (state.sharedCount == 0 && !state.exclusive && state.holders.empty() &&
-        state.waiters == 0) {
+        state.suspendedTransactions.empty()) {
         pageLocks_.erase(it);
     }
 }
@@ -1939,7 +1771,7 @@ void LockManager::pageUnlockAll(const std::string& dbname, const std::string& ta
         }
         if (state.holders.empty()) const_cast<LockManager*>(this)->releaseProcessLock(state);
         if (state.sharedCount == 0 && !state.exclusive && state.holders.empty() &&
-            state.waiters == 0) {
+            state.suspendedTransactions.empty()) {
             it = pageLocks_.erase(it);
         } else {
             ++it;
@@ -1965,7 +1797,7 @@ void LockManager::pageUnlockAll() const {
         }
         if (state.holders.empty()) const_cast<LockManager*>(this)->releaseProcessLock(state);
         if (state.sharedCount == 0 && !state.exclusive && state.holders.empty() &&
-            state.waiters == 0) {
+            state.suspendedTransactions.empty()) {
             it = pageLocks_.erase(it);
         } else {
             ++it;

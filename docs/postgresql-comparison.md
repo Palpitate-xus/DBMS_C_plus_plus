@@ -2,6 +2,10 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-22 · 表锁和数据页锁升级
+
+PostgreSQL 18.6 的表锁按模式检查冲突，并保留同一事务已持有的锁。页内读写由缓冲区锁协调。SQLite 的写入锁按数据库文件管理，DuckDB 用乐观并发控制处理同一行写入。本项目在转换表锁和数据页锁时保留原锁，在 Linux 上原子转换底层文件锁。当前 SQL 对照覆盖单表 `ACCESS SHARE` 和 `ACCESS EXCLUSIVE`，数据页锁由本项目原生用例验证。[PostgreSQL 表锁](https://www.postgresql.org/docs/18/sql-lock.html) · [PostgreSQL 18.6 缓冲区源码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/storage/buffer/bufmgr.c) · [SQLite 锁机制](https://www.sqlite.org/lockingv3.html) · [DuckDB 并发](https://duckdb.org/docs/current/connect/concurrency)
+
 ## 2026-11-22 · 共享行锁升级
 
 PostgreSQL 18 在多笔事务要升级互相冲突的行锁时会检测死锁。回滚到保存点时，保存点前的锁仍有效。SQLite 以数据库文件为单位协调写入，DuckDB 用乐观并发控制处理对同一行的写入冲突。本项目保留等待升级的原共享锁，连接间的死锁由同一个服务进程识别。Linux 进程间的行锁也在原有文件描述上转换，使失败的升级不释放原锁。[PostgreSQL 锁机制](https://www.postgresql.org/docs/18/explicit-locking.html#LOCKING-ROWS) · [SQLite 锁机制](https://www.sqlite.org/lockingv3.html) · [DuckDB 并发](https://duckdb.org/docs/current/connect/concurrency) · [Linux 行锁文档](https://man7.org/linux/man-pages/man2/fcntl_locking.2.html)

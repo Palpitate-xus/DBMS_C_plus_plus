@@ -1556,6 +1556,24 @@ bool isStandaloneDiscardAllStatement(const std::string& sql) {
            firstSqlKeyword(tokens[1]) == "all";
 }
 
+// Legacy SHARE/EXCLUSIVE spellings retain their established transaction
+// behavior. The canonical ACCESS modes and omitted default mode require a
+// transaction block; their full grammar remains the utility handler's job.
+bool isStandaloneCanonicalLockTableStatement(const std::string& sql) {
+    if (SQLParser::classify(sql) != SqlCommand::Lock) return false;
+    auto tokens = SQLParser::tokenize(sql);
+    if (!tokens.empty() && tokens.back() == ";") tokens.pop_back();
+    if (!tokens.empty() && SQLParser::toLower(tokens.back()) == "nowait") tokens.pop_back();
+    if (tokens.size() >= 3) {
+        const size_t end = tokens.size();
+        const auto beforeMode = SQLParser::toLower(tokens[end - 2]);
+        if (SQLParser::toLower(tokens[end - 1]) == "mode" &&
+            (beforeMode == "share" || beforeMode == "exclusive") &&
+            SQLParser::toLower(tokens[end - 3]) == "in") return false;
+    }
+    return true;
+}
+
 // A first, independent mode utility must not mistake Parse/Bind's internal
 // planning snapshot for a user BEGIN. Keep the supported value grammar
 // deliberately narrow and preserve the explicit-block restriction in Main.
@@ -8667,7 +8685,8 @@ void handleClient(SecureSocket socket, std::string clientHost) {
             }
             if (!portalIt->second.executed &&
                 (isStandaloneDiscardAllStatement(portalIt->second.sql) ||
-                 isStandaloneCompatibilityModeSetting(portalIt->second.sql)) &&
+                 isStandaloneCompatibilityModeSetting(portalIt->second.sql) ||
+                 isStandaloneCanonicalLockTableStatement(portalIt->second.sql)) &&
                 extendedImplicitTransaction && !extendedImplicitExecuted &&
                 !transactionFailed) {
                 // Finishing the planning transaction expires all its
@@ -8765,7 +8784,8 @@ void handleClient(SecureSocket socket, std::string clientHost) {
                     !isTransactionControlStatement(portalState.sql) &&
                     !SQLParser::isSetTransactionStatement(portalState.sql) &&
                     !isStandaloneDiscardAllStatement(portalState.sql) &&
-                    !isStandaloneCompatibilityModeSetting(portalState.sql)) {
+                    !isStandaloneCompatibilityModeSetting(portalState.sql) &&
+                    !isStandaloneCanonicalLockTableStatement(portalState.sql)) {
                     QueryResult beginResult = executeForProtocol("BEGIN");
                     if (beginResult.error) {
                         protocol.sendErrorResponse(

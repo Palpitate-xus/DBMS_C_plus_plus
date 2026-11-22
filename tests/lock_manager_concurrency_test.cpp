@@ -329,6 +329,88 @@ int main() {
     assert(upgradeDeadlockManager.getLockWaits().empty());
     std::cout << "[LOCK] shared row upgrade deadlock detection OK\n";
 
+    // Both table and page SHARE owners must remain present while upgrading.
+    // Their wait graph then has a real cycle: one victim releases its weak
+    // lock and the other upgrades. Table recursion depth must remain intact.
+    const pid_t multiUpgradeChild = ::fork();
+    assert(multiUpgradeChild >= 0);
+    if (multiUpgradeChild == 0) {
+        ::alarm(12);
+        assert(std::filesystem::create_directory("multi_upgrade_db"));
+        for (const bool page : {false, true}) {
+            LockManager locks;
+            std::mutex mutex;
+            std::condition_variable cv;
+            int ready = 0;
+            bool go = false;
+            std::atomic<int> upgraded{0}, rejected{0};
+            std::atomic<bool> checkpointsIntact{true};
+            const auto worker = [&] {
+                locks.setLockTimeout(5000);
+                locks.setDeadlockTimeout(0);
+                if (page) {
+                    assert(locks.pageLockShared("multi_upgrade_db", "resource", 1));
+                } else {
+                    assert(locks.lockShared("multi_upgrade_resource"));
+                    assert(locks.lockShared("multi_upgrade_resource"));
+                }
+                const auto before = locks.captureCheckpoint();
+                {
+                    std::lock_guard<std::mutex> lock(mutex);
+                    ++ready;
+                }
+                cv.notify_all();
+                {
+                    std::unique_lock<std::mutex> lock(mutex);
+                    cv.wait(lock, [&] { return go; });
+                }
+                const bool got = page
+                    ? locks.pageLockExclusive("multi_upgrade_db", "resource", 1)
+                    : locks.lockExclusive("multi_upgrade_resource");
+                const auto after = locks.captureCheckpoint();
+                if (got) {
+                    ++upgraded;
+                    if (page) {
+                        if (after.pageLocks != before.pageLocks || after.pageModes.size() != 1 ||
+                            after.pageModes.begin()->second != LockManager::LockMode::Exclusive)
+                            checkpointsIntact = false;
+                    } else if (after.tableCounts != before.tableCounts || after.tableModes.size() != 1 ||
+                               after.tableModes.begin()->second != LockManager::LockMode::Exclusive) {
+                        checkpointsIntact = false;
+                    }
+                } else {
+                    ++rejected;
+                    if (after.tableCounts != before.tableCounts || after.tableModes != before.tableModes ||
+                        after.pageLocks != before.pageLocks || after.pageModes != before.pageModes)
+                        checkpointsIntact = false;
+                }
+                if (page) {
+                    locks.pageUnlock("multi_upgrade_db", "resource", 1);
+                } else {
+                    locks.unlock("multi_upgrade_resource");
+                    locks.unlock("multi_upgrade_resource");
+                }
+            };
+            std::thread firstUpgrade(worker), secondUpgrade(worker);
+            {
+                std::unique_lock<std::mutex> lock(mutex);
+                cv.wait(lock, [&] { return ready == 2; });
+                go = true;
+            }
+            cv.notify_all();
+            firstUpgrade.join();
+            secondUpgrade.join();
+            assert(upgraded == 1 && rejected == 1 && checkpointsIntact);
+            assert(locks.getLockHolds().empty() && locks.getLockWaits().empty());
+        }
+        std::filesystem::remove_all("multi_upgrade_db");
+        ::_exit(0);
+    }
+    int multiUpgradeStatus = 0;
+    assert(::waitpid(multiUpgradeChild, &multiUpgradeStatus, 0) == multiUpgradeChild);
+    assert(WIFEXITED(multiUpgradeStatus) && WEXITSTATUS(multiUpgradeStatus) == 0);
+    std::cout << "[LOCK] competing table and page upgrades OK\n";
+
     // Checkpoint restoration must not wait on a competing local SHARE while
     // holding the row registry mutex. Use a child watchdog so a regression
     // cannot hang the entire suite; no timing determines the expected result.
