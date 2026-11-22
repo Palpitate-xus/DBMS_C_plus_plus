@@ -2624,6 +2624,24 @@ SET compatibility_mode = postgresql18;       -- 回到 PostgreSQL 18 语义
 SHOW dbms.extensions;                        -- 审计当前会话启用的偏移
 ```
 
+### 查找与系统表同名的 `pg_type`
+
+如果当前连接有临时 `pg_type` 表，默认先查这张表，否则查系统的 `pg_catalog.pg_type`。若在 `search_path` 中明确写出 `pg_temp` 或 `pg_catalog`，就按写出的位置查找。查找时遇到的第一张同名表决定可用的列和写入目标。也可以写全名直接指定一张表。
+
+```sql
+SELECT oid, typname FROM pg_catalog.pg_type WHERE oid = 23;
+
+CREATE TABLE public.pg_type (id integer);
+SET search_path = public, pg_catalog;
+INSERT INTO pg_type VALUES (13);
+SELECT id FROM pg_type;
+RESET search_path;
+
+DROP TABLE public.pg_type;
+```
+
+系统 `pg_type` 仍只支持已实现的列，`SELECT *` 和改写系统表会返回 `0A000`。用 `INSERT`、`UPDATE`、`DELETE` 或 `MERGE` 写入时，请确认选中的是自己的表。查询中的 `WITH` 同名结果可以作为读取来源，写入目标仍按查找顺序选取实际的表。[测试范围](test-report.md#pg-type-search-path-20261122)
+
 ### 在事务里临时调整超时
 
 `statement_timeout` 限制一条语句的执行时间。`lock_timeout` 限制一次锁等待的时间。`deadlock_timeout` 决定等待多久后检查是否有事务互相等待，修改它需要管理员权限。数字按毫秒处理，也可写带单位的字符串，例如 `'150ms'` 或 `'2s'`。前两个参数设为 `0` 会关闭对应的超时。

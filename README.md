@@ -16,6 +16,13 @@ cmake --build build/cmake --target dbms_main --parallel 2
 ## 最近更新
 
 <details>
+<summary>修复查询或写入 pg_type 时选错表的问题 · 2026-11-22</summary>
+
+数据库按连接的搜索顺序选择 `pg_type`。你可以用 `public.pg_type` 明确指定自己的表。
+
+</details>
+
+<details>
 <summary>按一长串值筛选时，更快看到查询计划 · 2026-11-22</summary>
 
 在一项按 32 个值筛选的测试中，用 `EXPLAIN` 查看查询计划的时间约减半。
@@ -26,13 +33,6 @@ cmake --build build/cmake --target dbms_main --parallel 2
 <summary>开始事务时少做一轮表结构检查 · 2026-11-22</summary>
 
 测试中，执行 `BEGIN` 少了 22 次文件或目录状态检查。
-
-</details>
-
-<details>
-<summary>别人改表时，仍可查看和调整自己的连接设置 · 2026-11-22</summary>
-
-例如，别人正在改表时，你仍可单独查看或调整遇到锁时最多等多久。
 
 </details>
 

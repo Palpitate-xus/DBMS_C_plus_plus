@@ -2,6 +2,17 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="pg-type-search-path-20261122"></a>
+## 2026-11-22 · 查找同名的 `pg_type`
+
+现有协议回归核对默认系统表、显式优先的用户表、临时表和调整前后的列描述。普通和扩展请求都检查写入系统表的错误码及同名用户表的实际记录。`MERGE RETURNING` 在只查看结果列时不会写入。执行后仅实际目标表中的一行更新。基线 `ccfbc827` 在有同名用户表时会把系统表读成错误的列数，第一版候选修复查询后仍会把部分 `MERGE` 写入用户表。最终版的同一组检查通过。[目录和同名表回归](../tests/pg_catalog_unavailable_sqlstate_protocol_e2e_test.py) · [目录来源回归](../tests/system_catalog_metadata_protocol_e2e_test.py)
+
+473 个请求检查了结果、行、命令标签和事务状态。基线与 PostgreSQL 18.6 有 135 处差异。最终版通过本项目的全部预期检查，其中 8 个系统表写入按本项目能力返回 `0A000`，PostgreSQL 因请求的列不存在返回 `42703`。另有 4 个带写入的 `WITH` 扩展请求在正确的数据前发送了 `NoData`。同一问题已在旧版的普通表对照中复现。单独的参数描述检查还发现，未显式指定的部分参数类型仍以零返回。473 项对照回执的 SHA-256 为 `1b0afa7e1e53cc3626132871e867dd0dcd297fa00220710465963d807ec4ca4c`。
+
+冷启动用例核对 19 条请求。进程被强制结束时，自定义模式下的修改和删除还未提交。重启后这些改动撤销，已经提交的公共同名表记录保留，默认仍读系统表。重新设置搜索顺序后可以继续写入自定义模式的表。另有 16 条双连接请求验证临时表隔离，以及按不同顺序删除公共表和临时表中的行。拒绝删除系统表中的行时，服务器在返回列描述前报错。
+
+6 套原生用例、9 套定向协议回归及完整协议套件通过。另一套 `pg_class` 检查仍预期 `relhasindex` 不可查询，在基线与最终版都读到了布尔列描述并返回零行。最终程序 SHA-256 为 `33177ea3de3abece1bc674ef62aa8c50ae278bb1149b4e48f1bce56e4436c2ed`，独立冷启动回执 SHA-256 为 `adc1bd87ed1dc29c0c8e7a03a8888611e09c0fda7af06b568bf71e97d83548a0`。[完整协议套件](../tests/postgres_protocol_test.py) · [性能报告](performance-report-2026-10-30.md#pg-type-search-path-cost-20261122)
+
 <a id="explain-filter-statistics-20261122"></a>
 ## 2026-11-22 · 复用查看查询计划时读到的统计
 
@@ -18,7 +29,7 @@
 
 两处旧断言仍认为 `pg_stats` 不可查询。现在核对空结果的完整列描述，以及 `ANALYZE` 后普通查询、查看结果类型和扩展执行返回的实际列及行。直方图测试核对 20 个双精度值按升序返回，只有一个取值时返回 SQL 空值。其余不支持的目录和同名用户表断言继续执行。[目录能力测试](../tests/pg_catalog_unavailable_sqlstate_protocol_e2e_test.py) · [直方图测试](../tests/pg_stats_histogram_extent_protocol_e2e_test.py) · [PostgreSQL pg_stats](https://www.postgresql.org/docs/18/view-pg-stats.html)
 
-新增用例也在 PostgreSQL 18.6 上执行通过。通过 `pg_stats` 用例后，旧版和当前版都在非限定名的 `INSERT INTO pg_type` 上返回 `XX001`。显式使用 `public.pg_type` 时，独立对照的读写成功。同名用户表原断言保留，便于继续检查。对照回执 SHA-256 为 `7094a6e63a93b53b60eac81b636ab5b610c84e03637c689981ae7e3c2bb04776`。
+新增用例也在 PostgreSQL 18.6 上执行通过。通过 `pg_stats` 用例后，当时的基线和候选版都在非限定名的 `INSERT INTO pg_type` 上返回 `XX001`。显式使用 `public.pg_type` 时，独立对照的读写成功。后续修复见[同名表回归](#pg-type-search-path-20261122)。对照回执 SHA-256 为 `7094a6e63a93b53b60eac81b636ab5b610c84e03637c689981ae7e3c2bb04776`。
 
 <a id="catalog-publication-one-scan-20261122"></a>
 ## 2026-11-22 · 开始事务时只检查一次目录文件

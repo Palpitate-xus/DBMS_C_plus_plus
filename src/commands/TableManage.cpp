@@ -1,5 +1,6 @@
 #include "catalog/SystemCatalogRows.h"
 #include "catalog/PgDefaultCatalog.h"
+#include "catalog/RelationSearchPath.h"
 #include "expression/LocalExpressionSyntax.h"
 #include "TableManage.h"
 #include "expression/ArrayDatumInput.h"
@@ -28223,18 +28224,7 @@ std::optional<std::string> StorageEngine::serialSequenceName(
     const Session* session = currentSession();
     std::vector<std::string> path;
     if (!name.schema.empty()) path.push_back(name.schema);
-    else {
-        std::string canonical;
-        if (!session || !parseSessionSearchPath(session->searchPath, path, canonical)) path = {"public"};
-        for (auto& entry : path)
-            if (session) entry = expandSessionSearchPathEntry(entry, session->username);
-        const bool explicitTemp = session && std::any_of(path.begin(), path.end(), [&](const auto& entry) {
-            return entry == "pg_temp" || entry == sessionTempSchemaName(*session);
-        });
-        if (std::find(path.begin(), path.end(), "pg_catalog") == path.end())
-            path.insert(path.begin(), "pg_catalog");
-        if (session && !explicitTemp) path.insert(path.begin(), sessionTempSchemaName(*session));
-    }
+    else path = effectiveRelationSearchPath(session);
     for (auto& entry : path)
         if (entry == "pg_temp" && session) entry = sessionTempSchemaName(*session);
     const auto catalog = catalogService_->acquire(dbname);
@@ -40866,6 +40856,7 @@ decltype(auto) StorageEngine::withQueryBindingMetadata(const std::string& dbname
             std::vector<std::string> schemas;
             const Session* session = currentSession();
             if (!requested.schema.empty()) schemas.push_back(requested.schema);
+            else if (requested.name == "pg_type") schemas = effectiveRelationSearchPath(session);
             else {
                 std::string canonical; std::vector<std::string> path;
                 if (!session || !parseSessionSearchPath(session->searchPath, path, canonical))
@@ -40916,9 +40907,7 @@ decltype(auto) StorageEngine::withQueryBindingMetadata(const std::string& dbname
                         }
                         return description;
                     }
-                    if(requested.name=="pg_type" &&
-                       (!requested.schema.empty() ||
-                        (!tableExists(dbname,requested.name) && !viewExists(dbname,requested.name)))) {
+                    if(requested.name=="pg_type") {
                         description.columns=ownedTypeCatalogDescriptor();
                         for(auto& column:description.columns) {
                             column.typeOid=mapBuiltinTypeNameToOid(column.type);

@@ -6,6 +6,10 @@
 
 截至 2026-11-22，273 项功能要求中有 22 项完成、167 项部分实现、69 项待验证、15 项暂缓。各项结果和剩余范围见功能总账。以下更新报告给出各轮测试的实际范围。[功能总账](gap-progress.json) · [支持的功能和限制](compatibility-contract.md)
 
+## 2026-11-22 · 修复 `pg_type` 同名表的读写
+
+如果系统表、用户表或当前连接的临时表都叫 `pg_type`，查询和普通写入会按连接的搜索路径选表。普通查询、预编译查询、合并写入、事务回滚和强制退出后的结果均已核对。[测试报告](test-report.md#pg-type-search-path-20261122) · [性能报告](performance-report-2026-10-30.md#pg-type-search-path-cost-20261122)
+
 ## 2026-11-22 · 查看长列表查询的计划更快
 
 `EXPLAIN` 估算同一列中的多个值时可以共用已读取的统计和表结构。文本和 JSON 计划都适用。已重新分析并回滚或重启后的结果也已核对。[测试报告](test-report.md#explain-filter-statistics-20261122) · [性能报告](performance-report-2026-10-30.md#explain-filter-statistics-cost-20261122)

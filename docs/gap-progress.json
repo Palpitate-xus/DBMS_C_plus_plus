@@ -2,6 +2,25 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-22 resolve SQL pg_type by relation search order",
+      "gap_ids": ["SQL-05", "CAT-02", "CAT-13"],
+      "status": "partial",
+      "evidence": [
+        "src/catalog/RelationSearchPath.h",
+        "src/commands/TableManage.cpp",
+        "src/commands/DmlExecutor.cpp",
+        "src/network/NetworkServer.cpp",
+        "docs/test-report.md",
+        "docs/performance-report-2026-10-30.md"
+      ],
+      "tests": ["tests/pg_catalog_unavailable_sqlstate_protocol_e2e_test.py", "tests/system_catalog_metadata_protocol_e2e_test.py"],
+      "verification": [
+        "Selected pg_type columns, rows, and physical write targets follow explicit and implicit search order.",
+        "Catalog writes fail closed and leave identically named ordinary and temporary tables intact.",
+        "System writes, more catalog names, COPY, DDL lookup, and some protocol metadata remain open."
+      ]
+    },
+    {
       "issue": "2026-11-22 reuse column statistics while estimating an EXPLAIN filter",
       "gap_ids": ["OPT-04", "OPT-05", "OPT-16"],
       "status": "partial",

@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>修复查询或写入 pg_type 时选错表的问题 · 2026-11-22</summary>
+
+数据库按连接的搜索顺序选择 `pg_type`。你可以用 `public.pg_type` 明确指定自己的表。
+
+[使用说明](docs/MANUAL.md#查找与系统表同名的-pg_type) · [测试报告](docs/test-report.md#pg-type-search-path-20261122)
+
+</details>
+
+<details>
 <summary>按一长串值筛选时，更快看到查询计划 · 2026-11-22</summary>
 
 在一项按 32 个值筛选的测试中，用 `EXPLAIN` 查看查询计划的时间约减半。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>别人改表时，仍可查看和调整自己的连接设置 · 2026-11-22</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-22 · 别人改表时，仍可查看和调整自己的连接设置
 
 例如，别人正在改表时，你仍可单独查看或调整遇到锁时最多等多久。
 
 [使用说明](docs/MANUAL.md#在-sql-表达式里读取和修改设置) · [并发测试](docs/test-report.md#session-setting-path-20261122) · [性能报告](docs/performance-report-2026-10-30.md#session-setting-path-cost-20261122)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-22 · 查询里也能查看和修改连接设置
 

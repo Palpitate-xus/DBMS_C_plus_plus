@@ -1,4 +1,5 @@
 #include "catalog/pg_owned_catalog_query.h"
+#include "catalog/RelationSearchPath.h"
 #include "expression/StoredRegtypeValue.h"
 #include "NetworkServer.h"
 #include "common/version.h"
@@ -1675,7 +1676,8 @@ struct ProtocolPhysicalSource {
 };
 
 ProtocolPhysicalSource protocolPhysicalSourceFromQuery(const std::string& sql,
-                                                      const Session& session) {
+                                                      const Session& session,
+                                                      bool describeWriteTarget = false) {
     ProtocolPhysicalSource result;
     SQLParser parser;
     const auto parsed = parser.parseForBinding(sql);
@@ -1732,6 +1734,8 @@ ProtocolPhysicalSource protocolPhysicalSourceFromQuery(const std::string& sql,
     if (!source.schema.empty()) {
         schemas.push_back(source.schema == "pg_temp"
             ? sessionTempSchemaName(session) : source.schema);
+    } else if (source.name == "pg_type") {
+        schemas = effectiveRelationSearchPath(&session);
     } else {
         schemas.push_back(sessionTempSchemaName(session));
         schemas.push_back("pg_catalog");
@@ -1743,6 +1747,10 @@ ProtocolPhysicalSource protocolPhysicalSourceFromQuery(const std::string& sql,
     std::string actualSchema;
     for (auto schema : schemas) {
         if (schema == "pg_temp") schema = sessionTempSchemaName(session);
+        if (schema == "pg_catalog" && source.name == "pg_type") {
+            if (describeWriteTarget) requireWritablePgTypeRelation(schema, source.name);
+            return result;
+        }
         Oid namespaceOid = INVALID_OID;
         for (const auto& name : catalog.namespaces)
             if (name.nspname == schema) { namespaceOid = name.oid; break; }
@@ -4597,6 +4605,10 @@ bool describePreparedResultShape(const std::string& sql, Session& session,
     bool virtualPgSettings = false;
     bool virtualPgStatActivity = false;
     if (!sourceName.empty()) {
+        CatalogManager::QualifiedName target;
+        if (!select && CatalogManager::parseQualifiedName(sourceName, target, true) &&
+            target.name == "pg_type")
+            (void)protocolPhysicalSourceFromQuery(sql, session, true);
         relation = resolveTableName(session, sourceName);
         if (g_engine.tableExists(session.currentDB, relation)) {
             schema = g_engine.getTableSchema(session.currentDB, relation);

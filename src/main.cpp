@@ -1,4 +1,5 @@
 #include "catalog/pg_owned_catalog_query.h"
+#include "catalog/RelationSearchPath.h"
 #include "catalog/type_catalog.h"
 #include "catalog/SystemCatalogRows.h"
 #include "catalog/PgDefaultCatalog.h"
@@ -7287,22 +7288,27 @@ string resolveTableName(Session& s, const string& name, bool foldUnquoted) {
         return name;
     }
 
-    // PostgreSQL implicitly searches the session temporary namespace before
-    // the explicit path unless pg_temp is listed later for function/operator
-    // lookup. This resolver is relation-only, so temp relations always win.
     const string& table = qualified.name;
-    if (s.tempTables.count(table)) return temporaryPhysicalName(table);
-    if (s.transientTempTables.count(table)) return temporaryPhysicalName(table);
-
+    const bool orderedCatalogPath = table == "pg_type";
     std::vector<std::string> entries;
-    std::string canonical;
-    if (!dbms::parseSessionSearchPath(s.searchPath, entries, canonical)) {
-        entries = {"public"};
+    std::string temporarySchema;
+    if (orderedCatalogPath) {
+        entries = dbms::effectiveRelationSearchPath(&s);
+        temporarySchema = sessionTempSchemaName(s);
+    } else {
+        if (s.tempTables.count(table) || s.transientTempTables.count(table))
+            return temporaryPhysicalName(table);
+        std::string canonical;
+        if (!dbms::parseSessionSearchPath(s.searchPath, entries, canonical))
+            entries = {"public"};
     }
     std::string firstCandidate;
     for (const auto& rawEntry : entries) {
-        const string schema = dbms::expandSessionSearchPathEntry(
-            rawEntry, s.username);
+        const string schema = orderedCatalogPath ? rawEntry :
+            dbms::expandSessionSearchPathEntry(rawEntry, s.username);
+        if (orderedCatalogPath && schema == temporarySchema &&
+            (s.tempTables.count(table) || s.transientTempTables.count(table)))
+            return temporaryPhysicalName(table);
         if (schema == "pg_catalog" || schema == "pg_temp" ||
             schema.rfind("pg_temp_", 0) == 0 ||
             !g_engine.schemaExists(s.currentDB, schema)) {
@@ -20132,19 +20138,6 @@ static bool executePgTypeQuery(const string& rawSql, const Session& session) {
     return false;
 }
 
-static bool handlePreparedTypeCatalogQuery(const string& rawSql,const Session& session,bool& handled) {
-    handled=false;
-    dbms::SQLParser parser;const auto parsed=parser.parseForBinding(rawSql);
-    const auto* select=parsed.success?dynamic_cast<const dbms::SelectStmt*>(parsed.stmt.get()):nullptr;
-    if(!select || !select->fromClause || select->fromClause->type!=dbms::FromItem::Type::Table)return false;
-    dbms::CatalogManager::QualifiedName name;
-    if(!dbms::CatalogManager::parseQualifiedName(select->fromClause->tableName,name,true) || name.name!="pg_type")return false;
-    if(name.schema!="pg_catalog" && (!name.schema.empty() ||
-        g_engine.tableExists(session.currentDB,name.name) || g_engine.viewExists(session.currentDB,name.name)))return false;
-    handled=true;
-    return executePgTypeQuery(rawSql,session);
-}
-
 static bool executePgSettingsQuery(const string& rawSql,
                                    const Session& session) {
     dbms::SQLParser parser;
@@ -28464,10 +28457,6 @@ static bool executeInternal(const string& rawSql, Session& s,
         const bool namespaceCatalogFailed=handlePreparedNamespaceCatalogQuery(effectiveRawSql,s,namespaceCatalogHandled);
         if(namespaceCatalogHandled)return namespaceCatalogFailed;
 
-        bool typeCatalogHandled=false;
-        const bool typeCatalogFailed=handlePreparedTypeCatalogQuery(effectiveRawSql,s,typeCatalogHandled);
-        if(typeCatalogHandled)return typeCatalogFailed;
-
         bool databaseCatalogHandled = false;
         const bool databaseCatalogFailed = handlePreparedDatabaseCatalogQuery(
             effectiveRawSql, s, databaseCatalogHandled);
@@ -33417,12 +33406,6 @@ static bool executeInternal(const string& rawSql, Session& s,
         const bool virtualPgClass=tname=="pg_class" &&
             (queryDb=="pg_catalog" || (queryDb==s.currentDB &&
              dbms::CatalogManager::parseQualifiedName(tnameOrig,classSource,true) && classSource.schema.empty()));
-        const bool virtualPgType = tname == "pg_type" &&
-            (queryDb == "pg_catalog" ||
-             (queryDb == s.currentDB && !g_engine.tableExists(queryDb,tname) &&
-              !g_engine.viewExists(queryDb,tname)));
-        if(virtualPgType)return executePgTypeQuery(effectiveRawSql,s);
-
         const bool virtualPgDatabase = tname == "pg_database" &&
             (queryDb == "pg_catalog" ||
              (queryDb == s.currentDB &&

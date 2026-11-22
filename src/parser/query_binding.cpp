@@ -1,4 +1,5 @@
 #include "catalog/SystemCatalogRows.h"
+#include "catalog/RelationSearchPath.h"
 #include "query_binding.h"
 #include "expression/IdentityValue.h"
 #include "common/GeometryValue.h"
@@ -2053,7 +2054,8 @@ public:
         if(!options.newAliased) add("new",false);
         return project(items,scopes);
     }
-    Range relation(const std::string& source, const std::string& alias, const Ctes& ctes) {
+    Range relation(const std::string& source, const std::string& alias, const Ctes& ctes,
+                   bool writeTarget = false) {
         CatalogManager::QualifiedName name;
         if (!CatalogManager::parseQualifiedName(source, name, true))
             throw DbError("42601", "invalid relation name");
@@ -2071,6 +2073,7 @@ public:
             : std::optional<QueryRelationMetadata>{};
         if (!owned && !metadata.relation) throw DbError("42P01", "relation does not exist: " + source);
         const auto description = owned ? *owned : metadata.relation(source);
+        if (writeTarget) requireWritablePgTypeRelation(description.schema, description.name);
         Range range{alias.empty() ? description.schema : "", alias.empty() ? description.name : identifier(alias), description.columns};
         range.relationSchema = description.schema;
         range.relationName = description.name;
@@ -2688,7 +2691,7 @@ public:
             return columns;
         }
         if (auto* insert = dynamic_cast<InsertStmt*>(&node)) {
-            auto target = registerSource(relation(insert->tableName, "", {}));
+            auto target = registerSource(relation(insert->tableName, "", {}, true));
             QueryRowDescriptor assignments;
             std::set<std::string> assignedNames;
             if (insert->columns.empty()) assignments = target.columns;
@@ -2847,7 +2850,7 @@ public:
         }
         if (auto* update = dynamic_cast<UpdateStmt*>(&node)) {
             auto ranges = from(update->fromClause.get(), outer, ctes);
-            const auto target = registerSource(relation(update->tableName, update->alias, {}));
+            const auto target = registerSource(relation(update->tableName, update->alias, {}, true));
             checkRangeConflicts({target}, ranges);
             ranges.insert(ranges.begin(), target);
             auto scopes = outer; scopes.insert(scopes.begin(), std::move(ranges));
@@ -2906,7 +2909,7 @@ public:
         }
         if (auto* remove = dynamic_cast<DeleteStmt*>(&node)) {
             auto ranges = from(remove->usingClause.get(), outer, ctes);
-            const auto target = registerSource(relation(remove->tableName, remove->alias, {}));
+            const auto target = registerSource(relation(remove->tableName, remove->alias, {}, true));
             checkRangeConflicts({target}, ranges);
             ranges.insert(ranges.begin(), target);
             auto scopes = outer; scopes.insert(scopes.begin(), std::move(ranges));
@@ -3229,7 +3232,9 @@ public:
             } else throw DbError("0A000","statement has no supported RETURNING declaration");
             // The target is always its real catalog relation, never a CTE
             // reinterpreted as a physical row owner.
-            const auto target=registerSource(declarationRelation(targetName,targetAlias,{}));
+            auto targetRange=declarationRelation(targetName,targetAlias,{});
+            requireWritablePgTypeRelation(targetRange.relationSchema,targetRange.relationName);
+            const auto target=registerSource(std::move(targetRange));
             auto ranges=declarationFrom(source,outer,ctes);checkRangeConflicts({target},ranges);
             ranges.insert(ranges.begin(),target);
             auto scopes=outer;scopes.insert(scopes.begin(),std::move(ranges));

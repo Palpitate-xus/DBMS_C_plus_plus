@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-22 · 查找已经存在的同名表
+
+PostgreSQL 18.6 按顺序查找 `search_path`，自动补上省略的 `pg_catalog` 和当前连接的临时模式。两者可通过显式写出改变位置。SQLite 使用固定的临时库、主库、附加库顺序。DuckDB 先查临时表和配置指定的路径，再查默认系统目录。[PostgreSQL 18.6 查找实现](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/catalog/namespace.c#L65-L86) · [SQLite 对象查找](https://sqlite.org/lang_naming.html) · [DuckDB 查找实现](https://github.com/duckdb/duckdb/blob/v1.4.3/src/catalog/catalog_search_path.cpp#L254-L270)
+
+本项目采用 PostgreSQL 的顺序查找 `pg_type`，并将选出的表身份用于列绑定、普通查询、协议结果描述和写入目标。支持普通和临时同名表，写入系统目录返回 `0A000`。其他系统表和建表、维护命令的查找仍需分别接入和验证。[测试报告](test-report.md#pg-type-search-path-20261122) · [性能报告](performance-report-2026-10-30.md#pg-type-search-path-cost-20261122)
+
 ## 2026-11-22 · 查看列表查询的计划
 
 PostgreSQL 使用列统计估算 `IN` 一类列表条件，也可以在 `ANALYZE` 后用扩展统计估算有关联的同表条件。SQLite 将 `ANALYZE` 采集的表和索引统计留给优化器，DuckDB 的 `ANALYZE` 用于更新选择连接顺序所需的统计。本项目在生成 `EXPLAIN` 的过滤节点时复用同一列的统计和表结构。列表条件仍逐值估算，相关多列的估算算法仍有差距。[PostgreSQL 统计](https://www.postgresql.org/docs/18/planner-stats.html) · [PostgreSQL 列表估算源码](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/utils/adt/selfuncs.c) · [SQLite ANALYZE](https://www.sqlite.org/lang_analyze.html) · [DuckDB ANALYZE](https://duckdb.org/docs/2.0/sql/statements/analyze) · [性能报告](performance-report-2026-10-30.md#explain-filter-statistics-cost-20261122)

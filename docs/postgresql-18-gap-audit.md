@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-22 · `pg_type` 同名表查找
+
+系统、持久及当前连接的临时 `pg_type` 按实际搜索顺序绑定。查询支持显式名称和同名 `WITH` 读取来源。普通 `INSERT`、`UPDATE`、`DELETE` 和 `MERGE` 以实际表为目标，选择系统目录时拒绝写入。当前验证未覆盖完整系统表的列和写入能力、所有模式的对象查找、`COPY` 与 DDL 命令以及完整的参数和结果描述。`SQL-05`、`CAT-02` 和 `CAT-13` 保持部分实现。[测试范围](test-report.md#pg-type-search-path-20261122)
+
 ## 2026-11-22 · 查看计划时合并重复统计读取
 
 文本与 JSON 的普通过滤节点在单次估算内复用新旧格式列统计、表结构和行数，涵盖多值匹配与同列重复条件。真实估算公式继续按现有方式逐值计算。PostgreSQL 18.6 的扩展统计定义在创建后可查，统计数据在 `ANALYZE` 后产生。本项目的旧扩展统计定义文件缺少持久编号、模式与所有者，仍需补齐相应的目录及多列估算。相关 `OPT-04`、`OPT-05` 和 `OPT-16` 保持部分实现。[测试报告](test-report.md#explain-filter-statistics-20261122) · [PostgreSQL 扩展统计定义](https://www.postgresql.org/docs/18/catalog-pg-statistic-ext.html)

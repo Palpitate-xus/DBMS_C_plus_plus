@@ -4,6 +4,7 @@
 // ============================================================================
 
 #include "commands/DmlExecutor.h"
+#include "catalog/RelationSearchPath.h"
 
 #include "access/BPTree.h"
 #include "access/HashIndex.h"
@@ -510,7 +511,8 @@ bool checkDatabase(const Session& s) {
 std::string resolveTable(Session& s, const std::string& name,
                          bool foldUnquoted = false,
                          bool* viewTarget = nullptr,
-                         bool* materializedTarget = nullptr) {
+                         bool* materializedTarget = nullptr,
+                         bool writeTarget = false) {
     if (viewTarget) *viewTarget = false;
     if (materializedTarget) *materializedTarget = false;
     const auto temporaryPhysicalName = [&](const std::string& table) {
@@ -522,11 +524,15 @@ std::string resolveTable(Session& s, const std::string& name,
     CatalogManager::QualifiedName qualified;
     if (!CatalogManager::parseQualifiedName(name, qualified,
                                             foldUnquoted)) return name;
+    const bool checkPgType = writeTarget && qualified.name == "pg_type";
     if (!qualified.schema.empty()) {
         const std::string& schema = qualified.schema;
         const std::string& table = qualified.name;
-        if ((schema == "pg_temp" || schema.rfind("pg_temp_", 0) == 0) &&
-            isTempTable(s, table)) {
+        if (checkPgType) requireWritablePgTypeRelation(schema, table);
+        const bool temporary = schema == "pg_temp" ||
+            (schema.rfind("pg_temp_", 0) == 0 &&
+             (!checkPgType || schema == sessionTempSchemaName(s)));
+        if (temporary && isTempTable(s, table)) {
             return temporaryPhysicalName(table);
         }
         if (g_engine.schemaExists(s.currentDB, schema)) {
@@ -577,12 +583,14 @@ std::string resolveTable(Session& s, const std::string& name,
     }
     const std::string& table = qualified.name;
     std::vector<std::string> entries;
-    std::string canonical;
-    if (!dbms::parseSessionSearchPath(s.searchPath, entries, canonical)) {
-        entries = {"public"};
+    if (checkPgType) {
+        entries = effectiveRelationSearchPath(&s);
+    } else {
+        std::string canonical;
+        if (!parseSessionSearchPath(s.searchPath, entries, canonical)) entries = {"public"};
     }
     const std::string temporarySchema = sessionTempSchemaName(s);
-    const bool explicitTemporary = std::any_of(entries.begin(), entries.end(),
+    const bool explicitTemporary = checkPgType || std::any_of(entries.begin(), entries.end(),
         [&](const std::string& entry) {
             const auto schema = expandSessionSearchPathEntry(entry, s.username);
             return schema == "pg_temp" || schema == temporarySchema;
@@ -593,8 +601,9 @@ std::string resolveTable(Session& s, const std::string& name,
         return temporaryPhysicalName(table);
     std::string firstCandidate;
     for (const auto& rawSchema : entries) {
-        const std::string schema = dbms::expandSessionSearchPathEntry(
-            rawSchema, s.username);
+        const std::string schema = checkPgType ? rawSchema :
+            expandSessionSearchPathEntry(rawSchema, s.username);
+        if (checkPgType) requireWritablePgTypeRelation(schema, table);
         if (schema == "pg_temp" || schema == temporarySchema) {
             if (isTempTable(s, table)) return temporaryPhysicalName(table);
             continue;
@@ -3299,7 +3308,8 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback,
 
     const std::string requestedTable = identifier(stmt.tableName);
     bool viewTarget = false;
-    const std::string resolvedTable = resolveTable(s, stmt.tableName, true, &viewTarget);
+    const std::string resolvedTable =
+        resolveTable(s, stmt.tableName, true, &viewTarget, nullptr, true);
 
     // Views and materialized views have separate rewrite/trigger semantics in
     // main.cpp.  Do not bypass those semantics while this bridge is partial.
@@ -3938,7 +3948,8 @@ bool executeUpdateFromJoin(const UpdateStmt& stmt, Session& s, bool& fallback) {
 
     const std::string requestedTable = identifier(stmt.tableName);
     bool viewTarget = false;
-    const std::string resolvedTable = resolveTable(s, stmt.tableName, true, &viewTarget);
+    const std::string resolvedTable =
+        resolveTable(s, stmt.tableName, true, &viewTarget, nullptr, true);
     if (viewTarget) {
         fallback = true;
         return false;
@@ -4135,7 +4146,8 @@ bool executeUpdateFrom(const UpdateStmt& stmt, Session& s, bool& fallback) {
 
     const std::string requestedTable = identifier(stmt.tableName);
     bool viewTarget = false;
-    const std::string resolvedTable = resolveTable(s, stmt.tableName, true, &viewTarget);
+    const std::string resolvedTable =
+        resolveTable(s, stmt.tableName, true, &viewTarget, nullptr, true);
     if (viewTarget) {
         fallback = true;
         return false;
@@ -4604,7 +4616,8 @@ bool executePreparedUpdate(const UpdateStmt& stmt, Session& s, bool& fallback,
     if (!checkDatabase(s)) return true;
     const std::string requestedTable = identifier(stmt.tableName);
     bool viewTarget = false;
-    const std::string resolvedTable = resolveTable(s, stmt.tableName, true, &viewTarget);
+    const std::string resolvedTable =
+        resolveTable(s, stmt.tableName, true, &viewTarget, nullptr, true);
     if (viewTarget) {
         fallback = true;
         return false;
@@ -4886,7 +4899,8 @@ bool executeUpdate(const UpdateStmt& stmt, Session& s, bool& fallback) {
     if (!checkDatabase(s)) return true;
     const std::string requestedTable = identifier(stmt.tableName);
     bool viewTarget = false;
-    const std::string resolvedTable = resolveTable(s, stmt.tableName, true, &viewTarget);
+    const std::string resolvedTable =
+        resolveTable(s, stmt.tableName, true, &viewTarget, nullptr, true);
     if (viewTarget) {
         fallback = true;
         return false;
@@ -5109,7 +5123,8 @@ bool executeMerge(const MergeStmt& stmt, Session& s, bool& fallback) {
 
     const std::string requestedTarget = identifier(stmt.targetTable);
     bool viewTarget = false;
-    const std::string targetTable = resolveTable(s, stmt.targetTable, true, &viewTarget);
+    const std::string targetTable =
+        resolveTable(s, stmt.targetTable, true, &viewTarget, nullptr, true);
     if (requestedTarget.empty()) return unsupported("target table is required");
     if (viewTarget) {
         return unsupported("views are not writable through MERGE");
@@ -5683,7 +5698,8 @@ bool executeDeleteUsingJoin(const DeleteStmt& stmt, Session& s, bool& fallback) 
 
     const std::string requestedTable = identifier(stmt.tableName);
     bool viewTarget = false;
-    const std::string resolvedTable = resolveTable(s, stmt.tableName, true, &viewTarget);
+    const std::string resolvedTable =
+        resolveTable(s, stmt.tableName, true, &viewTarget, nullptr, true);
     if (viewTarget) {
         fallback = true;
         return false;
@@ -5814,7 +5830,8 @@ bool executeDeleteUsing(const DeleteStmt& stmt, Session& s, bool& fallback) {
 
     const std::string requestedTable = identifier(stmt.tableName);
     bool viewTarget = false;
-    const std::string resolvedTable = resolveTable(s, stmt.tableName, true, &viewTarget);
+    const std::string resolvedTable =
+        resolveTable(s, stmt.tableName, true, &viewTarget, nullptr, true);
     if (viewTarget) {
         fallback = true;
         return false;
@@ -5966,7 +5983,8 @@ bool executeDelete(const DeleteStmt& stmt, Session& s, bool& fallback) {
     if (!checkDatabase(s)) return true;
     const std::string requestedTable = identifier(stmt.tableName);
     bool viewTarget = false;
-    const std::string resolvedTable = resolveTable(s, stmt.tableName, true, &viewTarget);
+    const std::string resolvedTable =
+        resolveTable(s, stmt.tableName, true, &viewTarget, nullptr, true);
     if (viewTarget) {
         fallback = true;
         return false;
@@ -7526,7 +7544,7 @@ bool tryDmlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
     else if(const auto* remove=dynamic_cast<const DeleteStmt*>(parsed.stmt.get()))targetSpelling=&remove->tableName;
     if(targetSpelling) {
         bool viewTarget=false,materializedTarget=false;
-        (void)resolveTable(s,*targetSpelling,true,&viewTarget,&materializedTarget);
+        (void)resolveTable(s,*targetSpelling,true,&viewTarget,&materializedTarget,true);
         if(materializedTarget) {
             if(!checkDatabase(s)){handled=true;return true;}
             auto prepared=std::make_shared<PreparedQuery>(
