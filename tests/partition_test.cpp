@@ -977,7 +977,7 @@ static void test_partition_scan_uses_leaf_nulls() {
     std::cout << "[PART] Partition scans retain each leaf's NULL bitmap OK" << std::endl;
 }
 
-static void test_partition_sort_reads_long_values_for_retained_rows() {
+static void test_partition_sort_reads_long_values_for_output_rows() {
     using dbms::DBStatus;
     const std::string db = testDbPath("part_sort_long_values");
     const std::string table = "events";
@@ -991,6 +991,7 @@ static void test_partition_sort_reads_long_values_for_retained_rows() {
     const std::string longValue(6200, 'z');
     assert(g_engine.insertRow(db, table, {{"id", "5"}, {"payload", "short"}}) == DBStatus::OK);
     assert(g_engine.insertRow(db, table, {{"id", "15"}, {"payload", longValue}}) == DBStatus::OK);
+    assert(g_engine.insertRow(db, table, {{"id", "19"}, {"payload", std::nullopt}}) == DBStatus::OK);
     assert(g_engine.checkpoint(db));
 
     const auto readSorted = [&](const std::string& orderClause) {
@@ -1008,12 +1009,19 @@ static void test_partition_sort_reads_long_values_for_retained_rows() {
     assert(first.ok && (first.structuredRows == std::vector<std::vector<std::string>>{{"5", "short"}}));
     const auto larger = readSorted("id LIMIT 1 OFFSET 1");
     assert(!larger.ok && larger.errorSqlState == "58030");
+    const auto afterLongValue = readSorted("id LIMIT 1 OFFSET 2");
+    assert(afterLongValue.ok);
+    assert((afterLongValue.structuredRows == std::vector<std::vector<std::string>>{{"19", ""}}));
+    assert((afterLongValue.structuredNulls == std::vector<std::vector<bool>>{{false, true}}));
+    const auto pastEnd = readSorted("id LIMIT 1 OFFSET 3");
+    assert(pastEnd.ok && pastEnd.structuredRows.empty());
     assert(!readSorted("payload LIMIT 1").ok);
     assert(!std::filesystem::exists(toast));
 
     std::filesystem::rename(saved, toast);
     const auto second = readSorted("id LIMIT 1 OFFSET 1");
     assert(second.ok && (second.structuredRows == std::vector<std::vector<std::string>>{{"15", longValue}}));
+    assert((second.structuredNulls == std::vector<std::vector<bool>>{{false, false}}));
     cleanup(db);
 }
 
@@ -1156,7 +1164,7 @@ int main() {
     test_partition_wal_routing();
     test_transactional_partition_inserts();
     test_partition_scan_uses_leaf_nulls();
-    test_partition_sort_reads_long_values_for_retained_rows();
+    test_partition_sort_reads_long_values_for_output_rows();
     test_analyze_partition_progress();
     std::cout << "[PART] all passed" << std::endl;
     return 0;

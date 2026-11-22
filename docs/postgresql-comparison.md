@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-22 · 分页后读取要返回的长字段
+
+PostgreSQL 18 可以在排序和分页后计算某些输出表达式，并保留排序、去重和分组所需的值。SQLite 的排序引用优化可以在排序记录中保存数据行的定位信息，稍后再读取需要的列。DuckDB 也有按需回取列值的优化。[PostgreSQL SELECT](https://www.postgresql.org/docs/18/sql-select.html) · [SQLite 排序引用源码](https://github.com/sqlite/sqlite/blob/master/src/select.c#L1060-L1110) · [DuckDB 延迟读取研究](https://www.duckdb.org/library/selective-late-materialization/)
+
+本项目对符合条件的分区分页在排序中保存原始行和该行的空值信息，跳过 `OFFSET` 指定的行后再展开当前页的长值。候选可按同一格式写入排序临时文件。排序键、行过滤和易变表达式仍由相应的执行计划处理。[验证范围](test-report.md#partition-offset-output-20261122) · [性能报告](performance-report-2026-10-30.md#partition-offset-output-cost-20261122)
+
 ## 2026-11-22 · 分区排序按页接收记录
 
 PostgreSQL 18.6 给排序器传入所需记录数，符合条件时用有界堆保留排名靠前的记录。SQLite 在已保留 `LIMIT + OFFSET` 条时比较新记录，只有排得更靠前才替换当前最后一条。DuckDB 的优化器也会将符合条件的排序和 `LIMIT` 合并为 `TopN`。[PostgreSQL 排序节点](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/executor/nodeSort.c) · [PostgreSQL 有界堆](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/utils/sort/tuplesort.c) · [SQLite 排序源码](https://github.com/sqlite/sqlite/blob/master/src/select.c#L843-L866) · [DuckDB 优化器](https://duckdb.org/2024/11/14/optimizers)

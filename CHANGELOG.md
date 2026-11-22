@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>查询翻到后面几页时少读长文本 · 2026-11-22</summary>
+
+按整数编号给分区表排序并翻页时，符合条件的查询会先跳过前面的记录，再读取当前页的长文本。
+
+[使用说明](docs/MANUAL.md#15-分区表) · [测试报告](docs/test-report.md#partition-offset-output-20261122) · [性能报告](docs/performance-report-2026-10-30.md#partition-offset-output-cost-20261122)
+
+</details>
+
+<details>
 <summary>部分分区查询排序时少读长文本 · 2026-11-22</summary>
 
 用 `ORDER BY` 和 `LIMIT` 按整数编号取前几条时，符合条件的查询会先比较编号，再读取可能入选记录的其他长字段。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>分区较多的表，重复查询用时缩短 · 2026-11-22</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-22 · 分区较多的表，重复查询用时缩短
 
 查询多个分区时，可以共用已经查到的表结构。在有 60 个分区的测试表上，连续查询的耗时缩短了约 16% 到 18%。
 
 [测试报告](docs/test-report.md#partition-scan-schema-20261122) · [性能报告](docs/performance-report-2026-10-30.md#partition-scan-schema-cost-20261122)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-22 · 修复部分跨分区查询漏掉记录的问题
 

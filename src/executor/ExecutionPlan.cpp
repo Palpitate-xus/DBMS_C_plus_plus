@@ -372,9 +372,10 @@ struct PreparedSelectState {
                 column.binding->declaredType + ":" + std::to_string(physical.dsize) + ":" + physical.collation;
         }, dbname, engine, false, windows.empty()?nullptr:statement);
     }
-    std::vector<ExprValue> cells(Operator& source, const std::string& raw) const {
+    std::vector<ExprValue> cells(Operator& source, const std::string& raw,
+                                 const std::vector<bool>* storedNulls = nullptr) const {
         std::vector<ExprValue> values;
-        if (source.lastStructuredValues(values)) {
+        if (!storedNulls && source.lastStructuredValues(values)) {
             if (values.size() != schema.len())
                 throw DbError("XX000","prepared source lost its typed descriptor width");
             for (size_t i = 0; i < values.size(); ++i) {
@@ -389,7 +390,13 @@ struct PreparedSelectState {
         }
         std::vector<std::string> structured;
         std::vector<bool> nulls;
-        bool available = source.supportsStructuredRows() && source.lastStructuredRow(structured, nulls);
+        bool available = storedNulls != nullptr;
+        if (storedNulls) {
+            detail::decodeStoredRowInputs(*engine, dbname, raw, schema,
+                                         *storedNulls, structured, nulls);
+        } else {
+            available = source.supportsStructuredRows() && source.lastStructuredRow(structured, nulls);
+        }
         if (!available) {
             const auto origin = source.scanOrigin();
             if (origin.engine == engine && origin.dbname == dbname &&
@@ -1164,6 +1171,7 @@ static std::optional<int> comparePreparedIdentityKeys(ExprEvaluator& evaluator,
 // context, so ordinary Sort need not retain another copy of those cells.
 struct TypedSortRow {
     std::string raw;
+    std::vector<bool> deferredNulls;
     std::vector<ExprValue> cells, keys;
     std::vector<std::optional<int64_t>> integerKeys;
     RowContext context;
@@ -1175,11 +1183,13 @@ struct TypedSortRowCodec {
     // Ordinary Sort caches one integer per owning key. Set output keys can
     // borrow cells instead, so validate their independent cache descriptor.
     std::optional<size_t> integers = std::nullopt;
+    size_t deferredColumns = 0;
     mutable std::shared_ptr<typed_sort_detail::GeneratedRegistry> generatedRegistry; // lazy actual spill metadata only
-    struct Header { uint64_t raw=0,cells=0,keys=0,integers=0,targets=0,ordinal=0; };
+    struct Header { uint64_t raw=0,cells=0,keys=0,integers=0,targets=0,ordinal=0,deferredNulls=0; };
     size_t bytes(const TypedSortRow& row) const {
         using namespace typed_sort_detail;
         size_t result=addBytes(sizeof(row),row.raw.capacity());
+        result=addBytes(result,row.deferredNulls.capacity() / 8);
         const auto values=[&](const auto& list) {
             size_t total=multiplyBytes(list.capacity(),sizeof(ExprValue));
             for(const auto& value:list)total=addBytes(total,dynamicValueBytes(value));
@@ -1193,8 +1203,10 @@ struct TypedSortRowCodec {
         return result;
     }
     void write(sort_detail::Writer& writer,const TypedSortRow& row) const {
-        writer.scalar(Header{row.raw.size(),row.cells.size(),row.keys.size(),row.integerKeys.size(),row.targets.size(),row.ordinal});
+        writer.scalar(Header{row.raw.size(),row.cells.size(),row.keys.size(),row.integerKeys.size(),
+                             row.targets.size(),row.ordinal,row.deferredNulls.size()});
         writer.append(row.raw.data(),row.raw.size());
+        for (bool isNull : row.deferredNulls) writer.scalar(uint8_t(isNull));
         for(const auto& value:row.cells)typed_sort_detail::writeValue(writer,value);
         for(const auto& value:row.keys)typed_sort_detail::writeValue(writer,value);
         for(const auto& value:row.integerKeys) {
@@ -1213,9 +1225,17 @@ struct TypedSortRowCodec {
     TypedSortRow read(sort_detail::Reader& reader) const {
         const auto header=reader.scalar<Header>();
         if(header.cells!=cells || header.keys!=keys || header.integers!=integers.value_or(keys) || header.targets!=targets ||
+           (header.deferredNulls && header.deferredNulls!=deferredColumns) ||
            header.raw>reader.remaining() || header.raw>std::numeric_limits<size_t>::max())
             typed_sort_detail::invalid("row descriptor");
         TypedSortRow row;row.ordinal=header.ordinal;row.raw=reader.string(static_cast<size_t>(header.raw));
+        if (header.deferredNulls > reader.remaining()) typed_sort_detail::invalid("stored NULL count");
+        row.deferredNulls.reserve(static_cast<size_t>(header.deferredNulls));
+        for (uint64_t i = 0; i < header.deferredNulls; ++i) {
+            const auto isNull = reader.scalar<uint8_t>();
+            if (isNull > 1) typed_sort_detail::invalid("stored NULL flag");
+            row.deferredNulls.push_back(isNull != 0);
+        }
         const auto values=[&](uint64_t count,std::vector<ExprValue>& list) {
             if(count>reader.remaining()/sizeof(typed_sort_detail::ValueHeader))typed_sort_detail::invalid("row value count");
             // The extent and plan descriptor have been validated. Avoid
@@ -1412,6 +1432,7 @@ class PreparedSortOp final : public Operator {
     size_t position_=0;
     bool budgeted_=false,opened_=false,available_=false;
     bool presortedInput_ = false, spilled_ = false;
+    bool deferredPhysicalRows_ = false;
     Row current_;
     mutable OrdinarySortComparisons comparisons_;
     const Row& current() const {return budgeted_?current_:rows_.at(position_-1);}
@@ -1470,6 +1491,39 @@ class PreparedSortOp final : public Operator {
         physicalKeyOrdinals_.assign(ordinals.begin(), ordinals.end());
         static_cast<TableScanOp&>(*child_).scanPartitionsOnDemand_ = true;
     }
+    void materializeCurrent() {
+        if (current_.deferredNulls.empty()) return;
+        const auto& schema = state_->schema;
+        detail::ScopedStoredRowNullBitmap nullOwner(schema, current_.deferredNulls);
+        bool ok = false;
+        current_.raw = state_->engine->resolveToastValues(state_->dbname,
+            schema.tablename, std::move(current_.raw), schema, &ok);
+        if (!ok) throw DbError("58030", "could not read partition sort row values");
+        // The scan has already advanced past this row. Use the bitmap saved
+        // with the original tuple, including when the row comes from a run.
+        current_.context = state_->context(state_->cells(*child_, current_.raw, &current_.deferredNulls));
+    }
+    bool nextRow(std::string* row) {
+        NextInstrument instrument(this);
+        available_ = false;
+        try {
+            if (budgeted_) {
+                if (!runs_ || !runs_->next(current_)) return false;
+            } else if (position_ == rows_.size()) return false;
+            ++position_;
+            if (row) {
+                if (budgeted_) materializeCurrent();
+                *row = current().raw;
+                available_ = true;
+            }
+            instrument.emitted = true;
+            return true;
+        } catch (...) {
+            const auto primary = std::current_exception();
+            try { close(); } catch (...) {}
+            std::rethrow_exception(primary);
+        }
+    }
 public:
     PreparedSortOp(OpPtr child, std::shared_ptr<PreparedSelectState> state)
         : child_(std::move(child)), state_(std::move(state)) {
@@ -1491,11 +1545,12 @@ public:
     ~PreparedSortOp() override {try{close();}catch(...) {}}
     bool open() override {
         OpenInstrument startup(this);clearError();rows_.clear();runs_.reset();position_=0;available_=false;current_=Row{};
-        presortedInput_ = spilled_ = false;
+        presortedInput_ = spilled_ = deferredPhysicalRows_ = false;
         const auto& select=state_->select();
         budgeted_=state_->aggregates.empty() && !select.having && select.groupBy.empty() && select.groupByElems.empty();
         comparisons_.reset(budgeted_?state_->keys.size():0);
-        if(budgeted_)runs_=std::make_unique<Runs>(sortWorkMemBytes(),TypedSortRowCodec{0,state_->keys.size(),state_->targets.size()},Less{this},bound_,
+        if(budgeted_)runs_=std::make_unique<Runs>(sortWorkMemBytes(),TypedSortRowCodec{0,state_->keys.size(),state_->targets.size(),
+            std::nullopt,physicalKeyColumns_.empty()?0:state_->schema.len()},Less{this},bound_,
             [](std::vector<Row>& rows,const Less& less){interruptibleStableSort(rows.begin(),rows.end(),less);});
         try {
             opened_=true;
@@ -1523,6 +1578,9 @@ public:
                 if(ordinal==std::numeric_limits<uint64_t>::max())throw DbError("54000","too many sort input rows");
                 row.ordinal=ordinal++;
                 if (decodedKeys) {
+                    if (!scan->lastStoredNullBitmap(row.deferredNulls))
+                        throw DbError("XX001", "partition sort lost the input NULL bitmap");
+                    deferredPhysicalRows_ = true;
                     row.context = state_->execution->context(state_->outerRow);
                     for (size_t i = 0; i < physicalKeyOrdinals_.size(); ++i) {
                         const auto column = physicalKeyOrdinals_[i];
@@ -1541,7 +1599,7 @@ public:
                     if (!budgeted_ && !state_->sourceContexts && state_->windows.empty())
                         row.cells=state_->cells(*child_,raw);
                 }
-                if (!decodedKeys) row.raw = std::move(raw);
+                row.raw = std::move(raw);
             row.targets.resize(state_->targets.size());
             const auto& context = row.context;
             // Keep required input values here. Delayed targets use the
@@ -1579,19 +1637,8 @@ public:
                 }
                 row.integerKeys.push_back(integer);
             }
-                if (decodedKeys) {
-                    runs_->add(std::move(row), [&](Row& retained) {
-                        std::vector<bool> bitmap;
-                        if (!scan->lastStoredNullBitmap(bitmap))
-                            throw DbError("XX001", "partition sort lost the input NULL bitmap");
-                        detail::ScopedStoredRowNullBitmap nullOwner(state_->schema, bitmap);
-                        bool ok = false;
-                        retained.raw = state_->engine->resolveToastValues(state_->dbname,
-                            state_->schema.tablename, std::move(raw), state_->schema, &ok);
-                        if (!ok) throw DbError("58030", "could not read partition sort row values");
-                        retained.context = state_->context(*child_, retained.raw);
-                    });
-                } else if (budgeted_) runs_->add(std::move(row));
+                if (decodedKeys) row.context = {};
+                if (budgeted_) runs_->add(std::move(row));
                 else rows_.push_back(std::move(row));
             }
             if(child_->hasError())return fail("prepared sort child failed");
@@ -1605,15 +1652,12 @@ public:
             const auto primary=std::current_exception();try{close();}catch(...){}std::rethrow_exception(primary);
         }
     }
-    bool next(std::string& row) override {
-        NextInstrument instrument(this);
-        try {
-            if(budgeted_) {if(!runs_ || !runs_->next(current_))return false;++position_;}
-            else {if(position_==rows_.size())return false;++position_;}
-            row=current().raw;available_=true;instrument.emitted=true;return true;
-        } catch(...) {
-            const auto primary=std::current_exception();try{close();}catch(...){}std::rethrow_exception(primary);
-        }
+    bool next(std::string& row) override { return nextRow(&row); }
+    std::optional<size_t> skipUnprojectedRows(size_t count) {
+        if (!deferredPhysicalRows_) return std::nullopt;
+        size_t skipped = 0;
+        while (skipped < count && nextRow(nullptr)) ++skipped;
+        return skipped;
     }
     const std::vector<std::optional<ExprValue>>& targets() const {return current().targets;}
     const std::vector<ExprValue>& keys() const {return current().keys;}
@@ -1666,6 +1710,7 @@ public:
     }
     void close() override {
         runs_.reset();std::vector<Row>().swap(rows_);current_=Row{};position_=0;available_=false;comparisons_.reset();
+        deferredPhysicalRows_ = false;
         if(opened_){opened_=false;child_->close();}
     }
     std::string preparedPlanNodeName() const override {return "TypedSort";}
@@ -1686,6 +1731,11 @@ class PreparedProjectOp final : public Operator {
 public:
     PreparedProjectOp(OpPtr child, std::shared_ptr<PreparedSelectState> state)
         : child_(std::move(child)), state_(std::move(state)) {}
+    std::optional<size_t> skipUnprojectedRows(size_t count) {
+        if (auto* sorted = dynamic_cast<PreparedSortOp*>(child_.get()))
+            return sorted->skipUnprojectedRows(count);
+        return std::nullopt;
+    }
     bool open() override {
         OpenInstrument startup(this); clearError(); values_.clear(); childOpened_ = false;
         callerNullBinding_ = StorageEngine::captureNullRowBinding();
@@ -8716,8 +8766,13 @@ bool OffsetOp::open() {
     OpenInstrument startup(this);
     skipped_ = 0;
     if (!child_->open()) return false;
-    std::string ignored;
-    while (skipped_ < offset_ && child_->next(ignored)) ++skipped_;
+    auto* projection = dynamic_cast<PreparedProjectOp*>(child_.get());
+    const auto skipped = projection ? projection->skipUnprojectedRows(offset_) : std::nullopt;
+    if (skipped) skipped_ = *skipped;
+    else {
+        std::string ignored;
+        while (skipped_ < offset_ && child_->next(ignored)) ++skipped_;
+    }
     if (child_->hasError()) return propagateChildError(child_.get(), "offset child failed");
     return true;
 }
