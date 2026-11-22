@@ -1,5 +1,9 @@
 # STO-02: relation storage identity and physical-name collision containment
 
+## 2026-11-22 · Table-scoped rollback for standalone truncate
+
+A standalone `TRUNCATE` of one current-format logged table in its default location can save the affected files and shared statistics in a durable before-image. Recovery binds the image to the database directory, physical relation ID, transaction and retained WAL timeline. It resolves the image before choosing a truncate replay boundary. Identity resets, outer transactions, external tablespaces and layouts with legacy TOAST directories use the existing snapshot. File-generation switching and independent index locators remain open. [Recovery tests](test-report.md#truncate-table-undo-20261122)
+
 ## 2026-11-21 · Commit-aware truncate recovery
 
 A standalone SQL truncate with a physical relation ID records its transaction ID. The existing rollback image still protects the heap, indexes and truncate completion file. Recovery first decides which transactions committed within the target, then skips other truncate records when choosing an LSN boundary. A completion file that names a skipped LSN fails closed because startup could not establish that the older storage was restored. Historical zero-XID records and outer transactions that use the existing savepoint path retain immediate redo. Generational storage with a per-table rollback image remains open. [Recovery tests](test-report.md#transactional-truncate-wal-20261121)

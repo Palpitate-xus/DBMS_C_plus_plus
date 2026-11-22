@@ -469,6 +469,50 @@ void testCorruptStateFailsClosed() {
     fs::remove_all(kCorruptDatabase);
 }
 
+void testStandaloneTableUndo() {
+    const std::string database = "truncate_scoped_undo_db";
+    const fs::path state = fs::path(database) / "items.truncate_state";
+    const fs::path pending = fs::path(database) / ".truncate_undo" / "pending";
+    const std::string payload = makePayload(9000);
+    fs::remove_all(database);
+
+    {
+        StorageEngine engine;
+        createTable(engine, database);
+        assert(engine.truncateTable(database, "items") == DBStatus::OK);
+        const auto previousState = readBytes(state);
+        assert(engine.insert(database, "items",
+                             {{"id", "999"}, {"payload", payload}, {"tag", "fresh"}}) ==
+               DBStatus::OK);
+
+        const auto legacyToast = fs::path(database) / "items.toast";
+        assert(fs::create_directory(legacyToast));
+        assert(engine.beginTransaction(database, true) == DBStatus::OK);
+        assert(engine.beginStandaloneTruncateUndo(database, "items") ==
+               StorageEngine::TruncateUndoResult::Unsupported);
+        assert(engine.rollbackTransaction() == DBStatus::OK);
+        assert(fs::remove(legacyToast));
+
+        assert(engine.beginTransaction(database, true) == DBStatus::OK);
+        assert(engine.beginStandaloneTruncateUndo(database, "items") ==
+               StorageEngine::TruncateUndoResult::Ready);
+        assert(fs::is_regular_file(pending));
+        assert(!engine.hasTransactionBackup());
+        assert(engine.truncateTable(database, "items", StorageEngine::TruncateWalMode::Autocommit) ==
+               DBStatus::OK);
+        assert(readBytes(state) != previousState);
+        assert(engine.rollbackTransaction() == DBStatus::OK);
+        assert(!fs::exists(pending));
+        assert(readBytes(state) == previousState);
+        assertFreshState(engine, payload, database);
+    }
+    {
+        StorageEngine recovered;
+        assertFreshState(recovered, payload, database);
+    }
+    fs::remove_all(database);
+}
+
 }  // namespace
 
 int main() {
@@ -495,6 +539,8 @@ int main() {
     std::cout << "[TRUNCATE RECOVERY] unresolved completion fails closed OK\n";
     testNameOnlyMarkerCannotTargetCurrentGeneration(true);
     std::cout << "[TRUNCATE RECOVERY] transactional name-only marker rejected OK\n";
+    testStandaloneTableUndo();
+    std::cout << "[TRUNCATE RECOVERY] table undo restores an earlier truncate state OK\n";
 
     fs::remove_all(kCompletedDatabase);
     fs::remove_all(kPendingDatabase);

@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>清空一张表时少复制文件 · 2026-11-22</summary>
+
+单独清空一张普通表时，数据库会为这张表保留一份恢复用的备份。同时修复了相邻日志记录可能漏写入磁盘的问题。
+
+[测试报告](docs/test-report.md#truncate-table-undo-20261122) · [性能报告](docs/performance-report-2026-10-30.md#truncate-table-undo-cost-20261122)
+
+</details>
+
+<details>
 <summary>重启时会检查清空表是否已提交 · 2026-11-21</summary>
 
 对新建的普通表，单独执行 `TRUNCATE` 时如果数据库意外退出，重启后会根据这次清空是否已提交，保留空表或恢复原来的数据。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>清空表时只重建一次索引 · 2026-11-21</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-21 · 清空表时只重建一次索引
 
 清空订单表后，可以照常写入新订单，继续用原来的索引按订单号查询。
 
 [测试报告](docs/test-report.md#truncate-single-index-rebuild-20261121) · [性能报告](docs/performance-report-2026-10-30.md#truncate-single-index-rebuild-cost-20261121)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-21 · 清空表或改列名时会保护其他表的数据
 

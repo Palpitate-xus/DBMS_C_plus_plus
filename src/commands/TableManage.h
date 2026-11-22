@@ -118,6 +118,9 @@ public:
     enum class TruncateWalMode { Immediate, Autocommit };
     DBStatus truncateTable(const std::string& dbname, const std::string& tablename,
                            TruncateWalMode mode = TruncateWalMode::Immediate);
+    enum class TruncateUndoResult { Unsupported, Ready, Error };
+    TruncateUndoResult beginStandaloneTruncateUndo(const std::string& dbname,
+                                                   const std::string& tablename);
     void bufferLogicalTruncate(const std::string& dbname,
                                const std::string& tablename);
     DBStatus alterTableAddColumn(const std::string& dbname, const std::string& tablename,
@@ -2105,6 +2108,15 @@ private:
     bool resetTableStorage(const std::string& dbname, const TableSchema& table,
                            const std::filesystem::path& relationRoot,
                            const std::vector<std::filesystem::path>& storageFiles);
+    void evictTableResetCaches(const std::string& dbname, const std::string& tablename);
+    struct TruncateUndoContext;
+    bool restoreStandaloneTruncate(const TruncateUndoContext& undo);
+    bool recoverStandaloneTruncate(const std::string& dbname,
+                                   const std::set<uint64_t>& committed,
+                                   const std::set<uint64_t>& aborted,
+                                   const std::set<std::pair<std::string, uint64_t>>& prepared,
+                                   bool targetedRecovery);
+    void finishStandaloneTruncate(bool committed);
     // Maintain the durable empty init forks used to reset UNLOGGED heaps
     // after an unclean server stop.  A normal shutdown keeps the main forks.
     bool ensureUnloggedInitForks(const std::string& dbname,
@@ -2652,6 +2664,8 @@ private:
         bool hasWrite = false;
         std::string txnBackupPath;
         bool transactionBackupDirty = false;
+        std::shared_ptr<TruncateUndoContext> truncateUndo;
+        bool truncateCommitUncertain = false;
         std::shared_ptr<void> createTableUndoFence;
         bool createTableUndoCleanupFailed = false;
         bool restoreBackupBeforeRowUndo = false;

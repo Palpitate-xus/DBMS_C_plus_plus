@@ -352,6 +352,7 @@ std::shared_ptr<std::shared_mutex> databaseTxnLockFor(
 bool databaseRollbackPending(const std::string& dbname);
 void setDatabaseRollbackPending(const std::string& dbname, uint64_t xid, bool pending);
 bool anyDatabaseRollbackPending();
+bool pendingTruncateUndo(const std::filesystem::path& database);
 
 // Physical operations already hold this exact lock without starting a
 // logical transaction. Lend that real capability to reentrant catalog
@@ -18318,6 +18319,7 @@ DBStatus StorageEngine::dropDatabase(const std::string& dbname) {
     if (!databaseLock.owns_lock()) return DBStatus::DATABASE_IN_USE;
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
+    if (pendingTruncateUndo(dbPath(dbname))) return DBStatus::IO_ERROR;
 
     // Release database-owned caches before removing the directory. This
     // prevents a later same-name database from inheriting stale CLOG/WAL or
@@ -18379,6 +18381,7 @@ DBStatus StorageEngine::renameDatabase(const std::string& oldName,
         transactionContext(), oldNameMutex, oldNameLock);
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (!databaseExists(oldName)) return DBStatus::DATABASE_NOT_FOUND;
+    if (pendingTruncateUndo(dbPath(oldName))) return DBStatus::IO_ERROR;
     std::error_code targetEc;
     if (pathEntryExists(dbPath(newName), targetEc)) {
         return DBStatus::TABLE_ALREADY_EXISTS;
@@ -21477,6 +21480,455 @@ static DBStatus planTableResetFiles(
     return DBStatus::OK;
 }
 
+
+namespace {
+
+constexpr const char* kTruncateUndoDirectory = ".truncate_undo";
+
+struct TruncateUndoImage {
+    std::string database, table;
+    uint64_t device = 0, inode = 0, relation = 0, xid = 0;
+    Lsn walStart = 0;
+    uint32_t timeline = 0;
+    std::vector<vacuum_full_backup::File> files;
+};
+
+std::filesystem::path truncateUndoRoot(const std::filesystem::path& database) {
+    return database / kTruncateUndoDirectory;
+}
+
+bool inspectTruncateUndo(const std::filesystem::path& database, bool& exists) {
+    const auto root = truncateUndoRoot(database);
+    std::error_code error;
+    const auto status = std::filesystem::symlink_status(root, error);
+    exists = false;
+    if (error == std::errc::no_such_file_or_directory ||
+        (!error && status.type() == std::filesystem::file_type::not_found)) return true;
+    if (error || !std::filesystem::is_directory(status)) return false;
+    return vacuum_full_backup::regularExists(root / "pending", exists);
+}
+
+bool pendingTruncateUndo(const std::filesystem::path& database) {
+    bool exists = false;
+    return !inspectTruncateUndo(database, exists) || exists;
+}
+
+bool discardInactiveTruncateUndo(const std::filesystem::path& journal) {
+    // The before-image is published before any reset. Without a pending
+    // record, only staging left by an interrupted copy or cleanup can remain.
+    std::error_code error;
+    std::filesystem::directory_iterator it(journal, error), end;
+    if (error == std::errc::no_such_file_or_directory) return true;
+    bool removed = false;
+    for (; !error && it != end; it.increment(error)) {
+        const auto name = it->path().filename().string();
+        const auto status = it->symlink_status(error);
+        if (error) return false;
+        const bool transactionDirectory = std::filesystem::is_directory(status) &&
+            name.size() <= 20 && name.front() >= '1' && name.front() <= '9' &&
+            name.find_first_not_of("0123456789") == std::string::npos;
+        constexpr std::string_view temporaryPrefix = ".dbms_atomic_pending.";
+        const bool temporaryRecord = std::filesystem::is_regular_file(status) &&
+            name.size() == temporaryPrefix.size() + 6 &&
+            name.compare(0, temporaryPrefix.size(), temporaryPrefix) == 0 &&
+            std::all_of(name.begin() + temporaryPrefix.size(), name.end(),
+                        [](unsigned char c) { return std::isalnum(c) != 0; });
+        if (transactionDirectory || temporaryRecord) {
+            std::filesystem::remove_all(it->path(), error);
+            if (error) return false;
+            removed = true;
+        }
+    }
+    return !error && (!removed || index_file::syncDirectory(journal));
+}
+
+bool truncateUndoDatabaseIdentity(const std::filesystem::path& path,
+                                  uint64_t& device, uint64_t& inode) {
+    struct stat identity{};
+    if (::lstat(path.c_str(), &identity) != 0 || !S_ISDIR(identity.st_mode)) return false;
+    device = static_cast<uint64_t>(identity.st_dev);
+    inode = static_cast<uint64_t>(identity.st_ino);
+    return true;
+}
+
+std::string encodeTruncateUndo(const TruncateUndoImage& image) {
+    using vacuum_full_backup::append;
+    using vacuum_full_backup::appendString;
+    if (!validStoredIdentifier(image.database, MAX_TABLE_NAME_LEN) ||
+        !validStoredRelationName(image.table) || image.inode == 0 ||
+        image.relation == 0 || image.xid == 0 || image.timeline == 0 ||
+        image.files.empty() || image.files.size() > 16384) return {};
+    std::string bytes = "TRU1";
+    appendString(bytes, image.database);
+    appendString(bytes, image.table);
+    append(bytes, image.device);
+    append(bytes, image.inode);
+    append(bytes, image.relation);
+    append(bytes, image.xid);
+    append(bytes, image.walStart);
+    append(bytes, image.timeline);
+    append(bytes, static_cast<uint32_t>(image.files.size()));
+    std::set<std::string> names;
+    for (const auto& file : image.files) {
+        if (!vacuum_full_backup::leaf(file.name) || !names.insert(file.name).second ||
+            file.mode > 07777 ||
+            (file.present ?
+                (file.digest.size() != 64 ||
+                 file.digest.find_first_not_of("0123456789abcdef") != std::string::npos)
+                : (file.mode != 0 || file.size != 0 || !file.digest.empty()))) return {};
+        appendString(bytes, file.name);
+        append(bytes, static_cast<uint32_t>(file.present));
+        append(bytes, file.mode);
+        append(bytes, file.size);
+        appendString(bytes, file.digest);
+    }
+    if (bytes.size() > vacuum_full_backup::maxManifestBytes - 64) return {};
+    return bytes + SHA256::hash(bytes);
+}
+
+bool decodeTruncateUndo(const std::string& bytes, TruncateUndoImage& image) {
+    if (bytes.size() < 68 || bytes.size() > vacuum_full_backup::maxManifestBytes ||
+        bytes.compare(0, 4, "TRU1") != 0) return false;
+    const size_t end = bytes.size() - 64;
+    size_t offset = 4;
+    const auto read = [&](auto& value) {
+        if (offset > end || sizeof(value) > end - offset) return false;
+        std::memcpy(&value, bytes.data() + offset, sizeof(value));
+        offset += sizeof(value);
+        return true;
+    };
+    const auto readString = [&](std::string& value) {
+        uint32_t size = 0;
+        if (!read(size) || size > 4096 || size > end - offset) return false;
+        value.assign(bytes.data() + offset, size);
+        offset += size;
+        return true;
+    };
+    uint32_t size = 0;
+    if (!readString(image.database) || !readString(image.table) ||
+        !read(image.device) || !read(image.inode) || !read(image.relation) ||
+        !read(image.xid) || !read(image.walStart) || !read(image.timeline) ||
+        !read(size) || size == 0 || size > 16384) return false;
+    for (uint32_t i = 0; i < size; ++i) {
+        vacuum_full_backup::File file;
+        uint32_t present = 0;
+        if (!readString(file.name) || !read(present) || present > 1 ||
+            !read(file.mode) || !read(file.size) || !readString(file.digest)) return false;
+        file.present = present != 0;
+        image.files.push_back(std::move(file));
+    }
+    return offset == end && encodeTruncateUndo(image) == bytes;
+}
+
+enum class TruncateUndoOutcome { Pending, Committed, Restored };
+
+std::string truncateUndoOutcomeText(TruncateUndoOutcome outcome, const std::string& manifest) {
+    return std::string(outcome == TruncateUndoOutcome::Committed ? "COMMITTED\n" : "RESTORED\n") +
+        manifest.substr(manifest.size() - 64) + '\n';
+}
+
+bool readTruncateUndoOutcome(const std::filesystem::path& backup, const std::string& manifest,
+                             TruncateUndoOutcome& outcome) {
+    using vacuum_full_backup::regularExists;
+    bool exists = false;
+    const auto path = backup / "outcome";
+    if (!regularExists(path, exists)) return false;
+    outcome = TruncateUndoOutcome::Pending;
+    if (!exists) return true;
+    std::string bytes;
+    if (!vacuum_full_backup::read(path, bytes, 128)) return false;
+    if (bytes == truncateUndoOutcomeText(TruncateUndoOutcome::Committed, manifest))
+        outcome = TruncateUndoOutcome::Committed;
+    else if (bytes == truncateUndoOutcomeText(TruncateUndoOutcome::Restored, manifest))
+        outcome = TruncateUndoOutcome::Restored;
+    else return false;
+    return true;
+}
+
+bool retireTruncateUndo(const std::filesystem::path& journal,
+                         const std::filesystem::path& backup,
+                         const std::string& manifest) {
+    std::string before;
+    if (!vacuum_full_backup::read(backup / "manifest", before) || before != manifest)
+        return false;
+    bool exists = false;
+    const auto pending = journal / "pending";
+    if (!vacuum_full_backup::regularExists(pending, exists)) return false;
+    if (exists) {
+        std::string active;
+        if (!vacuum_full_backup::read(pending, active) || active != manifest ||
+            !index_file::syncDirectory(backup) ||
+            !index_file::removeDurably(pending)) return false;
+    } else if (!index_file::syncDirectory(journal)) {
+        return false;
+    }
+    std::error_code error;
+    std::filesystem::remove_all(backup, error);
+    return !error && index_file::syncDirectory(journal);
+}
+
+}  // namespace
+
+struct StorageEngine::TruncateUndoContext {
+    TruncateUndoImage image;
+    std::string manifest;
+    std::filesystem::path journal, backup;
+    std::vector<std::filesystem::path> resetFiles;
+    std::unique_ptr<DatabaseMetadataWrite> metadata;
+    std::unique_ptr<StatsFileLock> statistics;
+    bool published = false;
+};
+
+StorageEngine::TruncateUndoResult StorageEngine::beginStandaloneTruncateUndo(
+    const std::string& dbname, const std::string& tablename) {
+    auto& context = transactionContext();
+    if (!context.inTransaction || context.txnDB != dbname || context.currentTxnId == 0 ||
+        context.truncateUndo || !context.txnBackupPath.empty() ||
+        !context.txnLog.empty() || !context.savepoints.empty() ||
+        !context.databaseExclusiveLock || !context.databaseExclusiveLock->owns_lock())
+        return TruncateUndoResult::Error;
+    auto undo = std::make_shared<TruncateUndoContext>();
+    const auto root = dbPath(dbname);
+    undo->metadata = std::make_unique<DatabaseMetadataWrite>(root);
+    if (!undo->metadata->acquired() || pendingTruncateUndo(root) ||
+        !tableExists(dbname, tablename)) return TruncateUndoResult::Error;
+    const auto table = getTableSchema(dbname, tablename);
+    if (table.isTemporary || table.isUnlogged || isSessionTempPhysicalName(tablename) ||
+        table.physicalRelationId == 0 || table.partitionType != TableSchema::PartitionType::None ||
+        relationDir(dbname, tablename).lexically_normal() != root.lexically_normal() ||
+        pendingCreateUndo(root))
+        return TruncateUndoResult::Unsupported;
+    if (const Session* session = currentSession(); session && session->currentDB == dbname) {
+        if (!session->tempTablesCreatedInTransaction.empty() ||
+            std::any_of(session->tempTableOnCommit.begin(), session->tempTableOnCommit.end(),
+                        [](const auto& action) { return action.second != "preserve"; }))
+            return TruncateUndoResult::Unsupported;
+    }
+    if (!lockManager_.lockMetadata(tablename)) return TruncateUndoResult::Error;
+    // The owning standalone transaction releases this lock at its terminal
+    // boundary. The reset itself briefly acquires a second, scoped token.
+    undo->statistics = std::make_unique<StatsFileLock>(statsPath(dbname));
+    if (!undo->statistics->ok()) return TruncateUndoResult::Error;
+    std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
+    bool pendingSwap = false;
+    const auto swap = root / ("." + tablename + std::string(kReindexSwapMarkerSuffix));
+    if (!vacuum_full_backup::regularExists(swap, pendingSwap)) return TruncateUndoResult::Error;
+    if (pendingSwap) return TruncateUndoResult::Unsupported;
+    if (!flushTableCaches(dbname, std::set<std::string>{tablename}) ||
+        planTableResetFiles(*this, dbname, table, root, undo->resetFiles) != DBStatus::OK)
+        return TruncateUndoResult::Error;
+    const auto legacyToast = root / (table.tablename + ".toast");
+    if (std::find(undo->resetFiles.begin(), undo->resetFiles.end(), legacyToast) !=
+        undo->resetFiles.end()) {
+        std::error_code error;
+        const auto status = std::filesystem::symlink_status(legacyToast, error);
+        if (error) return TruncateUndoResult::Error;
+        if (std::filesystem::is_directory(status)) return TruncateUndoResult::Unsupported;
+    }
+    // Include the three state files in the bound even with maximum-length names.
+    constexpr size_t maxResetFiles = 11000;
+    if (undo->resetFiles.size() > maxResetFiles) return TruncateUndoResult::Unsupported;
+    auto* wal = getWAL(dbname);
+    if (!wal || !wal->XLogFlush(wal->currentWriteLsn())) return TruncateUndoResult::Error;
+    undo->image.database = dbname;
+    undo->image.table = tablename;
+    undo->image.relation = table.physicalRelationId;
+    undo->image.xid = context.currentTxnId;
+    undo->image.walStart = wal->currentWriteLsn();
+    undo->image.timeline = wal->timelineId();
+    if (!truncateUndoDatabaseIdentity(root, undo->image.device, undo->image.inode))
+        return TruncateUndoResult::Error;
+
+    undo->journal = truncateUndoRoot(root);
+    undo->backup = undo->journal / std::to_string(context.currentTxnId);
+    std::error_code error;
+    std::filesystem::create_directory(undo->journal, error);
+    if (error || !index_file::syncDirectory(root) ||
+        !std::filesystem::create_directory(undo->backup, error) || error)
+        return TruncateUndoResult::Error;
+
+    auto files = undo->resetFiles;
+    files.push_back(truncateStatePath(*this, dbname, tablename));
+    files.push_back(specializedIndexDirtyPath(*this, dbname, tablename));
+    files.push_back(statsPath(dbname));
+    for (const auto& path : files) {
+        const auto target = vacuum_full_backup::backupFile(undo->backup, undo->image.files.size());
+        vacuum_full_backup::File file;
+        file.name = path.filename().string();
+        bool present = false;
+        struct stat original{};
+        if (!vacuum_full_backup::regularExists(path, present) ||
+            (present && (::lstat(path.c_str(), &original) != 0 || !S_ISREG(original.st_mode) ||
+                         !std::filesystem::copy_file(path, target, error) || error ||
+                         !vacuum_full_backup::syncFile(target))) ||
+            !vacuum_full_backup::digestFile(target, file) || file.present != present ||
+            (present && (file.mode != static_cast<uint32_t>(original.st_mode & 07777) ||
+                         file.size != static_cast<uint64_t>(original.st_size)))) {
+            std::filesystem::remove_all(undo->backup, error);
+            return TruncateUndoResult::Error;
+        }
+        undo->image.files.push_back(std::move(file));
+    }
+    undo->manifest = encodeTruncateUndo(undo->image);
+    if (undo->manifest.empty() ||
+        !vacuum_full_backup::publish(undo->backup / "manifest", undo->manifest, true)) {
+        std::filesystem::remove_all(undo->backup, error);
+        return TruncateUndoResult::Error;
+    }
+    context.truncateUndo = std::move(undo);
+    if (!vacuum_full_backup::publish(context.truncateUndo->journal / "pending",
+                                    context.truncateUndo->manifest, true))
+        return TruncateUndoResult::Error;
+    context.truncateUndo->published = true;
+    return TruncateUndoResult::Ready;
+}
+
+bool StorageEngine::restoreStandaloneTruncate(const TruncateUndoContext& undo) {
+    const auto& image = undo.image;
+    const auto root = dbPath(image.database);
+    std::string manifest;
+    if (!vacuum_full_backup::read(undo.backup / "manifest", manifest) ||
+        manifest != undo.manifest) return false;
+    TruncateUndoOutcome outcome;
+    if (!readTruncateUndoOutcome(undo.backup, manifest, outcome)) return false;
+    if (outcome == TruncateUndoOutcome::Restored)
+        return index_file::syncDirectory(undo.backup);
+    if (outcome != TruncateUndoOutcome::Pending) return false;
+    if (!tableExists(image.database, image.table)) return false;
+    const auto table = getTableSchema(image.database, image.table);
+    if (table.physicalRelationId != image.relation || table.isUnlogged || table.isTemporary ||
+        table.partitionType != TableSchema::PartitionType::None ||
+        relationDir(image.database, image.table).lexically_normal() != root.lexically_normal())
+        return false;
+
+    const auto stateFile = truncateStatePath(*this, image.database, image.table).filename().string();
+    const auto dirtyFile = specializedIndexDirtyPath(*this, image.database, image.table).filename().string();
+    const auto statsFile = statsPath(image.database).filename().string();
+    std::set<std::string> special{stateFile, dirtyFile, statsFile}, before;
+    for (size_t i = 0; i < image.files.size(); ++i) {
+        const auto& file = image.files[i];
+        if (!(special.erase(file.name) || isRelationPhysicalFileName(file.name, image.table)))
+            return false;
+        before.insert(file.name);
+        if (!file.present) continue;
+        vacuum_full_backup::File actual;
+        if (!vacuum_full_backup::digestFile(vacuum_full_backup::backupFile(undo.backup, i), actual) ||
+            !actual.present || actual.mode != file.mode || actual.size != file.size ||
+            actual.digest != file.digest) return false;
+    }
+    if (!special.empty()) return false;
+
+    const auto swap = root / ("." + image.table + std::string(kReindexSwapMarkerSuffix));
+    bool pendingSwap = false;
+    if (!vacuum_full_backup::regularExists(swap, pendingSwap) ||
+        (pendingSwap && !recoverReindexSwapMarker(swap, root, image.table))) return false;
+    std::vector<std::filesystem::path> after;
+    if (collectRelationFiles(*this, image.database, root, image.table, after) != DBStatus::OK)
+        return false;
+    std::set<std::string> owned{stateFile, dirtyFile, statsFile};
+    for (const auto& path : after) owned.insert(path.filename().string());
+    for (const auto& file : image.files) {
+        bool exists = false;
+        if (!vacuum_full_backup::regularExists(root / file.name, exists) ||
+            (exists && !owned.count(file.name))) return false;
+    }
+    evictTableResetCaches(image.database, image.table);
+    std::error_code error;
+    for (const auto& path : after) {
+        if (before.count(path.filename().string())) continue;
+        bool exists = false;
+        if (!vacuum_full_backup::regularExists(path, exists) ||
+            (exists && !std::filesystem::remove(path, error)) || error) return false;
+    }
+    for (size_t i = 0; i < image.files.size(); ++i) {
+        const auto& file = image.files[i];
+        const auto path = root / file.name;
+        bool exists = false;
+        if (!vacuum_full_backup::regularExists(path, exists)) return false;
+        if (!file.present) {
+            if ((exists && !std::filesystem::remove(path, error)) || error) return false;
+            continue;
+        }
+        const auto temp = undo.backup / (std::to_string(i) + ".restore");
+        bool staged = false;
+        if (!vacuum_full_backup::regularExists(temp, staged) ||
+            (staged && !std::filesystem::remove(temp, error)) || error ||
+            !std::filesystem::copy_file(vacuum_full_backup::backupFile(undo.backup, i), temp, error) ||
+            error || ::chmod(temp.c_str(), static_cast<mode_t>(file.mode)) != 0 ||
+            !vacuum_full_backup::syncFile(temp)) return false;
+        std::filesystem::rename(temp, path, error);
+        if (error) return false;
+    }
+    return index_file::syncDirectory(root) &&
+        vacuum_full_backup::publish(undo.backup / "outcome",
+            truncateUndoOutcomeText(TruncateUndoOutcome::Restored, manifest));
+}
+
+bool StorageEngine::recoverStandaloneTruncate(const std::string& dbname,
+                                              const std::set<uint64_t>& committed,
+                                              const std::set<uint64_t>& aborted,
+                                              const std::set<std::pair<std::string, uint64_t>>& prepared,
+                                              bool targetedRecovery) {
+    const auto root = dbPath(dbname);
+    bool pending = false;
+    if (!inspectTruncateUndo(root, pending)) return false;
+    if (!pending) return discardInactiveTruncateUndo(truncateUndoRoot(root));
+    if (targetedRecovery || pendingCreateUndo(root)) return false;
+    const DatabaseMetadataWrite metadataWrite(root);
+    if (!metadataWrite.acquired()) return false;
+
+    TruncateUndoContext undo;
+    undo.journal = truncateUndoRoot(root);
+    if (!vacuum_full_backup::read(undo.journal / "pending", undo.manifest) ||
+        !decodeTruncateUndo(undo.manifest, undo.image) || undo.image.database != dbname)
+        return false;
+    uint64_t device = 0, inode = 0;
+    if (!truncateUndoDatabaseIdentity(root, device, inode) ||
+        device != undo.image.device || inode != undo.image.inode) return false;
+    undo.backup = undo.journal / std::to_string(undo.image.xid);
+    std::error_code error;
+    if (!std::filesystem::is_directory(std::filesystem::symlink_status(undo.backup, error)) ||
+        error) return false;
+    std::string stageManifest;
+    if (!vacuum_full_backup::read(undo.backup / "manifest", stageManifest) ||
+        stageManifest != undo.manifest) return false;
+    TruncateUndoOutcome outcome;
+    if (!readTruncateUndoOutcome(undo.backup, undo.manifest, outcome) ||
+        prepared.count({dbname, undo.image.xid}) ||
+        (outcome == TruncateUndoOutcome::Restored && committed.count(undo.image.xid)) ||
+        (outcome != TruncateUndoOutcome::Restored && aborted.count(undo.image.xid))) return false;
+    if (outcome == TruncateUndoOutcome::Pending) {
+        auto* wal = getWAL(dbname);
+        if (!wal || wal->timelineId() != undo.image.timeline ||
+            wal->earliestAvailableLsn() > undo.image.walStart ||
+            wal->currentWriteLsn() < undo.image.walStart) return false;
+        if (committed.count(undo.image.xid)) {
+            if (!vacuum_full_backup::publish(undo.backup / "outcome",
+                    truncateUndoOutcomeText(TruncateUndoOutcome::Committed, undo.manifest)))
+                return false;
+        } else {
+            StatsFileLock lock(statsPath(dbname));
+            std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
+            if (!lock.ok() || !restoreStandaloneTruncate(undo)) return false;
+        }
+    }
+    return retireTruncateUndo(undo.journal, undo.backup, undo.manifest);
+}
+
+void StorageEngine::finishStandaloneTruncate(bool committed) {
+    auto undo = std::move(transactionContext().truncateUndo);
+    if (!undo) return;
+    const auto expected = committed ? TruncateUndoOutcome::Committed : TruncateUndoOutcome::Restored;
+    TruncateUndoOutcome outcome;
+    const bool decided = (!committed || vacuum_full_backup::publish(undo->backup / "outcome",
+            truncateUndoOutcomeText(expected, undo->manifest))) &&
+        readTruncateUndoOutcome(undo->backup, undo->manifest, outcome) && outcome == expected;
+    if (!decided || !retireTruncateUndo(undo->journal, undo->backup, undo->manifest)) {
+        std::cerr << "[truncate] retained rollback files for " << undo->image.database
+                  << "/" << undo->image.table << '\n';
+    }
+}
+
 DBStatus StorageEngine::dropTable(const std::string& dbname,
                                    const std::string& tablename) {
     const DatabaseMetadataWrite metadataWrite(dbPath(dbname));
@@ -21847,9 +22299,18 @@ DBStatus StorageEngine::truncateTable(const std::string& dbname,
     }
 
     const auto relationRoot = relationDir(dbname, tablename);
-    std::vector<std::filesystem::path> files;
-    const auto storage = planTableResetFiles(*this, dbname, table, relationRoot, files);
-    if (storage != DBStatus::OK) return storage;
+    const auto& context = transactionContext();
+    const auto& undo = context.truncateUndo;
+    if (undo && (!undo->published || mode != TruncateWalMode::Autocommit ||
+                 undo->image.database != dbname || undo->image.table != tablename ||
+                 undo->image.relation != table.physicalRelationId ||
+                 undo->image.xid != context.currentTxnId)) return DBStatus::INVALID_VALUE;
+    std::vector<std::filesystem::path> plannedFiles;
+    if (!undo) {
+        const auto storage = planTableResetFiles(*this, dbname, table, relationRoot, plannedFiles);
+        if (storage != DBStatus::OK) return storage;
+    }
+    const auto& files = undo ? undo->resetFiles : plannedFiles;
 
     Lsn truncateLsn = INVALID_LSN;
     const bool walLogged =
@@ -21858,12 +22319,11 @@ DBStatus StorageEngine::truncateTable(const std::string& dbname,
     if (walLogged) {
         uint64_t xid = 0;
         if (mode == TruncateWalMode::Autocommit && table.physicalRelationId != 0) {
-            const auto& context = transactionContext();
             // The transaction owner must be able to restore the old heap,
             // indexes and completion state if this reset never commits.
             if (!context.inTransaction || context.txnDB != dbname ||
                 !context.currentTxnId || !context.savepoints.empty() ||
-                context.txnBackupPath.empty() || !context.transactionBackupDirty ||
+                (!undo && (context.txnBackupPath.empty() || !context.transactionBackupDirty)) ||
                 !context.databaseExclusiveLock || !context.databaseExclusiveLock->owns_lock()) {
                 return DBStatus::INVALID_VALUE;
             }
@@ -49443,6 +49903,52 @@ bool StorageEngine::resetTableStorage(
     }
 }
 
+void StorageEngine::evictTableResetCaches(
+    const std::string& dbname, const std::string& tablename) {
+    const std::string tableKey = dbname + "/" + tablename;
+    const std::string secondaryPrefix = tableKey + "/";
+    pageAllocators_.erase(tableKey);
+    fsmCache_.erase(tableKey);
+    vmCache_.erase(tableKey);
+    pkIndexCache_.erase(tableKey);
+    secidxLinesCache_.erase(tableKey);
+    hashidxLinesCache_.erase(tableKey);
+    for (auto it = secondaryIndexCache_.begin();
+         it != secondaryIndexCache_.end();) {
+        if (it->first.rfind(secondaryPrefix, 0) == 0)
+            it = secondaryIndexCache_.erase(it);
+        else
+            ++it;
+    }
+    for (auto it = hashIndexCache_.begin();
+         it != hashIndexCache_.end();) {
+        if (it->first.rfind(secondaryPrefix, 0) == 0)
+            it = hashIndexCache_.erase(it);
+        else
+            ++it;
+    }
+    for (auto it = bloomIndexCache_.begin();
+         it != bloomIndexCache_.end();) {
+        if (it->first.rfind(secondaryPrefix, 0) == 0)
+            it = bloomIndexCache_.erase(it);
+        else
+            ++it;
+    }
+    const std::string toastKey = dbname + ":" + tablename;
+    toastPageAllocators_.erase(toastKey);
+    toastIndexes_.erase(toastKey);
+    {
+        std::lock_guard<std::mutex> lock(spGiSTMutex_);
+        for (auto it = spGiSTCache_.begin();
+             it != spGiSTCache_.end();) {
+            if (it->first.rfind(secondaryPrefix, 0) == 0)
+                it = spGiSTCache_.erase(it);
+            else
+                ++it;
+        }
+    }
+}
+
 bool StorageEngine::resetTableStorage(
     const std::string& dbname, const TableSchema& table,
     const std::filesystem::path& relationRoot,
@@ -49456,48 +49962,7 @@ bool StorageEngine::resetTableStorage(
             return false;
         }
 
-        const std::string tableKey = dbname + "/" + tablename;
-        const std::string secondaryPrefix = tableKey + "/";
-        pageAllocators_.erase(tableKey);
-        fsmCache_.erase(tableKey);
-        vmCache_.erase(tableKey);
-        pkIndexCache_.erase(tableKey);
-        secidxLinesCache_.erase(tableKey);
-        hashidxLinesCache_.erase(tableKey);
-        for (auto it = secondaryIndexCache_.begin();
-             it != secondaryIndexCache_.end();) {
-            if (it->first.rfind(secondaryPrefix, 0) == 0)
-                it = secondaryIndexCache_.erase(it);
-            else
-                ++it;
-        }
-        for (auto it = hashIndexCache_.begin();
-             it != hashIndexCache_.end();) {
-            if (it->first.rfind(secondaryPrefix, 0) == 0)
-                it = hashIndexCache_.erase(it);
-            else
-                ++it;
-        }
-        for (auto it = bloomIndexCache_.begin();
-             it != bloomIndexCache_.end();) {
-            if (it->first.rfind(secondaryPrefix, 0) == 0)
-                it = bloomIndexCache_.erase(it);
-            else
-                ++it;
-        }
-        const std::string toastKey = dbname + ":" + tablename;
-        toastPageAllocators_.erase(toastKey);
-        toastIndexes_.erase(toastKey);
-        {
-            std::lock_guard<std::mutex> lock(spGiSTMutex_);
-            for (auto it = spGiSTCache_.begin();
-                 it != spGiSTCache_.end();) {
-                if (it->first.rfind(secondaryPrefix, 0) == 0)
-                    it = spGiSTCache_.erase(it);
-                else
-                    ++it;
-            }
-        }
+        evictTableResetCaches(dbname, tablename);
 
         std::error_code fileError;
         for (const auto& path : storageFiles) {
@@ -50112,7 +50577,7 @@ bool StorageEngine::recoverAllDatabases() {
         } catch (...) { continue; }
         if (!isDatabaseDirectory(dbname)) {
             std::error_code ec;
-            if (pendingCreateUndo(entry.path()) &&
+            if ((pendingCreateUndo(entry.path()) || pendingTruncateUndo(entry.path())) &&
                 !pathEntryExists(entry.path() / kPhysicalBackupMarker, ec)) return false;
             continue;
         }
@@ -50621,7 +51086,7 @@ bool StorageEngine::recoverAllDatabases() {
     for (const auto& dbname : getDatabaseNames()) {
         if (!pendingCreateUndo(dbPath(dbname))) continue;
         uint64_t owner = 0;
-        if (!createUndoOwner(dbPath(dbname), owner) ||
+        if (pendingTruncateUndo(dbPath(dbname)) || !createUndoOwner(dbPath(dbname), owner) ||
             inDoubtPreparedXids.count({dbname, owner}) ||
             !recoverCreateTableUndo(dbname, committedXidsByDb[dbname],
                                     abortedXidsByDb[dbname],
@@ -50674,6 +51139,13 @@ bool StorageEngine::recoverAllDatabases() {
     // before any heap WAL image is assigned to the current generation.
     for (const auto& dbname : getDatabaseNames()) {
         const auto databaseRoot = dbPath(dbname);
+        const auto targeted = recoveryTargetsByDb.count(dbname) != 0;
+        if (!recoverStandaloneTruncate(dbname, committedXidsByDb[dbname], abortedXidsByDb[dbname],
+                                      inDoubtPreparedXids, targeted)) {
+            std::cerr << "[recovery] could not resolve TRUNCATE rollback files for "
+                      << dbname << std::endl;
+            return false;
+        }
         std::vector<std::filesystem::path> pendingRewrites;
         for (const auto& entry : std::filesystem::directory_iterator(databaseRoot)) {
             const auto name = entry.path().filename().string();
@@ -51687,7 +52159,7 @@ bool StorageEngine::checkpoint(const std::string& dbname) {
     std::unique_lock<std::shared_mutex> checkpointDatabaseLock(
         *databaseMutex, std::try_to_lock);
     if (!checkpointDatabaseLock.owns_lock() || !databaseExists(dbname) ||
-        pendingCreateUndo(dbPath(dbname))) {
+        pendingCreateUndo(dbPath(dbname)) || pendingTruncateUndo(dbPath(dbname))) {
         return false;
     }
     PhysicalCatalogOwnership catalogOwnership(
@@ -52697,7 +53169,7 @@ bool StorageEngine::physicalBackup(const std::string& dbname,
     if (transactionContext().inTransaction) return false;
     const auto databaseMutex = databaseTxnLockFor(dbname);
     std::unique_lock<std::shared_mutex> databaseLock(*databaseMutex);
-    if (!databaseExists(dbname)) return false;
+    if (!databaseExists(dbname) || pendingTruncateUndo(dbPath(dbname))) return false;
     PhysicalCatalogOwnership catalogOwnership(
         transactionContext(), databaseMutex, databaseLock);
     if (catalogService_ && !catalogService_->persistAll()) return false;
@@ -52734,6 +53206,7 @@ bool StorageEngine::physicalBackupLocked(
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
     if (!databaseExists(dbname)) return false;
     const auto src = dbPath(dbname);
+    if (pendingTruncateUndo(src)) return false;
     if (pendingCreateUndo(src)) {
         if (!includeUnloggedMain || !removeRetiredCreateUndo(src)) return false;
         // A transaction image may include its own active CREATE journal.
@@ -52835,7 +53308,8 @@ bool StorageEngine::physicalBackupLocked(
             // into a backup snapshot.
             const auto filename = entry.path().filename().string();
             if (filename == kPhysicalBackupMarker ||
-                filename == kPhysicalBackupManifest || filename == ".lockmgr" ||
+                filename == kPhysicalBackupManifest || filename == kTruncateUndoDirectory ||
+                filename == ".lockmgr" ||
                 filename == ".runtime_stats.lock" ||
                 filename == ".sql_stats.lock" ||
                 filename.rfind(".runtime_stats.tmp.", 0) == 0 ||
@@ -53193,6 +53667,7 @@ bool StorageEngine::PhysicalRestoreAdmission::restore(
     if (engine.transactionContext().inTransaction) return false;
     const auto databaseMutex = databaseTxnLockFor(dbname);
     std::unique_lock<std::shared_mutex> databaseLock(*databaseMutex);
+    if (pendingTruncateUndo(engine.dbPath(dbname))) return false;
     std::unique_lock<std::shared_mutex> transactionAdmission(
         physicalRestoreTransactionAdmission());
     {
@@ -56349,6 +56824,8 @@ DBStatus StorageEngine::beginTransaction(const std::string& dbname, bool ddlSnap
     transactionContext().hasWrite = false;
     transactionContext().ddlUndoActions.clear();
     transactionContext().accessedTemporaryObjects = false;
+    transactionContext().truncateUndo.reset();
+    transactionContext().truncateCommitUncertain = false;
     transactionContext().transactionBackupDirty = false;
     transactionContext().restoreBackupBeforeRowUndo = false;
     transactionContext().txnLogSizeAtBackup = 0;
@@ -56983,6 +57460,16 @@ DBStatus StorageEngine::commitTransaction() {
     const Lsn commitLsn = noEffects ? INVALID_LSN : walXactCommit(committingDb, committingTxnId);
     if (!noEffects && (commitLsn == INVALID_LSN || !wal->XLogFlush(commitLsn))) {
         releaseCommitHeapPageLocks();
+        if (committingContext.truncateUndo) {
+            // A failed append or sync can leave a readable COMMIT record.
+            // Keep the before-image and prevent a contradictory live undo.
+            committingContext.truncateCommitUncertain = true;
+            committingContext.rollbackPending = true;
+            setDatabaseRollbackPending(committingDb, committingTxnId, true);
+            std::cerr << "[truncate] uncertain commit for " << committingDb
+                      << ":" << committingTxnId << "; restart to recover the outcome\n";
+            return DBStatus::IO_ERROR;
+        }
         rollbackTransaction();
         return DBStatus::IO_ERROR;
     }
@@ -57080,6 +57567,7 @@ DBStatus StorageEngine::commitTransaction() {
         }
         committingContext.createTableUndoFence.reset();
     }
+    finishStandaloneTruncate(true);
 
     // Update max committed txId
     TxnIdGenerator::instance().notifyCommit(transactionContext().currentTxnId);
@@ -57566,7 +58054,8 @@ DBStatus StorageEngine::rollbackTransaction() {
     lockManager_.setResourceNamespace(transactionContext().txnDB);
 
     auto& rollbackContext = transactionContext();
-    if (rollbackContext.rollbackRunning) return DBStatus::IO_ERROR;
+    if (rollbackContext.rollbackRunning || rollbackContext.truncateCommitUncertain)
+        return DBStatus::IO_ERROR;
     rollbackContext.rollbackPending = true;
     rollbackContext.rollbackRunning = true;
     struct RollbackAttempt {
@@ -57617,6 +58106,14 @@ DBStatus StorageEngine::rollbackTransaction() {
     bool snapshotRestoreOk = true;
     bool rowUndoOk = rowUndoBoundaryValid;
     std::set<BloomIndex*> bloomUndoIndexes;
+
+    if (rollbackContext.truncateUndo) {
+        std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
+        if (!restoreStandaloneTruncate(*rollbackContext.truncateUndo)) {
+            std::cerr << "[truncate] rollback is incomplete for " << rollbackDb << '\n';
+            return DBStatus::IO_ERROR;
+        }
+    }
 
     // A DDL snapshot may have been taken in the middle of an explicit outer
     // transaction. Restore it before row undo so the row log can replay from
@@ -58282,6 +58779,8 @@ DBStatus StorageEngine::rollbackTransaction() {
         abortWalOk = false;
     }
     if (!abortWalOk) return DBStatus::IO_ERROR;
+    const bool scopedTruncate = static_cast<bool>(rollbackContext.truncateUndo);
+    finishStandaloneTruncate(false);
 
     // The heap and every current-version index now agree again, so readers
     // may stop treating this xid as a source of snapshot-incomplete indexes.
@@ -58385,7 +58884,7 @@ DBStatus StorageEngine::rollbackTransaction() {
     // undo+ABORT. Clean opt-in images retain their existing wrapper ownership.
     if (!preserveBackup || hasBackup) discardTransactionBackup(rollbackDb);
 
-    if (!preserveBackup && snapshotRestoreOk && rowUndoOk && ddlUndoOk &&
+    if (!scopedTruncate && !preserveBackup && snapshotRestoreOk && rowUndoOk && ddlUndoOk &&
         specializedUndoOk && undoFlushOk && clogOk && abortWalOk &&
         transactionContext().databaseExclusiveLock &&
         transactionContext().databaseExclusiveLock->owns_lock())
@@ -58846,6 +59345,7 @@ DBStatus StorageEngine::prepareTransaction(const std::string& xid) {
     }
     if (!transactionContext().ddlUndoActions.empty() ||
         transactionContext().transactionBackupDirty ||
+        transactionContext().truncateUndo ||
         transactionContext().createTableUndoFence) {
         // DDL undo callbacks are backend-local closures, while a dirty
         // transaction snapshot can only be restored safely while this

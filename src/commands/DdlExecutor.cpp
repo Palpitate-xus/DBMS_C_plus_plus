@@ -4615,17 +4615,30 @@ bool DdlExecutor::executeTruncate(const TruncateStmt* stmt, Session& s) {
     const auto walMode = g_engine.inTransaction()
         ? StorageEngine::TruncateWalMode::Immediate
         : StorageEngine::TruncateWalMode::Autocommit;
+    const bool tryTableUndo = walMode == StorageEngine::TruncateWalMode::Autocommit &&
+        !stmt->restartIdentity && targets.size() == 1;
     DdlTransaction txn(s);
     txn.enableSnapshotRollback();
-    if (!txn.begin()) {
+    if (!txn.begin(tryTableUndo ? DdlTransaction::SnapshotTiming::BeforeChange
+                               : DdlTransaction::SnapshotTiming::AtBegin)) {
         std::cout << "DDL transaction begin failed" << std::endl;
         return true;
+    }
+    bool tableUndo = false;
+    if (tryTableUndo) {
+        const auto undo = g_engine.beginStandaloneTruncateUndo(s.currentDB, *targets.begin());
+        tableUndo = undo == StorageEngine::TruncateUndoResult::Ready;
+        if (undo == StorageEngine::TruncateUndoResult::Error ||
+            (!tableUndo && !txn.enableSnapshotRollback())) {
+            std::cout << "TRUNCATE could not save its rollback data" << std::endl;
+            return true;
+        }
     }
     for (const auto& name : targets) {
         // TRUNCATE rewrites the heap and all RID-bearing sidecars. Mark the
         // snapshot before the first physical change so a failure in any
         // target restores every earlier target in this statement.
-        txn.markSnapshotDirty();
+        if (!tableUndo) txn.markSnapshotDirty();
         const DBStatus result = g_engine.truncateTable(s.currentDB, name, walMode);
         if (result != DBStatus::OK) {
             txn.rollback();
