@@ -1,27 +1,27 @@
 # 更新日志
 
 <details>
-<summary>查看带长列表的查询计划更快 · 2026-11-22</summary>
+<summary>按一长串值筛选时，更快看到查询计划 · 2026-11-22</summary>
 
-用 `EXPLAIN` 查看含多个 `IN` 或 `NOT IN` 值的查询时，数据库会共用已经读到的表结构和统计。
+在一项按 32 个值筛选的测试中，用 `EXPLAIN` 查看查询计划的时间约减半。
 
 [测试报告](docs/test-report.md#explain-filter-statistics-20261122) · [性能报告](docs/performance-report-2026-10-30.md#explain-filter-statistics-cost-20261122)
 
 </details>
 
 <details>
-<summary>开事务时，少做一轮表结构检查 · 2026-11-22</summary>
+<summary>开始事务时少做一轮表结构检查 · 2026-11-22</summary>
 
-数据库会用同一轮检查判断是否需要保存表结构。目录更新时，已经在用的旧版本仍可继续读取。
+测试中，执行 `BEGIN` 少了 22 次文件或目录状态检查。
 
 [测试报告](docs/test-report.md#catalog-publication-one-scan-20261122) · [性能报告](docs/performance-report-2026-10-30.md#catalog-publication-one-scan-cost-20261122)
 
 </details>
 
 <details>
-<summary>有人改表时，其他连接仍可查看和修改自己的设置 · 2026-11-22</summary>
+<summary>别人改表时，仍可查看和调整自己的连接设置 · 2026-11-22</summary>
 
-例如，另一连接正在改表时，单独查询当前连接的锁等待时间，无需等改表结束。手册列出了适用的 SQL 写法。
+例如，别人正在改表时，你仍可单独查看或调整遇到锁时最多等多久。
 
 [使用说明](docs/MANUAL.md#在-sql-表达式里读取和修改设置) · [并发测试](docs/test-report.md#session-setting-path-20261122) · [性能报告](docs/performance-report-2026-10-30.md#session-setting-path-cost-20261122)
 
