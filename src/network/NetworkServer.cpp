@@ -5994,6 +5994,12 @@ struct CopyInputField {
 };
 using CopyFields = std::vector<CopyInputField>;
 
+bool hasCopyDefaultMarker(const CopyFields& fields) {
+    return std::any_of(fields.begin(), fields.end(), [](const auto& field) {
+        return field.useDefault;
+    });
+}
+
 bool decodeCopyTextRecord(
         std::string record, const CopyWirePlan& plan,
         CopyFields& fields,
@@ -6025,7 +6031,10 @@ bool decodeCopyTextRecord(
         field.push_back(ch);
     }
     rawFields.push_back(std::move(field));
-    if (rawFields.size() != plan.columnIndexes.size()) {
+    const auto expected = plan.columnIndexes.size();
+    const bool shortMarkedRecord = rawFields.size() < expected && plan.defaultMarker &&
+        std::find(rawFields.begin(), rawFields.end(), *plan.defaultMarker) != rawFields.end();
+    if (rawFields.size() != expected && !shortMarkedRecord) {
         error = "COPY row has " + std::to_string(rawFields.size()) +
                 " fields but expected " +
                 std::to_string(plan.columnIndexes.size());
@@ -6238,8 +6247,10 @@ private:
     void endRecord(Insert& insert) {
         endField();
         if (!header_ || plan_.matchHeader) {
-            if (fields_.size() != plan_.columnIndexes.size())
+            if (fields_.size() != plan_.columnIndexes.size() &&
+                (header_ || !plan_.defaultMarker || !hasCopyDefaultMarker(fields_))) {
                 throw DbError("22P04", "missing data for expected CSV column");
+            }
         }
         if (header_ && plan_.matchHeader &&
             !std::equal(fields_.begin(), fields_.end(), plan_.columnNames.begin(),
@@ -6362,17 +6373,13 @@ CopyStreamResult receiveCopyIn(PostgresProtocol& protocol,
     std::string pending;
     std::optional<CopyCsvInput> csv;
     if (plan.csv) csv.emplace(plan);
-    std::vector<unsigned> integerInputBits;
-    integerInputBits.reserve(plan.columnIndexes.size());
+    std::vector<StorageEngine::CopyInputColumn> copyColumns;
+    copyColumns.reserve(plan.columnIndexes.size());
     for (const size_t index : plan.columnIndexes) {
         const Column& column = table.cols[index];
         const uint32_t oid = column.isArray ? 0 : mapBuiltinTypeNameToOid(column.dataType);
-        switch (oid) {
-            case 21: integerInputBits.push_back(16); break;
-            case 23: integerInputBits.push_back(32); break;
-            case 20: integerInputBits.push_back(64); break;
-            default: integerInputBits.push_back(0); break;
-        }
+        const unsigned bits = oid == 21 ? 16 : oid == 23 ? 32 : oid == 20 ? 64 : 0;
+        copyColumns.push_back({index, bits});
     }
     const auto checkCopyInterrupt = [&]() {
         if (deadline != std::chrono::steady_clock::time_point::max() &&
@@ -6409,9 +6416,10 @@ CopyStreamResult receiveCopyIn(PostgresProtocol& protocol,
         pending.clear();
     };
     const auto insertFields = [&](CopyFields& fields) {
+        const bool hasMarkers = plan.defaultMarker && hasCopyDefaultMarker(fields);
         StorageEngine::SqlRow values;
         for (size_t field = 0; field < fields.size(); ++field) {
-            const Column& column = table.cols[plan.columnIndexes[field]];
+            const Column& column = table.cols[copyColumns[field].index];
             if (fields[field].useDefault) {
                 if (column.defaultValue.empty() && !column.isAutoIncrement)
                     throw DbError("22P04", "COPY default marker used for column \"" + column.dataName +
@@ -6421,8 +6429,8 @@ CopyStreamResult receiveCopyIn(PostgresProtocol& protocol,
                 continue;
             }
             auto value = std::move(fields[field].value);
-            const unsigned bits = integerInputBits[field];
-            if (value && bits != 0) {
+            const unsigned bits = copyColumns[field].integerBits;
+            if (!hasMarkers && value && bits != 0) {
                 const auto parsed = parsePostgresIntegerText(*value, bits);
                 if (parsed.error == IntegerTextError::InvalidSyntax) {
                     throw DbError("22P02", "invalid input syntax for type " +
@@ -6438,9 +6446,11 @@ CopyStreamResult receiveCopyIn(PostgresProtocol& protocol,
         }
         // COPY FROM accepts explicit identity values, including for ALWAYS.
         // Omitted keys still invoke the target column's generator.
+        const StorageEngine::CopyInputOrder order{copyColumns, fields.size()};
         const DBStatus status = g_engine.insertRow(
             session.currentDB, plan.physicalTable, values, nullptr,
-            StorageEngine::IdentityOverride::System);
+            StorageEngine::IdentityOverride::System, nullptr, false, nullptr, nullptr,
+            hasMarkers ? &order : nullptr);
         if (status != DBStatus::OK) {
             throw DbError(sqlstateForDBStatus(status),
                 "COPY FROM failed while inserting row " + std::to_string(result.rows + 1));

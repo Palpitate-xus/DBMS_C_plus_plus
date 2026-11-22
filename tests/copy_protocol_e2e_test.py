@@ -471,6 +471,52 @@ def check_csv_copy_input(client, runner, sock):
         messages, sqlstate = simple(client, sock, "INSERT INTO copy_identity VALUES (600, 600, 'plain insert')")
         assert (sqlstate, messages[-1]) == ("428C9", (b"Z", b"I")), messages
         command("DROP TABLE copy_identity", b"DROP TABLE")
+
+        command("CREATE SEQUENCE copy_eval_seq START WITH 30", b"CREATE SEQUENCE")
+        command("CREATE TABLE copy_eval (id SMALLINT GENERATED ALWAYS AS IDENTITY (START 10 INCREMENT 2), "
+                "first_value INT DEFAULT nextval('copy_eval_seq'), n SMALLINT, "
+                "last_value INT DEFAULT nextval('copy_eval_seq'), "
+                "omitted_value INT DEFAULT nextval('copy_eval_seq'), limited_text VARCHAR(3))", b"CREATE TABLE")
+
+        def check_sequence(expected):
+            result = runner.decode_wire_result(client.simple_query(sock, "SELECT nextval('copy_eval_seq')"))
+            assert (result[0], result[1], result[4]) == ([[str(expected)]], None, "SELECT 1"), result
+
+        def ordered_copy(selected, data, **expected):
+            sql = f"COPY copy_eval ({selected}) FROM STDIN (FORMAT csv, DEFAULT 'GEN')"
+            load(sql, data, extended, **expected)
+
+        ordered_copy("last_value,n,id,first_value", b"GEN,bad,GEN,GEN\n", columns=4, error="22P02")
+        check_sequence(31)
+        ordered_copy("n,id,first_value,last_value", b"32768,GEN,GEN,GEN\n", columns=4, error="22003")
+        check_sequence(32)
+        ordered_copy("id,last_value,first_value,n", b"GEN,GEN,GEN,42\n", columns=4, count=1)
+        ordered_copy("first_value,limited_text", b"GEN,long\n", columns=2, error="22001")
+        check_sequence(37)
+        ordered_copy("limited_text,first_value", b"long,GEN\n", columns=2, error="22001")
+        check_sequence(38)
+        ordered_copy("first_value,n", b"GEN,GEN\n", columns=2, error="22P04")
+        check_sequence(39)
+        ordered_copy("first_value,n", b"GEN\n", columns=2, error="22P04")
+        check_sequence(41)
+        ordered_copy("first_value,n", b"GEN,2,extra\n", columns=2, error="22P04")
+        check_sequence(42)
+        load(r"COPY copy_eval (first_value, n) FROM STDIN (FORMAT text, DEFAULT '\G')",
+             b"\\G\n", extended, columns=2, error="22P04")
+        check_sequence(44)
+
+        command("BEGIN", b"BEGIN", b"T")
+        load(r"COPY copy_eval (id, n) FROM STDIN (FORMAT text, DEFAULT '\G')",
+             b"\\G\tbad\n", extended, columns=2, error="22P02", ready=b"E")
+        command("ROLLBACK", b"ROLLBACK")
+        ordered_copy("n", b"43\n", columns=1, count=1)
+        rows, sqlstate, _, _, tag = runner.decode_wire_result(client.simple_query(
+            sock, "SELECT id, first_value, n, last_value, omitted_value FROM copy_eval ORDER BY id"))
+        assert (sqlstate, tag, rows) == (None, "SELECT 2", [
+            ["10", "34", "42", "33", "35"], ["14", "45", "43", "46", "47"],
+        ]), (sqlstate, tag, rows)
+        command("DROP TABLE copy_eval", b"DROP TABLE")
+        command("DROP SEQUENCE copy_eval_seq", b"DROP SEQUENCE")
     print("COPY_CSV_INPUT_MODES_COMPLETE 2")
 
 

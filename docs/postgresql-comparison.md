@@ -2,11 +2,15 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-22 · 字段中的默认值先于后续字段求值
+
+PostgreSQL 18.6 在转换文本或 CSV 记录时处理字段中的默认值标记，随后计算列清单之外的默认值。SQLite 的 `INSERT` 按位置匹配列清单和 `VALUES` 中的值，省略的列采用默认值。DuckDB 的 `INSERT` 也区分显式 `DEFAULT` 和未提供的列。本项目使用现有的写入转换处理带标记的导入行，并核对了序列与整数、字符长度错误的先后顺序。[PostgreSQL 导入实现](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/commands/copyfromparse.c) · [SQLite INSERT](https://www.sqlite.org/lang_insert.html) · [DuckDB INSERT](https://duckdb.org/docs/2.0/sql/statements/insert) · [测试范围](test-report.md#copy-default-evaluation-order-20261122)
+
 ## 2026-11-22 · 导入身份列与转换错误
 
 PostgreSQL 18.6 的 `COPY FROM` 直接采用文件中的身份列值。导入时省略该列，或者为该字段使用默认值标记，会从序列取号。本项目在普通表的客户端文本和 CSV 导入中接入了这条规则，并对比了显式编号、序列取号和回滚结果。[PostgreSQL COPY](https://www.postgresql.org/docs/18/sql-copy.html) · [对照报告](test-report.md#copy-identity-input-20261122)
 
-PostgreSQL 18.6 的 `ON_ERROR ignore` 可以跳过字段类型转换失败的记录，超过 `REJECT_LIMIT` 时会报错并撤销导入。参考测试中，两条被跳过的记录也调用了列清单之外的序列默认值。DuckDB 的 CSV 读取还可跳过结构错误，并选择把坏行记入临时表。SQLite 命令行通过 `.import` 按 CSV 格式读取数据，可为表启用 `STRICT` 类型检查。本项目仍需处理 PostgreSQL 的跳行和默认值求值顺序。[PostgreSQL 导入实现](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/commands/copyfromparse.c) · [DuckDB 错误处理](https://duckdb.org/docs/2.0/data/csv/reading_faulty_csv_files) · [SQLite 导入](https://www.sqlite.org/cli.html#importing_files_as_csv_or_other_formats) · [SQLite STRICT](https://www.sqlite.org/stricttables.html)
+PostgreSQL 18.6 的 `ON_ERROR ignore` 可以跳过字段类型转换失败的记录，超过 `REJECT_LIMIT` 时会报错并撤销导入。参考测试中，整数域的检查失败也被跳过，两个被跳过的记录仍调用了列清单之外的序列默认值。DuckDB 的 CSV 读取还可跳过结构错误，并选择把坏行记入临时表。SQLite 命令行通过 `.import` 按 CSV 格式读取数据，可为表启用 `STRICT` 类型检查。本项目的跳行选项仍待实现。[PostgreSQL 导入实现](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/commands/copyfromparse.c) · [DuckDB 错误处理](https://duckdb.org/docs/2.0/data/csv/reading_faulty_csv_files) · [SQLite 导入](https://www.sqlite.org/cli.html#importing_files_as_csv_or_other_formats) · [SQLite STRICT](https://www.sqlite.org/stricttables.html)
 
 ## 2026-11-22 · 导入时使用列默认值
 

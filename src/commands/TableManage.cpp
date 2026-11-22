@@ -26,6 +26,7 @@
 #include "common/CharacterColumn.h"
 #include "common/NetworkValue.h"
 #include "common/GeometryValue.h"
+#include "common/IntegerTextCodec.h"
 #include "expression/geometric_input.h"
 #include "common/NotificationManager.h"
 #include "common/QueryHostProvider.h"
@@ -1187,6 +1188,44 @@ static bool characterExcessIsSpaces(const std::string& value,
                        [](char c) { return c == ' '; });
 }
 
+static DBStatus normalizeCharacterColumnWidth(const Column& column,
+                                               std::string& value) {
+    if (column.isArray && character_column::varying(column)) {
+        return normalizeVarcharArrayWidth(column, value);
+    }
+    if (!characterWidthLimitedType(column)) return DBStatus::OK;
+    if (varyingCharacterColumn(column) ||
+        variableBlankPaddedCharacterColumn(column)) {
+        const auto varyingBound = varyingCharacterColumn(column)
+            ? character_column::characterLimit(column)
+            : std::optional<size_t>{column.dsize};
+        if (!varyingBound) return DBStatus::OK;
+        size_t characters = 0;
+        if (!truncateCharacterValue(
+                value, *varyingBound, &characters)) {
+            return DBStatus::STRING_DATA_RIGHT_TRUNCATION;
+        }
+        if (variableBlankPaddedCharacterColumn(column) &&
+            characters < column.dsize) {
+            value.append(column.dsize - characters, ' ');
+        }
+        if (value.size() > characterColumnByteLimit(column)) {
+            return DBStatus::STRING_DATA_RIGHT_TRUNCATION;
+        }
+        return DBStatus::OK;
+    }
+    if (value.size() > column.dsize) {
+        if (!characterExcessIsSpaces(value, column.dsize))
+            return DBStatus::STRING_DATA_RIGHT_TRUNCATION;
+        value.resize(column.dsize);
+    }
+    if ((column.dataType == "char" || column.dataType == "character") &&
+        value.size() < column.dsize) {
+        value.append(column.dsize - value.size(), ' ');
+    }
+    return DBStatus::OK;
+}
+
 static DBStatus normalizeCharacterColumnWidths(
     const TableSchema& table,
     std::map<std::string, std::string>& values,
@@ -1196,42 +1235,9 @@ static DBStatus normalizeCharacterColumnWidths(
         auto value = values.find(column.dataName);
         if (value == values.end() ||
             (nullColumns && nullColumns->count(column.dataName) != 0)) continue;
-        if (column.isArray && character_column::varying(column)) {
-            if (!nullColumns && value->second == "NULL") continue;
-            const auto status = normalizeVarcharArrayWidth(column, value->second);
-            if (status != DBStatus::OK) return status;
-            continue;
-        }
-        if (!characterWidthLimitedType(column)) continue;
-        if (varyingCharacterColumn(column) ||
-            variableBlankPaddedCharacterColumn(column)) {
-            const auto varyingBound = varyingCharacterColumn(column)
-                ? character_column::characterLimit(column)
-                : std::optional<size_t>{column.dsize};
-            if (!varyingBound) continue;
-            size_t characters = 0;
-            if (!truncateCharacterValue(
-                    value->second, *varyingBound, &characters)) {
-                return DBStatus::STRING_DATA_RIGHT_TRUNCATION;
-            }
-            if (variableBlankPaddedCharacterColumn(column) &&
-                characters < column.dsize) {
-                value->second.append(column.dsize - characters, ' ');
-            }
-            if (value->second.size() > characterColumnByteLimit(column)) {
-                return DBStatus::STRING_DATA_RIGHT_TRUNCATION;
-            }
-            continue;
-        }
-        if (value->second.size() > column.dsize) {
-            if (!characterExcessIsSpaces(value->second, column.dsize))
-                return DBStatus::STRING_DATA_RIGHT_TRUNCATION;
-            value->second.resize(column.dsize);
-        }
-        if ((column.dataType == "char" || column.dataType == "character") &&
-            value->second.size() < column.dsize) {
-            value->second.append(column.dsize - value->second.size(), ' ');
-        }
+        if (!nullColumns && column.isArray && value->second == "NULL") continue;
+        const auto status = normalizeCharacterColumnWidth(column, value->second);
+        if (status != DBStatus::OK) return status;
     }
     return DBStatus::OK;
 }
@@ -30480,7 +30486,8 @@ DBStatus StorageEngine::insertRow(const std::string& dbname,
                                    IdentityOverride identityOverride,
                                 OwningMutationRows* owningRows, bool deferVirtualInputs,
                                 SqlRow* conflictingRow,
-                                const OwningSqlRow* arrayDomainInputs) {
+                                const OwningSqlRow* arrayDomainInputs,
+                                const CopyInputOrder* copyInput) {
     if (conflictingRow) conflictingRow->clear();
     const auto ownershipStatus = ensureDatabaseTransactionOwnership(dbname);
     if (ownershipStatus != DBStatus::OK) return ownershipStatus;
@@ -30514,12 +30521,14 @@ DBStatus StorageEngine::insertRow(const std::string& dbname,
         } else {
             return insertInternal(
                 dbname, tablename, values, nullColumns, insertedRows,
-                identityOverride,owningRows,deferVirtualInputs,conflictingRow,arrayDomainInputs);
+                identityOverride,owningRows,deferVirtualInputs,conflictingRow,arrayDomainInputs,
+            nullptr, copyInput);
         }
         if (usesLegacyPartitionRoute) {
             const DBStatus status = insertInternal(
                 dbname, tablename, values, nullColumns, insertedRows,
-                identityOverride,owningRows,deferVirtualInputs,conflictingRow,arrayDomainInputs);
+                identityOverride,owningRows,deferVirtualInputs,conflictingRow,arrayDomainInputs,
+            nullptr, copyInput);
             if (status != DBStatus::OK && insertedRows) {
                 insertedRows->resize(returnedRowStart);
             }
@@ -30532,7 +30541,8 @@ DBStatus StorageEngine::insertRow(const std::string& dbname,
         try {
         const DBStatus insertStatus = insertInternal(
             dbname, tablename, values, nullColumns, insertedRows,
-            identityOverride,owningRows,deferVirtualInputs,conflictingRow,arrayDomainInputs);
+            identityOverride,owningRows,deferVirtualInputs,conflictingRow,arrayDomainInputs,
+            nullptr, copyInput);
         if (insertStatus != DBStatus::OK) {
             const DBStatus rollbackStatus = rollbackTransaction();
             if (insertedRows) insertedRows->resize(returnedRowStart);
@@ -30575,7 +30585,8 @@ DBStatus StorageEngine::insertRow(const std::string& dbname,
     try {
     const DBStatus insertStatus =
         insertInternal(dbname, tablename, values, nullColumns, insertedRows,
-                       identityOverride,owningRows,deferVirtualInputs,conflictingRow,arrayDomainInputs);
+                       identityOverride,owningRows,deferVirtualInputs,conflictingRow,arrayDomainInputs,
+            nullptr, copyInput);
     if (insertStatus != DBStatus::OK) {
         DBStatus rollbackStatus = DBStatus::OK;
         if (transactionContext().inTransaction && hasStatementSavepoint) {
@@ -30646,7 +30657,8 @@ DBStatus StorageEngine::insertInternal(
                                 OwningMutationRows* owningRows, bool deferVirtualInputs,
                                 SqlRow* conflictingRow,
                                 const OwningSqlRow* arrayDomainInputs,
-                                PartitionReplacement* replacement) {
+                                PartitionReplacement* replacement,
+                                const CopyInputOrder* copyInput) {
     noteTemporaryRelationAccess(dbname, tablename);
     if (!replacement && transactionContext().inTransaction && dbname == transactionContext().txnDB) {
         if ((transactionContext().txnIsolationLevel == IsolationLevel::READ_COMMITTED ||
@@ -30786,89 +30798,6 @@ DBStatus StorageEngine::insertInternal(
         }
     }
 
-    for (size_t i = 0; i < tbl.len(); ++i) {
-        const Column& col = tbl.cols[i];
-        auto it = actualValues.find(col.dataName);
-        // Presence means the caller supplied the column, including an explicit
-        // NULL represented by an empty value.  Only an omitted column receives
-        // its DEFAULT; this is required to distinguish DEFAULT from NULL.
-        if (it == actualValues.end() && !col.defaultValue.empty()) {
-            try {
-                const bool referenceOutput = stored_regtype_detail::scalarType(col.dataType);
-                const bool arrayDomain = col.isArray && !col.domainName.empty();
-                auto evaluated = ExprHelper::evalString(col.defaultValue, actualValues,
-                    typeHints, dbname, "", this, referenceOutput || arrayDomain);
-                if (arrayDomain && evaluated.ok && evaluated.owningValue)
-                    convertedDomains.insert_or_assign(col.dataName, *evaluated.owningValue);
-                if (!evaluated.ok) {
-                    // The boolean-only helper discarded the original SQL
-                    // error and could even store the SQL text in a TEXT
-                    // column. Preserve typed failures at this DEFAULT owner.
-                    if (!evaluated.sqlState.empty())
-                        throw DbError(evaluated.sqlState, evaluated.error);
-                    // Some legacy evaluators attach SQLSTATE to the error
-                    // message instead of returning it as a separate field.
-                    const auto marker = evaluated.error.rfind("(SQLSTATE ");
-                    if (marker != std::string::npos &&
-                        marker + 16 == evaluated.error.size() &&
-                        evaluated.error.back() == ')') {
-                        const auto state = evaluated.error.substr(marker + 10, 5);
-                        const bool valid = std::all_of(state.begin(), state.end(),
-                            [](char c) { return (c >= '0' && c <= '9') ||
-                                                (c >= 'A' && c <= 'Z'); });
-                        if (valid) {
-                            auto message = evaluated.error.substr(0, marker);
-                            if (!message.empty() && message.back() == ' ')
-                                message.pop_back();
-                            throw DbError(state, message);
-                        }
-                    }
-                    // Retain the legacy native literal representation only
-                    // when evaluation produced no structured SQL failure.
-                    actualValues[col.dataName] = col.defaultValue;
-                    actualNullColumns.erase(col.dataName);
-                } else if (evaluated.isNull) {
-                    actualValues[col.dataName].clear();
-                    actualNullColumns.insert(col.dataName);
-                } else {
-                    if (referenceOutput && !evaluated.owningValue)
-                        throw DbError("XX001", "DEFAULT lost its actual object-reference value");
-                    actualValues[col.dataName] = referenceOutput
-                        ? stored_regtype_detail::storageText(*evaluated.owningValue) : evaluated.value;
-                    actualNullColumns.erase(col.dataName);
-                }
-            } catch (...) {
-                unlockTable();
-                throw;
-            }
-        }
-    }
-
-    // Apply AUTO_INCREMENT values
-    for (size_t i = 0; i < tbl.len(); ++i) {
-        const Column& col = tbl.cols[i];
-        if (!col.isAutoIncrement) continue;
-        auto it = actualValues.find(col.dataName);
-        if (it != actualValues.end()) continue;
-        if (col.identitySequenceOid != 0) {
-            actualValues[col.dataName] = std::to_string(
-                nextIdentityValue(dbname, col.identitySequenceOid));
-            actualNullColumns.erase(col.dataName);
-        } else {
-            const int64_t nextVal = readNextSeq(dbname, tablename, col.dataName);
-            actualValues[col.dataName] = std::to_string(nextVal);
-            actualNullColumns.erase(col.dataName);
-            writeNextSeq(dbname, tablename, col.dataName, nextVal + 1);
-        }
-    }
-
-    // Canonicalize packed POINT values before uniqueness/index checks.  The
-    // prior writer silently turned malformed input into (0,0), and its
-    // default stream precision could make distinct coordinates share a key.
-    if (!normalizePointColumns(tbl, actualValues, &actualNullColumns)) {
-        unlockTable();
-        return DBStatus::INVALID_VALUE;
-    }
     // Uniqueness must be checked against the final NEW row, after BEFORE
     // triggers and stored generated columns. Define the validator here so it
     // can share the deferred-constraint bookkeeping, but invoke it only once
@@ -31160,12 +31089,7 @@ DBStatus StorageEngine::insertInternal(
         return DBStatus::OK;
     };
 
-    // Canonicalize input values before triggers consume them, then run the
-    // same validation against the final NEW image after triggers/generated
-    // columns. NOT NULL belongs only to that final pass so a BEFORE trigger
-    // can supply an omitted required value.
-    const auto validateRowValues = [&](bool enforceNotNull) -> DBStatus {
-    for (size_t i = 0; i < tbl.len(); ++i) {
+    const auto validateRowValue = [&](size_t i, bool enforceNotNull) -> DBStatus {
         const Column& col = tbl.cols[i];
         auto it = actualValues.find(col.dataName);
         const bool hasValue = it != actualValues.end();
@@ -31180,43 +31104,30 @@ DBStatus StorageEngine::insertInternal(
                 !(isNullMarker && nullColumns.count(col.dataName) && values.count(col.dataName) &&
                   arrayDomainChecks.retainsNullAssignment(i, col.dataName, it->second, convertedDomains)));
             if (required) {
-                unlockTable();
                 return DBStatus::NULL_NOT_ALLOWED;
             }
         }
         const bool arrayDomain = col.isArray && !col.domainName.empty();
         if (hasValue && !isNullMarker && val.empty() &&
             !arrayDomain && !columnAcceptsEmptyValue(col)) {
-            unlockTable();
             return DBStatus::INVALID_VALUE;
         }
         // The NULL marker encodes SQL NULL; type validations below must not
         // try to parse it as a value.
         if (isNullMarker) val.clear();
         if (hasValue && !isNullMarker && stored_regtype_detail::scalarType(col.dataType)) {
-            try {
-                const auto catalog = regtype_detail::metadata(*this, dbname);
-                actualValues[col.dataName] = stored_regtype_detail::input(
-                    val, col.isArray, catalog, currentSession(), col.dataType);
-                val = actualValues[col.dataName];
-            } catch (...) {
-                unlockTable();
-                throw;
-            }
+            const auto catalog = regtype_detail::metadata(*this, dbname);
+            actualValues[col.dataName] = stored_regtype_detail::input(
+                val, col.isArray, catalog, currentSession(), col.dataType);
             // Reference input is complete; arithmetic/array casts must not
             // interpret the canonical OID as a different SQL input type.
-            continue;
+            return DBStatus::OK;
         }
         // Domain conversion preserves the real base-type input failure.
         // The same pass also covers defaults and post-trigger values.
         if (arrayDomain && hasValue && !isNullMarker) {
-            try {
-                actualValues[col.dataName] = arrayDomainChecks.convertBaseInput(i, val, dbname, this);
-            } catch (...) {
-                unlockTable();
-                throw;
-            }
-            continue;
+            actualValues[col.dataName] = arrayDomainChecks.convertBaseInput(i, val, dbname, this);
+            return DBStatus::OK;
         }
         // An array's dataType names its element. Scalar validators must not
         // parse the whole brace literal as NUMERIC, UUID, MONEY, etc.
@@ -31224,49 +31135,43 @@ DBStatus StorageEngine::insertInternal(
             if (!val.empty()) {
                 std::string canonical;
                 if (!(col.dataType == "interval" || col.dataType == "numeric" ? normalizeModifiedColumn(col, val, canonical) : normalizeArray(val, col.dataType, canonical))) {
-                    unlockTable();
                     return DBStatus::INVALID_VALUE;
                 }
                 actualValues[col.dataName] = std::move(canonical);
             }
-            continue;
+            return DBStatus::OK;
         }
         if (col.storageCodec == Column::StorageCodec::TemporalMicros) {
             if (!val.empty()) {
                 std::string canonical;
                 if (!normalizeTemporalColumn(col, val, canonical)) {
-                    unlockTable();
                     return DBStatus::INVALID_VALUE;
                 }
                 actualValues[col.dataName] = std::move(canonical);
             }
-            continue;
+            return DBStatus::OK;
         }
         if (!col.isVariableLength && col.dataType == "date" && !val.empty()) {
             Date d(val.c_str());
             if (d.year == 0) {
-                unlockTable();
                 return DBStatus::INVALID_VALUE;
             }
         }
         if (!col.isVariableLength && (col.dataType == "timestamp" || col.dataType == "timestamptz" || col.dataType == "datetime") && !val.empty()) {
             int64_t ts = parseTimestampToSeconds(val);
             if (ts == 0) {
-                unlockTable();
                 return DBStatus::INVALID_VALUE;
             }
         }
         if (!col.isVariableLength && col.dataType == "time" && !val.empty()) {
             int32_t ts = parseTimeToSeconds(val);
             if (ts < 0) {
-                unlockTable();
                 return DBStatus::INVALID_VALUE;
             }
         }
         if (!col.isVariableLength && col.dataType == "float" && !val.empty()) {
             float parsed = 0.0f;
             if (!parseFloatLiteral(val, parsed)) {
-                unlockTable();
                 return DBStatus::INVALID_VALUE;
             }
             actualValues[col.dataName] = formatFloatingValue(parsed);
@@ -31275,21 +31180,18 @@ DBStatus StorageEngine::insertInternal(
             int64_t minorUnits = 0;
             std::string canonical;
             if (!parseMoneyLiteral(val, minorUnits, &canonical)) {
-                unlockTable();
                 return DBStatus::INVALID_VALUE;
             }
             actualValues[col.dataName] = canonical;
         } else if (col.dataType == "numeric" && !val.empty()) {
             std::string canonical;
             if (!normalizeModifiedColumn(col, val, canonical)) {
-                unlockTable();
                 return DBStatus::INVALID_VALUE;
             }
             actualValues[col.dataName] = std::move(canonical);
         } else if (!col.isVariableLength && (col.dataType == "double" || col.dataType == "decimal") && !val.empty()) {
             double parsed = 0.0;
             if (!parseDoubleLiteral(val, parsed)) {
-                unlockTable();
                 return DBStatus::INVALID_VALUE;
             }
             actualValues[col.dataName] = formatFloatingValue(parsed);
@@ -31297,7 +31199,6 @@ DBStatus StorageEngine::insertInternal(
         if (!col.isVariableLength && col.dataType == "boolean" && !val.empty()) {
             const auto parsed = parsePostgresBoolean(val);
             if (!parsed) {
-                unlockTable();
                 return DBStatus::INVALID_VALUE;
             }
             actualValues[col.dataName] = postgresBooleanOutput(*parsed);
@@ -31306,7 +31207,6 @@ DBStatus StorageEngine::insertInternal(
             int n = (col.dataType == "macaddr8") ? 8 : 6;
             uint8_t bytes[8];
             if (!normalizeMacAddr(val, n, bytes)) {
-                unlockTable();
                 return DBStatus::INVALID_VALUE;
             }
         }
@@ -31315,7 +31215,6 @@ DBStatus StorageEngine::insertInternal(
         if ((col.dataType == "bit" || col.dataType == "bit varying") && !val.empty()) {
             std::string canon;
             if (!normalizeBitString(val, col.dataType, col.dsize, canon)) {
-                unlockTable();
                 return DBStatus::INVALID_VALUE;
             }
             actualValues[col.dataName] = canon;
@@ -31325,7 +31224,6 @@ DBStatus StorageEngine::insertInternal(
         if (isGeometricTextType(col.dataType) && !val.empty()) {
             std::string canon;
             if (!normalizeGeometry(val, col.dataType, canon)) {
-                unlockTable();
                 return DBStatus::INVALID_VALUE;
             }
             actualValues[col.dataName] = canon;
@@ -31334,7 +31232,6 @@ DBStatus StorageEngine::insertInternal(
         if (col.dataType == "uuid" && !val.empty()) {
             std::string canon;
             if (!normalizeUuid(val, canon)) {
-                unlockTable();
                 return DBStatus::INVALID_VALUE;
             }
             actualValues[col.dataName] = canon;
@@ -31343,7 +31240,6 @@ DBStatus StorageEngine::insertInternal(
         if (col.dataType == "blob" && !val.empty()) {
             std::string canon;
             if (!normalizeBytea(val, canon)) {
-                unlockTable();
                 return DBStatus::INVALID_VALUE;
             }
             actualValues[col.dataName] = canon;
@@ -31353,7 +31249,6 @@ DBStatus StorageEngine::insertInternal(
             uint8_t family = 0, prefix = 0, addr[16];
             if (!parseInetAddr(val, family, prefix, addr,
                                col.dataType == "cidr")) {
-                unlockTable();
                 return DBStatus::INVALID_VALUE;
             }
         }
@@ -31362,17 +31257,6 @@ DBStatus StorageEngine::insertInternal(
         if (isRangeType(col.dataType) && !val.empty()) {
             std::string canon;
             if (!normalizeRange(val, col.dataType, canon)) {
-                unlockTable();
-                return DBStatus::INVALID_VALUE;
-            }
-            actualValues[col.dataName] = canon;
-        }
-        // Validate / canonicalize array literals (brace structure, rectangular
-        // dimensions, per-element type for numeric element types).
-        if (col.isArray && !val.empty()) {
-            std::string canon;
-            if (!(col.dataType == "interval" || col.dataType == "numeric" ? normalizeModifiedColumn(col, val, canon) : normalizeArray(val, col.dataType, canon))) {
-                unlockTable();
                 return DBStatus::INVALID_VALUE;
             }
             actualValues[col.dataName] = canon;
@@ -31380,7 +31264,6 @@ DBStatus StorageEngine::insertInternal(
         // Validate XML well-formedness (stored verbatim, no canonicalization).
         if (col.dataType == "xml" && !col.isArray) {
             if (!validateXml(val, XmlParseMode::Content).ok) {
-                unlockTable();
                 return DBStatus::INVALID_VALUE;
             }
         }
@@ -31388,21 +31271,18 @@ DBStatus StorageEngine::insertInternal(
         if (col.dataType == "tsvector" && !col.isArray && !val.empty()) {
             std::string canon;
             if (!normalizeTsVectorImpl(val, canon)) {
-                unlockTable();
                 return DBStatus::INVALID_VALUE;
             }
             actualValues[col.dataName] = canon;
         }
         if (col.dataType == "tsquery" && !col.isArray && !val.empty()) {
             if (!isValidTsQuery(val)) {
-                unlockTable();
                 return DBStatus::INVALID_VALUE;
             }
         }
         // Validate jsonpath structure (stored verbatim).
         if (col.dataType == "jsonpath" && !col.isArray && !val.empty()) {
             if (!isValidJsonPath(val)) {
-                unlockTable();
                 return DBStatus::INVALID_VALUE;
             }
         }
@@ -31410,7 +31290,6 @@ DBStatus StorageEngine::insertInternal(
         if (col.dataType == "interval" && !col.isArray && !val.empty()) {
             std::string canon;
             if (!normalizeModifiedColumn(col, val, canon)) {
-                unlockTable();
                 return DBStatus::INVALID_VALUE;
             }
             actualValues[col.dataName] = canon;
@@ -31423,7 +31302,6 @@ DBStatus StorageEngine::insertInternal(
             if (!ct.name.empty()) {
                 std::string canon;
                 if (!normalizeComposite(val, ct, canon)) {
-                    unlockTable();
                     return DBStatus::INVALID_VALUE;
                 }
                 actualValues[col.dataName] = canon;
@@ -31432,7 +31310,6 @@ DBStatus StorageEngine::insertInternal(
         // Validate JSON / JSONB columns
         if ((col.dataType == "json" || col.dataType == "jsonb") && !val.empty()) {
             if (!isValidJson(val, col.dataType == "jsonb")) {
-                unlockTable();
                 return DBStatus::INVALID_VALUE;
             }
         }
@@ -31443,7 +31320,6 @@ DBStatus StorageEngine::insertInternal(
                 if (label == val) { valid = true; break; }
             }
             if (!valid) {
-                unlockTable();
                 return DBStatus::INVALID_VALUE;
             }
         }
@@ -31451,12 +31327,164 @@ DBStatus StorageEngine::insertInternal(
             const auto num = parseStoredInteger(val);
             if (!num || !integerValueFitsColumn(col, *num) ||
                 (*num == INF && col.isNull && !usesHeapTupleHeader(tbl.formatVersion))) {
-                unlockTable();
                 return DBStatus::INVALID_VALUE;
             }
         }
+        return DBStatus::OK;
+    };
+
+    // An absent key may receive a default; a present NULL never does.
+    const auto applyDefaultExpression = [&](const Column& col) {
+        if (col.defaultValue.empty() || actualValues.count(col.dataName)) return;
+        const bool referenceOutput = stored_regtype_detail::scalarType(col.dataType);
+        const bool arrayDomain = col.isArray && !col.domainName.empty();
+        auto evaluated = ExprHelper::evalString(col.defaultValue, actualValues,
+            typeHints, dbname, "", this, referenceOutput || arrayDomain);
+        if (arrayDomain && evaluated.ok && evaluated.owningValue)
+            convertedDomains.insert_or_assign(col.dataName, *evaluated.owningValue);
+        if (!evaluated.ok) {
+            // The boolean-only helper discarded the original SQL
+            // error and could even store the SQL text in a TEXT
+            // column. Preserve typed failures at this DEFAULT owner.
+            if (!evaluated.sqlState.empty())
+                throw DbError(evaluated.sqlState, evaluated.error);
+            // Some legacy evaluators attach SQLSTATE to the error
+            // message instead of returning it as a separate field.
+            const auto marker = evaluated.error.rfind("(SQLSTATE ");
+            if (marker != std::string::npos &&
+                marker + 16 == evaluated.error.size() &&
+                evaluated.error.back() == ')') {
+                const auto state = evaluated.error.substr(marker + 10, 5);
+                const bool valid = std::all_of(state.begin(), state.end(),
+                    [](char c) { return (c >= '0' && c <= '9') ||
+                                        (c >= 'A' && c <= 'Z'); });
+                if (valid) {
+                    auto message = evaluated.error.substr(0, marker);
+                    if (!message.empty() && message.back() == ' ')
+                        message.pop_back();
+                    throw DbError(state, message);
+                }
+            }
+            // Retain the legacy native literal representation only
+            // when evaluation produced no structured SQL failure.
+            actualValues[col.dataName] = col.defaultValue;
+            actualNullColumns.erase(col.dataName);
+        } else if (evaluated.isNull) {
+            actualValues[col.dataName].clear();
+            actualNullColumns.insert(col.dataName);
+        } else {
+            if (referenceOutput && !evaluated.owningValue)
+                throw DbError("XX001", "DEFAULT lost its actual object-reference value");
+            actualValues[col.dataName] = referenceOutput
+                ? stored_regtype_detail::storageText(*evaluated.owningValue) : evaluated.value;
+            actualNullColumns.erase(col.dataName);
+        }
+    };
+    const auto applyAutoIncrement = [&](const Column& col) {
+        if (!col.isAutoIncrement || actualValues.count(col.dataName)) return;
+        if (col.identitySequenceOid != 0) {
+            actualValues[col.dataName] = std::to_string(
+                nextIdentityValue(dbname, col.identitySequenceOid));
+            actualNullColumns.erase(col.dataName);
+        } else {
+            const int64_t nextVal = readNextSeq(dbname, tablename, col.dataName);
+            actualValues[col.dataName] = std::to_string(nextVal);
+            actualNullColumns.erase(col.dataName);
+            writeNextSeq(dbname, tablename, col.dataName, nextVal + 1);
+        }
+    };
+
+    std::vector<bool> convertedCopyInputs;
+    try {
+        if (copyInput) {
+            convertedCopyInputs.resize(tbl.len());
+            // Markers are expressions in the input column order. An earlier
+            // conversion failure must leave later markers unevaluated.
+            for (size_t field = 0; field < copyInput->columns.size(); ++field) {
+                const auto& input = copyInput->columns[field];
+                const auto& col = tbl.cols.at(input.index);
+                if (field >= copyInput->fieldCount) {
+                    throw DbError("22P04", "missing data for column \"" + col.dataName + "\"");
+                }
+                auto supplied = actualValues.find(col.dataName);
+                const bool marker = supplied == actualValues.end();
+                if (marker) {
+                    applyDefaultExpression(col);
+                    applyAutoIncrement(col);
+                    supplied = actualValues.find(col.dataName);
+                }
+                if (supplied != actualValues.end() && !actualNullColumns.count(col.dataName)) {
+                    auto& value = supplied->second;
+                    if (!marker && input.integerBits != 0) {
+                        const auto parsed = parsePostgresIntegerText(value, input.integerBits);
+                        if (parsed.error == IntegerTextError::InvalidSyntax) {
+                            throw DbError("22P02", "invalid input syntax for type " +
+                                col.dataType + ": \"" + value + "\"");
+                        }
+                        if (parsed.error == IntegerTextError::OutOfRange) {
+                            throw DbError("22003", "value out of range for type " +
+                                col.dataType + ": \"" + value + "\"");
+                        }
+                        value = std::to_string(parsed.value);
+                    }
+                    const auto status = validateRowValue(input.index, false);
+                    if (status != DBStatus::OK) {
+                        unlockTable();
+                        return status;
+                    }
+                    if (col.dataType == "point" && !col.isArray && !value.empty()) {
+                        std::string canonical;
+                        if (!normalizePointLiteral(value, canonical)) {
+                            unlockTable();
+                            return DBStatus::INVALID_VALUE;
+                        }
+                        value = std::move(canonical);
+                    }
+                    const auto widthStatus = normalizeCharacterColumnWidth(col, value);
+                    if (widthStatus != DBStatus::OK) {
+                        unlockTable();
+                        return widthStatus;
+                    }
+                }
+                convertedCopyInputs[input.index] = true;
+            }
+            for (const auto& col : tbl.cols) {
+                applyDefaultExpression(col);
+                applyAutoIncrement(col);
+            }
+        } else {
+            for (const auto& col : tbl.cols) applyDefaultExpression(col);
+            for (const auto& col : tbl.cols) applyAutoIncrement(col);
+        }
+    } catch (...) {
+        unlockTable();
+        throw;
     }
-    return DBStatus::OK;
+
+    // Canonicalize packed POINT values before uniqueness/index checks.  The
+    // prior writer silently turned malformed input into (0,0), and its
+    // default stream precision could make distinct coordinates share a key.
+    if (!normalizePointColumns(tbl, actualValues, &actualNullColumns)) {
+        unlockTable();
+        return DBStatus::INVALID_VALUE;
+    }
+    // A final pass still covers defaults, trigger changes and generated values.
+    const auto validateRowValues = [&](bool enforceNotNull) -> DBStatus {
+        try {
+            for (size_t i = 0; i < tbl.len(); ++i) {
+                if (!enforceNotNull && !convertedCopyInputs.empty() && convertedCopyInputs[i])
+                    continue;
+                const auto status = validateRowValue(i, enforceNotNull);
+                if (status != DBStatus::OK) {
+                    unlockTable();
+                    return status;
+                }
+            }
+        } catch (...) {
+            unlockTable();
+            throw;
+        }
+        return DBStatus::OK;
     };
 
     const DBStatus inputValidation = validateRowValues(false);

@@ -2,6 +2,18 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-22 evaluate COPY default markers in input column order",
+      "gap_ids": ["DML-06", "PROTO-06"],
+      "status": "partial",
+      "evidence": ["src/network/NetworkServer.cpp", "src/commands/TableManage.cpp", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/copy_protocol_e2e_test.py"],
+      "verification": [
+        "Input markers evaluate in the requested order relative to conversion and missing-field errors.",
+        "A rejected batch rolls back inserted rows while sequence calls evaluated before the error remain visible.",
+        "Domain constraints, skipped-row policy, other encodings and binary COPY retain open gaps."
+      ]
+    },
+    {
       "issue": "2026-11-22 load explicit and generated identity values through client COPY",
       "gap_ids": ["DML-06", "PROTO-06"],
       "status": "partial",

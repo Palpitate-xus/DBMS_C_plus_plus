@@ -755,6 +755,16 @@ public:
                     IdentityOverride identityOverride = IdentityOverride::None,
                     OwningMutationRows* owningRows = nullptr,
         bool deferVirtualInputs = false);
+    struct CopyInputColumn {
+        size_t index;
+        unsigned integerBits;
+    };
+    // COPY binds selected columns before starting the stream. An absent key
+    // within fieldCount represents a DEFAULT marker for that input field.
+    struct CopyInputOrder {
+        const std::vector<CopyInputColumn>& columns;
+        size_t fieldCount;
+    };
     // Optional conflictingRow is cleared on entry. On DUPLICATE_KEY it owns
     // the rejected candidate's normalized base/stored values, including real
     // defaults and identities; virtual columns keep their separate read owner.
@@ -767,7 +777,8 @@ public:
                     OwningMutationRows* owningRows = nullptr,
         bool deferVirtualInputs = false,
         SqlRow* conflictingRow = nullptr,
-        const OwningSqlRow* arrayDomainInputs = nullptr);
+        const OwningSqlRow* arrayDomainInputs = nullptr,
+        const CopyInputOrder* copyInput = nullptr);
     // INSERT INTO t DEFAULT VALUES — uses column defaults or NULL.
     DBStatus insertDefaultValues(const std::string& dbname,
                                  const std::string& tablename,
@@ -2490,7 +2501,8 @@ private:
         bool deferVirtualInputs = false,
         SqlRow* conflictingRow = nullptr,
         const OwningSqlRow* arrayDomainInputs = nullptr,
-        PartitionReplacement* replacement = nullptr);
+        PartitionReplacement* replacement = nullptr,
+        const CopyInputOrder* copyInput = nullptr);
     DBStatus removeInternal(
         const std::string& dbname, const std::string& tablename,
         const std::vector<std::string>& conditions,

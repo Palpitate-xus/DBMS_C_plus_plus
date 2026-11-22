@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>修复导入时自动取号的顺序 · 2026-11-22</summary>
+
+如果一行先读到自动编号，再读到无法转换的字段，数据库会记住已经取过的编号，并撤销这一批导入的记录。
+
+[用法](docs/MANUAL.md#用客户端复制数据) · [测试报告](docs/test-report.md#copy-default-evaluation-order-20261122) · [性能报告](docs/performance-report-2026-10-30.md#copy-default-evaluation-order-cost-20261122)
+
+</details>
+
+<details>
 <summary>导入旧数据时可以保留原来的编号 · 2026-11-22</summary>
 
 例如，迁移订单时可以保留旧订单号。文件里省略编号时，数据库可以自动生成。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>从 CSV 导入数据 · 2026-11-22</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-22 · 从 CSV 导入数据
 
 可以把表格软件保存的 CSV 导入数据库，并在导入前核对第一行的列名和顺序。单元格里有换行也可以导入。
 
 [使用说明](docs/MANUAL.md#用客户端复制数据) · [测试报告](docs/test-report.md#copy-csv-in-20261122) · [性能报告](docs/performance-report-2026-10-30.md#copy-csv-in-cost-20261122)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-22 · 把查询结果保存为 CSV
 

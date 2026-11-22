@@ -6,6 +6,10 @@
 
 截至 2026-11-22，273 项功能要求中有 22 项完成、167 项部分实现、69 项待验证、15 项暂缓。各项结果和剩余范围见功能总账。以下更新报告给出各轮测试的实际范围。[功能总账](gap-progress.json) · [支持的功能和限制](compatibility-contract.md)
 
+## 2026-11-22 · 导入按列顺序处理默认值标记
+
+文本和 CSV 导入按列清单的顺序取号。遇到后续字段转换失败或缺列时，整批导入记录会撤销，已经取过的编号会保留。[测试报告](test-report.md#copy-default-evaluation-order-20261122) · [性能报告](performance-report-2026-10-30.md#copy-default-evaluation-order-cost-20261122)
+
 ## 2026-11-22 · 客户端导入可以保留旧编号
 
 使用身份列自动编号的普通表可以导入已有编号，或按序列生成新编号。文本和 CSV 的正确性、回滚与重启已核对。每次导入只确定一次选定列的整数转换规则。[用法](MANUAL.md#用客户端复制数据) · [测试报告](test-report.md#copy-identity-input-20261122) · [性能报告](performance-report-2026-10-30.md#copy-identity-input-cost-20261122)

@@ -19,6 +19,13 @@ cmake --build build/cmake --target dbms_main --parallel 2
 ## 最近更新
 
 <details>
+<summary>修复导入时自动取号的顺序 · 2026-11-22</summary>
+
+如果一行先读到自动编号，再读到无法转换的字段，数据库会记住已经取过的编号，并撤销这一批导入的记录。
+
+</details>
+
+<details>
 <summary>导入旧数据时可以保留原来的编号 · 2026-11-22</summary>
 
 例如，迁移订单时可以保留旧订单号。文件里省略编号时，数据库可以自动生成。
@@ -29,13 +36,6 @@ cmake --build build/cmake --target dbms_main --parallel 2
 <summary>导入数据时可以使用列的默认值 · 2026-11-22</summary>
 
 例如，导入订单时可以用一个约定的标记，让数据库填上默认状态。
-
-</details>
-
-<details>
-<summary>从 CSV 导入数据 · 2026-11-22</summary>
-
-可以把表格软件保存的 CSV 导入数据库，并在导入前核对第一行的列名和顺序。单元格里有换行也可以导入。
 
 </details>
 
