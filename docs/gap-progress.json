@@ -2,6 +2,28 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-22 reuse the locked parent schema during partition scans",
+      "gap_ids": ["CAT-11", "STO-02"],
+      "status": "partial",
+      "evidence": [
+        "src/commands/TableManage.cpp",
+        "src/executor/ExecutionPlan.cpp",
+        "docs/postgresql-comparison.md",
+        "docs/test-report.md",
+        "docs/performance-report-2026-10-30.md"
+      ],
+      "tests": [
+        "tests/partition_test.cpp",
+        "tests/table_scan_streaming_test.cpp",
+        "tests/sorted_projection_null_bitmap_cost_test.cpp"
+      ],
+      "verification": [
+        "Six native suites, six existing protocol suites, and 262 PostgreSQL comparison replies passed. External tablespace scans visited all 60 leaves, including replacement of a cached leaf file, and forced policy and long-value cases passed across restart.",
+        "File tracing reported 134 to 10 parent schema status checks. Two 60-leaf warm timings had 16.13% and 18.07% lower paired request medians. First reads and the 256-row controls had mixed results.",
+        "Independent leaf relation identities and broader partition features remain open. The prior direct-read regression was not isolated to a cause."
+      ]
+    },
+    {
       "issue": "2026-11-22 preserve physical partition rows in plain SELECT predicates",
       "gap_ids": ["CAT-11", "QRY-01", "STO-02"],
       "status": "partial",

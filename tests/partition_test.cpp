@@ -875,6 +875,17 @@ static void test_partition_scan_uses_leaf_nulls() {
     const std::map<std::string, bool> expected = {{"5", true}, {"15", false}};
     assert(observed == expected);
 
+    // A scan transfers its buffered rows to the caller. Reopening it must
+    // build a fresh buffer for both leaves.
+    assert(scan.open());
+    size_t reopenedRows = 0;
+    while (scan.next(row)) {
+        assert(!row.empty());
+        ++reopenedRows;
+    }
+    scan.close();
+    assert(reopenedRows == expected.size());
+
     dbms::StorageEngine::SelectExpr bucket;
     bucket.colName = "bucket";
     dbms::StorageEngine::SelectExpr withFallback;

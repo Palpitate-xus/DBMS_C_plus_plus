@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-22 · 读取分区时复用表定义
+
+PostgreSQL 的 `Append` 从各叶分区的扫描节点取行，长字段可在真正需要时再展开。SQLite 在执行已编译语句时检查模式变更，必要时重新编译。DuckDB 的扫描支持只读取查询所需的列。它们分别说明了扫描状态复用、模式失效检查和按需读列的做法。[PostgreSQL Append 源码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/executor/nodeAppend.c#L335-L352) · [PostgreSQL 长值存储](https://www.postgresql.org/docs/18/storage-toast.html) · [SQLite 语句编译](https://sqlite.org/c3ref/prepare.html) · [DuckDB Parquet 扫描](https://duckdb.org/docs/data/parquet)
+
+本项目在已持有表锁的分区扫描中共用一次读到的父表定义和存储目录。处理每个叶分区时仍核对实际文件，行级权限也使用这次读取的表定义。固定长度的行直接交给后续操作，已有行缓冲可以交接给排序和输出。长文本继续按原顺序读取、解码和报错。[验证范围](test-report.md#partition-scan-schema-20261122) · [性能报告](performance-report-2026-10-30.md#partition-scan-schema-cost-20261122)
+
 ## 2026-11-22 · 分区查询中的 OR 和空值
 
 PostgreSQL 用 `Append` 等节点合并子计划，各叶分区有自己的行身份。优化器只剪掉条件明确排除的分区。SQLite 可以分别用索引查找各个 `OR` 条件，再按同一张表的行身份合并。DuckDB 用选择向量关联数据位置，并维护单独的空值标记。[PostgreSQL Append 源码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/executor/nodeAppend.c#L335-L352) · [分区裁剪](https://www.postgresql.org/docs/18/ddl-partitioning.html#DDL-PARTITION-PRUNING) · [SQLite OR 优化](https://www.sqlite.org/optoverview.html#or_optimizations) · [DuckDB 数据向量](https://duckdb.org/docs/current/internals/vector) · [DuckDB 空值标记](https://duckdb.org/docs/current/clients/c/vector)

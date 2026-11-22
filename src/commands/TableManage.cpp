@@ -3646,7 +3646,11 @@ std::filesystem::path StorageEngine::paramsPath(const std::string& dbname,
 
 std::filesystem::path StorageEngine::relationDir(const std::string& dbname,
                                                   const std::string& tablename) const {
-    TableSchema tbl = getTableSchema(dbname, tablename);
+    return relationDir(dbname, getTableSchema(dbname, tablename));
+}
+
+std::filesystem::path StorageEngine::relationDir(const std::string& dbname,
+                                                  const TableSchema& tbl) const {
     const std::string tablespace = tbl.tablespace.empty() ? "pg_default" : tbl.tablespace;
     auto base = tablespaceDir(dbname, tablespace);
     if (tablespace == "pg_default") return base;
@@ -9591,11 +9595,22 @@ bool StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
                                 bool registerSiread,
                                 bool indexMaintenanceView,
                                 ScopedMaintenanceProgress* progress) const {
+    return forEachRowUsingSchema(dbname, tablename, callback, readView, targetPartitions,
+                                 registerSiread, indexMaintenanceView, progress, nullptr);
+}
+
+bool StorageEngine::forEachRowUsingSchema(
+    const std::string& dbname, const std::string& tablename,
+    const std::function<void(uint32_t, uint16_t, const char*, size_t)>& callback,
+    const ReadView* readView, const std::vector<std::string>& targetPartitions,
+    bool registerSiread, bool indexMaintenanceView, ScopedMaintenanceProgress* progress,
+    const TableSchema* lockedSchema) const {
     ReadView autocommitView, commandInternalView;
     const auto* rv = prepareRowScanView(dbname, tablename, readView,
         indexMaintenanceView, autocommitView, commandInternalView);
 
-    TableSchema tbl = getTableSchema(dbname, tablename);
+    const TableSchema localSchema = lockedSchema ? TableSchema{} : getTableSchema(dbname, tablename);
+    const TableSchema& tbl = lockedSchema ? *lockedSchema : localSchema;
 
     const auto heapRowWidth = heapHeaderRowWidth(tbl);
     if (!heapRowWidth) return false;
@@ -9734,17 +9749,22 @@ bool StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
             // These are parent-owned heaps, not independently cataloged tables.
             progress->publish(samplePhase, scanCounters);
         }
+        std::optional<std::filesystem::path> lockedDirectory;
         for (const auto& leaf : leaves) {
             if (!selectedLeaf(leaf)) continue;
-            const auto path = leaf.subPartition.empty()
-                ? partitionDataPath(dbname, tablename, leaf.partition)
-                : partitionDataPath(dbname, tablename, leaf.partition,
-                                    leaf.subPartition);
+            if (lockedSchema && !lockedDirectory)
+                lockedDirectory = relationDir(dbname, tbl);
+            const std::string heapName = tablename + "#" + leaf.partition +
+                (leaf.subPartition.empty() ? "" : "#" + leaf.subPartition);
+            const auto path = lockedDirectory
+                ? *lockedDirectory / (heapName + ".dt")
+                : (leaf.subPartition.empty()
+                    ? partitionDataPath(dbname, tablename, leaf.partition)
+                    : partitionDataPath(dbname, tablename, leaf.partition, leaf.subPartition));
             auto ppa = acquireSharedHeap(
                 dbname, path, *heapRowWidth,
                 pageSizeForFormatVersion(tbl.formatVersion),
-                tbl.formatVersion, dbname + "/" + tablename + "#" + leaf.partition +
-                    (leaf.subPartition.empty() ? "" : "#" + leaf.subPartition));
+                tbl.formatVersion, dbname + "/" + heapName);
             if (!ppa) return false;
             const uint32_t pageCount = ppa->numPages();
             reportSampleRange(pageCount);
@@ -9918,14 +9938,25 @@ bool StorageEngine::forEachVisibleRow(
     const std::function<void(uint32_t, uint16_t, const char*, size_t)>& callback,
     const ReadView* readView,
     const std::vector<std::string>& targetPartitions) const {
-    const TableSchema tbl = getTableSchema(dbname, tablename);
+    return forEachVisibleRowUsingSchema(
+        dbname, tablename, command, callback, readView, targetPartitions, nullptr);
+}
+
+bool StorageEngine::forEachVisibleRowUsingSchema(
+    const std::string& dbname, const std::string& tablename, const std::string& command,
+    const std::function<void(uint32_t, uint16_t, const char*, size_t)>& callback,
+    const ReadView* readView, const std::vector<std::string>& targetPartitions,
+    const TableSchema* lockedSchema) const {
+    const TableSchema localSchema = lockedSchema ? TableSchema{} : getTableSchema(dbname, tablename);
+    const TableSchema& tbl = lockedSchema ? *lockedSchema : localSchema;
     const std::string user = StorageEngine::getRLSUser();
 
     // The frontend installs the authenticated username before execution. An
     // absent identity is still kept on the policy path and therefore cannot
     // bypass an enabled RLS table.
     if (!shouldEnforceRLS(tbl, user)) {
-        return forEachRow(dbname, tablename, callback, readView, targetPartitions);
+        return forEachRowUsingSchema(dbname, tablename, callback, readView, targetPartitions,
+                                     true, false, nullptr, lockedSchema);
     }
 
     const auto policies = getApplicablePolicies(dbname, tablename, command, user);
@@ -9943,7 +9974,7 @@ bool StorageEngine::forEachVisibleRow(
         tbl.formatVersion == DATA_FILE_FORMAT_VERSION;
     std::vector<VisibleRow> visible;
     bool evaluationError = false;
-    if (!forEachRow(dbname, tablename,
+    if (!forEachRowUsingSchema(dbname, tablename,
                [&](uint32_t pageId, uint16_t slotId, const char* data, size_t len) {
         if (evaluationError) return;
         const auto* tuple = keepScanTuple ? g_scanHeapTuple : nullptr;
@@ -9972,7 +10003,7 @@ bool StorageEngine::forEachVisibleRow(
                 visible.push_back({pageId, slotId, std::move(row)});
             }
         }
-    }, readView, targetPartitions)) return false;
+    }, readView, targetPartitions, true, false, nullptr, lockedSchema)) return false;
 
     if (evaluationError) return false;
     for (const auto& row : visible) {
@@ -20333,18 +20364,37 @@ std::string StorageEngine::resolveToastValues(const std::string& dbname,
                                               const std::string& rowBuffer,
                                               const TableSchema& tbl,
                                               bool* ok) {
+    auto expanded = expandToastRow(dbname, tablename, rowBuffer, tbl, ok);
+    if (expanded) return std::move(*expanded);
+    return rowBuffer;
+}
+
+std::string StorageEngine::resolveToastValues(const std::string& dbname,
+                                              const std::string& tablename,
+                                              std::string&& rowBuffer,
+                                              const TableSchema& tbl,
+                                              bool* ok) {
+    auto expanded = expandToastRow(dbname, tablename, rowBuffer, tbl, ok);
+    if (expanded) return std::move(*expanded);
+    return std::move(rowBuffer);
+}
+
+std::optional<std::string> StorageEngine::expandToastRow(
+    const std::string& dbname, const std::string& tablename,
+    const std::string& rowBuffer, const TableSchema& tbl, bool* ok) {
     if (ok) *ok = true;
-    if (tbl.varColCount() == 0) return rowBuffer;
+    const size_t variableColumns = tbl.varColCount();
+    if (variableColumns == 0) return std::nullopt;
 
     // Never recursively interpret a literal such as "__TOAST__1" that was
     // itself retrieved from TOAST and placed in an already-resolved row.
     uint32_t ignoredOffset = 0;
     uint32_t ignoredLength = 0;
     if (resolvedToastEntry(rowBuffer, tbl, 0, &ignoredOffset, &ignoredLength))
-        return rowBuffer;
+        return std::nullopt;
 
     std::vector<std::string> values;
-    values.reserve(tbl.varColCount());
+    values.reserve(variableColumns);
     bool foundMarker = false;
     for (size_t i = 0; i < tbl.len(); ++i) {
         if (!tbl.cols[i].isVariableLength) continue;
@@ -20356,28 +20406,28 @@ std::string StorageEngine::resolveToastValues(const std::string& dbname,
                            characterColumnByteLimit(tbl.cols[i]),
                            resolved)) {
                 if (ok) *ok = false;
-                return rowBuffer;
+                return std::nullopt;
             }
             val = std::move(resolved);
             foundMarker = true;
         }
         values.push_back(std::move(val));
     }
-    if (!foundMarker) return rowBuffer;
+    if (!foundMarker) return std::nullopt;
 
     const size_t fixedSize = tbl.fixedDataSize();
     const size_t varCount = values.size();
     if (fixedSize > rowBuffer.size() ||
         varCount > (std::numeric_limits<size_t>::max() - fixedSize) / 4) {
         if (ok) *ok = false;
-        return rowBuffer;
+        return std::nullopt;
     }
     const size_t legacyArraySize = varCount * 4;
     constexpr size_t resolvedHeaderSize = sizeof(uint32_t) * 2;
     if (varCount > (std::numeric_limits<size_t>::max() - fixedSize -
                     legacyArraySize - resolvedHeaderSize) / 8) {
         if (ok) *ok = false;
-        return rowBuffer;
+        return std::nullopt;
     }
     const size_t entriesSize = varCount * 8;
     const size_t dataStart = fixedSize + legacyArraySize +
@@ -20387,7 +20437,7 @@ std::string StorageEngine::resolveToastValues(const std::string& dbname,
     if (totalSize > std::numeric_limits<uint32_t>::max() ||
         totalSize > std::numeric_limits<size_t>::max()) {
         if (ok) *ok = false;
-        return rowBuffer;
+        return std::nullopt;
     }
 
     std::string result;

@@ -1914,6 +1914,23 @@ public:
     const CatalogService& catalogService() const;
 
 private:
+    friend class TableScanOp;
+    // A scan with an existing relation lock can reuse the schema obtained
+    // under that lock for visibility, policy and leaf path resolution.
+    bool forEachRowUsingSchema(
+        const std::string& dbname, const std::string& tablename,
+        const std::function<void(uint32_t, uint16_t, const char*, size_t)>& callback,
+        const ReadView* readView, const std::vector<std::string>& targetPartitions,
+        bool registerSiread, bool indexMaintenanceView, ScopedMaintenanceProgress* progress,
+        const TableSchema* lockedSchema) const;
+    bool forEachVisibleRowUsingSchema(
+        const std::string& dbname, const std::string& tablename, const std::string& command,
+        const std::function<void(uint32_t, uint16_t, const char*, size_t)>& callback,
+        const ReadView* readView, const std::vector<std::string>& targetPartitions,
+        const TableSchema* lockedSchema) const;
+    std::optional<std::string> expandToastRow(
+        const std::string& dbname, const std::string& tablename,
+        const std::string& rowBuffer, const TableSchema& schema, bool* ok);
     int64_t nextvalWithIdentity(const std::string& dbname,
                                const std::string& seqname,
                                uint32_t expectedOid);
@@ -1923,6 +1940,7 @@ private:
     // and in <tablespace-location>/<database> for user tablespaces. Catalog
     // and table metadata files always remain in dbPath(dbname).
     std::filesystem::path relationDir(const std::string& dbname, const std::string& tablename) const;
+    std::filesystem::path relationDir(const std::string& dbname, const TableSchema& table) const;
     std::filesystem::path dataPath(const std::string& dbname, const std::string& tablename) const;
     std::filesystem::path partitionDataPath(const std::string& dbname, const std::string& tablename,
                                             const std::string& partitionName) const;
@@ -2009,6 +2027,9 @@ public:
                                    const std::string& rowBuffer, const TableSchema& tbl);
     std::string resolveToastValues(const std::string& dbname, const std::string& tablename,
                                    const std::string& rowBuffer, const TableSchema& tbl,
+                                   bool* ok);
+    std::string resolveToastValues(const std::string& dbname, const std::string& tablename,
+                                   std::string&& rowBuffer, const TableSchema& tbl,
                                    bool* ok);
 
     // ========================================================================

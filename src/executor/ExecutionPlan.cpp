@@ -5203,7 +5203,8 @@ bool TableScanOp::open() {
     lastBufferedNullsValid_ = false;
     lastRid_ = 0;
     pos_ = 0; lastNulls_.clear(); cursor_.reset();
-    if (tbl_.partitionType == TableSchema::PartitionType::None &&
+    const bool partitioned = tbl_.partitionType != TableSchema::PartitionType::None;
+    if (!partitioned &&
         !engine_->rlsAppliesTo(dbname_, tablename_)) {
         cursor_ = engine_->beginHeapScan(dbname_, tablename_, tbl_);
         return true;
@@ -5211,8 +5212,8 @@ bool TableScanOp::open() {
     bool toastFailed = false;
     bool bitmapFailed = false;
     const bool capturePartitionNulls =
-        tbl_.partitionType != TableSchema::PartitionType::None &&
-        tbl_.formatVersion == DATA_FILE_FORMAT_VERSION;
+        partitioned && tbl_.formatVersion == DATA_FILE_FORMAT_VERSION;
+    const bool hasVariableColumns = tbl_.hasVariableLength();
     const auto appendRow = [&](uint32_t pageId, uint16_t slotId,
                                const char* data, size_t len) {
         if (toastFailed || bitmapFailed) return;
@@ -5226,21 +5227,24 @@ bool TableScanOp::open() {
             }
             // TOAST resolution must use this leaf's bitmap, not the parent
             // heap reached by an ambiguous page/slot RID.
-            nullOwner.emplace(tbl_, capturedNulls);
+            if (hasVariableColumns) nullOwner.emplace(tbl_, capturedNulls);
         }
         std::string row(data, len);
-        bool toastOk = false;
-        row = engine_->resolveToastValues(dbname_, tablename_, row, tbl_, &toastOk);
-        if (!toastOk) {
-            toastFailed = true;
-            return;
+        if (hasVariableColumns) {
+            bool toastOk = false;
+            row = engine_->resolveToastValues(dbname_, tablename_, std::move(row), tbl_, &toastOk);
+            if (!toastOk) {
+                toastFailed = true;
+                return;
+            }
         }
         rows_.emplace_back(StorageEngine::encodeRid(pageId, slotId), std::move(row));
         if (capturePartitionNulls) bufferedNulls_.push_back(std::move(capturedNulls));
     };
-    const bool scanOk = engine_->rlsAppliesTo(dbname_, tablename_)
-        ? engine_->forEachVisibleRow(dbname_, tablename_, "SELECT", appendRow)
-        : engine_->forEachRow(dbname_, tablename_, appendRow);
+    const bool scanOk = partitioned
+        ? engine_->forEachVisibleRowUsingSchema(
+            dbname_, tablename_, "SELECT", appendRow, nullptr, {}, &tbl_)
+        : engine_->forEachVisibleRow(dbname_, tablename_, "SELECT", appendRow);
     if (!scanOk || toastFailed || bitmapFailed) {
         rows_.clear();
         bufferedNulls_.clear();
@@ -5419,7 +5423,7 @@ bool TableScanOp::nextRow(std::string& outRow, const TableSchema* projection,
     }
     if (pos_ >= rows_.size()) return false;
     lastRid_ = rows_[pos_].first;
-    outRow = rows_[pos_].second;
+    outRow = std::move(rows_[pos_].second);
     lastBufferedNullsValid_ = pos_ < bufferedNulls_.size();
     if (lastBufferedNullsValid_) lastNulls_ = std::move(bufferedNulls_[pos_]);
     else lastNulls_.clear();

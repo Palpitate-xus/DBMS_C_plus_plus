@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>读取分区表时减少重复查找 · 2026-11-22</summary>
+
+各分区共用扫描开始时读到的表定义，数据库逐个核对并读取分区文件。测试中，分区较多的表在重复查询时耗时更短。
+
+[测试报告](docs/test-report.md#partition-scan-schema-20261122) · [性能报告](docs/performance-report-2026-10-30.md#partition-scan-schema-cost-20261122)
+
+</details>
+
+<details>
 <summary>修复跨分区查询时漏掉记录的问题 · 2026-11-22</summary>
 
 用 `OR` 查询多个分区时，数据库会返回所有匹配记录。同一条记录即使命中多个条件，也只返回一次。排序和查询结果能区分空值、空字符串和数字零。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>清空分区表后及时腾出磁盘空间 · 2026-11-22</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-22 · 清空分区表后及时腾出磁盘空间
 
 数据库会及时关闭旧分区文件，让操作系统回收这些文件占用的空间。单独清空默认数据目录里的分区表时，可以只保存恢复这张表所需的文件。
 
 [测试报告](docs/test-report.md#truncate-partition-undo-20261122) · [性能报告](docs/performance-report-2026-10-30.md#truncate-partition-undo-cost-20261122)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-22 · 同时清空多张表，出错时一起恢复
 
