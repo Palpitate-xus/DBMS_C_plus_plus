@@ -2,6 +2,10 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-22 · 事务开始时检查目录的开销
+
+PostgreSQL 18.6 在事务提交时通知其他连接哪些目录数据需要重新读取。SQLite 在数据库文件头维护表结构版本，运行已准备的语句时会检查它。DuckDB 用目录标识和版本判断是否需要重新分析已准备的语句。本项目仍逐个检查目录文件，在热目录上用同一轮检查决定是否需要写入并核对冲突。收到其他实例发布的版本后，目录服务加载新的对象，已有连接可用完所持有的版本。[PostgreSQL 目录通知](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/utils/cache/inval.c#L1097-L1158) · [SQLite 表结构版本](https://sqlite.org/fileformat.html#schema_cookie) · [DuckDB 目录版本](https://github.com/duckdb/duckdb/blob/v1.4.3/src/main/prepared_statement_data.cpp#L26-L74) · [性能报告](performance-report-2026-10-30.md#catalog-publication-one-scan-cost-20261122)
+
 ## 2026-11-22 · 单独查询连接设置的开销
 
 PostgreSQL 先给事务分配虚拟编号，持久编号通常在第一次写入时分配。SQLite 在 SQL 实际访问数据库时开启相应的读写事务，部分连接级 `PRAGMA` 可以直接执行。DuckDB 也提供读取当前连接设置的 `current_setting` 函数。本项目在确认调用属于 `pg_catalog` 且参数为基础类型后，直接读写连接设置。单条普通查询使用已有的语句设置快照，扩展请求以自身的同步周期提交或撤销设置。[PostgreSQL 事务编号](https://www.postgresql.org/docs/18/transaction-id.html) · [SQLite 事务](https://www.sqlite.org/lang_transaction.html) · [DuckDB 设置](https://duckdb.org/docs/2.0/configuration/overview)

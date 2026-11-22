@@ -3,6 +3,7 @@
 #include "common/DbError.h"
 #include "test_utils.h"
 #include <cassert>
+#include <filesystem>
 #include <iostream>
 
 static bool has(dbms::StorageEngine& engine, const std::string& database,
@@ -124,6 +125,27 @@ int main() {
     assert(dirty->dropObject(PgClassOid_Namespace, dirtyOid,
                             CatalogManager::DropBehavior::Restrict, &dropError));
     assert(reader.catalogService().get(db).findNamespaceByName("peer_published"));
+
+    // A lost, previously observed family cannot be adopted from a peer image
+    // that changed independently. Restore that family before refreshing.
+    const auto beforeLoss = reader.catalogService().acquire(db);
+    const auto* retained = beforeLoss->findNamespaceByName("peer_published");
+    assert(retained);
+    const auto retainedOid = retained->oid;
+    assert(writer.createSchema(db, "peer_with_lost_family") == DBStatus::OK);
+    const auto description = reader.dbPath(db) / "pg_catalog" / "pg_description.cat";
+    const auto savedDescription = description.string() + ".saved";
+    assert(std::filesystem::is_regular_file(description));
+    std::filesystem::rename(description, savedDescription);
+    assert(!reader.catalogService().persistAll(db));
+    assert(!std::filesystem::exists(description));
+    assert(beforeLoss->findNamespaceByName("peer_published") == retained && retained->oid == retainedOid);
+    assert(!beforeLoss->findNamespaceByName("peer_with_lost_family"));
+    std::filesystem::rename(savedDescription, description);
+    assert(reader.catalogService().persistAll(db));
+    const auto afterRestore = reader.catalogService().acquire(db);
+    assert(afterRestore != beforeLoss && afterRestore->findNamespaceByName("peer_with_lost_family"));
+    assert(beforeLoss->findNamespaceByName("peer_published") == retained && retained->oid == retainedOid);
 
     assert(writer.dropDatabase(db) == DBStatus::OK);
     assert(writer.createDatabase(db) == DBStatus::OK);

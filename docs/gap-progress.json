@@ -2,6 +2,23 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-22 scan cached catalog files once at transaction start",
+      "gap_ids": ["CAT-01", "CAT-07"],
+      "status": "partial",
+      "evidence": [
+        "src/catalog/catalog.cpp",
+        "src/catalog/CatalogService.cpp",
+        "docs/test-report.md",
+        "docs/performance-report-2026-10-30.md"
+      ],
+      "tests": ["tests/catalog_publication_scan_test.cpp", "tests/native_schema_peer_catalog_test.cpp"],
+      "verification": [
+        "Transaction startup and catalog publication use one scan on the ordinary current-generation path.",
+        "A new service generation is installed after successful publication. Old generation leases remain intact.",
+        "Dirty conflicts, durable write failures, database ownership, and recovery keep their existing checks. WAL-backed catalog rows remain open."
+      ]
+    },
+    {
       "issue": "2026-11-22 execute qualified session setting queries without database ownership",
       "gap_ids": ["OPT-15", "TXN-05", "OPS-02"],
       "status": "partial",

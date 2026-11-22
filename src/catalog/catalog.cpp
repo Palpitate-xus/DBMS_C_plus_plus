@@ -2911,34 +2911,60 @@ bool CatalogManager::hasUnpublishedChanges() const {
 }
 
 bool CatalogManager::persistAll() {
+    return persistAllImpl(true) == PersistResult::Published;
+}
+
+CatalogManager::PersistResult CatalogManager::persistCurrent() {
+    return persistAllImpl(false);
+}
+
+CatalogManager::PersistResult CatalogManager::persistAllImpl(bool reloadInPlace) {
     std::error_code pathError;
     const auto catalogPath = std::filesystem::weakly_canonical(dbPath_, pathError);
-    if (pathError) return false;
+    if (pathError) return PersistResult::Failed;
     const DatabaseMetadataWrite writer(catalogPath.parent_path());
-    if (!writer.acquired()) return false;
+    if (!writer.acquired()) return PersistResult::Failed;
     std::lock_guard<std::mutex> lock(mutex_);
     std::lock_guard<std::mutex> publicationLock(persistence_->publication->mutex);
     auto images = serializeAllLocked();
     std::map<std::string, CatalogFileGeneration> current;
     bool peerChanged = false;
     bool missingImage = false;
+    bool lostImage = false;
+#if defined(__linux__) && defined(O_PATH)
+    CatalogDirectoryScan directory(dbPath_);
+    const bool useDirectoryFd = directory.valid();
+#endif
     for (const auto& image : images) {
         auto& generation = current[image.first];
-        if (!catalogGeneration(catalogFilePath(image.first), generation) ||
-            (generation.exists && !generation.regular)) return false;
+#if defined(__linux__) && defined(O_PATH)
+        const bool inspected = useDirectoryFd
+            ? directory.read("pg_" + image.first + ".cat", generation)
+            : catalogGeneration(catalogFilePath(image.first), generation);
+#else
+        const bool inspected = catalogGeneration(catalogFilePath(image.first), generation);
+#endif
+        if (!inspected || (generation.exists && !generation.regular)) return PersistResult::Failed;
         missingImage = missingImage || !generation.exists;
         const auto observed = persistence_->observed.find(image.first);
-        // A missing file is repaired, not treated as a new peer image.
-        if (generation.exists &&
-            (observed == persistence_->observed.end() ||
-             !(observed->second == generation))) peerChanged = true;
+        if (observed == persistence_->observed.end() || !(observed->second == generation)) {
+            // Repair a missing image when the rest of the model is still
+            // current. A peer refresh cannot safely adopt a lost image.
+            if (generation.exists) peerChanged = true;
+            else lostImage = true;
+        }
     }
+#if defined(__linux__) && defined(O_PATH)
+    if (useDirectoryFd && !directory.stillNamesDirectory()) return PersistResult::Failed;
+#endif
     if (peerChanged) {
         // No cross-cache merge is implied: retain unsaved local changes on a
         // conflict, rather than silently publishing over newer peer metadata.
-        if (images != persistence_->baseline || missingImage) return false;
+        if (images != persistence_->baseline || (reloadInPlace ? missingImage : lostImage))
+            return PersistResult::Failed;
+        if (!reloadInPlace) return PersistResult::RefreshRequired;
         try { loadAllLocked(); }
-        catch (const std::exception&) { return false; }
+        catch (const std::exception&) { return PersistResult::Failed; }
         images = serializeAllLocked();
         current = persistence_->observed;
     }
@@ -2951,6 +2977,9 @@ bool CatalogManager::persistAll() {
             known->second.generation == current[image.first] &&
             known->second.bytes == image.second) continue;
 
+#if defined(__linux__) && defined(O_PATH)
+        if (useDirectoryFd && !directory.stillNamesDirectory()) return PersistResult::Failed;
+#endif
         const auto target = catalogFilePath(image.first);
         const bool written = writeCatalogFileAtomically(target,
             [&](std::ostream& out) { out.write(image.second.data(), image.second.size()); });
@@ -2971,7 +3000,7 @@ bool CatalogManager::persistAll() {
         persistence_->baseline[image.first] = image.second;
     }
     if (oidGen_ && !oidGen_->persist()) ok = false;
-    return ok;
+    return ok ? PersistResult::Published : PersistResult::Failed;
 }
 
 void CatalogManager::loadAll() {

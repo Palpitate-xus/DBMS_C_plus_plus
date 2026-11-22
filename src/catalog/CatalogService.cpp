@@ -12,6 +12,7 @@
 #include "commands/TableManage.h"
 #include "commands/SequenceStorageName.h"
 #include "utils/Session.h"
+#include "common/DatabaseMetadataWrite.h"
 #include "common/DbError.h"
 #include "access/IndexFileUtil.h"
 #include <filesystem>
@@ -454,26 +455,55 @@ bool CatalogService::persistAll(const std::string& database) {
             if (entry.second.manager && entry.second.manager->hasUnpublishedChanges()) ok = false;
             continue;
         }
-        auto publishing = entry.second.manager;
-        if (!publishing ||
-            publishing->publicationState() == CatalogManager::PublicationState::CleanPeerChange) {
-            // persistAll() on the old manager reloads its vectors in place.
-            // A service refresh must instead keep an acquired generation's
-            // rows stable, including BEGIN/checkpoint's implicit publication.
-            auto replacement = loadOwnedCatalog(engine_, entry.first);
-            {
-                std::lock_guard<std::mutex> lock(mutex_);
-                const auto current = cache_.find(entry.first);
-                if (current != cache_.end() && current->second.manager == publishing) {
-                    const auto committed = current->second.writeTransaction == ownership.writeTransaction
-                        ? current->second.committed : std::shared_ptr<CatalogManager>{};
-                    current->second = {replacement, physical.device, physical.inode, committed,
-                                      committed ? ownership.writeTransaction : 0};
-                }
+        using Result = CatalogManager::PersistResult;
+        if (entry.second.manager) {
+            const auto result = entry.second.manager->persistCurrent();
+            if (result != Result::RefreshRequired) {
+                if (result == Result::Failed) ok = false;
+                continue;
             }
-            publishing = std::move(replacement);
         }
-        if (!publishing->persistAll()) ok = false;
+
+        // A clean peer refresh must keep every acquired generation stable.
+        // Publish a private replacement, then make it available to readers.
+        const DatabaseMetadataWrite writer(engine_.dbPath(entry.first));
+        if (!writer.acquired()) {
+            ok = false;
+            continue;
+        }
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto current = cache_.find(entry.first);
+        if (current == cache_.end()) continue;
+        auto& cached = current->second;
+        if (cached.databaseDevice != physical.device || cached.databaseInode != physical.inode) {
+            ok = false;
+            continue;
+        }
+        CatalogDatabaseIdentity refreshed;
+        if (!databaseIdentity(engine_.dbPath(entry.first), refreshed, entry.first == "info") ||
+            refreshed.device != physical.device || refreshed.inode != physical.inode) {
+            ok = false;
+            continue;
+        }
+        // Another publisher may have changed the file set before this
+        // refresh acquired the metadata owner. Revalidate on this rare path.
+        if (cached.manager) {
+            const auto result = cached.manager->persistCurrent();
+            if (result != Result::RefreshRequired) {
+                if (result == Result::Failed) ok = false;
+                continue;
+            }
+        }
+        auto replacement = loadOwnedCatalog(engine_, entry.first);
+        if (replacement->persistCurrent() != Result::Published ||
+            (cached.manager && cached.manager->hasUnpublishedChanges())) {
+            ok = false;
+            continue;
+        }
+        const auto committed = cached.writeTransaction == ownership.writeTransaction
+            ? cached.committed : std::shared_ptr<CatalogManager>{};
+        cached = {std::move(replacement), physical.device, physical.inode, committed,
+                  committed ? ownership.writeTransaction : 0};
     }
     return ok;
 }

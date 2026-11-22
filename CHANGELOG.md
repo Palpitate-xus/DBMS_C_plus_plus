@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>开事务时，少做一轮表结构检查 · 2026-11-22</summary>
+
+数据库会用同一轮检查判断是否需要保存表结构。目录更新时，已经在用的旧版本仍可继续读取。
+
+[测试报告](docs/test-report.md#catalog-publication-one-scan-20261122) · [性能报告](docs/performance-report-2026-10-30.md#catalog-publication-one-scan-cost-20261122)
+
+</details>
+
+<details>
 <summary>有人改表时，其他连接仍可查看和修改自己的设置 · 2026-11-22</summary>
 
 例如，另一连接正在改表时，单独查询当前连接的锁等待时间，无需等改表结束。手册列出了适用的 SQL 写法。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>回滚后会恢复原来的超时设置 · 2026-11-22</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-22 · 回滚后会恢复原来的超时设置
 
 例如，事务中临时缩短了锁等待时间，回滚后就会恢复到事务开始前的值。
 
 [使用示例](docs/MANUAL.md#在事务里临时调整超时) · [测试报告](docs/test-report.md#transactional-timeouts-20261122) · [性能报告](docs/performance-report-2026-10-30.md#transactional-timeouts-cost-20261122)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-22 · 等不到更严格的表锁，原来的锁会保留
 

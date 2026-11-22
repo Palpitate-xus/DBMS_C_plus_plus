@@ -240,6 +240,10 @@ public:
     // 持久化
     // =====================================================================
     bool persistAll();
+    enum class PersistResult { Published, RefreshRequired, Failed };
+    // Service-owned rows can stay leased after a peer publishes new files.
+    // Publish this model or tell the service to load a separate replacement.
+    PersistResult persistCurrent();
     void loadAll();
     enum class PublicationState { Current, CleanPeerChange, Conflict };
     // Pure serialized-model/generation check. This does not reload rows or
@@ -375,6 +379,7 @@ private:
     // 辅助函数
     std::string catalogFilePath(const std::string& tablename) const;
     std::map<std::string, std::string> serializeAllLocked() const;
+    PersistResult persistAllImpl(bool reloadInPlace);
     void loadAllLocked();
     void rebuildIndexes();
     static std::string classNameKey(Oid nspOid, const std::string& relname);

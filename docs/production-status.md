@@ -6,6 +6,10 @@
 
 截至 2026-11-22，273 项功能要求中有 22 项完成、167 项部分实现、69 项待验证、15 项暂缓。各项结果和剩余范围见功能总账。以下更新报告给出各轮测试的实际范围。[功能总账](gap-progress.json) · [支持的功能和限制](compatibility-contract.md)
 
+## 2026-11-22 · 开始事务时少查一遍表结构
+
+事务准备保存当前数据库的目录时，只检查一次已加载的文件。目录发生变化时仍要核对本地改动，报告写入错误，并保留已经交给读者的旧版本。[测试报告](test-report.md#catalog-publication-one-scan-20261122) · [性能报告](performance-report-2026-10-30.md#catalog-publication-one-scan-cost-20261122)
+
 ## 2026-11-22 · 单独查询设置时减少数据库访问
 
 在普通查询、命令行和预编译请求里，带 `pg_catalog` 限定的单个设置函数可直接读取和修改当前连接的值。普通请求使用语句设置快照，预编译请求使用自身的事务边界。改表竞争下的设置查询和实际读表分别验证。[测试报告](test-report.md#session-setting-path-20261122) · [性能报告](performance-report-2026-10-30.md#session-setting-path-cost-20261122)

@@ -13,6 +13,17 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#ifdef EXPECT_SINGLE_PASS_CATALOG_PERSISTENCE
+#include "catalog/CatalogService.h"
+#include "commands/TableManage.h"
+#include "test_utils.h"
+#include <chrono>
+#include <iterator>
+#include <map>
+#include <string_view>
+#include <tuple>
+#endif
+
 namespace fs = std::filesystem;
 using dbms::CatalogManager;
 namespace {
@@ -22,15 +33,173 @@ void check(bool value, const char* what) {
     if (!value) throw std::runtime_error(what);
 }
 #ifdef EXPECT_BATCHED_CATALOG_SCAN
-bool raceEnabled = false;
-bool raceFired = false;
-int raceMode = 1;
+thread_local bool raceEnabled = false;
+thread_local bool raceFired = false;
+thread_local int raceMode = 1;
 std::string liveDirectory, displacedDirectory, replacementDirectory;
+#endif
+#ifdef EXPECT_SINGLE_PASS_CATALOG_PERSISTENCE
+thread_local std::map<std::string, unsigned>* countedImages = nullptr;
+thread_local unsigned replacementLoadProbes = 0;
+std::string liveDescription, stagedDescription;
+
+bool catalogImage(std::string_view name) {
+    return name.size() > 7 && name.substr(0, 3) == "pg_" && name.substr(name.size() - 4) == ".cat";
+}
+
+void countCatalogImage(const char* path) {
+    if (!countedImages || !path) return;
+    const auto name = fs::path(path).filename().string();
+    if (catalogImage(name)) ++(*countedImages)[name];
+}
+
+using CatalogInventory = std::map<std::string, std::tuple<ino_t, fs::file_time_type, std::string>>;
+
+CatalogInventory catalogInventory(const fs::path& directory) {
+    CatalogInventory inventory;
+    for (const auto& entry : fs::directory_iterator(directory)) {
+        const auto name = entry.path().filename().string();
+        if (!catalogImage(name) && name != ".oid_counter") continue;
+        struct stat file{};
+        check(::lstat(entry.path().c_str(), &file) == 0 && S_ISREG(file.st_mode), "regular catalog image");
+        std::ifstream input(entry.path(), std::ios::binary);
+        check(input.is_open(), "open catalog inventory image");
+        std::string bytes((std::istreambuf_iterator<char>(input)), {});
+        inventory.emplace(name, std::make_tuple(file.st_ino, entry.last_write_time(), std::move(bytes)));
+    }
+    return inventory;
+}
+
+bool persistDuringRace(dbms::CatalogService& service, const std::string& database, int mode) {
+    struct ResetRace {
+        ~ResetRace() { raceEnabled = false; }
+    } reset;
+    raceMode = mode;
+    raceFired = false;
+    raceEnabled = true;
+    return service.persistAll(database);
+}
+
+void checkSecondPublication(dbms::StorageEngine& engine, const std::string& database,
+                            const fs::path& directory,
+                            const std::shared_ptr<CatalogManager>& lease, dbms::Oid oid) {
+    using namespace dbms;
+    auto& service = engine.catalogService();
+    StorageEngine blocker;
+    blocker.setBackgroundIntervals(60000, 60000);
+    const auto original = lease->getDescription(oid, PgClassOid_Namespace, 0);
+    CatalogManager peer(directory.string(), false);
+    peer.setDescription(oid, PgClassOid_Namespace, 0, "first peer");
+    check(peer.persistAll(), "publish the first peer generation");
+    const auto description = directory / "pg_description.cat";
+    const auto staged = directory.parent_path() / ".test-peer-next.cat";
+    {
+        std::ifstream input(description, std::ios::binary);
+        std::string bytes((std::istreambuf_iterator<char>(input)), {});
+        const auto start = bytes.find("first peer");
+        check(start != std::string::npos, "find the first peer's text in the real image");
+        bytes.replace(start, std::string_view("first peer").size(), "next peer");
+        std::ofstream output(staged, std::ios::binary);
+        output << bytes;
+        output.close();
+        check(bool(output), "stage a second valid catalog image");
+    }
+    liveDescription = description.string();
+    stagedDescription = staged.string();
+    replacementLoadProbes = 0;
+    const bool published = persistDuringRace(service, database, 4);
+    check(raceFired && !published, "peer image arriving before install prevents stale publication");
+    check(lease->getDescription(oid, PgClassOid_Namespace, 0) == original,
+          "concurrent peer leaves the retained original model unchanged");
+
+    // Under a foreign writer, acquire must return the cached generation
+    // without loading the current files and thereby masking a stale install.
+    check(blocker.beginTransaction(database, true) == DBStatus::OK, "hold catalog read ownership");
+    check(service.acquire(database) == lease, "failed refresh never installed the stale generation");
+    check(blocker.commitTransaction() == DBStatus::OK, "release catalog read ownership");
+    check(service.persistAll(database), "retry publishes the newest complete peer generation");
+    const auto newest = service.acquire(database);
+    check(newest != lease && newest->getDescription(oid, PgClassOid_Namespace, 0) == "next peer",
+          "successful retry replaces the cached generation without rewriting the peer");
+}
+
+void checkServicePublication() {
+    using namespace dbms;
+    TypeRegistry::instance().bootstrap();
+    StorageEngine engine;
+    engine.setBackgroundIntervals(60000, 60000);
+    const auto database = testDbPath("catalog_single_pass");
+    check(engine.createDatabase(database) == DBStatus::OK, "create catalog publication database");
+    auto& service = engine.catalogService();
+    (void)service.get(database); // Install the real manager in the service cache.
+    check(service.persistAll(database), "warm catalog publication receipts");
+    const auto lease = service.acquire(database);
+    const auto* row = lease->findNamespaceByName("public");
+    check(row != nullptr, "borrow an actual cached namespace");
+    const auto rowOid = row->oid;
+    const auto directory = engine.dbPath(database) / "pg_catalog";
+    std::map<std::string, unsigned> expected;
+    for (const auto& entry : fs::directory_iterator(directory)) {
+        const auto name = entry.path().filename().string();
+        if (catalogImage(name)) expected.emplace(name, 1);
+    }
+    check(!expected.empty(), "catalog contains actual persisted families");
+    std::map<std::string, unsigned> observed;
+    {
+        struct ResetCount {
+            ~ResetCount() { countedImages = nullptr; }
+        } reset;
+        countedImages = &observed;
+        check(service.persistAll(database), "warm service publication succeeds");
+    }
+    unsigned probes = 0;
+    for (const auto& image : observed) probes += image.second;
+    std::cout << "CATALOG_SERVICE_SCAN families=" << observed.size() << " probes=" << probes << '\n';
+    check(observed == expected, "warm service publication checks each family once");
+
+    const auto alternate = directory.parent_path() / ".test-catalog-alternate";
+    const auto displaced = directory.parent_path() / ".test-catalog-displaced";
+    fs::copy(directory, alternate, fs::copy_options::recursive);
+    // Detect even a same-byte counter write without relying on clock precision.
+    for (const auto& target : {directory, alternate}) {
+        const auto counter = target / ".oid_counter";
+        fs::last_write_time(counter, fs::last_write_time(counter) - std::chrono::hours(1));
+    }
+    const auto original = catalogInventory(directory);
+    const auto replacement = catalogInventory(alternate);
+    liveDirectory = directory.string();
+    displacedDirectory = displaced.string();
+    replacementDirectory = alternate.string();
+    const bool published = persistDuringRace(service, database, 1);
+    check(raceFired, "directory swap interleaved with service publication");
+    const bool unchanged = original == catalogInventory(displaced) && replacement == catalogInventory(directory);
+    fs::remove_all(directory);
+    fs::rename(displaced, directory);
+    check(!published, "service publication rejects a directory swap");
+    check(unchanged, "service publication leaves both directory generations untouched");
+    check(service.acquire(database) == lease && lease->findNamespaceByName("public") == row &&
+              row->oid == rowOid, "failed publication keeps the old service lease intact");
+    check(service.persistAll(database), "service publication retries after directory restoration");
+    checkSecondPublication(engine, database, directory, lease, rowOid);
+    check(engine.dropDatabase(database) == DBStatus::OK, "drop catalog publication database");
+}
 #endif
 }
 #ifdef EXPECT_BATCHED_CATALOG_SCAN
 extern "C" int __real_fstatat(int, const char*, struct stat*, int);
 extern "C" int __wrap_fstatat(int dirfd, const char* name, struct stat* info, int flags) {
+#ifdef EXPECT_SINGLE_PASS_CATALOG_PERSISTENCE
+    countCatalogImage(name);
+    if (raceEnabled && raceMode == 4) {
+        // Cold loading inspects the image before and after reading it. Wait for
+        // the replacement's following publication scan before swapping it.
+        if (!raceFired && replacementLoadProbes >= 2 && name && std::string_view(name) == "pg_description.cat") {
+            raceFired = true;
+            if (::rename(stagedDescription.c_str(), liveDescription.c_str()) != 0) std::abort();
+        }
+        return __real_fstatat(dirfd, name, info, flags);
+    }
+#endif
     if (raceEnabled && !raceFired && name && std::string(name).find("pg_") == 0) {
         raceFired = true;
         if (::rename(liveDirectory.c_str(), displacedDirectory.c_str()) != 0)
@@ -48,6 +217,14 @@ extern "C" int __wrap_fstatat(int dirfd, const char* name, struct stat* info, in
         }
     }
     return __real_fstatat(dirfd, name, info, flags);
+}
+#endif
+#ifdef EXPECT_SINGLE_PASS_CATALOG_PERSISTENCE
+extern "C" int __real_lstat(const char*, struct stat*);
+extern "C" int __wrap_lstat(const char* path, struct stat* info) {
+    countCatalogImage(path);
+    if (raceEnabled && raceMode == 4 && path && liveDescription == path) ++replacementLoadProbes;
+    return __real_lstat(path, info);
 }
 #endif
 int main() {
@@ -169,6 +346,9 @@ int main() {
             fs::remove_all(alternate);
 #endif
         }
+#ifdef EXPECT_SINGLE_PASS_CATALOG_PERSISTENCE
+        checkServicePublication();
+#endif
         fs::remove_all(base);
         std::cout<<"CATALOG_PUBLICATION_SCAN_CHECKED="<<checked<<" FAILURES=0\n";
         return 0;
