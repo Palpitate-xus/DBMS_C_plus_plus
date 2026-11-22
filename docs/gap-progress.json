@@ -2,6 +2,18 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-22 load explicit and generated identity values through client COPY",
+      "gap_ids": ["DML-06", "PROTO-06"],
+      "status": "partial",
+      "evidence": ["src/network/NetworkServer.cpp", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/copy_protocol_e2e_test.py"],
+      "verification": [
+        "Client COPY preserves explicit values for ALWAYS and BY DEFAULT identity columns and can allocate values for omitted columns or fields marked DEFAULT.",
+        "Conversion widths are mapped once per selected column, before consuming rows.",
+        "Sequence evaluation before a later bad field, skipped-row policy, other encodings and binary COPY remain open."
+      ]
+    },
+    {
       "issue": "2026-11-22 apply DEFAULT field markers in text and CSV COPY input",
       "gap_ids": ["DML-06", "PROTO-06"],
       "status": "partial",

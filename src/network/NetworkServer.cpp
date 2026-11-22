@@ -5827,13 +5827,7 @@ bool validateCopyWirePlan(CopyWirePlan& plan, Session& session, TableSchema& tab
     std::vector<std::string> columns;
     columns.reserve(plan.columnIndexes.size());
     for (const size_t index : plan.columnIndexes) {
-        const Column& column = table.cols[index];
-        columns.push_back(column.dataName);
-        if (plan.direction == CopyWireDirection::FromStdin &&
-            column.identityKind != 0) {
-            copyUnsupported(plan, "FROM on identity columns");
-            return false;
-        }
+        columns.push_back(table.cols[index].dataName);
     }
     const bool temporary = relation.temporary;
     const auto privilege = plan.direction == CopyWireDirection::FromStdin
@@ -6368,6 +6362,18 @@ CopyStreamResult receiveCopyIn(PostgresProtocol& protocol,
     std::string pending;
     std::optional<CopyCsvInput> csv;
     if (plan.csv) csv.emplace(plan);
+    std::vector<unsigned> integerInputBits;
+    integerInputBits.reserve(plan.columnIndexes.size());
+    for (const size_t index : plan.columnIndexes) {
+        const Column& column = table.cols[index];
+        const uint32_t oid = column.isArray ? 0 : mapBuiltinTypeNameToOid(column.dataType);
+        switch (oid) {
+            case 21: integerInputBits.push_back(16); break;
+            case 23: integerInputBits.push_back(32); break;
+            case 20: integerInputBits.push_back(64); break;
+            default: integerInputBits.push_back(0); break;
+        }
+    }
     const auto checkCopyInterrupt = [&]() {
         if (deadline != std::chrono::steady_clock::time_point::max() &&
             std::chrono::steady_clock::now() >= deadline) {
@@ -6415,10 +6421,8 @@ CopyStreamResult receiveCopyIn(PostgresProtocol& protocol,
                 continue;
             }
             auto value = std::move(fields[field].value);
-            const uint32_t typeOid = mapBuiltinTypeNameToOid(column.dataType);
-            if (value && !column.isArray &&
-                (typeOid == 21 || typeOid == 23 || typeOid == 20)) {
-                const unsigned bits = typeOid == 21 ? 16 : typeOid == 23 ? 32 : 64;
+            const unsigned bits = integerInputBits[field];
+            if (value && bits != 0) {
                 const auto parsed = parsePostgresIntegerText(*value, bits);
                 if (parsed.error == IntegerTextError::InvalidSyntax) {
                     throw DbError("22P02", "invalid input syntax for type " +
@@ -6432,8 +6436,11 @@ CopyStreamResult receiveCopyIn(PostgresProtocol& protocol,
             }
             values[column.dataName] = std::move(value);
         }
+        // COPY FROM accepts explicit identity values, including for ALWAYS.
+        // Omitted keys still invoke the target column's generator.
         const DBStatus status = g_engine.insertRow(
-            session.currentDB, plan.physicalTable, values);
+            session.currentDB, plan.physicalTable, values, nullptr,
+            StorageEngine::IdentityOverride::System);
         if (status != DBStatus::OK) {
             throw DbError(sqlstateForDBStatus(status),
                 "COPY FROM failed while inserting row " + std::to_string(result.rows + 1));

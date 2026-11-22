@@ -19,6 +19,13 @@ cmake --build build/cmake --target dbms_main --parallel 2
 ## 最近更新
 
 <details>
+<summary>导入旧数据时可以保留原来的编号 · 2026-11-22</summary>
+
+例如，迁移订单时可以保留旧订单号。文件里省略编号时，数据库可以自动生成。
+
+</details>
+
+<details>
 <summary>导入数据时可以使用列的默认值 · 2026-11-22</summary>
 
 例如，导入订单时可以用一个约定的标记，让数据库填上默认状态。
@@ -29,13 +36,6 @@ cmake --build build/cmake --target dbms_main --parallel 2
 <summary>从 CSV 导入数据 · 2026-11-22</summary>
 
 可以把表格软件保存的 CSV 导入数据库，并在导入前核对第一行的列名和顺序。单元格里有换行也可以导入。
-
-</details>
-
-<details>
-<summary>把查询结果保存为 CSV · 2026-11-22</summary>
-
-例如，只导出本月的订单，按金额排序，并把列名写在第一行。
 
 </details>
 

@@ -2496,6 +2496,8 @@ CSV 或文本导入可以用 `DEFAULT` 指定默认值标记。例如，若 `nam
 COPY public.users (id, name) FROM STDIN WITH (FORMAT csv, DEFAULT 'USE_DEFAULT');
 ```
 
+如果表用身份列自动编号，文本和 CSV 导入可以直接写入已有编号，包括 `GENERATED ALWAYS AS IDENTITY` 的列。省略整列时，序列会为每行取号。在列清单里包含该列时，也可以在单个字段中使用 `DEFAULT` 标记取号。导入显式编号后，序列仍从它自己的当前位置取号。显式空值会触发身份列的非空约束。[例子和回滚测试](test-report.md#copy-identity-input-20261122)
+
 ### 备份与恢复作业
 
 `DUMP` 产生逻辑 SQL 文件；`RESTORE DATABASE` 只接受 `BACKUP DATABASE`

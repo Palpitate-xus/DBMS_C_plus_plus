@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>导入旧数据时可以保留原来的编号 · 2026-11-22</summary>
+
+例如，迁移订单时可以保留旧订单号。文件里省略编号时，数据库可以自动生成。
+
+[用法](docs/MANUAL.md#用客户端复制数据) · [测试报告](docs/test-report.md#copy-identity-input-20261122) · [性能报告](docs/performance-report-2026-10-30.md#copy-identity-input-cost-20261122)
+
+</details>
+
+<details>
 <summary>导入数据时可以使用列的默认值 · 2026-11-22</summary>
 
 例如，导入订单时可以用一个约定的标记，让数据库填上默认状态。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>把查询结果保存为 CSV · 2026-11-22</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-22 · 把查询结果保存为 CSV
 
 例如，只导出本月的订单，按金额排序，并把列名写在第一行。
 
 [使用说明](docs/MANUAL.md#用客户端复制数据) · [测试报告](docs/test-report.md#copy-csv-out-20261122) · [性能报告](docs/performance-report-2026-10-30.md#copy-csv-out-cost-20261122)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-22 · 查询可以等表结构保存完成
 
