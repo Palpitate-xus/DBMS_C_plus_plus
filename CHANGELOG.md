@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>部分分区查询排序时少读长文本 · 2026-11-22</summary>
+
+用 `ORDER BY` 和 `LIMIT` 按整数编号取前几条时，符合条件的查询会先比较编号，再读取可能入选记录的其他长字段。
+
+[使用说明](docs/MANUAL.md#15-分区表) · [测试报告](docs/test-report.md#partition-order-input-20261122) · [性能报告](docs/performance-report-2026-10-30.md#partition-order-input-cost-20261122)
+
+</details>
+
+<details>
 <summary>分区查询取够结果后可以提前结束 · 2026-11-22</summary>
 
 用 `LIMIT` 查询分区表时，符合条件的查询取够记录后就会停止。测试中，查询一张有 60 个分区的表并只取一条记录，从打开 60 个分区文件减少到 1 个。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>修复部分跨分区查询漏掉记录的问题 · 2026-11-22</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-22 · 修复部分跨分区查询漏掉记录的问题
 
 用 `OR` 连接筛选条件时，符合任一条件的记录都会返回。一条记录同时符合多个条件时，也只返回一次。排序和查询结果仍能区分空值、空字符串和数字零。
 
 [测试报告](docs/test-report.md#plain-partition-or-20261122) · [性能报告](docs/performance-report-2026-10-30.md#plain-partition-or-cost-20261122)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-22 · 可以向分区表写入数据
 

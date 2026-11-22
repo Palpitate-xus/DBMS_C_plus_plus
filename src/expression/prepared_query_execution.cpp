@@ -773,13 +773,13 @@ RowContext PreparedQueryExecution::context(const RowContext& caller) const {
 }
 
 void PreparedQueryExecution::setSourceRow(RowContext& row, size_t ordinal,
-    const std::vector<ExprValue>& cells) const {
+    std::vector<ExprValue> cells) const {
     const auto& source = sourceRange(ordinal);
     if (source.columns.size() != cells.size())
         throw DbError("XX000", "prepared source row width differs from its descriptor");
     row.clearGeneratedSource(ordinal);
     for (size_t i = 0; i < cells.size(); ++i) {
-        ExprValue cell = cells[i];
+        auto& cell = cells[i];
         const auto type = ExprHelper::canonicalResultTypeName(source.columns[i].type);
         if (!cell.typeName.empty() && ExprHelper::canonicalResultTypeName(cell.typeName) != type)
             throw DbError("XX000", "prepared source cell type differs from its descriptor");
@@ -817,15 +817,15 @@ static ExprValue nullExtendedSourceCell(const QueryOutputColumn& field) {
 }
 
 void PreparedQueryExecution::setSourceInputs(RowContext& row,size_t source,
-    const std::vector<ExprValue>& cells,bool present) const {
+    std::vector<ExprValue> cells,bool present) const {
     const auto& range=sourceRange(source);
-    if(!range.generatedRelation){setSourceRow(row,source,cells);return;}
+    if(!range.generatedRelation){setSourceRow(row,source,std::move(cells));return;}
     if(cells.size()!=range.columns.size() || range.generatedRelation->columns.size()!=cells.size())
         throw DbError("XX000","generated source inputs lost the real declaration width");
     row.clearGeneratedSource(source);
     for(size_t i=0;i<cells.size();++i) {
         if(auto read=generatedSourceRead(source,i)){row.setGeneratedBound(source,i,std::move(read),present);continue;}
-        auto cell=present?cells[i]:nullExtendedSourceCell(range.columns[i]);
+        auto cell=present?std::move(cells[i]):nullExtendedSourceCell(range.columns[i]);
         const auto declared=ExprHelper::canonicalResultTypeName(range.columns[i].type);
         if(!cell.typeName.empty() && ExprHelper::canonicalResultTypeName(cell.typeName)!=declared)
             throw DbError("XX000","stored generated-source input changed its actual declaration");
@@ -840,7 +840,7 @@ void PreparedQueryExecution::copySourceInputs(RowContext& row,size_t source,cons
         else if(range.generatedRelation)cells.emplace_back(); // the generated-source owner supplies the NULL below
         else cells.push_back(nullExtendedSourceCell(range.columns[i]));
     }
-    setSourceInputs(row,source,cells,actual!=nullptr);
+    setSourceInputs(row,source,std::move(cells),actual!=nullptr);
     if(actual)row.copyGeneratedSource(*actual,source);
 }
 

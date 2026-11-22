@@ -2229,6 +2229,8 @@ ORDER BY event_time NULLS LAST;
 
 通过数据库服务查询一张分区表的普通列时，`LIMIT` 可以让数据库取够匹配行后停止读取。没有排序或去重，也无需显式行锁或执行行级访问策略的查询可以使用这个优化。例如 `LIMIT 2 OFFSET 5` 会取至多七条符合筛选条件的记录，再跳过前五条。需要固定的分页顺序时，可以用 `ORDER BY` 加上能区分每一行的列。[测试范围](test-report.md#partition-limit-prefix-20261122)
 
+对符合条件的 `ORDER BY id LIMIT 10`，数据库先比较 `id`。在内存中选择候选记录时，可以等记录入选后再读取其他长字段。所有分区的排序列仍会参与比较。[测试范围](test-report.md#partition-order-input-20261122)
+
 ---
 
 ## 16. 全文搜索

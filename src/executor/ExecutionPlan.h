@@ -317,6 +317,7 @@ public:
 
 private:
     friend class ProjectOp;
+    friend class PreparedSortOp;
     friend class QueryPlanner;
     // Private consumer capability, never retained across pulls. Other next()
     // callers and subclasses keep the complete-row materialization contract.

@@ -434,12 +434,12 @@ struct PreparedSelectState {
         for (size_t i = 0; i < schema.len(); ++i) {
             if(schema.cols[i].generatedKind=='v'){values.emplace_back();continue;}
             bool computedNull = false;
-            const std::string value = available ? structured.at(i) :
+            std::string value = available ? std::move(structured.at(i)) :
                 engine->extractColumnValue(raw, schema, i, dbname, true, &computedNull);
             const bool isNull = available ? nulls.at(i) : computedNull ||
                 (schema.cols[i].generatedKind != 'v' && source.lastColumnIsNull(i));
             values.emplace_back(ExprHelper::canonicalResultTypeName(schema.cols[i].dataType +
-                (schema.cols[i].isArray ? "[]" : "")), value, isNull);
+                (schema.cols[i].isArray ? "[]" : "")), std::move(value), isNull);
             const auto& column = schema.cols[i];
             if (physicalDeclaration && i < physicalDeclaration->size()) {
                 const auto& declaredField = physicalDeclaration->at(i).typeMetadata;
@@ -452,7 +452,7 @@ struct PreparedSelectState {
                     validatedArrayDomainOid = declaredField->actualOid;
                 if (stored_regtype_detail::columnType(column.dataType)) {
                     const auto catalog = regtype_detail::metadata(*engine, dbname);
-                    values.back() = stored_regtype_detail::load(value, column.isArray, isNull,
+                    values.back() = stored_regtype_detail::load(values.back().value, column.isArray, isNull,
                         catalog, currentSession(), declaredField, column.dataType, validatedArrayDomainOid);
                 } else if (column.isArray &&
                     !compound_value_detail::decodeArrayStorageInput(values.back(), declaredField,
@@ -464,9 +464,9 @@ struct PreparedSelectState {
         }
         return values;
     }
-    RowContext context(const std::vector<ExprValue>& values) const {
+    RowContext context(std::vector<ExprValue> values) const {
         auto row = execution->context(outerRow);
-        if (sourceOrdinal != noTarget) execution->setSourceInputs(row, sourceOrdinal, values,true);
+        if (sourceOrdinal != noTarget) execution->setSourceInputs(row, sourceOrdinal, std::move(values), true);
         return row;
     }
     RowContext context(Operator& source, const std::string& raw) const {
@@ -1396,6 +1396,7 @@ public:
 };
 
 bool hasOrderedPrimaryKeyInput(const Operator* source, const PreparedSelectState& state);
+} // namespace
 
 class PreparedSortOp final : public Operator {
     using Row=TypedSortRow;
@@ -1406,6 +1407,8 @@ class PreparedSortOp final : public Operator {
     std::vector<Row> rows_; // Existing aggregate/HAVING path only.
     std::unique_ptr<Runs> runs_;
     std::optional<size_t> bound_;
+    std::set<std::string> physicalKeyColumns_;
+    std::vector<size_t> physicalKeyOrdinals_;
     size_t position_=0;
     bool budgeted_=false,opened_=false,available_=false;
     bool presortedInput_ = false, spilled_ = false;
@@ -1428,6 +1431,45 @@ class PreparedSortOp final : public Operator {
     bool fail(const char* message) {
         propagateChildError(child_.get(),message);try{close();}catch(...){}return false;
     }
+    void selectPhysicalKeyColumns() {
+        const auto& schema = state_->schema;
+        if (!bound_ || typeid(*child_) != typeid(TableScanOp) || state_->sourceContexts ||
+            !state_->windows.empty() || !state_->select().locking.empty() ||
+            schema.partitionType == TableSchema::PartitionType::None ||
+            schema.formatVersion != DATA_FILE_FORMAT_VERSION || !schema.hasVariableLength()) return;
+        for (size_t i = 0; i < schema.len(); ++i) {
+            const auto& column = schema.cols[i];
+            const auto type = ExprHelper::canonicalResultTypeName(column.dataType);
+            if (column.isArray || column.isUnsigned || column.generatedKind ||
+                !column.domainName.empty() || !column.enumValues.empty() ||
+                (type != "smallint" && type != "integer" && type != "bigint" &&
+                 type != "text" && type != "character varying" && type != "boolean")) return;
+        }
+        const auto columnOrdinal = [&](const Expr* expression) -> std::optional<size_t> {
+            const auto* column = dynamic_cast<const ColumnRefExpr*>(expression);
+            if (!column || !column->binding || column->preparedSubquery || column->generatedRead)
+                return {};
+            const auto& field = *column->binding;
+            if (field.mergedUsing || field.scopeDepth || field.sourceOrdinal != state_->sourceOrdinal ||
+                field.columnOrdinal >= schema.len()) return {};
+            return field.columnOrdinal;
+        };
+        for (const auto* target : state_->targets) if (!columnOrdinal(target)) return;
+        std::set<size_t> ordinals;
+        for (const auto& key : state_->keys) {
+            const auto* expression = key.target == PreparedSelectState::noTarget
+                ? key.expression : state_->targets.at(key.target);
+            const auto ordinal = columnOrdinal(expression);
+            // Variable sort keys require their long values for every row.
+            if (!ordinal || key.enumComparison || schema.cols[*ordinal].isVariableLength) return;
+            ordinals.insert(*ordinal);
+        }
+        if (ordinals.empty() || ordinals.size() == schema.len()) return;
+        for (const auto ordinal : ordinals)
+            physicalKeyColumns_.insert(schema.cols[ordinal].dataName);
+        physicalKeyOrdinals_.assign(ordinals.begin(), ordinals.end());
+        static_cast<TableScanOp&>(*child_).scanPartitionsOnDemand_ = true;
+    }
 public:
     PreparedSortOp(OpPtr child, std::shared_ptr<PreparedSelectState> state)
         : child_(std::move(child)), state_(std::move(state)) {
@@ -1444,6 +1486,7 @@ public:
             if (*select.limit <= std::numeric_limits<size_t>::max() - offset)
                 bound_ = offset + *select.limit;
         }
+        selectPhysicalKeyColumns();
     }
     ~PreparedSortOp() override {try{close();}catch(...) {}}
     bool open() override {
@@ -1459,33 +1502,53 @@ public:
             if(!child_->open())return fail("prepared sort child could not open");
             uint64_t ordinal=0;
             std::string raw;
+            auto* scan = physicalKeyColumns_.empty() ? nullptr : static_cast<TableScanOp*>(child_.get());
+            std::vector<std::string> keyCells;
+            std::vector<bool> keyNulls;
+            bool decodedKeys = false;
+            const auto pull = [&] {
+                return scan ? scan->nextForProjection(raw, state_->schema, physicalKeyColumns_,
+                    keyCells, keyNulls, decodedKeys) : child_->next(raw);
+            };
             // A logical table source may open its physical scan lazily at
             // the first pull. Inspect the chosen path before buffering rows.
-            bool hasRow = child_->next(raw);
+            bool hasRow = pull();
             if (runs_ && hasOrderedPrimaryKeyInput(child_.get(), *state_)) {
                 runs_->usePresortedInput();
                 presortedInput_ = true;
             }
-            for (; hasRow; hasRow = child_->next(raw)) {
+            for (; hasRow; hasRow = pull()) {
                 if((ordinal&127U)==0)checkForQueryInterrupt();
-                Row row;row.raw=raw;
+                Row row;
                 if(ordinal==std::numeric_limits<uint64_t>::max())throw DbError("54000","too many sort input rows");
                 row.ordinal=ordinal++;
-                if(!state_->sourceContexts && !child_->supportsPreparedContexts()) {
+                if (decodedKeys) {
+                    row.context = state_->execution->context(state_->outerRow);
+                    for (size_t i = 0; i < physicalKeyOrdinals_.size(); ++i) {
+                        const auto column = physicalKeyOrdinals_[i];
+                        const auto& field = state_->schema.cols[column];
+                        ExprValue value(ExprHelper::canonicalResultTypeName(field.dataType),
+                            std::move(keyCells.at(i)), keyNulls.at(i));
+                        value.collation = field.collation;
+                        row.context.setBoundColumn(state_->sourceOrdinal, column, std::move(value));
+                    }
+                } else if (!budgeted_ && !state_->sourceContexts && !child_->supportsPreparedContexts()) {
                     row.cells=state_->cells(*child_,raw);row.context=state_->context(row.cells);
                 } else {
                     row.context=state_->context(*child_,raw);
                     // WindowAgg emits the genuine owning context. Its
                     // display row is empty and cannot be decoded as storage.
-                    if(!state_->sourceContexts && state_->windows.empty())row.cells=state_->cells(*child_,raw);
+                    if (!budgeted_ && !state_->sourceContexts && state_->windows.empty())
+                        row.cells=state_->cells(*child_,raw);
                 }
+                if (!decodedKeys) row.raw = std::move(raw);
             row.targets.resize(state_->targets.size());
             const auto& context = row.context;
             // Keep required input values here. Delayed targets use the
             // owning context when Project requests the sorted row. Sort keys,
             // aliases and structurally identical targets still share slots.
             for (size_t i = 0; i < state_->targets.size(); ++i)
-                if (state_->targetOwners[i]==i && state_->targetsBeforeSort[i])
+                if (!decodedKeys && state_->targetOwners[i]==i && state_->targetsBeforeSort[i])
                     row.targets[i] = state_->evaluate(state_->targets[i], context);
             for (const auto& key : state_->keys) {
                 if (key.priorKey != PreparedSelectState::noTarget) {
@@ -1516,12 +1579,20 @@ public:
                 }
                 row.integerKeys.push_back(integer);
             }
-                if(budgeted_) {
-                    // The bound source cells remain genuine owning datums in
-                    // this exact context snapshot, not decoded display text.
-                    std::vector<ExprValue>().swap(row.cells);
-                    runs_->add(std::move(row));
-                } else rows_.push_back(std::move(row));
+                if (decodedKeys) {
+                    runs_->add(std::move(row), [&](Row& retained) {
+                        std::vector<bool> bitmap;
+                        if (!scan->lastStoredNullBitmap(bitmap))
+                            throw DbError("XX001", "partition sort lost the input NULL bitmap");
+                        detail::ScopedStoredRowNullBitmap nullOwner(state_->schema, bitmap);
+                        bool ok = false;
+                        retained.raw = state_->engine->resolveToastValues(state_->dbname,
+                            state_->schema.tablename, std::move(raw), state_->schema, &ok);
+                        if (!ok) throw DbError("58030", "could not read partition sort row values");
+                        retained.context = state_->context(*child_, retained.raw);
+                    });
+                } else if (budgeted_) runs_->add(std::move(row));
+                else rows_.push_back(std::move(row));
             }
             if(child_->hasError())return fail("prepared sort child failed");
             if (budgeted_) {
@@ -1605,6 +1676,7 @@ public:
     std::vector<Operator*> preparedPlanChildren() const override {return {child_.get()};}
 };
 
+namespace {
 class PreparedProjectOp final : public Operator {
     OpPtr child_;
     std::shared_ptr<PreparedSelectState> state_;
@@ -3915,8 +3987,7 @@ OpPtr QueryPlanner::buildPreparedSelectPlan(StorageEngine* engine,
         select->groupBy.empty() && select->groupByElems.empty() && !select->having &&
         state->aggregates.empty() && state->windows.empty() &&
         typeid(*source) == typeid(TableScanOp)) {
-        // LIMIT and OFFSET already pull rows from this source through the
-        // ordinary filter and projection. Open each partition on demand.
+        // LIMIT and OFFSET pull filtered rows. Open each leaf on demand.
         static_cast<TableScanOp&>(*source).scanPartitionsOnDemand_ = true;
     }
     state->sourceContexts = source->supportsPreparedContexts();

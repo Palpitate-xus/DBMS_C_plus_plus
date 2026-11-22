@@ -948,6 +948,9 @@ static void test_partition_scan_uses_leaf_nulls() {
     assert((first.structuredNulls == std::vector<std::vector<bool>>{{false, true}}));
     const auto late = readPage("LIMIT 1 OFFSET 1");
     assert(!late.ok && late.errorSqlState == "58030");
+    // The bounded sort still has to consider rows from every partition.
+    const auto sorted = readPage("ORDER BY bucket DESC LIMIT 1");
+    assert(!sorted.ok);
     assert(std::filesystem::file_size(lateHeap) == 1);
 
     std::filesystem::rename(savedHeap, lateHeap);
@@ -955,6 +958,9 @@ static void test_partition_scan_uses_leaf_nulls() {
     assert(second.ok && second.structuredRowsAvailable);
     assert((second.structuredRows == std::vector<std::vector<std::string>>{{"15", "0"}}));
     assert((second.structuredNulls == std::vector<std::vector<bool>>{{false, false}}));
+    const auto sortedSecond = readPage("ORDER BY value ASC NULLS LAST LIMIT 1 OFFSET 1");
+    assert(sortedSecond.ok && sortedSecond.structuredRows == first.structuredRows);
+    assert(sortedSecond.structuredNulls == first.structuredNulls);
 
     assert(g_engine.insertRow(db, table, {{"bucket", "6"}, {"value", "0"}}) ==
            DBStatus::OK);
@@ -969,6 +975,46 @@ static void test_partition_scan_uses_leaf_nulls() {
 
     cleanup(db);
     std::cout << "[PART] Partition scans retain each leaf's NULL bitmap OK" << std::endl;
+}
+
+static void test_partition_sort_reads_long_values_for_retained_rows() {
+    using dbms::DBStatus;
+    const std::string db = testDbPath("part_sort_long_values");
+    const std::string table = "events";
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == DBStatus::OK);
+    auto schema = makeSchema(table, {"id int", "payload text"});
+    schema.partitionType = dbms::TableSchema::PartitionType::Range;
+    schema.partitionKey = "id";
+    schema.rangePartitions = {{"early", "10"}, {"later", "20"}};
+    assert(g_engine.createTable(db, schema) == DBStatus::OK);
+    const std::string longValue(6200, 'z');
+    assert(g_engine.insertRow(db, table, {{"id", "5"}, {"payload", "short"}}) == DBStatus::OK);
+    assert(g_engine.insertRow(db, table, {{"id", "15"}, {"payload", longValue}}) == DBStatus::OK);
+    assert(g_engine.checkpoint(db));
+
+    const auto readSorted = [&](const std::string& orderClause) {
+        auto prepared = g_engine.prepareBoundQuery(db,
+            "SELECT id, payload FROM events ORDER BY " + orderClause);
+        return dbms::QueryPlanner::executePlanWithPrefix(
+            dbms::QueryPlanner::buildPreparedSelectPlan(&g_engine, db, table, std::move(prepared)));
+    };
+    const auto toast = std::filesystem::path(db) / "events.toast.dt";
+    const auto saved = std::filesystem::path(db) / "events.toast.saved";
+    assert(std::filesystem::file_size(toast) > 8192);
+    std::filesystem::rename(toast, saved);
+
+    const auto first = readSorted("id LIMIT 1");
+    assert(first.ok && (first.structuredRows == std::vector<std::vector<std::string>>{{"5", "short"}}));
+    const auto larger = readSorted("id LIMIT 1 OFFSET 1");
+    assert(!larger.ok && larger.errorSqlState == "58030");
+    assert(!readSorted("payload LIMIT 1").ok);
+    assert(!std::filesystem::exists(toast));
+
+    std::filesystem::rename(saved, toast);
+    const auto second = readSorted("id LIMIT 1 OFFSET 1");
+    assert(second.ok && (second.structuredRows == std::vector<std::vector<std::string>>{{"15", longValue}}));
+    cleanup(db);
 }
 
 // The SQL frontend cannot yet create real partition children, so exercise
@@ -1110,6 +1156,7 @@ int main() {
     test_partition_wal_routing();
     test_transactional_partition_inserts();
     test_partition_scan_uses_leaf_nulls();
+    test_partition_sort_reads_long_values_for_retained_rows();
     test_analyze_partition_progress();
     std::cout << "[PART] all passed" << std::endl;
     return 0;

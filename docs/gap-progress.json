@@ -2,6 +2,28 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-22 defer long values that are not partition sort keys",
+      "gap_ids": ["CAT-11", "QRY-01", "STO-02"],
+      "status": "partial",
+      "evidence": [
+        "src/executor/ExecutionPlan.cpp",
+        "src/executor/BoundedSortRuns.h",
+        "docs/postgresql-comparison.md",
+        "docs/test-report.md",
+        "docs/performance-report-2026-10-30.md"
+      ],
+      "tests": [
+        "tests/partition_test.cpp",
+        "tests/typed_sort_operator_test.cpp",
+        "tests/bounded_sort_runs_test.cpp"
+      ],
+      "verification": [
+        "Four PostgreSQL 18.6 matrices matched for ordered results, row descriptors and SQLSTATE. Two-connection visibility, restart, spill cleanup and qualified long-value reads were verified.",
+        "All 24 leaves were visited. When sorting by id for one row, long-value heap reads fell from 63 to 2 and index reads from 6 to 3. The same fixture still required every long sort key when ordering by text.",
+        "Short integer order limits and small pages of wide rows improved. Deep OFFSET and the long-text sort control still showed slowdowns. Independent leaf relations and general partition planning remain partial."
+      ]
+    },
+    {
       "issue": "2026-11-22 read partitions on demand for unordered LIMIT queries",
       "gap_ids": ["CAT-11", "QRY-01", "STO-02"],
       "status": "partial",

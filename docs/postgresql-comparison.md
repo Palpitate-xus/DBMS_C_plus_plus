@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-22 · 分区排序按页接收记录
+
+PostgreSQL 18.6 给排序器传入所需记录数，符合条件时用有界堆保留排名靠前的记录。SQLite 在已保留 `LIMIT + OFFSET` 条时比较新记录，只有排得更靠前才替换当前最后一条。DuckDB 的优化器也会将符合条件的排序和 `LIMIT` 合并为 `TopN`。[PostgreSQL 排序节点](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/executor/nodeSort.c) · [PostgreSQL 有界堆](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/utils/sort/tuplesort.c) · [SQLite 排序源码](https://github.com/sqlite/sqlite/blob/master/src/select.c#L843-L866) · [DuckDB 优化器](https://duckdb.org/2024/11/14/optimizers)
+
+本项目原有的有界排序已经按 `LIMIT + OFFSET` 保留候选。符合条件的分区查询现在按页送入记录，在内存中先比较排序键，再为可能入选的记录读取其他字段。排序仍要检查每个分区。遇到内存不足时，现有排序器将数据写入临时文件。[功能验证](test-report.md#partition-order-input-20261122) · [性能报告](performance-report-2026-10-30.md#partition-order-input-cost-20261122)
+
 ## 2026-11-22 · 分区查询按 LIMIT 停止读取
 
 PostgreSQL 18.6 的 `Limit` 节点按需要从下游请求记录，`Append` 可以按顺序向各子计划取行。SQLite 的 `OffsetLimit` 指令计算分页需要读取的行数。DuckDB 的文档将 `LIMIT` 定义为作用于查询结果的操作，并说明无排序时结果顺序可能变化。[PostgreSQL Limit 源码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/executor/nodeLimit.c) · [PostgreSQL Append 源码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/executor/nodeAppend.c) · [SQLite 指令](https://www.sqlite.org/opcode.html) · [DuckDB LIMIT 文档](https://duckdb.org/docs/2.0/sql/query_syntax/limit)

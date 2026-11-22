@@ -102,8 +102,8 @@ public:
     RowContext context(const RowContext& caller) const;
     const PreparedQuery::SourceRange& sourceRange(size_t ordinal) const;
     void setSourceRow(RowContext& row, size_t ordinal,
-                      const std::vector<ExprValue>& cells) const;
-    void setSourceInputs(RowContext&,size_t,const std::vector<ExprValue>&,bool present) const;
+                      std::vector<ExprValue> cells) const;
+    void setSourceInputs(RowContext&,size_t,std::vector<ExprValue>,bool present) const;
     void copySourceInputs(RowContext&,size_t,const RowContext* actual) const;
     ExprValue readSourceColumn(const RowContext&,size_t,size_t) const;
     ExprValue evaluateMergedUsing(const PreparedQuery::SourceRange& merged, size_t index,

@@ -110,7 +110,8 @@ private:
         std::vector<Row>().swap(rows_);
         dynamicBytes_ = 0;
     }
-    void addImpl(Row row) {
+    template<class Materialize>
+    void addImpl(Row row, Materialize materialize) {
         if (phase_ != Phase::Loading) throw DbError("XX000", "sort input is already closed");
         checkForQueryInterrupt();
         if (inputTotal_ == std::numeric_limits<uint64_t>::max())
@@ -119,8 +120,10 @@ private:
         if (bound_ && (!*bound_ || (presorted_ && inputTotal_ > *bound_))) return;
         // Rejected TopN rows need no deep capacity traversal. Their original
         // SQL keys and early targets have already been evaluated by the owner.
-        if (!input_ && bound_ && heapReady_) {
-            if (!checkedLess(row, rows_.front())) return;
+        const bool replacing = !input_ && bound_ && heapReady_;
+        if (replacing && !checkedLess(row, rows_.front())) return;
+        materialize(row);
+        if (replacing) {
             const auto extra = extraBytes(row);
             const auto priorExtra = extraBytes(rows_.front());
             const auto replacement = sum(dynamicBytes_ - priorExtra, extra);
@@ -306,7 +309,13 @@ public:
         presorted_ = true;
     }
     void add(Row row) {
-        try { addImpl(std::move(row)); }
+        add(std::move(row), [](Row&) {});
+    }
+    // Materialize non-key data only after the row survives comparison, and
+    // before accounting, retaining or spilling it. The callback preserves Less.
+    template<class Materialize>
+    void add(Row row, Materialize materialize) {
+        try { addImpl(std::move(row), std::move(materialize)); }
         catch (...) { close(); throw; }
     }
     void finish() {

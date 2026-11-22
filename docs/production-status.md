@@ -6,6 +6,10 @@
 
 截至 2026-11-22，273 项功能要求中有 22 项完成、167 项部分实现、69 项待验证、15 项暂缓。各项结果和剩余范围见功能总账。以下更新报告给出各轮测试的实际范围。[功能总账](gap-progress.json) · [支持的功能和限制](compatibility-contract.md)
 
+## 2026-11-22 · 分区排序先比较排序列
+
+符合条件的分区 `ORDER BY ... LIMIT` 查询在内存中先比较定长排序列，再读取可能入选记录的其他字段。24 叶、144 行宽表的单行查询将长值数据页读取从 63 次降至 2 次，仍检查全部 24 个分区的排序列。小内存排序、两连接事务及重启测试通过。[测试报告](test-report.md#partition-order-input-20261122) · [性能报告](performance-report-2026-10-30.md#partition-order-input-cost-20261122)
+
 ## 2026-11-22 · 分区表取够结果后停止读取
 
 符合条件的单表 `LIMIT` 查询保留同一份事务快照，按页读取，当需要更多记录时才打开后续分区。在 60 叶、360 行的夹具上，`LIMIT 1` 打开的叶文件从 60 个降至 1 个，`LIMIT 2 OFFSET 5` 打开 2 个。独立分区关系、排序优化及完整的客户端按批取行仍有差距。[测试报告](test-report.md#partition-limit-prefix-20261122) · [性能报告](performance-report-2026-10-30.md#partition-limit-prefix-cost-20261122)
