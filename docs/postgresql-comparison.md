@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-22 · 导入时使用列默认值
+
+PostgreSQL 18.6 在解析 COPY 字段时识别默认值标记，再调用当前列默认表达式。DuckDB 的 `INSERT` 支持省略列或显式写 `DEFAULT`。SQLite 的 `INSERT` 也支持通过省略列或使用 `DEFAULT VALUES` 来采用默认值。[PostgreSQL COPY](https://www.postgresql.org/docs/18/sql-copy.html) · [PostgreSQL 导入实现](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/commands/copyfromparse.c) · [DuckDB INSERT](https://duckdb.org/docs/2.0/sql/statements/insert) · [SQLite INSERT](https://www.sqlite.org/lang_insert.html)
+
+本项目用原有的写入代码求取默认值。所测的列默认值、域默认值及序列均可通过标记写入，`DEFAULT NULL::text` 的定义存储仍有差异。跳过坏行、二进制和服务器文件的更多选项仍待实现。[正确性](test-report.md#copy-default-marker-20261122) · [性能](performance-report-2026-10-30.md#copy-default-marker-cost-20261122)
+
 ## 2026-11-22 · CSV 导入
 
 PostgreSQL 18.6 读取完整的 CSV 记录，再解释字段和空值。引号内换行会保留，`HEADER MATCH` 按导入列的顺序核对列名。DuckDB 可自动识别 CSV 格式，也支持指定空值标记并行读取文件。SQLite 的命令行通过 `.import` 读取带引号的 CSV。[PostgreSQL 导入实现](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/commands/copyfromparse.c) · [DuckDB CSV 导入](https://duckdb.org/docs/2.0/data/csv/overview) · [SQLite 导入](https://www.sqlite.org/cli.html#importing_files_as_csv_or_other_formats)

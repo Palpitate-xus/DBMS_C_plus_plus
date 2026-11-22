@@ -2490,6 +2490,12 @@ COPY public.users (id, name) FROM STDIN WITH (FORMAT csv, HEADER MATCH);
 
 字段里的换行需要放在引号内。默认把未加引号的空字段读成 SQL 空值，把 `""` 读成空字符串。可以用 `NULL` 更改标记，用 `FORCE_NULL (name)` 将加引号的标记也读成空值，或用 `FORCE_NOT_NULL (name)` 保留未加引号的标记。格式或数据出错时，整次导入会撤销。[CSV 导入测试](test-report.md#copy-csv-in-20261122)
 
+CSV 或文本导入可以用 `DEFAULT` 指定默认值标记。例如，若 `name` 列已定义默认值，下面的命令会用它替换 CSV 中未加引号的 `USE_DEFAULT`。加引号的 `"USE_DEFAULT"` 仍是普通文本。文本格式按输入字段的原始字节比较标记，再处理反斜杠转义。标记落在没有默认值的列时会报错。[默认值导入测试](test-report.md#copy-default-marker-20261122)
+
+```sql
+COPY public.users (id, name) FROM STDIN WITH (FORMAT csv, DEFAULT 'USE_DEFAULT');
+```
+
 ### 备份与恢复作业
 
 `DUMP` 产生逻辑 SQL 文件；`RESTORE DATABASE` 只接受 `BACKUP DATABASE`

@@ -2,9 +2,13 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-22 · COPY 中的默认值标记
+
+CSV 和文本 `COPY … FROM STDIN` 支持 `DEFAULT '标记'`。遇到标记时采用列的当前默认值，列没有默认值时返回 `22P04`。原有的目标表与列限制仍适用。用 `DEFAULT NULL::text` 创建普通文本列时，本项目保留了默认表达式，PostgreSQL 会在所测写法下省略它，使用标记时两者行为有差异。[用法](MANUAL.md#用客户端复制数据) · [对照范围](test-report.md#copy-default-marker-20261122)
+
 ## 2026-11-22 · CSV 导入
 
-`COPY … FROM STDIN` 支持 UTF-8 CSV，包括带换行的字段、`HEADER`、`HEADER MATCH`、自定义分隔符与空值、`FORCE_NULL` 和 `FORCE_NOT_NULL`。每次导入沿用已有的列、写入权限和事务限制。`DEFAULT` 标记、跳过坏行、二进制及服务器文件的 CSV 选项仍待实现。[用法](MANUAL.md#用客户端复制数据) · [验证范围](test-report.md#copy-csv-in-20261122)
+`COPY … FROM STDIN` 支持 UTF-8 CSV，包括带换行的字段、`HEADER`、`HEADER MATCH`、自定义分隔符与空值、`FORCE_NULL` 和 `FORCE_NOT_NULL`。每次导入沿用已有的列、写入权限和事务限制。跳过坏行、二进制及服务器文件的 CSV 选项仍待实现。[用法](MANUAL.md#用客户端复制数据) · [验证范围](test-report.md#copy-csv-in-20261122)
 
 ## 2026-11-22 · CSV 导出
 

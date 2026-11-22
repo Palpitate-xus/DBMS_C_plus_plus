@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>导入数据时可以使用列的默认值 · 2026-11-22</summary>
+
+例如，导入订单时可以用一个约定的标记，让数据库填上默认状态。
+
+[用法](docs/MANUAL.md#用客户端复制数据) · [测试报告](docs/test-report.md#copy-default-marker-20261122) · [性能报告](docs/performance-report-2026-10-30.md#copy-default-marker-cost-20261122)
+
+</details>
+
+<details>
 <summary>从 CSV 导入数据 · 2026-11-22</summary>
 
 可以把表格软件保存的 CSV 导入数据库，并在导入前核对第一行的列名和顺序。单元格里有换行也可以导入。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>有人改表时，其他查询可以等一下 · 2026-11-22</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-22 · 查询可以等表结构保存完成
 
 数据库正在保存表结构时，另一个连接发来的查询可以等保存完成再继续。达到设置的等待时间才报超时。
 
 [测试报告](docs/test-report.md#begin-catalog-contention-20261122) · [性能报告](docs/performance-report-2026-10-30.md#begin-catalog-contention-cost-20261122)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-22 · 可以导出查询筛选后的数据
 

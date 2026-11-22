@@ -389,6 +389,56 @@ def check_csv_copy_input(client, runner, sock):
         ]), (sqlstate, tag, rows)
         command("DROP TABLE copy_csv_marker", b"DROP TABLE")
         command("DROP TABLE copy_csv_input", b"DROP TABLE")
+
+        command("CREATE SEQUENCE copy_default_seq START WITH 40", b"CREATE SEQUENCE")
+        command("CREATE TABLE copy_defaults (id INT PRIMARY KEY, val TEXT DEFAULT 'fallback', "
+                "n INT DEFAULT nextval('copy_default_seq'), absent TEXT, extra INT DEFAULT 77)", b"CREATE TABLE")
+        selected = "COPY copy_defaults (id, val, n, absent) FROM STDIN"
+        load(selected + " (FORMAT csv, HEADER MATCH, DEFAULT 'DEF', NULL 'NIL')",
+             b'id,val,n,absent\n1,DEF,DEF,plain\n2,"DEF",DEF,"DEF"\n3,NIL,NIL,""\n',
+             extended, count=3, columns=4)
+        load(selected + r" (FORMAT text, DEFAULT '\D')",
+             b'4\t\\D\t88\ttext\n5\t\\\\D\t\\D\t\\N\n', extended, count=2, columns=4)
+        load(selected + " (FORMAT csv, DEFAULT '', NULL 'NIL')",
+             b'6,,90,""\n', extended, count=1, columns=4)
+        load(selected + " (FORMAT csv, DEFAULT 'val', HEADER MATCH)",
+             b'id,val,n,absent\n7,val,91,ok\n', extended, count=1, columns=4)
+
+        command("BEGIN", b"BEGIN", b"T")
+        load(selected + " (FORMAT csv, DEFAULT 'DEF')",
+             b'8,DEF,DEF,will-rollback\n9,DEF,93,DEF\n', extended, error="22P04", ready=b"E", columns=4)
+        command("ROLLBACK", b"ROLLBACK")
+        seq, sqlstate, _, _, tag = runner.decode_wire_result(client.simple_query(
+            sock, "SELECT nextval('copy_default_seq')"))
+        assert (seq, sqlstate, tag) == ([["44"]], None, "SELECT 1"), (seq, sqlstate, tag)
+
+        for sql, code in (
+            (selected + " (FORMAT csv, DEFAULT '')", "0A000"),
+            (selected + " (FORMAT csv, DEFAULT 'a,b')", "0A000"),
+            (selected + ''' (FORMAT csv, DEFAULT 'a"b')''', "0A000"),
+            (selected + r" (FORMAT csv, DEFAULT E'\n')", "22023"),
+            (selected + r" (FORMAT csv, DEFAULT E'\xff')", "22021"),
+            ("COPY copy_defaults TO STDOUT (DEFAULT 'DEF')", "0A000"),
+        ):
+            if extended:
+                sock.sendall(client.typed(b"P", parse("", sql)) + client.typed(b"B", bind("", "")) +
+                             client.typed(b"E", execute()) + client.typed(b"S"))
+                reply = client.read_until_ready(sock)
+            else:
+                reply = client.simple_query(sock, sql)
+            assert (state(reply), reply[-1]) == (code, (b"Z", b"I")), (sql, reply)
+            assert all(kind not in (b"G", b"H") for kind, _ in reply), (sql, reply)
+
+        rows, sqlstate, _, _, tag = runner.decode_wire_result(client.simple_query(
+            sock, "SELECT id, val, n, absent, extra FROM copy_defaults ORDER BY id"))
+        assert (sqlstate, tag, rows) == (None, "SELECT 7", [
+            ["1", "fallback", "40", "plain", "77"], ["2", "DEF", "41", "DEF", "77"],
+            ["3", None, None, "", "77"], ["4", "fallback", "88", "text", "77"],
+            ["5", "\\D", "42", None, "77"], ["6", "fallback", "90", "", "77"],
+            ["7", "fallback", "91", "ok", "77"],
+        ]), (sqlstate, tag, rows)
+        command("DROP TABLE copy_defaults", b"DROP TABLE")
+        command("DROP SEQUENCE copy_default_seq", b"DROP SEQUENCE")
     print("COPY_CSV_INPUT_MODES_COMPLETE 2")
 
 

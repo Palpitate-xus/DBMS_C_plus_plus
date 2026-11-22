@@ -5200,6 +5200,7 @@ struct CopyWirePlan {
     char quote = '"';
     char escape = '"';
     std::string nullMarker = "\\N";
+    std::optional<std::string> defaultMarker;
     std::string sqlState;
     std::string error;
 };
@@ -5456,6 +5457,8 @@ bool parseCopyTable(CopySqlScanner& scanner, CopyToken token, CopyWirePlan& plan
     return true;
 }
 
+bool validUtf8(const std::string& value);
+
 CopyWirePlan parseCopyWirePlan(const std::string& sql) {
     CopyWirePlan plan;
     CopySqlScanner scanner(sql);
@@ -5640,6 +5643,20 @@ CopyWirePlan parseCopyWirePlan(const std::string& sql) {
                 return plan;
             }
             plan.nullMarker = value.text;
+        } else if (option == "default") {
+            if (to) {
+                copyError(plan, "0A000", "COPY DEFAULT requires COPY FROM");
+                return plan;
+            }
+            if (!validUtf8(value.text)) {
+                copyError(plan, "22021", "invalid UTF8 in COPY default marker");
+                return plan;
+            }
+            if (value.text.find_first_of("\r\n") != std::string::npos) {
+                copyError(plan, "22023", "invalid COPY default marker");
+                return plan;
+            }
+            plan.defaultMarker = std::move(value.text);
         } else if (option == "encoding") {
             std::string encoding = lowerAscii(value.text);
             encoding.erase(std::remove_if(
@@ -5685,6 +5702,12 @@ CopyWirePlan parseCopyWirePlan(const std::string& sql) {
     }
     if (plan.nullMarker.find(plan.delimiter) != std::string::npos) {
         copyError(plan, "22023", "COPY null marker cannot contain the delimiter");
+        return plan;
+    }
+    if (plan.defaultMarker &&
+        (*plan.defaultMarker == plan.nullMarker || plan.defaultMarker->find(plan.delimiter) != std::string::npos ||
+         (plan.csv && plan.defaultMarker->find(plan.quote) != std::string::npos))) {
+        copyError(plan, "0A000", "COPY default marker conflicts with NULL, DELIMITER or QUOTE");
         return plan;
     }
     token = scanner.next();
@@ -5971,9 +5994,15 @@ bool decodeCopyTextField(const std::string& raw, std::string& value,
     return true;
 }
 
+struct CopyInputField {
+    std::optional<std::string> value;
+    bool useDefault = false;
+};
+using CopyFields = std::vector<CopyInputField>;
+
 bool decodeCopyTextRecord(
         std::string record, const CopyWirePlan& plan,
-        std::vector<std::optional<std::string>>& fields,
+        CopyFields& fields,
         std::string& error) {
     if (!record.empty() && record.back() == '\r') record.pop_back();
     std::vector<std::string> rawFields;
@@ -6012,12 +6041,16 @@ bool decodeCopyTextRecord(
     fields.reserve(rawFields.size());
     for (const auto& raw : rawFields) {
         if (raw == plan.nullMarker) {
-            fields.push_back(std::nullopt);
+            fields.push_back({std::nullopt});
+            continue;
+        }
+        if (plan.defaultMarker && raw == *plan.defaultMarker) {
+            fields.push_back({std::nullopt, true});
             continue;
         }
         std::string decoded;
         if (!decodeCopyTextField(raw, decoded, error)) return false;
-        fields.emplace_back(std::move(decoded));
+        fields.push_back({std::move(decoded)});
     }
     return true;
 }
@@ -6108,8 +6141,6 @@ bool bindCopyColumnOptions(CopyWirePlan& plan, const TableSchema& table,
            bindFlags(plan.forceNotNull, "FORCE_NOT_NULL") && bindFlags(plan.forceNull, "FORCE_NULL");
 }
 
-using CopyFields = std::vector<std::optional<std::string>>;
-
 // Decode CSV records independently of CopyData boundaries. A pending quote,
 // escape or carriage return may need the first byte of the next payload.
 class CopyCsvInput {
@@ -6192,8 +6223,10 @@ private:
             const bool isNull = field_ == plan_.nullMarker &&
                 (quoted_ ? (!header_ && plan_.forceNull.contains(index))
                          : (header_ || !plan_.forceNotNull.contains(index)));
-            if (isNull) fields_.emplace_back(std::nullopt);
-            else fields_.emplace_back(std::move(field_));
+            if (isNull) fields_.push_back({std::nullopt});
+            else if (!header_ && !quoted_ && plan_.defaultMarker && field_ == *plan_.defaultMarker)
+                fields_.push_back({std::nullopt, true});
+            else fields_.push_back({std::move(field_)});
         }
         field_.clear();
         quoted_ = false;
@@ -6215,7 +6248,8 @@ private:
                 throw DbError("22P04", "missing data for expected CSV column");
         }
         if (header_ && plan_.matchHeader &&
-            !std::equal(fields_.begin(), fields_.end(), plan_.columnNames.begin()))
+            !std::equal(fields_.begin(), fields_.end(), plan_.columnNames.begin(),
+                [](const auto& field, const auto& column) { return field.value == column; }))
             throw DbError("22P04", "CSV header does not match selected column names");
         if (!header_) insert(fields_);
         header_ = false;
@@ -6372,7 +6406,15 @@ CopyStreamResult receiveCopyIn(PostgresProtocol& protocol,
         StorageEngine::SqlRow values;
         for (size_t field = 0; field < fields.size(); ++field) {
             const Column& column = table.cols[plan.columnIndexes[field]];
-            auto value = std::move(fields[field]);
+            if (fields[field].useDefault) {
+                if (column.defaultValue.empty() && !column.isAutoIncrement)
+                    throw DbError("22P04", "COPY default marker used for column \"" + column.dataName +
+                        "\" without a default value");
+                // An omitted key uses the same expression and conversion as
+                // INSERT. A present key with no value still means SQL NULL.
+                continue;
+            }
+            auto value = std::move(fields[field].value);
             const uint32_t typeOid = mapBuiltinTypeNameToOid(column.dataType);
             if (value && !column.isArray &&
                 (typeOid == 21 || typeOid == 23 || typeOid == 20)) {
