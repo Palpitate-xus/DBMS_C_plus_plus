@@ -1,27 +1,27 @@
 # 更新日志
 
 <details>
-<summary>查询可以连接视图和普通表 · 2026-11-22</summary>
+<summary>可以把表和视图里的数据合起来查 · 2026-11-22</summary>
 
-例如，可以把已保存的销售汇总视图和订单表按订单号连起来，在同一个结果里查看汇总金额和订单明细。
+例如，销售汇总视图里只有产品编号和金额。用产品编号匹配产品表，就能同时查出产品名称和销售总额。
 
 [用法](docs/MANUAL.md#9-视图与物化视图) · [测试报告](docs/test-report.md#join-ordinary-views-20261122) · [性能报告](docs/performance-report-2026-10-30.md#join-ordinary-views-cost-20261122)
 
 </details>
 
 <details>
-<summary>表改列名后，已有视图仍可查询 · 2026-11-22</summary>
+<summary>表里的列改名后，已有视图照常可用 · 2026-11-22</summary>
 
-例如，订单表把「数量」改成「订购数量」后，已有视图仍用原来的列名显示数量和合计。
+例如，订单表把「数量」改成「订购数量」后，已有视图里的这一列仍叫「数量」。
 
 [用法](docs/MANUAL.md#9-视图与物化视图) · [测试报告](docs/test-report.md#rename-dependent-views-20261122) · [性能报告](docs/performance-report-2026-10-30.md#rename-dependent-views-cost-20261122)
 
 </details>
 
 <details>
-<summary>列改名后，数据检查规则也会更新 · 2026-11-22</summary>
+<summary>列改名后，原来的检查规则仍然生效 · 2026-11-22</summary>
 
-把「数量」改成「订购数量」后，要求数量为正数的规则仍会生效，自动计算的列也会使用新列名。
+例如，订单数量改名后，系统仍会拒绝负数，订单金额也能继续按数量和单价计算。
 
 [用法](docs/MANUAL.md#修改表) · [测试报告](docs/test-report.md#rename-quoted-column-references-20261122) · [性能报告](docs/performance-report-2026-10-30.md#rename-quoted-column-references-cost-20261122)
 
