@@ -2,6 +2,27 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-22 reuse already locked schema for ordinary partition scans",
+      "gap_ids": ["CAT-11", "QRY-01", "STO-02"],
+      "status": "partial",
+      "evidence": [
+        "src/commands/TableManage.cpp",
+        "docs/postgresql-comparison.md",
+        "docs/test-report.md",
+        "docs/performance-report-2026-10-30.md"
+      ],
+      "tests": [
+        "tests/partition_test.cpp",
+        "tests/table_scan_statistics_test.cpp",
+        "tests/policy_test.cpp"
+      ],
+      "verification": [
+        "31 PostgreSQL comparisons and retained partition, row-policy, snapshot, and cold-start checks passed. An external tablespace test verified NULL, long values, and leaf file replacement and restore.",
+        "Five startup-then-query traces matched the previous build byte for byte, including identical leaf reads and schema file calls. Repeated full scans showed fewer user-space samples in schema lookup.",
+        "Independent runs used separate database processes per query and included same-binary controls. General partition pruning and independent leaf relations remain partial."
+      ]
+    },
+    {
       "issue": "2026-11-22 skip irrelevant partitions for integer range queries",
       "gap_ids": ["CAT-11", "QRY-01", "STO-02"],
       "status": "partial",

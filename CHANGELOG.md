@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>读取多个分区时，少查表结构 · 2026-11-22</summary>
+
+一次查询要读取多个分区时，扫描可以共用已经读到的表结构，省掉为每个分区重复查表结构的工作。
+
+[使用说明](docs/MANUAL.md#15-分区表) · [测试报告](docs/test-report.md#partition-scan-reuse-20261122) · [性能报告](docs/performance-report-2026-10-30.md#partition-scan-reuse-cost-20261122)
+
+</details>
+
+<details>
 <summary>按编号查找时，跳过无关分区 · 2026-11-22</summary>
 
 比如订单按编号区间分开存放。查找 100 到 199 号订单时，数据库可以跳过不可能包含这些订单的分区。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>按编号取前几条时，少读长文本 · 2026-11-22</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-22 · 按编号取前几条时，少读长文本
 
 比如在分区表里找编号最小的 10 条记录，查询可以先比较编号，只为可能入选的记录读取长文本。
 
 [使用说明](docs/MANUAL.md#15-分区表) · [测试报告](docs/test-report.md#partition-order-input-20261122) · [性能报告](docs/performance-report-2026-10-30.md#partition-order-input-cost-20261122)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-22 · 只取几条记录时，读够就停
 

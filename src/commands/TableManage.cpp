@@ -4699,22 +4699,26 @@ static std::optional<StorageEngine::IntegerPartitionFilter> integerPartitionCond
     const auto domain = StorageEngine::integerPartitionDomain(table);
     if (!domain) return std::nullopt;
     using Filter = StorageEngine::IntegerPartitionFilter;
+    const auto readCondition = [&](const StorageEngine::Condition& condition) -> std::optional<Filter> {
+        if (condition.colName != table.partitionKey || condition.columnComparison) return std::nullopt;
+        if (condition.op == "isnull") return Filter{{}, true};
+        if (condition.op == "isnotnull") return Filter{{*domain}, false};
+        if (!condition.decodedLiteralRhs || condition.patternIsNull ||
+            (!condition.patternType.empty() && condition.patternType != "unknown")) return std::nullopt;
+        const auto value = parsePartitionInteger(condition.value);
+        if (!value || *value < domain->first || *value > domain->second) return std::nullopt;
+        return Filter::comparison(condition.op, *value);
+    };
+    if (branches.size() == 1 && branches.front().size() == 1)
+        return readCondition(branches.front().front());
+
     Filter result;
     for (const auto& branch : branches) {
         Filter matches{{*domain}, true};
         for (const auto& condition : branch) {
-            if (condition.colName != table.partitionKey || condition.columnComparison) return std::nullopt;
-            if (condition.op == "isnull") matches.intersect(Filter{{}, true});
-            else if (condition.op == "isnotnull") matches.matchesNull = false;
-            else {
-                if (!condition.decodedLiteralRhs || condition.patternIsNull ||
-                    (!condition.patternType.empty() && condition.patternType != "unknown")) return std::nullopt;
-                const auto value = parsePartitionInteger(condition.value);
-                if (!value || *value < domain->first || *value > domain->second) return std::nullopt;
-                const auto comparison = Filter::comparison(condition.op, *value);
-                if (!comparison) return std::nullopt;
-                matches.intersect(*comparison);
-            }
+            const auto comparison = readCondition(condition);
+            if (!comparison) return std::nullopt;
+            matches.intersect(*comparison);
         }
         result.unite(matches);
     }
@@ -4727,8 +4731,13 @@ std::optional<std::vector<std::string>> StorageEngine::pruneIntegerPartitions(
     if (!domain) return std::nullopt;
     if (!table.rangePartitionLowerBounds.empty() &&
         table.rangePartitionLowerBounds.size() != table.rangePartitions.size()) return std::nullopt;
-    IntegerPartitionFilter wanted = filter;
-    wanted.intersect(IntegerPartitionFilter{{*domain}, true});
+    std::optional<IntegerPartitionFilter> clipped;
+    if (!filter.intervals.empty() && (filter.intervals.front().first < domain->first ||
+        filter.intervals.back().second > domain->second)) {
+        clipped = filter;
+        clipped->intersect(IntegerPartitionFilter{{*domain}, true});
+    }
+    const auto& wanted = clipped ? *clipped : filter;
     // The legacy row encoder can store the parse-failure sentinel for a
     // long decimal spelling of any integer. Its low-width representation
     // may therefore exist in a leaf whose bounds do not include that value.
@@ -4750,6 +4759,8 @@ std::optional<std::vector<std::string>> StorageEngine::pruneIntegerPartitions(
     // Those spellings sort before every admitted finite bound. They can
     // reside in the first MINVALUE range, or in DEFAULT otherwise.
     bool legacyDefault = !wanted.intervals.empty() && wanted.intervals.front().first <= 0;
+    const bool hasDefault = !table.defaultPartitionName.empty();
+    int64_t previousLast = 0;
     std::vector<std::pair<int64_t, int64_t>> occupied;
     std::vector<std::string> selected;
     const auto readBound = [&](const std::string& text, bool lower) -> std::optional<int64_t> {
@@ -4774,16 +4785,16 @@ std::optional<std::vector<std::string>> StorageEngine::pruneIntegerPartitions(
             : table.rangePartitionLowerBounds[i];
         const auto first = readBound(lower, true);
         const auto last = readBound(upper, false);
-        if (!first || !last || *first > *last ||
-            (!occupied.empty() && *first <= occupied.back().second)) return std::nullopt;
-        occupied.emplace_back(*first, *last);
+        if (!first || !last || *first > *last || (i != 0 && *first <= previousLast)) return std::nullopt;
+        previousLast = *last;
+        if (hasDefault) occupied.emplace_back(*first, *last);
         const bool possibleLegacyRows = legacyDefault && i == 0 && SQLParser::toLower(trim(lower)) == "minvalue";
         if (possibleLegacyRows) legacyDefault = false;
         if (possibleLegacyRows || std::any_of(wanted.intervals.begin(), wanted.intervals.end(), [&](const auto& range) {
                 return range.first <= *last && *first <= range.second;
             })) selected.push_back(name);
     }
-    if (!table.defaultPartitionName.empty()) {
+    if (hasDefault) {
         const auto crossesGap = [&](const auto& range) {
             int64_t first = range.first;
             for (const auto& covered : occupied) {
@@ -4798,7 +4809,7 @@ std::optional<std::vector<std::string>> StorageEngine::pruneIntegerPartitions(
             std::any_of(wanted.intervals.begin(), wanted.intervals.end(), crossesGap))
             selected.push_back(table.defaultPartitionName);
     }
-    if (selected.size() == table.rangePartitions.size() + !table.defaultPartitionName.empty())
+    if (selected.size() == table.rangePartitions.size() + hasDefault)
         return std::nullopt;
     return selected;
 }
@@ -39189,8 +39200,9 @@ std::vector<std::string> StorageEngine::query(
                 branches.push_back(std::move(branch));
             }
         }
-        const auto integerFilter = capturePartitionNulls && !enforceRls && !forUpdate && !noWait && !skipLocked
-            ? integerPartitionConditions(tbl, branches) : std::nullopt;
+        const TableSchema* scanSchema = capturePartitionNulls && !forUpdate && !noWait && !skipLocked
+            ? &tbl : nullptr;
+        const auto integerFilter = scanSchema && !enforceRls ? integerPartitionConditions(tbl, branches) : std::nullopt;
         const auto integerTargets = integerFilter ? pruneIntegerPartitions(tbl, *integerFilter) : std::nullopt;
         std::set<std::string> possiblePartitions;
         // LIST and HASH routing uses the spelling of the inserted key.
@@ -39248,14 +39260,13 @@ std::vector<std::string> StorageEngine::query(
             if (capturePartitionNulls)
                 partitionNulls.push_back(std::move(bitmap));
         };
-        if (integerTargets) {
-            if (integerTargets->empty()) noteScanSiread(dbname, tablename);
-            else scanFailed = !forEachRowUsingSchema(dbname, tablename, collect, queryView,
-                *integerTargets, true, false, nullptr, &tbl);
+        if (integerTargets && integerTargets->empty()) {
+            noteScanSiread(dbname, tablename);
         } else {
+            const auto& partitions = integerTargets ? *integerTargets : targetParts;
             scanFailed = !(enforceRls
-                ? forEachVisibleRow(dbname, tablename, "SELECT", collect, queryView, targetParts)
-                : forEachRow(dbname, tablename, collect, queryView, targetParts));
+                ? forEachVisibleRowUsingSchema(dbname, tablename, "SELECT", collect, queryView, partitions, scanSchema)
+                : forEachRowUsingSchema(dbname, tablename, collect, queryView, partitions, true, false, nullptr, scanSchema));
         }
     } else if (enforceRls) {
         const auto targetParts = tbl.partitionType == TableSchema::PartitionType::None

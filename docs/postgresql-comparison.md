@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-22 · 减少分区扫描中重复的表定义查找
+
+PostgreSQL 18.6 对已经解析的分区边界做二分查找。SQLite 对有序索引先定位范围起点，再顺序读匹配记录。DuckDB 用数据组的边界跳过无法匹配的组。[PostgreSQL 分区裁剪源码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/partitioning/partprune.c) · [SQLite 查询规划](https://sqlite.org/queryplanner.html) · [DuckDB 最小值和最大值索引](https://duckdb.org/docs/2.0/guides/performance/indexing)
+
+本项目减少单个整数条件的区间分配，并在普通分区扫描中复用已经加锁读取的表定义和数据目录。这也包括所有分区都需要读取的情况。与 PostgreSQL 的通用边界索引、多列分区键和独立叶关系仍有差距。[测试报告](test-report.md#partition-scan-reuse-20261122) · [性能报告](performance-report-2026-10-30.md#partition-scan-reuse-cost-20261122)
+
 ## 2026-11-22 · 按整数范围跳过无关分区
 
 PostgreSQL 18.6 依据分区边界和查询条件生成裁剪步骤，用交集处理 `AND`，用并集处理 `OR`，也可以在执行时根据参数进一步缩小范围。SQLite 在满足条件时分别使用索引处理各个 `OR` 条件，再合并行位置。DuckDB 利用每组数据的最小值和最大值跳过不可能命中的数据组。[PostgreSQL 分区裁剪](https://www.postgresql.org/docs/18/ddl-partitioning.html#DDL-PARTITION-PRUNING) · [PostgreSQL 18.6 源码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/partitioning/partprune.c) · [SQLite OR 优化](https://sqlite.org/optoverview.html#or_optimizations) · [DuckDB 最小值和最大值索引](https://duckdb.org/docs/2.0/guides/performance/indexing)
