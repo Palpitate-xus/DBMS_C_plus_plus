@@ -1,27 +1,27 @@
 # 更新日志
 
 <details>
-<summary>可以从 CSV 导入数据 · 2026-11-22</summary>
+<summary>从 CSV 导入数据 · 2026-11-22</summary>
 
-可以把带列名的 CSV 导入普通表，也可以让数据库先核对列名和顺序。带引号的字段可以跨多行。
+可以把表格软件保存的 CSV 导入数据库，并在导入前核对第一行的列名和顺序。单元格里有换行也可以导入。
 
 [使用说明](docs/MANUAL.md#用客户端复制数据) · [测试报告](docs/test-report.md#copy-csv-in-20261122) · [性能报告](docs/performance-report-2026-10-30.md#copy-csv-in-cost-20261122)
 
 </details>
 
 <details>
-<summary>可以导出 CSV · 2026-11-22</summary>
+<summary>把查询结果保存为 CSV · 2026-11-22</summary>
 
-可以导出整张表，也可以先筛选、排序再导出。第一行可以带上列名，方便用表格软件打开。
+例如，只导出本月的订单，按金额排序，并把列名写在第一行。
 
 [使用说明](docs/MANUAL.md#用客户端复制数据) · [测试报告](docs/test-report.md#copy-csv-out-20261122) · [性能报告](docs/performance-report-2026-10-30.md#copy-csv-out-cost-20261122)
 
 </details>
 
 <details>
-<summary>有连接正在保存表结构时，其他查询可以等待 · 2026-11-22</summary>
+<summary>有人改表时，其他查询可以等一下 · 2026-11-22</summary>
 
-多个连接同时开始事务时，短暂的保存工作完成后，等待中的查询可以继续。超过设定的等待时间会报告锁超时。
+数据库正在保存表结构时，另一个连接发来的查询可以等保存完成再继续。达到设置的等待时间才报超时。
 
 [测试报告](docs/test-report.md#begin-catalog-contention-20261122) · [性能报告](docs/performance-report-2026-10-30.md#begin-catalog-contention-cost-20261122)
 
