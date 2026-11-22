@@ -6,6 +6,10 @@
 
 截至 2026-11-22，273 项功能要求中有 22 项完成、167 项部分实现、69 项待验证、15 项暂缓。各项结果和剩余范围见功能总账。以下更新报告给出各轮测试的实际范围。[功能总账](gap-progress.json) · [支持的功能和限制](compatibility-contract.md)
 
+## 2026-11-22 · 同时开始事务时可以等待目录保存
+
+新版将目录保存时的短暂冲突交给锁等待处理。在 6 个连接的测试中，2,880 次查询和事务操作全部完成，基线有 1,110 次返回文件错误。完整协议套件通过。[测试报告](test-report.md#begin-catalog-contention-20261122) · [性能报告](performance-report-2026-10-30.md#begin-catalog-contention-cost-20261122)
+
 ## 2026-11-22 · 可以导出筛选后的查询结果
 
 `COPY (查询) TO STDOUT` 支持客户端导出文本，可以先筛选、排序或计算列。在 32 MiB 的逐行导出测试中，服务端峰值内存约为 23 MiB，直接执行同一查询时约为 151 MiB。列授权、实际行计算失败和服务重启均纳入验证。[用法](MANUAL.md#用客户端复制数据) · [测试报告](test-report.md#copy-query-stdout-20261122) · [性能报告](performance-report-2026-10-30.md#copy-query-stdout-cost-20261122)

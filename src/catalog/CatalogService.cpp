@@ -415,6 +415,11 @@ void CatalogService::evict(const std::string& dbname) {
 }
 
 bool CatalogService::persistAll(const std::string& database) {
+    return persistCatalogs(database) == CatalogManager::PersistResult::Published;
+}
+
+CatalogManager::PersistResult CatalogService::persistCatalogs(const std::string& database) {
+    using Result = CatalogManager::PersistResult;
     std::vector<std::pair<std::string, CachedCatalog>> models;
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -422,7 +427,10 @@ bool CatalogService::persistAll(const std::string& database) {
             if(database.empty() || engine_.dbPath(entry.first).lexically_normal()==
                                    engine_.dbPath(database).lexically_normal())models.push_back(entry);
     }
-    bool ok = true;
+    auto status = Result::Published;
+    const auto record = [&](Result result) {
+        if (result == Result::Failed || status == Result::Published) status = result;
+    };
     for (const auto& entry : models) {
         // Embedded callers and tests may remove a database directory outside
         // DROP DATABASE. Never let an orphaned catalog cache make an
@@ -452,14 +460,13 @@ bool CatalogService::persistAll(const std::string& database) {
             continue;
         }
         if (!ownership.mayReadCurrentFiles) {
-            if (entry.second.manager && entry.second.manager->hasUnpublishedChanges()) ok = false;
+            if (entry.second.manager && entry.second.manager->hasUnpublishedChanges()) record(Result::Failed);
             continue;
         }
-        using Result = CatalogManager::PersistResult;
         if (entry.second.manager) {
             const auto result = entry.second.manager->persistCurrent();
             if (result != Result::RefreshRequired) {
-                if (result == Result::Failed) ok = false;
+                record(result);
                 continue;
             }
         }
@@ -468,7 +475,7 @@ bool CatalogService::persistAll(const std::string& database) {
         // Publish a private replacement, then make it available to readers.
         const DatabaseMetadataWrite writer(engine_.dbPath(entry.first));
         if (!writer.acquired()) {
-            ok = false;
+            record(writer.contended() ? Result::Busy : Result::Failed);
             continue;
         }
         std::lock_guard<std::mutex> lock(mutex_);
@@ -476,13 +483,13 @@ bool CatalogService::persistAll(const std::string& database) {
         if (current == cache_.end()) continue;
         auto& cached = current->second;
         if (cached.databaseDevice != physical.device || cached.databaseInode != physical.inode) {
-            ok = false;
+            record(Result::Failed);
             continue;
         }
         CatalogDatabaseIdentity refreshed;
         if (!databaseIdentity(engine_.dbPath(entry.first), refreshed, entry.first == "info") ||
             refreshed.device != physical.device || refreshed.inode != physical.inode) {
-            ok = false;
+            record(Result::Failed);
             continue;
         }
         // Another publisher may have changed the file set before this
@@ -490,14 +497,14 @@ bool CatalogService::persistAll(const std::string& database) {
         if (cached.manager) {
             const auto result = cached.manager->persistCurrent();
             if (result != Result::RefreshRequired) {
-                if (result == Result::Failed) ok = false;
+                record(result);
                 continue;
             }
         }
         auto replacement = loadOwnedCatalog(engine_, entry.first);
         if (replacement->persistCurrent() != Result::Published ||
             (cached.manager && cached.manager->hasUnpublishedChanges())) {
-            ok = false;
+            record(Result::Failed);
             continue;
         }
         const auto committed = cached.writeTransaction == ownership.writeTransaction
@@ -505,7 +512,7 @@ bool CatalogService::persistAll(const std::string& database) {
         cached = {std::move(replacement), physical.device, physical.inode, committed,
                   committed ? ownership.writeTransaction : 0};
     }
-    return ok;
+    return status;
 }
 
 bool CatalogService::has(const std::string& dbname) const {

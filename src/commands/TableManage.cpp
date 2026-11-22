@@ -57502,6 +57502,65 @@ StorageEngine::CatalogReadOwnership StorageEngine::catalogReadOwnership(
     return {fence->lock.owns_lock(), std::move(fence)};
 }
 
+namespace {
+
+// Catalog publishers may need the database lock themselves. Release any
+// staged lock before retrying a busy publisher, while keeping a single
+// deadline for both kinds of contention.
+template<class Context>
+DBStatus acquireTransactionCatalog(const StorageEngine& engine, CatalogService* catalogs,
+        Context& context, const std::string& database, bool exclusive) {
+    const int timeoutMs = engine.getLockManager().getLockTimeout();
+    const auto deadline = timeoutMs > 0
+        ? std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs)
+        : std::chrono::steady_clock::time_point::max();
+    auto mutex = databaseTxnLockFor(database);
+    using Result = CatalogManager::PersistResult;
+    for (;;) {
+        checkForQueryInterrupt();
+        bool retain = false;
+        struct StagedLock {
+            Context& context;
+            bool& retain;
+            ~StagedLock() {
+                if (retain) return;
+                context.databaseExclusiveLock.reset();
+                context.databaseSharedLock.reset();
+                context.databaseTxnMutex.reset();
+            }
+        };
+        {
+            StagedLock staged{context, retain};
+            if (exclusive) {
+                auto lock = std::make_unique<std::unique_lock<std::shared_mutex>>(
+                    *mutex, std::try_to_lock);
+                if (lock->owns_lock()) context.databaseExclusiveLock = std::move(lock);
+            } else {
+                auto lock = std::make_unique<std::shared_lock<std::shared_mutex>>(
+                    *mutex, std::try_to_lock);
+                if (lock->owns_lock()) context.databaseSharedLock = std::move(lock);
+            }
+            if (context.databaseExclusiveLock || context.databaseSharedLock) {
+                // CatalogService must see the lock we already own.
+                context.databaseTxnMutex = mutex;
+                if (!engine.databaseExists(database)) return DBStatus::DATABASE_NOT_FOUND;
+                if (databaseRollbackPending(database)) return DBStatus::IO_ERROR;
+                const auto result = catalogs ? catalogs->persistCatalogs(database) : Result::Published;
+                if (result == Result::Published) {
+                    retain = true;
+                    return DBStatus::OK;
+                }
+                if (result != Result::Busy) return DBStatus::IO_ERROR;
+            }
+        }
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= deadline) return DBStatus::LOCK_CONFLICT;
+        std::this_thread::sleep_until(std::min(deadline, now + std::chrono::milliseconds(1)));
+    }
+}
+
+} // namespace
+
 DBStatus StorageEngine::beginTransaction(const std::string& dbname) {
     return beginTransaction(dbname, false);
 }
@@ -57542,24 +57601,9 @@ DBStatus StorageEngine::ensureDatabaseTransactionOwnership(const std::string& db
         explicit PromotionScope(bool& flag) : flag(flag) { flag = true; }
         ~PromotionScope() { flag = false; }
     } promotion(context.promotingDatabaseOwnership);
-    auto mutex = databaseTxnLockFor(context.txnDB);
-    auto lock = std::make_unique<std::shared_lock<std::shared_mutex>>(*mutex, std::defer_lock);
-    const int timeoutMs = lockManager_.getLockTimeout();
-    const auto deadline = timeoutMs > 0
-        ? std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs)
-        : std::chrono::steady_clock::time_point::max();
-    for (;;) {
-        checkForQueryInterrupt();
-        if (lock->try_lock()) break;
-        if (std::chrono::steady_clock::now() >= deadline) return DBStatus::LOCK_CONFLICT;
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-    if (!databaseExists(context.txnDB)) return DBStatus::DATABASE_NOT_FOUND;
-    // Expose the actual held lock to reentrant catalog/WAL getters while
-    // promoting. A failed promotion relinquishes only these staged locks,
-    // leaving the same logical transaction alive for abort/Sync.
-    context.databaseTxnMutex = mutex;
-    context.databaseSharedLock = std::move(lock);
+    const auto acquired = acquireTransactionCatalog(*this, catalogService_.get(),
+        context, context.txnDB, false);
+    if (acquired != DBStatus::OK) return acquired;
     bool promotionSucceeded = false;
     struct StagedOwnership {
         TransactionContext& context;
@@ -57571,7 +57615,6 @@ DBStatus StorageEngine::ensureDatabaseTransactionOwnership(const std::string& db
             }
         }
     } staged{context, promotionSucceeded};
-    if (catalogService_ && !catalogService_->persistAll(context.txnDB)) return DBStatus::IO_ERROR;
     auto* commitLog = getCommitLog(context.txnDB);
     if (!commitLog) return DBStatus::IO_ERROR;
     std::shared_ptr<WALManager> transactionWal;
@@ -57888,68 +57931,8 @@ DBStatus StorageEngine::beginTransaction(const std::string& dbname, bool ddlSnap
     }
     context.databaseOwnershipDeferred = deferOwnership;
     if (!deferOwnership) {
-    context.databaseTxnMutex = databaseTxnLockFor(dbname);
-    const int lockTimeoutMs = lockManager_.getLockTimeout();
-    const auto acquireDatabaseLock = [lockTimeoutMs](auto& lock) {
-        if (lockTimeoutMs <= 0) {
-            lock.lock();
-            return true;
-        }
-        const auto deadline = std::chrono::steady_clock::now() +
-            std::chrono::milliseconds(lockTimeoutMs);
-        do {
-            if (lock.try_lock()) return true;
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        } while (std::chrono::steady_clock::now() < deadline);
-        return false;
-    };
-    if (ddlSnapshot) {
-        auto lock = std::make_unique<std::unique_lock<std::shared_mutex>>(
-            *context.databaseTxnMutex, std::defer_lock);
-        if (!acquireDatabaseLock(*lock)) {
-            context.databaseTxnMutex.reset();
-            return DBStatus::LOCK_CONFLICT;
-        }
-        context.databaseExclusiveLock = std::move(lock);
-    } else {
-        auto lock = std::make_unique<std::shared_lock<std::shared_mutex>>(
-            *context.databaseTxnMutex, std::defer_lock);
-        if (!acquireDatabaseLock(*lock)) {
-            context.databaseTxnMutex.reset();
-            return DBStatus::LOCK_CONFLICT;
-        }
-        context.databaseSharedLock = std::move(lock);
-    }
-
-    // DROP/RENAME can acquire the exclusive name lock after the fast
-    // existence check and finish while BEGIN waits for that lock. Never
-    // start WAL/CLOG or publish a transaction for a disappeared generation.
-    if (!databaseExists(dbname)) {
-        context.databaseExclusiveLock.reset();
-        context.databaseSharedLock.reset();
-        context.databaseTxnMutex.reset();
-        return DBStatus::DATABASE_NOT_FOUND;
-    }
-    if (Session* session = currentSession();
-        session && session->currentDB == dbname) {
-        context.tempNamespaceAtTransactionStart =
-            session->tempNamespaceCreated;
-        context.tempTablesAtTransactionStart = session->tempTables;
-        context.tempTableOnCommitAtTransactionStart =
-            session->tempTableOnCommit;
-        context.tempTablesCreatedAtTransactionStart =
-            session->tempTablesCreatedInTransaction;
-    }
-
-    // CatalogManager is lazily persisted and may contain the latest DDL
-    // state only in memory. Persist this database before taking its transaction
-    // snapshot so a DDL rollback can safely evict/reload the catalog.
-    if (catalogService_ && !catalogService_->persistAll(dbname)) {
-        context.databaseExclusiveLock.reset();
-        context.databaseSharedLock.reset();
-        context.databaseTxnMutex.reset();
-        return DBStatus::IO_ERROR;
-    }
+    const auto acquired = acquireTransactionCatalog(*this, catalogService_.get(), context, dbname, ddlSnapshot);
+    if (acquired != DBStatus::OK) return acquired;
     {
         std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
         if (!getWAL(dbname)) {

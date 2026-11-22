@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>有连接正在保存表结构时，其他查询可以等待 · 2026-11-22</summary>
+
+多个连接同时开始事务时，短暂的保存工作完成后，等待中的查询可以继续。超过设定的等待时间会报告锁超时。
+
+[测试报告](docs/test-report.md#begin-catalog-contention-20261122) · [性能报告](docs/performance-report-2026-10-30.md#begin-catalog-contention-cost-20261122)
+
+</details>
+
+<details>
 <summary>可以导出查询筛选后的数据 · 2026-11-22</summary>
 
 例如，只导出本月的订单，并按金额排序。客户端可以用 `COPY (SELECT ...) TO STDOUT` 逐行接收结果。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>修复导入和导出时选错表的问题 · 2026-11-22</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-22 · 修复导入和导出时选错表的问题
 
 如果你建了一张叫 `pg_type` 的表，用 `COPY` 导入或导出时，数据库会按当前连接的设置在你的表和自带的类型表之间选择。导出自带的类型表时，可以只取类型名等需要的列。
 
 [使用说明](docs/MANUAL.md#用客户端复制数据) · [测试报告](docs/test-report.md#copy-relation-selection-20261122)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-22 · 查询和写入时会区分自带的类型表和同名表
 

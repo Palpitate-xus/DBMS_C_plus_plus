@@ -27,7 +27,10 @@ public:
         std::lock_guard<std::mutex> lock(registry.mutex);
         auto [it, inserted] = registry.owners.try_emplace(path_, Owner{thread, 0});
         (void)inserted;
-        if (it->second.thread != thread) return;
+        if (it->second.thread != thread) {
+            contended_ = true;
+            return;
+        }
         ++it->second.count;
         acquired_ = true;
     }
@@ -44,6 +47,7 @@ public:
     DatabaseMetadataWrite& operator=(const DatabaseMetadataWrite&) = delete;
 
     bool acquired() const { return acquired_; }
+    bool contended() const { return contended_; }
 
 private:
     struct Owner {
@@ -61,6 +65,7 @@ private:
 
     std::filesystem::path path_;
     bool acquired_ = false;
+    bool contended_ = false;
 };
 
 }  // namespace dbms

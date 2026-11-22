@@ -3645,8 +3645,8 @@ def main():
         sock.sendall(typed(b"X"))
         sock.close()
 
-        role_rows = data_row_values(simple_query(role_sock, "SELECT id FROM t"))
-        assert role_rows == [[b"1"], [b"3"], [b"20"]], role_rows
+        role_reply = simple_query(role_sock, "SELECT id FROM t")
+        assert data_row_values(role_reply) == [[b"1"], [b"3"], [b"20"]], role_reply
         default_role_rows = data_row_values(simple_query(
             role_sock, "SELECT id FROM default_acl_protocol"))
         assert default_role_rows == [[b"7"]], default_role_rows

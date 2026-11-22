@@ -1,9 +1,11 @@
 #include "commands/TableManage.h"
 #include "catalog/CatalogService.h"
+#include "common/DatabaseMetadataWrite.h"
 #include "common/DbError.h"
 #include "test_utils.h"
 #include <cassert>
 #include <filesystem>
+#include <future>
 #include <iostream>
 
 static bool has(dbms::StorageEngine& engine, const std::string& database,
@@ -138,6 +140,8 @@ int main() {
     assert(std::filesystem::is_regular_file(description));
     std::filesystem::rename(description, savedDescription);
     assert(!reader.catalogService().persistAll(db));
+    assert(reader.beginTransaction(db) == DBStatus::IO_ERROR);
+    assert(!reader.inTransaction());
     assert(!std::filesystem::exists(description));
     assert(beforeLoss->findNamespaceByName("peer_published") == retained && retained->oid == retainedOid);
     assert(!beforeLoss->findNamespaceByName("peer_with_lost_family"));
@@ -146,6 +150,59 @@ int main() {
     const auto afterRestore = reader.catalogService().acquire(db);
     assert(afterRestore != beforeLoss && afterRestore->findNamespaceByName("peer_with_lost_family"));
     assert(beforeLoss->findNamespaceByName("peer_published") == retained && retained->oid == retainedOid);
+
+    // A short-lived metadata publisher can overlap BEGIN. Treat this as
+    // lock contention, and let the publisher take an exclusive database
+    // lock while the reader waits with its staged shared lock released.
+    {
+        using namespace std::chrono_literals;
+        const int previousTimeout = reader.getLockManager().getLockTimeout();
+        {
+            const DatabaseMetadataWrite publisher(writer.dbPath(db));
+            assert(publisher.acquired());
+            auto timedOut = std::async(std::launch::async, [&] {
+                reader.getLockManager().setLockTimeout(40);
+                const auto start = std::chrono::steady_clock::now();
+                auto result = reader.beginTransaction(db);
+                assert(result == DBStatus::LOCK_CONFLICT);
+                assert(std::chrono::steady_clock::now() - start >= 30ms);
+                assert(!reader.inTransaction());
+                {
+                    StorageEngine::DatabaseIndependentBeginScope logical(reader);
+                    assert(reader.beginTransaction(db) == DBStatus::OK);
+                }
+                assert(reader.databaseTransactionOwnershipDeferred());
+                assert(reader.ensureDatabaseTransactionOwnership() == DBStatus::LOCK_CONFLICT);
+                assert(reader.databaseTransactionOwnershipDeferred());
+                assert(reader.rollbackTransaction() == DBStatus::OK);
+                return result;
+            });
+            assert(timedOut.get() == DBStatus::LOCK_CONFLICT);
+        }
+
+        std::future<DBStatus> pending;
+        {
+            const DatabaseMetadataWrite publisher(writer.dbPath(db));
+            assert(publisher.acquired());
+            pending = std::async(std::launch::async, [&] {
+                reader.getLockManager().setLockTimeout(2500);
+                const auto result = reader.beginTransaction(db);
+                if (result == DBStatus::OK) {
+                    assert(has(reader, db, "published_while_begin_waited"));
+                    assert(reader.commitTransaction() == DBStatus::OK);
+                }
+                return result;
+            });
+            assert(pending.wait_for(60ms) == std::future_status::timeout);
+            writer.getLockManager().setLockTimeout(750);
+            assert(writer.beginTransaction(db, true) == DBStatus::OK);
+            assert(writer.createSchema(db, "published_while_begin_waited") == DBStatus::OK);
+            assert(writer.commitTransaction() == DBStatus::OK);
+            assert(pending.wait_for(5ms) == std::future_status::timeout);
+        }
+        assert(pending.get() == DBStatus::OK);
+        writer.getLockManager().setLockTimeout(previousTimeout);
+    }
 
     assert(writer.dropDatabase(db) == DBStatus::OK);
     assert(writer.createDatabase(db) == DBStatus::OK);

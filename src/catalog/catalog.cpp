@@ -2923,7 +2923,8 @@ CatalogManager::PersistResult CatalogManager::persistAllImpl(bool reloadInPlace)
     const auto catalogPath = std::filesystem::weakly_canonical(dbPath_, pathError);
     if (pathError) return PersistResult::Failed;
     const DatabaseMetadataWrite writer(catalogPath.parent_path());
-    if (!writer.acquired()) return PersistResult::Failed;
+    if (!writer.acquired())
+        return writer.contended() ? PersistResult::Busy : PersistResult::Failed;
     std::lock_guard<std::mutex> lock(mutex_);
     std::lock_guard<std::mutex> publicationLock(persistence_->publication->mutex);
     auto images = serializeAllLocked();

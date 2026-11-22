@@ -240,7 +240,7 @@ public:
     // 持久化
     // =====================================================================
     bool persistAll();
-    enum class PersistResult { Published, RefreshRequired, Failed };
+    enum class PersistResult { Published, RefreshRequired, Failed, Busy };
     // Service-owned rows can stay leased after a peer publishes new files.
     // Publish this model or tell the service to load a separate replacement.
     PersistResult persistCurrent();

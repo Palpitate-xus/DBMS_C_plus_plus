@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-22 · 并发事务和目录写入
+
+PostgreSQL 按查询访问的表取得相应的锁，普通 `SELECT` 使用 `ACCESS SHARE`。SQLite 在事务无法取得文件访问权时可返回 `SQLITE_BUSY`，应用可设置最长等待时间。DuckDB 在单个进程内用多版本数据和乐观并发控制，发生实际写入冲突时返回事务冲突。[PostgreSQL 锁](https://www.postgresql.org/docs/18/explicit-locking.html) · [SQLite 事务](https://www.sqlite.org/lang_transaction.html) · [DuckDB 并发](https://duckdb.org/docs/current/connect/concurrency)
+
+本项目的连接会在开始事务前检查目录文件。新版遇到同一进程里正在保存目录的连接时，先释放本次取得的数据库锁，再按锁等待时间重试。更细粒度的目录锁和跨进程锁队列仍待补齐。[测试报告](test-report.md#begin-catalog-contention-20261122) · [性能报告](performance-report-2026-10-30.md#begin-catalog-contention-cost-20261122)
+
 ## 2026-11-22 · 导出查询结果
 
 PostgreSQL 18.6 可以把查询计划执行出来的行直接交给 COPY 编码器，再逐行发给客户端。它也支持把带 `RETURNING` 的写入结果交给同一个导出入口。DuckDB 支持把查询结果导出为 CSV、Parquet 或 JSON 等文件。SQLite 的命令行工具执行普通查询，再用 `.mode` 和 `.once` 把结果写到文件。[PostgreSQL 18.6 实现](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/commands/copyto.c) · [PostgreSQL COPY](https://www.postgresql.org/docs/18/sql-copy.html) · [DuckDB COPY](https://duckdb.org/docs/2.0/sql/statements/copy) · [SQLite 导出](https://www.sqlite.org/cli.html#export_to_csv)

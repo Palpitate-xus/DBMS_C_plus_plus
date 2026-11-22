@@ -51,6 +51,10 @@ public:
     // that database. BEGIN must not publish another database's dirty model.
     bool persistAll(const std::string& database = {});
 
+    // Transaction admission can retry a busy publisher after releasing its
+    // database lock. A failed publication must still propagate as an error.
+    CatalogManager::PersistResult persistCatalogs(const std::string& database);
+
     // Test/debug: is `dbname` currently cached?
     bool has(const std::string& dbname) const;
     // Public callers receive a complete snapshot by default. Internal callers
