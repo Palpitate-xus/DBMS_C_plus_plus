@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-22 · 导出查询结果
+
+PostgreSQL 18.6 可以把查询计划执行出来的行直接交给 COPY 编码器，再逐行发给客户端。它也支持把带 `RETURNING` 的写入结果交给同一个导出入口。DuckDB 支持把查询结果导出为 CSV、Parquet 或 JSON 等文件。SQLite 的命令行工具执行普通查询，再用 `.mode` 和 `.once` 把结果写到文件。[PostgreSQL 18.6 实现](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/commands/copyto.c) · [PostgreSQL COPY](https://www.postgresql.org/docs/18/sql-copy.html) · [DuckDB COPY](https://duckdb.org/docs/2.0/sql/statements/copy) · [SQLite 导出](https://www.sqlite.org/cli.html#export_to_csv)
+
+本项目使用现有查询计划逐行读取结果，再用现有的 COPY 文本传输发送。需要排序等处理时，仍由查询计划决定需要暂存的数据。写入语句的结果、更多输出格式和查询导出到服务器文件仍有差距。[测试报告](test-report.md#copy-query-stdout-20261122) · [性能报告](performance-report-2026-10-30.md#copy-query-stdout-cost-20261122)
+
 ## 2026-11-22 · 按编号查询系统类型
 
 PostgreSQL 18.6 在 `pg_type.oid` 上建有唯一 B-tree 索引。实测查询已知编号和不存在的编号都使用了 `pg_type_oid_index`。SQLite 把 `sqlite_schema` 存在普通表的 B-tree 中，按 `rowid` 可点查，按对象名时实测扫描这张表。DuckDB 1.4.3 的 `duckdb_types()` 收集已登记的类型，再分批返回数据。[PostgreSQL 类型目录索引](https://github.com/postgres/postgres/blob/REL_18_6/src/include/catalog/pg_type.h#L265-L269) · [SQLite 文件格式](https://www.sqlite.org/fileformat2.html#storage_of_the_sql_database_schema) · [DuckDB 类型目录实现](https://github.com/duckdb/duckdb/blob/v1.4.3/src/function/table/system/duckdb_types.cpp#L60-L84)
@@ -12,7 +18,7 @@ PostgreSQL 18.6 在 `pg_type.oid` 上建有唯一 B-tree 索引。实测查询�
 
 PostgreSQL 为 `COPY` 打开实际表并取得相应的锁，然后检查列和权限。SQLite 的命令行工具用 `.import --schema` 指定导入位置，导出时执行查询。DuckDB 在绑定 `COPY` 时确定导入表或导出查询，支持将数据导出到多个文件格式。[PostgreSQL 18.6 COPY 源码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/commands/copy.c#L123-L206) · [SQLite 导入导出](https://www.sqlite.org/cli.html#csv_import) · [DuckDB COPY](https://duckdb.org/docs/stable/sql/statements/copy)
 
-本项目让客户端的 `COPY` 先取得事务的数据访问权，再绑定实际表和输出列。对同名 `pg_type`，系统表、用户表和临时表按连接设置选择。系统表已能按列输出部分数据，系统表导入、查询形式和更多文件格式仍有差距。[测试报告](test-report.md#copy-relation-selection-20261122) · [性能报告](performance-report-2026-10-30.md#copy-relation-selection-cost-20261122)
+本项目让客户端的 `COPY` 先取得事务的数据访问权，再绑定实际表和输出列。对同名 `pg_type`，系统表、用户表和临时表按连接设置选择。系统表已能按列输出部分数据，系统表导入和更多文件格式仍有差距。[测试报告](test-report.md#copy-relation-selection-20261122) · [性能报告](performance-report-2026-10-30.md#copy-relation-selection-cost-20261122)
 
 ## 2026-11-22 · 查找已经存在的同名表
 

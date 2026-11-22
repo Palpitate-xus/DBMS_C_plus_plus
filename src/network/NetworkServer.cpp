@@ -4,10 +4,12 @@
 #include "catalog/SystemCatalogRows.h"
 #include "expression/StoredRegtypeValue.h"
 #include "NetworkServer.h"
+#include "CopyQuery.h"
 #include "common/version.h"
 #include "common/DbError.h"
 #include "common/CharacterColumn.h"
 #include "common/SqlTrivia.h"
+#include "common/SqlSyntax.h"
 #include "commands/DmlExecutor.h"
 #include "commands/CopyRelation.h"
 #include "executor/ExecutionPlan.h"
@@ -122,6 +124,7 @@ static std::atomic<bool> g_serverStopRequested{false};
 static volatile sig_atomic_t g_signalStopRequested = 0;
 static std::atomic<int> g_listenFd{-1};
 static std::mutex g_clientFdMutex;
+
 static std::set<int> g_clientFds;
 
 void registerClientFd(int fd) {
@@ -368,6 +371,8 @@ std::vector<ProcessInfo> getProcessList() {
 }
 
 namespace {
+
+std::string renderProtocolTimestamptzText(const std::string&, const Session&);
 
 // Protocol analysis also resolves relations, routines and types through the
 // current session. It runs outside Main's execution scope, and must not rely
@@ -5168,6 +5173,7 @@ struct CopyWirePlan {
     bool matched = false;
     bool wire = false;
     CopyWireDirection direction = CopyWireDirection::None;
+    std::optional<std::string> querySql;
     std::string relation;
     std::string physicalTable;
     bool systemPgType = false;
@@ -5256,6 +5262,24 @@ public:
         CopyToken token = next();
         held_ = token;
         return token;
+    }
+
+    // The opening parenthesis has already been consumed. Let the ordinary
+    // query lexer protect literals, quoted identifiers, and comments.
+    std::optional<std::string> readQuery() {
+        const auto protectedBytes = sqlProtectedBytes(sql_);
+        size_t depth = 1;
+        for (size_t i = offset_; i < sql_.size(); ++i) {
+            if (protectedBytes[i]) continue;
+            if (sql_[i] == ';') return std::nullopt;
+            if (sql_[i] == '(') ++depth;
+            if (sql_[i] == ')' && --depth == 0) {
+                auto query = sql_.substr(offset_, i - offset_);
+                offset_ = i + 1;
+                return query;
+            }
+        }
+        return std::nullopt;
     }
 
 private:
@@ -5354,6 +5378,51 @@ bool parseCopyOptionValue(CopySqlScanner& scanner, CopyToken& value,
     return false;
 }
 
+bool parseCopyTable(CopySqlScanner& scanner, CopyToken token, CopyWirePlan& plan) {
+    if (copyKeyword(token, "only")) token = scanner.next();
+    if (token.kind != CopyToken::Kind::Word) {
+        copyError(plan, "42601", "COPY requires a relation name");
+        return false;
+    }
+    plan.relation = token.quoted ? SQLParser::quoteIdentifier(token.text) : token.text;
+    if (scanner.peek().kind == CopyToken::Kind::Dot) {
+        (void)scanner.next();
+        const CopyToken table = scanner.next();
+        if (table.kind != CopyToken::Kind::Word) {
+            copyError(plan, "42601", "malformed qualified relation name in COPY");
+            return false;
+        }
+        plan.relation += "." + (table.quoted ? SQLParser::quoteIdentifier(table.text) : table.text);
+        if (scanner.peek().kind == CopyToken::Kind::Dot) {
+            copyUnsupported(plan, "three-part relation names");
+            return false;
+        }
+    }
+
+    if (scanner.peek().kind == CopyToken::Kind::LeftParen) {
+        (void)scanner.next();
+        while (true) {
+            const CopyToken column = scanner.next();
+            if (column.kind != CopyToken::Kind::Word) {
+                copyError(plan, "42601", "malformed COPY column list");
+                return false;
+            }
+            plan.requestedColumns.push_back(column.text);
+            token = scanner.next();
+            if (token.kind == CopyToken::Kind::RightParen) break;
+            if (token.kind != CopyToken::Kind::Comma) {
+                copyError(plan, "42601", "malformed COPY column list");
+                return false;
+            }
+        }
+        if (plan.requestedColumns.empty()) {
+            copyError(plan, "42601", "COPY column list cannot be empty");
+            return false;
+        }
+    }
+    return true;
+}
+
 CopyWirePlan parseCopyWirePlan(const std::string& sql) {
     CopyWirePlan plan;
     CopySqlScanner scanner(sql);
@@ -5367,49 +5436,13 @@ CopyWirePlan parseCopyWirePlan(const std::string& sql) {
         return plan;
     }
     if (token.kind == CopyToken::Kind::LeftParen) {
-        copyUnsupported(plan, "query form");
+        plan.querySql = scanner.readQuery();
+        if (!plan.querySql || skipLeadingSqlTrivia(*plan.querySql) >= plan.querySql->size()) {
+            copyError(plan, "42601", "COPY requires a single parenthesized query");
+            return plan;
+        }
+    } else if (!parseCopyTable(scanner, std::move(token), plan)) {
         return plan;
-    }
-    if (copyKeyword(token, "only")) token = scanner.next();
-    if (token.kind != CopyToken::Kind::Word) {
-        copyError(plan, "42601", "COPY requires a relation name");
-        return plan;
-    }
-    plan.relation = token.quoted ? SQLParser::quoteIdentifier(token.text) : token.text;
-    if (scanner.peek().kind == CopyToken::Kind::Dot) {
-        (void)scanner.next();
-        const CopyToken table = scanner.next();
-        if (table.kind != CopyToken::Kind::Word) {
-            copyError(plan, "42601", "malformed qualified relation name in COPY");
-            return plan;
-        }
-        plan.relation += "." + (table.quoted ? SQLParser::quoteIdentifier(table.text) : table.text);
-        if (scanner.peek().kind == CopyToken::Kind::Dot) {
-            copyUnsupported(plan, "three-part relation names");
-            return plan;
-        }
-    }
-
-    if (scanner.peek().kind == CopyToken::Kind::LeftParen) {
-        (void)scanner.next();
-        while (true) {
-            const CopyToken column = scanner.next();
-            if (column.kind != CopyToken::Kind::Word) {
-                copyError(plan, "42601", "malformed COPY column list");
-                return plan;
-            }
-            plan.requestedColumns.push_back(column.text);
-            token = scanner.next();
-            if (token.kind == CopyToken::Kind::RightParen) break;
-            if (token.kind != CopyToken::Kind::Comma) {
-                copyError(plan, "42601", "malformed COPY column list");
-                return plan;
-            }
-        }
-        if (plan.requestedColumns.empty()) {
-            copyError(plan, "42601", "COPY column list cannot be empty");
-            return plan;
-        }
     }
 
     token = scanner.next();
@@ -5423,12 +5456,20 @@ CopyWirePlan parseCopyWirePlan(const std::string& sql) {
         copyError(plan, "42601", "COPY requires FROM or TO");
         return plan;
     }
+    if (plan.querySql && !to) {
+        copyError(plan, "42601", "COPY with a query requires TO");
+        return plan;
+    }
     token = scanner.next();
     if (copyKeyword(token, "program")) {
         copyUnsupported(plan, "PROGRAM");
         return plan;
     }
     if (token.kind == CopyToken::Kind::String) {
+        if (plan.querySql) {
+            copyUnsupported(plan, "query export to server files");
+            return plan;
+        }
         // Server-side file COPY remains owned by the SQL executor.  Do not
         // reinterpret it as a wire operation, but fail closed on option
         // syntax that the legacy file executor would otherwise ignore.
@@ -5886,34 +5927,21 @@ bool decodeCopyTextRecord(
 std::string encodeCopyTextField(const std::string& value, char delimiter) {
     std::string encoded;
     encoded.reserve(value.size());
-    const char* octal = "01234567";
     for (const unsigned char byte : value) {
         switch (byte) {
             case '\b': encoded += "\\b"; break;
             case '\f': encoded += "\\f"; break;
             case '\n': encoded += "\\n"; break;
             case '\r': encoded += "\\r"; break;
-            case '\t':
-                if (delimiter == '\t') encoded += "\\t";
-                else encoded.push_back('\t');
-                break;
+            case '\t': encoded += "\\t"; break;
             case '\v': encoded += "\\v"; break;
             case '\\': encoded += "\\\\"; break;
             case 0:
                 encoded += "\\000";
                 break;
             default:
-                if (byte == static_cast<unsigned char>(delimiter)) {
-                    encoded.push_back('\\');
-                    encoded.push_back(static_cast<char>(byte));
-                } else if (byte < 0x20 && byte != '\t') {
-                    encoded.push_back('\\');
-                    encoded.push_back(octal[(byte >> 6) & 7]);
-                    encoded.push_back(octal[(byte >> 3) & 7]);
-                    encoded.push_back(octal[byte & 7]);
-                } else {
-                    encoded.push_back(static_cast<char>(byte));
-                }
+                if (byte == static_cast<unsigned char>(delimiter)) encoded.push_back('\\');
+                encoded.push_back(static_cast<char>(byte));
                 break;
         }
     }
@@ -6203,7 +6231,8 @@ CopyStreamResult sendCopyOut(PostgresProtocol& protocol,
                              const CopyWirePlan& plan,
                              Session& session,
                              std::chrono::steady_clock::time_point deadline,
-                             const TableSchema& table) {
+                             const TableSchema& table,
+                             PreparedQueryCursor* queryCursor) {
     CopyStreamResult result;
     const auto checkCopyInterrupt = [&]() {
         if (deadline != std::chrono::steady_clock::time_point::max() &&
@@ -6244,7 +6273,32 @@ CopyStreamResult sendCopyOut(PostgresProtocol& protocol,
         ++result.rows;
     };
     try {
-        if (plan.systemPgType) {
+        if (queryCursor) {
+            const auto& columns = queryCursor->descriptor();
+            std::vector<ExprValue> row;
+            std::string output;
+            while (result.transportOk && result.error.empty() && queryCursor->next(row)) {
+                checkCopyInterrupt();
+                output.clear();
+                for (size_t i = 0; i < columns.size(); ++i) {
+                    if (i != 0) output.push_back(plan.delimiter);
+                    auto& cell = row[i];
+                    if (!cell.isNull) {
+                        if (columns[i].typeOid == 1184) {
+                            cell.value = renderProtocolTimestamptzText(cell.value, session);
+                        } else if (const char* geometry = geometryTypeNameForOid(columns[i].typeOid)) {
+                            std::string text;
+                            if (!normalizeGeometryText(cell.value, geometry, text, true))
+                                throw DbError("XX000", "COPY query produced an invalid geometry value");
+                            cell.value = std::move(text);
+                        }
+                    }
+                    output += cell.isNull ? plan.nullMarker : encodeCopyTextField(cell.value, plan.delimiter);
+                }
+                sendRecord(output);
+            }
+            queryCursor->close();
+        } else if (plan.systemPgType) {
             const auto metadata = g_engine.catalogService().metadataSnapshot(session.currentDB, false);
             for (const auto& row : metadata.types) {
                 if (!result.transportOk || !result.error.empty()) break;
@@ -7048,7 +7102,7 @@ bool establishClientTransport(int clientFd, TLSServerContext& tlsContext,
 
 // Render protocol presentation only. DmlResult/heap row images keep their
 // original UTC datums, while RETURNING may bypass Main's SELECT formatter.
-static std::string renderProtocolTimestamptzText(
+std::string renderProtocolTimestamptzText(
     const std::string& value, const Session& session) {
     if (value == "infinity" || value == "-infinity") return value;
     const size_t timeStart = value.find(' ');
@@ -7153,7 +7207,7 @@ bool sendPendingNotifications(PostgresProtocol& protocol,
     return true;
 }
 
-void handleClient(SecureSocket socket, std::string clientHost) {
+void handleClient(SecureSocket socket, std::string clientHost, CopyQueryFactory openCopyQuery) {
     g_stats.totalConnections++;
     PostgresProtocol protocol(socket);
     PgStartupMessage startup;
@@ -7859,22 +7913,40 @@ void handleClient(SecureSocket socket, std::string clientHost) {
         // The statement boundary owns the database before binding column
         // positions. Use that same schema until the COPY finishes.
         TableSchema table;
+        std::optional<CopyInterruptGuard> queryInterrupt;
+        std::shared_ptr<PreparedQueryCursor> queryCursor;
+        size_t columnCount = 0;
         bool planValid = false;
         try {
-            planValid = validateCopyWirePlan(plan, session, table);
+            if (plan.querySql) {
+                queryInterrupt.emplace(session, copyDeadline);
+                if (!openCopyQuery)
+                    throw DbError("0A000", "COPY query execution is not available");
+                queryCursor = openCopyQuery(session, *plan.querySql);
+                columnCount = queryCursor->descriptor().size();
+                if (columnCount > std::numeric_limits<uint16_t>::max())
+                    throw DbError("54000", "too many columns for COPY protocol response");
+                dbms::checkForQueryInterrupt();
+                planValid = true;
+            } else {
+                planValid = validateCopyWirePlan(plan, session, table);
+                columnCount = plan.columnIndexes.size();
+            }
         } catch (const DbError& error) {
             copyError(plan, error.sqlState(), error.message());
         } catch (const std::exception& error) {
             copyError(plan, "XX000", error.what());
         }
         if (!planValid) {
+            queryCursor.reset();
+            queryInterrupt.reset();
             (void)abortCopyTransaction();
             outcome.connectionOk = protocol.sendErrorResponse(
                 "ERROR", plan.sqlState.empty() ? "XX000" : plan.sqlState,
                 plan.error);
             return outcome;
         }
-        const std::vector<uint16_t> formats(plan.columnIndexes.size(), 0);
+        const std::vector<uint16_t> formats(columnCount, 0);
         if (plan.direction == CopyWireDirection::FromStdin) {
             CopyStreamResult stream;
             bool responseSent = false;
@@ -7930,10 +8002,12 @@ void handleClient(SecureSocket socket, std::string clientHost) {
         CopyStreamResult stream;
         bool responseSent = false;
         {
-            CopyInterruptGuard interruptGuard(session, copyDeadline);
+            if (!queryInterrupt) queryInterrupt.emplace(session, copyDeadline);
             responseSent = protocol.sendCopyOutResponse(0, formats);
             if (responseSent) stream = sendCopyOut(
-                protocol, plan, session, copyDeadline, table);
+                protocol, plan, session, copyDeadline, table, queryCursor.get());
+            queryCursor.reset();
+            queryInterrupt.reset();
         }
         if (!responseSent) {
             QueryResult ignored;
@@ -9193,6 +9267,10 @@ bool serverShutdownRequested() {
 }
 
 bool startServer(int port, bool allowPlaintext) {
+    return startServer(port, allowPlaintext, nullptr);
+}
+
+bool startServer(int port, bool allowPlaintext, CopyQueryFactory openCopyQuery) {
     g_serverStopRequested.store(false, std::memory_order_relaxed);
     g_signalStopRequested = 0;
 
@@ -9344,7 +9422,7 @@ bool startServer(int port, bool allowPlaintext) {
         try {
             auto worker = std::make_unique<Worker>();
             worker->done = done;
-            worker->thread = std::thread([clientFd, &tlsCtx, allowPlaintext, clientHost, done]() {
+            worker->thread = std::thread([clientFd, &tlsCtx, allowPlaintext, clientHost, done, openCopyQuery]() {
                 struct SlotGuard {
                     ~SlotGuard() {
                         ConnectionPool::instance().releaseClientSlot();
@@ -9360,7 +9438,7 @@ bool startServer(int port, bool allowPlaintext) {
                         std::cerr << "client transport negotiation failed" << std::endl;
                     }
                 } else {
-                    handleClient(std::move(socket), clientHost);
+                    handleClient(std::move(socket), clientHost, openCopyQuery);
                 }
                 // Close before removing the descriptor from the shutdown
                 // registry. Otherwise a new accept could reuse this fd and

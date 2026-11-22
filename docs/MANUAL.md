@@ -2465,6 +2465,14 @@ COPY pg_catalog.pg_type (oid, typname) TO STDOUT;
 
 导出系统 `pg_type` 时需要列出受支持的列。函数引用列、整张系统表导出以及系统表导入仍不支持。服务器文件复制遵循同一选表顺序，系统表文件复制会在打开文件前报错。[验证范围](test-report.md#copy-relation-selection-20261122)
 
+需要筛选、排序或计算列时，可以把查询放在括号内，将结果按文本发给客户端。
+
+```sql
+COPY (SELECT id, name FROM public.users WHERE id > 0 ORDER BY id) TO STDOUT;
+```
+
+可以用 `WITH (DELIMITER '|', NULL 'NUL')` 自定义字段分隔符和空值标记。默认用制表符分隔字段，用 `\N` 表示 SQL 空值。查询没有结果时仍会返回列数，结束时报告 `COPY 0`。[查询导出测试](test-report.md#copy-query-stdout-20261122)
+
 ### 备份与恢复作业
 
 `DUMP` 产生逻辑 SQL 文件；`RESTORE DATABASE` 只接受 `BACKUP DATABASE`

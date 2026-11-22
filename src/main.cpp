@@ -42,6 +42,7 @@
 #include "ExecutionPlan.h"
 #include "executor/PreparedTableSource.h"
 #include "NetworkServer.h"
+#include "network/CopyQuery.h"
 #include "network/ConnectionPool.h"
 #include "replication/LogicalDecoder.h"
 #include "storage/PageCrypto.h"
@@ -21040,6 +21041,7 @@ class PreparedWithDmlRuntime {
     dbms::WithStmt* root_;
     dbms::SelectStmt* readRoot_;
     bool readRootDeclaredCollations_ = false;
+    bool streamResults_ = false;
     dbms::PreparedQueryExecution validation_;
     Frames queryFrames_;
     vector<shared_ptr<dbms::PreparedQueryCursor>> mutationCursors_;
@@ -21047,15 +21049,17 @@ class PreparedWithDmlRuntime {
 
     vector<string> selectedColumns(const dbms::Stmt* root,
                                    const dbms::PreparedQuery::SourceRange& source) const {
-        set<string> names;
+        set<size_t> ordinals;
+        const auto use = [&](const optional<dbms::QueryColumnBinding>& binding) {
+            if (binding && binding->sourceOrdinal == source.ordinal)
+                ordinals.insert(binding->columnOrdinal);
+        };
         function<void(const dbms::Stmt*)> statement;
         function<void(const dbms::Expr*)> expression = [&](const dbms::Expr* value) {
             if (!value) return;
             if (value->preparedSubquery) statement(value->preparedSubquery.get());
             if (const auto* column=dynamic_cast<const dbms::ColumnRefExpr*>(value)) {
-                if (column->binding && column->binding->sourceOrdinal==source.ordinal)
-                    names.insert(source.relationName.empty() ? source.columns.at(column->binding->columnOrdinal).name :
-                        g_engine.getTableSchema(session_.currentDB,physical(source,session_)).cols[column->binding->columnOrdinal].dataName);
+                use(column->binding);
             } else if (const auto* binary=dynamic_cast<const dbms::BinaryOpExpr*>(value)) {
                 expression(binary->left.get()); expression(binary->right.get());
             } else if (const auto* quantified=dynamic_cast<const dbms::QuantifiedComparisonExpr*>(value)) {
@@ -21066,6 +21070,11 @@ class PreparedWithDmlRuntime {
                 for (const auto& arg:call->args) expression(arg.get());
                 for (const auto& arg:call->namedArgs) expression(arg.value.get());
                 expression(call->filter.get());
+                for (const auto& key : call->aggregateOrderKeys) expression(key.expr.get());
+                for (const auto& key : call->over.partitionBy) expression(key.get());
+                for (const auto& key : call->over.orderBy) expression(key.first.get());
+                expression(call->over.frameStart.get());
+                expression(call->over.frameEnd.get());
             } else if (const auto* conditional=dynamic_cast<const dbms::CaseExpr*>(value)) {
                 expression(conditional->switchExpr.get()); expression(conditional->elseExpr.get());
                 for (const auto& arm:conditional->whenClauses) { expression(arm.first.get()); expression(arm.second.get()); }
@@ -21074,6 +21083,13 @@ class PreparedWithDmlRuntime {
             } else if (const auto* row=dynamic_cast<const dbms::RowExpr*>(value)) {
                 for (const auto& cell:row->elements) expression(cell.get());
             }
+        };
+        const function<void(const dbms::FromItem*)> from = [&](const dbms::FromItem* item) {
+            if (!item) return;
+            expression(item->joinCondition.get());
+            statement(item->subquery.get());
+            from(item->left.get());
+            from(item->right.get());
         };
         statement = [&](const dbms::Stmt* value) {
             if(const auto* update=dynamic_cast<const dbms::UpdateStmt*>(value)) {
@@ -21090,26 +21106,54 @@ class PreparedWithDmlRuntime {
             const auto* child=dynamic_cast<const dbms::SelectStmt*>(value);
             if (!child) return;
             for (const auto& cte:child->ctes) statement(cte.query.get());
+            statement(child->setOpLhs.get());
+            statement(child->setOpRhs.get());
+            from(child->fromClause.get());
             for (const auto& target:child->selectList) expression(target.expr.get());
+            // Bound star expansions retain the exact range of each output.
+            const auto projected = query_->projectionBindings.find(child);
+            if (projected != query_->projectionBindings.end())
+                for (const auto& output : projected->second) use(output.column);
             expression(child->whereClause.get()); expression(child->having.get());
             for (const auto& order:child->orderBy) expression(order.expr.get());
             for (const auto& group:child->groupBy) expression(group.get());
+            for (const auto& group : child->groupByElems)
+                for (const auto& key : group.exprs) expression(key.get());
+            for (const auto& key : child->distinctOn) expression(key.get());
+            for (const auto& row : child->valuesRows)
+                for (const auto& cell : row) expression(cell.get());
+            expression(child->limitExpr.get());
+            expression(child->offsetExpr.get());
+            for (const auto& window : child->windowDefs) {
+                for (const auto& key : window.partitionBy) expression(key.get());
+                for (const auto& key : window.orderBy) expression(key.first.get());
+                expression(window.frameStart.get());
+                expression(window.frameEnd.get());
+            }
         };
         statement(root);
+        // USING and NATURAL JOIN consume both input keys even when neither
+        // source key is referenced by a separate expression or projected.
+        for (size_t i = 0; i < source.columns.size(); ++i)
+            if (source.hiddenUnqualified.count(source.columns[i].name)) ordinals.insert(i);
         const vector<dbms::SelectItem>* targets=nullptr;
-        if(const auto* select=dynamic_cast<const dbms::SelectStmt*>(root))targets=&select->selectList;
-        else if(const auto* update=dynamic_cast<const dbms::UpdateStmt*>(root))targets=&update->returning;
+        if(const auto* update=dynamic_cast<const dbms::UpdateStmt*>(root))targets=&update->returning;
         else if(const auto* remove=dynamic_cast<const dbms::DeleteStmt*>(root))targets=&remove->returning;
         if(targets)for (const auto& target:*targets) {
             const auto* literal=dynamic_cast<const dbms::LiteralExpr*>(target.expr.get());
             const auto* column=dynamic_cast<const dbms::ColumnRefExpr*>(target.expr.get());
             if ((target.expr && target.expr->type==dbms::ExprType::A_Star) ||
                 (literal && literal->value=="*") || (column && column->column=="*"))
-                for(size_t i=0;i<source.columns.size();++i)
-                    names.insert(source.relationName.empty() ? source.columns[i].name :
-                        g_engine.getTableSchema(session_.currentDB,physical(source,session_)).cols[i].dataName);
+                for(size_t i=0;i<source.columns.size();++i) ordinals.insert(i);
         }
-        return {names.begin(),names.end()};
+        if (ordinals.empty()) return {};
+        const auto schema = source.relationName.empty() ? dbms::TableSchema{} :
+            g_engine.getTableSchema(session_.currentDB, physical(source, session_));
+        vector<string> names;
+        names.reserve(ordinals.size());
+        for (const size_t ordinal : ordinals)
+            names.push_back(source.relationName.empty() ? source.columns.at(ordinal).name : schema.cols[ordinal].dataName);
+        return names;
     }
 
     const dbms::QueryRowDescriptor& output(const dbms::Stmt* statement) const {
@@ -21130,14 +21174,13 @@ class PreparedWithDmlRuntime {
     }
     void checkPhysicalSourcePermission(const dbms::Stmt* owner,
             const dbms::PreparedQuery::SourceRange& range, const string& table) const {
+        if (canReadWholeTable(session_, table)) return;
         if(!checkTablePermission(session_,table,dbms::StorageEngine::TablePrivilege::Select))
             throw dbms::DbError("42501","permission denied for mutation source");
-        if(!sessionIsAdmin(session_)) {
-            const auto columns=selectedColumns(owner,range);
-            if(!columns.empty() && !g_engine.hasColumnPermission(session_.currentDB,table,
-                effectiveSessionRole(session_),dbms::StorageEngine::TablePrivilege::Select,columns))
-                throw dbms::DbError("42501","permission denied for selected mutation source columns");
-        }
+        const auto columns=selectedColumns(owner,range);
+        if(!columns.empty() && !g_engine.hasColumnPermission(session_.currentDB,table,
+            effectiveSessionRole(session_),dbms::StorageEngine::TablePrivilege::Select,columns))
+            throw dbms::DbError("42501","permission denied for selected mutation source columns");
     }
     static bool ordinaryPhysicalRange(const dbms::PreparedQuery::SourceRange& range) {
         return range.source && range.source->type==dbms::FromItem::Type::Table &&
@@ -21326,7 +21369,7 @@ class PreparedWithDmlRuntime {
             closed=true;
             if(closeReader)closeReader();
         }
-        bool readAt(size_t index,dbms::RowContext& row) {
+        bool readAt(size_t index,dbms::RowContext& row,bool retain=true) {
             if(!opened)open();
             NextInstrument instrument(this);
             if(index<rows.size()){row=rows[index];instrument.emitted=true;return true;}
@@ -21336,9 +21379,10 @@ class PreparedWithDmlRuntime {
                 if(index>=rows.size())return false;
                 row=rows[index];instrument.emitted=true;return true;
             }
-            if(index!=rows.size())throw dbms::DbError("XX000","logical source read skipped its demand ordinal");
+            if(retain && index!=rows.size())throw dbms::DbError("XX000","logical source read skipped its demand ordinal");
             if(!read(index,row)){loaded=true;closeSource();return false;}
-            rows.push_back(row);instrument.emitted=true;return true;
+            if(retain)rows.push_back(row);
+            instrument.emitted=true;return true;
         }
         // The caller uses this only until the next demand on this node.
         const dbms::RowContext* borrowAt(size_t index) {
@@ -21355,8 +21399,8 @@ class PreparedWithDmlRuntime {
     };
     class DmlSourceContextsOp final : public dbms::Operator, public dbms::PreparedOrderedTableInput {
     public:
-        DmlSourceContextsOp(shared_ptr<DmlSourceNode> node,bool rebindable)
-            : node_(std::move(node)),rebindable_(rebindable) {}
+        DmlSourceContextsOp(shared_ptr<DmlSourceNode> node,bool rebindable,bool retainRows)
+            : node_(std::move(node)),rebindable_(rebindable),retainRows_(retainRows) {}
         bool open() override {
             OpenInstrument instrument(this);clearError();position_=0;row_=dbms::RowContext{};
             if(closed_)throw dbms::DbError("XX000","prepared context source must rebind before reopening");
@@ -21365,7 +21409,7 @@ class PreparedWithDmlRuntime {
         bool next(string& display) override {
             NextInstrument instrument(this);
             if(closed_)throw dbms::DbError("XX000","prepared context source has already been closed");
-            if(!node_->readAt(position_,row_))return false;
+            if(!node_->readAt(position_,row_,retainRows_))return false;
             ++position_;display.clear();instrument.emitted=true;return true;
         }
         void close() override {
@@ -21392,7 +21436,7 @@ class PreparedWithDmlRuntime {
         }
     private:
         shared_ptr<DmlSourceNode> node_;
-        bool rebindable_=false,closed_=false;
+        bool rebindable_=false,closed_=false,retainRows_=true;
         size_t position_=0;
         dbms::RowContext row_;
     };
@@ -21439,9 +21483,11 @@ class PreparedWithDmlRuntime {
                 if(!select)throw dbms::DbError("0A000","mutation derived source requires a SELECT/VALUES plan");
                 cursor=dbms::QueryPlanner::makePreparedCursor(selectPlan(select,outer,frames,false,false,provider),output(select));
             } else if(range.viewQuery) {
-                if(!checkTablePermission(session_,physical(range,session_),dbms::StorageEngine::TablePrivilege::Select))
+                const auto view = physical(range,session_);
+                if(streamResults_ ? !canReadWholeTable(session_,view) :
+                   !checkTablePermission(session_,view,dbms::StorageEngine::TablePrivilege::Select))
                     throw dbms::DbError("42501","permission denied for view source");
-                viewRuntime=make_shared<PreparedWithDmlRuntime>(session_,range.viewQuery);
+                viewRuntime=make_shared<PreparedWithDmlRuntime>(session_,range.viewQuery,streamResults_);
                 auto* select=dynamic_cast<dbms::SelectStmt*>(range.viewQuery->ast.get());
                 if(!select)throw dbms::DbError("0A000","view source requires a genuine SELECT/VALUES plan");
                 cursor=dbms::QueryPlanner::makePreparedCursor(viewRuntime->selectPlan(select,dbms::RowContext{},{}),range.columns);
@@ -21825,7 +21871,7 @@ class PreparedWithDmlRuntime {
             // earlier correlated scan/join counters. Logical producer frames
             // still require their own parameterized lifetime contract.
             source=make_unique<DmlSourceContextsOp>(std::move(node),
-                select->ctes.empty() && physicalSources(select->fromClause.get()));
+                select->ctes.empty() && physicalSources(select->fromClause.get()), !streamResults_);
         }
         if(select->whereClause) {
             const auto type=dbms::ExprHelper::inferParsedResultType(select->whereClause.get(),{},session_.currentDB,&g_engine);
@@ -21918,9 +21964,10 @@ public:
         return affected;
     }
 
-    PreparedWithDmlRuntime(Session& session,shared_ptr<dbms::PreparedQuery> query)
+    PreparedWithDmlRuntime(Session& session,shared_ptr<dbms::PreparedQuery> query,bool streamResults=false)
         :session_(session),query_(std::move(query)),root_(dynamic_cast<dbms::WithStmt*>(query_->ast.get())),
-         readRoot_(dynamic_cast<dbms::SelectStmt*>(query_->ast.get())),validation_(query_,&g_engine,session.currentDB) {
+         readRoot_(dynamic_cast<dbms::SelectStmt*>(query_->ast.get())),streamResults_(streamResults),
+         validation_(query_,&g_engine,session.currentDB) {
         if(!root_ && !readRoot_ && !dynamic_cast<dbms::InsertStmt*>(query_->ast.get()) &&
            !dynamic_cast<dbms::UpdateStmt*>(query_->ast.get()) && !dynamic_cast<dbms::DeleteStmt*>(query_->ast.get()))
             throw dbms::DbError("XX000","prepared runtime requires a genuine query envelope");
@@ -22133,6 +22180,36 @@ public:
         return hasWriter?dbms::executeAtomicDmlUnit(session_,command):command();
     }
 };
+}
+
+static shared_ptr<dbms::PreparedQueryCursor> openCopyQuery(Session& session, const string& sql) {
+    auto query = make_shared<dbms::PreparedQuery>(
+        g_engine.prepareBoundQuery(session.currentDB, sql, {}, true));
+    const auto checkRead = [](const dbms::Stmt* statement) {
+        const auto* select = dynamic_cast<const dbms::SelectStmt*>(statement);
+        if (!select)
+            throw dbms::DbError("0A000", "COPY TO STDOUT requires a SELECT or VALUES query");
+        if (!select->locking.empty())
+            throw dbms::DbError("0A000", "COPY does not support queries that lock result rows");
+    };
+    const function<void(const dbms::PreparedQuery&)> checkQuery = [&](const dbms::PreparedQuery& query) {
+        checkRead(query.ast.get());
+        for (const auto& entry : query.statementOutputs) checkRead(entry.first);
+        for (const auto& range : query.sourceRanges)
+            if (range.viewQuery) checkQuery(*range.viewQuery);
+    };
+    checkQuery(*query);
+
+    auto runtime = make_shared<PreparedWithDmlRuntime>(session, query, true);
+    auto plan = runtime->queryPlan();
+    if (!plan->supportsStructuredRows())
+        throw dbms::DbError("0A000", "COPY query does not produce typed rows");
+    auto cursor = dbms::QueryPlanner::makePreparedCursor(std::move(plan), query->output);
+    // Plan callbacks borrow the runtime. Keep it alive through cursor close
+    // and destruction, including when writing to the client fails.
+    return {cursor.release(), [runtime = std::move(runtime)](dbms::PreparedQueryCursor* cursor) {
+        delete cursor;
+    }};
 }
 
 static bool canRunPreparedIntegerJoin(const dbms::PreparedQuery& query, const Session& session) {
@@ -42125,7 +42202,7 @@ int main(int argc, char* argv[]) {
 
     // Server mode: ./dbms_main -D DATA_DIR --server PORT [--insecure]
     if (serverMode)
-        return dbms::startServer(serverPort, allowPlaintext) ? 0 : 1;
+        return dbms::startServer(serverPort, allowPlaintext, openCopyQuery) ? 0 : 1;
 
     dbms::ScopedDiagnosticCapture cliDiagnostics([](dbms::StatementDiagnostic diagnostic) {
         std::cerr << diagnostic.severity << ": " << diagnostic.message << '\n';

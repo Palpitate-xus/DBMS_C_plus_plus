@@ -191,6 +191,107 @@ def check_copy_schema_lock(client, owner, reader):
     print("COPY_SCHEMA_LOCK_CHECK_COMPLETE 1")
 
 
+def check_query_copy_output(client, sock):
+    def command(sql, tag, ready=b"I"):
+        messages, sqlstate = simple(client, sock, sql)
+        assert (sqlstate, command_tags(messages), messages[-1]) == (
+            None, [tag], (b"Z", ready)), (sql, messages)
+
+    sync = client.typed(b"S")
+
+    def request(sql, extended):
+        if extended:
+            sock.sendall(client.typed(b"P", parse("", sql)) + client.typed(b"B", bind("", "")) +
+                         client.typed(b"E", execute()) + sync)
+        else:
+            sock.sendall(client.typed(b"Q", sql.encode() + b"\0"))
+        first = client.read_message(sock)
+        if extended and first == (b"1", b""):
+            assert client.read_message(sock) == (b"2", b""), sql
+            first = client.read_message(sock)
+        elif extended:
+            assert first[0] == b"E", (sql, first)
+        assert first[0] in (b"H", b"E"), (sql, first)
+        return [first, *client.read_until_ready(sock)]
+
+    def exported(sql, width, rows, extended, ready=b"I"):
+        messages = request(sql, extended)
+        assert messages[0][0] == b"H", (sql, messages)
+        expect_copy_response(messages[0][1], width)
+        ending = [(b"c", b""), (b"C", f"COPY {len(rows)}\0".encode()), (b"Z", ready)]
+        assert messages[1:] == [(b"d", row) for row in rows] + ending, (sql, messages)
+
+    def rejected(sql, sqlstate, extended, ready=b"I"):
+        messages = request(sql, extended)
+        assert [kind for kind, _ in messages] == [b"E", b"Z"], (sql, messages)
+        assert (state(messages), messages[-1]) == (sqlstate, (b"Z", ready)), (sql, messages)
+
+    command("CREATE TABLE copy_query_fixture (id INT PRIMARY KEY, payload TEXT)", b"CREATE TABLE")
+    begin_copy(client, sock, "COPY copy_query_fixture (id, payload) FROM STDIN", columns=2)
+    escaped = b"left\\tright\\\\slash\\nnext\\rend|marker"
+    seed = b"1\toutside\n2\t\\N\n3\t\n4\t" + escaped + b"\n5\tNULL\n6\tNULL\n"
+    sock.sendall(client.typed(b"d", seed) + client.typed(b"c"))
+    assert finish_simple_copy(client, sock) == [(b"C", b"COPY 6\0"), (b"Z", b"I")]
+    command("CREATE ROLE copy_query_reader", b"CREATE ROLE")
+    command("GRANT SELECT(id) ON copy_query_fixture TO copy_query_reader", b"GRANT SELECT(ID)")
+
+    ordered = ("COPY (SELECT id+10 AS n, payload FROM copy_query_fixture "
+               "WHERE id>=2 AND id<=5 ORDER BY id DESC) TO STDOUT")
+    ordered_rows = [b"15\tNULL\n", b"14\t" + escaped + b"\n", b"13\t\n", b"12\t\\N\n"]
+    zero = "COPY (SELECT id, payload, NULL::text AS extra FROM copy_query_fixture WHERE id<0) TO STDOUT"
+    missing = "COPY (SELECT missing FROM copy_query_fixture) TO STDOUT"
+    for extended in (False, True):
+        exported(ordered, 2, ordered_rows, extended)
+        exported(zero, 3, [], extended)
+        exported("COPY (SELECT payload FROM copy_query_fixture WHERE id>=5 ORDER BY id) TO STDOUT",
+                 1, [b"NULL\n", b"NULL\n"], extended)
+        exported("COPY (SELECT id, payload FROM copy_query_fixture WHERE id>=2 AND id<=5 ORDER BY id) "
+                 "TO STDOUT WITH (DELIMITER '|', NULL 'NUL')", 2,
+                 [b"2|NUL\n", b"3|\n", b"4|" + escaped.replace(b"|", b"\\|") + b"\n", b"5|NULL\n"], extended)
+        exported("COPY (SELECT '('::text AS first, ')'::text AS second FROM copy_query_fixture "
+                 "WHERE id=1 /* ) */) TO STDOUT", 2, [b"(\t)\n"], extended)
+        exported("COPY (VALUES (1, NULL::text), (2, ''::text)) TO STDOUT", 2,
+                 [b"1\t\\N\n", b"2\t\n"], extended)
+        exported("COPY (WITH source AS (SELECT id FROM copy_query_fixture WHERE id<=2) "
+                 "SELECT id FROM source ORDER BY id DESC) TO STDOUT", 1,
+                 [b"2\n", b"1\n"], extended)
+        rejected("COPY (SELECT id FROM copy_query_fixture) FROM STDIN", "42601", extended)
+        rejected(missing, "42703", extended)
+        rejected("COPY (SELECT id FROM copy_query_absent) TO STDOUT", "42P01", extended)
+        rejected("COPY (SELECT 1/0) TO STDOUT", "22012", extended)
+        partial = request(
+            "COPY (SELECT id, 10/(2-id) FROM (SELECT id FROM copy_query_fixture "
+            "WHERE id<=2 ORDER BY id) AS sorted) TO STDOUT", extended)
+        assert [kind for kind, _ in partial] == [b"H", b"d", b"E", b"Z"], partial
+        expect_copy_response(partial[0][1], 2)
+        assert (partial[1][1], state(partial), partial[-1]) == (
+            b"1\t10\n", "22012", (b"Z", b"I")), partial
+
+        command("BEGIN READ ONLY", b"BEGIN", b"T")
+        exported(ordered, 2, ordered_rows, extended, b"T")
+        command("SELECT 1", b"SELECT 1", b"T")
+        command("ROLLBACK", b"ROLLBACK")
+        command("BEGIN", b"BEGIN", b"T")
+        rejected(missing, "42703", extended, b"E")
+        messages, sqlstate = simple(client, sock, "SELECT 1")
+        assert (sqlstate, messages[-1]) == ("25P02", (b"Z", b"E")), messages
+        command("ROLLBACK", b"ROLLBACK")
+        exported(zero, 3, [], extended)
+
+        command("SET ROLE copy_query_reader", b"SET")
+        try:
+            exported("COPY (SELECT id FROM copy_query_fixture WHERE id=1) TO STDOUT", 1,
+                     [b"1\n"], extended)
+            rejected("COPY (SELECT l.id FROM copy_query_fixture l JOIN copy_query_fixture r "
+                     "ON l.payload=r.payload) TO STDOUT", "42501", extended)
+        finally:
+            command("RESET ROLE", b"RESET")
+
+    command("DROP TABLE copy_query_fixture", b"DROP TABLE")
+    command("DROP ROLE copy_query_reader", b"DROP ROLE")
+    print("COPY_QUERY_OUTPUT_MODES_COMPLETE 2")
+
+
 def main():
     root = Path(__file__).resolve().parent.parent
     spec = importlib.util.spec_from_file_location(
@@ -206,6 +307,7 @@ def main():
         with socket.create_connection(("127.0.0.1", server["port"]), 15) as peer:
             client.startup(peer, "alice", "info")
             check_copy_schema_lock(client, sock, peer)
+        check_query_copy_output(client, sock)
         _, sqlstate = simple(
             client, sock,
             "CREATE TABLE copy_wire (id INT PRIMARY KEY, payload TEXT, optional TEXT DEFAULT 'fallback');")
