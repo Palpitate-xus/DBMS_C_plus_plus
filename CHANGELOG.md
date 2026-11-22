@@ -1,29 +1,29 @@
 # 更新日志
 
 <details>
-<summary>读取分区表时减少重复查找 · 2026-11-22</summary>
+<summary>分区较多的表，重复查询用时缩短 · 2026-11-22</summary>
 
-各分区共用扫描开始时读到的表定义，数据库逐个核对并读取分区文件。测试中，分区较多的表在重复查询时耗时更短。
+查询多个分区时，可以共用已经查到的表结构。在有 60 个分区的测试表上，连续查询的耗时缩短了约 16% 到 18%。
 
 [测试报告](docs/test-report.md#partition-scan-schema-20261122) · [性能报告](docs/performance-report-2026-10-30.md#partition-scan-schema-cost-20261122)
 
 </details>
 
 <details>
-<summary>修复跨分区查询时漏掉记录的问题 · 2026-11-22</summary>
+<summary>修复部分跨分区查询漏掉记录的问题 · 2026-11-22</summary>
 
-用 `OR` 查询多个分区时，数据库会返回所有匹配记录。同一条记录即使命中多个条件，也只返回一次。排序和查询结果能区分空值、空字符串和数字零。
+用 `OR` 连接筛选条件时，符合任一条件的记录都会返回。一条记录同时符合多个条件时，也只返回一次。排序和查询结果仍能区分空值、空字符串和数字零。
 
 [测试报告](docs/test-report.md#plain-partition-or-20261122) · [性能报告](docs/performance-report-2026-10-30.md#plain-partition-or-cost-20261122)
 
 </details>
 
 <details>
-<summary>可以用 SQL 向分区表添加记录 · 2026-11-22</summary>
+<summary>可以向分区表写入数据 · 2026-11-22</summary>
 
-已准备好分区且没有索引的表可以用 `INSERT` 写入。数据库会把每条记录放进对应的分区，提交前可以撤销写入。
+可以对部分已建好分区的表执行 `INSERT`。数据库会把记录放到对应的分区，提交前还能撤销写入。
 
-[使用手册](docs/MANUAL.md#向分区表写入) · [测试报告](docs/test-report.md#transactional-partition-insert-20261122) · [性能报告](docs/performance-report-2026-10-30.md#transactional-partition-insert-cost-20261122)
+[写入条件](docs/MANUAL.md#向分区表写入) · [测试报告](docs/test-report.md#transactional-partition-insert-20261122) · [性能报告](docs/performance-report-2026-10-30.md#transactional-partition-insert-cost-20261122)
 
 </details>
 
