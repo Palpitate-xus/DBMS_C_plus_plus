@@ -3,6 +3,7 @@
 
 import importlib.util
 from pathlib import Path
+import struct
 
 
 UNIMPLEMENTED_CATALOGS = (
@@ -19,7 +20,6 @@ UNIMPLEMENTED_CATALOGS = (
     "pg_default_acl",
     "pg_tablespace",
     "pg_namespace",
-    "pg_stats",
     "pg_statistic",
     "pg_statistic_ext",
     "pg_subscription",
@@ -31,6 +31,62 @@ UNIMPLEMENTED_CATALOGS = (
     "pg_enum",
     "pg_roles",
 )
+
+
+def check_stats_query(client, sock, sql, columns, rows):
+    simple = client.simple_query(sock, sql)
+    parse = client.typed(b"P", b"\0" + sql.encode() + b"\0" + struct.pack("!H", 0))
+    sync = client.typed(b"S")
+    sock.sendall(parse + client.typed(b"D", b"S\0") + sync)
+    described = client.read_until_ready(sock)
+    bind = client.typed(b"B", b"\0\0" + struct.pack("!HHH", 0, 0, 0))
+    execute = client.typed(b"E", b"\0" + struct.pack("!I", 0))
+    sock.sendall(parse + bind + client.typed(b"D", b"P\0") + execute + sync)
+    executed = client.read_until_ready(sock)
+
+    data_frames = [b"D"] * len(rows)
+    assert [kind for kind, _ in simple] == [b"T", *data_frames, b"C", b"Z"], (sql, simple)
+    assert [kind for kind, _ in described] == [b"1", b"t", b"T", b"Z"], (sql, described)
+    assert [kind for kind, _ in executed] == [b"1", b"2", b"T", *data_frames, b"C", b"Z"], (sql, executed)
+    tag = (b"C", ("SELECT %d" % len(rows)).encode() + b"\0")
+    assert simple[-2] == executed[-2] == tag, (sql, simple[-2], executed[-2])
+    assert client.data_row_values(simple) == client.data_row_values(executed) == rows, sql
+    fields = client.row_description_fields(simple)
+    assert fields == client.row_description_fields(described) == client.row_description_fields(executed), sql
+    assert all(field[1] != 0 for field in fields), (sql, fields)
+    expected = [(name.encode(), i, oid, size, -1, 0)
+                for i, (name, oid, size) in enumerate(columns, 1)]
+    assert [(field[0], *field[2:]) for field in fields] == expected, (sql, fields)
+    assert simple[-1] == described[-1] == executed[-1] == (b"Z", b"I"), sql
+
+
+def check_stats_catalog(client, runner, sock):
+    for sql, tag in (
+            ("CREATE TABLE audit_catalog_stats (id INTEGER)", "CREATE TABLE"),
+            ("INSERT INTO audit_catalog_stats VALUES (2), (2), (8)", "INSERT 0 3"),
+            ("ANALYZE audit_catalog_stats", "ANALYZE")):
+        messages = client.simple_query(sock, sql)
+        _, error, _, _, actual_tag = runner.decode_wire_result(messages)
+        assert (error, actual_tag, messages[-1]) == (None, tag, (b"Z", b"I")), (sql, messages)
+
+    # PostgreSQL 18.6 returns the same descriptor even when the filter has no rows.
+    columns = (
+        ("schemaname", 19, 64), ("tablename", 19, 64), ("attname", 19, 64),
+        ("inherited", 16, 1), ("null_frac", 700, 4), ("avg_width", 23, 4),
+        ("n_distinct", 700, 4), ("most_common_vals", 2277, -1),
+        ("most_common_freqs", 1021, -1), ("histogram_bounds", 2277, -1),
+        ("correlation", 700, 4), ("most_common_elems", 2277, -1),
+        ("most_common_elem_freqs", 1021, -1), ("elem_count_histogram", 1021, -1),
+        ("range_length_histogram", 2277, -1), ("range_empty_frac", 700, 4),
+        ("range_bounds_histogram", 2277, -1),
+    )
+    for source in ("pg_stats", "pg_catalog.pg_stats"):
+        check_stats_query(client, sock, "SELECT * FROM " + source + " WHERE FALSE", columns, [])
+        check_stats_query(client, sock,
+                          "SELECT schemaname, tablename, attname, inherited, null_frac, avg_width "
+                          f"FROM {source} WHERE schemaname='public' AND tablename='audit_catalog_stats' "
+                          "ORDER BY attname", columns[:6],
+                          [[b"public", b"audit_catalog_stats", b"id", b"f", b"0", b"4"]])
 
 
 def main():
@@ -51,10 +107,11 @@ def main():
                 assert result[1] == "0A000", (name, result)
                 assert messages[-1] == (b"Z", b"I"), (name, messages[-1])
 
+        check_stats_catalog(client, runner, sock)
+
         # pg_database exposes only its verified typed subset. The complete
         # PostgreSQL schema is not fabricated, so SELECT * and real but
-        # unsupported columns fail closed. pg_stats/pg_statistic also fail
-        # closed until their distinct PostgreSQL shapes have typed execution.
+        # unsupported columns fail closed.
         messages = client.simple_query(
             sock, "SELECT datname, encoding FROM pg_catalog.pg_database "
             "WHERE datname = 'info'")

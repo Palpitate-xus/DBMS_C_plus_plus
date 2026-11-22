@@ -19,6 +19,15 @@ cmake --build build/cmake --target dbms_main --parallel 2
 ## 最近更新
 
 <details>
+<summary>查看带长列表的查询计划更快 · 2026-11-22</summary>
+
+用 `EXPLAIN` 查看含多个 `IN` 或 `NOT IN` 值的查询时，数据库会共用已经读到的表结构和统计。
+
+[性能报告](docs/performance-report-2026-10-30.md#explain-filter-statistics-cost-20261122)
+
+</details>
+
+<details>
 <summary>开事务时，少做一轮表结构检查 · 2026-11-22</summary>
 
 数据库会用同一轮检查判断是否需要保存表结构。目录更新时，已经在用的旧版本仍可继续读取。
@@ -33,15 +42,6 @@ cmake --build build/cmake --target dbms_main --parallel 2
 例如，另一连接正在改表时，单独查询当前连接的锁等待时间，无需等改表结束。手册列出了适用的 SQL 写法。
 
 [使用说明](docs/MANUAL.md#在-sql-表达式里读取和修改设置)
-
-</details>
-
-<details>
-<summary>查询里也能查看和修改连接设置 · 2026-11-22</summary>
-
-可以在 SQL 查询里查看或调整当前连接的锁等待时间。也可以只为当前事务调整。
-
-[使用示例](docs/MANUAL.md#在-sql-表达式里读取和修改设置)
 
 </details>
 

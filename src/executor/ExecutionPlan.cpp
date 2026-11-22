@@ -11525,59 +11525,88 @@ static bool statLess(const std::string& a, const std::string& b) {
     return a < b;
 }
 
+namespace {
+// One Filter estimate can consider a column many times, including once for
+// every value in an IN list. Keep evidence only for this filter's estimate.
+class FilterSelectivity {
+public:
+    FilterSelectivity(StorageEngine* engine, const std::string& database, const std::string& table)
+        : engine_(engine), database_(database), table_(table) {}
+
+    double estimate(const StorageEngine::Condition& condition);
+
+private:
+    struct Evidence {
+        std::optional<std::shared_ptr<const analyzed_statistics::Column>> typed;
+        std::optional<StorageEngine::ColumnStats> legacy;
+        std::optional<const Column*> column;
+    };
+
+    double estimate(const StorageEngine::Condition& condition, Evidence& evidence);
+    const Column* column(const std::string& name, Evidence& evidence) {
+        if (!evidence.column) {
+            if (!schema_) schema_ = engine_->getTableSchema(database_, table_);
+            evidence.column = nullptr;
+            for (size_t i = 0; i < schema_->len(); ++i) {
+                if (schema_->cols[i].dataName == name) {
+                    evidence.column = &schema_->cols[i];
+                    break;
+                }
+            }
+        }
+        return *evidence.column;
+    }
+
+    size_t analyzedRows() {
+        if (!analyzedRows_) analyzedRows_ = engine_->getTableRowCount(database_, table_);
+        return *analyzedRows_;
+    }
+
+    StorageEngine* engine_;
+    const std::string& database_;
+    const std::string& table_;
+    std::map<std::string, Evidence> columns_;
+    std::optional<TableSchema> schema_;
+    std::optional<size_t> analyzedRows_;
+    std::optional<size_t> estimatedRows_;
+};
+
+double FilterSelectivity::estimate(const StorageEngine::Condition& condition) {
+    return estimate(condition, columns_[condition.colName]);
+}
+
 // Selectivity estimation consuming ANALYZE statistics:
 //   '='  : MCV hit -> exact frequency; else 1/ndistinct (default 0.1)
 //   '!=' : 1 - '=' selectivity
 //   '<' '<=' '>' '>=' : equidepth histogram interpolation between bucket
 //                       boundaries, clamped by min/max (default 0.3)
-static double estimateSelectivity(const StorageEngine::Condition& cond,
-                                  StorageEngine* engine,
-                                  const std::string& dbname,
-                                  const std::string& tablename) {
+double FilterSelectivity::estimate(const StorageEngine::Condition& cond, Evidence& evidence) {
     if(cond.op=="isnull" || cond.op=="isnotnull" || cond.op=="=" || cond.op=="!=") {
-        if(const auto typed=engine->getAnalyzedColumnStatistics(dbname,tablename,cond.colName)) {
+        if (!evidence.typed)
+            evidence.typed = engine_->getAnalyzedColumnStatistics(database_, table_, cond.colName);
+        if (const auto* typed = evidence.typed->get()) {
             if(cond.op=="isnull")return typed->nullFraction;
             if(cond.op=="isnotnull")return 1.0-typed->nullFraction;
-            const auto schema=engine->getTableSchema(dbname,tablename);
-            for(size_t i=0;i<schema.len();++i)if(schema.cols[i].dataName==cond.colName) {
+            if (const auto* field = column(cond.colName, evidence)) {
                 const auto probe=cond.referenceInputOid?std::to_string(*cond.referenceInputOid):cond.value;
-                if(const auto fraction=analyzedEqualityFraction(schema.cols[i],*typed,
-                        plannerRowEstimate(engine,dbname,tablename),probe))
+                if (!estimatedRows_) estimatedRows_ = plannerRowEstimate(engine_, database_, table_);
+                if(const auto fraction=analyzedEqualityFraction(*field,*typed,*estimatedRows_,probe))
                     return cond.op=="="?*fraction:std::max(0.0,1.0-typed->nullFraction-*fraction);
-                break;
             }
         }
-    }
-    auto stats = engine->getColumnStats(dbname, tablename, cond.colName);
-    const double totalRows = static_cast<double>(stats.analyzedRows
-        ? *stats.analyzedRows : engine->getTableRowCount(dbname, tablename));
-    // NULL fraction (pg null_frac): 0 when stats predate nullCount.
-    double nullFrac = (totalRows > 0 && stats.nullCount > 0)
-        ? std::min(1.0, static_cast<double>(stats.nullCount) / totalRows)
-        : 0.0;
-    if (cond.op == "isnull") {
-        // Exact when ANALYZE ran: nullCount / rows.
-        if (totalRows > 0 && stats.nullCount > 0) return nullFrac;
-        return 0.1;   // historical default-null guess
-    }
-    if (cond.op == "isnotnull") {
-        if (totalRows > 0 && stats.nullCount > 0) return 1.0 - nullFrac;
-        return 0.9;
     }
     if (cond.op == "in" || cond.op == "notin") {
         // PG scalargtsub/eqsel-sum semantics: sum the per-value equality
         // selectivities (MCV-exact where available), clamp IN to at most
         // 0.5..1 like PG's HALF/ONE defaults; NOT IN takes the complement.
         std::istringstream iss(cond.value);
-        std::string tok;
+        StorageEngine::Condition eq;
+        eq.op = "=";
+        eq.colName = cond.colName;
         double sum = 0.0;
         size_t k = 0;
-        while (iss >> tok) {
-            StorageEngine::Condition eq;
-            eq.op = "=";
-            eq.colName = cond.colName;
-            eq.value = tok;
-            sum += estimateSelectivity(eq, engine, dbname, tablename);
+        while (iss >> eq.value) {
+            sum += estimate(eq, evidence);
             ++k;
         }
         if (k == 0) return cond.op == "in" ? 0.0 : 1.0;
@@ -11587,28 +11616,35 @@ static double estimateSelectivity(const StorageEngine::Condition& cond,
         if (sel >= 1.0) sel = 0.999;
         return sel;
     }
+    if (!evidence.legacy) evidence.legacy = engine_->getColumnStats(database_, table_, cond.colName);
+    const auto& stats = *evidence.legacy;
+    const double totalRows = static_cast<double>(stats.analyzedRows ? *stats.analyzedRows : analyzedRows());
+    // NULL fraction (pg null_frac): 0 when stats predate nullCount.
+    const double nullFrac = (totalRows > 0 && stats.nullCount > 0)
+        ? std::min(1.0, static_cast<double>(stats.nullCount) / totalRows)
+        : 0.0;
+    if (cond.op == "isnull") {
+        if (totalRows > 0 && stats.nullCount > 0) return nullFrac;
+        return 0.1;   // historical default-null guess
+    }
+    if (cond.op == "isnotnull") {
+        if (totalRows > 0 && stats.nullCount > 0) return 1.0 - nullFrac;
+        return 0.9;
+    }
     if (cond.op == "=") {
         // Most Common Values first: mcv entries are (value, row count), so
         // the selectivity of a hot value is count / table rows — exact.
         // NULLs never satisfy equality; the count already excludes them.
-        double rows = totalRows;
-        const auto schema = engine->getTableSchema(dbname, tablename);
-        const Column* column = nullptr;
-        for (size_t i = 0; i < schema.len(); ++i) {
-            if (schema.cols[i].dataName == cond.colName) {
-                column = &schema.cols[i];
-                break;
-            }
-        }
-        if(column) {
+        const auto* field = column(cond.colName, evidence);
+        if(field) {
             const auto probe=cond.referenceInputOid?std::to_string(*cond.referenceInputOid):cond.value;
-            if(const auto fraction=analyzedEqualityFraction(*column,stats,totalRows,probe))return *fraction;
+            if(const auto fraction=analyzedEqualityFraction(*field,stats,totalRows,probe))return *fraction;
         }
         for (const auto& m : stats.mcv) {
-            if (m.first == cond.value || (column && StorageEngine::compareValues(
-                    *column, m.first, false, cond.value, false, "=")
+            if (m.first == cond.value || (field && StorageEngine::compareValues(
+                    *field, m.first, false, cond.value, false, "=")
                     == StorageEngine::PredicateTruth::True)) {
-                if (rows > 0) return static_cast<double>(m.second) / rows;
+                if (totalRows > 0) return static_cast<double>(m.second) / totalRows;
                 return 1.0 / static_cast<double>(stats.cardinality);
             }
         }
@@ -11625,7 +11661,7 @@ static double estimateSelectivity(const StorageEngine::Condition& cond,
         eqCond.op = "=";
         eqCond.colName = cond.colName;
         eqCond.value = cond.value;
-        return 1.0 - estimateSelectivity(eqCond, engine, dbname, tablename);
+        return 1.0 - estimate(eqCond, evidence);
     }
     if (cond.op == "like") {
         // PG-style likesel: a literal prefix (LIKE 'abc%') bounds the
@@ -11672,11 +11708,10 @@ static double estimateSelectivity(const StorageEngine::Condition& cond,
         hi.op = "<";
         hi.colName = cond.colName;
         hi.value = upper;
-        double s = estimateSelectivity(lo, engine, dbname, tablename) *
-                   estimateSelectivity(hi, engine, dbname, tablename);
+        double s = estimate(lo, evidence) * estimate(hi, evidence);
         // MCV correction: hot values inside the prefix range give exact
         // frequencies that the uniform histogram misses.
-        double rows = static_cast<double>(engine->getTableRowCount(dbname, tablename));
+        double rows = static_cast<double>(analyzedRows());
         double mcvInside = 0.0;
         for (const auto& m : stats.mcv) {
             const std::string& v = m.first;
@@ -11730,6 +11765,24 @@ static double estimateSelectivity(const StorageEngine::Condition& cond,
     }
     return 0.3;
 }
+
+static double explainFilterSelectivity(const FilterOp& filter, StorageEngine* engine,
+                                       const std::string& database) {
+    const auto* child = filter.child();
+    std::string table;
+    if (const auto* scan = dynamic_cast<const TableScanOp*>(child)) table = scan->tableName();
+    else if (const auto* scan = dynamic_cast<const ParallelTableScanOp*>(child)) table = scan->tableName();
+    else if (const auto* scan = dynamic_cast<const IndexScanOp*>(child)) table = scan->tableName();
+    else if (const auto* scan = dynamic_cast<const BitmapHeapScanOp*>(child)) table = scan->scanOrigin().tablename;
+    else if (const auto* scan = dynamic_cast<const BitmapOrHeapScanOp*>(child)) table = scan->scanOrigin().tablename;
+
+    FilterSelectivity estimator(engine, database, table);
+    double selectivity = 1.0;
+    for (const auto& condition : filter.conditions())
+        selectivity *= estimator.estimate(condition);
+    return selectivity;
+}
+} // namespace
 
 // Stats-driven equality-join selectivity: 1 / max(ndistinct_l, ndistinct_r),
 // defaulting to the historical 0.1 without ANALYZE stats.
@@ -11932,22 +11985,7 @@ static CostEstimate explainOp(Operator* op, int indent,
 
     } else if (auto* filt = dynamic_cast<FilterOp*>(op)) {
         CostEstimate child = explainOp(filt->child(), indent + 1, engine, dbname, out, opts);
-        double sel = 1.0;
-        for (const auto& c : filt->conditions()) {
-            std::string tblName;
-            if (auto* ts = dynamic_cast<TableScanOp*>(filt->child())) {
-                tblName = ts->tableName();
-            } else if (auto* pts = dynamic_cast<ParallelTableScanOp*>(filt->child())) {
-                tblName = pts->tableName();
-            } else if (auto* is = dynamic_cast<IndexScanOp*>(filt->child())) {
-                tblName = is->tableName();
-            } else if (auto* bitmap = dynamic_cast<BitmapHeapScanOp*>(filt->child())) {
-                tblName = bitmap->scanOrigin().tablename;
-            } else if (auto* bitmapOr = dynamic_cast<BitmapOrHeapScanOp*>(filt->child())) {
-                tblName = bitmapOr->scanOrigin().tablename;
-            }
-            sel *= estimateSelectivity(c, engine, dbname, tblName);
-        }
+        const double sel = explainFilterSelectivity(*filt, engine, dbname);
         est.rows = child.rows>0?std::max(1.0,child.rows*sel):0;
         est.cost = child.cost + est.rows * 0.5;
         out += prefix + "Filter" + costRowsStr(est, opts) + "\n";
@@ -12258,22 +12296,7 @@ static std::pair<std::string, CostEstimate> explainOpJson(Operator* op,
 
     } else if (auto* filt = dynamic_cast<FilterOp*>(op)) {
         auto [childJson, child] = explainOpJson(filt->child(), engine, dbname, opts);
-        double sel = 1.0;
-        for (const auto& c : filt->conditions()) {
-            std::string tblName;
-            if (auto* ts = dynamic_cast<TableScanOp*>(filt->child())) {
-                tblName = ts->tableName();
-            } else if (auto* pts = dynamic_cast<ParallelTableScanOp*>(filt->child())) {
-                tblName = pts->tableName();
-            } else if (auto* is = dynamic_cast<IndexScanOp*>(filt->child())) {
-                tblName = is->tableName();
-            } else if (auto* bitmap = dynamic_cast<BitmapHeapScanOp*>(filt->child())) {
-                tblName = bitmap->scanOrigin().tablename;
-            } else if (auto* bitmapOr = dynamic_cast<BitmapOrHeapScanOp*>(filt->child())) {
-                tblName = bitmapOr->scanOrigin().tablename;
-            }
-            sel *= estimateSelectivity(c, engine, dbname, tblName);
-        }
+        const double sel = explainFilterSelectivity(*filt, engine, dbname);
         est.rows = child.rows>0?std::max(1.0,child.rows*sel):0;
         est.cost = child.cost + est.rows * 0.5;
         json += "\"nodeType\":\"Filter\",";

@@ -6,6 +6,10 @@
 
 截至 2026-11-22，273 项功能要求中有 22 项完成、167 项部分实现、69 项待验证、15 项暂缓。各项结果和剩余范围见功能总账。以下更新报告给出各轮测试的实际范围。[功能总账](gap-progress.json) · [支持的功能和限制](compatibility-contract.md)
 
+## 2026-11-22 · 查看长列表查询的计划更快
+
+`EXPLAIN` 估算同一列中的多个值时可以共用已读取的统计和表结构。文本和 JSON 计划都适用。已重新分析并回滚或重启后的结果也已核对。[测试报告](test-report.md#explain-filter-statistics-20261122) · [性能报告](performance-report-2026-10-30.md#explain-filter-statistics-cost-20261122)
+
 ## 2026-11-22 · 开始事务时少查一遍表结构
 
 事务准备保存当前数据库的目录时，只检查一次已加载的文件。目录发生变化时仍要核对本地改动，报告写入错误，并保留已经交给读者的旧版本。[测试报告](test-report.md#catalog-publication-one-scan-20261122) · [性能报告](performance-report-2026-10-30.md#catalog-publication-one-scan-cost-20261122)

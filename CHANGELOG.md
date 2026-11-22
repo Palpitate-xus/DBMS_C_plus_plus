@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>查看带长列表的查询计划更快 · 2026-11-22</summary>
+
+用 `EXPLAIN` 查看含多个 `IN` 或 `NOT IN` 值的查询时，数据库会共用已经读到的表结构和统计。
+
+[测试报告](docs/test-report.md#explain-filter-statistics-20261122) · [性能报告](docs/performance-report-2026-10-30.md#explain-filter-statistics-cost-20261122)
+
+</details>
+
+<details>
 <summary>开事务时，少做一轮表结构检查 · 2026-11-22</summary>
 
 数据库会用同一轮检查判断是否需要保存表结构。目录更新时，已经在用的旧版本仍可继续读取。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>查询里也能查看和修改连接设置 · 2026-11-22</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-22 · 查询里也能查看和修改连接设置
 
 可以在 SQL 查询里查看或调整当前连接的锁等待时间。也可以只为当前事务调整。
 
 [使用示例](docs/MANUAL.md#在-sql-表达式里读取和修改设置) · [测试报告](docs/test-report.md#session-setting-functions-20261122) · [性能报告](docs/performance-report-2026-10-30.md#session-setting-functions-cost-20261122)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-22 · 回滚后会恢复原来的超时设置
 

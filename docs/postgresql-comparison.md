@@ -2,6 +2,10 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-22 · 查看列表查询的计划
+
+PostgreSQL 使用列统计估算 `IN` 一类列表条件，也可以在 `ANALYZE` 后用扩展统计估算有关联的同表条件。SQLite 将 `ANALYZE` 采集的表和索引统计留给优化器，DuckDB 的 `ANALYZE` 用于更新选择连接顺序所需的统计。本项目在生成 `EXPLAIN` 的过滤节点时复用同一列的统计和表结构。列表条件仍逐值估算，相关多列的估算算法仍有差距。[PostgreSQL 统计](https://www.postgresql.org/docs/18/planner-stats.html) · [PostgreSQL 列表估算源码](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/utils/adt/selfuncs.c) · [SQLite ANALYZE](https://www.sqlite.org/lang_analyze.html) · [DuckDB ANALYZE](https://duckdb.org/docs/2.0/sql/statements/analyze) · [性能报告](performance-report-2026-10-30.md#explain-filter-statistics-cost-20261122)
+
 ## 2026-11-22 · 事务开始时检查目录的开销
 
 PostgreSQL 18.6 在事务提交时通知其他连接哪些目录数据需要重新读取。SQLite 在数据库文件头维护表结构版本，运行已准备的语句时会检查它。DuckDB 用目录标识和版本判断是否需要重新分析已准备的语句。本项目仍逐个检查目录文件，在热目录上用同一轮检查决定是否需要写入并核对冲突。收到其他实例发布的版本后，目录服务加载新的对象，已有连接可用完所持有的版本。[PostgreSQL 目录通知](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/utils/cache/inval.c#L1097-L1158) · [SQLite 表结构版本](https://sqlite.org/fileformat.html#schema_cookie) · [DuckDB 目录版本](https://github.com/duckdb/duckdb/blob/v1.4.3/src/main/prepared_statement_data.cpp#L26-L74) · [性能报告](performance-report-2026-10-30.md#catalog-publication-one-scan-cost-20261122)

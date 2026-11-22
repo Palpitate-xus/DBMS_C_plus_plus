@@ -2,6 +2,24 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="explain-filter-statistics-20261122"></a>
+## 2026-11-22 · 复用查看查询计划时读到的统计
+
+普通过滤节点在文本和 JSON 计划中使用同一段估算代码。长 `IN`、`NOT IN`、重复列和混合列各有明确的行数及代价断言，并核对实际查询结果。已读取的统计和表结构仅在该过滤节点本次估算中复用。发生重新估算时读取当时的统计。[协议回归](../tests/analyzed_planner_statistics_protocol_e2e_test.py) · [性能报告](performance-report-2026-10-30.md#explain-filter-statistics-cost-20261122)
+
+基线与最终版有 253 组原始回复逐字节一致。其中 70 组 JSON 计划含实际过滤节点。12 次旧格式和新格式统计文件检查一致。事务内重新 `ANALYZE` 后读取一个文本值的计划估算从 41 变为 1，回滚恢复 41，提交另一组新统计并重启后读到 19。另有 60 条普通 `SELECT` 与 PostgreSQL 18.6 对照，结果、命令标签、错误码和事务状态一致。两个系统分别分配的物理表编号按各自来源核对。
+
+链接实际执行器的原生对照额外检查了 5 组文本和 JSON 计划，覆盖前缀和非前缀 `LIKE`、同列和跨列条件及空过滤节点。原始输出与基线逐字节一致。最终程序 SHA-256 为 `367137eca70633141a644164318a076d1eeaed686d6f7a36efb5f89463a52534`，独立协议对照回执为 `b83845e170fde702d2f64869cd8c9d1418a490c60e95c5a4381a7018b2e1b767`。
+
+7 套原生用例和 12 套定向协议用例通过。内存盘完整协议套件首轮在角色查询断言处失败，随后最终版复测两次通过。相同条件下基线一次通过、一次在并发连接的 `BEGIN` 断言处失败。两个版本的失败继续保留，回执 SHA-256 为 `07a8faed269c0c7077eed611746c5adc22da49c4cd8d172da482aad33f5c8a55`。[完整协议套件](../tests/postgres_protocol_test.py)
+
+<a id="pg-stats-wire-expectations-20261122"></a>
+## 2026-11-22 · 校正 pg_stats 协议断言
+
+两处旧断言仍认为 `pg_stats` 不可查询。现在核对空结果的完整列描述，以及 `ANALYZE` 后普通查询、查看结果类型和扩展执行返回的实际列及行。直方图测试核对 20 个双精度值按升序返回，只有一个取值时返回 SQL 空值。其余不支持的目录和同名用户表断言继续执行。[目录能力测试](../tests/pg_catalog_unavailable_sqlstate_protocol_e2e_test.py) · [直方图测试](../tests/pg_stats_histogram_extent_protocol_e2e_test.py) · [PostgreSQL pg_stats](https://www.postgresql.org/docs/18/view-pg-stats.html)
+
+新增用例也在 PostgreSQL 18.6 上执行通过。通过 `pg_stats` 用例后，旧版和当前版都在非限定名的 `INSERT INTO pg_type` 上返回 `XX001`。显式使用 `public.pg_type` 时，独立对照的读写成功。同名用户表原断言保留，便于继续检查。对照回执 SHA-256 为 `7094a6e63a93b53b60eac81b636ab5b610c84e03637c689981ae7e3c2bb04776`。
+
 <a id="catalog-publication-one-scan-20261122"></a>
 ## 2026-11-22 · 开始事务时只检查一次目录文件
 

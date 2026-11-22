@@ -101,6 +101,28 @@ def main():
         query('ANALYZE typed_wire')
         rows, oids = query("SELECT id,renamed,pad FROM typed_wire WHERE renamed LIKE 'replacement%' ORDER BY id")
         assert rows == replacement and oids == [23, 25, 25]
+        query('CREATE TABLE estimate_wire(id int PRIMARY KEY,v int,w int)')
+        query('INSERT INTO estimate_wire VALUES ' +
+              ','.join(f'({i},{i},{i % 8})' for i in range(1, 65)))
+        query('ANALYZE estimate_wire')
+        values = ','.join(str(i) for i in range(1, 17))
+        # Drive the costed Filter in both renderers. The two extra predicates
+        # exercise reuse for the same column and independence for another.
+        for predicate, row_count, filter_cost, result_ids in (
+                (f'v IN ({values})', 16, 72, range(1, 17)),
+                (f'v NOT IN ({values})', 48, 88, range(17, 65)),
+                (f'v IN ({values}) AND v<>32', 15, 71, range(1, 17)),
+                (f'v IN ({values}) AND w=1', 2, 65, (1, 9))):
+            sql = 'SELECT id FROM estimate_wire WHERE ' + predicate
+            rows, _ = query('EXPLAIN (FORMAT JSON, COSTS TRUE) ' + sql)
+            document = json.loads(rows[0][0])
+            filter_node = document['plan']['children'][0]
+            assert (filter_node['nodeType'], filter_node['rows'], filter_node['cost']) == (
+                'Filter', row_count, filter_cost), document
+            rows, _ = query('EXPLAIN (COSTS TRUE) ' + sql)
+            assert [f'  Filter  cost={filter_cost}  rows={row_count}'] in rows, rows
+            rows, oids = query(sql + ' ORDER BY id')
+            assert rows == [[str(i)] for i in result_ids] and oids == [23], (sql, rows, oids)
         trace['complete'] = True
     finally:
         runner.stop_ours(server); trace['server_exit'] = server['process'].returncode
