@@ -321,6 +321,77 @@ def check_query_copy_output(client, sock):
     print("COPY_QUERY_OUTPUT_MODES_COMPLETE 2")
 
 
+def check_csv_copy_input(client, runner, sock):
+    def command(sql, tag, ready=b"I"):
+        messages, sqlstate = simple(client, sock, sql)
+        assert (sqlstate, command_tags(messages), messages[-1]) == (
+            None, [tag], (b"Z", ready)), (sql, messages)
+
+    def load(sql, data, extended, *, count=None, error=None, ready=b"I", columns=3):
+        if extended:
+            sock.sendall(client.typed(b"P", parse("", sql)) + client.typed(b"B", bind("", "")) +
+                         client.typed(b"E", execute()))
+            assert client.read_message(sock) == (b"1", b""), sql
+            assert client.read_message(sock) == (b"2", b""), sql
+            kind, body = client.read_message(sock)
+            assert kind == b"G", (sql, kind, body)
+            expect_copy_response(body, columns)
+        else:
+            begin_copy(client, sock, sql, columns=columns)
+        # Split data records at every byte, including inside doubled quotes,
+        # CRLF and a UTF-8 code point. Each CopyData message is complete.
+        payload = b"".join(client.typed(b"d", data[i:i + 1]) for i in range(len(data)))
+        sock.sendall(payload + client.typed(b"c") + (client.typed(b"S") if extended else b""))
+        reply = client.read_until_ready(sock)
+        kinds = [kind for kind, _ in reply]
+        assert (state(reply), reply[-1]) == (error, (b"Z", ready)), (sql, reply)
+        if error is None:
+            assert reply == [(b"C", f"COPY {count}\0".encode()), (b"Z", ready)], (sql, reply)
+        else:
+            assert kinds == [b"E", b"Z"], (sql, reply)
+
+    for extended in (False, True):
+        command("CREATE TABLE copy_csv_input (id INT PRIMARY KEY, payload TEXT, aux TEXT)", b"CREATE TABLE")
+        load("COPY copy_csv_input FROM STDIN (FORMAT csv, HEADER MATCH)",
+             b'id,payload,aux\r\n1,,""\r\n2,"line\r\nnext","a ""quote"""\r\n'
+             b'3,caf\xc3\xa9,\\.\r\n4,ab"xy", tail', extended, count=4)
+        load("COPY copy_csv_input FROM STDIN WITH (FORMAT csv, HEADER, DELIMITER '|', "
+             "NULL 'nil', QUOTE '!', ESCAPE '^', FORCE_NULL (payload), FORCE_NOT_NULL (payload))",
+             b"arbitrary header\n5|nil|nil\n6|!nil!|!nil!\n7|!a^!b^^c!|!end!\n", extended, count=3)
+        load("COPY copy_csv_input (id, aux, payload) FROM STDIN (FORMAT csv, HEADER MATCH, FORCE_NOT_NULL *)",
+             b'id,aux,payload\r8,,abc\r', extended, count=1)
+        load("COPY copy_csv_input FROM STDIN CSV HEADER", b'ignored\n9,legacy,ok\n', extended, count=1)
+        command("CREATE TABLE copy_csv_marker (payload TEXT)", b"CREATE TABLE")
+        load("COPY copy_csv_marker FROM STDIN (FORMAT csv)", b'\\.\n', extended, count=1, columns=1)
+        marker = runner.decode_wire_result(client.simple_query(sock, "SELECT payload FROM copy_csv_marker"))
+        assert marker[0] == [["\\."]] and marker[1] is None, marker
+
+        csv = "COPY copy_csv_input FROM STDIN (FORMAT csv)"
+        load("COPY copy_csv_input FROM STDIN (FORMAT csv, HEADER MATCH)",
+             b'id,aux,payload\n10,wrong,order\n', extended, error="22P04")
+        load("COPY copy_csv_input FROM STDIN (FORMAT csv, HEADER MATCH)", b'', extended, error="22P04")
+        for data, code in ((b'10,too-few\n', "22P04"), (b'10,x,y,z\n', "22P04"),
+                           (b'10,a,b\n11,c,d\r\n', "22P04"), (b'10,a,\xff\n', "22021"),
+                           (b'2147483648,x,y\n', "22003")):
+            load(csv, data, extended, error=code)
+        command("BEGIN", b"BEGIN", b"T")
+        load(csv, b'10,first,row\n11,"unclosed', extended, error="22P04", ready=b"E")
+        messages, sqlstate = simple(client, sock, "SELECT 1")
+        assert (sqlstate, messages[-1]) == ("25P02", (b"Z", b"E")), messages
+        command("ROLLBACK", b"ROLLBACK")
+
+        rows, sqlstate, _, _, tag = runner.decode_wire_result(client.simple_query(
+            sock, "SELECT id, payload, aux FROM copy_csv_input ORDER BY id"))
+        assert (sqlstate, tag, rows) == (None, "SELECT 9", [
+            ["1", None, ""], ["2", "line\r\nnext", 'a "quote"'], ["3", "café", "\\."],
+            ["4", "abxy", " tail"], ["5", "nil", None], ["6", None, "nil"],
+            ["7", "a!b^c", "end"], ["8", "abc", ""], ["9", "legacy", "ok"],
+        ]), (sqlstate, tag, rows)
+        command("DROP TABLE copy_csv_marker", b"DROP TABLE")
+        command("DROP TABLE copy_csv_input", b"DROP TABLE")
+    print("COPY_CSV_INPUT_MODES_COMPLETE 2")
+
+
 def main():
     root = Path(__file__).resolve().parent.parent
     spec = importlib.util.spec_from_file_location(
@@ -337,6 +408,7 @@ def main():
             client.startup(peer, "alice", "info")
             check_copy_schema_lock(client, sock, peer)
         check_query_copy_output(client, sock)
+        check_csv_copy_input(client, runner, sock)
         _, sqlstate = simple(
             client, sock,
             "CREATE TABLE copy_wire (id INT PRIMARY KEY, payload TEXT, optional TEXT DEFAULT 'fallback');")
@@ -423,7 +495,6 @@ def main():
         # Unsupported semantics fail before CopyInResponse and before writes.
         for sql in (
             "COPY copy_wire FROM STDIN WITH (FORMAT binary)",
-            "COPY copy_wire FROM STDIN WITH (FORMAT csv)",
             "COPY copy_wire FROM PROGRAM 'producer'",
             "COPY copy_wire FROM STDIN WITH (FREEZE true)",
             "COPY copy_wire FROM STDIN WITH (ON_ERROR ignore)",

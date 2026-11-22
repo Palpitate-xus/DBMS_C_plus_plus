@@ -5169,6 +5169,16 @@ std::string whereUnknownFunctionError(const std::string& sql,
 
 enum class CopyWireDirection { None, FromStdin, ToStdout };
 
+struct CopyColumnFlags {
+    bool all = false;
+    std::vector<std::string> names;
+    std::vector<bool> selected;
+
+    bool contains(size_t index) const {
+        return all || (!selected.empty() && selected[index]);
+    }
+};
+
 struct CopyWirePlan {
     bool matched = false;
     bool wire = false;
@@ -5181,10 +5191,11 @@ struct CopyWirePlan {
     std::vector<size_t> columnIndexes;
     bool csv = false;
     bool header = false;
-    bool forceQuoteAll = false;
-    std::vector<std::string> forceQuoteColumns;
-    std::vector<bool> forceQuote;
-    std::vector<std::string> outputNames;
+    bool matchHeader = false;
+    CopyColumnFlags forceQuote;
+    CopyColumnFlags forceNotNull;
+    CopyColumnFlags forceNull;
+    std::vector<std::string> columnNames;
     char delimiter = '\t';
     char quote = '"';
     char escape = '"';
@@ -5529,7 +5540,7 @@ CopyWirePlan parseCopyWirePlan(const std::string& sql) {
         return plan;
     }
     if (copyKeyword(token, "with")) token = scanner.next();
-    if (to && copyKeyword(token, "csv")) {
+    if (copyKeyword(token, "csv")) {
         plan.csv = true;
         plan.delimiter = ',';
         plan.nullMarker.clear();
@@ -5561,41 +5572,48 @@ CopyWirePlan parseCopyWirePlan(const std::string& sql) {
                                       "\" specified more than once");
             return plan;
         }
+        const bool force = option == "force_quote" || option == "force_not_null" || option == "force_null";
         if (option == "binary" || option == "csv" || option == "freeze" ||
             option == "on_error" ||
             option == "reject_limit" || option == "log_verbosity" ||
-            option == "oids" || (option.rfind("force_", 0) == 0 && option != "force_quote") ||
-            (from && (option == "header" || option == "quote" || option == "escape" || option == "force_quote"))) {
+            option == "oids" || (option.rfind("force_", 0) == 0 && !force) ||
+            (from && option == "force_quote")) {
             copyUnsupported(plan, option);
             return plan;
         }
 
         CopyToken value;
-        if (option == "force_quote") {
+        if (force) {
+            auto& flags = option == "force_quote" ? plan.forceQuote :
+                option == "force_null" ? plan.forceNull : plan.forceNotNull;
             const auto list = scanner.next();
-            if (list.kind == CopyToken::Kind::Star) plan.forceQuoteAll = true;
+            if (list.kind == CopyToken::Kind::Star) flags.all = true;
             else if (list.kind != CopyToken::Kind::LeftParen) {
-                copyError(plan, "42601", "COPY FORCE_QUOTE requires a column list or *");
+                copyError(plan, "42601", "COPY " + option + " requires a column list or *");
                 return plan;
-            } else if (!parseCopyColumns(scanner, plan.forceQuoteColumns, plan)) return plan;
+            } else if (!parseCopyColumns(scanner, flags.names, plan)) return plan;
         } else if (option == "header" && (scanner.peek().kind == CopyToken::Kind::Comma ||
                                           scanner.peek().kind == CopyToken::Kind::RightParen)) {
             plan.header = true;
         } else if (!parseCopyOptionValue(scanner, value, plan)) return plan;
         else if (option == "header") {
             if (lowerAscii(value.text) == "match") {
-                copyError(plan, "0A000", "COPY TO does not support HEADER MATCH");
-                return plan;
+                if (to) {
+                    copyError(plan, "0A000", "COPY TO does not support HEADER MATCH");
+                    return plan;
+                }
+                plan.header = plan.matchHeader = true;
+            } else {
+                const auto header = parsePostgresBoolean(value.text);
+                if (!header) {
+                    copyError(plan, "22023", "COPY HEADER requires a boolean value or MATCH");
+                    return plan;
+                }
+                plan.header = *header;
             }
-            const auto header = parsePostgresBoolean(value.text);
-            if (!header) {
-                copyError(plan, "22023", "COPY TO HEADER requires a boolean value");
-                return plan;
-            }
-            plan.header = *header;
         } else if (option == "format") {
             std::string format = lowerAscii(value.text);
-            if (format == "csv" && to) plan.csv = true;
+            if (format == "csv") plan.csv = true;
             else if (format != "text") {
                 copyUnsupported(plan, "FORMAT " + value.text);
                 return plan;
@@ -5652,8 +5670,14 @@ CopyWirePlan parseCopyWirePlan(const std::string& sql) {
             copyError(plan, "22023", "CSV quote character conflicts with the delimiter or null marker");
             return plan;
         }
-    } else if (seenOptions.count("quote") || seenOptions.count("escape") || seenOptions.count("force_quote")) {
-        copyError(plan, "0A000", "COPY QUOTE, ESCAPE and FORCE_QUOTE require CSV format");
+        if (to && (seenOptions.count("force_null") || seenOptions.count("force_not_null"))) {
+            copyError(plan, "22023", "COPY FORCE_NULL and FORCE_NOT_NULL require COPY FROM");
+            return plan;
+        }
+    } else if (seenOptions.count("quote") || seenOptions.count("escape") ||
+               seenOptions.count("force_quote") || seenOptions.count("force_null") ||
+               seenOptions.count("force_not_null") || (from && seenOptions.count("header"))) {
+        copyError(plan, "0A000", "COPY option requires CSV format");
         return plan;
     } else if (plan.delimiter == '\\') {
         copyError(plan, "22023", "COPY text delimiter cannot be a backslash");
@@ -6044,39 +6068,172 @@ void appendCopyOutputField(std::string& output, const std::string& value,
     output.push_back(plan.quote);
 }
 
-bool bindCopyOutputOptions(CopyWirePlan& plan, const TableSchema& table,
+bool bindCopyColumnOptions(CopyWirePlan& plan, const TableSchema& table,
         const PreparedQueryCursor* cursor) {
-    if (!plan.header && plan.forceQuoteColumns.empty()) return true;
+    const bool outputHeader = plan.header && plan.direction == CopyWireDirection::ToStdout;
+    if (!outputHeader && !plan.matchHeader && plan.forceQuote.names.empty() &&
+        plan.forceNotNull.names.empty() && plan.forceNull.names.empty()) return true;
     const auto& types = ownedTypeCatalogDescriptor();
     if (cursor) {
-        for (const auto& column : cursor->descriptor()) plan.outputNames.push_back(column.name);
+        for (const auto& column : cursor->descriptor()) plan.columnNames.push_back(column.name);
     } else {
         for (const auto index : plan.columnIndexes)
-            plan.outputNames.push_back(plan.systemPgType ? types[index].name : table.cols[index].dataName);
+            plan.columnNames.push_back(plan.systemPgType ? types[index].name : table.cols[index].dataName);
     }
-    if (plan.forceQuoteColumns.empty()) return true;
-    plan.forceQuote.resize(plan.outputNames.size());
-    for (const auto& column : plan.forceQuoteColumns) {
-        const auto output = std::find(plan.outputNames.begin(), plan.outputNames.end(), column);
-        if (output == plan.outputNames.end()) {
-            bool exists = false;
-            if (plan.systemPgType) {
-                exists = std::any_of(types.begin(), types.end(), [&](const auto& item) { return item.name == column; });
-            } else if (!cursor) {
-                for (size_t i = 0; i < table.len(); ++i) exists |= table.cols[i].dataName == column;
+    const auto bindFlags = [&](CopyColumnFlags& flags, const std::string& option) {
+        if (flags.names.empty()) return true;
+        flags.selected.resize(plan.columnNames.size());
+        for (const auto& column : flags.names) {
+            const auto selected = std::find(plan.columnNames.begin(), plan.columnNames.end(), column);
+            if (selected == plan.columnNames.end()) {
+                bool exists = false;
+                if (plan.systemPgType) {
+                    exists = std::any_of(types.begin(), types.end(), [&](const auto& item) { return item.name == column; });
+                } else if (!cursor) {
+                    for (size_t i = 0; i < table.len(); ++i) exists |= table.cols[i].dataName == column;
+                }
+                copyError(plan, exists ? "42P10" : "42703", "COPY " + option + " column \"" + column + "\" is not selected");
+                return false;
             }
-            copyError(plan, exists ? "42P10" : "42703", "COPY FORCE_QUOTE column \"" + column + "\" is not in the output");
-            return false;
+            const auto index = static_cast<size_t>(selected - plan.columnNames.begin());
+            if (flags.selected[index]) {
+                copyError(plan, "42701", "COPY " + option + " column \"" + column + "\" specified more than once");
+                return false;
+            }
+            flags.selected[index] = true;
         }
-        const auto index = static_cast<size_t>(output - plan.outputNames.begin());
-        if (plan.forceQuote[index]) {
-            copyError(plan, "42701", "COPY FORCE_QUOTE column \"" + column + "\" specified more than once");
-            return false;
-        }
-        plan.forceQuote[index] = true;
-    }
-    return true;
+        return true;
+    };
+    return bindFlags(plan.forceQuote, "FORCE_QUOTE") &&
+           bindFlags(plan.forceNotNull, "FORCE_NOT_NULL") && bindFlags(plan.forceNull, "FORCE_NULL");
 }
+
+using CopyFields = std::vector<std::optional<std::string>>;
+
+// Decode CSV records independently of CopyData boundaries. A pending quote,
+// escape or carriage return may need the first byte of the next payload.
+class CopyCsvInput {
+public:
+    explicit CopyCsvInput(const CopyWirePlan& plan) : plan_(plan), header_(plan.header) {
+        fields_.reserve(plan.columnIndexes.size());
+    }
+
+    template<class Insert>
+    void consume(const std::vector<uint8_t>& bytes, Insert&& insert) {
+        for (const char ch : bytes) {
+            if (pendingCr_) {
+                pendingCr_ = false;
+                endLine(ch == '\n' ? Eol::CrLf : Eol::Cr, insert);
+                if (ch == '\n') continue;
+            }
+            if (pendingEscape_) {
+                pendingEscape_ = false;
+                if (ch == plan_.quote || ch == plan_.escape) {
+                    countByte();
+                    field_.push_back(ch);
+                    continue;
+                }
+                settleEscape();
+            }
+            if (!inQuote_ && ch == '\n') {
+                endLine(Eol::Lf, insert);
+                continue;
+            }
+            if (!inQuote_ && ch == '\r') {
+                pendingCr_ = true;
+                continue;
+            }
+
+            countByte();
+            if (inQuote_ && ch == plan_.escape) {
+                pendingEscape_ = true;
+            } else if (ch == plan_.quote) {
+                inQuote_ = !inQuote_;
+                quoted_ = true;
+            } else if (!inQuote_ && ch == plan_.delimiter) {
+                endField();
+            } else {
+                field_.push_back(ch);
+            }
+        }
+    }
+
+    template<class Insert>
+    void finish(Insert&& insert) {
+        if (pendingCr_) {
+            endLine(Eol::Cr, insert);
+        } else {
+            if (pendingEscape_) settleEscape();
+            if (inQuote_ && (!header_ || plan_.matchHeader))
+                throw DbError("22P04", "unterminated CSV quoted field");
+            if (recordBytes_ != 0 || (header_ && plan_.matchHeader)) endRecord(insert);
+        }
+    }
+
+private:
+    enum class Eol { Unknown, Lf, Cr, CrLf };
+
+    void countByte() {
+        if (++recordBytes_ > kMaxCopyRecordBytes)
+            throw DbError("54000", "COPY input row exceeds 16 MiB limit");
+    }
+
+    void settleEscape() {
+        if (plan_.escape == plan_.quote) inQuote_ = false;
+        else field_.push_back(plan_.escape);
+    }
+
+    void endField() {
+        if (!validUtf8(field_)) throw DbError("22021", "invalid byte sequence for encoding UTF8 in CSV data");
+        if (!header_ || plan_.matchHeader) {
+            const size_t index = fields_.size();
+            if (index == plan_.columnIndexes.size())
+                throw DbError("22P04", "extra data after last expected CSV column");
+            const bool isNull = field_ == plan_.nullMarker &&
+                (quoted_ ? (!header_ && plan_.forceNull.contains(index))
+                         : (header_ || !plan_.forceNotNull.contains(index)));
+            if (isNull) fields_.emplace_back(std::nullopt);
+            else fields_.emplace_back(std::move(field_));
+        }
+        field_.clear();
+        quoted_ = false;
+    }
+
+    template<class Insert>
+    void endLine(Eol eol, Insert& insert) {
+        if (eol_ != Eol::Unknown && eol_ != eol)
+            throw DbError("22P04", "inconsistent line endings in CSV data");
+        eol_ = eol;
+        endRecord(insert);
+    }
+
+    template<class Insert>
+    void endRecord(Insert& insert) {
+        endField();
+        if (!header_ || plan_.matchHeader) {
+            if (fields_.size() != plan_.columnIndexes.size())
+                throw DbError("22P04", "missing data for expected CSV column");
+        }
+        if (header_ && plan_.matchHeader &&
+            !std::equal(fields_.begin(), fields_.end(), plan_.columnNames.begin()))
+            throw DbError("22P04", "CSV header does not match selected column names");
+        if (!header_) insert(fields_);
+        header_ = false;
+        fields_.clear();
+        recordBytes_ = 0;
+    }
+
+    const CopyWirePlan& plan_;
+    bool header_;
+    bool inQuote_ = false;
+    bool quoted_ = false;
+    bool pendingEscape_ = false;
+    bool pendingCr_ = false;
+    size_t recordBytes_ = 0;
+    Eol eol_ = Eol::Unknown;
+    CopyFields fields_;
+    std::string field_;
+};
 
 struct CopyStreamResult {
     bool transportOk = true;
@@ -6175,6 +6332,8 @@ CopyStreamResult receiveCopyIn(PostgresProtocol& protocol,
                                const TableSchema& table) {
     CopyStreamResult result;
     std::string pending;
+    std::optional<CopyCsvInput> csv;
+    if (plan.csv) csv.emplace(plan);
     const auto checkCopyInterrupt = [&]() {
         if (deadline != std::chrono::steady_clock::time_point::max() &&
             std::chrono::steady_clock::now() >= deadline) {
@@ -6209,52 +6368,58 @@ CopyStreamResult receiveCopyIn(PostgresProtocol& protocol,
         if (!result.errorSent) result.transportOk = false;
         pending.clear();
     };
-    const auto insertRecord = [&](std::string record) {
-        if (!result.error.empty()) return;
+    const auto insertFields = [&](CopyFields& fields) {
+        StorageEngine::SqlRow values;
+        for (size_t field = 0; field < fields.size(); ++field) {
+            const Column& column = table.cols[plan.columnIndexes[field]];
+            auto value = std::move(fields[field]);
+            const uint32_t typeOid = mapBuiltinTypeNameToOid(column.dataType);
+            if (value && !column.isArray &&
+                (typeOid == 21 || typeOid == 23 || typeOid == 20)) {
+                const unsigned bits = typeOid == 21 ? 16 : typeOid == 23 ? 32 : 64;
+                const auto parsed = parsePostgresIntegerText(*value, bits);
+                if (parsed.error == IntegerTextError::InvalidSyntax) {
+                    throw DbError("22P02", "invalid input syntax for type " +
+                        column.dataType + ": \"" + *value + "\"");
+                }
+                if (parsed.error == IntegerTextError::OutOfRange) {
+                    throw DbError("22003", "value out of range for type " +
+                        column.dataType + ": \"" + *value + "\"");
+                }
+                *value = std::to_string(parsed.value);
+            }
+            values[column.dataName] = std::move(value);
+        }
+        const DBStatus status = g_engine.insertRow(
+            session.currentDB, plan.physicalTable, values);
+        if (status != DBStatus::OK) {
+            throw DbError(sqlstateForDBStatus(status),
+                "COPY FROM failed while inserting row " + std::to_string(result.rows + 1));
+        }
+        ++result.rows;
+    };
+    const auto handleInput = [&](auto&& read) {
         try {
             checkCopyInterrupt();
-            std::vector<std::optional<std::string>> fields;
-            std::string decodeError;
-            if (!decodeCopyTextRecord(
-                    std::move(record), plan, fields, decodeError)) {
-                fail("22P04", decodeError);
-                return;
-            }
-            StorageEngine::SqlRow values;
-            for (size_t field = 0; field < fields.size(); ++field) {
-                const Column& column = table.cols[plan.columnIndexes[field]];
-                auto value = std::move(fields[field]);
-                const uint32_t typeOid = mapBuiltinTypeNameToOid(column.dataType);
-                if (value && !column.isArray &&
-                    (typeOid == 21 || typeOid == 23 || typeOid == 20)) {
-                    const unsigned bits = typeOid == 21 ? 16 : typeOid == 23 ? 32 : 64;
-                    const auto parsed = parsePostgresIntegerText(*value, bits);
-                    if (parsed.error == IntegerTextError::InvalidSyntax) {
-                        throw DbError("22P02", "invalid input syntax for type " +
-                            column.dataType + ": \"" + *value + "\"");
-                    }
-                    if (parsed.error == IntegerTextError::OutOfRange) {
-                        throw DbError("22003", "value out of range for type " +
-                            column.dataType + ": \"" + *value + "\"");
-                    }
-                    *value = std::to_string(parsed.value);
-                }
-                values[column.dataName] = std::move(value);
-            }
-            const DBStatus status = g_engine.insertRow(
-                session.currentDB, plan.physicalTable, values);
-            if (status != DBStatus::OK) {
-                fail(sqlstateForDBStatus(status),
-                     "COPY FROM failed while inserting row " +
-                         std::to_string(result.rows + 1));
-                return;
-            }
-            ++result.rows;
+            read();
         } catch (const DbError& error) {
             fail(error.sqlState(), error.message());
         } catch (const std::exception& error) {
             fail("XX000", error.what());
         }
+    };
+    const auto insertRecord = [&](std::string record) {
+        handleInput([&] {
+            CopyFields fields;
+            std::string decodeError;
+            if (!decodeCopyTextRecord(std::move(record), plan, fields, decodeError))
+                throw DbError("22P04", std::move(decodeError));
+            insertFields(fields);
+        });
+    };
+    const auto insertCsv = [&](CopyFields& fields) {
+        checkCopyInterrupt();
+        insertFields(fields);
     };
 
     while (result.transportOk) {
@@ -6301,6 +6466,10 @@ CopyStreamResult receiveCopyIn(PostgresProtocol& protocol,
         }
         if (message.type == 'd') {
             if (!result.error.empty()) continue;
+            if (csv) {
+                handleInput([&] { csv->consume(message.payload, insertCsv); });
+                continue;
+            }
             for (const uint8_t byte : message.payload) {
                 if (!result.error.empty()) break;
                 if (byte == '\n') {
@@ -6319,6 +6488,8 @@ CopyStreamResult receiveCopyIn(PostgresProtocol& protocol,
         if (message.type == 'c') {
             if (!message.payload.empty()) {
                 fail("08P01", "malformed CopyDone message");
+            } else if (result.error.empty() && csv) {
+                handleInput([&] { csv->finish(insertCsv); });
             } else if (result.error.empty() && !pending.empty()) {
                 insertRecord(std::move(pending));
             }
@@ -6406,15 +6577,15 @@ CopyStreamResult sendCopyOut(PostgresProtocol& protocol,
     const auto appendField = [&](std::string& output, size_t index, const std::string& value, bool isNull) {
         if (index != 0) output.push_back(plan.delimiter);
         appendCopyOutputField(output, value, isNull, plan, width == 1,
-            plan.forceQuoteAll || (!plan.forceQuote.empty() && plan.forceQuote[index]));
+            plan.forceQuote.contains(index));
     };
     try {
         std::string output;
         if (plan.header) {
             checkCopyInterrupt();
-            for (size_t i = 0; i < plan.outputNames.size(); ++i) {
+            for (size_t i = 0; i < plan.columnNames.size(); ++i) {
                 if (i != 0) output.push_back(plan.delimiter);
-                appendCopyOutputField(output, plan.outputNames[i], false, plan, width == 1);
+                appendCopyOutputField(output, plan.columnNames[i], false, plan, width == 1);
             }
             sendRecord(output, true);
             if (!result.transportOk || !result.error.empty()) return result;
@@ -8072,7 +8243,7 @@ void handleClient(SecureSocket socket, std::string clientHost, CopyQueryFactory 
                 planValid = validateCopyWirePlan(plan, session, table);
                 columnCount = plan.columnIndexes.size();
             }
-            if (planValid) planValid = bindCopyOutputOptions(plan, table, queryCursor.get());
+            if (planValid) planValid = bindCopyColumnOptions(plan, table, queryCursor.get());
         } catch (const DbError& error) {
             copyError(plan, error.sqlState(), error.message());
         } catch (const std::exception& error) {

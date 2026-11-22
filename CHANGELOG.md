@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>可以从 CSV 导入数据 · 2026-11-22</summary>
+
+可以把带列名的 CSV 导入普通表，也可以让数据库先核对列名和顺序。带引号的字段可以跨多行。
+
+[使用说明](docs/MANUAL.md#用客户端复制数据) · [测试报告](docs/test-report.md#copy-csv-in-20261122) · [性能报告](docs/performance-report-2026-10-30.md#copy-csv-in-cost-20261122)
+
+</details>
+
+<details>
 <summary>可以导出 CSV · 2026-11-22</summary>
 
 可以导出整张表，也可以先筛选、排序再导出。第一行可以带上列名，方便用表格软件打开。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>可以导出查询筛选后的数据 · 2026-11-22</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-22 · 可以导出查询筛选后的数据
 
 例如，只导出本月的订单，并按金额排序。客户端可以用 `COPY (SELECT ...) TO STDOUT` 逐行接收结果。
 
 [使用说明](docs/MANUAL.md#用客户端复制数据) · [测试报告](docs/test-report.md#copy-query-stdout-20261122) · [性能报告](docs/performance-report-2026-10-30.md#copy-query-stdout-cost-20261122)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-22 · 按编号查数据类型更快
 

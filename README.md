@@ -19,6 +19,13 @@ cmake --build build/cmake --target dbms_main --parallel 2
 ## 最近更新
 
 <details>
+<summary>可以从 CSV 导入数据 · 2026-11-22</summary>
+
+可以把带列名的 CSV 导入普通表，也可以让数据库先核对列名和顺序。带引号的字段可以跨多行。
+
+</details>
+
+<details>
 <summary>可以导出 CSV · 2026-11-22</summary>
 
 可以导出整张表，也可以先筛选、排序再导出。第一行可以带上列名，方便用表格软件打开。
@@ -29,13 +36,6 @@ cmake --build build/cmake --target dbms_main --parallel 2
 <summary>有连接正在保存表结构时，其他查询可以等待 · 2026-11-22</summary>
 
 多个连接同时开始事务时，短暂的保存工作完成后，等待中的查询可以继续。超过设定的等待时间会报告锁超时。
-
-</details>
-
-<details>
-<summary>可以导出查询筛选后的数据 · 2026-11-22</summary>
-
-例如，只导出本月的订单，并按金额排序。客户端可以用 `COPY (SELECT ...) TO STDOUT` 逐行接收结果。
 
 </details>
 

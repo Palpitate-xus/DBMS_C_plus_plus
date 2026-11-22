@@ -2482,6 +2482,14 @@ COPY (SELECT id, name FROM public.users WHERE id > 0 ORDER BY id)
 
 CSV 默认用逗号分隔字段。SQL 空值写成空字段，空字符串写成 `""`。包含逗号、引号或换行的字段会加引号。可用 `DELIMITER`、`NULL`、`QUOTE` 和 `ESCAPE` 调整格式，`FORCE_QUOTE (name)` 可给 `name` 列的非空值加引号。`HEADER` 生成的列名行不计入 `COPY` 返回的行数，也可以用于默认文本格式。[CSV 导出测试](test-report.md#copy-csv-out-20261122)
 
+客户端可以把 UTF-8 CSV 导入普通表。`HEADER MATCH` 会核对首行的列名和顺序，`HEADER` 则跳过首行。
+
+```sql
+COPY public.users (id, name) FROM STDIN WITH (FORMAT csv, HEADER MATCH);
+```
+
+字段里的换行需要放在引号内。默认把未加引号的空字段读成 SQL 空值，把 `""` 读成空字符串。可以用 `NULL` 更改标记，用 `FORCE_NULL (name)` 将加引号的标记也读成空值，或用 `FORCE_NOT_NULL (name)` 保留未加引号的标记。格式或数据出错时，整次导入会撤销。[CSV 导入测试](test-report.md#copy-csv-in-20261122)
+
 ### 备份与恢复作业
 
 `DUMP` 产生逻辑 SQL 文件；`RESTORE DATABASE` 只接受 `BACKUP DATABASE`
