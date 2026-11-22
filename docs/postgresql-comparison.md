@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-22 · 分区查询按 LIMIT 停止读取
+
+PostgreSQL 18.6 的 `Limit` 节点按需要从下游请求记录，`Append` 可以按顺序向各子计划取行。SQLite 的 `OffsetLimit` 指令计算分页需要读取的行数。DuckDB 的文档将 `LIMIT` 定义为作用于查询结果的操作，并说明无排序时结果顺序可能变化。[PostgreSQL Limit 源码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/executor/nodeLimit.c) · [PostgreSQL Append 源码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/executor/nodeAppend.c) · [SQLite 指令](https://www.sqlite.org/opcode.html) · [DuckDB LIMIT 文档](https://duckdb.org/docs/2.0/sql/query_syntax/limit)
+
+本项目在符合条件且只查询一张分区表时，取到 `OFFSET + LIMIT` 条匹配记录就停止读取。这次改动沿用分区过滤、事务可见性和输出处理。独立分区关系、通用按需扫描及 PostgreSQL 客户端按批取行的交互还有差距。[验证范围](test-report.md#partition-limit-prefix-20261122) · [性能报告](performance-report-2026-10-30.md#partition-limit-prefix-cost-20261122)
+
 ## 2026-11-22 · 读取分区时复用表定义
 
 PostgreSQL 的 `Append` 从各叶分区的扫描节点取行，长字段可在真正需要时再展开。SQLite 在执行已编译语句时检查模式变更，必要时重新编译。DuckDB 的扫描支持只读取查询所需的列。它们分别说明了扫描状态复用、模式失效检查和按需读列的做法。[PostgreSQL Append 源码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/executor/nodeAppend.c#L335-L352) · [PostgreSQL 长值存储](https://www.postgresql.org/docs/18/storage-toast.html) · [SQLite 语句编译](https://sqlite.org/c3ref/prepare.html) · [DuckDB Parquet 扫描](https://duckdb.org/docs/data/parquet)

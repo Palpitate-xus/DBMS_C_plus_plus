@@ -9848,29 +9848,47 @@ std::unique_ptr<HeapScanCursor> StorageEngine::beginHeapScan(
     if (schema.partitionType != TableSchema::PartitionType::None ||
         rlsAppliesTo(dbname, tablename))
         throw DbError("0A000", "relation requires its policy or partition scan path");
+    return beginHeapScanUsingSchema(dbname, tablename, schema, inclusivePageRanges, false);
+}
+
+std::unique_ptr<HeapScanCursor> StorageEngine::beginHeapScanUsingSchema(
+    const std::string& dbname, const std::string& tablename,
+    const TableSchema& schema,
+    const std::vector<std::pair<uint32_t, uint32_t>>* inclusivePageRanges,
+    bool scanPartitions) const {
+    const bool partitioned = schema.partitionType != TableSchema::PartitionType::None;
+    if (partitioned && (!scanPartitions || inclusivePageRanges))
+        throw DbError("0A000", "relation requires its policy or partition scan path");
     ReadView autocommitView, commandInternalView;
     const auto* view = prepareRowScanView(dbname, tablename, nullptr, false,
                                          autocommitView, commandInternalView);
     noteScanSiread(dbname, tablename);
-    std::shared_ptr<PageAllocator> allocator;
-    {
-        std::lock_guard<std::recursive_mutex> lock(cacheMutex_);
-        // Retain the validated allocator, including existing missing-file,
-        // tablespace and format checks. A cursor never creates a lost heap.
-        if (!getPageAllocator(dbname, tablename))
-            throw DbError("58030", "could not open heap scan");
-        allocator = pageAllocators_.at(dbname + "/" + tablename);
-    }
     struct State {
         std::shared_ptr<PageAllocator> allocator;
         TableSchema schema;
         ReadView view;
         uint32_t page = 1, end = 0;
+        std::vector<PartitionLeaf> leaves;
+        size_t nextLeaf = 0;
+        std::optional<std::filesystem::path> directory;
+        size_t heapRowWidth = 0;
         bool limited = false;
         size_t range = 0;
         std::vector<std::pair<uint32_t, uint32_t>> ranges;
     };
     auto state = std::make_shared<State>();
+    if (partitioned) {
+        const auto width = heapHeaderRowWidth(schema);
+        if (!width) throw DbError("58030", "could not determine partition heap row width");
+        state->heapRowWidth = *width;
+        state->leaves = partitionLeaves(schema);
+    } else {
+        std::lock_guard<std::recursive_mutex> lock(cacheMutex_);
+        if (!getPageAllocator(dbname, tablename))
+            throw DbError("58030", "could not open heap scan");
+        state->allocator = pageAllocators_.at(dbname + "/" + tablename);
+        state->end = state->allocator->numPages();
+    }
     if (inclusivePageRanges) {
         state->limited = true;
         state->ranges = *inclusivePageRanges;
@@ -9881,16 +9899,32 @@ std::unique_ptr<HeapScanCursor> StorageEngine::beginHeapScan(
             previous = range.second;
         }
     }
-    state->allocator = std::move(allocator); state->schema = schema;
-    state->view = *view; state->end = state->allocator->numPages();
+    state->schema = schema;
+    state->view = *view;
     return std::make_unique<PageHeapScanCursor>(
-        [this, state, dbname, tablename](std::vector<HeapScanRow>& rows) {
+        [this, state, dbname, tablename, partitioned](std::vector<HeapScanRow>& rows) {
             checkForQueryInterrupt();
             if (state->limited) {
                 while (state->range < state->ranges.size() &&
                        state->page > state->ranges[state->range].second) ++state->range;
                 if (state->range == state->ranges.size()) return false;
                 state->page = std::max(state->page, state->ranges[state->range].first);
+            }
+            const auto& table = state->schema;
+            while (state->page >= state->end && state->nextLeaf < state->leaves.size()) {
+                checkForQueryInterrupt();
+                if (!state->directory) state->directory = relationDir(dbname, table);
+                const auto& leaf = state->leaves[state->nextLeaf++];
+                const std::string heapName = tablename + "#" + leaf.partition +
+                    (leaf.subPartition.empty() ? "" : "#" + leaf.subPartition);
+                state->allocator = acquireSharedHeap(dbname,
+                    *state->directory / (heapName + ".dt"), state->heapRowWidth,
+                    pageSizeForFormatVersion(table.formatVersion), table.formatVersion,
+                    dbname + "/" + heapName);
+                if (!state->allocator)
+                    throw DbError("58030", "could not open partition heap \"" + heapName + "\"");
+                state->page = 1;
+                state->end = state->allocator->numPages();
             }
             if (state->page >= state->end) return false;
             // Nested commands may create combo IDs after this scan began.
@@ -9908,7 +9942,6 @@ std::unique_ptr<HeapScanCursor> StorageEngine::beginHeapScan(
             char* buffer = state->allocator->fetchPage(pageId);
             if (!buffer) throw DbError("58030", "could not read heap page");
             guard.pinned = true;
-            const auto& table = state->schema;
             PageWrapper page(buffer, state->allocator->pageSize(), table.formatVersion);
             page.forEachLive([&](uint16_t slotId, const char* bytes, size_t length) {
                 checkForQueryInterrupt();
@@ -9917,6 +9950,10 @@ std::unique_ptr<HeapScanCursor> StorageEngine::beginHeapScan(
                 const size_t offset = usesHeapTupleHeader(table.formatVersion)
                     ? castHeapHeader(bytes)->t_hoff : dataOffset(table.formatVersion, table.len());
                 if (offset >= length) return;
+                if (partitioned && !scanPayloadMatchesTuple(
+                        table, bytes + offset, length - offset, castHeapHeader(bytes))) {
+                    throw DbError("XX001", "partition tuple NULL bitmap unavailable");
+                }
                 HeapScanRow row;
                 row.rid = encodeRid(pageId, slotId);
                 noteScanSiread(dbname, tablename, row.rid);
@@ -10020,8 +10057,11 @@ bool StorageEngine::forEachVisibleRowUsingSchema(
 
 bool StorageEngine::rlsAppliesTo(const std::string& dbname,
                                   const std::string& tablename) const {
-    return shouldEnforceRLS(getTableSchema(dbname, tablename),
-                             StorageEngine::getRLSUser());
+    return rlsAppliesTo(getTableSchema(dbname, tablename));
+}
+
+bool StorageEngine::rlsAppliesTo(const TableSchema& schema) const {
+    return shouldEnforceRLS(schema, StorageEngine::getRLSUser());
 }
 
 bool StorageEngine::forEachRowPageRange(

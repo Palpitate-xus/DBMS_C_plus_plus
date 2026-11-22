@@ -1915,6 +1915,12 @@ public:
 
 private:
     friend class TableScanOp;
+    bool rlsAppliesTo(const TableSchema& schema) const;
+    std::unique_ptr<HeapScanCursor> beginHeapScanUsingSchema(
+        const std::string& dbname, const std::string& tablename,
+        const TableSchema& schema,
+        const std::vector<std::pair<uint32_t, uint32_t>>* inclusivePageRanges,
+        bool scanPartitions) const;
     // A scan with an existing relation lock can reuse the schema obtained
     // under that lock for visibility, policy and leaf path resolution.
     bool forEachRowUsingSchema(

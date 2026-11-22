@@ -926,6 +926,36 @@ static void test_partition_scan_uses_leaf_nulls() {
         assert(nulls == std::vector<std::vector<bool>>(2, {false}));
     }
 
+    const auto readPage = [&](const std::string& pageClause) {
+        auto prepared = g_engine.prepareBoundQuery(db,
+            "SELECT bucket, value FROM events WHERE bucket = 5 OR bucket = 15 " + pageClause);
+        return dbms::QueryPlanner::executePlanWithPrefix(
+            dbms::QueryPlanner::buildPreparedSelectPlan(&g_engine, db, table, std::move(prepared)));
+    };
+    assert(g_engine.checkpoint(db));
+    const auto lateHeap = std::filesystem::path(db) / "events#high.dt";
+    const auto savedHeap = std::filesystem::path(db) / "events#high.saved";
+    std::filesystem::rename(lateHeap, savedHeap);
+    std::ofstream(lateHeap, std::ios::binary).put('x');
+
+    // The second leaf has an invalid file. Only a query that needs it
+    // should report the read error.
+    const auto zero = readPage("LIMIT 0 OFFSET 1");
+    assert(zero.ok && zero.structuredRowsAvailable && zero.structuredRows.empty());
+    const auto first = readPage("LIMIT 1");
+    assert(first.ok && first.structuredRowsAvailable);
+    assert((first.structuredRows == std::vector<std::vector<std::string>>{{"5", ""}}));
+    assert((first.structuredNulls == std::vector<std::vector<bool>>{{false, true}}));
+    const auto late = readPage("LIMIT 1 OFFSET 1");
+    assert(!late.ok && late.errorSqlState == "58030");
+    assert(std::filesystem::file_size(lateHeap) == 1);
+
+    std::filesystem::rename(savedHeap, lateHeap);
+    const auto second = readPage("LIMIT 1 OFFSET 1");
+    assert(second.ok && second.structuredRowsAvailable);
+    assert((second.structuredRows == std::vector<std::vector<std::string>>{{"15", "0"}}));
+    assert((second.structuredNulls == std::vector<std::vector<bool>>{{false, false}}));
+
     assert(g_engine.insertRow(db, table, {{"bucket", "6"}, {"value", "0"}}) ==
            DBStatus::OK);
     options.conditionAlternatives.push_back({"=bucket 6"});

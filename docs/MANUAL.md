@@ -2227,6 +2227,8 @@ WHERE id = 4 OR id = 9
 ORDER BY event_time NULLS LAST;
 ```
 
+通过数据库服务查询一张分区表的普通列时，`LIMIT` 可以让数据库取够匹配行后停止读取。没有排序或去重，也无需显式行锁或执行行级访问策略的查询可以使用这个优化。例如 `LIMIT 2 OFFSET 5` 会取至多七条符合筛选条件的记录，再跳过前五条。需要固定的分页顺序时，可以用 `ORDER BY` 加上能区分每一行的列。[测试范围](test-report.md#partition-limit-prefix-20261122)
+
 ---
 
 ## 16. 全文搜索

@@ -3909,6 +3909,16 @@ OpPtr QueryPlanner::buildPreparedSelectPlan(StorageEngine* engine,
     prepareAggregateRoles(*state);
     state->windows=prepared_window_detail::collect(*select,*state->query,engine,dbname);
     state->windowStages=prepared_window_detail::stages(*select,*state->query,state->windows,engine,dbname);
+    if (sourceSchema.partitionType != TableSchema::PartitionType::None &&
+        !selectBodyOnly && select->limit && !select->withTies && select->orderBy.empty() &&
+        !select->distinct && select->distinctOn.empty() && select->locking.empty() &&
+        select->groupBy.empty() && select->groupByElems.empty() && !select->having &&
+        state->aggregates.empty() && state->windows.empty() &&
+        typeid(*source) == typeid(TableScanOp)) {
+        // LIMIT and OFFSET already pull rows from this source through the
+        // ordinary filter and projection. Open each partition on demand.
+        static_cast<TableScanOp&>(*source).scanPartitionsOnDemand_ = true;
+    }
     state->sourceContexts = source->supportsPreparedContexts();
     if (state->sourceContexts) state->logicalSource = source.get();
     if (state->sourceContexts && select->fromClause) {
@@ -5204,9 +5214,9 @@ bool TableScanOp::open() {
     lastRid_ = 0;
     pos_ = 0; lastNulls_.clear(); cursor_.reset();
     const bool partitioned = tbl_.partitionType != TableSchema::PartitionType::None;
-    if (!partitioned &&
-        !engine_->rlsAppliesTo(dbname_, tablename_)) {
-        cursor_ = engine_->beginHeapScan(dbname_, tablename_, tbl_);
+    if ((!partitioned || scanPartitionsOnDemand_) && !engine_->rlsAppliesTo(tbl_)) {
+        cursor_ = engine_->beginHeapScanUsingSchema(dbname_, tablename_, tbl_,
+                                                   nullptr, scanPartitionsOnDemand_);
         return true;
     }
     bool toastFailed = false;

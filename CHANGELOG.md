@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>分区查询取够结果后可以提前结束 · 2026-11-22</summary>
+
+用 `LIMIT` 查询分区表时，符合条件的查询取够记录后就会停止。测试中，查询一张有 60 个分区的表并只取一条记录，从打开 60 个分区文件减少到 1 个。
+
+[使用说明](docs/MANUAL.md#15-分区表) · [测试报告](docs/test-report.md#partition-limit-prefix-20261122) · [性能报告](docs/performance-report-2026-10-30.md#partition-limit-prefix-cost-20261122)
+
+</details>
+
+<details>
 <summary>分区较多的表，重复查询用时缩短 · 2026-11-22</summary>
 
 查询多个分区时，可以共用已经查到的表结构。在有 60 个分区的测试表上，连续查询的耗时缩短了约 16% 到 18%。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>可以向分区表写入数据 · 2026-11-22</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-22 · 可以向分区表写入数据
 
 可以对部分已建好分区的表执行 `INSERT`。数据库会把记录放到对应的分区，提交前还能撤销写入。
 
 [写入条件](docs/MANUAL.md#向分区表写入) · [测试报告](docs/test-report.md#transactional-partition-insert-20261122) · [性能报告](docs/performance-report-2026-10-30.md#transactional-partition-insert-cost-20261122)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-22 · 清空分区表后及时腾出磁盘空间
 

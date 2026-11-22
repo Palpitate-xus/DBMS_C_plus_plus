@@ -317,6 +317,7 @@ public:
 
 private:
     friend class ProjectOp;
+    friend class QueryPlanner;
     // Private consumer capability, never retained across pulls. Other next()
     // callers and subclasses keep the complete-row materialization contract.
     bool nextForProjection(std::string& raw, const TableSchema& schema,
@@ -336,6 +337,7 @@ private:
     std::vector<std::vector<bool>> bufferedNulls_;
     std::unique_ptr<HeapScanCursor> cursor_;
     std::vector<bool> lastNulls_;
+    bool scanPartitionsOnDemand_ = false;
     bool lastBufferedNullsValid_ = false;
     size_t pos_ = 0;
     int64_t lastRid_ = 0;
