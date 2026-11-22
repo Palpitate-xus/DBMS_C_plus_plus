@@ -58,6 +58,7 @@ def main():
     try:
         query(f"CREATE TABLE {one}(id INT);")
         query(f"CREATE TABLE {two}(id INT,v TEXT);")
+        query(f"CREATE INDEX {two}_index ON {two}(id);")
         for extended in (False, True):
             if not reference:
                 query("SELECT * FROM pg_catalog.pg_class;", extended,
@@ -96,8 +97,14 @@ def main():
             query(f"SELECT NULL::text AS absent FROM pg_class WHERE relname='{one}';", extended,
                   [[None]], ["absent"], [25])
             query(f"SELECT missing_catalog_column FROM pg_class WHERE FALSE;", extended, state="42703")
+            query("SELECT relhasindex FROM pg_class WHERE FALSE;", extended,
+                  [], ["relhasindex"], [16])
+            query(f"SELECT relhasindex FROM pg_class WHERE relname='{one}';", extended,
+                  [["f"]], ["relhasindex"], [16])
+            query(f"SELECT relhasindex FROM pg_catalog.pg_class WHERE relname='{two}';", extended,
+                  [["t"]], ["relhasindex"], [16])
             if not reference:
-                query(f"SELECT relhasindex FROM pg_class WHERE FALSE;", extended,
+                query("SELECT relallfrozen FROM pg_class WHERE FALSE;", extended,
                       state="0A000")
             query(f"SELECT wrong.relname FROM pg_class WHERE FALSE;", extended, state="42P01")
             query(f"SELECT relname FROM pg_class WHERE relname;", extended, state="42804")
