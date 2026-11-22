@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-22 · 文本相等比较
+
+确定性内置规则下的文本相等和不等比较直接检查字节，减少按文本筛选时逐行创建区域设置的开销。明确指定的系统区域设置、大小写不敏感规则、文本大小比较和 `NULL` 行为继续走各自的原有路径。`SQL-10` 和 `TYPE-04` 保持部分实现。[测试](test-report.md#text-equality-deterministic-20261122) · [性能](performance-report-2026-10-30.md#text-equality-deterministic-cost-20261122)
+
 ## 2026-11-22 · 查询当前设置
 
 `pg_settings` 原有三列由普通查询引擎处理。扩展协议从实际绑定读取列名和类型，普通表同名时继续按项目已有规则选择来源。受测的连接、表达式和排序已对齐 PostgreSQL，带 `GROUP BY` 的聚合、其余设置列和值清单仍有差距。`OPS-02`、`CAT-03`、`QRY-03` 与 `PROTO-02` 保持部分实现。[对照结果](test-report.md#pg-settings-expressions-20261122)

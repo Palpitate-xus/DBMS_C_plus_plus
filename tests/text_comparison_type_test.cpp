@@ -5,6 +5,7 @@
 #include <cassert>
 #include <iostream>
 #include <map>
+#include <stdexcept>
 #include <string>
 
 int main() {
@@ -33,5 +34,20 @@ int main() {
     binding.collation = "C";
     assert(!evaluator.comparePrepared(binding, upper, lower).asBool());
     assert(evaluator.comparePrepared(binding, upper, dbms::ExprValue("text", "", true)).isNull);
+    binding.collation = "default";
+    const dbms::ExprValue composed("text", "\xC3\xA9");
+    const dbms::ExprValue decomposed("text", "e\xCC\x81");
+    assert(evaluator.comparePrepared(binding, composed, composed).asBool());
+    assert(!evaluator.comparePrepared(binding, composed, decomposed).asBool());
+
+    binding.collation = "dbms_missing_test_locale";
+    binding.collationUsesSystemLocale = true;
+    bool missingLocale = false;
+    try {
+        (void)evaluator.comparePrepared(binding, upper, upper);
+    } catch (const std::runtime_error&) {
+        missingLocale = true;
+    }
+    assert(missingLocale);
     std::cout << "[TEXT COMPARISON TYPE] passed\n";
 }

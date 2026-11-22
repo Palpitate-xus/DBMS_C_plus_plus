@@ -1,0 +1,26 @@
+-- The two spellings of é below are U+00E9 and U+0065 U+0301.
+SELECT 'é' = 'é' AS eq, 'é' <> 'é' AS ne, 'é' = 'é' AS same;
+SELECT 'a' = 'A' AS eq, 'a' != 'A' AS ne, 'a'::text IS DISTINCT FROM 'A'::text AS different;
+SELECT '' = ' ' AS eq, '' IS NOT DISTINCT FROM NULL::text AS same, NULL::text = '' AS null_eq;
+SELECT 'a'::character(4) = 'a '::character(4) AS padded, 'a'::varchar(4) = 'a '::varchar(4) AS varying;
+SELECT ('é'::text COLLATE "C") = ('é'::text COLLATE "C") AS eq;
+SELECT ('é'::text COLLATE "default") <> ('é'::text COLLATE "default") AS ne;
+SELECT 'a'::text COLLATE "C" = 'a'::text COLLATE "default";
+CREATE TABLE equality_text_rows (id integer PRIMARY KEY, label text, raw varchar(16), padded character(4));
+INSERT INTO equality_text_rows VALUES (1, 'é', 'a ', 'a'), (2, 'é', 'a', 'a '), (3, 'A', 'A', 'A'), (4, '', '', ''), (5, NULL, NULL, NULL);
+SELECT id, label FROM equality_text_rows WHERE label = 'é' ORDER BY id;
+SELECT id, label FROM equality_text_rows WHERE label <> 'é' ORDER BY id;
+SELECT id, label FROM equality_text_rows WHERE label IN ('a', 'A', 'é') ORDER BY id;
+SELECT id, label FROM equality_text_rows WHERE label NOT IN ('é', 'A') ORDER BY id;
+SELECT id FROM equality_text_rows WHERE label IS DISTINCT FROM 'é' ORDER BY id;
+SELECT id FROM equality_text_rows WHERE label IS NOT DISTINCT FROM NULL ORDER BY id;
+SELECT id, raw = 'a ' AS raw_match, padded = 'a ' AS padded_match FROM equality_text_rows ORDER BY id;
+SELECT id, CASE label WHEN 'é' THEN 10 WHEN 'é' THEN 20 ELSE 30 END AS code FROM equality_text_rows ORDER BY id;
+SELECT id, label FROM equality_text_rows ORDER BY label COLLATE "C" NULLS LAST;
+SELECT a.id AS left_id, b.id AS right_id FROM equality_text_rows a JOIN equality_text_rows b ON a.label = b.label ORDER BY a.id, b.id;
+SELECT id FROM equality_text_rows WHERE upper(label) = 'A' ORDER BY id;
+BEGIN;
+UPDATE equality_text_rows SET label = 'new' WHERE label = 'é';
+SELECT id, label FROM equality_text_rows WHERE label = 'new' ORDER BY id;
+ROLLBACK;
+SELECT id, label FROM equality_text_rows WHERE label = 'é' ORDER BY id;

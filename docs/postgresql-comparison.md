@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-22 · 文本相等比较
+
+PostgreSQL 18.6 对确定性排序规则下的文本相等和不等比较使用字节比较，大小顺序则使用对应的排序规则。SQLite 区分逐字节比较的 `BINARY`、忽略大小写的 `NOCASE` 和忽略末尾空格的 `RTRIM`。DuckDB 默认逐字节比较，并提供忽略大小写、重音和规范化后比较的选项。[PostgreSQL 文本比较代码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/utils/adt/varlena.c#L1628) · [SQLite 排序规则](https://www.sqlite.org/datatype3.html#collating_sequences) · [DuckDB 排序规则](https://www.duckdb.org/docs/2.0/sql/expressions/collations)
+
+本项目对现有确定性内置规则的文本相等比较直接核对字节。`CHAR` 先执行原有的尾部空格处理。大小顺序、`NOCASE` 和显式系统区域设置继续调用相应的比较规则。[测试报告](test-report.md#text-equality-deterministic-20261122) · [性能报告](performance-report-2026-10-30.md#text-equality-deterministic-cost-20261122)
+
 ## 2026-11-22 · 用 SQL 查询当前设置
 
 PostgreSQL 18.6 的 `pg_settings` 是一个普通视图，数据来自 `pg_show_all_settings()`，因此查询可以使用表达式、筛选、分组和连接。SQLite 把只读 PRAGMA 的结果提供为表函数。DuckDB 的 `duckdb_settings()` 也返回可以用普通 SQL 查询的行。[PostgreSQL 系统视图](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/catalog/system_views.sql) · [SQLite 表函数](https://www.sqlite.org/pragma.html#pragma_functions) · [DuckDB 设置表函数](https://www.duckdb.org/docs/current/sql/meta/duckdb_table_functions#duckdb_settings)

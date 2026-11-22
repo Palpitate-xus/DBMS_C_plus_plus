@@ -230,7 +230,13 @@ static bool isCharacterCodeScalarName(const std::string& name) {
 static int compareTextWithCollation(const std::string& left,
                                     const std::string& right,
                                     const std::string& requested,
-                                    bool usesSystemLocale = false) {
+                                    bool usesSystemLocale,
+                                    bool equalityOnly) {
+    // Deterministic comparison breaks collation ties with the original bytes.
+    // A caller asking only about equality can skip the locale sort comparison.
+    // Explicit system locales still validate availability when reached.
+    if (equalityOnly && !usesSystemLocale && requested != "nocase")
+        return left == right ? 0 : 1;
     const std::string effective = requested.empty()
         ? "en_US.utf8" : requested;
     const int compared = usesSystemLocale ? collation::compareLocale(left, right, effective)
@@ -2501,7 +2507,7 @@ int ExprEvaluator::compareArrayValues(const ExprValue& left, const ExprValue& ri
     return 0;
 }
 
-int ExprEvaluator::compareValues(const ExprValue& a, const ExprValue& b) {
+static int compareValuesImpl(const ExprValue& a, const ExprValue& b, bool equalityOnly) {
     if (a.isNull || b.isNull) return 0; // caller handles NULL
 
     std::string ta = toLower(a.typeName);
@@ -2519,12 +2525,12 @@ int ExprEvaluator::compareValues(const ExprValue& a, const ExprValue& b) {
             if (left == "unknown" || right == "unknown")
                 throw DbError("42883", "could not identify a comparison function for type unknown");
             if (left != right) throw DbError("42804", "cannot compare dissimilar record field types");
-            (void)resolveComparison("<", left, right);
+            (void)ExprEvaluator::resolveComparison("<", left, right);
             // Operator lookup belongs to the reached field descriptor, even
             // when both values are NULL. Earlier unequal fields still exit.
             if (first[i].isNull != second[i].isNull) return first[i].isNull ? 1 : -1;
             if (first[i].isNull) continue;
-            const int comparison = compareValues(first[i], second[i]);
+            const int comparison = compareValuesImpl(first[i], second[i], false);
             if (comparison) return comparison;
         }
         if (first.size() != second.size())
@@ -2548,7 +2554,7 @@ int ExprEvaluator::compareValues(const ExprValue& a, const ExprValue& b) {
         return (left>right)-(left<right);
     }
     if(common_type_detail::array(ta) && common_type_detail::array(tb))
-        return compareArrayValues(a,b);
+        return ExprEvaluator::compareArrayValues(a,b);
     if(ta=="interval" && tb=="interval") {
         const auto left=preparedIntervalValue(a),right=preparedIntervalValue(b);
         return (left>right)-(left<right);
@@ -2674,14 +2680,14 @@ int ExprEvaluator::compareValues(const ExprValue& a, const ExprValue& b) {
         };
         if (blankPaddedA || (blankPaddedB && varyingA)) trimPadding(left);
         if (blankPaddedB || (blankPaddedA && varyingB)) trimPadding(right);
-        return compareTextWithCollation(left, right, textCollation, usesSystemLocale);
+        return compareTextWithCollation(left, right, textCollation, usesSystemLocale, equalityOnly);
     }
 
     // A pair of text values stays textual even when both strings contain
     // digits. Numeric coercion here changes ORDER BY, comparisons and
     // GREATEST/LEAST (for example, text '10' must precede text '2').
     if (textualA && textualB) {
-        return compareTextWithCollation(a.value, b.value, textCollation, usesSystemLocale);
+        return compareTextWithCollation(a.value, b.value, textCollation, usesSystemLocale, equalityOnly);
     }
 
     if (ta == "money" || tb == "money") {
@@ -2752,6 +2758,10 @@ int ExprEvaluator::compareValues(const ExprValue& a, const ExprValue& b) {
 
     // Default string comparison
     return a.value < b.value ? -1 : (a.value > b.value ? 1 : 0);
+}
+
+int ExprEvaluator::compareValues(const ExprValue& a, const ExprValue& b) {
+    return compareValuesImpl(a, b, false);
 }
 
 static double geometricFloatOperation(double left, double right, bool divide = false) {
@@ -2833,6 +2843,10 @@ static ExprValue comparisonResult(const std::string& op, int comparison) {
     return ExprValue("boolean", result ? "t" : "f", false);
 }
 
+static bool isEqualityComparison(const std::string& op) {
+    return op == "=" || op == "<>" || op == "!=";
+}
+
 ExprValue ExprEvaluator::applyComparison(const std::string& op,
                                          const ExprValue& l,
                                          const ExprValue& r) {
@@ -2850,7 +2864,7 @@ ExprValue ExprEvaluator::applyComparison(const std::string& op,
     if (const auto equal = compareGeometricEquality(cmp,l,r))
         return ExprValue("boolean", *equal ? "t" : "f", false);
 
-    return comparisonResult(cmp, compareValues(l, r));
+    return comparisonResult(cmp, compareValuesImpl(l, r, isEqualityComparison(cmp)));
 }
 
 QueryComparisonBinding ExprEvaluator::resolveComparison(const std::string& rawOp,
@@ -2928,7 +2942,7 @@ ExprValue ExprEvaluator::comparePrepared(const QueryComparisonBinding& binding,
         const auto collation = binding.collationUsesSystemLocale
             ? binding.collation : collation::normalizeName(binding.collation);
         return comparisonResult(binding.op, compareTextWithCollation(left.value, right.value,
-            collation, binding.collationUsesSystemLocale));
+            collation, binding.collationUsesSystemLocale, isEqualityComparison(binding.op)));
     }
     const auto a=coerceComparison(binding,left,true),b=coerceComparison(binding,right,false);
     if(a.isNull || b.isNull)return ExprValue("boolean","",true);

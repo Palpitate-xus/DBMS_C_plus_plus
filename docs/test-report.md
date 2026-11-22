@@ -2,6 +2,17 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="text-equality-deterministic-20261122"></a>
+## 2026-11-22 · 文本相等比较
+
+普通和扩展协议各执行 25 条语句。基线 `e0344dfc` 与新版逐条一致，各有 48 条与 PostgreSQL 18.6 一致。核对两种 Unicode 重音写法、大小写差异、末尾空格、空字符串、`NULL`、筛选、更新、连接结果和排序。两处既有差异都在扩展协议。一处排序规则冲突在两端都返回 `42P21`，本项目先发送列描述，再报告错误。另一处文本连接的行和值正确，游标描述仍缺列信息。[对照 SQL](../tests/compat/cases/deterministic_text_equality.sql)
+
+从基线创建的数据目录启动新版，完成 19 个恢复步骤。用两种 Unicode 写法分别筛选同名文本，一次在未提交更新后强制结束进程，一次在已提交更新后强制结束进程。重启后只有已提交的更新可见，两种写法仍匹配不同的行，`NULL` 所在行仍可读。恢复记录 SHA-256 为 `c3673d8ec7d8c7423241fde9e7379891b32eacb6429454e7b34a07b7f2298244`。
+
+九组既有 SQL 和设置视图用例共 174 条响应，与基线逐条一致。另通过 6 个原生测试及 9 个客户端回归，覆盖忽略大小写、显式系统区域设置不可用时的错误、`CHAR` 尾部空格、位串、内部字符、枚举、窗口、设置读取和完整协议。设置视图命名语句的二进制响应重现此前与 PostgreSQL 一致的字节。[文本比较测试](../tests/text_comparison_type_test.cpp) · [大小写测试](../tests/text_case_locale_protocol_e2e_test.py) · [连接排序规则测试](../tests/join_collation_role_protocol_e2e_test.py)
+
+新版 SHA-256 为 `4ca96f7e266803553a3a102d9bb44a1ca0f784b7ac0240b3a2932bc7644d79b3`。PostgreSQL、基线和新版协议记录的 SHA-256 分别为 `6b2f8c622e465e4c97b99ef4d5634fcb423805b61f26017a7da10ddeee29d1c7`、`8e9deaca6c79e0247ffe20f52706b11ba8ba9e98bc14035cd76084a7034ca1d6` 和 `ddf29dd56b7733a3ae868fc0c8ab93a1782bdf9a4568775159181a042b14a827`。[性能报告](performance-report-2026-10-30.md#text-equality-deterministic-cost-20261122)
+
 <a id="pg-settings-expressions-20261122"></a>
 ## 2026-11-22 · 用 SQL 查询当前设置
 

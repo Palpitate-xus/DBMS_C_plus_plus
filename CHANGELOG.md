@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>按文字精确查找更快了 · 2026-11-22</summary>
+
+例如，按名字找一项数据库设置，或筛出名称完全相同的几行。
+
+[测试报告](docs/test-report.md#text-equality-deterministic-20261122) · [性能报告](docs/performance-report-2026-10-30.md#text-equality-deterministic-cost-20261122)
+
+</details>
+
+<details>
 <summary>可以用 SQL 比较数据库的当前设置 · 2026-11-22</summary>
 
 例如，把两种超时设置列在一起，再按毫秒数排序。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>可以改一组表共用的名称前缀 · 2026-11-22</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-22 · 可以改一组表共用的名称前缀
 
 例如，把 `sales` 改成 `sales_archive` 后，可以用 `sales_archive.orders` 查原来的订单表，之前建好的报表也能继续使用。
 
 [用法](docs/MANUAL.md#schema-改名) · [测试报告](docs/test-report.md#schema-rename-20261122) · [性能报告](docs/performance-report-2026-10-30.md#schema-rename-cost-20261122)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-22 · 表改名或换位置后，原来的报表还能用
 
