@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>按编号查询系统类型更快 · 2026-11-22</summary>
+
+例如，查 `pg_type` 中编号为 23 的类型时，数据库只为匹配的记录生成查询结果。
+
+[测试报告](docs/test-report.md#pg-type-oid-source-20261122) · [性能报告](docs/performance-report-2026-10-30.md#pg-type-oid-source-cost-20261122)
+
+</details>
+
+<details>
 <summary>修复复制 pg_type 时选错表的问题 · 2026-11-22</summary>
 
 导入和导出 `pg_type` 时会按当前连接的查找顺序选表。也可以指定列来导出系统类型列表。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>按一长串值筛选时，更快看到查询计划 · 2026-11-22</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-22 · 按一长串值筛选时，更快看到查询计划
 
 在一项按 32 个值筛选的测试中，用 `EXPLAIN` 查看查询计划的时间约减半。
 
 [测试报告](docs/test-report.md#explain-filter-statistics-20261122) · [性能报告](docs/performance-report-2026-10-30.md#explain-filter-statistics-cost-20261122)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-22 · 开始事务时少做一轮表结构检查
 

@@ -1,0 +1,97 @@
+#pragma once
+
+#include "catalog/CatalogService.h"
+#include "catalog/type_catalog.h"
+
+#include <algorithm>
+#include <charconv>
+#include <optional>
+#include <string_view>
+
+namespace dbms {
+
+// Admit only a direct equality on this range's OID column and a decimal
+// constant that is lossless as an OID. The original filter still runs.
+inline std::optional<Oid> typeCatalogOidFilter(const PreparedQuery::SourceRange& range) {
+    const auto* select = dynamic_cast<const SelectStmt*>(range.owner);
+    if (!select || range.source != select->fromClause.get() || range.columns.empty() ||
+        range.columns.front().physicalAttributeNumber != 1 || range.columns.front().typeOid != 26)
+        return std::nullopt;
+    const auto* equality = dynamic_cast<const BinaryOpExpr*>(select->whereClause.get());
+    if (!equality || equality->op != "=" || equality->preparedSubquery ||
+        equality->comparison || equality->predicateCollation)
+        return std::nullopt;
+    const auto oidColumn = [&](const Expr* expression) {
+        const auto* column = dynamic_cast<const ColumnRefExpr*>(expression);
+        return column && !column->preparedSubquery && column->binding &&
+               column->binding->scopeDepth == 0 && !column->binding->mergedUsing &&
+               column->binding->sourceOrdinal == range.ordinal &&
+               column->binding->columnOrdinal == 0 && column->binding->typeOid == 26;
+    };
+    const Expr* input = nullptr;
+    if (oidColumn(equality->left.get())) input = equality->right.get();
+    else if (oidColumn(equality->right.get())) input = equality->left.get();
+    if (!input || input->preparedSubquery) return std::nullopt;
+
+    const auto* cast = dynamic_cast<const CastExpr*>(input);
+    if (cast) {
+        CatalogManager::QualifiedName target;
+        if (!cast->typeMods.empty() || !CatalogManager::parseQualifiedName(cast->typeName, target, true) ||
+            target.schema != "pg_catalog" || target.name != "oid")
+            return std::nullopt;
+        input = cast->operand.get();
+    }
+    const auto* literal = dynamic_cast<const LiteralExpr*>(input);
+    if (!literal || literal->preparedSubquery) return std::nullopt;
+    if (!literal->typeName.empty() && (!literal->analyzedPrimitiveConstant ||
+        (literal->typeName != "oid" && literal->typeName != "smallint" &&
+         literal->typeName != "integer" && literal->typeName != "bigint")))
+        return std::nullopt;
+
+    // Never evaluate a literal or cast during source selection. Check its
+    // decimal representation; the ordinary predicate owns all conversions.
+    std::string_view digits = literal->value;
+    if ((cast || literal->analyzedPrimitiveConstant) && digits.size() >= 2 &&
+        digits.front() == '\'' && digits.back() == '\'') {
+        digits.remove_prefix(1);
+        digits.remove_suffix(1);
+    }
+    if (digits.empty() || digits.size() > 10) return std::nullopt;
+    Oid oid;
+    const auto end = digits.data() + digits.size();
+    const auto parsed = std::from_chars(digits.data(), end, oid);
+    if (parsed.ec == std::errc{} && parsed.ptr == end) return oid;
+    return std::nullopt;
+}
+
+class TypeCatalogScan {
+public:
+    TypeCatalogScan(std::optional<Oid> oid, bool bootstrapFallback)
+        : oid_(oid), bootstrapFallback_(bootstrapFallback) {}
+
+    void capture(const CatalogService& service, const std::string& database) {
+        if (rows_) return;
+        auto snapshot = service.metadataSnapshot(database, false);
+        rows_ = bootstrapFallback_ && snapshot.namespaces.empty() && snapshot.types.empty()
+            ? CatalogManager::builtinTypeRows() : std::move(snapshot.types);
+        if (oid_) {
+            rows_->erase(std::remove_if(rows_->begin(), rows_->end(),
+                [&](const auto& row) { return row.oid != *oid_; }), rows_->end());
+        }
+    }
+
+    bool read(const CatalogService& service, const std::string& database, size_t index,
+              std::vector<ExprValue>& cells) {
+        capture(service, database);
+        if (index >= rows_->size()) return false;
+        cells = ownedTypeCatalogCells((*rows_)[index]);
+        return true;
+    }
+
+private:
+    std::optional<Oid> oid_;
+    bool bootstrapFallback_;
+    std::optional<std::vector<PgTypeRow>> rows_;
+};
+
+}  // namespace dbms

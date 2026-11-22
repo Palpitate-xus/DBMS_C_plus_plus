@@ -16,6 +16,13 @@ cmake --build build/cmake --target dbms_main --parallel 2
 ## 最近更新
 
 <details>
+<summary>按编号查询系统类型更快 · 2026-11-22</summary>
+
+例如，查 `pg_type` 中编号为 23 的类型时，数据库只为匹配的记录生成查询结果。
+
+</details>
+
+<details>
 <summary>修复复制 pg_type 时选错表的问题 · 2026-11-22</summary>
 
 导入和导出 `pg_type` 时会按当前连接的查找顺序选表。也可以指定列来导出系统类型列表。
@@ -26,13 +33,6 @@ cmake --build build/cmake --target dbms_main --parallel 2
 <summary>修复查询或写入 pg_type 时选错表的问题 · 2026-11-22</summary>
 
 数据库按连接的搜索顺序选择 `pg_type`。你可以用 `public.pg_type` 明确指定自己的表。
-
-</details>
-
-<details>
-<summary>按一长串值筛选时，更快看到查询计划 · 2026-11-22</summary>
-
-在一项按 32 个值筛选的测试中，用 `EXPLAIN` 查看查询计划的时间约减半。
 
 </details>
 

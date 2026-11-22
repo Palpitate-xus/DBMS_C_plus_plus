@@ -25,6 +25,7 @@
 #include "catalog/collation.h"
 #include "catalog/CatalogService.h"
 #include "catalog/type_catalog.h"
+#include "catalog/TypeCatalogScan.h"
 #include "catalog/namespace_catalog.h"
 #include "catalog/systables.h"
 #include "Config.h"
@@ -5337,17 +5338,10 @@ OpPtr QueryPlanner::buildPreparedQueryPlan(StorageEngine* engine,const std::stri
                 Column column;column.dataName=output.name;column.dataType=output.type;
                 column.isVariableLength=true;schema.append(column);
             }
-            auto rows=std::make_shared<std::optional<std::vector<PgTypeRow>>>();
+            auto rows = std::make_shared<TypeCatalogScan>(typeCatalogOidFilter(*found), true);
             source=std::make_unique<PreparedSourceRowsOp>(found->columns,
                 [engine,database,rows](size_t index,std::vector<ExprValue>& row) {
-                    if(!*rows) {
-                        auto metadata=engine->catalogService().metadataSnapshot(database);
-                        if(metadata.types.empty() && metadata.namespaces.empty())
-                            *rows=CatalogManager::builtinTypeRows();
-                        else *rows=std::move(metadata.types);
-                    }
-                    if(index>=(**rows).size())return false;
-                    row=ownedTypeCatalogCells((**rows)[index]);return true;
+                    return rows->read(engine->catalogService(), database, index, row);
                 });
         } else {
             if(found->relationName.empty())

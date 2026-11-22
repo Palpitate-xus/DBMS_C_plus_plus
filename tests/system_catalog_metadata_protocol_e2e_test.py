@@ -2,7 +2,7 @@
 """Actual system-catalog values and all seven RowDescription fields.
 
 The finite expectations were independently checked against PostgreSQL 18.6.
-Only ordinary simple-query source metadata is exercised here.
+Catalog OID lookups also check extended-protocol descriptions and results.
 """
 import importlib.util
 import socket
@@ -69,6 +69,82 @@ def descriptors(messages):
     return result
 
 
+def check_pg_type_oid_queries(client, runner, sock, type_name):
+    def query_result(messages, sql):
+        rows, state, _, _, tag, _ = runner.decode_wire_result(messages, include_types=True)
+        assert state is None and messages[-1] == (b'Z', b'I'), (sql, messages)
+        return rows, tag
+
+    sql = f"CREATE TYPE {type_name} AS ENUM ('first', 'second')"
+    assert query_result(client.simple_query(sock, sql), sql) == ([], 'CREATE TYPE')
+    sql = f"SELECT oid FROM pg_catalog.pg_type WHERE typname='{type_name}'"
+    probe = client.simple_query(sock, sql)
+    rows, tag = query_result(probe, sql)
+    assert tag == 'SELECT 1' and len(rows) == 1 and len(rows[0]) == 1, (sql, probe)
+    assert descriptors(probe) == [field('oid', 1247, 1, 26, 4)], (sql, probe)
+    oid = int(rows[0][0])
+    assert 0 < oid <= 2**32 - 1, (sql, probe)
+
+    identity = [field('oid', 1247, 1, 26, 4), field('typname', 1247, 2, 19, 64)]
+    prefix = 'SELECT oid,typname FROM pg_catalog.pg_type WHERE '
+    checks = (
+        (prefix + 'oid=23', [['23', 'int4']], identity),
+        ('SELECT t.oid,t.typname FROM pg_type AS t WHERE 25=t.oid', [['25', 'text']], identity),
+        (prefix + 'oid=912345', [], identity),
+        (prefix + 'oid=NULL::oid', [], identity),
+        (prefix + 'oid=23 LIMIT 0', [], identity),
+        (prefix + 'typelem=23 ORDER BY oid LIMIT 1', [['1007', '_int4']], identity),
+        (prefix + "oid=23 AND typname='text'", [], identity),
+        (prefix + 'oid=23 OR oid=25 ORDER BY oid', [['23', 'int4'], ['25', 'text']], identity),
+        (f'SELECT oid AS "Object OID",typname,typtype FROM pg_catalog.pg_type WHERE oid={oid}',
+         [[str(oid), type_name, 'e']],
+         [field('Object OID', 1247, 1, 26, 4), identity[1], field('typtype', 1247, 7, 18, 1)]),
+    )
+    bind = client.typed(b'B', b'\0\0' + struct.pack('!HHH', 0, 0, 0))
+    execute = client.typed(b'E', b'\0' + struct.pack('!I', 0))
+    sync = client.typed(b'S')
+    for sql, expected, fields in checks:
+        result = client.simple_query(sock, sql)
+        row_frames = [b'D'] * len(expected)
+        assert [kind for kind, _ in result] == [b'T'] + row_frames + [b'C', b'Z'], (sql, result)
+        parse = client.typed(b'P', b'\0' + sql.encode() + b'\0' + struct.pack('!H', 0))
+        sock.sendall(parse + client.typed(b'D', b'S\0') + sync)
+        described = client.read_until_ready(sock)
+        assert [kind for kind, _ in described] == [b'1', b't', b'T', b'Z'], (sql, described)
+        assert described[-1] == (b'Z', b'I'), (sql, described)
+        sock.sendall(bind + client.typed(b'D', b'P\0') + execute + sync)
+        executed = client.read_until_ready(sock)
+        assert [kind for kind, _ in executed] == [b'2', b'T'] + row_frames + [b'C', b'Z'], (sql, executed)
+        expected_result = (expected, f'SELECT {len(expected)}')
+        assert query_result(result, sql) == query_result(executed, sql) == expected_result, (sql, result, executed)
+        assert descriptors(result) == descriptors(described) == descriptors(executed) == fields, (sql, described, executed)
+    print('PG_TYPE_OID_METADATA_CHECKS', len(checks), flush=True)
+
+
+def check_pg_type_catalog_snapshot(client, runner, sock, type_name, routine):
+    def query(sql, rows, fields, tag):
+        messages = client.simple_query(sock, sql)
+        result = runner.decode_wire_result(messages, include_types=True)
+        assert (result[0], result[1], result[4], messages[-1]) == (rows, None, tag, (b'Z', b'I')), (sql, messages)
+        assert descriptors(messages) == fields, (sql, messages)
+
+    typname = field('typname', 1247, 2, 19, 64)
+    probe = f"SELECT typname FROM pg_type WHERE typname='{type_name}'"
+    try:
+        query(f'CREATE FUNCTION {routine}() RETURNS integer LANGUAGE plpgsql AS $$ '
+              f"BEGIN CREATE TYPE {type_name} AS ENUM ('new'); RETURN 7; END; $$",
+              [], [], 'CREATE FUNCTION')
+        query(probe, [], [typname], 'SELECT 0')
+        query(f'WITH first_row AS (SELECT {routine}() AS made) '
+              f"SELECT made,t.typname FROM first_row CROSS JOIN pg_type AS t WHERE t.typname='{type_name}'",
+              [], [field('made', 0, 0, 23, 4), typname], 'SELECT 0')
+        query(probe, [[type_name]], [typname], 'SELECT 1')
+    finally:
+        client.simple_query(sock, f'DROP FUNCTION IF EXISTS {routine}()')
+        client.simple_query(sock, f'DROP TYPE IF EXISTS {type_name}')
+    print('PG_TYPE_CATALOG_SNAPSHOT_CHECKS 1', flush=True)
+
+
 def main():
     root = Path(__file__).resolve().parent.parent
     spec = importlib.util.spec_from_file_location('catalog_metadata_runner', root / 'tests/compat/pg_diff_runner.py')
@@ -87,6 +163,7 @@ def main():
         server = runner.start_ours(client)
         sock = server['sock']
     table = 'catalog_metadata_' + uuid.uuid4().hex[:10]
+    type_name = table + '_enum'
     failures = []
     controls = cases(table)
     try:
@@ -102,10 +179,13 @@ def main():
                                      wire=[(kind.hex(), body.hex()) for kind, body in messages]))
         print('SYSTEM_CATALOG_METADATA_CHECKS', len(controls), 'FAILURES', failures, flush=True)
         assert not failures, failures
+        check_pg_type_oid_queries(client, runner, sock, type_name)
+        check_pg_type_catalog_snapshot(client, runner, sock, table + '_snapshot', table + '_create_type')
     finally:
         try:
             client.simple_query(sock, 'ROLLBACK')
             client.simple_query(sock, f'DROP TABLE IF EXISTS {table}')
+            client.simple_query(sock, f'DROP TYPE IF EXISTS {type_name}')
         finally:
             if server:
                 runner.stop_ours(server)

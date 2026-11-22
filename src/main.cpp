@@ -2,6 +2,7 @@
 #include "catalog/RelationSearchPath.h"
 #include "commands/CopyRelation.h"
 #include "catalog/type_catalog.h"
+#include "catalog/TypeCatalogScan.h"
 #include "catalog/SystemCatalogRows.h"
 #include "catalog/PgDefaultCatalog.h"
 #include "expression/ArrayDatumInput.h"
@@ -21431,6 +21432,7 @@ class PreparedWithDmlRuntime {
             shared_ptr<PreparedWithDmlRuntime> viewRuntime;
             shared_ptr<dbms::PreparedQueryRows> virtualRows;
             shared_ptr<optional<dbms::PreparedQueryRows>> statisticsRows;
+            shared_ptr<dbms::TypeCatalogScan> typeRows;
             dbms::TableSchema scanSchema;
             if(item->type==dbms::FromItem::Type::Subquery) {
                 auto* select=dynamic_cast<dbms::SelectStmt*>(item->subquery.get());
@@ -21449,9 +21451,10 @@ class PreparedWithDmlRuntime {
                 virtualRows=make_shared<dbms::PreparedQueryRows>(dbms::system_catalog::attributeRows(
                     g_engine.catalogService().metadataSnapshot(session_.currentDB)));
             } else if(range.relationSchema=="pg_catalog" && range.relationName=="pg_type") {
-                virtualRows=make_shared<dbms::PreparedQueryRows>();
-                const auto metadata=g_engine.catalogService().metadataSnapshot(session_.currentDB);
-                for(const auto& row:metadata.types)virtualRows->push_back(dbms::ownedTypeCatalogCells(row));
+                typeRows = make_shared<dbms::TypeCatalogScan>(dbms::typeCatalogOidFilter(range), false);
+                // A sibling can run a routine that changes the catalog. Keep
+                // the source snapshot from before any of those rows execute.
+                typeRows->capture(g_engine.catalogService(), session_.currentDB);
             } else if(range.relationSchema=="pg_catalog" &&
                       (range.relationName=="pg_attrdef" || range.relationName=="pg_depend")) {
                 virtualRows=make_shared<dbms::PreparedQueryRows>(dbms::default_catalog::rows(
@@ -21497,7 +21500,7 @@ class PreparedWithDmlRuntime {
             node->reset=[currentOuter,resetExecution](const dbms::RowContext& row) {
                 *currentOuter=row;resetExecution();
             };
-            node->read=[this,executionOwner,currentOuter,frames,rangePointer=&range,cursor,scan,scanSchema,virtualRows,statisticsRows,scanOpened,source=node.get()]
+            node->read=[this,executionOwner,currentOuter,frames,rangePointer=&range,cursor,scan,scanSchema,virtualRows,statisticsRows,typeRows,scanOpened,source=node.get()]
                 (size_t index,dbms::RowContext& row) {
                 vector<dbms::ExprValue> cells;
                 bool found=false;
@@ -21506,6 +21509,7 @@ class PreparedWithDmlRuntime {
                     if(!*statisticsRows)*statisticsRows=g_engine.getAnalyzedStatisticsRows(session_.currentDB);
                     if(index<(**statisticsRows).size()){cells=(**statisticsRows)[index];found=true;}
                 }
+                else if(typeRows) found=typeRows->read(g_engine.catalogService(),session_.currentDB,index,cells);
                 else if(virtualRows) {
                     if(index<virtualRows->size()){cells=virtualRows->at(index);found=true;}
                 } else if(!scan)found=readCte(rangePointer->cteStatement,index,cells,frames);
