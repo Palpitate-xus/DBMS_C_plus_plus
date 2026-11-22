@@ -803,6 +803,7 @@ struct FromItem {
     enum class Type { Table, Subquery, Join, Function };
     Type type = Type::Table;
     std::string tableName;
+    size_t tableNameBegin = std::string::npos;
     bool only = false;
     std::string alias;
     // Canonical SQL source-column aliases are metadata, not expressions.

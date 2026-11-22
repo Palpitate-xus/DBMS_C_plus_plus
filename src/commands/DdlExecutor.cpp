@@ -11128,6 +11128,32 @@ static std::string viewDefinitionQuery(std::string definition) {
     return definition;
 }
 
+static std::string qualifyViewSources(const PreparedQuery& prepared) {
+    std::map<size_t, std::string> schemaPrefixes;
+    for (const auto& range : prepared.sourceRanges) {
+        const auto* from = range.source;
+        if (!from || from->type != FromItem::Type::Table || range.cteStatement ||
+            range.relationName.empty() || range.relationSchema.empty() ||
+            range.relationSchema.rfind("pg_temp_", 0) == 0) continue;
+        CatalogManager::QualifiedName spelling;
+        if (!CatalogManager::parseQualifiedName(from->tableName, spelling, true))
+            throw DbError("XX000", "view source name has no bound identifier");
+        if (!spelling.schema.empty()) continue;
+        if (from->tableNameBegin >= prepared.source.size())
+            throw DbError("XX000", "view source name has no source position");
+        const auto prefix = SQLParser::quoteIdentifier(range.relationSchema) + ".";
+        const auto [entry, inserted] = schemaPrefixes.emplace(from->tableNameBegin, prefix);
+        if (!inserted && entry->second != prefix)
+            throw DbError("XX000", "ambiguous view source position");
+    }
+    // Reopening a view must use the schemas chosen during CREATE. Edit only
+    // bound relation tokens, leaving aliases, CTE names and literals intact.
+    std::string definition = prepared.source;
+    for (auto edit = schemaPrefixes.rbegin(); edit != schemaPrefixes.rend(); ++edit)
+        definition.insert(edit->first, edit->second);
+    return definition;
+}
+
 using ViewEditSpan = std::pair<size_t, size_t>;
 
 static auto viewJoinKeys(const PreparedQuery& query) {
@@ -11548,6 +11574,7 @@ bool DdlExecutor::executeCreateView(const CreateViewStmt* stmt, Session& s) {
             throw DbError("42601", "CREATE VIEW requires a query");
         viewDependencies = boundViewRelationDependencies(
             g_engine.catalogService().get(s.currentDB), s.currentDB, prepared);
+        viewSql = qualifyViewSources(prepared);
         output = std::move(prepared.output);
         if (stmt->columnNames.size() > output.size())
             throw DbError("42601", "CREATE VIEW has more column names than columns");

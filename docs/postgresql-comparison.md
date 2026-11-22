@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-22 · 创建视图时确定来源
+
+PostgreSQL 在创建或替换视图时查找其来源，保存绑定后的查询。SQLite 把持久视图的读取范围限制在同一个数据库。DuckDB 读取视图时用独立的绑定器，并优先查找视图所在的 catalog 和 schema。[PostgreSQL CREATE VIEW](https://www.postgresql.org/docs/18/sql-createview.html) · [SQLite 来源绑定](https://github.com/sqlite/sqlite/blob/master/src/attach.c) · [DuckDB 视图绑定](https://github.com/duckdb/duckdb/blob/main/src/planner/binder/tableref/bind_basetableref.cpp)
+
+本项目保存新建或替换视图时选中的来源 schema，查询时不再用调用者的查找顺序重新选择这些表。表和 schema 改名后按对象编号追踪、补齐旧定义和视图的权限规则仍待完成。[正确性与恢复](test-report.md#view-source-identity-20261122) · [性能](performance-report-2026-10-30.md#view-source-identity-cost-20261122)
+
 ## 2026-11-22 · 查询时连接普通视图
 
 PostgreSQL 先把视图展开成查询树，再由计划器处理可合并的子查询。SQLite 在满足条件时把视图的查询合并到外层，以减少临时表。DuckDB 的普通视图在被引用时执行保存的查询。[PostgreSQL 视图规则](https://www.postgresql.org/docs/18/rules-views.html) · [SQLite 的子查询合并](https://www.sqlite.org/optoverview.html#subquery_flattening) · [DuckDB 普通视图](https://duckdb.org/docs/sql/statements/create_view)

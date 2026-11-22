@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>同名表不会让新建的视图读错数据 · 2026-11-22</summary>
+
+例如，报表创建时用的是销售部门的订单表。即使后来有人建了同名的临时表，报表仍会读取原来的订单。
+
+[用法](docs/MANUAL.md#9-视图与物化视图) · [测试报告](docs/test-report.md#view-source-identity-20261122) · [性能报告](docs/performance-report-2026-10-30.md#view-source-identity-cost-20261122)
+
+</details>
+
+<details>
 <summary>可以把表和视图里的数据合起来查 · 2026-11-22</summary>
 
 例如，销售汇总视图里只有产品编号和金额。用产品编号匹配产品表，就能同时查出产品名称和销售总额。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>列改名后，原来的检查规则仍然生效 · 2026-11-22</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-22 · 列改名后，原来的检查规则仍然生效
 
 例如，订单数量改名后，系统仍会拒绝负数，订单金额也能继续按数量和单价计算。
 
 [用法](docs/MANUAL.md#修改表) · [测试报告](docs/test-report.md#rename-quoted-column-references-20261122) · [性能报告](docs/performance-report-2026-10-30.md#rename-quoted-column-references-cost-20261122)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-22 · 导入时可以跳过数值超出自定义范围的行
 

@@ -3622,7 +3622,9 @@ static std::unique_ptr<FromItem> parseFromAtom(const std::vector<std::string>& t
         item->type = FromItem::Type::Table;
         const bool parenthesized = item->only && tokens[pos] == "(";
         if (parenthesized) ++pos;
+        const size_t nameBegin = pos;
         if (!parseQualifiedObjectName(tokens, pos, item->tableName)) return nullptr;
+        item->tableNameBegin = statementSource(tokens, nameBegin, pos).first;
         if (parenthesized) {
             if (pos >= tokens.size() || tokens[pos] != ")") return nullptr;
             ++pos;
