@@ -892,7 +892,9 @@ public:
         const GeneratedRelationPtr& generatedDeclaration = {},
         std::vector<std::vector<ExprValue>>* generatedInputs = nullptr,
         // Metadata only: raw stored-reference roles in output schema order.
-        std::vector<StoredReferenceOutputRole>* storedOutputRoles = nullptr);
+        std::vector<StoredReferenceOutputRole>* storedOutputRoles = nullptr,
+        // When provided, a row qualifies if any conjunction matches.
+        const std::vector<std::vector<std::string>>& conditionAlternatives = {});
 
     // Scalar function expression for queryExpr
     struct SelectExpr {

@@ -2,6 +2,28 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-22 preserve physical partition rows in plain SELECT predicates",
+      "gap_ids": ["CAT-11", "QRY-01", "STO-02"],
+      "status": "partial",
+      "evidence": [
+        "src/commands/TableManage.cpp",
+        "src/main.cpp",
+        "docs/postgresql-comparison.md",
+        "docs/test-report.md",
+        "docs/performance-report-2026-10-30.md"
+      ],
+      "tests": [
+        "tests/partition_test.cpp",
+        "tests/order_by_row_identity_test.cpp",
+        "tests/sorted_projection_null_bitmap_cost_test.cpp"
+      ],
+      "verification": [
+        "All 74 plain SELECT comparisons matched PostgreSQL 18.6 across each of two starts. Another 24 partition-key comparisons passed, including HASH equality with noncanonical integer spelling.",
+        "Cold and warm runs retained NULL, empty strings, duplicate values and long text. A forced row policy kept visible long values and hid the other rows. Six native suites, six existing protocol suites, and the previous 114 focused comparisons passed.",
+        "Matched timing reports include both the faster overlapping OR workload and slower plain partition scan controls. Independent leaf storage identities, row-lock compatibility and parallel scans remain open."
+      ]
+    },
+    {
       "issue": "2026-11-22 commit and undo inserts in the selected partition",
       "gap_ids": ["CAT-11", "DML-01", "QRY-01", "STO-02", "TXN-05", "WAL-05"],
       "status": "partial",

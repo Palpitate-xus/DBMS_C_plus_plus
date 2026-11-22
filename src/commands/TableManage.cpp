@@ -38726,7 +38726,8 @@ std::vector<std::string> StorageEngine::query(
     std::vector<int64_t>* structuredRowIds,
     const GeneratedRelationPtr& generatedDeclaration,
     std::vector<std::vector<ExprValue>>* generatedInputs,
-    std::vector<StoredReferenceOutputRole>* storedOutputRoles) {
+    std::vector<StoredReferenceOutputRole>* storedOutputRoles,
+    const std::vector<std::vector<std::string>>& conditionAlternatives) {
     if (storedOutputRoles) storedOutputRoles->clear();
     noteTemporaryRelationAccess(dbname, tablename);
     std::vector<std::string> result;
@@ -38881,11 +38882,100 @@ std::vector<std::string> StorageEngine::query(
     // `owner = current_user` to the old textual condition format is unsafe.
     const bool enforceRls = shouldEnforceRLS(tbl, StorageEngine::getRLSUser());
     auto conds = parseConditions(conditions);
-    std::vector<std::pair<int64_t, std::string>> matchRows;
+    struct MatchedRow {
+        int64_t rid;
+        std::string payload;
+        size_t nullBitmapIndex = 0;
+    };
+    std::vector<MatchedRow> matchRows;
+    std::vector<std::vector<bool>> partitionNulls;
+    const bool capturePartitionNulls =
+        tbl.partitionType != TableSchema::PartitionType::None &&
+        usesHeapTupleHeader(tbl.formatVersion);
+    const auto bindPartitionNulls = [&](const MatchedRow& row,
+            std::optional<detail::ScopedStoredRowNullBitmap>& binding) {
+        if (capturePartitionNulls)
+            binding.emplace(tbl, partitionNulls[row.nullBitmapIndex]);
+    };
+    const auto storedNull = [&](int64_t rid, size_t column) {
+        return !capturePartitionNulls && dbms::detail::storedRowColumnIsNull(
+            *this, dbname, tablename, tbl, rid, column);
+    };
     bool usedIndex = false;
     bool scanFailed = false;
     bool indexReadFailed = false;
-    if (enforceRls) {
+    if (capturePartitionNulls || !conditionAlternatives.empty()) {
+        std::vector<std::vector<Condition>> branches;
+        if (conditionAlternatives.empty()) {
+            branches.push_back(conds);
+        } else {
+            branches.reserve(conditionAlternatives.size());
+            for (const auto& alternative : conditionAlternatives) {
+                auto branch = parseConditions(alternative);
+                prepareFilterConditions(*this, dbname, tbl, branch);
+                branches.push_back(std::move(branch));
+            }
+        }
+        std::set<std::string> possiblePartitions;
+        // LIST and HASH routing uses the spelling of the inserted key.
+        // A SQL-equal key can have a different spelling and live elsewhere.
+        if (tbl.partitionType == TableSchema::PartitionType::Range) {
+            for (const auto& branch : branches) {
+                const bool safeEquality = std::all_of(branch.begin(), branch.end(),
+                    [&](const Condition& condition) {
+                        return condition.colName != tbl.partitionKey || condition.op != "=" ||
+                            (condition.decodedLiteralRhs && !condition.patternIsNull);
+                    });
+                if (!safeEquality) {
+                    possiblePartitions.clear();
+                    break;
+                }
+                auto partitions = getTargetPartitions(tbl, branch);
+                if (partitions.empty()) {
+                    // An empty target list means the scan cannot prune
+                    // this branch. Its union also needs all partitions.
+                    possiblePartitions.clear();
+                    break;
+                }
+                possiblePartitions.insert(partitions.begin(), partitions.end());
+            }
+        }
+        const std::vector<std::string> targetParts(
+            possiblePartitions.begin(), possiblePartitions.end());
+        LocalExpressionSyntax predicateSyntax;
+        const auto collect = [&](uint32_t pid, uint16_t sid,
+                                 const char* data, size_t len) {
+            const auto rid = encodeRid(pid, sid);
+            std::vector<bool> bitmap;
+            std::optional<detail::ScopedStoredRowNullBitmap> binding;
+            std::optional<NullRowBinding> policyRow;
+            if (capturePartitionNulls) {
+                if (!captureCurrentScanNullBitmap(tbl, data, len, bitmap))
+                    throw DbError("XX001", "partition tuple NULL bitmap unavailable");
+                binding.emplace(tbl, bitmap);
+            }
+            // Policy filtering replays an owned tuple outside the original
+            // scan callback. Supply its storage context for long values.
+            if (enforceRls)
+                policyRow.emplace(this, dbname, tablename, rid, tbl.len());
+            std::string row(data, len);
+            const bool matches = std::any_of(branches.begin(), branches.end(),
+                [&](const auto& branch) {
+                    return std::all_of(branch.begin(), branch.end(),
+                        [&](const auto& predicate) {
+                            return evalConditionOnRowWithSyntax(
+                                predicate, row, tbl, &predicateSyntax, generatedMetadata.get());
+                        });
+                });
+            if (!matches) return;
+            matchRows.push_back({rid, std::move(row), partitionNulls.size()});
+            if (capturePartitionNulls)
+                partitionNulls.push_back(std::move(bitmap));
+        };
+        scanFailed = !(enforceRls
+            ? forEachVisibleRow(dbname, tablename, "SELECT", collect, queryView, targetParts)
+            : forEachRow(dbname, tablename, collect, queryView, targetParts));
+    } else if (enforceRls) {
         const auto targetParts = tbl.partitionType == TableSchema::PartitionType::None
             ? std::vector<std::string>{}
             : getTargetPartitions(tbl, conds);
@@ -38896,12 +38986,12 @@ std::vector<std::string> StorageEngine::query(
                 for (const auto& c : conds) {
                     if (!evalConditionOnRowWithSyntax(c,row,tbl,nullptr,generatedMetadata.get())) return;
                 }
-                matchRows.emplace_back(encodeRid(pid, sid), std::move(row));
+                matchRows.push_back({encodeRid(pid, sid), std::move(row)});
             }, queryView, targetParts);
         if (!scanOk) scanFailed = true;
     } else if (conds.empty()) {
         if (!forEachRow(dbname, tablename, [&](uint32_t pid, uint16_t sid, const char* data, size_t len) {
-            matchRows.emplace_back(encodeRid(pid, sid), std::string(data, len));
+            matchRows.push_back({encodeRid(pid, sid), std::string(data, len)});
         })) scanFailed = true;
     } else if (tbl.partitionType != TableSchema::PartitionType::None) {
         // Partitioned table: use forEachRow with partition pruning + in-callback filtering
@@ -38912,7 +39002,7 @@ std::vector<std::string> StorageEngine::query(
             for (const auto& c : conds) {
                 if (!evalConditionOnRowWithSyntax(c,row,tbl,nullptr,generatedMetadata.get())) { match = false; break; }
             }
-            if (match) matchRows.emplace_back(encodeRid(pid, sid), std::move(row));
+            if (match) matchRows.push_back({encodeRid(pid, sid), std::move(row)});
         }, queryView, targetParts)) scanFailed = true;
     } else {
         auto ids = filterRows(dbname, tablename, conds, &usedIndex, &scanFailed,
@@ -38920,7 +39010,7 @@ std::vector<std::string> StorageEngine::query(
         for (int64_t rid : ids) {
             std::string row;
             if (readVisibleRowByRid(dbname, pa, rid, row, tbl, queryView)) {
-                matchRows.emplace_back(rid, std::move(row));
+                matchRows.push_back({rid, std::move(row)});
             }
         }
     }
@@ -38929,34 +39019,41 @@ std::vector<std::string> StorageEngine::query(
             throw DbError("XX001", "B-tree index read failed for relation \"" +
                 tablename + "\"");
         }
+        if (capturePartitionNulls)
+            throw DbError("58030", "could not read partitioned relation \"" + tablename + "\"");
         return result;
     }
 
     // Resolve TOAST markers in matched rows so downstream formatting sees
     // actual values instead of __TOAST__ markers.
     for (auto& mr : matchRows) {
+        std::optional<detail::ScopedStoredRowNullBitmap> nullBinding;
+        bindPartitionNulls(mr, nullBinding);
         bool toastOk = false;
         std::string resolved = resolveToastValues(
-            dbname, tablename, mr.second, tbl, &toastOk);
+            dbname, tablename, mr.payload, tbl, &toastOk);
         if (!toastOk) {
+            if (capturePartitionNulls)
+                throw DbError("58030", "could not read long value in partitioned relation \"" +
+                    tablename + "\"");
             return result;
         }
-        mr.second = std::move(resolved);
+        mr.payload = std::move(resolved);
     }
 
     // Row-level locks within transaction
     if (transactionContext().inTransaction) {
-        std::vector<std::pair<int64_t, std::string>> lockedRows;
+        std::vector<MatchedRow> lockedRows;
         for (auto& mr : matchRows) {
             bool locked;
             if (noWait || skipLocked) {
                 locked = forUpdate
-                    ? lockManager_.rowLockExclusiveNoWait(tablename, mr.first)
-                    : lockManager_.rowLockSharedNoWait(tablename, mr.first);
+                    ? lockManager_.rowLockExclusiveNoWait(tablename, mr.rid)
+                    : lockManager_.rowLockSharedNoWait(tablename, mr.rid);
             } else {
                 locked = forUpdate
-                    ? lockManager_.rowLockExclusive(tablename, mr.first)
-                    : lockManager_.rowLockShared(tablename, mr.first);
+                    ? lockManager_.rowLockExclusive(tablename, mr.rid)
+                    : lockManager_.rowLockShared(tablename, mr.rid);
             }
             if (!locked) {
                 if (skipLocked) {
@@ -39026,17 +39123,19 @@ std::vector<std::string> StorageEngine::query(
         for (size_t rowIndex = 0; rowIndex < matchRows.size(); ++rowIndex) {
             auto& mr = matchRows[rowIndex];
             SortKey k{rowIndex, {}, {}};
-            NullRowBinding nbS(this, dbname, tbl.tablename, mr.first, tbl.len());
+            NullRowBinding nbS(this, dbname, tbl.tablename, mr.rid, tbl.len());
+            std::optional<detail::ScopedStoredRowNullBitmap> partitionNullBinding;
+            bindPartitionNulls(mr, partitionNullBinding);
             for (size_t orderIndex = 0; orderIndex < orderBy.size();
                  ++orderIndex) {
                 const size_t sortIdx = sortColumnIndices[orderIndex];
                 if (sortIdx < tbl.len()) {
                     bool valueIsNull = false;
                     std::string val = extractColumnValue(
-                        mr.second,tbl,sortIdx,dbname,true,&valueIsNull,nullptr,generation);
+                        mr.payload,tbl,sortIdx,dbname,true,&valueIsNull,nullptr,generation);
                     const Column& scol = tbl.cols[sortIdx];
                     const bool resultIsNull = valueIsNull ||
-                        (scol.generatedKind != 'v' && dbms::detail::storedRowColumnIsNull(*this, dbname, tbl.tablename, tbl, mr.first, sortIdx));
+                        (scol.generatedKind != 'v' && storedNull(mr.rid, sortIdx));
                     k.isNulls.push_back(resultIsNull);
                     if (scol.dataType == "numeric") {
                         k.vals.emplace_back(
@@ -39141,7 +39240,7 @@ std::vector<std::string> StorageEngine::query(
             }
             return false;
         });
-        std::vector<std::pair<int64_t, std::string>> sorted;
+        std::vector<MatchedRow> sorted;
         sorted.reserve(matchRows.size());
         for (const auto& k : keys)
             sorted.push_back(std::move(matchRows[k.rowIndex]));
@@ -39275,8 +39374,11 @@ std::vector<std::string> StorageEngine::query(
         }
         for (size_t ri = 0; ri < matchRows.size(); ++ri) {
             ExprKey ek{ri, {}, {}};
+            const auto& mr = matchRows[ri];
             NullRowBinding nullBinding(
-                this, dbname, tbl.tablename, matchRows[ri].first, tbl.len());
+                this, dbname, tbl.tablename, mr.rid, tbl.len());
+            std::optional<detail::ScopedStoredRowNullBitmap> partitionNullBinding;
+            bindPartitionNulls(mr, partitionNullBinding);
             // Build column value map for expression evaluation
             std::map<std::string, std::string> rowData;
             std::map<std::string, bool> rowNulls;
@@ -39284,16 +39386,15 @@ std::vector<std::string> StorageEngine::query(
                 if(generation && tbl.cols[ci].generatedKind=='v')continue;
                 bool valueIsNull = false;
                 rowData[tbl.cols[ci].dataName] = extractColumnValue(
-                    matchRows[ri].second, tbl, ci, dbname, true,
+                    mr.payload, tbl, ci, dbname, true,
                     &valueIsNull);
                 rowNulls[tbl.cols[ci].dataName] = valueIsNull ||
-                    (tbl.cols[ci].generatedKind != 'v' &&
-                     dbms::detail::storedRowColumnIsNull(*this, dbname, tbl.tablename, tbl, matchRows[ri].first, ci));
+                    (tbl.cols[ci].generatedKind != 'v' && storedNull(mr.rid, ci));
             }
             const auto actualSortColumn=[&](const std::string& name)->ExprValue {
                 for(size_t i=0;i<tbl.len();++i)if(tbl.cols[i].dataName==name && generation && generation->columns[i]) {
                     bool null=false;std::optional<ExprValue> actual;
-                    (void)extractColumnValue(matchRows[ri].second,tbl,i,dbname,true,&null,&actual,generation);
+                    (void)extractColumnValue(mr.payload,tbl,i,dbname,true,&null,&actual,generation);
                     if(!actual)throw DbError("XX000","generated sort input lost its actual value");
                     return std::move(*actual);
                 }
@@ -39427,7 +39528,7 @@ std::vector<std::string> StorageEngine::query(
             }
             return false;
         });
-        std::vector<std::pair<int64_t, std::string>> sorted;
+        std::vector<MatchedRow> sorted;
         sorted.reserve(matchRows.size());
         for (const auto& ek : ekeys) {
             sorted.push_back(std::move(matchRows[ek.idx]));
@@ -39446,19 +39547,20 @@ std::vector<std::string> StorageEngine::query(
         if (distinctIdxs.size() == distinctOnCols.size()) {
             std::set<std::pair<std::vector<std::string>,
                                std::vector<bool>>> seen;
-            std::vector<std::pair<int64_t, std::string>> deduped;
+            std::vector<MatchedRow> deduped;
             for (auto& mr : matchRows) {
                 NullRowBinding nullBinding(
-                    this, dbname, tbl.tablename, mr.first, tbl.len());
+                    this, dbname, tbl.tablename, mr.rid, tbl.len());
+                std::optional<detail::ScopedStoredRowNullBitmap> partitionNullBinding;
+                bindPartitionNulls(mr, partitionNullBinding);
                 std::vector<std::string> keyValues;
                 std::vector<bool> keyNulls;
                 for (size_t idx : distinctIdxs) {
                     bool valueIsNull = false;
                     std::string value = extractColumnValue(
-                        mr.second,tbl,idx,dbname,true,&valueIsNull,nullptr,generation);
+                        mr.payload,tbl,idx,dbname,true,&valueIsNull,nullptr,generation);
                     const bool resultIsNull = valueIsNull ||
-                        (tbl.cols[idx].generatedKind != 'v' &&
-                         dbms::detail::storedRowColumnIsNull(*this, dbname, tbl.tablename, tbl, mr.first, idx));
+                        (tbl.cols[idx].generatedKind != 'v' && storedNull(mr.rid, idx));
                     keyValues.push_back(
                         resultIsNull ? std::string{} :
                             canonicalColumnKeyValue(tbl.cols[idx], value));
@@ -39475,7 +39577,9 @@ std::vector<std::string> StorageEngine::query(
 
     for (auto& mr : matchRows) {
         NullRowBinding nullBinding(
-            this, dbname, tbl.tablename, mr.first, tbl.len());
+            this, dbname, tbl.tablename, mr.rid, tbl.len());
+        std::optional<detail::ScopedStoredRowNullBitmap> partitionNullBinding;
+        bindPartitionNulls(mr, partitionNullBinding);
         std::string rowStr;
         std::vector<std::string> structuredRow;
         std::vector<bool> structuredNullRow;
@@ -39492,11 +39596,11 @@ std::vector<std::string> StorageEngine::query(
             }
             bool valueIsNull = false;
             std::string val = extractColumnValue(
-                mr.second,tbl,i,dbname,true,&valueIsNull,nullptr,generation);
+                mr.payload,tbl,i,dbname,true,&valueIsNull,nullptr,generation);
             // VIRTUAL generated columns carry the evaluator's NULL result;
             // their unused heap slot cannot describe logical nullness.
             const bool resultIsNull = valueIsNull ||
-                (col.generatedKind != 'v' && dbms::detail::storedRowColumnIsNull(*this, dbname, tbl.tablename, tbl, mr.first, i));
+                (col.generatedKind != 'v' && storedNull(mr.rid, i));
             if(transportGenerated) {
                 actualInputs.emplace_back(ExprHelper::canonicalResultTypeName(col.dataType+(col.isArray?"[]":"")),
                     resultIsNull?std::string{}:val,resultIsNull);
@@ -39535,7 +39639,7 @@ std::vector<std::string> StorageEngine::query(
         if (structuredRows) structuredRows->push_back(std::move(structuredRow));
         if (structuredNulls)
             structuredNulls->push_back(std::move(structuredNullRow));
-        if (structuredRowIds) structuredRowIds->push_back(mr.first);
+        if (structuredRowIds) structuredRowIds->push_back(mr.rid);
     }
     if (storedOutputRoles) {
         size_t outputWidth = 0;

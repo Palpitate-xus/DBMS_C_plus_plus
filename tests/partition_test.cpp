@@ -898,6 +898,34 @@ static void test_partition_scan_uses_leaf_nulls() {
     assert(rows == projected);
     assert(nulls == std::vector<std::vector<bool>>(2, {false, false, false}));
 
+    // Use the same qualifying rows through the plain projection. The
+    // unselected sort key must keep its NULL bit after the scan finishes.
+    dbms::StorageEngine::OrderBySpec hiddenOrder;
+    hiddenOrder.colName = "value";
+    for (bool nullsFirst : {false, true}) {
+        hiddenOrder.nullsFirst = nullsFirst;
+        g_engine.query(db, table, options.conditionAlternatives.front(),
+            {"bucket"}, {hiddenOrder}, false, false, false, 0, {},
+            &rows, &nulls, nullptr, {}, nullptr, nullptr,
+            options.conditionAlternatives);
+        const std::vector<std::vector<std::string>> expectedBuckets =
+            nullsFirst ? std::vector<std::vector<std::string>>{{"5"}, {"15"}}
+                       : std::vector<std::vector<std::string>>{{"15"}, {"5"}};
+        assert(rows == expectedBuckets);
+        assert(nulls == std::vector<std::vector<bool>>(2, {false}));
+    }
+
+    assert(g_engine.insertRow(db, table, {{"bucket", "6"}, {"value", "0"}}) ==
+           DBStatus::OK);
+    options.conditionAlternatives.push_back({"=bucket 6"});
+    g_engine.query(db, table, options.conditionAlternatives.front(),
+        {"value"}, {order}, false, false, false, 0, {}, &rows, &nulls,
+        nullptr, {}, nullptr, nullptr, options.conditionAlternatives);
+    const std::vector<std::vector<std::string>> values = {{""}, {"0"}, {"0"}};
+    const std::vector<std::vector<bool>> valueNulls = {{true}, {false}, {false}};
+    assert(rows == values);
+    assert(nulls == valueNulls);
+
     cleanup(db);
     std::cout << "[PART] Partition scans retain each leaf's NULL bitmap OK" << std::endl;
 }

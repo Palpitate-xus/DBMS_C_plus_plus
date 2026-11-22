@@ -40273,7 +40273,18 @@ static bool executeInternal(const string& rawSql, Session& s) {
                     condTokens.push_back(")");
                     for (auto& t : condTokens) t = modifyLogic(t, true);
                     auto groups = breakDownConditions(condTokens);
-                    if (captureStructuredPlain) {
+                    if (tbl.partitionType != dbms::TableSchema::PartitionType::None &&
+                        !groups.empty()) {
+                        answers = g_engine.query(
+                            queryDb, tname, groups.front(), selectCols,
+                            structuredPlainOrderSpecs, forUpdate, noWait, skipLocked,
+                            s.timezoneOffsetMinutes, distinctOnCols,
+                            captureStructuredPlain ? &structuredPlainResult.rows : nullptr,
+                            captureStructuredPlain ? &structuredPlainResult.nulls : nullptr,
+                            nullptr, {}, nullptr,
+                            captureStructuredPlain ? &plainStoredOutputRoles : nullptr, groups);
+                        structuredPlainRows = captureStructuredPlain;
+                    } else if (captureStructuredPlain) {
                         set<int64_t> seenRowIds;
                         vector<int64_t> mergedRowIds;
                         for (const auto& g : groups) {

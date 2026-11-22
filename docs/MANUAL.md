@@ -2219,6 +2219,14 @@ CREATE TABLE h (
 ) PARTITION BY HASH (K);
 ```
 
+查询父表时，`OR` 可以匹配不同分区中的记录。多个条件同时匹配同一条记录时，这条记录只返回一次。不同记录即使显示成相同的值，也会各自返回。可以按未出现在结果里的列排序，并指定空值排在前面还是后面。
+
+```sql
+SELECT id FROM events
+WHERE id = 4 OR id = 9
+ORDER BY event_time NULLS LAST;
+```
+
 ---
 
 ## 16. 全文搜索

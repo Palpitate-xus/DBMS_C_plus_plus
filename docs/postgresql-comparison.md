@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-22 · 分区查询中的 OR 和空值
+
+PostgreSQL 用 `Append` 等节点合并子计划，各叶分区有自己的行身份。优化器只剪掉条件明确排除的分区。SQLite 可以分别用索引查找各个 `OR` 条件，再按同一张表的行身份合并。DuckDB 用选择向量关联数据位置，并维护单独的空值标记。[PostgreSQL Append 源码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/executor/nodeAppend.c#L335-L352) · [分区裁剪](https://www.postgresql.org/docs/18/ddl-partitioning.html#DDL-PARTITION-PRUNING) · [SQLite OR 优化](https://www.sqlite.org/optoverview.html#or_optimizations) · [DuckDB 数据向量](https://duckdb.org/docs/current/internals/vector) · [DuckDB 空值标记](https://duckdb.org/docs/current/clients/c/vector)
+
+本项目的各分区仍由父表管理。读取时逐行判断 `OR` 条件，每个命中的实际记录进入结果一次。两个分区的记录可以有相同的页号和槽号，也可以投影出同样的值，这两种情况下都应各自返回。数据库从实际记录提取空值标记，并随原行保留到排序和输出。
+
 ## 2026-11-22 · 向分区表写入并处理回滚
 
 PostgreSQL 18.6 在执行插入时选择实际的叶关系，首次写到某一叶关系时才准备相应的写入状态。执行器的行容器同时保留来源表编号、行位置和各列是否为空。SQLite 的隐式事务在语句执行结束时提交，显式事务由提交或回滚结束。DuckDB 为批量修改记录撤销信息，提交后可用预写日志恢复数据。[PostgreSQL 分区](https://www.postgresql.org/docs/18/ddl-partitioning.html) · [写入路由源码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/executor/execPartition.c#L194-L253) · [行容器源码](https://github.com/postgres/postgres/blob/REL_18_6/src/include/executor/tuptable.h#L104-L125) · [SQLite 事务](https://www.sqlite.org/lang_transaction.html) · [DuckDB 事务实现](https://duckdb.org/2024/10/30/analytics-optimized-concurrent-transactions)
