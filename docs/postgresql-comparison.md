@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-22 · 表内文字相等和约束检查
+
+PostgreSQL 对确定性规则下的文本相等比较先检查长度，然后比较字节。`CHAR` 在计算长度时跳过尾部空格。SQLite 的 `BINARY` 和 `RTRIM` 也区分保留或跳过尾部空格的比较。DuckDB 默认使用字节比较，并可另选忽略大小写、重音或规范化的规则。[PostgreSQL 文本](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/utils/adt/varlena.c#L1632) · [PostgreSQL CHAR](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/utils/adt/varchar.c#L701) · [SQLite 排序规则](https://www.sqlite.org/datatype3.html#collating_sequences) · [DuckDB 排序规则](https://duckdb.org/docs/1.5/sql/expressions/collations)
+
+本项目的默认文本相等比较使用同样的字节规则。批量检查唯一键和外键时，适用的列可按完整键查找，从而省去逐行两两比较。同机 512 行无索引文本等值查询在本项目约需 10–12 毫秒，PostgreSQL 18.6 约需 0.26–0.34 毫秒。[测试报告](test-report.md#stored-text-equality-20261122) · [性能报告](performance-report-2026-10-30.md#stored-text-equality-cost-20261122)
+
 ## 2026-11-22 · 用文本函数筛选行
 
 PostgreSQL 在初始化表达式时，根据已解析的函数编号准备可重复调用的函数和参数空间。SQLite 在编译表达式时把函数定义写入虚拟机指令。DuckDB 在执行已绑定的函数时按数据块计算参数和结果。[PostgreSQL 表达式执行](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/executor/execExpr.c#L2557) · [SQLite 表达式编译](https://github.com/sqlite/sqlite/blob/master/src/expr.c#L5550) · [DuckDB 函数执行](https://github.com/duckdb/duckdb/blob/main/src/execution/expression_executor/execute_function.cpp)

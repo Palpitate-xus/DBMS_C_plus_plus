@@ -19,6 +19,13 @@ cmake --build build/cmake --target dbms_main --parallel 2
 ## 最近更新
 
 <details>
+<summary>直接比对文字更快了 · 2026-11-22</summary>
+
+按完整名称查找记录更快了。给已有数据的表加唯一约束时，检查重复值也更快了。
+
+</details>
+
+<details>
 <summary>截取文字再筛选更快了 · 2026-11-22</summary>
 
 比如取姓名的第一个字，再找出所有姓张的人。把名称转成小写再比较也更快了。
@@ -26,16 +33,9 @@ cmake --build build/cmake --target dbms_main --parallel 2
 </details>
 
 <details>
-<summary>按名称查找更快了 · 2026-11-22</summary>
+<summary>查数据库设置更快了 · 2026-11-22</summary>
 
-比如按名称查一项数据库设置，或在表里查找名称完全相同的记录。
-
-</details>
-
-<details>
-<summary>可以把几项数据库设置放在一起比较 · 2026-11-22</summary>
-
-比如列出两项超时设置，按各自的毫秒数排序。
+比如按名称查当前的工作内存上限。
 
 </details>
 

@@ -5593,6 +5593,22 @@ bool columnUsesBinaryCollation(const Column& column) {
            collation::isBinary(column.collation);
 }
 
+bool textValuesEqual(const Column& column, const std::string& left,
+                     const std::string& right) {
+    if (!column.collation.empty()) return compareTextValues(column, left, right) == 0;
+    // The implicit locale's ordering already breaks equal weights by bytes.
+    // Equality only needs the same padding rules and the resulting bytes.
+    if (column.dataType == "char" || column.dataType == "character") {
+        return canonicalColumnKeyValue(column, left) ==
+               canonicalColumnKeyValue(column, right);
+    }
+    return left == right;
+}
+
+bool columnUsesCanonicalEquality(const Column& column) {
+    return column.collation.empty() || columnUsesBinaryCollation(column);
+}
+
 // Physical B-tree/hash keys are byte ordered, but SQL uniqueness follows the
 // column's equality semantics.  Keep the fast canonical-key comparison for
 // binary columns and use the resolved collation for non-binary text columns.
@@ -5600,7 +5616,7 @@ bool constraintColumnValuesEqual(const Column& column,
                                  const std::string& left,
                                  const std::string& right) {
     if (!columnUsesBinaryCollation(column)) {
-        return compareTextValues(column, left, right) == 0;
+        return textValuesEqual(column, left, right);
     }
     return canonicalColumnKeyValue(column, left) ==
            canonicalColumnKeyValue(column, right);
@@ -5654,12 +5670,12 @@ bool constraintKeyValuesEqual(const TableSchema& table,
     return true;
 }
 
-bool constraintNeedsCollationScan(const TableSchema& table,
-                                  const std::vector<size_t>& columns) {
+bool constraintNeedsCollationComparison(const TableSchema& table,
+                                        const std::vector<size_t>& columns) {
     return std::any_of(
         columns.begin(), columns.end(), [&](size_t columnIndex) {
             return columnIndex >= table.len() ||
-                   !columnUsesBinaryCollation(table.cols[columnIndex]);
+                   !columnUsesCanonicalEquality(table.cols[columnIndex]);
         });
 }
 
@@ -14681,7 +14697,7 @@ DBStatus StorageEngine::createIndex(const std::string& dbname, const std::string
 
     const std::vector<size_t> uniqueColumns{colIdx};
     const bool needsCollationScan = unique &&
-        constraintNeedsCollationScan(tbl, uniqueColumns);
+        constraintNeedsCollationComparison(tbl, uniqueColumns);
     std::set<std::string> seenBinaryKeys;
     std::vector<std::string> seenCollatedKeys;
     bool duplicate = false;
@@ -14989,7 +15005,7 @@ DBStatus StorageEngine::createCompositeIndex(const std::string& dbname,
     };
 
     const bool needsCollationScan = unique &&
-        constraintNeedsCollationScan(tbl, columnIndices);
+        constraintNeedsCollationComparison(tbl, columnIndices);
     std::set<std::vector<std::string>> seenBinaryKeys;
     std::vector<std::vector<std::string>> seenCollatedKeys;
     bool duplicate = false;
@@ -25781,11 +25797,11 @@ DBStatus validateStoredForeignKeyRows(StorageEngine& engine, const std::string& 
     const std::string& parentName, const TableSchema& parent,
     const ValidatedForeignKeyDefinition& definition) {
     // Canonical equality is sufficient only for these actual parent roles.
-    // Locale/network/legacy temporal keys retain the existing FK equality.
+    // Explicit locale, network and legacy temporal keys use FK comparisons.
     bool canonicalSafe = true;
     for (const size_t index : definition.referencedColumnIndices) {
         const auto& column = parent.cols[index];
-        canonicalSafe = canonicalSafe && columnUsesBinaryCollation(column) &&
+        canonicalSafe = canonicalSafe && columnUsesCanonicalEquality(column) &&
             column.dataType != "inet" && column.dataType != "cidr" &&
             column.dataType != "macaddr" && column.dataType != "macaddr8" &&
             !(column.storageCodec == Column::StorageCodec::Legacy &&
@@ -25964,7 +25980,7 @@ DBStatus StorageEngine::alterTableAddUniqueConstraint(const std::string& dbname,
     // metadata without this scan leaves a table that advertises uniqueness
     // while retaining duplicate keys from before the ALTER statement.
     const bool needsCollationScan =
-        constraintNeedsCollationScan(tbl, colIndices);
+        constraintNeedsCollationComparison(tbl, colIndices);
     std::set<std::vector<std::string>> seenBinaryKeys;
     std::vector<std::vector<std::string>> seenCollatedKeys;
     bool duplicate = false;
@@ -26072,7 +26088,7 @@ DBStatus StorageEngine::alterTableAddPrimaryKey(const std::string& dbname,
     // Validate existing data: every PK column must be non-NULL and the tuple of
     // PK columns must be unique across all rows.
     const bool needsCollationScan =
-        constraintNeedsCollationScan(tbl, colIndices);
+        constraintNeedsCollationComparison(tbl, colIndices);
     std::set<std::vector<std::string>> seenBinaryKeys;
     std::vector<std::vector<std::string>> seenCollatedKeys;
     bool violation = false;
@@ -28915,6 +28931,10 @@ StorageEngine::PredicateTruth StorageEngine::compareValues(
         return fromCompare((left>right)-(left<right));
     if (col.dataType == "char" ||
         (col.isVariableLength && col.dataType != "numeric")) {
+        if (op == "=" || op == "!=" || op == "<>") {
+            const bool matches = textValuesEqual(col, left, right) == (op == "=");
+            return matches ? PredicateTruth::True : PredicateTruth::False;
+        }
         const int cmp = compareTextValues(col, left, right);
         return fromCompare(cmp);
     }
@@ -29205,6 +29225,10 @@ bool StorageEngine::evalConditionOnRowWithSyntax(const Condition& cond,
         const auto right = read(comparison->rightIndex);
         if (isNull) return false;
         if (comparison->kind == ComparisonKind::Text) {
+            if (comparison->operation == "=" || comparison->operation == "!=" ||
+                comparison->operation == "<>") {
+                return (left == right) == (comparison->operation == "=");
+            }
             const auto& leftColumn = tbl.cols[comparison->leftIndex];
             const auto& rightColumn = tbl.cols[comparison->rightIndex];
             // This binding admits only the database default or a binary rule.
@@ -29659,16 +29683,17 @@ bool StorageEngine::evalConditionOnRowWithSyntax(const Condition& cond,
     }
     if (col.dataType == "char" ||
         (col.isVariableLength && col.dataType != "numeric")) {
-        // Apply the column's collation for equality/comparison operators.
+        if (cond.op == "=" || cond.op == "!=") {
+            return textValuesEqual(col, val, cond.value) == (cond.op == "=");
+        }
+        // Apply the column's collation for ordering and ranges.
         auto scmp = [&](const std::string& a, const std::string& b) {
             return compareTextValues(col, a, b);
         };
         if (cond.op == "<"  && !(scmp(val, cond.value) < 0))     return false;
         if (cond.op == ">"  && !(scmp(val, cond.value) > 0))     return false;
-        if (cond.op == "="  && scmp(val, cond.value) != 0)        return false;
         if (cond.op == "<=" && (scmp(val, cond.value) > 0))      return false;
         if (cond.op == ">=" && (scmp(val, cond.value) < 0))      return false;
-        if (cond.op == "!=" && scmp(val, cond.value) == 0)        return false;
         if (cond.op == "between" || cond.op == "notbetween") {
             // cond.value = "lo hi" (space-joined by modifyLogic)
             size_t sp = cond.value.find(' ');
@@ -30872,7 +30897,11 @@ DBStatus StorageEngine::insertInternal(
             const std::string pkVal = tbl.buildPKValue(actualValues);
             if (!pkVal.empty()) {
                 bool duplicate = false;
-                if (constraintNeedsCollationScan(tbl, primaryColumns)) {
+                // An index lookup also depends on the existing physical key
+                // eligibility. Bulk validation instead compares full keys.
+                const bool needsRowScan = std::any_of(primaryColumns.begin(), primaryColumns.end(),
+                    [&](size_t index) { return !columnUsesBinaryCollation(tbl.cols[index]); });
+                if (needsRowScan) {
                     std::vector<std::string> candidateValues;
                     candidateValues.reserve(primaryColumns.size());
                     for (const size_t columnIndex : primaryColumns) {

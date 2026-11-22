@@ -8927,6 +8927,11 @@ bool DdlExecutor::executeCreateIndex(const CreateIndexStmt* stmt, Session& s) {
         return true;
     }
 
+    if (stmt->unique && res == DBStatus::DUPLICATE_KEY) {
+        std::cout << "ERROR: could not create unique index \"" << idxName
+                  << "\" (SQLSTATE 23505)" << std::endl;
+        return true;
+    }
     if (res != DBStatus::OK) {
         std::cout << "CREATE INDEX failed" << std::endl;
         return true;

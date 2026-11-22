@@ -2,6 +2,19 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="stored-text-equality-20261122"></a>
+## 2026-11-22 · 表内文字比较和约束检查
+
+普通和扩展协议各跑 46 条语句。新版的 92 条响应全部与 PostgreSQL 18.6 一致，基线 `83123620` 为 90 条。两条差异来自同一次建索引操作。已有 `CHAR` 值忽略尾部空格后相等时，新版返回 `23505`。对照包含逐行筛选、两列比较、空字符串与 `NULL`、显式二进制排序、更新删除和回滚、单列与复合唯一索引、给已有数据加主键和验证外键。另核对一个唯一二级索引中具有相同前缀的两个长文本键。[对照 SQL](../tests/compat/cases/stored_text_equality_keys.sql)
+
+从基线数据目录启动新版，完成 29 个步骤。在提交前和提交后分别强制结束进程。第一次重启后，子表仍有原来的孤立引用，外键验证再次失败。第二次重启后，已提交的修复和唯一索引仍有效。补齐后的外键能验证，并拒绝无对应记录的引用。恢复记录 SHA-256 为 `ce86a2d6d8a4e687219087e4c7001b538148140dffee06fee72bac20682ecc75`。
+
+九个原生测试和十一个客户端回归通过，包括自定义排序规则、唯一索引失败后清理、空文本、完整外键值、历史数据验证和完整协议。外键历史数据验证专项核对了启动时的 142 条及重启后的 12 条操作。[排序规则](../tests/collation_test.cpp) · [唯一索引](../tests/unique_index_enforcement_test.cpp) · [历史数据验证](../tests/constraint_not_valid_protocol_e2e_test.py) · [外键完整值](../tests/foreign_key_full_value_protocol_e2e_test.py)
+
+长文本主键还有一个可复现的缺口。给已有数据加主键，如果两个文本键的前 20 字节相同，等值查询会漏掉第二个键。新旧版对这组测试的 16 条响应完全相同，查询漏行、新键插入失败和合法外键引用被拒绝分别在两种协议中复现。[已知问题复现](../tests/compat/known_gaps/long_text_primary_key_collision.sql)
+
+新版程序 SHA-256 为 `96aae6a18a53df8758e1911ddda42b944c63bab83c574e09edf1af693babdc3a`。PostgreSQL、基线、新版对照记录的 SHA-256 分别为 `28ca54114edfba287c6df71491ed384e7917e5e9f27d1d75f8b6e4385003d17d`、`0cd6da6f4b6476c21f429cd5e1464cc3720f061bfb9adbc877db9385b1808038` 和 `26204c02a2dff2822a3a305656d65820a1cdabdb8bf969261abd659a0aae4399`。[性能对照](performance-report-2026-10-30.md#stored-text-equality-cost-20261122)
+
 <a id="ordinary-text-function-filter-20261122"></a>
 ## 2026-11-22 · 用文本函数筛选行
 
