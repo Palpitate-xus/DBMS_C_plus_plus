@@ -809,20 +809,27 @@ def extended_query_describe(sock):
         sock, "SELECT v FROM varchar_unbounded_meta")) == [[long_varchar.encode()]]
     for name, width, expected_typmod in (
             ("varchar_255_meta", 255, 259),
-            ("varchar_max_meta", 65535, 65539)):
+            ("varchar_65535_meta", 65535, 65539),
+            ("varchar_65536_meta", 65536, 65540),
+            ("varchar_max_meta", 10485760, 10485764)):
         assert any(kind == b"C" for kind, _ in simple_query(
             sock, "CREATE TABLE " + name + " (v VARCHAR(" + str(width) + "))"))
-        assert row_description_fields(simple_query(
-            sock, "SELECT v FROM " + name))[0][2:6] == (
-            1, 1043, -1, expected_typmod)
+        query = "SELECT v FROM " + name
+        columns = row_description_fields(simple_query(sock, query))
+        assert len(columns) == 1 and columns[0][2:6] == (
+            1, 1043, -1, expected_typmod), columns
+        statement = ("describe_" + name).encode() + b"\0"
+        parse = statement + query.encode() + b"\0" + struct.pack("!H", 0)
+        sock.sendall(typed(b"P", parse) + typed(b"D", b"S" + statement) + typed(b"S"))
+        assert row_description_fields(read_until_ready(sock)) == columns
     assert any(kind == b"C" for kind, _ in simple_query(
-        sock, "ALTER TABLE varchar_max_meta ALTER COLUMN v SET DEFAULT 'x'"))
+        sock, "ALTER TABLE varchar_65535_meta ALTER COLUMN v SET DEFAULT 'x'"))
     assert row_description_fields(simple_query(
-        sock, "SELECT v FROM varchar_max_meta"))[0][5] == 65539
+        sock, "SELECT v FROM varchar_65535_meta"))[0][5] == 65539
     assert any(kind == b"C" for kind, _ in simple_query(
-        sock, "ALTER TABLE varchar_max_meta ALTER COLUMN v TYPE VARCHAR"))
+        sock, "ALTER TABLE varchar_65535_meta ALTER COLUMN v TYPE VARCHAR"))
     assert row_description_fields(simple_query(
-        sock, "SELECT v FROM varchar_max_meta"))[0][5] == -1
+        sock, "SELECT v FROM varchar_65535_meta"))[0][5] == -1
     overlong_varchar = simple_query(
         sock, "INSERT INTO varchar_width_regression VALUES ('abcd')")
     assert b"C22001\0" in next(body for kind, body in overlong_varchar if kind == b"E")
@@ -904,7 +911,7 @@ def extended_query_describe(sock):
             ("invalid_char_zero", "CHAR(0)"),
             ("invalid_varchar_zero", "VARCHAR(0)"),
             ("unsupported_char_length", "CHAR(1006)"),
-            ("unsupported_varchar_length", "VARCHAR(65536)")):
+            ("unsupported_varchar_length", "VARCHAR(10485761)")):
         rejected = simple_query(sock, "CREATE TABLE " + name + " (v " + type_spec + ")")
         assert any(kind == b"E" for kind, _ in rejected), (type_spec, rejected)
         assert b"C22023\0" in next(body for kind, body in rejected if kind == b"E")
