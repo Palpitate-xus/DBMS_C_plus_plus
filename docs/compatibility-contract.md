@@ -2,9 +2,13 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-22 · 客户端导入中的自定义域约束
+
+文本和 CSV 导入会在读取字段时检查所支持的标量域和数组域。显式值违反 `CHECK` 或 `NOT NULL` 时，可按 `ON_ERROR ignore` 跳过。域检查表达式的运行错误、无效默认值和表约束错误仍会撤销本次导入。历史表结构中缺少来源信息的约束仍按表检查处理。[对照范围](test-report.md#copy-domain-input-20261122)
+
 ## 2026-11-22 · 客户端导入的坏行处理
 
-文本和 CSV `COPY … FROM STDIN` 接受 `ON_ERROR stop`、`ON_ERROR ignore`、`REJECT_LIMIT` 和 `LOG_VERBOSITY`。所测的整数和布尔转换错误可跳过，主键、表约束、格式及默认值错误会撤销导入。自定义域约束仍由写入阶段检查，可能使整次导入失败。[用法](MANUAL.md#用客户端复制数据) · [对照范围](test-report.md#copy-ignore-bad-rows-20261122)
+文本和 CSV `COPY … FROM STDIN` 接受 `ON_ERROR stop`、`ON_ERROR ignore`、`REJECT_LIMIT` 和 `LOG_VERBOSITY`。所测的整数和布尔转换错误可跳过，主键、表约束、格式及默认值错误会撤销导入。[用法](MANUAL.md#用客户端复制数据) · [对照范围](test-report.md#copy-ignore-bad-rows-20261122)
 
 ## 2026-11-22 · 导入默认值的求值顺序
 

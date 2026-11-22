@@ -2500,11 +2500,13 @@ COPY public.users (id, name) FROM STDIN WITH (FORMAT csv, DEFAULT 'USE_DEFAULT')
 
 一行里有多个默认值标记时，按导入列清单的顺序求值。在遇错停止模式下，后面的字段出错时，已取过的序列编号仍然保留，这次导入的记录会撤销。[对照测试](test-report.md#copy-default-evaluation-order-20261122)
 
-客户端文本和 CSV 导入可以用 `ON_ERROR ignore` 跳过无法转换的行，例如整数列里写了文字。`REJECT_LIMIT` 接受正整数，超过上限时整批撤销。默认返回跳过的行数，`LOG_VERBOSITY verbose` 还会报告行号、列名和截短的原值，`LOG_VERBOSITY silent` 隐藏这些提示。字段格式错误、表约束失败和默认表达式报错时，导入会按错误处理。自定义域约束的处理仍有差异。[测试范围](test-report.md#copy-ignore-bad-rows-20261122)
+客户端文本和 CSV 导入可以用 `ON_ERROR ignore` 跳过无法转换的行，例如整数列里写了文字。`REJECT_LIMIT` 接受正整数，超过上限时整批撤销。默认返回跳过的行数，`LOG_VERBOSITY verbose` 还会报告行号、列名和截短的原值，`LOG_VERBOSITY silent` 隐藏这些提示。字段格式错误、表约束失败和默认表达式报错时，导入会按错误处理。[测试范围](test-report.md#copy-ignore-bad-rows-20261122)
 
 ```sql
 COPY public.users (id, name) FROM STDIN WITH (FORMAT csv, ON_ERROR ignore, REJECT_LIMIT 10);
 ```
+
+如果列使用带约束的自定义类型（域），导入会在读取字段时检查该类型的规则。比如用 `CREATE DOMAIN positive_quantity AS INT CHECK (VALUE > 0)` 定义正整数后，输入 `-1` 的行可由 `ON_ERROR ignore` 跳过。检查表达式自身报错或默认值违反域约束时，这批导入会撤销。[自定义类型对照](test-report.md#copy-domain-input-20261122)
 
 ### 备份与恢复作业
 

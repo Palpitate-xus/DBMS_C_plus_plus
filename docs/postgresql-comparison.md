@@ -2,9 +2,15 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-22 · 导入时检查自定义类型的约束
+
+PostgreSQL 18.6 先把字段转换成域的基础类型，再执行域约束。约束拒绝了该值时可跳过该行。检查表达式执行出错时会中止导入。DuckDB 可以用 `CREATE TYPE` 为基础类型起别名，其 CSV 读取也提供跳过转换错误的选项。SQLite 的 `STRICT` 表会拒绝无法无损转换的值。[PostgreSQL 域输入实现](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/utils/adt/domains.c) · [DuckDB 类型别名](https://duckdb.org/docs/2.0/sql/statements/create_type) · [DuckDB CSV 错误处理](https://duckdb.org/docs/2.0/data/csv/reading_faulty_csv_files) · [SQLite STRICT](https://www.sqlite.org/stricttables.html)
+
+本项目在导入字段中使用当前域定义，核对了标量、继承和数组域，以及被跳过行的默认值求值。新建表能识别写入表结构的域检查，避免对同一输入重复执行。旧表中没有记录来源的检查仍按原来方式执行。[测试范围](test-report.md#copy-domain-input-20261122)
+
 ## 2026-11-22 · 跳过字段转换失败的行
 
-PostgreSQL 18.6 的 `ON_ERROR ignore` 可以跳过字段类型转换失败的记录，超过 `REJECT_LIMIT` 时会报错并撤销导入。参考测试中，整数域的检查失败也被跳过，两个被跳过的记录仍调用了列清单之外的序列默认值。DuckDB 的 CSV 读取还可跳过结构错误，并选择把坏行记入临时表。SQLite 命令行通过 `.import` 按 CSV 格式读取数据，可为表启用 `STRICT` 类型检查。本项目支持了转换错误、坏行上限和通知。整数域的检查失败仍会中止本项目的导入。[PostgreSQL 导入实现](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/commands/copyfromparse.c) · [DuckDB 错误处理](https://duckdb.org/docs/2.0/data/csv/reading_faulty_csv_files) · [SQLite 导入](https://www.sqlite.org/cli.html#importing_files_as_csv_or_other_formats) · [SQLite STRICT](https://www.sqlite.org/stricttables.html)
+PostgreSQL 18.6 的 `ON_ERROR ignore` 可以跳过字段类型转换失败的记录，超过 `REJECT_LIMIT` 时会报错并撤销导入。参考测试中，两个被跳过的记录仍调用了列清单之外的序列默认值。DuckDB 的 CSV 读取还可跳过结构错误，并选择把坏行记入临时表。SQLite 命令行通过 `.import` 按 CSV 格式读取数据，可为表启用 `STRICT` 类型检查。[PostgreSQL 导入实现](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/commands/copyfromparse.c) · [DuckDB 错误处理](https://duckdb.org/docs/2.0/data/csv/reading_faulty_csv_files) · [SQLite 导入](https://www.sqlite.org/cli.html#importing_files_as_csv_or_other_formats) · [SQLite STRICT](https://www.sqlite.org/stricttables.html)
 
 本项目在启动写入前处理字段转换。跳过一行后，列清单之外的默认值仍会求值。超过上限、默认表达式失败或表约束失败时，整批导入会撤销。[对照测试](test-report.md#copy-ignore-bad-rows-20261122)
 

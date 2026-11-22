@@ -15,6 +15,8 @@ struct StorageEngine::CopyInputOrder {
     size_t fieldCount;
     // If supplied, report the input field rejected during conversion.
     std::optional<size_t>* rejectedField = nullptr;
+    // Residual table CHECK after removing a recorded domain check.
+    std::map<size_t, std::string>* tableChecks = nullptr;
 };
 
 } // namespace dbms

@@ -6,6 +6,10 @@
 
 截至 2026-11-22，273 项功能要求中有 22 项完成、167 项部分实现、69 项待验证、15 项暂缓。各项结果和剩余范围见功能总账。以下更新报告给出各轮测试的实际范围。[功能总账](gap-progress.json) · [支持的功能和限制](compatibility-contract.md)
 
+## 2026-11-22 · 客户端导入按字段检查域约束
+
+导入可以跳过违反标量域或数组域约束的显式值。表约束及默认值失败仍会撤销整批导入。已有表和新建表的检查来源分别核对。[用法](MANUAL.md#用客户端复制数据) · [测试报告](test-report.md#copy-domain-input-20261122) · [性能报告](performance-report-2026-10-30.md#copy-domain-input-cost-20261122)
+
 ## 2026-11-22 · 客户端导入可跳过无法转换的行
 
 启用 `ON_ERROR ignore` 后，可以跳过数量列填成文字之类的记录。超过设置的坏行上限时会撤销本次导入。已核对成功行、通知、回滚和重启后的结果。[用法](MANUAL.md#用客户端复制数据) · [测试报告](test-report.md#copy-ignore-bad-rows-20261122) · [性能报告](performance-report-2026-10-30.md#copy-ignore-bad-rows-cost-20261122)

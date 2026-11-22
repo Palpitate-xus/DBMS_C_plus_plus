@@ -610,6 +610,103 @@ def check_csv_copy_input(client, runner, sock):
             sock, "SELECT id FROM copy_skip_reference ORDER BY id"))
         assert (sqlstate, tag, rows) == (None, "SELECT 2", [["1"], ["4"]]), rows
         command("DROP TABLE copy_skip_reference", b"DROP TABLE")
+
+        command("CREATE DOMAIN copy_positive AS INT NOT NULL CHECK (VALUE > 0)", b"CREATE DOMAIN")
+        command("CREATE DOMAIN copy_digit AS copy_positive CHECK (VALUE < 10)", b"CREATE DOMAIN")
+        command("CREATE DOMAIN copy_pair AS INT[] CHECK (cardinality(VALUE) = 2)", b"CREATE DOMAIN")
+        command("CREATE SEQUENCE copy_domain_seq START WITH 20", b"CREATE SEQUENCE")
+        command("CREATE TABLE copy_domains (id INT PRIMARY KEY, d copy_digit CHECK (d <> 7), "
+                "a copy_pair, n INT DEFAULT nextval('copy_domain_seq'))", b"CREATE TABLE")
+        copy_domains = "COPY copy_domains (id, d, a) FROM STDIN"
+        load(copy_domains + " (FORMAT csv, ON_ERROR ignore, LOG_VERBOSITY verbose)",
+             b'1,2,"{1,2}"\n2,,"{1,2}"\n3,-1,"{1,2}"\n4,12,"{1,2}"\n5,3,{1}\n6,4,\n',
+             extended, count=2, notices=(
+                 'skipping row due to data type incompatibility at line 2 for column "d": null input',
+                 'skipping row due to data type incompatibility at line 3 for column "d": "-1"',
+                 'skipping row due to data type incompatibility at line 4 for column "d": "12"',
+                 'skipping row due to data type incompatibility at line 5 for column "a": "{1}"',
+                 '4 rows were skipped due to data type incompatibility'))
+        load(copy_domains + " (FORMAT csv, ON_ERROR ignore)", b"7,7,\n", extended, error="23514")
+        load("COPY copy_domains (id) FROM STDIN", b"7\n", extended, columns=1, count=1)
+        load("COPY copy_domains (id, d, n) FROM STDIN (FORMAT csv, DEFAULT 'DF')",
+             b"8,-1,DF\n", extended, error="23514")
+        result = runner.decode_wire_result(client.simple_query(sock, "SELECT nextval('copy_domain_seq')"))
+        assert (result[0], result[1], result[4]) == ([["28"]], None, "SELECT 1"), result
+        load(copy_domains + " (FORMAT csv, ON_ERROR ignore, REJECT_LIMIT 1)",
+             b"8,5,\n9,-1,\n10,10,\n", extended, error="22P02")
+        rows, sqlstate, _, _, tag = runner.decode_wire_result(client.simple_query(
+            sock, "SELECT id,d,a,n FROM copy_domains ORDER BY id"))
+        assert (sqlstate, tag, rows) == (None, "SELECT 3", [
+            ["1", "2", "{1,2}", "20"], ["6", "4", None, "25"], ["7", None, None, "27"],
+        ]), (sqlstate, tag, rows)
+        command("DROP TABLE copy_domains", b"DROP TABLE")
+        command("DROP DOMAIN copy_digit", b"DROP DOMAIN")
+        command("DROP DOMAIN copy_positive", b"DROP DOMAIN")
+        command("DROP DOMAIN copy_pair", b"DROP DOMAIN")
+
+        command("CREATE DOMAIN copy_invalid_default AS INT DEFAULT -1 CHECK (VALUE > 0)", b"CREATE DOMAIN")
+        command("CREATE TABLE copy_domain_defaults (id INT, d copy_invalid_default, "
+                "n INT DEFAULT nextval('copy_domain_seq'))", b"CREATE TABLE")
+        load("COPY copy_domain_defaults FROM STDIN (FORMAT csv, ON_ERROR ignore, DEFAULT 'DF')",
+             b"1,DF,99\n", extended, error="23514")
+        load("COPY copy_domain_defaults (id) FROM STDIN (FORMAT csv, ON_ERROR ignore)",
+             b"2\n", extended, columns=1, error="23514")
+        result = runner.decode_wire_result(client.simple_query(sock, "SELECT nextval('copy_domain_seq')"))
+        assert (result[0], result[1], result[4]) == ([["32"]], None, "SELECT 1"), result
+        command("DROP TABLE copy_domain_defaults", b"DROP TABLE")
+        command("DROP DOMAIN copy_invalid_default", b"DROP DOMAIN")
+        command("DROP SEQUENCE copy_domain_seq", b"DROP SEQUENCE")
+
+        command("CREATE DOMAIN copy_divisor AS INT CHECK (10 / VALUE > 0)", b"CREATE DOMAIN")
+        command("CREATE TABLE copy_domain_expression (id INT PRIMARY KEY, d copy_divisor)", b"CREATE TABLE")
+        load("COPY copy_domain_expression FROM STDIN (FORMAT csv, ON_ERROR ignore)",
+             b"1,2\n2,0\n", extended, columns=2, error="22012")
+        rows, sqlstate, _, _, tag = runner.decode_wire_result(client.simple_query(
+            sock, "SELECT id,d FROM copy_domain_expression"))
+        assert (sqlstate, tag, rows) == (None, "SELECT 0", []), (sqlstate, tag, rows)
+        load("COPY copy_domain_expression FROM STDIN (ON_ERROR ignore)",
+             b"1\t2\n2\t-1\n", extended, columns=2, count=1, notices=(one_skipped,))
+        command("DROP TABLE copy_domain_expression", b"DROP TABLE")
+        command("DROP DOMAIN copy_divisor", b"DROP DOMAIN")
+
+        command("CREATE SEQUENCE copy_check_calls START WITH 100", b"CREATE SEQUENCE")
+        command("CREATE DOMAIN copy_counted AS INT CHECK (nextval('copy_check_calls') > 0 AND VALUE > 0)",
+                b"CREATE DOMAIN")
+        command("CREATE TABLE copy_domain_checks (id INT PRIMARY KEY, d copy_counted CHECK (d < 10))",
+                b"CREATE TABLE")
+        load("COPY copy_domain_checks FROM STDIN (FORMAT csv, ON_ERROR ignore)",
+             b"1,4\n", extended, columns=2, count=1)
+        load("COPY copy_domain_checks FROM STDIN (FORMAT csv, ON_ERROR ignore)",
+             b"2,11\n", extended, columns=2, error="23514")
+        result = runner.decode_wire_result(client.simple_query(sock, "SELECT nextval('copy_check_calls')"))
+        assert (result[0], result[1], result[4]) == ([["102"]], None, "SELECT 1"), result
+        command("DROP TABLE copy_domain_checks", b"DROP TABLE")
+        command("DROP DOMAIN copy_counted", b"DROP DOMAIN")
+        command("DROP SEQUENCE copy_check_calls", b"DROP SEQUENCE")
+
+        command("CREATE DOMAIN copy_changed_rule AS INT CONSTRAINT copy_positive_rule CHECK (VALUE > 0)",
+                b"CREATE DOMAIN")
+        command("CREATE TABLE copy_constraint_owner (id INT PRIMARY KEY, d copy_changed_rule CHECK (d <> -2))",
+                b"CREATE TABLE")
+        command("ALTER DOMAIN copy_changed_rule DROP CONSTRAINT copy_positive_rule", b"ALTER DOMAIN")
+        load("COPY copy_constraint_owner FROM STDIN (FORMAT csv, ON_ERROR ignore)",
+             b"1,-1\n", extended, columns=2, count=1)
+        load("COPY copy_constraint_owner FROM STDIN (FORMAT csv, ON_ERROR ignore)",
+             b"2,-2\n", extended, columns=2, error="23514")
+        rows, sqlstate, _, _, tag = runner.decode_wire_result(client.simple_query(
+            sock, "SELECT id,d FROM copy_constraint_owner ORDER BY id"))
+        assert (sqlstate, tag, rows) == (None, "SELECT 1", [["1", "-1"]]), rows
+        command("DROP TABLE copy_constraint_owner", b"DROP TABLE")
+        command("DROP DOMAIN copy_changed_rule", b"DROP DOMAIN")
+
+        command("CREATE DOMAIN copy_plain_rule AS INT", b"CREATE DOMAIN")
+        command("CREATE TABLE copy_comment_check (id INT PRIMARY KEY, d copy_plain_rule)", b"CREATE TABLE")
+        command("ALTER TABLE copy_comment_check ADD CONSTRAINT ordinary_check "
+                "CHECK ((/*DBMS domain CHECK*/(d > 0)))", b"ALTER TABLE")
+        load("COPY copy_comment_check FROM STDIN (FORMAT csv, ON_ERROR ignore)",
+             b"1,-1\n", extended, columns=2, error="23514")
+        command("DROP TABLE copy_comment_check", b"DROP TABLE")
+        command("DROP DOMAIN copy_plain_rule", b"DROP DOMAIN")
     print("COPY_CSV_INPUT_MODES_COMPLETE 2")
 
 

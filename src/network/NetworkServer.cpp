@@ -6452,6 +6452,9 @@ CopyStreamResult receiveCopyIn(PostgresProtocol& protocol,
         const unsigned bits = oid == 21 ? 16 : oid == 23 ? 32 : oid == 20 ? 64 : 0;
         copyColumns.push_back({index, bits});
     }
+    const bool hasDomains = std::any_of(table.cols.begin(), table.cols.end(),
+        [](const auto& column) { return !column.domainName.empty(); });
+    std::map<size_t, std::string> copyTableChecks;
     const auto checkCopyInterrupt = [&]() {
         if (deadline != std::chrono::steady_clock::time_point::max() &&
             std::chrono::steady_clock::now() >= deadline) {
@@ -6487,7 +6490,7 @@ CopyStreamResult receiveCopyIn(PostgresProtocol& protocol,
         pending.clear();
     };
     const auto insertFields = [&](CopyFields& fields, uint64_t lineNumber) {
-        const bool orderedInput = plan.ignoreConversionErrors ||
+        const bool orderedInput = hasDomains || plan.ignoreConversionErrors ||
             (plan.defaultMarker && hasCopyDefaultMarker(fields));
         StorageEngine::SqlRow values;
         for (size_t field = 0; field < fields.size(); ++field) {
@@ -6520,7 +6523,8 @@ CopyStreamResult receiveCopyIn(PostgresProtocol& protocol,
         // Omitted keys still invoke the target column's generator.
         std::optional<size_t> rejectedField;
         const StorageEngine::CopyInputOrder order{copyColumns, fields.size(),
-            plan.ignoreConversionErrors ? &rejectedField : nullptr};
+            plan.ignoreConversionErrors ? &rejectedField : nullptr,
+            hasDomains ? &copyTableChecks : nullptr};
         const auto sendRejectedNotice = [&] {
             if (!rejectedField || plan.verbosity != CopyVerbosity::Verbose) return;
             const auto& column = table.cols[copyColumns[*rejectedField].index].dataName;

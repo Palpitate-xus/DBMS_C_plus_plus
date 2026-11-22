@@ -1,3 +1,4 @@
+#include "commands/DomainCheck.h"
 #include "catalog/SystemAttributeDeclaration.h"
 #include "catalog/declared_type.h"
 #include "catalog/DatumMetadataFactory.h"
@@ -1362,6 +1363,7 @@ static bool normalizeNamedCheckConstraints(TableSchema& table,
         if (result < 0) return false;
         if (result == 0) {
             column.checkExpr.clear();
+            column.hasStoredDomainCheck = false;
             column.checkConstraintName.clear();
             column.deferrable = false;
             column.initiallyDeferred = false;
@@ -5600,6 +5602,10 @@ bool DdlExecutor::columnDefToColumn(const ColumnDef& cd, const std::string& dbna
             if (!col.checkExpr.empty()) col.checkExpr = "(" + col.checkExpr + ") AND (" + rewritten + ")";
             else col.checkExpr = rewritten;
         }
+        if (!storageArray && !col.checkExpr.empty()) {
+            col.checkExpr = annotateStoredDomainCheck(col.checkExpr);
+            col.hasStoredDomainCheck = true;
+        }
     }
 
     // Apply check constraints from column definition
@@ -6507,6 +6513,7 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
             }
             if (!lc.includingConstraints) {
                 c.checkExpr.clear();
+                c.hasStoredDomainCheck = false;
                 c.checkConstraintName.clear();
             }
             if (!lc.includingGenerated) {
@@ -6658,6 +6665,7 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
             if (incoming.checkExpr.empty()) return true;
             if (target.checkExpr.empty()) {
                 target.checkExpr = incoming.checkExpr;
+                target.hasStoredDomainCheck = incoming.hasStoredDomainCheck;
                 target.checkConstraintName = incoming.checkConstraintName;
                 target.deferrable = incoming.deferrable;
                 target.initiallyDeferred = incoming.initiallyDeferred;
@@ -7039,6 +7047,7 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
             const std::string expression = tc.checkExpr->toString();
             if (tbl.cols[0].checkExpr.empty()) {
                 tbl.cols[0].checkExpr = expression;
+                tbl.cols[0].hasStoredDomainCheck = false;
                 tbl.cols[0].checkConstraintName = tc.name;
                 tbl.cols[0].deferrable = tc.deferrable;
                 tbl.cols[0].initiallyDeferred = tc.initiallyDeferred;

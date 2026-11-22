@@ -1,3 +1,4 @@
+#include "commands/DomainCheck.h"
 #include "commands/CopyInputOrder.h"
 #include "catalog/SystemCatalogRows.h"
 #include "catalog/PgDefaultCatalog.h"
@@ -1387,15 +1388,22 @@ ArrayDomainProgram prepareArrayDomainProgram(
     return program;
 }
 
-void evaluateArrayDomainProgram(const std::string& database,
+struct DomainConstraintFailure {
+    const char* state;
+    std::string message;
+};
+
+using DomainInputCheck = std::optional<DomainConstraintFailure>;
+
+DomainInputCheck checkArrayDomainProgram(const std::string& database,
         const ArrayDomainProgram& program, const ExprValue& value,
         StorageEngine* engine, LocalExpressionSyntax& syntax) {
     if (value.isNull && program.notNull)
-        throw DbError("23502", "domain " + program.name + " does not allow null values");
+        return DomainConstraintFailure{"23502", "domain " + program.name + " does not allow null values"};
     if (!value.isNull && (!compound_value_detail::owningElements(value) ||
             !sameArrayCodec(value.compound->type, program.declaration)))
         throw DbError("XX001", "array domain lost its converted array value");
-    if (program.checks.empty()) return;
+    if (program.checks.empty()) return std::nullopt;
 
     // The input datum supplies the real typed elements and NULLs. The scalar
     // helper receives VALUE as a bound column, never SQL assembled from text.
@@ -1414,9 +1422,10 @@ void evaluateArrayDomainProgram(const std::string& database,
         if (!result.isNull && !ExprValue("boolean", result.value, false).asBool()) {
             std::string message = "value for domain " + program.name + " violates check constraint";
             if (!check.name.empty()) message += " \"" + check.name + "\"";
-            throw DbError("23514", message);
+            return DomainConstraintFailure{"23514", std::move(message)};
         }
     }
+    return std::nullopt;
 }
 
 // Own the same copied declaration for all assignments of this operation. The
@@ -1483,10 +1492,27 @@ public:
             input->compound->dimensions.empty();
     }
 
+    DomainInputCheck checkInput(size_t index, const Column& column,
+            const std::string& raw, bool isNull, const std::string& database,
+            StorageEngine* engine) {
+        const auto& program = programs_.at(index);
+        ExprValue value(program.inputType, isNull ? std::string{} : raw, isNull);
+        value.collation = column.resolvedCollation.empty() ? column.collation : column.resolvedCollation;
+        if (!isNull && stored_regtype_detail::scalarType(column.dataType)) {
+            if (!referenceCatalog_) referenceCatalog_.emplace(regtype_detail::metadata(*engine, database));
+            value = stored_regtype_detail::load(raw, true, false, *referenceCatalog_,
+                currentSession(), program.declaration, column.dataType);
+        } else if (!compound_value_detail::decodeArrayStorageInput(value, program.declaration)) {
+            throw DbError("XX001", "could not decode converted array domain assignment");
+        }
+        return checkArrayDomainProgram(database, program, value, engine, syntax_);
+    }
+
     void validate(const TableSchema& table, const std::map<std::string, std::string>& values,
             const std::set<std::string>& nulls, const std::string& database,
             StorageEngine* engine, const std::set<size_t>* assigned = nullptr,
-            const StorageEngine::OwningSqlRow* convertedInputs = nullptr) {
+            const StorageEngine::OwningSqlRow* convertedInputs = nullptr,
+            const std::map<size_t, StorageEngine::SqlCell>* checkedCopyDomains = nullptr) {
         for (const auto& [index, program] : programs_) {
             if (program.checks.empty() || (assigned && !assigned->count(index))) continue;
             const auto& column = table.cols[index];
@@ -1494,23 +1520,54 @@ public:
             if (raw == values.end())
                 throw DbError("XX001", "array domain assignment lost its row value");
             const bool isNull = nulls.count(column.dataName) != 0;
+            if (checkedCopyDomains) {
+                const auto checked = checkedCopyDomains->find(index);
+                if (checked != checkedCopyDomains->end() &&
+                    (isNull ? !checked->second : checked->second == raw->second)) continue;
+            }
             // A retained conversion must still describe the final value.
             const auto* input = retainedInput(program, column.dataName, isNull, convertedInputs);
             if (input && (isNull || (compound_value_detail::owningElements(*input) &&
                 stored_regtype_detail::storageText(*input) == raw->second))) continue;
-            ExprValue value(program.inputType, isNull ? std::string{} : raw->second, isNull);
-            value.collation = column.resolvedCollation.empty() ? column.collation : column.resolvedCollation;
-            if (!isNull && stored_regtype_detail::scalarType(column.dataType)) {
-                if (!referenceCatalog_) referenceCatalog_.emplace(regtype_detail::metadata(*engine, database));
-                value = stored_regtype_detail::load(raw->second, true, false, *referenceCatalog_,
-                    currentSession(), program.declaration, column.dataType);
-            } else if (!compound_value_detail::decodeArrayStorageInput(value, program.declaration)) {
-                throw DbError("XX001", "could not decode converted array domain assignment");
-            }
-            evaluateArrayDomainProgram(database, program, value, engine, syntax_);
+            if (auto failure = checkInput(index, column, raw->second, isNull, database, engine))
+                throw DbError(failure->state, failure->message);
         }
     }
 };
+
+DomainInputCheck checkScalarDomainInput(StorageEngine& engine,
+        const std::string& database, const StorageEngine::DomainAncestry& domain,
+        const Column& column, const std::string& raw, bool isNull) {
+    if (isNull && domain.notNull)
+        return DomainConstraintFailure{"23502", "domain " + domain.name + " does not allow null values"};
+    const std::map<std::string, std::string> row{{"value", raw}};
+    const std::map<std::string, std::string> hints{{"value", column.dataType}};
+    const std::map<std::string, std::string> collations{{"value",
+        column.resolvedCollation.empty() ? column.collation : column.resolvedCollation}};
+    const std::set<std::string> nulls = isNull
+        ? std::set<std::string>{"value"} : std::set<std::string>{};
+    StorageEngine::OwningSqlRow owning;
+    if (!isNull && stored_regtype_detail::scalarType(column.dataType)) {
+        const auto catalog = regtype_detail::metadata(engine, database);
+        owning.emplace("value", stored_regtype_detail::load(
+            raw, false, false, catalog, currentSession(), {}, column.dataType));
+    }
+    LocalExpressionSyntax syntax;
+    for (auto ancestor = domain.domains.rbegin(); ancestor != domain.domains.rend(); ++ancestor) {
+        if (ancestor->checkExpr.empty()) continue;
+        const auto result = ExprHelper::evalStringWithNullsSyntax(syntax,
+            ancestor->checkExpr, row, nulls, hints, database, "", &engine, collations,
+            false, owning.empty() ? nullptr : &owning);
+        if (!result.ok)
+            throw DbError(result.sqlState.empty() ? "XX000" : result.sqlState, result.error);
+        if (!result.isNull && !ExprValue("boolean", result.value, false).asBool()) {
+            std::string message = "value for domain " + domain.name + " violates check constraint";
+            if (!ancestor->constraintName.empty()) message += " \"" + ancestor->constraintName + "\"";
+            return DomainConstraintFailure{"23514", std::move(message)};
+        }
+    }
+    return std::nullopt;
+}
 
 } // namespace
 
@@ -1519,7 +1576,8 @@ void StorageEngine::validateArrayDomainValue(const std::string& database,
         const DatumMetadataContext& metadata) {
     auto program = prepareArrayDomainProgram(ancestry, metadata);
     LocalExpressionSyntax syntax;
-    evaluateArrayDomainProgram(database, program, value, this, syntax);
+    if (auto failure = checkArrayDomainProgram(database, program, value, this, syntax))
+        throw DbError(failure->state, failure->message);
 }
 
 // CHECK row maps are keyed by the actual raw attribute name, including
@@ -18939,7 +18997,9 @@ void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
             out.write(tbl.cols[i].checkExpr.data(), checkLen);
             // New in version 6: persist CHECK constraint name and deferrability.
             writeFixedString(out, tbl.cols[i].checkConstraintName, MAX_COL_NAME_LEN);
-            uint8_t deferFlags = (tbl.cols[i].deferrable ? 1 : 0) | (tbl.cols[i].initiallyDeferred ? 2 : 0);
+            uint8_t deferFlags = (tbl.cols[i].deferrable ? 1 : 0) |
+                (tbl.cols[i].initiallyDeferred ? 2 : 0) |
+                (tbl.cols[i].hasStoredDomainCheck ? 4 : 0);
             out.write(reinterpret_cast<const char*>(&deferFlags), 1);
         }
         if (!tbl.cols[i].generatedExpr.empty()) {
@@ -19275,6 +19335,7 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
             if (in) {
                 tbl.cols[i].deferrable = (deferFlags & 1) != 0;
                 tbl.cols[i].initiallyDeferred = (deferFlags & 2) != 0;
+                tbl.cols[i].hasStoredDomainCheck = (deferFlags & 4) != 0;
             }
         }
         if (hasGenerated) {
@@ -25856,6 +25917,7 @@ DBStatus StorageEngine::alterTableAddCheckConstraint(const std::string& database
     const size_t target = definition.firstReferencedColumn;
     if (target < table.len() && table.cols[target].checkExpr.empty()) {
         table.cols[target].checkExpr = expression;
+        table.cols[target].hasStoredDomainCheck = false;
         table.cols[target].checkConstraintName = name;
         table.cols[target].deferrable = false;
         table.cols[target].initiallyDeferred = false;
@@ -26264,6 +26326,7 @@ DBStatus StorageEngine::alterTableDropConstraint(const std::string& dbname,
     for (size_t i = 0; i < tbl.len(); ++i) {
         if (tbl.cols[i].checkConstraintName == name) {
             tbl.cols[i].checkExpr.clear();
+            tbl.cols[i].hasStoredDomainCheck = false;
             tbl.cols[i].checkConstraintName.clear();
             tbl.cols[i].deferrable = false;
             tbl.cols[i].initiallyDeferred = false;
@@ -30714,14 +30777,21 @@ DBStatus StorageEngine::insertInternal(
         ? std::vector<CompositeIndexInfo>{} : getCompositeIndexes(dbname, tablename);
     std::vector<bool> domainRequired(tbl.len(), false);
     StoredArrayDomainChecks arrayDomainChecks;
+    std::map<size_t, DomainAncestry> copyScalarDomains;
     try {
         for (size_t i = 0; i < tbl.len(); ++i) {
             const auto& column = tbl.cols[i];
             if (column.domainName.empty()) continue;
-            const auto domain = resolveDomainAncestry(dbname, column.domainName);
+            auto domain = resolveDomainAncestry(dbname, column.domainName);
             if (domain.name.empty()) throw DbError("XX001", "column domain metadata is missing");
             domainRequired[i] = domain.notNull;
             arrayDomainChecks.add(i, column, domain, dbname, tablename, this, generatedMetadata);
+            if (copyInput && !column.isArray) {
+                if (column.hasStoredDomainCheck && copyInput->tableChecks &&
+                    copyInput->tableChecks->find(i) == copyInput->tableChecks->end())
+                    copyInput->tableChecks->emplace(i, copyCheckWithoutDomain(column.checkExpr));
+                copyScalarDomains.emplace(i, std::move(domain));
+            }
         }
     } catch (...) {
         unlockTable();
@@ -31395,6 +31465,13 @@ DBStatus StorageEngine::insertInternal(
         }
     };
 
+    std::map<size_t, SqlCell> checkedCopyDomains;
+    const auto checkCopyDomain = [&](size_t i, const std::string& value, bool isNull) -> DomainInputCheck {
+        const auto& column = tbl.cols[i];
+        if (column.isArray)
+            return arrayDomainChecks.checkInput(i, column, value, isNull, dbname, this);
+        return checkScalarDomainInput(*this, dbname, copyScalarDomains.at(i), column, value, isNull);
+    };
     std::vector<bool> convertedCopyInputs;
     try {
         if (copyInput) {
@@ -31464,6 +31541,16 @@ DBStatus StorageEngine::insertInternal(
                         break;
                     }
                 }
+                if (!col.domainName.empty() && supplied != actualValues.end()) {
+                    const bool isNull = actualNullColumns.count(col.dataName) != 0;
+                    if (auto failure = checkCopyDomain(input.index, supplied->second, isNull)) {
+                        if (marker || !copyInput->rejectedField)
+                            throw DbError(failure->state, failure->message);
+                        rejected = field;
+                        break;
+                    }
+                    checkedCopyDomains.emplace(input.index, isNull ? SqlCell{} : SqlCell{supplied->second});
+                }
                 convertedCopyInputs[input.index] = true;
             }
             // Defaults of unlisted columns run even on a row being skipped.
@@ -31477,6 +31564,31 @@ DBStatus StorageEngine::insertInternal(
                 if (rejected && convertedCopyInputs[i]) continue;
                 applyDefaultExpression(tbl.cols[i]);
                 applyAutoIncrement(tbl.cols[i]);
+                const auto& column = tbl.cols[i];
+                if (convertedCopyInputs[i] || column.domainName.empty() ||
+                    !column.generatedExpr.empty()) continue;
+                const auto value = actualValues.find(column.dataName);
+                if (value == actualValues.end()) {
+                    // Unlisted columns without defaults are supplied as NULL,
+                    // without invoking the domain input function.
+                    domainRequired[i] = false;
+                    actualValues.emplace(column.dataName, "");
+                    actualNullColumns.insert(column.dataName);
+                    checkedCopyDomains.emplace(i, std::nullopt);
+                    continue;
+                }
+                const bool isNull = actualNullColumns.count(column.dataName) != 0;
+                if (!isNull) {
+                    const auto status = convertCopyField({i, 0}, column, value->second, true);
+                    if (status != DBStatus::OK) {
+                        unlockTable();
+                        return status;
+                    }
+                }
+                if (auto failure = checkCopyDomain(i, value->second, isNull))
+                    throw DbError(failure->state, failure->message);
+                checkedCopyDomains.emplace(i, isNull ? SqlCell{} : SqlCell{value->second});
+                convertedCopyInputs[i] = true;
             }
             if (rejected) {
                 unlockTable();
@@ -31683,7 +31795,18 @@ DBStatus StorageEngine::insertInternal(
 
     try {
         arrayDomainChecks.validate(tbl, actualValues, actualNullColumns,
-            dbname, this, nullptr, &convertedDomains);
+            dbname, this, nullptr, &convertedDomains, &checkedCopyDomains);
+        for (const auto& [index, domain] : copyScalarDomains) {
+            const auto& column = tbl.cols[index];
+            const auto value = actualValues.find(column.dataName);
+            if (value == actualValues.end()) continue;
+            const bool isNull = actualNullColumns.count(column.dataName) != 0;
+            const auto checked = checkedCopyDomains.find(index);
+            if (checked != checkedCopyDomains.end() &&
+                (isNull ? !checked->second : checked->second == value->second)) continue;
+            if (auto failure = checkScalarDomainInput(*this, dbname, domain, column, value->second, isNull))
+                throw DbError(failure->state, failure->message);
+        }
     } catch (...) {
         unlockTable();
         throw;
@@ -31746,7 +31869,12 @@ DBStatus StorageEngine::insertInternal(
     std::vector<const CheckConstraint*> deferredAdditionalChecks;
     for (size_t i = 0; i < tbl.len(); ++i) {
         const Column& col = tbl.cols[i];
-        if (col.checkExpr.empty()) continue;
+        const std::string* expression = &col.checkExpr;
+        if (copyInput && copyInput->tableChecks && !col.deferrable) {
+            const auto residual = copyInput->tableChecks->find(i);
+            if (residual != copyInput->tableChecks->end()) expression = &residual->second;
+        }
+        if (expression->empty()) continue;
         const bool deferred = transactionContext().inTransaction &&
             col.deferrable && isConstraintDeferred(
                 col.checkConstraintName, col.initiallyDeferred);
@@ -31756,7 +31884,7 @@ DBStatus StorageEngine::insertInternal(
         }
         std::string err;
         bool accepted;
-        try {accepted=generatedCheckInput(col.checkExpr,tbl,actualValues,actualNullColumns,typeHints,dbname,this,&err,generatedMetadata.get());}
+        try {accepted=generatedCheckInput(*expression,tbl,actualValues,actualNullColumns,typeHints,dbname,this,&err,generatedMetadata.get());}
         catch(...){unlockTable();throw;}
         if (!accepted) {
             unlockTable();

@@ -64,6 +64,7 @@ struct Column {
     // Stable catalog identity for SQL identity sequences. Zero preserves the
     // legacy native/schema counter; never infer a sequence from its name.
     uint32_t identitySequenceOid = 0;
+    bool hasStoredDomainCheck = false; // CHECK contains the domain expression copied at DDL time
 
 
     void print() const;

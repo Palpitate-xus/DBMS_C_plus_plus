@@ -1,34 +1,40 @@
 # 更新日志
 
 <details>
-<summary>导入时可以跳过无法转换的行 · 2026-11-22</summary>
+<summary>导入时可以跳过数值超出自定义范围的行 · 2026-11-22</summary>
 
-例如，数量列误填了文字时，可以跳过这一行。也可以设置上限，坏行太多时整批撤销。
+例如，给数量定义了「必须为正数」的类型后，可以设置跳过数量为负的行。如果遇到重复的订单号，整批订单仍会撤销。
+
+[用法](docs/MANUAL.md#用客户端复制数据) · [测试报告](docs/test-report.md#copy-domain-input-20261122) · [性能报告](docs/performance-report-2026-10-30.md#copy-domain-input-cost-20261122)
+
+</details>
+
+<details>
+<summary>数字列误填文字时，导入可以继续 · 2026-11-22</summary>
+
+例如，把「三件」填进整数列时，可以只跳过这一行。也可以设定最多跳过多少行，超出上限就撤销整批导入。
 
 [用法](docs/MANUAL.md#用客户端复制数据) · [测试报告](docs/test-report.md#copy-ignore-bad-rows-20261122) · [性能报告](docs/performance-report-2026-10-30.md#copy-ignore-bad-rows-cost-20261122)
 
 </details>
 
 <details>
-<summary>修复导入时自动取号的顺序 · 2026-11-22</summary>
+<summary>导入失败后，已取过的编号不会重用 · 2026-11-22</summary>
 
-如果一行先读到自动编号，再读到无法转换的字段，数据库会记住已经取过的编号，并撤销这一批导入的记录。
+例如，导入订单时先生成了订单号 40，随后因数量填错而撤销这批订单。下次导入会从 41 继续。
 
 [用法](docs/MANUAL.md#用客户端复制数据) · [测试报告](docs/test-report.md#copy-default-evaluation-order-20261122) · [性能报告](docs/performance-report-2026-10-30.md#copy-default-evaluation-order-cost-20261122)
 
 </details>
 
 <details>
-<summary>导入旧数据时可以保留原来的编号 · 2026-11-22</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-22 · 导入旧数据时可以保留原来的编号
 
 例如，迁移订单时可以保留旧订单号。文件里省略编号时，数据库可以自动生成。
 
 [用法](docs/MANUAL.md#用客户端复制数据) · [测试报告](docs/test-report.md#copy-identity-input-20261122) · [性能报告](docs/performance-report-2026-10-30.md#copy-identity-input-cost-20261122)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-22 · 导入数据时可以使用列的默认值
 
