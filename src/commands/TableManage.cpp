@@ -41057,7 +41057,7 @@ decltype(auto) StorageEngine::withQueryBindingMetadata(const std::string& dbname
                         {"pg_attrdef", default_catalog::descriptor()},
                         {"pg_depend", default_catalog::dependencyDescriptor()},
                         {"pg_namespace", ownedNamespaceCatalogDescriptor()},
-                        {"pg_settings", {{"name","text"},{"setting","text"},{"unit","text"}}},
+                        {"pg_settings", system_catalog::settingsDescriptor()},
                         {"pg_stat_activity", {{"pid","integer"},{"datname","name"},{"usename","name"},{"state","text"},{"query","text"}}}
                     };
                     const auto found = virtualTables.find(requested.name);

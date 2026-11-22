@@ -2659,6 +2659,21 @@ host    all       all       0.0.0.0/0       reject
 
 ## 25. GUC 参数配置
 
+### 查询当前设置
+
+`pg_catalog.pg_settings` 提供设置名称 `name`、当前值 `setting` 和单位 `unit`。这三列都可以用于筛选、表达式、排序及与其他表连接。设置值以文本返回，需要按数值比较时可显式转换类型。
+
+```sql
+SELECT name, setting::integer AS milliseconds
+FROM pg_catalog.pg_settings
+WHERE name IN ('statement_timeout', 'lock_timeout')
+ORDER BY milliseconds;
+```
+
+查询读取当前连接的有效设置，包括事务内临时生效的 `SET LOCAL`。仍有部分 PostgreSQL 字段和查询方式待支持，例如 `category`、`SELECT *` 和带 `GROUP BY` 的聚合。[兼容范围](compatibility-contract.md#pg-settings-expressions-contract)
+
+### 修改设置
+
 ```sql
 -- 当前连接参数
 SET timezone = 'Asia/Shanghai';

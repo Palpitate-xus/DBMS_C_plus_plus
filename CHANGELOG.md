@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>可以用 SQL 比较数据库的当前设置 · 2026-11-22</summary>
+
+例如，把两种超时设置列在一起，再按毫秒数排序。
+
+[用法](docs/MANUAL.md#查询当前设置) · [测试报告](docs/test-report.md#pg-settings-expressions-20261122) · [性能报告](docs/performance-report-2026-10-30.md#pg-settings-expressions-cost-20261122)
+
+</details>
+
+<details>
 <summary>改名后，订单号会接着生成 · 2026-11-22</summary>
 
 例如，订单号已经发到 42。把订单表所在的「销售」改名为「销售归档」后，下一笔订单仍从 43 开始。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>表改名或换位置后，原来的报表还能用 · 2026-11-22</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-22 · 表改名或换位置后，原来的报表还能用
 
 例如，订单表从销售区移到归档区后，原来的报表仍会查询这张表。即使用旧名字新建一张表，报表也会继续读原来的订单。
 
 [用法](docs/MANUAL.md#9-视图与物化视图) · [测试报告](docs/test-report.md#view-table-rename-20261122) · [性能报告](docs/performance-report-2026-10-30.md#view-table-rename-cost-20261122)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-22 · 新建的报表会记住用的是哪张表
 

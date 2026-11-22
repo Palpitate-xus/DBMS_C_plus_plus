@@ -19,6 +19,13 @@ cmake --build build/cmake --target dbms_main --parallel 2
 ## 最近更新
 
 <details>
+<summary>可以用 SQL 比较数据库的当前设置 · 2026-11-22</summary>
+
+例如，把两种超时设置列在一起，再按毫秒数排序。
+
+</details>
+
+<details>
 <summary>改名后，订单号会接着生成 · 2026-11-22</summary>
 
 例如，订单号已经发到 42。把订单表所在的「销售」改名为「销售归档」后，下一笔订单仍从 43 开始。
@@ -29,13 +36,6 @@ cmake --build build/cmake --target dbms_main --parallel 2
 <summary>可以改一组表共用的名称前缀 · 2026-11-22</summary>
 
 例如，把 `sales` 改成 `sales_archive` 后，可以用 `sales_archive.orders` 查原来的订单表，之前建好的报表也能继续使用。
-
-</details>
-
-<details>
-<summary>表改名或换位置后，原来的报表还能用 · 2026-11-22</summary>
-
-例如，订单表从销售区移到归档区后，原来的报表仍会查询这张表。即使用旧名字新建一张表，报表也会继续读原来的订单。
 
 </details>
 

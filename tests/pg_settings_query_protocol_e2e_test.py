@@ -3,7 +3,6 @@
 
 import importlib.util
 from pathlib import Path
-import socket
 import struct
 
 
@@ -36,6 +35,7 @@ def main():
         return result
 
     try:
+        query("SET work_mem TO '4099kB'")
         for extended in (False, True):
             result = query(
                 "SELECT name, setting, unit FROM pg_catalog.pg_settings "
@@ -55,7 +55,15 @@ def main():
                 extended, headers=["setting"], types=[25])
             assert result[0] == [], result
 
+            result = query(
+                "SELECT setting::integer + 1 AS kilobytes FROM pg_settings "
+                "WHERE name = 'work_mem'",
+                extended, headers=["kilobytes"], types=[23])
+            assert result[0] == [["4100"]], result
+
             query("SELECT * FROM pg_settings", extended, state="0A000")
+            query("SELECT s.* FROM pg_catalog.pg_settings AS s", extended,
+                  state="0A000")
             query("SELECT category FROM pg_catalog.pg_settings", extended,
                   state="0A000")
             query("SELECT not_a_pg_settings_column FROM pg_settings", extended,
@@ -70,6 +78,9 @@ def main():
             assert result[1] is None, (sql, result)
         result = query("SELECT * FROM pg_settings", headers=["id"], types=[23])
         assert result[0] == [["23"]], result
+        result = query("SELECT setting::integer FROM pg_catalog.pg_settings "
+                       "WHERE name = 'work_mem'", extended=True)
+        assert result[0] == [["4099"]] and result[5] == [23], result
 
         for sql in (
                 "CREATE TABLE pg_settings_view_source (id INTEGER)",

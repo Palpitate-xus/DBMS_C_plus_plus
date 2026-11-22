@@ -2,6 +2,13 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="pg-settings-expressions-contract"></a>
+## 2026-11-22 · 查询当前设置
+
+`pg_catalog.pg_settings` 的 `name`、`setting` 和 `unit` 三列可用于普通查询。已验证 `CASE`、类型转换、数值排序、`DISTINCT`、`COUNT(*)`、列别名、派生表及与用户表连接。没有单位的设置返回 SQL `NULL`，`SET LOCAL` 与保存点回滚会反映在查询结果中。
+
+`SELECT *`、未实现的设置列以及受测的 `GROUP BY` 聚合返回 `0A000`。设置清单及字段仍是 PostgreSQL 18.6 的子集。[测试范围](test-report.md#pg-settings-expressions-20261122)
+
 <a id="schema-rename-contract"></a>
 ## 2026-11-22 · schema 改名
 

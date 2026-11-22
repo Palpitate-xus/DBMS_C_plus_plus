@@ -2,6 +2,18 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-22 query the implemented pg_settings columns using bound SQL",
+      "gap_ids": ["OPS-02", "CAT-03", "QRY-03", "PROTO-02"],
+      "status": "partial",
+      "evidence": ["src/main.cpp", "src/catalog/SystemCatalogRows.h", "src/parser/query_binding.cpp", "src/network/NetworkServer.cpp", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/compat/cases/pg_settings_expressions.sql", "tests/pg_settings_query_protocol_e2e_test.py", "tests/ordinary_case_prepared_protocol_e2e_test.py", "tests/timeout_settings_protocol_e2e_test.py"],
+      "verification": [
+        "Normal bound projections, casts, filters, joins and ORDER BY use the existing typed settings rows.",
+        "Description returns real output names and types without reading current values. Transaction-local values are visible and rollback restores their prior values.",
+        "The full settings schema and setting inventory, and the tested grouped aggregate, remain open."
+      ]
+    },
+    {
       "issue": "2026-11-22 preserve sequences when renaming user schemas",
       "gap_ids": ["CAT-02", "CAT-07", "CAT-15", "SQL-11", "PROTO-02", "WAL-08"],
       "status": "partial",

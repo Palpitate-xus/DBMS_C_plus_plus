@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-22 · 查询当前设置
+
+`pg_settings` 原有三列由普通查询引擎处理。扩展协议从实际绑定读取列名和类型，普通表同名时继续按项目已有规则选择来源。受测的连接、表达式和排序已对齐 PostgreSQL，带 `GROUP BY` 的聚合、其余设置列和值清单仍有差距。`OPS-02`、`CAT-03`、`QRY-03` 与 `PROTO-02` 保持部分实现。[对照结果](test-report.md#pg-settings-expressions-20261122)
+
 ## 2026-11-22 · 含表、视图和序列的 schema 改名
 
 `ALTER SCHEMA ... RENAME TO` 支持空 schema 及只含受支持表、视图、索引和序列的用户 schema。目录编号保留，数据文件、外键、普通视图、序列所有权和授权记录一起更新或恢复。受测的自增列继续沿用原来的序列。物化视图、自定义类型、例程和完整的权限模型仍有差距。`P0-03`、`P0-04`、`CAT-02`、`CAT-07`、`CAT-15` 与 `SQL-11` 保持部分实现。[表与视图测试](test-report.md#schema-rename-20261122) · [序列测试](test-report.md#schema-rename-sequences-20261122)

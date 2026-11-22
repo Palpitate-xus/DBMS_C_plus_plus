@@ -20151,159 +20151,6 @@ static bool executePgTypeQuery(const string& rawSql, const Session& session) {
     return false;
 }
 
-static bool executePgSettingsQuery(const string& rawSql,
-                                   const Session& session) {
-    dbms::SQLParser parser;
-    const auto parsed = parser.parse(rawSql);
-    const auto* select = parsed.success
-        ? dynamic_cast<const dbms::SelectStmt*>(parsed.stmt.get()) : nullptr;
-    if (!select || !select->fromClause ||
-        select->fromClause->type != dbms::FromItem::Type::Table) {
-        throw dbms::DbError("42601", "invalid pg_settings query");
-    }
-    if (select->distinct || !select->groupBy.empty() ||
-        !select->groupByElems.empty() || select->having ||
-        select->setOp != dbms::SetOp::None || !select->locking.empty() ||
-        !select->distinctOn.empty() || !select->windowDefs.empty() ||
-        select->withTies || !select->orderBy.empty()) {
-        throw dbms::DbError("0A000", "complex pg_settings query is not supported");
-    }
-
-    const string qualifier = select->fromClause->alias.empty()
-        ? "pg_settings" : decodeQuotedIdentifier(select->fromClause->alias);
-    const vector<string> supported = {"name", "setting", "unit"};
-    map<string, string> hints;
-    for (const auto& column : supported) {
-        hints[column] = "text";
-        hints[qualifier + "." + column] = "text";
-        if (select->fromClause->alias.empty())
-            hints["pg_catalog.pg_settings." + column] = "text";
-    }
-    static const set<string> kPg18SettingsColumns = {
-        "name", "setting", "unit", "category", "short_desc", "extra_desc",
-        "context", "vartype", "source", "min_val", "max_val", "enumvals",
-        "boot_val", "reset_val", "sourcefile", "sourceline",
-        "pending_restart"};
-    function<void(const dbms::Expr*)> validate =
-        [&](const dbms::Expr* expression) {
-            if (!expression) return;
-            if (const auto* column =
-                    dynamic_cast<const dbms::ColumnRefExpr*>(expression)) {
-                const bool validQualifier = column->table.empty() ||
-                    (column->table == qualifier &&
-                     (column->schema.empty() ||
-                      (select->fromClause->alias.empty() &&
-                       column->schema == "pg_catalog")));
-                if (!validQualifier)
-                    throw dbms::DbError("42P01", "missing FROM-clause entry");
-                if (hints.count(column->column)) return;
-                if (kPg18SettingsColumns.count(column->column))
-                    throw dbms::DbError(
-                        "0A000", "pg_settings column \"" + column->column +
-                                     "\" is not implemented");
-                throw dbms::DbError(
-                    "42703", "column does not exist: " + column->column);
-            }
-            if (dynamic_cast<const dbms::LiteralExpr*>(expression)) return;
-            if (const auto* unary =
-                    dynamic_cast<const dbms::UnaryOpExpr*>(expression)) {
-                validate(unary->operand.get());
-                return;
-            }
-            if (const auto* binary =
-                    dynamic_cast<const dbms::BinaryOpExpr*>(expression)) {
-                validate(binary->left.get());
-                validate(binary->right.get());
-                return;
-            }
-            if (const auto* cast =
-                    dynamic_cast<const dbms::CastExpr*>(expression)) {
-                validate(cast->operand.get());
-                return;
-            }
-            throw dbms::DbError("0A000", "pg_settings expression is not supported");
-        };
-
-    vector<const dbms::ColumnRefExpr*> projection;
-    vector<string> headers;
-    for (const auto& item : select->selectList) {
-        const auto* column =
-            dynamic_cast<const dbms::ColumnRefExpr*>(item.expr.get());
-        if (!column || column->column == "*") {
-            throw dbms::DbError(
-                "0A000", "SELECT * requires the complete pg_settings schema");
-        }
-        validate(item.expr.get());
-        projection.push_back(column);
-        headers.push_back(item.alias.empty()
-            ? column->column : decodeQuotedIdentifier(item.alias));
-    }
-    if (projection.empty())
-        throw dbms::DbError("42601", "pg_settings query has no projection");
-    validate(select->whereClause.get());
-    if (select->whereClause) {
-        const string predicateType = dbms::ExprHelper::inferResultType(
-            select->whereClause->toString(), hints);
-        if (predicateType != "boolean" && predicateType != "bool")
-            throw dbms::DbError("42804", "argument of WHERE must be type boolean");
-    }
-
-    const auto settings = preparedPgSettingsRows(session);
-    dbms::ExprEvaluator evaluator;
-    evaluator.setCurrentDB(session.currentDB);
-    vector<vector<dbms::ExprValue>> results;
-    for (const auto& values : settings) {
-        dbms::RowContext context;
-        for (size_t i = 0; i < supported.size(); ++i) {
-            context.set(supported[i], values[i]);
-            context.set(qualifier + "." + supported[i], values[i]);
-            if (select->fromClause->alias.empty())
-                context.set("pg_catalog.pg_settings." + supported[i], values[i]);
-        }
-        if (select->whereClause) {
-            const auto predicate = evaluator.eval(select->whereClause.get(), context);
-            if (!predicate.isNull && predicate.typeName != "boolean" &&
-                predicate.typeName != "bool") {
-                throw dbms::DbError("42804", "argument of WHERE must be type boolean");
-            }
-            if (predicate.isNull || !predicate.asBool()) continue;
-        }
-        vector<dbms::ExprValue> row;
-        for (const auto* column : projection)
-            row.push_back(values[column->column == "name" ? 0 :
-                                 column->column == "setting" ? 1 : 2]);
-        results.push_back(std::move(row));
-    }
-
-    const size_t first = min(select->offset.value_or(0), results.size());
-    const size_t kept = min(select->limit.value_or(results.size()),
-                            results.size() - first);
-    vector<vector<string>> rows;
-    vector<vector<bool>> nulls;
-    for (size_t i = first; i < first + kept; ++i) {
-        vector<string> row;
-        vector<bool> bitmap;
-        for (const auto& value : results[i]) {
-            row.push_back(value.value);
-            bitmap.push_back(value.isNull);
-        }
-        rows.push_back(std::move(row));
-        nulls.push_back(std::move(bitmap));
-    }
-    publishStructuredUtilityResult(headers,
-                                    vector<string>(headers.size(), "text"),
-                                    rows, nulls,
-                                    "SELECT " + to_string(rows.size()));
-    for (const auto& header : headers) cout << renderLegacyHeader(header) << ' ';
-    cout << '\n';
-    for (size_t i = 0; i < rows.size(); ++i) {
-        for (size_t j = 0; j < rows[i].size(); ++j)
-            cout << (nulls[i][j] ? "NULL" : rows[i][j]) << ' ';
-        cout << '\n';
-    }
-    return false;
-}
-
 // Execute the available pg_database columns as typed rows.  The old renderer
 // ignored SELECT/WHERE entirely, making catalog queries silently misleading.
 static bool executePgDatabaseQuery(const string& rawSql,
@@ -21004,7 +20851,7 @@ static bool handlePreparedQualifiedCatalogQuery(const string& rawSql,Session& se
     dbms::CatalogManager::QualifiedName name;
     if(!dbms::CatalogManager::parseQualifiedName(select->fromClause->tableName,name,true) ||
        name.schema!="pg_catalog")return false;
-    static const set<string> owned={"pg_class","pg_settings","pg_stat_activity","pg_database","pg_type"};
+    static const set<string> owned={"pg_class","pg_stat_activity","pg_database","pg_type"};
     if(!owned.count(name.name))return false;
     // These partial legacy schemas do not own PG ordinal alias metadata.
     // In particular datname/pid are not PG's first catalog columns. Never
@@ -21013,7 +20860,6 @@ static bool handlePreparedQualifiedCatalogQuery(const string& rawSql,Session& se
         throw dbms::DbError("0A000","catalog column alias lists require the complete source schema");
     handled=true;
     if(name.name=="pg_class")return executePgClassQuery(rawSql,session,session.currentDB);
-    if(name.name=="pg_settings")return executePgSettingsQuery(rawSql,session);
     if(name.name=="pg_stat_activity")return executePgStatActivityQuery(rawSql,session);
     if(name.name=="pg_database")return executePgDatabaseQuery(rawSql,session);
     return executePgTypeQuery(rawSql,session);
@@ -23252,11 +23098,7 @@ static bool handlePreparedPgSequenceCatalogQuery(const string& rawSql,Session& s
 
 static bool handlePreparedOwnedCatalogQuery(const string& rawSql,Session& session,bool& handled) {
     handled=false;
-    const auto contains=[&](const char* name) {
-        return std::search(rawSql.begin(),rawSql.end(),name,name+std::char_traits<char>::length(name),
-            [](unsigned char c,char e){return (c>='A'&&c<='Z'?c+('a'-'A'):c)==e;})!=rawSql.end();
-    };
-    if(!contains("pg_class") && !contains("pg_attribute") && !contains("pg_type") && !contains("pg_attrdef") && !contains("pg_depend"))return false;
+    if (!dbms::mentionsPgOwnedCatalog(rawSql)) return false;
     dbms::SQLParser parser;const auto parsed=parser.parseForBinding(rawSql);
     if(!parsed.success || !dynamic_cast<const dbms::SelectStmt*>(parsed.stmt.get()) ||
        !dbms::pgOwnedCatalogSourceCandidate(parsed.stmt.get()))return false;
@@ -33491,18 +33333,13 @@ static bool executeInternal(const string& rawSql, Session& s,
              (queryDb == s.currentDB &&
               !g_engine.tableExists(queryDb, tname) &&
               !g_engine.viewExists(queryDb, tname)));
-        const bool virtualPgSettings = tname == "pg_settings" &&
-            (queryDb == "pg_catalog" ||
-             (queryDb == s.currentDB &&
-              !g_engine.tableExists(queryDb, tname) &&
-              !g_engine.viewExists(queryDb, tname)));
         const bool virtualPgStatActivity = tname == "pg_stat_activity" &&
             (queryDb == "pg_catalog" ||
              (queryDb == s.currentDB &&
               !g_engine.tableExists(queryDb, tname) &&
               !g_engine.viewExists(queryDb, tname)));
         // pg_stat_* virtual tables
-        if (tname == "pg_stat_database" || tname == "pg_stat_tables" || tname == "pg_stat_statements" || tname == "pg_seclabels" || tname == "pg_buffercache" || tname == "pg_locks" || tname == "pg_stat_wait_events" || virtualPgStatActivity || virtualPgDatabase || virtualPgSettings || tname == "pg_tables" || tname == "pg_views" || tname == "pg_indexes" || virtualPgClass) {
+        if (tname == "pg_stat_database" || tname == "pg_stat_tables" || tname == "pg_stat_statements" || tname == "pg_seclabels" || tname == "pg_buffercache" || tname == "pg_locks" || tname == "pg_stat_wait_events" || virtualPgStatActivity || virtualPgDatabase || tname == "pg_tables" || tname == "pg_views" || tname == "pg_indexes" || virtualPgClass) {
             auto bpStats = g_engine.getBufferPoolStats();
             const std::string catalogDb = queryDb == "pg_catalog"
                 ? s.currentDB : queryDb;
@@ -33661,8 +33498,6 @@ static bool executeInternal(const string& rawSql, Session& s,
                         }
                     }
                 }
-            } else if (tname == "pg_settings") {
-                return executePgSettingsQuery(effectiveRawSql, s);
             } else if (virtualPgClass) {
                 return executePgClassQuery(effectiveRawSql, s, catalogDb);
             }

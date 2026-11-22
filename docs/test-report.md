@@ -2,6 +2,19 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="pg-settings-expressions-20261122"></a>
+## 2026-11-22 · 用 SQL 查询当前设置
+
+普通协议和扩展协议各执行 39 条语句。与 PostgreSQL 18.6 对照，基线 `d4ecc910` 有 39 条一致，新版有 76 条一致。对照核对返回行、列名、类型编号、完成标签、错误码、消息顺序和事务状态。用例覆盖 `CASE`、数值转换、排序、去重、计数、外连接、子查询和列别名，以及 `SET LOCAL` 在保存点和事务回滚后的值。两条剩余差异来自同一条 `GROUP BY` 聚合。本项目返回 `0A000`，PostgreSQL 返回两个分组。[对照 SQL](../tests/compat/cases/pg_settings_expressions.sql)
+
+另以带文本参数的命名语句查询 `work_mem`。每次更改设置后重新绑定，二进制结果按顺序返回整数 4099 和 8195。PostgreSQL 与本项目在该用例的完整协议字节一致，SHA-256 为 `79d3161d9808fe2efa1e173f337a316aa34f699e19aea9ac1731014f31851dbd`。
+
+从基线创建的数据目录启动新版，完成 16 个恢复步骤。用用户表连接设置视图，分别在未提交和已提交的插入后强制结束进程。重启后仅保留已提交的行，设置恢复为新连接的默认值，本次连接临时设置的值没有持久化。恢复记录 SHA-256 为 `169a244f6fa588ef26efe8574afe1f037a51c462a39b188629f3d7eb3ebc3fb2`。
+
+此前 490 条既有 SQL 对照响应及 104 条序列和 schema 改名响应与基线逐条一致。设置视图、普通 `CASE`、设置启动与事务回归、类型目录、完整协议、导入导出和 schema 改名专项通过。[设置测试](../tests/pg_settings_query_protocol_e2e_test.py) · [普通 CASE](../tests/ordinary_case_prepared_protocol_e2e_test.py) · [超时设置](../tests/timeout_settings_protocol_e2e_test.py)
+
+新版 SHA-256 为 `0e12a08709122fe9eecf8bad35105cf6b598ad2b808bcdd1dc3849d9bc5b6286`。PostgreSQL、基线和新版的协议记录摘要分别为 `9a7c277682e0dec15622b36f4e2c30ffbff4ecbf9cb194ab0f148e780bd37f62`、`4054a9379d43626921ad13f923f5cd4d526575c46f156fa1fc96f6fbbc2bb647` 和 `c5fe080d2baf18e2b001cdcd13e72ef8fab62f4cfd46ea5e5f0ab798d8b196f0`。[性能报告](performance-report-2026-10-30.md#pg-settings-expressions-cost-20261122)
+
 <a id="schema-rename-sequences-20261122"></a>
 ## 2026-11-22 · schema 改名后继续使用序列
 

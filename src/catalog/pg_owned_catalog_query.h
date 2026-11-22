@@ -4,8 +4,28 @@
 #include "parser/query_binding.h"
 #include "common/DbError.h"
 #include <functional>
+#include <string_view>
 
 namespace dbms {
+inline constexpr std::string_view pgOwnedCatalogs[] = {
+    "pg_class", "pg_attribute", "pg_type", "pg_attrdef", "pg_depend", "pg_settings"};
+
+inline bool isPgOwnedCatalog(std::string_view name) {
+    return std::find(std::begin(pgOwnedCatalogs), std::end(pgOwnedCatalogs), name) !=
+           std::end(pgOwnedCatalogs);
+}
+
+// This is a cheap prefilter for common statements. Binding determines identity.
+inline bool mentionsPgOwnedCatalog(std::string_view sql) {
+    return std::any_of(std::begin(pgOwnedCatalogs), std::end(pgOwnedCatalogs),
+        [&](std::string_view name) {
+            return std::search(sql.begin(), sql.end(), name.begin(), name.end(),
+                [](unsigned char input, char expected) {
+                    return (input >= 'A' && input <= 'Z' ? input + ('a' - 'A') : input) == expected;
+                }) != sql.end();
+        });
+}
+
 // A metadata-only admission probe for FROM trees. CTE names/aliases are not
 // source identities: the caller must confirm the actual bound sourceRanges.
 inline bool pgOwnedCatalogSourceCandidate(const Stmt* root) {
@@ -17,7 +37,7 @@ inline bool pgOwnedCatalogSourceCandidate(const Stmt* root) {
         if(item->type==FromItem::Type::Table) {
             CatalogManager::QualifiedName name;
             return CatalogManager::parseQualifiedName(item->tableName,name,true) &&
-                (name.name=="pg_class" || name.name=="pg_attribute" || name.name=="pg_type" || name.name=="pg_attrdef" || name.name=="pg_depend") && (name.schema.empty() || name.schema=="pg_catalog");
+                isPgOwnedCatalog(name.name) && (name.schema.empty() || name.schema=="pg_catalog");
         }
         return statement(item->subquery.get(),depth+1) ||
             source(item->left.get(),depth+1) || source(item->right.get(),depth+1);
@@ -40,7 +60,7 @@ inline bool pgOwnedCatalogSourceCandidate(const Stmt* root) {
 
 inline bool ownsPgOwnedCatalogSource(const PreparedQuery& query) {
     for(const auto& range:query.sourceRanges)
-        if(range.relationSchema=="pg_catalog" && (range.relationName=="pg_class" || range.relationName=="pg_attribute" || range.relationName=="pg_type" || range.relationName=="pg_attrdef" || range.relationName=="pg_depend") &&
+        if(range.relationSchema=="pg_catalog" && isPgOwnedCatalog(range.relationName) &&
            !range.cteStatement && !range.viewQuery)return true;
     return false;
 }

@@ -4,6 +4,33 @@
 
 > 复核发现，几组早期 COPY 计时在每个对照场景中使用了固定的执行顺序。耗时差可能包含顺序影响。这项问题涉及默认值求值、按列查找、默认值标记、短 CSV 导出和短查询导出的配对计时。[默认值求值](#copy-default-evaluation-order-cost-20261122) · [按列查找](#copy-identity-input-cost-20261122) · [默认值标记](#copy-default-marker-cost-20261122) · [CSV 导出](#copy-csv-out-cost-20261122) · [查询导出](#copy-query-stdout-cost-20261122)
 
+<a id="pg-settings-expressions-cost-20261122"></a>
+## 2026-11-22 · 设置查询耗时
+
+基线为 `d4ecc910`。两版用 CMake、C++17 和 `-O2` 构建，每个进程从同一份内存文件系统中的数据目录副本启动。为复测，先创建 128 行的整数主键表 `copy_export_profile(id, marker)`，其中 `marker = id * 13 - 301`。启动后设 `work_mem` 为 `4099kB`。查询设置值、空结果和普通表主键作为新旧对照。增加仅在新版成功的数值表达式查询作为耗时参考。
+
+```sql
+SELECT setting FROM pg_catalog.pg_settings WHERE name = 'work_mem';
+SELECT setting FROM pg_settings WHERE name = 'no_such_setting';
+SELECT marker FROM copy_export_profile WHERE id = 10;
+SELECT setting::integer + 1 AS usage FROM pg_settings WHERE name = 'work_mem';
+```
+
+普通协议发送一条查询，扩展协议每次执行 `Parse`、`Bind`、`Describe`、`Execute`、`Sync`。客户端与服务端分别绑到 CPU 21 和 22，并交换位置。每个位置做两对新旧进程，交换运行顺序。每个查询和协议组合在预热后计时 40 次，两轮共 4480 次。计时从发出请求到收到就绪消息，对照查询在两版和两轮的响应字节均一致。耗时为每个进程的单次平均值取中位数，变化百分比为每对新旧测量先求变化再取中位数。
+
+| 查询 | 协议 | 首轮耗时基线 → 新版 | 复测耗时基线 → 新版 | 两轮耗时变化 | 两轮服务端 CPU 变化 |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 查 `work_mem` | 普通 | 3.36 → 3.82 ms | 3.56 → 3.79 ms | +13.72% / +8.91% | +14.03% / +9.52% |
+| 查 `work_mem` | 扩展 | 5.00 → 4.99 ms | 5.13 → 4.93 ms | +2.15% / −3.21% | +2.17% / −3.31% |
+| 查不存在的设置 | 普通 | 3.50 → 3.44 ms | 3.54 → 3.50 ms | −1.37% / −0.38% | −1.14% / +0.64% |
+| 查不存在的设置 | 扩展 | 5.31 → 5.11 ms | 5.19 → 5.11 ms | −2.99% / −1.37% | −2.69% / −1.11% |
+| 查普通表主键 | 普通 | 3.22 → 3.20 ms | 3.31 → 3.33 ms | −0.66% / +0.82% | −0.53% / +0.80% |
+| 查普通表主键 | 扩展 | 5.52 → 5.31 ms | 5.30 → 5.20 ms | −3.05% / −1.70% | −3.10% / −1.27% |
+
+含数值计算的设置查询，新版普通协议耗时为 3.95 和 4.03 ms，扩展协议为 5.84 和 5.78 ms。基线返回 `0A000`。新版本对直接指定 `pg_catalog.pg_settings` 的普通列查询复用执行时确定的列信息，省去一次提前绑定。单项设置命中的普通查询在两轮都变慢，扩展查询变化方向不同。
+
+原始计时记录留在本机，两轮 SHA-256 分别为 `3d2a78f03248d3d76ccf5761dfcf7cab6dd38daebdea298232262e76a53ada8e` 和 `9cf1e2e1e89bff284e325bf79827a9e7c24e477263cf56533dd611f2b48780f3`。[正确性与恢复](test-report.md#pg-settings-expressions-20261122)
+
 <a id="schema-rename-sequences-cost-20261122"></a>
 ## 2026-11-22 · 含序列的 schema 改名耗时
 

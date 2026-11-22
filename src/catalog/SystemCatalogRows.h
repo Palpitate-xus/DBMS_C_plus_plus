@@ -67,10 +67,30 @@ inline const QueryRowDescriptor& attributeDescriptor() {
         "attislocal","attinhcount","attcollation","attstattarget"});
     return fields;
 }
+inline const QueryRowDescriptor& settingsDescriptor() {
+    static const QueryRowDescriptor fields = [] {
+        QueryRowDescriptor columns;
+        for (const auto* name : {"name", "setting", "unit"}) {
+            QueryOutputColumn field{name, "text"};
+            field.typeOid = 25;
+            field.physicalAttributeNumber = static_cast<int16_t>(columns.size() + 1);
+            columns.push_back(std::move(field));
+        }
+        return columns;
+    }();
+    return fields;
+}
 inline bool unownedColumn(const std::string& relation,const QueryRowDescriptor& owned,const std::string& name) {
     if(std::any_of(owned.begin(),owned.end(),[&](const auto& f){return f.name==name;}))return false;
     const auto contains=[&](const auto& fields){return std::any_of(fields.begin(),fields.end(),
         [&](const auto& field){return name==field.name;});};
+    if (relation == "pg_settings") {
+        static const std::set<std::string_view> missing = {
+            "category", "short_desc", "extra_desc", "context", "vartype", "source",
+            "min_val", "max_val", "enumvals", "boot_val", "reset_val", "sourcefile",
+            "sourceline", "pending_restart"};
+        return missing.count(name) != 0;
+    }
     return relation=="pg_class"?contains(class_catalog::fields):
         relation=="pg_attribute"?contains(attributeFields):relation=="pg_type"?contains(typeFields):false;
 }

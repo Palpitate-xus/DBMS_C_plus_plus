@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-22 · 用 SQL 查询当前设置
+
+PostgreSQL 18.6 的 `pg_settings` 是一个普通视图，数据来自 `pg_show_all_settings()`，因此查询可以使用表达式、筛选、分组和连接。SQLite 把只读 PRAGMA 的结果提供为表函数。DuckDB 的 `duckdb_settings()` 也返回可以用普通 SQL 查询的行。[PostgreSQL 系统视图](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/catalog/system_views.sql) · [SQLite 表函数](https://www.sqlite.org/pragma.html#pragma_functions) · [DuckDB 设置表函数](https://www.duckdb.org/docs/current/sql/meta/duckdb_table_functions#duckdb_settings)
+
+本项目让已有三个设置字段作为普通查询来源，通过绑定查询确定列信息，执行时才读取当前连接的值。已支持数值转换、排序和连接。设置字段和分组功能仍需补齐。[测试](test-report.md#pg-settings-expressions-20261122) · [性能](performance-report-2026-10-30.md#pg-settings-expressions-cost-20261122)
+
 ## 2026-11-22 · 改名后继续使用序列
 
 PostgreSQL 用 `regclass` 保存序列的对象编号。改名后，已经保存的编号仍指向同一序列。`nextval` 分出的值在回滚后仍视作已用。SQLite 的 `AUTOINCREMENT` 按表在 `sqlite_sequence` 中记录编号。DuckDB 的改名回归仍期望 `ALTER SCHEMA ... RENAME TO` 返回功能尚未实现。[PostgreSQL 对象编号](https://www.postgresql.org/docs/18/datatype-oid.html) · [PostgreSQL 序列函数](https://www.postgresql.org/docs/18/functions-sequence.html) · [SQLite 编号分配](https://www.sqlite.org/autoinc.html) · [DuckDB 改名测试](https://github.com/duckdb/duckdb/blob/main/test/sql/alter/rename_schema/rename_schema.test)

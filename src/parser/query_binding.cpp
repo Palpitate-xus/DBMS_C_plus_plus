@@ -55,7 +55,8 @@ bool incompleteOwnedCatalog(const Range& range) {
     return range.relationSchema=="pg_catalog" &&
         ((range.relationName=="pg_class" && range.columns.size()==30) ||
          (range.relationName=="pg_attribute" && range.columns.size()==19) ||
-         (range.relationName=="pg_type" && range.columns.size()==28));
+         (range.relationName=="pg_type" && range.columns.size()==28) ||
+         (range.relationName=="pg_settings" && range.columns.size()==3));
 }
 void requireCompleteStar(const Range& range) {
     if(incompleteNamespaceCatalog(range) || incompleteOwnedCatalog(range))
@@ -2226,6 +2227,9 @@ public:
                 for (auto& range : side) {
                     if (key == "nspacl" && incompleteNamespaceCatalog(range))
                         throw DbError("0A000", "pg_namespace ACL JOIN key is not implemented");
+                    if (range.relationName == "pg_settings" && incompleteOwnedCatalog(range) &&
+                        system_catalog::unownedColumn(range.relationName, range.columns, key))
+                        throw DbError("0A000", "pg_settings JOIN key is not implemented");
                     if (range.hiddenUnqualified.count(key)) continue;
                     for (size_t i = 0; i < range.columns.size(); ++i)
                         if (range.columns[i].name == key) found = {&range, i, found.count + 1};

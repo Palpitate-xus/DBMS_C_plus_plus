@@ -3993,16 +3993,27 @@ bool describePreparedPgSequenceCatalog(const std::string& sql,Session& session,
 
 
 bool describePreparedOwnedCatalog(const std::string& sql,Session& session,
-    std::vector<PgColumnDescription>& columns,const std::vector<uint32_t>& parameterOids) {
-    // Admission only: every supported spelling of this fixed ASCII catalog
-    // name contains these bytes. The parsed/bound source remains authority.
-    const auto contains=[&](const char* name) {
-        return std::search(sql.begin(),sql.end(),name,name+std::char_traits<char>::length(name),
-            [](unsigned char c,char e){return (c>='A'&&c<='Z'?c+('a'-'A'):c)==e;})!=sql.end();
-    };
-    if(!contains("pg_class") && !contains("pg_attribute") && !contains("pg_type") && !contains("pg_attrdef") && !contains("pg_depend"))return false;
+    std::vector<PgColumnDescription>& columns,const std::vector<uint32_t>& parameterOids,
+    bool useExecutionDescriptor = false) {
+    if (!mentionsPgOwnedCatalog(sql)) return false;
     SQLParser parser;const auto parsed=parser.parseForBinding(sql);
     if(!parsed.success || !pgOwnedCatalogSourceCandidate(parsed.stmt.get()))return false;
+    if (useExecutionDescriptor) {
+        const auto* select = dynamic_cast<const SelectStmt*>(parsed.stmt.get());
+        CatalogManager::QualifiedName name;
+        // A direct reference to the system view has no user-table origin.
+        // Its execution already returns the bound names and types, so an
+        // ordinary query need not bind this same projection twice.
+        if (select && select->ctes.empty() && select->setOp == SetOp::None &&
+            select->fromClause && select->fromClause->type == FromItem::Type::Table &&
+            CatalogManager::parseQualifiedName(select->fromClause->tableName, name, true) &&
+            name.schema == "pg_catalog" && name.name == "pg_settings" &&
+            std::all_of(select->selectList.begin(), select->selectList.end(),
+                [](const auto& target) {
+                    const auto* column = dynamic_cast<const ColumnRefExpr*>(target.expr.get());
+                    return column && column->column != "*";
+                })) return true;
+    }
     auto* previous=currentSession();setCurrentSession(&session);
     struct Restore {Session* previous;~Restore(){setCurrentSession(previous);}} restore{previous};
     const auto query=g_engine.prepareBoundQuery(session.currentDB,sql,
@@ -4657,7 +4668,6 @@ bool describePreparedResultShape(const std::string& sql, Session& session,
     TableSchema schema;
     std::map<std::string, std::string> typeHints;
     bool virtualPgClass = false;
-    bool virtualPgSettings = false;
     bool virtualPgStatActivity = false;
     if (!sourceName.empty()) {
         CatalogManager::QualifiedName target;
@@ -4673,16 +4683,6 @@ bool describePreparedResultShape(const std::string& sql, Session& session,
                 CatalogManager::parseQualifiedName(sourceName, name, true) &&
                 name.name == "pg_class" &&
                 (name.schema.empty() || name.schema == "pg_catalog");
-            CatalogManager::QualifiedName settingsName;
-            const bool namesPgSettings = select &&
-                CatalogManager::parseQualifiedName(sourceName, settingsName, true) &&
-                settingsName.name == "pg_settings" &&
-                (settingsName.schema.empty() ||
-                 settingsName.schema == "pg_catalog");
-            virtualPgSettings = namesPgSettings &&
-                (settingsName.schema == "pg_catalog" ||
-                 (!g_engine.tableExists(session.currentDB, relation) &&
-                  !g_engine.viewExists(session.currentDB, relation)));
             CatalogManager::QualifiedName activityName;
             const bool namesPgStatActivity = select &&
                 CatalogManager::parseQualifiedName(sourceName, activityName, true) &&
@@ -4693,13 +4693,11 @@ bool describePreparedResultShape(const std::string& sql, Session& session,
                 (activityName.schema == "pg_catalog" ||
                  (!g_engine.tableExists(session.currentDB, relation) &&
                   !g_engine.viewExists(session.currentDB, relation)));
-            if (!virtualPgClass && !virtualPgSettings &&
-                !virtualPgStatActivity) return false;
+            if (!virtualPgClass && !virtualPgStatActivity) return false;
 
             // Match each virtual catalog's supported typed execution shape
             // without executing SELECT (Describe must never acquire rows or
-            // cause side effects). pg_settings and pg_stat_activity
-            // intentionally expose only their implemented subsets.
+            // cause side effects). pg_stat_activity exposes its implemented subset.
             const std::vector<std::pair<std::string, std::string>> fields =
                 virtualPgClass
                     ? std::vector<std::pair<std::string, std::string>>{
@@ -4708,10 +4706,6 @@ bool describePreparedResultShape(const std::string& sql, Session& session,
                           {"relnatts", "smallint"},
                           {"relpersistence", "\"char\""},
                           {"relowner", "oid"}}
-                    : virtualPgSettings
-                    ? std::vector<std::pair<std::string, std::string>>{
-                          {"name", "text"}, {"setting", "text"},
-                          {"unit", "text"}}
                     : std::vector<std::pair<std::string, std::string>>{
                           {"pid", "integer"}, {"datname", "name"},
                           {"usename", "name"}, {"state", "text"},
@@ -4723,7 +4717,7 @@ bool describePreparedResultShape(const std::string& sql, Session& session,
                 schema.append(std::move(column));
             }
             relation = virtualPgClass ? "pg_class"
-                : virtualPgSettings ? "pg_settings" : "pg_stat_activity";
+                : "pg_stat_activity";
         }
         for (size_t i = 0; i < schema.len(); ++i) {
             const Column& column = schema.cols[i];
@@ -4732,9 +4726,6 @@ bool describePreparedResultShape(const std::string& sql, Session& session,
             typeHints[relation + "." + column.dataName] = declaredType;
             if (virtualPgClass && sourceAlias.empty())
                 typeHints["pg_catalog.pg_class." + column.dataName] = declaredType;
-            if (virtualPgSettings && sourceAlias.empty())
-                typeHints["pg_catalog.pg_settings." + column.dataName] =
-                    declaredType;
             if (virtualPgStatActivity && sourceAlias.empty())
                 typeHints["pg_catalog.pg_stat_activity." + column.dataName] =
                     declaredType;
@@ -4769,7 +4760,7 @@ bool describePreparedResultShape(const std::string& sql, Session& session,
         if (reference.schema.empty()) return true;
         return reference.schema == source.schema ||
                (source.schema.empty() && reference.schema == "public") ||
-               ((virtualPgClass || virtualPgSettings || virtualPgStatActivity) &&
+               ((virtualPgClass || virtualPgStatActivity) &&
                 reference.schema == "pg_catalog");
     };
     for (const auto& item : *projections) {
@@ -4779,7 +4770,7 @@ bool describePreparedResultShape(const std::string& sql, Session& session,
         if ((literal && literal->value == "*") ||
             (reference && reference->column == "*")) {
             if (relation.empty()) return false;
-            if (virtualPgSettings || virtualPgStatActivity) return false;
+            if (virtualPgStatActivity) return false;
             if (reference && !qualifierMatches(*reference)) return false;
             appendPhysicalColumns();
             continue;
@@ -4882,7 +4873,7 @@ bool describePreparedResultShape(const std::string& sql, Session& session,
     }
     if (shape.columns.empty()) return false;
     const std::string descriptionSql =
-        (virtualPgSettings || virtualPgStatActivity)
+        (virtualPgStatActivity)
             ? "SELECT 1"
             : sql;
     columns = describeProtocolColumns(shape,
@@ -6989,7 +6980,7 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session,
             if (!sessionSetting && retainOrdinarySourceDeclaration && !typedExplain) {
                 if (!describeMaintenanceProgress(sql,ordinarySourceColumns))
                 if (!describePreparedPgStatsCatalog(sql,session,ordinarySourceColumns,{}))
-                    if (!describePreparedOwnedCatalog(sql,session,ordinarySourceColumns,{}))
+                    if (!describePreparedOwnedCatalog(sql,session,ordinarySourceColumns,{},true))
                     if (!describePreparedPgSequenceCatalog(sql,session,ordinarySourceColumns,{}))
                     if (!describePreparedWindowHostResult(sql, session, ordinarySourceColumns, {}))
                         (void)describePreparedOrdinarySourceResult(sql, session, ordinarySourceColumns);
