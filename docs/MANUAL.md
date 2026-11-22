@@ -1177,6 +1177,12 @@ INSERT INTO users (ID, NAME) OVERRIDING SYSTEM VALUE VALUES (10, 'Test');
 INSERT INTO users (ID, NAME) VALUES (100, 'New') RETURNING ID, NAME;
 ```
 
+### 向分区表写入
+
+对于已准备好各个分区的持久表，可以对父表执行 `INSERT`。数据库按分区键把每行写入对应的分区。单独执行的插入会自动提交，也可以用 `BEGIN`、`COMMIT`、`ROLLBACK` 和 `ROLLBACK TO SAVEPOINT` 管理一批写入。一行找不到匹配的范围或列表分区，且没有默认分区时，整条插入语句失败并返回 `23514`。
+
+目前适用于记录写入日志且无索引、主键、唯一约束、外键、排斥约束或可延迟约束的分区表。独立子表的 `CREATE TABLE ... PARTITION OF`、分区表的 `UPDATE` 和 `DELETE`，以及含分区插入的两阶段提交仍待支持。[测试范围](test-report.md#transactional-partition-insert-20261122)
+
 ### 插入时如何找空位
 
 插入记录时，数据库先尝试空闲空间记录推荐的页。推荐页忙或空间不够时，会尝试下一个推荐页和表的最后一页。这些尝试不会等待页锁，拿到锁后会核对实际空间和 `fillfactor` 要为更新预留的空间。找不到合适的页时，继续逐页查找，必要时增加数据页。[锁页与恢复测试](test-report.md#insert-page-choice-20261119)
@@ -2194,16 +2200,13 @@ DROP TRIGGER update_modified ON users;
 
 ## 15. 分区表
 
+下面的语句声明父表的分区方式。当前可通过原生接口准备父表管理的数据分区。用 `CREATE TABLE ... PARTITION OF` 定义独立子表，或者用 `ALTER TABLE ... ATTACH PARTITION` 挂载已有表时，数据库会返回 `0A000`。[原生分区示例](../tests/partition_test.cpp) · [向已有分区表写入](#向分区表写入)
+
 ```sql
 -- RANGE 分区
 CREATE TABLE events (
     ID INT, EVENT_TIME TIMESTAMP
 ) PARTITION BY RANGE (EVENT_TIME);
-
--- ATTACH 已有表作为分区
-CREATE TABLE events_2024 (LIKE events);
-ALTER TABLE events ATTACH PARTITION events_2024
-    FOR VALUES FROM ('2024-01-01') TO ('2025-01-01');
 
 -- LIST 分区
 CREATE TABLE logs (

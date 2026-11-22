@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>可以用 SQL 向分区表添加记录 · 2026-11-22</summary>
+
+已准备好分区且没有索引的表可以用 `INSERT` 写入。数据库会把每条记录放进对应的分区，提交前可以撤销写入。
+
+[使用手册](docs/MANUAL.md#向分区表写入) · [测试报告](docs/test-report.md#transactional-partition-insert-20261122) · [性能报告](docs/performance-report-2026-10-30.md#transactional-partition-insert-cost-20261122)
+
+</details>
+
+<details>
 <summary>清空分区表后及时腾出磁盘空间 · 2026-11-22</summary>
 
 数据库会及时关闭旧分区文件，让操作系统回收这些文件占用的空间。单独清空默认数据目录里的分区表时，可以只保存恢复这张表所需的文件。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>清空一张表时减少备份文件 · 2026-11-22</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-22 · 清空一张表时减少备份文件
 
 单独清空默认数据目录里的一张普通表时，数据库可以只备份恢复这张表所需的文件。提交前意外退出，重启后可以找回原来的数据。也修复了部分操作记录可能漏写到磁盘的问题。
 
 [测试报告](docs/test-report.md#truncate-table-undo-20261122) · [性能报告](docs/performance-report-2026-10-30.md#truncate-table-undo-cost-20261122)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-21 · 重启时会检查清空表是否已提交
 

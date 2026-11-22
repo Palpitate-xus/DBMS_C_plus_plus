@@ -6,9 +6,15 @@
 
 截至 2026-11-22，273 项功能要求中有 22 项完成、167 项部分实现、69 项待验证、15 项暂缓。各项结果和剩余范围见功能总账。以下更新报告给出各轮测试的实际范围。[功能总账](gap-progress.json) · [支持的功能和限制](compatibility-contract.md)
 
+## 2026-11-22 · 已有分区表可以接收 SQL 插入
+
+SQL 可以向没有索引、主键和外键等约束的持久分区表插入数据。写入记录实际存放的分区，提交、整笔回滚和保存点回滚都能找到对应的数据。受测的空值筛选、排序和表达式投影可以区分空值和数字零。普通列投影与跨分区 `OR` 组合时仍可能漏行。独立子表的 SQL 定义、分区索引、更新和删除以及两阶段提交仍待实现。[使用手册](MANUAL.md#向分区表写入) · [测试报告](test-report.md#transactional-partition-insert-20261122) · [性能报告](performance-report-2026-10-30.md#transactional-partition-insert-cost-20261122)
+
+256 行内存盘对照中，直接查询和带 `COALESCE` 的查询请求耗时分别下降 10.56% 和 5.49%，均为配对中位数。ext4 上的新功能测试中，范围、列表、哈希分区各插一行的请求耗时中位数分别为 4.71、5.19 和 3.65 毫秒。普通表点查和插入对照波动较大。[完整样本范围](performance-report-2026-10-30.md#transactional-partition-insert-cost-20261122)
+
 ## 2026-11-22 · 分区表清空时释放旧文件
 
-清空同一父表管理下的分区时，会在重建前释放这些分区的旧缓存。独立清空默认位置的持久分区父表使用该表的恢复文件。叶分区写入的 SQL 事务和独立分区文件编号仍待补齐。[测试报告](test-report.md#truncate-partition-undo-20261122) · [性能报告](performance-report-2026-10-30.md#truncate-partition-undo-cost-20261122)
+清空同一父表管理下的分区时，会在重建前释放这些分区的旧缓存。独立清空默认位置的持久分区父表使用该表的恢复文件。独立分区文件编号仍待补齐。[测试报告](test-report.md#truncate-partition-undo-20261122) · [性能报告](performance-report-2026-10-30.md#truncate-partition-undo-cost-20261122)
 
 受测三分区小表的清空耗时在内存盘下降 85.05%–86.52%，在两轮 ext4 对照分别下降 82.95% 和 90.10%。ext4 普通表清空对照的配对中位耗时分别增加 10.50% 和 1.97%，两轮结果均已记录。[完整计时](performance-report-2026-10-30.md#truncate-partition-undo-cost-20261122)
 

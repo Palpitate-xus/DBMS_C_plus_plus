@@ -2,11 +2,17 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-22 · 向分区表写入并处理回滚
+
+PostgreSQL 18.6 在执行插入时选择实际的叶关系，首次写到某一叶关系时才准备相应的写入状态。执行器的行容器同时保留来源表编号、行位置和各列是否为空。SQLite 的隐式事务在语句执行结束时提交，显式事务由提交或回滚结束。DuckDB 为批量修改记录撤销信息，提交后可用预写日志恢复数据。[PostgreSQL 分区](https://www.postgresql.org/docs/18/ddl-partitioning.html) · [写入路由源码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/executor/execPartition.c#L194-L253) · [行容器源码](https://github.com/postgres/postgres/blob/REL_18_6/src/include/executor/tuptable.h#L104-L125) · [SQLite 事务](https://www.sqlite.org/lang_transaction.html) · [DuckDB 事务实现](https://duckdb.org/2024/10/30/analytics-optimized-concurrent-transactions)
+
+本项目仍由父表管理分区文件。事务写入记录父表的物理编号、写入的分区以及分区内的位置，提交和撤销操作都定位到实际的数据文件。查询从同一份记录读取数据和空值标记，两个分区恰好使用相同的页和槽时仍能区分。独立子表身份、支持分区的行索引，以及更新、删除和两阶段提交仍需后续工作。[测试范围](test-report.md#transactional-partition-insert-20261122) · [性能报告](performance-report-2026-10-30.md#transactional-partition-insert-cost-20261122)
+
 ## 2026-11-22 · 清空分区表的恢复范围
 
 PostgreSQL 的各个叶分区有自己的关系编号。清空父表时会处理各叶分区，单独清空一个叶分区时保留兄弟分区的数据。PostgreSQL 为需要回滚的关系切换文件编号。SQLite 可以直接清空符合条件的无条件 `DELETE`，DuckDB 为批量修改记录撤销信息。[PostgreSQL TRUNCATE](https://www.postgresql.org/docs/18/sql-truncate.html) · [PostgreSQL 18.6 源码](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/commands/tablecmds.c#L2079-L2131) · [SQLite DELETE](https://www.sqlite.org/lang_delete.html#the_truncate_optimization) · [DuckDB 事务实现](https://duckdb.org/2024/10/30/analytics-optimized-concurrent-transactions)
 
-本项目的叶分区文件由父表管理。符合条件的父表可以一起保存各分区的恢复文件，清空会释放对应的缓存，重放日志时核对要写的文件。对照使用原生接口准备本项目的实际数据分区，用 SQL 比较父表的查询和清空。通过 SQL 创建独立叶分区、在事务中写入分区表，以及为重用名称的分区分配独立文件身份，仍有差距。[验证范围](test-report.md#truncate-partition-undo-20261122)
+本项目的叶分区文件由父表管理。符合条件的父表可以一起保存各分区的恢复文件，清空会释放对应的缓存，重放日志时核对要写的文件。对照使用原生接口准备本项目的实际数据分区，用 SQL 比较父表的查询和清空。该轮对照早于上面的事务插入改动。通过 SQL 创建独立叶分区，以及为重用名称的分区分配独立文件身份，仍有差距。[验证范围](test-report.md#truncate-partition-undo-20261122)
 
 ## 2026-11-22 · 一次清空多张普通表
 

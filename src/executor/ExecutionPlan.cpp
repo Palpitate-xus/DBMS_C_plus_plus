@@ -5199,6 +5199,8 @@ bool TableScanOp::open() {
     tableLockHeld_ = true;
     tbl_ = engine_->getTableSchema(dbname_, tablename_);
     rows_.clear();
+    bufferedNulls_.clear();
+    lastBufferedNullsValid_ = false;
     lastRid_ = 0;
     pos_ = 0; lastNulls_.clear(); cursor_.reset();
     if (tbl_.partitionType == TableSchema::PartitionType::None &&
@@ -5207,8 +5209,25 @@ bool TableScanOp::open() {
         return true;
     }
     bool toastFailed = false;
+    bool bitmapFailed = false;
+    const bool capturePartitionNulls =
+        tbl_.partitionType != TableSchema::PartitionType::None &&
+        tbl_.formatVersion == DATA_FILE_FORMAT_VERSION;
     const auto appendRow = [&](uint32_t pageId, uint16_t slotId,
                                const char* data, size_t len) {
+        if (toastFailed || bitmapFailed) return;
+        std::vector<bool> capturedNulls;
+        std::optional<detail::ScopedStoredRowNullBitmap> nullOwner;
+        if (capturePartitionNulls) {
+            if (!StorageEngine::captureCurrentScanNullBitmap(
+                    tbl_, data, len, capturedNulls) || capturedNulls.size() != tbl_.len()) {
+                bitmapFailed = true;
+                return;
+            }
+            // TOAST resolution must use this leaf's bitmap, not the parent
+            // heap reached by an ambiguous page/slot RID.
+            nullOwner.emplace(tbl_, capturedNulls);
+        }
         std::string row(data, len);
         bool toastOk = false;
         row = engine_->resolveToastValues(dbname_, tablename_, row, tbl_, &toastOk);
@@ -5217,13 +5236,16 @@ bool TableScanOp::open() {
             return;
         }
         rows_.emplace_back(StorageEngine::encodeRid(pageId, slotId), std::move(row));
+        if (capturePartitionNulls) bufferedNulls_.push_back(std::move(capturedNulls));
     };
     const bool scanOk = engine_->rlsAppliesTo(dbname_, tablename_)
         ? engine_->forEachVisibleRow(dbname_, tablename_, "SELECT", appendRow)
         : engine_->forEachRow(dbname_, tablename_, appendRow);
-    if (!scanOk || toastFailed) {
+    if (!scanOk || toastFailed || bitmapFailed) {
         rows_.clear();
-        setError(toastFailed ? "TOAST value read failed" : "table scan failed");
+        bufferedNulls_.clear();
+        setError(toastFailed ? "TOAST value read failed" :
+                 bitmapFailed ? "partition tuple NULL bitmap unavailable" : "table scan failed");
         return false;
     }
     pos_ = 0;
@@ -5398,6 +5420,9 @@ bool TableScanOp::nextRow(std::string& outRow, const TableSchema* projection,
     if (pos_ >= rows_.size()) return false;
     lastRid_ = rows_[pos_].first;
     outRow = rows_[pos_].second;
+    lastBufferedNullsValid_ = pos_ < bufferedNulls_.size();
+    if (lastBufferedNullsValid_) lastNulls_ = std::move(bufferedNulls_[pos_]);
+    else lastNulls_.clear();
     ++pos_;
     // Bind stored-NULL visibility for the row handed upstream so
     // projections see the heap null bitmap instead of zero values.
@@ -5407,12 +5432,13 @@ bool TableScanOp::nextRow(std::string& outRow, const TableSchema* projection,
 }
 
 bool TableScanOp::lastColumnIsNull(size_t colIdx) const {
-    if (cursor_ && colIdx < lastNulls_.size()) return lastNulls_[colIdx];
+    if ((cursor_ || lastBufferedNullsValid_) && colIdx < lastNulls_.size())
+        return lastNulls_[colIdx];
     return detail::storedRowColumnIsNull(*engine_, dbname_, tablename_, tbl_, lastRid_, colIdx);
 }
 
 bool TableScanOp::lastStoredNullBitmap(std::vector<bool>& nulls) const {
-    if (!cursor_ || !lastRid_) return false;
+    if ((!cursor_ && !lastBufferedNullsValid_) || !lastRid_) return false;
     nulls = lastNulls_; return true;
 }
 
@@ -5420,6 +5446,8 @@ void TableScanOp::close() {
     if (!tableLockHeld_ && !cursor_ && rows_.empty()) return;
     const bool partialScan = cursor_ && !statsRecorded_;
     cursor_.reset(); lastNulls_.clear();
+    bufferedNulls_.clear();
+    lastBufferedNullsValid_ = false;
     rows_.clear();
     lastRid_ = 0;
     StorageEngine::unbindNullRow();
@@ -6644,6 +6672,14 @@ bool FilterOp::next(std::string& outRow) {
         return true;
     };
     while (child_->next(outRow)) {
+        std::vector<bool> partitionNulls;
+        std::optional<detail::ScopedStoredRowNullBitmap> partitionNullOwner;
+        if (sameTable && tbl_.partitionType != TableSchema::PartitionType::None &&
+            scan->lastStoredNullBitmap(partitionNulls) && partitionNulls.size() == tbl_.len()) {
+            // Generic conditions and virtual expressions may inspect more
+            // than their named column; bind the same leaf's entire bitmap.
+            partitionNullOwner.emplace(tbl_, partitionNulls);
+        }
         bool match = false;
         if (branches_.empty()) {
             match = matchesBranch(conds_);
@@ -7267,6 +7303,10 @@ bool ProjectOp::next(std::string& outRow) {
                tbl_.formatVersion == DATA_FILE_FORMAT_VERSION && needsStoredNulls()) {
         if (auto* sort = matchingSort(); sort &&
             sort->lastStoredNullBitmap(storedNulls) && storedNulls.size() == tbl_.len())
+            storedNullOwner.emplace(tbl_, storedNulls);
+        else if (tbl_.partitionType != TableSchema::PartitionType::None &&
+                 typeid(*child_) == typeid(FilterOp) &&
+                 child_->lastStoredNullBitmap(storedNulls) && storedNulls.size() == tbl_.len())
             storedNullOwner.emplace(tbl_, storedNulls);
     }
     outRow.clear();

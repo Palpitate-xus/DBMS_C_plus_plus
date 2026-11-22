@@ -1,5 +1,9 @@
 # STO-02: relation storage identity and physical-name collision containment
 
+## 2026-11-22 · Locate partition rows during commit and rollback
+
+Transactional inserts record the parent physical ID, the selected leaf fork, and the page and slot within that leaf. Commit flushes the touched files, and rollback checks the same identity before removing a row or its external values. After a successful savepoint rollback, writeback entries for pages with no remaining inserts are retired. Buffered scans capture the NULL bitmap before releasing the leaf tuple. Separate on-disk identities for newly created or reused leaf names and leaf-aware indexes remain open. [Test results](test-report.md#transactional-partition-insert-20261122)
+
 ## 2026-11-22 · Partition files when truncating the parent
 
 The reset plan checks the existing heap paths and the paths that will be recreated. Cache eviction uses the declared partition name and physical file path. WAL replay verifies the cached file against the resolved leaf before writing. A standalone truncate of the entire parent can include those files in the existing transaction image. Partition-name reuse with earlier WAL still needs independent leaf generations. [Recovery tests](test-report.md#truncate-partition-undo-20261122)

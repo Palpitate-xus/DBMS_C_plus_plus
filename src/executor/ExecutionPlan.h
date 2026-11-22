@@ -331,8 +331,12 @@ private:
     std::string tablename_;
     TableSchema tbl_;
     std::vector<std::pair<int64_t, std::string>> rows_;
+    // Partition RIDs do not identify a leaf. Keep the bitmap captured while
+    // each buffered row still owns its actual physical tuple.
+    std::vector<std::vector<bool>> bufferedNulls_;
     std::unique_ptr<HeapScanCursor> cursor_;
     std::vector<bool> lastNulls_;
+    bool lastBufferedNullsValid_ = false;
     size_t pos_ = 0;
     int64_t lastRid_ = 0;
     bool statsRecorded_ = false;
@@ -572,6 +576,10 @@ public:
     Operator* child() const { return child_.get(); }
     bool lastColumnIsNull(size_t colIdx) const override {
         return child_->lastColumnIsNull(colIdx);
+    }
+    bool lastStoredNullBitmap(std::vector<bool>& nulls) const override {
+        return tbl_.partitionType != TableSchema::PartitionType::None &&
+            child_->lastStoredNullBitmap(nulls);
     }
     ScanOrigin scanOrigin() const override { return child_->scanOrigin(); }
     const std::vector<StorageEngine::Condition>& conditions() const { return conds_; }

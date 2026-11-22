@@ -404,6 +404,19 @@ static thread_local const StorageEngine* g_condNullEngine = nullptr;
 // The current physical scan tuple, valid only during a forEachRow callback.
 // Unlike a table/page RID lookup, this also identifies partition-leaf NULLs.
 static thread_local const HeapTupleHeaderData* g_scanHeapTuple = nullptr;
+class CurrentScanTupleBinding {
+public:
+    explicit CurrentScanTupleBinding(const HeapTupleHeaderData* tuple)
+        : previous_(g_scanHeapTuple) {
+        g_scanHeapTuple = tuple;
+    }
+    ~CurrentScanTupleBinding() { g_scanHeapTuple = previous_; }
+    CurrentScanTupleBinding(const CurrentScanTupleBinding&) = delete;
+    CurrentScanTupleBinding& operator=(const CurrentScanTupleBinding&) = delete;
+
+private:
+    const HeapTupleHeaderData* previous_;
+};
 static thread_local int64_t g_condNullRid = -1;
 static thread_local std::string g_condNullTable;
 static thread_local std::string g_condNullDb;
@@ -4650,6 +4663,7 @@ DBStatus StorageEngine::attachPartition(const std::string& dbname,
                                           const std::string& tablename,
                                           const std::string& partitionName,
                                           const std::string& partitionSpec) {
+    if (hasPartitionInserts(dbname, tablename)) return DBStatus::FEATURE_NOT_SUPPORTED;
     const DatabaseMetadataWrite metadataWrite(dbPath(dbname));
     if (!metadataWrite.acquired()) return DBStatus::LOCK_CONFLICT;
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
@@ -4934,6 +4948,7 @@ DBStatus StorageEngine::attachPartition(const std::string& dbname,
 DBStatus StorageEngine::detachPartition(const std::string& dbname,
                                           const std::string& tablename,
                                           const std::string& partitionName) {
+    if (hasPartitionInserts(dbname, tablename)) return DBStatus::FEATURE_NOT_SUPPORTED;
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     if (!lockManager_.lockMetadata(tablename)) return DBStatus::LOCK_CONFLICT;
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
@@ -7566,23 +7581,38 @@ private:
     bool active_;
 };
 
-// Index builders already own the physical tuple for this callback. Borrow
-// its bitmap only after proving that the callback payload belongs to that
-// header; never look up this row again by a partition-ambiguous RID. Scratch
-// storage belongs to the builder, and the existing binding restores nested
-// materialized/scan owners in LIFO order, including exception unwinding.
+static bool scanPayloadMatchesTuple(const TableSchema& schema,
+                                    const char* payload, size_t length,
+                                    const HeapTupleHeaderData* tuple) {
+    return schema.formatVersion == DATA_FILE_FORMAT_VERSION &&
+        tuple && schema.len() <= MAX_COLUMNS &&
+        (tuple->t_infomask2 & HEAP_NATTS_MASK) == schema.len() &&
+        tuple->t_hoff >= computeHeapHeaderSize(schema.len()) &&
+        payload == reinterpret_cast<const char*>(tuple) + tuple->t_hoff &&
+        length != 0;
+}
+
+bool StorageEngine::captureCurrentScanNullBitmap(
+    const TableSchema& schema, const char* payload, size_t length,
+    std::vector<bool>& nulls) {
+    const auto* tuple = g_scanHeapTuple;
+    if (!scanPayloadMatchesTuple(schema, payload, length, tuple)) return false;
+    nulls.resize(schema.len());
+    for (size_t i = 0; i < schema.len(); ++i) {
+        nulls[i] = schema.cols[i].isNull && dbms::isNull(tuple, i);
+    }
+    return true;
+}
+
+// Keep the callback's own bitmap available to index builders and predicates.
 class ScannedNullRowBinding {
 public:
     ScannedNullRowBinding(const TableSchema& schema,
                           std::vector<bool>& scratch,
                           const char* payload, size_t payloadLength,
                           const HeapTupleHeaderData* tuple = g_scanHeapTuple) {
-        if (schema.formatVersion != DATA_FILE_FORMAT_VERSION || !tuple ||
-            schema.len() > MAX_COLUMNS || scratch.size() != schema.len() ||
-            (tuple->t_infomask2 & HEAP_NATTS_MASK) != schema.len() ||
-            tuple->t_hoff < computeHeapHeaderSize(schema.len()) ||
-            payload != reinterpret_cast<const char*>(tuple) + tuple->t_hoff ||
-            payloadLength == 0) return;
+        if (scratch.size() != schema.len() ||
+            !scanPayloadMatchesTuple(schema, payload, payloadLength, tuple)) return;
         for (size_t i = 0; i < schema.len(); ++i)
             scratch[i] = schema.cols[i].isNull && dbms::isNull(tuple, i);
         binding_.emplace(schema, scratch);
@@ -9661,11 +9691,8 @@ bool StorageEngine::forEachRow(const std::string& dbname, const std::string& tab
         const int64_t condRid = this->encodeRid(pid, sid);
         g_condNullEngine = this; g_condNullRid = condRid;
         g_condNullTable = tablename; g_condNullDb = dbname;
-        struct RestoreScanTuple {
-            const HeapTupleHeaderData* previous;
-            ~RestoreScanTuple() { g_scanHeapTuple = previous; }
-        } restoreScanTuple{g_scanHeapTuple};
-        g_scanHeapTuple = usesHeapTupleHeader(fmtVer) ? castHeapHeader(data) : nullptr;
+        const CurrentScanTupleBinding tupleOwner(
+            usesHeapTupleHeader(fmtVer) ? castHeapHeader(data) : nullptr);
         callback(pid, sid, data + off, len - off);
         g_condNullEngine = nullptr; g_condNullRid = -1;
         g_condNullTable.clear(); g_condNullDb.clear();
@@ -9910,13 +9937,21 @@ bool StorageEngine::forEachVisibleRow(
         uint32_t pageId = 0;
         uint16_t slotId = 0;
         std::string data;
+        size_t payloadOffset = 0;
     };
+    const bool keepScanTuple = tbl.partitionType != TableSchema::PartitionType::None &&
+        tbl.formatVersion == DATA_FILE_FORMAT_VERSION;
     std::vector<VisibleRow> visible;
     bool evaluationError = false;
     if (!forEachRow(dbname, tablename,
                [&](uint32_t pageId, uint16_t slotId, const char* data, size_t len) {
         if (evaluationError) return;
-        const std::string row(data, len);
+        const auto* tuple = keepScanTuple ? g_scanHeapTuple : nullptr;
+        if (keepScanTuple && !scanPayloadMatchesTuple(tbl, data, len, tuple)) {
+            evaluationError = true;
+            return;
+        }
+        std::string row(data, len);
         std::map<std::string, std::string> values;
         std::map<std::string, std::string> typeHints;
         for (size_t i = 0; i < tbl.len(); ++i) {
@@ -9928,12 +9963,26 @@ bool StorageEngine::forEachVisibleRow(
         const bool allowed = evaluateRlsPolicies(
             policies, false, values, typeHints, dbname, user, evaluationError,
             const_cast<StorageEngine*>(this));
-        if (allowed) visible.push_back({pageId, slotId, row});
+        if (allowed) {
+            if (tuple) {
+                const auto* bytes = reinterpret_cast<const char*>(tuple);
+                visible.push_back({pageId, slotId,
+                    std::string(bytes, tuple->t_hoff + len), tuple->t_hoff});
+            } else {
+                visible.push_back({pageId, slotId, std::move(row)});
+            }
+        }
     }, readView, targetPartitions)) return false;
 
     if (evaluationError) return false;
     for (const auto& row : visible) {
-        callback(row.pageId, row.slotId, row.data.data(), row.data.size());
+        if (row.payloadOffset == 0) {
+            callback(row.pageId, row.slotId, row.data.data(), row.data.size());
+        } else {
+            const CurrentScanTupleBinding tupleOwner(castHeapHeader(row.data.data()));
+            callback(row.pageId, row.slotId, row.data.data() + row.payloadOffset,
+                     row.data.size() - row.payloadOffset);
+        }
     }
     return true;
 }
@@ -10769,6 +10818,7 @@ DBStatus StorageEngine::createHashIndex(const std::string& dbname,
                                          const std::string& tablename,
                                          const std::string& colname,
                                          bool /*concurrently*/) {
+    if (hasPartitionInserts(dbname, tablename)) return DBStatus::FEATURE_NOT_SUPPORTED;
     const DatabaseMetadataWrite metadataWrite(dbPath(dbname));
     if (!metadataWrite.acquired()) return DBStatus::LOCK_CONFLICT;
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
@@ -10943,6 +10993,7 @@ BloomIndex* StorageEngine::getBloomIndexForBuild(
 DBStatus StorageEngine::createBloomIndex(const std::string& dbname,
                                          const std::string& tablename,
                                          const std::string& colname) {
+    if (hasPartitionInserts(dbname, tablename)) return DBStatus::FEATURE_NOT_SUPPORTED;
     const DatabaseMetadataWrite metadataWrite(dbPath(dbname));
     if (!metadataWrite.acquired()) return DBStatus::LOCK_CONFLICT;
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
@@ -14171,6 +14222,7 @@ DBStatus StorageEngine::createIndex(const std::string& dbname, const std::string
                                      const std::string& expression,
                                      bool concurrently,
                                      bool unique) {
+    if (hasPartitionInserts(dbname, tablename)) return DBStatus::FEATURE_NOT_SUPPORTED;
     const DatabaseMetadataWrite metadataWrite(dbPath(dbname));
     if (!metadataWrite.acquired()) return DBStatus::LOCK_CONFLICT;
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
@@ -14518,6 +14570,7 @@ DBStatus StorageEngine::createCompositeIndex(const std::string& dbname,
                                               const std::string& whereCondition,
                                               bool concurrently,
                                               bool unique) {
+    if (hasPartitionInserts(dbname, tablename)) return DBStatus::FEATURE_NOT_SUPPORTED;
     const DatabaseMetadataWrite metadataWrite(dbPath(dbname));
     if (!metadataWrite.acquired()) return DBStatus::LOCK_CONFLICT;
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
@@ -15439,6 +15492,7 @@ static std::vector<std::string> tokenizeText(const std::string& text) {
 DBStatus StorageEngine::createFullTextIndex(const std::string& dbname,
                                              const std::string& tablename,
                                              const std::string& colname) {
+    if (hasPartitionInserts(dbname, tablename)) return DBStatus::FEATURE_NOT_SUPPORTED;
     const DatabaseMetadataWrite metadataWrite(dbPath(dbname));
     if (!metadataWrite.acquired()) return DBStatus::LOCK_CONFLICT;
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
@@ -15729,6 +15783,7 @@ static std::string serializeGinIndex(
 DBStatus StorageEngine::createGinIndex(const std::string& dbname,
                                         const std::string& tablename,
                                         const std::string& colname) {
+    if (hasPartitionInserts(dbname, tablename)) return DBStatus::FEATURE_NOT_SUPPORTED;
     const DatabaseMetadataWrite metadataWrite(dbPath(dbname));
     if (!metadataWrite.acquired()) return DBStatus::LOCK_CONFLICT;
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
@@ -16107,6 +16162,7 @@ static bool gistFileOwnerIsUnique(const StorageEngine& engine,
 DBStatus StorageEngine::createGiSTIndex(const std::string& dbname,
                                          const std::string& tablename,
                                          const std::string& colname) {
+    if (hasPartitionInserts(dbname, tablename)) return DBStatus::FEATURE_NOT_SUPPORTED;
     const DatabaseMetadataWrite metadataWrite(dbPath(dbname));
     if (!metadataWrite.acquired()) return DBStatus::LOCK_CONFLICT;
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
@@ -16958,6 +17014,7 @@ std::vector<std::string> StorageEngine::getGiSTIndexedColumns(const std::string&
 DBStatus StorageEngine::createSPGiSTIndex(const std::string& dbname,
                                            const std::string& tablename,
                                            const std::string& colname) {
+    if (hasPartitionInserts(dbname, tablename)) return DBStatus::FEATURE_NOT_SUPPORTED;
     const DatabaseMetadataWrite metadataWrite(dbPath(dbname));
     if (!metadataWrite.acquired()) return DBStatus::LOCK_CONFLICT;
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
@@ -17425,6 +17482,7 @@ DBStatus StorageEngine::createBrinIndex(const std::string& dbname,
                                          const std::string& tablename,
                                          const std::string& colname,
                                          size_t pagesPerRange) {
+    if (hasPartitionInserts(dbname, tablename)) return DBStatus::FEATURE_NOT_SUPPORTED;
     const DatabaseMetadataWrite metadataWrite(dbPath(dbname));
     if (!metadataWrite.acquired()) return DBStatus::LOCK_CONFLICT;
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
@@ -22115,6 +22173,7 @@ void StorageEngine::finishStandaloneTruncate(bool committed) {
 
 DBStatus StorageEngine::dropTable(const std::string& dbname,
                                    const std::string& tablename) {
+    if (hasPartitionInserts(dbname, tablename)) return DBStatus::FEATURE_NOT_SUPPORTED;
     const DatabaseMetadataWrite metadataWrite(dbPath(dbname));
     if (!metadataWrite.acquired()) return DBStatus::LOCK_CONFLICT;
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
@@ -22448,6 +22507,7 @@ DBStatus StorageEngine::dropTable(const std::string& dbname,
 DBStatus StorageEngine::truncateTable(const std::string& dbname,
                                        const std::string& tablename,
                                        TruncateWalMode mode) {
+    if (hasPartitionInserts(dbname, tablename)) return DBStatus::FEATURE_NOT_SUPPORTED;
     const DatabaseMetadataWrite metadataWrite(dbPath(dbname));
     if (!metadataWrite.acquired()) return DBStatus::LOCK_CONFLICT;
     noteTemporaryRelationAccess(dbname, tablename);
@@ -22571,6 +22631,7 @@ void StorageEngine::bufferLogicalTruncate(const std::string& dbname,
 DBStatus StorageEngine::alterTableAddColumn(const std::string& dbname,
                                              const std::string& tablename,
                                              const Column& col) {
+    if (hasPartitionInserts(dbname, tablename)) return DBStatus::FEATURE_NOT_SUPPORTED;
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     if (!lockManager_.lockExclusive(tablename)) return DBStatus::LOCK_CONFLICT;
@@ -22883,6 +22944,7 @@ DBStatus StorageEngine::alterTableAddColumn(const std::string& dbname,
 DBStatus StorageEngine::alterTableDropColumn(const std::string& dbname,
                                               const std::string& tablename,
                                               const std::string& colName) {
+    if (hasPartitionInserts(dbname, tablename)) return DBStatus::FEATURE_NOT_SUPPORTED;
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     if (!lockManager_.lockExclusive(tablename)) return DBStatus::LOCK_CONFLICT;
@@ -23230,6 +23292,7 @@ DBStatus StorageEngine::alterTableAlterColumnType(const std::string& dbname,
                                                   const std::string& colName,
                                                   const Column& newCol,
                                                   const std::vector<std::string>& typeMods) {
+    if (hasPartitionInserts(dbname, tablename)) return DBStatus::FEATURE_NOT_SUPPORTED;
     if (!databaseExists(dbname)) return DBStatus::DATABASE_NOT_FOUND;
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     if (!lockManager_.lockExclusive(tablename)) return DBStatus::LOCK_CONFLICT;
@@ -23594,6 +23657,7 @@ DBStatus StorageEngine::alterTableRenameColumn(const std::string& dbname,
                                                 const std::string& tablename,
                                                 const std::string& oldName,
                                                 const std::string& newName) {
+    if (hasPartitionInserts(dbname, tablename)) return DBStatus::FEATURE_NOT_SUPPORTED;
     const DatabaseMetadataWrite metadataWrite(dbPath(dbname));
     if (!metadataWrite.acquired()) return DBStatus::LOCK_CONFLICT;
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
@@ -24088,6 +24152,7 @@ DBStatus StorageEngine::alterTableRenameColumn(const std::string& dbname,
 DBStatus StorageEngine::alterTableRenameTable(const std::string& dbname,
                                                const std::string& oldName,
                                                const std::string& newName) {
+    if (hasPartitionInserts(dbname, oldName)) return DBStatus::FEATURE_NOT_SUPPORTED;
     const DatabaseMetadataWrite metadataWrite(dbPath(dbname));
     if (!metadataWrite.acquired()) return DBStatus::LOCK_CONFLICT;
     if (!tableExists(dbname, oldName)) return DBStatus::TABLE_NOT_FOUND;
@@ -24837,6 +24902,7 @@ DBStatus StorageEngine::alterTableIdentity(const std::string& dbname,
 DBStatus StorageEngine::alterTableSetLogged(const std::string& dbname,
                                              const std::string& tablename,
                                              bool logged) {
+    if (hasPartitionInserts(dbname, tablename)) return DBStatus::FEATURE_NOT_SUPPORTED;
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
     if (!lockManager_.lockMetadata(tablename)) return DBStatus::LOCK_CONFLICT;
     TableSchema tbl = getTableSchema(dbname, tablename);
@@ -26112,6 +26178,7 @@ DBStatus StorageEngine::alterTableTablespace(const std::string& dbname,
                                               const std::function<void(
                                                   const std::filesystem::path&,
                                                   bool)>& beforeRenameForTesting) {
+    if (hasPartitionInserts(dbname, tablename)) return DBStatus::FEATURE_NOT_SUPPORTED;
     const DatabaseMetadataWrite metadataWrite(dbPath(dbname));
     if (!metadataWrite.acquired()) return DBStatus::LOCK_CONFLICT;
     if (!tableExists(dbname, tablename)) return DBStatus::TABLE_NOT_FOUND;
@@ -30352,16 +30419,31 @@ DBStatus StorageEngine::insertInternal(
         lockManager_.unlock(tablename);
         throw;
     }
-    // A partition-local tuple locator is not represented in TxnLogEntry yet:
-    // every partition starts at page 1/slot 0, so transaction rollback would
-    // address the empty parent heap (or an unrelated partition row).  Reject
-    // this unsupported path before defaults, sequences, triggers, TOAST, WAL,
-    // or heap state can change.  Autocommit INSERT routing remains supported.
-    if (tbl.partitionType != TableSchema::PartitionType::None &&
+    const bool partitionTxn = tbl.partitionType != TableSchema::PartitionType::None &&
         transactionContext().inTransaction &&
-        dbname == transactionContext().txnDB) {
-        lockManager_.unlock(tablename);
-        return DBStatus::INVALID_VALUE;
+        dbname == transactionContext().txnDB;
+    if (partitionTxn) {
+        // Persisted index RIDs and deferred-constraint entries still carry
+        // only page/slot. Two different leaves can use the same RID.
+        bool specialized = false;
+        visitSpecializedIndexColumns(*this, dbname, relationDir(dbname, tablename), tablename,
+            [&](size_t, std::string_view) { specialized = true; });
+        if (tbl.physicalRelationId == 0 || tbl.isTemporary || tbl.isUnlogged ||
+            isSessionTempPhysicalName(tablename) ||
+            !transactionContext().txnBackupPath.empty() ||
+            tbl.hasPrimaryKey() || !tbl.uniqueConstraints.empty() || !tbl.fks.empty() ||
+            std::any_of(tbl.cols.begin(), tbl.cols.end(), [](const Column& column) {
+                return column.isUnique || column.deferrable;
+            }) ||
+            std::any_of(tbl.additionalCheckConstraints.begin(), tbl.additionalCheckConstraints.end(),
+                [](const CheckConstraint& check) { return check.deferrable; }) ||
+            !secondaryIndexMetadata.empty() || !compositeIndexMetadata.empty() ||
+            !getHashIndexedColumns(dbname, tablename).empty() ||
+            !getBloomIndexedColumns(dbname, tablename).empty() ||
+            !getExclusionConstraints(dbname, tablename).empty() || specialized) {
+            lockManager_.unlock(tablename);
+            return DBStatus::FEATURE_NOT_SUPPORTED;
+        }
     }
     std::vector<Trigger> operationTriggers;
     if (triggerExecutor_ && !tryGetAllTriggers(dbname, operationTriggers)) {
@@ -31551,10 +31633,15 @@ DBStatus StorageEngine::insertInternal(
         if (pit != actualValues.end() &&
             actualNullColumns.count(tbl.partitionKey) == 0) {
             targetPartition = getPartitionName(tbl, pit->second);
+        } else if (partitionTxn) {
+            if (tbl.partitionType == TableSchema::PartitionType::Hash && tbl.hashPartitions > 0)
+                targetPartition = "p0";
+            else
+                targetPartition = tbl.defaultPartitionName;
         }
         if (targetPartition.empty()) {
             lockManager_.unlock(tablename);
-            return DBStatus::INVALID_VALUE;
+            return partitionTxn ? DBStatus::CHECK_VIOLATION : DBStatus::INVALID_VALUE;
         }
     }
     if (tbl.subPartitionType != TableSchema::PartitionType::None) {
@@ -31562,10 +31649,13 @@ DBStatus StorageEngine::insertInternal(
         if (spit != actualValues.end() &&
             actualNullColumns.count(tbl.subPartitionKey) == 0) {
             targetSubPartition = getSubPartitionName(tbl, spit->second);
+        } else if (partitionTxn && tbl.subPartitionType == TableSchema::PartitionType::Hash &&
+                   tbl.subHashPartitions > 0) {
+            targetSubPartition = "sp0";
         }
         if (targetSubPartition.empty()) {
             lockManager_.unlock(tablename);
-            return DBStatus::INVALID_VALUE;
+            return partitionTxn ? DBStatus::CHECK_VIOLATION : DBStatus::INVALID_VALUE;
         }
     }
     const uint32_t heapFork = targetPartition.empty()
@@ -31646,18 +31736,21 @@ DBStatus StorageEngine::insertInternal(
     // Write row into page-based storage
     PageAllocator* pa = nullptr;
     std::shared_ptr<PageAllocator> partPa;
-    if (!targetPartition.empty() && !targetSubPartition.empty()) {
-        partPa = acquireSharedHeap(dbname, partitionDataPath(dbname, tablename, targetPartition, targetSubPartition), *heapRowWidth, pageSizeForFormatVersion(tbl.formatVersion), tbl.formatVersion,
-            dbname + "/" + tablename + "#" + targetPartition + "#" + targetSubPartition);
-        if (!partPa) {
-            return failBeforeHeapInsert(DBStatus::INVALID_VALUE);
+    if (!targetPartition.empty()) {
+        const auto path = targetSubPartition.empty()
+            ? partitionDataPath(dbname, tablename, targetPartition)
+            : partitionDataPath(dbname, tablename, targetPartition, targetSubPartition);
+        if (partitionTxn) {
+            bool exists = false;
+            if (!inspectRegularFile(path, exists) || !exists)
+                return failBeforeHeapInsert(DBStatus::IO_ERROR);
         }
-        pa = partPa.get();
-    } else if (!targetPartition.empty()) {
-        partPa = acquireSharedHeap(dbname, partitionDataPath(dbname, tablename, targetPartition), *heapRowWidth, pageSizeForFormatVersion(tbl.formatVersion), tbl.formatVersion,
-            dbname + "/" + tablename + "#" + targetPartition);
+        auto key = dbname + "/" + tablename + "#" + targetPartition;
+        if (!targetSubPartition.empty()) key += "#" + targetSubPartition;
+        partPa = acquireSharedHeap(dbname, path, *heapRowWidth,
+            pageSizeForFormatVersion(tbl.formatVersion), tbl.formatVersion, key);
         if (!partPa) {
-            return failBeforeHeapInsert(DBStatus::INVALID_VALUE);
+            return failBeforeHeapInsert(partitionTxn ? DBStatus::IO_ERROR : DBStatus::INVALID_VALUE);
         }
         pa = partPa.get();
     } else {
@@ -31896,7 +31989,8 @@ DBStatus StorageEngine::insertInternal(
                 bloomNulls[column] = true;
         }
         logTxnInsert(tablename, rid, strippedRow,
-                     bloomNulls.empty() ? nullptr : &bloomNulls);
+                     bloomNulls.empty() ? nullptr : &bloomNulls, heapFork,
+                     heapFork != 0 ? tbl.physicalRelationId : 0);
     }
 
     // Index writes are part of the INSERT atomicity boundary.  A failed
@@ -32100,10 +32194,9 @@ DBStatus StorageEngine::insertInternal(
             }
         }
     }
-    // Partition INSERT uses a statement-local allocator, whereas the
-    // whole-table specialized builders reopen partition files. Publish its
-    // dirty pages first so that scan observes the tuple just indexed above.
-    if (partPa && !partPa->flush()) {
+    // A native insert must publish the leaf before specialized builders
+    // reopen it. An explicit transaction flushes each touched leaf at commit.
+    if (partPa && !partitionTxn && !partPa->flush()) {
         return abortIndexUpdate();
     }
     if (!maintainSpecializedIndexesAfterMutation(dbname, tablename)) {
@@ -41338,6 +41431,11 @@ static bool scalarArgColumnIsNull(const std::string& arg,
                 rowBuffer, tbl, i, dbname, true, &valueIsNull);
             return valueIsNull;
         }
+        // Materialized partition rows carry their own bitmap; a leaf-local
+        // RID cannot be looked up in the parent heap.
+        if (g_bufferedConditionSchema == &tbl && g_bufferedConditionNulls &&
+            i < g_bufferedConditionNulls->size())
+            return (*g_bufferedConditionNulls)[i];
         // Condition-scope context (forEachRow scans)...
         if (g_condNullEngine && g_condNullRid >= 0 &&
             tbl.tablename == g_condNullTable)
@@ -45472,11 +45570,48 @@ std::vector<std::string> StorageEngine::queryExpr(
         else qualificationBranches = preparedAlternatives;
     }
     std::vector<std::pair<int64_t, std::string>> matchRows;
+    // A partition-local page/slot is not a relation-wide identity. Retain
+    // each actual tuple's bitmap beside its row rather than looking that RID
+    // up in the empty parent heap or deduplicating RIDs across leaves.
+    const bool capturePartitionNulls =
+        tbl.partitionType != TableSchema::PartitionType::None &&
+        tbl.formatVersion == DATA_FILE_FORMAT_VERSION;
+    std::vector<std::vector<bool>> partitionNulls;
     bool scanFailed = false;
     bool indexReadFailed = false;
     if (noMatches) {
         // Keep empty aggregate input semantics; do not evaluate a WHERE or
         // target function merely to discover that this branch cannot be true.
+    } else if (capturePartitionNulls) {
+        std::vector<std::vector<Condition>> scanBranches;
+        LocalExpressionSyntax predicateSyntax;
+        DatumMetadataContextPtr generatedMetadata;
+        if (!streamingQualification &&
+            (!conds.empty() || !options.conditionAlternatives.empty())) {
+            scanBranches = options.conditionAlternatives.empty()
+                ? std::vector<std::vector<Condition>>{conds} : preparedAlternatives;
+            for (auto& branch : scanBranches) prepareFilterConditions(*this, dbname, tbl, branch);
+            generatedMetadata = freezeGeneratedStorageInput(tbl, dbname, tablename, this);
+        }
+        if (!forEachVisibleRow(dbname, tablename, "SELECT", [&](uint32_t pid, uint16_t sid, const char* data, size_t len) {
+            std::vector<bool> bitmap;
+            if (!captureCurrentScanNullBitmap(tbl, data, len, bitmap) || bitmap.size() != tbl.len())
+                throw DbError("XX001", "partition tuple NULL bitmap unavailable");
+            std::string row(data, len);
+            if (!scanBranches.empty()) {
+                detail::ScopedStoredRowNullBitmap nullOwner(tbl, bitmap);
+                const bool matches = std::any_of(scanBranches.begin(), scanBranches.end(),
+                    [&](const auto& branch) {
+                        return std::all_of(branch.begin(), branch.end(), [&](const auto& predicate) {
+                            return evalConditionOnRowWithSyntax(
+                                predicate, row, tbl, &predicateSyntax, generatedMetadata.get());
+                        });
+                    });
+                if (!matches) return;
+            }
+            partitionNulls.push_back(std::move(bitmap));
+            matchRows.emplace_back(encodeRid(pid, sid), std::move(row));
+        })) scanFailed = true;
     } else if (conds.empty() || streamingQualification) {
         if (!forEachRow(dbname, tablename, [&](uint32_t pid, uint16_t sid, const char* data, size_t len) {
             matchRows.emplace_back(encodeRid(pid, sid), std::string(data, len));
@@ -45513,13 +45648,24 @@ std::vector<std::string> StorageEngine::queryExpr(
         return result;
     }
 
+    const auto bindPartitionNulls = [&](size_t row,
+            std::optional<detail::ScopedStoredRowNullBitmap>& owner) {
+        if (!capturePartitionNulls) return;
+        if (row >= partitionNulls.size() || partitionNulls[row].size() != tbl.len())
+            throw DbError("XX001", "partition tuple NULL bitmap lost during query");
+        owner.emplace(tbl, partitionNulls[row]);
+    };
+
     if (aggregateProjection) {
         // Capture nullable typed input cells before executing any aggregate
         // argument. Volatile arguments must not change a later cell's bitmap.
         std::vector<std::vector<ExprValue>> inputs;
         inputs.reserve(matchRows.size());
-        for (const auto& matched : matchRows) {
+        for (size_t row = 0; row < matchRows.size(); ++row) {
+            const auto& matched = matchRows[row];
             NullRowBinding binding(this, dbname, tablename, matched.first, tbl.len());
+            std::optional<detail::ScopedStoredRowNullBitmap> partitionNullOwner;
+            bindPartitionNulls(row, partitionNullOwner);
             std::vector<ExprValue> cells(tbl.len());
             for (size_t column : aggregateInputSlots) {
                 bool isNull = false;
@@ -45578,6 +45724,8 @@ std::vector<std::string> StorageEngine::queryExpr(
             auto& mr = matchRows[input];
             SortKey k{input, {}, {}};
             NullRowBinding nbS(this, dbname, tbl.tablename, mr.first, tbl.len());
+            std::optional<detail::ScopedStoredRowNullBitmap> partitionNullOwner;
+            bindPartitionNulls(input, partitionNullOwner);
             for (const auto& spec : orderBy) {
                 size_t sortIdx = tbl.len();
                 for (size_t i = 0; i < tbl.len(); ++i) {
@@ -45690,12 +45838,17 @@ std::vector<std::string> StorageEngine::queryExpr(
         });
         std::vector<std::pair<int64_t, std::string>> sorted;
         sorted.reserve(matchRows.size());
+        std::vector<std::vector<bool>> sortedPartitionNulls;
+        if (capturePartitionNulls) sortedPartitionNulls.reserve(matchRows.size());
         sortedInputPositions.reserve(matchRows.size());
         for (const auto& k : keys) {
             sortedInputPositions.push_back(k.inputPosition);
             sorted.push_back(std::move(matchRows[k.inputPosition]));
+            if (capturePartitionNulls)
+                sortedPartitionNulls.push_back(std::move(partitionNulls[k.inputPosition]));
         }
         matchRows = std::move(sorted);
+        if (capturePartitionNulls) partitionNulls = std::move(sortedPartitionNulls);
     }
 
     // Detect unnest in SELECT expressions
@@ -45851,6 +46004,8 @@ std::vector<std::string> StorageEngine::queryExpr(
             if (row == std::numeric_limits<size_t>::max()) continue;
             NullRowBinding binding(this, dbname, tbl.tablename,
                                    matchRows[row].first, tbl.len());
+            std::optional<detail::ScopedStoredRowNullBitmap> partitionNullOwner;
+            bindPartitionNulls(row, partitionNullOwner);
             for (size_t col = 0; col < exprs.size(); ++col) {
                 if (!options.deferredSortProjections.count(col))
                     earlySortProjection[row][col] = evaluateCell(exprs[col], matchRows[row],
@@ -45863,6 +46018,8 @@ std::vector<std::string> StorageEngine::queryExpr(
         auto& mr = matchRows[rowIndex];
         // Bind stored-NULL visibility for the row being projected.
         NullRowBinding nbP(this, dbname, tbl.tablename, mr.first, tbl.len());
+        std::optional<detail::ScopedStoredRowNullBitmap> partitionNullOwner;
+        bindPartitionNulls(rowIndex, partitionNullOwner);
         if (streamingQualification && !std::any_of(
                 qualificationBranches.begin(), qualificationBranches.end(),
                 [&](const auto& branch) {
@@ -55955,9 +56112,98 @@ void StorageEngine::recordSsiIndexKeys(const std::string& dbname,
     }
 }
 
+bool StorageEngine::hasPartitionInserts(const std::string& dbname,
+                                         const std::string& table) const {
+    const auto& txn = transactionContext();
+    return txn.inTransaction && txn.txnDB == dbname &&
+        std::any_of(txn.txnLog.begin(), txn.txnLog.end(), [&](const TxnLogEntry& entry) {
+            return entry.heapFork != 0 && (table.empty() || entry.tableName == table);
+        });
+}
+
+std::shared_ptr<PageAllocator> StorageEngine::transactionPartitionHeap(
+    const std::string& dbname, const std::string& table, uint32_t fork,
+    uint64_t relation) {
+    if (fork == 0 || relation == 0 || !tableExists(dbname, table)) return {};
+    const auto schema = getTableSchema(dbname, table);
+    if (schema.physicalRelationId != relation) return {};
+    const auto width = heapHeaderRowWidth(schema);
+    PartitionLeaf leaf;
+    bool collision = false;
+    if (!width || !resolvePartitionFork(schema, fork, leaf, collision)) return {};
+    const auto path = leaf.subPartition.empty()
+        ? partitionDataPath(dbname, table, leaf.partition)
+        : partitionDataPath(dbname, table, leaf.partition, leaf.subPartition);
+    bool exists = false;
+    if (!inspectRegularFile(path, exists) || !exists) return {};
+    auto key = dbname + "/" + table + "#" + leaf.partition;
+    if (!leaf.subPartition.empty()) key += "#" + leaf.subPartition;
+    return acquireSharedHeap(dbname, path, *width,
+        pageSizeForFormatVersion(schema.formatVersion), schema.formatVersion, key);
+}
+
+bool StorageEngine::undoPartitionInsert(const TxnLogEntry& entry) {
+    const auto& txn = transactionContext();
+    const auto& dbname = txn.txnDB;
+    if (entry.op != TxnLogEntry::Op::Insert || entry.rowData.empty()) return false;
+    auto allocator = transactionPartitionHeap(
+        dbname, entry.tableName, entry.heapFork, entry.partitionRelation);
+    if (!allocator) return false;
+    const auto schema = getTableSchema(dbname, entry.tableName);
+    uint32_t pageId = 0;
+    uint16_t slotId = 0;
+    decodeRid(entry.rowIdx, pageId, slotId);
+    if (pageId == 0 || !lockManager_.pageLockExclusive(dbname, entry.tableName, pageId))
+        return false;
+    {
+        HeapPageGuard guard{lockManager_, *allocator, dbname, entry.tableName, pageId};
+        if (pageId < allocator->numPages()) {
+            char* buffer = allocator->fetchPage(pageId);
+            if (!buffer) return false;
+            guard.pinned = true;
+            PageWrapper page(buffer, allocator->pageSize(), schema.formatVersion);
+            if (!page.isValid()) return false;
+            const char* row = nullptr;
+            size_t length = 0;
+            if (page.read(slotId, row, length)) {
+                if (length < sizeof(HeapTupleHeaderData) ||
+                    castHeapHeader(row)->t_fields.t_xmin != txn.currentTxnId ||
+                    stripRowHeader(row, length, schema.formatVersion, schema.len()) != entry.rowData)
+                    return false;
+                const Lsn before = walPageImage(
+                    dbname, entry.tableName, pageId, buffer, allocator->pageSize(),
+                    true, entry.heapFork);
+                if (before == INVALID_LSN) return false;
+                std::vector<char> image(buffer, buffer + allocator->pageSize());
+                PageWrapper staged(image.data(), allocator->pageSize(), schema.formatVersion);
+                if (!staged.remove(slotId)) return false;
+                const Lsn after = walPageImage(
+                    dbname, entry.tableName, pageId, image.data(), allocator->pageSize(),
+                    false, entry.heapFork);
+                auto* wal = getWAL(dbname);
+                if (after == INVALID_LSN || !wal || !wal->XLogFlush(after)) return false;
+                std::memcpy(buffer, image.data(), image.size());
+                setPageLsnAndChecksum(buffer, after);
+                allocator->markDirty(pageId);
+                getFSM(dbname, entry.tableName)->setFreePercent(pageId,
+                    static_cast<uint8_t>(staged.freeSpace() * 100 / allocator->pageSize()));
+                getVM(dbname, entry.tableName)->setAllVisible(pageId, false);
+            }
+            // A retry may find the slot already empty while the last
+            // attempt's page write is still dirty.
+            if (!allocator->flush()) return false;
+        }
+    }
+    // The saved physical payload identifies this row's own TOAST values.
+    // Reading the parent heap by a leaf-local RID cannot identify them.
+    deleteToastForRow(dbname, entry.tableName, entry.rowData);
+    return true;
+}
+
 void StorageEngine::logTxnInsert(const std::string& tableName, int64_t rowIdx,
                                  const std::string& rowData,
-                                 const std::vector<bool>* rowNulls) {
+                                 const std::vector<bool>* rowNulls, uint32_t heapFork,
+                                 uint64_t partitionRelation) {
     // Executor-owned CTE/derived relations are dropped before the outer SQL
     // command returns.  They must not leave undo entries that point at files
     // which no longer exist when an explicit transaction later rolls back.
@@ -55969,6 +56215,8 @@ void StorageEngine::logTxnInsert(const std::string& tableName, int64_t rowIdx,
     entry.tableName = tableName;
     entry.rowIdx = rowIdx;
     entry.rowData = rowData;
+    entry.heapFork = heapFork;
+    entry.partitionRelation = partitionRelation;
     if (rowNulls) {
         auto owner = std::make_shared<TxnLogEntry::BloomNullSnapshot>();
         owner->row = *rowNulls;
@@ -55979,7 +56227,8 @@ void StorageEngine::logTxnInsert(const std::string& tableName, int64_t rowIdx,
     uint16_t slotId = 0;
     decodeRid(rowIdx, pageId, slotId);
     (void)slotId;
-    transactionContext().txnHeapWritebackPages.insert({tableName, pageId});
+    transactionContext().txnHeapWritebackPages.insert(
+        {tableName, pageId, heapFork, partitionRelation});
     if (transactionContext().txnIsolationLevel == IsolationLevel::SERIALIZABLE) {
         TableSchema tbl = getTableSchema(transactionContext().txnDB, tableName);
         recordSsiIndexKeys(
@@ -57022,6 +57271,8 @@ bool StorageEngine::createTransactionBackup() {
     // back up. In particular, do not persist catalogs before this check.
     if (context.databaseOwnershipDeferred || !context.databaseExclusiveLock ||
         !context.databaseExclusiveLock->owns_lock()) return false;
+    if (hasPartitionInserts(context.txnDB))
+        throw DbError("0A000", "DDL snapshots after transactional partition INSERT are not supported");
     if (!context.txnBackupPath.empty()) return true;
     const std::string dbname = context.txnDB;
     if (catalogService_ && !catalogService_->persistAll()) return false;
@@ -57503,7 +57754,9 @@ DBStatus StorageEngine::commitTransaction() {
     std::vector<CommitHeapPage> commitHeapPages;
     std::vector<PageAllocator*> commitAllocationState;
     std::set<PageAllocator*> seenAllocationState;
-    for (const auto& [tableName, pageId] :
+    std::map<std::tuple<std::string, uint32_t, uint64_t>, std::shared_ptr<PageAllocator>>
+        partitionOwners;
+    for (const auto& [tableName, pageId, heapFork, partitionRelation] :
          transactionContext().txnHeapWritebackPages) {
         if (tableName.empty() || pageId == 0) {
             rollbackTransaction();
@@ -57511,8 +57764,18 @@ DBStatus StorageEngine::commitTransaction() {
         }
         // A relation can legitimately disappear after its last DML (for
         // example INSERT followed by DROP in one DDL-capable transaction).
-        if (!tableExists(committingDb, tableName)) continue;
-        PageAllocator* allocator = getPageAllocator(committingDb, tableName);
+        PageAllocator* allocator = nullptr;
+        if (heapFork == 0) {
+            if (!tableExists(committingDb, tableName)) continue;
+            allocator = getPageAllocator(committingDb, tableName);
+        } else {
+            auto [it, inserted] = partitionOwners.try_emplace({tableName, heapFork, partitionRelation});
+            if (inserted) {
+                it->second = transactionPartitionHeap(
+                    committingDb, tableName, heapFork, partitionRelation);
+            }
+            allocator = it->second.get();
+        }
         if (!allocator || !allocator->bufferPool()) {
             rollbackTransaction();
             return DBStatus::IO_ERROR;
@@ -57565,23 +57828,30 @@ DBStatus StorageEngine::commitTransaction() {
     // written pages in the set's deterministic order and hold them across the
     // WAL durability boundary plus writeback. This prevents both user writers
     // and a simultaneous commit from changing a frame while it is copied.
-    size_t lockedCommitHeapPages = 0;
+    const auto samePageLockAsPrevious = [&](size_t index) {
+        return index != 0 &&
+            commitHeapPages[index - 1].pageId == commitHeapPages[index].pageId &&
+            commitHeapPages[index - 1].tablename == commitHeapPages[index].tablename;
+    };
+    size_t visitedCommitHeapPages = 0;
     const auto releaseCommitHeapPageLocks = [&]() {
-        while (lockedCommitHeapPages > 0) {
-            const auto& page = commitHeapPages[lockedCommitHeapPages - 1];
+        while (visitedCommitHeapPages > 0) {
+            const size_t index = --visitedCommitHeapPages;
+            if (samePageLockAsPrevious(index)) continue;
+            const auto& page = commitHeapPages[index];
             lockManager_.pageUnlock(
                 committingDb, page.tablename, page.pageId);
-            --lockedCommitHeapPages;
         }
     };
-    for (const auto& page : commitHeapPages) {
+    for (; visitedCommitHeapPages < commitHeapPages.size(); ++visitedCommitHeapPages) {
+        if (samePageLockAsPrevious(visitedCommitHeapPages)) continue;
+        const auto& page = commitHeapPages[visitedCommitHeapPages];
         if (!lockManager_.pageLockExclusive(
                 committingDb, page.tablename, page.pageId)) {
             releaseCommitHeapPageLocks();
             rollbackTransaction();
             return DBStatus::LOCK_CONFLICT;
         }
-        ++lockedCommitHeapPages;
     }
 
     WALManager* wal = getWAL(committingDb);
@@ -58326,6 +58596,10 @@ DBStatus StorageEngine::rollbackTransaction() {
         static_cast<std::ptrdiff_t>(rowUndoReplaySize);
     for (auto it = std::make_reverse_iterator(rowUndoBegin);
          it != transactionContext().txnLog.rend(); ++it) {
+        if (it->heapFork != 0) {
+            if (!undoPartitionInsert(*it)) rowUndoOk = false;
+            continue;
+        }
         PageAllocator* pa = getPageAllocator(transactionContext().txnDB, it->tableName);
         TableSchema tbl = getTableSchema(transactionContext().txnDB, it->tableName);
 
@@ -59516,6 +59790,9 @@ DBStatus StorageEngine::prepareTransaction(const std::string& xid) {
     if (transactionContext().rollbackPending) return DBStatus::IO_ERROR;
     if (!transactionContext().inTransaction) return DBStatus::INVALID_VALUE;
     if (!validPreparedXid(xid)) return DBStatus::INVALID_VALUE;
+    // The current serialized prepared-state format cannot identify the
+    // partition that owns a row after the preparing backend exits.
+    if (hasPartitionInserts(transactionContext().txnDB)) return DBStatus::FEATURE_NOT_SUPPORTED;
     if (transactionContext().accessedTemporaryObjects) {
         // Like PG, a failed PREPARE at this boundary ends the whole top-level
         // transaction. In particular no permanent writes or prepared locks
@@ -60236,6 +60513,10 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
     // Undo entries from end back to savepoint
     for (size_t i = transactionContext().txnLog.size(); i > txnLogSpIdx; --i) {
         auto& entry = transactionContext().txnLog[i - 1];
+        if (entry.heapFork != 0) {
+            if (!undoPartitionInsert(entry)) rowUndoOk = false;
+            continue;
+        }
         PageAllocator* pa = getPageAllocator(transactionContext().txnDB, entry.tableName);
         TableSchema tbl = getTableSchema(transactionContext().txnDB, entry.tableName);
         if (entry.op == TxnLogEntry::Op::Insert) {
@@ -60702,6 +60983,26 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
         (void)rollbackTransaction();
         return DBStatus::IO_ERROR;
     }
+
+    // Undo has flushed the affected leaf pages. A page with no retained
+    // insert must not force COMMIT to reopen a leaf that later DDL can drop.
+    const auto partitionPage = [](const TxnLogEntry& entry) {
+        uint32_t pageId = 0;
+        uint16_t slotId = 0;
+        decodeRid(entry.rowIdx, pageId, slotId);
+        return TxnHeapPage{entry.tableName, pageId, entry.heapFork,
+                           entry.partitionRelation};
+    };
+    std::set<TxnHeapPage> undonePartitionPages;
+    for (size_t i = txnLogSpIdx; i < context.txnLog.size(); ++i) {
+        const auto& entry = context.txnLog[i];
+        if (entry.heapFork != 0) undonePartitionPages.insert(partitionPage(entry));
+    }
+    for (size_t i = 0; i < txnLogSpIdx && !undonePartitionPages.empty(); ++i) {
+        const auto& entry = context.txnLog[i];
+        if (entry.heapFork != 0) undonePartitionPages.erase(partitionPage(entry));
+    }
+    for (const auto& page : undonePartitionPages) context.txnHeapWritebackPages.erase(page);
 
     transactionContext().txnLog.resize(txnLogSpIdx);
     transactionContext().txnLogicalChanges.resize(logicalChangeSpIdx);

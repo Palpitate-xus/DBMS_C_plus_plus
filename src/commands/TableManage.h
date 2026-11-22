@@ -1618,6 +1618,10 @@ public:
                     bool registerSiread = true,
                     bool indexMaintenanceView = false,
                     ScopedMaintenanceProgress* progress = nullptr) const;
+    // Copy the physical bitmap belonging to this scan callback's payload.
+    static bool captureCurrentScanNullBitmap(const TableSchema& schema,
+                                             const char* payload, size_t length,
+                                             std::vector<bool>& nulls);
     // Caller holds the relation's shared lock for the complete cursor lifetime.
     // Captures one MVCC view and heap extent, buffers at most one raw page,
     // and releases page locks/pins before returning any owned row. Partitioned
@@ -2502,10 +2506,28 @@ private:
             std::vector<bool> next;
         };
         std::shared_ptr<const BloomNullSnapshot> bloomNulls;
+        uint32_t heapFork = 0;
+        uint64_t partitionRelation = 0;
+    };
+    struct TxnHeapPage {
+        std::string tableName;
+        uint32_t pageId;
+        uint32_t heapFork = 0;
+        uint64_t partitionRelation = 0;
+        bool operator<(const TxnHeapPage& other) const {
+            return std::tie(tableName, pageId, heapFork, partitionRelation) <
+                   std::tie(other.tableName, other.pageId, other.heapFork, other.partitionRelation);
+        }
     };
     void logTxnInsert(const std::string& tableName, int64_t rowIdx,
                       const std::string& rowData,
-                      const std::vector<bool>* rowNulls = nullptr);
+                      const std::vector<bool>* rowNulls, uint32_t heapFork,
+                      uint64_t partitionRelation);
+    bool hasPartitionInserts(const std::string& dbname, const std::string& table = "") const;
+    std::shared_ptr<PageAllocator> transactionPartitionHeap(
+        const std::string& dbname, const std::string& table, uint32_t fork,
+        uint64_t relation);
+    bool undoPartitionInsert(const TxnLogEntry& entry);
     void logTxnUpdate(const std::string& tableName, int64_t rowIdx,
                       const std::string& oldRowData,
                       const std::vector<bool>* oldNulls = nullptr,
@@ -2733,7 +2755,7 @@ private:
         std::set<std::string> txnWrittenPages;
         // Physical heap pages that this transaction must consider for
         // transaction-scoped writeback, independent of SSI bookkeeping.
-        std::set<std::pair<std::string, uint32_t>> txnHeapWritebackPages;
+        std::set<TxnHeapPage> txnHeapWritebackPages;
         std::set<SsiIndexPredicate> txnReadIndexPredicates;
         std::set<SsiIndexKey> txnWrittenIndexKeys;
         // Pages whose pre-image has already been logged in this transaction.

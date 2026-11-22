@@ -220,12 +220,11 @@ static void test_range_partitioning() {
            dbms::DBStatus::INVALID_VALUE);
     assert(rowCount(db, "logs") == 4);
 
-    // Transaction undo has the same parent-only row locator limitation.
-    // Reject before the sequence/WAL/heap state changes rather than accepting
-    // an INSERT that ROLLBACK cannot remove.
+    // The primary-key index still stores leaf-local row addresses without
+    // recording which leaf owns them.
     assert(g_engine.beginTransaction(db) == dbms::DBStatus::OK);
     assert(g_engine.insert(db, "logs", {{"id", "6"}, {"yr", "2019"}}) ==
-           dbms::DBStatus::INVALID_VALUE);
+           dbms::DBStatus::FEATURE_NOT_SUPPORTED);
     assert(g_engine.rollbackTransaction() == dbms::DBStatus::OK);
     assert(rowCount(db, "logs") == 4);
 
@@ -766,6 +765,143 @@ static void test_partition_wal_routing() {
     std::cout << "[PART] WAL partition routing OK" << std::endl;
 }
 
+static void test_transactional_partition_inserts() {
+    using dbms::DBStatus;
+    const std::string db = testDbPath("part_txn_insert");
+    const std::string table = "events";
+    cleanup(db);
+
+    const std::string longText = incompressiblePayload(9000);
+    const std::map<std::string, std::string> committed = {
+        {"1", "left " + longText}, {"2", "right " + longText}};
+    const auto read = [&](dbms::StorageEngine& engine) {
+        std::map<std::string, std::string> rows;
+        const auto schema = engine.getTableSchema(db, table);
+        assert(engine.forEachRow(db, table,
+            [&](uint32_t, uint16_t, const char* bytes, size_t size) {
+                const std::string row(bytes, size);
+                const auto id = engine.extractColumnValue(row, schema, 0, db);
+                const auto payload = engine.extractColumnValue(row, schema, 2, db);
+                assert(rows.emplace(id, payload).second);
+            }));
+        return rows;
+    };
+
+    {
+        dbms::StorageEngine writer;
+        assert(writer.createDatabase(db, "utf8") == DBStatus::OK);
+        auto schema = makeSchema(table, {"id int", "bucket int", "payload text"});
+        schema.partitionType = dbms::TableSchema::PartitionType::Range;
+        schema.partitionKey = "bucket";
+        schema.rangePartitions = {{"low", "10"}, {"high", "20"}};
+        assert(writer.createTable(db, schema) == DBStatus::OK);
+        const auto insert = [&](int id, int bucket, const std::string& payload) {
+            return writer.insert(db, table, {{"id", std::to_string(id)},
+                {"bucket", std::to_string(bucket)}, {"payload", payload}});
+        };
+
+        assert(writer.beginTransaction(db) == DBStatus::OK);
+        assert(insert(1, 5, committed.at("1")) == DBStatus::OK);
+        assert(insert(2, 15, committed.at("2")) == DBStatus::OK);
+        assert(writer.savepoint("keep") == DBStatus::OK);
+        assert(insert(3, 5, "discard left " + longText) == DBStatus::OK);
+        assert(insert(4, 15, "discard right " + longText) == DBStatus::OK);
+        assert(read(writer).size() == 4);
+        assert(writer.rollbackToSavepoint("keep") == DBStatus::OK);
+        assert(read(writer) == committed);
+        assert(writer.commitTransaction() == DBStatus::OK);
+
+        assert(writer.beginTransaction(db) == DBStatus::OK);
+        assert(insert(5, 5, "rollback left " + longText) == DBStatus::OK);
+        assert(insert(6, 15, "rollback right " + longText) == DBStatus::OK);
+        assert(writer.prepareTransaction("partition-insert") == DBStatus::FEATURE_NOT_SUPPORTED);
+        assert(writer.truncateTable(db, table) == DBStatus::FEATURE_NOT_SUPPORTED);
+        assert(writer.rollbackTransaction() == DBStatus::OK);
+        assert(read(writer) == committed);
+    }
+
+    {
+        dbms::StorageEngine reopened;
+        assert(read(reopened) == committed);
+        assert(reopened.beginTransaction(db) == DBStatus::OK);
+        assert(reopened.savepoint("before_insert") == DBStatus::OK);
+        assert(reopened.insert(db, table, {{"id", "7"}, {"bucket", "5"},
+            {"payload", longText}}) == DBStatus::OK);
+        assert(reopened.rollbackToSavepoint("before_insert") == DBStatus::OK);
+        assert(reopened.dropTable(db, table) == DBStatus::OK);
+        assert(reopened.commitTransaction() == DBStatus::OK);
+    }
+    {
+        dbms::StorageEngine reopened;
+        assert(!reopened.tableExists(db, table));
+    }
+
+    cleanup(db);
+    std::cout << "[PART] Transactional partition inserts OK" << std::endl;
+}
+
+static void test_partition_scan_uses_leaf_nulls() {
+    using dbms::DBStatus;
+    const std::string db = testDbPath("part_scan_nulls");
+    const std::string table = "events";
+    cleanup(db);
+    assert(g_engine.createDatabase(db, "utf8") == DBStatus::OK);
+    auto schema = makeSchema(table, {"bucket int", "value int"});
+    schema.partitionType = dbms::TableSchema::PartitionType::Range;
+    schema.partitionKey = "bucket";
+    schema.rangePartitions = {{"low", "10"}, {"high", "20"}};
+    assert(g_engine.createTable(db, schema) == DBStatus::OK);
+    assert(g_engine.insertRow(db, table, {{"bucket", "5"}, {"value", std::nullopt}}) ==
+           DBStatus::OK);
+    assert(g_engine.insertRow(db, table, {{"bucket", "15"}, {"value", "0"}}) ==
+           DBStatus::OK);
+
+    dbms::TableScanOp scan(&g_engine, db, table);
+    assert(scan.open());
+    std::string row;
+    std::map<std::string, bool> observed;
+    int64_t firstRid = -1;
+    while (scan.next(row)) {
+        const auto bucket = g_engine.extractColumnValue(row, schema, 0, db);
+        const bool valueIsNull = scan.lastColumnIsNull(1);
+        assert(observed.emplace(bucket, valueIsNull).second);
+        std::vector<bool> nulls;
+        assert(scan.lastStoredNullBitmap(nulls));
+        assert(nulls == std::vector<bool>({false, valueIsNull}));
+        if (firstRid == -1) firstRid = scan.lastRid();
+        else assert(scan.lastRid() == firstRid);
+    }
+    scan.close();
+    const std::map<std::string, bool> expected = {{"5", true}, {"15", false}};
+    assert(observed == expected);
+
+    dbms::StorageEngine::SelectExpr bucket;
+    bucket.colName = "bucket";
+    dbms::StorageEngine::SelectExpr withFallback;
+    withFallback.isScalar = true;
+    withFallback.funcName = "coalesce";
+    withFallback.funcArgs = {"value", "777"};
+    dbms::StorageEngine::SelectExpr isNull;
+    isNull.isScalar = true;
+    isNull.funcName = "is_null";
+    isNull.funcArgs = {"value"};
+    dbms::StorageEngine::OrderBySpec order;
+    order.colName = "bucket";
+    auto options = dbms::StorageEngine::defaultQueryExprOptions();
+    options.conditionAlternatives = {{"=bucket 5"}, {"=bucket 15"}, {"=bucket 5"}};
+    std::vector<std::vector<std::string>> rows;
+    std::vector<std::vector<bool>> nulls;
+    g_engine.queryExpr(db, table, options.conditionAlternatives.front(),
+        {bucket, withFallback, isNull}, {order}, &rows, &nulls, nullptr, options);
+    const std::vector<std::vector<std::string>> projected = {
+        {"5", "777", "t"}, {"15", "0", "f"}};
+    assert(rows == projected);
+    assert(nulls == std::vector<std::vector<bool>>(2, {false, false, false}));
+
+    cleanup(db);
+    std::cout << "[PART] Partition scans retain each leaf's NULL bitmap OK" << std::endl;
+}
+
 // The SQL frontend cannot yet create real partition children, so exercise
 // the parent-owned leaf format through the native storage API. Lock the same
 // physical page tokens used by the scanner to inspect both leaf transitions.
@@ -903,6 +1039,8 @@ int main() {
     test_drop_removes_partition_storage();
     test_rename_preserves_partition_storage();
     test_partition_wal_routing();
+    test_transactional_partition_inserts();
+    test_partition_scan_uses_leaf_nulls();
     test_analyze_partition_progress();
     std::cout << "[PART] all passed" << std::endl;
     return 0;

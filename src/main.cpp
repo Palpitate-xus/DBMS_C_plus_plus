@@ -40,6 +40,7 @@
 #include "network/ConnectionPool.h"
 #include "replication/LogicalDecoder.h"
 #include "storage/PageCrypto.h"
+#include "storage/DataFileHeader.h"
 #include "common/version.h"
 #include "common/DataDirectory.h"
 #include "common/DbError.h"
@@ -39568,10 +39569,14 @@ static bool executeInternal(const string& rawSql, Session& s) {
                         &structuredScalarResult.nulls, nullptr, scalarExecutionOptions);
                     structuredScalarRows = true;
                 } else if (captureStructuredScalar && !groups.empty() &&
-                           scalarExecutionOptions.maxProjectionRows && !hasMixedOrderKeys) {
+                           (scalarExecutionOptions.maxProjectionRows ||
+                            (tbl.partitionType != dbms::TableSchema::PartitionType::None &&
+                             tbl.formatVersion == dbms::DATA_FILE_FORMAT_VERSION)) &&
+                           !hasMixedOrderKeys) {
                     scalarExecutionOptions.conditionAlternatives = groups;
                     answers = g_engine.queryExpr(queryDb, tname, groups.front(),
-                        mergeExprs, scalarDemandOrder, &structuredScalarResult.rows,
+                        canSortScalarProjected ? mergeExprs : selectExprs,
+                        scalarDemandOrder, &structuredScalarResult.rows,
                         &structuredScalarResult.nulls, nullptr, scalarExecutionOptions);
                     structuredScalarRows = true;
                 } else if (captureStructuredScalar && !groups.empty() &&
