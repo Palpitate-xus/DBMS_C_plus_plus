@@ -1,18 +1,18 @@
 # 更新日志
 
 <details>
-<summary>可以在查询里查看和修改连接设置 · 2026-11-22</summary>
+<summary>查询里也能查看和修改连接设置 · 2026-11-22</summary>
 
-应用可以用 SQL 函数查看当前的等待时间，也可以为一次事务临时调整等待时间或查询使用的内存。
+可以在 SQL 查询里查看或调整当前连接的锁等待时间。也可以只为当前事务调整。
 
 [使用示例](docs/MANUAL.md#在-sql-表达式里读取和修改设置) · [测试报告](docs/test-report.md#session-setting-functions-20261122) · [性能报告](docs/performance-report-2026-10-30.md#session-setting-functions-cost-20261122)
 
 </details>
 
 <details>
-<summary>回滚事务时，会恢复之前的超时设置 · 2026-11-22</summary>
+<summary>回滚后会恢复原来的超时设置 · 2026-11-22</summary>
 
-可以只为当前事务缩短锁等待时间，结束后恢复原来的设置。用 `SHOW` 可以随时查看当前值。
+例如，事务中临时缩短了锁等待时间，回滚后就会恢复到事务开始前的值。
 
 [使用示例](docs/MANUAL.md#在事务里临时调整超时) · [测试报告](docs/test-report.md#transactional-timeouts-20261122) · [性能报告](docs/performance-report-2026-10-30.md#transactional-timeouts-cost-20261122)
 
