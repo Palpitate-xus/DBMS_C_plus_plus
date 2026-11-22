@@ -1,8 +1,8 @@
 # PostgreSQL 18 功能差距审计
 
-## 2026-11-22 · schema 改名
+## 2026-11-22 · 含表、视图和序列的 schema 改名
 
-`ALTER SCHEMA ... RENAME TO` 支持空 schema 及只含受支持表、视图和索引的用户 schema。目录编号不变，数据文件、外键、普通视图与权限一起更新或恢复。序列、物化视图、自定义类型和完整的权限模型仍有差距。`P0-03`、`P0-04`、`CAT-02`、`CAT-07` 与 `SQL-11` 保持部分实现。[测试范围](test-report.md#schema-rename-20261122)
+`ALTER SCHEMA ... RENAME TO` 支持空 schema 及只含受支持表、视图、索引和序列的用户 schema。目录编号保留，数据文件、外键、普通视图、序列所有权和授权记录一起更新或恢复。受测的自增列继续沿用原来的序列。物化视图、自定义类型、例程和完整的权限模型仍有差距。`P0-03`、`P0-04`、`CAT-02`、`CAT-07`、`CAT-15` 与 `SQL-11` 保持部分实现。[表与视图测试](test-report.md#schema-rename-20261122) · [序列测试](test-report.md#schema-rename-sequences-20261122)
 
 ## 2026-11-22 · 表改名或迁移后保留普通视图
 

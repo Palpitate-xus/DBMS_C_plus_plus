@@ -875,14 +875,14 @@ SHOW DATABASES;
 
 ### schema 改名
 
-管理员可以给空 schema 或包含普通表、索引和普通视图的 schema 改名。表和视图用新名字访问，目录里的对象编号和已记录的视图引用继续沿用。
+管理员可以给空 schema 或只包含普通表、索引、普通视图和序列的 schema 改名。通过新名字访问其中的对象。自增列会继续生成编号，原来通过序列对象编号保存的默认值和视图也能继续使用。
 
 ```sql
 ALTER SCHEMA sales RENAME TO sales_archive;
 SELECT * FROM sales_archive.orders;
 ```
 
-包含序列、用户定义的类型或例程，以及有受影响的物化视图时，数据库会拒绝改名。表权限、schema 权限和按 schema 设置的默认权限随受支持的改名保留。会话的 `search_path` 仍保留原来设置的文本。[兼容范围](compatibility-contract.md#schema-rename-contract) · [恢复验证](test-report.md#schema-rename-20261122)
+包含用户定义的类型或例程，以及有受影响的物化视图时，数据库会拒绝改名。如果旧视图只写了序列名，数据库又无法确定它原来引用的是哪一个序列，先用 `CREATE OR REPLACE VIEW` 保存带 schema 的序列名。显式转换成 `text` 的参数仍按查询时的名称查找，`search_path` 也继续使用会话原来的设置。回滚会恢复旧名称，已经取出的编号仍会保留。[兼容范围](compatibility-contract.md#schema-rename-contract) · [序列恢复验证](test-report.md#schema-rename-sequences-20261122)
 
 ---
 

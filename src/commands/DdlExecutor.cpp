@@ -2462,9 +2462,11 @@ static void dropColumnDependentViews(
 
 using ViewRelationDependencies = std::set<std::pair<Oid, int32_t>>;
 using ViewSourceBinding = std::tuple<size_t, size_t, size_t>;
+using ViewEditSpan = std::pair<size_t, size_t>;
 using ViewSourceRenames = std::map<std::pair<std::string, std::string>,
                                    std::pair<std::string, std::string>>;
 struct ViewRenamePlan {
+    Oid oid = INVALID_OID;
     std::string name;
     std::string definition;
     std::string query;
@@ -2473,6 +2475,7 @@ struct ViewRenamePlan {
     std::vector<ViewSourceBinding> references;
     std::map<size_t, std::set<std::string>> joinKeys;
     QueryRowDescriptor output;
+    std::set<Oid> newSequenceDependencies;
 };
 static std::vector<ViewRenamePlan> planDependentViewRenames(
     CatalogManager& catalog, const std::string& database,
@@ -2484,7 +2487,7 @@ static std::vector<ViewRenamePlan> planViewSourceRename(
     const std::string& newSchema, const std::string& newName);
 static std::vector<ViewRenamePlan> planViewSourceRenames(
     StorageEngine& engine, CatalogManager& catalog, const std::string& database,
-    const ViewSourceRenames& renames);
+    const ViewSourceRenames& renames, const std::set<Oid>& sequences = {});
 static void publishDependentViewRenames(
     CatalogManager& catalog, const std::string& database,
     const std::vector<ViewRenamePlan>& plans, DdlTransaction& transaction,
@@ -11008,7 +11011,8 @@ bool DdlExecutor::executeDropType(const DropStmt* stmt, Session& s) {
 static ViewRelationDependencies boundViewRelationDependencies(
     const CatalogManager& catalog, const std::string& database, const PreparedQuery& prepared,
     const std::function<void(const ColumnRefExpr&)>& onColumn = {},
-    StorageEngine& engine = g_engine) {
+    StorageEngine& engine = g_engine,
+    const std::function<void(const FunctionCallExpr&)>& onCall = {}) {
     ViewRelationDependencies dependencies;
     std::map<size_t, const PreparedQuery::SourceRange*> sources;
     std::map<size_t, std::vector<PgAttributeRow>> attributes;
@@ -11099,6 +11103,7 @@ static ViewRelationDependencies boundViewRelationDependencies(
         } else if (const auto* binary = dynamic_cast<const BinaryOpExpr*>(node)) {
             expression(binary->left.get()); expression(binary->right.get());
         } else if (const auto* call = dynamic_cast<const FunctionCallExpr*>(node)) {
+            if (onCall) onCall(*call);
             for (const auto& argument : call->args) expression(argument.get());
             for (const auto& argument : call->namedArgs) expression(argument.value.get());
             expression(call->filter.get());
@@ -11186,8 +11191,8 @@ static std::string viewDefinitionQuery(std::string definition) {
     return definition;
 }
 
-static std::string qualifyViewSources(const PreparedQuery& prepared) {
-    std::map<size_t, std::string> schemaPrefixes;
+static std::string qualifyViewSources(const PreparedQuery& prepared,
+    std::map<ViewEditSpan, std::string> edits = {}) {
     for (const auto& range : prepared.sourceRanges) {
         const auto* from = range.source;
         if (!from || from->type != FromItem::Type::Table || range.cteStatement ||
@@ -11200,19 +11205,24 @@ static std::string qualifyViewSources(const PreparedQuery& prepared) {
         if (from->tableNameBegin >= prepared.source.size())
             throw DbError("XX000", "view source name has no source position");
         const auto prefix = SQLParser::quoteIdentifier(range.relationSchema) + ".";
-        const auto [entry, inserted] = schemaPrefixes.emplace(from->tableNameBegin, prefix);
+        const auto [entry, inserted] = edits.emplace(
+            ViewEditSpan{from->tableNameBegin, from->tableNameBegin}, prefix);
         if (!inserted && entry->second != prefix)
             throw DbError("XX000", "ambiguous view source position");
     }
     // Reopening a view must use the schemas chosen during CREATE. Edit only
     // bound relation tokens, leaving aliases, CTE names and literals intact.
     std::string definition = prepared.source;
-    for (auto edit = schemaPrefixes.rbegin(); edit != schemaPrefixes.rend(); ++edit)
-        definition.insert(edit->first, edit->second);
+    size_t previous = definition.size();
+    for (auto edit = edits.rbegin(); edit != edits.rend(); ++edit) {
+        const auto [begin, end] = edit->first;
+        if (begin > end || end > previous)
+            throw DbError("XX001", "view source edits overlap or lack source positions");
+        definition.replace(begin, end - begin, edit->second);
+        previous = begin;
+    }
     return definition;
 }
-
-using ViewEditSpan = std::pair<size_t, size_t>;
 
 static auto viewJoinKeys(const PreparedQuery& query) {
     std::map<size_t, std::set<std::string>> keys;
@@ -11224,19 +11234,147 @@ static auto viewJoinKeys(const PreparedQuery& query) {
     return keys;
 }
 
+static bool mayReferenceSequence(const std::string& sql) {
+    const auto normalized = SQLParser::toLower(sql);
+    return normalized.find("nextval") != std::string::npos ||
+        normalized.find("currval") != std::string::npos ||
+        normalized.find("setval") != std::string::npos;
+}
+
+struct ViewSequenceArgument {
+    Oid oid;
+    ViewEditSpan span;
+    bool byName;
+};
+
+// Explicit text casts are evaluated at runtime and have no object dependency.
+static std::optional<ViewSequenceArgument> inspectViewSequenceArgument(
+    const FunctionCallExpr& call, StorageEngine& engine, ExprEvaluator& resolver,
+    const CatalogManager::MetadataSnapshot& catalog, bool bindByName,
+    const std::set<Oid>* moving = nullptr) {
+    CatalogManager::QualifiedName routine;
+    const auto spelling = call.schema.empty() ? call.funcName : call.schema + "." + call.funcName;
+    if (call.args.empty() || !CatalogManager::parseQualifiedName(spelling, routine, true) ||
+        (routine.name != "nextval" && routine.name != "currval" && routine.name != "setval"))
+        return std::nullopt;
+
+    const Expr* argument = call.args.front().get();
+    const Expr* literal = argument;
+    std::string castType;
+    if (const auto* cast = dynamic_cast<const CastExpr*>(argument)) {
+        literal = cast->operand.get();
+        castType = cast->typeName;
+    } else if (const auto* cast = dynamic_cast<const BinaryOpExpr*>(argument); cast && cast->op == "::") {
+        const auto* type = dynamic_cast<const LiteralExpr*>(cast->right.get());
+        if (!type) return std::nullopt;
+        literal = cast->left.get();
+        castType = type->value;
+    }
+    const auto input = column_default::stringLiteral(literal);
+    if (!input || input->empty()) return std::nullopt;
+    Oid oid = INVALID_OID;
+    const auto [end, error] = std::from_chars(input->data(), input->data() + input->size(), oid);
+    const bool numeric = error == std::errc{} && end == input->data() + input->size();
+    if (!numeric && !bindByName) return std::nullopt;
+    if (!castType.empty()) {
+        const auto type = resolveDeclaredTypeName(castType, &catalog, currentSession());
+        if (type.typeOid != 2205) return std::nullopt;
+    }
+    if (resolver.scalarFunctionIdentity(&call, &engine).rfind("builtin", 0) != 0)
+        return std::nullopt;
+    const PgClassRow* relation = nullptr;
+    if (numeric) {
+        const auto found = std::find_if(catalog.relations.begin(), catalog.relations.end(),
+            [&](const auto& row) { return row.oid == oid; });
+        if (found != catalog.relations.end()) relation = &*found;
+    } else {
+        const auto name = regclass_detail::parseName(*input);
+        if (moving && name.schema.empty() &&
+            std::any_of(catalog.relations.begin(), catalog.relations.end(), [&](const auto& row) {
+                return moving->count(row.oid) && row.relname == name.name;
+            }))
+            throw DbError("0A000", "stored SQL has an unqualified sequence reference to the renamed schema");
+        relation = regclass_detail::lookup(name, catalog, currentSession());
+    }
+    if (!relation || relation->relkind != 'S' || (moving && !moving->count(relation->oid)))
+        return std::nullopt;
+    return ViewSequenceArgument{relation->oid, {argument->sourceBegin, argument->sourceEnd}, !numeric};
+}
+
+static std::string storedSequenceArgument(Oid oid) {
+    return "CAST('" + std::to_string(oid) + "' AS pg_catalog.regclass)";
+}
+
+struct LegacySequenceDefault {
+    std::string table, column, definition;
+};
+
+static std::vector<LegacySequenceDefault> planLegacySequenceDefaults(
+    StorageEngine& engine, CatalogManager& catalog, const std::string& database,
+    const std::set<Oid>& sequences) {
+    std::vector<LegacySequenceDefault> updates;
+    if (sequences.empty()) return updates;
+    std::optional<CatalogManager::MetadataSnapshot> metadata;
+    ExprEvaluator resolver;
+    resolver.setCurrentDB(database);
+    for (const auto& table : engine.getTableNames(database)) {
+        const auto definition = engine.getTableSchema(database, table);
+        const auto name = CatalogService::logicalName(table);
+        const auto schema = catalog.getNamespaceByName(name.schema.empty() ? "public" : name.schema);
+        const auto relation = schema ? catalog.getClassByName(name.name, schema->oid) : std::nullopt;
+        for (const auto& column : definition.cols) {
+            if (column.defaultOrigin == Column::DefaultOrigin::Domain ||
+                !mayReferenceSequence(column.defaultValue)) continue;
+            const auto attribute = relation
+                ? catalog.getAttribute(relation->oid, column.dataName) : std::nullopt;
+            // SQL defaults with a catalog owner already store early-bound
+            // OIDs and intentionally keep dynamic text references as text.
+            if (attribute && catalog.getAttrdefForColumn(relation->oid, attribute->attnum)) continue;
+            if (!metadata) metadata = catalog.metadataSnapshot(false);
+            const auto prepared = engine.prepareBoundQuery(database, "SELECT " + column.defaultValue);
+            std::map<ViewEditSpan, std::string> edits;
+            (void)boundViewRelationDependencies(catalog, database, prepared, {}, engine,
+                [&](const FunctionCallExpr& call) {
+                    const auto moved = inspectViewSequenceArgument(
+                        call, engine, resolver, *metadata, true, &sequences);
+                    if (moved && moved->byName)
+                        edits.emplace(moved->span, storedSequenceArgument(moved->oid));
+                });
+            if (!edits.empty())
+                updates.push_back({table, column.dataName,
+                    qualifyViewSources(prepared, std::move(edits)).substr(sizeof("SELECT ") - 1)});
+        }
+    }
+    return updates;
+}
+
 static ViewRelationDependencies inspectViewBindings(
     const CatalogManager& catalog, const std::string& database,
     const PreparedQuery& query, std::vector<ViewSourceBinding>& references,
     const std::function<void(const ColumnRefExpr&)>& onColumn = {},
-    StorageEngine& engine = g_engine) {
+    StorageEngine& engine = g_engine,
+    const std::function<void(const FunctionCallExpr&)>& onCall = {}) {
     std::vector<std::pair<ViewEditSpan, ViewSourceBinding>> ordered;
+    std::optional<CatalogManager::MetadataSnapshot> sequenceMetadata;
+    if (mayReferenceSequence(query.source)) sequenceMetadata = catalog.metadataSnapshot(false);
+    ExprEvaluator resolver;
+    resolver.setCurrentDB(database);
+    std::set<Oid> sequenceDependencies;
     auto dependencies = boundViewRelationDependencies(
         catalog, database, query, [&](const ColumnRefExpr& ref) {
             const auto& binding = *ref.binding;
             ordered.emplace_back(ViewEditSpan{ref.sourceBegin, ref.sourceEnd},
                 ViewSourceBinding{binding.sourceOrdinal, binding.columnOrdinal, binding.scopeDepth});
             if (onColumn) onColumn(ref);
-        }, engine);
+        }, engine, [&](const FunctionCallExpr& call) {
+            if (sequenceMetadata) {
+                const auto reference = inspectViewSequenceArgument(call, engine, resolver,
+                    *sequenceMetadata, false);
+                if (reference) sequenceDependencies.insert(reference->oid);
+            }
+            if (onCall) onCall(call);
+        });
+    for (const auto oid : sequenceDependencies) dependencies.emplace(oid, 0);
     std::sort(ordered.begin(), ordered.end());
     references.reserve(ordered.size());
     for (const auto& site : ordered) references.push_back(site.second);
@@ -11270,7 +11408,7 @@ static std::vector<ViewRenamePlan> planViewSourceRename(
 
 static std::vector<ViewRenamePlan> planViewSourceRenames(
     StorageEngine& engine, CatalogManager& catalog, const std::string& database,
-    const ViewSourceRenames& renames) {
+    const ViewSourceRenames& renames, const std::set<Oid>& sequences) {
     std::set<Oid> views;
     for (const auto& [source, _] : renames) {
         const auto& [oldSchema, oldName] = source;
@@ -11281,16 +11419,37 @@ static std::vector<ViewRenamePlan> planViewSourceRenames(
             if (edge.classid == PgClassOid_Class) views.insert(edge.objid);
     }
 
+    std::optional<CatalogManager::MetadataSnapshot> sequenceMetadata;
+    std::map<Oid, std::string> sequenceViews;
+    if (!sequences.empty()) {
+        sequenceMetadata = catalog.metadataSnapshot(false);
+        for (const auto& view : sequenceMetadata->relations) {
+            if (view.relkind != 'v') continue;
+            std::string name, error;
+            if (!catalogViewStorageName(catalog, view, name, error))
+                throw DbError("XX001", error);
+            if (!engine.viewExists(database, name)) continue; // compiled catalog views
+            auto stored = engine.getViewSQL(database, name);
+            if (mayReferenceSequence(stored)) sequenceViews.emplace(view.oid, std::move(stored));
+        }
+    }
+    auto candidates = views;
+    for (const auto& [oid, _] : sequenceViews) candidates.insert(oid);
+    ExprEvaluator sequenceResolver;
+    sequenceResolver.setCurrentDB(database);
     const auto quote = SQLParser::quoteIdentifier;
     std::vector<ViewRenamePlan> plans;
-    for (const auto oid : views) {
+    for (const auto oid : candidates) {
         const auto view = catalog.getClass(oid);
         if (!view || view->relkind != 'v') continue;
         ViewRenamePlan plan;
+        plan.oid = oid;
         std::string error;
         if (!catalogViewStorageName(catalog, *view, plan.name, error))
             throw DbError("XX001", error);
-        const auto stored = engine.getViewSQL(database, plan.name);
+        const auto sequenceView = sequenceViews.find(oid);
+        const auto stored = sequenceView == sequenceViews.end()
+            ? engine.getViewSQL(database, plan.name) : sequenceView->second;
         plan.query = viewDefinitionQuery(stored);
         if (plan.query.empty()) throw DbError("XX001", "view definition is missing");
         auto suffix = stored.substr(plan.query.size());
@@ -11352,13 +11511,25 @@ static std::vector<ViewRenamePlan> planViewSourceRenames(
             edit(ref.sourceBegin, ref.sourceEnd, qualifier->second + "." + tokens.back());
         };
         plan.dependencies = inspectViewBindings(catalog, database, prepared, plan.references,
-            [&](const ColumnRefExpr& ref) { updateQualifier(ref, ref.binding->sourceOrdinal); }, engine);
+            [&](const ColumnRefExpr& ref) { updateQualifier(ref, ref.binding->sourceOrdinal); },
+            engine, [&](const FunctionCallExpr& call) {
+                if (sequenceView == sequenceViews.end()) return;
+                const auto moved = inspectViewSequenceArgument(
+                    call, engine, sequenceResolver, *sequenceMetadata, true, &sequences);
+                if (moved && moved->byName) {
+                    edit(moved->span.first, moved->span.second, storedSequenceArgument(moved->oid));
+                    plan.newSequenceDependencies.insert(moved->oid);
+                }
+            });
         for (const auto& projection : prepared.projectionBindings)
             for (const auto& field : projection.second) {
                 const auto* star = dynamic_cast<const ColumnRefExpr*>(field.expression);
                 if (star && star->column == "*" && field.column)
                     updateQualifier(*star, field.column->sourceOrdinal);
             }
+        if (edits.empty() && !views.count(oid)) continue;
+        for (const auto sequence : plan.newSequenceDependencies)
+            plan.dependencies.emplace(sequence, 0);
         for (const auto& edge : catalog.findDepends(PgClassOid_Class, oid)) {
             if (edge.refclassid == PgClassOid_Class &&
                 !plan.dependencies.count({edge.refobjid, edge.refobjsubid}))
@@ -11505,6 +11676,7 @@ static void publishDependentViewRenames(
     StorageEngine& engine) {
     // A view can use both the table and another changed view. Publish all
     // within the DDL snapshot before checking their new bindings together.
+    bool updatedDependencies = false;
     for (const auto& plan : plans) {
         if (!plan.changed) continue;
         if (!engine.viewExists(database, plan.name) ||
@@ -11524,12 +11696,25 @@ static void publishDependentViewRenames(
             !std::equal(updated.output.begin(), updated.output.end(),
                         plan.output.begin(), plan.output.end(), sameType))
             throw DbError("0A000", "alter table changes the binding of a dependent view");
+        for (const auto sequence : plan.newSequenceDependencies) {
+            PgDependRow edge;
+            edge.classid = PgClassOid_Class;
+            edge.objid = plan.oid;
+            edge.refclassid = PgClassOid_Class;
+            edge.refobjid = sequence;
+            edge.deptype = 'n';
+            catalog.addDepend(edge);
+            updatedDependencies = true;
+        }
     }
+    if (updatedDependencies && !catalog.persistAll())
+        throw DbError("58030", "could not save view sequence dependencies");
 }
 
 static std::map<std::filesystem::path, std::string> planSchemaRenameGrants(
     StorageEngine& engine, const std::string& database,
-    const std::string& oldName, const std::string& newName) {
+    const std::string& oldName, const std::string& newName,
+    const std::map<std::string, std::string>& sequenceGrants) {
     const auto path = engine.dbPath(database);
     std::map<std::filesystem::path, std::string> edits;
     for (const auto& file : {engine.permPath(database), path / ".grant_chain", path / ".default_privs"}) {
@@ -11556,12 +11741,16 @@ static std::map<std::filesystem::path, std::string> planSchemaRenameGrants(
             if (begin != std::string::npos) {
                 const auto end = line.find_first_of(whitespace, begin);
                 const auto key = line.substr(begin, end - begin);
-                if (key == newKey || (!isDefault && key.rfind(newName + "__", 0) == 0))
+                const auto moved = isDefault ? sequenceGrants.end() : sequenceGrants.find(key);
+                if (key == newKey || (!isDefault &&
+                    (key.rfind(newName + "__", 0) == 0 ||
+                     key.rfind("sequence:" + newName + ".", 0) == 0)))
                     throw DbError("42P06", "destination contains privileges for another object");
-                if (spaces && (key == oldKey || (!isDefault && key.rfind(oldName + "__", 0) == 0)))
+                if (spaces && (key == oldKey || moved != sequenceGrants.end() ||
+                    (!isDefault && key.rfind(oldName + "__", 0) == 0)))
                     throw DbError("0A000", "schema name cannot be represented in stored privileges");
-                if (key == oldKey) {
-                    line.replace(begin, key.size(), newKey);
+                if (key == oldKey || moved != sequenceGrants.end()) {
+                    line.replace(begin, key.size(), key == oldKey ? newKey : moved->second);
                     changed = true;
                 }
             }
@@ -11608,6 +11797,14 @@ SchemaNamespaceResult renameSchemaNamespace(StorageEngine& engine,
     const auto metadata = catalog.metadataSnapshot(false);
     ViewSourceRenames renames;
     std::map<std::string, std::string> tables, views;
+    struct SequenceMove {
+        std::string from, to;
+        SequenceInfo ownership;
+    };
+    std::vector<SequenceMove> sequenceMoves;
+    std::set<std::string> sequenceStorage;
+    std::set<Oid> sequenceOids;
+    std::map<std::string, std::string> sequenceGrants;
     std::set<Oid> rowTypes;
     std::set<Oid> materializedViews;
     for (const auto& relation : metadata.relations)
@@ -11625,6 +11822,36 @@ SchemaNamespaceResult renameSchemaNamespace(StorageEngine& engine,
             case 'v':
                 views.emplace(oldViewPrefix + relation.relname, newViewPrefix + relation.relname);
                 break;
+            case 'S': {
+                SequenceMove plan{sequenceStorageName(oldName, relation.relname),
+                    sequenceStorageName(newName, relation.relname), {}};
+                if (engine.sequenceExists(database, plan.to))
+                    return {DBStatus::TABLE_ALREADY_EXISTS, "destination sequence name is already occupied", {}};
+                SequenceInfo info;
+                const auto status = engine.getSequenceInfo(database, plan.from, info);
+                if (status != DBStatus::OK) return {status, "cannot read schema sequence", {}};
+                if (!info.ownedByTable.empty()) {
+                    CatalogManager::QualifiedName table;
+                    if (!CatalogManager::parseQualifiedName(info.ownedByTable, table) ||
+                        (!table.schema.empty() && table.schema != oldName))
+                        return {DBStatus::CORRUPTED_DATA, "schema sequence owner is invalid", {}};
+                    const auto owner = catalog.getClassByName(table.name, schema->oid);
+                    if (!owner || !catalog.getAttribute(owner->oid, info.ownedByColumn))
+                        return {DBStatus::CORRUPTED_DATA, "schema sequence owner does not exist", {}};
+                    plan.ownership.ownedBySpecified = true;
+                    plan.ownership.ownedByTable = storedOwnedTableReference(newName, owner->relname);
+                    plan.ownership.ownedByColumn = info.ownedByColumn;
+                }
+                sequenceStorage.insert(plan.from);
+                sequenceOids.insert(relation.oid);
+                sequenceGrants.emplace("sequence:" + oldViewPrefix + relation.relname,
+                                       "sequence:" + newViewPrefix + relation.relname);
+                sequenceGrants.emplace(
+                    "sequence:" + SQLParser::quoteIdentifier(oldName) + "." + SQLParser::quoteIdentifier(relation.relname),
+                    "sequence:" + SQLParser::quoteIdentifier(newName) + "." + SQLParser::quoteIdentifier(relation.relname));
+                sequenceMoves.push_back(std::move(plan));
+                continue;
+            }
             case 'i': case 'I':
                 continue;
             default:
@@ -11664,8 +11891,11 @@ SchemaNamespaceResult renameSchemaNamespace(StorageEngine& engine,
         return {DBStatus::IO_ERROR, "cannot read auxiliary type definitions", {}};
     std::vector<std::string> udtNames;
     for (const auto& type : udts) udtNames.push_back(type.name);
+    auto otherSequences = engine.getSequenceNames(database);
+    otherSequences.erase(std::remove_if(otherSequences.begin(), otherSequences.end(),
+        [&](const auto& name) { return sequenceStorage.count(name); }), otherSequences.end());
     const std::vector<std::vector<std::string>> auxiliaryNames{
-        engine.getMaterializedViewNames(database), engine.getSequenceNames(database),
+        engine.getMaterializedViewNames(database), std::move(otherSequences),
         engine.getDomainNames(database), engine.getEnumTypeNames(database),
         engine.getCompositeTypeNames(database), engine.getTVFNames(database),
         std::move(shells), std::move(udtNames)
@@ -11690,8 +11920,9 @@ SchemaNamespaceResult renameSchemaNamespace(StorageEngine& engine,
             [&](const auto& routine) { return routine.pronamespace == schema->oid; }))
         return {DBStatus::FEATURE_NOT_SUPPORTED, "schema contains unsupported auxiliary objects", {}};
 
-    const auto grants = planSchemaRenameGrants(engine, database, oldName, newName);
-    auto viewPlans = planViewSourceRenames(engine, catalog, database, renames);
+    const auto grants = planSchemaRenameGrants(engine, database, oldName, newName, sequenceGrants);
+    const auto sequenceDefaults = planLegacySequenceDefaults(engine, catalog, database, sequenceOids);
+    auto viewPlans = planViewSourceRenames(engine, catalog, database, renames, sequenceOids);
     std::map<std::string, std::string> viewDefinitions;
     for (const auto& [from, _] : views) {
         auto definition = engine.getViewSQL(database, from);
@@ -11710,6 +11941,23 @@ SchemaNamespaceResult renameSchemaNamespace(StorageEngine& engine,
         const auto status = engine.alterTableRenameTable(database, from, to);
         if (status != DBStatus::OK) return {status, "cannot rename schema table", {}};
         transaction.recordUpdate(DdlObjectKind::Table, from, to);
+    }
+    for (const auto& sequence : sequenceMoves) {
+        auto status = engine.renameSequence(database, sequence.from, sequence.to);
+        if (status != DBStatus::OK) return {status, "cannot rename schema sequence", {}};
+        if (sequence.ownership.ownedBySpecified) {
+            status = engine.alterSequence(database, sequence.to, sequence.ownership);
+            if (status != DBStatus::OK)
+                return {status, "cannot update schema sequence ownership", {}};
+        }
+        transaction.recordUpdate(DdlObjectKind::Sequence, sequence.from, sequence.to);
+    }
+    for (const auto& value : sequenceDefaults) {
+        const auto moved = tables.find(value.table);
+        const auto& table = moved == tables.end() ? value.table : moved->second;
+        const auto status = engine.alterTableSetDefault(database, table, value.column, value.definition);
+        if (status != DBStatus::OK)
+            return {status, "cannot update stored sequence default", {}};
     }
     for (const auto& [from, to] : views) {
         auto status = engine.createView(database, to, viewDefinitions.at(from));
@@ -11977,9 +12225,25 @@ bool DdlExecutor::executeCreateView(const CreateViewStmt* stmt, Session& s) {
         auto prepared = g_engine.prepareBoundQuery(s.currentDB, viewSql, {}, true);
         if (!dynamic_cast<const SelectStmt*>(prepared.ast.get()))
             throw DbError("42601", "CREATE VIEW requires a query");
-        viewDependencies = boundViewRelationDependencies(
-            g_engine.catalogService().get(s.currentDB), s.currentDB, prepared);
-        viewSql = qualifyViewSources(prepared);
+        auto& catalog = g_engine.catalogService().get(s.currentDB);
+        std::optional<CatalogManager::MetadataSnapshot> sequenceMetadata;
+        if (mayReferenceSequence(viewSql)) sequenceMetadata = catalog.metadataSnapshot(false);
+        ExprEvaluator resolver;
+        resolver.setCurrentDB(s.currentDB);
+        std::map<ViewEditSpan, std::string> sequenceEdits;
+        std::set<Oid> sequenceDependencies;
+        viewDependencies = boundViewRelationDependencies(catalog, s.currentDB, prepared,
+            {}, g_engine, [&](const FunctionCallExpr& call) {
+                if (!sequenceMetadata) return;
+                const auto reference = inspectViewSequenceArgument(
+                    call, g_engine, resolver, *sequenceMetadata, true);
+                if (!reference) return;
+                sequenceDependencies.insert(reference->oid);
+                if (reference->byName)
+                    sequenceEdits.emplace(reference->span, storedSequenceArgument(reference->oid));
+            });
+        for (const auto sequence : sequenceDependencies) viewDependencies.emplace(sequence, 0);
+        viewSql = qualifyViewSources(prepared, std::move(sequenceEdits));
         output = std::move(prepared.output);
         if (stmt->columnNames.size() > output.size())
             throw DbError("42601", "CREATE VIEW has more column names than columns");

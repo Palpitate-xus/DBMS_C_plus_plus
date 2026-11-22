@@ -1,9 +1,18 @@
 # 更新日志
 
 <details>
-<summary>可以给一组表所在的命名空间改名 · 2026-11-22</summary>
+<summary>改名后，订单号会接着生成 · 2026-11-22</summary>
 
-例如，把「销售」改成「销售归档」后，可以用新名字访问里面的表和视图，之前建好的报表也能继续使用。
+例如，订单号已经发到 42。把订单表所在的「销售」改名为「销售归档」后，下一笔订单仍从 43 开始。
+
+[用法](docs/MANUAL.md#schema-改名) · [测试报告](docs/test-report.md#schema-rename-sequences-20261122) · [性能报告](docs/performance-report-2026-10-30.md#schema-rename-sequences-cost-20261122)
+
+</details>
+
+<details>
+<summary>可以改一组表共用的名称前缀 · 2026-11-22</summary>
+
+例如，把 `sales` 改成 `sales_archive` 后，可以用 `sales_archive.orders` 查原来的订单表，之前建好的报表也能继续使用。
 
 [用法](docs/MANUAL.md#schema-改名) · [测试报告](docs/test-report.md#schema-rename-20261122) · [性能报告](docs/performance-report-2026-10-30.md#schema-rename-cost-20261122)
 
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>新建的报表会记住用的是哪张表 · 2026-11-22</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-22 · 新建的报表会记住用的是哪张表
 
 例如，报表创建时用的是销售部门的订单表。即使后来有人建了同名的临时表，报表仍会读取原来的订单。
 
 [用法](docs/MANUAL.md#9-视图与物化视图) · [测试报告](docs/test-report.md#view-source-identity-20261122) · [性能报告](docs/performance-report-2026-10-30.md#view-source-identity-cost-20261122)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-22 · 可以把表和视图里的数据合起来查
 

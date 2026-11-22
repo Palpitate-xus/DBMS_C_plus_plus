@@ -2,6 +2,17 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="schema-rename-sequences-20261122"></a>
+## 2026-11-22 · schema 改名后继续使用序列
+
+普通和扩展协议各执行 52 条语句。104 条响应中有 103 条与 PostgreSQL 18.6 一致，基线 `23b47855` 有 51 处差异。用例覆盖独立序列、`SERIAL`、`IDENTITY`、其他 schema 中的列默认值和视图、带点或空格的名称、回滚，以及重建旧同名序列。普通视图还分别验证保存时确定序列和使用 `text` 在执行时查找序列。删除自增列所在的表后，双方对旧序列都返回 `42P01`。扩展协议中 PostgreSQL 在解析阶段返回错误，本项目先发送列描述，再在执行阶段返回错误。[对照 SQL](../tests/compat/cases/schema_rename_sequences.sql)
+
+从基线创建的数据目录启动新版，完成 38 个恢复检查步骤。旧视图中无法确定归属的序列名会阻止改名，旧文件保持原样。替换该视图后，在同一目录分别强制中止未提交改名和已提交改名的服务进程。前者恢复旧名称、授权记录和视图定义，保留改名期间已取出的值 43，下一次取号为 46。后者恢复新名称和同一序列编号，下次取号为 52。两个视图重新启动后仍可读取原序列，使用中的序列拒绝被直接删除。另用原生测试核对不含目录默认值记录的旧表定义，改名后原列默认值保存为序列对象编号。
+
+此前七组 SQL 用例的 490 条响应和表、视图改名的 126 条响应与基线一致。序列回滚、所有权、带引号的改序列选项、文件同步失败恢复、完整协议及客户端导入导出测试通过。普通 `CASE` 协议套件在两版都出现同一处 `pg_settings` 查询错误，涉及错误码、返回行和列类型三个断言。[文件碰撞和序列检查](../tests/rename_schema_guard_e2e_test.py) · [文件同步测试](../tests/sequence_namespace_durability_test.cpp) · [CASE 套件](../tests/ordinary_case_prepared_protocol_e2e_test.py)
+
+新版程序 SHA-256 为 `bb31973c66d8c759baea4930170490e1ae8efeb07d6a5dfa8f032b826ea77744`。原始记录留在本地，PostgreSQL、基线和新版协议记录的 SHA-256 分别为 `b16340114b8cf8405f3f3d267e9b9ceadf719a5ba451f2d3cc3d2a83f6a5a6d8`、`cc03b260cd2e485074bdde18e90bb9a440ed67b31469558efc99670034baa956` 和 `f054e9859c954c9192664761b10893571af8b580e7acfb25ebb76bbcd82934ee`。恢复记录为 `fe1b9755f81d2e2e419bc1216d80b19c8a1548f326f88721ebac9d9d290050e2`。[性能报告](performance-report-2026-10-30.md#schema-rename-sequences-cost-20261122)
+
 <a id="schema-rename-20261122"></a>
 ## 2026-11-22 · schema 改名
 
@@ -11,7 +22,7 @@
 
 双连接验证中，改名事务能通过新名字读取数据。另一个连接在提交前使用新旧名字查询都返回锁等待错误 `55P03`，提交后能用新名字查询，也能从原报表读到同一条记录。
 
-七组既有 SQL 用例的 490 条响应与基线一致。另通过原生视图和碰撞测试、完整协议、表迁移、授权和客户端导入导出测试。schema 改名专项验证了序列、受影响的物化视图、目标表文件冲突及带点的目标物化视图键冲突。拒绝改名后，旧对象仍可查询。[客户端碰撞测试](../tests/rename_schema_guard_e2e_test.py) · [原生碰撞测试](../tests/rename_schema_collision_guard_test.cpp)
+七组既有 SQL 用例的 490 条响应与基线一致。另通过原生视图和碰撞测试、完整协议、表迁移、授权和客户端导入导出测试。在这一版，schema 改名专项验证了拒绝序列、受影响的物化视图、目标表文件冲突及带点的目标物化视图键冲突。拒绝改名后，旧对象仍可查询。[客户端碰撞测试](../tests/rename_schema_guard_e2e_test.py) · [原生碰撞测试](../tests/rename_schema_collision_guard_test.cpp)
 
 新版 SHA-256 为 `e63bac2b8298f894d7701622011e248cb2ca7578de212c4c2da4550ce148d55c`。三份协议记录的摘要分别为 PostgreSQL `3e1abac75e0f1b3d6e43d6db58ab7c33dd17c6c379b62a3131a44318cd3fbb25`、基线 `020143c3935128e2baf618a7366048fc9978cf5596e81d972e21909678e1c222` 和新版 `5638564a0e4788c6cd249e9808186182fde883adf67dbb3ae9cae4f7fd42b796`。[性能报告](performance-report-2026-10-30.md#schema-rename-cost-20261122)
 

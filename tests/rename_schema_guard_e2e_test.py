@@ -27,15 +27,14 @@ def main():
         expect("CREATE SCHEMA old_space;", None)
         expect("CREATE TABLE old_space.items (id INT);", None)
         expect("INSERT INTO old_space.items VALUES (7);", None)
-        expect("CREATE SEQUENCE old_space.unsupported_seq;", None)
-        expect("ALTER SCHEMA old_space RENAME TO new_space;", "0A000")
+        expect("CREATE SEQUENCE old_space.ticket START WITH 17;", None)
+        assert expect("SELECT nextval('old_space.ticket');", None) == [["17"]]
         assert expect("SELECT id FROM old_space.items;", None) == [["7"]]
         data_dir = Path(server["dir"])
         assert (data_dir / "info" / ".schema_old_space").exists()
         assert not (data_dir / "info" / ".schema_new_space").exists()
         assert (data_dir / "info" / "old_space__items.stc").exists()
         assert not (data_dir / "info" / "new_space__items.stc").exists()
-        expect("DROP SEQUENCE old_space.unsupported_seq;", None)
         expect("CREATE MATERIALIZED VIEW public.schema_move_mv AS SELECT id FROM old_space.items;", None)
         expect("ALTER SCHEMA old_space RENAME TO new_space;", "0A000")
         assert expect("SELECT id FROM public.schema_move_mv;", None) == [["7"]]
@@ -56,10 +55,12 @@ def main():
         expect("DROP TABLE schema_move_seed;", None)
         expect("ALTER SCHEMA old_space RENAME TO new_space;", None)
         assert expect("SELECT id FROM new_space.items;", None) == [["7"]]
+        assert expect("SELECT nextval('new_space.ticket');", None) == [["18"]]
         assert not (data_dir / "info" / ".schema_old_space").exists()
         assert (data_dir / "info" / ".schema_new_space").exists()
         assert not (data_dir / "info" / "old_space__items.stc").exists()
         assert (data_dir / "info" / "new_space__items.stc").exists()
+        expect("DROP SEQUENCE new_space.ticket;", None)
         expect("DROP TABLE new_space.items;", None)
         expect("DROP SCHEMA new_space;", None)
         print("[RENAME SCHEMA GUARD E2E] passed")
