@@ -1,27 +1,27 @@
 # 更新日志
 
 <details>
-<summary>查询翻到后面几页时少读长文本 · 2026-11-22</summary>
+<summary>翻到后面的页面时，少读长文本 · 2026-11-22</summary>
 
-按整数编号给分区表排序并翻页时，符合条件的查询会先跳过前面的记录，再读取当前页的长文本。
+给分区表按编号排序后，比如翻到第 5 页，符合条件的查询只读取这一页的长文本。
 
 [使用说明](docs/MANUAL.md#15-分区表) · [测试报告](docs/test-report.md#partition-offset-output-20261122) · [性能报告](docs/performance-report-2026-10-30.md#partition-offset-output-cost-20261122)
 
 </details>
 
 <details>
-<summary>部分分区查询排序时少读长文本 · 2026-11-22</summary>
+<summary>按编号取前几条时，少读长文本 · 2026-11-22</summary>
 
-用 `ORDER BY` 和 `LIMIT` 按整数编号取前几条时，符合条件的查询会先比较编号，再读取可能入选记录的其他长字段。
+比如在分区表里找编号最小的 10 条记录，查询可以先比较编号，只为可能入选的记录读取长文本。
 
 [使用说明](docs/MANUAL.md#15-分区表) · [测试报告](docs/test-report.md#partition-order-input-20261122) · [性能报告](docs/performance-report-2026-10-30.md#partition-order-input-cost-20261122)
 
 </details>
 
 <details>
-<summary>分区查询取够结果后可以提前结束 · 2026-11-22</summary>
+<summary>只取几条记录时，读够就停 · 2026-11-22</summary>
 
-用 `LIMIT` 查询分区表时，符合条件的查询取够记录后就会停止。测试中，查询一张有 60 个分区的表并只取一条记录，从打开 60 个分区文件减少到 1 个。
+查询分区表时，如果只取一条且不要求排序，读到符合条件的记录就可以停。测试中，需要打开的分区文件从 60 个减少到 1 个。
 
 [使用说明](docs/MANUAL.md#15-分区表) · [测试报告](docs/test-report.md#partition-limit-prefix-20261122) · [性能报告](docs/performance-report-2026-10-30.md#partition-limit-prefix-cost-20261122)
 

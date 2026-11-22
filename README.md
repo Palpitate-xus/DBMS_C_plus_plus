@@ -1,29 +1,41 @@
 # DBMS C++
 
-这是一个用 C++ 编写的数据库。你可以在终端用 SQL 建表、写入和查询数据，也可以用 `psql` 连接。
+用 C++ 编写的关系型数据库。可以用 SQL 建表、写入和查询数据，也可以用 `psql` 连接。
 
-[编译和运行](docs/MANUAL.md#1-快速开始) · [支持的功能](docs/compatibility-contract.md) · [文档目录](docs/README.md)
+## 快速开始
+
+在 Linux 上先安装编译依赖。[依赖清单](docs/PACKAGING.md#编译依赖)
+
+```bash
+git clone https://github.com/Palpitate-xus/DBMS_C_plus_plus.git
+cd DBMS_C_plus_plus
+cmake -S . -B build/cmake
+cmake --build build/cmake --target dbms_main --parallel 2
+./build/cmake/dbms_main --version
+```
+
+[启动和首次登录](docs/MANUAL.md#运行) · [用 psql 连接](docs/MANUAL.md#18-网络服务) · [支持的功能](docs/compatibility-contract.md) · [全部文档](docs/README.md)
 
 ## 最近更新
 
 <details>
-<summary>查询翻到后面几页时少读长文本 · 2026-11-22</summary>
+<summary>翻到后面的页面时，少读长文本 · 2026-11-22</summary>
 
-按整数编号给分区表排序并翻页时，符合条件的查询会先跳过前面的记录，再读取当前页的长文本。[使用说明](docs/MANUAL.md#15-分区表)
-
-</details>
-
-<details>
-<summary>部分分区查询排序时少读长文本 · 2026-11-22</summary>
-
-用 `ORDER BY` 和 `LIMIT` 按整数编号取前几条时，符合条件的查询会先比较编号，再读取可能入选记录的其他长字段。[使用说明](docs/MANUAL.md#15-分区表)
+给分区表按编号排序后，比如翻到第 5 页，符合条件的查询只读取这一页的长文本。[使用说明](docs/MANUAL.md#15-分区表)
 
 </details>
 
 <details>
-<summary>分区查询取够结果后可以提前结束 · 2026-11-22</summary>
+<summary>按编号取前几条时，少读长文本 · 2026-11-22</summary>
 
-用 `LIMIT` 查询分区表时，符合条件的查询取够记录后就会停止。测试中，查询一张有 60 个分区的表并只取一条记录，从打开 60 个分区文件减少到 1 个。[使用说明](docs/MANUAL.md#15-分区表)
+比如在分区表里找编号最小的 10 条记录，查询可以先比较编号，只为可能入选的记录读取长文本。[使用说明](docs/MANUAL.md#15-分区表)
+
+</details>
+
+<details>
+<summary>只取几条记录时，读够就停 · 2026-11-22</summary>
+
+查询分区表时，如果只取一条且不要求排序，读到符合条件的记录就可以停。测试中，需要打开的分区文件从 60 个减少到 1 个。[使用说明](docs/MANUAL.md#15-分区表)
 
 </details>
 
