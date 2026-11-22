@@ -4382,6 +4382,48 @@ static PgColumnDescription sessionSettingProtocolColumn(const SessionSettingProj
     return column;
 }
 
+static bool protocolJoinsOrdinaryView(const SelectStmt& root, const Session& session) {
+    if (root.ctes.empty() && (!root.fromClause || root.fromClause->type == FromItem::Type::Table))
+        return false;
+    if (!QueryPlanner::supportsPreparedSourceSelectPlan(root)) return false;
+
+    const CatalogManager* catalog = nullptr;
+    using Names = std::set<std::string>;
+    std::function<bool(const SelectStmt&, Names)> query;
+    const std::function<bool(const FromItem*, const Names&, bool)> from =
+        [&](const FromItem* source, const Names& ctes, bool joined) {
+            if (!source) return false;
+            if (source->type == FromItem::Type::Join)
+                return from(source->left.get(), ctes, true) || from(source->right.get(), ctes, true);
+            if (source->type == FromItem::Type::Subquery) {
+                const auto* subquery = dynamic_cast<const SelectStmt*>(source->subquery.get());
+                return subquery && query(*subquery, ctes);
+            }
+            if (!joined || source->type != FromItem::Type::Table) return false;
+            CatalogManager::QualifiedName name;
+            if (!CatalogManager::parseQualifiedName(source->tableName, name, true) ||
+                (name.schema.empty() && ctes.count(name.name))) return false;
+            auto path = name.schema.empty() ? effectiveRelationSearchPath(&session)
+                : std::vector<std::string>{name.schema == "pg_temp" ? sessionTempSchemaName(session) : name.schema};
+            if (!catalog) catalog = &g_engine.catalogService().get(session.currentDB);
+            const auto relation = catalog->resolveRelationSnapshot(name.name, path);
+            // Compiled system catalog views have their own descriptor owners.
+            return relation && relation->relkind == 'v' && relation->relnamespace != 11;
+        };
+    query = [&](const SelectStmt& select, Names ctes) {
+        for (const auto& definition : select.ctes) {
+            const auto* child = dynamic_cast<const SelectStmt*>(definition.query.get());
+            CatalogManager::QualifiedName name;
+            if (!child || definition.recursive ||
+                !CatalogManager::parseQualifiedName(definition.name, name, true)) return false;
+            if (query(*child, ctes)) return true;
+            ctes.insert(std::move(name.name));
+        }
+        return from(select.fromClause.get(), ctes, false);
+    };
+    return query(root, {});
+}
+
 bool describePreparedResultShape(const std::string& sql, Session& session,
                             std::vector<PgColumnDescription>& columns,
                             const std::vector<uint32_t>& parameterOids = {}) {
@@ -4426,7 +4468,11 @@ bool describePreparedResultShape(const std::string& sql, Session& session,
         }
     }
     const auto* select = dynamic_cast<const SelectStmt*>(parsed.stmt.get());
-    if (select && protocolPhysicalSourceFromQuery(sql, session).logicalView) {
+    if (select && (protocolPhysicalSourceFromQuery(sql, session).logicalView ||
+                   protocolJoinsOrdinaryView(*select, session))) {
+        auto* previous = currentSession();
+        setCurrentSession(&session);
+        struct Restore { Session* previous; ~Restore() { setCurrentSession(previous); } } restore{previous};
         const auto prepared = g_engine.prepareBoundQuery(session.currentDB, sql,
             protocolMetadataParameters(session, parameterOids), true);
         QueryResult shape;

@@ -2186,7 +2186,8 @@ bool checkDB(const Session& s);
 bool execute(const std::string& rawSql, Session& s);
 static bool executeQueryChild(const std::string& rawSql, Session& s);
 string resolveTableName(Session& s, const string& name);
-string resolveTableName(Session& s, const string& name, bool foldUnquoted);
+string resolveTableName(Session& s, const string& name, bool foldUnquoted,
+                        bool* ordinaryView = nullptr);
 static bool checkTablePermission(Session& s, const string& tname,
                                  dbms::StorageEngine::TablePrivilege privilege);
 static bool checkSelectColumnPermission(Session& s, const string& tname,
@@ -7233,7 +7234,13 @@ static dbms::PreparedQuery prepareRuntimeValueDeclaration(Session& s, const stri
     return g_engine.prepareBoundQuery(s.currentDB, statement);
 }
 
-string resolveTableName(Session& s, const string& name, bool foldUnquoted) {
+string resolveTableName(Session& s, const string& name, bool foldUnquoted,
+                        bool* ordinaryView) {
+    if (ordinaryView) *ordinaryView = false;
+    const auto viewName = [&](const string& storageName) {
+        if (ordinaryView) *ordinaryView = true;
+        return storageName;
+    };
     const auto temporaryPhysicalName = [&](const string& table) {
         const string physical = tempTablePrefix(s, table);
         g_engine.noteTemporaryRelationAccess(s.currentDB, physical);
@@ -7286,9 +7293,10 @@ string resolveTableName(Session& s, const string& name, bool foldUnquoted) {
             }
             if (!g_engine.tableExists(s.currentDB, physical)) {
                 const string viewPhysical = schema + "." + table;
-                if (g_engine.viewExists(s.currentDB, viewPhysical)) {
-                    return viewPhysical;
-                }
+                if (g_engine.viewExists(s.currentDB, viewPhysical))
+                    return viewName(viewPhysical);
+                if (ordinaryView && g_engine.viewExists(s.currentDB, physical))
+                    return viewName(physical);
             }
             return physical;
         }
@@ -7346,13 +7354,11 @@ string resolveTableName(Session& s, const string& name, bool foldUnquoted) {
         if (g_engine.isMaterializedView(s.currentDB, physical)) {
             return dbms::StorageEngine::materializedViewPrefix(physical);
         }
-        if (g_engine.tableExists(s.currentDB, physical) ||
-            g_engine.viewExists(s.currentDB, physical)) {
-            return physical;
-        }
+        if (g_engine.tableExists(s.currentDB, physical)) return physical;
+        if (g_engine.viewExists(s.currentDB, physical)) return viewName(physical);
         const string viewPhysical = schema + "." + table;
         if (g_engine.viewExists(s.currentDB, viewPhysical)) {
-            return viewPhysical;
+            return viewName(viewPhysical);
         }
     }
     return firstCandidate.empty() ? table : firstCandidate;
@@ -21483,9 +21489,9 @@ class PreparedWithDmlRuntime {
                 if(!select)throw dbms::DbError("0A000","mutation derived source requires a SELECT/VALUES plan");
                 cursor=dbms::QueryPlanner::makePreparedCursor(selectPlan(select,outer,frames,false,false,provider),output(select));
             } else if(range.viewQuery) {
-                const auto view = physical(range,session_);
-                if(streamResults_ ? !canReadWholeTable(session_,view) :
-                   !checkTablePermission(session_,view,dbms::StorageEngine::TablePrivilege::Select))
+                const auto view = range.relationSchema.empty() || range.relationSchema == "public"
+                    ? range.relationName : range.relationSchema + "." + range.relationName;
+                if (!canReadWholeTable(session_, view))
                     throw dbms::DbError("42501","permission denied for view source");
                 viewRuntime=make_shared<PreparedWithDmlRuntime>(session_,range.viewQuery,streamResults_);
                 auto* select=dynamic_cast<dbms::SelectStmt*>(range.viewQuery->ast.get());
@@ -22216,7 +22222,7 @@ static bool canRunPreparedIntegerJoin(const dbms::PreparedQuery& query, const Se
     return PreparedWithDmlRuntime::runsIntegerJoin(query, session);
 }
 
-static void executePreparedWindowReceiver(Session& session,
+static void executePreparedReadReceiver(Session& session,
         const shared_ptr<dbms::PreparedQuery>& query) {
     PreparedWithDmlRuntime runtime(session,query);
     auto result=runtime.runRead();
@@ -22966,15 +22972,21 @@ static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& 
     bool logicalSource=false;
     bool usingSource=false;
     bool nestedInheritance=false;
+    bool viewSource = false;
     function<bool(const dbms::Stmt*)> supportsDerivedQuery;
     const function<bool(const dbms::FromItem*)> supportsDerivedSources=[&](const dbms::FromItem* source) {
         if(!source)return true;
         if(source->type==dbms::FromItem::Type::Table) {
-            if(!nestedInheritance && source!=select->fromClause.get()) {
-                if(source->only)nestedInheritance=true;
-                else {
-                    const auto table=resolveTableName(session,source->tableName,true);
-                    if(!table.empty())nestedInheritance=!g_engine.getInheritedChildren(session.currentDB,table).empty();
+            if (source != select->fromClause.get()) {
+                if (source->only) nestedInheritance = true;
+                const bool probeView = !required && !viewSource;
+                if (!nestedInheritance || probeView) {
+                    const auto table = resolveTableName(session, source->tableName, true,
+                                                        probeView ? &viewSource : nullptr);
+                    if (!table.empty()) {
+                        if (!nestedInheritance)
+                            nestedInheritance = !g_engine.getInheritedChildren(session.currentDB, table).empty();
+                    }
                 }
             }
             return true;
@@ -23010,8 +23022,11 @@ static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& 
         supportsDerivedQuery(select);
     const bool derivedProbe=sourceProbe && logicalSource;
     const bool inheritanceProbe=sourceProbe && nestedInheritance;
-    const bool generatedJoinProbe=!required && !comparisonCandidate && plainGeneratedJoinSourceProbe(*select,session);
-    if(!required && !comparisonCandidate && !generatedJoinProbe && !derivedProbe && !inheritanceProbe && !integerJoinProbe) {
+    const bool viewProbe = sourceProbe && viewSource;
+    const bool generatedJoinProbe = !required && !comparisonCandidate && !viewProbe &&
+        plainGeneratedJoinSourceProbe(*select,session);
+    if(!required && !comparisonCandidate && !generatedJoinProbe && !derivedProbe &&
+       !inheritanceProbe && !integerJoinProbe && !viewProbe) {
         if(!sourceProbe || !usingSource)return false;
         // Avoid whole-query preparation for existing scalar-only physical
         // joins. The bound USING key still makes the actual admission decision.
@@ -23074,6 +23089,10 @@ static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& 
         }
     }
     auto query=make_shared<dbms::PreparedQuery>(g_engine.prepareBoundQuery(session.currentDB,rawSql));
+    // The binding, rather than the name probe, owns the actual source.
+    // A CTE can hide a catalog view with the same spelling.
+    const bool viewRequired = viewProbe && any_of(query->sourceRanges.begin(), query->sourceRanges.end(),
+        [](const auto& range) { return range.source && bool(range.viewQuery); });
     const bool integerJoinRequired = integerJoinProbe && canRunPreparedIntegerJoin(*query, session);
     const bool inheritanceRequired=!integerJoinRequired && inheritanceProbe && PreparedWithDmlRuntime::readsNestedInheritance(*query,session);
     const auto arrayColumn=[](const dbms::QueryOutputColumn& column) {
@@ -23098,7 +23117,7 @@ static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& 
                [&](const auto& statement) { return isArrayDomain(statement.second); }) ||
         any_of(query->setOperationInputs.begin(),query->setOperationInputs.end(),
                [&](const auto& set) { return isArrayDomain(set.second.left) || isArrayDomain(set.second.right); }));
-    if(!required && !inheritanceRequired && !integerJoinRequired) {
+    if(!required && !inheritanceRequired && !integerJoinRequired && !viewRequired) {
         // The parser only probes a shape. Actual copied type/operator metadata
         // owns this receiver; ordinary builtin comparisons keep their existing
         // consumer. Never discover enum identity from evaluated datum strings.
@@ -23307,7 +23326,7 @@ static bool handlePreparedFetchPeersQuery(const string& rawSql, Session& session
             if (readGraph && bound && hasCurrentQueryWindows(bound) &&
                 dbms::QueryPlanner::supportsPreparedSourceSelectPlan(*bound)) {
                 handled = true;
-                executePreparedWindowReceiver(session, query);
+                executePreparedReadReceiver(session, query);
                 return false;
             }
         }
@@ -28475,7 +28494,7 @@ static bool executeInternal(const string& rawSql, Session& s,
                     });
                 if(windowSelect && (hasCurrentQueryWindows(windowSelect) || nestedWindowRead) &&
                     dbms::QueryPlanner::supportsPreparedSourceSelectPlan(*windowSelect)) {
-                    executePreparedWindowReceiver(s,query);
+                    executePreparedReadReceiver(s,query);
                     return false;
                 }
             }
@@ -33715,6 +33734,33 @@ static bool executeInternal(const string& rawSql, Session& s,
             if (g_engine.viewExists(queryDb, viewLookup)) {
                 string viewSql = g_engine.getViewSQL(queryDb, viewLookup);
                 if (!viewSql.empty()) {
+                    // Join views can return typed rows to the outer query
+                    // directly. Check the actual bound view and both SELECT
+                    // shapes before opening any producer.
+                    if (queryDb == s.currentDB &&
+                        findTopLevelKeyword(toLowerSql(viewSql), "join", 0) != string::npos) {
+                        dbms::SQLParser parser;
+                        const auto probe = parser.parseForBinding(effectiveRawSql);
+                        const auto* outer = dynamic_cast<const dbms::SelectStmt*>(probe.stmt.get());
+                        if (probe.isValid() && outer && outer->fromClause &&
+                            outer->fromClause->type == dbms::FromItem::Type::Table &&
+                            dbms::QueryPlanner::supportsPreparedSourceSelectPlan(*outer) &&
+                            !usesInheritedQueryCteSource(*outer, s)) {
+                            auto prepared = make_shared<dbms::PreparedQuery>(
+                                g_engine.prepareBoundQuery(queryDb, effectiveRawSql, {}, true));
+                            const auto joinedView = [&](const dbms::PreparedQuery::SourceRange& range) {
+                                if (range.owner != prepared->ast.get() || !range.viewQuery) return false;
+                                const auto* body = dynamic_cast<const dbms::SelectStmt*>(range.viewQuery->ast.get());
+                                return body && body->fromClause &&
+                                    body->fromClause->type == dbms::FromItem::Type::Join &&
+                                    dbms::QueryPlanner::supportsPreparedSourceSelectPlan(*body);
+                            };
+                            if (any_of(prepared->sourceRanges.begin(), prepared->sourceRanges.end(), joinedView)) {
+                                executePreparedReadReceiver(s, prepared);
+                                return false;
+                            }
+                        }
+                    }
                     // Explicit CREATE VIEW column names belong to the view
                     // relation, not its independently executed query body.
                     // Read that same bound contract before materialization;

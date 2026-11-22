@@ -2289,7 +2289,13 @@ public:
         auto merged = mergeUsing(item, left, right);
         left.insert(left.end(), right.begin(), right.end());
         auto scopes = outer; scopes.insert(scopes.begin(), left);
-        expression(item->joinCondition, scopes);
+        const auto condition = expression(item->joinCondition, scopes);
+        if (item->joinCondition) {
+            const auto type = common_type_detail::canonical(condition);
+            if (type != "unknown" && type != "boolean")
+                throw DbError("42804", "argument of JOIN/ON must be type boolean");
+            coerceCaseInput(item->joinCondition, condition, "boolean");
+        }
         registerUsingOutput(left, std::move(merged), item);
         return left;
     }

@@ -19,6 +19,13 @@ cmake --build build/cmake --target dbms_main --parallel 2
 ## 最近更新
 
 <details>
+<summary>查询可以连接视图和普通表 · 2026-11-22</summary>
+
+例如，可以把已保存的销售汇总视图和订单表按订单号连起来，在同一个结果里查看汇总金额和订单明细。
+
+</details>
+
+<details>
 <summary>表改列名后，已有视图仍可查询 · 2026-11-22</summary>
 
 例如，订单表把「数量」改成「订购数量」后，已有视图仍用原来的列名显示数量和合计。
@@ -29,13 +36,6 @@ cmake --build build/cmake --target dbms_main --parallel 2
 <summary>列改名后，数据检查规则也会更新 · 2026-11-22</summary>
 
 把「数量」改成「订购数量」后，要求数量为正数的规则仍会生效，自动计算的列也会使用新列名。
-
-</details>
-
-<details>
-<summary>导入时可以跳过数值超出自定义范围的行 · 2026-11-22</summary>
-
-例如，给数量定义了「必须为正数」的类型后，可以设置跳过数量为负的行。如果遇到重复的订单号，整批订单仍会撤销。
 
 </details>
 

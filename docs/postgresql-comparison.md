@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-22 · 查询时连接普通视图
+
+PostgreSQL 先把视图展开成查询树，再由计划器处理可合并的子查询。SQLite 在满足条件时把视图的查询合并到外层，以减少临时表。DuckDB 的普通视图在被引用时执行保存的查询。[PostgreSQL 视图规则](https://www.postgresql.org/docs/18/rules-views.html) · [SQLite 的子查询合并](https://www.sqlite.org/optoverview.html#subquery_flattening) · [DuckDB 普通视图](https://duckdb.org/docs/sql/statements/create_view)
+
+本项目将已绑定的视图作为连接输入，沿用现有的连接算子。受支持的连接视图可以把行直接交给外层查询。扩展协议从绑定结果取得列描述，描述阶段无需执行视图。[对照范围](test-report.md#join-ordinary-views-20261122)
+
 ## 2026-11-22 · 基础表改列名后保留已有视图
 
 PostgreSQL 18.6 更新目录中的列名，视图仍按原表和列编号读取。SQLite 在解析时标出引用的位置，改相关建表 SQL 后检查是否仍能解析。DuckDB 的列改名重新绑定修改后的表定义和约束。[PostgreSQL 改列名](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/commands/tablecmds.c#L3618) · [PostgreSQL 视图规则](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/rewrite/rewriteDefine.c) · [SQLite 改列名](https://www.sqlite.org/lang_altertable.html#alter_table_rename_column) · [DuckDB 改列名](https://github.com/duckdb/duckdb/blob/main/src/catalog/catalog_entry/duck_table_entry.cpp#L391)

@@ -2,6 +2,18 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-22 execute SELECT joins with ordinary views",
+      "gap_ids": ["QRY-03", "QRY-12", "PROTO-03", "PROTO-04"],
+      "status": "partial",
+      "evidence": ["src/main.cpp", "src/network/NetworkServer.cpp", "src/parser/query_binding.cpp", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/compat/cases/join_ordinary_views.sql", "tests/postgres_protocol_test.py"],
+      "verification": [
+        "Ordinary view ranges feed the existing typed join executor. Supported outer queries over stored explicit joins consume rows directly.",
+        "Parse and Describe use bound output declarations. Binary Bind and suspended portal resumption were verified.",
+        "View owner privilege semantics, more query shapes, and exact relation-origin metadata remain open."
+      ]
+    },
+    {
       "issue": "2026-11-22 preserve readable ordinary views after a base column rename",
       "gap_ids": ["CAT-07", "CAT-10"],
       "status": "partial",

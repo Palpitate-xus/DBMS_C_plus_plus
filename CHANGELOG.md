@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>查询可以连接视图和普通表 · 2026-11-22</summary>
+
+例如，可以把已保存的销售汇总视图和订单表按订单号连起来，在同一个结果里查看汇总金额和订单明细。
+
+[用法](docs/MANUAL.md#9-视图与物化视图) · [测试报告](docs/test-report.md#join-ordinary-views-20261122) · [性能报告](docs/performance-report-2026-10-30.md#join-ordinary-views-cost-20261122)
+
+</details>
+
+<details>
 <summary>表改列名后，已有视图仍可查询 · 2026-11-22</summary>
 
 例如，订单表把「数量」改成「订购数量」后，已有视图仍用原来的列名显示数量和合计。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>导入时可以跳过数值超出自定义范围的行 · 2026-11-22</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-22 · 导入时可以跳过数值超出自定义范围的行
 
 例如，给数量定义了「必须为正数」的类型后，可以设置跳过数量为负的行。如果遇到重复的订单号，整批订单仍会撤销。
 
 [用法](docs/MANUAL.md#用客户端复制数据) · [测试报告](docs/test-report.md#copy-domain-input-20261122) · [性能报告](docs/performance-report-2026-10-30.md#copy-domain-input-cost-20261122)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-22 · 数字列误填文字时，导入可以继续
 

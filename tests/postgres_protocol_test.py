@@ -619,6 +619,38 @@ def extended_query_portal_pagination(sock):
     assert sum(kind == b"3" for kind, _ in messages) == 2, messages
 
 
+def extended_query_view_join(sock):
+    setup = simple_query(sock, "CREATE VIEW portal_join_v AS SELECT id, id*2 AS doubled FROM portal_t")
+    assert (b"C", b"CREATE VIEW\0") in setup, setup
+    sql = ("SELECT v.id+0 AS id, v.doubled FROM portal_join_v v "
+           "JOIN portal_t p ON v.id=p.id WHERE p.id>$1 ORDER BY v.id")
+    parse = b"view_join\0" + sql.encode() + b"\0" + struct.pack("!HI", 1, 23)
+    bind = b"view_portal\0view_join\0" + struct.pack("!HHHIiHH", 1, 1, 1, 4, 0, 1, 1)
+    execute = b"view_portal\0"
+    sock.sendall(typed(b"P", parse) + typed(b"D", b"Sview_join\0") +
+                 typed(b"B", bind) + typed(b"D", b"Pview_portal\0") +
+                 typed(b"E", execute + struct.pack("!I", 1)) + typed(b"H"))
+    first = [read_message(sock) for _ in range(7)]
+    assert [kind for kind, _ in first] == [b"1", b"t", b"T", b"2", b"T", b"D", b"s"], first
+    assert first[1][1] == struct.pack("!HI", 1, 23), first
+    for field_index, format_code in ((2, 0), (4, 1)):
+        fields = row_description_fields([first[field_index]])
+        assert [(field[0], field[3:]) for field in fields] == [
+            (b"id", (23, 4, -1, format_code)),
+            (b"doubled", (23, 4, -1, format_code)),
+        ], fields
+    assert data_row_values(first) == [[struct.pack("!i", 1), struct.pack("!i", 2)]], first
+
+    sock.sendall(typed(b"E", execute + struct.pack("!I", 0)) + typed(b"S"))
+    rest = read_until_ready(sock)
+    assert [kind for kind, _ in rest] == [b"D", b"C", b"Z"], rest
+    assert data_row_values(rest) == [[struct.pack("!i", 3), struct.pack("!i", 6)]], rest
+    assert rest[-1] == (b"Z", b"I"), rest
+    sock.sendall(typed(b"C", b"Sview_join\0") + typed(b"S"))
+    assert read_until_ready(sock) == [(b"3", b""), (b"Z", b"I")]
+    assert (b"C", b"DROP VIEW\0") in simple_query(sock, "DROP VIEW portal_join_v")
+
+
 def extended_query_describe(sock):
     parse = b"describe_stmt\0SELECT id AS ident FROM t\0" + struct.pack("!H", 0)
     bind = (b"describe_portal\0describe_stmt\0" +
@@ -3458,6 +3490,7 @@ def main():
         extended_query_money_binary_parameter(sock)
         extended_query_bytea_binary_parameter(sock)
         extended_query_portal_pagination(sock)
+        extended_query_view_join(sock)
         extended_query_describe(sock)
         extended_query_error_recovery(sock)
         transaction_error_state_recovery(sock)
