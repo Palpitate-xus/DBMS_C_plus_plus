@@ -2642,6 +2642,21 @@ COMMIT;
 SHOW lock_timeout;                       -- 2s
 ```
 
+### 在 SQL 表达式里读取和修改设置
+
+使用 `current_setting()` 读取 `work_mem`、`lock_timeout`、`statement_timeout` 或 `deadlock_timeout`。结果以文本显示，例如 `150ms` 或 `0`。第二个参数为 `true` 时，查找不到的名称返回 SQL `NULL`。使用 `set_config()` 修改同一组设置，传入 `NULL` 代表恢复默认值。第三个参数为 `true` 时，这次修改只在当前事务中有效。单独执行时，它会在语句结束后恢复。与普通 `SET` 一样，持久到连接的修改也会随失败的事务撤销。
+
+```sql
+SELECT current_setting('lock_timeout');
+BEGIN;
+SELECT set_config('lock_timeout', '150ms', true);
+SELECT current_setting('lock_timeout');  -- 150ms
+COMMIT;
+SELECT set_config('work_mem', NULL, false);
+```
+
+两个函数可以带 `pg_catalog` 限定，也可以使用查询参数。更改 `deadlock_timeout` 需要管理员权限。[测试范围](test-report.md#session-setting-functions-20261122)
+
 ### 配置值与实际运行资源的边界
 
 参数能写入配置或出现在 `pg_settings` 中，并不表示已实现 PostgreSQL 的同名调度或资源语义。

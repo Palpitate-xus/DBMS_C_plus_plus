@@ -2,6 +2,25 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-22 scalar current_setting and set_config functions",
+      "gap_ids": ["FUNC-01", "FUNC-04", "OPS-02", "TXN-05"],
+      "status": "partial",
+      "evidence": [
+        "src/common/TrackedSessionSettings.h",
+        "src/expression/ExprEvaluator.cpp",
+        "src/network/NetworkServer.cpp",
+        "docs/compatibility-contract.md",
+        "docs/test-report.md",
+        "docs/performance-report-2026-10-30.md"
+      ],
+      "tests": ["tests/session_setting_functions_protocol_e2e_test.py"],
+      "verification": [
+        "The built-in functions share the value conversion, privilege and transaction handling of the four covered utility settings.",
+        "Reading and assigning settings are runtime operations. Prepared declarations infer text and boolean direct inputs without calling the setter.",
+        "Coverage for other settings, custom parameters, parameter SET grants and full catalog metadata remains open."
+      ]
+    },
+    {
       "issue": "2026-11-22 restore timeout settings across transaction boundaries",
       "gap_ids": ["OPS-02", "TXN-05", "TXN-07", "PROTO-07"],
       "status": "partial",

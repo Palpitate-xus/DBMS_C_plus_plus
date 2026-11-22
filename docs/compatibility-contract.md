@@ -2,6 +2,10 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-22 · 查询里的连接设置函数
+
+`current_setting` 和 `set_config` 支持 `work_mem`、`lock_timeout`、`statement_timeout`、`deadlock_timeout`，返回与 `SHOW` 一致的文本。查询可以绑定参数，准备阶段不会修改设置。执行失败或回滚时恢复对应的值。`search_path`、其他参数和自定义设置仍待接入这两个函数。更改死锁检查时间需要管理员权限。[使用手册](MANUAL.md#在-sql-表达式里读取和修改设置) · [验证范围](test-report.md#session-setting-functions-20261122)
+
 ## 2026-11-22 · 超时设置随事务恢复
 
 `lock_timeout`、`statement_timeout` 和 `deadlock_timeout` 支持当前连接和当前事务两种作用域。提交保留普通 `SET`，回滚撤销它，保存点恢复当时的设置。普通或扩展请求中的失败也会恢复该次事务的设置。显式 `SET` 和连接启动选项可以覆盖服务器默认值。继承服务器默认值的连接会在后续请求中采用重载后的值。`deadlock_timeout` 的独立设置和重置限管理员，参数级授权仍待实现。[使用手册](MANUAL.md#在事务里临时调整超时) · [验证范围](test-report.md#transactional-timeouts-20261122)

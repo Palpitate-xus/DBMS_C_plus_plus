@@ -33,6 +33,7 @@
 #include "utils/prepared_stmts.h"
 #include "utils/PlanCacheEpoch.h"
 #include "common/WorkMemUtilityContext.h"
+#include "common/TrackedSessionSettings.h"
 #include "transaction/StatementInterruptGuard.h"
 #include "ExecutionPlan.h"
 #include "executor/PreparedTableSource.h"
@@ -3614,12 +3615,6 @@ static bool restoreSessionTimeZone(Session& s) {
     return false;
 }
 
-static void checkTimeoutPrivilege(const Session& s, dbms::TimeoutParameter parameter,
-                                  const string& name) {
-    if (parameter == dbms::TimeoutParameter::Deadlock && !sessionIsAdmin(s))
-        throw dbms::DbError("42501", "permission denied to set parameter \"" + name + "\"");
-}
-
 static bool handleResetCommand(const string& sql, Session& s) {
     // RESET ROLE
     if (sql == "reset role") {
@@ -3646,22 +3641,16 @@ static bool handleResetCommand(const string& sql, Session& s) {
     const auto resetTokens = dbms::SQLParser::tokenize(sql);
     const auto name = resetTokens.size() > 1
         ? toLower(decodeQuotedIdentifier(resetTokens[1])) : string{};
-    const auto timeout = dbms::findTimeoutParameter(name);
-    if ((name == "work_mem" || timeout) &&
-        (resetTokens.size() == 2 || resetTokens[2].front() != '.')) {
+    if (dbms::isTrackedSessionSetting(name) &&
+        (resetTokens.size() == 2 || resetTokens[2].rfind('.', 0) != 0)) {
         dbms::SQLParser parser;
         const auto syntax = parser.parseForBinding(sql);
         if (!syntax.success)
             throw dbms::DbError("42601", syntax.error.empty() ? "invalid RESET " + name : syntax.error);
-        if (timeout) {
-            checkTimeoutPrivilege(s, *timeout, name);
-            if (g_engine.inTransaction()) s.timeouts.begin();
-            s.timeouts.set(*timeout, std::nullopt, false);
-            s.timeouts.syncLocks(g_engine.getLockManager());
-            cout << "RESET" << endl;
-            return false;
-        }
-        rest = "work_mem";
+        dbms::assignTrackedSetting(s, g_engine, name, g_config.workMemKb,
+                                   std::nullopt, dbms::SettingChangeScope::Session);
+        cout << "RESET" << endl;
+        return false;
     }
     if (rest == "all") {
         if (restoreSessionTimeZone(s)) return true;
@@ -3711,12 +3700,6 @@ static bool handleResetCommand(const string& sql, Session& s) {
     if (rest == "lc_monetary") {
         s.lcMonetary = s.defaultLcMonetary;
         cout << "RESET " << rest << endl;
-        return false;
-    }
-    if (toLower(decodeQuotedIdentifier(rest)) == "work_mem") {
-        if (g_engine.inTransaction()) s.workMem.begin();
-        s.workMem.assign(std::nullopt, false);
-        cout << "RESET" << endl;
         return false;
     }
     if (rest == "transaction_isolation" || rest == "transaction isolation") {
@@ -4189,60 +4172,35 @@ static std::optional<bool> handleScalarSessionSetting(const string& rawSql, Sess
     if (target >= tokens.size() ||
         (target + 1 < tokens.size() && tokens[target + 1].front() == '.')) return std::nullopt;
     const auto name = dbms::SQLParser::toLower(decodeQuotedIdentifier(tokens[target]));
-    const auto timeout = dbms::findTimeoutParameter(name);
-    if (name != "work_mem" && !timeout) return std::nullopt;
+    if (!dbms::isTrackedSessionSetting(name)) return std::nullopt;
     dbms::SQLParser parser;
     const auto parsed = parser.parseForBinding(rawSql);
     const auto* setting = parsed.success ? dynamic_cast<const dbms::SetStmt*>(parsed.stmt.get()) : nullptr;
     if (!setting || setting->name != name)
         throw dbms::DbError("42601", parsed.error.empty() ? "invalid SET " + name : parsed.error);
     const bool local = setting->scope == dbms::SetStmt::Scope::Local;
-    const bool localAllowed = timeout ? dbms::ScopedWorkMemUtilityContext::insideBlock()
-                                      : dbms::ScopedWorkMemUtilityContext::localAllowed();
+    const bool workMem = name == "work_mem";
+    const bool localAllowed = workMem ? dbms::ScopedWorkMemUtilityContext::localAllowed()
+                                      : dbms::ScopedWorkMemUtilityContext::insideBlock();
     const bool outsideBlock = local && (!g_engine.inTransaction() ||
         (executeDepth == 1 && !localAllowed));
     // PostgreSQL warns before flattening/checking the value, even when that
     // check subsequently raises an error. Syntax errors remain parse errors.
     if (outsideBlock)
         dbms::emitDiagnostic({"WARNING", "25P01", "SET LOCAL can only be used in transaction blocks"});
-    if (timeout) {
-        checkTimeoutPrivilege(s, *timeout, name);
-        std::optional<int> value;
-        if (setting->values.empty()) {
-            value = s.timeouts.get(*timeout);
-        } else if (setting->values.size() != 1) {
-            throw dbms::DbError("22023", "SET " + name + " takes only one argument");
-        } else if (setting->values.front() != "default") {
-            const auto& datum = setting->values.front();
-            const auto duration = dbms::parseTimeoutMs(!datum.empty() && datum.front() == '"'
-                ? decodeQuotedIdentifier(datum) : stripQuotes(datum),
-                dbms::timeoutMinimum(*timeout, name));
-            if (!duration)
-                throw dbms::DbError("22023", "invalid value for parameter \"" + name + "\"");
-            value = *duration;
-        }
-        if (g_engine.inTransaction()) s.timeouts.begin();
-        // A first Extended Execute warns, but its value is visible to later
-        // commands before Sync ends the implicit transaction.
-        s.timeouts.set(*timeout, value, local);
-        s.timeouts.syncLocks(g_engine.getLockManager());
-        cout << "SET" << endl;
-        return false;
-    }
-    std::optional<size_t> value;
-    if (setting->values.empty()) value = s.workMem.effective(g_config.workMemKb);
-    else if (setting->values.size() != 1)
-        throw dbms::DbError("22023", "SET work_mem takes only one argument");
-    else if (setting->values.front() != "default") {
+    if (setting->values.size() > 1)
+        throw dbms::DbError("22023", "SET " + name + " takes only one argument");
+    const bool fromCurrent = setting->values.empty();
+    std::optional<string> value;
+    if (!fromCurrent && setting->values.front() != "default") {
         const auto& datum = setting->values.front();
-        value = dbms::parseWorkMemKb(!datum.empty() && datum.front() == '"'
-            ? decodeQuotedIdentifier(datum) : stripQuotes(datum));
-        if (!value) throw dbms::DbError("22023", "invalid value for parameter \"work_mem\"");
+        value = !datum.empty() && datum.front() == '"'
+            ? decodeQuotedIdentifier(datum) : stripQuotes(datum);
     }
-    if (!outsideBlock) {
-        if (g_engine.inTransaction()) s.workMem.begin();
-        s.workMem.assign(value, local);
-    }
+    using Scope = dbms::SettingChangeScope;
+    const auto scope = outsideBlock && workMem ? Scope::ValidateOnly
+        : local ? Scope::Local : Scope::Session;
+    dbms::assignTrackedSetting(s, g_engine, name, g_config.workMemKb, value, scope, fromCurrent);
     cout << "SET" << endl;
     return false;
 }
@@ -26982,18 +26940,11 @@ static bool executeInternal(const string& rawSql, Session& s) {
             return false;
         }
         if (shown && shown->isShow) {
-            if (const auto timeout = dbms::findTimeoutParameter(shown->name)) {
-                const auto value = dbms::formatTimeoutMs(s.timeouts.get(*timeout));
-                publishStructuredUtilityResult({shown->name}, {"text"}, {{value}}, {{false}}, "SHOW");
-                cout << shown->name << endl << value << endl;
+            if (const auto value = dbms::showTrackedSetting(s, shown->name, g_config.workMemKb)) {
+                publishStructuredUtilityResult({shown->name}, {"text"}, {{*value}}, {{false}}, "SHOW");
+                cout << shown->name << endl << *value << endl;
                 return false;
             }
-        }
-        if (shown && shown->isShow && shown->name == "work_mem") {
-            const auto value = dbms::formatWorkMemKb(s.workMem.effective(g_config.workMemKb));
-            publishStructuredUtilityResult({"work_mem"}, {"text"}, {{value}}, {{false}}, "SHOW");
-            cout << "work_mem" << endl << value << endl;
-            return false;
         }
         if (shown && shown->isShow && shown->name == "transaction_isolation") {
             // Outside a block, show the default used by a fresh SQL BEGIN,
@@ -42094,7 +42045,15 @@ int main(int argc, char* argv[]) {
                 g_engine.insert(triggerSession.currentDB, actual, r);
             }
         }
-        bool failed = execute(actionSql, triggerSession);
+        bool failed = [&] {
+            // The direct SQL action uses a copy of the session. Its settings
+            // are isolated, including the lock manager's thread-local values.
+            struct RestoreLockTimeouts {
+                const Session& caller;
+                ~RestoreLockTimeouts() { caller.timeouts.syncLocks(g_engine.getLockManager()); }
+            } restoreTimeouts{*activeSession};
+            return execute(actionSql, triggerSession);
+        }();
         for (const auto& alias : createdAliases) {
             g_engine.dropTable(triggerSession.currentDB,
                                tempTablePrefix(triggerSession, alias));

@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>可以在查询里查看和修改连接设置 · 2026-11-22</summary>
+
+应用可以用 SQL 函数查看当前的等待时间，也可以为一次事务临时调整等待时间或查询使用的内存。
+
+[使用示例](docs/MANUAL.md#在-sql-表达式里读取和修改设置) · [测试报告](docs/test-report.md#session-setting-functions-20261122) · [性能报告](docs/performance-report-2026-10-30.md#session-setting-functions-cost-20261122)
+
+</details>
+
+<details>
 <summary>回滚事务时，会恢复之前的超时设置 · 2026-11-22</summary>
 
 可以只为当前事务缩短锁等待时间，结束后恢复原来的设置。用 `SHOW` 可以随时查看当前值。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>改记录时等不到锁，原来的锁会保留 · 2026-11-22</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-22 · 改记录时等不到锁，原来的锁会保留
 
 如果你先锁住一条记录来核对，之后尝试修改时等到超时，回到保存点后，其他人仍要等你的事务结束才能修改这条记录。
 
 [使用说明](docs/MANUAL.md#查询时锁住分区表记录) · [测试报告](docs/test-report.md#row-lock-upgrade-20261122) · [性能报告](docs/performance-report-2026-10-30.md#row-lock-upgrade-cost-20261122)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-22 · 多人可以同时核对分区表里的同一条记录
 

@@ -28,6 +28,7 @@
 #include "common/TimeZoneRules.h"
 #include "common/BooleanCodec.h"
 #include "common/WorkMemUtilityContext.h"
+#include "common/TrackedSessionSettings.h"
 #include "transaction/StatementInterruptGuard.h"
 #include "common/IntegerTextCodec.h"
 #include "common/NetworkValue.h"
@@ -3111,12 +3112,13 @@ bool hasProtocolScalarSignatureCall(const Stmt* statement,const std::string& dat
             CatalogManager::QualifiedName name;
             const auto spelling=call->schema.empty()?call->funcName:call->schema+"."+call->funcName;
             const bool parsedName=CatalogManager::parseQualifiedName(spelling,name,true);
+            const bool settingCall = parsedName && isSessionSettingFunction(SQLParser::toLower(name.name));
             const bool scaleCall=parsedName && (SQLParser::toLower(name.name)=="starts_with" || SQLParser::toLower(name.name)=="ascii" || SQLParser::toLower(name.name)=="chr" || SQLParser::toLower(name.name)=="scale" || SQLParser::toLower(name.name)=="min_scale" || SQLParser::toLower(name.name)=="gcd" || SQLParser::toLower(name.name)=="lcm" || SQLParser::toLower(name.name)=="factorial");
             // These finite declared calls need whole-query transformation: FILTER's
             // names and boolean type precede the non-aggregate diagnostic.
             // Do not send it through the legacy name-only signature probe.
             if((call->hasOver || call->setReturning || call->distinct || call->filter ||
-                !call->orderBy.empty()) && !scaleCall)return false;
+                !call->orderBy.empty()) && !scaleCall && !settingCall)return false;
             if(parsedName && (name.schema.empty() || name.schema=="pg_catalog")) {
                 // These are the established frontend aggregate/window/SRF
                 // roles, not a second overload or function-validity resolver.
@@ -3134,6 +3136,7 @@ bool hasProtocolScalarSignatureCall(const Stmt* statement,const std::string& dat
                 // Route only this finite family through real declaration
                 // binding, including unknown parameters and invalid quoted
                 // case. Folding here admits analysis; it never picks a callee.
+                if (settingCall) candidate = true;
                 if(parsedName && (SQLParser::toLower(name.name)=="starts_with" || SQLParser::toLower(name.name)=="ascii" || SQLParser::toLower(name.name)=="chr" || SQLParser::toLower(name.name)=="strpos" || SQLParser::toLower(name.name)=="scale" || SQLParser::toLower(name.name)=="min_scale" || SQLParser::toLower(name.name)=="gcd" || SQLParser::toLower(name.name)=="lcm" || SQLParser::toLower(name.name)=="factorial"))candidate=true;
                 // Parse/Describe may bind a genuine quoted SQL callee even
                 // when no stored name exists. Do not apply this new entry to
@@ -3466,8 +3469,17 @@ void inferProtocolWholeScalarParameters(const std::string& sql,Session& session,
     if(!call || call->args.empty() || !call->namedArgs.empty())return;
     // This finite boundary does not pretend to unify parameter constraints
     // across independent expressions or explicit casts.
-    for(const auto& argument:call->args)
-        if(!dynamic_cast<const ParameterExpr*>(argument.get()))return;
+    CatalogManager::QualifiedName functionName;
+    const bool settingCall = CatalogManager::parseQualifiedName(call->funcName, functionName, true) &&
+        isSessionSettingFunction(functionName.name);
+    if (!settingCall) {
+        for (const auto& argument : call->args)
+            if (!dynamic_cast<const ParameterExpr*>(argument.get())) return;
+    } else if (std::none_of(call->args.begin(), call->args.end(), [](const auto& argument) {
+                   return dynamic_cast<const ParameterExpr*>(argument.get()) != nullptr;
+               })) {
+        return;
+    }
     auto* previous=currentSession();setCurrentSession(&session);
     struct Restore {Session* previous;~Restore(){setCurrentSession(previous);}} restore{previous};
     auto prepared=g_engine.prepareBoundQuery(session.currentDB,sql,
@@ -3483,7 +3495,10 @@ void inferProtocolWholeScalarParameters(const std::string& sql,Session& session,
         const auto* cast=dynamic_cast<const CastExpr*>(argument.get());
         const auto* parameter=dynamic_cast<const ParameterExpr*>(
             cast?cast->operand.get():argument.get());
-        if(!parameter)throw DbError("XX000","scalar parameter lost its source");
+        if (!parameter) {
+            if (settingCall) continue;
+            throw DbError("XX000", "scalar parameter lost its source");
+        }
         const auto use=std::find_if(prepared.uses.begin(),prepared.uses.end(),[&](const auto& use) {
             return use.slot==parameter->slot && use.begin==parameter->sourceBegin &&
                    use.end==parameter->sourceEnd;
@@ -3540,7 +3555,8 @@ void validatePreparedScalarArithmetic(const std::string& sql,Session& session,
                 "char_length","character_length","octet_length","bit_length","ascii","chr","starts_with","strpos","scale","min_scale","gcd","lcm","factorial","array_position","array_positions"};
             CatalogManager::QualifiedName name;
             if(CatalogManager::parseQualifiedName(call->funcName,name,true) &&
-               name.schema.empty() && (declarations.count(name.name) || SQLParser::toLower(name.name)=="starts_with" || SQLParser::toLower(name.name)=="ascii" || SQLParser::toLower(name.name)=="chr" || SQLParser::toLower(name.name)=="strpos"))return true;
+               name.schema.empty() && (declarations.count(name.name) || isSessionSettingFunction(SQLParser::toLower(name.name)) ||
+                   SQLParser::toLower(name.name)=="starts_with" || SQLParser::toLower(name.name)=="ascii" || SQLParser::toLower(name.name)=="chr" || SQLParser::toLower(name.name)=="strpos"))return true;
             for(const auto& argument:call->args)if(contains(argument.get()))return true;
             for(const auto& argument:call->namedArgs)if(contains(argument.value.get()))return true;
             return contains(call->filter.get());

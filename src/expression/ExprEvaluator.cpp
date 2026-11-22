@@ -15,6 +15,8 @@
 #include "SqlPattern.h"
 #include "function_namespace.h"
 #include "common/QueryHostProvider.h"
+#include "common/Config.h"
+#include "common/TrackedSessionSettings.h"
 #include "utils/interval.h"
 #include "utils/interval_type.h"
 #include "commands/TableManage.h"
@@ -79,6 +81,7 @@
 
 // Global engine reference used by sequence builtins.
 extern dbms::StorageEngine g_engine;
+extern dbms::Config g_config;
 
 namespace dbms {
 static bool parseArrayElements(const std::string&, std::vector<std::string>&);
@@ -6388,7 +6391,43 @@ struct SqlSerialSequenceFunction {
         throw DbError("XX000", "pg_get_serial_sequence requires its actual evaluation context");
     }
 };
+struct SqlSessionSettingFunction {
+    bool write;
+
+    ExprValue operator()(const std::vector<ExprValue>& args) const {
+        return invoke(args, g_engine);
+    }
+
+    ExprValue invoke(const std::vector<ExprValue>& args, StorageEngine& engine) const {
+        if (write ? args.size() != 3 : args.empty() || args.size() > 2)
+            throw DbError("42883", "configuration function does not accept these arguments");
+        if (!write && (args[0].isNull || (args.size() == 2 && args[1].isNull)))
+            return ExprValue("text", "", true);
+        if (args[0].isNull) throw DbError("22004", "SET requires parameter name");
+        auto* session = currentSession();
+        if (!session) throw DbError("XX000", "configuration function requires a session");
+
+        const auto name = toLower(args[0].value);
+        // Utility commands also accept project-specific _ms aliases. These
+        // SQL functions expose the standard parameter names.
+        if (name != "work_mem" && std::find(timeoutNames.begin(), timeoutNames.end(), name) == timeoutNames.end()) {
+            if (!write && args.size() == 2 && args[1].asBool()) return ExprValue("text", "", true);
+            throw DbError("42704", "unrecognized configuration parameter \"" + args[0].value + "\"");
+        }
+        const auto defaultWorkMemKb = g_config.workMemKb;
+        if (write) {
+            const auto value = args[1].isNull ? std::nullopt : std::optional<std::string>(args[1].value);
+            const auto scope = !args[2].isNull && args[2].asBool()
+                ? SettingChangeScope::Local : SettingChangeScope::Session;
+            assignTrackedSetting(*session, engine, name, defaultWorkMemKb, value, scope);
+        }
+        const auto value = showTrackedSetting(*session, name, defaultWorkMemKb);
+        return ExprValue("text", value.value());
+    }
+};
 bool ownsScalarSignatures(const std::string& name,const ScalarFunction* callback) {
+    if (isSessionSettingFunction(name))
+        return callback && callback->target<SqlSessionSettingFunction>();
     if(name=="pg_get_serial_sequence")
         return callback && callback->target<SqlSerialSequenceFunction>();
     if(isCoreOverloadedScalarName(name))
@@ -6472,6 +6511,16 @@ const std::vector<ScalarSignature>& scalarSignatures(const std::string& name) {
         return *value;
     }
     if(name=="pg_get_serial_sequence"){ static const auto* const value = new const std::vector<ScalarSignature>{{{"text","text"},"text"}}; return *value; }
+    if (name == "current_setting") {
+        static const auto* const signatures = new const std::vector<ScalarSignature>{
+            {{"text"}, "text"}, {{"text", "boolean"}, "text"}};
+        return *signatures;
+    }
+    if (name == "set_config") {
+        static const auto* const signatures = new const std::vector<ScalarSignature>{
+            {{"text", "text", "boolean"}, "text"}};
+        return *signatures;
+    }
     if(name=="scale" || name=="min_scale"){ static const auto* const value = new const std::vector<ScalarSignature>{{{"numeric"},"integer"}}; return *value; }
     if(name=="factorial"){ static const auto* const value = new const std::vector<ScalarSignature>{{{"bigint"},"numeric"}}; return *value; }
     if(name=="gcd" || name=="lcm"){ static const auto* const value = new const std::vector<ScalarSignature>{
@@ -6703,7 +6752,8 @@ ResolvedScalarFunction resolveTypedScalar(const std::string& name,
         candidates.erase(std::remove_if(candidates.begin(),candidates.end(),[](const auto& candidate){return candidate.polymorphic;}),candidates.end());
     if(candidates.size()>1)throw DbError("42725","function "+name+" is not unique");
     if(candidates.empty())return {};
-    if((name=="scale" || name=="min_scale" || name=="gcd" || name=="lcm" || name=="factorial") && !candidates.front().stored &&
+    if((name=="scale" || name=="min_scale" || name=="gcd" || name=="lcm" || name=="factorial" ||
+        isSessionSettingFunction(name)) && !candidates.front().stored &&
        (call->hasOver || call->distinct || call->filter || !call->orderBy.empty() ||
         !call->aggregateOrderKeys.empty()))
         throw DbError("42809",name+" is not an aggregate or window function");
@@ -7329,6 +7379,31 @@ ExprValue ExprEvaluator::evalSqlValue(const FunctionCallExpr* e,const RowContext
     return value;
 }
 
+// Bound statement inputs can be constants. A NULL read from a row, a routine
+// result, or a metadata placeholder never removes demand for another argument.
+static bool nullStatementInput(const Expr* expression, const RowContext& ctx,
+                               bool allowCatalogTextAndBool = false) {
+    if (!expression || expression->preparedSubquery) return false;
+    if (between_input_detail::nullConstant(expression)) return true;
+    if (const auto* parameter = dynamic_cast<const ParameterExpr*>(expression))
+        return parameter->origin == ParameterOrigin::StatementInput && ctx.parameter(parameter->slot).isNull;
+    const auto allowedCast = [allowCatalogTextAndBool](const std::string& type) {
+        if (between_input_detail::primitiveType(type)) return true;
+        CatalogManager::QualifiedName name;
+        return allowCatalogTextAndBool && CatalogManager::parseQualifiedName(type, name, true) &&
+               name.schema == "pg_catalog" && (name.name == "text" || name.name == "bool");
+    };
+    if (const auto* cast = dynamic_cast<const CastExpr*>(expression))
+        return cast->typeMods.empty() && allowedCast(cast->typeName) &&
+               nullStatementInput(cast->operand.get(), ctx, allowCatalogTextAndBool);
+    if (const auto* cast = dynamic_cast<const BinaryOpExpr*>(expression); cast && cast->op == "::") {
+        const auto* target = dynamic_cast<const LiteralExpr*>(cast->right.get());
+        return target && allowedCast(target->value) &&
+               nullStatementInput(cast->left.get(), ctx, allowCatalogTextAndBool);
+    }
+    return false;
+}
+
 ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowContext& ctx) const {
     if (!e) return ExprValue{};
     if (identity_value_detail::bound(e)) {
@@ -7453,24 +7528,6 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
         const bool negate = name == "not between";
         for (const auto& argument : e->args)
             between_input_detail::validateLiteralCasts(argument.get());
-        const std::function<bool(const Expr*)> nullInput = [&](const Expr* expression) {
-            if (!expression || expression->preparedSubquery) return false;
-            if (between_input_detail::nullConstant(expression)) return true;
-            // Only actual statement inputs are immutable after Bind. Runtime
-            // rows/aggregate cells and metadata placeholders keep peer demand;
-            // never execute an expression to infer preparation-time NULL.
-            if (const auto* parameter = dynamic_cast<const ParameterExpr*>(expression))
-                return parameter->origin == ParameterOrigin::StatementInput &&
-                    ctx.parameter(parameter->slot).isNull;
-            if (const auto* cast = dynamic_cast<const CastExpr*>(expression))
-                return cast->typeMods.empty() && between_input_detail::primitiveType(cast->typeName) &&
-                    nullInput(cast->operand.get());
-            if (const auto* cast = dynamic_cast<const BinaryOpExpr*>(expression); cast && cast->op == "::") {
-                const auto* target = dynamic_cast<const LiteralExpr*>(cast->right.get());
-                return target && between_input_detail::primitiveType(target->value) && nullInput(cast->left.get());
-            }
-            return false;
-        };
         const auto input = [&](size_t position) {
             ExprValue value = eval(e->args[position].get(), ctx);
             const auto* literal = dynamic_cast<const LiteralExpr*>(e->args[position].get());
@@ -7487,7 +7544,8 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
             // A genuine constant NULL makes a strict comparison NULL during
             // planning. Do not invoke its otherwise volatile peer just to
             // rediscover that fact; row/provider NULLs are not constants.
-            if (nullInput(e->args[0].get()) || nullInput(e->args[bound].get())) {
+            if (nullStatementInput(e->args[0].get(), ctx) ||
+                nullStatementInput(e->args[bound].get(), ctx)) {
                 // Pure peers retain planning errors even under a strict NULL
                 // comparison. No row/parameter/routine/child is evaluated.
                 ExprEvaluator pure;
@@ -7520,6 +7578,23 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
         return ExprValue("boolean", negate ? "f" : "t", false);
     }
 
+    if (name == "current_setting" && callback != functionRegistry().end() &&
+        callback->second.target<SqlSessionSettingFunction>() &&
+        std::any_of(e->args.begin(), e->args.end(), [&](const auto& argument) {
+            // Wire Bind lowers typed NULL to CAST(NULL AS pg_catalog.type).
+            return nullStatementInput(argument.get(), ctx, true);
+        })) {
+        auto* owner = sqlValueEngine_ ? sqlValueEngine_ : &g_engine;
+        std::vector<std::string> inputs;
+        for (const auto& argument : e->args) {
+            between_input_detail::validateLiteralCasts(argument.get());
+            inputs.push_back(scalarSignatureInputType(
+                arrayExpressionType(argument.get(), ctx, currentDB_, this, true, owner)));
+        }
+        if (!resolveTypedScalar(name, inputs, e, {"pg_catalog"}, owner, currentDB_).found)
+            throw DbError("42883", "function does not exist: " + name);
+        return ExprValue("text", "", true);
+    }
     std::vector<ExprValue> args;
     for (const auto& a : e->args) {
         auto value=eval(a.get(),ctx);
@@ -7712,6 +7787,9 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
             intrinsic.sqlValue=keyword->kind;
             intrinsic.funcName=keyword->kind==sql_value_detail::Kind::CurrentCatalog?"current_catalog":name;
             result=evalSqlValue(&intrinsic,ctx);
+        } else if (const auto* setting = it->second.target<SqlSessionSettingFunction>()) {
+            auto* owner = sqlValueEngine_ ? sqlValueEngine_ : &g_engine;
+            result = setting->invoke(args, *owner);
         } else result = it->second(args);
         if(!pushElement && declaredResult.size()>=2 && declaredResult.compare(declaredResult.size()-2,2,"[]")==0)
             result=implicitRuntimeValue(*this,std::move(result),declaredResult);
@@ -13703,6 +13781,8 @@ void ExprEvaluator::registerStatelessBuiltins() {
     functions_["current_schema"]=SqlNameFunction{sql_value_detail::Kind::CurrentSchema};
     functions_["pg_typeof"]=SqlTypeOfFunction{};
     functions_["pg_get_serial_sequence"]=SqlSerialSequenceFunction{};
+    functions_["current_setting"] = SqlSessionSettingFunction{false};
+    functions_["set_config"] = SqlSessionSettingFunction{true};
     functions_["version"]=SqlVersionFunction{};
     for(const auto* name:{"current_user","session_user","current_database","current_schema"})
         volatility_[name]='s';
@@ -14572,6 +14652,8 @@ void ExprEvaluator::registerStatelessBuiltins() {
     volatility_["current_user"] = 's';
     volatility_["pg_typeof"] = 's';
     volatility_["pg_get_serial_sequence"] = 's';
+    volatility_["current_setting"] = 's';
+    volatility_["set_config"] = 'v';
     volatility_["version"] = 's';
     volatility_["session_user"] = 's';
     volatility_["nextval"] = 'v';

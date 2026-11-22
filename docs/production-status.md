@@ -6,6 +6,10 @@
 
 截至 2026-11-22，273 项功能要求中有 22 项完成、167 项部分实现、69 项待验证、15 项暂缓。各项结果和剩余范围见功能总账。以下更新报告给出各轮测试的实际范围。[功能总账](gap-progress.json) · [支持的功能和限制](compatibility-contract.md)
 
+## 2026-11-22 · 查询可以读写内存和超时设置
+
+应用可以通过 `current_setting()` 查看当前的工作内存和三项超时设置，通过 `set_config()` 修改它们。预编译查询可以绑定参数。修改会随事务提交或撤销，参数解析和结果类型查询不会先执行修改。[测试报告](test-report.md#session-setting-functions-20261122) · [性能报告](performance-report-2026-10-30.md#session-setting-functions-cost-20261122)
+
 ## 2026-11-22 · 回滚时恢复原有的超时设置
 
 语句超时、锁等待超时和死锁检查时间可按事务临时调整。保存点、回滚和准备事务时会恢复或保留相应的值。连接设置可以覆盖服务器默认值，连接继承的默认值可以随服务器配置更新。交互式命令行开启语句超时后仍使用原线程执行 SQL，可继续操作之前开启的事务。[测试报告](test-report.md#transactional-timeouts-20261122) · [性能报告](performance-report-2026-10-30.md#transactional-timeouts-cost-20261122)

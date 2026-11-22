@@ -2,6 +2,10 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-22 · 通过查询读写连接设置
+
+PostgreSQL 通过 `current_setting` 读取运行中的设置，`set_config` 使用与 `SET` 相同的事务机制。DuckDB 也有 `current_setting`，用 `SET` 或 `PRAGMA` 更改设置。SQLite 为部分只读 `PRAGMA` 提供可查询的表函数。本项目将两种 SQL 函数接入原有标量函数和事务设置处理，覆盖工作内存和三项超时。预编译时只确定输入和输出类型，执行时才读取或更改当前连接。[PostgreSQL 函数文档](https://www.postgresql.org/docs/18/functions-admin.html#FUNCTIONS-ADMIN-SET) · [PostgreSQL 18.6 实现](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/utils/misc/guc_funcs.c) · [DuckDB 配置](https://duckdb.org/docs/2.0/configuration/overview) · [SQLite PRAGMA 表函数](https://www.sqlite.org/pragma.html#pragma_functions)
+
 ## 2026-11-22 · 锁等待时间与事务设置
 
 PostgreSQL 为事务中的参数变更保存可回滚的历史，普通 `SET` 在提交后保留，`SET LOCAL` 在事务结束时恢复。SQLite 的 `busy_timeout` 属于连接，按等待时间累计决定是否返回 `SQLITE_BUSY`。DuckDB 支持会话级设置，并用乐观并发控制处理对同一行的冲突写入。本项目复用保存点的设置快照，并用版本号在服务器更新三项超时默认值后刷新连接。普通请求只需查看一次版本号，无需为每次读取默认值加锁。[PostgreSQL SET](https://www.postgresql.org/docs/18/sql-set.html) · [PostgreSQL 18.6 参数实现](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/utils/misc/guc.c) · [SQLite busy timeout](https://www.sqlite.org/c3ref/busy_timeout.html) · [DuckDB 并发](https://duckdb.org/docs/2.0/connect/concurrency)

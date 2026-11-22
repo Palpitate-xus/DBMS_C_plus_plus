@@ -635,6 +635,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/pg_stat_activity_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/statement_timeout_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/timeout_settings_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/session_setting_functions_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/statement_timeout_cli_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/pg_catalog_unavailable_sqlstate_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/order_by_terminator_protocol_e2e_test.py)
