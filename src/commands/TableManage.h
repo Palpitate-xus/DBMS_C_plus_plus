@@ -1939,12 +1939,14 @@ private:
         bool scanPartitions, const std::vector<std::string>* partitions = nullptr) const;
     // A scan with an existing relation lock can reuse the schema obtained
     // under that lock for visibility, policy and leaf path resolution.
+    using PartitionScanStart = std::function<void(
+        uint32_t fork, const std::string& heapName, const std::shared_ptr<PageAllocator>&)>;
     bool forEachRowUsingSchema(
         const std::string& dbname, const std::string& tablename,
         const std::function<void(uint32_t, uint16_t, const char*, size_t)>& callback,
         const ReadView* readView, const std::vector<std::string>& targetPartitions,
         bool registerSiread, bool indexMaintenanceView, ScopedMaintenanceProgress* progress,
-        const TableSchema* lockedSchema) const;
+        const TableSchema* lockedSchema, const PartitionScanStart* startPartition = nullptr) const;
     bool forEachVisibleRowUsingSchema(
         const std::string& dbname, const std::string& tablename, const std::string& command,
         const std::function<void(uint32_t, uint16_t, const char*, size_t)>& callback,
@@ -2486,6 +2488,10 @@ private:
         const SqlMutationCallbacks* mutationCallbacks = nullptr,
         OwningMutationRows* owningRows = nullptr,
         bool deferVirtualInputs = false);
+    DBStatus removePartitionRows(
+        const std::string& dbname, const TableSchema& table,
+        const std::vector<std::string>& conditions, std::vector<SqlRow>* deletedRows,
+        const SqlDeleteMatcher& deleteMatcher, bool mayRecheck, size_t* affectedRows);
     DBStatus updateInternal(
         const std::string& dbname, const std::string& tablename,
         const std::map<std::string, std::string>& updates,
@@ -2538,7 +2544,7 @@ private:
         enum class Op { Insert, Update, Delete } op;
         std::string tableName;
         int64_t rowIdx;
-        std::string rowData;     // INSERT/DELETE image or UPDATE OLD image
+        std::string rowData;     // Physical payload, or a full old tuple for partition DELETE
         std::string newRowData;  // UPDATE NEW image
         // UPDATE stores the new tuple in rowIdx and keeps the superseded
         // physical version at previousRowIdx until vacuum.  Older log entries
@@ -2568,18 +2574,19 @@ private:
                       const std::string& rowData,
                       const std::vector<bool>* rowNulls, uint32_t heapFork,
                       uint64_t partitionRelation);
-    bool hasPartitionInserts(const std::string& dbname, const std::string& table = "") const;
+    bool hasPartitionHeapWrites(const std::string& dbname, const std::string& table = "") const;
     std::shared_ptr<PageAllocator> transactionPartitionHeap(
         const std::string& dbname, const std::string& table, uint32_t fork,
         uint64_t relation);
-    bool undoPartitionInsert(const TxnLogEntry& entry);
+    bool undoPartitionMutation(const TxnLogEntry& entry);
     void logTxnUpdate(const std::string& tableName, int64_t rowIdx,
                       const std::string& oldRowData,
                       const std::vector<bool>* oldNulls = nullptr,
                       const std::vector<bool>* newNulls = nullptr);
     void logTxnDelete(const std::string& tableName, int64_t rowIdx,
                       const std::string& oldRowData,
-                      const std::vector<bool>* rowNulls = nullptr);
+                      const std::vector<bool>* rowNulls = nullptr,
+                      uint32_t heapFork = 0, uint64_t partitionRelation = 0);
     bool undoVersionedUpdate(const TxnLogEntry& entry);
     bool restoreDeletedRowIndexes(
         const std::string& dbname, const std::string& tablename,

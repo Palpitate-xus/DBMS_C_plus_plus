@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>可以删除分区表里的记录 · 2026-11-22</summary>
+
+在已经建好分区的表里，可以按条件删除记录。用 `RETURNING` 能看到删掉的行，提交前也可以撤销。
+
+[使用说明](docs/MANUAL.md#删除分区表中的记录) · [测试报告](docs/test-report.md#partition-delete-20261122) · [性能报告](docs/performance-report-2026-10-30.md#partition-delete-cost-20261122)
+
+</details>
+
+<details>
 <summary>读取多个分区时，少查表结构 · 2026-11-22</summary>
 
 一次查询要读取多个分区时，扫描可以共用已经读到的表结构，省掉为每个分区重复查表结构的工作。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>翻到后面的页面时，少读长文本 · 2026-11-22</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-22 · 翻到后面的页面时，少读长文本
 
 给分区表按编号排序后，比如翻到第 5 页，符合条件的查询只读取这一页的长文本。
 
 [使用说明](docs/MANUAL.md#15-分区表) · [测试报告](docs/test-report.md#partition-offset-output-20261122) · [性能报告](docs/performance-report-2026-10-30.md#partition-offset-output-cost-20261122)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-22 · 按编号取前几条时，少读长文本
 

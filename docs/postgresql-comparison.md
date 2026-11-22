@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-22 · 删除分区表中的记录
+
+PostgreSQL 18.6 用实际目标关系和元组位置调用表访问方法，在需要时等待并发修改并重新检查。SQLite 可为没有筛选、返回列或触发器的整表删除选择清空路径。DuckDB 的事务实现使用撤销信息保留旧版本可见性。[PostgreSQL 删除执行源码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/executor/nodeModifyTable.c) · [SQLite DELETE](https://sqlite.org/lang_delete.html#the_truncate_optimization) · [DuckDB 事务](https://duckdb.org/2024/10/30/analytics-optimized-concurrent-transactions)
+
+本项目在受支持的现有分区布局中，按实际叶分区锁定和删除行。预写日志包含父表物理身份和叶编号，回滚按实际叶页面恢复原记录。`ONLY` 查询父表自身时返回零行，普通 `RETURNING` 保留空值。独立叶关系、分区索引、分区 `UPDATE`、带来源的 `DELETE USING` 及更广的分区事务支持仍待补齐。[测试报告](test-report.md#partition-delete-20261122) · [性能报告](performance-report-2026-10-30.md#partition-delete-cost-20261122)
+
 ## 2026-11-22 · 减少分区扫描中重复的表定义查找
 
 PostgreSQL 18.6 对已经解析的分区边界做二分查找。SQLite 对有序索引先定位范围起点，再顺序读匹配记录。DuckDB 用数据组的边界跳过无法匹配的组。[PostgreSQL 分区裁剪源码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/partitioning/partprune.c) · [SQLite 查询规划](https://sqlite.org/queryplanner.html) · [DuckDB 最小值和最大值索引](https://duckdb.org/docs/2.0/guides/performance/indexing)

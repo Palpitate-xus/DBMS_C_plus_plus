@@ -193,10 +193,9 @@ static void test_range_partitioning() {
     assert(rows["1"] == "2018");
     assert(rows["3"] == "2030");
 
-    // Every physical partition starts at the same local page/slot pair.  The
-    // current row-addressed UPDATE/DELETE implementation cannot retain that
-    // identity, so it must reject the operation instead of reporting a
-    // successful no-op or targeting an unrelated tuple.
+    // The existing primary-key index does not retain the leaf identity.
+    // UPDATE and indexed DELETE must reject the operation instead of
+    // targeting an unrelated tuple.
     auto matches = g_engine.query(db, "logs", {"=id 2"}, {});
     assert(matches.size() == 1);
     dbms::PlanContext planContext;
@@ -218,7 +217,7 @@ static void test_range_partitioning() {
     assert(rows["2"] == "2022");
     assert(rows.count("20") == 0);
     assert(g_engine.remove(db, "logs", {"=id 1"}) ==
-           dbms::DBStatus::INVALID_VALUE);
+           dbms::DBStatus::FEATURE_NOT_SUPPORTED);
     assert(rowCount(db, "logs") == 4);
 
     // The primary-key index still stores leaf-local row addresses without
@@ -941,6 +940,150 @@ static void test_transactional_partition_inserts() {
     std::cout << "[PART] Transactional partition inserts OK" << std::endl;
 }
 
+static void test_transactional_partition_deletes() {
+    using dbms::DBStatus;
+    using SqlRow = dbms::StorageEngine::SqlRow;
+    const std::string db = testDbPath("part_txn_delete");
+    const std::string table = "events";
+    const std::string longText = incompressiblePayload(9000);
+    cleanup(db);
+
+    const auto read = [&](dbms::StorageEngine& engine) {
+        auto query = engine.prepareBoundQuery(db,
+            "SELECT id, bucket, payload FROM events ORDER BY id");
+        auto result = dbms::QueryPlanner::executePlanWithPrefix(
+            dbms::QueryPlanner::buildPreparedSelectPlan(
+                &engine, db, table, std::move(query)));
+        assert(result.ok && result.structuredRowsAvailable);
+        std::map<std::string, SqlRow> rows;
+        assert(result.structuredRows.size() == result.structuredNulls.size());
+        for (size_t i = 0; i < result.structuredRows.size(); ++i) {
+            const auto& row = result.structuredRows[i];
+            const auto& nulls = result.structuredNulls[i];
+            assert(row.size() == 3 && nulls.size() == 3);
+            assert(!nulls[0] && !nulls[1]);
+            SqlRow values{{"id", row[0]}, {"bucket", row[1]}};
+            values["payload"] = nulls[2] ? std::nullopt
+                                           : std::optional<std::string>(row[2]);
+            assert(rows.emplace(row[0], std::move(values)).second);
+        }
+        return rows;
+    };
+
+    {
+        dbms::StorageEngine writer;
+        assert(writer.createDatabase(db, "utf8") == DBStatus::OK);
+        auto schema = makeSchema(table, {"id int", "bucket int", "payload text"});
+        schema.partitionType = dbms::TableSchema::PartitionType::Range;
+        schema.partitionKey = "bucket";
+        schema.rangePartitions = {{"low", "10"}, {"high", "20"}};
+        assert(writer.createTable(db, schema) == DBStatus::OK);
+        assert(writer.beginTransaction(db) == DBStatus::OK);
+        assert(writer.insertRow(db, table, {{"id", "1"}, {"bucket", "5"},
+                                          {"payload", std::nullopt}}) == DBStatus::OK);
+        assert(writer.insertRow(db, table, {{"id", "2"}, {"bucket", "15"},
+                                          {"payload", ""}}) == DBStatus::OK);
+        assert(writer.insertRow(db, table, {{"id", "3"}, {"bucket", "6"},
+                                          {"payload", "keep"}}) == DBStatus::OK);
+        assert(writer.insertRow(db, table, {{"id", "4"}, {"bucket", "16"},
+                                          {"payload", longText}}) == DBStatus::OK);
+        assert(writer.commitTransaction() == DBStatus::OK);
+
+        // The first physical slot in each leaf has the same local RID. A
+        // parent-only RID set would silently delete or miss the wrong row.
+        const auto firstRid = [&](const std::string& leaf, const std::string& id) {
+            int64_t rid = -1;
+            assert(writer.forEachRow(db, table,
+                [&](uint32_t page, uint16_t slot, const char* data, size_t length) {
+                    const auto value = writer.extractColumnValue(
+                        std::string(data, length), schema, 0, db);
+                    if (value == id) rid = dbms::StorageEngine::encodeRid(page, slot);
+                }, nullptr, {leaf}));
+            assert(rid >= 0);
+            return rid;
+        };
+        assert(firstRid("low", "1") == firstRid("high", "2"));
+
+        assert(writer.beginTransaction(db) == DBStatus::OK);
+        assert(writer.savepoint("both_leaves") == DBStatus::OK);
+        std::vector<SqlRow> pairDeleted;
+        size_t pairCount = 0;
+        assert(writer.removeRows(db, table, {}, &pairDeleted,
+            [](const SqlRow& row) {
+                return row.at("id") == "1" || row.at("id") == "2";
+            }, &pairCount) == DBStatus::OK);
+        assert(pairCount == 2 && pairDeleted.size() == 2);
+        auto pairedRemainder = read(writer);
+        assert(pairedRemainder.size() == 2 && pairedRemainder.count("3") &&
+               pairedRemainder.count("4"));
+        assert(writer.rollbackToSavepoint("both_leaves") == DBStatus::OK);
+        assert(read(writer).size() == 4);
+        assert(writer.commitTransaction() == DBStatus::OK);
+
+        const auto removeId = [&](const std::string& id) {
+            std::vector<SqlRow> deleted;
+            size_t affected = 0;
+            const auto status = writer.removeRows(db, table, {"=id " + id},
+                                                  &deleted, {}, &affected);
+            if (status != DBStatus::OK)
+                std::cerr << "[PART] delete id " << id << " returned status "
+                          << static_cast<int>(status) << std::endl;
+            assert(status == DBStatus::OK);
+            assert(affected == 1 && deleted.size() == 1);
+            assert(deleted[0].at("id") == id);
+            return deleted[0];
+        };
+
+        assert(writer.beginTransaction(db) == DBStatus::OK);
+        const auto emptyDeleted = removeId("2");
+        assert(emptyDeleted.at("payload").has_value());
+        assert(emptyDeleted.at("payload").value().empty());
+        assert(writer.savepoint("after_first") == DBStatus::OK);
+        const auto nullDeleted = removeId("1");
+        assert(!nullDeleted.at("payload").has_value());
+        auto rows = read(writer);
+        assert(rows.size() == 2 && rows.count("3") && rows.count("4"));
+        assert(rows.at("4").at("payload") == longText);
+        assert(writer.rollbackToSavepoint("after_first") == DBStatus::OK);
+        rows = read(writer);
+        assert(rows.size() == 3 && rows.count("1") && !rows.count("2"));
+        assert(!rows.at("1").at("payload").has_value());
+        assert(writer.commitTransaction() == DBStatus::OK);
+
+        // A row inserted before a savepoint must survive rolling back its
+        // later deletion; full rollback must undo insert-then-delete as well.
+        assert(writer.beginTransaction(db) == DBStatus::OK);
+        assert(writer.insertRow(db, table, {{"id", "5"}, {"bucket", "5"},
+                                          {"payload", "own"}}) == DBStatus::OK);
+        assert(writer.savepoint("own_insert") == DBStatus::OK);
+        assert(removeId("5").at("payload") == "own");
+        assert(!read(writer).count("5"));
+        assert(writer.rollbackToSavepoint("own_insert") == DBStatus::OK);
+        assert(read(writer).at("5").at("payload") == "own");
+        assert(writer.commitTransaction() == DBStatus::OK);
+
+        assert(writer.beginTransaction(db) == DBStatus::OK);
+        assert(writer.insertRow(db, table, {{"id", "6"}, {"bucket", "15"},
+                                          {"payload", "discard"}}) == DBStatus::OK);
+        removeId("6");
+        assert(writer.rollbackTransaction() == DBStatus::OK);
+        assert(!read(writer).count("6"));
+    }
+
+    {
+        dbms::StorageEngine reopened;
+        const auto rows = read(reopened);
+        assert(rows.size() == 4 && rows.count("1") && !rows.count("2") &&
+               rows.count("3") && rows.count("4") && rows.count("5"));
+        assert(!rows.at("1").at("payload").has_value());
+        assert(rows.at("3").at("payload") == "keep");
+        assert(rows.at("4").at("payload") == longText);
+        assert(rows.at("5").at("payload") == "own");
+    }
+    cleanup(db);
+    std::cout << "[PART] Transactional partition deletes OK" << std::endl;
+}
+
 static void test_partition_scan_uses_leaf_nulls() {
     using dbms::DBStatus;
     const std::string db = testDbPath("part_scan_nulls");
@@ -1265,6 +1408,7 @@ int main() {
     test_rename_preserves_partition_storage();
     test_partition_wal_routing();
     test_transactional_partition_inserts();
+    test_transactional_partition_deletes();
     test_partition_scan_uses_leaf_nulls();
     test_partition_sort_reads_long_values_for_output_rows();
     test_analyze_partition_progress();

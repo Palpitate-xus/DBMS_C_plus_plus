@@ -6822,6 +6822,11 @@ public:
     }
 private:
     DmlResult executeRows(const PreparedChildExecutor& reader) {
+        if (const auto* remove = dynamic_cast<const DeleteStmt*>(statement_);
+            remove && remove->only && table_.partitionType != TableSchema::PartitionType::None) {
+            // ONLY addresses the partitioned root, which owns no rows.
+            return result({}, "DELETE", 0);
+        }
         CapturedVirtualRows virtualRows(table_,!returning_->empty());
         if(auto* insert=dynamic_cast<InsertStmt*>(statement_)) {
             std::vector<std::string> columns;
@@ -6992,7 +6997,10 @@ private:
             return result(updatedReturningImages(changes,&virtualRows),"UPDATE",count);
         }
         auto* remove=static_cast<DeleteStmt*>(statement_);
-        const auto matcher=[&](const SqlRow& old){return matches(remove->whereClause.get(),old);};
+        StorageEngine::SqlDeleteMatcher matcher;
+        if (remove->whereClause) {
+            matcher = [&](const SqlRow& old) { return matches(remove->whereClause.get(), old); };
+        }
         callbacks.integerHeapEquality = boundIntegerHeapEquality(
             remove->whereClause.get(), table_, target_->ordinal);
         const auto status=g_engine.removeRows(session_.currentDB,physical_,integerEqualityCandidates(remove->whereClause.get()),returning_->empty()?nullptr:&images,matcher,&count,&callbacks,virtualRows.output(),true);

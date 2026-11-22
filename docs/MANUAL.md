@@ -1181,7 +1181,7 @@ INSERT INTO users (ID, NAME) VALUES (100, 'New') RETURNING ID, NAME;
 
 对于已准备好各个分区的持久表，可以对父表执行 `INSERT`。数据库按分区键把每行写入对应的分区。单独执行的插入会自动提交，也可以用 `BEGIN`、`COMMIT`、`ROLLBACK` 和 `ROLLBACK TO SAVEPOINT` 管理一批写入。一行找不到匹配的范围或列表分区，且没有默认分区时，整条插入语句失败并返回 `23514`。
 
-目前适用于记录写入日志且无索引、主键、唯一约束、外键、排斥约束或可延迟约束的分区表。独立子表的 `CREATE TABLE ... PARTITION OF`、分区表的 `UPDATE` 和 `DELETE`，以及含分区插入的两阶段提交仍待支持。[测试范围](test-report.md#transactional-partition-insert-20261122)
+目前适用于记录写入日志且无索引、主键、唯一约束、外键、排斥约束或可延迟约束的分区表。独立子表的 `CREATE TABLE ... PARTITION OF`、分区表的 `UPDATE` 以及含分区写入的两阶段提交仍待支持。[插入测试](test-report.md#transactional-partition-insert-20261122) · [删除分区表中的记录](#删除分区表中的记录)
 
 ### 插入时如何找空位
 
@@ -1246,6 +1246,16 @@ DELETE FROM users USING orders WHERE users.ID = orders.user_id;
 -- RETURNING
 DELETE FROM users WHERE ACTIVE = FALSE RETURNING ID;
 ```
+
+### 删除分区表中的记录
+
+已有范围、列表或哈希分区的普通持久表可以执行单表 `DELETE`。例如，若 `events` 已建好分区，可以删除编号为 7 的记录，并显示删掉的列值。
+
+```sql
+DELETE FROM events WHERE id = 7 RETURNING id;
+```
+
+事务提交前可以撤销删除，也可以撤销到保存点。`DELETE FROM ONLY events` 只指定父表自身，受影响行数为零。需要应用行级访问规则、删除触发器、分区索引、外键引用或逻辑发布等未贯通的操作会返回 `0A000`。同样的错误也适用于分区表上的 `DELETE USING` 及含分区写入的 `PREPARE TRANSACTION`。[测试范围](test-report.md#partition-delete-20261122)
 
 ### MERGE
 
@@ -2200,7 +2210,7 @@ DROP TRIGGER update_modified ON users;
 
 ## 15. 分区表
 
-下面的语句声明父表的分区方式。当前可通过原生接口准备父表管理的数据分区。用 `CREATE TABLE ... PARTITION OF` 定义独立子表，或者用 `ALTER TABLE ... ATTACH PARTITION` 挂载已有表时，数据库会返回 `0A000`。[原生分区示例](../tests/partition_test.cpp) · [向已有分区表写入](#向分区表写入)
+下面的语句声明父表的分区方式。当前可通过原生接口准备父表管理的数据分区。用 `CREATE TABLE ... PARTITION OF` 定义独立子表，或者用 `ALTER TABLE ... ATTACH PARTITION` 挂载已有表时，数据库会返回 `0A000`。[原生分区示例](../tests/partition_test.cpp) · [向已有分区表写入](#向分区表写入) · [从已有分区表删除记录](#删除分区表中的记录)
 
 ```sql
 -- RANGE 分区
