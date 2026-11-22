@@ -1,38 +1,39 @@
 # DBMS C++
 
-用 C++ 编写的关系型数据库，支持 SQL 查询、索引和事务，可以用 `psql` 连接。
+用 C++ 编写的关系型数据库。支持 SQL 查询、索引和事务，可以用 PostgreSQL 的命令行工具 `psql` 连接。
 
 ## 快速开始
 
-在 Linux 上装好[编译依赖](docs/PACKAGING.md#编译依赖)，然后运行下面的命令。
+在 Linux 上安装[编译依赖](docs/PACKAGING.md#编译依赖)，再下载并编译。
 
 ```bash
 git clone https://github.com/Palpitate-xus/DBMS_C_plus_plus.git
 cd DBMS_C_plus_plus
 cmake -S . -B build/cmake
 cmake --build build/cmake --target dbms_main --parallel 2
+./build/cmake/dbms_main --version
 ```
 
-[启动和登录](docs/MANUAL.md#运行) · [用 psql 连接](docs/MANUAL.md#18-网络服务) · [支持的功能和限制](docs/compatibility-contract.md) · [全部文档](docs/README.md)
+[启动和登录](docs/MANUAL.md#运行) · [全部文档](docs/README.md)
 
 ## 最近更新
 
 <details>
-<summary>表和视图所在的 schema 可以改名 · 2026-11-22</summary>
+<summary>可以给一组表所在的命名空间改名 · 2026-11-22</summary>
 
-例如，把「销售」改成「销售归档」后，其中的表和视图可以用新名字访问，外部报表也能继续查到原来的数据。
+例如，把「销售」改成「销售归档」后，可以用新名字访问里面的表和视图，之前建好的报表也能继续使用。
 
 </details>
 
 <details>
-<summary>表改名后，原来的报表还能用 · 2026-11-22</summary>
+<summary>表改名或换位置后，原来的报表还能用 · 2026-11-22</summary>
 
 例如，订单表从销售区移到归档区后，原来的报表仍会查询这张表。即使用旧名字新建一张表，报表也会继续读原来的订单。
 
 </details>
 
 <details>
-<summary>同名表不会让新建的视图读错数据 · 2026-11-22</summary>
+<summary>新建的报表会记住用的是哪张表 · 2026-11-22</summary>
 
 例如，报表创建时用的是销售部门的订单表。即使后来有人建了同名的临时表，报表仍会读取原来的订单。
 
