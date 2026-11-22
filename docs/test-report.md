@@ -2,6 +2,17 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="bounded-btree-equality-20261122"></a>
+## 2026-11-22 · B+ 树多行等值查找
+
+新原生用例构建 275 条同前缀记录，再写入 2,000 条更大的键。移除 101 个指定位置后，重新打开索引，找回剩余 174 个位置并逐项核对。旧版同样找回 174 个位置，但读取了 45 个缓冲池未命中页，新版为 6 个。另检查前段和中间无结果、最后一个键，以及已有的叶链循环和页类型损坏用例。[原生回归](../tests/bptree_topology_corruption_test.cpp)
+
+旧版建立的 768 行表可由新版重新打开。恢复检查完成 58 个步骤，分别在提交前、提交后和重建索引后强制结束进程。重启后，已提交的更新和删除准确反映在重复键查询中。记录 SHA-256 为 `b1d1d19777b7f006e67a3394e9e34f4744a3f11f3f56259f56ffa7684f1b6b23`。
+
+六个原生测试和六个客户端回归通过，包含 B+ 树并发、索引完整值检查、缺少索引、损坏页、命名语句参数、重复前缀和完整协议。等值查询代价专项在新旧两版同样于 GiST 用例失败，返回行正确，实际使用了顺序扫描。[索引损坏](../tests/index_corruption_protocol_e2e_test.py) · [完整值检查](../tests/index_scan_full_value_protocol_e2e_test.py) · [等值查询代价](../tests/equality_scan_cost_protocol_e2e_test.py)
+
+表内文本比较的 92 条普通与扩展响应仍与 PostgreSQL 18.6 一致。长文本主键冲突用例的 16 条响应与上版一致，其中有六处与 PostgreSQL 不同。新版程序 SHA-256 为 `aaf50a8d7bd1653f668ba4c0acdd777360aac5d1cece1b62bb5f90c8ca1bec0c`。[文本对照](../tests/compat/cases/stored_text_equality_keys.sql) · [长主键复现](../tests/compat/known_gaps/long_text_primary_key_collision.sql) · [性能报告](performance-report-2026-10-30.md#bounded-btree-equality-cost-20261122)
+
 <a id="stored-text-equality-20261122"></a>
 ## 2026-11-22 · 表内文字比较和约束检查
 

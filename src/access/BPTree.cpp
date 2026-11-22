@@ -662,17 +662,19 @@ bool BPTree::searchMultiChecked(const std::string& key,
         if (!next) return false;
         node = std::move(*next);
     }
-    // Scan leaf for matching keys (including duplicates)
+    // Equal keys can continue through empty leaves or across a split, but
+    // once a greater key is reached the rest of the tree cannot match.
     while (true) {
-        for (size_t i = 0; i < node.numKeys; ++i) {
-            if (node.keys[i] == normalizedKey) {
-                results.push_back(node.values[i]);
-            }
-        }
-        if (node.nextLeaf == 0) break;
+        const size_t first = lowerBoundIdx(node.keys, node.numKeys, normalizedKey);
+        const size_t last = upperBoundIdx(node.keys, node.numKeys, normalizedKey);
+        results.insert(results.end(), node.values.begin() + first,
+                        node.values.begin() + last);
+        if (last < node.numKeys || node.nextLeaf == 0) break;
         if (!visited.insert(node.nextLeaf).second) return false;
         auto next = readNode(node.nextLeaf);
         if (!next || !next->isLeaf) return false;
+        if (!node.keys.empty() && !next->keys.empty() &&
+            node.keys.back() > next->keys.front()) return false;
         node = std::move(*next);
     }
     values = std::move(results);

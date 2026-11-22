@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-22 · 按键定位索引记录
+
+PostgreSQL 的 B-tree 能根据扫描条件和页边界结束查找。SQLite 按记录格式比较索引键，较长的键可以跨到溢出页。DuckDB 的 ART 按完整编码键定位叶节点，再返回该键的行位置。[PostgreSQL 扫描](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/access/nbtree/nbtsearch.c#L1713) · [SQLite 索引格式](https://sqlite.org/fileformat.html#b_tree_pages) · [DuckDB ART](https://github.com/duckdb/duckdb/blob/main/src/execution/index/art/art.cpp#L739)
+
+本项目的多行等值查找读取键所在的叶页范围。长度超出 20 字节时，现有索引保存前缀。本项目的二级索引能保留有同一前缀的多个行位置，主键索引仍需解决旧目录里的缺失项及各写入入口的维护。[测试与剩余缺口](test-report.md#bounded-btree-equality-20261122) · [性能](performance-report-2026-10-30.md#bounded-btree-equality-cost-20261122)
+
 ## 2026-11-22 · 表内文字相等和约束检查
 
 PostgreSQL 对确定性规则下的文本相等比较先检查长度，然后比较字节。`CHAR` 在计算长度时跳过尾部空格。SQLite 的 `BINARY` 和 `RTRIM` 也区分保留或跳过尾部空格的比较。DuckDB 默认使用字节比较，并可另选忽略大小写、重音或规范化的规则。[PostgreSQL 文本](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/utils/adt/varlena.c#L1632) · [PostgreSQL CHAR](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/utils/adt/varchar.c#L701) · [SQLite 排序规则](https://www.sqlite.org/datatype3.html#collating_sequences) · [DuckDB 排序规则](https://duckdb.org/docs/1.5/sql/expressions/collations)

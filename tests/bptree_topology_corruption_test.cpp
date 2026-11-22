@@ -163,6 +163,45 @@ void test_leaf_entry_scan_bounds_sparse_tree() {
     std::filesystem::remove_all(directory);
 }
 
+void test_multi_lookup_reads_only_the_matching_key_range() {
+    const auto directory = createTempDir();
+    const auto path = directory / "prefix.idx";
+    const std::string prefix = "prefixabcdefghijklmnopqrst";
+    const auto laterKey = [](int n) { return "z" + std::to_string(10000 + n); };
+    {
+        dbms::BPTree tree(path);
+        assert(tree.open());
+        for (int64_t rid = 1; rid <= 275; ++rid)
+            assert(tree.insertMulti(prefix + std::to_string(rid), rid));
+        for (int n = 0; n < 2000; ++n)
+            assert(tree.insertMulti(laterKey(n), 10000 + n));
+        // Splits and removals leave both empty leaves and equal keys across
+        // the remaining leaf boundaries.
+        for (int64_t rid = 50; rid <= 150; ++rid)
+            assert(tree.removeMulti(prefix, rid));
+        assert(tree.flush());
+    }
+    {
+        dbms::BPTree tree(path);
+        assert(tree.openExisting());
+        auto before = tree.cacheStatistics();
+        std::vector<int64_t> values;
+        assert(tree.searchMultiChecked(prefix + "-probe", values));
+        std::sort(values.begin(), values.end());
+        std::vector<int64_t> expected;
+        for (int64_t rid = 1; rid <= 275; ++rid)
+            if (rid < 50 || rid > 150) expected.push_back(rid);
+        assert(values == expected);
+        auto after = tree.cacheStatistics();
+        assert(after.misses - before.misses <= 9);
+        assert(tree.searchMultiChecked("a-before", values) && values.empty());
+        assert(tree.searchMultiChecked("y-gap", values) && values.empty());
+        assert(tree.searchMultiChecked(laterKey(1999), values));
+        assert(values == std::vector<int64_t>{11999});
+    }
+    std::filesystem::remove_all(directory);
+}
+
 void test_signed_integer_prefix_and_legacy_reopen() {
     const auto directory = createTempDir();
     const auto numericPath = directory / "numeric.idx";
@@ -493,6 +532,7 @@ void test_leaf_entry_scan_validates_sibling_links_and_separators() {
 int main() {
     test_checked_lookup_distinguishes_absence();
     test_leaf_entry_scan_bounds_sparse_tree();
+    test_multi_lookup_reads_only_the_matching_key_range();
     test_signed_integer_prefix_and_legacy_reopen();
     test_checksummed_index_page_rejects_corruption();
     test_checksummed_index_rejects_swapped_pages();

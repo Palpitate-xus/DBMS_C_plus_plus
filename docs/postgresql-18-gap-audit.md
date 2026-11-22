@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-22 · B+ 树等值查找的读取范围
+
+返回多个行位置的等值查找会跨过空叶页，并在遇到更大的键时停止。受测索引从读取 45 页降到 6 页。长文本主键仍可能在建立索引时丢失一个同前缀键的位置。`IDX-03` 仍为部分实现。[测试](test-report.md#bounded-btree-equality-20261122) · [性能](performance-report-2026-10-30.md#bounded-btree-equality-cost-20261122)
+
 ## 2026-11-22 · 表内文字相等和约束检查
 
 默认规则的物理行相等比较直接使用值的字节。批量建唯一索引、验证主键或外键时，适用的列按完整键比较。建唯一索引遇到旧数据有重复值时返回 `23505`。受测的长文本主键仍会因 20 字节键前缀冲突漏行或拒绝有效写入。`SQL-10`、`SQL-11`、`TYPE-04`、`CAT-10` 和 `IDX-03` 保持部分实现。[测试与复现](test-report.md#stored-text-equality-20261122) · [性能](performance-report-2026-10-30.md#stored-text-equality-cost-20261122)
