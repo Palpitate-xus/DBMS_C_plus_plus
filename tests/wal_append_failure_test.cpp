@@ -30,6 +30,8 @@ enum class Mode { Normal, Eintr, TwiceEintr, Short, AllShort, Mixed, Eio, NoSpac
 enum class Cleanup { None, TruncateEintr, TruncateError, SyncEintr, SyncError,
                      UnlinkError, DirSyncEintr, DirSyncError };
 bool armed=false,positions=true;
+bool flushBoundaryArmed=false;
+size_t flushBoundaryAttempts=0,flushBoundaryFaults=0;
 Mode selected=Mode::Normal;
 Cleanup cleanup=Cleanup::None;
 std::string activeDirectory;
@@ -129,6 +131,14 @@ extern "C" int ftruncate(int fd,off_t length) noexcept {
 extern "C" int fsync(int fd){
     using Original=int(*)(int);static const auto original=reinterpret_cast<Original>(::dlsym(RTLD_NEXT,"fsync"));if(!original)::_exit(86);
     uint32_t segment=0;const bool data=descriptorSegment(fd,segment),directory=descriptorDirectory(fd);
+    if (data && flushBoundaryArmed) {
+        ++flushBoundaryAttempts;
+        if (flushBoundaryFaults == 0) {
+            ++flushBoundaryFaults;
+            errno = EIO;
+            return -1;
+        }
+    }
     if(hard && !cleanupFaults && ((data && (cleanup==Cleanup::SyncEintr||cleanup==Cleanup::SyncError))||
        (directory && (cleanup==Cleanup::DirSyncEintr||cleanup==Cleanup::DirSyncError)))){
         ++cleanupFaults;errno=cleanup==Cleanup::SyncEintr||cleanup==Cleanup::DirSyncEintr?EINTR:EIO;return -1;}
@@ -237,28 +247,77 @@ bool foreignTail(const Template& source,const fs::path& directory,bool cold){
     const auto before=image(directory);const auto result=wal->XLogInsert(dbms::RM_HEAP_ID,dbms::XLOG_HEAP_INSERT,92,{'F'});
     const bool good=result==dbms::INVALID_LSN && image(directory)==before;wal.reset();fs::remove_all(directory);return good;
 }
+bool adjacentFlushBoundary(const fs::path& directory) {
+    auto wal = std::make_unique<WALManager>(directory);
+    require(wal->ensureOpen(), "boundary open");
+
+    const auto first = wal->XLogInsert(
+        dbms::RM_HEAP_ID, dbms::XLOG_HEAP_INSERT, 101, {'A'});
+    require(first != dbms::INVALID_LSN && wal->XLogFlush(first),
+            "boundary first flush");
+    const Lsn syncedEnd = wal->currentWriteLsn();
+    const auto second = wal->XLogInsert(
+        dbms::RM_HEAP_ID, dbms::XLOG_HEAP_INSERT, 102, {'B'});
+    require(second == syncedEnd, "boundary records must be adjacent");
+
+    activeDirectory = directory.string();
+    arm(Mode::Normal);
+    flushBoundaryAttempts = 0;
+    flushBoundaryFaults = 0;
+    flushBoundaryArmed = true;
+    const bool firstFlush = wal->XLogFlush(second);
+    const bool retryFlush = wal->XLogFlush(second);
+    flushBoundaryArmed = false;
+    armed = false;
+
+    const bool good = !firstFlush && retryFlush && flushBoundaryFaults == 1 &&
+        flushBoundaryAttempts == 2 && recordEquals(*wal, first, 0, {'A'}, 101) &&
+        recordEquals(*wal, second, first, {'B'}, 102);
+    WALManager reader(directory);
+    const bool reopened = reader.ensureOpen(false) &&
+        recordEquals(reader, second, first, {'B'}, 102);
+    wal.reset();
+    fs::remove_all(directory);
+    std::cout << "WAL_FLUSH_ADJACENT first=" << first << " second=" << second
+              << " syncedEnd=" << syncedEnd << " firstFlush=" << firstFlush
+              << " retry=" << retryFlush << " fsyncAttempts=" << flushBoundaryAttempts
+              << " injected=" << flushBoundaryFaults << " good=" << (good && reopened)
+              << '\n';
+    return good && reopened;
 }
-int main(){char pattern[]="/tmp/dbms-wal-append-failure.XXXXXX";const char* made=::mkdtemp(pattern);if(!made)return 120;const fs::path root(made);
+}
+int main(int argc, char** argv) {
+    char pattern[] = "/tmp/dbms-wal-append-failure.XXXXXX";
+    const char* made = ::mkdtemp(pattern);
+    if (!made) return 120;
+    const fs::path root(made);
     try{size_t controls=0,failures=0;const auto check=[&](bool good,const char* label){++controls;if(!good){++failures;std::cerr<<"WAL_APPEND_FAIL "<<label<<'\n';}};
+        require(argc == 1 || (argc == 2 &&
+                std::strcmp(argv[1], "--flush-boundary-only") == 0),
+                "unknown test argument");
+        const bool boundaryOnly = argc == 2;
         const auto path=[&]{return root/("case-"+std::to_string(controls));};
-        for(size_t layout=0;layout<layouts.size();++layout){Template source(root/("seed-"+std::to_string(layout)),layouts[layout]);
-            for(bool cold:{false,true})for(Mode mode:{Mode::Normal,Mode::Eintr,Mode::TwiceEintr,Mode::Short,Mode::AllShort,Mode::Mixed,
-                    Mode::Eio,Mode::NoSpace,Mode::ShortEio,Mode::ShortNoSpace,Mode::Zero,Mode::SeekError})
-                check(runCase(source,path(),cold,mode,Cleanup::None,layout),"transfer/failure");
-            for(Mode mode:{Mode::OpenEintr,Mode::OpenError,Mode::OpenEmfile})check(runCase(source,path(),true,mode,Cleanup::None,layout),"cold open");
-            if(layout==2||layout==3||layout==5){
-                for(bool cold:{false,true})for(Mode mode:{Mode::NextEio,Mode::NextZero,Mode::NextOpenError})
-                    check(runCase(source,path(),cold,mode,Cleanup::None,layout),"later segment failure");
-                for(bool cold:{false,true})for(Cleanup fault:{Cleanup::TruncateEintr,Cleanup::TruncateError,Cleanup::SyncEintr,Cleanup::SyncError,
-                        Cleanup::UnlinkError,Cleanup::DirSyncEintr,Cleanup::DirSyncError})
-                    check(runCase(source,path(),cold,layout==5?Mode::LastEio:Mode::NextEio,fault,layout),"rollback IO boundary");
+        if (!boundaryOnly) {
+            for(size_t layout=0;layout<layouts.size();++layout){Template source(root/("seed-"+std::to_string(layout)),layouts[layout]);
+                for(bool cold:{false,true})for(Mode mode:{Mode::Normal,Mode::Eintr,Mode::TwiceEintr,Mode::Short,Mode::AllShort,Mode::Mixed,
+                        Mode::Eio,Mode::NoSpace,Mode::ShortEio,Mode::ShortNoSpace,Mode::Zero,Mode::SeekError})
+                    check(runCase(source,path(),cold,mode,Cleanup::None,layout),"transfer/failure");
+                for(Mode mode:{Mode::OpenEintr,Mode::OpenError,Mode::OpenEmfile})check(runCase(source,path(),true,mode,Cleanup::None,layout),"cold open");
+                if(layout==2||layout==3||layout==5){
+                    for(bool cold:{false,true})for(Mode mode:{Mode::NextEio,Mode::NextZero,Mode::NextOpenError})
+                        check(runCase(source,path(),cold,mode,Cleanup::None,layout),"later segment failure");
+                    for(bool cold:{false,true})for(Cleanup fault:{Cleanup::TruncateEintr,Cleanup::TruncateError,Cleanup::SyncEintr,Cleanup::SyncError,
+                            Cleanup::UnlinkError,Cleanup::DirSyncEintr,Cleanup::DirSyncError})
+                        check(runCase(source,path(),cold,layout==5?Mode::LastEio:Mode::NextEio,fault,layout),"rollback IO boundary");
+                }
+                if(layout==5)for(bool cold:{false,true})for(Mode mode:{Mode::LastEio,Mode::LastZero,Mode::LastOpenError})
+                    check(runCase(source,path(),cold,mode,Cleanup::None,layout),"third segment failure");
+                if(layout==0||layout==1||layout==4){for(bool cold:{false,true}){
+                    for(bool process:{false,true})check(peerCase(source,path(),cold,process),"stale writer preserves peer");
+                    check(foreignTail(source,path(),cold),"foreign malformed tail not silently removed");}}
             }
-            if(layout==5)for(bool cold:{false,true})for(Mode mode:{Mode::LastEio,Mode::LastZero,Mode::LastOpenError})
-                check(runCase(source,path(),cold,mode,Cleanup::None,layout),"third segment failure");
-            if(layout==0||layout==1||layout==4){for(bool cold:{false,true}){
-                for(bool process:{false,true})check(peerCase(source,path(),cold,process),"stale writer preserves peer");
-                check(foreignTail(source,path(),cold),"foreign malformed tail not silently removed");}}
         }
-        require(controls==246,"complete append inventory");fs::remove_all(root);std::cout<<"WAL_APPEND_FAILURE_NATIVE_COMPLETE "<<controls<<" FAILURES "<<failures<<'\n';return failures?1:0;
+        check(adjacentFlushBoundary(path()), "flush at durable prefix boundary");
+        require(controls == (boundaryOnly ? 1U : 247U), "complete append inventory");fs::remove_all(root);std::cout<<"WAL_APPEND_FAILURE_NATIVE_COMPLETE "<<controls<<" FAILURES "<<failures<<'\n';return failures?1:0;
     }catch(const std::exception& error){armed=false;std::cerr<<"WAL_APPEND_DRIVER_EXCEPTION "<<error.what()<<'\n';fs::remove_all(root);return 120;}
 }

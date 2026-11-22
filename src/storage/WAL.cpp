@@ -1687,9 +1687,9 @@ bool WALManager::XLogFlush(Lsn targetLsn) {
         releaseWalFileLock(walLock);
         return false;
     }
-    // Already-durable prefix: nothing to do. This makes the common repeated
-    // flush of the same LSN a pure memory check.
-    if (targetLsn != 0 && targetLsn <= lastSyncedLsn_) {
+    // The synced prefix ends just before lastSyncedLsn_. A record beginning
+    // there still needs to be flushed, even if the previous record was synced.
+    if (targetLsn != 0 && targetLsn < lastSyncedLsn_) {
         releaseWalFileLock(walLock);
         return true;
     }
@@ -1710,7 +1710,7 @@ bool WALManager::XLogFlush(Lsn targetLsn) {
             return false;
         }
     }
-    if (endLsn == 0) {
+    if (endLsn <= lastSyncedLsn_) {
         releaseWalFileLock(walLock);
         return true;
     }
