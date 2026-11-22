@@ -19,6 +19,7 @@
 #include <iterator>
 #include <map>
 #include <optional>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -513,6 +514,58 @@ void testStandaloneTableUndo() {
     fs::remove_all(database);
 }
 
+void testStandaloneMultiTableUndo() {
+    const std::string database = "truncate_multi_undo_db";
+    const fs::path root(database);
+    const auto pending = root / ".truncate_undo" / "pending";
+    const std::set<std::string> tables{"later", "items"};
+    const auto mode = StorageEngine::TruncateWalMode::Autocommit;
+    const auto payload = makePayload(9000);
+    fs::remove_all(root);
+
+    {
+        StorageEngine engine;
+        createTable(engine, database);
+        TableSchema later;
+        later.tablename = "later";
+        later.formatVersion = 2;
+        later.append(makeIntColumn("id", false, 4, true));
+        assert(engine.createTable(database, later) == DBStatus::OK);
+        assert(engine.insert(database, "later", {{"id", "51"}}) == DBStatus::OK);
+        assert(engine.insert(database, "items",
+                             {{"id", "999"}, {"payload", payload}, {"tag", "fresh"}}) ==
+               DBStatus::OK);
+
+        assert(engine.beginTransaction(database, true) == DBStatus::OK);
+        assert(engine.beginStandaloneTruncateUndo(database, tables) ==
+               StorageEngine::TruncateUndoResult::Ready);
+        assert(readBytes(pending).compare(0, 4, "TRU2") == 0);
+        assert(!engine.hasTransactionBackup());
+        assert(engine.truncateTable(database, "items", mode) == DBStatus::OK);
+        assert(fs::is_regular_file(root / "items.truncate_state"));
+        assert(!fs::exists(root / "later.truncate_state"));
+        assert(engine.commitTransaction() == DBStatus::IO_ERROR);
+        assert(!engine.inTransaction() && !fs::exists(pending));
+        assert(!fs::exists(root / "items.truncate_state"));
+        assertFreshState(engine, payload, database);
+        assert(engine.query(database, "later", {"=id 51"}, {"id"}).size() == 1);
+
+        assert(engine.beginTransaction(database, true) == DBStatus::OK);
+        assert(engine.beginStandaloneTruncateUndo(database, tables) ==
+               StorageEngine::TruncateUndoResult::Ready);
+        assert(engine.truncateTable(database, "items", mode) == DBStatus::OK);
+        assert(engine.truncateTable(database, "later", mode) == DBStatus::OK);
+        assert(engine.commitTransaction() == DBStatus::OK);
+        assert(!fs::exists(pending));
+    }
+    {
+        StorageEngine recovered;
+        assertEmptyState(recovered, database);
+        assert(recovered.query(database, "later", {"=id 51"}, {"id"}).empty());
+    }
+    fs::remove_all(root);
+}
+
 }  // namespace
 
 int main() {
@@ -541,6 +594,8 @@ int main() {
     std::cout << "[TRUNCATE RECOVERY] transactional name-only marker rejected OK\n";
     testStandaloneTableUndo();
     std::cout << "[TRUNCATE RECOVERY] table undo restores an earlier truncate state OK\n";
+    testStandaloneMultiTableUndo();
+    std::cout << "[TRUNCATE RECOVERY] incomplete multi-table reset cannot commit OK\n";
 
     fs::remove_all(kCompletedDatabase);
     fs::remove_all(kPendingDatabase);

@@ -120,7 +120,11 @@ public:
                            TruncateWalMode mode = TruncateWalMode::Immediate);
     enum class TruncateUndoResult { Unsupported, Ready, Error };
     TruncateUndoResult beginStandaloneTruncateUndo(const std::string& dbname,
-                                                   const std::string& tablename);
+                                                   const std::set<std::string>& tables);
+    TruncateUndoResult beginStandaloneTruncateUndo(const std::string& dbname,
+                                                   const std::string& table) {
+        return beginStandaloneTruncateUndo(dbname, std::set<std::string>{table});
+    }
     void bufferLogicalTruncate(const std::string& dbname,
                                const std::string& tablename);
     DBStatus alterTableAddColumn(const std::string& dbname, const std::string& tablename,

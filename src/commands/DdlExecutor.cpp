@@ -4503,71 +4503,98 @@ bool DdlExecutor::executeTruncate(const TruncateStmt* stmt, Session& s) {
     }
     if (!checkDB(s)) return true;
 
-    std::set<std::string> targets;
-    const auto addTargetWithChildren = [&](const std::string& rawName) {
-        std::vector<std::string> pending{rawName};
-        while (!pending.empty()) {
-            const std::string name = pending.back();
-            pending.pop_back();
-            if (!targets.insert(name).second || stmt->only) continue;
-            for (const auto& child : g_engine.getInheritedChildren(s.currentDB, name)) {
-                pending.push_back(child);
-            }
-        }
+    const bool standalone = !g_engine.inTransaction();
+    const auto walMode = standalone ? StorageEngine::TruncateWalMode::Autocommit
+                                    : StorageEngine::TruncateWalMode::Immediate;
+    DdlTransaction txn(s);
+    txn.enableSnapshotRollback();
+    const auto beginStandalone = [&] {
+        if (txn.begin(DdlTransaction::SnapshotTiming::BeforeChange)) return true;
+        std::cout << "DDL transaction begin failed" << std::endl;
+        return false;
     };
 
-    for (const auto& rawName : stmt->tableNames) {
-        const std::string name = resolveTableName(s, rawName);
-        if (!g_engine.tableExists(s.currentDB, name)) {
-            std::cout << "Table " << name << " does not exist" << std::endl;
-            return true;
-        }
-        addTargetWithChildren(name);
-    }
+    // Resolve explicitly grouped or cascading statements under exclusive
+    // ownership. Keep the existing planning path for a direct single target.
+    const bool planWithOwnership = standalone && (stmt->tableNames.size() > 1 || stmt->cascade);
+    if (planWithOwnership && !beginStandalone()) return true;
 
-    // Expand FK dependants before mutating any table.  This makes RESTRICT
-    // statement-atomic and makes CASCADE recursive instead of only clearing
-    // the first level of references.
-    bool expanded = true;
-    while (expanded) {
-        expanded = false;
-        for (const auto& candidate : g_engine.getTableNames(s.currentDB)) {
-            if (targets.count(candidate)) continue;
-            const TableSchema table = g_engine.getTableSchema(s.currentDB, candidate);
-            bool dependsOnTarget = false;
-            for (size_t i = 0; i < table.fkLen(); ++i) {
-                if (targets.count(table.fks[i].refTable)) {
-                    dependsOnTarget = true;
-                    break;
+    std::set<std::string> targets;
+    const auto planTargets = [&] {
+        targets.clear();
+        const auto addTargetWithChildren = [&](const std::string& rawName) {
+            std::vector<std::string> pending{rawName};
+            while (!pending.empty()) {
+                const std::string name = pending.back();
+                pending.pop_back();
+                if (!targets.insert(name).second || stmt->only) continue;
+                for (const auto& child : g_engine.getInheritedChildren(s.currentDB, name)) {
+                    pending.push_back(child);
                 }
             }
-            if (!dependsOnTarget) continue;
-            if (!stmt->cascade) {
-                std::cout << "cannot truncate table because table \"" << candidate
-                          << "\" references it; use CASCADE" << std::endl;
-                return true;
+        };
+
+        for (const auto& rawName : stmt->tableNames) {
+            const std::string name = resolveTableName(s, rawName);
+            if (!g_engine.tableExists(s.currentDB, name)) {
+                std::cout << "Table " << name << " does not exist" << std::endl;
+                return false;
             }
-            addTargetWithChildren(candidate);
-            expanded = true;
+            addTargetWithChildren(name);
         }
-    }
 
-    for (const auto& name : targets) {
-        if (!g_engine.tableExists(s.currentDB, name)) {
-            std::cout << "TRUNCATE found missing inherited table \"" << name << "\""
-                      << std::endl;
-            return true;
+        // Expand FK dependants before mutating any table.  This makes RESTRICT
+        // statement-atomic and makes CASCADE recursive instead of only clearing
+        // the first level of references.
+        bool expanded = true;
+        while (expanded) {
+            expanded = false;
+            for (const auto& candidate : g_engine.getTableNames(s.currentDB)) {
+                if (targets.count(candidate)) continue;
+                const TableSchema table = g_engine.getTableSchema(s.currentDB, candidate);
+                bool dependsOnTarget = false;
+                for (size_t i = 0; i < table.fkLen(); ++i) {
+                    if (targets.count(table.fks[i].refTable)) {
+                        dependsOnTarget = true;
+                        break;
+                    }
+                }
+                if (!dependsOnTarget) continue;
+                if (!stmt->cascade) {
+                    std::cout << "cannot truncate table because table \"" << candidate
+                              << "\" references it; use CASCADE" << std::endl;
+                    return false;
+                }
+                addTargetWithChildren(candidate);
+                expanded = true;
+            }
         }
-    }
 
-    const std::string actor = effectiveSessionRole(s);
-    for (const auto& name : targets) {
-        if (sessionIsAdmin(s)) continue;
-        const TableSchema table = g_engine.getTableSchema(s.currentDB, name);
-        if (table.owner != actor) {
-            std::cout << "permission denied to truncate table \"" << name << "\"" << std::endl;
-            return true;
+        for (const auto& name : targets) {
+            if (!g_engine.tableExists(s.currentDB, name)) {
+                std::cout << "TRUNCATE found missing inherited table \"" << name << "\""
+                          << std::endl;
+                return false;
+            }
         }
+
+        const std::string actor = effectiveSessionRole(s);
+        for (const auto& name : targets) {
+            if (sessionIsAdmin(s)) continue;
+            const TableSchema table = g_engine.getTableSchema(s.currentDB, name);
+            if (table.owner != actor) {
+                std::cout << "permission denied to truncate table \"" << name << "\"" << std::endl;
+                return false;
+            }
+        }
+        return true;
+    };
+    if (!planTargets()) return true;
+    if (standalone && !planWithOwnership) {
+        if (!beginStandalone()) return true;
+        // Inheritance can expand a single SQL name. Recompute that group
+        // under the same ownership as its file plan.
+        if (targets.size() > 1 && !planTargets()) return true;
     }
 
     std::vector<std::pair<std::string, int64_t>> ownedSequencesToRestart;
@@ -4609,30 +4636,21 @@ bool DdlExecutor::executeTruncate(const TruncateStmt* stmt, Session& s) {
         }
     }
 
-    // A standalone statement has a single transaction decision. An outer
-    // transaction can roll this statement back to a savepoint and later
-    // commit, so it continues to use the snapshot's existing WAL boundary.
-    const auto walMode = g_engine.inTransaction()
-        ? StorageEngine::TruncateWalMode::Immediate
-        : StorageEngine::TruncateWalMode::Autocommit;
-    const bool tryTableUndo = walMode == StorageEngine::TruncateWalMode::Autocommit &&
-        !stmt->restartIdentity && targets.size() == 1;
-    DdlTransaction txn(s);
-    txn.enableSnapshotRollback();
-    if (!txn.begin(tryTableUndo ? DdlTransaction::SnapshotTiming::BeforeChange
-                               : DdlTransaction::SnapshotTiming::AtBegin)) {
-        std::cout << "DDL transaction begin failed" << std::endl;
-        return true;
-    }
     bool tableUndo = false;
-    if (tryTableUndo) {
-        const auto undo = g_engine.beginStandaloneTruncateUndo(s.currentDB, *targets.begin());
+    if (standalone) {
+        auto undo = StorageEngine::TruncateUndoResult::Unsupported;
+        if (!stmt->restartIdentity) {
+            undo = g_engine.beginStandaloneTruncateUndo(s.currentDB, targets);
+        }
         tableUndo = undo == StorageEngine::TruncateUndoResult::Ready;
         if (undo == StorageEngine::TruncateUndoResult::Error ||
             (!tableUndo && !txn.enableSnapshotRollback())) {
             std::cout << "TRUNCATE could not save its rollback data" << std::endl;
             return true;
         }
+    } else if (!txn.begin()) {
+        std::cout << "DDL transaction begin failed" << std::endl;
+        return true;
     }
     for (const auto& name : targets) {
         // TRUNCATE rewrites the heap and all RID-bearing sidecars. Mark the

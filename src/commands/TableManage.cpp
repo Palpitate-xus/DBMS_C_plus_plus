@@ -21047,10 +21047,11 @@ DBStatus StorageEngine::createTable(const std::string& dbname,
 static std::filesystem::path grantChainPath(
     const std::filesystem::path& dbPath);
 
-static bool removeTableStatistics(const std::filesystem::path& path,
-                                  const std::string& tablename,
-                                  std::string* original = nullptr,
-                                  bool* existed = nullptr) {
+template <class Predicate>
+static bool removeTableStatisticsWhere(const std::filesystem::path& path,
+                                       Predicate remove,
+                                       std::string* original = nullptr,
+                                       bool* existed = nullptr) {
     std::error_code error;
     if (!std::filesystem::exists(path, error)) {
         if (original) original->clear();
@@ -21073,9 +21074,18 @@ static bool removeTableStatistics(const std::filesystem::path& path,
         std::istringstream fields(line);
         std::string storedTable;
         fields >> storedTable;
-        if (storedTable != tablename) retained << line << '\n';
+        if (!remove(storedTable)) retained << line << '\n';
     }
     return index_file::writeAtomically(path, retained.str());
+}
+
+static bool removeTableStatistics(const std::filesystem::path& path,
+                                  const std::string& tablename,
+                                  std::string* original = nullptr,
+                                  bool* existed = nullptr) {
+    return removeTableStatisticsWhere(path, [&](const std::string& name) {
+        return name == tablename;
+    }, original, existed);
 }
 
 static std::filesystem::path commentsPath(const std::string& dbname);
@@ -21437,7 +21447,8 @@ static DBStatus collectRelationFiles(
 static DBStatus planTableResetFiles(
     const StorageEngine& engine, const std::string& dbname,
     const TableSchema& table, const std::filesystem::path& root,
-    std::vector<std::filesystem::path>& files) {
+    std::vector<std::filesystem::path>& files,
+    std::set<std::string>* destinations = nullptr) {
     std::error_code error;
     if (!std::filesystem::is_directory(root, error) || error) {
         return DBStatus::IO_ERROR;
@@ -21450,6 +21461,7 @@ static DBStatus planTableResetFiles(
     std::set<std::string> present;
     for (const auto& file : files) present.insert(file.filename().string());
     auto reserve = [&](const std::string& filename, bool btree) {
+        if (destinations) destinations->insert(filename);
         if (present.count(filename) != 0) return DBStatus::OK;
         return checkIndexFileDestination(engine, dbname, table, root / filename, btree);
     };
@@ -21484,12 +21496,21 @@ static DBStatus planTableResetFiles(
 namespace {
 
 constexpr const char* kTruncateUndoDirectory = ".truncate_undo";
+constexpr uint32_t kMaxTruncateManifestFiles = 16384;
+
+struct TruncateUndoRelation {
+    std::string table;
+    uint64_t identity = 0;
+    uint32_t fileCount = 0;
+};
 
 struct TruncateUndoImage {
-    std::string database, table;
-    uint64_t device = 0, inode = 0, relation = 0, xid = 0;
+    std::string database;
+    uint64_t device = 0, inode = 0, xid = 0;
     Lsn walStart = 0;
     uint32_t timeline = 0;
+    std::vector<TruncateUndoRelation> relations;
+    // Files are grouped in relation order, followed by one shared .stats.
     std::vector<vacuum_full_backup::File> files;
 };
 
@@ -21555,18 +21576,40 @@ std::string encodeTruncateUndo(const TruncateUndoImage& image) {
     using vacuum_full_backup::append;
     using vacuum_full_backup::appendString;
     if (!validStoredIdentifier(image.database, MAX_TABLE_NAME_LEN) ||
-        !validStoredRelationName(image.table) || image.inode == 0 ||
-        image.relation == 0 || image.xid == 0 || image.timeline == 0 ||
-        image.files.empty() || image.files.size() > 16384) return {};
-    std::string bytes = "TRU1";
+        image.inode == 0 || image.xid == 0 || image.timeline == 0 ||
+        image.relations.empty() || image.files.size() < 3 ||
+        image.files.size() > kMaxTruncateManifestFiles ||
+        image.files.back().name != ".stats") return {};
+    size_t fileCount = 1;
+    std::set<uint64_t> identities;
+    std::string_view prior;
+    for (const auto& relation : image.relations) {
+        if (!validStoredRelationName(relation.table) || relation.table <= prior ||
+            relation.identity == 0 || !identities.insert(relation.identity).second ||
+            relation.fileCount < 2 || relation.fileCount > image.files.size() - fileCount)
+            return {};
+        fileCount += relation.fileCount;
+        prior = relation.table;
+    }
+    if (fileCount != image.files.size()) return {};
+    const bool single = image.relations.size() == 1;
+    std::string bytes = single ? "TRU1" : "TRU2";
     appendString(bytes, image.database);
-    appendString(bytes, image.table);
+    if (single) appendString(bytes, image.relations.front().table);
     append(bytes, image.device);
     append(bytes, image.inode);
-    append(bytes, image.relation);
+    if (single) append(bytes, image.relations.front().identity);
     append(bytes, image.xid);
     append(bytes, image.walStart);
     append(bytes, image.timeline);
+    if (!single) {
+        append(bytes, static_cast<uint32_t>(image.relations.size()));
+        for (const auto& relation : image.relations) {
+            appendString(bytes, relation.table);
+            append(bytes, relation.identity);
+            append(bytes, relation.fileCount);
+        }
+    }
     append(bytes, static_cast<uint32_t>(image.files.size()));
     std::set<std::string> names;
     for (const auto& file : image.files) {
@@ -21587,8 +21630,9 @@ std::string encodeTruncateUndo(const TruncateUndoImage& image) {
 }
 
 bool decodeTruncateUndo(const std::string& bytes, TruncateUndoImage& image) {
-    if (bytes.size() < 68 || bytes.size() > vacuum_full_backup::maxManifestBytes ||
-        bytes.compare(0, 4, "TRU1") != 0) return false;
+    if (bytes.size() < 68 || bytes.size() > vacuum_full_backup::maxManifestBytes) return false;
+    const bool single = bytes.compare(0, 4, "TRU1") == 0;
+    if (!single && bytes.compare(0, 4, "TRU2") != 0) return false;
     const size_t end = bytes.size() - 64;
     size_t offset = 4;
     const auto read = [&](auto& value) {
@@ -21604,11 +21648,29 @@ bool decodeTruncateUndo(const std::string& bytes, TruncateUndoImage& image) {
         offset += size;
         return true;
     };
+    TruncateUndoRelation legacy;
+    if (!readString(image.database) || (single && !readString(legacy.table)) ||
+        !read(image.device) || !read(image.inode) ||
+        (single && !read(legacy.identity)) ||
+        !read(image.xid) || !read(image.walStart) || !read(image.timeline)) return false;
+    if (!single) {
+        uint32_t count = 0;
+        if (!read(count) || count < 2 || count > kMaxTruncateManifestFiles / 2) return false;
+        image.relations.reserve(count);
+        for (uint32_t i = 0; i < count; ++i) {
+            TruncateUndoRelation relation;
+            if (!readString(relation.table) || !read(relation.identity) ||
+                !read(relation.fileCount)) return false;
+            image.relations.push_back(std::move(relation));
+        }
+    }
     uint32_t size = 0;
-    if (!readString(image.database) || !readString(image.table) ||
-        !read(image.device) || !read(image.inode) || !read(image.relation) ||
-        !read(image.xid) || !read(image.walStart) || !read(image.timeline) ||
-        !read(size) || size == 0 || size > 16384) return false;
+    if (!read(size) || size < 3 || size > kMaxTruncateManifestFiles) return false;
+    if (single) {
+        legacy.fileCount = size - 1;
+        image.relations.push_back(std::move(legacy));
+    }
+    image.files.reserve(size);
     for (uint32_t i = 0; i < size; ++i) {
         vacuum_full_backup::File file;
         uint32_t present = 0;
@@ -21673,66 +21735,110 @@ struct StorageEngine::TruncateUndoContext {
     TruncateUndoImage image;
     std::string manifest;
     std::filesystem::path journal, backup;
-    std::vector<std::filesystem::path> resetFiles;
+    std::map<std::string, std::vector<std::filesystem::path>> resetFiles;
     std::unique_ptr<DatabaseMetadataWrite> metadata;
     std::unique_ptr<StatsFileLock> statistics;
+    size_t completedTargets = 0;
     bool published = false;
 };
 
 StorageEngine::TruncateUndoResult StorageEngine::beginStandaloneTruncateUndo(
-    const std::string& dbname, const std::string& tablename) {
+    const std::string& dbname, const std::set<std::string>& tables) {
     auto& context = transactionContext();
     if (!context.inTransaction || context.txnDB != dbname || context.currentTxnId == 0 ||
         context.truncateUndo || !context.txnBackupPath.empty() ||
         !context.txnLog.empty() || !context.savepoints.empty() ||
-        !context.databaseExclusiveLock || !context.databaseExclusiveLock->owns_lock())
+        !context.databaseExclusiveLock || !context.databaseExclusiveLock->owns_lock() ||
+        tables.empty())
         return TruncateUndoResult::Error;
+    // Bound the file count before copying any payload, including state files
+    // and enough room for maximum-length paths in the formatted manifest.
+    constexpr size_t maxFiles = 10000;
+    if (tables.size() > maxFiles / 2) return TruncateUndoResult::Unsupported;
     auto undo = std::make_shared<TruncateUndoContext>();
     const auto root = dbPath(dbname);
     undo->metadata = std::make_unique<DatabaseMetadataWrite>(root);
-    if (!undo->metadata->acquired() || pendingTruncateUndo(root) ||
-        !tableExists(dbname, tablename)) return TruncateUndoResult::Error;
-    const auto table = getTableSchema(dbname, tablename);
-    if (table.isTemporary || table.isUnlogged || isSessionTempPhysicalName(tablename) ||
-        table.physicalRelationId == 0 || table.partitionType != TableSchema::PartitionType::None ||
-        relationDir(dbname, tablename).lexically_normal() != root.lexically_normal() ||
-        pendingCreateUndo(root))
-        return TruncateUndoResult::Unsupported;
+    if (!undo->metadata->acquired() || pendingTruncateUndo(root)) return TruncateUndoResult::Error;
+    if (pendingCreateUndo(root)) return TruncateUndoResult::Unsupported;
     if (const Session* session = currentSession(); session && session->currentDB == dbname) {
         if (!session->tempTablesCreatedInTransaction.empty() ||
             std::any_of(session->tempTableOnCommit.begin(), session->tempTableOnCommit.end(),
                         [](const auto& action) { return action.second != "preserve"; }))
             return TruncateUndoResult::Unsupported;
     }
-    if (!lockManager_.lockMetadata(tablename)) return TruncateUndoResult::Error;
-    // The owning standalone transaction releases this lock at its terminal
-    // boundary. The reset itself briefly acquires a second, scoped token.
+    std::vector<TableSchema> schemas;
+    schemas.reserve(tables.size());
+    for (const auto& name : tables) {
+        if (!tableExists(dbname, name)) return TruncateUndoResult::Error;
+        auto table = getTableSchema(dbname, name);
+        if (table.tablename != name) return TruncateUndoResult::Error;
+        if (table.isTemporary || table.isUnlogged || isSessionTempPhysicalName(name) ||
+            table.physicalRelationId == 0 || table.partitionType != TableSchema::PartitionType::None ||
+            relationDir(dbname, name).lexically_normal() != root.lexically_normal())
+            return TruncateUndoResult::Unsupported;
+        schemas.push_back(std::move(table));
+    }
+    // Acquire all relation locks in the reset order and keep them through
+    // the transaction decision. Each reset takes a nested token.
+    for (const auto& name : tables) {
+        if (!lockManager_.lockMetadata(name)) return TruncateUndoResult::Error;
+    }
     undo->statistics = std::make_unique<StatsFileLock>(statsPath(dbname));
     if (!undo->statistics->ok()) return TruncateUndoResult::Error;
     std::lock_guard<std::recursive_mutex> cacheLock(cacheMutex_);
-    bool pendingSwap = false;
-    const auto swap = root / ("." + tablename + std::string(kReindexSwapMarkerSuffix));
-    if (!vacuum_full_backup::regularExists(swap, pendingSwap)) return TruncateUndoResult::Error;
-    if (pendingSwap) return TruncateUndoResult::Unsupported;
-    if (!flushTableCaches(dbname, std::set<std::string>{tablename}) ||
-        planTableResetFiles(*this, dbname, table, root, undo->resetFiles) != DBStatus::OK)
-        return TruncateUndoResult::Error;
-    const auto legacyToast = root / (table.tablename + ".toast");
-    if (std::find(undo->resetFiles.begin(), undo->resetFiles.end(), legacyToast) !=
-        undo->resetFiles.end()) {
-        std::error_code error;
-        const auto status = std::filesystem::symlink_status(legacyToast, error);
-        if (error) return TruncateUndoResult::Error;
-        if (std::filesystem::is_directory(status)) return TruncateUndoResult::Unsupported;
+    for (const auto& name : tables) {
+        bool pendingSwap = false;
+        const auto swap = root / ("." + name + std::string(kReindexSwapMarkerSuffix));
+        if (!vacuum_full_backup::regularExists(swap, pendingSwap)) return TruncateUndoResult::Error;
+        if (pendingSwap) return TruncateUndoResult::Unsupported;
     }
-    // Include the three state files in the bound even with maximum-length names.
-    constexpr size_t maxResetFiles = 11000;
-    if (undo->resetFiles.size() > maxResetFiles) return TruncateUndoResult::Unsupported;
+    if (!flushTableCaches(dbname, tables)) return TruncateUndoResult::Error;
+
+    std::vector<std::filesystem::path> files;
+    std::set<std::string> allDestinations;
+    const bool multiple = tables.size() > 1;
+    for (const auto& table : schemas) {
+        const auto& name = table.tablename;
+        auto& reset = undo->resetFiles[name];
+        std::set<std::string> destinations;
+        if (planTableResetFiles(*this, dbname, table, root, reset,
+                                multiple ? &destinations : nullptr) != DBStatus::OK)
+            return TruncateUndoResult::Error;
+        const auto legacyToast = root / (name + ".toast");
+        if (std::find(reset.begin(), reset.end(), legacyToast) != reset.end()) {
+            std::error_code error;
+            const auto status = std::filesystem::symlink_status(legacyToast, error);
+            if (error) return TruncateUndoResult::Error;
+            if (std::filesystem::is_directory(status)) return TruncateUndoResult::Unsupported;
+        }
+        if (files.size() + reset.size() + 3 > maxFiles) return TruncateUndoResult::Unsupported;
+        const auto state = truncateStatePath(*this, dbname, name);
+        const auto dirty = specializedIndexDirtyPath(*this, dbname, name);
+        if (multiple) {
+            for (const auto& path : reset) destinations.insert(path.filename().string());
+            destinations.insert(state.filename().string());
+            destinations.insert(dirty.filename().string());
+            for (const auto& filename : destinations) {
+                if (!allDestinations.insert(filename).second) return TruncateUndoResult::Error;
+            }
+        }
+        files.insert(files.end(), reset.begin(), reset.end());
+        files.push_back(state);
+        files.push_back(dirty);
+        undo->image.relations.push_back(
+            {name, table.physicalRelationId, static_cast<uint32_t>(reset.size() + 2)});
+    }
+    files.push_back(statsPath(dbname));
+    // Charge enough room for the common header, relation records and one
+    // digest per file before creating the staging directory.
+    size_t manifestBudget = 128 + dbname.size();
+    for (const auto& relation : undo->image.relations) manifestBudget += 16 + relation.table.size();
+    for (const auto& path : files) manifestBudget += 88 + path.filename().string().size();
+    if (manifestBudget > vacuum_full_backup::maxManifestBytes)
+        return TruncateUndoResult::Unsupported;
     auto* wal = getWAL(dbname);
     if (!wal || !wal->XLogFlush(wal->currentWriteLsn())) return TruncateUndoResult::Error;
     undo->image.database = dbname;
-    undo->image.table = tablename;
-    undo->image.relation = table.physicalRelationId;
     undo->image.xid = context.currentTxnId;
     undo->image.walStart = wal->currentWriteLsn();
     undo->image.timeline = wal->timelineId();
@@ -21747,10 +21853,6 @@ StorageEngine::TruncateUndoResult StorageEngine::beginStandaloneTruncateUndo(
         !std::filesystem::create_directory(undo->backup, error) || error)
         return TruncateUndoResult::Error;
 
-    auto files = undo->resetFiles;
-    files.push_back(truncateStatePath(*this, dbname, tablename));
-    files.push_back(specializedIndexDirtyPath(*this, dbname, tablename));
-    files.push_back(statsPath(dbname));
     for (const auto& path : files) {
         const auto target = vacuum_full_backup::backupFile(undo->backup, undo->image.files.size());
         vacuum_full_backup::File file;
@@ -21794,51 +21896,74 @@ bool StorageEngine::restoreStandaloneTruncate(const TruncateUndoContext& undo) {
     if (outcome == TruncateUndoOutcome::Restored)
         return index_file::syncDirectory(undo.backup);
     if (outcome != TruncateUndoOutcome::Pending) return false;
-    if (!tableExists(image.database, image.table)) return false;
-    const auto table = getTableSchema(image.database, image.table);
-    if (table.physicalRelationId != image.relation || table.isUnlogged || table.isTemporary ||
-        table.partitionType != TableSchema::PartitionType::None ||
-        relationDir(image.database, image.table).lexically_normal() != root.lexically_normal())
-        return false;
-
-    const auto stateFile = truncateStatePath(*this, image.database, image.table).filename().string();
-    const auto dirtyFile = specializedIndexDirtyPath(*this, image.database, image.table).filename().string();
     const auto statsFile = statsPath(image.database).filename().string();
-    std::set<std::string> special{stateFile, dirtyFile, statsFile}, before;
+    std::map<std::string, std::string_view> before, live;
+    before.emplace(statsFile, std::string_view{});
+    live.emplace(statsFile, std::string_view{});
+    size_t fileIndex = 0;
+    for (const auto& relation : image.relations) {
+        const auto& name = relation.table;
+        if (!tableExists(image.database, name)) return false;
+        const auto table = getTableSchema(image.database, name);
+        if (table.physicalRelationId != relation.identity || table.isUnlogged || table.isTemporary ||
+            table.partitionType != TableSchema::PartitionType::None ||
+            relationDir(image.database, name).lexically_normal() != root.lexically_normal())
+            return false;
+
+        const auto stateFile = truncateStatePath(*this, image.database, name).filename().string();
+        const auto dirtyFile = specializedIndexDirtyPath(*this, image.database, name).filename().string();
+        std::set<std::string> special{stateFile, dirtyFile};
+        const size_t end = fileIndex + relation.fileCount;
+        for (; fileIndex < end; ++fileIndex) {
+            const auto& file = image.files[fileIndex];
+            if (!(special.erase(file.name) || isRelationPhysicalFileName(file.name, name)) ||
+                !before.emplace(file.name, name).second) return false;
+        }
+        if (!special.empty() || !live.emplace(stateFile, name).second ||
+            !live.emplace(dirtyFile, name).second) return false;
+    }
+
     for (size_t i = 0; i < image.files.size(); ++i) {
         const auto& file = image.files[i];
-        if (!(special.erase(file.name) || isRelationPhysicalFileName(file.name, image.table)))
-            return false;
-        before.insert(file.name);
         if (!file.present) continue;
         vacuum_full_backup::File actual;
         if (!vacuum_full_backup::digestFile(vacuum_full_backup::backupFile(undo.backup, i), actual) ||
             !actual.present || actual.mode != file.mode || actual.size != file.size ||
             actual.digest != file.digest) return false;
     }
-    if (!special.empty()) return false;
 
-    const auto swap = root / ("." + image.table + std::string(kReindexSwapMarkerSuffix));
-    bool pendingSwap = false;
-    if (!vacuum_full_backup::regularExists(swap, pendingSwap) ||
-        (pendingSwap && !recoverReindexSwapMarker(swap, root, image.table))) return false;
-    std::vector<std::filesystem::path> after;
-    if (collectRelationFiles(*this, image.database, root, image.table, after) != DBStatus::OK)
-        return false;
-    std::set<std::string> owned{stateFile, dirtyFile, statsFile};
-    for (const auto& path : after) owned.insert(path.filename().string());
-    for (const auto& file : image.files) {
-        bool exists = false;
-        if (!vacuum_full_backup::regularExists(root / file.name, exists) ||
-            (exists && !owned.count(file.name))) return false;
+    // Check ownership for the entire group before replacing the first file.
+    for (const auto& relation : image.relations) {
+        const auto& name = relation.table;
+        const auto swap = root / ("." + name + std::string(kReindexSwapMarkerSuffix));
+        bool pendingSwap = false;
+        if (!vacuum_full_backup::regularExists(swap, pendingSwap) ||
+            (pendingSwap && !recoverReindexSwapMarker(swap, root, name))) return false;
+        std::vector<std::filesystem::path> after;
+        if (collectRelationFiles(*this, image.database, root, name, after) != DBStatus::OK)
+            return false;
+        for (const auto& path : after) {
+            if (!live.emplace(path.filename().string(), name).second) return false;
+        }
     }
-    evictTableResetCaches(image.database, image.table);
-    std::error_code error;
-    for (const auto& path : after) {
-        if (before.count(path.filename().string())) continue;
+    for (const auto& [name, owner] : before) {
         bool exists = false;
-        if (!vacuum_full_backup::regularExists(path, exists) ||
-            (exists && !std::filesystem::remove(path, error)) || error) return false;
+        const auto current = live.find(name);
+        if (!vacuum_full_backup::regularExists(root / name, exists) ||
+            (exists && (current == live.end() || current->second != owner))) return false;
+    }
+    for (const auto& entry : live) {
+        bool exists = false;
+        if (!vacuum_full_backup::regularExists(root / entry.first, exists)) return false;
+    }
+
+    for (const auto& relation : image.relations)
+        evictTableResetCaches(image.database, relation.table);
+    std::error_code error;
+    for (const auto& entry : live) {
+        if (before.count(entry.first)) continue;
+        std::filesystem::remove(root / entry.first, error);
+        if (error) return false;
     }
     for (size_t i = 0; i < image.files.size(); ++i) {
         const auto& file = image.files[i];
@@ -21924,8 +22049,8 @@ void StorageEngine::finishStandaloneTruncate(bool committed) {
             truncateUndoOutcomeText(expected, undo->manifest))) &&
         readTruncateUndoOutcome(undo->backup, undo->manifest, outcome) && outcome == expected;
     if (!decided || !retireTruncateUndo(undo->journal, undo->backup, undo->manifest)) {
-        std::cerr << "[truncate] retained rollback files for " << undo->image.database
-                  << "/" << undo->image.table << '\n';
+        std::cerr << "[truncate] retained rollback files for "
+                  << undo->image.database << '\n';
     }
 }
 
@@ -22301,16 +22426,20 @@ DBStatus StorageEngine::truncateTable(const std::string& dbname,
     const auto relationRoot = relationDir(dbname, tablename);
     const auto& context = transactionContext();
     const auto& undo = context.truncateUndo;
-    if (undo && (!undo->published || mode != TruncateWalMode::Autocommit ||
-                 undo->image.database != dbname || undo->image.table != tablename ||
-                 undo->image.relation != table.physicalRelationId ||
-                 undo->image.xid != context.currentTxnId)) return DBStatus::INVALID_VALUE;
+    if (undo) {
+        if (!undo->published || mode != TruncateWalMode::Autocommit ||
+            undo->image.database != dbname || undo->image.xid != context.currentTxnId ||
+            undo->completedTargets >= undo->image.relations.size()) return DBStatus::INVALID_VALUE;
+        const auto& next = undo->image.relations[undo->completedTargets];
+        if (next.table != tablename || next.identity != table.physicalRelationId)
+            return DBStatus::INVALID_VALUE;
+    }
     std::vector<std::filesystem::path> plannedFiles;
     if (!undo) {
         const auto storage = planTableResetFiles(*this, dbname, table, relationRoot, plannedFiles);
         if (storage != DBStatus::OK) return storage;
     }
-    const auto& files = undo ? undo->resetFiles : plannedFiles;
+    const auto& files = undo ? undo->resetFiles.at(tablename) : plannedFiles;
 
     Lsn truncateLsn = INVALID_LSN;
     const bool walLogged =
@@ -22348,7 +22477,14 @@ DBStatus StorageEngine::truncateTable(const std::string& dbname,
         return DBStatus::IO_ERROR;
     }
 
-    if (!removeTableStatistics(statsPath(dbname), tablename)) {
+    if (undo) {
+        // Rewrite the shared statistics file once, after every reset succeeds.
+        if (undo->completedTargets + 1 == undo->image.relations.size() &&
+            !removeTableStatisticsWhere(statsPath(dbname), [&](const std::string& name) {
+                return undo->resetFiles.count(name) != 0;
+            })) return DBStatus::IO_ERROR;
+        ++undo->completedTargets;
+    } else if (!removeTableStatistics(statsPath(dbname), tablename)) {
         return DBStatus::IO_ERROR;
     }
 
@@ -57060,6 +57196,11 @@ DBStatus StorageEngine::commitTransaction() {
     }
     if (transactionContext().rollbackPending) return DBStatus::IO_ERROR;
     if (!transactionContext().inTransaction) return DBStatus::OK;
+    if (const auto& undo = transactionContext().truncateUndo;
+        undo && undo->completedTargets != undo->image.relations.size()) {
+        (void)rollbackTransaction();
+        return DBStatus::IO_ERROR;
+    }
     if (transactionContext().databaseOwnershipDeferred) return finishDatabaseIndependentTransaction();
     lockManager_.setResourceNamespace(transactionContext().txnDB);
 

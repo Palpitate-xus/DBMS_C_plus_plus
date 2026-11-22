@@ -2,11 +2,17 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-22 · 一次清空多张普通表
+
+PostgreSQL 可以在一条 `TRUNCATE` 里清空多张表，整组由事务决定是否生效。SQLite 在回滚日志模式下以一份共同记录决定多个数据库文件的事务结果。DuckDB 用事务的撤销记录找回原来的数据，再由提交决定哪些修改生效。[PostgreSQL 18 的 TRUNCATE](https://www.postgresql.org/docs/18/sql-truncate.html) · [SQLite 多文件原子提交](https://www.sqlite.org/atomiccommit.html#multi_file_commit) · [DuckDB 事务实现](https://duckdb.org/2024/10/30/analytics-optimized-concurrent-transactions)
+
+本项目在开始清空前，为语句涉及的整组普通持久表准备一份恢复记录。每张表分别核对文件归属和物理编号，共用一份统计文件备份。提交前任何一张表失败，恢复会处理整组。显式事务、重置自增编号及包含外部表空间表等不符合条件的组合使用全库备份，独立物理存储代仍待实现。[恢复测试](test-report.md#truncate-multi-table-undo-20261122)
+
 ## 2026-11-22 · 清空一张表时按表保存回滚数据
 
 PostgreSQL 18.6 为需要保留回滚能力的表分配新文件编号，让旧文件留到事务结束。SQLite 的回滚日志保存将被改写的原始页面。DuckDB 的撤销缓冲区记录事务涉及的数据变化。[PostgreSQL 18.6 源码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/commands/tablecmds.c#L2079-L2131) · [SQLite 原子提交](https://www.sqlite.org/atomiccommit.html#creating_a_rollback_journal_file) · [DuckDB 事务实现](https://duckdb.org/2024/10/30/analytics-optimized-concurrent-transactions)
 
-本项目单独清空默认位置中一张有物理编号的普通持久表时，会复制目标表的数据、附属文件和共享统计文件，其他表的数据文件无需复制。提交前退出后，可按日志决定是否还原这些文件。现有的全库回滚备份继续用于显式事务、多表清空、重置自增编号、分区表、外部表空间和旧长文本目录。为每张表切换到新的存储代仍有待实现。[恢复测试](test-report.md#truncate-table-undo-20261122) · [同等日志同步下的性能测试](performance-report-2026-10-30.md#truncate-table-undo-cost-20261122)
+这一轮先支持单独清空默认位置中一张有物理编号的普通持久表。数据库复制目标表的数据、附属文件和共享统计文件。提交前退出后，可按日志决定是否还原这些文件。[恢复测试](test-report.md#truncate-table-undo-20261122) · [同等日志同步下的性能测试](performance-report-2026-10-30.md#truncate-table-undo-cost-20261122)
 
 ## 2026-11-21 · 清空表日志与事务结果
 

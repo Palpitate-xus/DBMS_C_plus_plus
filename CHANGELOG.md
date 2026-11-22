@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>一次清空多张表时少复制文件 · 2026-11-22</summary>
+
+一次清空多张普通表时，数据库只为涉及的表保存恢复用的备份。提交前中途出错，整次清空都会撤销。
+
+[测试报告](docs/test-report.md#truncate-multi-table-undo-20261122) · [性能报告](docs/performance-report-2026-10-30.md#truncate-multi-table-undo-cost-20261122)
+
+</details>
+
+<details>
 <summary>清空一张表时少复制文件 · 2026-11-22</summary>
 
 单独清空一张普通表时，数据库会为这张表保留一份恢复用的备份。同时修复了相邻日志记录可能漏写入磁盘的问题。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>备份时减少重复打开文件 · 2026-11-21</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-21 · 备份时减少重复打开文件
 
 核对备份文件和把它写到磁盘时，只需打开一次文件。备份做到一半中断后，数据库重启时会跳过那份备份。
 
 [测试报告](docs/test-report.md#backup-manifest-sync-20261121) · [性能报告](docs/performance-report-2026-10-30.md#backup-manifest-sync-cost-20261121)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-21 · 清空表时只重建一次索引
 

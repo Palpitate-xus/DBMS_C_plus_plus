@@ -1,5 +1,9 @@
 # STO-02: relation storage identity and physical-name collision containment
 
+## 2026-11-22 · Rollback for a group of tables
+
+Standalone `TRUNCATE` can save the affected files for every supported target together. The journal identifies each physical relation and includes one copy of the shared statistics file. Recovery verifies every target and before-image before replacing an original file. A single durable transaction decision applies to the group. Generational file switching and independent index locators remain open. [Recovery tests](test-report.md#truncate-multi-table-undo-20261122)
+
 ## 2026-11-22 · Table-scoped rollback for standalone truncate
 
 A standalone `TRUNCATE` of one current-format logged table in its default location can save the affected files and shared statistics in a durable before-image. Recovery binds the image to the database directory, physical relation ID, transaction and retained WAL timeline. It resolves the image before choosing a truncate replay boundary. Identity resets, outer transactions, external tablespaces and layouts with legacy TOAST directories use the existing snapshot. File-generation switching and independent index locators remain open. [Recovery tests](test-report.md#truncate-table-undo-20261122)
