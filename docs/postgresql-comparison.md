@@ -2,6 +2,13 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="integer-primary-page-reuse-comparison-20261123"></a>
+## 2026-11-23 · 同页的候选记录共用一次表页读取
+
+PostgreSQL 的位图堆扫描让索引标出记录的位置，再按物理顺序读取表页。同一页中还有候选时，继续在页内取下一条。SQLite 的 B 树游标也利用同一页内移动的低成本，表和索引分开的查询仍可能需要按行号查表。DuckDB 在列存表里按一组行检查可见性和筛选条件，再读取这一组需要的列。 [PostgreSQL 执行计划](https://www.postgresql.org/docs/18/using-explain.html) · [PostgreSQL 位图堆扫描源码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/executor/nodeBitmapHeapscan.c) · [SQLite 多行查询](https://www.sqlite.org/queryplanner.html#multiple_result_rows) · [DuckDB 表扫描源码](https://github.com/duckdb/duckdb/blob/main/src/storage/table/row_group.cpp)
+
+本项目为同一页上的相邻候选复用一份表页副本，每次最多保留一页。有序读保持主键顺序，无排序的小范围读保持表内顺序。按主键查出的记录分散时，仍可能逐条取页。通用位图扫描的批量读页和基于代价的选择仍需覆盖更多索引和查询。 [测试范围](test-report.md#integer-primary-page-reuse-20261123) · [计时对照](performance-report-2026-10-30.md#integer-primary-page-reuse-cost-20261123)
+
 <a id="complete-integer-range-comparison-20261123"></a>
 ## 2026-11-23 · 先用主键索引定位范围，再读取记录
 

@@ -319,6 +319,27 @@ def presorted_page_controls(query, check_plan=True):
     expect("SELECT k FROM scalar_order_presorted_wide ORDER BY "
            "CASE WHEN k = 9007199254741028 THEN (payload || 'bad')::BIGINT ELSE k END LIMIT 1",
            [],state='22P02')
+
+    # Each value is stored externally. Twelve restored values fit inside
+    # work_mem, but the extra copied heap page would push them over budget.
+    expect('CREATE TABLE scalar_order_external(k INTEGER PRIMARY KEY,payload TEXT)')
+    large_values = [f'{k:02d}/' + chr(97+k)*4997 for k in range(1,19)]
+    expect('INSERT INTO scalar_order_external VALUES ' +
+           ','.join(f"({k},'{value}')" for k,value in enumerate(large_values,1)) +
+           ',(19,NULL)')
+    for limit, use_index in ((12,True),(14,False)):
+        sql = f'SELECT k,payload FROM scalar_order_external ORDER BY k LIMIT {limit}'
+        expect(sql, [[str(k),value] for k,value in enumerate(large_values[:limit],1)], [23,25])
+        if check_plan:
+            nodes = plan_nodes(expect(
+                'EXPLAIN (ANALYZE TRUE, TIMING FALSE, COSTS FALSE, FORMAT JSON) '+sql))
+            index = nodes['IntegerPrimaryKeyPage']
+            assert (index['usedPrimaryKeyPage'] == 'true') == use_index, index
+            if use_index:
+                assert int(index['heapRowsFetched']) == limit, index
+    expect('SELECT k,payload FROM scalar_order_external WHERE payload IS NOT NULL '
+           'ORDER BY k DESC LIMIT 3 OFFSET 2',
+           [[str(k),large_values[k-1]] for k in (16,15,14)], [23,25])
     expect('RESET work_mem')
     print('[PRESORTED PRIMARY KEY PROTOCOL] passed',flush=True)
 

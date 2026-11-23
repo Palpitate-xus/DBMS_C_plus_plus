@@ -2,6 +2,18 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-23 reuse a table page for consecutive integer primary key candidates",
+      "gap_ids": ["IDX-03", "OPT-01"],
+      "status": "partial",
+      "evidence": ["src/commands/TableManage.cpp", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/ordinary_scalar_order_protocol_e2e_test.py"],
+      "verification": [
+        "The checked reader can reuse a copied page under the relation lock while releasing the page lock before reading external values.",
+        "The reader discards the copied page when needed to honor the row memory budget.",
+        "Instrumented clustered reads fetch one page for 128 rows, while the scattered ordered case still fetches 128."
+      ]
+    },
+    {
       "issue": "2026-11-23 use signed integer primary indexes for complete selective ranges",
       "gap_ids": ["IDX-03", "OPT-01"],
       "status": "partial",

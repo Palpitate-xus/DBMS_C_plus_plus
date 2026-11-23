@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>连续取多笔订单可以减少重复读取 · 2026-11-23</summary>
+
+例如，最早的 128 笔订单都存在同一页时，数据库可以只取一次这一页，再逐条读取订单。
+
+[测试报告](docs/test-report.md#integer-primary-page-reuse-20261123) · [性能报告](docs/performance-report-2026-10-30.md#integer-primary-page-reuse-cost-20261123)
+
+</details>
+
+<details>
 <summary>按订单号查一小段记录更快 · 2026-11-23</summary>
 
 如果订单号是表的整数主键，查 1000 到 1100 号订单时，数据库可以用索引直接找这些记录。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>部分查询省去重复筛选 · 2026-11-23</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-23 · 部分查询省去重复筛选
 
 例如，同时按商品编号和库存量筛选时，数据库可以沿用读表时已经比较过的结果。
 
 [测试报告](docs/test-report.md#stored-where-reuse-20261123) · [性能报告](docs/performance-report-2026-10-30.md#stored-where-reuse-cost-20261123)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-23 · 部分按编号筛选的查询更快
 

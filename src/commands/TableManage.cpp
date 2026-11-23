@@ -11091,8 +11091,8 @@ std::optional<OrderedPrimaryKeyReadPage> StorageEngine::tryReadOrderedIntegerPri
     }
     OrderedPrimaryKeyReadPage result;
     std::vector<BPTree::IntegerEntry> candidates;
-    // The working budget covers index keys and copied table rows. An older
-    // index needs room for both its decimal keys and numeric candidates.
+    // The working budget covers index keys, copied table rows, and any page
+    // copy. An older index needs room for both its decimal and numeric keys.
     const size_t maxEntries = byteBudget / (2 * (sizeof(BPTree::LeafEntry) + sizeof(BPTree::IntegerEntry)));
     constexpr size_t maxCompleteCandidates = 256;
     if (completeRange) count = std::min(count, maxCompleteCandidates);
@@ -11153,35 +11153,52 @@ std::optional<OrderedPrimaryKeyReadPage> StorageEngine::tryReadOrderedIntegerPri
     }
     result.rows.reserve(std::min(count, candidates.size()));
     size_t remaining = byteBudget;
-    const auto readCandidate = [&](const BPTree::IntegerEntry& candidate, size_t keyBufferBytes) {
+    const size_t pageBytes = allocator->pageSize();
+    std::unique_ptr<char[]> pageCopy;
+    uint32_t copiedPage = 0;
+    const auto copyTuple = [&](char* buffer, uint16_t slotId, std::string& raw, std::vector<bool>& bitmap) {
+        PageWrapper page(buffer, pageBytes, schema.formatVersion);
+        const char* tuple = nullptr;
+        size_t length = 0;
+        if (!page.read(slotId, tuple, length) || length < sizeof(HeapTupleHeaderData) ||
+            !view->isVisible(tuple, length, schema.formatVersion)) return false;
+        const auto* header = castHeapHeader(tuple);
+        const size_t minOffset = sizeof(HeapTupleHeaderData) +
+            ((header->t_infomask & HEAP_HASNULL) ? (schema.len() + 7) / 8 : 0);
+        if (header->t_hoff < minOffset || header->t_hoff >= length) return false;
+        raw.assign(tuple + header->t_hoff, length - header->t_hoff);
+        for (size_t col = 0; col < schema.len(); ++col)
+            if (schema.cols[col].isNull)
+                bitmap[col] = dbms::isNull(header, static_cast<int>(col));
+        return true;
+    };
+    const auto readCandidate = [&](const BPTree::IntegerEntry& candidate, size_t keyBufferBytes,
+                                   bool samePageFollows) {
         checkForQueryInterrupt();
         const auto [keyValue, rid] = candidate;
         if ((lower && keyValue < *lower) || (upper && keyValue > *upper)) return false;
+        uint32_t pageId = 0;
+        uint16_t slotId = 0;
+        decodeRid(rid, pageId, slotId);
+        if (!pageId || encodeRid(pageId, slotId) != rid) return false;
         std::string raw;
         std::vector<bool> bitmap(schema.len(), false);
-        {
-            uint32_t pageId = 0;
-            uint16_t slotId = 0;
-            decodeRid(rid, pageId, slotId);
-            if (!pageId || encodeRid(pageId, slotId) != rid ||
-                !lockManager_.pageLockShared(dbname, tablename, pageId)) return false;
+        if (pageCopy && copiedPage == pageId) {
+            if (!copyTuple(pageCopy.get(), slotId, raw, bitmap)) return false;
+        } else {
+            if (!lockManager_.pageLockShared(dbname, tablename, pageId)) return false;
             HeapPageGuard guard{lockManager_, *allocator, dbname, tablename, pageId};
             char* buffer = allocator->fetchPage(pageId);
             if (!buffer) return false;
             guard.pinned = true;
-            PageWrapper page(buffer, allocator->pageSize(), schema.formatVersion);
-            const char* tuple = nullptr;
-            size_t length = 0;
-            if (!page.read(slotId, tuple, length) || length < sizeof(HeapTupleHeaderData) ||
-                !view->isVisible(tuple, length, schema.formatVersion)) return false;
-            const auto* header = castHeapHeader(tuple);
-            const size_t minOffset = sizeof(HeapTupleHeaderData) +
-                ((header->t_infomask & HEAP_HASNULL) ? (schema.len() + 7) / 8 : 0);
-            if (header->t_hoff < minOffset || header->t_hoff >= length) return false;
-            raw.assign(tuple + header->t_hoff, length - header->t_hoff);
-            for (size_t col = 0; col < schema.len(); ++col)
-                if (schema.cols[col].isNull)
-                    bitmap[col] = dbms::isNull(header, static_cast<int>(col));
+            if (!copyTuple(buffer, slotId, raw, bitmap)) return false;
+            // The exclusive relation lock protects the copy between reads.
+            // Release the page lock before resolving any external values.
+            if (samePageFollows && pageBytes <= remaining - keyBufferBytes) {
+                if (!pageCopy) pageCopy.reset(new char[pageBytes]);
+                std::memcpy(pageCopy.get(), buffer, pageBytes);
+                copiedPage = pageId;
+            }
         }
         if (bitmap[keyColumn] ||
             parseStoredInteger(extractColumnValueStatic(raw, schema, keyColumn)) != keyValue) return false;
@@ -11198,6 +11215,7 @@ std::optional<OrderedPrimaryKeyReadPage> StorageEngine::tryReadOrderedIntegerPri
             value.capacity() > remaining - keyBufferBytes - rowOverhead)
             return false;
         remaining -= rowOverhead + value.capacity();
+        if (pageCopy && pageBytes > remaining - keyBufferBytes) pageCopy.reset();
         result.rows.push_back({rid, std::move(value), std::move(bitmap)});
         return true;
     };
@@ -11208,8 +11226,13 @@ std::optional<OrderedPrimaryKeyReadPage> StorageEngine::tryReadOrderedIntegerPri
     for (;;) {
         const size_t keyBufferBytes = candidates.capacity() * sizeof(BPTree::IntegerEntry);
         if (keyBufferBytes > remaining) return {};
-        for (size_t i = first; i < candidates.size() && result.rows.size() < count; ++i)
-            if (!readCandidate(candidates[i], keyBufferBytes)) return {};
+        for (size_t i = first; i < candidates.size() && result.rows.size() < count; ++i) {
+            const bool samePageFollows = i + 1 < candidates.size() &&
+                (filtered || count - result.rows.size() > 1) &&
+                (static_cast<uint64_t>(candidates[i].value) >> 32) ==
+                    (static_cast<uint64_t>(candidates[i + 1].value) >> 32);
+            if (!readCandidate(candidates[i], keyBufferBytes, samePageFollows)) return {};
+        }
         if (!filtered || result.rows.size() == count || candidates.size() < requested) break;
         if (result.heapRowsFetched >= maxEntries) return {};
 
@@ -11221,6 +11244,7 @@ std::optional<OrderedPrimaryKeyReadPage> StorageEngine::tryReadOrderedIntegerPri
         if (nextBatchSize < 256) nextBatchSize = std::min<size_t>(256, nextBatchSize * 2);
         requested = std::min(nextBatchSize, maxEntries - result.heapRowsFetched) + 1;
         if (requested > remaining / sizeof(BPTree::IntegerEntry)) return {};
+        pageCopy.reset();
         std::vector<BPTree::IntegerEntry>().swap(candidates);
         if (!readBatch(requested) || candidates.empty() ||
             candidates.front().key != tail.key || candidates.front().value != tail.value) return {};
