@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-23 · 边筛选边读取有序的复合主键分页
+
+PostgreSQL 可以在索引扫描中追加筛选，`LIMIT` 取够符合条件的行便结束请求。SQLite 会比较有序索引扫描和其他访问路径的成本。DuckDB 将 `ORDER BY` 与 `LIMIT` 合并成 TopN，减少排序所需的内存和工作量。[PostgreSQL 执行计划](https://www.postgresql.org/docs/18/using-explain.html) · [SQLite 排序规划](https://sqlite.org/optoverview.html#order_by_optimizations) · [DuckDB 优化器](https://duckdb.org/2024/11/14/optimizers)
+
+本项目可以在固定复合主键前导列后，检查受支持的文字长度、空值和简单比较，再按整数末列顺序交出满足条件的一页。查找和筛选的成本超过预算时会改用原查询路径。通用筛选、稀疏筛选的成本估计，以及跨组有序读取仍有差距。[协议测试](test-report.md#composite-primary-filtered-order-20261123) · [性能对照](performance-report-2026-10-30.md#composite-primary-filtered-order-cost-20261123)
+
 ## 2026-11-23 · 从区间的一端读取一页复合主键结果
 
 PostgreSQL 的 B-tree 支持正向或反向读取，符合排序的索引可在达到 `LIMIT` 时停止。SQLite 在多列索引中先定位前导等值组，再按后续列读取。DuckDB 1.5 文档中的 ART 扫描面向单列筛选，未用于消除排序。[PostgreSQL 索引排序](https://www.postgresql.org/docs/18/indexes-ordering.html) · [SQLite 查找与排序](https://sqlite.org/queryplanner.html#searching_and_sorting_with_a_multi_column_index) · [DuckDB 索引](https://duckdb.org/docs/1.5/guides/performance/indexing)

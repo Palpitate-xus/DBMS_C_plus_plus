@@ -1098,7 +1098,7 @@ WHERE shop_code = 'north'
 ORDER BY order_number DESC LIMIT 5 OFFSET 2;
 ```
 
-数据库会核对表中实际的店铺编号、订单号和记录对当前事务是否可见。当旧快照、更多筛选条件或扫描成本要求读整张表时，数据库按原条件筛选和排序。[排序和分页验证](test-report.md#composite-primary-prefix-20261123)
+如果订单表还有 `note` 备注列，像 `AND length(note) > 2` 这样的筛选可以在按订单号读取时完成。数据库核对实际的店铺编号、订单号、备注和事务可见性，读够一页才结束。如果符合条件的订单太少，或执行时使用旧快照，数据库可以改为扫描和排序。[筛选和分页验证](test-report.md#composite-primary-filtered-order-20261123)
 
 ### 删除表
 

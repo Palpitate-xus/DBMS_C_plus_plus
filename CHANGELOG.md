@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>按备注筛选后取前几笔订单更快 · 2026-11-23</summary>
+
+比如按订单号从大到小查备注超过两个字的订单，数据库可以边读边筛，找够就停。
+
+[用法](docs/MANUAL.md#用多列一起区分记录) · [测试报告](docs/test-report.md#composite-primary-filtered-order-20261123) · [性能报告](docs/performance-report-2026-10-30.md#composite-primary-filtered-order-cost-20261123)
+
+</details>
+
+<details>
 <summary>一家店有很多订单时，翻页也更快 · 2026-11-23</summary>
 
 即使一家店有几千笔订单，按订单号查前几笔时，数据库也可以只读这一页需要的记录。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>逐条按名称或数字筛选记录更快 · 2026-11-23</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-23 · 逐条按名称或数字筛选记录更快
 
 比如在商品表里逐条查找名为「绿茶」的商品，数据库只需在查找前处理一次要比较的名称。
 
 [测试报告](docs/test-report.md#stored-literal-filter-20261123) · [性能报告](docs/performance-report-2026-10-30.md#stored-literal-filter-cost-20261123)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-23 · 查一家店指定号码范围内的订单更快
 

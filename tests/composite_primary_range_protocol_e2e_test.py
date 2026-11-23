@@ -152,15 +152,72 @@ def main():
         check_access(writer, lambda: observe(bind(store, -64, 6140, b'limited'), 'SELECT 2',
                      [['6138', 'n6138'], ['6137', 'n6137']]), [0, 0, 1, 3])
 
+        for key, note in ((6159, 'NULL'), (6158, "''"), (6157, "'界'"), (6156, 'NULL'), (6155, "'界🙂'")):
+            sql(writer, f"UPDATE {table} SET note={note} WHERE shop='{store}' AND ord={key}", 'UPDATE 1')
+
+        def descending(condition=''):
+            return lookup(store, condition, 'ord DESC')
+
+        filtered = descending('AND length(note)>1') + ' LIMIT 3 OFFSET 1'
+        check_access(writer, lambda: sql(writer, filtered, 'SELECT 3',
+                     [[str(i), f'n{i}'] for i in range(6154, 6151, -1)]), [0, 0, 1, 8])
+        check_access(writer, lambda: sql(writer, descending('AND note IS NULL') + ' LIMIT 2',
+                     'SELECT 2', [['6159', None], ['6156', None]]), [0, 0, 1, 4])
+        check_access(writer, lambda: sql(writer, descending("AND note = '界🙂'") + ' LIMIT 1',
+                     'SELECT 1', [['6155', '界🙂']]), [0, 0, 1, 5])
+        check_access(writer, lambda: sql(writer, lookup(sparse, 'AND ord <> 9223372036854775807', 'ord DESC') +
+                     ' LIMIT 2', 'SELECT 2', [['0', None], ['-9223372036854775808', 'minimum']]),
+                     [0, 0, 1, 3])
+        check_access(writer, lambda: sql(writer, descending('AND ord >= 6155 AND note IS NOT NULL') +
+                     ' LIMIT 5', 'SELECT 3', [['6158', ''], ['6157', '界'], ['6155', '界🙂']]),
+                     [0, 0, 1, 5])
+        filtered_bind = (select + ' WHERE shop=$1 AND ord>=$2 AND $3>ord '
+                         'AND length(note)>1 ORDER BY ord DESC LIMIT 3 OFFSET 1')
+        writer.sendall(typed(b'P', b'filtered\0' + filtered_bind.encode() + b'\0' +
+                       pack('!HIII', 3, 25, 20, 20)) + typed(b'S'))
+        assert client.read_until_ready(writer) == [(b'1', b''), (b'Z', b'I')]
+        check_access(writer, lambda: observe(bind(store, -64, 6160, b'filtered'), 'SELECT 3',
+                     [[str(i), f'n{i}'] for i in range(6154, 6151, -1)]), [0, 0, 1, 8])
+        check_access(writer, lambda: observe(bind(store, 6154, 6157, b'filtered'), 'SELECT 1',
+                     [['6154', 'n6154']]), [0, 0, 1, 3])
+
+        before = stats(writer)
+        sql(writer, descending("AND note = 'n6000'") + ' LIMIT 1', 'SELECT 1', [['6000', 'n6000']])
+        counts = [new - old for old, new in zip(before, stats(writer), strict=True)]
+        assert counts[:3] == [1, 6340, 1] and 1 <= counts[3] <= 32, counts
+        unsafe = descending('AND ord BETWEEN 6150 AND 6159 AND 1/(ord-6154) > 0') + ' LIMIT 1'
+        error = runner.decode_wire_result(client.simple_query(writer, unsafe))
+        assert error[1] == '22012', error
+        sql(writer, 'CREATE SCHEMA wire_residual', 'CREATE SCHEMA')
+        sql(writer, 'CREATE FUNCTION wire_residual.length(s text) RETURNS integer '
+            'LANGUAGE SQL IMMUTABLE AS $$SELECT CASE WHEN s IS NULL THEN 2 ELSE 0 END$$', 'CREATE FUNCTION')
+        stored = descending('AND ord >= 6155 AND wire_residual.length(note)>1') + ' LIMIT 1'
+        check_access(writer, lambda: sql(writer, stored, 'SELECT 1', [['6159', None]]), [0, 0, 1, 5])
+
+        sql(writer, f"UPDATE {table} SET note=repeat('界',3000) WHERE shop='{store}' AND ord=6155", 'UPDATE 1')
+        long_text = (f'SELECT ord FROM {table} WHERE shop=\'{store}\' AND length(note)=3000 '
+                     'ORDER BY ord DESC LIMIT 1')
+        check_access(writer, lambda: sql(writer, long_text, 'SELECT 1', [['6155']]), [0, 0, 1, 5])
+
+        sql(reader, 'BEGIN ISOLATION LEVEL REPEATABLE READ', 'BEGIN', ready=b'T')
+        null_page = descending('AND note IS NULL') + ' LIMIT 2'
+        old_notes = [['6159', None], ['6156', None]]
+        sql(reader, null_page, 'SELECT 2', old_notes, ready=b'T')
+        sql(writer, f"UPDATE {table} SET note='later' WHERE shop='{store}' AND ord=6159", 'UPDATE 1')
+        check_access(reader, lambda: sql(reader, null_page, 'SELECT 2', old_notes, ready=b'T'),
+                     [1, 6340, 0, 0])
+        sql(reader, 'COMMIT', 'COMMIT')
+        check_access(writer, lambda: sql(writer, descending('AND note IS NULL') + ' LIMIT 1',
+                     'SELECT 1', [['6156', None]]), [0, 0, 1, 4])
+
         sql(writer, "SET work_mem='64kB'", 'SET')
         sql(writer, 'SET random_page_cost=0.01', 'SET')
-        descending = lookup(store, order='ord DESC')
         before = stats(writer)
-        sql(writer, descending + ' LIMIT 5 OFFSET 1200', 'SELECT 5',
+        sql(writer, descending() + ' LIMIT 5 OFFSET 1200', 'SELECT 5',
             [[str(i), f'n{i}'] for i in range(4959, 4954, -1)])
         counts = [new - old for old, new in zip(before, stats(writer), strict=True)]
         assert counts[:3] == [1, 6340, 1] and 0 < counts[3] < 1205, counts
-        check_access(writer, lambda: sql(writer, descending + ' LIMIT 5 OFFSET 4100', 'SELECT 5',
+        check_access(writer, lambda: sql(writer, descending() + ' LIMIT 5 OFFSET 4100', 'SELECT 5',
                      [[str(i), f'n{i}'] for i in range(2059, 2054, -1)]), [1, 6340, 0, 0])
     finally:
         if reader is not None:

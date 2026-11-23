@@ -2,6 +2,18 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-23 fill an ordered composite primary key page after evaluating safe filters",
+      "gap_ids": ["IDX-03", "OPT-01"],
+      "status": "partial",
+      "evidence": ["src/executor/ExecutionPlan.cpp", "docs/MANUAL.md", "docs/postgresql-comparison.md", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/compat/cases/composite_primary_filtered_order.sql", "tests/composite_primary_range_protocol_e2e_test.py"],
+      "verification": [
+        "Pages can stop after enough matches to supported NULL, text, integer and builtin length predicates. Exact values, order, visibility and the current index fence remain checked.",
+        "A sparse filter can fall back to a full scan before releasing results. Tests cover user routines with the same name, SQL errors, multibyte text, old snapshots and process restart.",
+        "General residual filtering, sparse predicate costing and ordered scans across groups remain open."
+      ]
+    },
+    {
       "issue": "2026-11-23 read small ordered pages from either end of a composite primary key range",
       "gap_ids": ["IDX-03", "OPT-01"],
       "status": "partial",

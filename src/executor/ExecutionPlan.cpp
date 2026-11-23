@@ -2497,9 +2497,15 @@ struct CompositeSuffixBound {
     bool inclusive;
 };
 
+struct CompositePageFilter {
+    std::vector<const Expr*> clauses;
+    std::vector<const ColumnRefExpr*> columns;
+};
+
 struct CompositeSuffixOrder {
     bool ascending;
     std::optional<size_t> fetchCount;
+    CompositePageFilter filter;
 };
 
 static bool compositeOperandType(const std::string&, const std::string&);
@@ -2556,6 +2562,17 @@ class CompositePrimaryKeyScanOp final : public Operator {
         return true;
     }
 
+    bool canEvaluatePageFilter() const {
+        return std::all_of(order_->filter.columns.begin(), order_->filter.columns.end(), [&](const auto* input) {
+            const auto& binding = *input->binding;
+            if (binding.columnOrdinal >= schema_.len()) return false;
+            const auto& column = schema_.cols[binding.columnOrdinal];
+            return column.dataName == input->column && !compositeEqualityType(column).empty() &&
+                ExprHelper::canonicalResultTypeName(column.dataType) ==
+                    ExprHelper::canonicalResultTypeName(binding.declaredType);
+        });
+    }
+
     bool fetchCandidate(size_t candidate, std::string& row,
                         std::optional<uint64_t> fence = std::nullopt) {
         checkForQueryInterrupt();
@@ -2593,7 +2610,7 @@ class CompositePrimaryKeyScanOp final : public Operator {
         return true;
     }
 
-    bool bufferPrefix(size_t count, uint64_t fence) {
+    bool bufferPrefix(size_t count, size_t candidates, uint64_t fence) {
         if (engine_->indexReadSnapshotFence(database_) != fence) return false;
         struct RestoreNullBinding {
             StorageEngine::NullRowBindingState saved = StorageEngine::captureNullRowBinding();
@@ -2604,21 +2621,47 @@ class CompositePrimaryKeyScanOp final : public Operator {
         // short of the required number of real matches.
         size_t budget = sortWorkMemBytes();
         const size_t rowSize = sizeof(decltype(prefixRows_)::value_type);
-        if (rids_.size() > budget / rowSize) return false;
-        prefixRows_.reserve(rids_.size());
+        const size_t capacity = std::min(count, rids_.size());
+        if (capacity > budget / rowSize) return false;
+        prefixRows_.reserve(capacity);
         if (prefixRows_.capacity() > budget / rowSize) return false;
         budget -= prefixRows_.capacity() * rowSize;
-        for (size_t candidate = 0; candidate < rids_.size(); ++candidate) {
+        const auto& filter = order_->filter;
+        std::optional<ExprEvaluator> evaluator;
+        if (!filter.clauses.empty()) {
+            evaluator.emplace();
+            evaluator->setCurrentDB(database_);
+        }
+        for (size_t candidate = 0; candidate < rids_.size() && prefixRows_.size() < count; ++candidate) {
             std::string row;
             if (!fetchCandidate(candidate, row, fence)) {
                 if (hasError()) return false;
                 continue;
             }
+            if (evaluator) {
+                RowContext context;
+                for (const auto* input : filter.columns) {
+                    const auto& binding = *input->binding;
+                    bool isNull = false;
+                    auto actual = engine_->extractColumnValue(row, schema_, binding.columnOrdinal,
+                                                               database_, false, &isNull);
+                    auto type = ExprHelper::canonicalResultTypeName(binding.declaredType);
+                    ExprValue value(std::move(type), std::move(actual), isNull);
+                    const auto& column = schema_.cols[binding.columnOrdinal];
+                    value.collation = column.resolvedCollation.empty() ? column.collation : column.resolvedCollation;
+                    context.setBoundColumn(binding.sourceOrdinal, binding.columnOrdinal, std::move(value));
+                }
+                const bool qualifies = std::all_of(filter.clauses.begin(), filter.clauses.end(), [&](const auto* clause) {
+                    const auto value = evaluator->eval(clause, context);
+                    return !value.isNull && value.asBool();
+                });
+                if (!qualifies) continue;
+            }
             if (row.capacity() > budget) return false;
             budget -= row.capacity();
             prefixRows_.emplace_back(rids_[candidate], std::move(row));
         }
-        if (rids_.size() == count && prefixRows_.size() < count) return false;
+        if (rids_.size() == candidates && prefixRows_.size() < count) return false;
         rids_.clear();
         suffixValues_.clear();
         return true;
@@ -2655,18 +2698,27 @@ class CompositePrimaryKeyScanOp final : public Operator {
         const auto indexCost = [](size_t fetches) {
             return QueryPlanner::costScan("index_scan", static_cast<double>(fetches), 0);
         };
+        if (order_ && !canEvaluatePageFilter()) return false;
         const auto count = order_ ? order_->fetchCount : std::nullopt;
         const bool prefix = count && *count <= maxRows && indexCost(*count) < heapCost;
+        size_t candidates = prefix ? *count : maxRows;
+        if (prefix && !order_->filter.clauses.empty()) {
+            // Estimate only the maximum speculative I/O. Stop fetching as
+            // soon as enough rows pass both the key and the SQL filter.
+            candidates = std::min(maxRows, std::max<size_t>(32, *count * 4));
+            while (candidates > *count && indexCost(candidates) >= heapCost)
+                candidates = *count + (candidates - *count) / 2;
+        }
         using Mode = BPTree::CompositeRangeRead;
         const auto mode = !prefix ? Mode::Entire
             : order_->ascending ? Mode::FirstAscending : Mode::FirstDescending;
         const auto status = index.readCompositePrimaryRange(
-            first, last, prefix ? *count : maxRows, maxNodes, rids_,
+            first, last, candidates, maxNodes, rids_,
             order_ ? &suffixValues_ : nullptr, mode);
         if (status == BPTree::LeafEntriesResult::Error)
             throw DbError("XX001", "could not read B-tree index for relation \"" + table_ + "\"");
         if (status != BPTree::LeafEntriesResult::Complete) return false;
-        if (prefix) return bufferPrefix(*count, fence);
+        if (prefix) return bufferPrefix(*count, candidates, fence);
         size_t fetches = rids_.size();
         if (count) fetches = std::min(fetches, *count);
         if (fetches && indexCost(fetches) >= heapCost) return false;
@@ -3107,9 +3159,9 @@ static size_t collectCompositePredicates(const TableSchema& schema, const std::v
         const Expr* predicate, std::optional<size_t> range,
         std::map<size_t, CompositeEqualityInput>& matches,
         std::vector<CompositeSuffixBound>* bounds = nullptr,
-        std::optional<size_t> suffix = {}, bool* fullyCovered = nullptr) {
+        std::optional<size_t> suffix = {}, std::vector<const Expr*>* residual = nullptr) {
     std::vector<const Expr*> terms{predicate};
-    size_t conjuncts = 0, covered = 0;
+    size_t conjuncts = 0;
     while (!terms.empty()) {
         const auto* term = terms.back();
         const auto* binary = dynamic_cast<const BinaryOpExpr*>(term);
@@ -3121,8 +3173,12 @@ static size_t collectCompositePredicates(const TableSchema& schema, const std::v
             continue;
         }
         ++conjuncts;
+        if (residual) residual->push_back(term);
         if (!binary && bounds && suffix &&
-            collectCompositeBetween(schema, *suffix, term, range, *bounds)) ++covered;
+            collectCompositeBetween(schema, *suffix, term, range, *bounds)) {
+            if (residual) residual->pop_back();
+            continue;
+        }
         if (!binary || binary->preparedSubquery || binary->rowComparison) continue;
         const bool equality = binary->op == "=";
         if (!equality && (!bounds || !suffix ||
@@ -3188,9 +3244,8 @@ static size_t collectCompositePredicates(const TableSchema& schema, const std::v
         else bounds->push_back({std::move(termInput),
             (binary->op.front() == '>') == (columnExpr == binary->left.get()),
             binary->op.size() == 2});
-        ++covered;
+        if (residual) residual->pop_back();
     }
-    if (fullyCovered) *fullyCovered = covered == conjuncts;
     return conjuncts;
 }
 
@@ -3213,6 +3268,94 @@ static std::optional<QueryColumnBinding> preparedDirectOrderColumn(
 static std::optional<QueryColumnBinding> integerPageOrder(
     const PreparedQuery& query, const SelectStmt& select);
 
+// Only total, row-local predicates can be checked speculatively and skipped
+// after a full page. Keep actual SQL expression evaluation and the original
+// WHERE above the scan, including on the path that falls back to the heap.
+static std::optional<CompositePageFilter> bindCompositePageFilter(StorageEngine& engine,
+        const std::string& database, const TableSchema& schema, size_t source,
+        const std::vector<const Expr*>& residual) {
+    CompositePageFilter filter;
+    filter.clauses = residual;
+    if (residual.empty()) return filter;
+    ExprEvaluator evaluator;
+    evaluator.setCurrentDB(database);
+    const auto localColumn = [&](const Expr* expression) -> const ColumnRefExpr* {
+        const auto* column = dynamic_cast<const ColumnRefExpr*>(expression);
+        if (!column || column->preparedSubquery || column->generatedRead || !column->binding) return nullptr;
+        const auto& binding = *column->binding;
+        const auto& declaration = binding.typeMetadata;
+        if (binding.scopeDepth || binding.mergedUsing || binding.sourceOrdinal != source ||
+            binding.columnOrdinal >= schema.len() || !declaration || declaration->kind != DatumKind::Scalar ||
+            declaration->actualOid != declaration->codecOid || declaration->enumType) return nullptr;
+        const auto& field = schema.cols[binding.columnOrdinal];
+        if (field.dataName != column->column || compositeEqualityType(field).empty() ||
+            ExprHelper::canonicalResultTypeName(field.dataType) !=
+                ExprHelper::canonicalResultTypeName(binding.declaredType)) return nullptr;
+        return column;
+    };
+    const auto addColumn = [&](const ColumnRefExpr* column) {
+        if (std::none_of(filter.columns.begin(), filter.columns.end(), [&](const auto* existing) {
+                return existing->binding->columnOrdinal == column->binding->columnOrdinal;
+            })) filter.columns.push_back(column);
+    };
+    const auto readOperand = [&](const Expr* operand) -> std::pair<const ColumnRefExpr*, std::string> {
+        if (!operand || operand->preparedSubquery) return {};
+        if (const auto* column = localColumn(compositeTextEnvelope(operand))) {
+            const auto type = compositeEqualityType(schema.cols[column->binding->columnOrdinal]);
+            if (type == "text" || operand == column) return {column, type};
+        }
+        const auto* call = dynamic_cast<const FunctionCallExpr*>(operand);
+        if (!call || call->args.size() != 1 || call->identitySequenceOid ||
+            call->sqlValue != FunctionCallExpr::SqlValue::None) return {};
+        CatalogManager::QualifiedName name;
+        if (!CatalogManager::parseQualifiedName(call->funcName, name, true) || name.name != "length") return {};
+        const auto* column = localColumn(compositeTextEnvelope(call->args.front().get()));
+        if (!column || compositeEqualityType(schema.cols[column->binding->columnOrdinal]) != "text" ||
+            evaluator.strictStringResultType(call, &engine) != "integer") return {};
+        return {column, "integer"};
+    };
+    for (const auto* clause : residual) {
+        if (!clause || clause->preparedSubquery) return {};
+        if (const auto* unary = dynamic_cast<const UnaryOpExpr*>(clause)) {
+            if (unary->op != "IS NULL" && unary->op != "IS NOT NULL") return {};
+            const auto* column = localColumn(unary->operand.get());
+            if (!column) return {};
+            addColumn(column);
+            continue;
+        }
+        const auto* binary = dynamic_cast<const BinaryOpExpr*>(clause);
+        if (!binary || binary->rowComparison) return {};
+        const auto& op = binary->op;
+        const bool equality = op == "=" || op == "<>" || op == "!=";
+        if (!equality && op != "<" && op != "<=" && op != ">" && op != ">=") return {};
+        if (binary->predicateCollation) {
+            const auto& rule = *binary->predicateCollation;
+            if (rule.indeterminate || rule.selected.usesSystemLocale ||
+                (!rule.selected.comparisonName.empty() && !collation::isBinary(rule.selected.comparisonName)))
+                return {};
+        }
+        auto [column, type] = readOperand(binary->left.get());
+        const auto* literal = binary->right.get();
+        if (!column) {
+            std::tie(column, type) = readOperand(binary->right.get());
+            literal = binary->left.get();
+        }
+        if (!column || (type == "text" && !equality)) return {};
+        if (binary->comparison) {
+            const auto& binding = *binary->comparison;
+            if (!binding.strict || binding.enumTypeOid || binding.collationUsesSystemLocale ||
+                (!binding.collation.empty() && !collation::isBinary(binding.collation)) ||
+                !compositeOperandType(type, binding.leftType) || !compositeOperandType(type, binding.rightType) ||
+                binding.identity != "builtin-comparison:" + op + "(" + binding.leftType + "," + binding.rightType + ")")
+                return {};
+        }
+        if (type == "text") literal = compositeTextEnvelope(literal);
+        if (!compositeLiteralValue(literal, type == "text" ? type : "bigint")) return {};
+        addColumn(column);
+    }
+    return filter;
+}
+
 static OpPtr preparedCompositePrimarySource(StorageEngine* engine, const std::string& database,
         const std::shared_ptr<PreparedQuery>& query, const SelectStmt& select,
         const TableSchema& schema, OpPtr& source, bool allowRange) {
@@ -3232,9 +3375,9 @@ static OpPtr preparedCompositePrimarySource(StorageEngine* engine, const std::st
     std::vector<CompositeSuffixBound> bounds;
     auto suffix = allowRange ? primary_key_index::orderedSuffixColumn(schema) : std::nullopt;
     if (allowRange && !suffix) return {};
-    bool fullyCovered = false;
+    std::vector<const Expr*> residual;
     collectCompositePredicates(schema, columns, select.whereClause.get(),
-                               range->ordinal, matches, &bounds, suffix, &fullyCovered);
+                               range->ordinal, matches, &bounds, suffix, &residual);
     auto ordered = orderedCompositeInputs(columns, matches, suffix.has_value());
     if (ordered.empty()) return {};
     if (ordered.size() == columns.size()) suffix.reset();
@@ -3243,7 +3386,7 @@ static OpPtr preparedCompositePrimarySource(StorageEngine* engine, const std::st
         const auto key = preparedDirectOrderColumn(*query, select);
         if (key && !key->scopeDepth && !key->mergedUsing &&
             key->sourceOrdinal == range->ordinal && key->columnOrdinal == *suffix) {
-            order = CompositeSuffixOrder{select.orderBy.front().asc, std::nullopt};
+            order = CompositeSuffixOrder{select.orderBy.front().asc, std::nullopt, {}};
             const auto plainOutput = [&](const SelectItem& item) {
                 const auto* column = dynamic_cast<const ColumnRefExpr*>(item.expr.get());
                 return column && !column->preparedSubquery && !column->generatedRead && column->binding &&
@@ -3252,9 +3395,13 @@ static OpPtr preparedCompositePrimarySource(StorageEngine* engine, const std::st
                     column->binding->columnOrdinal < schema.len() &&
                     !compositeEqualityType(schema.cols[column->binding->columnOrdinal]).empty();
             };
-            if (fullyCovered && integerPageOrder(*query, select) &&
-                std::all_of(select.selectList.begin(), select.selectList.end(), plainOutput))
-                order->fetchCount = *select.limit + select.offset.value_or(0);
+            if (integerPageOrder(*query, select) &&
+                std::all_of(select.selectList.begin(), select.selectList.end(), plainOutput)) {
+                if (auto filter = bindCompositePageFilter(*engine, database, schema, range->ordinal, residual)) {
+                    order->fetchCount = *select.limit + select.offset.value_or(0);
+                    order->filter = std::move(*filter);
+                }
+            }
         }
     }
     return std::make_unique<CompositePrimaryKeyScanOp>(engine, database, schema,
@@ -11696,7 +11843,7 @@ static std::unique_ptr<CompositePrimaryKeyScanOp> compactCompositePrimarySource(
             [&](const auto& condition) {
                 return safeOrderedCompositePredicate(table, condition, inputs, leadingOnly);
             })) {
-        order = CompositeSuffixOrder{context.orderByAsc, std::nullopt};
+        order = CompositeSuffixOrder{context.orderByAsc, std::nullopt, {}};
         if (leadingOnly && context.limit &&
             context.limit <= std::numeric_limits<size_t>::max() - context.offset)
             order->fetchCount = context.limit + context.offset;
