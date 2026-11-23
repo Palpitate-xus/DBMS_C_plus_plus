@@ -2,6 +2,11 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="stored-filter-prefix-comparison-20261123"></a>
+## 2026-11-23 · 在构造结果行之前筛选
+
+PostgreSQL 18.6 的扫描执行器先取出一行，检查查询条件，通过后才计算结果列。SQLite 为 `UNION`、`INTERSECT` 和 `EXCEPT` 的每个分支分别生成访问计划，分支可以使用索引只访问满足范围的记录。DuckDB 会将适用的条件下推到表扫描，尽早缩小中间结果。项目这次让已支持的整数和空值检查持续作用于当前扫描，减少交给上层查询的行。测试中的表扫描仍读取可见行。 [PostgreSQL 扫描执行器](https://github.com/postgres/postgres/blob/REL_18_6/src/include/executor/execScan.h) · [SQLite 复合查询计划](https://www.sqlite.org/eqp.html#compound_queries) · [DuckDB 查询优化](https://duckdb.org/2024/11/14/optimizers#filter-pull-up--filter-pushdown) · [本项目性能报告](performance-report-2026-10-30.md#stored-filter-prefix-cost-20261123)
+
 <a id="ordinary-set-comparison-20261123"></a>
 ## 2026-11-23 · 普通集合运算逐对确定类型
 

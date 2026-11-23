@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-23 · 开头连续匹配时也继续检查整数条件
+
+在 2,048 行的合并查询测试中，取前 128 行的四轮内存计时从约 20–21 毫秒降到约 10–11 毫秒。PostgreSQL 18.6 在同样使用内存盘的对照中约需 1.5 毫秒。表访问与中间结果转换仍有开销，`OPT-01` 保持部分实现。 [回归与恢复](test-report.md#stored-filter-prefix-20261123) · [计时](performance-report-2026-10-30.md#stored-filter-prefix-cost-20261123)
+
 ## 2026-11-23 · 普通查询合并时保留共同类型
 
 普通 `SELECT 7 UNION SELECT NULL` 可以返回整数列，去重、求交和求差也使用各分支已确定的共同类型。外层查询可以报告普通子查询和只读 `WITH` 中集合结果的列说明。零列查询也提供列数为零的结果说明。复杂类型的行比较与常量错误发生的协议阶段仍有差距。`QRY-06`、`PROTO-04` 和 `OPT-01` 保持部分实现。[验证范围](test-report.md#ordinary-set-20261123) · [性能](performance-report-2026-10-30.md#ordinary-set-cost-20261123)

@@ -2,6 +2,18 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-23 keep fixed-width integer and null checks active through clustered ranges",
+      "gap_ids": ["OPT-01"],
+      "status": "partial",
+      "evidence": ["src/executor/ExecutionPlan.cpp", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/stored_literal_filter_protocol_e2e_test.py"],
+      "verification": [
+        "A scan that passes its first 64 rows still rejects later nonmatching rows using eligible fixed-width integer and null checks.",
+        "The protocol comparison validates 83 complete responses against PostgreSQL 18.6, and the disk recovery fixture validates committed and uncommitted updates.",
+        "Paired timings improve clustered prefix UNION and show mixed results with nearly all rows matching."
+      ]
+    },
+    {
       "issue": "2026-11-23 apply bound set types to ordinary SELECT operands and describe nested and zero-column set results",
       "gap_ids": ["QRY-06", "PROTO-04", "OPT-01"],
       "status": "partial",

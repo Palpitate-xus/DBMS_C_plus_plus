@@ -3772,6 +3772,7 @@ class StoredFilterScanOp final : public Operator {
     std::string database_, table_;
     uint64_t relationId_;
     StoredPredicates predicates_;
+    bool sampleSelectivity_;
     OpPtr scan_;
     TableSchema schema_;
     std::vector<bool> nulls_;
@@ -3782,7 +3783,11 @@ public:
     StoredFilterScanOp(StorageEngine& engine, std::string database, const TableSchema& schema,
                        StoredPredicates predicates, OpPtr scan)
         : engine_(engine), database_(std::move(database)), table_(schema.tablename),
-          relationId_(schema.physicalRelationId), predicates_(std::move(predicates)), scan_(std::move(scan)) {}
+          relationId_(schema.physicalRelationId), predicates_(std::move(predicates)),
+          sampleSelectivity_(std::any_of(predicates_.begin(), predicates_.end(), [](const auto& predicate) {
+              using Input = StoredPredicate::Input;
+              return !predicate.integer && predicate.input != Input::IsNull && predicate.input != Input::IsNotNull;
+          })), scan_(std::move(scan)) {}
 
     ~StoredFilterScanOp() override { try { close(); } catch (...) {} }
 
@@ -3810,9 +3815,10 @@ public:
                     rejected_ = true;
                     continue;
                 }
-                // Avoid doing the same work below and above the source when
-                // the first page of results shows no benefit from prefiltering.
-                if (!matches || (!rejected_ && ++initialMatches_ == 64)) active_ = false;
+                // A prefix of matching rows does not predict the rest of a
+                // clustered range. Keep cheap integer and NULL checks active.
+                // Sample only predicates that extract or process values.
+                if (!matches || (sampleSelectivity_ && !rejected_ && ++initialMatches_ == 64)) active_ = false;
             }
             instrument.emitted = true;
             return true;

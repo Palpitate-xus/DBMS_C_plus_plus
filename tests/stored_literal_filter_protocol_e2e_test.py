@@ -86,6 +86,19 @@ def main():
         assert any("StoredFilter" in row[0] and "rows=3" in row[0] for row in plan), plan
         assert any("TableScan" in row[0] and "rows=7" in row[0] for row in plan), plan
 
+        simple("CREATE TABLE stored_filter_ranges(n smallint, ord bigint, qty integer)", "CREATE TABLE")
+        prefix = ",".join(f"({n},{2**53 + n},1)" for n in range(64))
+        tail = "(-32768,1,1),(NULL,2,1),(32767,NULL,1),(100,3,0),(101,4,NULL)," \
+               "(32767,9223372036854775807,2147483647)"
+        simple(f"INSERT INTO stored_filter_ranges VALUES {prefix},{tail}", "INSERT 0 70")
+        clustered = "SELECT ord FROM stored_filter_ranges WHERE n>=0 AND qty>0 " \
+                    "AND ord IS NOT NULL ORDER BY ord OFFSET 0 FETCH FIRST 100 ROWS WITH TIES"
+        expected = [[str(2**53 + n)] for n in range(64)] + [[str(2**63 - 1)]]
+        assert simple(clustered, "SELECT 65") == expected
+        plan = simple("EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF) " + clustered, "EXPLAIN")
+        assert any("StoredFilter" in row[0] and "rows=65" in row[0] for row in plan), plan
+        assert any("TableScan" in row[0] and "rows=70" in row[0] for row in plan), plan
+
         prepare(b"length_scan", f"SELECT ord FROM {table} WHERE shop=$1 AND ord>=$2 AND $3>=ord "
                 "AND length(shop)>1 ORDER BY ord")
         assert probe("青木", 0, 10, [9], b"length_scan") == [1, 7, 0, 0]
