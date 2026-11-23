@@ -45,7 +45,7 @@ def complete_range_controls(query):
         if used:
             assert int(scan['indexEntries']) == int(scan['heapRowsFetched']) == fetched, scan
             if ranges is not None:
-                assert int(scan['indexRanges']) == ranges, scan
+                assert int(scan.get('indexRanges', '1')) == ranges, scan
             assert nodes['TableScan'].get('actualRows', 0) == 0, nodes
         else:
             assert nodes['TableScan']['actualRows'] == len(keys), nodes
@@ -74,6 +74,20 @@ def complete_range_controls(query):
     check('k NOT BETWEEN SYMMETRIC 1534 AND 3', (1, 2, 1535, 1536), True, 4, 2)
     check('k NOT BETWEEN ASYMMETRIC 8 AND 1 AND k<5', (1, 2, 3, 4), True, 4)
     check('k BETWEEN SYMMETRIC NULL AND 8', (), False)
+    check('k<=3 OR 1535<=k', (1, 2, 3, 1535, 1536), True, 5, 2)
+    check('k BETWEEN 1 AND 4 OR k BETWEEN 4 AND 8 OR k=9', range(1, 10), True, 9, 1)
+    check('(k>1 AND k<4) OR (k=7 OR k=9) OR k>1535', (2, 3, 7, 9, 1536), True, 5, 4)
+    check('(k!=8 OR k=2000) AND k>=6 AND k<=8', (6, 7), True, 2, 1)
+    check('k< -2147483648 OR k>2147483647', (), True, 0)
+    check('k<=128 OR k>=1409', (*range(1, 129), *range(1409, 1537)), True, 256, 2)
+    check('k<=129 OR k>=1409', (*range(1, 130), *range(1409, 1537)), False)
+    check('k<=3 OR val>1534', (1, 2, 3, 1535), False)
+    check('k<2.5 OR k>1535.5', (1, 2, 1536), False)
+    check(' OR '.join(['k=2'] * 129), (2,), False)
+    for predicate, expected in (('k=4 OR val=11', (4, 11)),
+                                ('k<2.5 OR k>1535.5', (1, 2, 1536))):
+        result = query(f'SELECT k+0::integer AS v FROM {table} WHERE {predicate} ORDER BY k')
+        assert result[1] is None and result[0] == [[str(k)] for k in expected], result
 
     # The index sources the same heap order when SQL has no sort key.
     for tail, expected in (('LIMIT 4', insertion_order[:4]),
@@ -85,6 +99,8 @@ def complete_range_controls(query):
     assert result[1] is None and result[0] == [['1'], ['4']], result
     result = query(f'SELECT k FROM {table} WHERE k NOT BETWEEN 3 AND 6 AND k<=8 LIMIT 3 OFFSET 1')
     assert result[1] is None and result[0] == [['2'], ['1'], ['7']], result
+    result = query(f'SELECT k FROM {table} WHERE k<=2 OR (k>=7 AND k<=8) LIMIT 2 OFFSET 1')
+    assert result[1] is None and result[0] == [['2'], ['1']], result
 
     explain = 'EXPLAIN (ANALYZE TRUE, TIMING FALSE, COSTS FALSE, FORMAT JSON) '
     for condition, order, limit, expected, fetched in (
@@ -92,6 +108,10 @@ def complete_range_controls(query):
         ('k NOT BETWEEN 3 AND 1534', 'k DESC', '3 OFFSET 1', [1535, 2, 1], 4),
         ('k NOT BETWEEN 3 AND 1534', 'k DESC', '1', [1536], 1),
         ('k NOT BETWEEN 128 AND 1408 AND val IS NULL', 'k ASC', '70',
+         [*range(2, 128, 2), *range(1410, 1423, 2)], 141),
+        ('k<=3 OR k>=1535', 'k ASC', '3 OFFSET 1', [2, 3, 1535], 4),
+        ('k<=3 OR k>=1535', 'k DESC', '3 OFFSET 1', [1535, 3, 2], 4),
+        ('(k<128 OR k>1408) AND val IS NULL', 'k ASC', '70',
          [*range(2, 128, 2), *range(1410, 1423, 2)], 141),
     ):
         sql = f'SELECT k FROM {table} WHERE {condition} ORDER BY {order} LIMIT {limit}'
@@ -111,6 +131,9 @@ def complete_range_controls(query):
         ('val NOT BETWEEN 1 AND 8', '764', False),
         ('val NOT BETWEEN 8 AND 1', '768', False),
         ('val BETWEEN 1 AND 8 AND val NOT BETWEEN 1 AND 8', '0', True),
+        ('(val<2 OR val IS NULL) AND val IS NULL', '768', False),
+        ('(val<2 OR val>1536) AND val IS NULL', '0', True),
+        ('(val<2 OR val>1534) AND (val=1 OR val=3)', '1', False),
     ):
         count = f'SELECT count(*) FROM {table} WHERE {condition}'
         result = query(count)
@@ -200,6 +223,10 @@ def parameter_range_controls(runner, client, sock, check_plan=True):
     query("SELECT 2 BETWEEN SYMMETRIC nextval('explicit_range_effects') AND 1 AS v", [['f']])
     query("SELECT currval('explicit_range_effects') AS v", [['1']])
     check(client.simple_query(sock, 'DROP SEQUENCE explicit_range_effects'), tag='DROP SEQUENCE')
+    prepare('range_disjunction', 'SELECT k FROM scalar_order_pk_int WHERE k<$1 OR $2<=k ORDER BY k LIMIT 3', (21,20))
+    execute('range_disjunction',(-5,10),[['-2147483648'],['-100'],['10']],[23],binary_widths=(2,8))
+    execute('range_disjunction',(None,10),[['10'],['2147483647']],[23])
+    execute('range_disjunction',(5,-2),[['-2147483648'],['-100'],['-2']],[23])
     outside = ('SELECT k FROM scalar_order_pk_int WHERE k NOT BETWEEN $1 AND $2 '
                'AND k>=-2 ORDER BY k DESC LIMIT 2')
     prepare('range_outside',outside,(21,20))

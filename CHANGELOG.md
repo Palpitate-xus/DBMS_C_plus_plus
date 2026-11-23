@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>同时查几段订单号更快 · 2026-11-23</summary>
+
+例如，同时查 1000 到 1100 号和 5000 到 5100 号时，数据库可以按订单号分别找到这两批记录。两段重叠时，同一笔订单只返回一次。
+
+[测试报告](docs/test-report.md#integer-primary-or-20261123) · [性能报告](docs/performance-report-2026-10-30.md#integer-primary-or-cost-20261123)
+
+</details>
+
+<details>
 <summary>查一段订单号时，可以把两端反着写 · 2026-11-23</summary>
 
 用 `BETWEEN SYMMETRIC` 查询时，从 1100 到 1000 和从 1000 到 1100 会找到同一批订单。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>按数字排除一段范围时，筛选更快 · 2026-11-23</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-23 · 按数字排除一段范围时，筛选更快
 
 例如，筛掉商品件数在 10 到 20 之间的订单时，数据库读到一笔就能直接比较件数。
 
 [测试报告](docs/test-report.md#integer-not-between-20261123) · [性能报告](docs/performance-report-2026-10-30.md#integer-not-between-cost-20261123)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-23 · 按起止订单号查订单更快
 

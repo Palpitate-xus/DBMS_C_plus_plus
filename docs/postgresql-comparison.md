@@ -2,6 +2,13 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="integer-primary-or-comparison-20261123"></a>
+## 2026-11-23 · `OR` 连接的整数范围可以合并读取
+
+PostgreSQL 18.6 查找能分别用索引的 `OR` 分支，可将它们的行位置合并成位图，再按表页访问。SQLite 尝试把同列等值条件改写为 `IN`，其他适用分支可以分别执行索引查找。DuckDB 可把同列常量比较交给扫描器，连续整数等值条件可以合成一段范围，其他条件可以用于跳过数据块。 [PostgreSQL 路径选择源码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/optimizer/path/indxpath.c) · [PostgreSQL 位图扫描](https://www.postgresql.org/docs/18/indexes-bitmap-scans.html) · [SQLite 查询优化](https://www.sqlite.org/optoverview.html#or_optimizations) · [DuckDB 筛选合并源码](https://github.com/duckdb/duckdb/blob/main/src/optimizer/filter_combiner.cpp)
+
+本项目对同一整数主键的 `OR` 合并重叠和相邻的范围，共用一次快照读取。候选很多或位置分散时，可以在读表时按这些范围直接筛选。跨列或带小数的两类主键排序查询继续走表达式筛选，并按整数顺序排序。通用多索引位图和依赖统计信息的选择仍待覆盖。 [对照测试](test-report.md#integer-primary-or-20261123) · [性能对照](performance-report-2026-10-30.md#integer-primary-or-cost-20261123)
+
 <a id="explicit-between-comparison-20261123"></a>
 ## 2026-11-23 · 显式指定 `BETWEEN` 是否考虑端点顺序
 

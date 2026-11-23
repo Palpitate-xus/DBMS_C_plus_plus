@@ -2626,12 +2626,12 @@ static StorageEngine::IntegerPartitionFilter outsideIntegerInterval(int64_t lowe
 }
 
 struct StoredPredicate {
-    enum class Input { IsNull, IsNotNull, Text, Integer, TextLength, IntegerOutsideRange };
+    enum class Input { IsNull, IsNotNull, Text, Integer, TextLength, IntegerOutsideRange, IntegerRanges };
     size_t column;
     std::string name, type;
     Input input;
     StoredComparison comparison = StoredComparison::Equal;
-    std::variant<std::string, int64_t, IntegerInterval> constant;
+    std::variant<std::string, int64_t, IntegerInterval, StorageEngine::IntegerPartitionFilter> constant;
     std::optional<StoredIntegerField> integer = std::nullopt;
 };
 
@@ -2677,6 +2677,19 @@ static std::optional<bool> storedPredicatesMatch(const StoredPredicates& predica
         const bool isNull = nulls[predicate.column];
         if (predicate.input == Input::IsNull || predicate.input == Input::IsNotNull) {
             if (isNull != (predicate.input == Input::IsNull)) return false;
+            continue;
+        }
+        if (predicate.input == Input::IntegerRanges) {
+            const auto& filter = std::get<StorageEngine::IntegerPartitionFilter>(predicate.constant);
+            if (isNull) {
+                if (!filter.matchesNull) return false;
+                continue;
+            }
+            const auto actual = predicate.integer->read(row);
+            if (!actual) return {};
+            const auto found = std::lower_bound(filter.intervals.begin(), filter.intervals.end(), *actual,
+                [](const IntegerInterval& interval, int64_t value) { return interval.second < value; });
+            if (found == filter.intervals.end() || *actual < found->first) return false;
             continue;
         }
         if (isNull) return false;
@@ -2735,8 +2748,20 @@ static bool storedPredicatesContradict(const TableSchema& schema, const StoredPr
                 rules.mustBeNull = true;
                 continue;
             }
+            if (predicate.input == Input::IntegerRanges) {
+                const auto& range = std::get<Range>(predicate.constant);
+                if (!rules.numbers) rules.numbers = Range{{storedIntegerLimits(predicate.integer->width)}, false};
+                rules.numbers->intersect(range);
+                if (!range.matchesNull || !schema.cols[predicate.column].isNull) {
+                    if (rules.mustBeNull) return false;
+                    rules.mustHaveValue = true;
+                }
+                if (rules.mustHaveValue && rules.numbers->intervals.empty()) return false;
+                continue;
+            }
             if (rules.mustBeNull) return false;
             rules.mustHaveValue = true;
+            if (rules.numbers && rules.numbers->intervals.empty()) return false;
             if (predicate.input == Input::Text && predicate.comparison == StoredComparison::Equal) {
                 const auto& text = std::get<std::string>(predicate.constant);
                 if (rules.text && *rules.text != text) return false;
@@ -3729,6 +3754,46 @@ static const ColumnRefExpr* boundIntegerBetweenColumn(const FunctionCallExpr& be
 static std::optional<IntegerInterval> integerBetweenEndpoints(
     const FunctionCallExpr& between, const PreparedQuery* query);
 
+static std::optional<StorageEngine::IntegerPartitionFilter> integerKeyPredicate(
+    const Expr* expression, size_t source, size_t key, const std::string& keyType,
+    const PreparedQuery* inputs, size_t* remaining = nullptr);
+
+// Bound repeated range unions for long, left-deep OR expressions.
+static constexpr size_t maxRangePredicateNodes = 256;
+
+static std::optional<StoredPredicate> bindIntegerDisjunction(const BinaryOpExpr& expression,
+        const TableSchema& schema, size_t source, const PreparedQuery* query) {
+    const Expr* first = &expression;
+    const ColumnRefExpr* column = nullptr;
+    for (size_t depth = 0; first && depth < maxRangePredicateNodes; ++depth) {
+        if (first->preparedSubquery) return {};
+        if (const auto* binary = dynamic_cast<const BinaryOpExpr*>(first)) {
+            if (binary->op == "AND" || binary->op == "OR") {
+                first = binary->left.get();
+                continue;
+            }
+            column = boundStoredPredicateColumn(binary->left.get(), schema, source);
+            if (!column) column = boundStoredPredicateColumn(binary->right.get(), schema, source);
+        } else if (const auto* unary = dynamic_cast<const UnaryOpExpr*>(first)) {
+            column = boundStoredPredicateColumn(unary->operand.get(), schema, source);
+        } else if (const auto* between = rangePredicateCall(first)) {
+            column = boundStoredPredicateColumn(between->args.front().get(), schema, source);
+        }
+        break;
+    }
+    if (!column) return {};
+    const auto ordinal = column->binding->columnOrdinal;
+    const auto field = storedIntegerField(schema, ordinal);
+    if (!field) return {};
+    size_t remaining = maxRangePredicateNodes;
+    const auto& declaration = schema.cols[ordinal];
+    auto filter = integerKeyPredicate(&expression, source, ordinal,
+        ExprHelper::canonicalResultTypeName(declaration.dataType), query, &remaining);
+    if (!filter) return {};
+    return StoredPredicate{ordinal, declaration.dataName, declaration.dataType,
+        StoredPredicate::Input::IntegerRanges, StoredComparison::Equal, std::move(*filter), field};
+}
+
 // Only total, row-local predicates may reject a row before materialization.
 // Keep the ordinary WHERE above the source for expressions and fallback.
 static std::optional<StoredPredicates> bindStoredPredicates(StorageEngine& engine,
@@ -3814,6 +3879,12 @@ static std::optional<StoredPredicates> bindStoredPredicates(StorageEngine& engin
         const auto* binary = dynamic_cast<const BinaryOpExpr*>(clause);
         if (!binary || binary->rowComparison) return {};
         const auto& op = binary->op;
+        if (op == "OR") {
+            auto ranges = bindIntegerDisjunction(*binary, schema, source, query);
+            if (!ranges) return {};
+            filter.push_back(std::move(*ranges));
+            continue;
+        }
         const bool equality = op == "=" || op == "<>" || op == "!=";
         auto comparator = comparisons.find(op);
         if (comparator == comparisons.end()) return {};
@@ -4639,7 +4710,8 @@ struct IntegerPageBounds {
     std::optional<int64_t> lower;
     std::optional<int64_t> upper;
     std::vector<OrderedPrimaryKeyNullTest> nullTests;
-    std::optional<StorageEngine::IntegerPartitionFilter> outside;
+    std::optional<StorageEngine::IntegerPartitionFilter> ranges;
+    bool hasDisjunction = false;
 
     void constrain(bool isLower, bool inclusive, int64_t value) {
         if (!inclusive) {
@@ -4654,26 +4726,29 @@ struct IntegerPageBounds {
         else upper = std::min(upper.value_or(INT64_MAX), value);
     }
 
-    void exclude(const IntegerInterval& interval) {
-        if (interval.first > interval.second) return;
-        auto remaining = outsideIntegerInterval(interval.first, interval.second);
-        if (outside) outside->intersect(remaining);
-        else outside = std::move(remaining);
+    void intersect(StorageEngine::IntegerPartitionFilter filter) {
+        if (ranges) ranges->intersect(filter);
+        else ranges = std::move(filter);
     }
 
-    bool applyExclusions(const TableSchema& schema, size_t key) {
-        if (!outside) return true;
+    void exclude(const IntegerInterval& interval) {
+        if (interval.first <= interval.second)
+            intersect(outsideIntegerInterval(interval.first, interval.second));
+    }
+
+    bool applyRanges(const TableSchema& schema, size_t key) {
+        if (!ranges) return true;
         const auto field = storedIntegerField(schema, key);
         if (!field) return false;
         const auto [minKey, maxKey] = storedIntegerLimits(field->width);
-        outside->intersect({{{std::max(minKey, lower.value_or(minKey)),
+        ranges->intersect({{{std::max(minKey, lower.value_or(minKey)),
                               std::min(maxKey, upper.value_or(maxKey))}}, false});
-        if (outside->intervals.size() > 1) return true;
-        if (outside->intervals.empty()) {
+        if (ranges->intervals.size() > 1) return true;
+        if (ranges->intervals.empty()) {
             lower = INT64_MAX;
             upper = INT64_MIN;
         } else {
-            const auto [start, end] = outside->intervals.front();
+            const auto [start, end] = ranges->intervals.front();
             if (lower || start != minKey) lower = start;
             if (upper || end != maxKey) upper = end;
         }
@@ -4682,8 +4757,10 @@ struct IntegerPageBounds {
 
     const std::vector<IntegerInterval>& disjointRanges() const {
         static const std::vector<IntegerInterval> none;
-        return outside && outside->intervals.size() > 1 ? outside->intervals : none;
+        return ranges && ranges->intervals.size() > 1 ? ranges->intervals : none;
     }
+
+    bool bounded() const { return lower || upper || !disjointRanges().empty(); }
 };
 
 struct IntegerPageEndpoint {
@@ -4752,11 +4829,12 @@ static bool isOrdinaryNullTestColumn(const Column& column) {
         type == "text" || type == "character varying";
 }
 
-static std::optional<StorageEngine::IntegerPartitionFilter> integerPartitionPredicate(
-    const Expr* expression, const PreparedQuery& query, size_t source, size_t key,
-    const std::string& keyType, bool ownsStatementInputs) {
+static std::optional<StorageEngine::IntegerPartitionFilter> integerKeyPredicate(
+    const Expr* expression, size_t source, size_t key, const std::string& keyType,
+    const PreparedQuery* inputs, size_t* remaining) {
     using Filter = StorageEngine::IntegerPartitionFilter;
-    if (!expression || expression->preparedSubquery) return std::nullopt;
+    if (!expression || expression->preparedSubquery || (remaining && !*remaining)) return std::nullopt;
+    if (remaining) --*remaining;
     const auto oid = mapBuiltinTypeNameToOid(keyType);
     const auto isKey = [&](const Expr* operand) {
         const auto* column = dynamic_cast<const ColumnRefExpr*>(operand);
@@ -4775,7 +4853,7 @@ static std::optional<StorageEngine::IntegerPartitionFilter> integerPartitionPred
     if (const auto* between = rangePredicateCall(expression)) {
         if (!isKey(between->args.front().get()) ||
             (between->args.size() == 4 && !isKey(between->args.back().get()))) return {};
-        const auto interval = integerBetweenEndpoints(*between, ownsStatementInputs ? &query : nullptr);
+        const auto interval = integerBetweenEndpoints(*between, inputs);
         if (!interval) return {};
         if (betweenSyntax(*between)->negated) return outsideIntegerInterval(interval->first, interval->second);
         if (interval->first > interval->second) return Filter{};
@@ -4790,9 +4868,9 @@ static std::optional<StorageEngine::IntegerPartitionFilter> integerPartitionPred
     const auto* binary = dynamic_cast<const BinaryOpExpr*>(expression);
     if (!binary || binary->rowComparison || binary->predicateCollation) return std::nullopt;
     if (binary->op == "AND" || binary->op == "OR") {
-        auto left = integerPartitionPredicate(binary->left.get(), query, source, key, keyType, ownsStatementInputs);
+        auto left = integerKeyPredicate(binary->left.get(), source, key, keyType, inputs, remaining);
         if (!left) return std::nullopt;
-        const auto right = integerPartitionPredicate(binary->right.get(), query, source, key, keyType, ownsStatementInputs);
+        const auto right = integerKeyPredicate(binary->right.get(), source, key, keyType, inputs, remaining);
         if (!right) return std::nullopt;
         if (binary->op == "AND") left->intersect(*right);
         else left->unite(*right);
@@ -4805,16 +4883,16 @@ static std::optional<StorageEngine::IntegerPartitionFilter> integerPartitionPred
     if (!keyOnLeft && !isKey(binary->right.get())) return std::nullopt;
     const auto* input = keyOnLeft ? binary->right.get() : binary->left.get();
     // An external execution provider may supply a different parameter owner.
-    if (!ownsStatementInputs && dynamic_cast<const ParameterExpr*>(input)) return std::nullopt;
-    const auto endpoint = integerPageEndpoint(input, &query);
+    const auto endpoint = integerPageEndpoint(input, inputs);
     if (!endpoint) return std::nullopt;
     if (binary->comparison) {
         const auto& binding = *binary->comparison;
         const auto& leftType = keyOnLeft ? keyType : endpoint->type;
         const auto& rightType = keyOnLeft ? endpoint->type : keyType;
+        const auto boundOp = op == "!=" ? std::string("<>") : binary->op;
         if (!binding.strict || binding.enumTypeOid || !binding.collation.empty() ||
-            binding.op != binary->op || binding.leftType != leftType || binding.rightType != rightType ||
-            binding.identity != "builtin-comparison:" + binary->op + "(" + leftType + "," + rightType + ")")
+            binding.op != boundOp || binding.leftType != leftType || binding.rightType != rightType ||
+            binding.identity != "builtin-comparison:" + boundOp + "(" + leftType + "," + rightType + ")")
             return std::nullopt;
     }
     if (!keyOnLeft) {
@@ -4861,6 +4939,15 @@ static bool intersectIntegerPageBounds(const Expr* expression, const QueryColumn
     if (op == "AND")
         return intersectIntegerPageBounds(comparison->left.get(), key, schema, query, bounds) &&
             intersectIntegerPageBounds(comparison->right.get(), key, schema, query, bounds);
+    if (op == "OR") {
+        size_t remaining = maxRangePredicateNodes;
+        auto filter = integerKeyPredicate(expression, key.sourceOrdinal, key.columnOrdinal,
+            ExprHelper::canonicalResultTypeName(key.declaredType), &query, &remaining);
+        if (!filter || (filter->matchesNull && schema.cols[key.columnOrdinal].isNull)) return false;
+        bounds.intersect(std::move(*filter));
+        bounds.hasDisjunction = true;
+        return true;
+    }
     if (op != "<" && op != "<=" && op != ">" && op != ">=") return false;
 
     const auto* column = dynamic_cast<const ColumnRefExpr*>(comparison->left.get());
@@ -4895,7 +4982,7 @@ static std::optional<IntegerPageBounds> integerPageBounds(const PreparedQuery& q
     IntegerPageBounds bounds;
     if (select.whereClause &&
         (!intersectIntegerPageBounds(select.whereClause.get(), key, schema, query, bounds) ||
-         !bounds.applyExclusions(schema, key.columnOrdinal))) return {};
+         !bounds.applyRanges(schema, key.columnOrdinal))) return {};
     // The existing filter eagerly decodes stored inputs. Only use bitmap
     // rejection if that decoding requires no array/domain/reference handling.
     if (!bounds.nullTests.empty())
@@ -4963,6 +5050,14 @@ static std::optional<std::pair<size_t, IntegerPageBounds>> completeIntegerPrimar
         if (!predicate.integer || (key && predicate.column != *key) ||
             !isSingleColumnPrimaryKey(schema, predicate.name)) return {};
         key = predicate.column;
+        if (predicate.input == Input::IntegerRanges) {
+            const auto& filter = std::get<StorageEngine::IntegerPartitionFilter>(predicate.constant);
+            if (filter.matchesNull && schema.cols[*key].isNull) return {};
+            bounds.intersect(filter);
+            bounds.hasDisjunction = true;
+            inequality = true;
+            continue;
+        }
         if (predicate.input == Input::IntegerOutsideRange) {
             bounds.exclude(std::get<IntegerInterval>(predicate.constant));
             inequality = true;
@@ -4982,16 +5077,32 @@ static std::optional<std::pair<size_t, IntegerPageBounds>> completeIntegerPrimar
         }
         inequality = true;
     }
-    if (!key || !inequality || !bounds.applyExclusions(schema, *key) ||
-        (!bounds.lower && !bounds.upper && bounds.disjointRanges().empty()))
+    if (!key || !inequality || !bounds.applyRanges(schema, *key) ||
+        (!bounds.hasDisjunction && !bounds.bounded()))
         return {};
     return std::pair<size_t, IntegerPageBounds>{*key, std::move(bounds)};
 }
 
-bool QueryPlanner::mayUseDisjointIntegerPrimaryRange(StorageEngine& engine, const std::string& database,
+bool QueryPlanner::mayUseIntegerPrimaryRangeAlternatives(StorageEngine& engine, const std::string& database,
         const PreparedQuery& query, const SelectStmt& select, const TableSchema& schema) {
     const auto range = completeIntegerPrimaryRange(engine, database, query, select, schema);
-    return range && !range->second.disjointRanges().empty();
+    if (range && (range->second.hasDisjunction || !range->second.disjointRanges().empty())) return true;
+
+    // The compact OR executor can combine alternative scans and sort an
+    // integer key as display text. Keep the bound sort even when an OR arm
+    // uses a different column or a non-integer endpoint and needs a scan.
+    if (!select.locking.empty() || !supportsStoredHeapPredicate(schema) || select.orderBy.size() != 1)
+        return false;
+    const auto key = preparedDirectOrderColumn(query, select);
+    if (!key || !integerPageRelation(query, select, *key) || !eligibleIntegerPageKey(schema, *key))
+        return false;
+    const auto hasDisjunction = [](const auto& self, const Expr* expression) -> bool {
+        const auto* binary = dynamic_cast<const BinaryOpExpr*>(expression);
+        if (!binary || binary->preparedSubquery) return false;
+        return binary->op == "OR" || (binary->op == "AND" &&
+            (self(self, binary->left.get()) || self(self, binary->right.get())));
+    };
+    return hasDisjunction(hasDisjunction, select.whereClause.get());
 }
 
 class IntegerPrimaryKeyPageOp final : public Operator {
@@ -5101,8 +5212,7 @@ public:
             {"orderedIndex", orderedIndex_ ? "true" : "false"}, {"indexEntries", std::to_string(indexEntries_)},
             {"heapRowsFetched", std::to_string(heapRows_)}};
         if (orderedIndex_) attributes.emplace("indexNodesVisited", std::to_string(indexNodesVisited_));
-        if (bounds_.lower || bounds_.upper || !bounds_.disjointRanges().empty())
-            attributes.emplace("indexKeyRange", "true");
+        if (bounds_.bounded()) attributes.emplace("indexKeyRange", "true");
         if (!bounds_.disjointRanges().empty())
             attributes.emplace("indexRanges", std::to_string(bounds_.disjointRanges().size()));
         if (!bounds_.nullTests.empty()) attributes.emplace("indexNullFilter", "true");
@@ -5344,12 +5454,15 @@ OpPtr makePreparedTableSource(StorageEngine* engine, const std::string& database
     if (physical && typeid(*physical) == typeid(TableScanOp) && physical->tableName() == schema.tablename) {
         const auto key = integerPageOrder(*query, *select);
         if (key && integerPageRelation(*query, *select, *key) && eligibleIntegerPageKey(schema, *key)) {
-            if (auto bounds = integerPageBounds(*query, *select, *key, schema))
+            if (auto bounds = integerPageBounds(*query, *select, *key, schema)) {
+                auto fallback = bounds->hasDisjunction ? heap() : std::move(source);
                 return std::make_unique<IntegerPrimaryKeyPageOp>(engine, database, schema, key->columnOrdinal,
                     select->offset.value_or(0) + *select->limit, !select->orderBy.front().asc, std::move(*bounds),
-                    std::move(source));
+                    std::move(fallback));
+            }
         }
-        if (auto range = completeIntegerPrimaryRange(*engine, database, *query, *select, schema)) {
+        if (auto range = completeIntegerPrimaryRange(*engine, database, *query, *select, schema);
+            range && range->second.bounded()) {
             const auto demand = select->orderBy.empty() ? simpleIntegerScanDemand(*select) : std::nullopt;
             return std::make_unique<IntegerPrimaryKeyPageOp>(engine, database, schema, range->first,
                 demand.value_or(std::numeric_limits<size_t>::max()), false, std::move(range->second),
@@ -6070,8 +6183,8 @@ OpPtr QueryPlanner::buildPreparedSelectPlan(StorageEngine* engine,
                 const auto& column = sourceSchema.cols[i];
                 if (column.dataName != sourceSchema.partitionKey) continue;
                 const auto keyType = ExprHelper::canonicalResultTypeName(column.dataType);
-                auto filter = integerPartitionPredicate(select->whereClause.get(), *state->query,
-                    state->sourceOrdinal, i, keyType, !state->executionProvider);
+                auto filter = integerKeyPredicate(select->whereClause.get(), state->sourceOrdinal, i, keyType,
+                    state->executionProvider ? nullptr : state->query.get());
                 if (filter) static_cast<TableScanOp&>(*source).rangePruning_ = TableScanOp::RangePruning{
                     sourceSchema.physicalRelationId, column.dataName, i, *domain, std::move(*filter)};
                 break;

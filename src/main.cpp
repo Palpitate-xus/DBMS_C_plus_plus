@@ -20659,7 +20659,7 @@ static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bo
     vector<string> descendants;
     bool typedSortDemand = false;
     bool declaredPredicateCollations = false;
-    bool possibleDisjointRange = false;
+    bool possibleRangeAlternatives = false;
     if (candidate->fromClause) {
         const string& spelling = candidate->fromClause->tableName;
         physical = resolveTableName(session, spelling, true);
@@ -20705,17 +20705,19 @@ static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bo
             const auto schema = g_engine.getTableSchema(session.currentDB, physical);
             typedSortDemand = ordinaryTypedSortDemand(*candidate, schema);
             declaredPredicateCollations = dbms::QueryPlanner::usesDeclaredFilterCollations(*candidate, schema);
-            const auto hasRangeExclusion = [](const auto& visit, const dbms::Expr* expression) -> bool {
+            const auto hasRangeAlternatives = [](const auto& visit, const dbms::Expr* expression) -> bool {
                 if (!expression || expression->preparedSubquery) return false;
-                if (const auto* binary = dynamic_cast<const dbms::BinaryOpExpr*>(expression);
-                    binary && binary->op == "AND")
-                    return visit(visit, binary->left.get()) || visit(visit, binary->right.get());
+                if (const auto* binary = dynamic_cast<const dbms::BinaryOpExpr*>(expression)) {
+                    if (binary->op == "OR") return true;
+                    return binary->op == "AND" &&
+                        (visit(visit, binary->left.get()) || visit(visit, binary->right.get()));
+                }
                 const auto* call = dynamic_cast<const dbms::FunctionCallExpr*>(expression);
                 return call && call->schema.empty() && call->funcName == "NOT BETWEEN";
             };
-            possibleDisjointRange = schema.hasPrimaryKey() &&
-                hasRangeExclusion(hasRangeExclusion, candidate->whereClause.get());
-            if (!typedSortDemand && !declaredPredicateCollations && !possibleDisjointRange &&
+            possibleRangeAlternatives = schema.hasPrimaryKey() &&
+                hasRangeAlternatives(hasRangeAlternatives, candidate->whereClause.get());
+            if (!typedSortDemand && !declaredPredicateCollations && !possibleRangeAlternatives &&
                 none_of(schema.cols.begin(), schema.cols.end(),
                         [](const dbms::Column& column) { return column.isArray; })) return false;
         }
@@ -20744,7 +20746,7 @@ static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bo
         if (!physicalColumnCandidate) return false;
         const auto schema = g_engine.getTableSchema(session.currentDB, physical);
         if (!dbms::QueryPlanner::usesDeclaredFilterCollations(*select, schema) &&
-            !(possibleDisjointRange && dbms::QueryPlanner::mayUseDisjointIntegerPrimaryRange(
+            !(possibleRangeAlternatives && dbms::QueryPlanner::mayUseIntegerPrimaryRangeAlternatives(
                 g_engine, session.currentDB, prepared, *select, schema))) return false;
     }
     // Preserve column grants on precisely the bound source cells used by

@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-23 · 同一个整数主键上可合并 `OR` 的范围
+
+单列整数主键可以合并同列 `OR` 条件的候选范围，支持重叠去重、顺序翻页和小范围读取。候选超出索引读取条件时，符合要求的整数过滤可在表扫描中检查。同一测试中，PostgreSQL 18.6 对两段和三段用了位图合并，对倒序取 8 行用了仅索引扫描。通用多索引位图、仅索引读取和统计代价模型仍有差距。`IDX-03` 与 `OPT-01` 保持部分实现。 [验证](test-report.md#integer-primary-or-20261123) · [性能](performance-report-2026-10-30.md#integer-primary-or-cost-20261123) · [实现对照](postgresql-comparison.md#integer-primary-or-comparison-20261123)
+
 ## 2026-11-23 · 显式范围端点顺序和整数索引读取
 
 支持 `BETWEEN SYMMETRIC`、`BETWEEN ASYMMETRIC` 和各自的 `NOT` 形式。已核对反向端点、空值、参数、序列求值和磁盘恢复。普通整数主键可使用前向或反向范围读取，已有整数范围分区可沿用原来的筛选。`SQL-01`、`QRY-01`、`IDX-03` 与 `OPT-01` 保持部分实现。 [验证](test-report.md#explicit-between-20261123) · [性能](performance-report-2026-10-30.md#explicit-between-cost-20261123) · [实现对照](postgresql-comparison.md#explicit-between-comparison-20261123)

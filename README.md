@@ -19,6 +19,13 @@ cmake --build build/cmake --target dbms_main --parallel 2
 ## 最近更新
 
 <details>
+<summary>同时查几段订单号更快 · 2026-11-23</summary>
+
+例如，同时查 1000 到 1100 号和 5000 到 5100 号时，数据库可以按订单号分别找到这两批记录。两段重叠时，同一笔订单只返回一次。
+
+</details>
+
+<details>
 <summary>查一段订单号时，可以把两端反着写 · 2026-11-23</summary>
 
 用 `BETWEEN SYMMETRIC` 查询时，从 1100 到 1000 和从 1000 到 1100 会找到同一批订单。
@@ -29,13 +36,6 @@ cmake --build build/cmake --target dbms_main --parallel 2
 <summary>跳过一段订单号，可以直接查两头 · 2026-11-23</summary>
 
 例如，只查最早和最新的几笔订单时，数据库可以按订单号找到这两批记录，省去读取中间的订单。
-
-</details>
-
-<details>
-<summary>按数字排除一段范围时，筛选更快 · 2026-11-23</summary>
-
-例如，筛掉商品件数在 10 到 20 之间的订单时，数据库读到一笔就能直接比较件数。
 
 </details>
 

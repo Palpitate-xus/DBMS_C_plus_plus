@@ -4730,7 +4730,8 @@ void StorageEngine::IntegerPartitionFilter::unite(const IntegerPartitionFilter& 
     std::sort(intervals.begin(), intervals.end());
     size_t count = 0;
     for (const auto interval : intervals) {
-        if (count && interval.first <= intervals[count - 1].second)
+        if (count && (interval.first <= intervals[count - 1].second ||
+                     (intervals[count - 1].second != INT64_MAX && interval.first == intervals[count - 1].second + 1)))
             intervals[count - 1].second = std::max(interval.second, intervals[count - 1].second);
         else intervals[count++] = interval;
     }
