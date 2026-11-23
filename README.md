@@ -1,18 +1,8 @@
 # DBMS C++
 
-一个用 C++ 编写的关系型数据库。可以用 SQL 存取数据、创建索引和运行事务，也可以用 `psql` 连接。
+用 C++ 编写的开源关系型数据库。支持用 SQL 查询和修改数据、创建索引和运行事务，也可以用 `psql` 连接。
 
-## 快速开始
-
-[安装编译依赖（Linux）](docs/PACKAGING.md#编译依赖)，然后在仓库目录运行下面的命令。
-
-```bash
-cmake -S . -B build/cmake
-cmake --build build/cmake --target dbms_main --parallel 2
-./build/cmake/dbms_main --version
-```
-
-[启动数据库并运行 SQL](docs/MANUAL.md#1-快速开始) · [用 `psql` 连接](docs/MANUAL.md#18-网络服务) · [文档目录](docs/README.md)
+[编译和安装](docs/PACKAGING.md#编译依赖) · [启动并执行第一条 SQL](docs/MANUAL.md#1-快速开始) · [用 psql 连接](docs/MANUAL.md#18-网络服务)
 
 ## 最近更新
 
