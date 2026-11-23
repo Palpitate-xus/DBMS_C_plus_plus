@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>加零的整数条件筛选更快 · 2026-11-23</summary>
+
+例如，筛选 `订单号 + 0` 是否小于某个值时，数据库可以直接比较订单号。
+
+[测试报告](docs/test-report.md#stored-integer-identity-20261123) · [性能报告](docs/performance-report-2026-10-30.md#stored-integer-identity-cost-20261123)
+
+</details>
+
+<details>
 <summary>部分查询少做一遍整数检查 · 2026-11-23</summary>
 
 例如，用商品编号和库存量筛选记录时，数据库可以直接用扫描时的检查结果。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>合并查询时可以保留空值 · 2026-11-23</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-23 · 合并查询时可以保留空值
 
 把查出的编号和一行空值合在一起，结果仍是一列整数，其中一行是空值。
 
 [用法](docs/MANUAL.md#union--intersect--except) · [测试报告](docs/test-report.md#ordinary-set-20261123) · [性能报告](docs/performance-report-2026-10-30.md#ordinary-set-cost-20261123)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-23 · 展开一组数字时可以直接加上空值
 

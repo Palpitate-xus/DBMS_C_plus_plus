@@ -3641,6 +3641,42 @@ static const ColumnRefExpr* boundStoredPredicateColumn(const Expr* expression,
     return column;
 }
 
+static const ColumnRefExpr* boundStoredIntegerIdentity(const Expr* expression,
+        const TableSchema& schema, size_t source) {
+    // These operations preserve every signed integer and SQL NULL. Strip
+    // them only for comparisons on a real fixed-width field, leaving the
+    // bound expression and its declared result type intact.
+    const auto isIdentity = [](const Expr* input, std::string_view expected) {
+        if (const auto* cast = dynamic_cast<const BinaryOpExpr*>(input); cast && cast->op == "::") {
+            const auto* target = dynamic_cast<const LiteralExpr*>(cast->right.get());
+            if (cast->preparedSubquery || !target || target->preparedSubquery ||
+                integerIndexCastType(target->value).empty()) return false;
+            // Both identity values fit any of the integer cast targets.
+            input = cast->left.get();
+        }
+        if (!dynamic_cast<const LiteralExpr*>(input) && !dynamic_cast<const CastExpr*>(input)) return false;
+        const auto value = compositeLiteralValue(input, "bigint");
+        return value && *value == expected;
+    };
+    if (!dynamic_cast<const BinaryOpExpr*>(expression)) return nullptr;
+    while (const auto* arithmetic = dynamic_cast<const BinaryOpExpr*>(expression)) {
+        if (arithmetic->preparedSubquery || arithmetic->comparison || arithmetic->rowComparison ||
+            arithmetic->arrayConcat) return nullptr;
+        const auto& op = arithmetic->op;
+        if (op != "+" && op != "-" && op != "*" && op != "/") return nullptr;
+        const std::string_view identity = (op == "+" || op == "-") ? "0" : "1";
+        if (isIdentity(arithmetic->right.get(), identity)) {
+            expression = arithmetic->left.get();
+        } else if ((op == "+" || op == "*") && isIdentity(arithmetic->left.get(), identity)) {
+            expression = arithmetic->right.get();
+        } else {
+            return nullptr;
+        }
+    }
+    const auto* column = boundStoredPredicateColumn(expression, schema, source);
+    return column && storedIntegerField(schema, column->binding->columnOrdinal) ? column : nullptr;
+}
+
 // Only total, row-local predicates may reject a row before materialization.
 // Keep the ordinary WHERE above the source for expressions and fallback.
 static std::optional<StoredPredicates> bindStoredPredicates(StorageEngine& engine,
@@ -3665,6 +3701,8 @@ static std::optional<StoredPredicates> bindStoredPredicates(StorageEngine& engin
             if (type == "text") return {column, Input::Text};
             if (operand == column) return {column, Input::Integer};
         }
+        if (const auto* column = boundStoredIntegerIdentity(operand, schema, source))
+            return {column, Input::Integer};
         const auto* call = dynamic_cast<const FunctionCallExpr*>(operand);
         if (!call || call->args.size() != 1 || call->identitySequenceOid ||
             call->sqlValue != FunctionCallExpr::SqlValue::None) return {};
@@ -3695,6 +3733,7 @@ static std::optional<StoredPredicates> bindStoredPredicates(StorageEngine& engin
         if (const auto* unary = dynamic_cast<const UnaryOpExpr*>(clause)) {
             if (unary->op != "IS NULL" && unary->op != "IS NOT NULL") return {};
             const auto* column = localColumn(unary->operand.get());
+            if (!column) column = boundStoredIntegerIdentity(unary->operand.get(), schema, source);
             if (!column) return {};
             filter.push_back(predicateFor(*column, unary->op == "IS NULL" ? Input::IsNull : Input::IsNotNull));
             continue;

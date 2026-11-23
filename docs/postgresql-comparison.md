@@ -2,6 +2,11 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="stored-integer-identity-comparison-20261123"></a>
+## 2026-11-23 · 化简不改变整数值的运算
+
+DuckDB 的算术化简规则能去掉整数加零、减零和乘一等运算，并保留原返回类型。在 2,048 行、单整数主键的本地对照中，PostgreSQL 18.6 对 `id<=128` 选用主键索引，对 `id+0<=128` 选用顺序扫描。SQLite 3.51.1 的计划也从主键范围访问切换到全表扫描。两个数据库都支持为表达式建立索引。本项目这一轮仍扫描普通表的可见行，把符合条件的整数表达式在扫描中直接按原值比较。 [DuckDB 算术化简](https://github.com/duckdb/duckdb/blob/main/src/optimizer/rule/arithmetic_simplification.cpp) · [PostgreSQL 表达式索引](https://www.postgresql.org/docs/18/indexes-expressional.html) · [SQLite 表达式索引](https://www.sqlite.org/expridx.html)
+
 <a id="stored-where-reuse-comparison-20261123"></a>
 ## 2026-11-23 · 重用扫描已经完成的条件检查
 

@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-23 · 整数加零等条件直接按原值筛选
+
+2,048 行中按 `id+0<=128` 筛选再做合并，内存盘的各轮中位耗时从约 30–35 毫秒降到约 8–9 毫秒，同轮 PostgreSQL 18.6 约需 1.7 毫秒。普通查询和计数也可以使用这项优化。表访问仍扫描可见行，`OPT-01` 保持部分实现。 [正确性验证](test-report.md#stored-integer-identity-20261123) · [性能](performance-report-2026-10-30.md#stored-integer-identity-cost-20261123)
+
 ## 2026-11-23 · 上层筛选复用普通表的整数条件检查
 
 2,048 行均匹配两项整数条件时，合并查询在内存盘各轮中位耗时从约 60–85 毫秒降到约 35–38 毫秒。相同存储条件下，PostgreSQL 18.6 约需 16 毫秒。适用范围为普通表扫描上已完整检查的定宽整数和空值条件，`OPT-01` 保持部分实现。 [正确性验证](test-report.md#stored-where-reuse-20261123) · [性能](performance-report-2026-10-30.md#stored-where-reuse-cost-20261123)

@@ -101,6 +101,28 @@ def main():
         assert any("TableScan" in row[0] and "rows=70" in row[0] for row in plan), plan
         assert any("TypedFilter" in row[0] and "storedWhereRows=65" in row[0] for row in plan), plan
 
+        identities = clustered.replace("n>=0 AND qty>0 AND ord IS NOT NULL",
+                                       "0+n>=0 AND 1*qty>0 AND (ord/1::bigint-0) IS NOT NULL")
+        assert simple(identities, "SELECT 65") == clustered_rows
+        plan = simple("EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF) " + identities, "EXPLAIN")
+        assert any("StoredFilter" in row[0] and "rows=65" in row[0] for row in plan), plan
+        assert any("TypedFilter" in row[0] and "storedWhereRows=65" in row[0] for row in plan), plan
+        count_identities = "SELECT count(*) FROM stored_filter_ranges WHERE n+0>=0 AND qty*1>0 " \
+                           "AND (ord/CAST(1 AS bigint)) IS NOT NULL"
+        assert simple(count_identities, "SELECT 1") == [["65"]]
+        plan = simple("EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF) " + count_identities, "EXPLAIN")
+        assert any("StoredCount" in row[0] and "rows=1" in row[0] for row in plan), plan
+        for condition in ("0-n>0", "n+0.0<0", "n+1<0"):
+            sql = f"SELECT ord FROM stored_filter_ranges WHERE {condition} " \
+                  "ORDER BY ord OFFSET 0 FETCH FIRST 100 ROWS WITH TIES"
+            assert simple(sql, "SELECT 1") == [["1"]]
+            plan = simple("EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF) " + sql, "EXPLAIN")
+            assert all("StoredFilter" not in row[0] and "storedWhereRows" not in row[0] for row in plan), plan
+        for condition, state in (("ord+1>0", "22003"), ("ord/0>0", "22012")):
+            frames = client.simple_query(sock, f"SELECT ord FROM stored_filter_ranges WHERE {condition} "
+                                        "UNION SELECT NULL ORDER BY ord")
+            assert runner.decode_wire_result(frames)[1] == state and frames[-1] == (b"Z", b"I"), frames
+
         prepare(b"length_scan", f"SELECT ord FROM {table} WHERE shop=$1 AND ord>=$2 AND $3>=ord "
                 "AND length(shop)>1 ORDER BY ord")
         assert probe("青木", 0, 10, [9], b"length_scan") == [1, 7, 0, 0]
@@ -219,7 +241,8 @@ def main():
         simple("ALTER TABLE counted_access ENABLE ROW LEVEL SECURITY", "ALTER TABLE")
         simple("SET ROLE count_reader", "SET")
         assert simple(clustered, "SELECT 3") == clustered_rows[:3]
-        plan = simple("EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF) " + clustered, "EXPLAIN")
+        assert simple(identities, "SELECT 3") == clustered_rows[:3]
+        plan = simple("EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF) " + identities, "EXPLAIN")
         assert any("TypedFilter" in row[0] and "rows=3" in row[0] for row in plan), plan
         assert all("storedWhereRows" not in row[0] for row in plan), plan
         for tail in ("", " WHERE id>=0"):
