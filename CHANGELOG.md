@@ -1,27 +1,27 @@
 # 更新日志
 
 <details>
-<summary>部分查询出错时会保留已查到的结果 · 2026-11-23</summary>
+<summary>部分查询会先返回结果，再报告错误 · 2026-11-23</summary>
 
-比如前两条记录算出了结果，第三条遇到除零。数据库先发出前两条结果，再报告错误。
+例如，前两条记录算出了结果，第三条遇到除以零。客户端会先收到前两条结果，再收到错误消息。
 
 [测试报告](docs/test-report.md#simple-query-runtime-result-20261123) · [性能报告](docs/performance-report-2026-10-30.md#simple-query-runtime-result-cost-20261123)
 
 </details>
 
 <details>
-<summary>条件互相矛盾时，计数可以直接返回零 · 2026-11-23</summary>
+<summary>条件互相矛盾时，统计数量可以直接返回 0 · 2026-11-23</summary>
 
-比如统计库存大于 10 件、同时又小于 5 件的商品。数据库能看出两个条件无法同时成立，直接给出结果。
+例如，统计库存既大于 10 件又小于 5 件的商品。数据库可以跳过读取商品表，直接返回 0。
 
 [用法](docs/MANUAL.md#聚合) · [测试报告](docs/test-report.md#ordinary-count-constraints-20261123) · [性能报告](docs/performance-report-2026-10-30.md#ordinary-count-constraints-cost-20261123)
 
 </details>
 
 <details>
-<summary>统计符合条件的记录更快 · 2026-11-23</summary>
+<summary>多项统计可以只读一遍表 · 2026-11-23</summary>
 
-比如同时统计有库存的商品和缺货商品各有多少。读一遍商品表就可以得到两个数字。
+例如，同时数出有货和缺货的商品各有多少。数据库可以读一遍商品表，算出两个数量。
 
 [用法](docs/MANUAL.md#聚合) · [测试报告](docs/test-report.md#ordinary-stored-count-20261123) · [性能报告](docs/performance-report-2026-10-30.md#ordinary-stored-count-cost-20261123)
 
