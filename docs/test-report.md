@@ -2,6 +2,17 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="timetz-range-20261123"></a>
+## 2026-11-23 · 带偏移时间的范围查询
+
+新版通过 56 项定向检查，其中 36 项也在 PostgreSQL 18.6 上通过，其余 20 项核对本项目的实际执行计划。旧版有 14 项差异，其中 11 项没有使用索引，1 项对具有相同 UTC 时钟的值过滤错误，2 项把无效输入当成没有匹配结果。用例覆盖开放和闭合端点、反向谓词、`BETWEEN`、`SYMMETRIC`、`NOT BETWEEN`、空值、舍入后再比较、矛盾范围、部分索引和候选很多的范围。文本和二进制协议都核对了两个范围参数及其返回值。 [定向回归](../tests/timetz_range_protocol_e2e_test.py)
+
+原生 B 树测试覆盖分隔键两侧的重复值、找不到结果、读取预算和平级链损坏。恢复从旧版建立的数据目录开始。72 步检查包含 4 次强制退出和重启，覆盖已提交与未提交的索引键修改、保存点回滚、`REINDEX`、`VACUUM FULL` 和旧事务版本。串行化事务及强制行访问策略下的直接列读取继续走表扫描。 [原生检查](../tests/bptree_topology_corruption_test.cpp)
+
+4 项原生测试通过。时间等值索引、存储、精度、常用 `BETWEEN` 和复合主键协议回归通过。时间等值回归第一次在建表阶段超时，改用内存盘复跑通过 44 项。较大的时间和数组对照仍有 240/2,563 项既有差异，逐条核对无新增失败。 [时间和数组对照](../tests/timetz_binary_result_protocol_e2e_test.py)
+
+受测程序 SHA-256 为 `0ed26b1a0a70404e2f9da19c6882b69ae6f83a5b6b28408c8a1498d8386f016a`。本轮覆盖普通表的单列范围，附加复杂表达式和 `NOT BETWEEN` 仍由常规筛选计算。 [实现对照](postgresql-comparison.md#timetz-range-comparison-20261123) · [性能报告](performance-report-2026-10-30.md#timetz-range-cost-20261123)
+
 <a id="timetz-index-20261123"></a>
 ## 2026-11-23 · 按带偏移的时间使用索引
 
@@ -13,7 +24,7 @@
 
 4 项原生测试通过，覆盖时间存储、排序和 B 树损坏处理。此前的时间存储和精度协议分别通过 39 项和 90 项。空索引等值与长文本主键回归也通过。16 套相邻协议回归中 13 套通过，另外 3 套仍分别有 203/1,806、18/408 和 215/2,362 项差异。原有 2,563 项时间和数组对照仍有 240 项差异，逐条核对通过与失败的结果，未发现新增失败。 [原有时间对照](../tests/timetz_binary_result_protocol_e2e_test.py)
 
-受测程序 SHA-256 为 `e41a854900d04acf85b882d672d1b43a187adcd7b45fb133f233044b4bc2bab4`。本次验证集中在普通表的单列等值查询。复合索引、部分索引的条件推断和按时间范围选索引仍待覆盖。 [实现对照](postgresql-comparison.md#timetz-index-comparison-20261123) · [性能报告](performance-report-2026-10-30.md#timetz-index-cost-20261123)
+受测程序 SHA-256 为 `e41a854900d04acf85b882d672d1b43a187adcd7b45fb133f233044b4bc2bab4`。本次验证集中在普通表的单列等值查询。复合索引和部分索引的条件推断仍待覆盖。单列范围查询见上方本轮验证。 [实现对照](postgresql-comparison.md#timetz-index-comparison-20261123) · [性能报告](performance-report-2026-10-30.md#timetz-index-cost-20261123)
 
 <a id="timetz-storage-20261123"></a>
 ## 2026-11-23 · 普通表保存带 UTC 偏移的时间

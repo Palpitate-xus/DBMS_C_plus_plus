@@ -583,15 +583,37 @@ void test_leaf_entry_scan_validates_sibling_links_and_separators() {
         assert(tree.openExisting());
         assert(tree.readLeafEntriesChecked(2, entries) == LeafEntriesResult::Complete);
         assert(entries.size() == 2 && entries[0].value == 11 && entries[1].value == 22);
+        std::vector<int64_t> positions;
+        assert(tree.readOrderedKeyRange("c", "c", 1, 2, positions) == LeafEntriesResult::Complete);
+        assert(positions == std::vector<int64_t>{22});
+        assert(tree.readOrderedKeyRange("a", "c", 1, 3, positions) == LeafEntriesResult::LimitExceeded);
+        assert(positions.empty());
+    }
+
+    // A range on the separator must reach duplicates on both sides.
+    writeLeaf(bytes, 2, "b", 11, 3);
+    writeLeaf(bytes, 3, "b", 22, 0);
+    publish(path.string(), bytes);
+    {
+        dbms::BPTree tree(path);
+        assert(tree.openExisting());
+        std::vector<int64_t> positions;
+        assert(tree.readOrderedKeyRange("b", "b", 2, 3, positions) == LeafEntriesResult::Complete);
+        assert((positions == std::vector<int64_t>{11, 22}));
+        assert(tree.readOrderedKeyRange("d", "e", 1, 2, positions) == LeafEntriesResult::Complete);
+        assert(positions.empty());
     }
 
     // The child graph still lists both leaves, but the leaf chain drops one.
+    writeLeaf(bytes, 3, "c", 22, 0);
     writeLeaf(bytes, 2, "a", 11, 0);
     publish(path.string(), bytes);
     {
         dbms::BPTree tree(path);
         assert(tree.openExisting());
         assert(tree.readLeafEntriesChecked(2, entries) == LeafEntriesResult::Error && entries.empty());
+        std::vector<int64_t> positions{99};
+        assert(tree.readOrderedKeyRange("a", "c", 2, 3, positions) == LeafEntriesResult::Error && positions.empty());
     }
 
     // Restore the leaf links and break the boundary between the children.

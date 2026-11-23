@@ -1,8 +1,12 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-23 · 普通表可用索引查找一段带偏移的时间
+
+合并同一 `TIMETZ` 列的范围边界，支持用主键或完整单列 B 树读取候选。候选太多时保留表扫描。`BETWEEN` 复用带偏移时间的普通比较，修复换算后同一时刻的边界匹配。`IDX-03`、`OPT-01` 和 `TYPE-06` 保持部分实现。复合索引、部分索引条件推断及时间范围排序省读仍有差距。 [功能验证](test-report.md#timetz-range-20261123) · [性能对照](performance-report-2026-10-30.md#timetz-range-cost-20261123) · [实现对照](postgresql-comparison.md#timetz-range-comparison-20261123)
+
 ## 2026-11-23 · 普通表的带偏移时间等值查询可用索引
 
-普通表可用单列 `TIMETZ` 主键或覆盖整列的 B 树索引查询指定时间，支持数值偏移、微秒和已经声明类型的客户端参数。只有索引能服务当前事务视图时，索引缺少匹配项才可直接得出空结果。`IDX-03`、`OPT-01` 和 `TYPE-06` 保持部分实现。范围查找、部分索引条件推断和完整时间类型兼容仍待覆盖。 [功能验证](test-report.md#timetz-index-20261123) · [性能对照](performance-report-2026-10-30.md#timetz-index-cost-20261123) · [实现对照](postgresql-comparison.md#timetz-index-comparison-20261123)
+普通表可用单列 `TIMETZ` 主键或覆盖整列的 B 树索引查询指定时间，支持数值偏移、微秒和已经声明类型的客户端参数。只有索引能服务当前事务视图时，索引缺少匹配项才可直接得出空结果。`IDX-03`、`OPT-01` 和 `TYPE-06` 保持部分实现。部分索引条件推断和完整时间类型兼容仍待覆盖。单列范围查找见上方本轮更新。 [功能验证](test-report.md#timetz-index-20261123) · [性能对照](performance-report-2026-10-30.md#timetz-index-cost-20261123) · [实现对照](postgresql-comparison.md#timetz-index-comparison-20261123)
 
 ## 2026-11-23 · 普通表支持写入和读取带偏移的时间
 

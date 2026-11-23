@@ -975,6 +975,19 @@ bool BPTree::allValuesChecked(std::vector<int64_t>& values) const {
     return rangeScanChecked("", std::string(BP_KEY_LEN, '\xFF'), values);
 }
 
+BPTree::LeafEntriesResult BPTree::readOrderedKeyRange(
+        const std::string& lower, const std::string& upper, size_t maxRows,
+        size_t maxNodes, std::vector<int64_t>& values) const {
+    std::shared_lock<std::shared_mutex> treeLock(treeMutex_);
+    values.clear();
+    if (!bp_ || !bp_->isOpen() || lower.size() > BP_KEY_LEN || upper.size() > BP_KEY_LEN ||
+        (header_.reserved != 0 && header_.reserved != bptree_format::kContentChecksumFormat &&
+         header_.reserved != bptree_format::kPageBoundChecksumFormat))
+        return LeafEntriesResult::Error;
+    return readFixedRangeLocked(normalizeKey(lower), normalizeKey(upper), maxRows, maxNodes,
+                                values, nullptr, CompositeRangeRead::Entire, nullptr);
+}
+
 BPTree::LeafEntriesResult BPTree::readCompositePrimaryRange(
         const std::string& lower, const std::string& upper, size_t maxRows,
         size_t maxNodes, std::vector<int64_t>& values, std::vector<int64_t>* suffixes,
@@ -987,6 +1000,14 @@ BPTree::LeafEntriesResult BPTree::readCompositePrimaryRange(
         header_.reserved != bptree_format::kCompositePrimaryRangeFormat ||
         lower.size() != BP_KEY_LEN || upper.size() != BP_KEY_LEN)
         return LeafEntriesResult::Error;
+    return readFixedRangeLocked(lower, upper, maxRows, maxNodes, values, suffixes,
+                                mode, visitedNodes);
+}
+
+BPTree::LeafEntriesResult BPTree::readFixedRangeLocked(
+        const std::string& lower, const std::string& upper, size_t maxRows,
+        size_t maxNodes, std::vector<int64_t>& values, std::vector<int64_t>* suffixes,
+        CompositeRangeRead mode, size_t* visitedNodes) const {
     const bool prefix = mode != CompositeRangeRead::Entire;
     const bool descending = mode == CompositeRangeRead::FirstDescending;
     if (!header_.rootPage || lower > upper || (prefix && maxRows == 0))

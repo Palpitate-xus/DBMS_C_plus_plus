@@ -85,6 +85,12 @@ public:
     enum class LeafEntriesResult { Complete, LimitExceeded, Error };
     enum class CompositeRangeRead { Entire, FirstAscending, FirstDescending };
 
+    // Checked seek on the ordinary fixed-width key format. Copy the whole
+    // closed interval only if it fits the candidate and page budgets.
+    LeafEntriesResult readOrderedKeyRange(const std::string& lower, const std::string& upper,
+                                          size_t maxRows, size_t maxNodes,
+                                          std::vector<int64_t>& values) const;
+
     // Copy row positions for a closed range of fixed-width composite keys.
     // A supplied suffix vector receives the signed key for each row position.
     // FirstAscending and FirstDescending stop at maxRows or the end of the
@@ -206,6 +212,9 @@ private:
 
     bool writeHeader();
     bool readHeader();
+    LeafEntriesResult readFixedRangeLocked(const std::string& lower, const std::string& upper,
+        size_t maxRows, size_t maxNodes, std::vector<int64_t>& values,
+        std::vector<int64_t>* suffixes, CompositeRangeRead mode, size_t* visitedNodes) const;
 
     bool writeNode(uint32_t pageNum, const Node& node);
     std::optional<Node> readNode(uint32_t pageNum) const;

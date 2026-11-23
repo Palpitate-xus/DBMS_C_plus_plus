@@ -17,6 +17,13 @@ cmake --build build/cmake --target dbms_main --parallel 2
 ## 最近更新
 
 <details>
+<summary>可以用索引查找一段带时区的时间 · 2026-11-23</summary>
+
+例如，可以查找上午 9 点到 9 点半之间的签到记录。范围较小时，数据库可以用索引直接找到这一段。
+
+</details>
+
+<details>
 <summary>按带时区的时间查找记录可以用索引 · 2026-11-23</summary>
 
 例如，给签到时间建索引后，查找 `14:30:00+05:30` 时可以直接定位记录。索引确认没有匹配时，也可以直接返回。
@@ -27,13 +34,6 @@ cmake --build build/cmake --target dbms_main --parallel 2
 <summary>可以保存带时区的时间 · 2026-11-23</summary>
 
 例如，把签到时间存为 `14:30:00+05:30`，查询时仍会显示 `+05:30`。
-
-</details>
-
-<details>
-<summary>可以指定时间的小数秒保留几位 · 2026-11-23</summary>
-
-例如，保留两位小数时，`14:30:00.125+05:30` 会变成 `14:30:00.13+05:30`。
 
 </details>
 

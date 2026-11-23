@@ -2,6 +2,18 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-23 use checked scalar TIMETZ index ranges and consistent BETWEEN comparisons",
+      "gap_ids": ["IDX-03", "OPT-01", "TYPE-06"],
+      "status": "partial",
+      "evidence": ["src/access/BPTree.cpp", "src/commands/TableManage.cpp", "src/executor/ExecutionPlan.cpp", "src/expression/ExprEvaluator.cpp", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/timetz_range_protocol_e2e_test.py", "tests/bptree_topology_corruption_test.cpp"],
+      "verification": [
+        "Single-column ranges seek a checked interval in existing primary and secondary indexes and recheck heap values.",
+        "BETWEEN and ordinary comparison agree when equal UTC clocks have different offsets. Both range bounds survive text and binary Bind.",
+        "The candidate budget keeps a dense range on the table scan. Snapshot and recovery controls cover concurrent writes, savepoints, committed and uncommitted crashes, and rebuild."
+      ]
+    },
+    {
       "issue": "2026-11-23 use complete single-column indexes for ordinary TIMETZ equality",
       "gap_ids": ["IDX-03", "OPT-01", "TYPE-06"],
       "status": "partial",

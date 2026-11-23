@@ -5471,6 +5471,127 @@ public:
     }
 };
 
+// The outer filter keeps responsibility for the SQL predicate. This source
+// also checks each heap value against the physical interval before emitting it.
+class ZonedClockRangeScanOp final : public Operator {
+public:
+    ZonedClockRangeScanOp(StorageEngine& engine, std::string database,
+                          const TableSchema& schema, StoredZonedClockRange range, OpPtr fallback)
+        : engine_(engine), database_(std::move(database)), table_(schema.tablename),
+          relationId_(schema.physicalRelationId), range_(std::move(range)), fallback_(std::move(fallback)) {}
+
+    ~ZonedClockRangeScanOp() override { try { close(); } catch (...) {} }
+
+    bool open() override {
+        OpenInstrument instrument(this);
+        close();
+        clearError();
+        usedIndex_ = false;
+        auto& locks = engine_.getLockManager();
+        locks.setResourceNamespace(database_);
+        if (!locks.lockShared(table_)) throw DbError("55P03", "could not obtain lock on relation \"" + table_ + "\"");
+        locked_ = true;
+        schema_ = engine_.getTableSchema(database_, table_);
+        column_ = 0;
+        while (column_ < schema_.len() && schema_.cols[column_].dataName != range_.column) ++column_;
+        if (column_ < schema_.len() && schema_.physicalRelationId == relationId_ &&
+            engine_.getInheritedChildren(database_, table_).empty()) {
+            engine_.noteQuerySnapshot();
+            if (auto positions = readStoredZonedClockRange(engine_, database_, schema_, range_)) {
+                rids_ = std::move(*positions);
+                // Read heap pages in physical order. A requested SQL order
+                // still belongs to the ordinary sort above this source.
+                std::sort(rids_.begin(), rids_.end());
+                rids_.erase(std::unique(rids_.begin(), rids_.end()), rids_.end());
+                usedIndex_ = true;
+                recordTableScan(database_, table_, rids_.size(), true, false);
+                return true;
+            }
+        }
+        fallbackOpened_ = true;
+        return fallback_->open() || propagateChildError(fallback_.get(), "range heap source failed");
+    }
+
+    bool next(std::string& row) override {
+        NextInstrument instrument(this);
+        if (fallbackOpened_) {
+            instrument.emitted = fallback_->next(row);
+            if (!instrument.emitted && fallback_->hasError()) return propagateChildError(fallback_.get(), "range heap source failed");
+            return instrument.emitted;
+        }
+        while (position_ < rids_.size()) {
+            checkForQueryInterrupt();
+            const auto rid = rids_[position_++];
+            bool failed = false;
+            if (!engine_.readIndexedRowByRid(database_, table_, rid, row, schema_, nullptr, &failed)) {
+                if (failed) {
+                    setError("indexed heap fetch failed");
+                    return false;
+                }
+                continue;
+            }
+            lastRid_ = rid;
+            StorageEngine::bindNullRow(&engine_, database_, table_, rid, schema_.len());
+            if (lastColumnIsNull(column_) || !range_.matches(engine_.extractColumnValue(
+                    row, schema_, column_, database_, true))) continue;
+            bool toastOk = false;
+            row = engine_.resolveToastValues(database_, table_, row, schema_, &toastOk);
+            if (!toastOk) {
+                setError("TOAST value read failed");
+                return false;
+            }
+            instrument.emitted = true;
+            return true;
+        }
+        return false;
+    }
+
+    ScanOrigin scanOrigin() const override {
+        if (fallbackOpened_) return fallback_->scanOrigin();
+        return {&engine_, database_, table_, lastRid_};
+    }
+    bool lastColumnIsNull(size_t ordinal) const override {
+        if (fallbackOpened_) return fallback_->lastColumnIsNull(ordinal);
+        return lastRid_ > 0 && ordinal < schema_.len() &&
+            detail::storedRowColumnIsNull(engine_, database_, table_, schema_, lastRid_, ordinal);
+    }
+    void close() override {
+        std::exception_ptr error;
+        try { if (std::exchange(fallbackOpened_, false)) fallback_->close(); }
+        catch (...) { error = std::current_exception(); }
+        if (lastRid_) StorageEngine::unbindNullRow();
+        rids_.clear(); position_ = 0; lastRid_ = 0;
+        if (std::exchange(locked_, false)) {
+            auto& locks = engine_.getLockManager();
+            locks.setResourceNamespace(database_);
+            locks.unlock(table_);
+        }
+        if (error) std::rethrow_exception(error);
+    }
+    std::string preparedPlanNodeName() const override { return "ZonedClockRangeScan"; }
+    std::map<std::string, std::string> preparedPlanAttributes() const override {
+        return {{"usedIndex", usedIndex_ ? "true" : "false"}, {"column", range_.column}};
+    }
+    std::vector<Operator*> preparedPlanChildren() const override {
+        return usedIndex_ ? std::vector<Operator*>{} : std::vector<Operator*>{fallback_.get()};
+    }
+    std::vector<IOperator*> children() override {
+        return usedIndex_ ? std::vector<IOperator*>{} : std::vector<IOperator*>{fallback_.get()};
+    }
+
+private:
+    StorageEngine& engine_;
+    std::string database_, table_;
+    uint64_t relationId_;
+    StoredZonedClockRange range_;
+    OpPtr fallback_;
+    TableSchema schema_;
+    std::vector<int64_t> rids_;
+    size_t position_ = 0, column_ = 0;
+    int64_t lastRid_ = 0;
+    bool locked_ = false, fallbackOpened_ = false, usedIndex_ = false;
+};
+
 static OpPtr makePreparedTableSource(StorageEngine* engine, const std::string& database,
     const std::shared_ptr<PreparedQuery>& query, SelectStmt* select,
     const TableSchema& schema, OpPtr source, const std::vector<bool>& projectedColumns) {
@@ -5491,6 +5612,16 @@ static OpPtr makePreparedTableSource(StorageEngine* engine, const std::string& d
     };
     const auto* physical = dynamic_cast<const TableScanOp*>(source.get());
     if (physical && typeid(*physical) == typeid(TableScanOp) && physical->tableName() == schema.tablename) {
+        if (select->locking.empty() && select->fromClause && select->fromClause->type == FromItem::Type::Table) {
+            for (const auto& sourceRange : query->sourceRanges) {
+                if (sourceRange.owner != select || sourceRange.source != select->fromClause.get() ||
+                    sourceRange.cteStatement || sourceRange.viewQuery) continue;
+                if (auto range = storedZonedClockRange(*engine, database, schema,
+                        select->whereClause.get(), sourceRange.ordinal)) {
+                    return std::make_unique<ZonedClockRangeScanOp>(*engine, database, schema, std::move(*range), heap());
+                }
+            }
+        }
         const auto key = integerPageOrder(*query, *select);
         if (key && integerPageRelation(*query, *select, *key) && eligibleIntegerPageKey(schema, *key)) {
             if (auto bounds = integerPageBounds(*query, *select, *key, schema)) {
@@ -9001,11 +9132,12 @@ static void validatePredicateTypes(const TableSchema& table,
         const std::vector<StorageEngine::Condition>& conditions,
         const std::string& database = {}, StorageEngine* owner = nullptr) {
     for (const auto& condition : conditions) {
-        if (owner && condition.op == "=" && condition.decodedLiteralRhs &&
+        if (owner && (condition.op == "=" || condition.op == "<" || condition.op == "<=" ||
+                      condition.op == ">" || condition.op == ">=") && condition.decodedLiteralRhs &&
             condition.patternType == "unknown" && !condition.patternIsNull) {
             for (size_t i = 0; i < table.len(); ++i) {
                 if (table.cols[i].dataName == condition.colName)
-                    validateStoredZonedClockEqualityInput(table.cols[i], condition.value);
+                    validateStoredZonedClockComparisonInput(table.cols[i], condition.value);
             }
         }
         if (nullScalarPredicate(condition) && condition.op!="typedexpr") {
@@ -13337,6 +13469,12 @@ OpPtr QueryPlanner::buildSelectPlan(StorageEngine* engine, const PlanContext& in
     }
 
     if (!root && !rlsApplies) root = ordinaryBrinTableSource(engine, ctx, table);
+    if (!root && !rlsApplies && ctx.disjunctiveConds.empty()) {
+        if (auto range = storedZonedClockRange(*engine, ctx.dbname, table, remainingConds)) {
+            auto fallback = std::make_unique<TableScanOp>(engine, ctx.dbname, ctx.tablename);
+            root = std::make_unique<ZonedClockRangeScanOp>(*engine, ctx.dbname, table, std::move(*range), std::move(fallback));
+        }
+    }
     if (!root && compositeRange) root = std::move(compositeRange);
     if (!root) {
         // Keep the original typed predicate above a candidate-only lookup.

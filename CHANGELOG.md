@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>可以用索引查找一段带时区的时间 · 2026-11-23</summary>
+
+例如，可以查找上午 9 点到 9 点半之间的签到记录。范围较小时，数据库可以用索引直接找到这一段。
+
+[使用说明](docs/MANUAL.md#日期时间类型) · [测试报告](docs/test-report.md#timetz-range-20261123) · [性能报告](docs/performance-report-2026-10-30.md#timetz-range-cost-20261123)
+
+</details>
+
+<details>
 <summary>按带时区的时间查找记录可以用索引 · 2026-11-23</summary>
 
 例如，给签到时间建索引后，查找 `14:30:00+05:30` 时可以直接定位记录。索引确认没有匹配时，也可以直接返回。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>可以指定时间的小数秒保留几位 · 2026-11-23</summary>
+<summary>查看更早的更新和版本记录</summary>
+
+## 2026-11-23 · 可以指定时间的小数秒保留几位
 
 例如，保留两位小数时，`14:30:00.125+05:30` 会变成 `14:30:00.13+05:30`。
 
 [使用说明](docs/MANUAL.md#日期时间类型) · [测试报告](docs/test-report.md#timetz-precision-20261123) · [性能报告](docs/performance-report-2026-10-30.md#timetz-precision-cost-20261123)
-
-</details>
-
-<details>
-<summary>查看更早的更新和版本记录</summary>
 
 ## 2026-11-23 · 修复延后提交时漏查临时表的问题
 
