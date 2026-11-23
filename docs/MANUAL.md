@@ -1441,6 +1441,8 @@ ORDER BY position;
 
 `WITH ORDINALITY` 在筛选和排序前增加从 1 开始的行号。空数组或值为 `NULL` 的数组自身提供零行。并排展开时，行数以最长的数组为准。空字符串和文字 `'NULL'` 保留原值。可以用 `pg_catalog.unnest` 展开一个数组；直接并排展开多个数组时写 `unnest`。[测试报告](test-report.md#unnest-from-20261123) · [性能报告](performance-report-2026-10-30.md#unnest-from-cost-20261123)
 
+用 `smallint`、`integer` 和 `bigint` 构造或转换数组时，可以直接使用已知的内置类型。元素仍按原顺序求值，并检查输入格式和数值范围。[整数数组性能](performance-report-2026-10-30.md#integer-array-cast-cost-20261123)
+
 #### 并排读取多组函数结果
 
 `ROWS FROM` 按行把多个函数的结果放在一起。较短的一组用 `NULL` 补齐。下面的查询返回 `(1,'甲',1)`、`(2,'乙',2)` 和 `(3,NULL,3)`，最后一列是从 1 开始的行号。

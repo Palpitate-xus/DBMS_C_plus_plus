@@ -1869,6 +1869,12 @@ std::string ExprHelper::declaredTypeInput(const std::string& spelling,
     const DatumMetadataContext* datumMetadata) {
     if(datumMetadata && datumMetadata->inputDeclaration)
         return datumMetadata->inputDeclaration(spelling);
+    // SQL integer type keywords have fixed builtin declarations. Canonical
+    // spellings reach this path for every element of an integer array. Named
+    // types such as int4 and all qualified names still use catalog resolution.
+    if (spelling == "smallint" || spelling == "integer" || spelling == "bigint" ||
+        spelling == "smallint[]" || spelling == "integer[]" || spelling == "bigint[]")
+        return spelling;
     const auto* session=currentSession();
     const auto database=currentDB.empty() && session?session->currentDB:currentDB;
     if(database.empty())return resolveDeclaredTypeName(spelling,nullptr,session).inputType;

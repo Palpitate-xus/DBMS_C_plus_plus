@@ -162,6 +162,13 @@ def main():
             ("SELECT * FROM unnest(NULL::integer[],ARRAY[4::bigint]) WITH ORDINALITY",
              [[None, "4", "1"]], ["unnest", "unnest", "ordinality"], [23, 20, 20]),
             ("SELECT * FROM unnest('{}'::int[]) WITH ORDINALITY", [], ["unnest", "ordinality"], [23, 20]),
+            ("SELECT * FROM unnest(ARRAY[NULL,(-32768)::smallint,32767::smallint]) WITH ORDINALITY AS u(v,n)",
+             [[None, "1"], ["-32768", "2"], ["32767", "3"]], ["v", "n"], [21, 20]),
+            ("SELECT * FROM unnest('[0:2]={-2147483648,NULL,2147483647}'::integer[]) WITH ORDINALITY AS u(v,n)",
+             [["-2147483648", "1"], [None, "2"], ["2147483647", "3"]], ["v", "n"], [23, 20]),
+            ("SELECT * FROM unnest(ARRAY[NULL,(-9223372036854775807-1),9223372036854775807]) "
+             "WITH ORDINALITY AS u(v,n)",
+             [[None, "1"], ["-9223372036854775808", "2"], ["9223372036854775807", "3"]], ["v", "n"], [20, 20]),
             ("SELECT u,u.v FROM unnest(ARRAY['x','y']) AS u(v)", [["x", "x"], ["y", "y"]], ["u", "v"], [25, 25]),
             ("SELECT * FROM unnest(ARRAY[1,2]) u(v) LEFT JOIN unnest(ARRAY[2,3]) z(w) ON v=w ORDER BY v",
              [["1", None], ["2", "2"]], ["v", "w"], [23, 23]),

@@ -2,6 +2,15 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="integer-array-cast-20261123"></a>
+## 2026-11-23 · 直接使用内置整数类型
+
+查询转换 `smallint`、`integer`、`bigint` 和它们的数组时，使用固定的内置类型。转换保留格式和范围检查，数组保留元素顺序和空值。新增普通查询、语句描述和扩展执行用例覆盖三种整数的上下限、空值、显式数组下界和行号。新旧版各通过 285 项函数协议检查，PostgreSQL 18.6 通过适用的 281 项。上一版 117 份数组展开响应逐份一致。[协议回归](../tests/generate_series_protocol_e2e_test.py)
+
+在两版分别创建一个名为 `number_types.int4` 的整数数组域，并把该模式放在 `pg_catalog` 之前。`int4` 继续解析到该域并检查约束，`integer` 和 `pg_catalog.int4` 继续返回内置整数类型。19 步验证覆盖新版打开旧版目录、保存点和两次强制退出。CSV 查询输出逐字节一致。[测量与复现 SQL](performance-report-2026-10-30.md#integer-array-cast-cost-20261123)
+
+主协议测试、11 项相邻端到端测试和 8 项原生测试通过。相邻的数组元素长度与精度套件在两版中均有相同的 54 项差异，630 项记录逐项一致。最终程序 SHA-256 为 `cc276a311d588efc8b4bfcfb27f822eccd8b00db49090c9a0b58de55e44894d3`。[数组类型修饰测试](../tests/array_constructor_typmod_protocol_e2e_test.py)
+
 <a id="unnest-from-20261123"></a>
 ## 2026-11-23 · 直接在 FROM 中展开数组
 

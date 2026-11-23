@@ -2,6 +2,11 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="integer-array-cast-comparison-20261123"></a>
+## 2026-11-23 · 数组展开前如何处理元素类型
+
+PostgreSQL 在构造数组时使用已确定的元素类型，逐项展开时保存数组遍历状态。DuckDB 展开列表时按位置读取已求值的子向量。SQLite 的虚拟表先在 `xFilter` 接收输入，再通过游标逐行读取。本项目复用三种内置整数类型的固定定义，避免为每个元素复制数据库目录。元素转换、求值顺序和用户命名类型的查询沿用原规则。[PostgreSQL 数组构造](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/executor/execExprInterp.c) · [PostgreSQL 数组展开](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/utils/adt/arrayfuncs.c) · [DuckDB 展开实现](https://github.com/duckdb/duckdb/blob/main/src/execution/operator/projection/physical_unnest.cpp) · [SQLite 游标接口](https://sqlite.org/vtab.html#the_xfilter_method)
+
 <a id="unnest-from-comparison-20261123"></a>
 ## 2026-11-23 · 从数组读取数据行
 

@@ -2,6 +2,17 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-23 avoid repeated catalog snapshots during integer array conversion",
+      "gap_ids": ["QRY-02", "OPT-01"],
+      "status": "partial",
+      "evidence": ["src/expression/expr_helper.cpp", "src/expression/ExprEvaluator.cpp", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/generate_series_protocol_e2e_test.py", "tests/integer_cast_text_input_test.cpp", "tests/declared_type_keyword_role_test.cpp"],
+      "verification": [
+        "The exact intrinsic integer spellings use their fixed input types; qualified names and session-resolved names use the catalog.",
+        "Ordinary and extended protocol tests cover all three integer widths, NULLs, dimension bounds, and minimum and maximum values."
+      ]
+    },
+    {
       "issue": "2026-11-23 read typed single and parallel arrays from direct UNNEST sources",
       "gap_ids": ["QRY-02", "FUNC-01", "PROTO-04"],
       "status": "partial",

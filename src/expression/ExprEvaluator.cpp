@@ -6103,6 +6103,8 @@ ExprValue ExprEvaluator::evalCast(const Expr* inputExpression, const RowContext&
         return ExprValue("interval",formatIntervalInput(parsed.months,parsed.days,parsed.micros,true),false);
     }
     if (v.isNull) {
+        if (target == "smallint" || target == "integer" || target == "bigint")
+            return ExprValue(target,"",true);
         const auto* session=currentSession();
         const auto database=currentDB_.empty() && session?session->currentDB:currentDB_;
         auto* owner=sqlValueEngine_?sqlValueEngine_:&g_engine;

@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>展开长整数数组更快 · 2026-11-23</summary>
+
+数据里有几千个整数时，数据库可以少做很多重复的类型查找，完整读取和只取前几行都能更快返回。
+
+[用法](docs/MANUAL.md#把数组展开成行) · [测试报告](docs/test-report.md#integer-array-cast-20261123) · [性能报告](docs/performance-report-2026-10-30.md#integer-array-cast-cost-20261123)
+
+</details>
+
+<details>
 <summary>可以把一个或多个数组展开成行 · 2026-11-23</summary>
 
 例如，把 3 个编号和 2 个名字并排展开。结果有 3 行，最后一行的名字为空。还可以给每行编号，再筛选或排序。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>可以把多组生成的数据并排显示 · 2026-11-23</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-23 · 可以把多组生成的数据并排显示
 
 例如，把 3 个编号和 2 个名字并排查询，结果会有 3 行，最后一行的名字为空。
 
 [用法](docs/MANUAL.md#并排读取多组函数结果) · [测试报告](docs/test-report.md#rows-from-20261123) · [性能报告](docs/performance-report-2026-10-30.md#rows-from-cost-20261123)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-23 · 只要前几个数字，就只生成这几个
 
