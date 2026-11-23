@@ -1,27 +1,27 @@
 # 更新日志
 
 <details>
-<summary>开头相同的长编号也能准确查找 · 2026-11-23</summary>
+<summary>开头一样的长编号可以分别保存和查找 · 2026-11-23</summary>
 
-两条记录的长编号即使开头相同，也能按各自的完整编号查到。
+如果用一个文本编号来区分订单，即使两个编号开头一样，也能按完整编号找到各自的订单。
 
 [测试报告](docs/test-report.md#long-text-primary-keys-20261123) · [性能报告](docs/performance-report-2026-10-30.md#long-text-primary-keys-cost-20261123)
 
 </details>
 
 <details>
-<summary>按索引查找时少读数据 · 2026-11-22</summary>
+<summary>按编号查订单时可以少读数据 · 2026-11-22</summary>
 
-比如按产品编号找订单。读过可能匹配的记录后，数据库无需再读后面的索引页。
+例如查某个产品的全部订单。数据库查完可能匹配的部分后，可以跳过后面无关的数据。
 
 [测试报告](docs/test-report.md#bounded-btree-equality-20261122) · [性能报告](docs/performance-report-2026-10-30.md#bounded-btree-equality-cost-20261122)
 
 </details>
 
 <details>
-<summary>直接比对文字更快了 · 2026-11-22</summary>
+<summary>按完整名称找记录更快了 · 2026-11-22</summary>
 
-按完整名称查找记录更快了。给已有数据的表加唯一约束时，检查重复值也更快了。
+例如查商品名正好是「绿茶」的记录。给已有数据的表加上「名称不能重复」的规则时，查重也更快了。
 
 [测试报告](docs/test-report.md#stored-text-equality-20261122) · [性能报告](docs/performance-report-2026-10-30.md#stored-text-equality-cost-20261122)
 

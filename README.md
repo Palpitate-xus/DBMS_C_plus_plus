@@ -4,38 +4,28 @@
 
 ## 快速开始
 
-在 Linux 上下载并编译。[编译依赖](docs/PACKAGING.md#编译依赖)
-
-```bash
-git clone https://github.com/Palpitate-xus/DBMS_C_plus_plus.git
-cd DBMS_C_plus_plus
-cmake -S . -B build/cmake
-cmake --build build/cmake --target dbms_main --parallel 2
-./build/cmake/dbms_main --version
-```
-
-[启动数据库](docs/MANUAL.md#运行) · [用 psql 连接](docs/MANUAL.md#18-网络服务) · [支持的功能](docs/compatibility-contract.md) · [全部文档](docs/README.md)
+[编译依赖](docs/PACKAGING.md#编译依赖) · [下载并编译](docs/MANUAL.md#编译) · [启动数据库](docs/MANUAL.md#运行) · [用 psql 连接](docs/MANUAL.md#18-网络服务) · [更多文档](docs/README.md)
 
 ## 最近更新
 
 <details>
-<summary>开头相同的长编号也能准确查找 · 2026-11-23</summary>
+<summary>开头一样的长编号可以分别保存和查找 · 2026-11-23</summary>
 
-两条记录的长编号即使开头相同，也能按各自的完整编号查到。
-
-</details>
-
-<details>
-<summary>按索引查找时少读数据 · 2026-11-22</summary>
-
-比如按产品编号找订单。读过可能匹配的记录后，数据库无需再读后面的索引页。
+如果用一个文本编号来区分订单，即使两个编号开头一样，也能按完整编号找到各自的订单。
 
 </details>
 
 <details>
-<summary>直接比对文字更快了 · 2026-11-22</summary>
+<summary>按编号查订单时可以少读数据 · 2026-11-22</summary>
 
-按完整名称查找记录更快了。给已有数据的表加唯一约束时，检查重复值也更快了。
+例如查某个产品的全部订单。数据库查完可能匹配的部分后，可以跳过后面无关的数据。
+
+</details>
+
+<details>
+<summary>按完整名称找记录更快了 · 2026-11-22</summary>
+
+例如查商品名正好是「绿茶」的记录。给已有数据的表加上「名称不能重复」的规则时，查重也更快了。
 
 </details>
 
