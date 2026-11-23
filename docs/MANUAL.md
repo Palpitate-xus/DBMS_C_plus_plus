@@ -1639,8 +1639,13 @@ RESET work_mem;
 
 ### 聚合
 
+`COUNT(*)` 统计当前查询可见且符合条件的行。`COUNT(列名)` 只统计该列值非 `NULL` 的行，空字符串也计入。可以用 `FILTER` 为每个计数指定单独的条件。
+
 ```sql
 SELECT COUNT(*) FROM users;
+SELECT COUNT(*) AS all_orders,
+       COUNT(note) FILTER (WHERE quantity > 0) AS orders_with_note
+FROM orders;
 SELECT COUNT(DISTINCT DEPT) FROM users;
 SELECT MAX(SALARY), MIN(SALARY), AVG(SALARY) FROM employees;
 SELECT SUM(AMOUNT) FROM orders;
@@ -1652,6 +1657,8 @@ SELECT DEPT, COUNT(*) FROM employees GROUP BY ROLLUP (DEPT);
 SELECT DEPT, TEAM, COUNT(*) FROM employees GROUP BY CUBE (DEPT, TEAM);
 SELECT DEPT, COUNT(*) FROM employees GROUP BY GROUPING SETS ((DEPT), ());
 ```
+
+在受支持的普通表上，多个计数可以共用一次扫描。`EXPLAIN ANALYZE` 中 `StoredCount` 下直接显示 `TableScan` 时，数据库读取每条可见记录后直接累计数目。适用的筛选包括空值检查、受支持的文本比较、文字长度和整数比较。[测试](test-report.md#ordinary-stored-count-20261123) · [性能](performance-report-2026-10-30.md#ordinary-stored-count-cost-20261123)
 
 ### JOIN
 

@@ -1003,11 +1003,18 @@ static int comparePreparedOrderValues(ExprEvaluator& evaluator,
            greater == StorageEngine::PredicateTruth::True ? 1 : 0;
 }
 
+static void incrementAggregateCount(int64_t& count) {
+    if (count == std::numeric_limits<int64_t>::max())
+        throw DbError("22003", "aggregate count out of range");
+    ++count;
+}
+
 class PreparedAggregateOp final : public Operator {
     OpPtr child_;
     std::shared_ptr<PreparedSelectState> state_;
     struct Entry { ExprValue value; std::vector<ExprValue> keys; };
     std::vector<std::vector<Entry>> inputs_;
+    std::vector<std::optional<int64_t>> counts_;
     RowContext result_;
     bool emitted_ = false, opened_ = false;
 
@@ -1032,6 +1039,7 @@ class PreparedAggregateOp final : public Operator {
         return state_->evaluator.eval(&expression, row);
     }
     ExprValue finish(size_t index) {
+        if (counts_[index]) return ExprValue("bigint", std::to_string(*counts_[index]));
         const auto& aggregate = state_->aggregates[index];
         auto& inputs = inputs_[index];
         if (!aggregate.call->aggregateOrderKeys.empty()) {
@@ -1060,8 +1068,7 @@ class PreparedAggregateOp final : public Operator {
                         return binary("=", previous, input.value).asBool(); })) continue;
                 distinct.push_back(input.value);
             }
-            if (count == std::numeric_limits<int64_t>::max()) throw DbError("22003", "aggregate count out of range");
-            ++count;
+            incrementAggregateCount(count);
             if (aggregate.name == "count") continue;
             if (aggregate.name == "sum" || aggregate.name == "avg") {
                 const auto converted = cast(input.value, aggregate.resultType);
@@ -1085,6 +1092,12 @@ public:
     bool open() override {
         OpenInstrument instrument(this); clearError(); emitted_ = false;
         inputs_.assign(state_->aggregates.size(), {});
+        counts_.clear();
+        for (const auto& aggregate : state_->aggregates) {
+            if (aggregate.name == "count" && !aggregate.call->distinct && aggregate.call->aggregateOrderKeys.empty())
+                counts_.emplace_back(0);
+            else counts_.emplace_back(std::nullopt);
+        }
         opened_ = true; return child_->open();
     }
     bool next(std::string& display) override {
@@ -1107,6 +1120,10 @@ public:
                 Entry input;
                 input.value = literal && literal->value == "*" ? ExprValue("boolean", "t") :
                     state_->evaluate(aggregate.call->args.front().get(), row);
+                if (auto& count = counts_[i]; count) {
+                    if (!input.value.isNull) incrementAggregateCount(*count);
+                    continue;
+                }
                 for (size_t key = 0; key < aggregate.call->aggregateOrderKeys.size(); ++key) {
                     const auto owner = aggregate.keyOwners.at(key);
                     if (owner == PreparedSelectState::noTarget - 1)
@@ -1131,7 +1148,7 @@ public:
         display.clear(); instrument.emitted = true; return true;
     }
     void close() override {
-        inputs_.clear(); emitted_ = false;
+        inputs_.clear(); counts_.clear(); emitted_ = false;
         if (opened_) { opened_ = false; child_->close(); }
     }
     bool supportsPreparedContexts() const override { return true; }
@@ -2543,6 +2560,7 @@ static bool matchesStoredComparison(StoredComparison comparison, int order) {
 static std::optional<bool> storedPredicatesMatch(const StoredPredicates& predicates,
         StorageEngine& engine, const std::string& database, const TableSchema& schema,
         const std::string& row, const std::vector<bool>& nulls) {
+    if (predicates.empty()) return true;
     using Input = StoredPredicate::Input;
     detail::ScopedStoredRowNullBitmap bitmap(schema, nulls);
     for (const auto& predicate : predicates) {
@@ -3452,6 +3470,22 @@ static std::optional<QueryColumnBinding> preparedDirectOrderColumn(
 static std::optional<QueryColumnBinding> integerPageOrder(
     const PreparedQuery& query, const SelectStmt& select);
 
+static const ColumnRefExpr* boundStoredPredicateColumn(const Expr* expression,
+        const TableSchema& schema, size_t source) {
+    const auto* column = dynamic_cast<const ColumnRefExpr*>(expression);
+    if (!column || column->preparedSubquery || column->generatedRead || !column->binding) return nullptr;
+    const auto& binding = *column->binding;
+    const auto& declaration = binding.typeMetadata;
+    if (binding.scopeDepth || binding.mergedUsing || binding.sourceOrdinal != source ||
+        binding.columnOrdinal >= schema.len() || !declaration || declaration->kind != DatumKind::Scalar ||
+        declaration->actualOid != declaration->codecOid || declaration->enumType) return nullptr;
+    const auto& field = schema.cols[binding.columnOrdinal];
+    if (field.dataName != column->column || compositeEqualityType(field).empty() ||
+        ExprHelper::canonicalResultTypeName(field.dataType) !=
+            ExprHelper::canonicalResultTypeName(binding.declaredType)) return nullptr;
+    return column;
+}
+
 // Only total, row-local predicates may reject a row before materialization.
 // Keep the ordinary WHERE above the source for expressions and fallback.
 static std::optional<StoredPredicates> bindStoredPredicates(StorageEngine& engine,
@@ -3461,19 +3495,8 @@ static std::optional<StoredPredicates> bindStoredPredicates(StorageEngine& engin
     StoredPredicates filter;
     if (residual.empty()) return filter;
     std::optional<ExprEvaluator> evaluator;
-    const auto localColumn = [&](const Expr* expression) -> const ColumnRefExpr* {
-        const auto* column = dynamic_cast<const ColumnRefExpr*>(expression);
-        if (!column || column->preparedSubquery || column->generatedRead || !column->binding) return nullptr;
-        const auto& binding = *column->binding;
-        const auto& declaration = binding.typeMetadata;
-        if (binding.scopeDepth || binding.mergedUsing || binding.sourceOrdinal != source ||
-            binding.columnOrdinal >= schema.len() || !declaration || declaration->kind != DatumKind::Scalar ||
-            declaration->actualOid != declaration->codecOid || declaration->enumType) return nullptr;
-        const auto& field = schema.cols[binding.columnOrdinal];
-        if (field.dataName != column->column || compositeEqualityType(field).empty() ||
-            ExprHelper::canonicalResultTypeName(field.dataType) !=
-                ExprHelper::canonicalResultTypeName(binding.declaredType)) return nullptr;
-        return column;
+    const auto localColumn = [&](const Expr* expression) {
+        return boundStoredPredicateColumn(expression, schema, source);
     };
     const auto predicateFor = [&](const ColumnRefExpr& column, Input input) {
         const auto ordinal = column.binding->columnOrdinal;
@@ -3581,6 +3604,24 @@ static std::optional<StoredPredicates> bindStoredPredicates(StorageEngine& engin
     return filter;
 }
 
+static std::optional<StoredPredicates> bindStoredWhere(StorageEngine& engine, const std::string& database,
+        const TableSchema& schema, size_t source, const Expr* expression) {
+    if (!expression) return StoredPredicates{};
+    std::vector<const Expr*> terms{expression}, clauses;
+    while (!terms.empty()) {
+        const auto* term = terms.back();
+        terms.pop_back();
+        const auto* binary = dynamic_cast<const BinaryOpExpr*>(term);
+        if (!binary || binary->preparedSubquery || binary->op != "AND") {
+            clauses.push_back(term);
+            continue;
+        }
+        terms.push_back(binary->right.get());
+        terms.push_back(binary->left.get());
+    }
+    return bindStoredPredicates(engine, database, schema, source, clauses);
+}
+
 class StoredFilterScanOp final : public Operator {
     StorageEngine& engine_;
     std::string database_, table_;
@@ -3638,6 +3679,8 @@ public:
     ScanOrigin scanOrigin() const override { return scan_->scanOrigin(); }
     bool lastColumnIsNull(size_t ordinal) const override { return scan_->lastColumnIsNull(ordinal); }
     bool lastStoredNullBitmap(std::vector<bool>& bitmap) const override { return scan_->lastStoredNullBitmap(bitmap); }
+    TableScanOp* tableScan() const { return static_cast<TableScanOp*>(scan_.get()); }
+    const StoredPredicates& predicates() const { return predicates_; }
     std::string preparedPlanNodeName() const override { return "StoredFilter"; }
     std::vector<Operator*> preparedPlanChildren() const override { return {scan_.get()}; }
     double estimatedRows() const override { return scan_->estimatedRows(); }
@@ -3658,19 +3701,7 @@ static OpPtr prefilterPreparedHeap(StorageEngine& engine, const std::string& dat
         return candidate.owner == &select && candidate.source == select.fromClause.get() && !candidate.mergedUsing;
     });
     if (range == query.sourceRanges.end()) return {};
-    std::vector<const Expr*> terms{select.whereClause.get()}, clauses;
-    while (!terms.empty()) {
-        const auto* term = terms.back();
-        terms.pop_back();
-        const auto* binary = dynamic_cast<const BinaryOpExpr*>(term);
-        if (!binary || binary->preparedSubquery || binary->op != "AND") {
-            clauses.push_back(term);
-            continue;
-        }
-        terms.push_back(binary->right.get());
-        terms.push_back(binary->left.get());
-    }
-    auto predicates = bindStoredPredicates(engine, database, schema, range->ordinal, clauses);
+    auto predicates = bindStoredWhere(engine, database, schema, range->ordinal, select.whereClause.get());
     if (!predicates || predicates->empty()) return {};
     return std::make_unique<StoredFilterScanOp>(engine, database, schema, std::move(*predicates), std::move(scan));
 }
@@ -4685,6 +4716,165 @@ std::optional<PreparedIntegerKeyOrder> matchingPrimaryKeyInputOrder(
 }
 } // namespace
 
+bool QueryPlanner::supportsStoredCountSelect(const SelectStmt& select) {
+    if (!select.fromClause || select.fromClause->type != FromItem::Type::Table ||
+        select.setOp != SetOp::None || !select.ctes.empty() || !select.groupBy.empty() ||
+        !select.groupByElems.empty() || select.having || !select.orderBy.empty() ||
+        select.distinct || !select.distinctOn.empty() || !select.locking.empty() ||
+        !select.windowDefs.empty() || select.withTies || select.existsTargetPrunable ||
+        select.selectList.empty()) return false;
+    return std::all_of(select.selectList.begin(), select.selectList.end(), [](const auto& item) {
+        const auto* call = dynamic_cast<const FunctionCallExpr*>(item.expr.get());
+        if (!call || call->preparedSubquery || aggregate_type_detail::builtinName(call) != "count" ||
+            call->args.size() != 1 || !call->namedArgs.empty() || call->hasOver || call->setReturning ||
+            call->distinct || !call->orderBy.empty() || !call->aggregateOrderKeys.empty()) return false;
+        const auto* argument = call->args.front().get();
+        const auto* literal = dynamic_cast<const LiteralExpr*>(argument);
+        return (literal && literal->value == "*") || dynamic_cast<const ColumnRefExpr*>(argument);
+    });
+}
+
+static std::optional<StoredPredicates> bindStoredCountFilter(StorageEngine& engine,
+        const std::string& database, const TableSchema& schema, size_t source, const FunctionCallExpr& call) {
+    auto filter = bindStoredWhere(engine, database, schema, source, call.filter.get());
+    if (!filter) return {};
+    if (const auto* column = dynamic_cast<const ColumnRefExpr*>(call.args.front().get())) {
+        if (!boundStoredPredicateColumn(column, schema, source)) return {};
+        const auto ordinal = column->binding->columnOrdinal;
+        filter->push_back({ordinal, column->column, schema.cols[ordinal].dataType,
+            StoredPredicate::Input::IsNotNull, StoredComparison::Equal, {}});
+    }
+    return filter;
+}
+
+bool QueryPlanner::usesStoredCountSource(StorageEngine& engine, const std::string& database,
+        const SelectStmt& select, const TableSchema& schema, size_t sourceOrdinal) {
+    if (!supportsStoredCountSelect(select) || !schema.physicalRelationId ||
+        !supportsStoredHeapPredicate(schema) || schema.rowLevelSecurity || schema.forceRowLevelSecurity ||
+        !bindStoredWhere(engine, database, schema, sourceOrdinal, select.whereClause.get())) return false;
+    ExprEvaluator evaluator;
+    evaluator.setCurrentDB(database);
+    return std::all_of(select.selectList.begin(), select.selectList.end(), [&](const auto& item) {
+        const auto& call = static_cast<const FunctionCallExpr&>(*item.expr);
+        return !evaluator.hasScalarFunction(&call, &engine) &&
+            bindStoredCountFilter(engine, database, schema, sourceOrdinal, call).has_value();
+    });
+}
+
+class PreparedStoredCountOp final : public Operator {
+    OpPtr fallback_;
+    TableScanOp* scan_;
+    std::shared_ptr<PreparedSelectState> state_;
+    StoredPredicates where_;
+    std::vector<StoredPredicates> filters_;
+    RowContext result_;
+    bool opened_ = false, stored_ = false, emitted_ = false;
+
+public:
+    PreparedStoredCountOp(OpPtr fallback, TableScanOp* scan,
+                          std::shared_ptr<PreparedSelectState> state, StoredPredicates where,
+                          std::vector<StoredPredicates> filters)
+        : fallback_(std::move(fallback)), scan_(scan), state_(std::move(state)),
+          where_(std::move(where)), filters_(std::move(filters)) {}
+
+    ~PreparedStoredCountOp() override { try { close(); } catch (...) {} }
+
+    bool open() override {
+        OpenInstrument instrument(this);
+        if (opened_) close();
+        clearError();
+        emitted_ = stored_ = false;
+        opened_ = true;
+        if (!fallback_->open()) return propagateChildError(fallback_.get(), "count input failed");
+        const auto& schema = scan_->tbl_;
+        stored_ = scan_->cursor_ && schema.physicalRelationId == state_->schema.physicalRelationId &&
+            supportsStoredHeapPredicate(schema) && storedPredicateSchemaMatches(where_, schema) &&
+            std::all_of(filters_.begin(), filters_.end(), [&](const auto& filter) {
+                return storedPredicateSchemaMatches(filter, schema);
+            });
+        return true;
+    }
+
+    bool next(std::string& display) override {
+        NextInstrument instrument(this);
+        if (emitted_) return false;
+        if (stored_) {
+            std::vector<int64_t> counts(filters_.size(), 0);
+            std::string row;
+            const auto& schema = scan_->tbl_;
+            while (scan_->next(row)) {
+                checkForQueryInterrupt();
+                const auto& bitmap = scan_->lastNulls_;
+                const auto match = [&](const StoredPredicates& predicates) -> std::optional<bool> {
+                    if (predicates.empty()) return true;
+                    if (bitmap.size() != schema.len()) return {};
+                    return storedPredicatesMatch(predicates, *state_->engine, state_->dbname,
+                        schema, row, bitmap);
+                };
+                // An unavailable comparison can use the ordinary evaluator
+                // for this row under the same relation lock and read view.
+                std::optional<RowContext> ordinary;
+                const auto context = [&]() -> const RowContext& {
+                    if (!ordinary) ordinary.emplace(state_->context(*scan_, row));
+                    return *ordinary;
+                };
+                auto where = match(where_);
+                if (!where) {
+                    const auto value = evaluatePreparedWhere(*state_, state_->select().whereClause.get(), context());
+                    where = !value.isNull && value.asBool();
+                }
+                if (!*where) continue;
+                for (size_t i = 0; i < counts.size(); ++i) {
+                    auto selected = match(filters_[i]);
+                    if (!selected) {
+                        const auto& call = *state_->aggregates[i].call;
+                        if (call.filter) {
+                            const auto filter = state_->evaluate(call.filter.get(), context());
+                            if (filter.isNull || !filter.asBool()) continue;
+                        }
+                        const auto* column = dynamic_cast<const ColumnRefExpr*>(call.args.front().get());
+                        selected = !column || !state_->evaluate(column, context()).isNull;
+                    }
+                    if (*selected) incrementAggregateCount(counts[i]);
+                }
+            }
+            if (scan_->hasError()) return propagateChildError(scan_, "count scan failed");
+            result_ = state_->execution->context(state_->outerRow);
+            for (size_t i = 0; i < counts.size(); ++i) {
+                const auto& column = state_->aggregates[i].column;
+                result_.setBoundColumn(column.sourceOrdinal, column.columnOrdinal,
+                    ExprValue("bigint", std::to_string(counts[i])));
+            }
+            display.clear();
+            emitted_ = instrument.emitted = true;
+            return true;
+        }
+        if (!fallback_->next(display)) {
+            if (fallback_->hasError()) return propagateChildError(fallback_.get(), "count input failed");
+            return false;
+        }
+        emitted_ = instrument.emitted = true;
+        return true;
+    }
+
+    void close() override {
+        if (!opened_) return;
+        opened_ = false;
+        fallback_->close();
+    }
+    bool supportsPreparedContexts() const override { return true; }
+    bool lastPreparedContext(RowContext& row) const override {
+        if (!emitted_) return false;
+        if (!stored_) return fallback_->lastPreparedContext(row);
+        row = result_;
+        return true;
+    }
+    std::string preparedPlanNodeName() const override { return "StoredCount"; }
+    std::vector<Operator*> preparedPlanChildren() const override {
+        return {stored_ ? static_cast<Operator*>(scan_) : fallback_.get()};
+    }
+};
+
 OpPtr makePreparedTableSource(StorageEngine* engine, const std::string& database,
     const std::shared_ptr<PreparedQuery>& query, SelectStmt* select,
     const TableSchema& schema, OpPtr source) {
@@ -5413,10 +5603,39 @@ OpPtr QueryPlanner::buildPreparedSelectPlan(StorageEngine* engine,
             }
         }
     }
+    TableScanOp* countScan = nullptr;
+    StoredPredicates countWhere;
+    std::vector<StoredPredicates> countFilters;
+    if (sourceSchema.physicalRelationId && state->aggregates.size() == select->selectList.size() &&
+        supportsStoredCountSelect(*select) && supportsStoredHeapPredicate(sourceSchema)) {
+        if (auto* filtered = dynamic_cast<StoredFilterScanOp*>(source.get())) {
+            countScan = filtered->tableScan();
+            countWhere = filtered->predicates();
+        } else if (!select->whereClause && typeid(*source) == typeid(TableScanOp)) {
+            countScan = static_cast<TableScanOp*>(source.get());
+        }
+        if (countScan) {
+            const auto origin = countScan->scanOrigin();
+            if (origin.engine != engine || origin.dbname != dbname || origin.tablename != sourceSchema.tablename)
+                countScan = nullptr;
+        }
+        if (countScan) {
+            for (const auto& aggregate : state->aggregates) {
+                auto filter = bindStoredCountFilter(*engine, dbname, sourceSchema, state->sourceOrdinal,
+                    *aggregate.call);
+                if (!filter) break;
+                countFilters.push_back(std::move(*filter));
+            }
+            if (countFilters.size() != state->aggregates.size()) countScan = nullptr;
+        }
+    }
     OpPtr root = std::move(source);
     if (select->whereClause) root = std::make_unique<PreparedFilterOp>(std::move(root), state);
     if (!state->aggregates.empty() || select->having)
         root = std::make_unique<PreparedAggregateOp>(std::move(root), state);
+    if (countScan)
+        root = std::make_unique<PreparedStoredCountOp>(std::move(root), countScan, state,
+            std::move(countWhere), std::move(countFilters));
     if(!state->windowStages.empty())root=makePreparedWindowStages(std::move(root),state);
     if (!state->keys.empty() && !orderedWindow) root = std::make_unique<PreparedSortOp>(std::move(root), state);
     auto* tiesSort=select->withTies?dynamic_cast<PreparedSortOp*>(root.get()):nullptr;

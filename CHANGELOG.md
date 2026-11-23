@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>统计符合条件的记录更快 · 2026-11-23</summary>
+
+比如同时统计有库存的商品和缺货商品各有多少。读一遍商品表就可以得到两个数字。
+
+[用法](docs/MANUAL.md#聚合) · [测试报告](docs/test-report.md#ordinary-stored-count-20261123) · [性能报告](docs/performance-report-2026-10-30.md#ordinary-stored-count-cost-20261123)
+
+</details>
+
+<details>
 <summary>按文字长度和数字筛选更快 · 2026-11-23</summary>
 
 比如找名称超过两个字、库存大于零的商品。数据库在读取时就能筛掉不符合条件的商品。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>按条件取订单号最大的几笔更快 · 2026-11-23</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-23 · 按条件取订单号最大的几笔更快
 
 比如只看备注超过两个字、订单号最大的 5 笔订单。数据库从大到小查找，找到 5 笔就可以停下。
 
 [用法](docs/MANUAL.md#用多列一起区分记录) · [测试报告](docs/test-report.md#composite-primary-filtered-order-20261123) · [性能报告](docs/performance-report-2026-10-30.md#composite-primary-filtered-order-cost-20261123)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-23 · 一家店有很多订单时，翻页也更快
 

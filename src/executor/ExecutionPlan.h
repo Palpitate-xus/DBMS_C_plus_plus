@@ -318,6 +318,7 @@ public:
 private:
     friend class ProjectOp;
     friend class PreparedSortOp;
+    friend class PreparedStoredCountOp;
     friend class QueryPlanner;
     // Private consumer capability, never retained across pulls. Other next()
     // callers and subclasses keep the complete-row materialization contract.
@@ -1415,6 +1416,9 @@ public:
     // the complete query namespace; this consumes its retained typed AST.
     static bool supportsPreparedSelectPlan(const SelectStmt& select);
     static bool usesDeclaredFilterCollations(const SelectStmt& select, const TableSchema& schema);
+    static bool supportsStoredCountSelect(const SelectStmt& select);
+    static bool usesStoredCountSource(StorageEngine& engine, const std::string& database,
+        const SelectStmt& select, const TableSchema& schema, size_t sourceOrdinal);
     static bool supportsPreparedSourceSelectPlan(const SelectStmt& select, bool selectBodyOnly = false);
     static bool mayUseIntegerPrimaryKeyPage(StorageEngine* engine, const std::string& database,
         const PreparedQuery& query, const SelectStmt& select);

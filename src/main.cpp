@@ -21087,14 +21087,18 @@ class PreparedWithDmlRuntime {
         if(select!=readRoot_ && !canReadWholeTable(session_,table))return {};
         const auto descendants=item->only ? vector<string>{}
             : dbms::inheritedTableDescendants(g_engine,session_.currentDB,table);
-        if (descendants.empty() && (select != readRoot_ || !select->whereClause)) return {};
+        const bool storedCount = select == readRoot_ && descendants.empty() &&
+            dbms::QueryPlanner::supportsStoredCountSelect(*select) && canReadWholeTable(session_, table);
+        if (descendants.empty() && (select != readRoot_ || (!select->whereClause && !storedCount))) return {};
         auto parent=g_engine.getTableSchema(session_.currentDB,table);
         const bool declaredFilter = select == readRoot_ &&
             dbms::QueryPlanner::usesDeclaredFilterCollations(*select, parent);
         if (descendants.empty()) {
-            if (!declaredFilter) return {};
+            if (!declaredFilter && !(storedCount && dbms::QueryPlanner::usesStoredCountSource(
+                    g_engine, session_.currentDB, *select, parent, range.ordinal)))
+                return {};
             checkPhysicalSourcePermission(select, range, table);
-            readRootDeclaredCollations_ = true;
+            if (declaredFilter) readRootDeclaredCollations_ = true;
             schema = std::move(parent);
             return make_unique<dbms::TableScanOp>(&g_engine, session_.currentDB, table);
         }

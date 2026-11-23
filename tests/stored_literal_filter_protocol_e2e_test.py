@@ -3,6 +3,7 @@
 
 import importlib.util
 from pathlib import Path
+import socket
 from struct import pack, unpack
 
 
@@ -18,10 +19,10 @@ def main():
     typed = client.typed
     table = "stored_filter_inputs"
 
-    def simple(statement, tag):
-        frames = client.simple_query(sock, statement)
+    def simple(statement, tag, ready=b"I", connection=sock):
+        frames = client.simple_query(connection, statement)
         rows, state, _, _, actual = runner.decode_wire_result(frames)
-        assert (state, actual, frames[-1]) == (None, tag, (b"Z", b"I")), frames
+        assert (state, actual, frames[-1]) == (None, tag, (b"Z", ready)), frames
         return rows
 
     def stats():
@@ -93,6 +94,50 @@ def main():
                      [9007199254740993], b"length_scan") == [1, 7, 0, 0]
         assert simple(f"SELECT count(*) FROM {table} WHERE shop IS NULL AND ord>0", "SELECT 1") == [["1"]]
 
+        unfiltered = f"SELECT count(*) AS total, count(shop), count(ord) FROM {table}"
+        filtered = f"SELECT count(*), count(ord) FILTER (WHERE shop IS NOT NULL) FROM {table} " \
+                   "WHERE 3<length(shop) AND ord>0"
+        for sql, expected in ((unfiltered, [["7", "6", "6"]]), (filtered, [["3", "3"]])):
+            before = stats()
+            assert simple(sql, "SELECT 1") == expected
+            assert [right - left for left, right in zip(before, stats(), strict=True)] == [1, 7, 0, 0]
+            plan = simple("EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF) " + sql, "EXPLAIN")
+            assert any("StoredCount" in row[0] and "rows=1" in row[0] for row in plan), plan
+            assert any("TableScan" in row[0] and "rows=7" in row[0] for row in plan), plan
+            assert all("TypedFilter" not in row[0] for row in plan), plan
+
+        prepare(b"count", f"SELECT count(*) AS total, count(ord) AS numbers FROM {table} "
+                "WHERE shop=$1 AND ord>=$2 AND $3>=ord")
+        for shop, lower, upper, expected in (("青木", 9, 9, 1), ("O'Brien", 0, 2**63 - 1, 2),
+                                             ("absent", 0, 2**63 - 1, 0), ("青木", 10, 10, 0)):
+            value = shop.encode()
+            args = pack("!I", len(value)) + value + pack("!IqIq", 8, lower, 8, upper)
+            binding = b"\0count\0" + pack("!HHH", 1, 1, 3) + args + pack("!HH", 1, 1)
+            before = stats()
+            sock.sendall(typed(b"B", binding) + typed(b"D", b"P\0") +
+                         typed(b"E", b"\0" * 5) + typed(b"S"))
+            frames = client.read_until_ready(sock)
+            assert [kind for kind, _ in frames] == [b"2", b"T", b"D", b"C", b"Z"], frames
+            _, _, _, fields, _, oids = runner.decode_wire_result([frames[1]], include_types=True)
+            assert (fields, oids) == (["total", "numbers"], [20, 20]), frames
+            assert frames[2:] == [(b"D", pack("!Hiqiq", 2, 8, expected, 8, expected)),
+                                  (b"C", b"SELECT 1\0"), (b"Z", b"I")], frames
+            assert [right - left for left, right in zip(before, stats(), strict=True)] == [1, 7, 0, 0]
+
+        with socket.create_connection(("127.0.0.1", server["port"]), timeout=runner.wire_timeout()) as writer:
+            client.startup(writer, "alice", "info")
+            simple("BEGIN ISOLATION LEVEL REPEATABLE READ", "BEGIN", b"T")
+            assert simple(unfiltered, "SELECT 1", b"T") == [["7", "6", "6"]]
+            simple(f"INSERT INTO {table} VALUES ('new',77)", "INSERT 0 1", connection=writer)
+            assert simple(unfiltered, "SELECT 1", b"T") == [["7", "6", "6"]]
+            simple("SAVEPOINT count_update", "SAVEPOINT", b"T")
+            simple(f"UPDATE {table} SET shop=NULL WHERE ord=9", "UPDATE 1", b"T")
+            assert simple(unfiltered, "SELECT 1", b"T") == [["7", "5", "6"]]
+            simple("ROLLBACK TO SAVEPOINT count_update", "ROLLBACK", b"T")
+            assert simple(unfiltered, "SELECT 1", b"T") == [["7", "6", "6"]]
+            simple("COMMIT", "COMMIT")
+            assert simple(unfiltered, "SELECT 1") == [["8", "7", "7"]]
+
         simple("CREATE SCHEMA stored_predicate_routine", "CREATE SCHEMA")
         simple("CREATE FUNCTION stored_predicate_routine.length(s text) RETURNS integer LANGUAGE SQL "
                "IMMUTABLE AS $$SELECT CASE WHEN s IS NULL THEN 1 ELSE 0 END$$", "CREATE FUNCTION")
@@ -100,6 +145,32 @@ def main():
         assert simple(stored, "SELECT 1") == [["8"]]
         plan = simple("EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF) " + stored, "EXPLAIN")
         assert all("StoredFilter" not in row[0] for row in plan), plan
+        routine_count = f"SELECT count(*) FROM {table} WHERE stored_predicate_routine.length(shop)>0"
+        assert simple(routine_count, "SELECT 1") == [["1"]]
+        plan = simple("EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF) " + routine_count, "EXPLAIN")
+        assert all("StoredCount" not in row[0] for row in plan), plan
+
+        simple("CREATE TABLE counted_access(id integer, note text)", "CREATE TABLE")
+        simple("INSERT INTO counted_access VALUES (1,NULL),(2,'private'),(3,'private')", "INSERT 0 3")
+        simple("CREATE ROLE count_reader", "CREATE ROLE")
+        simple("GRANT SELECT ON counted_access TO count_reader", "GRANT")
+        simple("CREATE POLICY count_visible ON counted_access FOR SELECT TO count_reader USING (id<2)",
+               "CREATE POLICY")
+        simple("ALTER TABLE counted_access ENABLE ROW LEVEL SECURITY", "ALTER TABLE")
+        simple("SET ROLE count_reader", "SET")
+        for tail in ("", " WHERE id>=0"):
+            sql = "SELECT count(*), count(note) FROM counted_access" + tail
+            assert simple(sql, "SELECT 1") == [["1", "0"]]
+            plan = simple("EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF) " + sql, "EXPLAIN")
+            assert any("Aggregate" in row[0] and "rows=1" in row[0] for row in plan), plan
+        simple("RESET ROLE", "RESET")
+
+        simple("CREATE TABLE counted_parent(id integer, note text)", "CREATE TABLE")
+        simple("CREATE TABLE counted_child() INHERITS (counted_parent)", "CREATE TABLE")
+        simple("INSERT INTO counted_parent VALUES (1,'parent')", "INSERT 0 1")
+        simple("INSERT INTO counted_child VALUES (2,NULL)", "INSERT 0 1")
+        for base, expected in (("counted_parent", [["2", "1"]]), ("ONLY counted_parent", [["1", "1"]])):
+            assert simple("SELECT count(*), count(note) FROM " + base, "SELECT 1") == expected
     finally:
         runner.stop_ours(server)
     print("[STORED LITERAL FILTER PROTOCOL] exact binary inputs and results passed")

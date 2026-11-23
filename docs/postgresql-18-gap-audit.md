@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-23 · 扫描普通表时累计计数
+
+裸 `COUNT(*)`、`COUNT(列名)` 和受支持的筛选可以在已有单表扫描中直接计数。普通无排序和去重的全局计数也无需保存每条输入。并行聚合、复杂分组和索引覆盖计数仍待补齐。`QRY-07` 和 `OPT-01` 保持现有状态。[测试](test-report.md#ordinary-stored-count-20261123) · [性能](performance-report-2026-10-30.md#ordinary-stored-count-cost-20261123)
+
 ## 2026-11-23 · 普通表和有序分页共用已准备的筛选条件
 
 受支持的空值、文本、文字长度和整数比较可以直接检查表中的值。普通表先按快照读行，再筛掉不符合条件的行。用多列主键分页时，共用同样的检查方式。通用表达式编译、参数化路径和复杂筛选下推仍待补齐。`P0-01`、`SQL-10` 和 `OPT-01` 保持部分实现。[测试](test-report.md#ordinary-stored-predicate-20261123) · [性能](performance-report-2026-10-30.md#ordinary-stored-predicate-cost-20261123)

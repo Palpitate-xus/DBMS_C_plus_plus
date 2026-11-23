@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-23 · 单表计数
+
+PostgreSQL 的聚合节点随输入行更新聚合状态，整表 `COUNT(*)` 需要扫描表或包含全部行的索引。SQLite 的 `Count` 指令可遍历 B-tree 页来获得精确行数。DuckDB 用批次行数累计 `COUNT(*)`，按列计数时检查有效值。[PostgreSQL 聚合实现](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/executor/nodeAgg.c) · [PostgreSQL 计数文档](https://www.postgresql.org/docs/18/functions-aggregate.html) · [SQLite 指令](https://www.sqlite.org/opcode.html) · [DuckDB 计数实现](https://github.com/duckdb/duckdb/blob/v1.5.6/src/function/aggregate/distributive/count.cpp)
+
+本项目在普通表行通过快照检查后直接累计受支持的计数，同一个查询里的多个计数共用一次扫描。实测 8,355 行且全部符合筛选条件时，普通请求中位数为 31.299 毫秒，PostgreSQL 为 3.433 毫秒。扫描仍逐行读取并检查数据，列向量聚合、并行聚合、覆盖索引计数和完整的分组聚合能力仍有差距。[测试](test-report.md#ordinary-stored-count-20261123) · [性能对照](performance-report-2026-10-30.md#ordinary-stored-count-cost-20261123)
+
 ## 2026-11-23 · 在读取表行时应用已准备的比较条件
 
 PostgreSQL 在执行器初始化时把表达式整理成一组步骤，SQLite 把查询生成字节码后执行。DuckDB 的算子处理固定大小的列向量，并有专门的常量向量表示。[PostgreSQL 执行器](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/executor/README) · [SQLite 字节码](https://www.sqlite.org/opcode.html) · [DuckDB 执行格式](https://duckdb.org/docs/1.5/internals/vector)
