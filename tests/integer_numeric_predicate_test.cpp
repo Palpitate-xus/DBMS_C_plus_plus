@@ -55,6 +55,31 @@ int main() {
         expectRows(database, table.tablename, {"=", "id", "9223372036854775808.0"}, 0);
         expectRows(database, table.tablename, {"between", "id", "9007199254740992.9 9007199254740993.1"}, 1);
         expectRows(database, table.tablename, {"notbetween", "id", "9007199254740992.9 9007199254740993.1"}, 5);
+        expectRows(database, table.tablename, {"between", "id", "+0001 9007199254740992"}, 3);
+        expectRows(database, table.tablename, {"notbetween", "id", "2 -1"}, 6);
+        expectRows(database, table.tablename, {"notbetween", "id", "-9223372036854775808 9223372036854775807"}, 0);
+        expectRows(database, table.tablename, {"notbetween", "id", "9223372036854775808 9223372036854775809"}, 6);
+        const auto storedSchema = g_engine.getTableSchema(database, table.tablename);
+        dbms::PlanContext intervalPlan;
+        intervalPlan.dbname = database;
+        intervalPlan.tablename = table.tablename;
+        intervalPlan.selectCols = {"id"};
+        dbms::StorageEngine::Condition interval{"typedexpr", "", "id NOT BETWEEN 1 AND 2 AND id >= 0"};
+        dbms::StorageEngine::bindStoredComparison(interval, storedSchema);
+        assert(interval.literalComparisons && interval.literalComparisons->size() == 2);
+        using IntegerRange = dbms::StorageEngine::Condition::LiteralComparison::IntegerRange;
+        assert((std::get<IntegerRange>(interval.literalComparisons->front().value) == IntegerRange{1, 2}));
+        intervalPlan.conds = {interval};
+        auto intervalResult = dbms::QueryPlanner::executePlanChecked(
+            dbms::QueryPlanner::buildSelectPlan(&g_engine, intervalPlan));
+        assert(intervalResult.ok && intervalResult.rows.size() == 3);
+        interval.value = "id NOT BETWEEN 1.5 AND 2";
+        dbms::StorageEngine::bindStoredComparison(interval, storedSchema);
+        assert(!interval.literalComparisons);
+        intervalPlan.conds = {interval};
+        intervalResult = dbms::QueryPlanner::executePlanChecked(
+            dbms::QueryPlanner::buildSelectPlan(&g_engine, intervalPlan));
+        assert(intervalResult.ok && intervalResult.rows.size() == 5);
         if (indexed) {
             dbms::PlanContext context;
             context.dbname = database;

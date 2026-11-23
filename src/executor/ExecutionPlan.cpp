@@ -2608,13 +2608,29 @@ static std::optional<StoredIntegerField> storedIntegerField(const TableSchema& s
     return StoredIntegerField{offset, width};
 }
 
+using IntegerInterval = std::pair<int64_t, int64_t>;
+
+static IntegerInterval storedIntegerLimits(size_t width) {
+    if (width == sizeof(int16_t)) return {INT16_MIN, INT16_MAX};
+    if (width == sizeof(int32_t)) return {INT32_MIN, INT32_MAX};
+    return {INT64_MIN, INT64_MAX};
+}
+
+static StorageEngine::IntegerPartitionFilter outsideIntegerInterval(int64_t lower, int64_t upper) {
+    if (lower > upper) return {{{INT64_MIN, INT64_MAX}}, false};
+    StorageEngine::IntegerPartitionFilter result;
+    if (lower != INT64_MIN) result.intervals.emplace_back(INT64_MIN, lower - 1);
+    if (upper != INT64_MAX) result.intervals.emplace_back(upper + 1, INT64_MAX);
+    return result;
+}
+
 struct StoredPredicate {
-    enum class Input { IsNull, IsNotNull, Text, Integer, TextLength };
+    enum class Input { IsNull, IsNotNull, Text, Integer, TextLength, IntegerOutsideRange };
     size_t column;
     std::string name, type;
     Input input;
     StoredComparison comparison = StoredComparison::Equal;
-    std::variant<std::string, int64_t> constant;
+    std::variant<std::string, int64_t, IntegerInterval> constant;
     std::optional<StoredIntegerField> integer = std::nullopt;
 };
 
@@ -2666,6 +2682,11 @@ static std::optional<bool> storedPredicatesMatch(const StoredPredicates& predica
         if (predicate.integer) {
             const auto actual = predicate.integer->read(row);
             if (!actual) return {};
+            if (predicate.input == Input::IntegerOutsideRange) {
+                const auto [lower, upper] = std::get<IntegerInterval>(predicate.constant);
+                if (*actual >= lower && *actual <= upper) return false;
+                continue;
+            }
             const auto expected = std::get<int64_t>(predicate.constant);
             if (!matchesStoredComparison(predicate.comparison, (*actual > expected) - (*actual < expected)))
                 return false;
@@ -2721,14 +2742,18 @@ static bool storedPredicatesContradict(const TableSchema& schema, const StoredPr
                 rules.text = &text;
             } else if (predicate.integer || predicate.input == Input::TextLength) {
                 if (!rules.numbers) {
-                    const auto width = predicate.integer ? predicate.integer->width : 0;
-                    const int64_t low = width == 0 ? 0 : width == 2 ? INT16_MIN : width == 4 ? INT32_MIN : INT64_MIN;
-                    const int64_t high = width == 2 ? INT16_MAX : width == 4 ? INT32_MAX : INT64_MAX;
-                    rules.numbers = Range{{{low, high}}, false};
+                    const auto limits = predicate.integer
+                        ? storedIntegerLimits(predicate.integer->width) : IntegerInterval{0, INT64_MAX};
+                    rules.numbers = Range{{limits}, false};
                 }
                 static constexpr std::string_view operators[] = {"=", "<>", "<", "<=", ">", ">="};
-                rules.numbers->intersect(*Range::comparison(operators[static_cast<size_t>(predicate.comparison)],
-                    std::get<int64_t>(predicate.constant)));
+                if (predicate.input == Input::IntegerOutsideRange) {
+                    const auto [lower, upper] = std::get<IntegerInterval>(predicate.constant);
+                    rules.numbers->intersect(outsideIntegerInterval(lower, upper));
+                } else {
+                    rules.numbers->intersect(*Range::comparison(operators[static_cast<size_t>(predicate.comparison)],
+                        std::get<int64_t>(predicate.constant)));
+                }
                 if (rules.numbers->intervals.empty()) return false;
             }
         }
@@ -3478,9 +3503,9 @@ static bool resolveCompositeInput(const Expr* expr, bool bound,
     return true;
 }
 
-static const FunctionCallExpr* inclusiveBetween(const Expr* expression) {
+static const FunctionCallExpr* rangePredicateCall(const Expr* expression) {
     const auto* call = dynamic_cast<const FunctionCallExpr*>(expression);
-    if (!call || call->preparedSubquery || call->funcName != "BETWEEN" ||
+    if (!call || call->preparedSubquery || (call->funcName != "BETWEEN" && call->funcName != "NOT BETWEEN") ||
         !call->schema.empty() || (call->args.size() != 3 && call->args.size() != 4) ||
         call->filter || call->hasOver || call->distinct || !call->namedArgs.empty() ||
         !call->orderBy.empty() || call->identitySequenceOid) return nullptr;
@@ -3490,8 +3515,8 @@ static const FunctionCallExpr* inclusiveBetween(const Expr* expression) {
 static bool collectCompositeBetween(const TableSchema& schema, size_t suffix,
         const Expr* expression, std::optional<size_t> range,
         std::vector<CompositeSuffixBound>& bounds) {
-    const auto* call = inclusiveBetween(expression);
-    if (!call) return false;
+    const auto* call = rangePredicateCall(expression);
+    if (!call || call->funcName != "BETWEEN") return false;
     const auto& column = schema.cols[suffix];
     const auto type = compositeEqualityType(column);
     if (type.empty() || type == "text") return false;
@@ -3698,7 +3723,7 @@ static const ColumnRefExpr* boundIntegerBetweenColumn(const FunctionCallExpr& be
     return first;
 }
 
-static std::optional<std::pair<int64_t, int64_t>> integerBetweenEndpoints(
+static std::optional<IntegerInterval> integerBetweenEndpoints(
     const FunctionCallExpr& between, const PreparedQuery* query);
 
 // Only total, row-local predicates may reject a row before materialization.
@@ -3754,13 +3779,19 @@ static std::optional<StoredPredicates> bindStoredPredicates(StorageEngine& engin
     };
     for (const auto* clause : residual) {
         if (!clause || clause->preparedSubquery) return {};
-        if (const auto* between = inclusiveBetween(clause)) {
+        if (const auto* between = rangePredicateCall(clause)) {
             const auto* column = boundIntegerBetweenColumn(*between, schema, source);
             if (!column) return {};
             const auto endpoints = integerBetweenEndpoints(*between, query);
             if (!endpoints) return {};
             auto predicate = predicateFor(*column, Input::Integer);
             predicate.integer = storedIntegerField(schema, predicate.column);
+            if (between->funcName == "NOT BETWEEN") {
+                predicate.input = Input::IntegerOutsideRange;
+                predicate.constant = *endpoints;
+                filter.push_back(std::move(predicate));
+                continue;
+            }
             predicate.comparison = StoredComparison::GreaterEqual;
             predicate.constant = endpoints->first;
             filter.push_back(predicate);
@@ -4605,6 +4636,7 @@ struct IntegerPageBounds {
     std::optional<int64_t> lower;
     std::optional<int64_t> upper;
     std::vector<OrderedPrimaryKeyNullTest> nullTests;
+    std::optional<StorageEngine::IntegerPartitionFilter> outside;
 
     void constrain(bool isLower, bool inclusive, int64_t value) {
         if (!inclusive) {
@@ -4617,6 +4649,33 @@ struct IntegerPageBounds {
         }
         if (isLower) lower = std::max(lower.value_or(INT64_MIN), value);
         else upper = std::min(upper.value_or(INT64_MAX), value);
+    }
+
+    void exclude(const IntegerInterval& interval) {
+        if (interval.first > interval.second) return;
+        auto remaining = outsideIntegerInterval(interval.first, interval.second);
+        if (outside) outside->intersect(remaining);
+        else outside = std::move(remaining);
+    }
+
+    bool applyExclusions(const TableSchema& schema, size_t key) {
+        if (!outside) return true;
+        const auto field = storedIntegerField(schema, key);
+        if (!field) return false;
+        const auto [minKey, maxKey] = storedIntegerLimits(field->width);
+        outside->intersect({{{std::max(minKey, lower.value_or(minKey)),
+                              std::min(maxKey, upper.value_or(maxKey))}}, false});
+        // The primary-key reader can prove one contiguous interval per read.
+        if (outside->intervals.size() > 1) return false;
+        if (outside->intervals.empty()) {
+            lower = INT64_MAX;
+            upper = INT64_MIN;
+        } else {
+            const auto [start, end] = outside->intervals.front();
+            if (lower || start != minKey) lower = start;
+            if (upper || end != maxKey) upper = end;
+        }
+        return true;
     }
 };
 
@@ -4668,7 +4727,7 @@ static std::optional<IntegerPageEndpoint> integerPageEndpoint(const Expr* expres
     return input ? parseIntegerPageEndpoint(input->value, std::move(type)) : std::nullopt;
 }
 
-static std::optional<std::pair<int64_t, int64_t>> integerBetweenEndpoints(
+static std::optional<IntegerInterval> integerBetweenEndpoints(
         const FunctionCallExpr& between, const PreparedQuery* query) {
     const auto lower = integerPageEndpoint(between.args[1].get(), query);
     const auto upper = integerPageEndpoint(between.args[2].get(), query);
@@ -4704,6 +4763,15 @@ static std::optional<StorageEngine::IntegerPartitionFilter> integerPartitionPred
             (!declaration || (declaration->actualOid == oid && declaration->codecOid == oid &&
                 declaration->kind == DatumKind::Scalar && !declaration->enumType));
     };
+    if (const auto* between = rangePredicateCall(expression)) {
+        if (!isKey(between->args.front().get()) ||
+            (between->args.size() == 4 && !isKey(between->args.back().get()))) return {};
+        const auto interval = integerBetweenEndpoints(*between, ownsStatementInputs ? &query : nullptr);
+        if (!interval) return {};
+        if (between->funcName == "NOT BETWEEN") return outsideIntegerInterval(interval->first, interval->second);
+        if (interval->first > interval->second) return Filter{};
+        return Filter{{*interval}, false};
+    }
     if (const auto* test = dynamic_cast<const UnaryOpExpr*>(expression)) {
         if (!isKey(test->operand.get())) return std::nullopt;
         if (test->op == "IS NULL") return Filter{{}, true};
@@ -4753,13 +4821,16 @@ static bool intersectIntegerPageBounds(const Expr* expression, const QueryColumn
                                        const TableSchema& schema, const PreparedQuery& query,
                                        IntegerPageBounds& bounds) {
     if (!expression || expression->preparedSubquery) return false;
-    if (const auto* between = inclusiveBetween(expression)) {
+    if (const auto* between = rangePredicateCall(expression)) {
         const auto* column = boundIntegerBetweenColumn(*between, schema, key.sourceOrdinal);
         if (!column || column->binding->columnOrdinal != key.columnOrdinal) return false;
         const auto endpoints = integerBetweenEndpoints(*between, &query);
         if (!endpoints) return false;
-        bounds.constrain(true, true, endpoints->first);
-        bounds.constrain(false, true, endpoints->second);
+        if (between->funcName == "NOT BETWEEN") bounds.exclude(*endpoints);
+        else {
+            bounds.constrain(true, true, endpoints->first);
+            bounds.constrain(false, true, endpoints->second);
+        }
         return true;
     }
     if (const auto* test = dynamic_cast<const UnaryOpExpr*>(expression)) {
@@ -4813,8 +4884,9 @@ static bool intersectIntegerPageBounds(const Expr* expression, const QueryColumn
 static std::optional<IntegerPageBounds> integerPageBounds(const PreparedQuery& query, const SelectStmt& select,
                                                           const QueryColumnBinding& key, const TableSchema& schema) {
     IntegerPageBounds bounds;
-    if (select.whereClause && !intersectIntegerPageBounds(select.whereClause.get(), key, schema, query, bounds))
-        return {};
+    if (select.whereClause &&
+        (!intersectIntegerPageBounds(select.whereClause.get(), key, schema, query, bounds) ||
+         !bounds.applyExclusions(schema, key.columnOrdinal))) return {};
     // The existing filter eagerly decodes stored inputs. Only use bitmap
     // rejection if that decoding requires no array/domain/reference handling.
     if (!bounds.nullTests.empty())
@@ -4882,6 +4954,11 @@ static std::optional<std::pair<size_t, IntegerPageBounds>> completeIntegerPrimar
         if (!predicate.integer || (key && predicate.column != *key) ||
             !isSingleColumnPrimaryKey(schema, predicate.name)) return {};
         key = predicate.column;
+        if (predicate.input == Input::IntegerOutsideRange) {
+            bounds.exclude(std::get<IntegerInterval>(predicate.constant));
+            inequality = true;
+            continue;
+        }
         const auto endpoint = std::get<int64_t>(predicate.constant);
         switch (predicate.comparison) {
             case StoredComparison::Equal:
@@ -4896,7 +4973,8 @@ static std::optional<std::pair<size_t, IntegerPageBounds>> completeIntegerPrimar
         }
         inequality = true;
     }
-    if (!key || !inequality) return {};
+    if (!key || !inequality || !bounds.applyExclusions(schema, *key) || (!bounds.lower && !bounds.upper))
+        return {};
     return std::pair<size_t, IntegerPageBounds>{*key, std::move(bounds)};
 }
 

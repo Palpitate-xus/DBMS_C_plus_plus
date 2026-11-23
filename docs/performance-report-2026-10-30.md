@@ -4,6 +4,53 @@
 
 > 复核发现，几组早期 COPY 计时在每个对照场景中使用了固定的执行顺序。耗时差可能包含顺序影响。这项问题涉及默认值求值、按列查找、默认值标记、短 CSV 导出和短查询导出的配对计时。[默认值求值](#copy-default-evaluation-order-cost-20261122) · [按列查找](#copy-identity-input-cost-20261122) · [默认值标记](#copy-default-marker-cost-20261122) · [CSV 导出](#copy-csv-out-cost-20261122) · [查询导出](#copy-query-stdout-cost-20261122)
 
+<a id="integer-not-between-cost-20261123"></a>
+## 2026-11-23 · 排除整数范围的查询耗时
+
+基线为 `ecf27627`。以 GCC 13.3、CMake C++17 `-O2` 构建，在 Intel Xeon E5-2678 v3 上对照。表 `outside_clustered(id integer PRIMARY KEY, n integer)` 按主键从 1 到 8,192 写入。能被 9 整除的主键令 `n=id%64`，其余写入 `NULL`，每条 `INSERT` 写 128 行。
+
+```sql
+SELECT id AS v FROM outside_clustered WHERE id NOT BETWEEN 1 AND 8176 ORDER BY id;
+SELECT id AS v FROM outside_clustered WHERE id NOT BETWEEN -2147483648 AND 8176 ORDER BY id LIMIT 8;
+SELECT id AS v FROM outside_clustered WHERE id>=8000 AND id<=8192
+AND id NOT BETWEEN 8100 AND 8192 ORDER BY id DESC LIMIT 16;
+SELECT count(*) AS v FROM outside_clustered WHERE n NOT BETWEEN 5 AND 13;
+SELECT count(*) AS v FROM outside_clustered WHERE n BETWEEN 5 AND 13 AND n NOT BETWEEN 5 AND 13;
+```
+
+三个对照为 `SELECT 1 AS v`、单行主键查询 `id=42`，以及用 `id BETWEEN 1 AND 128` 筛选后 `UNION SELECT 0 ORDER BY v`。每个进程对每条 SQL 预热一次并计时八次，从发送请求计到收到 `ReadyForQuery`。逐次核对完整结果、列名、类型和消息顺序。内存盘用 `/dev/shm` 和 CPU 21/22，磁盘用 `/tmp` 和 CPU 25/26，各交换一次版本先后与客户端和服务端 CPU。新旧间每种介质计时 256 次。使用相同内存盘和 CPU 21/22 对照 PostgreSQL 18.6，共 256 次，关闭 PostgreSQL 的 JIT 和并行查询。
+
+初版加速了有序读取和计数。第一条无 `LIMIT` 的普通查询仍需约 1 秒。测试专用程序在 8,192 行扫描中观测到 8,192 次上界 `8176` 的高精度数值转换，调用栈定位到筛选器逐行求值的入口。最终版在扫描前绑定纯整数端点，保留原有的小数计算。取数统计与用时分开测量。
+
+各轮用时中位数范围如下，单位为毫秒。
+
+| 查询 | 内存盘旧版 | 内存盘新版 | 磁盘旧版 | 磁盘新版 | 同轮内存盘新版 | PostgreSQL 18.6 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `SELECT 1` | 0.43–0.44 | 0.37–0.43 | 0.38–0.40 | 0.38–0.44 | 0.39–0.40 | 0.11–0.16 |
+| 主键查一行 | 2.59–2.78 | 2.45–2.56 | 4.89–8.04 | 5.64–9.20 | 2.58–2.59 | 0.14–0.18 |
+| 正向 `BETWEEN` 合并前 128 行 | 6.57–8.43 | 6.48–6.49 | 11.69–15.02 | 8.37–13.28 | 5.98–6.45 | 1.42–1.49 |
+| 排除范围后排序，可能命中两段 | 1020.57–1028.46 | 21.30–21.71 | 979.48–996.88 | 21.75–28.75 | 20.15–21.34 | 4.02–4.26 |
+| 两端限制后只剩后段，取前 8 行 | 260.06–509.08 | 3.18–3.26 | 247.68–516.31 | 6.73–9.52 | 3.02–3.28 | 4.07–4.21 |
+| 附加边界后只剩一段，倒序取 16 行 | 108.40–115.00 | 4.25–5.97 | 111.14–639.43 | 11.49–13.64 | 5.78–6.22 | 0.58–0.71 |
+| 非主键列按排除范围计数 | 190.27–201.43 | 18.38–22.51 | 192.58–624.29 | 22.82–78.65 | 20.83–21.11 | 1.53–1.60 |
+| 矛盾范围计数 | 325.49–342.11 | 3.45–4.26 | 339.15–345.22 | 6.64–11.46 | 4.28–4.32 | 1.44–1.45 |
+
+普通查询在内存盘从约 1 秒降到约 21 毫秒，仍读取 8,192 行。同轮 PostgreSQL 约 4 毫秒。两个只剩一个区间的分页查询分别读取 8 行和 16 行。两组磁盘点查对照一组快约 30%，一组慢约 88%，正向合并对照一组快约 44%，一组慢约 14%。这些波动的原因尚未确定。
+
+磁盘补测把新旧实例固定到同一个服务端 CPU，同一条 SQL 交替请求。使用 CPU 17/18，交换客户端和服务端，每个版本每条对照计时 20 次，三条对照共 240 次。点查中位数为旧版 4.52–5.56 毫秒、新版 4.56–5.60 毫秒，两组增幅均小于 1%。正向合并中位数由 8.81–13.29 毫秒降到 8.79–12.98 毫秒。
+
+分区另以原生接口创建内存盘夹具。整数键 `k` 从 1 到 4,096，顺序分成 16 个范围，每段 256 行，另有一个空默认分区。查询为 `SELECT k FROM events WHERE 条件 ORDER BY k`，三条条件分别为 `k BETWEEN 1537 AND 2048`、`k BETWEEN 1025 AND 3072 AND k NOT BETWEEN 1537 AND 2560` 和 `k BETWEEN 100 AND 1`。计时范围为绑定到返回完整结果，使用 CPU 31 和 32、交换新旧顺序，每个进程每条语句计时十次，共 120 次。这组原生计时和普通网络查询分别记录。
+
+| 分区查询 | 旧版中位数范围（毫秒） | 新版中位数范围（毫秒） |
+| --- | ---: | ---: |
+| 单一范围 | 111.79–111.99 | 20.38–20.92 |
+| 排除中间范围，返回两段 | 167.97–173.37 | 62.13–63.03 |
+| 反向边界，结果为空 | 108.66–118.24 | 3.84–4.15 |
+
+文件追踪另使用下文的 `many_leaves` 数据，查询 `SELECT id,k FROM many_leaves WHERE k BETWEEN 11 AND 51 AND k NOT BETWEEN 21 AND 39 ORDER BY id LIMIT 36`。返回的 36 行一致。叶文件打开数从 60 降到 8，8 KiB 读取从 120 次降到 16 次。去掉 `LIMIT 36` 时，两版均打开 60 个叶文件，读取 120 次。
+
+[正确性与恢复验证](test-report.md#integer-not-between-20261123) · [其他数据库的做法](postgresql-comparison.md#integer-not-between-comparison-20261123)
+
 <a id="integer-between-range-cost-20261123"></a>
 ## 2026-11-23 · 整数 `BETWEEN` 的查询耗时
 

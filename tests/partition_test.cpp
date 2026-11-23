@@ -338,6 +338,16 @@ static void test_integer_range_query_pruning() {
     const auto included = prepared(table, "k >= 15 AND k < 20");
     assert(!included.ok && included.errorSqlState == "58030");
 
+    const auto between = prepared(table, "k BETWEEN 5 AND 9");
+    assert(between.ok && (between.structuredRows == std::vector<std::vector<std::string>>{{"5"}, {"9"}}));
+    const auto outside = prepared(table, "k BETWEEN 5 AND 20 AND k NOT BETWEEN 15 AND 19");
+    assert(outside.ok &&
+        (outside.structuredRows == std::vector<std::vector<std::string>>{{"5"}, {"9"}, {"10"}, {"20"}}));
+    const auto reversed = prepared(table, "k BETWEEN 9 AND 5");
+    assert(reversed.ok && reversed.structuredRows.empty());
+    const auto wanted = prepared(table, "k BETWEEN 15 AND 19 AND k NOT BETWEEN 19 AND 15");
+    assert(!wanted.ok && wanted.errorSqlState == "58030");
+
     std::vector<std::vector<std::string>> directRows;
     std::vector<std::vector<bool>> directNulls;
     const std::vector<std::vector<std::string>> branches{{">=k 5", "<k 10"}, {"=k 20"}};
@@ -345,6 +355,15 @@ static void test_integer_range_query_pruning() {
         &directRows, &directNulls, nullptr, {}, nullptr, nullptr, branches);
     assert((directRows == std::vector<std::vector<std::string>>{{"5"}, {"9"}, {"20"}}));
     assert(std::filesystem::file_size(lateHeap) == 1);
+
+    const auto fallbackHeap = std::filesystem::path(db) / "events#fallback.dt";
+    const auto savedFallback = std::filesystem::path(db) / "events#fallback.saved";
+    std::filesystem::rename(fallbackHeap, savedFallback);
+    std::ofstream(fallbackHeap, std::ios::binary).put('x');
+    assert(prepared(table, "k BETWEEN 5 AND 9").ok);
+    const auto withNull = prepared(table, "(k BETWEEN 5 AND 9) OR k IS NULL");
+    assert(!withNull.ok && withNull.errorSqlState == "58030");
+    std::filesystem::rename(savedFallback, fallbackHeap);
 
     std::filesystem::rename(saved, lateHeap);
     const auto restored = prepared(table, "k >= 15 AND k < 20");

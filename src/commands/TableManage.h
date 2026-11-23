@@ -1501,9 +1501,10 @@ public:
             size_t rightIndex = 0;
         };
         struct LiteralComparison {
+            using IntegerRange = std::pair<int64_t, int64_t>;
             size_t column;
             std::string operation;
-            std::variant<std::string, int64_t> value;
+            std::variant<std::string, int64_t, IntegerRange> value;
         };
         std::string op;  // "<", ">", "=", "<=", ">=", "!=", "like"
         std::string colName;

@@ -901,7 +901,7 @@ static bool isIntegerStorageType(const std::string& type) {
 
 // Checked parsing must not use a valid datum (INT64_MIN) as its failure
 // sentinel. The legacy parseInt API remains for compatibility callers.
-static std::optional<int64_t> parseStoredInteger(const std::string& value) {
+static std::optional<int64_t> parseStoredInteger(std::string_view value) {
     if (value.empty()) return std::nullopt;
     const char* begin = value.data();
     const char* end = begin + value.size();
@@ -4755,7 +4755,7 @@ std::optional<std::pair<int64_t, int64_t>> StorageEngine::integerPartitionDomain
     return std::nullopt;
 }
 
-static std::optional<int64_t> parsePartitionInteger(const std::string& value) {
+static std::optional<int64_t> parseIntegerBound(std::string_view value) {
     if (value.empty()) return std::nullopt;
     if (value.front() == '+' && (value.size() == 1 || value[1] < '0' || value[1] > '9'))
         return std::nullopt;
@@ -4773,7 +4773,7 @@ static std::optional<StorageEngine::IntegerPartitionFilter> integerPartitionCond
         if (condition.op == "isnotnull") return Filter{{*domain}, false};
         if (!condition.decodedLiteralRhs || condition.patternIsNull ||
             (!condition.patternType.empty() && condition.patternType != "unknown")) return std::nullopt;
-        const auto value = parsePartitionInteger(condition.value);
+        const auto value = parseIntegerBound(condition.value);
         if (!value || *value < domain->first || *value > domain->second) return std::nullopt;
         return Filter::comparison(condition.op, *value);
     };
@@ -4834,7 +4834,7 @@ std::optional<std::vector<std::string>> StorageEngine::pruneIntegerPartitions(
     const auto readBound = [&](const std::string& text, bool lower) -> std::optional<int64_t> {
         // The row router requires a fully consumed finite endpoint and can
         // use lexical ordering for old spellings such as a trailing space.
-        const auto value = parsePartitionInteger(text);
+        const auto value = parseIntegerBound(text);
         if (!value) {
             const auto sentinel = SQLParser::toLower(trim(text));
             if (lower && sentinel == "minvalue") return domain->first;
@@ -29486,8 +29486,38 @@ static std::optional<ExprValue> storedComparisonConstant(const Expr* expression)
     return {};
 }
 
+static std::optional<size_t> literalComparisonColumn(const ColumnRefExpr* column, const TableSchema& table) {
+    if (!column || column->preparedSubquery || !column->schema.empty() || !column->table.empty()) return {};
+    for (size_t index = 0; index < table.len(); ++index)
+        if (table.cols[index].dataName == column->column && physicalComparisonColumn(table.cols[index]))
+            return index;
+    return {};
+}
+
+static std::optional<int64_t> storedRangeEndpoint(const Expr* expression) {
+    const auto value = storedComparisonConstant(expression);
+    if (!value) return {};
+    const auto type = ExprHelper::canonicalResultTypeName(value->typeName);
+    if (type != "smallint" && type != "integer" && type != "bigint") return {};
+    return parseIntegerBound(value->value);
+}
+
 static bool bindLiteralComparisons(const Expr* expression, const TableSchema& table,
         std::vector<StorageEngine::Condition::LiteralComparison>& result) {
+    if (const auto* range = dynamic_cast<const FunctionCallExpr*>(expression)) {
+        if (range->preparedSubquery || !range->schema.empty() || range->args.size() != 3 ||
+            (range->funcName != "BETWEEN" && range->funcName != "NOT BETWEEN") ||
+            range->filter || range->distinct || range->hasOver || !range->namedArgs.empty() ||
+            !range->orderBy.empty()) return false;
+        const auto index = literalComparisonColumn(dynamic_cast<const ColumnRefExpr*>(range->args[0].get()), table);
+        if (!index || !signedComparisonColumn(table.cols[*index])) return false;
+        const auto lower = storedRangeEndpoint(range->args[1].get());
+        const auto upper = storedRangeEndpoint(range->args[2].get());
+        if (!lower || !upper) return false;
+        using IntegerRange = StorageEngine::Condition::LiteralComparison::IntegerRange;
+        result.push_back({*index, range->funcName, IntegerRange{*lower, *upper}});
+        return true;
+    }
     const auto* binary = dynamic_cast<const BinaryOpExpr*>(expression);
     if (!binary || binary->preparedSubquery || binary->rowComparison ||
         binary->predicateCollation || binary->comparison) return false;
@@ -29506,13 +29536,9 @@ static bool bindLiteralComparisons(const Expr* expression, const TableSchema& ta
         if (op.front() == '<' && op != "<>") op.front() = '>';
         else if (op.front() == '>') op.front() = '<';
     }
-    if (!column || column->preparedSubquery || !column->schema.empty() ||
-        !column->table.empty()) return false;
-    size_t index = 0;
-    while (index < table.len() && table.cols[index].dataName != column->column) ++index;
-    if (index == table.len()) return false;
-    const auto& field = table.cols[index];
-    if (!physicalComparisonColumn(field)) return false;
+    const auto index = literalComparisonColumn(column, table);
+    if (!index) return false;
+    const auto& field = table.cols[*index];
     const auto value = storedComparisonConstant(input);
     if (!value) return false;
     const auto type = ExprHelper::canonicalResultTypeName(value->typeName);
@@ -29520,7 +29546,7 @@ static bool bindLiteralComparisons(const Expr* expression, const TableSchema& ta
         if (type != "smallint" && type != "integer" && type != "bigint") return false;
         const auto number = parseStoredInteger(value->value);
         if (!number) return false;
-        result.push_back({index, std::move(op), *number});
+        result.push_back({*index, std::move(op), *number});
         return true;
     }
     if (!varyingTextComparisonColumn(field) || (op != "=" && op != "<>" && op != "!=") ||
@@ -29529,7 +29555,7 @@ static bool bindLiteralComparisons(const Expr* expression, const TableSchema& ta
     if (field.resolvedCollationUsesLocale ||
         (!collation.empty() && (!field.resolvedCollationIsBinary || !dbms::collation::isBinary(collation))))
         return false;
-    result.push_back({index, std::move(op), value->value});
+    result.push_back({*index, std::move(op), value->value});
     return true;
 }
 
@@ -29644,6 +29670,11 @@ bool StorageEngine::evalConditionOnRowWithSyntax(const Condition& cond,
                 if (!number) {
                     decoded = false;
                     break;
+                }
+                if (const auto* bounds = std::get_if<Condition::LiteralComparison::IntegerRange>(&comparison.value)) {
+                    const bool inside = *number >= bounds->first && *number <= bounds->second;
+                    if (inside != (comparison.operation == "BETWEEN")) return false;
+                    continue;
                 }
                 const auto expected = std::get<int64_t>(comparison.value);
                 if (!comparisonPredicateMatches(comparison.operation,
@@ -30408,6 +30439,10 @@ bool StorageEngine::evalConditionOnRowWithSyntax(const Condition& cond,
             size_t sp = cond.value.find(' ');
             if (sp == std::string::npos) return false;
             if (isIntegerStorageType(col.dataType)) {
+                const std::string_view bounds(cond.value);
+                const auto lo = parseIntegerBound(bounds.substr(0, sp));
+                const auto hi = parseIntegerBound(bounds.substr(sp + 1));
+                if (lo && hi) return (num >= *lo && num <= *hi) == (cond.op == "between");
                 try {
                     const Numeric lower(cond.value.substr(0, sp));
                     const Numeric upper(cond.value.substr(sp + 1));

@@ -60,6 +60,10 @@ def complete_range_controls(query):
     check('k BETWEEN 1.5 AND 5.5', range(2, 6), False)
     check('k BETWEEN NULL AND 8', (), False)
     check('k NOT BETWEEN 1 AND 1535', (1536,), False)
+    check('k NOT BETWEEN -2147483648 AND 1535', (1536,), True, 1)
+    check('k NOT BETWEEN 3 AND 6 AND k>=3 AND k<8', (7,), True, 1)
+    check('k NOT BETWEEN 1 AND 1536 AND k>=1 AND k<=1536', (), True, 0)
+    check('k NOT BETWEEN 3 AND 6 AND k<8', (1, 2, 7), False)
 
     # The index sources the same heap order when SQL has no sort key.
     for tail, expected in (('LIMIT 4', insertion_order[:4]),
@@ -75,6 +79,16 @@ def complete_range_controls(query):
     assert result[1] is None and result[0] == [['4']], result
     nodes = plan_nodes(query('EXPLAIN (ANALYZE TRUE, TIMING FALSE, COSTS FALSE, FORMAT JSON) ' + count))
     assert 'StoredCount' in nodes, nodes
+    for condition, expected, empty in (
+        ('val NOT BETWEEN 1 AND 8', '764', False),
+        ('val NOT BETWEEN 8 AND 1', '768', False),
+        ('val BETWEEN 1 AND 8 AND val NOT BETWEEN 1 AND 8', '0', True),
+    ):
+        count = f'SELECT count(*) FROM {table} WHERE {condition}'
+        result = query(count)
+        assert result[1] is None and result[0] == [[expected]], result
+        nodes = plan_nodes(query('EXPLAIN (ANALYZE TRUE, TIMING FALSE, COSTS FALSE, FORMAT JSON) ' + count))
+        assert (nodes['StoredCount'].get('emptyInput') == 'true') == empty, nodes
 
 
 def parameter_range_controls(runner, client, sock, check_plan=True):
@@ -145,6 +159,13 @@ def parameter_range_controls(runner, client, sock, check_plan=True):
     for pair in ((10,-2),(None,10),(-2,None)):
         execute('range_between',pair,[],[23,25])
     execute('range_between',(-2,2),[['0','zero'],['-2',None]],[23,25])
+    outside = ('SELECT k FROM scalar_order_pk_int WHERE k NOT BETWEEN $1 AND $2 '
+               'AND k>=-2 ORDER BY k DESC LIMIT 2')
+    prepare('range_outside',outside,(21,20))
+    execute('range_outside',(-2,10),[['2147483647']],[23],binary_widths=(2,8))
+    execute('range_outside',(10,-2),[['2147483647'],['10']],[23])
+    execute('range_outside',(None,10),[['2147483647']],[23])
+    execute('range_outside',(0,None),[['-2']],[23])
 
     prepare('range_big','SELECT k,payload FROM scalar_order_pk_big '
             'WHERE k >= $1 AND k <= $2 ORDER BY k DESC LIMIT 2',(20,20))
@@ -195,6 +216,12 @@ def parameter_range_controls(runner, client, sock, check_plan=True):
         prepare('between_plan',explain+between,(21,20))
         for values,fetched in (((-2,10),3),((10,-2),0)):
             nodes=plan_nodes(execute('between_plan',values,binary_widths=(2,8)))
+            page=nodes['IntegerPrimaryKeyPage']
+            assert page['usedPrimaryKeyPage']=='true' and int(page['heapRowsFetched'])==fetched,nodes
+            assert nodes['TableScan'].get('actualRows',0)==0,nodes
+        prepare('outside_plan',explain+outside,(21,20))
+        for values,fetched in (((-2,10),1),((10,-2),2)):
+            nodes=plan_nodes(execute('outside_plan',values,binary_widths=(2,8)))
             page=nodes['IntegerPrimaryKeyPage']
             assert page['usedPrimaryKeyPage']=='true' and int(page['heapRowsFetched'])==fetched,nodes
             assert nodes['TableScan'].get('actualRows',0)==0,nodes

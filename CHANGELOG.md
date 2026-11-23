@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>排除一段订单号时，查询更快 · 2026-11-23</summary>
+
+例如，只看 1000 号以前和 1100 号以后的订单时，数据库读到一笔就能判断是否保留。
+
+[测试报告](docs/test-report.md#integer-not-between-20261123) · [性能报告](docs/performance-report-2026-10-30.md#integer-not-between-cost-20261123)
+
+</details>
+
+<details>
 <summary>按起止订单号查订单更快 · 2026-11-23</summary>
 
 例如，查 1000 到 1100 号订单时，两头都算在内。记录集中时，数据库可以直接用订单号找到它们。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>按订单号查一小段记录更快 · 2026-11-23</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-23 · 按订单号查一小段记录更快
 
 如果订单号是表的整数主键，查 1000 到 1100 号订单时，数据库可以用索引直接找这些记录。
 
 [测试报告](docs/test-report.md#complete-integer-range-20261123) · [性能报告](docs/performance-report-2026-10-30.md#complete-integer-range-cost-20261123)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-23 · 订单号加 0 的筛选可以省一步
 
