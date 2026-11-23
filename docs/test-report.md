@@ -15,6 +15,12 @@
 
 受测程序 SHA-256 为 `d6924a446c6886fa5395bfff989d1005adcc26f0536d4368431df33633ca404b`。这次实现覆盖普通表的单列排序小页。多列排序和需要返回与页尾并列项的 `WITH TIES` 继续使用完整排序路径。 [实现对照](postgresql-comparison.md#timetz-page-comparison-20261123) · [性能报告](performance-report-2026-10-30.md#timetz-page-cost-20261123)
 
+### 排序分页去掉重复的表结构查询
+
+修改后的版本和 `46288d88` 都通过 56 项分页回归。新增的 3 项核对文本和二进制返回的列来源、列号、类型长度、精度与值字节，以及同表整数主键分页。35 项共享检查在 PostgreSQL 18.6 上通过。另有 15 项检查覆盖带引号的限定名、输出别名、源列改名、继承、`ONLY`、非法列名后的连接复用，两个版本和 PostgreSQL 18.6 均通过。 [分页回归](../tests/timetz_ordered_page_protocol_e2e_test.py)
+
+新版通过 13 套相邻协议回归、4 项原生测试、包含 4 次强制重启的 72 步恢复检查和 4 项回退检查。时间和数组对照的 2,563 项逐条复核，既有的 240 项差异没有变化。受测程序 SHA-256 为 `646470b4683694cd7fc6f28ba7ee54ea5539ae97f6d4b2bd18bc168f65d50696`。 [时间和数组对照](../tests/timetz_binary_result_protocol_e2e_test.py) · [性能复测](performance-report-2026-10-30.md#timetz-page-dispatch-cost-20261123)
+
 <a id="timetz-range-20261123"></a>
 ## 2026-11-23 · 带偏移时间的范围查询
 

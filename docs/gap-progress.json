@@ -10,7 +10,8 @@
       "verification": [
         "The executor can stop checked forward or backward index traversal after the declared OFFSET and LIMIT demand, including a proven range on the same column.",
         "All visible heap keys are verified before using a prefix. Empty and short pages, NULL ordering, stale-key, memory-budget and partial-index fallback have direct witnesses.",
-        "Normal SQL and binary result descriptors preserve column origin. Recovery exercises old snapshots, savepoints, abrupt shutdown, REINDEX and VACUUM FULL."
+        "Normal SQL and binary result descriptors preserve column origin. Recovery exercises old snapshots, savepoints, abrupt shutdown, REINDEX and VACUUM FULL.",
+        "The ordinary limited SELECT path uses bound column metadata instead of probing the table separately. In the three-build memory-backed replay, integer key paging returned to the initial baseline and bounded time paging retained its four-row index prefix."
       ]
     },
     {

@@ -9,6 +9,8 @@ PostgreSQL 可以正向或反向读 B 树，在找到 `LIMIT` 所需的行数后
 
 本项目在普通单列 `TIMETZ` 的小页查询中，用索引读到 `OFFSET + LIMIT` 所需的行，再从表里核对完整键和可见性。常规排序和行数限制仍处理这批已经缩小的候选。由于现有索引跳过空值，空值可能影响页首或页尾时继续使用完整排序。覆盖索引、多列顺序和 `WITH TIES` 的索引提前停止仍有差距。 [功能验证](test-report.md#timetz-page-20261123) · [性能对照](performance-report-2026-10-30.md#timetz-page-cost-20261123)
 
+PostgreSQL 选索引时使用计划器已收集的表索引信息，DuckDB 在已有的逻辑计划中识别可合并的排序和行数限制。本项目的普通小页查询也由执行计划根据已解析的列类型选择索引。移除了针对带偏移时间的额外表结构查询，整数主键排序也随之少做一次查询。 [PostgreSQL 收集索引信息](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/optimizer/util/plancat.c) · [PostgreSQL 选择索引路径](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/optimizer/path/indxpath.c) · [DuckDB TopN 实现](https://github.com/duckdb/duckdb/blob/main/src/optimizer/topn_optimizer.cpp)
+
 <a id="timetz-range-comparison-20261123"></a>
 ## 2026-11-23 · 用索引查找一段带偏移的时间
 

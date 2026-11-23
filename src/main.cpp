@@ -20656,6 +20656,7 @@ static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bo
     // LIMIT on a base table controls source and projection demand, with or
     // without sorting, including after protocol parameter expansion.
     // Admit it at execution, without changing Parse/Bind planning phases.
+    // The physical planner chooses the ordered source from the bound column.
     const bool physicalLimitDemand = physicalColumnCandidate && candidate->limit;
     const bool possibleBitNegation=physicalColumnCandidate && candidate->ctes.empty() &&
         candidate->setOp==dbms::SetOp::None && candidate->groupBy.empty() &&
@@ -22820,21 +22821,6 @@ static bool supportsPreparedSetComparisons(const dbms::PreparedQuery& query, con
     });
 }
 
-static bool probesStoredZonedClockPage(const dbms::SelectStmt& select, Session& session) {
-    if (!select.limit || !*select.limit || *select.limit > 512 || select.orderBy.size() != 1 ||
-        select.withTies || !select.ctes.empty() || !select.fromClause ||
-        select.fromClause->type != dbms::FromItem::Type::Table || select.setOp != dbms::SetOp::None)
-        return false;
-    const auto* key = queryDemandPhysicalOrderColumn(select, select.orderBy.front());
-    if (!key) return false;
-    const auto table = resolveTableName(session, select.fromClause->tableName, true);
-    if (table.empty()) return false;
-    const auto schema = g_engine.getTableSchema(session.currentDB, table);
-    return any_of(schema.cols.begin(), schema.cols.end(), [&](const auto& column) {
-        return column.dataName == key->column && column.storageCodec == dbms::Column::StorageCodec::ZonedClock;
-    });
-}
-
 static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& handled,
                                     bool tableFunctionOnly = false) {
     handled=false;
@@ -23063,13 +23049,12 @@ static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& 
         supportsDerivedQuery(select);
     if (tableFunctionOnly && !sourceProbe) return false;
     required = required || ((emptyProjection || tableFunction) && sourceProbe);
-    const bool orderedClockProbe = !required && probesStoredZonedClockPage(*select, session);
     const bool derivedProbe=sourceProbe && logicalSource;
     const bool inheritanceProbe=sourceProbe && nestedInheritance;
     const bool viewProbe = sourceProbe && viewSource;
     const bool generatedJoinProbe = !required && !comparisonCandidate && !viewProbe &&
         plainGeneratedJoinSourceProbe(*select,session);
-    if(!required && !orderedClockProbe && !comparisonCandidate && !generatedJoinProbe && !derivedProbe &&
+    if(!required && !comparisonCandidate && !generatedJoinProbe && !derivedProbe &&
        !inheritanceProbe && !integerJoinProbe && !viewProbe) {
         if(!sourceProbe || !usingSource)return false;
         // Avoid whole-query preparation for existing scalar-only physical
@@ -23163,9 +23148,7 @@ static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& 
                [&](const auto& statement) { return isArrayDomain(statement.second); }) ||
         any_of(query->setOperationInputs.begin(),query->setOperationInputs.end(),
                [&](const auto& set) { return isArrayDomain(set.second.left) || isArrayDomain(set.second.right); }));
-    const bool orderedClockRequired = orderedClockProbe && dbms::mayUseStoredZonedClockPage(
-        g_engine, session.currentDB, *query, *static_cast<const dbms::SelectStmt*>(query->ast.get()));
-    if(!required && !orderedClockRequired && !inheritanceRequired && !integerJoinRequired && !viewRequired && !demandedLogicalRead) {
+    if(!required && !inheritanceRequired && !integerJoinRequired && !viewRequired && !demandedLogicalRead) {
         // The parser only probes a shape. Actual copied type/operator metadata
         // owns this receiver; ordinary builtin comparisons keep their existing
         // consumer. Never discover enum identity from evaluated datum strings.

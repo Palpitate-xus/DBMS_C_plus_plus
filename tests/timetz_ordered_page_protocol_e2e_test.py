@@ -2,6 +2,7 @@
 """An ordered TIMETZ page uses only checked index entries where possible."""
 
 import json
+import struct
 
 from compat.numeric_type_review import Review
 
@@ -71,6 +72,32 @@ def main():
             review.query(sql, rows=[["24:00:00-15:59:59", "4"], ["11:00:00+00", "5"]], oids=[1266, 23])
             page(sql, 2)
 
+        origin_query = "SELECT t AS clock,id AS v FROM tp_pk ORDER BY clock DESC LIMIT 1"
+        catalog = client.simple_query(sock, "SELECT oid FROM pg_catalog.pg_class WHERE relname='tp_pk'")
+        relation_oid = int(client.data_row_values(catalog)[0][0])
+        assert relation_oid > 0
+        fields = [(b"clock", relation_oid, 1, 1266, 12, 6, 0), (b"v", relation_oid, 2, 23, 4, -1, 0)]
+        simple = client.simple_query(sock, origin_query)
+        simple_result = client.row_description_fields(simple), client.data_row_values(simple)
+        simple_values = [[b"24:00:00-15:59:59", b"4"]]
+        review.record("simple query column origins", simple_result == (fields, simple_values)
+                      and b"".join(k for k, _ in simple) == b"TDCZ"
+                      and simple[-2:] == [(b"C", b"SELECT 1\0"), (b"Z", b"I")],
+                      simple_result, (fields, simple_values))
+
+        parse = b"page_origin\0" + origin_query.encode() + b"\0" + struct.pack("!H", 0)
+        bind = b"\0page_origin\0" + struct.pack("!HHHH", 0, 0, 1, 1)
+        sock.sendall(client.typed(b"P", parse) + client.typed(b"B", bind) + client.typed(b"D", b"P\0")
+                     + client.typed(b"E", b"\0" + struct.pack("!I", 0)) + client.typed(b"S"))
+        binary = client.read_until_ready(sock)
+        binary_result = client.row_description_fields(binary), client.data_row_values(binary)
+        binary_fields = [(*field[:-1], 1) for field in fields]
+        binary_values = [[struct.pack("!qi", 86_400_000_000, 57_599), struct.pack("!i", 4)]]
+        review.record("binary portal column origins", binary_result == (binary_fields, binary_values)
+                      and b"".join(k for k, _ in binary) == b"12TDCZ"
+                      and binary[-2:] == [(b"C", b"SELECT 1\0"), (b"Z", b"I")],
+                      binary_result, (binary_fields, binary_values))
+
         query = "SELECT id+0 AS v FROM tp_pk WHERE t>=$1 ORDER BY t LIMIT 2"
         review.parameter(query, ["10:00:00.124001+02"], [1266], [["1"], ["2"]], [23])
 
@@ -89,12 +116,13 @@ def main():
         ids(base + " WHERE t IS NOT NULL ORDER BY t DESC LIMIT 4", [3, 1, 4], 3)
         ids(base + " WHERE t>'00:01:00+00' ORDER BY t DESC LIMIT 3", [3, 1], 2)
         ids(base + " ORDER BY t LIMIT 700", [4, 1, 3, 2])
+        review.query("SELECT id+0 AS v FROM tp_log ORDER BY id LIMIT 2", rows=[["1"], ["2"]], oids=[23])
         command("REINDEX TABLE tp_log", "REINDEX")
         ids(base + " ORDER BY t ASC LIMIT 2", [4, 1], 2)
         command("DROP INDEX tp_all", "DROP INDEX")
         ids(base + " ORDER BY t ASC LIMIT 2", [4, 1])
         assert plans == (0 if reference else 21), plans
-        review.complete(32 + plans)
+        review.complete(35 + plans)
     finally:
         review.close()
 
