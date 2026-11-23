@@ -1787,6 +1787,12 @@ SELECT A FROM t1 INTERSECT SELECT A FROM t2;
 SELECT A FROM t1 EXCEPT SELECT A FROM t2;
 ```
 
+普通查询合并时，无类型的 `NULL` 和字符串字面量可以按同一列的类型转换。下面的查询返回 `NULL`、`7` 和 `8`，列类型为整数。串联多个 `UNION` 时，每一对查询分别确定共同类型。括号可以改变合并顺序。[协议与类型验证](test-report.md#ordinary-set-20261123)
+
+```sql
+SELECT 7 AS id UNION SELECT NULL UNION SELECT '8' ORDER BY id NULLS FIRST;
+```
+
 ### CTE (公用表表达式)
 
 ```sql

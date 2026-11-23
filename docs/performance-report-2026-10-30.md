@@ -4,6 +4,42 @@
 
 > 复核发现，几组早期 COPY 计时在每个对照场景中使用了固定的执行顺序。耗时差可能包含顺序影响。这项问题涉及默认值求值、按列查找、默认值标记、短 CSV 导出和短查询导出的配对计时。[默认值求值](#copy-default-evaluation-order-cost-20261122) · [按列查找](#copy-identity-input-cost-20261122) · [默认值标记](#copy-default-marker-cost-20261122) · [CSV 导出](#copy-csv-out-cost-20261122) · [查询导出](#copy-query-stdout-cost-20261122)
 
+<a id="ordinary-set-cost-20261123"></a>
+## 2026-11-23 · 普通表和常量集合查询的耗时
+
+基线为 `d8f8ee69`。项目两版均用 GCC 13.3、CMake C++17 `-O2`，各版本在同一台 Intel Xeon E5-2678 v3 上执行相同 SQL。建表 `ordinary_set_bench(id integer PRIMARY KEY, n integer)`，每批插入 128 行，共插入 2,048 行。`id` 为 1 至 2048，`n` 为 1 至 64 循环重复。数据准备不计时。测试包含以下写法。
+
+```sql
+SELECT id AS v FROM ordinary_set_bench WHERE id<=128 UNION SELECT 0 ORDER BY v;
+SELECT n AS v FROM ordinary_set_bench WHERE id<=1024
+INTERSECT ALL SELECT n AS v FROM ordinary_set_bench WHERE id>1024 ORDER BY v;
+SELECT n AS v FROM ordinary_set_bench WHERE id<=1024
+EXCEPT ALL SELECT n AS v FROM ordinary_set_bench WHERE id>1536 ORDER BY v;
+SELECT 0 AS v UNION ALL SELECT id AS v FROM ordinary_set_bench LIMIT 1;
+```
+
+测试 2,048 行的 `UNION` 时去掉第一条的 `WHERE`，用 `id` 列测试不同值，用 `n` 列测试重复值。无类型字面量场景用 `SELECT '0'`。单行查表使用 `WHERE id=42`。常量对照为 `SELECT 1 AS v`、`SELECT 1 AS v UNION SELECT 2 ORDER BY v` 和 `SELECT 7 AS v UNION SELECT NULL ORDER BY v NULLS FIRST`。
+
+计时从发送查询到收到 `ReadyForQuery`，逐次核对全部行值、列名、类型、消息顺序、命令标签与会话状态。每个进程每种查询预热一次，计时十二次。新旧对照使用 CPU 21/22 和 25/26，与 PostgreSQL 18.6 对照用 31/32。每轮交换执行顺序及客户端、服务端 CPU。PostgreSQL 关闭 JIT 和并行查询。首次测量使用磁盘文件系统。磁盘等待升高后，后续试验在建表阶段超时，随后将新旧版都放在 `/dev/shm` 重测。下表为内存文件系统中的 1,392 次计时，各进程中位数范围以毫秒计。
+
+| 查询 | 旧版 | 新版 | 同轮新版 | PostgreSQL 18.6 |
+| --- | ---: | ---: | ---: | ---: |
+| `SELECT 1` | 0.412–0.499 | 0.392–0.438 | 0.416–0.438 | 0.154–0.186 |
+| 按主键查一行 | 2.370–2.636 | 2.323–2.552 | 2.472–2.521 | 0.200–0.235 |
+| 两个整数常量做 `UNION` | 1.471–1.892 | 1.716–1.902 | 1.849–2.145 | 0.200–0.235 |
+| 表中前 128 行做 `UNION` | 13.487–15.027 | 19.934–22.809 | 20.507–23.890 | 1.390–1.454 |
+| 表中 2,048 个不同整数做 `UNION` | 50.625–55.098 | 36.219–40.158 | 39.939–41.363 | 14.995–15.927 |
+| 表中 2,048 行含重复值做 `UNION` | 20.628–22.750 | 12.561–15.403 | 14.721–15.392 | 1.582–1.630 |
+| 表中重复值做 `INTERSECT ALL` | 64.928–69.023 | 47.168–56.667 | 54.656–59.117 | 8.517–8.810 |
+| 表中重复值做 `EXCEPT ALL` | 46.590–49.917 | 36.217–40.675 | 38.971–41.065 | 4.899–4.972 |
+| `UNION ALL` 取首行 | 1.706–1.803 | 1.729–1.887 | 1.645–1.809 | 0.220–0.230 |
+| 整数常量与无类型的 `NULL` 合并 | — | — | 2.413–2.420 | 0.207–0.210 |
+| 表中 2,048 个整数与 `'0'` 合并 | — | — | 39.377–42.594 | 15.036–15.356 |
+
+四种较大的去重、取交和求差查询在四对内存计时中均更快，减幅约为 13%–40%。128 行 `UNION` 四对都变慢，增幅为 33%–69%。早期在磁盘文件系统上的 1,392 次计时中，128 行 `UNION` 四对仍全部变慢，由 23.890–29.605 毫秒增至 32.891–38.296 毫秒。重复值 `INTERSECT ALL` 四对都更快，由 76.844–87.367 毫秒降至 66.879–71.309 毫秒。两种 2,048 行 `UNION` 和 `EXCEPT ALL` 各有三对更快、一对更慢。两个无类型用例在旧版返回 `42804`。
+
+另外用内存文件系统和 CPU 35/36 对两个实现交叉计时 216 次，每种查询每个进程六次。直接使用物理投影的试验实现对 128 行 `UNION`、两种 2,048 行 `UNION`、交集和差集均在两对中变慢。最终采用耗时更低的一版。[协议与恢复](test-report.md#ordinary-set-20261123) · [其他数据库的类型规则](postgresql-comparison.md#ordinary-set-comparison-20261123)
+
 <a id="set-input-types-cost-20261123"></a>
 ## 2026-11-23 · 按共同列类型匹配集合结果的耗时
 

@@ -2,6 +2,18 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-23 apply bound set types to ordinary SELECT operands and describe nested and zero-column set results",
+      "gap_ids": ["QRY-06", "PROTO-04", "OPT-01"],
+      "status": "partial",
+      "evidence": ["src/main.cpp", "src/network/NetworkServer.cpp", "docs/MANUAL.md", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/set_operation_structured_protocol_e2e_test.py"],
+      "verification": [
+        "Ordinary UNION, INTERSECT and EXCEPT retain pairwise common types for supported scalar branches.",
+        "Describe retains the enclosing projection's type when an ordinary derived table or read-only CTE contains a set query, including zero-column set descriptors.",
+        "The diagnostic timing of a constant divide-by-zero during an extended request still differs from PostgreSQL."
+      ]
+    },
+    {
       "issue": "2026-11-23 retain bound common types in supported UNION, INTERSECT and EXCEPT execution",
       "gap_ids": ["QRY-02", "QRY-06", "OPT-01"],
       "status": "partial",

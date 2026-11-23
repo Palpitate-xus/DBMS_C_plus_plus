@@ -17,6 +17,13 @@ cmake --build build/cmake --target dbms_main --parallel 2
 ## 最近更新
 
 <details>
+<summary>普通查询合并时也能保留空值 · 2026-11-23</summary>
+
+例如，把表里查出的编号和一行空值合在一起，结果仍是一列整数，空值也会保留下来。
+
+</details>
+
+<details>
 <summary>合并数组结果时可以直接写空值 · 2026-11-23</summary>
 
 例如，把一组编号和一个 `NULL` 合并成一列时，编号仍是整数，空值也会保留下来。
@@ -27,13 +34,6 @@ cmake --build build/cmake --target dbms_main --parallel 2
 <summary>数组里的值可以和其他查询结果合并 · 2026-11-23</summary>
 
 例如，可以把手头的一组订单号和从表里查出的订单号放在同一份结果里，也可以去掉重复项。
-
-</details>
-
-<details>
-<summary>从长数组里取几行更快 · 2026-11-23</summary>
-
-比如从一组 2,048 个编号里取第一条。数据库少读几遍同样的 SQL，能更早返回结果。
 
 </details>
 

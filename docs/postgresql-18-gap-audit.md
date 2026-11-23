@@ -1,8 +1,12 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-23 · 普通查询合并时保留共同类型
+
+普通 `SELECT 7 UNION SELECT NULL` 可以返回整数列，去重、求交和求差也使用各分支已确定的共同类型。外层查询可以报告普通子查询和只读 `WITH` 中集合结果的列说明。零列查询也提供列数为零的结果说明。复杂类型的行比较与常量错误发生的协议阶段仍有差距。`QRY-06`、`PROTO-04` 和 `OPT-01` 保持部分实现。[验证范围](test-report.md#ordinary-set-20261123) · [性能](performance-report-2026-10-30.md#ordinary-set-cost-20261123)
+
 ## 2026-11-23 · 集合运算保留共同列类型
 
-适用的数组来源和 `VALUES` 查询可以在集合运算中按共同类型读取 `NULL` 和字符串字面量。支持的标量结果按共同类型去重或匹配重复次数。普通 `SELECT 7 UNION SELECT NULL` 仍有执行差距。自定义类型与显式排序规则也需要进一步验证。`QRY-02`、`QRY-06` 和 `OPT-01` 保持部分实现。[验证范围](test-report.md#set-input-types-20261123) · [性能](performance-report-2026-10-30.md#set-input-types-cost-20261123)
+适用的数组来源和 `VALUES` 查询可以在集合运算中按共同类型读取 `NULL` 和字符串字面量。支持的标量结果按共同类型去重或匹配重复次数。这一版中的 `SELECT 7 UNION SELECT NULL` 仍报类型错误，普通查询的修复见上节。自定义类型与显式排序规则也需要进一步验证。`QRY-02`、`QRY-06` 和 `OPT-01` 保持部分实现。[验证范围](test-report.md#set-input-types-20261123) · [性能](performance-report-2026-10-30.md#set-input-types-cost-20261123)
 
 ## 2026-11-23 · 数组来源可以参与集合运算
 

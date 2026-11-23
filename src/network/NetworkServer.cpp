@@ -2457,10 +2457,11 @@ std::vector<PgColumnDescription> describeProtocolColumns(const QueryResult& resu
 
 // Parse and Describe share the query host's genuine pure descriptor. Returning
 // false means another existing consumer owns the shape, not an analysis error.
-bool describePreparedSetResult(const std::string& sql, Session& session,
+bool describePreparedSetResult(const ProtocolQuerySyntax& syntax, Session& session,
                                std::vector<PgColumnDescription>& columns) {
     SQLParser parser;
-    const auto probe = parser.parseForBinding(sql);
+    const auto& sql = syntax.sql();
+    const auto& probe = syntax.parse();
     if(!probe.isValid()) {
         int depth=0;
         for(const auto& token:SQLParser::tokenize(sql)) {
@@ -2504,27 +2505,45 @@ bool describePreparedSetResult(const std::string& sql, Session& session,
         }
         return false;
     };
+    const auto setSource = [&](const auto& visit, const FromItem* source) -> bool {
+        if (!source) return false;
+        if (source->type == FromItem::Type::Subquery)
+            return setQuery(dynamic_cast<const SelectStmt*>(source->subquery.get()));
+        if (source->type == FromItem::Type::Join)
+            return visit(visit, source->left.get()) || visit(visit, source->right.get());
+        return false;
+    };
     setQuery = [&](const SelectStmt* query) {
         if(!query)return false;
         if(query->setOp!=SetOp::None)return true;
         for(const auto& item:query->selectList)if(setValue(item.expr.get()))return true;
-        return setValue(query->whereClause.get());
+        if (setValue(query->whereClause.get())) return true;
+        if (std::any_of(query->ctes.begin(), query->ctes.end(), [](const auto& cte) {
+                return cte.recursive || !dynamic_cast<const SelectStmt*>(cte.query.get());
+            })) return false;
+        for (const auto& cte : query->ctes)
+            if (setQuery(static_cast<const SelectStmt*>(cte.query.get()))) return true;
+        return setSource(setSource, query->fromClause.get());
     };
     if(!setQuery(select))return false;
     // The completed whole-tree binder owns common output types, UNKNOWN
     // input conversion and every branch namespace. Neither a left target
     // nor a source row is an authoritative set-query descriptor.
-    const auto prepared = g_engine.prepareBoundQuery(session.currentDB, sql);
+    auto prepared = g_engine.prepareBoundQuery(session.currentDB, sql);
     QueryResult shape;
     for (const auto& field : prepared.output) {
         shape.columns.push_back(field.name);
         shape.columnTypes.push_back(field.type);
     }
-    // Set outputs have no physical table/attribute origin, even when their
-    // label happens to name the left branch's actual physical column.
     columns = describeProtocolColumns(shape, std::string{}, session);
+    // A set output has no physical origin. An enclosing SELECT may also
+    // project ordinary source columns, whose bound origins are retained.
+    if (select->setOp == SetOp::None)
+        attachPreparedProjectionOrigins(prepared.output, prepared, session);
     applyBoundProtocolDescriptor(columns, prepared.output, session);
-    return !columns.empty();
+    // A zero-column SELECT still describes a row, including when no rows
+    // survive the set operation.
+    return true;
 }
 
 bool describePreparedQueryHostResult(const std::string& sql, Session& session,
@@ -4480,7 +4499,7 @@ bool describePreparedResultShape(const std::string& sql, Session& session,
     auto betweenParameterOids = parameterOids;
     if (prepareProtocolBitBetween(sql, session, betweenParameterOids, &columns)) return true;
     if(describePreparedExplainResult(syntax,session,columns,parameterOids))return true;
-    if (parameterOids.empty() && describePreparedSetResult(sql, session, columns))
+    if (parameterOids.empty() && describePreparedSetResult(syntax, session, columns))
         return true;
     SQLParser parser;
     ParseResult parsed = parser.parse(sql);
@@ -9067,7 +9086,7 @@ void handleClient(SecureSocket socket, std::string clientHost, CopyQueryFactory 
                             // statement. A failed call never leaves a named object
                             // behind or turns its next Parse into spurious 42P05.
                             std::vector<PgColumnDescription> staticColumns;
-                            if (!describePreparedSetResult(sql,session,staticColumns) &&
+                            if (!describePreparedSetResult(ProtocolQuerySyntax(sql),session,staticColumns) &&
                                 !describePreparedQueryHostResult(sql,session,staticColumns))
                                 (void)describePreparedOrdinarySourceResult(ProtocolQuerySyntax(sql),session,staticColumns);
                         }

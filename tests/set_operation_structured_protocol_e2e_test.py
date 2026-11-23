@@ -6,10 +6,14 @@ from pathlib import Path
 import struct
 
 
-def check_table_function_operands(client, sock):
+def check_set_operands(client, sock):
     sequence = "setop_array_branch_calls"
     created = client.simple_query(sock, f"CREATE SEQUENCE {sequence}")
     assert created == [(b"C", b"CREATE SEQUENCE\0"), (b"Z", b"I")], created
+    created = client.simple_query(sock, "CREATE TABLE ordinary_set_operands (n integer)")
+    assert created == [(b"C", b"CREATE TABLE\0"), (b"Z", b"I")], created
+    inserted = client.simple_query(sock, "INSERT INTO ordinary_set_operands VALUES (3),(3),(8),(NULL)")
+    assert inserted == [(b"C", b"INSERT 0 4\0"), (b"Z", b"I")], inserted
     cases = [
         ("(SELECT v AS \"Number\" FROM unnest(ARRAY[7,8]) AS u(v) LIMIT 1) "
          "UNION ALL SELECT 10000000000 ORDER BY \"Number\"", "Number", 20, 8,
@@ -51,6 +55,22 @@ def check_table_function_operands(client, sock):
         ("WITH a AS (SELECT v FROM unnest(ARRAY[7,8]) AS u(v) UNION SELECT '10') "
          "SELECT v FROM a ORDER BY v", "v", 23, 4, [[b"7"], [b"8"], [b"10"]]),
         ("VALUES (7) UNION SELECT NULL ORDER BY 1", "column1", 23, 4, [[b"7"], [None]]),
+        ("SELECT 7 AS v UNION SELECT NULL ORDER BY v NULLS FIRST", "v", 23, 4, [[None], [b"7"]]),
+        ("SELECT '8' AS v UNION SELECT 7 ORDER BY v", "v", 23, 4, [[b"7"], [b"8"]]),
+        ("SELECT NULL AS v UNION (SELECT NULL UNION SELECT 7) ORDER BY v NULLS FIRST",
+         "v", 23, 4, [[None], [b"7"]]),
+        ("SELECT n FROM ordinary_set_operands INTERSECT ALL VALUES (3),(3),(3),(NULL) "
+         "ORDER BY n NULLS FIRST", "n", 23, 4, [[None], [b"3"], [b"3"]]),
+        ("SELECT n FROM ordinary_set_operands EXCEPT ALL SELECT '3' ORDER BY n NULLS FIRST",
+         "n", 23, 4, [[None], [b"3"], [b"8"]]),
+        ("WITH a AS (SELECT 7 AS v UNION SELECT NULL) SELECT v FROM a ORDER BY v NULLS FIRST",
+         "v", 23, 4, [[None], [b"7"]]),
+        ("SELECT v FROM (SELECT 7 AS v UNION SELECT NULL) AS mixed ORDER BY v NULLS FIRST",
+         "v", 23, 4, [[None], [b"7"]]),
+        ("SELECT UNION SELECT", None, 0, 0, [[]]),
+        ("SELECT UNION ALL SELECT", None, 0, 0, [[], []]),
+        ("SELECT INTERSECT ALL SELECT", None, 0, 0, [[]]),
+        ("SELECT EXCEPT SELECT", None, 0, 0, []),
     ]
     for sql, name, oid, size, rows in cases:
         parse = client.typed(b"P", b"\0" + sql.encode() + b"\0\0\0")
@@ -67,9 +87,8 @@ def check_table_function_operands(client, sock):
         execution_kinds = b"T" + b"D" * len(rows) + b"CZ"
         for messages, kinds in zip(results, (execution_kinds, b"1tTZ", b"12" + execution_kinds)):
             assert b"".join(kind for kind, _ in messages) == kinds, (sql, messages)
-            assert client.row_description_fields(messages) == [
-                (name.encode(), 0, 0, oid, size, -1, 0)
-            ], (sql, messages)
+            fields = [] if name is None else [(name.encode(), 0, 0, oid, size, -1, 0)]
+            assert client.row_description_fields(messages) == fields, (sql, messages)
             assert messages[-1] == (b"Z", b"I"), (sql, messages)
             if kinds.endswith(b"CZ"):
                 assert client.data_row_values(messages) == rows, (sql, messages)
@@ -79,18 +98,57 @@ def check_table_function_operands(client, sock):
     assert client.data_row_values(next_value) == [[b"1"]], next_value
 
     # Input conversion is validated before the read begins, even at LIMIT 0.
-    sql = (f"SELECT v FROM unnest(ARRAY[nextval('{sequence}')]) AS u(v) "
-           "EXCEPT SELECT 'not a number' LIMIT 0")
-    parse = client.typed(b"P", b"\0" + sql.encode() + b"\0\0\0")
-    simple_error = client.simple_query(sock, sql)
-    sock.sendall(parse + client.typed(b"S", b""))
-    parse_error = client.read_until_ready(sock)
-    for messages in (simple_error, parse_error):
-        assert [kind for kind, _ in messages] == [b"E", b"Z"], messages
-        assert b"C22P02\0" in messages[0][1], messages
-        assert messages[1] == (b"Z", b"I"), messages
+    errors = [
+        (f"SELECT v FROM unnest(ARRAY[nextval('{sequence}')]) AS u(v) "
+         "EXCEPT SELECT 'not a number' LIMIT 0", b"22P02"),
+        (f"SELECT nextval('{sequence}') UNION SELECT 'not a number' LIMIT 0", b"22P02"),
+        ("SELECT NULL UNION SELECT NULL UNION SELECT 7", b"42804"),
+        ("SELECT 1 AS n UNION SELECT 2 ORDER BY missing", b"42703"),
+    ]
+    for sql, state in errors:
+        parse = client.typed(b"P", b"\0" + sql.encode() + b"\0\0\0")
+        simple_error = client.simple_query(sock, sql)
+        sock.sendall(parse + client.typed(b"S", b""))
+        parse_error = client.read_until_ready(sock)
+        for messages in (simple_error, parse_error):
+            assert [kind for kind, _ in messages] == [b"E", b"Z"], messages
+            assert b"C" + state + b"\0" in messages[0][1], messages
+            assert messages[1] == (b"Z", b"I"), messages
     next_value = client.simple_query(sock, f"SELECT nextval('{sequence}')")
     assert client.data_row_values(next_value) == [[b"2"]], next_value
+
+
+def check_set_source_permissions(client, sock):
+    def command(sql):
+        messages = client.simple_query(sock, sql)
+        assert messages[0][0] == b"C" and messages[-1] == (b"Z", b"I"), (sql, messages)
+        flags = {"SET ROLE ordinary_set_reader": b"off", "RESET ROLE": b"on"}
+        notice = [(b"S", b"is_superuser\0" + flags[sql] + b"\0")] if sql in flags else []
+        assert messages[1:-1] in ([], notice), (sql, messages)
+
+    command("CREATE TABLE ordinary_set_acl(id integer, note text)")
+    command("INSERT INTO ordinary_set_acl VALUES (1,'visible'),(2,'hidden')")
+    command("CREATE ROLE ordinary_set_reader")
+    command("GRANT SELECT(id) ON ordinary_set_acl TO ordinary_set_reader")
+    command("SET ROLE ordinary_set_reader")
+    messages = client.simple_query(sock, "SELECT id FROM ordinary_set_acl UNION SELECT '3' ORDER BY id")
+    assert client.data_row_values(messages) == [[b"1"], [b"2"], [b"3"]], messages
+    messages = client.simple_query(sock, "SELECT note FROM ordinary_set_acl UNION SELECT NULL")
+    assert [kind for kind, _ in messages] == [b"E", b"Z"], messages
+    assert b"C42501\0" in messages[0][1], messages
+    command("RESET ROLE")
+
+    command("GRANT SELECT ON ordinary_set_acl TO ordinary_set_reader")
+    command("SET ROLE ordinary_set_reader")
+    messages = client.simple_query(sock, "SELECT id FROM ordinary_set_acl EXCEPT SELECT '2' ORDER BY id")
+    assert client.data_row_values(messages) == [[b"1"]], messages
+    command("RESET ROLE")
+    command("CREATE POLICY ordinary_set_visible ON ordinary_set_acl FOR SELECT TO ordinary_set_reader USING (id=1)")
+    command("ALTER TABLE ordinary_set_acl ENABLE ROW LEVEL SECURITY")
+    command("SET ROLE ordinary_set_reader")
+    messages = client.simple_query(sock, "SELECT id FROM ordinary_set_acl UNION SELECT NULL ORDER BY id NULLS FIRST")
+    assert client.data_row_values(messages) == [[None], [b"1"]], messages
+    command("RESET ROLE")
 
 
 def main():
@@ -529,7 +587,7 @@ def main():
         error_cases = [
             ("SELECT 1 UNION SELECT 1, 2;", "42601"),
             ("SELECT 1 UNION SELECT DATE '2024-01-01';", "42804"),
-            ("SELECT 1 AS n UNION SELECT 2 ORDER BY missing;", "42P10"),
+            ("SELECT 1 AS n UNION SELECT 2 ORDER BY missing;", "42703"),
             ("SELECT 1 AS x, 2 AS x UNION ALL SELECT 3, 4 ORDER BY x;",
              "42702"),
             ("SELECT 1 UNION ALL SELECT 1 FETCH FIRST 1 ROW WITH TIES;",
@@ -546,7 +604,8 @@ def main():
             assert state is None and rows == [["9"]], (
                 sql, state, message, rows)
 
-        check_table_function_operands(client, server["sock"])
+        check_set_operands(client, server["sock"])
+        check_set_source_permissions(client, server["sock"])
         print("[STRUCTURED SET OPERATION PROTOCOL E2E] passed")
     finally:
         runner.stop_ours(server)

@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>普通查询合并时也能保留空值 · 2026-11-23</summary>
+
+例如，把表里查出的编号和一行空值合在一起，结果仍是一列整数，空值也会保留下来。
+
+[用法](docs/MANUAL.md#union--intersect--except) · [测试报告](docs/test-report.md#ordinary-set-20261123) · [性能报告](docs/performance-report-2026-10-30.md#ordinary-set-cost-20261123)
+
+</details>
+
+<details>
 <summary>合并数组结果时可以直接写空值 · 2026-11-23</summary>
 
 例如，把一组编号和一个 `NULL` 合并成一列时，编号仍是整数，空值也会保留下来。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>从长数组里取几行更快 · 2026-11-23</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-23 · 从长数组里取几行更快
 
 比如从一组 2,048 个编号里取第一条。数据库少读几遍同样的 SQL，能更早返回结果。
 
 [测试报告](docs/test-report.md#query-syntax-reuse-20261123) · [性能报告](docs/performance-report-2026-10-30.md#query-syntax-reuse-cost-20261123)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-23 · SQL 里直接写几千个数字，查询更快
 

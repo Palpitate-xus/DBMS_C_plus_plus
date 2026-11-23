@@ -22745,6 +22745,22 @@ static bool usesDemandedLogicalRead(const dbms::PreparedQuery& query) {
     return false;
 }
 
+static bool supportsPreparedSetComparisons(const dbms::PreparedQuery& query, const string& sql) {
+    bool comparesRows = false;
+    for (const auto& entry : query.setOperationInputs) {
+        const auto* set = entry.first;
+        if (set->setOp == dbms::SetOp::Union && set->setOpAll) continue;
+        comparesRows = true;
+        if (!dbms::QueryPlanner::supportsPreparedSetEquality(query.statementOutputs.at(set))) return false;
+    }
+    if (!comparesRows) return true;
+    const auto tokens = dbms::SQLParser::tokenize(sql);
+    // The existing set executor owns explicit collation resolution.
+    return none_of(tokens.begin(), tokens.end(), [](const auto& token) {
+        return token.size() == 7 && dbms::SQLParser::toLower(token) == "collate";
+    });
+}
+
 static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& handled,
                                     bool tableFunctionOnly = false) {
     handled=false;
@@ -23042,21 +23058,7 @@ static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& 
         }
     }
     auto query=make_shared<dbms::PreparedQuery>(g_engine.prepareBoundQuery(session.currentDB,rawSql));
-    if (tableFunction && sourceProbe) {
-        bool comparesRows = false;
-        for (const auto& [set, inputs] : query->setOperationInputs) {
-            if (set->setOp == dbms::SetOp::Union && set->setOpAll) continue;
-            comparesRows = true;
-            if (!dbms::QueryPlanner::supportsPreparedSetEquality(query->statementOutputs.at(set))) return false;
-        }
-        if (comparesRows) {
-            const auto tokens = dbms::SQLParser::tokenize(rawSql);
-            // The fallback still owns explicit set collation resolution.
-            if (any_of(tokens.begin(), tokens.end(), [](const auto& token) {
-                    return token.size() == 7 && dbms::SQLParser::toLower(token) == "collate";
-                })) return false;
-        }
-    }
+    if (tableFunction && sourceProbe && !supportsPreparedSetComparisons(*query, rawSql)) return false;
     // The binding, rather than the name probe, owns the actual source.
     // A CTE can hide a catalog view with the same spelling.
     const bool viewRequired = viewProbe && any_of(query->sourceRanges.begin(), query->sourceRanges.end(),
@@ -23301,7 +23303,7 @@ static bool handlePreparedFetchPeersQuery(const string& rawSql, Session& session
     return handlePreparedCaseQuery(rawSql, session, handled);
 }
 
-static bool handlePreparedUnionAllQuery(const string& rawSql,Session& session,bool& handled) {
+static bool handlePreparedSetQuery(const string& rawSql,Session& session,bool& handled) {
     handled=false;
     dbms::SQLParser parser;auto parsed=parser.parseForBinding(rawSql);
     if(!parsed.isValid()) {
@@ -23314,7 +23316,9 @@ static bool handlePreparedUnionAllQuery(const string& rawSql,Session& session,bo
         }
     }
     const auto* root=parsed.isValid()?dynamic_cast<const dbms::SelectStmt*>(parsed.stmt.get()):nullptr;
-    if(!root || root->setOp!=dbms::SetOp::Union || !root->setOpAll)return false;
+    if(!root || root->setOp==dbms::SetOp::None)return false;
+    const bool append = root->setOp == dbms::SetOp::Union && root->setOpAll;
+    if (!append && usesInheritedQueryCteSource(*root,session)) return false;
     // A metadata-only shape probe preserves other existing aggregate/window/
     // backend-local SRF contracts. It never renders an inline-left body or
     // opens a source to discover eligibility. Whole binding below retains all
@@ -23362,17 +23366,23 @@ static bool handlePreparedUnionAllQuery(const string& rawSql,Session& session,bo
             return false;
         // Query clauses belong to their retained SelectStmt: a set wrapper
         // owns global clauses; parenthesized branch bodies own local ones.
-        if(select->setOp!=dbms::SetOp::None && (select->setOp!=dbms::SetOp::Union || !select->setOpAll || !select->setOpRhs))return false;
+        if(select->setOp!=dbms::SetOp::None && !select->setOpRhs)return false;
+        if (!append) for (const auto& cte : select->ctes) {
+            if (cte.recursive || !supported(dynamic_cast<const dbms::SelectStmt*>(cte.query.get()))) return false;
+        }
         if(select->setOpLhs && !supported(dynamic_cast<const dbms::SelectStmt*>(select->setOpLhs.get())))return false;
         if(select->setOpRhs && !supported(dynamic_cast<const dbms::SelectStmt*>(select->setOpRhs.get())))return false;
         for(const auto& target:select->selectList)if(!scalar(target.expr.get()))return false;
         for(const auto& row:select->valuesRows)for(const auto& value:row)if(!scalar(value.get()))return false;
-        for(const auto& key:select->orderBy)if(!key.usingOp.empty() || !scalar(key.expr.get()))return false;
+        for(const auto& key:select->orderBy)
+            if(!key.usingOp.empty() || (select->setOp==dbms::SetOp::None && !scalar(key.expr.get())))return false;
         return scalar(select->whereClause.get()) && source(select->fromClause.get());
     };
+    if (!append && !supported(root)) return false;
     if(!checkDB(session)){handled=true;return true;}
     auto query=make_shared<dbms::PreparedQuery>(g_engine.prepareBoundQuery(session.currentDB,rawSql));
-    if(!supported(static_cast<const dbms::SelectStmt*>(query->ast.get())))return false;
+    if(!supported(static_cast<const dbms::SelectStmt*>(query->ast.get())) ||
+       !supportsPreparedSetComparisons(*query, rawSql))return false;
     PreparedWithDmlRuntime runtime(session,std::move(query));auto result=runtime.runRead();
     for(const auto& name:result.columns)cout<<name<<' ';cout<<'\n';
     for(size_t i=0;i<result.rows.size();++i) {
@@ -23645,9 +23655,9 @@ static bool executeInternal(const string& rawSql, Session& s,
     const size_t leadingStatement = dbms::skipLeadingSqlTrivia(sql);
     if (leadingStatement != string::npos &&
         leadingStatement < sql.size() && sql[leadingStatement] == '(') {
-        bool preparedUnionHandled=false;
-        const bool preparedUnionFailed=handlePreparedUnionAllQuery(effectiveRawSql,s,preparedUnionHandled);
-        if(preparedUnionHandled)return preparedUnionFailed;
+        bool preparedSetHandled=false;
+        const bool preparedSetFailed=handlePreparedSetQuery(effectiveRawSql,s,preparedSetHandled);
+        if(preparedSetHandled)return preparedSetFailed;
         bool fetchHandled = false;
         const bool fetchFailed = handlePreparedFetchPeersQuery(
             effectiveRawSql, s, fetchHandled);
@@ -26809,9 +26819,9 @@ static bool executeInternal(const string& rawSql, Session& s,
     // Set operations share one execution path so errors, precedence and
     // duplicate-row semantics are consistent across UNION/INTERSECT/EXCEPT.
     if(dbms::SQLParser::classify(effectiveRawSql)==dbms::SqlCommand::Select) {
-        bool preparedUnionHandled=false;
-        const bool preparedUnionFailed=handlePreparedUnionAllQuery(effectiveRawSql,s,preparedUnionHandled);
-        if(preparedUnionHandled)return preparedUnionFailed;
+        bool preparedSetHandled=false;
+        const bool preparedSetFailed=handlePreparedSetQuery(effectiveRawSql,s,preparedSetHandled);
+        if(preparedSetHandled)return preparedSetFailed;
         // Ordinary SELECT must reach the same typed peer consumer before
         // legacy FETCH lowering as a parenthesized query expression does.
         bool fetchHandled = false;

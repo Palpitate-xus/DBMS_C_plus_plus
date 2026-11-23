@@ -2,6 +2,11 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="ordinary-set-comparison-20261123"></a>
+## 2026-11-23 · 普通集合运算逐对确定类型
+
+PostgreSQL 按语法树从内向外应用共同类型规则。两个 `NULL` 先合并时，这一对得到文本类型，与外层整数合并会报类型错误。DuckDB 在规划集合运算时逐个给子计划加必要的类型转换。SQLite 复合查询的重复行比较保留值原有的存储类型。本项目把普通 `SELECT` 的逐对类型结果交给同一棵执行树，包括上层用于报告列类型的子查询和只读 `WITH`。[PostgreSQL 共同类型规则](https://www.postgresql.org/docs/18/typeconv-union-case.html) · [DuckDB 转换规划](https://github.com/duckdb/duckdb/blob/main/src/planner/binder/query_node/plan_setop.cpp) · [SQLite 复合查询](https://www.sqlite.org/lang_select.html#compound_select_statements)
+
 <a id="set-input-types-comparison-20261123"></a>
 ## 2026-11-23 · 集合运算在比较之前转换输入
 
