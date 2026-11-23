@@ -418,6 +418,7 @@ public:
     const std::string& tableName() const { return tablename_; }
     const std::string& colName() const { return colname_; }
     const std::string& value() const { return value_; }
+    bool usedIndex() const { return usedIndex_; }
     ScanOrigin scanOrigin() const override {
         ScanOrigin origin;
         origin.engine = engine_;
@@ -440,6 +441,7 @@ private:
     size_t pos_ = 0;
     int64_t lastRid_ = 0;
     bool isPK_ = false;
+    bool usedIndex_ = false;
     bool statsRecorded_ = false;
     bool tableLockHeld_ = false;
 };

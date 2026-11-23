@@ -11,6 +11,7 @@
 #include "commands/CreatedDatabaseCatalog.h"
 #include "commands/CreateTableUndo.h"
 #include "commands/StoredRowNull.h"
+#include "commands/StoredZonedClockPredicate.h"
 #include "commands/DdlRewrite.h"
 #include "commands/DdlTransaction.h"
 #include "commands/RelationSchemaMove.h"
@@ -34036,6 +34037,101 @@ bool StorageEngine::anyRowMatches(const std::string& dbname,
                       indexReadFailed).empty();
 }
 
+bool completeStoredZonedClockIndex(StorageEngine& engine, const std::string& database,
+                                   const TableSchema& schema, const Column& key) {
+    if (schema.formatVersion != DATA_FILE_FORMAT_VERSION || !schema.physicalRelationId ||
+        schema.isTemporary || schema.tablespace != "pg_default" ||
+        schema.partitionType != TableSchema::PartitionType::None ||
+        key.storageCodec != Column::StorageCodec::ZonedClock || key.dsize != TIMETZ_SIZE)
+        return false;
+    const auto primaryColumn = primary_key_index::singleKeyColumn(schema);
+    const bool primary = primaryColumn && schema.cols[*primaryColumn].dataName == key.dataName;
+    const auto stem = primary ? schema.tablename : schema.tablename + "_" + key.dataName;
+    if (!primary) {
+        const auto indexes = engine.getIndexMetadata(database, schema.tablename);
+        const auto matching = std::find_if(indexes.begin(), indexes.end(), [&](const auto& index) {
+            return index.name == key.dataName;
+        });
+        if (matching == indexes.end() || matching->isExpression || !matching->whereCondition.empty() ||
+            std::any_of(std::next(matching), indexes.end(), [&](const auto& index) {
+                return index.name == key.dataName;
+            }) || engine.tableExists(database, stem)) return false;
+    }
+    // Some legacy filenames can name two secondary indexes or a primary
+    // index and a secondary index. Use the heap if ownership is ambiguous.
+    for (size_t split = stem.find('_', 1); split != std::string::npos;
+         split = stem.find('_', split + 1)) {
+        if (split + 1 == stem.size() || (!primary && split == schema.tablename.size())) continue;
+        const auto possibleTable = stem.substr(0, split);
+        const auto possibleColumn = stem.substr(split + 1);
+        const auto indexes = engine.getIndexMetadata(database, possibleTable);
+        if (std::any_of(indexes.begin(), indexes.end(), [&](const auto& index) {
+            return index.name == possibleColumn;
+        })) return false;
+    }
+    return true;
+}
+
+std::optional<std::string> constantStoredZonedClockInput(StorageEngine& engine,
+    const std::string& database, const Expr* input) {
+    if (!input || input->preparedSubquery) return {};
+    std::string spelling;
+    if (const auto* cast = dynamic_cast<const CastExpr*>(input)) {
+        spelling = cast->typeName;
+        if (!cast->typeMods.empty()) {
+            if (cast->typeMods.size() != 1) return {};
+            spelling += "(" + cast->typeMods.front() + ")";
+        }
+        input = cast->operand.get();
+    } else if (const auto* cast = dynamic_cast<const BinaryOpExpr*>(input); cast && cast->op == "::") {
+        const auto* target = dynamic_cast<const LiteralExpr*>(cast->right.get());
+        if (!target || target->preparedSubquery) return {};
+        spelling = target->value;
+        input = cast->left.get();
+    }
+    const auto* literal = dynamic_cast<const LiteralExpr*>(input);
+    if (!literal || literal->preparedSubquery || literal->value.size() < 2 ||
+        literal->value.front() != '\'' || literal->value.back() != '\'') return {};
+    if (!literal->typeName.empty() && literal->typeName != "unknown") {
+        if (!spelling.empty()) return {};
+        spelling = literal->typeName;
+    }
+    try {
+        int precision = -1;
+        if (!spelling.empty()) {
+            const auto catalog = engine.catalogService().metadataSnapshot(database);
+            const auto type = resolveDeclaredTypeName(spelling, &catalog, currentSession());
+            if (type.typeOid != 1266) return {};
+            const auto spec = SQLParser::parseTypeSpecification(type.inputType);
+            const auto modifier = TypeRegistry::instance().applyTypeMods("timetz", spec.typeMods);
+            if (!modifier.ok()) return {};
+            precision = modifier.typmod;
+        }
+        // Decode the string, then apply the same clock precision as the
+        // original predicate. Leave any errors to the original evaluation.
+        LiteralExpr text;
+        text.value = literal->value;
+        const auto value = ExprEvaluator().eval(&text, RowContext{});
+        if (value.isNull) return {};
+        using namespace temporal_storage_detail;
+        auto clock = parseZonedClock(value.value);
+        if (!clock) return {};
+        const auto rounded = roundTimeMicros(clock->localMicros, precision);
+        if (!rounded) return {};
+        clock->localMicros = *rounded;
+        return formatZonedClock(*clock);
+    } catch (const DbError&) {
+        return {};
+    }
+}
+
+void validateStoredZonedClockEqualityInput(const Column& column, const std::string& value) {
+    if (column.storageCodec != Column::StorageCodec::ZonedClock) return;
+    const char* state = "22007";
+    if (!temporal_storage_detail::parseZonedClock(value, &state))
+        throw DbError(state, "invalid input syntax for type time with time zone: \"" + value + "\"");
+}
+
 static void prepareFilterConditions(
         StorageEngine& engine, const std::string& dbname, const TableSchema& tbl,
         std::vector<StorageEngine::Condition>& conds) {
@@ -34047,6 +34143,9 @@ static void prepareFilterConditions(
             if(tbl.cols[i].dataName==condition.colName)declared=&tbl.cols[i];
             if(!condition.decodedLiteralRhs && tbl.cols[i].dataName==condition.value)rightIsColumn=true;
         }
+        if (declared && condition.op == "=" && condition.decodedLiteralRhs &&
+            condition.patternType == "unknown" && !condition.patternIsNull)
+            validateStoredZonedClockEqualityInput(*declared, condition.value);
         if(declared && !rightIsColumn && !declared->isArray && stored_regtype_detail::scalarType(declared->dataType)) {
             const auto catalog=regtype_detail::metadata(engine,dbname);
             condition.value=condition.referenceInputOid?std::to_string(*condition.referenceInputOid):
@@ -34063,6 +34162,37 @@ static void prepareFilterConditions(
             throw DbError("42601","invalid typed predicate");
         validateNullWhereColumns(select->selectList[0].expr.get(),tbl);
         ExprHelper::prepareArrayTypes(select->selectList[0].expr.get(),buildTypeHints(tbl),dbname,&engine);
+        // Keep compound predicates and other SQL expressions on their
+        // existing receiver. A plain TIMETZ equality needs one immutable
+        // input, even if the text frontend expanded a bound parameter.
+        const auto* equality = conds.size() == 1
+            ? dynamic_cast<const BinaryOpExpr*>(select->selectList.front().expr.get()) : nullptr;
+        if (equality && equality->op == "=" && !equality->rowComparison &&
+            (!equality->comparison || (equality->comparison->strict &&
+                equality->comparison->identity == "builtin-comparison:=(timetz,timetz)"))) {
+            const auto* reference = dynamic_cast<const ColumnRefExpr*>(equality->left.get());
+            const Expr* input = equality->right.get();
+            if (!reference) {
+                reference = dynamic_cast<const ColumnRefExpr*>(equality->right.get());
+                input = equality->left.get();
+            }
+            if (reference && reference->table.empty() && reference->schema.empty()) {
+                const auto column = std::find_if(tbl.cols.begin(), tbl.cols.end(), [&](const auto& key) {
+                    return key.dataName == reference->column && !key.isArray && !key.generatedKind &&
+                        key.domainName.empty() && key.storageCodec == Column::StorageCodec::ZonedClock;
+                });
+                if (column != tbl.cols.end()) {
+                    if (auto clock = constantStoredZonedClockInput(engine, dbname, input)) {
+                        condition = {};
+                        condition.op = "=";
+                        condition.colName = column->dataName;
+                        condition.value = std::move(*clock);
+                        condition.decodedLiteralRhs = true;
+                        continue;
+                    }
+                }
+            }
+        }
         StorageEngine::bindStoredComparison(condition, tbl);
     }
 }
@@ -34205,6 +34335,7 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
     if (indexesAreSnapshotComplete) {
     const Condition* indexPredicate = nullptr;
     bool recheckIndexPredicate = false;
+    std::optional<uint64_t> zonedClockFence;
     const auto indexedCandidates = [&]() -> std::optional<std::set<int64_t>> {
     // Try full-text index for CONTAINS conditions
     for (const auto& c : conds) {
@@ -34235,6 +34366,15 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
                     break;
                 }
             }
+            const bool zonedClock = searchColumn &&
+                searchColumn->storageCodec == Column::StorageCodec::ZonedClock;
+            if (zonedClock) {
+                if (!c.decodedLiteralRhs || readContext.txnIsolationLevel == IsolationLevel::SERIALIZABLE ||
+                    rlsAppliesTo(tbl) || !completeStoredZonedClockIndex(*this, dbname, tbl, *searchColumn) ||
+                    !temporal_storage_detail::parseZonedClock(c.value)) continue;
+                zonedClockFence = indexReadSnapshotFence(dbname);
+                if (!zonedClockFence) continue;
+            }
             const std::string searchValue = searchColumn
                 ? canonicalColumnKeyValue(*searchColumn, c.value)
                 : c.value;
@@ -34259,7 +34399,7 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
                 }
             } else {
                 // Try hash index first (O(1) equality lookup)
-                HashIndex* hidx = getHashIndex(dbname, tablename, c.colName);
+                HashIndex* hidx = zonedClock ? nullptr : getHashIndex(dbname, tablename, c.colName);
                 if (hidx) {
                     auto vals = hidx->search(searchValue);
                     for (int64_t v : vals) ids.insert(v);
@@ -34274,7 +34414,7 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
                     for (int64_t v : vals) ids.insert(v);
                 }
                 // Try expression index (e.g. UPPER(name) = 'FOO')
-                if (ids.empty()) {
+                if (ids.empty() && !zonedClock) {
                     for (const auto& meta : secondaryMetadata) {
                         // A partial index is only a subset.  Until predicate
                         // implication is proven, using it as a complete
@@ -34319,11 +34459,11 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
                     }
                 }
             }
-            if (!ids.empty()) {
+            if (zonedClock || !ids.empty()) {
                 // Fixed-width index equality only proves prefix equality at
                 // this boundary. Recheck the indexed atom itself as well.
                 indexPredicate = &c;
-                recheckIndexPredicate = searchValue.size() >= BP_KEY_LEN;
+                recheckIndexPredicate = zonedClock || searchValue.size() >= BP_KEY_LEN;
                 return ids;
             }
         }
@@ -34393,14 +34533,15 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
             }
         }
         const auto& current = transactionContext();
-        const bool candidatesComplete = !currentReadOwner ||
+        const bool candidatesComplete = (!zonedClockFence || indexReadSnapshotFence(dbname) == zonedClockFence) &&
+            (!currentReadOwner ||
             (current.inTransaction && current.currentTxnId == indexOwnerXid &&
             current.txnDB == dbname && !current.hasWrite &&
             current.txnLog.empty() && current.ddlUndoActions.empty() &&
             !current.transactionBackupDirty && current.snapshotAcquired &&
             current.readView.activeTxnIds.empty() &&
             current.readView.lowLimitId == indexAllocationFence + 1 &&
-            TxnIdGenerator::instance().maxCommittedTxId() == indexAllocationFence);
+            TxnIdGenerator::instance().maxCommittedTxId() == indexAllocationFence));
         if (candidatesComplete) {
             // Once physical completeness is established, expression effects
             // cannot change this already selected snapshot's candidates.

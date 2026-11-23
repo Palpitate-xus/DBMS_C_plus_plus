@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-23 · 普通表的带偏移时间等值查询可用索引
+
+普通表可用单列 `TIMETZ` 主键或覆盖整列的 B 树索引查询指定时间，支持数值偏移、微秒和已经声明类型的客户端参数。只有索引能服务当前事务视图时，索引缺少匹配项才可直接得出空结果。`IDX-03`、`OPT-01` 和 `TYPE-06` 保持部分实现。范围查找、部分索引条件推断和完整时间类型兼容仍待覆盖。 [功能验证](test-report.md#timetz-index-20261123) · [性能对照](performance-report-2026-10-30.md#timetz-index-cost-20261123) · [实现对照](postgresql-comparison.md#timetz-index-comparison-20261123)
+
 ## 2026-11-23 · 普通表支持写入和读取带偏移的时间
 
 新建标量列保存本地时钟和偏移。写入按列精度舍入，查询按 UTC 时钟和偏移筛选、排序。已核对索引维护、文本导入、二进制读回和四次强制退出与重启。`TYPE-06` 与 `PROTO-04` 保持部分实现，命名时区、会话偏移及数组仍需补齐。 [功能验证](test-report.md#timetz-storage-20261123) · [性能对照](performance-report-2026-10-30.md#timetz-storage-cost-20261123) · [实现对照](postgresql-comparison.md#timetz-storage-comparison-20261123)

@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>按带时区的时间查找记录可以用索引 · 2026-11-23</summary>
+
+例如，给签到时间建索引后，查找 `14:30:00+05:30` 时可以直接定位记录。索引确认没有匹配时，也可以直接返回。
+
+[使用说明](docs/MANUAL.md#日期时间类型) · [测试报告](docs/test-report.md#timetz-index-20261123) · [性能报告](docs/performance-report-2026-10-30.md#timetz-index-cost-20261123)
+
+</details>
+
+<details>
 <summary>可以保存带时区的时间 · 2026-11-23</summary>
 
 例如，把签到时间存为 `14:30:00+05:30`，查询时仍会显示 `+05:30`。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>修复延后提交时漏查临时表的问题 · 2026-11-23</summary>
+<summary>查看更早的更新和版本记录</summary>
+
+## 2026-11-23 · 修复延后提交时漏查临时表的问题
 
 用 `PREPARE TRANSACTION` 把事务留到稍后提交时，如果应用已准备了一条会用到临时表的查询，即使还没运行，数据库也会拒绝请求并撤销这笔事务的修改。
 
 [使用说明](docs/MANUAL.md#7-事务控制) · [测试报告](docs/test-report.md#temp-prepare-subqueries-20261123) · [性能报告](docs/performance-report-2026-10-30.md#temp-prepare-subqueries-cost-20261123)
-
-</details>
-
-<details>
-<summary>查看更早的更新和版本记录</summary>
 
 ## 2026-11-23 · 在 SQL 里直接列出多行数据时，查询准备更快
 

@@ -20,11 +20,13 @@
 #include "network/SimpleQueryResultScope.h"
 #include "common/DbError.h"
 #include "common/TemporalStorageCodec.h"
+#include "commands/StoredZonedClockPredicate.h"
 #include "access/BPTree.h"
 #include "access/PrimaryKeyIndex.h"
 #include "access/HashIndex.h"
 #include "access/BloomIndex.h"
 #include "catalog/type_registry.h"
+#include "catalog/declared_type.h"
 #include "catalog/catalog.h"
 #include "catalog/collation.h"
 #include "catalog/CatalogService.h"
@@ -4230,28 +4232,36 @@ class PreparedParameterIndexScanOp final : public Operator {
     std::string database_, table_, column_, type_;
     std::shared_ptr<PreparedQuery> query_;
     size_t slot_;
-    OpPtr fallback_, index_, heapFilter_;
+    uint64_t relationId_;
+    OpPtr fallback_, heapFilter_;
+    std::unique_ptr<IndexScanOp> index_;
     Operator* active_ = nullptr;
     bool opened_ = false, locked_ = false, usedFallback_ = false;
 
     bool sameKey(const TableSchema& schema) const {
         if (schema.partitionType != TableSchema::PartitionType::None ||
-            !isSingleColumnPrimaryKey(schema, column_)) return false;
+            (type_ != "timetz" && !isSingleColumnPrimaryKey(schema, column_))) return false;
+        const Column* key = nullptr;
         for (size_t i = 0; i < schema.len(); ++i) {
             if (schema.cols[i].generatedKind == 'v') return false;
-            if (schema.cols[i].dataName == column_ &&
-                (schema.cols[i].isArray || schema.cols[i].isUnsigned || !schema.cols[i].domainName.empty() ||
-                 schema.cols[i].generatedKind ||
-                 ExprHelper::canonicalResultTypeName(schema.cols[i].dataType) != type_))
-                return false;
+            if (schema.cols[i].dataName == column_) key = &schema.cols[i];
         }
-        return true;
+        if (!key || key->isArray || key->isUnsigned || !key->domainName.empty() ||
+            key->generatedKind || ExprHelper::canonicalResultTypeName(key->dataType) != type_)
+            return false;
+        return type_ != "timetz" || (schema.physicalRelationId == relationId_ &&
+            completeStoredZonedClockIndex(*engine_, database_, schema, *key));
     }
     bool key(std::string& value) const {
         if (slot_ >= query_->parameters.size()) return false;
         const auto& input = query_->parameters[slot_];
         if (input.isNull || ExprHelper::canonicalResultTypeName(input.typeName) != type_)
             return false;
+        if (type_ == "timetz") {
+            if (!temporal_storage_detail::parseZonedClock(input.value)) return false;
+            value = input.value;
+            return true;
+        }
         int64_t integer = 0;
         const auto parsed = std::from_chars(input.value.data(),
             input.value.data() + input.value.size(), integer);
@@ -4265,10 +4275,11 @@ class PreparedParameterIndexScanOp final : public Operator {
 public:
     PreparedParameterIndexScanOp(StorageEngine* engine, std::string database,
         std::string table, std::string column, std::string type,
-        std::shared_ptr<PreparedQuery> query, size_t slot, OpPtr fallback)
+        std::shared_ptr<PreparedQuery> query, size_t slot, OpPtr fallback,
+        uint64_t relationId = 0)
         : engine_(engine), database_(std::move(database)), table_(std::move(table)),
           column_(std::move(column)), type_(std::move(type)), query_(std::move(query)),
-          slot_(slot), fallback_(std::move(fallback)) {}
+          slot_(slot), relationId_(relationId), fallback_(std::move(fallback)) {}
     ~PreparedParameterIndexScanOp() override {
         if (opened_) try { close(); } catch (...) {}
     }
@@ -4291,14 +4302,16 @@ public:
             index_ = std::make_unique<IndexScanOp>(engine_, database_, table_, column_, value);
             active_ = index_.get();
             if (!active_->open()) return propagateChildError(active_, "parameter index source failed");
-            if (engine_->indexReadSnapshotFence(database_) == fence) return true;
+            if (engine_->indexReadSnapshotFence(database_) == fence &&
+                (type_ != "timetz" || index_->usedIndex())) return true;
             // Allocation/ownership changed during the candidate probe.
             active_->close(); active_ = nullptr;
+            if (type_ == "timetz") index_.reset();
         }
         usedFallback_ = true;
         if (usableKey) {
             // Old/overlapping snapshots still scan the visible heap. Apply
-            // the same proven integer equality before the legacy typed
+            // the same proven equality before the legacy typed
             // predicate rebuilds a full expression context for each row.
             // TableScan retains RLS and serializable dependency ownership.
             StorageEngine::Condition condition;
@@ -4341,6 +4354,10 @@ public:
     }
     std::string preparedPlanNodeName() const override {
         return "TypedEqualityScan(table=" + table_ + ", col=" + column_ + ")";
+    }
+    std::map<std::string, std::string> preparedPlanAttributes() const override {
+        if (type_ != "timetz") return {};
+        return {{"usedIndex", index_ && index_->usedIndex() ? "true" : "false"}};
     }
     double estimatedRows() const override { return 1; }
     void close() override {
@@ -5511,27 +5528,41 @@ static OpPtr makePreparedTableSource(StorageEngine* engine, const std::string& d
             range.ordinal == column->binding->sourceOrdinal) sameRange = true;
     const auto& key = schema.cols[column->binding->columnOrdinal];
     const auto type = ExprHelper::canonicalResultTypeName(key.dataType);
-    if (!sameRange || (type != "smallint" && type != "integer" && type != "bigint") ||
-        key.isArray || key.isUnsigned || !key.domainName.empty() || key.generatedKind ||
-        ExprHelper::canonicalResultTypeName(column->binding->declaredType) != type ||
-        !isSingleColumnPrimaryKey(schema, key.dataName)) return heap();
+    if (!sameRange || key.isArray || key.isUnsigned || !key.domainName.empty() || key.generatedKind ||
+        ExprHelper::canonicalResultTypeName(column->binding->declaredType) != type) return heap();
     if (equality->comparison && (equality->comparison->identity !=
         "builtin-comparison:=(" + type + "," + type + ")" || !equality->comparison->strict))
         return heap();
     const auto table = physical->tableName();
+    const bool zonedClock = type == "timetz";
+    if (zonedClock) {
+        const auto& declaration = column->binding->typeMetadata;
+        if (typeid(*physical) != typeid(TableScanOp) || table != schema.tablename ||
+            !equality->comparison || equality->comparison->enumTypeOid || equality->rowComparison ||
+            equality->preparedSubquery || column->generatedRead || column->generatedBaseDeclaration ||
+            !declaration || declaration->actualOid != 1266 || declaration->codecOid != 1266 ||
+            !select->locking.empty() || !completeStoredZonedClockIndex(*engine, database, schema, key)) return heap();
+    } else if ((type != "smallint" && type != "integer" && type != "bigint") ||
+               !isSingleColumnPrimaryKey(schema, key.dataName)) return heap();
     if (!parameter) {
-        const auto value = constantIntegerIndexInput(input, type);
+        std::optional<ExprValue> value;
+        if (zonedClock) {
+            if (auto clock = constantStoredZonedClockInput(*engine, database, input))
+                value.emplace("timetz", std::move(*clock));
+        } else {
+            value = constantIntegerIndexInput(input, type);
+        }
         if (!value) return heap();
         auto frozen = std::make_shared<PreparedQuery>();
         frozen->parameters.push_back(*value);
         return std::make_unique<PreparedParameterIndexScanOp>(engine, database, table,
-            key.dataName, type, std::move(frozen), 0, std::move(source));
+            key.dataName, type, std::move(frozen), 0, std::move(source), schema.physicalRelationId);
     }
     if (parameter->origin != ParameterOrigin::StatementInput ||
         parameter->slot >= query->parameters.size() ||
         ExprHelper::canonicalResultTypeName(parameter->declaredType) != type) return heap();
     return std::make_unique<PreparedParameterIndexScanOp>(engine, database, table,
-        key.dataName, type, query, parameter->slot, std::move(source));
+        key.dataName, type, query, parameter->slot, std::move(source), schema.physicalRelationId);
 }
 
 OpPtr makePreparedTableSource(StorageEngine* engine, const std::string& database,
@@ -8153,6 +8184,7 @@ IndexScanOp::IndexScanOp(StorageEngine* engine, const std::string& dbname,
       colname_(colname), value_(value), referenceInputOid_(referenceInputOid) {}
 
 bool IndexScanOp::open() {
+    usedIndex_ = false;
     referenceEqualityOid_.reset();
     struct ReferenceInputGuard {
         std::optional<uint32_t>& value;
@@ -8260,6 +8292,7 @@ bool IndexScanOp::open() {
         return heapFallback();
     }
     pos_ = 0;
+    usedIndex_ = true;
     if (!statsRecorded_) {
         recordTableScan(dbname_, tablename_, rids_.size(), true, false);
         statsRecorded_ = true;
@@ -8968,6 +9001,13 @@ static void validatePredicateTypes(const TableSchema& table,
         const std::vector<StorageEngine::Condition>& conditions,
         const std::string& database = {}, StorageEngine* owner = nullptr) {
     for (const auto& condition : conditions) {
+        if (owner && condition.op == "=" && condition.decodedLiteralRhs &&
+            condition.patternType == "unknown" && !condition.patternIsNull) {
+            for (size_t i = 0; i < table.len(); ++i) {
+                if (table.cols[i].dataName == condition.colName)
+                    validateStoredZonedClockEqualityInput(table.cols[i], condition.value);
+            }
+        }
         if (nullScalarPredicate(condition) && condition.op!="typedexpr") {
             bool found=false;
             for(size_t i=0;i<table.len();++i) if(table.cols[i].dataName==condition.colName) {

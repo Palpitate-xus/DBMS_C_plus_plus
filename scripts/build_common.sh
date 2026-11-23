@@ -134,6 +134,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/timetz_binary_result_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/timetz_precision_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/timetz_storage_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/timetz_index_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/quoted_bit_column_predicate_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/bit_comparison_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/bit_unknown_comparison_protocol_e2e_test.py)

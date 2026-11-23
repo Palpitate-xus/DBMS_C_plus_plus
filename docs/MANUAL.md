@@ -668,6 +668,13 @@ INSERT INTO check_ins VALUES (1, '14:30:00.125+05:30');
 SELECT local_time FROM check_ins WHERE id = 1;  -- 14:30:00.13+05:30
 ```
 
+查询某个带偏移的时间时，普通表可以用该列的主键或单列 B 树索引定位。匹配按列中实际保存的值进行。查询条件的小数位数独立于列的声明，需要舍入条件时可写 `CAST(... AS timetz(2))`。
+
+```sql
+CREATE INDEX check_ins_local_time_idx ON check_ins (local_time);
+SELECT id FROM check_ins WHERE local_time = '14:30:00.13+05:30';
+```
+
 省略偏移时从会话时区推断、命名时区输入和完整数组支持仍有差距。旧表的迁移边界见[打包与部署](PACKAGING.md#时间列存储与版本边界)和[测试报告](test-report.md#timetz-storage-20261123)。
 
 ### 二进制类型

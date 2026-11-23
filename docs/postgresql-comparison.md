@@ -2,6 +2,13 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="timetz-index-comparison-20261123"></a>
+## 2026-11-23 · 用索引查找指定的带偏移时间
+
+PostgreSQL 18.6 给 `TIMETZ` 定义了 B 树比较规则，可用于等值和范围查询。普通索引读取用行位置访问数据页并检查记录可见性。SQLite 的普通索引也根据行号读取数据页。DuckDB 的单列 ART 索引用于符合条件的高选择性等值和 `IN` 查询。 [PostgreSQL 18.6 操作符类](https://github.com/postgres/postgres/blob/REL_18_6/src/include/catalog/pg_opclass.dat#L129) · [PostgreSQL 索引读取](https://www.postgresql.org/docs/18/indexes-index-only-scans.html) · [SQLite 按索引查找](https://www.sqlite.org/queryplanner.html#lookup_by_index) · [DuckDB 索引](https://duckdb.org/docs/1.4/guides/performance/indexing#art-index-scans)
+
+本项目在普通表的单列 `TIMETZ` 等值查找中复用现有 B 树和行可见性检查。查到行位置后核对实际值。只有索引覆盖整列且能服务当前视图时，查询才可以从空的查找结果直接返回。历史快照使用数据页上的旧版本。范围查询、部分索引的条件推断及仅从索引读取仍有差距。 [功能验证](test-report.md#timetz-index-20261123) · [性能对照](performance-report-2026-10-30.md#timetz-index-cost-20261123)
+
 <a id="timetz-storage-comparison-20261123"></a>
 ## 2026-11-23 · 保存带 UTC 偏移的一天内时间
 

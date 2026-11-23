@@ -2,6 +2,18 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-23 use complete single-column indexes for ordinary TIMETZ equality",
+      "gap_ids": ["IDX-03", "OPT-01", "TYPE-06"],
+      "status": "partial",
+      "evidence": ["src/commands/TableManage.cpp", "src/commands/StoredZonedClockPredicate.h", "src/executor/ExecutionPlan.cpp", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/timetz_index_protocol_e2e_test.py"],
+      "verification": [
+        "Simple SQL and repeated text and binary Bind executions preserve the full clock and offset when probing single-column primary and secondary indexes.",
+        "The executor verifies row visibility and the full equality. Missing keys on a complete current index return an empty result without a heap scan.",
+        "Old snapshots, own writes, serializable reads, partial indexes and enforced row policies were exercised with heap fallback. Four abrupt restarts covered commit, rollback and index rebuild."
+      ]
+    },
+    {
       "issue": "2026-11-23 store and query ordinary scalar TIMETZ columns",
       "gap_ids": ["TYPE-06", "PROTO-04"],
       "status": "partial",

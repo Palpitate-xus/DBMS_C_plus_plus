@@ -17,6 +17,13 @@ cmake --build build/cmake --target dbms_main --parallel 2
 ## 最近更新
 
 <details>
+<summary>按带时区的时间查找记录可以用索引 · 2026-11-23</summary>
+
+例如，给签到时间建索引后，查找 `14:30:00+05:30` 时可以直接定位记录。索引确认没有匹配时，也可以直接返回。
+
+</details>
+
+<details>
 <summary>可以保存带时区的时间 · 2026-11-23</summary>
 
 例如，把签到时间存为 `14:30:00+05:30`，查询时仍会显示 `+05:30`。
@@ -27,13 +34,6 @@ cmake --build build/cmake --target dbms_main --parallel 2
 <summary>可以指定时间的小数秒保留几位 · 2026-11-23</summary>
 
 例如，保留两位小数时，`14:30:00.125+05:30` 会变成 `14:30:00.13+05:30`。
-
-</details>
-
-<details>
-<summary>修复延后提交时漏查临时表的问题 · 2026-11-23</summary>
-
-如果应用准备了一条会用到临时表的查询，即使还没运行，数据库也会拒绝将这笔事务留待稍后提交，并撤销它已经做出的修改。
 
 </details>
 
