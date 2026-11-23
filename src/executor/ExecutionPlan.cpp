@@ -1,6 +1,7 @@
 #include "catalog/SystemCatalogRows.h"
 #include "catalog/PgDefaultCatalog.h"
 #include "ExecutionPlan.h"
+#include "parser/BetweenSyntax.h"
 #include "expression/StoredRegtypeValue.h"
 #include "expression/ArrayDatumInput.h"
 #include "executor/PreparedTableSource.h"
@@ -3505,8 +3506,8 @@ static bool resolveCompositeInput(const Expr* expr, bool bound,
 
 static const FunctionCallExpr* rangePredicateCall(const Expr* expression) {
     const auto* call = dynamic_cast<const FunctionCallExpr*>(expression);
-    if (!call || call->preparedSubquery || (call->funcName != "BETWEEN" && call->funcName != "NOT BETWEEN") ||
-        !call->schema.empty() || (call->args.size() != 3 && call->args.size() != 4) ||
+    if (!call || call->preparedSubquery || !betweenSyntax(*call) ||
+        (call->args.size() != 3 && call->args.size() != 4) ||
         call->filter || call->hasOver || call->distinct || !call->namedArgs.empty() ||
         !call->orderBy.empty() || call->identitySequenceOid) return nullptr;
     return call;
@@ -3516,7 +3517,9 @@ static bool collectCompositeBetween(const TableSchema& schema, size_t suffix,
         const Expr* expression, std::optional<size_t> range,
         std::vector<CompositeSuffixBound>& bounds) {
     const auto* call = rangePredicateCall(expression);
-    if (!call || call->funcName != "BETWEEN") return false;
+    if (!call) return false;
+    const auto syntax = betweenSyntax(*call);
+    if (syntax->negated || syntax->symmetric) return false;
     const auto& column = schema.cols[suffix];
     const auto type = compositeEqualityType(column);
     if (type.empty() || type == "text") return false;
@@ -3786,7 +3789,7 @@ static std::optional<StoredPredicates> bindStoredPredicates(StorageEngine& engin
             if (!endpoints) return {};
             auto predicate = predicateFor(*column, Input::Integer);
             predicate.integer = storedIntegerField(schema, predicate.column);
-            if (between->funcName == "NOT BETWEEN") {
+            if (betweenSyntax(*between)->negated) {
                 predicate.input = Input::IntegerOutsideRange;
                 predicate.constant = *endpoints;
                 filter.push_back(std::move(predicate));
@@ -4736,6 +4739,8 @@ static std::optional<IntegerInterval> integerBetweenEndpoints(
     const auto lower = integerPageEndpoint(between.args[1].get(), query);
     const auto upper = integerPageEndpoint(between.args[2].get(), query);
     if (!lower || !upper) return {};
+    if (betweenSyntax(between)->symmetric && lower->value > upper->value)
+        return std::pair{upper->value, lower->value};
     return std::pair{lower->value, upper->value};
 }
 
@@ -4772,7 +4777,7 @@ static std::optional<StorageEngine::IntegerPartitionFilter> integerPartitionPred
             (between->args.size() == 4 && !isKey(between->args.back().get()))) return {};
         const auto interval = integerBetweenEndpoints(*between, ownsStatementInputs ? &query : nullptr);
         if (!interval) return {};
-        if (between->funcName == "NOT BETWEEN") return outsideIntegerInterval(interval->first, interval->second);
+        if (betweenSyntax(*between)->negated) return outsideIntegerInterval(interval->first, interval->second);
         if (interval->first > interval->second) return Filter{};
         return Filter{{*interval}, false};
     }
@@ -4830,7 +4835,7 @@ static bool intersectIntegerPageBounds(const Expr* expression, const QueryColumn
         if (!column || column->binding->columnOrdinal != key.columnOrdinal) return false;
         const auto endpoints = integerBetweenEndpoints(*between, &query);
         if (!endpoints) return false;
-        if (between->funcName == "NOT BETWEEN") bounds.exclude(*endpoints);
+        if (betweenSyntax(*between)->negated) bounds.exclude(*endpoints);
         else {
             bounds.constrain(true, true, endpoints->first);
             bounds.constrain(false, true, endpoints->second);

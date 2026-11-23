@@ -29,6 +29,25 @@ int main() {
         const auto value=ExprEvaluator{}.eval(range,{});
         assert(value.typeName=="boolean");
     }
+    for (const auto& [expression, expected] : std::vector<std::pair<std::string, std::optional<bool>>>{
+            {"2 BETWEEN SYMMETRIC 3 AND 1", true}, {"2 NOT BETWEEN SYMMETRIC 3 AND 1", false},
+            {"1 BETWEEN ASYMMETRIC 3 AND 1", false}, {"1 NOT BETWEEN ASYMMETRIC 3 AND 1", true},
+            {"2 BETWEEN SYMMETRIC NULL AND 1", {}}, {"2 NOT BETWEEN SYMMETRIC 1 AND NULL", {}},
+            {"2 BETWEEN ASYMMETRIC NULL AND 1", false}, {"2 NOT BETWEEN ASYMMETRIC NULL AND 1", true}}) {
+        auto parsed = parser.parse("SELECT " + expression);
+        assert(parsed.isValid());
+        const auto& select = static_cast<const SelectStmt&>(*parsed.stmt);
+        const auto* predicate = select.selectList.front().expr.get();
+        const auto value = ExprEvaluator{}.eval(predicate, {});
+        assert(value.typeName == "boolean" && value.isNull == !expected);
+        if (expected) assert(value.asBool() == *expected);
+    }
+    for (const auto* malformed : {"SELECT 2 BETWEEN SYMMETRIC 1 3", "SELECT 2 BETWEEN ASYMMETRIC AND 3",
+                                  "SELECT 2 NOT BETWEEN SYMMETRIC 1 AND",
+                                  "SELECT 2 NOT BETWEEN ASYMMETRIC 1 AND FROM ranges",
+                                  "SELECT 'b' BETWEEN SYMMETRIC 'z' COLLATE \"C\" AND 'a'"})
+        assert(!parser.parse(malformed).isValid());
+    assert(parser.parse("SELECT 'b' BETWEEN SYMMETRIC ('z' COLLATE \"C\") AND 'a'").isValid());
     const auto db=testDbPath("between_predicate_type");
     assert(g_engine.createDatabase(db)==DBStatus::OK);
     TableSchema table;table.tablename="ranges";
@@ -39,7 +58,9 @@ int main() {
     for(const auto& predicate:std::vector<std::string>{
         "id BETWEEN 1 AND 3", "id NOT BETWEEN 1 AND 3",
         "name BETWEEN 'a' AND 'c'", "name NOT BETWEEN 'a' AND 'c'",
-        "id BETWEEN NULL AND 3", "id NOT BETWEEN 1 AND NULL"}) {
+        "id BETWEEN NULL AND 3", "id NOT BETWEEN 1 AND NULL",
+        "id BETWEEN SYMMETRIC 3 AND 1", "id NOT BETWEEN ASYMMETRIC 3 AND 1",
+        "name NOT BETWEEN SYMMETRIC 'z' AND 'a'"}) {
         auto prepared=std::make_shared<PreparedQuery>(g_engine.prepareBoundQuery(db,
             "SELECT "+predicate+" AS predicate FROM ranges"));
         assert(prepared->output.size()==1 && prepared->output.front().type=="boolean");

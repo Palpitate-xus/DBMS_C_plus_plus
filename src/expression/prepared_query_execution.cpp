@@ -5,6 +5,7 @@
 #include "common/Config.h"
 #include "common/DbError.h"
 #include "expression/ArrayDatumInput.h"
+#include "parser/BetweenSyntax.h"
 #include "expression/expr_helper.h"
 #include "expression/aggregate_type.h"
 #include "parser/parser.h"
@@ -396,11 +397,11 @@ std::optional<ExprValue> simplifyCaseConstants(ExprPtr& expression,
         simplifyCaseConstants(quantified->right,evaluator,roles);
         return std::nullopt;
     } else if (auto* call = dynamic_cast<FunctionCallExpr*>(expression.get())) {
-        if (call->schema.empty() && (call->funcName == "BETWEEN" || call->funcName == "NOT BETWEEN") &&
-            (call->args.size() == 3 || call->args.size() == 4)) {
-            const bool negate = call->funcName == "NOT BETWEEN";
-            const auto pair = [&](size_t bound) -> std::optional<ExprValue> {
-                auto& left = call->args[bound == 2 && call->args.size() == 4 ? 3 : 0];
+        if (const auto range = betweenSyntax(*call);
+            range && (call->args.size() == 3 || call->args.size() == 4)) {
+            const bool negate = range->negated;
+            const auto pair = [&](bool lower, size_t bound) -> std::optional<ExprValue> {
+                auto& left = call->args[!lower && call->args.size() == 4 ? 3 : 0];
                 auto& right = call->args[bound];
                 const auto leftType = ExprHelper::inferParsedInputType(left.get());
                 const auto rightType = ExprHelper::inferParsedInputType(right.get());
@@ -412,7 +413,7 @@ std::optional<ExprValue> simplifyCaseConstants(ExprPtr& expression,
                 if (!a || !b) return std::nullopt;
                 if (leftType == "unknown") a->typeName = "unknown";
                 if (rightType == "unknown") b->typeName = "unknown";
-                const auto op = bound == 1 ? (negate ? "<" : ">=") : (negate ? ">" : "<=");
+                const auto op = lower ? (negate ? "<" : ">=") : (negate ? ">" : "<=");
                 const auto bit = [](const std::string& input) {
                     const auto type = ExprHelper::canonicalResultTypeName(input);
                     return type == "bit" || type == "bit varying";
@@ -424,19 +425,25 @@ std::optional<ExprValue> simplifyCaseConstants(ExprPtr& expression,
                 comparison.right = constantExpression(*b, nullptr);
                 return evaluator.eval(&comparison, RowContext{});
             };
-            const auto lower = pair(1);
-            if (lower && !lower->isNull && lower->asBool() == negate) {
-                const ExprValue result("boolean", negate ? "t" : "f", false);
-                expression = constantExpression(result, expression.get()); return result;
+            const auto checkRange = [&](size_t first, size_t second) -> std::optional<ExprValue> {
+                auto lower = pair(true, first);
+                if (lower && !lower->isNull && lower->asBool() == negate) return lower;
+                auto upper = pair(false, second);
+                if (range->explicitMode && upper && !upper->isNull && upper->asBool() == negate) return upper;
+                if (!lower || !upper) return std::nullopt;
+                if (!upper->isNull && upper->asBool() == negate) return upper;
+                if (lower->isNull || upper->isNull) return ExprValue("boolean", "", true);
+                return ExprValue("boolean", negate ? "f" : "t", false);
+            };
+            auto result = checkRange(1, 2);
+            if (range->symmetric && (!result || result->isNull || result->asBool() == negate)) {
+                auto reverse = checkRange(2, 1);
+                if (!result || !reverse) return std::nullopt;
+                if (!reverse->isNull && reverse->asBool() != negate) result = std::move(reverse);
+                else if (result->isNull || reverse->isNull) result = ExprValue("boolean", "", true);
             }
-            const auto upper = pair(2);
-            if (lower && upper) {
-                const bool decisive = !upper->isNull && upper->asBool() == negate;
-                const ExprValue result("boolean", decisive ? (negate ? "t" : "f") : (negate ? "f" : "t"),
-                    !decisive && (lower->isNull || upper->isNull));
-                expression = constantExpression(result, expression.get()); return result;
-            }
-            return std::nullopt;
+            if (result) expression = constantExpression(*result, expression.get());
+            return result;
         }
         if (roles && roles->patternEscape && roles->patternEscape(call)) {
             std::vector<std::optional<ExprValue>> inputs;

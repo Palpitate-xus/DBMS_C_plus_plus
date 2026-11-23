@@ -1,4 +1,5 @@
 #include "parser.h"
+#include "parser/BetweenSyntax.h"
 #include "catalog/catalog.h"
 #include "common/SqlTrivia.h"
 #include "common/DbError.h"
@@ -2365,11 +2366,52 @@ static ExprPtr parseRangeExpr(const std::vector<std::string>& tokens, size_t& po
 
     if (w == "between") {
         ++pos;
+        std::string mode;
+        if (pos < tokens.size()) {
+            const auto modifier = SQLParser::toLower(tokens[pos]);
+            if (modifier == "symmetric" || modifier == "asymmetric") {
+                mode = modifier == "symmetric" ? " SYMMETRIC" : " ASYMMETRIC";
+                ++pos;
+            }
+        }
+        const auto invalidRange = []() -> ExprPtr {
+            const DbError error("42601", "BETWEEN requires two bounds separated by AND");
+            retainDeclarationSyntaxError(error);
+            throw error;
+        };
+        const auto startsBound = [&] {
+            if (pos >= tokens.size()) return false;
+            const auto token = SQLParser::toLower(tokens[pos]);
+            static constexpr std::string_view separators[] = {
+                "and", "or", "from", "as", "where", "group", "order", "having",
+                "limit", "offset", "fetch", "union", "intersect", "except", "returning",
+                "when", "then", "else", "end", ")", "]", ",", ";"
+            };
+            return std::find(std::begin(separators), std::end(separators), token) == std::end(separators);
+        };
+        if (!left || !startsBound())
+            return invalidRange();
+        const size_t lowerBegin = pos;
         auto lower = parseConcatExpr(tokens, pos);
-        if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "and") ++pos;
+        if (!lower || pos >= tokens.size() || SQLParser::toLower(tokens[pos]) != "and")
+            return invalidRange();
+        if (!mode.empty()) {
+            // PostgreSQL's restricted lower-bound expression permits COLLATE
+            // inside a parenthesized expression, CASE arm or argument list.
+            size_t nested = 0;
+            for (size_t i = lowerBegin; i < pos; ++i) {
+                const auto word = SQLParser::toLower(tokens[i]);
+                if (word == "collate" && !nested) return invalidRange();
+                if (word == "(" || word == "[" || word == "case") ++nested;
+                if ((word == ")" || word == "]" || word == "end") && nested) --nested;
+            }
+        }
+        ++pos;
+        if (!startsBound()) return invalidRange();
         auto upper = parseConcatExpr(tokens, pos);
+        if (!upper) return invalidRange();
         auto betweenExpr = std::make_unique<FunctionCallExpr>();
-        betweenExpr->funcName = negated ? "NOT BETWEEN" : "BETWEEN";
+        betweenExpr->funcName = (negated ? "NOT BETWEEN" : "BETWEEN") + mode;
         betweenExpr->args.push_back(std::move(left));
         betweenExpr->args.push_back(std::move(lower));
         betweenExpr->args.push_back(std::move(upper));
@@ -13714,6 +13756,9 @@ std::string TransactionStmt::toString() const {
 std::string FunctionCallExpr::toString() const {
     if(sqlValue!=SqlValue::None)
         return funcName+(sqlValuePrecision?"("+std::to_string(*sqlValuePrecision)+")":"");
+    if (const auto range = betweenSyntax(*this); range && range->explicitMode && args.size() == 3)
+        return "(" + args[0]->toString() + " " + funcName + " " + args[1]->toString() +
+            " AND " + args[2]->toString() + ")";
     std::string s = funcName + "(";
     if (distinct) s += "DISTINCT ";
     for (size_t i = 0; i < args.size(); ++i) {

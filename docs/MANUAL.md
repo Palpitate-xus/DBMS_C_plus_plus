@@ -1372,6 +1372,8 @@ REPLACE INTO users (ID, NAME) VALUES (1, 'New Alice');
 
 `WHERE id BETWEEN 1000 AND 1100` 包含两端，起点大于终点时没有匹配。普通表使用单列整数主键，范围命中的记录较少且集中时，查询可以直接用主键查找。按主键排序并限制行数时，数据库可以在范围内取够就停。 [测试与范围](test-report.md#integer-between-range-20261123)
 
+`WHERE id BETWEEN SYMMETRIC 1100 AND 1000` 会包含 1000 到 1100 的编号，两端的书写顺序可以交换。`BETWEEN ASYMMETRIC` 等同于普通 `BETWEEN`，保留书写顺序。两种写法都可以在 `BETWEEN` 前加 `NOT`。 [示例和空值规则](test-report.md#explicit-between-20261123)
+
 `WHERE id NOT BETWEEN 1000 AND 1100` 会排除 1000 到 1100 号记录，包括两端。两端都为非空整数时，数据库可以直接比较整数。对普通表的单列整数主键，数据库可以用索引读取排除后留下的少量记录，也可以按主键顺序读取一页。已有的整数范围分区表也可以根据 `BETWEEN` 和 `NOT BETWEEN` 跳过无关分区。 [普通表测试](test-report.md#disjoint-integer-primary-20261123) · [分区测试](test-report.md#integer-not-between-20261123)
 
 `SELECT FROM users WHERE active IS NOT NULL LIMIT 3` 可以返回最多三行，每行没有字段值。单独执行 `SELECT` 返回一条这样的行。使用 `DISTINCT` 时需要写出要比较的列或表达式。只从普通表读取零列结果且没有筛选或排序时，可跳过读取大字段。[测试](test-report.md#zero-width-read-20261123) · [性能](performance-report-2026-10-30.md#zero-width-read-cost-20261123)

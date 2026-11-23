@@ -69,6 +69,11 @@ def complete_range_controls(query):
     check('k NOT BETWEEN 2 AND 3 AND k NOT BETWEEN 6 AND 7 AND k<9', (1, 4, 5, 8), True, 4, 3)
     check('k NOT BETWEEN 129 AND 1408', (*range(1, 129), *range(1409, 1537)), True, 256, 2)
     check('k NOT BETWEEN 129 AND 1407', (*range(1, 129), *range(1408, 1537)), False)
+    check('k BETWEEN SYMMETRIC 8 AND 1', range(1, 9), True, 8)
+    check('k BETWEEN ASYMMETRIC 8 AND 1', (), True, 0)
+    check('k NOT BETWEEN SYMMETRIC 1534 AND 3', (1, 2, 1535, 1536), True, 4, 2)
+    check('k NOT BETWEEN ASYMMETRIC 8 AND 1 AND k<5', (1, 2, 3, 4), True, 4)
+    check('k BETWEEN SYMMETRIC NULL AND 8', (), False)
 
     # The index sources the same heap order when SQL has no sort key.
     for tail, expected in (('LIMIT 4', insertion_order[:4]),
@@ -127,7 +132,7 @@ def parameter_range_controls(runner, client, sock, check_plan=True):
     def query(sql,rows=None):
         return check(client.simple_query(sock,sql),rows)
 
-    def prepare(name,sql,types):
+    def prepare(name,sql,types,described_types=None):
         label=name.encode()+b'\0'
         body=label+sql.encode()+b'\0'+struct.pack('!H',len(types))
         body+=b''.join(struct.pack('!I',oid) for oid in types)
@@ -136,7 +141,8 @@ def parameter_range_controls(runner, client, sock, check_plan=True):
         check(messages,[])
         assert sum(kind==b'1' for kind,_ in messages)==1,messages
         described=[body for kind,body in messages if kind==b't']
-        expected=struct.pack('!H',len(types))+b''.join(struct.pack('!I',oid) for oid in types)
+        described_types = types if described_types is None else described_types
+        expected=struct.pack('!H',len(described_types))+b''.join(struct.pack('!I',oid) for oid in described_types)
         assert described==[expected],(name,described,expected)
 
     def execute(name,values,rows=None,oids=None,state=None,binary_widths=None):
@@ -182,6 +188,18 @@ def parameter_range_controls(runner, client, sock, check_plan=True):
     for pair in ((10,-2),(None,10),(-2,None)):
         execute('range_between',pair,[],[23,25])
     execute('range_between',(-2,2),[['0','zero'],['-2',None]],[23,25])
+    symmetric = between.replace(' BETWEEN ', ' BETWEEN SYMMETRIC ')
+    prepare('range_symmetric', symmetric, (21,20))
+    execute('range_symmetric',(10,-2),[['2',''],['0','zero']],[23,25],binary_widths=(2,8))
+    execute('range_symmetric',(None,10),[],[23,25])
+    execute('range_symmetric',(-2,2),[['0','zero'],['-2',None]],[23,25])
+    prepare('range_symmetric_inferred', 'SELECT 2 BETWEEN SYMMETRIC $1 AND $2 AS v', (0,0), (23,23))
+    execute('range_symmetric_inferred',(3,1),[['t']],[16],binary_widths=(4,4))
+    execute('range_symmetric_inferred',(3,None),[[None]],[16])
+    check(client.simple_query(sock, 'CREATE SEQUENCE explicit_range_effects'), tag='CREATE SEQUENCE')
+    query("SELECT 2 BETWEEN SYMMETRIC nextval('explicit_range_effects') AND 1 AS v", [['f']])
+    query("SELECT currval('explicit_range_effects') AS v", [['1']])
+    check(client.simple_query(sock, 'DROP SEQUENCE explicit_range_effects'), tag='DROP SEQUENCE')
     outside = ('SELECT k FROM scalar_order_pk_int WHERE k NOT BETWEEN $1 AND $2 '
                'AND k>=-2 ORDER BY k DESC LIMIT 2')
     prepare('range_outside',outside,(21,20))

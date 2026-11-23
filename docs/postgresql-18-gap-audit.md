@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-23 · 显式范围端点顺序和整数索引读取
+
+支持 `BETWEEN SYMMETRIC`、`BETWEEN ASYMMETRIC` 和各自的 `NOT` 形式。已核对反向端点、空值、参数、序列求值和磁盘恢复。普通整数主键可使用前向或反向范围读取，已有整数范围分区可沿用原来的筛选。`SQL-01`、`QRY-01`、`IDX-03` 与 `OPT-01` 保持部分实现。 [验证](test-report.md#explicit-between-20261123) · [性能](performance-report-2026-10-30.md#explicit-between-cost-20261123) · [实现对照](postgresql-comparison.md#explicit-between-comparison-20261123)
+
 ## 2026-11-23 · 普通表可通过索引读取不相连的主键范围
 
 单列整数主键可读取 `NOT BETWEEN` 留下的不相连区间。旧版查询 8,192 行，排除 1 至 8,176 号并排序时读整表。新版只读取剩下的 16 行。跨段有序分页可以在取够记录时停止。通用 `OR` 索引合并、多索引位图扫描和基于统计的代价估计仍待补齐。`IDX-03`、`OPT-01` 保持部分实现。 [验证](test-report.md#disjoint-integer-primary-20261123) · [性能](performance-report-2026-10-30.md#disjoint-integer-primary-cost-20261123) · [实现对照](postgresql-comparison.md#disjoint-integer-primary-comparison-20261123)

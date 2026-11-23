@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>查一段订单号时，可以把两端反着写 · 2026-11-23</summary>
+
+用 `BETWEEN SYMMETRIC` 查询时，从 1100 到 1000 和从 1000 到 1100 会找到同一批订单。
+
+[使用说明](docs/MANUAL.md#基础查询) · [测试报告](docs/test-report.md#explicit-between-20261123) · [性能报告](docs/performance-report-2026-10-30.md#explicit-between-cost-20261123)
+
+</details>
+
+<details>
 <summary>跳过一段订单号，可以直接查两头 · 2026-11-23</summary>
 
 例如，只查最早和最新的几笔订单时，数据库可以按订单号找到这两批记录，省去读取中间的订单。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>按起止订单号查订单更快 · 2026-11-23</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-23 · 按起止订单号查订单更快
 
 例如，查 1000 到 1100 号订单时，两头都算在内。记录集中时，数据库可以直接用订单号找到它们。
 
 [测试报告](docs/test-report.md#integer-between-range-20261123) · [性能报告](docs/performance-report-2026-10-30.md#integer-between-range-cost-20261123)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-23 · 连续取多笔订单可以减少重复读取
 

@@ -347,6 +347,12 @@ static void test_integer_range_query_pruning() {
     assert(reversed.ok && reversed.structuredRows.empty());
     const auto wanted = prepared(table, "k BETWEEN 15 AND 19 AND k NOT BETWEEN 19 AND 15");
     assert(!wanted.ok && wanted.errorSqlState == "58030");
+    const auto symmetric = prepared(table, "k BETWEEN SYMMETRIC 9 AND 5");
+    assert(symmetric.ok && symmetric.structuredRows == between.structuredRows);
+    const auto symmetricOutside = prepared(table, "k BETWEEN 5 AND 20 AND k NOT BETWEEN SYMMETRIC 19 AND 15");
+    assert(symmetricOutside.ok && symmetricOutside.structuredRows == outside.structuredRows);
+    const auto asymmetric = prepared(table, "k BETWEEN ASYMMETRIC 19 AND 15");
+    assert(asymmetric.ok && asymmetric.structuredRows.empty());
 
     std::vector<std::vector<std::string>> directRows;
     std::vector<std::vector<bool>> directNulls;

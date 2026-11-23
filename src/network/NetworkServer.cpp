@@ -15,6 +15,7 @@
 #include "commands/DmlExecutor.h"
 #include "commands/CopyRelation.h"
 #include "executor/ExecutionPlan.h"
+#include "parser/BetweenSyntax.h"
 #include "TableManage.h"
 #include "permissions.h"
 #include "PostgresProtocol.h"
@@ -3689,8 +3690,7 @@ void validatePreparedIntegerInputs(const std::string& sql,Session& session,
         if(const auto* unary=dynamic_cast<const UnaryOpExpr*>(value))return contains(unary->operand.get());
         if(const auto* cast=dynamic_cast<const CastExpr*>(value))return contains(cast->operand.get());
         if(const auto* call=dynamic_cast<const FunctionCallExpr*>(value)) {
-            if(call->schema.empty() && call->args.size()==3 &&
-               (call->funcName=="BETWEEN" || call->funcName=="NOT BETWEEN")) {
+            if(call->args.size()==3 && betweenSyntax(*call)) {
                 const bool integers=std::any_of(call->args.begin(),call->args.end(),[&](const auto& arg) {
                     const auto type=ExprHelper::canonicalResultTypeName(ExprHelper::inferParsedInputType(arg.get()));
                     return integerColumn(arg.get()) || type=="smallint" || type=="integer" || type=="bigint";
@@ -3807,8 +3807,9 @@ bool prepareProtocolBitBetween(const std::string& sql, Session& session,
     if (!select || select->fromClause || !select->ctes.empty() || select->setOpRhs ||
         select->selectList.size() != 1) return false;
     const auto* range = dynamic_cast<const FunctionCallExpr*>(select->selectList.front().expr.get());
-    if (!range || !range->schema.empty() || range->args.size() != 3) return false;
-    if (range->funcName != "BETWEEN" && range->funcName != "NOT BETWEEN") return false;
+    if (!range || range->args.size() != 3) return false;
+    const auto syntax = betweenSyntax(*range);
+    if (!syntax) return false;
     bool bitRange = false, integerRange = false;
     for (const auto& input : range->args) {
         const auto type = ExprHelper::canonicalResultTypeName(ExprHelper::inferParsedInputType(input.get(), {}));
@@ -3856,7 +3857,9 @@ bool prepareProtocolBitBetween(const std::string& sql, Session& session,
     };
     std::function<void(const Expr*)> inferParameters = [&](const Expr* input) {
         if (!input || input->preparedSubquery) return;
-        if (const auto* conversion = dynamic_cast<const CastExpr*>(input)) {
+        if (const auto* parameter = dynamic_cast<const ParameterExpr*>(input)) {
+            if (syntax->explicitMode) inferCastParameter(parameter, parameter->declaredType);
+        } else if (const auto* conversion = dynamic_cast<const CastExpr*>(input)) {
             // Inner explicit input casts precede the surrounding operator
             // conversion. Infer only from actual parameter/cast sites.
             inferParameters(conversion->operand.get());

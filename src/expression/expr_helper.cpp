@@ -6,6 +6,7 @@
 #include "expression/aggregate_type.h"
 #include "types/numeric.h"
 #include "between_input.h"
+#include "parser/BetweenSyntax.h"
 #include "expression/common_type.h"
 #include "expression/ArrayPushType.h"
 #include "array_type.h"
@@ -472,11 +473,10 @@ std::string inferAstResultType(
             name = callee.name;
         // These names are parser-owned three-operand grammar nodes, not
         // ordinary scalar calls whose type can follow their first argument.
-        if (call->schema.empty() &&
-            (name == "between" || name == "not between" ||
-             name == "like escape" || name == "not like escape" ||
+        if (betweenSyntax(*call) || (call->schema.empty() &&
+            (name == "like escape" || name == "not like escape" ||
              name == "ilike escape" || name == "not ilike escape" ||
-             name == "similar to escape" || name == "not similar to escape"))
+             name == "similar to escape" || name == "not similar to escape")))
             return "boolean";
         auto argType = [&](size_t index) {
             return index < call->args.size()
@@ -2260,7 +2260,8 @@ void ExprHelper::prepareArrayTypes(Expr* expression,
             for (auto& arm : conditional->whenClauses) { visit(arm.first.get(),{}); visit(arm.second.get(),{}); }
         } else if (auto* call = dynamic_cast<FunctionCallExpr*>(node)) {
             const auto operation=toLower(call->funcName);
-            if (call->schema.empty() && (call->funcName == "BETWEEN" || call->funcName == "NOT BETWEEN"))
+            const auto range = betweenSyntax(*call);
+            if (range)
                 for (const auto& argument : call->args)
                     between_input_detail::validateLiteralCasts(argument.get());
             if (call->schema.empty() && call->args.size()==3 &&
@@ -2268,8 +2269,7 @@ void ExprHelper::prepareArrayTypes(Expr* expression,
                  operation=="not ilike escape" || operation=="similar to escape" || operation=="not similar to escape"))
                 patternType(operation,{call->args[0].get(),call->args[1].get(),call->args[2].get()});
             for (auto& arg : call->args) visit(arg.get(),{});
-            if (call->schema.empty() && call->args.size() == 3 &&
-                (operation == "between" || operation == "not between")) {
+            if (range && call->args.size() == 3) {
                 const auto unknownInput = [&](ExprPtr& operand, const std::string& source,
                                               const std::string& target) {
                     if (source != "unknown") return;
@@ -2489,8 +2489,7 @@ std::string ExprHelper::inferResultType(
         const auto* binary = dynamic_cast<const BinaryOpExpr*>(structural);
         const auto* outerCast = dynamic_cast<const CastExpr*>(structural);
         const auto* grammar = dynamic_cast<const FunctionCallExpr*>(outerCast ? outerCast->operand.get() : structural);
-        const bool rangePredicate = grammar && grammar->schema.empty() && grammar->args.size() == 3 &&
-            (grammar->funcName == "BETWEEN" || grammar->funcName == "NOT BETWEEN");
+        const bool rangePredicate = grammar && grammar->args.size() == 3 && betweenSyntax(*grammar);
         const std::string type = inferAstResultType(structural, typeHints);
         const bool resolvedArithmetic = binary && arithmetic_detail::resultType(
             toLower(binary->op), inferAstResultType(binary->left.get(), typeHints),

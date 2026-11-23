@@ -1,5 +1,6 @@
 #include "catalog/pg_owned_catalog_query.h"
 #include "catalog/RelationSearchPath.h"
+#include "parser/BetweenSyntax.h"
 #include "commands/CopyRelation.h"
 #include "catalog/type_catalog.h"
 #include "catalog/TypeCatalogScan.h"
@@ -20425,7 +20426,8 @@ static bool executePgClassQuery(const string& rawSql,Session& session,const stri
 // whole-query binding. IN/ANY/ALL/EXISTS retain their multirow consumers.
 static pair<bool, bool> scalarQueryRoles(const dbms::Expr* expression, bool scalar = true,
                                        bool* explicitCollation = nullptr,
-                                       bool* stringPredicate = nullptr) {
+                                       bool* stringPredicate = nullptr,
+                                       bool* explicitBetween = nullptr) {
     if (!expression) return {};
     if (const auto* literal = dynamic_cast<const dbms::LiteralExpr*>(expression)) {
         const auto tokens = dbms::SQLParser::tokenize(literal->value);
@@ -20438,7 +20440,7 @@ static pair<bool, bool> scalarQueryRoles(const dbms::Expr* expression, bool scal
     }
     pair<bool, bool> result{};
     const auto add = [&](const dbms::Expr* child, bool role = true) {
-        const auto uses = scalarQueryRoles(child, role, explicitCollation, stringPredicate);
+        const auto uses = scalarQueryRoles(child, role, explicitCollation, stringPredicate, explicitBetween);
         result.first = result.first || uses.first;
         result.second = result.second || uses.second;
     };
@@ -20452,6 +20454,10 @@ static pair<bool, bool> scalarQueryRoles(const dbms::Expr* expression, bool scal
     }
     else if (const auto* cast = dynamic_cast<const dbms::CastExpr*>(expression)) add(cast->operand.get());
     else if (const auto* call = dynamic_cast<const dbms::FunctionCallExpr*>(expression)) {
+        if (explicitBetween) {
+            const auto range = dbms::betweenSyntax(*call);
+            if (range && range->explicitMode) *explicitBetween = true;
+        }
         dbms::CatalogManager::QualifiedName routine;
         const bool catalogCandidate = dbms::CatalogManager::parseQualifiedName(
             call->schema.empty() ? call->funcName : call->schema + "." + call->funcName, routine, true) &&
@@ -20473,6 +20479,8 @@ static pair<bool, bool> scalarQueryRoles(const dbms::Expr* expression, bool scal
         }
         for (const auto& argument : call->args) add(argument.get(), !special);
         for (const auto& argument : call->namedArgs) add(argument.value.get(), !special);
+        if (explicitBetween && call->filter)
+            (void)scalarQueryRoles(call->filter.get(), true, nullptr, nullptr, explicitBetween);
     } else if (const auto* conditional = dynamic_cast<const dbms::CaseExpr*>(expression)) {
         add(conditional->switchExpr.get()); add(conditional->elseExpr.get());
         for (const auto& arm : conditional->whenClauses) { add(arm.first.get()); add(arm.second.get()); }
@@ -20606,7 +20614,9 @@ static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bo
     if(possibleArray && !needsDomainCast && dbms::SQLParser::isDatabaseIndependentQuery(*candidate))return false;
     bool explicitPredicateCollation = false;
     bool stringPredicate = false;
-    const auto roles = scalarQueryRoles(candidate->whereClause.get(), true, &explicitPredicateCollation, &stringPredicate);
+    bool explicitBetween = false;
+    const auto roles = scalarQueryRoles(candidate->whereClause.get(), true, &explicitPredicateCollation,
+        &stringPredicate, &explicitBetween);
     bool scalarOrder = false;
     for (const auto& item : candidate->orderBy)
         scalarOrder = scalarOrder || scalarQueryRoles(item.expr.get()).first;
@@ -20641,8 +20651,10 @@ static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bo
          !physicalColumnCandidate) || roles.second) return false;
     // Additional multirow roles in targets/order also need their own lowering;
     // never reinterpret a set-valued child as a scalar expression.
-    for (const auto& item : candidate->selectList) if (scalarQueryRoles(item.expr.get()).second) return false;
-    for (const auto& item : candidate->orderBy) if (scalarQueryRoles(item.expr.get()).second) return false;
+    for (const auto& item : candidate->selectList)
+        if (scalarQueryRoles(item.expr.get(), true, nullptr, nullptr, &explicitBetween).second) return false;
+    for (const auto& item : candidate->orderBy)
+        if (scalarQueryRoles(item.expr.get(), true, nullptr, nullptr, &explicitBetween).second) return false;
     string physical;
     vector<string> descendants;
     bool typedSortDemand = false;
@@ -20689,7 +20701,7 @@ static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bo
         }
         if (descendants.empty() && !roles.first && !scalarOrder && !possibleArray && !needsDomainCast &&
             !fromlessDemand && !possibleBitNegation && !physicalLimitDemand && !stringProjection &&
-            !stringPredicate && !explicitPredicateCollation) {
+            !stringPredicate && !explicitPredicateCollation && !explicitBetween) {
             const auto schema = g_engine.getTableSchema(session.currentDB, physical);
             typedSortDemand = ordinaryTypedSortDemand(*candidate, schema);
             declaredPredicateCollations = dbms::QueryPlanner::usesDeclaredFilterCollations(*candidate, schema);
@@ -20728,7 +20740,7 @@ static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bo
     if(descendants.empty() && !roles.first && !scalarOrder && !queryArrays(select,true) && !arrayOutput &&
         !needsDomainCast && !fromlessDemand && !bitNegationOutput && !physicalLimitDemand &&
         !typedSortDemand && !stringProjection && !stringPredicate &&
-        !explicitPredicateCollation && !declaredPredicateCollations) {
+        !explicitPredicateCollation && !declaredPredicateCollations && !explicitBetween) {
         if (!physicalColumnCandidate) return false;
         const auto schema = g_engine.getTableSchema(session.currentDB, physical);
         if (!dbms::QueryPlanner::usesDeclaredFilterCollations(*select, schema) &&

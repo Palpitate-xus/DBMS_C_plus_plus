@@ -2,6 +2,17 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="explicit-between-20261123"></a>
+## 2026-11-23 · `BETWEEN` 可以显式指定是否交换端点
+
+`2 BETWEEN SYMMETRIC 3 AND 1` 返回 `true`，两端都包含在范围内。`2 BETWEEN ASYMMETRIC 3 AND 1` 返回 `false`。两种形式都支持 `NOT`。`2 BETWEEN SYMMETRIC NULL AND 1` 返回 `NULL`。`2 BETWEEN ASYMMETRIC NULL AND 1` 因为 `2` 大于确定的上界而返回 `false`。只有能确认两端为非空常量整数或已绑定的非空整数参数时，读取计划才预先排列对称范围的端点。 [原生谓词测试](../tests/between_predicate_type_test.cpp)
+
+235 组语句及参数与 PostgreSQL 18.6 对照，648 份成功响应逐字节一致，72 份错误的消息顺序、SQLSTATE 和会话状态一致。用例包括整数、小数、文本排序规则、日期、位串、`NULL`、子查询、序列求值次数、聚合的 `FILTER`、无效语法，以及命名语句的参数类型推断和文本、二进制绑定。普通 `BETWEEN` 与 `NOT BETWEEN` 的额外 756 份响应和上一版一致。 [索引和参数回归](../tests/ordinary_scalar_order_protocol_e2e_test.py)
+
+磁盘验证复用上一版建立的数据目录。新版创建的视图和 `CHECK` 约束在重启后仍可读取与执行。更新与删除覆盖保存点回滚，以及已提交和未提交时的强制退出。25 项读取、写入及约束检查与 PostgreSQL 对照一致。原生分区测试确认对称范围可以跳过损坏的无关分区，反向非对称范围可提前判断为空。 [分区回归](../tests/partition_test.cpp)
+
+23 个定向协议测试入口和九个原生测试通过。另有 12 个范围比较测试，九个通过，三个继续报告与旧版相同的参数错误阶段差异。受测程序 SHA-256 为 `3cbda69412329a420c7ffd200fbdc8418ecd03ec334a19acc0dee3776ac511a7`。 [性能与查询样例](performance-report-2026-10-30.md#explicit-between-cost-20261123)
+
 <a id="disjoint-integer-primary-20261123"></a>
 ## 2026-11-23 · 按整数主键读取排除范围后留下的记录
 

@@ -4,6 +4,41 @@
 
 > 复核发现，几组早期 COPY 计时在每个对照场景中使用了固定的执行顺序。耗时差可能包含顺序影响。这项问题涉及默认值求值、按列查找、默认值标记、短 CSV 导出和短查询导出的配对计时。[默认值求值](#copy-default-evaluation-order-cost-20261122) · [按列查找](#copy-identity-input-cost-20261122) · [默认值标记](#copy-default-marker-cost-20261122) · [CSV 导出](#copy-csv-out-cost-20261122) · [查询导出](#copy-query-stdout-cost-20261122)
 
+<a id="explicit-between-cost-20261123"></a>
+## 2026-11-23 · 显式指定范围两端顺序的查询耗时
+
+用 GCC 13.3 和 CMake C++17 `-O2` 构建两个版本，在 Intel Xeon E5-2678 v3 上运行。表 `explicit_ranges(id integer PRIMARY KEY, n integer)` 依次插入 1 至 8,192 号，每条语句插入 128 行。主键能被 9 整除时写入 `NULL`，其余写入 `n=id%64`。
+
+```sql
+SELECT 1 AS v;
+SELECT id+0 AS v FROM explicit_ranges WHERE id BETWEEN 8025 AND 8192 ORDER BY id DESC LIMIT 8;
+SELECT id+0 AS v FROM explicit_ranges WHERE id BETWEEN SYMMETRIC 8192 AND 8025 ORDER BY id DESC LIMIT 8;
+SELECT id+0 AS v FROM explicit_ranges WHERE id BETWEEN SYMMETRIC 8192 AND 8025 ORDER BY id;
+SELECT id+0 AS v FROM explicit_ranges WHERE id BETWEEN ASYMMETRIC 8025 AND 8192 ORDER BY id;
+SELECT id+0 AS v FROM explicit_ranges WHERE id NOT BETWEEN SYMMETRIC 8128 AND 65 ORDER BY id;
+SELECT id+0 AS v FROM explicit_ranges WHERE id NOT BETWEEN ASYMMETRIC 8128 AND 65 ORDER BY id LIMIT 8;
+SELECT count(*) AS v FROM explicit_ranges WHERE n BETWEEN SYMMETRIC 24 AND 17;
+```
+
+基线 `7b4e89b9` 对显式写法报错，因此使用等价的普通范围查询。`SYMMETRIC` 先把常量小端点写在前面再去掉关键字，`ASYMMETRIC` 只去掉关键字。每个进程对每条 SQL 预热一次后计时八次，从客户端发出请求到收到 `ReadyForQuery`，逐次核对完整结果与协议消息顺序。内存盘为 `/dev/shm`、CPU 21/22，磁盘为 ext4 `/tmp`、CPU 25/26，各交换一次版本顺序与客户端和服务端 CPU。每种介质新旧版之间各测 256 次。PostgreSQL 18.6 对照在内存盘用显式 SQL 测 256 次，关闭 JIT 和并行查询。
+
+各轮用时中位数范围以毫秒计。
+
+| 查询 | 内存盘基线 | 内存盘新版 | 磁盘基线 | 磁盘新版 | 同轮内存盘新版 | PostgreSQL 18.6 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `SELECT 1` | 0.42–0.43 | 0.42–0.48 | 0.41–0.48 | 0.45–0.48 | 0.39–0.42 | 0.17 |
+| 普通范围倒序取 8 行 | 3.13–3.34 | 3.14–3.20 | 7.32–8.60 | 6.63–7.51 | 3.14–3.33 | 0.33–0.34 |
+| 对称范围倒序取 8 行 | 4.29–4.54 | 4.54–6.00 | 9.53–9.62 | 6.25–7.60 | 4.46–4.76 | 0.35–0.38 |
+| 对称范围取全部 168 行 | 32.58–34.54 | 9.68–12.77 | 41.01–42.36 | 16.33–17.57 | 9.61–10.31 | 1.63–1.69 |
+| 非对称范围取全部 168 行 | 33.25–34.64 | 9.42–11.80 | 41.28–42.30 | 15.45–15.93 | 8.60–9.62 | 1.67–1.69 |
+| 排除对称范围后取两段 128 行 | 5.91–6.35 | 7.91–8.21 | 11.30–13.91 | 14.44–14.45 | 6.95–7.48 | 2.69–2.72 |
+| 排除反向非对称范围后取 8 行 | 3.78–3.80 | 4.12–4.46 | 9.75–12.30 | 9.49–9.90 | 4.22–4.29 | 0.33 |
+| 在非主键列上按对称范围计数 | 21.39–22.71 | 21.69–21.71 | 24.50–39.55 | 23.38–24.89 | 22.85–23.20 | 1.93–1.99 |
+
+普通无分页查询从新版的表访问统计确认了索引读取，取 168 行只读 168 行，排除后取两段只读 128 行。两条分页读取各取 8 行。非主键过滤计数仍会读取 8,192 行。 [正确性测试](test-report.md#explicit-between-20261123)
+
+内存盘补测固定新旧实例使用同一服务端 CPU，交替执行普通分页、对称分页、对称排除、反向非对称排除以及计数。用 CPU 17/18 交换客户端和服务端，每个版本每条每轮计时 20 次，共 400 次。对称分页中位数从 3.14–3.16 毫秒到 3.23 毫秒，两段排除从 6.47–6.51 毫秒到 6.19–6.41 毫秒。五条查询的两轮变化都在 5% 内。分开运行的结果仍保留在表中。
+
 <a id="disjoint-integer-primary-cost-20261123"></a>
 ## 2026-11-23 · 跳过主键中间区间的查询耗时
 

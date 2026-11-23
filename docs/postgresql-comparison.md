@@ -2,6 +2,13 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="explicit-between-comparison-20261123"></a>
+## 2026-11-23 · 显式指定 `BETWEEN` 是否考虑端点顺序
+
+PostgreSQL 18.6 将 `SYMMETRIC` 展开为两组比较，分别用原顺序和反向顺序进行判断。对空值使用 SQL 的三值逻辑，执行时可能重复求值。`ASYMMETRIC` 与普通 `BETWEEN` 含义相同。SQLite 文档中的普通 `BETWEEN` 只对被比较的值求值一次。DuckDB 的优化器可以把同一列的常量上下界合并为范围。 [PostgreSQL 比较谓词](https://www.postgresql.org/docs/18/functions-comparison.html) · [PostgreSQL 18.6 转换源码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/parser/parse_expr.c) · [SQLite 范围比较](https://www.sqlite.org/lang_expr.html#the_between_operator) · [DuckDB 筛选合并源码](https://github.com/duckdb/duckdb/blob/main/src/optimizer/filter_combiner.cpp)
+
+本项目的两种显式范围模式复用现有比较和索引读取。可确认的非空整数端点在规划时确定顺序，动态端点按实际比较求值。已验证普通筛选、分页、现有整数范围分区、约束和重启后的视图。更广泛的比较类型和通用索引合并仍待覆盖。 [对照验证](test-report.md#explicit-between-20261123) · [查询用时](performance-report-2026-10-30.md#explicit-between-cost-20261123)
+
 <a id="disjoint-integer-primary-comparison-20261123"></a>
 ## 2026-11-23 · 用主键索引查找不相连的几段编号
 
@@ -23,7 +30,7 @@ PostgreSQL 18 的语法分析会把普通 `BETWEEN` 转换成包含两端的两�
 
 本项目在普通表的有符号整数读路径中提取可确认的上下界，同时保留原 SQL 表达式供其他路径使用。适用主键索引时，`BETWEEN` 与两个比较可以读取同样的候选行。对任意可比较类型的范围选路、分区裁剪和更通用的代价判断仍有差距。 [验证与限制](test-report.md#integer-between-range-20261123) · [性能对比](performance-report-2026-10-30.md#integer-between-range-cost-20261123)
 
-另用反向端点对照了显式 `SYMMETRIC` 和 `ASYMMETRIC` 及各自的否定写法。PostgreSQL 18.6 的四条查询均返回布尔值，本项目均返回 `42703`。普通的 `NOT BETWEEN` 在同一组反向及空值端点用例中与 PostgreSQL 一致。其整数筛选性能见上节。 [PostgreSQL 比较谓词](https://www.postgresql.org/docs/18/functions-comparison.html)
+这一版用反向端点对照了显式 `SYMMETRIC` 和 `ASYMMETRIC` 及各自的否定写法。PostgreSQL 18.6 的四条查询均返回布尔值，这一版均返回 `42703`。普通的 `NOT BETWEEN` 在同一组反向及空值端点用例中与 PostgreSQL 一致。 [后续的显式范围语法](#explicit-between-comparison-20261123)
 
 <a id="integer-primary-page-reuse-comparison-20261123"></a>
 ## 2026-11-23 · 同页的候选记录共用一次表页读取

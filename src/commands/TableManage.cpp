@@ -4,6 +4,7 @@
 #include "catalog/PgDefaultCatalog.h"
 #include "catalog/RelationSearchPath.h"
 #include "expression/LocalExpressionSyntax.h"
+#include "parser/BetweenSyntax.h"
 #include "TableManage.h"
 #include "expression/ArrayDatumInput.h"
 #include "commands/HeapScanCursor.h"
@@ -29428,9 +29429,7 @@ static std::string applyScalarFunc(const StorageEngine::SelectExpr& expr,
 static bool containsBetweenExpression(const Expr* expression) {
     if (!expression || expression->preparedSubquery) return false;
     if (const auto* call = dynamic_cast<const FunctionCallExpr*>(expression)) {
-        const auto name = SQLParser::toLower(call->funcName);
-        if (call->schema.empty() && call->args.size() == 3 &&
-            (name == "between" || name == "not between")) return true;
+        if (call->args.size() == 3 && betweenSyntax(*call)) return true;
         for (const auto& argument : call->args)
             if (containsBetweenExpression(argument.get())) return true;
         for (const auto& argument : call->namedArgs)
@@ -29545,8 +29544,8 @@ static std::optional<int64_t> storedRangeEndpoint(const Expr* expression) {
 static bool bindLiteralComparisons(const Expr* expression, const TableSchema& table,
         std::vector<StorageEngine::Condition::LiteralComparison>& result) {
     if (const auto* range = dynamic_cast<const FunctionCallExpr*>(expression)) {
-        if (range->preparedSubquery || !range->schema.empty() || range->args.size() != 3 ||
-            (range->funcName != "BETWEEN" && range->funcName != "NOT BETWEEN") ||
+        const auto syntax = betweenSyntax(*range);
+        if (!syntax || range->preparedSubquery || range->args.size() != 3 ||
             range->filter || range->distinct || range->hasOver || !range->namedArgs.empty() ||
             !range->orderBy.empty()) return false;
         const auto index = literalComparisonColumn(dynamic_cast<const ColumnRefExpr*>(range->args[0].get()), table);
@@ -29555,7 +29554,9 @@ static bool bindLiteralComparisons(const Expr* expression, const TableSchema& ta
         const auto upper = storedRangeEndpoint(range->args[2].get());
         if (!lower || !upper) return false;
         using IntegerRange = StorageEngine::Condition::LiteralComparison::IntegerRange;
-        result.push_back({*index, range->funcName, IntegerRange{*lower, *upper}});
+        IntegerRange bounds{*lower, *upper};
+        if (syntax->symmetric && bounds.first > bounds.second) std::swap(bounds.first, bounds.second);
+        result.push_back({*index, syntax->negated ? "NOT BETWEEN" : "BETWEEN", bounds});
         return true;
     }
     const auto* binary = dynamic_cast<const BinaryOpExpr*>(expression);
@@ -42636,7 +42637,7 @@ static PlPgsqlQueryResult plpgsqlEvalBoundExpression(
                     "not similar to escape"
                 };
                 std::string name = SQLParser::toLower(function->funcName);
-                if (!syntaxFunctions.count(name)) {
+                if (!betweenSyntax(*function) && !syntaxFunctions.count(name)) {
                     CatalogManager::QualifiedName decoded;
                     if (!CatalogManager::parseQualifiedName(function->funcName, decoded, true) ||
                         !decoded.schema.empty())

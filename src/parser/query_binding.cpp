@@ -18,6 +18,7 @@
 #include "expression/macaddr_input.h"
 #include "expression/network_input.h"
 #include "expression/between_input.h"
+#include "parser/BetweenSyntax.h"
 #include "expression/regtype_cast.h"
 #include "expression/record_cast.h"
 #include "expression/sql_value.h"
@@ -1231,8 +1232,7 @@ public:
                 }
             }
             const auto grammarOperation = SQLParser::toLower(call->funcName);
-            if (call->schema.empty() && call->args.size() == 3 &&
-                (grammarOperation == "between" || grammarOperation == "not between")) {
+            if (betweenSyntax(*call) && call->args.size() == 3) {
                 for (const auto& argument : call->args)
                     between_input_detail::validateLiteralCasts(argument.get());
                 std::vector<std::string> types;

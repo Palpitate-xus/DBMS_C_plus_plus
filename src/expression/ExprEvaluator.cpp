@@ -33,6 +33,7 @@
 #include "expression/macaddr_input.h"
 #include "expression/network_input.h"
 #include "expression/between_input.h"
+#include "parser/BetweenSyntax.h"
 #include "expression/regtype_input.h"
 #include "expression/record_cast.h"
 #include "expression/sql_value.h"
@@ -529,7 +530,7 @@ void ExprEvaluator::bindPredicateCollations(Expr* expression,
             for (auto& arg : call->namedArgs) visit(arg.value.get());
             visit(call->filter.get());
             const auto name = toLower(call->funcName);
-            const bool between = name == "between" || name == "not between";
+            const bool between = betweenSyntax(*call).has_value();
             const bool pair = name == "nullif" || name == "like escape" ||
                 name == "not like escape" || name == "ilike escape" ||
                 name == "not ilike escape" || name == "similar to escape" ||
@@ -7010,7 +7011,7 @@ ResolvedScalarFunction resolveScalarFunction(
     ResolvedScalarFunction result;
     // SQL syntax wrappers have spaces and are not routine identifiers.
     const std::string syntax = toLower(call->funcName);
-    if (call->schema.empty() && syntaxFunctions.count(syntax)) {
+    if (betweenSyntax(*call) || (call->schema.empty() && syntaxFunctions.count(syntax))) {
         result.found = true;
         result.name = syntax;
         return result;
@@ -7383,7 +7384,7 @@ void ExprEvaluator::bindScalarFunctions(Expr* expression, StorageEngine* engine)
                 registerFunction(key, BoundScalarRoutine{engine, currentDB_, resolved,function},
                                  resolved.routine.provolatile);
                 function->funcName = key;
-            } else if(!function->setReturning) {
+            } else if(!function->setReturning && !betweenSyntax(*function)) {
                 function->funcName = resolved.name;
             }
             if(!function->setReturning)function->schema.clear();
@@ -7630,10 +7631,10 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
         return result;
     }
 
-    if (e->schema.empty() && (name == "between" || name == "not between") &&
-        functionRegistry().find(name) == functionRegistry().end()) {
+    if (const auto range = betweenSyntax(*e);
+        range && functionRegistry().find(name) == functionRegistry().end()) {
         if (e->args.size() != 3 && e->args.size() != 4) return ExprValue("boolean", "f", false);
-        const bool negate = name == "not between";
+        const bool negate = range->negated;
         for (const auto& argument : e->args)
             between_input_detail::validateLiteralCasts(argument.get());
         const auto input = [&](size_t position) {
@@ -7648,20 +7649,20 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
             const auto type = ExprHelper::canonicalResultTypeName(raw);
             return isBitStringTypeName(type) || type == "smallint" || type == "integer" || type == "bigint";
         };
-        const auto comparison = [&](const std::string& operation, size_t bound) {
+        const auto comparison = [&](const std::string& operation, size_t lhs, size_t bound) {
             // A genuine constant NULL makes a strict comparison NULL during
             // planning. Do not invoke its otherwise volatile peer just to
             // rediscover that fact; row/provider NULLs are not constants.
-            if (nullStatementInput(e->args[0].get(), ctx) ||
+            if (nullStatementInput(e->args[lhs].get(), ctx) ||
                 nullStatementInput(e->args[bound].get(), ctx)) {
                 // Pure peers retain planning errors even under a strict NULL
                 // comparison. No row/parameter/routine/child is evaluated.
                 ExprEvaluator pure;
-                if (between_input_detail::constant(e->args[0].get()))
-                    (void)pure.eval(e->args[0].get(), RowContext{});
+                if (between_input_detail::constant(e->args[lhs].get()))
+                    (void)pure.eval(e->args[lhs].get(), RowContext{});
                 if (between_input_detail::constant(e->args[bound].get()))
                     (void)pure.eval(e->args[bound].get(), RowContext{});
-                const auto leftType = arrayExpressionType(e->args[0].get(), ctx, currentDB_, this);
+                const auto leftType = arrayExpressionType(e->args[lhs].get(), ctx, currentDB_, this);
                 const auto rightType = arrayExpressionType(e->args[bound].get(), ctx, currentDB_, this);
                 if (preparedType(leftType) || preparedType(rightType))
                     (void)resolveComparison(operation, leftType, rightType);
@@ -7669,21 +7670,38 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
             }
             // Each logical comparison owns its actual left occurrence. A
             // demanded second pair repeats the left expression, not its value.
-            auto left = input(bound == 2 && e->args.size() == 4 ? 3 : 0), right = input(bound);
+            auto left = input(lhs), right = input(bound);
             if (bound < e->predicateArgumentCollations.size())
                 applyPredicateCollation(e->predicateArgumentCollations[bound], left, right);
             return preparedType(left.typeName) || preparedType(right.typeName)
                 ? comparePrepared(resolveComparison(operation, left.typeName, right.typeName), left, right)
                 : applyComparison(operation, left, right);
         };
-        const auto lower = comparison(negate ? "<" : ">=", 1);
-        if (!lower.isNull && lower.asBool() == negate)
-            return ExprValue("boolean", negate ? "t" : "f", false);
-        const auto upper = comparison(negate ? ">" : "<=", 2);
-        if (!upper.isNull && upper.asBool() == negate)
-            return ExprValue("boolean", negate ? "t" : "f", false);
-        if (lower.isNull || upper.isNull) return ExprValue("boolean", "", true);
-        return ExprValue("boolean", negate ? "f" : "t", false);
+        const auto checkRange = [&](size_t first, size_t second) {
+            const size_t upperLeft = e->args.size() == 4 ? 3 : 0;
+            const auto pure = [&](size_t position) { return between_input_detail::constant(e->args[position].get()); };
+            std::optional<ExprValue> upper;
+            if (range->explicitMode && pure(upperLeft) && pure(second) && !(pure(0) && pure(first))) {
+                // A decisive constant peer can eliminate the other comparison
+                // before a function or row source is evaluated.
+                upper = comparison(negate ? ">" : "<=", upperLeft, second);
+                if (!upper->isNull && upper->asBool() == negate) return *upper;
+            }
+            auto lower = comparison(negate ? "<" : ">=", 0, first);
+            if (!lower.isNull && lower.asBool() == negate) return lower;
+            if (!upper) upper = comparison(negate ? ">" : "<=", upperLeft, second);
+            if (!upper->isNull && upper->asBool() == negate) return *upper;
+            if (lower.isNull || upper->isNull) return ExprValue("boolean", "", true);
+            return ExprValue("boolean", negate ? "f" : "t", false);
+        };
+        auto forward = checkRange(1, 2);
+        if (!range->symmetric || (!forward.isNull && forward.asBool() != negate)) return forward;
+        // A symmetric range tests both orientations as logical expressions.
+        // NULL endpoints and volatile inputs cannot be sorted as plain values.
+        auto reverse = checkRange(2, 1);
+        if (!reverse.isNull && reverse.asBool() != negate) return reverse;
+        if (forward.isNull || reverse.isNull) return ExprValue("boolean", "", true);
+        return reverse;
     }
 
     if (name == "current_setting" && callback != functionRegistry().end() &&
