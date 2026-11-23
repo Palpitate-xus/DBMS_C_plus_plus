@@ -3632,6 +3632,38 @@ static std::unique_ptr<FromItem> parseFromAtom(const std::vector<std::string>& t
         if (parenthesized) {
             if (pos >= tokens.size() || tokens[pos] != ")") return nullptr;
             ++pos;
+        } else if (!item->only && pos < tokens.size() && tokens[pos] == "(") {
+            CatalogManager::QualifiedName name;
+            if (CatalogManager::parseQualifiedName(item->tableName, name, true) &&
+                name.name == "generate_series") {
+                size_t end = pos;
+                size_t depth = 0;
+                do {
+                    if (tokens[end] == "(") ++depth;
+                    else if (tokens[end] == ")") --depth;
+                    ++end;
+                } while (end < tokens.size() && depth != 0);
+                if (depth != 0) {
+                    retainDeclarationSyntaxError(DbError("42601", "unterminated function call in FROM"));
+                    return nullptr;
+                }
+                auto start = nameBegin;
+                auto expression = parsePrimaryExpr(tokens, start);
+                const auto* call = dynamic_cast<const FunctionCallExpr*>(expression.get());
+                if (!call || call->hasOver || call->filter || call->distinct ||
+                    !call->orderBy.empty() || !call->aggregateOrderKeys.empty() ||
+                    start != end) return nullptr;
+                pos = start;
+                item->type = FromItem::Type::Function;
+                auto producer = std::make_unique<SelectStmt>();
+                producer->selectList.push_back({std::move(expression), name.name});
+                item->subquery = std::move(producer);
+                if (pos + 1 < tokens.size() && SQLParser::toLower(tokens[pos]) == "with" &&
+                    SQLParser::toLower(tokens[pos + 1]) == "ordinality") {
+                    item->withOrdinality = true;
+                    pos += 2;
+                }
+            }
         } else if (!item->only && pos < tokens.size() && tokens[pos] == "*") {
             ++pos;
         }
@@ -3656,6 +3688,14 @@ static std::unique_ptr<FromItem> parseFromAtom(const std::vector<std::string>& t
         }
         if(item->columnAliases.empty() || pos>=tokens.size() || tokens[pos]!=")")return nullptr;
         ++pos;
+    }
+
+    if (item->type == FromItem::Type::Function) {
+        if (item->alias.empty()) item->alias = "generate_series";
+        if (!item->withOrdinality) {
+            auto& producer = static_cast<SelectStmt&>(*item->subquery);
+            producer.selectList.front().alias = item->alias;
+        }
     }
 
     return item;

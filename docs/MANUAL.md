@@ -1415,6 +1415,18 @@ SELECT * FROM users ORDER BY AGE NULLS FIRST;
 
 在普通单表查询中，`upper`、`lower`、`length` 和 `replace` 接受完整的表达式。例如，`upper('prefix:' || name)` 会逐行拼接并转成大写。`name` 为 `NULL` 时结果仍为 `NULL`。在 `replace(name, ...)` 中，从表里读到的空值不会跳过其他参数，因此其他参数仍可能推进序列或报错。直接传入能提前确定的 `NULL` 时，严格函数可以在执行前化简。查询准备时仍会检查参数里的名称、类型和受支持的常量错误。[查询测试](test-report.md#scalar-string-arguments-20261120)
 
+#### 用函数生成一组值
+
+`generate_series` 可以在 `FROM` 中提供一组值。步长默认为 1，范围包含能走到的终点。下面的查询依次返回 `5` 和 `3`，旁边的行号是 `1` 和 `2`。
+
+```sql
+SELECT value, position
+FROM generate_series(5, 1, -2) WITH ORDINALITY AS series(value, position)
+LIMIT 2;
+```
+
+若步长无法朝终点前进，或任一参数为 `NULL`，结果为零行。实际读取时，零步长会报错。支持整数、小数和时间序列。一般的相关函数来源和 `ROWS FROM` 仍待补齐。[测试报告](test-report.md#series-source-20261123) · [性能报告](performance-report-2026-10-30.md#series-source-cost-20261123)
+
 #### 查询继承表
 
 查询普通的父表时，可以读取父表、子表以及更深层后代表中的记录。即使同一张表有多条继承路径，也只读取一次。查询按父表的列名读取各表的数据，再对全部结果排序和分页。`ONLY` 只读取指定的表。

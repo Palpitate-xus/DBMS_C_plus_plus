@@ -46,6 +46,7 @@ struct Range {
     const Stmt* cteStatement = nullptr;
     std::shared_ptr<PreparedQuery> viewQuery;
     GeneratedRelationPtr generatedRelation;
+    bool scalarFunctionRange = false;
 };
 using Namespace = std::vector<Range>;
 bool incompleteNamespaceCatalog(const Range& range) {
@@ -189,6 +190,8 @@ public:
 
     Range registerSource(Range range, const FromItem* source = nullptr) {
         range.occurrence = nextSourceOccurrence++;
+        range.scalarFunctionRange = source && source->type == FromItem::Type::Function &&
+            range.columns.size() == 1;
         result.sourceRanges.push_back({range.occurrence,
             statementOwners.empty() ? nullptr : statementOwners.back(), source,
             range.schema, range.name, range.columns, range.mergedUsing,
@@ -710,6 +713,21 @@ public:
                     }
                 }
                 if (matches || rangeFound) break; // nearest SQL level wins
+            }
+            // A single-column function also exposes its scalar value by its
+            // range name. Ordinary column lookup has precedence over that name.
+            if (!matches && column->table.empty() && column->schema.empty()) {
+                for (size_t depth = 0; depth < scopes.size() && !matches; ++depth) {
+                    for (const auto& range : scopes[depth]) {
+                        if (range.name != column->column || !range.scalarFunctionRange) continue;
+                        const auto& field = range.columns.front();
+                        ++matches;
+                        sourceType = field.type;
+                        valueTypeModifiers[column] = field.typeMod;
+                        resolved = {depth, range.occurrence, 0, field.type, false, field.typeOid,
+                            field.typeMetadata};
+                    }
+                }
             }
             if (matches > 1 || (matches && datum && !datum->columnPrecedence))
                 throw DbError("42702", "column reference \"" + column->toString() + "\" is ambiguous");
@@ -2261,6 +2279,13 @@ public:
         scope.insert(scope.begin(), std::move(range));
     }
 
+    void appendFunctionOrdinality(const FromItem& source, QueryRowDescriptor& columns) const {
+        if (!source.withOrdinality) return;
+        QueryOutputColumn ordinal{"ordinality", "bigint", false, 0, 20};
+        if (metadata.datumType) ordinal.typeMetadata = metadata.datumType("bigint", 20);
+        columns.push_back(std::move(ordinal));
+    }
+
     Namespace from(FromItem* item, const std::vector<Namespace>& outer, const Ctes& ctes) {
         if (!item) return {};
         const auto aliases=[&](Range range) {
@@ -2274,7 +2299,7 @@ public:
         };
         if (item->type == FromItem::Type::Table)
             return {aliases(relation(item->tableName, item->alias, ctes))};
-        if (item->type == FromItem::Type::Subquery) {
+        if (item->type == FromItem::Type::Subquery || item->type == FromItem::Type::Function) {
             if (!item->subquery) throw DbError("42601", "derived query is missing");
             auto derivedOuter = outer;
             // A non-LATERAL source cannot see this SQL level's siblings,
@@ -2285,6 +2310,7 @@ public:
                     column.type = "text";
                     if(metadata.datumType)column.typeMetadata=metadata.datumType("text",25);
                 }
+            appendFunctionOrdinality(*item, columns);
             return {aliases({"", item->alias.empty() ? "" : identifier(item->alias), std::move(columns)})};
         }
         if (item->type != FromItem::Type::Join) throw DbError("0A000", "source requires structured preparation");
@@ -3059,7 +3085,7 @@ public:
         };
         if (item->type == FromItem::Type::Table)
             return {aliases(declarationRelation(item->tableName, item->alias, ctes))};
-        if (item->type == FromItem::Type::Subquery) {
+        if (item->type == FromItem::Type::Subquery || item->type == FromItem::Type::Function) {
             if (!item->subquery) throw DbError("42601", "derived query is missing");
             auto derivedOuter = outer;
             // A non-LATERAL source cannot see this SQL level's siblings,
@@ -3070,6 +3096,7 @@ public:
                     column.type = "text";
                     if(metadata.datumType)column.typeMetadata=metadata.datumType("text",25);
                 }
+            appendFunctionOrdinality(*item, columns);
             return {aliases({"", item->alias.empty() ? "" : identifier(item->alias), std::move(columns)})};
         }
         if (item->type != FromItem::Type::Join) throw DbError("0A000", "source requires structured preparation");

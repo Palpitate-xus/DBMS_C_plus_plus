@@ -2,6 +2,18 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-23 stream generate_series as a typed query source",
+      "gap_ids": ["QRY-02", "FUNC-01", "PROTO-04"],
+      "status": "partial",
+      "evidence": ["src/main.cpp", "src/parser/parser.cpp", "src/parser/query_binding.cpp", "src/network/NetworkServer.cpp", "docs/MANUAL.md", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/generate_series_protocol_e2e_test.py", "tests/generate_series_bound_metadata_test.cpp", "tests/generate_series_cursor_test.cpp"],
+      "verification": [
+        "A supported SELECT reads typed generate_series rows on demand and can report a bigint ordinal for each row.",
+        "The shared protocol fixture covers column descriptions, actual rows, declared parameters and single evaluation of a sequence argument.",
+        "General correlated function sources, ROWS FROM and combinations with writing CTEs remain open."
+      ]
+    },
+    {
       "issue": "2026-11-23 reject reads of command-only CTEs before any write",
       "gap_ids": ["QRY-05", "DML-01"],
       "status": "partial",

@@ -21389,10 +21389,14 @@ class PreparedWithDmlRuntime {
             shared_ptr<optional<dbms::PreparedQueryRows>> statisticsRows;
             shared_ptr<dbms::TypeCatalogScan> typeRows;
             dbms::TableSchema scanSchema;
-            if(item->type==dbms::FromItem::Type::Subquery) {
+            if(item->type==dbms::FromItem::Type::Subquery || item->type==dbms::FromItem::Type::Function) {
                 auto* select=dynamic_cast<dbms::SelectStmt*>(item->subquery.get());
                 if(!select)throw dbms::DbError("0A000","mutation derived source requires a SELECT/VALUES plan");
                 cursor=dbms::QueryPlanner::makePreparedCursor(selectPlan(select,outer,frames,false,false,provider),output(select));
+                if (item->type == dbms::FromItem::Type::Function) {
+                    node->planName = "Function Scan";
+                    if (cursor->plan()) node->planChildren.push_back(cursor->plan());
+                }
             } else if(range.viewQuery) {
                 const auto view = range.relationSchema.empty() || range.relationSchema == "public"
                     ? range.relationName : range.relationSchema + "." + range.relationName;
@@ -21457,7 +21461,7 @@ class PreparedWithDmlRuntime {
             node->reset=[currentOuter,resetExecution](const dbms::RowContext& row) {
                 *currentOuter=row;resetExecution();
             };
-            node->read=[this,executionOwner,currentOuter,frames,rangePointer=&range,cursor,scan,scanSchema,virtualRows,statisticsRows,typeRows,scanOpened,source=node.get()]
+            node->read=[this,executionOwner,currentOuter,frames,rangePointer=&range,cursor,scan,scanSchema,virtualRows,statisticsRows,typeRows,scanOpened,source=node.get(),ordinality=item->withOrdinality]
                 (size_t index,dbms::RowContext& row) {
                 vector<dbms::ExprValue> cells;
                 bool found=false;
@@ -21520,7 +21524,12 @@ class PreparedWithDmlRuntime {
                     }
                 }
                 if(!found)return false;
-                row=*currentOuter;(*executionOwner)->setSourceInputs(row,rangePointer->ordinal,cells,true);
+                if (ordinality) {
+                    if (index >= static_cast<uint64_t>(std::numeric_limits<int64_t>::max()))
+                        throw dbms::DbError("22003", "function row number is out of range");
+                    cells.emplace_back("bigint", std::to_string(index + 1), false);
+                }
+                row=*currentOuter;(*executionOwner)->setSourceInputs(row,rangePointer->ordinal,std::move(cells),true);
                 return true;
             };
             return node;
@@ -22607,7 +22616,7 @@ static bool usesInheritedQueryCteSource(const dbms::SelectStmt& root,
     source = [&](const dbms::FromItem* item, const Names& local) {
         if (!item) return false;
         if (item->type == dbms::FromItem::Type::Table) return inherited(item->tableName, local);
-        if (item->type == dbms::FromItem::Type::Subquery) return statement(item->subquery.get(), local);
+        if (item->subquery) return statement(item->subquery.get(), local);
         if (item->type == dbms::FromItem::Type::Join)
             return source(item->left.get(), local) || source(item->right.get(), local) ||
                 expression(item->joinCondition.get(), local);
@@ -22748,7 +22757,8 @@ static bool usesDemandedLogicalRead(const dbms::PreparedQuery& query) {
     return false;
 }
 
-static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& handled) {
+static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& handled,
+                                    bool seriesOnly = false) {
     handled=false;
     dbms::SQLParser parser;auto parsed=parser.parseForBinding(rawSql);
     if(!parsed.isValid() && (parsed.sqlState == "42601" ||
@@ -22756,6 +22766,8 @@ static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& 
         throw dbms::DbError("42601",parsed.error);
     auto* select=parsed.isValid()?dynamic_cast<dbms::SelectStmt*>(parsed.stmt.get()):nullptr;
     if(!select || hasCurrentQueryWindows(select))return false;
+    const bool seriesSource = dbms::hasTableFunctionSource(select);
+    if (seriesOnly && !seriesSource) return false;
     if(usesInheritedQueryCteSource(*select,session))return false;
     const bool integerJoinProbe = probesPreparedIntegerJoin(*select);
     // Scalar SQL children and typed unary operators must consume this same
@@ -22944,7 +22956,7 @@ static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& 
             usingSource=usingSource || !source->usingCols.empty() || toLower(source->joinType).rfind("natural",0)==0;
             return supportsDerivedSources(source->left.get()) && supportsDerivedSources(source->right.get());
         }
-        if(source->type!=dbms::FromItem::Type::Subquery)return false;
+        if (!source->subquery) return false;
         logicalSource=true;
         return supportsDerivedQuery(source->subquery.get());
     };
@@ -22970,7 +22982,8 @@ static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& 
     const bool sourceProbe=(emptyProjection || !select->ctes.empty() ||
         (select->fromClause && select->fromClause->type!=dbms::FromItem::Type::Table)) &&
         supportsDerivedQuery(select);
-    required = required || (emptyProjection && sourceProbe);
+    if (seriesOnly && !sourceProbe) return false;
+    required = required || ((emptyProjection || seriesSource) && sourceProbe);
     const bool derivedProbe=sourceProbe && logicalSource;
     const bool inheritanceProbe=sourceProbe && nestedInheritance;
     const bool viewProbe = sourceProbe && viewSource;
@@ -23112,7 +23125,7 @@ static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& 
         }
         if(!enumRequired && !generatedRequired && !arraySourceRequired)return false;
     }
-    PreparedWithDmlRuntime runtime(session,std::move(query),demandedLogicalRead);
+    PreparedWithDmlRuntime runtime(session,std::move(query),demandedLogicalRead || seriesSource);
     auto result=runtime.runRead(0,false,!arrayDomainRequired,arraySourceRequired);
     for(const auto& name:result.columns)cout<<name<<' ';cout<<'\n';
     for(size_t i=0;i<result.rows.size();++i) {
@@ -23614,6 +23627,12 @@ static bool executeInternal(const string& rawSql, Session& s,
         const bool failed = executeMaintenanceProgressQuery(effectiveRawSql, s, handled);
         if (handled) return failed;
     }
+    if (sql.find("generate_series") != string::npos &&
+        dbms::SQLParser::classify(effectiveRawSql) == dbms::SqlCommand::Select) {
+        bool handled = false;
+        const bool failed = handlePreparedCaseQuery(effectiveRawSql, s, handled, true);
+        if (handled) return failed;
+    }
     // A query expression may legally start with a parenthesized SELECT. Route
     // such set operations before legacy statement-prefix handlers can mistake
     // the opening parenthesis for an unrecognized command. Ordinary SELECTs
@@ -23741,24 +23760,13 @@ static bool executeInternal(const string& rawSql, Session& s,
                         if (colName.empty()) colName = aliasName == "generate_series" ? "generate_series" : aliasName;
                         string unionBody;
                         bool firstU = true;
-                        if (gs3 > 0) {
-                            for (long long v = gs1; v <= gs2; v += gs3) {
-                                if ((static_cast<uint64_t>(v - gs1) & 1023U) == 0) {
-                                    dbms::checkForQueryInterrupt();
-                                }
-                                if (!firstU) unionBody += " union all ";
-                                unionBody += "select " + std::to_string(v) + " as " + colName;
-                                firstU = false;
-                            }
-                        } else {
-                            for (long long v = gs1; v >= gs2; v += gs3) {
-                                if ((static_cast<uint64_t>(gs1 - v) & 1023U) == 0) {
-                                    dbms::checkForQueryInterrupt();
-                                }
-                                if (!firstU) unionBody += " union all ";
-                                unionBody += "select " + std::to_string(v) + " as " + colName;
-                                firstU = false;
-                            }
+                        size_t rows = 0;
+                        for (long long v = gs1; gs3 > 0 ? v <= gs2 : v >= gs2;) {
+                            if ((rows++ & 1023U) == 0) dbms::checkForQueryInterrupt();
+                            if (!firstU) unionBody += " union all ";
+                            unionBody += "select " + std::to_string(v) + " as " + colName;
+                            firstU = false;
+                            if (__builtin_add_overflow(v, gs3, &v)) break;
                         }
                         if (!unionBody.empty()) {
                             string sep = (sql[fpos] == ',') ? "," : " from ";

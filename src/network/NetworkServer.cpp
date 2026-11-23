@@ -4480,7 +4480,8 @@ bool describePreparedResultShape(const std::string& sql, Session& session,
         }
     }
     const auto* select = dynamic_cast<const SelectStmt*>(parsed.stmt.get());
-    if (select && (protocolPhysicalSourceFromQuery(sql, session).logicalView ||
+    const bool functionSource = hasTableFunctionSource(select);
+    if (select && (functionSource || protocolPhysicalSourceFromQuery(sql, session).logicalView ||
                    protocolJoinsOrdinaryView(*select, session))) {
         auto* previous = currentSession();
         setCurrentSession(&session);
@@ -4493,7 +4494,8 @@ bool describePreparedResultShape(const std::string& sql, Session& session,
             shape.columnTypes.push_back(field.type);
         }
         columns = describeProtocolColumns(shape, sql, session, &prepared.output);
-        return !columns.empty();
+        if (functionSource) retainPreparedWindowOrigins(columns, prepared, session);
+        return functionSource || !columns.empty();
     }
     if (select && !parameterOids.empty() &&
         std::all_of(parameterOids.begin(), parameterOids.end(),

@@ -2,6 +2,13 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="series-function-comparison-20261123"></a>
+## 2026-11-23 · 从函数读取等差序列
+
+PostgreSQL 的 `generate_series` 支持整数、小数和时间，`WITH ORDINALITY` 会接在结果后面添加从 1 开始的 `bigint` 行号。其普通函数扫描第一次取行时把函数结果存入临时行集。SQLite 的实现用虚拟表逐行生成整数，可在适用时把范围与条数限制交给函数。DuckDB 按批生成结果，包含终点的 `generate_series` 与排除终点的 `range` 各有一套入口。[PostgreSQL 函数](https://www.postgresql.org/docs/18/functions-srf.html) · [PostgreSQL 函数扫描](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/executor/nodeFunctionscan.c) · [SQLite 实现](https://github.com/sqlite/sqlite/blob/master/ext/misc/series.c) · [DuckDB 实现](https://github.com/duckdb/duckdb/blob/main/src/function/table/range.cpp)
+
+本项目在受支持的查询中按需生成序列，`WITH ORDINALITY` 会在筛选和排序前为函数输出编号。参数求值和列说明分别由实际执行与查询绑定完成。相关函数来源和多函数组合仍待补齐。[测试](test-report.md#series-source-20261123) · [性能](performance-report-2026-10-30.md#series-source-cost-20261123)
+
 ## 2026-11-23 · 写入 CTE 需要声明可读取的输出
 
 PostgreSQL 和 DuckDB 允许在 `WITH` 里写入数据。后续查询读取的是写入命令的 `RETURNING` 输出。PostgreSQL 仍会执行语句中未被引用的写入。SQLite 将 `RETURNING` 的输出交给客户端，当前语法无法把它接到后续查询。本项目用 PostgreSQL 18.6 核对普通语句中的引用错误、表内容与序列值。[PostgreSQL WITH](https://www.postgresql.org/docs/18/queries-with.html) · [DuckDB WITH](https://duckdb.org/docs/2.0/sql/query_syntax/with) · [SQLite RETURNING](https://sqlite.org/lang_returning.html) · [测试报告](test-report.md#cte-command-visibility-20261123)

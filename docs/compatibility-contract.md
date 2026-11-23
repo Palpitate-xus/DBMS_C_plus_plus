@@ -2,6 +2,10 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-23 · 读取 `generate_series` 的结果
+
+受支持的查询可将 `generate_series` 作为 `FROM` 来源。绑定阶段确定函数重载、列名和类型。函数开始被读取时才求值参数，`WITH ORDINALITY` 增加从 1 开始的 `bigint` 行号。普通查询、扩展协议的列说明及执行使用同一列定义。相关函数来源、`ROWS FROM` 和写入 CTE 与函数来源的组合仍有差异。[测试与限制](test-report.md#series-source-20261123)
+
 ## 2026-11-23 · 写入 CTE 的可读取输出
 
 在受支持的普通语句里，把没有 `RETURNING` 的写入 CTE 当作表读取，会在语句执行前返回 `0A000`。名称检查按查询作用域进行，覆盖同名实体表、内层同名定义、其他 CTE 和集合查询。未被引用的写入仍可执行，并省去创建空临时表的操作。[测试](test-report.md#cte-command-visibility-20261123) · [性能](performance-report-2026-10-30.md#cte-command-visibility-cost-20261123)

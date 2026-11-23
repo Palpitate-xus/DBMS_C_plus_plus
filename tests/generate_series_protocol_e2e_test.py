@@ -21,21 +21,41 @@ def main():
         server=runner.start_ours(client);sock=server["sock"]
     checked=0;failures=[]
 
-    def check(sql,rows=None,oids=None,state=None,describe=False):
+    def check(sql, rows=None, oids=None, state=None, describe=False, *,
+              names=None, kinds=None, execute=False, arguments=()):
         nonlocal checked
-        checked+=1
-        if describe:
-            parse=b"\0"+sql.encode()+b"\0"+struct.pack("!H",0)
-            sock.sendall(client.typed(b"P",parse)+client.typed(b"D",b"S\0")+client.typed(b"S"))
-            messages=client.read_until_ready(sock)
-        else:messages=client.simple_query(sock,sql)
-        result=runner.decode_wire_result(messages,include_types=True)
-        valid=result[1]==state
-        if rows is not None:valid=valid and result[0]==rows
-        if oids is not None:valid=valid and result[5]==oids
-        if state:valid=valid and result[0]==[] and result[4] is None
-        print("GENERATE_SERIES",sql,"describe=",describe,result,"pass=",valid,flush=True)
-        if not valid:failures.append((sql,describe,result,rows,oids,state))
+        checked += 1
+        if describe or execute:
+            parse = b"\0" + sql.encode() + b"\0" + struct.pack("!H", len(arguments))
+            parse += b"".join(struct.pack("!I", 23) for _ in arguments)
+            packets = [client.typed(b"P", parse)]
+            if execute:
+                bind = b"\0" * 4 + struct.pack("!H", len(arguments))
+                bind += b"".join(struct.pack("!I", len(value)) + value for value in arguments)
+                packets.extend((client.typed(b"B", bind + b"\0\0"),
+                                client.typed(b"D", b"P\0"),
+                                client.typed(b"E", b"\0" * 5)))
+            else:
+                packets.append(client.typed(b"D", b"S\0"))
+            packets.append(client.typed(b"S"))
+            sock.sendall(b"".join(packets))
+            messages = client.read_until_ready(sock)
+        else:
+            messages = client.simple_query(sock, sql)
+        result = runner.decode_wire_result(messages, include_types=True)
+        valid = (result[1] == state
+                 and (rows is None or result[0] == rows)
+                 and (oids is None or result[5] == oids)
+                 and (names is None or result[3] == names))
+        if kinds is not None:
+            valid = valid and b"".join(kind for kind, _ in messages) == kinds and messages[-1] == (b"Z", b"I")
+            if state is None and not describe and rows is not None:
+                valid = valid and result[4] == f"SELECT {len(rows)}"
+        if state:
+            valid = valid and result[0] == [] and result[4] is None
+        print("GENERATE_SERIES", sql, "describe=", describe, result, "pass=", valid, flush=True)
+        if not valid:
+            failures.append((sql, describe, execute, result, rows, oids, state))
 
     try:
         cases=[
@@ -68,6 +88,51 @@ def main():
         for sql,rows,oids in cases:
             check(sql,rows,oids)
             check(sql,[],oids,describe=True)
+        from_cases = [
+            ("SELECT * FROM generate_series(1,0)", [], ["generate_series"], [23]),
+            ("SELECT * FROM generate_series(NULL::integer,3,0)", [], ["generate_series"], [23]),
+            ("SELECT * FROM generate_series(1+4,1,-2)",
+             [["5"], ["3"], ["1"]], ["generate_series"], [23]),
+            ("SELECT * FROM generate_series(9223372036854775806,9223372036854775807)",
+             [["9223372036854775806"], ["9223372036854775807"]], ["generate_series"], [20]),
+            ("SELECT * FROM generate_series(1.0::numeric,2.0::numeric,0.5::numeric)",
+             [["1.0"], ["1.5"], ["2.0"]], ["generate_series"], [1700]),
+            ("SELECT * FROM \"pg_catalog\".\"generate_series\" /* comment */ (1,2) AS \"Pick\"(\"Value\")",
+             [["1"], ["2"]], ["Value"], [23]),
+            ("SELECT g,g.i FROM generate_series(1,2) AS g(i)",
+             [["1", "1"], ["2", "2"]], ["g", "i"], [23, 23]),
+            ("SELECT * FROM generate_series(5,1,-2) WITH ORDINALITY AS g(i,n) WHERE i<5 ORDER BY i",
+             [["1", "3"], ["3", "2"]], ["i", "n"], [23, 20]),
+            ("SELECT a.i,b.j FROM generate_series(1,2) a(i) CROSS JOIN generate_series(3,4) b(j) ORDER BY a.i,b.j",
+             [["1", "3"], ["1", "4"], ["2", "3"], ["2", "4"]], ["i", "j"], [23, 23]),
+            ("WITH s AS (SELECT * FROM generate_series(1,3) AS n) SELECT n FROM s LIMIT 2",
+             [["1"], ["2"]], ["n"], [23]),
+            ("SELECT count(*) FROM generate_series(1,0) g(i)", [["0"]], ["count"], [20]),
+            ("SELECT FROM generate_series(1,2)", [[], []], [], []),
+            ("SELECT * FROM generate_series(1,2,0) LIMIT 0", [], ["generate_series"], [23]),
+            ("SELECT * FROM generate_series(1,2,0) WHERE false", [], ["generate_series"], [23]),
+        ]
+        for sql, rows, names, oids in from_cases:
+            check(sql, rows, oids, names=names, kinds=b"T"+b"D"*len(rows)+b"CZ")
+            check(sql, [], oids, names=names, describe=True, kinds=b"1tTZ")
+            check(sql, rows, oids, names=names, execute=True, kinds=b"12T"+b"D"*len(rows)+b"CZ")
+        check("SELECT * FROM generate_series($1::integer,$2::integer) WITH ORDINALITY AS g(i,n)",
+              [["8", "1"], ["9", "2"]], [23, 20], names=["i", "n"], execute=True,
+              kinds=b"12TDDCZ", arguments=(b"8", b"9"))
+        check("CREATE SEQUENCE series_argument_seq")
+        once = "SELECT v FROM generate_series(nextval('series_argument_seq'),4::bigint) AS s(v) LIMIT 2"
+        check(once, [], [20], names=["v"], describe=True, kinds=b"1tTZ")
+        check(once, [["1"], ["2"]], [20], names=["v"], execute=True, kinds=b"12TDDCZ")
+        check("SELECT nextval('series_argument_seq')", [["2"]], [20], kinds=b"TDCZ")
+        check("DROP SEQUENCE series_argument_seq")
+        if not reference:
+            check("SET statement_timeout TO '2s'")
+            check("SELECT i FROM generate_series(1,9223372036854775807) AS g(i) LIMIT 1",
+                  [["1"]], [20], names=["i"], kinds=b"TDCZ")
+            check("RESET statement_timeout")
+        check("SELECT * FROM generate_series(1,3,0)", state="22023", kinds=b"TEZ")
+        check("SELECT * FROM generate_series(1,2) g(i,j)", state="42P10", kinds=b"EZ")
+        check("SELECT * FROM generate_series(1,(2)", state="42601", kinds=b"EZ")
         errors=[
             ("SELECT generate_series(1::SMALLINT,2::SMALLINT)","42725"),
             ("SELECT generate_series(1,2,0)","22023"),

@@ -4,6 +4,34 @@
 
 > 复核发现，几组早期 COPY 计时在每个对照场景中使用了固定的执行顺序。耗时差可能包含顺序影响。这项问题涉及默认值求值、按列查找、默认值标记、短 CSV 导出和短查询导出的配对计时。[默认值求值](#copy-default-evaluation-order-cost-20261122) · [按列查找](#copy-identity-input-cost-20261122) · [默认值标记](#copy-default-marker-cost-20261122) · [CSV 导出](#copy-csv-out-cost-20261122) · [查询导出](#copy-query-stdout-cost-20261122)
 
+<a id="series-source-cost-20261123"></a>
+## 2026-11-23 · 查询按需生成等差序列
+
+基线为 `01ec1a94`，两版均以 GCC 13.3、CMake C++17 `-O2` 构建。旧版把范围里的每个值转换为一条 `SELECT`，通过 `UNION ALL` 组合。新版复用原有生成器，直接为查询提供带类型的行。`EXPLAIN (ANALYZE, FORMAT JSON) SELECT x FROM generate_series(1,100000) AS g(x) LIMIT 3` 实际显示 `Function Scan` 和生成器各输出三行。需要排序或求和时，执行器按查询语义继续读取所需的行。[正确性与恢复检查](test-report.md#series-source-20261123)
+
+复测时用本机普通协议分别发送以下 SQL，从发送请求到收到 `ReadyForQuery` 计时。每个新进程先跑一次预热，再计时十二次。对照中交换进程执行顺序和客户端、服务端所在的 CPU。每次核对所有结果行、列说明、状态和命令标签。
+
+```sql
+SELECT 1 AS v;
+SELECT i AS v FROM generate_series(1,12) AS g(i);
+SELECT i AS v FROM generate_series(1,12) AS g(i) LIMIT 1;
+SELECT i AS v FROM generate_series(1,40) AS g(i) LIMIT 1;
+SELECT sum(i) AS v FROM generate_series(1,40) AS g(i);
+```
+
+两轮新旧对照分别使用 CPU 21/22 和 25/26，另在 CPU 31/32 对照新版与 PostgreSQL 18.6。共核对 768 次计时请求。表中是各进程中位数的范围，单位为毫秒。
+
+| 查询 | 旧版 | 新版 | 与 PostgreSQL 同轮的新版 | PostgreSQL 18.6 |
+| --- | ---: | ---: | ---: | ---: |
+| 单独 `SELECT 1` | 0.617–1.033 | 0.564–0.790 | 0.957–0.959 | 0.127–0.130 |
+| 取全部 12 项 | 134.498–188.915 | 12.731–17.580 | 16.428–16.827 | 0.270–0.275 |
+| 从 12 项取第 1 项 | 135.389–187.735 | 12.258–17.927 | 15.001–18.458 | 0.182–0.187 |
+| 从 40 项取第 1 项 | 203.363–284.515 | 12.703–17.431 | 17.787–18.414 | 0.179–0.185 |
+| 将 40 项求和 | 195.369–278.824 | 20.476–25.726 | 23.514–25.661 | 0.202–0.207 |
+| 从 30,000 项取第 1 项 | — | — | 17.111–18.553 | 5.722–5.725 |
+
+最后一行将第四条 SQL 的终点改为 `30000`。旧版在单独观察中超过客户端等待时间，从 256 项取第 1 项也返回查询嵌套深度错误 `54001`。可直接相比的四条序列查询均提速。本轮所有查询的 PostgreSQL 中位耗时仍更低。原始计时保存在本地构建目录。[数据库实现对照](postgresql-comparison.md#series-function-comparison-20261123)
+
 <a id="cte-command-visibility-cost-20261123"></a>
 ## 2026-11-23 · 未引用的写入 CTE 省去空临时表
 

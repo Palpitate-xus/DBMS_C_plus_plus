@@ -810,7 +810,8 @@ struct FromItem {
     // Canonical SQL source-column aliases are metadata, not expressions.
     // Preserve the list rather than leaving its '(' as ignored tail tokens.
     std::vector<std::string> columnAliases;
-    StmtPtr subquery;          // 子查询 (type == Subquery)
+    StmtPtr subquery;          // Derived query or the typed producer of a function source.
+    bool withOrdinality = false;
     std::string joinType;      // INNER, LEFT, RIGHT, FULL, CROSS
     std::unique_ptr<FromItem> left;
     std::unique_ptr<FromItem> right;
@@ -921,6 +922,22 @@ struct SelectStmt : public Stmt {
     SelectStmt() : Stmt(SqlCommand::Select) {}
     std::string toString() const override { return "SELECT"; }
 };
+
+inline bool hasTableFunctionSource(const Stmt* statement) {
+    const auto* select = dynamic_cast<const SelectStmt*>(statement);
+    if (!select) return false;
+    const auto from = [](const auto& visit, const FromItem* item) -> bool {
+        return item && (item->type == FromItem::Type::Function ||
+            hasTableFunctionSource(item->subquery.get()) ||
+            visit(visit, item->left.get()) || visit(visit, item->right.get()));
+    };
+    if (from(from, select->fromClause.get()) || hasTableFunctionSource(select->setOpLhs.get()) ||
+        hasTableFunctionSource(select->setOpRhs.get())) return true;
+    for (const auto& definition : select->ctes) {
+        if (hasTableFunctionSource(definition.query.get())) return true;
+    }
+    return false;
+}
 
 // A WITH envelope whose primary statement is DML. SELECT retains its
 // existing CTE field for compatibility; both representations own genuine

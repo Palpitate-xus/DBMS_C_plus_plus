@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>只取几个数字时，可以按需生成 · 2026-11-23</summary>
+
+例如，用 SQL 生成从 1 到 10 万的数字，只取开头的 3 个。数据库生成这 3 个就能返回结果。
+
+[用法](docs/MANUAL.md#用函数生成一组值) · [测试报告](docs/test-report.md#series-source-20261123) · [性能报告](docs/performance-report-2026-10-30.md#series-source-cost-20261123)
+
+</details>
+
+<details>
 <summary>先检查修改结果能否读取，再改数据 · 2026-11-23</summary>
 
 例如，一条语句先修改订单，再读取修改结果。如果这次修改没有指定要返回的内容，数据库会在改动订单前报错。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>部分查询找到足够的记录后就会停下 · 2026-11-23</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-23 · 部分查询找到足够的记录后就会停下
 
 例如，只取前 5 笔订单来计算金额时，部分查询读完这 5 笔就能返回结果，省去继续读表的时间。
 
 [用法](docs/MANUAL.md#cte-公用表表达式) · [测试报告](docs/test-report.md#logical-read-demand-20261123) · [性能报告](docs/performance-report-2026-10-30.md#logical-read-demand-cost-20261123)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-23 · 部分查询会先返回结果，再报告错误
 
