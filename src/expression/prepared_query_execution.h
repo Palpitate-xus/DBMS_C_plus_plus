@@ -153,6 +153,7 @@ public:
 
 private:
     mutable std::unique_ptr<std::map<std::pair<size_t,size_t>,GeneratedReadPtr>> generatedReads_;
+    mutable std::map<size_t, std::vector<std::string>> sourceColumnTypes_;
     struct Child {
         size_t begin = 0, end = 0;
         bool runtimeParameters = false;

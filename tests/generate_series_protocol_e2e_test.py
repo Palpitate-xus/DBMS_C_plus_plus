@@ -138,6 +138,17 @@ def main():
              [["1", "10"], ["2", None], ["3", None]], ["i", "b"], [23, 23]),
             ("SELECT * FROM ROWS FROM(generate_series(1,2,0),generate_series(10,12)) LIMIT 0",
              [], ["generate_series", "generate_series"], [23, 23]),
+            ("SELECT n,v,n AS again FROM ROWS FROM(unnest(ARRAY['NULL',NULL,'中文']),"
+             "generate_series(10,11)) WITH ORDINALITY AS g(v,x,n) WHERE x IS NULL OR n=1",
+             [["1", "NULL", "1"], ["3", "中文", "3"]], ["n", "v", "again"], [20, 25, 20]),
+            ("SELECT DISTINCT v FROM ROWS FROM(unnest(ARRAY['text','text']),generate_series(1,0)) AS g(v,x)",
+             [["text"]], ["v"], [25]),
+            ("SELECT b,a,b AS again FROM ROWS FROM(generate_series(1::bigint,3),"
+             "unnest(ARRAY[true,NULL])) AS g(a,b)",
+             [["t", "1", "t"], [None, "2", None], [None, "3", None]], ["b", "a", "again"], [16, 20, 16]),
+            ("SELECT v, p FROM ROWS FROM(unnest(ARRAY['leading space','',NULL]),generate_series(6,7)) "
+             "WITH ORDINALITY AS g(v,x,p) OFFSET 1 LIMIT 2",
+             [["", "2"], [None, "3"]], ["v", "p"], [25, 20]),
         ]
         for sql, rows, names, oids in from_cases:
             check(sql, rows, oids, names=names, kinds=b"T"+b"D"*len(rows)+b"CZ")

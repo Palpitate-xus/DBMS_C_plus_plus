@@ -777,13 +777,23 @@ void PreparedQueryExecution::setSourceRow(RowContext& row, size_t ordinal,
     const auto& source = sourceRange(ordinal);
     if (source.columns.size() != cells.size())
         throw DbError("XX000", "prepared source row width differs from its descriptor");
+    auto declaration = sourceColumnTypes_.find(ordinal);
+    if (declaration == sourceColumnTypes_.end()) {
+        std::vector<std::string> types;
+        types.reserve(source.columns.size());
+        for (const auto& column : source.columns)
+            types.push_back(ExprHelper::canonicalResultTypeName(column.type));
+        declaration = sourceColumnTypes_.emplace(ordinal, std::move(types)).first;
+    }
     row.clearGeneratedSource(ordinal);
     for (size_t i = 0; i < cells.size(); ++i) {
         auto& cell = cells[i];
-        const auto type = ExprHelper::canonicalResultTypeName(source.columns[i].type);
-        if (!cell.typeName.empty() && ExprHelper::canonicalResultTypeName(cell.typeName) != type)
-            throw DbError("XX000", "prepared source cell type differs from its descriptor");
-        cell.typeName = type;
+        const auto& type = declaration->second[i];
+        if (cell.typeName != type) {
+            if (!cell.typeName.empty() && ExprHelper::canonicalResultTypeName(cell.typeName) != type)
+                throw DbError("XX000", "prepared source cell type differs from its descriptor");
+            cell.typeName = type;
+        }
         row.setBoundColumn(ordinal, i, std::move(cell));
     }
 }

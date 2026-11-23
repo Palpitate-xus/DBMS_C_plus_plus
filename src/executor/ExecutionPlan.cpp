@@ -343,6 +343,7 @@ struct PreparedSelectState {
     static constexpr size_t noTarget = std::numeric_limits<size_t>::max();
     size_t sourceOrdinal = noTarget;
     bool sourceContexts = false;
+    std::vector<size_t> functionProjectionColumns;
     Operator* logicalSource = nullptr; // Owned by the actual operator graph.
     std::vector<const PreparedQuery::SourceRange*> visibleRanges;
     SelectStmt& select() const { return *statement; }
@@ -1798,6 +1799,19 @@ public:
             instrumentation.emitted = true;
             return true;
         }
+        if (!state_->functionProjectionColumns.empty()) {
+            RowContext source;
+            if (!child_->lastPreparedContext(source))
+                throw DbError("XX000", "function projection lost its source row");
+            const auto occurrence = state_->visibleRanges.front()->ordinal;
+            for (const auto column : state_->functionProjectionColumns) {
+                const auto& value = source.boundColumn(occurrence, column);
+                values_.push_back(value);
+                row += value.isNull ? "NULL " : value.value + " ";
+            }
+            instrumentation.emitted = true;
+            return true;
+        }
         const auto context = state_->context(*child_, raw);
         const auto* sorted = dynamic_cast<const PreparedSortOp*>(child_.get());
         for (size_t i = 0; i < state_->targets.size(); ++i) {
@@ -2143,7 +2157,7 @@ public:
                             throw DbError("XX000","set-returning receiver has no cursor factory");
                         auto rows=providerReader_?providerReader_(binding,arguments):provider.read(arguments,currentSession(),database_);
                         for(const auto& cell:rows)
-                            if(ExprHelper::canonicalResultTypeName(cell.typeName)!=
+                            if(cell.typeName != binding.elementType && ExprHelper::canonicalResultTypeName(cell.typeName)!=
                                ExprHelper::canonicalResultTypeName(binding.elementType))
                                 throw DbError("XX000","set-returning receiver lost its declared element type");
                         providerCursors_[i]=std::make_unique<MaterializedProviderCursor>(std::move(rows));
@@ -2152,7 +2166,7 @@ public:
                 }
                 ExprValue cell;
                 if(providerCursors_[i] && providerCursors_[i]->next(cell)) {
-                    if(ExprHelper::canonicalResultTypeName(cell.typeName)!=
+                    if(cell.typeName != call->setReturning->elementType && ExprHelper::canonicalResultTypeName(cell.typeName)!=
                        ExprHelper::canonicalResultTypeName(call->setReturning->elementType))
                         throw DbError("XX000","set-returning cursor changed its declared element type");
                     hasSetRow=true;values_.push_back(std::move(cell));
@@ -5643,6 +5657,23 @@ OpPtr QueryPlanner::buildPreparedSelectPlan(StorageEngine* engine,
                 state->starTargets.push_back(std::move(expression));
             }
         } else state->targets.push_back(target.expr.get());
+    }
+    if (state->visibleRanges.size() == 1 && select->fromClause &&
+        select->fromClause->type == FromItem::Type::Function &&
+        state->aggregates.empty() && state->windowStages.empty() && !select->having &&
+        select->orderBy.empty() && !select->existsTargetPrunable) {
+        const auto& range = *state->visibleRanges.front();
+        for (const auto* target : state->targets) {
+            const auto* column = dynamic_cast<const ColumnRefExpr*>(target);
+            if (!column || !column->binding || column->generatedRead || column->generatedBaseDeclaration ||
+                column->binding->scopeDepth || column->binding->mergedUsing ||
+                column->binding->sourceOrdinal != range.ordinal ||
+                column->binding->columnOrdinal >= range.columns.size()) {
+                state->functionProjectionColumns.clear();
+                break;
+            }
+            state->functionProjectionColumns.push_back(column->binding->columnOrdinal);
+        }
     }
     const auto aliases=state->query->sortOutputOwners.find(select);
     for(size_t i=0;i<state->targets.size();++i)state->targetOwners.push_back(
@@ -14244,11 +14275,15 @@ namespace {
 class PreparedOperatorCursor final : public PreparedQueryCursor {
     OpPtr plan_;
     QueryRowDescriptor descriptor_;
+    std::vector<std::string> canonicalTypes_;
     bool opened_ = false, closed_ = false, eof_ = false;
 public:
     PreparedOperatorCursor(OpPtr plan, QueryRowDescriptor descriptor)
         : plan_(std::move(plan)), descriptor_(std::move(descriptor)) {
         if (!plan_) throw DbError("XX000", "prepared cursor received a null plan");
+        canonicalTypes_.reserve(descriptor_.size());
+        for (const auto& column : descriptor_)
+            canonicalTypes_.push_back(ExprHelper::canonicalResultTypeName(column.type));
     }
     ~PreparedOperatorCursor() override {
         try { close(); } catch (...) {}
@@ -14275,8 +14310,8 @@ public:
             checkForQueryInterrupt();
             if (!opened_) {
                 opened_ = true;
-                for (const auto& column : descriptor_)
-                    if (column.type.empty() || ExprHelper::canonicalResultTypeName(column.type) == "unknown")
+                for (size_t i = 0; i < descriptor_.size(); ++i)
+                    if (descriptor_[i].type.empty() || canonicalTypes_[i] == "unknown")
                         throw DbError("XX000", "prepared cursor requires a declared output type");
                 if (!plan_->supportsStructuredRows())
                     throw DbError("0A000", "prepared cursor requires a typed structured plan");
@@ -14299,12 +14334,13 @@ public:
                     throw DbError("XX000", "prepared cursor plan lost its typed descriptor width");
                 for (size_t i = 0; i < row.size(); ++i) {
                     const auto& value = row[i];
-                    const auto& column = descriptor_[i];
+                    if (value.typeName == canonicalTypes_[i]) continue;
                     const auto physicalType = ExprHelper::canonicalResultTypeName(value.typeName);
-                    if (physicalType == ExprHelper::canonicalResultTypeName(column.type)) continue;
+                    if (physicalType == canonicalTypes_[i]) continue;
 
                     // An array domain uses its base type for storage and keeps
                     // the domain declaration on the owning value.
+                    const auto& column = descriptor_[i];
                     const auto& declaration = column.typeMetadata;
                     const auto& data = value.compound;
                     if (declaration && declaration->kind == DatumKind::Array &&
@@ -14326,8 +14362,7 @@ public:
                 cells.size() != descriptor_.size() || nulls.size() != cells.size())
                 throw DbError("XX000", "prepared cursor plan lost its structured descriptor");
             for (size_t i = 0; i < cells.size(); ++i)
-                row.emplace_back(ExprHelper::canonicalResultTypeName(descriptor_[i].type),
-                    std::move(cells[i]), nulls[i]);
+                row.emplace_back(canonicalTypes_[i], std::move(cells[i]), nulls[i]);
             return true;
         } catch (...) {
             row.clear();

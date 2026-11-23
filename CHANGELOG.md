@@ -1,7 +1,16 @@
 # 更新日志
 
 <details>
-<summary>两组结果可以并排读，短的一组补空值 · 2026-11-23</summary>
+<summary>读取和导出生成的多行数据更快 · 2026-11-23</summary>
+
+在一组测试中，读完生成的 4,096 行数据，用时从约 100 毫秒降到约 60 毫秒。导出同样的数据也更快。
+
+[用法](docs/MANUAL.md#并排读取多组函数结果) · [测试报告](docs/test-report.md#function-projection-20261123) · [性能报告](docs/performance-report-2026-10-30.md#function-projection-cost-20261123)
+
+</details>
+
+<details>
+<summary>可以把多组生成的数据并排显示 · 2026-11-23</summary>
 
 例如，把 3 个编号和 2 个名字并排查询，结果会有 3 行，最后一行的名字为空。
 
@@ -10,7 +19,7 @@
 </details>
 
 <details>
-<summary>只取几个数字时，可以按需生成 · 2026-11-23</summary>
+<summary>只要前几个数字，就只生成这几个 · 2026-11-23</summary>
 
 例如，用 SQL 生成从 1 到 10 万的数字，只取开头的 3 个。数据库生成这 3 个就能返回结果。
 
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>先检查修改结果能否读取，再改数据 · 2026-11-23</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-23 · 先检查修改结果能否读取，再改数据
 
 例如，一条语句先修改订单，再读取修改结果。如果这次修改没有指定要返回的内容，数据库会在改动订单前报错。
 
 [用法](docs/MANUAL.md#cte-公用表表达式) · [测试报告](docs/test-report.md#cte-command-visibility-20261123) · [性能报告](docs/performance-report-2026-10-30.md#cte-command-visibility-cost-20261123)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-23 · 查询可以返回没有列的结果行
 

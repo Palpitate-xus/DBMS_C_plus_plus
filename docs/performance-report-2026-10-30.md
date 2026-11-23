@@ -4,6 +4,45 @@
 
 > 复核发现，几组早期 COPY 计时在每个对照场景中使用了固定的执行顺序。耗时差可能包含顺序影响。这项问题涉及默认值求值、按列查找、默认值标记、短 CSV 导出和短查询导出的配对计时。[默认值求值](#copy-default-evaluation-order-cost-20261122) · [按列查找](#copy-identity-input-cost-20261122) · [默认值标记](#copy-default-marker-cost-20261122) · [CSV 导出](#copy-csv-out-cost-20261122) · [查询导出](#copy-query-stdout-cost-20261122)
 
+<a id="function-projection-cost-20261123"></a>
+## 2026-11-23 · 减少函数结果的交接成本
+
+基线为 `24320c9f`。项目两版均用 GCC 13.3、CMake C++17 `-O2` 构建。新旧两版及 PostgreSQL 18.6 执行相同的 SQL。计时从普通协议发送查询开始，到收到 `ReadyForQuery`，每次核对所有行值、空值、列说明、命令标签和会话状态。
+
+```sql
+SELECT 1 AS v;
+SELECT * FROM ROWS FROM(generate_series(1,256),generate_series(10,11)) AS r(a,b);
+SELECT generate_series(1,256) AS a,generate_series(10,11) AS b;
+SELECT * FROM ROWS FROM(generate_series(1,4096),generate_series(10,11)) AS r(a,b);
+SELECT n,a,b,a AS again
+FROM ROWS FROM(generate_series(1,4096),generate_series(10,11)) WITH ORDINALITY AS r(a,b,n)
+WHERE n>4000 AND b IS NULL;
+SELECT a+1 AS v FROM ROWS FROM(generate_series(1,4096),generate_series(10,11)) AS r(a,b);
+SELECT * FROM ROWS FROM(generate_series(1,300000),generate_series(10,11)) AS r(a,b) LIMIT 1;
+```
+
+每场景每进程预热一次、计时十二次。两轮新旧对照用 CPU 21/22 和 25/26，PostgreSQL 对照用 CPU 31/32，每轮交换进程顺序和客户端、服务端 CPU。PostgreSQL 关闭 JIT 和并行查询。下表汇总 1,008 次计时，单位为毫秒，范围来自各进程中位数。
+
+| 查询 | 旧版 | 新版 | 同轮新版 | PostgreSQL 18.6 |
+| --- | ---: | ---: | ---: | ---: |
+| 单独 `SELECT 1` | 0.671–0.956 | 0.608–0.985 | 0.548–0.836 | 0.099–0.139 |
+| `ROWS FROM` 读完 256 行 | 17.816–19.969 | 14.277–17.431 | 13.573–24.723 | 2.117–2.497 |
+| 在 `SELECT` 清单中生成 256 行 | 11.418–16.483 | 10.777–17.706 | 16.075–24.598 | 2.121–2.425 |
+| `ROWS FROM` 读完 4,096 行 | 90.091–101.997 | 58.025–65.711 | 63.614–78.650 | 29.609–30.628 |
+| 按行号和空值筛选 | 83.826–92.319 | 45.618–54.271 | 50.829–56.890 | 2.395–2.450 |
+| 对 4,096 行计算 `a+1` | 104.438–134.984 | 74.761–88.918 | 89.190–97.435 | 28.538–29.232 |
+| 从 300,000 行取首行 | 5.412–12.380 | 7.577–12.669 | 11.049–18.196 | 35.131–37.907 |
+
+四对 `ROWS FROM` 全量查询、筛选和表达式查询均提速。取 300,000 行的首行有三对变慢，另一对略快。与 PostgreSQL 同轮的全量查询、筛选和计算用时仍更高。单次 `EXPLAIN (ANALYZE, FORMAT JSON)` 将第二条查询的范围改为 16,384 项，基线生成器约 39 毫秒，包含生成器和结果交接的函数扫描约 180 毫秒。新版这两个节点分别约 8 和 30 毫秒，前后均验证实际输出 16,384 行。[其他数据库的实现](postgresql-comparison.md#function-projection-comparison-20261123) · [正确性与恢复检查](test-report.md#function-projection-20261123)
+
+```sql
+COPY (SELECT b,a,a AS again
+      FROM ROWS FROM(generate_series(1,4096),generate_series(10,11)) AS g(a,b))
+TO STDOUT WITH (FORMAT CSV, HEADER true);
+```
+
+另在 CPU 35/36 以相同配对方法测量此导出，共 48 次，校验完整 CSV 字节与 `COPY 4096` 命令标签。中位耗时从 130.465–141.351 毫秒降到 68.402–76.134 毫秒。
+
 <a id="rows-from-cost-20261123"></a>
 ## 2026-11-23 · 按需组合多组函数结果
 

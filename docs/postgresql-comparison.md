@@ -2,6 +2,11 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="function-projection-comparison-20261123"></a>
+## 2026-11-23 · 传递已经生成的函数列
+
+PostgreSQL 在单函数且结果类型一致时直接把数据读入扫描槽。DuckDB 对直接列引用复用输入向量，只为计算列另行准备输出缓冲。SQLite 的虚拟表通过当前行游标按列返回值。本项目让查询执行器按已绑定的列位置直接提供函数值，并复用同一次执行中已经确定的类型名称。[PostgreSQL 函数扫描](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/executor/nodeFunctionscan.c) · [DuckDB 投影执行](https://github.com/duckdb/duckdb/blob/main/src/execution/operator/projection/physical_projection.cpp) · [SQLite 取列接口](https://sqlite.org/vtab.html#the_xcolumn_method) · [性能测试](performance-report-2026-10-30.md#function-projection-cost-20261123)
+
 <a id="rows-from-comparison-20261123"></a>
 ## 2026-11-23 · 并排读取多个函数
 

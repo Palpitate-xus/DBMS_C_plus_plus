@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-23 · 减少读取函数结果的开销
+
+直接读取受支持的函数结果列时，可以复用已核对的类型和当前行的值。相同 SQL 读完 4,096 行的中位用时从 90–102 毫秒降到 58–66 毫秒。与 PostgreSQL 同轮测试时，本项目需要 64–79 毫秒，PostgreSQL 需要 30–31 毫秒。`QRY-02` 和 `OPT-01` 仍为部分实现。[测试](test-report.md#function-projection-20261123) · [性能](performance-report-2026-10-30.md#function-projection-cost-20261123)
+
 ## 2026-11-23 · `ROWS FROM` 按位置组合单列结果
 
 受支持的 `ROWS FROM` 并排读取 `generate_series`、`unnest` 和返回单个值的函数。覆盖空集合、补空值、整数及其他列类型、别名和全组行号。函数参数引用同级其他表列、返回记录、声明列类型以及其他表函数仍待补齐。`QRY-02` 保持部分实现。[测试](test-report.md#rows-from-20261123) · [性能](performance-report-2026-10-30.md#rows-from-cost-20261123)

@@ -1439,6 +1439,8 @@ WITH ORDINALITY AS pairs(id, label, position);
 
 返回单个值的函数贡献一行，即使这个值是 `NULL`。可以用外层 `WHERE` 筛选补出的空值，或用 `LIMIT` 只读取前几行。当前支持每个成员返回一列的用法。引用同级其他表列、为函数声明多列输出等用法仍待补齐。[测试报告](test-report.md#rows-from-20261123) · [性能报告](performance-report-2026-10-30.md#rows-from-cost-20261123)
 
+只从一个函数来源中选列时，可以直接返回已有的值。例如把上面的查询改为 `SELECT label, id, id AS repeated_id`，会按指定顺序返回这三列，并保留空字符串和 SQL 空值的区别。[测试报告](test-report.md#function-projection-20261123) · [性能报告](performance-report-2026-10-30.md#function-projection-cost-20261123)
+
 #### 查询继承表
 
 查询普通的父表时，可以读取父表、子表以及更深层后代表中的记录。即使同一张表有多条继承路径，也只读取一次。查询按父表的列名读取各表的数据，再对全部结果排序和分页。`ONLY` 只读取指定的表。
