@@ -2243,7 +2243,7 @@ static bool supportsPreparedSelectShape(const SelectStmt& select, bool allowCtes
                                        bool selectBodyOnly = false) {
     if (select.command != SqlCommand::Select || (!allowCtes && !select.ctes.empty()) ||
         (!selectBodyOnly && (select.setOp != SetOp::None || select.setOpLhs || select.setOpRhs)) ||
-        (selectBodyOnly && (select.setOp != SetOp::Union || !select.setOpAll || select.setOpLhs || !select.setOpRhs)) ||
+        (selectBodyOnly && (select.setOp == SetOp::None || select.setOpLhs || !select.setOpRhs)) ||
         !select.groupBy.empty() || !select.groupByElems.empty() ||
         !select.distinctOn.empty() ||
         !select.locking.empty() || (select.withTies && ((select.distinct && !select.existsTargetPrunable) || selectBodyOnly))) return false;
@@ -5846,7 +5846,9 @@ OpPtr QueryPlanner::buildPreparedSelectPlan(StorageEngine* engine,
 namespace {
 class PreparedAppendOp final : public Operator {
     OpPtr branches_[2];
-    QueryRowDescriptor inputs_[2], output_;
+    std::vector<std::string> inputTypes_[2], outputTypes_;
+    std::vector<uint32_t> outputOids_;
+    bool renderRows_;
     std::function<void()> begin_, finish_;
     std::vector<ExprValue> values_;
     size_t branch_=0;
@@ -5857,12 +5859,17 @@ class PreparedAppendOp final : public Operator {
         opened_[index]=false;branches_[index]->close();
     }
 public:
-    PreparedAppendOp(OpPtr left,OpPtr right,QueryRowDescriptor leftInput,
-        QueryRowDescriptor rightInput,QueryRowDescriptor output,
+    PreparedAppendOp(OpPtr left,OpPtr right,const QueryRowDescriptor& leftInput,
+        const QueryRowDescriptor& rightInput,const QueryRowDescriptor& output,bool renderRows,
         std::function<void()> begin,std::function<void()> finish)
-        :output_(std::move(output)),begin_(std::move(begin)),finish_(std::move(finish)) {
+        :renderRows_(renderRows),begin_(std::move(begin)),finish_(std::move(finish)) {
         branches_[0]=std::move(left);branches_[1]=std::move(right);
-        inputs_[0]=std::move(leftInput);inputs_[1]=std::move(rightInput);
+        for (const auto& column : leftInput) inputTypes_[0].push_back(ExprHelper::canonicalResultTypeName(column.type));
+        for (const auto& column : rightInput) inputTypes_[1].push_back(ExprHelper::canonicalResultTypeName(column.type));
+        for (const auto& column : output) {
+            outputTypes_.push_back(ExprHelper::canonicalResultTypeName(column.type));
+            outputOids_.push_back(column.typeOid);
+        }
     }
     ~PreparedAppendOp() override {try{close();}catch(...) {}}
     bool open() override {
@@ -5877,13 +5884,13 @@ public:
         while(branch_<2) {
             std::string ignored;
             if(branches_[branch_]->next(ignored)) {
-                if(!branches_[branch_]->lastStructuredValues(values_) || values_.size()!=output_.size())
+                if(!branches_[branch_]->lastStructuredValues(values_) || values_.size()!=outputTypes_.size())
                     throw DbError("XX000","typed append child lost its declared row");
                 display.clear();
                 for(size_t i=0;i<values_.size();++i) {
-                    const auto source=ExprHelper::canonicalResultTypeName(inputs_[branch_].at(i).type);
-                    const auto target=ExprHelper::canonicalResultTypeName(output_[i].type);
-                    if(ExprHelper::canonicalResultTypeName(values_[i].typeName)!=source)
+                    const auto& source=inputTypes_[branch_][i];
+                    const auto& target=outputTypes_[i];
+                    if(values_[i].typeName!=source && ExprHelper::canonicalResultTypeName(values_[i].typeName)!=source)
                         throw DbError("XX000","typed append child cell differs from its bound input type");
                     if(source!=target) {
                         // Convert the genuine typed datum, never its rendered
@@ -5898,13 +5905,13 @@ public:
                         const auto& data = values_[i].compound;
                         if (data && data->type && data->type->kind == DatumKind::Array &&
                             data->type->actualOid != data->type->codecOid &&
-                            output_[i].typeOid == data->type->codecOid)
+                            outputOids_[i] == data->type->codecOid)
                             values_[i] = compound_value_detail::asBaseArray(std::move(values_[i]));
                     }
-                    if(ExprHelper::canonicalResultTypeName(values_[i].typeName)!=target)
+                    if(values_[i].typeName!=target && ExprHelper::canonicalResultTypeName(values_[i].typeName)!=target)
                         throw DbError("XX000","typed append coercion lost its common output type");
                     values_[i].typeName=target;
-                    display+=values_[i].isNull?"NULL ":values_[i].value+" ";
+                    if (renderRows_) display+=values_[i].isNull?"NULL ":values_[i].value+" ";
                 }
                 rowAvailable_=instrument.emitted=true;return true;
             }
@@ -5928,6 +5935,9 @@ public:
         if(primary)std::rethrow_exception(primary);
     }
     bool supportsStructuredRows() const override {return true;}
+    size_t currentBranch() const {return branch_;}
+    const std::vector<ExprValue>& values() const {return values_;}
+    std::vector<ExprValue> takeValues() {return std::move(values_);}
     bool lastStructuredValues(std::vector<ExprValue>& row) const override {row=values_;return rowAvailable_;}
     bool lastStructuredRow(std::vector<std::string>& cells,std::vector<bool>& nulls) const override {
         cells.clear();nulls.clear();for(const auto& value:values_){cells.push_back(value.value);nulls.push_back(value.isNull);}return rowAvailable_;
@@ -5940,6 +5950,125 @@ public:
     bool bindPreparedOuterRow(const RowContext& row) override {
         return supportsPreparedOuterRow() && branches_[0]->bindPreparedOuterRow(row) && branches_[1]->bindPreparedOuterRow(row);
     }
+};
+
+class PreparedSetMatchOp final : public Operator {
+    struct Row {
+        std::vector<ExprValue> values;
+        size_t group;
+    };
+    struct KeyColumn {
+        Column storage;
+        std::optional<QueryComparisonBinding> floatingEquality;
+    };
+    std::unique_ptr<PreparedAppendOp> child_;
+    SetOp operation_;
+    bool all_;
+    std::vector<KeyColumn> keyColumns_;
+    std::vector<Row> rows_;
+    size_t position_ = 0;
+    bool loaded_ = false;
+    bool available_ = false;
+
+    bool load() {
+        std::unordered_map<std::string, size_t> groups;
+        std::vector<size_t> rightCounts;
+        std::string display;
+        while (child_->next(display)) {
+            const auto& values = child_->values();
+            std::string key;
+            for (size_t i = 0; i < values.size(); ++i) {
+                const auto& column = keyColumns_[i];
+                const auto& value = values[i];
+                if (column.floatingEquality && !value.isNull) {
+                    const auto material = ExprEvaluator::comparisonHashKey(*column.floatingEquality, value, true);
+                    key += "V" + std::to_string(material.size()) + ":" + material;
+                } else {
+                    key += StorageEngine::groupingValueKey(column.storage, value.value, value.isNull);
+                }
+            }
+
+            if (operation_ != SetOp::Union && child_->currentBranch() == 1) {
+                const auto match = groups.find(key);
+                if (match != groups.end()) ++rightCounts[match->second];
+                continue;
+            }
+            const auto [entry, inserted] = groups.try_emplace(std::move(key), groups.size());
+            if (inserted && operation_ != SetOp::Union) rightCounts.push_back(0);
+            if (inserted || all_) rows_.push_back({child_->takeValues(), entry->second});
+        }
+        if (child_->hasError()) return propagateChildError(child_.get(), "typed set input failed");
+        if (operation_ != SetOp::Union) {
+            const auto keep = [&](const Row& row) {
+                checkForQueryInterrupt();
+                size_t& right = rightCounts[row.group];
+                const bool matched = right != 0;
+                if (matched && all_) --right;
+                return operation_ == SetOp::Intersect ? matched : !matched;
+            };
+            rows_.erase(std::remove_if(rows_.begin(), rows_.end(),
+                [&](const Row& row) { return !keep(row); }), rows_.end());
+        }
+        return true;
+    }
+
+public:
+    PreparedSetMatchOp(std::unique_ptr<PreparedAppendOp> child, SetOp operation, bool all,
+                       const QueryRowDescriptor& output)
+        : child_(std::move(child)), operation_(operation), all_(all) {
+        keyColumns_.reserve(output.size());
+        for (const auto& field : output) {
+            KeyColumn column;
+            const auto error = TypeRegistry::instance().resolveColumnType(column.storage, field.type, {}, false);
+            if (!error.empty()) throw DbError("0A000", "unsupported set comparison type: " + field.type);
+            if (field.typeOid == 700 || field.typeOid == 701) {
+                const auto type = ExprHelper::canonicalResultTypeName(field.type);
+                column.floatingEquality = ExprEvaluator::resolveComparison("=", type, type);
+            }
+            keyColumns_.push_back(std::move(column));
+        }
+    }
+    bool open() override {
+        OpenInstrument instrument(this);
+        clearError(); rows_.clear(); position_ = 0; loaded_ = available_ = false;
+        return child_->open() || propagateChildError(child_.get(), "typed set input open failed");
+    }
+    bool next(std::string& display) override {
+        NextInstrument instrument(this);
+        available_ = false;
+        if (!loaded_) {
+            loaded_ = true;
+            if (!load()) return false;
+        }
+        if (position_ == rows_.size()) return false;
+        display.clear();
+        for (const auto& value : rows_[position_++].values)
+            display += value.isNull ? "NULL " : value.value + " ";
+        available_ = instrument.emitted = true;
+        return true;
+    }
+    void close() override {
+        rows_.clear(); position_ = 0; loaded_ = available_ = false;
+        child_->close();
+    }
+    bool supportsStructuredRows() const override {return true;}
+    bool lastStructuredValues(std::vector<ExprValue>& values) const override {
+        if (!available_) return false;
+        values = rows_[position_ - 1].values;
+        return true;
+    }
+    bool lastStructuredRow(std::vector<std::string>& cells, std::vector<bool>& nulls) const override {
+        if (!available_) return false;
+        cells.clear(); nulls.clear();
+        for (const auto& value : rows_[position_ - 1].values) {
+            cells.push_back(value.value); nulls.push_back(value.isNull);
+        }
+        return true;
+    }
+    std::string preparedPlanNodeName() const override {return "TypedSetMatch";}
+    std::vector<Operator*> preparedPlanChildren() const override {return {child_.get()};}
+    bool supportsPreparedOuterRow() const override {return child_->supportsPreparedOuterRow();}
+    bool bindPreparedOuterRow(const RowContext& row) override {return child_->bindPreparedOuterRow(row);}
 };
 
 // Keep the existing RuntimeCell expression comparison owner. Reuse only
@@ -6464,18 +6593,33 @@ std::function<std::pair<std::optional<size_t>,size_t>()> preparedRowCounts(
 }
 }
 
-OpPtr QueryPlanner::buildPreparedUnionAllPlan(StorageEngine* engine,const std::string& database,
+bool QueryPlanner::supportsPreparedSetEquality(const QueryRowDescriptor& output) {
+    return std::all_of(output.begin(), output.end(), [](const QueryOutputColumn& field) {
+        switch (field.typeOid) {
+            case 16: case 20: case 21: case 23: case 25: // bool, integers, text
+            case 700: case 701: case 1042: case 1043:   // floats, char, varchar
+            case 1700: case 2950:                      // numeric, uuid
+                return true;
+            default:
+                return false;
+        }
+    });
+}
+
+OpPtr QueryPlanner::buildPreparedSetPlan(StorageEngine* engine,const std::string& database,
     std::shared_ptr<PreparedQuery> query,SelectStmt* select,PreparedSetBranchFactory branchFactory,
     PreparedChildExecutor reader,PreparedChildCursorFactory cursor,bool ownsScalarChildren,
     bool planRootConstants,PreparedExecutionProvider executionProvider,const RowContext& outerRow) {
-    if(!engine || !query || !select || !branchFactory || select->setOp!=SetOp::Union ||
-        !select->setOpAll || !select->setOpRhs)
-        throw DbError("0A000","typed set plan currently requires genuine UNION ALL operands");
+    if(!engine || !query || !select || !branchFactory || select->setOp==SetOp::None || !select->setOpRhs)
+        throw DbError("0A000","typed set plan requires genuine operands");
     const auto inputs=query->setOperationInputs.find(select);
     const auto output=query->statementOutputs.find(select);
     if(inputs==query->setOperationInputs.end() || output==query->statementOutputs.end() ||
         inputs->second.left.size()!=output->second.size() || inputs->second.right.size()!=output->second.size())
         throw DbError("XX000","typed set plan has no complete bound branch descriptors");
+    const bool needsEquality = select->setOp != SetOp::Union || !select->setOpAll;
+    if (needsEquality && !supportsPreparedSetEquality(output->second))
+        throw DbError("0A000", "set comparison requires a supported output type");
     std::function<void()> begin,finish;
     if(!executionProvider) {
         if(!cursor) {
@@ -6502,17 +6646,22 @@ OpPtr QueryPlanner::buildPreparedUnionAllPlan(StorageEngine* engine,const std::s
     }
     auto* left=select->setOpLhs?dynamic_cast<SelectStmt*>(select->setOpLhs.get()):select;
     auto* right=dynamic_cast<SelectStmt*>(select->setOpRhs.get());
-    if(!left || !right)throw DbError("42601","UNION ALL operands must be retained query statements");
+    if(!left || !right)throw DbError("42601","set operands must be retained query statements");
     auto leftPlan=branchFactory(left,!select->setOpLhs,executionProvider);
     auto rightPlan=branchFactory(right,false,executionProvider);
     if(!leftPlan || !rightPlan)throw DbError("XX000","typed set branch factory returned no actual graph");
     const bool expressionCounts=bool(select->limitExpr || select->offsetExpr ||
         (select->signedLimitCount && *select->signedLimitCount<0) ||
         (select->signedOffsetCount && *select->signedOffsetCount<0));
-    OpPtr root=std::make_unique<PreparedAppendOp>(std::move(leftPlan),std::move(rightPlan),
-        inputs->second.left,inputs->second.right,output->second,
+    auto append=std::make_unique<PreparedAppendOp>(std::move(leftPlan),std::move(rightPlan),
+        inputs->second.left,inputs->second.right,output->second,!needsEquality,
         expressionCounts?std::function<void()>{}:std::move(begin),
         expressionCounts?std::function<void()>{}:std::move(finish));
+    OpPtr root;
+    if (needsEquality)
+        root = std::make_unique<PreparedSetMatchOp>(std::move(append), select->setOp, select->setOpAll, output->second);
+    else
+        root = std::move(append);
     PreparedSetSortOp* sorted=nullptr;
     if(!select->orderBy.empty()) {
         const auto keys=query->setOrderColumns.find(select);
@@ -6706,7 +6855,7 @@ OpPtr QueryPlanner::buildPreparedQueryPlan(StorageEngine* engine,const std::stri
         return makePreparedCursor(std::move(plan),query->statementOutputs.at(child));
     };
     if(!selectBodyOnly && select->setOp!=SetOp::None)
-        return buildPreparedUnionAllPlan(engine,database,query,select,
+        return buildPreparedSetPlan(engine,database,query,select,
             [engine,database,query,outer](SelectStmt* branch,bool body,PreparedExecutionProvider owner) {
                 return buildPreparedQueryPlan(engine,database,query,branch,outer,std::move(owner),body);
             },{},childFactory,false,false,std::move(executionProvider),outer);

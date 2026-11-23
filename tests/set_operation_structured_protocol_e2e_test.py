@@ -32,6 +32,25 @@ def check_table_function_operands(client, sock):
          "UNION ALL SELECT 1 ORDER BY v LIMIT 0", "v", 23, 4, []),
         ("SELECT v FROM unnest(ARRAY[7,8]) AS u(v) "
          f"UNION ALL SELECT nextval('{sequence}') LIMIT 1", "v", 20, 8, [[b"7"]]),
+        ("SELECT v FROM unnest(ARRAY[7,NULL,8,NULL]) AS u(v) UNION SELECT NULL "
+         "ORDER BY v NULLS FIRST", "v", 23, 4, [[None], [b"7"], [b"8"]]),
+        ("SELECT '8' AS v UNION SELECT v FROM unnest(ARRAY[7,8]) AS u(v) ORDER BY v",
+         "v", 23, 4, [[b"7"], [b"8"]]),
+        ("SELECT v FROM unnest(ARRAY[1,2,2,NULL,NULL]) AS u(v) INTERSECT ALL SELECT '2' "
+         "ORDER BY v", "v", 23, 4, [[b"2"]]),
+        ("SELECT v FROM unnest(ARRAY[1,2,2,NULL,NULL]) AS u(v) EXCEPT ALL SELECT NULL "
+         "ORDER BY v NULLS FIRST", "v", 23, 4, [[None], [b"1"], [b"2"], [b"2"]]),
+        ("SELECT 'true' AS v UNION SELECT v FROM unnest(ARRAY[true,false]) AS u(v) ORDER BY v",
+         "v", 16, 1, [[b"f"], [b"t"]]),
+        ("SELECT count(*) AS n FROM (SELECT v FROM unnest(ARRAY[1.0,1.00,2.50]) AS u(v) "
+         "UNION SELECT '2.5') AS set_rows", "n", 20, 8, [[b"2"]]),
+        ("SELECT count(*) AS n FROM (SELECT v FROM unnest(ARRAY[-0.0::float8,0.0::float8,'NaN'::float8]) "
+         "AS u(v) UNION SELECT 'NaN') AS set_rows", "n", 20, 8, [[b"2"]]),
+        ("SELECT v FROM unnest(ARRAY[7,8]) AS u(v) UNION SELECT '7' ORDER BY v LIMIT 0",
+         "v", 23, 4, []),
+        ("WITH a AS (SELECT v FROM unnest(ARRAY[7,8]) AS u(v) UNION SELECT '10') "
+         "SELECT v FROM a ORDER BY v", "v", 23, 4, [[b"7"], [b"8"], [b"10"]]),
+        ("VALUES (7) UNION SELECT NULL ORDER BY 1", "column1", 23, 4, [[b"7"], [None]]),
     ]
     for sql, name, oid, size, rows in cases:
         parse = client.typed(b"P", b"\0" + sql.encode() + b"\0\0\0")
@@ -58,6 +77,20 @@ def check_table_function_operands(client, sock):
     # The first unconsumed branch must still be untouched after both executions.
     next_value = client.simple_query(sock, f"SELECT nextval('{sequence}')")
     assert client.data_row_values(next_value) == [[b"1"]], next_value
+
+    # Input conversion is validated before the read begins, even at LIMIT 0.
+    sql = (f"SELECT v FROM unnest(ARRAY[nextval('{sequence}')]) AS u(v) "
+           "EXCEPT SELECT 'not a number' LIMIT 0")
+    parse = client.typed(b"P", b"\0" + sql.encode() + b"\0\0\0")
+    simple_error = client.simple_query(sock, sql)
+    sock.sendall(parse + client.typed(b"S", b""))
+    parse_error = client.read_until_ready(sock)
+    for messages in (simple_error, parse_error):
+        assert [kind for kind, _ in messages] == [b"E", b"Z"], messages
+        assert b"C22P02\0" in messages[0][1], messages
+        assert messages[1] == (b"Z", b"I"), messages
+    next_value = client.simple_query(sock, f"SELECT nextval('{sequence}')")
+    assert client.data_row_values(next_value) == [[b"2"]], next_value
 
 
 def main():

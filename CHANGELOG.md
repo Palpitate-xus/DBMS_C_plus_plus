@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>合并数组结果时可以直接写空值 · 2026-11-23</summary>
+
+例如，把一组编号和一个 `NULL` 合并成一列时，编号仍是整数，空值也会保留下来。
+
+[用法](docs/MANUAL.md#把数组展开成行) · [测试报告](docs/test-report.md#set-input-types-20261123) · [性能报告](docs/performance-report-2026-10-30.md#set-input-types-cost-20261123)
+
+</details>
+
+<details>
 <summary>数组里的值可以和其他查询结果合并 · 2026-11-23</summary>
 
 例如，可以把手头的一组订单号和从表里查出的订单号放在同一份结果里，也可以去掉重复项。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>SQL 里直接写几千个数字，查询更快 · 2026-11-23</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-23 · SQL 里直接写几千个数字，查询更快
 
 把一长串数字直接写在查询里时，数据库能更快读完这条 SQL。
 
 [测试报告](docs/test-report.md#array-query-startup-20261123) · [性能报告](docs/performance-report-2026-10-30.md#array-query-startup-cost-20261123)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-23 · 把一组整数拆成多行更快
 

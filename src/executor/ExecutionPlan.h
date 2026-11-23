@@ -1439,10 +1439,11 @@ public:
         bool planRootConstants = false,
         PreparedExecutionProvider executionProvider = {},
         bool selectBodyOnly = false);
-    // A typed, lazy UNION ALL over real retained branch/body identities.
+    // A set operation over real retained branch/body identities.
     // Branches borrow one execution-owned carrier, including its planned
     // copies, original child sites, parameters and per-execution memo.
-    static OpPtr buildPreparedUnionAllPlan(StorageEngine*, const std::string&,
+    static bool supportsPreparedSetEquality(const QueryRowDescriptor&);
+    static OpPtr buildPreparedSetPlan(StorageEngine*, const std::string&,
         std::shared_ptr<PreparedQuery>, SelectStmt*, PreparedSetBranchFactory,
         PreparedChildExecutor = {}, PreparedChildCursorFactory = {},
         bool cursorOwnsScalarChildren = true, bool planRootConstants = false,

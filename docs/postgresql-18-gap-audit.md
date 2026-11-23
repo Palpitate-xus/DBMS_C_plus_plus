@@ -1,8 +1,12 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-23 · 集合运算保留共同列类型
+
+适用的数组来源和 `VALUES` 查询可以在集合运算中按共同类型读取 `NULL` 和字符串字面量。支持的标量结果按共同类型去重或匹配重复次数。普通 `SELECT 7 UNION SELECT NULL` 仍有执行差距。自定义类型与显式排序规则也需要进一步验证。`QRY-02`、`QRY-06` 和 `OPT-01` 保持部分实现。[验证范围](test-report.md#set-input-types-20261123) · [性能](performance-report-2026-10-30.md#set-input-types-cost-20261123)
+
 ## 2026-11-23 · 数组来源可以参与集合运算
 
-保留 `ARRAY[...]` 的原有表达式后，`UNION`、`INTERSECT ALL` 和 `EXCEPT ALL` 可以读取数组展开的行。适用的 `UNION ALL` 在读够行数时可以跳过另一边的执行。去重集合运算仍有隐式类型转换差距，例如整数结果与无类型的 `NULL` 合并时需要显式转换。`QRY-02`、`QRY-06` 和 `OPT-01` 保持部分实现。[验证范围](test-report.md#array-set-20261123) · [性能](performance-report-2026-10-30.md#array-set-cost-20261123)
+保留 `ARRAY[...]` 的原有表达式后，`UNION`、`INTERSECT ALL` 和 `EXCEPT ALL` 可以读取数组展开的行。适用的 `UNION ALL` 在读够行数时可以跳过另一边的执行。这一版中，整数数组与无类型的 `NULL` 合并时还需要显式转换。`QRY-02`、`QRY-06` 和 `OPT-01` 保持部分实现。[验证范围](test-report.md#array-set-20261123) · [性能](performance-report-2026-10-30.md#array-set-cost-20261123)
 
 ## 2026-11-23 · 一次查询共用部分 SQL 解析结果
 

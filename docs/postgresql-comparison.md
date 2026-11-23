@@ -2,6 +2,11 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="set-input-types-comparison-20261123"></a>
+## 2026-11-23 · 集合运算在比较之前转换输入
+
+PostgreSQL 按输出列选择共同类型，并把无类型的常量转换到该类型，再执行合并、求交和求差。DuckDB 先根据各个子查询确定输出类型，再在规划阶段为输入加入相应的转换。SQLite 的复合查询按输入值比较重复行，比较时保留值原有的存储类型。本项目让适用的集合运算读取已经转换的行，然后按类型比较这些值。[PostgreSQL 18.6 分析器](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/parser/analyze.c) · [DuckDB 类型推断](https://github.com/duckdb/duckdb/blob/main/src/planner/binder/query_node/bind_setop_node.cpp) · [DuckDB 转换规划](https://github.com/duckdb/duckdb/blob/main/src/planner/binder/query_node/plan_setop.cpp) · [SQLite 复合查询](https://www.sqlite.org/lang_select.html#compound_select_statements)
+
 <a id="array-set-comparison-20261123"></a>
 ## 2026-11-23 · 把数组展开的结果与其他查询合并
 

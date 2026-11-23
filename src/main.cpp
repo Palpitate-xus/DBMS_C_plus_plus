@@ -21716,7 +21716,7 @@ class PreparedWithDmlRuntime {
             !frames.back()->producers.count(select->ctes.front().query.get())))
             frames.push_back(definitions(select->ctes,outer));
         if(!selectBodyOnly && select->setOp!=dbms::SetOp::None)
-            return dbms::QueryPlanner::buildPreparedUnionAllPlan(&g_engine,session_.currentDB,query_,select,
+            return dbms::QueryPlanner::buildPreparedSetPlan(&g_engine,session_.currentDB,query_,select,
                 [this,outer,frames](dbms::SelectStmt* branch,bool body,dbms::QueryPlanner::PreparedExecutionProvider owner) {
                     return selectPlan(branch,outer,frames,false,false,std::move(owner),body);
                 },reader(frames),cursorFactory(frames),true,planRootConstants,std::move(executionProvider),outer);
@@ -22957,7 +22957,7 @@ static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& 
                 if(cte.recursive || !supportsDerivedQuery(cte.query.get()))return false;
         }
         if(body->setOp!=dbms::SetOp::None) {
-            if(body->setOp!=dbms::SetOp::Union || !body->setOpAll ||
+            if((!tableFunction && (body->setOp!=dbms::SetOp::Union || !body->setOpAll)) ||
                !supportsDerivedQuery(body->setOpRhs.get()))return false;
             if(body->setOpLhs)return supportsDerivedQuery(body->setOpLhs.get());
         }
@@ -22967,8 +22967,8 @@ static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& 
         return supportsDerivedSources(body->fromClause.get());
     };
     const bool emptyProjection = select->command == dbms::SqlCommand::Select && select->selectList.empty();
-    const bool tableFunctionAppend = tableFunction && select->setOp == dbms::SetOp::Union && select->setOpAll;
-    const bool sourceProbe=(emptyProjection || tableFunctionAppend || !select->ctes.empty() ||
+    const bool tableFunctionSet = tableFunction && select->setOp != dbms::SetOp::None;
+    const bool sourceProbe=(emptyProjection || tableFunctionSet || !select->ctes.empty() ||
         (select->fromClause && select->fromClause->type!=dbms::FromItem::Type::Table)) &&
         supportsDerivedQuery(select);
     if (tableFunctionOnly && !sourceProbe) return false;
@@ -22997,7 +22997,7 @@ static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& 
     }
     if(select->command==dbms::SqlCommand::Values) {
         if(!select->ctes.empty() || !select->orderBy.empty() || select->whereClause || select->limit || select->offset || select->setOp!=dbms::SetOp::None)return false;
-    } else if (!(tableFunctionAppend && sourceProbe)) {
+    } else if (!(tableFunctionSet && sourceProbe)) {
         // The parsed local tree is only a shape probe. Its original CTEs are
         // immediately restored; whole preparation below retains every CTE
         // and byte span, and the borrowed plan builder accepts this envelope.
@@ -23042,6 +23042,21 @@ static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& 
         }
     }
     auto query=make_shared<dbms::PreparedQuery>(g_engine.prepareBoundQuery(session.currentDB,rawSql));
+    if (tableFunction && sourceProbe) {
+        bool comparesRows = false;
+        for (const auto& [set, inputs] : query->setOperationInputs) {
+            if (set->setOp == dbms::SetOp::Union && set->setOpAll) continue;
+            comparesRows = true;
+            if (!dbms::QueryPlanner::supportsPreparedSetEquality(query->statementOutputs.at(set))) return false;
+        }
+        if (comparesRows) {
+            const auto tokens = dbms::SQLParser::tokenize(rawSql);
+            // The fallback still owns explicit set collation resolution.
+            if (any_of(tokens.begin(), tokens.end(), [](const auto& token) {
+                    return token.size() == 7 && dbms::SQLParser::toLower(token) == "collate";
+                })) return false;
+        }
+    }
     // The binding, rather than the name probe, owns the actual source.
     // A CTE can hide a catalog view with the same spelling.
     const bool viewRequired = viewProbe && any_of(query->sourceRanges.begin(), query->sourceRanges.end(),
