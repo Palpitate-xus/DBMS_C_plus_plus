@@ -19,6 +19,13 @@ cmake --build build/cmake --target dbms_main --parallel 2
 ## 最近更新
 
 <details>
+<summary>带参数的查询在扫描整张表时更快 · 2026-11-23</summary>
+
+例如应用传入店铺编号查询订单时，数据库会先准备好比较条件，再逐行检查。
+
+</details>
+
+<details>
 <summary>可以更快地查某家店的一段订单号 · 2026-11-23</summary>
 
 例如查一家店的第 100 到 110 号订单，数据库可以直接去找这一段。只按店铺查询时，订单少的店铺也可以用同样的办法定位。
@@ -29,13 +36,6 @@ cmake --build build/cmake --target dbms_main --parallel 2
 <summary>同一家店的订单很多时，按订单号查找更快 · 2026-11-23</summary>
 
 同时给出店铺编号和订单号后，数据库可以少检查同一家店的其他订单。按这两个编号修改或删除订单，以及检查新订单是否重号，也能少读记录。
-
-</details>
-
-<details>
-<summary>修改或删除指定店铺的订单更快 · 2026-11-23</summary>
-
-同时给出店铺编号和订单号，数据库就能少翻一些记录，再修改或删除找到的订单。
 
 </details>
 

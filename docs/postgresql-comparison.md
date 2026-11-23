@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-23 · 表扫描前准备比较条件
+
+PostgreSQL 18.6 在初始化执行器时把查询条件转换成可执行步骤，扫描时读取当前行和参数。SQLite 在生成字节码时翻译筛选条件。DuckDB 的筛选算子用已经绑定的表达式批量选出符合条件的行。[PostgreSQL 执行器](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/executor/README) · [SQLite 架构](https://www.sqlite.org/arch.html) · [DuckDB 筛选算子](https://github.com/duckdb/duckdb/blob/v1.5.6/src/execution/operator/filter/physical_filter.cpp)
+
+本项目在一次扫描开始前准备可确认类型的文本相等比较和有符号整数比较，包括参数落入普通扫描中后的内置类型常量。执行器使用行的实际 NULL 状态和完整值，整数按 64 位比较。复杂表达式、会忽略大小写等区别的比较规则和有错误的转换继续走原有表达式路径。[协议测试](test-report.md#stored-literal-filter-20261123) · [性能对照](performance-report-2026-10-30.md#stored-literal-filter-cost-20261123)
+
 ## 2026-11-23 · 给定前导键的范围查询
 
 PostgreSQL 的多列 B-tree 可用前导列的等值和相邻列的范围限制索引扫描，也可按索引顺序输出。SQLite 用多列索引定位第一个匹配项后顺序查找相邻记录，查询前导列等值时可按后一列的索引顺序返回。DuckDB 1.5 的 ART 查询扫描适用于无表达式的单列索引，区间筛选还可借助数据块的最小值和最大值。[PostgreSQL 多列索引](https://www.postgresql.org/docs/18/indexes-multicolumn.html) · [PostgreSQL 索引排序](https://www.postgresql.org/docs/18/indexes-ordering.html) · [SQLite 查找与排序](https://sqlite.org/queryplanner.html#searching_and_sorting_with_a_multi_column_index) · [DuckDB 索引](https://duckdb.org/docs/1.5/guides/performance/indexing)

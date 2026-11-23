@@ -12,6 +12,7 @@
 #include <set>
 #include <string>
 #include <string_view>
+#include <variant>
 #include <vector>
 
 #include <atomic>
@@ -1499,6 +1500,11 @@ public:
             size_t leftIndex = 0;
             size_t rightIndex = 0;
         };
+        struct LiteralComparison {
+            size_t column;
+            std::string operation;
+            std::variant<std::string, int64_t> value;
+        };
         std::string op;  // "<", ">", "=", "<=", ">=", "!=", "like"
         std::string colName;
         std::string value;
@@ -1519,6 +1525,8 @@ public:
         // The SQL expression remains a residual predicate. Only the execution
         // owner binds its column positions against the schema it reads.
         std::optional<ColumnComparison> columnComparison;
+        // Populated against the storage declaration for this execution.
+        std::shared_ptr<const std::vector<LiteralComparison>> literalComparisons;
     };
     enum class PredicateTruth { False, True, Unknown };
     // Compare two already decoded values using the column's PostgreSQL-like
@@ -1536,7 +1544,7 @@ public:
                                         const std::string& value,
                                         bool valueIsNull);
     static std::vector<Condition> parseConditions(const std::vector<std::string>& cstr);
-    static void bindColumnComparison(Condition& cond, const TableSchema& tbl);
+    static void bindStoredComparison(Condition& cond, const TableSchema& tbl);
     static bool evalConditionOnRow(const Condition& cond, const std::string& rowBuffer, const TableSchema& tbl);
     // Execution-local pristine syntax only; original public entry stays uncached.
     static bool evalConditionOnRowWithSyntax(const Condition& cond,

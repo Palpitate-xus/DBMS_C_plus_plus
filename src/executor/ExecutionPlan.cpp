@@ -875,7 +875,7 @@ class PreparedFilterOp final : public Operator {
         condition.colName = planned.cols[*left].dataName;
         condition.columnComparison = StorageEngine::Condition::ColumnComparison{
             planned.cols[*right].dataName, comparison->op};
-        StorageEngine::bindColumnComparison(condition, planned);
+        StorageEngine::bindStoredComparison(condition, planned);
         using Kind = StorageEngine::Condition::ColumnComparison::Kind;
         if (condition.columnComparison->kind != Kind::Text) return {};
         return condition;
@@ -7374,10 +7374,10 @@ FilterOp::FilterOp(
 
 bool FilterOp::open() {
     validatePredicateTypes(tbl_, conds_);
-    for (auto& condition : conds_) StorageEngine::bindColumnComparison(condition, tbl_);
+    for (auto& condition : conds_) StorageEngine::bindStoredComparison(condition, tbl_);
     for (auto& branch : branches_) {
         validatePredicateTypes(tbl_, branch);
-        for (auto& condition : branch) StorageEngine::bindColumnComparison(condition, tbl_);
+        for (auto& condition : branch) StorageEngine::bindStoredComparison(condition, tbl_);
     }
     return child_->open();
 }
@@ -7392,7 +7392,9 @@ bool FilterOp::next(std::string& outRow) {
         if (nullPredicateBranch(conditions)) return false;
         for (const auto& c : conditions) {
             using Kind = StorageEngine::Condition::ColumnComparison::Kind;
-            if (sameTable && c.columnComparison && c.columnComparison->kind != Kind::Unbound &&
+            const bool boundComparison = c.literalComparisons ||
+                (c.columnComparison && c.columnComparison->kind != Kind::Unbound);
+            if (sameTable && boundComparison &&
                 scan->lastStoredNullBitmap(storedNulls) && storedNulls.size() == tbl_.len()) {
                 if (!StorageEngine::evalConditionOnRow(c, outRow, tbl_, storedNulls)) return false;
                 continue;

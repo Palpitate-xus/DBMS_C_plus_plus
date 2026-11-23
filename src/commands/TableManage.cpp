@@ -29390,8 +29390,117 @@ bool StorageEngine::evalConditionOnRow(const Condition& cond,
     return evalConditionOnRowWithSyntax(cond, rowBuffer, tbl, nullptr);
 }
 
-void StorageEngine::bindColumnComparison(Condition& cond, const TableSchema& tbl) {
-    if (cond.op != "typedexpr" || !cond.columnComparison) return;
+static bool signedComparisonColumn(const Column& column) {
+    if (column.isVariableLength || column.storageCodec != Column::StorageCodec::Legacy)
+        return false;
+    const auto type = ExprHelper::canonicalResultTypeName(column.dataType);
+    return (type == "smallint" && column.dsize == sizeof(int16_t)) ||
+        (type == "integer" && column.dsize == sizeof(int32_t)) ||
+        (type == "bigint" && column.dsize == sizeof(int64_t));
+}
+
+static bool varyingTextComparisonColumn(const Column& column) {
+    return column.isVariableLength && (column.dataType == "text" ||
+        column.dataType == "varchar" || column.dataType == "character varying");
+}
+
+static bool physicalComparisonColumn(const Column& column) {
+    return !column.isArray && !column.isUnsigned && column.generatedKind != 'v' &&
+        column.domainName.empty() && column.enumValues.empty();
+}
+
+// Only builtin literal casts have a value independent of the row and catalog.
+// Leave failures and other expressions to the evaluator at their actual demand.
+static std::optional<ExprValue> storedComparisonConstant(const Expr* expression) {
+    if (!expression || expression->preparedSubquery) return {};
+    const Expr* literal = expression;
+    if (const auto* cast = dynamic_cast<const CastExpr*>(literal)) {
+        CatalogManager::QualifiedName target;
+        if (!cast->typeMods.empty() || !CatalogManager::parseQualifiedName(cast->typeName, target) ||
+            target.schema != "pg_catalog" || (target.name != "text" && target.name != "varchar" &&
+                target.name != "int2" && target.name != "int4" && target.name != "int8")) return {};
+        literal = cast->operand.get();
+    }
+    if (const auto* sign = dynamic_cast<const UnaryOpExpr*>(literal)) {
+        if (sign->preparedSubquery || (sign->op != "+" && sign->op != "-")) return {};
+        literal = sign->operand.get();
+    }
+    const auto* leaf = dynamic_cast<const LiteralExpr*>(literal);
+    if (!leaf || leaf->preparedSubquery || !leaf->typeName.empty()) return {};
+    try {
+        auto value = ExprEvaluator{}.eval(expression, RowContext{});
+        if (!value.isNull) return value;
+    } catch (const DbError&) {
+        // An invalid constant is still diagnosed by the original SQL predicate.
+    }
+    return {};
+}
+
+static bool bindLiteralComparisons(const Expr* expression, const TableSchema& table,
+        std::vector<StorageEngine::Condition::LiteralComparison>& result) {
+    const auto* binary = dynamic_cast<const BinaryOpExpr*>(expression);
+    if (!binary || binary->preparedSubquery || binary->rowComparison ||
+        binary->predicateCollation || binary->comparison) return false;
+    if (binary->op == "AND") {
+        return bindLiteralComparisons(binary->left.get(), table, result) &&
+               bindLiteralComparisons(binary->right.get(), table, result);
+    }
+    std::string op = binary->op;
+    if (op != "=" && op != "<>" && op != "!=" && op != "<" && op != ">" &&
+        op != "<=" && op != ">=") return false;
+    const auto* column = dynamic_cast<const ColumnRefExpr*>(binary->left.get());
+    const Expr* input = binary->right.get();
+    if (!column) {
+        column = dynamic_cast<const ColumnRefExpr*>(input);
+        input = binary->left.get();
+        if (op.front() == '<' && op != "<>") op.front() = '>';
+        else if (op.front() == '>') op.front() = '<';
+    }
+    if (!column || column->preparedSubquery || !column->schema.empty() ||
+        !column->table.empty()) return false;
+    size_t index = 0;
+    while (index < table.len() && table.cols[index].dataName != column->column) ++index;
+    if (index == table.len()) return false;
+    const auto& field = table.cols[index];
+    if (!physicalComparisonColumn(field)) return false;
+    const auto value = storedComparisonConstant(input);
+    if (!value) return false;
+    const auto type = ExprHelper::canonicalResultTypeName(value->typeName);
+    if (signedComparisonColumn(field)) {
+        if (type != "smallint" && type != "integer" && type != "bigint") return false;
+        const auto number = parseStoredInteger(value->value);
+        if (!number) return false;
+        result.push_back({index, std::move(op), *number});
+        return true;
+    }
+    if (!varyingTextComparisonColumn(field) || (op != "=" && op != "<>" && op != "!=") ||
+        (type != "text" && type != "character varying" && type != "unknown")) return false;
+    const auto& collation = field.resolvedCollation.empty() ? field.collation : field.resolvedCollation;
+    if (field.resolvedCollationUsesLocale ||
+        (!collation.empty() && (!field.resolvedCollationIsBinary || !dbms::collation::isBinary(collation))))
+        return false;
+    result.push_back({index, std::move(op), value->value});
+    return true;
+}
+
+void StorageEngine::bindStoredComparison(Condition& cond, const TableSchema& tbl) {
+    cond.literalComparisons.reset();
+    if (cond.op != "typedexpr") return;
+    if (!cond.columnComparison) {
+        if (cond.patternIsNull || tbl.formatVersion != DATA_FILE_FORMAT_VERSION ||
+            tbl.partitionType != TableSchema::PartitionType::None ||
+            std::any_of(tbl.cols.begin(), tbl.cols.end(),
+                [](const Column& column) { return column.generatedKind == 'v'; })) return;
+        auto parsed = SQLParser{}.parseForBinding("SELECT " + cond.value);
+        const auto* select = parsed.success ? dynamic_cast<const SelectStmt*>(parsed.stmt.get()) : nullptr;
+        if (!select || select->selectList.size() != 1 || select->fromClause) return;
+        std::vector<Condition::LiteralComparison> literals;
+        if (bindLiteralComparisons(select->selectList.front().expr.get(), tbl, literals)) {
+            cond.literalComparisons = std::make_shared<const std::vector<Condition::LiteralComparison>>(
+                std::move(literals));
+        }
+        return;
+    }
     auto& comparison = *cond.columnComparison;
     using Kind = Condition::ColumnComparison::Kind;
     comparison.kind = Kind::Unbound;
@@ -29404,28 +29513,13 @@ void StorageEngine::bindColumnComparison(Condition& cond, const TableSchema& tbl
     };
     const auto left = findColumn(cond.colName);
     const auto right = findColumn(comparison.rightColumn);
-    const auto isPhysicalBuiltin = [&](const auto& column) {
-        return column != tbl.cols.end() && !column->isArray && !column->isUnsigned &&
-            column->generatedKind != 'v' && column->domainName.empty() && column->enumValues.empty();
-    };
-    if (!isPhysicalBuiltin(left) || !isPhysicalBuiltin(right)) return;
+    if (left == tbl.cols.end() || right == tbl.cols.end() ||
+        !physicalComparisonColumn(*left) || !physicalComparisonColumn(*right)) return;
 
-    const auto signedInteger = [](const Column& column) {
-        if (column.isVariableLength || column.storageCodec != Column::StorageCodec::Legacy)
-            return false;
-        const auto type = ExprHelper::canonicalResultTypeName(column.dataType);
-        return (type == "smallint" && column.dsize == sizeof(int16_t)) ||
-            (type == "integer" && column.dsize == sizeof(int32_t)) ||
-            (type == "bigint" && column.dsize == sizeof(int64_t));
-    };
-    if (signedInteger(*left) && signedInteger(*right)) {
+    if (signedComparisonColumn(*left) && signedComparisonColumn(*right)) {
         comparison.kind = Kind::SignedInteger;
     } else {
-        const auto varyingText = [](const Column& column) {
-            return column.isVariableLength && (column.dataType == "text" ||
-                column.dataType == "varchar" || column.dataType == "character varying");
-        };
-        if (!varyingText(*left) || !varyingText(*right)) return;
+        if (!varyingTextComparisonColumn(*left) || !varyingTextComparisonColumn(*right)) return;
         const auto defaultRule = [](const Column& column) {
             return column.collation.empty() && column.resolvedCollation.empty();
         };
@@ -29483,6 +29577,31 @@ bool StorageEngine::evalConditionOnRowWithSyntax(const Condition& cond,
     // general evaluator for other declarations or rows without a NULL owner.
     using ComparisonKind = Condition::ColumnComparison::Kind;
     const bool haveBitmap = buffered && g_bufferedConditionNulls->size() == tbl.len();
+    if (cond.literalComparisons && (valueEngine || haveBitmap)) {
+        bool decoded = true;
+        for (const auto& comparison : *cond.literalComparisons) {
+            const auto index = comparison.column;
+            if (haveBitmap && (*g_bufferedConditionNulls)[index]) return false;
+            bool isNull = false;
+            const auto datum = valueEngine
+                ? valueEngine->extractColumnValue(rowBuffer, tbl, index, valueDb, false, &isNull)
+                : extractColumnValueStatic(rowBuffer, tbl, index);
+            if (isNull) return false;
+            if (const auto* text = std::get_if<std::string>(&comparison.value)) {
+                if ((datum == *text) != (comparison.operation == "=")) return false;
+            } else {
+                const auto number = parseStoredInteger(datum);
+                if (!number) {
+                    decoded = false;
+                    break;
+                }
+                const auto expected = std::get<int64_t>(comparison.value);
+                if (!comparisonPredicateMatches(comparison.operation,
+                        (*number > expected) - (*number < expected))) return false;
+            }
+        }
+        if (decoded) return true;
+    }
     if (const auto& comparison = cond.columnComparison;
         cond.op == "typedexpr" && comparison && comparison->kind != ComparisonKind::Unbound &&
         (valueEngine || haveBitmap)) {
@@ -33660,7 +33779,7 @@ static void prepareFilterConditions(
             throw DbError("42601","invalid typed predicate");
         validateNullWhereColumns(select->selectList[0].expr.get(),tbl);
         ExprHelper::prepareArrayTypes(select->selectList[0].expr.get(),buildTypeHints(tbl),dbname,&engine);
-        StorageEngine::bindColumnComparison(condition, tbl);
+        StorageEngine::bindStoredComparison(condition, tbl);
     }
 }
 

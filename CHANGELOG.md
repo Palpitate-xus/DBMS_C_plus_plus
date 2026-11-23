@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>带参数的查询在扫描整张表时更快 · 2026-11-23</summary>
+
+例如应用传入店铺编号查询订单时，数据库会先准备好比较条件，再逐行检查。
+
+[测试报告](docs/test-report.md#stored-literal-filter-20261123) · [性能报告](docs/performance-report-2026-10-30.md#stored-literal-filter-cost-20261123)
+
+</details>
+
+<details>
 <summary>可以更快地查某家店的一段订单号 · 2026-11-23</summary>
 
 例如查一家店的第 100 到 110 号订单，数据库可以直接去找这一段。只按店铺查询时，订单少的店铺也可以用同样的办法定位。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>修改或删除指定店铺的订单更快 · 2026-11-23</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-23 · 修改或删除指定店铺的订单更快
 
 同时给出店铺编号和订单号，数据库就能少翻一些记录，再修改或删除找到的订单。
 
 [测试报告](docs/test-report.md#composite-primary-mutation-20261123) · [性能报告](docs/performance-report-2026-10-30.md#composite-primary-mutation-cost-20261123)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-23 · 查找指定店铺的订单更快
 
