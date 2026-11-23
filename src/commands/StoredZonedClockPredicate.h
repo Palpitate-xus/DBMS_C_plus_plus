@@ -44,10 +44,12 @@ std::optional<std::vector<int64_t>> readStoredZonedClockRange(StorageEngine& eng
     const std::string& database, const TableSchema& schema, const StoredZonedClockRange& range);
 
 struct StoredZonedClockOrder {
+    static constexpr size_t maxRows = 512;
     size_t count;
     bool descending;
     bool nullsFirst;
     bool excludesNulls;
+    bool withTies;
 };
 
 struct StoredZonedClockPage {

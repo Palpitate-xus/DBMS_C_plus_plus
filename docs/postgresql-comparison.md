@@ -2,12 +2,19 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="timetz-ties-comparison-20261123"></a>
+## 2026-11-23 · 按时间分页时从索引读取页尾并列记录
+
+PostgreSQL 的 `WITH TIES` 在正常页尾后继续向下游取行，直到排序键变化。兼容排序的 B 树能按需提供这些行。SQLite 也可以按索引顺序读，DuckDB 的 TopN 则在排序输入中只保留当前领先的一部分。 [PostgreSQL 执行器源码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/executor/nodeLimit.c) · [SQLite 索引排序](https://www.sqlite.org/queryplanner.html#sorting_by_index) · [DuckDB TopN](https://duckdb.org/2024/11/14/optimizers#optimizers)
+
+本项目可以在普通单列 `TIMETZ` 查询用索引读到 `OFFSET` 之后的页尾，继续核对同键记录，并将第一条不同记录交给现有分页执行器判断。排序键仍按换算后的 UTC 时钟和偏移区分。索引跳过空值，因此空值可能影响边界时会读取完整输入。候选行、索引页和内存都有上限。覆盖索引、多列排序的提前停止仍有差距。 [测试报告](test-report.md#timetz-ties-20261123) · [性能报告](performance-report-2026-10-30.md#timetz-ties-cost-20261123)
+
 <a id="timetz-page-comparison-20261123"></a>
 ## 2026-11-23 · 按带偏移的时间翻页
 
 PostgreSQL 可以正向或反向读 B 树，在找到 `LIMIT` 所需的行数后停下。SQLite 也可正反向读取索引来满足排序。DuckDB 的 TopN 在输入中保留当前最靠前的 N 行，以减少排序和内存开销。 [PostgreSQL 索引与排序](https://www.postgresql.org/docs/18/indexes-ordering.html) · [SQLite 索引排序](https://www.sqlite.org/queryplanner.html#sorting_by_index) · [DuckDB TopN](https://duckdb.org/2024/11/14/optimizers#optimizers)
 
-本项目在普通单列 `TIMETZ` 的小页查询中，用索引读到 `OFFSET + LIMIT` 所需的行，再从表里核对完整键和可见性。常规排序和行数限制仍处理这批已经缩小的候选。由于现有索引跳过空值，空值可能影响页首或页尾时继续使用完整排序。覆盖索引、多列顺序和 `WITH TIES` 的索引提前停止仍有差距。 [功能验证](test-report.md#timetz-page-20261123) · [性能对照](performance-report-2026-10-30.md#timetz-page-cost-20261123)
+本项目在普通单列 `TIMETZ` 的小页查询中，用索引读到 `OFFSET + LIMIT` 所需的行，再从表里核对完整键和可见性。常规排序和行数限制仍处理这批已经缩小的候选。由于现有索引跳过空值，空值可能影响页首或页尾时继续使用完整排序。带并列记录的分页见上方更新。 [功能验证](test-report.md#timetz-page-20261123) · [性能对照](performance-report-2026-10-30.md#timetz-page-cost-20261123)
 
 PostgreSQL 选索引时使用计划器已收集的表索引信息，DuckDB 在已有的逻辑计划中识别可合并的排序和行数限制。本项目的普通小页查询也由执行计划根据已解析的列类型选择索引。移除了针对带偏移时间的额外表结构查询，整数主键排序也随之少做一次查询。 [PostgreSQL 收集索引信息](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/optimizer/util/plancat.c) · [PostgreSQL 选择索引路径](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/optimizer/path/indxpath.c) · [DuckDB TopN 实现](https://github.com/duckdb/duckdb/blob/main/src/optimizer/topn_optimizer.cpp)
 

@@ -995,16 +995,17 @@ BPTree::LeafEntriesResult BPTree::readOrderedKeyRange(
 BPTree::LeafEntriesResult BPTree::readOrderedKeyPrefix(
         const std::string& lower, const std::string& upper, size_t count,
         size_t maxNodes, bool descending, std::vector<LeafEntry>& entries,
-        size_t& visitedNodes) const {
+        size_t& visitedNodes, size_t maxRowsWithPeers) const {
     std::shared_lock<std::shared_mutex> treeLock(treeMutex_);
     entries.clear();
     visitedNodes = 0;
     if (!bp_ || !bp_->isOpen() || lower.size() > BP_KEY_LEN || upper.size() > BP_KEY_LEN ||
         !ordinaryBtreeKeyFormat(header_.reserved)) return LeafEntriesResult::Error;
+    if (maxRowsWithPeers && count > maxRowsWithPeers) return LeafEntriesResult::LimitExceeded;
     std::vector<int64_t> positions;
     const auto mode = descending ? CompositeRangeRead::FirstDescending : CompositeRangeRead::FirstAscending;
     return readFixedRangeLocked(normalizeKey(lower), normalizeKey(upper), count, maxNodes,
-                                positions, nullptr, mode, &visitedNodes, &entries);
+                                positions, nullptr, mode, &visitedNodes, &entries, maxRowsWithPeers);
 }
 
 BPTree::LeafEntriesResult BPTree::readCompositePrimaryRange(
@@ -1026,7 +1027,8 @@ BPTree::LeafEntriesResult BPTree::readCompositePrimaryRange(
 BPTree::LeafEntriesResult BPTree::readFixedRangeLocked(
         const std::string& lower, const std::string& upper, size_t maxRows,
         size_t maxNodes, std::vector<int64_t>& values, std::vector<int64_t>* suffixes,
-        CompositeRangeRead mode, size_t* visitedNodes, std::vector<LeafEntry>* keys) const {
+        CompositeRangeRead mode, size_t* visitedNodes, std::vector<LeafEntry>* keys,
+        size_t maxRowsWithPeers) const {
     const bool prefix = mode != CompositeRangeRead::Entire;
     const bool descending = mode == CompositeRangeRead::FirstDescending;
     if (!header_.rootPage || lower > upper || (prefix && maxRows == 0))
@@ -1036,6 +1038,10 @@ BPTree::LeafEntriesResult BPTree::readFixedRangeLocked(
     std::vector<int64_t> resultSuffixes;
     std::vector<LeafEntry> orderedEntries;
     const auto copied = [&] { return keys ? orderedEntries.size() : result.size(); };
+    bool copiedNextGroup = false;
+    const auto wantsNext = [&] {
+        return !prefix || (maxRowsWithPeers ? !copiedNextGroup : copied() < maxRows);
+    };
     std::unordered_set<uint32_t> visited;
     std::optional<size_t> leafDepth;
     uint32_t lastLeaf = 0;
@@ -1056,7 +1062,7 @@ BPTree::LeafEntriesResult BPTree::readFixedRangeLocked(
         const size_t first = lowerBoundIdx(node->keys, node->numKeys, lower);
         const size_t end = upperBoundIdx(node->keys, node->numKeys, upper);
         if (!node->isLeaf) {
-            for (size_t offset = 0; offset <= end - first && (!prefix || copied() < maxRows);
+            for (size_t offset = 0; offset <= end - first && wantsNext();
                  ++offset) {
                 const size_t i = descending ? end - offset : first + offset;
                 const auto status = self(self, node->children[i], depth + 1,
@@ -1077,16 +1083,23 @@ BPTree::LeafEntriesResult BPTree::readFixedRangeLocked(
         leafDepth = depth;
         lastLeaf = page;
         lastNextLeaf = node->nextLeaf;
-        const size_t remaining = maxRows - copied();
+        const size_t budget = maxRowsWithPeers ? maxRowsWithPeers : maxRows;
+        const size_t remaining = budget - copied();
         if (!prefix && end - first > remaining) return LeafEntriesResult::LimitExceeded;
-        const size_t take = std::min(end - first, remaining);
+        const size_t take = maxRowsWithPeers ? end - first : std::min(end - first, remaining);
         for (size_t offset = 0; offset < take; ++offset) {
             const size_t i = descending ? end - 1 - offset : first + offset;
+            if (maxRowsWithPeers && copied() == budget) return LeafEntriesResult::LimitExceeded;
             if (keys) {
                 LeafEntry entry;
                 std::copy_n(node->keys[i].data(), BP_KEY_LEN, entry.key.begin());
                 entry.value = node->values[i];
+                // Keep the first distinct row for the SQL limit's boundary
+                // probe, so it still uses the real visible row and sort key.
+                copiedNextGroup = maxRowsWithPeers && copied() >= maxRows &&
+                    entry.key != orderedEntries[maxRows - 1].key;
                 orderedEntries.push_back(entry);
+                if (copiedNextGroup) break;
             } else {
                 result.push_back(node->values[i]);
             }

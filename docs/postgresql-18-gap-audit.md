@@ -1,8 +1,12 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-23 · 单列时间索引支持带并列记录的分页
+
+单列 `TIMETZ` 的 `FETCH … WITH TIES` 可以继续读取与页尾同键的记录，并从表中核对第一条不同记录。支持正序、倒序、`OFFSET` 及可确认的同列范围。空值可能参与边界、候选太多、内存不足或索引视图不适用时会使用常规路径。覆盖索引与多列排序的提前停止仍待覆盖，`IDX-03` 和 `OPT-01` 保持部分实现。 [功能验证](test-report.md#timetz-ties-20261123) · [性能对照](performance-report-2026-10-30.md#timetz-ties-cost-20261123) · [实现对照](postgresql-comparison.md#timetz-ties-comparison-20261123)
+
 ## 2026-11-23 · 普通表可按带偏移的时间从索引取一页
 
-支持按单列 `TIMETZ` 正序和倒序读取，包含可确认的同列时间范围及 `OFFSET`。索引页、内存和候选数量受限，开始返回前核对每个候选的真实键和可见性。`IDX-03`、`OPT-01` 保持部分实现。覆盖索引、多列顺序和 `WITH TIES` 的提前停止仍待覆盖。 [功能验证](test-report.md#timetz-page-20261123) · [性能对照](performance-report-2026-10-30.md#timetz-page-cost-20261123) · [实现对照](postgresql-comparison.md#timetz-page-comparison-20261123)
+支持按单列 `TIMETZ` 正序和倒序读取，包含可确认的同列时间范围及 `OFFSET`。索引页、内存和候选数量受限，开始返回前核对每个候选的真实键和可见性。`IDX-03`、`OPT-01` 保持部分实现。带并列记录的分页见上方更新。 [功能验证](test-report.md#timetz-page-20261123) · [性能对照](performance-report-2026-10-30.md#timetz-page-cost-20261123) · [实现对照](postgresql-comparison.md#timetz-page-comparison-20261123)
 
 ## 2026-11-23 · 普通表可用索引查找一段带偏移的时间
 

@@ -3703,8 +3703,8 @@ static std::vector<CompositeEqualityInput> orderedCompositeInputs(const std::vec
 
 static std::optional<QueryColumnBinding> preparedDirectOrderColumn(
     const PreparedQuery& query, const SelectStmt& select);
-static std::optional<QueryColumnBinding> integerPageOrder(
-    const PreparedQuery& query, const SelectStmt& select);
+static std::optional<QueryColumnBinding> directPageOrder(
+    const PreparedQuery& query, const SelectStmt& select, bool allowTies = false);
 
 static const ColumnRefExpr* boundStoredPredicateColumn(const Expr* expression,
         const TableSchema& schema, size_t source) {
@@ -4118,7 +4118,7 @@ static OpPtr preparedCompositePrimarySource(StorageEngine* engine, const std::st
                     column->binding->columnOrdinal < schema.len() &&
                     !compositeEqualityType(schema.cols[column->binding->columnOrdinal]).empty();
             };
-            if (integerPageOrder(*query, select) &&
+            if (directPageOrder(*query, select) &&
                 std::all_of(select.selectList.begin(), select.selectList.end(), plainOutput)) {
                 if (auto filter = bindStoredPredicates(*engine, database, schema, range->ordinal, residual)) {
                     order->fetchCount = *select.limit + select.offset.value_or(0);
@@ -4722,11 +4722,11 @@ static bool hasCardinalityChangingTargets(const SelectStmt& select) {
     });
 }
 
-static std::optional<size_t> simpleIntegerScanDemand(const SelectStmt& select) {
+static std::optional<size_t> simplePageDemand(const SelectStmt& select, bool allowTies = false) {
     if (!select.limit || !*select.limit || select.limitExpr || select.offsetExpr ||
         select.distinct || !select.distinctOn.empty() || select.having || !select.groupBy.empty() ||
         !select.groupByElems.empty() || !select.windowDefs.empty() || !select.ctes.empty() ||
-        select.setOp != SetOp::None || select.setOpLhs || select.setOpRhs || select.withTies ||
+        select.setOp != SetOp::None || select.setOpLhs || select.setOpRhs || (select.withTies && !allowTies) ||
         !select.locking.empty() || select.existsTargetPrunable ||
         (select.signedFetchCount && *select.signedFetchCount < 0) ||
         *select.limit > std::numeric_limits<size_t>::max() - select.offset.value_or(0) ||
@@ -4734,10 +4734,10 @@ static std::optional<size_t> simpleIntegerScanDemand(const SelectStmt& select) {
     return select.offset.value_or(0) + *select.limit;
 }
 
-static std::optional<QueryColumnBinding> integerPageOrder(const PreparedQuery& query,
-                                                        const SelectStmt& select) {
+static std::optional<QueryColumnBinding> directPageOrder(const PreparedQuery& query,
+                                                        const SelectStmt& select, bool allowTies) {
     if (!select.fromClause || select.fromClause->type != FromItem::Type::Table ||
-        select.orderBy.size() != 1 || !simpleIntegerScanDemand(select)) return {};
+        select.orderBy.size() != 1 || !simplePageDemand(select, allowTies)) return {};
     return preparedDirectOrderColumn(query, select);
 }
 
@@ -5051,7 +5051,7 @@ static bool eligibleIntegerPageKey(const TableSchema& schema, const QueryColumnB
 
 bool QueryPlanner::mayUseIntegerPrimaryKeyPage(StorageEngine* engine, const std::string& database,
         const PreparedQuery& query, const SelectStmt& select) {
-    const auto key = integerPageOrder(query, select);
+    const auto key = directPageOrder(query, select);
     const auto* range = key ? integerPageRelation(query, select, *key) : nullptr;
     if (!range) return false;
     const auto table = range->relationSchema.empty() || range->relationSchema == "public" ? range->relationName
@@ -5479,15 +5479,15 @@ struct ZonedClockPageSpec {
 static std::optional<ZonedClockPageSpec> zonedClockPageSpec(StorageEngine& engine,
         const std::string& database, const SelectStmt& select,
         const QueryColumnBinding& key, const TableSchema& schema) {
-    const auto count = simpleIntegerScanDemand(select);
-    if (!count || *count > 512 || key.columnOrdinal >= schema.len() || key.typeOid != 1266 ||
+    const auto count = simplePageDemand(select, true);
+    if (!count || *count > StoredZonedClockOrder::maxRows || key.columnOrdinal >= schema.len() || key.typeOid != 1266 ||
         !key.typeMetadata || key.typeMetadata->actualOid != 1266 || key.typeMetadata->codecOid != 1266)
         return {};
     const auto& column = schema.cols[key.columnOrdinal];
     if (column.isArray || column.generatedKind || !column.domainName.empty() ||
         !completeStoredZonedClockIndex(engine, database, schema, column)) return {};
     const auto& order = select.orderBy.front();
-    ZonedClockPageSpec page{{column.dataName}, {*count, !order.asc, order.nullsFirst, false}};
+    ZonedClockPageSpec page{{column.dataName}, {*count, !order.asc, order.nullsFirst, false, select.withTies}};
     if (select.whereClause) {
         const auto* test = dynamic_cast<const UnaryOpExpr*>(select.whereClause.get());
         const auto* reference = test && test->op == "IS NOT NULL" && !test->preparedSubquery
@@ -5509,7 +5509,7 @@ static std::optional<ZonedClockPageSpec> zonedClockPageSpec(StorageEngine& engin
 
 bool mayUseStoredZonedClockPage(StorageEngine& engine, const std::string& database,
                                const PreparedQuery& query, const SelectStmt& select) {
-    const auto key = integerPageOrder(query, select);
+    const auto key = directPageOrder(query, select, true);
     if (!key || key->typeOid != 1266) return false;
     const auto* relation = integerPageRelation(query, select, *key);
     if (!relation) return false;
@@ -5694,7 +5694,7 @@ static OpPtr makePreparedTableSource(StorageEngine* engine, const std::string& d
     };
     const auto* physical = dynamic_cast<const TableScanOp*>(source.get());
     if (physical && typeid(*physical) == typeid(TableScanOp) && physical->tableName() == schema.tablename) {
-        const auto orderKey = integerPageOrder(*query, *select);
+        const auto orderKey = directPageOrder(*query, *select, true);
         if (orderKey && orderKey->typeOid == 1266 && integerPageRelation(*query, *select, *orderKey)) {
             if (auto page = zonedClockPageSpec(*engine, database, *select, *orderKey, schema)) {
                 return std::make_unique<ZonedClockRangeScanOp>(*engine, database, schema,
@@ -5712,7 +5712,7 @@ static OpPtr makePreparedTableSource(StorageEngine* engine, const std::string& d
             }
         }
         const auto& key = orderKey;
-        if (key && integerPageRelation(*query, *select, *key) && eligibleIntegerPageKey(schema, *key)) {
+        if (!select->withTies && key && integerPageRelation(*query, *select, *key) && eligibleIntegerPageKey(schema, *key)) {
             if (auto bounds = integerPageBounds(*query, *select, *key, schema)) {
                 auto fallback = bounds->hasDisjunction ? heap() : std::move(source);
                 return std::make_unique<IntegerPrimaryKeyPageOp>(engine, database, schema, key->columnOrdinal,
@@ -5722,7 +5722,7 @@ static OpPtr makePreparedTableSource(StorageEngine* engine, const std::string& d
         }
         if (auto range = completeIntegerPrimaryRange(*engine, database, *query, *select, schema);
             range && range->second.bounded()) {
-            const auto demand = select->orderBy.empty() ? simpleIntegerScanDemand(*select) : std::nullopt;
+            const auto demand = select->orderBy.empty() ? simplePageDemand(*select) : std::nullopt;
             return std::make_unique<IntegerPrimaryKeyPageOp>(engine, database, schema, range->first,
                 demand.value_or(std::numeric_limits<size_t>::max()), false, std::move(range->second),
                 heap(), projectedColumns, select->whereClause.get());

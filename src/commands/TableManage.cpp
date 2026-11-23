@@ -34316,19 +34316,22 @@ std::optional<StoredZonedClockPage> readStoredZonedClockPage(StorageEngine& engi
     if (!index) throw DbError("XX001", "could not open B-tree index for relation \"" + schema.tablename + "\"");
     StoredZonedClockPage result;
     if (range.lower > range.upper) return result;
-    if (!order.count || order.count > byteBudget / (sizeof(BPTree::LeafEntry) + sizeof(StoredZonedClockPage::Row))) return {};
+    const size_t candidateLimit = std::min(StoredZonedClockOrder::maxRows,
+        byteBudget / (sizeof(BPTree::LeafEntry) + sizeof(StoredZonedClockPage::Row)));
+    if (!order.count || order.count > candidateLimit) return {};
     const auto [lower, upper] = storedZonedClockDiskBounds(range);
     std::vector<BPTree::LeafEntry> entries;
     constexpr size_t maxNodes = 64;
     checkForQueryInterrupt();
     const auto status = index->readOrderedKeyPrefix(lower, upper, order.count, maxNodes,
-        order.descending, entries, result.indexNodes);
+        order.descending, entries, result.indexNodes, order.withTies ? candidateLimit : 0);
     if (status == BPTree::LeafEntriesResult::Error)
         throw DbError("XX001", "could not read B-tree index for relation \"" + schema.tablename + "\"");
-    // NULL entries are omitted from these indexes. A short prefix of a
-    // nullable column may need those rows after its last non-NULL key.
+    // A short page or a WITH TIES probe could need omitted NULL entries
+    // after the final non-NULL key. Use the heap if the index cannot supply it.
     if (status != BPTree::LeafEntriesResult::Complete || (nullable && entries.size() < order.count) ||
         engine.indexReadSnapshotFence(database) != fence) return {};
+    if (nullable && order.withTies && entries.back().key == entries[order.count - 1].key) return {};
     if (entries.size() > 8) {
         uint64_t rows = 0;
         const auto pages = engine.tableNumPages(database, schema.tablename);

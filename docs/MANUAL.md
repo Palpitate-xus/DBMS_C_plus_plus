@@ -687,6 +687,14 @@ WHERE local_time IS NOT NULL
 ORDER BY local_time DESC LIMIT 10;
 ```
 
+如果第 10 条之后还有排序值相同的记录，可以用 `WITH TIES` 一起取回。数据库可以借助单列索引，读到第一条不同的记录时停止。空值可能参与分页、并列记录很多或存在更多排序列时，数据库可以回到常规查询路径。 [并列分页验证](test-report.md#timetz-ties-20261123)
+
+```sql
+SELECT id, local_time FROM check_ins
+WHERE local_time IS NOT NULL
+ORDER BY local_time DESC FETCH FIRST 10 ROWS WITH TIES;
+```
+
 省略偏移时从会话时区推断、命名时区输入和完整数组支持仍有差距。旧表的迁移边界见[打包与部署](PACKAGING.md#时间列存储与版本边界)和[测试报告](test-report.md#timetz-storage-20261123)。
 
 ### 二进制类型

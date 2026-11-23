@@ -593,6 +593,12 @@ void test_leaf_entry_scan_validates_sibling_links_and_separators() {
         assert(visited == 2 && entries.size() == 1 && entries.front().key[0] == 'a' && entries.front().value == 11);
         assert(tree.readOrderedKeyPrefix("a", "c", 1, 2, true, entries, visited) == LeafEntriesResult::Complete);
         assert(visited == 2 && entries.size() == 1 && entries.front().key[0] == 'c' && entries.front().value == 22);
+        for (const bool descending : {false, true}) {
+            assert(tree.readOrderedKeyPrefix("a", "c", 1, 3, descending, entries, visited, 2) == LeafEntriesResult::Complete);
+            assert(visited == 3 && entries.size() == 2 && entries.front().value == (descending ? 22 : 11));
+            assert(tree.readOrderedKeyPrefix("a", "c", 1, 3, descending, entries, visited, 1) == LeafEntriesResult::LimitExceeded);
+            assert(entries.empty());
+        }
     }
 
     // A range on the separator must reach duplicates on both sides.
@@ -610,6 +616,10 @@ void test_leaf_entry_scan_validates_sibling_links_and_separators() {
         size_t visited = 0;
         assert(tree.readOrderedKeyPrefix("b", "b", 2, 3, true, entries, visited) == LeafEntriesResult::Complete);
         assert(visited == 3 && entries.size() == 2 && entries[0].value == 22 && entries[1].value == 11);
+        assert(tree.readOrderedKeyPrefix("b", "b", 1, 3, true, entries, visited, 2) == LeafEntriesResult::Complete);
+        assert(visited == 3 && entries.size() == 2 && entries[0].value == 22 && entries[1].value == 11);
+        assert(tree.readOrderedKeyPrefix("b", "b", 1, 2, true, entries, visited, 2) == LeafEntriesResult::LimitExceeded);
+        assert(entries.empty());
     }
 
     // The child graph still lists both leaves, but the leaf chain drops one.

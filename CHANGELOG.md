@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>分页带上并列记录时也可以用索引 · 2026-11-23</summary>
+
+例如，查最早的 3 条预约并带上与第 3 条时间相同的预约。给时间建好索引后，数据库可以读到下一个不同的时间就停。
+
+[使用说明](docs/MANUAL.md#日期时间类型) · [测试报告](docs/test-report.md#timetz-ties-20261123) · [性能报告](docs/performance-report-2026-10-30.md#timetz-ties-cost-20261123)
+
+</details>
+
+<details>
 <summary>按时间排序，只取前几条更快 · 2026-11-23</summary>
 
 例如，给预约时间建好索引后，查询最早的 4 条预约时，数据库读够 4 条就可以停。预约时间可以带时区偏移，例如 `09:00:00+08:00`。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>可以用索引查指定时间的记录 · 2026-11-23</summary>
+<summary>查看更早的更新和版本记录</summary>
+
+## 2026-11-23 · 可以用索引查指定时间的记录
 
 例如，给预约时间建好索引后，查询 `14:30:00+05:30` 的预约时，数据库可以直接找到符合条件的记录。
 
 [使用说明](docs/MANUAL.md#日期时间类型) · [测试报告](docs/test-report.md#timetz-index-20261123) · [性能报告](docs/performance-report-2026-10-30.md#timetz-index-cost-20261123)
-
-</details>
-
-<details>
-<summary>查看更早的更新和版本记录</summary>
 
 ## 2026-11-23 · 可以保存带时区的时间
 

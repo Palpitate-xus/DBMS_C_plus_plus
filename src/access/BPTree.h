@@ -90,9 +90,11 @@ public:
     LeafEntriesResult readOrderedKeyRange(const std::string& lower, const std::string& upper,
                                           size_t maxRows, size_t maxNodes,
                                           std::vector<int64_t>& values) const;
+    // A nonzero maxRowsWithPeers extends the prefix through all equal keys
+    // and copies the first different key, if present, within that row budget.
     LeafEntriesResult readOrderedKeyPrefix(const std::string& lower, const std::string& upper,
         size_t count, size_t maxNodes, bool descending, std::vector<LeafEntry>& entries,
-        size_t& visitedNodes) const;
+        size_t& visitedNodes, size_t maxRowsWithPeers = 0) const;
 
     // Copy row positions for a closed range of fixed-width composite keys.
     // A supplied suffix vector receives the signed key for each row position.
@@ -218,7 +220,7 @@ private:
     LeafEntriesResult readFixedRangeLocked(const std::string& lower, const std::string& upper,
         size_t maxRows, size_t maxNodes, std::vector<int64_t>& values,
         std::vector<int64_t>* suffixes, CompositeRangeRead mode, size_t* visitedNodes,
-        std::vector<LeafEntry>* keys = nullptr) const;
+        std::vector<LeafEntry>* keys = nullptr, size_t maxRowsWithPeers = 0) const;
 
     bool writeNode(uint32_t pageNum, const Node& node);
     std::optional<Node> readNode(uint32_t pageNum) const;

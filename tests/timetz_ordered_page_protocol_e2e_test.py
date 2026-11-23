@@ -63,7 +63,7 @@ def main():
             " ORDER BY t DESC LIMIT 2 OFFSET 1", [5, 2], 3)
         ids(base + " WHERE t>'24:00:00-15:59:59' ORDER BY t LIMIT 3", [], 0)
         ids(base + " WHERE t BETWEEN '11:00:00+00' AND '11:00:00+00' ORDER BY t LIMIT 3", [5], 1)
-        ids(base + " ORDER BY t FETCH FIRST 2 ROWS WITH TIES", [3, 6])
+        ids(base + " ORDER BY t FETCH FIRST 2 ROWS WITH TIES", [3, 6], 3)
         ids(base + " ORDER BY t,id LIMIT 2", [3, 6])
         review.query(base + " ORDER BY t LIMIT 0", rows=[], oids=[23])
 
@@ -121,8 +121,53 @@ def main():
         ids(base + " ORDER BY t ASC LIMIT 2", [4, 1], 2)
         command("DROP INDEX tp_all", "DROP INDEX")
         ids(base + " ORDER BY t ASC LIMIT 2", [4, 1])
-        assert plans == (0 if reference else 21), plans
-        review.complete(35 + plans)
+
+        command("CREATE TABLE tp_ties(id integer PRIMARY KEY,t timetz(6))", "CREATE TABLE")
+        command("INSERT INTO tp_ties VALUES (1,'00:00:00+00'),(2,'09:00:00+01'),"
+                "(3,'09:00:00+01'),(4,'09:00:00+01'),(5,'10:00:00+02'),(6,'12:00:00+00'),(7,NULL),(8,NULL)",
+                "INSERT 0 8")
+        command("CREATE INDEX tp_ties_time ON tp_ties(t)", "CREATE INDEX")
+        base = "SELECT t AS v FROM tp_ties"
+        peer_rows = [["09:00:00+01"]] * 3
+        cases = (
+            (" ORDER BY t FETCH FIRST 3 ROWS WITH TIES", [["00:00:00+00"], ["10:00:00+02"]] + peer_rows, 6),
+            (" ORDER BY v DESC NULLS LAST OFFSET 1 ROW FETCH NEXT ROW WITH TIES", peer_rows, 5),
+            (" ORDER BY t OFFSET 3 ROWS FETCH NEXT ROW WITH TIES", peer_rows[1:], 6),
+            (" WHERE t>='09:00:00+01' AND t<='09:00:00+01' ORDER BY 1 FETCH FIRST ROW WITH TIES", peer_rows, 3),
+            (" ORDER BY t ASC NULLS FIRST FETCH FIRST ROW WITH TIES", [[None], [None]], None),
+            (" ORDER BY t OFFSET 5 ROWS FETCH NEXT ROW WITH TIES", [["12:00:00+00"]], None),
+            (" ORDER BY t OFFSET 6 ROWS FETCH NEXT ROW WITH TIES", [[None], [None]], None),
+        )
+        for suffix, expected, candidates in cases:
+            review.query(base + suffix, rows=expected, oids=[1266])
+            page(base + suffix, candidates)
+
+        command("CREATE SEQUENCE tp_ties_probe", "CREATE SEQUENCE")
+        review.query("SELECT nextval('tp_ties_probe') AS v FROM tp_ties ORDER BY t FETCH FIRST 3 ROWS WITH TIES",
+                     rows=[[str(value)] for value in range(1, 6)], oids=[20])
+        review.query("SELECT currval('tp_ties_probe') AS v", rows=[["6"]], oids=[20])
+
+        bound = base + " WHERE t >= $1 ORDER BY t FETCH FIRST ROW WITH TIES"
+        review.parameter(bound, ["09:00:00+01"], [1266], peer_rows, [1266])
+        parse = b"time_peers\0" + bound.encode() + b"\0" + struct.pack("!HI", 1, 1266)
+        value = struct.pack("!qi", 32_400_000_000, -3_600)
+        bind = b"\0time_peers\0" + struct.pack("!HHHi", 1, 1, 1, len(value)) + value + struct.pack("!HH", 1, 1)
+        sock.sendall(client.typed(b"P", parse) + client.typed(b"B", bind) + client.typed(b"D", b"P\0")
+                     + client.typed(b"E", b"\0" + struct.pack("!I", 0)) + client.typed(b"S"))
+        frames = client.read_until_ready(sock)
+        desc = client.row_description_fields(frames)
+        rows = client.data_row_values(frames)
+        review.record("binary time peers", b"".join(kind for kind, _ in frames) == b"12TDDDCZ"
+                      and len(desc) == 1 and desc[0][3:] == (1266, 12, 6, 1)
+                      and rows == [[value]] * 3 and frames[-2:] == [(b"C", b"SELECT 3\0"), (b"Z", b"I")],
+                      (desc, rows), (1266, [[value]] * 3))
+
+        command("INSERT INTO tp_ties VALUES " + ",".join(f"({i},'20:00:00+00')" for i in range(9, 522)), "INSERT 0 513")
+        sql = base + " WHERE t IS NOT NULL ORDER BY t DESC FETCH FIRST ROW WITH TIES"
+        review.query(sql, rows=[["20:00:00+00"]] * 513, oids=[1266])
+        page(sql, None)
+        assert plans == (0 if reference else 29), plans
+        review.complete(52 + plans)
     finally:
         review.close()
 
