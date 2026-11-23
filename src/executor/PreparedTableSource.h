@@ -9,6 +9,7 @@ namespace dbms {
 struct PreparedIntegerKeyOrder {
     size_t columnOrdinal;
     bool ascending;
+    bool canStopAtLimit = false;
 };
 
 // Available only while the physical page owns rows in checked key order.

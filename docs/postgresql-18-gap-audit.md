@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-23 · 复用复合主键整数末列的顺序
+
+固定所有前导列时，符合条件的 `ORDER BY` 可以直接读取复合主键的整数末列顺序。当前索引和快照满足要求时，受支持的 `LIMIT/OFFSET` 可提前结束表行读取。旧快照或旧索引继续排序。跨组扫描、任意复合排序方向和更大的区间候选遍历仍开放。`IDX-03` 和 `OPT-01` 保持部分实现。[测试](test-report.md#composite-primary-order-20261123) · [性能](performance-report-2026-10-30.md#composite-primary-order-cost-20261123)
+
 ## 2026-11-23 · 表扫描复用已准备的比较条件
 
 普通物理表支持在扫描前准备直接文本列的相等和不等比较，以及有符号整数列与常量的比较。覆盖内置参数类型、大小整数、实际 NULL、保存点和进程恢复。复杂表达式的执行整合、排序规则和字符类型的完整语义仍开放。`P0-01`、`SQL-10` 和 `TYPE-04` 保持部分实现。[测试](test-report.md#stored-literal-filter-20261123) · [性能](performance-report-2026-10-30.md#stored-literal-filter-cost-20261123)

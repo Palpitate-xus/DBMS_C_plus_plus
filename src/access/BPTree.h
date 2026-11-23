@@ -85,10 +85,12 @@ public:
     enum class LeafEntriesResult { Complete, LimitExceeded, Error };
 
     // Copy row positions for a closed range of fixed-width composite keys.
-    // An error or limit result leaves values empty.
+    // A supplied suffix vector receives the signed key for each row position.
+    // An error or limit result leaves both outputs empty.
     LeafEntriesResult readCompositePrimaryRange(const std::string& lower, const std::string& upper,
                                                  size_t maxRows, size_t maxNodes,
-                                                 std::vector<int64_t>& values) const;
+                                                 std::vector<int64_t>& values,
+                                                 std::vector<int64_t>* suffixes = nullptr) const;
 
     // Copy at most maxEntries fixed-width leaf keys and their values in tree
     // order. A failed or over-limit read clears entries. Callers can process

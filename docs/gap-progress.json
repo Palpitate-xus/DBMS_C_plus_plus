@@ -2,6 +2,18 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-23 consume a composite primary integer range in order for pagination",
+      "gap_ids": ["IDX-03", "OPT-01"],
+      "status": "partial",
+      "evidence": ["src/access/BPTree.cpp", "src/executor/ExecutionPlan.cpp", "src/executor/PreparedTableSource.h", "docs/MANUAL.md", "docs/postgresql-comparison.md", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/composite_primary_order_test.cpp", "tests/compat/cases/composite_primary_order.sql", "tests/composite_primary_range_protocol_e2e_test.py"],
+      "verification": [
+        "Forward and backward order are verified from the opened range path. A bounded qualifying query stops after OFFSET plus LIMIT; older snapshots, legacy files and unsupported predicates use the existing path.",
+        "Row positions are checked against their stored signed order keys. Full response comparisons and crash recovery cover the supported order and row window.",
+        "The existing bounded index traversal still caps candidates. Global ordered scans across leading groups and arbitrary compound sort keys remain open."
+      ]
+    },
+    {
       "issue": "2026-11-23 reuse stored text and integer literal comparisons during table scans",
       "gap_ids": ["P0-01", "SQL-10", "TYPE-04"],
       "status": "partial",

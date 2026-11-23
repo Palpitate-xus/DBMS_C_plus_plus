@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-23 · 用已有顺序读取一页复合主键结果
+
+PostgreSQL 可以正向或反向读 B-tree 来满足对应的 `ORDER BY`，并在取够 `LIMIT` 所需的行后结束。SQLite 可以先在多列索引中定位前导等值组，再按后续列顺序读取。DuckDB 1.5 的 ART 查询路径以选择性筛选为主，文档所述的 ART 查询扫描不会消除排序。[PostgreSQL 索引排序](https://www.postgresql.org/docs/18/indexes-ordering.html) · [SQLite 查找与排序](https://sqlite.org/queryplanner.html#searching_and_sorting_with_a_multi_column_index) · [DuckDB 索引](https://duckdb.org/docs/1.5/guides/performance/indexing)
+
+本项目在已有的 `0xC556` 索引上核对前导列并按整数末列顺序输出。执行后确认实际使用了范围索引才省去排序。支持正向和反向读取。简单分页可以在取得 `OFFSET + LIMIT` 条符合条件的行时停止读取表行。索引页读取仍使用有上限的候选遍历。多个前导组间的全局顺序、任意排序键和更大的候选范围仍有差距。[协议测试](test-report.md#composite-primary-order-20261123) · [性能对照](performance-report-2026-10-30.md#composite-primary-order-cost-20261123)
+
 ## 2026-11-23 · 表扫描前准备比较条件
 
 PostgreSQL 18.6 在初始化执行器时把查询条件转换成可执行步骤，扫描时读取当前行和参数。SQLite 在生成字节码时翻译筛选条件。DuckDB 的筛选算子用已经绑定的表达式批量选出符合条件的行。[PostgreSQL 执行器](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/executor/README) · [SQLite 架构](https://www.sqlite.org/arch.html) · [DuckDB 筛选算子](https://github.com/duckdb/duckdb/blob/v1.5.6/src/execution/operator/filter/physical_filter.cpp)
@@ -12,7 +18,7 @@ PostgreSQL 18.6 在初始化执行器时把查询条件转换成可执行步骤�
 
 PostgreSQL 的多列 B-tree 可用前导列的等值和相邻列的范围限制索引扫描，也可按索引顺序输出。SQLite 用多列索引定位第一个匹配项后顺序查找相邻记录，查询前导列等值时可按后一列的索引顺序返回。DuckDB 1.5 的 ART 查询扫描适用于无表达式的单列索引，区间筛选还可借助数据块的最小值和最大值。[PostgreSQL 多列索引](https://www.postgresql.org/docs/18/indexes-multicolumn.html) · [PostgreSQL 索引排序](https://www.postgresql.org/docs/18/indexes-ordering.html) · [SQLite 查找与排序](https://sqlite.org/queryplanner.html#searching_and_sorting_with_a_multi_column_index) · [DuckDB 索引](https://duckdb.org/docs/1.5/guides/performance/indexing)
 
-本项目在 20 字节键中使用前导列摘要和有序的整数末列。确定前导等值键后可只读取期望区间的索引页，原 SQL 仍核对真实值并负责排序。完整多列排序、跨前导组范围和跳跃扫描仍需实现。[正确性与恢复](test-report.md#composite-primary-range-20261123) · [性能对照](performance-report-2026-10-30.md#composite-primary-range-cost-20261123)
+本项目在 20 字节键中使用前导列摘要和有序的整数末列。确定前导等值键后可只读取期望区间的索引页，原 SQL 仍核对真实值。这轮计时包含显式排序。[正确性与恢复](test-report.md#composite-primary-range-20261123) · [性能对照](performance-report-2026-10-30.md#composite-primary-range-cost-20261123)
 
 ## 2026-11-23 · 共享长前缀的复合主键
 

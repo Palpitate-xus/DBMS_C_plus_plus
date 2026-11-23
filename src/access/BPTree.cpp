@@ -46,10 +46,10 @@ bool validIntegerStoredKey(const std::string& key) {
                        [](char byte) { return byte == '\0'; });
 }
 
-int64_t readIntegerStoredKey(const std::string& key) {
+int64_t readIntegerStoredKey(const std::string& key, size_t offset = 0) {
     uint64_t biased = 0;
     for (size_t i = 0; i < kIntegerKeyBytes; ++i) {
-        biased = (biased << 8) | static_cast<unsigned char>(key[i]);
+        biased = (biased << 8) | static_cast<unsigned char>(key[offset + i]);
     }
     if (biased < kIntegerSignBias) {
         return std::numeric_limits<int64_t>::min() + static_cast<int64_t>(biased);
@@ -977,9 +977,10 @@ bool BPTree::allValuesChecked(std::vector<int64_t>& values) const {
 
 BPTree::LeafEntriesResult BPTree::readCompositePrimaryRange(
         const std::string& lower, const std::string& upper, size_t maxRows,
-        size_t maxNodes, std::vector<int64_t>& values) const {
+        size_t maxNodes, std::vector<int64_t>& values, std::vector<int64_t>* suffixes) const {
     std::shared_lock<std::shared_mutex> treeLock(treeMutex_);
     values.clear();
+    if (suffixes) suffixes->clear();
     if (!bp_ || !bp_->isOpen() ||
         header_.reserved != bptree_format::kCompositePrimaryRangeFormat ||
         lower.size() != BP_KEY_LEN || upper.size() != BP_KEY_LEN)
@@ -987,6 +988,7 @@ BPTree::LeafEntriesResult BPTree::readCompositePrimaryRange(
     if (!header_.rootPage || lower > upper) return LeafEntriesResult::Complete;
 
     std::vector<int64_t> result;
+    std::vector<int64_t> resultSuffixes;
     std::unordered_set<uint32_t> visited;
     std::optional<size_t> leafDepth;
     uint32_t nextLeaf = 0;
@@ -1022,10 +1024,16 @@ BPTree::LeafEntriesResult BPTree::readCompositePrimaryRange(
         nextLeaf = node->nextLeaf;
         if (end - first > maxRows - result.size()) return LeafEntriesResult::LimitExceeded;
         result.insert(result.end(), node->values.begin() + first, node->values.begin() + end);
+        if (suffixes)
+            for (size_t i = first; i < end; ++i)
+                resultSuffixes.push_back(readIntegerStoredKey(node->keys[i], BP_KEY_LEN - kIntegerKeyBytes));
         return LeafEntriesResult::Complete;
     };
     const auto status = collect(collect, header_.rootPage, 0, nullptr, nullptr, true);
-    if (status == LeafEntriesResult::Complete) values = std::move(result);
+    if (status == LeafEntriesResult::Complete) {
+        values = std::move(result);
+        if (suffixes) *suffixes = std::move(resultSuffixes);
+    }
     return status;
 }
 

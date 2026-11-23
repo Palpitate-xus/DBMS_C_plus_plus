@@ -51,9 +51,9 @@ def main():
     def lookup(shop, condition='', order='ord'):
         return select + f" WHERE shop='{shop}' {condition} ORDER BY {order}"
 
-    def bind(shop, low, high):
+    def bind(shop, low, high, name=b'bounds'):
         shop = shop.encode()
-        payload = b'\0bounds\0' + pack('!HHHI', 1, 1, 3, len(shop)) + shop
+        payload = b'\0' + name + b'\0' + pack('!HHHI', 1, 1, 3, len(shop)) + shop
         for value in (low, high):
             payload += pack('!i', -1) if value is None else pack('!iq', 8, value)
         payload += pack('!H', 0)
@@ -91,6 +91,19 @@ def main():
         check_access(writer, lambda: sql(writer, lookup(store), 'SELECT 128',
                      [[str(i), f'n{i}'] for i in range(-64, 64)]), [1, 2180, 0, 0])
 
+        top = lookup(store, order='ord DESC NULLS LAST') + ' LIMIT 3 OFFSET 2'
+        check_access(writer, lambda: sql(writer, top, 'SELECT 3',
+                     [[str(i), f'n{i}'] for i in (61, 60, 59)]), [0, 0, 1, 5])
+        plan = sql(writer, 'EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF) ' + top, 'EXPLAIN')
+        assert any('keyOrder=desc' in row[0] for row in plan), plan
+        assert any('presorted' in row[0] for row in plan), plan
+        ascending = lookup(store, 'AND ord BETWEEN -30 AND 30') + ' LIMIT 2 OFFSET 1'
+        check_access(writer, lambda: sql(writer, ascending, 'SELECT 2',
+                     [['-29', 'n-29'], ['-28', 'n-28']]), [0, 0, 1, 3])
+        residual = lookup(store, "AND note LIKE 'n63'", 'ord ASC') + ' LIMIT 1'
+        check_access(writer, lambda: sql(writer, residual, 'SELECT 1',
+                     [['63', 'n63']]), [1, 2180, 0, 0])
+
         params = select + " WHERE shop=$1 AND ord>=$2 AND $3>ord ORDER BY ord"
         writer.sendall(typed(b'P', b'bounds\0' + params.encode() + b'\0' +
                        pack('!HIII', 3, 25, 20, 20)) + typed(b'S'))
@@ -100,6 +113,15 @@ def main():
         check_access(writer, lambda: observe(bind(nearby, -1, 2), 'SELECT 1',
                      [['0', 'other']]), [0, 0, 1, 1])
         observe(bind(store, None, 2), 'SELECT 0', [])
+        limited = (select + " WHERE shop=$1 AND ord>=$2 AND $3>ord "
+                   "ORDER BY ord DESC LIMIT 2 OFFSET 1")
+        writer.sendall(typed(b'P', b'limited\0' + limited.encode() + b'\0' +
+                       pack('!HIII', 3, 25, 20, 20)) + typed(b'S'))
+        assert client.read_until_ready(writer) == [(b'1', b''), (b'Z', b'I')]
+        check_access(writer, lambda: observe(bind(store, -40, 41, b'limited'), 'SELECT 2',
+                     [['39', 'n39'], ['38', 'n38']]), [0, 0, 1, 3])
+        check_access(writer, lambda: observe(bind(store, -64, -62, b'limited'), 'SELECT 1',
+                     [['-64', 'n-64']]), [0, 0, 1, 2])
 
         reader = socket.create_connection(('127.0.0.1', server['port']), timeout=runner.wire_timeout())
         client.startup(reader, 'alice', 'info')
@@ -108,14 +130,19 @@ def main():
         sql(writer, f"UPDATE {table} SET ord=1000 WHERE shop='{store}' AND ord=-1", 'UPDATE 1')
         check_access(reader, lambda: sql(reader, range_query, 'SELECT 4', expected, ready=b'T'),
                      [1, 2180, 0, 0])
+        newest = lookup(store, order='ord DESC') + ' LIMIT 1'
+        check_access(reader, lambda: sql(reader, newest, 'SELECT 1', [['63', 'n63']], ready=b'T'),
+                     [1, 2180, 0, 0])
         sql(reader, 'COMMIT', 'COMMIT')
+        check_access(writer, lambda: sql(writer, newest, 'SELECT 1', [['1000', 'n-1']]),
+                     [0, 0, 1, 1])
         current = [[str(i), f'n{i}'] for i in (1, 0, -2)]
         check_access(writer, lambda: sql(writer, range_query, 'SELECT 3', current), [0, 0, 1, 3])
     finally:
         if reader is not None:
             reader.close()
         runner.stop_ours(server)
-    print('[COMPOSITE PRIMARY RANGE] leading equality, signed bounds, rebinding and snapshots passed')
+    print('[COMPOSITE PRIMARY RANGE] bounds, rebinding, ordered limits and snapshots passed')
 
 
 if __name__ == '__main__':

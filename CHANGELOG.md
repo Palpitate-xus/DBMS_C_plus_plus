@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>按订单号取前几条记录更快 · 2026-11-23</summary>
+
+例如，查看某家店订单号最大的 5 笔订单时，数据库可以沿着索引读取，取够就结束。
+
+[测试报告](docs/test-report.md#composite-primary-order-20261123) · [性能报告](docs/performance-report-2026-10-30.md#composite-primary-order-cost-20261123)
+
+</details>
+
+<details>
 <summary>带参数的查询在扫描整张表时更快 · 2026-11-23</summary>
 
 例如应用传入店铺编号查询订单时，数据库会先准备好比较条件，再逐行检查。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>同一家店的订单很多时，按订单号查找更快 · 2026-11-23</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-23 · 同一家店的订单很多时，按订单号查找更快
 
 同时给出店铺编号和订单号后，数据库可以少检查同一家店的其他订单。按这两个编号修改或删除订单，以及检查新订单是否重号，也能少读记录。
 
 [测试报告](docs/test-report.md#composite-primary-fingerprint-20261123) · [性能报告](docs/performance-report-2026-10-30.md#composite-primary-fingerprint-cost-20261123)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-23 · 修改或删除指定店铺的订单更快
 
