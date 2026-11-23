@@ -1080,7 +1080,7 @@ INSERT INTO shop_orders VALUES ('north', 42), ('south', 42);
 SELECT * FROM shop_orders WHERE shop_code = 'north' AND order_number = 42;
 ```
 
-升级后可对旧库里的普通表运行 `REINDEX TABLE shop_orders;`。默认比较规则下，重建后可用索引减少写入时要核对的记录。[索引格式](PACKAGING.md#复合主键索引格式) · [测试结果](test-report.md#composite-primary-keys-20261123)
+新建或重建的索引可以加速上例。主键各列为 `text`、`varchar` 或有符号整数，且查询按等值给出每一列时，数据库可以先用索引缩小范围，再核对完整键和其他条件。旧库可以运行 `REINDEX TABLE shop_orders;` 启用这条路径。只按店铺筛选、旧事务快照和忽略大小写的规则等场景使用原有扫描。[索引格式](PACKAGING.md#复合主键索引格式) · [查询测试](test-report.md#composite-primary-lookup-20261123)
 
 ### 删除表
 

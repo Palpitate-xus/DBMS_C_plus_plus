@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-23 · 完整复合主键查询
+
+普通表按完整复合主键做等值查询时，可以在当前快照上使用索引，核对候选的完整值和其他条件。已验证普通协议、命名语句参数、旧快照、旧索引及恢复。范围和部分键扫描、完整索引排序、成本模型和分区表仍有差距。`IDX-03` 和 `OPT-01` 保持部分实现。[测试](test-report.md#composite-primary-lookup-20261123) · [性能](performance-report-2026-10-30.md#composite-primary-lookup-cost-20261123)
+
 ## 2026-11-23 · 普通表复合主键
 
 普通非分区表允许写入只共享物理索引键的不同复合主键，查重逐列核对。覆盖旧数据升级、两种协议、并发写入和恢复。重建后的索引可在写入时缩小查重范围。复合索引排序、查询规划及分区约束仍有差距。`IDX-03`、`IDX-15`、`TXN-08` 和 `CAT-10` 保持部分实现。[测试](test-report.md#composite-primary-keys-20261123) · [性能](performance-report-2026-10-30.md#composite-primary-keys-cost-20261123)

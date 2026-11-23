@@ -2387,6 +2387,7 @@ static void prepareAggregateRoles(PreparedSelectState& state) {
 }
 
 static bool isSingleColumnPrimaryKey(const TableSchema&, const std::string&);
+static std::vector<int64_t> lookupBtreeMultiChecked(BPTree*, const std::string&);
 
 static std::string integerIndexCastType(const std::string& spelling) {
     CatalogManager::QualifiedName name;
@@ -2436,6 +2437,237 @@ static std::optional<ExprValue> constantIntegerIndexInput(const Expr* expression
         return std::nullopt;
     }
 }
+
+static std::vector<size_t> compositePrimaryColumns(const TableSchema& schema) {
+    if (!primary_key_index::isCompoundKey(schema)) return {};
+    if (!schema.pkColIndices.empty()) return schema.pkColIndices;
+    std::vector<size_t> result;
+    for (size_t i = 0; i < schema.len(); ++i)
+        if (schema.cols[i].isPrimaryKey) result.push_back(i);
+    return result;
+}
+
+static std::string compositeEqualityType(const Column& column) {
+    if (column.isArray || column.isUnsigned || column.generatedKind ||
+        !column.domainName.empty() || !column.enumValues.empty()) return {};
+    if (!column.collation.empty()) {
+        const auto& rule = column.resolvedCollation.empty() ? column.collation : column.resolvedCollation;
+        if (!column.resolvedCollationIsBinary || column.resolvedCollationUsesLocale ||
+            !collation::isBinary(rule)) return {};
+    }
+    const auto type = ExprHelper::canonicalResultTypeName(column.dataType);
+    if (type == "text" || type == "character varying") return "text";
+    if (type == "smallint" || type == "integer" || type == "bigint") return type;
+    return {};
+}
+
+static std::optional<std::string> compositeEqualityValue(
+        const std::string& type, const std::string& input) {
+    if (type == "text") return input;
+    const auto* begin = input.data();
+    const auto* end = begin + input.size();
+    if (begin != end && *begin == '+') {
+        if (++begin == end || *begin < '0' || *begin > '9') return {};
+    }
+    int64_t number = 0;
+    const auto parsed = std::from_chars(begin, end, number);
+    if (parsed.ec != std::errc{} || parsed.ptr != end ||
+        (type == "smallint" && (number < INT16_MIN || number > INT16_MAX)) ||
+        (type == "integer" && (number < INT32_MIN || number > INT32_MAX))) return {};
+    return std::to_string(number);
+}
+
+struct CompositeEqualityInput {
+    size_t column;
+    std::string name;
+    std::string type;
+    std::string value;
+    std::optional<size_t> slot;
+};
+
+static bool compositeOperandType(const std::string&, const std::string&);
+
+// The tree can only narrow a current snapshot, and several distinct full
+// keys can share the same stored bytes. Keep the original SQL predicate
+// above this source and verify the exact key before resolving the payload.
+class CompositePrimaryKeyScanOp final : public Operator {
+    StorageEngine* engine_;
+    std::string database_, table_;
+    uint64_t relationId_;
+    std::vector<CompositeEqualityInput> inputs_;
+    std::shared_ptr<PreparedQuery> query_;
+    OpPtr fallback_;
+    TableSchema schema_;
+    std::map<std::string, std::string> values_;
+    std::vector<int64_t> rids_;
+    size_t position_ = 0, fetched_ = 0;
+    int64_t lastRid_ = 0;
+    bool locked_ = false, fallbackActive_ = false, usedIndex_ = false;
+    bool opened_ = false;
+
+    bool buildValues() {
+        const auto columns = compositePrimaryColumns(schema_);
+        if (schema_.physicalRelationId != relationId_ || columns.size() != inputs_.size())
+            return false;
+        for (size_t i = 0; i < columns.size(); ++i) {
+            const auto& input = inputs_[i];
+            if (columns[i] != input.column || input.column >= schema_.len()) return false;
+            const auto& column = schema_.cols[input.column];
+            if (column.dataName != input.name || compositeEqualityType(column) != input.type)
+                return false;
+            if (!input.slot) {
+                values_.emplace(input.name, input.value);
+                continue;
+            }
+            if (!query_ || *input.slot >= query_->parameters.size()) return false;
+            const auto& parameter = query_->parameters[*input.slot];
+            if (parameter.isNull || !compositeOperandType(input.type, parameter.typeName))
+                return false;
+            const auto value = compositeEqualityValue(input.type, parameter.value);
+            if (!value) return false;
+            values_.emplace(input.name, *value);
+        }
+        return true;
+    }
+public:
+    CompositePrimaryKeyScanOp(StorageEngine* engine, std::string database,
+            const TableSchema& schema, std::vector<CompositeEqualityInput> inputs,
+            OpPtr fallback, std::shared_ptr<PreparedQuery> query = {})
+        : engine_(engine), database_(std::move(database)), table_(schema.tablename),
+          relationId_(schema.physicalRelationId), inputs_(std::move(inputs)),
+          query_(std::move(query)), fallback_(std::move(fallback)) {}
+
+    ~CompositePrimaryKeyScanOp() override {
+        if (locked_) try { close(); } catch (...) {}
+    }
+
+    bool open() override {
+        OpenInstrument instrumentation(this);
+        clearError();
+        position_ = fetched_ = 0;
+        lastRid_ = 0;
+        rids_.clear();
+        values_.clear();
+        usedIndex_ = fallbackActive_ = false;
+        auto& locks = engine_->getLockManager();
+        locks.setResourceNamespace(database_);
+        if (!locks.lockShared(table_))
+            throw DbError("55P03", "could not obtain lock on relation \"" + table_ + "\"");
+        locked_ = opened_ = true;
+        schema_ = engine_->getTableSchema(database_, table_);
+        engine_->noteQuerySnapshot();
+        const auto before = engine_->indexReadSnapshotFence(database_);
+        if (before && engine_->currentTxnId() != 0 &&
+            engine_->getIsolationLevel() != IsolationLevel::SERIALIZABLE &&
+            !engine_->rlsAppliesTo(database_, table_) &&
+            engine_->getInheritedChildren(database_, table_).empty() && buildValues()) {
+            auto* index = engine_->getPKIndex(database_, table_);
+            if (!index || !index->isOpen())
+                throw DbError("XX001", "could not open B-tree index for relation \"" + table_ + "\"");
+            if (index->hasCompletePrimaryPrefixes()) {
+                const auto key = schema_.buildPKValue(values_);
+                rids_ = lookupBtreeMultiChecked(index, key);
+                if (engine_->indexReadSnapshotFence(database_) == before) {
+                    usedIndex_ = true;
+                    return true;
+                }
+                rids_.clear();
+            }
+        }
+        fallbackActive_ = true;
+        return fallback_->open() || propagateChildError(fallback_.get(), "primary key heap scan failed");
+    }
+
+    bool next(std::string& row) override {
+        NextInstrument instrument(this);
+        if (fallbackActive_) {
+            if (!fallback_->next(row)) {
+                if (fallback_->hasError())
+                    return propagateChildError(fallback_.get(), "primary key heap scan failed");
+                return false;
+            }
+            instrument.emitted = true;
+            return true;
+        }
+        while (position_ < rids_.size()) {
+            checkForQueryInterrupt();
+            const auto rid = rids_[position_++];
+            bool failed = false;
+            ++fetched_;
+            if (!engine_->readIndexedRowByRid(database_, table_, rid, row, schema_, nullptr, &failed)) {
+                if (failed) {
+                    setError("indexed heap fetch failed");
+                    return false;
+                }
+                continue;
+            }
+            StorageEngine::bindNullRow(engine_, database_, table_, rid, schema_.len());
+            const bool matches = std::all_of(inputs_.begin(), inputs_.end(), [&](const auto& input) {
+                bool isNull = false;
+                const auto actual = engine_->extractColumnValue(row, schema_, input.column,
+                                                                database_, false, &isNull);
+                return !isNull && actual == values_.at(input.name);
+            });
+            if (!matches) continue;
+            bool toastOk = false;
+            row = engine_->resolveToastValues(database_, table_, row, schema_, &toastOk);
+            if (!toastOk) {
+                setError("TOAST value read failed");
+                return false;
+            }
+            lastRid_ = rid;
+            instrument.emitted = true;
+            return true;
+        }
+        return false;
+    }
+
+    ScanOrigin scanOrigin() const override {
+        if (fallbackActive_) return fallback_->scanOrigin();
+        ScanOrigin origin;
+        origin.engine = engine_;
+        origin.dbname = database_;
+        origin.tablename = table_;
+        origin.rid = lastRid_;
+        return origin;
+    }
+    bool lastColumnIsNull(size_t column) const override {
+        if (fallbackActive_) return fallback_->lastColumnIsNull(column);
+        return lastRid_ > 0 &&
+            detail::storedRowColumnIsNull(*engine_, database_, table_, schema_, lastRid_, column);
+    }
+    bool lastStoredNullBitmap(std::vector<bool>& nulls) const override {
+        if (fallbackActive_) return fallback_->lastStoredNullBitmap(nulls);
+        if (lastRid_ <= 0) return false;
+        auto bitmap = detail::storedRowNullBitmap(*engine_, database_, table_, schema_, lastRid_);
+        if (!bitmap) return false;
+        nulls = std::move(*bitmap);
+        return true;
+    }
+    std::vector<Operator*> preparedPlanChildren() const override {
+        return fallbackActive_ ? std::vector<Operator*>{fallback_.get()} : std::vector<Operator*>{};
+    }
+    std::string preparedPlanNodeName() const override { return "CompositePrimaryKeyScan"; }
+    std::map<std::string, std::string> preparedPlanAttributes() const override {
+        return {{"table", table_}, {"access", !opened_ ? "planned" : usedIndex_ ? "index" : "heap"}};
+    }
+    double estimatedRows() const override { return 1; }
+    void close() override {
+        if (!locked_) return;
+        std::exception_ptr error;
+        try {
+            if (fallbackActive_) fallback_->close();
+            if (usedIndex_) recordTableScan(database_, table_, fetched_, true, false);
+        } catch (...) { error = std::current_exception(); }
+        auto& locks = engine_->getLockManager();
+        locks.setResourceNamespace(database_);
+        locks.unlock(table_);
+        locked_ = false;
+        lastRid_ = 0;
+        rids_.clear();
+        if (error) std::rethrow_exception(error);
+    }
+};
 
 // A V3 summary supplies lossy pages; the normal heap cursor captures one
 // read view and owns each row/NULL bitmap. Full predicates stay above it.
@@ -2604,6 +2836,166 @@ static std::optional<std::string> brinLiteralInput(const Expr* expression,
         throw;
     }
 }
+
+static bool compositeOperandType(const std::string& keyType, const std::string& operandType) {
+    const auto type = ExprHelper::canonicalResultTypeName(operandType);
+    return keyType == "text"
+        ? type == "text" || type == "character varying"
+        : type == "smallint" || type == "integer" || type == "bigint";
+}
+
+static const Expr* compositeTextEnvelope(const Expr* node) {
+    while (const auto* cast = dynamic_cast<const CastExpr*>(node)) {
+        if (!cast->implicit || !cast->typeMods.empty() || cast->preparedSubquery ||
+            !compositeOperandType("text", cast->typeName)) break;
+        node = cast->operand.get();
+    }
+    return node;
+}
+
+// The protocol can lower a Bind datum to a qualified builtin CAST. Decode
+// only these text casts, integer constants and ordinary literal leaves.
+static std::optional<std::string> compositeLiteralValue(const Expr* input,
+                                                        const std::string& type) {
+    if (const auto* cast = dynamic_cast<const CastExpr*>(input)) {
+        if (type == "text") {
+            CatalogManager::QualifiedName target;
+            if (cast->implicit || !cast->typeMods.empty() || cast->preparedSubquery ||
+                !CatalogManager::parseQualifiedName(cast->typeName, target) ||
+                target.schema != "pg_catalog" ||
+                (target.name != "text" && target.name != "varchar")) return {};
+            // Cast a decoded string only. Numeric/boolean-to-text casts use
+            // their SQL output spelling, which may differ from the input.
+            if (!dynamic_cast<const LiteralExpr*>(cast->operand.get())) return {};
+            input = cast->operand.get();
+        } else {
+            const auto target = integerIndexCastType(cast->typeName);
+            if (target.empty()) return {};
+            const auto value = constantIntegerIndexInput(input, target);
+            return value ? compositeEqualityValue(type, value->value) : std::nullopt;
+        }
+    }
+    std::string inputType;
+    const auto literal = brinLiteralInput(input, &inputType);
+    if (!literal || (!compositeOperandType(type, inputType) &&
+        !(type == "text" && inputType == "unknown"))) return {};
+    return compositeEqualityValue(type, *literal);
+}
+
+static void collectCompositePredicates(const TableSchema& schema, const std::vector<size_t>& columns,
+        const Expr* predicate, std::optional<size_t> range,
+        std::map<size_t, CompositeEqualityInput>& matches) {
+    std::vector<const Expr*> terms{predicate};
+    while (!terms.empty()) {
+        const auto* binary = dynamic_cast<const BinaryOpExpr*>(terms.back());
+        terms.pop_back();
+        if (!binary || binary->preparedSubquery) continue;
+        if (binary->op == "AND" || binary->op == "and") {
+            terms.push_back(binary->right.get());
+            terms.push_back(binary->left.get());
+            continue;
+        }
+        if (binary->op != "=" || binary->rowComparison) continue;
+        if (binary->comparison && (!binary->comparison->strict ||
+            binary->comparison->identity.rfind("builtin-comparison:=", 0) != 0 ||
+            binary->comparison->enumTypeOid || binary->comparison->collationUsesSystemLocale ||
+            (!binary->comparison->collation.empty() &&
+                !collation::isBinary(binary->comparison->collation)))) continue;
+        if (binary->predicateCollation) {
+            const auto& rule = *binary->predicateCollation;
+            if (rule.indeterminate || rule.selected.usesSystemLocale ||
+                (!rule.selected.comparisonName.empty() &&
+                    !collation::isBinary(rule.selected.comparisonName))) continue;
+        }
+        const Expr* columnExpr = binary->left.get();
+        const auto* column = dynamic_cast<const ColumnRefExpr*>(compositeTextEnvelope(columnExpr));
+        const Expr* input = binary->right.get();
+        if (!column) {
+            columnExpr = input;
+            column = dynamic_cast<const ColumnRefExpr*>(compositeTextEnvelope(columnExpr));
+            input = binary->left.get();
+        }
+        if (!column) continue;
+        size_t ordinal = schema.len();
+        if (range) {
+            if (!column->binding || column->binding->scopeDepth || column->binding->mergedUsing ||
+                column->binding->sourceOrdinal != *range) continue;
+            ordinal = column->binding->columnOrdinal;
+        } else {
+            // The compact planner has only this physical range. Do not
+            // reinterpret a qualified or outer reference as a local key.
+            if (!column->schema.empty() || !column->table.empty()) continue;
+            for (const auto index : columns)
+                if (index < schema.len() && schema.cols[index].dataName == column->column) {
+                    ordinal = index;
+                    break;
+                }
+        }
+        if (ordinal >= schema.len()) continue;
+        if (std::find(columns.begin(), columns.end(), ordinal) == columns.end() ||
+            matches.count(ordinal)) continue;
+        const auto& key = schema.cols[ordinal];
+        const auto type = compositeEqualityType(key);
+        if (type.empty() || (type != "text" && columnExpr != column)) continue;
+        if (range) {
+            const auto& declaration = column->binding->typeMetadata;
+            if (!declaration || declaration->kind != DatumKind::Scalar || declaration->enumType ||
+                declaration->actualOid != declaration->codecOid ||
+                !compositeOperandType(type, column->binding->declaredType)) continue;
+        }
+        if (binary->comparison &&
+            (!compositeOperandType(type, binary->comparison->leftType) ||
+             !compositeOperandType(type, binary->comparison->rightType))) continue;
+        if (type == "text") input = compositeTextEnvelope(input);
+        if (const auto* parameter = dynamic_cast<const ParameterExpr*>(input)) {
+            if (range && parameter->origin == ParameterOrigin::StatementInput &&
+                compositeOperandType(type, parameter->declaredType))
+                matches.emplace(ordinal, CompositeEqualityInput{ordinal, key.dataName, type,
+                                                                {}, parameter->slot});
+        } else {
+            const auto value = compositeLiteralValue(input, type);
+            if (value)
+                matches.emplace(ordinal, CompositeEqualityInput{ordinal, key.dataName, type, *value, {}});
+        }
+    }
+}
+
+static std::vector<CompositeEqualityInput> orderedCompositeInputs(const std::vector<size_t>& columns,
+        std::map<size_t, CompositeEqualityInput>& matches) {
+    if (matches.size() != columns.size()) return {};
+    std::vector<CompositeEqualityInput> ordered;
+    ordered.reserve(columns.size());
+    for (const auto column : columns) {
+        const auto found = matches.find(column);
+        if (found == matches.end()) return {};
+        ordered.push_back(std::move(found->second));
+    }
+    return ordered;
+}
+
+static OpPtr preparedCompositePrimarySource(StorageEngine* engine, const std::string& database,
+        const std::shared_ptr<PreparedQuery>& query, const SelectStmt& select,
+        const TableSchema& schema, OpPtr& source) {
+    const auto columns = compositePrimaryColumns(schema);
+    const auto* scan = dynamic_cast<const TableScanOp*>(source.get());
+    if (columns.empty() || !scan || typeid(*scan) != typeid(TableScanOp) ||
+        scan->tableName() != schema.tablename || !select.whereClause ||
+        !select.locking.empty() || !select.fromClause ||
+        select.fromClause->type != FromItem::Type::Table) return {};
+    const auto range = std::find_if(query->sourceRanges.begin(), query->sourceRanges.end(),
+        [&](const auto& candidate) {
+            return candidate.owner == &select && candidate.source == select.fromClause.get() &&
+                !candidate.mergedUsing;
+        });
+    if (range == query->sourceRanges.end()) return {};
+    std::map<size_t, CompositeEqualityInput> matches;
+    collectCompositePredicates(schema, columns, select.whereClause.get(), range->ordinal, matches);
+    auto ordered = orderedCompositeInputs(columns, matches);
+    if (ordered.empty()) return {};
+    return std::make_unique<CompositePrimaryKeyScanOp>(engine, database, schema,
+        std::move(ordered), std::move(source), query);
+}
+
 static OpPtr literalBrinTableSource(StorageEngine* engine, const std::string& database,
     const std::shared_ptr<PreparedQuery>& query, const SelectStmt* select,
     const TableSchema& schema, OpPtr& source) {
@@ -3552,6 +3944,8 @@ bool hasOrderedPrimaryKeyInput(const Operator* source, const PreparedSelectState
 OpPtr makePreparedTableSource(StorageEngine* engine, const std::string& database,
     const std::shared_ptr<PreparedQuery>& query, SelectStmt* select,
     const TableSchema& schema, OpPtr source) {
+    if (auto narrowed = preparedCompositePrimarySource(engine, database, query, *select, schema, source))
+        return narrowed;
     if (auto narrowed = literalBrinTableSource(engine, database, query, select, schema, source))
         return narrowed;
     if (auto narrowed = literalGiSTTableSource(engine, database, query, select, schema, source))
@@ -10870,6 +11264,44 @@ static OpPtr ordinaryBrinTableSource(StorageEngine* engine, const PlanContext& c
         schema, bestPages, bestPages * 32.0, *bestCost);
 }
 
+static OpPtr compactCompositePrimarySource(StorageEngine* engine,
+        const PlanContext& context, const TableSchema& table) {
+    const auto columns = compositePrimaryColumns(table);
+    if (columns.empty() || context.conds.empty()) return {};
+    std::map<size_t, CompositeEqualityInput> matches;
+    for (const auto index : columns) {
+        if (index >= table.len()) return {};
+        const auto& column = table.cols[index];
+        const auto type = compositeEqualityType(column);
+        if (type.empty()) return {};
+        const auto condition = std::find_if(context.conds.begin(), context.conds.end(),
+            [&](const auto& item) {
+                return item.colName == column.dataName && item.op == "=" &&
+                    item.decodedLiteralRhs && !item.patternIsNull && !item.referenceInputOid &&
+                    (item.patternType.empty() || item.patternType == "unknown");
+            });
+        if (condition == context.conds.end()) continue;
+        const auto value = compositeEqualityValue(type, condition->value);
+        if (value)
+            matches.emplace(index, CompositeEqualityInput{index, column.dataName, type, *value, {}});
+    }
+    if (matches.size() < columns.size()) {
+        for (const auto& condition : context.conds) {
+            if (condition.op != "typedexpr") continue;
+            SQLParser parser;
+            auto parsed = parser.parseForBinding("SELECT " + condition.value);
+            const auto* select = parsed.success ? dynamic_cast<const SelectStmt*>(parsed.stmt.get()) : nullptr;
+            if (!select || select->selectList.size() != 1 || select->fromClause) continue;
+            collectCompositePredicates(table, columns, select->selectList.front().expr.get(), {}, matches);
+        }
+    }
+    auto inputs = orderedCompositeInputs(columns, matches);
+    if (inputs.empty()) return {};
+    auto fallback = std::make_unique<TableScanOp>(engine, context.dbname, context.tablename);
+    return std::make_unique<CompositePrimaryKeyScanOp>(engine, context.dbname, table,
+        std::move(inputs), std::move(fallback));
+}
+
 OpPtr QueryPlanner::buildSelectPlan(StorageEngine* engine, const PlanContext& inputContext) {
     auto ctx = inputContext;
     const auto table = engine->getTableSchema(ctx.dbname, ctx.tablename);
@@ -10896,6 +11328,7 @@ OpPtr QueryPlanner::buildSelectPlan(StorageEngine* engine, const PlanContext& in
     // bitmap, or parallel access path duplicate policy evaluation: use the
     // policy-aware TableScanOp and keep user predicates above it.
     const bool rlsApplies = engine->rlsAppliesTo(ctx.dbname, ctx.tablename);
+    if (!root && !rlsApplies) root = compactCompositePrimarySource(engine, ctx, table);
     const bool useBitmap = !root && !rlsApplies && canUseBitmapHeapScan(relation);
     // GiST acceleration: a range or anchored-prefix predicate on a
     // .gist-indexed column narrows candidates via the sidecar overlap

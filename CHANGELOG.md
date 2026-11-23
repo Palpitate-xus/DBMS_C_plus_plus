@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>同时按店铺和订单号查找更快 · 2026-11-23</summary>
+
+查某家店的第 42 号订单时，数据库先用两个编号缩小范围，再核对完整编号。
+
+[测试报告](docs/test-report.md#composite-primary-lookup-20261123) · [性能报告](docs/performance-report-2026-10-30.md#composite-primary-lookup-cost-20261123)
+
+</details>
+
+<details>
 <summary>编号相同的订单也能按店铺区分 · 2026-11-23</summary>
 
 即使两个店铺的编号很长、开头也一样，各自的第 42 号订单也能分别保存和修改。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>按编号查订单时可以少读数据 · 2026-11-22</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-22 · 按编号查订单时可以少读数据
 
 例如查某个产品的全部订单。数据库查完可能匹配的部分后，可以跳过后面无关的数据。
 
 [测试报告](docs/test-report.md#bounded-btree-equality-20261122) · [性能报告](docs/performance-report-2026-10-30.md#bounded-btree-equality-cost-20261122)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-22 · 按完整名称找记录更快了
 
