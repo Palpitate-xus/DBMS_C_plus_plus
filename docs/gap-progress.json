@@ -2,6 +2,17 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-23 reuse statement-local syntax in wire metadata checks and route UNNEST through the existing table function path",
+      "gap_ids": ["SQL-01", "QRY-02", "OPT-01"],
+      "status": "partial",
+      "evidence": ["src/network/NetworkServer.cpp", "src/main.cpp", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/generate_series_protocol_e2e_test.py", "tests/simple_query_runtime_result_protocol_e2e_test.py"],
+      "verification": [
+        "Compatible metadata checks share an unbound syntax tree for the current call. The existing binding step resolves catalog names and types.",
+        "UNNEST uses the same early admission as other supported table functions. The wire regression verifies completed rows before a runtime error and rollback of a preceding batch write."
+      ]
+    },
+    {
       "issue": "2026-11-23 remove redundant token scans from statement parsing and read bare array literals directly",
       "gap_ids": ["SQL-01", "OPT-01"],
       "status": "partial",

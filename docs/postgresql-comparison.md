@@ -2,6 +2,11 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="query-syntax-reuse-comparison-20261123"></a>
+## 2026-11-23 · 重用一次查询中的语法信息
+
+PostgreSQL 的普通查询先生成原始语法树，再逐条执行名称和类型分析。DuckDB 客户端上下文从语句迭代器取得已解析的语句，再交给规划器。SQLite 在准备语句时把 SQL 编译成供执行器使用的字节码。本项目在当前调用的结果说明检查中共用一份未绑定的语法树，各检查仍使用各自的目录和类型分析规则。[PostgreSQL 普通查询入口](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/tcop/postgres.c) · [DuckDB 客户端查询入口](https://github.com/duckdb/duckdb/blob/main/src/main/client_context.cpp) · [SQLite 准备语句](https://sqlite.org/c3ref/prepare.html)
+
 <a id="array-query-startup-comparison-20261123"></a>
 ## 2026-11-23 · 减少 SQL 解析中的重复分词
 

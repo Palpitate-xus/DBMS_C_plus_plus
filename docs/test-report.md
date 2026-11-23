@@ -2,6 +2,17 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="query-syntax-reuse-20261123"></a>
+## 2026-11-23 · 在一次查询中共用语法信息
+
+协议层检查时间精度提示、`EXPLAIN`、系统视图和一些查询的列定义时，共用当前调用的语法树。受支持的 `FROM unnest` 可提前进入表函数执行流程。函数协议测试在新旧两版各通过 288 项，在 PostgreSQL 18.6 通过适用的 284 项。[函数协议用例](../tests/generate_series_protocol_e2e_test.py)
+
+45 条新旧版响应逐字节一致，覆盖批量语句、保存点、提示、系统视图、不同角色、嵌套查询和 CSV 导出。另有 117 份数组响应和 84 份解析边界响应逐项一致，检查行值、空值、列说明、错误码、消息顺序、命令标签及会话状态。新增除零回归核对普通查询先交付已完成的两行再报错，同一批次中先前的写入被回滚，后续写入没有执行。`LIMIT 2` 可以在到达出错行之前结束。19 步恢复检查从旧版数据目录启动，覆盖正常重启和两次强制退出后的事务数据。[除零回归](../tests/simple_query_runtime_result_protocol_e2e_test.py)
+
+主协议及 12 项相关端到端测试通过。另一个维护进度用例在两版中都未通过同一处 `VACUUM` 角色可见性断言，复测两版均在预先查询同名视图时超时。集合查询中的两种数组展开写法仍报 `42703`，`SELECT INTO ... FROM unnest(...)` 仍报 `XX000`，三条语句在 PostgreSQL 18.6 均成功。[维护进度用例](../tests/maintenance_progress_protocol_e2e_test.py) · [测量与复现 SQL](performance-report-2026-10-30.md#query-syntax-reuse-cost-20261123)
+
+最终程序 SHA-256 为 `1e3f724aa8e109f297db51e2e8ba3a2d32fa051b3b2cf27f23bc12f44b09ac36`。
+
 <a id="array-query-startup-20261123"></a>
 ## 2026-11-23 · 复用 SQL 分词结果
 

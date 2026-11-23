@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-23 · 一次查询共用部分 SQL 解析结果
+
+同一条 SQL 写入 2,048 个整数并取首行，各轮中位耗时从 90–95 毫秒降到 67–73 毫秒。与 PostgreSQL 同轮测试，本项目约需 73–74 毫秒，PostgreSQL 约需 2 毫秒。部分集合查询及 `SELECT INTO` 中的数组来源仍待实现。`SQL-01`、`QRY-02` 和 `OPT-01` 保持部分实现。[测试](test-report.md#query-syntax-reuse-20261123) · [性能](performance-report-2026-10-30.md#query-syntax-reuse-cost-20261123)
+
 ## 2026-11-23 · 长数组查询减少重复分词
 
 同一条 SQL 写入 2,048 个整数、只取首行，各轮中位耗时从 158–165 毫秒降到 92–102 毫秒。与 PostgreSQL 同轮测试，本项目约需 97 毫秒，PostgreSQL 约需 2 毫秒。当前调用链仍有重复解析，`SQL-01` 和 `OPT-01` 保持部分实现。[测试](test-report.md#array-query-startup-20261123) · [性能](performance-report-2026-10-30.md#array-query-startup-cost-20261123)

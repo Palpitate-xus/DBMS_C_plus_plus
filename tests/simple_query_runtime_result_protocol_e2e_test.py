@@ -184,6 +184,13 @@ def main(verify_table_reads=True):
         query(f"INSERT INTO {table} VALUES (9,'rolled back',2); {count}; "
               f"INSERT INTO {table} VALUES (10,'unreached',2)", b"CTEZ", ("INSERT 0 1",), state="22012")
         query(f"SELECT count(*) FROM {table}", b"TDCZ", ("SELECT 1",), (("4",),))
+        array_query = "SELECT 10/v AS quotient FROM unnest(ARRAY[2,5,0]) AS u(v)"
+        array_prefix = (("5",), ("2",))
+        query(array_query + " LIMIT 2", b"TDDCZ", ("SELECT 2",), array_prefix)
+        query(f"INSERT INTO {table} VALUES (11,'rolled back',2); {array_query}; "
+              f"INSERT INTO {table} VALUES (12,'unreached',2)",
+              b"CTDDEZ", ("INSERT 0 1",), array_prefix, state="22012")
+        query(f"SELECT count(*) FROM {table}", b"TDCZ", ("SELECT 1",), (("4",),))
         query("BEGIN", b"CZ", ("BEGIN",), ready=b"T")
         query("SAVEPOINT runtime_failure", b"CZ", ("SAVEPOINT",), ready=b"T")
         query(projection, b"TDDEZ", rows=prefix, state="22012", ready=b"E")

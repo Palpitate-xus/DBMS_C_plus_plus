@@ -17,6 +17,13 @@ cmake --build build/cmake --target dbms_main --parallel 2
 ## 最近更新
 
 <details>
+<summary>从长数组里取几行更快 · 2026-11-23</summary>
+
+比如从一组 2,048 个编号里取第一条。数据库少读几遍同样的 SQL，能更早返回结果。
+
+</details>
+
+<details>
 <summary>SQL 里直接写几千个数字，查询更快 · 2026-11-23</summary>
 
 把一长串数字直接写在查询里时，数据库能更快读完这条 SQL。
@@ -27,13 +34,6 @@ cmake --build build/cmake --target dbms_main --parallel 2
 <summary>把一组整数拆成多行更快 · 2026-11-23</summary>
 
 比如查询一组订单号，每行显示一个。读完整组数据所需的时间更短。
-
-</details>
-
-<details>
-<summary>可以把一个或多个数组展开成行 · 2026-11-23</summary>
-
-例如，把 3 个编号和 2 个名字并排展开。结果有 3 行，最后一行的名字为空。还可以给每行编号，再筛选或排序。
 
 </details>
 

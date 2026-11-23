@@ -23588,7 +23588,8 @@ static bool executeInternal(const string& rawSql, Session& s,
         const bool failed = executeMaintenanceProgressQuery(effectiveRawSql, s, handled);
         if (handled) return failed;
     }
-    if ((sql.find("generate_series") != string::npos || sql.find("rows from") != string::npos) &&
+    if ((sql.find("generate_series") != string::npos || sql.find("rows from") != string::npos ||
+         (!s.currentDB.empty() && sql.find("unnest") != string::npos)) &&
         dbms::SQLParser::classify(effectiveRawSql) == dbms::SqlCommand::Select) {
         bool handled = false;
         const bool failed = handlePreparedCaseQuery(effectiveRawSql, s, handled, true);
