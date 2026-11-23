@@ -5536,7 +5536,7 @@ static dbms::Oid resolvePreparedParameterType(const string& typeSpec,
     return dbms::INVALID_OID;
 }
 
-static bool handlePrepare(const string& sql, Session& s) {
+static bool handlePrepare(const string& sql, const string& originalSql, Session& s) {
     string rest = trim(sql.substr(8));
     if (rest.substr(0, 12) == "transaction ") {
         string xid = stripQuotes(trim(rest.substr(12)));
@@ -5611,7 +5611,16 @@ static bool handlePrepare(const string& sql, Session& s) {
     size_t asPos = dbms::ps_findPrepareAs(rest);
     if (asPos != string::npos) {
         string head = trim(rest.substr(0, asPos));
-        string templateSql = trim(rest.substr(asPos + 4));
+        // The statement body owns its subqueries and quoted data. Legacy
+        // rewrites of ANY/ALL and other expressions can erase that syntax.
+        const string foldedOriginal = toLowerSql(originalSql);
+        const size_t nameBegin = dbms::skipLeadingSqlTrivia(
+            foldedOriginal, dbms::skipLeadingSqlTrivia(foldedOriginal) + 7);
+        size_t originalAs = findTopLevelKeyword(foldedOriginal, "as", nameBegin);
+        if (originalAs == nameBegin)
+            originalAs = findTopLevelKeyword(foldedOriginal, "as", nameBegin + 2);
+        string templateSql = originalAs == string::npos ? trim(rest.substr(asPos + 4))
+                                                        : trim(originalSql.substr(originalAs + 2));
         string stmtName;
         vector<string> paramTypes;
         const bool typesDeclared = head.find('(') != string::npos;
@@ -24305,7 +24314,7 @@ static bool executeInternal(const string& rawSql, Session& s,
 
         case dbms::SqlCommand::Prepare:
         case dbms::SqlCommand::PrepareTransaction:
-            return handlePrepare(sql, s);
+            return handlePrepare(sql, effectiveRawSql, s);
 
         case dbms::SqlCommand::Execute:
             return handleExecutePrepared(effectiveRawSql, s);

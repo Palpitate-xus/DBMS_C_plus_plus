@@ -134,15 +134,24 @@ def main():
                                f"SELECT (SELECT id FROM {empty} LIMIT 1);",
                                f"SELECT 1 WHERE EXISTS(SELECT id FROM {empty});",
                                f"SELECT 1 WHERE 1 IN (SELECT id FROM {empty});",
+                               f"SELECT 1 WHERE 1 NOT IN (SELECT id FROM {empty});",
+                               f"SELECT (SELECT id FROM {empty} LIMIT 1) = ANY(ARRAY[1,2]);",
+                               f"SELECT 1 < ALL(SELECT id FROM pg_temp.{empty});",
+                               f"VALUES (1),(2) LIMIT (SELECT id FROM {empty} LIMIT 1);",
+                               f"VALUES (1),(2) OFFSET (SELECT id FROM {empty} LIMIT 1);",
                                f"SELECT id FROM (SELECT id FROM {empty}) AS nested;",
+                               f"SELECT * FROM ROWS FROM (generate_series(1,(SELECT id FROM {empty} LIMIT 1)), generate_series(1,2));",
                                f"WITH child AS (SELECT id FROM {empty}) SELECT id FROM child;",
                                f"WITH {empty} AS (SELECT id FROM {empty}) SELECT id FROM {empty};",
+                               f"WITH child AS (SELECT id FROM {empty}) INSERT INTO {persistent} SELECT id FROM child;",
                                f"SELECT id FROM {empty} UNION ALL SELECT id FROM {persistent};",
+                               f"EXPLAIN SELECT 1 IN (SELECT id FROM {empty});",
                                f"UPDATE {empty} SET id=3;",
                                f"DELETE FROM {empty};",
                                f"INSERT INTO {empty} VALUES(3);"):
                 index += 1
                 query("BEGIN;", extended, ready=b"T")
+                query(f"INSERT INTO {persistent} VALUES({index});", extended, ready=b"T")
                 statement = ("temp_parse_" + suffix + str(index)).encode()
                 sock.sendall(client.typed(b"P", statement + b"\0" +
                                          parsed_sql.encode() + b"\0\0\0") +
@@ -151,13 +160,15 @@ def main():
                 print("[TEMP PREPARE PARSE-ONLY] " + parsed_sql, flush=True)
                 query(f"PREPARE TRANSACTION 'temp_prepare_parse_{suffix}{index}';",
                       extended, "0A000")
+                query(f"SELECT id FROM {persistent};", extended, rows=[])
                 query(f"SELECT id FROM {empty};", extended, rows=[])
 
             # Analysis must neither execute a volatile sequence function nor
             # confuse a CTE alias with an actual TEMP relation of that name.
             for parsed_sql in (f"SELECT nextval('{sequence}');",
                                f"SELECT '(SELECT id FROM {empty})' AS data;",
-                               f"WITH {empty} AS (SELECT 7 AS id) SELECT id FROM {empty};"):
+                               f"SELECT $$SELECT id FROM {empty}$$ AS data;",
+                               f"WITH {empty} AS (SELECT 7 AS id) SELECT 7 = ANY(SELECT id FROM {empty});"):
                 index += 1
                 query("BEGIN;", extended, ready=b"T")
                 statement = ("temp_parse_safe_" + suffix + str(index)).encode()
@@ -173,13 +184,24 @@ def main():
                 query(f"SELECT currval('{sequence}');", extended,
                       rows=[["20" if extended else "2"]])
 
-            index += 1
-            query("BEGIN;", extended, ready=b"T")
-            query(f"PREPARE temp_sql_{suffix}{index} AS SELECT id FROM {empty};",
-                  extended, ready=b"T")
-            query(f"PREPARE TRANSACTION 'temp_prepare_sql_{suffix}{index}';",
-                  extended, "0A000")
-            query(f"SELECT id FROM {empty};", extended, rows=[])
+            for prepared_sql in (f"SELECT id FROM {empty}",
+                                 f"SELECT 1 = SOME(SELECT id FROM {empty})",
+                                 f"SELECT 1 = ANY(SELECT id FROM {empty})",
+                                 f"SELECT 1 < ALL(SELECT id FROM {empty})",
+                                 f"SELECT * FROM ROWS FROM (generate_series(1,(SELECT id FROM {empty} LIMIT 1)), generate_series(1,2))"):
+                index += 1
+                query("BEGIN;", extended, ready=b"T")
+                query(f"PREPARE temp_sql_{suffix}{index} AS {prepared_sql};",
+                      extended, ready=b"T")
+                query(f"PREPARE TRANSACTION 'temp_prepare_sql_{suffix}{index}';",
+                      extended, "0A000")
+                query(f"SELECT id FROM {empty};", extended, rows=[])
+
+            statement = f"temp_execute_{suffix}{extended}"
+            query(f"PREPARE /* statement body follows */ {statement} AS\n"
+                  f"SELECT 1 = ANY(SELECT id FROM {temporary}) AS found;", extended)
+            query(f"EXECUTE {statement};", extended, rows=[["t"]], tag="SELECT 1")
+            query(f"DEALLOCATE {statement};", extended, tag="DEALLOCATE")
 
             query("BEGIN READ ONLY;", extended, ready=b"T")
             query(f"SELECT id FROM {temporary};", extended, ready=b"T", rows=[["1"]])

@@ -2001,6 +2001,8 @@ ROLLBACK PREPARED 'txn_001';
 
 包含跨语句 DDL CREATE undo 的事务暂不支持 `PREPARE TRANSACTION`；请先完成 `COMMIT` 或 `ROLLBACK`。
 
+事务访问临时表后，`PREPARE TRANSACTION` 会返回 `0A000`，并回滚整个事务。受支持的子查询在语句准备阶段引用临时表时，也会记录这次访问。回滚到保存点后，外层事务仍保留该记录。 [临时表与事务测试](test-report.md#temp-prepare-subqueries-20261123)
+
 正常启动时，如果数据库需要用事务备份撤销未提交的表结构修改，仍存在的序列会保留已经发出的编号。恢复备份失败时，数据库会停止启动并保留备份，以便排除故障后重试。普通 `CREATE TABLE` 在显式事务中尚有一项限制。如果进程在提交建表前异常退出，重启后可能还留有一张空表。[重启验证](test-report.md#ddl-image-sequence-recovery-20261119)
 
 ### 在事务里锁住一张表

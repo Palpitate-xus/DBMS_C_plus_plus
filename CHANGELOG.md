@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>事务检查能识别查询里的临时表 · 2026-11-23</summary>
+
+应用只准备了一条查询时，数据库也能识别查询里的临时表。如果应用尝试登记这笔事务，留到之后再提交，数据库会拒绝并撤销本次修改。
+
+[使用说明](docs/MANUAL.md#7-事务控制) · [测试报告](docs/test-report.md#temp-prepare-subqueries-20261123) · [性能报告](docs/performance-report-2026-10-30.md#temp-prepare-subqueries-cost-20261123)
+
+</details>
+
+<details>
 <summary>准备含多行数据的查询更快 · 2026-11-23</summary>
 
 例如，应用把 128 行数据写在同一条查询里，数据库在准备执行时会少读几遍这条命令。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>只查订单号时，可以跳过长备注 · 2026-11-23</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-23 · 只查订单号时，可以跳过长备注
 
 例如，按订单号取前 20 笔且只显示编号时，数据库可以跳过另存的长备注。查询要显示备注或用它筛选时，仍会读取所需内容。
 
 [使用说明](docs/MANUAL.md#基础查询) · [测试报告](docs/test-report.md#primary-key-projection-20261123) · [性能报告](docs/performance-report-2026-10-30.md#primary-key-projection-cost-20261123)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-23 · 按订单号翻页时，减少重复读取
 

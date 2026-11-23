@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-23 · 在准备阶段记录子查询访问的临时表
+
+SQL `PREPARE` 保留原查询。协议 `Parse` 和 SQL 路径均能记录 `IN`、`ANY`、`ALL`、表函数参数、`LIMIT`、`OFFSET` 与 `WITH` 中的临时表引用。协议路径还覆盖 `EXPLAIN`。尝试准备该事务时返回 `0A000` 并回滚普通表写入。`CAT-13`、`TXN-06` 与 `PROTO-03` 仍为部分实现。 [测试](test-report.md#temp-prepare-subqueries-20261123) · [性能对照](performance-report-2026-10-30.md#temp-prepare-subqueries-cost-20261123) · [实现对照](postgresql-comparison.md#temp-prepare-subqueries-comparison-20261123)
+
 ## 2026-11-23 · 扩展查询消息内共用语法分析
 
 准备语句、描述字段、绑定参数时的语法检查可以共用当前消息的解析结果。128 行 VALUES 准备阶段的原 SQL 解析调用从 27 次降到 5 次。参数类型和目录检查的执行阶段沿用现有路径。`OPT-01` 和 `PROTO-03` 保持部分实现。 [测试](test-report.md#extended-query-syntax-20261123) · [性能](performance-report-2026-10-30.md#extended-query-syntax-cost-20261123) · [实现对照](postgresql-comparison.md#extended-query-syntax-comparison-20261123)

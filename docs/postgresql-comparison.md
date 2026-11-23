@@ -2,6 +2,13 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="temp-prepare-subqueries-comparison-20261123"></a>
+## 2026-11-23 · 准备语句时检查子查询引用的临时表
+
+PostgreSQL 18.6 在事务中记住临时对象的访问，并拒绝对该事务执行 `PREPARE TRANSACTION`。SQLite 的临时表属于创建它的连接，关闭连接时销毁临时数据库。DuckDB 的临时表也随连接结束而删除。 [PostgreSQL 准备事务说明](https://www.postgresql.org/docs/18/sql-prepare-transaction.html) · [PostgreSQL 源码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/access/transam/xact.c#L2419) · [SQLite 临时数据库](https://www.sqlite.org/tempfiles.html#temp_databases) · [DuckDB 临时表](https://duckdb.org/docs/1.4/sql/statements/create_table#temporary-tables)
+
+本项目在 SQL `PREPARE` 和协议 `Parse` 中检查子查询、表函数的参数、行数限制及 `WITH` 主体等位置。拒绝准备事务时沿用现有的顶层回滚。完整的两阶段提交资源恢复仍需继续验证。 [协议与恢复测试](test-report.md#temp-prepare-subqueries-20261123)
+
 <a id="extended-query-syntax-comparison-20261123"></a>
 ## 2026-11-23 · 扩展查询在一条消息内共用语法分析
 

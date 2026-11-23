@@ -1,5 +1,7 @@
 # 第 958 项：TEMP 访问与 PREPARE TRANSACTION 生命周期
 
+后续增加的查询写法曾让准备阶段漏掉临时表引用。关于这次回归及修复后的协议、两阶段提交和重启检查，见 [2026-11-23 验证](test-report.md#temp-prepare-subqueries-20261123)。
+
 状态：源码 `3cfe28db` 已集成至 D source commit `70c5a116`；总账项仍为 partial。
 
 本项修复了真实 TEMP relation、TEMP sequence 或 TEMP 对象创建访问可以绕过 `PREPARE TRANSACTION` 限制的问题。旧逻辑只检查仍留在 undo log 中的临时写入，因而空表读取、零行修改、序列访问和已 `ROLLBACK TO` 的子事务访问均可能漏检。PG18.6 对此返回 `0A000` 并结束顶层事务。

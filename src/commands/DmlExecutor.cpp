@@ -7323,24 +7323,36 @@ void notePreparedTemporaryObjectAccess(const std::string& sql, Session& session)
     };
     visitExpression = [&](const Expr* expression, const Names& ctes) {
         if (!expression) return;
+        if (expression->preparedSubquery) {
+            visitStatement(expression->preparedSubquery.get(), ctes);
+            return;
+        }
         if (const auto* literal = dynamic_cast<const LiteralExpr*>(expression)) {
-            // The current parser's scalar/EXISTS/IN subquery adapter stores
-            // query text in an unquoted LiteralExpr. Decode only that adapter:
-            // quoted, E- and dollar data remain data, never SQL to execute.
-            std::string nested = literal->value;
-            if (nested.size() >= 2 && nested.front() == '(' && nested.back() == ')')
-                nested = nested.substr(1, nested.size() - 2);
-            const auto tokens = SQLParser::tokenize(nested);
+            // The parser joins legacy subquery tokens into an unquoted literal.
+            // Skip ordinary data before copying or tokenizing its text.
+            std::string_view nested(literal->value);
+            if (nested.size() >= 2 && nested.front() == '(' && nested.back() == ')') {
+                nested.remove_prefix(1);
+                nested.remove_suffix(1);
+            }
+            if (nested.empty()) return;
+            const auto first = std::tolower(static_cast<unsigned char>(nested.front()));
+            if (first != 's' && first != 'w' && first != 'v') return;
+            const std::string sql(nested);
+            const auto tokens = SQLParser::tokenize(sql);
             if (tokens.empty()) return;
             const std::string keyword = SQLParser::toLower(tokens.front());
             if (keyword != "select" && keyword != "with" && keyword != "values") return;
-            const auto query = parser.parse(nested);
+            const auto query = parser.parse(sql);
             if (query.isValid()) visitStatement(query.stmt.get(), ctes);
         } else if (const auto* unary = dynamic_cast<const UnaryOpExpr*>(expression)) {
             visitExpression(unary->operand.get(), ctes);
         } else if (const auto* binary = dynamic_cast<const BinaryOpExpr*>(expression)) {
             visitExpression(binary->left.get(), ctes);
             visitExpression(binary->right.get(), ctes);
+        } else if (const auto* quantified = dynamic_cast<const QuantifiedComparisonExpr*>(expression)) {
+            visitExpression(quantified->left.get(), ctes);
+            visitExpression(quantified->right.get(), ctes);
         } else if (const auto* function = dynamic_cast<const FunctionCallExpr*>(expression)) {
             for (const auto& argument : function->args) visitExpression(argument.get(), ctes);
             for (const auto& argument : function->namedArgs) visitExpression(argument.value.get(), ctes);
@@ -7377,6 +7389,10 @@ void notePreparedTemporaryObjectAccess(const std::string& sql, Session& session)
                 visitExpression(from->joinCondition.get(), ctes);
                 break;
             case FromItem::Type::Function: {
+                if (from->subquery) {
+                    visitStatement(from->subquery.get(), ctes);
+                    break;
+                }
                 const auto query = parser.parse("SELECT " + from->tableName);
                 const auto* select = query.isValid()
                     ? dynamic_cast<const SelectStmt*>(query.stmt.get()) : nullptr;
@@ -7386,30 +7402,32 @@ void notePreparedTemporaryObjectAccess(const std::string& sql, Session& session)
             }
         }
     };
+    const auto visitDefinitions = [&](const std::vector<SelectStmt::CTE>& definitions, Names& ctes) {
+        const auto addName = [&](const SelectStmt::CTE& cte) {
+            CatalogManager::QualifiedName name;
+            if (CatalogManager::parseQualifiedName(cte.name, name, true)) ctes.insert(name.name);
+        };
+        // Non-recursive CTEs see earlier CTEs. Their own name still refers
+        // to any real relation while analyzing their definition.
+        if (!definitions.empty() && definitions.front().recursive)
+            for (const auto& cte : definitions) addName(cte);
+        for (const auto& cte : definitions) {
+            visitStatement(cte.query.get(), ctes);
+            addName(cte);
+        }
+    };
     visitStatement = [&](const Stmt* statement, Names ctes) {
         if (!statement) return;
         if (const auto* select = dynamic_cast<const SelectStmt*>(statement)) {
-            // Non-recursive CTEs see earlier CTEs, not their own new alias.
-            // WITH local AS (SELECT * FROM local) opens the real relation.
-            if (!select->ctes.empty() && select->ctes.front().recursive) {
-                for (const auto& cte : select->ctes) {
-                    CatalogManager::QualifiedName name;
-                    if (CatalogManager::parseQualifiedName(cte.name, name, true))
-                        ctes.insert(name.name);
-                }
-            }
-            for (const auto& cte : select->ctes) {
-                visitStatement(cte.query.get(), ctes);
-                CatalogManager::QualifiedName name;
-                if (CatalogManager::parseQualifiedName(cte.name, name, true))
-                    ctes.insert(name.name);
-            }
+            visitDefinitions(select->ctes, ctes);
             visitFrom(select->fromClause.get(), ctes);
             visitStatement(select->setOpLhs.get(), ctes);
             visitStatement(select->setOpRhs.get(), ctes);
             for (const auto& item : select->selectList) visitExpression(item.expr.get(), ctes);
             visitExpression(select->whereClause.get(), ctes);
             visitExpression(select->having.get(), ctes);
+            visitExpression(select->limitExpr.get(), ctes);
+            visitExpression(select->offsetExpr.get(), ctes);
             for (const auto& expression : select->groupBy) visitExpression(expression.get(), ctes);
             for (const auto& group : select->groupByElems)
                 for (const auto& expression : group.exprs) visitExpression(expression.get(), ctes);
@@ -7418,6 +7436,11 @@ void notePreparedTemporaryObjectAccess(const std::string& sql, Session& session)
             for (const auto& row : select->valuesRows)
                 for (const auto& expression : row) visitExpression(expression.get(), ctes);
             for (const auto& window : select->windowDefs) visitWindow(window, ctes);
+        } else if (const auto* with = dynamic_cast<const WithStmt*>(statement)) {
+            visitDefinitions(with->ctes, ctes);
+            visitStatement(with->statement.get(), ctes);
+        } else if (const auto* explain = dynamic_cast<const ExplainStmt*>(statement)) {
+            visitStatement(explain->query.get(), ctes);
         } else if (const auto* insert = dynamic_cast<const InsertStmt*>(statement)) {
             visitRelation(insert->tableName, {});
             visitStatement(insert->selectSource.get(), ctes);
