@@ -10,6 +10,87 @@ def decode(runner, client, server, sql):
         client.simple_query(server["sock"], sql), include_types=True)
 
 
+def check_command_ctes(runner, client, server):
+    def query(sql, kinds, tag=None, rows=(), state=None, ready=b"I", cte=None):
+        frames = client.simple_query(server["sock"], sql)
+        values, code, message, _, actual = runner.decode_wire_result(frames)
+        assert (b"".join(kind for kind, _ in frames), actual, values, code, frames[-1]) == (
+            kinds, tag, [list(row) for row in rows], state, (b"Z", ready)), (sql, frames)
+        if cte is not None:
+            assert message == f'WITH query "{cte}" does not have a RETURNING clause', message
+
+    table = "public.cte_command_rows"
+    aux = "public.cte_command_aux"
+    seq = "public.cte_command_seq"
+    sequence_value = f"nextval('{seq}')"
+    contents = f"SELECT id,n FROM {table} ORDER BY id"
+    initial = (("1", "10"), ("2", "20"), ("3", "30"))
+    query(f"CREATE TABLE {table}(id integer PRIMARY KEY,n integer)", b"CZ", "CREATE TABLE")
+    query(f"CREATE TABLE {aux}(id integer PRIMARY KEY,n integer)", b"CZ", "CREATE TABLE")
+    query(f"CREATE SEQUENCE {seq} START WITH 50", b"CZ", "CREATE SEQUENCE")
+    query(f"INSERT INTO {table} VALUES (1,10),(2,20),(3,30)", b"CZ", "INSERT 0 3")
+    query(f"INSERT INTO {aux} VALUES (1,100)", b"CZ", "INSERT 0 1")
+    update = f"UPDATE {table} SET n={sequence_value} WHERE id=1"
+    delete = f"DELETE FROM {table} WHERE id=2"
+    insert = f"INSERT INTO {table} VALUES (4,{sequence_value})"
+    for sql in (
+        f"WITH changed AS ({insert}) SELECT * FROM changed",
+        f"WITH changed AS ({update}) SELECT FROM changed",
+        f"WITH changed AS ({delete}) SELECT count(*) FROM changed LIMIT 0",
+        f"WITH changed AS ({update}) SELECT count(*) FROM (SELECT * FROM changed) q",
+        f"WITH changed AS ({update}) SELECT EXISTS(SELECT FROM changed)",
+        f"WITH changed AS ({update}) SELECT 1 UNION SELECT count(*) FROM changed",
+        f"WITH prev AS ({update} RETURNING id), changed AS ({delete}), "
+        "later AS (SELECT count(*) FROM changed) SELECT * FROM later",
+        f"WITH changed AS ({delete}) INSERT INTO {aux} SELECT * FROM changed",
+        f"WITH changed AS ({delete}) UPDATE {aux} SET n=0 FROM changed",
+        f"WITH changed AS ({delete}) DELETE FROM {aux} USING changed",
+    ):
+        query(sql, b"EZ", state="0A000", cte="changed")
+        query(contents, b"TDDDCZ", "SELECT 3", initial)
+    query(f'WITH "No result" AS ({update}) SELECT * FROM "No result"',
+          b"EZ", state="0A000", cte="No result")
+    query(f"WITH changed AS ({update}) SELECT 1 FROM changed ORDER BY",
+          b"EZ", state="42601")
+    query(f"INSERT INTO {aux} VALUES (2,200); "
+          f"WITH changed AS ({update}) SELECT * FROM changed; "
+          f"INSERT INTO {aux} VALUES (3,300)",
+          b"CEZ", "INSERT 0 1", state="0A000", cte="changed")
+    query(f"SELECT {sequence_value}", b"TDCZ", "SELECT 1", (("50",),))
+    query(f"SELECT id,n FROM {aux}", b"TDCZ", "SELECT 1", (("1", "100"),))
+
+    query("BEGIN", b"CZ", "BEGIN", ready=b"T")
+    query(f"UPDATE {aux} SET n=101 WHERE id=1", b"CZ", "UPDATE 1", ready=b"T")
+    query("SAVEPOINT no_result", b"CZ", "SAVEPOINT", ready=b"T")
+    query(f"WITH changed AS ({update}) SELECT * FROM changed", b"EZ",
+          state="0A000", ready=b"E", cte="changed")
+    query(contents, b"EZ", state="25P02", ready=b"E")
+    query("ROLLBACK TO SAVEPOINT no_result", b"CZ", "ROLLBACK", ready=b"T")
+    query(contents, b"TDDDCZ", "SELECT 3", initial, ready=b"T")
+    query(f"SELECT id,n FROM {aux}", b"TDCZ", "SELECT 1", (("1", "101"),), ready=b"T")
+    query("COMMIT", b"CZ", "COMMIT")
+
+    query(f"WITH changed AS ({update}) SELECT 1 LIMIT 0", b"TCZ", "SELECT 0")
+    query(f"WITH changed AS ({delete}) "
+          f"SELECT * FROM (WITH changed AS (SELECT id,n FROM {aux}) SELECT * FROM changed) q",
+          b"TDCZ", "SELECT 1", (("1", "101"),))
+    query(f"WITH changed AS (UPDATE {table} SET n=100 WHERE id=3 RETURNING n) "
+          "SELECT n FROM changed", b"TDCZ", "SELECT 1", (("100",),))
+    query(contents, b"TDDCZ", "SELECT 2", (("1", "51"), ("3", "100")))
+    query(f'WITH "__cte_0" AS (UPDATE {table} SET n=52 WHERE id=1), '
+          "read_back AS (SELECT 123 AS v) SELECT v FROM read_back",
+          b"TDCZ", "SELECT 1", (("123",),))
+    query(f"WITH changed AS (UPDATE {table} SET n=53 WHERE id=1) "
+          f"SELECT b.id,changed.n FROM {table} b "
+          "CROSS JOIN LATERAL (SELECT b.n AS n) changed ORDER BY b.id",
+          b"TDDCZ", "SELECT 2", (("1", "52"), ("3", "100")))
+    query(f"WITH changed AS (UPDATE {table} SET n=54 WHERE id=1) "
+          f"SELECT b.id,q.n AS changed FROM {table} b "
+          "CROSS JOIN LATERAL (SELECT b.n AS n) q ORDER BY b.id",
+          b"TDDCZ", "SELECT 2", (("1", "53"), ("3", "100")))
+    query(contents, b"TDDCZ", "SELECT 2", (("1", "54"), ("3", "100")))
+
+
 def main():
     root = Path(__file__).resolve().parent.parent
     spec = importlib.util.spec_from_file_location(
@@ -130,6 +211,7 @@ def main():
         assert headers == ["id", "txt"] and type_oids == [23, 25], (
             headers, type_oids)
         assert command_tag == "SELECT 1", command_tag
+        check_command_ctes(runner, client, server)
         print("[DML CTE PROTOCOL E2E] passed")
     finally:
         runner.stop_ours(server)

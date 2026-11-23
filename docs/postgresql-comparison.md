@@ -2,6 +2,10 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-23 · 写入 CTE 需要声明可读取的输出
+
+PostgreSQL 和 DuckDB 允许在 `WITH` 里写入数据。后续查询读取的是写入命令的 `RETURNING` 输出。PostgreSQL 仍会执行语句中未被引用的写入。SQLite 将 `RETURNING` 的输出交给客户端，当前语法无法把它接到后续查询。本项目用 PostgreSQL 18.6 核对普通语句中的引用错误、表内容与序列值。[PostgreSQL WITH](https://www.postgresql.org/docs/18/queries-with.html) · [DuckDB WITH](https://duckdb.org/docs/2.0/sql/query_syntax/with) · [SQLite RETURNING](https://sqlite.org/lang_returning.html) · [测试报告](test-report.md#cte-command-visibility-20261123)
+
 ## 2026-11-23 · 保留零列查询的结果行
 
 PostgreSQL 允许普通 `SELECT` 省略列清单，并在每条数据行消息中写入零列计数。SQLite 的 `SELECT` 语法要求结果列，DuckDB 的 `FROM` 简写默认选择全部列。此次以 PostgreSQL 的行数、报错和消息顺序为对照。[PostgreSQL SELECT](https://www.postgresql.org/docs/18/sql-select.html) · [PostgreSQL 数据行格式](https://www.postgresql.org/docs/18/protocol-message-formats.html) · [SQLite SELECT](https://sqlite.org/lang_select.html) · [DuckDB FROM](https://duckdb.org/docs/2.0/sql/query_syntax/from)

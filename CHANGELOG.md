@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>写入结果无法查询时，数据库会提前报错 · 2026-11-23</summary>
+
+例如，更新一笔订单后，接着查询这次更新返回的内容。如果更新没有指定要返回哪些列，数据库会先报错，原订单数据会保留。
+
+[用法](docs/MANUAL.md#cte-公用表表达式) · [测试报告](docs/test-report.md#cte-command-visibility-20261123) · [性能报告](docs/performance-report-2026-10-30.md#cte-command-visibility-cost-20261123)
+
+</details>
+
+<details>
 <summary>查询不选列时，也会逐行返回结果 · 2026-11-23</summary>
 
 例如，只查某家店的订单行。如果有 3 笔符合条件的订单，客户端就会收到 3 行，每行没有字段值。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>部分查询会先返回结果，再报告错误 · 2026-11-23</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-23 · 部分查询会先返回结果，再报告错误
 
 例如，前两条记录算出了结果，第三条遇到除以零。客户端会先收到前两条结果，再收到错误消息。
 
 [测试报告](docs/test-report.md#simple-query-runtime-result-20261123) · [性能报告](docs/performance-report-2026-10-30.md#simple-query-runtime-result-cost-20261123)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-23 · 条件互相矛盾时，统计数量可以直接返回 0
 

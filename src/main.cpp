@@ -6959,10 +6959,21 @@ void cleanupSessionTempTables(Session& s) {
 struct QueryCteFrame {
     const Session* session;
     string database;
+    // An empty physical name reserves the SQL name for a command-only CTE.
     map<string, string> relations;
     bool inheritPrevious;
 };
 static thread_local vector<QueryCteFrame> queryCteFrames;
+
+static const string* findQueryCteBinding(const Session& session, const string& name) {
+    for (auto frame = queryCteFrames.rbegin(); frame != queryCteFrames.rend(); ++frame) {
+        if (frame->session != &session || frame->database != session.currentDB) continue;
+        const auto found = frame->relations.find(name);
+        if (found != frame->relations.end()) return &found->second;
+        if (!frame->inheritPrevious) break;
+    }
+    return nullptr;
+}
 
 class QueryCteScope {
 public:
@@ -6997,15 +7008,13 @@ static dbms::PreparedQuery prepareWindowSourceQuery(Session& s, const string& st
             dbms::CatalogManager::QualifiedName requested;
             if (!dbms::CatalogManager::parseQualifiedName(spelling, requested, true) ||
                 !requested.schema.empty()) return nullopt;
-            for (auto frame = queryCteFrames.rbegin(); frame != queryCteFrames.rend(); ++frame) {
-                if (frame->session != &s || frame->database != s.currentDB) continue;
-                const auto owned = frame->relations.find(requested.name);
-                if (owned != frame->relations.end()) {
-                    auto descriptor = g_engine.prepareBoundQuery(s.currentDB,
-                        "SELECT * FROM pg_temp." + quoteDumpIdentifier(owned->second), {}, true).output;
-                    return dbms::QueryRelationMetadata{"", requested.name, std::move(descriptor), {}};
-                }
-                if (!frame->inheritPrevious) break;
+            if (const auto* physical = findQueryCteBinding(s, requested.name)) {
+                if (physical->empty())
+                    throw dbms::DbError("0A000", "WITH query \"" + requested.name +
+                        "\" does not have a RETURNING clause");
+                auto descriptor = g_engine.prepareBoundQuery(s.currentDB,
+                    "SELECT * FROM pg_temp." + quoteDumpIdentifier(*physical), {}, true).output;
+                return dbms::QueryRelationMetadata{"", requested.name, std::move(descriptor), {}};
             }
             return nullopt;
         });
@@ -7253,11 +7262,11 @@ string resolveTableName(Session& s, const string& name, bool foldUnquoted,
     if (!dbms::CatalogManager::parseQualifiedName(name, qualified,
                                                    foldUnquoted)) return name;
     if (qualified.schema.empty()) {
-        for (auto frame = queryCteFrames.rbegin(); frame != queryCteFrames.rend(); ++frame) {
-            if (frame->session != &s || frame->database != s.currentDB) continue;
-            const auto found = frame->relations.find(qualified.name);
-            if (found != frame->relations.end()) return temporaryPhysicalName(found->second);
-            if (!frame->inheritPrevious) break;
+        if (const auto* physical = findQueryCteBinding(s, qualified.name)) {
+            if (physical->empty())
+                throw dbms::DbError("0A000", "WITH query \"" + qualified.name +
+                    "\" does not have a RETURNING clause");
+            return temporaryPhysicalName(*physical);
         }
     }
     if (!qualified.schema.empty()) {
@@ -13852,6 +13861,7 @@ static std::string createTempTableFromRows(Session& s,
         tmpName = "__cte_" + std::to_string(counter++);
         actualName = tempTablePrefix(s, tmpName);
         if (s.tempTables.count(tmpName) || s.transientTempTables.count(tmpName) ||
+            findQueryCteBinding(s, tmpName) ||
             g_engine.tableExists(s.currentDB, actualName) ||
             g_engine.viewExists(s.currentDB, actualName)) continue;
         std::string visibleName;
@@ -14259,6 +14269,18 @@ static string rewriteJoinQualifierKeys(const string& sql,
     return result;
 }
 
+static bool cteMutationWithoutReturning(const dbms::Stmt* statement) {
+    if (const auto* with = dynamic_cast<const dbms::WithStmt*>(statement))
+        statement = with->statement.get();
+    if (const auto* insert = dynamic_cast<const dbms::InsertStmt*>(statement))
+        return insert->returning.empty();
+    if (const auto* update = dynamic_cast<const dbms::UpdateStmt*>(statement))
+        return update->returning.empty();
+    if (const auto* remove = dynamic_cast<const dbms::DeleteStmt*>(statement))
+        return remove->returning.empty();
+    return false;
+}
+
 // Materialize leading WITH definitions and bind their logical relations in
 // the current query frame. Return the main query with WITH removed.
 static std::string processCTEs(const std::string& sql, Session& s, bool& failed) {
@@ -14392,13 +14414,6 @@ static std::string processCTEs(const std::string& sql, Session& s, bool& failed)
                 failed = true;
                 return {};
             }
-            if (colNames.empty()) {
-                colNames.push_back("count");
-                rows.clear();
-                structuredRows.clear();
-                structuredNulls.clear();
-                structuredAvailable = false;
-            }
             if (!cteColumnAliases.empty()) {
                 if (cteColumnAliases.size() != colNames.size()) {
                     cout << "CTE column alias count does not match result "
@@ -14408,13 +14423,15 @@ static std::string processCTEs(const std::string& sql, Session& s, bool& failed)
                 }
                 colNames = cteColumnAliases;
             }
-            tmpName = createTempTableFromRows(
-                s, rows, colNames, cteCount, colTypes,
-                structuredAvailable ? &structuredRows : nullptr,
-                structuredAvailable ? &structuredNulls : nullptr);
-            if (tmpName.empty()) {
-                failed = true;
-                return {};
+            if (!colNames.empty()) {
+                tmpName = createTempTableFromRows(
+                    s, rows, colNames, cteCount, colTypes,
+                    structuredAvailable ? &structuredRows : nullptr,
+                    structuredAvailable ? &structuredNulls : nullptr);
+                if (tmpName.empty()) {
+                    failed = true;
+                    return {};
+                }
             }
         }
 
@@ -23434,7 +23451,50 @@ static bool handlePreparedWithDml(const string& rawSql,Session& session,bool& ha
     if(begin==string::npos || dbms::SQLParser::toLower(rawSql.substr(begin,4))!="with" ||
         (begin+4<rawSql.size() && isSqlIdentChar(rawSql[begin+4])))return false;
     dbms::SQLParser parser;auto parsed=parser.parseForBinding(rawSql);
-    if(!parsed.isValid() || !dynamic_cast<dbms::WithStmt*>(parsed.stmt.get()))return false;
+    if (!parsed.isValid()) {
+        // The legacy parser can identify WITH definitions in query shapes
+        // the binding parser cannot consume. Reject possible references to
+        // command-only names before executing any of the definitions.
+        const auto envelope = parser.parse(rawSql);
+        const auto* select = dynamic_cast<const dbms::SelectStmt*>(envelope.stmt.get());
+        if (!select) return false;
+        map<string, bool> seen;
+        for (const auto& cte : select->ctes) {
+            dbms::CatalogManager::QualifiedName name;
+            if (cteMutationWithoutReturning(cte.query.get()) &&
+                dbms::CatalogManager::parseQualifiedName(cte.name, name, true))
+                seen.emplace(std::move(name.name), false);
+        }
+        if (seen.empty()) return false;
+        const auto tokens = dbms::SQLParser::tokenize(rawSql);
+        for (size_t i = 0; i < tokens.size(); ++i) {
+            dbms::CatalogManager::QualifiedName name;
+            if (!dbms::CatalogManager::parseQualifiedName(tokens[i], name, true) ||
+                !name.schema.empty()) continue;
+            if (const auto entry = seen.find(name.name); entry != seen.end()) {
+                // A qualified name never resolves to this CTE. AS and a
+                // closed derived source introduce aliases, not new ranges.
+                if ((i && (tokens[i - 1] == "." || tokens[i - 1] == ")" ||
+                           dbms::SQLParser::toLower(tokens[i - 1]) == "as")) ||
+                    (i + 1 < tokens.size() && tokens[i + 1] == ".")) continue;
+                if (entry->second) throw dbms::DbError("42601", parsed.error);
+                entry->second = true;
+            }
+        }
+        return false;
+    }
+    if (const auto* select = dynamic_cast<const dbms::SelectStmt*>(parsed.stmt.get())) {
+        if (any_of(select->ctes.begin(), select->ctes.end(), [](const auto& cte) {
+                return cteMutationWithoutReturning(cte.query.get());
+            })) {
+            // The legacy reader executes WITH definitions before reading its
+            // primary statement. Bind all references first, including those
+            // in sibling definitions and branches that will return no rows.
+            (void)prepareWindowSourceQuery(session, rawSql);
+        }
+        return false;
+    }
+    if(!dynamic_cast<dbms::WithStmt*>(parsed.stmt.get()))return false;
     auto query=make_shared<dbms::PreparedQuery>(g_engine.prepareBoundQuery(session.currentDB,rawSql));
     PreparedWithDmlRuntime runtime(session,std::move(query));auto result=runtime.run();
     handled=true;

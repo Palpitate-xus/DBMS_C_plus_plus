@@ -40,7 +40,9 @@ int main() {
     error("SELECT id FROM(SELECT t.id FROM t)source WHERE FALSE", "42702");
     error("SELECT t.id FROM t AS hidden", "42P01");
     error("SELECT t.id FROM t; INSERT INTO side VALUES(1)", "42601");
-    for (const auto& invalid : {"SELECT FROM t", "SELECT 1, FROM t", "SELECT 1 WHERE", "SELECT 1 ORDER BY", "SELECT $0", "SELECT 1 x y"})
+    assert(prepareQuery("SELECT FROM t", datums, metadata).output.empty());
+    error("WITH outputless AS (DELETE FROM side) SELECT FROM outputless", "0A000");
+    for (const auto& invalid : {"SELECT 1, FROM t", "SELECT 1 WHERE", "SELECT 1 ORDER BY", "SELECT $0", "SELECT 1 x y"})
         error(invalid, "42601");
     auto prepared = prepareQuery("SELECT f.id,b.wanted,empty,t.\"ID\" FROM t WHERE t.id=1", datums, metadata);
     auto* select = dynamic_cast<SelectStmt*>(prepared.ast.get());

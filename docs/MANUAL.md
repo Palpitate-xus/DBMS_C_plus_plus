@@ -1751,6 +1751,8 @@ SELECT * FROM cte;
 
 只读 `WITH` 或 `FROM (SELECT ...)` 从普通表读取并传递列或字面值时，外层查询可以逐行取数。例如 `WITH q AS (SELECT id, quantity FROM orders) SELECT id, quantity * 2 FROM q LIMIT 5` 取够五条就可以结束。筛选或排序仍按各自需要读取数据。计算出错时，已完成的结果继续按普通查询规则返回。[测试](test-report.md#logical-read-demand-20261123) · [性能](performance-report-2026-10-30.md#logical-read-demand-cost-20261123)
 
+在 `WITH` 中写入数据时，其他查询只能读取 `RETURNING` 返回的列。例如，`WITH changed AS (UPDATE orders SET quantity = 2 WHERE id = 7 RETURNING id) SELECT id FROM changed` 会返回更新的订单编号。没有 `RETURNING` 的写入仍会执行，前提是语句其余部分没有把它当表读取。普通查询在写入前检查这种引用，即使外层有 `LIMIT 0`。[测试](test-report.md#cte-command-visibility-20261123)
+
 ### 窗口函数
 
 2026-11-03，基于源码 `9f019ffa` 的前批最终 C9 程序 `c696d3b2` 已将受支持的普通窗口查询接入
