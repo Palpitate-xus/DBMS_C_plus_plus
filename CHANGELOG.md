@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>查询不选列时，也会逐行返回结果 · 2026-11-23</summary>
+
+例如，只查某家店的订单行。如果有 3 笔符合条件的订单，客户端就会收到 3 行，每行没有字段值。
+
+[用法](docs/MANUAL.md#基础查询) · [测试报告](docs/test-report.md#zero-width-read-20261123) · [性能报告](docs/performance-report-2026-10-30.md#zero-width-read-cost-20261123)
+
+</details>
+
+<details>
 <summary>有些查询只取几条结果时，读够就可以停下 · 2026-11-23</summary>
 
 例如，从一批订单中取 5 笔并计算金额。在支持的查询中，数据库可以只读需要的订单。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>条件互相矛盾时，统计数量可以直接返回 0 · 2026-11-23</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-23 · 条件互相矛盾时，统计数量可以直接返回 0
 
 例如，统计库存既大于 10 件又小于 5 件的商品。数据库可以跳过读取商品表，直接返回 0。
 
 [用法](docs/MANUAL.md#聚合) · [测试报告](docs/test-report.md#ordinary-count-constraints-20261123) · [性能报告](docs/performance-report-2026-10-30.md#ordinary-count-constraints-cost-20261123)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-23 · 多项统计可以只读一遍表
 

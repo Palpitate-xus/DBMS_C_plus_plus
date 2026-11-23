@@ -2,6 +2,18 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-23 deliver real zero-column rows and skip unused values in ordinary heap scans",
+      "gap_ids": ["QRY-01", "QRY-05", "PROTO-04"],
+      "status": "partial",
+      "evidence": ["src/main.cpp", "src/parser/parser.cpp", "src/parser/query_binding.cpp", "src/executor/ExecutionPlan.cpp", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/compat/cases/zero_width_read.sql", "tests/simple_query_runtime_result_protocol_e2e_test.py", "tests/select_projection_terminator_test.cpp"],
+      "verification": [
+        "Ordinary SQL can return a real result row with no columns. The tested CTE and derived sources preserve that cardinality, and the wire receiver emits empty rows before execution errors.",
+        "Ordinary protocol observations matched PostgreSQL 18.6 in 37 of 39 cases. Confirmed a zero-row limit reads nothing and a healthy heap can emit empty rows when its unselected large-field file is unavailable.",
+        "Function ranges, zero-column duplicate removal, zero-column table writes and extended-protocol differences remain open."
+      ]
+    },
+    {
       "issue": "2026-11-23 stop supported read-only CTE and derived scans when the parent has enough rows",
       "gap_ids": ["QRY-01", "QRY-05", "PROTO-04"],
       "status": "partial",

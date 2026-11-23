@@ -1793,9 +1793,13 @@ public:
             if (child_->hasError()) return propagateChildError(child_.get(), "prepared projection child failed");
             return false;
         }
+        values_.clear(); row.clear();
+        if (state_->targets.empty()) {
+            instrumentation.emitted = true;
+            return true;
+        }
         const auto context = state_->context(*child_, raw);
         const auto* sorted = dynamic_cast<const PreparedSortOp*>(child_.get());
-        values_.clear(); row.clear();
         for (size_t i = 0; i < state_->targets.size(); ++i) {
             const auto owner=state_->targetOwners[i];
             values_.push_back(state_->select().existsTargetPrunable
@@ -5721,6 +5725,11 @@ OpPtr QueryPlanner::buildPreparedSelectPlan(StorageEngine* engine,
     prepareWindowResultSharing(*state,!state->keys.empty() && !orderedWindow);
     source = makePreparedTableSource(engine, dbname, state->query, select,
                                     sourceSchema, std::move(source));
+    if (select->selectList.empty() && !select->whereClause && !select->having &&
+        state->keys.empty() && state->aggregates.empty() && state->windowStages.empty() &&
+        typeid(*source) == typeid(TableScanOp)) {
+        static_cast<TableScanOp&>(*source).readVisibleRowsOnly_ = true;
+    }
     if (select->whereClause && select->locking.empty() && sourceSchema.physicalRelationId &&
         state->sourceOrdinal != PreparedSelectState::noTarget && typeid(*source) == typeid(TableScanOp)) {
         if (const auto domain = StorageEngine::integerPartitionDomain(sourceSchema)) {
@@ -5796,7 +5805,7 @@ class PreparedAppendOp final : public Operator {
     std::function<void()> begin_, finish_;
     std::vector<ExprValue> values_;
     size_t branch_=0;
-    bool opened_[2]={false,false}, ownerActive_=false;
+    bool opened_[2]={false,false}, ownerActive_=false, rowAvailable_=false;
     ExprEvaluator evaluator_;
     void closeBranch(size_t index) {
         if(!opened_[index])return;
@@ -5812,14 +5821,14 @@ public:
     }
     ~PreparedAppendOp() override {try{close();}catch(...) {}}
     bool open() override {
-        OpenInstrument instrument(this);clearError();values_.clear();branch_=0;
+        OpenInstrument instrument(this);clearError();values_.clear();branch_=0;rowAvailable_=false;
         ownerActive_=true;if(begin_)begin_();
         opened_[0]=true;
         if(!branches_[0]->open())return propagateChildError(branches_[0].get(),"typed append left open failed");
         return true;
     }
     bool next(std::string& display) override {
-        NextInstrument instrument(this);checkForQueryInterrupt();
+        NextInstrument instrument(this);rowAvailable_=false;checkForQueryInterrupt();
         while(branch_<2) {
             std::string ignored;
             if(branches_[branch_]->next(ignored)) {
@@ -5852,7 +5861,7 @@ public:
                     values_[i].typeName=target;
                     display+=values_[i].isNull?"NULL ":values_[i].value+" ";
                 }
-                instrument.emitted=true;return true;
+                rowAvailable_=instrument.emitted=true;return true;
             }
             if(branches_[branch_]->hasError())return propagateChildError(branches_[branch_].get(),"typed append child failed");
             closeBranch(branch_++);
@@ -5870,13 +5879,13 @@ public:
             ownerActive_=false;
             try{if(finish_)finish_();}catch(...){if(!primary)primary=std::current_exception();}
         }
-        values_.clear();branch_=0;
+        values_.clear();branch_=0;rowAvailable_=false;
         if(primary)std::rethrow_exception(primary);
     }
     bool supportsStructuredRows() const override {return true;}
-    bool lastStructuredValues(std::vector<ExprValue>& row) const override {row=values_;return !values_.empty();}
+    bool lastStructuredValues(std::vector<ExprValue>& row) const override {row=values_;return rowAvailable_;}
     bool lastStructuredRow(std::vector<std::string>& cells,std::vector<bool>& nulls) const override {
-        cells.clear();nulls.clear();for(const auto& value:values_){cells.push_back(value.value);nulls.push_back(value.isNull);}return !values_.empty();
+        cells.clear();nulls.clear();for(const auto& value:values_){cells.push_back(value.value);nulls.push_back(value.isNull);}return rowAvailable_;
     }
     std::string preparedPlanNodeName() const override {return "Append";}
     std::vector<Operator*> preparedPlanChildren() const override {return {branches_[0].get(),branches_[1].get()};}
@@ -7119,8 +7128,10 @@ bool TableScanOp::nextRow(std::string& outRow, const TableSchema* projection,
         }
         lastRid_ = row.rid; lastNulls_ = std::move(row.nulls);
         StorageEngine::bindNullRow(engine_, dbname_, tablename_, lastRid_, tbl_.len());
-        bool ok = false;
-        if (projection) {
+        bool ok = true;
+        if (readVisibleRowsOnly_) {
+            outRow.clear();
+        } else if (projection) {
             ok = detail::decodeStoredRowProjection(*engine_, dbname_, row.data,
                     *projection, lastNulls_, *selected, *cells, *nulls);
             outRow = std::move(row.data);

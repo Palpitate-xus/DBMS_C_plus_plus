@@ -2063,7 +2063,8 @@ public:
         if (name.schema.empty()) {
             const auto cte = ctes.find(name.name);
             if (cte != ctes.end()) {
-                if (cte->second.columns.empty())
+                if (cte->second.columns.empty() &&
+                    !dynamic_cast<const SelectStmt*>(cte->second.statement))
                     throw DbError("0A000", "WITH query does not have a RETURNING clause: " + name.name);
                 Range range{"", alias.empty() ? name.name : identifier(alias), cte->second.columns};
                 range.cteStatement = cte->second.statement;
@@ -3029,7 +3030,8 @@ public:
         CatalogManager::QualifiedName name;
         if(!CatalogManager::parseQualifiedName(source,name,true))throw DbError("42601","invalid relation name");
         if(name.schema.empty())if(const auto found=ctes.find(name.name);found!=ctes.end()) {
-            if(found->second.columns.empty())throw DbError("0A000","WITH query does not have a RETURNING clause: "+name.name);
+            if(found->second.columns.empty() && !dynamic_cast<const SelectStmt*>(found->second.statement))
+                throw DbError("0A000","WITH query does not have a RETURNING clause: "+name.name);
             Range range{"",alias.empty()?name.name:identifier(alias),found->second.columns};
             range.cteStatement=found->second.statement;return range;
         }

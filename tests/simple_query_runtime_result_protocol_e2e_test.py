@@ -27,12 +27,30 @@ def main(verify_table_reads=True):
              "SELECT id,label,10/divisor AS quotient FROM input"
     prefix = (("1", "first", "5"), ("2", None, "2"))
 
+    def empty_projection(sql, row_count, state=None, ready=b"I"):
+        rows = ((),) * row_count
+        described = state is None or row_count > 0
+        kinds = b"T" if described else b""
+        kinds += b"D" * row_count
+        kinds += b"CZ" if state is None else b"EZ"
+        tags = (f"SELECT {row_count}",) if state is None else ()
+        frames = query(sql, kinds, tags, rows, state, ready)
+        assert all(body == b"\0\0" for kind, body in frames if kind in (b"T", b"D")), (sql, frames)
+
     def table_reads():
         frames = client.simple_query(sock, "SELECT * FROM pg_catalog.pg_stat_tables")
         rows, state, _, fields, _ = runner.decode_wire_result(frames)
         assert state is None and frames[-1] == (b"Z", b"I"), frames
         row, = (row for row in rows if row[fields.index("relname")] == "runtime_result_rows")
         return tuple(int(row[fields.index(name)]) for name in ("seq_scan", "seq_tup_read"))
+
+    def reader_role(enabled):
+        sql = "SET ROLE runtime_result_reader" if enabled else "RESET ROLE"
+        tag = b"SET\0" if enabled else b"RESET\0"
+        value = b"off\0" if enabled else b"on\0"
+        frames = client.simple_query(sock, sql)
+        assert frames[0] == (b"C", tag) and frames[-1] == (b"Z", b"I"), (sql, frames)
+        assert frames[1:-1] in ([], [(b"S", b"is_superuser\0" + value)]), (sql, frames)
 
     try:
         query(f"CREATE TABLE {table}(id integer PRIMARY KEY,label varchar(12),divisor integer)",
@@ -98,6 +116,70 @@ def main(verify_table_reads=True):
             assert (state, tag, frames[-1]) == (None, "EXPLAIN", (b"Z", b"I")), frames
             assert any("Limit" in row[0] and "actual rows=2" in row[0] for row in plan), plan
             assert table_reads() == (after[0] + 1, after[1] + 2)
+
+        for sql, cardinality in (
+            ("SELECT", 1),
+            ("SELECT ALL", 1),
+            ("SELECT WHERE false", 0),
+            ("SELECT OFFSET 1", 0),
+            (f"SELECT FROM {table}", 4),
+            (f"SELECT FROM {table} LIMIT 0", 0),
+            (f"SELECT FROM {table} LIMIT 2 OFFSET 1", 2),
+            (f"SELECT ALL FROM {table} WHERE id<3", 2),
+            (f"SELECT FROM {table} ORDER BY id DESC FETCH FIRST 1 ROW ONLY", 1),
+            (f"SELECT FROM {table} WHERE 10/divisor>0 LIMIT 2", 2),
+            (f"WITH input AS (SELECT id FROM {table}) SELECT FROM input WHERE id<3", 2),
+            (f"SELECT FROM (SELECT id FROM {table}) q WHERE id<3", 2),
+            (f"SELECT FROM {table} UNION ALL SELECT FROM {table}", 8),
+        ):
+            empty_projection(sql, cardinality)
+        empty_projection(f"SELECT FROM {table} WHERE 10/divisor>0", 2, state="22012")
+        empty_projection(f"WITH input AS (SELECT id,divisor FROM {table}) "
+                         "SELECT FROM input WHERE 10/divisor>0", 2, state="22012")
+        for sql, state in (
+            (f"SELECT DISTINCT FROM {table}", "42601"),
+            (f"SELECT DISTINCT ON (id) FROM {table}", "42601"),
+            (f"SELECT id, FROM {table}", "42601"),
+            (f"SELECT FROM {table} ORDER BY 1", "42P10"),
+            (f"SELECT FROM {table} WHERE 1/0>0", "22012"),
+        ):
+            empty_projection(sql, 0, state=state)
+        query(f"SELECT count(*) FROM (SELECT FROM {table} WHERE id<3) q",
+              b"TDCZ", ("SELECT 1",), (("2",),))
+        query(f"WITH input AS (SELECT FROM {table} WHERE id<3) SELECT count(*) FROM input",
+              b"TDCZ", ("SELECT 1",), (("2",),))
+        if verify_table_reads:
+            before = table_reads()
+            empty_projection(f"SELECT FROM {table} LIMIT 0", 0)
+            assert table_reads() == before
+            empty_projection(f"SELECT FROM {table} LIMIT 2 OFFSET 1", 2)
+            assert table_reads() == (before[0] + 1, before[1] + 3)
+
+        acl_table = "public.runtime_result_acl"
+        query(f"CREATE TABLE {acl_table}(id integer, note text)", b"CZ", ("CREATE TABLE",))
+        query(f"INSERT INTO {acl_table} VALUES (1,'visible'),(2,'hidden')",
+              b"CZ", ("INSERT 0 2",))
+        query("CREATE ROLE runtime_result_reader", b"CZ", ("CREATE ROLE",))
+        reader_role(True)
+        empty_projection(f"SELECT FROM {acl_table}", 0, state="42501")
+        reader_role(False)
+        query(f"GRANT SELECT(id) ON {acl_table} TO runtime_result_reader", b"CZ", ("GRANT",))
+        reader_role(True)
+        empty_projection(f"SELECT FROM {acl_table}", 2)
+        empty_projection(f"SELECT FROM {acl_table} WHERE id=1", 1)
+        empty_projection(f"SELECT FROM {acl_table} WHERE note IS NOT NULL", 0, state="42501")
+        reader_role(False)
+        query(f"GRANT SELECT ON {acl_table} TO runtime_result_reader", b"CZ", ("GRANT",))
+        query(f"ALTER TABLE {acl_table} ENABLE ROW LEVEL SECURITY", b"CZ", ("ALTER TABLE",))
+        query(f"CREATE POLICY runtime_result_policy ON {acl_table} "
+              "TO runtime_result_reader USING (id=1)", b"CZ", ("CREATE POLICY",))
+        reader_role(True)
+        empty_projection(f"SELECT FROM {acl_table}", 1)
+        empty_projection(f"SELECT FROM {acl_table} LIMIT 0", 0)
+        empty_projection(f"SELECT FROM {acl_table} WHERE id=2", 0)
+        reader_role(False)
+        query(f"DROP TABLE {acl_table}", b"CZ", ("DROP TABLE",))
+        query("DROP ROLE runtime_result_reader", b"CZ", ("DROP ROLE",))
 
         query(f"INSERT INTO {table} VALUES (9,'rolled back',2); {count}; "
               f"INSERT INTO {table} VALUES (10,'unreached',2)", b"CTEZ", ("INSERT 0 1",), state="22012")

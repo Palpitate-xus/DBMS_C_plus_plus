@@ -349,6 +349,7 @@ private:
     std::optional<RangePruning> rangePruning_;
     bool prunedPartitions_ = false;
     bool scanPartitionsOnDemand_ = false;
+    bool readVisibleRowsOnly_ = false;
     bool lastBufferedNullsValid_ = false;
     size_t pos_ = 0;
     int64_t lastRid_ = 0;

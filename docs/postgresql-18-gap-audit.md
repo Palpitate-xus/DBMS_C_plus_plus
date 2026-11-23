@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-23 · 普通查询的零字段结果
+
+受支持的 `SELECT` 可以返回真实零字段行，并在执行错误前保留已完成的空行。普通表无筛选或排序时可以跳过读取大字段。函数来源、零列去重及零列表写入仍有差距。`QRY-01` 和 `PROTO-04` 仍为部分实现。[测试](test-report.md#zero-width-read-20261123) · [性能](performance-report-2026-10-30.md#zero-width-read-cost-20261123)
+
 ## 2026-11-23 · 只读 CTE 与派生表按需取行
 
 受支持的只读查询按外层需求读取内部列值。`LIMIT` 达到指定条数后，内部扫描停止；普通算术和计数错误保留对应的执行阶段。`QRY-01`、`QRY-05` 和 `PROTO-04` 仍为部分实现。[测试](test-report.md#logical-read-demand-20261123) · [性能](performance-report-2026-10-30.md#logical-read-demand-cost-20261123)

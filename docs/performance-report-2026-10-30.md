@@ -4,6 +4,22 @@
 
 > 复核发现，几组早期 COPY 计时在每个对照场景中使用了固定的执行顺序。耗时差可能包含顺序影响。这项问题涉及默认值求值、按列查找、默认值标记、短 CSV 导出和短查询导出的配对计时。[默认值求值](#copy-default-evaluation-order-cost-20261122) · [按列查找](#copy-identity-input-cost-20261122) · [默认值标记](#copy-default-marker-cost-20261122) · [CSV 导出](#copy-csv-out-cost-20261122) · [查询导出](#copy-query-stdout-cost-20261122)
 
+<a id="zero-width-read-cost-20261123"></a>
+## 2026-11-23 · 普通表只取空行时少读大字段
+
+基线为 `61365895`，两版均以 GCC 13.3、CMake C++17 `-O2` 构建。从同一份正常关闭的数据目录副本启动。表为 `zero_width_cost(id integer PRIMARY KEY, payload text)`，按顺序插入编号 1 至 192，每行使用相同的 16,384 字节文本。文本由 `zero-width-cost-0` 到 `zero-width-cost-255` 的 SHA-256 十六进制结果依次拼接。项目数据目录的大字段文件约为 2.1 MiB。PostgreSQL 18.6 用相同 SQL 插入数据，随后执行 `ANALYZE`，关闭 JIT 和并行查询。
+
+在 CPU 25/26 与 27/28 各跑一轮新旧对照，在 CPU 31/32 跑新版与 PostgreSQL 对照。每轮两对进程，交换执行顺序和服务端、客户端的 CPU。每个进程每条查询先预热一次，再计时五次。共核对 240 次计时请求的结果、消息顺序、列类型、命令标签和会话状态。计时从发送普通查询到收到 `ReadyForQuery`。下表单位为毫秒，新旧范围是前两轮各自的中位数，最后两列来自同一轮。
+
+| 查询 | 旧版 | 新版 | 同轮新版 | PostgreSQL 18.6 |
+| --- | ---: | ---: | ---: | ---: |
+| `SELECT FROM zero_width_cost` | 69.126–74.475 | 5.643–6.910 | 6.012 | 3.500 |
+| `SELECT FROM zero_width_cost LIMIT 16` | 55.915–57.092 | 2.996–3.666 | 3.368 | 0.600 |
+| `SELECT FROM zero_width_cost LIMIT 0` | 58.026–58.564 | 1.964–2.350 | 2.172 | 0.214 |
+| `SELECT id FROM zero_width_cost LIMIT 16` | 7.151–7.241 | 7.703–8.311 | 8.299 | 0.521 |
+
+旧版三个零列查询均读取 192 行，且只发送结果列说明和命令标签。新版分别读取 192、16 和 0 行，发送与 PostgreSQL 数量一致的零字段数据行。取 0 行时不启动表扫描，实际扫描也避免了从大字段文件取值。按编号取 16 行的对照在两版都读取 16 行，延迟增加约 6.4%–16.2%，两轮结果不足以定位原因。报告统计的是表的可见行读取次数。[功能与恢复回归](test-report.md#zero-width-read-20261123)
+
 <a id="logical-read-demand-cost-20261123"></a>
 ## 2026-11-23 · 只取几条时提前停止读表
 

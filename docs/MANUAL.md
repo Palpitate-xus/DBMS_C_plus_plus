@@ -2,7 +2,7 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
-**当前查询差距：** 普通表零列投影可能漏发真实行，并受未选大字段故障影响；某些函数参数中的转义引号和拼接会产生错误成功值。所测写入及冷重启控制与 PostgreSQL 一致，不能将查询反例扩展为已证实的持久化错误。[测试与限制](test-report.md#zero-projection-argument-audit-20261108)。
+**零列查询：** 普通表的查询会返回实际匹配的空行。无筛选或排序时，扫描可以跳过大字段。函数来源、零列去重和零列表写入仍有差距。[当前测试](test-report.md#zero-width-read-20261123) · [早期查询复核](test-report.md#zero-projection-argument-audit-20261108)
 
 ## numeric 对数（2026-11-08）
 
@@ -1369,6 +1369,8 @@ REPLACE INTO users (ID, NAME) VALUES (1, 'New Alice');
 ## 6. 查询 (DQL)
 
 ### 基础查询
+
+`SELECT FROM users WHERE active IS NOT NULL LIMIT 3` 可以返回最多三行，每行没有字段值。单独执行 `SELECT` 返回一条这样的行。使用 `DISTINCT` 时需要写出要比较的列或表达式。只从普通表读取零列结果且没有筛选或排序时，可跳过读取大字段。[测试](test-report.md#zero-width-read-20261123) · [性能](performance-report-2026-10-30.md#zero-width-read-cost-20261123)
 
 在 `WHERE id = 7` 中，`7` 是数字。在 `WHERE id = "7"` 中，`"7"` 是列名，查询比较同一行中的两列，即使表上有索引也是如此。[查询测试](test-report.md#narrow-select-20261121)
 

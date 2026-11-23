@@ -4069,7 +4069,7 @@ static std::string parseQueryRootClauses(const std::vector<std::string>& tokens,
 ParseResult SQLParser::parseSelect(const std::string& sql) {
     ParseResult r;
     auto tokens = tokenize(sql);
-    if (tokens.size() < 2 && !executeArgumentSyntaxOnly) {
+    if (tokens.empty() || (tokens.size() == 1 && toLower(tokens.front()) != "select")) {
         r.error = "SELECT statement too short";
         return r;
     }
@@ -4313,7 +4313,8 @@ ParseResult SQLParser::parseSelect(const std::string& sql) {
     } else if (bindingParse) { r.error = "WITH requires a SELECT body"; return r; }
 
     // DISTINCT / DISTINCT ON (...)
-    if (pos < tokens.size() && toLower(tokens[pos]) == "distinct") {
+    const bool distinctClause = pos < tokens.size() && toLower(tokens[pos]) == "distinct";
+    if (distinctClause) {
         ++pos;
         if (pos + 1 < tokens.size() && toLower(tokens[pos]) == "on" && tokens[pos + 1] == "(") {
             pos += 2;
@@ -4350,10 +4351,11 @@ ParseResult SQLParser::parseSelect(const std::string& sql) {
         }
         if (bindingParse) break;
     }
-    if (bindingParse && ((stmt->selectList.empty() &&
-        (!executeArgumentSyntaxOnly || stmt->distinct || !stmt->distinctOn.empty())) ||
+    if (bindingParse && ((stmt->selectList.empty() && distinctClause) ||
         (pos && tokens[pos - 1] == ","))) {
-        r.error = "SELECT requires an expression"; return r;
+        r.error = "SELECT requires an expression";
+        r.sqlState = "42601";
+        return r;
     }
 
     // FROM (supports comma join and explicit JOINs)

@@ -6113,7 +6113,7 @@ static bool handleExplain(const string& sql, Session& s) {
         // including queries that yield no rows and plain EXPLAIN cache hits.
         auto prepared = make_shared<dbms::PreparedQuery>(g_engine.prepareBoundQuery(s.currentDB, inner));
         auto* select = static_cast<dbms::SelectStmt*>(prepared->ast.get());
-        if (usesDemandedLogicalRead(*prepared) ||
+        if (select->selectList.empty() || usesDemandedLogicalRead(*prepared) ||
             (integerJoinProbe && canRunPreparedIntegerJoin(*prepared, s)))
             return explainPreparedReadQuery(s,inner,opts,isJson,std::move(prepared));
         // Scalar query children acquire their AST role during pure binding;
@@ -21092,12 +21092,14 @@ class PreparedWithDmlRuntime {
             : dbms::inheritedTableDescendants(g_engine,session_.currentDB,table);
         const bool storedCount = select == readRoot_ && descendants.empty() &&
             dbms::QueryPlanner::supportsStoredCountSelect(*select) && canReadWholeTable(session_, table);
-        if (descendants.empty() && (select != readRoot_ || (!select->whereClause && !storedCount))) return {};
+        const bool emptyProjection = select->selectList.empty();
+        if (descendants.empty() && !emptyProjection &&
+            (select != readRoot_ || (!select->whereClause && !storedCount))) return {};
         auto parent=g_engine.getTableSchema(session_.currentDB,table);
         const bool declaredFilter = select == readRoot_ &&
             dbms::QueryPlanner::usesDeclaredFilterCollations(*select, parent);
         if (descendants.empty()) {
-            if (!declaredFilter && !(storedCount && dbms::QueryPlanner::usesStoredCountSource(
+            if (!emptyProjection && !declaredFilter && !(storedCount && dbms::QueryPlanner::usesStoredCountSource(
                     g_engine, session_.currentDB, *select, parent, range.ordinal)))
                 return {};
             checkPhysicalSourcePermission(select, range, table);
@@ -22947,9 +22949,11 @@ static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& 
             return false;
         return supportsDerivedSources(body->fromClause.get());
     };
-    const bool sourceProbe=(!select->ctes.empty() ||
+    const bool emptyProjection = select->command == dbms::SqlCommand::Select && select->selectList.empty();
+    const bool sourceProbe=(emptyProjection || !select->ctes.empty() ||
         (select->fromClause && select->fromClause->type!=dbms::FromItem::Type::Table)) &&
         supportsDerivedQuery(select);
+    required = required || (emptyProjection && sourceProbe);
     const bool derivedProbe=sourceProbe && logicalSource;
     const bool inheritanceProbe=sourceProbe && nestedInheritance;
     const bool viewProbe = sourceProbe && viewSource;

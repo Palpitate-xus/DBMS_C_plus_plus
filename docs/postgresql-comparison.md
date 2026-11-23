@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-23 · 保留零列查询的结果行
+
+PostgreSQL 允许普通 `SELECT` 省略列清单，并在每条数据行消息中写入零列计数。SQLite 的 `SELECT` 语法要求结果列，DuckDB 的 `FROM` 简写默认选择全部列。此次以 PostgreSQL 的行数、报错和消息顺序为对照。[PostgreSQL SELECT](https://www.postgresql.org/docs/18/sql-select.html) · [PostgreSQL 数据行格式](https://www.postgresql.org/docs/18/protocol-message-formats.html) · [SQLite SELECT](https://sqlite.org/lang_select.html) · [DuckDB FROM](https://duckdb.org/docs/2.0/sql/query_syntax/from)
+
+本项目的普通表、只读 CTE 和派生表中的受支持查询会发送真实空行；无筛选或排序的普通表扫描可以跳过读取大字段。零列表的写入与恢复仍有差距。[测试](test-report.md#zero-width-read-20261123) · [性能](performance-report-2026-10-30.md#zero-width-read-cost-20261123)
+
 ## 2026-11-23 · 外层查询按需读取内部结果
 
 PostgreSQL 的普通 `LIMIT` 在达到条数后停止从子节点取行。单次引用且符合条件的只读 CTE 也可与外层合并。SQLite 使用 `MATERIALIZED` 作为查询优化的边界，DuckDB 通常先保留 CTE 并根据使用方式决定是否合并。[PostgreSQL WITH](https://www.postgresql.org/docs/18/queries-with.html) · [PostgreSQL LIMIT 实现](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/executor/nodeLimit.c) · [SQLite WITH](https://sqlite.org/lang_with.html) · [DuckDB WITH](https://duckdb.org/docs/2.0/sql/query_syntax/with)
