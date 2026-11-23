@@ -18,6 +18,7 @@
 #include "common/DbError.h"
 #include "common/TemporalStorageCodec.h"
 #include "access/BPTree.h"
+#include "access/PrimaryKeyIndex.h"
 #include "access/HashIndex.h"
 #include "access/BloomIndex.h"
 #include "catalog/type_registry.h"
@@ -6052,7 +6053,8 @@ bool IndexScanOp::open() {
             tablename_ + "\"");
     }
     if(!beforeFence)return heapFallback();
-    if (isPK_) {
+    if (isPK_ && primary_key_index::lookupNeedsHeap(tbl_, *idx, key)) return heapFallback();
+    if (isPK_ && !primary_key_index::sharesPrefix(tbl_, key)) {
         int64_t rid = 0;
         if (lookupBtreeKeyChecked(idx, key, rid)) rids_.push_back(rid);
     } else {
@@ -6177,7 +6179,13 @@ static bool collectEqualityIndexCandidates(
         int64_t rid = 0;
         const std::string key = tbl.buildPKValue(
             std::map<std::string, std::string>{{condition.colName, value}});
-        if (lookupBtreeKeyChecked(index, key, rid)) candidates.insert(rid);
+        if (primary_key_index::lookupNeedsHeap(tbl, *index, key)) return false;
+        if (primary_key_index::sharesPrefix(tbl, key)) {
+            const auto matches = lookupBtreeMultiChecked(index, key);
+            candidates.insert(matches.begin(), matches.end());
+        } else if (lookupBtreeKeyChecked(index, key, rid)) {
+            candidates.insert(rid);
+        }
         return true;
     }
 

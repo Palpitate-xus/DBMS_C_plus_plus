@@ -34,9 +34,12 @@ public:
     // Use signed integer keys when initializing a new file. Existing files
     // keep the key format identified by their header.
     bool openWithSignedIntegerKeys();
+    // Primary-key prefixes can contain more than one row location.
+    bool openWithCompletePrimaryPrefixes();
     // Open an existing index without allowing the buffer pool to create it.
     bool openExisting();
     bool usesSignedIntegerKeys() const;
+    bool hasCompletePrimaryPrefixes() const;
     void close();
     // Flush all dirty index pages and fsync the index file.
     bool flush();

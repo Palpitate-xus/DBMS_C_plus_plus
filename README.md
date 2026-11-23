@@ -19,6 +19,13 @@ cmake --build build/cmake --target dbms_main --parallel 2
 ## 最近更新
 
 <details>
+<summary>开头相同的长编号也能准确查找 · 2026-11-23</summary>
+
+两条记录的长编号即使开头相同，也能按各自的完整编号查到。
+
+</details>
+
+<details>
 <summary>按索引查找时少读数据 · 2026-11-22</summary>
 
 比如按产品编号找订单。读过可能匹配的记录后，数据库无需再读后面的索引页。
@@ -29,13 +36,6 @@ cmake --build build/cmake --target dbms_main --parallel 2
 <summary>直接比对文字更快了 · 2026-11-22</summary>
 
 按完整名称查找记录更快了。给已有数据的表加唯一约束时，检查重复值也更快了。
-
-</details>
-
-<details>
-<summary>截取文字再筛选更快了 · 2026-11-22</summary>
-
-比如取姓名的第一个字，再找出所有姓张的人。把名称转成小写再比较也更快了。
 
 </details>
 

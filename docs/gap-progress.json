@@ -2,11 +2,23 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-23 preserve full single-column text primary keys with shared prefixes",
+      "gap_ids": ["IDX-03", "IDX-15", "TXN-08", "CAT-10"],
+      "status": "partial",
+      "evidence": ["src/access/BPTree.cpp", "src/access/PrimaryKeyIndex.h", "src/commands/TableManage.cpp", "src/executor/ExecutionPlan.cpp", "src/commands/DdlExecutor.cpp", "docs/PACKAGING.md", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/compat/cases/long_text_primary_key_collision.sql", "tests/compat/cases/long_text_primary_keys.sql", "tests/long_text_primary_key_protocol_e2e_test.py", "tests/reindex_single_pass_test.cpp"],
+      "verification": [
+        "All 112 normalized protocol responses match PostgreSQL 18.6, including the six original differences and a delayed unnamed foreign key.",
+        "Old directories remain readable. REINDEX restores index scans with complete row positions. Savepoint and process-termination tests verify restoration by exact row position.",
+        "A competing insert waits for an identical full key and rechecks current rows, including after deletion rollback or committed key replacement. Compound keys, partitions and full PostgreSQL lock/index coverage remain open."
+      ]
+    },
+    {
       "issue": "2026-11-22 bound B-tree multi-value equality lookups to their leaf range",
       "gap_ids": ["IDX-03"],
       "status": "partial",
       "evidence": ["src/access/BPTree.cpp", "docs/postgresql-comparison.md", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
-      "tests": ["tests/bptree_topology_corruption_test.cpp", "tests/index_corruption_protocol_e2e_test.py", "tests/index_scan_full_value_protocol_e2e_test.py", "tests/compat/known_gaps/long_text_primary_key_collision.sql"],
+      "tests": ["tests/bptree_topology_corruption_test.cpp", "tests/index_corruption_protocol_e2e_test.py", "tests/index_scan_full_value_protocol_e2e_test.py", "tests/compat/cases/long_text_primary_key_collision.sql"],
       "verification": [
         "The same reopened tree returns all 174 surviving physical prefix matches and reads six cold pages rather than 45. Empty leaves, adjacent key boundaries and traversed-page corruption are covered.",
         "Existing data, rollback after process termination, committed key changes and a rebuilt index all return the expected rows.",
@@ -18,7 +30,7 @@
       "gap_ids": ["SQL-10", "SQL-11", "TYPE-04", "CAT-10", "IDX-03"],
       "status": "partial",
       "evidence": ["src/commands/TableManage.cpp", "src/commands/DdlExecutor.cpp", "docs/postgresql-comparison.md", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
-      "tests": ["tests/compat/cases/stored_text_equality_keys.sql", "tests/compat/known_gaps/long_text_primary_key_collision.sql", "tests/collation_test.cpp", "tests/unique_index_enforcement_test.cpp", "tests/constraint_not_valid_protocol_e2e_test.py"],
+      "tests": ["tests/compat/cases/stored_text_equality_keys.sql", "tests/compat/cases/long_text_primary_key_collision.sql", "tests/collation_test.cpp", "tests/unique_index_enforcement_test.cpp", "tests/constraint_not_valid_protocol_e2e_test.py"],
       "verification": [
         "All 92 targeted responses match PostgreSQL 18.6. CREATE UNIQUE INDEX on duplicate existing values reports 23505 while the DDL API keeps its boolean error result.",
         "Old-directory startup and crashes before and after commit cover text unique index and foreign-key validation.",

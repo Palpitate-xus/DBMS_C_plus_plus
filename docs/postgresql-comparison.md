@@ -2,11 +2,17 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-23 · 开头相同的长主键
+
+PostgreSQL 的 B-tree 可保存同键的多个物理行版本，约束检查结合完整键和行可见性。SQLite 在索引记录放不下一页时把其余内容放在溢出页。DuckDB 由 ART 按编码键查找，并用它支持主键约束。[PostgreSQL 唯一性检查](https://www.postgresql.org/docs/18/index-unique-checks.html) · [SQLite 索引格式](https://sqlite.org/fileformat.html#b_tree_pages) · [DuckDB 索引](https://duckdb.org/docs/current/guides/performance/indexing)
+
+本项目在普通单列文本主键索引中保留同前缀的行位置，取出可见候选后比较完整值。长前缀下的候选越多，等值查找需要核对的行也越多。复合主键编码和分区表的跨分区约束仍有差距。[测试](test-report.md#long-text-primary-keys-20261123) · [性能](performance-report-2026-10-30.md#long-text-primary-keys-cost-20261123)
+
 ## 2026-11-22 · 按键定位索引记录
 
 PostgreSQL 的 B-tree 能根据扫描条件和页边界结束查找。SQLite 按记录格式比较索引键，较长的键可以跨到溢出页。DuckDB 的 ART 按完整编码键定位叶节点，再返回该键的行位置。[PostgreSQL 扫描](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/access/nbtree/nbtsearch.c#L1713) · [SQLite 索引格式](https://sqlite.org/fileformat.html#b_tree_pages) · [DuckDB ART](https://github.com/duckdb/duckdb/blob/main/src/execution/index/art/art.cpp#L739)
 
-本项目的多行等值查找读取键所在的叶页范围。长度超出 20 字节时，现有索引保存前缀。本项目的二级索引能保留有同一前缀的多个行位置，主键索引仍需解决旧目录里的缺失项及各写入入口的维护。[测试与剩余缺口](test-report.md#bounded-btree-equality-20261122) · [性能](performance-report-2026-10-30.md#bounded-btree-equality-cost-20261122)
+本项目的多行等值查找读取键所在的叶页范围。长度超出 20 字节时，现有索引保存前缀。本项目的二级索引能保留有同一前缀的多个行位置。这一轮试验中，旧主键索引仍会遗漏同一前缀下的其他位置。[历史试验](test-report.md#bounded-btree-equality-20261122) · [性能](performance-report-2026-10-30.md#bounded-btree-equality-cost-20261122)
 
 ## 2026-11-22 · 表内文字相等和约束检查
 

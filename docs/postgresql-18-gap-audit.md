@@ -1,12 +1,16 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-23 · 单列长文本主键
+
+普通非分区表的单列文本主键保留同前缀的多个行位置，并按完整值核对。写入时对相同完整键做事务级协调。旧索引读取会从表中补齐遗漏，重建后可从索引定位。复合及分区主键、完整锁模型和索引持久化证明仍待补齐。`IDX-03`、`IDX-15`、`TXN-08` 和 `CAT-10` 保持部分实现。[测试](test-report.md#long-text-primary-keys-20261123) · [性能](performance-report-2026-10-30.md#long-text-primary-keys-cost-20261123)
+
 ## 2026-11-22 · B+ 树等值查找的读取范围
 
-返回多个行位置的等值查找会跨过空叶页，并在遇到更大的键时停止。受测索引从读取 45 页降到 6 页。长文本主键仍可能在建立索引时丢失一个同前缀键的位置。`IDX-03` 仍为部分实现。[测试](test-report.md#bounded-btree-equality-20261122) · [性能](performance-report-2026-10-30.md#bounded-btree-equality-cost-20261122)
+返回多个行位置的等值查找会跨过空叶页，并在遇到更大的键时停止。受测索引从读取 45 页降到 6 页。该轮发现长文本主键同前缀漏项，后续于 11 月 23 日修复。`IDX-03` 仍为部分实现。[测试](test-report.md#bounded-btree-equality-20261122) · [性能](performance-report-2026-10-30.md#bounded-btree-equality-cost-20261122)
 
 ## 2026-11-22 · 表内文字相等和约束检查
 
-默认规则的物理行相等比较直接使用值的字节。批量建唯一索引、验证主键或外键时，适用的列按完整键比较。建唯一索引遇到旧数据有重复值时返回 `23505`。受测的长文本主键仍会因 20 字节键前缀冲突漏行或拒绝有效写入。`SQL-10`、`SQL-11`、`TYPE-04`、`CAT-10` 和 `IDX-03` 保持部分实现。[测试与复现](test-report.md#stored-text-equality-20261122) · [性能](performance-report-2026-10-30.md#stored-text-equality-cost-20261122)
+默认规则的物理行相等比较直接使用值的字节。批量建唯一索引、验证主键或外键时，适用的列按完整键比较。建唯一索引遇到旧数据有重复值时返回 `23505`。`SQL-10`、`SQL-11`、`TYPE-04`、`CAT-10` 和 `IDX-03` 保持部分实现。[测试与复现](test-report.md#stored-text-equality-20261122) · [性能](performance-report-2026-10-30.md#stored-text-equality-cost-20261122)
 
 ## 2026-11-22 · 用文本函数筛选行
 

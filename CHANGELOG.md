@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>开头相同的长编号也能准确查找 · 2026-11-23</summary>
+
+两条记录的长编号即使开头相同，也能按各自的完整编号查到。
+
+[测试报告](docs/test-report.md#long-text-primary-keys-20261123) · [性能报告](docs/performance-report-2026-10-30.md#long-text-primary-keys-cost-20261123)
+
+</details>
+
+<details>
 <summary>按索引查找时少读数据 · 2026-11-22</summary>
 
 比如按产品编号找订单。读过可能匹配的记录后，数据库无需再读后面的索引页。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>截取文字再筛选更快了 · 2026-11-22</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-22 · 截取文字再筛选更快了
 
 比如取姓名的第一个字，再找出所有姓张的人。把名称转成小写再比较也更快了。
 
 [测试报告](docs/test-report.md#ordinary-text-function-filter-20261122) · [性能报告](docs/performance-report-2026-10-30.md#ordinary-text-function-filter-cost-20261122)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-22 · 查数据库设置更快了
 

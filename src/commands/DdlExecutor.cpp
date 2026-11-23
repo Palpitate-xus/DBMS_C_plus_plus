@@ -7047,6 +7047,7 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
     // and by DROP TABLE ... CASCADE.  PostgreSQL derives these from the
     // relation and referencing column, adding a suffix for collisions.
     std::set<std::string> usedConstraintNames;
+    std::map<std::string, const TableConstraint*> unnamedForeignKeys;
     for (const auto& constraint : stmt->constraints) {
         if (!constraint.name.empty()) {
             usedConstraintNames.insert(constraint.name);
@@ -7144,6 +7145,7 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
                      ++suffix) {
                     fk.name = base + std::to_string(suffix);
                 }
+                unnamedForeignKeys.emplace(fk.name, &tc);
             }
             tbl.appendFK(fk);
         } else if (t == "check") {
@@ -7387,8 +7389,13 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
                 [&](const TableConstraint& tc) { return tc.name == fk.name; })) {
             continue;
         }
+        const auto entry = unnamedForeignKeys.find(fk.name);
+        const auto* definition = entry == unnamedForeignKeys.end() ? nullptr : entry->second;
+        const bool notValid = definition && definition->notValid;
         if (!alterStatusOk(persistConstraintMetadata(
-                s.currentDB, tname, fk.name, true, false, false, false),
+                s.currentDB, tname, fk.name, !notValid, notValid,
+                definition && definition->deferrable,
+                definition && definition->initiallyDeferred),
                 "Constraint")) return true;
     }
     if (!temporary) {

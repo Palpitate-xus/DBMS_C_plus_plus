@@ -37,6 +37,12 @@ sudo apt install cmake g++ make zlib1g-dev libicu-dev
 
 数据库在已有列统计的表上执行 `VACUUM FULL` 时，可写入新版统计快照，记录重写前后的文件身份。当前程序可读前一版及新版统计快照。只支持前一版的程序无法读取新版 `.analyzed_statistics`。需要切回旧程序时使用升级前的数据目录备份。[恢复验证](test-report.md#vacuum-target-columns-20261119)
 
+## 单列文本主键索引格式
+
+普通非分区表上，单列 `text`、`varchar` 或 `character` 主键的新索引使用标记 `0xC554`。索引保存同前缀记录的多个行位置，等值查找会比较实际的完整键。
+
+旧数据目录可以直接打开。对旧索引中的长键等值查找，新版从表中核对完整值，以覆盖旧索引遗漏的记录。`REINDEX TABLE` 会从表重新建立索引并写入新标记。旧程序无法读取 `0xC554` 文件，切回旧程序时使用升级前的备份。[测试与性能](test-report.md#long-text-primary-keys-20261123)
+
 ## 整数主键索引格式
 
 默认表空间的普通表在创建或重建单列有符号整数主键索引时，记录 `0xC553` 格式标记。索引页仍为 4 KiB，保留页号绑定校验。新版按索引文件记录的格式读取，原有十进制索引可以继续使用。符合条件的表可用 `REINDEX TABLE` 重新生成有序索引。需要重建索引的表结构修改和恢复操作也使用当前创建规则。
@@ -100,7 +106,7 @@ Bloom、GIN、BRIN、GiST 与 SP-GiST 索引校验：
 该命令验证主/分区/TOAST/unlogged init heap，以及 `.idx`/`.idx_*` B+Tree
 索引、`.hidx` Hash、`.bidx` Bloom、`.gin` GIN、`.brin` BRIN、`.gist` GiST
 和 `.spgist` SP-GiST 侧车，包括从 tablespace marker 解析的外置文件；诊断定位到索引文件和 heap block。
-统计会分开列出使用页号绑定校验的 `0xC552` 或 `0xC553`、使用旧内容校验的 `0xC551` 与无 checksum 的
+统计会分开列出使用页号绑定校验的 `0xC552`、`0xC553` 和 `0xC554`、使用旧内容校验的 `0xC551` 与无 checksum 的
 zero-marker legacy 页，并单列带 checksum 的 Hash V2/Bloom BLM2/GIN V2/BRIN V2/GiST V2
 与未校验的 Hash V1/Bloom BLM1/GIN V1/BRIN V1/GiST V1/SP-GiST V1 文件。GIN V2/BRIN V2/GiST V2/SP-GiST V2
 扫描验证格式头、entry-count 边界与 CRC32C，但不解析 GIN postings、BRIN ranges

@@ -2,6 +2,19 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="long-text-primary-keys-20261123"></a>
+## 2026-11-23 · 单列长文本主键
+
+两组 SQL 在普通和扩展协议各执行一遍。新版的 112 条响应全部与 PostgreSQL 18.6 一致，基线 `978fd588` 为 50 条。其中，原长文本主键的 16 条复现已全部通过。扩展用例包括已有表加主键、直接建表、命中与无结果、完整键重复、空字符串、`CHAR` 尾部空格、更新、删除、级联及未命名的延迟外键。[原复现](../tests/compat/cases/long_text_primary_key_collision.sql) · [扩展用例](../tests/compat/cases/long_text_primary_keys.sql)
+
+命名语句接收二进制文本键，覆盖同前缀的 150 个短值、两条约 2.4 KiB 的多字节长值和空串。重建索引后，取跨页的多个位置和两个长值，并验证两个未命中的键。忽略两端各自的表来源编号后，二进制结果、列描述和消息顺序与 PostgreSQL 18.6 一致，记录 SHA-256 为 `05074e874fb0b20bf58b0aa0f9525274a6f02fe4a1eb164939895efd3196cbd5`。
+
+从旧版创建的 `0xC552` 索引和表启动，完成 45 个步骤。先验证旧索引遗漏的行仍能查到，再核对保存点回滚、提交前强制退出、重建索引、提交后强制退出。重启后索引保持 `0xC554`，提交的改键和删除生效，外键接受新的完整键并拒绝旧键。对重建后的独立数据副本运行离线校验通过。恢复记录 SHA-256 为 `250fc044ac4aa62307dde42bfef8f3bf42ecd09ababf332f704a4a0d95e2d288`。
+
+两连接并发写入同一个长键时，后一个写入等待。先前的插入提交后，后一个写入报 `23505`。先前的删除回滚后，重用该键同样报 `23505`。先前的改键提交后，旧值可以重新插入。另验证重复读事务仍能看到其他连接改键前的值。并发写入和重复读记录 SHA-256 分别为 `938ce622b5703570f1a70b27540ab1c4e7d1603df8b01e0b1b7948f012ebe929` 和 `36f3f45e881b6ad093ac1017993dcad5d78aea6efd0410f4ed182c33f48c16bc`。[并发回归](../tests/long_text_primary_key_protocol_e2e_test.py)
+
+另跑七个通过的原生测试和十二个通过的客户端回归。基线和新版的建表原生专项均在重复列名处抛出 `42701`，测试预期接收布尔值。新版程序 SHA-256 为 `47342060804ac82970f02f644c8b5a98b1c5d4ebe153a048cd5316b7a1c6a502`。两组新版对照记录 SHA-256 分别为 `726d2ddc70d80812ec2984bcb6b9e140ba47b0f458b4b0e1832955f053843f31` 和 `31d00091c2def5bf4d1e53aefc11cbd54fa28182c3f6d3bb42b88b7741c95dda`。[建表专项](../tests/create_table_primary_key_validation_test.cpp) · [性能报告](performance-report-2026-10-30.md#long-text-primary-keys-cost-20261123)
+
 <a id="bounded-btree-equality-20261122"></a>
 ## 2026-11-22 · B+ 树多行等值查找
 
@@ -11,7 +24,7 @@
 
 六个原生测试和六个客户端回归通过，包含 B+ 树并发、索引完整值检查、缺少索引、损坏页、命名语句参数、重复前缀和完整协议。等值查询代价专项在新旧两版同样于 GiST 用例失败，返回行正确，实际使用了顺序扫描。[索引损坏](../tests/index_corruption_protocol_e2e_test.py) · [完整值检查](../tests/index_scan_full_value_protocol_e2e_test.py) · [等值查询代价](../tests/equality_scan_cost_protocol_e2e_test.py)
 
-表内文本比较的 92 条普通与扩展响应仍与 PostgreSQL 18.6 一致。长文本主键冲突用例的 16 条响应与上版一致，其中有六处与 PostgreSQL 不同。新版程序 SHA-256 为 `aaf50a8d7bd1653f668ba4c0acdd777360aac5d1cece1b62bb5f90c8ca1bec0c`。[文本对照](../tests/compat/cases/stored_text_equality_keys.sql) · [长主键复现](../tests/compat/known_gaps/long_text_primary_key_collision.sql) · [性能报告](performance-report-2026-10-30.md#bounded-btree-equality-cost-20261122)
+表内文本比较的 92 条普通与扩展响应仍与 PostgreSQL 18.6 一致。当时长文本主键冲突用例的 16 条响应中有六处与 PostgreSQL 不同。该用例在 11 月 23 日通过。该轮程序 SHA-256 为 `aaf50a8d7bd1653f668ba4c0acdd777360aac5d1cece1b62bb5f90c8ca1bec0c`。[文本对照](../tests/compat/cases/stored_text_equality_keys.sql) · [长主键测试](#long-text-primary-keys-20261123) · [性能报告](performance-report-2026-10-30.md#bounded-btree-equality-cost-20261122)
 
 <a id="stored-text-equality-20261122"></a>
 ## 2026-11-22 · 表内文字比较和约束检查
@@ -22,7 +35,7 @@
 
 九个原生测试和十一个客户端回归通过，包括自定义排序规则、唯一索引失败后清理、空文本、完整外键值、历史数据验证和完整协议。外键历史数据验证专项核对了启动时的 142 条及重启后的 12 条操作。[排序规则](../tests/collation_test.cpp) · [唯一索引](../tests/unique_index_enforcement_test.cpp) · [历史数据验证](../tests/constraint_not_valid_protocol_e2e_test.py) · [外键完整值](../tests/foreign_key_full_value_protocol_e2e_test.py)
 
-长文本主键还有一个可复现的缺口。给已有数据加主键，如果两个文本键的前 20 字节相同，等值查询会漏掉第二个键。新旧版对这组测试的 16 条响应完全相同，查询漏行、新键插入失败和合法外键引用被拒绝分别在两种协议中复现。[已知问题复现](../tests/compat/known_gaps/long_text_primary_key_collision.sql)
+当时给已有数据加主键，如果两个文本键的前 20 字节相同，等值查询会漏掉第二个键。当轮的新旧版对这组测试的 16 条响应完全相同，查询漏行、新键插入失败和合法外键引用被拒绝分别在两种协议中复现。[原复现](../tests/compat/cases/long_text_primary_key_collision.sql) · [11 月 23 日修复](#long-text-primary-keys-20261123)
 
 新版程序 SHA-256 为 `96aae6a18a53df8758e1911ddda42b944c63bab83c574e09edf1af693babdc3a`。PostgreSQL、基线、新版对照记录的 SHA-256 分别为 `28ca54114edfba287c6df71491ed384e7917e5e9f27d1d75f8b6e4385003d17d`、`0cd6da6f4b6476c21f429cd5e1464cc3720f061bfb9adbc877db9385b1808038` 和 `26204c02a2dff2822a3a305656d65820a1cdabdb8bf969261abd659a0aae4399`。[性能对照](performance-report-2026-10-30.md#stored-text-equality-cost-20261122)
 

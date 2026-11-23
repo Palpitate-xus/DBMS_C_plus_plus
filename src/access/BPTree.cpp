@@ -229,6 +229,10 @@ bool BPTree::openWithSignedIntegerKeys() {
     return openInternal(true, bptree_format::kSignedIntegerKeyFormat);
 }
 
+bool BPTree::openWithCompletePrimaryPrefixes() {
+    return openInternal(true, bptree_format::kCompletePrimaryPrefixesFormat);
+}
+
 bool BPTree::openExisting() {
     return openInternal(false);
 }
@@ -237,6 +241,12 @@ bool BPTree::usesSignedIntegerKeys() const {
     std::shared_lock<std::shared_mutex> treeLock(treeMutex_);
     return bp_ && bp_->isOpen() &&
            header_.reserved == bptree_format::kSignedIntegerKeyFormat;
+}
+
+bool BPTree::hasCompletePrimaryPrefixes() const {
+    std::shared_lock<std::shared_mutex> lock(treeMutex_);
+    return bp_ && bp_->isOpen() &&
+           header_.reserved == bptree_format::kCompletePrimaryPrefixesFormat;
 }
 
 bool BPTree::openInternal(bool createIfMissing, uint16_t creationFormat) {
