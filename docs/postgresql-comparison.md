@@ -2,6 +2,13 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="extended-query-syntax-comparison-20261123"></a>
+## 2026-11-23 · 扩展查询在一条消息内共用语法分析
+
+PostgreSQL 18.6 在收到 `Parse` 消息后完成语法和参数分析，存入客户端命名或未命名的语句。SQLite 的 `sqlite3_prepare_v2` 把 SQL 编译为可执行的语句对象。DuckDB 支持先准备带参数的语句，再提供实际值执行。 [PostgreSQL 18.6 消息处理源码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/tcop/postgres.c#L1403) · [PostgreSQL 扩展查询流程](https://www.postgresql.org/docs/18/protocol-flow.html#PROTOCOL-FLOW-EXT-QUERY) · [SQLite 语句编译](https://www.sqlite.org/c3ref/prepare.html) · [DuckDB 预编译语句](https://duckdb.org/docs/1.4/sql/query_syntax/prepared_statements)
+
+本项目让同一条协议消息中的语法检查和字段说明共用解析结果。绑定和目录检查继续按各自的阶段运行。128 行 VALUES 的准备耗时从约 13 毫秒降到约 5 毫秒。同轮 PostgreSQL 18.6 约需 0.2 毫秒。 [测试与解析次数](test-report.md#extended-query-syntax-20261123) · [性能对照](performance-report-2026-10-30.md#extended-query-syntax-cost-20261123)
+
 <a id="between-bind-types-comparison-20261123"></a>
 ## 2026-11-23 · 参数类型由第一项范围比较决定
 

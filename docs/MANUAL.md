@@ -2566,6 +2566,8 @@ statement/portal 仍返回 CloseComplete。一个 Sync group 内的 Execute 共�
 当前 Describe 的结果列分析和大型 portal 的真正流式执行仍未完成，因此客户端
 不应把这一子集当作完整的 PostgreSQL Extended Query 实现。
 
+客户端发送扩展查询消息时，服务端可在本条消息内共用原 SQL 的解析结果，减少检查语法和字段说明的重复工作。用多行 `VALUES` 或包含许多 `WHEN` 分支的 `CASE` 准备语句时，收益更明显。 [性能报告](performance-report-2026-10-30.md#extended-query-syntax-cost-20261123)
+
 [R163](issue-review-r163-qualified-parse-validation.md)在发布statement前纯绑定受支持的已知签名标量形状；
 不是任意SQL的完整Parse分析，也不为取描述执行callee。
 [R166](issue-review-r166-scalar-protocol-parameter-inference.md)只对source-free、无ORDER/LIMIT/OFFSET/FETCH等容器的

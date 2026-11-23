@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-23 · 扩展查询消息内共用语法分析
+
+准备语句、描述字段、绑定参数时的语法检查可以共用当前消息的解析结果。128 行 VALUES 准备阶段的原 SQL 解析调用从 27 次降到 5 次。参数类型和目录检查的执行阶段沿用现有路径。`OPT-01` 和 `PROTO-03` 保持部分实现。 [测试](test-report.md#extended-query-syntax-20261123) · [性能](performance-report-2026-10-30.md#extended-query-syntax-cost-20261123) · [实现对照](postgresql-comparison.md#extended-query-syntax-comparison-20261123)
+
 ## 2026-11-23 · 补齐受支持整数和位串范围查询的参数推断
 
 单值范围查询可以用比较表达式确定未声明的参数类型，并按 SQL 编号发送参数描述。受测的普通、对称和非对称范围形式，以及同一参数重复使用或需要转换的情况，均与 PostgreSQL 18.6 对照通过。`QRY-01`、`PROTO-03` 和 `PROTO-04` 继续标为部分实现。 [协议验证](test-report.md#between-bind-types-20261123) · [性能](performance-report-2026-10-30.md#between-bind-types-cost-20261123) · [实现对照](postgresql-comparison.md#between-bind-types-comparison-20261123)

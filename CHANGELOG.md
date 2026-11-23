@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>准备含多行数据的查询更快 · 2026-11-23</summary>
+
+例如，应用把 128 行数据写在同一条查询里，数据库在准备执行时会少读几遍这条命令。
+
+[测试报告](docs/test-report.md#extended-query-syntax-20261123) · [性能报告](docs/performance-report-2026-10-30.md#extended-query-syntax-cost-20261123)
+
+</details>
+
+<details>
 <summary>应用可以稍后传入要检查的数字 · 2026-11-23</summary>
 
 例如，查询一个编号是否在 1 到 10 之间时，应用可以在查询里先留一个位置，执行时再传入 5。数据库会把传入的值当作整数。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>按订单号翻页时，减少重复读取 · 2026-11-23</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-23 · 按订单号翻页时，减少重复读取
 
 例如，查编号最小的 128 笔订单时，数据库可以把存放在一起的订单一次读出来，最后按编号返回。
 
 [测试报告](docs/test-report.md#ordered-heap-pages-20261123) · [性能报告](docs/performance-report-2026-10-30.md#ordered-heap-pages-cost-20261123)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-23 · 同时查几段订单号，可以跳过中间的订单
 

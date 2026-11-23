@@ -2,6 +2,18 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-23 reuse the raw parse across checks in each extended query message",
+      "gap_ids": ["OPT-01", "PROTO-03"],
+      "status": "partial",
+      "evidence": ["src/network/NetworkServer.cpp", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/integer_between_parameter_protocol_e2e_test.py", "tests/prepared_union_all_execution_protocol_e2e_test.py", "tests/postgres_protocol_test.py"],
+      "verification": [
+        "Read-only grammar and result-shape probes reuse the raw parse within a single protocol message.",
+        "The 128-row VALUES Parse reduces original SQL parse calls from 27 to 5.",
+        "Range protocol responses and restart controls match the baseline. Existing temporal and temporary-table failures reproduce unchanged."
+      ]
+    },
+    {
       "issue": "2026-11-23 keep the first comparison's parameter type in integer and BIT ranges",
       "gap_ids": ["QRY-01", "PROTO-03", "PROTO-04"],
       "status": "partial",
