@@ -32,9 +32,9 @@ def main():
         row, = (row for row in rows if row[0] == table)
         return [int(value) for value in row[1:5]]
 
-    def prepare(name, statement):
+    def prepare(name, statement, types=(25, 20, 20)):
         sock.sendall(typed(b"P", name + b"\0" + statement.encode() + b"\0" +
-                           pack("!HIII", 3, 25, 20, 20)) + typed(b"S"))
+                           pack("!H" + "I" * len(types), len(types), *types)) + typed(b"S"))
         assert client.read_until_ready(sock) == [(b"1", b""), (b"Z", b"I")]
 
     def probe(shop, lower, upper, expected, name=b"scan"):
@@ -124,6 +124,47 @@ def main():
                                   (b"C", b"SELECT 1\0"), (b"Z", b"I")], frames
             assert [right - left for left, right in zip(before, stats(), strict=True)] == [1, 7, 0, 0]
 
+        for conditions, expected, reads in (
+            ("ord<-9223372036854775808", ["0", "0"], False),
+            ("ord>7 AND ord<8", ["0", "0"], False),
+            ("ord IS NULL AND ord>=0", ["0", "0"], False),
+            ("shop<>'青木' AND shop='青木'", ["0", "0"], False),
+            ("length(shop)<0", ["0", "0"], False),
+            ("ord>70 AND ord<80", ["0", "0"], True),
+            ("ord>=9223372036854775806", ["0", "0"], True),
+            ("ord>=9007199254740993 AND ord<=9007199254740993", ["1", "1"], True),
+            ("ord=-9223372036854775808", ["1", "1"], True),
+        ):
+            sql = f"SELECT count(*), count(ord) FROM {table} WHERE {conditions}"
+            before = stats()
+            assert simple(sql, "SELECT 1") == [expected], sql
+            assert [right - left for left, right in zip(before, stats(), strict=True)] == [int(reads), 7 * reads, 0, 0], sql
+
+        mixed = f"SELECT count(*) FILTER (WHERE ord<0), count(*) FROM {table} WHERE ord>0"
+        all_empty = f"SELECT count(*) FILTER (WHERE ord<0), count(ord) FILTER (WHERE ord IS NULL) FROM {table} WHERE ord>0"
+        before = stats()
+        assert simple(mixed, "SELECT 1") == [["0", "5"]]
+        assert [right - left for left, right in zip(before, stats(), strict=True)] == [1, 7, 0, 0]
+        before = stats()
+        assert simple(all_empty, "SELECT 1") == [["0", "0"]]
+        assert stats() == before
+        plan = simple("EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF) " + all_empty, "EXPLAIN")
+        assert any("StoredCount" in row[0] and "emptyInput=true" in row[0] for row in plan), plan
+
+        prepare(b"bounds", f"SELECT count(*) FROM {table} WHERE ord>=$1 AND ord<=$2", (20, 20))
+        for lower, upper, expected, reads in ((10, 9, 0, False), (7, 9, 3, True),
+                                               (-(2**63), -(2**63), 1, True), (5, 2, 0, False)):
+            args = pack("!IqIq", 8, lower, 8, upper)
+            binding = b"\0bounds\0" + pack("!HHH", 1, 1, 2) + args + pack("!HH", 1, 1)
+            before = stats()
+            sock.sendall(typed(b"B", binding) + typed(b"D", b"P\0") +
+                         typed(b"E", b"\0" * 5) + typed(b"S"))
+            frames = client.read_until_ready(sock)
+            assert [kind for kind, _ in frames] == [b"2", b"T", b"D", b"C", b"Z"], frames
+            assert frames[2:] == [(b"D", pack("!Hiq", 1, 8, expected)),
+                                  (b"C", b"SELECT 1\0"), (b"Z", b"I")], frames
+            assert [right - left for left, right in zip(before, stats(), strict=True)] == [int(reads), 7 * reads, 0, 0]
+
         with socket.create_connection(("127.0.0.1", server["port"]), timeout=runner.wire_timeout()) as writer:
             client.startup(writer, "alice", "info")
             simple("BEGIN ISOLATION LEVEL REPEATABLE READ", "BEGIN", b"T")
@@ -171,6 +212,10 @@ def main():
         simple("INSERT INTO counted_child VALUES (2,NULL)", "INSERT 0 1")
         for base, expected in (("counted_parent", [["2", "1"]]), ("ONLY counted_parent", [["1", "1"]])):
             assert simple("SELECT count(*), count(note) FROM " + base, "SELECT 1") == expected
+        simple("SET ROLE count_reader", "SET")
+        frames = client.simple_query(sock, "SELECT count(*) FROM counted_parent WHERE id>2147483647")
+        assert runner.decode_wire_result(frames)[1] == "42501" and frames[-1] == (b"Z", b"I"), frames
+        simple("RESET ROLE", "RESET")
     finally:
         runner.stop_ours(server)
     print("[STORED LITERAL FILTER PROTOCOL] exact binary inputs and results passed")

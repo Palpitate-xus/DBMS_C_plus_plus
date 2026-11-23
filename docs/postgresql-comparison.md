@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-23 · 判断计数条件是否可能成立
+
+PostgreSQL 区分条件必为 `FALSE` 和条件无法为 `TRUE` 两种结论，并将后者用于识别互相矛盾的筛选。DuckDB 合并同一表达式上的常量比较，发现冲突时可生成空结果。SQLite 在选择表和索引访问条件时，会沿等式关系寻找可以使用的常量比较。[PostgreSQL 条件证明](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/optimizer/util/predtest.c) · [DuckDB 条件合并](https://github.com/duckdb/duckdb/blob/v1.5.6/src/optimizer/filter_combiner.cpp) · [SQLite 查询条件](https://github.com/sqlite/sqlite/blob/version-3.54.1/src/where.c)
+
+本项目已在普通单表计数中判断受支持的 `AND` 条件是否可能为真。范围越界和比较冲突的普通请求中位数分别为 4.196 和 4.387 毫秒，同轮 PostgreSQL 为 1.064 和 1.092 毫秒。更一般的条件推导仍需覆盖多列关系、连接和更多表达式。[测试](test-report.md#ordinary-count-constraints-20261123) · [性能](performance-report-2026-10-30.md#ordinary-count-constraints-cost-20261123)
+
 ## 2026-11-23 · 单表计数
 
 PostgreSQL 的聚合节点随输入行更新聚合状态，整表 `COUNT(*)` 需要扫描表或包含全部行的索引。SQLite 的 `Count` 指令可遍历 B-tree 页来获得精确行数。DuckDB 用批次行数累计 `COUNT(*)`，按列计数时检查有效值。[PostgreSQL 聚合实现](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/executor/nodeAgg.c) · [PostgreSQL 计数文档](https://www.postgresql.org/docs/18/functions-aggregate.html) · [SQLite 指令](https://www.sqlite.org/opcode.html) · [DuckDB 计数实现](https://github.com/duckdb/duckdb/blob/v1.5.6/src/function/aggregate/distributive/count.cpp)

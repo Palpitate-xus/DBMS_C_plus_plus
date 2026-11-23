@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>条件互相矛盾时，计数可以直接返回零 · 2026-11-23</summary>
+
+比如统计库存大于 10 件、同时又小于 5 件的商品。数据库能看出两个条件无法同时成立，直接给出结果。
+
+[用法](docs/MANUAL.md#聚合) · [测试报告](docs/test-report.md#ordinary-count-constraints-20261123) · [性能报告](docs/performance-report-2026-10-30.md#ordinary-count-constraints-cost-20261123)
+
+</details>
+
+<details>
 <summary>统计符合条件的记录更快 · 2026-11-23</summary>
 
 比如同时统计有库存的商品和缺货商品各有多少。读一遍商品表就可以得到两个数字。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>符合条件的订单很少时，翻页更快 · 2026-11-23</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-23 · 符合条件的订单很少时，翻页更快
 
 比如翻看一家店里带详细备注的订单。即使这样的订单很少，数据库也能沿着订单号继续查找，直到填满一页或查完这家店的订单。
 
 [用法](docs/MANUAL.md#用多列一起区分记录) · [测试报告](docs/test-report.md#composite-primary-refill-20261123) · [性能报告](docs/performance-report-2026-10-30.md#composite-primary-refill-cost-20261123)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-23 · 按条件取订单号最大的几笔更快
 

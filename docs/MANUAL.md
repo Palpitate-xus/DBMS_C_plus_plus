@@ -1660,6 +1660,8 @@ SELECT DEPT, COUNT(*) FROM employees GROUP BY GROUPING SETS ((DEPT), ());
 
 在受支持的普通表上，多个计数可以共用一次扫描。`EXPLAIN ANALYZE` 中 `StoredCount` 下直接显示 `TableScan` 时，数据库读取每条可见记录后直接累计数目。适用的筛选包括空值检查、受支持的文本比较、文字长度和整数比较。[测试](test-report.md#ordinary-stored-count-20261123) · [性能](performance-report-2026-10-30.md#ordinary-stored-count-cost-20261123)
 
+如果比较条件无法同时成立，例如 `quantity > 10 AND quantity < 5`，受支持的计数可以在读取表行前确定结果为 `0`。`EXPLAIN ANALYZE` 会在 `StoredCount` 上显示 `emptyInput=true`。每个 `FILTER` 都会与 `WHERE` 一起检查，有其他计数需要读表时，它们仍共用一次扫描。[测试](test-report.md#ordinary-count-constraints-20261123) · [性能](performance-report-2026-10-30.md#ordinary-count-constraints-cost-20261123)
+
 ### JOIN
 
 ```sql

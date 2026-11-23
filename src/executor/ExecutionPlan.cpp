@@ -2517,6 +2517,37 @@ struct CompositeSuffixBound {
 
 enum class StoredComparison { Equal, NotEqual, Less, LessEqual, Greater, GreaterEqual };
 
+struct StoredIntegerField {
+    size_t offset, width;
+
+    bool operator==(const StoredIntegerField& other) const {
+        return offset == other.offset && width == other.width;
+    }
+
+    std::optional<int64_t> read(std::string_view row) const {
+        if (offset > row.size() || width > row.size() - offset) return {};
+        int64_t value = 0;
+        std::memcpy(&value, row.data() + offset, width);
+        // Use the same physical encoding as extractColumnValueStatic.
+        if (width == 4 && (value & 0x80000000LL)) value |= 0xFFFFFFFF00000000LL;
+        if (width == 2 && (value & 0x8000LL)) value |= 0xFFFFFFFFFFFF0000LL;
+        return value;
+    }
+};
+
+static std::optional<StoredIntegerField> storedIntegerField(const TableSchema& schema, size_t ordinal) {
+    const auto& column = schema.cols[ordinal];
+    const auto type = compositeEqualityType(column);
+    const size_t width = type == "smallint" ? sizeof(int16_t) : type == "integer" ? sizeof(int32_t) :
+        type == "bigint" ? sizeof(int64_t) : 0;
+    if (!width || column.isVariableLength || column.dsize != width ||
+        column.storageCodec != Column::StorageCodec::Legacy) return {};
+    size_t offset = 0;
+    for (size_t i = 0; i < ordinal; ++i)
+        if (!schema.cols[i].isVariableLength) offset += schema.cols[i].dsize;
+    return StoredIntegerField{offset, width};
+}
+
 struct StoredPredicate {
     enum class Input { IsNull, IsNotNull, Text, Integer, TextLength };
     size_t column;
@@ -2524,6 +2555,7 @@ struct StoredPredicate {
     Input input;
     StoredComparison comparison = StoredComparison::Equal;
     std::variant<std::string, int64_t> constant;
+    std::optional<StoredIntegerField> integer = std::nullopt;
 };
 
 using StoredPredicates = std::vector<StoredPredicate>;
@@ -2541,7 +2573,8 @@ static bool storedPredicateSchemaMatches(const StoredPredicates& predicates, con
         if (predicate.column >= schema.len()) return false;
         const auto& column = schema.cols[predicate.column];
         return column.dataName == predicate.name && column.dataType == predicate.type &&
-            !compositeEqualityType(column).empty();
+            !compositeEqualityType(column).empty() &&
+            (!predicate.integer || storedIntegerField(schema, predicate.column) == predicate.integer);
     });
 }
 
@@ -2562,7 +2595,7 @@ static std::optional<bool> storedPredicatesMatch(const StoredPredicates& predica
         const std::string& row, const std::vector<bool>& nulls) {
     if (predicates.empty()) return true;
     using Input = StoredPredicate::Input;
-    detail::ScopedStoredRowNullBitmap bitmap(schema, nulls);
+    std::optional<detail::ScopedStoredRowNullBitmap> bitmap;
     for (const auto& predicate : predicates) {
         const bool isNull = nulls[predicate.column];
         if (predicate.input == Input::IsNull || predicate.input == Input::IsNotNull) {
@@ -2570,6 +2603,15 @@ static std::optional<bool> storedPredicatesMatch(const StoredPredicates& predica
             continue;
         }
         if (isNull) return false;
+        if (predicate.integer) {
+            const auto actual = predicate.integer->read(row);
+            if (!actual) return {};
+            const auto expected = std::get<int64_t>(predicate.constant);
+            if (!matchesStoredComparison(predicate.comparison, (*actual > expected) - (*actual < expected)))
+                return false;
+            continue;
+        }
+        if (!bitmap) bitmap.emplace(schema, nulls);
         const auto value = engine.extractColumnValue(row, schema, predicate.column, database, false);
         if (predicate.input == Input::Text) {
             if (!matchesStoredComparison(predicate.comparison, value.compare(std::get<std::string>(predicate.constant))))
@@ -2588,6 +2630,59 @@ static std::optional<bool> storedPredicatesMatch(const StoredPredicates& predica
         if (!matchesStoredComparison(predicate.comparison, (actual > expected) - (actual < expected))) return false;
     }
     return true;
+}
+
+// These predicates have already been bound as total comparisons on one
+// stored source. Track values that can make every conjunct true, with NULL
+// as a separate possibility rather than an endpoint of the value range.
+static bool storedPredicatesContradict(const TableSchema& schema, const StoredPredicates& where,
+                                      const StoredPredicates& filter) {
+    using Input = StoredPredicate::Input;
+    using Range = StorageEngine::IntegerPartitionFilter;
+    struct Requirements {
+        bool mustBeNull = false, mustHaveValue = false;
+        const std::string* text = nullptr;
+        std::optional<Range> numbers;
+    };
+    std::map<size_t, Requirements> columns;
+    auto apply = [&](const StoredPredicates& predicates) {
+        for (const auto& predicate : predicates) {
+            auto& rules = columns[predicate.column];
+            if (predicate.input == Input::IsNull) {
+                if (rules.mustHaveValue || !schema.cols[predicate.column].isNull) return false;
+                rules.mustBeNull = true;
+                continue;
+            }
+            if (rules.mustBeNull) return false;
+            rules.mustHaveValue = true;
+            if (predicate.input == Input::Text && predicate.comparison == StoredComparison::Equal) {
+                const auto& text = std::get<std::string>(predicate.constant);
+                if (rules.text && *rules.text != text) return false;
+                rules.text = &text;
+            } else if (predicate.integer || predicate.input == Input::TextLength) {
+                if (!rules.numbers) {
+                    const auto width = predicate.integer ? predicate.integer->width : 0;
+                    const int64_t low = width == 0 ? 0 : width == 2 ? INT16_MIN : width == 4 ? INT32_MIN : INT64_MIN;
+                    const int64_t high = width == 2 ? INT16_MAX : width == 4 ? INT32_MAX : INT64_MAX;
+                    rules.numbers = Range{{{low, high}}, false};
+                }
+                static constexpr std::string_view operators[] = {"=", "<>", "<", "<=", ">", ">="};
+                rules.numbers->intersect(*Range::comparison(operators[static_cast<size_t>(predicate.comparison)],
+                    std::get<int64_t>(predicate.constant)));
+                if (rules.numbers->intervals.empty()) return false;
+            }
+        }
+        return true;
+    };
+    if (!apply(where) || !apply(filter)) return true;
+    const auto excludesText = [&](const StoredPredicates& predicates) {
+        return std::any_of(predicates.begin(), predicates.end(), [&](const auto& predicate) {
+            if (predicate.input != Input::Text || predicate.comparison != StoredComparison::NotEqual) return false;
+            const auto* text = columns.at(predicate.column).text;
+            return text && *text == std::get<std::string>(predicate.constant);
+        });
+    };
+    return excludesText(where) || excludesText(filter);
 }
 
 struct CompositeSuffixOrder {
@@ -3590,6 +3685,7 @@ static std::optional<StoredPredicates> bindStoredPredicates(StorageEngine& engin
         }
         auto predicate = predicateFor(*column, kind);
         predicate.comparison = comparator->second;
+        if (kind == Input::Integer) predicate.integer = storedIntegerField(schema, predicate.column);
         if (kind == Input::Text) {
             predicate.constant = *constant;
         } else {
@@ -4767,8 +4863,9 @@ class PreparedStoredCountOp final : public Operator {
     std::shared_ptr<PreparedSelectState> state_;
     StoredPredicates where_;
     std::vector<StoredPredicates> filters_;
+    std::vector<bool> impossibleFilters_;
     RowContext result_;
-    bool opened_ = false, stored_ = false, emitted_ = false;
+    bool opened_ = false, stored_ = false, emitted_ = false, emptyInput_ = false;
 
 public:
     PreparedStoredCountOp(OpPtr fallback, TableScanOp* scan,
@@ -4783,7 +4880,7 @@ public:
         OpenInstrument instrument(this);
         if (opened_) close();
         clearError();
-        emitted_ = stored_ = false;
+        emitted_ = stored_ = emptyInput_ = false;
         opened_ = true;
         if (!fallback_->open()) return propagateChildError(fallback_.get(), "count input failed");
         const auto& schema = scan_->tbl_;
@@ -4792,6 +4889,20 @@ public:
             std::all_of(filters_.begin(), filters_.end(), [&](const auto& filter) {
                 return storedPredicateSchemaMatches(filter, schema);
             });
+        if (stored_) {
+            emptyInput_ = storedPredicatesContradict(schema, where_, {});
+            if (!emptyInput_) {
+                impossibleFilters_.assign(filters_.size(), false);
+                for (size_t i = 0; i < filters_.size(); ++i)
+                    if (!filters_[i].empty())
+                        impossibleFilters_[i] = storedPredicatesContradict(schema, where_, filters_[i]);
+                emptyInput_ = std::all_of(impossibleFilters_.begin(), impossibleFilters_.end(),
+                    [](bool impossible) { return impossible; });
+            }
+            // The scan's open step has acquired the relation lock and read
+            // view. Release the unused cursor, retaining the lock until close.
+            if (emptyInput_) scan_->cursor_.reset();
+        }
         return true;
     }
 
@@ -4802,7 +4913,7 @@ public:
             std::vector<int64_t> counts(filters_.size(), 0);
             std::string row;
             const auto& schema = scan_->tbl_;
-            while (scan_->next(row)) {
+            while (!emptyInput_ && scan_->next(row)) {
                 checkForQueryInterrupt();
                 const auto& bitmap = scan_->lastNulls_;
                 const auto match = [&](const StoredPredicates& predicates) -> std::optional<bool> {
@@ -4825,6 +4936,7 @@ public:
                 }
                 if (!*where) continue;
                 for (size_t i = 0; i < counts.size(); ++i) {
+                    if (impossibleFilters_[i]) continue;
                     auto selected = match(filters_[i]);
                     if (!selected) {
                         const auto& call = *state_->aggregates[i].call;
@@ -4870,6 +4982,10 @@ public:
         return true;
     }
     std::string preparedPlanNodeName() const override { return "StoredCount"; }
+    std::map<std::string, std::string> preparedPlanAttributes() const override {
+        if (emptyInput_) return {{"emptyInput", "true"}};
+        return {};
+    }
     std::vector<Operator*> preparedPlanChildren() const override {
         return {stored_ ? static_cast<Operator*>(scan_) : fallback_.get()};
     }

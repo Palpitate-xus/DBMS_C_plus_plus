@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-23 · 判断计数条件是否可能成立
+
+普通单表计数可以证明受支持的同列范围与空值条件无法同时成立，并在锁定表后直接得到零行的计数。整数比较可以直接读取存储值。`OPT-03` 已验证这部分条件证明，登记为部分实现。更一般的常量传播、等价关系、连接改写和分区删除仍待补齐。[测试](test-report.md#ordinary-count-constraints-20261123) · [性能](performance-report-2026-10-30.md#ordinary-count-constraints-cost-20261123)
+
 ## 2026-11-23 · 扫描普通表时累计计数
 
 裸 `COUNT(*)`、`COUNT(列名)` 和受支持的筛选可以在已有单表扫描中直接计数。普通无排序和去重的全局计数也无需保存每条输入。并行聚合、复杂分组和索引覆盖计数仍待补齐。`QRY-07` 和 `OPT-01` 保持现有状态。[测试](test-report.md#ordinary-stored-count-20261123) · [性能](performance-report-2026-10-30.md#ordinary-stored-count-cost-20261123)
