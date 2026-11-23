@@ -1,27 +1,27 @@
 # 更新日志
 
 <details>
-<summary>小范围查询可以用整数主键定位 · 2026-11-23</summary>
+<summary>按订单号查一小段记录更快 · 2026-11-23</summary>
 
-例如，查询一小段订单号时，数据库可以用主键索引找到这些记录所在的位置。
+如果订单号是表的整数主键，查 1000 到 1100 号订单时，数据库可以用索引直接找这些记录。
 
 [测试报告](docs/test-report.md#complete-integer-range-20261123) · [性能报告](docs/performance-report-2026-10-30.md#complete-integer-range-cost-20261123)
 
 </details>
 
 <details>
-<summary>加零的整数条件筛选更快 · 2026-11-23</summary>
+<summary>订单号加 0 的筛选可以省一步 · 2026-11-23</summary>
 
-例如，筛选 `订单号 + 0` 是否小于某个值时，数据库可以直接比较订单号。
+例如，查订单号加 0 后小于 100 的记录时，数据库可以直接比较订单号。
 
 [测试报告](docs/test-report.md#stored-integer-identity-20261123) · [性能报告](docs/performance-report-2026-10-30.md#stored-integer-identity-cost-20261123)
 
 </details>
 
 <details>
-<summary>部分查询少做一遍整数检查 · 2026-11-23</summary>
+<summary>部分查询省去重复筛选 · 2026-11-23</summary>
 
-例如，用商品编号和库存量筛选记录时，数据库可以直接用扫描时的检查结果。
+例如，同时按商品编号和库存量筛选时，数据库可以沿用读表时已经比较过的结果。
 
 [测试报告](docs/test-report.md#stored-where-reuse-20261123) · [性能报告](docs/performance-report-2026-10-30.md#stored-where-reuse-cost-20261123)
 
