@@ -1,5 +1,10 @@
 # PostgreSQL 18 功能差距审计
 
+<a id="primary-key-projection-audit-20261123"></a>
+## 2026-11-23 · 单列整数主键读取可以跳过未用的长值
+
+有序分页和支持的小范围查询可只解码需要的列，继续按事务快照检查每条记录。常规读取仍保留覆盖所有列的执行路径。该进展记录在 `OPT-01`，状态仍为部分实现。 `OPT-08` 和 `IDX-11` 保持未验证。 [正确性验证](test-report.md#primary-key-projection-20261123) · [性能](performance-report-2026-10-30.md#primary-key-projection-cost-20261123) · [实现对照](postgresql-comparison.md#primary-key-projection-comparison-20261123)
+
 ## 2026-11-23 · 读取分散的主键记录时减少重复取页
 
 有序主键分页能够在一批中合并对同一表页的读取，再按索引顺序返回。分散表取 128 行时，取页接口调用从 128 次降到 10 次。检查可见性仍需读表，覆盖列和可见性映射仍需继续验证与实现。`IDX-03` 和 `OPT-01` 保持部分实现。 [正确性验证](test-report.md#ordered-heap-pages-20261123) · [性能](performance-report-2026-10-30.md#ordered-heap-pages-cost-20261123) · [实现对照](postgresql-comparison.md#ordered-heap-pages-comparison-20261123)

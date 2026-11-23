@@ -87,7 +87,8 @@ void decodeStoredRowInputs(StorageEngine& engine, const std::string& database,
                           const std::string& raw, const TableSchema& schema,
                           const std::vector<bool>& storedNulls,
                           std::vector<std::string>& values,
-                          std::vector<bool>& nulls);
+                          std::vector<bool>& nulls,
+                          const std::vector<bool>& projectedColumns = {});
 
 // A scan/decoder already owns this physical schema under its relation lock.
 // Reading the tuple bitmap must not re-resolve domains or reload the catalog

@@ -21126,14 +21126,18 @@ class PreparedWithDmlRuntime {
             : dbms::inheritedTableDescendants(g_engine,session_.currentDB,table);
         const bool storedCount = select == readRoot_ && descendants.empty() &&
             dbms::QueryPlanner::supportsStoredCountSelect(*select) && canReadWholeTable(session_, table);
+        const bool orderedPrimaryPage = select == readRoot_ && descendants.empty() &&
+            select->limit && !select->orderBy.empty() &&
+            dbms::QueryPlanner::mayUseIntegerPrimaryKeyPage(&g_engine, session_.currentDB, *query_, *select);
         const bool emptyProjection = select->selectList.empty();
         if (descendants.empty() && !emptyProjection &&
-            (select != readRoot_ || (!select->whereClause && !storedCount))) return {};
+            (select != readRoot_ || (!select->whereClause && !storedCount && !orderedPrimaryPage))) return {};
         auto parent=g_engine.getTableSchema(session_.currentDB,table);
         const bool declaredFilter = select == readRoot_ &&
             dbms::QueryPlanner::usesDeclaredFilterCollations(*select, parent);
         if (descendants.empty()) {
-            if (!emptyProjection && !declaredFilter && !(storedCount && dbms::QueryPlanner::usesStoredCountSource(
+            if (!emptyProjection && !declaredFilter && !(orderedPrimaryPage && parent.hasVariableLength()) &&
+                !(storedCount && dbms::QueryPlanner::usesStoredCountSource(
                     g_engine, session_.currentDB, *select, parent, range.ordinal)))
                 return {};
             checkPhysicalSourcePermission(select, range, table);

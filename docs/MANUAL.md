@@ -1380,6 +1380,8 @@ REPLACE INTO users (ID, NAME) VALUES (1, 'New Alice');
 
 用单列整数主键排序并限制行数时，同一表页上的候选记录可以一起读取，再按主键顺序返回。这样可以减少插入顺序与编号顺序不同时的重复取页。 [分散读取测试](test-report.md#ordered-heap-pages-20261123)
 
+例如，`SELECT order_id FROM orders ORDER BY order_id LIMIT 20` 只需要订单号。数据库用单列整数主键索引读取这一页时，可以跳过另存的长备注。用来返回、筛选或排序的列仍会按查询需要读取。同一查询改为 `SELECT *` 后会读取所有返回列。 `EXPLAIN ANALYZE` 的 `projectedColumns` 表示该索引读取需要的列数。 [长文本测试](test-report.md#primary-key-projection-20261123)
+
 `SELECT FROM users WHERE active IS NOT NULL LIMIT 3` 可以返回最多三行，每行没有字段值。单独执行 `SELECT` 返回一条这样的行。使用 `DISTINCT` 时需要写出要比较的列或表达式。只从普通表读取零列结果且没有筛选或排序时，可跳过读取大字段。[测试](test-report.md#zero-width-read-20261123) · [性能](performance-report-2026-10-30.md#zero-width-read-cost-20261123)
 
 在 `WHERE id = 7` 中，`7` 是数字。在 `WHERE id = "7"` 中，`"7"` 是列名，查询比较同一行中的两列，即使表上有索引也是如此。[查询测试](test-report.md#narrow-select-20261121)

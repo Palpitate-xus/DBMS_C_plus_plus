@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>只查订单号时，可以跳过长备注 · 2026-11-23</summary>
+
+例如，按订单号取前 20 笔且只显示编号时，数据库可以跳过另存的长备注。查询要显示备注或用它筛选时，仍会读取所需内容。
+
+[使用说明](docs/MANUAL.md#基础查询) · [测试报告](docs/test-report.md#primary-key-projection-20261123) · [性能报告](docs/performance-report-2026-10-30.md#primary-key-projection-cost-20261123)
+
+</details>
+
+<details>
 <summary>按订单号翻页时，减少重复读取 · 2026-11-23</summary>
 
 例如，查编号最小的 128 笔订单时，数据库可以把存放在一起的订单一次读出来，最后按编号返回。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>查一段订单号时，起止编号可以反着写 · 2026-11-23</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-23 · 查一段订单号时，起止编号可以反着写
 
 用 `BETWEEN SYMMETRIC` 查询时，把 1100 写在 1000 前面，也能查出 1000 到 1100 号的所有订单。
 
 [使用说明](docs/MANUAL.md#基础查询) · [测试报告](docs/test-report.md#explicit-between-20261123) · [性能报告](docs/performance-report-2026-10-30.md#explicit-between-cost-20261123)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-23 · 跳过一段订单号，可以直接查两头
 

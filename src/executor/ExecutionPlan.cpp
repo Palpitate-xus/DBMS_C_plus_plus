@@ -344,6 +344,7 @@ struct PreparedSelectState {
     static constexpr size_t noTarget = std::numeric_limits<size_t>::max();
     size_t sourceOrdinal = noTarget;
     bool sourceContexts = false;
+    std::vector<bool> projectedPhysicalColumns;
     std::vector<size_t> functionProjectionColumns;
     Operator* logicalSource = nullptr; // Owned by the actual operator graph.
     std::vector<const PreparedQuery::SourceRange*> visibleRanges;
@@ -400,7 +401,7 @@ struct PreparedSelectState {
         bool available = storedNulls != nullptr;
         if (storedNulls) {
             detail::decodeStoredRowInputs(*engine, dbname, raw, schema,
-                                         *storedNulls, structured, nulls);
+                                         *storedNulls, structured, nulls, projectedPhysicalColumns);
         } else {
             available = source.supportsStructuredRows() && source.lastStructuredRow(structured, nulls);
         }
@@ -411,12 +412,12 @@ struct PreparedSelectState {
                 std::vector<bool> captured;
                 if (source.lastStoredNullBitmap(captured)) {
                     detail::decodeStoredRowInputs(*engine, dbname, raw, schema,
-                                                 captured, structured, nulls);
+                                                 captured, structured, nulls, projectedPhysicalColumns);
                     available = true;
                 } else if (const auto bitmap = detail::storedRowNullBitmap(
                                *engine, dbname, origin.tablename, schema, origin.rid)) {
                     detail::decodeStoredRowInputs(*engine, dbname, raw, schema,
-                                                 *bitmap, structured, nulls);
+                                                 *bitmap, structured, nulls, projectedPhysicalColumns);
                     available = true;
                 }
             }
@@ -424,7 +425,8 @@ struct PreparedSelectState {
         const QueryRowDescriptor* physicalDeclaration=nullptr;
         bool needsPhysicalDatum=false;
         for(size_t i=0;i<schema.len();++i)
-            if(schema.cols[i].generatedKind!='v' &&
+            if((projectedPhysicalColumns.empty() || projectedPhysicalColumns[i]) &&
+               schema.cols[i].generatedKind!='v' &&
                (schema.cols[i].isArray || stored_regtype_detail::columnType(schema.cols[i].dataType))) {
                 needsPhysicalDatum=true;break;
             }
@@ -447,6 +449,12 @@ struct PreparedSelectState {
             values.reserve(schema.len());
         for (size_t i = 0; i < schema.len(); ++i) {
             if(schema.cols[i].generatedKind=='v'){values.emplace_back();continue;}
+            const auto& column = schema.cols[i];
+            if (!projectedPhysicalColumns.empty() && !projectedPhysicalColumns[i]) {
+                values.emplace_back(ExprHelper::canonicalResultTypeName(column.dataType +
+                    (column.isArray ? "[]" : "")), "", true);
+                continue;
+            }
             bool computedNull = false;
             std::string value = available ? std::move(structured.at(i)) :
                 engine->extractColumnValue(raw, schema, i, dbname, true, &computedNull);
@@ -454,7 +462,6 @@ struct PreparedSelectState {
                 (schema.cols[i].generatedKind != 'v' && source.lastColumnIsNull(i));
             values.emplace_back(ExprHelper::canonicalResultTypeName(schema.cols[i].dataType +
                 (schema.cols[i].isArray ? "[]" : "")), std::move(value), isNull);
-            const auto& column = schema.cols[i];
             if (physicalDeclaration && i < physicalDeclaration->size()) {
                 const auto& declaredField = physicalDeclaration->at(i).typeMetadata;
                 // The physical scan, persisted domain column and actual
@@ -5114,6 +5121,7 @@ class IntegerPrimaryKeyPageOp final : public Operator {
     IntegerPageBounds bounds_;
     OpPtr fallback_;
     const Expr* rangePredicate_;
+    std::vector<bool> projectedColumns_;
     std::optional<OrderedPrimaryKeyReadPage> page_;
     size_t position_ = 0, indexEntries_ = 0, indexNodesVisited_ = 0, heapRows_ = 0;
     bool fallbackOpen_ = false, usedPage_ = false, orderedIndex_ = false;
@@ -5122,10 +5130,10 @@ class IntegerPrimaryKeyPageOp final : public Operator {
 public:
     IntegerPrimaryKeyPageOp(StorageEngine* engine, std::string database, const TableSchema& schema,
             size_t keyColumn, size_t count, bool descending, IntegerPageBounds bounds, OpPtr fallback,
-            const Expr* rangePredicate = nullptr)
+            const std::vector<bool>& projectedColumns, const Expr* rangePredicate = nullptr)
         : engine_(engine), database_(std::move(database)), schema_(schema), keyColumn_(keyColumn),
           count_(count), descending_(descending), bounds_(std::move(bounds)), fallback_(std::move(fallback)),
-          rangePredicate_(rangePredicate) {}
+          rangePredicate_(rangePredicate), projectedColumns_(projectedColumns) {}
     std::optional<PreparedIntegerKeyOrder> openedKeyOrder() const {
         // Both signed-key scans and successful legacy numeric prefixes
         // return checked heap rows in key order. A heap fallback does not.
@@ -5140,7 +5148,7 @@ public:
         indexEntries_ = indexNodesVisited_ = heapRows_ = 0;
         page_ = engine_->tryReadOrderedIntegerPrimaryKey(database_, schema_.tablename, schema_,
             keyColumn_, descending_, count_, sortWorkMemBytes(), bounds_.lower, bounds_.upper, bounds_.nullTests,
-            rangePredicate_ != nullptr, bounds_.disjointRanges());
+            rangePredicate_ != nullptr, bounds_.disjointRanges(), projectedColumns_);
         if (page_) {
             usedPage_ = true;
             orderedIndex_ = page_->orderedIndex;
@@ -5213,6 +5221,9 @@ public:
             {"heapRowsFetched", std::to_string(heapRows_)}};
         if (orderedIndex_) attributes.emplace("indexNodesVisited", std::to_string(indexNodesVisited_));
         if (bounds_.bounded()) attributes.emplace("indexKeyRange", "true");
+        if (!projectedColumns_.empty())
+            attributes.emplace("projectedColumns", std::to_string(std::count(projectedColumns_.begin(),
+                projectedColumns_.end(), true)));
         if (!bounds_.disjointRanges().empty())
             attributes.emplace("indexRanges", std::to_string(bounds_.disjointRanges().size()));
         if (!bounds_.nullTests.empty()) attributes.emplace("indexNullFilter", "true");
@@ -5432,9 +5443,9 @@ public:
     }
 };
 
-OpPtr makePreparedTableSource(StorageEngine* engine, const std::string& database,
+static OpPtr makePreparedTableSource(StorageEngine* engine, const std::string& database,
     const std::shared_ptr<PreparedQuery>& query, SelectStmt* select,
-    const TableSchema& schema, OpPtr source) {
+    const TableSchema& schema, OpPtr source, const std::vector<bool>& projectedColumns) {
     if (auto narrowed = preparedCompositePrimarySource(engine, database, query, *select, schema, source, false))
         return narrowed;
     if (auto narrowed = literalBrinTableSource(engine, database, query, select, schema, source))
@@ -5458,7 +5469,7 @@ OpPtr makePreparedTableSource(StorageEngine* engine, const std::string& database
                 auto fallback = bounds->hasDisjunction ? heap() : std::move(source);
                 return std::make_unique<IntegerPrimaryKeyPageOp>(engine, database, schema, key->columnOrdinal,
                     select->offset.value_or(0) + *select->limit, !select->orderBy.front().asc, std::move(*bounds),
-                    std::move(fallback));
+                    std::move(fallback), projectedColumns);
             }
         }
         if (auto range = completeIntegerPrimaryRange(*engine, database, *query, *select, schema);
@@ -5466,7 +5477,7 @@ OpPtr makePreparedTableSource(StorageEngine* engine, const std::string& database
             const auto demand = select->orderBy.empty() ? simpleIntegerScanDemand(*select) : std::nullopt;
             return std::make_unique<IntegerPrimaryKeyPageOp>(engine, database, schema, range->first,
                 demand.value_or(std::numeric_limits<size_t>::max()), false, std::move(range->second),
-                heap(), select->whereClause.get());
+                heap(), projectedColumns, select->whereClause.get());
         }
     }
     const auto* equality = dynamic_cast<const BinaryOpExpr*>(select->whereClause.get());
@@ -5510,6 +5521,73 @@ OpPtr makePreparedTableSource(StorageEngine* engine, const std::string& database
         ExprHelper::canonicalResultTypeName(parameter->declaredType) != type) return heap();
     return std::make_unique<PreparedParameterIndexScanOp>(engine, database, table,
         key.dataName, type, query, parameter->slot, std::move(source));
+}
+
+OpPtr makePreparedTableSource(StorageEngine* engine, const std::string& database,
+    const std::shared_ptr<PreparedQuery>& query, SelectStmt* select,
+    const TableSchema& schema, OpPtr source) {
+    // The raw-row consumers need the complete physical value envelope.
+    return makePreparedTableSource(engine, database, query, select, schema, std::move(source), {});
+}
+
+static std::vector<bool> projectedPrimaryKeyReadColumns(const PreparedSelectState& state) {
+    const auto& select = *state.statement;
+    const auto& schema = state.schema;
+    if (state.sourceContexts || state.sourceOrdinal == PreparedSelectState::noTarget ||
+        !schema.hasPrimaryKey() || !schema.hasVariableLength() || schema.formatVersion != DATA_FILE_FORMAT_VERSION ||
+        !state.aggregates.empty() || !state.windows.empty() || !select.locking.empty() || select.having ||
+        !select.groupBy.empty() || !select.groupByElems.empty() || select.limitExpr || select.offsetExpr ||
+        (!select.whereClause && state.keys.empty())) return {};
+
+    std::vector<bool> columns(schema.len(), false);
+    bool complete = true;
+    const auto visit = [&](const auto& self, Expr* value) -> void {
+        if (!value || !complete) return;
+        if (value->preparedSubquery) { complete = false; return; }
+        switch (value->type) {
+            case ExprType::ColumnRef: {
+                const auto& column = static_cast<const ColumnRefExpr&>(*value);
+                const auto& input = column.binding;
+                if (!input || input->scopeDepth || input->mergedUsing || input->sourceOrdinal != state.sourceOrdinal ||
+                    input->columnOrdinal >= schema.len() || column.generatedRead || column.generatedBaseDeclaration ||
+                    schema.cols[input->columnOrdinal].generatedKind == 'v' ||
+                    schema.cols[input->columnOrdinal].dataName != column.column) {
+                    complete = false;
+                    return;
+                }
+                columns[input->columnOrdinal] = true;
+                return;
+            }
+            case ExprType::Literal:
+                complete = static_cast<const LiteralExpr&>(*value).value != "*";
+                return;
+            case ExprType::Parameter:
+                return;
+            case ExprType::FunctionCall: {
+                const auto& call = static_cast<const FunctionCallExpr&>(*value);
+                if (call.hasOver || call.setReturning || call.filter || !call.orderBy.empty() ||
+                    !call.aggregateOrderKeys.empty()) { complete = false; return; }
+                break;
+            }
+            case ExprType::UnaryOp: case ExprType::BinaryOp: case ExprType::CaseExpr:
+            case ExprType::CastExpr: case ExprType::ArrayExpr: case ExprType::RowExpr:
+            case ExprType::QuantifiedComparison:
+                break;
+            default:
+                complete = false;
+                return;
+        }
+        prepared_window_detail::spec_detail::valueChildren(value, [&](Expr* child) { self(self, child); });
+    };
+    for (auto* target : state.targets) visit(visit, target);
+    visit(visit, select.whereClause.get());
+    for (const auto& key : state.keys)
+        if (key.target == PreparedSelectState::noTarget) visit(visit, key.expression);
+    for (const auto& key : select.distinctOn) visit(visit, key.get());
+    if (!complete) return {};
+    for (size_t i = 0; i < schema.len(); ++i)
+        if (schema.cols[i].isVariableLength && !columns[i]) return columns;
+    return {};
 }
 
 std::vector<std::string> inheritedTableDescendants(StorageEngine& engine,
@@ -6169,8 +6247,11 @@ OpPtr QueryPlanner::buildPreparedSelectPlan(StorageEngine* engine,
     state->prepareExecution();
     const bool orderedWindow=prepareWindowOutputOrder(*state);
     prepareWindowResultSharing(*state,!state->keys.empty() && !orderedWindow);
+    if (typeid(*source) == typeid(TableScanOp))
+        state->projectedPhysicalColumns = projectedPrimaryKeyReadColumns(*state);
     source = makePreparedTableSource(engine, dbname, state->query, select,
-                                    sourceSchema, std::move(source));
+                                    sourceSchema, std::move(source), state->projectedPhysicalColumns);
+    if (!dynamic_cast<const IntegerPrimaryKeyPageOp*>(source.get())) state->projectedPhysicalColumns.clear();
     if (select->selectList.empty() && !select->whereClause && !select->having &&
         state->keys.empty() && state->aggregates.empty() && state->windowStages.empty() &&
         typeid(*source) == typeid(TableScanOp)) {

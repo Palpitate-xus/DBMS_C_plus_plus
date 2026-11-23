@@ -481,6 +481,50 @@ def presorted_page_controls(query, check_plan=True):
         index = nodes['IntegerPrimaryKeyPage']
         assert index['usedPrimaryKeyPage']=='true' and index['indexRanges']=='2', nodes
         assert int(index['heapRowsFetched']) == 12,nodes
+    projection = 'SELECT k FROM scalar_order_external ORDER BY k DESC LIMIT 17 OFFSET 2'
+    expect(projection, [[str(k)] for k in range(17, 0, -1)], [23])
+    explain = 'EXPLAIN (ANALYZE TRUE, TIMING FALSE, COSTS FALSE, FORMAT JSON) '
+    if check_plan:
+        nodes = plan_nodes(expect(explain + projection))
+        index = nodes['IntegerPrimaryKeyPage']
+        assert index['usedPrimaryKeyPage'] == 'true' and index.get('projectedColumns') == '1', nodes
+        assert int(index['heapRowsFetched']) == 19, nodes
+
+    expect('CREATE TABLE scalar_order_projection(k INTEGER PRIMARY KEY, tag text, a text, b text)')
+    notes = {k: (None if k % 3 == 0 else f'tag-{k}') for k in range(1, 13)}
+    payload_a = {k: str(k) + 'a'*4999 for k in notes}
+    payload_b = {k: str(k) + 'b'*5199 for k in notes}
+    rows = [(k, notes[k], payload_a[k], payload_b[k]) for k in (1 + i*5 % 12 for i in range(12))]
+    expect('INSERT INTO scalar_order_projection VALUES ' + ','.join(
+        f"({k},{repr(tag) if tag is not None else 'NULL'},'{a}','{b}')" for k, tag, a, b in rows))
+    projection = 'SELECT k,tag,a FROM scalar_order_projection ORDER BY k LIMIT 9'
+    expect(projection, [[str(k), notes[k], payload_a[k]] for k in range(1, 10)], [23,25,25])
+    if check_plan:
+        nodes = plan_nodes(expect(explain + projection))
+        index = nodes['IntegerPrimaryKeyPage']
+        assert index['usedPrimaryKeyPage'] == 'true' and index.get('projectedColumns') == '3', nodes
+    expect('SELECT k,tag FROM scalar_order_projection WHERE tag IS NULL ORDER BY k LIMIT 3',
+           [[str(k),None] for k in (3,6,9)], [23,25])
+    all_columns = 'SELECT * FROM scalar_order_projection ORDER BY k LIMIT 9'
+    expect(all_columns,
+           [[str(k), notes[k], payload_a[k], payload_b[k]] for k in range(1, 10)], [23,25,25,25])
+    if check_plan:
+        nodes = plan_nodes(expect(explain + all_columns))
+        assert nodes['IntegerPrimaryKeyPage']['usedPrimaryKeyPage'] == 'false', nodes
+    correlated = ('SELECT t.k,(SELECT length(t.b)) FROM scalar_order_projection t '
+                  'ORDER BY t.k DESC LIMIT 2')
+    expect(correlated, [[str(k),str(len(payload_b[k]))] for k in (12,11)], [23,23])
+    if check_plan:
+        nodes = plan_nodes(expect(explain + correlated))
+        assert 'projectedColumns' not in nodes.get('IntegerPrimaryKeyPage', {}), nodes
+    expect('CREATE TABLE scalar_order_generated(k INTEGER PRIMARY KEY, body TEXT, '
+           'size INTEGER GENERATED ALWAYS AS (length(body)) VIRTUAL)')
+    expect(f"INSERT INTO scalar_order_generated(k,body) VALUES (1,'{payload_a[1]}'),(2,NULL)")
+    generated = 'SELECT k,size FROM scalar_order_generated ORDER BY k LIMIT 2'
+    expect(generated, [['1', str(len(payload_a[1]))], ['2', None]], [23,23])
+    if check_plan:
+        nodes = plan_nodes(expect(explain + generated))
+        assert 'projectedColumns' not in nodes.get('IntegerPrimaryKeyPage', {}), nodes
     expect('CREATE TABLE scalar_order_scattered(k INTEGER PRIMARY KEY, payload TEXT)')
     physical_order = [1 + i*223 % 576 for i in range(576)]
     scattered_payload = {k: None if k % 7 == 0 else f'row-{k}' for k in physical_order}

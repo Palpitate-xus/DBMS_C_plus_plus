@@ -2,6 +2,11 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="primary-key-projection-comparison-20261123"></a>
+## 2026-11-23 · 按主键翻页时跳过未用的长文本
+
+PostgreSQL 通常在需要某个值时才读取另存的 TOAST 数据。SQLite 能从包含所需列的覆盖索引直接返回结果。DuckDB 读取 Parquet 时可以只读取查询需要的列。本项目会在有序单列整数主键读取和部分小范围读取中跳过未使用的外部值，继续从表页检查行及事务可见性。覆盖索引和可见性映射仍需验证和实现。 [PostgreSQL TOAST](https://www.postgresql.org/docs/18/storage-toast.html) · [PostgreSQL 18.6 读取源码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/access/common/detoast.c) · [SQLite 覆盖索引](https://www.sqlite.org/queryplanner.html#covidx) · [DuckDB 列读取](https://duckdb.org/docs/1.4/data/parquet/overview#partial-reading) · [性能对照](performance-report-2026-10-30.md#primary-key-projection-cost-20261123)
+
 <a id="ordered-heap-pages-comparison-20261123"></a>
 ## 2026-11-23 · 有序主键分页可以按表页合并读取
 

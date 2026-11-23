@@ -11050,10 +11050,12 @@ std::optional<OrderedPrimaryKeyReadPage> StorageEngine::tryReadOrderedIntegerPri
         const TableSchema& expectedSchema, size_t keyColumn, bool descending,
         size_t count, size_t byteBudget, std::optional<int64_t> lower,
         std::optional<int64_t> upper, const std::vector<OrderedPrimaryKeyNullTest>& nullTests,
-        bool completeRange, const std::vector<std::pair<int64_t, int64_t>>& disjointRanges) {
+        bool completeRange, const std::vector<std::pair<int64_t, int64_t>>& disjointRanges,
+        const std::vector<bool>& projectedColumns) {
     // Only files in the executable's locked data directory have the required
     // instance ownership. An external tablespace can outlive that lock.
     if (dataDirectory().empty() || !count || signedIntegerPrimaryKeyColumn(expectedSchema) != keyColumn ||
+        (!projectedColumns.empty() && projectedColumns.size() != expectedSchema.len()) ||
         transactionContext().txnIsolationLevel == IsolationLevel::SERIALIZABLE ||
         std::any_of(nullTests.begin(), nullTests.end(), [&](const auto& test) {
             return test.column >= expectedSchema.len();
@@ -11077,6 +11079,9 @@ std::optional<OrderedPrimaryKeyReadPage> StorageEngine::tryReadOrderedIntegerPri
         };
         if (layout(schema.cols[i]) != layout(expectedSchema.cols[i])) return {};
     }
+    bool readExternalValues = projectedColumns.empty();
+    for (size_t i = 0; !readExternalValues && i < schema.len(); ++i)
+        readExternalValues = projectedColumns[i] && schema.cols[i].isVariableLength;
     ReadView autocommit, commandView;
     const auto before = indexReadSnapshotFence(dbname);
     // For an existing READ COMMITTED command, the ordinary scan establishes
@@ -11231,21 +11236,26 @@ std::optional<OrderedPrimaryKeyReadPage> StorageEngine::tryReadOrderedIntegerPri
         }
         if (bitmap[keyColumn] ||
             parseStoredInteger(extractColumnValueStatic(raw, schema, keyColumn)) != keyValue) return false;
-        bool toastOk = false;
-        detail::ScopedStoredRowNullBitmap nullOwner(schema, bitmap);
-        auto value = resolveToastValues(dbname, tablename, raw, schema, &toastOk);
-        if (!toastOk) return false;
+        if (readExternalValues) {
+            bool toastOk = false;
+            detail::ScopedStoredRowNullBitmap nullOwner(schema, bitmap);
+            if (projectedColumns.empty())
+                raw = resolveToastValues(dbname, tablename, raw, schema, &toastOk);
+            else if (auto expanded = expandToastRow(dbname, tablename, raw, schema, &toastOk, projectedColumns))
+                raw = std::move(*expanded);
+            if (!toastOk) return false;
+        }
         ++result.heapRowsFetched;
         if (std::any_of(nullTests.begin(), nullTests.end(), [&](const auto& test) {
             return bitmap[test.column] != test.expectsNull;
         })) return true;
         const size_t rowOverhead = sizeof(HeapScanRow) + bitmap.capacity() / 8;
         if (keyBufferBytes > remaining || rowOverhead > remaining - keyBufferBytes ||
-            value.capacity() > remaining - keyBufferBytes - rowOverhead)
+            raw.capacity() > remaining - keyBufferBytes - rowOverhead)
             return false;
-        remaining -= rowOverhead + value.capacity();
+        remaining -= rowOverhead + raw.capacity();
         if (pageCopy && pageBytes > remaining - keyBufferBytes) pageCopy.reset();
-        result.rows.push_back({rid, std::move(value), std::move(bitmap)});
+        result.rows.push_back({rid, std::move(raw), std::move(bitmap)});
         return true;
     };
 
@@ -13142,13 +13152,19 @@ void detail::decodeStoredRowInputs(StorageEngine& engine,
                                   const TableSchema& schema,
                                   const std::vector<bool>& storedNulls,
                                   std::vector<std::string>& values,
-                                  std::vector<bool>& nulls) {
-    if (storedNulls.size() != schema.len())
+                                  std::vector<bool>& nulls,
+                                  const std::vector<bool>& projectedColumns) {
+    if (storedNulls.size() != schema.len() ||
+        (!projectedColumns.empty() && projectedColumns.size() != schema.len()))
         throw DbError("XX000", "stored row NULL bitmap width mismatch");
     BufferedNullRowBinding binding(schema, storedNulls);
     values.clear(); nulls.clear();
     values.reserve(schema.len()); nulls.reserve(schema.len());
     for (size_t i = 0; i < schema.len(); ++i) {
+        if (!projectedColumns.empty() && !projectedColumns[i]) {
+            values.emplace_back(); nulls.push_back(true);
+            continue;
+        }
         if (schema.cols[i].generatedKind == 'v') {
             // The prepared consumer skips both placeholder lanes, then
             // attaches its real read recipe/presence with setSourceInputs.
@@ -21124,7 +21140,8 @@ std::string StorageEngine::resolveToastValues(const std::string& dbname,
 
 std::optional<std::string> StorageEngine::expandToastRow(
     const std::string& dbname, const std::string& tablename,
-    const std::string& rowBuffer, const TableSchema& tbl, bool* ok) {
+    const std::string& rowBuffer, const TableSchema& tbl, bool* ok,
+    const std::vector<bool>& projectedColumns) {
     if (ok) *ok = true;
     const size_t variableColumns = tbl.varColCount();
     if (variableColumns == 0) return std::nullopt;
@@ -21141,6 +21158,10 @@ std::optional<std::string> StorageEngine::expandToastRow(
     bool foundMarker = false;
     for (size_t i = 0; i < tbl.len(); ++i) {
         if (!tbl.cols[i].isVariableLength) continue;
+        if (!projectedColumns.empty() && !projectedColumns[i]) {
+            values.emplace_back();
+            continue;
+        }
         std::string val = extractColumnValueStatic(rowBuffer, tbl, i);
         uint64_t toastId = 0;
         if (parseToastMarker(val, toastId)) {

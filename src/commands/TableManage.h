@@ -1701,7 +1701,8 @@ public:
         size_t count, size_t byteBudget, std::optional<int64_t> lower = {},
         std::optional<int64_t> upper = {},
         const std::vector<OrderedPrimaryKeyNullTest>& nullTests = {}, bool completeRange = false,
-        const std::vector<std::pair<int64_t, int64_t>>& disjointRanges = {});
+        const std::vector<std::pair<int64_t, int64_t>>& disjointRanges = {},
+        const std::vector<bool>& projectedColumns = {});
 
     // Schema helpers (public for execution plan use)
     static std::string extractPKValue(const std::string& rowBuffer, const TableSchema& tbl);
@@ -1971,7 +1972,8 @@ private:
         const TableSchema* lockedSchema) const;
     std::optional<std::string> expandToastRow(
         const std::string& dbname, const std::string& tablename,
-        const std::string& rowBuffer, const TableSchema& schema, bool* ok);
+        const std::string& rowBuffer, const TableSchema& schema, bool* ok,
+        const std::vector<bool>& projectedColumns = {});
     int64_t nextvalWithIdentity(const std::string& dbname,
                                const std::string& seqname,
                                uint32_t expectedOid);
