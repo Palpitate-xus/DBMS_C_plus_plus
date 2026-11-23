@@ -4,6 +4,7 @@
 #include "expression/StoredRegtypeValue.h"
 #include "expression/ArrayDatumInput.h"
 #include "executor/PreparedTableSource.h"
+#include "executor/CompositeKeyLookup.h"
 #include "executor/EqualityStatistics.h"
 #include "executor/AnalyzedSelectivity.h"
 #include "executor/LikePrefix.h"
@@ -2882,19 +2883,23 @@ static std::optional<std::string> compositeLiteralValue(const Expr* input,
     return compositeEqualityValue(type, *literal);
 }
 
-static void collectCompositePredicates(const TableSchema& schema, const std::vector<size_t>& columns,
+static size_t collectCompositePredicates(const TableSchema& schema, const std::vector<size_t>& columns,
         const Expr* predicate, std::optional<size_t> range,
         std::map<size_t, CompositeEqualityInput>& matches) {
     std::vector<const Expr*> terms{predicate};
+    size_t conjuncts = 0;
     while (!terms.empty()) {
-        const auto* binary = dynamic_cast<const BinaryOpExpr*>(terms.back());
+        const auto* term = terms.back();
+        const auto* binary = dynamic_cast<const BinaryOpExpr*>(term);
         terms.pop_back();
-        if (!binary || binary->preparedSubquery) continue;
-        if (binary->op == "AND" || binary->op == "and") {
+        if (binary && !binary->preparedSubquery &&
+            (binary->op == "AND" || binary->op == "and")) {
             terms.push_back(binary->right.get());
             terms.push_back(binary->left.get());
             continue;
         }
+        ++conjuncts;
+        if (!binary || binary->preparedSubquery) continue;
         if (binary->op != "=" || binary->rowComparison) continue;
         if (binary->comparison && (!binary->comparison->strict ||
             binary->comparison->identity.rfind("builtin-comparison:=", 0) != 0 ||
@@ -2958,6 +2963,7 @@ static void collectCompositePredicates(const TableSchema& schema, const std::vec
                 matches.emplace(ordinal, CompositeEqualityInput{ordinal, key.dataName, type, *value, {}});
         }
     }
+    return conjuncts;
 }
 
 static std::vector<CompositeEqualityInput> orderedCompositeInputs(const std::vector<size_t>& columns,
@@ -11264,29 +11270,29 @@ static OpPtr ordinaryBrinTableSource(StorageEngine* engine, const PlanContext& c
         schema, bestPages, bestPages * 32.0, *bestCost);
 }
 
-static OpPtr compactCompositePrimarySource(StorageEngine* engine,
-        const PlanContext& context, const TableSchema& table) {
+static std::vector<CompositeEqualityInput> compactCompositeInputs(
+        const TableSchema& table, const std::vector<StorageEngine::Condition>& conditions) {
     const auto columns = compositePrimaryColumns(table);
-    if (columns.empty() || context.conds.empty()) return {};
+    if (columns.empty() || conditions.empty()) return {};
     std::map<size_t, CompositeEqualityInput> matches;
     for (const auto index : columns) {
         if (index >= table.len()) return {};
         const auto& column = table.cols[index];
         const auto type = compositeEqualityType(column);
         if (type.empty()) return {};
-        const auto condition = std::find_if(context.conds.begin(), context.conds.end(),
+        const auto condition = std::find_if(conditions.begin(), conditions.end(),
             [&](const auto& item) {
                 return item.colName == column.dataName && item.op == "=" &&
                     item.decodedLiteralRhs && !item.patternIsNull && !item.referenceInputOid &&
                     (item.patternType.empty() || item.patternType == "unknown");
             });
-        if (condition == context.conds.end()) continue;
+        if (condition == conditions.end()) continue;
         const auto value = compositeEqualityValue(type, condition->value);
         if (value)
             matches.emplace(index, CompositeEqualityInput{index, column.dataName, type, *value, {}});
     }
     if (matches.size() < columns.size()) {
-        for (const auto& condition : context.conds) {
+        for (const auto& condition : conditions) {
             if (condition.op != "typedexpr") continue;
             SQLParser parser;
             auto parsed = parser.parseForBinding("SELECT " + condition.value);
@@ -11295,7 +11301,37 @@ static OpPtr compactCompositePrimarySource(StorageEngine* engine,
             collectCompositePredicates(table, columns, select->selectList.front().expr.get(), {}, matches);
         }
     }
-    auto inputs = orderedCompositeInputs(columns, matches);
+    return orderedCompositeInputs(columns, matches);
+}
+
+std::map<std::string, std::string> composite_key_lookup::compactValues(
+        const TableSchema& table, const std::vector<StorageEngine::Condition>& conditions) {
+    std::map<std::string, std::string> values;
+    for (const auto& input : compactCompositeInputs(table, conditions))
+        values.emplace(input.name, input.value);
+    return values;
+}
+
+std::map<std::string, std::string> composite_key_lookup::boundMutationValues(
+        const TableSchema& table, const Expr* predicate, size_t target) {
+    const auto columns = compositePrimaryColumns(table);
+    if (columns.empty() || !predicate) return {};
+    std::map<size_t, CompositeEqualityInput> matches;
+    // Keep expressions outside the exact key conjunction on their existing
+    // demand path. The compact binding has no slot owner for runtime inputs.
+    const auto count = collectCompositePredicates(table, columns, predicate, target, matches);
+    if (count != columns.size() || matches.size() != columns.size()) return {};
+    std::map<std::string, std::string> values;
+    for (const auto& [ordinal, input] : matches) {
+        if (input.slot) return {};
+        values.emplace(input.name, input.value);
+    }
+    return values;
+}
+
+static OpPtr compactCompositePrimarySource(StorageEngine* engine,
+        const PlanContext& context, const TableSchema& table) {
+    auto inputs = compactCompositeInputs(table, context.conds);
     if (inputs.empty()) return {};
     auto fallback = std::make_unique<TableScanOp>(engine, context.dbname, context.tablename);
     return std::make_unique<CompositePrimaryKeyScanOp>(engine, context.dbname, table,

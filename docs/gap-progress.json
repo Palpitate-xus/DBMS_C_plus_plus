@@ -2,6 +2,18 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-23 locate ordinary update and delete targets by complete composite primary keys",
+      "gap_ids": ["IDX-03", "OPT-01", "TXN-08"],
+      "status": "partial",
+      "evidence": ["src/commands/TableManage.cpp", "src/commands/DmlExecutor.cpp", "src/executor/CompositeKeyLookup.h", "docs/MANUAL.md", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/compat/cases/composite_primary_mutation.sql", "tests/composite_primary_mutation_protocol_e2e_test.py"],
+      "verification": [
+        "All 56 ordinary and extended replies and 23 separate lock-wait replies match PostgreSQL 18.6. Counters confirm that ordinary statements and binary binds use the index for eligible complete keys.",
+        "Legacy indexes and a transaction with previous writes retain the heap path. Process termination before and after commit verified rollback, retained writes and subsequent index access.",
+        "Paired update and delete timings use the same fixture. Multicolumn range scans, joined target planning and complete PostgreSQL lock semantics remain open."
+      ]
+    },
+    {
       "issue": "2026-11-23 probe complete composite primary keys on current ordinary-table snapshots",
       "gap_ids": ["IDX-03", "OPT-01"],
       "status": "partial",

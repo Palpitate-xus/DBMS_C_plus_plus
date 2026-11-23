@@ -67,6 +67,7 @@
 #include "expression/assignment_input.h"
 #include "expression/ExprEvaluator.h"
 #include "executor/ExecutionPlan.h"
+#include "executor/CompositeKeyLookup.h"
 #include "executor/LikePrefix.h"
 #include "expression/SqlPattern.h"
 #include "expression/ExpressionVolatility.h"
@@ -33973,6 +33974,18 @@ DBStatus StorageEngine::insertDefaultValues(const std::string& dbname,
 // The ordinary mutation path already holds the target's intention lock.
 // Its write marker is set before matching. Only the original, unmodified
 // command snapshot can use the current index to identify a target.
+template<typename Context>
+static bool canProbeCurrentMutationKey(const TableSchema& table,
+        const std::string& tablename, const Context& context, uint64_t ownerBeforeWrite,
+        PageAllocator* allocator) {
+    return ownerBeforeWrite && context.currentTxnId == ownerBeforeWrite &&
+        (context.txnIsolationLevel == IsolationLevel::READ_COMMITTED ||
+         context.txnIsolationLevel == IsolationLevel::REPEATABLE_READ) &&
+        context.readView.commandIdVisibility && !context.commandInternalRelations.count(tablename) &&
+        allocator && !dataDirectory().empty() && !table.isUnlogged &&
+        !isSessionTemporaryRelation(tablename);
+}
+
 template<typename Context, typename Registry>
 static std::optional<int64_t> matchCurrentIntegerPrimaryKey(
         StorageEngine& engine, const std::string& dbname, const std::string& tablename,
@@ -33980,11 +33993,7 @@ static std::optional<int64_t> matchCurrentIntegerPrimaryKey(
         Context& context, uint64_t ownerBeforeWrite, std::recursive_mutex& cacheMutex,
         PageAllocator* allocator, Registry& registry,
         const StorageEngine::SqlMutationCallbacks* callbacks) {
-    if (!ownerBeforeWrite || context.currentTxnId != ownerBeforeWrite ||
-        (context.txnIsolationLevel != IsolationLevel::READ_COMMITTED &&
-         context.txnIsolationLevel != IsolationLevel::REPEATABLE_READ) ||
-        !context.readView.commandIdVisibility || context.commandInternalRelations.count(tablename) ||
-        !allocator || dataDirectory().empty() || table.isUnlogged || isSessionTemporaryRelation(tablename))
+    if (!canProbeCurrentMutationKey(table, tablename, context, ownerBeforeWrite, allocator))
         return {};
     std::vector<StorageEngine::Condition> probe;
     if (conditions.empty() && callbacks && !callbacks->targetPrimaryKeyProbe.empty())
@@ -34063,6 +34072,74 @@ static std::optional<int64_t> matchCurrentIntegerPrimaryKey(
     context.hasRead = true;
     context.querySnapshotUsed = true;
     return rid;
+}
+
+template<typename Context, typename Registry>
+static std::optional<DBStatus> matchCurrentCompositePrimaryKey(
+        StorageEngine& engine, const std::string& dbname, const std::string& tablename,
+        const TableSchema& table, std::vector<StorageEngine::Condition>& conditions,
+        Context& context, uint64_t ownerBeforeWrite, std::recursive_mutex& cacheMutex,
+        PageAllocator* allocator, Registry& registry, std::set<int64_t>& targets) {
+    if (!primary_key_index::isCompoundKey(table) || conditions.empty() ||
+        !canProbeCurrentMutationKey(table, tablename, context, ownerBeforeWrite, allocator))
+        return {};
+    const auto values = composite_key_lookup::compactValues(table, conditions);
+    if (values.empty()) return {};
+    checkForQueryInterrupt();
+    const auto fence = currentIndexSnapshotFence(context, dbname, false, registry);
+    if (!fence) return {};
+    const auto command = context.currentCommandId;
+    std::vector<int64_t> positions;
+    {
+        std::lock_guard<std::recursive_mutex> lock(cacheMutex);
+        const auto* index = engine.getPKIndex(dbname, tablename);
+        if (!index || !index->isOpen()) return DBStatus::IO_ERROR;
+        if (!index->hasCompletePrimaryPrefixes()) return {};
+        if (!index->searchMultiChecked(table.buildPKValue(values), positions))
+            return DBStatus::IO_ERROR;
+    }
+
+    // Copy only snapshot-visible payloads before rechecking the allocation
+    // fence. Residual predicates can invoke SQL and must execute once, after
+    // the probe has been accepted. The normal writer acquires the row lock.
+    std::vector<std::pair<int64_t, std::string>> candidates;
+    for (const auto rid : positions) {
+        checkForQueryInterrupt();
+        uint32_t page = 0;
+        uint16_t slot = 0;
+        StorageEngine::decodeRid(rid, page, slot);
+        if (!page || page >= allocator->numPages() ||
+            StorageEngine::encodeRid(page, slot) != rid) return DBStatus::IO_ERROR;
+        std::string row;
+        bool failed = false;
+        if (!engine.readIndexedRowByRid(dbname, tablename, rid, row, table,
+                                        &context.readView, &failed)) {
+            if (failed) return DBStatus::IO_ERROR;
+            return {};
+        }
+        candidates.emplace_back(rid, std::move(row));
+    }
+    if (context.currentTxnId != ownerBeforeWrite || context.currentCommandId != command ||
+        currentIndexSnapshotFence(context, dbname, false, registry) != fence) return {};
+
+    auto predicates = prepareStoredUnknownBitScalarInputs(table, conditions);
+    prepareFilterConditions(engine, dbname, table, predicates);
+    LocalExpressionSyntax syntax;
+    const auto metadata = freezeGeneratedStorageInput(table, dbname, tablename, &engine);
+    // The fixed-width index can group distinct logical keys. As on the
+    // heap path, only the full predicates can qualify a target. For
+    // typed DML, the caller also runs its original bound WHERE.
+    for (const auto& [rid, row] : candidates) {
+        NullRowBinding binding(&engine, dbname, tablename, rid, table.len());
+        if (std::all_of(predicates.begin(), predicates.end(), [&](const auto& predicate) {
+                return StorageEngine::evalConditionOnRowWithSyntax(
+                    predicate, row, table, &syntax, metadata.get());
+            })) targets.insert(rid);
+    }
+    context.hasRead = true;
+    context.querySnapshotUsed = true;
+    recordTableScan(dbname, tablename, candidates.size(), true, false);
+    return DBStatus::OK;
 }
 
 enum class IntegerHeapCollection { Unavailable, Collected, IoError };
@@ -34813,6 +34890,9 @@ DBStatus StorageEngine::removeInternal(
         if (const auto target = matchCurrentIntegerPrimaryKey(*this, dbname, tablename,
                 tbl, conds, context, ownerBeforeWrite, cacheMutex_, pa, transactionRegistry(), mutationCallbacks))
             toDelete.insert(*target);
+        else if (const auto status = matchCurrentCompositePrimaryKey(*this, dbname, tablename,
+                tbl, conds, context, ownerBeforeWrite, cacheMutex_, pa, transactionRegistry(), toDelete))
+            scanFailed = *status != DBStatus::OK;
         else {
             const auto collected = collectIntegerHeapEquality(
                 *this, dbname, tablename, tbl, mutationCallbacks, bool(deleteMatcher),
@@ -36479,6 +36559,9 @@ DBStatus StorageEngine::updateInternal(
         if (const auto target = matchCurrentIntegerPrimaryKey(*this, dbname, tablename,
                        tbl, conds, context, ownerBeforeWrite, cacheMutex_, pa, transactionRegistry(), mutationCallbacks)) {
             matchIds.insert(*target);
+        } else if (const auto status = matchCurrentCompositePrimaryKey(*this, dbname, tablename,
+                       tbl, conds, context, ownerBeforeWrite, cacheMutex_, pa, transactionRegistry(), matchIds)) {
+            scanFailed = *status != DBStatus::OK;
         } else if (conds.empty()) {
             const auto collected = collectIntegerHeapEquality(
                 *this, dbname, tablename, tbl, mutationCallbacks, bool(updateMatcher),

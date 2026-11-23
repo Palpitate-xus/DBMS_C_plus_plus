@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>按店铺和订单号修改或删除订单更快 · 2026-11-23</summary>
+
+修改某家店的第 42 号订单时，数据库先用两个编号缩小范围。删除这笔订单时也一样。
+
+[测试报告](docs/test-report.md#composite-primary-mutation-20261123) · [性能报告](docs/performance-report-2026-10-30.md#composite-primary-mutation-cost-20261123)
+
+</details>
+
+<details>
 <summary>同时按店铺和订单号查找更快 · 2026-11-23</summary>
 
 查某家店的第 42 号订单时，数据库先用两个编号缩小范围，再核对完整编号。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>开头一样的长编号可以分别保存和查找 · 2026-11-23</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-23 · 开头一样的长编号可以分别保存和查找
 
 如果用一个文本编号来区分订单，即使两个编号开头一样，也能按完整编号找到各自的订单。
 
 [测试报告](docs/test-report.md#long-text-primary-keys-20261123) · [性能报告](docs/performance-report-2026-10-30.md#long-text-primary-keys-cost-20261123)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-22 · 按编号查订单时可以少读数据
 

@@ -1267,7 +1267,7 @@ UPDATE items SET label = '已复核' WHERE id = 42 RETURNING id, label;
 DELETE FROM items WHERE id = 43 RETURNING id;
 ```
 
-这一查找方式要求可用的新版主键索引和仍能使用当前索引的语句快照，适用于符合条件的 `READ COMMITTED` 或 `REPEATABLE READ` 事务。索引未命中、事务内已有写入、复合主键、范围条件和旧索引都沿用表扫描。[测试范围](test-report.md#integer-primary-key-mutation-20261119)
+这一查找方式要求可用的新版主键索引和仍能使用当前索引的语句快照，适用于符合条件的 `READ COMMITTED` 或 `REPEATABLE READ` 事务。单列整数索引未命中、事务内已有写入、范围条件和旧索引都沿用表扫描。[测试范围](test-report.md#integer-primary-key-mutation-20261119)
 
 带来源表的 `UPDATE ... FROM` 和 `DELETE ... USING` 也可用这个查找方式。条件开头需用同类型的整数值和目标表的主键作等值比较。核实索引命中后，数据库仍计算来源和完整条件。索引未命中时沿用原来的查找方式。[带来源表的测试](test-report.md#joined-primary-key-target-20261119)
 
@@ -1275,6 +1275,19 @@ DELETE FROM items WHERE id = 43 RETURNING id;
 UPDATE items AS t SET label = s.label FROM proposed_labels AS s
 WHERE t.id = 42 AND t.id = s.item_id;
 ```
+
+### 按复合主键修改或删除
+
+给出主键每一列的等值条件时，普通表的首次写入可以用索引定位目标。支持 `text`、`varchar` 和有符号整数的组合。旧库可先运行 `REINDEX TABLE shop_orders;` 重建索引。索引命中后会核对各列，等待行锁后会按事务规则重新检查条件。旧事务快照或同一事务已写入时沿用表扫描。
+
+```sql
+UPDATE shop_orders SET order_number = 43
+WHERE shop_code = 'north' AND order_number = 42 RETURNING order_number;
+DELETE FROM shop_orders
+WHERE shop_code = 'north' AND order_number = 43 RETURNING order_number;
+```
+
+[协议与恢复测试](test-report.md#composite-primary-mutation-20261123)
 
 ### 同时修改同一行
 

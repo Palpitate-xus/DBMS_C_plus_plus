@@ -20,6 +20,7 @@
 #include "expression/expr_helper.h"
 #include "expression/prepared_query_execution.h"
 #include "executor/ExecutionPlan.h"
+#include "executor/CompositeKeyLookup.h"
 #include "parser/parser.h"
 #include "permissions.h"
 #include "types/numeric.h"
@@ -4537,6 +4538,17 @@ static std::vector<std::string> boundIntegerPrimaryKeyCandidates(
     return conditions;
 }
 
+static std::vector<std::string> boundCompositePrimaryKeyCandidates(
+        const Expr* where, const TableSchema& table, size_t target) {
+    const auto values = composite_key_lookup::boundMutationValues(table, where, target);
+    std::vector<std::string> conditions;
+    conditions.reserve(values.size());
+    for (const auto& [column, value] : values)
+        conditions.push_back("apicond =" + regtype_detail::quoted(column) +
+                             " " + quoteSetLiteral(value));
+    return conditions;
+}
+
 // A necessary predicate only: storage scans the heap and the original bound
 // WHERE remains authoritative for every candidate and every locked successor.
 static std::optional<StorageEngine::IntegerHeapEqualityCandidate>
@@ -4858,6 +4870,8 @@ bool executePreparedUpdate(const UpdateStmt& stmt, Session& s, bool& fallback,
     // RETURNING metadata, but leave all leaves untouched for ONLY.
     if (!update->only || table.partitionType == TableSchema::PartitionType::None) {
         auto candidates = boundIntegerPrimaryKeyCandidates(update->whereClause.get(), table, targetOrdinal);
+        if (candidates.empty())
+            candidates = boundCompositePrimaryKeyCandidates(update->whereClause.get(), table, targetOrdinal);
         if (candidates.empty()) {
             callbacks.integerHeapEquality = boundIntegerHeapEquality(update->whereClause.get(), table, targetOrdinal);
             const auto& equality = callbacks.integerHeapEquality;
@@ -7034,7 +7048,10 @@ private:
         }
         callbacks.integerHeapEquality = boundIntegerHeapEquality(
             remove->whereClause.get(), table_, target_->ordinal);
-        const auto status=g_engine.removeRows(session_.currentDB,physical_,integerEqualityCandidates(remove->whereClause.get()),returning_->empty()?nullptr:&images,matcher,&count,&callbacks,virtualRows.output(),true);
+        auto candidates = integerEqualityCandidates(remove->whereClause.get());
+        if (candidates.empty())
+            candidates = boundCompositePrimaryKeyCandidates(remove->whereClause.get(), table_, target_->ordinal);
+        const auto status=g_engine.removeRows(session_.currentDB,physical_,candidates,returning_->empty()?nullptr:&images,matcher,&count,&callbacks,virtualRows.output(),true);
         if(status!=DBStatus::OK)throw DbError(sqlstateForDBStatus(status),"WITH DELETE failed");
         return result(deletedReturningImages(images,&virtualRows),"DELETE",count);
     }

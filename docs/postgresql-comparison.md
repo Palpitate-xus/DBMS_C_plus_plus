@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-23 · 用索引定位要修改或删除的行
+
+PostgreSQL 用语句快照选择目标，默认隔离级别下遇到并发修改会等待，再在已提交的新版本上检查原条件。SQLite 的 `UPDATE` 和 `DELETE` 用通用条件规划器定位行，并按语句特点选择直接写入或先收集行标识。DuckDB 将部分更新改写为删除再插入，带主键或唯一约束的表需要维护 ART 索引。[PostgreSQL 事务隔离](https://www.postgresql.org/docs/18/transaction-iso.html) · [SQLite 更新](https://github.com/sqlite/sqlite/blob/master/src/update.c) · [SQLite 删除](https://github.com/sqlite/sqlite/blob/master/src/delete.c) · [DuckDB 索引](https://duckdb.org/docs/1.5/sql/indexes)
+
+本项目可以用完整复合键定位单表修改或删除的候选。语句快照与当前索引对不上时，沿用表扫描。进入写入前仍使用原有行锁及重查流程，带来源表、范围条件及分区表的复合主键写入路径仍有差距。[并发验证](test-report.md#composite-primary-mutation-20261123) · [性能](performance-report-2026-10-30.md#composite-primary-mutation-cost-20261123)
+
 ## 2026-11-23 · 多列条件一起定位记录
 
 PostgreSQL 的多列 B-tree 优先根据前导列的等值条件和相邻范围列缩小扫描。SQLite 的多列索引也能同时处理用 `AND` 连接的多个条件。DuckDB 1.5 用 ART 实施主键和唯一约束，文档中的查询索引扫描适用于单列索引。[PostgreSQL 多列索引](https://www.postgresql.org/docs/18/indexes-multicolumn.html) · [SQLite 查询规划](https://www.sqlite.org/queryplanner.html#multi_column_indices) · [DuckDB 1.5 索引](https://duckdb.org/docs/1.5/guides/performance/indexing)
