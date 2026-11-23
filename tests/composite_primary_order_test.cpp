@@ -1,4 +1,5 @@
 #include "access/PrimaryKeyIndex.h"
+#include "catalog/CatalogService.h"
 #include "catalog/type_registry.h"
 #include "commands/TableManage.h"
 #include "executor/ExecutionPlan.h"
@@ -114,6 +115,65 @@ int main() {
     assert(g_engine.finishSqlCommand());
     assert(g_engine.commitTransaction() == DBStatus::OK);
     assert(index->removeMulti(collision, foreignRows.front()));
+
+    // Simulate a collision spanning multiple B-tree leaves and refill
+    // batches. Every candidate at the shared key is read exactly once.
+    const auto shared = key("0");
+    std::vector<int64_t> duplicates;
+    for (int i = 101; i <= 400; ++i) {
+        const auto order = std::to_string(i);
+        assert(g_engine.insertRow(database, name,
+            {{"store", prefix + "B"}, {"ord", order}, {"note", "foreign"}}) == DBStatus::OK);
+        const auto actualKey = primary_key_index::keyForValues(table, *index,
+            {{"store", prefix + "B"}, {"ord", order}});
+        const auto actualRows = index->searchMulti(actualKey);
+        assert(actualRows.size() == 1 && index->insertMulti(shared, actualRows.front()));
+        duplicates.push_back(actualRows.front());
+    }
+    // The native CREATE helper writes storage only. Publish the physical
+    // relation's declared types for the ordinary SQL binder as well.
+    auto& catalog = g_engine.catalogService().get(database);
+    const auto publicSchema = catalog.getNamespaceByName("public");
+    assert(publicSchema);
+    PgClassRow relation;
+    relation.relname = name;
+    relation.relnamespace = publicSchema->oid;
+    relation.relnatts = table.len();
+    const Oid relationOid = catalog.createClass(relation);
+    assert(relationOid);
+    for (size_t i = 0; i < table.len(); ++i) {
+        const auto& column = table.cols[i];
+        PgAttributeRow attribute;
+        attribute.attrelid = relationOid;
+        attribute.attname = column.dataName;
+        attribute.attnum = i + 1;
+        attribute.atttypid = mapBuiltinTypeNameToOid(column.dataType);
+        const auto type = catalog.getType(attribute.atttypid);
+        assert(type);
+        attribute.attlen = type->typlen;
+        attribute.attnotnull = !column.isNull;
+        catalog.addAttribute(attribute);
+    }
+    assert(catalog.persistAll());
+    assert(g_engine.beginTransaction(database) == DBStatus::OK);
+    assert(g_engine.beginSqlCommand());
+    for (bool ascending : {true, false}) {
+        const auto sql = "SELECT ord FROM purchases WHERE store=CAST('" + prefix +
+            "A' AS pg_catalog.varchar) AND note IS NOT NULL ORDER BY ord " +
+            (ascending ? "ASC" : "DESC") + " LIMIT 2 OFFSET 1";
+        before = stats();
+        const auto page = QueryPlanner::executePlanChecked(QueryPlanner::buildPreparedSelectPlan(
+            &g_engine, database, name, g_engine.prepareBoundQuery(database, sql)));
+        assert(page.ok && page.structuredRows.size() == 2);
+        assert(page.structuredRows[0].at(0) == (ascending ? "-2" : "3"));
+        assert(page.structuredRows[1].at(0) == (ascending ? "3" : "-2"));
+        after = stats();
+        assert(after.seqScan == before.seqScan && after.idxScan - before.idxScan == 1);
+        assert(after.idxTupFetch - before.idxTupFetch == 304);
+    }
+    assert(g_engine.finishSqlCommand());
+    assert(g_engine.commitTransaction() == DBStatus::OK);
+    for (auto rid : duplicates) assert(index->removeMulti(shared, rid));
 
     QueryPlanner::setCostModel(savedCosts);
     assert(g_engine.dropDatabase(database) == DBStatus::OK);

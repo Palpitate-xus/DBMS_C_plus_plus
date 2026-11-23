@@ -2510,6 +2510,66 @@ struct CompositeSuffixOrder {
 
 static bool compositeOperandType(const std::string&, const std::string&);
 
+// Own one heap page while qualifying an ordered batch. The page lock and
+// buffer pin are released before any SQL expression or TOAST lookup runs.
+class CompositeHeapPage {
+    LockManager& locks_;
+    PageAllocator& allocator_;
+    const std::string& database_;
+    const TableSchema& schema_;
+    StorageEngine::ReadView view_;
+    alignas(PgPage::MAXALIGN) std::array<char, PgPage::PAGE_SIZE> bytes_;
+    uint32_t pageId_ = 0;
+
+    void load(uint32_t page) {
+        if (!locks_.pageLockShared(database_, schema_.tablename, page))
+            throw DbError("55P03", "could not obtain heap page lock");
+        struct ReleasePage {
+            LockManager& locks;
+            PageAllocator& allocator;
+            const std::string& database;
+            const std::string& table;
+            uint32_t page;
+            bool pinned = false;
+            ~ReleasePage() {
+                if (pinned) allocator.unpinPage(page);
+                locks.pageUnlock(database, table, page);
+            }
+        } release{locks_, allocator_, database_, schema_.tablename, page};
+        const char* buffer = allocator_.fetchPage(page);
+        if (!buffer) throw DbError("58030", "could not read indexed heap page");
+        release.pinned = true;
+        std::copy_n(buffer, bytes_.size(), bytes_.data());
+        pageId_ = page;
+    }
+
+public:
+    CompositeHeapPage(LockManager& locks, PageAllocator& allocator, const std::string& database,
+                      const TableSchema& schema, const StorageEngine::ReadView& view)
+        : locks_(locks), allocator_(allocator), database_(database), schema_(schema), view_(view) {}
+
+    bool read(uint32_t page, uint16_t slot, std::string& row, std::vector<bool>& nulls) {
+        if (page != pageId_) load(page);
+        PageWrapper heap(bytes_.data(), bytes_.size(), schema_.formatVersion);
+        const char* tuple = nullptr;
+        size_t length = 0;
+        if (!heap.read(slot, tuple, length)) return false;
+        if (length < sizeof(HeapTupleHeaderData))
+            throw DbError("XX001", "invalid indexed heap tuple header");
+        if (!view_.isVisible(tuple, length, schema_.formatVersion)) return false;
+        const auto* header = castHeapHeader(tuple);
+        const size_t minimum = sizeof(HeapTupleHeaderData) +
+            ((header->t_infomask & HEAP_HASNULL) ? (schema_.len() + 7) / 8 : 0);
+        if (header->t_hoff < minimum || header->t_hoff >= length)
+            throw DbError("XX001", "invalid indexed heap tuple header");
+        row.assign(tuple + header->t_hoff, length - header->t_hoff);
+        nulls.assign(schema_.len(), false);
+        for (size_t column = 0; column < schema_.len(); ++column)
+            if (schema_.cols[column].isNull) nulls[column] = dbms::isNull(header, static_cast<int>(column));
+        return true;
+    }
+};
+
 // The tree can only narrow a current snapshot, and several distinct full
 // keys can share the same stored bytes. Keep the original SQL predicate
 // above this source and verify the exact key before resolving the payload.
@@ -2573,17 +2633,8 @@ class CompositePrimaryKeyScanOp final : public Operator {
         });
     }
 
-    bool fetchCandidate(size_t candidate, std::string& row,
-                        std::optional<uint64_t> fence = std::nullopt) {
-        checkForQueryInterrupt();
-        const auto rid = rids_[candidate];
-        bool failed = false;
-        ++fetched_;
-        if (!engine_->readIndexedRowByRid(database_, table_, rid, row, schema_, nullptr, &failed)) {
-            if (failed) setError("indexed heap fetch failed");
-            return false;
-        }
-        StorageEngine::bindNullRow(engine_, database_, table_, rid, schema_.len());
+    bool matchesCandidate(size_t candidate, const std::string& row,
+                          std::optional<uint64_t> fence = std::nullopt) {
         const bool matches = std::all_of(inputs_.begin(), inputs_.end(), [&](const auto& input) {
             bool isNull = false;
             const auto actual = engine_->extractColumnValue(row, schema_, input.column,
@@ -2610,8 +2661,51 @@ class CompositePrimaryKeyScanOp final : public Operator {
         return true;
     }
 
-    bool bufferPrefix(size_t count, size_t candidates, uint64_t fence) {
-        if (engine_->indexReadSnapshotFence(database_) != fence) return false;
+    bool fetchCandidate(size_t candidate, std::string& row,
+                        std::optional<uint64_t> fence = std::nullopt) {
+        checkForQueryInterrupt();
+        const auto rid = rids_[candidate];
+        bool failed = false;
+        ++fetched_;
+        if (!engine_->readIndexedRowByRid(database_, table_, rid, row, schema_, nullptr, &failed)) {
+            if (failed) setError("indexed heap fetch failed");
+            return false;
+        }
+        StorageEngine::bindNullRow(engine_, database_, table_, rid, schema_.len());
+        return matchesCandidate(candidate, row, fence);
+    }
+
+    bool readIndexRange(BPTree& index, const std::string& first, const std::string& last,
+                        size_t candidates, size_t maxNodes, BPTree::CompositeRangeRead mode,
+                        size_t* visitedNodes = nullptr) {
+        const auto status = index.readCompositePrimaryRange(first, last, candidates, maxNodes,
+            rids_, order_ ? &suffixValues_ : nullptr, mode, visitedNodes);
+        if (status == BPTree::LeafEntriesResult::Error)
+            throw DbError("XX001", "could not read B-tree index for relation \"" + table_ + "\"");
+        return status == BPTree::LeafEntriesResult::Complete;
+    }
+
+    bool qualifiesPageFilter(ExprEvaluator& evaluator, RowContext& context, const std::string& row) {
+        const auto& filter = order_->filter;
+        for (const auto* input : filter.columns) {
+            const auto& binding = *input->binding;
+            bool isNull = false;
+            auto actual = engine_->extractColumnValue(row, schema_, binding.columnOrdinal,
+                                                       database_, false, &isNull);
+            auto type = ExprHelper::canonicalResultTypeName(binding.declaredType);
+            ExprValue value(std::move(type), std::move(actual), isNull);
+            const auto& column = schema_.cols[binding.columnOrdinal];
+            value.collation = column.resolvedCollation.empty() ? column.collation : column.resolvedCollation;
+            context.setBoundColumn(binding.sourceOrdinal, binding.columnOrdinal, std::move(value));
+        }
+        return std::all_of(filter.clauses.begin(), filter.clauses.end(), [&](const auto* clause) {
+            const auto value = evaluator.eval(clause, context);
+            return !value.isNull && value.asBool();
+        });
+    }
+
+    bool bufferPrefix(BPTree& index, std::string first, std::string last, size_t count,
+                      size_t batch, size_t maxNodes, double heapCost, uint64_t fence) {
         struct RestoreNullBinding {
             StorageEngine::NullRowBindingState saved = StorageEngine::captureNullRowBinding();
             ~RestoreNullBinding() { StorageEngine::restoreNullRowBinding(std::move(saved)); }
@@ -2621,47 +2715,98 @@ class CompositePrimaryKeyScanOp final : public Operator {
         // short of the required number of real matches.
         size_t budget = sortWorkMemBytes();
         const size_t rowSize = sizeof(decltype(prefixRows_)::value_type);
-        const size_t capacity = std::min(count, rids_.size());
-        if (capacity > budget / rowSize) return false;
-        prefixRows_.reserve(capacity);
-        if (prefixRows_.capacity() > budget / rowSize) return false;
-        budget -= prefixRows_.capacity() * rowSize;
-        const auto& filter = order_->filter;
         std::optional<ExprEvaluator> evaluator;
-        if (!filter.clauses.empty()) {
+        std::optional<CompositeHeapPage> heap;
+        if (!order_->filter.clauses.empty()) {
             evaluator.emplace();
             evaluator->setCurrentDB(database_);
+            auto* allocator = engine_->getPageAllocator(database_, table_);
+            const auto* view = engine_->getCurrentReadView();
+            if (!allocator || !view || schema_.formatVersion != DATA_FILE_FORMAT_VERSION ||
+                allocator->pageSize() != PgPage::PAGE_SIZE || budget < PgPage::PAGE_SIZE) return false;
+            heap.emplace(engine_->getLockManager(), *allocator, database_, schema_, *view);
+            budget -= PgPage::PAGE_SIZE;
         }
-        for (size_t candidate = 0; candidate < rids_.size() && prefixRows_.size() < count; ++candidate) {
-            std::string row;
-            if (!fetchCandidate(candidate, row, fence)) {
-                if (hasError()) return false;
-                continue;
+        using Mode = BPTree::CompositeRangeRead;
+        const auto mode = order_->ascending ? Mode::FirstAscending : Mode::FirstDescending;
+        const auto& costs = QueryPlanner::costModel();
+        const double tupleCost = costs.cpuIndexTupleCost + costs.cpuOperatorCost * order_->filter.clauses.size();
+        constexpr size_t maxProbes = 8192, maxBatch = 512;
+        std::vector<int64_t> overlap;
+        int64_t lastSuffix = 0;
+        uint32_t lastHeapPage = 0;
+        double heapPageCost = 0;
+        RowContext context;
+        std::vector<bool> nulls;
+        for (;;) {
+            if (!maxNodes || engine_->indexReadSnapshotFence(database_) != fence) return false;
+            const size_t requested = batch + overlap.size();
+            size_t visited = 0;
+            if (!readIndexRange(index, first, last, requested, maxNodes, mode, &visited) ||
+                engine_->indexReadSnapshotFence(database_) != fence) return false;
+            maxNodes -= visited;
+            if (!overlap.empty() && (rids_.size() < overlap.size() ||
+                suffixValues_[overlap.size() - 1] != lastSuffix ||
+                !std::equal(overlap.begin(), overlap.end(), rids_.begin()))) return false;
+
+            if (!fetched_) {
+                const size_t capacity = std::min(count, rids_.size());
+                if (capacity > budget / rowSize) return false;
+                prefixRows_.reserve(capacity);
+                if (prefixRows_.capacity() > budget / rowSize) return false;
+                budget -= prefixRows_.capacity() * rowSize;
             }
-            if (evaluator) {
-                RowContext context;
-                for (const auto* input : filter.columns) {
-                    const auto& binding = *input->binding;
-                    bool isNull = false;
-                    auto actual = engine_->extractColumnValue(row, schema_, binding.columnOrdinal,
-                                                               database_, false, &isNull);
-                    auto type = ExprHelper::canonicalResultTypeName(binding.declaredType);
-                    ExprValue value(std::move(type), std::move(actual), isNull);
-                    const auto& column = schema_.cols[binding.columnOrdinal];
-                    value.collation = column.resolvedCollation.empty() ? column.collation : column.resolvedCollation;
-                    context.setBoundColumn(binding.sourceOrdinal, binding.columnOrdinal, std::move(value));
+            for (size_t candidate = overlap.size(); candidate < rids_.size() && prefixRows_.size() < count;
+                 ++candidate) {
+                std::string row;
+                if (heap) {
+                    checkForQueryInterrupt();
+                    uint32_t page;
+                    uint16_t slot;
+                    StorageEngine::decodeRid(rids_[candidate], page, slot);
+                    if (!page || StorageEngine::encodeRid(page, slot) != rids_[candidate])
+                        throw DbError("XX001", "invalid indexed heap row position");
+                    if (page != lastHeapPage) {
+                        const auto distance = std::max(page, lastHeapPage) - std::min(page, lastHeapPage);
+                        heapPageCost += lastHeapPage && distance == 1
+                            ? std::min(costs.seqPageCost, costs.randomPageCost) : costs.randomPageCost;
+                        lastHeapPage = page;
+                    }
+                    const auto candidateCost = costs.customCost
+                        ? QueryPlanner::costScan("index_scan", fetched_ + 1, 0)
+                        : heapPageCost + (fetched_ + 1) * tupleCost;
+                    if (candidateCost >= heapCost) return false;
+                    ++fetched_;
+                    if (!heap->read(page, slot, row, nulls)) continue;
+                    detail::ScopedStoredRowNullBitmap bitmap(schema_, nulls);
+                    if (!matchesCandidate(candidate, row, fence) || !qualifiesPageFilter(*evaluator, context, row))
+                        continue;
+                } else if (!fetchCandidate(candidate, row, fence)) {
+                    if (hasError()) return false;
+                    continue;
                 }
-                const bool qualifies = std::all_of(filter.clauses.begin(), filter.clauses.end(), [&](const auto* clause) {
-                    const auto value = evaluator->eval(clause, context);
-                    return !value.isNull && value.asBool();
-                });
-                if (!qualifies) continue;
+                if (row.capacity() > budget) return false;
+                budget -= row.capacity();
+                prefixRows_.emplace_back(rids_[candidate], std::move(row));
             }
-            if (row.capacity() > budget) return false;
-            budget -= row.capacity();
-            prefixRows_.emplace_back(rids_[candidate], std::move(row));
+            if (prefixRows_.size() == count || rids_.size() < requested) break;
+            if (!evaluator || fetched_ >= maxProbes) return false;
+
+            // Retain the consumed entries at the inclusive boundary. Equal
+            // stored keys can have different row positions across leaves.
+            // A checked overlap both validates the leaf chain at the join and
+            // lets the following batch fetch only previously unread tuples.
+            lastSuffix = suffixValues_.back();
+            const auto beforeTail = std::find_if(suffixValues_.rbegin(), suffixValues_.rend(),
+                [&](int64_t key) { return key != lastSuffix; });
+            const size_t offset = beforeTail.base() - suffixValues_.begin();
+            overlap.assign(rids_.begin() + offset, rids_.end());
+            const auto boundary = primary_key_index::suffixRangeKeys(schema_, *suffix_, values_,
+                lastSuffix, lastSuffix).first;
+            if (order_->ascending) first = boundary;
+            else last = boundary;
+            batch = std::min({batch * 2, maxBatch, maxProbes - fetched_});
         }
-        if (rids_.size() == candidates && prefixRows_.size() < count) return false;
         rids_.clear();
         suffixValues_.clear();
         return true;
@@ -2709,16 +2854,9 @@ class CompositePrimaryKeyScanOp final : public Operator {
             while (candidates > *count && indexCost(candidates) >= heapCost)
                 candidates = *count + (candidates - *count) / 2;
         }
-        using Mode = BPTree::CompositeRangeRead;
-        const auto mode = !prefix ? Mode::Entire
-            : order_->ascending ? Mode::FirstAscending : Mode::FirstDescending;
-        const auto status = index.readCompositePrimaryRange(
-            first, last, candidates, maxNodes, rids_,
-            order_ ? &suffixValues_ : nullptr, mode);
-        if (status == BPTree::LeafEntriesResult::Error)
-            throw DbError("XX001", "could not read B-tree index for relation \"" + table_ + "\"");
-        if (status != BPTree::LeafEntriesResult::Complete) return false;
-        if (prefix) return bufferPrefix(*count, candidates, fence);
+        if (prefix) return bufferPrefix(index, first, last, *count, candidates, maxNodes, heapCost, fence);
+        if (!readIndexRange(index, first, last, maxRows, maxNodes, BPTree::CompositeRangeRead::Entire))
+            return false;
         size_t fetches = rids_.size();
         if (count) fetches = std::min(fetches, *count);
         if (fetches && indexCost(fetches) >= heapCost) return false;

@@ -2,6 +2,15 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="composite-primary-refill-20261123"></a>
+## 2026-11-23 · 分批找够一页订单
+
+此前六组复合主键 SQL 的 344 条普通及扩展协议响应，与 PostgreSQL 18.6 的消息顺序、事务状态、错误码、命令结果、列类型和完整数据一致。独立的 20 条二进制参数记录继续匹配。七个原生测试和十三个客户端回归通过。[SQL 对照](../tests/compat/cases/composite_primary_filtered_order.sql)
+
+在 6,340 行表上，升序和降序分页分别检查 251 条和 160 条候选后得到一条。命名语句以二进制参数绑定后复现降序结果。空结果读取区间内的 80 条候选后结束。提高 `random_page_cost` 会触发回到表扫描，结果和读计数均核对。原生测试向同一物理键加入 300 条来自其他店铺的候选。无论升序还是降序，跨多次续读都精确检查 304 条候选，返回正确订单。B+ 树回归也核对正常读取及触及页上限时的访问计数。[协议回归](../tests/composite_primary_range_protocol_e2e_test.py) · [重复物理键测试](../tests/composite_primary_order_test.cpp) · [索引页测试](../tests/bptree_topology_corruption_test.cpp)
+
+分别在 `0xC552` 和 `0xC555` 旧索引上完成 66 步重建与恢复。8,355 行的现有 `0xC556` 目录另完成 41 步，涵盖保存点回滚、提交前后强制退出和重启，降序筛选跳过一条后取五条时检查 4,006 条候选。三个恢复记录的 SHA-256 依次为 `c914a3c5ae675072999ed857d9b1e9562d166bbf50d4a7dca1a78238d8490811`、`6527b836186754d40aa86eeedf58ce8f0036f3e80773da489f8f83de15631a6d` 和 `5719937c76d0bdb1382173a2f1b5a0bbdd11b19cf7a43633bdf05163f7dcef06`。CMake C++17 `-O2` 程序 SHA-256 为 `f2a1edf0507f15e7c4655e9c732dbde65557db65784dd0388ef289bb7e90676f`。[性能对照](performance-report-2026-10-30.md#composite-primary-refill-cost-20261123)
+
 <a id="composite-primary-filtered-order-20261123"></a>
 ## 2026-11-23 · 按索引顺序筛选并取一页
 

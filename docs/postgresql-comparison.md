@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-23 · 后续索引批次与数据页复用
+
+PostgreSQL 的 B-tree 扫描可继续访问下一页，其成本模型考虑索引顺序与表中物理顺序的相关性。SQLite 使用游标定位和逐步移动。DuckDB 可使用区段的最小值和最大值排除不相关行组。[PostgreSQL 扫描](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/access/nbtree/nbtsearch.c) · [PostgreSQL 成本计算](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/optimizer/path/costsize.c) · [SQLite 游标](https://www.sqlite.org/opcode.html#btree) · [DuckDB 索引](https://duckdb.org/docs/1.5/guides/performance/indexing)
+
+本项目在固定的复合主键组内从上批末尾续读，核对相同物理键处已读过的条目。连续命中同一个数据页时使用同一份页副本，并按相邻或跳跃读页估计成本。结果仍经事务快照和完整键校验。可以通过区间末尾确认无匹配，超出成本或页数预算时回到表扫描。通用游标、跨组顺序和基于统计信息的成本估计仍有差距。[协议测试](test-report.md#composite-primary-refill-20261123) · [性能对照](performance-report-2026-10-30.md#composite-primary-refill-cost-20261123)
+
 ## 2026-11-23 · 边筛选边读取有序的复合主键分页
 
 PostgreSQL 可以在索引扫描中追加筛选，`LIMIT` 取够符合条件的行便结束请求。SQLite 会比较有序索引扫描和其他访问路径的成本。DuckDB 将 `ORDER BY` 与 `LIMIT` 合并成 TopN，减少排序所需的内存和工作量。[PostgreSQL 执行计划](https://www.postgresql.org/docs/18/using-explain.html) · [SQLite 排序规划](https://sqlite.org/optoverview.html#order_by_optimizations) · [DuckDB 优化器](https://duckdb.org/2024/11/14/optimizers)

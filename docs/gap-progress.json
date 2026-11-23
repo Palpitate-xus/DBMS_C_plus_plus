@@ -2,6 +2,18 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-23 resume filtered composite primary key pages and reuse heap page reads",
+      "gap_ids": ["IDX-03", "OPT-01"],
+      "status": "partial",
+      "evidence": ["src/access/BPTree.cpp", "src/executor/ExecutionPlan.cpp", "docs/MANUAL.md", "docs/postgresql-comparison.md", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/bptree_topology_corruption_test.cpp", "tests/composite_primary_order_test.cpp", "tests/composite_primary_range_protocol_e2e_test.py", "tests/compat/cases/composite_primary_filtered_order.sql"],
+      "verification": [
+        "The sparse page used 4,005 index candidates and the empty result 4,256. Both avoided scanning the full 8,355-row table in the measured case.",
+        "Both directions resume across an injected 300-entry digest collision without missing or rereading candidates. The protocol and recovery checks include offsets, MVCC, duplicate rejection and a cost-based heap fallback.",
+        "Arbitrary cursor predicates, cross-group order and statistics-driven costing remain open."
+      ]
+    },
+    {
       "issue": "2026-11-23 fill an ordered composite primary key page after evaluating safe filters",
       "gap_ids": ["IDX-03", "OPT-01"],
       "status": "partial",

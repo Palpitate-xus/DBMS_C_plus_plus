@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-23 · 续读有序索引直到取够一页
+
+受支持的筛选不足一页时，按实际读页开销继续读取索引。保留批次交界处相同物理键的行位置，核对后跳过已检查的条目。超预算或快照变化时回到表扫描。跨组顺序、通用游标和读页成本估计仍待补齐。`IDX-03` 和 `OPT-01` 保持部分实现。[测试](test-report.md#composite-primary-refill-20261123) · [性能](performance-report-2026-10-30.md#composite-primary-refill-cost-20261123)
+
 ## 2026-11-23 · 在有序分页中提前检查筛选条件
 
 固定所有前导列时，可按整数末列顺序检查受支持的空值、文字长度和常量比较，再按 `LIMIT/OFFSET` 取一页。兼容测试覆盖同名自定义函数、可能报错的表达式、当前和旧快照。低命中率筛选和通用有序扫描仍有差距。`IDX-03` 和 `OPT-01` 保持部分实现。[测试](test-report.md#composite-primary-filtered-order-20261123) · [性能](performance-report-2026-10-30.md#composite-primary-filtered-order-cost-20261123)

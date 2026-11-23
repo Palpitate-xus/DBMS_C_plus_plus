@@ -978,10 +978,11 @@ bool BPTree::allValuesChecked(std::vector<int64_t>& values) const {
 BPTree::LeafEntriesResult BPTree::readCompositePrimaryRange(
         const std::string& lower, const std::string& upper, size_t maxRows,
         size_t maxNodes, std::vector<int64_t>& values, std::vector<int64_t>* suffixes,
-        CompositeRangeRead mode) const {
+        CompositeRangeRead mode, size_t* visitedNodes) const {
     std::shared_lock<std::shared_mutex> treeLock(treeMutex_);
     values.clear();
     if (suffixes) suffixes->clear();
+    if (visitedNodes) *visitedNodes = 0;
     if (!bp_ || !bp_->isOpen() ||
         header_.reserved != bptree_format::kCompositePrimaryRangeFormat ||
         lower.size() != BP_KEY_LEN || upper.size() != BP_KEY_LEN)
@@ -1046,6 +1047,7 @@ BPTree::LeafEntriesResult BPTree::readCompositePrimaryRange(
         return LeafEntriesResult::Complete;
     };
     const auto status = collect(collect, header_.rootPage, 0, nullptr, nullptr, true);
+    if (visitedNodes) *visitedNodes = visited.size();
     if (status == LeafEntriesResult::Complete) {
         values = std::move(result);
         if (suffixes) *suffixes = std::move(resultSuffixes);

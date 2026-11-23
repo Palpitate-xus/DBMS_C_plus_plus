@@ -89,12 +89,14 @@ public:
     // A supplied suffix vector receives the signed key for each row position.
     // FirstAscending and FirstDescending stop at maxRows or the end of the
     // range. Entire requires the whole range to fit within both limits.
-    // An error or limit result leaves both outputs empty.
+    // An error or limit result leaves both outputs empty. visitedNodes, if
+    // supplied, also counts pages reached by a traversal that could not finish.
     LeafEntriesResult readCompositePrimaryRange(const std::string& lower, const std::string& upper,
                                                  size_t maxRows, size_t maxNodes,
                                                  std::vector<int64_t>& values,
                                                  std::vector<int64_t>* suffixes = nullptr,
-                                                 CompositeRangeRead mode = CompositeRangeRead::Entire) const;
+                                                 CompositeRangeRead mode = CompositeRangeRead::Entire,
+                                                 size_t* visitedNodes = nullptr) const;
 
     // Copy at most maxEntries fixed-width leaf keys and their values in tree
     // order. A failed or over-limit read clears entries. Callers can process

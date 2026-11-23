@@ -181,10 +181,25 @@ def main():
         check_access(writer, lambda: observe(bind(store, 6154, 6157, b'filtered'), 'SELECT 1',
                      [['6154', 'n6154']]), [0, 0, 1, 3])
 
+        rare = descending("AND note = 'n6000'") + ' LIMIT 1'
+        check_access(writer, lambda: sql(writer, rare, 'SELECT 1', [['6000', 'n6000']]), [0, 0, 1, 160])
+        check_access(writer, lambda: sql(writer, lookup(store, "AND ord >= 2000 AND note = 'n2250'") + ' LIMIT 1',
+                     'SELECT 1', [['2250', 'n2250']]), [0, 0, 1, 251])
+        empty = descending("AND ord BETWEEN 6080 AND 6159 AND note='never'") + ' LIMIT 1'
+        check_access(writer, lambda: sql(writer, empty, 'SELECT 0', []), [0, 0, 1, 80])
+        sparse_bind = (select + " WHERE shop=$1 AND ord>=$2 AND $3>ord AND note='n6000' "
+                       'ORDER BY ord DESC LIMIT 1')
+        writer.sendall(typed(b'P', b'sparse_filter\0' + sparse_bind.encode() + b'\0' +
+                       pack('!HIII', 3, 25, 20, 20)) + typed(b'S'))
+        assert client.read_until_ready(writer) == [(b'1', b''), (b'Z', b'I')]
+        check_access(writer, lambda: observe(bind(store, -64, 6160, b'sparse_filter'), 'SELECT 1',
+                     [['6000', 'n6000']]), [0, 0, 1, 160])
+        sql(writer, 'SET random_page_cost=80', 'SET')
         before = stats(writer)
-        sql(writer, descending("AND note = 'n6000'") + ' LIMIT 1', 'SELECT 1', [['6000', 'n6000']])
+        sql(writer, lookup(store, "AND note = 'n2250'") + ' LIMIT 1', 'SELECT 1', [['2250', 'n2250']])
         counts = [new - old for old, new in zip(before, stats(writer), strict=True)]
-        assert counts[:3] == [1, 6340, 1] and 1 <= counts[3] <= 32, counts
+        assert counts[:3] == [1, 6340, 1] and 0 < counts[3] < 379, counts
+        sql(writer, 'SET random_page_cost=4', 'SET')
         unsafe = descending('AND ord BETWEEN 6150 AND 6159 AND 1/(ord-6154) > 0') + ' LIMIT 1'
         error = runner.decode_wire_result(client.simple_query(writer, unsafe))
         assert error[1] == '22012', error

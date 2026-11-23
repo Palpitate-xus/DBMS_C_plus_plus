@@ -1098,7 +1098,7 @@ WHERE shop_code = 'north'
 ORDER BY order_number DESC LIMIT 5 OFFSET 2;
 ```
 
-如果订单表还有 `note` 备注列，像 `AND length(note) > 2` 这样的筛选可以在按订单号读取时完成。数据库核对实际的店铺编号、订单号、备注和事务可见性，读够一页才结束。如果符合条件的订单太少，或执行时使用旧快照，数据库可以改为扫描和排序。[筛选和分页验证](test-report.md#composite-primary-filtered-order-20261123)
+如果订单表还有 `note` 备注列，像 `AND length(note) > 2` 这样的筛选可以在按订单号读取时完成。前一批订单不够凑成一页时，数据库可以从刚读过的位置继续找。找到一页或读到这家店的最后一笔后便结束。当订单分散在很多地方、继续查找的成本过高，或者查询使用旧事务快照时，数据库仍可扫描表并排序。[筛选和分页验证](test-report.md#composite-primary-refill-20261123)
 
 ### 删除表
 

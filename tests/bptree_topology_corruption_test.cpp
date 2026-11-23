@@ -218,10 +218,11 @@ void test_composite_range_visits_only_selected_leaves() {
         assert(tree.openExisting());
         const auto before = tree.cacheStatistics();
         std::vector<int64_t> values, suffixes;
+        size_t visits = 0;
         constexpr int first = 20, last = 4090, count = 161;
         assert(tree.readCompositePrimaryRange(key('b', first), key('b', last),
-            count, 12, values, &suffixes, mode) == LeafEntriesResult::Complete);
-        assert(tree.cacheStatistics().misses - before.misses < 12);
+            count, 12, values, &suffixes, mode, &visits) == LeafEntriesResult::Complete);
+        assert(visits > 1 && visits < 12 && tree.cacheStatistics().misses - before.misses <= visits);
         assert(values.size() == count && suffixes.size() == count);
         for (int i = 0; i < count; ++i) {
             const int64_t expected = mode == Mode::FirstAscending ? first + i : last - i;
@@ -235,8 +236,8 @@ void test_composite_range_visits_only_selected_leaves() {
         assert(std::all_of(suffixes.begin() + 1, suffixes.end() - 1,
             [](int64_t suffix) { return suffix == INT64_MIN + 10; }));
         assert(tree.readCompositePrimaryRange(key('b', first), key('b', last),
-            count, 1, values, &suffixes, mode) == LeafEntriesResult::LimitExceeded);
-        assert(values.empty() && suffixes.empty());
+            count, 1, values, &suffixes, mode, &visits) == LeafEntriesResult::LimitExceeded);
+        assert(values.empty() && suffixes.empty() && visits == 1);
     }
     std::filesystem::remove_all(directory);
 }

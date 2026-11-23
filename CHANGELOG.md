@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>符合条件的订单很少时，翻页也能更快 · 2026-11-23</summary>
+
+比如查一家店里备注较长的订单，数据库可以继续按订单号在这家店里找，直到凑够一页。
+
+[用法](docs/MANUAL.md#用多列一起区分记录) · [测试报告](docs/test-report.md#composite-primary-refill-20261123) · [性能报告](docs/performance-report-2026-10-30.md#composite-primary-refill-cost-20261123)
+
+</details>
+
+<details>
 <summary>按备注筛选后取前几笔订单更快 · 2026-11-23</summary>
 
 比如按订单号从大到小查备注超过两个字的订单，数据库可以边读边筛，找够就停。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>查订单号最大的几笔订单更快 · 2026-11-23</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-23 · 查订单号最大的几笔订单更快
 
 比如查看一家店订单号最大的 5 笔订单，数据库可以按号码从大到小取出这 5 笔，省去另外排序。
 
 [测试报告](docs/test-report.md#composite-primary-order-20261123) · [性能报告](docs/performance-report-2026-10-30.md#composite-primary-order-cost-20261123)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-23 · 逐条按名称或数字筛选记录更快
 
