@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-23 · 数组来源可以参与集合运算
+
+保留 `ARRAY[...]` 的原有表达式后，`UNION`、`INTERSECT ALL` 和 `EXCEPT ALL` 可以读取数组展开的行。适用的 `UNION ALL` 在读够行数时可以跳过另一边的执行。去重集合运算仍有隐式类型转换差距，例如整数结果与无类型的 `NULL` 合并时需要显式转换。`QRY-02`、`QRY-06` 和 `OPT-01` 保持部分实现。[验证范围](test-report.md#array-set-20261123) · [性能](performance-report-2026-10-30.md#array-set-cost-20261123)
+
 ## 2026-11-23 · 一次查询共用部分 SQL 解析结果
 
 同一条 SQL 写入 2,048 个整数并取首行，各轮中位耗时从 90–95 毫秒降到 67–73 毫秒。与 PostgreSQL 同轮测试，本项目约需 73–74 毫秒，PostgreSQL 约需 2 毫秒。部分集合查询及 `SELECT INTO` 中的数组来源仍待实现。`SQL-01`、`QRY-02` 和 `OPT-01` 保持部分实现。[测试](test-report.md#query-syntax-reuse-20261123) · [性能](performance-report-2026-10-30.md#query-syntax-reuse-cost-20261123)

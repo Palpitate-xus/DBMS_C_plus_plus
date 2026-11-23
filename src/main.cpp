@@ -1096,25 +1096,53 @@ static string sqlProcessor(string raw, bool /*normalizeBooleanLiterals*/ = false
         raw = preprocessCaseWhen(raw);
     }
     // Convert array subscript syntax: col[n] -> array_get(col, n)
-    {
+    if (raw.find('[') != string::npos) {
         string out;
+        out.reserve(raw.size());
+        const auto protectedBytes = dbms::sqlProtectedBytes(raw);
+        const auto findBracket = [&](char bracket, size_t position) {
+            for (size_t at = raw.find(bracket, position); at != string::npos;
+                 at = raw.find(bracket, at + 1)) {
+                if (!protectedBytes[at]) return at;
+            }
+            return string::npos;
+        };
         size_t i = 0;
         while (i < raw.size()) {
-            size_t bracketOpen = findTextOutsideQuotes(raw, "[", i);
+            const size_t bracketOpen = findBracket('[', i);
             if (bracketOpen == string::npos) {
                 out += raw.substr(i);
                 break;
             }
             // Find column name before bracket
-            size_t colStart = bracketOpen;
-            while (colStart > i && isspace(static_cast<unsigned char>(raw[colStart - 1]))) --colStart;
+            size_t colEnd = bracketOpen;
+            while (colEnd > i && isspace(static_cast<unsigned char>(raw[colEnd - 1]))) --colEnd;
+            size_t colStart = colEnd;
             while (colStart > i && (isalnum(static_cast<unsigned char>(raw[colStart - 1])) || raw[colStart - 1] == '_')) --colStart;
-            if (colStart == bracketOpen) {
-                out += raw[i];
-                ++i;
+            // ARRAY[...] constructs a value. Retain its complete expression so
+            // a set operand or derived query can bind the array itself.
+            size_t preceding = colStart;
+            while (preceding > i && isspace(static_cast<unsigned char>(raw[preceding - 1]))) --preceding;
+            if (colEnd - colStart == 5 && raw.compare(colStart, 5, "array") == 0 &&
+                (colStart == 0 || !dbms::sqlIdentifierContinuation(static_cast<unsigned char>(raw[colStart - 1]))) &&
+                (preceding == 0 || raw[preceding - 1] != '.')) {
+                size_t end = bracketOpen + 1;
+                size_t depth = 1;
+                for (; end < raw.size() && depth; ++end) {
+                    if (protectedBytes[end]) continue;
+                    if (raw[end] == '[') ++depth;
+                    else if (raw[end] == ']') --depth;
+                }
+                out.append(raw, i, end - i);
+                i = end;
                 continue;
             }
-            size_t bracketClose = findTextOutsideQuotes(raw, "]", bracketOpen);
+            if (colStart == colEnd) {
+                out.append(raw, i, bracketOpen + 1 - i);
+                i = bracketOpen + 1;
+                continue;
+            }
+            const size_t bracketClose = findBracket(']', bracketOpen + 1);
             if (bracketClose == string::npos) {
                 out += raw.substr(i);
                 break;
@@ -1140,8 +1168,7 @@ static string sqlProcessor(string raw, bool /*normalizeBooleanLiterals*/ = false
         auto rewriteQuantifiedArray = [](const string& in) -> string {
             string out = in;
             for (size_t q = 0; ; ) {
-                // An ARRAY[...] literal has already been rewritten to
-                // array_get(array, e1, e2, ...) upstream; accept both forms.
+                // Accept a constructor or the legacy rewritten form.
                 const size_t anyPos =
                     findTextOutsideQuotes(out, " any (array", q);
                 const size_t allPos =
@@ -22940,7 +22967,8 @@ static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& 
         return supportsDerivedSources(body->fromClause.get());
     };
     const bool emptyProjection = select->command == dbms::SqlCommand::Select && select->selectList.empty();
-    const bool sourceProbe=(emptyProjection || !select->ctes.empty() ||
+    const bool tableFunctionAppend = tableFunction && select->setOp == dbms::SetOp::Union && select->setOpAll;
+    const bool sourceProbe=(emptyProjection || tableFunctionAppend || !select->ctes.empty() ||
         (select->fromClause && select->fromClause->type!=dbms::FromItem::Type::Table)) &&
         supportsDerivedQuery(select);
     if (tableFunctionOnly && !sourceProbe) return false;
@@ -22969,7 +22997,7 @@ static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& 
     }
     if(select->command==dbms::SqlCommand::Values) {
         if(!select->ctes.empty() || !select->orderBy.empty() || select->whereClause || select->limit || select->offset || select->setOp!=dbms::SetOp::None)return false;
-    } else {
+    } else if (!(tableFunctionAppend && sourceProbe)) {
         // The parsed local tree is only a shape probe. Its original CTEs are
         // immediately restored; whole preparation below retains every CTE
         // and byte span, and the borrowed plan builder accepts this envelope.

@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>数组里的值可以和其他查询结果合并 · 2026-11-23</summary>
+
+例如，可以把手头的一组订单号和从表里查出的订单号放在同一份结果里，也可以去掉重复项。
+
+[用法](docs/MANUAL.md#把数组展开成行) · [测试报告](docs/test-report.md#array-set-20261123) · [性能报告](docs/performance-report-2026-10-30.md#array-set-cost-20261123)
+
+</details>
+
+<details>
 <summary>从长数组里取几行更快 · 2026-11-23</summary>
 
 比如从一组 2,048 个编号里取第一条。数据库少读几遍同样的 SQL，能更早返回结果。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>把一组整数拆成多行更快 · 2026-11-23</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-23 · 把一组整数拆成多行更快
 
 比如查询一组订单号，每行显示一个。读完整组数据所需的时间更短。
 
 [用法](docs/MANUAL.md#把数组展开成行) · [测试报告](docs/test-report.md#integer-array-cast-20261123) · [性能报告](docs/performance-report-2026-10-30.md#integer-array-cast-cost-20261123)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-23 · 可以把一个或多个数组展开成行
 

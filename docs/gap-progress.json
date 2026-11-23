@@ -2,6 +2,18 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-23 preserve array constructors in set operands and execute supported table-function UNION ALL with a typed append",
+      "gap_ids": ["QRY-02", "QRY-06", "OPT-01"],
+      "status": "partial",
+      "evidence": ["src/main.cpp", "docs/MANUAL.md", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/set_operation_structured_protocol_e2e_test.py"],
+      "verification": [
+        "Array constructors retain their bracketed expressions when the enclosing query passes through legacy normalization.",
+        "The existing UNION ALL operator reads supported table-function branches from the bound tree and skips an unread branch when the row limit is reached.",
+        "The DISTINCT set execution path still needs contextual coercion for untyped literals in some mixed-type branches."
+      ]
+    },
+    {
       "issue": "2026-11-23 reuse statement-local syntax in wire metadata checks and route UNNEST through the existing table function path",
       "gap_ids": ["SQL-01", "QRY-02", "OPT-01"],
       "status": "partial",

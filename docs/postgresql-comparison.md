@@ -2,6 +2,11 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="array-set-comparison-20261123"></a>
+## 2026-11-23 · 把数组展开的结果与其他查询合并
+
+PostgreSQL 逐层分析集合运算的左右查询，并在执行前为相应的列选择共同类型。DuckDB 的绑定器先分析子查询，再为集合运算确定输出列的类型。SQLite 的复合查询按值比较重复行，比较时保留值原有的存储类型。项目沿用 PostgreSQL 的共同类型规则，并让适用的 `UNION ALL` 由同一个查询计划逐行读取两边的数据。[PostgreSQL 共同类型规则](https://www.postgresql.org/docs/18/typeconv-union-case.html) · [DuckDB 集合运算绑定器](https://github.com/duckdb/duckdb/blob/main/src/planner/binder/query_node/bind_setop_node.cpp) · [SQLite 复合查询](https://www.sqlite.org/lang_select.html#compound_select_statements)
+
 <a id="query-syntax-reuse-comparison-20261123"></a>
 ## 2026-11-23 · 重用一次查询中的语法信息
 

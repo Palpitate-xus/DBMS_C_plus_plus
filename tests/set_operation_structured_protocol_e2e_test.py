@@ -6,6 +6,60 @@ from pathlib import Path
 import struct
 
 
+def check_table_function_operands(client, sock):
+    sequence = "setop_array_branch_calls"
+    created = client.simple_query(sock, f"CREATE SEQUENCE {sequence}")
+    assert created == [(b"C", b"CREATE SEQUENCE\0"), (b"Z", b"I")], created
+    cases = [
+        ("(SELECT v AS \"Number\" FROM unnest(ARRAY[7,8]) AS u(v) LIMIT 1) "
+         "UNION ALL SELECT 10000000000 ORDER BY \"Number\"", "Number", 20, 8,
+         [[b"7"], [b"10000000000"]]),
+        ("SELECT 9 AS v UNION ALL SELECT v FROM unnest(ARRAY[4,5]) AS u(v) "
+         "ORDER BY v LIMIT 2", "v", 23, 4, [[b"4"], [b"5"]]),
+        ("SELECT v FROM unnest(ARRAY[2,2,1]) AS u(v) UNION SELECT 6 ORDER BY v",
+         "v", 23, 4, [[b"1"], [b"2"], [b"6"]]),
+        ("SELECT v FROM unnest(ARRAY[2,2,1]) AS u(v) EXCEPT ALL SELECT 2 ORDER BY v",
+         "v", 23, 4, [[b"1"], [b"2"]]),
+        ("SELECT v FROM unnest(ARRAY[ARRAY[2,2],ARRAY[1,9]]) AS u(v) INTERSECT ALL "
+         "SELECT v FROM unnest(ARRAY[1,2,2,7]) AS u(v) ORDER BY v",
+         "v", 23, 4, [[b"1"], [b"2"], [b"2"]]),
+        ("SELECT v FROM unnest(ARRAY[7,NULL,8]) AS u(v) UNION SELECT NULL::integer "
+         "ORDER BY v NULLS FIRST", "v", 23, 4, [[None], [b"7"], [b"8"]]),
+        ("SELECT v FROM (SELECT v FROM ROWS FROM(unnest(ARRAY['',NULL,'NULL',''])) AS u(v) "
+         "UNION SELECT 'last') AS combined ORDER BY v COLLATE \"C\" NULLS FIRST",
+         "v", 25, -1, [[None], [b""], [b"NULL"], [b"last"]]),
+        ("SELECT v FROM unnest(ARRAY /* retain the constructor */ [8,9]) AS u(v) "
+         "UNION ALL SELECT 1 ORDER BY v LIMIT 0", "v", 23, 4, []),
+        ("SELECT v FROM unnest(ARRAY[7,8]) AS u(v) "
+         f"UNION ALL SELECT nextval('{sequence}') LIMIT 1", "v", 20, 8, [[b"7"]]),
+    ]
+    for sql, name, oid, size, rows in cases:
+        parse = client.typed(b"P", b"\0" + sql.encode() + b"\0\0\0")
+        sync = client.typed(b"S", b"")
+        bind = client.typed(b"B", b"\0\0" + struct.pack("!HHH", 0, 0, 0))
+        describe_statement = client.typed(b"D", b"S\0")
+        describe_portal = client.typed(b"D", b"P\0")
+        execute = client.typed(b"E", b"\0" + struct.pack("!I", 0))
+        results = [client.simple_query(sock, sql)]
+        for request in (parse + describe_statement + sync,
+                        parse + bind + describe_portal + execute + sync):
+            sock.sendall(request)
+            results.append(client.read_until_ready(sock))
+        execution_kinds = b"T" + b"D" * len(rows) + b"CZ"
+        for messages, kinds in zip(results, (execution_kinds, b"1tTZ", b"12" + execution_kinds)):
+            assert b"".join(kind for kind, _ in messages) == kinds, (sql, messages)
+            assert client.row_description_fields(messages) == [
+                (name.encode(), 0, 0, oid, size, -1, 0)
+            ], (sql, messages)
+            assert messages[-1] == (b"Z", b"I"), (sql, messages)
+            if kinds.endswith(b"CZ"):
+                assert client.data_row_values(messages) == rows, (sql, messages)
+                assert messages[-2] == (b"C", f"SELECT {len(rows)}".encode() + b"\0"), (sql, messages)
+    # The first unconsumed branch must still be untouched after both executions.
+    next_value = client.simple_query(sock, f"SELECT nextval('{sequence}')")
+    assert client.data_row_values(next_value) == [[b"1"]], next_value
+
+
 def main():
     root = Path(__file__).resolve().parent.parent
     spec = importlib.util.spec_from_file_location(
@@ -459,6 +513,7 @@ def main():
             assert state is None and rows == [["9"]], (
                 sql, state, message, rows)
 
+        check_table_function_operands(client, server["sock"])
         print("[STRUCTURED SET OPERATION PROTOCOL E2E] passed")
     finally:
         runner.stop_ours(server)

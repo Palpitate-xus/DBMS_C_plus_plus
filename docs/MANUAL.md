@@ -1443,6 +1443,14 @@ ORDER BY position;
 
 用 `smallint`、`integer` 和 `bigint` 构造或转换数组时，可以直接使用已知的内置类型。元素仍按原顺序求值，并检查输入格式和数值范围。[整数数组性能](performance-report-2026-10-30.md#integer-array-cast-cost-20261123)
 
+数组展开的结果可以和其他查询合并。下面的 `UNION` 去掉重复的 `2`，按顺序返回 `1`、`2`、`6`。用 `UNION ALL` 可以保留重复行。
+
+```sql
+SELECT id FROM unnest(ARRAY[2, 2, 1]) AS items(id)
+UNION SELECT 6
+ORDER BY id;
+```
+
 #### 并排读取多组函数结果
 
 `ROWS FROM` 按行把多个函数的结果放在一起。较短的一组用 `NULL` 补齐。下面的查询返回 `(1,'甲',1)`、`(2,'乙',2)` 和 `(3,NULL,3)`，最后一列是从 1 开始的行号。
