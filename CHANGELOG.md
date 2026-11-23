@@ -1,27 +1,27 @@
 # 更新日志
 
 <details>
-<summary>写入结果无法查询时，数据库会提前报错 · 2026-11-23</summary>
+<summary>先检查修改结果能否读取，再改数据 · 2026-11-23</summary>
 
-例如，更新一笔订单后，接着查询这次更新返回的内容。如果更新没有指定要返回哪些列，数据库会先报错，原订单数据会保留。
+例如，一条语句先修改订单，再读取修改结果。如果这次修改没有指定要返回的内容，数据库会在改动订单前报错。
 
 [用法](docs/MANUAL.md#cte-公用表表达式) · [测试报告](docs/test-report.md#cte-command-visibility-20261123) · [性能报告](docs/performance-report-2026-10-30.md#cte-command-visibility-cost-20261123)
 
 </details>
 
 <details>
-<summary>查询不选列时，也会逐行返回结果 · 2026-11-23</summary>
+<summary>查询可以返回没有列的结果行 · 2026-11-23</summary>
 
-例如，只查某家店的订单行。如果有 3 笔符合条件的订单，客户端就会收到 3 行，每行没有字段值。
+例如，按店铺筛选订单，不选择订单号或金额等列。找到 3 笔订单时，查询会返回 3 行空白记录。
 
 [用法](docs/MANUAL.md#基础查询) · [测试报告](docs/test-report.md#zero-width-read-20261123) · [性能报告](docs/performance-report-2026-10-30.md#zero-width-read-cost-20261123)
 
 </details>
 
 <details>
-<summary>有些查询只取几条结果时，读够就可以停下 · 2026-11-23</summary>
+<summary>部分查询找到足够的记录后就会停下 · 2026-11-23</summary>
 
-例如，从一批订单中取 5 笔并计算金额。在支持的查询中，数据库可以只读需要的订单。
+例如，只取前 5 笔订单来计算金额时，部分查询读完这 5 笔就能返回结果，省去继续读表的时间。
 
 [用法](docs/MANUAL.md#cte-公用表表达式) · [测试报告](docs/test-report.md#logical-read-demand-20261123) · [性能报告](docs/performance-report-2026-10-30.md#logical-read-demand-cost-20261123)
 
