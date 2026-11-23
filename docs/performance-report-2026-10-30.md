@@ -4,6 +4,62 @@
 
 > 复核发现，几组早期 COPY 计时在每个对照场景中使用了固定的执行顺序。耗时差可能包含顺序影响。这项问题涉及默认值求值、按列查找、默认值标记、短 CSV 导出和短查询导出的配对计时。[默认值求值](#copy-default-evaluation-order-cost-20261122) · [按列查找](#copy-identity-input-cost-20261122) · [默认值标记](#copy-default-marker-cost-20261122) · [CSV 导出](#copy-csv-out-cost-20261122) · [查询导出](#copy-query-stdout-cost-20261122)
 
+<a id="qualified-inheritance-cost-20261123"></a>
+## 2026-11-23 · 指定父表所在 schema 的建表与修改耗时
+
+基线为 `027f0cd7`。同一台 Intel Xeon E5-2678 v3 使用 GCC 13.3、CMake C++17 和 `-O2` 编译两个版本，本地连接测试关闭 OpenSSL。两个 schema 中各有一张空的同名表，再创建一张用于加入和解除关系的空表。
+
+```sql
+CREATE SCHEMA settings_src;
+CREATE SCHEMA settings_dst;
+CREATE TABLE settings_src.template (id int, note text);
+CREATE TABLE settings_dst.template (id int, note text);
+CREATE TABLE settings_dst.existing (id int, note text);
+SET search_path = settings_src, public;
+```
+
+```sql
+CREATE TABLE settings_dst.generated () INHERITS (settings_src.template);
+ALTER TABLE settings_dst.existing INHERIT settings_src.template;
+ALTER TABLE settings_dst.existing NO INHERIT settings_src.template;
+CREATE TABLE settings_dst.generated (id int, note text);
+```
+
+旧版对写明 schema 的父表返回错误。旧版与新版的对照将前三条语句中的父表改为 `template`，由搜索路径选择同一张表。新版与 PostgreSQL 18.6 的同机对照执行上方原语句。每次独立提交，计时从本地 TCP 发送到收到就绪消息。两个版本交替执行，每轮每项预热 4 次并测量 20 次，逐次核对完成和就绪消息。单独验证子表数据只出现在选中的父表查询里。删除刚建立的子表和恢复待加入或待解除的关系都在计时之外。内存盘用 CPU 21/22，ext4 用 25/26，同机 PostgreSQL 对照用 27/28，第二轮交换客户端和服务端 CPU。
+
+内存盘的两轮中位数范围如下，单位为毫秒。
+
+| 操作 | 旧版 | 新版 |
+| --- | ---: | ---: |
+| 建表并继承 | 12.36–12.98 | 11.88–12.76 |
+| 加入继承 | 9.89–10.20 | 10.37–10.68 |
+| 解除继承 | 10.12–10.27 | 10.08–10.40 |
+| 普通建表对照 | 14.22–14.83 | 14.89–15.06 |
+
+加入继承在内存盘两轮各增加约 0.48 毫秒。普通建表对照也有小幅增加。 [功能和恢复验证](test-report.md#qualified-inheritance-20261123)
+
+ext4 对照的两轮中位数范围如下，单位为毫秒。
+
+| 操作 | 旧版 | 新版 |
+| --- | ---: | ---: |
+| 建表并继承 | 256.43–436.74 | 233.38–446.77 |
+| 加入继承 | 186.55–362.65 | 195.93–352.25 |
+| 解除继承 | 183.88–342.46 | 185.00–344.13 |
+| 普通建表对照 | 242.20–435.11 | 248.79–434.46 |
+
+磁盘上的操作随轮次变化较大。建表并继承的第 95 百分位从旧版的 338.86–509.88 毫秒升至新版的 444.73–636.11 毫秒。普通建表对照在第一轮也从 289.11 毫秒升到 397.78 毫秒，第二轮从 534.25 毫秒降到 490.25 毫秒。波动原因尚未查明。
+
+单独的同机 ext4 对照使用写明 schema 的父表。两轮中位数范围如下，单位为毫秒。
+
+| 操作 | 新版 | PostgreSQL 18.6 |
+| --- | ---: | ---: |
+| 建表并继承 | 442.21–464.79 | 3.89–4.00 |
+| 加入继承 | 352.72–352.96 | 2.04–2.51 |
+| 解除继承 | 331.82–336.37 | 1.99–2.51 |
+| 普通建表对照 | 434.55–437.76 | 3.79–4.22 |
+
+普通建表对照与建表并继承都有相近的耗时差距。这些测量包含事务提交和写盘。 [实现对照](postgresql-comparison.md#qualified-inheritance-comparison-20261123)
+
 <a id="timetz-ties-cost-20261123"></a>
 ## 2026-11-23 · 索引只读到页尾并列记录结束
 

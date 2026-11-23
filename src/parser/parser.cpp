@@ -553,8 +553,8 @@ static bool parseQualifiedObjectName(
     return true;
 }
 
-static bool parseQualifiedRoutineName(const std::vector<std::string>& tokens,
-    size_t& pos, std::string& name) {
+static bool parseQualifiedIdentifier(const std::vector<std::string>& tokens,
+    size_t& pos, std::string& name, bool foldUnquoted = false) {
     const auto identifier=[](const std::string& token) {
         if(token.empty())return false;
         if(token.front()=='"')return token.size()>=2 && token.back()=='"';
@@ -568,7 +568,15 @@ static bool parseQualifiedRoutineName(const std::vector<std::string>& tokens,
     if(!parseQualifiedObjectName(tokens,pos,name) || !identifier(tokens[first]) ||
        (pos>first+1 && !identifier(tokens[pos-1])))return false;
     CatalogManager::QualifiedName identity;
-    return CatalogManager::parseQualifiedName(name,identity,true);
+    if (!CatalogManager::parseQualifiedName(name, identity, true)) return false;
+    if (foldUnquoted) {
+        const auto component = [&](size_t index) {
+            return tokens[index].front() == '"' ? tokens[index] : SQLParser::toLower(tokens[index]);
+        };
+        name = component(first);
+        if (pos > first + 1) name += "." + component(first + 2);
+    }
+    return true;
 }
 
 static bool parseForeignKeyTarget(
@@ -9057,12 +9065,15 @@ StmtPtr SQLParser::parseCreateTable(const std::vector<std::string>& tokens, size
         std::string kw = toLower(tokens[pos]);
         if (kw == "inherits") {
             ++pos;
-            if (pos >= tokens.size() || tokens[pos] != "(") return nullptr;
-            auto parents = collectParenthesized(tokens, pos);
-            for (const auto& p : parents) {
-                if (p != ",") stmt->inherits.push_back(p);
+            if (!stmt->inherits.empty() || pos >= tokens.size() || tokens[pos++] != "(") return nullptr;
+            for (;;) {
+                std::string parent;
+                if (!parseQualifiedIdentifier(tokens, pos, parent, true) || pos >= tokens.size()) return nullptr;
+                stmt->inherits.push_back(std::move(parent));
+                const auto& separator = tokens[pos++];
+                if (separator == ")") break;
+                if (separator != ",") return nullptr;
             }
-            if (stmt->inherits.empty()) return nullptr;
         } else if (kw == "partition") {
             ++pos;
             if (pos + 2 >= tokens.size() || toLower(tokens[pos]) != "by") {
@@ -10106,7 +10117,7 @@ StmtPtr SQLParser::parseCreateProcedure(const std::vector<std::string>& tokens, 
     if (pos >= tokens.size()) return stmt;
     std::string declared;
     CatalogManager::QualifiedName routine;
-    if(!parseQualifiedRoutineName(tokens,pos,declared) ||
+    if(!parseQualifiedIdentifier(tokens,pos,declared) ||
        !CatalogManager::parseQualifiedName(declared,routine,true))return nullptr;
     stmt->schema=routine.schema;
     stmt->funcName=routine.name;
@@ -11205,7 +11216,7 @@ StmtPtr SQLParser::parseDropDomain(const std::vector<std::string>& tokens, size_
             // in this position; only a following option changes behavior.
             if (word == "exists") return nullptr;
             std::string name;
-            if (!parseQualifiedRoutineName(tokens, pos, name)) return nullptr;
+            if (!parseQualifiedIdentifier(tokens, pos, name)) return nullptr;
             CatalogManager::QualifiedName target;
             if (!CatalogManager::parseQualifiedName(name, target, true) || target.name.empty())
                 return nullptr;
@@ -11213,7 +11224,7 @@ StmtPtr SQLParser::parseDropDomain(const std::vector<std::string>& tokens, size_
                 ++pos;
                 std::string component;
                 CatalogManager::QualifiedName decoded;
-                if (!parseQualifiedRoutineName(tokens, pos, component) ||
+                if (!parseQualifiedIdentifier(tokens, pos, component) ||
                     !CatalogManager::parseQualifiedName(component, decoded, true) ||
                     decoded.name.empty() || !decoded.schema.empty()) return nullptr;
                 name += "." + component;
@@ -11279,7 +11290,7 @@ StmtPtr SQLParser::parseDropType(const std::vector<std::string>& tokens, size_t&
 
 static bool parseRoutineIdentity(const std::vector<std::string>& tokens,size_t& pos,
                                  RoutineIdentitySpec& result) {
-    if(!parseQualifiedRoutineName(tokens,pos,result.name))return false;
+    if(!parseQualifiedIdentifier(tokens,pos,result.name))return false;
     if(pos==tokens.size() || tokens[pos]!="(")return true;
     ++pos;result.argumentTypes.emplace();
     if(pos<tokens.size() && tokens[pos]==")"){++pos;return true;}
@@ -11345,7 +11356,7 @@ StmtPtr SQLParser::parseDropProcedure(const std::vector<std::string>& tokens, si
         stmt->ifExists = true; pos += 2;
     }
     std::string name;
-    if (!parseQualifiedRoutineName(tokens, pos, name)) return nullptr;
+    if (!parseQualifiedIdentifier(tokens, pos, name)) return nullptr;
     stmt->objectNames.push_back(std::move(name));
     while (pos < tokens.size() && tokens[pos] != ";") {
         std::string w = toLower(tokens[pos]);
@@ -12501,14 +12512,14 @@ StmtPtr SQLParser::parseAlterTable(const std::vector<std::string>& tokens, size_
             recognized = true;
             sub.action = AlterTableStmt::Action::DetachPartition; pos += 2; // DETACH PARTITION
             if (pos < tokens.size()) sub.name = tokens[pos++];
-        } else if (kw == "inherit") {
+        } else if (kw == "inherit" ||
+                   (kw == "no" && pos + 1 < tokens.size() && toLower(tokens[pos + 1]) == "inherit")) {
             recognized = true;
-            sub.action = AlterTableStmt::Action::Inherit; ++pos;
-            if (pos < tokens.size()) sub.parentTable = tokens[pos++];
-        } else if (kw == "no" && pos + 1 < tokens.size() && toLower(tokens[pos + 1]) == "inherit") {
-            recognized = true;
-            sub.action = AlterTableStmt::Action::NoInherit; pos += 2;
-            if (pos < tokens.size()) sub.parentTable = tokens[pos++];
+            const bool detach = kw == "no";
+            sub.action = detach ? AlterTableStmt::Action::NoInherit : AlterTableStmt::Action::Inherit;
+            pos += detach ? 2 : 1;
+            if (!parseQualifiedIdentifier(tokens, pos, sub.parentTable, true) ||
+                (pos < tokens.size() && tokens[pos] != "," && tokens[pos] != ";")) return nullptr;
         } else if (kw == "owner") {
             recognized = true;
             sub.action = AlterTableStmt::Action::Owner;

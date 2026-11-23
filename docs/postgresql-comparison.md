@@ -2,6 +2,13 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="qualified-inheritance-comparison-20261123"></a>
+## 2026-11-23 · 继承关系按完整表名选择父表
+
+PostgreSQL 的 `INHERITS` 会保存父子关系，普通父表查询包含子表数据，未限定的名字由搜索路径解析。SQLite 和 DuckDB 的 `CREATE TABLE AS SELECT` 提供按查询结果创建独立表的方式，DuckDB 还给出了只复制列名和类型的写法。 [PostgreSQL 建表](https://www.postgresql.org/docs/18/sql-createtable.html) · [PostgreSQL 搜索路径](https://www.postgresql.org/docs/18/ddl-schemas.html#DDL-SCHEMAS-PATH) · [SQLite 建表](https://www.sqlite.org/lang_createtable.html) · [DuckDB 建表](https://duckdb.org/docs/lts/sql/statements/create_table)
+
+本项目的建表、加入和移除继承现在可用 schema 限定的父表名。重启后仍按写入时选中的表读取，修改搜索路径可以影响后续建表。受测范围是普通表的命名、绑定和持久化。完整目录接口、约束和权限传播仍有差距。 [测试报告](test-report.md#qualified-inheritance-20261123) · [性能报告](performance-report-2026-10-30.md#qualified-inheritance-cost-20261123)
+
 <a id="timetz-ties-comparison-20261123"></a>
 ## 2026-11-23 · 按时间分页时从索引读取页尾并列记录
 

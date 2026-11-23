@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-23 · 普通表继承可跨 schema 绑定父表
+
+`CREATE TABLE … INHERITS`、`ALTER TABLE … INHERIT` 和 `NO INHERIT` 可识别写明 schema 的父表，保留引号内的点、大小写和双引号。已核对多父表语法、选择同名表、非法父表提示以及事务和重启后的关系。完整继承目录与传播规则仍待补齐，`CAT-12` 和 `QRY-12` 保持部分实现。 [功能验证](test-report.md#qualified-inheritance-20261123) · [性能对照](performance-report-2026-10-30.md#qualified-inheritance-cost-20261123) · [实现对照](postgresql-comparison.md#qualified-inheritance-comparison-20261123)
+
 ## 2026-11-23 · 单列时间索引支持带并列记录的分页
 
 单列 `TIMETZ` 的 `FETCH … WITH TIES` 可以继续读取与页尾同键的记录，并从表中核对第一条不同记录。支持正序、倒序、`OFFSET` 及可确认的同列范围。空值可能参与边界、候选太多、内存不足或索引视图不适用时会使用常规路径。覆盖索引与多列排序的提前停止仍待覆盖，`IDX-03` 和 `OPT-01` 保持部分实现。 [功能验证](test-report.md#timetz-ties-20261123) · [性能对照](performance-report-2026-10-30.md#timetz-ties-cost-20261123) · [实现对照](postgresql-comparison.md#timetz-ties-comparison-20261123)

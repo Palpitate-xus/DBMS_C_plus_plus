@@ -1526,6 +1526,17 @@ WITH ORDINALITY AS pairs(id, label, position);
 
 #### 查询继承表
 
+父表名可以带 schema。即使多个 schema 里有同名表，下面的子表也只继承 `live.orders`。已有的表可以用 `ALTER TABLE … INHERIT live.orders` 加入，用 `ALTER TABLE … NO INHERIT live.orders` 移除关系。 [继承验证](test-report.md#qualified-inheritance-20261123)
+
+```sql
+CREATE SCHEMA live;
+CREATE SCHEMA archive;
+CREATE TABLE live.orders (id integer, note text);
+CREATE TABLE archive.orders_2025 () INHERITS (live.orders);
+INSERT INTO archive.orders_2025 VALUES (1, '历史订单');
+SELECT id, note FROM live.orders;
+```
+
 查询普通的父表时，可以读取父表、子表以及更深层后代表中的记录。即使同一张表有多条继承路径，也只读取一次。查询按父表的列名读取各表的数据，再对全部结果排序和分页。`ONLY` 只读取指定的表。
 
 ```sql

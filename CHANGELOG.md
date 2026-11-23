@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>建子表时可以指明父表的位置 · 2026-11-23</summary>
+
+例如，`live.orders` 和 `archive.orders` 同名。创建订单子表时，写 `INHERITS (live.orders)` 就会选中 `live` 里的父表。
+
+[使用说明](docs/MANUAL.md#查询继承表) · [测试报告](docs/test-report.md#qualified-inheritance-20261123) · [性能报告](docs/performance-report-2026-10-30.md#qualified-inheritance-cost-20261123)
+
+</details>
+
+<details>
 <summary>分页带上并列记录时也可以用索引 · 2026-11-23</summary>
 
 例如，查最早的 3 条预约并带上与第 3 条时间相同的预约。给时间建好索引后，数据库可以读到下一个不同的时间就停。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>可以用索引查一段时间内的记录 · 2026-11-23</summary>
+<summary>查看更早的更新和版本记录</summary>
+
+## 2026-11-23 · 可以用索引查一段时间内的记录
 
 例如，要查上午 9 点到 9 点半之间的预约，如果时间带时区偏移且已有索引，数据库可以跳过这段时间以外的记录。
 
 [使用说明](docs/MANUAL.md#日期时间类型) · [测试报告](docs/test-report.md#timetz-range-20261123) · [性能报告](docs/performance-report-2026-10-30.md#timetz-range-cost-20261123)
-
-</details>
-
-<details>
-<summary>查看更早的更新和版本记录</summary>
 
 ## 2026-11-23 · 可以用索引查指定时间的记录
 

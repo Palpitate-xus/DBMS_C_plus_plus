@@ -19,6 +19,7 @@
 #include "process/StatementNotice.h"
 #include "parser/parser.h"
 #include "catalog/CatalogService.h"
+#include "catalog/RelationSearchPath.h"
 #include "catalog/systables.h"
 #include "catalog/type_registry.h"
 #include "utils/interval_type.h"
@@ -1906,6 +1907,46 @@ static bool synchronizeTableIndexFlagInCatalog(
                   << error.what() << std::endl;
         return false;
     }
+}
+
+static std::optional<std::string> resolveInheritanceParent(
+    Session& session, const std::string& parent, const std::string& childStorageName) {
+    CatalogManager::QualifiedName name;
+    if (!CatalogManager::parseQualifiedName(parent, name) || name.name.empty()) {
+        std::cout << "ERROR: invalid inheritance parent name (SQLSTATE 42601)" << std::endl;
+        return {};
+    }
+    auto& catalog = g_engine.catalogService().get(session.currentDB);
+    std::optional<PgClassRow> relation;
+    if (name.schema.empty()) {
+        relation = catalog.resolveRelationSnapshot(parent, effectiveRelationSearchPath(&session));
+    } else {
+        const bool temporary = name.schema == "pg_temp";
+        const auto schema = temporary ? sessionTempSchemaName(session) : name.schema;
+        if (const auto ns = catalog.getNamespaceByName(schema)) {
+            relation = catalog.getClassByName(name.name, ns->oid);
+        } else if (!temporary && !g_engine.schemaExists(session.currentDB, schema)) {
+            std::cout << "ERROR: schema \"" << name.schema << "\" does not exist (SQLSTATE 3F000)" << std::endl;
+            return {};
+        }
+    }
+    if (relation && relation->relkind != 'r' && relation->relkind != 'f') {
+        std::cout << "ERROR: inherited relation \"" << name.name
+                  << "\" is not a table or foreign table (SQLSTATE 42809)" << std::endl;
+        return {};
+    }
+    auto physicalName = resolveTableName(session, parent);
+    if (!g_engine.tableExists(session.currentDB, physicalName)) {
+        const auto logicalName = name.schema.empty() ? name.name : name.schema + "." + name.name;
+        std::cout << "ERROR: relation \"" << logicalName << "\" does not exist (SQLSTATE 42P01)" << std::endl;
+        return {};
+    }
+    if (physicalName.find_first_of("|\r\n") != std::string::npos ||
+        childStorageName.find_first_of("|\r\n") != std::string::npos) {
+        std::cout << "ERROR: table name cannot be represented in inheritance metadata (SQLSTATE 0A000)" << std::endl;
+        return {};
+    }
+    return physicalName;
 }
 
 static bool updateTableHierarchyFlagsInCatalog(
@@ -3831,13 +3872,9 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                               << " not found" << std::endl;
                     return true;
                 }
-                const std::string parentName =
-                    resolveTableName(s, sub.parentTable);
-                if (!g_engine.tableExists(s.currentDB, parentName)) {
-                    std::cout << "Parent table " << sub.parentTable
-                              << " not found" << std::endl;
-                    return true;
-                }
+                const auto resolvedParent = resolveInheritanceParent(s, sub.parentTable, tableName);
+                if (!resolvedParent) return true;
+                const auto& parentName = *resolvedParent;
                 if (parentName == tableName) {
                     std::cout << "A table cannot inherit from itself" << std::endl;
                     return true;
@@ -6849,14 +6886,12 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
         };
 
         for (const auto& parentRaw : stmt->inherits) {
-            std::string parent = resolveTableName(s, parentRaw);
-            if (!g_engine.tableExists(s.currentDB, parent)) {
-                std::cout << "Parent table " << parentRaw << " not found" << std::endl;
-                return true;
-            }
+            const auto resolvedParent = resolveInheritanceParent(s, parentRaw, tname);
+            if (!resolvedParent) return true;
+            const auto& parent = *resolvedParent;
             if (!resolvedParents.insert(parent).second) {
                 std::cout << "ERROR: relation \"" << parentRaw
-                          << "\" would be inherited from more than once"
+                          << "\" would be inherited from more than once (SQLSTATE 42P07)"
                           << std::endl;
                 return true;
             }

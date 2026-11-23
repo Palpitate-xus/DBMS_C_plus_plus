@@ -81,6 +81,18 @@ static void test_inherit_parser() {
     assert(alter->subCommands[0].action == dbms::AlterTableStmt::Action::NoInherit);
     assert(alter->subCommands[0].parentTable == "parent");
 
+    r = parser.parse(R"(CREATE TABLE child () INHERITS (APP . parent, "Archive.V1"."Parent""Name"))");
+    const auto* create = dynamic_cast<const dbms::CreateTableStmt*>(r.stmt.get());
+    assert(r.success && create);
+    assert((create->inherits == std::vector<std::string>{"app.parent", R"("Archive.V1"."Parent""Name")"}));
+    assert(!parser.parse("CREATE TABLE child () INHERITS (app.parent,)").success);
+
+    r = parser.parse(R"(ALTER TABLE child NO INHERIT "Archive.V1"."Parent""Name", ADD COLUMN z int)");
+    alter = dynamic_cast<dbms::AlterTableStmt*>(r.stmt.get());
+    assert(r.success && alter && alter->subCommands.size() == 2);
+    assert(alter->subCommands[0].parentTable == R"("Archive.V1"."Parent""Name")");
+    assert(alter->subCommands[1].action == dbms::AlterTableStmt::Action::AddColumn);
+
     cleanup(db);
     std::cout << "[INHERIT] parser OK" << std::endl;
 }
