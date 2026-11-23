@@ -2,6 +2,7 @@
 #include "catalog/RelationSearchPath.h"
 #include "parser/BetweenSyntax.h"
 #include "commands/CopyRelation.h"
+#include "commands/StoredZonedClockPredicate.h"
 #include "catalog/type_catalog.h"
 #include "catalog/TypeCatalogScan.h"
 #include "catalog/SystemCatalogRows.h"
@@ -6206,6 +6207,7 @@ static bool handleExplain(const string& sql, Session& s) {
         };
         if (!select->ctes.empty() || explainNeedsTypedPlan(*select) ||
             dbms::QueryPlanner::mayUseIntegerPrimaryKeyPage(&g_engine,s.currentDB,*prepared,*select) ||
+            dbms::mayUseStoredZonedClockPage(g_engine,s.currentDB,*prepared,*select) ||
             (directCall && directCall->setReturning) || typedDeclaredFilter())
             // Consume the same owned, bound query on the real execution
             // root, including its source/demand contexts and pure planning.
@@ -21141,14 +21143,16 @@ class PreparedWithDmlRuntime {
         const bool orderedPrimaryPage = select == readRoot_ && descendants.empty() &&
             select->limit && !select->orderBy.empty() &&
             dbms::QueryPlanner::mayUseIntegerPrimaryKeyPage(&g_engine, session_.currentDB, *query_, *select);
+        const bool orderedClockPage = select == readRoot_ && descendants.empty() &&
+            dbms::mayUseStoredZonedClockPage(g_engine, session_.currentDB, *query_, *select);
         const bool emptyProjection = select->selectList.empty();
         if (descendants.empty() && !emptyProjection &&
-            (select != readRoot_ || (!select->whereClause && !storedCount && !orderedPrimaryPage))) return {};
+            (select != readRoot_ || (!select->whereClause && !storedCount && !orderedPrimaryPage && !orderedClockPage))) return {};
         auto parent=g_engine.getTableSchema(session_.currentDB,table);
         const bool declaredFilter = select == readRoot_ &&
             dbms::QueryPlanner::usesDeclaredFilterCollations(*select, parent);
         if (descendants.empty()) {
-            if (!emptyProjection && !declaredFilter && !(orderedPrimaryPage && parent.hasVariableLength()) &&
+            if (!emptyProjection && !declaredFilter && !orderedClockPage && !(orderedPrimaryPage && parent.hasVariableLength()) &&
                 !(storedCount && dbms::QueryPlanner::usesStoredCountSource(
                     g_engine, session_.currentDB, *select, parent, range.ordinal)))
                 return {};
@@ -22816,6 +22820,21 @@ static bool supportsPreparedSetComparisons(const dbms::PreparedQuery& query, con
     });
 }
 
+static bool probesStoredZonedClockPage(const dbms::SelectStmt& select, Session& session) {
+    if (!select.limit || !*select.limit || *select.limit > 512 || select.orderBy.size() != 1 ||
+        select.withTies || !select.ctes.empty() || !select.fromClause ||
+        select.fromClause->type != dbms::FromItem::Type::Table || select.setOp != dbms::SetOp::None)
+        return false;
+    const auto* key = queryDemandPhysicalOrderColumn(select, select.orderBy.front());
+    if (!key) return false;
+    const auto table = resolveTableName(session, select.fromClause->tableName, true);
+    if (table.empty()) return false;
+    const auto schema = g_engine.getTableSchema(session.currentDB, table);
+    return any_of(schema.cols.begin(), schema.cols.end(), [&](const auto& column) {
+        return column.dataName == key->column && column.storageCodec == dbms::Column::StorageCodec::ZonedClock;
+    });
+}
+
 static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& handled,
                                     bool tableFunctionOnly = false) {
     handled=false;
@@ -23044,12 +23063,13 @@ static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& 
         supportsDerivedQuery(select);
     if (tableFunctionOnly && !sourceProbe) return false;
     required = required || ((emptyProjection || tableFunction) && sourceProbe);
+    const bool orderedClockProbe = !required && probesStoredZonedClockPage(*select, session);
     const bool derivedProbe=sourceProbe && logicalSource;
     const bool inheritanceProbe=sourceProbe && nestedInheritance;
     const bool viewProbe = sourceProbe && viewSource;
     const bool generatedJoinProbe = !required && !comparisonCandidate && !viewProbe &&
         plainGeneratedJoinSourceProbe(*select,session);
-    if(!required && !comparisonCandidate && !generatedJoinProbe && !derivedProbe &&
+    if(!required && !orderedClockProbe && !comparisonCandidate && !generatedJoinProbe && !derivedProbe &&
        !inheritanceProbe && !integerJoinProbe && !viewProbe) {
         if(!sourceProbe || !usingSource)return false;
         // Avoid whole-query preparation for existing scalar-only physical
@@ -23143,7 +23163,9 @@ static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& 
                [&](const auto& statement) { return isArrayDomain(statement.second); }) ||
         any_of(query->setOperationInputs.begin(),query->setOperationInputs.end(),
                [&](const auto& set) { return isArrayDomain(set.second.left) || isArrayDomain(set.second.right); }));
-    if(!required && !inheritanceRequired && !integerJoinRequired && !viewRequired && !demandedLogicalRead) {
+    const bool orderedClockRequired = orderedClockProbe && dbms::mayUseStoredZonedClockPage(
+        g_engine, session.currentDB, *query, *static_cast<const dbms::SelectStmt*>(query->ast.get()));
+    if(!required && !orderedClockRequired && !inheritanceRequired && !integerJoinRequired && !viewRequired && !demandedLogicalRead) {
         // The parser only probes a shape. Actual copied type/operator metadata
         // owns this receiver; ordinary builtin comparisons keep their existing
         // consumer. Never discover enum identity from evaluated datum strings.

@@ -588,6 +588,11 @@ void test_leaf_entry_scan_validates_sibling_links_and_separators() {
         assert(positions == std::vector<int64_t>{22});
         assert(tree.readOrderedKeyRange("a", "c", 1, 3, positions) == LeafEntriesResult::LimitExceeded);
         assert(positions.empty());
+        size_t visited = 0;
+        assert(tree.readOrderedKeyPrefix("a", "c", 1, 2, false, entries, visited) == LeafEntriesResult::Complete);
+        assert(visited == 2 && entries.size() == 1 && entries.front().key[0] == 'a' && entries.front().value == 11);
+        assert(tree.readOrderedKeyPrefix("a", "c", 1, 2, true, entries, visited) == LeafEntriesResult::Complete);
+        assert(visited == 2 && entries.size() == 1 && entries.front().key[0] == 'c' && entries.front().value == 22);
     }
 
     // A range on the separator must reach duplicates on both sides.
@@ -602,6 +607,9 @@ void test_leaf_entry_scan_validates_sibling_links_and_separators() {
         assert((positions == std::vector<int64_t>{11, 22}));
         assert(tree.readOrderedKeyRange("d", "e", 1, 2, positions) == LeafEntriesResult::Complete);
         assert(positions.empty());
+        size_t visited = 0;
+        assert(tree.readOrderedKeyPrefix("b", "b", 2, 3, true, entries, visited) == LeafEntriesResult::Complete);
+        assert(visited == 3 && entries.size() == 2 && entries[0].value == 22 && entries[1].value == 11);
     }
 
     // The child graph still lists both leaves, but the leaf chain drops one.
@@ -614,6 +622,8 @@ void test_leaf_entry_scan_validates_sibling_links_and_separators() {
         assert(tree.readLeafEntriesChecked(2, entries) == LeafEntriesResult::Error && entries.empty());
         std::vector<int64_t> positions{99};
         assert(tree.readOrderedKeyRange("a", "c", 2, 3, positions) == LeafEntriesResult::Error && positions.empty());
+        size_t visited = 0;
+        assert(tree.readOrderedKeyPrefix("a", "c", 2, 3, true, entries, visited) == LeafEntriesResult::Error && entries.empty());
     }
 
     // Restore the leaf links and break the boundary between the children.

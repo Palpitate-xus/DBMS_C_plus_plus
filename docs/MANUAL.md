@@ -679,6 +679,14 @@ WHERE local_time >= '14:30:00+05:30' AND local_time < '14:31:00+05:30';
 
 同一列上的范围比较和 `BETWEEN` 也可以用单列索引。`BETWEEN` 包含两端。比较先按换算后的 UTC 时钟排序，时钟相同再按偏移区分，因此小数秒或偏移不同的值可能落在边界两侧。 [范围查询验证](test-report.md#timetz-range-20261123)
 
+只取按时间排序的一小页时，数据库可以从索引的一端开始，读够就停。下面的查询只找最近的 10 条有效时间。 [排序分页验证](test-report.md#timetz-page-20261123)
+
+```sql
+SELECT id, local_time FROM check_ins
+WHERE local_time IS NOT NULL
+ORDER BY local_time DESC LIMIT 10;
+```
+
 省略偏移时从会话时区推断、命名时区输入和完整数组支持仍有差距。旧表的迁移边界见[打包与部署](PACKAGING.md#时间列存储与版本边界)和[测试报告](test-report.md#timetz-storage-20261123)。
 
 ### 二进制类型

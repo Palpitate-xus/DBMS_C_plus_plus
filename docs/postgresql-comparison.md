@@ -2,6 +2,13 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="timetz-page-comparison-20261123"></a>
+## 2026-11-23 · 按带偏移的时间翻页
+
+PostgreSQL 可以正向或反向读 B 树，在找到 `LIMIT` 所需的行数后停下。SQLite 也可正反向读取索引来满足排序。DuckDB 的 TopN 在输入中保留当前最靠前的 N 行，以减少排序和内存开销。 [PostgreSQL 索引与排序](https://www.postgresql.org/docs/18/indexes-ordering.html) · [SQLite 索引排序](https://www.sqlite.org/queryplanner.html#sorting_by_index) · [DuckDB TopN](https://duckdb.org/2024/11/14/optimizers#optimizers)
+
+本项目在普通单列 `TIMETZ` 的小页查询中，用索引读到 `OFFSET + LIMIT` 所需的行，再从表里核对完整键和可见性。常规排序和行数限制仍处理这批已经缩小的候选。由于现有索引跳过空值，空值可能影响页首或页尾时继续使用完整排序。覆盖索引、多列顺序和 `WITH TIES` 的索引提前停止仍有差距。 [功能验证](test-report.md#timetz-page-20261123) · [性能对照](performance-report-2026-10-30.md#timetz-page-cost-20261123)
+
 <a id="timetz-range-comparison-20261123"></a>
 ## 2026-11-23 · 用索引查找一段带偏移的时间
 

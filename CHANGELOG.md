@@ -1,34 +1,40 @@
 # 更新日志
 
 <details>
-<summary>可以用索引查找一段带时区的时间 · 2026-11-23</summary>
+<summary>按时间排序，只取前几条更快 · 2026-11-23</summary>
 
-例如，可以查找上午 9 点到 9 点半之间的签到记录。范围较小时，数据库可以用索引直接找到这一段。
+例如，给预约时间建好索引后，查询最早的 4 条预约时，数据库读够 4 条就可以停。预约时间可以带时区偏移，例如 `09:00:00+08:00`。
+
+[使用说明](docs/MANUAL.md#日期时间类型) · [测试报告](docs/test-report.md#timetz-page-20261123) · [性能报告](docs/performance-report-2026-10-30.md#timetz-page-cost-20261123)
+
+</details>
+
+<details>
+<summary>可以用索引查一段时间内的记录 · 2026-11-23</summary>
+
+例如，要查上午 9 点到 9 点半之间的预约，如果时间带时区偏移且已有索引，数据库可以跳过这段时间以外的记录。
 
 [使用说明](docs/MANUAL.md#日期时间类型) · [测试报告](docs/test-report.md#timetz-range-20261123) · [性能报告](docs/performance-report-2026-10-30.md#timetz-range-cost-20261123)
 
 </details>
 
 <details>
-<summary>按带时区的时间查找记录可以用索引 · 2026-11-23</summary>
+<summary>可以用索引查指定时间的记录 · 2026-11-23</summary>
 
-例如，给签到时间建索引后，查找 `14:30:00+05:30` 时可以直接定位记录。索引确认没有匹配时，也可以直接返回。
+例如，给预约时间建好索引后，查询 `14:30:00+05:30` 的预约时，数据库可以直接找到符合条件的记录。
 
 [使用说明](docs/MANUAL.md#日期时间类型) · [测试报告](docs/test-report.md#timetz-index-20261123) · [性能报告](docs/performance-report-2026-10-30.md#timetz-index-cost-20261123)
 
 </details>
 
 <details>
-<summary>可以保存带时区的时间 · 2026-11-23</summary>
+<summary>查看更早的更新和版本记录</summary>
+
+## 2026-11-23 · 可以保存带时区的时间
 
 例如，把签到时间存为 `14:30:00+05:30`，查询时仍会显示 `+05:30`。
 
 [使用说明](docs/MANUAL.md#日期时间类型) · [测试报告](docs/test-report.md#timetz-storage-20261123) · [性能报告](docs/performance-report-2026-10-30.md#timetz-storage-cost-20261123)
-
-</details>
-
-<details>
-<summary>查看更早的更新和版本记录</summary>
 
 ## 2026-11-23 · 可以指定时间的小数秒保留几位
 

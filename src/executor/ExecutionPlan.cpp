@@ -5471,14 +5471,63 @@ public:
     }
 };
 
+struct ZonedClockPageSpec {
+    StoredZonedClockRange range;
+    StoredZonedClockOrder order;
+};
+
+static std::optional<ZonedClockPageSpec> zonedClockPageSpec(StorageEngine& engine,
+        const std::string& database, const SelectStmt& select,
+        const QueryColumnBinding& key, const TableSchema& schema) {
+    const auto count = simpleIntegerScanDemand(select);
+    if (!count || *count > 512 || key.columnOrdinal >= schema.len() || key.typeOid != 1266 ||
+        !key.typeMetadata || key.typeMetadata->actualOid != 1266 || key.typeMetadata->codecOid != 1266)
+        return {};
+    const auto& column = schema.cols[key.columnOrdinal];
+    if (column.isArray || column.generatedKind || !column.domainName.empty() ||
+        !completeStoredZonedClockIndex(engine, database, schema, column)) return {};
+    const auto& order = select.orderBy.front();
+    ZonedClockPageSpec page{{column.dataName}, {*count, !order.asc, order.nullsFirst, false}};
+    if (select.whereClause) {
+        const auto* test = dynamic_cast<const UnaryOpExpr*>(select.whereClause.get());
+        const auto* reference = test && test->op == "IS NOT NULL" && !test->preparedSubquery
+            ? dynamic_cast<const ColumnRefExpr*>(test->operand.get()) : nullptr;
+        if (!reference || !reference->binding || reference->preparedSubquery ||
+            reference->binding->scopeDepth || reference->binding->mergedUsing ||
+            reference->binding->sourceOrdinal != key.sourceOrdinal ||
+            reference->binding->columnOrdinal != key.columnOrdinal) {
+            auto range = storedZonedClockRange(engine, database, schema, select.whereClause.get(), key.sourceOrdinal);
+            if (!range || range->column != column.dataName) return {};
+            page.range = std::move(*range);
+        }
+        page.order.excludesNulls = true;
+    }
+    if (!page.order.excludesNulls && page.order.nullsFirst && column.isNull &&
+        !isSingleColumnPrimaryKey(schema, column.dataName)) return {};
+    return page;
+}
+
+bool mayUseStoredZonedClockPage(StorageEngine& engine, const std::string& database,
+                               const PreparedQuery& query, const SelectStmt& select) {
+    const auto key = integerPageOrder(query, select);
+    if (!key || key->typeOid != 1266) return false;
+    const auto* relation = integerPageRelation(query, select, *key);
+    if (!relation) return false;
+    const auto table = relation->relationSchema.empty() || relation->relationSchema == "public" ? relation->relationName
+        : relation->relationSchema + "__" + relation->relationName;
+    const auto schema = engine.getTableSchema(database, table);
+    return zonedClockPageSpec(engine, database, select, *key, schema).has_value();
+}
+
 // The outer filter keeps responsibility for the SQL predicate. This source
 // also checks each heap value against the physical interval before emitting it.
 class ZonedClockRangeScanOp final : public Operator {
 public:
     ZonedClockRangeScanOp(StorageEngine& engine, std::string database,
-                          const TableSchema& schema, StoredZonedClockRange range, OpPtr fallback)
+                          const TableSchema& schema, StoredZonedClockRange range, OpPtr fallback,
+                          std::optional<StoredZonedClockOrder> order = std::nullopt)
         : engine_(engine), database_(std::move(database)), table_(schema.tablename),
-          relationId_(schema.physicalRelationId), range_(std::move(range)), fallback_(std::move(fallback)) {}
+          relationId_(schema.physicalRelationId), range_(std::move(range)), fallback_(std::move(fallback)), order_(order) {}
 
     ~ZonedClockRangeScanOp() override { try { close(); } catch (...) {} }
 
@@ -5487,6 +5536,7 @@ public:
         close();
         clearError();
         usedIndex_ = false;
+        prefixRows_ = prefixNodes_ = 0;
         auto& locks = engine_.getLockManager();
         locks.setResourceNamespace(database_);
         if (!locks.lockShared(table_)) throw DbError("55P03", "could not obtain lock on relation \"" + table_ + "\"");
@@ -5497,7 +5547,15 @@ public:
         if (column_ < schema_.len() && schema_.physicalRelationId == relationId_ &&
             engine_.getInheritedChildren(database_, table_).empty()) {
             engine_.noteQuerySnapshot();
-            if (auto positions = readStoredZonedClockRange(engine_, database_, schema_, range_)) {
+            if (order_) {
+                page_ = readStoredZonedClockPage(engine_, database_, schema_, range_, *order_, sortWorkMemBytes());
+                if (page_) {
+                    prefixRows_ = page_->rows.size();
+                    prefixNodes_ = page_->indexNodes;
+                    usedIndex_ = true;
+                    return true;
+                }
+            } else if (auto positions = readStoredZonedClockRange(engine_, database_, schema_, range_)) {
                 rids_ = std::move(*positions);
                 // Read heap pages in physical order. A requested SQL order
                 // still belongs to the ordinary sort above this source.
@@ -5518,6 +5576,14 @@ public:
             instrument.emitted = fallback_->next(row);
             if (!instrument.emitted && fallback_->hasError()) return propagateChildError(fallback_.get(), "range heap source failed");
             return instrument.emitted;
+        }
+        if (page_) {
+            if (position_ == page_->rows.size()) return false;
+            auto& stored = page_->rows[position_++];
+            lastRid_ = stored.rid;
+            row = std::move(stored.data);
+            instrument.emitted = true;
+            return true;
         }
         while (position_ < rids_.size()) {
             checkForQueryInterrupt();
@@ -5552,14 +5618,22 @@ public:
     }
     bool lastColumnIsNull(size_t ordinal) const override {
         if (fallbackOpened_) return fallback_->lastColumnIsNull(ordinal);
+        if (page_) return position_ && ordinal < schema_.len() && page_->rows[position_ - 1].nulls[ordinal];
         return lastRid_ > 0 && ordinal < schema_.len() &&
             detail::storedRowColumnIsNull(engine_, database_, table_, schema_, lastRid_, ordinal);
+    }
+    bool lastStoredNullBitmap(std::vector<bool>& bitmap) const override {
+        if (fallbackOpened_) return fallback_->lastStoredNullBitmap(bitmap);
+        if (!page_ || !position_) return false;
+        bitmap = page_->rows[position_ - 1].nulls;
+        return true;
     }
     void close() override {
         std::exception_ptr error;
         try { if (std::exchange(fallbackOpened_, false)) fallback_->close(); }
         catch (...) { error = std::current_exception(); }
-        if (lastRid_) StorageEngine::unbindNullRow();
+        if (lastRid_ && !page_) StorageEngine::unbindNullRow();
+        page_.reset();
         rids_.clear(); position_ = 0; lastRid_ = 0;
         if (std::exchange(locked_, false)) {
             auto& locks = engine_.getLockManager();
@@ -5568,9 +5642,14 @@ public:
         }
         if (error) std::rethrow_exception(error);
     }
-    std::string preparedPlanNodeName() const override { return "ZonedClockRangeScan"; }
+    std::string preparedPlanNodeName() const override { return order_ ? "ZonedClockIndexPage" : "ZonedClockRangeScan"; }
     std::map<std::string, std::string> preparedPlanAttributes() const override {
-        return {{"usedIndex", usedIndex_ ? "true" : "false"}, {"column", range_.column}};
+        std::map<std::string, std::string> attributes{{"usedIndex", usedIndex_ ? "true" : "false"}, {"column", range_.column}};
+        if (order_ && usedIndex_) {
+            attributes.emplace("heapRowsFetched", std::to_string(prefixRows_));
+            attributes.emplace("indexNodesVisited", std::to_string(prefixNodes_));
+        }
+        return attributes;
     }
     std::vector<Operator*> preparedPlanChildren() const override {
         return usedIndex_ ? std::vector<Operator*>{} : std::vector<Operator*>{fallback_.get()};
@@ -5585,9 +5664,12 @@ private:
     uint64_t relationId_;
     StoredZonedClockRange range_;
     OpPtr fallback_;
+    std::optional<StoredZonedClockOrder> order_;
+    std::optional<StoredZonedClockPage> page_;
     TableSchema schema_;
     std::vector<int64_t> rids_;
     size_t position_ = 0, column_ = 0;
+    size_t prefixRows_ = 0, prefixNodes_ = 0;
     int64_t lastRid_ = 0;
     bool locked_ = false, fallbackOpened_ = false, usedIndex_ = false;
 };
@@ -5612,6 +5694,13 @@ static OpPtr makePreparedTableSource(StorageEngine* engine, const std::string& d
     };
     const auto* physical = dynamic_cast<const TableScanOp*>(source.get());
     if (physical && typeid(*physical) == typeid(TableScanOp) && physical->tableName() == schema.tablename) {
+        const auto orderKey = integerPageOrder(*query, *select);
+        if (orderKey && orderKey->typeOid == 1266 && integerPageRelation(*query, *select, *orderKey)) {
+            if (auto page = zonedClockPageSpec(*engine, database, *select, *orderKey, schema)) {
+                return std::make_unique<ZonedClockRangeScanOp>(*engine, database, schema,
+                    std::move(page->range), heap(), page->order);
+            }
+        }
         if (select->locking.empty() && select->fromClause && select->fromClause->type == FromItem::Type::Table) {
             for (const auto& sourceRange : query->sourceRanges) {
                 if (sourceRange.owner != select || sourceRange.source != select->fromClause.get() ||
@@ -5622,7 +5711,7 @@ static OpPtr makePreparedTableSource(StorageEngine* engine, const std::string& d
                 }
             }
         }
-        const auto key = integerPageOrder(*query, *select);
+        const auto& key = orderKey;
         if (key && integerPageRelation(*query, *select, *key) && eligibleIntegerPageKey(schema, *key)) {
             if (auto bounds = integerPageBounds(*query, *select, *key, schema)) {
                 auto fallback = bounds->hasDisjunction ? heap() : std::move(source);

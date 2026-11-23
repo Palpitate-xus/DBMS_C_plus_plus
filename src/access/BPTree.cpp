@@ -975,17 +975,36 @@ bool BPTree::allValuesChecked(std::vector<int64_t>& values) const {
     return rangeScanChecked("", std::string(BP_KEY_LEN, '\xFF'), values);
 }
 
+static bool ordinaryBtreeKeyFormat(uint16_t format) {
+    return !format || format == bptree_format::kContentChecksumFormat ||
+        format == bptree_format::kPageBoundChecksumFormat;
+}
+
 BPTree::LeafEntriesResult BPTree::readOrderedKeyRange(
         const std::string& lower, const std::string& upper, size_t maxRows,
         size_t maxNodes, std::vector<int64_t>& values) const {
     std::shared_lock<std::shared_mutex> treeLock(treeMutex_);
     values.clear();
     if (!bp_ || !bp_->isOpen() || lower.size() > BP_KEY_LEN || upper.size() > BP_KEY_LEN ||
-        (header_.reserved != 0 && header_.reserved != bptree_format::kContentChecksumFormat &&
-         header_.reserved != bptree_format::kPageBoundChecksumFormat))
+        !ordinaryBtreeKeyFormat(header_.reserved))
         return LeafEntriesResult::Error;
     return readFixedRangeLocked(normalizeKey(lower), normalizeKey(upper), maxRows, maxNodes,
                                 values, nullptr, CompositeRangeRead::Entire, nullptr);
+}
+
+BPTree::LeafEntriesResult BPTree::readOrderedKeyPrefix(
+        const std::string& lower, const std::string& upper, size_t count,
+        size_t maxNodes, bool descending, std::vector<LeafEntry>& entries,
+        size_t& visitedNodes) const {
+    std::shared_lock<std::shared_mutex> treeLock(treeMutex_);
+    entries.clear();
+    visitedNodes = 0;
+    if (!bp_ || !bp_->isOpen() || lower.size() > BP_KEY_LEN || upper.size() > BP_KEY_LEN ||
+        !ordinaryBtreeKeyFormat(header_.reserved)) return LeafEntriesResult::Error;
+    std::vector<int64_t> positions;
+    const auto mode = descending ? CompositeRangeRead::FirstDescending : CompositeRangeRead::FirstAscending;
+    return readFixedRangeLocked(normalizeKey(lower), normalizeKey(upper), count, maxNodes,
+                                positions, nullptr, mode, &visitedNodes, &entries);
 }
 
 BPTree::LeafEntriesResult BPTree::readCompositePrimaryRange(
@@ -1007,7 +1026,7 @@ BPTree::LeafEntriesResult BPTree::readCompositePrimaryRange(
 BPTree::LeafEntriesResult BPTree::readFixedRangeLocked(
         const std::string& lower, const std::string& upper, size_t maxRows,
         size_t maxNodes, std::vector<int64_t>& values, std::vector<int64_t>* suffixes,
-        CompositeRangeRead mode, size_t* visitedNodes) const {
+        CompositeRangeRead mode, size_t* visitedNodes, std::vector<LeafEntry>* keys) const {
     const bool prefix = mode != CompositeRangeRead::Entire;
     const bool descending = mode == CompositeRangeRead::FirstDescending;
     if (!header_.rootPage || lower > upper || (prefix && maxRows == 0))
@@ -1015,6 +1034,8 @@ BPTree::LeafEntriesResult BPTree::readFixedRangeLocked(
 
     std::vector<int64_t> result;
     std::vector<int64_t> resultSuffixes;
+    std::vector<LeafEntry> orderedEntries;
+    const auto copied = [&] { return keys ? orderedEntries.size() : result.size(); };
     std::unordered_set<uint32_t> visited;
     std::optional<size_t> leafDepth;
     uint32_t lastLeaf = 0;
@@ -1035,7 +1056,7 @@ BPTree::LeafEntriesResult BPTree::readFixedRangeLocked(
         const size_t first = lowerBoundIdx(node->keys, node->numKeys, lower);
         const size_t end = upperBoundIdx(node->keys, node->numKeys, upper);
         if (!node->isLeaf) {
-            for (size_t offset = 0; offset <= end - first && (!prefix || result.size() < maxRows);
+            for (size_t offset = 0; offset <= end - first && (!prefix || copied() < maxRows);
                  ++offset) {
                 const size_t i = descending ? end - offset : first + offset;
                 const auto status = self(self, node->children[i], depth + 1,
@@ -1056,12 +1077,19 @@ BPTree::LeafEntriesResult BPTree::readFixedRangeLocked(
         leafDepth = depth;
         lastLeaf = page;
         lastNextLeaf = node->nextLeaf;
-        const size_t remaining = maxRows - result.size();
+        const size_t remaining = maxRows - copied();
         if (!prefix && end - first > remaining) return LeafEntriesResult::LimitExceeded;
         const size_t take = std::min(end - first, remaining);
         for (size_t offset = 0; offset < take; ++offset) {
             const size_t i = descending ? end - 1 - offset : first + offset;
-            result.push_back(node->values[i]);
+            if (keys) {
+                LeafEntry entry;
+                std::copy_n(node->keys[i].data(), BP_KEY_LEN, entry.key.begin());
+                entry.value = node->values[i];
+                orderedEntries.push_back(entry);
+            } else {
+                result.push_back(node->values[i]);
+            }
             if (suffixes)
                 resultSuffixes.push_back(readIntegerStoredKey(node->keys[i], BP_KEY_LEN - kIntegerKeyBytes));
         }
@@ -1072,6 +1100,7 @@ BPTree::LeafEntriesResult BPTree::readFixedRangeLocked(
     if (status == LeafEntriesResult::Complete) {
         values = std::move(result);
         if (suffixes) *suffixes = std::move(resultSuffixes);
+        if (keys) *keys = std::move(orderedEntries);
     }
     return status;
 }

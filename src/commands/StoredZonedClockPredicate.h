@@ -8,6 +8,8 @@
 namespace dbms {
 
 class Expr;
+struct PreparedQuery;
+struct SelectStmt;
 
 // The complete scalar key is available only from the physical B-tree owner.
 bool completeStoredZonedClockIndex(StorageEngine& engine, const std::string& database,
@@ -40,5 +42,30 @@ std::optional<StoredZonedClockRange> storedZonedClockRange(StorageEngine& engine
 // when it has no rows. An unavailable or expensive read uses the heap.
 std::optional<std::vector<int64_t>> readStoredZonedClockRange(StorageEngine& engine,
     const std::string& database, const TableSchema& schema, const StoredZonedClockRange& range);
+
+struct StoredZonedClockOrder {
+    size_t count;
+    bool descending;
+    bool nullsFirst;
+    bool excludesNulls;
+};
+
+struct StoredZonedClockPage {
+    struct Row {
+        int64_t rid;
+        std::string data;
+        std::vector<bool> nulls;
+    };
+    std::vector<Row> rows;
+    size_t indexNodes = 0;
+};
+
+std::optional<StoredZonedClockPage> readStoredZonedClockPage(StorageEngine& engine,
+    const std::string& database, const TableSchema& schema, const StoredZonedClockRange& range,
+    const StoredZonedClockOrder& order, size_t byteBudget);
+
+// Query admission and source construction use the same bound order and range.
+bool mayUseStoredZonedClockPage(StorageEngine& engine, const std::string& database,
+                               const PreparedQuery& query, const SelectStmt& select);
 
 } // namespace dbms

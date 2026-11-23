@@ -2,6 +2,18 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-23 stop ordered scalar TIMETZ index reads at page demand",
+      "gap_ids": ["IDX-03", "OPT-01"],
+      "status": "partial",
+      "evidence": ["src/access/BPTree.cpp", "src/commands/TableManage.cpp", "src/executor/ExecutionPlan.cpp", "src/main.cpp", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/timetz_ordered_page_protocol_e2e_test.py", "tests/bptree_topology_corruption_test.cpp"],
+      "verification": [
+        "The executor can stop checked forward or backward index traversal after the declared OFFSET and LIMIT demand, including a proven range on the same column.",
+        "All visible heap keys are verified before using a prefix. Empty and short pages, NULL ordering, stale-key, memory-budget and partial-index fallback have direct witnesses.",
+        "Normal SQL and binary result descriptors preserve column origin. Recovery exercises old snapshots, savepoints, abrupt shutdown, REINDEX and VACUUM FULL."
+      ]
+    },
+    {
       "issue": "2026-11-23 use checked scalar TIMETZ index ranges and consistent BETWEEN comparisons",
       "gap_ids": ["IDX-03", "OPT-01", "TYPE-06"],
       "status": "partial",

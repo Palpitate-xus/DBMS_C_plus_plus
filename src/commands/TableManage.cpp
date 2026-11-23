@@ -34259,6 +34259,14 @@ std::optional<StoredZonedClockRange> storedZonedClockRange(StorageEngine& engine
     return range;
 }
 
+static std::pair<std::string,std::string> storedZonedClockDiskBounds(const StoredZonedClockRange& range) {
+    auto upper = orderedTemporalKey(range.upper);
+    // The single-column primary layout may append a delimiter. The range
+    // bounds cover the complete physical key for either layout.
+    upper.append(BP_KEY_LEN - upper.size(), '\xFF');
+    return {orderedTemporalKey(range.lower), std::move(upper)};
+}
+
 std::optional<std::vector<int64_t>> readStoredZonedClockRange(StorageEngine& engine,
     const std::string& database, const TableSchema& schema, const StoredZonedClockRange& range) {
     const auto* column = storedZonedClockColumn(schema, range.column);
@@ -34279,11 +34287,7 @@ std::optional<std::vector<int64_t>> readStoredZonedClockRange(StorageEngine& eng
         ? static_cast<double>(rows) : 32.0 * pages, pages);
     constexpr size_t maxRows = 512;
     constexpr size_t maxNodes = 64;
-    const auto lower = orderedTemporalKey(range.lower);
-    auto upper = orderedTemporalKey(range.upper);
-    // The single-column primary layout may append a delimiter. The range
-    // bounds cover the complete physical key for either layout.
-    upper.append(BP_KEY_LEN - upper.size(), '\xFF');
+    const auto [lower, upper] = storedZonedClockDiskBounds(range);
     std::vector<int64_t> candidates;
     checkForQueryInterrupt();
     const auto result = index->readOrderedKeyRange(lower, upper, maxRows, maxNodes, candidates);
@@ -34292,6 +34296,90 @@ std::optional<std::vector<int64_t>> readStoredZonedClockRange(StorageEngine& eng
     if (result != BPTree::LeafEntriesResult::Complete || engine.indexReadSnapshotFence(database) != fence ||
         (candidates.size() > 1 && QueryPlanner::costScan("index_scan", candidates.size(), 0) >= heapCost)) return {};
     return candidates;
+}
+
+std::optional<StoredZonedClockPage> readStoredZonedClockPage(StorageEngine& engine,
+    const std::string& database, const TableSchema& schema, const StoredZonedClockRange& range,
+    const StoredZonedClockOrder& order, size_t byteBudget) {
+    const auto* column = storedZonedClockColumn(schema, range.column);
+    if (!column || engine.getIsolationLevel() == IsolationLevel::SERIALIZABLE ||
+        engine.rlsAppliesTo(database, schema.tablename) ||
+        !completeStoredZonedClockIndex(engine, database, schema, *column)) return {};
+    const auto fence = engine.indexReadSnapshotFence(database);
+    if (!fence) return {};
+    const size_t ordinal = static_cast<size_t>(column - schema.cols.data());
+    const bool primary = primary_key_index::singleKeyColumn(schema) == ordinal;
+    const bool nullable = !primary && column->isNull && !order.excludesNulls;
+    if (nullable && order.nullsFirst) return {};
+    const auto* index = primary ? engine.getPKIndex(database, schema.tablename)
+        : engine.getSecondaryIndex(database, schema.tablename, range.column);
+    if (!index) throw DbError("XX001", "could not open B-tree index for relation \"" + schema.tablename + "\"");
+    StoredZonedClockPage result;
+    if (range.lower > range.upper) return result;
+    if (!order.count || order.count > byteBudget / (sizeof(BPTree::LeafEntry) + sizeof(StoredZonedClockPage::Row))) return {};
+    const auto [lower, upper] = storedZonedClockDiskBounds(range);
+    std::vector<BPTree::LeafEntry> entries;
+    constexpr size_t maxNodes = 64;
+    checkForQueryInterrupt();
+    const auto status = index->readOrderedKeyPrefix(lower, upper, order.count, maxNodes,
+        order.descending, entries, result.indexNodes);
+    if (status == BPTree::LeafEntriesResult::Error)
+        throw DbError("XX001", "could not read B-tree index for relation \"" + schema.tablename + "\"");
+    // NULL entries are omitted from these indexes. A short prefix of a
+    // nullable column may need those rows after its last non-NULL key.
+    if (status != BPTree::LeafEntriesResult::Complete || (nullable && entries.size() < order.count) ||
+        engine.indexReadSnapshotFence(database) != fence) return {};
+    if (entries.size() > 8) {
+        uint64_t rows = 0;
+        const auto pages = engine.tableNumPages(database, schema.tablename);
+        const double sequential = QueryPlanner::costScan("seq_scan",
+            getRuntimeLiveRowEstimate(database, schema.tablename, rows) ? static_cast<double>(rows) : 32.0 * pages,
+            pages);
+        if (QueryPlanner::costScan("index_scan", entries.size(), 0) >= sequential) return {};
+    }
+
+    struct RestoreBinding {
+        StorageEngine::NullRowBindingState previous = StorageEngine::captureNullRowBinding();
+        ~RestoreBinding() { StorageEngine::restoreNullRowBinding(std::move(previous)); }
+    } restore;
+    result.rows.reserve(entries.size());
+    const size_t allocated = entries.capacity() * sizeof(BPTree::LeafEntry) +
+        result.rows.capacity() * sizeof(StoredZonedClockPage::Row);
+    if (allocated > byteBudget) return {};
+    byteBudget -= allocated;
+    std::unordered_set<int64_t> seen;
+    for (const auto& entry : entries) {
+        checkForQueryInterrupt();
+        if (entry.value <= 0 || !seen.insert(entry.value).second) return {};
+        StoredZonedClockPage::Row row{entry.value, {}, {}};
+        bool failed = false;
+        if (!engine.readIndexedRowByRid(database, schema.tablename, row.rid, row.data, schema, nullptr, &failed)) {
+            if (failed) throw DbError("XX001", "indexed heap fetch failed");
+            return {};
+        }
+        StorageEngine::bindNullRow(&engine, database, schema.tablename, row.rid, schema.len());
+        row.nulls.resize(schema.len());
+        for (size_t i = 0; i < schema.len(); ++i)
+            row.nulls[i] = detail::storedRowColumnIsNull(engine, database, schema.tablename, schema, row.rid, i);
+        if (row.nulls[ordinal]) return {};
+        const auto value = engine.extractColumnValue(row.data, schema, ordinal, database, true);
+        if (!range.matches(value)) return {};
+        const auto physical = BPTree::normalizeKeyForComparison(primary
+            ? schema.buildPKValue({{range.column, value}}) : schema.columnIndexKey(range.column, value));
+        // A stale key could put this row in the wrong place even if its
+        // current value passes the SQL range. Never expose a partial prefix.
+        if (!std::equal(entry.key.begin(), entry.key.end(), physical.begin(), physical.end())) return {};
+        bool toastOk = false;
+        row.data = engine.resolveToastValues(database, schema.tablename, row.data, schema, &toastOk);
+        if (!toastOk) throw DbError("XX001", "TOAST value read failed");
+        const size_t bytes = row.data.capacity() + (row.nulls.capacity() + 7) / 8;
+        if (bytes > byteBudget) return {};
+        byteBudget -= bytes;
+        result.rows.push_back(std::move(row));
+    }
+    if (engine.indexReadSnapshotFence(database) != fence) return {};
+    recordTableScan(database, schema.tablename, result.rows.size(), true, false);
+    return result;
 }
 
 static void prepareFilterConditions(

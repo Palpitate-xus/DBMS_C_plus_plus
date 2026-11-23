@@ -1,8 +1,12 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-23 · 普通表可按带偏移的时间从索引取一页
+
+支持按单列 `TIMETZ` 正序和倒序读取，包含可确认的同列时间范围及 `OFFSET`。索引页、内存和候选数量受限，开始返回前核对每个候选的真实键和可见性。`IDX-03`、`OPT-01` 保持部分实现。覆盖索引、多列顺序和 `WITH TIES` 的提前停止仍待覆盖。 [功能验证](test-report.md#timetz-page-20261123) · [性能对照](performance-report-2026-10-30.md#timetz-page-cost-20261123) · [实现对照](postgresql-comparison.md#timetz-page-comparison-20261123)
+
 ## 2026-11-23 · 普通表可用索引查找一段带偏移的时间
 
-合并同一 `TIMETZ` 列的范围边界，支持用主键或完整单列 B 树读取候选。候选太多时保留表扫描。`BETWEEN` 复用带偏移时间的普通比较，修复换算后同一时刻的边界匹配。`IDX-03`、`OPT-01` 和 `TYPE-06` 保持部分实现。复合索引、部分索引条件推断及时间范围排序省读仍有差距。 [功能验证](test-report.md#timetz-range-20261123) · [性能对照](performance-report-2026-10-30.md#timetz-range-cost-20261123) · [实现对照](postgresql-comparison.md#timetz-range-comparison-20261123)
+合并同一 `TIMETZ` 列的范围边界，支持用主键或完整单列 B 树读取候选。候选太多时保留表扫描。`BETWEEN` 复用带偏移时间的普通比较，修复换算后同一时刻的边界匹配。`IDX-03`、`OPT-01` 和 `TYPE-06` 保持部分实现。复合索引和部分索引条件推断仍有差距。单列范围排序分页见上方更新。 [功能验证](test-report.md#timetz-range-20261123) · [性能对照](performance-report-2026-10-30.md#timetz-range-cost-20261123) · [实现对照](postgresql-comparison.md#timetz-range-comparison-20261123)
 
 ## 2026-11-23 · 普通表的带偏移时间等值查询可用索引
 
