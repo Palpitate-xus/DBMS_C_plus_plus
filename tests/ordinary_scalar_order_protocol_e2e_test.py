@@ -35,7 +35,7 @@ def complete_range_controls(query):
         values = ','.join(f'({k},{k if k % 2 else "NULL"})' for k in batch)
         assert query(f'INSERT INTO {table} VALUES {values}')[1] is None
 
-    def check(where, expected, used, fetched=None):
+    def check(where, expected, used, fetched=None, ranges=None):
         sql = f'SELECT k FROM {table} WHERE {where} ORDER BY k OFFSET 0 FETCH FIRST 1536 ROWS WITH TIES'
         result = query(sql)
         assert result[1] is None and result[0] == [[str(k)] for k in expected], (sql, result)
@@ -44,6 +44,8 @@ def complete_range_controls(query):
         assert (scan.get('usedPrimaryKeyRange') == 'true') == used, nodes
         if used:
             assert int(scan['indexEntries']) == int(scan['heapRowsFetched']) == fetched, scan
+            if ranges is not None:
+                assert int(scan['indexRanges']) == ranges, scan
             assert nodes['TableScan'].get('actualRows', 0) == 0, nodes
         else:
             assert nodes['TableScan']['actualRows'] == len(keys), nodes
@@ -59,11 +61,14 @@ def complete_range_controls(query):
     check('k BETWEEN 1 AND 257', range(1, 258), False)
     check('k BETWEEN 1.5 AND 5.5', range(2, 6), False)
     check('k BETWEEN NULL AND 8', (), False)
-    check('k NOT BETWEEN 1 AND 1535', (1536,), False)
+    check('k NOT BETWEEN 1 AND 1535', (1536,), True, 1, 2)
     check('k NOT BETWEEN -2147483648 AND 1535', (1536,), True, 1)
     check('k NOT BETWEEN 3 AND 6 AND k>=3 AND k<8', (7,), True, 1)
     check('k NOT BETWEEN 1 AND 1536 AND k>=1 AND k<=1536', (), True, 0)
-    check('k NOT BETWEEN 3 AND 6 AND k<8', (1, 2, 7), False)
+    check('k NOT BETWEEN 3 AND 6 AND k<8', (1, 2, 7), True, 3, 2)
+    check('k NOT BETWEEN 2 AND 3 AND k NOT BETWEEN 6 AND 7 AND k<9', (1, 4, 5, 8), True, 4, 3)
+    check('k NOT BETWEEN 129 AND 1408', (*range(1, 129), *range(1409, 1537)), True, 256, 2)
+    check('k NOT BETWEEN 129 AND 1407', (*range(1, 129), *range(1408, 1537)), False)
 
     # The index sources the same heap order when SQL has no sort key.
     for tail, expected in (('LIMIT 4', insertion_order[:4]),
@@ -73,6 +78,24 @@ def complete_range_controls(query):
         assert result[1] is None and result[0] == [[str(k)] for k in expected], result
     result = query(f'SELECT k FROM {table} WHERE k BETWEEN 1 AND 8 LIMIT 2 OFFSET 3')
     assert result[1] is None and result[0] == [['1'], ['4']], result
+    result = query(f'SELECT k FROM {table} WHERE k NOT BETWEEN 3 AND 6 AND k<=8 LIMIT 3 OFFSET 1')
+    assert result[1] is None and result[0] == [['2'], ['1'], ['7']], result
+
+    explain = 'EXPLAIN (ANALYZE TRUE, TIMING FALSE, COSTS FALSE, FORMAT JSON) '
+    for condition, order, limit, expected, fetched in (
+        ('k NOT BETWEEN 3 AND 1534', 'k ASC', '3 OFFSET 1', [2, 1535, 1536], 4),
+        ('k NOT BETWEEN 3 AND 1534', 'k DESC', '3 OFFSET 1', [1535, 2, 1], 4),
+        ('k NOT BETWEEN 3 AND 1534', 'k DESC', '1', [1536], 1),
+        ('k NOT BETWEEN 128 AND 1408 AND val IS NULL', 'k ASC', '70',
+         [*range(2, 128, 2), *range(1410, 1423, 2)], 141),
+    ):
+        sql = f'SELECT k FROM {table} WHERE {condition} ORDER BY {order} LIMIT {limit}'
+        result = query(sql)
+        assert result[1] is None and result[0] == [[str(k)] for k in expected], (sql, result)
+        nodes = plan_nodes(query(explain + sql))
+        scan = nodes['IntegerPrimaryKeyPage']
+        assert scan['usedPrimaryKeyPage'] == 'true' and int(scan['indexRanges']) == 2, nodes
+        assert int(scan['heapRowsFetched']) == fetched and nodes['TableScan'].get('actualRows', 0) == 0, nodes
 
     count = f'SELECT count(*) FROM {table} WHERE val BETWEEN 1 AND 8'
     result = query(count)
@@ -166,6 +189,12 @@ def parameter_range_controls(runner, client, sock, check_plan=True):
     execute('range_outside',(10,-2),[['2147483647'],['10']],[23])
     execute('range_outside',(None,10),[['2147483647']],[23])
     execute('range_outside',(0,None),[['-2']],[23])
+    disjoint = ('SELECT k FROM scalar_order_pk_int WHERE k NOT BETWEEN $1 AND $2 '
+                'ORDER BY k LIMIT 4')
+    prepare('range_disjoint',disjoint,(21,20))
+    execute('range_disjoint',(-5,5),[['-2147483648'],['-100'],['10'],['2147483647']],[23],
+            binary_widths=(2,8))
+    execute('range_disjoint',(5,-5),[['-2147483648'],['-100'],['-2'],['0']],[23])
 
     prepare('range_big','SELECT k,payload FROM scalar_order_pk_big '
             'WHERE k >= $1 AND k <= $2 ORDER BY k DESC LIMIT 2',(20,20))
@@ -225,6 +254,11 @@ def parameter_range_controls(runner, client, sock, check_plan=True):
             page=nodes['IntegerPrimaryKeyPage']
             assert page['usedPrimaryKeyPage']=='true' and int(page['heapRowsFetched'])==fetched,nodes
             assert nodes['TableScan'].get('actualRows',0)==0,nodes
+        prepare('disjoint_plan',explain+disjoint,(21,20))
+        nodes=plan_nodes(execute('disjoint_plan',(-5,5),binary_widths=(2,8)))
+        page=nodes['IntegerPrimaryKeyPage']
+        assert page['usedPrimaryKeyPage']=='true' and page['indexRanges']=='2',nodes
+        assert int(page['heapRowsFetched'])==4 and nodes['TableScan'].get('actualRows',0)==0,nodes
     print('[PREPARED INTEGER RANGE PROTOCOL] passed',flush=True)
 
 
@@ -395,6 +429,13 @@ def presorted_page_controls(query, check_plan=True):
     expect('SELECT k,payload FROM scalar_order_external WHERE payload IS NOT NULL '
            'ORDER BY k DESC LIMIT 3 OFFSET 2',
            [[str(k),large_values[k-1]] for k in (16,15,14)], [23,25])
+    disjoint = 'SELECT k,payload FROM scalar_order_external WHERE k NOT BETWEEN 7 AND 12 ORDER BY k LIMIT 12'
+    expect(disjoint, [[str(k),large_values[k-1]] for k in (*range(1,7),*range(13,19))], [23,25])
+    if check_plan:
+        nodes = plan_nodes(expect('EXPLAIN (ANALYZE TRUE, TIMING FALSE, COSTS FALSE, FORMAT JSON) '+disjoint))
+        index = nodes['IntegerPrimaryKeyPage']
+        assert index['usedPrimaryKeyPage']=='true' and index['indexRanges']=='2', nodes
+        assert int(index['heapRowsFetched']) == 12,nodes
     expect('RESET work_mem')
     print('[PRESORTED PRIMARY KEY PROTOCOL] passed',flush=True)
 

@@ -2,12 +2,19 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="disjoint-integer-primary-comparison-20261123"></a>
+## 2026-11-23 · 用主键索引查找不相连的几段编号
+
+PostgreSQL 可以把不同索引扫描得到的行位置合并成位图。位图按表页顺序访问，查询要求索引键排序时还要排序。SQLite 可对分别满足索引条件的 `OR` 分支进行查找，再按行位置合并，并通过估算选择路径。DuckDB 用最小值和最大值跳过无关数据块，单列 ART 索引面向高选择性的等值及 `IN` 查询。 [PostgreSQL 位图扫描](https://www.postgresql.org/docs/18/indexes-bitmap-scans.html) · [SQLite 查询优化](https://www.sqlite.org/optoverview.html#or_optimizations) · [DuckDB 索引](https://www.duckdb.org/docs/1.5/guides/performance/indexing)
+
+本项目从常量整数 `NOT BETWEEN` 及附加边界算出单列主键仍可取到的几段编号。读全部匹配项时，共用候选数量和表页覆盖限制。只按主键取一页时，沿指定方向读够就停。通用 `OR` 的索引合并、多索引位图和基于统计信息的代价估计仍有差距。 [读行验证](test-report.md#disjoint-integer-primary-20261123) · [性能对照](performance-report-2026-10-30.md#disjoint-integer-primary-cost-20261123)
+
 <a id="integer-not-between-comparison-20261123"></a>
 ## 2026-11-23 · 读取整数范围以外的数据
 
 PostgreSQL 把普通 `NOT BETWEEN` 转成两个由 `OR` 连接的不等式，并可根据分区边界排除无关分区。SQLite 对每项都能用索引的部分 `OR` 条件，可以分别读取再合并。DuckDB 在列存表上用数据块统计信息判断哪些块可跳过。 [PostgreSQL 比较语法源码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/parser/parse_expr.c) · [PostgreSQL 分区文档](https://www.postgresql.org/docs/18/ddl-partitioning.html#DDL-PARTITION-PRUNING) · [SQLite 查询优化](https://www.sqlite.org/optoverview.html) · [DuckDB 块统计跳过](https://github.com/duckdb/duckdb/blob/main/src/storage/table/row_group.cpp)
 
-本项目复用原有的整数分区判断。普通表上，若其他条件和主键的取值范围把结果缩成一个连续区间，就可直接定位主键。剩下两段时，仍读取整表并直接比较整数，跨两个区间的普通主键读取仍有差距。 [验证](test-report.md#integer-not-between-20261123) · [性能](performance-report-2026-10-30.md#integer-not-between-cost-20261123)
+这一版复用原有的整数分区判断。普通表上，若其他条件和主键的取值范围把结果缩成一个连续区间，就可直接定位主键。剩下两段时，这一版仍读取整表并直接比较整数。 [验证](test-report.md#integer-not-between-20261123) · [性能](performance-report-2026-10-30.md#integer-not-between-cost-20261123) · [后续的多段读取](#disjoint-integer-primary-comparison-20261123)
 
 <a id="integer-between-range-comparison-20261123"></a>
 ## 2026-11-23 · 将 `BETWEEN` 交给范围读取

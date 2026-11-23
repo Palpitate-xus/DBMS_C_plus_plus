@@ -1,9 +1,18 @@
 # 更新日志
 
 <details>
-<summary>排除一段订单号时，查询更快 · 2026-11-23</summary>
+<summary>跳过一段订单号，可以直接查两头 · 2026-11-23</summary>
 
-例如，只看 1000 号以前和 1100 号以后的订单时，数据库读到一笔就能判断是否保留。
+例如，只查最早和最新的几笔订单时，数据库可以按订单号找到这两批记录，省去读取中间的订单。
+
+[测试报告](docs/test-report.md#disjoint-integer-primary-20261123) · [性能报告](docs/performance-report-2026-10-30.md#disjoint-integer-primary-cost-20261123)
+
+</details>
+
+<details>
+<summary>按数字排除一段范围时，筛选更快 · 2026-11-23</summary>
+
+例如，筛掉商品件数在 10 到 20 之间的订单时，数据库读到一笔就能直接比较件数。
 
 [测试报告](docs/test-report.md#integer-not-between-20261123) · [性能报告](docs/performance-report-2026-10-30.md#integer-not-between-cost-20261123)
 
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>连续取多笔订单可以减少重复读取 · 2026-11-23</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-23 · 连续取多笔订单可以减少重复读取
 
 例如，最早的 128 笔订单都存在同一页时，数据库可以只取一次这一页，再逐条读取订单。
 
 [测试报告](docs/test-report.md#integer-primary-page-reuse-20261123) · [性能报告](docs/performance-report-2026-10-30.md#integer-primary-page-reuse-cost-20261123)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-23 · 按订单号查一小段记录更快
 

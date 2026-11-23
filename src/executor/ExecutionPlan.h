@@ -1427,6 +1427,8 @@ public:
     static bool supportsPreparedSourceSelectPlan(const SelectStmt& select, bool selectBodyOnly = false);
     static bool mayUseIntegerPrimaryKeyPage(StorageEngine* engine, const std::string& database,
         const PreparedQuery& query, const SelectStmt& select);
+    static bool mayUseDisjointIntegerPrimaryRange(StorageEngine& engine, const std::string& database,
+        const PreparedQuery& query, const SelectStmt& select, const TableSchema& schema);
     static OpPtr buildPreparedSelectPlan(StorageEngine* engine,
         const std::string& dbname, const std::string& tablename,
         PreparedQuery prepared);

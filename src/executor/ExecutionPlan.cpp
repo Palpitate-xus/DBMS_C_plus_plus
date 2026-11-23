@@ -4665,8 +4665,7 @@ struct IntegerPageBounds {
         const auto [minKey, maxKey] = storedIntegerLimits(field->width);
         outside->intersect({{{std::max(minKey, lower.value_or(minKey)),
                               std::min(maxKey, upper.value_or(maxKey))}}, false});
-        // The primary-key reader can prove one contiguous interval per read.
-        if (outside->intervals.size() > 1) return false;
+        if (outside->intervals.size() > 1) return true;
         if (outside->intervals.empty()) {
             lower = INT64_MAX;
             upper = INT64_MIN;
@@ -4676,6 +4675,11 @@ struct IntegerPageBounds {
             if (upper || end != maxKey) upper = end;
         }
         return true;
+    }
+
+    const std::vector<IntegerInterval>& disjointRanges() const {
+        static const std::vector<IntegerInterval> none;
+        return outside && outside->intervals.size() > 1 ? outside->intervals : none;
     }
 };
 
@@ -4973,9 +4977,16 @@ static std::optional<std::pair<size_t, IntegerPageBounds>> completeIntegerPrimar
         }
         inequality = true;
     }
-    if (!key || !inequality || !bounds.applyExclusions(schema, *key) || (!bounds.lower && !bounds.upper))
+    if (!key || !inequality || !bounds.applyExclusions(schema, *key) ||
+        (!bounds.lower && !bounds.upper && bounds.disjointRanges().empty()))
         return {};
     return std::pair<size_t, IntegerPageBounds>{*key, std::move(bounds)};
+}
+
+bool QueryPlanner::mayUseDisjointIntegerPrimaryRange(StorageEngine& engine, const std::string& database,
+        const PreparedQuery& query, const SelectStmt& select, const TableSchema& schema) {
+    const auto range = completeIntegerPrimaryRange(engine, database, query, select, schema);
+    return range && !range->second.disjointRanges().empty();
 }
 
 class IntegerPrimaryKeyPageOp final : public Operator {
@@ -5013,7 +5024,7 @@ public:
         indexEntries_ = indexNodesVisited_ = heapRows_ = 0;
         page_ = engine_->tryReadOrderedIntegerPrimaryKey(database_, schema_.tablename, schema_,
             keyColumn_, descending_, count_, sortWorkMemBytes(), bounds_.lower, bounds_.upper, bounds_.nullTests,
-            rangePredicate_ != nullptr);
+            rangePredicate_ != nullptr, bounds_.disjointRanges());
         if (page_) {
             usedPage_ = true;
             orderedIndex_ = page_->orderedIndex;
@@ -5085,7 +5096,10 @@ public:
             {"orderedIndex", orderedIndex_ ? "true" : "false"}, {"indexEntries", std::to_string(indexEntries_)},
             {"heapRowsFetched", std::to_string(heapRows_)}};
         if (orderedIndex_) attributes.emplace("indexNodesVisited", std::to_string(indexNodesVisited_));
-        if (bounds_.lower || bounds_.upper) attributes.emplace("indexKeyRange", "true");
+        if (bounds_.lower || bounds_.upper || !bounds_.disjointRanges().empty())
+            attributes.emplace("indexKeyRange", "true");
+        if (!bounds_.disjointRanges().empty())
+            attributes.emplace("indexRanges", std::to_string(bounds_.disjointRanges().size()));
         if (!bounds_.nullTests.empty()) attributes.emplace("indexNullFilter", "true");
         return attributes;
     }

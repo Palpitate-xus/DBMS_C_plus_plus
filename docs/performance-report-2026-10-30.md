@@ -4,6 +4,51 @@
 
 > 复核发现，几组早期 COPY 计时在每个对照场景中使用了固定的执行顺序。耗时差可能包含顺序影响。这项问题涉及默认值求值、按列查找、默认值标记、短 CSV 导出和短查询导出的配对计时。[默认值求值](#copy-default-evaluation-order-cost-20261122) · [按列查找](#copy-identity-input-cost-20261122) · [默认值标记](#copy-default-marker-cost-20261122) · [CSV 导出](#copy-csv-out-cost-20261122) · [查询导出](#copy-query-stdout-cost-20261122)
 
+<a id="disjoint-integer-primary-cost-20261123"></a>
+## 2026-11-23 · 跳过主键中间区间的查询耗时
+
+基线为 `ba02c8e0`。新旧版均由 GCC 13.3 以 CMake C++17 `-O2` 构建。Intel Xeon E5-2678 v3 上建两张 `id integer PRIMARY KEY, n integer` 表。`ranges_clustered` 顺序插入 1 至 8,192，`ranges_scattered` 按 `1+(i*509)%2048` 插入，`i` 取 0 至 2,047。键能被 9 整除时写 `n=id%64`，其余写 `NULL`。每次插入 128 行。
+
+```sql
+SELECT 1 AS v;
+SELECT id AS v FROM ranges_clustered WHERE id=42;
+SELECT id AS v FROM ranges_clustered WHERE id BETWEEN 1 AND 128 UNION SELECT 0 ORDER BY v;
+SELECT id AS v FROM ranges_clustered WHERE id NOT BETWEEN 1 AND 8176 ORDER BY id;
+SELECT id AS v FROM ranges_clustered WHERE id NOT BETWEEN 65 AND 8128 ORDER BY id;
+SELECT id AS v FROM ranges_clustered WHERE id NOT BETWEEN 33 AND 4050
+  AND id NOT BETWEEN 4083 AND 8160 UNION SELECT 0 ORDER BY v;
+SELECT id AS v FROM ranges_clustered WHERE id NOT BETWEEN 129 AND 8064 ORDER BY id;
+SELECT id AS v FROM ranges_clustered WHERE id NOT BETWEEN 129 AND 8063 ORDER BY id;
+SELECT id AS v FROM ranges_scattered WHERE id NOT BETWEEN 65 AND 1984 ORDER BY id;
+SELECT id AS v FROM ranges_clustered WHERE id NOT BETWEEN 65 AND 8160 ORDER BY id DESC LIMIT 8;
+SELECT id AS v FROM ranges_clustered WHERE id NOT BETWEEN 65 AND 8160 ORDER BY id DESC LIMIT 24 OFFSET 16;
+SELECT id AS v FROM ranges_clustered WHERE id NOT BETWEEN 128 AND 8000
+  AND n IS NOT NULL ORDER BY id LIMIT 20;
+```
+
+各用 `/dev/shm` 和 ext4 `/tmp` 测量。内存盘使用 CPU 21/22，磁盘使用 CPU 25/26，第二轮交换新旧顺序与客户端和服务端的 CPU。每个进程在每条 SQL 上预热一次并计时八次，从客户端发送请求到收到 `ReadyForQuery`。每次核对行内容、列名、列类型和消息顺序。每种介质在新旧两版间计时 384 次。PostgreSQL 18.6 对照同样在内存盘上测 384 次，关闭 JIT 和并行查询。
+
+各轮用时中位数范围以毫秒计。
+
+| 查询 | 内存盘旧版 | 内存盘新版 | 磁盘旧版 | 磁盘新版 | 同轮内存盘新版 | PostgreSQL 18.6 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `SELECT 1` | 0.41–0.44 | 0.42–0.52 | 0.38–0.41 | 0.43–0.86 | 0.42–0.45 | 0.16–0.17 |
+| 主键查一行 | 2.51–2.64 | 2.57–2.58 | 8.01–8.16 | 4.98–8.03 | 2.46–2.51 | 0.17–0.20 |
+| 正向范围读取后合并 | 6.34–6.49 | 6.82–7.10 | 12.28–12.46 | 12.25–12.29 | 5.95–7.19 | 1.67–1.70 |
+| 排除范围后只剩尾部 16 行 | 20.51–21.39 | 3.05–4.53 | 27.49–28.17 | 8.90–9.34 | 4.29–4.62 | 4.15–4.19 |
+| 两段共取 128 行 | 22.70–23.44 | 7.66–8.10 | 29.16–30.31 | 11.26–13.40 | 5.51–8.24 | 5.18–5.28 |
+| 三段共取 96 行后合并 | 18.14–18.45 | 6.08–6.44 | 25.13–25.69 | 10.06–11.63 | 5.25–6.53 | 2.87–2.93 |
+| 256 个候选 | 25.36–25.76 | 9.91–10.36 | 32.80–39.37 | 16.57–17.88 | 9.13–10.03 | 5.41–6.18 |
+| 257 个候选 | 25.23–25.35 | 25.91–27.45 | 33.14–33.88 | 30.63–31.00 | 26.07–26.59 | 6.22–6.55 |
+| 分散存放的 128 行 | 9.39–9.86 | 10.42–10.80 | 18.72–19.77 | 16.13–19.03 | 10.20–10.26 | 1.91–1.99 |
+| 倒序取 8 行 | 16.76–17.08 | 3.49–3.58 | 24.24–25.97 | 9.23–9.64 | 3.45–3.56 | 0.24–0.33 |
+| 倒序跨段取 24 行 | 17.59–18.54 | 6.55–6.79 | 23.91–25.60 | 12.47–12.83 | 6.38–6.84 | 4.35–4.48 |
+| 筛掉空值后跨段取 20 行 | 17.06–18.23 | 6.02–6.16 | 23.62–25.33 | 11.63–12.13 | 6.07–6.24 | 3.04–3.17 |
+
+只剩尾部 16 行的查询在同轮内存盘对照中与 PostgreSQL 18.6 用时接近。倒序取 8 行仍比 PostgreSQL 18.6 慢约一个数量级。257 个候选和存放分散的 128 行仍读整表。它们的分开运行结果在内存盘慢约 3% 至 11%，在磁盘快约 4% 至 14%。 [实际读行数](test-report.md#disjoint-integer-primary-20261123)
+
+内存盘补测让新旧版共用同一个服务端 CPU，交替测试相同 SQL。使用 CPU 17/18，第二轮交换客户端和服务端。每个版本每轮每条计时 20 次，三条基础对照和两条回退查询共 400 次。257 个候选的两轮中位数从 26.67–26.69 毫秒降到 23.62–23.96 毫秒，分散读取从 10.17–10.45 毫秒降到 9.81–9.85 毫秒。`SELECT 1`、单行主键与正向范围合并在两轮的中位数变化均在 5% 内。
+
 <a id="integer-not-between-cost-20261123"></a>
 ## 2026-11-23 · 排除整数范围的查询耗时
 

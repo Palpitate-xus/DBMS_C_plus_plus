@@ -20647,6 +20647,7 @@ static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bo
     vector<string> descendants;
     bool typedSortDemand = false;
     bool declaredPredicateCollations = false;
+    bool possibleDisjointRange = false;
     if (candidate->fromClause) {
         const string& spelling = candidate->fromClause->tableName;
         physical = resolveTableName(session, spelling, true);
@@ -20692,7 +20693,18 @@ static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bo
             const auto schema = g_engine.getTableSchema(session.currentDB, physical);
             typedSortDemand = ordinaryTypedSortDemand(*candidate, schema);
             declaredPredicateCollations = dbms::QueryPlanner::usesDeclaredFilterCollations(*candidate, schema);
-            if (!typedSortDemand && !declaredPredicateCollations && none_of(schema.cols.begin(), schema.cols.end(),
+            const auto hasRangeExclusion = [](const auto& visit, const dbms::Expr* expression) -> bool {
+                if (!expression || expression->preparedSubquery) return false;
+                if (const auto* binary = dynamic_cast<const dbms::BinaryOpExpr*>(expression);
+                    binary && binary->op == "AND")
+                    return visit(visit, binary->left.get()) || visit(visit, binary->right.get());
+                const auto* call = dynamic_cast<const dbms::FunctionCallExpr*>(expression);
+                return call && call->schema.empty() && call->funcName == "NOT BETWEEN";
+            };
+            possibleDisjointRange = schema.hasPrimaryKey() &&
+                hasRangeExclusion(hasRangeExclusion, candidate->whereClause.get());
+            if (!typedSortDemand && !declaredPredicateCollations && !possibleDisjointRange &&
+                none_of(schema.cols.begin(), schema.cols.end(),
                         [](const dbms::Column& column) { return column.isArray; })) return false;
         }
         dbms::CatalogManager::QualifiedName name;
@@ -20717,8 +20729,11 @@ static bool handlePreparedScalarQuery(const string& rawSql, Session& session, bo
         !needsDomainCast && !fromlessDemand && !bitNegationOutput && !physicalLimitDemand &&
         !typedSortDemand && !stringProjection && !stringPredicate &&
         !explicitPredicateCollation && !declaredPredicateCollations) {
-        if (!physicalColumnCandidate || !dbms::QueryPlanner::usesDeclaredFilterCollations(
-                *select, g_engine.getTableSchema(session.currentDB, physical))) return false;
+        if (!physicalColumnCandidate) return false;
+        const auto schema = g_engine.getTableSchema(session.currentDB, physical);
+        if (!dbms::QueryPlanner::usesDeclaredFilterCollations(*select, schema) &&
+            !(possibleDisjointRange && dbms::QueryPlanner::mayUseDisjointIntegerPrimaryRange(
+                g_engine, session.currentDB, prepared, *select, schema))) return false;
     }
     // Preserve column grants on precisely the bound source cells used by
     // this query (including correlated child references), not SELECT *.

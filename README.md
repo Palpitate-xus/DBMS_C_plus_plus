@@ -19,9 +19,16 @@ cmake --build build/cmake --target dbms_main --parallel 2
 ## 最近更新
 
 <details>
-<summary>排除一段订单号时，查询更快 · 2026-11-23</summary>
+<summary>跳过一段订单号，可以直接查两头 · 2026-11-23</summary>
 
-例如，只看 1000 号以前和 1100 号以后的订单时，数据库读到一笔就能判断是否保留。
+例如，只查最早和最新的几笔订单时，数据库可以按订单号找到这两批记录，省去读取中间的订单。
+
+</details>
+
+<details>
+<summary>按数字排除一段范围时，筛选更快 · 2026-11-23</summary>
+
+例如，筛掉商品件数在 10 到 20 之间的订单时，数据库读到一笔就能直接比较件数。
 
 </details>
 
@@ -29,13 +36,6 @@ cmake --build build/cmake --target dbms_main --parallel 2
 <summary>按起止订单号查订单更快 · 2026-11-23</summary>
 
 例如，查 1000 到 1100 号订单时，两头都算在内。记录集中时，数据库可以直接用订单号找到它们。
-
-</details>
-
-<details>
-<summary>连续取多笔订单可以减少重复读取 · 2026-11-23</summary>
-
-例如，最早的 128 笔订单都存在同一页时，数据库可以只取一次这一页，再逐条读取订单。
 
 </details>
 

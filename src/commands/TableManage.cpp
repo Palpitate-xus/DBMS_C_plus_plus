@@ -11047,7 +11047,7 @@ std::optional<OrderedPrimaryKeyReadPage> StorageEngine::tryReadOrderedIntegerPri
         const TableSchema& expectedSchema, size_t keyColumn, bool descending,
         size_t count, size_t byteBudget, std::optional<int64_t> lower,
         std::optional<int64_t> upper, const std::vector<OrderedPrimaryKeyNullTest>& nullTests,
-        bool completeRange) {
+        bool completeRange, const std::vector<std::pair<int64_t, int64_t>>& disjointRanges) {
     // Only files in the executable's locked data directory have the required
     // instance ownership. An external tablespace can outlive that lock.
     if (dataDirectory().empty() || !count || signedIntegerPrimaryKeyColumn(expectedSchema) != keyColumn ||
@@ -11097,28 +11097,54 @@ std::optional<OrderedPrimaryKeyReadPage> StorageEngine::tryReadOrderedIntegerPri
     constexpr size_t maxCompleteCandidates = 256;
     if (completeRange) count = std::min(count, maxCompleteCandidates);
     const size_t probeCount = completeRange ? maxCompleteCandidates + 1 : count;
-    if (probeCount > maxEntries) return {};
-    const bool bounded = lower.has_value() || upper.has_value();
+    if (probeCount > maxEntries || disjointRanges.size() > maxEntries) return {};
+    for (size_t i = 0; i < disjointRanges.size(); ++i) {
+        const auto [start, end] = disjointRanges[i];
+        if (start > end || (i && start <= disjointRanges[i - 1].second) ||
+            (lower && start < *lower) || (upper && end > *upper)) return {};
+    }
+    const bool disjoint = !disjointRanges.empty();
+    const bool bounded = disjoint || lower.has_value() || upper.has_value();
     const bool filtered = !nullTests.empty();
     if (completeRange && !bounded) return {};
     const size_t maxNodes = std::max<size_t>(64, maxEntries);
     auto batchLower = lower;
     auto batchUpper = upper;
-    const auto readBatch = [&](size_t size) {
+    const auto selectRange = [&](size_t ordinal) {
+        const auto& interval = disjointRanges[descending ? disjointRanges.size() - 1 - ordinal : ordinal];
+        batchLower = interval.first;
+        batchUpper = interval.second;
+    };
+    const auto readBatch = [&](size_t size, std::vector<BPTree::IntegerEntry>& output) {
         size_t nodes = 0;
         if (result.indexNodesVisited >= maxNodes) return false;
         const auto read = tree->readSignedIntegerRange(size, maxNodes - result.indexNodesVisited,
-            descending, batchLower, batchUpper, candidates, nodes);
+            descending, batchLower, batchUpper, output, nodes);
         result.indexNodesVisited += nodes;
         checkForQueryInterrupt();
-        return read == BPTree::LeafEntriesResult::Complete;
+        return read == BPTree::LeafEntriesResult::Complete &&
+            (!disjoint || std::all_of(output.begin(), output.end(), [&](const auto& entry) {
+                return entry.key >= *batchLower && entry.key <= *batchUpper;
+            }));
     };
     const size_t batchSize = filtered ? std::min(maxEntries, std::max(probeCount, size_t{32})) : probeCount;
     result.orderedIndex = tree->usesSignedIntegerKeys();
     if (result.orderedIndex) {
-        if (((bounded || filtered) && !tree->rootPage()) || !readBatch(batchSize) ||
-            (!bounded && !filtered && candidates.size() != count))
-            return {};
+        if ((bounded || filtered) && !tree->rootPage()) return {};
+        if (disjoint) selectRange(0);
+        if (completeRange && disjoint) {
+            // All intervals share one candidate limit and the same relation lock
+            // and read view. Nothing is exposed before the whole range is known.
+            candidates.reserve(probeCount);
+            for (size_t i = 0; i < disjointRanges.size(); ++i) {
+                selectRange(i);
+                std::vector<BPTree::IntegerEntry> interval;
+                const size_t room = probeCount - candidates.size();
+                if (!readBatch(room, interval) || interval.size() == room) return {};
+                candidates.insert(candidates.end(), interval.begin(), interval.end());
+            }
+        } else if (!readBatch(batchSize, candidates) ||
+                   (!bounded && !filtered && candidates.size() != count)) return {};
     } else if (bounded || filtered || !readLegacyIntegerIndexKeys(*tree,
         ExprHelper::canonicalResultTypeName(schema.cols[keyColumn].dataType),
         !schema.pkColIndices.empty(), descending, count, maxEntries, candidates)) return {};
@@ -11220,36 +11246,50 @@ std::optional<OrderedPrimaryKeyReadPage> StorageEngine::tryReadOrderedIntegerPri
         return true;
     };
 
-    size_t first = 0;
-    size_t requested = batchSize;
-    size_t nextBatchSize = batchSize;
-    for (;;) {
-        const size_t keyBufferBytes = candidates.capacity() * sizeof(BPTree::IntegerEntry);
-        if (keyBufferBytes > remaining) return {};
-        for (size_t i = first; i < candidates.size() && result.rows.size() < count; ++i) {
-            const bool samePageFollows = i + 1 < candidates.size() &&
-                (filtered || count - result.rows.size() > 1) &&
-                (static_cast<uint64_t>(candidates[i].value) >> 32) ==
-                    (static_cast<uint64_t>(candidates[i + 1].value) >> 32);
-            if (!readCandidate(candidates[i], keyBufferBytes, samePageFollows)) return {};
-        }
-        if (!filtered || result.rows.size() == count || candidates.size() < requested) break;
-        if (result.heapRowsFetched >= maxEntries) return {};
+    const auto readRows = [&](size_t requested) {
+        size_t first = 0;
+        size_t nextBatchSize = requested;
+        for (;;) {
+            const size_t keyBufferBytes = candidates.capacity() * sizeof(BPTree::IntegerEntry);
+            if (keyBufferBytes > remaining) return false;
+            for (size_t i = first; i < candidates.size() && result.rows.size() < count; ++i) {
+                const bool samePageFollows = i + 1 < candidates.size() &&
+                    (filtered || count - result.rows.size() > 1) &&
+                    (static_cast<uint64_t>(candidates[i].value) >> 32) ==
+                        (static_cast<uint64_t>(candidates[i + 1].value) >> 32);
+                if (!readCandidate(candidates[i], keyBufferBytes, samePageFollows)) return false;
+            }
+            if (!filtered || result.rows.size() == count || candidates.size() < requested) return true;
+            if (result.heapRowsFetched >= maxEntries) return false;
 
-        // Overlap one key so the checked tree traversal still verifies a leaf
-        // link crossing the batch boundary. Only the new RIDs are fetched.
-        const auto tail = candidates.back();
-        if (descending) batchUpper = tail.key;
-        else batchLower = tail.key;
-        if (nextBatchSize < 256) nextBatchSize = std::min<size_t>(256, nextBatchSize * 2);
-        requested = std::min(nextBatchSize, maxEntries - result.heapRowsFetched) + 1;
-        if (requested > remaining / sizeof(BPTree::IntegerEntry)) return {};
+            // Overlap one key so the checked tree traversal still verifies a leaf
+            // link crossing the batch boundary. Only the new RIDs are fetched.
+            const auto tail = candidates.back();
+            if (descending) batchUpper = tail.key;
+            else batchLower = tail.key;
+            if (nextBatchSize < 256) nextBatchSize = std::min<size_t>(256, nextBatchSize * 2);
+            requested = std::min(nextBatchSize, maxEntries - result.heapRowsFetched) + 1;
+            if (requested > remaining / sizeof(BPTree::IntegerEntry)) return false;
+            pageCopy.reset();
+            std::vector<BPTree::IntegerEntry>().swap(candidates);
+            if (!readBatch(requested, candidates) || candidates.empty() ||
+                candidates.front().key != tail.key || candidates.front().value != tail.value) return false;
+            first = 1;
+            result.indexEntries += candidates.size() - first;
+        }
+    };
+    if (!readRows(batchSize)) return {};
+    for (size_t i = 1; !completeRange && i < disjointRanges.size() && result.rows.size() < count; ++i) {
+        const size_t needed = count - result.rows.size();
+        const size_t requested = std::min({filtered ? std::max(needed, size_t{32}) : needed,
+            maxEntries - result.heapRowsFetched, remaining / sizeof(BPTree::IntegerEntry)});
+        if (!requested || (!filtered && requested < needed)) return {};
+        selectRange(i);
         pageCopy.reset();
         std::vector<BPTree::IntegerEntry>().swap(candidates);
-        if (!readBatch(requested) || candidates.empty() ||
-            candidates.front().key != tail.key || candidates.front().value != tail.value) return {};
-        first = 1;
-        result.indexEntries += candidates.size() - first;
+        if (!readBatch(requested, candidates)) return {};
+        result.indexEntries += candidates.size();
+        if (!readRows(requested)) return {};
     }
     if (indexReadSnapshotFence(dbname) != fence) return {};
     recordTableScan(dbname, tablename, result.heapRowsFetched, true, false);

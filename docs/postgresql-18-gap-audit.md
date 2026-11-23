@@ -1,8 +1,12 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-23 · 普通表可通过索引读取不相连的主键范围
+
+单列整数主键可读取 `NOT BETWEEN` 留下的不相连区间。旧版查询 8,192 行，排除 1 至 8,176 号并排序时读整表。新版只读取剩下的 16 行。跨段有序分页可以在取够记录时停止。通用 `OR` 索引合并、多索引位图扫描和基于统计的代价估计仍待补齐。`IDX-03`、`OPT-01` 保持部分实现。 [验证](test-report.md#disjoint-integer-primary-20261123) · [性能](performance-report-2026-10-30.md#disjoint-integer-primary-cost-20261123) · [实现对照](postgresql-comparison.md#disjoint-integer-primary-comparison-20261123)
+
 ## 2026-11-23 · 整数范围排除和分区读取
 
-普通表可以直接计算整数 `NOT BETWEEN`，并可在只剩一个区间时用主键定位。排除区间后排序的测试仍扫描 8,192 行，内存盘耗时从约 1 秒降到 21 毫秒，同轮 PostgreSQL 18.6 约需 4 毫秒。已有整数范围分区的一组分页查询打开的叶文件从 60 个降到 8 个。两段普通主键的索引读取、无分页的普通分区筛选和独立子表创建仍有差距。`IDX-03`、`OPT-01` 和 `QRY-01` 保持部分实现。 [验证](test-report.md#integer-not-between-20261123) · [性能](performance-report-2026-10-30.md#integer-not-between-cost-20261123)
+这一版在普通表上可以直接计算整数 `NOT BETWEEN`，并可在只剩一个区间时用主键定位。排除区间后排序的测试仍扫描 8,192 行，内存盘耗时从约 1 秒降到 21 毫秒，同轮 PostgreSQL 18.6 约需 4 毫秒。已有整数范围分区的一组分页查询打开的叶文件从 60 个降到 8 个。无分页的普通分区筛选和独立子表创建仍有差距。`IDX-03`、`OPT-01` 和 `QRY-01` 保持部分实现。 [验证](test-report.md#integer-not-between-20261123) · [性能](performance-report-2026-10-30.md#integer-not-between-cost-20261123)
 
 ## 2026-11-23 · 整数 `BETWEEN` 可以用主键定位
 

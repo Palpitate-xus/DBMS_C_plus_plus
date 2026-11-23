@@ -1700,7 +1700,8 @@ public:
         const TableSchema& expectedSchema, size_t keyColumn, bool descending,
         size_t count, size_t byteBudget, std::optional<int64_t> lower = {},
         std::optional<int64_t> upper = {},
-        const std::vector<OrderedPrimaryKeyNullTest>& nullTests = {}, bool completeRange = false);
+        const std::vector<OrderedPrimaryKeyNullTest>& nullTests = {}, bool completeRange = false,
+        const std::vector<std::pair<int64_t, int64_t>>& disjointRanges = {});
 
     // Schema helpers (public for execution plan use)
     static std::string extractPKValue(const std::string& rowBuffer, const TableSchema& tbl);
