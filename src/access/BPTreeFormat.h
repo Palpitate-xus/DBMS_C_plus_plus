@@ -14,11 +14,13 @@ constexpr uint16_t kContentChecksumFormat = 0xC551;
 constexpr uint16_t kPageBoundChecksumFormat = 0xC552;
 constexpr uint16_t kSignedIntegerKeyFormat = 0xC553;
 constexpr uint16_t kCompletePrimaryPrefixesFormat = 0xC554;
+constexpr uint16_t kCompositePrimaryFingerprintFormat = 0xC555;
 
 constexpr bool usesPageBoundChecksum(uint16_t format) {
     return format == kPageBoundChecksumFormat ||
            format == kSignedIntegerKeyFormat ||
-           format == kCompletePrimaryPrefixesFormat;
+           format == kCompletePrimaryPrefixesFormat ||
+           format == kCompositePrimaryFingerprintFormat;
 }
 
 struct FileHeader {

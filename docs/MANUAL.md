@@ -1080,7 +1080,7 @@ INSERT INTO shop_orders VALUES ('north', 42), ('south', 42);
 SELECT * FROM shop_orders WHERE shop_code = 'north' AND order_number = 42;
 ```
 
-新建或重建的索引可以加速上例。主键各列为 `text`、`varchar` 或有符号整数，且查询按等值给出每一列时，数据库可以先用索引缩小范围，再核对完整键和其他条件。旧库可以运行 `REINDEX TABLE shop_orders;` 启用这条路径。只按店铺筛选、旧事务快照和忽略大小写的规则等场景使用原有扫描。[索引格式](PACKAGING.md#复合主键索引格式) · [查询测试](test-report.md#composite-primary-lookup-20261123)
+主键各列为 `text`、`varchar` 或有符号整数，且查询给出每一列的等值条件时，数据库可以先用索引缩小范围，再核对完整键和其他条件。新索引用完整键计算查找位置，同一家店订单很多时也可以少读候选。旧库可以运行 `REINDEX TABLE shop_orders;` 获得这项改进。只按店铺筛选、旧事务快照和忽略大小写的规则等场景使用原有扫描。[索引格式](PACKAGING.md#复合主键索引格式) · [查询测试](test-report.md#composite-primary-fingerprint-20261123)
 
 ### 删除表
 

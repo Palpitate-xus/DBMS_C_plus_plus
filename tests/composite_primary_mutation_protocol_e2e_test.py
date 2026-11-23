@@ -78,15 +78,15 @@ def main():
         update = f'UPDATE {table}'
         delete = f'DELETE FROM {table}'
         check_access(lambda: sql(first, update+" SET note='changed'"+where(1)+' RETURNING note',
-                                 'UPDATE 1', rows=[['changed']]), 2)
-        check_access(lambda: sql(first, delete+where(3)+' RETURNING note', 'DELETE 0', rows=[]), 2)
+                                 'UPDATE 1', rows=[['changed']]), 1)
+        check_access(lambda: sql(first, delete+where(3)+' RETURNING note', 'DELETE 0', rows=[]), 0)
         check_access(lambda: sql(first, update+" SET note='wrong'"+where(3, 'absent'),
                                  'UPDATE 0'), 0)
         check_access(lambda: sql(first, update+" SET note='quote kept'"+where(5, "O''Brien")+
                                  ' RETURNING note', 'UPDATE 1', rows=[['quote kept']]), 1)
         prepare(b'write_order', update+" SET note='binary' WHERE shop=$1 AND ord=$2 RETURNING note")
         prepare(b'remove_order', delete+" WHERE ord=$2 AND shop=$1 RETURNING note")
-        check_access(lambda: observe(bind(b'write_order', prefix, 2), 'UPDATE 1', rows=[['binary']]), 2)
+        check_access(lambda: observe(bind(b'write_order', prefix, 2), 'UPDATE 1', rows=[['binary']]), 1)
         check_access(lambda: observe(bind(b'remove_order', '', 4), 'DELETE 1', rows=[['empty']]), 1)
 
         second = socket.create_connection(('127.0.0.1', server['port']), timeout=runner.wire_timeout())
@@ -121,7 +121,7 @@ def main():
         collision = '''DELETE FROM wire_compound_separator WHERE "Shop code"='a' ''' \
             '''AND "Order no"='b\x01c' RETURNING note'''
         check_access(lambda: sql(first, collision, 'DELETE 1', rows=[['first']]),
-                     2, relation='wire_compound_separator')
+                     1, relation='wire_compound_separator')
         sql(first, 'SELECT note FROM wire_compound_separator', 'SELECT 1', rows=[['second']])
     finally:
         if second is not None:

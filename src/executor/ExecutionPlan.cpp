@@ -2565,8 +2565,8 @@ public:
             auto* index = engine_->getPKIndex(database_, table_);
             if (!index || !index->isOpen())
                 throw DbError("XX001", "could not open B-tree index for relation \"" + table_ + "\"");
-            if (index->hasCompletePrimaryPrefixes()) {
-                const auto key = schema_.buildPKValue(values_);
+            if (index->hasCompletePrimaryKeys()) {
+                const auto key = primary_key_index::keyForValues(schema_, *index, values_);
                 rids_ = lookupBtreeMultiChecked(index, key);
                 if (engine_->indexReadSnapshotFence(database_) == before) {
                     usedIndex_ = true;

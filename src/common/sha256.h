@@ -12,10 +12,8 @@ class SHA256 {
 public:
     static std::array<uint8_t, 32> digestBytes(const std::string& input) {
         SHA256 sha;
-        sha.update(reinterpret_cast<const uint8_t*>(input.data()), input.size());
-        std::array<uint8_t, 32> digest{};
-        sha.finalize(digest.data());
-        return digest;
+        sha.append(input.data(), input.size());
+        return sha.finishBytes();
     }
 
     static std::string hash(const std::string& input) {
@@ -27,15 +25,19 @@ public:
     }
 
     // Incremental interface for hashing files and protocol streams without
-    // materializing the complete payload in memory. A SHA256 instance is
-    // single-use once finishHex() has been called.
+    // materializing the complete payload in memory. Finish a stream once.
     void append(const char* input, size_t len) {
         update(reinterpret_cast<const uint8_t*>(input), len);
     }
 
+    std::array<uint8_t, 32> finishBytes() {
+        std::array<uint8_t, 32> digest{};
+        finalize(digest.data());
+        return digest;
+    }
+
     std::string finishHex() {
-        uint8_t digest[32];
-        finalize(digest);
+        const auto digest = finishBytes();
         std::ostringstream oss;
         for (const uint8_t byte : digest) {
             oss << std::hex << std::setw(2) << std::setfill('0')

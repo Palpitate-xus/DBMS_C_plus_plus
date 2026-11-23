@@ -5,6 +5,10 @@
 
 namespace dbms::primary_key_index {
 
+// Construct the physical probe key using the format of the open index.
+std::string keyForValues(const TableSchema& table, const BPTree& index,
+                         const std::map<std::string, std::string>& values);
+
 inline std::optional<size_t> singleKeyColumn(const TableSchema& table) {
     size_t column = table.len();
     if (!table.pkColIndices.empty()) {
@@ -55,7 +59,7 @@ inline bool sharesPrefix(const TableSchema& table, const std::string& key) {
 
 inline bool lookupNeedsHeap(const TableSchema& table, const BPTree& index,
                             const std::string& key) {
-    return sharesPrefix(table, key) && !index.hasCompletePrimaryPrefixes();
+    return sharesPrefix(table, key) && !index.hasCompletePrimaryKeys();
 }
 
 inline bool insert(const TableSchema& table, BPTree& index,
@@ -70,7 +74,7 @@ inline bool remove(const TableSchema& table, BPTree& index,
         if (!index.searchMultiChecked(key, candidates)) return false;
         if (std::find(candidates.begin(), candidates.end(), rid) == candidates.end()) {
             // A legacy index may have omitted a distinct row at this prefix.
-            return undo || !index.hasCompletePrimaryPrefixes();
+            return undo || !index.hasCompletePrimaryKeys();
         }
         return index.removeMulti(key, rid);
     }

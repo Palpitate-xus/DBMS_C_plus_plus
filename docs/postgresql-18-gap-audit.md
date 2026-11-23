@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-23 · 减少复合主键等值定位的候选
+
+普通表的新建和重建复合主键索引使用完整键的固定宽度摘要缩小候选范围，并逐列核对真实键。已验证旧格式读写、重建、精确的重复判断和进程退出后的恢复。完整多列排序、部分键与范围规划、同前缀写入的锁竞争和分区约束仍有差距。`IDX-03`、`IDX-15` 和 `OPT-01` 保持部分实现。[测试](test-report.md#composite-primary-fingerprint-20261123) · [性能](performance-report-2026-10-30.md#composite-primary-fingerprint-cost-20261123)
+
 ## 2026-11-23 · 按完整复合主键更新和删除
 
 普通表的目标定位可在能使用当前索引的事务首次写入时核对完整等值键，支持普通和命名语句的参数。旧索引、旧快照和事务内已有写入沿用表扫描。并发的行锁和条件重查、保存点、外键动作及重启结果已验证。复合主键的范围扫描、带来源写入和完整锁模型仍有差距。`IDX-03`、`OPT-01` 和 `TXN-08` 保持部分实现。[测试](test-report.md#composite-primary-mutation-20261123) · [性能](performance-report-2026-10-30.md#composite-primary-mutation-cost-20261123)

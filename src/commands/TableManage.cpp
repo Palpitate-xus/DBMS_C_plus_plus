@@ -5745,8 +5745,8 @@ bool constraintNeedsCollationComparison(const TableSchema& table,
 
 DBStatus lockCompoundPrimaryKey(LockManager& locks, const std::string& relation,
         bool canonicalEquality, const std::string& key) {
-    // Keep every RID in the physical bucket stable while the writer checks
-    // full keys. Noncanonical equality can also cross physical buckets.
+    // Keep the logical lock stable when REINDEX replaces a prefix tree or
+    // a prepared writer still holds a lock taken before the upgrade.
     return lockPrimaryKey(locks, relation, canonicalEquality,
                           BPTree::normalizeKeyForComparison(key));
 }
@@ -5754,7 +5754,7 @@ DBStatus lockCompoundPrimaryKey(LockManager& locks, const std::string& relation,
 DBStatus checkCompoundPrimaryKey(StorageEngine& engine, const std::string& dbname,
         const std::string& relation, const TableSchema& table,
         const std::vector<size_t>& columns, const std::map<std::string, std::string>& values,
-        const std::string& key, bool canonicalEquality, int64_t exceptRid = -1) {
+        bool canonicalEquality, int64_t exceptRid = -1) {
     auto* index = engine.getPKIndex(dbname, relation);
     if (!index || !index->isOpen()) return DBStatus::IO_ERROR;
 
@@ -5773,7 +5773,7 @@ DBStatus checkCompoundPrimaryKey(StorageEngine& engine, const std::string& dbnam
 
     // A legacy tree can omit rows that shared the stored key. An explicit
     // noncanonical collation can equate values in different buckets.
-    if (!canonicalEquality || !index->hasCompletePrimaryPrefixes()) {
+    const auto scanHeap = [&]() {
         bool duplicate = false;
         if (!engine.forEachRow(dbname, relation,
                 [&](uint32_t page, uint16_t slot, const char* data, size_t length) {
@@ -5781,9 +5781,12 @@ DBStatus checkCompoundPrimaryKey(StorageEngine& engine, const std::string& dbnam
                         duplicate = matches(std::string(data, length));
                 }, nullptr, {}, true, true)) return DBStatus::IO_ERROR;
         return duplicate ? DBStatus::DUPLICATE_KEY : DBStatus::OK;
-    }
+    };
+    if (!canonicalEquality || !index->hasCompletePrimaryKeys()) return scanHeap();
 
     std::vector<int64_t> positions;
+    const auto key = primary_key_index::keyForValues(table, *index, values);
+    if (key.empty()) return DBStatus::CORRUPTED_DATA;
     if (!index->searchMultiChecked(key, positions)) return DBStatus::IO_ERROR;
     if (positions.empty()) return DBStatus::OK;
 
@@ -5804,7 +5807,18 @@ DBStatus checkCompoundPrimaryKey(StorageEngine& engine, const std::string& dbnam
         std::string row;
         const bool read = engine.readRowByRid(allocator, rid, row, table);
         if (acquired) locks.pageUnlock(dbname, relation, page);
-        if (!read) return DBStatus::IO_ERROR;
+        if (!read) {
+            // A fingerprint collision can share a physical key across
+            // unrelated legacy lock buckets. If that candidate disappeared,
+            // rescan under the stable logical lock for the requested key.
+            if (index->usesCompositePrimaryFingerprints()) {
+                std::vector<int64_t> remaining;
+                if (index->searchMultiChecked(key, remaining) &&
+                    std::find(remaining.begin(), remaining.end(), rid) == remaining.end())
+                    return scanHeap();
+            }
+            return DBStatus::IO_ERROR;
+        }
         if (matches(row)) return DBStatus::DUPLICATE_KEY;
     }
     return DBStatus::OK;
@@ -10812,6 +10826,54 @@ std::string StorageEngine::extractPKValue(const std::string& rowBuffer,
     return tbl.buildPKValue(values);
 }
 
+// Size-prefix the canonical datum of every column. Both the column order and
+// the byte order of the lengths are part of the on-disk key format. The
+// fingerprint narrows candidates; the constraint compares the full values.
+template<typename DatumAt>
+static std::string compositePrimaryFingerprint(const TableSchema& table, DatumAt datumAt) {
+    SHA256 hash;
+    const auto append = [&](size_t index) {
+        const auto value = canonicalColumnKeyValue(table.cols[index], datumAt(index));
+        std::array<char, sizeof(uint64_t)> length{};
+        uint64_t remaining = value.size();
+        for (size_t i = length.size(); i > 0; --i) {
+            length[i - 1] = static_cast<char>(remaining & 0xff);
+            remaining >>= 8;
+        }
+        hash.append(length.data(), length.size());
+        hash.append(value.data(), value.size());
+    };
+    if (!primary_key_index::isCompoundKey(table)) return {};
+    if (!table.pkColIndices.empty()) {
+        for (const auto index : table.pkColIndices) {
+            if (index >= table.len()) return {};
+            append(index);
+        }
+    } else {
+        for (size_t i = 0; i < table.len(); ++i)
+            if (table.cols[i].isPrimaryKey) append(i);
+    }
+    const auto digest = hash.finishBytes();
+    static_assert(BP_KEY_LEN <= std::tuple_size<decltype(digest)>::value);
+    return std::string(reinterpret_cast<const char*>(digest.data()), BP_KEY_LEN);
+}
+
+std::string primary_key_index::keyForValues(const TableSchema& table, const BPTree& index,
+        const std::map<std::string, std::string>& values) {
+    if (!index.usesCompositePrimaryFingerprints()) return table.buildPKValue(values);
+    return compositePrimaryFingerprint(table, [&](size_t ordinal) {
+        return valueFromRowMap(values, table.cols[ordinal].dataName);
+    });
+}
+
+static std::string primaryIndexKeyFromRow(StorageEngine& engine, const std::string& dbname,
+        const TableSchema& table, const BPTree& index, const std::string& row) {
+    if (!index.usesCompositePrimaryFingerprints()) return engine.extractPKValue(row, table, dbname);
+    return compositePrimaryFingerprint(table, [&](size_t ordinal) {
+        return engine.extractColumnValue(row, table, ordinal, dbname);
+    });
+}
+
 BPTree* StorageEngine::loadBtreeIndex(
         std::map<std::string, std::shared_ptr<BPTree>>& cache,
         const std::string& key, const std::filesystem::path& path,
@@ -10876,7 +10938,9 @@ static std::optional<size_t> signedIntegerPrimaryKeyColumn(const TableSchema& sc
 }
 
 static bool openNewPrimaryIndex(BPTree& index, const TableSchema& table) {
-    if (primary_key_index::isSingleTextKey(table) || primary_key_index::isCompoundKey(table))
+    if (primary_key_index::isCompoundKey(table))
+        return index.openWithCompositePrimaryFingerprints();
+    if (primary_key_index::isSingleTextKey(table))
         return index.openWithCompletePrimaryPrefixes();
     if (signedIntegerPrimaryKeyColumn(table)) return index.openWithSignedIntegerKeys();
     return index.open();
@@ -15609,7 +15673,7 @@ DBStatus StorageEngine::rebuildTableIndexes(
             const std::string row(data, len);
             const int64_t rid = encodeRid(pageId, slotId);
             if (tbl.hasPrimaryKey() && !primaryWriteFailed) {
-                const std::string key = extractPKValue(row, tbl);
+                const std::string key = primaryIndexKeyFromRow(*this, dbname, tbl, *primary, row);
                 if (!key.empty()) primaryWriteFailed = !primary_key_index::insert(tbl, *primary, key, rid);
             }
             if (primaryWriteFailed) return;
@@ -15684,7 +15748,7 @@ DBStatus StorageEngine::rebuildTableIndexes(
             if (primaryWriteFailed) return;
             ScannedNullRowBinding scanNullOwner(tbl, scanNulls, data, len);
             const std::string row(data, len);
-            const std::string key = extractPKValue(row, tbl);
+            const std::string key = primaryIndexKeyFromRow(*this, dbname, tbl, *primary, row);
             if (!key.empty()) {
                 primaryWriteFailed = !primary_key_index::insert(
                     tbl, *primary, key, encodeRid(pageId, slotId));
@@ -26322,7 +26386,7 @@ DBStatus StorageEngine::alterTableAddPrimaryKey(const std::string& dbname,
                        [&](uint32_t pageId, uint16_t slotId, const char* data, size_t len) {
                            if (!indexWriteOk) return;
                            std::string row(data, len);
-                           std::string pkVal = extractPKValue(row, tbl);
+                           const auto pkVal = primaryIndexKeyFromRow(*this, dbname, tbl, pkIdx, row);
                            if (!pkVal.empty() && !primary_key_index::insert(
                                    tbl, pkIdx, pkVal, encodeRid(pageId, slotId)))
                                indexWriteOk = false;
@@ -31054,7 +31118,7 @@ DBStatus StorageEngine::insertInternal(
                 const auto status = lockCompoundPrimaryKey(lockManager_, tablename, canonical, pkVal);
                 if (status != DBStatus::OK) return status;
                 const auto checked = checkCompoundPrimaryKey(*this, dbname, tablename, tbl,
-                    primaryColumns, actualValues, pkVal, canonical);
+                    primaryColumns, actualValues, canonical);
                 if (checked != DBStatus::OK) return checked;
             } else if (!pkVal.empty()) {
                 bool duplicate = false;
@@ -32682,10 +32746,10 @@ DBStatus StorageEngine::insertInternal(
             unlockTable();
             return DBStatus::LOCK_CONFLICT;
         }
-        const std::string pkVal = tbl.buildPKValue(actualValues);
         if (tbl.hasPrimaryKey()) {
-            if (BPTree* idx = getPKIndex(dbname, tablename); idx && !pkVal.empty()) {
-                primary_key_index::remove(tbl, *idx, pkVal, rid, true);
+            if (BPTree* idx = getPKIndex(dbname, tablename)) {
+                const auto key = primary_key_index::keyForValues(tbl, *idx, actualValues);
+                if (!key.empty()) primary_key_index::remove(tbl, *idx, key, rid, true);
             }
         }
         for (const auto& entry : secondaryIndexValues) {
@@ -32808,11 +32872,11 @@ DBStatus StorageEngine::insertInternal(
     }
 
     // Update B+ tree PK index.
-    {
+    if (tbl.hasPrimaryKey()) {
         BPTree* idx = getPKIndex(dbname, tablename);
-        std::string pkVal = tbl.buildPKValue(actualValues);
-        if (tbl.hasPrimaryKey() && !pkVal.empty() &&
-            (!idx || !primary_key_index::insert(tbl, *idx, pkVal, rid))) {
+        if (!idx) return abortIndexUpdate();
+        const auto key = primary_key_index::keyForValues(tbl, *idx, actualValues);
+        if (key.empty() || !primary_key_index::insert(tbl, *idx, key, rid)) {
             return abortIndexUpdate();
         }
     }
@@ -34094,8 +34158,8 @@ static std::optional<DBStatus> matchCurrentCompositePrimaryKey(
         std::lock_guard<std::recursive_mutex> lock(cacheMutex);
         const auto* index = engine.getPKIndex(dbname, tablename);
         if (!index || !index->isOpen()) return DBStatus::IO_ERROR;
-        if (!index->hasCompletePrimaryPrefixes()) return {};
-        if (!index->searchMultiChecked(table.buildPKValue(values), positions))
+        if (!index->hasCompletePrimaryKeys()) return {};
+        if (!index->searchMultiChecked(primary_key_index::keyForValues(table, *index, values), positions))
             return DBStatus::IO_ERROR;
     }
 
@@ -35636,7 +35700,7 @@ DBStatus StorageEngine::removeInternal(
             }
             const auto& row = logicalRowsToDelete[rowIndex++];
             if (row.empty()) continue;
-            const std::string pkVal = extractPKValue(row, tbl);
+            const auto pkVal = primaryIndexKeyFromRow(*this, dbname, tbl, *pkIdx, row);
             if (pkVal.empty() || !primary_key_index::remove(tbl, *pkIdx, pkVal, rid)) {
                 lockManager_.unlock(tablename);
                 return DBStatus::IO_ERROR;
@@ -37824,7 +37888,7 @@ DBStatus StorageEngine::updateInternal(
                     });
                 if (changed) {
                     status = checkCompoundPrimaryKey(*this, dbname, tablename, tbl,
-                        primaryColumns, rowValues, newPK, canonical, rid);
+                        primaryColumns, rowValues, canonical, rid);
                 }
             }
             if (status != DBStatus::OK) {
@@ -38655,12 +38719,16 @@ DBStatus StorageEngine::updateInternal(
         // the statement savepoint restores the heap and all earlier indexes.
         if (tbl.hasPrimaryKey()) {
             BPTree* pkIdx = getPKIndex(dbname, tablename);
-            if (!pkIdx || !pkIdx->isOpen() || oldPK.empty() || newPK.empty()) {
-                return indexMaintenanceFailure();
-            }
-            if (oldPK != newPK || actualRid != rid) {
-                if (!primary_key_index::remove(tbl, *pkIdx, oldPK, rid) ||
-                    !primary_key_index::insert(tbl, *pkIdx, newPK, actualRid)) {
+            if (!pkIdx || !pkIdx->isOpen()) return indexMaintenanceFailure();
+            const bool fingerprints = pkIdx->usesCompositePrimaryFingerprints();
+            const auto oldKey = fingerprints
+                ? primary_key_index::keyForValues(tbl, *pkIdx, oldLogicalValues) : oldPK;
+            const auto newKey = fingerprints
+                ? primary_key_index::keyForValues(tbl, *pkIdx, rowValues) : newPK;
+            if (oldKey.empty() || newKey.empty()) return indexMaintenanceFailure();
+            if (oldKey != newKey || actualRid != rid) {
+                if (!primary_key_index::remove(tbl, *pkIdx, oldKey, rid) ||
+                    !primary_key_index::insert(tbl, *pkIdx, newKey, actualRid)) {
                     return indexMaintenanceFailure();
                 }
             }
@@ -57647,7 +57715,8 @@ bool StorageEngine::restoreDeletedRowIndexes(
 
     if (tbl.hasPrimaryKey()) {
         BPTree* primary = getPKIndex(dbname, tablename);
-        const std::string key = extractPKValue(rowData, tbl, dbname);
+        const auto key = primary
+            ? primaryIndexKeyFromRow(*this, dbname, tbl, *primary, rowData) : std::string{};
         if (!primary || key.empty() || !primary_key_index::restore(tbl, *primary, key, rid))
             ok = false;
     }
@@ -59639,21 +59708,21 @@ bool StorageEngine::undoVersionedUpdate(const TxnLogEntry& entry) {
     };
     if (tbl.hasPrimaryKey()) {
         BPTree* index = getPKIndex(dbname, tablename);
-        const std::string currentKey = extractPKValue(currentRow, tbl, dbname);
-        const std::string previousKey =
-            extractPKValue(entry.rowData, tbl, dbname);
-        if (!index || !index->isOpen() || currentKey.empty() ||
-            previousKey.empty()) {
+        if (!index || !index->isOpen()) {
             indexesOk = false;
         } else {
+            const auto currentKey = primaryIndexKeyFromRow(*this, dbname, tbl, *index, currentRow);
+            const auto previousKey = primaryIndexKeyFromRow(*this, dbname, tbl, *index, entry.rowData);
             // Forward index maintenance may have failed before inserting NEW
             // (or even before removing OLD). Undo only mutations that are
             // actually present, then restore OLD only when it is absent.
-            if (!primary_key_index::remove(tbl, *index, currentKey, entry.rowIdx, true)) {
+            if (currentKey.empty() ||
+                !primary_key_index::remove(tbl, *index, currentKey, entry.rowIdx, true)) {
                 indexesOk = false;
             }
 
-            if (!primary_key_index::restore(tbl, *index, previousKey, entry.previousRowIdx)) {
+            if (previousKey.empty() ||
+                !primary_key_index::restore(tbl, *index, previousKey, entry.previousRowIdx)) {
                 indexesOk = false;
             }
         }
@@ -59866,6 +59935,7 @@ DBStatus StorageEngine::rollbackTransaction() {
             // INSERT records carry the physical row payload so index cleanup
             // does not depend on successfully re-reading a damaged heap page.
             const std::string& insertedRow = it->rowData;
+            BPTree* pkIdx = nullptr;
             std::string pkVal;
             std::vector<EvaluatedIndexEntry> secondaryIdxVals;
             std::vector<EvaluatedIndexEntry> compositeIdxVals;
@@ -59878,8 +59948,12 @@ DBStatus StorageEngine::rollbackTransaction() {
                 std::vector<bool> nullColumns;
                 readRowByRid(pa, it->rowIdx, heapRow, tbl, &nullColumns);
                 BufferedNullRowBinding nullBinding(tbl, nullColumns);
-                pkVal = extractPKValue(
-                    insertedRow, tbl, transactionContext().txnDB);
+                if (tbl.hasPrimaryKey()) {
+                    pkIdx = getPKIndex(transactionContext().txnDB, it->tableName);
+                    if (pkIdx && (pkIdx->isOpen() || pkIdx->open()))
+                        pkVal = primaryIndexKeyFromRow(*this, transactionContext().txnDB, tbl,
+                                                       *pkIdx, insertedRow);
+                }
                 for (const auto& metadata : getIndexMetadata(
                          transactionContext().txnDB, it->tableName)) {
                     EvaluatedIndexEntry entry;
@@ -60033,10 +60107,7 @@ DBStatus StorageEngine::rollbackTransaction() {
             }
             // Remove from PK index
             if (tbl.hasPrimaryKey()) {
-                BPTree* pkIdx = getPKIndex(
-                    transactionContext().txnDB, it->tableName);
-                if (pkVal.empty() || !pkIdx ||
-                    (!pkIdx->isOpen() && !pkIdx->open())) {
+                if (pkVal.empty() || !pkIdx) {
                     rowUndoOk = false;
                 } else if (!primary_key_index::remove(tbl, *pkIdx, pkVal, it->rowIdx, true)) {
                     rowUndoOk = false;
@@ -60194,14 +60265,15 @@ DBStatus StorageEngine::rollbackTransaction() {
             BPTree* pkIdx = getPKIndex(transactionContext().txnDB, it->tableName);
             if (pkIdx) {
                 if (foundCurrent) {
-                    std::string currentPk = extractPKValue(
-                        currentRow, tbl, transactionContext().txnDB);
+                    const auto currentPk = primaryIndexKeyFromRow(
+                        *this, transactionContext().txnDB, tbl, *pkIdx, currentRow);
                     if (!currentPk.empty() &&
                         !primary_key_index::remove(tbl, *pkIdx, currentPk, it->rowIdx, true)) {
                         rowUndoOk = false;
                     }
                 }
-                const auto pkVal = extractPKValue(it->rowData, tbl, transactionContext().txnDB);
+                const auto pkVal = primaryIndexKeyFromRow(
+                    *this, transactionContext().txnDB, tbl, *pkIdx, it->rowData);
                 if (!pkVal.empty() &&
                     !primary_key_index::restore(tbl, *pkIdx, pkVal, it->rowIdx)) {
                     rowUndoOk = false;
@@ -61786,13 +61858,13 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
             } else if (tbl.hasPrimaryKey()) {
                 BPTree* pkIdx = getPKIndex(
                     transactionContext().txnDB, entry.tableName);
-                const std::string pkVal = extractPKValue(
-                    insertedRow, tbl, transactionContext().txnDB);
-                if (!pkIdx || (!pkIdx->isOpen() && !pkIdx->open()) ||
-                    pkVal.empty()) {
+                if (!pkIdx || (!pkIdx->isOpen() && !pkIdx->open())) {
                     rowUndoOk = false;
-                } else if (!primary_key_index::remove(tbl, *pkIdx, pkVal, entry.rowIdx, true)) {
-                    rowUndoOk = false;
+                } else {
+                    const auto pkVal = primaryIndexKeyFromRow(
+                        *this, transactionContext().txnDB, tbl, *pkIdx, insertedRow);
+                    if (pkVal.empty() || !primary_key_index::remove(
+                            tbl, *pkIdx, pkVal, entry.rowIdx, true)) rowUndoOk = false;
                 }
             }
             for (const auto& metadata : getIndexMetadata(
@@ -62030,14 +62102,15 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
             BPTree* pkIdx = getPKIndex(transactionContext().txnDB, entry.tableName);
             if (pkIdx) {
                 if (foundCurrent) {
-                    std::string currentPk = extractPKValue(
-                        currentRow, tbl, transactionContext().txnDB);
+                    const auto currentPk = primaryIndexKeyFromRow(
+                        *this, transactionContext().txnDB, tbl, *pkIdx, currentRow);
                     if (!currentPk.empty() &&
                         !primary_key_index::remove(tbl, *pkIdx, currentPk, entry.rowIdx, true)) {
                         rowUndoOk = false;
                     }
                 }
-                const auto newPk = extractPKValue(entry.rowData, tbl, transactionContext().txnDB);
+                const auto newPk = primaryIndexKeyFromRow(
+                    *this, transactionContext().txnDB, tbl, *pkIdx, entry.rowData);
                 if (!newPk.empty() &&
                     !primary_key_index::restore(tbl, *pkIdx, newPk, entry.rowIdx)) {
                     rowUndoOk = false;

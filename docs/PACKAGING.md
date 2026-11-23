@@ -45,9 +45,9 @@ sudo apt install cmake g++ make zlib1g-dev libicu-dev
 
 ## 复合主键索引格式
 
-普通非分区表的新建或重建复合主键索引使用 `0xC554` 标记，保存同一物理键下的每条记录位置。已有数据目录可直接打开，旧索引下的查重从表中核对各列。运行 `REINDEX TABLE 表名` 后，符合条件的查询、写入查重、更新和删除先从索引定位候选，再逐列核对。[查询验证](test-report.md#composite-primary-lookup-20261123) · [更新和删除验证](test-report.md#composite-primary-mutation-20261123)
+普通非分区表的新建或重建复合主键索引使用 `0xC555`。按主键列的定义顺序，将每个规范化值的 8 字节大端长度及其内容输入 SHA-256，并把结果的前 20 字节作为索引键。每个键可以关联多个行位置，查重和等值定位仍逐列核对表中的完整值。
 
-使用过新版复合主键写入或重建后，切回只支持旧复合索引行为的程序时应恢复升级前的备份。[恢复验证](test-report.md#composite-primary-keys-20261123)
+两种旧格式均可直接打开和写入。`0xC552` 复合索引使用表扫描核对，`0xC554` 继续用原来的 20 字节前缀定位候选。运行 `REINDEX TABLE 表名` 可以从表中生成 `0xC555` 索引。如果待决的两阶段事务阻止重建，完成该事务后再运行。旧程序无法读取 `0xC555` 文件，切回旧程序时应恢复升级前的数据目录备份。[升级和恢复验证](test-report.md#composite-primary-fingerprint-20261123)
 
 ## 整数主键索引格式
 
@@ -112,8 +112,8 @@ Bloom、GIN、BRIN、GiST 与 SP-GiST 索引校验：
 该命令验证主/分区/TOAST/unlogged init heap，以及 `.idx`/`.idx_*` B+Tree
 索引、`.hidx` Hash、`.bidx` Bloom、`.gin` GIN、`.brin` BRIN、`.gist` GiST
 和 `.spgist` SP-GiST 侧车，包括从 tablespace marker 解析的外置文件；诊断定位到索引文件和 heap block。
-统计会分开列出使用页号绑定校验的 `0xC552`、`0xC553` 和 `0xC554`、使用旧内容校验的 `0xC551` 与无 checksum 的
-zero-marker legacy 页，并单列带 checksum 的 Hash V2/Bloom BLM2/GIN V2/BRIN V2/GiST V2
+统计按校验方式汇总 B+ 树页。`0xC552`、`0xC553`、`0xC554` 和 `0xC555` 计入页号绑定校验，`0xC551`
+计入内容校验，零标记页计入无校验。统计还单列带 checksum 的 Hash V2/Bloom BLM2/GIN V2/BRIN V2/GiST V2
 与未校验的 Hash V1/Bloom BLM1/GIN V1/BRIN V1/GiST V1/SP-GiST V1 文件。GIN V2/BRIN V2/GiST V2/SP-GiST V2
 扫描验证格式头、entry-count 边界与 CRC32C，但不解析 GIN postings、BRIN ranges
 或 GiST range entries、SP-GiST coordinates 的完整语义。它也不验证 quadtree 拓扑或全部 catalog/metadata，没有锁机制

@@ -67,15 +67,15 @@ def main():
             "('',4,'empty')", 'INSERT 0 3')
         sql(primary, f'REINDEX TABLE {table}', 'REINDEX')
         check_access(primary, lambda: sql(primary, point(prefix, 1), 'SELECT 1', [[None]]),
-                     [0, 0, 1, 2])
+                     [0, 0, 1, 1])
         check_access(primary, lambda: sql(primary, point(prefix, 3), 'SELECT 0', []),
-                     [0, 0, 1, 2])
+                     [0, 0, 1, 0])
         check_access(primary, lambda: sql(primary, point('absent', 1), 'SELECT 0', []),
                      [0, 0, 1, 0])
         check_access(primary, lambda: sql(primary, point('', 4), 'SELECT 1', [['empty']]),
                      [0, 0, 1, 1])
         check_access(primary, lambda: sql(primary, point(prefix, 2) + ' AND note IS NULL',
-                                         'SELECT 0', []), [0, 0, 1, 2])
+                                         'SELECT 0', []), [0, 0, 1, 1])
         plan = sql(primary, 'EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF) ' + point(prefix, 1), 'EXPLAIN')
         assert any('CompositePrimaryKeyScan (access=index' in line[0] for line in plan), plan
         check_access(primary, lambda: sql(primary, f"SELECT note FROM {table} WHERE shop='{prefix}' ORDER BY ord",
@@ -86,7 +86,7 @@ def main():
         primary.sendall(typed(b'P', name+b'\0'+text+b'\0'+pack('!HII', 2, 25, 23)) + typed(b'S'))
         assert client.read_until_ready(primary) == [(b'1', b''), (b'Z', b'I')]
         check_access(primary, lambda: observe(bind(name, prefix, 1), 'SELECT 1', [[None]]),
-                     [0, 0, 1, 2])
+                     [0, 0, 1, 1])
         check_access(primary, lambda: observe(bind(name, '', 4), 'SELECT 1', [['empty']]),
                      [0, 0, 1, 1])
         observe(bind(name, prefix, None), 'SELECT 0', [])
@@ -102,7 +102,7 @@ def main():
         sql(reader, point(prefix, 3), 'SELECT 0', [], ready=b'T')
         sql(reader, 'COMMIT', 'COMMIT')
         check_access(primary, lambda: sql(primary, point(prefix, 3), 'SELECT 1', [[None]]),
-                     [0, 0, 1, 2])
+                     [0, 0, 1, 1])
 
         sql(primary, 'BEGIN ISOLATION LEVEL SERIALIZABLE', 'BEGIN', ready=b'T')
         check_access(primary, lambda: sql(primary, point(prefix, 3), 'SELECT 1', [[None]], ready=b'T'),

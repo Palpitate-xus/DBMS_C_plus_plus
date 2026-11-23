@@ -100,6 +100,10 @@ std::string BPTree::normalizeKeyForComparison(const std::string& key) {
 }
 
 std::optional<std::string> BPTree::keyForStorage(const std::string& key) const {
+    if (header_.reserved == bptree_format::kCompositePrimaryFingerprintFormat) {
+        if (key.size() != BP_KEY_LEN) return std::nullopt;
+        return key;
+    }
     if (header_.reserved != bptree_format::kSignedIntegerKeyFormat) {
         return normalizeKey(key);
     }
@@ -233,6 +237,10 @@ bool BPTree::openWithCompletePrimaryPrefixes() {
     return openInternal(true, bptree_format::kCompletePrimaryPrefixesFormat);
 }
 
+bool BPTree::openWithCompositePrimaryFingerprints() {
+    return openInternal(true, bptree_format::kCompositePrimaryFingerprintFormat);
+}
+
 bool BPTree::openExisting() {
     return openInternal(false);
 }
@@ -243,10 +251,17 @@ bool BPTree::usesSignedIntegerKeys() const {
            header_.reserved == bptree_format::kSignedIntegerKeyFormat;
 }
 
-bool BPTree::hasCompletePrimaryPrefixes() const {
+bool BPTree::hasCompletePrimaryKeys() const {
     std::shared_lock<std::shared_mutex> lock(treeMutex_);
     return bp_ && bp_->isOpen() &&
-           header_.reserved == bptree_format::kCompletePrimaryPrefixesFormat;
+        (header_.reserved == bptree_format::kCompletePrimaryPrefixesFormat ||
+         header_.reserved == bptree_format::kCompositePrimaryFingerprintFormat);
+}
+
+bool BPTree::usesCompositePrimaryFingerprints() const {
+    std::shared_lock<std::shared_mutex> lock(treeMutex_);
+    return bp_ && bp_->isOpen() &&
+        header_.reserved == bptree_format::kCompositePrimaryFingerprintFormat;
 }
 
 bool BPTree::openInternal(bool createIfMissing, uint16_t creationFormat) {

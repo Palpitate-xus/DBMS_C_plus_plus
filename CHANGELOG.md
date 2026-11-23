@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>同一家店的订单很多时，按订单号查找更快 · 2026-11-23</summary>
+
+同时给出店铺编号和订单号后，数据库可以少检查同一家店的其他订单。按这两个编号修改或删除订单，以及检查新订单是否重号，也能少读记录。
+
+[测试报告](docs/test-report.md#composite-primary-fingerprint-20261123) · [性能报告](docs/performance-report-2026-10-30.md#composite-primary-fingerprint-cost-20261123)
+
+</details>
+
+<details>
 <summary>修改或删除指定店铺的订单更快 · 2026-11-23</summary>
 
 同时给出店铺编号和订单号，数据库就能少翻一些记录，再修改或删除找到的订单。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>不同店铺可以各自使用同一个订单号 · 2026-11-23</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-23 · 不同店铺可以各自使用同一个订单号
 
 两家店可以各自保存一笔 42 号订单，哪怕两家的店铺编号很长，开头也相同。
 
 [测试报告](docs/test-report.md#composite-primary-keys-20261123) · [性能报告](docs/performance-report-2026-10-30.md#composite-primary-keys-cost-20261123)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-23 · 开头一样的长编号可以分别保存和查找
 

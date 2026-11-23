@@ -36,10 +36,12 @@ public:
     bool openWithSignedIntegerKeys();
     // Primary-key prefixes can contain more than one row location.
     bool openWithCompletePrimaryPrefixes();
+    bool openWithCompositePrimaryFingerprints();
     // Open an existing index without allowing the buffer pool to create it.
     bool openExisting();
     bool usesSignedIntegerKeys() const;
-    bool hasCompletePrimaryPrefixes() const;
+    bool hasCompletePrimaryKeys() const;
+    bool usesCompositePrimaryFingerprints() const;
     void close();
     // Flush all dirty index pages and fsync the index file.
     bool flush();
