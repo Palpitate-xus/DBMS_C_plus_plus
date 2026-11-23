@@ -3605,6 +3605,65 @@ static bool fromAliasIdentifier(const std::string& token) {
     return category == 0 || category == 1;
 }
 
+static ExprPtr parseFromFunctionCall(const std::vector<std::string>& tokens, size_t& pos,
+                                     size_t argumentsBegin) {
+    size_t end = argumentsBegin;
+    size_t depth = 0;
+    do {
+        if (tokens[end] == "(") ++depth;
+        else if (tokens[end] == ")") --depth;
+        ++end;
+    } while (end < tokens.size() && depth != 0);
+    if (depth != 0) {
+        retainDeclarationSyntaxError(DbError("42601", "unterminated function call in FROM"));
+        return nullptr;
+    }
+    auto expression = parsePrimaryExpr(tokens, pos);
+    const auto* call = dynamic_cast<const FunctionCallExpr*>(expression.get());
+    if (!call || call->hasOver || call->filter || call->distinct ||
+        !call->orderBy.empty() || !call->aggregateOrderKeys.empty() || pos != end) return nullptr;
+    return expression;
+}
+
+static std::unique_ptr<SelectStmt> parseRowsFrom(const std::vector<std::string>& tokens, size_t& pos) {
+    auto producer = std::make_unique<SelectStmt>();
+    producer->functionSourceProducer = true;
+    do {
+        ++pos;  // Skip the initial '(' or member separator.
+        const auto start = pos;
+        std::string name;
+        if (!parseQualifiedObjectName(tokens, pos, name) || pos == tokens.size() || tokens[pos] != "(")
+            break;
+        const auto argStart = pos;
+        pos = start;
+        auto expression = parseFromFunctionCall(tokens, pos, argStart);
+        auto* call = dynamic_cast<FunctionCallExpr*>(expression.get());
+        if (!call || pos == tokens.size() || (tokens[pos] != "," && tokens[pos] != ")")) break;
+
+        // PostgreSQL expands the SQL-standard, unqualified multi-array form
+        // into separate calls to the builtin. Each array retains its type.
+        if (call->schema.empty() && parseRoutineIdentifier(call->funcName) == "unnest" &&
+            call->namedArgs.empty() && call->args.size() > 1) {
+            for (auto& argument : call->args) {
+                auto unnest = std::make_unique<FunctionCallExpr>();
+                unnest->schema = "pg_catalog";
+                unnest->funcName = "unnest";
+                unnest->args.push_back(std::move(argument));
+                producer->selectList.push_back({std::move(unnest), "unnest"});
+            }
+        } else {
+            const auto label = call->funcName;
+            producer->selectList.push_back({std::move(expression), label});
+        }
+        if (tokens[pos] == ")") {
+            ++pos;
+            return producer;
+        }
+    } while (true);
+    retainDeclarationSyntaxError(DbError("42601", "invalid function list in ROWS FROM"));
+    return nullptr;
+}
+
 // Parse one relation or derived query before composing JOINs. Never turn the
 // opening parenthesis into a physical relation name and lose its query tree.
 static std::unique_ptr<FromItem> parseFromAtom(const std::vector<std::string>& tokens, size_t& pos) {
@@ -3613,7 +3672,13 @@ static std::unique_ptr<FromItem> parseFromAtom(const std::vector<std::string>& t
     auto item = std::make_unique<FromItem>();
     item->only = SQLParser::toLower(tokens[pos]) == "only";
     if (item->only && ++pos == tokens.size()) return nullptr;
-    if (!item->only && tokens[pos] == "(") {
+    if (!item->only && pos + 2 < tokens.size() && SQLParser::toLower(tokens[pos]) == "rows" &&
+        SQLParser::toLower(tokens[pos + 1]) == "from" && tokens[pos + 2] == "(") {
+        pos += 2;
+        item->type = FromItem::Type::Function;
+        item->subquery = parseRowsFrom(tokens, pos);
+        if (!item->subquery) return nullptr;
+    } else if (!item->only && tokens[pos] == "(") {
         const auto nestedTokens = collectParenthesized(tokens, pos);
         SQLParser parser;
         auto nested = parser.parse(joinParserTokens(nestedTokens, 0, nestedTokens.size()));
@@ -3636,37 +3701,24 @@ static std::unique_ptr<FromItem> parseFromAtom(const std::vector<std::string>& t
             CatalogManager::QualifiedName name;
             if (CatalogManager::parseQualifiedName(item->tableName, name, true) &&
                 name.name == "generate_series") {
-                size_t end = pos;
-                size_t depth = 0;
-                do {
-                    if (tokens[end] == "(") ++depth;
-                    else if (tokens[end] == ")") --depth;
-                    ++end;
-                } while (end < tokens.size() && depth != 0);
-                if (depth != 0) {
-                    retainDeclarationSyntaxError(DbError("42601", "unterminated function call in FROM"));
-                    return nullptr;
-                }
-                auto start = nameBegin;
-                auto expression = parsePrimaryExpr(tokens, start);
-                const auto* call = dynamic_cast<const FunctionCallExpr*>(expression.get());
-                if (!call || call->hasOver || call->filter || call->distinct ||
-                    !call->orderBy.empty() || !call->aggregateOrderKeys.empty() ||
-                    start != end) return nullptr;
-                pos = start;
+                const auto argStart = pos;
+                pos = nameBegin;
+                auto expression = parseFromFunctionCall(tokens, pos, argStart);
+                if (!expression) return nullptr;
                 item->type = FromItem::Type::Function;
                 auto producer = std::make_unique<SelectStmt>();
                 producer->selectList.push_back({std::move(expression), name.name});
                 item->subquery = std::move(producer);
-                if (pos + 1 < tokens.size() && SQLParser::toLower(tokens[pos]) == "with" &&
-                    SQLParser::toLower(tokens[pos + 1]) == "ordinality") {
-                    item->withOrdinality = true;
-                    pos += 2;
-                }
             }
         } else if (!item->only && pos < tokens.size() && tokens[pos] == "*") {
             ++pos;
         }
+    }
+
+    if (item->type == FromItem::Type::Function && pos + 1 < tokens.size() &&
+        SQLParser::toLower(tokens[pos]) == "with" && SQLParser::toLower(tokens[pos + 1]) == "ordinality") {
+        item->withOrdinality = true;
+        pos += 2;
     }
 
     // AS alias or implicit alias
@@ -3691,11 +3743,10 @@ static std::unique_ptr<FromItem> parseFromAtom(const std::vector<std::string>& t
     }
 
     if (item->type == FromItem::Type::Function) {
-        if (item->alias.empty()) item->alias = "generate_series";
-        if (!item->withOrdinality) {
-            auto& producer = static_cast<SelectStmt&>(*item->subquery);
+        auto& producer = static_cast<SelectStmt&>(*item->subquery);
+        if (item->alias.empty()) item->alias = producer.selectList.front().alias;
+        if (producer.selectList.size() == 1)
             producer.selectList.front().alias = item->alias;
-        }
     }
 
     return item;

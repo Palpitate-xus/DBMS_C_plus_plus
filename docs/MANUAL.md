@@ -1425,7 +1425,19 @@ FROM generate_series(5, 1, -2) WITH ORDINALITY AS series(value, position)
 LIMIT 2;
 ```
 
-若步长无法朝终点前进，或任一参数为 `NULL`，结果为零行。实际读取时，零步长会报错。支持整数、小数和时间序列。一般的相关函数来源和 `ROWS FROM` 仍待补齐。[测试报告](test-report.md#series-source-20261123) · [性能报告](performance-report-2026-10-30.md#series-source-cost-20261123)
+若步长无法朝终点前进，或任一参数为 `NULL`，结果为零行。实际读取时，零步长会报错。支持整数、小数和时间序列。[测试报告](test-report.md#series-source-20261123) · [性能报告](performance-report-2026-10-30.md#series-source-cost-20261123)
+
+#### 并排读取多组函数结果
+
+`ROWS FROM` 按行把多个函数的结果放在一起。较短的一组用 `NULL` 补齐。下面的查询返回 `(1,'甲',1)`、`(2,'乙',2)` 和 `(3,NULL,3)`，最后一列是从 1 开始的行号。
+
+```sql
+SELECT id, label, position
+FROM ROWS FROM (generate_series(1, 3), unnest(ARRAY['甲', '乙']))
+WITH ORDINALITY AS pairs(id, label, position);
+```
+
+返回单个值的函数贡献一行，即使这个值是 `NULL`。可以用外层 `WHERE` 筛选补出的空值，或用 `LIMIT` 只读取前几行。当前支持每个成员返回一列的用法。引用同级其他表列、为函数声明多列输出等用法仍待补齐。[测试报告](test-report.md#rows-from-20261123) · [性能报告](performance-report-2026-10-30.md#rows-from-cost-20261123)
 
 #### 查询继承表
 

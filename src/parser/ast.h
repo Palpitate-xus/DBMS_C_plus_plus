@@ -823,6 +823,9 @@ enum class SetOp { None, Union, Intersect, Except };
 
 struct SelectStmt : public Stmt {
     std::vector<SelectItem> selectList;
+    // A FROM function producer consumes each call once and aligns its rows.
+    // This differs from ordinary SELECT targets, whose scalars repeat.
+    bool functionSourceProducer = false;
     std::unique_ptr<FromItem> fromClause;
     ExprPtr whereClause;
     std::vector<ExprPtr> groupBy;

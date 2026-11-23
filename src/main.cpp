@@ -22758,7 +22758,7 @@ static bool usesDemandedLogicalRead(const dbms::PreparedQuery& query) {
 }
 
 static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& handled,
-                                    bool seriesOnly = false) {
+                                    bool tableFunctionOnly = false) {
     handled=false;
     dbms::SQLParser parser;auto parsed=parser.parseForBinding(rawSql);
     if(!parsed.isValid() && (parsed.sqlState == "42601" ||
@@ -22766,8 +22766,8 @@ static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& 
         throw dbms::DbError("42601",parsed.error);
     auto* select=parsed.isValid()?dynamic_cast<dbms::SelectStmt*>(parsed.stmt.get()):nullptr;
     if(!select || hasCurrentQueryWindows(select))return false;
-    const bool seriesSource = dbms::hasTableFunctionSource(select);
-    if (seriesOnly && !seriesSource) return false;
+    const bool tableFunction = dbms::hasTableFunctionSource(select);
+    if (tableFunctionOnly && !tableFunction) return false;
     if(usesInheritedQueryCteSource(*select,session))return false;
     const bool integerJoinProbe = probesPreparedIntegerJoin(*select);
     // Scalar SQL children and typed unary operators must consume this same
@@ -22982,8 +22982,8 @@ static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& 
     const bool sourceProbe=(emptyProjection || !select->ctes.empty() ||
         (select->fromClause && select->fromClause->type!=dbms::FromItem::Type::Table)) &&
         supportsDerivedQuery(select);
-    if (seriesOnly && !sourceProbe) return false;
-    required = required || ((emptyProjection || seriesSource) && sourceProbe);
+    if (tableFunctionOnly && !sourceProbe) return false;
+    required = required || ((emptyProjection || tableFunction) && sourceProbe);
     const bool derivedProbe=sourceProbe && logicalSource;
     const bool inheritanceProbe=sourceProbe && nestedInheritance;
     const bool viewProbe = sourceProbe && viewSource;
@@ -23125,7 +23125,7 @@ static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& 
         }
         if(!enumRequired && !generatedRequired && !arraySourceRequired)return false;
     }
-    PreparedWithDmlRuntime runtime(session,std::move(query),demandedLogicalRead || seriesSource);
+    PreparedWithDmlRuntime runtime(session,std::move(query),demandedLogicalRead || tableFunction);
     auto result=runtime.runRead(0,false,!arrayDomainRequired,arraySourceRequired);
     for(const auto& name:result.columns)cout<<name<<' ';cout<<'\n';
     for(size_t i=0;i<result.rows.size();++i) {
@@ -23627,7 +23627,7 @@ static bool executeInternal(const string& rawSql, Session& s,
         const bool failed = executeMaintenanceProgressQuery(effectiveRawSql, s, handled);
         if (handled) return failed;
     }
-    if (sql.find("generate_series") != string::npos &&
+    if ((sql.find("generate_series") != string::npos || sql.find("rows from") != string::npos) &&
         dbms::SQLParser::classify(effectiveRawSql) == dbms::SqlCommand::Select) {
         bool handled = false;
         const bool failed = handlePreparedCaseQuery(effectiveRawSql, s, handled, true);

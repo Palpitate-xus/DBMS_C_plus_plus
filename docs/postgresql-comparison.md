@@ -2,12 +2,17 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="rows-from-comparison-20261123"></a>
+## 2026-11-23 · 并排读取多个函数
+
+PostgreSQL 的 `ROWS FROM` 让多个函数按各自的结果顺序并排列出，较短的结果用 `NULL` 补齐。首次取行时，函数扫描会保存各函数的完整结果。DuckDB 在同一 `SELECT` 中展开多个列表时，也会为短列表补空值。SQLite 把 `generate_series` 之类的函数接到虚拟表接口，由虚拟表游标提供行。本项目使用已有的逐行函数执行器组合结果。[PostgreSQL 表函数](https://www.postgresql.org/docs/18/queries-table-expressions.html#QUERIES-TABLEFUNCTIONS) · [PostgreSQL 扫描源码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/executor/nodeFunctionscan.c) · [DuckDB 展开列表](https://duckdb.org/docs/lts/sql/query_syntax/unnest) · [SQLite 虚拟表](https://www.sqlite.org/vtab.html)
+
 <a id="series-function-comparison-20261123"></a>
 ## 2026-11-23 · 从函数读取等差序列
 
 PostgreSQL 的 `generate_series` 支持整数、小数和时间，`WITH ORDINALITY` 会接在结果后面添加从 1 开始的 `bigint` 行号。其普通函数扫描第一次取行时把函数结果存入临时行集。SQLite 的实现用虚拟表逐行生成整数，可在适用时把范围与条数限制交给函数。DuckDB 按批生成结果，包含终点的 `generate_series` 与排除终点的 `range` 各有一套入口。[PostgreSQL 函数](https://www.postgresql.org/docs/18/functions-srf.html) · [PostgreSQL 函数扫描](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/executor/nodeFunctionscan.c) · [SQLite 实现](https://github.com/sqlite/sqlite/blob/master/ext/misc/series.c) · [DuckDB 实现](https://github.com/duckdb/duckdb/blob/main/src/function/table/range.cpp)
 
-本项目在受支持的查询中按需生成序列，`WITH ORDINALITY` 会在筛选和排序前为函数输出编号。参数求值和列说明分别由实际执行与查询绑定完成。相关函数来源和多函数组合仍待补齐。[测试](test-report.md#series-source-20261123) · [性能](performance-report-2026-10-30.md#series-source-cost-20261123)
+本项目在受支持的查询中按需生成序列，`WITH ORDINALITY` 会在筛选和排序前为函数输出编号。参数求值和列说明分别由实际执行与查询绑定完成。函数参数引用同级其他表列的用法仍待补齐。[测试](test-report.md#series-source-20261123) · [性能](performance-report-2026-10-30.md#series-source-cost-20261123)
 
 ## 2026-11-23 · 写入 CTE 需要声明可读取的输出
 

@@ -13,6 +13,7 @@
 #include "expression/expr_helper.h"
 #include "expression/array_type.h"
 #include "expression/arithmetic_type.h"
+#include "expression/aggregate_type.h"
 #include "expression/geometric_input.h"
 #include "expression/macaddr_input.h"
 #include "expression/network_input.h"
@@ -1333,6 +1334,15 @@ public:
                 key.enumComparison = enumSortComparison(type, expressionTypeOid(key.expr.get()));
             }
             window(call->over, scopes);
+            const auto* owner = statementOwners.empty() ? nullptr
+                : dynamic_cast<const SelectStmt*>(statementOwners.back());
+            if (owner && owner->functionSourceProducer && metadata.aggregateFunction &&
+                metadata.aggregateFunction(call)) {
+                const auto input = call->args.empty() ? first
+                    : patternBaseType(first, call->args.front().get());
+                (void)aggregate_type_detail::resultType(call, aggregate_type_detail::builtinName(call), input);
+                throw DbError("42803", "aggregate functions are not allowed in functions in FROM");
+            }
             if (call->schema.empty() && SQLParser::toLower(call->funcName) == "exists" &&
                 call->args.size() == 1 && call->args.front()->preparedSubquery) {
                 // EXISTS is a SQL consumer, not a callable whose name or
@@ -2279,7 +2289,13 @@ public:
         scope.insert(scope.begin(), std::move(range));
     }
 
-    void appendFunctionOrdinality(const FromItem& source, QueryRowDescriptor& columns) const {
+    void finishFunctionSourceColumns(const FromItem& source, QueryRowDescriptor& columns) const {
+        if (source.type != FromItem::Type::Function) return;
+        for (const auto& column : columns) {
+            if (column.type == "record" ||
+                (column.typeMetadata && column.typeMetadata->kind == DatumKind::Record))
+                throw DbError("0A000", "functions returning records in FROM require a column descriptor");
+        }
         if (!source.withOrdinality) return;
         QueryOutputColumn ordinal{"ordinality", "bigint", false, 0, 20};
         if (metadata.datumType) ordinal.typeMetadata = metadata.datumType("bigint", 20);
@@ -2310,7 +2326,7 @@ public:
                     column.type = "text";
                     if(metadata.datumType)column.typeMetadata=metadata.datumType("text",25);
                 }
-            appendFunctionOrdinality(*item, columns);
+            finishFunctionSourceColumns(*item, columns);
             return {aliases({"", item->alias.empty() ? "" : identifier(item->alias), std::move(columns)})};
         }
         if (item->type != FromItem::Type::Join) throw DbError("0A000", "source requires structured preparation");
@@ -3096,7 +3112,7 @@ public:
                     column.type = "text";
                     if(metadata.datumType)column.typeMetadata=metadata.datumType("text",25);
                 }
-            appendFunctionOrdinality(*item, columns);
+            finishFunctionSourceColumns(*item, columns);
             return {aliases({"", item->alias.empty() ? "" : identifier(item->alias), std::move(columns)})};
         }
         if (item->type != FromItem::Type::Join) throw DbError("0A000", "source requires structured preparation");

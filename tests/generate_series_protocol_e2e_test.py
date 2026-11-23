@@ -111,6 +111,33 @@ def main():
             ("SELECT FROM generate_series(1,2)", [[], []], [], []),
             ("SELECT * FROM generate_series(1,2,0) LIMIT 0", [], ["generate_series"], [23]),
             ("SELECT * FROM generate_series(1,2,0) WHERE false", [], ["generate_series"], [23]),
+            ("SELECT * FROM generate_series(1,2) WITH ORDINALITY AS r",
+             [["1", "1"], ["2", "2"]], ["r", "ordinality"], [23, 20]),
+            ("SELECT * FROM ROWS FROM(generate_series(1,3), generate_series(10,11))",
+             [["1", "10"], ["2", "11"], ["3", None]], ["generate_series", "generate_series"], [23, 23]),
+            ("SELECT * FROM ROWS FROM(unnest(ARRAY[1,NULL,3]),generate_series(10,11)) "
+             "WITH ORDINALITY AS r(a,b,n)",
+             [["1", "10", "1"], [None, "11", "2"], ["3", None, "3"]], ["a", "b", "n"], [23, 23, 20]),
+            ("SELECT * FROM ROWS FROM(generate_series(1,0),generate_series(NULL::integer,4)) "
+             "WITH ORDINALITY AS r(a,b,n)", [], ["a", "b", "n"], [23, 23, 20]),
+            ("SELECT * FROM ROWS FROM(unnest(ARRAY['a','b']),generate_series(1,0),upper('hi')) AS r(word,n,tag)",
+             [["a", None, "HI"], ["b", None, None]], ["word", "n", "tag"], [25, 23, 25]),
+            ("SELECT * FROM ROWS FROM(upper('a'),abs(-2)) AS r(a,b)", [["A", "2"]], ["a", "b"], [25, 23]),
+            ("SELECT * FROM ROWS FROM(unnest(ARRAY[1,2],ARRAY[3::bigint])) AS t(a,b)",
+             [["1", "3"], ["2", None]], ["a", "b"], [23, 20]),
+            ("SELECT r.* FROM ROWS FROM(generate_series(1,2),generate_series(10,12)) AS r(a)",
+             [["1", "10"], ["2", "11"], [None, "12"]], ["a", "generate_series"], [23, 23]),
+            ("SELECT r FROM ROWS FROM(generate_series(1,2)) AS r(a)", [["1"], ["2"]], ["r"], [23]),
+            ("SELECT * FROM ROWS FROM(generate_series(1,2)) WITH ORDINALITY AS r",
+             [["1", "1"], ["2", "2"]], ["r", "ordinality"], [23, 20]),
+            ("SELECT FROM ROWS FROM(generate_series(1,2),generate_series(1,3))", [[], [], []], [], []),
+            ("WITH q AS (SELECT * FROM ROWS FROM(generate_series(1,2),generate_series(10,12)) t(a,b)) "
+             "SELECT count(a),count(b) FROM q", [["2", "3"]], ["count", "count"], [20, 20]),
+            ("SELECT x.i,t.b FROM generate_series(1,3) x(i) "
+             "LEFT JOIN ROWS FROM(generate_series(1,2),generate_series(10,10)) t(a,b) ON t.a=x.i ORDER BY x.i",
+             [["1", "10"], ["2", None], ["3", None]], ["i", "b"], [23, 23]),
+            ("SELECT * FROM ROWS FROM(generate_series(1,2,0),generate_series(10,12)) LIMIT 0",
+             [], ["generate_series", "generate_series"], [23, 23]),
         ]
         for sql, rows, names, oids in from_cases:
             check(sql, rows, oids, names=names, kinds=b"T"+b"D"*len(rows)+b"CZ")
@@ -125,14 +152,37 @@ def main():
         check(once, [["1"], ["2"]], [20], names=["v"], execute=True, kinds=b"12TDDCZ")
         check("SELECT nextval('series_argument_seq')", [["2"]], [20], kinds=b"TDCZ")
         check("DROP SEQUENCE series_argument_seq")
+        check("CREATE SEQUENCE rows_from_argument_seq START WITH 10")
+        zip_once = ("SELECT * FROM ROWS FROM(nextval('rows_from_argument_seq'), "
+                    "generate_series(nextval('rows_from_argument_seq'),15::bigint)) "
+                    "WITH ORDINALITY AS r(n,i,k) LIMIT 2")
+        check(zip_once, [], [20, 20, 20], names=["n", "i", "k"], describe=True, kinds=b"1tTZ")
+        check(zip_once, [["10", "11", "1"], [None, "12", "2"]], [20, 20, 20],
+              names=["n", "i", "k"], execute=True, kinds=b"12TDDCZ")
+        check("SELECT nextval('rows_from_argument_seq')", [["12"]], [20], kinds=b"TDCZ")
+        check("DROP SEQUENCE rows_from_argument_seq")
         if not reference:
             check("SET statement_timeout TO '2s'")
             check("SELECT i FROM generate_series(1,9223372036854775807) AS g(i) LIMIT 1",
                   [["1"]], [20], names=["i"], kinds=b"TDCZ")
+            check("SELECT * FROM ROWS FROM(generate_series(1,9223372036854775807),unnest(ARRAY[1,2])) "
+                  "AS g(i,v) LIMIT 3", [["1", "1"], ["2", "2"], ["3", None]],
+                  [20, 23], names=["i", "v"], kinds=b"TDDDCZ")
             check("RESET statement_timeout")
         check("SELECT * FROM generate_series(1,3,0)", state="22023", kinds=b"TEZ")
         check("SELECT * FROM generate_series(1,2) g(i,j)", state="42P10", kinds=b"EZ")
         check("SELECT * FROM generate_series(1,(2)", state="42601", kinds=b"EZ")
+        check("SELECT * FROM ROWS FROM()", state="42601", kinds=b"EZ")
+        check("SELECT * FROM ROWS FROM(generate_series(1,2),)", state="42601", kinds=b"EZ")
+        check("SELECT generate_series FROM ROWS FROM(generate_series(1,2),generate_series(10,12))",
+              state="42702", kinds=b"EZ")
+        check("SELECT * FROM ROWS FROM(generate_series(1,2),generate_series(10,12,0)) LIMIT 1",
+              state="22023", kinds=b"TEZ")
+        check("SELECT * FROM ROWS FROM(no_such_function(1))", state="42883", kinds=b"EZ")
+        for sql in ("SELECT * FROM ROWS FROM(sum(1))", "SELECT * FROM ROWS FROM(generate_series(sum(1),3))"):
+            check(sql, state="42803", kinds=b"EZ")
+            check(sql, state="42803", execute=True, kinds=b"EZ")
+        check("SELECT * FROM ROWS FROM(sum('text'::text))", state="42883", kinds=b"EZ")
         errors=[
             ("SELECT generate_series(1::SMALLINT,2::SMALLINT)","42725"),
             ("SELECT generate_series(1,2,0)","22023"),

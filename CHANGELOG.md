@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>两组结果可以并排读，短的一组补空值 · 2026-11-23</summary>
+
+例如，把 3 个编号和 2 个名字并排查询，结果会有 3 行，最后一行的名字为空。
+
+[用法](docs/MANUAL.md#并排读取多组函数结果) · [测试报告](docs/test-report.md#rows-from-20261123) · [性能报告](docs/performance-report-2026-10-30.md#rows-from-cost-20261123)
+
+</details>
+
+<details>
 <summary>只取几个数字时，可以按需生成 · 2026-11-23</summary>
 
 例如，用 SQL 生成从 1 到 10 万的数字，只取开头的 3 个。数据库生成这 3 个就能返回结果。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>查询可以返回没有列的结果行 · 2026-11-23</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-23 · 查询可以返回没有列的结果行
 
 例如，按店铺筛选订单，不选择订单号或金额等列。找到 3 笔订单时，查询会返回 3 行空白记录。
 
 [用法](docs/MANUAL.md#基础查询) · [测试报告](docs/test-report.md#zero-width-read-20261123) · [性能报告](docs/performance-report-2026-10-30.md#zero-width-read-cost-20261123)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-23 · 部分查询找到足够的记录后就会停下
 

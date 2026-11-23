@@ -2119,7 +2119,8 @@ public:
         NextInstrument instrument(this);
         checkForQueryInterrupt();
         if(ended_)return false;
-        auto context=execution_.context(outer_);
+        const bool tableSource = select_->functionSourceProducer;
+        const auto context = tableSource && initialized_ ? RowContext{} : execution_.context(outer_);
         if(!qualified_) {
             qualified_=true;
             if(select_->whereClause) {
@@ -2150,12 +2151,20 @@ public:
                     if(!providerCursors_[i])throw DbError("XX000","set-returning receiver lost its cursor");
                 }
                 ExprValue cell;
-                if(providerCursors_[i]->next(cell)) {
+                if(providerCursors_[i] && providerCursors_[i]->next(cell)) {
                     if(ExprHelper::canonicalResultTypeName(cell.typeName)!=
                        ExprHelper::canonicalResultTypeName(call->setReturning->elementType))
                         throw DbError("XX000","set-returning cursor changed its declared element type");
                     hasSetRow=true;values_.push_back(std::move(cell));
-                } else values_.emplace_back(call->setReturning->elementType,"",true);
+                } else {
+                    providerCursors_[i].reset();
+                    values_.emplace_back(call->setReturning->elementType,"",true);
+                }
+            } else if (tableSource && initialized_) {
+                // A scalar FROM function contributes exactly one row, even
+                // when its result is NULL, then pads a longer member's rows.
+                const auto& output = query_->statementOutputs.at(select_);
+                values_.emplace_back(output[i].type, "", true);
             } else {
                 // Ordinary targets are evaluated on each ProjectSet attempt,
                 // including its terminal attempt. WHERE false/LIMIT 0 never
@@ -2164,12 +2173,15 @@ public:
                 auto value=execution_.evaluate(select_->selectList[i].expr.get(),context);
                 if(value.typeName=="unknown")value.typeName="text";
                 values_.push_back(std::move(value));
+                hasSetRow = hasSetRow || tableSource;
             }
         }
         initialized_=true;
         if(!hasSetRow){ended_=true;values_.clear();return false;}
         ++position_;
-        for(const auto& value:values_)display+=value.isNull?"NULL ":value.value+" ";
+        // The FROM receiver reads owning typed cells through its cursor.
+        if (!tableSource)
+            for (const auto& value : values_) display += value.isNull ? "NULL " : value.value + " ";
         instrument.emitted=true;return true;
     }
     bool supportsStructuredRows() const override {return true;}
@@ -2193,7 +2205,9 @@ public:
         }
         if(failure)std::rethrow_exception(failure);
     }
-    std::string preparedPlanNodeName() const override {return "ProjectSet";}
+    std::string preparedPlanNodeName() const override {
+        return select_->functionSourceProducer ? "Rows From" : "ProjectSet";
+    }
     std::vector<Operator*> preparedPlanChildren() const override {
         std::vector<Operator*> plans;
         for(size_t i=0;i<calls_.size();++i) {
@@ -6618,7 +6632,7 @@ OpPtr QueryPlanner::buildPreparedSetReturningPlan(StorageEngine* engine,const st
     bool returning=false;
     for(const auto& target:select->selectList)
         if(const auto* call=dynamic_cast<const FunctionCallExpr*>(target.expr.get());call && call->setReturning)returning=true;
-    if(!returning)return {};
+    if(!returning && !select->functionSourceProducer)return {};
     if(select->command!=SqlCommand::Select || select->fromClause || select->setOp!=SetOp::None ||
         select->setOpLhs || select->setOpRhs || !select->groupBy.empty() || !select->groupByElems.empty() ||
         select->having || select->distinct || !select->distinctOn.empty() || !select->orderBy.empty() ||
