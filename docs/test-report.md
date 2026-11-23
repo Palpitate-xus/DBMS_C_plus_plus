@@ -2,6 +2,15 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="ordinary-stored-predicate-20261123"></a>
+## 2026-11-23 · 准备比较条件后再逐行筛选
+
+新增 29 条 SQL。旧版和新版共各 58 条普通和扩展协议响应，与 PostgreSQL 18.6 一致。覆盖多字节文字、空字符串、NULL、反向比较、`smallint` 与 `bigint` 边界、分页、计数、保存点和填充空格的 `char`。此前 344 条复合主键响应和 20 条独立的二进制参数记录仍匹配。另有 52 条旧筛选响应与本项目基线完全一致，其中先前两条扩展协议报错的消息发送顺序仍与 PostgreSQL 有别，错误码匹配。[新增 SQL 用例](../tests/compat/cases/ordinary_stored_predicate.sql) · [旧筛选用例](../tests/compat/cases/ordinary_stored_literal_filter.sql)
+
+七行普通表测试中，`EXPLAIN ANALYZE` 确认表扫描交给提前筛选的七行中，有三行进入后续执行。命名语句用二进制参数重绑并按字节核对结果。另验证同名自定义函数由自己的实现执行。复合主键回归继续覆盖批次续读、并发更新、同物理键冲突、稀疏分页和成本限制。八个原生测试和十三个客户端回归通过。[协议回归](../tests/stored_literal_filter_protocol_e2e_test.py) · [分页回归](../tests/composite_primary_range_protocol_e2e_test.py)
+
+从 `0xC552`、`0xC555` 各完成 66 步重建与恢复。用 8,355 行的现有 `0xC556` 目录完成 51 步。提交前退出并重启后，普通表筛选计数为 129，提交后为 128。保存点回滚、索引分页结果和行访问统计也核对一致。三个恢复记录 SHA-256 依次为 `90293c67cd82332d0ef05d6e349fe74349de11f84f53026c7c6cd9ac7d3a437d`、`b769047f06c616695050bd3f9e297f0e86e620559a7934a0e19d6844f16e0cc0` 和 `f822a200459451e8283085d6582b5e1dc79d6d9f5bdf6213004ba646e6b5d92f`。CMake C++17 `-O2` 程序 SHA-256 为 `995905f172ec74c3689d89c04234cf8788233e0454f265df32e4a2103b001631`。[性能对照](performance-report-2026-10-30.md#ordinary-stored-predicate-cost-20261123)
+
 <a id="composite-primary-refill-20261123"></a>
 ## 2026-11-23 · 分批找够一页订单
 

@@ -3,12 +3,20 @@
 #include <cctype>
 #include <cstdint>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
 namespace dbms {
 
 enum class BuiltinEncoding { Utf8, Latin1, SqlAscii };
+
+inline size_t utf8CharCount(std::string_view text) {
+    size_t count = 0;
+    for (unsigned char byte : text)
+        if ((byte & 0xc0U) != 0x80U) ++count;
+    return count;
+}
 
 inline bool parseBuiltinEncoding(std::string name, BuiltinEncoding& encoding) {
     std::string normalized;

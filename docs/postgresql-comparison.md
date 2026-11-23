@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-23 · 在读取表行时应用已准备的比较条件
+
+PostgreSQL 在执行器初始化时把表达式整理成一组步骤，SQLite 把查询生成字节码后执行。DuckDB 的算子处理固定大小的列向量，并有专门的常量向量表示。[PostgreSQL 执行器](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/executor/README) · [SQLite 字节码](https://www.sqlite.org/opcode.html) · [DuckDB 执行格式](https://duckdb.org/docs/1.5/internals/vector)
+
+本项目把受支持的文字长度、文字和整数比较准备成直接检查，普通表和复合主键分页共用。普通表在取回可见行后筛选，减少送去组装和排序的行。通用表达式求值、列向量处理和任意筛选下推仍有差距。[验证](test-report.md#ordinary-stored-predicate-20261123) · [性能](performance-report-2026-10-30.md#ordinary-stored-predicate-cost-20261123)
+
 ## 2026-11-23 · 后续索引批次与数据页复用
 
 PostgreSQL 的 B-tree 扫描可继续访问下一页，其成本模型考虑索引顺序与表中物理顺序的相关性。SQLite 使用游标定位和逐步移动。DuckDB 可使用区段的最小值和最大值排除不相关行组。[PostgreSQL 扫描](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/access/nbtree/nbtsearch.c) · [PostgreSQL 成本计算](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/optimizer/path/costsize.c) · [SQLite 游标](https://www.sqlite.org/opcode.html#btree) · [DuckDB 索引](https://duckdb.org/docs/1.5/guides/performance/indexing)

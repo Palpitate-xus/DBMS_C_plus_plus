@@ -1100,6 +1100,8 @@ ORDER BY order_number DESC LIMIT 5 OFFSET 2;
 
 如果订单表还有 `note` 备注列，像 `AND length(note) > 2` 这样的筛选可以在按订单号读取时完成。前一批订单不够凑成一页时，数据库可以从刚读过的位置继续找。找到一页或读到这家店的最后一笔后便结束。当订单分散在很多地方、继续查找的成本过高，或者查询使用旧事务快照时，数据库仍可扫描表并排序。[筛选和分页验证](test-report.md#composite-primary-refill-20261123)
 
+扫描普通表时，`length(note) > 2 AND order_number > 0` 这类条件可以在组装查询结果前检查。比如 `SELECT count(*)` 仍会查看所有对当前事务可见的记录，只有符合条件的行才进入计数。[筛选验证](test-report.md#ordinary-stored-predicate-20261123)
+
 ### 删除表
 
 ```sql

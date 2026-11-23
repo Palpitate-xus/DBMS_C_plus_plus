@@ -1277,7 +1277,6 @@ static std::string unquote(const std::string& s) {
 
 
 static std::string trimStr(const std::string& s);
-static size_t utf8CharCount(const std::string& s);
 static size_t utf8ByteAt(const std::string& s, size_t charIdx);
 static bool isBlankPaddedCharacterType(const std::string& typeName);
 static size_t logicalCharacterByteLength(const ExprValue& value);
@@ -8350,13 +8349,6 @@ static uint32_t byteaCrc(const std::string& bytes, uint32_t polynomial) {
     return crc ^ 0xffffffffU;
 }
 
-// UTF-8 aware helpers: total characters and char-index -> byte offset.
-static size_t utf8CharCount(const std::string& s) {
-    size_t n = 0;
-    for (unsigned char c : s) if ((c & 0xC0) != 0x80) ++n;
-    return n;
-}
-
 static bool isBlankPaddedCharacterType(const std::string& typeName) {
     const std::string type = toLower(typeName);
     return type == "char" || type == "character" || type == "bpchar" ||
@@ -11055,7 +11047,7 @@ void ExprEvaluator::registerStatelessBuiltins() {
         } else if (byteLength) {
             length = a[0].value.size();
         } else {
-            length = utf8CharCount(a[0].value.substr(
+            length = utf8CharCount(std::string_view(a[0].value).substr(
                 0, logicalCharacterByteLength(a[0])));
         }
         return ExprValue("integer", std::to_string(length), false);

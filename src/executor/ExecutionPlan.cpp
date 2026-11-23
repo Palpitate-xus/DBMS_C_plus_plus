@@ -34,6 +34,7 @@
 #include "process/RuntimeStats.h"
 #include "utils/permissions.h"
 #include "types/numeric.h"
+#include "types/encoding_conversion.h"
 #include "expression/expr_helper.h"
 #include "expression/ExprEvaluator.h"
 #include "expression/prepared_query_execution.h"
@@ -2497,18 +2498,89 @@ struct CompositeSuffixBound {
     bool inclusive;
 };
 
-struct CompositePageFilter {
-    std::vector<const Expr*> clauses;
-    std::vector<const ColumnRefExpr*> columns;
+enum class StoredComparison { Equal, NotEqual, Less, LessEqual, Greater, GreaterEqual };
+
+struct StoredPredicate {
+    enum class Input { IsNull, IsNotNull, Text, Integer, TextLength };
+    size_t column;
+    std::string name, type;
+    Input input;
+    StoredComparison comparison = StoredComparison::Equal;
+    std::variant<std::string, int64_t> constant;
 };
+
+using StoredPredicates = std::vector<StoredPredicate>;
+
+static bool supportsStoredHeapPredicate(const TableSchema& schema) {
+    return schema.formatVersion == DATA_FILE_FORMAT_VERSION &&
+        schema.partitionType == TableSchema::PartitionType::None &&
+        std::all_of(schema.cols.begin(), schema.cols.end(), [](const Column& column) {
+            return !compositeEqualityType(column).empty();
+        });
+}
+
+static bool storedPredicateSchemaMatches(const StoredPredicates& predicates, const TableSchema& schema) {
+    return std::all_of(predicates.begin(), predicates.end(), [&](const auto& predicate) {
+        if (predicate.column >= schema.len()) return false;
+        const auto& column = schema.cols[predicate.column];
+        return column.dataName == predicate.name && column.dataType == predicate.type &&
+            !compositeEqualityType(column).empty();
+    });
+}
+
+static bool matchesStoredComparison(StoredComparison comparison, int order) {
+    switch (comparison) {
+        case StoredComparison::Equal: return order == 0;
+        case StoredComparison::NotEqual: return order != 0;
+        case StoredComparison::Less: return order < 0;
+        case StoredComparison::LessEqual: return order <= 0;
+        case StoredComparison::Greater: return order > 0;
+        case StoredComparison::GreaterEqual: return order >= 0;
+    }
+    return false;
+}
+
+static std::optional<bool> storedPredicatesMatch(const StoredPredicates& predicates,
+        StorageEngine& engine, const std::string& database, const TableSchema& schema,
+        const std::string& row, const std::vector<bool>& nulls) {
+    using Input = StoredPredicate::Input;
+    detail::ScopedStoredRowNullBitmap bitmap(schema, nulls);
+    for (const auto& predicate : predicates) {
+        const bool isNull = nulls[predicate.column];
+        if (predicate.input == Input::IsNull || predicate.input == Input::IsNotNull) {
+            if (isNull != (predicate.input == Input::IsNull)) return false;
+            continue;
+        }
+        if (isNull) return false;
+        const auto value = engine.extractColumnValue(row, schema, predicate.column, database, false);
+        if (predicate.input == Input::Text) {
+            if (!matchesStoredComparison(predicate.comparison, value.compare(std::get<std::string>(predicate.constant))))
+                return false;
+            continue;
+        }
+        int64_t actual = 0;
+        if (predicate.input == Input::TextLength) {
+            actual = static_cast<int64_t>(utf8CharCount(value));
+        } else {
+            const auto* end = value.data() + value.size();
+            const auto parsed = std::from_chars(value.data(), end, actual);
+            if (parsed.ec != std::errc{} || parsed.ptr != end) return {};
+        }
+        const auto expected = std::get<int64_t>(predicate.constant);
+        if (!matchesStoredComparison(predicate.comparison, (actual > expected) - (actual < expected))) return false;
+    }
+    return true;
+}
 
 struct CompositeSuffixOrder {
     bool ascending;
     std::optional<size_t> fetchCount;
-    CompositePageFilter filter;
+    StoredPredicates filter;
 };
 
 static bool compositeOperandType(const std::string&, const std::string&);
+static OpPtr prefilterPreparedHeap(StorageEngine&, const std::string&, const PreparedQuery&,
+                                   const SelectStmt&, const TableSchema&, OpPtr&);
 
 // Own one heap page while qualifying an ordered batch. The page lock and
 // buffer pin are released before any SQL expression or TOAST lookup runs.
@@ -2582,6 +2654,7 @@ class CompositePrimaryKeyScanOp final : public Operator {
     std::vector<CompositeSuffixBound> bounds_;
     std::optional<CompositeSuffixOrder> order_;
     std::shared_ptr<PreparedQuery> query_;
+    const SelectStmt* fallbackSelect_;
     OpPtr fallback_;
     TableSchema schema_;
     std::map<std::string, std::string> values_;
@@ -2620,17 +2693,6 @@ class CompositePrimaryKeyScanOp final : public Operator {
             values_.emplace(input.name, *value);
         }
         return true;
-    }
-
-    bool canEvaluatePageFilter() const {
-        return std::all_of(order_->filter.columns.begin(), order_->filter.columns.end(), [&](const auto* input) {
-            const auto& binding = *input->binding;
-            if (binding.columnOrdinal >= schema_.len()) return false;
-            const auto& column = schema_.cols[binding.columnOrdinal];
-            return column.dataName == input->column && !compositeEqualityType(column).empty() &&
-                ExprHelper::canonicalResultTypeName(column.dataType) ==
-                    ExprHelper::canonicalResultTypeName(binding.declaredType);
-        });
     }
 
     bool matchesCandidate(size_t candidate, const std::string& row,
@@ -2685,25 +2747,6 @@ class CompositePrimaryKeyScanOp final : public Operator {
         return status == BPTree::LeafEntriesResult::Complete;
     }
 
-    bool qualifiesPageFilter(ExprEvaluator& evaluator, RowContext& context, const std::string& row) {
-        const auto& filter = order_->filter;
-        for (const auto* input : filter.columns) {
-            const auto& binding = *input->binding;
-            bool isNull = false;
-            auto actual = engine_->extractColumnValue(row, schema_, binding.columnOrdinal,
-                                                       database_, false, &isNull);
-            auto type = ExprHelper::canonicalResultTypeName(binding.declaredType);
-            ExprValue value(std::move(type), std::move(actual), isNull);
-            const auto& column = schema_.cols[binding.columnOrdinal];
-            value.collation = column.resolvedCollation.empty() ? column.collation : column.resolvedCollation;
-            context.setBoundColumn(binding.sourceOrdinal, binding.columnOrdinal, std::move(value));
-        }
-        return std::all_of(filter.clauses.begin(), filter.clauses.end(), [&](const auto* clause) {
-            const auto value = evaluator.eval(clause, context);
-            return !value.isNull && value.asBool();
-        });
-    }
-
     bool bufferPrefix(BPTree& index, std::string first, std::string last, size_t count,
                       size_t batch, size_t maxNodes, double heapCost, uint64_t fence) {
         struct RestoreNullBinding {
@@ -2715,11 +2758,8 @@ class CompositePrimaryKeyScanOp final : public Operator {
         // short of the required number of real matches.
         size_t budget = sortWorkMemBytes();
         const size_t rowSize = sizeof(decltype(prefixRows_)::value_type);
-        std::optional<ExprEvaluator> evaluator;
         std::optional<CompositeHeapPage> heap;
-        if (!order_->filter.clauses.empty()) {
-            evaluator.emplace();
-            evaluator->setCurrentDB(database_);
+        if (!order_->filter.empty()) {
             auto* allocator = engine_->getPageAllocator(database_, table_);
             const auto* view = engine_->getCurrentReadView();
             if (!allocator || !view || schema_.formatVersion != DATA_FILE_FORMAT_VERSION ||
@@ -2730,13 +2770,12 @@ class CompositePrimaryKeyScanOp final : public Operator {
         using Mode = BPTree::CompositeRangeRead;
         const auto mode = order_->ascending ? Mode::FirstAscending : Mode::FirstDescending;
         const auto& costs = QueryPlanner::costModel();
-        const double tupleCost = costs.cpuIndexTupleCost + costs.cpuOperatorCost * order_->filter.clauses.size();
+        const double tupleCost = costs.cpuIndexTupleCost + costs.cpuOperatorCost * order_->filter.size();
         constexpr size_t maxProbes = 8192, maxBatch = 512;
         std::vector<int64_t> overlap;
         int64_t lastSuffix = 0;
         uint32_t lastHeapPage = 0;
         double heapPageCost = 0;
-        RowContext context;
         std::vector<bool> nulls;
         for (;;) {
             if (!maxNodes || engine_->indexReadSnapshotFence(database_) != fence) return false;
@@ -2779,8 +2818,10 @@ class CompositePrimaryKeyScanOp final : public Operator {
                     ++fetched_;
                     if (!heap->read(page, slot, row, nulls)) continue;
                     detail::ScopedStoredRowNullBitmap bitmap(schema_, nulls);
-                    if (!matchesCandidate(candidate, row, fence) || !qualifiesPageFilter(*evaluator, context, row))
-                        continue;
+                    if (!matchesCandidate(candidate, row, fence)) continue;
+                    const auto qualifies = storedPredicatesMatch(order_->filter, *engine_, database_, schema_, row, nulls);
+                    if (!qualifies) return false;
+                    if (!*qualifies) continue;
                 } else if (!fetchCandidate(candidate, row, fence)) {
                     if (hasError()) return false;
                     continue;
@@ -2790,7 +2831,7 @@ class CompositePrimaryKeyScanOp final : public Operator {
                 prefixRows_.emplace_back(rids_[candidate], std::move(row));
             }
             if (prefixRows_.size() == count || rids_.size() < requested) break;
-            if (!evaluator || fetched_ >= maxProbes) return false;
+            if (!heap || fetched_ >= maxProbes) return false;
 
             // Retain the consumed entries at the inclusive boundary. Equal
             // stored keys can have different row positions across leaves.
@@ -2843,11 +2884,11 @@ class CompositePrimaryKeyScanOp final : public Operator {
         const auto indexCost = [](size_t fetches) {
             return QueryPlanner::costScan("index_scan", static_cast<double>(fetches), 0);
         };
-        if (order_ && !canEvaluatePageFilter()) return false;
+        if (order_ && !storedPredicateSchemaMatches(order_->filter, schema_)) return false;
         const auto count = order_ ? order_->fetchCount : std::nullopt;
         const bool prefix = count && *count <= maxRows && indexCost(*count) < heapCost;
         size_t candidates = prefix ? *count : maxRows;
-        if (prefix && !order_->filter.clauses.empty()) {
+        if (prefix && !order_->filter.empty()) {
             // Estimate only the maximum speculative I/O. Stop fetching as
             // soon as enough rows pass both the key and the SQL filter.
             candidates = std::min(maxRows, std::max<size_t>(32, *count * 4));
@@ -2882,11 +2923,12 @@ public:
             const TableSchema& schema, std::vector<CompositeEqualityInput> inputs,
             OpPtr fallback, std::shared_ptr<PreparedQuery> query = {},
             std::optional<size_t> suffix = {}, std::vector<CompositeSuffixBound> bounds = {},
-            std::optional<CompositeSuffixOrder> order = {})
+            std::optional<CompositeSuffixOrder> order = {}, const SelectStmt* fallbackSelect = nullptr)
         : engine_(engine), database_(std::move(database)), table_(schema.tablename),
           relationId_(schema.physicalRelationId), inputs_(std::move(inputs)),
           suffix_(suffix), bounds_(std::move(bounds)),
-          order_(order), query_(std::move(query)), fallback_(std::move(fallback)) {}
+          order_(std::move(order)), query_(std::move(query)), fallbackSelect_(fallbackSelect),
+          fallback_(std::move(fallback)) {}
 
     ~CompositePrimaryKeyScanOp() override {
         if (locked_) try { close(); } catch (...) {}
@@ -2934,6 +2976,10 @@ public:
             rids_.clear();
             suffixValues_.clear();
             prefixRows_.clear();
+        }
+        if (fallbackSelect_) {
+            auto filtered = prefilterPreparedHeap(*engine_, database_, *query_, *fallbackSelect_, schema_, fallback_);
+            if (filtered) fallback_ = std::move(filtered);
         }
         fallbackActive_ = true;
         return fallback_->open() || propagateChildError(fallback_.get(), "primary key heap scan failed");
@@ -3406,17 +3452,15 @@ static std::optional<QueryColumnBinding> preparedDirectOrderColumn(
 static std::optional<QueryColumnBinding> integerPageOrder(
     const PreparedQuery& query, const SelectStmt& select);
 
-// Only total, row-local predicates can be checked speculatively and skipped
-// after a full page. Keep actual SQL expression evaluation and the original
-// WHERE above the scan, including on the path that falls back to the heap.
-static std::optional<CompositePageFilter> bindCompositePageFilter(StorageEngine& engine,
+// Only total, row-local predicates may reject a row before materialization.
+// Keep the ordinary WHERE above the source for expressions and fallback.
+static std::optional<StoredPredicates> bindStoredPredicates(StorageEngine& engine,
         const std::string& database, const TableSchema& schema, size_t source,
         const std::vector<const Expr*>& residual) {
-    CompositePageFilter filter;
-    filter.clauses = residual;
+    using Input = StoredPredicate::Input;
+    StoredPredicates filter;
     if (residual.empty()) return filter;
-    ExprEvaluator evaluator;
-    evaluator.setCurrentDB(database);
+    std::optional<ExprEvaluator> evaluator;
     const auto localColumn = [&](const Expr* expression) -> const ColumnRefExpr* {
         const auto* column = dynamic_cast<const ColumnRefExpr*>(expression);
         if (!column || column->preparedSubquery || column->generatedRead || !column->binding) return nullptr;
@@ -3431,16 +3475,17 @@ static std::optional<CompositePageFilter> bindCompositePageFilter(StorageEngine&
                 ExprHelper::canonicalResultTypeName(binding.declaredType)) return nullptr;
         return column;
     };
-    const auto addColumn = [&](const ColumnRefExpr* column) {
-        if (std::none_of(filter.columns.begin(), filter.columns.end(), [&](const auto* existing) {
-                return existing->binding->columnOrdinal == column->binding->columnOrdinal;
-            })) filter.columns.push_back(column);
+    const auto predicateFor = [&](const ColumnRefExpr& column, Input input) {
+        const auto ordinal = column.binding->columnOrdinal;
+        return StoredPredicate{ordinal, column.column, schema.cols[ordinal].dataType, input,
+            StoredComparison::Equal, {}};
     };
-    const auto readOperand = [&](const Expr* operand) -> std::pair<const ColumnRefExpr*, std::string> {
+    const auto readOperand = [&](const Expr* operand) -> std::pair<const ColumnRefExpr*, Input> {
         if (!operand || operand->preparedSubquery) return {};
         if (const auto* column = localColumn(compositeTextEnvelope(operand))) {
             const auto type = compositeEqualityType(schema.cols[column->binding->columnOrdinal]);
-            if (type == "text" || operand == column) return {column, type};
+            if (type == "text") return {column, Input::Text};
+            if (operand == column) return {column, Input::Integer};
         }
         const auto* call = dynamic_cast<const FunctionCallExpr*>(operand);
         if (!call || call->args.size() != 1 || call->identitySequenceOid ||
@@ -3448,9 +3493,24 @@ static std::optional<CompositePageFilter> bindCompositePageFilter(StorageEngine&
         CatalogManager::QualifiedName name;
         if (!CatalogManager::parseQualifiedName(call->funcName, name, true) || name.name != "length") return {};
         const auto* column = localColumn(compositeTextEnvelope(call->args.front().get()));
-        if (!column || compositeEqualityType(schema.cols[column->binding->columnOrdinal]) != "text" ||
-            evaluator.strictStringResultType(call, &engine) != "integer") return {};
-        return {column, "integer"};
+        if (!column || compositeEqualityType(schema.cols[column->binding->columnOrdinal]) != "text") return {};
+        if (!evaluator) {
+            evaluator.emplace();
+            evaluator->setCurrentDB(database);
+        }
+        if (evaluator->strictStringResultType(call, &engine) != "integer") return {};
+        return {column, Input::TextLength};
+    };
+    const auto integerWidth = [](const std::string& declaredType) {
+        const auto type = ExprHelper::canonicalResultTypeName(declaredType);
+        if (type == "smallint") return 16;
+        if (type == "integer") return 32;
+        return 64;
+    };
+    static const std::map<std::string, StoredComparison> comparisons{
+        {"=", StoredComparison::Equal}, {"<>", StoredComparison::NotEqual}, {"!=", StoredComparison::NotEqual},
+        {"<", StoredComparison::Less}, {"<=", StoredComparison::LessEqual},
+        {">", StoredComparison::Greater}, {">=", StoredComparison::GreaterEqual},
     };
     for (const auto* clause : residual) {
         if (!clause || clause->preparedSubquery) return {};
@@ -3458,27 +3518,37 @@ static std::optional<CompositePageFilter> bindCompositePageFilter(StorageEngine&
             if (unary->op != "IS NULL" && unary->op != "IS NOT NULL") return {};
             const auto* column = localColumn(unary->operand.get());
             if (!column) return {};
-            addColumn(column);
+            filter.push_back(predicateFor(*column, unary->op == "IS NULL" ? Input::IsNull : Input::IsNotNull));
             continue;
         }
         const auto* binary = dynamic_cast<const BinaryOpExpr*>(clause);
         if (!binary || binary->rowComparison) return {};
         const auto& op = binary->op;
         const bool equality = op == "=" || op == "<>" || op == "!=";
-        if (!equality && op != "<" && op != "<=" && op != ">" && op != ">=") return {};
+        auto comparator = comparisons.find(op);
+        if (comparator == comparisons.end()) return {};
         if (binary->predicateCollation) {
             const auto& rule = *binary->predicateCollation;
             if (rule.indeterminate || rule.selected.usesSystemLocale ||
                 (!rule.selected.comparisonName.empty() && !collation::isBinary(rule.selected.comparisonName)))
                 return {};
         }
-        auto [column, type] = readOperand(binary->left.get());
+        auto [column, kind] = readOperand(binary->left.get());
+        const bool reversed = !column;
         const auto* literal = binary->right.get();
-        if (!column) {
-            std::tie(column, type) = readOperand(binary->right.get());
+        if (reversed) {
+            std::tie(column, kind) = readOperand(binary->right.get());
             literal = binary->left.get();
+            if (!equality) {
+                const std::string reverseOp = std::string(1, op[0] == '<' ? '>' : '<') + op.substr(1);
+                comparator = comparisons.find(reverseOp);
+            }
         }
-        if (!column || (type == "text" && !equality)) return {};
+        if (!column || (kind == Input::Text && !equality)) return {};
+        const std::string type = kind == Input::Text ? "text" : "bigint";
+        if (kind == Input::Text) literal = compositeTextEnvelope(literal);
+        const auto constant = compositeLiteralValue(literal, type);
+        if (!constant) return {};
         if (binary->comparison) {
             const auto& binding = *binary->comparison;
             if (!binding.strict || binding.enumTypeOid || binding.collationUsesSystemLocale ||
@@ -3486,12 +3556,123 @@ static std::optional<CompositePageFilter> bindCompositePageFilter(StorageEngine&
                 !compositeOperandType(type, binding.leftType) || !compositeOperandType(type, binding.rightType) ||
                 binding.identity != "builtin-comparison:" + op + "(" + binding.leftType + "," + binding.rightType + ")")
                 return {};
+            if (kind != Input::Text) {
+                const auto& fieldType = reversed ? binding.rightType : binding.leftType;
+                const auto& constantType = reversed ? binding.leftType : binding.rightType;
+                const int width = kind == Input::TextLength ? 32 : integerWidth(column->binding->declaredType);
+                if (integerWidth(fieldType) < width ||
+                    !compositeEqualityValue(ExprHelper::canonicalResultTypeName(constantType), *constant))
+                    return {};
+            }
         }
-        if (type == "text") literal = compositeTextEnvelope(literal);
-        if (!compositeLiteralValue(literal, type == "text" ? type : "bigint")) return {};
-        addColumn(column);
+        auto predicate = predicateFor(*column, kind);
+        predicate.comparison = comparator->second;
+        if (kind == Input::Text) {
+            predicate.constant = *constant;
+        } else {
+            int64_t number = 0;
+            const auto* end = constant->data() + constant->size();
+            const auto parsed = std::from_chars(constant->data(), end, number);
+            if (parsed.ec != std::errc{} || parsed.ptr != end) return {};
+            predicate.constant = number;
+        }
+        filter.push_back(std::move(predicate));
     }
     return filter;
+}
+
+class StoredFilterScanOp final : public Operator {
+    StorageEngine& engine_;
+    std::string database_, table_;
+    uint64_t relationId_;
+    StoredPredicates predicates_;
+    OpPtr scan_;
+    TableSchema schema_;
+    std::vector<bool> nulls_;
+    bool opened_ = false, active_ = false, rejected_ = false;
+    size_t initialMatches_ = 0;
+
+public:
+    StoredFilterScanOp(StorageEngine& engine, std::string database, const TableSchema& schema,
+                       StoredPredicates predicates, OpPtr scan)
+        : engine_(engine), database_(std::move(database)), table_(schema.tablename),
+          relationId_(schema.physicalRelationId), predicates_(std::move(predicates)), scan_(std::move(scan)) {}
+
+    ~StoredFilterScanOp() override { try { close(); } catch (...) {} }
+
+    bool open() override {
+        OpenInstrument instrument(this);
+        clearError();
+        opened_ = true;
+        active_ = rejected_ = false;
+        initialMatches_ = 0;
+        if (!scan_->open()) return propagateChildError(scan_.get(), "stored filter scan failed");
+        schema_ = engine_.getTableSchema(database_, table_);
+        active_ = schema_.physicalRelationId == relationId_ && supportsStoredHeapPredicate(schema_) &&
+            !engine_.rlsAppliesTo(database_, table_) && storedPredicateSchemaMatches(predicates_, schema_);
+        return true;
+    }
+
+    bool next(std::string& row) override {
+        NextInstrument instrument(this);
+        while (scan_->next(row)) {
+            if (active_) {
+                const auto matches = scan_->lastStoredNullBitmap(nulls_) && nulls_.size() == schema_.len()
+                    ? storedPredicatesMatch(predicates_, engine_, database_, schema_, row, nulls_)
+                    : std::nullopt;
+                if (matches && !*matches) {
+                    rejected_ = true;
+                    continue;
+                }
+                // Avoid doing the same work below and above the source when
+                // the first page of results shows no benefit from prefiltering.
+                if (!matches || (!rejected_ && ++initialMatches_ == 64)) active_ = false;
+            }
+            instrument.emitted = true;
+            return true;
+        }
+        if (scan_->hasError()) return propagateChildError(scan_.get(), "stored filter scan failed");
+        return false;
+    }
+
+    ScanOrigin scanOrigin() const override { return scan_->scanOrigin(); }
+    bool lastColumnIsNull(size_t ordinal) const override { return scan_->lastColumnIsNull(ordinal); }
+    bool lastStoredNullBitmap(std::vector<bool>& bitmap) const override { return scan_->lastStoredNullBitmap(bitmap); }
+    std::string preparedPlanNodeName() const override { return "StoredFilter"; }
+    std::vector<Operator*> preparedPlanChildren() const override { return {scan_.get()}; }
+    double estimatedRows() const override { return scan_->estimatedRows(); }
+    void close() override {
+        if (!opened_) return;
+        opened_ = false;
+        scan_->close();
+    }
+};
+
+static OpPtr prefilterPreparedHeap(StorageEngine& engine, const std::string& database,
+        const PreparedQuery& query, const SelectStmt& select, const TableSchema& schema, OpPtr& scan) {
+    if (!select.whereClause || !select.locking.empty() || !select.fromClause ||
+        select.fromClause->type != FromItem::Type::Table || !scan || typeid(*scan) != typeid(TableScanOp) ||
+        static_cast<const TableScanOp&>(*scan).tableName() != schema.tablename || !schema.physicalRelationId ||
+        !supportsStoredHeapPredicate(schema)) return {};
+    const auto range = std::find_if(query.sourceRanges.begin(), query.sourceRanges.end(), [&](const auto& candidate) {
+        return candidate.owner == &select && candidate.source == select.fromClause.get() && !candidate.mergedUsing;
+    });
+    if (range == query.sourceRanges.end()) return {};
+    std::vector<const Expr*> terms{select.whereClause.get()}, clauses;
+    while (!terms.empty()) {
+        const auto* term = terms.back();
+        terms.pop_back();
+        const auto* binary = dynamic_cast<const BinaryOpExpr*>(term);
+        if (!binary || binary->preparedSubquery || binary->op != "AND") {
+            clauses.push_back(term);
+            continue;
+        }
+        terms.push_back(binary->right.get());
+        terms.push_back(binary->left.get());
+    }
+    auto predicates = bindStoredPredicates(engine, database, schema, range->ordinal, clauses);
+    if (!predicates || predicates->empty()) return {};
+    return std::make_unique<StoredFilterScanOp>(engine, database, schema, std::move(*predicates), std::move(scan));
 }
 
 static OpPtr preparedCompositePrimarySource(StorageEngine* engine, const std::string& database,
@@ -3535,7 +3716,7 @@ static OpPtr preparedCompositePrimarySource(StorageEngine* engine, const std::st
             };
             if (integerPageOrder(*query, select) &&
                 std::all_of(select.selectList.begin(), select.selectList.end(), plainOutput)) {
-                if (auto filter = bindCompositePageFilter(*engine, database, schema, range->ordinal, residual)) {
+                if (auto filter = bindStoredPredicates(*engine, database, schema, range->ordinal, residual)) {
                     order->fetchCount = *select.limit + select.offset.value_or(0);
                     order->filter = std::move(*filter);
                 }
@@ -3543,7 +3724,7 @@ static OpPtr preparedCompositePrimarySource(StorageEngine* engine, const std::st
         }
     }
     return std::make_unique<CompositePrimaryKeyScanOp>(engine, database, schema,
-        std::move(ordered), std::move(source), query, suffix, std::move(bounds), order);
+        std::move(ordered), std::move(source), query, suffix, std::move(bounds), std::move(order), &select);
 }
 
 static OpPtr literalBrinTableSource(StorageEngine* engine, const std::string& database,
@@ -4518,6 +4699,10 @@ OpPtr makePreparedTableSource(StorageEngine* engine, const std::string& database
         return narrowed;
     if (auto narrowed = preparedCompositePrimarySource(engine, database, query, *select, schema, source, true))
         return narrowed;
+    const auto heap = [&] {
+        auto filtered = prefilterPreparedHeap(*engine, database, *query, *select, schema, source);
+        return filtered ? std::move(filtered) : std::move(source);
+    };
     const auto* physical = dynamic_cast<const TableScanOp*>(source.get());
     if (physical && typeid(*physical) == typeid(TableScanOp) && physical->tableName() == schema.tablename) {
         const auto key = integerPageOrder(*query, *select);
@@ -4531,7 +4716,7 @@ OpPtr makePreparedTableSource(StorageEngine* engine, const std::string& database
     const auto* equality = dynamic_cast<const BinaryOpExpr*>(select->whereClause.get());
     if (!physical || !select->fromClause || select->fromClause->type != FromItem::Type::Table ||
         !equality || equality->op != "=" || schema.partitionType != TableSchema::PartitionType::None)
-        return source;
+        return heap();
     const auto* column = dynamic_cast<const ColumnRefExpr*>(equality->left.get());
     const Expr* input = equality->right.get();
     if (!column) {
@@ -4541,7 +4726,7 @@ OpPtr makePreparedTableSource(StorageEngine* engine, const std::string& database
     const auto* parameter = dynamic_cast<const ParameterExpr*>(input);
     if (!column || !column->binding || column->binding->scopeDepth ||
         column->binding->mergedUsing || column->binding->columnOrdinal >= schema.len())
-        return source;
+        return heap();
     bool sameRange = false;
     for (const auto& range : query->sourceRanges)
         if (range.owner == select && range.source == select->fromClause.get() &&
@@ -4551,14 +4736,14 @@ OpPtr makePreparedTableSource(StorageEngine* engine, const std::string& database
     if (!sameRange || (type != "smallint" && type != "integer" && type != "bigint") ||
         key.isArray || key.isUnsigned || !key.domainName.empty() || key.generatedKind ||
         ExprHelper::canonicalResultTypeName(column->binding->declaredType) != type ||
-        !isSingleColumnPrimaryKey(schema, key.dataName)) return source;
+        !isSingleColumnPrimaryKey(schema, key.dataName)) return heap();
     if (equality->comparison && (equality->comparison->identity !=
         "builtin-comparison:=(" + type + "," + type + ")" || !equality->comparison->strict))
-        return source;
+        return heap();
     const auto table = physical->tableName();
     if (!parameter) {
         const auto value = constantIntegerIndexInput(input, type);
-        if (!value) return source;
+        if (!value) return heap();
         auto frozen = std::make_shared<PreparedQuery>();
         frozen->parameters.push_back(*value);
         return std::make_unique<PreparedParameterIndexScanOp>(engine, database, table,
@@ -4566,7 +4751,7 @@ OpPtr makePreparedTableSource(StorageEngine* engine, const std::string& database
     }
     if (parameter->origin != ParameterOrigin::StatementInput ||
         parameter->slot >= query->parameters.size() ||
-        ExprHelper::canonicalResultTypeName(parameter->declaredType) != type) return source;
+        ExprHelper::canonicalResultTypeName(parameter->declaredType) != type) return heap();
     return std::make_unique<PreparedParameterIndexScanOp>(engine, database, table,
         key.dataName, type, query, parameter->slot, std::move(source));
 }

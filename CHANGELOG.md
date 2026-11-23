@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>逐行查找时，按文字和数字筛选更快 · 2026-11-23</summary>
+
+比如查备注超过两个字、金额大于零的订单。数据库提前准备好比较条件，筛掉不合条件的记录后再组装结果。
+
+[测试报告](docs/test-report.md#ordinary-stored-predicate-20261123) · [性能报告](docs/performance-report-2026-10-30.md#ordinary-stored-predicate-cost-20261123)
+
+</details>
+
+<details>
 <summary>符合条件的订单很少时，翻页也能更快 · 2026-11-23</summary>
 
 比如查一家店里备注较长的订单，数据库可以继续按订单号在这家店里找，直到凑够一页。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>一家店有很多订单时，翻页也更快 · 2026-11-23</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-23 · 一家店有很多订单时，翻页也更快
 
 即使一家店有几千笔订单，按订单号查前几笔时，数据库也可以只读这一页需要的记录。
 
 [用法](docs/MANUAL.md#用多列一起区分记录) · [测试报告](docs/test-report.md#composite-primary-prefix-20261123) · [性能报告](docs/performance-report-2026-10-30.md#composite-primary-prefix-cost-20261123)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-23 · 查订单号最大的几笔订单更快
 

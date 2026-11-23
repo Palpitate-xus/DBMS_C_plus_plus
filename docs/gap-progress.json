@@ -2,6 +2,18 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-23 prepare stored scalar predicates for heap and ordered index reads",
+      "gap_ids": ["P0-01", "SQL-10", "OPT-01"],
+      "status": "partial",
+      "evidence": ["src/executor/ExecutionPlan.cpp", "src/expression/ExprEvaluator.cpp", "src/types/encoding_conversion.h", "docs/postgresql-comparison.md", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/compat/cases/ordinary_stored_predicate.sql", "tests/stored_literal_filter_protocol_e2e_test.py", "tests/composite_primary_range_protocol_e2e_test.py"],
+      "verification": [
+        "Bound comparisons and builtin text length run directly against stored fields with a physical NULL bitmap. Heap scans can discard rejected rows before the typed source builds result cells.",
+        "Matched 58 new PostgreSQL 18.6 SQL responses, retained composite-key and binary-parameter results, and verified table counts before and after cold recovery.",
+        "Arbitrary expression and policy evaluation, general predicate pushdown and vectorized execution remain open."
+      ]
+    },
+    {
       "issue": "2026-11-23 resume filtered composite primary key pages and reuse heap page reads",
       "gap_ids": ["IDX-03", "OPT-01"],
       "status": "partial",

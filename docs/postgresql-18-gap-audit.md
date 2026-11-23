@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-23 · 普通表和有序分页共用已准备的筛选条件
+
+受支持的空值、文本、文字长度和整数比较可以直接检查表中的值。普通表先按快照读行，再筛掉不符合条件的行。用多列主键分页时，共用同样的检查方式。通用表达式编译、参数化路径和复杂筛选下推仍待补齐。`P0-01`、`SQL-10` 和 `OPT-01` 保持部分实现。[测试](test-report.md#ordinary-stored-predicate-20261123) · [性能](performance-report-2026-10-30.md#ordinary-stored-predicate-cost-20261123)
+
 ## 2026-11-23 · 续读有序索引直到取够一页
 
 受支持的筛选不足一页时，按实际读页开销继续读取索引。保留批次交界处相同物理键的行位置，核对后跳过已检查的条目。超预算或快照变化时回到表扫描。跨组顺序、通用游标和读页成本估计仍待补齐。`IDX-03` 和 `OPT-01` 保持部分实现。[测试](test-report.md#composite-primary-refill-20261123) · [性能](performance-report-2026-10-30.md#composite-primary-refill-cost-20261123)
