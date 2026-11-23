@@ -1427,6 +1427,20 @@ LIMIT 2;
 
 若步长无法朝终点前进，或任一参数为 `NULL`，结果为零行。实际读取时，零步长会报错。支持整数、小数和时间序列。[测试报告](test-report.md#series-source-20261123) · [性能报告](performance-report-2026-10-30.md#series-source-cost-20261123)
 
+#### 把数组展开成行
+
+`unnest` 可以在 `FROM` 中展开一个或多个数组。每个数组各占一列，多维数组按原顺序展开。下面的查询返回 `1` 和 `3`，对应原来的第 1 行和第 3 行。第 3 行的 `label` 是 `NULL`。
+
+```sql
+SELECT id, label, position
+FROM unnest(ARRAY[1, 2, 3], ARRAY['甲', '乙'])
+WITH ORDINALITY AS items(id, label, position)
+WHERE position <> 2
+ORDER BY position;
+```
+
+`WITH ORDINALITY` 在筛选和排序前增加从 1 开始的行号。空数组或值为 `NULL` 的数组自身提供零行。并排展开时，行数以最长的数组为准。空字符串和文字 `'NULL'` 保留原值。可以用 `pg_catalog.unnest` 展开一个数组；直接并排展开多个数组时写 `unnest`。[测试报告](test-report.md#unnest-from-20261123) · [性能报告](performance-report-2026-10-30.md#unnest-from-cost-20261123)
+
 #### 并排读取多组函数结果
 
 `ROWS FROM` 按行把多个函数的结果放在一起。较短的一组用 `NULL` 补齐。下面的查询返回 `(1,'甲',1)`、`(2,'乙',2)` 和 `(3,NULL,3)`，最后一列是从 1 开始的行号。

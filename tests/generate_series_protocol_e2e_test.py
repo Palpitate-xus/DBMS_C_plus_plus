@@ -1,4 +1,4 @@
-"""Real generate_series overloads, typed descriptors and lazy query demand."""
+"""Typed function sources, generate_series overloads and lazy query demand."""
 import importlib.util
 import socket
 import struct
@@ -149,6 +149,26 @@ def main():
             ("SELECT v, p FROM ROWS FROM(unnest(ARRAY['leading space','',NULL]),generate_series(6,7)) "
              "WITH ORDINALITY AS g(v,x,p) OFFSET 1 LIMIT 2",
              [["", "2"], [None, "3"]], ["v", "p"], [25, 20]),
+            ("SELECT * FROM unnest(ARRAY['NULL','',NULL,'中文']) WITH ORDINALITY AS u(v,n)",
+             [["NULL", "1"], ["", "2"], [None, "3"], ["中文", "4"]], ["v", "n"], [25, 20]),
+            ("SELECT v,n FROM pg_catalog.unnest(ARRAY[9,7,8]) WITH ORDINALITY AS u(v,n) WHERE v<9 ORDER BY v",
+             [["7", "2"], ["8", "3"]], ["v", "n"], [23, 20]),
+            ("SELECT * FROM unnest(ARRAY[1,2,3],ARRAY['A',NULL]) WITH ORDINALITY AS u(i,v,n)",
+             [["1", "A", "1"], ["2", None, "2"], ["3", None, "3"]], ["i", "v", "n"], [23, 25, 20]),
+            ("SELECT * FROM UNNEST(ARRAY[1,2],ARRAY[2::bigint]) AS zipped",
+             [["1", "2"], ["2", None]], ["unnest", "unnest"], [23, 20]),
+            ('SELECT * FROM "pg_catalog"."unnest"(ARRAY[ARRAY[1,2],ARRAY[3,4]]) AS "X"',
+             [["1"], ["2"], ["3"], ["4"]], ["X"], [23]),
+            ("SELECT * FROM unnest(NULL::integer[],ARRAY[4::bigint]) WITH ORDINALITY",
+             [[None, "4", "1"]], ["unnest", "unnest", "ordinality"], [23, 20, 20]),
+            ("SELECT * FROM unnest('{}'::int[]) WITH ORDINALITY", [], ["unnest", "ordinality"], [23, 20]),
+            ("SELECT u,u.v FROM unnest(ARRAY['x','y']) AS u(v)", [["x", "x"], ["y", "y"]], ["u", "v"], [25, 25]),
+            ("SELECT * FROM unnest(ARRAY[1,2]) u(v) LEFT JOIN unnest(ARRAY[2,3]) z(w) ON v=w ORDER BY v",
+             [["1", None], ["2", "2"]], ["v", "w"], [23, 23]),
+            ("SELECT n FROM (SELECT n FROM unnest(ARRAY['a','b']) WITH ORDINALITY u(v,n)) q",
+             [["1"], ["2"]], ["n"], [20]),
+            ("SELECT * FROM unnest(string_to_array('c,d,e', ',')) AS u", [["c"], ["d"], ["e"]], ["u"], [25]),
+            ("SELECT FROM unnest(ARRAY[1,2])", [[], []], [], []),
         ]
         for sql, rows, names, oids in from_cases:
             check(sql, rows, oids, names=names, kinds=b"T"+b"D"*len(rows)+b"CZ")
@@ -157,12 +177,36 @@ def main():
         check("SELECT * FROM generate_series($1::integer,$2::integer) WITH ORDINALITY AS g(i,n)",
               [["8", "1"], ["9", "2"]], [23, 20], names=["i", "n"], execute=True,
               kinds=b"12TDDCZ", arguments=(b"8", b"9"))
+        check("SELECT * FROM unnest(ARRAY[$1::integer,NULL]) WITH ORDINALITY AS u(v,n) OFFSET 1",
+              [[None, "2"]], [23, 20], names=["v", "n"], execute=True,
+              kinds=b"12TDCZ", arguments=(b"23",))
+        for sql, state in (
+            ("SELECT * FROM pg_catalog.unnest(ARRAY[1],ARRAY[2])", "42883"),
+            ("SELECT * FROM unnest(1)", "42883"),
+            ("SELECT * FROM unnest(ARRAY[1,2]) AS u(v,w)", "42P10"),
+            ("SELECT * FROM unnest(ARRAY[unnest(ARRAY[1])])", "0A000"),
+            ("SELECT * FROM unnest(ARRAY[sum(1)])", "42803"),
+            ("SELECT * FROM unnest(ARRAY[ROW(1,2)])", "42601"),
+            ("SELECT * FROM unnest(ARRAY[1]) WITH", "42601"),
+            ("SELECT * FROM unnest(ARRAY[1]) AS u(v,)", "42601"),
+        ):
+            check(sql, [], state=state, kinds=b"EZ")
+            check(sql, [], state=state, describe=True, kinds=b"EZ")
+            check(sql, [], state=state, execute=True, kinds=b"EZ")
         check("CREATE SEQUENCE series_argument_seq")
         once = "SELECT v FROM generate_series(nextval('series_argument_seq'),4::bigint) AS s(v) LIMIT 2"
         check(once, [], [20], names=["v"], describe=True, kinds=b"1tTZ")
         check(once, [["1"], ["2"]], [20], names=["v"], execute=True, kinds=b"12TDDCZ")
         check("SELECT nextval('series_argument_seq')", [["2"]], [20], kinds=b"TDCZ")
         check("DROP SEQUENCE series_argument_seq")
+        check("CREATE SEQUENCE unnest_argument_seq START WITH 30")
+        unnest_once = ("SELECT * FROM unnest(ARRAY[nextval('unnest_argument_seq'),"
+                       "nextval('unnest_argument_seq')]) WITH ORDINALITY AS u(v,n)")
+        check(unnest_once, [], [20, 20], names=["v", "n"], describe=True, kinds=b"1tTZ")
+        check(unnest_once + " LIMIT 0", [], [20, 20], names=["v", "n"], kinds=b"TCZ")
+        check(unnest_once, [["30", "1"], ["31", "2"]], [20, 20], names=["v", "n"], execute=True, kinds=b"12TDDCZ")
+        check("SELECT nextval('unnest_argument_seq')", [["32"]], [20], kinds=b"TDCZ")
+        check("DROP SEQUENCE unnest_argument_seq")
         check("CREATE SEQUENCE rows_from_argument_seq START WITH 10")
         zip_once = ("SELECT * FROM ROWS FROM(nextval('rows_from_argument_seq'), "
                     "generate_series(nextval('rows_from_argument_seq'),15::bigint)) "
@@ -226,6 +270,15 @@ def main():
         check("SELECT generate_series('a','b')",[["stored text"]],[25])
         check("SELECT pg_catalog.generate_series('a'::TEXT,'b'::TEXT) WHERE false",state="42883")
         check("DROP FUNCTION public.generate_series")
+        check("CREATE FUNCTION public.unnest(a INTEGER) RETURNS TEXT LANGUAGE SQL AS $$SELECT 'stored'::TEXT$$")
+        stored_unnest = "SELECT * FROM public.unnest(1) WITH ORDINALITY AS u(v,n)"
+        check(stored_unnest, [["stored", "1"]], [25, 20], names=["v", "n"], kinds=b"TDCZ")
+        check(stored_unnest, [], [25, 20], names=["v", "n"], describe=True, kinds=b"1tTZ")
+        check(stored_unnest, [["stored", "1"]], [25, 20], names=["v", "n"], execute=True, kinds=b"12TDCZ")
+        check("SELECT * FROM unnest(1)", [["stored"]], [25], names=["unnest"], kinds=b"TDCZ")
+        check("SELECT * FROM unnest(ARRAY[1,2],ARRAY['b']) AS r(a,b)",
+              [["1", "b"], ["2", None]], [23, 25], names=["a", "b"], kinds=b"TDDCZ")
+        check("DROP FUNCTION public.unnest")
         check("SELECT 1",[["1"]],[23])
         print("GENERATE_SERIES_COMPLETE",checked,"FAILED",len(failures),failures,flush=True)
         assert not failures,failures

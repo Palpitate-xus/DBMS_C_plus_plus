@@ -57,7 +57,7 @@ def rows_after_header(stdout, header="unnest "):
             last = i
     if last is None:
         return []
-    return lines[last + 1:]
+    return [line.rstrip(" ") for line in lines[last + 1:]]
 
 
 def main():
@@ -103,7 +103,7 @@ def main():
 
     # alias form
     out, err, rc = run_sql(["SELECT u FROM unnest(ARRAY[7,8]) AS u"])
-    check("aliased", rows_after_header(out) == ["7", "8"])
+    check("aliased", rows_after_header(out, "u") == ["7", "8"])
 
     print(f"[UNNEST-E2E] {passed} passed, {failed} failed")
     return 1 if failed else 0

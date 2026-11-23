@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-23 · 直接展开一个或多个数组
+
+`FROM unnest` 可以提供类型化结果并参与筛选、排序和连接。支持多数组、行号、空数组、别名、字符串 `NULL` 和真正的空值。引用同级其他表列、显式记录列定义和只用一个别名取完整多列记录仍有差距。`QRY-02` 保持部分实现。[测试](test-report.md#unnest-from-20261123) · [性能](performance-report-2026-10-30.md#unnest-from-cost-20261123)
+
 ## 2026-11-23 · 减少读取函数结果的开销
 
 直接读取受支持的函数结果列时，可以复用已核对的类型和当前行的值。相同 SQL 读完 4,096 行的中位用时从 90–102 毫秒降到 58–66 毫秒。与 PostgreSQL 同轮测试时，本项目需要 64–79 毫秒，PostgreSQL 需要 30–31 毫秒。`QRY-02` 和 `OPT-01` 仍为部分实现。[测试](test-report.md#function-projection-20261123) · [性能](performance-report-2026-10-30.md#function-projection-cost-20261123)

@@ -3625,6 +3625,24 @@ static ExprPtr parseFromFunctionCall(const std::vector<std::string>& tokens, siz
     return expression;
 }
 
+static void appendFromFunction(SelectStmt& producer, ExprPtr expression) {
+    auto& call = static_cast<FunctionCallExpr&>(*expression);
+    // Unqualified multi-array UNNEST expands into one builtin call per argument.
+    if (call.schema.empty() && parseRoutineIdentifier(call.funcName) == "unnest" &&
+        call.namedArgs.empty() && call.args.size() > 1) {
+        for (auto& argument : call.args) {
+            auto unnest = std::make_unique<FunctionCallExpr>();
+            unnest->schema = "pg_catalog";
+            unnest->funcName = "unnest";
+            unnest->args.push_back(std::move(argument));
+            producer.selectList.push_back({std::move(unnest), "unnest"});
+        }
+    } else {
+        auto label = call.funcName;
+        producer.selectList.push_back({std::move(expression), std::move(label)});
+    }
+}
+
 static std::unique_ptr<SelectStmt> parseRowsFrom(const std::vector<std::string>& tokens, size_t& pos) {
     auto producer = std::make_unique<SelectStmt>();
     producer->functionSourceProducer = true;
@@ -3640,21 +3658,7 @@ static std::unique_ptr<SelectStmt> parseRowsFrom(const std::vector<std::string>&
         auto* call = dynamic_cast<FunctionCallExpr*>(expression.get());
         if (!call || pos == tokens.size() || (tokens[pos] != "," && tokens[pos] != ")")) break;
 
-        // PostgreSQL expands the SQL-standard, unqualified multi-array form
-        // into separate calls to the builtin. Each array retains its type.
-        if (call->schema.empty() && parseRoutineIdentifier(call->funcName) == "unnest" &&
-            call->namedArgs.empty() && call->args.size() > 1) {
-            for (auto& argument : call->args) {
-                auto unnest = std::make_unique<FunctionCallExpr>();
-                unnest->schema = "pg_catalog";
-                unnest->funcName = "unnest";
-                unnest->args.push_back(std::move(argument));
-                producer->selectList.push_back({std::move(unnest), "unnest"});
-            }
-        } else {
-            const auto label = call->funcName;
-            producer->selectList.push_back({std::move(expression), label});
-        }
+        appendFromFunction(*producer, std::move(expression));
         if (tokens[pos] == ")") {
             ++pos;
             return producer;
@@ -3700,14 +3704,19 @@ static std::unique_ptr<FromItem> parseFromAtom(const std::vector<std::string>& t
         } else if (!item->only && pos < tokens.size() && tokens[pos] == "(") {
             CatalogManager::QualifiedName name;
             if (CatalogManager::parseQualifiedName(item->tableName, name, true) &&
-                name.name == "generate_series") {
+                (name.name == "generate_series" || name.name == "unnest")) {
                 const auto argStart = pos;
                 pos = nameBegin;
                 auto expression = parseFromFunctionCall(tokens, pos, argStart);
                 if (!expression) return nullptr;
                 item->type = FromItem::Type::Function;
                 auto producer = std::make_unique<SelectStmt>();
-                producer->selectList.push_back({std::move(expression), name.name});
+                if (name.name == "unnest") {
+                    producer->functionSourceProducer = true;
+                    appendFromFunction(*producer, std::move(expression));
+                } else {
+                    producer->selectList.push_back({std::move(expression), name.name});
+                }
                 item->subquery = std::move(producer);
             }
         } else if (!item->only && pos < tokens.size() && tokens[pos] == "*") {
@@ -3715,16 +3724,25 @@ static std::unique_ptr<FromItem> parseFromAtom(const std::vector<std::string>& t
         }
     }
 
-    if (item->type == FromItem::Type::Function && pos + 1 < tokens.size() &&
-        SQLParser::toLower(tokens[pos]) == "with" && SQLParser::toLower(tokens[pos + 1]) == "ordinality") {
+    if (item->type == FromItem::Type::Function && pos < tokens.size() &&
+        SQLParser::toLower(tokens[pos]) == "with") {
+        if (pos + 1 == tokens.size() || SQLParser::toLower(tokens[pos + 1]) != "ordinality") {
+            retainDeclarationSyntaxError(DbError("42601", "expected ORDINALITY after WITH"));
+            return nullptr;
+        }
         item->withOrdinality = true;
         pos += 2;
     }
 
+    const auto invalidAlias = [&]() -> std::unique_ptr<FromItem> {
+        if (item->type == FromItem::Type::Function)
+            retainDeclarationSyntaxError(DbError("42601", "invalid alias or column list for function in FROM"));
+        return nullptr;
+    };
     // AS alias or implicit alias
     if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "as") {
         ++pos;
-        if (pos >= tokens.size() || !fromAliasIdentifier(tokens[pos])) return nullptr;
+        if (pos >= tokens.size() || !fromAliasIdentifier(tokens[pos])) return invalidAlias();
         item->alias = tokens[pos++];
     } else if (pos < tokens.size() && fromAliasIdentifier(tokens[pos])) {
         item->alias = tokens[pos++];
@@ -3733,12 +3751,12 @@ static std::unique_ptr<FromItem> parseFromAtom(const std::vector<std::string>& t
     if(!item->alias.empty() && pos<tokens.size() && tokens[pos]=="(") {
         ++pos;
         while(pos<tokens.size() && tokens[pos]!=")") {
-            if(!fromAliasIdentifier(tokens[pos]))return nullptr;
+            if(!fromAliasIdentifier(tokens[pos]))return invalidAlias();
             item->columnAliases.push_back(tokens[pos++]);
-            if(pos<tokens.size() && tokens[pos]==","){++pos;if(pos>=tokens.size() || tokens[pos]==")")return nullptr;}
+            if(pos<tokens.size() && tokens[pos]==","){++pos;if(pos>=tokens.size() || tokens[pos]==")")return invalidAlias();}
             else break;
         }
-        if(item->columnAliases.empty() || pos>=tokens.size() || tokens[pos]!=")")return nullptr;
+        if(item->columnAliases.empty() || pos>=tokens.size() || tokens[pos]!=")")return invalidAlias();
         ++pos;
     }
 

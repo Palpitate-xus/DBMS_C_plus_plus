@@ -19407,45 +19407,6 @@ static int sqlAuditCategory(const string& sql) {
 }
 
 
-// Extract the array literal text for an unnest(...) call from RAW sql
-// (before sqlProcessor rewrites ARRAY[..] to array_get(...)).  Returns
-// false when no complete unnest(...) call is present.
-static bool extractUnnestLiteral(const string& rawSql, string& outLiteral) {
-    string low;
-    for (auto& c : rawSql) low += static_cast<char>(tolower(static_cast<unsigned char>(c)));
-    size_t up = low.find("unnest(");
-    if (up == string::npos) return false;
-    size_t lp = up + 6;
-    // match to the balancing close paren
-    int depth = 0;
-    size_t i = lp;
-    for (; i < rawSql.size(); ++i) {
-        if (rawSql[i] == '(') ++depth;
-        else if (rawSql[i] == ')') { --depth; if (depth == 0) break; }
-    }
-    if (i == rawSql.size() || depth != 0) return false;
-    string inner = trim(rawSql.substr(lp + 1, i - lp - 1));
-    // strip a cast like ::int[] / ::text[]
-    size_t cast = inner.rfind("::");
-    while (cast != string::npos) {
-        // only when the cast tail looks like a type
-        string tail = inner.substr(cast + 2);
-        string tl;
-        for (auto& c : tail) tl += static_cast<char>(tolower(static_cast<unsigned char>(c)));
-        bool typeish = !tl.empty();
-        for (char c : tl) {
-            if (!(isalnum(static_cast<unsigned char>(c)) || c == '[' || c == ']' || c == ' ')) {
-                typeish = false; break;
-            }
-        }
-        if (typeish) { inner = trim(inner.substr(0, cast)); cast = inner.rfind("::"); }
-        else break;
-    }
-    outLiteral = inner;
-    return !inner.empty();
-}
-
-
 // Re-render logical TIMESTAMPTZ cells in the session TimeZone. Prefer typed
 // cells so fractional timestamps and quoted/spaced siblings retain boundaries.
 static void applySessionTimezoneToAnswers(
@@ -33297,35 +33258,6 @@ static bool executeInternal(const string& rawSql, Session& s,
                 queryDb = maybeDb;
                 tname = trim(tnameOrig.substr(dotPos + 1));
                 tnameOrig = tname;
-            }
-        }
-
-        // FROM unnest(<array literal>): structured operator expansion
-        {
-            string un = tnameOrig;
-            for (auto& c : un) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
-            size_t ulp = un.find('(');
-            if (ulp != string::npos && trim(un.substr(0, ulp)) == "unnest") {
-                string arrVal;
-                if (extractUnnestLiteral(effectiveRawSql, arrVal)) {
-                    dbms::UnnestOp op(arrVal, "unnest");
-                    if (!op.open()) {
-                        cout << "unnest failed" << endl;
-                        return true;
-                    }
-                    string row;
-                    cout << "unnest " << endl;
-                    size_t emitted = 0;
-                    while (op.next(row)) {
-                        // strip the trailing separator added by the operator
-                        cout << trim(row) << endl;
-                        log(s.username, trim(row), getTime());
-                        ++emitted;
-                    }
-                    op.close();
-                    (void)emitted;
-                    return false;
-                }
             }
         }
 

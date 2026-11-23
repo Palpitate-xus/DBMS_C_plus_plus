@@ -2,6 +2,11 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="unnest-from-comparison-20261123"></a>
+## 2026-11-23 · 从数组读取数据行
+
+PostgreSQL 在分析 `FROM` 时，把符合条件的多参数 `unnest` 拆成多个内置单参数调用，再按位置合并输出。DuckDB 支持在同一 `SELECT` 中并排展开多个列表，短列表补空值。SQLite 的 `json_each` 可以逐行读取 JSON 数组的直接元素。本项目把 `FROM unnest` 接到已有的函数来源执行逻辑，沿用类型、空值和行号处理。[PostgreSQL 解析实现](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/parser/parse_clause.c) · [PostgreSQL 数组函数](https://www.postgresql.org/docs/18/functions-array.html) · [DuckDB 列表展开](https://www.duckdb.org/docs/1.5/sql/query_syntax/unnest) · [SQLite `json_each`](https://sqlite.org/json1.html#jeach)
+
 <a id="function-projection-comparison-20261123"></a>
 ## 2026-11-23 · 传递已经生成的函数列
 

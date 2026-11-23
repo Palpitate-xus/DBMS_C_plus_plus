@@ -2292,8 +2292,9 @@ public:
     void finishFunctionSourceColumns(const FromItem& source, QueryRowDescriptor& columns) const {
         if (source.type != FromItem::Type::Function) return;
         for (const auto& column : columns) {
-            if (column.type == "record" ||
-                (column.typeMetadata && column.typeMetadata->kind == DatumKind::Record))
+            if (column.type == "record")
+                throw DbError("42601", "a column definition list is required for functions returning record");
+            if (column.typeMetadata && column.typeMetadata->kind == DatumKind::Record)
                 throw DbError("0A000", "functions returning records in FROM require a column descriptor");
         }
         if (!source.withOrdinality) return;
