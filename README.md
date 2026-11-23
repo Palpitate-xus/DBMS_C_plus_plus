@@ -17,6 +17,13 @@ cmake --build build/cmake --target dbms_main --parallel 2
 ## 最近更新
 
 <details>
+<summary>带时区的时间可以按指定位数四舍五入 · 2026-11-23</summary>
+
+例如，要求保留两位小数时，`14:30:00.125+05:30` 会变成 `14:30:00.13+05:30`。
+
+</details>
+
+<details>
 <summary>临时表检查也覆盖还没执行的查询 · 2026-11-23</summary>
 
 有些应用会先登记一笔事务，再决定何时提交。即使应用只准备了涉及临时表的查询，还没有运行，数据库也会拒绝登记，并撤销这笔事务的修改。
@@ -27,13 +34,6 @@ cmake --build build/cmake --target dbms_main --parallel 2
 <summary>在 SQL 里直接列出多行数据时，查询准备更快 · 2026-11-23</summary>
 
 在一次测试中，直接在 SQL 里列出 128 行数据，准备这条查询的时间从约 13 毫秒降到约 5 毫秒。
-
-</details>
-
-<details>
-<summary>检查数字范围时，可以到执行时再传入数字 · 2026-11-23</summary>
-
-例如，查询某个数字是否在 1 到 10 之间。应用可以先写 `SELECT $1 BETWEEN 1 AND 10`，执行时再传入 `5`。数据库会将它当作整数，并返回 `true`。
 
 </details>
 

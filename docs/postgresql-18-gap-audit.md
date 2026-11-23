@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-23 · 带 UTC 偏移的时间能按指定精度舍入
+
+`TIMETZ(p)` 转换带数值偏移的时间时，只舍入时钟部分。协议中明确声明为 `TIMETZ` 的标量参数支持文本和二进制。列存储、命名时区、隐式参数类型推断和部分声明仍待补齐。`TYPE-06` 与 `PROTO-04` 保持部分实现。 [功能验证](test-report.md#timetz-precision-20261123) · [性能对照](performance-report-2026-10-30.md#timetz-precision-cost-20261123) · [实现对照](postgresql-comparison.md#timetz-precision-comparison-20261123)
+
 ## 2026-11-23 · 在准备阶段记录子查询访问的临时表
 
 SQL `PREPARE` 保留原查询。协议 `Parse` 和 SQL 路径均能记录 `IN`、`ANY`、`ALL`、表函数参数、`LIMIT`、`OFFSET` 与 `WITH` 中的临时表引用。协议路径还覆盖 `EXPLAIN`。尝试准备该事务时返回 `0A000` 并回滚普通表写入。`CAT-13`、`TXN-06` 与 `PROTO-03` 仍为部分实现。 [测试](test-report.md#temp-prepare-subqueries-20261123) · [性能对照](performance-report-2026-10-30.md#temp-prepare-subqueries-cost-20261123) · [实现对照](postgresql-comparison.md#temp-prepare-subqueries-comparison-20261123)

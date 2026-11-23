@@ -6299,10 +6299,10 @@ ExprValue ExprEvaluator::evalCast(const Expr* inputExpression, const RowContext&
         result.collation = v.collation;
         return result;
     }
-    if (targetBase == "time" &&
-        (isTextCastSourceType(sourceType) || sourceType == "time")) {
+    if ((targetBase == "time" || targetBase == "timetz") &&
+        (isTextCastSourceType(sourceType) || sourceType == targetBase)) {
         const auto declaration = SQLParser::parseTypeSpecification(target);
-        if (declaration.typeMods.empty())
+        if (targetBase == "time" && declaration.typeMods.empty())
             return ExprValue("time", normalizeDefaultTimeInput(v.value), false);
         auto precisionMods = declaration.typeMods;
         if (precisionMods.size() == 1) {
@@ -6312,9 +6312,21 @@ ExprValue ExprEvaluator::evalCast(const Expr* inputExpression, const RowContext&
         }
         // SQL declaration analysis clamps excess precision; the persistent
         // registry remains strict about already-normalized schema metadata.
-        const auto modifier = TypeRegistry::instance().applyTypeMods("time", precisionMods);
-        if (modifier.ok())
-            return ExprValue("time", normalizeDefaultTimeInput(v.value, modifier.typmod), false);
+        const auto modifier = TypeRegistry::instance().applyTypeMods(targetBase, precisionMods);
+        if (targetBase == "time") {
+            if (modifier.ok())
+                return ExprValue("time", normalizeDefaultTimeInput(v.value, modifier.typmod), false);
+        } else {
+            if (!modifier.ok()) throw DbError("22023", modifier.error);
+            using namespace temporal_storage_detail;
+            const char* state = nullptr;
+            auto value = parseZonedClock(v.value, &state);
+            if (!value) throw DbError(state, "invalid time with time zone: '" + v.value + "'");
+            const auto rounded = roundTimeMicros(value->localMicros, modifier.typmod);
+            if (!rounded) throw DbError("22008", "time precision adjustment is out of range");
+            value->localMicros = *rounded;
+            return ExprValue("timetz", formatZonedClock(*value), false);
+        }
     }
     if (target == "date") return castToDate(v);
     if (targetBase == "timestamp" || targetBase == "timestamptz") {

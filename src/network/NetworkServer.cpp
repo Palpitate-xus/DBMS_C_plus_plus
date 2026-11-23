@@ -34,6 +34,7 @@
 #include "catalog/systables.h"
 #include "expression/regtype_input.h"
 #include "common/DateType.h"
+#include "common/TemporalStorageCodec.h"
 #include "common/TimeZoneRules.h"
 #include "common/BooleanCodec.h"
 #include "common/WorkMemUtilityContext.h"
@@ -1099,6 +1100,41 @@ std::string binaryProtocolParameterLiteral(uint32_t typeOid,
             }
             return quoteProtocolText(value, error);
         }
+        case 1266: {
+            using namespace temporal_storage_detail;
+            if (raw.size() < 8) {
+                inputSqlState = "08P01";
+                error = "insufficient data left in message";
+                return {};
+            }
+            bits = 0;
+            for (size_t i = 0; i < 8; ++i) bits = (bits << 8) | raw[i];
+            if (bits > static_cast<uint64_t>(MicrosPerDay)) {
+                inputSqlState = "22008";
+                error = "time out of range";
+                return {};
+            }
+            if (raw.size() < 12) {
+                inputSqlState = "08P01";
+                error = "insufficient data left in message";
+                return {};
+            }
+            uint32_t offsetBits = 0;
+            for (size_t i = 8; i < 12; ++i) offsetBits = (offsetBits << 8) | raw[i];
+            const auto offset = offsetBits <= INT32_MAX
+                ? static_cast<int32_t>(offsetBits) : -1 - static_cast<int32_t>(~offsetBits);
+            if (offset <= -ZonedClockOffsetLimit || offset >= ZonedClockOffsetLimit) {
+                inputSqlState = "22009";
+                error = "time zone displacement out of range";
+                return {};
+            }
+            if (raw.size() > 12) {
+                inputSqlState = "22P03";
+                error = "invalid binary input length for parameter type";
+                return {};
+            }
+            return quoteProtocolText(formatZonedClock({static_cast<int64_t>(bits), offset}), error);
+        }
         case 1186: {
             const auto value = intervalProtocolParameterText(raw, error, inputSqlState);
             return error.empty() ? quoteProtocolText(value, error) : std::string{};
@@ -1243,6 +1279,17 @@ std::string protocolParameterLiteral(uint32_t typeOid,
     if(typeOid==3802) {
         const auto canonical=jsonbProtocolParameterText(raw,false,error,inputSqlState);
         return error.empty()?quoteProtocolText(canonical,error):std::string{};
+    }
+    if (typeOid == 1266) {
+        using namespace temporal_storage_detail;
+        const char* state = nullptr;
+        const auto datum = parseZonedClock(value, &state);
+        if (!datum) {
+            inputSqlState = state;
+            error = "invalid time with time zone: '" + value + "'";
+            return {};
+        }
+        return quoteProtocolText(formatZonedClock(*datum), error);
     }
     if (typeOid == 1083 || typeOid == 1183) {
         try {

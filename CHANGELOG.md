@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>带时区的时间可以按指定位数四舍五入 · 2026-11-23</summary>
+
+例如，要求保留两位小数时，`14:30:00.125+05:30` 会变成 `14:30:00.13+05:30`。
+
+[使用说明](docs/MANUAL.md#日期时间类型) · [测试报告](docs/test-report.md#timetz-precision-20261123) · [性能报告](docs/performance-report-2026-10-30.md#timetz-precision-cost-20261123)
+
+</details>
+
+<details>
 <summary>临时表检查也覆盖还没执行的查询 · 2026-11-23</summary>
 
 有些应用会先登记一笔事务，再决定何时提交。即使应用只准备了涉及临时表的查询，还没有运行，数据库也会拒绝登记，并撤销这笔事务的修改。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>检查数字范围时，可以到执行时再传入数字 · 2026-11-23</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-23 · 检查数字范围时，可以到执行时再传入数字
 
 例如，查询某个数字是否在 1 到 10 之间。应用可以先写 `SELECT $1 BETWEEN 1 AND 10`，执行时再传入 `5`。数据库会将它当作整数，并返回 `true`。
 
 [使用说明](docs/MANUAL.md#基础查询) · [测试报告](docs/test-report.md#between-bind-types-20261123) · [性能报告](docs/performance-report-2026-10-30.md#between-bind-types-cost-20261123)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-23 · 只查订单号时，可以跳过长备注
 

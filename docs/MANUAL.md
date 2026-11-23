@@ -649,9 +649,18 @@ USE DATABASE mydb;
 |------|------|--------|
 | `DATE` | 日期 | `'2024-01-01'`, `infinity`, `-infinity` |
 | `TIME` | 时间 | `'14:30:00'` |
+| `TIMETZ` | 一天中的时间与 UTC 偏移 | `'14:30:00.125+05:30'` |
 | `TIMESTAMP` | 日期时间 | `'2024-01-01 14:30:00'` |
 | `TIMESTAMPTZ` | 带时区时间戳 | `'2024-01-01 14:30:00+08'` |
 | `INTERVAL` | 时间间隔 | `'1 year 2 months'`, `'90 minutes'` |
+
+`TIMETZ(p)`（也可写作 `TIME(p) WITH TIME ZONE`）将一天中的时间舍入到小数点后 `p` 位，支持 0 到 6 位。转换保留明确写出的 UTC 偏移，包括秒，例如 `-00:00:07`。接近午夜的值舍入后可得到 `24:00:00`。
+
+```sql
+SELECT '14:30:00.125+05:30'::timetz(2);  -- 14:30:00.13+05:30
+```
+
+用 PostgreSQL 协议执行查询时，声明为 `TIMETZ` 的标量参数可用文本或二进制发送。存储 `TIMETZ` 列、从会话时区获取省略的偏移和命名时区输入仍有差距。[测试与已知限制](test-report.md#timetz-precision-20261123)
 
 ### 二进制类型
 | 类型 | 说明 |
@@ -662,8 +671,7 @@ USE DATABASE mydb;
 数组请求 PostgreSQL 二进制结果格式时，已有标量二进制发送 codec 的内置
 元素可作为数组输出，保留维度、真实下界、元素 OID、SQL NULL 和空数组的
 区别；不要把二进制结果与二进制 Bind 输入混同，后者不由本项实现。
-TIMETZ、JSON/JSONB、TSVECTOR、range 等缺失标量发送 codec 的非 NULL
-数组元素仍未支持。数组封套边界见[R110](issue-review-r110-array-binary-result.md)，
+已有的 `TIMETZ` 标量发送实现也用于二进制数组结果。数组封套边界见[R110](issue-review-r110-array-binary-result.md)，
 INTERVAL的后续真实发送实现见[R113](issue-review-r113-interval-binary-result.md)。
 
 CHAR/VARCHAR与数组共存时，SELECT *仍应保留字符列声明长度；普通表、TEMP、
