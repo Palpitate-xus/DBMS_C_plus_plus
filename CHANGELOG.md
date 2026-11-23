@@ -1,27 +1,27 @@
 # 更新日志
 
 <details>
-<summary>连接两张表时，只取第一条更快 · 2026-11-23</summary>
+<summary>两张表按编号匹配时，取第一条更快 · 2026-11-23</summary>
 
-例如，把两张表的编号转成同一种整数类型再匹配。只取一条结果时，一组测试从约 310 毫秒降到了约 6 毫秒。
+在一组测试中，先把两张表的编号转成同一种类型，再查找相同的编号。取第一条结果的时间从约 310 毫秒降到了约 6 毫秒。
 
 [测试报告](docs/test-report.md#integer-cast-join-limit-20261123) · [性能报告](docs/performance-report-2026-10-30.md#integer-cast-join-limit-cost-20261123)
 
 </details>
 
 <details>
-<summary>查子表的父表名称更快 · 2026-11-23</summary>
+<summary>查一张子表的父表名称更快 · 2026-11-23</summary>
 
-例如，数据库里有 128 条表继承关系。在这组测试中，查一张子表的父表名称从约 170 毫秒降到了约 15 毫秒。
+在包含 128 条表继承关系的一组测试中，这项查询的时间从约 170 毫秒降到了约 15 毫秒。
 
 [使用说明](docs/MANUAL.md#查询继承表) · [测试报告](docs/test-report.md#oid-join-20261123) · [性能报告](docs/performance-report-2026-10-30.md#oid-join-cost-20261123)
 
 </details>
 
 <details>
-<summary>可以查询一张表继承了哪些表 · 2026-11-23</summary>
+<summary>可以查到一张表直接继承了哪些表 · 2026-11-23</summary>
 
-例如，迁移工具可以查询 `pg_inherits`，找到订单子表的直接父表，以及各父表的顺序。
+例如，迁移工具可以查到订单子表直接继承了哪些表，以及这些父表的顺序。
 
 [使用说明](docs/MANUAL.md#查询继承表) · [测试报告](docs/test-report.md#pg-inherits-20261123) · [性能报告](docs/performance-report-2026-10-30.md#pg-inherits-cost-20261123)
 
