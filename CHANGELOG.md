@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>查子表的父表名称更快 · 2026-11-23</summary>
+
+例如，数据库里有 128 条表继承关系。在这组测试中，查一张子表的父表名称从约 170 毫秒降到了约 15 毫秒。
+
+[使用说明](docs/MANUAL.md#查询继承表) · [测试报告](docs/test-report.md#oid-join-20261123) · [性能报告](docs/performance-report-2026-10-30.md#oid-join-cost-20261123)
+
+</details>
+
+<details>
 <summary>可以查询一张表继承了哪些表 · 2026-11-23</summary>
 
 例如，迁移工具可以查询 `pg_inherits`，找到订单子表的直接父表，以及各父表的顺序。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>分页带上并列记录时也可以用索引 · 2026-11-23</summary>
+<summary>查看更早的更新和版本记录</summary>
+
+## 2026-11-23 · 分页带上并列记录时也可以用索引
 
 例如，查最早的 3 条预约并带上与第 3 条时间相同的预约。给时间建好索引后，数据库可以读到下一个不同的时间就停。
 
 [使用说明](docs/MANUAL.md#日期时间类型) · [测试报告](docs/test-report.md#timetz-ties-20261123) · [性能报告](docs/performance-report-2026-10-30.md#timetz-ties-cost-20261123)
-
-</details>
-
-<details>
-<summary>查看更早的更新和版本记录</summary>
 
 ## 2026-11-23 · 按时间排序，只取前几条更快
 

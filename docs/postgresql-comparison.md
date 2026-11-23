@@ -2,6 +2,13 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="oid-join-comparison-20261123"></a>
+## 2026-11-23 · 用表编号连接目录
+
+PostgreSQL 18.6 给 `pg_inherits` 创建了以子表编号和父表序号为键的 B 树，也给父表编号单独建索引。是否从索引查找由查询计划选择。SQLite 在预计有大量重复查找时可创建语句级 B 树。DuckDB 可以先按连接键建立哈希表，再用另一侧的键查找候选行。 [PostgreSQL 18.6 目录索引](https://github.com/postgres/postgres/blob/REL_18_6/src/include/catalog/pg_inherits.h) · [PostgreSQL 执行计划](https://www.postgresql.org/docs/18/using-explain.html) · [SQLite 临时索引](https://www.sqlite.org/optoverview.html#automatic_query_time_indexes) · [DuckDB 哈希连接](https://duckdb.org/2022/05/27/iejoin)
+
+本项目沿用整数等值连接已有的查找方法。完成对右侧的首次读取后，连续编号可以直接定位行，其他编号可以在内存用量允许时通过已排序的键定位。原来的等值条件继续核对候选。目录查询仍会读取各输入的数据和表结构。 [测试报告](test-report.md#oid-join-20261123) · [性能报告](performance-report-2026-10-30.md#oid-join-cost-20261123)
+
 <a id="pg-inherits-comparison-20261123"></a>
 ## 2026-11-23 · 查询直接表继承关系
 

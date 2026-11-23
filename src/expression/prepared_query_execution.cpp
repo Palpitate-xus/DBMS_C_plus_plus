@@ -919,6 +919,7 @@ std::shared_ptr<PreparedJoinKeyFilter> PreparedJoinKeyFilter::prepareIntegerEqua
     case 21: key.type = "smallint"; key.bits = 16; break;
     case 23: key.type = "integer"; key.bits = 32; break;
     case 20: key.type = "bigint"; key.bits = 64; break;
+    case 26: key.type = "oid"; break;
     default: return {};
     }
     const auto matchesType = [&](const QueryColumnBinding& binding) {
@@ -953,6 +954,14 @@ PreparedJoinKeyFilter::Fingerprint PreparedJoinKeyFilter::fingerprint(const RowC
             if (value.typeName != key.type) return {};
             if (value.isNull) return {Fingerprint::State::Null, 0};
             if (!key.elementType) {
+                if (key.codecOid == 26) {
+                    if (value.objectOid) return {Fingerprint::State::Value, *value.objectOid};
+                    Oid oid = 0;
+                    const auto end = value.value.data() + value.value.size();
+                    const auto parsed = std::from_chars(value.value.data(), end, oid);
+                    if (parsed.ec != std::errc{} || parsed.ptr != end) return {};
+                    return {Fingerprint::State::Value, oid};
+                }
                 int64_t number = 0;
                 if (!parseJoinInteger(value.value, key.bits, number)) return {};
                 return {Fingerprint::State::Value, static_cast<uint64_t>(number)};

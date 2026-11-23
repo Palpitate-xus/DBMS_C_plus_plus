@@ -2,6 +2,18 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-23 reuse ordered candidate lookup for OID equality joins",
+      "gap_ids": ["QRY-03", "OPT-02"],
+      "status": "partial",
+      "evidence": ["src/expression/prepared_query_execution.cpp", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/oid_equality_join_protocol_e2e_test.py", "tests/integer_join_prefilter_protocol_e2e_test.py"],
+      "verification": [
+        "Direct equality between bound OID columns uses the existing bounded lookup after reading the entire right input. Lookup preserves unsigned identity, duplicate order, NULL behavior, and outer rows.",
+        "OID joins in derived inputs and system catalogs were tested against PostgreSQL 18.6. Binary results cover zero and values beyond signed 32-bit range.",
+        "Recovery checks use old data and committed or rolled-back key changes. Rule-based lookup does not complete cost-based join selection or reordering."
+      ]
+    },
+    {
       "issue": "2026-11-23 expose durable direct table inheritance links in pg_inherits",
       "gap_ids": ["CAT-07", "CAT-12"],
       "status": "partial",

@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-23 · 按对象编号连接时可跳过不匹配的行
+
+两侧都是 `oid` 的直接等值连接可沿用整数键查找。保留重复匹配、`NULL` 规则、外连接和提前结束查询的行为。系统目录和带 `oid` 结果的子查询均有验证。多列连接、连接顺序优化和通用索引选择仍待补齐，`QRY-03` 和 `OPT-02` 保持部分实现。 [功能验证](test-report.md#oid-join-20261123) · [性能对照](performance-report-2026-10-30.md#oid-join-cost-20261123) · [实现对照](postgresql-comparison.md#oid-join-comparison-20261123)
+
 ## 2026-11-23 · 普通表的直接继承关系可以通过系统目录查询
 
 `pg_catalog.pg_inherits` 返回实际父子表编号、父表顺序以及解除分区状态。普通表的状态始终为 `false`。已验证跨 schema 同名表、解除和重新加入继承、改名、删除、旧目录升级及事务恢复。独立分区表、分区索引、并发解除分区，以及继承约束和权限的完整传播仍待实现。`CAT-07` 和 `CAT-12` 保持部分实现。 [功能验证](test-report.md#pg-inherits-20261123) · [性能对照](performance-report-2026-10-30.md#pg-inherits-cost-20261123) · [实现对照](postgresql-comparison.md#pg-inherits-comparison-20261123)
