@@ -21219,6 +21219,8 @@ class PreparedWithDmlRuntime {
         function<void()> closeReader;
         function<void(const dbms::RowContext&)> reset;
         vector<dbms::Operator*> planChildren;
+        // The leaf reader owns this scan. Joined and cached rows have no proof.
+        const dbms::Operator* predicateSource=nullptr;
         string planName="Materialize";
         map<string,string> planAttributes;
         shared_ptr<const dbms::PreparedJoinKeyFilter> planKeyFilter;
@@ -21268,7 +21270,9 @@ class PreparedWithDmlRuntime {
             closed=true;
             if(closeReader)closeReader();
         }
-        bool readAt(size_t index,dbms::RowContext& row,bool retain=true) {
+        bool readAt(size_t index,dbms::RowContext& row,bool retain=true,
+                    const dbms::Expr** satisfiedWhere=nullptr) {
+            if(satisfiedWhere)*satisfiedWhere=nullptr;
             if(!opened)open();
             NextInstrument instrument(this);
             if(index<rows.size()){row=rows[index];instrument.emitted=true;return true;}
@@ -21280,6 +21284,7 @@ class PreparedWithDmlRuntime {
             }
             if(retain && index!=rows.size())throw dbms::DbError("XX000","logical source read skipped its demand ordinal");
             if(!read(index,row)){loaded=true;closeSource();return false;}
+            if(satisfiedWhere && predicateSource)*satisfiedWhere=predicateSource->lastSatisfiedWhere();
             if(retain)rows.push_back(row);
             instrument.emitted=true;return true;
         }
@@ -21302,21 +21307,24 @@ class PreparedWithDmlRuntime {
             : node_(std::move(node)),rebindable_(rebindable),retainRows_(retainRows) {}
         bool open() override {
             OpenInstrument instrument(this);clearError();position_=0;row_=dbms::RowContext{};
+            satisfiedWhere_=nullptr;
             if(closed_)throw dbms::DbError("XX000","prepared context source must rebind before reopening");
             return true;
         }
         bool next(string& display) override {
             NextInstrument instrument(this);
             if(closed_)throw dbms::DbError("XX000","prepared context source has already been closed");
-            if(!node_->readAt(position_,row_,retainRows_))return false;
+            if(!node_->readAt(position_,row_,retainRows_,&satisfiedWhere_))return false;
             ++position_;display.clear();instrument.emitted=true;return true;
         }
         void close() override {
             position_=0;row_=dbms::RowContext{};
+            satisfiedWhere_=nullptr;
             if(closed_)return;
             closed_=true;node_->closeSource();
         }
         bool supportsPreparedContexts() const override {return true;}
+        const dbms::Expr* lastSatisfiedWhere() const override {return satisfiedWhere_;}
         optional<dbms::PreparedIntegerKeyOrder> integerKeyOrder(size_t sourceOrdinal) const override {
             if (closed_ || node_->occurrences.size() != 1 || node_->occurrences.front() != sourceOrdinal)
                 return {};
@@ -21338,6 +21346,7 @@ class PreparedWithDmlRuntime {
         bool rebindable_=false,closed_=false,retainRows_=true;
         size_t position_=0;
         dbms::RowContext row_;
+        const dbms::Expr* satisfiedWhere_=nullptr;
     };
     const dbms::PreparedQuery::SourceRange& sourceRange(const dbms::Stmt* owner,
         const dbms::FromItem* source,bool merged=false) const {
@@ -21438,6 +21447,7 @@ class PreparedWithDmlRuntime {
                     physicalScan=dbms::makePreparedTableSource(&g_engine,session_.currentDB,
                         query_,const_cast<dbms::SelectStmt*>(select),scanSchema,std::move(physicalScan));
                 scan=shared_ptr<dbms::Operator>(std::move(physicalScan));
+                node->predicateSource=scan.get();
                 node->planChildren.push_back(scan.get());
             } else if(item->type!=dbms::FromItem::Type::Table || !range.cteStatement)
                 throw dbms::DbError("0A000","mutation source requires additional function-range lowering");

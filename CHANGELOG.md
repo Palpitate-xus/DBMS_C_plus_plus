@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>部分查询少做一遍整数检查 · 2026-11-23</summary>
+
+例如，用商品编号和库存量筛选记录时，数据库可以直接用扫描时的检查结果。
+
+[测试报告](docs/test-report.md#stored-where-reuse-20261123) · [性能报告](docs/performance-report-2026-10-30.md#stored-where-reuse-cost-20261123)
+
+</details>
+
+<details>
 <summary>部分按编号筛选的查询更快 · 2026-11-23</summary>
 
 例如，从 2,048 条记录中找出编号不超过 128 的记录，再合并查询结果。测试中这条查询的用时约减半。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>展开一组数字时可以直接加上空值 · 2026-11-23</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-23 · 展开一组数字时可以直接加上空值
 
 例如，把 10、20、30 展开成三行，再补一行 `NULL`，结果会有四行。
 
 [用法](docs/MANUAL.md#把数组展开成行) · [测试报告](docs/test-report.md#set-input-types-20261123) · [性能报告](docs/performance-report-2026-10-30.md#set-input-types-cost-20261123)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-23 · 手头的订单号可以与查询结果合并
 

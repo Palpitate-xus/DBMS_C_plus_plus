@@ -51,6 +51,10 @@ public:
         (void)nulls; return false;
     }
 
+    // An exact, complete WHERE condition checked for the row just returned.
+    // Sources that buffer, combine, or otherwise replace rows default to no proof.
+    virtual const Expr* lastSatisfiedWhere() const { return nullptr; }
+
     // Operators that synthesize result cells (aggregates, joins, windows)
     // can expose the exact row separately from their legacy display string.
     // This keeps SQL NULL distinct from text "NULL" and preserves embedded

@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-23 · 上层筛选复用普通表的整数条件检查
+
+2,048 行均匹配两项整数条件时，合并查询在内存盘各轮中位耗时从约 60–85 毫秒降到约 35–38 毫秒。相同存储条件下，PostgreSQL 18.6 约需 16 毫秒。适用范围为普通表扫描上已完整检查的定宽整数和空值条件，`OPT-01` 保持部分实现。 [正确性验证](test-report.md#stored-where-reuse-20261123) · [性能](performance-report-2026-10-30.md#stored-where-reuse-cost-20261123)
+
 ## 2026-11-23 · 开头连续匹配时也继续检查整数条件
 
 在 2,048 行的合并查询测试中，取前 128 行的四轮内存计时从约 20–21 毫秒降到约 10–11 毫秒。PostgreSQL 18.6 在同样使用内存盘的对照中约需 1.5 毫秒。表访问与中间结果转换仍有开销，`OPT-01` 保持部分实现。 [回归与恢复](test-report.md#stored-filter-prefix-20261123) · [计时](performance-report-2026-10-30.md#stored-filter-prefix-cost-20261123)

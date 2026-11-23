@@ -2,6 +2,11 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="stored-where-reuse-comparison-20261123"></a>
+## 2026-11-23 · 重用扫描已经完成的条件检查
+
+PostgreSQL 为索引扫描保留尚未满足的条件，索引给出的近似匹配仍会用实际记录复查。SQLite 在生成字节码时可以跳过索引已能保证的条件，并考虑外联接和传递条件的限制。DuckDB 区分完全交给扫描的条件和只下推了一部分的条件。本项目在扫描确认一行满足完整的整数和空值条件后，把检查结果交给同一条语句的上层筛选。缓存行和联接输出会按原条件判断。 [PostgreSQL 索引计划](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/optimizer/plan/createplan.c) · [PostgreSQL 索引复查](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/executor/nodeIndexscan.c) · [SQLite 条件字节码](https://github.com/sqlite/sqlite/blob/master/src/wherecode.c) · [DuckDB 下推实现](https://github.com/duckdb/duckdb/blob/main/src/optimizer/pushdown/pushdown_get.cpp)
+
 <a id="stored-filter-prefix-comparison-20261123"></a>
 ## 2026-11-23 · 在构造结果行之前筛选
 

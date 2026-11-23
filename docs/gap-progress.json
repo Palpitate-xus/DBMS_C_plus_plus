@@ -2,6 +2,18 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-23 reuse complete integer and null predicate checks for the same scan row",
+      "gap_ids": ["OPT-01"],
+      "status": "partial",
+      "evidence": ["src/executor/ExecutionPlan.cpp", "src/executor/ExecutionPlan.h", "src/main.cpp", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/stored_literal_filter_protocol_e2e_test.py"],
+      "verification": [
+        "The prepared filter skips rechecking an exact complete predicate only for a fresh matching scan row from its own statement.",
+        "The regression observes 65 reused checks and verifies the ordinary filter remains in use for text and row-level security.",
+        "Successful responses and error boundaries agree with the PostgreSQL 18.6 reference across 559 comparisons."
+      ]
+    },
+    {
       "issue": "2026-11-23 keep fixed-width integer and null checks active through clustered ranges",
       "gap_ids": ["OPT-01"],
       "status": "partial",

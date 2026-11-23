@@ -838,6 +838,7 @@ class PreparedFilterOp final : public Operator {
     std::shared_ptr<PreparedSelectState> state_;
     std::optional<StorageEngine::Condition> storedTextPredicate_;
     bool childOpened_ = false, empty_ = false;
+    size_t storedWhereRows_ = 0;
 
     std::optional<StorageEngine::Condition> bindStoredTextPredicate() const {
         const auto* comparison = dynamic_cast<const BinaryOpExpr*>(state_->select().whereClause.get());
@@ -904,6 +905,7 @@ public:
         : child_(std::move(child)), state_(std::move(state)) {}
     bool open() override {
         OpenInstrument startup(this); clearError(); childOpened_ = false; empty_ = false;
+        storedWhereRows_ = 0;
         storedTextPredicate_.reset();
         if(!(preparedWhereTruths(state_->select().whereClause.get())&1)) { empty_=true;return true; }
         if (PreparedSelectState::rowIndependent(state_->select().whereClause.get())) {
@@ -921,6 +923,11 @@ public:
         if (empty_) return false;
         std::vector<bool> nulls;
         while (child_->next(row)) {
+            if (child_->lastSatisfiedWhere() == state_->select().whereClause.get()) {
+                ++storedWhereRows_;
+                instrumentation.emitted = true;
+                return true;
+            }
             if (storedTextPredicate_ && child_->lastStoredNullBitmap(nulls) &&
                 nulls.size() == state_->schema.len()) {
                 if (!StorageEngine::evalConditionOnRow(*storedTextPredicate_, row, state_->schema, nulls))
@@ -955,6 +962,10 @@ public:
     std::string preparedPlanNodeName() const override {
         const auto children=state_->execution?state_->execution->childPlans(state_->select().whereClause.get()):std::vector<Operator*>{};
         return children.empty()?"TypedFilter":"QuantifiedSubqueryFilter";
+    }
+    std::map<std::string, std::string> preparedPlanAttributes() const override {
+        if (storedWhereRows_ == 0) return {};
+        return {{"storedWhereRows", std::to_string(storedWhereRows_)}};
     }
     std::vector<Operator*> preparedPlanChildren() const override {
         auto plans=state_->execution?state_->execution->childPlans(state_->select().whereClause.get()):std::vector<Operator*>{};
@@ -3771,19 +3782,21 @@ class StoredFilterScanOp final : public Operator {
     StorageEngine& engine_;
     std::string database_, table_;
     uint64_t relationId_;
+    const Expr* where_;
     StoredPredicates predicates_;
     bool sampleSelectivity_;
     OpPtr scan_;
     TableSchema schema_;
     std::vector<bool> nulls_;
     bool opened_ = false, active_ = false, rejected_ = false;
+    bool matchedWhere_ = false;
     size_t initialMatches_ = 0;
 
 public:
     StoredFilterScanOp(StorageEngine& engine, std::string database, const TableSchema& schema,
-                       StoredPredicates predicates, OpPtr scan)
+                       const Expr* where, StoredPredicates predicates, OpPtr scan)
         : engine_(engine), database_(std::move(database)), table_(schema.tablename),
-          relationId_(schema.physicalRelationId), predicates_(std::move(predicates)),
+          relationId_(schema.physicalRelationId), where_(where), predicates_(std::move(predicates)),
           sampleSelectivity_(std::any_of(predicates_.begin(), predicates_.end(), [](const auto& predicate) {
               using Input = StoredPredicate::Input;
               return !predicate.integer && predicate.input != Input::IsNull && predicate.input != Input::IsNotNull;
@@ -3795,7 +3808,7 @@ public:
         OpenInstrument instrument(this);
         clearError();
         opened_ = true;
-        active_ = rejected_ = false;
+        active_ = rejected_ = matchedWhere_ = false;
         initialMatches_ = 0;
         if (!scan_->open()) return propagateChildError(scan_.get(), "stored filter scan failed");
         schema_ = engine_.getTableSchema(database_, table_);
@@ -3806,6 +3819,7 @@ public:
 
     bool next(std::string& row) override {
         NextInstrument instrument(this);
+        matchedWhere_ = false;
         while (scan_->next(row)) {
             if (active_) {
                 const auto matches = scan_->lastStoredNullBitmap(nulls_) && nulls_.size() == schema_.len()
@@ -3819,6 +3833,7 @@ public:
                 // clustered range. Keep cheap integer and NULL checks active.
                 // Sample only predicates that extract or process values.
                 if (!matches || (sampleSelectivity_ && !rejected_ && ++initialMatches_ == 64)) active_ = false;
+                matchedWhere_ = matches.value_or(false) && !sampleSelectivity_;
             }
             instrument.emitted = true;
             return true;
@@ -3830,12 +3845,14 @@ public:
     ScanOrigin scanOrigin() const override { return scan_->scanOrigin(); }
     bool lastColumnIsNull(size_t ordinal) const override { return scan_->lastColumnIsNull(ordinal); }
     bool lastStoredNullBitmap(std::vector<bool>& bitmap) const override { return scan_->lastStoredNullBitmap(bitmap); }
+    const Expr* lastSatisfiedWhere() const override { return matchedWhere_ ? where_ : nullptr; }
     TableScanOp* tableScan() const { return static_cast<TableScanOp*>(scan_.get()); }
     const StoredPredicates& predicates() const { return predicates_; }
     std::string preparedPlanNodeName() const override { return "StoredFilter"; }
     std::vector<Operator*> preparedPlanChildren() const override { return {scan_.get()}; }
     double estimatedRows() const override { return scan_->estimatedRows(); }
     void close() override {
+        matchedWhere_ = false;
         if (!opened_) return;
         opened_ = false;
         scan_->close();
@@ -3854,7 +3871,8 @@ static OpPtr prefilterPreparedHeap(StorageEngine& engine, const std::string& dat
     if (range == query.sourceRanges.end()) return {};
     auto predicates = bindStoredWhere(engine, database, schema, range->ordinal, select.whereClause.get());
     if (!predicates || predicates->empty()) return {};
-    return std::make_unique<StoredFilterScanOp>(engine, database, schema, std::move(*predicates), std::move(scan));
+    return std::make_unique<StoredFilterScanOp>(engine, database, schema, select.whereClause.get(),
+                                                std::move(*predicates), std::move(scan));
 }
 
 static OpPtr preparedCompositePrimarySource(StorageEngine* engine, const std::string& database,

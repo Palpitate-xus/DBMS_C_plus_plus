@@ -85,6 +85,7 @@ def main():
         plan = simple("EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF) " + predicate, "EXPLAIN")
         assert any("StoredFilter" in row[0] and "rows=3" in row[0] for row in plan), plan
         assert any("TableScan" in row[0] and "rows=7" in row[0] for row in plan), plan
+        assert all("storedWhereRows" not in row[0] for row in plan), plan
 
         simple("CREATE TABLE stored_filter_ranges(n smallint, ord bigint, qty integer)", "CREATE TABLE")
         prefix = ",".join(f"({n},{2**53 + n},1)" for n in range(64))
@@ -93,11 +94,12 @@ def main():
         simple(f"INSERT INTO stored_filter_ranges VALUES {prefix},{tail}", "INSERT 0 70")
         clustered = "SELECT ord FROM stored_filter_ranges WHERE n>=0 AND qty>0 " \
                     "AND ord IS NOT NULL ORDER BY ord OFFSET 0 FETCH FIRST 100 ROWS WITH TIES"
-        expected = [[str(2**53 + n)] for n in range(64)] + [[str(2**63 - 1)]]
-        assert simple(clustered, "SELECT 65") == expected
+        clustered_rows = [[str(2**53 + n)] for n in range(64)] + [[str(2**63 - 1)]]
+        assert simple(clustered, "SELECT 65") == clustered_rows
         plan = simple("EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF) " + clustered, "EXPLAIN")
         assert any("StoredFilter" in row[0] and "rows=65" in row[0] for row in plan), plan
         assert any("TableScan" in row[0] and "rows=70" in row[0] for row in plan), plan
+        assert any("TypedFilter" in row[0] and "storedWhereRows=65" in row[0] for row in plan), plan
 
         prepare(b"length_scan", f"SELECT ord FROM {table} WHERE shop=$1 AND ord>=$2 AND $3>=ord "
                 "AND length(shop)>1 ORDER BY ord")
@@ -208,10 +210,18 @@ def main():
         simple("INSERT INTO counted_access VALUES (1,NULL),(2,'private'),(3,'private')", "INSERT 0 3")
         simple("CREATE ROLE count_reader", "CREATE ROLE")
         simple("GRANT SELECT ON counted_access TO count_reader", "GRANT")
+        simple("GRANT SELECT ON stored_filter_ranges TO count_reader", "GRANT")
+        simple("CREATE POLICY range_visible ON stored_filter_ranges FOR SELECT TO count_reader USING (n<3)",
+               "CREATE POLICY")
+        simple("ALTER TABLE stored_filter_ranges ENABLE ROW LEVEL SECURITY", "ALTER TABLE")
         simple("CREATE POLICY count_visible ON counted_access FOR SELECT TO count_reader USING (id<2)",
                "CREATE POLICY")
         simple("ALTER TABLE counted_access ENABLE ROW LEVEL SECURITY", "ALTER TABLE")
         simple("SET ROLE count_reader", "SET")
+        assert simple(clustered, "SELECT 3") == clustered_rows[:3]
+        plan = simple("EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF) " + clustered, "EXPLAIN")
+        assert any("TypedFilter" in row[0] and "rows=3" in row[0] for row in plan), plan
+        assert all("storedWhereRows" not in row[0] for row in plan), plan
         for tail in ("", " WHERE id>=0"):
             sql = "SELECT count(*), count(note) FROM counted_access" + tail
             assert simple(sql, "SELECT 1") == [["1", "0"]]
