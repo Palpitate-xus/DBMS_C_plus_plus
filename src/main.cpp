@@ -6023,13 +6023,25 @@ static bool unqualifiedJoinStar(const dbms::Expr* expression) {
     return expression && (expression->type == dbms::ExprType::A_Star || (literal && literal->value == "*"));
 }
 
-static bool simpleJoinSelectBody(const dbms::SelectStmt& select) {
+static const dbms::ColumnRefExpr* directJoinColumnCast(const dbms::Expr* expression) {
+    if (!expression || expression->preparedSubquery) return nullptr;
+    if (const auto* cast = dynamic_cast<const dbms::CastExpr*>(expression))
+        return !cast->implicit && cast->typeMods.empty()
+            ? dynamic_cast<const dbms::ColumnRefExpr*>(cast->operand.get()) : nullptr;
+    if (const auto* cast = dynamic_cast<const dbms::BinaryOpExpr*>(expression);
+        cast && cast->op == "::" && dynamic_cast<const dbms::LiteralExpr*>(cast->right.get()))
+        return dynamic_cast<const dbms::ColumnRefExpr*>(cast->left.get());
+    return nullptr;
+}
+
+static bool simpleJoinSelectBody(const dbms::SelectStmt& select, bool allowColumnCast = false) {
     return select.command == dbms::SqlCommand::Select && select.ctes.empty() && !select.distinct &&
         !select.having && select.windowDefs.empty() && !select.fetchFirst && !select.withTies &&
         !select.limitExpr && !select.offsetExpr &&
         dbms::QueryPlanner::supportsPreparedSourceSelectPlan(select) &&
-        all_of(select.selectList.begin(), select.selectList.end(), [](const auto& item) {
-            return dynamic_cast<const dbms::ColumnRefExpr*>(item.expr.get()) || unqualifiedJoinStar(item.expr.get());
+        all_of(select.selectList.begin(), select.selectList.end(), [&](const auto& item) {
+            return dynamic_cast<const dbms::ColumnRefExpr*>(item.expr.get()) || unqualifiedJoinStar(item.expr.get()) ||
+                (allowColumnCast && directJoinColumnCast(item.expr.get()));
         }) && all_of(select.orderBy.begin(), select.orderBy.end(), [](const auto& key) {
             return dynamic_cast<const dbms::ColumnRefExpr*>(key.expr.get());
         }) && simpleJoinFilter(select.whereClause.get());
@@ -6054,7 +6066,7 @@ static bool probesPreparedIntegerJoin(const dbms::SelectStmt& select) {
         if (item->type == dbms::FromItem::Type::Table) return true;
         const auto* child = dynamic_cast<const dbms::SelectStmt*>(item->subquery.get());
         return item->type == dbms::FromItem::Type::Subquery && child && child->fromClause &&
-            child->fromClause->type == dbms::FromItem::Type::Table && simpleJoinSelectBody(*child);
+            child->fromClause->type == dbms::FromItem::Type::Table && simpleJoinSelectBody(*child, true);
     };
     return simpleJoinSelectBody(select) && leaf(join->left.get()) && leaf(join->right.get());
 }
@@ -21895,6 +21907,30 @@ public:
         if (!left || !right || !dbms::PreparedJoinKeyFilter::prepareIntegerEquality(
                 query, join->joinCondition.get(), {left->ordinal}, {right->ordinal})) return false;
 
+        const auto builtinInteger = [](uint32_t oid) {
+            return oid == 20 || oid == 21 || oid == 23 || oid == 26;
+        };
+        const auto* equality = static_cast<const dbms::BinaryOpExpr*>(join->joinCondition.get());
+        for (const auto* range : {left, right}) {
+            if (range->source->type != dbms::FromItem::Type::Subquery) continue;
+            const auto* producer = dynamic_cast<const dbms::SelectStmt*>(range->source->subquery.get());
+            const auto projections = query.projectionBindings.find(producer);
+            if (projections == query.projectionBindings.end() || projections->second.size() != range->columns.size())
+                return false;
+            for (size_t i = 0; i < projections->second.size(); ++i) {
+                const auto* column = directJoinColumnCast(projections->second[i].expression);
+                if (!column) continue;
+                const auto usedAsKey = [&](const dbms::Expr* operand) {
+                    const auto* key = static_cast<const dbms::ColumnRefExpr*>(operand);
+                    return key->binding->sourceOrdinal == range->ordinal && key->binding->columnOrdinal == i;
+                };
+                // Only convert bound integer join keys here. A producer's
+                // unrelated casts can have other evaluation requirements.
+                if (!column->binding || column->binding->scopeDepth || !builtinInteger(column->binding->typeOid) ||
+                    !builtinInteger(range->columns[i].typeOid) ||
+                    (!usedAsKey(equality->left.get()) && !usedAsKey(equality->right.get()))) return false;
+            }
+        }
         for (const auto& range : query.sourceRanges) {
             if (range.source && range.source->type == dbms::FromItem::Type::Subquery) continue;
             if (!ordinaryPhysicalRange(range) || range.generatedRelation) return false;

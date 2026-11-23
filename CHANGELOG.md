@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>连接两张表时，只取第一条更快 · 2026-11-23</summary>
+
+例如，把两张表的编号转成同一种整数类型再匹配。只取一条结果时，一组测试从约 310 毫秒降到了约 6 毫秒。
+
+[测试报告](docs/test-report.md#integer-cast-join-limit-20261123) · [性能报告](docs/performance-report-2026-10-30.md#integer-cast-join-limit-cost-20261123)
+
+</details>
+
+<details>
 <summary>查子表的父表名称更快 · 2026-11-23</summary>
 
 例如，数据库里有 128 条表继承关系。在这组测试中，查一张子表的父表名称从约 170 毫秒降到了约 15 毫秒。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>建子表时可以指明父表的位置 · 2026-11-23</summary>
+<summary>查看更早的更新和版本记录</summary>
+
+## 2026-11-23 · 建子表时可以指明父表的位置
 
 例如，`live.orders` 和 `archive.orders` 同名。创建订单子表时，写 `INHERITS (live.orders)` 就会选中 `live` 里的父表。
 
 [使用说明](docs/MANUAL.md#查询继承表) · [测试报告](docs/test-report.md#qualified-inheritance-20261123) · [性能报告](docs/performance-report-2026-10-30.md#qualified-inheritance-cost-20261123)
-
-</details>
-
-<details>
-<summary>查看更早的更新和版本记录</summary>
 
 ## 2026-11-23 · 分页带上并列记录时也可以用索引
 

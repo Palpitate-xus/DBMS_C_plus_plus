@@ -2,6 +2,15 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="integer-cast-join-limit-comparison-20261123"></a>
+## 2026-11-23 · 连接得到足够结果后停止读行
+
+PostgreSQL 18.6 的执行器按 `LIMIT` 向子计划取行，规划时也会考虑返回首批行前的开销。SQLite 的子查询可以通过协程逐行交给外层，也可以在需反复读取时暂存结果。DuckDB 的流式限制算子按批处理，取够所需行后就结束。 [PostgreSQL 执行器](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/executor/nodeLimit.c) · [PostgreSQL 计划示例](https://www.postgresql.org/docs/18/using-explain.html) · [SQLite 子查询协程](https://www.sqlite.org/optoverview.html#subquery_co_routines) · [DuckDB 流式限制算子](https://github.com/duckdb/duckdb/blob/v1.4.4/src/execution/operator/helper/physical_streaming_limit.cpp)
+
+PostgreSQL 把 `smallint` 和 `integer` 转成 `oid` 时按 32 位无符号编号解释，`bigint` 则必须位于 0 到 4,294,967,295 之间。本项目的受测整数转换采用同样的结果和错误码。 [PostgreSQL 转换表](https://github.com/postgres/postgres/blob/REL_18_6/src/include/catalog/pg_cast.dat) · [PostgreSQL bigint 转换](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/utils/adt/int8.c#L1311)
+
+本项目让已绑定的整数等值连接直接使用两侧的查询结果。子查询可直接转换作为连接键的整数列。子查询只在外层需要时读行，连接仍可重用已读的右侧行，排序和筛选继续由 SQL 计划处理。完整的连接顺序和启动代价选择仍待实现。 [功能验证](test-report.md#integer-cast-join-limit-20261123) · [性能对照](performance-report-2026-10-30.md#integer-cast-join-limit-cost-20261123)
+
 <a id="oid-join-comparison-20261123"></a>
 ## 2026-11-23 · 用表编号连接目录
 

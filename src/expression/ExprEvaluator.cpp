@@ -5798,6 +5798,17 @@ ExprValue ExprEvaluator::transformUnknownIntegerInput(const ExprValue& input,
         target=="integer"?IntegerCastTarget::Integer:IntegerCastTarget::BigInt);
 }
 
+static Oid integerObjectId(const ExprValue& value, const std::string& type) {
+    const auto kind = type == "smallint" ? IntegerCastTarget::SmallInt :
+        type == "integer" ? IntegerCastTarget::Integer : IntegerCastTarget::BigInt;
+    const auto integer = castToInteger(value, kind);
+    long long number = 0;
+    if (!parseInt64Exact(integer.value, number) ||
+        (type == "bigint" && (number < 0 || static_cast<unsigned long long>(number) > std::numeric_limits<Oid>::max())))
+        throw DbError("22003", "OID out of range");
+    return static_cast<Oid>(number);
+}
+
 ExprValue ExprEvaluator::castReferenceValue(const ExprValue& v,
     const std::string& sourceType, const std::string& target,
     StorageEngine& engine, const std::string& database) {
@@ -5810,16 +5821,8 @@ ExprValue ExprEvaluator::castReferenceValue(const ExprValue& v,
         const auto source=common_type_detail::canonical(sourceType);
         Oid oid=0;
         if(regtype_cast_detail::reference(source) && v.objectOid)oid=*v.objectOid;
-        else if(source=="smallint" || source=="integer" || source=="bigint") {
-            const auto kind=source=="smallint"?IntegerCastTarget::SmallInt:
-                source=="integer"?IntegerCastTarget::Integer:IntegerCastTarget::BigInt;
-            const auto integer=castToInteger(v,kind);
-            long long number=0;
-            if(!parseInt64Exact(integer.value,number) ||
-               (source=="bigint" && (number<0 || static_cast<unsigned long long>(number)>std::numeric_limits<Oid>::max())))
-                throw DbError("22003","OID out of range");
-            oid=static_cast<Oid>(number);
-        } else if(common_type_detail::oidType(source) && !regtype_cast_detail::reference(source)) {
+        else if (isIntegerTypeName(source)) oid = integerObjectId(v, source);
+        else if(common_type_detail::oidType(source) && !regtype_cast_detail::reference(source)) {
             oid=v.objectOid?*v.objectOid:regtype_detail::numericOid(v.value);
         } else oid=stored_regtype_detail::inputOid(v.value,catalog,session,target);
         ExprValue result(target,stored_regtype_detail::outputOid(oid,catalog,session,target),false);
@@ -5945,6 +5948,15 @@ ExprValue ExprEvaluator::evalCast(const Expr* inputExpression, const RowContext&
     }
     const auto sourceType=ExprHelper::canonicalResultTypeName(v.typeName);
     const auto targetBase=ExprHelper::canonicalResultTypeName(target);
+    if (target == "oid" && (isIntegerTypeName(sourceType) || sourceType == "oid")) {
+        if (v.isNull) return ExprValue("oid", "", true);
+        const auto oid = sourceType == "oid"
+            ? (v.objectOid ? *v.objectOid : regtype_detail::numericOid(v.value))
+            : integerObjectId(v, sourceType);
+        ExprValue result("oid", std::to_string(oid));
+        result.objectOid = oid;
+        return result;
+    }
     // These actual pg_catalog declarations describe the virtual pg_class
     // schema. They grant no value-input codec. This is a selected runtime
     // conversion only; declaration resolution and dead-arm analysis are not

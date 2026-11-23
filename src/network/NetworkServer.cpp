@@ -4097,6 +4097,57 @@ bool describePreparedOwnedCatalog(const ProtocolQuerySyntax& syntax,Session& ses
     return !columns.empty();
 }
 
+bool describePreparedDerivedIntegerJoin(const ProtocolQuerySyntax& syntax, Session& session,
+    std::vector<PgColumnDescription>& columns) {
+    const auto& parsed = syntax.parse();
+    const auto* select = parsed.isValid() ? dynamic_cast<const SelectStmt*>(parsed.stmt.get()) : nullptr;
+    if (!select || !select->ctes.empty() || select->selectList.empty() ||
+        !QueryPlanner::supportsPreparedSourceSelectPlan(*select)) return false;
+    const auto* join = select->fromClause.get();
+    if (!join || join->type != FromItem::Type::Join || !join->left || !join->right) return false;
+    const auto* equality = dynamic_cast<const BinaryOpExpr*>(join->joinCondition.get());
+    if (!equality || equality->op != "=" ||
+        !dynamic_cast<const ColumnRefExpr*>(equality->left.get()) ||
+        !dynamic_cast<const ColumnRefExpr*>(equality->right.get())) return false;
+    const auto tableOrDerived = [](const FromItem& input) {
+        if (input.type == FromItem::Type::Table) return true;
+        const auto* child = dynamic_cast<const SelectStmt*>(input.subquery.get());
+        return input.type == FromItem::Type::Subquery && child && child->ctes.empty() &&
+            child->fromClause && child->fromClause->type == FromItem::Type::Table &&
+            QueryPlanner::supportsPreparedSourceSelectPlan(*child);
+    };
+    if ((join->left->type != FromItem::Type::Subquery && join->right->type != FromItem::Type::Subquery) ||
+        !tableOrDerived(*join->left) || !tableOrDerived(*join->right) ||
+        !std::all_of(select->selectList.begin(), select->selectList.end(), [](const auto& target) {
+            return dynamic_cast<const ColumnRefExpr*>(target.expr.get()) != nullptr;
+        })) return false;
+
+    auto* previous = currentSession();
+    setCurrentSession(&session);
+    struct Restore { Session* previous; ~Restore() { setCurrentSession(previous); } } restore{previous};
+    // Describe only needs the bound output. A cast in either source can
+    // fail when read, so do not create an executing plan here.
+    const auto query = g_engine.prepareBoundQuery(session.currentDB, syntax.sql(), {}, true);
+    const auto* root = static_cast<const SelectStmt*>(query.ast.get());
+    const auto& source = *root->fromClause;
+    const PreparedQuery::SourceRange* left = nullptr;
+    const PreparedQuery::SourceRange* right = nullptr;
+    for (const auto& range : query.sourceRanges) {
+        if (range.source == source.left.get()) left = &range;
+        if (range.source == source.right.get()) right = &range;
+    }
+    if (!left || !right || !PreparedJoinKeyFilter::prepareIntegerEquality(
+            query, source.joinCondition.get(), {left->ordinal}, {right->ordinal})) return false;
+    QueryResult shape;
+    for (const auto& field : query.output) {
+        shape.columns.push_back(field.name);
+        shape.columnTypes.push_back(field.type);
+    }
+    columns = describeProtocolColumns(shape, std::string{}, session, &query.output);
+    retainPreparedWindowOrigins(columns, query, session);
+    return !columns.empty();
+}
+
 // A typed quantified consumer owns whole-query metadata, not a guessed
 // BOOLEAN descriptor. Reuse pure preparation/planning before Describe so
 // missing names, operand types and constant-plan failures cannot arrive after
@@ -4527,6 +4578,7 @@ bool describePreparedResultShape(const ProtocolQuerySyntax& syntax, Session& ses
     if(describePreparedPgSequenceCatalog(syntax,session,columns,parameterOids))return true;
     if(describePreparedNamespaceCatalog(syntax,session,columns,parameterOids))return true;
     if (describePreparedBitNegation(syntax,session,columns,parameterOids)) return true;
+    if (parameterOids.empty() && describePreparedDerivedIntegerJoin(syntax,session,columns)) return true;
     if (describePreparedHavingResult(syntax, session, columns, parameterOids)) return true;
     if (describePreparedConflictPredicateResult(syntax, session, columns, parameterOids)) return true;
     if(describePreparedRecursiveCteResult(syntax,session,columns,parameterOids))return true;

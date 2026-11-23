@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-23 · 用转换后的整数连接时可以按需读取
+
+普通表子查询可直接转换作为等值连接键的内置整数或 `oid`，并沿用逐行连接。`LIMIT 0` 可以跳过两侧取行，取够行数后可以停止。受测的筛选、排序、偏移、重复值和外连接继续由同一查询计划处理。任意表达式、多来源子查询与通用的连接顺序优化仍待补齐，整数转 `oid` 的受测边界及扩展协议的列来源已核对。`QRY-01`、`QRY-02`、`QRY-03` 和 `OPT-02` 保持部分实现。 [功能验证](test-report.md#integer-cast-join-limit-20261123) · [性能对照](performance-report-2026-10-30.md#integer-cast-join-limit-cost-20261123) · [实现对照](postgresql-comparison.md#integer-cast-join-limit-comparison-20261123)
+
 ## 2026-11-23 · 按对象编号连接时可跳过不匹配的行
 
 两侧都是 `oid` 的直接等值连接可沿用整数键查找。保留重复匹配、`NULL` 规则、外连接和提前结束查询的行为。系统目录和带 `oid` 结果的子查询均有验证。多列连接、连接顺序优化和通用索引选择仍待补齐，`QRY-03` 和 `OPT-02` 保持部分实现。 [功能验证](test-report.md#oid-join-20261123) · [性能对照](performance-report-2026-10-30.md#oid-join-cost-20261123) · [实现对照](postgresql-comparison.md#oid-join-comparison-20261123)
