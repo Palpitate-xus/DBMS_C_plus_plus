@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>部分查询出错时会保留已查到的结果 · 2026-11-23</summary>
+
+比如前两条记录算出了结果，第三条遇到除零。数据库先发出前两条结果，再报告错误。
+
+[测试报告](docs/test-report.md#simple-query-runtime-result-20261123) · [性能报告](docs/performance-report-2026-10-30.md#simple-query-runtime-result-cost-20261123)
+
+</details>
+
+<details>
 <summary>条件互相矛盾时，计数可以直接返回零 · 2026-11-23</summary>
 
 比如统计库存大于 10 件、同时又小于 5 件的商品。数据库能看出两个条件无法同时成立，直接给出结果。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>按文字长度和数字筛选更快 · 2026-11-23</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-23 · 按文字长度和数字筛选更快
 
 比如找名称超过两个字、库存大于零的商品。数据库在读取时就能筛掉不符合条件的商品。
 
 [测试报告](docs/test-report.md#ordinary-stored-predicate-20261123) · [性能报告](docs/performance-report-2026-10-30.md#ordinary-stored-predicate-cost-20261123)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-23 · 符合条件的订单很少时，翻页更快
 

@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-23 · 普通查询的执行错误保留已完成结果
+
+普通查询执行受支持的只读计划时，执行错误响应带有已绑定的列说明和执行器完成的结果行。验证覆盖除零、整数溢出、无成功结束消息及失败事务状态。`PROTO-01` 和 `PROTO-04` 仍有其他协议行为待实现。[测试](test-report.md#simple-query-runtime-result-20261123) · [性能](performance-report-2026-10-30.md#simple-query-runtime-result-cost-20261123)
+
 ## 2026-11-23 · 判断计数条件是否可能成立
 
 普通单表计数可以证明受支持的同列范围与空值条件无法同时成立，并在锁定表后直接得到零行的计数。整数比较可以直接读取存储值。`OPT-03` 已验证这部分条件证明，登记为部分实现。更一般的常量传播、等价关系、连接改写和分区删除仍待补齐。[测试](test-report.md#ordinary-count-constraints-20261123) · [性能](performance-report-2026-10-30.md#ordinary-count-constraints-cost-20261123)

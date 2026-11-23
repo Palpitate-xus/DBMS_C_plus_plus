@@ -2,6 +2,18 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-23 preserve result metadata and completed rows before simple query execution errors",
+      "gap_ids": ["PROTO-01", "PROTO-04"],
+      "status": "partial",
+      "evidence": ["src/main.cpp", "src/executor/ExecutionPlan.cpp", "src/network/NetworkServer.cpp", "src/network/SimpleQueryResultScope.h", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/compat/cases/simple_query_runtime_result.sql", "tests/simple_query_runtime_result_protocol_e2e_test.py"],
+      "verification": [
+        "A planned read emits genuine result metadata and completed rows before an execution error on the simple receiver. Ordinary folded COUNT arguments and filters can fail during planning, before any descriptor is sent.",
+        "Matched all 35 targeted Simple Query observations against PostgreSQL 18.6, including failures and successful controls. Verified batch rollback, savepoints, connection reuse and recovery after process termination.",
+        "Legacy CTE execution and the separately recorded extended-protocol differences remain open."
+      ]
+    },
+    {
       "issue": "2026-11-23 exclude contradictory stored count predicates and compare fixed-width integers directly",
       "gap_ids": ["OPT-03", "QRY-07"],
       "status": "partial",

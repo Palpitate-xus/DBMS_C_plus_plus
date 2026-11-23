@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-23 · 普通查询出错时返回的结果
+
+PostgreSQL 在结果接收器启动时发送列说明，执行中逐行发送数据，发生错误时结束当前查询。SQLite 和 DuckDB 的 C API 也可以分别取得已准备语句的列信息及执行结果，只有 PostgreSQL 的比较涉及网络消息顺序。[PostgreSQL 消息规则](https://www.postgresql.org/docs/18/protocol-flow.html#PROTOCOL-FLOW-SIMPLE-QUERY) · [PostgreSQL 结果接收器](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/access/common/printtup.c) · [SQLite 列说明](https://www.sqlite.org/c3ref/column_count.html) · [DuckDB 预编译接口](https://duckdb.org/docs/1.5/clients/c/prepared)
+
+本项目的普通 `Query` 消息已能在受支持的只读查询执行失败时，先发送列说明和已经完成的行，再返回错误。列名、类型及 NULL 由实际结果接收器提供。[协议对照](test-report.md#simple-query-runtime-result-20261123) · [性能](performance-report-2026-10-30.md#simple-query-runtime-result-cost-20261123)
+
 ## 2026-11-23 · 判断计数条件是否可能成立
 
 PostgreSQL 区分条件必为 `FALSE` 和条件无法为 `TRUE` 两种结论，并将后者用于识别互相矛盾的筛选。DuckDB 合并同一表达式上的常量比较，发现冲突时可生成空结果。SQLite 在选择表和索引访问条件时，会沿等式关系寻找可以使用的常量比较。[PostgreSQL 条件证明](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/optimizer/util/predtest.c) · [DuckDB 条件合并](https://github.com/duckdb/duckdb/blob/v1.5.6/src/optimizer/filter_combiner.cpp) · [SQLite 查询条件](https://github.com/sqlite/sqlite/blob/version-3.54.1/src/where.c)

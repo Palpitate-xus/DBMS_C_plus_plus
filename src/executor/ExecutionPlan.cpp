@@ -16,6 +16,7 @@
 #include "executor/WindowAggregateState.h"
 #include "commands/StoredRowNull.h"
 #include "commands/HeapScanCursor.h"
+#include "network/SimpleQueryResultScope.h"
 #include "common/DbError.h"
 #include "common/TemporalStorageCodec.h"
 #include "access/BPTree.h"
@@ -548,6 +549,22 @@ struct PreparedSelectState {
         execution->prepareExpression(select().having.get());
         for (const auto& key : keys)
             if (key.target == noTarget) execution->prepareExpression(key.expression);
+        if (planRootConstants && !executionProvider && statement == query->ast.get() &&
+            dbms::SimpleQueryResultScope::active()) {
+            for (const auto& aggregate : aggregates) {
+                const auto* argument = aggregate.call->args.front().get();
+                const auto* star = dynamic_cast<const LiteralExpr*>(argument);
+                const bool planArgument = (!star || star->value != "*") &&
+                    !dynamic_cast<const ColumnRefExpr*>(argument);
+                if (aggregate.name != "count" || !aggregate.call->aggregateOrderKeys.empty() ||
+                    (!planArgument && !aggregate.call->filter)) continue;
+                if (!execution->aggregateColumnDemanded(aggregate.call)) continue;
+                // The root expression now reads a result slot. Its separate
+                // aggregate inputs must finish planning before delivery starts.
+                if (planArgument) execution->planExpressionConstants(aggregate.call->args.front().get());
+                execution->planExpressionConstants(aggregate.call->filter.get());
+            }
+        }
         for(const auto& stage:windowStages) {
             const bool demanded=std::any_of(stage.producers.begin(),stage.producers.end(),[&](size_t index) {
                 return execution->aggregateColumnDemanded(windows.at(index).call);

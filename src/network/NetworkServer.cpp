@@ -5,6 +5,7 @@
 #include "catalog/SystemCatalogRows.h"
 #include "expression/StoredRegtypeValue.h"
 #include "NetworkServer.h"
+#include "SimpleQueryResultScope.h"
 #include "CopyQuery.h"
 #include "common/version.h"
 #include "common/DbError.h"
@@ -7188,8 +7189,8 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session,
         } else {
             result.sqlState = "XX000";
         }
-        if(structuredError && structuredDml.available &&
-            structuredDml.runtimeErrorMetadata && !structuredDml.columns.empty()) {
+        if(structuredError && structuredDml.available && structuredDml.runtimeErrorMetadata &&
+            (!structuredDml.columns.empty() || SimpleQueryResultScope::active())) {
             result.resultSet=true;
             result.columns=structuredDml.columns;result.columnTypes=structuredDml.columnTypes;
             result.rowDescriptor=structuredDml.rowDescriptor;
@@ -7201,7 +7202,8 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session,
             result.commandTag.clear();
             result.columnDescriptions=ordinarySourceColumns.empty()
                 ? describeProtocolColumns(result,sql,session) : ordinarySourceColumns;
-            if (std::any_of(result.rowDescriptor.begin(), result.rowDescriptor.end(), [](const auto& field) {
+            if (SimpleQueryResultScope::active() ||
+                std::any_of(result.rowDescriptor.begin(), result.rowDescriptor.end(), [](const auto& field) {
                     return field.typeMetadata && field.typeMetadata->kind == DatumKind::Array &&
                         field.typeMetadata->actualOid != field.typeMetadata->codecOid;
                 }))
@@ -8671,6 +8673,7 @@ void handleClient(SecureSocket socket, std::string clientHost, CopyQueryFactory 
             if (message.type != 'S') continue;
         }
         if (message.type == 'Q') {
+            const SimpleQueryResultScope simpleQueryResult;
             // A simple-query message executes its statements under their own
             // per-statement timers, independent of a pending extended cycle.
             clearExtendedQueryTimeout();

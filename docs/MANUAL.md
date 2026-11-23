@@ -2474,6 +2474,8 @@ Simple Query 的一个 `Q` 消息可以包含多条顶层分号分隔语句；�
 一次 ReadyForQuery。空串、纯注释或只有分号的消息返回一次
 EmptyQueryResponse，不伪造 command tag。
 
+受支持的只读查询在执行中出错时，数据库先向客户端发出列说明和已经算出的行，再返回错误与事务状态。比如前两条记录的除法正常、第三条除以零时，前两条仍在响应中。语法、列绑定和常量规划出错时，直接返回错误。客户端应以错误和事务状态判断语句是否成功。[协议示例与测试](test-report.md#simple-query-runtime-result-20261123)
+
 执行首句前的原始语法预检目前仅证明词法错误、不可能命令头和严格DROP DOMAIN目标语法；
 其他已知命令仍交原接收者，不是完整SQL raw grammar。CREATE-then-use及到达执行阶段的语义错误
 不提前猜拒绝，不能仅因42601就将错误前移。范围见[R169](issue-review-r169-simple-query-raw-syntax.md)。

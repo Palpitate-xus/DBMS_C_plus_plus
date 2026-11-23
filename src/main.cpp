@@ -8,6 +8,7 @@
 #include "expression/ArrayDatumInput.h"
 #include "expression/StoredRegtypeValue.h"
 #include "expression/StoredReferenceOutput.h"
+#include "network/SimpleQueryResultScope.h"
 #include <algorithm>
 #include <charconv>
 #include "types/numeric.h"
@@ -22009,15 +22010,17 @@ public:
         // through validate(). Do not install the root definitions twice.
         auto plan=selectPlan(readRoot_,validation_.context(),frames,true,planRootConstants);
         const auto command=[&] {
-            // Ordinary top-level count/window failures happen after analysis
-            // established their descriptor. Preserve genuine row prefixes on
-            // the existing receiver, including actual window SQL children.
-            const bool windowOutput=any_of(query_->statementOutputs.begin(),query_->statementOutputs.end(),[](const auto& item) {
+            // A Simple Query that reached the planned read receiver can
+            // deliver its descriptor and any rows completed before failure.
+            const bool simpleRead = dbms::SimpleQueryResultScope::active() &&
+                storedFunctionHostDepth == 0 && !receiverRows && planRootConstants &&
+                readRoot_->command == dbms::SqlCommand::Select;
+            const bool windowOutput=!simpleRead && any_of(query_->statementOutputs.begin(),query_->statementOutputs.end(),[](const auto& item) {
                 const auto* select=dynamic_cast<const dbms::SelectStmt*>(item.first);
                 return select && hasCurrentQueryWindows(select);
             });
             const bool preservePrefix=executeDepth==1 && !hasWriter &&
-                (readRootDeclaredCollations_ || derivedArrayResult || windowOutput ||
+                (simpleRead || readRootDeclaredCollations_ || derivedArrayResult || windowOutput ||
                 (readRoot_->hasRowCountClause &&
                  (readRoot_->command==dbms::SqlCommand::Values || readRoot_->setOp!=dbms::SetOp::None)));
             const auto demand=receiverRows ? receiverRows : currentQueryRowDemand();
