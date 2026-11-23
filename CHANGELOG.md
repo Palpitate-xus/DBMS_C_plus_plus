@@ -1,18 +1,18 @@
 # 更新日志
 
 <details>
-<summary>写有长数组的查询更快返回 · 2026-11-23</summary>
+<summary>SQL 里直接写几千个数字，查询更快 · 2026-11-23</summary>
 
-当 SQL 里列出几千个数字时，数据库少读几遍同样的文字。查询即使只取第一行，也能更快返回。
+把一长串数字直接写在查询里时，数据库能更快读完这条 SQL。
 
 [测试报告](docs/test-report.md#array-query-startup-20261123) · [性能报告](docs/performance-report-2026-10-30.md#array-query-startup-cost-20261123)
 
 </details>
 
 <details>
-<summary>展开长整数数组更快 · 2026-11-23</summary>
+<summary>把一组整数拆成多行更快 · 2026-11-23</summary>
 
-数据里有几千个整数时，数据库可以少做很多重复的类型查找，完整读取和只取前几行都能更快返回。
+比如查询一组订单号，每行显示一个。读完整组数据所需的时间更短。
 
 [用法](docs/MANUAL.md#把数组展开成行) · [测试报告](docs/test-report.md#integer-array-cast-20261123) · [性能报告](docs/performance-report-2026-10-30.md#integer-array-cast-cost-20261123)
 
