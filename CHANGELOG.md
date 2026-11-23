@@ -1,27 +1,27 @@
 # 更新日志
 
 <details>
-<summary>按订单号取前几条记录更快 · 2026-11-23</summary>
+<summary>查订单号最大的几笔订单更快 · 2026-11-23</summary>
 
-例如，查看某家店订单号最大的 5 笔订单时，数据库可以沿着索引读取，取够就结束。
+比如查看一家店订单号最大的 5 笔订单，数据库可以按号码从大到小取出这 5 笔，省去另外排序。
 
 [测试报告](docs/test-report.md#composite-primary-order-20261123) · [性能报告](docs/performance-report-2026-10-30.md#composite-primary-order-cost-20261123)
 
 </details>
 
 <details>
-<summary>带参数的查询在扫描整张表时更快 · 2026-11-23</summary>
+<summary>逐条按名称或数字筛选记录更快 · 2026-11-23</summary>
 
-例如应用传入店铺编号查询订单时，数据库会先准备好比较条件，再逐行检查。
+比如在商品表里逐条查找名为「绿茶」的商品，数据库只需在查找前处理一次要比较的名称。
 
 [测试报告](docs/test-report.md#stored-literal-filter-20261123) · [性能报告](docs/performance-report-2026-10-30.md#stored-literal-filter-cost-20261123)
 
 </details>
 
 <details>
-<summary>可以更快地查某家店的一段订单号 · 2026-11-23</summary>
+<summary>查一家店指定号码范围内的订单更快 · 2026-11-23</summary>
 
-例如查一家店的第 100 到 110 号订单，数据库可以直接去找这一段。只按店铺查询时，订单少的店铺也可以用同样的办法定位。
+比如查一家店订单号在 100 到 110 之间的订单，数据库可以直接找到这一段。
 
 [用法](docs/MANUAL.md#用多列一起区分记录) · [测试报告](docs/test-report.md#composite-primary-range-20261123) · [性能报告](docs/performance-report-2026-10-30.md#composite-primary-range-cost-20261123)
 
