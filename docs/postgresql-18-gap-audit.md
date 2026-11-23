@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-23 · 长数组查询减少重复分词
+
+同一条 SQL 写入 2,048 个整数、只取首行，各轮中位耗时从 158–165 毫秒降到 92–102 毫秒。与 PostgreSQL 同轮测试，本项目约需 97 毫秒，PostgreSQL 约需 2 毫秒。当前调用链仍有重复解析，`SQL-01` 和 `OPT-01` 保持部分实现。[测试](test-report.md#array-query-startup-20261123) · [性能](performance-report-2026-10-30.md#array-query-startup-cost-20261123)
+
 ## 2026-11-23 · 减少整数数组的类型查找
 
 复用已知的内置整数类型后，同一查询读完 2,048 项的中位耗时从 279–294 毫秒降到 201–206 毫秒。与 PostgreSQL 同轮测试时，本项目需要 203–204 毫秒，PostgreSQL 需要 17 毫秒左右。`QRY-02` 和 `OPT-01` 保持部分实现。[测试](test-report.md#integer-array-cast-20261123) · [性能](performance-report-2026-10-30.md#integer-array-cast-cost-20261123)

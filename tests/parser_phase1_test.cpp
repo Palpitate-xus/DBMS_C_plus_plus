@@ -55,6 +55,24 @@ static const FunctionCallExpr* asFuncCall(const ExprPtr& expr) {
 int main() {
     SQLParser parser;
 
+    {
+        const std::string sql = "/* outer /* inner */ */ SELECT ARRAY[001, /* gap */ 2.5e1, 3 + 4, $1]";
+        const auto parsed = parser.parseForBinding(sql);
+        const auto* select = asSelect(parsed.stmt);
+        assert(parsed.success && select && select->selectList.size() == 1);
+        const auto* array = dynamic_cast<const ArrayExpr*>(select->selectList.front().expr.get());
+        assert(array && array->elements.size() == 4);
+        for (size_t i = 0; i < 2; ++i) {
+            const auto* literal = dynamic_cast<const LiteralExpr*>(array->elements[i].get());
+            const std::string value = i == 0 ? "001" : "2.5e1";
+            assert(literal && literal->value == value && literal->sourceBegin == sql.find(value) &&
+                   literal->sourceEnd == sql.find(value) + value.size());
+        }
+        const auto* sum = dynamic_cast<const BinaryOpExpr*>(array->elements[2].get());
+        const auto* parameter = dynamic_cast<const ParameterExpr*>(array->elements[3].get());
+        assert(sum && sum->op == "+" && parameter && parameter->slot == 0);
+    }
+
     // NATURAL is a key-selection modifier, not the row-preservation kind.
     for (const auto& entry : std::vector<std::pair<std::string, std::string>>{
              {"NATURAL JOIN", "NATURAL"},

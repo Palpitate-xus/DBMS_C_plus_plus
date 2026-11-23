@@ -880,10 +880,12 @@ std::string SQLParser::lexicalError(const std::string& sql) {
     return error;
 }
 
-std::optional<std::string> SQLParser::duplicateCteName(const std::string& sql) {
-    std::string lexicalError;
-    const auto tokens = tokenizeImpl(sql, &lexicalError);
-    if (!lexicalError.empty()) return std::nullopt;
+static std::optional<std::string> duplicateCteNameInTokens(const std::vector<std::string>& tokens) {
+    const auto isWith = [](const std::string& token) {
+        return token.size() == 4 && SQLParser::toLower(token) == "with";
+    };
+    const auto firstWith = std::find_if(tokens.begin(), tokens.end(), isWith);
+    if (firstWith == tokens.end()) return std::nullopt;
     // Build matching parentheses once: skipping nested CTE/query bodies must
     // not repeatedly traverse them for every enclosing WITH scope.
     std::vector<size_t> closes(tokens.size(), std::string::npos), opens;
@@ -904,10 +906,10 @@ std::optional<std::string> SQLParser::duplicateCteName(const std::string& sql) {
             if (!std::isalnum(ch) && ch != '_' && ch != '$' && ch < 0x80) return false;
         return true;
     };
-    for (size_t with = 0; with < tokens.size(); ++with) {
-        if (toLower(tokens[with]) != "with") continue;
+    for (size_t with = firstWith - tokens.begin(); with < tokens.size(); ++with) {
+        if (!isWith(tokens[with])) continue;
         size_t pos = with + 1;
-        if (pos < tokens.size() && toLower(tokens[pos]) == "recursive") ++pos;
+        if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "recursive") ++pos;
         std::set<std::string> names;
         while (pos < tokens.size() && isIdentifier(tokens[pos])) {
             const std::string name = parseRoutineIdentifier(tokens[pos++]);
@@ -915,12 +917,12 @@ std::optional<std::string> SQLParser::duplicateCteName(const std::string& sql) {
                 if (closes[pos] == std::string::npos) break;
                 pos = closes[pos] + 1;
             }
-            if (pos == tokens.size() || toLower(tokens[pos]) != "as") break;
+            if (pos == tokens.size() || SQLParser::toLower(tokens[pos]) != "as") break;
             ++pos;
-            if (pos < tokens.size() && toLower(tokens[pos]) == "not") {
-                if (pos + 1 == tokens.size() || toLower(tokens[pos + 1]) != "materialized") break;
+            if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "not") {
+                if (pos + 1 == tokens.size() || SQLParser::toLower(tokens[pos + 1]) != "materialized") break;
                 pos += 2;
-            } else if (pos < tokens.size() && toLower(tokens[pos]) == "materialized") ++pos;
+            } else if (pos < tokens.size() && SQLParser::toLower(tokens[pos]) == "materialized") ++pos;
             if (pos == tokens.size() || tokens[pos] != "(" ||
                 closes[pos] == std::string::npos) break;
             pos = closes[pos] + 1;
@@ -932,15 +934,29 @@ std::optional<std::string> SQLParser::duplicateCteName(const std::string& sql) {
     return std::nullopt;
 }
 
+std::optional<std::string> SQLParser::duplicateCteName(const std::string& sql) {
+    std::string error;
+    const auto tokens = tokenizeImpl(sql, &error);
+    return error.empty() ? duplicateCteNameInTokens(tokens) : std::nullopt;
+}
+
 std::vector<std::string> SQLParser::tokenizeImpl(const std::string& sql, std::string* error) {
     std::vector<std::string> tokens;
     std::vector<std::pair<size_t, size_t>> spans;
     std::string cur;
     size_t curBegin = 0;
+    bool hasPosition = false;
+    bool hasOverlaps = false;
     const auto emit = [&](std::string value, size_t begin, size_t end) {
+        if (value.size() == 8) {
+            const auto keyword = toLower(value);
+            hasPosition = hasPosition || keyword == "position";
+            hasOverlaps = hasOverlaps || keyword == "overlaps";
+        } else if (value.size() == 6 && !hasPosition) {
+            hasPosition = toLower(value) == "strpos";
+        }
         tokens.push_back(std::move(value));
-        spans.emplace_back(begin + (bindingParse ? bindingParse->base : 0),
-                           end + (bindingParse ? bindingParse->base : 0));
+        if (bindingParse) spans.emplace_back(begin + bindingParse->base, end + bindingParse->base);
     };
     const auto flush = [&](size_t end) {
         if (!cur.empty()) { emit(cur, curBegin, end); cur.clear(); }
@@ -1184,7 +1200,7 @@ std::vector<std::string> SQLParser::tokenizeImpl(const std::string& sql, std::st
     // comma when it appears inside a position()/strpos() argument list, so
     // the generic expression parser sees two arguments instead of an IN
     // comparison.
-    {
+    if (hasPosition) {
         int depth = 0;
         int posFuncDepth = -1;  // paren depth of an open position( call
         std::string prev;
@@ -1211,7 +1227,7 @@ std::vector<std::string> SQLParser::tokenizeImpl(const std::string& sql, std::st
     //   (s1, e1) OVERLAPS (s2, e2)
     // into a plain function call  overlaps(s1, e1, s2, e2)
     // so the generic expression parser never sees row constructors.
-    {
+    if (hasOverlaps) {
         for (size_t i = 0; i < tokens.size(); ++i) {
             if (toLower(tokens[i]) != "overlaps") continue;
             if (i == 0 || tokens[i - 1] != ")") continue;
@@ -1249,7 +1265,8 @@ std::vector<std::string> SQLParser::tokenizeImpl(const std::string& sql, std::st
             std::vector<std::string> out;
             std::vector<std::pair<size_t, size_t>> reordered;
             const auto append = [&](const std::string& value, size_t origin) {
-                out.push_back(value); reordered.push_back(spans[origin]);
+                out.push_back(value);
+                if (bindingParse) reordered.push_back(spans[origin]);
             };
             out.reserve(tokens.size());
             for (size_t j = 0; j < ls; ++j) append(tokens[j], j);
@@ -1809,9 +1826,9 @@ ParseResult SQLParser::parse(const std::string& inputSql) {
     }
     const std::string sql = inputSql.substr(offset);
     BindingSourceScope sourceScope(offset);
-    result.error = lexicalError(sql);
+    const auto leadingTokens = tokenizeImpl(sql, &result.error);
     if (!result.error.empty()) { result.sqlState = "42601"; return result; }
-    if (!executeArgumentSyntaxOnly) if (const auto duplicate = duplicateCteName(sql)) {
+    if (!executeArgumentSyntaxOnly) if (const auto duplicate = duplicateCteNameInTokens(leadingTokens)) {
         result.error = "WITH query name \"" + *duplicate +
             "\" specified more than once (SQLSTATE 42712)";
         return result;
@@ -1827,7 +1844,6 @@ ParseResult SQLParser::parse(const std::string& inputSql) {
 
     // parseSelect owns the WITH grammar head and delegates a genuine DML
     // primary statement to its own parser after retaining exact byte spans.
-    const auto leadingTokens = tokenize(sql);
     if (!leadingTokens.empty() && toLower(leadingTokens.front()) == "with")
         return parseSelect(sql);
 
@@ -2735,8 +2751,20 @@ static ExprPtr parseArrayConstructorContents(const std::vector<std::string>& tok
         return array;
     }
     while (pos < tokens.size()) {
-        auto element = tokens[pos] == "["
-            ? parseArrayConstructorContents(tokens, pos) : parseExpr(tokens, pos);
+        ExprPtr element;
+        if (tokens[pos] == "[") {
+            element = parseArrayConstructorContents(tokens, pos);
+        } else if (pos + 1 < tokens.size() && (tokens[pos + 1] == "," || tokens[pos + 1] == "]") &&
+                   isNumericToken(tokens[pos])) {
+            // The delimiter completes this literal; no operator can bind to it.
+            auto literal = std::make_unique<LiteralExpr>();
+            literal->value = tokens[pos];
+            markSource(literal.get(), tokens, pos, pos + 1);
+            ++pos;
+            element = std::move(literal);
+        } else {
+            element = parseExpr(tokens, pos);
+        }
         if (!element) return {};
         array->elements.push_back(std::move(element));
         if (pos < tokens.size() && tokens[pos] == "]") {

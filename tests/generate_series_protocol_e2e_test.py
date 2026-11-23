@@ -162,6 +162,9 @@ def main():
             ("SELECT * FROM unnest(NULL::integer[],ARRAY[4::bigint]) WITH ORDINALITY",
              [[None, "4", "1"]], ["unnest", "unnest", "ordinality"], [23, 20, 20]),
             ("SELECT * FROM unnest('{}'::int[]) WITH ORDINALITY", [], ["unnest", "ordinality"], [23, 20]),
+            ("/* numbers */ SELECT * FROM unnest(ARRAY[0001, /* item */ 23,10+2,(-55),NULL]) "
+             "WITH ORDINALITY AS u(v,n)",
+             [["1", "1"], ["23", "2"], ["12", "3"], ["-55", "4"], [None, "5"]], ["v", "n"], [23, 20]),
             ("SELECT * FROM unnest(ARRAY[NULL,(-32768)::smallint,32767::smallint]) WITH ORDINALITY AS u(v,n)",
              [[None, "1"], ["-32768", "2"], ["32767", "3"]], ["v", "n"], [21, 20]),
             ("SELECT * FROM unnest('[0:2]={-2147483648,NULL,2147483647}'::integer[]) WITH ORDINALITY AS u(v,n)",

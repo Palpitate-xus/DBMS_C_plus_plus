@@ -2,6 +2,11 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="array-query-startup-comparison-20261123"></a>
+## 2026-11-23 · 减少 SQL 解析中的重复分词
+
+PostgreSQL 的原始解析入口把词法扫描器交给语法分析器，之后再解析列和类型。DuckDB 的解析器先分词，再用标记游标遍历各条语句并保留原文位置。SQLite 在准备语句时将 SQL 编译成执行所用的字节码。本项目在一次语法解析内复用已有的词法标记，并让数组里的独立数字直接形成常量表达式。[PostgreSQL 原始解析](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/parser/parser.c) · [DuckDB 解析](https://github.com/duckdb/duckdb/blob/main/src/parser/parser.cpp) · [SQLite 准备语句](https://sqlite.org/c3ref/prepare.html)
+
 <a id="integer-array-cast-comparison-20261123"></a>
 ## 2026-11-23 · 数组展开前如何处理元素类型
 

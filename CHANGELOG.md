@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>写有长数组的查询更快返回 · 2026-11-23</summary>
+
+当 SQL 里列出几千个数字时，数据库少读几遍同样的文字。查询即使只取第一行，也能更快返回。
+
+[测试报告](docs/test-report.md#array-query-startup-20261123) · [性能报告](docs/performance-report-2026-10-30.md#array-query-startup-cost-20261123)
+
+</details>
+
+<details>
 <summary>展开长整数数组更快 · 2026-11-23</summary>
 
 数据里有几千个整数时，数据库可以少做很多重复的类型查找，完整读取和只取前几行都能更快返回。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>读取和导出生成的多行数据更快 · 2026-11-23</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-23 · 读取和导出生成的多行数据更快
 
 在一组测试中，读完生成的 4,096 行数据，用时从约 100 毫秒降到约 60 毫秒。导出同样的数据也更快。
 
 [用法](docs/MANUAL.md#并排读取多组函数结果) · [测试报告](docs/test-report.md#function-projection-20261123) · [性能报告](docs/performance-report-2026-10-30.md#function-projection-cost-20261123)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-23 · 可以把多组生成的数据并排显示
 
