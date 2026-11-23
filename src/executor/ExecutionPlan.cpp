@@ -1,3 +1,4 @@
+#include "commands/InheritanceGraph.h"
 #include "catalog/SystemCatalogRows.h"
 #include "catalog/PgDefaultCatalog.h"
 #include "ExecutionPlan.h"
@@ -5865,9 +5866,9 @@ std::vector<std::string> inheritedTableDescendants(StorageEngine& engine,
     std::map<std::string, std::vector<std::string>> edges;
     std::string line;
     while (std::getline(input, line)) {
-        const auto separator = line.find('|');
-        if (separator != std::string::npos)
-            edges[line.substr(0, separator)].push_back(line.substr(separator + 1));
+        if (line.empty()) continue;
+        const auto link = inheritance_graph::parse(line);
+        edges[std::string(link.parent)].emplace_back(link.child);
     }
     if (input.bad()) throw DbError("58030", "could not finish reading inheritance links");
     std::set<std::string> seen{parent};

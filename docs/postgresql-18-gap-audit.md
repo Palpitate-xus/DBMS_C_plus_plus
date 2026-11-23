@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-23 · 普通表的直接继承关系可以通过系统目录查询
+
+`pg_catalog.pg_inherits` 返回实际父子表编号、父表顺序以及解除分区状态。普通表的状态始终为 `false`。已验证跨 schema 同名表、解除和重新加入继承、改名、删除、旧目录升级及事务恢复。独立分区表、分区索引、并发解除分区，以及继承约束和权限的完整传播仍待实现。`CAT-07` 和 `CAT-12` 保持部分实现。 [功能验证](test-report.md#pg-inherits-20261123) · [性能对照](performance-report-2026-10-30.md#pg-inherits-cost-20261123) · [实现对照](postgresql-comparison.md#pg-inherits-comparison-20261123)
+
 ## 2026-11-23 · 普通表继承可跨 schema 绑定父表
 
 `CREATE TABLE … INHERITS`、`ALTER TABLE … INHERIT` 和 `NO INHERIT` 可识别写明 schema 的父表，保留引号内的点、大小写和双引号。已核对多父表语法、选择同名表、非法父表提示以及事务和重启后的关系。完整继承目录与传播规则仍待补齐，`CAT-12` 和 `QRY-12` 保持部分实现。 [功能验证](test-report.md#qualified-inheritance-20261123) · [性能对照](performance-report-2026-10-30.md#qualified-inheritance-cost-20261123) · [实现对照](postgresql-comparison.md#qualified-inheritance-comparison-20261123)

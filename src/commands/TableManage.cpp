@@ -22,6 +22,8 @@
 #include "commands/VacuumFullBackup.h"
 #include "common/DbError.h"
 #include "common/DatabaseMetadataWrite.h"
+#include "commands/InheritanceGraph.h"
+#include "catalog/PgInheritanceCatalog.h"
 #include "common/DataDirectory.h"
 #include "storage/VariableRow.h"
 #include "common/SqlArrayText.h"
@@ -23119,34 +23121,18 @@ DBStatus StorageEngine::dropTable(const std::string& dbname,
     std::string originalInheritance;
     std::string filteredInheritance;
     bool inheritanceChanged = false;
-    std::error_code inheritanceError;
-    if (std::filesystem::exists(inheritancePath, inheritanceError)) {
-        std::ifstream input(inheritancePath);
-        if (!input) {
-            return DBStatus::IO_ERROR;
+    try {
+        auto graph = inheritance_graph::read(inheritancePath);
+        originalInheritance = std::move(graph.bytes);
+        const auto unchangedEnd = std::remove_if(graph.edges.begin(), graph.edges.end(), [&](const auto& edge) {
+            return edge.parent == tablename || edge.child == tablename;
+        });
+        if (unchangedEnd != graph.edges.end()) {
+            inheritanceChanged = true;
+            graph.edges.erase(unchangedEnd, graph.edges.end());
+            filteredInheritance = inheritance_graph::serialize(graph.edges);
         }
-        std::ostringstream retained;
-        std::string line;
-        while (std::getline(input, line)) {
-            originalInheritance += line + '\n';
-            const size_t separator = line.find('|');
-            if (separator == std::string::npos) {
-                retained << line << '\n';
-                continue;
-            }
-            const std::string parent = line.substr(0, separator);
-            const std::string child = line.substr(separator + 1);
-            if (parent == tablename || child == tablename) {
-                inheritanceChanged = true;
-                continue;
-            }
-            retained << line << '\n';
-        }
-        if (input.bad()) {
-            return DBStatus::IO_ERROR;
-        }
-        filteredInheritance = retained.str();
-    } else if (inheritanceError) {
+    } catch (const DbError&) {
         return DBStatus::IO_ERROR;
     }
 
@@ -25192,38 +25178,25 @@ DBStatus StorageEngine::alterTableRenameTable(const std::string& dbname,
     std::string originalInheritanceBytes;
     std::string renamedInheritanceBytes;
     bool inheritanceChanged = false;
-    std::error_code inheritanceError;
-    if (std::filesystem::exists(inheritancePath, inheritanceError)) {
-        std::ifstream input(inheritancePath);
-        if (!input) {
-            return DBStatus::IO_ERROR;
-        }
-        std::ostringstream rewritten;
-        std::string line;
-        while (std::getline(input, line)) {
-            originalInheritanceBytes += line + '\n';
-            const size_t separator = line.find('|');
-            if (separator == std::string::npos) {
-                rewritten << line << '\n';
-                continue;
-            }
-            std::string parent = line.substr(0, separator);
-            std::string child = line.substr(separator + 1);
-            if (parent == oldName) {
-                parent = newName;
+    try {
+        auto graph = inheritance_graph::read(inheritancePath);
+        originalInheritanceBytes = std::move(graph.bytes);
+        for (auto& edge : graph.edges) {
+            if (edge.parent == oldName) {
+                edge.parent = newName;
                 inheritanceChanged = true;
             }
-            if (child == oldName) {
-                child = newName;
+            if (edge.child == oldName) {
+                edge.child = newName;
                 inheritanceChanged = true;
             }
-            rewritten << parent << '|' << child << '\n';
         }
-        if (input.bad()) {
-            return DBStatus::IO_ERROR;
+        if (inheritanceChanged) {
+            if (newName.find_first_of("|\r\n") != std::string::npos)
+                return DBStatus::FEATURE_NOT_SUPPORTED;
+            renamedInheritanceBytes = inheritance_graph::serialize(graph.edges);
         }
-        renamedInheritanceBytes = rewritten.str();
-    } else if (inheritanceError) {
+    } catch (const DbError&) {
         return DBStatus::IO_ERROR;
     }
 
@@ -40312,6 +40285,55 @@ std::vector<std::vector<ExprValue>> StorageEngine::getSequenceCatalogRows(const 
     return rows;
 }
 
+std::vector<std::vector<ExprValue>> inheritance_catalog::rows(
+    StorageEngine& engine, const std::string& database) {
+    const auto ownership = engine.catalogReadOwnership(database);
+    if (!ownership.mayReadCurrentFiles)
+        throw DbError("55P03", "inheritance catalog read conflicts with an active database writer");
+    const auto metadata = engine.catalogService().metadataSnapshot(database, false);
+    default_catalog::validate(metadata, relationOid, name, fields);
+    const auto graph = inheritance_graph::read(engine.dbPath(database) / ".inherits");
+    if (graph.edges.empty()) return {};
+
+    std::unordered_map<Oid, std::string_view> namespaces;
+    for (const auto& space : metadata.namespaces) namespaces.emplace(space.oid, space.nspname);
+    std::unordered_map<std::string, Oid> relations, legacyPublic;
+    for (const auto& relation : metadata.relations) {
+        if (relation.relkind != 'r' && relation.relkind != 'f') continue;
+        const auto space = namespaces.find(relation.relnamespace);
+        if (space == namespaces.end()) continue;
+        const auto schema = space->second;
+        std::string physical;
+        if (schema == "public") {
+            physical = relation.relname;
+            legacyPublic.emplace("public__" + physical, relation.oid);
+        } else if (schema.substr(0, 8) == "pg_temp_") {
+            physical = "__tmp_" + std::string(schema.substr(8)) + '_' + relation.relname;
+        } else {
+            physical = std::string(schema) + "__" + relation.relname;
+        }
+        relations.emplace(std::move(physical), relation.oid);
+    }
+    const auto relationFor = [&](const std::string& physical) {
+        const auto found = relations.find(physical);
+        if (found != relations.end()) return found->second;
+        const auto legacy = legacyPublic.find(physical);
+        return legacy == legacyPublic.end() ? INVALID_OID : legacy->second;
+    };
+    std::vector<std::vector<ExprValue>> result;
+    result.reserve(graph.edges.size());
+    for (const auto& edge : graph.edges) {
+        checkForQueryInterrupt();
+        const auto child = relationFor(edge.child);
+        const auto parent = relationFor(edge.parent);
+        // Legacy storage-only relations have no SQL catalog identity.
+        if (!child || !parent) continue;
+        result.push_back({ExprValue("oid", std::to_string(child)), ExprValue("oid", std::to_string(parent)),
+            ExprValue("integer", std::to_string(edge.sequence)), ExprValue("boolean", "f")});
+    }
+    return result;
+}
+
 // Full database-owned pg_stats source. The separate eight-column native
 // compatibility renderer below retains its existing public API and storage.
 std::vector<std::vector<ExprValue>> StorageEngine::getAnalyzedStatisticsRows(const std::string& dbname) const {
@@ -42291,7 +42313,8 @@ decltype(auto) StorageEngine::withQueryBindingMetadata(const std::string& dbname
             std::vector<std::string> schemas;
             const Session* session = currentSession();
             if (!requested.schema.empty()) schemas.push_back(requested.schema);
-            else if (requested.name == "pg_type") schemas = effectiveRelationSearchPath(session);
+            else if (requested.name == "pg_type" || requested.name == inheritance_catalog::name)
+                schemas = effectiveRelationSearchPath(session);
             else {
                 std::string canonical; std::vector<std::string> path;
                 if (!session || !parseSessionSearchPath(session->searchPath, path, canonical))
@@ -42316,6 +42339,7 @@ decltype(auto) StorageEngine::withQueryBindingMetadata(const std::string& dbname
                         {"pg_attribute", system_catalog::attributeDescriptor()},
                         {"pg_attrdef", default_catalog::descriptor()},
                         {"pg_depend", default_catalog::dependencyDescriptor()},
+                        {"pg_inherits", inheritance_catalog::descriptor()},
                         {"pg_namespace", ownedNamespaceCatalogDescriptor()},
                         {"pg_settings", system_catalog::settingsDescriptor()},
                         {"pg_stat_activity", {{"pid","integer"},{"datname","name"},{"usename","name"},{"state","text"},{"query","text"}}}
@@ -42336,6 +42360,9 @@ decltype(auto) StorageEngine::withQueryBindingMetadata(const std::string& dbname
                         if(requested.name=="pg_attribute")system_catalog::validateRead(catalog,1249,"pg_attribute",75,270,system_catalog::attributeFields,20);
                         if(requested.name=="pg_attrdef")default_catalog::validate(catalog,2604,"pg_attrdef",default_catalog::fields);
                         if(requested.name=="pg_depend")default_catalog::validate(catalog,2608,"pg_depend",default_catalog::dependencyFields);
+                        if (requested.name == inheritance_catalog::name)
+                            default_catalog::validate(catalog, inheritance_catalog::relationOid,
+                                inheritance_catalog::name, inheritance_catalog::fields);
                         for(auto& column:description.columns) {
                             column.typeOid=mapBuiltinTypeNameToOid(column.type);
                             if(column.typeOid)column.typeMetadata=metadata.datumType(column.type,column.typeOid);
@@ -64870,11 +64897,9 @@ std::vector<std::string> StorageEngine::getInheritedChildren(const std::string& 
     if (!ifs) return children;
     std::string line;
     while (std::getline(ifs, line)) {
-        size_t sep = line.find('|');
-        if (sep == std::string::npos) continue;
-        std::string parent = line.substr(0, sep);
-        std::string child = line.substr(sep + 1);
-        if (parent == parentName) children.push_back(child);
+        if (line.empty()) continue;
+        const auto link = inheritance_graph::parse(line);
+        if (link.parent == parentName) children.emplace_back(link.child);
     }
     return children;
 }

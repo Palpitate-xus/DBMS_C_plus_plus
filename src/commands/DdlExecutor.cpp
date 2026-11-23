@@ -9,6 +9,7 @@
 #include "commands/DdlExecutor.h"
 #include "commands/DmlExecutor.h"
 #include "commands/DdlTransaction.h"
+#include "commands/InheritanceGraph.h"
 #include "common/DatabaseMetadataWrite.h"
 #include "commands/DdlRewrite.h"
 #include "commands/SchemaNamespace.h"
@@ -4016,49 +4017,17 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                 const DatabaseMetadataWrite write(g_engine.dbPath(s.currentDB));
                 if (!write.acquired())
                     throw DbError("55P03", "another backend is publishing database metadata");
-                std::ostringstream rewritten;
-                bool edgeFound = false;
-                bool graphChanged = false;
-                std::error_code inheritanceError;
-                if (std::filesystem::exists(path, inheritanceError)) {
-                    std::ifstream input(path);
-                    if (!input) {
-                        std::cout << "Could not read inheritance metadata"
-                                  << std::endl;
-                        return true;
-                    }
-                    std::string line;
-                    while (std::getline(input, line)) {
-                        const size_t separator = line.find('|');
-                        if (separator == std::string::npos) {
-                            rewritten << line << '\n';
-                            continue;
-                        }
-                        const std::string storedParent =
-                            line.substr(0, separator);
-                        const std::string storedChild =
-                            line.substr(separator + 1);
-                        if (storedParent == parentName &&
-                            storedChild == tableName) {
-                            edgeFound = true;
-                            if (sub.action ==
-                                AlterTableStmt::Action::NoInherit) {
-                                graphChanged = true;
-                                continue;
-                            }
-                        }
-                        rewritten << line << '\n';
-                    }
-                    if (input.bad()) {
-                        std::cout << "Could not read inheritance metadata"
-                                  << std::endl;
-                        return true;
-                    }
-                } else if (inheritanceError) {
-                    std::cout << "Could not inspect inheritance metadata"
-                              << std::endl;
+                inheritance_graph::Image graph;
+                try {
+                    graph = inheritance_graph::read(path);
+                } catch (const DbError& error) {
+                    std::cout << error.what() << std::endl;
                     return true;
                 }
+                const auto existing = std::find_if(graph.edges.begin(), graph.edges.end(), [&](const auto& edge) {
+                    return edge.parent == parentName && edge.child == tableName;
+                });
+                const bool edgeFound = existing != graph.edges.end();
                 if (sub.action == AlterTableStmt::Action::Inherit &&
                     edgeFound) {
                     std::cout << "Relation \"" << stmt->tableName
@@ -4075,11 +4044,14 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                     return true;
                 }
                 if (sub.action == AlterTableStmt::Action::Inherit) {
-                    rewritten << parentName << '|' << tableName << '\n';
-                    graphChanged = true;
+                    int32_t highest = 0;
+                    for (const auto& edge : graph.edges)
+                        if (edge.child == tableName) highest = std::max(highest, edge.sequence);
+                    graph.edges.push_back({parentName, tableName, inheritance_graph::nextSequence(highest)});
+                } else {
+                    graph.edges.erase(existing);
                 }
-                if (graphChanged &&
-                    !index_file::writeAtomically(path, rewritten.str())) {
+                if (!index_file::writeAtomically(path, inheritance_graph::serialize(graph.edges))) {
                     std::cout << "Could not persist inheritance metadata"
                               << std::endl;
                     return true;
@@ -7238,48 +7210,26 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
     if (!inheritedParents.empty()) {
         inheritancePath = std::filesystem::path(g_engine.dbPath(s.currentDB)) /
             ".inherits";
-        std::error_code inheritanceError;
-        if (std::filesystem::exists(inheritancePath, inheritanceError)) {
-            if (!std::filesystem::is_regular_file(
-                    inheritancePath, inheritanceError) || inheritanceError) {
-                std::cout << "Could not inspect inheritance metadata"
-                          << std::endl;
-                return true;
-            }
-            std::ifstream input(inheritancePath, std::ios::binary);
-            if (!input) {
-                std::cout << "Could not read inheritance metadata" << std::endl;
-                return true;
-            }
-            inheritanceMetadata.assign(
-                std::istreambuf_iterator<char>(input),
-                std::istreambuf_iterator<char>());
-            if (input.bad()) {
-                std::cout << "Could not read inheritance metadata" << std::endl;
-                return true;
-            }
-        } else if (inheritanceError) {
-            std::cout << "Could not inspect inheritance metadata" << std::endl;
+        inheritance_graph::Image graph;
+        try {
+            graph = inheritance_graph::read(inheritancePath);
+        } catch (const DbError& error) {
+            std::cout << error.what() << std::endl;
             return true;
         }
-
-        std::set<std::pair<std::string, std::string>> existingEdges;
-        std::istringstream existingLines(inheritanceMetadata);
-        std::string line;
-        while (std::getline(existingLines, line)) {
-            const size_t separator = line.find('|');
-            if (separator == std::string::npos) continue;
-            existingEdges.emplace(line.substr(0, separator),
-                                  line.substr(separator + 1));
+        int32_t highest = 0;
+        std::set<std::string> existingParents;
+        for (const auto& edge : graph.edges) {
+            if (edge.child != tname) continue;
+            highest = std::max(highest, edge.sequence);
+            existingParents.insert(edge.parent);
         }
         for (const auto& parent : inheritedParents) {
-            if (!existingEdges.emplace(parent, tname).second) continue;
-            if (!inheritanceMetadata.empty() &&
-                inheritanceMetadata.back() != '\n') {
-                inheritanceMetadata.push_back('\n');
-            }
-            inheritanceMetadata += parent + "|" + tname + "\n";
+            if (!existingParents.insert(parent).second) continue;
+            highest = inheritance_graph::nextSequence(highest);
+            graph.edges.push_back({parent, tname, highest});
         }
+        inheritanceMetadata = inheritance_graph::serialize(graph.edges);
     }
 
     // Duplicate names and invalid definitions can return without copying the

@@ -4,6 +4,44 @@
 
 > 复核发现，几组早期 COPY 计时在每个对照场景中使用了固定的执行顺序。耗时差可能包含顺序影响。这项问题涉及默认值求值、按列查找、默认值标记、短 CSV 导出和短查询导出的配对计时。[默认值求值](#copy-default-evaluation-order-cost-20261122) · [按列查找](#copy-identity-input-cost-20261122) · [默认值标记](#copy-default-marker-cost-20261122) · [CSV 导出](#copy-csv-out-cost-20261122) · [查询导出](#copy-query-stdout-cost-20261122)
 
+<a id="pg-inherits-cost-20261123"></a>
+## 2026-11-23 · 读取直接继承关系的耗时
+
+同机使用 Intel Xeon E5-2678 v3，两个项目版本用 GCC 13.3、CMake C++17 和 `-O2` 编译，关闭 OpenSSL。旧版为 `c6b0e5a2`。旧版与新版用普通父表查询对照，新版与 PostgreSQL 18.6 还执行三条目录查询。
+
+在每个实例中，先用 `CREATE TABLE meta_parent_0(id integer)` 到 `meta_parent_3` 创建四张空表。再建 `meta_child_0` 至 `meta_child_7`，每张都用 `INHERITS(meta_parent_0,meta_parent_1,meta_parent_2,meta_parent_3)` 继承这四张表。向八张子表分别插入编号 1 至 8。共有 32 条直接继承关系。
+
+```sql
+SELECT count(*) AS v FROM pg_catalog.pg_inherits;
+SELECT p.relname, i.inhseqno
+FROM pg_catalog.pg_inherits i
+JOIN pg_catalog.pg_class p ON p.oid = i.inhparent
+JOIN pg_catalog.pg_class c ON c.oid = i.inhrelid
+WHERE c.relname = 'meta_child_3'
+ORDER BY i.inhseqno;
+SELECT inhseqno FROM pg_catalog.pg_inherits WHERE inhrelid = 0::oid;
+SELECT id+0 AS v FROM meta_parent_0 ORDER BY id LIMIT 4;
+```
+
+计时从本机 TCP 发送 SQL 到收到就绪消息。每个版本每条语句每轮预热 4 次，取 28 次计时。两个版本交替发送查询，每条结果都核对值、列类型和完成消息。第二轮交换客户端和服务端 CPU。P95 取每轮 28 次中的第 27 小值。
+
+旧版与新版使用内存盘，在 CPU 21/22 上做普通父表查询对照。两轮中位数分别落在 4.67–4.79 和 4.72–4.79 毫秒，P95 分别落在 4.96–6.10 和 5.64–5.76 毫秒。这组查询未测出稳定的速度变化。旧版没有 `pg_inherits`，目录查询从 PostgreSQL 对照建立基准。
+
+下面是各轮中位数和 P95 的范围，单位为毫秒。内存盘对照用 CPU 25/26，ext4 对照用 27/28。
+
+| 存储 | 查询 | 项目中位数 | PostgreSQL 中位数 | 项目 P95 | PostgreSQL P95 |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 内存盘 | 统计全部关系 | 3.33–3.39 | 0.23–0.25 | 3.42–3.54 | 0.26–0.27 |
+| 内存盘 | 查一张子表的父表名 | 24.73–25.33 | 0.53–0.54 | 26.38–27.14 | 0.82–0.84 |
+| 内存盘 | 查不存在的子表编号 | 6.02–6.32 | 0.20–0.21 | 6.32–6.59 | 0.24–0.25 |
+| 内存盘 | 查普通父表前 4 行 | 4.30–4.32 | 0.33–0.34 | 4.54–4.58 | 0.36–0.39 |
+| ext4 | 统计全部关系 | 9.99–10.74 | 0.31–0.34 | 14.62–17.07 | 0.43–0.51 |
+| ext4 | 查一张子表的父表名 | 33.08–33.43 | 0.59–0.61 | 36.72–37.31 | 0.85–0.87 |
+| ext4 | 查不存在的子表编号 | 9.26–13.77 | 0.20–0.27 | 10.12–22.63 | 0.23–0.47 |
+| ext4 | 查普通父表前 4 行 | 7.96–12.76 | 0.33–0.55 | 10.58–19.77 | 0.41–0.79 |
+
+这组测试中，查询一张子表的父表名耗时最高，内存盘中位数约为 PostgreSQL 的 46–48 倍。当前会先读取直接关系和关系目录，再执行连接与筛选。测试只覆盖一个连接和 32 条关系。 [功能和恢复验证](test-report.md#pg-inherits-20261123)
+
 <a id="qualified-inheritance-cost-20261123"></a>
 ## 2026-11-23 · 指定父表所在 schema 的建表与修改耗时
 

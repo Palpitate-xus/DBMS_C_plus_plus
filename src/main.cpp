@@ -6,6 +6,7 @@
 #include "catalog/type_catalog.h"
 #include "catalog/TypeCatalogScan.h"
 #include "catalog/SystemCatalogRows.h"
+#include "catalog/PgInheritanceCatalog.h"
 #include "catalog/PgDefaultCatalog.h"
 #include "expression/ArrayDatumInput.h"
 #include "expression/StoredRegtypeValue.h"
@@ -21469,6 +21470,8 @@ class PreparedWithDmlRuntime {
                     g_engine.catalogService().metadataSnapshot(session_.currentDB,true),range.relationName=="pg_depend"));
             } else if(range.relationSchema=="pg_catalog" && range.relationName=="pg_sequence") {
                 virtualRows=make_shared<dbms::PreparedQueryRows>(g_engine.getSequenceCatalogRows(session_.currentDB));
+            } else if (range.relationSchema == "pg_catalog" && range.relationName == dbms::inheritance_catalog::name) {
+                virtualRows = make_shared<dbms::PreparedQueryRows>(dbms::inheritance_catalog::rows(g_engine, session_.currentDB));
             } else if(range.relationSchema=="pg_catalog" && range.relationName=="pg_stats") {
                 statisticsRows=make_shared<optional<dbms::PreparedQueryRows>>();
             } else if(range.relationSchema=="pg_catalog" && range.relationName=="pg_namespace") {

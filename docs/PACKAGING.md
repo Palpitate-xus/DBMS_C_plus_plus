@@ -70,6 +70,10 @@ sudo apt install cmake g++ make zlib1g-dev libicu-dev
 [R136](issue-review-r136-temporal-microsecond-storage.md)，不能据此推导整个数据目录的升级/
 降级或崩溃恢复已全面验收。
 
+## 继承目录格式
+
+新版可直接读取旧版的两字段 `.inherits` 记录。旧记录没有保存序号，升级时按同一个子表的父表出现顺序推算。新版删除中间父表后会在需要时写入第三个字段，保留其余父表的原序号。切回只识别两字段的程序时使用升级前的数据目录备份。 [恢复验证](test-report.md#pg-inherits-20261123)
+
 ## 目录约定（显式 data directory）
 
 每次正常启动都必须用 `-D/--data-dir` 或 `DBMS_DATA_DIR` 显式选择数据根；

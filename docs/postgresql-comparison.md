@@ -2,6 +2,13 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="pg-inherits-comparison-20261123"></a>
+## 2026-11-23 · 查询直接表继承关系
+
+PostgreSQL 的 `pg_inherits` 为每个直接父子关系返回表编号与父表顺序，也覆盖分区索引及分区正在解除的状态。SQLite 的 `sqlite_schema` 记录表、索引、视图和触发器，DuckDB 提供查询表和约束等信息的目录函数。 [PostgreSQL pg_inherits](https://www.postgresql.org/docs/18/catalog-pg-inherits.html) · [SQLite 目录](https://www.sqlite.org/schematab.html) · [DuckDB 目录函数](https://www.duckdb.org/docs/1.5/sql/meta/duckdb_table_functions)
+
+本项目通过同一份继承记录向查询和系统目录提供普通表之间的直接关系。解除继承后保留其余父表的原序号，重新加入时取当前最大序号加一。目录返回 `pg_class` 里实际的表编号。已有分区使用父表内部的存储文件，独立分区表和分区索引仍需接入。 [功能和恢复验证](test-report.md#pg-inherits-20261123) · [性能对照](performance-report-2026-10-30.md#pg-inherits-cost-20261123)
+
 <a id="qualified-inheritance-comparison-20261123"></a>
 ## 2026-11-23 · 继承关系按完整表名选择父表
 

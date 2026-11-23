@@ -1537,6 +1537,17 @@ INSERT INTO archive.orders_2025 VALUES (1, '历史订单');
 SELECT id, note FROM live.orders;
 ```
 
+系统目录 `pg_catalog.pg_inherits` 可以查询普通表的直接继承关系。`inhrelid` 是子表编号，`inhparent` 是父表编号，`inhseqno` 是父表顺序。解除某个父表后，其他父表的序号保持不变。普通继承的 `inhdetachpending` 始终为 `false`，分区关系仍待支持。下面用 `pg_class` 把编号换成表名。 [目录验证](test-report.md#pg-inherits-20261123)
+
+```sql
+SELECT child.relname AS child_table, parent.relname AS parent_table, i.inhseqno
+FROM pg_catalog.pg_inherits AS i
+JOIN pg_catalog.pg_class AS child ON child.oid = i.inhrelid
+JOIN pg_catalog.pg_class AS parent ON parent.oid = i.inhparent
+WHERE child.relname = 'orders_2025'
+ORDER BY i.inhseqno;
+```
+
 查询普通的父表时，可以读取父表、子表以及更深层后代表中的记录。即使同一张表有多条继承路径，也只读取一次。查询按父表的列名读取各表的数据，再对全部结果排序和分页。`ONLY` 只读取指定的表。
 
 ```sql

@@ -13,6 +13,7 @@
 #include "commands/SequenceStorageName.h"
 #include "utils/Session.h"
 #include "common/DatabaseMetadataWrite.h"
+#include "catalog/PgInheritanceCatalog.h"
 #include "common/DbError.h"
 #include "access/IndexFileUtil.h"
 #include <filesystem>
@@ -233,6 +234,23 @@ std::shared_ptr<CatalogManager> loadOwnedCatalog(
     }
     const bool initializedClassCatalog=class_catalog::bootstrapRelation(*catalog);
     const bool initializedOwnedCatalogs=system_catalog::bootstrapRelations(*catalog,publishedSystemCatalog);
+    const auto inheritanceMarker = directory / ".inheritance_catalog_version";
+    std::error_code inheritanceError;
+    const auto inheritanceStatus = fs::symlink_status(inheritanceMarker, inheritanceError);
+    const bool publishedInheritance = fs::exists(inheritanceStatus);
+    if (inheritanceError && inheritanceError != std::errc::no_such_file_or_directory)
+        throw DbError("58030", "could not inspect inheritance catalog version");
+    if (publishedInheritance) {
+        if (!fs::is_regular_file(inheritanceStatus))
+            throw DbError("XX001", "invalid inheritance catalog version");
+        std::ifstream input(inheritanceMarker, std::ios::binary);
+        if (!input) throw DbError("58030", "could not read inheritance catalog version");
+        const std::string bytes((std::istreambuf_iterator<char>(input)), {});
+        if (input.bad() || bytes != inheritance_catalog::version)
+            throw DbError("XX001", "invalid inheritance catalog version");
+    }
+    const bool initializedInheritance = default_catalog::bootstrapOne(*catalog,
+        inheritance_catalog::relationOid, inheritance_catalog::name, inheritance_catalog::fields, publishedInheritance);
     const bool publishedDefaultCatalog = default_catalog::published(directory);
     const bool initializedDefaultCatalog = default_catalog::bootstrap(*catalog, publishedDefaultCatalog);
     const auto sequenceMarker=directory/".sequence_catalog_version";
@@ -282,8 +300,11 @@ std::shared_ptr<CatalogManager> loadOwnedCatalog(
         }
     }
     migrateLegacyPublicDottedSequences(engine, database, *catalog);
-    if((initializedClassCatalog || initializedOwnedCatalogs || initializedSequenceCatalog || initializedStatisticsView || initializedSystemAttributes || initializedTypeProperties || initializedCatalogCollations || initializedPhysicalArrays || initializedDefaultCatalog || !publishedDefaultCatalog || !publishedTypeProperties || !publishedCatalogCollations || !publishedPhysicalArrays) && !catalog->persistAll())
+    if((initializedClassCatalog || initializedOwnedCatalogs || initializedInheritance || initializedSequenceCatalog || initializedStatisticsView || initializedSystemAttributes || initializedTypeProperties || initializedCatalogCollations || initializedPhysicalArrays || initializedDefaultCatalog || !publishedDefaultCatalog || !publishedTypeProperties || !publishedCatalogCollations || !publishedPhysicalArrays) && !catalog->persistAll())
         throw DbError("58030","could not publish initialized system view identities");
+    if (!publishedInheritance && index_file::writeAtomicallyNoReplace(inheritanceMarker,
+            inheritance_catalog::version) != index_file::WriteResult::OK)
+        throw DbError("58030", "could not publish inheritance catalog version");
     if(!publishedSequenceCatalog &&
        index_file::writeAtomicallyNoReplace(sequenceMarker,sequenceVersion)!=index_file::WriteResult::OK)
         throw DbError("58030","could not publish sequence catalog version");

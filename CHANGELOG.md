@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>可以查询一张表继承了哪些表 · 2026-11-23</summary>
+
+例如，迁移工具可以查询 `pg_inherits`，找到订单子表的直接父表，以及各父表的顺序。
+
+[使用说明](docs/MANUAL.md#查询继承表) · [测试报告](docs/test-report.md#pg-inherits-20261123) · [性能报告](docs/performance-report-2026-10-30.md#pg-inherits-cost-20261123)
+
+</details>
+
+<details>
 <summary>建子表时可以指明父表的位置 · 2026-11-23</summary>
 
 例如，`live.orders` 和 `archive.orders` 同名。创建订单子表时，写 `INHERITS (live.orders)` 就会选中 `live` 里的父表。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>按时间排序，只取前几条更快 · 2026-11-23</summary>
+<summary>查看更早的更新和版本记录</summary>
+
+## 2026-11-23 · 按时间排序，只取前几条更快
 
 例如，给预约时间建好索引后，查询最早的 4 条预约时，数据库读够 4 条就可以停。预约时间可以带时区偏移，例如 `09:00:00+08:00`。
 
 [使用说明](docs/MANUAL.md#日期时间类型) · [测试报告](docs/test-report.md#timetz-page-20261123) · [性能报告](docs/performance-report-2026-10-30.md#timetz-page-cost-20261123)
-
-</details>
-
-<details>
-<summary>查看更早的更新和版本记录</summary>
 
 ## 2026-11-23 · 可以用索引查一段时间内的记录
 
