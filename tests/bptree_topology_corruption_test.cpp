@@ -212,6 +212,32 @@ void test_composite_range_visits_only_selected_leaves() {
         assert(tree.readCompositePrimaryRange(key('b', 3498), key('b', 3494), 10, 12, values) ==
                LeafEntriesResult::Complete && values.empty());
     }
+    using Mode = dbms::BPTree::CompositeRangeRead;
+    for (const auto mode : {Mode::FirstAscending, Mode::FirstDescending}) {
+        dbms::BPTree tree(path);
+        assert(tree.openExisting());
+        const auto before = tree.cacheStatistics();
+        std::vector<int64_t> values, suffixes;
+        constexpr int first = 20, last = 4090, count = 161;
+        assert(tree.readCompositePrimaryRange(key('b', first), key('b', last),
+            count, 12, values, &suffixes, mode) == LeafEntriesResult::Complete);
+        assert(tree.cacheStatistics().misses - before.misses < 12);
+        assert(values.size() == count && suffixes.size() == count);
+        for (int i = 0; i < count; ++i) {
+            const int64_t expected = mode == Mode::FirstAscending ? first + i : last - i;
+            assert(values[i] == expected && suffixes[i] == INT64_MIN + expected);
+        }
+        assert(tree.readCompositePrimaryRange(key('a', 9), key('a', 11),
+            250, 12, values, &suffixes, mode) == LeafEntriesResult::Complete);
+        assert(values.size() == 190 && suffixes.size() == values.size());
+        assert(values.front() == (mode == Mode::FirstAscending ? 9 : 11));
+        assert(values.back() == (mode == Mode::FirstAscending ? 11 : 9));
+        assert(std::all_of(suffixes.begin() + 1, suffixes.end() - 1,
+            [](int64_t suffix) { return suffix == INT64_MIN + 10; }));
+        assert(tree.readCompositePrimaryRange(key('b', first), key('b', last),
+            count, 1, values, &suffixes, mode) == LeafEntriesResult::LimitExceeded);
+        assert(values.empty() && suffixes.empty());
+    }
     std::filesystem::remove_all(directory);
 }
 

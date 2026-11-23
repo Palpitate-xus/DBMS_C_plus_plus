@@ -977,7 +977,8 @@ bool BPTree::allValuesChecked(std::vector<int64_t>& values) const {
 
 BPTree::LeafEntriesResult BPTree::readCompositePrimaryRange(
         const std::string& lower, const std::string& upper, size_t maxRows,
-        size_t maxNodes, std::vector<int64_t>& values, std::vector<int64_t>* suffixes) const {
+        size_t maxNodes, std::vector<int64_t>& values, std::vector<int64_t>* suffixes,
+        CompositeRangeRead mode) const {
     std::shared_lock<std::shared_mutex> treeLock(treeMutex_);
     values.clear();
     if (suffixes) suffixes->clear();
@@ -985,13 +986,17 @@ BPTree::LeafEntriesResult BPTree::readCompositePrimaryRange(
         header_.reserved != bptree_format::kCompositePrimaryRangeFormat ||
         lower.size() != BP_KEY_LEN || upper.size() != BP_KEY_LEN)
         return LeafEntriesResult::Error;
-    if (!header_.rootPage || lower > upper) return LeafEntriesResult::Complete;
+    const bool prefix = mode != CompositeRangeRead::Entire;
+    const bool descending = mode == CompositeRangeRead::FirstDescending;
+    if (!header_.rootPage || lower > upper || (prefix && maxRows == 0))
+        return LeafEntriesResult::Complete;
 
     std::vector<int64_t> result;
     std::vector<int64_t> resultSuffixes;
     std::unordered_set<uint32_t> visited;
     std::optional<size_t> leafDepth;
-    uint32_t nextLeaf = 0;
+    uint32_t lastLeaf = 0;
+    uint32_t lastNextLeaf = 0;
     const auto collect = [&](const auto& self, uint32_t page, size_t depth,
                              const std::string* lowerFence, const std::string* upperFence,
                              bool rightEdge) -> LeafEntriesResult {
@@ -1008,7 +1013,9 @@ BPTree::LeafEntriesResult BPTree::readCompositePrimaryRange(
         const size_t first = lowerBoundIdx(node->keys, node->numKeys, lower);
         const size_t end = upperBoundIdx(node->keys, node->numKeys, upper);
         if (!node->isLeaf) {
-            for (size_t i = first; i <= end; ++i) {
+            for (size_t offset = 0; offset <= end - first && (!prefix || result.size() < maxRows);
+                 ++offset) {
+                const size_t i = descending ? end - offset : first + offset;
                 const auto status = self(self, node->children[i], depth + 1,
                     i ? &node->keys[i - 1] : lowerFence,
                     i < node->keys.size() ? &node->keys[i] : upperFence,
@@ -1017,16 +1024,25 @@ BPTree::LeafEntriesResult BPTree::readCompositePrimaryRange(
             }
             return LeafEntriesResult::Complete;
         }
-        if ((leafDepth && (*leafDepth != depth || nextLeaf != page)) ||
-            rightEdge != (node->nextLeaf == 0) || visited.count(node->nextLeaf))
+        // In reverse order the current leaf must point to the one just read.
+        const bool validLink = descending && lastLeaf
+            ? node->nextLeaf == lastLeaf : !visited.count(node->nextLeaf);
+        if ((leafDepth && *leafDepth != depth) || !validLink ||
+            (!descending && lastLeaf && lastNextLeaf != page) ||
+            rightEdge != (node->nextLeaf == 0))
             return LeafEntriesResult::Error;
         leafDepth = depth;
-        nextLeaf = node->nextLeaf;
-        if (end - first > maxRows - result.size()) return LeafEntriesResult::LimitExceeded;
-        result.insert(result.end(), node->values.begin() + first, node->values.begin() + end);
-        if (suffixes)
-            for (size_t i = first; i < end; ++i)
+        lastLeaf = page;
+        lastNextLeaf = node->nextLeaf;
+        const size_t remaining = maxRows - result.size();
+        if (!prefix && end - first > remaining) return LeafEntriesResult::LimitExceeded;
+        const size_t take = std::min(end - first, remaining);
+        for (size_t offset = 0; offset < take; ++offset) {
+            const size_t i = descending ? end - 1 - offset : first + offset;
+            result.push_back(node->values[i]);
+            if (suffixes)
                 resultSuffixes.push_back(readIntegerStoredKey(node->keys[i], BP_KEY_LEN - kIntegerKeyBytes));
+        }
         return LeafEntriesResult::Complete;
     };
     const auto status = collect(collect, header_.rootPage, 0, nullptr, nullptr, true);

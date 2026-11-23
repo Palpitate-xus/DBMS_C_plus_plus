@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-23 · 从区间的一端读取一页复合主键结果
+
+PostgreSQL 的 B-tree 支持正向或反向读取，符合排序的索引可在达到 `LIMIT` 时停止。SQLite 在多列索引中先定位前导等值组，再按后续列读取。DuckDB 1.5 文档中的 ART 扫描面向单列筛选，未用于消除排序。[PostgreSQL 索引排序](https://www.postgresql.org/docs/18/indexes-ordering.html) · [SQLite 查找与排序](https://sqlite.org/queryplanner.html#searching_and_sorting_with_a_multi_column_index) · [DuckDB 索引](https://duckdb.org/docs/1.5/guides/performance/indexing)
+
+本项目使用已有的 `0xC556` 格式，从整数范围的一端读取一页，并在返回前核对表里的主键值、顺序和事务可见性。索引存储前导键的摘要，如果读到的候选未能组成完整的一页，可以回到表扫描。当前按索引排序的范围是一组前导等值键。跨组排序、不同列的混合顺序和任意查询的有序索引选择仍有差距。[协议测试](test-report.md#composite-primary-prefix-20261123) · [性能对照](performance-report-2026-10-30.md#composite-primary-prefix-cost-20261123)
+
 ## 2026-11-23 · 用已有顺序读取一页复合主键结果
 
 PostgreSQL 可以正向或反向读 B-tree 来满足对应的 `ORDER BY`，并在取够 `LIMIT` 所需的行后结束。SQLite 可以先在多列索引中定位前导等值组，再按后续列顺序读取。DuckDB 1.5 的 ART 查询路径以选择性筛选为主，文档所述的 ART 查询扫描不会消除排序。[PostgreSQL 索引排序](https://www.postgresql.org/docs/18/indexes-ordering.html) · [SQLite 查找与排序](https://sqlite.org/queryplanner.html#searching_and_sorting_with_a_multi_column_index) · [DuckDB 索引](https://duckdb.org/docs/1.5/guides/performance/indexing)

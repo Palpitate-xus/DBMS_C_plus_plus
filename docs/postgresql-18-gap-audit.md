@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-23 · 从复合主键区间两端读取一页
+
+固定所有前导列时，支持的小页可从整数末列区间的一端读到所需的候选数，即使整个组超过之前的候选上限。读取完成后复核完整值、顺序和事务可见性。跨前导组排序、较大请求和通用多列排序规划仍开放。`IDX-03` 和 `OPT-01` 保持部分实现。[测试](test-report.md#composite-primary-prefix-20261123) · [性能](performance-report-2026-10-30.md#composite-primary-prefix-cost-20261123)
+
 ## 2026-11-23 · 复用复合主键整数末列的顺序
 
 固定所有前导列时，符合条件的 `ORDER BY` 可以直接读取复合主键的整数末列顺序。当前索引和快照满足要求时，受支持的 `LIMIT/OFFSET` 可提前结束表行读取。旧快照或旧索引继续排序。跨组扫描、任意复合排序方向和更大的区间候选遍历仍开放。`IDX-03` 和 `OPT-01` 保持部分实现。[测试](test-report.md#composite-primary-order-20261123) · [性能](performance-report-2026-10-30.md#composite-primary-order-cost-20261123)

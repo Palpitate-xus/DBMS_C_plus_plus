@@ -138,6 +138,30 @@ def main():
                      [0, 0, 1, 1])
         current = [[str(i), f'n{i}'] for i in (1, 0, -2)]
         check_access(writer, lambda: sql(writer, range_query, 'SELECT 3', current), [0, 0, 1, 3])
+
+        for start in range(2000, 6160, 64):
+            values = ','.join(f"({i},'{store}','n{i}')" for i in range(start, start + 64))
+            sql(writer, f'INSERT INTO {table} VALUES ' + values, 'INSERT 0 64')
+        for order, expected in (('ord ASC', range(-62, -57)), ('ord DESC', range(6157, 6152, -1))):
+            page = lookup(store, order=order) + ' LIMIT 5 OFFSET 2'
+            check_access(writer, lambda: sql(writer, page, 'SELECT 5',
+                         [[str(i), f'n{i}'] for i in expected]), [0, 0, 1, 7])
+        bounded = lookup(store, 'AND ord BETWEEN -30 AND 6090', 'ord DESC') + ' LIMIT 1'
+        check_access(writer, lambda: sql(writer, bounded, 'SELECT 1', [['6090', 'n6090']]),
+                     [0, 0, 1, 1])
+        check_access(writer, lambda: observe(bind(store, -64, 6140, b'limited'), 'SELECT 2',
+                     [['6138', 'n6138'], ['6137', 'n6137']]), [0, 0, 1, 3])
+
+        sql(writer, "SET work_mem='64kB'", 'SET')
+        sql(writer, 'SET random_page_cost=0.01', 'SET')
+        descending = lookup(store, order='ord DESC')
+        before = stats(writer)
+        sql(writer, descending + ' LIMIT 5 OFFSET 1200', 'SELECT 5',
+            [[str(i), f'n{i}'] for i in range(4959, 4954, -1)])
+        counts = [new - old for old, new in zip(before, stats(writer), strict=True)]
+        assert counts[:3] == [1, 6340, 1] and 0 < counts[3] < 1205, counts
+        check_access(writer, lambda: sql(writer, descending + ' LIMIT 5 OFFSET 4100', 'SELECT 5',
+                     [[str(i), f'n{i}'] for i in range(2059, 2054, -1)]), [1, 6340, 0, 0])
     finally:
         if reader is not None:
             reader.close()

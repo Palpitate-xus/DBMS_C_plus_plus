@@ -83,14 +83,18 @@ public:
         int64_t value;
     };
     enum class LeafEntriesResult { Complete, LimitExceeded, Error };
+    enum class CompositeRangeRead { Entire, FirstAscending, FirstDescending };
 
     // Copy row positions for a closed range of fixed-width composite keys.
     // A supplied suffix vector receives the signed key for each row position.
+    // FirstAscending and FirstDescending stop at maxRows or the end of the
+    // range. Entire requires the whole range to fit within both limits.
     // An error or limit result leaves both outputs empty.
     LeafEntriesResult readCompositePrimaryRange(const std::string& lower, const std::string& upper,
                                                  size_t maxRows, size_t maxNodes,
                                                  std::vector<int64_t>& values,
-                                                 std::vector<int64_t>* suffixes = nullptr) const;
+                                                 std::vector<int64_t>* suffixes = nullptr,
+                                                 CompositeRangeRead mode = CompositeRangeRead::Entire) const;
 
     // Copy at most maxEntries fixed-width leaf keys and their values in tree
     // order. A failed or over-limit read clears entries. Callers can process

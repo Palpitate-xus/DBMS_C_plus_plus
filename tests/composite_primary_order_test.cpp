@@ -95,6 +95,26 @@ int main() {
     assert(index->removeMulti(high, lowerRows.front()) && index->removeMulti(lower, highRows.front()));
     assert(index->insertMulti(high, highRows.front()) && index->insertMulti(lower, lowerRows.front()));
 
+    // Simulate a leading digest collision at the start of the ordered page.
+    // The false candidate must not consume LIMIT or make the result shorter.
+    const auto foreignKey = primary_key_index::keyForValues(table, *index,
+        {{"store", prefix + "B"}, {"ord", "99"}});
+    const auto foreignRows = index->searchMulti(foreignKey);
+    assert(foreignRows.size() == 1);
+    const auto collision = key("12");
+    assert(index->insertMulti(collision, foreignRows.front()));
+    assert(g_engine.beginTransaction(database) == DBStatus::OK);
+    assert(g_engine.beginSqlCommand());
+    before = stats();
+    const auto retried = QueryPlanner::executePlanChecked(QueryPlanner::buildSelectPlan(&g_engine, query));
+    assert(retried.ok && retried.structuredRows.size() == 1);
+    assert(retried.structuredRows[0].at(0) == "11");
+    after = stats();
+    assert(after.seqScan - before.seqScan == 1 && after.idxTupFetch - before.idxTupFetch == 1);
+    assert(g_engine.finishSqlCommand());
+    assert(g_engine.commitTransaction() == DBStatus::OK);
+    assert(index->removeMulti(collision, foreignRows.front()));
+
     QueryPlanner::setCostModel(savedCosts);
     assert(g_engine.dropDatabase(database) == DBStatus::OK);
     std::cout << "[COMPOSITE PRIMARY ORDER] native ordered scans preserve rows, offsets and NULLs\n";

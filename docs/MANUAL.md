@@ -1090,7 +1090,15 @@ WHERE shop_code = 'north' AND order_number BETWEEN 100 AND 110
 ORDER BY order_number;
 ```
 
-当查询只按主键最后一列排序，且前面的主键列都有等值条件时，可以直接使用该组记录的索引顺序。例如按订单号从大到小读取前几条。若使用旧快照或代价估计选择扫描整张表，数据库会按原条件排序后返回。[排序和分页验证](test-report.md#composite-primary-order-20261123)
+当查询只按主键最后一列排序，且前面的主键列都有等值条件时，可以直接使用该组记录的索引顺序。比如下面的查询可以从最大订单号开始找，读够七条后跳过前两条。店里有几千笔订单时也可以这样找。
+
+```sql
+SELECT order_number FROM shop_orders
+WHERE shop_code = 'north'
+ORDER BY order_number DESC LIMIT 5 OFFSET 2;
+```
+
+数据库会核对表中实际的店铺编号、订单号和记录对当前事务是否可见。当旧快照、更多筛选条件或扫描成本要求读整张表时，数据库按原条件筛选和排序。[排序和分页验证](test-report.md#composite-primary-prefix-20261123)
 
 ### 删除表
 

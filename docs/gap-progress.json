@@ -2,6 +2,18 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-23 read small ordered pages from either end of a composite primary key range",
+      "gap_ids": ["IDX-03", "OPT-01"],
+      "status": "partial",
+      "evidence": ["src/access/BPTree.cpp", "src/executor/ExecutionPlan.cpp", "docs/MANUAL.md", "docs/postgresql-comparison.md", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/bptree_topology_corruption_test.cpp", "tests/composite_primary_order_test.cpp", "tests/composite_primary_range_protocol_e2e_test.py"],
+      "verification": [
+        "Both scan directions stop after fetching seven rows for a five-row page with an offset of two in a group over 4,096 keys. Named binary bindings use the same bounded scan.",
+        "Tests check a simulated leading-key digest collision, exact stored order, old snapshots, and full SQL and binary response agreement in the tested cases with PostgreSQL 18.6.",
+        "The existing index format is reused. Multi-group index order, mixed column directions and unbounded scans remain open."
+      ]
+    },
+    {
       "issue": "2026-11-23 consume a composite primary integer range in order for pagination",
       "gap_ids": ["IDX-03", "OPT-01"],
       "status": "partial",

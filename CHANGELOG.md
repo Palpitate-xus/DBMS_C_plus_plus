@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>一家店有很多订单时，翻页也更快 · 2026-11-23</summary>
+
+即使一家店有几千笔订单，按订单号查前几笔时，数据库也可以只读这一页需要的记录。
+
+[用法](docs/MANUAL.md#用多列一起区分记录) · [测试报告](docs/test-report.md#composite-primary-prefix-20261123) · [性能报告](docs/performance-report-2026-10-30.md#composite-primary-prefix-cost-20261123)
+
+</details>
+
+<details>
 <summary>查订单号最大的几笔订单更快 · 2026-11-23</summary>
 
 比如查看一家店订单号最大的 5 笔订单，数据库可以按号码从大到小取出这 5 笔，省去另外排序。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>查一家店指定号码范围内的订单更快 · 2026-11-23</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-23 · 查一家店指定号码范围内的订单更快
 
 比如查一家店订单号在 100 到 110 之间的订单，数据库可以直接找到这一段。
 
 [用法](docs/MANUAL.md#用多列一起区分记录) · [测试报告](docs/test-report.md#composite-primary-range-20261123) · [性能报告](docs/performance-report-2026-10-30.md#composite-primary-range-cost-20261123)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-23 · 同一家店的订单很多时，按订单号查找更快
 

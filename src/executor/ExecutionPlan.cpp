@@ -2521,6 +2521,7 @@ class CompositePrimaryKeyScanOp final : public Operator {
     std::map<std::string, std::string> values_;
     std::vector<int64_t> rids_;
     std::vector<int64_t> suffixValues_;
+    std::vector<std::pair<int64_t, std::string>> prefixRows_;
     size_t position_ = 0, fetched_ = 0;
     int64_t lastRid_ = 0;
     std::optional<int64_t> lastOrderedValue_;
@@ -2555,7 +2556,75 @@ class CompositePrimaryKeyScanOp final : public Operator {
         return true;
     }
 
-    bool readSuffixRange(BPTree& index) {
+    bool fetchCandidate(size_t candidate, std::string& row,
+                        std::optional<uint64_t> fence = std::nullopt) {
+        checkForQueryInterrupt();
+        const auto rid = rids_[candidate];
+        bool failed = false;
+        ++fetched_;
+        if (!engine_->readIndexedRowByRid(database_, table_, rid, row, schema_, nullptr, &failed)) {
+            if (failed) setError("indexed heap fetch failed");
+            return false;
+        }
+        StorageEngine::bindNullRow(engine_, database_, table_, rid, schema_.len());
+        const bool matches = std::all_of(inputs_.begin(), inputs_.end(), [&](const auto& input) {
+            bool isNull = false;
+            const auto actual = engine_->extractColumnValue(row, schema_, input.column,
+                                                            database_, false, &isNull);
+            return !isNull && actual == values_.at(input.name);
+        });
+        if (!matches) return false;
+        if (order_) {
+            bool isNull = false;
+            const auto value = engine_->extractColumnValue(
+                row, schema_, *suffix_, database_, false, &isNull);
+            int64_t number = 0;
+            const auto end = value.data() + value.size();
+            const auto parsed = std::from_chars(value.data(), end, number);
+            if (isNull || parsed.ec != std::errc{} || parsed.ptr != end ||
+                number != suffixValues_[candidate] ||
+                (lastOrderedValue_ && (order_->ascending
+                    ? number <= *lastOrderedValue_ : number >= *lastOrderedValue_))) {
+                if (fence && engine_->indexReadSnapshotFence(database_) != fence) return false;
+                throw DbError("XX001", "composite primary key index order does not match the table");
+            }
+            lastOrderedValue_ = number;
+        }
+        return true;
+    }
+
+    bool bufferPrefix(size_t count, uint64_t fence) {
+        if (engine_->indexReadSnapshotFence(database_) != fence) return false;
+        struct RestoreNullBinding {
+            StorageEngine::NullRowBindingState saved = StorageEngine::captureNullRowBinding();
+            ~RestoreNullBinding() { StorageEngine::restoreNullRowBinding(std::move(saved)); }
+        } restore;
+        // Certify the first page before the sort is allowed to consume it.
+        // A digest collision or invisible tuple can leave the copied prefix
+        // short of the required number of real matches.
+        size_t budget = sortWorkMemBytes();
+        const size_t rowSize = sizeof(decltype(prefixRows_)::value_type);
+        if (rids_.size() > budget / rowSize) return false;
+        prefixRows_.reserve(rids_.size());
+        if (prefixRows_.capacity() > budget / rowSize) return false;
+        budget -= prefixRows_.capacity() * rowSize;
+        for (size_t candidate = 0; candidate < rids_.size(); ++candidate) {
+            std::string row;
+            if (!fetchCandidate(candidate, row, fence)) {
+                if (hasError()) return false;
+                continue;
+            }
+            if (row.capacity() > budget) return false;
+            budget -= row.capacity();
+            prefixRows_.emplace_back(rids_[candidate], std::move(row));
+        }
+        if (rids_.size() == count && prefixRows_.size() < count) return false;
+        rids_.clear();
+        suffixValues_.clear();
+        return true;
+    }
+
+    bool readSuffixRange(BPTree& index, uint64_t fence) {
         if (!index.usesCompositePrimaryRanges()) return false;
         int64_t lower = INT64_MIN;
         int64_t upper = INT64_MAX;
@@ -2583,15 +2652,40 @@ class CompositePrimaryKeyScanOp final : public Operator {
         // A wide range can always use the ordinary scan and its SQL filter.
         constexpr size_t maxRows = 4096;
         constexpr size_t maxNodes = 128;
+        const auto indexCost = [](size_t fetches) {
+            return QueryPlanner::costScan("index_scan", static_cast<double>(fetches), 0);
+        };
+        const auto count = order_ ? order_->fetchCount : std::nullopt;
+        const bool prefix = count && *count <= maxRows && indexCost(*count) < heapCost;
+        using Mode = BPTree::CompositeRangeRead;
+        const auto mode = !prefix ? Mode::Entire
+            : order_->ascending ? Mode::FirstAscending : Mode::FirstDescending;
         const auto status = index.readCompositePrimaryRange(
-            first, last, maxRows, maxNodes, rids_, order_ ? &suffixValues_ : nullptr);
+            first, last, prefix ? *count : maxRows, maxNodes, rids_,
+            order_ ? &suffixValues_ : nullptr, mode);
         if (status == BPTree::LeafEntriesResult::Error)
             throw DbError("XX001", "could not read B-tree index for relation \"" + table_ + "\"");
+        if (status != BPTree::LeafEntriesResult::Complete) return false;
+        if (prefix) return bufferPrefix(*count, fence);
         size_t fetches = rids_.size();
-        if (order_ && order_->fetchCount) fetches = std::min(fetches, *order_->fetchCount);
-        return status == BPTree::LeafEntriesResult::Complete &&
-            (fetches == 0 ||
-             QueryPlanner::costScan("index_scan", static_cast<double>(fetches), 0) < heapCost);
+        if (count) fetches = std::min(fetches, *count);
+        if (fetches && indexCost(fetches) >= heapCost) return false;
+        if (order_ && !order_->ascending) {
+            std::reverse(rids_.begin(), rids_.end());
+            std::reverse(suffixValues_.begin(), suffixValues_.end());
+        }
+        return true;
+    }
+
+    bool finishRow(int64_t rid, std::string& row) {
+        bool toastOk = false;
+        row = engine_->resolveToastValues(database_, table_, row, schema_, &toastOk);
+        if (!toastOk) {
+            setError("TOAST value read failed");
+            return false;
+        }
+        lastRid_ = rid;
+        return true;
     }
 public:
     CompositePrimaryKeyScanOp(StorageEngine* engine, std::string database,
@@ -2616,6 +2710,7 @@ public:
         lastOrderedValue_.reset();
         rids_.clear();
         suffixValues_.clear();
+        prefixRows_.clear();
         values_.clear();
         usedIndex_ = fallbackActive_ = false;
         auto& locks = engine_->getLockManager();
@@ -2635,21 +2730,20 @@ public:
                 throw DbError("XX001", "could not open B-tree index for relation \"" + table_ + "\"");
             bool read = false;
             if (suffix_) {
-                read = readSuffixRange(*index);
+                read = readSuffixRange(*index, *before);
             } else if (index->hasCompletePrimaryKeys()) {
                 const auto key = primary_key_index::keyForValues(schema_, *index, values_);
                 rids_ = lookupBtreeMultiChecked(index, key);
                 read = true;
             }
+            if (hasError()) return false;
             if (read && engine_->indexReadSnapshotFence(database_) == before) {
                 usedIndex_ = true;
-                if (order_ && !order_->ascending) {
-                    std::reverse(rids_.begin(), rids_.end());
-                    std::reverse(suffixValues_.begin(), suffixValues_.end());
-                }
                 return true;
             }
             rids_.clear();
+            suffixValues_.clear();
+            prefixRows_.clear();
         }
         fallbackActive_ = true;
         return fallback_->open() || propagateChildError(fallback_.get(), "primary key heap scan failed");
@@ -2666,49 +2760,23 @@ public:
             instrument.emitted = true;
             return true;
         }
-        while (position_ < rids_.size()) {
+        if (!prefixRows_.empty()) {
+            if (position_ == prefixRows_.size()) return false;
+            auto& [rid, raw] = prefixRows_[position_++];
             checkForQueryInterrupt();
-            const auto rid = rids_[position_++];
-            bool failed = false;
-            ++fetched_;
-            if (!engine_->readIndexedRowByRid(database_, table_, rid, row, schema_, nullptr, &failed)) {
-                if (failed) {
-                    setError("indexed heap fetch failed");
-                    return false;
-                }
+            row = std::move(raw);
+            StorageEngine::bindNullRow(engine_, database_, table_, rid, schema_.len());
+            instrument.emitted = finishRow(rid, row);
+            return instrument.emitted;
+        }
+        while (position_ < rids_.size()) {
+            const auto candidate = position_++;
+            if (!fetchCandidate(candidate, row)) {
+                if (hasError()) return false;
                 continue;
             }
-            StorageEngine::bindNullRow(engine_, database_, table_, rid, schema_.len());
-            const bool matches = std::all_of(inputs_.begin(), inputs_.end(), [&](const auto& input) {
-                bool isNull = false;
-                const auto actual = engine_->extractColumnValue(row, schema_, input.column,
-                                                                database_, false, &isNull);
-                return !isNull && actual == values_.at(input.name);
-            });
-            if (!matches) continue;
-            if (order_) {
-                bool isNull = false;
-                const auto value = engine_->extractColumnValue(
-                    row, schema_, *suffix_, database_, false, &isNull);
-                int64_t number = 0;
-                const auto end = value.data() + value.size();
-                const auto parsed = std::from_chars(value.data(), end, number);
-                if (isNull || parsed.ec != std::errc{} || parsed.ptr != end ||
-                    number != suffixValues_[position_ - 1] ||
-                    (lastOrderedValue_ && (order_->ascending
-                        ? number <= *lastOrderedValue_ : number >= *lastOrderedValue_)))
-                    throw DbError("XX001", "composite primary key index order does not match the table");
-                lastOrderedValue_ = number;
-            }
-            bool toastOk = false;
-            row = engine_->resolveToastValues(database_, table_, row, schema_, &toastOk);
-            if (!toastOk) {
-                setError("TOAST value read failed");
-                return false;
-            }
-            lastRid_ = rid;
-            instrument.emitted = true;
-            return true;
+            instrument.emitted = finishRow(rids_[candidate], row);
+            return instrument.emitted;
         }
         return false;
     }
@@ -2760,7 +2828,7 @@ public:
         std::exception_ptr error;
         try {
             if (fallbackActive_) fallback_->close();
-            if (usedIndex_) recordTableScan(database_, table_, fetched_, true, false);
+            if (usedIndex_ || fetched_) recordTableScan(database_, table_, fetched_, true, false);
         } catch (...) { error = std::current_exception(); }
         auto& locks = engine_->getLockManager();
         locks.setResourceNamespace(database_);
@@ -2769,6 +2837,7 @@ public:
         lastRid_ = 0;
         rids_.clear();
         suffixValues_.clear();
+        prefixRows_.clear();
         if (error) std::rethrow_exception(error);
     }
 };
