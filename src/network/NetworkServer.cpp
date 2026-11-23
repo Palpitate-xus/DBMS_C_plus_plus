@@ -3808,8 +3808,7 @@ bool prepareProtocolBitBetween(const std::string& sql, Session& session,
         select->selectList.size() != 1) return false;
     const auto* range = dynamic_cast<const FunctionCallExpr*>(select->selectList.front().expr.get());
     if (!range || range->args.size() != 3) return false;
-    const auto syntax = betweenSyntax(*range);
-    if (!syntax) return false;
+    if (!betweenSyntax(*range)) return false;
     bool bitRange = false, integerRange = false;
     for (const auto& input : range->args) {
         const auto type = ExprHelper::canonicalResultTypeName(ExprHelper::inferParsedInputType(input.get(), {}));
@@ -3835,48 +3834,25 @@ bool prepareProtocolBitBetween(const std::string& sql, Session& session,
     auto* previous = currentSession(); setCurrentSession(&session);
     struct Restore {Session* previous; ~Restore() {setCurrentSession(previous);}} restore{previous};
     const auto prepared = g_engine.prepareBoundQuery(session.currentDB, sql, parameters);
-    const auto* boundSelect = dynamic_cast<const SelectStmt*>(prepared.ast.get());
-    const auto* boundRange = dynamic_cast<const FunctionCallExpr*>(boundSelect->selectList.front().expr.get());
-    const auto inferCastParameter = [&](const Expr* operand, const std::string& target) {
-        if (const auto* parameter = dynamic_cast<const ParameterExpr*>(operand)) {
-            // Binder cell slots follow occurrence order. The wire slot is
-            // SQL $n, retained by this actual parameter's source provenance.
-            const auto use = std::find_if(prepared.uses.begin(), prepared.uses.end(), [&](const auto& use) {
-                return use.slot == parameter->slot && use.begin == parameter->sourceBegin && use.end == parameter->sourceEnd;
-            });
-            if (use == prepared.uses.end()) throw DbError("XX000", "range parameter has no source provenance");
-            const auto spelling = prepared.source.substr(use->begin, use->end - use->begin);
-            if (spelling.size() < 2 || spelling.front() != '$' ||
-                !std::all_of(spelling.begin() + 1, spelling.end(), [](unsigned char c) {return std::isdigit(c);}))
+    if (std::find(parameterOids.begin(), parameterOids.end(), 0) != parameterOids.end()) {
+        // The binder already resolved each shared input's type. Its cells
+        // follow occurrence order, so use the original $n to find the wire slot.
+        for (const auto& use : prepared.uses) {
+            if (use.slot >= prepared.parameters.size() || use.begin >= use.end || use.end > prepared.source.size())
+                throw DbError("XX000", "range parameter has no source provenance");
+            const auto spelling = std::string_view(prepared.source).substr(use.begin, use.end - use.begin);
+            size_t position = 0;
+            const auto end = spelling.data() + spelling.size();
+            const auto parsed = std::from_chars(spelling.data() + 1, end, position);
+            if (spelling.front() != '$' || parsed.ptr != end || parsed.ec != std::errc{})
                 throw DbError("XX000", "invalid range parameter provenance");
-            const size_t position = std::stoul(spelling.substr(1));
             if (!position || position > parameterOids.size()) throw DbError("42P02", "invalid range parameter");
-            const auto oid = mapBuiltinTypeNameToOid(ExprHelper::canonicalResultTypeName(target));
-            if (!parameterOids[position - 1] && oid != INVALID_OID) parameterOids[position - 1] = oid;
+            if (parameterOids[position - 1]) continue;
+            const auto type = ExprHelper::canonicalResultTypeName(prepared.parameters[use.slot].typeName);
+            const auto oid = mapBuiltinTypeNameToOid(type);
+            if (oid != INVALID_OID && oid != 705) parameterOids[position - 1] = oid;
         }
-    };
-    std::function<void(const Expr*)> inferParameters = [&](const Expr* input) {
-        if (!input || input->preparedSubquery) return;
-        if (const auto* parameter = dynamic_cast<const ParameterExpr*>(input)) {
-            if (syntax->explicitMode) inferCastParameter(parameter, parameter->declaredType);
-        } else if (const auto* conversion = dynamic_cast<const CastExpr*>(input)) {
-            // Inner explicit input casts precede the surrounding operator
-            // conversion. Infer only from actual parameter/cast sites.
-            inferParameters(conversion->operand.get());
-            inferCastParameter(conversion->operand.get(), conversion->typeName);
-        } else if (const auto* binary = dynamic_cast<const BinaryOpExpr*>(input)) {
-            inferParameters(binary->left.get());
-            if (binary->op == "::") {
-                if (const auto* target = dynamic_cast<const LiteralExpr*>(binary->right.get()))
-                    inferCastParameter(binary->left.get(), target->value);
-            } else inferParameters(binary->right.get());
-        } else if (const auto* unary = dynamic_cast<const UnaryOpExpr*>(input)) {
-            inferParameters(unary->operand.get());
-        } else if (const auto* call = dynamic_cast<const FunctionCallExpr*>(input)) {
-            for (const auto& argument : call->args) inferParameters(argument.get());
-        }
-    };
-    for (const auto& argument : boundRange->args) inferParameters(argument.get());
+    }
     if (std::find(parameterOids.begin(), parameterOids.end(), 0) != parameterOids.end())
         throw DbError("42P18", "could not determine data type of range parameter");
     if (columns) {

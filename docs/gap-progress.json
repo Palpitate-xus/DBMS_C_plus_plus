@@ -2,6 +2,18 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-23 keep the first comparison's parameter type in integer and BIT ranges",
+      "gap_ids": ["QRY-01", "PROTO-03", "PROTO-04"],
+      "status": "partial",
+      "evidence": ["src/parser/query_binding.cpp", "src/network/NetworkServer.cpp", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/integer_between_parameter_protocol_e2e_test.py", "tests/bit_between_parameter_protocol_e2e_test.py", "tests/bit_between_parameter_position_protocol_e2e_test.py", "tests/bit_between_cast_parameter_protocol_e2e_test.py"],
+      "verification": [
+        "The first comparison can settle a shared parameter before a cast in the upper bound is analyzed.",
+        "The protocol reports inferred types in SQL parameter order and preserves declared OIDs and compatible conversions.",
+        "The three earlier failing suites and the explicit-cast suite pass all 730 controls on the product and PostgreSQL 18.6."
+      ]
+    },
+    {
       "issue": "2026-11-23 read only demanded columns in ordered integer primary key pages",
       "gap_ids": ["OPT-01"],
       "status": "partial",

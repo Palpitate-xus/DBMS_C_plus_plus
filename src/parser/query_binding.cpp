@@ -1235,25 +1235,24 @@ public:
             if (betweenSyntax(*call) && call->args.size() == 3) {
                 for (const auto& argument : call->args)
                     between_input_detail::validateLiteralCasts(argument.get());
-                std::vector<std::string> types;
-                for (auto& arg : call->args)
-                    types.push_back(ExprHelper::canonicalResultTypeName(expression(arg, scopes)));
-                const bool bitRange = std::any_of(types.begin(), types.end(), [](const auto& type) {
-                    return type == "bit" || type == "bit varying";
-                });
-                const bool integerRange = std::any_of(types.begin(), types.end(), [](const auto& type) {
-                    return type == "smallint" || type == "integer" || type == "bigint";
-                });
-                for (size_t i = 1; i < types.size(); ++i) {
-                    if (!bitRange && !integerRange) continue;
+                const auto typeAt = [&](size_t index) {
+                    return ExprHelper::canonicalResultTypeName(expression(call->args[index], scopes));
+                };
+                auto valueType = typeAt(0);
+                const auto lowerType = typeAt(1);
+                const auto checkedType = [](const std::string& type) {
+                    return type == "bit" || type == "bit varying" ||
+                        type == "smallint" || type == "integer" || type == "bigint";
+                };
+                const auto bindComparison = [&](size_t i, std::string boundType) {
                     const auto comparison = ExprEvaluator::resolveComparison(
-                        i == 1 ? ">=" : "<=", types[0], types[i]);
-                    if (types[0] == "unknown") {
+                        i == 1 ? ">=" : "<=", valueType, boundType);
+                    if (valueType == "unknown") {
                         if (dynamic_cast<ParameterExpr*>(call->args[0].get())) {
                             // A shared parameter is inferred by the first comparison,
                             // then the second comparison sees that resolved input.
-                            coerceCaseInput(call->args[0], types[0], comparison.leftType);
-                            types[0] = comparison.leftType;
+                            coerceCaseInput(call->args[0], valueType, comparison.leftType);
+                            valueType = comparison.leftType;
                         } else if (const auto* literal = dynamic_cast<const LiteralExpr*>(call->args[0].get());
                                    literal && literal->typeName.empty() && !literal->preparedSubquery) {
                             // BETWEEN repeats a literal in two independently typed
@@ -1263,7 +1262,24 @@ public:
                             coerceCaseInput(input, "unknown", comparison.leftType);
                         }
                     }
-                    coerceCaseInput(call->args[i], types[i], comparison.rightType);
+                    if (const auto* input = dynamic_cast<const ParameterExpr*>(call->args[i].get()))
+                        boundType = ExprHelper::canonicalResultTypeName(input->declaredType);
+                    coerceCaseInput(call->args[i], boundType, comparison.rightType);
+                };
+                const auto needsInputType = [](const Expr* input, const std::string& type) {
+                    const auto* parameter = dynamic_cast<const ParameterExpr*>(input);
+                    return type == "unknown" && parameter && parameter->origin == ParameterOrigin::MetadataPlaceholder;
+                };
+                // The upper expression may contain a cast of the very same
+                // parameter. Publish the lower comparison's input type first.
+                const bool lowerOwnsInput = (checkedType(valueType) || checkedType(lowerType) ||
+                    (valueType == "unknown" && lowerType == "unknown")) &&
+                    (needsInputType(call->args[0].get(), valueType) || needsInputType(call->args[1].get(), lowerType));
+                if (lowerOwnsInput) bindComparison(1, lowerType);
+                const auto upperType = typeAt(2);
+                if (checkedType(valueType) || checkedType(lowerType) || checkedType(upperType)) {
+                    if (!lowerOwnsInput) bindComparison(1, lowerType);
+                    bindComparison(2, upperType);
                 }
                 call->resolvedResultType = "boolean";
                 return "boolean";

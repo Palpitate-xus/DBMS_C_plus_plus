@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-23 · 补齐受支持整数和位串范围查询的参数推断
+
+单值范围查询可以用比较表达式确定未声明的参数类型，并按 SQL 编号发送参数描述。受测的普通、对称和非对称范围形式，以及同一参数重复使用或需要转换的情况，均与 PostgreSQL 18.6 对照通过。`QRY-01`、`PROTO-03` 和 `PROTO-04` 继续标为部分实现。 [协议验证](test-report.md#between-bind-types-20261123) · [性能](performance-report-2026-10-30.md#between-bind-types-cost-20261123) · [实现对照](postgresql-comparison.md#between-bind-types-comparison-20261123)
+
 <a id="primary-key-projection-audit-20261123"></a>
 ## 2026-11-23 · 单列整数主键读取可以跳过未用的长值
 

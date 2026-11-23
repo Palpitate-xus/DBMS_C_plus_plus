@@ -1378,6 +1378,8 @@ REPLACE INTO users (ID, NAME) VALUES (1, 'New Alice');
 
 `WHERE id BETWEEN 1000 AND 1100 OR id BETWEEN 5000 AND 5100` 可以一次查出两段编号。`id` 是单列整数主键而候选记录较少且集中时，数据库可以用索引读取各段。重叠区间会先合并，带 `ORDER BY id` 的分页可以读够指定行数就停。 [测试范围与回退条件](test-report.md#integer-primary-or-20261123)
 
+应用可以准备 `SELECT $1 BETWEEN 1 AND 10`，执行时再传实际值。客户端省略参数类型时，数据库会从第一项比较确定 `$1` 是整数。用 `SELECT B'10' BETWEEN $2 AND $1` 查询时，两个参数会按 SQL 编号报告为 `bit`。 [整数和位串参数测试](test-report.md#between-bind-types-20261123)
+
 用单列整数主键排序并限制行数时，同一表页上的候选记录可以一起读取，再按主键顺序返回。这样可以减少插入顺序与编号顺序不同时的重复取页。 [分散读取测试](test-report.md#ordered-heap-pages-20261123)
 
 例如，`SELECT order_id FROM orders ORDER BY order_id LIMIT 20` 只需要订单号。数据库用单列整数主键索引读取这一页时，可以跳过另存的长备注。用来返回、筛选或排序的列仍会按查询需要读取。同一查询改为 `SELECT *` 后会读取所有返回列。 `EXPLAIN ANALYZE` 的 `projectedColumns` 表示该索引读取需要的列数。 [长文本测试](test-report.md#primary-key-projection-20261123)

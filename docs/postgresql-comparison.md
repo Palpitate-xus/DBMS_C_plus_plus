@@ -2,6 +2,13 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="between-bind-types-comparison-20261123"></a>
+## 2026-11-23 · 参数类型由第一项范围比较决定
+
+PostgreSQL 把 `BETWEEN` 按顺序展开成两项比较。第一项比较可确定参数类型，后续位置读取同一个类型。SQLite 的参数在运行时绑定，两个比较可分别应用类型亲和性。DuckDB 的范围比较会把三个输入转换为同一类型。 [PostgreSQL 18.6 范围比较](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/parser/parse_expr.c#L1231) · [PostgreSQL 18.6 参数绑定](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/parser/parse_param.c#L170) · [SQLite 类型亲和性](https://www.sqlite.org/datatype3.html#type_conversions_prior_to_comparison) · [DuckDB 范围比较](https://duckdb.org/docs/1.4/sql/expressions/comparison_operators#between-and-is-not-null)
+
+本项目在已支持的单值整数和位串范围查询中，先从第一项比较确定参数的输入类型，再按实际 SQL 编号报告类型。完整的参数推断和改写规则仍有差距。 [协议对照](test-report.md#between-bind-types-20261123) · [准备与执行用时](performance-report-2026-10-30.md#between-bind-types-cost-20261123)
+
 <a id="primary-key-projection-comparison-20261123"></a>
 ## 2026-11-23 · 按主键翻页时跳过未用的长文本
 

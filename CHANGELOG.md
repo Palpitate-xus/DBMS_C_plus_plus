@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>应用可以稍后传入要检查的数字 · 2026-11-23</summary>
+
+例如，查询一个编号是否在 1 到 10 之间时，应用可以在查询里先留一个位置，执行时再传入 5。数据库会把传入的值当作整数。
+
+[使用说明](docs/MANUAL.md#基础查询) · [测试报告](docs/test-report.md#between-bind-types-20261123) · [性能报告](docs/performance-report-2026-10-30.md#between-bind-types-cost-20261123)
+
+</details>
+
+<details>
 <summary>只查订单号时，可以跳过长备注 · 2026-11-23</summary>
 
 例如，按订单号取前 20 笔且只显示编号时，数据库可以跳过另存的长备注。查询要显示备注或用它筛选时，仍会读取所需内容。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>同时查几段订单号，可以跳过中间的订单 · 2026-11-23</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-23 · 同时查几段订单号，可以跳过中间的订单
 
 例如，查 1 到 16 号和 8177 到 8192 号时，数据库可以直接找到这两批订单。两段重叠时，同一笔订单只返回一次。
 
 [测试报告](docs/test-report.md#integer-primary-or-20261123) · [性能报告](docs/performance-report-2026-10-30.md#integer-primary-or-cost-20261123)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-23 · 查一段订单号时，起止编号可以反着写
 
