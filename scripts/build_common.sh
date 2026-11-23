@@ -504,6 +504,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/missing_index_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/primary_key_plan_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/long_text_primary_key_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/composite_primary_key_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/plan_cache_invalidation_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/missing_memory_index_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/bitmap_explain_protocol_e2e_test.py)

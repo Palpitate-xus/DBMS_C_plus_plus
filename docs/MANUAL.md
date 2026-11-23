@@ -1064,11 +1064,23 @@ ALTER TABLE events DETACH PARTITION events_p2024;
 ALTER TABLE users ALTER COLUMN ID SET DEFAULT 42;
 ```
 
-已知限制：普通INSERT的单列PRIMARY KEY外键检查仍可能把20字节索引前缀
-命中误当成完整父键存在，造成无效引用。候选修复与扩展测试见
-[R137](issue-review-r137-foreign-key-full-value.md)，本项按用户要求暂缓，
-未进入已接受实现；不能据初稿有限通过宣称外键完整性已修复。通用长PK写入、
-全部复合/MATCH/deferred/partitioned/concurrent FK也不因该候选完成。
+普通非分区表的单列文本主键允许多个值共享长前缀，所测外键按完整值接受或拒绝引用。R137 的原候选及其专项验证仍暂缓。[单列文本主键测试](test-report.md#long-text-primary-keys-20261123) · [R137 历史记录](issue-review-r137-foreign-key-full-value.md)
+
+### 用多列一起区分记录
+
+在普通非分区表上，可以用店铺编号和订单号一起区分订单。不同店铺可以使用相同的订单号。插入或修改订单时，两个编号都相同才会触发主键重复错误。
+
+```sql
+CREATE TABLE shop_orders (
+    shop_code text,
+    order_number integer,
+    PRIMARY KEY (shop_code, order_number)
+);
+INSERT INTO shop_orders VALUES ('north', 42), ('south', 42);
+SELECT * FROM shop_orders WHERE shop_code = 'north' AND order_number = 42;
+```
+
+升级后可对旧库里的普通表运行 `REINDEX TABLE shop_orders;`。默认比较规则下，重建后可用索引减少写入时要核对的记录。[索引格式](PACKAGING.md#复合主键索引格式) · [测试结果](test-report.md#composite-primary-keys-20261123)
 
 ### 删除表
 

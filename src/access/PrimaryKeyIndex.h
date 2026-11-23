@@ -5,8 +5,7 @@
 
 namespace dbms::primary_key_index {
 
-inline std::optional<size_t> textKeyColumn(const TableSchema& table) {
-    if (table.partitionType != TableSchema::PartitionType::None) return {};
+inline std::optional<size_t> singleKeyColumn(const TableSchema& table) {
     size_t column = table.len();
     if (!table.pkColIndices.empty()) {
         if (table.pkColIndices.size() != 1) return {};
@@ -19,12 +18,29 @@ inline std::optional<size_t> textKeyColumn(const TableSchema& table) {
         }
     }
     if (column >= table.len()) return {};
-    const auto& key = table.cols[column];
+    return column;
+}
+
+inline bool isCompoundKey(const TableSchema& table) {
+    if (table.partitionType != TableSchema::PartitionType::None) return false;
+    if (!table.pkColIndices.empty()) return table.pkColIndices.size() > 1;
+    size_t count = 0;
+    for (size_t i = 0; i < table.len(); ++i) {
+        if (table.cols[i].isPrimaryKey && ++count == 2) return true;
+    }
+    return false;
+}
+
+inline std::optional<size_t> textKeyColumn(const TableSchema& table) {
+    if (table.partitionType != TableSchema::PartitionType::None) return {};
+    const auto column = singleKeyColumn(table);
+    if (!column) return {};
+    const auto& key = table.cols[*column];
     const auto& type = key.dataType;
     const bool text = !key.isArray && key.enumValues.empty() &&
         (type == "text" || type == "varchar" || type == "character varying" ||
          type == "char" || type == "character" || type == "bpchar");
-    return text ? std::optional<size_t>{column} : std::nullopt;
+    return text ? column : std::nullopt;
 }
 
 inline bool isSingleTextKey(const TableSchema& table) {
@@ -32,7 +48,9 @@ inline bool isSingleTextKey(const TableSchema& table) {
 }
 
 inline bool sharesPrefix(const TableSchema& table, const std::string& key) {
-    return key.size() >= BP_KEY_LEN && isSingleTextKey(table);
+    // Compound keys can also share a short physical key when a column
+    // contains the separator used by the original disk encoding.
+    return isCompoundKey(table) || (key.size() >= BP_KEY_LEN && isSingleTextKey(table));
 }
 
 inline bool lookupNeedsHeap(const TableSchema& table, const BPTree& index,

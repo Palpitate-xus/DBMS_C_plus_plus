@@ -5610,12 +5610,12 @@ bool columnUsesCanonicalEquality(const Column& column) {
     return column.collation.empty() || columnUsesBinaryCollation(column);
 }
 
-DBStatus lockTextPrimaryKey(LockManager& locks, const std::string& relation,
-                            const Column& column, const std::string& key) {
+DBStatus lockPrimaryKey(LockManager& locks, const std::string& relation,
+                        bool canonicalEquality, const std::string& key) {
     // Heap RIDs are positive. Reserve negative row-lock IDs for logical
     // keys so transaction, savepoint and prepared-lock ownership apply.
     int64_t lockId = INT64_MIN;
-    if (columnUsesCanonicalEquality(column)) {
+    if (canonicalEquality) {
         uint64_t hash = 14695981039346656037ULL;
         for (const unsigned char byte : key) {
             hash ^= byte;
@@ -5626,6 +5626,11 @@ DBStatus lockTextPrimaryKey(LockManager& locks, const std::string& relation,
     if (locks.rowLockExclusive(relation, lockId)) return DBStatus::OK;
     return locks.lastRowLockWasDeadlock() ? DBStatus::DEADLOCK_DETECTED
                                          : DBStatus::LOCK_CONFLICT;
+}
+
+DBStatus lockTextPrimaryKey(LockManager& locks, const std::string& relation,
+                            const Column& column, const std::string& key) {
+    return lockPrimaryKey(locks, relation, columnUsesCanonicalEquality(column), key);
 }
 
 // Physical B-tree/hash keys are byte ordered, but SQL uniqueness follows the
@@ -5735,6 +5740,91 @@ bool constraintNeedsCollationComparison(const TableSchema& table,
             return columnIndex >= table.len() ||
                    !columnUsesCanonicalEquality(table.cols[columnIndex]);
         });
+}
+
+DBStatus lockCompoundPrimaryKey(LockManager& locks, const std::string& relation,
+        bool canonicalEquality, const std::string& key) {
+    // Keep every RID in the physical bucket stable while the writer checks
+    // full keys. Noncanonical equality can also cross physical buckets.
+    return lockPrimaryKey(locks, relation, canonicalEquality,
+                          BPTree::normalizeKeyForComparison(key));
+}
+
+DBStatus checkCompoundPrimaryKey(StorageEngine& engine, const std::string& dbname,
+        const std::string& relation, const TableSchema& table,
+        const std::vector<size_t>& columns, const std::map<std::string, std::string>& values,
+        const std::string& key, bool canonicalEquality, int64_t exceptRid = -1) {
+    auto* index = engine.getPKIndex(dbname, relation);
+    if (!index || !index->isOpen()) return DBStatus::IO_ERROR;
+
+    std::vector<std::string> wanted;
+    wanted.reserve(columns.size());
+    for (const auto column : columns)
+        wanted.push_back(valueFromRowMap(values, table.cols[column].dataName));
+    const auto matches = [&](const std::string& row) {
+        for (size_t i = 0; i < columns.size(); ++i) {
+            const size_t column = columns[i];
+            const auto value = engine.extractColumnValue(row, table, column, dbname);
+            if (!constraintColumnValuesEqual(table.cols[column], value, wanted[i])) return false;
+        }
+        return true;
+    };
+
+    // A legacy tree can omit rows that shared the stored key. An explicit
+    // noncanonical collation can equate values in different buckets.
+    if (!canonicalEquality || !index->hasCompletePrimaryPrefixes()) {
+        bool duplicate = false;
+        if (!engine.forEachRow(dbname, relation,
+                [&](uint32_t page, uint16_t slot, const char* data, size_t length) {
+                    if (!duplicate && StorageEngine::encodeRid(page, slot) != exceptRid)
+                        duplicate = matches(std::string(data, length));
+                }, nullptr, {}, true, true)) return DBStatus::IO_ERROR;
+        return duplicate ? DBStatus::DUPLICATE_KEY : DBStatus::OK;
+    }
+
+    std::vector<int64_t> positions;
+    if (!index->searchMultiChecked(key, positions)) return DBStatus::IO_ERROR;
+    if (positions.empty()) return DBStatus::OK;
+
+    auto* allocator = engine.getPageAllocator(dbname, relation);
+    auto& locks = engine.getLockManager();
+    for (const auto rid : positions) {
+        if (rid == exceptRid) continue;
+        checkForQueryInterrupt();
+        uint32_t page = 0;
+        uint16_t slot = 0;
+        StorageEngine::decodeRid(rid, page, slot);
+        if (!allocator || !page || page >= allocator->numPages() ||
+            StorageEngine::encodeRid(page, slot) != rid) return DBStatus::IO_ERROR;
+        bool acquired = false;
+        if (!locks.pageLockShared(dbname, relation, page, &acquired)) return DBStatus::LOCK_CONFLICT;
+        // The locked index bucket describes the current heap, and can
+        // contain a row committed after the caller's transaction snapshot.
+        std::string row;
+        const bool read = engine.readRowByRid(allocator, rid, row, table);
+        if (acquired) locks.pageUnlock(dbname, relation, page);
+        if (!read) return DBStatus::IO_ERROR;
+        if (matches(row)) return DBStatus::DUPLICATE_KEY;
+    }
+    return DBStatus::OK;
+}
+
+bool samePrimaryKey(StorageEngine& engine, const std::string& dbname,
+        const TableSchema& table, const std::string& left, const std::string& right) {
+    if (!primary_key_index::isCompoundKey(table)) {
+        return engine.extractPKValue(left, table, dbname) ==
+            engine.extractPKValue(right, table, dbname);
+    }
+    for (size_t index = 0; index < table.len(); ++index) {
+        const auto& column = table.cols[index];
+        const bool primary = table.pkColIndices.empty() ? column.isPrimaryKey :
+            std::find(table.pkColIndices.begin(), table.pkColIndices.end(), index) !=
+                table.pkColIndices.end();
+        if (primary && !constraintColumnValuesEqual(column,
+                engine.extractColumnValue(left, table, index, dbname),
+                engine.extractColumnValue(right, table, index, dbname))) return false;
+    }
+    return true;
 }
 
 } // namespace
@@ -10785,7 +10875,7 @@ static std::optional<size_t> signedIntegerPrimaryKeyColumn(const TableSchema& sc
 }
 
 static bool openNewPrimaryIndex(BPTree& index, const TableSchema& table) {
-    if (primary_key_index::isSingleTextKey(table))
+    if (primary_key_index::isSingleTextKey(table) || primary_key_index::isCompoundKey(table))
         return index.openWithCompletePrimaryPrefixes();
     if (signedIntegerPrimaryKeyColumn(table)) return index.openWithSignedIntegerKeys();
     return index.open();
@@ -30958,7 +31048,14 @@ DBStatus StorageEngine::insertInternal(
                 return DBStatus::CORRUPTED_DATA;
             }
             const std::string pkVal = tbl.buildPKValue(actualValues);
-            if (!pkVal.empty()) {
+            if (primary_key_index::isCompoundKey(tbl)) {
+                const bool canonical = !constraintNeedsCollationComparison(tbl, primaryColumns);
+                const auto status = lockCompoundPrimaryKey(lockManager_, tablename, canonical, pkVal);
+                if (status != DBStatus::OK) return status;
+                const auto checked = checkCompoundPrimaryKey(*this, dbname, tablename, tbl,
+                    primaryColumns, actualValues, pkVal, canonical);
+                if (checked != DBStatus::OK) return checked;
+            } else if (!pkVal.empty()) {
                 bool duplicate = false;
                 // An index lookup also depends on the existing physical key
                 // eligibility. Bulk validation instead compares full keys.
@@ -33597,7 +33694,8 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
         }
     }
 
-    // Try B+ tree PK index for = conditions
+    // Try the primary B+ tree only when this predicate supplies its entire key.
+    const auto primaryColumn = primary_key_index::singleKeyColumn(tbl);
     for (const auto& c : conds) {
         if (c.op == "=") {
             // Non-binary collation requires collation-aware comparison; skip binary indexes.
@@ -33607,9 +33705,8 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
             for (size_t i = 0; i < tbl.len(); ++i) {
                 if (tbl.cols[i].dataName == c.colName) {
                     searchColumn = &tbl.cols[i];
-                }
-                if (tbl.cols[i].isPrimaryKey && tbl.cols[i].dataName == c.colName) {
-                    hasPK = true; break;
+                    hasPK = primaryColumn == i;
+                    break;
                 }
             }
             const std::string searchValue = searchColumn
@@ -35117,11 +35214,21 @@ DBStatus StorageEngine::removeInternal(
             return DBStatus::CORRUPTED_DATA;
         }
     }
-    if (const auto keyColumn = primary_key_index::textKeyColumn(tbl)) {
+    const auto keyColumn = primary_key_index::textKeyColumn(tbl);
+    const bool compoundPrimary = primary_key_index::isCompoundKey(tbl);
+    if (keyColumn || compoundPrimary) {
+        std::vector<size_t> columns;
+        if (compoundPrimary && !collectPrimaryKeyColumns(tbl, columns)) {
+            lockManager_.unlock(tablename);
+            return DBStatus::CORRUPTED_DATA;
+        }
+        const bool canonical = !constraintNeedsCollationComparison(tbl, columns);
         for (const auto& row : logicalRowsToDelete) {
             if (row.empty()) continue;
-            const auto status = lockTextPrimaryKey(lockManager_, tablename, tbl.cols[*keyColumn],
-                                                   extractPKValue(row, tbl, dbname));
+            const auto key = extractPKValue(row, tbl, dbname);
+            const auto status = compoundPrimary
+                ? lockCompoundPrimaryKey(lockManager_, tablename, canonical, key)
+                : lockTextPrimaryKey(lockManager_, tablename, tbl.cols[*keyColumn], key);
             if (status != DBStatus::OK) {
                 lockManager_.unlock(tablename);
                 return status;
@@ -37506,13 +37613,16 @@ DBStatus StorageEngine::updateInternal(
             return DBStatus::OK;
         };
 
+        const bool compoundPrimary = primary_key_index::isCompoundKey(tbl);
+        std::vector<size_t> primaryColumns;
         if (tbl.hasPrimaryKey()) {
-            std::vector<size_t> primaryColumns;
             if (!collectPrimaryKeyColumns(tbl, primaryColumns) ||
                 primaryColumns.empty()) {
                 lockManager_.unlock(tablename);
                 return DBStatus::CORRUPTED_DATA;
             }
+        }
+        if (!primaryColumns.empty() && !compoundPrimary) {
             // Primary keys remain immediate in this storage layer. Passing an
             // empty constraint name prevents the UNIQUE deferral branch while
             // reusing its collation-aware tuple scan.
@@ -37616,7 +37726,29 @@ DBStatus StorageEngine::updateInternal(
         // Keep the primary index synchronized when the primary key changes.
         std::string newPK = tbl.buildPKValue(rowValues);
         const auto textKeyColumn = primary_key_index::textKeyColumn(tbl);
-        if (textKeyColumn) {
+        if (compoundPrimary) {
+            const bool canonical = !constraintNeedsCollationComparison(tbl, primaryColumns);
+            auto status = lockCompoundPrimaryKey(lockManager_, tablename, canonical, oldPK);
+            if (status == DBStatus::OK && oldPK != newPK)
+                status = lockCompoundPrimaryKey(lockManager_, tablename, canonical, newPK);
+            if (status == DBStatus::OK) {
+                const bool changed = std::any_of(primaryColumns.begin(), primaryColumns.end(),
+                    [&](size_t index) {
+                        const auto& col = tbl.cols[index];
+                        return !constraintColumnValuesEqual(col,
+                            valueFromRowMap(oldLogicalValues, col.dataName),
+                            valueFromRowMap(rowValues, col.dataName));
+                    });
+                if (changed) {
+                    status = checkCompoundPrimaryKey(*this, dbname, tablename, tbl,
+                        primaryColumns, rowValues, newPK, canonical, rid);
+                }
+            }
+            if (status != DBStatus::OK) {
+                lockManager_.unlock(tablename);
+                return status;
+            }
+        } else if (textKeyColumn) {
             const auto& column = tbl.cols[*textKeyColumn];
             auto status = lockTextPrimaryKey(lockManager_, tablename, column, oldPK);
             if (status == DBStatus::OK && oldPK != newPK)
@@ -37626,7 +37758,7 @@ DBStatus StorageEngine::updateInternal(
                 return status;
             }
         }
-        if (tbl.hasPrimaryKey() && oldPK != newPK && !newPK.empty()) {
+        if (!compoundPrimary && tbl.hasPrimaryKey() && oldPK != newPK && !newPK.empty()) {
             BPTree* primaryIndex = getPKIndex(dbname, tablename);
             if (!primaryIndex) {
                 lockManager_.unlock(tablename);
@@ -59932,14 +60064,11 @@ DBStatus StorageEngine::rollbackTransaction() {
                     currentRow = stripRowHeader(currentData, currentLen, tbl.formatVersion, tbl.len());
                     foundCurrent = true;
                 } else if (!got) {
-                    std::string targetPk = extractPKValue(
-                        it->rowData, tbl, transactionContext().txnDB);
                     page.forEachLive([&]([[maybe_unused]] uint16_t sid, const char* data, size_t len) {
                         if (foundCurrent || len <= rowHeaderSize(tbl.formatVersion, tbl.len())) return;
                         std::string rowData = stripRowHeader(data, len, tbl.formatVersion, tbl.len());
-                        std::string pk = extractPKValue(
-                            rowData, tbl, transactionContext().txnDB);
-                        if (pk == targetPk) {
+                        if (samePrimaryKey(*this, transactionContext().txnDB, tbl,
+                                           rowData, it->rowData)) {
                             currentRow = rowData;
                             foundCurrent = true;
                         }
@@ -59953,15 +60082,12 @@ DBStatus StorageEngine::rollbackTransaction() {
                     setRowXmax(fullRow.data(), fullRow.size(), tbl.formatVersion, 0);
                     page.update(slotId, fullRow.data(), fullRow.size());
                 } else if (!got) {
-                    std::string targetPk = extractPKValue(
-                        it->rowData, tbl, transactionContext().txnDB);
                     bool restored = false;
                     page.forEachLive([&]([[maybe_unused]] uint16_t sid, const char* data, size_t len) {
                         if (restored || len <= rowHeaderSize(tbl.formatVersion, tbl.len())) return;
                         std::string rowData = stripRowHeader(data, len, tbl.formatVersion, tbl.len());
-                        std::string pk = extractPKValue(
-                            rowData, tbl, transactionContext().txnDB);
-                        if (pk == targetPk) {
+                        if (samePrimaryKey(*this, transactionContext().txnDB, tbl,
+                                           rowData, it->rowData)) {
                             std::string fullRow = replaceRowData(
                                 std::string(data, len), it->rowData, tbl.formatVersion, tbl.len());
                             setRowXmin(fullRow.data(), fullRow.size(), tbl.formatVersion, 0);
@@ -61774,14 +61900,11 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
                     currentRow = stripRowHeader(currentData, currentLen, tbl.formatVersion, tbl.len());
                     foundCurrent = true;
                 } else {
-                    std::string targetPk = extractPKValue(
-                        entry.rowData, tbl, transactionContext().txnDB);
                     page.forEachLive([&]([[maybe_unused]] uint16_t sid, const char* data, size_t len) {
                         if (foundCurrent || len <= rowHeaderSize(tbl.formatVersion, tbl.len())) return;
                         std::string rowData = stripRowHeader(data, len, tbl.formatVersion, tbl.len());
-                        std::string pk = extractPKValue(
-                            rowData, tbl, transactionContext().txnDB);
-                        if (pk == targetPk) {
+                        if (samePrimaryKey(*this, transactionContext().txnDB, tbl,
+                                           rowData, entry.rowData)) {
                             currentRow = rowData;
                             foundCurrent = true;
                         }
@@ -61795,15 +61918,12 @@ DBStatus StorageEngine::rollbackToSavepoint(const std::string& name) {
                     setRowXmax(fullRow.data(), fullRow.size(), tbl.formatVersion, 0);
                     page.update(slotId, fullRow.data(), fullRow.size());
                 } else {
-                    std::string targetPk = extractPKValue(
-                        entry.rowData, tbl, transactionContext().txnDB);
                     bool restored = false;
                     page.forEachLive([&]([[maybe_unused]] uint16_t sid, const char* data, size_t len) {
                         if (restored || len <= rowHeaderSize(tbl.formatVersion, tbl.len())) return;
                         std::string rowData = stripRowHeader(data, len, tbl.formatVersion, tbl.len());
-                        std::string pk = extractPKValue(
-                            rowData, tbl, transactionContext().txnDB);
-                        if (pk == targetPk) {
+                        if (samePrimaryKey(*this, transactionContext().txnDB, tbl,
+                                           rowData, entry.rowData)) {
                             std::string fullRow = replaceRowData(
                                 std::string(data, len), entry.rowData, tbl.formatVersion, tbl.len());
                             setRowXmin(fullRow.data(), fullRow.size(), tbl.formatVersion, 0);
