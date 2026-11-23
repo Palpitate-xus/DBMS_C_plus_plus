@@ -2,6 +2,15 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="integer-between-range-comparison-20261123"></a>
+## 2026-11-23 · 将 `BETWEEN` 交给范围读取
+
+PostgreSQL 18 的语法分析会把普通 `BETWEEN` 转换成包含两端的两个比较。SQLite 为索引选择增加等价的上界和下界，在两个条件都用到索引时可省去运行时的原条件。DuckDB 的筛选合并器会把常量端点交给比较条件合并。 [PostgreSQL 源码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/parser/parse_expr.c) · [SQLite 查询优化](https://www.sqlite.org/optoverview.html#the_between_optimization) · [DuckDB 源码](https://github.com/duckdb/duckdb/blob/main/src/optimizer/filter_combiner.cpp)
+
+本项目在普通表的有符号整数读路径中提取可确认的上下界，同时保留原 SQL 表达式供其他路径使用。适用主键索引时，`BETWEEN` 与两个比较可以读取同样的候选行。对任意可比较类型的范围选路、分区裁剪和更通用的代价判断仍有差距。 [验证与限制](test-report.md#integer-between-range-20261123) · [性能对比](performance-report-2026-10-30.md#integer-between-range-cost-20261123)
+
+另用反向端点对照了显式 `SYMMETRIC` 和 `ASYMMETRIC` 及各自的否定写法。PostgreSQL 18.6 的四条查询均返回布尔值，本项目均返回 `42703`。普通的 `NOT BETWEEN` 在同一组反向及空值端点用例中与 PostgreSQL 一致，仍走原条件计算。 [PostgreSQL 比较谓词](https://www.postgresql.org/docs/18/functions-comparison.html)
+
 <a id="integer-primary-page-reuse-comparison-20261123"></a>
 ## 2026-11-23 · 同页的候选记录共用一次表页读取
 

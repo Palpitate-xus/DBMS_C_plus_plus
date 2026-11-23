@@ -3478,12 +3478,20 @@ static bool resolveCompositeInput(const Expr* expr, bool bound,
     return true;
 }
 
+static const FunctionCallExpr* inclusiveBetween(const Expr* expression) {
+    const auto* call = dynamic_cast<const FunctionCallExpr*>(expression);
+    if (!call || call->preparedSubquery || call->funcName != "BETWEEN" ||
+        !call->schema.empty() || (call->args.size() != 3 && call->args.size() != 4) ||
+        call->filter || call->hasOver || call->distinct || !call->namedArgs.empty() ||
+        !call->orderBy.empty() || call->identitySequenceOid) return nullptr;
+    return call;
+}
+
 static bool collectCompositeBetween(const TableSchema& schema, size_t suffix,
         const Expr* expression, std::optional<size_t> range,
         std::vector<CompositeSuffixBound>& bounds) {
-    const auto* call = dynamic_cast<const FunctionCallExpr*>(expression);
-    if (!call || call->preparedSubquery || call->funcName != "BETWEEN" ||
-        !call->schema.empty() || (call->args.size() != 3 && call->args.size() != 4)) return false;
+    const auto* call = inclusiveBetween(expression);
+    if (!call) return false;
     const auto& column = schema.cols[suffix];
     const auto type = compositeEqualityType(column);
     if (type.empty() || type == "text") return false;
@@ -3677,11 +3685,27 @@ static const ColumnRefExpr* boundStoredIntegerIdentity(const Expr* expression,
     return column && storedIntegerField(schema, column->binding->columnOrdinal) ? column : nullptr;
 }
 
+static const ColumnRefExpr* boundIntegerBetweenColumn(const FunctionCallExpr& between,
+        const TableSchema& schema, size_t source) {
+    const auto column = [&](const Expr* expr) {
+        const auto* ref = boundStoredPredicateColumn(expr, schema, source);
+        return ref ? ref : boundStoredIntegerIdentity(expr, schema, source);
+    };
+    const auto* first = column(between.args[0].get());
+    const auto* second = between.args.size() == 4 ? column(between.args[3].get()) : first;
+    if (!first || !second || first->binding->columnOrdinal != second->binding->columnOrdinal ||
+        !storedIntegerField(schema, first->binding->columnOrdinal)) return nullptr;
+    return first;
+}
+
+static std::optional<std::pair<int64_t, int64_t>> integerBetweenEndpoints(
+    const FunctionCallExpr& between, const PreparedQuery* query);
+
 // Only total, row-local predicates may reject a row before materialization.
 // Keep the ordinary WHERE above the source for expressions and fallback.
 static std::optional<StoredPredicates> bindStoredPredicates(StorageEngine& engine,
         const std::string& database, const TableSchema& schema, size_t source,
-        const std::vector<const Expr*>& residual) {
+        const std::vector<const Expr*>& residual, const PreparedQuery* query = nullptr) {
     using Input = StoredPredicate::Input;
     StoredPredicates filter;
     if (residual.empty()) return filter;
@@ -3730,6 +3754,21 @@ static std::optional<StoredPredicates> bindStoredPredicates(StorageEngine& engin
     };
     for (const auto* clause : residual) {
         if (!clause || clause->preparedSubquery) return {};
+        if (const auto* between = inclusiveBetween(clause)) {
+            const auto* column = boundIntegerBetweenColumn(*between, schema, source);
+            if (!column) return {};
+            const auto endpoints = integerBetweenEndpoints(*between, query);
+            if (!endpoints) return {};
+            auto predicate = predicateFor(*column, Input::Integer);
+            predicate.integer = storedIntegerField(schema, predicate.column);
+            predicate.comparison = StoredComparison::GreaterEqual;
+            predicate.constant = endpoints->first;
+            filter.push_back(predicate);
+            predicate.comparison = StoredComparison::LessEqual;
+            predicate.constant = endpoints->second;
+            filter.push_back(std::move(predicate));
+            continue;
+        }
         if (const auto* unary = dynamic_cast<const UnaryOpExpr*>(clause)) {
             if (unary->op != "IS NULL" && unary->op != "IS NOT NULL") return {};
             const auto* column = localColumn(unary->operand.get());
@@ -3800,7 +3839,8 @@ static std::optional<StoredPredicates> bindStoredPredicates(StorageEngine& engin
 }
 
 static std::optional<StoredPredicates> bindStoredWhere(StorageEngine& engine, const std::string& database,
-        const TableSchema& schema, size_t source, const Expr* expression) {
+        const TableSchema& schema, size_t source, const Expr* expression,
+        const PreparedQuery* query = nullptr) {
     if (!expression) return StoredPredicates{};
     std::vector<const Expr*> terms{expression}, clauses;
     while (!terms.empty()) {
@@ -3814,7 +3854,7 @@ static std::optional<StoredPredicates> bindStoredWhere(StorageEngine& engine, co
         terms.push_back(binary->right.get());
         terms.push_back(binary->left.get());
     }
-    return bindStoredPredicates(engine, database, schema, source, clauses);
+    return bindStoredPredicates(engine, database, schema, source, clauses, query);
 }
 
 class StoredFilterScanOp final : public Operator {
@@ -4600,13 +4640,13 @@ static std::optional<IntegerPageEndpoint> parseIntegerPageEndpoint(const std::st
 }
 
 static std::optional<IntegerPageEndpoint> integerPageEndpoint(const Expr* expression,
-                                                            const PreparedQuery& query) {
+                                                            const PreparedQuery* query) {
     if (!expression || expression->preparedSubquery) return {};
     if (const auto* parameter = dynamic_cast<const ParameterExpr*>(expression)) {
-        if (parameter->origin != ParameterOrigin::StatementInput ||
-            parameter->slot >= query.parameters.size()) return {};
+        if (!query || parameter->origin != ParameterOrigin::StatementInput ||
+            parameter->slot >= query->parameters.size()) return {};
         const auto type = ExprHelper::canonicalResultTypeName(parameter->declaredType);
-        const auto& input = query.parameters[parameter->slot];
+        const auto& input = query->parameters[parameter->slot];
         if (input.isNull || ExprHelper::canonicalResultTypeName(input.typeName) != type) return {};
         return parseIntegerPageEndpoint(input.value, type);
     }
@@ -4626,6 +4666,14 @@ static std::optional<IntegerPageEndpoint> integerPageEndpoint(const Expr* expres
     if (type.empty()) return {};
     const auto input = constantIntegerIndexInput(expression, type);
     return input ? parseIntegerPageEndpoint(input->value, std::move(type)) : std::nullopt;
+}
+
+static std::optional<std::pair<int64_t, int64_t>> integerBetweenEndpoints(
+        const FunctionCallExpr& between, const PreparedQuery* query) {
+    const auto lower = integerPageEndpoint(between.args[1].get(), query);
+    const auto upper = integerPageEndpoint(between.args[2].get(), query);
+    if (!lower || !upper) return {};
+    return std::pair{lower->value, upper->value};
 }
 
 static bool isOrdinaryNullTestColumn(const Column& column) {
@@ -4681,7 +4729,7 @@ static std::optional<StorageEngine::IntegerPartitionFilter> integerPartitionPred
     const auto* input = keyOnLeft ? binary->right.get() : binary->left.get();
     // An external execution provider may supply a different parameter owner.
     if (!ownsStatementInputs && dynamic_cast<const ParameterExpr*>(input)) return std::nullopt;
-    const auto endpoint = integerPageEndpoint(input, query);
+    const auto endpoint = integerPageEndpoint(input, &query);
     if (!endpoint) return std::nullopt;
     if (binary->comparison) {
         const auto& binding = *binary->comparison;
@@ -4705,6 +4753,15 @@ static bool intersectIntegerPageBounds(const Expr* expression, const QueryColumn
                                        const TableSchema& schema, const PreparedQuery& query,
                                        IntegerPageBounds& bounds) {
     if (!expression || expression->preparedSubquery) return false;
+    if (const auto* between = inclusiveBetween(expression)) {
+        const auto* column = boundIntegerBetweenColumn(*between, schema, key.sourceOrdinal);
+        if (!column || column->binding->columnOrdinal != key.columnOrdinal) return false;
+        const auto endpoints = integerBetweenEndpoints(*between, &query);
+        if (!endpoints) return false;
+        bounds.constrain(true, true, endpoints->first);
+        bounds.constrain(false, true, endpoints->second);
+        return true;
+    }
     if (const auto* test = dynamic_cast<const UnaryOpExpr*>(expression)) {
         if (test->op != "IS NULL" && test->op != "IS NOT NULL") return false;
         const auto* column = dynamic_cast<const ColumnRefExpr*>(test->operand.get());
@@ -4736,7 +4793,7 @@ static bool intersectIntegerPageBounds(const Expr* expression, const QueryColumn
         input.declaredType != key.declaredType) return false;
 
     const auto endpoint = integerPageEndpoint(
-        endpointFirst ? comparison->left.get() : comparison->right.get(), query);
+        endpointFirst ? comparison->left.get() : comparison->right.get(), &query);
     if (!endpoint) return false;
     if (comparison->comparison) {
         const auto keyType = ExprHelper::canonicalResultTypeName(key.declaredType);
@@ -4811,7 +4868,7 @@ static std::optional<std::pair<size_t, IntegerPageBounds>> completeIntegerPrimar
     });
     if (range == query.sourceRanges.end() || range->relationName.empty() || range->cteStatement || range->viewQuery)
         return {};
-    const auto predicates = bindStoredWhere(engine, database, schema, range->ordinal, select.whereClause.get());
+    const auto predicates = bindStoredWhere(engine, database, schema, range->ordinal, select.whereClause.get(), &query);
     if (!predicates) return {};
     IntegerPageBounds bounds;
     std::optional<size_t> key;

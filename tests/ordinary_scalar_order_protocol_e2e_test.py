@@ -40,8 +40,8 @@ def complete_range_controls(query):
         result = query(sql)
         assert result[1] is None and result[0] == [[str(k)] for k in expected], (sql, result)
         nodes = plan_nodes(query('EXPLAIN (ANALYZE TRUE, TIMING FALSE, COSTS FALSE, FORMAT JSON) ' + sql))
-        scan = nodes['IntegerPrimaryKeyRange']
-        assert scan['usedPrimaryKeyRange'] == str(used).lower(), nodes
+        scan = nodes.get('IntegerPrimaryKeyRange', {})
+        assert (scan.get('usedPrimaryKeyRange') == 'true') == used, nodes
         if used:
             assert int(scan['indexEntries']) == int(scan['heapRowsFetched']) == fetched, scan
             assert nodes['TableScan'].get('actualRows', 0) == 0, nodes
@@ -53,6 +53,13 @@ def complete_range_controls(query):
     check('k>7 AND k<6', (), True, 0)
     check('k<=256', range(1, 257), True, 256)
     check('k<=257', range(1, 258), False)
+    check('k+0 BETWEEN 1 AND 8 AND val IS NULL', (2, 4, 6, 8), True, 8)
+    check('k BETWEEN 8 AND 8', (8,), True, 1)
+    check('k BETWEEN 8 AND 1', (), True, 0)
+    check('k BETWEEN 1 AND 257', range(1, 258), False)
+    check('k BETWEEN 1.5 AND 5.5', range(2, 6), False)
+    check('k BETWEEN NULL AND 8', (), False)
+    check('k NOT BETWEEN 1 AND 1535', (1536,), False)
 
     # The index sources the same heap order when SQL has no sort key.
     for tail, expected in (('LIMIT 4', insertion_order[:4]),
@@ -60,6 +67,14 @@ def complete_range_controls(query):
                            ('AND val IS NULL LIMIT 2 OFFSET 1', [2, 6])):
         result = query(f'SELECT k FROM {table} WHERE k+0<=8 {tail}')
         assert result[1] is None and result[0] == [[str(k)] for k in expected], result
+    result = query(f'SELECT k FROM {table} WHERE k BETWEEN 1 AND 8 LIMIT 2 OFFSET 3')
+    assert result[1] is None and result[0] == [['1'], ['4']], result
+
+    count = f'SELECT count(*) FROM {table} WHERE val BETWEEN 1 AND 8'
+    result = query(count)
+    assert result[1] is None and result[0] == [['4']], result
+    nodes = plan_nodes(query('EXPLAIN (ANALYZE TRUE, TIMING FALSE, COSTS FALSE, FORMAT JSON) ' + count))
+    assert 'StoredCount' in nodes, nodes
 
 
 def parameter_range_controls(runner, client, sock, check_plan=True):
@@ -123,6 +138,13 @@ def parameter_range_controls(runner, client, sock, check_plan=True):
     prepare('range_mixed_widths','SELECT k FROM scalar_order_pk_int '
             'WHERE $1 <= k AND k < $2 ORDER BY k LIMIT 3',(21,20))
     execute('range_mixed_widths',(-2,2147483648),[['-2'],['0'],['2']],[23],binary_widths=(2,8))
+    between = ('SELECT p.k,p.payload FROM scalar_order_pk_int p '
+               'WHERE p.k BETWEEN $1 AND $2 ORDER BY p.k DESC LIMIT 2 OFFSET 1')
+    prepare('range_between',between,(21,20))
+    execute('range_between',(-2,10),[['2',''],['0','zero']],[23,25],binary_widths=(2,8))
+    for pair in ((10,-2),(None,10),(-2,None)):
+        execute('range_between',pair,[],[23,25])
+    execute('range_between',(-2,2),[['0','zero'],['-2',None]],[23,25])
 
     prepare('range_big','SELECT k,payload FROM scalar_order_pk_big '
             'WHERE k >= $1 AND k <= $2 ORDER BY k DESC LIMIT 2',(20,20))
@@ -170,6 +192,12 @@ def parameter_range_controls(runner, client, sock, check_plan=True):
         prepare('range_plan_numeric',explain+decimal,(1700,))
         nodes=plan_nodes(execute('range_plan_numeric',('2.5',)))
         assert nodes.get('IntegerPrimaryKeyPage',{}).get('usedPrimaryKeyPage')!='true',nodes
+        prepare('between_plan',explain+between,(21,20))
+        for values,fetched in (((-2,10),3),((10,-2),0)):
+            nodes=plan_nodes(execute('between_plan',values,binary_widths=(2,8)))
+            page=nodes['IntegerPrimaryKeyPage']
+            assert page['usedPrimaryKeyPage']=='true' and int(page['heapRowsFetched'])==fetched,nodes
+            assert nodes['TableScan'].get('actualRows',0)==0,nodes
     print('[PREPARED INTEGER RANGE PROTOCOL] passed',flush=True)
 
 

@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>按起止订单号查订单更快 · 2026-11-23</summary>
+
+例如，查 1000 到 1100 号订单时，两头都算在内。记录集中时，数据库可以直接用订单号找到它们。
+
+[测试报告](docs/test-report.md#integer-between-range-20261123) · [性能报告](docs/performance-report-2026-10-30.md#integer-between-range-cost-20261123)
+
+</details>
+
+<details>
 <summary>连续取多笔订单可以减少重复读取 · 2026-11-23</summary>
 
 例如，最早的 128 笔订单都存在同一页时，数据库可以只取一次这一页，再逐条读取订单。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>订单号加 0 的筛选可以省一步 · 2026-11-23</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-23 · 订单号加 0 的筛选可以省一步
 
 例如，查订单号加 0 后小于 100 的记录时，数据库可以直接比较订单号。
 
 [测试报告](docs/test-report.md#stored-integer-identity-20261123) · [性能报告](docs/performance-report-2026-10-30.md#stored-integer-identity-cost-20261123)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-23 · 部分查询省去重复筛选
 

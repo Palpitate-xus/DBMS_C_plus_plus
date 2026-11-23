@@ -1370,6 +1370,8 @@ REPLACE INTO users (ID, NAME) VALUES (1, 'New Alice');
 
 ### 基础查询
 
+`WHERE id BETWEEN 1000 AND 1100` 包含两端，起点大于终点时没有匹配。普通表使用单列整数主键，范围命中的记录较少且集中时，查询可以直接用主键查找。按主键排序并限制行数时，数据库可以在范围内取够就停。 [测试与范围](test-report.md#integer-between-range-20261123)
+
 `SELECT FROM users WHERE active IS NOT NULL LIMIT 3` 可以返回最多三行，每行没有字段值。单独执行 `SELECT` 返回一条这样的行。使用 `DISTINCT` 时需要写出要比较的列或表达式。只从普通表读取零列结果且没有筛选或排序时，可跳过读取大字段。[测试](test-report.md#zero-width-read-20261123) · [性能](performance-report-2026-10-30.md#zero-width-read-cost-20261123)
 
 在 `WHERE id = 7` 中，`7` 是数字。在 `WHERE id = "7"` 中，`"7"` 是列名，查询比较同一行中的两列，即使表上有索引也是如此。[查询测试](test-report.md#narrow-select-20261121)

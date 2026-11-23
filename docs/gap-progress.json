@@ -2,6 +2,18 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-23 plan stored signed integer BETWEEN as inclusive range bounds",
+      "gap_ids": ["IDX-03", "OPT-01"],
+      "status": "partial",
+      "evidence": ["src/executor/ExecutionPlan.cpp", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/ordinary_scalar_order_protocol_e2e_test.py"],
+      "verification": [
+        "Signed integer BETWEEN supplies both inclusive endpoints to stored predicates and indexed range reads.",
+        "Ordered reads accept matching bound integer parameters, and unordered LIMIT preserves the physical table order.",
+        "Full scans remain available when the candidate count, page coverage, snapshot or access checks preclude index reads."
+      ]
+    },
+    {
       "issue": "2026-11-23 reuse a table page for consecutive integer primary key candidates",
       "gap_ids": ["IDX-03", "OPT-01"],
       "status": "partial",
