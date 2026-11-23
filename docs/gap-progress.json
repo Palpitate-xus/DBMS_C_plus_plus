@@ -2,6 +2,18 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-23 stop supported read-only CTE and derived scans when the parent has enough rows",
+      "gap_ids": ["QRY-01", "QRY-05", "PROTO-04"],
+      "status": "partial",
+      "evidence": ["src/main.cpp", "src/executor/ExecutionPlan.cpp", "docs/MANUAL.md", "docs/compatibility-contract.md", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/compat/cases/logical_read_demand.sql", "tests/simple_query_runtime_result_protocol_e2e_test.py"],
+      "verification": [
+        "Read-only chains over ordinary tables provide rows on demand. LIMIT 5 reads five of 8355 visible rows. LIMIT 0 reads zero and an unrestricted count still reads all rows.",
+        "All 34 ordinary-protocol fixture statements matched PostgreSQL 18.6. Checked result rows before errors, constant aggregate argument errors, LATERAL preservation, and reopening old data after forced exit.",
+        "Literal VALUES sources, zero-column projections and differences in extended-protocol planning remain open."
+      ]
+    },
+    {
       "issue": "2026-11-23 preserve result metadata and completed rows before simple query execution errors",
       "gap_ids": ["PROTO-01", "PROTO-04"],
       "status": "partial",

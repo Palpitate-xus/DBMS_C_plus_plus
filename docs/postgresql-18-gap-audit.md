@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-23 · 只读 CTE 与派生表按需取行
+
+受支持的只读查询按外层需求读取内部列值。`LIMIT` 达到指定条数后，内部扫描停止；普通算术和计数错误保留对应的执行阶段。`QRY-01`、`QRY-05` 和 `PROTO-04` 仍为部分实现。[测试](test-report.md#logical-read-demand-20261123) · [性能](performance-report-2026-10-30.md#logical-read-demand-cost-20261123)
+
 ## 2026-11-23 · 普通查询的执行错误保留已完成结果
 
 普通查询执行受支持的只读计划时，执行错误响应带有已绑定的列说明和执行器完成的结果行。验证覆盖除零、整数溢出、无成功结束消息及失败事务状态。`PROTO-01` 和 `PROTO-04` 仍有其他协议行为待实现。[测试](test-report.md#simple-query-runtime-result-20261123) · [性能](performance-report-2026-10-30.md#simple-query-runtime-result-cost-20261123)

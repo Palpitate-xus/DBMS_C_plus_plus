@@ -556,7 +556,7 @@ struct PreparedSelectState {
                 const auto* star = dynamic_cast<const LiteralExpr*>(argument);
                 const bool planArgument = (!star || star->value != "*") &&
                     !dynamic_cast<const ColumnRefExpr*>(argument);
-                if (aggregate.name != "count" || !aggregate.call->aggregateOrderKeys.empty() ||
+                if (!aggregate.call->aggregateOrderKeys.empty() ||
                     (!planArgument && !aggregate.call->filter)) continue;
                 if (!execution->aggregateColumnDemanded(aggregate.call)) continue;
                 // The root expression now reads a result slot. Its separate

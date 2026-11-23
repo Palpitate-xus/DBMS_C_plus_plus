@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>有些查询只取几条结果时，读够就可以停下 · 2026-11-23</summary>
+
+例如，从一批订单中取 5 笔并计算金额。在支持的查询中，数据库可以只读需要的订单。
+
+[用法](docs/MANUAL.md#cte-公用表表达式) · [测试报告](docs/test-report.md#logical-read-demand-20261123) · [性能报告](docs/performance-report-2026-10-30.md#logical-read-demand-cost-20261123)
+
+</details>
+
+<details>
 <summary>部分查询会先返回结果，再报告错误 · 2026-11-23</summary>
 
 例如，前两条记录算出了结果，第三条遇到除以零。客户端会先收到前两条结果，再收到错误消息。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>多项统计可以只读一遍表 · 2026-11-23</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-23 · 多项统计可以只读一遍表
 
 例如，同时数出有货和缺货的商品各有多少。数据库可以读一遍商品表，算出两个数量。
 
 [用法](docs/MANUAL.md#聚合) · [测试报告](docs/test-report.md#ordinary-stored-count-20261123) · [性能报告](docs/performance-report-2026-10-30.md#ordinary-stored-count-cost-20261123)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-23 · 按文字长度和数字筛选更快
 

@@ -1747,6 +1747,8 @@ WITH RECURSIVE cte AS (
 SELECT * FROM cte;
 ```
 
+只读 `WITH` 或 `FROM (SELECT ...)` 从普通表读取并传递列或字面值时，外层查询可以逐行取数。例如 `WITH q AS (SELECT id, quantity FROM orders) SELECT id, quantity * 2 FROM q LIMIT 5` 取够五条就可以结束。筛选或排序仍按各自需要读取数据。计算出错时，已完成的结果继续按普通查询规则返回。[测试](test-report.md#logical-read-demand-20261123) · [性能](performance-report-2026-10-30.md#logical-read-demand-cost-20261123)
+
 ### 窗口函数
 
 2026-11-03，基于源码 `9f019ffa` 的前批最终 C9 程序 `c696d3b2` 已将受支持的普通窗口查询接入

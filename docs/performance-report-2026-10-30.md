@@ -4,6 +4,43 @@
 
 > 复核发现，几组早期 COPY 计时在每个对照场景中使用了固定的执行顺序。耗时差可能包含顺序影响。这项问题涉及默认值求值、按列查找、默认值标记、短 CSV 导出和短查询导出的配对计时。[默认值求值](#copy-default-evaluation-order-cost-20261122) · [按列查找](#copy-identity-input-cost-20261122) · [默认值标记](#copy-default-marker-cost-20261122) · [CSV 导出](#copy-csv-out-cost-20261122) · [查询导出](#copy-query-stdout-cost-20261122)
 
+<a id="logical-read-demand-cost-20261123"></a>
+## 2026-11-23 · 只取几条时提前停止读表
+
+新旧程序均用 GCC 13.3、CMake C++17 `-O2` 构建，基线为 `be1418e0`。测试使用 8,355 行的 `public.compound_range_cost` 表。两版均从同一个已正常关闭的数据目录副本启动。PostgreSQL 18.6 按相同顺序插入相同数据，建主键后执行 `ANALYZE`，关闭 JIT 和并行查询。[表定义与数据构造](#ordinary-stored-count-cost-20261123)
+
+```sql
+WITH input AS (SELECT ord, payload FROM public.compound_range_cost)
+SELECT ord + 1 AS n FROM input LIMIT 5;
+
+SELECT q.ord + 1 AS n
+FROM (SELECT ord, payload FROM public.compound_range_cost) AS q LIMIT 5;
+
+WITH input AS (SELECT ord, payload FROM public.compound_range_cost)
+SELECT ord + 1 AS n FROM input LIMIT 0;
+
+WITH input AS (SELECT ord, payload FROM public.compound_range_cost)
+SELECT count(*) FROM input;
+
+SELECT ord FROM public.compound_range_cost
+WHERE shop = 'shared-long-store-code-01234567-A'
+ORDER BY ord DESC LIMIT 5 OFFSET 2;
+```
+
+各轮含两对进程，交换执行顺序及客户端与服务端的 CPU 位置。新旧两轮分别用 CPU 25/26 和 27/28，PostgreSQL 对照轮用 CPU 31/32。各进程每条 SQL 预热一次、计时两次，每轮共 40 次计时请求。计时从发送普通查询到收到 `ReadyForQuery`。每次核对完整消息顺序、列名、`bigint` 类型、数据、命令标签和会话状态。
+
+下表单位为毫秒。新旧范围来自前两轮各自的中位数，最后两列来自第三轮。
+
+| 查询 | 旧版 | 新版 | 同轮新版 | PostgreSQL 18.6 |
+| --- | ---: | ---: | ---: | ---: |
+| `WITH` 取五行 | 7029.188–7076.681 | 6.427–6.925 | 7.213 | 0.382 |
+| 派生表取五行 | 7056.511–7110.541 | 4.300–5.230 | 5.495 | 0.328 |
+| `WITH` 取零行 | 6372.728–6407.608 | 4.148–4.745 | 4.560 | 0.240 |
+| `WITH` 全部计数 | 6491.093–6527.945 | 142.994–155.707 | 147.112 | 1.189 |
+| 直接按主键分页 | 3.742–3.912 | 3.957–3.980 | 3.971 | 0.373 |
+
+`pg_stat_tables` 中，两种取五行的查询都由一次顺序扫描读 8,355 行降为一次扫描读 5 行。取零行时，扫描次数和可见行读取数均为 0。全部计数仍读 8,355 行，省去旧执行方式写入临时表的工作。主键分页新旧各用一次索引查找并取 7 条记录，延迟增加约 1.7%–5.7%。本轮统计可见行次数，磁盘和缓冲页实际读取量未测。五项查询在 PostgreSQL 的同轮延迟均更低。[功能与恢复回归](test-report.md#logical-read-demand-20261123)
+
 <a id="simple-query-runtime-result-cost-20261123"></a>
 ## 2026-11-23 · 普通查询的执行错误
 

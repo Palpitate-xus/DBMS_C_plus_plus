@@ -5961,6 +5961,7 @@ static bool explainPreparedDmlQuery(Session&,const string&,
     const dbms::QueryPlanner::ExplainOptions&,bool);
 
 static bool canRunPreparedIntegerJoin(const dbms::PreparedQuery&, const Session&);
+static bool usesDemandedLogicalRead(const dbms::PreparedQuery&);
 
 static bool simpleJoinFilter(const dbms::Expr* expression) {
     if (!expression) return true;
@@ -6112,7 +6113,8 @@ static bool handleExplain(const string& sql, Session& s) {
         // including queries that yield no rows and plain EXPLAIN cache hits.
         auto prepared = make_shared<dbms::PreparedQuery>(g_engine.prepareBoundQuery(s.currentDB, inner));
         auto* select = static_cast<dbms::SelectStmt*>(prepared->ast.get());
-        if (integerJoinProbe && canRunPreparedIntegerJoin(*prepared, s))
+        if (usesDemandedLogicalRead(*prepared) ||
+            (integerJoinProbe && canRunPreparedIntegerJoin(*prepared, s)))
             return explainPreparedReadQuery(s,inner,opts,isJson,std::move(prepared));
         // Scalar query children acquire their AST role during pure binding;
         // do not mistake their parser envelope literal for a physical target.
@@ -22685,6 +22687,48 @@ static bool plainGeneratedJoinSourceProbe(const dbms::SelectStmt& select,Session
     return hasPhysicalVirtual(select.fromClause.get());
 }
 
+static bool usesDemandedLogicalRead(const dbms::PreparedQuery& query) {
+    const auto* root = dynamic_cast<const dbms::SelectStmt*>(query.ast.get());
+    if (!root || !root->fromClause) return false;
+    const auto* select = root;
+    const auto isStoredValue = [](const dbms::ExprPtr& expression) {
+        return expression && !expression->preparedSubquery &&
+            (dynamic_cast<const dbms::LiteralExpr*>(expression.get()) ||
+             dynamic_cast<const dbms::ColumnRefExpr*>(expression.get()) ||
+             expression->type == dbms::ExprType::A_Star);
+    };
+    while (select) {
+        const bool producer = select != root;
+        // Only chains ending at a stored relation use the physical read path.
+        // A source-free producer can depend on the caller's LATERAL row.
+        if (!select->fromClause || hasCurrentQueryWindows(select) ||
+            !dbms::QueryPlanner::supportsPreparedSourceSelectPlan(*select))
+            return false;
+        // A producer can carry through stored fields and literal values
+        // without evaluating an unused computed target in an inline CTE.
+        if (producer && !all_of(select->selectList.begin(), select->selectList.end(),
+                [&](const auto& target) { return isStoredValue(target.expr); })) return false;
+        for (const auto& cte : select->ctes) {
+            if (cte.recursive || !dynamic_cast<const dbms::SelectStmt*>(cte.query.get())) return false;
+            if (cte.materializationSpecified && !cte.materialized &&
+                count_if(query.sourceRanges.begin(), query.sourceRanges.end(), [&](const auto& range) {
+                    return range.cteStatement == cte.query.get() && !range.mergedUsing;
+                }) > 1) return false;
+        }
+        const auto& from = *select->fromClause;
+        if (from.type != dbms::FromItem::Type::Table && from.type != dbms::FromItem::Type::Subquery) return false;
+        const auto range = find_if(query.sourceRanges.begin(), query.sourceRanges.end(), [&](const auto& item) {
+            return item.owner == select && item.source == &from && !item.mergedUsing;
+        });
+        if (range == query.sourceRanges.end() || range->generatedRelation) return false;
+        const auto* child = range->cteStatement ? range->cteStatement : from.subquery.get();
+        if (!child) return producer && !range->viewQuery && !range->relationName.empty() &&
+            range->relationSchema != "pg_catalog" && range->relationSchema != "information_schema";
+        select = dynamic_cast<const dbms::SelectStmt*>(child);
+    }
+    return false;
+}
+
 static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& handled) {
     handled=false;
     dbms::SQLParser parser;auto parsed=parser.parseForBinding(rawSql);
@@ -22981,6 +23025,7 @@ static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& 
         [](const auto& range) { return range.source && bool(range.viewQuery); });
     const bool integerJoinRequired = integerJoinProbe && canRunPreparedIntegerJoin(*query, session);
     const bool inheritanceRequired=!integerJoinRequired && inheritanceProbe && PreparedWithDmlRuntime::readsNestedInheritance(*query,session);
+    const bool demandedLogicalRead = derivedProbe && usesDemandedLogicalRead(*query);
     const auto arrayColumn=[](const dbms::QueryOutputColumn& column) {
         const auto& type=column.typeMetadata;
         return type && type->kind==dbms::DatumKind::Array && type->actualOid==column.typeOid &&
@@ -23003,7 +23048,7 @@ static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& 
                [&](const auto& statement) { return isArrayDomain(statement.second); }) ||
         any_of(query->setOperationInputs.begin(),query->setOperationInputs.end(),
                [&](const auto& set) { return isArrayDomain(set.second.left) || isArrayDomain(set.second.right); }));
-    if(!required && !inheritanceRequired && !integerJoinRequired && !viewRequired) {
+    if(!required && !inheritanceRequired && !integerJoinRequired && !viewRequired && !demandedLogicalRead) {
         // The parser only probes a shape. Actual copied type/operator metadata
         // owns this receiver; ordinary builtin comparisons keep their existing
         // consumer. Never discover enum identity from evaluated datum strings.
@@ -23046,7 +23091,7 @@ static bool handlePreparedCaseQuery(const string& rawSql,Session& session,bool& 
         }
         if(!enumRequired && !generatedRequired && !arraySourceRequired)return false;
     }
-    PreparedWithDmlRuntime runtime(session,std::move(query));
+    PreparedWithDmlRuntime runtime(session,std::move(query),demandedLogicalRead);
     auto result=runtime.runRead(0,false,!arrayDomainRequired,arraySourceRequired);
     for(const auto& name:result.columns)cout<<name<<' ';cout<<'\n';
     for(size_t i=0;i<result.rows.size();++i) {
@@ -23303,7 +23348,7 @@ static bool explainPreparedReadQuery(Session& session,const string& raw,
     const dbms::QueryPlanner::ExplainOptions& options,bool json,
     shared_ptr<dbms::PreparedQuery> query) {
     if(!query)query=make_shared<dbms::PreparedQuery>(g_engine.prepareBoundQuery(session.currentDB,raw));
-    PreparedWithDmlRuntime runtime(session,query);
+    PreparedWithDmlRuntime runtime(session,query,usesDemandedLogicalRead(*query));
     auto plan=runtime.queryPlan();
     // Writer completion is part of the exact successful statement. The
     // publication sink remains outer-commit gated by execute().

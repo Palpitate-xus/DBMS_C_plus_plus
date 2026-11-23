@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-23 · 外层查询按需读取内部结果
+
+PostgreSQL 的普通 `LIMIT` 在达到条数后停止从子节点取行。单次引用且符合条件的只读 CTE 也可与外层合并。SQLite 使用 `MATERIALIZED` 作为查询优化的边界，DuckDB 通常先保留 CTE 并根据使用方式决定是否合并。[PostgreSQL WITH](https://www.postgresql.org/docs/18/queries-with.html) · [PostgreSQL LIMIT 实现](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/executor/nodeLimit.c) · [SQLite WITH](https://sqlite.org/lang_with.html) · [DuckDB WITH](https://duckdb.org/docs/2.0/sql/query_syntax/with)
+
+本项目的受支持只读 CTE 和派生表现在按外层需求提供数据，保持内部列类型及 NULL。复杂 CTE 合并、表达式消除和任意查询形状仍待补齐。[测试](test-report.md#logical-read-demand-20261123) · [性能](performance-report-2026-10-30.md#logical-read-demand-cost-20261123)
+
 ## 2026-11-23 · 普通查询出错时返回的结果
 
 PostgreSQL 在结果接收器启动时发送列说明，执行中逐行发送数据，发生错误时结束当前查询。SQLite 和 DuckDB 的 C API 也可以分别取得已准备语句的列信息及执行结果，只有 PostgreSQL 的比较涉及网络消息顺序。[PostgreSQL 消息规则](https://www.postgresql.org/docs/18/protocol-flow.html#PROTOCOL-FLOW-SIMPLE-QUERY) · [PostgreSQL 结果接收器](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/access/common/printtup.c) · [SQLite 列说明](https://www.sqlite.org/c3ref/column_count.html) · [DuckDB 预编译接口](https://duckdb.org/docs/1.5/clients/c/prepared)
