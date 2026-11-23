@@ -1,34 +1,34 @@
 # 更新日志
 
 <details>
-<summary>建表后可以保存带时区的时间 · 2026-11-23</summary>
+<summary>可以保存带时区的时间 · 2026-11-23</summary>
 
-例如，签到时间可以保存为 `14:30:00.13+05:30`。以后查询时，仍能看到当时记录的偏移。
+例如，把签到时间存为 `14:30:00+05:30`，查询时仍会显示 `+05:30`。
 
 [使用说明](docs/MANUAL.md#日期时间类型) · [测试报告](docs/test-report.md#timetz-storage-20261123) · [性能报告](docs/performance-report-2026-10-30.md#timetz-storage-cost-20261123)
 
 </details>
 
 <details>
-<summary>带时区的时间可以按指定位数四舍五入 · 2026-11-23</summary>
+<summary>可以指定时间的小数秒保留几位 · 2026-11-23</summary>
 
-例如，要求保留两位小数时，`14:30:00.125+05:30` 会变成 `14:30:00.13+05:30`。
+例如，保留两位小数时，`14:30:00.125+05:30` 会变成 `14:30:00.13+05:30`。
 
 [使用说明](docs/MANUAL.md#日期时间类型) · [测试报告](docs/test-report.md#timetz-precision-20261123) · [性能报告](docs/performance-report-2026-10-30.md#timetz-precision-cost-20261123)
 
 </details>
 
 <details>
-<summary>临时表检查也覆盖还没执行的查询 · 2026-11-23</summary>
+<summary>修复延后提交时漏查临时表的问题 · 2026-11-23</summary>
 
-有些应用会先登记一笔事务，再决定何时提交。即使应用只准备了涉及临时表的查询，还没有运行，数据库也会拒绝登记，并撤销这笔事务的修改。
+用 `PREPARE TRANSACTION` 把事务留到稍后提交时，如果应用已准备了一条会用到临时表的查询，即使还没运行，数据库也会拒绝请求并撤销这笔事务的修改。
 
 [使用说明](docs/MANUAL.md#7-事务控制) · [测试报告](docs/test-report.md#temp-prepare-subqueries-20261123) · [性能报告](docs/performance-report-2026-10-30.md#temp-prepare-subqueries-cost-20261123)
 
 </details>
 
 <details>
-<summary>更早的更新</summary>
+<summary>查看更早的更新和版本记录</summary>
 
 ## 2026-11-23 · 在 SQL 里直接列出多行数据时，查询准备更快
 
