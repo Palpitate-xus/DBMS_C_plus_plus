@@ -2,6 +2,18 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-23 use signed integer primary indexes for complete selective ranges",
+      "gap_ids": ["IDX-03", "OPT-01"],
+      "status": "partial",
+      "evidence": ["src/commands/TableManage.cpp", "src/executor/ExecutionPlan.cpp", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/ordinary_scalar_order_protocol_e2e_test.py"],
+      "verification": [
+        "A complete range may fetch matching indexed rows in heap order without requiring ORDER BY or LIMIT.",
+        "The candidate limit, heap extent, snapshot, format and visibility checks preserve the full scan fallback.",
+        "A fixed unordered LIMIT and OFFSET only fetch enough qualifying rows after complete candidate discovery."
+      ]
+    },
+    {
       "issue": "2026-11-23 lower identity arithmetic in signed integer scan predicates",
       "gap_ids": ["OPT-01"],
       "status": "partial",

@@ -2,6 +2,11 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="complete-integer-range-comparison-20261123"></a>
+## 2026-11-23 · 先用主键索引定位范围，再读取记录
+
+PostgreSQL 可为 B-tree 范围比较选择索引扫描或位图堆扫描，命中范围扩大时也可能选择整表扫描。SQLite 根据条件估计可排除多少记录，决定使用哪一个索引。DuckDB 用分组的最小值和最大值跳过区间外的数据，单列 ART 索引另有选择性阈值。本项目先读取符合范围的有序整数键，只有能完整取得所有候选且这些记录集中在少量表页时才从该索引读取记录。 [PostgreSQL 索引类型](https://www.postgresql.org/docs/18/indexes-types.html#INDEXES-TYPES-BTREE) · [PostgreSQL 执行计划](https://www.postgresql.org/docs/18/using-explain.html) · [SQLite 范围优化](https://www.sqlite.org/optoverview.html#range_queries) · [DuckDB 索引](https://www.duckdb.org/docs/1.5/guides/performance/indexing)
+
 <a id="stored-integer-identity-comparison-20261123"></a>
 ## 2026-11-23 · 化简不改变整数值的运算
 

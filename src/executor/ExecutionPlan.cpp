@@ -4526,16 +4526,7 @@ static std::optional<QueryColumnBinding> preparedDirectOrderColumn(
     return projections->second.at(ordinal - 1).column;
 }
 
-static std::optional<QueryColumnBinding> integerPageOrder(const PreparedQuery& query,
-                                                        const SelectStmt& select) {
-    if (!select.fromClause || select.fromClause->type != FromItem::Type::Table || !select.limit || !*select.limit ||
-        select.limitExpr || select.offsetExpr || select.orderBy.size() != 1 || select.orderBy[0].enumComparison ||
-        !select.orderBy[0].usingOp.empty() || select.distinct || !select.distinctOn.empty() ||
-        select.having || !select.groupBy.empty() || !select.groupByElems.empty() || !select.windowDefs.empty() ||
-        !select.ctes.empty() || select.setOp != SetOp::None || select.setOpLhs || select.setOpRhs ||
-        select.withTies || !select.locking.empty() || select.existsTargetPrunable ||
-        (select.signedFetchCount && *select.signedFetchCount < 0) ||
-        *select.limit > std::numeric_limits<size_t>::max() - select.offset.value_or(0)) return {};
+static bool hasCardinalityChangingTargets(const SelectStmt& select) {
     const auto cardinalityChanges = [&](const auto& self, Expr* expression) -> bool {
         if (!expression || expression->preparedSubquery) return false;
         if (const auto* call = dynamic_cast<const FunctionCallExpr*>(expression);
@@ -4546,8 +4537,27 @@ static std::optional<QueryColumnBinding> integerPageOrder(const PreparedQuery& q
             [&](Expr* child) { if (!changes) changes = self(self, child); });
         return changes;
     };
-    for (const auto& target : select.selectList)
-        if (cardinalityChanges(cardinalityChanges, target.expr.get())) return {};
+    return std::any_of(select.selectList.begin(), select.selectList.end(), [&](const auto& target) {
+        return cardinalityChanges(cardinalityChanges, target.expr.get());
+    });
+}
+
+static std::optional<size_t> simpleIntegerScanDemand(const SelectStmt& select) {
+    if (!select.limit || !*select.limit || select.limitExpr || select.offsetExpr ||
+        select.distinct || !select.distinctOn.empty() || select.having || !select.groupBy.empty() ||
+        !select.groupByElems.empty() || !select.windowDefs.empty() || !select.ctes.empty() ||
+        select.setOp != SetOp::None || select.setOpLhs || select.setOpRhs || select.withTies ||
+        !select.locking.empty() || select.existsTargetPrunable ||
+        (select.signedFetchCount && *select.signedFetchCount < 0) ||
+        *select.limit > std::numeric_limits<size_t>::max() - select.offset.value_or(0) ||
+        hasCardinalityChangingTargets(select)) return {};
+    return select.offset.value_or(0) + *select.limit;
+}
+
+static std::optional<QueryColumnBinding> integerPageOrder(const PreparedQuery& query,
+                                                        const SelectStmt& select) {
+    if (!select.fromClause || select.fromClause->type != FromItem::Type::Table ||
+        select.orderBy.size() != 1 || !simpleIntegerScanDemand(select)) return {};
     return preparedDirectOrderColumn(query, select);
 }
 
@@ -4555,6 +4565,19 @@ struct IntegerPageBounds {
     std::optional<int64_t> lower;
     std::optional<int64_t> upper;
     std::vector<OrderedPrimaryKeyNullTest> nullTests;
+
+    void constrain(bool isLower, bool inclusive, int64_t value) {
+        if (!inclusive) {
+            if ((isLower && value == INT64_MAX) || (!isLower && value == INT64_MIN)) {
+                lower = INT64_MAX;
+                upper = INT64_MIN;
+                return;
+            }
+            value += isLower ? 1 : -1;
+        }
+        if (isLower) lower = std::max(lower.value_or(INT64_MIN), value);
+        else upper = std::min(upper.value_or(INT64_MAX), value);
+    }
 };
 
 struct IntegerPageEndpoint {
@@ -4725,19 +4748,8 @@ static bool intersectIntegerPageBounds(const Expr* expression, const QueryColumn
             binding.identity != "builtin-comparison:" + op + "(" + leftType + "," + rightType + ")") return false;
     }
 
-    int64_t value = endpoint->value;
     const bool isLower = (op.front() == '>') != endpointFirst;
-    if (op.size() == 1) {
-        if ((isLower && value == INT64_MAX) || (!isLower && value == INT64_MIN)) {
-            // Both endpoints are representable even though the interval is empty.
-            bounds.lower = INT64_MAX;
-            bounds.upper = INT64_MIN;
-            return true;
-        }
-        value += isLower ? 1 : -1;
-    }
-    if (isLower) bounds.lower = std::max(bounds.lower.value_or(INT64_MIN), value);
-    else bounds.upper = std::min(bounds.upper.value_or(INT64_MAX), value);
+    bounds.constrain(isLower, op.size() == 2, endpoint->value);
     return true;
 }
 
@@ -4788,6 +4800,49 @@ bool QueryPlanner::mayUseIntegerPrimaryKeyPage(StorageEngine* engine, const std:
     return eligibleIntegerPageKey(schema, *key) && integerPageBounds(query, select, *key, schema).has_value();
 }
 
+static std::optional<std::pair<size_t, IntegerPageBounds>> completeIntegerPrimaryRange(
+        StorageEngine& engine, const std::string& database, const PreparedQuery& query,
+        const SelectStmt& select, const TableSchema& schema) {
+    if (!select.whereClause || !select.locking.empty() || !select.fromClause ||
+        select.fromClause->type != FromItem::Type::Table || !schema.physicalRelationId ||
+        !supportsStoredHeapPredicate(schema) || QueryPlanner::supportsStoredCountSelect(select)) return {};
+    const auto range = std::find_if(query.sourceRanges.begin(), query.sourceRanges.end(), [&](const auto& source) {
+        return source.owner == &select && source.source == select.fromClause.get() && !source.mergedUsing;
+    });
+    if (range == query.sourceRanges.end() || range->relationName.empty() || range->cteStatement || range->viewQuery)
+        return {};
+    const auto predicates = bindStoredWhere(engine, database, schema, range->ordinal, select.whereClause.get());
+    if (!predicates) return {};
+    IntegerPageBounds bounds;
+    std::optional<size_t> key;
+    bool inequality = false;
+    using Input = StoredPredicate::Input;
+    for (const auto& predicate : *predicates) {
+        if (predicate.input == Input::IsNull || predicate.input == Input::IsNotNull) {
+            bounds.nullTests.push_back({predicate.column, predicate.input == Input::IsNull});
+            continue;
+        }
+        if (!predicate.integer || (key && predicate.column != *key) ||
+            !isSingleColumnPrimaryKey(schema, predicate.name)) return {};
+        key = predicate.column;
+        const auto endpoint = std::get<int64_t>(predicate.constant);
+        switch (predicate.comparison) {
+            case StoredComparison::Equal:
+                bounds.constrain(true, true, endpoint);
+                bounds.constrain(false, true, endpoint);
+                continue;
+            case StoredComparison::NotEqual: return {};
+            case StoredComparison::Less: bounds.constrain(false, false, endpoint); break;
+            case StoredComparison::LessEqual: bounds.constrain(false, true, endpoint); break;
+            case StoredComparison::Greater: bounds.constrain(true, false, endpoint); break;
+            case StoredComparison::GreaterEqual: bounds.constrain(true, true, endpoint); break;
+        }
+        inequality = true;
+    }
+    if (!key || !inequality) return {};
+    return std::pair<size_t, IntegerPageBounds>{*key, std::move(bounds)};
+}
+
 class IntegerPrimaryKeyPageOp final : public Operator {
     StorageEngine* engine_;
     std::string database_;
@@ -4796,6 +4851,7 @@ class IntegerPrimaryKeyPageOp final : public Operator {
     bool descending_;
     IntegerPageBounds bounds_;
     OpPtr fallback_;
+    const Expr* rangePredicate_;
     std::optional<OrderedPrimaryKeyReadPage> page_;
     size_t position_ = 0, indexEntries_ = 0, indexNodesVisited_ = 0, heapRows_ = 0;
     bool fallbackOpen_ = false, usedPage_ = false, orderedIndex_ = false;
@@ -4803,13 +4859,15 @@ class IntegerPrimaryKeyPageOp final : public Operator {
     std::vector<bool> lastNulls_;
 public:
     IntegerPrimaryKeyPageOp(StorageEngine* engine, std::string database, const TableSchema& schema,
-            size_t keyColumn, size_t count, bool descending, IntegerPageBounds bounds, OpPtr fallback)
+            size_t keyColumn, size_t count, bool descending, IntegerPageBounds bounds, OpPtr fallback,
+            const Expr* rangePredicate = nullptr)
         : engine_(engine), database_(std::move(database)), schema_(schema), keyColumn_(keyColumn),
-          count_(count), descending_(descending), bounds_(std::move(bounds)), fallback_(std::move(fallback)) {}
+          count_(count), descending_(descending), bounds_(std::move(bounds)), fallback_(std::move(fallback)),
+          rangePredicate_(rangePredicate) {}
     std::optional<PreparedIntegerKeyOrder> openedKeyOrder() const {
         // Both signed-key scans and successful legacy numeric prefixes
         // return checked heap rows in key order. A heap fallback does not.
-        if (!page_) return {};
+        if (!page_ || rangePredicate_) return {};
         return PreparedIntegerKeyOrder{keyColumn_, !descending_};
     }
     bool open() override {
@@ -4819,7 +4877,8 @@ public:
         usedPage_ = orderedIndex_ = false;
         indexEntries_ = indexNodesVisited_ = heapRows_ = 0;
         page_ = engine_->tryReadOrderedIntegerPrimaryKey(database_, schema_.tablename, schema_,
-            keyColumn_, descending_, count_, sortWorkMemBytes(), bounds_.lower, bounds_.upper, bounds_.nullTests);
+            keyColumn_, descending_, count_, sortWorkMemBytes(), bounds_.lower, bounds_.upper, bounds_.nullTests,
+            rangePredicate_ != nullptr);
         if (page_) {
             usedPage_ = true;
             orderedIndex_ = page_->orderedIndex;
@@ -4839,7 +4898,7 @@ public:
                 return false;
             }
         } else {
-            if (position_ == page_->rows.size()) return false;
+            if (position_ == page_->rows.size()) { lastRid_ = 0; return false; }
             auto& row = page_->rows[position_++];
             lastRid_ = row.rid;
             lastNulls_ = std::move(row.nulls);
@@ -4868,6 +4927,9 @@ public:
         bitmap = lastNulls_;
         return true;
     }
+    const Expr* lastSatisfiedWhere() const override {
+        return page_ ? (lastRid_ ? rangePredicate_ : nullptr) : fallback_->lastSatisfiedWhere();
+    }
     ScanOrigin scanOrigin() const override {
         if (!page_) return fallback_->scanOrigin();
         ScanOrigin origin;
@@ -4877,11 +4939,14 @@ public:
         origin.rid = lastRid_;
         return origin;
     }
-    std::string preparedPlanNodeName() const override { return "IntegerPrimaryKeyPage"; }
+    std::string preparedPlanNodeName() const override {
+        return rangePredicate_ ? "IntegerPrimaryKeyRange" : "IntegerPrimaryKeyPage";
+    }
     std::vector<Operator*> preparedPlanChildren() const override { return {fallback_.get()}; }
     std::map<std::string, std::string> preparedPlanAttributes() const override {
-        if (!usedPage_) return {{"usedPrimaryKeyPage", "false"}};
-        std::map<std::string, std::string> attributes{{"usedPrimaryKeyPage", "true"},
+        const char* used = rangePredicate_ ? "usedPrimaryKeyRange" : "usedPrimaryKeyPage";
+        if (!usedPage_) return {{used, "false"}};
+        std::map<std::string, std::string> attributes{{used, "true"},
             {"orderedIndex", orderedIndex_ ? "true" : "false"}, {"indexEntries", std::to_string(indexEntries_)},
             {"heapRowsFetched", std::to_string(heapRows_)}};
         if (orderedIndex_) attributes.emplace("indexNodesVisited", std::to_string(indexNodesVisited_));
@@ -5129,6 +5194,12 @@ OpPtr makePreparedTableSource(StorageEngine* engine, const std::string& database
                 return std::make_unique<IntegerPrimaryKeyPageOp>(engine, database, schema, key->columnOrdinal,
                     select->offset.value_or(0) + *select->limit, !select->orderBy.front().asc, std::move(*bounds),
                     std::move(source));
+        }
+        if (auto range = completeIntegerPrimaryRange(*engine, database, *query, *select, schema)) {
+            const auto demand = select->orderBy.empty() ? simpleIntegerScanDemand(*select) : std::nullopt;
+            return std::make_unique<IntegerPrimaryKeyPageOp>(engine, database, schema, range->first,
+                demand.value_or(std::numeric_limits<size_t>::max()), false, std::move(range->second),
+                heap(), select->whereClause.get());
         }
     }
     const auto* equality = dynamic_cast<const BinaryOpExpr*>(select->whereClause.get());

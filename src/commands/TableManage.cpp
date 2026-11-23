@@ -11046,7 +11046,8 @@ std::optional<OrderedPrimaryKeyReadPage> StorageEngine::tryReadOrderedIntegerPri
         const std::string& dbname, const std::string& tablename,
         const TableSchema& expectedSchema, size_t keyColumn, bool descending,
         size_t count, size_t byteBudget, std::optional<int64_t> lower,
-        std::optional<int64_t> upper, const std::vector<OrderedPrimaryKeyNullTest>& nullTests) {
+        std::optional<int64_t> upper, const std::vector<OrderedPrimaryKeyNullTest>& nullTests,
+        bool completeRange) {
     // Only files in the executable's locked data directory have the required
     // instance ownership. An external tablespace can outlive that lock.
     if (dataDirectory().empty() || !count || signedIntegerPrimaryKeyColumn(expectedSchema) != keyColumn ||
@@ -11093,9 +11094,13 @@ std::optional<OrderedPrimaryKeyReadPage> StorageEngine::tryReadOrderedIntegerPri
     // The working budget covers index keys and copied table rows. An older
     // index needs room for both its decimal keys and numeric candidates.
     const size_t maxEntries = byteBudget / (2 * (sizeof(BPTree::LeafEntry) + sizeof(BPTree::IntegerEntry)));
-    if (count > maxEntries) return {};
+    constexpr size_t maxCompleteCandidates = 256;
+    if (completeRange) count = std::min(count, maxCompleteCandidates);
+    const size_t probeCount = completeRange ? maxCompleteCandidates + 1 : count;
+    if (probeCount > maxEntries) return {};
     const bool bounded = lower.has_value() || upper.has_value();
     const bool filtered = !nullTests.empty();
+    if (completeRange && !bounded) return {};
     const size_t maxNodes = std::max<size_t>(64, maxEntries);
     auto batchLower = lower;
     auto batchUpper = upper;
@@ -11108,7 +11113,7 @@ std::optional<OrderedPrimaryKeyReadPage> StorageEngine::tryReadOrderedIntegerPri
         checkForQueryInterrupt();
         return read == BPTree::LeafEntriesResult::Complete;
     };
-    const size_t batchSize = filtered ? std::min(maxEntries, std::max(count, size_t{32})) : count;
+    const size_t batchSize = filtered ? std::min(maxEntries, std::max(probeCount, size_t{32})) : probeCount;
     result.orderedIndex = tree->usesSignedIntegerKeys();
     if (result.orderedIndex) {
         if (((bounded || filtered) && !tree->rootPage()) || !readBatch(batchSize) ||
@@ -11117,6 +11122,9 @@ std::optional<OrderedPrimaryKeyReadPage> StorageEngine::tryReadOrderedIntegerPri
     } else if (bounded || filtered || !readLegacyIntegerIndexKeys(*tree,
         ExprHelper::canonicalResultTypeName(schema.cols[keyColumn].dataType),
         !schema.pkColIndices.empty(), descending, count, maxEntries, candidates)) return {};
+    // The last slot is a sentinel. A full buffer cannot establish that
+    // the index supplied the whole interval, even if it hit an endpoint.
+    if (completeRange && candidates.size() == probeCount) return {};
     result.indexEntries = candidates.size();
 
     std::shared_ptr<PageAllocator> allocator;
@@ -11124,6 +11132,24 @@ std::optional<OrderedPrimaryKeyReadPage> StorageEngine::tryReadOrderedIntegerPri
         std::lock_guard<std::recursive_mutex> cache(cacheMutex_);
         if (!getPageAllocator(dbname, tablename)) return {};
         allocator = pageAllocators_.at(dbname + "/" + tablename);
+    }
+    if (completeRange && !candidates.empty()) {
+        // Preserve the ordinary heap's page and slot order for consumers
+        // that use LIMIT, evaluate targets, or combine unsorted rows.
+        std::sort(candidates.begin(), candidates.end(), [](const auto& left, const auto& right) {
+            return static_cast<uint64_t>(left.value) < static_cast<uint64_t>(right.value);
+        });
+        size_t candidatePages = 0;
+        uint32_t lastPage = 0;
+        for (const auto& candidate : candidates) {
+            uint32_t page = 0;
+            uint16_t slot = 0;
+            decodeRid(candidate.value, page, slot);
+            if (page != lastPage) ++candidatePages;
+            lastPage = page;
+        }
+        const auto extent = allocator->numPages();
+        if (extent <= 1 || candidatePages > (extent - 1) / 2) return {};
     }
     result.rows.reserve(std::min(count, candidates.size()));
     size_t remaining = byteBudget;

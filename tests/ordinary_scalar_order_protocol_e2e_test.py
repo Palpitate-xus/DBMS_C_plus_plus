@@ -25,6 +25,43 @@ def assert_sort_input_order(nodes, spilled=None):
         assert sort.get('spilled')==str(spilled).lower(),nodes
 
 
+def complete_range_controls(query):
+    table = 'scalar_order_complete_range'
+    insertion_order = [8, 2, 6, 1, 4, 7, 3, 5]
+    assert query(f'CREATE TABLE {table}(k integer PRIMARY KEY, val integer)')[1] is None
+    keys = insertion_order + list(range(9, 1537))
+    for start in range(0, len(keys), 128):
+        batch = keys[start:start + 128]
+        values = ','.join(f'({k},{k if k % 2 else "NULL"})' for k in batch)
+        assert query(f'INSERT INTO {table} VALUES {values}')[1] is None
+
+    def check(where, expected, used, fetched=None):
+        sql = f'SELECT k FROM {table} WHERE {where} ORDER BY k OFFSET 0 FETCH FIRST 1536 ROWS WITH TIES'
+        result = query(sql)
+        assert result[1] is None and result[0] == [[str(k)] for k in expected], (sql, result)
+        nodes = plan_nodes(query('EXPLAIN (ANALYZE TRUE, TIMING FALSE, COSTS FALSE, FORMAT JSON) ' + sql))
+        scan = nodes['IntegerPrimaryKeyRange']
+        assert scan['usedPrimaryKeyRange'] == str(used).lower(), nodes
+        if used:
+            assert int(scan['indexEntries']) == int(scan['heapRowsFetched']) == fetched, scan
+            assert nodes['TableScan'].get('actualRows', 0) == 0, nodes
+        else:
+            assert nodes['TableScan']['actualRows'] == len(keys), nodes
+
+    check('k+0<=8', range(1, 9), True, 8)
+    check('1*k<=8 AND val IS NULL', (2, 4, 6, 8), True, 8)
+    check('k>7 AND k<6', (), True, 0)
+    check('k<=256', range(1, 257), True, 256)
+    check('k<=257', range(1, 258), False)
+
+    # The index sources the same heap order when SQL has no sort key.
+    for tail, expected in (('LIMIT 4', insertion_order[:4]),
+                           ('LIMIT 2 OFFSET 3', [1, 4]),
+                           ('AND val IS NULL LIMIT 2 OFFSET 1', [2, 6])):
+        result = query(f'SELECT k FROM {table} WHERE k+0<=8 {tail}')
+        assert result[1] is None and result[0] == [[str(k)] for k in expected], result
+
+
 def parameter_range_controls(runner, client, sock, check_plan=True):
     """Exercise repeated wire Bind inputs on the previously seeded PK tables."""
     def check(messages, rows=None, oids=None, state=None, tag=None):
@@ -441,6 +478,7 @@ def main():
         parameter_range_controls(runner,client,server['sock'])
         null_filter_page_controls(query)
         presorted_page_controls(query)
+        complete_range_controls(query)
         print('[ORDINARY SCALAR ORDER PROTOCOL] passed')
     finally:runner.stop_ours(server)
 

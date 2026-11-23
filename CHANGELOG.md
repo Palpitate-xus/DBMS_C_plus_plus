@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>小范围查询可以用整数主键定位 · 2026-11-23</summary>
+
+例如，查询一小段订单号时，数据库可以用主键索引找到这些记录所在的位置。
+
+[测试报告](docs/test-report.md#complete-integer-range-20261123) · [性能报告](docs/performance-report-2026-10-30.md#complete-integer-range-cost-20261123)
+
+</details>
+
+<details>
 <summary>加零的整数条件筛选更快 · 2026-11-23</summary>
 
 例如，筛选 `订单号 + 0` 是否小于某个值时，数据库可以直接比较订单号。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>部分按编号筛选的查询更快 · 2026-11-23</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-23 · 部分按编号筛选的查询更快
 
 例如，从 2,048 条记录中找出编号不超过 128 的记录，再合并查询结果。测试中这条查询的用时约减半。
 
 [测试报告](docs/test-report.md#stored-filter-prefix-20261123) · [性能报告](docs/performance-report-2026-10-30.md#stored-filter-prefix-cost-20261123)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-23 · 合并查询时可以保留空值
 
