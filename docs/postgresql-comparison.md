@@ -2,11 +2,17 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-23 · 给定前导键的范围查询
+
+PostgreSQL 的多列 B-tree 可用前导列的等值和相邻列的范围限制索引扫描，也可按索引顺序输出。SQLite 用多列索引定位第一个匹配项后顺序查找相邻记录，查询前导列等值时可按后一列的索引顺序返回。DuckDB 1.5 的 ART 查询扫描适用于无表达式的单列索引，区间筛选还可借助数据块的最小值和最大值。[PostgreSQL 多列索引](https://www.postgresql.org/docs/18/indexes-multicolumn.html) · [PostgreSQL 索引排序](https://www.postgresql.org/docs/18/indexes-ordering.html) · [SQLite 查找与排序](https://sqlite.org/queryplanner.html#searching_and_sorting_with_a_multi_column_index) · [DuckDB 索引](https://duckdb.org/docs/1.5/guides/performance/indexing)
+
+本项目在 20 字节键中使用前导列摘要和有序的整数末列。确定前导等值键后可只读取期望区间的索引页，原 SQL 仍核对真实值并负责排序。完整多列排序、跨前导组范围和跳跃扫描仍需实现。[正确性与恢复](test-report.md#composite-primary-range-20261123) · [性能对照](performance-report-2026-10-30.md#composite-primary-range-cost-20261123)
+
 ## 2026-11-23 · 共享长前缀的复合主键
 
 PostgreSQL 的多列 B-tree 按列比较完整键，支持使用前导列的等值条件及相邻列的范围条件来缩小扫描。其哈希索引只支持单列等值搜索，表中的值仍要复核。SQLite 的 B-tree 记录按列从左到右比较。DuckDB 1.5 用 ART 实施约束，查询中的 ART 索引扫描适用于无表达式的单列索引。[PostgreSQL 多列索引](https://www.postgresql.org/docs/18/indexes-multicolumn.html) · [PostgreSQL 哈希索引](https://www.postgresql.org/docs/18/hash-index.html) · [SQLite 记录排序](https://sqlite.org/fileformat.html#record_sort_order) · [DuckDB 1.5 索引](https://duckdb.org/docs/1.5/guides/performance/indexing)
 
-本项目沿用 4 KiB 的 B+ 树页，在普通表的复合主键索引中保存完整键的固定宽度摘要。摘要可以定位等值候选，数据库逐列核对表中的原值。复合主键的范围扫描、按索引顺序返回、部分键规划和分区约束仍需实现。事务锁仍按旧前缀选择。同一前缀的写入仍可能等待。[功能验证](test-report.md#composite-primary-fingerprint-20261123) · [与 PostgreSQL 18.6 的计时](performance-report-2026-10-30.md#composite-primary-fingerprint-cost-20261123)
+这轮测试中的 `0xC555` 格式沿用 4 KiB 的 B+ 树页，并保存完整键的固定宽度摘要以定位等值候选。数据库逐列核对表中的原值。事务锁仍按旧前缀选择，同一前缀的写入仍可能等待。[功能验证](test-report.md#composite-primary-fingerprint-20261123) · [与 PostgreSQL 18.6 的计时](performance-report-2026-10-30.md#composite-primary-fingerprint-cost-20261123)
 
 ## 2026-11-23 · 用索引定位要修改或删除的行
 

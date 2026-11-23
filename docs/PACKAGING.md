@@ -45,9 +45,9 @@ sudo apt install cmake g++ make zlib1g-dev libicu-dev
 
 ## 复合主键索引格式
 
-普通非分区表的新建或重建复合主键索引使用 `0xC555`。按主键列的定义顺序，将每个规范化值的 8 字节大端长度及其内容输入 SHA-256，并把结果的前 20 字节作为索引键。每个键可以关联多个行位置，查重和等值定位仍逐列核对表中的完整值。
+普通非分区表的新建或重建复合主键索引按末列类型选择格式。末列是受支持的有符号整数时使用 `0xC556`。索引键由前面各列摘要的前 12 字节和末列的 8 字节组成。末列整数翻转符号位后以大端顺序写入。其他复合主键索引仍使用 `0xC555`，记录所有列摘要的前 20 字节。摘要输入按主键列的定义顺序依次写入每列规范化值的 8 字节大端长度及内容，再计算 SHA-256。
 
-两种旧格式均可直接打开和写入。`0xC552` 复合索引使用表扫描核对，`0xC554` 继续用原来的 20 字节前缀定位候选。运行 `REINDEX TABLE 表名` 可以从表中生成 `0xC555` 索引。如果待决的两阶段事务阻止重建，完成该事务后再运行。旧程序无法读取 `0xC555` 文件，切回旧程序时应恢复升级前的数据目录备份。[升级和恢复验证](test-report.md#composite-primary-fingerprint-20261123)
+每个键可关联多个行位置，执行时仍核对表中各列的真实值。旧索引可直接打开和写入。`0xC552` 复合索引使用表扫描核对，`0xC554` 按原来的 20 字节前缀定位，`0xC555` 可按完整键等值定位。运行 `REINDEX TABLE 表名` 可以生成当前格式。如果待决的两阶段事务阻止重建，完成该事务后再运行。切回不识别新索引格式的程序时应恢复升级前的数据目录备份。[升级和恢复验证](test-report.md#composite-primary-range-20261123)
 
 ## 整数主键索引格式
 
@@ -112,7 +112,7 @@ Bloom、GIN、BRIN、GiST 与 SP-GiST 索引校验：
 该命令验证主/分区/TOAST/unlogged init heap，以及 `.idx`/`.idx_*` B+Tree
 索引、`.hidx` Hash、`.bidx` Bloom、`.gin` GIN、`.brin` BRIN、`.gist` GiST
 和 `.spgist` SP-GiST 侧车，包括从 tablespace marker 解析的外置文件；诊断定位到索引文件和 heap block。
-统计按校验方式汇总 B+ 树页。`0xC552`、`0xC553`、`0xC554` 和 `0xC555` 计入页号绑定校验，`0xC551`
+统计按校验方式汇总 B+ 树页。`0xC552`、`0xC553`、`0xC554`、`0xC555` 和 `0xC556` 计入页号绑定校验，`0xC551`
 计入内容校验，零标记页计入无校验。统计还单列带 checksum 的 Hash V2/Bloom BLM2/GIN V2/BRIN V2/GiST V2
 与未校验的 Hash V1/Bloom BLM1/GIN V1/BRIN V1/GiST V1/SP-GiST V1 文件。GIN V2/BRIN V2/GiST V2/SP-GiST V2
 扫描验证格式头、entry-count 边界与 CRC32C，但不解析 GIN postings、BRIN ranges

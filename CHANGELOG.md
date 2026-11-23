@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>可以更快地查某家店的一段订单号 · 2026-11-23</summary>
+
+例如查一家店的第 100 到 110 号订单，数据库可以直接去找这一段。只按店铺查询时，订单少的店铺也可以用同样的办法定位。
+
+[用法](docs/MANUAL.md#用多列一起区分记录) · [测试报告](docs/test-report.md#composite-primary-range-20261123) · [性能报告](docs/performance-report-2026-10-30.md#composite-primary-range-cost-20261123)
+
+</details>
+
+<details>
 <summary>同一家店的订单很多时，按订单号查找更快 · 2026-11-23</summary>
 
 同时给出店铺编号和订单号后，数据库可以少检查同一家店的其他订单。按这两个编号修改或删除订单，以及检查新订单是否重号，也能少读记录。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>查找指定店铺的订单更快 · 2026-11-23</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-23 · 查找指定店铺的订单更快
 
 比如查某家店的第 42 号订单时，数据库会一起用上店铺编号和订单号，少检查一些记录。
 
 [测试报告](docs/test-report.md#composite-primary-lookup-20261123) · [性能报告](docs/performance-report-2026-10-30.md#composite-primary-lookup-cost-20261123)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-23 · 不同店铺可以各自使用同一个订单号
 

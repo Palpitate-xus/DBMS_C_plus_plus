@@ -2,6 +2,18 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-23 use leading equalities to search a composite primary key's integer suffix range",
+      "gap_ids": ["IDX-03", "IDX-15", "OPT-01"],
+      "status": "partial",
+      "evidence": ["src/access/BPTreeFormat.h", "src/access/BPTree.cpp", "src/commands/TableManage.cpp", "src/executor/ExecutionPlan.cpp", "docs/PACKAGING.md", "docs/postgresql-comparison.md", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/compat/cases/composite_primary_range.sql", "tests/composite_primary_range_protocol_e2e_test.py", "tests/bptree_topology_corruption_test.cpp", "tests/primary_key_plan_protocol_e2e_test.py"],
+      "verification": [
+        "58 targeted and 180 existing composite-key responses match PostgreSQL 18.6. Range scans stop at separator bounds, allow collision candidates, and recheck row visibility and the original predicate.",
+        "Three legacy formats reopen, rebuild, and survive process termination before and after commit. Runtime counters distinguish selective ranges, leading equality, dense scans, and old snapshots.",
+        "Ordered scans across leading values, sort elimination, additional suffix types, range-based writes and partitioned constraints remain open."
+      ]
+    },
+    {
       "issue": "2026-11-23 use the whole composite primary key to narrow equality candidates",
       "gap_ids": ["IDX-03", "IDX-15", "OPT-01"],
       "status": "partial",

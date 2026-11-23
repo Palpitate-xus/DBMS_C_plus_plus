@@ -100,7 +100,8 @@ std::string BPTree::normalizeKeyForComparison(const std::string& key) {
 }
 
 std::optional<std::string> BPTree::keyForStorage(const std::string& key) const {
-    if (header_.reserved == bptree_format::kCompositePrimaryFingerprintFormat) {
+    if (header_.reserved == bptree_format::kCompositePrimaryFingerprintFormat ||
+        header_.reserved == bptree_format::kCompositePrimaryRangeFormat) {
         if (key.size() != BP_KEY_LEN) return std::nullopt;
         return key;
     }
@@ -241,6 +242,10 @@ bool BPTree::openWithCompositePrimaryFingerprints() {
     return openInternal(true, bptree_format::kCompositePrimaryFingerprintFormat);
 }
 
+bool BPTree::openWithCompositePrimaryRanges() {
+    return openInternal(true, bptree_format::kCompositePrimaryRangeFormat);
+}
+
 bool BPTree::openExisting() {
     return openInternal(false);
 }
@@ -255,13 +260,20 @@ bool BPTree::hasCompletePrimaryKeys() const {
     std::shared_lock<std::shared_mutex> lock(treeMutex_);
     return bp_ && bp_->isOpen() &&
         (header_.reserved == bptree_format::kCompletePrimaryPrefixesFormat ||
-         header_.reserved == bptree_format::kCompositePrimaryFingerprintFormat);
+         header_.reserved == bptree_format::kCompositePrimaryFingerprintFormat ||
+         header_.reserved == bptree_format::kCompositePrimaryRangeFormat);
 }
 
 bool BPTree::usesCompositePrimaryFingerprints() const {
     std::shared_lock<std::shared_mutex> lock(treeMutex_);
     return bp_ && bp_->isOpen() &&
-        header_.reserved == bptree_format::kCompositePrimaryFingerprintFormat;
+        (header_.reserved == bptree_format::kCompositePrimaryFingerprintFormat ||
+         header_.reserved == bptree_format::kCompositePrimaryRangeFormat);
+}
+
+bool BPTree::usesCompositePrimaryRanges() const {
+    std::shared_lock<std::shared_mutex> lock(treeMutex_);
+    return bp_ && bp_->isOpen() && header_.reserved == bptree_format::kCompositePrimaryRangeFormat;
 }
 
 bool BPTree::openInternal(bool createIfMissing, uint16_t creationFormat) {
@@ -961,6 +973,60 @@ std::vector<int64_t> BPTree::allValues() const {
 
 bool BPTree::allValuesChecked(std::vector<int64_t>& values) const {
     return rangeScanChecked("", std::string(BP_KEY_LEN, '\xFF'), values);
+}
+
+BPTree::LeafEntriesResult BPTree::readCompositePrimaryRange(
+        const std::string& lower, const std::string& upper, size_t maxRows,
+        size_t maxNodes, std::vector<int64_t>& values) const {
+    std::shared_lock<std::shared_mutex> treeLock(treeMutex_);
+    values.clear();
+    if (!bp_ || !bp_->isOpen() ||
+        header_.reserved != bptree_format::kCompositePrimaryRangeFormat ||
+        lower.size() != BP_KEY_LEN || upper.size() != BP_KEY_LEN)
+        return LeafEntriesResult::Error;
+    if (!header_.rootPage || lower > upper) return LeafEntriesResult::Complete;
+
+    std::vector<int64_t> result;
+    std::unordered_set<uint32_t> visited;
+    std::optional<size_t> leafDepth;
+    uint32_t nextLeaf = 0;
+    const auto collect = [&](const auto& self, uint32_t page, size_t depth,
+                             const std::string* lowerFence, const std::string* upperFence,
+                             bool rightEdge) -> LeafEntriesResult {
+        if (depth >= kMaxTraversalDepth || visited.count(page))
+            return LeafEntriesResult::Error;
+        if (visited.size() >= maxNodes) return LeafEntriesResult::LimitExceeded;
+        visited.insert(page);
+        const auto node = readNode(page);
+        if (!node) return LeafEntriesResult::Error;
+        // Equal keys may span two children, so both fences are inclusive.
+        if (!node->keys.empty() && ((lowerFence && node->keys.front() < *lowerFence) ||
+                                   (upperFence && node->keys.back() > *upperFence)))
+            return LeafEntriesResult::Error;
+        const size_t first = lowerBoundIdx(node->keys, node->numKeys, lower);
+        const size_t end = upperBoundIdx(node->keys, node->numKeys, upper);
+        if (!node->isLeaf) {
+            for (size_t i = first; i <= end; ++i) {
+                const auto status = self(self, node->children[i], depth + 1,
+                    i ? &node->keys[i - 1] : lowerFence,
+                    i < node->keys.size() ? &node->keys[i] : upperFence,
+                    rightEdge && i + 1 == node->children.size());
+                if (status != LeafEntriesResult::Complete) return status;
+            }
+            return LeafEntriesResult::Complete;
+        }
+        if ((leafDepth && (*leafDepth != depth || nextLeaf != page)) ||
+            rightEdge != (node->nextLeaf == 0) || visited.count(node->nextLeaf))
+            return LeafEntriesResult::Error;
+        leafDepth = depth;
+        nextLeaf = node->nextLeaf;
+        if (end - first > maxRows - result.size()) return LeafEntriesResult::LimitExceeded;
+        result.insert(result.end(), node->values.begin() + first, node->values.begin() + end);
+        return LeafEntriesResult::Complete;
+    };
+    const auto status = collect(collect, header_.rootPage, 0, nullptr, nullptr, true);
+    if (status == LeafEntriesResult::Complete) values = std::move(result);
+    return status;
 }
 
 BPTree::LeafEntriesResult BPTree::readLeafEntriesChecked(

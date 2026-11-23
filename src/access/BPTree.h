@@ -37,11 +37,13 @@ public:
     // Primary-key prefixes can contain more than one row location.
     bool openWithCompletePrimaryPrefixes();
     bool openWithCompositePrimaryFingerprints();
+    bool openWithCompositePrimaryRanges();
     // Open an existing index without allowing the buffer pool to create it.
     bool openExisting();
     bool usesSignedIntegerKeys() const;
     bool hasCompletePrimaryKeys() const;
     bool usesCompositePrimaryFingerprints() const;
+    bool usesCompositePrimaryRanges() const;
     void close();
     // Flush all dirty index pages and fsync the index file.
     bool flush();
@@ -81,6 +83,12 @@ public:
         int64_t value;
     };
     enum class LeafEntriesResult { Complete, LimitExceeded, Error };
+
+    // Copy row positions for a closed range of fixed-width composite keys.
+    // An error or limit result leaves values empty.
+    LeafEntriesResult readCompositePrimaryRange(const std::string& lower, const std::string& upper,
+                                                 size_t maxRows, size_t maxNodes,
+                                                 std::vector<int64_t>& values) const;
 
     // Copy at most maxEntries fixed-width leaf keys and their values in tree
     // order. A failed or over-limit read clears entries. Callers can process

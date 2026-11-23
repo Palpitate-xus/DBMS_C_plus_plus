@@ -35,8 +35,8 @@ def main():
         expect("INSERT INTO pair_pk VALUES (1,2),(1,3);")
         query = "SELECT a,b FROM pair_pk WHERE a=1 ORDER BY b;"
         expect(query, [["1", "2"], ["1", "3"]])
-        plan = expect("EXPLAIN " + query)
-        assert "TableScan" in str(plan) and "IndexScan" not in str(plan), plan
+        plan = expect("EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF) " + query)
+        assert "CompositePrimaryKeyRangeScan (access=heap" in str(plan), plan
         expect("CREATE INDEX pair_a_idx ON pair_pk(a);")
         expect(query, [["1", "2"], ["1", "3"]])
         # Reuse the exact key cached before DDL; the new standalone secondary

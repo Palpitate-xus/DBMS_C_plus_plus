@@ -2486,6 +2486,12 @@ struct CompositeEqualityInput {
     std::optional<size_t> slot;
 };
 
+struct CompositeSuffixBound {
+    CompositeEqualityInput input;
+    bool lower;
+    bool inclusive;
+};
+
 static bool compositeOperandType(const std::string&, const std::string&);
 
 // The tree can only narrow a current snapshot, and several distinct full
@@ -2496,6 +2502,8 @@ class CompositePrimaryKeyScanOp final : public Operator {
     std::string database_, table_;
     uint64_t relationId_;
     std::vector<CompositeEqualityInput> inputs_;
+    std::optional<size_t> suffix_;
+    std::vector<CompositeSuffixBound> bounds_;
     std::shared_ptr<PreparedQuery> query_;
     OpPtr fallback_;
     TableSchema schema_;
@@ -2506,36 +2514,77 @@ class CompositePrimaryKeyScanOp final : public Operator {
     bool locked_ = false, fallbackActive_ = false, usedIndex_ = false;
     bool opened_ = false;
 
+    std::optional<std::string> inputValue(const CompositeEqualityInput& input) const {
+        if (!input.slot) return input.value;
+        if (!query_ || *input.slot >= query_->parameters.size()) return {};
+        const auto& parameter = query_->parameters[*input.slot];
+        if (parameter.isNull || !compositeOperandType(input.type, parameter.typeName)) return {};
+        return compositeEqualityValue(input.type, parameter.value);
+    }
+
     bool buildValues() {
         const auto columns = compositePrimaryColumns(schema_);
-        if (schema_.physicalRelationId != relationId_ || columns.size() != inputs_.size())
+        if (schema_.physicalRelationId != relationId_ ||
+            columns.size() != inputs_.size() + (suffix_ ? 1 : 0) ||
+            (suffix_ && (columns.back() != *suffix_ ||
+                         primary_key_index::orderedSuffixColumn(schema_) != suffix_)))
             return false;
-        for (size_t i = 0; i < columns.size(); ++i) {
+        for (size_t i = 0; i < inputs_.size(); ++i) {
             const auto& input = inputs_[i];
             if (columns[i] != input.column || input.column >= schema_.len()) return false;
             const auto& column = schema_.cols[input.column];
             if (column.dataName != input.name || compositeEqualityType(column) != input.type)
                 return false;
-            if (!input.slot) {
-                values_.emplace(input.name, input.value);
-                continue;
-            }
-            if (!query_ || *input.slot >= query_->parameters.size()) return false;
-            const auto& parameter = query_->parameters[*input.slot];
-            if (parameter.isNull || !compositeOperandType(input.type, parameter.typeName))
-                return false;
-            const auto value = compositeEqualityValue(input.type, parameter.value);
+            const auto value = inputValue(input);
             if (!value) return false;
             values_.emplace(input.name, *value);
         }
         return true;
     }
+
+    bool readSuffixRange(BPTree& index) {
+        if (!index.usesCompositePrimaryRanges()) return false;
+        int64_t lower = INT64_MIN;
+        int64_t upper = INT64_MAX;
+        for (const auto& bound : bounds_) {
+            const auto value = inputValue(bound.input);
+            if (!value) return false;
+            int64_t endpoint = 0;
+            const auto parsed = std::from_chars(value->data(), value->data() + value->size(), endpoint);
+            if (parsed.ec != std::errc{} || parsed.ptr != value->data() + value->size()) return false;
+            if (!bound.inclusive) {
+                if (endpoint == (bound.lower ? INT64_MAX : INT64_MIN)) return true;
+                endpoint += bound.lower ? 1 : -1;
+            }
+            if (bound.lower) lower = std::max(lower, endpoint);
+            else upper = std::min(upper, endpoint);
+        }
+        if (lower > upper) return true;
+        const auto [first, last] = primary_key_index::suffixRangeKeys(schema_, *suffix_, values_, lower, upper);
+        uint64_t liveRows = 0;
+        const size_t pages = engine_->tableNumPages(database_, table_);
+        const double rows = getRuntimeLiveRowEstimate(database_, table_, liveRows)
+            ? static_cast<double>(liveRows) : 32.0 * pages;
+        const double heapCost = QueryPlanner::costScan("seq_scan", rows, pages);
+        // The samples only decide whether to fetch heap rows via the index.
+        // A wide range can always use the ordinary scan and its SQL filter.
+        constexpr size_t maxRows = 4096;
+        constexpr size_t maxNodes = 128;
+        const auto status = index.readCompositePrimaryRange(first, last, maxRows, maxNodes, rids_);
+        if (status == BPTree::LeafEntriesResult::Error)
+            throw DbError("XX001", "could not read B-tree index for relation \"" + table_ + "\"");
+        return status == BPTree::LeafEntriesResult::Complete &&
+            (rids_.empty() ||
+             QueryPlanner::costScan("index_scan", static_cast<double>(rids_.size()), 0) < heapCost);
+    }
 public:
     CompositePrimaryKeyScanOp(StorageEngine* engine, std::string database,
             const TableSchema& schema, std::vector<CompositeEqualityInput> inputs,
-            OpPtr fallback, std::shared_ptr<PreparedQuery> query = {})
+            OpPtr fallback, std::shared_ptr<PreparedQuery> query = {},
+            std::optional<size_t> suffix = {}, std::vector<CompositeSuffixBound> bounds = {})
         : engine_(engine), database_(std::move(database)), table_(schema.tablename),
           relationId_(schema.physicalRelationId), inputs_(std::move(inputs)),
+          suffix_(suffix), bounds_(std::move(bounds)),
           query_(std::move(query)), fallback_(std::move(fallback)) {}
 
     ~CompositePrimaryKeyScanOp() override {
@@ -2565,15 +2614,19 @@ public:
             auto* index = engine_->getPKIndex(database_, table_);
             if (!index || !index->isOpen())
                 throw DbError("XX001", "could not open B-tree index for relation \"" + table_ + "\"");
-            if (index->hasCompletePrimaryKeys()) {
+            bool read = false;
+            if (suffix_) {
+                read = readSuffixRange(*index);
+            } else if (index->hasCompletePrimaryKeys()) {
                 const auto key = primary_key_index::keyForValues(schema_, *index, values_);
                 rids_ = lookupBtreeMultiChecked(index, key);
-                if (engine_->indexReadSnapshotFence(database_) == before) {
-                    usedIndex_ = true;
-                    return true;
-                }
-                rids_.clear();
+                read = true;
             }
+            if (read && engine_->indexReadSnapshotFence(database_) == before) {
+                usedIndex_ = true;
+                return true;
+            }
+            rids_.clear();
         }
         fallbackActive_ = true;
         return fallback_->open() || propagateChildError(fallback_.get(), "primary key heap scan failed");
@@ -2648,11 +2701,14 @@ public:
     std::vector<Operator*> preparedPlanChildren() const override {
         return fallbackActive_ ? std::vector<Operator*>{fallback_.get()} : std::vector<Operator*>{};
     }
-    std::string preparedPlanNodeName() const override { return "CompositePrimaryKeyScan"; }
+    std::string preparedPlanNodeName() const override {
+        return suffix_ ? "CompositePrimaryKeyRangeScan" : "CompositePrimaryKeyScan";
+    }
+    bool readsSuffixRange() const { return suffix_.has_value(); }
     std::map<std::string, std::string> preparedPlanAttributes() const override {
         return {{"table", table_}, {"access", !opened_ ? "planned" : usedIndex_ ? "index" : "heap"}};
     }
-    double estimatedRows() const override { return 1; }
+    double estimatedRows() const override { return suffix_ ? fallback_->estimatedRows() : 1; }
     void close() override {
         if (!locked_) return;
         std::exception_ptr error;
@@ -2883,9 +2939,58 @@ static std::optional<std::string> compositeLiteralValue(const Expr* input,
     return compositeEqualityValue(type, *literal);
 }
 
+static bool resolveCompositeInput(const Expr* expr, bool bound,
+        CompositeEqualityInput& input) {
+    if (const auto* parameter = dynamic_cast<const ParameterExpr*>(expr)) {
+        if (!bound || parameter->origin != ParameterOrigin::StatementInput ||
+            !compositeOperandType(input.type, parameter->declaredType)) return false;
+        input.slot = parameter->slot;
+        return true;
+    }
+    const auto value = compositeLiteralValue(expr, input.type);
+    if (!value) return false;
+    input.value = *value;
+    return true;
+}
+
+static void collectCompositeBetween(const TableSchema& schema, size_t suffix,
+        const Expr* expression, std::optional<size_t> range,
+        std::vector<CompositeSuffixBound>& bounds) {
+    const auto* call = dynamic_cast<const FunctionCallExpr*>(expression);
+    if (!call || call->preparedSubquery || call->funcName != "BETWEEN" ||
+        !call->schema.empty() || (call->args.size() != 3 && call->args.size() != 4)) return;
+    const auto& column = schema.cols[suffix];
+    const auto type = compositeEqualityType(column);
+    if (type.empty() || type == "text") return;
+    const auto isSuffix = [&](const Expr* expr) {
+        const auto* reference = dynamic_cast<const ColumnRefExpr*>(expr);
+        if (!reference || reference->preparedSubquery) return false;
+        if (!range) return reference->schema.empty() && reference->table.empty() &&
+                           reference->column == column.dataName;
+        if (!reference->binding) return false;
+        const auto& binding = *reference->binding;
+        return !binding.scopeDepth && !binding.mergedUsing &&
+            binding.sourceOrdinal == *range && binding.columnOrdinal == suffix &&
+            binding.typeMetadata && binding.typeMetadata->kind == DatumKind::Scalar &&
+            !binding.typeMetadata->enumType &&
+            binding.typeMetadata->actualOid == binding.typeMetadata->codecOid &&
+            compositeOperandType(type, binding.declaredType);
+    };
+    if (!isSuffix(call->args.front().get()) ||
+        (call->args.size() == 4 && !isSuffix(call->args.back().get()))) return;
+    CompositeEqualityInput low{suffix, column.dataName, "bigint", {}, {}};
+    CompositeEqualityInput high = low;
+    if (!resolveCompositeInput(call->args[1].get(), range.has_value(), low) ||
+        !resolveCompositeInput(call->args[2].get(), range.has_value(), high)) return;
+    bounds.push_back({std::move(low), true, true});
+    bounds.push_back({std::move(high), false, true});
+}
+
 static size_t collectCompositePredicates(const TableSchema& schema, const std::vector<size_t>& columns,
         const Expr* predicate, std::optional<size_t> range,
-        std::map<size_t, CompositeEqualityInput>& matches) {
+        std::map<size_t, CompositeEqualityInput>& matches,
+        std::vector<CompositeSuffixBound>* bounds = nullptr,
+        std::optional<size_t> suffix = {}) {
     std::vector<const Expr*> terms{predicate};
     size_t conjuncts = 0;
     while (!terms.empty()) {
@@ -2899,10 +3004,14 @@ static size_t collectCompositePredicates(const TableSchema& schema, const std::v
             continue;
         }
         ++conjuncts;
-        if (!binary || binary->preparedSubquery) continue;
-        if (binary->op != "=" || binary->rowComparison) continue;
+        if (!binary && bounds && suffix) collectCompositeBetween(schema, *suffix, term, range, *bounds);
+        if (!binary || binary->preparedSubquery || binary->rowComparison) continue;
+        const bool equality = binary->op == "=";
+        if (!equality && (!bounds || !suffix ||
+            (binary->op != "<" && binary->op != "<=" &&
+             binary->op != ">" && binary->op != ">="))) continue;
         if (binary->comparison && (!binary->comparison->strict ||
-            binary->comparison->identity.rfind("builtin-comparison:=", 0) != 0 ||
+            binary->comparison->identity.rfind("builtin-comparison:" + binary->op + "(", 0) != 0 ||
             binary->comparison->enumTypeOid || binary->comparison->collationUsesSystemLocale ||
             (!binary->comparison->collation.empty() &&
                 !collation::isBinary(binary->comparison->collation)))) continue;
@@ -2937,8 +3046,10 @@ static size_t collectCompositePredicates(const TableSchema& schema, const std::v
                 }
         }
         if (ordinal >= schema.len()) continue;
-        if (std::find(columns.begin(), columns.end(), ordinal) == columns.end() ||
-            matches.count(ordinal)) continue;
+        if (equality) {
+            if (std::find(columns.begin(), columns.end(), ordinal) == columns.end() ||
+                matches.count(ordinal)) continue;
+        } else if (ordinal != suffix) continue;
         const auto& key = schema.cols[ordinal];
         const auto type = compositeEqualityType(key);
         if (type.empty() || (type != "text" && columnExpr != column)) continue;
@@ -2952,27 +3063,25 @@ static size_t collectCompositePredicates(const TableSchema& schema, const std::v
             (!compositeOperandType(type, binary->comparison->leftType) ||
              !compositeOperandType(type, binary->comparison->rightType))) continue;
         if (type == "text") input = compositeTextEnvelope(input);
-        if (const auto* parameter = dynamic_cast<const ParameterExpr*>(input)) {
-            if (range && parameter->origin == ParameterOrigin::StatementInput &&
-                compositeOperandType(type, parameter->declaredType))
-                matches.emplace(ordinal, CompositeEqualityInput{ordinal, key.dataName, type,
-                                                                {}, parameter->slot});
-        } else {
-            const auto value = compositeLiteralValue(input, type);
-            if (value)
-                matches.emplace(ordinal, CompositeEqualityInput{ordinal, key.dataName, type, *value, {}});
-        }
+        const std::string inputType = equality ? type : "bigint";
+        CompositeEqualityInput termInput{ordinal, key.dataName, inputType, {}, {}};
+        if (!resolveCompositeInput(input, range.has_value(), termInput)) continue;
+        if (equality) matches.emplace(ordinal, std::move(termInput));
+        else bounds->push_back({std::move(termInput),
+            (binary->op.front() == '>') == (columnExpr == binary->left.get()),
+            binary->op.size() == 2});
     }
     return conjuncts;
 }
 
 static std::vector<CompositeEqualityInput> orderedCompositeInputs(const std::vector<size_t>& columns,
-        std::map<size_t, CompositeEqualityInput>& matches) {
-    if (matches.size() != columns.size()) return {};
+        std::map<size_t, CompositeEqualityInput>& matches, bool allowPrefix = false) {
+    if (matches.size() != columns.size() &&
+        (!allowPrefix || matches.size() + 1 != columns.size())) return {};
     std::vector<CompositeEqualityInput> ordered;
-    ordered.reserve(columns.size());
-    for (const auto column : columns) {
-        const auto found = matches.find(column);
+    ordered.reserve(matches.size());
+    for (size_t i = 0; i < matches.size(); ++i) {
+        const auto found = matches.find(columns[i]);
         if (found == matches.end()) return {};
         ordered.push_back(std::move(found->second));
     }
@@ -2981,7 +3090,7 @@ static std::vector<CompositeEqualityInput> orderedCompositeInputs(const std::vec
 
 static OpPtr preparedCompositePrimarySource(StorageEngine* engine, const std::string& database,
         const std::shared_ptr<PreparedQuery>& query, const SelectStmt& select,
-        const TableSchema& schema, OpPtr& source) {
+        const TableSchema& schema, OpPtr& source, bool allowRange) {
     const auto columns = compositePrimaryColumns(schema);
     const auto* scan = dynamic_cast<const TableScanOp*>(source.get());
     if (columns.empty() || !scan || typeid(*scan) != typeid(TableScanOp) ||
@@ -2995,11 +3104,16 @@ static OpPtr preparedCompositePrimarySource(StorageEngine* engine, const std::st
         });
     if (range == query->sourceRanges.end()) return {};
     std::map<size_t, CompositeEqualityInput> matches;
-    collectCompositePredicates(schema, columns, select.whereClause.get(), range->ordinal, matches);
-    auto ordered = orderedCompositeInputs(columns, matches);
+    std::vector<CompositeSuffixBound> bounds;
+    auto suffix = allowRange ? primary_key_index::orderedSuffixColumn(schema) : std::nullopt;
+    if (allowRange && !suffix) return {};
+    collectCompositePredicates(schema, columns, select.whereClause.get(), range->ordinal,
+                               matches, &bounds, suffix);
+    auto ordered = orderedCompositeInputs(columns, matches, suffix.has_value());
     if (ordered.empty()) return {};
+    if (ordered.size() == columns.size()) suffix.reset();
     return std::make_unique<CompositePrimaryKeyScanOp>(engine, database, schema,
-        std::move(ordered), std::move(source), query);
+        std::move(ordered), std::move(source), query, suffix, std::move(bounds));
 }
 
 static OpPtr literalBrinTableSource(StorageEngine* engine, const std::string& database,
@@ -3950,7 +4064,7 @@ bool hasOrderedPrimaryKeyInput(const Operator* source, const PreparedSelectState
 OpPtr makePreparedTableSource(StorageEngine* engine, const std::string& database,
     const std::shared_ptr<PreparedQuery>& query, SelectStmt* select,
     const TableSchema& schema, OpPtr source) {
-    if (auto narrowed = preparedCompositePrimarySource(engine, database, query, *select, schema, source))
+    if (auto narrowed = preparedCompositePrimarySource(engine, database, query, *select, schema, source, false))
         return narrowed;
     if (auto narrowed = literalBrinTableSource(engine, database, query, select, schema, source))
         return narrowed;
@@ -3958,6 +4072,8 @@ OpPtr makePreparedTableSource(StorageEngine* engine, const std::string& database
         return narrowed;
     if (auto narrowed = literalLikeTableSource(engine, database, query, select,
                                                schema, source))
+        return narrowed;
+    if (auto narrowed = preparedCompositePrimarySource(engine, database, query, *select, schema, source, true))
         return narrowed;
     const auto* physical = dynamic_cast<const TableScanOp*>(source.get());
     if (physical && typeid(*physical) == typeid(TableScanOp) && physical->tableName() == schema.tablename) {
@@ -11271,7 +11387,8 @@ static OpPtr ordinaryBrinTableSource(StorageEngine* engine, const PlanContext& c
 }
 
 static std::vector<CompositeEqualityInput> compactCompositeInputs(
-        const TableSchema& table, const std::vector<StorageEngine::Condition>& conditions) {
+        const TableSchema& table, const std::vector<StorageEngine::Condition>& conditions,
+        std::vector<CompositeSuffixBound>* bounds = nullptr, std::optional<size_t> suffix = {}) {
     const auto columns = compositePrimaryColumns(table);
     if (columns.empty() || conditions.empty()) return {};
     std::map<size_t, CompositeEqualityInput> matches;
@@ -11293,15 +11410,26 @@ static std::vector<CompositeEqualityInput> compactCompositeInputs(
     }
     if (matches.size() < columns.size()) {
         for (const auto& condition : conditions) {
+            if (bounds && suffix && condition.colName == table.cols[*suffix].dataName &&
+                condition.decodedLiteralRhs && !condition.patternIsNull &&
+                !condition.referenceInputOid && !condition.columnComparison &&
+                (condition.patternType.empty() || condition.patternType == "unknown") &&
+                (condition.op == "<" || condition.op == "<=" ||
+                 condition.op == ">" || condition.op == ">=")) {
+                if (const auto value = compositeEqualityValue("bigint", condition.value))
+                    bounds->push_back({{*suffix, condition.colName, "bigint", *value, {}},
+                        condition.op.front() == '>', condition.op.size() == 2});
+            }
             if (condition.op != "typedexpr") continue;
             SQLParser parser;
             auto parsed = parser.parseForBinding("SELECT " + condition.value);
             const auto* select = parsed.success ? dynamic_cast<const SelectStmt*>(parsed.stmt.get()) : nullptr;
             if (!select || select->selectList.size() != 1 || select->fromClause) continue;
-            collectCompositePredicates(table, columns, select->selectList.front().expr.get(), {}, matches);
+            collectCompositePredicates(table, columns, select->selectList.front().expr.get(),
+                                       {}, matches, bounds, suffix);
         }
     }
-    return orderedCompositeInputs(columns, matches);
+    return orderedCompositeInputs(columns, matches, suffix.has_value());
 }
 
 std::map<std::string, std::string> composite_key_lookup::compactValues(
@@ -11329,13 +11457,16 @@ std::map<std::string, std::string> composite_key_lookup::boundMutationValues(
     return values;
 }
 
-static OpPtr compactCompositePrimarySource(StorageEngine* engine,
+static std::unique_ptr<CompositePrimaryKeyScanOp> compactCompositePrimarySource(StorageEngine* engine,
         const PlanContext& context, const TableSchema& table) {
-    auto inputs = compactCompositeInputs(table, context.conds);
+    auto suffix = primary_key_index::orderedSuffixColumn(table);
+    std::vector<CompositeSuffixBound> bounds;
+    auto inputs = compactCompositeInputs(table, context.conds, &bounds, suffix);
     if (inputs.empty()) return {};
+    if (suffix && inputs.back().column == *suffix) suffix.reset();
     auto fallback = std::make_unique<TableScanOp>(engine, context.dbname, context.tablename);
     return std::make_unique<CompositePrimaryKeyScanOp>(engine, context.dbname, table,
-        std::move(inputs), std::move(fallback));
+        std::move(inputs), std::move(fallback), nullptr, suffix, std::move(bounds));
 }
 
 OpPtr QueryPlanner::buildSelectPlan(StorageEngine* engine, const PlanContext& inputContext) {
@@ -11364,7 +11495,11 @@ OpPtr QueryPlanner::buildSelectPlan(StorageEngine* engine, const PlanContext& in
     // bitmap, or parallel access path duplicate policy evaluation: use the
     // policy-aware TableScanOp and keep user predicates above it.
     const bool rlsApplies = engine->rlsAppliesTo(ctx.dbname, ctx.tablename);
-    if (!root && !rlsApplies) root = compactCompositePrimarySource(engine, ctx, table);
+    std::unique_ptr<CompositePrimaryKeyScanOp> compositeRange;
+    if (!root && !rlsApplies) {
+        compositeRange = compactCompositePrimarySource(engine, ctx, table);
+        if (compositeRange && !compositeRange->readsSuffixRange()) root = std::move(compositeRange);
+    }
     const bool useBitmap = !root && !rlsApplies && canUseBitmapHeapScan(relation);
     // GiST acceleration: a range or anchored-prefix predicate on a
     // .gist-indexed column narrows candidates via the sidecar overlap
@@ -11401,6 +11536,7 @@ OpPtr QueryPlanner::buildSelectPlan(StorageEngine* engine, const PlanContext& in
     }
 
     if (!root && !rlsApplies) root = ordinaryBrinTableSource(engine, ctx, table);
+    if (!root && compositeRange) root = std::move(compositeRange);
     if (!root) {
         // Keep the original typed predicate above a candidate-only lookup.
         // This also covers wire parameters expanded to explicit builtin

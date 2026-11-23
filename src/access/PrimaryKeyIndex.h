@@ -9,6 +9,13 @@ namespace dbms::primary_key_index {
 std::string keyForValues(const TableSchema& table, const BPTree& index,
                          const std::map<std::string, std::string>& values);
 
+std::optional<size_t> orderedSuffixColumn(const TableSchema& table);
+
+// The caller must have proved equality for each column before the suffix.
+std::pair<std::string, std::string> suffixRangeKeys(
+    const TableSchema& table, size_t suffixColumn,
+    const std::map<std::string, std::string>& leadingValues, int64_t lower, int64_t upper);
+
 inline std::optional<size_t> singleKeyColumn(const TableSchema& table) {
     size_t column = table.len();
     if (!table.pkColIndices.empty()) {

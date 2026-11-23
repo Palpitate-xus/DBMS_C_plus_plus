@@ -163,6 +163,58 @@ void test_leaf_entry_scan_bounds_sparse_tree() {
     std::filesystem::remove_all(directory);
 }
 
+void test_composite_range_visits_only_selected_leaves() {
+    const auto directory = createTempDir();
+    const auto path = directory / "composite_range.idx";
+    const auto key = [](char group, uint16_t suffix) {
+        std::string bytes(dbms::BP_KEY_LEN, '\0');
+        bytes[0] = group;
+        bytes[bytes.size() - 2] = static_cast<char>(suffix >> 8);
+        bytes.back() = static_cast<char>(suffix & 0xff);
+        return bytes;
+    };
+    constexpr int rowCount = 4096;
+    constexpr int sharedRows = 320;
+    {
+        dbms::BPTree tree(path);
+        assert(tree.openWithCompositePrimaryRanges());
+        for (int i = 1; i <= rowCount; ++i)
+            assert(tree.insertMulti(key('b', i), i));
+        for (int i = 1; i <= sharedRows; ++i)
+            assert(tree.insertMulti(key('a', 10), -i));
+        assert(tree.insertMulti(key('a', 9), 9));
+        assert(tree.insertMulti(key('a', 11), 11));
+        for (int i = 70; i <= 201; ++i)
+            assert(tree.removeMulti(key('a', 10), -i));
+        assert(tree.flush());
+    }
+    {
+        dbms::BPTree tree(path);
+        assert(tree.openExisting() && tree.usesCompositePrimaryRanges());
+        const auto before = tree.cacheStatistics();
+        std::vector<int64_t> values;
+        assert(tree.readCompositePrimaryRange(key('a', 10), key('a', 10), 200, 12, values) ==
+               LeafEntriesResult::Complete);
+        const auto after = tree.cacheStatistics();
+        assert(after.misses - before.misses < 12);
+        std::sort(values.begin(), values.end());
+        std::vector<int64_t> expected;
+        for (int64_t i = -sharedRows; i < 0; ++i)
+            if (i < -201 || i > -70) expected.push_back(i);
+        assert(values == expected);
+        assert(tree.readCompositePrimaryRange(key('a', 10), key('a', 10), 100, 12, values) ==
+               LeafEntriesResult::LimitExceeded && values.empty());
+        assert(tree.readCompositePrimaryRange(key('a', 10), key('a', 10), 200, 1, values) ==
+               LeafEntriesResult::LimitExceeded && values.empty());
+        assert(tree.readCompositePrimaryRange(key('b', 3494), key('b', 3498), 10, 12, values) ==
+               LeafEntriesResult::Complete);
+        assert((values == std::vector<int64_t>{3494, 3495, 3496, 3497, 3498}));
+        assert(tree.readCompositePrimaryRange(key('b', 3498), key('b', 3494), 10, 12, values) ==
+               LeafEntriesResult::Complete && values.empty());
+    }
+    std::filesystem::remove_all(directory);
+}
+
 void test_multi_lookup_reads_only_the_matching_key_range() {
     const auto directory = createTempDir();
     const auto path = directory / "prefix.idx";
@@ -532,6 +584,7 @@ void test_leaf_entry_scan_validates_sibling_links_and_separators() {
 int main() {
     test_checked_lookup_distinguishes_absence();
     test_leaf_entry_scan_bounds_sparse_tree();
+    test_composite_range_visits_only_selected_leaves();
     test_multi_lookup_reads_only_the_matching_key_range();
     test_signed_integer_prefix_and_legacy_reopen();
     test_checksummed_index_page_rejects_corruption();

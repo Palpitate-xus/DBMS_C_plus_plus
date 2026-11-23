@@ -10826,13 +10826,41 @@ std::string StorageEngine::extractPKValue(const std::string& rowBuffer,
     return tbl.buildPKValue(values);
 }
 
-// Size-prefix the canonical datum of every column. Both the column order and
-// the byte order of the lengths are part of the on-disk key format. The
-// fingerprint narrows candidates; the constraint compares the full values.
+std::optional<size_t> primary_key_index::orderedSuffixColumn(const TableSchema& table) {
+    if (!isCompoundKey(table)) return {};
+    size_t ordinal = table.len();
+    if (!table.pkColIndices.empty()) {
+        ordinal = table.pkColIndices.back();
+    } else {
+        for (size_t i = 0; i < table.len(); ++i)
+            if (table.cols[i].isPrimaryKey) ordinal = i;
+    }
+    if (ordinal >= table.len()) return {};
+    const auto& column = table.cols[ordinal];
+    if (column.isArray || column.isUnsigned || column.generatedKind ||
+        !column.domainName.empty() || !column.enumValues.empty()) return {};
+    const auto type = ExprHelper::canonicalResultTypeName(column.dataType);
+    if (type != "smallint" && type != "integer" && type != "bigint") return {};
+    return ordinal;
+}
+
+static constexpr size_t kPrimarySuffixBytes = sizeof(int64_t);
+
+static void appendOrderedPrimarySuffix(std::string& key, int64_t number) {
+    uint64_t ordered = static_cast<uint64_t>(number) ^ (uint64_t{1} << 63);
+    for (size_t i = kPrimarySuffixBytes; i > 0; --i)
+        key.push_back(static_cast<char>((ordered >> ((i - 1) * 8)) & 0xff));
+}
+
+// The disk format hashes size-prefixed canonical column values in declared
+// order. A range key hashes the leading columns and keeps the last integer
+// separately so that bounds within one leading key can be sought in the tree.
 template<typename DatumAt>
-static std::string compositePrimaryFingerprint(const TableSchema& table, DatumAt datumAt) {
+static std::string compositePrimaryFingerprint(const TableSchema& table, DatumAt datumAt,
+        std::optional<size_t> suffix) {
     SHA256 hash;
     const auto append = [&](size_t index) {
+        if (index == suffix) return;
         const auto value = canonicalColumnKeyValue(table.cols[index], datumAt(index));
         std::array<char, sizeof(uint64_t)> length{};
         uint64_t remaining = value.size();
@@ -10855,13 +10883,41 @@ static std::string compositePrimaryFingerprint(const TableSchema& table, DatumAt
     }
     const auto digest = hash.finishBytes();
     static_assert(BP_KEY_LEN <= std::tuple_size<decltype(digest)>::value);
-    return std::string(reinterpret_cast<const char*>(digest.data()), BP_KEY_LEN);
+    const size_t size = suffix ? BP_KEY_LEN - kPrimarySuffixBytes : BP_KEY_LEN;
+    return std::string(reinterpret_cast<const char*>(digest.data()), size);
+}
+
+template<typename DatumAt>
+static std::string compositePrimaryDiskKey(const TableSchema& table, const BPTree& index,
+        DatumAt datumAt) {
+    if (!index.usesCompositePrimaryRanges())
+        return compositePrimaryFingerprint(table, datumAt, {});
+    const auto suffix = primary_key_index::orderedSuffixColumn(table);
+    if (!suffix) return {};
+    const auto number = parseStoredInteger(datumAt(*suffix));
+    if (!number) return {};
+    auto key = compositePrimaryFingerprint(table, datumAt, suffix);
+    if (!key.empty()) appendOrderedPrimarySuffix(key, *number);
+    return key;
+}
+
+std::pair<std::string, std::string> primary_key_index::suffixRangeKeys(
+        const TableSchema& table, size_t suffixColumn,
+        const std::map<std::string, std::string>& leadingValues, int64_t lower, int64_t upper) {
+    auto first = compositePrimaryFingerprint(table, [&](size_t ordinal) {
+        return valueFromRowMap(leadingValues, table.cols[ordinal].dataName);
+    }, suffixColumn);
+    if (first.empty()) return {};
+    auto last = first;
+    appendOrderedPrimarySuffix(first, lower);
+    appendOrderedPrimarySuffix(last, upper);
+    return {std::move(first), std::move(last)};
 }
 
 std::string primary_key_index::keyForValues(const TableSchema& table, const BPTree& index,
         const std::map<std::string, std::string>& values) {
     if (!index.usesCompositePrimaryFingerprints()) return table.buildPKValue(values);
-    return compositePrimaryFingerprint(table, [&](size_t ordinal) {
+    return compositePrimaryDiskKey(table, index, [&](size_t ordinal) {
         return valueFromRowMap(values, table.cols[ordinal].dataName);
     });
 }
@@ -10869,7 +10925,7 @@ std::string primary_key_index::keyForValues(const TableSchema& table, const BPTr
 static std::string primaryIndexKeyFromRow(StorageEngine& engine, const std::string& dbname,
         const TableSchema& table, const BPTree& index, const std::string& row) {
     if (!index.usesCompositePrimaryFingerprints()) return engine.extractPKValue(row, table, dbname);
-    return compositePrimaryFingerprint(table, [&](size_t ordinal) {
+    return compositePrimaryDiskKey(table, index, [&](size_t ordinal) {
         return engine.extractColumnValue(row, table, ordinal, dbname);
     });
 }
@@ -10938,6 +10994,8 @@ static std::optional<size_t> signedIntegerPrimaryKeyColumn(const TableSchema& sc
 }
 
 static bool openNewPrimaryIndex(BPTree& index, const TableSchema& table) {
+    if (primary_key_index::orderedSuffixColumn(table))
+        return index.openWithCompositePrimaryRanges();
     if (primary_key_index::isCompoundKey(table))
         return index.openWithCompositePrimaryFingerprints();
     if (primary_key_index::isSingleTextKey(table))
