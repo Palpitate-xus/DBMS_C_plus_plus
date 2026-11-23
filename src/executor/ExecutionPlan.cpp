@@ -1016,6 +1016,11 @@ static int comparePreparedOrderValues(ExprEvaluator& evaluator,
         return *comparison;
     const auto type = ExprHelper::canonicalResultTypeName(left.typeName);
     const auto rightType = ExprHelper::canonicalResultTypeName(right.typeName);
+    if (type == "timetz" && rightType == "timetz") {
+        const auto order = temporal_storage_detail::compareZonedClocks(left.value, right.value);
+        if (!order) throw DbError("22007", "invalid time with time zone sort key");
+        return *order;
+    }
     if (type == rightType && supportsPreparedArrayOrder(type))
         return ExprEvaluator::compareArrayValues(left, right);
     if ((type == "real" || type == "double precision") &&
@@ -1414,7 +1419,7 @@ class OrdinarySortComparisons {
     struct Entry {
         bool ready=false;
         std::string leftType,rightType,leftCollation,rightCollation;
-        enum class Kind { Storage,Expression,Oid,ReferenceArray,Array } kind=Kind::Storage;
+        enum class Kind { Storage,Expression,Oid,ReferenceArray,Array,ZonedClock } kind=Kind::Storage;
         std::optional<Column> column;
         std::optional<QueryComparisonBinding> binding;
     };
@@ -1436,6 +1441,7 @@ public:
             const auto type=ExprHelper::canonicalResultTypeName(a.typeName);
             const bool same=type==ExprHelper::canonicalResultTypeName(b.typeName);
             if(same && type=="oid")next.kind=Entry::Kind::Oid;
+            else if(same && type=="timetz")next.kind=Entry::Kind::ZonedClock;
             else if(same && (type=="regtype[]" || type=="regclass[]"))
                 next.kind=Entry::Kind::ReferenceArray;
             else if (same && supportsPreparedArrayOrder(type))
@@ -1460,6 +1466,11 @@ public:
             return compareOwningReferenceArrays(a,b);
         if (entry.kind == Entry::Kind::Array)
             return ExprEvaluator::compareArrayValues(a, b);
+        if (entry.kind == Entry::Kind::ZonedClock) {
+            const auto order = temporal_storage_detail::compareZonedClocks(a.value, b.value);
+            if (!order) throw DbError("22007", "invalid time with time zone sort key");
+            return *order;
+        }
         if(entry.kind==Entry::Kind::Expression) {
             if(evaluator.comparePrepared(*entry.binding,a,b).asBool())return -1;
             if(evaluator.comparePrepared(*entry.binding,b,a).asBool())return 1;
@@ -10714,7 +10725,11 @@ struct SortOp::State {
     void key(Row& row, std::string value) const {
         if (column.dataType == "char" || column.isVariableLength) row.key = std::move(value);
         else if (column.dataType == "date") row.date = value.empty() ? Date{} : Date(value.c_str());
-        else if (column.storageCodec == Column::StorageCodec::TemporalMicros)
+        else if (column.storageCodec == Column::StorageCodec::ZonedClock) {
+            const auto clock = temporal_storage_detail::parseZonedClock(value);
+            if (clock) row.integer = temporal_storage_detail::zonedClockOrderKey(*clock);
+            else if (!row.isNull) throw DbError("22007", "invalid time with time zone sort key");
+        } else if (column.storageCodec == Column::StorageCodec::TemporalMicros)
             row.integer = value.empty() ? 0 : (column.dataType == "time"
                 ? temporal_storage_detail::parseTimeMicros(value).value_or(0)
                 : temporal_storage_detail::parseTimestampMicros(value).value_or(0));

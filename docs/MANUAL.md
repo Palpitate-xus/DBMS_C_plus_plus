@@ -660,7 +660,15 @@ USE DATABASE mydb;
 SELECT '14:30:00.125+05:30'::timetz(2);  -- 14:30:00.13+05:30
 ```
 
-用 PostgreSQL 协议执行查询时，声明为 `TIMETZ` 的标量参数可用文本或二进制发送。存储 `TIMETZ` 列、从会话时区获取省略的偏移和命名时区输入仍有差距。[测试与已知限制](test-report.md#timetz-precision-20261123)
+新建的 `TIMETZ` 列保存本地时钟和 UTC 偏移。写入时按列声明的小数位数舍入，读取、筛选和排序时保留原偏移。排序先比较换算成 UTC 的时钟，再比较向西偏移的秒数。数据库支持文本与二进制查询结果，声明为 `TIMETZ` 的标量参数也可用这两种格式发送。
+
+```sql
+CREATE TABLE check_ins (id integer PRIMARY KEY, local_time timetz(2));
+INSERT INTO check_ins VALUES (1, '14:30:00.125+05:30');
+SELECT local_time FROM check_ins WHERE id = 1;  -- 14:30:00.13+05:30
+```
+
+省略偏移时从会话时区推断、命名时区输入和完整数组支持仍有差距。旧表的迁移边界见[打包与部署](PACKAGING.md#时间列存储与版本边界)和[测试报告](test-report.md#timetz-storage-20261123)。
 
 ### 二进制类型
 | 类型 | 说明 |

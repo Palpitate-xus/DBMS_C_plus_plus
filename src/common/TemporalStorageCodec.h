@@ -110,6 +110,13 @@ struct ZonedClock {
 
 inline constexpr int32_t ZonedClockOffsetLimit = 16 * 3600;
 
+inline int64_t zonedClockOrderKey(const ZonedClock& value) {
+    const auto utcMicros = value.localMicros + value.secondsWest * MicrosPerSecond;
+    // A one-microsecond difference dominates the entire range of offsets.
+    // Equal UTC clocks compare by seconds west without wrapping at midnight.
+    return utcMicros * (int64_t{1} << 17) + value.secondsWest;
+}
+
 inline std::optional<int32_t> parseZonedClockOffset(std::string_view offset) {
     int hours = 0, minutes = 0, seconds = 0;
     const auto colon = offset.find(':');
@@ -205,6 +212,15 @@ inline std::optional<ZonedClock> parseZonedClock(std::string_view value,
     const auto micros = (hours * 3600LL + minutes * 60LL + seconds) * MicrosPerSecond + fraction;
     if (micros > MicrosPerDay) return fail("22008");
     return ZonedClock{micros, secondsWest};
+}
+
+inline std::optional<int> compareZonedClocks(std::string_view left, std::string_view right) {
+    const auto a = parseZonedClock(left);
+    const auto b = parseZonedClock(right);
+    if (!a || !b) return std::nullopt;
+    const auto l = zonedClockOrderKey(*a);
+    const auto r = zonedClockOrderKey(*b);
+    return (l > r) - (l < r);
 }
 
 inline std::optional<int64_t> parseTimestampMicros(const std::string& value) {

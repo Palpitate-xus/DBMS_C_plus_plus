@@ -955,18 +955,49 @@ static std::optional<int64_t> temporalColumnMicros(const Column& column,
         : temporal_storage_detail::parseTimestampMicros(value);
 }
 
+static std::string normalizeZonedColumn(const Column& column, const std::string& input) {
+    using namespace temporal_storage_detail;
+    const char* state = nullptr;
+    auto clock = parseZonedClock(input, &state);
+    if (!clock) throw DbError(state, "invalid time with time zone: '" + input + "'");
+    const auto rounded = roundTimeMicros(clock->localMicros, column.typeMod);
+    if (!rounded) throw DbError("22008", "time precision adjustment is out of range");
+    clock->localMicros = *rounded;
+    return formatZonedClock(*clock);
+}
+
+static void writeZonedClock(char* target, const std::string& value) {
+    using namespace temporal_storage_detail;
+    ZonedClock clock{-1, 0};
+    if (!value.empty()) {
+        const auto parsed = parseZonedClock(value);
+        if (!parsed) throw DbError("22007", "invalid canonical time with time zone");
+        clock = *parsed;
+    }
+    std::memcpy(target, &clock.localMicros, sizeof(clock.localMicros));
+    std::memcpy(target + sizeof(clock.localMicros), &clock.secondsWest, sizeof(clock.secondsWest));
+}
+
 static std::string canonicalColumnKeyValue(const Column& column,
                                            const std::string& value) {
     if (value.empty()) return {};
-    if (column.storageCodec == Column::StorageCodec::TemporalMicros) {
-        std::string canonical;
-        if (!normalizeTemporalColumn(column, value, canonical, false)) return value;
-        const auto micros = temporalColumnMicros(column, canonical);
-        if (!micros) return value;
-        // B+Tree stores only 20 bytes: ISO timestamp text loses all fractional
-        // digits at that boundary. Bias the signed int64 then use 16 fixed hex
-        // digits, preserving exact equality AND chronological byte ordering.
-        uint64_t ordered = static_cast<uint64_t>(*micros) ^ (uint64_t{1} << 63);
+    if (column.storageCodec == Column::StorageCodec::TemporalMicros ||
+        column.storageCodec == Column::StorageCodec::ZonedClock) {
+        int64_t keyValue;
+        if (column.storageCodec == Column::StorageCodec::ZonedClock) {
+            const auto clock = temporal_storage_detail::parseZonedClock(value);
+            if (!clock) return value;
+            keyValue = temporal_storage_detail::zonedClockOrderKey(*clock);
+        } else {
+            std::string canonical;
+            if (!normalizeTemporalColumn(column, value, canonical, false)) return value;
+            const auto micros = temporalColumnMicros(column, canonical);
+            if (!micros) return value;
+            keyValue = *micros;
+        }
+        // The fixed hex form fits the B-tree's 20-byte limit and preserves
+        // both temporal ordering and equality, including fractional digits.
+        uint64_t ordered = static_cast<uint64_t>(keyValue) ^ (uint64_t{1} << 63);
         std::string key(16, '0');
         constexpr char hex[] = "0123456789abcdef";
         for (size_t digit = key.size(); digit-- > 0;) {
@@ -3155,6 +3186,17 @@ Column makeTimeColumn(const std::string& name, bool isNull, bool isPK) {
     c.isPrimaryKey = isPK;
     c.dataType = "time";
     c.dsize = 4;  // int32_t seconds since 00:00:00
+    return c;
+}
+
+Column makeTimetzColumn(const std::string& name, bool isNull, bool isPK) {
+    Column c;
+    c.dataName = name;
+    c.isNull = isNull;
+    c.isPrimaryKey = isPK;
+    c.dataType = "timetz";
+    c.dsize = TIMETZ_SIZE;
+    c.storageCodec = Column::StorageCodec::ZonedClock;
     return c;
 }
 
@@ -13246,6 +13288,15 @@ std::string StorageEngine::extractColumnValueStatic(const std::string& rowBuffer
         Date d;
         std::memcpy(&d, rowBuffer.data() + offset, DATE_SIZE);
         return (d.year == 0) ? "" : str(d);
+    } else if (col.storageCodec == Column::StorageCodec::ZonedClock) {
+        temporal_storage_detail::ZonedClock clock;
+        std::memcpy(&clock.localMicros, rowBuffer.data() + offset, sizeof(clock.localMicros));
+        std::memcpy(&clock.secondsWest, rowBuffer.data() + offset + sizeof(clock.localMicros),
+                    sizeof(clock.secondsWest));
+        if (clock.localMicros == -1 && !storedNullKnown) return {};
+        auto text = temporal_storage_detail::formatZonedClock(clock);
+        if (text.empty()) throw DbError("XX001", "invalid stored time with time zone");
+        return text;
     } else if (col.storageCodec == Column::StorageCodec::TemporalMicros) {
         int64_t value = 0;
         std::memcpy(&value, rowBuffer.data() + offset, sizeof(value));
@@ -19327,8 +19378,10 @@ static bool isValidTemporalColumnModifier(const Column& column) {
 
 static bool isValidColumnStorageCodec(const Column& column) {
     if (column.storageCodec == Column::StorageCodec::Legacy) return true;
+    if (column.isArray || column.isVariableLength || column.isUnsigned) return false;
+    if (column.storageCodec == Column::StorageCodec::ZonedClock)
+        return column.dataType == "timetz" && column.dsize == TIMETZ_SIZE;
     return column.storageCodec == Column::StorageCodec::TemporalMicros &&
-        !column.isArray && !column.isVariableLength && !column.isUnsigned &&
         column.dsize == sizeof(int64_t) &&
         (column.dataType == "time" || column.dataType == "timestamp" ||
          column.dataType == "timestamptz" || column.dataType == "datetime");
@@ -24314,6 +24367,13 @@ DBStatus StorageEngine::alterTableAlterColumnType(const std::string& dbname,
         } else if(sourceReference && referenceStringTarget) {
             const auto catalog=regtype_detail::metadata(*this,dbname);
             it->second=stored_regtype_detail::output(*it->second,false,catalog,currentSession(),referenceSourceType);
+        } else if (target.storageCodec == Column::StorageCodec::ZonedClock) {
+            try {
+                it->second = normalizeZonedColumn(target, *it->second);
+            } catch (...) {
+                lockManager_.unlock(tablename);
+                throw;
+            }
         } else if (target.storageCodec == Column::StorageCodec::TemporalMicros) {
             std::string canonical;
             std::string temporalInput = *it->second;
@@ -29398,6 +29458,10 @@ StorageEngine::PredicateTruth StorageEngine::compareValues(
         if (!l.year || !r.year) return PredicateTruth::Unknown;
         return fromCompare(l < r ? -1 : (r < l ? 1 : 0));
     }
+    if (col.dataType == "timetz" && !col.isArray) {
+        const auto comparison = temporal_storage_detail::compareZonedClocks(left, right);
+        return comparison ? fromCompare(*comparison) : PredicateTruth::Unknown;
+    }
     if (col.storageCodec == Column::StorageCodec::TemporalMicros) {
         std::string canonicalLeft, canonicalRight;
         if (!normalizeTemporalColumn(col, left, canonicalLeft, false) ||
@@ -30335,7 +30399,8 @@ bool StorageEngine::evalConditionOnRowWithSyntax(const Condition& cond,
         if (cond.op == "<=" && v.year && (d > v))   return false;
         if (cond.op == ">=" && v.year && (d < v))   return false;
         if (cond.op == "!=" && v.year && d == v)    return false;
-    } else if (col.storageCodec == Column::StorageCodec::TemporalMicros) {
+    } else if (col.storageCodec == Column::StorageCodec::TemporalMicros ||
+               col.storageCodec == Column::StorageCodec::ZonedClock) {
         return compareValues(col, val, val.empty(), cond.value, false, cond.op) ==
             PredicateTruth::True;
     } else if (col.dataType == "timestamp" || col.dataType == "timestamptz" || col.dataType == "datetime") {
@@ -30684,6 +30749,8 @@ static std::string buildRowBuffer(const TableSchema& tbl,
                     Date d(val.c_str());
                     std::memcpy(&rowBuffer[offset], &d, DATE_SIZE);
                 }
+            } else if (col.storageCodec == Column::StorageCodec::ZonedClock) {
+                writeZonedClock(&rowBuffer[offset], val);
             } else if (col.storageCodec == Column::StorageCodec::TemporalMicros) {
                 const auto parsed = val.empty() ? std::optional<int64_t>{} : temporalColumnMicros(col, val);
                 if (!val.empty() && !parsed)
@@ -30788,6 +30855,8 @@ static std::string buildRowBuffer(const TableSchema& tbl,
                         Date d(val.c_str());
                         std::memcpy(&fixedData[fixedOff], &d, DATE_SIZE);
                     }
+                } else if (col.storageCodec == Column::StorageCodec::ZonedClock) {
+                    writeZonedClock(&fixedData[fixedOff], val);
                 } else if (col.storageCodec == Column::StorageCodec::TemporalMicros) {
                     const auto parsed = val.empty() ? std::optional<int64_t>{} : temporalColumnMicros(col, val);
                     if (!val.empty() && !parsed)
@@ -31813,6 +31882,11 @@ DBStatus StorageEngine::insertInternal(
                 return DBStatus::NULL_NOT_ALLOWED;
             }
         }
+        if (col.storageCodec == Column::StorageCodec::ZonedClock) {
+            if (hasValue && !isNullMarker)
+                actualValues[col.dataName] = normalizeZonedColumn(col, val);
+            return DBStatus::OK;
+        }
         const bool arrayDomain = col.isArray && !col.domainName.empty();
         if (hasValue && !isNullMarker && val.empty() &&
             !arrayDomain && !columnAcceptsEmptyValue(col)) {
@@ -32158,7 +32232,8 @@ DBStatus StorageEngine::insertInternal(
                     } catch (const DbError& error) {
                         const auto& state = error.sqlState();
                         const bool invalidValue = state == "22P02" || state == "22003" ||
-                            state == "22001" || state == "22007" || state == "22008";
+                            state == "22001" || state == "22007" || state == "22008" ||
+                            (col.storageCodec == Column::StorageCodec::ZonedClock && state == "22009");
                         const bool invalidReference =
                             (col.dataType == "regtype" &&
                              (state == "42704" || state == "42601" || state == "3F000")) ||
@@ -36722,7 +36797,8 @@ DBStatus StorageEngine::updateInternal(
                     }
                     const bool arrayDomain = col.isArray && !col.domainName.empty();
                     if (kv.second.empty() &&
-                        !arrayDomain && !columnAcceptsEmptyValue(col)) {
+                        !arrayDomain && !columnAcceptsEmptyValue(col) &&
+                        col.storageCodec != Column::StorageCodec::ZonedClock) {
                         return DBStatus::INVALID_VALUE;
                     }
                     std::string storeVal = kv.second;
@@ -36735,6 +36811,8 @@ DBStatus StorageEngine::updateInternal(
                         // Already canonicalized once by the actual input owner.
                     } else if (arrayDomain) {
                         storeVal = arrayDomainChecks.convertBaseInput(i, kv.second, dbname, this);
+                    } else if (col.storageCodec == Column::StorageCodec::ZonedClock) {
+                        storeVal = normalizeZonedColumn(col, kv.second);
                     } else if (col.storageCodec == Column::StorageCodec::TemporalMicros) {
                         if (!normalizeTemporalColumn(col, kv.second, storeVal)) return DBStatus::INVALID_VALUE;
                     } else if (col.isArray && col.dataType == "numeric") {

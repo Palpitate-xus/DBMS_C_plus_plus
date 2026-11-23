@@ -39,7 +39,12 @@ int main() {
                 precision<0?std::vector<std::string>{}:std::vector<std::string>{std::to_string(precision)},array);
             check(error.empty(),"registry resolves "+declaration);
             check(column.typeMod==precision,"registry keeps modifier "+declaration);
-            check(column.dsize==family.physical && column.isArray==array,"registry physical codec "+declaration);
+            const bool zonedClock = !array && family.oid == 1266;
+            check(column.dsize == (zonedClock ? TIMETZ_SIZE : family.physical) &&
+                  column.isArray == array &&
+                  column.storageCodec == (zonedClock ? Column::StorageCodec::ZonedClock :
+                                                       Column::StorageCodec::Legacy),
+                  "registry physical codec " + declaration);
         }
     }
     const std::string database=testDbPath("temporal_column_precision");
@@ -68,11 +73,13 @@ int main() {
             const Column* column=i<schema.len()?&schema.cols[i]:nullptr;
             const Column* omitted=field.defaultIndex<schema.len()?&schema.cols[field.defaultIndex]:nullptr;
             check(column && column->typeMod==field.precision,phase+" schema modifier "+field.name);
+            const auto codec = field.array ? Column::StorageCodec::Legacy :
+                field.family.oid == 1266 ? Column::StorageCodec::ZonedClock : Column::StorageCodec::TemporalMicros;
             check(column && omitted && column->dsize==omitted->dsize &&
                 column->isVariableLength==omitted->isVariableLength && column->isArray==field.array &&
                 column->storageCodec==omitted->storageCodec &&
-                column->storageCodec==((field.array || std::string(field.family.name)=="timetz")
-                    ? Column::StorageCodec::Legacy : Column::StorageCodec::TemporalMicros),
+                column->storageCodec==codec &&
+                (codec != Column::StorageCodec::ZonedClock || column->dsize == TIMETZ_SIZE),
                 phase+" no precision-based physical width "+field.name);
             check(attribute && attribute->atttypmod==field.precision,phase+" attribute modifier "+field.name);
             check(attribute && attribute->attlen==(field.array?-1:field.family.logical),phase+" logical width "+field.name);

@@ -1027,6 +1027,8 @@ public:
                 "AND", "OR", "LIKE", "NOT LIKE", "ILIKE", "NOT ILIKE",
                 "SIMILAR TO", "NOT SIMILAR TO", "IN", "NOT IN", "IS DISTINCT FROM", "IS NOT DISTINCT FROM", "@@"};
             static const std::set<std::string> comparisons={"=","<>","!=","<",">","<=",">=","IS DISTINCT FROM","IS NOT DISTINCT FROM"};
+            const auto leftBase=ExprHelper::canonicalResultTypeName(left);
+            const auto rightBase=ExprHelper::canonicalResultTypeName(right);
             if(comparisons.count(binary->op)) {
                 binary->comparison=enumComparison(binary->op,binary->left,binary->right,left,right);
                 const auto metadataInput=[](const Expr* value) {
@@ -1034,10 +1036,15 @@ public:
                     return input && input->origin==ParameterOrigin::MetadataPlaceholder &&
                         common_type_detail::canonical(input->declaredType)=="unknown";
                 };
-                if(!binary->comparison && (metadataInput(binary->left.get()) || metadataInput(binary->right.get()))) {
-                    const auto selected=ExprEvaluator::resolveComparison(binary->op,left,right);
+                const bool zonedClock = leftBase=="timetz" || rightBase=="timetz";
+                if(!binary->comparison && (zonedClock || metadataInput(binary->left.get()) ||
+                                           metadataInput(binary->right.get()))) {
+                    const auto operation = zonedClock &&
+                        (binary->op=="IS DISTINCT FROM" || binary->op=="IS NOT DISTINCT FROM") ? "=" : binary->op;
+                    const auto selected=ExprEvaluator::resolveComparison(operation,left,right);
                     inferMetadataInput(binary->left.get(),selected.leftType);
                     inferMetadataInput(binary->right.get(),selected.rightType);
+                    if(zonedClock) binary->comparison=selected;
                 }
                 // Integer input functions transform genuine UNKNOWN SQL
                 // literals during binding, even if no source row is demanded.
@@ -1071,8 +1078,6 @@ public:
                 else if(!binary->comparison && integer(right) && left=="unknown" && unknownLiteral(binary->left.get()))
                     integerInput(binary->left,common_type_detail::canonical(right));
             }
-            const auto leftBase=ExprHelper::canonicalResultTypeName(left);
-            const auto rightBase=ExprHelper::canonicalResultTypeName(right);
             const bool bitOperand=leftBase=="bit" || leftBase=="bit varying" ||
                                   rightBase=="bit" || rightBase=="bit varying";
             static const std::set<std::string> bitComparisons={"=","<>","!=","<",">","<=",">="};

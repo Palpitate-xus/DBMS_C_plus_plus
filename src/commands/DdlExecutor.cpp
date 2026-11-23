@@ -5569,8 +5569,12 @@ bool DdlExecutor::columnDefToColumn(const ColumnDef& cd, const std::string& dbna
     } else if (baseType == "time") {
         col = makeTimeColumn(cd.name, cd.isNull, cd.isPrimaryKey);
     } else if (baseType == "timetz") {
-        col = makeTimeColumn(cd.name, cd.isNull, cd.isPrimaryKey);
-        col.dataType = "timetz";
+        if (storageArray) {
+            col = makeTimeColumn(cd.name, cd.isNull, cd.isPrimaryKey);
+            col.dataType = "timetz";
+        } else {
+            col = makeTimetzColumn(cd.name, cd.isNull, cd.isPrimaryKey);
+        }
     } else if (baseType == "interval") {
         col = makeIntervalColumn(cd.name, cd.isNull, cd.isPrimaryKey);
         col.typeMod = interval_type_detail::modifiers(typeMods).packed();
@@ -6950,6 +6954,9 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
                 column.dataType == "timestamp" || column.dataType == "timestamptz")) {
                 column.storageCodec = Column::StorageCodec::TemporalMicros;
                 column.dsize = sizeof(int64_t);
+            } else if (!column.isArray && column.dataType == "timetz") {
+                column.storageCodec = Column::StorageCodec::ZonedClock;
+                column.dsize = TIMETZ_SIZE;
             }
         }
         tbl = merged;

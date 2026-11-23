@@ -2,6 +2,18 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-23 store and query ordinary scalar TIMETZ columns",
+      "gap_ids": ["TYPE-06", "PROTO-04"],
+      "status": "partial",
+      "evidence": ["src/commands/TableManage.cpp", "src/common/TemporalStorageCodec.h", "src/commands/DdlExecutor.cpp", "src/executor/ExecutionPlan.cpp", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/timetz_storage_protocol_e2e_test.py", "tests/temporal_storage_layout_test.cpp", "tests/temporal_column_precision_test.cpp"],
+      "verification": [
+        "A separate heap codec records both clock and offset in fixed and mixed rows, retaining the original type modifier and real SQL nulls.",
+        "The PostgreSQL comparison order is used for typed predicates, sorting and scalar key encoding.",
+        "New and existing rows survive cold open, rollback, forced process exit and rewrites. The earlier unsupported integer placeholder is preserved until explicitly converted or replaced."
+      ]
+    },
+    {
       "issue": "2026-11-23 round TIMETZ scalar casts and receive declared binary parameters",
       "gap_ids": ["TYPE-06", "PROTO-04"],
       "status": "partial",

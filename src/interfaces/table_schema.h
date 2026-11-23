@@ -18,6 +18,7 @@ constexpr size_t MAX_TYPE_NAME_LEN = 64;
 constexpr size_t MAX_COL_NAME_LEN = 64;
 constexpr size_t DATE_SIZE = 12;
 constexpr size_t TIMESTAMP_SIZE = 8;
+constexpr size_t TIMETZ_SIZE = sizeof(int64_t) + sizeof(int32_t);
 constexpr int64_t INF = 0x8000000000000000LL;
 inline constexpr char PRIMARY_KEY_CONSTRAINT_NAME_PARAM[] =
     "internal.primary_key_constraint_name";
@@ -59,7 +60,7 @@ struct Column {
     int32_t typeMod = -1;
     // Physical temporal units are explicit. Old schema9/A/B/C and native
     // factories retain Legacy; never infer microseconds from an 8-byte slot.
-    enum class StorageCodec : uint8_t { Legacy = 0, TemporalMicros = 1 };
+    enum class StorageCodec : uint8_t { Legacy = 0, TemporalMicros = 1, ZonedClock = 2 };
     StorageCodec storageCodec = StorageCodec::Legacy;
     // Stable catalog identity for SQL identity sequences. Zero preserves the
     // legacy native/schema counter; never infer a sequence from its name.

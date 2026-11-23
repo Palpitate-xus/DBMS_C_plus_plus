@@ -238,6 +238,10 @@ std::string TypeRegistry::resolveColumnType(Column& col,
     col.dsize = r.dsize;
     col.isVariableLength = r.isVariableLength;
     col.isArray = false;
+    if (canonical == "timetz") {
+        col.dsize = TIMETZ_SIZE;
+        col.storageCodec = Column::StorageCodec::ZonedClock;
+    }
     if (canonical == "regtype" || canonical == "regclass") col.isUnsigned = true;
     col.typeMod = canonical == "character varying"
         ? (typeMods.empty() ? character_column::unboundedVarchar : r.typmod)

@@ -2568,14 +2568,9 @@ static int compareValuesImpl(const ExprValue& a, const ExprValue& b, bool equali
     }
     const auto isZonedTime = [](const std::string& type) { return type == "timetz" || type == "time with time zone"; };
     if (isZonedTime(ta) && isZonedTime(tb)) {
-        using namespace temporal_storage_detail;
-        const auto left = parseZonedClock(a.value), right = parseZonedClock(b.value);
-        if (!left || !right) throw DbError("22007", "invalid time with time zone datum in comparison");
-        // PostgreSQL breaks ties by seconds west and retains clocks across midnight.
-        const auto leftUtc = left->localMicros + left->secondsWest * MicrosPerSecond;
-        const auto rightUtc = right->localMicros + right->secondsWest * MicrosPerSecond;
-        if (leftUtc != rightUtc) return leftUtc < rightUtc ? -1 : 1;
-        return (left->secondsWest > right->secondsWest) - (left->secondsWest < right->secondsWest);
+        const auto comparison = temporal_storage_detail::compareZonedClocks(a.value, b.value);
+        if (!comparison) throw DbError("22007", "invalid time with time zone datum in comparison");
+        return *comparison;
     }
     if (ta == "jsonb" && tb == "jsonb")
         return JsonbValue::parse(a.value).compare(JsonbValue::parse(b.value));
@@ -2887,7 +2882,7 @@ QueryComparisonBinding ExprEvaluator::resolveComparison(const std::string& rawOp
     const bool timestamps=temporal.count(binding.leftType) && temporal.count(binding.rightType);
     const bool same=binding.leftType==binding.rightType &&
         (binding.leftType=="oid" || binding.leftType=="boolean" || binding.leftType=="\"char\"" || binding.leftType=="uuid" || binding.leftType=="bytea" ||
-         binding.leftType=="time" || binding.leftType=="interval" || binding.leftType=="record" ||
+         binding.leftType=="time" || binding.leftType=="timetz" || binding.leftType=="interval" || binding.leftType=="record" ||
          binding.leftType=="macaddr" || binding.leftType=="macaddr8" ||
          isBitStringTypeName(binding.leftType) || common_type_detail::array(binding.leftType));
     if (!operations.count(binding.op) || (!numbers && !strings && !timestamps && !same))
@@ -4104,6 +4099,25 @@ ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& c
     if (e->predicateCollation && op != "||")
         applyPredicateCollation(*e->predicateCollation, l, r);
 
+    const auto compare = [&](const std::string& operation) {
+        if (e->comparison) return comparePrepared(*e->comparison, l, r);
+        const auto zoned = [](const ExprValue& value) {
+            return value.typeName == "timetz" || value.typeName == "time with time zone";
+        };
+        if (zoned(l) || zoned(r)) {
+            const auto inputType = [](const Expr* expression, const ExprValue& value) {
+                const auto* literal = dynamic_cast<const LiteralExpr*>(expression);
+                return literal && !literal->preparedSubquery && literal->typeName.empty() &&
+                    (value.isNull || isQuotedString(literal->value))
+                    ? std::string("unknown") : value.typeName;
+            };
+            const auto binding = resolveComparison(operation,
+                inputType(e->left.get(), l), inputType(e->right.get(), r));
+            return comparePrepared(binding, l, r);
+        }
+        return applyComparison(operation, l, r);
+    };
+
     // Comparison
     // IS [NOT] DISTINCT FROM: equality that treats NULLs as comparable
     // (never returns NULL).
@@ -4114,7 +4128,7 @@ ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& c
         } else {
             // DISTINCT selects '=' and negates its Boolean result. '<>' is
             // neither guaranteed to exist nor its inverse for geometric NaN.
-            distinct = !(e->comparison?comparePrepared(*e->comparison,l,r):applyComparison("=",l,r)).asBool();
+            distinct = !compare("=").asBool();
         }
         if (op == "is not distinct from") distinct = !distinct;
         return ExprValue("boolean", distinct ? "t" : "f", false);
@@ -4135,7 +4149,7 @@ ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& c
         return ExprValue("boolean", m ? "t" : "f", false);
     }
     static const std::set<std::string> cmpOps = {"=", "<>", "!=", "<", ">", "<=", ">="};
-    if (cmpOps.count(op)) return e->comparison?comparePrepared(*e->comparison,l,r):applyComparison(op,l,r);
+    if (cmpOps.count(op)) return compare(op);
 
     // Arithmetic
     static const std::set<std::string> arithOps = {"+", "-", "*", "/", "%", "^"};

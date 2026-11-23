@@ -204,6 +204,45 @@ int main() {
         "new child uses its own microsecond heap");
     check(g_engine.insertRow(database, "micro_inherited", {{"t", std::string("00:00:00.000001")}}) == DBStatus::OK,
           "inherited fractional insert");
+
+    check(!ddl.executeSql("CREATE TABLE zoned(id integer PRIMARY KEY,t timetz(2),tail integer)", session),
+          "SQL zoned clock table");
+    const auto zonedPath = std::filesystem::path(database) / "zoned.stc";
+    const auto zonedImage = readBytes(zonedPath);
+    const auto zoned = g_engine.getTableSchema(database, "zoned");
+    check(version(zonedImage) == 0x4442000D && zoned.len() == 3, "zoned clock uses codec extension");
+    if (zoned.len() != 3 || zonedImage.size() < 9) return 1;
+    check(zoned.cols[1].storageCodec == Column::StorageCodec::ZonedClock &&
+        zoned.cols[1].dsize == 12 && zoned.cols[1].typeMod == 2, "zoned clock width, codec and precision");
+    check(g_engine.insertRow(database, "zoned", {{"id", std::string("1")},
+        {"t", std::string("23:59:59.99999-00:30:04")}, {"tail", std::string("8")}}) == DBStatus::OK,
+        "native insert rounds clock without rounding offset");
+    check(g_engine.insertRow(database, "zoned", {{"id", std::string("2")},
+        {"tail", std::string("7")}}) == DBStatus::OK, "zoned column accepts NULL");
+    size_t encoded = 0;
+    g_engine.forEachRow(database, "zoned", [&](uint32_t, uint16_t, const char* bytes, size_t size) {
+        const std::string row(bytes, size);
+        if (StorageEngine::extractColumnValueStatic(row, zoned, 0) != "1") return;
+        ++encoded;
+        const auto offset = zoned.cols[0].dsize;
+        int64_t micros = 0;
+        int32_t secondsWest = 0;
+        if (row.size() >= offset + TIMETZ_SIZE) {
+            std::memcpy(&micros, bytes + offset, sizeof(micros));
+            std::memcpy(&secondsWest, bytes + offset + sizeof(micros), sizeof(secondsWest));
+        }
+        check(micros == 86400000000LL && secondsWest == 1804, "on-disk clock is two independent fields");
+        check(StorageEngine::extractColumnValueStatic(row, zoned, 1) == "24:00:00-00:30:04" &&
+            StorageEngine::extractColumnValueStatic(row, zoned, 2) == "8", "zoned value and adjacent column");
+    });
+    check(encoded == 1, "one non-NULL row payload sampled");
+    auto wrongCodec = zonedImage;
+    wrongCodec[wrongCodec.size() - 2] = static_cast<char>(Column::StorageCodec::TemporalMicros);
+    publish(zonedPath, wrongCodec);
+    check(parser.getTableSchema(database, "zoned").len() == 0, "non-zoned codec rejected for zoned column");
+    publish(zonedPath, zonedImage);
+    check(parser.getTableSchema(database, "zoned").len() == 3, "zoned schema readable after restoration");
+
     std::cout << "TEMPORAL_STORAGE_LAYOUT_COMPLETE " << checks << " FAILURES " << failures << '\n';
     return failures == 0 ? 0 : 1;
 }

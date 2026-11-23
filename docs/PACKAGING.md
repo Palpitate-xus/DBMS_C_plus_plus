@@ -57,6 +57,10 @@ sudo apt install cmake g++ make zlib1g-dev libicu-dev
 
 ## 时间列存储与版本边界
 
+新建的 `TIMETZ` 标量列在 `TCM1` 中使用标记 `2`，每个值占 12 字节，分别保存 8 字节本地微秒和 4 字节向西的偏移秒数。可以读取旧列和相邻字段原来的字节。旧程序无法读取使用标记 `2` 的列。
+
+旧 `TIMETZ` 列可能含有旧程序接受的整数。没有可据此恢复的原偏移，直接执行 `ALTER COLUMN … TYPE TIMETZ` 会拒绝这些行。有可靠来源时，可以把原时间与偏移重新导入新表。旧列值全为 `NULL` 时，可以用 `ALTER COLUMN … TYPE TIMETZ` 重写后再写入有效时间。 [旧数据与恢复测试](test-report.md#timetz-storage-20261123)
+
 新SQL标量TIME/TIMESTAMP/TIMESTAMPTZ列使用schema-D（0x4442000D）与TCM1逐列
 单位标签；物理数据为int64微秒，timestamp基准为2000-01-01，TIME范围含24:00。
 已有schema9/A/B/C及native工厂的Legacy秒列保持原单位，不自动重解释原八字节数据。

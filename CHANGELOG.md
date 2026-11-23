@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>建表后可以保存带时区的时间 · 2026-11-23</summary>
+
+例如，签到时间可以保存为 `14:30:00.13+05:30`。以后查询时，仍能看到当时记录的偏移。
+
+[使用说明](docs/MANUAL.md#日期时间类型) · [测试报告](docs/test-report.md#timetz-storage-20261123) · [性能报告](docs/performance-report-2026-10-30.md#timetz-storage-cost-20261123)
+
+</details>
+
+<details>
 <summary>带时区的时间可以按指定位数四舍五入 · 2026-11-23</summary>
 
 例如，要求保留两位小数时，`14:30:00.125+05:30` 会变成 `14:30:00.13+05:30`。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>在 SQL 里直接列出多行数据时，查询准备更快 · 2026-11-23</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-23 · 在 SQL 里直接列出多行数据时，查询准备更快
 
 在一次测试中，直接在 SQL 里列出 128 行数据，准备这条查询的时间从约 13 毫秒降到约 5 毫秒。
 
 [测试报告](docs/test-report.md#extended-query-syntax-20261123) · [性能报告](docs/performance-report-2026-10-30.md#extended-query-syntax-cost-20261123)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-23 · 检查数字范围时，可以到执行时再传入数字
 

@@ -143,6 +143,7 @@ using dbms::makeDecimalColumn;
 using dbms::makeBooleanColumn;
 using dbms::makeUuidColumn;
 using dbms::makeTimeColumn;
+using dbms::makeTimetzColumn;
 using dbms::makeDateTimeColumn;
 using dbms::makeIntervalColumn;
 using dbms::DBStatus;
@@ -13935,6 +13936,8 @@ static std::string createTempTableFromRows(Session& s,
             col = makeIntColumn(cname, true, 3);
         } else if (type == "date") {
             col = makeDateColumn(cname, true);
+        } else if (type == "timetz" && !isArray) {
+            col = makeTimetzColumn(cname, true);
         } else if (type == "time" || type == "timetz") {
             col = makeTimeColumn(cname, true);
             if (type == "timetz") col.dataType = type;

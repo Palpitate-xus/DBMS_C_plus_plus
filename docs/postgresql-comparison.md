@@ -2,12 +2,19 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="timetz-storage-comparison-20261123"></a>
+## 2026-11-23 · 保存带 UTC 偏移的一天内时间
+
+PostgreSQL 18.6 分别保存本地微秒和 UTC 偏移，排序先比较换算后的时钟，再按向西偏移的秒数区分同一时刻的值。DuckDB 提供带偏移的 `TIMETZ`，其文档示例以 UTC 显示。SQLite 日期时间函数将输入中的偏移换算到 UTC，可以用文本、实数或整数列保存日期时间。 [PostgreSQL 比较实现](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/utils/adt/date.c#L2368) · [DuckDB 时间类型](https://duckdb.org/docs/1.4/sql/data_types/time) · [SQLite 日期时间存储](https://www.sqlite.org/datatype3.html#date_and_time_datatype)
+
+本项目的 `TIMETZ` 标量列用 12 字节记录本地时钟和偏移。普通表写入时按列精度舍入，同样的比较规则用于筛选、排序和索引键。会话时区推断、命名时区输入与数组存储还有差距。 [功能验证](test-report.md#timetz-storage-20261123) · [性能报告](performance-report-2026-10-30.md#timetz-storage-cost-20261123)
+
 <a id="timetz-precision-comparison-20261123"></a>
 ## 2026-11-23 · 带 UTC 偏移的时间精度
 
 PostgreSQL 18.6 保存本地时钟和 UTC 偏移，转换到 `TIMETZ(p)` 时只舍入本地时钟。二进制表示为本地微秒数和向西偏移的秒数。DuckDB 也有微秒精度的 `TIMETZ`，其文档示例的显示结果换算为 UTC。SQLite 的日期时间函数使用 UTC，将输入中的偏移用于换算。 [PostgreSQL 源码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/utils/adt/date.c#L2207) · [DuckDB 时间类型](https://duckdb.org/docs/1.4/sql/data_types/time) · [SQLite 日期时间函数](https://www.sqlite.org/lang_datefunc.html#time_values)
 
-本项目在转换明确写出数值偏移的时间时舍入小数，并支持协议中明确声明的 `TIMETZ` 标量参数。命名时区、未写出偏移时的会话时区推断，以及 `TIMETZ` 列的值存取仍有差距。 [使用说明](MANUAL.md#日期时间类型) · [功能验证](test-report.md#timetz-precision-20261123)
+本项目在转换明确写出数值偏移的时间时舍入小数，并支持协议中明确声明的 `TIMETZ` 标量参数。列写入在后续通过同一解析器实现。 [使用说明](MANUAL.md#日期时间类型) · [转换测试](test-report.md#timetz-precision-20261123)
 
 <a id="temp-prepare-subqueries-comparison-20261123"></a>
 ## 2026-11-23 · 准备语句时检查子查询引用的临时表

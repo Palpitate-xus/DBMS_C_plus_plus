@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-23 · 普通表支持写入和读取带偏移的时间
+
+新建标量列保存本地时钟和偏移。写入按列精度舍入，查询按 UTC 时钟和偏移筛选、排序。已核对索引维护、文本导入、二进制读回和四次强制退出与重启。`TYPE-06` 与 `PROTO-04` 保持部分实现，命名时区、会话偏移及数组仍需补齐。 [功能验证](test-report.md#timetz-storage-20261123) · [性能对照](performance-report-2026-10-30.md#timetz-storage-cost-20261123) · [实现对照](postgresql-comparison.md#timetz-storage-comparison-20261123)
+
 ## 2026-11-23 · 带 UTC 偏移的时间能按指定精度舍入
 
 `TIMETZ(p)` 转换带数值偏移的时间时，只舍入时钟部分。协议中明确声明为 `TIMETZ` 的标量参数支持文本和二进制。列存储、命名时区、隐式参数类型推断和部分声明仍待补齐。`TYPE-06` 与 `PROTO-04` 保持部分实现。 [功能验证](test-report.md#timetz-precision-20261123) · [性能对照](performance-report-2026-10-30.md#timetz-precision-cost-20261123) · [实现对照](postgresql-comparison.md#timetz-precision-comparison-20261123)
