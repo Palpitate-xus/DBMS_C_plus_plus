@@ -1,27 +1,27 @@
 # 更新日志
 
 <details>
-<summary>普通查询合并时也能保留空值 · 2026-11-23</summary>
+<summary>合并查询时可以保留空值 · 2026-11-23</summary>
 
-例如，把表里查出的编号和一行空值合在一起，结果仍是一列整数，空值也会保留下来。
+把查出的编号和一行空值合在一起，结果仍是一列整数，其中一行是空值。
 
 [用法](docs/MANUAL.md#union--intersect--except) · [测试报告](docs/test-report.md#ordinary-set-20261123) · [性能报告](docs/performance-report-2026-10-30.md#ordinary-set-cost-20261123)
 
 </details>
 
 <details>
-<summary>合并数组结果时可以直接写空值 · 2026-11-23</summary>
+<summary>展开一组数字时可以直接加上空值 · 2026-11-23</summary>
 
-例如，把一组编号和一个 `NULL` 合并成一列时，编号仍是整数，空值也会保留下来。
+例如，把 10、20、30 展开成三行，再补一行 `NULL`，结果会有四行。
 
 [用法](docs/MANUAL.md#把数组展开成行) · [测试报告](docs/test-report.md#set-input-types-20261123) · [性能报告](docs/performance-report-2026-10-30.md#set-input-types-cost-20261123)
 
 </details>
 
 <details>
-<summary>数组里的值可以和其他查询结果合并 · 2026-11-23</summary>
+<summary>手头的订单号可以与查询结果合并 · 2026-11-23</summary>
 
-例如，可以把手头的一组订单号和从表里查出的订单号放在同一份结果里，也可以去掉重复项。
+可以在一条 SQL 里写入一组订单号，与表里查到的订单号合并，并按需去掉重复项。
 
 [用法](docs/MANUAL.md#把数组展开成行) · [测试报告](docs/test-report.md#array-set-20261123) · [性能报告](docs/performance-report-2026-10-30.md#array-set-cost-20261123)
 
