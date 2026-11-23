@@ -481,6 +481,26 @@ def presorted_page_controls(query, check_plan=True):
         index = nodes['IntegerPrimaryKeyPage']
         assert index['usedPrimaryKeyPage']=='true' and index['indexRanges']=='2', nodes
         assert int(index['heapRowsFetched']) == 12,nodes
+    expect('CREATE TABLE scalar_order_scattered(k INTEGER PRIMARY KEY, payload TEXT)')
+    physical_order = [1 + i*223 % 576 for i in range(576)]
+    scattered_payload = {k: None if k % 7 == 0 else f'row-{k}' for k in physical_order}
+    scattered_payload[11] = 'left'*1250
+    scattered_payload[563] = 'right'*1000
+    for start in range(0, len(physical_order), 128):
+        entries = [(k, scattered_payload[k]) for k in physical_order[start:start+128]]
+        values = ','.join(f"({k},{'NULL' if value is None else repr(value)})" for k, value in entries)
+        expect('INSERT INTO scalar_order_scattered VALUES '+values)
+    for suffix, keys, heap_rows in (
+        ('ORDER BY k LIMIT 257 OFFSET 3', range(4, 261), 260),
+        ('WHERE k<=19 OR k>=560 ORDER BY k DESC LIMIT 25 OFFSET 6',
+         (*range(570, 559, -1), *range(19, 5, -1)), 31),
+    ):
+        sql = 'SELECT k,payload FROM scalar_order_scattered ' + suffix
+        expect(sql, [[str(k), scattered_payload[k]] for k in keys], [23,25])
+        if check_plan:
+            nodes = plan_nodes(expect('EXPLAIN (ANALYZE TRUE, TIMING FALSE, COSTS FALSE, FORMAT JSON) '+sql))
+            index = nodes['IntegerPrimaryKeyPage']
+            assert index['usedPrimaryKeyPage']=='true' and int(index['heapRowsFetched'])==heap_rows, nodes
     expect('RESET work_mem')
     print('[PRESORTED PRIMARY KEY PROTOCOL] passed',flush=True)
 

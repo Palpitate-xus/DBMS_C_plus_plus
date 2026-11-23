@@ -1378,6 +1378,8 @@ REPLACE INTO users (ID, NAME) VALUES (1, 'New Alice');
 
 `WHERE id BETWEEN 1000 AND 1100 OR id BETWEEN 5000 AND 5100` 可以一次查出两段编号。`id` 是单列整数主键而候选记录较少且集中时，数据库可以用索引读取各段。重叠区间会先合并，带 `ORDER BY id` 的分页可以读够指定行数就停。 [测试范围与回退条件](test-report.md#integer-primary-or-20261123)
 
+用单列整数主键排序并限制行数时，同一表页上的候选记录可以一起读取，再按主键顺序返回。这样可以减少插入顺序与编号顺序不同时的重复取页。 [分散读取测试](test-report.md#ordered-heap-pages-20261123)
+
 `SELECT FROM users WHERE active IS NOT NULL LIMIT 3` 可以返回最多三行，每行没有字段值。单独执行 `SELECT` 返回一条这样的行。使用 `DISTINCT` 时需要写出要比较的列或表达式。只从普通表读取零列结果且没有筛选或排序时，可跳过读取大字段。[测试](test-report.md#zero-width-read-20261123) · [性能](performance-report-2026-10-30.md#zero-width-read-cost-20261123)
 
 在 `WHERE id = 7` 中，`7` 是数字。在 `WHERE id = "7"` 中，`"7"` 是列名，查询比较同一行中的两列，即使表上有索引也是如此。[查询测试](test-report.md#narrow-select-20261121)

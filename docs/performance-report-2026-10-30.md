@@ -4,6 +4,57 @@
 
 > 复核发现，几组早期 COPY 计时在每个对照场景中使用了固定的执行顺序。耗时差可能包含顺序影响。这项问题涉及默认值求值、按列查找、默认值标记、短 CSV 导出和短查询导出的配对计时。[默认值求值](#copy-default-evaluation-order-cost-20261122) · [按列查找](#copy-identity-input-cost-20261122) · [默认值标记](#copy-default-marker-cost-20261122) · [CSV 导出](#copy-csv-out-cost-20261122) · [查询导出](#copy-query-stdout-cost-20261122)
 
+<a id="ordered-heap-pages-cost-20261123"></a>
+## 2026-11-23 · 分散存放的主键分页耗时
+
+基线为 `4920ffb6`。新旧版用 GCC 13.3 和 CMake C++17 `-O2` 构建，运行于 Intel Xeon E5-2678 v3。三张表都含 `id integer PRIMARY KEY, n integer`。`gather_clustered` 按主键顺序写入 8,192 行。`gather_scattered` 写 2,048 行，`gather_wide` 写 1,024 行，主键写入顺序为 `1+(i*509)%总行数`，`i` 从 0 开始递增。能被 9 整除的主键存 `n=id%64`，其余存 `NULL`。前两张表每次插入 128 行。第三张表每次插入 16 行，另有 `payload text`，内容为补齐至四位的编号、一个斜杠和 595 个相同小写字母，字母由 `id%26` 决定。
+
+```sql
+SELECT 1 AS v;
+SELECT id AS v FROM gather_clustered WHERE id=42;
+SELECT id AS v FROM gather_clustered ORDER BY id LIMIT 1;
+SELECT id AS v FROM gather_clustered ORDER BY id LIMIT 128;
+SELECT id AS v FROM gather_clustered ORDER BY id LIMIT 512;
+SELECT id AS v FROM gather_scattered ORDER BY id LIMIT 128;
+SELECT id AS v FROM gather_scattered ORDER BY id DESC LIMIT 512 OFFSET 19;
+SELECT id AS v FROM gather_scattered WHERE id<=64 OR id>=1985 ORDER BY id DESC LIMIT 110 OFFSET 7;
+SELECT id AS v FROM gather_scattered WHERE n IS NOT NULL ORDER BY id LIMIT 20 OFFSET 3;
+SELECT id AS v FROM gather_scattered WHERE id>=450 AND id<=514 UNION SELECT 0 ORDER BY v;
+SELECT id AS v FROM gather_wide ORDER BY id LIMIT 128;
+SELECT id AS v,payload FROM gather_wide ORDER BY id DESC LIMIT 128 OFFSET 8;
+```
+
+每个进程对各查询预热一次后计时八次，从客户端发出请求到收到 `ReadyForQuery`，每次核对完整结果、列名、类型和消息顺序。内存盘为 `/dev/shm`，使用 CPU 21/22。磁盘为 ext4 `/tmp`，使用 CPU 25/26。第二轮交换新旧顺序，并交换客户端和服务端使用的 CPU。每种介质新旧版各测 384 次。PostgreSQL 18.6 的同轮内存盘对照也测 384 次，关闭 JIT 和并行查询。
+
+各轮用时中位数范围以毫秒计。
+
+| 查询 | 内存盘旧版 | 内存盘新版 | 磁盘旧版 | 磁盘新版 | 同轮内存盘新版 | PostgreSQL 18.6 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `SELECT 1` | 0.42–0.43 | 0.42 | 0.58–0.60 | 0.49–0.58 | 0.45–0.47 | 0.16–0.17 |
+| 主键查一行 | 2.40–2.41 | 2.43–2.52 | 8.45–9.04 | 7.37–8.10 | 2.64–4.45 | 0.19–0.20 |
+| 顺序存放，分页取 1 行 | 3.48–3.49 | 3.45–3.50 | 7.52–8.82 | 7.57–7.59 | 3.38–3.94 | 0.25–0.26 |
+| 顺序存放，分页取 128 行 | 7.74–8.60 | 8.00–8.64 | 11.75–13.36 | 11.97–12.05 | 6.97–7.35 | 1.33–1.36 |
+| 顺序存放，分页取 512 行 | 15.76–16.40 | 15.47–18.34 | 25.30–25.37 | 22.84–23.21 | 15.09–18.81 | 4.24–4.42 |
+| 分散存放，正序取 128 行 | 7.28–9.05 | 5.13–7.57 | 15.43–16.82 | 12.20–12.45 | 5.29–8.03 | 1.34–1.38 |
+| 分散存放，倒序取 512 行 | 20.18–21.63 | 13.01–16.92 | 28.99–31.85 | 22.80–23.34 | 14.06–21.82 | 4.41–4.42 |
+| 分散存放，倒序跨两段取 110 行 | 8.66–9.02 | 7.28–9.16 | 17.78–18.19 | 10.79–16.61 | 7.47–12.50 | 2.72–2.76 |
+| 分散存放，筛掉空值再分页 | 6.40–6.45 | 6.30–7.15 | 13.89–17.27 | 14.42–14.69 | 6.40–10.66 | 0.55–0.57 |
+| 分散存放，完整读取范围再合并 | 9.13–9.21 | 8.95–9.29 | 17.92–19.52 | 17.29–17.72 | 8.89–13.50 | 0.98–1.04 |
+| 带文本列的表，分页取编号 | 7.09–7.28 | 5.86–5.91 | 15.62–16.50 | 12.86–13.16 | 5.29–5.98 | 1.32–1.37 |
+| 带文本列的表，分页取编号和文本 | 8.09–8.23 | 7.08–7.26 | 17.93–18.02 | 14.68–14.73 | 7.08–7.47 | 1.33–1.36 |
+
+内存盘补测以 CPU 17/18 交换客户端和服务端。新旧实例共用一个服务端 CPU，交替运行七条查询，每个版本每轮每条计时 20 次，共 560 次。分散表查询的中位数如下，单位为毫秒。
+
+| 查询 | 旧版 | 新版 |
+| --- | ---: | ---: |
+| 正序取 128 行 | 6.60–6.61 | 5.34–5.52 |
+| 倒序取 512 行 | 19.56–19.83 | 14.64–14.88 |
+| 倒序跨两段取 110 行 | 7.90–8.04 | 6.78–7.05 |
+| 取编号和文本 | 7.91–8.12 | 6.92–6.98 |
+| 筛掉空值再分页 | 5.30–5.76 | 5.51–5.81 |
+
+顺序存放的单条与 128 行分页补测变化均在 2% 内。取页次数另行测量，包含缓冲池命中。PostgreSQL 18.6 的分散表查询在刚写入后核对了 128 个堆记录，执行 `VACUUM ANALYZE` 后，同一条仅索引查询的 `Heap Fetches` 为 0。本项目继续逐条核对表记录。 [取页次数与正确性](test-report.md#ordered-heap-pages-20261123)
+
 <a id="integer-primary-or-cost-20261123"></a>
 ## 2026-11-23 · 按编号读取多个范围的查询耗时
 

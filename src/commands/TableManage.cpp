@@ -115,6 +115,7 @@
 #include <locale>
 #include <string_view>
 #include <limits>
+#include <numeric>
 #include <mutex>
 #include <thread>
 #include <atomic>
@@ -11248,17 +11249,77 @@ std::optional<OrderedPrimaryKeyReadPage> StorageEngine::tryReadOrderedIntegerPri
         return true;
     };
 
+    const auto candidatePage = [&](size_t index) {
+        return static_cast<uint64_t>(candidates[index].value) >> 32;
+    };
+    const auto readOrderedRows = [&](size_t keyBufferBytes) {
+        // Work on bounded batches. Keep the existing row and page-copy
+        // budgets and use a small stack permutation to restore index order.
+        std::array<uint16_t, 256> order;
+        for (size_t start = 0; start < candidates.size(); start += order.size()) {
+            checkForQueryInterrupt();
+            const size_t size = std::min(order.size(), candidates.size() - start);
+            bool groupPages = false;
+            if (size >= 8 && pageBytes <= remaining - keyBufferBytes) {
+                bool rises = false, falls = false;
+                size_t runs = 1;
+                for (size_t i = start + 1; i < start + size; ++i) {
+                    const auto previous = candidatePage(i - 1);
+                    const auto current = candidatePage(i);
+                    rises |= previous < current;
+                    falls |= previous > current;
+                    runs += previous != current;
+                }
+                // In physical page order (in either direction), the usual
+                // page-copy path already fetches each page at most once.
+                if (rises && falls) {
+                    std::iota(order.begin(), order.begin() + size, uint16_t{0});
+                    std::sort(order.begin(), order.begin() + size, [&](uint16_t a, uint16_t b) {
+                        return static_cast<uint64_t>(candidates[start + a].value) <
+                               static_cast<uint64_t>(candidates[start + b].value);
+                    });
+                    size_t pages = 1;
+                    for (size_t i = 1; i < size; ++i)
+                        pages += candidatePage(start + order[i - 1]) != candidatePage(start + order[i]);
+                    groupPages = pages < runs;
+                }
+            }
+            const size_t firstRow = result.rows.size();
+            const auto position = [&](size_t i) { return start + (groupPages ? order[i] : i); };
+            for (size_t i = 0; i < size; ++i) {
+                const size_t index = position(i);
+                const size_t next = i + 1 < size ? position(i + 1) : start + size;
+                const bool samePageFollows = next < candidates.size() &&
+                    candidatePage(index) == candidatePage(next);
+                if (!readCandidate(candidates[index], keyBufferBytes, samePageFollows)) return false;
+            }
+            if (groupPages) {
+                for (size_t i = 0; i < size; ++i) {
+                    while (order[i] != i) {
+                        const size_t destination = order[i];
+                        std::swap(result.rows[firstRow + i], result.rows[firstRow + destination]);
+                        std::swap(order[i], order[destination]);
+                    }
+                }
+            }
+        }
+        return true;
+    };
+
     const auto readRows = [&](size_t requested) {
         size_t first = 0;
         size_t nextBatchSize = requested;
         for (;;) {
             const size_t keyBufferBytes = candidates.capacity() * sizeof(BPTree::IntegerEntry);
             if (keyBufferBytes > remaining) return false;
+            // A filtered batch can discover its LIMIT before visiting every
+            // candidate. Complete ranges already follow physical order.
+            if (!filtered && !completeRange && candidates.size() <= count - result.rows.size())
+                return readOrderedRows(keyBufferBytes);
             for (size_t i = first; i < candidates.size() && result.rows.size() < count; ++i) {
                 const bool samePageFollows = i + 1 < candidates.size() &&
                     (filtered || count - result.rows.size() > 1) &&
-                    (static_cast<uint64_t>(candidates[i].value) >> 32) ==
-                        (static_cast<uint64_t>(candidates[i + 1].value) >> 32);
+                    candidatePage(i) == candidatePage(i + 1);
                 if (!readCandidate(candidates[i], keyBufferBytes, samePageFollows)) return false;
             }
             if (!filtered || result.rows.size() == count || candidates.size() < requested) return true;

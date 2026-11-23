@@ -2,6 +2,18 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-23 group ordered primary key candidates by heap page within a batch",
+      "gap_ids": ["IDX-03", "OPT-01"],
+      "status": "partial",
+      "evidence": ["src/commands/TableManage.cpp", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/ordinary_scalar_order_protocol_e2e_test.py", "tests/bptree_topology_corruption_test.cpp"],
+      "verification": [
+        "Candidate groups reuse a copied heap page while checking every row under the same snapshot.",
+        "Rows are restored to validated index order before LIMIT, OFFSET, and projection observe them.",
+        "Instrumented scattered reads fetch 10 pages for 128 rows where the baseline fetched 128."
+      ]
+    },
+    {
       "issue": "2026-11-23 combine integer ranges joined by OR for primary key queries and heap filters",
       "gap_ids": ["IDX-03", "OPT-01"],
       "status": "partial",

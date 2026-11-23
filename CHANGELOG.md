@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>按订单号翻页时，减少重复读取 · 2026-11-23</summary>
+
+订单存放顺序和编号顺序不一样时，数据库可以先一起读取存放在同一页的订单，再按订单号返回。
+
+[测试报告](docs/test-report.md#ordered-heap-pages-20261123) · [性能报告](docs/performance-report-2026-10-30.md#ordered-heap-pages-cost-20261123)
+
+</details>
+
+<details>
 <summary>同时查几段订单号更快 · 2026-11-23</summary>
 
 例如，同时查 1000 到 1100 号和 5000 到 5100 号时，数据库可以按订单号分别找到这两批记录。两段重叠时，同一笔订单只返回一次。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>跳过一段订单号，可以直接查两头 · 2026-11-23</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-23 · 跳过一段订单号，可以直接查两头
 
 例如，只查最早和最新的几笔订单时，数据库可以按订单号找到这两批记录，省去读取中间的订单。
 
 [测试报告](docs/test-report.md#disjoint-integer-primary-20261123) · [性能报告](docs/performance-report-2026-10-30.md#disjoint-integer-primary-cost-20261123)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-23 · 按数字排除一段范围时，筛选更快
 

@@ -2,6 +2,11 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="ordered-heap-pages-comparison-20261123"></a>
+## 2026-11-23 · 有序主键分页可以按表页合并读取
+
+PostgreSQL 的位图扫描会按表页访问候选，查询要求索引顺序时还要排序。仅索引扫描可在表页的可见性标记满足条件时省去读表。SQLite 的覆盖索引可直接按键顺序取所需列，DuckDB 的列式执行可以按块读取，并跳过无需查看的数据。本项目仍在同一事务快照下核对各条记录，可以先把本批候选按表页分组，读取后再还原主键顺序。仅索引读取、覆盖列以及可见性映射的维护仍有差距。 [PostgreSQL 位图扫描](https://www.postgresql.org/docs/18/indexes-bitmap-scans.html) · [PostgreSQL 仅索引扫描](https://www.postgresql.org/docs/18/indexes-index-only-scans.html) · [SQLite 覆盖索引](https://www.sqlite.org/queryplanner.html#covidx) · [DuckDB 索引与数据块](https://www.duckdb.org/docs/1.5/guides/performance/indexing) · [取页对照](performance-report-2026-10-30.md#ordered-heap-pages-cost-20261123)
+
 <a id="integer-primary-or-comparison-20261123"></a>
 ## 2026-11-23 · `OR` 连接的整数范围可以合并读取
 

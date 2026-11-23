@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-23 · 读取分散的主键记录时减少重复取页
+
+有序主键分页能够在一批中合并对同一表页的读取，再按索引顺序返回。分散表取 128 行时，取页接口调用从 128 次降到 10 次。检查可见性仍需读表，覆盖列和可见性映射仍需继续验证与实现。`IDX-03` 和 `OPT-01` 保持部分实现。 [正确性验证](test-report.md#ordered-heap-pages-20261123) · [性能](performance-report-2026-10-30.md#ordered-heap-pages-cost-20261123) · [实现对照](postgresql-comparison.md#ordered-heap-pages-comparison-20261123)
+
 ## 2026-11-23 · 同一个整数主键上可合并 `OR` 的范围
 
 单列整数主键可以合并同列 `OR` 条件的候选范围，支持重叠去重、顺序翻页和小范围读取。候选超出索引读取条件时，符合要求的整数过滤可在表扫描中检查。同一测试中，PostgreSQL 18.6 对两段和三段用了位图合并，对倒序取 8 行用了仅索引扫描。通用多索引位图、仅索引读取和统计代价模型仍有差距。`IDX-03` 与 `OPT-01` 保持部分实现。 [验证](test-report.md#integer-primary-or-20261123) · [性能](performance-report-2026-10-30.md#integer-primary-or-cost-20261123) · [实现对照](postgresql-comparison.md#integer-primary-or-comparison-20261123)
