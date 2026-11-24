@@ -2,6 +2,13 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="catalog-oid-lookup-comparison-20261124"></a>
+## 2026-11-24 · 按编号查找类型和排序规则
+
+PostgreSQL 18.6 为 `pg_type.oid` 和 `pg_collation.oid` 定义唯一 B 树索引，两者也用于系统目录缓存。SQLite 在关联子查询中可以使用可用索引缩小读取范围。DuckDB 对关联子查询执行去关联改写，可以把逐行子查询转换为连接等操作。 [PostgreSQL 类型目录源码](https://github.com/postgres/postgres/blob/REL_18_6/src/include/catalog/pg_type.h) · [PostgreSQL 排序规则目录源码](https://github.com/postgres/postgres/blob/REL_18_6/src/include/catalog/pg_collation.h) · [SQLite 查询计划](https://www.sqlite.org/eqp.html) · [DuckDB 关联子查询](https://duckdb.org/2023/05/26/correlated-subqueries-in-sql)
+
+本项目在这两张系统表组成的查询中，利用外层已有的对象编号，只把匹配的目录记录转换成行，再执行原有筛选条件。类型记录继续取自执行开始时持有的目录快照。类型目录仍需扫描快照中的编号，跨查询的持久索引和更普遍的子查询改写仍有差距。 [测试范围](test-report.md#catalog-oid-lookup-20261124) · [性能对照](performance-report-2026-10-30.md#catalog-oid-lookup-cost-20261124)
+
 <a id="collation-catalog-comparison-20261124"></a>
 ## 2026-11-24 · 查询列使用的排序规则
 

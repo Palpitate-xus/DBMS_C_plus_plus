@@ -55,6 +55,44 @@ DETAILS = [
     ("portable", "text", None, "f", "POSIX", "", ""),
     ("unicode_name", "text", None, "f", "ucs_basic", "", ""),
 ]
+DETAIL_FIELDS = [("attname", 19), ("format_type", 25), ("pg_get_expr", 25), ("attnotnull", 16),
+                 ("attcollation", 19), ("attidentity", 18), ("attgenerated", 18)]
+
+
+def correlated_catalog_rows(wire, local):
+    wire.command("CREATE TABLE coll_probe.oid_probe(id integer, collation_id oid, type_id oid, divisor integer)",
+                 "CREATE TABLE")
+    wire.command("INSERT INTO coll_probe.oid_probe VALUES "
+                 "(1,950,23,1),(2,951,25,1),(3,950,23,1),(4,4294967295,23,1),"
+                 "(5,950,4294967295,0),(6,NULL,23,0),(7,950,NULL,0)", "INSERT 0 7")
+    statement = """
+        SELECT p.id,
+          (SELECT t.typname FROM pg_catalog.pg_type t WHERE t.oid=p.type_id)::text AS typ,
+          (SELECT c.collname FROM pg_catalog.pg_collation c WHERE p.collation_id=c.oid)::text AS collation_name,
+          (SELECT t.typname FROM pg_catalog.pg_type t CROSS JOIN pg_catalog.pg_collation c
+           WHERE p.collation_id=c.oid AND p.type_id=t.oid)::text AS both_present
+        FROM coll_probe.oid_probe p ORDER BY p.id
+    """
+    rows = [("1", "int4", "C", "int4"), ("2", "text", "POSIX", "text"), ("3", "int4", "C", "int4"),
+            ("4", "int4", None, None), ("5", None, "C", None), ("6", "int4", None, None), ("7", None, "C", None)]
+    for extended in (False, True):
+        mode = Wire(wire.client, wire.sock, extended)
+        mode.query(statement, rows=rows, tag="SELECT 7",
+                   fields=[("id", 23), ("typ", 25), ("collation_name", 25), ("both_present", 25)])
+        mode.query("SELECT (SELECT c.collname FROM pg_catalog.pg_collation c "
+                   "WHERE c.oid=p.collation_id OR c.oid=100)::text AS name "
+                   "FROM coll_probe.oid_probe p WHERE p.id=4",
+                   rows=[("default",)], fields=[("name", 25)])
+
+    if local:
+        # Preserve this evaluator's short circuit order, including NULL AND x.
+        for key, predicate in (
+                (5, "1/p.divisor=1 AND t.oid=p.type_id"),
+                (6, "c.oid=p.collation_id AND t.oid=p.type_id AND 1/p.divisor=1"),
+                (7, "c.oid=p.collation_id AND t.oid=p.type_id AND 1/p.divisor=1")):
+            wire.query("SELECT (SELECT t.typname FROM pg_catalog.pg_type t, pg_catalog.pg_collation c "
+                       f"WHERE {predicate}) FROM coll_probe.oid_probe p WHERE p.id={key}",
+                       tag=None, state="22012")
 
 
 def main():
@@ -93,7 +131,10 @@ def main():
         columns(DECLARATIONS)
         identity = wire.send_statements("SELECT 'coll_probe.column_probe'::regclass::oid AS id")
         oid = int(client.data_row_values(identity)[0][0])
-        wire.query(DETAIL_QUERY.format(oid=oid), rows=DETAILS, tag="SELECT 5")
+        for extended in (False, True):
+            Wire(client, sock, extended).query(DETAIL_QUERY.format(oid=oid), rows=DETAILS,
+                                               fields=DETAIL_FIELDS, tag="SELECT 5")
+        correlated_catalog_rows(wire, review.server is not None)
         wire.query("SELECT a.attname FROM pg_catalog.pg_attribute a "
                    f"WHERE ('{oid}'=a.attrelid OR a.attrelid=3456) AND a.attnum>0 ORDER BY a.attrelid,a.attnum",
                    rows=[(column[0],) for column in FIELDS + DECLARATIONS], fields=[("attname", 19)], tag="SELECT 17")
@@ -107,10 +148,13 @@ def main():
         wire.command("ROLLBACK", "ROLLBACK")
         columns(DECLARATIONS)
 
-        wire.command("CREATE TABLE coll_probe.pg_collation(marker integer)", "CREATE TABLE")
-        wire.command("INSERT INTO coll_probe.pg_collation VALUES (17)", "INSERT 0 1")
+        wire.command("CREATE TABLE coll_probe.pg_collation(oid oid, marker integer)", "CREATE TABLE")
+        wire.command("INSERT INTO coll_probe.pg_collation VALUES (950,17)", "INSERT 0 1")
         wire.command("SET search_path=coll_probe,pg_catalog,public", "SET")
         wire.query("SELECT marker FROM pg_collation", rows=[("17",)], fields=[("marker", 23)])
+        wire.query("SELECT (SELECT c.marker FROM pg_collation c WHERE c.oid=p.collation_id)::integer AS marker "
+                   "FROM coll_probe.oid_probe p WHERE p.id IN (1,2) ORDER BY p.id",
+                   rows=[("17",), (None,)], fields=[("marker", 23)], tag="SELECT 2")
         wire.query("SELECT collname FROM pg_catalog.pg_collation WHERE oid=950",
                    rows=[("C",)], fields=[("collname", 19)])
 

@@ -4,6 +4,24 @@
 
 > 复核发现，几组早期 COPY 计时在每个对照场景中使用了固定的执行顺序。耗时差可能包含顺序影响。这项问题涉及默认值求值、按列查找、默认值标记、短 CSV 导出和短查询导出的配对计时。[默认值求值](#copy-default-evaluation-order-cost-20261122) · [按列查找](#copy-identity-input-cost-20261122) · [默认值标记](#copy-default-marker-cost-20261122) · [CSV 导出](#copy-csv-out-cost-20261122) · [查询导出](#copy-query-stdout-cost-20261122)
 
+<a id="catalog-oid-lookup-cost-20261124"></a>
+## 2026-11-24 · 查询表的列信息更快
+
+对照上一版 `d3dc8e53`、本次版本和 PostgreSQL 18.6。两个本项目程序用 GCC 13.3、CMake、C++17 和 `-O2` 构建，关闭 OpenSSL。测试机为 Intel Xeon E5-2678 v3，客户端和服务端使用 CPU 13、28。本项目的测试数据目录位于 `/dev/shm`，PostgreSQL 数据目录位于工作区文件系统，关闭自动清理、JIT 和并行查询。
+
+复测时分别启动三个实例，在每个空库运行协议用例中的 `CREATE SCHEMA coll_probe` 和 `DDL`。使用测试中的 `DETAIL_QUERY`、`COLUMN_QUERY` 和 `CATALOG`。把 `DETAIL_QUERY` 中的 `{oid}` 替换为该实例 `SELECT 'coll_probe.column_probe'::regclass::oid` 返回的真实编号。单查类型的对照使用 `SELECT t.oid, t.typname FROM pg_catalog.pg_type t WHERE t.oid IN (23,25) ORDER BY t.oid`。 [建表和查询夹具](../tests/pg_collation_catalog_protocol_e2e_test.py)
+
+为每个实例保持一个本地 TCP 连接。计时从发送查询到收到就绪消息，逐次核对所有行、列名、列类型和完成消息。每种查询轮流执行两个本项目版本和 PostgreSQL，第二轮反转执行顺序。每轮各先预热 4 次，再记录 20 次。下表给出两轮的中位数范围及 P95 范围，单位为毫秒。P95 取每轮第 19 小的样本。
+
+| 场景 | 上一版中位数 / P95 | 本次中位数 / P95 | PostgreSQL 18.6 中位数 / P95 |
+| --- | ---: | ---: | ---: |
+| 原版 `psql` 读取五列信息的 SQL | 306.29–307.57 / 317.09–317.81 | 15.09–15.20 / 15.80–16.53 | 0.70–0.71 / 0.73–3.75 |
+| 连接系统表查询五列的排序规则 | 41.61–42.82 / 43.09–43.58 | 41.85–42.94 / 43.29–43.65 | 0.59–0.62 / 0.66 |
+| 单独读取四条排序规则 | 3.21–3.26 / 3.39 | 3.13–3.21 / 3.28–3.40 | 0.24–0.25 / 0.27 |
+| 单独读取两个类型名称 | 13.18–13.34 / 13.79–14.16 | 13.23–13.27 / 13.50–14.40 | 0.24 / 0.29–0.35 |
+
+同一条五列信息查询中位数降低约 95%，仍约为本次 PostgreSQL 对照的 21–22 倍。三个对照查询的中位数变化均小于 3%，其中连接查询两轮都有小幅增加。原版 `psql` 的完整 `\d` 仍在随后查询外键时报告缺少 `pg_constraint`。 [测试报告](test-report.md#catalog-oid-lookup-20261124) · [实现对照](postgresql-comparison.md#catalog-oid-lookup-comparison-20261124)
+
 <a id="collation-catalog-cost-20261124"></a>
 ## 2026-11-24 · 查询列信息和排序规则的耗时
 

@@ -56,16 +56,18 @@ inline const QueryRowDescriptor& descriptor() {
     return value;
 }
 
-inline std::vector<std::vector<ExprValue>> rows() {
+inline std::vector<ExprValue> cells(const Collation& entry) {
     const auto text = [](const char* value) { return ExprValue("text", value ? value : "", !value); };
+    return {ExprValue("oid", std::to_string(entry.oid)), ExprValue("name", entry.name),
+        ExprValue("oid", "11"), ExprValue("oid", "10"), ExprValue("\"char\"", std::string(1, entry.provider)),
+        ExprValue("boolean", entry.deterministic ? "t" : "f"), ExprValue("integer", std::to_string(entry.encoding)),
+        text(entry.libcLocale), text(entry.libcLocale), text(entry.builtinLocale), text(nullptr), text(entry.version)};
+}
+
+inline std::vector<std::vector<ExprValue>> rows() {
     std::vector<std::vector<ExprValue>> result;
     result.reserve(collations.size());
-    for (const auto& entry : collations) {
-        result.push_back({ExprValue("oid", std::to_string(entry.oid)), ExprValue("name", entry.name),
-            ExprValue("oid", "11"), ExprValue("oid", "10"), ExprValue("\"char\"", std::string(1, entry.provider)),
-            ExprValue("boolean", entry.deterministic ? "t" : "f"), ExprValue("integer", std::to_string(entry.encoding)),
-            text(entry.libcLocale), text(entry.libcLocale), text(entry.builtinLocale), text(nullptr), text(entry.version)});
-    }
+    for (const auto& entry : collations) result.push_back(cells(entry));
     return result;
 }
 

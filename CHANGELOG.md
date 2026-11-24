@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>查询表的列信息更快 · 2026-11-24</summary>
+
+在本机测试中，查询一张有五列的表，显示列名、类型、默认值和排序规则，耗时中位数从约 307 毫秒降到约 15 毫秒。
+
+[测试报告](docs/test-report.md#catalog-oid-lookup-20261124) · [性能报告](docs/performance-report-2026-10-30.md#catalog-oid-lookup-cost-20261124)
+
+</details>
+
+<details>
 <summary>查看文本列怎么排序 · 2026-11-24</summary>
 
 如果建表时选了按字节顺序排序（`C`），查询列信息时就会显示这个设置。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>查看列的类型和建表时指定的长度 · 2026-11-24</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-24 · 查看列的类型和建表时指定的长度
 
 可以查到一列存的是整数、日期还是文本。例如，查询 `varchar(12)` 的列会显示长度 12。
 
 [查询示例](docs/MANUAL.md#查询列的类型) · [测试报告](docs/test-report.md#format-type-20261124) · [性能报告](docs/performance-report-2026-10-30.md#format-type-cost-20261124)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-24 · 可以用 psql 列出表
 

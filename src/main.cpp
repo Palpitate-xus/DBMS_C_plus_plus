@@ -21424,6 +21424,87 @@ class PreparedWithDmlRuntime {
         if(found==query_->sourceRanges.end())throw dbms::DbError("XX000","mutation source lost its actual prepared occurrence");
         return *found;
     }
+    static bool oidLookupCatalog(const dbms::PreparedQuery::SourceRange& range) {
+        return range.relationSchema == "pg_catalog" &&
+            (range.relationName == "pg_type" || range.relationName == dbms::collation_catalog::name) &&
+            !range.columns.empty() && range.columns.front().physicalAttributeNumber == 1 &&
+            range.columns.front().typeOid == 26;
+    }
+
+    vector<dbms::QueryColumnBinding> catalogLookupBindings(const dbms::PreparedQuery::SourceRange& range) const {
+        const auto* select = dynamic_cast<const dbms::SelectStmt*>(range.owner);
+        if (!select || !oidLookupCatalog(range) || !select->whereClause) return {};
+
+        // Only these owned catalog rows can be skipped before the WHERE filter.
+        const auto catalogProduct = [&](const auto& visit, const dbms::FromItem& item) -> bool {
+            if (item.type == dbms::FromItem::Type::Join)
+                return item.joinType == "CROSS" && !item.joinCondition && item.usingCols.empty() &&
+                    visit(visit, *item.left) && visit(visit, *item.right);
+            return item.type == dbms::FromItem::Type::Table && oidLookupCatalog(sourceRange(select, &item));
+        };
+        if (!catalogProduct(catalogProduct, *select->fromClause)) return {};
+
+        const auto boundOid = [](const dbms::Expr* input) -> const dbms::QueryColumnBinding* {
+            const auto* column = dynamic_cast<const dbms::ColumnRefExpr*>(input);
+            if (!column || column->preparedSubquery || column->generatedRead || column->generatedBaseDeclaration ||
+                !column->binding || column->binding->mergedUsing || column->binding->typeOid != 26) return nullptr;
+            return &*column->binding;
+        };
+        vector<dbms::QueryColumnBinding> inputs;
+        bool matched = false;
+        // Walk the leading equalities in evaluation order. Pushing a later
+        // equality past any other expression could hide its errors or effects.
+        const auto collect = [&](const auto& visit, const dbms::Expr* input) -> bool {
+            const auto* binary = dynamic_cast<const dbms::BinaryOpExpr*>(input);
+            if (!binary || binary->preparedSubquery || binary->comparison || binary->predicateCollation) return false;
+            if (binary->op == "and" || binary->op == "AND")
+                return visit(visit, binary->left.get()) && visit(visit, binary->right.get());
+            if (binary->op != "=") return false;
+            auto local = boundOid(binary->left.get());
+            auto outer = boundOid(binary->right.get());
+            if (!local || !outer) return false;
+            if (local->scopeDepth > 0) std::swap(local, outer);
+            if (local->scopeDepth != 0 || outer->scopeDepth == 0 || local->columnOrdinal != 0) return false;
+            const auto found = find_if(query_->sourceRanges.begin(), query_->sourceRanges.end(),
+                [&](const auto& source) { return source.ordinal == local->sourceOrdinal; });
+            if (found == query_->sourceRanges.end() || found->owner != select || !oidLookupCatalog(*found)) return false;
+            inputs.push_back(*outer);
+            matched = local->sourceOrdinal == range.ordinal;
+            return !matched;
+        };
+        collect(collect, select->whereClause.get());
+        return matched ? std::move(inputs) : vector<dbms::QueryColumnBinding>{};
+    }
+
+    static optional<dbms::Oid> catalogLookupOid(const vector<dbms::QueryColumnBinding>& bindings,
+                                                const dbms::RowContext& row) {
+        optional<dbms::Oid> selected;
+        for (const auto& binding : bindings) {
+            if (row.generatedBound(binding.sourceOrdinal, binding.columnOrdinal)) return {};
+            // Some plans are built without the actual outer row. Let the
+            // original predicate decide whether a missing input is demanded.
+            const dbms::ExprValue* cell;
+            try {
+                cell = &row.boundColumn(binding.sourceOrdinal, binding.columnOrdinal);
+            } catch (const dbms::DbError&) {
+                return {};
+            }
+            // NULL does not short-circuit AND. Preserve evaluation of the
+            // remaining predicate for that outer row.
+            if (cell->isNull || cell->typeName != "oid") return {};
+            if (cell->objectOid) {
+                selected = cell->objectOid;
+                continue;
+            }
+            dbms::Oid oid;
+            const auto* end = cell->value.data() + cell->value.size();
+            const auto parsed = std::from_chars(cell->value.data(), end, oid);
+            if (parsed.ec != std::errc{} || parsed.ptr != end) return {};
+            selected = oid;
+        }
+        return selected;
+    }
+
     shared_ptr<DmlSourceNode> sourceNode(const dbms::Stmt* owner,const dbms::FromItem* item,
                                         const dbms::RowContext& outer,const Frames& frames,
                                         dbms::QueryPlanner::PreparedExecutionProvider provider={}) {
@@ -21453,6 +21534,7 @@ class PreparedWithDmlRuntime {
             shared_ptr<dbms::PreparedQueryRows> virtualRows;
             shared_ptr<optional<dbms::PreparedQueryRows>> statisticsRows;
             shared_ptr<dbms::TypeCatalogScan> typeRows;
+            bool collationRows = false;
             dbms::TableSchema scanSchema;
             if(item->type==dbms::FromItem::Type::Subquery || item->type==dbms::FromItem::Type::Function) {
                 auto* select=dynamic_cast<dbms::SelectStmt*>(item->subquery.get());
@@ -21497,7 +21579,7 @@ class PreparedWithDmlRuntime {
             } else if (range.relationSchema == "pg_catalog" && range.relationName == dbms::access_method_catalog::name) {
                 virtualRows = make_shared<dbms::PreparedQueryRows>(dbms::access_method_catalog::rows());
             } else if (range.relationSchema == "pg_catalog" && range.relationName == dbms::collation_catalog::name) {
-                virtualRows = make_shared<dbms::PreparedQueryRows>(dbms::collation_catalog::rows());
+                collationRows = true;
             } else if(range.relationSchema=="pg_catalog" && range.relationName=="pg_stats") {
                 statisticsRows=make_shared<optional<dbms::PreparedQueryRows>>();
             } else if(range.relationSchema=="pg_catalog" && range.relationName=="pg_namespace") {
@@ -21537,16 +21619,32 @@ class PreparedWithDmlRuntime {
             node->reset=[currentOuter,resetExecution](const dbms::RowContext& row) {
                 *currentOuter=row;resetExecution();
             };
-            node->read=[this,executionOwner,currentOuter,frames,rangePointer=&range,cursor,scan,scanSchema,virtualRows,statisticsRows,typeRows,scanOpened,source=node.get(),ordinality=item->withOrdinality]
-                (size_t index,dbms::RowContext& row) {
+            auto lookupBindings = (typeRows || collationRows) ? catalogLookupBindings(range) : vector<dbms::QueryColumnBinding>{};
+            if (!lookupBindings.empty()) node->planAttributes["catalogOidLookup"] = "true";
+            node->read=[this,executionOwner,currentOuter,frames,rangePointer=&range,cursor,scan,scanSchema,virtualRows,statisticsRows,typeRows,
+                        collationRows,scanOpened,source=node.get(),ordinality=item->withOrdinality,
+                        lookupBindings=std::move(lookupBindings),lookupOid=optional<dbms::Oid>{}]
+                (size_t index,dbms::RowContext& row) mutable {
                 vector<dbms::ExprValue> cells;
                 bool found=false;
+                if (index == 0 && !lookupBindings.empty()) lookupOid = catalogLookupOid(lookupBindings, *currentOuter);
                 if(cursor)found=cursor->next(cells);
                 else if(statisticsRows) {
                     if(!*statisticsRows)*statisticsRows=g_engine.getAnalyzedStatisticsRows(session_.currentDB);
                     if(index<(**statisticsRows).size()){cells=(**statisticsRows)[index];found=true;}
                 }
-                else if(typeRows) found=typeRows->read(g_engine.catalogService(),session_.currentDB,index,cells);
+                else if(typeRows) found=typeRows->read(g_engine.catalogService(),session_.currentDB,index,cells,lookupOid);
+                else if(collationRows) {
+                    const auto& entries = dbms::collation_catalog::collations;
+                    auto entry = entries.end();
+                    if (!lookupOid && index < entries.size()) entry = entries.begin() + index;
+                    else if (lookupOid && index == 0) entry = find_if(entries.begin(), entries.end(),
+                        [&](const auto& candidate) { return candidate.oid == *lookupOid; });
+                    if (entry != entries.end()) {
+                        cells = dbms::collation_catalog::cells(*entry);
+                        found = true;
+                    }
+                }
                 else if(virtualRows) {
                     if(index<virtualRows->size()){cells=virtualRows->at(index);found=true;}
                 } else if(!scan)found=readCte(rangePointer->cteStatement,index,cells,frames);

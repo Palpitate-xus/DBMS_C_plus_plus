@@ -99,8 +99,17 @@ public:
     }
 
     bool read(const CatalogService& service, const std::string& database, size_t index,
-              std::vector<ExprValue>& cells) {
+              std::vector<ExprValue>& cells, std::optional<Oid> outerOid = std::nullopt) {
         capture(service, database);
+        if (outerOid) {
+            for (const auto& row : *rows_) {
+                if (row.oid != *outerOid) continue;
+                if (index-- != 0) continue;
+                cells = ownedTypeCatalogCells(row);
+                return true;
+            }
+            return false;
+        }
         if (index >= rows_->size()) return false;
         cells = ownedTypeCatalogCells((*rows_)[index]);
         return true;
