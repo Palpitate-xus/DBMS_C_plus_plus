@@ -2,12 +2,19 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="oid-range-comparison-20261124"></a>
+## 2026-11-24 · 用索引查一段对象编号
+
+PostgreSQL 18.6 的 B 树通过 `oid_ops` 支持等值和四种大小比较，按无符号 32 位编号排序。SQLite 为 `BETWEEN` 生成两个可用于索引的边界。DuckDB 根据每个数据块的最小值和最大值跳过不可能匹配的块。 [PostgreSQL 操作符类](https://github.com/postgres/postgres/blob/REL_18_6/src/include/catalog/pg_amop.dat#L159-L169) · [PostgreSQL 的编号比较](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/utils/adt/oid.c#L299-L332) · [SQLite 范围优化](https://sqlite.org/optoverview.html#the_between_optimization) · [DuckDB 数据块过滤](https://duckdb.org/docs/1.4/guides/performance/indexing#zonemaps)
+
+本项目合并同一普通表列上的范围边界，在完整的单列 B 树中找出候选位置。实际读取仍核对可见性和表中存储的值。候选位置分布在过多表页时保留表扫描。混合条件和宽范围仍有进一步优化空间。 [功能验证](test-report.md#oid-range-20261124) · [性能对照](performance-report-2026-10-30.md#oid-range-cost-20261124)
+
 <a id="oid-column-comparison-20261124"></a>
 ## 2026-11-24 · 在普通表保存对象编号
 
 PostgreSQL 的 `oid` 是 4 字节无符号对象编号。文本输入支持十进制、十六进制和八进制，也接受可用 32 位有符号整数表示的负值作为原始位模式。DuckDB 的 `UINTEGER` 同样用 4 字节保存完整的无符号范围。SQLite 用整数存储类，按值选择磁盘上的编码宽度。 [PostgreSQL 对象编号](https://www.postgresql.org/docs/18/datatype-oid.html) · [PostgreSQL 18.6 文本输入](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/utils/adt/numutils.c#L852) · [DuckDB 整数类型](https://duckdb.org/docs/lts/sql/data_types/numeric) · [SQLite 存储类型](https://www.sqlite.org/datatype3.html)
 
-本项目复用已有的对象编号读写逻辑，普通表可保存整个无符号范围，可按数值排序、创建主键或单列索引。范围查询仍需扫描表，`oid[]` 和其他对象引用类型的完整目录解析仍待实现。 [功能验证](test-report.md#oid-column-20261124) · [性能对照](performance-report-2026-10-30.md#oid-column-cost-20261124)
+本项目复用已有的对象编号读写逻辑，普通表可保存整个无符号范围，可按数值排序、创建主键或单列索引。`oid[]` 和其他对象引用类型的完整目录解析仍待实现。范围索引见上方的后续更新。 [功能验证](test-report.md#oid-column-20261124) · [性能对照](performance-report-2026-10-30.md#oid-column-cost-20261124)
 
 <a id="integer-cast-join-limit-comparison-20261123"></a>
 ## 2026-11-23 · 连接得到足够结果后停止读行

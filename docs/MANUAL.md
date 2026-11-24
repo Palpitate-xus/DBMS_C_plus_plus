@@ -832,9 +832,10 @@ CREATE TABLE migration_log (id integer PRIMARY KEY, source_table oid);
 INSERT INTO migration_log VALUES (1, 4294967295), (2, NULL), (3, 0);
 CREATE INDEX migration_log_source ON migration_log(source_table);
 SELECT id FROM migration_log WHERE source_table = '4294967295';
+SELECT id FROM migration_log WHERE source_table >= '4294967290' AND source_table <= '4294967295';
 ```
 
-查询返回编号为 1 的迁移记录。等值条件可以用索引。当前支持单个 `oid` 值，`oid[]` 列仍待实现。 [测试报告](test-report.md#oid-column-20261124) · [升级说明](PACKAGING.md#对象编号列的表定义)
+两条查询都返回编号为 1 的迁移记录。索引可以查指定编号，也可以在较小范围内查找。查询涉及较多记录或使用较早的事务快照时，会改为扫描表。当前支持单个 `oid` 值，`oid[]` 列仍待实现。 [范围查询测试](test-report.md#oid-range-20261124) · [升级说明](PACKAGING.md#对象编号列的表定义)
 
 ### 其他类型
 | 类型 | 说明 |

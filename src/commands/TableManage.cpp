@@ -1000,6 +1000,16 @@ static bool fixedObjectNumber(const Column& column) {
         (column.dataType == "oid" || stored_regtype_detail::scalarType(column.dataType));
 }
 
+static std::string orderedOidKey(Oid oid) {
+    // The same eight hex digits serve both equality and ordered searches.
+    std::string key(8, '0');
+    for (size_t digit = key.size(); digit-- > 0;) {
+        key[digit] = "0123456789abcdef"[oid & 15u];
+        oid >>= 4;
+    }
+    return key;
+}
+
 static std::string canonicalColumnKeyValue(const Column& column,
                                            const std::string& value) {
     if (value.empty()) return {};
@@ -1020,13 +1030,7 @@ static std::string canonicalColumnKeyValue(const Column& column,
         return orderedTemporalKey(keyValue);
     }
     if (fixedObjectNumber(column)) {
-        const Oid oid = stored_regtype_detail::rawOid(value);
-        // Fixed width preserves unsigned OID ordering in the existing byte-key
-        // B+tree/hash/SSI/unique-key owners. This is not a rendered type name.
-        std::string key(8, '0');
-        for (size_t digit=0; digit<8; ++digit)
-            key[7-digit] = "0123456789abcdef"[(oid >> (4*digit)) & 15u];
-        return key;
+        return orderedOidKey(stored_regtype_detail::rawOid(value));
     }
     if (!column.isArray && isIntegerStorageType(column.dataType)) {
         // Heap encoding parses the integer datum, so index writes and unique
@@ -34043,12 +34047,11 @@ bool StorageEngine::anyRowMatches(const std::string& dbname,
                       indexReadFailed).empty();
 }
 
-bool completeStoredZonedClockIndex(StorageEngine& engine, const std::string& database,
-                                   const TableSchema& schema, const Column& key) {
+static bool completeStoredRangeIndex(StorageEngine& engine, const std::string& database,
+                                     const TableSchema& schema, const Column& key) {
     if (schema.formatVersion != DATA_FILE_FORMAT_VERSION || !schema.physicalRelationId ||
         schema.isTemporary || schema.tablespace != "pg_default" ||
-        schema.partitionType != TableSchema::PartitionType::None ||
-        key.storageCodec != Column::StorageCodec::ZonedClock || key.dsize != TIMETZ_SIZE)
+        schema.partitionType != TableSchema::PartitionType::None)
         return false;
     const auto primaryColumn = primary_key_index::singleKeyColumn(schema);
     const bool primary = primaryColumn && schema.cols[*primaryColumn].dataName == key.dataName;
@@ -34076,6 +34079,12 @@ bool completeStoredZonedClockIndex(StorageEngine& engine, const std::string& dat
         })) return false;
     }
     return true;
+}
+
+bool completeStoredZonedClockIndex(StorageEngine& engine, const std::string& database,
+                                   const TableSchema& schema, const Column& key) {
+    return key.storageCodec == Column::StorageCodec::ZonedClock && key.dsize == TIMETZ_SIZE &&
+        completeStoredRangeIndex(engine, database, schema, key);
 }
 
 std::optional<std::string> constantStoredZonedClockInput(StorageEngine& engine,
@@ -34138,7 +34147,7 @@ void validateStoredZonedClockComparisonInput(const Column& column, const std::st
         throw DbError(state, "invalid input syntax for type time with time zone: \"" + value + "\"");
 }
 
-static bool isZonedClockRangeOp(std::string_view op) {
+static bool isOrderedRangeOp(std::string_view op) {
     return op == "<" || op == "<=" || op == ">" || op == ">=";
 }
 
@@ -34147,9 +34156,15 @@ static bool ordinaryZonedClockColumn(const Column& column) {
         !column.isArray && !column.generatedKind && column.domainName.empty();
 }
 
-static const Column* storedZonedClockColumn(const TableSchema& schema, const std::string& name) {
+static bool ordinaryOidColumn(const Column& column) {
+    return column.dataType == "oid" && column.dsize == sizeof(Oid) &&
+        !column.isArray && !column.isVariableLength && !column.generatedKind && column.domainName.empty();
+}
+
+static const Column* storedBtreeRangeColumn(const TableSchema& schema, const std::string& name) {
     for (size_t i = 0; i < schema.len(); ++i)
-        if (schema.cols[i].dataName == name && ordinaryZonedClockColumn(schema.cols[i])) return &schema.cols[i];
+        if (schema.cols[i].dataName == name &&
+            (ordinaryZonedClockColumn(schema.cols[i]) || ordinaryOidColumn(schema.cols[i]))) return &schema.cols[i];
     return nullptr;
 }
 
@@ -34159,122 +34174,203 @@ static std::optional<int64_t> storedZonedClockOrder(std::string_view input) {
     return temporal_storage_detail::zonedClockOrderKey(*clock);
 }
 
-bool StoredZonedClockRange::matches(const std::string& value) const {
+bool StoredBtreeRange::matches(const std::string& value) const {
+    if (key == Key::ObjectNumber) {
+        const auto oid = stored_regtype_detail::rawOid(value);
+        return lower <= oid && oid <= upper;
+    }
     const auto key = storedZonedClockOrder(value);
     return key && lower <= *key && *key <= upper;
 }
 
-static bool addZonedClockBound(StoredZonedClockRange& range, const Column& column,
+static bool addStoredBtreeBound(StoredBtreeRange& range, const Column& column,
                                std::string_view op, int64_t key) {
     if (!range.column.empty() && range.column != column.dataName) return false;
-    range.column = column.dataName;
-    // Zoned-clock keys are strictly within the int64 endpoints. Tightening an
-    // exclusive bound by one preserves both fractional time and offset ties.
+    if (range.column.empty()) {
+        range.column = column.dataName;
+        if (ordinaryOidColumn(column)) {
+            range.key = StoredBtreeRange::Key::ObjectNumber;
+            range.lower = 0;
+            range.upper = std::numeric_limits<Oid>::max();
+        }
+    }
+    // Both supported key types lie strictly within the int64 endpoints.
+    // An exclusive comparison against an OID endpoint produces an empty range.
     if (op.front() == '<') range.upper = std::min(range.upper, key - (op == "<"));
     else range.lower = std::max(range.lower, key + (op == ">"));
     return true;
 }
 
-static bool collectZonedClockBounds(StorageEngine& engine, const std::string& database,
+static bool oidRangeLiteral(StorageEngine& engine, const std::string& database, const Expr* input) {
+    if (!input || input->preparedSubquery) return false;
+    const auto builtin = [&](const std::string& spelling) {
+        if (spelling.empty() || spelling == "unknown") return true;
+        const auto catalog = engine.catalogService().metadataSnapshot(database);
+        const auto type = resolveDeclaredTypeName(spelling, &catalog, currentSession());
+        return type.typeOid == 20 || type.typeOid == 21 || type.typeOid == 23 || type.typeOid == 26;
+    };
+    if (const auto* literal = dynamic_cast<const LiteralExpr*>(input))
+        return builtin(literal->typeName);
+    if (const auto* unary = dynamic_cast<const UnaryOpExpr*>(input))
+        return (unary->op == "+" || unary->op == "-") && oidRangeLiteral(engine, database, unary->operand.get());
+    if (const auto* cast = dynamic_cast<const CastExpr*>(input))
+        return cast->typeMods.empty() && builtin(cast->typeName) && oidRangeLiteral(engine, database, cast->operand.get());
+    if (const auto* cast = dynamic_cast<const BinaryOpExpr*>(input); cast && cast->op == "::") {
+        const auto* target = dynamic_cast<const LiteralExpr*>(cast->right.get());
+        return target && !target->preparedSubquery && builtin(target->value) &&
+            oidRangeLiteral(engine, database, cast->left.get());
+    }
+    return false;
+}
+
+static std::optional<int64_t> constantStoredOidOrder(StorageEngine& engine,
+        const std::string& database, const Expr* input) {
+    try {
+        if (!oidRangeLiteral(engine, database, input)) return {};
+        ExprEvaluator evaluator;
+        evaluator.setCurrentDB(database);
+        auto value = evaluator.eval(input, RowContext{});
+        if (value.isNull) return {};
+        if (const auto* literal = dynamic_cast<const LiteralExpr*>(input); literal &&
+            literal->typeName.empty() && literal->value.size() >= 2 &&
+            literal->value.front() == '\'' && literal->value.back() == '\'')
+            value.typeName = "unknown";
+        const auto comparison = ExprEvaluator::resolveComparison(">=", "oid", value.typeName);
+        if (!comparison.strict || comparison.leftType != "oid" || comparison.rightType != "oid") return {};
+        return stored_regtype_detail::rawOid(evaluator.coerceComparison(comparison, value, false).value);
+    } catch (const DbError&) {
+        // The ordinary predicate reports its own error when required.
+        return {};
+    }
+}
+
+static bool collectStoredBtreeBounds(StorageEngine& engine, const std::string& database,
         const TableSchema& schema, const Expr* predicate, std::optional<size_t> sourceOrdinal,
-        StoredZonedClockRange& range) {
+        StoredBtreeRange& range) {
     if (!predicate || predicate->preparedSubquery) return false;
     const auto columnOf = [&](const Expr* expression) -> const Column* {
         const auto* ref = dynamic_cast<const ColumnRefExpr*>(expression);
         if (!ref || ref->generatedRead || ref->generatedBaseDeclaration) return nullptr;
         if (!sourceOrdinal)
-            return ref->table.empty() && ref->schema.empty() ? storedZonedClockColumn(schema, ref->column) : nullptr;
+            return ref->table.empty() && ref->schema.empty() ? storedBtreeRangeColumn(schema, ref->column) : nullptr;
         const auto& binding = ref->binding;
         if (!binding || binding->scopeDepth || binding->mergedUsing || binding->sourceOrdinal != *sourceOrdinal ||
-            binding->columnOrdinal >= schema.len() || !binding->typeMetadata ||
-            binding->typeMetadata->actualOid != 1266 || binding->typeMetadata->codecOid != 1266) return nullptr;
+            binding->columnOrdinal >= schema.len() || !binding->typeMetadata) return nullptr;
         const auto& column = schema.cols[binding->columnOrdinal];
-        return ordinaryZonedClockColumn(column) ? &column : nullptr;
+        const Oid oid = ordinaryZonedClockColumn(column) ? 1266 : ordinaryOidColumn(column) ? 26 : 0;
+        return oid && oid == binding->typeMetadata->actualOid && oid == binding->typeMetadata->codecOid
+            ? &column : nullptr;
     };
-    const auto keyOf = [&](const Expr* input) -> std::optional<int64_t> {
+    const auto keyOf = [&](const Column& column, const Expr* input) -> std::optional<int64_t> {
+        if (ordinaryOidColumn(column)) return constantStoredOidOrder(engine, database, input);
         const auto value = constantStoredZonedClockInput(engine, database, input);
         return value ? storedZonedClockOrder(*value) : std::nullopt;
     };
     if (const auto* binary = dynamic_cast<const BinaryOpExpr*>(predicate)) {
         const auto& op = binary->op;
         if (op == "AND" || op == "and")
-            return collectZonedClockBounds(engine, database, schema, binary->left.get(), sourceOrdinal, range) &&
-                   collectZonedClockBounds(engine, database, schema, binary->right.get(), sourceOrdinal, range);
-        if (!isZonedClockRangeOp(op) || binary->rowComparison || binary->predicateCollation ||
-            (binary->comparison && (!binary->comparison->strict || binary->comparison->enumTypeOid ||
-             binary->comparison->identity != "builtin-comparison:" + op + "(timetz,timetz)"))) return false;
-        if (const auto* column = columnOf(binary->left.get())) {
-            const auto key = keyOf(binary->right.get());
-            return key && addZonedClockBound(range, *column, op, *key);
-        }
-        const auto* column = columnOf(binary->right.get());
+            return collectStoredBtreeBounds(engine, database, schema, binary->left.get(), sourceOrdinal, range) &&
+                   collectStoredBtreeBounds(engine, database, schema, binary->right.get(), sourceOrdinal, range);
+        if (!isOrderedRangeOp(op) || binary->rowComparison || binary->predicateCollation) return false;
+        const auto* left = columnOf(binary->left.get());
+        const auto* column = left ? left : columnOf(binary->right.get());
         if (!column) return false;
-        const auto key = keyOf(binary->left.get());
-        const std::string reversed = std::string(op.front() == '<' ? ">" : "<") + op.substr(1);
-        return key && addZonedClockBound(range, *column, reversed, *key);
+        const auto operands = ordinaryOidColumn(*column) ? "(oid,oid)" : "(timetz,timetz)";
+        if (binary->comparison && (!binary->comparison->strict || binary->comparison->enumTypeOid ||
+            binary->comparison->identity != "builtin-comparison:" + op + operands)) return false;
+        const auto key = keyOf(*column, left ? binary->right.get() : binary->left.get());
+        const auto operation = left ? op : std::string(op.front() == '<' ? ">" : "<") + op.substr(1);
+        return key && addStoredBtreeBound(range, *column, operation, *key);
     }
     const auto* call = dynamic_cast<const FunctionCallExpr*>(predicate);
     const auto between = call ? betweenSyntax(*call) : std::nullopt;
     if (!between || between->negated || call->args.size() != 3) return false;
     const auto* column = columnOf(call->args[0].get());
     if (!column) return false;
-    auto lower = keyOf(call->args[1].get());
-    auto upper = keyOf(call->args[2].get());
+    auto lower = keyOf(*column, call->args[1].get());
+    auto upper = keyOf(*column, call->args[2].get());
     if (!lower || !upper) return false;
     if (between->symmetric && *upper < *lower) std::swap(lower, upper);
-    return addZonedClockBound(range, *column, ">=", *lower) &&
-           addZonedClockBound(range, *column, "<=", *upper);
+    return addStoredBtreeBound(range, *column, ">=", *lower) &&
+           addStoredBtreeBound(range, *column, "<=", *upper);
 }
 
-std::optional<StoredZonedClockRange> storedZonedClockRange(StorageEngine& engine,
+static bool hasSelectiveStoredBtreeBound(const StoredBtreeRange& range) {
+    // A full-domain OID predicate only excludes NULLs. Keep it on the heap
+    // path instead of probing the B-tree before making that same decision.
+    return range.key != StoredBtreeRange::Key::ObjectNumber ||
+        range.lower > 0 || range.upper < std::numeric_limits<Oid>::max();
+}
+
+std::optional<StoredBtreeRange> storedBtreeRange(StorageEngine& engine,
     const std::string& database, const TableSchema& schema, const Expr* predicate,
     size_t sourceOrdinal) {
-    StoredZonedClockRange range;
-    if (collectZonedClockBounds(engine, database, schema, predicate, sourceOrdinal, range)) return range;
+    StoredBtreeRange range;
+    if (collectStoredBtreeBounds(engine, database, schema, predicate, sourceOrdinal, range) &&
+        hasSelectiveStoredBtreeBound(range)) return range;
     return {};
 }
 
-std::optional<StoredZonedClockRange> storedZonedClockRange(StorageEngine& engine,
+std::optional<StoredBtreeRange> storedBtreeRange(StorageEngine& engine,
     const std::string& database, const TableSchema& schema,
     const std::vector<StorageEngine::Condition>& conditions) {
-    // Avoid parsing unrelated typed predicates when this relation has no
-    // physical scalar clock column.
-    if (conditions.empty() || std::none_of(schema.cols.begin(), schema.cols.end(), ordinaryZonedClockColumn)) return {};
-    StoredZonedClockRange range;
+    if (conditions.empty() || std::none_of(schema.cols.begin(), schema.cols.end(), [](const Column& column) {
+            return ordinaryZonedClockColumn(column) || ordinaryOidColumn(column);
+        })) return {};
+    StoredBtreeRange range;
     for (const auto& condition : conditions) {
         if (condition.op == "typedexpr") {
             SQLParser parser;
             auto parsed = parser.parseForBinding("SELECT " + condition.value);
             const auto* select = parsed.success ? dynamic_cast<const SelectStmt*>(parsed.stmt.get()) : nullptr;
             if (!select || select->selectList.size() != 1 || select->fromClause ||
-                !collectZonedClockBounds(engine, database, schema, select->selectList.front().expr.get(),
+                !collectStoredBtreeBounds(engine, database, schema, select->selectList.front().expr.get(),
                                          std::nullopt, range)) return {};
             continue;
         }
-        if (!isZonedClockRangeOp(condition.op) || !condition.decodedLiteralRhs || condition.patternIsNull ||
+        if (!isOrderedRangeOp(condition.op) || !condition.decodedLiteralRhs || condition.patternIsNull ||
             (!condition.patternType.empty() && condition.patternType != "unknown")) return {};
-        const auto* column = storedZonedClockColumn(schema, condition.colName);
+        const auto* column = storedBtreeRangeColumn(schema, condition.colName);
         if (!column) return {};
-        const auto key = storedZonedClockOrder(condition.value);
-        if (!key || !addZonedClockBound(range, *column, condition.op, *key)) return {};
+        std::optional<int64_t> key;
+        if (ordinaryZonedClockColumn(*column)) {
+            key = storedZonedClockOrder(condition.value);
+        } else if (condition.referenceInputOid) {
+            key = *condition.referenceInputOid;
+        } else {
+            std::string_view input = condition.value;
+            if (condition.patternType.empty()) {
+                if (!input.empty() && (input.front() == '+' || input.front() == '-')) input.remove_prefix(1);
+                if (input.empty() || (input.size() > 1 && input.front() == '0') ||
+                    input.find_first_not_of("0123456789") != std::string_view::npos) return {};
+            }
+            try { key = parseOidInput(condition.value); }
+            catch (const DbError&) { return {}; }
+        }
+        if (!key || !addStoredBtreeBound(range, *column, condition.op, *key)) return {};
     }
-    return range;
+    return hasSelectiveStoredBtreeBound(range) ? std::optional<StoredBtreeRange>(std::move(range)) : std::nullopt;
 }
 
-static std::pair<std::string,std::string> storedZonedClockDiskBounds(const StoredZonedClockRange& range) {
-    auto upper = orderedTemporalKey(range.upper);
+static std::pair<std::string,std::string> storedBtreeDiskBounds(const StoredBtreeRange& range) {
+    const auto encode = [&](int64_t key) {
+        return range.key == StoredBtreeRange::Key::ObjectNumber
+            ? orderedOidKey(static_cast<Oid>(key)) : orderedTemporalKey(key);
+    };
+    auto upper = encode(range.upper);
     // The single-column primary layout may append a delimiter. The range
     // bounds cover the complete physical key for either layout.
     upper.append(BP_KEY_LEN - upper.size(), '\xFF');
-    return {orderedTemporalKey(range.lower), std::move(upper)};
+    return {encode(range.lower), std::move(upper)};
 }
 
-std::optional<std::vector<int64_t>> readStoredZonedClockRange(StorageEngine& engine,
-    const std::string& database, const TableSchema& schema, const StoredZonedClockRange& range) {
-    const auto* column = storedZonedClockColumn(schema, range.column);
+std::optional<std::vector<int64_t>> readStoredBtreeRange(StorageEngine& engine,
+    const std::string& database, const TableSchema& schema, const StoredBtreeRange& range) {
+    const auto* column = storedBtreeRangeColumn(schema, range.column);
     if (!column || engine.getIsolationLevel() == IsolationLevel::SERIALIZABLE ||
         engine.rlsAppliesTo(database, schema.tablename) ||
-        !completeStoredZonedClockIndex(engine, database, schema, *column)) return {};
+        (range.key == StoredBtreeRange::Key::ObjectNumber) != ordinaryOidColumn(*column) ||
+        !completeStoredRangeIndex(engine, database, schema, *column)) return {};
     const auto fence = engine.indexReadSnapshotFence(database);
     if (!fence) return {};
     if (range.lower > range.upper) return std::vector<int64_t>{};
@@ -34289,22 +34385,39 @@ std::optional<std::vector<int64_t>> readStoredZonedClockRange(StorageEngine& eng
         ? static_cast<double>(rows) : 32.0 * pages, pages);
     constexpr size_t maxRows = 512;
     constexpr size_t maxNodes = 64;
-    const auto [lower, upper] = storedZonedClockDiskBounds(range);
+    const auto [lower, upper] = storedBtreeDiskBounds(range);
     std::vector<int64_t> candidates;
     checkForQueryInterrupt();
     const auto result = index->readOrderedKeyRange(lower, upper, maxRows, maxNodes, candidates);
     if (result == BPTree::LeafEntriesResult::Error)
         throw DbError("XX001", "could not read B-tree index for relation \"" + schema.tablename + "\"");
-    if (result != BPTree::LeafEntriesResult::Complete || engine.indexReadSnapshotFence(database) != fence ||
-        (candidates.size() > 1 && QueryPlanner::costScan("index_scan", candidates.size(), 0) >= heapCost)) return {};
+    if (result != BPTree::LeafEntriesResult::Complete || engine.indexReadSnapshotFence(database) != fence) return {};
+    if (candidates.size() > 1) {
+        double indexCost = QueryPlanner::costScan("index_scan", candidates.size(), 0);
+        if (range.key == StoredBtreeRange::Key::ObjectNumber) {
+            // Nearby OID keys can refer to out-of-order rows on the same
+            // heap page. The row reader sorts RIDs before fetching them.
+            std::unordered_set<uint32_t> heapPages;
+            for (int64_t rid : candidates) {
+                uint32_t page;
+                uint16_t slot;
+                StorageEngine::decodeRid(rid, page, slot);
+                heapPages.insert(page);
+            }
+            indexCost = QueryPlanner::costScan("index_scan", heapPages.size(), 0) +
+                QueryPlanner::costScan("seq_scan", candidates.size(), 0);
+        }
+        if (indexCost >= heapCost) return {};
+    }
     return candidates;
 }
 
 std::optional<StoredZonedClockPage> readStoredZonedClockPage(StorageEngine& engine,
-    const std::string& database, const TableSchema& schema, const StoredZonedClockRange& range,
+    const std::string& database, const TableSchema& schema, const StoredBtreeRange& range,
     const StoredZonedClockOrder& order, size_t byteBudget) {
-    const auto* column = storedZonedClockColumn(schema, range.column);
+    const auto* column = storedBtreeRangeColumn(schema, range.column);
     if (!column || engine.getIsolationLevel() == IsolationLevel::SERIALIZABLE ||
+        range.key != StoredBtreeRange::Key::ZonedClock || !ordinaryZonedClockColumn(*column) ||
         engine.rlsAppliesTo(database, schema.tablename) ||
         !completeStoredZonedClockIndex(engine, database, schema, *column)) return {};
     const auto fence = engine.indexReadSnapshotFence(database);
@@ -34321,7 +34434,7 @@ std::optional<StoredZonedClockPage> readStoredZonedClockPage(StorageEngine& engi
     const size_t candidateLimit = std::min(StoredZonedClockOrder::maxRows,
         byteBudget / (sizeof(BPTree::LeafEntry) + sizeof(StoredZonedClockPage::Row)));
     if (!order.count || order.count > candidateLimit) return {};
-    const auto [lower, upper] = storedZonedClockDiskBounds(range);
+    const auto [lower, upper] = storedBtreeDiskBounds(range);
     std::vector<BPTree::LeafEntry> entries;
     constexpr size_t maxNodes = 64;
     checkForQueryInterrupt();
@@ -34398,7 +34511,7 @@ static void prepareFilterConditions(
             if(tbl.cols[i].dataName==condition.colName)declared=&tbl.cols[i];
             if(!condition.decodedLiteralRhs && tbl.cols[i].dataName==condition.value)rightIsColumn=true;
         }
-        if (declared && (condition.op == "=" || isZonedClockRangeOp(condition.op)) && condition.decodedLiteralRhs &&
+        if (declared && (condition.op == "=" || isOrderedRangeOp(condition.op)) && condition.decodedLiteralRhs &&
             condition.patternType == "unknown" && !condition.patternIsNull)
             validateStoredZonedClockComparisonInput(*declared, condition.value);
         if (declared && !rightIsColumn && !declared->isArray && declared->dataType == "oid" && !condition.patternIsNull) {
@@ -34595,13 +34708,13 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
     if (indexesAreSnapshotComplete) {
     const Condition* indexPredicate = nullptr;
     bool recheckIndexPredicate = false;
-    std::optional<uint64_t> zonedClockFence;
+    std::optional<uint64_t> checkedIndexFence;
     const auto indexedCandidates = [&]() -> std::optional<std::set<int64_t>> {
-    if (const auto range = storedZonedClockRange(*this, dbname, tbl, conds)) {
+    if (const auto range = storedBtreeRange(*this, dbname, tbl, conds)) {
         const auto fence = indexReadSnapshotFence(dbname);
         if (fence) {
-            if (auto candidates = readStoredZonedClockRange(*this, dbname, tbl, *range)) {
-                zonedClockFence = fence;
+            if (auto candidates = readStoredBtreeRange(*this, dbname, tbl, *range)) {
+                checkedIndexFence = fence;
                 recheckIndexPredicate = true;
                 return std::set<int64_t>(candidates->begin(), candidates->end());
             }
@@ -34642,8 +34755,8 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
                 if (!c.decodedLiteralRhs || readContext.txnIsolationLevel == IsolationLevel::SERIALIZABLE ||
                     rlsAppliesTo(tbl) || !completeStoredZonedClockIndex(*this, dbname, tbl, *searchColumn) ||
                     !temporal_storage_detail::parseZonedClock(c.value)) continue;
-                zonedClockFence = indexReadSnapshotFence(dbname);
-                if (!zonedClockFence) continue;
+                checkedIndexFence = indexReadSnapshotFence(dbname);
+                if (!checkedIndexFence) continue;
             }
             const std::string searchValue = searchColumn
                 ? canonicalColumnKeyValue(*searchColumn, c.value)
@@ -34803,7 +34916,7 @@ std::set<int64_t> StorageEngine::filterRows(const std::string& dbname,
             }
         }
         const auto& current = transactionContext();
-        const bool candidatesComplete = (!zonedClockFence || indexReadSnapshotFence(dbname) == zonedClockFence) &&
+        const bool candidatesComplete = (!checkedIndexFence || indexReadSnapshotFence(dbname) == checkedIndexFence) &&
             (!currentReadOwner ||
             (current.inTransaction && current.currentTxnId == indexOwnerXid &&
             current.txnDB == dbname && !current.hasWrite &&

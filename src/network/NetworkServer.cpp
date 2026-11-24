@@ -4,6 +4,7 @@
 #include "catalog/type_catalog.h"
 #include "catalog/SystemCatalogRows.h"
 #include "expression/StoredRegtypeValue.h"
+#include "common/OidInput.h"
 #include "NetworkServer.h"
 #include "SimpleQueryResultScope.h"
 #include "CopyQuery.h"
@@ -752,16 +753,6 @@ bool isNumericParameterType(uint32_t typeOid) {
     return typeOid == 700 || typeOid == 701 || typeOid == 1700;
 }
 
-bool isStrictInteger(const std::string& value) {
-    if (value.empty()) return false;
-    size_t offset = (value.front() == '-' || value.front() == '+') ? 1 : 0;
-    if (offset == value.size()) return false;
-    for (; offset < value.size(); ++offset) {
-        if (!std::isdigit(static_cast<unsigned char>(value[offset]))) return false;
-    }
-    return true;
-}
-
 bool isStrictNumeric(const std::string& value) {
     if (value.empty()) return false;
     char* end = nullptr;
@@ -1311,22 +1302,24 @@ std::string protocolParameterLiteral(uint32_t typeOid,
         error = "invalid input syntax for type boolean";
         return {};
     }
-    if (isIntegerParameterType(typeOid)) {
-        if(typeOid!=26) {
-            const unsigned width=typeOid==21?16:typeOid==23?32:64;
-            const auto parsed=parsePostgresIntegerText(value,width);
-            if(parsed.error!=IntegerTextError::None) {
-                error=parsed.error==IntegerTextError::OutOfRange
-                    ?"integer parameter out of range":"invalid input syntax for integer parameter";
-                return {};
-            }
-            return std::to_string(parsed.value);
-        }
-        if (!isStrictInteger(value)) {
-            error = "invalid input syntax for integer parameter";
+    if (typeOid == 26) {
+        try {
+            return std::to_string(parseOidInput(value));
+        } catch (const DbError& failure) {
+            inputSqlState = failure.sqlState();
+            error = failure.what();
             return {};
         }
-        return value;
+    }
+    if (isIntegerParameterType(typeOid)) {
+        const unsigned width = typeOid == 21 ? 16 : typeOid == 23 ? 32 : 64;
+        const auto parsed = parsePostgresIntegerText(value, width);
+        if (parsed.error != IntegerTextError::None) {
+            error = parsed.error == IntegerTextError::OutOfRange
+                ? "integer parameter out of range" : "invalid input syntax for integer parameter";
+            return {};
+        }
+        return std::to_string(parsed.value);
     }
     if (typeOid == 700 || typeOid == 701) {
         // These are typed input strings, not SQL arithmetic expressions.
@@ -3845,38 +3838,67 @@ void validatePreparedBitScalarParameters(const ProtocolQuerySyntax& querySyntax,
     (void)g_engine.prepareBoundQuery(session.currentDB, sql, parameters);
 }
 
-// The retained ordinary parameter path renders Bind values as SQL. A BIT
-// BETWEEN must first infer its shared parameter cells, not turn each rendered
-// occurrence into a separately typed UNKNOWN literal. This finite owner is a
-// single fromless grammar range; other statement shapes retain their owners.
-bool prepareProtocolBitBetween(const ProtocolQuerySyntax& querySyntax, Session& session,
+// Infer shared parameter declarations before the ordinary Bind path renders
+// their values as SQL. Physical OID predicates retain the table's actual type.
+bool prepareProtocolRangeParameters(const ProtocolQuerySyntax& querySyntax, Session& session,
                                std::vector<uint32_t>& parameterOids,
                                std::vector<PgColumnDescription>* columns = nullptr) {
     const auto& sql = querySyntax.sql();
     const auto& parsed = querySyntax.parse();
     const auto* select = parsed.success ? dynamic_cast<const SelectStmt*>(parsed.stmt.get()) : nullptr;
-    if (!select || select->fromClause || !select->ctes.empty() || select->setOpRhs ||
-        select->selectList.size() != 1) return false;
-    const auto* range = dynamic_cast<const FunctionCallExpr*>(select->selectList.front().expr.get());
-    if (!range || range->args.size() != 3) return false;
-    if (!betweenSyntax(*range)) return false;
-    bool bitRange = false, integerRange = false;
-    for (const auto& input : range->args) {
-        const auto type = ExprHelper::canonicalResultTypeName(ExprHelper::inferParsedInputType(input.get(), {}));
-        bitRange = bitRange || type == "bit" || type == "bit varying";
-        integerRange = integerRange || type == "smallint" || type == "integer" || type == "bigint";
+    if (!select || !select->ctes.empty() || select->setOp != SetOp::None || select->setOpRhs) return false;
+    if (select->fromClause) {
+        if (select->fromClause->type != FromItem::Type::Table || !select->whereClause ||
+            !select->groupBy.empty() || !select->groupByElems.empty() || select->having ||
+            !select->windowDefs.empty() || !select->locking.empty() || parameterOids.empty() ||
+            (!columns && std::find(parameterOids.begin(), parameterOids.end(), 0) == parameterOids.end()))
+            return false;
+        const auto physical = protocolPhysicalSourceFromQuery(sql, session);
+        const auto oidColumn = [&](const Expr* node) {
+            const auto* ref = dynamic_cast<const ColumnRefExpr*>(node);
+            return ref && std::any_of(physical.table.cols.begin(), physical.table.cols.end(), [&](const Column& column) {
+                return column.dataName == ref->column && column.dataType == "oid" &&
+                    !column.isArray && column.domainName.empty();
+            });
+        };
+        const auto parameter = [](const Expr* node) { return dynamic_cast<const ParameterExpr*>(node) != nullptr; };
+        const std::function<bool(const Expr*)> hasOidBound = [&](const Expr* node) {
+            if (!node || node->preparedSubquery) return false;
+            if (const auto* binary = dynamic_cast<const BinaryOpExpr*>(node)) {
+                if (binary->op == "AND")
+                    return hasOidBound(binary->left.get()) || hasOidBound(binary->right.get());
+                if (binary->op == "<" || binary->op == "<=" || binary->op == ">" || binary->op == ">=")
+                    return (oidColumn(binary->left.get()) && parameter(binary->right.get())) ||
+                           (parameter(binary->left.get()) && oidColumn(binary->right.get()));
+            }
+            const auto* call = dynamic_cast<const FunctionCallExpr*>(node);
+            return call && call->args.size() == 3 && betweenSyntax(*call) && oidColumn(call->args[0].get()) &&
+                (parameter(call->args[1].get()) || parameter(call->args[2].get()));
+        };
+        if (!hasOidBound(select->whereClause.get())) return false;
+    } else {
+        if (select->selectList.size() != 1) return false;
+        const auto* range = dynamic_cast<const FunctionCallExpr*>(select->selectList.front().expr.get());
+        if (!range || range->args.size() != 3 || !betweenSyntax(*range)) return false;
+        bool bitRange = false, integerRange = false;
+        for (const auto& input : range->args) {
+            const auto type = ExprHelper::canonicalResultTypeName(ExprHelper::inferParsedInputType(input.get(), {}));
+            bitRange = bitRange || type == "bit" || type == "bit varying";
+            integerRange = integerRange || type == "smallint" || type == "integer" || type == "bigint";
+        }
+        for (const auto oid : parameterOids) bitRange = bitRange || oid == 1560 || oid == 1562;
+        for (const auto oid : parameterOids) integerRange = integerRange || oid == 21 || oid == 23 || oid == 20;
+        if (!bitRange && !integerRange) return false;
     }
-    for (const auto oid : parameterOids) bitRange = bitRange || oid == 1560 || oid == 1562;
-    for (const auto oid : parameterOids) integerRange = integerRange || oid == 21 || oid == 23 || oid == 20;
-    if (!bitRange && !integerRange) return false;
     std::vector<QueryBindingDatum> parameters;
     for (size_t i = 0; i < parameterOids.size(); ++i) {
         QueryBindingDatum input;
-        input.identity = "bit-range-protocol-parameter-" + std::to_string(i + 1);
+        input.identity = "range-protocol-parameter-" + std::to_string(i + 1);
         input.origin = ParameterOrigin::MetadataPlaceholder;
         input.position = i + 1;
         if (parameterOids[i] == 1560) input.type = "bit";
         else if (parameterOids[i] == 1562) input.type = "bit varying";
+        else if (select->fromClause && parameterOids[i] == 26) input.type = "oid";
         else if (const auto* type = valuesParameterCastType(parameterOids[i])) input.type = type;
         else if (!parameterOids[i]) input.type = "unknown";
         else return false;
@@ -4583,7 +4605,7 @@ bool describePreparedResultShape(const ProtocolQuerySyntax& syntax, Session& ses
     if (describePreparedConflictPredicateResult(syntax, session, columns, parameterOids)) return true;
     if(describePreparedRecursiveCteResult(syntax,session,columns,parameterOids))return true;
     auto betweenParameterOids = parameterOids;
-    if (prepareProtocolBitBetween(syntax, session, betweenParameterOids, &columns)) return true;
+    if (prepareProtocolRangeParameters(syntax, session, betweenParameterOids, &columns)) return true;
     if(describePreparedExplainResult(syntax,session,columns,parameterOids))return true;
     if (parameterOids.empty() && describePreparedSetResult(syntax, session, columns))
         return true;
@@ -9166,7 +9188,7 @@ void handleClient(SecureSocket socket, std::string clientHost, CopyQueryFactory 
                         (void)describePreparedConflictPredicateResult(syntax, session, explainDescriptor, parameterTypes);
                         (void)describePreparedRecursiveCteResult(syntax,session,explainDescriptor,parameterTypes);
                         (void)describePreparedExplainResult(syntax,session,explainDescriptor,parameterTypes);
-                        (void)prepareProtocolBitBetween(syntax, session, parameterTypes);
+                        (void)prepareProtocolRangeParameters(syntax, session, parameterTypes);
                         if(parameterTypes.empty()) {
                             // Whole provider analysis precedes publishing a prepared
                             // statement. A failed call never leaves a named object
@@ -9238,7 +9260,7 @@ void handleClient(SecureSocket socket, std::string clientHost, CopyQueryFactory 
             auto betweenParameterTypes = preparedParameterTypes;
             bool bitBetween = false;
             try {
-                if (!sessionSetting) bitBetween = prepareProtocolBitBetween(preparedSyntax, session, betweenParameterTypes);
+                if (!sessionSetting) bitBetween = prepareProtocolRangeParameters(preparedSyntax, session, betweenParameterTypes);
             }
             catch (const DbError& error) {
                 sendExtendedProtocolError(error.sqlState(), error.message());

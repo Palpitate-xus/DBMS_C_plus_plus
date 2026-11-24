@@ -1250,7 +1250,7 @@ public:
                 const auto lowerType = typeAt(1);
                 const auto checkedType = [](const std::string& type) {
                     return type == "bit" || type == "bit varying" ||
-                        type == "smallint" || type == "integer" || type == "bigint";
+                        type == "smallint" || type == "integer" || type == "bigint" || type == "oid";
                 };
                 const auto bindComparison = [&](size_t i, std::string boundType) {
                     const auto comparison = ExprEvaluator::resolveComparison(

@@ -5474,7 +5474,7 @@ public:
 };
 
 struct ZonedClockPageSpec {
-    StoredZonedClockRange range;
+    StoredBtreeRange range;
     StoredZonedClockOrder order;
 };
 
@@ -5498,7 +5498,7 @@ static std::optional<ZonedClockPageSpec> zonedClockPageSpec(StorageEngine& engin
             reference->binding->scopeDepth || reference->binding->mergedUsing ||
             reference->binding->sourceOrdinal != key.sourceOrdinal ||
             reference->binding->columnOrdinal != key.columnOrdinal) {
-            auto range = storedZonedClockRange(engine, database, schema, select.whereClause.get(), key.sourceOrdinal);
+            auto range = storedBtreeRange(engine, database, schema, select.whereClause.get(), key.sourceOrdinal);
             if (!range || range->column != column.dataName) return {};
             page.range = std::move(*range);
         }
@@ -5523,15 +5523,15 @@ bool mayUseStoredZonedClockPage(StorageEngine& engine, const std::string& databa
 
 // The outer filter keeps responsibility for the SQL predicate. This source
 // also checks each heap value against the physical interval before emitting it.
-class ZonedClockRangeScanOp final : public Operator {
+class StoredBtreeRangeScanOp final : public Operator {
 public:
-    ZonedClockRangeScanOp(StorageEngine& engine, std::string database,
-                          const TableSchema& schema, StoredZonedClockRange range, OpPtr fallback,
+    StoredBtreeRangeScanOp(StorageEngine& engine, std::string database,
+                          const TableSchema& schema, StoredBtreeRange range, OpPtr fallback,
                           std::optional<StoredZonedClockOrder> order = std::nullopt)
         : engine_(engine), database_(std::move(database)), table_(schema.tablename),
           relationId_(schema.physicalRelationId), range_(std::move(range)), fallback_(std::move(fallback)), order_(order) {}
 
-    ~ZonedClockRangeScanOp() override { try { close(); } catch (...) {} }
+    ~StoredBtreeRangeScanOp() override { try { close(); } catch (...) {} }
 
     bool open() override {
         OpenInstrument instrument(this);
@@ -5557,7 +5557,7 @@ public:
                     usedIndex_ = true;
                     return true;
                 }
-            } else if (auto positions = readStoredZonedClockRange(engine_, database_, schema_, range_)) {
+            } else if (auto positions = readStoredBtreeRange(engine_, database_, schema_, range_)) {
                 rids_ = std::move(*positions);
                 // Read heap pages in physical order. A requested SQL order
                 // still belongs to the ordinary sort above this source.
@@ -5644,7 +5644,10 @@ public:
         }
         if (error) std::rethrow_exception(error);
     }
-    std::string preparedPlanNodeName() const override { return order_ ? "ZonedClockIndexPage" : "ZonedClockRangeScan"; }
+    std::string preparedPlanNodeName() const override {
+        if (range_.key == StoredBtreeRange::Key::ObjectNumber) return "OidRangeScan";
+        return order_ ? "ZonedClockIndexPage" : "ZonedClockRangeScan";
+    }
     std::map<std::string, std::string> preparedPlanAttributes() const override {
         std::map<std::string, std::string> attributes{{"usedIndex", usedIndex_ ? "true" : "false"}, {"column", range_.column}};
         if (order_ && usedIndex_) {
@@ -5664,7 +5667,7 @@ private:
     StorageEngine& engine_;
     std::string database_, table_;
     uint64_t relationId_;
-    StoredZonedClockRange range_;
+    StoredBtreeRange range_;
     OpPtr fallback_;
     std::optional<StoredZonedClockOrder> order_;
     std::optional<StoredZonedClockPage> page_;
@@ -5699,7 +5702,7 @@ static OpPtr makePreparedTableSource(StorageEngine* engine, const std::string& d
         const auto orderKey = directPageOrder(*query, *select, true);
         if (orderKey && orderKey->typeOid == 1266 && integerPageRelation(*query, *select, *orderKey)) {
             if (auto page = zonedClockPageSpec(*engine, database, *select, *orderKey, schema)) {
-                return std::make_unique<ZonedClockRangeScanOp>(*engine, database, schema,
+                return std::make_unique<StoredBtreeRangeScanOp>(*engine, database, schema,
                     std::move(page->range), heap(), page->order);
             }
         }
@@ -5707,9 +5710,9 @@ static OpPtr makePreparedTableSource(StorageEngine* engine, const std::string& d
             for (const auto& sourceRange : query->sourceRanges) {
                 if (sourceRange.owner != select || sourceRange.source != select->fromClause.get() ||
                     sourceRange.cteStatement || sourceRange.viewQuery) continue;
-                if (auto range = storedZonedClockRange(*engine, database, schema,
+                if (auto range = storedBtreeRange(*engine, database, schema,
                         select->whereClause.get(), sourceRange.ordinal)) {
-                    return std::make_unique<ZonedClockRangeScanOp>(*engine, database, schema, std::move(*range), heap());
+                    return std::make_unique<StoredBtreeRangeScanOp>(*engine, database, schema, std::move(*range), heap());
                 }
             }
         }
@@ -13565,9 +13568,9 @@ OpPtr QueryPlanner::buildSelectPlan(StorageEngine* engine, const PlanContext& in
 
     if (!root && !rlsApplies) root = ordinaryBrinTableSource(engine, ctx, table);
     if (!root && !rlsApplies && ctx.disjunctiveConds.empty()) {
-        if (auto range = storedZonedClockRange(*engine, ctx.dbname, table, remainingConds)) {
+        if (auto range = storedBtreeRange(*engine, ctx.dbname, table, remainingConds)) {
             auto fallback = std::make_unique<TableScanOp>(engine, ctx.dbname, ctx.tablename);
-            root = std::make_unique<ZonedClockRangeScanOp>(*engine, ctx.dbname, table, std::move(*range), std::move(fallback));
+            root = std::make_unique<StoredBtreeRangeScanOp>(*engine, ctx.dbname, table, std::move(*range), std::move(fallback));
         }
     }
     if (!root && compositeRange) root = std::move(compositeRange);

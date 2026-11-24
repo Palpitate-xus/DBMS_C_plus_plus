@@ -22,26 +22,28 @@ std::optional<std::string> constantStoredZonedClockInput(StorageEngine& engine,
 
 void validateStoredZonedClockComparisonInput(const Column& column, const std::string& value);
 
-struct StoredZonedClockRange {
+struct StoredBtreeRange {
+    enum class Key { ZonedClock, ObjectNumber };
     std::string column;
     int64_t lower = INT64_MIN;
     int64_t upper = INT64_MAX;
+    Key key = Key::ZonedClock;
 
     bool matches(const std::string& value) const;
 };
 
-std::optional<StoredZonedClockRange> storedZonedClockRange(StorageEngine& engine,
+std::optional<StoredBtreeRange> storedBtreeRange(StorageEngine& engine,
     const std::string& database, const TableSchema& schema, const Expr* predicate,
     size_t sourceOrdinal);
 
-std::optional<StoredZonedClockRange> storedZonedClockRange(StorageEngine& engine,
+std::optional<StoredBtreeRange> storedBtreeRange(StorageEngine& engine,
     const std::string& database, const TableSchema& schema,
     const std::vector<StorageEngine::Condition>& conditions);
 
 // An engaged result covers the whole range for the current snapshot, even
 // when it has no rows. An unavailable or expensive read uses the heap.
-std::optional<std::vector<int64_t>> readStoredZonedClockRange(StorageEngine& engine,
-    const std::string& database, const TableSchema& schema, const StoredZonedClockRange& range);
+std::optional<std::vector<int64_t>> readStoredBtreeRange(StorageEngine& engine,
+    const std::string& database, const TableSchema& schema, const StoredBtreeRange& range);
 
 struct StoredZonedClockOrder {
     static constexpr size_t maxRows = 512;
@@ -63,7 +65,7 @@ struct StoredZonedClockPage {
 };
 
 std::optional<StoredZonedClockPage> readStoredZonedClockPage(StorageEngine& engine,
-    const std::string& database, const TableSchema& schema, const StoredZonedClockRange& range,
+    const std::string& database, const TableSchema& schema, const StoredBtreeRange& range,
     const StoredZonedClockOrder& order, size_t byteBudget);
 
 // Query admission and source construction use the same bound order and range.

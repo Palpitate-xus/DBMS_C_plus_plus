@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>按一段对象编号查记录更快 · 2026-11-24</summary>
+
+例如，给原表编号建好索引后，可以直接找到编号在指定范围内的迁移记录。
+
+[使用说明](docs/MANUAL.md#对象编号) · [测试报告](docs/test-report.md#oid-range-20261124) · [性能报告](docs/performance-report-2026-10-30.md#oid-range-cost-20261124)
+
+</details>
+
+<details>
 <summary>可以在表里保存对象编号 · 2026-11-24</summary>
 
 例如，迁移记录可以保存原表的编号，最大可到 4,294,967,295。没有编号的记录可以留空，和编号 0 区分开。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>查一张子表的父表名称更快 · 2026-11-23</summary>
+<summary>查看更早的更新和版本记录</summary>
+
+## 2026-11-23 · 查一张子表的父表名称更快
 
 在包含 128 条表继承关系的一组测试中，这项查询的时间从约 170 毫秒降到了约 15 毫秒。
 
 [使用说明](docs/MANUAL.md#查询继承表) · [测试报告](docs/test-report.md#oid-join-20261123) · [性能报告](docs/performance-report-2026-10-30.md#oid-join-cost-20261123)
-
-</details>
-
-<details>
-<summary>查看更早的更新和版本记录</summary>
 
 ## 2026-11-23 · 可以查到一张表直接继承了哪些表
 

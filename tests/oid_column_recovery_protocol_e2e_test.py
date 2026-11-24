@@ -38,8 +38,9 @@ def main():
         wire = Wire(client, server["sock"])
 
     def verify_key(key, ids, ready=b"I"):
-        wire.query(f"SELECT id FROM oid_durable WHERE k='{key}'", rows=[(str(i),) for i in ids],
-                   tag=f"SELECT {len(ids)}", fields=[("id", 23)], ready=ready)
+        for predicate in (f"k='{key}'", f"k>='{key}' AND k<='{key}'"):
+            wire.query("SELECT id FROM oid_durable WHERE " + predicate, rows=[(str(i),) for i in ids],
+                       tag=f"SELECT {len(ids)}", fields=[("id", 23)], ready=ready)
 
     def begin_update():
         wire.command("BEGIN", "BEGIN", ready=b"T")

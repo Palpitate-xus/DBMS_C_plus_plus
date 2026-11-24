@@ -1,8 +1,12 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-24 · 单列对象编号索引可以读一段范围
+
+支持普通表的单列主键或单列 B 树，按无符号顺序合并同列边界并核对表行，覆盖大于 2,147,483,647 的值。用于 `BETWEEN` 或大小比较的协议参数可按列类型确定。现有数据目录可以直接打开。`IDX-03`、`OPT-01`、`TYPE-20`、`PROTO-03` 和 `PROTO-05` 保持部分实现。 [功能验证](test-report.md#oid-range-20261124) · [性能对照](performance-report-2026-10-30.md#oid-range-cost-20261124) · [实现对照](postgresql-comparison.md#oid-range-comparison-20261124)
+
 ## 2026-11-24 · 普通表可以保存对象编号
 
-标量 `oid` 用 4 字节保存完整无符号范围，支持普通表写入、等值索引、排序、带类型的二进制查询及磁盘恢复。对象编号数组、范围索引和其他对象引用类型仍待补齐。`TYPE-20`、`PROTO-04` 和 `PROTO-05` 保持部分实现。 [功能验证](test-report.md#oid-column-20261124) · [性能对照](performance-report-2026-10-30.md#oid-column-cost-20261124) · [实现对照](postgresql-comparison.md#oid-column-comparison-20261124)
+标量 `oid` 用 4 字节保存完整无符号范围，支持普通表写入、等值索引、排序、带类型的二进制查询及磁盘恢复。对象编号数组和其他对象引用类型仍待补齐。`TYPE-20`、`PROTO-04` 和 `PROTO-05` 保持部分实现。 [功能验证](test-report.md#oid-column-20261124) · [性能对照](performance-report-2026-10-30.md#oid-column-cost-20261124) · [实现对照](postgresql-comparison.md#oid-column-comparison-20261124)
 
 ## 2026-11-23 · 用转换后的整数连接时可以按需读取
 

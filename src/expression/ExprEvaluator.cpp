@@ -7689,7 +7689,7 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
         const auto preparedType = [](const std::string& raw) {
             const auto type = ExprHelper::canonicalResultTypeName(raw);
             return isBitStringTypeName(type) || type == "smallint" || type == "integer" ||
-                type == "bigint" || type == "timetz";
+                type == "bigint" || type == "timetz" || type == "oid";
         };
         const auto comparison = [&](const std::string& operation, size_t lhs, size_t bound) {
             // A genuine constant NULL makes a strict comparison NULL during

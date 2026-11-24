@@ -2,6 +2,18 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-24 seek ordinary OID ranges in single-column B-trees",
+      "gap_ids": ["IDX-03", "OPT-01", "TYPE-20", "PROTO-03", "PROTO-05"],
+      "status": "partial",
+      "evidence": ["src/commands/TableManage.cpp", "src/executor/ExecutionPlan.cpp", "src/network/NetworkServer.cpp", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/oid_range_protocol_e2e_test.py", "tests/oid_column_recovery_protocol_e2e_test.py", "tests/timetz_range_protocol_e2e_test.py"],
+      "verification": [
+        "Direct unsigned comparisons on the same stored OID column can bound a complete single-column B-tree. The executor validates the snapshot and rechecks the stored values.",
+        "BETWEEN and direct comparisons infer ordinary OID parameter types. Text and binary bounds, zero, NULL, and the maximum unsigned number are covered against PostgreSQL 18.6.",
+        "Upgrade, old snapshots, uncommitted writes, recovery, and index rebuilds are checked on the same persistent data. Large ranges retain the heap path. The wider planner and type items remain open."
+      ]
+    },
+    {
       "issue": "2026-11-24 store scalar OID values in ordinary tables",
       "gap_ids": ["TYPE-20", "PROTO-04", "PROTO-05"],
       "status": "partial",
@@ -10,7 +22,7 @@
       "verification": [
         "Ordinary scalar OID columns use four bytes and preserve the unsigned range, zero and NULL. The tested forms cover typed input, text COPY, binary parameters and column provenance.",
         "Equality uses canonical unsigned index keys. Crash restarts cover committed and rolled-back changes, and the previous reader rejects the new table format.",
-        "OID arrays, indexed range scans and the remaining object-reference type family stay open."
+        "OID arrays and the remaining object-reference type family stay open."
       ]
     },
     {
