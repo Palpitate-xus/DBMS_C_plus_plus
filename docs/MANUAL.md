@@ -2800,6 +2800,16 @@ SELECT pg_catalog.pg_get_indexdef('public.orders_customer_idx'::regclass::oid);
 
 也可以传入 `索引编号, 列序号, true`，只查看索引中的某一列。序号从 1 开始，附带列排在索引键之后。传入 `0, true` 查看整个定义，并在表名可直接使用时省略模式名。表达式索引的定义仍待补齐。
 
+### 用 psql 查看索引的列
+
+在 `psql` 输入下面的命令，可以查看普通表上用列名创建的 B 树和哈希索引。
+
+```text
+\d public.orders_customer_idx
+```
+
+输出包括列名、类型和定义。`Key?` 表示这一列是否用来查找。用 `INCLUDE` 附带的列排在键列后面，显示为 `no`。表列改名后，索引列名保留创建时的名称，定义列显示当前表列名。 [测试报告](test-report.md#index-attributes-20261124)
+
 ### 查看部分索引的条件
 
 部分索引只收录满足 `WHERE` 条件的记录。先查询 `orders_stock_idx` 的索引编号，再将第二条查询中的编号换成查到的值。

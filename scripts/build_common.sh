@@ -209,6 +209,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/pg_get_indexdef_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/pg_index_catalog_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/pg_index_predicate_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/pg_index_attribute_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/primary_index_catalog_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/primary_key_catalog_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/catalog_oid_join_filter_protocol_e2e_test.py)

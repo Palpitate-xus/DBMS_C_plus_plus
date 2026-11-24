@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>用 psql 查看索引用了哪些列 · 2026-11-24</summary>
+
+输入 `\d 索引名`，可以看到普通索引中各列的类型，以及哪些列用来查找、哪些列随索引一起保存。
+
+[使用说明](docs/MANUAL.md#用-psql-查看索引的列) · [测试报告](docs/test-report.md#index-attributes-20261124) · [性能报告](docs/performance-report-2026-10-30.md#index-attributes-cost-20261124)
+
+</details>
+
+<details>
 <summary>查看索引按什么条件收录记录 · 2026-11-24</summary>
 
 在 `psql` 里用 `\d 索引名` 可以查看部分索引的筛选条件。例如，商品索引只收录库存大于 0 的商品。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>查看主键用了哪些列 · 2026-11-24</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-24 · 查看主键用了哪些列
 
 例如，可以查到订单表用订单编号作为主键、对应的索引叫什么，以及哪些表引用了它。
 
 [查询示例](docs/MANUAL.md#查询主键和外键使用的索引) · [测试报告](docs/test-report.md#primary-constraint-20261124) · [性能报告](docs/performance-report-2026-10-30.md#primary-constraint-cost-20261124)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-24 · 可以查看数据库自动创建的主键索引
 

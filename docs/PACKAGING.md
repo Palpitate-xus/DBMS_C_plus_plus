@@ -35,6 +35,12 @@ sudo apt install cmake g++ make zlib1g-dev libicu-dev
 
 上一版程序打开带有新主键索引目录记录的库后，测试表的数据仍可读，但扫描 `pg_index` 返回 `XX001`。需要切回上一版时，使用升级前的备份。
 
+## 显式索引的列信息升级
+
+新版首次打开旧数据库时，为能核对定义的普通 B 树和哈希索引补写列名和类型。表、索引编号和索引文件保留。写完后在各数据库的 `pg_catalog` 中保存 `.explicit_index_attributes_version`。 [升级和恢复测试](test-report.md#index-attributes-20261124)
+
+上一版查询带有附带列的新版索引目录时，会因为列数变化报错。切回上一版时使用升级前的备份。
+
 ## 部分索引的条件
 
 新版沿用原有索引条件文件格式，读取的是索引实际保存的条件。早期版本建索引时可能丢失括号，已有文件无法还原丢失的分组。要恢复原先的分组，使用最初的 `CREATE INDEX ... WHERE ...` 语句删除并重建该索引。 [验证记录](test-report.md#index-predicate-20261124)

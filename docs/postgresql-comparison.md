@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-24 · 查询索引的列
+
+PostgreSQL 在 `pg_attribute` 为索引的每一列保存一条记录，`psql` 通过 `pg_index.indnkeyatts` 确定哪些列是键。SQLite 的 `PRAGMA index_xinfo` 区分键和辅助定位列。DuckDB 的 `duckdb_indexes()` 列出显式创建的索引和对应的建索引语句。 [PostgreSQL 列目录](https://www.postgresql.org/docs/18/catalog-pg-attribute.html) · [PostgreSQL 索引目录](https://www.postgresql.org/docs/18/catalog-pg-index.html) · [SQLite 索引列](https://www.sqlite.org/pragma.html#pragma_index_xinfo) · [DuckDB 索引目录](https://duckdb.org/docs/current/sql/meta/duckdb_table_functions#duckdb_indexes)
+
+本项目普通 B 树和哈希索引使用已有目录文件保存列记录，原版 `psql` 可读取。简单的五列索引详情查询在本机测得约 8–9 毫秒，PostgreSQL 18.6 约 0.3–0.5 毫秒。 [功能测试](test-report.md#index-attributes-20261124) · [性能对照](performance-report-2026-10-30.md#index-attributes-cost-20261124)
+
 <a id="index-predicate-comparison-20261124"></a>
 ## 2026-11-24 · 部分索引条件如何保存和显示
 

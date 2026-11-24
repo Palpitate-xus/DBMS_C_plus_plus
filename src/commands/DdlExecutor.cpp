@@ -24,6 +24,8 @@
 #include "catalog/PgCollationCatalog.h"
 #include "catalog/PgForeignKeyCatalog.h"
 #include "catalog/PgIndexCatalog.h"
+#include "catalog/PgRolesCatalog.h"
+#include "catalog/ExplicitIndexAttributes.h"
 #include "catalog/RelationSearchPath.h"
 #include "catalog/systables.h"
 #include "catalog/type_registry.h"
@@ -1523,7 +1525,8 @@ static std::string availablePrimaryKeyName(const CatalogManager& catalog, Oid sc
     return name;
 }
 
-static void synchronizePrimaryIndex(const std::string& database, const std::string& physical, bool legacy = false) {
+static void synchronizePrimaryIndex(const std::string& database, const std::string& physical,
+                                    bool legacy = false, const std::string* rebuiltColumn = nullptr) {
     auto& catalog = g_engine.catalogService().get(database);
     const auto name = CatalogService::logicalName(physical);
     const auto space = catalog.getNamespaceByName(name.schema.empty() ? "public" : name.schema);
@@ -1534,7 +1537,9 @@ static void synchronizePrimaryIndex(const std::string& database, const std::stri
     }
     if (!owner) return;
     index_catalog::synchronizePrimary(g_engine, database, catalog, *owner, physical, legacy);
-    if (!catalog.persistAll()) throw DbError("58030", "could not persist primary index identity");
+    if (rebuiltColumn && owner->relhasindex)
+        index_catalog::rebuildExplicitColumnIndexes(g_engine, database, catalog, owner->oid, *rebuiltColumn);
+    if (!catalog.persistAll()) throw DbError("58030", "could not persist index identities");
 }
 
 static Oid registerMaterializedViewInCatalog(
@@ -2803,7 +2808,7 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                 }
                 break;
             }
-            case AlterTableStmt::Action::DropColumn:
+            case AlterTableStmt::Action::DropColumn: {
                 if (sub.name.empty()) {
                     std::cout << "SQL syntax error: DROP COLUMN requires a name" << std::endl;
                     return true;
@@ -2823,6 +2828,7 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                 // Resolve column dependencies before clearing comments or
                 // rewriting a single heap row. A view reads columns in its
                 // predicates/joins/children as well as its visible output.
+                bool droppedIndex = false;
                 try {
                     CatalogManager& catalog =
                         g_engine.catalogService().get(s.currentDB);
@@ -2836,6 +2842,11 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                         dropColumnDependentViews(
                             catalog, s.currentDB, relation->oid, attribute->attnum,
                             sub.options.count("cascade") != 0, txn);
+                        if (relation->relhasindex) {
+                            txn.markSnapshotDirty();
+                            droppedIndex = index_catalog::dropExplicitColumnIndexes(
+                                g_engine, s.currentDB, catalog, relation->oid, sub.name);
+                        }
                     }
                 } catch (const std::exception& error) {
                     std::cout << "ALTER TABLE DROP COLUMN: " << error.what()
@@ -2931,8 +2942,10 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                             << std::endl;
                         return true;
                     }
+                    if (droppedIndex && !synchronizeTableIndexFlagInCatalog(s.currentDB, tableName)) return true;
                 }
                 break;
+            }
             case AlterTableStmt::Action::RenameColumn: {
                 if (sub.name.empty() || sub.newName.empty()) {
                     std::cout << "SQL syntax error: RENAME COLUMN requires two names" << std::endl;
@@ -3384,7 +3397,7 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                               << std::endl;
                     return true;
                 }
-                if (!tableIsTemporary && !sub.dataType.empty()) synchronizePrimaryIndex(s.currentDB, tableName, true);
+                if (!sub.dataType.empty()) synchronizePrimaryIndex(s.currentDB, tableName, true, &sub.name);
                 break;
             }
             case AlterTableStmt::Action::SetStatistics: {
@@ -9095,6 +9108,7 @@ bool DdlExecutor::executeCreateIndex(const CreateIndexStmt* stmt, Session& s) {
             dep.refobjsubid = 0;
             dep.deptype = 'a';
             cat.addDepend(dep);
+            index_catalog::registerExplicitAttributes(g_engine, s.currentDB, cat, idxOid);
 
             const auto currentTable = cat.getClass(tableOid);
             if (!currentTable) {
@@ -12090,11 +12104,9 @@ static void dropColumnDependentViews(
     std::map<Oid, ViewRelationDependencies> graph;
     for (const auto& view : catalog.listClasses()) {
         if (view.relkind != 'v') continue;
-        // pg_stats is an owned, compiled metadata source, with no stored
-        // user query and no dependency on user table-column declarations.
-        const auto viewSchema = catalog.getNamespace(view.relnamespace);
-        if (viewSchema && viewSchema->nspname == "pg_catalog" &&
-            view.relname == "pg_stats") continue;
+        // These catalog views have compiled sources and no stored user query.
+        if (view.relnamespace == 11 &&
+            (view.relname == "pg_stats" || view.relname == roles_catalog::name)) continue;
         auto& dependencies = graph[view.oid];
         bool hasColumnIdentity = false;
         for (const auto& dependency : catalog.findDepends(PgClassOid_Class, view.oid)) {

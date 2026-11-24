@@ -19,10 +19,12 @@
 #include "catalog/PgForeignKeyCatalog.h"
 #include "catalog/PgRolesCatalog.h"
 #include "catalog/PgIndexCatalog.h"
+#include "catalog/ExplicitIndexAttributes.h"
 #include "catalog/PgIndexPredicate.h"
 #include "catalog/DatumMetadataFactory.h"
 #include "catalog/RelationSearchPath.h"
 #include "expression/regclass_input.h"
+#include "expression/expr_helper.h"
 #include "common/DbError.h"
 #include "common/TemporalStorageCodec.h"
 #include "common/QueryHostProvider.h"
@@ -135,6 +137,11 @@ static void migrateLegacyPublicDottedSequences(
 }
 
 namespace {
+constexpr char explicitIndexAttributesVersion[] = "DBMS_EXPLICIT_INDEX_ATTRIBUTES1\n";
+
+void initializeExplicitIndexAttributes(const StorageEngine& engine, const std::string& database,
+                                       CatalogManager& catalog);
+
 constexpr char physicalArrayVersion[] = "DBMS_PHYSICAL_BUILTIN_ARRAY_ATTRIBUTES1\n";
 bool physicalArraysPublished(const fs::path& directory) {
     const auto path = directory / ".physical_builtin_array_attributes_version";
@@ -487,6 +494,10 @@ std::shared_ptr<CatalogManager> loadOwnedCatalog(
     const auto primaryKeyMarker = directory / ".primary_key_catalog_version";
     const bool publishedPrimaryKeys = catalogVersionPublished(primaryKeyMarker, foreign_key_catalog::primaryKeyVersion);
     if (!publishedPrimaryKeys) catalog->initializePrimaryKeyIdentities();
+    const auto explicitIndexAttributesMarker = directory / ".explicit_index_attributes_version";
+    const bool publishedExplicitIndexAttributes =
+        catalogVersionPublished(explicitIndexAttributesMarker, explicitIndexAttributesVersion);
+    if (!publishedExplicitIndexAttributes) initializeExplicitIndexAttributes(engine, database, *catalog);
     // Some legitimate server cluster scaffolds already have tlist.lst and
     // auth metadata, but no namespace catalog. A newly bootstrapped logical
     // public namespace must have the same checked physical marker as CREATE
@@ -511,8 +522,11 @@ std::shared_ptr<CatalogManager> loadOwnedCatalog(
         }
     }
     migrateLegacyPublicDottedSequences(engine, database, *catalog);
-    if((initializedClassCatalog || initializedOwnedCatalogs || initializedInheritance || initializedSequenceCatalog || initializedStatisticsView || initializedRoles || initializedSystemAttributes || initializedTypeProperties || initializedCatalogCollations || initializedPhysicalArrays || initializedDefaultCatalog || !publishedDefaultCatalog || !publishedTypeProperties || !publishedCatalogCollations || !publishedPhysicalArrays || initializedAccessMethods || !publishedAccessMethods || !publishedCollations || initializedForeignKeys || !publishedForeignKeys || initializedIndexes || !publishedIndexes || !publishedPrimaryIndexes || !publishedPrimaryKeys) && !catalog->persistAll())
+    if((initializedClassCatalog || initializedOwnedCatalogs || initializedInheritance || initializedSequenceCatalog || initializedStatisticsView || initializedRoles || initializedSystemAttributes || initializedTypeProperties || initializedCatalogCollations || initializedPhysicalArrays || initializedDefaultCatalog || !publishedDefaultCatalog || !publishedTypeProperties || !publishedCatalogCollations || !publishedPhysicalArrays || initializedAccessMethods || !publishedAccessMethods || !publishedCollations || initializedForeignKeys || !publishedForeignKeys || initializedIndexes || !publishedIndexes || !publishedPrimaryIndexes || !publishedPrimaryKeys || !publishedExplicitIndexAttributes) && !catalog->persistAll())
         throw DbError("58030","could not publish initialized system view identities");
+    if (!publishedExplicitIndexAttributes && index_file::writeAtomicallyNoReplace(
+            explicitIndexAttributesMarker, explicitIndexAttributesVersion) != index_file::WriteResult::OK)
+        throw DbError("58030", "could not publish explicit index attribute catalog version");
     if (!publishedPrimaryKeys && index_file::writeAtomicallyNoReplace(primaryKeyMarker,
             foreign_key_catalog::primaryKeyVersion) != index_file::WriteResult::OK)
         throw DbError("58030", "could not publish primary key catalog version");
@@ -852,7 +866,8 @@ std::vector<std::string> primaryKeyColumns(const TableSchema& table) {
 }
 
 RegisteredIndexLayout readIndexLayout(const StorageEngine& engine, const std::string& database,
-                                      const CatalogManager::RegisteredIndex& index) {
+                                      const CatalogManager::RegisteredIndex& index,
+                                      bool allowMissingIncludes = false) {
     RegisteredIndexLayout result;
     auto& physical = result.physicalTable;
     physical = index.table.relname;
@@ -912,8 +927,11 @@ RegisteredIndexLayout readIndexLayout(const StorageEngine& engine, const std::st
         }
         result.keys.push_back(named->key);
     }
-    if (result.keys.empty() || result.keys.size() != static_cast<size_t>(index.index.relnatts) ||
-        result.keys.size() + result.includes.size() > static_cast<size_t>(std::numeric_limits<int16_t>::max()))
+    const auto count = result.keys.size() + result.includes.size();
+    const auto declared = static_cast<size_t>(index.index.relnatts);
+    // Older catalogs counted only key columns in pg_class.
+    if (result.keys.empty() || (declared != result.keys.size() && declared != count) ||
+        count > static_cast<size_t>(std::numeric_limits<int16_t>::max()))
         throw DbError("XX001", "index columns do not match its catalog identity");
     const auto validateColumns = [&](const auto& names) {
         for (const auto& name : names)
@@ -922,10 +940,151 @@ RegisteredIndexLayout readIndexLayout(const StorageEngine& engine, const std::st
                 throw DbError("XX001", "index column is missing from its owning table");
     };
     if (!result.expression) validateColumns(result.keys);
-    validateColumns(result.includes);
+    if (!allowMissingIncludes) validateColumns(result.includes);
     return result;
 }
+
+bool supportsExplicitAttributes(const CatalogManager::RegisteredIndex& index) {
+    return !index.primary && index.table.relkind == 'r' && !index.table.relispartition &&
+        (index.index.relam == access_method_catalog::btreeOid ||
+         index.index.relam == access_method_catalog::indexOid("hash"));
+}
+
+PgAttributeRow makeIndexAttribute(const PgAttributeRow& column, const std::string& name,
+                                  Oid index, int16_t ordinal, bool included) {
+    PgAttributeRow field;
+    field.attrelid = index;
+    field.attname = name;
+    field.attnum = ordinal;
+    field.atttypid = column.atttypid;
+    field.attlen = column.attlen;
+    field.atttypmod = column.atttypmod;
+    field.attndims = column.attndims;
+    field.attbyval = column.attbyval;
+    field.attalign = column.attalign;
+    field.attstorage = column.attstorage;
+    field.attcollation = included ? INVALID_OID : column.attcollation;
+    return field;
+}
+
+std::vector<PgAttributeRow> explicitIndexAttributes(const CatalogManager& catalog,
+    const CatalogManager::RegisteredIndex& index, const RegisteredIndexLayout& layout,
+    bool legacy = false) {
+    std::vector<PgAttributeRow> attributes;
+    if (layout.partitioned || layout.expression) return attributes;
+    attributes.reserve(layout.keys.size() + layout.includes.size());
+    std::set<std::string> names;
+    const auto append = [&](const std::vector<std::string>& columns, bool included) {
+        for (const auto& name : columns) {
+            const auto source = catalog.getAttribute(index.table.oid, name);
+            if (!source || source->attnum <= 0 || source->attisdropped) {
+                if (legacy && included) return false;
+                throw DbError("XX001", "index column is missing from its owning catalog relation");
+            }
+            auto label = name;
+            for (size_t suffix = 1; !names.insert(label).second; ++suffix) {
+                const auto digits = std::to_string(suffix);
+                size_t keep = std::min(name.size(), MAX_COL_NAME_LEN - 1 - digits.size());
+                while (keep < name.size() && (static_cast<unsigned char>(name[keep]) & 0xc0) == 0x80) --keep;
+                label = name.substr(0, keep) + digits;
+            }
+            auto field = makeIndexAttribute(*source, label, index.index.oid,
+                static_cast<int16_t>(attributes.size() + 1), included);
+            if (layout.method == "hash" && field.atttypid != 23) {
+                // PostgreSQL exposes Hash's stored int4 key, with the input collation.
+                field.atttypid = 23;
+                field.attlen = 4;
+                field.atttypmod = -1;
+                field.attndims = 0;
+                field.attbyval = true;
+                field.attalign = 'i';
+                field.attstorage = 'p';
+            }
+            attributes.push_back(std::move(field));
+        }
+        return true;
+    };
+    append(layout.keys, false);
+    if (!append(layout.includes, true)) attributes.clear();
+    return attributes;
+}
+
+void initializeExplicitIndexAttributes(const StorageEngine& engine, const std::string& database,
+                                       CatalogManager& catalog) {
+    for (const auto& index : catalog.registeredIndexes({}, {})) {
+        if (!supportsExplicitAttributes(index) || index.table.relpersistence == 't') continue;
+        const auto layout = readIndexLayout(engine, database, index, true);
+        const auto attributes = explicitIndexAttributes(catalog, index, layout, true);
+        if (attributes.empty() || !catalog.findUserAttributes(index.index.oid).empty()) continue;
+        if (!catalog.replaceAttributes(index.index.oid, attributes))
+            throw DbError("XX001", "could not register legacy index columns");
+    }
+}
+
+bool usesIndexColumn(const RegisteredIndexLayout& layout, const std::string& column) {
+    if (layout.expression || layout.partitioned) return false;
+    if (std::find(layout.keys.begin(), layout.keys.end(), column) != layout.keys.end() ||
+        std::find(layout.includes.begin(), layout.includes.end(), column) != layout.includes.end()) return true;
+    const auto referenced = ExprHelper::referencesColumn(layout.predicate, column);
+    if (!referenced) throw DbError("XX001", "cannot read index condition dependencies");
+    return *referenced;
+}
 } // namespace
+
+void index_catalog::registerExplicitAttributes(const StorageEngine& engine, const std::string& database,
+    CatalogManager& catalog, Oid oid) {
+    const auto index = catalog.registeredIndex(oid, {});
+    if (!index) throw DbError("XX001", "new index has no catalog entry");
+    if (!supportsExplicitAttributes(*index)) return;
+    const auto layout = readIndexLayout(engine, database, *index);
+    const auto attributes = explicitIndexAttributes(catalog, *index, layout);
+    if (!attributes.empty() && !catalog.replaceAttributes(oid, attributes))
+        throw DbError("XX001", "could not register index columns");
+}
+
+void index_catalog::rebuildExplicitColumnIndexes(const StorageEngine& engine, const std::string& database,
+    CatalogManager& catalog, Oid owner, const std::string& column) {
+    for (const auto& index : catalog.registeredIndexes(owner, {})) {
+        if (!supportsExplicitAttributes(index)) continue;
+        const auto layout = readIndexLayout(engine, database, index);
+        if (!usesIndexColumn(layout, column)) continue;
+        auto attributes = explicitIndexAttributes(catalog, index, layout);
+        auto replacement = index.index;
+        if (!catalog.dropClass(replacement.oid)) throw DbError("XX001", "rebuilt index identity disappeared");
+        replacement.oid = INVALID_OID;
+        const Oid oid = catalog.createClass(replacement);
+        PgDependRow edge;
+        edge.classid = edge.refclassid = PgClassOid_Class;
+        edge.objid = oid;
+        edge.refobjid = owner;
+        edge.deptype = 'a';
+        catalog.addDepend(edge);
+        for (auto& field : attributes) field.attrelid = oid;
+        if (!catalog.replaceAttributes(oid, attributes)) throw DbError("XX001", "could not register rebuilt index columns");
+    }
+}
+
+bool index_catalog::dropExplicitColumnIndexes(StorageEngine& engine, const std::string& database,
+    CatalogManager& catalog, Oid owner, const std::string& column) {
+    bool dropped = false;
+    for (const auto& index : catalog.registeredIndexes(owner, {})) {
+        if (!supportsExplicitAttributes(index)) continue;
+        const auto layout = readIndexLayout(engine, database, index, true);
+        if (!usesIndexColumn(layout, column)) continue;
+        const auto named = engine.getNamedIndex(database, layout.physicalTable, index.index.relname);
+        if (!named) throw DbError("XX001", "index name disappeared");
+        const auto status = engine.dropIndexByAccessMethod(database, layout.physicalTable,
+            named->key, named->accessMethod);
+        if (status != DBStatus::OK ||
+            !engine.unregisterIndexName(database, layout.physicalTable, index.index.relname))
+            throw DbError("58030", "could not remove index for dropped column");
+        std::string error;
+        if (!catalog.dropObject(PgClassOid_Class, index.index.oid, CatalogManager::DropBehavior::Restrict, &error))
+            throw DbError("2BP01", error);
+        dropped = true;
+    }
+    return dropped;
+}
 
 std::vector<PgAttributeRow> CatalogService::relationAttributes(const ReadCatalog& catalog, Oid relation) {
     if (catalog.manager) return catalog.manager->findUserAttributes(relation);
@@ -991,18 +1150,8 @@ void index_catalog::synchronizePrimary(const StorageEngine& engine, const std::s
         const auto column = catalog.getAttribute(owner.oid, key);
         if (!column || column->attnum <= 0 || column->attisdropped)
             throw DbError("XX001", "primary index column is missing from its owning table");
-        PgAttributeRow field;
-        field.attname = column->attname;
-        field.atttypid = column->atttypid;
-        field.attnum = static_cast<int16_t>(attributes.size() + 1);
-        field.attlen = column->attlen;
-        field.atttypmod = column->atttypmod;
-        field.attndims = column->attndims;
-        field.attbyval = column->attbyval;
-        field.attalign = column->attalign;
-        field.attstorage = column->attstorage;
-        field.attcollation = column->attcollation;
-        attributes.push_back(std::move(field));
+        attributes.push_back(makeIndexAttribute(*column, key, INVALID_OID,
+            static_cast<int16_t>(attributes.size() + 1), false));
     }
     PgClassRow index;
     index.relname = name;

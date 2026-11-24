@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-24 · 可查看显式索引的列
+
+普通 B 树和哈希索引写入实际的 `pg_attribute` 列记录，支持带附带列的索引详情查询。升级时保留原有编号。验证了表列改名、相关列类型改变后重建和事务回滚。表达式及分区索引详情、索引目录中的列向量字段和 `psql` 的完整表结构仍待实现。`CAT-02`、`CAT-03`、`CLIENT-01` 保持部分实现。 [功能验证](test-report.md#index-attributes-20261124) · [性能对照](performance-report-2026-10-30.md#index-attributes-cost-20261124)
+
 ## 2026-11-24 · 部分索引的条件可以从目录读回
 
 普通 B 树的索引条件可在 `pg_index.indpred` 和索引定义中读回，支持整数比较、布尔条件和空值判断。建索引时保留条件括号和带引号的列名。条件蕴含判断、任意表达式的目录转换和表达式索引的键继续跟踪。`CAT-03`、`IDX-10` 和 `CLIENT-01` 保持部分实现。 [功能验证](test-report.md#index-predicate-20261124) · [性能对照](performance-report-2026-10-30.md#index-predicate-cost-20261124)
