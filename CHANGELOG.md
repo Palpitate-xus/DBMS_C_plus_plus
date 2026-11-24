@@ -3,16 +3,16 @@
 <details>
 <summary>可以用 psql 列出表 · 2026-11-24</summary>
 
-用 `\dt` 可以看到表的所属模式、名称、类型和所有者。也可以按表名筛选，或只看指定模式里的表。
+在 `psql` 中输入 `\dt` 就能看到表名和所有者。可以按表名筛选，也可以只看某个模式里的表。
 
 [使用说明](docs/MANUAL.md#按名称查找表) · [测试报告](docs/test-report.md#pg-access-method-20261124) · [性能报告](docs/performance-report-2026-10-30.md#pg-access-method-cost-20261124)
 
 </details>
 
 <details>
-<summary>查询可以分清不同模式里的同名表 · 2026-11-24</summary>
+<summary>可以查出同名表会用到哪一张 · 2026-11-24</summary>
 
-如果两个模式里都有 `orders` 表，现在可以查出直接写 `orders` 会找到哪一张。原版 `psql` 已能完成这一步，显示完整表结构还待补齐。
+如果 `sales.orders` 和 `archive.orders` 同时存在，现在可以查出直接写 `orders` 会找到哪一张。`psql` 的 `\d` 还无法显示完整的表结构。
 
 [使用说明](docs/MANUAL.md#按名称查找表) · [测试报告](docs/test-report.md#psql-catalog-discovery-20261124) · [性能报告](docs/performance-report-2026-10-30.md#psql-catalog-discovery-cost-20261124)
 
@@ -21,7 +21,7 @@
 <details>
 <summary>修复 psql 密码登录 · 2026-11-24</summary>
 
-使用 SCRAM 密码认证时，原版 `psql` 18.6 现在可以通过本地网络连接登录并执行查询。密码错误时，连接仍会被拒绝。
+用原版 `psql` 18.6 在本机连接数据库时，可以用密码登录并执行查询。密码输错时会提示登录失败。
 
 [连接说明](docs/MANUAL.md#18-网络服务) · [测试报告](docs/test-report.md#scram-libpq-20261124) · [性能报告](docs/performance-report-2026-10-30.md#scram-libpq-cost-20261124)
 
