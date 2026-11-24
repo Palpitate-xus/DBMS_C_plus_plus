@@ -154,6 +154,9 @@ public:
     std::optional<RegisteredIndex> registeredIndex(Oid oid, const std::vector<std::string>& searchPath) const;
     static std::optional<RegisteredIndex> readRegisteredIndex(
         const std::string& path, Oid oid, const std::vector<std::string>& searchPath);
+    std::vector<RegisteredIndex> registeredIndexes(std::optional<Oid> owner, std::optional<Oid> index) const;
+    static std::vector<RegisteredIndex> readRegisteredIndexes(
+        const std::string& path, std::optional<Oid> owner, std::optional<Oid> index);
     bool updateClass(Oid oid, const PgClassRow& row);
     // Rename a relation while preserving its OID and dependency records.
     // PostgreSQL object identity is OID-based; a name change must not create

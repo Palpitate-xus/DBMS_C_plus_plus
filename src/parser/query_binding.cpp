@@ -60,6 +60,7 @@ bool incompleteOwnedCatalog(const Range& range) {
         ((range.relationName=="pg_class" && range.columns.size()==30) ||
          (range.relationName=="pg_attribute" && range.columns.size()==19) ||
          (range.relationName=="pg_type" && range.columns.size()==28) ||
+         (range.relationName=="pg_index" && range.columns.size()==15) ||
          (range.relationName=="pg_am" && range.columns.size()==3) ||
          (range.relationName=="pg_settings" && range.columns.size()==3));
 }

@@ -2753,6 +2753,19 @@ ORDER BY 1, 2;
 
 `pg_am` 可以查询 `oid`、`amname` 和 `amtype`。其中 `t` 代表表，`i` 代表索引。处理函数字段 `amhandler` 仍未开放，请在查询中列出需要的字段。 [验证记录](test-report.md#pg-access-method-20261124)
 
+### 按表查询索引
+
+`pg_catalog.pg_index` 可以列出由 `CREATE INDEX` 登记的索引。下面的查询返回每个索引的编号、列数、键列数和唯一性。附带列计入总列数。
+
+```sql
+SELECT indexrelid, indnatts, indnkeyatts, indisunique
+FROM pg_catalog.pg_index
+WHERE indrelid = 'public.orders'::regclass::oid
+ORDER BY indexrelid;
+```
+
+也可以在 `psql` 中输入 `\di 模式名.*` 查看索引列表。索引的所有者一栏可能显示未知。请在 SQL 查询中列明所需字段。隐式主键和唯一约束索引，以及 `indkey`、`indcollation`、`indclass`、`indoption`、`indexprs` 和 `indpred` 仍待支持。 [测试报告](test-report.md#pg-index-20261124)
+
 ### 查询索引的定义
 
 用索引名称或编号查出它建在哪张表、索引了哪些列。下面的查询可以显示普通表上显式创建的 B 树索引或哈希索引。
@@ -2761,7 +2774,7 @@ ORDER BY 1, 2;
 SELECT pg_catalog.pg_get_indexdef('public.orders_customer_idx'::regclass::oid);
 ```
 
-也可以传入 `索引编号, 列序号, true`，只查看索引中的某一列。序号从 1 开始，附带列排在索引键之后。传入 `0, true` 查看整个定义，并在表名可直接使用时省略模式名。表达式索引、完整的部分索引定义和索引目录 `pg_index` 仍待补齐。
+也可以传入 `索引编号, 列序号, true`，只查看索引中的某一列。序号从 1 开始，附带列排在索引键之后。传入 `0, true` 查看整个定义，并在表名可直接使用时省略模式名。表达式索引和部分索引的完整定义仍待补齐。
 
 ### 查询列的类型
 

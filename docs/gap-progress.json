@@ -2,6 +2,18 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-24 publish typed pg_index rows for registered explicit indexes",
+      "gap_ids": ["CAT-02", "CAT-03", "CLIENT-01"],
+      "status": "partial",
+      "evidence": ["src/catalog/PgIndexCatalog.h", "src/catalog/CatalogService.cpp", "src/catalog/catalog.cpp", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/pg_index_catalog_protocol_e2e_test.py"],
+      "verification": [
+        "Read the owning table and registered index identities, column counts and state. Leading literal OID filters restrict which physical definitions are read.",
+        "The tested fields and binary column origins agree with PostgreSQL 18.6. The old index identities survive startup and rollback after a crash, with committed drops remaining absent.",
+        "Stock psql lists explicit indexes via \\di. Constraint index identities, index ownership, conindid and the vector and expression fields remain open."
+      ]
+    },
+    {
       "issue": "2026-11-24 reconstruct registered explicit index definitions by OID",
       "gap_ids": ["CAT-02", "CAT-03", "CLIENT-01"],
       "status": "partial",

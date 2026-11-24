@@ -728,6 +728,48 @@ std::optional<CatalogManager::RegisteredIndex> CatalogManager::readRegisteredInd
     return catalog.registeredIndex(oid, searchPath);
 }
 
+std::vector<CatalogManager::RegisteredIndex> CatalogManager::registeredIndexes(
+    std::optional<Oid> owner, std::optional<Oid> index) const {
+    if (index) {
+        auto entry = registeredIndex(*index, {});
+        if (entry && (!owner || entry->table.oid == *owner)) return {std::move(*entry)};
+        return {};
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<RegisteredIndex> result;
+    std::unordered_map<Oid, Oid> seen;
+    for (const auto& edge : depends_) {
+        if (edge.classid != PgClassOid_Class || edge.refclassid != PgClassOid_Class ||
+            edge.objsubid || edge.refobjsubid || edge.deptype != 'a' || (owner && edge.refobjid != *owner)) continue;
+        const auto* entry = findClassUnlocked(edge.objid);
+        if (!entry || entry->relkind != 'i') continue;
+        const auto [position, inserted] = seen.emplace(edge.objid, edge.refobjid);
+        if (!inserted) {
+            if (position->second != edge.refobjid) throw DbError("XX001", "index has multiple owning relations");
+            continue;
+        }
+        const auto* table = findClassUnlocked(edge.refobjid);
+        if (!table || table->relnamespace != entry->relnamespace)
+            throw DbError("XX001", "index has no matching owning relation");
+        const auto* schema = findNamespaceUnlocked(table->relnamespace);
+        if (!schema) throw DbError("XX001", "index owner has no catalog namespace");
+        result.push_back(RegisteredIndex{*entry, *table, schema->nspname, false});
+    }
+    // A persisted index with no ownership edge cannot be attributed to a
+    // table. Check the full scan without doubling the work of point probes.
+    if (!owner && std::any_of(classes_.begin(), classes_.end(), [&](const auto& relation) {
+            return relation.relkind == 'i' && !seen.count(relation.oid);
+        })) throw DbError("XX001", "index is missing its owning relation");
+    return result;
+}
+
+std::vector<CatalogManager::RegisteredIndex> CatalogManager::readRegisteredIndexes(
+    const std::string& path, std::optional<Oid> owner, std::optional<Oid> index) {
+    CatalogManager catalog(path, ReadOnlyTag{});
+    return catalog.registeredIndexes(owner, index);
+}
+
 std::optional<PgAttributeRow> CatalogManager::resolveAttributeSnapshot(
     const std::string& tableName, const std::string& colName,
     const std::vector<std::string>& searchPath) const {

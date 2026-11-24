@@ -71,6 +71,8 @@ public:
                                          const std::vector<std::string>& searchPath) const;
     std::optional<std::string> indexDefinition(const std::string& database, Oid oid,
                                               int32_t column, bool pretty, const Session* session) const;
+    std::vector<std::vector<ExprValue>> indexRows(const std::string& database,
+        std::optional<Oid> owner, std::optional<Oid> index) const;
     // Specialized read-only projection for pg_attrdef/pg_depend scans.
     CatalogManager::DefaultCatalogSnapshot defaultCatalogSnapshot(
         const std::string& dbname, CatalogManager::DefaultCatalogKind kind, bool includeExpressions = false) const;

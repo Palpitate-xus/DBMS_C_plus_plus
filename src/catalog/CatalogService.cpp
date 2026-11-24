@@ -18,6 +18,7 @@
 #include "catalog/PgCollationCatalog.h"
 #include "catalog/PgForeignKeyCatalog.h"
 #include "catalog/PgRolesCatalog.h"
+#include "catalog/PgIndexCatalog.h"
 #include "catalog/DatumMetadataFactory.h"
 #include "catalog/RelationSearchPath.h"
 #include "expression/regclass_input.h"
@@ -400,6 +401,33 @@ std::shared_ptr<CatalogManager> loadOwnedCatalog(
         if (!catalog->updateClass(declaration.oid, declaration))
             throw DbError("XX001", "could not publish collation catalog relation");
     }
+    const auto indexMarker = directory / ".index_catalog_version";
+    const bool publishedIndexes = catalogVersionPublished(indexMarker, index_catalog::version);
+    auto int2vector = catalog->getType(22);
+    if (!int2vector && !publishedIndexes) {
+        PgTypeRow type;
+        type.oid = 22;
+        type.typname = "int2vector";
+        type.typnamespace = 11;
+        type.typlen = -1;
+        type.typcategory = 'A';
+        type.typalign = 'i';
+        type.typelem = 21;
+        if (catalog->createType(type) != 22)
+            throw DbError("XX001", "could not register the index vector declaration");
+        int2vector = catalog->getType(22);
+    }
+    if (!int2vector || int2vector->typname != "int2vector" || int2vector->typnamespace != 11 ||
+        int2vector->typlen != -1 || int2vector->typelem != 21)
+        throw DbError("XX001", "invalid index vector declaration");
+    const bool initializedIndexes = default_catalog::bootstrapOne(*catalog,
+        index_catalog::relationOid, index_catalog::name, index_catalog::fields, publishedIndexes);
+    if (initializedIndexes) {
+        auto declaration = catalog->getClass(index_catalog::relationOid).value();
+        declaration.relam = access_method_catalog::heapOid;
+        if (!catalog->updateClass(declaration.oid, declaration))
+            throw DbError("XX001", "could not publish index catalog relation");
+    }
     const bool publishedDefaultCatalog = default_catalog::published(directory);
     const bool initializedDefaultCatalog = default_catalog::bootstrap(*catalog, publishedDefaultCatalog);
     const auto foreignKeyMarker = directory / ".foreign_key_catalog_version";
@@ -467,8 +495,11 @@ std::shared_ptr<CatalogManager> loadOwnedCatalog(
         }
     }
     migrateLegacyPublicDottedSequences(engine, database, *catalog);
-    if((initializedClassCatalog || initializedOwnedCatalogs || initializedInheritance || initializedSequenceCatalog || initializedStatisticsView || initializedRoles || initializedSystemAttributes || initializedTypeProperties || initializedCatalogCollations || initializedPhysicalArrays || initializedDefaultCatalog || !publishedDefaultCatalog || !publishedTypeProperties || !publishedCatalogCollations || !publishedPhysicalArrays || initializedAccessMethods || !publishedAccessMethods || !publishedCollations || initializedForeignKeys || !publishedForeignKeys) && !catalog->persistAll())
+    if((initializedClassCatalog || initializedOwnedCatalogs || initializedInheritance || initializedSequenceCatalog || initializedStatisticsView || initializedRoles || initializedSystemAttributes || initializedTypeProperties || initializedCatalogCollations || initializedPhysicalArrays || initializedDefaultCatalog || !publishedDefaultCatalog || !publishedTypeProperties || !publishedCatalogCollations || !publishedPhysicalArrays || initializedAccessMethods || !publishedAccessMethods || !publishedCollations || initializedForeignKeys || !publishedForeignKeys || initializedIndexes || !publishedIndexes) && !catalog->persistAll())
         throw DbError("58030","could not publish initialized system view identities");
+    if (!publishedIndexes && index_file::writeAtomicallyNoReplace(indexMarker,
+            index_catalog::version) != index_file::WriteResult::OK)
+        throw DbError("58030", "could not publish index catalog version");
     if (!publishedForeignKeys && index_file::writeAtomicallyNoReplace(foreignKeyMarker,
             foreign_key_catalog::version) != index_file::WriteResult::OK)
         throw DbError("58030", "could not publish foreign key catalog version");
@@ -780,6 +811,80 @@ std::optional<bool> CatalogService::relationIsVisible(
     return CatalogManager::readRelationVisibility(catalog.path, oid, searchPath);
 }
 
+namespace {
+struct RegisteredIndexLayout {
+    std::string physicalTable, method;
+    std::vector<std::string> keys, includes;
+    bool unique = false, descending = false, partial = false, expression = false, partitioned = false;
+};
+
+RegisteredIndexLayout readIndexLayout(const StorageEngine& engine, const std::string& database,
+                                      const CatalogManager::RegisteredIndex& index) {
+    RegisteredIndexLayout result;
+    auto& physical = result.physicalTable;
+    physical = index.table.relname;
+    if (index.schema.compare(0, 8, "pg_temp_") == 0) {
+        physical = "__tmp_" + index.schema.substr(8) + "_" + physical;
+    } else if (index.schema != "public") {
+        physical = index.schema + "__" + physical;
+    }
+    if (index.table.relkind == 'm') physical = StorageEngine::materializedViewPrefix(physical);
+    auto table = engine.readPersistedSchemaForCatalog(database, physical);
+    if (!table && index.schema == "public" && index.table.relkind != 'm') {
+        physical = "public__" + physical;
+        table = engine.readPersistedSchemaForCatalog(database, physical);
+    }
+    if (!table) throw DbError("XX001", "index owner definition is missing");
+    result.partitioned = table->partitionType != TableSchema::PartitionType::None;
+    const auto named = engine.getNamedIndex(database, physical, index.index.relname);
+    if (!named || index.index.relam == INVALID_OID || access_method_catalog::indexOid(named->accessMethod) != index.index.relam)
+        throw DbError("XX001", "index access method does not match its catalog identity");
+
+    result.method = named->accessMethod;
+    if (result.method == "btree") {
+        const auto definitions = engine.getIndexMetadata(database, physical);
+        const auto definition = std::find_if(definitions.begin(), definitions.end(),
+            [&](const auto& entry) { return entry.name == named->key; });
+        if (definition == definitions.end()) throw DbError("XX001", "B-tree definition is missing");
+        result.expression = definition->isExpression;
+        result.keys.push_back(definition->name);
+        result.includes = definition->includeCols;
+        result.unique = definition->isUnique;
+        result.descending = definition->descending;
+        result.partial = !definition->whereCondition.empty();
+    } else if (result.method == "composite") {
+        const auto definitions = engine.getCompositeIndexes(database, physical);
+        const auto definition = std::find_if(definitions.begin(), definitions.end(),
+            [&](const auto& entry) { return entry.name == named->key; });
+        if (definition == definitions.end()) throw DbError("XX001", "composite B-tree definition is missing");
+        result.method = "btree";
+        result.keys = definition->columns;
+        result.includes = definition->includeCols;
+        result.unique = definition->isUnique;
+        result.partial = !definition->whereCondition.empty();
+    } else {
+        if (result.method == "hash") {
+            const auto columns = engine.getHashIndexedColumns(database, physical);
+            if (std::find(columns.begin(), columns.end(), named->key) == columns.end())
+                throw DbError("XX001", "hash index definition is missing");
+        }
+        result.keys.push_back(named->key);
+    }
+    if (result.keys.empty() || result.keys.size() != static_cast<size_t>(index.index.relnatts) ||
+        result.keys.size() + result.includes.size() > static_cast<size_t>(std::numeric_limits<int16_t>::max()))
+        throw DbError("XX001", "index columns do not match its catalog identity");
+    const auto validateColumns = [&](const auto& names) {
+        for (const auto& name : names)
+            if (std::none_of(table->cols.begin(), table->cols.end(),
+                    [&](const auto& candidate) { return candidate.dataName == name; }))
+                throw DbError("XX001", "index column is missing from its owning table");
+    };
+    if (!result.expression) validateColumns(result.keys);
+    validateColumns(result.includes);
+    return result;
+}
+} // namespace
+
 std::optional<std::string> CatalogService::indexDefinition(const std::string& database, Oid oid,
     int32_t column, bool pretty, const Session* session) const {
     const auto ownership = engine_.catalogReadOwnership(database);
@@ -792,81 +897,24 @@ std::optional<std::string> CatalogService::indexDefinition(const std::string& da
         throw DbError("55P03", "index definition conflicts with active DDL");
     if (index->table.relkind != 'r' || index->table.relispartition)
         throw DbError("0A000", "index definitions require an ordinary table");
-
-    std::string physical = index->table.relname;
-    if (index->schema.compare(0, 8, "pg_temp_") == 0) {
-        physical = "__tmp_" + index->schema.substr(8) + "_" + physical;
-    } else if (index->schema != "public") {
-        physical = index->schema + "__" + physical;
-    }
-    auto table = engine_.readPersistedSchemaForCatalog(database, physical);
-    if (!table && index->schema == "public") {
-        physical = "public__" + physical;
-        table = engine_.readPersistedSchemaForCatalog(database, physical);
-    }
-    if (!table) throw DbError("XX001", "index owner definition is missing");
-    if (table->partitionType != TableSchema::PartitionType::None)
-        throw DbError("0A000", "partitioned index definitions are not supported");
-    const auto named = engine_.getNamedIndex(database, physical, index->index.relname);
-    if (!named || access_method_catalog::indexOid(named->accessMethod) != index->index.relam)
-        throw DbError("XX001", "index access method does not match its catalog identity");
-
-    std::vector<std::string> keys;
-    std::vector<std::string> includes;
-    bool unique = false;
-    bool descending = false;
-    bool partial = false;
-    std::string method = named->accessMethod;
-    if (method == "btree") {
-        const auto definitions = engine_.getIndexMetadata(database, physical);
-        const auto definition = std::find_if(definitions.begin(), definitions.end(),
-            [&](const auto& entry) { return entry.name == named->key; });
-        if (definition == definitions.end()) throw DbError("XX001", "B-tree definition is missing");
-        if (definition->isExpression) throw DbError("0A000", "expression index definitions are not supported");
-        keys.push_back(definition->name);
-        includes = definition->includeCols;
-        unique = definition->isUnique;
-        descending = definition->descending;
-        partial = !definition->whereCondition.empty();
-    } else if (method == "composite") {
-        const auto definitions = engine_.getCompositeIndexes(database, physical);
-        const auto definition = std::find_if(definitions.begin(), definitions.end(),
-            [&](const auto& entry) { return entry.name == named->key; });
-        if (definition == definitions.end()) throw DbError("XX001", "composite B-tree definition is missing");
-        method = "btree";
-        keys = definition->columns;
-        includes = definition->includeCols;
-        unique = definition->isUnique;
-        partial = !definition->whereCondition.empty();
-    } else if (method == "hash") {
-        const auto columns = engine_.getHashIndexedColumns(database, physical);
-        if (std::find(columns.begin(), columns.end(), named->key) == columns.end())
-            throw DbError("XX001", "hash index definition is missing");
-        keys.push_back(named->key);
-    } else {
+    const auto layout = readIndexLayout(engine_, database, *index);
+    if (layout.partitioned) throw DbError("0A000", "partitioned index definitions are not supported");
+    if (layout.expression) throw DbError("0A000", "expression index definitions are not supported");
+    if (layout.method != "btree" && layout.method != "hash")
         throw DbError("0A000", "index definition for this access method is not supported");
-    }
-    if (keys.empty() || keys.size() != static_cast<size_t>(index->index.relnatts))
-        throw DbError("XX001", "index columns do not match its catalog identity");
-    const auto validateColumns = [&](const auto& names) {
-        for (const auto& name : names)
-            if (std::none_of(table->cols.begin(), table->cols.end(),
-                    [&](const auto& candidate) { return candidate.dataName == name; }))
-                throw DbError("XX001", "index column is missing from its owning table");
-    };
-    validateColumns(keys);
-    validateColumns(includes);
+    const auto& keys = layout.keys;
+    const auto& includes = layout.includes;
 
     if (column != 0) {
         if (column < 0 || static_cast<size_t>(column) > keys.size() + includes.size()) return std::string{};
         const size_t ordinal = static_cast<size_t>(column - 1);
         return SQLParser::quoteIdentifier(ordinal < keys.size() ? keys[ordinal] : includes[ordinal - keys.size()]);
     }
-    if (partial) throw DbError("0A000", "partial index predicates cannot be reconstructed");
-    std::string sql = unique ? "CREATE UNIQUE INDEX " : "CREATE INDEX ";
+    if (layout.partial) throw DbError("0A000", "partial index predicates cannot be reconstructed");
+    std::string sql = layout.unique ? "CREATE UNIQUE INDEX " : "CREATE INDEX ";
     sql += SQLParser::quoteIdentifier(index->index.relname) + " ON ";
     if (!index->tableVisible) sql += SQLParser::quoteIdentifier(index->schema) + '.';
-    sql += SQLParser::quoteIdentifier(index->table.relname) + " USING " + method + " (";
+    sql += SQLParser::quoteIdentifier(index->table.relname) + " USING " + layout.method + " (";
     const auto append = [&](const auto& names) {
         for (size_t i = 0; i < names.size(); ++i) {
             if (i) sql += ", ";
@@ -874,7 +922,7 @@ std::optional<std::string> CatalogService::indexDefinition(const std::string& da
         }
     };
     append(keys);
-    if (descending) sql += " DESC";
+    if (layout.descending) sql += " DESC";
     sql += ')';
     if (!includes.empty()) {
         sql += " INCLUDE (";
@@ -882,6 +930,37 @@ std::optional<std::string> CatalogService::indexDefinition(const std::string& da
         sql += ')';
     }
     return sql;
+}
+
+std::vector<std::vector<ExprValue>> CatalogService::indexRows(const std::string& database,
+    std::optional<Oid> owner, std::optional<Oid> index) const {
+    const auto ownership = engine_.catalogReadOwnership(database);
+    const auto catalog = readCatalog(database, ownership.mayReadCurrentFiles);
+    if (!catalog.manager && catalog.path.empty()) return {};
+    const auto entries = catalog.manager ? catalog.manager->registeredIndexes(owner, index) :
+        CatalogManager::readRegisteredIndexes(catalog.path, owner, index);
+    if (!entries.empty() && !ownership.mayReadCurrentFiles)
+        throw DbError("55P03", "index catalog conflicts with active DDL");
+    std::vector<std::vector<ExprValue>> rows;
+    rows.reserve(entries.size());
+    const auto flag = [](bool value) { return ExprValue("boolean", value ? "t" : "f"); };
+    for (const auto& entry : entries) {
+        checkForQueryInterrupt();
+        const auto layout = readIndexLayout(engine_, database, entry);
+        const auto params = engine_.getStorageParams(database, layout.physicalTable);
+        const auto namesIndex = [&](const char* key) {
+            const auto found = params.find(key);
+            return found != params.end() && found->second == entry.index.relname;
+        };
+        // Explicit indexes are registered only after the build completes.
+        // Their catalog identity is removed when the DDL drops the index.
+        rows.push_back({ExprValue("oid", std::to_string(entry.index.oid)), ExprValue("oid", std::to_string(entry.table.oid)),
+            ExprValue("smallint", std::to_string(layout.keys.size() + layout.includes.size())),
+            ExprValue("smallint", std::to_string(layout.keys.size())), flag(layout.unique), flag(false),
+            flag(false), flag(false), flag(true), flag(namesIndex("cluster_on")), flag(true), flag(false), flag(true),
+            flag(true), flag(entry.table.relreplident == 'i' && namesIndex("replica_identity_index"))});
+    }
+    return rows;
 }
 
 std::vector<PgNamespaceRow> CatalogService::namespaceSnapshot(const std::string& dbname) const {

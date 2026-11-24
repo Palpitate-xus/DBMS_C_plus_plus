@@ -27,6 +27,7 @@
 #include "catalog/PgAccessMethodCatalog.h"
 #include "catalog/PgCollationCatalog.h"
 #include "catalog/PgForeignKeyCatalog.h"
+#include "catalog/PgIndexCatalog.h"
 #include "catalog/PgRolesCatalog.h"
 #include "common/DataDirectory.h"
 #include "storage/VariableRow.h"
@@ -40743,60 +40744,7 @@ std::vector<std::string> StorageEngine::queryPgCatalog(
         }
         result = getPgStatsRows(fDb, fTable, fCol);
     } else if (tablename == "pg_index" || tablename == "PG_INDEX") {
-        // PostgreSQL pg_index: indrelid indkey indisunique indisprimary
-        for (const auto& dbname : getDatabaseNames()) {
-            for (const auto& tname : getTableNames(dbname)) {
-                TableSchema tbl = getTableSchema(dbname, tname);
-                // Single-column indexes
-                auto idxCols = getIndexedColumns(dbname, tname);
-                const auto indexMetadata =
-                    getIndexMetadata(dbname, tname);
-                for (const auto& cname : idxCols) {
-                    std::string isUnique = "f";
-                    std::string isPrimary = "f";
-                    for (size_t i = 0; i < tbl.len(); ++i) {
-                        if (tbl.cols[i].dataName == cname) {
-                            if (tbl.cols[i].isUnique) isUnique = "t";
-                            if (tbl.cols[i].isPrimaryKey) isPrimary = "t";
-                        }
-                    }
-                    for (const auto& metadata : indexMetadata) {
-                        if (!metadata.isExpression &&
-                            metadata.name == cname && metadata.isUnique) {
-                            isUnique = "t";
-                            break;
-                        }
-                    }
-                    std::string row = tname + " " + cname + " " + isUnique + " " + isPrimary + " ";
-                    bool match = true;
-                    for (const auto& c : conds) {
-                        if (c.colName == "indrelid" && c.op == "=" && tname != c.value) { match = false; break; }
-                    }
-                    if (match) result.push_back(row);
-                }
-                for (const auto& metadata :
-                     getCompositeIndexes(dbname, tname)) {
-                    std::string key;
-                    for (size_t columnIndex = 0;
-                         columnIndex < metadata.columns.size();
-                         ++columnIndex) {
-                        if (columnIndex != 0) key += ',';
-                        key += metadata.columns[columnIndex];
-                    }
-                    std::string row = tname + " " + key + " " +
-                        (metadata.isUnique ? "t" : "f") + " f ";
-                    bool match = true;
-                    for (const auto& c : conds) {
-                        if (c.colName == "indrelid" && c.op == "=" &&
-                            tname != c.value) {
-                            match = false;
-                            break;
-                        }
-                    }
-                    if (match) result.push_back(row);
-                }
-            }
-        }
+        throw DbError("0A000", "pg_index requires a database-bound catalog query");
     } else if (tablename == "pg_namespace" || tablename == "PG_NAMESPACE") {
         // This old text API has no database owner. Database directory names
         // are not schema rows; require the actual database-bound source.
@@ -42492,7 +42440,8 @@ decltype(auto) StorageEngine::withQueryBindingMetadata(const std::string& dbname
             if (!requested.schema.empty()) schemas.push_back(requested.schema);
             else if (requested.name == "pg_type" || requested.name == inheritance_catalog::name ||
                      requested.name == access_method_catalog::name || requested.name == collation_catalog::name ||
-                     requested.name == foreign_key_catalog::name || requested.name == roles_catalog::name)
+                     requested.name == foreign_key_catalog::name || requested.name == roles_catalog::name ||
+                     requested.name == index_catalog::name)
                 schemas = effectiveRelationSearchPath(session);
             else {
                 std::string canonical; std::vector<std::string> path;
@@ -42528,6 +42477,7 @@ decltype(auto) StorageEngine::withQueryBindingMetadata(const std::string& dbname
                         {access_method_catalog::name, access_method_catalog::descriptor()},
                         {collation_catalog::name, collation_catalog::descriptor()},
                         {foreign_key_catalog::name, foreign_key_catalog::descriptor()},
+                        {index_catalog::name, index_catalog::descriptor()},
                         {"pg_namespace", ownedNamespaceCatalogDescriptor()},
                         {"pg_settings", system_catalog::settingsDescriptor()},
                         {"pg_stat_activity", {{"pid","integer"},{"datname","name"},{"usename","name"},{"state","text"},{"query","text"}}}
@@ -42560,6 +42510,9 @@ decltype(auto) StorageEngine::withQueryBindingMetadata(const std::string& dbname
                         if (requested.name == foreign_key_catalog::name)
                             default_catalog::validate(catalog, foreign_key_catalog::relationOid,
                                 foreign_key_catalog::name, foreign_key_catalog::fields, 20);
+                        if (requested.name == index_catalog::name)
+                            default_catalog::validate(catalog, index_catalog::relationOid,
+                                index_catalog::name, index_catalog::fields, 19);
                         for(auto& column:description.columns) {
                             if (!column.typeOid) column.typeOid=mapBuiltinTypeNameToOid(column.type);
                             if(column.typeOid)column.typeMetadata=metadata.datumType(column.type,column.typeOid);

@@ -10,6 +10,7 @@
 #include "catalog/PgAccessMethodCatalog.h"
 #include "catalog/PgCollationCatalog.h"
 #include "catalog/PgForeignKeyCatalog.h"
+#include "catalog/PgIndexCatalog.h"
 #include "catalog/PgRolesCatalog.h"
 #include "catalog/PgDefaultCatalog.h"
 #include "expression/ArrayDatumInput.h"
@@ -21590,6 +21591,10 @@ class PreparedWithDmlRuntime {
             } else if (range.relationSchema == "pg_catalog" && range.relationName == dbms::roles_catalog::name) {
                 virtualRows = make_shared<dbms::PreparedQueryRows>(dbms::roles_catalog::rows(g_engine, range.readsRoleExpiry,
                     dbms::catalogOidLiteralFilter(range, true, dbms::roles_catalog::oidAttributeNumber)));
+            } else if (range.relationSchema == "pg_catalog" && range.relationName == dbms::index_catalog::name) {
+                virtualRows = make_shared<dbms::PreparedQueryRows>(g_engine.catalogService().indexRows(session_.currentDB,
+                    dbms::catalogOidLiteralFilter(range, true, dbms::index_catalog::ownerAttribute),
+                    dbms::catalogOidLiteralFilter(range, true, dbms::index_catalog::indexAttribute)));
             } else if(range.relationSchema=="pg_catalog" && range.relationName=="pg_stats") {
                 statisticsRows=make_shared<optional<dbms::PreparedQueryRows>>();
             } else if(range.relationSchema=="pg_catalog" && range.relationName=="pg_namespace") {
@@ -33946,7 +33951,7 @@ static bool executeInternal(const string& rawSql, Session& s,
             !g_engine.viewExists(queryDb, tname);
         static const std::set<std::string> unimplementedCatalogRelations = {
             "pg_auth_members", "pg_authid", "pg_cast",
-            "pg_default_acl", "pg_index",
+            "pg_default_acl",
             "pg_namespace", "pg_opclass", "pg_operator", "pg_policy",
             "pg_publication",
             "pg_rewrite", "pg_replication_origin", "pg_stats", "pg_statistic",

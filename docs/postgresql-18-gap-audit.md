@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-24 · `pg_index` 可查询显式索引
+
+可读出显式索引的真实编号、所属表、键列数、总列数和状态。隐式主键及约束索引、约束引用的索引编号和索引键定义仍待补齐。`CAT-02`、`CAT-03` 和 `CLIENT-01` 保持部分实现。 [功能验证](test-report.md#pg-index-20261124) · [性能对照](performance-report-2026-10-30.md#pg-index-cost-20261124)
+
 ## 2026-11-24 · 可以查看显式索引的定义
 
 `pg_get_indexdef` 使用已登记的索引和表编号，按当前表名、列名和保存的定义返回 SQL。支持普通表上的显式 B 树和哈希索引。`CAT-02`、`CAT-03` 和 `CLIENT-01` 保持部分实现。完整 `psql \d` 仍需要索引目录 `pg_index`。 [验证范围](test-report.md#index-definition-20261124) · [性能对照](performance-report-2026-10-30.md#index-definition-cost-20261124)

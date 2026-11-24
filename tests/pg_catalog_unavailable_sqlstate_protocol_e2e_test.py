@@ -22,7 +22,6 @@ UNIMPLEMENTED_CATALOGS = (
     "pg_subscription",
     "pg_publication",
     "pg_replication_origin",
-    "pg_index",
     "pg_operator",
     "pg_type",
     "pg_enum",
