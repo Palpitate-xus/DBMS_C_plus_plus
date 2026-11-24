@@ -3335,12 +3335,37 @@ void CatalogManager::loadAllLocked() {
     namespaces_.clear(); classes_.clear(); attributes_.clear(); types_.clear();
     enums_.clear(); procs_.clear(); depends_.clear(); authIds_.clear();
     authMembers_.clear(); descriptions_.clear(); attrdefs_.clear(); foreignKeys_.clear(); primaryKeys_.clear();
-    std::map<std::string, CatalogFileGeneration> before;
-    for (const auto& image : serializeAllLocked()) {
-        CatalogFileGeneration generation;
-        if (catalogGeneration(catalogFilePath(image.first), generation))
-            before.emplace(image.first, generation);
-    }
+    // All image families are emitted even by an empty model. Reuse their
+    // names for both inspections so one-shot readers need no serialized copy
+    // of the parsed rows.
+    const auto emptyImages = serializeAllLocked();
+    const auto inspectImages = [&] {
+        std::map<std::string, CatalogFileGeneration> generations;
+#if defined(__linux__) && defined(O_PATH)
+        // Close the extra descriptor before opening any catalog streams.
+        // Read-only scans can also fall back when no descriptor is available.
+        std::optional<CatalogDirectoryScan> directory;
+        if (!oidGen_) directory.emplace(dbPath_);
+        const bool useDirectoryFd = directory && directory->valid();
+#endif
+        for (const auto& image : emptyImages) {
+            CatalogFileGeneration generation;
+#if defined(__linux__) && defined(O_PATH)
+            const bool inspected = useDirectoryFd
+                ? directory->read("pg_" + image.first + ".cat", generation)
+                : catalogGeneration(catalogFilePath(image.first), generation);
+#else
+            const bool inspected = catalogGeneration(catalogFilePath(image.first), generation);
+#endif
+            if (inspected) generations.emplace(image.first, generation);
+        }
+#if defined(__linux__) && defined(O_PATH)
+        if (useDirectoryFd && !directory->stillNamesDirectory())
+            throw DbError("58030", "catalog image changed while loading");
+#endif
+        return generations;
+    };
+    const auto before = inspectImages();
 
     // A cold read-only metadata lookup must not bootstrap a catalog. Storage
     // schema reads legitimately precede creation of a pg_catalog directory.
@@ -3849,19 +3874,17 @@ void CatalogManager::loadAllLocked() {
     upgradeLegacyAttributeLengths(attributes_,types_,typeByOid_);
     if(systemAttributesExpected)system_attributes::validateAll(classes_,attributes_,types_);
     if(systemCatalogCollationsExpected)system_catalog_collation::validate(classes_,attributes_,types_);
-    auto images = serializeAllLocked();
-    std::map<std::string, CatalogFileGeneration> observed;
-    for (const auto& image : images) {
-        CatalogFileGeneration generation;
-        if (catalogGeneration(catalogFilePath(image.first), generation)) {
-            const auto original = before.find(image.first);
-            if (original == before.end() || !(original->second == generation))
-                throw DbError("58030", "catalog image changed while loading");
-            observed.emplace(image.first, generation);
-        }
+    // Mutable catalogs compare their rows with the loaded image before they
+    // can publish. ReadOnlyTag readers never take the publication path.
+    std::map<std::string, std::string> images;
+    if (oidGen_) images = serializeAllLocked();
+    auto observed = inspectImages();
+    if (before != observed)
+        throw DbError("58030", "catalog image changed while loading");
+    if (oidGen_) {
+        persistence_->baseline = std::move(images);
+        persistence_->observed = std::move(observed);
     }
-    persistence_->baseline = std::move(images);
-    persistence_->observed = std::move(observed);
     systemAttributesMaterialized_=systemAttributesExpected;
     } catch (...) {
         std::tie(namespaces_, classes_, attributes_, types_, enums_, procs_,

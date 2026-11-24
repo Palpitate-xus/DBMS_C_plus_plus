@@ -1,4 +1,5 @@
 #include "catalog/catalog.h"
+#include "common/DbError.h"
 #include <cerrno>
 #include <cstdlib>
 #include <filesystem>
@@ -316,11 +317,22 @@ int main() {
                 while (true) { int fd=::open("/dev/null",O_RDONLY|O_CLOEXEC);if(fd<0)break;held.push_back(fd); }
                 const bool exhausted=errno==EMFILE;
                 const auto state=observer.publicationState();
+                bool singleDescriptorRead = false;
+                if (!held.empty()) {
+                    ::close(held.back());
+                    held.pop_back();
+                    try {
+                        const auto snapshot = CatalogManager::readMetadataSnapshot(root.string());
+                        singleDescriptorRead = snapshot.relations.size() == 1 && snapshot.relations[0].oid == oid;
+                    } catch (const dbms::DbError&) {
+                    }
+                }
                 for(int fd:held)::close(fd);
                 const bool restored=::setrlimit(RLIMIT_NOFILE,&original)==0;
                 check(restored,"restore file descriptor limit");
                 check(exhausted,"exercise descriptor exhaustion");
                 check(state==current,"descriptor exhaustion preserves stat-only current read");
+                check(singleDescriptorRead,"read-only reload can inspect and open files with one free descriptor");
             }
 #ifdef EXPECT_BATCHED_CATALOG_SCAN
             const auto alternate=base/"alternate", displaced=base/"displaced";
@@ -344,6 +356,17 @@ int main() {
             const auto aba=observer.publicationState();raceEnabled=false;
             check(raceFired && aba==current,"swap-and-restore ABA is not detected");
             fs::remove_all(alternate);
+            fs::copy(root, alternate, fs::copy_options::recursive);
+            raceMode=1;raceFired=false;raceEnabled=true;
+            bool readRejected = false;
+            try { (void)CatalogManager::readMetadataSnapshot(root.string()); }
+            catch (const dbms::DbError& error) { readRejected = error.sqlState() == "58030"; }
+            raceEnabled=false;
+            check(raceFired && readRejected,"read-only load rejects directory replacement during inspection");
+            fs::remove_all(root);fs::rename(displaced,root);
+            const auto restored = CatalogManager::readMetadataSnapshot(root.string());
+            check(restored.relations.size() == 1 && restored.relations[0].oid == oid,
+                  "read-only load retries successfully after restoring the directory");
 #endif
         }
 #ifdef EXPECT_SINGLE_PASS_CATALOG_PERSISTENCE

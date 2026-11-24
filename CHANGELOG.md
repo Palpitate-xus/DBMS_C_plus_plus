@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>读取表和列的信息时少做重复工作 · 2026-11-24</summary>
+
+数据库读取表名、列名等信息时，省掉了准备写回文件的步骤。单独测试这项读取时，耗时减少约三成。
+
+[测试报告](docs/test-report.md#catalog-cold-read-20261124) · [性能报告](docs/performance-report-2026-10-30.md#catalog-cold-read-cost-20261124)
+
+</details>
+
+<details>
 <summary>反复查看同一张表的索引更快 · 2026-11-24</summary>
 
 反复查看索引时，数据库需要读的文件更少。在一张有 512 列的测试表上，`psql` 用来显示索引列的查询从约 10 毫秒降到约 8.5 毫秒。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>库里的表很多时，查看索引更快 · 2026-11-24</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-24 · 库里的表很多时，查看索引更快
 
 在多建了 256 张表的测试库里，查看一个索引的列名和类型，查询耗时减少约 25%–31%。
 
 [测试报告](docs/test-report.md#system-attribute-validation-20261124) · [性能报告](docs/performance-report-2026-10-30.md#system-attribute-validation-cost-20261124)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-24 · 用 psql 查看索引用了哪些列
 
