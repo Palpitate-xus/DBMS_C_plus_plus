@@ -17,6 +17,13 @@ cmake --build build/cmake --target dbms_main --parallel 2
 ## 最近更新
 
 <details>
+<summary>可以查到列用什么排序规则 · 2026-11-24</summary>
+
+创建表时为文本列指定了排序规则，现在可以查到它。例如，可以看出订单备注是否按字节顺序排序，也就是 `C` 规则。
+
+</details>
+
+<details>
 <summary>可以查到常见列默认值 · 2026-11-24</summary>
 
 可以用 SQL 查看一列的默认整数、文本或真假值。例如，可以查出订单备注默认是不是空字符串。
@@ -27,13 +34,6 @@ cmake --build build/cmake --target dbms_main --parallel 2
 <summary>可以查到列的类型和长度 · 2026-11-24</summary>
 
 可以用 SQL 查看一列是整数、日期还是文本。例如，声明为 `varchar(12)` 的列会显示长度 12。
-
-</details>
-
-<details>
-<summary>可以用 psql 列出表 · 2026-11-24</summary>
-
-在 `psql` 中输入 `\dt` 就能看到表名和所有者。可以按表名筛选，也可以只看某个模式里的表。
 
 </details>
 

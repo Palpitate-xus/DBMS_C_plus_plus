@@ -21,6 +21,7 @@
 #include "parser/parser.h"
 #include "catalog/CatalogService.h"
 #include "catalog/PgAccessMethodCatalog.h"
+#include "catalog/PgCollationCatalog.h"
 #include "catalog/RelationSearchPath.h"
 #include "catalog/systables.h"
 #include "catalog/type_registry.h"
@@ -1301,6 +1302,8 @@ static PgAttributeRow catalogAttributeForColumn(
     attribute.attstorage = declaredType->typstorage;
     if (!previous || previous->atttypid != attribute.atttypid || !attribute.attcollation)
         attribute.attcollation = declaredType->typcollation;
+    if (declaredType->typcollation)
+        if (const auto oid = collation_catalog::builtinOid(column.collation)) attribute.attcollation = oid;
     attribute.attidentity = column.identityKind;
     attribute.attgenerated = column.generatedExpr.empty()
         ? '\0' : (column.generatedKind == 'v' ? 'v' : 's');

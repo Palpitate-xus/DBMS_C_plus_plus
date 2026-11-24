@@ -135,11 +135,14 @@ inline std::vector<std::vector<ExprValue>> classRows(const CatalogManager::Metad
     for(const auto& row:snapshot.relations)rows.push_back(classCells(row));
     return rows;
 }
-inline std::vector<std::vector<ExprValue>> attributeRows(const CatalogManager::MetadataSnapshot& snapshot) {
+inline std::vector<std::vector<ExprValue>> attributeRows(const CatalogManager::MetadataSnapshot& snapshot,
+                                                        std::optional<Oid> relation = std::nullopt) {
     validateRead(snapshot,1249,"pg_attribute",75,270,attributeFields,20);
     if(snapshot.systemAttributesMaterialized)system_attributes::validateAll(snapshot.relations,snapshot.attributes,snapshot.types);
-    std::vector<std::vector<ExprValue>> rows;rows.reserve(snapshot.attributes.size());
-    for(const auto& row:snapshot.attributes)rows.push_back(attributeCells(row));
+    std::vector<std::vector<ExprValue>> rows;
+    if (!relation) rows.reserve(snapshot.attributes.size());
+    for (const auto& row : snapshot.attributes)
+        if (!relation || row.attrelid == *relation) rows.push_back(attributeCells(row));
     return rows;
 }
 } // namespace dbms::system_catalog

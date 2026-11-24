@@ -3,6 +3,7 @@
 #include "catalog/SystemCatalogRows.h"
 #include "catalog/PgDefaultCatalog.h"
 #include "catalog/PgAccessMethodCatalog.h"
+#include "catalog/PgCollationCatalog.h"
 #include "ExecutionPlan.h"
 #include "parser/BetweenSyntax.h"
 #include "expression/StoredRegtypeValue.h"
@@ -7721,21 +7722,24 @@ OpPtr QueryPlanner::buildPreparedQueryPlan(StorageEngine* engine,const std::stri
                 });
         } else if(found->relationSchema=="pg_catalog" &&
                   (found->relationName=="pg_class" || found->relationName=="pg_attribute" ||
-                   found->relationName==access_method_catalog::name)) {
+                   found->relationName==access_method_catalog::name || found->relationName==collation_catalog::name)) {
             for(const auto& output:found->columns) {
                 Column column;column.dataName=output.name;column.dataType=output.type;
                 column.isVariableLength=true;schema.append(column);
             }
             const bool attributes=found->relationName=="pg_attribute";
             const bool methods=found->relationName==access_method_catalog::name;
+            const bool collations=found->relationName==collation_catalog::name;
+            const auto relation = attributes ? attributeCatalogRelationFilter(*found) : std::nullopt;
             auto rows=std::make_shared<std::optional<PreparedQueryRows>>();
             source=std::make_unique<PreparedSourceRowsOp>(found->columns,
-                [engine,database,rows,attributes,methods](size_t index,std::vector<ExprValue>& row) {
+                [engine,database,rows,attributes,methods,collations,relation](size_t index,std::vector<ExprValue>& row) {
                     if(!*rows) {
                         if (methods) *rows = access_method_catalog::rows();
+                        else if (collations) *rows = collation_catalog::rows();
                         else {
-                            const auto metadata = engine->catalogService().metadataSnapshot(database, attributes);
-                            *rows = attributes ? system_catalog::attributeRows(metadata)
+                            const auto metadata = engine->catalogService().metadataSnapshot(database, false);
+                            *rows = attributes ? system_catalog::attributeRows(metadata, relation)
                                 : system_catalog::classRows(metadata);
                         }
                     }

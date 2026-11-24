@@ -12,12 +12,22 @@ namespace dbms {
 
 // Admit only a direct equality on this range's OID column and a decimal
 // constant that is lossless as an OID. The original filter still runs.
-inline std::optional<Oid> typeCatalogOidFilter(const PreparedQuery::SourceRange& range) {
+inline std::optional<Oid> catalogOidLiteralFilter(const PreparedQuery::SourceRange& range,
+                                                bool firstConjunct) {
     const auto* select = dynamic_cast<const SelectStmt*>(range.owner);
     if (!select || range.source != select->fromClause.get() || range.columns.empty() ||
         range.columns.front().physicalAttributeNumber != 1 || range.columns.front().typeOid != 26)
         return std::nullopt;
-    const auto* equality = dynamic_cast<const BinaryOpExpr*>(select->whereClause.get());
+    const Expr* predicate = select->whereClause.get();
+    if (firstConjunct) {
+        // Rows rejected by this leading equality already short-circuit all
+        // later terms. Do not skip a term that precedes the equality.
+        while (const auto* conjunction = dynamic_cast<const BinaryOpExpr*>(predicate)) {
+            if (conjunction->preparedSubquery || (conjunction->op != "and" && conjunction->op != "AND")) break;
+            predicate = conjunction->left.get();
+        }
+    }
+    const auto* equality = dynamic_cast<const BinaryOpExpr*>(predicate);
     if (!equality || equality->op != "=" || equality->preparedSubquery ||
         equality->comparison || equality->predicateCollation)
         return std::nullopt;
@@ -51,7 +61,7 @@ inline std::optional<Oid> typeCatalogOidFilter(const PreparedQuery::SourceRange&
     // Never evaluate a literal or cast during source selection. Check its
     // decimal representation; the ordinary predicate owns all conversions.
     std::string_view digits = literal->value;
-    if ((cast || literal->analyzedPrimitiveConstant) && digits.size() >= 2 &&
+    if ((cast || literal->analyzedPrimitiveConstant || firstConjunct) && digits.size() >= 2 &&
         digits.front() == '\'' && digits.back() == '\'') {
         digits.remove_prefix(1);
         digits.remove_suffix(1);
@@ -62,6 +72,14 @@ inline std::optional<Oid> typeCatalogOidFilter(const PreparedQuery::SourceRange&
     const auto parsed = std::from_chars(digits.data(), end, oid);
     if (parsed.ec == std::errc{} && parsed.ptr == end) return oid;
     return std::nullopt;
+}
+
+inline std::optional<Oid> typeCatalogOidFilter(const PreparedQuery::SourceRange& range) {
+    return catalogOidLiteralFilter(range, false);
+}
+
+inline std::optional<Oid> attributeCatalogRelationFilter(const PreparedQuery::SourceRange& range) {
+    return catalogOidLiteralFilter(range, true);
 }
 
 class TypeCatalogScan {

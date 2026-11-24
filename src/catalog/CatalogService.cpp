@@ -15,6 +15,7 @@
 #include "common/DatabaseMetadataWrite.h"
 #include "catalog/PgInheritanceCatalog.h"
 #include "catalog/PgAccessMethodCatalog.h"
+#include "catalog/PgCollationCatalog.h"
 #include "common/DbError.h"
 #include "access/IndexFileUtil.h"
 #include <filesystem>
@@ -182,21 +183,56 @@ std::vector<CatalogManager::PhysicalArrayAttribute> physicalArrayAttributes(
 
 struct CatalogDatabaseIdentity { uint64_t device = 0; uint64_t inode = 0; };
 
-bool accessMethodsPublished(const fs::path& path) {
+bool catalogVersionPublished(const fs::path& path, std::string_view version) {
     std::error_code error;
     const auto status = fs::symlink_status(path, error);
     if (error == std::errc::no_such_file_or_directory ||
         (!error && !fs::exists(status))) return false;
-    if (error) throw DbError("58030", "cannot inspect access method catalog version");
+    if (error) throw DbError("58030", "cannot inspect catalog version: " + path.filename().string());
     if (!fs::is_regular_file(status) ||
-        fs::file_size(path) != sizeof(access_method_catalog::version) - 1)
-        throw DbError("XX001", "invalid access method catalog version");
+        fs::file_size(path) != version.size())
+        throw DbError("XX001", "invalid catalog version: " + path.filename().string());
     std::ifstream input(path, std::ios::binary);
-    if (!input) throw DbError("58030", "cannot read access method catalog version");
+    if (!input) throw DbError("58030", "cannot read catalog version: " + path.filename().string());
     const std::string bytes((std::istreambuf_iterator<char>(input)), {});
-    if (input.bad() || bytes != access_method_catalog::version)
-        throw DbError("XX001", "invalid access method catalog version");
+    if (input.bad() || bytes != version)
+        throw DbError("XX001", "invalid catalog version: " + path.filename().string());
     return true;
+}
+
+void initializeColumnCollations(const StorageEngine& engine, const std::string& database,
+                                CatalogManager& catalog) {
+    std::unordered_map<std::string, Oid> physicalOwners;
+    for (const auto& relation : catalog.listClasses()) {
+        if (relation.relnamespace == 11 || (relation.relkind != 'r' && relation.relkind != 'p')) continue;
+        const auto schema = catalog.getNamespace(relation.relnamespace);
+        if (!schema || schema->nspname.rfind("pg_temp_", 0) == 0) continue;
+        const std::string physical = schema->nspname == "public" ? relation.relname
+            : schema->nspname + "__" + relation.relname;
+        const auto [it, unique] = physicalOwners.emplace(physical, relation.oid);
+        if (!unique) it->second = INVALID_OID;
+    }
+    for (const auto& [physical, owner] : physicalOwners) {
+        if (!owner) continue;
+        const auto schema = engine.readPersistedSchemaForCatalog(database, physical);
+        if (!schema) continue;
+        auto attributes = catalog.findUserAttributes(owner);
+        bool changed = false;
+        for (auto& attribute : attributes) {
+            if (attribute.attisdropped || attribute.attnum <= 0 ||
+                static_cast<size_t>(attribute.attnum) > schema->len()) continue;
+            const auto& column = schema->cols[attribute.attnum - 1];
+            if (column.dataName != attribute.attname) continue;
+            const auto oid = collation_catalog::builtinOid(column.collation);
+            if (!oid || oid == attribute.attcollation) continue;
+            const auto type = catalog.getType(attribute.atttypid);
+            if (!type || !type->typcollation) continue;
+            attribute.attcollation = oid;
+            changed = true;
+        }
+        if (changed && !catalog.replaceAttributes(owner, attributes))
+            throw DbError("XX001", "could not publish column collation identities");
+    }
 }
 
 void initializeRelationAccessMethods(const StorageEngine& engine, const std::string& database,
@@ -341,10 +377,20 @@ std::shared_ptr<CatalogManager> loadOwnedCatalog(
     const bool initializedInheritance = default_catalog::bootstrapOne(*catalog,
         inheritance_catalog::relationOid, inheritance_catalog::name, inheritance_catalog::fields, publishedInheritance);
     const auto accessMethodMarker = directory / ".access_method_catalog_version";
-    const bool publishedAccessMethods = accessMethodsPublished(accessMethodMarker);
+    const bool publishedAccessMethods = catalogVersionPublished(accessMethodMarker, access_method_catalog::version);
     const bool initializedAccessMethods = default_catalog::bootstrapOne(*catalog,
         access_method_catalog::relationOid, access_method_catalog::name, access_method_catalog::fields,
         publishedAccessMethods);
+    const auto collationMarker = directory / ".collation_catalog_version";
+    const bool publishedCollations = catalogVersionPublished(collationMarker, collation_catalog::version);
+    const bool initializedCollations = default_catalog::bootstrapOne(*catalog,
+        collation_catalog::relationOid, collation_catalog::name, collation_catalog::fields, publishedCollations);
+    if (initializedCollations) {
+        auto declaration = catalog->getClass(collation_catalog::relationOid).value();
+        declaration.relam = access_method_catalog::heapOid;
+        if (!catalog->updateClass(declaration.oid, declaration))
+            throw DbError("XX001", "could not publish collation catalog relation");
+    }
     const bool publishedDefaultCatalog = default_catalog::published(directory);
     const bool initializedDefaultCatalog = default_catalog::bootstrap(*catalog, publishedDefaultCatalog);
     const auto sequenceMarker=directory/".sequence_catalog_version";
@@ -371,6 +417,7 @@ std::shared_ptr<CatalogManager> loadOwnedCatalog(
     const bool initializedPhysicalArrays = catalog->bootstrapPhysicalArrayAttributes(
         physicalArrayAttributes(engine, database, *catalog), publishedPhysicalArrays);
     if (!publishedAccessMethods) initializeRelationAccessMethods(engine, database, *catalog);
+    if (!publishedCollations) initializeColumnCollations(engine, database, *catalog);
     // Some legitimate server cluster scaffolds already have tlist.lst and
     // auth metadata, but no namespace catalog. A newly bootstrapped logical
     // public namespace must have the same checked physical marker as CREATE
@@ -395,8 +442,11 @@ std::shared_ptr<CatalogManager> loadOwnedCatalog(
         }
     }
     migrateLegacyPublicDottedSequences(engine, database, *catalog);
-    if((initializedClassCatalog || initializedOwnedCatalogs || initializedInheritance || initializedSequenceCatalog || initializedStatisticsView || initializedSystemAttributes || initializedTypeProperties || initializedCatalogCollations || initializedPhysicalArrays || initializedDefaultCatalog || !publishedDefaultCatalog || !publishedTypeProperties || !publishedCatalogCollations || !publishedPhysicalArrays || initializedAccessMethods || !publishedAccessMethods) && !catalog->persistAll())
+    if((initializedClassCatalog || initializedOwnedCatalogs || initializedInheritance || initializedSequenceCatalog || initializedStatisticsView || initializedSystemAttributes || initializedTypeProperties || initializedCatalogCollations || initializedPhysicalArrays || initializedDefaultCatalog || !publishedDefaultCatalog || !publishedTypeProperties || !publishedCatalogCollations || !publishedPhysicalArrays || initializedAccessMethods || !publishedAccessMethods || !publishedCollations) && !catalog->persistAll())
         throw DbError("58030","could not publish initialized system view identities");
+    if (!publishedCollations && index_file::writeAtomicallyNoReplace(collationMarker,
+            collation_catalog::version) != index_file::WriteResult::OK)
+        throw DbError("58030", "could not publish collation catalog version");
     if (!publishedAccessMethods && index_file::writeAtomicallyNoReplace(accessMethodMarker,
             access_method_catalog::version) != index_file::WriteResult::OK)
         throw DbError("58030", "could not publish access method catalog version");

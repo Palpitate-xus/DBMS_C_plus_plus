@@ -6,9 +6,13 @@
 
 截至 2026-11-24，273 项功能要求中有 22 项完成、169 项部分实现、67 项待验证、15 项暂缓。各项结果和剩余范围见功能总账。以下更新报告给出各轮测试的实际范围。[功能总账](gap-progress.json) · [支持的功能和限制](compatibility-contract.md)
 
+## 2026-11-24 · 可以查到列用什么排序规则
+
+原版 `psql` 18.6 可执行普通表的列信息查询，读出类型、常见默认值和排序规则。完整的 `\d` 仍需要外键查询所用的 `pg_constraint`。 [查询示例](MANUAL.md#查询列的排序规则) · [测试报告](test-report.md#collation-catalog-20261124) · [性能报告](performance-report-2026-10-30.md#collation-catalog-cost-20261124)
+
 ## 2026-11-24 · 可以查到常见列默认值
 
-可以用 SQL 显示列登记的整数、文本、布尔值和对象引用默认值。显示时不会执行默认值。原版 `psql` 的 `\d` 还需要字符排序规则目录 `pg_collation`。 [查询示例](MANUAL.md#查询列的默认值) · [测试报告](test-report.md#column-default-expression-20261124) · [性能报告](performance-report-2026-10-30.md#column-default-expression-cost-20261124)
+可以用 SQL 显示列登记的整数、文本、布尔值和对象引用默认值。显示时不会执行默认值。 [查询示例](MANUAL.md#查询列的默认值) · [测试报告](test-report.md#column-default-expression-20261124) · [性能报告](performance-report-2026-10-30.md#column-default-expression-cost-20261124)
 
 ## 2026-11-24 · 可以查到列的类型和长度
 

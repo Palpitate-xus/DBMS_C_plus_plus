@@ -2701,7 +2701,7 @@ WHERE c.relname = 'orders'
 ORDER BY n.nspname, c.relname;
 ```
 
-`psql` 的 `\d orders` 能查找表并读取访问方式。普通表的列信息查询还需要字符排序规则目录。可以先用下面的 SQL 查询列类型和常见默认值。 [验证记录](test-report.md#column-default-expression-20261124)
+`psql` 的 `\d orders` 能查找表并读取列信息。显示完整表结构还需要约束目录。可以先用下面的 SQL 查询列类型、常见默认值和排序规则。 [验证记录](test-report.md#collation-catalog-20261124)
 
 ### 查询表和索引的访问方式
 
@@ -2746,6 +2746,21 @@ ORDER BY d.adnum;
 ```
 
 例如，默认为数字 `7` 时显示 `7`，默认是空字符串时显示 `''::text`。普通的 `DEFAULT NULL` 和未填写默认值的列没有目录记录。普通运算式、序列调用和引用其他列的生成表达式仍需进一步支持。 [验证记录](test-report.md#column-default-expression-20261124)
+
+### 查询列的排序规则
+
+查询 `public.orders` 使用的排序规则。对于整数这样的非文本类型，右侧名称为空。文本列没有另行指定规则时，通常显示 `default`。
+
+```sql
+SELECT a.attname, c.collname
+FROM pg_catalog.pg_attribute a
+LEFT JOIN pg_catalog.pg_collation c ON c.oid = a.attcollation
+WHERE a.attrelid = 'public.orders'::regclass
+  AND a.attnum > 0 AND NOT a.attisdropped
+ORDER BY a.attnum;
+```
+
+目录可查 `C`、`POSIX`、`ucs_basic`、`default` 及项目自己的 `nocase`、`reverse`、`C.utf8`。用户自行创建的排序规则仍需单独登记到目录。 [验证记录](test-report.md#collation-catalog-20261124)
 
 ---
 

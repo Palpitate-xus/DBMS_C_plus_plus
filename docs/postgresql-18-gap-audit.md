@@ -1,8 +1,12 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-24 · 用 SQL 查询列的排序规则
+
+新增 `pg_collation` 的内置项。普通表的列由真实声明发布排序规则编号，旧库在首次打开时补写可确认的编号。原版 `psql` 的普通表列信息查询通过，随后报告缺少 `pg_constraint`。`CAT-03` 和 `CLIENT-01` 保持部分实现。 [功能验证](test-report.md#collation-catalog-20261124) · [性能对照](performance-report-2026-10-30.md#collation-catalog-cost-20261124)
+
 ## 2026-11-24 · 用 SQL 查询常见列默认值
 
-`pg_attrdef.adbin` 和 `pg_get_expr` 支持常见常量默认值，使用实际列类型和已登记的对象编号生成结果。普通运算、序列调用和生成列引用仍待补齐。原版 `psql` 的普通表列信息查询还缺 `pg_collation`。`CAT-03` 和 `CLIENT-01` 保持部分实现。 [功能验证](test-report.md#column-default-expression-20261124) · [性能对照](performance-report-2026-10-30.md#column-default-expression-cost-20261124)
+`pg_attrdef.adbin` 和 `pg_get_expr` 支持常见常量默认值，使用实际列类型和已登记的对象编号生成结果。普通运算、序列调用和生成列引用仍待补齐。`CAT-03` 和 `CLIENT-01` 保持部分实现。 [功能验证](test-report.md#column-default-expression-20261124) · [性能对照](performance-report-2026-10-30.md#column-default-expression-cost-20261124)
 
 ## 2026-11-24 · 用 SQL 查询列的类型和长度
 

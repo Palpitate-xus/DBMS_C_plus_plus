@@ -8,6 +8,7 @@
 #include "catalog/SystemCatalogRows.h"
 #include "catalog/PgInheritanceCatalog.h"
 #include "catalog/PgAccessMethodCatalog.h"
+#include "catalog/PgCollationCatalog.h"
 #include "catalog/PgDefaultCatalog.h"
 #include "expression/ArrayDatumInput.h"
 #include "expression/StoredRegtypeValue.h"
@@ -21474,7 +21475,8 @@ class PreparedWithDmlRuntime {
                 virtualRows=make_shared<dbms::PreparedQueryRows>(preparedPgClassRows(session_));
             } else if(range.relationSchema=="pg_catalog" && range.relationName=="pg_attribute") {
                 virtualRows=make_shared<dbms::PreparedQueryRows>(dbms::system_catalog::attributeRows(
-                    g_engine.catalogService().metadataSnapshot(session_.currentDB)));
+                    g_engine.catalogService().metadataSnapshot(session_.currentDB, false),
+                    dbms::attributeCatalogRelationFilter(range)));
             } else if(range.relationSchema=="pg_catalog" && range.relationName=="pg_type") {
                 typeRows = make_shared<dbms::TypeCatalogScan>(dbms::typeCatalogOidFilter(range), false);
                 // A sibling can run a routine that changes the catalog. Keep
@@ -21494,6 +21496,8 @@ class PreparedWithDmlRuntime {
                 virtualRows = make_shared<dbms::PreparedQueryRows>(dbms::inheritance_catalog::rows(g_engine, session_.currentDB));
             } else if (range.relationSchema == "pg_catalog" && range.relationName == dbms::access_method_catalog::name) {
                 virtualRows = make_shared<dbms::PreparedQueryRows>(dbms::access_method_catalog::rows());
+            } else if (range.relationSchema == "pg_catalog" && range.relationName == dbms::collation_catalog::name) {
+                virtualRows = make_shared<dbms::PreparedQueryRows>(dbms::collation_catalog::rows());
             } else if(range.relationSchema=="pg_catalog" && range.relationName=="pg_stats") {
                 statisticsRows=make_shared<optional<dbms::PreparedQueryRows>>();
             } else if(range.relationSchema=="pg_catalog" && range.relationName=="pg_namespace") {
@@ -33824,7 +33828,7 @@ static bool executeInternal(const string& rawSql, Session& s,
             !g_engine.viewExists(queryDb, tname);
         static const std::set<std::string> unimplementedCatalogRelations = {
             "pg_auth_members", "pg_authid", "pg_cast",
-            "pg_collation", "pg_constraint", "pg_default_acl", "pg_index",
+            "pg_constraint", "pg_default_acl", "pg_index",
             "pg_namespace", "pg_opclass", "pg_operator", "pg_policy",
             "pg_publication",
             "pg_rewrite", "pg_replication_origin", "pg_stats", "pg_statistic",

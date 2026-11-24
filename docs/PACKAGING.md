@@ -82,6 +82,10 @@ sudo apt install cmake g++ make zlib1g-dev libicu-dev
 
 新版首次打开旧库时添加 `pg_am` 目录声明，并从表定义和已有索引记录补写能确认的访问方式。保留表和索引原有编号。升级完成后写入 `pg_catalog/.access_method_catalog_version`。 [恢复验证](test-report.md#pg-access-method-20261124)
 
+## 排序规则目录升级
+
+首次打开旧库时会登记 `pg_collation`，并从现有表定义补写能确认的内置排序规则编号。表编号和表定义文件可继续使用。目录写入完成后会保存 `.collation_catalog_version`。 [恢复验证](test-report.md#collation-catalog-20261124)
+
 ## 目录约定（显式 data directory）
 
 每次正常启动都必须用 `-D/--data-dir` 或 `DBMS_DATA_DIR` 显式选择数据根；

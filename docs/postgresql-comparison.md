@@ -2,6 +2,13 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="collation-catalog-comparison-20261124"></a>
+## 2026-11-24 · 查询列使用的排序规则
+
+PostgreSQL 用 `pg_attribute.attcollation` 连接 `pg_collation`，目录包含实现方式、编码、区域设置和版本。`psql` 只在列的排序规则与类型默认值不同时显示名称。SQLite 的 `PRAGMA collation_list` 列出连接可用的排序规则。DuckDB 用 `PRAGMA collations` 返回可用名称。 [PostgreSQL 排序规则目录](https://www.postgresql.org/docs/18/catalog-pg-collation.html) · [psql 18.6 源码](https://github.com/postgres/postgres/blob/REL_18_6/src/bin/psql/describe.c) · [SQLite PRAGMA](https://www.sqlite.org/pragma.html#pragma_collation_list) · [DuckDB PRAGMA](https://duckdb.org/docs/stable/configuration/pragmas#collations)
+
+本项目从实际列定义登记支持的内置排序规则。共有的 `default`、`C`、`POSIX` 和 `ucs_basic` 使用 PostgreSQL 的编号，项目自带的三个比较规则使用保留编号。用户自定义规则、操作系统提供的其他规则及完整 ICU 支持仍需补齐。 [功能验证](test-report.md#collation-catalog-20261124) · [性能对照](performance-report-2026-10-30.md#collation-catalog-cost-20261124)
+
 <a id="column-default-expression-comparison-20261124"></a>
 ## 2026-11-24 · 查询列的默认值
 

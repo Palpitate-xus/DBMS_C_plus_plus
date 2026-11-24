@@ -50,12 +50,12 @@ inline bool bootstrap(CatalogManager& catalog, bool requireExisting) {
     return defaults || dependencies;
 }
 template<size_t N> inline void validate(const CatalogManager::MetadataSnapshot& snapshot, Oid oid,
-    const char* name, const std::array<system_catalog::Field, N>& declaration) {
+    const char* name, const std::array<system_catalog::Field, N>& declaration, size_t firstNullable = N) {
     const auto relation = std::find_if(snapshot.relations.begin(), snapshot.relations.end(), [&](const auto& row) { return row.oid == oid; });
     const auto type = relation == snapshot.relations.end() ? snapshot.types.end() :
         std::find_if(snapshot.types.begin(), snapshot.types.end(), [&](const auto& row) { return row.oid == relation->reltype; });
     if (type == snapshot.types.end()) throw DbError("XX001", "missing actual attribute default catalog declaration");
-    system_catalog::validateRead(snapshot, oid, name, type->oid, type->typarray, declaration, N);
+    system_catalog::validateRead(snapshot, oid, name, type->oid, type->typarray, declaration, firstNullable);
 }
 inline const QueryRowDescriptor& descriptor() {
     static const auto value = [] {

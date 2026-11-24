@@ -10,7 +10,6 @@ UNIMPLEMENTED_CATALOGS = (
     "pg_constraint",
     "pg_opclass",
     "pg_cast",
-    "pg_collation",
     "pg_rewrite",
     "pg_trigger",
     "pg_policy",

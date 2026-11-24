@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>可以查到列用什么排序规则 · 2026-11-24</summary>
+
+创建表时为文本列指定了排序规则，现在可以查到它。例如，可以看出订单备注是否按字节顺序排序，也就是 `C` 规则。
+
+[查询示例](docs/MANUAL.md#查询列的排序规则) · [测试报告](docs/test-report.md#collation-catalog-20261124) · [性能报告](docs/performance-report-2026-10-30.md#collation-catalog-cost-20261124)
+
+</details>
+
+<details>
 <summary>可以查到常见列默认值 · 2026-11-24</summary>
 
 可以用 SQL 查看一列的默认整数、文本或真假值。例如，可以查出订单备注默认是不是空字符串。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>可以用 psql 列出表 · 2026-11-24</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-24 · 可以用 psql 列出表
 
 在 `psql` 中输入 `\dt` 就能看到表名和所有者。可以按表名筛选，也可以只看某个模式里的表。
 
 [使用说明](docs/MANUAL.md#按名称查找表) · [测试报告](docs/test-report.md#pg-access-method-20261124) · [性能报告](docs/performance-report-2026-10-30.md#pg-access-method-cost-20261124)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-24 · 可以查出同名表会用到哪一张
 
