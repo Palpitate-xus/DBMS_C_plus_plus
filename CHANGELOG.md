@@ -1,34 +1,40 @@
 # 更新日志
 
 <details>
-<summary>在 psql 里查看索引列更快 · 2026-11-24</summary>
+<summary>反复查看同一张表的索引更快 · 2026-11-24</summary>
 
-读取索引列的查询耗时中位数降低约 6%–11%。有同名自定义函数时，明确指定 `pg_catalog` 也能得到正确的结果类型。
+反复查看索引时，数据库需要读的文件更少。在一张有 512 列的测试表上，`psql` 用来显示索引列的查询从约 10 毫秒降到约 8.5 毫秒。
+
+[测试报告](docs/test-report.md#witnessed-index-files-20261124) · [性能报告](docs/performance-report-2026-10-30.md#witnessed-index-files-cost-20261124)
+
+</details>
+
+<details>
+<summary>用 psql 查看索引列更快 · 2026-11-24</summary>
+
+在本地测试中，用 `psql` 列出一个五列索引的列名和类型，这条查询比上一版快约 6%–11%。
 
 [测试报告](docs/test-report.md#bound-catalog-results-20261124) · [性能报告](docs/performance-report-2026-10-30.md#bound-catalog-results-cost-20261124)
 
 </details>
 
 <details>
-<summary>表多时，查索引的列更快 · 2026-11-24</summary>
+<summary>库里的表很多时，查看索引更快 · 2026-11-24</summary>
 
-在额外建了 256 张表的测试库里，查看一个索引的列名和类型，耗时中位数降低约 25%–31%。
+在多建了 256 张表的测试库里，查看一个索引的列名和类型，查询耗时减少约 25%–31%。
 
 [测试报告](docs/test-report.md#system-attribute-validation-20261124) · [性能报告](docs/performance-report-2026-10-30.md#system-attribute-validation-cost-20261124)
 
 </details>
 
 <details>
-<summary>用 psql 查看索引用了哪些列 · 2026-11-24</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-24 · 用 psql 查看索引用了哪些列
 
 输入 `\d 索引名`，可以看到普通索引中各列的类型，以及哪些列用来查找、哪些列随索引一起保存。
 
 [使用说明](docs/MANUAL.md#用-psql-查看索引的列) · [测试报告](docs/test-report.md#index-attributes-20261124) · [性能报告](docs/performance-report-2026-10-30.md#index-attributes-cost-20261124)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-24 · 查看索引按什么条件收录记录
 
