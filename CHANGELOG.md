@@ -3,38 +3,38 @@
 <details>
 <summary>修复 psql 密码登录 · 2026-11-24</summary>
 
-使用 SCRAM 密码认证的本地 TCP 连接，现在可以用原版 psql 18.6 登录并查询。密码错误时，连接仍会被拒绝。
+使用 SCRAM 密码认证时，原版 `psql` 18.6 现在可以通过本地网络连接登录并执行查询。密码错误时，连接仍会被拒绝。
 
 [连接说明](docs/MANUAL.md#18-网络服务) · [测试报告](docs/test-report.md#scram-libpq-20261124) · [性能报告](docs/performance-report-2026-10-30.md#scram-libpq-cost-20261124)
 
 </details>
 
 <details>
-<summary>用同一条 SQL 反复翻页更快 · 2026-11-24</summary>
+<summary>在 psql 里重复执行分页查询更快 · 2026-11-24</summary>
 
-在 psql 中准备好查询后，可以每次传入要取几条、要跳过几条。按对象编号查小页时，数据库读够就停。
+用 `PREPARE` 保存一条按表编号查记录的查询，再用 `EXECUTE` 指定取几条、跳过几条。给编号建好索引后，数据库可以读够就停。
 
 [使用说明](docs/MANUAL.md#对象编号) · [测试报告](docs/test-report.md#sql-bound-page-20261124) · [性能报告](docs/performance-report-2026-10-30.md#sql-bound-page-cost-20261124)
 
 </details>
 
 <details>
-<summary>按对象编号排序，取前几条更快 · 2026-11-24</summary>
+<summary>应用按编号查一小页数据更快 · 2026-11-24</summary>
 
-给原表编号建好索引后，查询编号最小或最大的几条迁移记录时，数据库可以读够就停。在 2,050 行的测试中，取最小的 3 条从约 16 毫秒降到约 3 毫秒。
+应用可以每次传入要取几条、跳过几条。在 2,048 行的内存盘测试中，沿编号索引取最小的 3 条，耗时中位数从 33–38 毫秒降到约 4 毫秒。
 
-[使用说明](docs/MANUAL.md#对象编号) · [测试报告](docs/test-report.md#oid-page-20261124) · [性能报告](docs/performance-report-2026-10-30.md#oid-page-cost-20261124)
+[使用说明](docs/MANUAL.md#对象编号) · [测试报告](docs/test-report.md#bound-row-count-20261124) · [性能报告](docs/performance-report-2026-10-30.md#bound-row-count-cost-20261124)
 
 </details>
 
 <details>
 <summary>查看更早的更新和版本记录</summary>
 
-## 2026-11-24 · 应用传入页大小和位置，查数据更快
+## 2026-11-24 · 按对象编号排序，取前几条更快
 
-应用每次传入要取几条、要跳过几条，数据库就能沿编号索引读够就停。在 2,048 行的测试中，取 3 条的时间从 33–38 毫秒降到约 4 毫秒。
+给原表编号建好索引后，查询编号最小或最大的几条迁移记录时，数据库可以读够就停。在 2,050 行的测试中，取最小的 3 条从约 16 毫秒降到约 3 毫秒。
 
-[使用说明](docs/MANUAL.md#对象编号) · [测试报告](docs/test-report.md#bound-row-count-20261124) · [性能报告](docs/performance-report-2026-10-30.md#bound-row-count-cost-20261124)
+[使用说明](docs/MANUAL.md#对象编号) · [测试报告](docs/test-report.md#oid-page-20261124) · [性能报告](docs/performance-report-2026-10-30.md#oid-page-cost-20261124)
 
 ## 2026-11-24 · 按一段对象编号查记录更快
 
