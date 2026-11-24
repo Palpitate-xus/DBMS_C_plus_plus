@@ -33,17 +33,23 @@ def main():
     # snapshot. Actual build/header/changelog/package version checks remain in
     # version_consistency_test.py.
     headings = re.findall(r"^## (.+)$", readme, re.MULTILINE)
-    assert headings == ["快速开始", "最近更新"], headings
+    assert headings == ["最近更新"], headings
+    introduction = readme.split("## 最近更新", 1)[0].strip().split("\n\n")
+    assert len(introduction) == 3, introduction
+    assert all("\n" not in paragraph for paragraph in introduction), introduction
     for link in ("docs/PACKAGING.md#编译依赖", "docs/MANUAL.md#1-快速开始", "docs/MANUAL.md#18-网络服务",
                  "docs/README.md", "CHANGELOG.md"):
         assert link in readme, "README omits %s" % link
 
-    def card_titles(document):
-        return re.findall(r"^<details>\n<summary>(.+)</summary>$", document, re.MULTILINE)
+    def cards(document):
+        return re.findall(r"^<details>\n<summary>(.+)</summary>\n\n([^\n]+)",
+                          document, re.MULTILINE)
 
-    latest = card_titles(readme)
+    latest = cards(readme)
     assert len(latest) == 3, latest
-    assert card_titles(changelog) == [*latest, "更早的更新"]
+    changelog_cards = cards(changelog)
+    assert changelog_cards[:3] == latest
+    assert [title for title, _ in changelog_cards[3:]] == ["更早的更新"]
     assert readme.count("<details") == readme.count("</details>") == 3
     assert changelog.count("<details") == changelog.count("</details>") == 4
     for stale_marker in (*canonical, "发行标识为 v", "当前状态（", "性能与并发硬化轮次",

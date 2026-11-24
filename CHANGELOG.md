@@ -1,27 +1,27 @@
 # 更新日志
 
 <details>
-<summary>可以查看部分索引的条件 · 2026-11-24</summary>
+<summary>查看索引按什么条件收录记录 · 2026-11-24</summary>
 
-例如，可以查到一个索引只收录数量大于零的记录。建索引时写下的条件括号也会保留下来。
+在 `psql` 里用 `\d 索引名` 可以查看部分索引的筛选条件。例如，商品索引只收录库存大于 0 的商品。
 
 [查询示例](docs/MANUAL.md#查看部分索引的条件) · [测试报告](docs/test-report.md#index-predicate-20261124) · [性能报告](docs/performance-report-2026-10-30.md#index-predicate-cost-20261124)
 
 </details>
 
 <details>
-<summary>按表查询索引更快 · 2026-11-24</summary>
+<summary>查一张表有哪些索引更快 · 2026-11-24</summary>
 
-查询订单表的索引时，数据库会先筛出与订单表有关的记录，减少其他表带来的开销。
+例如，列出订单表的索引时，数据库可以少检查其他表的索引记录。
 
 [测试报告](docs/test-report.md#catalog-join-filter-20261124) · [性能报告](docs/performance-report-2026-10-30.md#catalog-join-filter-cost-20261124)
 
 </details>
 
 <details>
-<summary>可以查询主键定义和它使用的索引 · 2026-11-24</summary>
+<summary>查看主键用了哪些列 · 2026-11-24</summary>
 
-例如，可以查到订单表用哪几列作为主键，也可以查到哪些外键引用了这个主键。
+例如，可以查到订单表用订单编号作为主键、对应的索引叫什么，以及哪些表引用了它。
 
 [查询示例](docs/MANUAL.md#查询主键和外键使用的索引) · [测试报告](docs/test-report.md#primary-constraint-20261124) · [性能报告](docs/performance-report-2026-10-30.md#primary-constraint-cost-20261124)
 
