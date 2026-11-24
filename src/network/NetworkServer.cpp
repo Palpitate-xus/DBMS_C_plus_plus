@@ -2966,7 +2966,7 @@ void visitPreparedProjectionOrigins(size_t width, const PreparedQuery& query,
         // physical ordinal. Dropped attributes retain their real attnum gap.
         if(source.relationSchema=="pg_catalog" && ordinal<source.columns.size() &&
            (source.relationName=="pg_class" || source.relationName=="pg_attribute" ||
-            source.relationName=="pg_type" || source.relationName=="pg_am") &&
+            source.relationName=="pg_type" || source.relationName=="pg_am" || source.relationName=="pg_constraint") &&
            source.columns[ordinal].physicalAttributeNumber>0) {
             const auto number=source.columns[ordinal].physicalAttributeNumber;
             for(const auto* attribute:attributes)if(attribute->attnum==number &&

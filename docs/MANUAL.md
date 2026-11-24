@@ -2764,6 +2764,20 @@ ORDER BY a.attnum;
 
 客户端同时查类型和排序规则时，可以用外层行的编号与 `pg_type.oid`、`pg_collation.oid` 匹配。对于以这些等值条件开头、只读取这两张系统表的子查询，数据库可先缩小读取范围。编号为空、需要计算编号或条件使用 `OR` 时，数据库仍按原条件求值。 [性能测试](performance-report-2026-10-30.md#catalog-oid-lookup-cost-20261124)
 
+### 查询表的外键
+
+对已登记的普通表，可以用 `pg_constraint` 读取外键的编号、名称、引用目标、两侧的列号，以及是否已经验证旧数据。
+
+```sql
+SELECT oid, conname, confrelid::regclass AS referenced_table,
+       conkey, confkey, condeferrable, condeferred, convalidated
+FROM pg_catalog.pg_constraint
+WHERE conrelid = 'public.orders'::regclass AND contype = 'f'
+ORDER BY conname;
+```
+
+查询哪些表引用了 `public.orders` 时，把筛选中的 `conrelid` 换成 `confrelid`，并在结果中查看 `conrelid::regclass`。组合外键的 `conkey` 和 `confkey` 按定义顺序一一对应。外键或表改名后仍可用原约束编号查询。完整 `psql \d` 还需要约束定义函数和其他目录。 [验证记录](test-report.md#foreign-key-catalog-20261124)
+
 ---
 
 ## 19. 预编译语句

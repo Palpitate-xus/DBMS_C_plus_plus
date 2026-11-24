@@ -4,6 +4,7 @@
 #include "catalog/PgDefaultCatalog.h"
 #include "catalog/PgAccessMethodCatalog.h"
 #include "catalog/PgCollationCatalog.h"
+#include "catalog/PgForeignKeyCatalog.h"
 #include "ExecutionPlan.h"
 #include "parser/BetweenSyntax.h"
 #include "expression/StoredRegtypeValue.h"
@@ -7719,6 +7720,24 @@ OpPtr QueryPlanner::buildPreparedQueryPlan(StorageEngine* engine,const std::stri
                     if(!cache->cursor)cache->cursor=childFactory(statement,outer);
                     if(!cache->cursor->next(row)){cache->cursor->close();cache->eof=true;return false;}
                     cache->rows.push_back(row);return true;
+                });
+        } else if (found->relationSchema == "pg_catalog" && found->relationName == foreign_key_catalog::name) {
+            for (const auto& output : found->columns) {
+                Column column;
+                column.dataName = output.name;
+                column.dataType = output.type;
+                column.isVariableLength = true;
+                schema.append(column);
+            }
+            const auto owner = catalogOidLiteralFilter(*found, true, 9);
+            const auto referenced = catalogOidLiteralFilter(*found, true, 13);
+            auto rows = std::make_shared<std::optional<PreparedQueryRows>>();
+            source = std::make_unique<PreparedSourceRowsOp>(found->columns,
+                [engine, database, rows, owner, referenced](size_t index, std::vector<ExprValue>& row) {
+                    if (!*rows) *rows = foreign_key_catalog::rows(*engine, database, owner, referenced);
+                    if (index >= (**rows).size()) return false;
+                    row = (**rows)[index];
+                    return true;
                 });
         } else if(found->relationSchema=="pg_catalog" &&
                   (found->relationName=="pg_class" || found->relationName=="pg_attribute" ||

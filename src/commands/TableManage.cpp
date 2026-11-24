@@ -26,6 +26,7 @@
 #include "catalog/PgInheritanceCatalog.h"
 #include "catalog/PgAccessMethodCatalog.h"
 #include "catalog/PgCollationCatalog.h"
+#include "catalog/PgForeignKeyCatalog.h"
 #include "common/DataDirectory.h"
 #include "storage/VariableRow.h"
 #include "common/SqlArrayText.h"
@@ -2093,10 +2094,11 @@ constexpr const char* kCreateUndoCleanupMember = "cleanup";
 constexpr size_t kCreateUndoImageLimit = 256 * 1024 * 1024;
 // Keep allocator counters out of the undo image. They must never move
 // backwards after recovery even if the objects using those IDs disappear.
-const std::array<const char*, 10> kCreateUndoCatalogPaths = {
+const std::array<const char*, 11> kCreateUndoCatalogPaths = {
     "tlist.lst", ".inherits", ".comments", ".exclusions", ".permissions",
     ".grant_chain", "pg_catalog/pg_class.cat", "pg_catalog/pg_attribute.cat",
-    "pg_catalog/pg_attrdef.cat", "pg_catalog/pg_depend.cat"};
+    "pg_catalog/pg_attrdef.cat", "pg_catalog/pg_depend.cat", "pg_catalog/pg_constraint.cat"};
+constexpr size_t kCreateUndoV2PathCount = 10;
 
 std::string createUndoBinding(const std::filesystem::path& database,
                               const std::string& header) {
@@ -2127,7 +2129,7 @@ bool captureCreateUndoCatalog(const std::filesystem::path& database,
     std::error_code error;
     if (std::filesystem::symlink_status(database / "pg_catalog", error).type() !=
             std::filesystem::file_type::directory || error) return false;
-    image = "CTUC2" + createUndoBinding(database, header);
+    image = "CTUC3" + createUndoBinding(database, header);
     for (const char* name : kCreateUndoCatalogPaths) {
         std::optional<std::string> bytes;
         if (!readCreateUndoFile(database / name, kCreateUndoImageLimit, bytes)) return false;
@@ -2146,9 +2148,12 @@ bool restoreCreateUndoCatalog(const std::filesystem::path& database,
     std::optional<std::string> header;
     if (!readCreateUndoFile(journal / "catalog", kCreateUndoImageLimit, image) ||
         !image || !readCreateUndoFile(journal / "header", create_table_undo::maxRecordBytes, header) ||
-        !header || image->size() < 133 ||
-        image->compare(0, 69, "CTUC2" + createUndoBinding(database, *header)) != 0)
+        !header || image->size() < 133)
         return false;
+    const auto binding = createUndoBinding(database, *header);
+    size_t pathCount = kCreateUndoCatalogPaths.size();
+    if (image->compare(0, 69, "CTUC2" + binding) == 0) pathCount = kCreateUndoV2PathCount;
+    else if (image->compare(0, 69, "CTUC3" + binding) != 0) return false;
     std::error_code directoryError;
     if (std::filesystem::symlink_status(database / "pg_catalog", directoryError).type() !=
             std::filesystem::file_type::directory || directoryError) return false;
@@ -2156,7 +2161,7 @@ bool restoreCreateUndoCatalog(const std::filesystem::path& database,
     if (SHA256::hash(payload) != image->substr(payload.size())) return false;
     std::vector<std::optional<std::string>> before;
     size_t offset = 69;
-    for (size_t i = 0; i < kCreateUndoCatalogPaths.size(); ++i) {
+    for (size_t i = 0; i < pathCount; ++i) {
         uint64_t size = 0;
         if (!relation_name_codec::read(payload, offset, 8, size) ||
             (size != 0 && size - 1 > payload.size() - offset)) return false;
@@ -42479,7 +42484,8 @@ decltype(auto) StorageEngine::withQueryBindingMetadata(const std::string& dbname
             const Session* session = currentSession();
             if (!requested.schema.empty()) schemas.push_back(requested.schema);
             else if (requested.name == "pg_type" || requested.name == inheritance_catalog::name ||
-                     requested.name == access_method_catalog::name || requested.name == collation_catalog::name)
+                     requested.name == access_method_catalog::name || requested.name == collation_catalog::name ||
+                     requested.name == foreign_key_catalog::name)
                 schemas = effectiveRelationSearchPath(session);
             else {
                 std::string canonical; std::vector<std::string> path;
@@ -42508,6 +42514,7 @@ decltype(auto) StorageEngine::withQueryBindingMetadata(const std::string& dbname
                         {"pg_inherits", inheritance_catalog::descriptor()},
                         {access_method_catalog::name, access_method_catalog::descriptor()},
                         {collation_catalog::name, collation_catalog::descriptor()},
+                        {foreign_key_catalog::name, foreign_key_catalog::descriptor()},
                         {"pg_namespace", ownedNamespaceCatalogDescriptor()},
                         {"pg_settings", system_catalog::settingsDescriptor()},
                         {"pg_stat_activity", {{"pid","integer"},{"datname","name"},{"usename","name"},{"state","text"},{"query","text"}}}
@@ -42537,6 +42544,9 @@ decltype(auto) StorageEngine::withQueryBindingMetadata(const std::string& dbname
                         if (requested.name == collation_catalog::name)
                             default_catalog::validate(catalog, collation_catalog::relationOid,
                                 collation_catalog::name, collation_catalog::fields, 7);
+                        if (requested.name == foreign_key_catalog::name)
+                            default_catalog::validate(catalog, foreign_key_catalog::relationOid,
+                                foreign_key_catalog::name, foreign_key_catalog::fields, 20);
                         for(auto& column:description.columns) {
                             if (!column.typeOid) column.typeOid=mapBuiltinTypeNameToOid(column.type);
                             if(column.typeOid)column.typeMetadata=metadata.datumType(column.type,column.typeOid);

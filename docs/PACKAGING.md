@@ -29,6 +29,12 @@ sudo apt install cmake g++ make zlib1g-dev libicu-dev
 
 二进制分发请同时提供仓库根 [THIRD_PARTY_NOTICES](../THIRD_PARTY_NOTICES) 中备份清单摘要实现的第三方版权、许可条件与免责声明。CMake 安装会将该声明放入安装前缀下的 `share/doc/DBMS_C_plus_plus/THIRD_PARTY_NOTICES`；单独复制 `dbms_main` 时也须附带该声明。
 
+## 外键目录升级
+
+打开旧库时，数据库从已有的普通表定义登记外键对象编号，并把编号保存到 `pg_catalog/pg_constraint.cat`。表文件本身沿用原来的格式。备份和恢复应保留整个数据库目录及其目录标记。
+
+新版可以恢复旧版的 `CTUC2` 建表撤销记录，也可以恢复含外键目录的 `CTUC3` 记录。旧程序遇到尚未恢复的 `CTUC3` 记录时无法完成恢复。需要切回旧程序时使用升级前的数据目录备份。 [升级和恢复验证](test-report.md#foreign-key-catalog-20261124)
+
 ## 普通表的列数上限
 
 新版可读取旧版常用的 30 列及以下表定义，宽表继续使用相同的磁盘定义格式。早于本次变更的程序无法打开超过 30 列的表定义。调用 C++ 接口的程序应使用 `TableSchema::len()` 和 `fkLen()` 读列数和外键数，并用新头文件重新编译。[旧格式读回和恢复测试](test-report.md#wide-table-20261120)

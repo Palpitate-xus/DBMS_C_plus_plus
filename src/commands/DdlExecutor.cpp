@@ -22,6 +22,7 @@
 #include "catalog/CatalogService.h"
 #include "catalog/PgAccessMethodCatalog.h"
 #include "catalog/PgCollationCatalog.h"
+#include "catalog/PgForeignKeyCatalog.h"
 #include "catalog/RelationSearchPath.h"
 #include "catalog/systables.h"
 #include "catalog/type_registry.h"
@@ -1496,6 +1497,21 @@ static void registerTableInCatalog(CatalogManager& cat, const TableSchema& tbl,
         dep.deptype = 'n';
         cat.addDepend(dep);
     }
+}
+
+static void synchronizeForeignKeys(const std::string& database, const std::string& physical,
+    const std::optional<std::pair<std::string, std::string>>& rename = {}) {
+    auto& catalog = g_engine.catalogService().get(database);
+    const auto logical = CatalogService::logicalName(physical);
+    const auto space = catalog.getNamespaceByName(logical.schema.empty() ? "public" : logical.schema);
+    auto owner = space ? catalog.getClassByName(logical.name, space->oid) : std::nullopt;
+    if (!owner && !logical.schema.empty()) {
+        const auto publicSpace = catalog.getNamespaceByName("public");
+        if (publicSpace) owner = catalog.getClassByName(physical, publicSpace->oid);
+    }
+    if (!owner) return;
+    foreign_key_catalog::synchronize(g_engine, database, catalog, *owner, physical, rename);
+    if (!catalog.persistAll()) throw DbError("58030", "could not persist foreign key identities");
 }
 
 static Oid registerMaterializedViewInCatalog(
@@ -3048,6 +3064,8 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                     return true;
                 }
                 if (!alterStatusOk(status, "Constraint")) return true;
+                if (!tableIsTemporary)
+                    synchronizeForeignKeys(s.currentDB, tableName, std::make_pair(sub.name, sub.newName));
                 break;
             case AlterTableStmt::Action::RenameTable: {
                 if (sub.newName.empty()) {
@@ -3776,6 +3794,7 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                     s.currentDB, tableName, constraintName, !tc.notValid, tc.notValid,
                     tc.deferrable, tc.initiallyDeferred);
                 if (!alterStatusOk(status, "Constraint")) return true;
+                if (!tableIsTemporary && type == "foreign key") synchronizeForeignKeys(s.currentDB, tableName);
                 if (!tableIsTemporary &&
                     (type == "primary key" || type == "unique") &&
                     !synchronizeTableIndexFlagInCatalog(
@@ -3817,6 +3836,7 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                      {constraintMetadataKey(sub.name, "deferrable"), ""},
                      {constraintMetadataKey(sub.name, "initially_deferred"), ""}});
                 if (!alterStatusOk(status, "Constraint")) return true;
+                if (!tableIsTemporary && !isExclusion) synchronizeForeignKeys(s.currentDB, tableName);
                 if (!tableIsTemporary && !isExclusion &&
                     !synchronizeTableCheckCountInCatalog(
                         s.currentDB, tableName)) {
@@ -7433,6 +7453,7 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
             if (!tableRelation || tableRelation->relkind != 'r') {
                 throw std::runtime_error("created table catalog row is missing");
             }
+            if (!tbl.fks.empty()) foreign_key_catalog::synchronize(g_engine, s.currentDB, cat, *tableRelation, tname);
             attachIdentityColumnSequences(cat, tableRelation->oid, identitySequences);
             for (const auto& parent : inheritedParents) {
                 if (!updateTableHierarchyFlagsInCatalog(

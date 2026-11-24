@@ -967,6 +967,10 @@ bool CatalogManager::dropClassUnlocked(Oid oid) {
     std::vector<Oid> defaults;
     for (const auto& row : attrdefs_) if (row.adrelid == oid) defaults.push_back(row.oid);
     for (Oid id : defaults) (void)dropAttrdefUnlocked(id);
+    for (auto key = foreignKeys_.begin(); key != foreignKeys_.end();) {
+        if (key->first.first == oid || key->second.referenced == oid) key = foreignKeys_.erase(key);
+        else ++key;
+    }
     classByName_.erase(classNameKey(classes_[idx].relnamespace, classes_[idx].relname));
     removeDependRecordsUnlocked(PgClassOid_Class, oid);
     if (idx + 1 < classes_.size()) {
@@ -2689,6 +2693,35 @@ std::string CatalogManager::catalogFilePath(const std::string& tablename) const 
     return dbPath_ + "/pg_" + tablename + ".cat";
 }
 
+void CatalogManager::reconcileForeignKeyIdentities(Oid relation, const ForeignKeyReferences& references,
+    const std::optional<std::pair<std::string, std::string>>& rename) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!findClassUnlocked(relation)) throw DbError("XX001", "foreign key owner has no catalog relation");
+    const auto start = foreignKeys_.lower_bound({relation, {}});
+    const auto end = std::find_if(start, foreignKeys_.end(), [&](const auto& row) { return row.first.first != relation; });
+    ForeignKeyIdentities replacement;
+    for (const auto& [name, target] : references) {
+        if (name.empty() || name.find('\0') != std::string::npos || !findClassUnlocked(target))
+            throw DbError("XX001", "foreign key has an invalid name or target relation");
+        const auto old = foreignKeys_.find({relation, rename && rename->second == name ? rename->first : name});
+        const auto oid = old != foreignKeys_.end() && old->second.referenced == target
+            ? old->second.oid : oidGen_->allocate();
+        replacement.emplace(std::make_pair(relation, name), ForeignKeyIdentity{oid, target});
+    }
+    foreignKeys_.erase(start, end);
+    foreignKeys_.merge(replacement);
+}
+
+CatalogManager::ForeignKeyIdentities CatalogManager::foreignKeyIdentities() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return foreignKeys_;
+}
+
+CatalogManager::ForeignKeyIdentities CatalogManager::readForeignKeyIdentities(const std::string& path) {
+    CatalogManager catalog(path, ReadOnlyTag{});
+    return std::move(catalog.foreignKeys_);
+}
+
 std::map<std::string, std::string> CatalogManager::serializeAllLocked() const {
     std::map<std::string, std::string> images;
     auto persist = [&](const char* name,
@@ -2834,6 +2867,12 @@ std::map<std::string, std::string> CatalogManager::serializeAllLocked() const {
         for (const auto& row : attrdefs_)
             out << "A1," << row.oid << ',' << row.adrelid << ',' << row.adnum
                 << ",X" << hexEncode(row.expression) << ",X" << hexEncode(row.adbin) << '\n';
+    });
+
+    persist("constraint", [&](std::ostream& out) {
+        for (const auto& [owner, key] : foreignKeys_)
+            out << "F1," << key.oid << ',' << owner.first << ',' << key.referenced
+                << ',' << hexEncode(owner.second) << '\n';
     });
 
     // pg_depend
@@ -3058,7 +3097,7 @@ void CatalogManager::loadAllLocked() {
         std::move(namespaces_), std::move(classes_), std::move(attributes_),
         std::move(types_), std::move(enums_), std::move(procs_),
         std::move(depends_), std::move(authIds_), std::move(authMembers_),
-        std::move(descriptions_), std::move(attrdefs_));
+        std::move(descriptions_), std::move(attrdefs_), std::move(foreignKeys_));
     auto priorIndexes = std::make_tuple(
         std::move(nsByOid_), std::move(classByOid_), std::move(typeByOid_),
         std::move(procByOid_), std::move(authIdByOid_), std::move(authMemberByOid_),
@@ -3066,7 +3105,7 @@ void CatalogManager::loadAllLocked() {
     try {
     namespaces_.clear(); classes_.clear(); attributes_.clear(); types_.clear();
     enums_.clear(); procs_.clear(); depends_.clear(); authIds_.clear();
-    authMembers_.clear(); descriptions_.clear(); attrdefs_.clear();
+    authMembers_.clear(); descriptions_.clear(); attrdefs_.clear(); foreignKeys_.clear();
     std::map<std::string, CatalogFileGeneration> before;
     for (const auto& image : serializeAllLocked()) {
         CatalogFileGeneration generation;
@@ -3444,6 +3483,28 @@ void CatalogManager::loadAllLocked() {
         if (in.bad()) throw DbError("58030", "cannot read attribute default catalog");
     }
 
+    {
+        auto in = openRelationImage("constraint");
+        if (!in.is_open() && std::filesystem::exists(std::filesystem::path(dbPath_) / ".foreign_key_catalog_version"))
+            throw DbError("58030", "published foreign key identity file is missing");
+        std::set<Oid> identities;
+        std::string line;
+        while (std::getline(in, line)) {
+            std::istringstream input(line);
+            std::string version, encoded, name;
+            Oid owner = INVALID_OID;
+            ForeignKeyIdentity key{};
+            if (!std::getline(input, version, ',') || version != "F1" ||
+                !readCatalogCsvField(input, key.oid) || !readCatalogCsvField(input, owner) ||
+                !readCatalogCsvField(input, key.referenced) || !std::getline(input, encoded) ||
+                !hexDecode(encoded, name) || name.empty() || name.find('\0') != std::string::npos ||
+                !key.oid || !owner || !key.referenced || !identities.insert(key.oid).second ||
+                !foreignKeys_.emplace(std::make_pair(owner, std::move(name)), key).second)
+                throw DbError("XX001", "invalid foreign key identity row");
+        }
+        if (in.bad()) throw DbError("58030", "cannot read foreign key identities");
+    }
+
     // pg_authid
     {
         std::ifstream in(catalogFilePath("authid"));
@@ -3504,6 +3565,10 @@ void CatalogManager::loadAllLocked() {
     }
 
     rebuildIndexes();
+    for (const auto& [owner, key] : foreignKeys_) {
+        if (!findClassUnlocked(owner.first) || !findClassUnlocked(key.referenced))
+            throw DbError("XX001", "foreign key identity has no catalog relation");
+    }
     for (const auto& row : attrdefs_) {
         const auto owner = std::find_if(attributes_.begin(), attributes_.end(), [&](const auto& a) {
             return a.attrelid == row.adrelid && a.attnum == row.adnum && !a.attisdropped;
@@ -3543,7 +3608,7 @@ void CatalogManager::loadAllLocked() {
     systemAttributesMaterialized_=systemAttributesExpected;
     } catch (...) {
         std::tie(namespaces_, classes_, attributes_, types_, enums_, procs_,
-                 depends_, authIds_, authMembers_, descriptions_, attrdefs_) = std::move(priorRows);
+                 depends_, authIds_, authMembers_, descriptions_, attrdefs_, foreignKeys_) = std::move(priorRows);
         std::tie(nsByOid_, classByOid_, typeByOid_, procByOid_, authIdByOid_,
                  authMemberByOid_, nsByName_, authIdByName_, classByName_) =
             std::move(priorIndexes);

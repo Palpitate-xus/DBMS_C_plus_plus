@@ -7,7 +7,6 @@ import struct
 
 
 UNIMPLEMENTED_CATALOGS = (
-    "pg_constraint",
     "pg_opclass",
     "pg_cast",
     "pg_rewrite",
@@ -237,12 +236,12 @@ def main():
         # A user relation with the same unqualified name still wins normal
         # lookup; only the absent unqualified catalog is gated.
         for sql in (
-                "CREATE TABLE pg_constraint (id INTEGER)",
-                "INSERT INTO pg_constraint VALUES (7)"):
+                "CREATE TABLE pg_cast (id INTEGER)",
+                "INSERT INTO pg_cast VALUES (7)"):
             result = runner.decode_wire_result(
                 client.simple_query(sock, sql), include_types=True)
             assert result[1] is None, (sql, result)
-        messages = client.simple_query(sock, "SELECT * FROM pg_constraint")
+        messages = client.simple_query(sock, "SELECT * FROM pg_cast")
         result = runner.decode_wire_result(messages, include_types=True)
         assert result[1] is None and result[0] == [["7"]], result
 

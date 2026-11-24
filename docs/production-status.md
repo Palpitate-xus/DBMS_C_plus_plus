@@ -6,13 +6,17 @@
 
 截至 2026-11-24，273 项功能要求中有 22 项完成、169 项部分实现、67 项待验证、15 项暂缓。各项结果和剩余范围见功能总账。以下更新报告给出各轮测试的实际范围。[功能总账](gap-progress.json) · [支持的功能和限制](compatibility-contract.md)
 
+## 2026-11-24 · 可以查询普通表的外键
+
+可通过 `pg_constraint` 查询已登记的普通表外键，包括来源表、引用表、列号及是否验证过旧数据。完整 `psql \d` 仍需要 `pg_get_constraintdef` 等能力。 [查询示例](MANUAL.md#查询表的外键) · [测试报告](test-report.md#foreign-key-catalog-20261124)
+
 ## 2026-11-24 · 查询表的列信息更快
 
-原版 `psql` 读取五列表的列信息 SQL，耗时中位数从约 307 毫秒降到约 15 毫秒。独立的规则查询、类型查询和外连接另有对照。完整 `\d` 仍需要 `pg_constraint`。 [测试报告](test-report.md#catalog-oid-lookup-20261124) · [性能报告](performance-report-2026-10-30.md#catalog-oid-lookup-cost-20261124)
+原版 `psql` 读取五列表的列信息 SQL，耗时中位数从约 307 毫秒降到约 15 毫秒。独立的规则查询、类型查询和外连接另有对照。 [测试报告](test-report.md#catalog-oid-lookup-20261124) · [性能报告](performance-report-2026-10-30.md#catalog-oid-lookup-cost-20261124)
 
 ## 2026-11-24 · 可以查到列用什么排序规则
 
-原版 `psql` 18.6 可执行普通表的列信息查询，读出类型、常见默认值和排序规则。完整的 `\d` 仍需要外键查询所用的 `pg_constraint`。 [查询示例](MANUAL.md#查询列的排序规则) · [测试报告](test-report.md#collation-catalog-20261124) · [性能报告](performance-report-2026-10-30.md#collation-catalog-cost-20261124)
+原版 `psql` 18.6 可执行普通表的列信息查询，读出类型、常见默认值和排序规则。 [查询示例](MANUAL.md#查询列的排序规则) · [测试报告](test-report.md#collation-catalog-20261124) · [性能报告](performance-report-2026-10-30.md#collation-catalog-cost-20261124)
 
 ## 2026-11-24 · 可以查到常见列默认值
 

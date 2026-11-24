@@ -17,6 +17,13 @@ cmake --build build/cmake --target dbms_main --parallel 2
 ## 最近更新
 
 <details>
+<summary>可以查到外键连接了哪些列 · 2026-11-24</summary>
+
+查询表的外键时，可以看到它引用的表和列，以及旧数据是否已经通过检查。
+
+</details>
+
+<details>
 <summary>查询表的列信息更快 · 2026-11-24</summary>
 
 在本机测试中，查询一张有五列的表，显示列名、类型、默认值和排序规则，耗时中位数从约 307 毫秒降到约 15 毫秒。
@@ -27,13 +34,6 @@ cmake --build build/cmake --target dbms_main --parallel 2
 <summary>查看文本列怎么排序 · 2026-11-24</summary>
 
 如果建表时选了按字节顺序排序（`C`），查询列信息时就会显示这个设置。
-
-</details>
-
-<details>
-<summary>查看一列没填时用什么默认值 · 2026-11-24</summary>
-
-例如，可以查到订单数量默认是 `1`，备注默认是空字符串。
 
 </details>
 

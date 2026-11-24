@@ -8,7 +8,8 @@
 
 namespace dbms {
 inline constexpr std::string_view pgOwnedCatalogs[] = {
-    "pg_class", "pg_attribute", "pg_type", "pg_attrdef", "pg_depend", "pg_inherits", "pg_settings", "pg_am", "pg_collation"};
+    "pg_class", "pg_attribute", "pg_type", "pg_attrdef", "pg_depend", "pg_inherits", "pg_settings", "pg_am", "pg_collation",
+    "pg_constraint"};
 
 inline bool isPgOwnedCatalog(std::string_view name) {
     return std::find(std::begin(pgOwnedCatalogs), std::end(pgOwnedCatalogs), name) !=

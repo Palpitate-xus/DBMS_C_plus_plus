@@ -13,11 +13,15 @@ namespace dbms {
 // Admit only a direct equality on this range's OID column and a decimal
 // constant that is lossless as an OID. The original filter still runs.
 inline std::optional<Oid> catalogOidLiteralFilter(const PreparedQuery::SourceRange& range,
-                                                bool firstConjunct) {
+                                                bool firstConjunct, int16_t attributeNumber = 1) {
     const auto* select = dynamic_cast<const SelectStmt*>(range.owner);
-    if (!select || range.source != select->fromClause.get() || range.columns.empty() ||
-        range.columns.front().physicalAttributeNumber != 1 || range.columns.front().typeOid != 26)
+    if (!select || range.source != select->fromClause.get()) return std::nullopt;
+    const auto field = std::find_if(range.columns.begin(), range.columns.end(), [&](const auto& column) {
+        return column.physicalAttributeNumber == attributeNumber && column.typeOid == 26;
+    });
+    if (field == range.columns.end())
         return std::nullopt;
+    const size_t ordinal = field - range.columns.begin();
     const Expr* predicate = select->whereClause.get();
     if (firstConjunct) {
         // Rows rejected by this leading equality already short-circuit all
@@ -36,7 +40,7 @@ inline std::optional<Oid> catalogOidLiteralFilter(const PreparedQuery::SourceRan
         return column && !column->preparedSubquery && column->binding &&
                column->binding->scopeDepth == 0 && !column->binding->mergedUsing &&
                column->binding->sourceOrdinal == range.ordinal &&
-               column->binding->columnOrdinal == 0 && column->binding->typeOid == 26;
+               column->binding->columnOrdinal == ordinal && column->binding->typeOid == 26;
     };
     const Expr* input = nullptr;
     if (oidColumn(equality->left.get())) input = equality->right.get();

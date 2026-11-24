@@ -16,6 +16,8 @@
 #include "catalog/PgInheritanceCatalog.h"
 #include "catalog/PgAccessMethodCatalog.h"
 #include "catalog/PgCollationCatalog.h"
+#include "catalog/PgForeignKeyCatalog.h"
+#include "catalog/DatumMetadataFactory.h"
 #include "common/DbError.h"
 #include "access/IndexFileUtil.h"
 #include <filesystem>
@@ -393,6 +395,21 @@ std::shared_ptr<CatalogManager> loadOwnedCatalog(
     }
     const bool publishedDefaultCatalog = default_catalog::published(directory);
     const bool initializedDefaultCatalog = default_catalog::bootstrap(*catalog, publishedDefaultCatalog);
+    const auto foreignKeyMarker = directory / ".foreign_key_catalog_version";
+    const bool publishedForeignKeys = catalogVersionPublished(foreignKeyMarker, foreign_key_catalog::version);
+    const bool initializedForeignKeys = default_catalog::bootstrapOne(*catalog,
+        foreign_key_catalog::relationOid, foreign_key_catalog::name, foreign_key_catalog::fields, publishedForeignKeys);
+    if (publishedForeignKeys && !fs::is_regular_file(directory / "pg_constraint.cat"))
+        throw DbError("58030", "published foreign key identity file is missing");
+    if (!publishedForeignKeys) {
+        for (const auto& relation : catalog->listClasses()) {
+            if (relation.relkind != 'r' || relation.relnamespace == 11 || relation.relpersistence == 't') continue;
+            const auto space = catalog->getNamespace(relation.relnamespace);
+            if (!space) continue;
+            const auto physical = space->nspname == "public" ? relation.relname : space->nspname + "__" + relation.relname;
+            foreign_key_catalog::synchronize(engine, database, *catalog, relation, physical);
+        }
+    }
     const auto sequenceMarker=directory/".sequence_catalog_version";
     constexpr char sequenceVersion[]="DBMS_PG_SEQUENCE_CATALOG1\n";
     struct stat markerStatus{};
@@ -442,8 +459,11 @@ std::shared_ptr<CatalogManager> loadOwnedCatalog(
         }
     }
     migrateLegacyPublicDottedSequences(engine, database, *catalog);
-    if((initializedClassCatalog || initializedOwnedCatalogs || initializedInheritance || initializedSequenceCatalog || initializedStatisticsView || initializedSystemAttributes || initializedTypeProperties || initializedCatalogCollations || initializedPhysicalArrays || initializedDefaultCatalog || !publishedDefaultCatalog || !publishedTypeProperties || !publishedCatalogCollations || !publishedPhysicalArrays || initializedAccessMethods || !publishedAccessMethods || !publishedCollations) && !catalog->persistAll())
+    if((initializedClassCatalog || initializedOwnedCatalogs || initializedInheritance || initializedSequenceCatalog || initializedStatisticsView || initializedSystemAttributes || initializedTypeProperties || initializedCatalogCollations || initializedPhysicalArrays || initializedDefaultCatalog || !publishedDefaultCatalog || !publishedTypeProperties || !publishedCatalogCollations || !publishedPhysicalArrays || initializedAccessMethods || !publishedAccessMethods || !publishedCollations || initializedForeignKeys || !publishedForeignKeys) && !catalog->persistAll())
         throw DbError("58030","could not publish initialized system view identities");
+    if (!publishedForeignKeys && index_file::writeAtomicallyNoReplace(foreignKeyMarker,
+            foreign_key_catalog::version) != index_file::WriteResult::OK)
+        throw DbError("58030", "could not publish foreign key catalog version");
     if (!publishedCollations && index_file::writeAtomicallyNoReplace(collationMarker,
             collation_catalog::version) != index_file::WriteResult::OK)
         throw DbError("58030", "could not publish collation catalog version");
@@ -724,6 +744,13 @@ CatalogManager::MetadataSnapshot CatalogService::metadataSnapshot(const std::str
     return CatalogManager::readMetadataSnapshot(catalog.path, includeDefaultObjects);
 }
 
+CatalogManager::ForeignKeyIdentities CatalogService::foreignKeyIdentities(const std::string& database) const {
+    const auto catalog = readCatalog(database);
+    if (catalog.manager) return catalog.manager->foreignKeyIdentities();
+    if (catalog.path.empty()) return {};
+    return CatalogManager::readForeignKeyIdentities(catalog.path);
+}
+
 std::optional<bool> CatalogService::relationIsVisible(
     const std::string& dbname, Oid oid, const std::vector<std::string>& searchPath) const {
     const auto catalog = readCatalog(dbname);
@@ -819,5 +846,126 @@ CatalogManager::QualifiedName CatalogService::logicalName(const std::string& phy
     }
     return qn;
 }
+
+namespace foreign_key_catalog {
+
+void synchronize(const StorageEngine& engine, const std::string& database,
+    CatalogManager& catalog, const PgClassRow& owner, const std::string& physical,
+    const std::optional<std::pair<std::string, std::string>>& rename) {
+    if (owner.relkind != 'r' || owner.relpersistence == 't' || owner.relispartition) return;
+    const auto publicSpace = catalog.getNamespaceByName("public");
+    auto table = engine.readPersistedSchemaForCatalog(database, physical);
+    if (!table && publicSpace && owner.relnamespace == publicSpace->oid)
+        table = engine.readPersistedSchemaForCatalog(database, "public__" + physical);
+    if (!table || table->partitionType != TableSchema::PartitionType::None) return;
+    CatalogManager::ForeignKeyReferences references;
+    for (const auto& fk : table->fks) {
+        const auto logical = CatalogService::logicalName(fk.refTable);
+        const auto space = catalog.getNamespaceByName(logical.schema.empty() ? "public" : logical.schema);
+        const auto qualified = space ? catalog.getClassByName(logical.name, space->oid) : std::nullopt;
+        const auto plain = publicSpace ? catalog.getClassByName(fk.refTable, publicSpace->oid) : std::nullopt;
+        if (qualified && plain && qualified->oid != plain->oid)
+            throw DbError("XX001", "ambiguous foreign key target storage identity");
+        const auto& target = qualified ? qualified : plain;
+        if (fk.name.empty() || !target || target->relkind != 'r' || target->relispartition || target->relpersistence == 't') continue;
+        if (!references.emplace(fk.name, target->oid).second)
+            throw DbError("XX001", "duplicate stored foreign key name");
+    }
+    catalog.reconcileForeignKeyIdentities(owner.oid, references, rename);
+}
+
+std::vector<std::vector<ExprValue>> rows(const StorageEngine& engine, const std::string& database,
+    std::optional<Oid> ownerFilter, std::optional<Oid> referencedFilter) {
+    const auto fence = engine.catalogReadOwnership(database);
+    if (!fence.mayReadCurrentFiles)
+        throw DbError("55P03", "foreign key catalog read conflicts with an active database writer");
+    const auto keys = engine.catalogService().foreignKeyIdentities(database);
+    if (keys.empty()) return {};
+    const auto metadata = engine.catalogService().metadataSnapshot(database, false);
+    const auto keyType = DatumMetadataFactory(metadata).type(1005);
+    if (!keyType || keyType->kind != DatumKind::Array || !keyType->arrayElement ||
+        keyType->arrayElement->actualOid != 21)
+        throw DbError("XX001", "foreign key column numbers have no smallint array type");
+    std::map<Oid, const PgClassRow*> relations;
+    std::map<Oid, std::string> namespaces;
+    for (const auto& relation : metadata.relations) relations.emplace(relation.oid, &relation);
+    for (const auto& space : metadata.namespaces) namespaces.emplace(space.oid, space.nspname);
+    const auto relation = [&](Oid oid) -> const PgClassRow& {
+        const auto found = relations.find(oid);
+        if (found == relations.end()) throw DbError("XX001", "foreign key catalog relation is missing");
+        return *found->second;
+    };
+    const auto physical = [&](const PgClassRow& row) {
+        const auto space = namespaces.find(row.relnamespace);
+        if (space == namespaces.end()) throw DbError("XX001", "foreign key catalog relation has no namespace");
+        return space->second == "public" ? row.relname : space->second + "__" + row.relname;
+    };
+    const auto array = [&](Oid relation, const std::vector<std::string>& columns) {
+        std::string text = "{";
+        auto value = std::make_shared<CompoundDatum>();
+        value->type = keyType;
+        value->dimensions.push_back({static_cast<int32_t>(columns.size()), 1});
+        value->arrayElements.emplace();
+        value->arrayElements->reserve(columns.size());
+        value->arrayNullBitmap = false;
+        for (const auto& name : columns) {
+            const auto field = std::find_if(metadata.attributes.begin(), metadata.attributes.end(), [&](const auto& attr) {
+                return attr.attrelid == relation && attr.attname == name && attr.attnum > 0 && !attr.attisdropped;
+            });
+            if (field == metadata.attributes.end()) throw DbError("XX001", "foreign key catalog field is missing");
+            if (text.size() > 1) text += ',';
+            const auto number = std::to_string(field->attnum);
+            text += number;
+            value->arrayElements->emplace_back("smallint", number);
+        }
+        ExprValue result("smallint[]", text + '}');
+        result.compound = std::move(value);
+        return result;
+    };
+    const auto oid = [](Oid value) { return ExprValue("oid", std::to_string(value)); };
+    const auto boolean = [](bool value) { return ExprValue("boolean", value ? "t" : "f"); };
+    std::vector<std::vector<ExprValue>> result;
+    const auto begin = ownerFilter ? keys.lower_bound({*ownerFilter, {}}) : keys.begin();
+    Oid current = INVALID_OID;
+    std::optional<TableSchema> table;
+    std::map<std::string, std::string> params;
+    for (auto entry = begin; entry != keys.end(); ++entry) {
+        const auto& [owner, name] = entry->first;
+        const auto& key = entry->second;
+        if (ownerFilter && owner != *ownerFilter) break;
+        if (referencedFilter && key.referenced != *referencedFilter) continue;
+        const auto& child = relation(owner);
+        const auto& parent = relation(key.referenced);
+        if (current != owner) {
+            auto storage = physical(child);
+            table = engine.readPersistedSchemaForCatalog(database, storage);
+            if (!table && namespaces.at(child.relnamespace) == "public") {
+                storage = "public__" + storage;
+                table = engine.readPersistedSchemaForCatalog(database, storage);
+            }
+            if (!table) throw DbError("XX001", "foreign key catalog owner has no stored schema");
+            params = engine.getStorageParams(database, storage);
+            current = owner;
+        }
+        checkForQueryInterrupt();
+        const auto fk = std::find_if(table->fks.begin(), table->fks.end(), [&](const auto& candidate) { return candidate.name == name; });
+        if (fk == table->fks.end()) throw DbError("XX001", "foreign key identity has no stored definition");
+        const auto target = physical(parent);
+        if ((fk->refTable != target && (namespaces.at(parent.relnamespace) != "public" || fk->refTable != "public__" + target)) ||
+            fk->colNames.empty() || fk->colNames.size() != fk->refCols.size())
+            throw DbError("XX001", "foreign key identity differs from its stored definition");
+        const auto flag = [&](const char* nameSuffix, bool missing) {
+            const auto setting = params.find("constraint." + name + '.' + nameSuffix);
+            return setting == params.end() ? missing : setting->second == "1";
+        };
+        result.push_back({oid(key.oid), ExprValue("name", name), oid(child.relnamespace), ExprValue("\"char\"", "f"),
+            boolean(flag("deferrable", false)), boolean(flag("initially_deferred", false)), boolean(true),
+            boolean(flag("validated", !flag("not_valid", false))), oid(owner), oid(0), oid(0), oid(key.referenced),
+            boolean(true), ExprValue("smallint", "0"), boolean(false), array(owner, fk->colNames), array(key.referenced, fk->refCols)});
+    }
+    return result;
+}
+
+} // namespace foreign_key_catalog
 
 } // namespace dbms

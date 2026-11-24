@@ -233,6 +233,19 @@ public:
     std::vector<PgAttrdefRow> findAttrdefs(Oid relation) const;
     bool dropAttrdef(Oid oid);
 
+    // Foreign key definitions and flags live in the owning table. This
+    // catalog gives each definition a durable identity across renames.
+    struct ForeignKeyIdentity {
+        Oid oid;
+        Oid referenced;
+    };
+    using ForeignKeyIdentities = std::map<std::pair<Oid, std::string>, ForeignKeyIdentity>;
+    using ForeignKeyReferences = std::map<std::string, Oid>;
+    void reconcileForeignKeyIdentities(Oid relation, const ForeignKeyReferences& references,
+        const std::optional<std::pair<std::string, std::string>>& rename = {});
+    ForeignKeyIdentities foreignKeyIdentities() const;
+    static ForeignKeyIdentities readForeignKeyIdentities(const std::string& path);
+
     // =====================================================================
     // 持久化
     // =====================================================================
@@ -356,6 +369,7 @@ private:
     std::vector<PgProcRow>       procs_;
     std::vector<PgDependRow>     depends_;
     std::vector<PgAttrdefRow>    attrdefs_;
+    ForeignKeyIdentities        foreignKeys_;
     std::vector<PgAuthIdRow>     authIds_;
     std::vector<PgAuthMembersRow> authMembers_;
     std::vector<PgDescriptionRow> descriptions_;

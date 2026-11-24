@@ -29,7 +29,8 @@ inline std::vector<std::string> effectiveRelationSearchPath(const Session* sessi
 }
 
 inline void requireWritableBuiltinRelation(std::string_view schema, std::string_view name) {
-    if (schema == "pg_catalog" && (name == "pg_type" || name == "pg_am" || name == "pg_collation"))
+    if (schema == "pg_catalog" &&
+        (name == "pg_type" || name == "pg_am" || name == "pg_collation" || name == "pg_constraint"))
         throw DbError("0A000", "writing pg_catalog." + std::string(name) + " is not supported");
 }
 

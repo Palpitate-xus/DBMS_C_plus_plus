@@ -2,6 +2,13 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="foreign-key-catalog-comparison-20261124"></a>
+## 2026-11-24 · 查询外键和它引用的列
+
+PostgreSQL 18.6 把约束登记为 `pg_constraint` 对象，外键行关联本表、引用表和两侧的列号。约束名只需在同一张表内唯一，约束编号可以独立查找。SQLite 用 `PRAGMA foreign_key_list` 列出指定表的外键。DuckDB 的 `duckdb_constraints()` 返回约束名称、定义、列和引用目标，也提供该约束在表定义中的位置。 [PostgreSQL 目录源码](https://github.com/postgres/postgres/blob/REL_18_6/src/include/catalog/pg_constraint.h) · [SQLite 外键查询](https://www.sqlite.org/pragma.html#pragma_foreign_key_list) · [DuckDB 约束信息](https://duckdb.org/docs/current/sql/meta/duckdb_table_functions#duckdb_constraints)
+
+本项目沿用实际执行外键的表定义，从目录分配并保存独立编号。查询用当前表的列号和现有约束状态生成结果。当前范围为具备目录身份的普通表外键。`pg_get_constraintdef`、分区约束、其他约束类型、支持外键的索引编号及完整的动作信息仍待补齐。 [测试报告](test-report.md#foreign-key-catalog-20261124)
+
 <a id="catalog-oid-lookup-comparison-20261124"></a>
 ## 2026-11-24 · 按编号查找类型和排序规则
 

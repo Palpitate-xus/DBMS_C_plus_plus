@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-24 · 普通表外键可以通过系统目录查询
+
+为已有表定义中的外键分配目录编号。改名保留编号，删除后重新创建使用新编号。`pg_constraint` 可以读取未验证状态、延后检查状态和两侧列号。`CAT-02`、`CAT-03`、`CAT-07` 和 `CLIENT-01` 保持部分实现。其他约束类型、外键动作和支持索引的完整字段，以及 `psql` 的约束定义显示仍待补齐。 [验证范围](test-report.md#foreign-key-catalog-20261124) · [性能对照](performance-report-2026-10-30.md#foreign-key-catalog-cost-20261124)
+
 ## 2026-11-24 · 按编号查找类型和排序规则
 
 只读取 `pg_type` 和 `pg_collation` 的子查询，可以利用开头的对象编号等值条件缩小读取范围。只转换编号匹配的记录，原有筛选继续执行。类型目录快照仍会复制，完整 `psql \d` 仍需要外键相关目录。`CAT-02`、`CAT-03` 和 `CLIENT-01` 保持部分实现。 [验证范围](test-report.md#catalog-oid-lookup-20261124) · [性能对照](performance-report-2026-10-30.md#catalog-oid-lookup-cost-20261124)
