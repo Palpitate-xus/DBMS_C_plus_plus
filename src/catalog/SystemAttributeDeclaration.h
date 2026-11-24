@@ -41,28 +41,7 @@ inline std::vector<PgAttributeRow> declarations(Oid relation,const std::vector<P
     }
     return rows;
 }
-inline void validate(const PgClassRow& relation,const std::vector<PgAttributeRow>& attributes,
-    const std::vector<PgTypeRow>& types,bool requireExisting) {
-    std::vector<PgAttributeRow> loaded;
-    for(const auto& a:attributes)if(a.attrelid==relation.oid && a.attnum<0)loaded.push_back(a);
-    if(!eligible(relation.relkind)) {
-        if(!loaded.empty())throw DbError("XX001","unexpected system attributes for relation kind");
-        return;
-    }
-    if(loaded.empty() && !requireExisting)return;
-    if(loaded.size()!=fields.size())throw DbError("XX001","incomplete system attribute declaration");
-    std::sort(loaded.begin(),loaded.end(),[](const auto& a,const auto& b){return a.attnum>b.attnum;});
-    const auto expected=declarations(relation.oid,types);
-    for(size_t i=0;i<expected.size();++i) {const auto& a=loaded[i];const auto& e=expected[i];
-        if(a.attname!=e.attname || a.atttypid!=e.atttypid || a.attnum!=e.attnum || a.attlen!=e.attlen ||
-           a.atttypmod!=-1 || !a.attnotnull || !a.attislocal || a.attinhcount || a.attisdropped ||
-           a.atthasdef || a.attidentity || a.attgenerated || a.attndims || a.attcollation ||
-           a.attbyval!=e.attbyval || a.attalign!=e.attalign || a.attstorage!=e.attstorage)
-            throw DbError("XX001","conflicting system attribute declaration");
-    }
-}
-inline void validateAll(const std::vector<PgClassRow>& relations,const std::vector<PgAttributeRow>& attributes,
-    const std::vector<PgTypeRow>& types) {
-    for(const auto& relation:relations)validate(relation,attributes,types,true);
-}
+void validateAll(const std::vector<PgClassRow>& relations,
+                 const std::vector<PgAttributeRow>& attributes,
+                 const std::vector<PgTypeRow>& types);
 } // namespace dbms::system_attributes

@@ -6,6 +6,10 @@
 
 截至 2026-11-24，273 项功能要求中有 22 项完成、169 项部分实现、67 项待验证、15 项暂缓。各项结果和剩余范围见功能总账。以下更新报告给出各轮测试的实际范围。[功能总账](gap-progress.json) · [支持的功能和限制](compatibility-contract.md)
 
+## 2026-11-24 · 表多时，查索引的列更快
+
+列目录改为按所属对象分组核对，保留原有的损坏检查。额外建了 256 张表时，读取一个索引的列信息耗时中位数降低约 25%–31%，`psql` 使用的索引列查询降低约 17%–20%。 [测试报告](test-report.md#system-attribute-validation-20261124) · [性能报告](performance-report-2026-10-30.md#system-attribute-validation-cost-20261124)
+
 ## 2026-11-24 · 用 psql 查看索引的列
 
 原版 `psql` 的 `\d 索引名` 可以显示已验证的普通 B 树、哈希索引的列名、类型和定义。B 树索引会标出哪些列只是附带保存。 [使用说明](MANUAL.md#用-psql-查看索引的列) · [测试报告](test-report.md#index-attributes-20261124)

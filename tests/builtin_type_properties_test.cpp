@@ -6,6 +6,7 @@
 #include "commands/TableManage.h"
 #include "executor/ExecutionPlan.h"
 #include "test_utils.h"
+#include <algorithm>
 #include <fstream>
 #include <iostream>
 #include <map>
@@ -36,6 +37,59 @@ PlanExecutionResult query(const std::string& database,const std::string& sql) {
     auto result=QueryPlanner::executePlanChecked(QueryPlanner::buildPreparedQueryPlan(&g_engine,database,prepared,prepared->ast.get()));
     result.throwIfFailed();return result;
 }
+
+void checkSystemAttributeValidation(const CatalogManager::MetadataSnapshot& snapshot, Oid relation) {
+    std::vector<PgAttributeRow> reversed = snapshot.attributes;
+    std::reverse(reversed.begin(), reversed.end());
+    system_attributes::validateAll(snapshot.relations, reversed, snapshot.types);
+    need(!reversed.empty(), "valid system attributes do not depend on physical row order");
+
+    const auto checkRejected = [&](const std::vector<PgAttributeRow>& attributes,
+                                    const std::vector<PgTypeRow>& types, const char* message) {
+        try {
+            system_attributes::validateAll(snapshot.relations, attributes, types);
+        } catch (const DbError& error) {
+            need(error.sqlState() == "XX001" && error.message() == message, message);
+            return;
+        }
+        need(false, message);
+    };
+    const auto ctid = std::find_if(reversed.begin(), reversed.end(), [relation](const auto& row) {
+        return row.attrelid == relation && row.attnum == -1;
+    });
+    need(ctid != reversed.end(), "catalog row provides a real ctid declaration");
+    const auto position = static_cast<size_t>(ctid - reversed.begin());
+
+    auto malformed = reversed;
+    malformed.erase(malformed.begin() + position);
+    checkRejected(malformed, snapshot.types, "incomplete system attribute declaration");
+
+    malformed = reversed;
+    malformed[position].attnum = -2;
+    checkRejected(malformed, snapshot.types, "conflicting system attribute declaration");
+    malformed[position].attnum = -32768;
+    checkRejected(malformed, snapshot.types, "conflicting system attribute declaration");
+    malformed[position].attnum = -1;
+    malformed[position].attlen = 4;
+    checkRejected(malformed, snapshot.types, "conflicting system attribute declaration");
+
+    const auto index = std::find_if(snapshot.relations.begin(), snapshot.relations.end(),
+                                    [](const auto& row) { return row.relkind == 'i'; });
+    need(index != snapshot.relations.end(), "catalog contains a real index without system attributes");
+    malformed = reversed;
+    malformed.push_back(*ctid);
+    malformed.back().attrelid = index->oid;
+    checkRejected(malformed, snapshot.types, "unexpected system attributes for relation kind");
+
+    auto types = snapshot.types;
+    const auto tid = std::find_if(types.begin(), types.end(), [](const auto& row) { return row.oid == 27; });
+    need(tid != types.end(), "catalog contains the actual tid type");
+    types.push_back(PgTypeRow(*tid));
+    checkRejected(reversed, types, "duplicate system attribute type");
+    types.pop_back();
+    types.erase(std::find_if(types.begin(), types.end(), [](const auto& row) { return row.oid == 27; }));
+    checkRejected(reversed, types, "missing actual system attribute type");
+}
 }
 int main() {
     try {
@@ -64,6 +118,8 @@ int main() {
         // before changing the schema, then inspect the published generation.
         catalog.reset();DdlExecutor ddl;
         need(!ddl.executeSql("CREATE TABLE physical_values(id smallint,k bigint,label varchar(17),a integer[],t timestamp,u uuid,n numeric)",session),"actual user schema declaration");
+        need(!ddl.executeSql("CREATE INDEX physical_values_id_idx ON physical_values(id)", session),
+             "index used to test the absence of system attributes");
         need(query(database,"SELECT attname,atttypid,attlen,attndims,attbyval,attalign,attstorage,attcollation FROM pg_attribute WHERE attrelid='physical_values'::regclass AND attnum>0 ORDER BY attnum").structuredRows==
             std::vector<std::vector<std::string>>{{"id","21","2","0","t","s","p","0"},
                 {"k","20","8","0",sizeof(uintptr_t)>=8?"t":"f","d","p","0"},
@@ -72,6 +128,9 @@ int main() {
                 {"u","2950","16","0","f","c","p","0"},{"n","1700","-1","0","f","i","m","0"}},
             "ordinary DDL copies genuine declared type properties and array identity");
         catalog=g_engine.catalogService().acquire(database);
+        const auto physicalTable = catalog->resolveRelationSnapshot("physical_values", {"public"});
+        need(physicalTable.has_value(), "real table for system attribute validation");
+        checkSystemAttributeValidation(catalog->metadataSnapshot(), physicalTable->oid);
         const auto current=physical(catalog->metadataSnapshot());const auto disk=bytes(path);
         need(!catalog->bootstrapBuiltinTypeProperties(true) && physical(catalog->metadataSnapshot())==current && bytes(path)==disk,"published generation validates without writes");
         g_engine.catalogService().evict(database);
@@ -89,6 +148,25 @@ int main() {
         PgAttributeRow small;small.attrelid=50000;small.attnum=1;small.attname="id";small.atttypid=21;small.attlen=2;
         PgAttributeRow text=small;text.attnum=2;text.attname="label";text.atttypid=1043;text.attlen=-1;text.attstorage='x';
         legacy.addAttribute(small);legacy.addAttribute(text);
+
+        relation.oid = 50001;
+        relation.relname = "legacy_reserved_name";
+        relation.relnatts = 1;
+        need(legacy.createClass(relation) == relation.oid, "second legacy relation for atomic bootstrap");
+        small.attrelid = relation.oid;
+        small.attname = "ctid";
+        legacy.addAttribute(small);
+        const auto beforeRejectedBootstrap = physical(legacy.metadataSnapshot());
+        bool rejectedBootstrap = false;
+        try {
+            (void)legacy.bootstrapSystemAttributes(false);
+        } catch (const DbError& error) {
+            rejectedBootstrap = error.sqlState() == "0A000";
+        }
+        need(rejectedBootstrap && physical(legacy.metadataSnapshot()) == beforeRejectedBootstrap &&
+            !legacy.metadataSnapshot().systemAttributesMaterialized,
+            "a later legacy conflict publishes none of the earlier table's generated columns");
+        need(legacy.renameAttribute(relation.oid, "ctid", "id"), "repair legacy name before bootstrap");
         need(legacy.bootstrapSystemAttributes(false),"actual old system fields use old stored type properties");
         need(legacy.persistAll(),"old format fixture published");
         {std::ofstream marker(legacyPath/".system_attribute_version");marker<<system_attributes::version;}

@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>表多时，查索引的列更快 · 2026-11-24</summary>
+
+在额外建了 256 张表的测试库里，查看一个索引的列名和类型，耗时中位数降低约 25%–31%。
+
+[测试报告](docs/test-report.md#system-attribute-validation-20261124) · [性能报告](docs/performance-report-2026-10-30.md#system-attribute-validation-cost-20261124)
+
+</details>
+
+<details>
 <summary>用 psql 查看索引用了哪些列 · 2026-11-24</summary>
 
 输入 `\d 索引名`，可以看到普通索引中各列的类型，以及哪些列用来查找、哪些列随索引一起保存。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>查一张表有哪些索引更快 · 2026-11-24</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-24 · 查一张表有哪些索引更快
 
 例如，列出订单表的索引时，数据库可以少检查其他表的索引记录。
 
 [测试报告](docs/test-report.md#catalog-join-filter-20261124) · [性能报告](docs/performance-report-2026-10-30.md#catalog-join-filter-cost-20261124)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-24 · 查看主键用了哪些列
 

@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-24 · 检查表和索引的列信息
+
+PostgreSQL 在 `pg_attribute` 上按表编号和列序号建索引，并为按列序号查找保留缓存。SQLite 的 `PRAGMA table_xinfo` 返回指定表的列。DuckDB 通过 `duckdb_columns()` 返回各表的列信息。 [PostgreSQL 18.6 源码](https://github.com/postgres/postgres/blob/REL_18_6/src/include/catalog/pg_attribute.h) · [SQLite 列说明](https://www.sqlite.org/pragma.html#pragma_table_xinfo) · [DuckDB 列信息](https://duckdb.org/docs/current/sql/meta/duckdb_table_functions#duckdb_columns)
+
+本项目读取已有列目录时，先按对象编号归拢系统列，再检查每个对象应有的列。对象增多时，检查次数随列数和对象数增长，省去为每张表重复扫描整个目录的开销。读取单个对象的操作仍会经过目录校验。 [性能对照](performance-report-2026-10-30.md#system-attribute-validation-cost-20261124)
+
 ## 2026-11-24 · 查询索引的列
 
 PostgreSQL 在 `pg_attribute` 为索引的每一列保存一条记录，`psql` 通过 `pg_index.indnkeyatts` 确定哪些列是键。SQLite 的 `PRAGMA index_xinfo` 区分键和辅助定位列。DuckDB 的 `duckdb_indexes()` 列出显式创建的索引和对应的建索引语句。 [PostgreSQL 列目录](https://www.postgresql.org/docs/18/catalog-pg-attribute.html) · [PostgreSQL 索引目录](https://www.postgresql.org/docs/18/catalog-pg-index.html) · [SQLite 索引列](https://www.sqlite.org/pragma.html#pragma_index_xinfo) · [DuckDB 索引目录](https://duckdb.org/docs/current/sql/meta/duckdb_table_functions#duckdb_indexes)

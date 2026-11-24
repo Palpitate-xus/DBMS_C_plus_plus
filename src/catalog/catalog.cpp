@@ -17,6 +17,8 @@
 #include <functional>
 #include <cerrno>
 #include <tuple>
+#include <unordered_map>
+#include <unordered_set>
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -1230,20 +1232,96 @@ std::vector<PgAttributeRow> CatalogManager::findUserAttributes(Oid relOid) const
     return findAttributes(relOid);
 }
 
+namespace {
+
+class SystemAttributeValidator {
+public:
+    SystemAttributeValidator(const std::vector<PgAttributeRow>& attributes,
+                             const std::vector<PgTypeRow>& types)
+        : types_(types) {
+        for (const auto& attribute : attributes) {
+            if (attribute.attnum >= 0) continue;
+            auto& group = byRelation_[attribute.attrelid];
+            ++group.count;
+            const auto position = static_cast<size_t>(-attribute.attnum - 1);
+            if (position < group.columns.size()) group.columns[position] = &attribute;
+        }
+    }
+
+    bool validate(const PgClassRow& relation, bool requireExisting) {
+        const auto found = byRelation_.find(relation.oid);
+        if (!system_attributes::eligible(relation.relkind)) {
+            if (found != byRelation_.end())
+                throw DbError("XX001", "unexpected system attributes for relation kind");
+            return false;
+        }
+        if (found == byRelation_.end() && !requireExisting) return false;
+        if (found == byRelation_.end() || found->second.count != system_attributes::fields.size())
+            throw DbError("XX001", "incomplete system attribute declaration");
+
+        const auto& expected = declarations();
+        for (size_t position = 0; position < expected.size(); ++position) {
+            const auto* actual = found->second.columns[position];
+            const auto& field = expected[position];
+            if (!actual || actual->attname != field.attname || actual->atttypid != field.atttypid ||
+                actual->attlen != field.attlen || actual->atttypmod != -1 || !actual->attnotnull ||
+                !actual->attislocal || actual->attinhcount || actual->attisdropped || actual->atthasdef ||
+                actual->attidentity || actual->attgenerated || actual->attndims || actual->attcollation ||
+                actual->attbyval != field.attbyval || actual->attalign != field.attalign ||
+                actual->attstorage != field.attstorage)
+                throw DbError("XX001", "conflicting system attribute declaration");
+        }
+        return true;
+    }
+
+    const std::vector<PgAttributeRow>& declarations() {
+        if (expected_.empty()) expected_ = system_attributes::declarations(INVALID_OID, types_);
+        return expected_;
+    }
+
+private:
+    struct AttributeGroup {
+        std::array<const PgAttributeRow*, system_attributes::fields.size()> columns{};
+        size_t count = 0;
+    };
+    std::unordered_map<Oid, AttributeGroup> byRelation_;
+    const std::vector<PgTypeRow>& types_;
+    std::vector<PgAttributeRow> expected_;
+};
+
+} // namespace
+
+void system_attributes::validateAll(const std::vector<PgClassRow>& relations,
+    const std::vector<PgAttributeRow>& attributes, const std::vector<PgTypeRow>& types) {
+    SystemAttributeValidator validator(attributes, types);
+    for (const auto& relation : relations) validator.validate(relation, true);
+}
+
 bool CatalogManager::bootstrapSystemAttributes(bool requireExisting) {
     std::lock_guard<std::mutex> lock(mutex_);
-    auto replacement=attributes_;bool changed=false;
-    for(const auto& relation:classes_) {
-        system_attributes::validate(relation,attributes_,types_,requireExisting);
-        if(!system_attributes::eligible(relation.relkind))continue;
-        const bool present=std::any_of(attributes_.begin(),attributes_.end(),[&](const auto& a){return a.attrelid==relation.oid && a.attnum<0;});
-        if(present)continue;
-        for(const auto& a:attributes_)if(a.attrelid==relation.oid && system_attributes::reserved(a.attname))
-            throw DbError("0A000","legacy column conflicts with a system attribute declaration");
-        const auto rows=system_attributes::declarations(relation.oid,types_);
-        replacement.insert(replacement.end(),rows.begin(),rows.end());changed=true;
+    SystemAttributeValidator validator(attributes_, types_);
+    std::unordered_set<Oid> reservedNames;
+    if (!requireExisting) {
+        for (const auto& attribute : attributes_)
+            if (attribute.attnum >= 0 && system_attributes::reserved(attribute.attname))
+                reservedNames.insert(attribute.attrelid);
     }
-    attributes_.swap(replacement);systemAttributesMaterialized_=true;return changed;
+    std::vector<PgAttributeRow> additions;
+    for (const auto& relation : classes_) {
+        const bool present = validator.validate(relation, requireExisting);
+        if (present || !system_attributes::eligible(relation.relkind)) continue;
+        if (reservedNames.count(relation.oid))
+            throw DbError("0A000", "legacy column conflicts with a system attribute declaration");
+        for (auto attribute : validator.declarations()) {
+            attribute.attrelid = relation.oid;
+            additions.push_back(std::move(attribute));
+        }
+    }
+    const bool changed = !additions.empty();
+    attributes_.insert(attributes_.end(), std::make_move_iterator(additions.begin()),
+                       std::make_move_iterator(additions.end()));
+    systemAttributesMaterialized_ = true;
+    return changed;
 }
 
 std::vector<PgAttributeRow> CatalogManager::findAttributesByNum(Oid relOid) const {
