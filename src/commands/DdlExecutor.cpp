@@ -3767,7 +3767,8 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                     status = g_engine.alterTableAddFKConstraint(
                         s.currentDB, tableName, constraintName, tc.columns,
                         resolveTableName(s, tc.refTable),
-                        tc.refColumns, tc.onDelete, tc.onUpdate, !tc.notValid);
+                        tc.refColumns, tc.onDelete.empty() ? "noaction" : tc.onDelete,
+                        tc.onUpdate.empty() ? "noaction" : tc.onUpdate, !tc.notValid);
                 } else {
                     std::cout << "ALTER TABLE constraint type is unsupported" << std::endl;
                     return true;
@@ -5792,8 +5793,8 @@ ForeignKey DdlExecutor::tableConstraintToForeignKey(const TableConstraint& tc) {
     fk.colNames = tc.columns;
     fk.refTable = tc.refTable;
     fk.refCols = tc.refColumns;
-    fk.onDelete = tc.onDelete.empty() ? "restrict" : toLower(tc.onDelete);
-    fk.onUpdate = tc.onUpdate.empty() ? "restrict" : toLower(tc.onUpdate);
+    fk.onDelete = tc.onDelete.empty() ? "noaction" : toLower(tc.onDelete);
+    fk.onUpdate = tc.onUpdate.empty() ? "noaction" : toLower(tc.onUpdate);
     return fk;
 }
 

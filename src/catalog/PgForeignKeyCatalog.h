@@ -2,6 +2,8 @@
 
 #include "catalog/PgDefaultCatalog.h"
 
+struct Session;
+
 namespace dbms {
 class StorageEngine;
 }
@@ -25,7 +27,7 @@ inline const QueryRowDescriptor& descriptor() {
     static const auto columns = [] {
         auto result = system_catalog::ownedDescriptor(fields,
             {"oid", "conname", "connamespace", "contype", "condeferrable", "condeferred", "conenforced",
-             "convalidated", "conrelid", "contypid", "conparentid", "confrelid", "conislocal",
+             "convalidated", "conrelid", "contypid", "conparentid", "confrelid", "confupdtype", "confdeltype", "conislocal",
              "coninhcount", "conperiod", "conkey", "confkey"});
         for (auto& column : result) {
             column.physicalRelationOid = relationOid;
@@ -41,5 +43,13 @@ void synchronize(const StorageEngine& engine, const std::string& database,
     const std::optional<std::pair<std::string, std::string>>& rename = {});
 std::vector<std::vector<ExprValue>> rows(const StorageEngine& engine, const std::string& database,
     std::optional<Oid> owner = {}, std::optional<Oid> referenced = {});
+std::optional<std::string> definition(const StorageEngine& engine, const std::string& database,
+    Oid constraint, const Session* session);
+
+struct ReferentialAction {
+    char code;
+    const char* sql;  // The default action is omitted when reconstructing SQL.
+};
+ReferentialAction referentialAction(std::string_view stored);
 
 }  // namespace dbms::foreign_key_catalog

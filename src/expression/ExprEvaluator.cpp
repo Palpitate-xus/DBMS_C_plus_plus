@@ -6,6 +6,7 @@
 #include "catalog/DatumMetadataFactory.h"
 #include "catalog/FormatType.h"
 #include "catalog/PgDefaultExpression.h"
+#include "catalog/PgForeignKeyCatalog.h"
 #include "catalog/RelationSearchPath.h"
 #include "expression/StoredRegtypeValue.h"
 #include "utils/numeric_type.h"
@@ -6625,6 +6626,21 @@ struct SqlGetExpressionFunction {
         return ExprValue("text", sql.value_or(""), !sql);
     }
 };
+struct SqlConstraintDefinitionFunction {
+    ExprValue operator()(const std::vector<ExprValue>&) const {
+        throw DbError("XX000", "pg_get_constraintdef requires its catalog context");
+    }
+
+    ExprValue invoke(const std::vector<ExprValue>& args, StorageEngine& engine,
+                     const std::string& database) const {
+        if (args.empty() || args.size() > 2) throw DbError("42883", "pg_get_constraintdef requires one or two arguments");
+        if (std::any_of(args.begin(), args.end(), [](const auto& arg) { return arg.isNull; }))
+            return ExprValue("text", "", true);
+        const auto oid = args[0].objectOid ? *args[0].objectOid : parseOidInput(args[0].value);
+        const auto sql = foreign_key_catalog::definition(engine, database, oid, currentSession());
+        return ExprValue("text", sql.value_or(""), !sql);
+    }
+};
 struct SqlSessionSettingFunction {
     bool write;
 
@@ -6649,6 +6665,8 @@ bool ownsScalarSignatures(const std::string& name,const ScalarFunction* callback
         return callback && callback->target<SqlFormatTypeFunction>();
     if (name == "pg_get_expr")
         return callback && callback->target<SqlGetExpressionFunction>();
+    if (name == "pg_get_constraintdef")
+        return callback && callback->target<SqlConstraintDefinitionFunction>();
     if(isCoreOverloadedScalarName(name))
         return callback && callback->target<DeclaredCoreScalarFunction>();
     if(isArraySearchScalarName(name))
@@ -6749,6 +6767,11 @@ const std::vector<ScalarSignature>& scalarSignatures(const std::string& name) {
         static const auto* const signatures = new const std::vector<ScalarSignature>{
             {{"pg_node_tree", "oid"}, "pg_catalog.text"},
             {{"pg_node_tree", "oid", "boolean"}, "pg_catalog.text"}};
+        return *signatures;
+    }
+    if (name == "pg_get_constraintdef") {
+        static const auto* const signatures = new const std::vector<ScalarSignature>{
+            {{"oid"}, "pg_catalog.text"}, {{"oid", "boolean"}, "pg_catalog.text"}};
         return *signatures;
     }
     if (name == "current_setting") {
@@ -6993,7 +7016,7 @@ ResolvedScalarFunction resolveTypedScalar(const std::string& name,
     if(candidates.size()>1)throw DbError("42725","function "+name+" is not unique");
     if(candidates.empty())return {};
     if((name=="scale" || name=="min_scale" || name=="gcd" || name=="lcm" || name=="factorial" ||
-        name=="format_type" || name=="pg_get_expr" ||
+        name=="format_type" || name=="pg_get_expr" || name=="pg_get_constraintdef" ||
         isSessionSettingFunction(name)) && !candidates.front().stored &&
        (call->hasOver || call->distinct || call->filter || !call->orderBy.empty() ||
         !call->aggregateOrderKeys.empty()))
@@ -8080,6 +8103,9 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
         } else if (const auto* expression = it->second.target<SqlGetExpressionFunction>()) {
             auto* owner = sqlValueEngine_ ? sqlValueEngine_ : &g_engine;
             result = expression->invoke(args, *owner, currentDB_);
+        } else if (const auto* definition = it->second.target<SqlConstraintDefinitionFunction>()) {
+            auto* owner = sqlValueEngine_ ? sqlValueEngine_ : &g_engine;
+            result = definition->invoke(args, *owner, currentDB_);
         } else result = it->second(args);
         if(!pushElement && declaredResult.size()>=2 && declaredResult.compare(declaredResult.size()-2,2,"[]")==0)
             result=implicitRuntimeValue(*this,std::move(result),declaredResult);
@@ -14072,6 +14098,8 @@ void ExprEvaluator::registerStatelessBuiltins() {
     volatility_["format_type"] = 's';
     functions_["pg_get_expr"] = SqlGetExpressionFunction{};
     volatility_["pg_get_expr"] = 's';
+    functions_["pg_get_constraintdef"] = SqlConstraintDefinitionFunction{};
+    volatility_["pg_get_constraintdef"] = 's';
     functions_["current_setting"] = SqlSessionSettingFunction{false};
     functions_["set_config"] = SqlSessionSettingFunction{true};
     functions_["version"]=SqlVersionFunction{};

@@ -4,6 +4,24 @@
 
 > 复核发现，几组早期 COPY 计时在每个对照场景中使用了固定的执行顺序。耗时差可能包含顺序影响。这项问题涉及默认值求值、按列查找、默认值标记、短 CSV 导出和短查询导出的配对计时。[默认值求值](#copy-default-evaluation-order-cost-20261122) · [按列查找](#copy-identity-input-cost-20261122) · [默认值标记](#copy-default-marker-cost-20261122) · [CSV 导出](#copy-csv-out-cost-20261122) · [查询导出](#copy-query-stdout-cost-20261122)
 
+<a id="foreign-key-definition-cost-20261124"></a>
+## 2026-11-24 · 查询外键定义的耗时
+
+对照上一版 `a21b992a`、本次版本和 PostgreSQL 18.6。本项目两个程序用 GCC 13.3、CMake、C++17 和 `-O2` 构建，关闭 OpenSSL。测试机为 Intel Xeon E5-2678 v3，客户端和服务端使用 CPU 13、28。本项目测试目录在 `/dev/shm`，PostgreSQL 测试目录在工作区文件系统，关闭自动清理、JIT 和并行查询。
+
+在每个空库运行外键测试中的 `setup` 和 `EXTRA`。额外创建 `fk_child.extra_00` 至 `extra_23` 共 24 张表，每张有 `id integer,b integer,a integer`，约束名为 `extra_00_fk` 至 `extra_23_fk`，均用 `(a,b)` 引用 `fk_parent.accounts(a,b)`。使用真实表编号执行测试中的 `QUERY` 和 `OUTGOING`。单查定义时用真实约束编号调用 `pg_catalog.pg_get_constraintdef`。查看 26 条定义时，从同一目录按 `confrelid` 选出引用 `fk_parent.accounts` 的外键，输出 `conname` 和函数结果并按 `conname` 排序。 [建表和查询夹具](../tests/pg_foreign_key_catalog_protocol_e2e_test.py)
+
+用持续连接测量从发出 SQL 到收到就绪消息的耗时，逐次核对行、字段类型和完成消息。每轮每个版本先预热 4 次，再计时 20 次。各版本轮流执行，第二轮反转顺序。表中为两轮的中位数和 P95 范围，单位为毫秒。每轮 P95 取第 19 小的样本。上一版缺少定义函数。
+
+| 查询 | 上一版中位数 / P95 | 本次中位数 / P95 | PostgreSQL 18.6 中位数 / P95 |
+| --- | ---: | ---: | ---: |
+| 读取两条外键的目录字段 | 5.90–6.35 / 7.23–7.69 | 6.24–6.39 / 7.68–7.86 | 0.46–0.49 / 0.55–0.56 |
+| 按编号显示一条定义 | — | 3.96–3.98 / 4.96–5.30 | 0.16 / 0.20–0.25 |
+| 原版 `psql` 查询当前表的两条外键 | — | 5.68–5.73 / 7.03–7.21 | 0.28–0.29 / 0.38 |
+| 列出引用同一张表的 26 条外键定义 | — | 13.75–14.08 / 15.23–15.30 | 0.72–0.75 / 0.98–1.08 |
+
+原有两条外键目录查询的中位数分别增加约 1% 和 6%。原版 `psql` 的两条外键查询耗时约为 PostgreSQL 的 20 倍。完整 `\d` 还会请求分区祖先，因此单独记录上述查询的耗时。 [功能验证](test-report.md#foreign-key-definition-20261124) · [实现对照](postgresql-comparison.md#foreign-key-definition-comparison-20261124)
+
 <a id="foreign-key-catalog-cost-20261124"></a>
 ## 2026-11-24 · 查询外键及建表、删表的耗时
 

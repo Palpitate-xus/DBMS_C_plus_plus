@@ -2776,7 +2776,18 @@ WHERE conrelid = 'public.orders'::regclass AND contype = 'f'
 ORDER BY conname;
 ```
 
-查询哪些表引用了 `public.orders` 时，把筛选中的 `conrelid` 换成 `confrelid`，并在结果中查看 `conrelid::regclass`。组合外键的 `conkey` 和 `confkey` 按定义顺序一一对应。外键或表改名后仍可用原约束编号查询。完整 `psql \d` 还需要约束定义函数和其他目录。 [验证记录](test-report.md#foreign-key-catalog-20261124)
+查询哪些表引用了 `public.orders` 时，把筛选中的 `conrelid` 换成 `confrelid`，并在结果中查看 `conrelid::regclass`。组合外键的 `conkey` 和 `confkey` 按定义顺序一一对应。外键或表改名后仍可用原约束编号查询。 [验证记录](test-report.md#foreign-key-catalog-20261124)
+
+用 `pg_get_constraintdef` 显示普通表外键的定义。输出使用当前的表名和列名，并显示显式动作、延后检查和 `NOT VALID`。
+
+```sql
+SELECT conname, pg_catalog.pg_get_constraintdef(oid) AS definition
+FROM pg_catalog.pg_constraint
+WHERE conrelid = 'public.orders'::regclass AND contype = 'f'
+ORDER BY conname;
+```
+
+新建外键的默认动作是 `NO ACTION`，显示定义时会省略这个默认动作。旧库中已经保存为 `RESTRICT` 的动作仍显示 `RESTRICT`。更新或删除被引用行时，两种动作的延期检查行为仍待完善。 [验证范围](test-report.md#foreign-key-definition-20261124)
 
 ---
 

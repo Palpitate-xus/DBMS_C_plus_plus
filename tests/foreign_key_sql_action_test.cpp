@@ -144,7 +144,7 @@ int main() {
     const dbms::TableSchema noActionChild =
         g_engine.getTableSchema(database, "no_action_child");
     assert(noActionChild.fkLen() == 1);
-    assert(noActionChild.fks[0].onDelete == "restrict");
+    assert(noActionChild.fks[0].onDelete == "noaction");
     assert(noActionChild.fks[0].onUpdate == "restrict");
 
     assert(!ddl.executeSql(
@@ -158,7 +158,7 @@ int main() {
         g_engine.getTableSchema(database, "api_child");
     assert(apiChild.fkLen() == 1);
     assert(apiChild.fks[0].onDelete == "setnull");
-    assert(apiChild.fks[0].onUpdate == "restrict");
+    assert(apiChild.fks[0].onUpdate == "noaction");
 
     assert(ddl.executeSql(
         "CREATE TABLE unsupported_default_child ("

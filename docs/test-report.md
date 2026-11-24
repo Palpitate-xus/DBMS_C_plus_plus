@@ -2,6 +2,17 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="foreign-key-definition-20261124"></a>
+## 2026-11-24 · 显示普通表外键的 SQL 定义
+
+同一套用例在本项目和 PostgreSQL 18.6 上通过。普通和扩展协议核对原版 `psql` 用于查看本表外键的 SQL。`pg_get_constraintdef` 的一参数和两参数形式均返回 `text`。测试覆盖组合外键、带引号的表名和列名、搜索路径中遮挡同名表和同名函数、显式 `RESTRICT`、`CASCADE`、`SET NULL`、默认 `NO ACTION`、延后检查及 `NOT VALID`。找不到约束编号或参数为空时返回 SQL 空值。校验了以 `oid` 为参数的已准备查询，以及动作字段的来源、类型和值。 [协议用例](../tests/pg_foreign_key_catalog_protocol_e2e_test.py)
+
+使用上一版生成的库，核对升级后的表定义文件字节和原约束编号。已合并保存的动作显示为原记录中的 `RESTRICT`。在增加外键和改名尚未提交或已提交时强制结束服务，重启后逐项核对定义、动作及原行值。上一轮的建表撤销及旧日志恢复用例也通过。 [升级说明](PACKAGING.md#外键目录升级)
+
+主协议在内的 9 套协议测试及 5 套 C++ 测试通过。既有 `NOT VALID` 套件的 154 项检查全部通过。
+
+用原版 `psql` 18.6 执行 `\d fk_child.payments`。上一版在查询当前表的外键时报缺少 `pg_get_constraintdef`，本次继续执行到查找引用当前表的外键，报告缺少 `pg_partition_ancestors`。已实现的函数适用于已登记的普通表外键。其他约束类型和更新或删除被引用行时的完整延期行为仍需补齐。受测程序 SHA-256 为 `dcaf0da3e9768b6ac5bd264cea85aa0ae8086a65c0596a8f639df19443d53a1b`。 [性能对照](performance-report-2026-10-30.md#foreign-key-definition-cost-20261124)
+
 <a id="foreign-key-catalog-20261124"></a>
 ## 2026-11-24 · 查询普通表外键
 

@@ -243,8 +243,8 @@ public:
     using ForeignKeyReferences = std::map<std::string, Oid>;
     void reconcileForeignKeyIdentities(Oid relation, const ForeignKeyReferences& references,
         const std::optional<std::pair<std::string, std::string>>& rename = {});
-    ForeignKeyIdentities foreignKeyIdentities() const;
-    static ForeignKeyIdentities readForeignKeyIdentities(const std::string& path);
+    ForeignKeyIdentities foreignKeyIdentities(std::optional<Oid> constraint = {}) const;
+    static ForeignKeyIdentities readForeignKeyIdentities(const std::string& path, std::optional<Oid> constraint = {});
 
     // =====================================================================
     // 持久化

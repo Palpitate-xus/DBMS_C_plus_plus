@@ -18,6 +18,7 @@
 #include "catalog/PgCollationCatalog.h"
 #include "catalog/PgForeignKeyCatalog.h"
 #include "catalog/DatumMetadataFactory.h"
+#include "expression/regclass_input.h"
 #include "common/DbError.h"
 #include "access/IndexFileUtil.h"
 #include <filesystem>
@@ -744,11 +745,12 @@ CatalogManager::MetadataSnapshot CatalogService::metadataSnapshot(const std::str
     return CatalogManager::readMetadataSnapshot(catalog.path, includeDefaultObjects);
 }
 
-CatalogManager::ForeignKeyIdentities CatalogService::foreignKeyIdentities(const std::string& database) const {
+CatalogManager::ForeignKeyIdentities CatalogService::foreignKeyIdentities(const std::string& database,
+    std::optional<Oid> constraint) const {
     const auto catalog = readCatalog(database);
-    if (catalog.manager) return catalog.manager->foreignKeyIdentities();
+    if (catalog.manager) return catalog.manager->foreignKeyIdentities(constraint);
     if (catalog.path.empty()) return {};
-    return CatalogManager::readForeignKeyIdentities(catalog.path);
+    return CatalogManager::readForeignKeyIdentities(catalog.path, constraint);
 }
 
 std::optional<bool> CatalogService::relationIsVisible(
@@ -874,6 +876,109 @@ void synchronize(const StorageEngine& engine, const std::string& database,
     catalog.reconcileForeignKeyIdentities(owner.oid, references, rename);
 }
 
+ReferentialAction referentialAction(std::string_view stored) {
+    if (stored == "noaction") return {'a', nullptr};
+    if (stored == "restrict" || stored.empty()) return {'r', "RESTRICT"};
+    if (stored == "cascade") return {'c', "CASCADE"};
+    if (stored == "setnull") return {'n', "SET NULL"};
+    throw DbError("XX001", "invalid stored foreign key action");
+}
+
+namespace {
+
+struct StoredDefinition {
+    const ForeignKey& key;
+    Oid ownerNamespace;
+    std::vector<int16_t> localColumns;
+    std::vector<int16_t> referencedColumns;
+    bool deferrable;
+    bool initiallyDeferred;
+    bool validated;
+};
+
+// Validate the owning table against the same catalog generation before
+// projecting its fields or reconstructing SQL. The caller holds the read fence.
+class DefinitionReader {
+public:
+    DefinitionReader(const StorageEngine& engine, const std::string& database)
+        : engine_(engine), database_(database), metadata_(engine.catalogService().metadataSnapshot(database, false)) {
+        for (const auto& row : metadata_.relations) relations_.emplace(row.oid, &row);
+        for (const auto& space : metadata_.namespaces) namespaces_.emplace(space.oid, space.nspname);
+    }
+
+    const CatalogManager::MetadataSnapshot& metadata() const { return metadata_; }
+
+    StoredDefinition read(const CatalogManager::ForeignKeyIdentities::value_type& entry) {
+        checkForQueryInterrupt();
+        const auto& [owner, name] = entry.first;
+        const auto& child = relation(owner);
+        const auto& parent = relation(entry.second.referenced);
+        if (current_ != owner) {
+            auto storage = physical(child);
+            table_ = engine_.readPersistedSchemaForCatalog(database_, storage);
+            if (!table_ && namespaces_.at(child.relnamespace) == "public") {
+                storage = "public__" + storage;
+                table_ = engine_.readPersistedSchemaForCatalog(database_, storage);
+            }
+            if (!table_) throw DbError("XX001", "foreign key catalog owner has no stored schema");
+            params_ = engine_.getStorageParams(database_, storage);
+            current_ = owner;
+        }
+        const auto fk = std::find_if(table_->fks.begin(), table_->fks.end(), [&](const auto& candidate) {
+            return candidate.name == name;
+        });
+        if (fk == table_->fks.end()) throw DbError("XX001", "foreign key identity has no stored definition");
+        const auto target = physical(parent);
+        if ((fk->refTable != target && (namespaces_.at(parent.relnamespace) != "public" || fk->refTable != "public__" + target)) ||
+            fk->colNames.empty() || fk->colNames.size() != fk->refCols.size())
+            throw DbError("XX001", "foreign key identity differs from its stored definition");
+        const auto flag = [&](const char* suffix, bool missing) {
+            const auto setting = params_.find("constraint." + name + '.' + suffix);
+            return setting == params_.end() ? missing : setting->second == "1";
+        };
+        return {*fk, child.relnamespace, columnNumbers(owner, fk->colNames),
+            columnNumbers(parent.oid, fk->refCols), flag("deferrable", false),
+            flag("initially_deferred", false), flag("validated", !flag("not_valid", false))};
+    }
+
+private:
+    const StorageEngine& engine_;
+    const std::string& database_;
+    const CatalogManager::MetadataSnapshot metadata_;
+    std::map<Oid, const PgClassRow*> relations_;
+    std::map<Oid, std::string_view> namespaces_;
+    Oid current_ = INVALID_OID;
+    std::optional<TableSchema> table_;
+    std::map<std::string, std::string> params_;
+
+    const PgClassRow& relation(Oid oid) const {
+        const auto found = relations_.find(oid);
+        if (found == relations_.end()) throw DbError("XX001", "foreign key catalog relation is missing");
+        return *found->second;
+    }
+
+    std::string physical(const PgClassRow& row) const {
+        const auto space = namespaces_.find(row.relnamespace);
+        if (space == namespaces_.end()) throw DbError("XX001", "foreign key catalog relation has no namespace");
+        return space->second == "public" ? row.relname : std::string(space->second) + "__" + row.relname;
+    }
+
+    std::vector<int16_t> columnNumbers(Oid relation, const std::vector<std::string>& columns) const {
+        std::vector<int16_t> numbers;
+        numbers.reserve(columns.size());
+        for (const auto& name : columns) {
+            const auto field = std::find_if(metadata_.attributes.begin(), metadata_.attributes.end(), [&](const auto& attr) {
+                return attr.attrelid == relation && attr.attname == name && attr.attnum > 0 && !attr.attisdropped;
+            });
+            if (field == metadata_.attributes.end()) throw DbError("XX001", "foreign key catalog field is missing");
+            numbers.push_back(field->attnum);
+        }
+        return numbers;
+    }
+};
+
+} // namespace
+
 std::vector<std::vector<ExprValue>> rows(const StorageEngine& engine, const std::string& database,
     std::optional<Oid> ownerFilter, std::optional<Oid> referencedFilter) {
     const auto fence = engine.catalogReadOwnership(database);
@@ -881,26 +986,12 @@ std::vector<std::vector<ExprValue>> rows(const StorageEngine& engine, const std:
         throw DbError("55P03", "foreign key catalog read conflicts with an active database writer");
     const auto keys = engine.catalogService().foreignKeyIdentities(database);
     if (keys.empty()) return {};
-    const auto metadata = engine.catalogService().metadataSnapshot(database, false);
-    const auto keyType = DatumMetadataFactory(metadata).type(1005);
+    DefinitionReader reader(engine, database);
+    const auto keyType = DatumMetadataFactory(reader.metadata()).type(1005);
     if (!keyType || keyType->kind != DatumKind::Array || !keyType->arrayElement ||
         keyType->arrayElement->actualOid != 21)
         throw DbError("XX001", "foreign key column numbers have no smallint array type");
-    std::map<Oid, const PgClassRow*> relations;
-    std::map<Oid, std::string> namespaces;
-    for (const auto& relation : metadata.relations) relations.emplace(relation.oid, &relation);
-    for (const auto& space : metadata.namespaces) namespaces.emplace(space.oid, space.nspname);
-    const auto relation = [&](Oid oid) -> const PgClassRow& {
-        const auto found = relations.find(oid);
-        if (found == relations.end()) throw DbError("XX001", "foreign key catalog relation is missing");
-        return *found->second;
-    };
-    const auto physical = [&](const PgClassRow& row) {
-        const auto space = namespaces.find(row.relnamespace);
-        if (space == namespaces.end()) throw DbError("XX001", "foreign key catalog relation has no namespace");
-        return space->second == "public" ? row.relname : space->second + "__" + row.relname;
-    };
-    const auto array = [&](Oid relation, const std::vector<std::string>& columns) {
+    const auto array = [&](const std::vector<int16_t>& columns) {
         std::string text = "{";
         auto value = std::make_shared<CompoundDatum>();
         value->type = keyType;
@@ -908,15 +999,11 @@ std::vector<std::vector<ExprValue>> rows(const StorageEngine& engine, const std:
         value->arrayElements.emplace();
         value->arrayElements->reserve(columns.size());
         value->arrayNullBitmap = false;
-        for (const auto& name : columns) {
-            const auto field = std::find_if(metadata.attributes.begin(), metadata.attributes.end(), [&](const auto& attr) {
-                return attr.attrelid == relation && attr.attname == name && attr.attnum > 0 && !attr.attisdropped;
-            });
-            if (field == metadata.attributes.end()) throw DbError("XX001", "foreign key catalog field is missing");
+        for (const auto number : columns) {
             if (text.size() > 1) text += ',';
-            const auto number = std::to_string(field->attnum);
-            text += number;
-            value->arrayElements->emplace_back("smallint", number);
+            const auto element = std::to_string(number);
+            text += element;
+            value->arrayElements->emplace_back("smallint", element);
         }
         ExprValue result("smallint[]", text + '}');
         result.compound = std::move(value);
@@ -924,46 +1011,53 @@ std::vector<std::vector<ExprValue>> rows(const StorageEngine& engine, const std:
     };
     const auto oid = [](Oid value) { return ExprValue("oid", std::to_string(value)); };
     const auto boolean = [](bool value) { return ExprValue("boolean", value ? "t" : "f"); };
+    const auto action = [](const std::string& value) {
+        return ExprValue("\"char\"", std::string(1, referentialAction(value).code));
+    };
     std::vector<std::vector<ExprValue>> result;
     const auto begin = ownerFilter ? keys.lower_bound({*ownerFilter, {}}) : keys.begin();
-    Oid current = INVALID_OID;
-    std::optional<TableSchema> table;
-    std::map<std::string, std::string> params;
     for (auto entry = begin; entry != keys.end(); ++entry) {
         const auto& [owner, name] = entry->first;
-        const auto& key = entry->second;
+        const auto& identity = entry->second;
         if (ownerFilter && owner != *ownerFilter) break;
-        if (referencedFilter && key.referenced != *referencedFilter) continue;
-        const auto& child = relation(owner);
-        const auto& parent = relation(key.referenced);
-        if (current != owner) {
-            auto storage = physical(child);
-            table = engine.readPersistedSchemaForCatalog(database, storage);
-            if (!table && namespaces.at(child.relnamespace) == "public") {
-                storage = "public__" + storage;
-                table = engine.readPersistedSchemaForCatalog(database, storage);
-            }
-            if (!table) throw DbError("XX001", "foreign key catalog owner has no stored schema");
-            params = engine.getStorageParams(database, storage);
-            current = owner;
-        }
-        checkForQueryInterrupt();
-        const auto fk = std::find_if(table->fks.begin(), table->fks.end(), [&](const auto& candidate) { return candidate.name == name; });
-        if (fk == table->fks.end()) throw DbError("XX001", "foreign key identity has no stored definition");
-        const auto target = physical(parent);
-        if ((fk->refTable != target && (namespaces.at(parent.relnamespace) != "public" || fk->refTable != "public__" + target)) ||
-            fk->colNames.empty() || fk->colNames.size() != fk->refCols.size())
-            throw DbError("XX001", "foreign key identity differs from its stored definition");
-        const auto flag = [&](const char* nameSuffix, bool missing) {
-            const auto setting = params.find("constraint." + name + '.' + nameSuffix);
-            return setting == params.end() ? missing : setting->second == "1";
-        };
-        result.push_back({oid(key.oid), ExprValue("name", name), oid(child.relnamespace), ExprValue("\"char\"", "f"),
-            boolean(flag("deferrable", false)), boolean(flag("initially_deferred", false)), boolean(true),
-            boolean(flag("validated", !flag("not_valid", false))), oid(owner), oid(0), oid(0), oid(key.referenced),
-            boolean(true), ExprValue("smallint", "0"), boolean(false), array(owner, fk->colNames), array(key.referenced, fk->refCols)});
+        if (referencedFilter && identity.referenced != *referencedFilter) continue;
+        const auto row = reader.read(*entry);
+        result.push_back({oid(identity.oid), ExprValue("name", name), oid(row.ownerNamespace), ExprValue("\"char\"", "f"),
+            boolean(row.deferrable), boolean(row.initiallyDeferred), boolean(true), boolean(row.validated),
+            oid(owner), oid(0), oid(0), oid(identity.referenced), action(row.key.onUpdate), action(row.key.onDelete),
+            boolean(true), ExprValue("smallint", "0"), boolean(false), array(row.localColumns), array(row.referencedColumns)});
     }
     return result;
+}
+
+std::optional<std::string> definition(const StorageEngine& engine, const std::string& database,
+    Oid constraint, const Session* session) {
+    if (!constraint) return {};
+    const auto fence = engine.catalogReadOwnership(database);
+    if (!fence.mayReadCurrentFiles)
+        throw DbError("55P03", "foreign key definition read conflicts with an active database writer");
+    const auto keys = engine.catalogService().foreignKeyIdentities(database, constraint);
+    if (keys.empty()) return {};
+    DefinitionReader reader(engine, database);
+    const auto& entry = *keys.begin();
+    const auto row = reader.read(entry);
+    std::string sql = "FOREIGN KEY (";
+    const auto appendColumns = [&](const std::vector<std::string>& columns) {
+        for (size_t i = 0; i < columns.size(); ++i) {
+            if (i) sql += ", ";
+            sql += SQLParser::quoteIdentifier(columns[i]);
+        }
+    };
+    appendColumns(row.key.colNames);
+    sql += ") REFERENCES " + regclass_detail::output(entry.second.referenced, reader.metadata(), session) + '(';
+    appendColumns(row.key.refCols);
+    sql += ')';
+    if (const auto update = referentialAction(row.key.onUpdate).sql) sql += std::string(" ON UPDATE ") + update;
+    if (const auto deletion = referentialAction(row.key.onDelete).sql) sql += std::string(" ON DELETE ") + deletion;
+    if (row.deferrable) sql += " DEFERRABLE";
+    if (row.initiallyDeferred) sql += " INITIALLY DEFERRED";
+    if (!row.validated) sql += " NOT VALID";
+    return sql;
 }
 
 } // namespace foreign_key_catalog

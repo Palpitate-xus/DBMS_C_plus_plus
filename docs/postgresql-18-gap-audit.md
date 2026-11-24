@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-24 · 显示外键的 SQL 定义
+
+为已登记的普通外键实现 `pg_get_constraintdef`。显示时使用当前的表和列，并区分新登记的默认动作和显式限制。`CAT-02`、`CAT-03`、`CAT-07` 和 `CLIENT-01` 保持部分实现。完整 `psql \d` 仍需要分区祖先查询以及其他目录。 [验证范围](test-report.md#foreign-key-definition-20261124) · [性能对照](performance-report-2026-10-30.md#foreign-key-definition-cost-20261124)
+
 ## 2026-11-24 · 普通表外键可以通过系统目录查询
 
 为已有表定义中的外键分配目录编号。改名保留编号，删除后重新创建使用新编号。`pg_constraint` 可以读取未验证状态、延后检查状态和两侧列号。`CAT-02`、`CAT-03`、`CAT-07` 和 `CLIENT-01` 保持部分实现。其他约束类型、外键动作和支持索引的完整字段，以及 `psql` 的约束定义显示仍待补齐。 [验证范围](test-report.md#foreign-key-catalog-20261124) · [性能对照](performance-report-2026-10-30.md#foreign-key-catalog-cost-20261124)

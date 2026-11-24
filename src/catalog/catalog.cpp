@@ -2712,13 +2712,19 @@ void CatalogManager::reconcileForeignKeyIdentities(Oid relation, const ForeignKe
     foreignKeys_.merge(replacement);
 }
 
-CatalogManager::ForeignKeyIdentities CatalogManager::foreignKeyIdentities() const {
+CatalogManager::ForeignKeyIdentities CatalogManager::foreignKeyIdentities(std::optional<Oid> constraint) const {
     std::lock_guard<std::mutex> lock(mutex_);
-    return foreignKeys_;
+    if (!constraint) return foreignKeys_;
+    const auto found = std::find_if(foreignKeys_.begin(), foreignKeys_.end(), [&](const auto& entry) {
+        return entry.second.oid == *constraint;
+    });
+    return found == foreignKeys_.end() ? ForeignKeyIdentities{} : ForeignKeyIdentities{*found};
 }
 
-CatalogManager::ForeignKeyIdentities CatalogManager::readForeignKeyIdentities(const std::string& path) {
+CatalogManager::ForeignKeyIdentities CatalogManager::readForeignKeyIdentities(const std::string& path,
+    std::optional<Oid> constraint) {
     CatalogManager catalog(path, ReadOnlyTag{});
+    if (constraint) return catalog.foreignKeyIdentities(constraint);
     return std::move(catalog.foreignKeys_);
 }
 

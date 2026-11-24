@@ -33,6 +33,8 @@ sudo apt install cmake g++ make zlib1g-dev libicu-dev
 
 打开旧库时，数据库从已有的普通表定义登记外键对象编号，并把编号保存到 `pg_catalog/pg_constraint.cat`。表文件本身沿用原来的格式。备份和恢复应保留整个数据库目录及其目录标记。
 
+新建外键会在现有表定义字段中分别保存 `NO ACTION` 和 `RESTRICT`。旧表中已保存的 `RESTRICT` 会原样保留。旧程序如果重写外键定义，可能再次合并这两种动作。 [动作读回验证](test-report.md#foreign-key-definition-20261124)
+
 新版可以恢复旧版的 `CTUC2` 建表撤销记录，也可以恢复含外键目录的 `CTUC3` 记录。旧程序遇到尚未恢复的 `CTUC3` 记录时无法完成恢复。需要切回旧程序时使用升级前的数据目录备份。 [升级和恢复验证](test-report.md#foreign-key-catalog-20261124)
 
 ## 普通表的列数上限

@@ -2430,17 +2430,12 @@ static bool normalizeForeignKeyAction(const std::string& action,
         compact.push_back(static_cast<char>(
             std::tolower(static_cast<unsigned char>(c))));
     }
-    if (compact.empty() || compact == "restrict" ||
-        compact == "noaction") {
+    if (compact.empty() || compact == "restrict") {
         normalized = "restrict";
         return true;
     }
-    if (compact == "cascade") {
-        normalized = "cascade";
-        return true;
-    }
-    if (compact == "setnull") {
-        normalized = "setnull";
+    if (compact == "noaction" || compact == "cascade" || compact == "setnull") {
+        normalized = std::move(compact);
         return true;
     }
     return false;

@@ -28068,8 +28068,10 @@ static bool executeInternal(const string& rawSql, Session& s,
                     ddl += fk.refCols[i];
                 }
                 ddl += ")";
-                if (!fk.onDelete.empty()) ddl += " ON DELETE " + fk.onDelete;
-                if (!fk.onUpdate.empty() && fk.onUpdate != "restrict") ddl += " ON UPDATE " + fk.onUpdate;
+                if (const auto update = dbms::foreign_key_catalog::referentialAction(fk.onUpdate).sql)
+                    ddl += string(" ON UPDATE ") + update;
+                if (const auto deletion = dbms::foreign_key_catalog::referentialAction(fk.onDelete).sql)
+                    ddl += string(" ON DELETE ") + deletion;
             }
             ddl += ")";
             cout << ddl << endl;
