@@ -203,6 +203,14 @@ public:
         return range;
     }
 
+    void noteDefaultExpressionRead(size_t source, Oid type) {
+        if (type != 194) return;
+        auto& range = result.sourceRanges.at(source);
+        if (range.relationSchema == "pg_catalog" && range.relationName == "pg_attrdef" &&
+            !range.cteStatement && !range.viewQuery && !range.mergedUsing)
+            range.readsDefaultExpression = true;
+    }
+
     bool rangeMatches(const ColumnRefExpr& reference, const Range& range) const {
         if (!reference.table.empty() && reference.table != range.name) return false;
         if (reference.schema.empty() || reference.schema == range.schema) return true;
@@ -756,6 +764,7 @@ public:
                     throw DbError("0A000","pg_namespace column nspacl is not implemented");
                 if(unsupportedOwnedCatalog)throw DbError("0A000","catalog field has no owned value producer");
                 column->binding = std::move(resolved);
+                noteDefaultExpressionRead(column->binding->sourceOrdinal, column->binding->typeOid);
                 for(auto* references:countReferences)references->push_back(column->binding->sourceOrdinal);
                 return sourceType;
             }
@@ -2038,6 +2047,7 @@ public:
                         const auto& column = range.columns[i];
                         if (!range.hiddenUnqualified.count(column.name)) {
                             columns.push_back(column);
+                            noteDefaultExpressionRead(range.occurrence, column.typeOid);
                             if (leaves) leaves->push_back(nullptr);
                             if (bindings) bindings->push_back({item.expr.get(),
                                 QueryColumnBinding{0,range.occurrence,i,column.type,range.mergedUsing,column.typeOid,column.typeMetadata}});
@@ -2051,6 +2061,8 @@ public:
                     if (!rangeMatches(*star, range)) continue;
                     requireCompleteStar(range);
                     found = true; columns.insert(columns.end(), range.columns.begin(), range.columns.end());
+                    for (const auto& column : range.columns)
+                        noteDefaultExpressionRead(range.occurrence, column.typeOid);
                     if (leaves) leaves->insert(leaves->end(), range.columns.size(), nullptr);
                     if (bindings)
                         for (size_t i=0;i<range.columns.size();++i)
@@ -2229,6 +2241,8 @@ public:
                            const UsingField& left, const UsingField& right, const std::string& join) {
         auto& a = left.descriptor();
         auto& b = right.descriptor();
+        noteDefaultExpressionRead(left.range->occurrence, a.typeOid);
+        noteDefaultExpressionRead(right.range->occurrence, b.typeOid);
         const bool arrays = builtinUsingArray(a) && builtinUsingArray(b);
         // USING resolves equality on the original inputs before it chooses a
         // common output. An output cast cannot make different codecs comparable.

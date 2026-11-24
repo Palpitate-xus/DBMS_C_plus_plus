@@ -2701,7 +2701,7 @@ WHERE c.relname = 'orders'
 ORDER BY n.nspname, c.relname;
 ```
 
-`psql` 的 `\d orders` 能查找表并读取访问方式，随后还需要读取列默认值。可以先用下面的 SQL 查询列类型。 [验证记录](test-report.md#format-type-20261124)
+`psql` 的 `\d orders` 能查找表并读取访问方式。普通表的列信息查询还需要字符排序规则目录。可以先用下面的 SQL 查询列类型和常见默认值。 [验证记录](test-report.md#column-default-expression-20261124)
 
 ### 查询表和索引的访问方式
 
@@ -2733,6 +2733,19 @@ ORDER BY a.attnum;
 ```
 
 `format_type` 根据类型编号和列中保存的长度或精度生成类型名。也可以传入 `NULL` 作为第二个参数，只查看该类型的名称。类型被搜索路径中的同名类型挡住时，返回的名称会带上所属模式。 [验证记录](test-report.md#format-type-20261124)
+
+### 查询列的默认值
+
+以下查询按列号显示 `public.orders` 已登记的默认值。受支持的值包括常见的整数、布尔值、文本和对象编号。显示默认值时不会执行表达式。
+
+```sql
+SELECT d.adnum, pg_catalog.pg_get_expr(d.adbin, d.adrelid) AS default_value
+FROM pg_catalog.pg_attrdef d
+WHERE d.adrelid = 'public.orders'::regclass
+ORDER BY d.adnum;
+```
+
+例如，默认为数字 `7` 时显示 `7`，默认是空字符串时显示 `''::text`。普通的 `DEFAULT NULL` 和未填写默认值的列没有目录记录。普通运算式、序列调用和引用其他列的生成表达式仍需进一步支持。 [验证记录](test-report.md#column-default-expression-20261124)
 
 ---
 

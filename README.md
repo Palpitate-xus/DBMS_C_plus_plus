@@ -17,6 +17,13 @@ cmake --build build/cmake --target dbms_main --parallel 2
 ## 最近更新
 
 <details>
+<summary>可以查到常见列默认值 · 2026-11-24</summary>
+
+可以用 SQL 查看一列的默认整数、文本或真假值。例如，可以查出订单备注默认是不是空字符串。
+
+</details>
+
+<details>
 <summary>可以查到列的类型和长度 · 2026-11-24</summary>
 
 可以用 SQL 查看一列是整数、日期还是文本。例如，声明为 `varchar(12)` 的列会显示长度 12。
@@ -27,13 +34,6 @@ cmake --build build/cmake --target dbms_main --parallel 2
 <summary>可以用 psql 列出表 · 2026-11-24</summary>
 
 在 `psql` 中输入 `\dt` 就能看到表名和所有者。可以按表名筛选，也可以只看某个模式里的表。
-
-</details>
-
-<details>
-<summary>可以查出同名表会用到哪一张 · 2026-11-24</summary>
-
-如果 `sales.orders` 和 `archive.orders` 同时存在，现在可以查出直接写 `orders` 会找到哪一张。
 
 </details>
 

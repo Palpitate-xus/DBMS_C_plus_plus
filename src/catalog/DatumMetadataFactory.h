@@ -86,7 +86,11 @@ public:
         }
         result->codecOid=base->oid;
         result->codecSize=base->typlen;
-        const char* role=genuineBuiltin(*base)?builtinDatumBinaryRole(base->oid):nullptr;
+        // pg_node_tree is declared with pg_class when a database starts.
+        // Its actual catalog identity has binary output but no input codec.
+        const bool nodeTree = base->oid == 194 && base->typnamespace == 11 &&
+            base->typname == "pg_node_tree" && base->typtype == 'b' && base->typlen == -1;
+        const char* role=(nodeTree || genuineBuiltin(*base))?builtinDatumBinaryRole(base->oid):nullptr;
         // Actual array_send identity is sufficient for genuine catalog arrays.
         // A user basename/category by itself never selects a codec role.
         const bool arrayRole=(role && (std::string(role)=="array_send" ||

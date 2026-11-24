@@ -441,7 +441,7 @@ bool encodeBinaryValue(const std::string& value, const PgColumnDescription& colu
                 return true;
             }
             case 19: // namesend is variable-length text, without NUL/padding.
-            case 25: case 1042: case 1043:
+            case 25: case 194: case 1042: case 1043:
                 encoded.insert(encoded.end(), value.begin(), value.end());
                 return true;
             default:

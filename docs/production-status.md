@@ -6,9 +6,13 @@
 
 截至 2026-11-24，273 项功能要求中有 22 项完成、169 项部分实现、67 项待验证、15 项暂缓。各项结果和剩余范围见功能总账。以下更新报告给出各轮测试的实际范围。[功能总账](gap-progress.json) · [支持的功能和限制](compatibility-contract.md)
 
+## 2026-11-24 · 可以查到常见列默认值
+
+可以用 SQL 显示列登记的整数、文本、布尔值和对象引用默认值。显示时不会执行默认值。原版 `psql` 的 `\d` 还需要字符排序规则目录 `pg_collation`。 [查询示例](MANUAL.md#查询列的默认值) · [测试报告](test-report.md#column-default-expression-20261124) · [性能报告](performance-report-2026-10-30.md#column-default-expression-cost-20261124)
+
 ## 2026-11-24 · 可以查到列的类型和长度
 
-通过 SQL 可以查询列类型，包括字符长度、数字精度和数组。原版 `psql` 的 `\d` 仍需要列默认值目录里的 `adbin` 才能显示列详情。 [查询示例](MANUAL.md#查询列的类型) · [测试报告](test-report.md#format-type-20261124) · [性能报告](performance-report-2026-10-30.md#format-type-cost-20261124)
+通过 SQL 可以查询列类型，包括字符长度、数字精度和数组。 [查询示例](MANUAL.md#查询列的类型) · [测试报告](test-report.md#format-type-20261124) · [性能报告](performance-report-2026-10-30.md#format-type-cost-20261124)
 
 ## 2026-11-24 · psql 可以列出普通表
 

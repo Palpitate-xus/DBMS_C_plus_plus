@@ -2,6 +2,18 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-24 show column default constants through the real attribute default catalog",
+      "gap_ids": ["CAT-03", "CLIENT-01"],
+      "status": "partial",
+      "evidence": ["src/catalog/PgConstNode.h", "src/catalog/PgDefaultCatalog.h", "src/catalog/PgDefaultExpression.h", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/column_default_expression_protocol_e2e_test.py", "tests/default_catalog_projection_test.cpp", "tests/default_catalog_projection_concurrency_test.cpp"],
+      "verification": [
+        "Supported defaults produce real native CONST nodes. Both SQL forms of pg_get_expr render the defaults using the relation and current object names. Identity-only reads omit expressions.",
+        "The catalog retains existing identifiers through upgrade and crash recovery. Unsupported expressions can still be listed by identifier.",
+        "Stock psql 18.6 reaches the pg_collation requirement. General default, generation, and collation display remains partial."
+      ]
+    },
+    {
       "issue": "2026-11-24 display column types and modifiers for psql table inspection",
       "gap_ids": ["CAT-03", "CLIENT-01"],
       "status": "partial",

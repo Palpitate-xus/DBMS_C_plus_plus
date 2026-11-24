@@ -710,29 +710,11 @@ std::vector<PgNamespaceRow> CatalogService::namespaceSnapshot(const std::string&
 }
 
 CatalogManager::DefaultCatalogSnapshot CatalogService::defaultCatalogSnapshot(
-    const std::string& dbname, CatalogManager::DefaultCatalogKind kind) const {
-    const auto ownership = engine_.catalogReadOwnership(dbname);
-    CatalogDatabaseIdentity physical;
-    if (!databaseIdentity(engine_.dbPath(dbname), physical, dbname == "info")) return {};
-    std::shared_ptr<CatalogManager> model;
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        const auto found = cache_.find(dbname);
-        if (found != cache_.end() && found->second.databaseDevice == physical.device &&
-            found->second.databaseInode == physical.inode)
-            model = !ownership.mayReadCurrentFiles && found->second.committed
-                ? found->second.committed : found->second.manager;
-    }
-    if (model) {
-        if (!ownership.mayReadCurrentFiles) return model->defaultCatalogSnapshot(kind);
-        const auto state = model->publicationState();
-        if (state == CatalogManager::PublicationState::Current) return model->defaultCatalogSnapshot(kind);
-        if (state == CatalogManager::PublicationState::Conflict)
-            throw DbError("58030", "catalog read conflicts with unpublished or missing metadata");
-    }
-    if (!ownership.mayReadCurrentFiles)
-        throw DbError("55P03", "cold catalog read conflicts with an active DDL owner");
-    return CatalogManager::readDefaultCatalogSnapshot(catalogDirForDb(engine_, dbname).string(), kind);
+    const std::string& dbname, CatalogManager::DefaultCatalogKind kind, bool includeExpressions) const {
+    const auto catalog = readCatalog(dbname);
+    if (catalog.manager) return catalog.manager->defaultCatalogSnapshot(kind, includeExpressions);
+    if (catalog.path.empty()) return {};
+    return CatalogManager::readDefaultCatalogSnapshot(catalog.path, kind, includeExpressions);
 }
 
 std::map<std::string, std::string> CatalogService::domainColumns(

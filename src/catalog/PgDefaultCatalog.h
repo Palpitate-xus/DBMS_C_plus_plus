@@ -1,6 +1,7 @@
 #pragma once
 #include "catalog/SystemCatalogDeclaration.h"
 #include "catalog/SystemCatalogRows.h"
+#include "commands/ColumnDefaultBinding.h"
 #include <filesystem>
 #include <fstream>
 
@@ -57,9 +58,13 @@ template<size_t N> inline void validate(const CatalogManager::MetadataSnapshot& 
     system_catalog::validateRead(snapshot, oid, name, type->oid, type->typarray, declaration, N);
 }
 inline const QueryRowDescriptor& descriptor() {
-    // The full declaration owns all four fields. General PostgreSQL node
-    // serialization is not complete yet; expose no made-up adbin value.
-    static const auto value = system_catalog::ownedDescriptor(fields, {"oid", "adrelid", "adnum"});
+    static const auto value = [] {
+        auto columns = system_catalog::ownedDescriptor(fields, {"oid", "adrelid", "adnum"});
+        QueryOutputColumn expression{"adbin", "pg_node_tree", false, 0, fields[3].type, -1, {}};
+        expression.physicalAttributeNumber = 4;
+        columns.push_back(std::move(expression));
+        return columns;
+    }();
     return value;
 }
 inline const QueryRowDescriptor& dependencyDescriptor() {
@@ -67,7 +72,40 @@ inline const QueryRowDescriptor& dependencyDescriptor() {
         {"classid", "objid", "objsubid", "refclassid", "refobjid", "refobjsubid", "deptype"});
     return value;
 }
-inline std::vector<std::vector<ExprValue>> rows(const CatalogManager::MetadataSnapshot& snapshot, bool dependencies) {
+inline std::vector<std::vector<ExprValue>> attrdefRows(
+    const std::vector<PgAttrdefRow>& defaults, const std::vector<PgAttributeRow>& attributes,
+    bool includeExpressions) {
+    std::optional<std::map<std::pair<Oid, int16_t>, Oid>> types;
+    std::vector<std::vector<ExprValue>> result;
+    result.reserve(defaults.size());
+    for (const auto& definition : defaults) {
+        std::string node = includeExpressions ? definition.adbin : std::string{};
+        if (includeExpressions && node.empty() && !definition.expression.empty()) {
+            if (!types) {
+                types.emplace();
+                for (const auto& column : attributes)
+                    if (column.attnum > 0 && column.atthasdef && !column.attisdropped)
+                        types->emplace(std::make_pair(column.attrelid, column.attnum), column.atttypid);
+            }
+            const auto type = types->find({definition.adrelid, definition.adnum});
+            if (type != types->end() && (type->second == 16 || type->second == 20 || type->second == 23 || type->second == 25)) {
+                SQLParser parser;
+                auto parsed = parser.parseForBinding("SELECT " + definition.expression);
+                const auto* select = parsed.success ? dynamic_cast<const SelectStmt*>(parsed.stmt.get()) : nullptr;
+                if (select && select->selectList.size() == 1 && select->selectList.front().alias.empty() &&
+                    !select->fromClause && !select->whereClause && !select->hasRowCountClause &&
+                    select->setOp == SetOp::None && select->orderBy.empty() && select->groupBy.empty() && !select->having)
+                    node = column_default::primitiveNode(select->selectList.front().expr.get(), type->second);
+            }
+        }
+        result.push_back({ExprValue("oid", std::to_string(definition.oid)),
+            ExprValue("oid", std::to_string(definition.adrelid)), ExprValue("smallint", std::to_string(definition.adnum)),
+            ExprValue("pg_node_tree", std::move(node))});
+    }
+    return result;
+}
+inline std::vector<std::vector<ExprValue>> rows(const CatalogManager::MetadataSnapshot& snapshot, bool dependencies,
+                                               bool includeExpressions = false) {
     if (!snapshot.defaultObjectsIncluded)
         throw DbError("XX001", "attribute default catalog source requires its actual object snapshot");
     std::vector<std::vector<ExprValue>> result;
@@ -80,14 +118,12 @@ inline std::vector<std::vector<ExprValue>> rows(const CatalogManager::MetadataSn
             ExprValue("integer", std::to_string(d.refobjsubid)), ExprValue("\"char\"", std::string(1, d.deptype))});
     } else {
         validate(snapshot, relationOid, "pg_attrdef", fields);
-        result.reserve(snapshot.defaults.size());
-        for (const auto& d : snapshot.defaults) result.push_back({ExprValue("oid", std::to_string(d.oid)),
-            ExprValue("oid", std::to_string(d.adrelid)), ExprValue("smallint", std::to_string(d.adnum))});
+        return attrdefRows(snapshot.defaults, snapshot.attributes, includeExpressions);
     }
     return result;
 }
 inline std::vector<std::vector<ExprValue>> rows(const CatalogManager::DefaultCatalogSnapshot& snapshot,
-                                              bool dependencies) {
+                                              bool dependencies, bool includeExpressions = false) {
     const auto kind = dependencies ? CatalogManager::DefaultCatalogKind::Depend
                                    : CatalogManager::DefaultCatalogKind::Attrdef;
     if (!snapshot.loaded || snapshot.kind != kind ||
@@ -104,9 +140,7 @@ inline std::vector<std::vector<ExprValue>> rows(const CatalogManager::DefaultCat
             ExprValue("integer", std::to_string(d.refobjsubid)), ExprValue("\"char\"", std::string(1, d.deptype))});
     } else {
         validate(snapshot.declaration, relationOid, "pg_attrdef", fields);
-        result.reserve(snapshot.defaults.size());
-        for (const auto& d : snapshot.defaults) result.push_back({ExprValue("oid", std::to_string(d.oid)),
-            ExprValue("oid", std::to_string(d.adrelid)), ExprValue("smallint", std::to_string(d.adnum))});
+        return attrdefRows(snapshot.defaults, snapshot.declaration.attributes, includeExpressions);
     }
     return result;
 }

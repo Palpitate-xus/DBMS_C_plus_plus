@@ -1,5 +1,5 @@
 #pragma once
-#include "catalog/systables.h"
+#include "catalog/PgConstNode.h"
 #include "common/DbError.h"
 #include "common/SqlArrayText.h"
 #include <algorithm>
@@ -8,7 +8,6 @@
 #include <functional>
 #include <limits>
 #include <optional>
-#include <sstream>
 #include <vector>
 
 namespace dbms::pg_object_constant {
@@ -59,9 +58,7 @@ inline std::string arrayDatum(const Value& constant) {
     if (offset > 0x3fffffffU || count > (0x3fffffffU - offset) / sizeof(Oid))
         throw DbError("54000", "array default is too large");
     std::string bytes(offset + count * sizeof(Oid), '\0');
-    const uint16_t endian = 1;
-    const bool little = *reinterpret_cast<const unsigned char*>(&endian) == 1;
-    store<uint32_t>(bytes, 0, static_cast<uint32_t>(bytes.size()) << (little ? 2 : 0));
+    store<uint32_t>(bytes, 0, static_cast<uint32_t>(bytes.size()) << (pg_const_node::littleEndian() ? 2 : 0));
     store<int32_t>(bytes, 4, static_cast<int32_t>(dimensions));
     store<int32_t>(bytes, 8, nulls ? static_cast<int32_t>(offset) : 0);
     store<Oid>(bytes, 12, element(constant.type));
@@ -85,22 +82,68 @@ inline std::string node(const Value& constant) {
     if (constant.type != 2205 && constant.type != 2206 && constant.type != 2210 && constant.type != 2211)
         throw DbError("XX001", "unsupported object constant node identity");
     const bool isArray = array(constant.type);
-    std::ostringstream output;
-    output << "{CONST :consttype " << constant.type
-           << " :consttypmod -1 :constcollid 0 :constlen " << (isArray ? -1 : 4)
-           << " :constbyval " << (isArray ? "false" : "true")
-           << " :constisnull " << (constant.value ? "false" : "true")
-           << " :location -1 :constvalue ";
-    if (!constant.value) return output.str() + "<>}";
-    std::string bytes;
-    if (isArray) bytes = arrayDatum(constant);
-    else {
-        const uintptr_t datum = oid(*constant.value);
-        bytes.assign(reinterpret_cast<const char*>(&datum), sizeof(datum));
+    std::optional<std::string> bytes;
+    if (constant.value)
+        bytes = isArray ? arrayDatum(constant) : pg_const_node::datum(oid(*constant.value));
+    return pg_const_node::encode({constant.type, -1, 0, static_cast<int16_t>(isArray ? -1 : 4),
+                                 !isArray, std::move(bytes)});
+}
+
+// Return a numeric object array literal from the native Datum. Name lookup
+// happens later, against the caller's catalog and search path.
+inline std::string readArrayDatum(Oid type, std::string_view bytes) {
+    using pg_const_node::read;
+    const auto corrupt = [] { throw DbError("XX001", "invalid object array catalog constant"); };
+    (void)pg_const_node::varlenaValue(bytes);
+    const auto count = read<int32_t>(bytes, 4);
+    const auto offset = read<int32_t>(bytes, 8);
+    if (count < 0 || count > 6 || offset < 0 || read<Oid>(bytes, 12) != element(type)) corrupt();
+    if (!count) {
+        if (offset || bytes.size() != 16) corrupt();
+        return "{}";
     }
-    output << (isArray ? bytes.size() : sizeof(Oid)) << " [ ";
-    for (char byte : bytes) output << static_cast<int>(byte) << ' ';
-    output << "]}";
-    return output.str();
+
+    std::vector<sql_array_text::Dimension> dimensions;
+    size_t cells = 1;
+    for (int32_t i = 0; i < count; ++i) {
+        const auto length = read<int32_t>(bytes, 16 + 4 * i);
+        const auto lower = read<int32_t>(bytes, 16 + 4 * (count + i));
+        if (length <= 0 || cells > std::numeric_limits<size_t>::max() / static_cast<size_t>(length)) corrupt();
+        if (int64_t(lower) + length - 1 >= std::numeric_limits<int32_t>::max()) corrupt();
+        cells *= static_cast<size_t>(length);
+        dimensions.push_back({lower, length});
+    }
+    const size_t header = 16 + 8 * static_cast<size_t>(count);
+    size_t position = header;
+    if (offset) {
+        if (static_cast<size_t>(offset) < header || static_cast<size_t>(offset) > bytes.size()) corrupt();
+        const size_t bitmap = cells / 8 + (cells % 8 != 0);
+        const size_t alignment = alignof(double);
+        if (bitmap > static_cast<size_t>(offset) - header ||
+            (header + bitmap + alignment - 1) / alignment * alignment != static_cast<size_t>(offset)) corrupt();
+        position = static_cast<size_t>(offset);
+    } else if (bytes.size() < header || cells != (bytes.size() - header) / sizeof(Oid)) corrupt();
+
+    std::string result = sql_array_text::prefix(dimensions);
+    size_t index = 0;
+    const auto emit = [&](const auto& self, size_t depth) -> void {
+        result += '{';
+        for (int32_t i = 0; i < dimensions[depth].length; ++i) {
+            if (i) result += ',';
+            if (depth + 1 < dimensions.size()) self(self, depth + 1);
+            else {
+                const bool present = !offset || (static_cast<unsigned char>(bytes[header + index / 8]) & (1U << (index % 8)));
+                if (present) {
+                    result += std::to_string(read<Oid>(bytes, position));
+                    position += sizeof(Oid);
+                } else result += "NULL";
+                ++index;
+            }
+        }
+        result += '}';
+    };
+    emit(emit, 0);
+    if (position != bytes.size()) corrupt();
+    return result;
 }
 } // namespace dbms::pg_object_constant

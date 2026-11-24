@@ -74,6 +74,12 @@ int main() {
             const auto deps = g_engine.catalogService().defaultCatalogSnapshot(db, Kind::Depend);
             need(full.defaultObjectsIncluded && full.defaults.size() == 3 && !full.dependencies.empty(),
                  "public snapshot still has all actual default expressions and dependencies");
+            need(std::all_of(attrs.defaults.begin(), attrs.defaults.end(), [](const auto& row) {
+                return row.expression.empty() && row.adbin.empty();
+            }), "identity-only projection copies no expression strings");
+            const auto expressions = g_engine.catalogService().defaultCatalogSnapshot(db, Kind::Attrdef, true);
+            need(equalRows(default_catalog::rows(full, false, true), default_catalog::rows(expressions, false, true)),
+                 "expression projection uses the same actual node values as the full snapshot");
             const auto owner = g_engine.catalogService().acquire(db);
             const auto relation = owner->getClassByName("projection_owner", 2200);
             need(bool(relation), "actual projection owner relation");

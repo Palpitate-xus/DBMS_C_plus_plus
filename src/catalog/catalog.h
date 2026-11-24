@@ -54,19 +54,12 @@ public:
         std::vector<PgDependRow> dependencies;
         bool defaultObjectsIncluded = false;
     };
-    // A catalog scan only exposes the three owned pg_attrdef fields or the
-    // pg_depend fields.  Its projection is deliberately separate from the
-    // public complete MetadataSnapshot, whose default expressions and graph
-    // remain intact for other consumers.
+    // A catalog scan captures either the attribute defaults or the dependency
+    // edges in a single catalog generation.
     enum class DefaultCatalogKind { Attrdef, Depend };
-    struct DefaultCatalogIdentity {
-        Oid oid = INVALID_OID;
-        Oid adrelid = INVALID_OID;
-        int16_t adnum = 0;
-    };
     struct DefaultCatalogSnapshot {
         MetadataSnapshot declaration;
-        std::vector<DefaultCatalogIdentity> defaults;
+        std::vector<PgAttrdefRow> defaults;
         std::vector<PgDependRow> dependencies;
         DefaultCatalogKind kind = DefaultCatalogKind::Attrdef;
         bool loaded = false;
@@ -77,9 +70,9 @@ public:
     // create directories or persist on destruction.
     static MetadataSnapshot readMetadataSnapshot(const std::string& dbPath,
                                                  bool includeDefaultObjects = true);
-    DefaultCatalogSnapshot defaultCatalogSnapshot(DefaultCatalogKind kind) const;
+    DefaultCatalogSnapshot defaultCatalogSnapshot(DefaultCatalogKind kind, bool includeExpressions = false) const;
     static DefaultCatalogSnapshot readDefaultCatalogSnapshot(const std::string& dbPath,
-                                                              DefaultCatalogKind kind);
+        DefaultCatalogKind kind, bool includeExpressions = false);
     // Narrow, single-lock logical identity copy for schema-cache reads.
     std::map<std::string, std::string> domainColumns(const std::string& schema,
                                                     const std::string& relation) const;

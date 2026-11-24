@@ -4,6 +4,29 @@
 
 > 复核发现，几组早期 COPY 计时在每个对照场景中使用了固定的执行顺序。耗时差可能包含顺序影响。这项问题涉及默认值求值、按列查找、默认值标记、短 CSV 导出和短查询导出的配对计时。[默认值求值](#copy-default-evaluation-order-cost-20261122) · [按列查找](#copy-identity-input-cost-20261122) · [默认值标记](#copy-default-marker-cost-20261122) · [CSV 导出](#copy-csv-out-cost-20261122) · [查询导出](#copy-query-stdout-cost-20261122)
 
+<a id="column-default-expression-cost-20261124"></a>
+## 2026-11-24 · 查询列默认值的耗时
+
+对照 `4586ede1`、本次版本和 PostgreSQL 18.6。测试机为 Intel Xeon E5-2678 v3。两套本项目程序用 GCC 13.3、CMake、C++17 和 `-O2` 构建，关闭 OpenSSL，数据目录位于 `/dev/shm`。客户端和服务端使用 CPU 13、28。
+
+在每套数据库运行协议测试里的 `SETUP`。另建 32 张表，名称为 `expression_probe.long_00` 至 `expression_probe.long_31`。每张表有一列 `label text`，默认值是由 1,024 个小写 `x` 组成的字符串字面量。只读列号运行以下 SQL，显示默认值运行协议测试中的 `TEXT`。 [建表与查询夹具](../tests/column_default_expression_protocol_e2e_test.py)
+
+```sql
+SELECT adnum
+FROM pg_catalog.pg_attrdef
+WHERE adrelid = 'expression_probe.defaults'::regclass
+ORDER BY adnum;
+```
+
+通过本地 TCP 测量发出 SQL 到收到就绪消息的时间，逐次核对 8 行结果、列类型和完成消息。每轮先预热 4 次，再计时 20 次。各版本轮流执行，第二轮反转顺序。P95 取每轮第 19 小的结果。下表是两轮的范围，单位为毫秒。
+
+| 场景 | 上一版中位数 | 本次中位数 | PostgreSQL 中位数 | 上一版 P95 | 本次 P95 | PostgreSQL P95 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 只查 8 个列号 | 10.12–10.55 | 10.12–10.50 | 0.32–0.43 | 10.47–15.35 | 10.76–15.38 | 0.43–0.63 |
+| 显示 8 个默认值 | — | 16.69–17.30 | 0.32–0.50 | — | 17.03–20.82 | 0.35–0.94 |
+
+初版为普通常量预先保存节点，查询列号时也读取表达式。该方案的列号查询中位数为 13.41–13.61 毫秒，同轮旧版为 10.47–10.51 毫秒。最终版只在查询用到表达式时读取相应数据，再为需要的常量生成节点。最终版的列号查询恢复到与旧版接近的耗时。显示默认值是新增查询，耗时仍高于 PostgreSQL。 [功能验证](test-report.md#column-default-expression-20261124) · [实现对照](postgresql-comparison.md#column-default-expression-comparison-20261124)
+
 <a id="format-type-cost-20261124"></a>
 ## 2026-11-24 · 查询列类型和长度的耗时
 

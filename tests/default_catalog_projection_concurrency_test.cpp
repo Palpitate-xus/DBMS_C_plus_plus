@@ -26,9 +26,9 @@ template<class F> bool hasState(F fn, const std::string& state) {
     try { fn(); } catch (const DbError& e) { return e.sqlState() == state; }
     return false;
 }
-std::vector<std::vector<std::string>> cells(const Projection& snapshot, bool depend) {
+std::vector<std::vector<std::string>> cells(const Projection& snapshot, bool depend, bool expressions = false) {
     std::vector<std::vector<std::string>> result;
-    for (const auto& row : default_catalog::rows(snapshot, depend)) {
+    for (const auto& row : default_catalog::rows(snapshot, depend, expressions)) {
         std::vector<std::string> values;
         for (const auto& field : row) values.push_back(field.typeName + ":" + field.value + ":" + (field.isNull ? "1" : "0"));
         result.push_back(std::move(values));
@@ -37,6 +37,7 @@ std::vector<std::vector<std::string>> cells(const Projection& snapshot, bool dep
 }
 struct PeerResult {
     Projection sameAttrs, sameDepends, warmAttrs, warmDepends;
+    Projection sameExpressions, warmExpressions;
     std::string coldAttrs, coldDepends;
 };
 }
@@ -61,6 +62,8 @@ int main() {
         const auto depsBefore = g_engine.catalogService().defaultCatalogSnapshot(db, Kind::Depend);
         const auto originalAttrs = cells(attrsBefore, false);
         const auto originalDeps = cells(depsBefore, true);
+        const auto expressionsBefore = g_engine.catalogService().defaultCatalogSnapshot(db, Kind::Attrdef, true);
+        const auto originalExpressions = cells(expressionsBefore, false, true);
         need(fullBefore.defaultObjectsIncluded && fullBefore.defaults.size() == 2, "complete public snapshot retained");
         need(!originalAttrs.empty() && !originalDeps.empty(), "actual rows exist");
         need(hasState([&] { (void)g_engine.catalogService().defaultCatalogSnapshot(db, static_cast<Kind>(77)); }, "XX000"),
@@ -83,8 +86,11 @@ int main() {
         ddl("ALTER TABLE proof_owner ALTER COLUMN n SET DEFAULT 9");
         const auto writerAttrs = g_engine.catalogService().defaultCatalogSnapshot(db, Kind::Attrdef);
         const auto writerDeps = g_engine.catalogService().defaultCatalogSnapshot(db, Kind::Depend);
+        const auto writerExpressions = g_engine.catalogService().defaultCatalogSnapshot(db, Kind::Attrdef, true);
         need(cells(writerAttrs, false) != originalAttrs, "writer observes changed actual default identity");
         need(cells(writerDeps, true) != originalDeps, "writer observes changed actual dependencies");
+        need(cells(writerExpressions, false, true) != originalExpressions &&
+             cells(expressionsBefore, false, true) == originalExpressions, "writer observes a separate expression generation");
         need(cells(attrsBefore, false) == originalAttrs && cells(depsBefore, true) == originalDeps,
              "earlier returned values remain unchanged after writer mutation");
         std::promise<PeerResult> promise; auto future = promise.get_future();
@@ -97,6 +103,8 @@ int main() {
                 r.sameDepends = g_engine.catalogService().defaultCatalogSnapshot(db, Kind::Depend);
                 r.warmAttrs = warm.catalogService().defaultCatalogSnapshot(db, Kind::Attrdef);
                 r.warmDepends = warm.catalogService().defaultCatalogSnapshot(db, Kind::Depend);
+                r.sameExpressions = g_engine.catalogService().defaultCatalogSnapshot(db, Kind::Attrdef, true);
+                r.warmExpressions = warm.catalogService().defaultCatalogSnapshot(db, Kind::Attrdef, true);
                 try { (void)cold.catalogService().defaultCatalogSnapshot(db, Kind::Attrdef); }
                 catch (const DbError& e) { r.coldAttrs = e.sqlState(); }
                 try { (void)cold.catalogService().defaultCatalogSnapshot(db, Kind::Depend); }
@@ -118,6 +126,9 @@ int main() {
              "foreign thread on same engine sees committed projection");
         need(cells(actual.warmAttrs, false) == originalAttrs && cells(actual.warmDepends, true) == originalDeps,
              "foreign thread on warm separate engine sees committed projection");
+        need(cells(actual.sameExpressions, false, true) == originalExpressions &&
+             cells(actual.warmExpressions, false, true) == originalExpressions,
+             "peer expression projections retain the committed values during ALTER DEFAULT");
         need(actual.coldAttrs == "55P03" && actual.coldDepends == "55P03",
              "cold separate engine fails closed while writer owns DDL");
         need(g_engine.rollbackTransaction() == DBStatus::OK, "actual rollback");

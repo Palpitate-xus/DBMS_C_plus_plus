@@ -2,6 +2,13 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="column-default-expression-comparison-20261124"></a>
+## 2026-11-24 · 查询列的默认值
+
+PostgreSQL 在 `pg_attrdef.adbin` 保存表达式树。`pg_get_expr` 从树中生成 SQL，并在需要时用当前关系解释列编号。SQLite 的 `PRAGMA table_xinfo` 直接提供默认值。DuckDB 的 `information_schema.columns` 提供 SQL 格式的默认表达式。 [PostgreSQL 默认值目录](https://www.postgresql.org/docs/18/catalog-pg-attrdef.html) · [PostgreSQL 18.6 显示实现](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/utils/adt/ruleutils.c) · [SQLite 列信息](https://www.sqlite.org/pragma.html#pragma_table_xinfo) · [DuckDB 列信息](https://duckdb.org/docs/current/sql/meta/information_schema#columns-columns)
+
+本项目读取已登记的默认值，按实际类型生成受支持的常量节点，并用存下来的对象编号查找当前名称。只查默认值编号或列号时跳过表达式。普通运算、序列调用和生成列引用还需要其他节点的实现。 [功能验证](test-report.md#column-default-expression-20261124) · [性能对照](performance-report-2026-10-30.md#column-default-expression-cost-20261124)
+
 <a id="format-type-comparison-20261124"></a>
 ## 2026-11-24 · 查询列的类型和长度
 

@@ -21482,8 +21482,12 @@ class PreparedWithDmlRuntime {
                 typeRows->capture(g_engine.catalogService(), session_.currentDB);
             } else if(range.relationSchema=="pg_catalog" &&
                       (range.relationName=="pg_attrdef" || range.relationName=="pg_depend")) {
+                using Kind = dbms::CatalogManager::DefaultCatalogKind;
+                const bool dependencies = range.relationName == "pg_depend";
                 virtualRows=make_shared<dbms::PreparedQueryRows>(dbms::default_catalog::rows(
-                    g_engine.catalogService().metadataSnapshot(session_.currentDB,true),range.relationName=="pg_depend"));
+                    g_engine.catalogService().defaultCatalogSnapshot(session_.currentDB,
+                        dependencies ? Kind::Depend : Kind::Attrdef, range.readsDefaultExpression),
+                    dependencies, range.readsDefaultExpression));
             } else if(range.relationSchema=="pg_catalog" && range.relationName=="pg_sequence") {
                 virtualRows=make_shared<dbms::PreparedQueryRows>(g_engine.getSequenceCatalogRows(session_.currentDB));
             } else if (range.relationSchema == "pg_catalog" && range.relationName == dbms::inheritance_catalog::name) {

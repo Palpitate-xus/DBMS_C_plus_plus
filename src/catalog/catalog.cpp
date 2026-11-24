@@ -580,7 +580,8 @@ CatalogManager::MetadataSnapshot CatalogManager::readMetadataSnapshot(const std:
     return catalog.metadataSnapshot(includeDefaultObjects);
 }
 
-CatalogManager::DefaultCatalogSnapshot CatalogManager::defaultCatalogSnapshot(DefaultCatalogKind kind) const {
+CatalogManager::DefaultCatalogSnapshot CatalogManager::defaultCatalogSnapshot(
+    DefaultCatalogKind kind, bool includeExpressions) const {
     std::lock_guard<std::mutex> lock(mutex_);
     DefaultCatalogSnapshot result;
     result.kind = kind;
@@ -590,9 +591,12 @@ CatalogManager::DefaultCatalogSnapshot CatalogManager::defaultCatalogSnapshot(De
     result.declaration.attributes = attributes_;
     result.declaration.types = types_;
     if (kind == DefaultCatalogKind::Attrdef) {
-        result.defaults.reserve(attrdefs_.size());
-        for (const auto& row : attrdefs_)
-            result.defaults.push_back({row.oid, row.adrelid, row.adnum});
+        if (includeExpressions) result.defaults = attrdefs_;
+        else {
+            result.defaults.reserve(attrdefs_.size());
+            for (const auto& row : attrdefs_)
+                result.defaults.push_back({row.oid, row.adrelid, row.adnum, {}, {}});
+        }
     } else if (kind == DefaultCatalogKind::Depend) {
         result.dependencies = depends_;
     } else {
@@ -603,9 +607,9 @@ CatalogManager::DefaultCatalogSnapshot CatalogManager::defaultCatalogSnapshot(De
 }
 
 CatalogManager::DefaultCatalogSnapshot CatalogManager::readDefaultCatalogSnapshot(
-    const std::string& path, DefaultCatalogKind kind) {
+    const std::string& path, DefaultCatalogKind kind, bool includeExpressions) {
     CatalogManager catalog(path, ReadOnlyTag{});
-    return catalog.defaultCatalogSnapshot(kind);
+    return catalog.defaultCatalogSnapshot(kind, includeExpressions);
 }
 
 std::map<std::string, std::string> CatalogManager::domainColumns(

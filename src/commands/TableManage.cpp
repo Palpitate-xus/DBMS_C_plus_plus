@@ -42533,7 +42533,7 @@ decltype(auto) StorageEngine::withQueryBindingMetadata(const std::string& dbname
                             default_catalog::validate(catalog, access_method_catalog::relationOid,
                                 access_method_catalog::name, access_method_catalog::fields);
                         for(auto& column:description.columns) {
-                            column.typeOid=mapBuiltinTypeNameToOid(column.type);
+                            if (!column.typeOid) column.typeOid=mapBuiltinTypeNameToOid(column.type);
                             if(column.typeOid)column.typeMetadata=metadata.datumType(column.type,column.typeOid);
                         }
                         return description;

@@ -45,6 +45,45 @@ inline std::string quoteLiteral(const std::string& text) {
     return result + '\'';
 }
 
+// Only syntax that already produces this Const type in PostgreSQL is
+// represented here. For example, a small integer assigned to a bigint
+// column has its own coercion node, even though both values are integers.
+inline std::string primitiveNode(const Expr* expression, Oid targetType) {
+    const auto* literal = dynamic_cast<const LiteralExpr*>(expression);
+    if (targetType == 25) {
+        if (!literal || !literal->typeName.empty() || literal->preparedSubquery) return {};
+        const auto value = stringLiteral(expression);
+        if (!value || value->find('\0') != std::string::npos) return {};
+        return pg_const_node::encode({25, -1, 100, -1, false, pg_const_node::varlena(*value)});
+    }
+    if (targetType == 16 && literal && literal->typeName.empty() && !literal->preparedSubquery) {
+        const auto keyword = SQLParser::toLower(literal->value);
+        if (keyword == "true" || keyword == "false")
+            return pg_const_node::encode({16, -1, 0, 1, true, pg_const_node::datum(keyword == "true")});
+        const auto input = stringLiteral(expression);
+        if (input && (*input == "t" || *input == "f"))
+            return pg_const_node::encode({16, -1, 0, 1, true, pg_const_node::datum(*input == "t")});
+    }
+    if (targetType != 23 && targetType != 20) return {};
+    bool negative = false;
+    if (const auto* unary = dynamic_cast<const UnaryOpExpr*>(expression); unary && unary->op == "-") {
+        negative = true;
+        literal = dynamic_cast<const LiteralExpr*>(unary->operand.get());
+    }
+    if (!literal || !literal->typeName.empty() || literal->preparedSubquery) return {};
+    const auto input = stringLiteral(literal);
+    if (input && negative) return {};
+    const auto text = (negative ? "-" : "") + (input ? *input : literal->value);
+    int64_t value = 0;
+    const auto parsed = std::from_chars(text.data(), text.data() + text.size(), value);
+    if (parsed.ec != std::errc{} || parsed.ptr != text.data() + text.size()) return {};
+    const bool fitsInt = value >= std::numeric_limits<int32_t>::min() && value <= std::numeric_limits<int32_t>::max();
+    if ((targetType == 23 && !fitsInt) || (targetType == 20 && !input && fitsInt) ||
+        (targetType == 20 && sizeof(uintptr_t) < sizeof(int64_t))) return {};
+    return pg_const_node::encode({targetType, -1, 0, static_cast<int16_t>(targetType == 23 ? 4 : 8),
+                                 true, pg_const_node::datum(static_cast<uintptr_t>(value))});
+}
+
 // Bind actual typed object constants without evaluating a routine, row,
 // subquery or default. Runtime text -> regclass casts deliberately remain
 // runtime casts. All unrelated source bytes retain their original spelling.

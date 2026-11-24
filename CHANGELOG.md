@@ -1,9 +1,18 @@
 # 更新日志
 
 <details>
+<summary>可以查到常见列默认值 · 2026-11-24</summary>
+
+可以用 SQL 查看一列的默认整数、文本或真假值。例如，可以查出订单备注默认是不是空字符串。
+
+[查询示例](docs/MANUAL.md#查询列的默认值) · [测试报告](docs/test-report.md#column-default-expression-20261124) · [性能报告](docs/performance-report-2026-10-30.md#column-default-expression-cost-20261124)
+
+</details>
+
+<details>
 <summary>可以查到列的类型和长度 · 2026-11-24</summary>
 
-可以用 SQL 查看一列是整数、日期还是文本。例如，声明为 `varchar(12)` 的列会显示长度 12。`psql` 的 `\d` 还缺少读取列默认值的功能。
+可以用 SQL 查看一列是整数、日期还是文本。例如，声明为 `varchar(12)` 的列会显示长度 12。
 
 [查询示例](docs/MANUAL.md#查询列的类型) · [测试报告](docs/test-report.md#format-type-20261124) · [性能报告](docs/performance-report-2026-10-30.md#format-type-cost-20261124)
 
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>可以查出同名表会用到哪一张 · 2026-11-24</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-24 · 可以查出同名表会用到哪一张
 
 如果 `sales.orders` 和 `archive.orders` 同时存在，现在可以查出直接写 `orders` 会找到哪一张。`psql` 的 `\d` 还无法显示完整的表结构。
 
 [使用说明](docs/MANUAL.md#按名称查找表) · [测试报告](docs/test-report.md#psql-catalog-discovery-20261124) · [性能报告](docs/performance-report-2026-10-30.md#psql-catalog-discovery-cost-20261124)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-24 · 修复 psql 密码登录
 

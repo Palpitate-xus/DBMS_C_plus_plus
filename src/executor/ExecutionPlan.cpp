@@ -7749,11 +7749,13 @@ OpPtr QueryPlanner::buildPreparedQueryPlan(StorageEngine* engine,const std::stri
                 column.isVariableLength=true;schema.append(column);
             }
             const bool dependencies=found->relationName=="pg_depend";
+            const bool expressions=found->readsDefaultExpression;
             auto rows=std::make_shared<std::optional<PreparedQueryRows>>();
             source=std::make_unique<PreparedSourceRowsOp>(found->columns,
-                [engine,database,rows,dependencies](size_t index,std::vector<ExprValue>& row) {
+                [engine,database,rows,dependencies,expressions](size_t index,std::vector<ExprValue>& row) {
                     if(!*rows)*rows=default_catalog::rows(engine->catalogService().defaultCatalogSnapshot(database,
-                        dependencies ? CatalogManager::DefaultCatalogKind::Depend : CatalogManager::DefaultCatalogKind::Attrdef),dependencies);
+                        dependencies ? CatalogManager::DefaultCatalogKind::Depend : CatalogManager::DefaultCatalogKind::Attrdef,
+                        expressions),dependencies,expressions);
                     if(index>=(**rows).size())return false;
                     row=(**rows)[index];return true;
                 });

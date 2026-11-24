@@ -5,6 +5,7 @@
 #include "expression/LocalExpressionSyntax.h"
 #include "catalog/DatumMetadataFactory.h"
 #include "catalog/FormatType.h"
+#include "catalog/PgDefaultExpression.h"
 #include "catalog/RelationSearchPath.h"
 #include "expression/StoredRegtypeValue.h"
 #include "utils/numeric_type.h"
@@ -1042,7 +1043,10 @@ GeneratedReadPtr bindGeneratedColumn(std::shared_ptr<const GeneratedColumnProgra
 }
 ExprValue ExprEvaluator::readBoundColumn(size_t source,size_t column,const RowContext& row) const {
     if(const auto* input=row.generatedBound(source,column))return evaluateGenerated(*input,row);
-    return row.boundColumn(source,column);
+    auto value = row.boundColumn(source,column);
+    if (!value.isNull && value.value.empty() && value.typeName == "pg_node_tree")
+        throw DbError("0A000", "catalog expression has no supported node encoding");
+    return value;
 }
 ExprValue ExprEvaluator::readNamedColumn(const std::string& key,const RowContext& row) const {
     if(const auto* input=row.generatedNamed(key))return evaluateGenerated(*input,row);
@@ -5646,6 +5650,9 @@ ExprValue ExprEvaluator::evalCast(const CastExpr* e, const RowContext& ctx) cons
         ExprValue v = eval(e->operand.get(), ctx);
         if (e->implicit && e->typeMods.empty()) {
             const auto target = ExprHelper::canonicalResultTypeName(e->typeName);
+            // A typed NULL carries no node bytes. Keep explicit casts and
+            // non-NULL input under the catalog type's normal input guard.
+            if (target == "pg_node_tree" && v.isNull) return ExprValue(target, "", true);
             if (target == "character" || target == "bpchar" || target == "bit") {
                 if (target == "bit")
                     v = evalCast(nullptr,ctx,v,"bit varying");
@@ -6603,6 +6610,21 @@ struct SqlFormatTypeFunction {
         return ExprValue("text", type_display::format(engine, database, oid, typmod, currentSession()));
     }
 };
+struct SqlGetExpressionFunction {
+    ExprValue operator()(const std::vector<ExprValue>&) const {
+        throw DbError("XX000", "pg_get_expr requires its catalog context");
+    }
+
+    ExprValue invoke(const std::vector<ExprValue>& args, StorageEngine& engine,
+                     const std::string& database) const {
+        if (args.size() < 2 || args.size() > 3) throw DbError("42883", "pg_get_expr requires two or three arguments");
+        if (std::any_of(args.begin(), args.end(), [](const auto& arg) { return arg.isNull; }))
+            return ExprValue("text", "", true);
+        const auto oid = args[1].objectOid ? *args[1].objectOid : parseOidInput(args[1].value);
+        const auto sql = default_expression::deparse(args[0].value, oid, engine, database, currentSession());
+        return ExprValue("text", sql.value_or(""), !sql);
+    }
+};
 struct SqlSessionSettingFunction {
     bool write;
 
@@ -6625,6 +6647,8 @@ bool ownsScalarSignatures(const std::string& name,const ScalarFunction* callback
         return callback && callback->target<SqlRoleNameFunction>();
     if (name == "format_type")
         return callback && callback->target<SqlFormatTypeFunction>();
+    if (name == "pg_get_expr")
+        return callback && callback->target<SqlGetExpressionFunction>();
     if(isCoreOverloadedScalarName(name))
         return callback && callback->target<DeclaredCoreScalarFunction>();
     if(isArraySearchScalarName(name))
@@ -6719,6 +6743,12 @@ const std::vector<ScalarSignature>& scalarSignatures(const std::string& name) {
     if (name == "format_type") {
         static const auto* const signatures = new const std::vector<ScalarSignature>{
             {{"oid", "integer"}, "pg_catalog.text"}};
+        return *signatures;
+    }
+    if (name == "pg_get_expr") {
+        static const auto* const signatures = new const std::vector<ScalarSignature>{
+            {{"pg_node_tree", "oid"}, "pg_catalog.text"},
+            {{"pg_node_tree", "oid", "boolean"}, "pg_catalog.text"}};
         return *signatures;
     }
     if (name == "current_setting") {
@@ -6962,7 +6992,8 @@ ResolvedScalarFunction resolveTypedScalar(const std::string& name,
         candidates.erase(std::remove_if(candidates.begin(),candidates.end(),[](const auto& candidate){return candidate.polymorphic;}),candidates.end());
     if(candidates.size()>1)throw DbError("42725","function "+name+" is not unique");
     if(candidates.empty())return {};
-    if((name=="scale" || name=="min_scale" || name=="gcd" || name=="lcm" || name=="factorial" || name=="format_type" ||
+    if((name=="scale" || name=="min_scale" || name=="gcd" || name=="lcm" || name=="factorial" ||
+        name=="format_type" || name=="pg_get_expr" ||
         isSessionSettingFunction(name)) && !candidates.front().stored &&
        (call->hasOver || call->distinct || call->filter || !call->orderBy.empty() ||
         !call->aggregateOrderKeys.empty()))
@@ -7871,9 +7902,15 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
         // genuine catalog callback reaches this coercion boundary.
         const auto resolved=resolveTypedScalar(name,inputs,e,{"pg_catalog"},owner,currentDB_);
         if(!resolved.found)throw DbError("42883","function does not exist: "+name);
-        for(size_t i=0;i<args.size();++i)
-            if(scalarSignatureInputType(args[i].typeName)!=resolved.inputs[i])
-                args[i]=evalCast(nullptr,ctx,args[i],resolved.inputs[i]);
+        for(size_t i=0;i<args.size();++i) {
+            if(scalarSignatureInputType(args[i].typeName)==resolved.inputs[i]) continue;
+            // The strict function can receive an inferred NULL node without
+            // enabling casts or text/binary input for arbitrary node strings.
+            if (args[i].isNull && resolved.inputs[i] == "pg_node_tree" &&
+                invocationCallback->second.target<SqlGetExpressionFunction>())
+                args[i] = ExprValue("pg_node_tree", "", true);
+            else args[i]=evalCast(nullptr,ctx,args[i],resolved.inputs[i]);
+        }
     }
 
     if (name == "timezone" && args.size() == 2) {
@@ -8040,6 +8077,9 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
         } else if (const auto* type = it->second.target<SqlFormatTypeFunction>()) {
             auto* owner = sqlValueEngine_ ? sqlValueEngine_ : &g_engine;
             result = type->invoke(args, *owner, currentDB_);
+        } else if (const auto* expression = it->second.target<SqlGetExpressionFunction>()) {
+            auto* owner = sqlValueEngine_ ? sqlValueEngine_ : &g_engine;
+            result = expression->invoke(args, *owner, currentDB_);
         } else result = it->second(args);
         if(!pushElement && declaredResult.size()>=2 && declaredResult.compare(declaredResult.size()-2,2,"[]")==0)
             result=implicitRuntimeValue(*this,std::move(result),declaredResult);
@@ -14030,6 +14070,8 @@ void ExprEvaluator::registerStatelessBuiltins() {
     volatility_["pg_get_userbyid"] = 's';
     functions_["format_type"] = SqlFormatTypeFunction{};
     volatility_["format_type"] = 's';
+    functions_["pg_get_expr"] = SqlGetExpressionFunction{};
+    volatility_["pg_get_expr"] = 's';
     functions_["current_setting"] = SqlSessionSettingFunction{false};
     functions_["set_config"] = SqlSessionSettingFunction{true};
     functions_["version"]=SqlVersionFunction{};

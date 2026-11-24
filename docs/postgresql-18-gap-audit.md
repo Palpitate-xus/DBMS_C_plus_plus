@@ -1,8 +1,12 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-24 · 用 SQL 查询常见列默认值
+
+`pg_attrdef.adbin` 和 `pg_get_expr` 支持常见常量默认值，使用实际列类型和已登记的对象编号生成结果。普通运算、序列调用和生成列引用仍待补齐。原版 `psql` 的普通表列信息查询还缺 `pg_collation`。`CAT-03` 和 `CLIENT-01` 保持部分实现。 [功能验证](test-report.md#column-default-expression-20261124) · [性能对照](performance-report-2026-10-30.md#column-default-expression-cost-20261124)
+
 ## 2026-11-24 · 用 SQL 查询列的类型和长度
 
-新增 `format_type`，可用类型编号和列定义的长度或精度生成名称。对照 PostgreSQL 18.6 验证了常见内置类型、枚举、域、数组和搜索路径。原版 `psql` 18.6 的 `\d` 已能找到此函数，接下来仍缺 `pg_attrdef.adbin`。`CAT-03` 和 `CLIENT-01` 保持部分实现。 [功能验证](test-report.md#format-type-20261124) · [性能对照](performance-report-2026-10-30.md#format-type-cost-20261124)
+新增 `format_type`，可用类型编号和列定义的长度或精度生成名称。对照 PostgreSQL 18.6 验证了常见内置类型、枚举、域、数组和搜索路径。原版 `psql` 18.6 的 `\d` 可找到此函数。`CAT-03` 和 `CLIENT-01` 保持部分实现。 [功能验证](test-report.md#format-type-20261124) · [性能对照](performance-report-2026-10-30.md#format-type-cost-20261124)
 
 ## 2026-11-24 · 可以用 psql 列出普通表
 

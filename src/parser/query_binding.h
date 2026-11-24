@@ -119,6 +119,7 @@ struct PreparedQuery {
         // into the caller's textual SQL or procedural parameter namespace.
         std::shared_ptr<PreparedQuery> viewQuery;
         GeneratedRelationPtr generatedRelation;
+        bool readsDefaultExpression = false;
     };
     std::string source;
     StmtPtr ast;
