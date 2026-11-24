@@ -12165,6 +12165,17 @@ std::vector<StorageEngine::CompositeIndexInfo> StorageEngine::getCompositeIndexe
                 if (!column.empty()) info.columns.push_back(column);
             }
 
+            if (includePos != std::string::npos &&
+                (wherePos == std::string::npos || includePos + 9 <= wherePos)) {
+                const size_t begin = includePos + 9;
+                std::istringstream includes(line.substr(begin,
+                    wherePos == std::string::npos ? std::string::npos : wherePos - begin));
+                while (std::getline(includes, column, ',')) {
+                    column = trim(column);
+                    if (!column.empty()) info.includeCols.push_back(column);
+                }
+            }
+
             if (wherePos != std::string::npos) {
                 info.whereCondition = line.substr(wherePos + 7);
             }

@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>查看索引建在哪张表和哪些列上 · 2026-11-24</summary>
+
+例如，可以查到订单索引按客户编号查找，也顺带保存了订单日期。可以查看整个定义，或只查看其中一列。
+
+[查询示例](docs/MANUAL.md#查询索引的定义) · [测试报告](docs/test-report.md#index-definition-20261124) · [性能报告](docs/performance-report-2026-10-30.md#index-definition-cost-20261124)
+
+</details>
+
+<details>
 <summary>把一列查询结果收进数组 · 2026-11-24</summary>
 
 例如，用一条查询把某位客户的订单编号按顺序放进一个数组。没有订单时会返回空数组。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>查出一个分区属于哪张表 · 2026-11-24</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-24 · 查出一个分区属于哪张表
 
 例如，订单按月份分开存放时，现在可以从某个月的分区查到订单总表。旧数据库中已记录归属关系的分区也可以查。
 
 [查询示例](docs/MANUAL.md#查询分区归属) · [测试报告](docs/test-report.md#partition-ancestors-20261124) · [性能报告](docs/performance-report-2026-10-30.md#partition-ancestors-cost-20261124)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-24 · 查看删除或修改记录时会怎样影响关联数据
 

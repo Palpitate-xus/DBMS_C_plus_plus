@@ -2,6 +2,18 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-24 reconstruct registered explicit index definitions by OID",
+      "gap_ids": ["CAT-02", "CAT-03", "CLIENT-01"],
+      "status": "partial",
+      "evidence": ["src/catalog/CatalogService.cpp", "src/catalog/catalog.cpp", "src/expression/ExprEvaluator.cpp", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/pg_get_indexdef_protocol_e2e_test.py"],
+      "verification": [
+        "Use the registered index OID and owning relation dependency to read persisted B-tree and hash definitions, including unique keys and INCLUDE columns.",
+        "The same protocol tests pass against PostgreSQL 18.6, including current names, namespace resolution, typed parameters and rollback.",
+        "Old index definitions survive restart and uncommitted removal; committed removal stays absent. Stock psql runs the function; pg_index and implicit index identities remain open."
+      ]
+    },
+    {
       "issue": "2026-11-24 construct typed arrays from SELECT and VALUES subqueries",
       "gap_ids": ["QRY-01", "QRY-04", "CLIENT-01"],
       "status": "partial",

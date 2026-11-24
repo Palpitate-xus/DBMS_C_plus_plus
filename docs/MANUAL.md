@@ -2736,7 +2736,7 @@ WHERE c.relname = 'orders'
 ORDER BY n.nspname, c.relname;
 ```
 
-`psql` 的 `\d orders` 能查找表并读取列信息。显示完整表结构还需要约束目录。可以先用下面的 SQL 查询列类型、常见默认值和排序规则。 [验证记录](test-report.md#collation-catalog-20261124)
+`psql` 的 `\d orders` 能查找表并读取列信息。完整输出还需要索引目录、规则目录和更多约束类型。下面的 SQL 可以单独查看相应信息。 [验证记录](test-report.md#collation-catalog-20261124)
 
 ### 查询表和索引的访问方式
 
@@ -2752,6 +2752,16 @@ ORDER BY 1, 2;
 ```
 
 `pg_am` 可以查询 `oid`、`amname` 和 `amtype`。其中 `t` 代表表，`i` 代表索引。处理函数字段 `amhandler` 仍未开放，请在查询中列出需要的字段。 [验证记录](test-report.md#pg-access-method-20261124)
+
+### 查询索引的定义
+
+用索引名称或编号查出它建在哪张表、索引了哪些列。下面的查询可以显示普通表上显式创建的 B 树索引或哈希索引。
+
+```sql
+SELECT pg_catalog.pg_get_indexdef('public.orders_customer_idx'::regclass::oid);
+```
+
+也可以传入 `索引编号, 列序号, true`，只查看索引中的某一列。序号从 1 开始，附带列排在索引键之后。传入 `0, true` 查看整个定义，并在表名可直接使用时省略模式名。表达式索引、完整的部分索引定义和索引目录 `pg_index` 仍待补齐。
 
 ### 查询列的类型
 

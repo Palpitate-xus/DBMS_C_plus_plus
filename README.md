@@ -19,6 +19,13 @@ cmake --build build/cmake --target dbms_main --parallel 2
 ## 最近更新
 
 <details>
+<summary>查看索引建在哪张表和哪些列上 · 2026-11-24</summary>
+
+例如，可以查到订单索引按客户编号查找，也顺带保存了订单日期。
+
+</details>
+
+<details>
 <summary>把一列查询结果收进数组 · 2026-11-24</summary>
 
 例如，用一条查询把某位客户的订单编号按顺序放进一个数组。
@@ -29,13 +36,6 @@ cmake --build build/cmake --target dbms_main --parallel 2
 <summary>在 psql 中查看数据库账号 · 2026-11-24</summary>
 
 输入 `\du` 就能查看哪些账号可以登录、同时连接的数量上限，以及密码何时过期。
-
-</details>
-
-<details>
-<summary>查出一个分区属于哪张表 · 2026-11-24</summary>
-
-例如，订单按月份分开存放时，现在可以从某个月的分区查到订单总表。
 
 </details>
 

@@ -19,6 +19,7 @@
 #include "catalog/PgForeignKeyCatalog.h"
 #include "catalog/PgRolesCatalog.h"
 #include "catalog/DatumMetadataFactory.h"
+#include "catalog/RelationSearchPath.h"
 #include "expression/regclass_input.h"
 #include "common/DbError.h"
 #include "common/TemporalStorageCodec.h"
@@ -777,6 +778,110 @@ std::optional<bool> CatalogService::relationIsVisible(
     if (catalog.manager) return catalog.manager->relationIsVisible(oid, searchPath);
     if (catalog.path.empty()) return std::nullopt;
     return CatalogManager::readRelationVisibility(catalog.path, oid, searchPath);
+}
+
+std::optional<std::string> CatalogService::indexDefinition(const std::string& database, Oid oid,
+    int32_t column, bool pretty, const Session* session) const {
+    const auto ownership = engine_.catalogReadOwnership(database);
+    const auto catalog = readCatalog(database, ownership.mayReadCurrentFiles);
+    const auto searchPath = pretty ? effectiveRelationSearchPath(session) : std::vector<std::string>{};
+    const auto index = catalog.manager ? catalog.manager->registeredIndex(oid, searchPath) :
+        catalog.path.empty() ? std::nullopt : CatalogManager::readRegisteredIndex(catalog.path, oid, searchPath);
+    if (!index) return std::nullopt;
+    if (!ownership.mayReadCurrentFiles)
+        throw DbError("55P03", "index definition conflicts with active DDL");
+    if (index->table.relkind != 'r' || index->table.relispartition)
+        throw DbError("0A000", "index definitions require an ordinary table");
+
+    std::string physical = index->table.relname;
+    if (index->schema.compare(0, 8, "pg_temp_") == 0) {
+        physical = "__tmp_" + index->schema.substr(8) + "_" + physical;
+    } else if (index->schema != "public") {
+        physical = index->schema + "__" + physical;
+    }
+    auto table = engine_.readPersistedSchemaForCatalog(database, physical);
+    if (!table && index->schema == "public") {
+        physical = "public__" + physical;
+        table = engine_.readPersistedSchemaForCatalog(database, physical);
+    }
+    if (!table) throw DbError("XX001", "index owner definition is missing");
+    if (table->partitionType != TableSchema::PartitionType::None)
+        throw DbError("0A000", "partitioned index definitions are not supported");
+    const auto named = engine_.getNamedIndex(database, physical, index->index.relname);
+    if (!named || access_method_catalog::indexOid(named->accessMethod) != index->index.relam)
+        throw DbError("XX001", "index access method does not match its catalog identity");
+
+    std::vector<std::string> keys;
+    std::vector<std::string> includes;
+    bool unique = false;
+    bool descending = false;
+    bool partial = false;
+    std::string method = named->accessMethod;
+    if (method == "btree") {
+        const auto definitions = engine_.getIndexMetadata(database, physical);
+        const auto definition = std::find_if(definitions.begin(), definitions.end(),
+            [&](const auto& entry) { return entry.name == named->key; });
+        if (definition == definitions.end()) throw DbError("XX001", "B-tree definition is missing");
+        if (definition->isExpression) throw DbError("0A000", "expression index definitions are not supported");
+        keys.push_back(definition->name);
+        includes = definition->includeCols;
+        unique = definition->isUnique;
+        descending = definition->descending;
+        partial = !definition->whereCondition.empty();
+    } else if (method == "composite") {
+        const auto definitions = engine_.getCompositeIndexes(database, physical);
+        const auto definition = std::find_if(definitions.begin(), definitions.end(),
+            [&](const auto& entry) { return entry.name == named->key; });
+        if (definition == definitions.end()) throw DbError("XX001", "composite B-tree definition is missing");
+        method = "btree";
+        keys = definition->columns;
+        includes = definition->includeCols;
+        unique = definition->isUnique;
+        partial = !definition->whereCondition.empty();
+    } else if (method == "hash") {
+        const auto columns = engine_.getHashIndexedColumns(database, physical);
+        if (std::find(columns.begin(), columns.end(), named->key) == columns.end())
+            throw DbError("XX001", "hash index definition is missing");
+        keys.push_back(named->key);
+    } else {
+        throw DbError("0A000", "index definition for this access method is not supported");
+    }
+    if (keys.empty() || keys.size() != static_cast<size_t>(index->index.relnatts))
+        throw DbError("XX001", "index columns do not match its catalog identity");
+    const auto validateColumns = [&](const auto& names) {
+        for (const auto& name : names)
+            if (std::none_of(table->cols.begin(), table->cols.end(),
+                    [&](const auto& candidate) { return candidate.dataName == name; }))
+                throw DbError("XX001", "index column is missing from its owning table");
+    };
+    validateColumns(keys);
+    validateColumns(includes);
+
+    if (column != 0) {
+        if (column < 0 || static_cast<size_t>(column) > keys.size() + includes.size()) return std::string{};
+        const size_t ordinal = static_cast<size_t>(column - 1);
+        return SQLParser::quoteIdentifier(ordinal < keys.size() ? keys[ordinal] : includes[ordinal - keys.size()]);
+    }
+    if (partial) throw DbError("0A000", "partial index predicates cannot be reconstructed");
+    std::string sql = unique ? "CREATE UNIQUE INDEX " : "CREATE INDEX ";
+    sql += SQLParser::quoteIdentifier(index->index.relname) + " ON ";
+    if (!index->tableVisible) sql += SQLParser::quoteIdentifier(index->schema) + '.';
+    sql += SQLParser::quoteIdentifier(index->table.relname) + " USING " + method + " (";
+    const auto append = [&](const auto& names) {
+        for (size_t i = 0; i < names.size(); ++i) {
+            if (i) sql += ", ";
+            sql += SQLParser::quoteIdentifier(names[i]);
+        }
+    };
+    append(keys);
+    if (descending) sql += " DESC";
+    sql += ')';
+    if (!includes.empty()) {
+        sql += " INCLUDE (";
+        append(includes);
+        sql += ')';
+    }
+    return sql;
 }
 
 std::vector<PgNamespaceRow> CatalogService::namespaceSnapshot(const std::string& dbname) const {

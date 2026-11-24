@@ -6641,6 +6641,24 @@ struct SqlConstraintDefinitionFunction {
         return ExprValue("text", sql.value_or(""), !sql);
     }
 };
+struct SqlIndexDefinitionFunction {
+    ExprValue operator()(const std::vector<ExprValue>&) const {
+        throw DbError("XX000", "pg_get_indexdef requires its catalog context");
+    }
+
+    ExprValue invoke(const std::vector<ExprValue>& args, StorageEngine& engine,
+                     const std::string& database) const {
+        if (args.size() != 1 && args.size() != 3)
+            throw DbError("42883", "pg_get_indexdef requires one or three arguments");
+        if (std::any_of(args.begin(), args.end(), [](const auto& arg) { return arg.isNull; }))
+            return ExprValue("text", "", true);
+        const Oid oid = args[0].objectOid ? *args[0].objectOid : parseOidInput(args[0].value);
+        const int32_t column = args.size() == 3 ? static_cast<int32_t>(args[1].asInt()) : 0;
+        const bool pretty = args.size() == 3 && args[2].asBool();
+        auto definition = engine.catalogService().indexDefinition(database, oid, column, pretty, currentSession());
+        return ExprValue("text", definition ? std::move(*definition) : std::string{}, !definition);
+    }
+};
 struct SqlSessionSettingFunction {
     bool write;
 
@@ -6667,6 +6685,8 @@ bool ownsScalarSignatures(const std::string& name,const ScalarFunction* callback
         return callback && callback->target<SqlGetExpressionFunction>();
     if (name == "pg_get_constraintdef")
         return callback && callback->target<SqlConstraintDefinitionFunction>();
+    if (name == "pg_get_indexdef")
+        return callback && callback->target<SqlIndexDefinitionFunction>();
     if(isCoreOverloadedScalarName(name))
         return callback && callback->target<DeclaredCoreScalarFunction>();
     if(isArraySearchScalarName(name))
@@ -6772,6 +6792,11 @@ const std::vector<ScalarSignature>& scalarSignatures(const std::string& name) {
     if (name == "pg_get_constraintdef") {
         static const auto* const signatures = new const std::vector<ScalarSignature>{
             {{"oid"}, "pg_catalog.text"}, {{"oid", "boolean"}, "pg_catalog.text"}};
+        return *signatures;
+    }
+    if (name == "pg_get_indexdef") {
+        static const auto* const signatures = new const std::vector<ScalarSignature>{
+            {{"oid"}, "pg_catalog.text"}, {{"oid", "integer", "boolean"}, "pg_catalog.text"}};
         return *signatures;
     }
     if (name == "current_setting") {
@@ -7016,7 +7041,7 @@ ResolvedScalarFunction resolveTypedScalar(const std::string& name,
     if(candidates.size()>1)throw DbError("42725","function "+name+" is not unique");
     if(candidates.empty())return {};
     if((name=="scale" || name=="min_scale" || name=="gcd" || name=="lcm" || name=="factorial" ||
-        name=="format_type" || name=="pg_get_expr" || name=="pg_get_constraintdef" ||
+        name=="format_type" || name=="pg_get_expr" || name=="pg_get_constraintdef" || name=="pg_get_indexdef" ||
         isSessionSettingFunction(name)) && !candidates.front().stored &&
        (call->hasOver || call->distinct || call->filter || !call->orderBy.empty() ||
         !call->aggregateOrderKeys.empty()))
@@ -8113,6 +8138,9 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
             auto* owner = sqlValueEngine_ ? sqlValueEngine_ : &g_engine;
             result = expression->invoke(args, *owner, currentDB_);
         } else if (const auto* definition = it->second.target<SqlConstraintDefinitionFunction>()) {
+            auto* owner = sqlValueEngine_ ? sqlValueEngine_ : &g_engine;
+            result = definition->invoke(args, *owner, currentDB_);
+        } else if (const auto* definition = it->second.target<SqlIndexDefinitionFunction>()) {
             auto* owner = sqlValueEngine_ ? sqlValueEngine_ : &g_engine;
             result = definition->invoke(args, *owner, currentDB_);
         } else result = it->second(args);
@@ -14109,6 +14137,8 @@ void ExprEvaluator::registerStatelessBuiltins() {
     volatility_["pg_get_expr"] = 's';
     functions_["pg_get_constraintdef"] = SqlConstraintDefinitionFunction{};
     volatility_["pg_get_constraintdef"] = 's';
+    functions_["pg_get_indexdef"] = SqlIndexDefinitionFunction{};
+    volatility_["pg_get_indexdef"] = 's';
     functions_["current_setting"] = SqlSessionSettingFunction{false};
     functions_["set_config"] = SqlSessionSettingFunction{true};
     functions_["version"]=SqlVersionFunction{};

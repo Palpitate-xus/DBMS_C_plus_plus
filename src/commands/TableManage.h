@@ -1366,6 +1366,7 @@ public:
         std::vector<std::string> columns;
         std::string whereCondition; // partial index WHERE clause
         bool isUnique = false;      // standalone CREATE UNIQUE INDEX
+        std::vector<std::string> includeCols;
     };
     DBStatus createCompositeIndex(const std::string& dbname, const std::string& tablename,
                                   const std::vector<std::string>& colnames,

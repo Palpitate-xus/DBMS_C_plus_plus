@@ -2,6 +2,13 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="index-definition-comparison-20261124"></a>
+## 2026-11-24 · 查询索引的定义
+
+PostgreSQL 根据索引编号读取索引目录，再用当前的表名、列名、访问方式和附带列生成建索引语句。SQLite 的 `sqlite_schema` 保存建索引 SQL，`PRAGMA index_xinfo` 提供索引列。DuckDB 的 `duckdb_indexes()` 可以列出显式索引及其定义。 [PostgreSQL 源码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/utils/adt/ruleutils.c) · [SQLite 结构目录](https://www.sqlite.org/schematab.html) · [SQLite 索引列](https://www.sqlite.org/pragma.html#pragma_index_xinfo) · [DuckDB 索引信息](https://duckdb.org/docs/current/sql/meta/duckdb_table_functions#duckdb_indexes)
+
+本项目从实际索引编号和依赖关系找到所属表，只读取该表保存的索引定义。可以还原普通表上显式创建的普通 B 树、唯一 B 树及哈希索引。约束隐式创建的索引和索引目录仍待补齐。 [使用说明](MANUAL.md#查询索引的定义) · [性能报告](performance-report-2026-10-30.md#index-definition-cost-20261124)
+
 <a id="array-subquery-comparison-20261124"></a>
 ## 2026-11-24 · 把查询结果收进数组
 

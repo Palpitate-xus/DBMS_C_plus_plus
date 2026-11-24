@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-24 · 可以查看显式索引的定义
+
+`pg_get_indexdef` 使用已登记的索引和表编号，按当前表名、列名和保存的定义返回 SQL。支持普通表上的显式 B 树和哈希索引。`CAT-02`、`CAT-03` 和 `CLIENT-01` 保持部分实现。完整 `psql \d` 仍需要索引目录 `pg_index`。 [验证范围](test-report.md#index-definition-20261124) · [性能对照](performance-report-2026-10-30.md#index-definition-cost-20261124)
+
 ## 2026-11-24 · 把查询结果收进数组
 
 `ARRAY(SELECT ...)` 可以收集带类型的子查询结果，支持空数组、排序、空值和多维数组。已验证原版 `psql` 用来整理规则角色名单的表达式。`QRY-01`、`QRY-04` 和 `CLIENT-01` 保持部分实现，规则目录 `pg_policy` 仍待补齐。 [验证范围](test-report.md#array-subquery-20261124) · [性能对照](performance-report-2026-10-30.md#array-subquery-cost-20261124)

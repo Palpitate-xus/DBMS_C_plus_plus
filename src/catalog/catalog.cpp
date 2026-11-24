@@ -698,6 +698,36 @@ std::optional<bool> CatalogManager::readRelationVisibility(
     return catalog.relationIsVisible(oid, searchPath);
 }
 
+std::optional<CatalogManager::RegisteredIndex> CatalogManager::registeredIndex(
+    Oid oid, const std::vector<std::string>& searchPath) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto* index = findClassUnlocked(oid);
+    if (!index || (index->relkind != 'i' && index->relkind != 'I')) return std::nullopt;
+    if (index->relkind == 'I') throw DbError("0A000", "partitioned index definitions are not supported");
+
+    Oid owner = INVALID_OID;
+    for (const auto& edge : depends_) {
+        if (edge.classid != PgClassOid_Class || edge.refclassid != PgClassOid_Class ||
+            edge.objid != oid || edge.objsubid || edge.refobjsubid || edge.deptype != 'a') continue;
+        if (owner && owner != edge.refobjid)
+            throw DbError("XX001", "index has multiple owning relations");
+        owner = edge.refobjid;
+    }
+    const auto* table = findClassUnlocked(owner);
+    if (!table || table->relnamespace != index->relnamespace)
+        throw DbError("XX001", "index has no matching owning relation");
+    const auto* schema = findNamespaceUnlocked(table->relnamespace);
+    if (!schema) throw DbError("XX001", "index owner has no catalog namespace");
+    return RegisteredIndex{*index, *table, schema->nspname,
+        visibleRelationUnlocked(table->relname, searchPath) == table};
+}
+
+std::optional<CatalogManager::RegisteredIndex> CatalogManager::readRegisteredIndex(
+    const std::string& path, Oid oid, const std::vector<std::string>& searchPath) {
+    CatalogManager catalog(path, ReadOnlyTag{});
+    return catalog.registeredIndex(oid, searchPath);
+}
+
 std::optional<PgAttributeRow> CatalogManager::resolveAttributeSnapshot(
     const std::string& tableName, const std::string& colName,
     const std::vector<std::string>& searchPath) const {

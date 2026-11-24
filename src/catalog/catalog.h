@@ -145,6 +145,15 @@ public:
     std::optional<bool> relationIsVisible(Oid oid, const std::vector<std::string>& searchPath) const;
     static std::optional<bool> readRelationVisibility(
         const std::string& path, Oid oid, const std::vector<std::string>& searchPath);
+    struct RegisteredIndex {
+        PgClassRow index;
+        PgClassRow table;
+        std::string schema;
+        bool tableVisible;
+    };
+    std::optional<RegisteredIndex> registeredIndex(Oid oid, const std::vector<std::string>& searchPath) const;
+    static std::optional<RegisteredIndex> readRegisteredIndex(
+        const std::string& path, Oid oid, const std::vector<std::string>& searchPath);
     bool updateClass(Oid oid, const PgClassRow& row);
     // Rename a relation while preserving its OID and dependency records.
     // PostgreSQL object identity is OID-based; a name change must not create

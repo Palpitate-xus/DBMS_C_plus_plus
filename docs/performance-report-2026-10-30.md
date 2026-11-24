@@ -4,6 +4,32 @@
 
 > 复核发现，几组早期 COPY 计时在每个对照场景中使用了固定的执行顺序。耗时差可能包含顺序影响。这项问题涉及默认值求值、按列查找、默认值标记、短 CSV 导出和短查询导出的配对计时。[默认值求值](#copy-default-evaluation-order-cost-20261122) · [按列查找](#copy-identity-input-cost-20261122) · [默认值标记](#copy-default-marker-cost-20261122) · [CSV 导出](#copy-csv-out-cost-20261122) · [查询导出](#copy-query-stdout-cost-20261122)
 
+<a id="index-definition-cost-20261124"></a>
+## 2026-11-24 · 按编号查询索引定义的耗时
+
+比较上一版 `c425c5eb`、本次版本和 PostgreSQL 18.6。本项目使用 CMake、GCC 13.3、C++17 和 `-O2` 编译，构建时关闭 OpenSSL。在 Intel Xeon E5-2678 v3 上，将客户端和服务进程限制在 CPU 13 和 28。本项目数据目录位于 `/dev/shm`。
+
+在独立模式 `idx_cost` 建立普通空表 `target(k integer, v text)`，执行 `CREATE UNIQUE INDEX target_idx ON idx_cost.target (k) INCLUDE (v)`。先测只有一个索引的模式，再为同一模式新增 32 张空表，每张表都有一个单列索引。通过 `SELECT 'idx_cost.target_idx'::regclass::oid` 取得各数据库的实际编号。使用该编号执行以下查询。
+
+```sql
+SELECT relname AS v FROM pg_catalog.pg_class WHERE oid = '实际编号';
+SELECT pg_catalog.pg_get_indexdef('实际编号'::oid) AS v;
+SELECT pg_catalog.pg_get_indexdef('实际编号'::oid, 2, true) AS v;
+```
+
+同一连接上记录发出查询到收到就绪消息的时间。各数据库轮流执行，第二轮反转顺序。每轮预热 4 次，再计时 12 次。每次核对完整结果、类型和结束状态。
+
+| 查询 | 同模式中的其他索引 | 上一版中位数 / 最大值（毫秒） | 本次中位数 / 最大值（毫秒） | PostgreSQL 18.6 中位数 / 最大值（毫秒） |
+| --- | ---: | ---: | ---: | ---: |
+| 查索引名称 | 0 | 3.058–3.069 / 3.099–3.316 | 3.102–3.105 / 3.148–3.389 | 0.211–0.212 / 0.226–0.230 |
+| 查索引名称 | 32 | 4.559–4.584 / 14.563–16.345 | 4.455–4.464 / 4.934–7.991 | 0.211–0.259 / 0.335 |
+| 查整个索引定义 | 0 | — | 4.167–4.228 / 4.651–6.349 | 0.195 / 0.241–0.287 |
+| 查整个索引定义 | 32 | — | 3.964–3.986 / 4.194–14.853 | 0.169–0.182 / 0.220–0.247 |
+| 只查附带列 | 0 | — | 3.740–4.087 / 4.068–4.702 | 0.152–0.154 / 0.178–0.193 |
+| 只查附带列 | 32 | — | 4.208–4.255 / 4.298–14.223 | 0.145–0.153 / 0.182–0.215 |
+
+上一版缺少 `pg_get_indexdef`。新增 32 个索引后，本项目查定义的中位耗时约为 4.0 毫秒，是 PostgreSQL 的 22–24 倍。本次计时使用空表，覆盖索引定义的读取。 [功能验证](test-report.md#index-definition-20261124) · [实现对照](postgresql-comparison.md#index-definition-comparison-20261124)
+
 <a id="array-subquery-cost-20261124"></a>
 ## 2026-11-24 · 把查询结果收进数组的耗时
 
