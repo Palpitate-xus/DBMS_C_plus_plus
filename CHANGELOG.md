@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>按表查询索引更快 · 2026-11-24</summary>
+
+查询订单表的索引时，数据库会先筛出与订单表有关的记录，减少其他表带来的开销。
+
+[测试报告](docs/test-report.md#catalog-join-filter-20261124) · [性能报告](docs/performance-report-2026-10-30.md#catalog-join-filter-cost-20261124)
+
+</details>
+
+<details>
 <summary>可以查询主键定义和它使用的索引 · 2026-11-24</summary>
 
 例如，可以查到订单表用哪几列作为主键，也可以查到哪些外键引用了这个主键。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>列出一张表上手动创建的索引 · 2026-11-24</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-24 · 列出一张表上手动创建的索引
 
 例如，可以列出订单表上的索引，看看哪些索引要求值不能重复。
 
 [查询示例](docs/MANUAL.md#按表查询索引) · [测试报告](docs/test-report.md#pg-index-20261124) · [性能报告](docs/performance-report-2026-10-30.md#pg-index-cost-20261124)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-24 · 查看某个索引用了哪些列
 

@@ -2,6 +2,13 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="catalog-join-filter-comparison-20261124"></a>
+## 2026-11-24 · 目录连接的筛选顺序
+
+PostgreSQL 会在生成执行计划时选择访问路径，`EXPLAIN` 可以显示筛选发生在哪个环节。SQLite 记录外连接中的 `ON` 条件来源，以保留和 `WHERE` 不同的语义。DuckDB 会把等值条件传给其他等价列，再将条件下推到数据读取。 [PostgreSQL 执行计划](https://www.postgresql.org/docs/18/using-explain.html) · [SQLite 的条件分析](https://www.sqlite.org/optoverview.html#where_clause_analysis) · [DuckDB 的优化方法](https://duckdb.org/docs/current/internals/overview)
+
+本项目在三个目录的连接中，沿已绑定的对象编号相等条件缩小读取范围。左连接只向可补空值的一侧传递条件。原查询中的 `ON` 和 `WHERE` 仍参与执行。此路径用于符合条件的目录连接，通用连接优化继续跟踪。 [验证范围](test-report.md#catalog-join-filter-20261124) · [性能对照](performance-report-2026-10-30.md#catalog-join-filter-cost-20261124)
+
 <a id="primary-constraint-comparison-20261124"></a>
 ## 2026-11-24 · 主键、外键与索引的关联
 

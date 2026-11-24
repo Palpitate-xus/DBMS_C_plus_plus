@@ -133,10 +133,13 @@ inline std::vector<ExprValue> attributeCells(const PgAttributeRow& r) {
     for(size_t i=0;i<values.size();++i)cells.emplace_back(descriptor[i].type,values[i],i+1==values.size() && r.attstattarget<0);
     return cells;
 }
-inline std::vector<std::vector<ExprValue>> classRows(const CatalogManager::MetadataSnapshot& snapshot) {
+inline std::vector<std::vector<ExprValue>> classRows(const CatalogManager::MetadataSnapshot& snapshot,
+                                                    std::optional<Oid> relation = {}) {
     validateRead(snapshot,1259,"pg_class",83,273,class_catalog::fields,31);
-    std::vector<std::vector<ExprValue>> rows;rows.reserve(snapshot.relations.size());
-    for(const auto& row:snapshot.relations)rows.push_back(classCells(row));
+    std::vector<std::vector<ExprValue>> rows;
+    rows.reserve(relation ? 1 : snapshot.relations.size());
+    for (const auto& row : snapshot.relations)
+        if (!relation || row.oid == *relation) rows.push_back(classCells(row));
     return rows;
 }
 inline std::vector<std::vector<ExprValue>> attributeRows(const CatalogManager::MetadataSnapshot& snapshot,

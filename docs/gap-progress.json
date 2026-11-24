@@ -2,6 +2,18 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-24 apply leading OID constraints before owned catalog joins",
+      "gap_ids": ["CAT-03", "QRY-03", "CLIENT-01"],
+      "status": "partial",
+      "evidence": ["src/catalog/CatalogJoinFilters.h", "src/main.cpp", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/catalog_oid_join_filter_protocol_e2e_test.py"],
+      "verification": [
+        "Propagate an exact literal OID across safe bound equality conditions on pg_class, pg_index and pg_constraint without rewriting the client SQL.",
+        "The shared PostgreSQL 18.6 query suite covers explicit and primary indexes, unmatched left joins, empty results, disjunctions and parameters.",
+        "The existing runtime still evaluates predicates and preserves errors for unsafe prefixes. Full psql describe and general join optimization remain open."
+      ]
+    },
+    {
       "issue": "2026-11-24 persist primary key constraints and expose their supporting indexes",
       "gap_ids": ["CAT-02", "CAT-03", "CAT-04", "CAT-07", "CLIENT-01"],
       "status": "partial",

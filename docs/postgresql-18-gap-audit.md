@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-24 · 目录连接提前按编号筛选
+
+在由 `pg_class`、`pg_index` 和 `pg_constraint` 组成的查询中，执行器可以把开头的编号等值条件应用到目录读取。左连接只从保留行的一侧向另一侧传递编号条件。原版 `psql` 发出的索引列表 SQL 可以使用这条路径。`CAT-03`、`QRY-03` 和 `CLIENT-01` 保持部分实现。 [功能验证](test-report.md#catalog-join-filter-20261124) · [性能对照](performance-report-2026-10-30.md#catalog-join-filter-cost-20261124)
+
 ## 2026-11-24 · 主键约束关联实际索引
 
 普通非临时表的主键约束有独立编号、定义和支持索引。引用同一组主键列的外键可查询相同的索引编号。其他唯一键、分区约束和完整的删除依赖仍待实现。`CAT-02`、`CAT-03`、`CAT-04`、`CAT-07` 和 `CLIENT-01` 保持部分实现。 [功能验证](test-report.md#primary-constraint-20261124) · [性能对照](performance-report-2026-10-30.md#primary-constraint-cost-20261124)

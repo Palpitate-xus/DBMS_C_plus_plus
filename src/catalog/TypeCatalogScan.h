@@ -10,6 +10,38 @@
 
 namespace dbms {
 
+inline std::optional<Oid> catalogOidLiteralValue(const Expr* input, bool allowQuoted) {
+    if (!input || input->preparedSubquery) return std::nullopt;
+    const auto* cast = dynamic_cast<const CastExpr*>(input);
+    if (cast) {
+        CatalogManager::QualifiedName target;
+        if (!cast->typeMods.empty() || !CatalogManager::parseQualifiedName(cast->typeName, target, true) ||
+            target.schema != "pg_catalog" || target.name != "oid")
+            return std::nullopt;
+        input = cast->operand.get();
+    }
+    const auto* literal = dynamic_cast<const LiteralExpr*>(input);
+    if (!literal || literal->preparedSubquery || literal->arraySubquery) return std::nullopt;
+    if (!literal->typeName.empty() && (!literal->analyzedPrimitiveConstant ||
+        (literal->typeName != "oid" && literal->typeName != "smallint" &&
+         literal->typeName != "integer" && literal->typeName != "bigint")))
+        return std::nullopt;
+
+    // Never evaluate a literal or cast during source selection.
+    std::string_view digits = literal->value;
+    if ((cast || literal->analyzedPrimitiveConstant || allowQuoted) && digits.size() >= 2 &&
+        digits.front() == '\'' && digits.back() == '\'') {
+        digits.remove_prefix(1);
+        digits.remove_suffix(1);
+    }
+    if (digits.empty() || digits.size() > 10) return std::nullopt;
+    Oid oid;
+    const auto end = digits.data() + digits.size();
+    const auto parsed = std::from_chars(digits.data(), end, oid);
+    if (parsed.ec == std::errc{} && parsed.ptr == end) return oid;
+    return std::nullopt;
+}
+
 // Admit only a direct equality on this range's OID column and a decimal
 // constant that is lossless as an OID. The original filter still runs.
 inline std::optional<Oid> catalogOidLiteralFilter(const PreparedQuery::SourceRange& range,
@@ -42,39 +74,8 @@ inline std::optional<Oid> catalogOidLiteralFilter(const PreparedQuery::SourceRan
                column->binding->sourceOrdinal == range.ordinal &&
                column->binding->columnOrdinal == ordinal && column->binding->typeOid == 26;
     };
-    const Expr* input = nullptr;
-    if (oidColumn(equality->left.get())) input = equality->right.get();
-    else if (oidColumn(equality->right.get())) input = equality->left.get();
-    if (!input || input->preparedSubquery) return std::nullopt;
-
-    const auto* cast = dynamic_cast<const CastExpr*>(input);
-    if (cast) {
-        CatalogManager::QualifiedName target;
-        if (!cast->typeMods.empty() || !CatalogManager::parseQualifiedName(cast->typeName, target, true) ||
-            target.schema != "pg_catalog" || target.name != "oid")
-            return std::nullopt;
-        input = cast->operand.get();
-    }
-    const auto* literal = dynamic_cast<const LiteralExpr*>(input);
-    if (!literal || literal->preparedSubquery) return std::nullopt;
-    if (!literal->typeName.empty() && (!literal->analyzedPrimitiveConstant ||
-        (literal->typeName != "oid" && literal->typeName != "smallint" &&
-         literal->typeName != "integer" && literal->typeName != "bigint")))
-        return std::nullopt;
-
-    // Never evaluate a literal or cast during source selection. Check its
-    // decimal representation; the ordinary predicate owns all conversions.
-    std::string_view digits = literal->value;
-    if ((cast || literal->analyzedPrimitiveConstant || firstConjunct) && digits.size() >= 2 &&
-        digits.front() == '\'' && digits.back() == '\'') {
-        digits.remove_prefix(1);
-        digits.remove_suffix(1);
-    }
-    if (digits.empty() || digits.size() > 10) return std::nullopt;
-    Oid oid;
-    const auto end = digits.data() + digits.size();
-    const auto parsed = std::from_chars(digits.data(), end, oid);
-    if (parsed.ec == std::errc{} && parsed.ptr == end) return oid;
+    if (oidColumn(equality->left.get())) return catalogOidLiteralValue(equality->right.get(), firstConjunct);
+    if (oidColumn(equality->right.get())) return catalogOidLiteralValue(equality->left.get(), firstConjunct);
     return std::nullopt;
 }
 

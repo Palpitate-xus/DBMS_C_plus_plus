@@ -5,6 +5,7 @@
 #include "commands/StoredZonedClockPredicate.h"
 #include "catalog/type_catalog.h"
 #include "catalog/TypeCatalogScan.h"
+#include "catalog/CatalogJoinFilters.h"
 #include "catalog/SystemCatalogRows.h"
 #include "catalog/PgInheritanceCatalog.h"
 #include "catalog/PgAccessMethodCatalog.h"
@@ -20105,8 +20106,8 @@ static bool executePgStatActivityQuery(const string& rawSql,
 // The prepared binder exposes this seven-column catalog subset, not a
 // physical heap. Feed the same real catalog rows to typed source consumers;
 // keep the physical descriptor guard for actual heap relations.
-static dbms::PreparedQueryRows preparedPgClassRows(const Session& session) {
-    return dbms::system_catalog::classRows(g_engine.catalogService().metadataSnapshot(session.currentDB, false));
+static dbms::PreparedQueryRows preparedPgClassRows(const Session& session, optional<dbms::Oid> relation) {
+    return dbms::system_catalog::classRows(g_engine.catalogService().metadataSnapshot(session.currentDB, false), relation);
 }
 
 // pg_settings is exposed as a deliberate typed subset.  PostgreSQL 18 has
@@ -21512,8 +21513,15 @@ class PreparedWithDmlRuntime {
 
     shared_ptr<DmlSourceNode> sourceNode(const dbms::Stmt* owner,const dbms::FromItem* item,
                                         const dbms::RowContext& outer,const Frames& frames,
-                                        dbms::QueryPlanner::PreparedExecutionProvider provider={}) {
+                                        dbms::QueryPlanner::PreparedExecutionProvider provider={},
+                                        const dbms::CatalogJoinFilters* joinFilters=nullptr) {
         if(!item)throw dbms::DbError("XX000","mutation source has no retained FROM tree");
+        dbms::CatalogJoinFilters localFilters;
+        if (const auto* select = dynamic_cast<const dbms::SelectStmt*>(owner);
+            !joinFilters && select && select->fromClause.get() == item && item->type == dbms::FromItem::Type::Join) {
+            localFilters = dbms::CatalogJoinFilterPlanner(*query_, *select).filters();
+            joinFilters = &localFilters;
+        }
         auto node=make_shared<DmlSourceNode>();
         auto execution=provider?provider():make_shared<dbms::PreparedQueryExecution>(query_,&g_engine,session_.currentDB);
         if(!execution)throw dbms::DbError("XX000","mutation source lost its execution owner");
@@ -21531,6 +21539,13 @@ class PreparedWithDmlRuntime {
         };
         if(item->type!=dbms::FromItem::Type::Join) {
             const auto& range=sourceRange(owner,item);
+            const auto catalogFilter = [&](int16_t attribute) -> optional<dbms::Oid> {
+                if (joinFilters) {
+                    const auto found = joinFilters->find({range.ordinal, attribute});
+                    if (found != joinFilters->end()) return found->second;
+                }
+                return dbms::catalogOidLiteralFilter(range, true, attribute);
+            };
             node->occurrences.push_back(range.ordinal);
             for(size_t i=0;i<range.columns.size();++i)node->visible.push_back({range.columns[i].name,{range.ordinal,i}});
             shared_ptr<dbms::PreparedQueryCursor> cursor;
@@ -21559,7 +21574,7 @@ class PreparedWithDmlRuntime {
                 if(!select)throw dbms::DbError("0A000","view source requires a genuine SELECT/VALUES plan");
                 cursor=dbms::QueryPlanner::makePreparedCursor(viewRuntime->selectPlan(select,dbms::RowContext{},{}),range.columns);
             } else if(range.relationSchema=="pg_catalog" && range.relationName=="pg_class") {
-                virtualRows=make_shared<dbms::PreparedQueryRows>(preparedPgClassRows(session_));
+                virtualRows=make_shared<dbms::PreparedQueryRows>(preparedPgClassRows(session_, catalogFilter(1)));
             } else if(range.relationSchema=="pg_catalog" && range.relationName=="pg_attribute") {
                 virtualRows=make_shared<dbms::PreparedQueryRows>(dbms::system_catalog::attributeRows(
                     g_engine.catalogService().metadataSnapshot(session_.currentDB, false),
@@ -21587,14 +21602,15 @@ class PreparedWithDmlRuntime {
                 collationRows = true;
             } else if (range.relationSchema == "pg_catalog" && range.relationName == dbms::foreign_key_catalog::name) {
                 virtualRows = make_shared<dbms::PreparedQueryRows>(dbms::foreign_key_catalog::rows(g_engine, session_.currentDB,
-                    dbms::catalogOidLiteralFilter(range, true, 9), dbms::catalogOidLiteralFilter(range, true, 13)));
+                    catalogFilter(dbms::foreign_key_catalog::ownerAttribute),
+                    catalogFilter(dbms::foreign_key_catalog::referencedAttribute),
+                    catalogFilter(dbms::foreign_key_catalog::oidAttribute)));
             } else if (range.relationSchema == "pg_catalog" && range.relationName == dbms::roles_catalog::name) {
                 virtualRows = make_shared<dbms::PreparedQueryRows>(dbms::roles_catalog::rows(g_engine, range.readsRoleExpiry,
                     dbms::catalogOidLiteralFilter(range, true, dbms::roles_catalog::oidAttributeNumber)));
             } else if (range.relationSchema == "pg_catalog" && range.relationName == dbms::index_catalog::name) {
                 virtualRows = make_shared<dbms::PreparedQueryRows>(g_engine.catalogService().indexRows(session_.currentDB,
-                    dbms::catalogOidLiteralFilter(range, true, dbms::index_catalog::ownerAttribute),
-                    dbms::catalogOidLiteralFilter(range, true, dbms::index_catalog::indexAttribute)));
+                    catalogFilter(dbms::index_catalog::ownerAttribute), catalogFilter(dbms::index_catalog::indexAttribute)));
             } else if(range.relationSchema=="pg_catalog" && range.relationName=="pg_stats") {
                 statisticsRows=make_shared<optional<dbms::PreparedQueryRows>>();
             } else if(range.relationSchema=="pg_catalog" && range.relationName=="pg_namespace") {
@@ -21723,8 +21739,8 @@ class PreparedWithDmlRuntime {
             };
             return node;
         }
-        auto left=sourceNode(owner,item->left.get(),outer,frames,provider);
-        auto right=sourceNode(owner,item->right.get(),outer,frames,provider);
+        auto left=sourceNode(owner,item->left.get(),outer,frames,provider,joinFilters);
+        auto right=sourceNode(owner,item->right.get(),outer,frames,provider,joinFilters);
         node->closeReader=[left,right] {
             std::exception_ptr failure;
             try{left->closeSource();}catch(...){failure=std::current_exception();}
