@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>在 psql 里查看索引列更快 · 2026-11-24</summary>
+
+读取索引列的查询耗时中位数降低约 6%–11%。有同名自定义函数时，明确指定 `pg_catalog` 也能得到正确的结果类型。
+
+[测试报告](docs/test-report.md#bound-catalog-results-20261124) · [性能报告](docs/performance-report-2026-10-30.md#bound-catalog-results-cost-20261124)
+
+</details>
+
+<details>
 <summary>表多时，查索引的列更快 · 2026-11-24</summary>
 
 在额外建了 256 张表的测试库里，查看一个索引的列名和类型，耗时中位数降低约 25%–31%。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>查看索引按什么条件收录记录 · 2026-11-24</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-24 · 查看索引按什么条件收录记录
 
 在 `psql` 里用 `\d 索引名` 可以查看部分索引的筛选条件。例如，商品索引只收录库存大于 0 的商品。
 
 [查询示例](docs/MANUAL.md#查看部分索引的条件) · [测试报告](docs/test-report.md#index-predicate-20261124) · [性能报告](docs/performance-report-2026-10-30.md#index-predicate-cost-20261124)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-24 · 查一张表有哪些索引更快
 

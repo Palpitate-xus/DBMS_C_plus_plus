@@ -123,11 +123,14 @@ def definition_lookup(wire, owner, invoice, late):
     assert_definition(wire, invoice, base + DEFERRED_CASCADE)
     wire.command("RESET search_path", "RESET")
 
-    wire.command("CREATE FUNCTION fk_child.pg_get_constraintdef(oid) RETURNS text "
-                 "LANGUAGE SQL AS $$ SELECT 'local'::text $$", "CREATE FUNCTION")
+    wire.command("CREATE FUNCTION fk_child.pg_get_constraintdef(oid) RETURNS integer[] "
+                 "LANGUAGE plpgsql AS $$ BEGIN RETURN ARRAY[37]; END $$", "CREATE FUNCTION")
     wire.command("SET search_path=fk_child,pg_catalog,public", "SET")
-    wire.query(f"SELECT pg_get_constraintdef('{invoice}'::oid) AS v", rows=[("local",)], fields=[("v", 25)])
-    assert_definition(wire, invoice, base + DEFERRED_CASCADE)
+    for mode in (wire, Wire(wire.client, wire.sock, extended=True)):
+        mode.query(f"SELECT pg_get_constraintdef('{invoice}'::oid) AS local_definition, "
+                   f"pg_catalog.pg_get_constraintdef('{invoice}'::oid) AS builtin_definition",
+                   rows=[("{37}", base + DEFERRED_CASCADE)],
+                   fields=[("local_definition", 1007), ("builtin_definition", 25)])
     wire.command("RESET search_path", "RESET")
 
     wire.command('CREATE TABLE fk_parent."Target.Table"("Key ID" integer PRIMARY KEY)', "CREATE TABLE")

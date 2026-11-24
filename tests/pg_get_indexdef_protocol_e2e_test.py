@@ -31,6 +31,33 @@ def definition(wire, oid, expected, arguments="", ready=b"I"):
                rows=[(expected,)], fields=[("v", 25)], ready=ready)
 
 
+def check_shadowed_catalog_functions(wire, extended, index):
+    wire.command("CREATE FUNCTION idx_shadow.pg_get_indexdef(k oid, n integer, pretty boolean) "
+                 "RETURNS integer[] LANGUAGE plpgsql AS $$BEGIN RETURN ARRAY[47,n]; END$$",
+                 "CREATE FUNCTION")
+    wire.command("CREATE FUNCTION idx_shadow.format_type(k oid, m integer) RETURNS integer[] "
+                 "LANGUAGE plpgsql AS $$BEGIN RETURN ARRAY[53,m]; END$$", "CREATE FUNCTION")
+    wire.command("SET search_path TO idx_shadow, pg_catalog, idx_catalog, public", "SET")
+
+    for mode in (wire, extended):
+        mode.query(
+            "SELECT a.attnum, pg_get_indexdef(a.attrelid,a.attnum::integer,true) AS shadow, "
+            "pg_catalog.pg_get_indexdef(a.attrelid,a.attnum,true) AS builtin "
+            f"FROM pg_catalog.pg_attribute a WHERE a.attrelid='{index}' AND a.attnum>0 ORDER BY a.attnum",
+            rows=[("1", "{47,1}", "k"), ("2", "{47,2}", '"Other Field"'),
+                  ("3", "{47,3}", "payload")],
+            fields=[("attnum", 21), ("shadow", 1007), ("builtin", 25)], tag="SELECT 3")
+        mode.query("SELECT format_type(1043::oid,16) AS shadow, "
+                   "pg_catalog.format_type(1043::oid,16) AS builtin",
+                   rows=[("{53,16}", "character varying(12)")],
+                   fields=[("shadow", 1007), ("builtin", 25)])
+        mode.query(f"SELECT pg_catalog.pg_get_indexdef('{index}'::oid,NULL::integer,true) AS definition, "
+                   "pg_catalog.format_type(23::oid,NULL::integer) AS type_name",
+                   rows=[(None, "integer")], fields=[("definition", 25), ("type_name", 25)])
+    wire.run_prepared(b"index_def", (index.encode(), b"2", b"t"), '"Other Field"')
+    wire.command("SET search_path TO idx_shadow, idx_catalog, public", "SET")
+
+
 def main():
     review = Review("INDEX_DEFINITION")
     wire = Wire(review.client, review.sock)
@@ -76,6 +103,7 @@ def main():
         assert messages[-2:] == [(b"C", b"SELECT 1\0"), (b"Z", b"I")], messages
         wire.command("SET search_path TO idx_shadow, idx_catalog, public", "SET")
         definition(extended, composite, full, ", 0, true")
+        check_shadowed_catalog_functions(wire, extended, composite)
 
         wire.command("BEGIN", "BEGIN", b"T")
         wire.command(f'ALTER TABLE {TABLE} RENAME COLUMN "Other Field" TO "Current Field"', "ALTER TABLE", b"T")

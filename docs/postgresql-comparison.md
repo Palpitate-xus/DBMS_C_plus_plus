@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-24 · 读取索引定义时如何识别函数
+
+PostgreSQL 在分析 SQL 时为函数调用选择具体函数编号和结果类型。`pg_get_indexdef` 执行时通过系统目录缓存按编号取得索引记录。SQLite 可以用 `PRAGMA index_xinfo` 查询索引列，DuckDB 通过 `duckdb_indexes()` 的 `sql` 字段给出索引定义。 [PostgreSQL 18.6 函数绑定](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/parser/parse_func.c) · [PostgreSQL 18.6 索引定义](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/utils/adt/ruleutils.c) · [SQLite 索引列](https://www.sqlite.org/pragma.html#pragma_index_xinfo) · [DuckDB 索引目录](https://duckdb.org/docs/current/sql/meta/duckdb_table_functions#duckdb_indexes)
+
+本项目在行执行阶段沿用已绑定的返回类型。定向跟踪显示，五列索引详情查询的目录文件状态检查从约 396–408 次减为 276 次，表定义和索引名称文件各打开 6 次。 [性能对照](performance-report-2026-10-30.md#bound-catalog-results-cost-20261124)
+
 ## 2026-11-24 · 检查表和索引的列信息
 
 PostgreSQL 在 `pg_attribute` 上按表编号和列序号建索引，并为按列序号查找保留缓存。SQLite 的 `PRAGMA table_xinfo` 返回指定表的列。DuckDB 通过 `duckdb_columns()` 返回各表的列信息。 [PostgreSQL 18.6 源码](https://github.com/postgres/postgres/blob/REL_18_6/src/include/catalog/pg_attribute.h) · [SQLite 列说明](https://www.sqlite.org/pragma.html#pragma_table_xinfo) · [DuckDB 列信息](https://duckdb.org/docs/current/sql/meta/duckdb_table_functions#duckdb_columns)

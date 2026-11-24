@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-24 · 沿用已绑定的系统函数结果类型
+
+已绑定的四个目录函数复用确定的结果类型，逐行调用仍读取实际目录对象。用相同参数声明、返回数组的用户函数验证限定和未限定调用能同时得到各自的结果。完整的系统目录、标量调用和 `psql` 兼容性继续跟踪，`CAT-03`、`QRY-01`、`CLIENT-01` 维持部分实现。 [功能验证](test-report.md#bound-catalog-results-20261124) · [性能对照](performance-report-2026-10-30.md#bound-catalog-results-cost-20261124)
+
 ## 2026-11-24 · 列目录检查少做重复工作
 
 读取列目录及打开数据目录时，先按对象编号分组系统列。每批只查一次系统列使用的实际类型定义。仍会拒绝缺失、重复、序号冲突及关系类型不允许的系统列。`CAT-02` 和 `CAT-03` 维持部分实现。 [功能验证](test-report.md#system-attribute-validation-20261124) · [性能对照](performance-report-2026-10-30.md#system-attribute-validation-cost-20261124)

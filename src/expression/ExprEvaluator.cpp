@@ -7764,16 +7764,20 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
         // scalar evaluation/cardinality or the legacy text-table parser.
         return scalarSubqueryExecutor_(e, ctx);
     }
-    // The bound text routines have a scalar result and the actual callback
-    // identity is known. Reuse the bound declaration during row evaluation;
-    // a stored routine or a native replacement still owns its own type.
+    // Fixed-result builtins can use the bound declaration during row
+    // evaluation. Catalog callbacks still read the requested objects when
+    // invoked. Stored routines and native replacements own their own types.
     bool useBoundResult = false;
     if (!e->resolvedResultType.empty() && e->resolvedResultType != "unknown" &&
         !common_type_detail::array(e->resolvedResultType) && callback != functionRegistry().end()) {
         const auto* substring = callback->second.target<decltype(&evaluateTextSubstring)>();
+        const bool catalogText = e->schema.empty() &&
+            (name == "format_type" || name == "pg_get_expr" ||
+             name == "pg_get_constraintdef" || name == "pg_get_indexdef");
         useBoundResult = (substring && *substring == &evaluateTextSubstring) ||
             ((name == "upper" || name == "lower" || name == "length" || name == "replace" ||
-              name == "starts_with" || name == "strpos") && ownsScalarSignatures(name, &callback->second));
+              name == "starts_with" || name == "strpos" || catalogText) &&
+             ownsScalarSignatures(name, &callback->second));
     }
     // Polymorphic and unbound calls still infer the type before any argument
     // runs. A brace-looking text value cannot supply an array declaration.

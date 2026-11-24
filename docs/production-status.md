@@ -6,6 +6,10 @@
 
 截至 2026-11-24，273 项功能要求中有 22 项完成、169 项部分实现、67 项待验证、15 项暂缓。各项结果和剩余范围见功能总账。以下更新报告给出各轮测试的实际范围。[功能总账](gap-progress.json) · [支持的功能和限制](compatibility-contract.md)
 
+## 2026-11-24 · 查看索引列少查一次函数声明
+
+查询多行时，内置目录函数沿用绑定时确定的结果类型。显式调用 `pg_catalog` 的函数时，同名的自定义函数不再改变其结果类型。测试中，原版 `psql` 用于读取索引列的查询中位数降低约 6%–11%。 [测试报告](test-report.md#bound-catalog-results-20261124) · [性能报告](performance-report-2026-10-30.md#bound-catalog-results-cost-20261124)
+
 ## 2026-11-24 · 表多时，查索引的列更快
 
 列目录改为按所属对象分组核对，保留原有的损坏检查。额外建了 256 张表时，读取一个索引的列信息耗时中位数降低约 25%–31%，`psql` 使用的索引列查询降低约 17%–20%。 [测试报告](test-report.md#system-attribute-validation-20261124) · [性能报告](performance-report-2026-10-30.md#system-attribute-validation-cost-20261124)

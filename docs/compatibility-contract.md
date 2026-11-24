@@ -2,6 +2,10 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-24 · 系统目录函数的返回类型
+
+查询绑定到内置 `format_type`、`pg_get_indexdef`、`pg_get_constraintdef` 或 `pg_get_expr` 时，执行沿用该调用确定的结果类型。明确使用 `pg_catalog` 的调用保留内置函数的文本结果。未指定模式的调用按搜索路径及参数类型选择函数。 [测试报告](test-report.md#bound-catalog-results-20261124)
+
 ## 2026-11-24 · 查看显式索引的列
 
 普通表和临时表上用列名创建的 B 树、哈希索引可在 `pg_attribute` 读取列信息。B 树按键列和 `INCLUDE` 列的顺序编号。索引键保留排序规则，附带列的排序规则编号为 0。哈希索引按 PostgreSQL 的目录约定显示 `integer` 键，原表列的类型不变。表列改名时保留原索引列名，`pg_get_indexdef` 显示当前表列名。表达式索引、分区索引和其他索引类型的完整列详情仍待实现。 [使用说明](MANUAL.md#用-psql-查看索引的列) · [测试报告](test-report.md#index-attributes-20261124)
