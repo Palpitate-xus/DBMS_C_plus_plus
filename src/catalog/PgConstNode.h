@@ -73,6 +73,7 @@ inline std::string_view varlenaValue(std::string_view bytes) {
 // Catalog node text is a native Datum, not an input or executable SQL form.
 // Validate every field and the full datum width before interpreting its bytes.
 class Reader {
+protected:
     std::string_view remaining_;
 
     [[noreturn]] static void invalid() {
@@ -103,6 +104,13 @@ public:
     explicit Reader(std::string_view expression) : remaining_(expression) {}
 
     Constant parse() {
+        auto constant = readConstant();
+        if (!remaining_.empty()) invalid();
+        return constant;
+    }
+
+protected:
+    Constant readConstant() {
         constexpr std::string_view prefix = "{CONST :consttype ";
         if (remaining_.substr(0, prefix.size()) != prefix)
             throw DbError("0A000", "catalog expression node is not supported");
@@ -140,7 +148,6 @@ public:
             expect("]");
         }
         expect("}");
-        if (!remaining_.empty()) invalid();
         return {type, typmod, collation, length, byValue, std::move(bytes)};
     }
 };

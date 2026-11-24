@@ -72,7 +72,9 @@ public:
     std::optional<std::string> indexDefinition(const std::string& database, Oid oid,
                                               int32_t column, bool pretty, const Session* session) const;
     std::vector<std::vector<ExprValue>> indexRows(const std::string& database,
-        std::optional<Oid> owner, std::optional<Oid> index) const;
+        std::optional<Oid> owner, std::optional<Oid> index, bool includePredicate = false) const;
+    std::optional<std::string> indexPredicateExpression(const std::string& database, Oid relation,
+        std::string_view node, bool pretty) const;
     // Specialized read-only projection for pg_attrdef/pg_depend scans.
     CatalogManager::DefaultCatalogSnapshot defaultCatalogSnapshot(
         const std::string& dbname, CatalogManager::DefaultCatalogKind kind, bool includeExpressions = false) const;
@@ -105,6 +107,7 @@ private:
     ReadCatalog readCatalog(const std::string& dbname) const;
     // The caller supplies the result of its held database read fence.
     ReadCatalog readCatalog(const std::string& dbname, bool mayReadCurrentFiles) const;
+    static std::vector<PgAttributeRow> relationAttributes(const ReadCatalog& catalog, Oid relation);
     friend std::vector<ExprValue> readPartitionAncestors(const StorageEngine&,
         const std::string&, const Session*, const ExprValue&);
     std::shared_ptr<CatalogManager> acquireImpl(const std::string& dbname,

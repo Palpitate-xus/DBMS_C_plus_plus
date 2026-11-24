@@ -1175,6 +1175,7 @@ struct CreateIndexStmt : public Stmt {
     bool concurrently = false;
     bool nullsNotDistinct = false;
     ExprPtr whereClause;       // partial index
+    std::string predicateSql;  // lexer tokens preserve grouping and quoted names
     std::vector<std::string> includeCols;
     std::map<std::string, std::string> options;
     std::string tablespace;

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "catalog/PgAccessMethodCatalog.h"
 #include "catalog/PgForeignKeyCatalog.h"
 #include "catalog/PgIndexCatalog.h"
 #include "catalog/TypeCatalogScan.h"
@@ -66,7 +67,7 @@ private:
         const auto* source = range(item);
         if (!source || source->viewQuery || source->cteStatement || source->relationSchema != "pg_catalog" ||
             (source->relationName != "pg_class" && source->relationName != index_catalog::name &&
-             source->relationName != foreign_key_catalog::name))
+             source->relationName != foreign_key_catalog::name && source->relationName != access_method_catalog::name))
             return false;
         sources_.emplace(source->ordinal, Source{source, optional});
         return true;
@@ -86,7 +87,7 @@ private:
 
     bool scanKey(CatalogJoinColumn field) const {
         const auto& relation = sources_.at(field.first).range->relationName;
-        if (relation == "pg_class") return field.second == 1;
+        if (relation == "pg_class" || relation == access_method_catalog::name) return field.second == 1;
         if (relation == index_catalog::name)
             return field.second == index_catalog::indexAttribute || field.second == index_catalog::ownerAttribute;
         return field.second == foreign_key_catalog::oidAttribute || field.second == foreign_key_catalog::ownerAttribute ||

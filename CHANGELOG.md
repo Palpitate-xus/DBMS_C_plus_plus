@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>可以查看部分索引的条件 · 2026-11-24</summary>
+
+例如，可以查到一个索引只收录数量大于零的记录。建索引时写下的条件括号也会保留下来。
+
+[查询示例](docs/MANUAL.md#查看部分索引的条件) · [测试报告](docs/test-report.md#index-predicate-20261124) · [性能报告](docs/performance-report-2026-10-30.md#index-predicate-cost-20261124)
+
+</details>
+
+<details>
 <summary>按表查询索引更快 · 2026-11-24</summary>
 
 查询订单表的索引时，数据库会先筛出与订单表有关的记录，减少其他表带来的开销。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>可以查看数据库自动创建的主键索引 · 2026-11-24</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-24 · 可以查看数据库自动创建的主键索引
 
 例如，在 `psql` 中可以列出订单表的主键索引，也可以查询这个索引用了哪几列。
 
 [查询示例](docs/MANUAL.md#查询主键索引) · [测试报告](docs/test-report.md#primary-index-20261124) · [性能报告](docs/performance-report-2026-10-30.md#primary-index-cost-20261124)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-24 · 列出一张表上手动创建的索引
 

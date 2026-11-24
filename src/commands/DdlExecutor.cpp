@@ -8897,7 +8897,10 @@ bool DdlExecutor::executeCreateIndex(const CreateIndexStmt* stmt, Session& s) {
     rejectVirtualKey(generatedIndexTarget,stmt->includeCols,"indexes");
     if(generatedVirtualReference(stmt->whereClause.get(),generatedIndexTarget))
         throw DbError("0A000","indexes on virtual generated columns are not supported");
-    std::string whereCondition = stmt->whereClause ? stmt->whereClause->toString() : "";
+    const auto whereCondition = stmt->predicateSql.empty() && stmt->whereClause
+        ? stmt->whereClause->toString() : stmt->predicateSql;
+    if (whereCondition.find_first_of("\r\n") != std::string::npos)
+        throw DbError("0A000", "line breaks inside partial index predicate literals are not supported");
     std::vector<std::string> includeCols = stmt->includeCols;
 
     std::string indexExpression;

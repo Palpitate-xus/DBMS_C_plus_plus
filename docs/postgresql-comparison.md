@@ -2,6 +2,13 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="index-predicate-comparison-20261124"></a>
+## 2026-11-24 · 部分索引条件如何保存和显示
+
+PostgreSQL 在 `pg_index.indpred` 中保存条件的表达式树，用 `pg_get_expr` 生成可读 SQL。SQLite 的部分索引也只收录条件为真的行，建索引语句保存在 `sqlite_schema`。DuckDB 的分区范围摘要可以依据筛选条件跳过部分行组。 [PostgreSQL 的索引目录](https://www.postgresql.org/docs/18/catalog-pg-index.html) · [SQLite 部分索引](https://www.sqlite.org/partialindex.html) · [SQLite 结构目录](https://www.sqlite.org/schematab.html) · [DuckDB 的范围摘要](https://duckdb.org/docs/current/guides/performance/indexing#zonemaps)
+
+本项目在原有索引文件中保留条件的 SQL。从目录读取时，用实际列号、列类型和 PostgreSQL 内置运算符编号生成所支持的表达式树。条件的转换范围及查询规划限制见验证记录。 [功能测试](test-report.md#index-predicate-20261124) · [性能对照](performance-report-2026-10-30.md#index-predicate-cost-20261124)
+
 <a id="catalog-join-filter-comparison-20261124"></a>
 ## 2026-11-24 · 目录连接的筛选顺序
 
@@ -35,7 +42,7 @@ PostgreSQL 的 `pg_index` 记录索引与表的对象编号，分开记录键列
 
 PostgreSQL 根据索引编号读取索引目录，再用当前的表名、列名、访问方式和附带列生成建索引语句。SQLite 的 `sqlite_schema` 保存建索引 SQL，`PRAGMA index_xinfo` 提供索引列。DuckDB 的 `duckdb_indexes()` 可以列出显式索引及其定义。 [PostgreSQL 源码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/utils/adt/ruleutils.c) · [SQLite 结构目录](https://www.sqlite.org/schematab.html) · [SQLite 索引列](https://www.sqlite.org/pragma.html#pragma_index_xinfo) · [DuckDB 索引信息](https://duckdb.org/docs/current/sql/meta/duckdb_table_functions#duckdb_indexes)
 
-本项目从实际索引编号和依赖关系找到所属表，只读取该表保存的索引定义。可以还原普通表上显式创建的普通 B 树、唯一 B 树及哈希索引。索引表达式和部分索引谓词仍待补齐。 [使用说明](MANUAL.md#查询索引的定义) · [性能报告](performance-report-2026-10-30.md#index-definition-cost-20261124)
+本项目从实际索引编号和依赖关系找到所属表，只读取该表保存的索引定义。可以还原普通表上显式创建的普通 B 树、唯一 B 树及哈希索引。表达式索引仍待补齐。 [使用说明](MANUAL.md#查询索引的定义) · [性能报告](performance-report-2026-10-30.md#index-definition-cost-20261124)
 
 <a id="array-subquery-comparison-20261124"></a>
 ## 2026-11-24 · 把查询结果收进数组

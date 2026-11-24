@@ -35,6 +35,10 @@ sudo apt install cmake g++ make zlib1g-dev libicu-dev
 
 上一版程序打开带有新主键索引目录记录的库后，测试表的数据仍可读，但扫描 `pg_index` 返回 `XX001`。需要切回上一版时，使用升级前的备份。
 
+## 部分索引的条件
+
+新版沿用原有索引条件文件格式，读取的是索引实际保存的条件。早期版本建索引时可能丢失括号，已有文件无法还原丢失的分组。要恢复原先的分组，使用最初的 `CREATE INDEX ... WHERE ...` 语句删除并重建该索引。 [验证记录](test-report.md#index-predicate-20261124)
+
 ## 主键约束目录升级
 
 新版首次打开已有主键索引编号的库时，会在 `pg_constraint.cat` 为主键约束补写编号。现有外键记录、表编号和索引编号保留。完成后在各数据库的 `pg_catalog` 中写入 `.primary_key_catalog_version`。 [升级和恢复验证](test-report.md#primary-constraint-20261124)

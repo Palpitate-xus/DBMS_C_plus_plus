@@ -21590,8 +21590,8 @@ class PreparedWithDmlRuntime {
                 const bool dependencies = range.relationName == "pg_depend";
                 virtualRows=make_shared<dbms::PreparedQueryRows>(dbms::default_catalog::rows(
                     g_engine.catalogService().defaultCatalogSnapshot(session_.currentDB,
-                        dependencies ? Kind::Depend : Kind::Attrdef, range.readsDefaultExpression),
-                    dependencies, range.readsDefaultExpression));
+                        dependencies ? Kind::Depend : Kind::Attrdef, range.readsCatalogExpression),
+                    dependencies, range.readsCatalogExpression));
             } else if(range.relationSchema=="pg_catalog" && range.relationName=="pg_sequence") {
                 virtualRows=make_shared<dbms::PreparedQueryRows>(g_engine.getSequenceCatalogRows(session_.currentDB));
             } else if (range.relationSchema == "pg_catalog" && range.relationName == dbms::inheritance_catalog::name) {
@@ -21610,7 +21610,8 @@ class PreparedWithDmlRuntime {
                     dbms::catalogOidLiteralFilter(range, true, dbms::roles_catalog::oidAttributeNumber)));
             } else if (range.relationSchema == "pg_catalog" && range.relationName == dbms::index_catalog::name) {
                 virtualRows = make_shared<dbms::PreparedQueryRows>(g_engine.catalogService().indexRows(session_.currentDB,
-                    catalogFilter(dbms::index_catalog::ownerAttribute), catalogFilter(dbms::index_catalog::indexAttribute)));
+                    catalogFilter(dbms::index_catalog::ownerAttribute), catalogFilter(dbms::index_catalog::indexAttribute),
+                    range.readsCatalogExpression));
             } else if(range.relationSchema=="pg_catalog" && range.relationName=="pg_stats") {
                 statisticsRows=make_shared<optional<dbms::PreparedQueryRows>>();
             } else if(range.relationSchema=="pg_catalog" && range.relationName=="pg_namespace") {

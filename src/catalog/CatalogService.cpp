@@ -19,6 +19,7 @@
 #include "catalog/PgForeignKeyCatalog.h"
 #include "catalog/PgRolesCatalog.h"
 #include "catalog/PgIndexCatalog.h"
+#include "catalog/PgIndexPredicate.h"
 #include "catalog/DatumMetadataFactory.h"
 #include "catalog/RelationSearchPath.h"
 #include "expression/regclass_input.h"
@@ -834,9 +835,9 @@ std::optional<bool> CatalogService::relationIsVisible(
 
 namespace {
 struct RegisteredIndexLayout {
-    std::string physicalTable, method;
+    std::string physicalTable, method, predicate;
     std::vector<std::string> keys, includes;
-    bool unique = false, descending = false, partial = false, expression = false, partitioned = false;
+    bool unique = false, descending = false, expression = false, partitioned = false;
 };
 
 std::vector<std::string> primaryKeyColumns(const TableSchema& table) {
@@ -892,7 +893,7 @@ RegisteredIndexLayout readIndexLayout(const StorageEngine& engine, const std::st
         result.includes = definition->includeCols;
         result.unique = definition->isUnique;
         result.descending = definition->descending;
-        result.partial = !definition->whereCondition.empty();
+        result.predicate = definition->whereCondition;
     } else if (result.method == "composite") {
         const auto definitions = engine.getCompositeIndexes(database, physical);
         const auto definition = std::find_if(definitions.begin(), definitions.end(),
@@ -902,7 +903,7 @@ RegisteredIndexLayout readIndexLayout(const StorageEngine& engine, const std::st
         result.keys = definition->columns;
         result.includes = definition->includeCols;
         result.unique = definition->isUnique;
-        result.partial = !definition->whereCondition.empty();
+        result.predicate = definition->whereCondition;
     } else {
         if (result.method == "hash") {
             const auto columns = engine.getHashIndexedColumns(database, physical);
@@ -925,6 +926,23 @@ RegisteredIndexLayout readIndexLayout(const StorageEngine& engine, const std::st
     return result;
 }
 } // namespace
+
+std::vector<PgAttributeRow> CatalogService::relationAttributes(const ReadCatalog& catalog, Oid relation) {
+    if (catalog.manager) return catalog.manager->findUserAttributes(relation);
+    if (catalog.path.empty()) return {};
+    auto fields = CatalogManager::readMetadataSnapshot(catalog.path, false).attributes;
+    fields.erase(std::remove_if(fields.begin(), fields.end(), [&](const auto& attr) {
+        return attr.attrelid != relation || attr.attnum <= 0;
+    }), fields.end());
+    return fields;
+}
+
+std::optional<std::string> CatalogService::indexPredicateExpression(const std::string& database, Oid relation,
+    std::string_view node, bool pretty) const {
+    const auto fields = relation ? relationAttributes(readCatalog(database), relation) : std::vector<PgAttributeRow>{};
+    if (relation && fields.empty() && !relationIsVisible(database, relation, {})) return std::nullopt;
+    return index_predicate::Reader(node, fields, pretty).expression();
+}
 
 void index_catalog::synchronizePrimary(const StorageEngine& engine, const std::string& database,
     CatalogManager& catalog, const PgClassRow& owner, const std::string& physical, bool legacy) {
@@ -1049,7 +1067,6 @@ std::optional<std::string> CatalogService::indexDefinition(const std::string& da
         const size_t ordinal = static_cast<size_t>(column - 1);
         return SQLParser::quoteIdentifier(ordinal < keys.size() ? keys[ordinal] : includes[ordinal - keys.size()]);
     }
-    if (layout.partial) throw DbError("0A000", "partial index predicates cannot be reconstructed");
     std::string sql = layout.unique ? "CREATE UNIQUE INDEX " : "CREATE INDEX ";
     sql += SQLParser::quoteIdentifier(index->index.relname) + " ON ";
     if (!index->tableVisible) sql += SQLParser::quoteIdentifier(index->schema) + '.';
@@ -1068,11 +1085,16 @@ std::optional<std::string> CatalogService::indexDefinition(const std::string& da
         append(includes);
         sql += ')';
     }
+    if (!layout.predicate.empty()) {
+        const auto fields = relationAttributes(catalog, index->table.oid);
+        const auto node = index_predicate::compile(layout.predicate, fields);
+        if (!node.empty()) sql += " WHERE " + index_predicate::Reader(node, fields, pretty).expression();
+    }
     return sql;
 }
 
 std::vector<std::vector<ExprValue>> CatalogService::indexRows(const std::string& database,
-    std::optional<Oid> owner, std::optional<Oid> index) const {
+    std::optional<Oid> owner, std::optional<Oid> index, bool includePredicate) const {
     const auto ownership = engine_.catalogReadOwnership(database);
     const auto catalog = readCatalog(database, ownership.mayReadCurrentFiles);
     if (!catalog.manager && catalog.path.empty()) return {};
@@ -1082,6 +1104,7 @@ std::vector<std::vector<ExprValue>> CatalogService::indexRows(const std::string&
         throw DbError("55P03", "index catalog conflicts with active DDL");
     std::vector<std::vector<ExprValue>> rows;
     rows.reserve(entries.size());
+    std::map<Oid, std::vector<PgAttributeRow>> attributes;
     const auto flag = [](bool value) { return ExprValue("boolean", value ? "t" : "f"); };
     for (const auto& entry : entries) {
         checkForQueryInterrupt();
@@ -1091,13 +1114,21 @@ std::vector<std::vector<ExprValue>> CatalogService::indexRows(const std::string&
             const auto found = params.find(key);
             return found != params.end() && found->second == entry.index.relname;
         };
+        std::string predicate;
+        if (includePredicate && !layout.predicate.empty()) {
+            const auto [position, first] = attributes.try_emplace(entry.table.oid);
+            if (first) position->second = relationAttributes(catalog, entry.table.oid);
+            predicate = index_predicate::compile(layout.predicate, position->second);
+        }
+        const bool predicateIsNull = predicate.empty();
         // Explicit indexes are registered only after the build completes.
         // Their catalog identity is removed when the DDL drops the index.
         rows.push_back({ExprValue("oid", std::to_string(entry.index.oid)), ExprValue("oid", std::to_string(entry.table.oid)),
             ExprValue("smallint", std::to_string(layout.keys.size() + layout.includes.size())),
             ExprValue("smallint", std::to_string(layout.keys.size())), flag(layout.unique), flag(false),
             flag(entry.primary), flag(false), flag(true), flag(namesIndex("cluster_on")), flag(true), flag(false), flag(true),
-            flag(true), flag(entry.table.relreplident == 'i' && namesIndex("replica_identity_index"))});
+            flag(true), flag(entry.table.relreplident == 'i' && namesIndex("replica_identity_index")),
+            ExprValue("pg_node_tree", std::move(predicate), predicateIsNull)});
     }
     return rows;
 }

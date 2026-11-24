@@ -2764,7 +2764,7 @@ WHERE indrelid = 'public.orders'::regclass::oid
 ORDER BY indexrelid;
 ```
 
-也可以在 `psql` 中输入 `\di 模式名.*` 查看索引列表。部分索引的所有者一栏可能显示未知。请在 SQL 查询中列明所需字段。唯一约束自动创建的索引，以及 `indkey`、`indcollation`、`indclass`、`indoption`、`indexprs` 和 `indpred` 仍待支持。 [测试报告](test-report.md#pg-index-20261124)
+也可以在 `psql` 中输入 `\di 模式名.*` 查看索引列表。部分索引的所有者一栏可能显示未知。请在 SQL 查询中列明所需字段。唯一约束自动创建的索引，以及 `indkey`、`indcollation`、`indclass`、`indoption` 和 `indexprs` 仍待支持。 [测试报告](test-report.md#pg-index-20261124)
 
 ### 查询主键索引
 
@@ -2798,7 +2798,21 @@ WHERE conrelid = 'public.orders'::regclass::oid AND contype = 'p';
 SELECT pg_catalog.pg_get_indexdef('public.orders_customer_idx'::regclass::oid);
 ```
 
-也可以传入 `索引编号, 列序号, true`，只查看索引中的某一列。序号从 1 开始，附带列排在索引键之后。传入 `0, true` 查看整个定义，并在表名可直接使用时省略模式名。表达式索引和部分索引的完整定义仍待补齐。
+也可以传入 `索引编号, 列序号, true`，只查看索引中的某一列。序号从 1 开始，附带列排在索引键之后。传入 `0, true` 查看整个定义，并在表名可直接使用时省略模式名。表达式索引的定义仍待补齐。
+
+### 查看部分索引的条件
+
+部分索引只收录满足 `WHERE` 条件的记录。先查询 `orders_stock_idx` 的索引编号，再将第二条查询中的编号换成查到的值。
+
+```sql
+SELECT 'public.orders_stock_idx'::regclass::oid;
+
+SELECT pg_catalog.pg_get_expr(indpred, indrelid, true)
+FROM pg_catalog.pg_index
+WHERE indexrelid = '12345';
+```
+
+支持普通 B 树索引中的整数比较、布尔列、`AND`、`OR`、`NOT` 和空值判断。`pg_get_indexdef` 也可显示这些条件。完整索引的 `indpred` 为 SQL 空值。目录暂不支持转换文本比较、函数调用等条件，会返回 `0A000`。 [测试报告](test-report.md#index-predicate-20261124)
 
 ### 查询列的类型
 

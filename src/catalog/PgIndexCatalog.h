@@ -27,6 +27,11 @@ inline const QueryRowDescriptor& descriptor() {
             {"indexrelid", "indrelid", "indnatts", "indnkeyatts", "indisunique", "indnullsnotdistinct", "indisprimary",
              "indisexclusion", "indimmediate", "indisclustered", "indisvalid", "indcheckxmin", "indisready",
              "indislive", "indisreplident"});
+        // pg_node_tree is materialized by the system catalog bootstrap.
+        // Its declaration is not part of the bootstrap-independent types.
+        QueryOutputColumn predicate{"indpred", "pg_node_tree", false, 0, fields.back().type, -1, {}};
+        predicate.physicalAttributeNumber = static_cast<int16_t>(fields.size());
+        result.push_back(std::move(predicate));
         for (auto& field : result) field.physicalRelationOid = relationOid;
         return result;
     }();

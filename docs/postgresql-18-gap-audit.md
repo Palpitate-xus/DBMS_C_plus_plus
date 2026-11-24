@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-24 · 部分索引的条件可以从目录读回
+
+普通 B 树的索引条件可在 `pg_index.indpred` 和索引定义中读回，支持整数比较、布尔条件和空值判断。建索引时保留条件括号和带引号的列名。条件蕴含判断、任意表达式的目录转换和表达式索引的键继续跟踪。`CAT-03`、`IDX-10` 和 `CLIENT-01` 保持部分实现。 [功能验证](test-report.md#index-predicate-20261124) · [性能对照](performance-report-2026-10-30.md#index-predicate-cost-20261124)
+
 ## 2026-11-24 · 目录连接提前按编号筛选
 
 在由 `pg_class`、`pg_index` 和 `pg_constraint` 组成的查询中，执行器可以把开头的编号等值条件应用到目录读取。左连接只从保留行的一侧向另一侧传递编号条件。原版 `psql` 发出的索引列表 SQL 可以使用这条路径。`CAT-03`、`QRY-03` 和 `CLIENT-01` 保持部分实现。 [功能验证](test-report.md#catalog-join-filter-20261124) · [性能对照](performance-report-2026-10-30.md#catalog-join-filter-cost-20261124)

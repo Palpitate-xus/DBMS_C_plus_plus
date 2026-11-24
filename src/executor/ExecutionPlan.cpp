@@ -7766,8 +7766,9 @@ OpPtr QueryPlanner::buildPreparedQueryPlan(StorageEngine* engine,const std::stri
             const auto index = catalogOidLiteralFilter(*found, true, index_catalog::indexAttribute);
             auto rows = std::make_shared<std::optional<PreparedQueryRows>>();
             source = std::make_unique<PreparedSourceRowsOp>(found->columns,
-                [engine, database, rows, owner, index](size_t ordinal, std::vector<ExprValue>& row) {
-                    if (!*rows) *rows = engine->catalogService().indexRows(database, owner, index);
+                [engine, database, rows, owner, index, predicate = found->readsCatalogExpression]
+                (size_t ordinal, std::vector<ExprValue>& row) {
+                    if (!*rows) *rows = engine->catalogService().indexRows(database, owner, index, predicate);
                     if (ordinal >= (**rows).size()) return false;
                     row = (**rows)[ordinal];
                     return true;
@@ -7805,7 +7806,7 @@ OpPtr QueryPlanner::buildPreparedQueryPlan(StorageEngine* engine,const std::stri
                 column.isVariableLength=true;schema.append(column);
             }
             const bool dependencies=found->relationName=="pg_depend";
-            const bool expressions=found->readsDefaultExpression;
+            const bool expressions=found->readsCatalogExpression;
             auto rows=std::make_shared<std::optional<PreparedQueryRows>>();
             source=std::make_unique<PreparedSourceRowsOp>(found->columns,
                 [engine,database,rows,dependencies,expressions](size_t index,std::vector<ExprValue>& row) {

@@ -9314,7 +9314,10 @@ StmtPtr SQLParser::parseCreateIndex(const std::vector<std::string>& tokens, size
             if (pos < tokens.size() && tokens[pos] == ")") ++pos;
         } else if (kw == "where") {
             ++pos;
+            const auto first = pos;
             stmt->whereClause = parseExpr(tokens, pos);
+            if (!stmt->whereClause || first == pos) return nullptr;
+            stmt->predicateSql = joinSqlTokens(std::vector<std::string>(tokens.begin() + first, tokens.begin() + pos));
         } else if (kw == "nulls" && pos + 1 < tokens.size()) {
             if (toLower(tokens[pos + 1]) == "not" &&
                 pos + 2 < tokens.size() &&

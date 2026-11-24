@@ -1,4 +1,5 @@
 #include "catalog/SystemCatalogRows.h"
+#include "catalog/PgIndexCatalog.h"
 #include "catalog/RelationSearchPath.h"
 #include "query_binding.h"
 #include "expression/IdentityValue.h"
@@ -60,7 +61,7 @@ bool incompleteOwnedCatalog(const Range& range) {
         ((range.relationName=="pg_class" && range.columns.size()==30) ||
          (range.relationName=="pg_attribute" && range.columns.size()==19) ||
          (range.relationName=="pg_type" && range.columns.size()==28) ||
-         (range.relationName=="pg_index" && range.columns.size()==15) ||
+         (range.relationName==index_catalog::name && range.columns.size()<index_catalog::fields.size()) ||
          (range.relationName=="pg_am" && range.columns.size()==3) ||
          (range.relationName=="pg_settings" && range.columns.size()==3));
 }
@@ -209,7 +210,8 @@ public:
         if (type != 194 && type != 1184) return;
         auto& range = result.sourceRanges.at(source);
         if (range.relationSchema != "pg_catalog" || range.cteStatement || range.viewQuery || range.mergedUsing) return;
-        if (type == 194 && range.relationName == "pg_attrdef") range.readsDefaultExpression = true;
+        if (type == 194 && (range.relationName == "pg_attrdef" || range.relationName == "pg_index"))
+            range.readsCatalogExpression = true;
         if (type == 1184 && range.relationName == "pg_roles") range.readsRoleExpiry = true;
     }
 

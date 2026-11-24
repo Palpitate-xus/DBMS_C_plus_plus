@@ -6622,7 +6622,11 @@ struct SqlGetExpressionFunction {
         if (std::any_of(args.begin(), args.end(), [](const auto& arg) { return arg.isNull; }))
             return ExprValue("text", "", true);
         const auto oid = args[1].objectOid ? *args[1].objectOid : parseOidInput(args[1].value);
-        const auto sql = default_expression::deparse(args[0].value, oid, engine, database, currentSession());
+        const auto& node = args[0].value;
+        const bool pretty = args.size() == 3 && args[2].asBool();
+        const auto sql = node.empty() || node.compare(0, 7, "{CONST ") == 0
+            ? default_expression::deparse(node, oid, engine, database, currentSession())
+            : engine.catalogService().indexPredicateExpression(database, oid, node, pretty);
         return ExprValue("text", sql.value_or(""), !sql);
     }
 };
