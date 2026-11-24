@@ -26,7 +26,6 @@ UNIMPLEMENTED_CATALOGS = (
     "pg_operator",
     "pg_type",
     "pg_enum",
-    "pg_roles",
 )
 
 
@@ -273,25 +272,26 @@ def main():
         check_pg_type_catalog(client, runner, sock)
 
         for relation, value in (("pg_enum", 15), ("pg_roles", 19)):
+            target = "public.pg_roles" if relation == "pg_roles" else relation
             for sql in (
-                    "CREATE TABLE %s (id INTEGER)" % relation,
-                    "INSERT INTO %s VALUES (%d)" % (relation, value)):
+                    "CREATE TABLE %s (id INTEGER)" % target,
+                    "INSERT INTO %s VALUES (%d)" % (target, value)):
                 result = runner.decode_wire_result(
                     client.simple_query(sock, sql), include_types=True)
                 assert result[1] is None, (sql, result)
             messages = client.simple_query(
-                sock, "SELECT * FROM %s" % relation)
+                sock, "SELECT * FROM %s" % target)
             result = runner.decode_wire_result(messages, include_types=True)
             assert result[1] is None and result[0] == [[str(value)]], result
             assert result[3] == ["id"] and result[5] == [23], result
 
-        # An ordinary view named after an unimplemented system view likewise
-        # follows normal lookup rather than the unsupported-catalog gate.
+        # An ordinary view may shadow a system view through an explicit search path.
         for sql in (
                 "CREATE TABLE catalog_view_source (id INTEGER)",
                 "INSERT INTO catalog_view_source VALUES (17)",
-                "DROP TABLE pg_roles",
-                "CREATE VIEW pg_roles AS SELECT id FROM catalog_view_source"):
+                "DROP TABLE public.pg_roles",
+                "CREATE VIEW public.pg_roles AS SELECT id FROM catalog_view_source",
+                "SET search_path=public,pg_catalog"):
             result = runner.decode_wire_result(
                 client.simple_query(sock, sql), include_types=True)
             assert result[1] is None, (sql, result)
@@ -299,6 +299,7 @@ def main():
         result = runner.decode_wire_result(messages, include_types=True)
         assert result[1] is None and result[0] == [["17"]], result
         assert result[3] == ["id"] and result[5] == [23], result
+        assert runner.decode_wire_result(client.simple_query(sock, "RESET search_path"))[1] is None
 
         # The explicit unsupported-catalog error is statement-scoped; it must
         # not poison a following query in the same connection.

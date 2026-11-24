@@ -120,6 +120,7 @@ struct PreparedQuery {
         std::shared_ptr<PreparedQuery> viewQuery;
         GeneratedRelationPtr generatedRelation;
         bool readsDefaultExpression = false;
+        bool readsRoleExpiry = false;
     };
     std::string source;
     StmtPtr ast;

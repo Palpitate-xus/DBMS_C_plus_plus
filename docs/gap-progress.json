@@ -2,6 +2,18 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-24 expose the shared public role catalog used by psql",
+      "gap_ids": ["CAT-03", "CLIENT-01"],
+      "status": "partial",
+      "evidence": ["src/catalog/PgRolesCatalog.h", "src/catalog/CatalogService.cpp", "src/catalog/catalog.cpp", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/pg_roles_catalog_protocol_e2e_test.py", "tests/pg_catalog_unavailable_sqlstate_protocol_e2e_test.py"],
+      "verification": [
+        "The typed pg_roles view reads real cluster role identifiers and options. Password output is always masked; point queries on a leading literal OID use a direct catalog lookup.",
+        "Stock psql 18.6 lists and filters roles. The shared SQL and binary result checks pass on PostgreSQL 18.6. A second database reads the same role identities.",
+        "An old catalog and a forced restart retain role and view identities. Role defaults, role-membership catalog, pg_policy and verbose role descriptions remain open."
+      ]
+    },
+    {
       "issue": "2026-11-24 read partition ancestry for psql's incoming foreign key query",
       "gap_ids": ["CAT-03", "CAT-11", "CLIENT-01"],
       "status": "partial",

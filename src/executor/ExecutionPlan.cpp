@@ -5,6 +5,7 @@
 #include "catalog/PgAccessMethodCatalog.h"
 #include "catalog/PgCollationCatalog.h"
 #include "catalog/PgForeignKeyCatalog.h"
+#include "catalog/PgRolesCatalog.h"
 #include "ExecutionPlan.h"
 #include "parser/BetweenSyntax.h"
 #include "expression/StoredRegtypeValue.h"
@@ -7728,7 +7729,8 @@ OpPtr QueryPlanner::buildPreparedQueryPlan(StorageEngine* engine,const std::stri
                     if(!cache->cursor->next(row)){cache->cursor->close();cache->eof=true;return false;}
                     cache->rows.push_back(row);return true;
                 });
-        } else if (found->relationSchema == "pg_catalog" && found->relationName == foreign_key_catalog::name) {
+        } else if (found->relationSchema == "pg_catalog" &&
+                   (found->relationName == foreign_key_catalog::name || found->relationName == roles_catalog::name)) {
             for (const auto& output : found->columns) {
                 Column column;
                 column.dataName = output.name;
@@ -7736,12 +7738,15 @@ OpPtr QueryPlanner::buildPreparedQueryPlan(StorageEngine* engine,const std::stri
                 column.isVariableLength = true;
                 schema.append(column);
             }
-            const auto owner = catalogOidLiteralFilter(*found, true, 9);
-            const auto referenced = catalogOidLiteralFilter(*found, true, 13);
+            const bool roles = found->relationName == roles_catalog::name;
+            const auto owner = roles ? std::nullopt : catalogOidLiteralFilter(*found, true, 9);
+            const auto referenced = catalogOidLiteralFilter(*found, true, roles ? roles_catalog::oidAttributeNumber : 13);
             auto rows = std::make_shared<std::optional<PreparedQueryRows>>();
             source = std::make_unique<PreparedSourceRowsOp>(found->columns,
-                [engine, database, rows, owner, referenced](size_t index, std::vector<ExprValue>& row) {
-                    if (!*rows) *rows = foreign_key_catalog::rows(*engine, database, owner, referenced);
+                [engine, database, rows, owner, referenced, roles, readExpiry = found->readsRoleExpiry]
+                (size_t index, std::vector<ExprValue>& row) {
+                    if (!*rows) *rows = roles ? roles_catalog::rows(*engine, readExpiry, referenced)
+                        : foreign_key_catalog::rows(*engine, database, owner, referenced);
                     if (index >= (**rows).size()) return false;
                     row = (**rows)[index];
                     return true;

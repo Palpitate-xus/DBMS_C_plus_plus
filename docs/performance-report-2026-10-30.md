@@ -4,6 +4,23 @@
 
 > 复核发现，几组早期 COPY 计时在每个对照场景中使用了固定的执行顺序。耗时差可能包含顺序影响。这项问题涉及默认值求值、按列查找、默认值标记、短 CSV 导出和短查询导出的配对计时。[默认值求值](#copy-default-evaluation-order-cost-20261122) · [按列查找](#copy-identity-input-cost-20261122) · [默认值标记](#copy-default-marker-cost-20261122) · [CSV 导出](#copy-csv-out-cost-20261122) · [查询导出](#copy-query-stdout-cost-20261122)
 
+<a id="roles-view-cost-20261124"></a>
+## 2026-11-24 · 查询角色的耗时
+
+使用 GCC 13.3、CMake、C++17 和 `-O2` 构建项目程序，关闭 OpenSSL。与 PostgreSQL 18.6 在同一台 Intel Xeon E5-2678 v3 上测试。客户端和服务进程使用 CPU 13、28。本项目的数据目录在 `/dev/shm`。
+
+运行角色测试中的建角色语句，额外创建 `cost_role_000` 至 `cost_role_511` 共 512 个无登录权限的角色。以实际角色编号查询 `rolname`、`rolcanlogin` 和 `rolpassword`。等值形式使用 `WHERE oid = '编号'`，扫描对照使用 `WHERE oid IN ('编号')`，二者返回同一行。另执行原版 `psql` 的名称筛选 SQL，返回三个 `role_catalog*` 角色。 [测试夹具](../tests/pg_roles_catalog_protocol_e2e_test.py)
+
+同一连接记录发出查询到接收就绪消息的耗时。每轮先预热 4 次，再记录 20 次。执行顺序轮换，第二轮反转顺序。每次核对结果、字段类型和结束状态。P95 为每轮第 19 小的耗时。
+
+| 查询 | 本次中位数 / P95（毫秒） | PostgreSQL 18.6 中位数 / P95（毫秒） |
+| --- | ---: | ---: |
+| 按 `oid = '编号'` 查询一条角色 | 2.66–3.23 / 3.67–5.06 | 0.22–0.41 / 0.27–0.48 |
+| 按 `oid IN ('编号')` 查询同一条角色 | 9.25–11.40 / 10.74–16.16 | 0.26–0.29 / 0.30–0.39 |
+| 原版 `psql` 通过名称筛选 3 个角色 | 10.44–11.16 / 11.26–12.02 | 0.43–0.59 / 0.51–0.71 |
+
+在本项目中，按编号等值查找走目录的直接查找路径。两轮的中位数比返回同一结果的扫描写法低约 71%–72%。原版 `psql` 的名称筛选仍需扫描角色，耗时约为 PostgreSQL 18.6 的 18–26 倍。上一版没有可用的 `pg_roles` 查询。 [功能验证](test-report.md#roles-view-20261124) · [实现对照](postgresql-comparison.md#roles-view-comparison-20261124)
+
 <a id="partition-ancestors-cost-20261124"></a>
 ## 2026-11-24 · 查找分区归属和引用当前表的外键
 

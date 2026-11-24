@@ -27,6 +27,7 @@
 #include "catalog/PgAccessMethodCatalog.h"
 #include "catalog/PgCollationCatalog.h"
 #include "catalog/PgForeignKeyCatalog.h"
+#include "catalog/PgRolesCatalog.h"
 #include "common/DataDirectory.h"
 #include "storage/VariableRow.h"
 #include "common/SqlArrayText.h"
@@ -42480,7 +42481,7 @@ decltype(auto) StorageEngine::withQueryBindingMetadata(const std::string& dbname
             if (!requested.schema.empty()) schemas.push_back(requested.schema);
             else if (requested.name == "pg_type" || requested.name == inheritance_catalog::name ||
                      requested.name == access_method_catalog::name || requested.name == collation_catalog::name ||
-                     requested.name == foreign_key_catalog::name)
+                     requested.name == foreign_key_catalog::name || requested.name == roles_catalog::name)
                 schemas = effectiveRelationSearchPath(session);
             else {
                 std::string canonical; std::vector<std::string> path;
@@ -42501,6 +42502,12 @@ decltype(auto) StorageEngine::withQueryBindingMetadata(const std::string& dbname
                 if (schema == "pg_temp" && session) schema = sessionTempSchemaName(*session);
                 QueryRelationMetadata description{schema, requested.name, {}, {}};
                 if (schema == "pg_catalog") {
+                    if (requested.name == roles_catalog::name) {
+                        description.columns = roles_catalog::descriptor(catalog);
+                        for (auto& column : description.columns)
+                            column.typeMetadata = metadata.datumType(column.type, column.typeOid);
+                        return description;
+                    }
                     static const std::map<std::string, QueryRowDescriptor> virtualTables = {
                         {"pg_class", system_catalog::classDescriptor()},
                         {"pg_attribute", system_catalog::attributeDescriptor()},

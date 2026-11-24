@@ -2699,6 +2699,18 @@ statement/portal 仍返回 CloseComplete。一个 Sync group 内的 Execute 共�
 整式标量调用中直接$n从真实输入声明推断OID，保留显式OID及冲突/编号缺口错误。
 带表、排序、分页和跨表达式统一推断仍开放；额外八条范围外收集不是兼容通过。
 
+### 列出数据库角色
+
+在 `psql` 中输入 `\du` 列出数据库角色，或用 `\du app_*` 按名称筛选。也可以直接查询 `pg_roles`。
+
+```sql
+SELECT oid, rolname, rolcanlogin, rolconnlimit, rolvaliduntil
+FROM pg_catalog.pg_roles
+ORDER BY rolname;
+```
+
+角色编号和属性来自当前实例的共享目录，因此连接到不同数据库可以查到同一个角色。`rolpassword` 始终显示 `********`。当前未保存角色级的默认配置，`rolconfig` 返回 SQL `NULL`。 [测试范围](test-report.md#roles-view-20261124)
+
 ### 按名称查找表
 
 原版 `psql` 18.6 可用 `\dt` 列出普通表，显示所属模式、表名、类型和所有者。`\dt orders*` 按名称筛选，`\dt sales.*` 列出 `sales` 模式的表。

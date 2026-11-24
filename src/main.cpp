@@ -10,6 +10,7 @@
 #include "catalog/PgAccessMethodCatalog.h"
 #include "catalog/PgCollationCatalog.h"
 #include "catalog/PgForeignKeyCatalog.h"
+#include "catalog/PgRolesCatalog.h"
 #include "catalog/PgDefaultCatalog.h"
 #include "expression/ArrayDatumInput.h"
 #include "expression/StoredRegtypeValue.h"
@@ -21584,6 +21585,9 @@ class PreparedWithDmlRuntime {
             } else if (range.relationSchema == "pg_catalog" && range.relationName == dbms::foreign_key_catalog::name) {
                 virtualRows = make_shared<dbms::PreparedQueryRows>(dbms::foreign_key_catalog::rows(g_engine, session_.currentDB,
                     dbms::catalogOidLiteralFilter(range, true, 9), dbms::catalogOidLiteralFilter(range, true, 13)));
+            } else if (range.relationSchema == "pg_catalog" && range.relationName == dbms::roles_catalog::name) {
+                virtualRows = make_shared<dbms::PreparedQueryRows>(dbms::roles_catalog::rows(g_engine, range.readsRoleExpiry,
+                    dbms::catalogOidLiteralFilter(range, true, dbms::roles_catalog::oidAttributeNumber)));
             } else if(range.relationSchema=="pg_catalog" && range.relationName=="pg_stats") {
                 statisticsRows=make_shared<optional<dbms::PreparedQueryRows>>();
             } else if(range.relationSchema=="pg_catalog" && range.relationName=="pg_namespace") {
@@ -33946,7 +33950,7 @@ static bool executeInternal(const string& rawSql, Session& s,
             "pg_rewrite", "pg_replication_origin", "pg_stats", "pg_statistic",
             "pg_statistic_ext",
             "pg_subscription", "pg_tablespace", "pg_trigger", "pg_type",
-            "pg_enum", "pg_roles"};
+            "pg_enum"};
         if ((queryDb == "pg_catalog" || unresolvedUnqualifiedRelation) &&
             unimplementedCatalogRelations.find(catalogName) !=
                 unimplementedCatalogRelations.end()) {

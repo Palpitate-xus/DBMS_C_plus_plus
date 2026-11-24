@@ -297,6 +297,8 @@ public:
     bool updateAuthId(Oid oid, const PgAuthIdRow& row);
     bool dropAuthId(Oid oid);
     std::vector<PgAuthIdRow> listAuthIds() const;
+    std::vector<PgAuthIdRow> publicRoleSnapshot(std::optional<Oid> role) const;
+    static std::vector<PgAuthIdRow> readPublicRoleSnapshot(const std::string& path, std::optional<Oid> role);
 
     void addAuthMember(const PgAuthMembersRow& row);
     bool updateAuthMember(Oid oid, const PgAuthMembersRow& row);

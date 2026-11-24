@@ -74,6 +74,7 @@ public:
         const std::string& dbname, CatalogManager::DefaultCatalogKind kind, bool includeExpressions = false) const;
     CatalogManager::ForeignKeyIdentities foreignKeyIdentities(const std::string& dbname,
         std::optional<Oid> constraint = {}) const;
+    std::vector<PgAuthIdRow> publicRoleSnapshot(std::optional<Oid> role) const;
     std::map<std::string, std::string> domainColumns(const std::string& dbname,
                                                     const std::string& physicalTable) const;
 

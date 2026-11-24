@@ -2,6 +2,13 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="roles-view-comparison-20261124"></a>
+## 2026-11-24 · 公开角色视图
+
+PostgreSQL 从共享角色目录读取角色属性，将密码字段替换为固定的掩码，并从角色设置目录加入全局默认配置。SQLite 把访问检查交给宿主应用的授权回调。DuckDB 的嵌入式进程也由宿主控制数据库访问。 [PostgreSQL 视图源码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/catalog/system_views.sql) · [SQLite 授权接口](https://www.sqlite.org/c3ref/set_authorizer.html) · [DuckDB 安全模型](https://duckdb.org/security#security-model)
+
+本项目的 `pg_roles` 从当前实例的共享目录读取真实编号和属性。明确按编号查找时，只取对应角色。查询结果始终使用固定掩码。角色级的默认配置、角色成员目录和行访问规则目录仍待实现。 [使用说明](MANUAL.md#列出数据库角色) · [测试报告](test-report.md#roles-view-20261124)
+
 <a id="partition-ancestors-comparison-20261124"></a>
 ## 2026-11-24 · 查询分区归属
 

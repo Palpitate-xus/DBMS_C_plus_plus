@@ -1,5 +1,7 @@
 # 第 993 项：`pg_roles` 的四列文本输出冒充系统视图
 
+本文记录旧版处理方式。新版已接入带类型的 `pg_roles`，可通过原版 `psql` 的 `\du` 读取。 [当前验证](test-report.md#roles-view-20261124)
+
 ## 发现
 
 旧 `pg_roles` SQL renderer 固定输出 `rolname`、`rolsuper`、`rolcreatedb`、`rolcanlogin` 四列文本，忽略查询投影和过滤。PostgreSQL 18 的 [`pg_roles` 官方 schema](https://www.postgresql.org/docs/18/view-pg-roles.html) 定义 13 列，包括继承、创建角色、复制、连接数限制、脱敏密码、有效期、RLS bypass、配置和角色 OID。因此 SQL 客户端得到的列集合与类型都不可信。

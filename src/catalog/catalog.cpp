@@ -1726,6 +1726,28 @@ std::vector<PgAuthIdRow> CatalogManager::listAuthIds() const {
     return authIds_;
 }
 
+std::vector<PgAuthIdRow> CatalogManager::publicRoleSnapshot(std::optional<Oid> role) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<PgAuthIdRow> result;
+    const auto append = [&](const PgAuthIdRow& row) {
+        result.push_back({row.oid, row.rolname, row.rolsuper, row.rolinherit, row.rolcreaterole,
+            row.rolcreatedb, row.rolcanlogin, row.rolreplication, row.rolbypassrls,
+            row.rolconnlimit, {}, row.rolvaliduntil});
+    };
+    if (role) {
+        if (const auto* row = findAuthIdUnlocked(*role)) append(*row);
+    } else {
+        result.reserve(authIds_.size());
+        for (const auto& row : authIds_) append(row);
+    }
+    return result;
+}
+
+std::vector<PgAuthIdRow> CatalogManager::readPublicRoleSnapshot(const std::string& path, std::optional<Oid> role) {
+    CatalogManager catalog(path, ReadOnlyTag{});
+    return catalog.publicRoleSnapshot(role);
+}
+
 // ============================================================================
 // pg_auth_members
 // ============================================================================

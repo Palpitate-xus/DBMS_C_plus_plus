@@ -17,9 +17,11 @@
 #include "catalog/PgAccessMethodCatalog.h"
 #include "catalog/PgCollationCatalog.h"
 #include "catalog/PgForeignKeyCatalog.h"
+#include "catalog/PgRolesCatalog.h"
 #include "catalog/DatumMetadataFactory.h"
 #include "expression/regclass_input.h"
 #include "common/DbError.h"
+#include "common/TemporalStorageCodec.h"
 #include "common/QueryHostProvider.h"
 #include "access/IndexFileUtil.h"
 #include <charconv>
@@ -431,6 +433,7 @@ std::shared_ptr<CatalogManager> loadOwnedCatalog(
     }
     const bool initializedSequenceCatalog=sequence_catalog::bootstrapRelation(*catalog,publishedSequenceCatalog);
     const bool initializedStatisticsView=analyzed_statistics::bootstrapView(*catalog);
+    const bool initializedRoles=roles_catalog::bootstrap(*catalog);
     const bool publishedSystemAttributes=system_attributes::published(directory);
     const bool initializedSystemAttributes=catalog->bootstrapSystemAttributes(publishedSystemAttributes);
     (void)catalog->bootstrapSystemCatalogCollations(true);
@@ -463,7 +466,7 @@ std::shared_ptr<CatalogManager> loadOwnedCatalog(
         }
     }
     migrateLegacyPublicDottedSequences(engine, database, *catalog);
-    if((initializedClassCatalog || initializedOwnedCatalogs || initializedInheritance || initializedSequenceCatalog || initializedStatisticsView || initializedSystemAttributes || initializedTypeProperties || initializedCatalogCollations || initializedPhysicalArrays || initializedDefaultCatalog || !publishedDefaultCatalog || !publishedTypeProperties || !publishedCatalogCollations || !publishedPhysicalArrays || initializedAccessMethods || !publishedAccessMethods || !publishedCollations || initializedForeignKeys || !publishedForeignKeys) && !catalog->persistAll())
+    if((initializedClassCatalog || initializedOwnedCatalogs || initializedInheritance || initializedSequenceCatalog || initializedStatisticsView || initializedRoles || initializedSystemAttributes || initializedTypeProperties || initializedCatalogCollations || initializedPhysicalArrays || initializedDefaultCatalog || !publishedDefaultCatalog || !publishedTypeProperties || !publishedCatalogCollations || !publishedPhysicalArrays || initializedAccessMethods || !publishedAccessMethods || !publishedCollations || initializedForeignKeys || !publishedForeignKeys) && !catalog->persistAll())
         throw DbError("58030","could not publish initialized system view identities");
     if (!publishedForeignKeys && index_file::writeAtomicallyNoReplace(foreignKeyMarker,
             foreign_key_catalog::version) != index_file::WriteResult::OK)
@@ -758,6 +761,14 @@ CatalogManager::ForeignKeyIdentities CatalogService::foreignKeyIdentities(const 
     if (catalog.manager) return catalog.manager->foreignKeyIdentities(constraint);
     if (catalog.path.empty()) return {};
     return CatalogManager::readForeignKeyIdentities(catalog.path, constraint);
+}
+
+std::vector<PgAuthIdRow> CatalogService::publicRoleSnapshot(std::optional<Oid> role) const {
+    const auto ownership = engine_.catalogReadOwnership("info");
+    const auto catalog = readCatalog("info", ownership.mayReadCurrentFiles);
+    if (catalog.manager) return catalog.manager->publicRoleSnapshot(role);
+    if (catalog.path.empty()) return {};
+    return CatalogManager::readPublicRoleSnapshot(catalog.path, role);
 }
 
 std::optional<bool> CatalogService::relationIsVisible(
@@ -1068,6 +1079,140 @@ std::optional<std::string> definition(const StorageEngine& engine, const std::st
 }
 
 } // namespace foreign_key_catalog
+
+namespace roles_catalog {
+
+QueryRowDescriptor descriptor(const CatalogManager::MetadataSnapshot& catalog) {
+    const auto view = std::find_if(catalog.relations.begin(), catalog.relations.end(), [](const auto& row) {
+        return row.relnamespace == 11 && row.relname == name;
+    });
+    if (view == catalog.relations.end() || view->relkind != 'v' || view->relnatts != static_cast<int16_t>(fields.size()))
+        throw DbError("XX001", "missing pg_roles view declaration");
+    const auto rowType = std::find_if(catalog.types.begin(), catalog.types.end(), [&](const auto& type) {
+        return type.oid == view->reltype && type.typrelid == view->oid && type.typnamespace == 11 &&
+            type.typname == name && type.typtype == 'c';
+    });
+    if (rowType == catalog.types.end()) throw DbError("XX001", "invalid pg_roles row type");
+    const auto arrayType = std::find_if(catalog.types.begin(), catalog.types.end(), [&](const auto& type) {
+        return type.oid == rowType->typarray && type.typelem == rowType->oid && type.typnamespace == 11;
+    });
+    if (arrayType == catalog.types.end()) throw DbError("XX001", "invalid pg_roles array type");
+    std::array<const PgAttributeRow*, fields.size()> attrs{};
+    for (const auto& attr : catalog.attributes) {
+        if (attr.attrelid != view->oid || attr.attnum <= 0) continue;
+        const size_t index = attr.attnum - 1;
+        if (index >= attrs.size() || attrs[index]) throw DbError("XX001", "conflicting pg_roles field identity");
+        attrs[index] = &attr;
+    }
+    std::vector<std::string> names;
+    for (size_t i = 0; i < fields.size(); ++i) {
+        const auto& field = fields[i];
+        const auto* attr = attrs[i];
+        if (!attr || attr->attname != field.name || attr->atttypid != field.type || attr->attlen != field.size ||
+            attr->attnotnull || attr->attisdropped || attr->atttypmod != -1)
+            throw DbError("XX001", "conflicting pg_roles field declaration");
+        names.emplace_back(field.name);
+    }
+    auto result = system_catalog::ownedDescriptor(fields, names);
+    for (auto& column : result) {
+        column.physicalRelationOid = view->oid;
+        if (column.typeOid == 1009) column.type = "text[]";
+    }
+    return result;
+}
+
+bool bootstrap(CatalogManager& catalog) {
+    const auto space = catalog.getNamespace(11);
+    if (!space || space->nspname != "pg_catalog") throw DbError("XX001", "missing pg_roles namespace");
+    if (catalog.getClassByName(name, space->oid)) {
+        (void)descriptor(catalog.metadataSnapshot(false));
+        return false;
+    }
+    if (catalog.getTypeByName(name, space->oid) || catalog.getTypeByName("_pg_roles", space->oid))
+        throw DbError("XX001", "pg_roles type identity conflicts with a stored type");
+    PgClassRow view;
+    view.oid = catalog.allocateOid();
+    view.relname = name;
+    view.relnamespace = space->oid;
+    view.relowner = space->nspowner;
+    view.relkind = 'v';
+    view.relnatts = fields.size();
+    view.reltype = catalog.allocateOid();
+    PgTypeRow row;
+    row.oid = view.reltype;
+    row.typname = name;
+    row.typnamespace = space->oid;
+    row.typowner = space->nspowner;
+    row.typtype = 'c';
+    row.typcategory = 'C';
+    row.typalign = 'd';
+    row.typstorage = 'x';
+    row.typrelid = view.oid;
+    row.typarray = catalog.allocateOid();
+    PgTypeRow array = row;
+    array.oid = row.typarray;
+    array.typname = "_pg_roles";
+    array.typtype = 'b';
+    array.typcategory = 'A';
+    array.typrelid = INVALID_OID;
+    array.typarray = INVALID_OID;
+    array.typelem = row.oid;
+    std::vector<PgAttributeRow> attrs;
+    for (size_t i = 0; i < fields.size(); ++i) {
+        const auto& field = fields[i];
+        const auto type = catalog.getType(field.type);
+        if (!type || type->typnamespace != space->oid || type->typlen != field.size)
+            throw DbError("XX001", "missing pg_roles field type");
+        PgAttributeRow attr;
+        attr.attrelid = view.oid;
+        attr.attnum = i + 1;
+        attr.attname = field.name;
+        attr.atttypid = type->oid;
+        attr.attlen = type->typlen;
+        attr.attbyval = type->typbyval;
+        attr.attalign = type->typalign;
+        attr.attstorage = type->typstorage;
+        attr.attcollation = field.type == 25 ? 100 : type->typcollation ? 950 : 0;
+        attrs.push_back(std::move(attr));
+    }
+    if (catalog.createClass(view) != view.oid || catalog.createType(row) != row.oid ||
+        catalog.createType(array) != array.oid || !catalog.replaceAttributes(view.oid, attrs))
+        throw DbError("XX001", "could not initialize pg_roles view");
+    catalog.addDepend({PgClassOid_Type, row.oid, 0, PgClassOid_Class, view.oid, 0, 'i'});
+    catalog.addDepend({PgClassOid_Type, array.oid, 0, PgClassOid_Type, row.oid, 0, 'i'});
+    return true;
+}
+
+std::vector<std::vector<ExprValue>> rows(const StorageEngine& engine, bool readExpiry, std::optional<Oid> roleOid) {
+    const auto roles = engine.catalogService().publicRoleSnapshot(roleOid);
+    const auto* session = currentSession();
+    const auto flag = [](bool value) { return ExprValue("boolean", value ? "t" : "f"); };
+    const auto expiry = [&](std::string value) {
+        if (!readExpiry || value.empty()) return ExprValue("timestamptz", "", true);
+        if (value.size() == 10) value += " 00:00:00";
+        if (value.size() > 10 && value[10] == 'T') value[10] = ' ';
+        value = SQLParser::toLower(value);
+        const auto micros = temporal_storage_detail::parseTimestampMicros(value);
+        if (!micros) throw DbError("22007", "invalid stored role expiration timestamp");
+        auto formatted = temporal_storage_detail::formatTimestampMicrosWithOffset(
+            *micros, session ? session->timezoneOffsetMinutes : 0);
+        if (formatted.empty()) throw DbError("22008", "role expiration is outside the supported timestamp range");
+        return ExprValue("timestamptz", std::move(formatted));
+    };
+    std::vector<std::vector<ExprValue>> result;
+    result.reserve(roles.size());
+    for (const auto& role : roles) {
+        checkForQueryInterrupt();
+        result.push_back({ExprValue("name", role.rolname), flag(role.rolsuper), flag(role.rolinherit),
+            flag(role.rolcreaterole), flag(role.rolcreatedb), flag(role.rolcanlogin), flag(role.rolreplication),
+            ExprValue("integer", std::to_string(role.rolconnlimit)), ExprValue("text", "********"),
+            expiry(role.rolvaliduntil), flag(role.rolbypassrls), ExprValue("text[]", "", true),
+            ExprValue("oid", std::to_string(role.oid))});
+    }
+    return result;
+}
+
+} // namespace roles_catalog
 
 namespace {
 

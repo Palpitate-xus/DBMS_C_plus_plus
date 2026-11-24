@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-24 · 可以查询数据库角色
+
+`pg_roles` 可以查到角色的真实编号、标志和登录选项。密码字段使用固定掩码。原版 `psql` 可以执行 `\du`。角色默认配置、成员关系和规则目录继续由 `CAT-03` 和 `CLIENT-01` 跟踪，两项保持部分实现。 [功能验证](test-report.md#roles-view-20261124) · [性能对照](performance-report-2026-10-30.md#roles-view-cost-20261124)
+
 ## 2026-11-24 · 可以查询分区归属
 
 `pg_partition_ancestors` 可以按当前目录编号查分区根表，或沿已证明的旧版子分区关系查父表。原版 `psql` 查找引用当前表的外键所用的 SQL 已可执行。分区索引、独立叶分区和后续查询所需的 `pg_policy` 目录仍待补齐。`CAT-03`、`CAT-11` 和 `CLIENT-01` 保持部分实现。 [功能验证](test-report.md#partition-ancestors-20261124) · [性能对照](performance-report-2026-10-30.md#partition-ancestors-cost-20261124)
