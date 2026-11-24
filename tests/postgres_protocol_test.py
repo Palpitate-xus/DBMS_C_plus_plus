@@ -104,18 +104,20 @@ def send_startup_packet(sock, user, database, application_name,
         sock.sendall(packet)
 
 
-def complete_startup_authentication(sock, user, password):
+def complete_startup_authentication(sock, user, password, *, scram_user=None,
+                                    expect_bad_password=False):
     kind, body = read_message(sock)
     assert kind == b"R"
     auth_type = struct.unpack("!I", body[:4])[0]
     if auth_type == 10:
-        client_first_bare = "n=%s,r=clientnonce" % user
+        client_first_bare = "n=%s,r=clientnonce" % (user if scram_user is None else scram_user)
         initial = b"n,," + client_first_bare.encode()
         sasl_initial = b"SCRAM-SHA-256\0" + struct.pack("!i", len(initial)) + initial
         sock.sendall(typed(b"p", sasl_initial))
         kind, body = read_message(sock)
         assert kind == b"R" and struct.unpack("!I", body[:4])[0] == 11, (kind, body)
-        server_first = body[4:].rstrip(b"\0").decode()
+        assert b"\0" not in body[4:], (kind, body)
+        server_first = body[4:].decode()
         server_attributes = dict(item.split("=", 1) for item in server_first.split(","))
         assert server_attributes["r"].startswith("clientnonce")
         client_final_without_proof = "c=biws,r=" + server_attributes["r"]
@@ -130,27 +132,30 @@ def complete_startup_authentication(sock, user, password):
         sock.sendall(typed(b"p", (client_final_without_proof + ",p=" +
                                   base64.b64encode(proof).decode()).encode()))
         kind, body = read_message(sock)
+        if expect_bad_password:
+            assert kind == b"E" and diagnostic_fields(body).get(b"C") == b"28P01", (kind, body)
+            return
         assert kind == b"R" and struct.unpack("!I", body[:4])[0] == 12, (kind, body)
         expected_server_signature = base64.b64encode(
             hmac.new(hmac.new(salted, b"Server Key", hashlib.sha256).digest(),
                      auth_message.encode(), hashlib.sha256).digest()
         ).decode()
-        assert body[4:].rstrip(b"\0") == ("v=" + expected_server_signature).encode()
+        assert body[4:] == ("v=" + expected_server_signature).encode(), (kind, body)
     else:
-        assert auth_type == 3
+        assert auth_type == 3 and not expect_bad_password
         sock.sendall(typed(b"p", password.encode() + b"\0"))
 
 
 def startup(sock, user, database, password="secret", fragmented=False,
             application_name="dbms-protocol-test", protocol_version=196608,
             protocol_options=None, validate_dbms_status=True,
-            startup_parameters=None, expected_application_name=None):
+            startup_parameters=None, expected_application_name=None, *, scram_user=None):
     protocol_options = protocol_options or {}
     startup_parameters = startup_parameters or {}
     send_startup_packet(sock, user, database, application_name,
                         protocol_version, protocol_options,
                         startup_parameters, fragmented)
-    complete_startup_authentication(sock, user, password)
+    complete_startup_authentication(sock, user, password, scram_user=scram_user)
     messages = read_until_ready(sock)
     assert messages[0] == (b"R", struct.pack("!I", 0))
     assert messages[-1] == (b"Z", b"I")

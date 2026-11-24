@@ -2631,7 +2631,7 @@ SHOW DEADLOCKS;
 
 服务端默认 fail-closed：OpenSSL 不可用、证书/私钥缺失或 TLS 初始化失败时不会启动明文监听。证书路径也可以保留默认值 `server.crt` / `server.key`。
 
-`psql` 18.6 的查询示例在本地密码认证下验证通过。使用 SCRAM 时，libpq 发出的空 SCRAM 用户名目前会被服务端拒绝。 [验证记录](test-report.md#sql-bound-page-20261124)
+`psql` 18.6 可通过本地 TCP 的 `SCRAM-SHA-256` 认证执行查询。服务端以连接时提供的用户名选择账户，并验证该账户的密码证明。TLS 通道绑定由 `SEC-03` 跟踪。 [验证记录](test-report.md#scram-libpq-20261124)
 
 服务进程收到 `SIGINT` 或 `SIGTERM` 后会停止接收新连接，关闭活动连接并等待客户端 worker 退出；监听端口失败会以非零退出码结束。`--insecure` 仅用于本地开发。
 

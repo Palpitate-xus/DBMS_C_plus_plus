@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-24 · 原版 psql 可以通过本地 SCRAM 登录
+
+接受 libpq 的空认证用户名，按报文长度发送认证挑战和最终签名。验证使用原版 `psql` 18.6、本地 TCP、正确及错误密码、旧版数据目录重启，以及登录后的 SQL 分页。`PROTO-01` 保持部分实现。 [验证范围](test-report.md#scram-libpq-20261124) · [登录计时](performance-report-2026-10-30.md#scram-libpq-cost-20261124) · [实现对照](postgresql-comparison.md#scram-libpq-comparison-20261124)
+
 ## 2026-11-24 · SQL 预编译语句可以按页读索引
 
 普通外层 `SELECT` 的直接分页参数可通过 SQL `PREPARE` 确定类型，`EXECUTE` 复用同一个已求值参数，并将 `oid` 边界交给现有索引读取。`EXPLAIN EXECUTE` 可显示受支持的查询计划。任意分页表达式和通用计划缓存仍待实现。`QRY-06`、`OPT-01`、`PROTO-03` 和 `PROTO-04` 保持部分实现。 [功能验证](test-report.md#sql-bound-page-20261124) · [性能对照](performance-report-2026-10-30.md#sql-bound-page-cost-20261124) · [实现对照](postgresql-comparison.md#sql-bound-page-comparison-20261124)

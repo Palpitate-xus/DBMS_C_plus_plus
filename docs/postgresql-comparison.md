@@ -2,6 +2,13 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="scram-libpq-comparison-20261124"></a>
+## 2026-11-24 · 原版 psql 通过 SCRAM 登录
+
+PostgreSQL 从连接启动消息选择账户。libpq 在 SCRAM 第一条消息中将用户名留空。服务端的认证挑战和最终签名使用消息长度界定数据。DuckDB 的 PostgreSQL 扩展使用 libpq 连接参数。SQLite 由调用进程直接打开数据库文件。 [PostgreSQL 18 SASL 认证](https://www.postgresql.org/docs/18/sasl-authentication.html) · [PostgreSQL 18 消息格式](https://www.postgresql.org/docs/18/protocol-message-formats.html) · [DuckDB PostgreSQL 扩展](https://duckdb.org/docs/current/core_extensions/postgres.html) · [SQLite 进程模型](https://www.sqlite.org/serverless.html)
+
+本项目接受 libpq 留空的认证用户名，并按协议长度发送挑战和签名。认证仍基于启动账户的验证器，客户端显式填写非空用户名时还会核对它是否与启动账户一致。实际对照覆盖原版 `psql` 18.6 的本地 TCP 登录、失败密码及分页查询。 [协议验证](test-report.md#scram-libpq-20261124) · [计时](performance-report-2026-10-30.md#scram-libpq-cost-20261124)
+
 <a id="sql-bound-page-comparison-20261124"></a>
 ## 2026-11-24 · 用 SQL 准备并复用分页查询
 

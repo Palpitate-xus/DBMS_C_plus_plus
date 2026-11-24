@@ -720,14 +720,14 @@ bool PostgresProtocol::sendAuthenticationSasl(const std::vector<std::string>& me
 bool PostgresProtocol::sendAuthenticationSaslContinue(const std::string& data) {
     std::vector<uint8_t> body;
     appendUInt32(body, 11);
-    appendCString(body, data);
+    body.insert(body.end(), data.begin(), data.end());
     return sendMessage('R', body);
 }
 
 bool PostgresProtocol::sendAuthenticationSaslFinal(const std::string& data) {
     std::vector<uint8_t> body;
     appendUInt32(body, 12);
-    appendCString(body, data);
+    body.insert(body.end(), data.begin(), data.end());
     return sendMessage('R', body);
 }
 

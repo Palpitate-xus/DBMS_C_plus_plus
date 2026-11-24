@@ -7677,7 +7677,8 @@ std::string messageCString(const PgFrontendMessage& message, size_t offset = 0) 
 }
 
 bool parseScramAttributes(const std::string& message,
-                          std::map<char, std::string>& attributes) {
+                          std::map<char, std::string>& attributes,
+                          bool allowEmptyUser = false) {
     attributes.clear();
     size_t begin = 0;
     while (begin <= message.size()) {
@@ -7685,7 +7686,8 @@ bool parseScramAttributes(const std::string& message,
         const std::string part = message.substr(begin, end == std::string::npos
                                                           ? std::string::npos
                                                           : end - begin);
-        if (part.size() < 3 || part[1] != '=' || part[0] < 'a' || part[0] > 'z' ||
+        if (part.size() < 2 || part[1] != '=' || part[0] < 'a' || part[0] > 'z' ||
+            (part.size() == 2 && !(allowEmptyUser && part[0] == 'n')) ||
             attributes.count(part[0]) != 0) {
             return false;
         }
@@ -7766,14 +7768,17 @@ bool authenticateScram(PostgresProtocol& protocol, const std::string& username,
 
     const std::string clientFirstBare = initialResponse.substr(3);
     std::map<char, std::string> firstAttributes;
-    if (!parseScramAttributes(clientFirstBare, firstAttributes) ||
+    // libpq leaves the SCRAM username empty. The StartupMessage user has
+    // already selected the verifier and the proof covers the original bytes.
+    if (!parseScramAttributes(clientFirstBare, firstAttributes, /*allowEmptyUser=*/true) ||
         firstAttributes.count('n') == 0 || firstAttributes.count('r') == 0 ||
         firstAttributes['r'].empty()) {
         error = "malformed SCRAM client-first attributes";
         protocol.sendErrorResponse("FATAL", "08P01", error);
         return false;
     }
-    if (unescapeScramName(firstAttributes['n']) != username) {
+    const auto& scramName = firstAttributes.at('n');
+    if (!scramName.empty() && unescapeScramName(scramName) != username) {
         error = "SCRAM username does not match startup user";
         protocol.sendErrorResponse("FATAL", "28P01", "password authentication failed");
         return false;

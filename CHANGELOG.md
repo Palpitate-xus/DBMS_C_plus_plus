@@ -1,20 +1,20 @@
 # 更新日志
 
 <details>
+<summary>修复 psql 密码登录 · 2026-11-24</summary>
+
+使用 SCRAM 密码认证的本地 TCP 连接，现在可以用原版 psql 18.6 登录并查询。密码错误时，连接仍会被拒绝。
+
+[连接说明](docs/MANUAL.md#18-网络服务) · [测试报告](docs/test-report.md#scram-libpq-20261124) · [性能报告](docs/performance-report-2026-10-30.md#scram-libpq-cost-20261124)
+
+</details>
+
+<details>
 <summary>用同一条 SQL 反复翻页更快 · 2026-11-24</summary>
 
 在 psql 中准备好查询后，可以每次传入要取几条、要跳过几条。按对象编号查小页时，数据库读够就停。
 
 [使用说明](docs/MANUAL.md#对象编号) · [测试报告](docs/test-report.md#sql-bound-page-20261124) · [性能报告](docs/performance-report-2026-10-30.md#sql-bound-page-cost-20261124)
-
-</details>
-
-<details>
-<summary>应用传入页大小和位置，查数据更快 · 2026-11-24</summary>
-
-应用每次传入要取几条、要跳过几条，数据库就能沿编号索引读够就停。在 2,048 行的测试中，取 3 条的时间从 33–38 毫秒降到约 4 毫秒。
-
-[使用说明](docs/MANUAL.md#对象编号) · [测试报告](docs/test-report.md#bound-row-count-20261124) · [性能报告](docs/performance-report-2026-10-30.md#bound-row-count-cost-20261124)
 
 </details>
 
@@ -29,6 +29,12 @@
 
 <details>
 <summary>查看更早的更新和版本记录</summary>
+
+## 2026-11-24 · 应用传入页大小和位置，查数据更快
+
+应用每次传入要取几条、要跳过几条，数据库就能沿编号索引读够就停。在 2,048 行的测试中，取 3 条的时间从 33–38 毫秒降到约 4 毫秒。
+
+[使用说明](docs/MANUAL.md#对象编号) · [测试报告](docs/test-report.md#bound-row-count-20261124) · [性能报告](docs/performance-report-2026-10-30.md#bound-row-count-cost-20261124)
 
 ## 2026-11-24 · 按一段对象编号查记录更快
 
