@@ -7740,14 +7740,16 @@ OpPtr QueryPlanner::buildPreparedQueryPlan(StorageEngine* engine,const std::stri
                 schema.append(column);
             }
             const bool roles = found->relationName == roles_catalog::name;
-            const auto owner = roles ? std::nullopt : catalogOidLiteralFilter(*found, true, 9);
-            const auto referenced = catalogOidLiteralFilter(*found, true, roles ? roles_catalog::oidAttributeNumber : 13);
+            const auto owner = roles ? std::nullopt : catalogOidLiteralFilter(*found, true, foreign_key_catalog::ownerAttribute);
+            const auto referenced = catalogOidLiteralFilter(*found, true,
+                roles ? roles_catalog::oidAttributeNumber : foreign_key_catalog::referencedAttribute);
+            const auto constraint = roles ? std::nullopt : catalogOidLiteralFilter(*found, true, foreign_key_catalog::oidAttribute);
             auto rows = std::make_shared<std::optional<PreparedQueryRows>>();
             source = std::make_unique<PreparedSourceRowsOp>(found->columns,
-                [engine, database, rows, owner, referenced, roles, readExpiry = found->readsRoleExpiry]
+                [engine, database, rows, owner, referenced, constraint, roles, readExpiry = found->readsRoleExpiry]
                 (size_t index, std::vector<ExprValue>& row) {
                     if (!*rows) *rows = roles ? roles_catalog::rows(*engine, readExpiry, referenced)
-                        : foreign_key_catalog::rows(*engine, database, owner, referenced);
+                        : foreign_key_catalog::rows(*engine, database, owner, referenced, constraint);
                     if (index >= (**rows).size()) return false;
                     row = (**rows)[index];
                     return true;

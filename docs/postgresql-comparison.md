@@ -2,12 +2,19 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="primary-constraint-comparison-20261124"></a>
+## 2026-11-24 · 主键、外键与索引的关联
+
+PostgreSQL 的 `pg_constraint` 保存约束编号、定义中的列号和相关索引编号。主键和引用该主键的外键会指向同一个索引。SQLite 用 `PRAGMA foreign_key_list` 查看外键声明。DuckDB 的 `duckdb_constraints()` 提供约束位置、列名和外键引用目标。 [PostgreSQL 约束目录](https://www.postgresql.org/docs/18/catalog-pg-constraint.html) · [SQLite 外键列表](https://www.sqlite.org/pragma.html#pragma_foreign_key_list) · [DuckDB 约束信息](https://duckdb.org/docs/1.5/sql/meta/duckdb_table_functions#duckdb_constraints)
+
+本项目在已有的约束目录中登记主键约束编号，并关联实际使用的主键索引。外键列与被引用的主键是同一组列时，关联该主键索引。其他唯一键及完整的约束依赖仍待实现。 [验证范围](test-report.md#primary-constraint-20261124) · [性能对照](performance-report-2026-10-30.md#primary-constraint-cost-20261124)
+
 <a id="primary-index-comparison-20261124"></a>
 ## 2026-11-24 · 主键索引的编号和来源
 
 PostgreSQL 为主键约束和支撑它的索引分别分配编号，并用 `pg_constraint.conindid` 连接两者。SQLite 可以用 `PRAGMA index_list` 的 `pk` 标记识别主键索引。DuckDB 的 `duckdb_indexes()` 列出显式索引，主键可通过 `duckdb_constraints()` 查询。 [PostgreSQL 约束目录](https://www.postgresql.org/docs/18/catalog-pg-constraint.html) · [SQLite 索引列表](https://www.sqlite.org/pragma.html#pragma_index_list) · [DuckDB 索引信息](https://duckdb.org/docs/current/sql/meta/duckdb_table_functions#duckdb_indexes)
 
-本项目从表定义读取主键列，登记独立索引编号，数据仍由表原有的主键索引维护。`pg_index` 及索引列信息可按编号查询。主键约束本身的编号与 `conindid` 仍待实现。 [查询示例](MANUAL.md#查询主键索引) · [性能报告](performance-report-2026-10-30.md#primary-index-cost-20261124)
+本项目从表定义读取主键列，登记独立索引编号，数据仍由表原有的主键索引维护。`pg_index` 及索引列信息可按编号查询。 [查询示例](MANUAL.md#查询主键索引) · [性能报告](performance-report-2026-10-30.md#primary-index-cost-20261124)
 
 <a id="pg-index-comparison-20261124"></a>
 ## 2026-11-24 · 按表查询索引
@@ -21,7 +28,7 @@ PostgreSQL 的 `pg_index` 记录索引与表的对象编号，分开记录键列
 
 PostgreSQL 根据索引编号读取索引目录，再用当前的表名、列名、访问方式和附带列生成建索引语句。SQLite 的 `sqlite_schema` 保存建索引 SQL，`PRAGMA index_xinfo` 提供索引列。DuckDB 的 `duckdb_indexes()` 可以列出显式索引及其定义。 [PostgreSQL 源码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/utils/adt/ruleutils.c) · [SQLite 结构目录](https://www.sqlite.org/schematab.html) · [SQLite 索引列](https://www.sqlite.org/pragma.html#pragma_index_xinfo) · [DuckDB 索引信息](https://duckdb.org/docs/current/sql/meta/duckdb_table_functions#duckdb_indexes)
 
-本项目从实际索引编号和依赖关系找到所属表，只读取该表保存的索引定义。可以还原普通表上显式创建的普通 B 树、唯一 B 树及哈希索引。约束隐式创建的索引和索引目录仍待补齐。 [使用说明](MANUAL.md#查询索引的定义) · [性能报告](performance-report-2026-10-30.md#index-definition-cost-20261124)
+本项目从实际索引编号和依赖关系找到所属表，只读取该表保存的索引定义。可以还原普通表上显式创建的普通 B 树、唯一 B 树及哈希索引。索引表达式和部分索引谓词仍待补齐。 [使用说明](MANUAL.md#查询索引的定义) · [性能报告](performance-report-2026-10-30.md#index-definition-cost-20261124)
 
 <a id="array-subquery-comparison-20261124"></a>
 ## 2026-11-24 · 把查询结果收进数组

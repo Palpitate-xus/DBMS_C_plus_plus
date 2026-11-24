@@ -256,8 +256,23 @@ public:
     using ForeignKeyReferences = std::map<std::string, Oid>;
     void reconcileForeignKeyIdentities(Oid relation, const ForeignKeyReferences& references,
         const std::optional<std::pair<std::string, std::string>>& rename = {});
-    ForeignKeyIdentities foreignKeyIdentities(std::optional<Oid> constraint = {}) const;
-    static ForeignKeyIdentities readForeignKeyIdentities(const std::string& path, std::optional<Oid> constraint = {});
+
+    struct PrimaryKeyIdentity {
+        Oid oid;
+        Oid index;
+    };
+    using PrimaryKeyIdentities = std::map<Oid, PrimaryKeyIdentity>;
+    struct ConstraintIdentities {
+        ForeignKeyIdentities foreign;
+        PrimaryKeyIdentities primary;
+        std::map<Oid, Oid> referencedPrimaryIndexes;
+    };
+    void ensurePrimaryKeyIdentity(Oid relation, Oid index);
+    void initializePrimaryKeyIdentities();
+    ConstraintIdentities constraintIdentities(std::optional<Oid> relation, std::optional<Oid> referenced,
+        std::optional<Oid> constraint) const;
+    static ConstraintIdentities readConstraintIdentities(const std::string& path, std::optional<Oid> relation,
+        std::optional<Oid> referenced, std::optional<Oid> constraint);
 
     // =====================================================================
     // 持久化
@@ -385,6 +400,7 @@ private:
     std::vector<PgDependRow>     depends_;
     std::vector<PgAttrdefRow>    attrdefs_;
     ForeignKeyIdentities        foreignKeys_;
+    PrimaryKeyIdentities        primaryKeys_;
     std::vector<PgAuthIdRow>     authIds_;
     std::vector<PgAuthMembersRow> authMembers_;
     std::vector<PgDescriptionRow> descriptions_;
@@ -423,6 +439,7 @@ private:
 
     std::vector<PgDependRow> findDependsUnlocked(Oid classid, Oid objid, int32_t objsubid = 0) const;
     bool dropAttrdefUnlocked(Oid oid);
+    void ensurePrimaryKeyIdentityUnlocked(Oid relation, Oid index);
     std::vector<PgDependRow> findRefsUnlocked(Oid refclassid, Oid refobjid, int32_t refobjsubid = 0) const;
     std::vector<PgDependRow> findAllDependentsUnlocked(Oid refclassid, Oid refobjid) const;
 

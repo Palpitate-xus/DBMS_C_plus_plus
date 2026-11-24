@@ -76,8 +76,8 @@ public:
     // Specialized read-only projection for pg_attrdef/pg_depend scans.
     CatalogManager::DefaultCatalogSnapshot defaultCatalogSnapshot(
         const std::string& dbname, CatalogManager::DefaultCatalogKind kind, bool includeExpressions = false) const;
-    CatalogManager::ForeignKeyIdentities foreignKeyIdentities(const std::string& dbname,
-        std::optional<Oid> constraint = {}) const;
+    CatalogManager::ConstraintIdentities constraintIdentities(const std::string& dbname, std::optional<Oid> owner = {},
+        std::optional<Oid> referenced = {}, std::optional<Oid> constraint = {}) const;
     std::vector<PgAuthIdRow> publicRoleSnapshot(std::optional<Oid> role) const;
     std::map<std::string, std::string> domainColumns(const std::string& dbname,
                                                     const std::string& physicalTable) const;

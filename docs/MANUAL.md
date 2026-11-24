@@ -2778,6 +2778,18 @@ WHERE indrelid = 'public.orders'::regclass::oid AND indisprimary;
 
 普通非临时表的主键索引有独立编号。表、列或主键约束改名会保留编号。主键列从 `integer` 改成 `bigint`，或删除主键后重新添加，会分配新编号。原版 `psql` 的 `\di` 可以列出主键索引和所有者。旧库如果已有其他对象占用主键索引的名称，可以先给主键约束改名，再查询主键索引。 [测试报告](test-report.md#primary-index-20261124)
 
+### 查询主键和外键使用的索引
+
+`pg_constraint` 记录普通非临时表的主键定义及其索引编号 `conindid`。下面的查询返回 `orders` 的主键定义和索引名称。
+
+```sql
+SELECT conname, pg_catalog.pg_get_constraintdef(oid), conindid::regclass AS index_name
+FROM pg_catalog.pg_constraint
+WHERE conrelid = 'public.orders'::regclass::oid AND contype = 'p';
+```
+
+外键引用已登记主键的整组列时，查询它的 `conindid` 会得到被引用表的主键索引。其他唯一键的索引关联仍待补齐，当前会返回 SQL 空值。 [测试报告](test-report.md#primary-constraint-20261124)
+
 ### 查询索引的定义
 
 用索引名称或编号查出它建在哪张表、索引了哪些列。下面的查询可以显示普通表上显式创建的 B 树索引或哈希索引。

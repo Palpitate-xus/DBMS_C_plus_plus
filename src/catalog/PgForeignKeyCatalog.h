@@ -13,6 +13,10 @@ namespace dbms::foreign_key_catalog {
 inline constexpr Oid relationOid = 2606;
 inline constexpr char name[] = "pg_constraint";
 inline constexpr char version[] = "DBMS_FOREIGN_KEY_CATALOG1\n";
+inline constexpr char primaryKeyVersion[] = "DBMS_PRIMARY_KEY_CATALOG1\n";
+inline constexpr int16_t oidAttribute = 1;
+inline constexpr int16_t ownerAttribute = 9;
+inline constexpr int16_t referencedAttribute = 13;
 inline constexpr std::array<system_catalog::Field, 28> fields{{
     {"oid", 26, 4}, {"conname", 19, 64}, {"connamespace", 26, 4}, {"contype", 18, 1},
     {"condeferrable", 16, 1}, {"condeferred", 16, 1}, {"conenforced", 16, 1}, {"convalidated", 16, 1},
@@ -27,8 +31,8 @@ inline const QueryRowDescriptor& descriptor() {
     static const auto columns = [] {
         auto result = system_catalog::ownedDescriptor(fields,
             {"oid", "conname", "connamespace", "contype", "condeferrable", "condeferred", "conenforced",
-             "convalidated", "conrelid", "contypid", "conparentid", "confrelid", "confupdtype", "confdeltype", "conislocal",
-             "coninhcount", "conperiod", "conkey", "confkey"});
+             "convalidated", "conrelid", "contypid", "conindid", "conparentid", "confrelid", "confupdtype", "confdeltype",
+             "conislocal", "coninhcount", "conperiod", "conkey", "confkey"});
         for (auto& column : result) {
             column.physicalRelationOid = relationOid;
             if (column.typeOid == 1005) column.type = "smallint[]";
@@ -42,7 +46,7 @@ void synchronize(const StorageEngine& engine, const std::string& database,
     CatalogManager& catalog, const PgClassRow& owner, const std::string& physical,
     const std::optional<std::pair<std::string, std::string>>& rename = {});
 std::vector<std::vector<ExprValue>> rows(const StorageEngine& engine, const std::string& database,
-    std::optional<Oid> owner = {}, std::optional<Oid> referenced = {});
+    std::optional<Oid> owner = {}, std::optional<Oid> referenced = {}, std::optional<Oid> constraint = {});
 std::optional<std::string> definition(const StorageEngine& engine, const std::string& database,
     Oid constraint, const Session* session);
 

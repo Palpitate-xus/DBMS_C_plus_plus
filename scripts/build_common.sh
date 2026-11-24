@@ -209,6 +209,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/pg_get_indexdef_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/pg_index_catalog_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/primary_index_catalog_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/primary_key_catalog_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/pg_partition_ancestors_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/pg_roles_catalog_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/array_subquery_protocol_e2e_test.py)

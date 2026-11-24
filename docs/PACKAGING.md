@@ -35,6 +35,12 @@ sudo apt install cmake g++ make zlib1g-dev libicu-dev
 
 上一版程序打开带有新主键索引目录记录的库后，测试表的数据仍可读，但扫描 `pg_index` 返回 `XX001`。需要切回上一版时，使用升级前的备份。
 
+## 主键约束目录升级
+
+新版首次打开已有主键索引编号的库时，会在 `pg_constraint.cat` 为主键约束补写编号。现有外键记录、表编号和索引编号保留。完成后在各数据库的 `pg_catalog` 中写入 `.primary_key_catalog_version`。 [升级和恢复验证](test-report.md#primary-constraint-20261124)
+
+含主键约束新记录的数据目录无法由上一版程序启动。需要切回上一版时，使用升级前的备份。
+
 ## 外键目录升级
 
 打开旧库时，数据库从已有的普通表定义登记外键对象编号，并把编号保存到 `pg_catalog/pg_constraint.cat`。表文件本身沿用原来的格式。备份和恢复应保留整个数据库目录及其目录标记。

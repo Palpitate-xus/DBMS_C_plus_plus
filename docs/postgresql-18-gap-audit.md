@@ -1,8 +1,12 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-24 · 主键约束关联实际索引
+
+普通非临时表的主键约束有独立编号、定义和支持索引。引用同一组主键列的外键可查询相同的索引编号。其他唯一键、分区约束和完整的删除依赖仍待实现。`CAT-02`、`CAT-03`、`CAT-04`、`CAT-07` 和 `CLIENT-01` 保持部分实现。 [功能验证](test-report.md#primary-constraint-20261124) · [性能对照](performance-report-2026-10-30.md#primary-constraint-cost-20261124)
+
 ## 2026-11-24 · 普通主键索引有独立编号
 
-普通非临时表的主键索引有独立的目录记录和键列。表、列及约束改名保留编号，旧库升级可补写编号。约束本身的编号、`conindid`、唯一约束索引和分区主键索引继续跟踪。`CAT-02`、`CAT-03`、`CAT-04`、`CAT-07` 和 `CLIENT-01` 均保持部分实现。 [功能验证](test-report.md#primary-index-20261124) · [性能对照](performance-report-2026-10-30.md#primary-index-cost-20261124)
+普通非临时表的主键索引有独立的目录记录和键列。表、列及约束改名保留编号，旧库升级可补写编号。唯一约束索引和分区主键索引继续跟踪。`CAT-02`、`CAT-03`、`CAT-04`、`CAT-07` 和 `CLIENT-01` 均保持部分实现。 [功能验证](test-report.md#primary-index-20261124) · [性能对照](performance-report-2026-10-30.md#primary-index-cost-20261124)
 
 ## 2026-11-24 · `pg_index` 可查询显式索引
 
@@ -10,7 +14,7 @@
 
 ## 2026-11-24 · 可以查看显式索引的定义
 
-`pg_get_indexdef` 使用已登记的索引和表编号，按当前表名、列名和保存的定义返回 SQL。支持普通表上的显式 B 树和哈希索引。`CAT-02`、`CAT-03` 和 `CLIENT-01` 保持部分实现。完整 `psql \d` 仍需要索引目录 `pg_index`。 [验证范围](test-report.md#index-definition-20261124) · [性能对照](performance-report-2026-10-30.md#index-definition-cost-20261124)
+`pg_get_indexdef` 使用已登记的索引和表编号，按当前表名、列名和保存的定义返回 SQL。支持普通表上的显式 B 树和哈希索引。`CAT-02`、`CAT-03` 和 `CLIENT-01` 保持部分实现。 [验证范围](test-report.md#index-definition-20261124) · [性能对照](performance-report-2026-10-30.md#index-definition-cost-20261124)
 
 ## 2026-11-24 · 把查询结果收进数组
 

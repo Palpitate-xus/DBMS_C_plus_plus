@@ -483,6 +483,9 @@ std::shared_ptr<CatalogManager> loadOwnedCatalog(
             index_catalog::synchronizePrimary(engine, database, *catalog, relation, physical, true);
         }
     }
+    const auto primaryKeyMarker = directory / ".primary_key_catalog_version";
+    const bool publishedPrimaryKeys = catalogVersionPublished(primaryKeyMarker, foreign_key_catalog::primaryKeyVersion);
+    if (!publishedPrimaryKeys) catalog->initializePrimaryKeyIdentities();
     // Some legitimate server cluster scaffolds already have tlist.lst and
     // auth metadata, but no namespace catalog. A newly bootstrapped logical
     // public namespace must have the same checked physical marker as CREATE
@@ -507,8 +510,11 @@ std::shared_ptr<CatalogManager> loadOwnedCatalog(
         }
     }
     migrateLegacyPublicDottedSequences(engine, database, *catalog);
-    if((initializedClassCatalog || initializedOwnedCatalogs || initializedInheritance || initializedSequenceCatalog || initializedStatisticsView || initializedRoles || initializedSystemAttributes || initializedTypeProperties || initializedCatalogCollations || initializedPhysicalArrays || initializedDefaultCatalog || !publishedDefaultCatalog || !publishedTypeProperties || !publishedCatalogCollations || !publishedPhysicalArrays || initializedAccessMethods || !publishedAccessMethods || !publishedCollations || initializedForeignKeys || !publishedForeignKeys || initializedIndexes || !publishedIndexes || !publishedPrimaryIndexes) && !catalog->persistAll())
+    if((initializedClassCatalog || initializedOwnedCatalogs || initializedInheritance || initializedSequenceCatalog || initializedStatisticsView || initializedRoles || initializedSystemAttributes || initializedTypeProperties || initializedCatalogCollations || initializedPhysicalArrays || initializedDefaultCatalog || !publishedDefaultCatalog || !publishedTypeProperties || !publishedCatalogCollations || !publishedPhysicalArrays || initializedAccessMethods || !publishedAccessMethods || !publishedCollations || initializedForeignKeys || !publishedForeignKeys || initializedIndexes || !publishedIndexes || !publishedPrimaryIndexes || !publishedPrimaryKeys) && !catalog->persistAll())
         throw DbError("58030","could not publish initialized system view identities");
+    if (!publishedPrimaryKeys && index_file::writeAtomicallyNoReplace(primaryKeyMarker,
+            foreign_key_catalog::primaryKeyVersion) != index_file::WriteResult::OK)
+        throw DbError("58030", "could not publish primary key catalog version");
     if (!publishedPrimaryIndexes && index_file::writeAtomicallyNoReplace(primaryIndexMarker,
             index_catalog::primaryVersion) != index_file::WriteResult::OK)
         throw DbError("58030", "could not publish primary index catalog version");
@@ -802,12 +808,12 @@ CatalogManager::MetadataSnapshot CatalogService::metadataSnapshot(const std::str
     return CatalogManager::readMetadataSnapshot(catalog.path, includeDefaultObjects);
 }
 
-CatalogManager::ForeignKeyIdentities CatalogService::foreignKeyIdentities(const std::string& database,
-    std::optional<Oid> constraint) const {
+CatalogManager::ConstraintIdentities CatalogService::constraintIdentities(const std::string& database,
+    std::optional<Oid> owner, std::optional<Oid> referenced, std::optional<Oid> constraint) const {
     const auto catalog = readCatalog(database);
-    if (catalog.manager) return catalog.manager->foreignKeyIdentities(constraint);
+    if (catalog.manager) return catalog.manager->constraintIdentities(owner, referenced, constraint);
     if (catalog.path.empty()) return {};
-    return CatalogManager::readForeignKeyIdentities(catalog.path, constraint);
+    return CatalogManager::readConstraintIdentities(catalog.path, owner, referenced, constraint);
 }
 
 std::vector<PgAuthIdRow> CatalogService::publicRoleSnapshot(std::optional<Oid> role) const {
@@ -1015,6 +1021,7 @@ void index_catalog::synchronizePrimary(const StorageEngine& engine, const std::s
     }
     for (auto& field : attributes) field.attrelid = oid;
     if (!catalog.replaceAttributes(oid, attributes)) throw DbError("XX001", "could not register primary index columns");
+    catalog.ensurePrimaryKeyIdentity(owner.oid, oid);
 }
 
 std::optional<std::string> CatalogService::indexDefinition(const std::string& database, Oid oid,
@@ -1230,6 +1237,15 @@ struct StoredDefinition {
     bool validated;
 };
 
+struct PrimaryDefinition {
+    std::string name;
+    Oid ownerNamespace;
+    std::vector<std::string> columns;
+    std::vector<int16_t> numbers;
+    bool deferrable;
+    bool initiallyDeferred;
+};
+
 // Validate the owning table against the same catalog generation before
 // projecting its fields or reconstructing SQL. The caller holds the read fence.
 class DefinitionReader {
@@ -1238,6 +1254,8 @@ public:
         : engine_(engine), database_(database), metadata_(engine.catalogService().metadataSnapshot(database, false)) {
         for (const auto& row : metadata_.relations) relations_.emplace(row.oid, &row);
         for (const auto& space : metadata_.namespaces) namespaces_.emplace(space.oid, space.nspname);
+        for (const auto& field : metadata_.attributes)
+            if (field.attnum > 0 && !field.attisdropped) attributes_[field.attrelid].push_back(&field);
     }
 
     const CatalogManager::MetadataSnapshot& metadata() const { return metadata_; }
@@ -1247,17 +1265,7 @@ public:
         const auto& [owner, name] = entry.first;
         const auto& child = relation(owner);
         const auto& parent = relation(entry.second.referenced);
-        if (current_ != owner) {
-            auto storage = physical(child);
-            table_ = engine_.readPersistedSchemaForCatalog(database_, storage);
-            if (!table_ && namespaces_.at(child.relnamespace) == "public") {
-                storage = "public__" + storage;
-                table_ = engine_.readPersistedSchemaForCatalog(database_, storage);
-            }
-            if (!table_) throw DbError("XX001", "foreign key catalog owner has no stored schema");
-            params_ = engine_.getStorageParams(database_, storage);
-            current_ = owner;
-        }
+        readOwner(child);
         const auto fk = std::find_if(table_->fks.begin(), table_->fks.end(), [&](const auto& candidate) {
             return candidate.name == name;
         });
@@ -1266,13 +1274,28 @@ public:
         if ((fk->refTable != target && (namespaces_.at(parent.relnamespace) != "public" || fk->refTable != "public__" + target)) ||
             fk->colNames.empty() || fk->colNames.size() != fk->refCols.size())
             throw DbError("XX001", "foreign key identity differs from its stored definition");
-        const auto flag = [&](const char* suffix, bool missing) {
-            const auto setting = params_.find("constraint." + name + '.' + suffix);
-            return setting == params_.end() ? missing : setting->second == "1";
-        };
         return {*fk, child.relnamespace, columnNumbers(owner, fk->colNames),
-            columnNumbers(parent.oid, fk->refCols), flag("deferrable", false),
-            flag("initially_deferred", false), flag("validated", !flag("not_valid", false))};
+            columnNumbers(parent.oid, fk->refCols), flag(name, "deferrable"),
+            flag(name, "initially_deferred"), flag(name, "validated", !flag(name, "not_valid"))};
+    }
+
+    PrimaryDefinition readPrimary(Oid owner, Oid index) {
+        checkForQueryInterrupt();
+        const auto& table = relation(owner);
+        const auto& backing = relation(index);
+        readOwner(table);
+        auto columns = primaryIndexColumns(index);
+        if (columns != primaryKeyColumns(*table_))
+            throw DbError("XX001", "primary key constraint columns differ from the owning table");
+        auto numbers = columnNumbers(owner, columns);
+        return {backing.relname, table.relnamespace, std::move(columns), std::move(numbers),
+            flag(backing.relname, "deferrable"), flag(backing.relname, "initially_deferred")};
+    }
+
+    bool referencesPrimaryIndex(Oid index, const std::vector<std::string>& referencedColumns) const {
+        const auto key = primaryIndexColumns(index);
+        return key.size() == referencedColumns.size() &&
+            std::is_permutation(key.begin(), key.end(), referencedColumns.begin());
     }
 
 private:
@@ -1281,50 +1304,97 @@ private:
     const CatalogManager::MetadataSnapshot metadata_;
     std::map<Oid, const PgClassRow*> relations_;
     std::map<Oid, std::string_view> namespaces_;
+    std::unordered_map<Oid, std::vector<const PgAttributeRow*>> attributes_;
     Oid current_ = INVALID_OID;
     std::optional<TableSchema> table_;
     std::map<std::string, std::string> params_;
 
     const PgClassRow& relation(Oid oid) const {
         const auto found = relations_.find(oid);
-        if (found == relations_.end()) throw DbError("XX001", "foreign key catalog relation is missing");
+        if (found == relations_.end()) throw DbError("XX001", "constraint catalog relation is missing");
         return *found->second;
     }
 
     std::string physical(const PgClassRow& row) const {
         const auto space = namespaces_.find(row.relnamespace);
-        if (space == namespaces_.end()) throw DbError("XX001", "foreign key catalog relation has no namespace");
+        if (space == namespaces_.end()) throw DbError("XX001", "constraint catalog relation has no namespace");
         return space->second == "public" ? row.relname : std::string(space->second) + "__" + row.relname;
     }
 
+    void readOwner(const PgClassRow& owner) {
+        if (current_ == owner.oid) return;
+        auto storage = physical(owner);
+        table_ = engine_.readPersistedSchemaForCatalog(database_, storage);
+        if (!table_ && namespaces_.at(owner.relnamespace) == "public") {
+            storage = "public__" + storage;
+            table_ = engine_.readPersistedSchemaForCatalog(database_, storage);
+        }
+        if (!table_) throw DbError("XX001", "constraint catalog owner has no stored schema");
+        params_ = engine_.getStorageParams(database_, storage);
+        current_ = owner.oid;
+    }
+
+    bool flag(const std::string& name, const char* suffix, bool missing = false) const {
+        const auto setting = params_.find("constraint." + name + '.' + suffix);
+        return setting == params_.end() ? missing : setting->second == "1";
+    }
+
+    std::vector<std::string> primaryIndexColumns(Oid index) const {
+        const auto& backing = relation(index);
+        const auto fields = attributes_.find(index);
+        if (backing.relkind != 'i' || backing.relnatts <= 0 || fields == attributes_.end() ||
+            fields->second.size() != static_cast<size_t>(backing.relnatts))
+            throw DbError("XX001", "invalid primary index columns");
+        std::vector<std::string> columns(fields->second.size());
+        for (const auto* field : fields->second) {
+            const size_t position = field->attnum - 1;
+            if (position >= columns.size() || !columns[position].empty() || field->attname.empty())
+                throw DbError("XX001", "invalid primary index column order");
+            columns[position] = field->attname;
+        }
+        return columns;
+    }
+
     std::vector<int16_t> columnNumbers(Oid relation, const std::vector<std::string>& columns) const {
+        const auto found = attributes_.find(relation);
+        if (found == attributes_.end()) throw DbError("XX001", "constraint catalog fields are missing");
+        const auto& fields = found->second;
         std::vector<int16_t> numbers;
         numbers.reserve(columns.size());
         for (const auto& name : columns) {
-            const auto field = std::find_if(metadata_.attributes.begin(), metadata_.attributes.end(), [&](const auto& attr) {
-                return attr.attrelid == relation && attr.attname == name && attr.attnum > 0 && !attr.attisdropped;
+            const auto field = std::find_if(fields.begin(), fields.end(), [&](const auto* attr) {
+                return attr->attname == name;
             });
-            if (field == metadata_.attributes.end()) throw DbError("XX001", "foreign key catalog field is missing");
-            numbers.push_back(field->attnum);
+            if (field == fields.end()) throw DbError("XX001", "constraint catalog field is missing");
+            numbers.push_back((*field)->attnum);
         }
         return numbers;
     }
 };
 
+std::string quotedColumns(const std::vector<std::string>& columns) {
+    std::string sql;
+    for (const auto& name : columns) {
+        if (!sql.empty()) sql += ", ";
+        sql += SQLParser::quoteIdentifier(name);
+    }
+    return sql;
+}
+
 } // namespace
 
 std::vector<std::vector<ExprValue>> rows(const StorageEngine& engine, const std::string& database,
-    std::optional<Oid> ownerFilter, std::optional<Oid> referencedFilter) {
+    std::optional<Oid> ownerFilter, std::optional<Oid> referencedFilter, std::optional<Oid> constraintFilter) {
     const auto fence = engine.catalogReadOwnership(database);
     if (!fence.mayReadCurrentFiles)
-        throw DbError("55P03", "foreign key catalog read conflicts with an active database writer");
-    const auto keys = engine.catalogService().foreignKeyIdentities(database);
-    if (keys.empty()) return {};
+        throw DbError("55P03", "constraint catalog read conflicts with an active database writer");
+    const auto keys = engine.catalogService().constraintIdentities(database, ownerFilter, referencedFilter, constraintFilter);
+    if (keys.foreign.empty() && keys.primary.empty()) return {};
     DefinitionReader reader(engine, database);
     const auto keyType = DatumMetadataFactory(reader.metadata()).type(1005);
     if (!keyType || keyType->kind != DatumKind::Array || !keyType->arrayElement ||
         keyType->arrayElement->actualOid != 21)
-        throw DbError("XX001", "foreign key column numbers have no smallint array type");
+        throw DbError("XX001", "constraint column numbers have no smallint array type");
     const auto array = [&](const std::vector<int16_t>& columns) {
         std::string text = "{";
         auto value = std::make_shared<CompoundDatum>();
@@ -1345,20 +1415,28 @@ std::vector<std::vector<ExprValue>> rows(const StorageEngine& engine, const std:
     };
     const auto oid = [](Oid value) { return ExprValue("oid", std::to_string(value)); };
     const auto boolean = [](bool value) { return ExprValue("boolean", value ? "t" : "f"); };
-    const auto action = [](const std::string& value) {
-        return ExprValue("\"char\"", std::string(1, referentialAction(value).code));
-    };
+    const auto code = [](char value) { return ExprValue("\"char\"", std::string(1, value)); };
     std::vector<std::vector<ExprValue>> result;
-    const auto begin = ownerFilter ? keys.lower_bound({*ownerFilter, {}}) : keys.begin();
-    for (auto entry = begin; entry != keys.end(); ++entry) {
-        const auto& [owner, name] = entry->first;
-        const auto& identity = entry->second;
-        if (ownerFilter && owner != *ownerFilter) break;
-        if (referencedFilter && identity.referenced != *referencedFilter) continue;
-        const auto row = reader.read(*entry);
-        result.push_back({oid(identity.oid), ExprValue("name", name), oid(row.ownerNamespace), ExprValue("\"char\"", "f"),
+    result.reserve(keys.foreign.size() + keys.primary.size());
+    for (const auto& [owner, identity] : keys.primary) {
+        const auto row = reader.readPrimary(owner, identity.index);
+        result.push_back({oid(identity.oid), ExprValue("name", row.name), oid(row.ownerNamespace), code('p'),
+            boolean(row.deferrable), boolean(row.initiallyDeferred), boolean(true), boolean(true),
+            oid(owner), oid(0), oid(identity.index), oid(0), oid(0), code(' '), code(' '),
+            boolean(true), ExprValue("smallint", "0"), boolean(false), array(row.numbers), ExprValue("smallint[]", "", true)});
+    }
+    for (const auto& entry : keys.foreign) {
+        const auto& [owner, name] = entry.first;
+        const auto& identity = entry.second;
+        const auto row = reader.read(entry);
+        auto supporting = ExprValue("oid", "", true);
+        const auto index = keys.referencedPrimaryIndexes.find(identity.referenced);
+        if (index != keys.referencedPrimaryIndexes.end() && reader.referencesPrimaryIndex(index->second, row.key.refCols))
+            supporting = oid(index->second);
+        result.push_back({oid(identity.oid), ExprValue("name", name), oid(row.ownerNamespace), code('f'),
             boolean(row.deferrable), boolean(row.initiallyDeferred), boolean(true), boolean(row.validated),
-            oid(owner), oid(0), oid(0), oid(identity.referenced), action(row.key.onUpdate), action(row.key.onDelete),
+            oid(owner), oid(0), std::move(supporting), oid(0), oid(identity.referenced),
+            code(referentialAction(row.key.onUpdate).code), code(referentialAction(row.key.onDelete).code),
             boolean(true), ExprValue("smallint", "0"), boolean(false), array(row.localColumns), array(row.referencedColumns)});
     }
     return result;
@@ -1369,23 +1447,22 @@ std::optional<std::string> definition(const StorageEngine& engine, const std::st
     if (!constraint) return {};
     const auto fence = engine.catalogReadOwnership(database);
     if (!fence.mayReadCurrentFiles)
-        throw DbError("55P03", "foreign key definition read conflicts with an active database writer");
-    const auto keys = engine.catalogService().foreignKeyIdentities(database, constraint);
-    if (keys.empty()) return {};
+        throw DbError("55P03", "constraint definition read conflicts with an active database writer");
+    const auto keys = engine.catalogService().constraintIdentities(database, {}, {}, constraint);
+    if (keys.foreign.empty() && keys.primary.empty()) return {};
     DefinitionReader reader(engine, database);
-    const auto& entry = *keys.begin();
+    if (!keys.primary.empty()) {
+        const auto& [owner, identity] = *keys.primary.begin();
+        const auto row = reader.readPrimary(owner, identity.index);
+        auto sql = "PRIMARY KEY (" + quotedColumns(row.columns) + ')';
+        if (row.deferrable) sql += " DEFERRABLE";
+        if (row.initiallyDeferred) sql += " INITIALLY DEFERRED";
+        return sql;
+    }
+    const auto& entry = *keys.foreign.begin();
     const auto row = reader.read(entry);
-    std::string sql = "FOREIGN KEY (";
-    const auto appendColumns = [&](const std::vector<std::string>& columns) {
-        for (size_t i = 0; i < columns.size(); ++i) {
-            if (i) sql += ", ";
-            sql += SQLParser::quoteIdentifier(columns[i]);
-        }
-    };
-    appendColumns(row.key.colNames);
-    sql += ") REFERENCES " + regclass_detail::output(entry.second.referenced, reader.metadata(), session) + '(';
-    appendColumns(row.key.refCols);
-    sql += ')';
+    auto sql = "FOREIGN KEY (" + quotedColumns(row.key.colNames) + ") REFERENCES " +
+        regclass_detail::output(entry.second.referenced, reader.metadata(), session) + '(' + quotedColumns(row.key.refCols) + ')';
     if (const auto update = referentialAction(row.key.onUpdate).sql) sql += std::string(" ON UPDATE ") + update;
     if (const auto deletion = referentialAction(row.key.onDelete).sql) sql += std::string(" ON DELETE ") + deletion;
     if (row.deferrable) sql += " DEFERRABLE";

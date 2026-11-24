@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>可以查询主键定义和它使用的索引 · 2026-11-24</summary>
+
+例如，可以查到订单表用哪几列作为主键，也可以查到哪些外键引用了这个主键。
+
+[查询示例](docs/MANUAL.md#查询主键和外键使用的索引) · [测试报告](docs/test-report.md#primary-constraint-20261124) · [性能报告](docs/performance-report-2026-10-30.md#primary-constraint-cost-20261124)
+
+</details>
+
+<details>
 <summary>可以查看数据库自动创建的主键索引 · 2026-11-24</summary>
 
 例如，在 `psql` 中可以列出订单表的主键索引，也可以查询这个索引用了哪几列。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>查看某个索引用了哪些列 · 2026-11-24</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-24 · 查看某个索引用了哪些列
 
 例如，可以查到订单表的一个索引按客户编号查找，同时保存了订单日期。可以查看整个索引的定义，也可以只查其中一列。
 
 [查询示例](docs/MANUAL.md#查询索引的定义) · [测试报告](docs/test-report.md#index-definition-20261124) · [性能报告](docs/performance-report-2026-10-30.md#index-definition-cost-20261124)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-24 · 把多行查询结果放进一个数组
 
