@@ -6,9 +6,13 @@
 
 截至 2026-11-24，273 项功能要求中有 22 项完成、169 项部分实现、67 项待验证、15 项暂缓。各项结果和剩余范围见功能总账。以下更新报告给出各轮测试的实际范围。[功能总账](gap-progress.json) · [支持的功能和限制](compatibility-contract.md)
 
+## 2026-11-24 · 可以查到列的类型和长度
+
+通过 SQL 可以查询列类型，包括字符长度、数字精度和数组。原版 `psql` 的 `\d` 仍需要列默认值目录里的 `adbin` 才能显示列详情。 [查询示例](MANUAL.md#查询列的类型) · [测试报告](test-report.md#format-type-20261124) · [性能报告](performance-report-2026-10-30.md#format-type-cost-20261124)
+
 ## 2026-11-24 · psql 可以列出普通表
 
-原版 `psql` 18.6 可用 `\dt` 列出表名、所属模式、类型和所有者。`\d` 可读取表的访问方式，列类型格式化及索引目录还待补齐。 [测试报告](test-report.md#pg-access-method-20261124) · [性能报告](performance-report-2026-10-30.md#pg-access-method-cost-20261124)
+原版 `psql` 18.6 可用 `\dt` 列出表名、所属模式、类型和所有者。`\d` 可读取表的访问方式，索引目录还待补齐。 [测试报告](test-report.md#pg-access-method-20261124) · [性能报告](performance-report-2026-10-30.md#pg-access-method-cost-20261124)
 
 ## 2026-11-24 · psql 按名称查找表
 

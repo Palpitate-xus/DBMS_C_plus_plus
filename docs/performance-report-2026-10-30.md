@@ -4,6 +4,30 @@
 
 > 复核发现，几组早期 COPY 计时在每个对照场景中使用了固定的执行顺序。耗时差可能包含顺序影响。这项问题涉及默认值求值、按列查找、默认值标记、短 CSV 导出和短查询导出的配对计时。[默认值求值](#copy-default-evaluation-order-cost-20261122) · [按列查找](#copy-identity-input-cost-20261122) · [默认值标记](#copy-default-marker-cost-20261122) · [CSV 导出](#copy-csv-out-cost-20261122) · [查询导出](#copy-query-stdout-cost-20261122)
 
+<a id="format-type-cost-20261124"></a>
+## 2026-11-24 · 查询列类型和长度的耗时
+
+测试使用 Intel Xeon E5-2678 v3。两套本项目程序用 GCC 13.3、CMake、C++17 和 `-O2` 构建，关闭 OpenSSL，数据目录位于 `/dev/shm`。比较实现初版、完成优化的版本和 PostgreSQL 18.6。初版已提供 `format_type`，普通的目录类型名每次都读取并复制目录。要复现初版，可省略 `FormatType.h` 中 `pg_catalog` 排第一时直接使用内置定义的分支。更早的 `89a0c7bd` 在准备该函数调用时报错。
+
+查询 9 列使用协议测试中的 `COLUMNS` 建表并执行 `COLUMN_QUERY`。另外在同一个连接上执行以下两条查询。 [建表与查询夹具](../tests/format_type_protocol_e2e_test.py)
+
+```sql
+SELECT pg_catalog.format_type(1043,5+(n % 12)) AS declared
+FROM generate_series(1,128) AS n;
+SELECT pg_catalog.format_type(25,(n % 2)-2) AS declared
+FROM generate_series(1,128) AS n;
+```
+
+客户端和服务端使用 CPU 13、28。计时从本地 TCP 发送 SQL 到收到就绪消息，同时逐次核对结果行、列类型和完成消息。各版本轮流执行，第二轮反转顺序。每轮前 4 次预热，随后计时 20 次。下表为两轮的范围，P95 取每轮第 19 小样本，单位为毫秒。
+
+| 场景 | 初版中位数 | 优化后中位数 | PostgreSQL 中位数 | 初版 P95 | 优化后 P95 | PostgreSQL P95 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 从目录查询 9 个真实列类型 | 26.59–27.76 | 26.64–27.53 | 0.76–0.82 | 28.45–28.54 | 28.78 | 0.84–0.87 |
+| 格式化 128 个字符长度 | 43.91–45.24 | 44.73–44.75 | 1.24 | 45.96–46.44 | 45.77–47.76 | 1.33–1.46 |
+| 重复查找内置 `text` 名称 128 次 | 50.74–50.78 | 44.56–45.02 | 1.22–1.24 | 51.89–53.20 | 45.70–46.11 | 1.32–1.42 |
+
+重复查找 `text` 的中位数在两轮分别降低约 12% 和 11%。从目录查询的中位数在两轮一降一升，P95 均略高。字符长度查询的中位数也是一升一降。三项查询的耗时仍明显高于 PostgreSQL。 [功能验证](test-report.md#format-type-20261124) · [实现对照](postgresql-comparison.md#format-type-comparison-20261124)
+
 <a id="pg-access-method-cost-20261124"></a>
 ## 2026-11-24 · 按名称查表和列出普通表
 

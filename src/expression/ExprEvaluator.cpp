@@ -4,6 +4,7 @@
 #include "expression/CompoundValueOps.h"
 #include "expression/LocalExpressionSyntax.h"
 #include "catalog/DatumMetadataFactory.h"
+#include "catalog/FormatType.h"
 #include "catalog/RelationSearchPath.h"
 #include "expression/StoredRegtypeValue.h"
 #include "utils/numeric_type.h"
@@ -6587,6 +6588,21 @@ struct SqlRoleNameFunction {
         return ExprValue("name", "unknown (OID=" + std::to_string(oid) + ")");
     }
 };
+struct SqlFormatTypeFunction {
+    ExprValue operator()(const std::vector<ExprValue>&) const {
+        throw DbError("XX000", "format_type requires its catalog context");
+    }
+
+    ExprValue invoke(const std::vector<ExprValue>& args, StorageEngine& engine,
+                     const std::string& database) const {
+        if (args.size() != 2) throw DbError("42883", "format_type requires two arguments");
+        if (args[0].isNull) return ExprValue("text", "", true);
+        const auto oid = args[0].objectOid ? *args[0].objectOid : parseOidInput(args[0].value);
+        std::optional<int32_t> typmod;
+        if (!args[1].isNull) typmod = static_cast<int32_t>(args[1].asInt());
+        return ExprValue("text", type_display::format(engine, database, oid, typmod, currentSession()));
+    }
+};
 struct SqlSessionSettingFunction {
     bool write;
 
@@ -6607,6 +6623,8 @@ bool ownsScalarSignatures(const std::string& name,const ScalarFunction* callback
         return callback && callback->target<SqlTableVisibilityFunction>();
     if (name == "pg_get_userbyid")
         return callback && callback->target<SqlRoleNameFunction>();
+    if (name == "format_type")
+        return callback && callback->target<SqlFormatTypeFunction>();
     if(isCoreOverloadedScalarName(name))
         return callback && callback->target<DeclaredCoreScalarFunction>();
     if(isArraySearchScalarName(name))
@@ -6696,6 +6714,11 @@ const std::vector<ScalarSignature>& scalarSignatures(const std::string& name) {
     if (name == "pg_get_userbyid") {
         static const auto* const signatures = new const std::vector<ScalarSignature>{
             {{"oid"}, "name"}};
+        return *signatures;
+    }
+    if (name == "format_type") {
+        static const auto* const signatures = new const std::vector<ScalarSignature>{
+            {{"oid", "integer"}, "pg_catalog.text"}};
         return *signatures;
     }
     if (name == "current_setting") {
@@ -6939,7 +6962,7 @@ ResolvedScalarFunction resolveTypedScalar(const std::string& name,
         candidates.erase(std::remove_if(candidates.begin(),candidates.end(),[](const auto& candidate){return candidate.polymorphic;}),candidates.end());
     if(candidates.size()>1)throw DbError("42725","function "+name+" is not unique");
     if(candidates.empty())return {};
-    if((name=="scale" || name=="min_scale" || name=="gcd" || name=="lcm" || name=="factorial" ||
+    if((name=="scale" || name=="min_scale" || name=="gcd" || name=="lcm" || name=="factorial" || name=="format_type" ||
         isSessionSettingFunction(name)) && !candidates.front().stored &&
        (call->hasOver || call->distinct || call->filter || !call->orderBy.empty() ||
         !call->aggregateOrderKeys.empty()))
@@ -8014,6 +8037,9 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
         } else if (const auto* user = it->second.target<SqlRoleNameFunction>()) {
             auto* owner = sqlValueEngine_ ? sqlValueEngine_ : &g_engine;
             result = user->invoke(args, *owner);
+        } else if (const auto* type = it->second.target<SqlFormatTypeFunction>()) {
+            auto* owner = sqlValueEngine_ ? sqlValueEngine_ : &g_engine;
+            result = type->invoke(args, *owner, currentDB_);
         } else result = it->second(args);
         if(!pushElement && declaredResult.size()>=2 && declaredResult.compare(declaredResult.size()-2,2,"[]")==0)
             result=implicitRuntimeValue(*this,std::move(result),declaredResult);
@@ -14002,6 +14028,8 @@ void ExprEvaluator::registerStatelessBuiltins() {
     volatility_["pg_table_is_visible"] = 's';
     functions_["pg_get_userbyid"] = SqlRoleNameFunction{};
     volatility_["pg_get_userbyid"] = 's';
+    functions_["format_type"] = SqlFormatTypeFunction{};
+    volatility_["format_type"] = 's';
     functions_["current_setting"] = SqlSessionSettingFunction{false};
     functions_["set_config"] = SqlSessionSettingFunction{true};
     functions_["version"]=SqlVersionFunction{};

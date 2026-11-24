@@ -2701,7 +2701,7 @@ WHERE c.relname = 'orders'
 ORDER BY n.nspname, c.relname;
 ```
 
-`psql` 的 `\d orders` 能查找表并读取访问方式。显示列和索引的后续步骤还需要补齐。 [验证记录](test-report.md#pg-access-method-20261124)
+`psql` 的 `\d orders` 能查找表并读取访问方式，随后还需要读取列默认值。可以先用下面的 SQL 查询列类型。 [验证记录](test-report.md#format-type-20261124)
 
 ### 查询表和索引的访问方式
 
@@ -2717,6 +2717,22 @@ ORDER BY 1, 2;
 ```
 
 `pg_am` 可以查询 `oid`、`amname` 和 `amtype`。其中 `t` 代表表，`i` 代表索引。处理函数字段 `amhandler` 仍未开放，请在查询中列出需要的字段。 [验证记录](test-report.md#pg-access-method-20261124)
+
+### 查询列的类型
+
+查询 `public.orders` 的列名、类型、长度和精度。结果可能包括 `integer`、`character varying(12)` 和 `numeric(10,2)`。
+
+```sql
+SELECT a.attname, pg_catalog.format_type(a.atttypid, a.atttypmod) AS declared_type
+FROM pg_catalog.pg_attribute a
+JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
+JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = 'public' AND c.relname = 'orders'
+  AND a.attnum > 0 AND NOT a.attisdropped
+ORDER BY a.attnum;
+```
+
+`format_type` 根据类型编号和列中保存的长度或精度生成类型名。也可以传入 `NULL` 作为第二个参数，只查看该类型的名称。类型被搜索路径中的同名类型挡住时，返回的名称会带上所属模式。 [验证记录](test-report.md#format-type-20261124)
 
 ---
 

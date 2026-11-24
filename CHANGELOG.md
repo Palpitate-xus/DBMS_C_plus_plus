@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>可以查到列的类型和长度 · 2026-11-24</summary>
+
+可以用 SQL 查看一列是整数、日期还是文本。例如，声明为 `varchar(12)` 的列会显示长度 12。`psql` 的 `\d` 还缺少读取列默认值的功能。
+
+[查询示例](docs/MANUAL.md#查询列的类型) · [测试报告](docs/test-report.md#format-type-20261124) · [性能报告](docs/performance-report-2026-10-30.md#format-type-cost-20261124)
+
+</details>
+
+<details>
 <summary>可以用 psql 列出表 · 2026-11-24</summary>
 
 在 `psql` 中输入 `\dt` 就能看到表名和所有者。可以按表名筛选，也可以只看某个模式里的表。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>修复 psql 密码登录 · 2026-11-24</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-24 · 修复 psql 密码登录
 
 用原版 `psql` 18.6 在本机连接数据库时，可以用密码登录并执行查询。密码输错时会提示登录失败。
 
 [连接说明](docs/MANUAL.md#18-网络服务) · [测试报告](docs/test-report.md#scram-libpq-20261124) · [性能报告](docs/performance-report-2026-10-30.md#scram-libpq-cost-20261124)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-24 · 在 psql 里重复执行分页查询更快
 

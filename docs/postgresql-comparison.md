@@ -2,6 +2,13 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="format-type-comparison-20261124"></a>
+## 2026-11-24 · 查询列的类型和长度
+
+PostgreSQL 从类型目录缓存获取指定编号的类型及数组元素，按搜索路径决定是否加上模式名。长度和精度来自列保存的修饰值，按类型的输出函数生成。SQLite 的 `PRAGMA table_xinfo` 直接给出列声明中的类型及隐藏列标记。DuckDB 的 `duckdb_columns()` 把类型名、类型编号、精度和小数位数分别列出。 [PostgreSQL 18.6 类型格式化实现](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/utils/adt/format_type.c) · [SQLite 列信息](https://www.sqlite.org/pragma.html#pragma_table_xinfo) · [DuckDB 列信息](https://duckdb.org/docs/stable/sql/meta/duckdb_table_functions.html#duckdb_columns)
+
+本项目也从类型编号生成显示名称，使用类型和数组元素间的真实目录关联，并读取列实际保存的长度或精度。可以从不可变的内置类型声明确定结果时，跳过整个目录的读取和复制。搜索路径可能选中同名用户类型时，使用当前目录判断。 [功能验证](test-report.md#format-type-20261124) · [性能对照](performance-report-2026-10-30.md#format-type-cost-20261124)
+
 <a id="pg-access-method-comparison-20261124"></a>
 ## 2026-11-24 · 查表和索引的访问方式
 

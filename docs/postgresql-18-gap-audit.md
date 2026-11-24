@@ -1,8 +1,12 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-24 · 用 SQL 查询列的类型和长度
+
+新增 `format_type`，可用类型编号和列定义的长度或精度生成名称。对照 PostgreSQL 18.6 验证了常见内置类型、枚举、域、数组和搜索路径。原版 `psql` 18.6 的 `\d` 已能找到此函数，接下来仍缺 `pg_attrdef.adbin`。`CAT-03` 和 `CLIENT-01` 保持部分实现。 [功能验证](test-report.md#format-type-20261124) · [性能对照](performance-report-2026-10-30.md#format-type-cost-20261124)
+
 ## 2026-11-24 · 可以用 psql 列出普通表
 
-增加 `pg_am` 的访问方式编号、名称和种类，以及根据角色编号返回名称的 `pg_get_userbyid`。普通堆表和已登记的显式索引通过 `relam` 关联真实访问方式。原版 `psql` 18.6 的 `\dt` 可列出普通表。`\d` 的列类型格式化、索引目录及处理函数仍待补齐。`CAT-03` 和 `CLIENT-01` 保持部分实现。 [功能验证](test-report.md#pg-access-method-20261124) · [性能对照](performance-report-2026-10-30.md#pg-access-method-cost-20261124)
+增加 `pg_am` 的访问方式编号、名称和种类，以及根据角色编号返回名称的 `pg_get_userbyid`。普通堆表和已登记的显式索引通过 `relam` 关联真实访问方式。原版 `psql` 18.6 的 `\dt` 可列出普通表。索引目录及处理函数仍待补齐。`CAT-03` 和 `CLIENT-01` 保持部分实现。 [功能验证](test-report.md#pg-access-method-20261124) · [性能对照](performance-report-2026-10-30.md#pg-access-method-cost-20261124)
 
 ## 2026-11-24 · psql 可以完成按名称查找表
 
