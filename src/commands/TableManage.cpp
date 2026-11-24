@@ -11453,6 +11453,96 @@ std::filesystem::path StorageEngine::secondaryIndexMetaPath(const std::string& d
 }
 
 namespace {
+struct FileImageGeneration {
+    dev_t device = 0;
+    ino_t inode = 0;
+    mode_t mode = 0;
+    off_t size = 0;
+    timespec modified{};
+    timespec changed{};
+
+    static FileImageGeneration from(const struct stat& status) {
+        return {status.st_dev, status.st_ino, status.st_mode, status.st_size,
+                status.st_mtim, status.st_ctim};
+    }
+
+    bool operator==(const FileImageGeneration& other) const {
+        return device == other.device && inode == other.inode &&
+            mode == other.mode && size == other.size &&
+            modified.tv_sec == other.modified.tv_sec &&
+            modified.tv_nsec == other.modified.tv_nsec &&
+            changed.tv_sec == other.changed.tv_sec &&
+            changed.tv_nsec == other.changed.tv_nsec;
+    }
+};
+
+template <typename T>
+class MetadataReadCache {
+public:
+    bool observePath(const std::filesystem::path& path) {
+        for (const auto& entry : recent_)
+            if (entry.path == path) return true;
+        remember(path, std::nullopt);
+        return false;
+    }
+
+    // Stream the first lookup and only pay to collect a reusable image when
+    // the same file generation is requested again.
+    std::optional<T>* repeated(const std::filesystem::path& path, FileImageGeneration generation) {
+        for (auto& entry : recent_) {
+            if (entry.path != path) continue;
+            if (entry.generation == generation) return &entry.parsed;
+            entry = {path, generation, std::nullopt};
+            return nullptr;
+        }
+        remember(path, generation);
+        return nullptr;
+    }
+
+private:
+    struct Entry {
+        std::filesystem::path path;
+        std::optional<FileImageGeneration> generation;
+        std::optional<T> parsed;
+    };
+    void remember(const std::filesystem::path& path, std::optional<FileImageGeneration> generation) {
+        recent_[next_] = {path, std::move(generation), std::nullopt};
+        next_ = (next_ + 1) % recent_.size();
+    }
+    std::array<Entry, 2> recent_{};
+    size_t next_ = 0;
+};
+
+// Only remember bytes read from the same open file described by the caller's
+// stat, and only while that descriptor's generation is unchanged. Large or
+// unstable files continue through the ordinary streaming readers.
+std::optional<std::string> readMetadataImage(const std::filesystem::path& path,
+    const FileImageGeneration& observed, int openFlags) {
+    constexpr off_t cacheImageLimit = 256 * 1024;
+    if (!S_ISREG(observed.mode) || observed.size < 0 || observed.size > cacheImageLimit)
+        return std::nullopt;
+    struct Handle {
+        int fd;
+        ~Handle() { if (fd >= 0) (void)::close(fd); }
+    } file{::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NONBLOCK | openFlags)};
+    if (file.fd < 0) return std::nullopt;
+
+    struct stat status{};
+    if (::fstat(file.fd, &status) != 0 || !(FileImageGeneration::from(status) == observed))
+        return std::nullopt;
+    std::string bytes(static_cast<size_t>(observed.size), '\0');
+    size_t offset = 0;
+    while (offset < bytes.size()) {
+        const ssize_t count = ::read(file.fd, bytes.data() + offset, bytes.size() - offset);
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0) return std::nullopt;
+        offset += static_cast<size_t>(count);
+    }
+    if (::fstat(file.fd, &status) != 0 || !(FileImageGeneration::from(status) == observed))
+        return std::nullopt;
+    return bytes;
+}
+
 std::filesystem::path namedIndexMetaPath(const StorageEngine& engine,
                                          const std::string& dbname,
                                          const std::string& tablename) {
@@ -11530,13 +11620,39 @@ bool StorageEngine::registerIndexName(const std::string& dbname,
 std::optional<StorageEngine::NamedIndexInfo> StorageEngine::getNamedIndex(
     const std::string& dbname, const std::string& tablename,
     const std::string& indexName) const {
-    std::ifstream in(namedIndexMetaPath(*this, dbname, tablename));
-    std::string name;
-    while (std::getline(in, name, '\t')) {
-        NamedIndexInfo entry;
-        entry.name = name;
-        if (!std::getline(in, entry.accessMethod, '\t') ||
-            !std::getline(in, entry.key)) break;
+    const auto path = namedIndexMetaPath(*this, dbname, tablename);
+    const auto readEntry = [](std::istream& input, NamedIndexInfo& entry) {
+        return std::getline(input, entry.name, '\t') && std::getline(input, entry.accessMethod, '\t') &&
+               std::getline(input, entry.key);
+    };
+    thread_local MetadataReadCache<std::vector<NamedIndexInfo>> recent;
+    struct stat status{};
+    // A cold name lookup can stream directly. Stat is needed only when the
+    // same metadata path is still in this reader's small working set.
+    if (recent.observePath(path) && ::stat(path.c_str(), &status) == 0 && S_ISREG(status.st_mode)) {
+        const auto generation = FileImageGeneration::from(status);
+        if (auto* cached = recent.repeated(path, generation)) {
+            if (!*cached) {
+                if (auto image = readMetadataImage(path, generation, 0)) {
+                    std::istringstream input(std::move(*image));
+                    std::vector<NamedIndexInfo> entries;
+                    NamedIndexInfo entry;
+                    while (readEntry(input, entry)) entries.push_back(std::move(entry));
+                    cached->emplace(std::move(entries));
+                }
+            }
+            if (*cached) {
+                const auto& entries = **cached;
+                const auto found = std::find_if(entries.begin(), entries.end(),
+                    [&](const auto& entry) { return entry.name == indexName; });
+                if (found != entries.end()) return *found;
+                return std::nullopt;
+            }
+        }
+    }
+    std::ifstream input(path);
+    NamedIndexInfo entry;
+    while (readEntry(input, entry)) {
         if (entry.name == indexName) return entry;
     }
     return std::nullopt;
@@ -20369,20 +20485,35 @@ std::optional<TableSchema> StorageEngine::readPersistedSchemaForCatalog(
         physicalName.empty() || !validStoredRelationName(physicalName))
         throw DbError("XX001", "invalid persisted schema identity");
     const auto path = schemaPath(dbname, physicalName);
-    std::error_code error;
-    const auto status = std::filesystem::symlink_status(path, error);
-    if (error == std::errc::no_such_file_or_directory ||
-        (!error && !std::filesystem::exists(status))) return std::nullopt;
-    if (error) throw DbError("58030", "cannot inspect persisted table schema");
-    if (!std::filesystem::is_regular_file(status))
+    struct stat status{};
+    if (::lstat(path.c_str(), &status) != 0) {
+        if (errno == ENOENT) return std::nullopt;
+        throw DbError("58030", "cannot inspect persisted table schema");
+    }
+    if (!S_ISREG(status.st_mode))
         throw DbError("XX001", "persisted table schema is not a regular file");
+
+    const auto parse = [&](std::istream& input) {
+        auto schema = readSchema(input, physicalName);
+        if (input.bad()) throw DbError("58030", "cannot read persisted table schema");
+        if (schema.tablename != physicalName)
+            throw DbError("XX001", "invalid persisted table schema");
+        return schema;
+    };
+    thread_local MetadataReadCache<TableSchema> recent;
+    const auto generation = FileImageGeneration::from(status);
+    if (auto* cached = recent.repeated(path, generation)) {
+        if (*cached) return **cached;
+        if (auto image = readMetadataImage(path, generation, O_NOFOLLOW)) {
+            std::istringstream input(std::move(*image), std::ios::binary);
+            auto schema = parse(input);
+            cached->emplace(schema);
+            return schema;
+        }
+    }
     std::ifstream input(path, std::ios::binary);
     if (!input) throw DbError("58030", "cannot read persisted table schema");
-    auto schema = readSchema(input, physicalName);
-    if (input.bad()) throw DbError("58030", "cannot read persisted table schema");
-    if (schema.tablename != physicalName)
-        throw DbError("XX001", "invalid persisted table schema");
-    return schema;
+    return parse(input);
 }
 
 // ========================================================================
@@ -55568,25 +55699,8 @@ static bool validPhysicalBackupSource(const std::filesystem::path& source,
            expectedFiles == actualFiles;
 }
 
-struct SavepointImageGeneration {
-    dev_t device = 0;
-    ino_t inode = 0;
-    mode_t mode = 0;
-    off_t size = 0;
-    timespec modified{};
-    timespec changed{};
-    bool operator==(const SavepointImageGeneration& other) const {
-        return device == other.device && inode == other.inode &&
-            mode == other.mode && size == other.size &&
-            modified.tv_sec == other.modified.tv_sec &&
-            modified.tv_nsec == other.modified.tv_nsec &&
-            changed.tv_sec == other.changed.tv_sec &&
-            changed.tv_nsec == other.changed.tv_nsec;
-    }
-};
-
 struct SavepointImageReceipt {
-    using Generations = std::map<std::string, SavepointImageGeneration>;
+    using Generations = std::map<std::string, FileImageGeneration>;
     std::string database;
     std::string backup;
     Generations sourceGenerations;
@@ -55613,9 +55727,7 @@ static bool collectSavepointGenerations(
         struct stat value{};
         if (::lstat(path.c_str(), &value) != 0 ||
             (!S_ISREG(value.st_mode) && !S_ISDIR(value.st_mode))) return false;
-        result.emplace(name, SavepointImageGeneration{
-            value.st_dev, value.st_ino, value.st_mode, value.st_size,
-            value.st_mtim, value.st_ctim});
+        result.emplace(name, FileImageGeneration::from(value));
         return true;
     };
     if (!add(root, ".") || !S_ISDIR(result.at(".").mode)) return false;

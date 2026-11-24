@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-24 · 表结构变化后如何刷新缓存
+
+PostgreSQL 记录系统目录变更，在命令结束、提交或回滚时按可见性规则处理缓存失效。SQLite 用数据库文件头中的结构版本号检查预编译语句。DuckDB 对预编译语句核对所依赖数据库的目录身份和版本。 [PostgreSQL 18.6 缓存失效源码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/utils/cache/inval.c) · [SQLite 文件格式](https://www.sqlite.org/fileformat.html#schema_cookie) · [DuckDB 1.4.2 预编译语句源码](https://github.com/duckdb/duckdb/blob/v1.4.2/src/main/prepared_statement_data.cpp)
+
+本项目的表定义和索引名称分别保存在文件里。再次读取时核对文件身份、长度和时间，命中时可复用已解析的内容。数据库原有的事务读取规则照常生效。 [用例和恢复验证](test-report.md#witnessed-index-files-20261124) · [性能对照](performance-report-2026-10-30.md#witnessed-index-files-cost-20261124)
+
 ## 2026-11-24 · 读取索引定义时如何识别函数
 
 PostgreSQL 在分析 SQL 时为函数调用选择具体函数编号和结果类型。`pg_get_indexdef` 执行时通过系统目录缓存按编号取得索引记录。SQLite 可以用 `PRAGMA index_xinfo` 查询索引列，DuckDB 通过 `duckdb_indexes()` 的 `sql` 字段给出索引定义。 [PostgreSQL 18.6 函数绑定](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/parser/parse_func.c) · [PostgreSQL 18.6 索引定义](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/utils/adt/ruleutils.c) · [SQLite 索引列](https://www.sqlite.org/pragma.html#pragma_index_xinfo) · [DuckDB 索引目录](https://duckdb.org/docs/current/sql/meta/duckdb_table_functions#duckdb_indexes)

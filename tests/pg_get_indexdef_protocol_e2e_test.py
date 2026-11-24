@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Check index definitions against real relation identities and stored index metadata."""
 
+import os
+from pathlib import Path
+
 from compat.numeric_type_review import Review
 from pg_foreign_key_catalog_protocol_e2e_test import relation_oid
 from session_setting_functions_protocol_e2e_test import Wire
@@ -56,6 +59,58 @@ def check_shadowed_catalog_functions(wire, extended, index):
                    rows=[(None, "integer")], fields=[("definition", 25), ("type_name", 25)])
     wire.run_prepared(b"index_def", (index.encode(), b"2", b"t"), '"Other Field"')
     wire.command("SET search_path TO idx_shadow, idx_catalog, public", "SET")
+
+
+def check_metadata_file_changes(wire, server):
+    wire.command("CREATE TABLE idx_catalog.file_check(k integer)", "CREATE TABLE")
+    wire.command("CREATE TABLE idx_catalog.file_donor(x integer)", "CREATE TABLE")
+    wire.command("CREATE INDEX file_idx ON idx_catalog.file_check(k)", "CREATE INDEX")
+    index = relation_oid(wire, "idx_catalog.file_idx")
+    database = Path(server["dir"]) / "info"
+    schema = database / "idx_catalog__file_check.stc"
+    names = database / "idx_catalog__file_check.idxnames"
+    sql = f"SELECT pg_catalog.pg_get_indexdef('{index}'::oid,1,true) AS v"
+
+    definition(wire, index, "k", ", 1, true")
+    definition(wire, index, "k", ", 1, true")
+
+    original = schema.read_bytes()
+    different = (database / "idx_catalog__file_donor.stc").read_bytes()
+    assert len(original) == len(different) and original != different
+    replacement = schema.with_suffix(".test-replacement")
+    stat = schema.stat()
+    replacement.write_bytes(different)
+    os.utime(replacement, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+    replacement.replace(schema)
+    try:
+        replaced = schema.stat()
+        assert replaced.st_ino != stat.st_ino and replaced.st_mtime_ns == stat.st_mtime_ns
+        wire.query(sql, tag=None, state="XX001")
+    finally:
+        schema.write_bytes(original)
+    definition(wire, index, "k", ", 1, true")
+
+    original = names.read_bytes()
+    assert original == b"file_idx\tbtree\tk\n", original
+    stat = names.stat()
+    try:
+        names.write_bytes(b"file_idx\tbtree\tx\n")
+        os.utime(names, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+        changed = names.stat()
+        assert changed.st_ino == stat.st_ino and changed.st_mtime_ns == stat.st_mtime_ns
+        assert changed.st_ctime_ns != stat.st_ctime_ns
+        wire.query(sql, tag=None, state="XX001")
+        names.unlink()
+        wire.query(sql, tag=None, state="XX001")
+        names.write_bytes(original + b"file_idx\tbtree\tx\n")
+        definition(wire, index, "k", ", 1, true")
+        definition(wire, index, "k", ", 1, true")
+        # The first matching record still works in a large names file.
+        names.write_bytes(original + b"x" * (256 * 1024))
+        definition(wire, index, "k", ", 1, true")
+    finally:
+        names.write_bytes(original)
+    definition(wire, index, "k", ", 1, true")
 
 
 def main():
@@ -125,6 +180,7 @@ def main():
         definition(extended, marker, "", ", 3, true")
         if review.server is not None:
             wire.query(f"SELECT pg_catalog.pg_get_indexdef('{marker}'::oid)", tag=None, state="0A000")
+            check_metadata_file_changes(wire, review.server)
         print("INDEX_DEFINITION_COMPLETE", flush=True)
     finally:
         review.close()

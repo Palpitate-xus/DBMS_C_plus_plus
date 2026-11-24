@@ -2,6 +2,18 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-24 reuse validated table schema and index name file contents",
+      "gap_ids": ["CAT-02", "CAT-03", "CLIENT-01"],
+      "status": "partial",
+      "evidence": ["src/commands/TableManage.cpp", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/pg_get_indexdef_protocol_e2e_test.py", "tests/savepoint_image_alias_test.cpp"],
+      "verification": [
+        "Cache decoded schemas and index names for two recent paths per reader only after validating the actual file descriptor and file generation.",
+        "Check same-size replacement, modification-time restoration, deleted metadata, duplicate names, the streaming fallback, peer DDL and crash recovery.",
+        "Compare file opens and SQL latency. Catalog lookup and index definitions outside current supported shapes remain open."
+      ]
+    },
+    {
       "issue": "2026-11-24 reuse bound result types for catalog scalar functions",
       "gap_ids": ["CAT-03", "QRY-01", "CLIENT-01"],
       "status": "partial",
