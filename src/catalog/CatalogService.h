@@ -64,6 +64,8 @@ public:
     // Owned namespace rows, with the transaction and publication checks used
     // by metadataSnapshot. The complete public snapshot remains unchanged.
     std::vector<PgNamespaceRow> namespaceSnapshot(const std::string& dbname) const;
+    std::optional<bool> relationIsVisible(const std::string& dbname, Oid oid,
+                                         const std::vector<std::string>& searchPath) const;
     // Specialized read-only projection for pg_attrdef/pg_depend scans.
     CatalogManager::DefaultCatalogSnapshot defaultCatalogSnapshot(
         const std::string& dbname, CatalogManager::DefaultCatalogKind kind) const;
@@ -86,6 +88,11 @@ private:
         uint64_t writeTransaction = 0;
     };
     std::unordered_map<std::string, CachedCatalog> cache_;
+    struct ReadCatalog {
+        std::shared_ptr<CatalogManager> manager;
+        std::string path;
+    };
+    ReadCatalog readCatalog(const std::string& dbname) const;
     std::shared_ptr<CatalogManager> acquireImpl(const std::string& dbname,
                                               bool cacheCold);
 };

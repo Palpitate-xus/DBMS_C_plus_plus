@@ -526,7 +526,7 @@ static ExprPtr parseSimpleExpr(const std::vector<std::string>& tokens, size_t& p
 
 static bool parseQualifiedObjectName(
     const std::vector<std::string>& tokens, size_t& pos,
-    std::string& name) {
+    std::string& name, bool allowQualifiedKeyword = false) {
     const auto invalidName = [](const std::string& token,
                                 bool rejectClauseKeyword) {
         static const std::set<std::string> clauseKeywords = {
@@ -544,7 +544,7 @@ static bool parseQualifiedObjectName(
     name = tokens[pos++];
     if (pos < tokens.size() && tokens[pos] == ".") {
         if (pos + 1 >= tokens.size() ||
-            invalidName(tokens[pos + 1], true)) {
+            invalidName(tokens[pos + 1], !allowQualifiedKeyword)) {
             return false;
         }
         name += "." + tokens[pos + 1];
@@ -2304,7 +2304,7 @@ static ExprPtr parseComparisonExpr(const std::vector<std::string>& tokens, size_
     while (pos < tokens.size()) {
         std::string op = tokens[pos];
         static const std::set<std::string> cmpOps = {
-            "=", "<>", "!=", "<", ">", "<=", ">=", "~", "~*", "!~", "!~*"
+            "=", "<>", "!=", "<", ">", "<=", ">="
         };
         if (cmpOps.count(op) == 0) break;
         ++pos;
@@ -2555,15 +2555,48 @@ static ExprPtr parseRangeExpr(const std::vector<std::string>& tokens, size_t& po
 static ExprPtr parseConcatExpr(const std::vector<std::string>& tokens, size_t& pos) {
     auto left = parseJsonOpExpr(tokens, pos);
     static const std::set<std::string> genericOperators = {
-        "||", "&", "|", "#", "<<", "<<=", ">>", ">>="
+        "||", "&", "|", "#", "<<", "<<=", ">>", ">>=", "~", "~*", "!~", "!~*"
     };
-    while (pos < tokens.size() && genericOperators.count(tokens[pos]) != 0) {
-        const std::string op = tokens[pos];
-        ++pos;
+    static const std::set<std::string> qualifiedOperators = {
+        "=", "<>", "!=", "<", ">", "<=", ">=", "+", "-", "*", "/", "%", "^"
+    };
+    while (left && pos < tokens.size()) {
+        std::string op = tokens[pos];
+        if (SQLParser::toLower(op) == "operator" &&
+            pos + 1 < tokens.size() && tokens[pos + 1] == "(") {
+            pos += 2;
+            std::string schema;
+            if (pos + 1 < tokens.size() && tokens[pos + 1] == ".") {
+                schema = parseRoutineIdentifier(tokens[pos]);
+                pos += 2;
+            }
+            if (pos + 1 >= tokens.size() || tokens[pos + 1] != ")" || tokens[pos] == ")") {
+                retainDeclarationSyntaxError(DbError("42601", "invalid OPERATOR expression"));
+                return nullptr;
+            }
+            op = tokens[pos];
+            if (!schema.empty() && schema != "pg_catalog")
+                throw DbError("42883", "operator does not exist: " + schema + "." + op);
+            if (!genericOperators.count(op) && !qualifiedOperators.count(op))
+                throw DbError("0A000", "operator is not supported: " + op);
+            pos += 2;
+        } else if (genericOperators.count(op)) {
+            ++pos;
+        } else {
+            break;
+        }
+        const size_t rightBegin = pos;
+        auto right = parseJsonOpExpr(tokens, pos);
+        if (!right || pos == rightBegin) {
+            retainDeclarationSyntaxError(DbError("42601", "operator requires a right operand"));
+            return nullptr;
+        }
         auto bin = std::make_unique<BinaryOpExpr>();
         bin->op = op;
         bin->left = std::move(left);
-        bin->right = parseJsonOpExpr(tokens, pos);
+        bin->right = std::move(right);
+        bin->sourceBegin = bin->left->sourceBegin;
+        bin->sourceEnd = bin->right->sourceEnd;
         left = std::move(bin);
     }
     return left;
@@ -2712,7 +2745,7 @@ static ExprPtr parseCastExpr(const std::vector<std::string>& tokens, size_t& pos
         if (pos >= tokens.size() || tokens[pos] == ")" || tokens[pos] == ",")
             return nullptr;
         std::string name;
-        if (!parseQualifiedObjectName(tokens, pos, name)) return nullptr;
+        if (!parseQualifiedObjectName(tokens, pos, name, true)) return nullptr;
         auto collated = std::make_unique<UnaryOpExpr>();
         collated->op = "COLLATE " + name;
         collated->operand = std::move(left);

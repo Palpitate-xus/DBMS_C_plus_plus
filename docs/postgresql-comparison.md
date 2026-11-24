@@ -2,6 +2,13 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="psql-catalog-discovery-comparison-20261124"></a>
+## 2026-11-24 · psql 按名称查找表
+
+PostgreSQL 的 `psql` 通过 SQL 连接 `pg_class` 和 `pg_namespace`，用正则匹配表名，再通过 `pg_table_is_visible` 处理搜索路径里的同名关系。PostgreSQL 用目录缓存查找关系，并按模式、选项和排序规则复用已编译的正则表达式。SQLite 的 `.tables` 从各个已连接数据库的 `sqlite_schema` 读取名称。DuckDB 可用 SQL `DESCRIBE` 直接查看表或查询的列。 [psql 18.6 源码](https://github.com/postgres/postgres/blob/REL_18_6/src/bin/psql/describe.c) · [PostgreSQL 搜索路径](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/catalog/namespace.c) · [PostgreSQL 正则缓存](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/utils/adt/regexp.c) · [SQLite 命令行工具](https://www.sqlite.org/cli.html#querying_the_database_schema) · [DuckDB DESCRIBE](https://duckdb.org/docs/stable/sql/statements/describe.html)
+
+本项目使用现有目录中的关系编号与名称索引完成搜索路径判断。正则匹配在每个执行线程中保留最近使用的四个模式。普通表的名称查找已经通过原版 `psql` 18.6 验证。显示表结构仍需要 `pg_am`、`pg_index` 等目录。 [测试](test-report.md#psql-catalog-discovery-20261124) · [性能对照](performance-report-2026-10-30.md#psql-catalog-discovery-cost-20261124)
+
 <a id="scram-libpq-comparison-20261124"></a>
 ## 2026-11-24 · 原版 psql 通过 SCRAM 登录
 

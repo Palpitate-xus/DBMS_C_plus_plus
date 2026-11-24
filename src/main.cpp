@@ -832,6 +832,7 @@ static pair<set<string>, bool> parseReturningClause(const string& sql, size_t se
 }
 
 static size_t findMatchingParen(const string& sql, size_t start);
+static bool containsPreparedPattern(const dbms::Expr* value);
 // Retain a parsed SQL pattern predicate as one typed execution atom. This
 // boundary handles the actual legacy callers too (aggregate/subquery/DML),
 // without rewriting ESCAPE bytes or turning SIMILAR into a regex operator.
@@ -839,30 +840,8 @@ static bool hasSqlPatternPredicate(const string& sql) {
     dbms::SQLParser parser;
     const auto parsed=parser.parse("SELECT "+sql);
     const auto* select=parsed.success ? dynamic_cast<const dbms::SelectStmt*>(parsed.stmt.get()) : nullptr;
-    if (!select || select->fromClause || select->selectList.size()!=1) return false;
-    std::function<bool(const dbms::Expr*)> visit=[&](const dbms::Expr* expression) -> bool {
-        if (const auto* binary=dynamic_cast<const dbms::BinaryOpExpr*>(expression)) {
-            const auto op=dbms::SQLParser::toLower(binary->op);
-            if (op=="like" || op=="not like" || op=="ilike" || op=="not ilike" ||
-                op=="similar to" || op=="not similar to") return true;
-            return visit(binary->left.get()) || visit(binary->right.get());
-        }
-        if (const auto* unary=dynamic_cast<const dbms::UnaryOpExpr*>(expression)) return visit(unary->operand.get());
-        if (const auto* cast=dynamic_cast<const dbms::CastExpr*>(expression)) return visit(cast->operand.get());
-        if (const auto* call=dynamic_cast<const dbms::FunctionCallExpr*>(expression)) {
-            const auto name=dbms::SQLParser::toLower(call->funcName);
-            if (name=="like escape" || name=="not like escape" || name=="ilike escape" ||
-                name=="not ilike escape" || name=="similar to escape" || name=="not similar to escape") return true;
-            for (const auto& argument:call->args) if (visit(argument.get())) return true;
-        }
-        if (const auto* conditional=dynamic_cast<const dbms::CaseExpr*>(expression)) {
-            if (visit(conditional->switchExpr.get()) || visit(conditional->elseExpr.get())) return true;
-            for (const auto& branch:conditional->whenClauses)
-                if (visit(branch.first.get()) || visit(branch.second.get())) return true;
-        }
-        return false;
-    };
-    return visit(select->selectList.front().expr.get());
+    return select && !select->fromClause && select->selectList.size()==1 &&
+        containsPreparedPattern(select->selectList.front().expr.get());
 }
 
 // The legacy projection splitter must preserve a numeric token's exponent
@@ -22664,7 +22643,8 @@ static bool containsPreparedPattern(const dbms::Expr* value) {
     if(const auto* binary=dynamic_cast<const dbms::BinaryOpExpr*>(value)) {
         const auto& op=binary->op;
         if(op=="LIKE" || op=="NOT LIKE" || op=="ILIKE" || op=="NOT ILIKE" ||
-           op=="SIMILAR TO" || op=="NOT SIMILAR TO")return true;
+           op=="SIMILAR TO" || op=="NOT SIMILAR TO" || op=="~" || op=="~*" ||
+           op=="!~" || op=="!~*")return true;
         return containsPreparedPattern(binary->left.get()) || containsPreparedPattern(binary->right.get());
     }
     if(const auto* unary=dynamic_cast<const dbms::UnaryOpExpr*>(value))return containsPreparedPattern(unary->operand.get());

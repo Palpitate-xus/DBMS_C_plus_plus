@@ -4,6 +4,7 @@
 #include "expression/CompoundValueOps.h"
 #include "expression/LocalExpressionSyntax.h"
 #include "catalog/DatumMetadataFactory.h"
+#include "catalog/RelationSearchPath.h"
 #include "expression/StoredRegtypeValue.h"
 #include "utils/numeric_type.h"
 #include "expression/ArrayCastPolicy.h"
@@ -2175,18 +2176,10 @@ ExprValue ExprEvaluator::evalUnaryOp(const UnaryOpExpr* e, const RowContext& ctx
     std::string op = toLower(e->op);
 
     if (op.rfind("collate ", 0) == 0) {
-        if (e->collationBinding) {
-            applyResultCollation(v, *e->collationBinding);
-            return v;
-        }
-        const std::string name = collation::normalizeName(
-            trimStr(e->op.substr(std::string("COLLATE ").size())));
-        if (!collation::isValid(name))
-            throw DbError("42704", "collation does not exist: " + name);
         if (!isCollatableExprType(v.typeName))
             throw DbError("42804", "collations are not supported by type " +
                                     v.typeName);
-        v.collation = name;
+        applyResultCollation(v, resolvedExplicitResultCollation(e));
         return v;
     }
 
@@ -4136,13 +4129,39 @@ ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& c
     }
     // POSIX-ish regex match operators: ~, ~* (case-insensitive), !~, !~*.
     if (op == "~" || op == "~*" || op == "!~" || op == "!~*") {
+        const auto textInput = [](const std::string& type) {
+            return type == "unknown" || type == "text" || type == "name" ||
+                type == "character varying" || type == "varchar" ||
+                type == "character" || type == "char" || type == "bpchar" || type == "\"char\"";
+        };
+        if (!textInput(l.typeName) || !textInput(r.typeName))
+            throw DbError("42883", "operator does not exist: " + l.typeName + " " + op + " " + r.typeName);
         if (l.isNull || r.isNull) return ExprValue("boolean", "", true);
         auto flags = std::regex::ECMAScript;
         if (op == "~*" || op == "!~*") flags |= std::regex::icase;
+        struct CompiledPattern {
+            std::string text;
+            std::regex::flag_type flags;
+            std::regex expression;
+
+            CompiledPattern(const std::string& text, std::regex::flag_type flags)
+                : text(text), flags(flags), expression(text, flags) {}
+        };
+        // A catalog filter can match many names against the same pattern.
+        // Keep a small set per executing thread, with recent hits first.
+        thread_local std::array<std::optional<CompiledPattern>, 4> patterns;
         bool m;
         try {
-            std::regex re(r.value, flags);
-            m = std::regex_search(l.value, re);
+            auto found = std::find_if(patterns.begin(), patterns.end(), [&](const auto& entry) {
+                return entry && entry->text == r.value && entry->flags == flags;
+            });
+            if (found == patterns.end()) {
+                patterns.back() = CompiledPattern(r.value, flags);
+                found = std::prev(patterns.end());
+            }
+            if (found != patterns.begin())
+                std::rotate(patterns.begin(), found, std::next(found));
+            m = std::regex_search(l.value, patterns.front()->expression);
         } catch (const std::regex_error&) {
             throwInvalidRegularExpression();
         }
@@ -6551,6 +6570,24 @@ struct SqlSerialSequenceFunction {
         throw DbError("XX000", "pg_get_serial_sequence requires its actual evaluation context");
     }
 };
+struct SqlTableVisibilityFunction {
+    ExprValue operator()(const std::vector<ExprValue>&) const {
+        throw DbError("XX000", "pg_table_is_visible requires its database context");
+    }
+
+    ExprValue invoke(const std::vector<ExprValue>& args, StorageEngine& engine,
+                     const std::string& database) const {
+        if (args.size() != 1)
+            throw DbError("42883", "function pg_table_is_visible does not exist for these arguments");
+        const auto& input = args.front();
+        if (input.isNull) return ExprValue("boolean", "", true);
+        const auto oid = input.objectOid ? *input.objectOid : parseOidInput(input.value);
+        const auto visible = engine.catalogService().relationIsVisible(
+            database, oid, effectiveRelationSearchPath(currentSession()));
+        if (!visible) return ExprValue("boolean", "", true);
+        return ExprValue("boolean", *visible ? "t" : "f");
+    }
+};
 struct SqlSessionSettingFunction {
     bool write;
 
@@ -6567,6 +6604,8 @@ bool ownsScalarSignatures(const std::string& name,const ScalarFunction* callback
         return callback && callback->target<SqlSessionSettingFunction>();
     if(name=="pg_get_serial_sequence")
         return callback && callback->target<SqlSerialSequenceFunction>();
+    if (name == "pg_table_is_visible")
+        return callback && callback->target<SqlTableVisibilityFunction>();
     if(isCoreOverloadedScalarName(name))
         return callback && callback->target<DeclaredCoreScalarFunction>();
     if(isArraySearchScalarName(name))
@@ -6648,6 +6687,11 @@ const std::vector<ScalarSignature>& scalarSignatures(const std::string& name) {
         return *value;
     }
     if(name=="pg_get_serial_sequence"){ static const auto* const value = new const std::vector<ScalarSignature>{{{"text","text"},"text"}}; return *value; }
+    if (name == "pg_table_is_visible") {
+        static const auto* const signatures = new const std::vector<ScalarSignature>{
+            {{"oid"}, "boolean"}};
+        return *signatures;
+    }
     if (name == "current_setting") {
         static const auto* const signatures = new const std::vector<ScalarSignature>{
             {{"text"}, "text"}, {{"text", "boolean"}, "text"}};
@@ -7958,6 +8002,9 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
         } else if (const auto* setting = it->second.target<SqlSessionSettingFunction>()) {
             auto* owner = sqlValueEngine_ ? sqlValueEngine_ : &g_engine;
             result = setting->invoke(args, *owner);
+        } else if (const auto* visibility = it->second.target<SqlTableVisibilityFunction>()) {
+            auto* owner = sqlValueEngine_ ? sqlValueEngine_ : &g_engine;
+            result = visibility->invoke(args, *owner, currentDB_);
         } else result = it->second(args);
         if(!pushElement && declaredResult.size()>=2 && declaredResult.compare(declaredResult.size()-2,2,"[]")==0)
             result=implicitRuntimeValue(*this,std::move(result),declaredResult);
@@ -13942,6 +13989,8 @@ void ExprEvaluator::registerStatelessBuiltins() {
     functions_["current_schema"]=SqlNameFunction{sql_value_detail::Kind::CurrentSchema};
     functions_["pg_typeof"]=SqlTypeOfFunction{};
     functions_["pg_get_serial_sequence"]=SqlSerialSequenceFunction{};
+    functions_["pg_table_is_visible"] = SqlTableVisibilityFunction{};
+    volatility_["pg_table_is_visible"] = 's';
     functions_["current_setting"] = SqlSessionSettingFunction{false};
     functions_["set_config"] = SqlSessionSettingFunction{true};
     functions_["version"]=SqlVersionFunction{};

@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>查询可以分清不同模式里的同名表 · 2026-11-24</summary>
+
+如果两个模式里都有 `orders` 表，现在可以查出直接写 `orders` 会找到哪一张。原版 `psql` 已能完成这一步，显示完整表结构还待补齐。
+
+[使用说明](docs/MANUAL.md#按名称查找表) · [测试报告](docs/test-report.md#psql-catalog-discovery-20261124) · [性能报告](docs/performance-report-2026-10-30.md#psql-catalog-discovery-cost-20261124)
+
+</details>
+
+<details>
 <summary>修复 psql 密码登录 · 2026-11-24</summary>
 
 使用 SCRAM 密码认证时，原版 `psql` 18.6 现在可以通过本地网络连接登录并执行查询。密码错误时，连接仍会被拒绝。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>应用按编号查一小页数据更快 · 2026-11-24</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-24 · 应用按编号查一小页数据更快
 
 应用可以每次传入要取几条、跳过几条。在 2,048 行的内存盘测试中，沿编号索引取最小的 3 条，耗时中位数从 33–38 毫秒降到约 4 毫秒。
 
 [使用说明](docs/MANUAL.md#对象编号) · [测试报告](docs/test-report.md#bound-row-count-20261124) · [性能报告](docs/performance-report-2026-10-30.md#bound-row-count-cost-20261124)
-
-</details>
-
-<details>
-<summary>查看更早的更新和版本记录</summary>
 
 ## 2026-11-24 · 按对象编号排序，取前几条更快
 

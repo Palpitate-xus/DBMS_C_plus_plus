@@ -2013,6 +2013,7 @@ void ExprHelper::prepareArrayTypes(Expr* expression,
     const auto patternType = [&](std::string operation,const std::vector<const Expr*>& operands) {
         const auto op=toLower(operation);
         const bool like=op=="like" || op=="not like" || op=="like escape" || op=="not like escape";
+        const bool regex = op == "~" || op == "~*" || op == "!~" || op == "!~*";
         bool bytes=false;
         std::vector<std::string> types;
         for (const auto* operand:operands) {
@@ -2023,7 +2024,7 @@ void ExprHelper::prepareArrayTypes(Expr* expression,
         for (const auto& resolved:types) {
             const bool unknown=resolved.empty() || resolved=="unknown";
             const bool text=resolved=="text" || resolved=="character" || resolved=="character varying" ||
-                resolved=="name" || resolved=="citext";
+                resolved=="name" || resolved=="citext" || (regex && resolved=="\"char\"");
             if ((!like && bytes) || (!unknown && (bytes ? resolved!="bytea" : !text)))
                 throw DbError("42883","operator does not exist for SQL pattern operand types");
         }
@@ -2182,7 +2183,8 @@ void ExprHelper::prepareArrayTypes(Expr* expression,
                 }
             }
             if (operation=="like" || operation=="not like" || operation=="ilike" ||
-                operation=="not ilike" || operation=="similar to" || operation=="not similar to")
+                operation=="not ilike" || operation=="similar to" || operation=="not similar to" ||
+                operation=="~" || operation=="~*" || operation=="!~" || operation=="!~*")
                 patternType(operation,{binary->left.get(),binary->right.get()});
             if (binary->op=="||") {
                 binary->arrayConcat = resolveArrayConcatTypes(type(binary->left.get()),type(binary->right.get()),true);

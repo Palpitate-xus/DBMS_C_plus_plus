@@ -2,6 +2,18 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-24 resolve visible relation names in stock psql catalog queries",
+      "gap_ids": ["CLIENT-01", "CAT-03", "SQL-04"],
+      "status": "partial",
+      "evidence": ["src/catalog/catalog.cpp", "src/expression/ExprEvaluator.cpp", "src/parser/parser.cpp", "src/network/NetworkServer.cpp", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/psql_catalog_discovery_protocol_e2e_test.py"],
+      "verification": [
+        "The name lookup issued by stock psql 18.6 returns the existing relation OID and schema. The following describe query still requires pg_am.",
+        "Visibility tests cover search path order, temporary tables, renamed or dropped relations, NULL, unknown OIDs and binary parameters. The regex checks cover ordinary text columns, NULL and Parse-time parameter typing.",
+        "The existing data directory opens with the new binary. Crash recovery preserves the old name for an uncommitted rename and the new name for a committed rename."
+      ]
+    },
+    {
       "issue": "2026-11-24 accept libpq SCRAM startup and send length-delimited SASL data",
       "gap_ids": ["PROTO-01"],
       "status": "partial",
@@ -11834,7 +11846,7 @@
     {"id":"PROTO-10","status":"unverified","evidence":[]},
     {"id":"PROTO-11","status":"unverified","evidence":[]},
     {"id":"PROTO-12","status":"unverified","evidence":[]},
-    {"id":"CLIENT-01","status":"unverified","evidence":[]},
+    {"id":"CLIENT-01","status":"partial","evidence":["docs/MANUAL.md","docs/test-report.md","src/catalog/catalog.cpp","src/parser/parser.cpp"],"tests":["tests/psql_catalog_discovery_protocol_e2e_test.py"]},
     {"id":"CLIENT-02","status":"unverified","evidence":[]},
     {"id":"SEC-01","status":"deferred_by_user","evidence":[]},
     {"id":"SEC-02","status":"deferred_by_user","evidence":[]},

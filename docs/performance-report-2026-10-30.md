@@ -4,6 +4,34 @@
 
 > 复核发现，几组早期 COPY 计时在每个对照场景中使用了固定的执行顺序。耗时差可能包含顺序影响。这项问题涉及默认值求值、按列查找、默认值标记、短 CSV 导出和短查询导出的配对计时。[默认值求值](#copy-default-evaluation-order-cost-20261122) · [按列查找](#copy-identity-input-cost-20261122) · [默认值标记](#copy-default-marker-cost-20261122) · [CSV 导出](#copy-csv-out-cost-20261122) · [查询导出](#copy-query-stdout-cost-20261122)
 
+<a id="psql-catalog-discovery-cost-20261124"></a>
+## 2026-11-24 · 按模式匹配名称和查找表
+
+在 Intel Xeon E5-2678 v3 上对照旧版 `673ca42c`、新版和 PostgreSQL 18.6。本项目用 GCC 13.3、CMake C++17 和 `-O2` 构建，关闭 OpenSSL。测试从本地 TCP 发请求计时，到客户端收到就绪消息为止。每次检查全部返回行、字段类型和完成消息。项目的数据目录位于内存盘。1,024 行测试使用 CPU 13、28，4,096 行复核使用 CPU 15、31。每轮先预热 4 次，随后计时 20 次。各版本轮流执行，第二轮反转执行顺序。P95 是每轮第 19 小的样本。 [功能验证](test-report.md#psql-catalog-discovery-20261124)
+
+```sql
+SELECT CAST('row' || n::text ~ '^(row[0-9]*[02468])$' AS boolean) AS matched
+FROM generate_series(1,1024) AS n;
+SELECT CAST(n::text ~ (CASE WHEN n % 2 = 0 THEN '[02468]$' ELSE '[13579]$' END)
+            AS boolean) AS matched
+FROM generate_series(1,1024) AS n;
+SELECT CAST(n % 2 = 0 AS boolean) AS matched
+FROM generate_series(1,1024) AS n;
+```
+
+名称查找测量原版 `psql` 用于 `\d catalog_probe` 的第一条 SQL。建一张 `catalog_probe(k integer)` 和另外 32 张 `catalog_probe_00` 至 `catalog_probe_31`。在每套数据库内先读出该表的真实编号，随后用协议测试中的 `DISCOVERY` 查询核对该编号、模式和表名。旧版不能执行这条查找，表中留空。早期试跑分别在建表和旧版布尔列类型校验阶段退出。正式对照使用内存盘，并在三套数据库上执行上方完全相同的 SQL，显式声明结果为布尔类型。 [查询夹具](../tests/psql_catalog_discovery_protocol_e2e_test.py)
+
+下表为最新版两轮的中位数和 P95 范围，单位为毫秒。
+
+| 场景 | 旧版中位数 | 新版中位数 | PostgreSQL 中位数 | 旧版 P95 | 新版 P95 | PostgreSQL P95 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1,024 行，固定模式 | 311.99–316.48 | 235.76–236.96 | 8.47–8.64 | 334.69–350.96 | 259.01–262.87 | 8.78–9.04 |
+| 1,024 行，交替模式 | 217.79–220.43 | 175.15–178.38 | 8.40–8.43 | 230.69–248.19 | 178.81–197.19 | 8.88–9.72 |
+| 1,024 行，余数对照 | 102.72–104.71 | 102.37–102.94 | 7.79–8.00 | 106.54–108.59 | 105.99–107.04 | 8.08–8.45 |
+| 查找一张表 | — | 6.83–6.90 | 0.37–0.39 | — | 7.39–7.45 | 0.61–0.65 |
+
+另外在只差扩展查询错误处理的中间版本上，将前三条 SQL 增至 4,096 行。固定模式查询的中位数从 1,226.22–1,228.00 毫秒降至 977.94–978.73 毫秒，交替模式从 851.52–859.40 毫秒降至 716.27–725.55 毫秒。余数对照从 390.79–393.19 毫秒增至 402.00–402.70 毫秒。本轮性能结果只覆盖这些查询。名称查找仍明显慢于 PostgreSQL，扫描和构造系统目录行的开销值得继续测量。 [实现对照](postgresql-comparison.md#psql-catalog-discovery-comparison-20261124)
+
 <a id="scram-libpq-cost-20261124"></a>
 ## 2026-11-24 · SCRAM 登录及第一条查询
 

@@ -541,8 +541,7 @@ bool CatalogService::has(const std::string& dbname) const {
     return cache_.find(dbname) != cache_.end();
 }
 
-CatalogManager::MetadataSnapshot CatalogService::metadataSnapshot(const std::string& dbname,
-                                                                  bool includeDefaultObjects) const {
+CatalogService::ReadCatalog CatalogService::readCatalog(const std::string& dbname) const {
     const auto ownership = engine_.catalogReadOwnership(dbname);
     CatalogDatabaseIdentity physical;
     if (!databaseIdentity(engine_.dbPath(dbname), physical, dbname == "info")) return {};
@@ -556,9 +555,9 @@ CatalogManager::MetadataSnapshot CatalogService::metadataSnapshot(const std::str
                 ? found->second.committed : found->second.manager;
     }
     if (model) {
-        if (!ownership.mayReadCurrentFiles) return model->metadataSnapshot(includeDefaultObjects);
+        if (!ownership.mayReadCurrentFiles) return {std::move(model), {}};
         const auto state = model->publicationState();
-        if (state == CatalogManager::PublicationState::Current) return model->metadataSnapshot(includeDefaultObjects);
+        if (state == CatalogManager::PublicationState::Current) return {std::move(model), {}};
         if (state == CatalogManager::PublicationState::Conflict)
             throw DbError("58030", "catalog read conflicts with unpublished or missing metadata");
     }
@@ -566,7 +565,23 @@ CatalogManager::MetadataSnapshot CatalogService::metadataSnapshot(const std::str
         throw DbError("55P03", "cold catalog read conflicts with an active DDL owner");
     // Copying committed metadata remains pure: no bootstrap/OID allocation,
     // cache insertion, legacy migration or destructor publication.
-    return CatalogManager::readMetadataSnapshot(catalogDirForDb(engine_, dbname).string(), includeDefaultObjects);
+    return {{}, catalogDirForDb(engine_, dbname).string()};
+}
+
+CatalogManager::MetadataSnapshot CatalogService::metadataSnapshot(const std::string& dbname,
+                                                                  bool includeDefaultObjects) const {
+    const auto catalog = readCatalog(dbname);
+    if (catalog.manager) return catalog.manager->metadataSnapshot(includeDefaultObjects);
+    if (catalog.path.empty()) return {};
+    return CatalogManager::readMetadataSnapshot(catalog.path, includeDefaultObjects);
+}
+
+std::optional<bool> CatalogService::relationIsVisible(
+    const std::string& dbname, Oid oid, const std::vector<std::string>& searchPath) const {
+    const auto catalog = readCatalog(dbname);
+    if (catalog.manager) return catalog.manager->relationIsVisible(oid, searchPath);
+    if (catalog.path.empty()) return std::nullopt;
+    return CatalogManager::readRelationVisibility(catalog.path, oid, searchPath);
 }
 
 std::vector<PgNamespaceRow> CatalogService::namespaceSnapshot(const std::string& dbname) const {

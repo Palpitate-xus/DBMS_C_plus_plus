@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-24 · psql 可以完成按名称查找表
+
+原版 `psql` 18.6 的 `\d` 可以查出目标表编号和所属模式。正则筛选和表的搜索路径判断可用于普通 SQL。显示表结构的下一条查询仍缺少 `pg_am`。其后还需要索引、约束等目录。将 `CLIENT-01` 记为部分实现，`CAT-03` 和 `SQL-04` 保持部分实现。 [功能验证](test-report.md#psql-catalog-discovery-20261124) · [性能对照](performance-report-2026-10-30.md#psql-catalog-discovery-cost-20261124) · [实现对照](postgresql-comparison.md#psql-catalog-discovery-comparison-20261124)
+
 ## 2026-11-24 · 原版 psql 可以通过本地 SCRAM 登录
 
 接受 libpq 的空认证用户名，按报文长度发送认证挑战和最终签名。验证使用原版 `psql` 18.6、本地 TCP、正确及错误密码、旧版数据目录重启，以及登录后的 SQL 分页。`PROTO-01` 保持部分实现。 [验证范围](test-report.md#scram-libpq-20261124) · [登录计时](performance-report-2026-10-30.md#scram-libpq-cost-20261124) · [实现对照](postgresql-comparison.md#scram-libpq-comparison-20261124)

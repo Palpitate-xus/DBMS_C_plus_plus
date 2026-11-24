@@ -149,6 +149,9 @@ public:
     const PgClassRow* findClassByName(const std::string& name, Oid nspOid) const;
     std::optional<PgClassRow> getClass(Oid oid) const;
     std::optional<PgClassRow> getClassByName(const std::string& name, Oid nspOid) const;
+    std::optional<bool> relationIsVisible(Oid oid, const std::vector<std::string>& searchPath) const;
+    static std::optional<bool> readRelationVisibility(
+        const std::string& path, Oid oid, const std::vector<std::string>& searchPath);
     bool updateClass(Oid oid, const PgClassRow& row);
     // Rename a relation while preserving its OID and dependency records.
     // PostgreSQL object identity is OID-based; a name change must not create
@@ -388,6 +391,8 @@ private:
     // 在已持有 mutex_ 的情况下使用，避免公共接口死锁
     const PgNamespaceRow* findNamespaceUnlocked(Oid oid) const;
     const PgClassRow* resolveRelationUnlocked(
+        const std::string& name, const std::vector<std::string>& searchPath) const;
+    const PgClassRow* visibleRelationUnlocked(
         const std::string& name, const std::vector<std::string>& searchPath) const;
     const PgClassRow*     findClassUnlocked(Oid oid) const;
     const PgTypeRow*      findTypeUnlocked(Oid oid) const;

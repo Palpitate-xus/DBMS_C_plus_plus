@@ -12,9 +12,16 @@ cmake --build build/cmake --target dbms_main --parallel 2
 ./build/cmake/dbms_main --version
 ```
 
-[启动数据库](docs/MANUAL.md#运行) · [用 psql 连接](docs/MANUAL.md#18-网络服务) · [更多文档](docs/README.md)
+[编译和启动说明](docs/MANUAL.md#1-快速开始) · [用 psql 连接](docs/MANUAL.md#18-网络服务) · [更多文档](docs/README.md)
 
 ## 最近更新
+
+<details>
+<summary>查询可以分清不同模式里的同名表 · 2026-11-24</summary>
+
+如果两个模式里都有 `orders` 表，现在可以查出直接写 `orders` 会找到哪一张。原版 `psql` 已能完成这一步，显示完整表结构还待补齐。
+
+</details>
 
 <details>
 <summary>修复 psql 密码登录 · 2026-11-24</summary>
@@ -27,13 +34,6 @@ cmake --build build/cmake --target dbms_main --parallel 2
 <summary>在 psql 里重复执行分页查询更快 · 2026-11-24</summary>
 
 用 `PREPARE` 保存一条按表编号查记录的查询，再用 `EXECUTE` 指定取几条、跳过几条。给编号建好索引后，数据库可以读够就停。
-
-</details>
-
-<details>
-<summary>应用按编号查一小页数据更快 · 2026-11-24</summary>
-
-应用可以每次传入要取几条、跳过几条。在 2,048 行的内存盘测试中，沿编号索引取最小的 3 条，耗时中位数从 33–38 毫秒降到约 4 毫秒。
 
 </details>
 

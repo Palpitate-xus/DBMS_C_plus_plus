@@ -2686,6 +2686,21 @@ statement/portal 仍返回 CloseComplete。一个 Sync group 内的 Execute 共�
 整式标量调用中直接$n从真实输入声明推断OID，保留显式OID及冲突/编号缺口错误。
 带表、排序、分页和跨表达式统一推断仍开放；额外八条范围外收集不是兼容通过。
 
+### 按名称查找表
+
+以下查询查找当前搜索路径下可以直接用名称引用的 `orders` 表，返回表编号和所属模式。
+
+```sql
+SELECT c.oid, n.nspname, c.relname
+FROM pg_catalog.pg_class c
+LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relname = 'orders'
+  AND pg_catalog.pg_table_is_visible(c.oid)
+ORDER BY n.nspname, c.relname;
+```
+
+`psql` 的 `\d orders` 能执行名称查找。后续显示表结构的步骤还需要补齐系统目录。 [验证记录](test-report.md#psql-catalog-discovery-20261124)
+
 ---
 
 ## 19. 预编译语句

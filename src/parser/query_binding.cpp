@@ -600,15 +600,30 @@ public:
         const auto lhs=patternBaseType(leftType,left.get());
         const auto rhs=patternBaseType(rightType,right.get());
         const bool binary=(op=="LIKE" || op=="NOT LIKE") && (lhs=="bytea" || rhs=="bytea");
-        const auto textual=[](const std::string& type) {
+        const bool regex = op == "~" || op == "~*" || op == "!~" || op == "!~*";
+        const auto textual=[regex](const std::string& type) {
             return type=="unknown" || type=="text" || type=="character varying" ||
-                   type=="character" || type=="name";
+                   type=="character" || type=="name" || (regex && type=="\"char\"");
         };
         if(binary ? ((lhs!="bytea" && lhs!="unknown") || (rhs!="bytea" && rhs!="unknown"))
                   : (!textual(lhs) || !textual(rhs)))
             throw DbError("42883","operator does not exist: "+leftType+" "+op+" "+rightType);
         const std::string target=binary?"bytea":"text";
-        if(lhs=="unknown" || binary)coerceCaseInput(left,leftType,target);
+        if (regex) {
+            // COLLATE preserves the input's role as a parameter, so an
+            // otherwise unknown pattern can still be declared as text.
+            auto inferCollatedInput = [&](Expr* input) {
+                while (auto* unary = dynamic_cast<UnaryOpExpr*>(input)) {
+                    if (unary->op.rfind("COLLATE ", 0) != 0) break;
+                    input = unary->operand.get();
+                }
+                inferMetadataInput(input, "text");
+            };
+            if (lhs == "unknown") inferCollatedInput(left.get());
+            if (rhs == "unknown") inferCollatedInput(right.get());
+        }
+        if(lhs=="unknown" || binary || (regex && (lhs=="character" || lhs=="\"char\"")))
+            coerceCaseInput(left,leftType,target);
         coerceCaseInput(right,rightType,target);
     }
     ExprPtr targetDefault(const Range& range, const QueryOutputColumn& column) {
@@ -967,7 +982,8 @@ public:
                 }
                 return binary->op=="[]"?element:type;
             }
-            if(patternOperator(binary->op)) {
+            if (patternOperator(binary->op) || binary->op == "~" || binary->op == "~*" ||
+                binary->op == "!~" || binary->op == "!~*") {
                 resolvePattern(binary->op,binary->left,binary->right,left,right);
                 return "boolean";
             }

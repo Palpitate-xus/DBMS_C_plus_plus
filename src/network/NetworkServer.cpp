@@ -3413,16 +3413,12 @@ void validatePreparedStoredSignatures(const ProtocolQuerySyntax& querySyntax,Ses
     (void)g_engine.prepareBoundQuery(session.currentDB,sql,protocolMetadataParameters(session,parameterOids));
 }
 
-// A whole, source-free scalar call has one selected input signature. Infer
-// its direct wire parameters from those declarations without evaluating a
-// callback, rendering a NULL literal, or treating occurrence slots as $n.
-// Other expression/query shapes keep their existing inference owners.
-// Derive selected concatenation input codecs from the ordinary metadata
+// Derive expression input codecs from the ordinary metadata
 // binder. Source spans identify wire parameters; values and routines are
 // never executed. Explicit wire OIDs keep ownership of their declarations.
-void inferProtocolConcatParameters(const ProtocolQuerySyntax& querySyntax,Session& session,
-                                   std::vector<uint32_t>& parameterOids) {
-    // Binding a genuine concat site is also its Parse-time type/input
+void inferProtocolExpressionParameters(const ProtocolQuerySyntax& querySyntax,Session& session,
+                                       std::vector<uint32_t>& parameterOids) {
+    // Binding the selected expression also checks its Parse-time
     // validation, even with no unknown parameters. Do this before emitting
     // ParseComplete; metadata preparation never executes its routines/rows.
     const auto& sql = querySyntax.sql();
@@ -3482,28 +3478,32 @@ void inferProtocolConcatParameters(const ProtocolQuerySyntax& querySyntax,Sessio
         for(const auto& row:select->valuesRows)for(const auto& member:row)expression(member.get());
     };
     bool concatenation=false;
+    bool regex=false;
     observe=[&](const Expr* value) {
-        if(const auto* binary=dynamic_cast<const BinaryOpExpr*>(value))
-            concatenation=concatenation || binary->op=="||";
+        if (const auto* binary = dynamic_cast<const BinaryOpExpr*>(value)) {
+            const auto& op = binary->op;
+            concatenation = concatenation || op == "||";
+            regex = regex || op == "~" || op == "~*" || op == "!~" || op == "!~*";
+        }
     };
-    statement(parsed.stmt.get());if(!concatenation && !queryCountClauses)return;
+    statement(parsed.stmt.get());if(!concatenation && !queryCountClauses && !regex)return;
     auto* previous=currentSession();setCurrentSession(&session);
     struct Restore {Session* previous;~Restore(){setCurrentSession(previous);}} restore{previous};
     const auto prepared=g_engine.prepareBoundQuery(session.currentDB,sql,
         protocolMetadataParameters(session,parameterOids));
-    if(queryCountClauses) {
+    if(queryCountClauses || regex) {
         // Ordinary metadata binding selects each input declaration from its
         // real expression context. Occurrence slots are not wire positions:
         // recover $n only through the binder's original source provenance.
         auto inferred=parameterOids;
         for(const auto& use:prepared.uses) {
             if(use.slot>=prepared.parameters.size() || use.begin>use.end || use.end>prepared.source.size())
-                throw DbError("XX000","row count parameter has no source provenance");
+                throw DbError("XX000","expression parameter has no source provenance");
             const auto spelling=prepared.source.substr(use.begin,use.end-use.begin);
             if(spelling.size()<2 || spelling.front()!='$' ||
                !std::all_of(spelling.begin()+1,spelling.end(),[](unsigned char c){return std::isdigit(c);}))continue;
             const auto position=std::stoul(spelling.substr(1));
-            if(!position || position>inferred.size())throw DbError("42P02","invalid row count parameter");
+            if(!position || position>inferred.size())throw DbError("42P02","invalid expression parameter");
             if(inferred[position-1])continue;
             const auto oid=mapBuiltinTypeNameToOid(ExprHelper::canonicalResultTypeName(prepared.parameters[use.slot].typeName));
             if(oid && oid!=705)inferred[position-1]=oid;
@@ -9221,7 +9221,7 @@ void handleClient(SecureSocket socket, std::string clientHost, CopyQueryFactory 
             // Other unsupported parser forms still belong to their existing
             // protocol analyzers rather than becoming blanket syntax errors.
             const ProtocolQuerySyntax syntax(sql);
-            {
+            try {
                 const auto& parsed = syntax.parse();
                 // Transaction grammar failures predate explicit ParseResult
                 // SQLSTATEs. They are still raw syntax errors, including in
@@ -9236,6 +9236,15 @@ void handleClient(SecureSocket socket, std::string clientHost, CopyQueryFactory 
                     extendedQueryError = true;
                     continue;
                 }
+            } catch (const DbError& error) {
+                if (transactionFailed && error.sqlState() != "42601") {
+                    const auto aborted = transactionAbortedResult();
+                    sendExtendedProtocolError(aborted.sqlState, aborted.errorMessage);
+                } else {
+                    sendExtendedProtocolError(error.sqlState(), error.message());
+                }
+                extendedQueryError = true;
+                continue;
             }
             // Raw syntax remains checked above, but an aborted block cannot
             // analyze or publish another statement. Preserve empty Parse and
@@ -9312,7 +9321,7 @@ void handleClient(SecureSocket socket, std::string clientHost, CopyQueryFactory 
                     if(namespaceDescriptor.empty())(void)describePreparedOwnedCatalog(syntax,session,namespaceDescriptor,parameterTypes);
                     if(namespaceDescriptor.empty())(void)describePreparedPgSequenceCatalog(syntax,session,namespaceDescriptor,parameterTypes);
                     if (!progressQuery) {
-                        inferProtocolConcatParameters(syntax,session,parameterTypes);
+                        inferProtocolExpressionParameters(syntax,session,parameterTypes);
                         inferProtocolWholeScalarParameters(syntax,session,parameterTypes);
                         validatePreparedAggregateOrderInputs(syntax,session,parameterTypes);
                         validatePreparedStoredSignatures(syntax,session,parameterTypes);

@@ -680,6 +680,20 @@ std::optional<PgClassRow> CatalogManager::resolveRelationSnapshot(
     return row ? std::make_optional(*row) : std::nullopt;
 }
 
+std::optional<bool> CatalogManager::relationIsVisible(
+    Oid oid, const std::vector<std::string>& searchPath) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto* relation = findClassUnlocked(oid);
+    if (!relation) return std::nullopt;
+    return visibleRelationUnlocked(relation->relname, searchPath) == relation;
+}
+
+std::optional<bool> CatalogManager::readRelationVisibility(
+    const std::string& path, Oid oid, const std::vector<std::string>& searchPath) {
+    CatalogManager catalog(path, ReadOnlyTag{});
+    return catalog.relationIsVisible(oid, searchPath);
+}
+
 std::optional<PgAttributeRow> CatalogManager::resolveAttributeSnapshot(
     const std::string& tableName, const std::string& colName,
     const std::vector<std::string>& searchPath) const {
@@ -1057,10 +1071,15 @@ const PgClassRow* CatalogManager::resolveRelationUnlocked(
         return nullptr;
     }
 
+    return visibleRelationUnlocked(qn.name, searchPath);
+}
+
+const PgClassRow* CatalogManager::visibleRelationUnlocked(
+    const std::string& name, const std::vector<std::string>& searchPath) const {
     for (const auto& nspname : searchPath) {
         auto nsIt = nsByName_.find(nspname);
         if (nsIt == nsByName_.end()) continue;
-        auto it = classByName_.find(classNameKey(nsIt->second, qn.name));
+        auto it = classByName_.find(classNameKey(nsIt->second, name));
         if (it != classByName_.end() && it->second < classes_.size()) {
             return &classes_[it->second];
         }
