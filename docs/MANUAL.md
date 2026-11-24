@@ -853,6 +853,18 @@ SELECT id FROM migration_log ORDER BY source_table LIMIT $1 OFFSET $2;
 
 直接用于这些位置且未声明类型的参数通常按 `bigint` 读取。`LIMIT` 传空值表示不限行数，`OFFSET` 传空值表示从第一条开始。带参数的 `FETCH … WITH TIES` 也可翻页，空值表示返回偏移之后的全部记录。两个位置的负数会在执行时返回错误。 [带参数的分页测试](test-report.md#bound-row-count-20261124)
 
+在 `psql` 里也可以准备并复用同一条分页语句。
+
+```sql
+PREPARE migration_page AS
+  SELECT id FROM migration_log ORDER BY source_table LIMIT $1 OFFSET $2;
+EXECUTE migration_page(1, 1);
+EXPLAIN (ANALYZE, FORMAT JSON) EXECUTE migration_page(1, 1);
+DEALLOCATE migration_page;
+```
+
+`EXECUTE` 先计算实参，再运行查询。同一个参数在查询里用到多次时，拿到的是同一个值。`EXPLAIN` 会显示这一次分页所用的计划，加上 `ANALYZE` 会实际读取并统计行数。 [SQL 分页验证](test-report.md#sql-bound-page-20261124)
+
 ### 其他类型
 | 类型 | 说明 |
 |------|------|
@@ -2606,7 +2618,7 @@ export DBMS_TLS_KEY=/etc/dbms/tls/server.key
 # 仅限本地开发的明文模式（生产环境禁止）
 ./dbms_main -D /srv/dbms/main --server 9999 --insecure
 
-# 客户端连接（libpq/psql；当前支持 SCRAM-SHA-256 与基础协议流程）
+# 客户端连接（libpq/psql）
 psql "host=localhost port=9999 dbname=info user=admin sslmode=require"
 
 # 连接监控
@@ -2618,6 +2630,8 @@ SHOW DEADLOCKS;
 ```
 
 服务端默认 fail-closed：OpenSSL 不可用、证书/私钥缺失或 TLS 初始化失败时不会启动明文监听。证书路径也可以保留默认值 `server.crt` / `server.key`。
+
+`psql` 18.6 的查询示例在本地密码认证下验证通过。使用 SCRAM 时，libpq 发出的空 SCRAM 用户名目前会被服务端拒绝。 [验证记录](test-report.md#sql-bound-page-20261124)
 
 服务进程收到 `SIGINT` 或 `SIGTERM` 后会停止接收新连接，关闭活动连接并等待客户端 worker 退出；监听端口失败会以非零退出码结束。`--insecure` 仅用于本地开发。
 

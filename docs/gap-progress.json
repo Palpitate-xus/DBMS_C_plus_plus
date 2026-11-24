@@ -2,6 +2,18 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-24 use ordered pages when executing SQL prepared statements",
+      "gap_ids": ["QRY-06", "OPT-01", "PROTO-03", "PROTO-04"],
+      "status": "partial",
+      "evidence": ["src/main.cpp", "src/utils/prepared_stmts.cpp", "src/commands/TableManage.cpp", "src/executor/ExecutionPlan.cpp", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/sql_prepared_page_protocol_e2e_test.py", "tests/sql_execute_argument_once_protocol_e2e_test.py", "tests/oid_column_recovery_protocol_e2e_test.py"],
+      "verification": [
+        "SQL PREPARE retains inferred declarations for direct count parameters. SQL EXECUTE evaluates each argument once and uses its typed value in the same SELECT plan.",
+        "An ordered OID source accepts a direct frozen bound, and EXPLAIN EXECUTE reports how many heap rows were read. The protocol checks include column provenance and use of a name from both SQL and the wire.",
+        "Nullable counts, tied rows, zero-result demand and crash recovery are covered. General count expressions and reusable generic plans remain open."
+      ]
+    },
+    {
       "issue": "2026-11-24 bind direct row count parameters for ordinary SELECT pages",
       "gap_ids": ["QRY-06", "OPT-01", "PROTO-03", "PROTO-04"],
       "status": "partial",

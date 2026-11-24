@@ -5495,6 +5495,14 @@ static bool handleCopy(const string& sql, Session& s) {
 
 static bool requiresParsedValueBinding(const dbms::Stmt* root,bool constantScalarOnly=false,bool windowOnly=false);
 
+static bool hasDirectPreparedRowCount(const dbms::Stmt* root) {
+    const auto* select = dynamic_cast<const dbms::SelectStmt*>(root);
+    return select && select->command == dbms::SqlCommand::Select && select->setOp == dbms::SetOp::None &&
+        !select->setOpLhs && !select->setOpRhs &&
+        (dynamic_cast<const dbms::ParameterExpr*>(select->limitExpr.get()) ||
+         dynamic_cast<const dbms::ParameterExpr*>(select->offsetExpr.get()));
+}
+
 static dbms::Oid resolvePreparedParameterType(const string& typeSpec,
                                               const Session& s) {
     string typeName = trim(typeSpec);
@@ -5688,7 +5696,8 @@ static bool handlePrepare(const string& sql, const string& originalSql, Session&
         {
             dbms::SQLParser parser;
             const auto parsed=parser.parseForBinding(templateSql);
-            if(requiresParsedValueBinding(parsed.stmt.get())) {
+            const bool rowCounts = hasDirectPreparedRowCount(parsed.stmt.get());
+            if (rowCounts || requiresParsedValueBinding(parsed.stmt.get())) {
                 vector<dbms::QueryBindingDatum> declarations;
                 for(size_t i=0;i<paramTypes.size();++i) {
                     dbms::QueryBindingDatum parameter;
@@ -5699,7 +5708,16 @@ static bool handlePrepare(const string& sql, const string& originalSql, Session&
                 }
                 // PREPARE analyzes declarations but never plans constants or
                 // evaluates argument values before publishing the name.
-                (void)g_engine.prepareBoundQuery(s.currentDB,templateSql,declarations);
+                const auto prepared = g_engine.prepareBoundQuery(s.currentDB,templateSql,declarations);
+                if (rowCounts) {
+                    dbms::ps_inferBoundParameterTypes(prepared, paramTypes);
+                    for (size_t i = 0; i < paramTypes.size(); ++i) {
+                        if (paramTypes[i].empty())
+                            throw dbms::DbError("42P18", "could not determine data type of parameter $" + to_string(i + 1));
+                        if (!parameterOids[i]) parameterOids[i] = resolvePreparedParameterType(paramTypes[i], s);
+                        if (!parameterOids[i]) throw dbms::DbError("42704", "prepared parameter type does not exist");
+                    }
+                }
             }
         }
         dbms::notePreparedTemporaryObjectAccess(templateSql, s);
@@ -5741,9 +5759,11 @@ static bool handlePrepare(const string& sql, const string& originalSql, Session&
 }
 
 static bool executePreparedInputQuery(const string& sql, const vector<string>& arguments,
-    const vector<string>& parameterTypes, Session& session);
+    const vector<string>& parameterTypes, Session& session,
+    const dbms::QueryPlanner::ExplainOptions* explain, bool json);
 
-static bool handleExecutePrepared(const string& sql, Session& s) {
+static bool handleExecutePrepared(const string& sql, Session& s,
+    const dbms::QueryPlanner::ExplainOptions* explain = nullptr, bool json = false) {
     dbms::SQLParser parser;
     const auto parsed = parser.parseForBinding(sql);
     const auto* input = dynamic_cast<const dbms::ExecuteStmt*>(parsed.stmt.get());
@@ -5752,6 +5772,8 @@ static bool handleExecutePrepared(const string& sql, Session& s) {
              << " (SQLSTATE " << (parsed.sqlState.empty() ? "42601" : parsed.sqlState) << ")" << endl;
         return true;
     }
+    if (explain && input->legacyUsing)
+        throw dbms::DbError("42601", "EXPLAIN EXECUTE requires parenthesized arguments");
     const string& stmtName = input->name;
     const bool pgForm = input->hasParentheses;
     auto it = s.preparedStmts.find(stmtName);
@@ -5781,9 +5803,9 @@ static bool handleExecutePrepared(const string& sql, Session& s) {
              << " but got " << values.size() << " (SQLSTATE 42601)" << endl;
         return true;
     }
-    if (dollarForm) {
+    if (dollarForm || explain) {
         if (ignoreExtraArguments) values.clear();
-        return executePreparedInputQuery(expanded, values, parameterTypes, s);
+        return executePreparedInputQuery(expanded, values, parameterTypes, s, explain, json);
     }
     if (!values.empty() && !dollarForm) {
         // Legacy '?' substitution for templates without $n.
@@ -6152,6 +6174,8 @@ static bool handleExplain(const string& sql, Session& s) {
     string inner = rest;
     dbms::SQLParser explainParser;
     auto explained = explainParser.parseForBinding(inner);
+    if (explained.success && dynamic_cast<const dbms::ExecuteStmt*>(explained.stmt.get()))
+        return handleExecutePrepared(inner, s, &opts, isJson);
     if(explained.success && (dynamic_cast<dbms::InsertStmt*>(explained.stmt.get()) ||
        dynamic_cast<dbms::UpdateStmt*>(explained.stmt.get()) || dynamic_cast<dbms::DeleteStmt*>(explained.stmt.get())))
         return explainPreparedDmlQuery(s,inner,opts,isJson);
@@ -22239,8 +22263,55 @@ static void executePreparedReadReceiver(Session& session,
     dbms::publishLastDmlResult(std::move(result));
 }
 
+static bool bindExecutedRowCounts(dbms::SelectStmt& select, const dbms::PreparedQuery& query,
+                                  const string& database, bool evaluate) {
+    if (select.command != dbms::SqlCommand::Select || select.setOp != dbms::SetOp::None ||
+        select.setOpLhs || select.setOpRhs || (!select.limitExpr && !select.offsetExpr)) return false;
+    const auto isFrozenParameter = [](const dbms::Expr* expression) {
+        if (!expression) return true;
+        if (const auto* cast = dynamic_cast<const dbms::CastExpr*>(expression); cast && cast->implicit)
+            expression = cast->operand.get();
+        const auto* parameter = dynamic_cast<const dbms::ParameterExpr*>(expression);
+        return parameter && parameter->origin == dbms::ParameterOrigin::StatementInput;
+    };
+    if (!isFrozenParameter(select.offsetExpr.get()) || !isFrozenParameter(select.limitExpr.get())) return false;
+
+    dbms::ExprEvaluator evaluator;
+    evaluator.setCurrentDB(database);
+    dbms::RowContext row;
+    row.setParameters(query.parameters);
+    const auto count = [&](const dbms::ExprPtr& expression, const char* clause,
+                           const char* sqlState) -> optional<size_t> {
+        const auto value = evaluator.eval(expression, row);
+        if (value.isNull) return {};
+        int64_t number = 0;
+        const auto end = value.value.data() + value.value.size();
+        const auto parsed = std::from_chars(value.value.data(), end, number);
+        if (parsed.ptr != end || parsed.ec != std::errc{})
+            throw dbms::DbError("XX000", "bound row count is not bigint");
+        if (number < 0) {
+            if (evaluate) throw dbms::DbError(sqlState, string(clause) + " must not be negative");
+            return 0;
+        }
+        if (static_cast<uint64_t>(number) > numeric_limits<size_t>::max())
+            throw dbms::DbError("54000", "row count is too large");
+        return static_cast<size_t>(number);
+    };
+    if (select.offsetExpr) {
+        select.offset = count(select.offsetExpr, "OFFSET", "2201X");
+        select.offsetExpr.reset();
+    }
+    if (select.limitExpr) {
+        select.limit = count(select.limitExpr, "LIMIT", "2201W");
+        select.limitExpr.reset();
+        if (!select.limit) select.withTies = false;
+    }
+    return true;
+}
+
 static bool executePreparedInputQuery(const string& sql, const vector<string>& arguments,
-    const vector<string>& parameterTypes, Session& session) {
+    const vector<string>& parameterTypes, Session& session,
+    const dbms::QueryPlanner::ExplainOptions* explain, bool json) {
     vector<dbms::QueryBindingDatum> inputs;
     if (!arguments.empty()) {
         string argumentSql = "SELECT ";
@@ -22335,15 +22406,26 @@ static bool executePreparedInputQuery(const string& sql, const vector<string>& a
     // slot, while the original output labels and declarations stay intact.
     auto query = make_shared<dbms::PreparedQuery>(
         g_engine.prepareBoundQuery(session.currentDB, sql, inputs, true));
-    const auto* read = dynamic_cast<const dbms::SelectStmt*>(query->ast.get());
+    auto* read = dynamic_cast<dbms::SelectStmt*>(query->ast.get());
+    const bool boundCounts = read && bindExecutedRowCounts(*read, *query, session.currentDB,
+        !explain || explain->analyze);
+    const bool nativeRead = read && dbms::QueryPlanner::supportsPreparedSelectPlan(*read);
+    if (explain) {
+        if (!nativeRead) throw dbms::DbError("0A000", "EXPLAIN EXECUTE requires a supported SELECT plan");
+        return explainPreparedReadQuery(session, sql, *explain, json, std::move(query));
+    }
     const auto* insert = dynamic_cast<const dbms::InsertStmt*>(query->ast.get());
     const bool mutation = (insert && insert->conflictAction.empty()) ||
         dynamic_cast<const dbms::UpdateStmt*>(query->ast.get()) ||
         dynamic_cast<const dbms::DeleteStmt*>(query->ast.get());
     dbms::DmlResult result;
-    if (mutation || (read && dbms::QueryPlanner::supportsPreparedSelectPlan(*read))) {
+    if (mutation || nativeRead) {
         PreparedWithDmlRuntime runtime(session, query);
         result = mutation ? runtime.runDml() : runtime.runRead();
+        if (boundCounts) {
+            dbms::attachPreparedProjectionOrigins(result.rowDescriptor, *query, session);
+            if (result.typedRowDescriptor) result.typedRowDescriptor = result.rowDescriptor;
+        }
         for (const auto& name : result.columns) cout << renderLegacyHeader(name) << ' ';
         if (!result.columns.empty()) cout << '\n';
         for (size_t i = 0; i < result.rows.size(); ++i) {

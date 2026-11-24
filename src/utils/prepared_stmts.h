@@ -5,6 +5,8 @@
 
 namespace dbms {
 
+struct PreparedQuery;
+
 std::string ps_trim(const std::string& s);
 
 // Top-level " AS " finder for PREPARE (quote/paren/dollar-quote aware).
@@ -19,6 +21,9 @@ bool ps_parsePrepareHead(const std::string& head, std::string& name,
 // unused $1), so count is the highest referenced parameter number.
 bool ps_analyzeDollarParams(const std::string& sql, size_t& count,
                             std::string& error);
+
+// Retain the binder's inferred types for the original positional inputs.
+void ps_inferBoundParameterTypes(const PreparedQuery& query, std::vector<std::string>& declarations);
 
 // Top-level comma split for EXECUTE argument lists.
 std::vector<std::string> ps_splitExecuteArgs(const std::string& in);

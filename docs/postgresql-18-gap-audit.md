@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-24 · SQL 预编译语句可以按页读索引
+
+普通外层 `SELECT` 的直接分页参数可通过 SQL `PREPARE` 确定类型，`EXECUTE` 复用同一个已求值参数，并将 `oid` 边界交给现有索引读取。`EXPLAIN EXECUTE` 可显示受支持的查询计划。任意分页表达式和通用计划缓存仍待实现。`QRY-06`、`OPT-01`、`PROTO-03` 和 `PROTO-04` 保持部分实现。 [功能验证](test-report.md#sql-bound-page-20261124) · [性能对照](performance-report-2026-10-30.md#sql-bound-page-cost-20261124) · [实现对照](postgresql-comparison.md#sql-bound-page-comparison-20261124)
+
 ## 2026-11-24 · 应用可以直接传入分页行数和位置
 
 普通外层 `SELECT` 的 `LIMIT`、`OFFSET` 和 `FETCH` 可从客户端接收直接参数。小页使用现有按序读取计划，客户端能够取得输入类型、结果类型和原列位置。较早的事务快照仍按当前可见性规则读取。任意表达式和嵌套参数有待补齐。`QRY-06`、`OPT-01`、`PROTO-03` 和 `PROTO-04` 保持部分实现。 [功能验证](test-report.md#bound-row-count-20261124) · [性能对照](performance-report-2026-10-30.md#bound-row-count-cost-20261124) · [实现对照](postgresql-comparison.md#bound-row-count-comparison-20261124)

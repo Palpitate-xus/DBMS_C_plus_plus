@@ -5481,7 +5481,7 @@ struct BtreePageSpec {
 
 static std::optional<BtreePageSpec> btreePageSpec(StorageEngine& engine,
         const std::string& database, const SelectStmt& select,
-        const QueryColumnBinding& key, const TableSchema& schema) {
+        const QueryColumnBinding& key, const TableSchema& schema, const PreparedQuery& query) {
     const auto count = simplePageDemand(select, true);
     if (!count || *count > StoredBtreeOrder::maxRows || key.columnOrdinal >= schema.len() ||
         (key.typeOid != 1266 && key.typeOid != 26) || !key.typeMetadata ||
@@ -5501,7 +5501,7 @@ static std::optional<BtreePageSpec> btreePageSpec(StorageEngine& engine,
             reference->binding->scopeDepth || reference->binding->mergedUsing ||
             reference->binding->sourceOrdinal != key.sourceOrdinal ||
             reference->binding->columnOrdinal != key.columnOrdinal) {
-            auto range = storedBtreeRange(engine, database, schema, select.whereClause.get(), key.sourceOrdinal, true);
+            auto range = storedBtreeRange(engine, database, schema, select.whereClause.get(), key.sourceOrdinal, true, &query);
             if (!range || range->column != column.dataName || range->key != kind) return {};
             page.range = std::move(*range);
         }
@@ -5521,7 +5521,7 @@ bool mayUseStoredBtreePage(StorageEngine& engine, const std::string& database,
     const auto table = relation->relationSchema.empty() || relation->relationSchema == "public" ? relation->relationName
         : relation->relationSchema + "__" + relation->relationName;
     const auto schema = engine.getTableSchema(database, table);
-    return btreePageSpec(engine, database, select, *key, schema).has_value();
+    return btreePageSpec(engine, database, select, *key, schema, query).has_value();
 }
 
 // The outer filter keeps responsibility for the SQL predicate. This source
@@ -5705,7 +5705,7 @@ static OpPtr makePreparedTableSource(StorageEngine* engine, const std::string& d
         const auto orderKey = directPageOrder(*query, *select, true);
         if (orderKey && (orderKey->typeOid == 1266 || orderKey->typeOid == 26) &&
             integerPageRelation(*query, *select, *orderKey)) {
-            if (auto page = btreePageSpec(*engine, database, *select, *orderKey, schema)) {
+            if (auto page = btreePageSpec(*engine, database, *select, *orderKey, schema, *query)) {
                 return std::make_unique<StoredBtreeRangeScanOp>(*engine, database, schema,
                     std::move(page->range), heap(), page->order);
             }
@@ -5715,7 +5715,7 @@ static OpPtr makePreparedTableSource(StorageEngine* engine, const std::string& d
                 if (sourceRange.owner != select || sourceRange.source != select->fromClause.get() ||
                     sourceRange.cteStatement || sourceRange.viewQuery) continue;
                 if (auto range = storedBtreeRange(*engine, database, schema,
-                        select->whereClause.get(), sourceRange.ordinal)) {
+                        select->whereClause.get(), sourceRange.ordinal, false, query.get())) {
                     return std::make_unique<StoredBtreeRangeScanOp>(*engine, database, schema, std::move(*range), heap());
                 }
             }

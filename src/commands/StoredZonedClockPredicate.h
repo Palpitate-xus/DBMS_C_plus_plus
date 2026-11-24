@@ -38,7 +38,7 @@ bool completeStoredBtreeIndex(StorageEngine& engine, const std::string& database
 
 std::optional<StoredBtreeRange> storedBtreeRange(StorageEngine& engine,
     const std::string& database, const TableSchema& schema, const Expr* predicate,
-    size_t sourceOrdinal, bool includeFullDomain = false);
+    size_t sourceOrdinal, bool includeFullDomain = false, const PreparedQuery* query = nullptr);
 
 std::optional<StoredBtreeRange> storedBtreeRange(StorageEngine& engine,
     const std::string& database, const TableSchema& schema,

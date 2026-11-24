@@ -2,6 +2,13 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="sql-bound-page-comparison-20261124"></a>
+## 2026-11-24 · 用 SQL 准备并复用分页查询
+
+PostgreSQL `PREPARE` 分析查询并保留参数声明。`EXECUTE` 先计算参数，再根据缓存设置和使用情况选择具体计划或通用计划。规划器可用已知的行数和偏移估计读取量。SQLite 的客户端可以调用 `sqlite3_bind_int64` 给已经准备的语句绑定整数。DuckDB 允许用 SQL 准备语句，并通过 `EXECUTE` 传入位置参数。 [PostgreSQL 18 PREPARE](https://www.postgresql.org/docs/18/sql-prepare.html) · [PostgreSQL 18.6 EXECUTE](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/commands/prepare.c#L149-L182) · [SQLite 参数绑定](https://www.sqlite.org/c3ref/bind_blob.html) · [DuckDB 预编译语句](https://duckdb.org/docs/current/sql/query_syntax/prepared_statements)
+
+本项目把 SQL `EXECUTE` 的参数求值结果直接交给普通 `SELECT` 的页大小、偏移和 `oid` 范围读取。`EXPLAIN EXECUTE` 可以查看这次运行的读取方式。已有的事务可见性和索引适用条件同样生效。该执行方式每次使用当次参数形成计划，通用计划缓存和任意分页表达式仍有待实现。 [功能验证](test-report.md#sql-bound-page-20261124) · [性能对照](performance-report-2026-10-30.md#sql-bound-page-cost-20261124)
+
 <a id="bound-row-count-comparison-20261124"></a>
 ## 2026-11-24 · 应用传入分页行数
 

@@ -34232,7 +34232,14 @@ static bool oidRangeLiteral(StorageEngine& engine, const std::string& database, 
 }
 
 static std::optional<int64_t> constantStoredOidOrder(StorageEngine& engine,
-        const std::string& database, const Expr* input) {
+        const std::string& database, const Expr* input, const PreparedQuery* query) {
+    if (const auto* parameter = dynamic_cast<const ParameterExpr*>(input)) {
+        if (!query || parameter->preparedSubquery || parameter->origin != ParameterOrigin::StatementInput ||
+            parameter->slot >= query->parameters.size() || parameter->declaredType != "oid") return {};
+        const auto& value = query->parameters[parameter->slot];
+        if (value.isNull || value.typeName != "oid") return {};
+        return stored_regtype_detail::rawOid(value.value);
+    }
     try {
         if (!oidRangeLiteral(engine, database, input)) return {};
         ExprEvaluator evaluator;
@@ -34254,7 +34261,7 @@ static std::optional<int64_t> constantStoredOidOrder(StorageEngine& engine,
 
 static bool collectStoredBtreeBounds(StorageEngine& engine, const std::string& database,
         const TableSchema& schema, const Expr* predicate, std::optional<size_t> sourceOrdinal,
-        StoredBtreeRange& range) {
+        StoredBtreeRange& range, const PreparedQuery* query = nullptr) {
     if (!predicate || predicate->preparedSubquery) return false;
     const auto columnOf = [&](const Expr* expression) -> const Column* {
         const auto* ref = dynamic_cast<const ColumnRefExpr*>(expression);
@@ -34270,15 +34277,15 @@ static bool collectStoredBtreeBounds(StorageEngine& engine, const std::string& d
             ? &column : nullptr;
     };
     const auto keyOf = [&](const Column& column, const Expr* input) -> std::optional<int64_t> {
-        if (ordinaryOidColumn(column)) return constantStoredOidOrder(engine, database, input);
+        if (ordinaryOidColumn(column)) return constantStoredOidOrder(engine, database, input, query);
         const auto value = constantStoredZonedClockInput(engine, database, input);
         return value ? storedZonedClockOrder(*value) : std::nullopt;
     };
     if (const auto* binary = dynamic_cast<const BinaryOpExpr*>(predicate)) {
         const auto& op = binary->op;
         if (op == "AND" || op == "and")
-            return collectStoredBtreeBounds(engine, database, schema, binary->left.get(), sourceOrdinal, range) &&
-                   collectStoredBtreeBounds(engine, database, schema, binary->right.get(), sourceOrdinal, range);
+            return collectStoredBtreeBounds(engine, database, schema, binary->left.get(), sourceOrdinal, range, query) &&
+                   collectStoredBtreeBounds(engine, database, schema, binary->right.get(), sourceOrdinal, range, query);
         if (!isOrderedRangeOp(op) || binary->rowComparison || binary->predicateCollation) return false;
         const auto* left = columnOf(binary->left.get());
         const auto* column = left ? left : columnOf(binary->right.get());
@@ -34312,9 +34319,9 @@ static bool hasSelectiveStoredBtreeBound(const StoredBtreeRange& range) {
 
 std::optional<StoredBtreeRange> storedBtreeRange(StorageEngine& engine,
     const std::string& database, const TableSchema& schema, const Expr* predicate,
-    size_t sourceOrdinal, bool includeFullDomain) {
+    size_t sourceOrdinal, bool includeFullDomain, const PreparedQuery* query) {
     StoredBtreeRange range;
-    if (collectStoredBtreeBounds(engine, database, schema, predicate, sourceOrdinal, range) &&
+    if (collectStoredBtreeBounds(engine, database, schema, predicate, sourceOrdinal, range, query) &&
         (includeFullDomain || hasSelectiveStoredBtreeBound(range))) return range;
     return {};
 }

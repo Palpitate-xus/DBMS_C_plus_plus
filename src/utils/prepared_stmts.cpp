@@ -10,9 +10,12 @@
 // ============================================================================
 
 #include "utils/prepared_stmts.h"
+#include "common/DbError.h"
+#include "parser/query_binding.h"
 
 #include <algorithm>
 #include <cctype>
+#include <iterator>
 #include <limits>
 
 namespace dbms {
@@ -242,6 +245,24 @@ bool ps_analyzeDollarParams(const std::string& sql, size_t& count,
     count = 0;
     for (const auto& ref : refs) count = std::max(count, ref.number);
     return true;
+}
+
+void ps_inferBoundParameterTypes(const PreparedQuery& query, std::vector<std::string>& declarations) {
+    std::vector<DollarParameterRef> refs;
+    std::string error;
+    if (!collectDollarParameters(query.source, refs, error)) throw DbError("42P02", error);
+    for (const auto& use : query.uses) {
+        const auto found = std::lower_bound(refs.begin(), refs.end(), use.begin,
+            [](const DollarParameterRef& ref, size_t begin) { return ref.begin < begin; });
+        if (found == refs.end() || found->end > use.end) continue;
+        const auto next = std::next(found);
+        if (next != refs.end() && next->begin < use.end)
+            throw DbError("XX000", "bound parameter has ambiguous source provenance");
+        if (found->number > declarations.size()) throw DbError("42P02", "invalid bound query parameter");
+        auto& declaration = declarations[found->number - 1];
+        const auto& type = query.parameters.at(use.slot).typeName;
+        if (declaration.empty() && type != "unknown") declaration = type;
+    }
 }
 
 // Split an EXECUTE argument list on top-level commas (quote/paren aware).

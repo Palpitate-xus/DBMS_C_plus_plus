@@ -3167,6 +3167,15 @@ bool describePreparedExplainResult(const ProtocolQuerySyntax& syntax, Session& s
     // The retained plan publisher owns TEXT/JSON. XML/YAML renderers remain
     // separate unsupported consumers, not text relabeled as those formats.
     if(!explain || explain->xml || explain->yaml)return false;
+    if (dynamic_cast<const ExecuteStmt*>(explain->query.get())) {
+        // The plan has a fixed output schema. The EXECUTE owner resolves
+        // its prepared statement and arguments when the command runs.
+        QueryResult shape;
+        shape.columns = {"QUERY PLAN"};
+        shape.columnTypes = {explain->json ? "json" : "text"};
+        columns = describeProtocolColumns(shape, std::string{}, session);
+        return true;
+    }
     // Genuine typed parameter sites, not substituted NULL SQL or a rendered
     // statement. Binding describes the whole tree but never plans constants,
     // invokes a routine, or constructs/opens its row providers.
@@ -3976,24 +3985,13 @@ void inferProtocolRowCountParameters(const ProtocolQuerySyntax& syntax, Session&
     const auto prepared = g_engine.prepareBoundQuery(session.currentDB, syntax.sql(),
         protocolMetadataParameters(session, oids));
     if (std::find(oids.begin(), oids.end(), 0) == oids.end()) return;
+    std::vector<std::string> types(oids.size());
+    ps_inferBoundParameterTypes(prepared, types);
     auto inferred = oids;
-    for (const auto& use : prepared.uses) {
-        if (use.begin >= use.end || use.end > prepared.source.size())
-            throw DbError("XX000", "row count query parameter has no source provenance");
-        const auto tokens = SQLParser::tokenize(prepared.source.substr(use.begin, use.end - use.begin));
-        for (const auto& token : tokens) {
-            if (token.size() < 2 || token.front() != '$') continue;
-            size_t position = 0;
-            const auto end = token.data() + token.size();
-            const auto parsed = std::from_chars(token.data() + 1, end, position);
-            if (parsed.ptr != end || parsed.ec != std::errc{} || !position || position > oids.size())
-                continue;
-            if (inferred[position - 1]) break;
-            const auto type = ExprHelper::canonicalResultTypeName(prepared.parameters.at(use.slot).typeName);
-            const auto oid = mapBuiltinTypeNameToOid(type);
-            if (oid != INVALID_OID && oid != 705) inferred[position - 1] = oid;
-            break;
-        }
+    for (size_t i = 0; i < types.size(); ++i) {
+        if (inferred[i] || types[i].empty()) continue;
+        const auto oid = mapBuiltinTypeNameToOid(ExprHelper::canonicalResultTypeName(types[i]));
+        if (oid != INVALID_OID && oid != 705) inferred[i] = oid;
     }
     if (std::find(inferred.begin(), inferred.end(), 0) != inferred.end())
         throw DbError("42P18", "could not determine data type of query parameter");

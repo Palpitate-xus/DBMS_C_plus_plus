@@ -52,6 +52,10 @@ def main():
         assert client.row_description_fields(frames)[0][3:] == (23, 4, -1, 1), frames
         assert client.data_row_values(frames) == [[struct.pack("!i", i)] for i in ids], frames
         assert frames[-2:] == [(b"C", b"SELECT 2\0"), (b"Z", ready)], frames
+        wire.command("PREPARE durable_page AS " + ordered + " LIMIT $1", "PREPARE", ready=ready)
+        wire.query("EXECUTE durable_page(2)", rows=[(str(i),) for i in ids], tag="SELECT 2",
+                   fields=[("id", 23)], ready=ready)
+        wire.command("DEALLOCATE durable_page", "DEALLOCATE", ready=ready)
 
     def begin_update():
         wire.command("BEGIN", "BEGIN", ready=b"T")

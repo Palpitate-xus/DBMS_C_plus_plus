@@ -4,6 +4,51 @@
 
 > 复核发现，几组早期 COPY 计时在每个对照场景中使用了固定的执行顺序。耗时差可能包含顺序影响。这项问题涉及默认值求值、按列查找、默认值标记、短 CSV 导出和短查询导出的配对计时。[默认值求值](#copy-default-evaluation-order-cost-20261122) · [按列查找](#copy-identity-input-cost-20261122) · [默认值标记](#copy-default-marker-cost-20261122) · [CSV 导出](#copy-csv-out-cost-20261122) · [查询导出](#copy-query-stdout-cost-20261122)
 
+<a id="sql-bound-page-cost-20261124"></a>
+## 2026-11-24 · 用 SQL PREPARE 和 EXECUTE 反复翻页
+
+对照使用 `dc3bc9b7` 和 PostgreSQL 18.6。三套服务均按 128 行分批写入，分别测试 512 行和 2,048 行。测试机为 Intel Xeon E5-2678 v3。本项目以 GCC 13.3、CMake C++17 和 `-O2` 编译，关闭 OpenSSL。
+
+```sql
+CREATE TABLE bench_page(id integer PRIMARY KEY, k oid NOT NULL, note text);
+-- id 从 0 到 511 或 2047。k = 2147483500 + 2 * id，note 为 'source record'。
+CREATE INDEX bench_page_key ON bench_page(k);
+ANALYZE bench_page;
+PREPARE first_page(bigint,bigint) AS SELECT id FROM bench_page ORDER BY k LIMIT $1 OFFSET $2;
+PREPARE last_page(bigint) AS SELECT id FROM bench_page ORDER BY k DESC NULLS FIRST LIMIT $1;
+PREPARE bounded_page(oid,bigint,bigint) AS
+  SELECT id FROM bench_page WHERE k >= $1 ORDER BY k LIMIT $2 OFFSET $3;
+PREPARE with_ties(bigint,bigint) AS
+  SELECT id FROM bench_page ORDER BY k OFFSET $1 ROWS FETCH NEXT $2 ROWS WITH TIES;
+PREPARE full_count(oid) AS SELECT count(*) FROM bench_page WHERE k >= $1;
+```
+
+每轮只准备一次。正序每次取 3 条，在 0 至 3 的偏移间循环。倒序取 4 至 6 条。范围查询从编号 2,147,484,070 起，使用 8 至 10 的偏移，取 4 条。并列语句按 0 至 3 的偏移取 3 条。它在新版和 PostgreSQL 间对照，所用编号各不相同，功能测试另有真实并列组。计数使用编号 0。每次通过同一条本机 TCP 连接发送一条 `EXECUTE` 到收到就绪消息，核对行、列类型和完成标签。 [功能验证](test-report.md#sql-bound-page-20261124)
+
+表中各组在功能回归结束后逐组运行。每轮对照与新版交替请求。每条语句预热 4 次，计时 20 次。第二轮交换客户端和服务器所在 CPU。内存盘新旧对照使用 CPU 21/22，PostgreSQL 对照用 25/26，ext4 新旧对照用 27/28。P95 是每轮第 19 小的样本。表中为两轮各自中位数和 P95 的范围，单位为毫秒。
+
+| 环境 | 查询 | 对照中位数 | 新版中位数 | 对照 P95 | 新版 P95 |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 内存盘 512 行 | 正序小页 | 10.78–12.12 | 2.70–3.33 | 11.55–14.42 | 3.34–4.24 |
+| 内存盘 512 行 | 倒序小页 | 10.78–13.14 | 2.69–3.24 | 11.86–20.56 | 3.33–4.80 |
+| 内存盘 512 行 | 限定编号与偏移 | 123.41–128.28 | 3.85–4.06 | 132.96–136.11 | 5.36–5.93 |
+| 内存盘 512 行 | 全范围计数 | 9.94–11.64 | 9.88–11.35 | 11.20–19.23 | 10.43–19.24 |
+| 内存盘 2,048 行 | 正序小页 | 38.42–40.52 | 2.89–3.11 | 42.11–47.99 | 3.50–3.99 |
+| 内存盘 2,048 行 | 倒序小页 | 38.89–39.82 | 2.87–3.17 | 40.60–44.85 | 3.78–6.51 |
+| 内存盘 2,048 行 | 限定编号与偏移 | 481.52–495.49 | 3.99–4.40 | 502.24–544.79 | 5.13–6.81 |
+| 内存盘 2,048 行 | 全范围计数 | 31.42–31.89 | 31.09–32.03 | 32.77–33.21 | 32.10–34.62 |
+| ext4 512 行 | 正序小页 | 16.89–17.77 | 7.13–7.20 | 21.60–27.61 | 8.60–9.65 |
+| ext4 512 行 | 倒序小页 | 15.69–16.90 | 6.94–7.45 | 16.93–21.98 | 8.44–8.73 |
+| ext4 512 行 | 限定编号与偏移 | 132.36–135.00 | 7.96–10.79 | 144.68–153.40 | 15.04–18.98 |
+| ext4 512 行 | 全范围计数 | 12.69–14.42 | 12.76–14.29 | 14.49–17.72 | 13.24–15.87 |
+| 内存盘 512 行，PostgreSQL 对照 | 正序小页 | 0.29–0.30 | 2.64–3.23 | 0.36–0.42 | 2.75–3.87 |
+| 内存盘 512 行，PostgreSQL 对照 | 倒序小页 | 0.27–0.35 | 2.58–2.99 | 0.34–0.48 | 2.68–4.02 |
+| 内存盘 512 行，PostgreSQL 对照 | 限定编号与偏移 | 0.29 | 3.79–4.41 | 0.57–0.58 | 4.19–4.93 |
+| 内存盘 512 行，PostgreSQL 对照 | 检查页尾并列 | 0.28–0.29 | 2.64–2.99 | 0.34–0.36 | 2.91–3.12 |
+| 内存盘 512 行，PostgreSQL 对照 | 全范围计数 | 0.29–0.33 | 10.16–10.79 | 0.56–0.60 | 10.32–11.98 |
+
+每轮首条分页语句的 `EXPLAIN ANALYZE EXECUTE` 显示，新版和 PostgreSQL 的四条查询分别从索引读取 3、4、12 和 4 行。第四条多读一行检查是否存在并列记录。全范围计数仍检查所有行。512 行的对照里 PostgreSQL 的端到端时间更短。 [实现对照](postgresql-comparison.md#sql-bound-page-comparison-20261124)
+
 <a id="bound-row-count-cost-20261124"></a>
 ## 2026-11-24 · 应用重复执行带参数的小页查询
 
