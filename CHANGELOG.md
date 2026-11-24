@@ -1,27 +1,27 @@
 # 更新日志
 
 <details>
-<summary>可以查到列用什么排序规则 · 2026-11-24</summary>
+<summary>查看文本列怎么排序 · 2026-11-24</summary>
 
-创建表时为文本列指定了排序规则，现在可以查到它。例如，可以看出订单备注是否按字节顺序排序，也就是 `C` 规则。
+如果建表时选了按字节顺序排序（`C`），查询列信息时就会显示这个设置。
 
 [查询示例](docs/MANUAL.md#查询列的排序规则) · [测试报告](docs/test-report.md#collation-catalog-20261124) · [性能报告](docs/performance-report-2026-10-30.md#collation-catalog-cost-20261124)
 
 </details>
 
 <details>
-<summary>可以查到常见列默认值 · 2026-11-24</summary>
+<summary>查看一列没填时用什么默认值 · 2026-11-24</summary>
 
-可以用 SQL 查看一列的默认整数、文本或真假值。例如，可以查出订单备注默认是不是空字符串。
+例如，可以查到订单数量默认是 `1`，备注默认是空字符串。
 
 [查询示例](docs/MANUAL.md#查询列的默认值) · [测试报告](docs/test-report.md#column-default-expression-20261124) · [性能报告](docs/performance-report-2026-10-30.md#column-default-expression-cost-20261124)
 
 </details>
 
 <details>
-<summary>可以查到列的类型和长度 · 2026-11-24</summary>
+<summary>查看列的类型和建表时指定的长度 · 2026-11-24</summary>
 
-可以用 SQL 查看一列是整数、日期还是文本。例如，声明为 `varchar(12)` 的列会显示长度 12。
+可以查到一列存的是整数、日期还是文本。例如，查询 `varchar(12)` 的列会显示长度 12。
 
 [查询示例](docs/MANUAL.md#查询列的类型) · [测试报告](docs/test-report.md#format-type-20261124) · [性能报告](docs/performance-report-2026-10-30.md#format-type-cost-20261124)
 
