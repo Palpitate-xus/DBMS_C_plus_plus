@@ -1,4 +1,5 @@
 #include "catalog/type_registry.h"
+#include "common/DbError.h"
 #include "commands/DdlExecutor.h"
 #include "commands/TableManage.h"
 #include "test_utils.h"
@@ -24,8 +25,15 @@ int main() {
     session.currentDB = database;
     dbms::DdlExecutor ddl;
 
-    assert(ddl.executeSql(
-        "CREATE TABLE duplicate_columns (id INT, id TEXT)", session));
+    const auto expectCreateError = [&](const std::string& sql, const char* state) {
+        try {
+            ddl.executeSql(sql, session);
+            assert(false && "expected CREATE TABLE to throw a SQL error");
+        } catch (const dbms::DbError& error) {
+            assert(error.sqlState() == state);
+        }
+    };
+    expectCreateError("CREATE TABLE duplicate_columns (id INT, id TEXT)", "42701");
     assert(!g_engine.tableExists(database, "duplicate_columns"));
 
     dbms::TableSchema directDuplicate;
@@ -112,11 +120,11 @@ int main() {
         tooManyColumnsSql += "c" + std::to_string(i) + " INT";
     }
     tooManyColumnsSql += ")";
-    assert(ddl.executeSql(tooManyColumnsSql, session));
+    expectCreateError(tooManyColumnsSql, "54011");
     assert(!g_engine.tableExists(database, "too_many_columns"));
-    assert(ddl.executeSql(
+    expectCreateError(
         "CREATE TABLE like_overflow (LIKE maximum_columns, extra INT)",
-        session));
+        "54011");
     assert(!g_engine.tableExists(database, "like_overflow"));
 
     assert(ddl.executeSql(

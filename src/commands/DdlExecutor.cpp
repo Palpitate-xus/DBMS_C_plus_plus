@@ -23,6 +23,7 @@
 #include "catalog/PgAccessMethodCatalog.h"
 #include "catalog/PgCollationCatalog.h"
 #include "catalog/PgForeignKeyCatalog.h"
+#include "catalog/PgIndexCatalog.h"
 #include "catalog/RelationSearchPath.h"
 #include "catalog/systables.h"
 #include "catalog/type_registry.h"
@@ -1512,6 +1513,28 @@ static void synchronizeForeignKeys(const std::string& database, const std::strin
     if (!owner) return;
     foreign_key_catalog::synchronize(g_engine, database, catalog, *owner, physical, rename);
     if (!catalog.persistAll()) throw DbError("58030", "could not persist foreign key identities");
+}
+
+static std::string availablePrimaryKeyName(const CatalogManager& catalog, Oid schema, const std::string& table) {
+    const auto base = table + "_pkey";
+    std::string name = base;
+    for (size_t suffix = 1; catalog.getClassByName(name, schema); ++suffix)
+        name = base + std::to_string(suffix);
+    return name;
+}
+
+static void synchronizePrimaryIndex(const std::string& database, const std::string& physical, bool legacy = false) {
+    auto& catalog = g_engine.catalogService().get(database);
+    const auto name = CatalogService::logicalName(physical);
+    const auto space = catalog.getNamespaceByName(name.schema.empty() ? "public" : name.schema);
+    auto owner = space ? catalog.getClassByName(name.name, space->oid) : std::nullopt;
+    if (!owner && !name.schema.empty()) {
+        const auto publicSpace = catalog.getNamespaceByName("public");
+        if (publicSpace) owner = catalog.getClassByName(physical, publicSpace->oid);
+    }
+    if (!owner) return;
+    index_catalog::synchronizePrimary(g_engine, database, catalog, *owner, physical, legacy);
+    if (!catalog.persistAll()) throw DbError("58030", "could not persist primary index identity");
 }
 
 static Oid registerMaterializedViewInCatalog(
@@ -3004,6 +3027,7 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                             }
                             const auto renamedAttribute = catalog.getAttribute(
                                 relationOid, sub.newName);
+                            index_catalog::synchronizePrimary(g_engine, s.currentDB, catalog, *relation, tableName, true);
                             const std::string logicalTableName =
                                 schemaName == "public"
                                     ? qualifiedName.name
@@ -3064,8 +3088,10 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                     return true;
                 }
                 if (!alterStatusOk(status, "Constraint")) return true;
-                if (!tableIsTemporary)
+                if (!tableIsTemporary) {
+                    synchronizePrimaryIndex(s.currentDB, tableName);
                     synchronizeForeignKeys(s.currentDB, tableName, std::make_pair(sub.name, sub.newName));
+                }
                 break;
             case AlterTableStmt::Action::RenameTable: {
                 if (sub.newName.empty()) {
@@ -3358,6 +3384,7 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                               << std::endl;
                     return true;
                 }
+                if (!tableIsTemporary && !sub.dataType.empty()) synchronizePrimaryIndex(s.currentDB, tableName, true);
                 break;
             }
             case AlterTableStmt::Action::SetStatistics: {
@@ -3411,6 +3438,7 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                               << std::endl;
                     return true;
                 }
+                if (!tableIsTemporary) synchronizePrimaryIndex(s.currentDB, tableName, true);
                 break;
             case AlterTableStmt::Action::SetUnlogged:
                 status = g_engine.alterTableSetLogged(s.currentDB, tableName, false);
@@ -3426,6 +3454,7 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                         << std::endl;
                     return true;
                 }
+                if (!tableIsTemporary) synchronizePrimaryIndex(s.currentDB, tableName, true);
                 break;
             case AlterTableStmt::Action::ClusterOn:
                 if (sub.name.empty()) {
@@ -3676,7 +3705,13 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                 std::string constraintName = tc.name;
                 if (constraintName.empty()) {
                     std::string suffix = tc.columns.empty() ? "constraint" : tc.columns.front();
-                    if (type == "primary key") constraintName = tableName + "_pkey";
+                    if (type == "primary key") {
+                        const auto logical = CatalogService::logicalName(tableName);
+                        const auto& catalog = g_engine.catalogService().get(s.currentDB);
+                        const auto space = catalog.getNamespaceByName(logical.schema.empty() ? "public" : logical.schema);
+                        constraintName = !tableIsTemporary && space
+                            ? availablePrimaryKeyName(catalog, space->oid, logical.name) : tableName + "_pkey";
+                    }
                     else if (type == "unique") constraintName = tableName + "_" + suffix + "_key";
                     else if (type == "foreign key") constraintName = tableName + "_" + suffix + "_fkey";
                     else if (type == "check") constraintName = tableName + "_check";
@@ -3796,6 +3831,7 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                     tc.deferrable, tc.initiallyDeferred);
                 if (!alterStatusOk(status, "Constraint")) return true;
                 if (!tableIsTemporary && type == "foreign key") synchronizeForeignKeys(s.currentDB, tableName);
+                if (!tableIsTemporary && type == "primary key") synchronizePrimaryIndex(s.currentDB, tableName);
                 if (!tableIsTemporary &&
                     (type == "primary key" || type == "unique") &&
                     !synchronizeTableIndexFlagInCatalog(
@@ -3838,6 +3874,7 @@ bool DdlExecutor::executeAlterTable(const AlterTableStmt* stmt, Session& s) {
                      {constraintMetadataKey(sub.name, "initially_deferred"), ""}});
                 if (!alterStatusOk(status, "Constraint")) return true;
                 if (!tableIsTemporary && !isExclusion) synchronizeForeignKeys(s.currentDB, tableName);
+                if (!tableIsTemporary && !isExclusion) synchronizePrimaryIndex(s.currentDB, tableName, true);
                 if (!tableIsTemporary && !isExclusion &&
                     !synchronizeTableCheckCountInCatalog(
                         s.currentDB, tableName)) {
@@ -7376,7 +7413,9 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
     // it alongside the other constraint metadata so DROP CONSTRAINT can
     // distinguish the real key from an unrelated or misspelled name.
     if (tbl.hasPrimaryKey()) {
-        std::string primaryKeyName = tname + "_pkey";
+        const auto nameSpace = tableCatalog->getNamespaceByName(targetSchema);
+        std::string primaryKeyName = !temporary && nameSpace
+            ? availablePrimaryKeyName(*tableCatalog, nameSpace->oid, targetName.name) : tname + "_pkey";
         for (const auto& tc : stmt->constraints) {
             if (toLower(tc.type) == "primary key" && !tc.name.empty()) {
                 primaryKeyName = tc.name;
@@ -7455,6 +7494,7 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
                 throw std::runtime_error("created table catalog row is missing");
             }
             if (!tbl.fks.empty()) foreign_key_catalog::synchronize(g_engine, s.currentDB, cat, *tableRelation, tname);
+            if (tbl.hasPrimaryKey()) index_catalog::synchronizePrimary(g_engine, s.currentDB, cat, *tableRelation, tname);
             attachIdentityColumnSequences(cat, tableRelation->oid, identitySequences);
             for (const auto& parent : inheritedParents) {
                 if (!updateTableHierarchyFlagsInCatalog(
@@ -7471,6 +7511,8 @@ bool DdlExecutor::executeCreateTable(const CreateTableStmt* stmt, Session& s) {
             if (!cat.persistAll()) {
                 throw std::runtime_error("cannot persist table catalog");
             }
+        } catch (const DbError&) {
+            throw;
         } catch (const std::exception& e) {
             std::cout << "CREATE TABLE catalog registration failed: "
                       << e.what() << std::endl;
@@ -7764,6 +7806,18 @@ static bool buildPhysicalCascadeActions(
             continue;
         }
         if (rel.relkind != 'i') continue;
+
+        const auto registration = catalog.registeredIndex(rel.oid, {});
+        if (registration && registration->primary) {
+            // Removing the heap also removes its built-in primary index.
+            const auto owner = std::make_pair(PgClassOid_Class, registration->table.oid);
+            if (registration->table.oid != rootOid &&
+                std::find(plan.objectsToDrop.begin(), plan.objectsToDrop.end(), owner) == plan.objectsToDrop.end()) {
+                error = "primary index cannot be removed independently of its owning table";
+                return false;
+            }
+            continue;
+        }
 
         std::string tableName;
         for (const auto& dependency :
@@ -9190,6 +9244,8 @@ bool DdlExecutor::executeDropIndex(const DropStmt* stmt, Session& s) {
             auto deps = cat.findDepends(PgClassOid_Class, indexOid);
             for (const auto& dep : deps) {
                 if (dep.refclassid != PgClassOid_Class) continue;
+                if (dep.deptype == 'i' && dep.refobjsubid == 0)
+                    throw DbError("2BP01", "cannot drop index \"" + indexRel->relname + "\" required by a primary key");
                 const auto ref = cat.getClass(dep.refobjid);
                 if (ref && ref->relkind == 'r') {
                     const auto tableNamespace =

@@ -471,6 +471,18 @@ std::shared_ptr<CatalogManager> loadOwnedCatalog(
         physicalArrayAttributes(engine, database, *catalog), publishedPhysicalArrays);
     if (!publishedAccessMethods) initializeRelationAccessMethods(engine, database, *catalog);
     if (!publishedCollations) initializeColumnCollations(engine, database, *catalog);
+    const auto primaryIndexMarker = directory / ".primary_index_catalog_version";
+    const bool publishedPrimaryIndexes = catalogVersionPublished(primaryIndexMarker, index_catalog::primaryVersion);
+    if (!publishedPrimaryIndexes) {
+        for (const auto& relation : catalog->listClasses()) {
+            if (relation.relkind != 'r' || !relation.relhasindex || relation.relnamespace == 11 ||
+                relation.relpersistence == 't' || relation.relispartition) continue;
+            const auto space = catalog->getNamespace(relation.relnamespace);
+            if (!space) continue;
+            const auto physical = space->nspname == "public" ? relation.relname : space->nspname + "__" + relation.relname;
+            index_catalog::synchronizePrimary(engine, database, *catalog, relation, physical, true);
+        }
+    }
     // Some legitimate server cluster scaffolds already have tlist.lst and
     // auth metadata, but no namespace catalog. A newly bootstrapped logical
     // public namespace must have the same checked physical marker as CREATE
@@ -495,8 +507,11 @@ std::shared_ptr<CatalogManager> loadOwnedCatalog(
         }
     }
     migrateLegacyPublicDottedSequences(engine, database, *catalog);
-    if((initializedClassCatalog || initializedOwnedCatalogs || initializedInheritance || initializedSequenceCatalog || initializedStatisticsView || initializedRoles || initializedSystemAttributes || initializedTypeProperties || initializedCatalogCollations || initializedPhysicalArrays || initializedDefaultCatalog || !publishedDefaultCatalog || !publishedTypeProperties || !publishedCatalogCollations || !publishedPhysicalArrays || initializedAccessMethods || !publishedAccessMethods || !publishedCollations || initializedForeignKeys || !publishedForeignKeys || initializedIndexes || !publishedIndexes) && !catalog->persistAll())
+    if((initializedClassCatalog || initializedOwnedCatalogs || initializedInheritance || initializedSequenceCatalog || initializedStatisticsView || initializedRoles || initializedSystemAttributes || initializedTypeProperties || initializedCatalogCollations || initializedPhysicalArrays || initializedDefaultCatalog || !publishedDefaultCatalog || !publishedTypeProperties || !publishedCatalogCollations || !publishedPhysicalArrays || initializedAccessMethods || !publishedAccessMethods || !publishedCollations || initializedForeignKeys || !publishedForeignKeys || initializedIndexes || !publishedIndexes || !publishedPrimaryIndexes) && !catalog->persistAll())
         throw DbError("58030","could not publish initialized system view identities");
+    if (!publishedPrimaryIndexes && index_file::writeAtomicallyNoReplace(primaryIndexMarker,
+            index_catalog::primaryVersion) != index_file::WriteResult::OK)
+        throw DbError("58030", "could not publish primary index catalog version");
     if (!publishedIndexes && index_file::writeAtomicallyNoReplace(indexMarker,
             index_catalog::version) != index_file::WriteResult::OK)
         throw DbError("58030", "could not publish index catalog version");
@@ -818,6 +833,17 @@ struct RegisteredIndexLayout {
     bool unique = false, descending = false, partial = false, expression = false, partitioned = false;
 };
 
+std::vector<std::string> primaryKeyColumns(const TableSchema& table) {
+    std::vector<std::string> result;
+    if (table.pkColIndices.empty()) {
+        for (const auto& field : table.cols)
+            if (field.isPrimaryKey) result.push_back(field.dataName);
+    } else {
+        for (const auto ordinal : table.pkColIndices) result.push_back(table.cols.at(ordinal).dataName);
+    }
+    return result;
+}
+
 RegisteredIndexLayout readIndexLayout(const StorageEngine& engine, const std::string& database,
                                       const CatalogManager::RegisteredIndex& index) {
     RegisteredIndexLayout result;
@@ -836,6 +862,15 @@ RegisteredIndexLayout readIndexLayout(const StorageEngine& engine, const std::st
     }
     if (!table) throw DbError("XX001", "index owner definition is missing");
     result.partitioned = table->partitionType != TableSchema::PartitionType::None;
+    if (index.primary) {
+        result.method = "btree";
+        result.unique = true;
+        result.keys = primaryKeyColumns(*table);
+        if (index.index.relam != access_method_catalog::btreeOid || result.keys.empty() ||
+            result.keys.size() != static_cast<size_t>(index.index.relnatts))
+            throw DbError("XX001", "primary index identity differs from its stored key");
+        return result;
+    }
     const auto named = engine.getNamedIndex(database, physical, index.index.relname);
     if (!named || index.index.relam == INVALID_OID || access_method_catalog::indexOid(named->accessMethod) != index.index.relam)
         throw DbError("XX001", "index access method does not match its catalog identity");
@@ -884,6 +919,103 @@ RegisteredIndexLayout readIndexLayout(const StorageEngine& engine, const std::st
     return result;
 }
 } // namespace
+
+void index_catalog::synchronizePrimary(const StorageEngine& engine, const std::string& database,
+    CatalogManager& catalog, const PgClassRow& owner, const std::string& physical, bool legacy) {
+    if (owner.relkind != 'r' || owner.relispartition || owner.relpersistence == 't') return;
+    auto path = physical;
+    auto table = engine.readPersistedSchemaForCatalog(database, path);
+    if (!table) {
+        const auto space = catalog.getNamespace(owner.relnamespace);
+        if (space && space->nspname == "public" && path == owner.relname) {
+            path = "public__" + path;
+            table = engine.readPersistedSchemaForCatalog(database, path);
+        }
+    }
+    if (!table) {
+        if (legacy) return;
+        throw DbError("XX001", "primary index owner definition is missing");
+    }
+    if (table->partitionType != TableSchema::PartitionType::None) return;
+    const auto keys = primaryKeyColumns(*table);
+
+    Oid oid = INVALID_OID;
+    for (const auto& candidate : catalog.registeredIndexes(owner.oid, std::nullopt)) {
+        if (!candidate.primary) continue;
+        if (oid) throw DbError("XX001", "table has multiple primary index identities");
+        oid = candidate.index.oid;
+    }
+    if (keys.empty()) {
+        if (oid && !catalog.dropClass(oid)) throw DbError("XX001", "primary index identity disappeared");
+        return;
+    }
+
+    const auto params = engine.getStorageParams(database, path);
+    const auto stored = params.find(PRIMARY_KEY_CONSTRAINT_NAME_PARAM);
+    const std::string name = stored != params.end() && !stored->second.empty()
+        ? stored->second : path + "_pkey";
+    const auto conflict = catalog.getClassByName(name, owner.relnamespace);
+    if (conflict && conflict->oid != oid) {
+        // An older release allowed a constraint label to overlap an unrelated
+        // relation. Keep that table usable until its constraint is renamed.
+        if (legacy && !oid) return;
+        throw DbError("42P07", "relation \"" + name + "\" already exists");
+    }
+    std::vector<PgAttributeRow> attributes;
+    attributes.reserve(keys.size());
+    for (const auto& key : keys) {
+        const auto column = catalog.getAttribute(owner.oid, key);
+        if (!column || column->attnum <= 0 || column->attisdropped)
+            throw DbError("XX001", "primary index column is missing from its owning table");
+        PgAttributeRow field;
+        field.attname = column->attname;
+        field.atttypid = column->atttypid;
+        field.attnum = static_cast<int16_t>(attributes.size() + 1);
+        field.attlen = column->attlen;
+        field.atttypmod = column->atttypmod;
+        field.attndims = column->attndims;
+        field.attbyval = column->attbyval;
+        field.attalign = column->attalign;
+        field.attstorage = column->attstorage;
+        field.attcollation = column->attcollation;
+        attributes.push_back(std::move(field));
+    }
+    PgClassRow index;
+    index.relname = name;
+    index.relnamespace = owner.relnamespace;
+    index.relowner = owner.relowner;
+    index.relkind = 'i';
+    index.relam = access_method_catalog::btreeOid;
+    index.relpersistence = owner.relpersistence;
+    index.relnatts = static_cast<int16_t>(keys.size());
+    if (oid) {
+        const auto previous = catalog.findUserAttributes(oid);
+        const bool sameKeyTypes = previous.size() == attributes.size() &&
+            std::equal(previous.begin(), previous.end(), attributes.begin(), [](const auto& before, const auto& after) {
+                return before.attnum == after.attnum && before.atttypid == after.atttypid &&
+                    before.atttypmod == after.atttypmod && before.attcollation == after.attcollation;
+            });
+        if (!sameKeyTypes) {
+            // A rebuilt key gets a new identity. Renames keep the old key
+            // types and retain the existing index identity.
+            if (!catalog.dropClass(oid)) throw DbError("XX001", "rebuilt primary index identity disappeared");
+            oid = INVALID_OID;
+        }
+    }
+    if (oid) {
+        if (!catalog.updateClass(oid, index)) throw DbError("XX001", "primary index identity disappeared");
+    } else {
+        oid = catalog.createClass(index);
+        PgDependRow edge;
+        edge.classid = edge.refclassid = PgClassOid_Class;
+        edge.objid = oid;
+        edge.refobjid = owner.oid;
+        edge.deptype = 'i';
+        catalog.addDepend(edge);
+    }
+    for (auto& field : attributes) field.attrelid = oid;
+    if (!catalog.replaceAttributes(oid, attributes)) throw DbError("XX001", "could not register primary index columns");
+}
 
 std::optional<std::string> CatalogService::indexDefinition(const std::string& database, Oid oid,
     int32_t column, bool pretty, const Session* session) const {
@@ -957,7 +1089,7 @@ std::vector<std::vector<ExprValue>> CatalogService::indexRows(const std::string&
         rows.push_back({ExprValue("oid", std::to_string(entry.index.oid)), ExprValue("oid", std::to_string(entry.table.oid)),
             ExprValue("smallint", std::to_string(layout.keys.size() + layout.includes.size())),
             ExprValue("smallint", std::to_string(layout.keys.size())), flag(layout.unique), flag(false),
-            flag(false), flag(false), flag(true), flag(namesIndex("cluster_on")), flag(true), flag(false), flag(true),
+            flag(entry.primary), flag(false), flag(true), flag(namesIndex("cluster_on")), flag(true), flag(false), flag(true),
             flag(true), flag(entry.table.relreplident == 'i' && namesIndex("replica_identity_index"))});
     }
     return rows;

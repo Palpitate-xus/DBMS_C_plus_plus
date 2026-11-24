@@ -2755,7 +2755,7 @@ ORDER BY 1, 2;
 
 ### 按表查询索引
 
-`pg_catalog.pg_index` 可以列出由 `CREATE INDEX` 登记的索引。下面的查询返回每个索引的编号、列数、键列数和唯一性。附带列计入总列数。
+`pg_catalog.pg_index` 可以列出由 `CREATE INDEX` 登记的索引和普通表的主键索引。下面的查询返回每个索引的编号、列数、键列数和唯一性。附带列计入总列数。
 
 ```sql
 SELECT indexrelid, indnatts, indnkeyatts, indisunique
@@ -2764,7 +2764,19 @@ WHERE indrelid = 'public.orders'::regclass::oid
 ORDER BY indexrelid;
 ```
 
-也可以在 `psql` 中输入 `\di 模式名.*` 查看索引列表。索引的所有者一栏可能显示未知。请在 SQL 查询中列明所需字段。隐式主键和唯一约束索引，以及 `indkey`、`indcollation`、`indclass`、`indoption`、`indexprs` 和 `indpred` 仍待支持。 [测试报告](test-report.md#pg-index-20261124)
+也可以在 `psql` 中输入 `\di 模式名.*` 查看索引列表。部分索引的所有者一栏可能显示未知。请在 SQL 查询中列明所需字段。唯一约束自动创建的索引，以及 `indkey`、`indcollation`、`indclass`、`indoption`、`indexprs` 和 `indpred` 仍待支持。 [测试报告](test-report.md#pg-index-20261124)
+
+### 查询主键索引
+
+`indisprimary` 可区分主键索引与普通索引。下面的查询返回 `orders` 的主键索引定义。
+
+```sql
+SELECT pg_catalog.pg_get_indexdef(indexrelid)
+FROM pg_catalog.pg_index
+WHERE indrelid = 'public.orders'::regclass::oid AND indisprimary;
+```
+
+普通非临时表的主键索引有独立编号。表、列或主键约束改名会保留编号。主键列从 `integer` 改成 `bigint`，或删除主键后重新添加，会分配新编号。原版 `psql` 的 `\di` 可以列出主键索引和所有者。旧库如果已有其他对象占用主键索引的名称，可以先给主键约束改名，再查询主键索引。 [测试报告](test-report.md#primary-index-20261124)
 
 ### 查询索引的定义
 

@@ -150,6 +150,7 @@ public:
         PgClassRow table;
         std::string schema;
         bool tableVisible;
+        bool primary = false;
     };
     std::optional<RegisteredIndex> registeredIndex(Oid oid, const std::vector<std::string>& searchPath) const;
     static std::optional<RegisteredIndex> readRegisteredIndex(

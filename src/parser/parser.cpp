@@ -8938,6 +8938,15 @@ StmtPtr SQLParser::parseCreateTable(const std::vector<std::string>& tokens, size
                         toLower(tokens[pos + 2]) == "check") {
                         pendingCheckName = parseRoutineIdentifier(tokens[pos + 1]);
                         pos += 2;
+                    } else if (ckw == "constraint" && pos + 3 < tokens.size() &&
+                               toLower(tokens[pos + 2]) == "primary" && toLower(tokens[pos + 3]) == "key") {
+                        TableConstraint constraint;
+                        constraint.name = parseRoutineIdentifier(tokens[pos + 1]);
+                        constraint.type = "primary key";
+                        constraint.columns.push_back(col.name);
+                        stmt->constraints.push_back(std::move(constraint));
+                        col.isNull = false;
+                        pos += 4;
                     } else if (ckw == "not" && pos + 1 < tokens.size() && toLower(tokens[pos + 1]) == "null") {
                         col.isNull = false;
                         col.constraints.push_back("NOT NULL");

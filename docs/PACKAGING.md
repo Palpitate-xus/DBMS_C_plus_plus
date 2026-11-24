@@ -29,6 +29,12 @@ sudo apt install cmake g++ make zlib1g-dev libicu-dev
 
 二进制分发请同时提供仓库根 [THIRD_PARTY_NOTICES](../THIRD_PARTY_NOTICES) 中备份清单摘要实现的第三方版权、许可条件与免责声明。CMake 安装会将该声明放入安装前缀下的 `share/doc/DBMS_C_plus_plus/THIRD_PARTY_NOTICES`；单独复制 `dbms_main` 时也须附带该声明。
 
+## 主键索引目录升级
+
+新版首次打开旧库时，从现有普通表的定义补登记主键索引编号，表和索引的数据文件沿用原格式。完成后在各数据库的 `pg_catalog` 中写入 `.primary_index_catalog_version`。旧库已有其他对象占用索引名称时，保留原对象和主键，等主键约束改名后再登记。 [升级和恢复验证](test-report.md#primary-index-20261124)
+
+上一版程序打开带有新主键索引目录记录的库后，测试表的数据仍可读，但扫描 `pg_index` 返回 `XX001`。需要切回上一版时，使用升级前的备份。
+
 ## 外键目录升级
 
 打开旧库时，数据库从已有的普通表定义登记外键对象编号，并把编号保存到 `pg_catalog/pg_constraint.cat`。表文件本身沿用原来的格式。备份和恢复应保留整个数据库目录及其目录标记。

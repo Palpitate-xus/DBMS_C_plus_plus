@@ -2,12 +2,19 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="primary-index-comparison-20261124"></a>
+## 2026-11-24 · 主键索引的编号和来源
+
+PostgreSQL 为主键约束和支撑它的索引分别分配编号，并用 `pg_constraint.conindid` 连接两者。SQLite 可以用 `PRAGMA index_list` 的 `pk` 标记识别主键索引。DuckDB 的 `duckdb_indexes()` 列出显式索引，主键可通过 `duckdb_constraints()` 查询。 [PostgreSQL 约束目录](https://www.postgresql.org/docs/18/catalog-pg-constraint.html) · [SQLite 索引列表](https://www.sqlite.org/pragma.html#pragma_index_list) · [DuckDB 索引信息](https://duckdb.org/docs/current/sql/meta/duckdb_table_functions#duckdb_indexes)
+
+本项目从表定义读取主键列，登记独立索引编号，数据仍由表原有的主键索引维护。`pg_index` 及索引列信息可按编号查询。主键约束本身的编号与 `conindid` 仍待实现。 [查询示例](MANUAL.md#查询主键索引) · [性能报告](performance-report-2026-10-30.md#primary-index-cost-20261124)
+
 <a id="pg-index-comparison-20261124"></a>
 ## 2026-11-24 · 按表查询索引
 
 PostgreSQL 的 `pg_index` 记录索引与表的对象编号，分开记录键列数和总列数。SQLite 的 `PRAGMA index_list` 区分显式索引、主键和唯一约束，`PRAGMA index_xinfo` 可读取索引列。DuckDB 在 `duckdb_indexes()` 中列出显式创建的索引，并通过 `duckdb_constraints()` 提供约束信息。 [PostgreSQL 索引目录](https://www.postgresql.org/docs/18/catalog-pg-index.html) · [SQLite 索引列表](https://www.sqlite.org/pragma.html#pragma_index_list) · [DuckDB 索引信息](https://duckdb.org/docs/current/sql/meta/duckdb_table_functions#duckdb_indexes)
 
-本项目使用已经保存的索引编号、所属表和索引定义。按表号或索引号等值筛选时，只读取匹配对象的定义。隐式索引还需要可持久保存的对象编号。 [使用说明](MANUAL.md#按表查询索引) · [性能报告](performance-report-2026-10-30.md#pg-index-cost-20261124)
+本项目使用已经保存的索引编号、所属表和索引定义。按表号或索引号等值筛选时，只读取匹配对象的定义。 [使用说明](MANUAL.md#按表查询索引) · [性能报告](performance-report-2026-10-30.md#pg-index-cost-20261124)
 
 <a id="index-definition-comparison-20261124"></a>
 ## 2026-11-24 · 查询索引的定义

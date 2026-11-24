@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>可以查看数据库自动创建的主键索引 · 2026-11-24</summary>
+
+例如，在 `psql` 中可以列出订单表的主键索引，也可以查询这个索引用了哪几列。
+
+[查询示例](docs/MANUAL.md#查询主键索引) · [测试报告](docs/test-report.md#primary-index-20261124) · [性能报告](docs/performance-report-2026-10-30.md#primary-index-cost-20261124)
+
+</details>
+
+<details>
 <summary>列出一张表上手动创建的索引 · 2026-11-24</summary>
 
 例如，可以列出订单表上的索引，看看哪些索引要求值不能重复。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>把多行查询结果放进一个数组 · 2026-11-24</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-24 · 把多行查询结果放进一个数组
 
 例如，可以把某位客户的所有订单编号放在同一个数组里。没有订单时会得到空数组。
 
 [查询示例](docs/MANUAL.md#把查询结果收进数组) · [测试报告](docs/test-report.md#array-subquery-20261124) · [性能报告](docs/performance-report-2026-10-30.md#array-subquery-cost-20261124)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-24 · 在 psql 中查看数据库账号
 

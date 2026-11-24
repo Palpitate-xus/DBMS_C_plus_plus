@@ -706,12 +706,14 @@ std::optional<CatalogManager::RegisteredIndex> CatalogManager::registeredIndex(
     if (index->relkind == 'I') throw DbError("0A000", "partitioned index definitions are not supported");
 
     Oid owner = INVALID_OID;
+    bool primary = false;
     for (const auto& edge : depends_) {
         if (edge.classid != PgClassOid_Class || edge.refclassid != PgClassOid_Class ||
-            edge.objid != oid || edge.objsubid || edge.refobjsubid || edge.deptype != 'a') continue;
-        if (owner && owner != edge.refobjid)
+            edge.objid != oid || edge.objsubid || edge.refobjsubid || (edge.deptype != 'a' && edge.deptype != 'i')) continue;
+        if (owner && (owner != edge.refobjid || primary != (edge.deptype == 'i')))
             throw DbError("XX001", "index has multiple owning relations");
         owner = edge.refobjid;
+        primary = edge.deptype == 'i';
     }
     const auto* table = findClassUnlocked(owner);
     if (!table || table->relnamespace != index->relnamespace)
@@ -719,7 +721,7 @@ std::optional<CatalogManager::RegisteredIndex> CatalogManager::registeredIndex(
     const auto* schema = findNamespaceUnlocked(table->relnamespace);
     if (!schema) throw DbError("XX001", "index owner has no catalog namespace");
     return RegisteredIndex{*index, *table, schema->nspname,
-        visibleRelationUnlocked(table->relname, searchPath) == table};
+        visibleRelationUnlocked(table->relname, searchPath) == table, primary};
 }
 
 std::optional<CatalogManager::RegisteredIndex> CatalogManager::readRegisteredIndex(
@@ -738,15 +740,17 @@ std::vector<CatalogManager::RegisteredIndex> CatalogManager::registeredIndexes(
 
     std::lock_guard<std::mutex> lock(mutex_);
     std::vector<RegisteredIndex> result;
-    std::unordered_map<Oid, Oid> seen;
+    std::unordered_map<Oid, std::pair<Oid, char>> seen;
     for (const auto& edge : depends_) {
         if (edge.classid != PgClassOid_Class || edge.refclassid != PgClassOid_Class ||
-            edge.objsubid || edge.refobjsubid || edge.deptype != 'a' || (owner && edge.refobjid != *owner)) continue;
+            edge.objsubid || edge.refobjsubid || (edge.deptype != 'a' && edge.deptype != 'i') ||
+            (owner && edge.refobjid != *owner)) continue;
         const auto* entry = findClassUnlocked(edge.objid);
         if (!entry || entry->relkind != 'i') continue;
-        const auto [position, inserted] = seen.emplace(edge.objid, edge.refobjid);
+        const auto ownership = std::make_pair(edge.refobjid, edge.deptype);
+        const auto [position, inserted] = seen.emplace(edge.objid, ownership);
         if (!inserted) {
-            if (position->second != edge.refobjid) throw DbError("XX001", "index has multiple owning relations");
+            if (position->second != ownership) throw DbError("XX001", "index has multiple owning relations");
             continue;
         }
         const auto* table = findClassUnlocked(edge.refobjid);
@@ -754,7 +758,7 @@ std::vector<CatalogManager::RegisteredIndex> CatalogManager::registeredIndexes(
             throw DbError("XX001", "index has no matching owning relation");
         const auto* schema = findNamespaceUnlocked(table->relnamespace);
         if (!schema) throw DbError("XX001", "index owner has no catalog namespace");
-        result.push_back(RegisteredIndex{*entry, *table, schema->nspname, false});
+        result.push_back(RegisteredIndex{*entry, *table, schema->nspname, false, edge.deptype == 'i'});
     }
     // A persisted index with no ownership edge cannot be attributed to a
     // table. Check the full scan without doubling the work of point probes.

@@ -2,11 +2,14 @@
 
 #include "catalog/SystemCatalogRows.h"
 
+namespace dbms { class StorageEngine; }
+
 namespace dbms::index_catalog {
 
 inline constexpr Oid relationOid = 2610;
 inline constexpr char name[] = "pg_index";
 inline constexpr char version[] = "DBMS_INDEX_CATALOG1\n";
+inline constexpr char primaryVersion[] = "DBMS_PRIMARY_INDEX_CATALOG1\n";
 inline constexpr int16_t indexAttribute = 1;
 inline constexpr int16_t ownerAttribute = 2;
 inline constexpr std::array<system_catalog::Field, 21> fields{{
@@ -29,5 +32,8 @@ inline const QueryRowDescriptor& descriptor() {
     }();
     return columns;
 }
+
+void synchronizePrimary(const StorageEngine& engine, const std::string& database,
+    CatalogManager& catalog, const PgClassRow& owner, const std::string& physical, bool legacy = false);
 
 } // namespace dbms::index_catalog
