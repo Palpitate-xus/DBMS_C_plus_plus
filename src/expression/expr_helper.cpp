@@ -1935,8 +1935,11 @@ std::pair<std::string,int> ExprHelper::projectionLabel(const Expr* expression,
     }
     if(dynamic_cast<const ArrayExpr*>(expression))return {"array",2};
     if(dynamic_cast<const RowExpr*>(expression))return {"row",2};
-    if(const auto* literal=dynamic_cast<const LiteralExpr*>(expression);literal && !literal->typeName.empty())
-        return legacyNullLiteral(literal)?std::make_pair(std::string(),0):std::make_pair(typeLabel(literal->typeName),1);
+    if(const auto* literal=dynamic_cast<const LiteralExpr*>(expression)) {
+        if (literal->arraySubquery) return {"array", 2};
+        if (!literal->typeName.empty())
+            return legacyNullLiteral(literal)?std::make_pair(std::string(),0):std::make_pair(typeLabel(literal->typeName),1);
+    }
     return {"",0};
 }
 

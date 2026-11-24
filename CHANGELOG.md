@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>把一列查询结果收进数组 · 2026-11-24</summary>
+
+例如，用一条查询把某位客户的订单编号按顺序放进一个数组。没有订单时会返回空数组。
+
+[查询示例](docs/MANUAL.md#把查询结果收进数组) · [测试报告](docs/test-report.md#array-subquery-20261124) · [性能报告](docs/performance-report-2026-10-30.md#array-subquery-cost-20261124)
+
+</details>
+
+<details>
 <summary>在 psql 中查看数据库账号 · 2026-11-24</summary>
 
 输入 `\du` 就能查看哪些账号可以登录、同时连接的数量上限，以及密码何时过期。直接查询角色信息时，密码字段只显示星号。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>查看删除或修改记录时会怎样影响关联数据 · 2026-11-24</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-24 · 查看删除或修改记录时会怎样影响关联数据
 
 例如，可以查到删除客户时，数据库会一起删除该客户的订单，还是拒绝删除这位客户。表或列改名后会显示新名称。
 
 [查询示例](docs/MANUAL.md#查询表的外键) · [测试报告](docs/test-report.md#foreign-key-definition-20261124) · [性能报告](docs/performance-report-2026-10-30.md#foreign-key-definition-cost-20261124)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-24 · 查看外键引用了哪张表、哪一列
 

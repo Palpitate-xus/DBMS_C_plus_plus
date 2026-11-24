@@ -3030,12 +3030,37 @@ static ExprPtr parsePrimaryExprImpl(const std::vector<std::string>& tokens, size
         }
         pos = save; // fall through to generic handling on malformed input
     }
-    // ARRAY's expression grammar owns '[' and its value children before
+    // ARRAY's expression grammar owns '[' and '(' before
     // any speculative declared-type suffix/constant parsing.
     if (SQLParser::toLower(tokens[pos]) == "array" && pos + 1 < tokens.size()
         && tokens[pos + 1] == "[") {
         ++pos;
         return parseArrayConstructorContents(tokens, pos);
+    }
+    if (SQLParser::toLower(tokens[pos]) == "array" && pos + 1 < tokens.size() && tokens[pos + 1] == "(") {
+        const size_t begin = pos + 2;
+        size_t query = begin;
+        while (query < tokens.size() && tokens[query] == "(") ++query;
+        const auto first = query < tokens.size() ? SQLParser::toLower(tokens[query]) : std::string();
+        if (first != "select" && first != "values" && first != "with")
+            throw DbError("42601", "ARRAY requires a subquery inside parentheses");
+        pos = begin;
+        int depth = 1;
+        std::string sql = "ARRAY(";
+        while (pos < tokens.size()) {
+            const auto& token = tokens[pos];
+            if (token == "(") ++depth;
+            if (token == ")" && --depth == 0) break;
+            sql += token + ' ';
+            ++pos;
+        }
+        if (depth != 0) throw DbError("42601", "unterminated ARRAY subquery");
+        if (!subqueryFetchGrammarValid(tokens, begin, pos)) return nullptr;
+        ++pos;
+        auto result = std::make_unique<LiteralExpr>();
+        result->value = sql + ')';
+        result->arraySubquery = true;
+        return result;
     }
     // A declared type followed by a real string constant is a type-input
     // grammar role, including named/qualified/quoted and modified types.
@@ -3141,6 +3166,10 @@ static ExprPtr parsePrimaryExprImpl(const std::vector<std::string>& tokens, size
         if (pos < tokens.size() && tokens[pos] == "(") {
             const size_t queryBegin = pos;
             ++pos;
+            size_t first = pos;
+            while (first < tokens.size() && tokens[first] == "(") ++first;
+            if (first < tokens.size() && SQLParser::toLower(tokens[first]) == "array")
+                throw DbError("42601", "EXISTS requires a subquery inside parentheses");
             std::string subq;
             int depth = 1;
             while (pos < tokens.size() && depth > 0) {

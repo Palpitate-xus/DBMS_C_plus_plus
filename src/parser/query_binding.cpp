@@ -8,6 +8,7 @@
 #include "catalog/catalog.h"
 #include "catalog/declared_type.h"
 #include "common/DbError.h"
+#include "common/SqlTrivia.h"
 #include "expression/common_type.h"
 #include "expression/equality_type.h"
 #include "expression/expr_helper.h"
@@ -777,6 +778,7 @@ public:
         }
         case ExprType::Literal: {
             auto* literal = static_cast<LiteralExpr*>(node.get());
+            if (literal->arraySubquery) return subquery(*literal, scopes);
             if (!literal->typeName.empty()) {
                 const auto type=declaredType(literal->typeName,literal);
                 if (isGeometryTypeName(literal->typeName)) {
@@ -1191,7 +1193,7 @@ public:
             auto* quantified = static_cast<QuantifiedComparisonExpr*>(node.get());
             const auto left = expression(quantified->left, scopes);
             auto right = expression(quantified->right, scopes);
-            const bool query = quantified->right && quantified->right->preparedSubquery;
+            const bool query = quantified->comparesQueryRows();
             if(query && right=="unknown") {
                 // A SELECT output finalizes UNKNOWN as TEXT before resolving
                 // the outer operator (unlike an ARRAY's context argument).
@@ -1705,9 +1707,13 @@ public:
     std::string subquery(LiteralExpr& literal, const std::vector<Namespace>& scopes, bool scalar = true) {
         if (literal.sourceBegin == std::string::npos || literal.sourceEnd > result.source.size())
             throw DbError("0A000", "subquery has no source provenance");
-        const size_t begin = result.source.find('(', literal.sourceBegin) + 1;
+        const size_t open = literal.arraySubquery ? skipLeadingSqlTrivia(result.source, literal.sourceBegin + 5)
+            : result.source.find('(', literal.sourceBegin);
+        if (open >= literal.sourceEnd || result.source[open] != '(')
+            throw DbError("42601", "invalid subquery");
+        const size_t begin = open + 1;
         const size_t end = result.source.rfind(')', literal.sourceEnd - 1);
-        if (begin == 0 || end < begin) throw DbError("42601", "invalid subquery");
+        if (end == std::string::npos || end < begin) throw DbError("42601", "invalid subquery");
         SQLParser parser;
         auto parsed = parser.parseForBinding(result.source.substr(begin, end - begin));
         if (!parsed.isValid()) throw DbError("42601", parsed.error);
@@ -1772,6 +1778,24 @@ public:
             }
         }
         literal.preparedSubquery = std::move(parsed.stmt);
+        if (literal.arraySubquery) {
+            auto& field = columns.front();
+            if (!field.typeOid) {
+                field.typeOid = field.typeMetadata ? field.typeMetadata->actualOid : mapBuiltinTypeNameToOid(field.type);
+                if (!field.typeMetadata && metadata.datumType && field.typeOid)
+                    field.typeMetadata = metadata.datumType(field.type, field.typeOid);
+                result.statementOutputs[literal.preparedSubquery.get()] = columns;
+            }
+            const bool stacked = field.typeMetadata && field.typeMetadata->kind == DatumKind::Array &&
+                field.typeMetadata->actualOid == field.typeMetadata->codecOid;
+            literal.typeName = declaredType(stacked ? field.type : field.type + "[]", &literal);
+            literal.arraySubqueryType = datumMetadata(literal.typeName, &literal);
+            const auto& array = literal.arraySubqueryType;
+            if (!array || array->kind != DatumKind::Array || !array->arrayElement ||
+                (stacked ? array->actualOid != field.typeOid : array->arrayElement->actualOid != field.typeOid))
+                throw DbError("0A000", "ARRAY subquery lacks a supported array type for " + field.type);
+            return literal.typeName;
+        }
         literal.typeName = scalar ? columns.front().type : "boolean";
         if(scalar) {
             valueTypeOids[&literal]=columns.front().typeOid;
@@ -2088,7 +2112,8 @@ public:
                 if (call && call->setReturning && !call->setReturning->sourceColumnName.empty())
                     name = call->setReturning->sourceColumnName;
             }
-            if(item.alias.empty() && item.expr->preparedSubquery) {
+            const auto* literal = dynamic_cast<const LiteralExpr*>(item.expr.get());
+            if(item.alias.empty() && item.expr->preparedSubquery && (!literal || !literal->arraySubquery)) {
                 const auto child=result.statementOutputs.find(item.expr->preparedSubquery.get());
                 if(child!=result.statementOutputs.end() && child->second.size()==1)
                     name=child->second.front().name;

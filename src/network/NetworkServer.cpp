@@ -3490,19 +3490,25 @@ void inferProtocolExpressionParameters(const ProtocolQuerySyntax& querySyntax,Se
     };
     bool concatenation=false;
     bool regex=false;
+    bool arraySubquery=false;
     observe=[&](const Expr* value) {
+        if (const auto* literal = dynamic_cast<const LiteralExpr*>(value))
+            arraySubquery = arraySubquery || literal->arraySubquery;
         if (const auto* binary = dynamic_cast<const BinaryOpExpr*>(value)) {
             const auto& op = binary->op;
             concatenation = concatenation || op == "||";
             regex = regex || op == "~" || op == "~*" || op == "!~" || op == "!~*";
         }
     };
-    statement(parsed.stmt.get());if(!concatenation && !queryCountClauses && !regex)return;
+    statement(parsed.stmt.get());
+    const bool inferArrayInput = arraySubquery &&
+        std::find(parameterOids.begin(), parameterOids.end(), 0) != parameterOids.end();
+    if(!concatenation && !queryCountClauses && !regex && !inferArrayInput)return;
     auto* previous=currentSession();setCurrentSession(&session);
     struct Restore {Session* previous;~Restore(){setCurrentSession(previous);}} restore{previous};
     const auto prepared=g_engine.prepareBoundQuery(session.currentDB,sql,
         protocolMetadataParameters(session,parameterOids));
-    if(queryCountClauses || regex) {
+    if(queryCountClauses || regex || inferArrayInput) {
         // Ordinary metadata binding selects each input declaration from its
         // real expression context. Occurrence slots are not wire positions:
         // recover $n only through the binder's original source provenance.
@@ -4312,11 +4318,11 @@ bool describePreparedDerivedIntegerJoin(const ProtocolQuerySyntax& syntax, Sessi
     return !columns.empty();
 }
 
-// A typed quantified consumer owns whole-query metadata, not a guessed
-// BOOLEAN descriptor. Reuse pure preparation/planning before Describe so
+// Quantified comparisons and ARRAY subqueries need the whole-query binder.
+// Reuse pure preparation/planning before Describe so
 // missing names, operand types and constant-plan failures cannot arrive after
 // a fabricated RowDescription. No cursor/source is opened here.
-bool describePreparedQuantified(const ProtocolQuerySyntax& querySyntax, Session& session,
+bool describePreparedMultirowExpression(const ProtocolQuerySyntax& querySyntax, Session& session,
     std::vector<PgColumnDescription>& columns,const std::vector<uint32_t>& parameterOids) {
     const auto& sql = querySyntax.sql();
     const auto& parsed = querySyntax.parse();
@@ -4328,6 +4334,8 @@ bool describePreparedQuantified(const ProtocolQuerySyntax& querySyntax, Session&
     value=[&](const Expr* expression) {
         if(!expression)return false;
         if(dynamic_cast<const QuantifiedComparisonExpr*>(expression))return true;
+        if (const auto* literal = dynamic_cast<const LiteralExpr*>(expression); literal && literal->arraySubquery)
+            return true;
         if(expression->preparedSubquery)return statement(expression->preparedSubquery.get());
         if(const auto* binary=dynamic_cast<const BinaryOpExpr*>(expression))
             return value(binary->left.get()) || (binary->op!="::" && value(binary->right.get()));
@@ -4736,7 +4744,7 @@ bool describePreparedResultShape(const ProtocolQuerySyntax& syntax, Session& ses
     }
     if (describeMaintenanceProgress(syntax, columns)) return true;
     if (describePreparedWindowHostResult(syntax,session,columns,parameterOids)) return true;
-    if(describePreparedQuantified(syntax,session,columns,parameterOids))return true;
+    if(describePreparedMultirowExpression(syntax,session,columns,parameterOids))return true;
     if(describePreparedPgStatsCatalog(syntax,session,columns,parameterOids))return true;
     if(describePreparedOwnedCatalog(syntax,session,columns,parameterOids))return true;
     if(describePreparedPgSequenceCatalog(syntax,session,columns,parameterOids))return true;

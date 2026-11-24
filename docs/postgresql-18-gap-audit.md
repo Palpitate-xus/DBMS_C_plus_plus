@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-24 · 把查询结果收进数组
+
+`ARRAY(SELECT ...)` 可以收集带类型的子查询结果，支持空数组、排序、空值和多维数组。已验证原版 `psql` 用来整理规则角色名单的表达式。`QRY-01`、`QRY-04` 和 `CLIENT-01` 保持部分实现，规则目录 `pg_policy` 仍待补齐。 [验证范围](test-report.md#array-subquery-20261124) · [性能对照](performance-report-2026-10-30.md#array-subquery-cost-20261124)
+
 ## 2026-11-24 · 可以查询数据库角色
 
 `pg_roles` 可以查到角色的真实编号、标志和登录选项。密码字段使用固定掩码。原版 `psql` 可以执行 `\du`。角色默认配置、成员关系和规则目录继续由 `CAT-03` 和 `CLIENT-01` 跟踪，两项保持部分实现。 [功能验证](test-report.md#roles-view-20261124) · [性能对照](performance-report-2026-10-30.md#roles-view-cost-20261124)

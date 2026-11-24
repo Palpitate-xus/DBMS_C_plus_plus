@@ -316,6 +316,8 @@ struct LiteralExpr : public Expr {
     // type declaration. Its already-resolved codec must not acquire catalog
     // ownership again merely to decode the planner's quoted payload.
     bool analyzedPrimitiveConstant = false;
+    bool arraySubquery = false;
+    DatumTypePtr arraySubqueryType;
     LiteralExpr() { type = ExprType::Literal; }
     std::string toString() const override { return value; }
 };
@@ -417,6 +419,11 @@ struct QuantifiedComparisonExpr : public Expr {
     Quantifier quantifier = Quantifier::Any; // SOME canonicalizes to ANY.
     std::optional<QueryComparisonBinding> comparison;
     QuantifiedComparisonExpr() { type = ExprType::QuantifiedComparison; }
+    bool comparesQueryRows() const {
+        if (!right || !right->preparedSubquery) return false;
+        const auto* literal = dynamic_cast<const LiteralExpr*>(right.get());
+        return !literal || !literal->arraySubquery;
+    }
     std::string toString() const override {
         return (left ? left->toString() : "?") + " " + op +
             (quantifier == Quantifier::Any ? " ANY(" : " ALL(") +

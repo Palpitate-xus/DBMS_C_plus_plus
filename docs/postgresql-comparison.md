@@ -2,6 +2,13 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="array-subquery-comparison-20261124"></a>
+## 2026-11-24 · 把查询结果收进数组
+
+PostgreSQL 逐行收集 `ARRAY(SELECT ...)` 的结果，并保留列类型和空值。DuckDB 的同类语法返回列表。SQLite 可用 `json_group_array` 生成 JSON 数组，列表的顺序可在聚合调用中指定。 [PostgreSQL 表达式说明](https://www.postgresql.org/docs/18/sql-expressions.html#SQL-SYNTAX-ARRAY-CONSTRUCTORS) · [PostgreSQL 执行器源码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/executor/nodeSubplan.c) · [DuckDB 子查询](https://duckdb.org/docs/current/sql/expressions/subqueries#array-subqueries) · [SQLite JSON 聚合](https://www.sqlite.org/json1.html#array_and_object_aggregate_functions)
+
+本项目直接从已绑定的子查询读取带类型的值，按子查询实际输出次序生成数组。只在本次查询内复用不依赖外层行的结果。分组读取需要按外层行分别执行对应的子查询。 [查询示例](MANUAL.md#把查询结果收进数组) · [性能对照](performance-report-2026-10-30.md#array-subquery-cost-20261124)
+
 <a id="roles-view-comparison-20261124"></a>
 ## 2026-11-24 · 公开角色视图
 

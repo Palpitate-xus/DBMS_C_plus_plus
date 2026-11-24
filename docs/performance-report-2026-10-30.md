@@ -4,6 +4,32 @@
 
 > 复核发现，几组早期 COPY 计时在每个对照场景中使用了固定的执行顺序。耗时差可能包含顺序影响。这项问题涉及默认值求值、按列查找、默认值标记、短 CSV 导出和短查询导出的配对计时。[默认值求值](#copy-default-evaluation-order-cost-20261122) · [按列查找](#copy-identity-input-cost-20261122) · [默认值标记](#copy-default-marker-cost-20261122) · [CSV 导出](#copy-csv-out-cost-20261122) · [查询导出](#copy-query-stdout-cost-20261122)
 
+<a id="array-subquery-cost-20261124"></a>
+## 2026-11-24 · 把查询结果收进数组的耗时
+
+比较上一版、本次版本和 PostgreSQL 18.6。本项目用 GCC 13.3、CMake 和 `-O2` 编译，使用 C++17，构建时关闭 OpenSSL。客户端与服务进程限用 Intel Xeon E5-2678 v3 的 CPU 13 和 28，本项目使用 `/dev/shm` 下的数据目录。
+
+创建 `ar_cost(k integer PRIMARY KEY, g integer, v integer)`。按编号从 768 到 1 倒序插入，分 6 批，每批 128 行。`g` 为 `k % 12`，`v` 一般为 `k * 3`，每逢 `k % 7 = 0` 写入 `NULL`。另建 `ar_cost_groups(g integer PRIMARY KEY)`，插入 0 到 11。以下第一、二条各取 `768` 和 `128` 两种范围。第三条查询返回 12 个数组，每组 64 个值。
+
+```sql
+SELECT ARRAY(SELECT v FROM ar_cost WHERE k <= 768 ORDER BY k) AS a;
+SELECT array_agg(v ORDER BY k) AS a FROM ar_cost WHERE k <= 768;
+SELECT o.g, ARRAY(SELECT v FROM ar_cost i WHERE i.g = o.g ORDER BY k) AS a
+FROM ar_cost_groups o ORDER BY o.g;
+```
+
+在同一连接记录发出查询到收到就绪消息的时间。各版本轮流执行，第二轮反转顺序。每轮先预热 4 次，再计时 12 次。每次核对数组元素、顺序、空值、字段类型和查询结束消息。
+
+| 查询 | 上一版中位数 / 最大值（毫秒） | 本次中位数 / 最大值（毫秒） | PostgreSQL 18.6 中位数 / 最大值（毫秒） |
+| --- | ---: | ---: | ---: |
+| `ARRAY(SELECT ...)` 收集 128 个值 | — | 3.346–3.505 / 3.791–4.003 | 0.202–0.219 / 0.240–0.241 |
+| `ARRAY(SELECT ...)` 收集 768 个值 | — | 9.397–9.567 / 9.899–10.165 | 0.401–0.634 / 0.988–0.998 |
+| `array_agg` 收集 128 个值 | 7.428–7.633 / 8.276–11.417 | 7.384–7.671 / 7.784–8.649 | 0.208–0.214 / 0.259–0.537 |
+| `array_agg` 收集 768 个值 | 25.310–26.157 / 27.329–28.409 | 25.455–26.398 / 27.644–33.338 | 0.443–0.469 / 0.495–1.227 |
+| 按外层记录分别收集 12 个数组 | — | 87.333–97.261 / 112.634–127.095 | 1.192–1.349 / 1.692–2.797 |
+
+上一版 `924d533c` 执行 `ARRAY(SELECT ...)` 会报错。用新写法得到同一结果时，128 个值的中位耗时比上一版的 `array_agg` 低 54%–55%，768 个值时低 63%。两版都用 `array_agg` 时，中位数接近。按 12 组收集时，本项目的中位耗时约为 PostgreSQL 的 72–73 倍。 [功能验证](test-report.md#array-subquery-20261124) · [实现对照](postgresql-comparison.md#array-subquery-comparison-20261124)
+
 <a id="roles-view-cost-20261124"></a>
 ## 2026-11-24 · 查询角色的耗时
 

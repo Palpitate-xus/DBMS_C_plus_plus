@@ -5,6 +5,7 @@
 #include "common/Config.h"
 #include "common/DbError.h"
 #include "expression/ArrayDatumInput.h"
+#include "expression/CompoundValueOps.h"
 #include "parser/BetweenSyntax.h"
 #include "expression/expr_helper.h"
 #include "expression/aggregate_type.h"
@@ -1469,7 +1470,7 @@ void PreparedQueryExecution::prepareExpression(Expr* expression) {
     for (const auto& site : sites) originalSites_[site.first] = site.second;
     for (const auto& site : sites)
         if (const auto* quantified=dynamic_cast<const QuantifiedComparisonExpr*>(site.second);
-            quantified && quantified->right && quantified->right->preparedSubquery)
+            quantified && quantified->comparesQueryRows())
             quantifiedSites_.insert(quantified);
     compiled_.emplace(expression,std::move(compiled));
     prepared_.insert(expression);
@@ -1509,7 +1510,7 @@ void PreparedQueryExecution::planExpressionConstants(Expr* expression,
         for (const auto& site : sites) originalSites_[site.first] = site.second;
         for (const auto& site : sites)
             if (const auto* quantified = dynamic_cast<const QuantifiedComparisonExpr*>(site.second);
-                quantified && quantified->right && quantified->right->preparedSubquery)
+                quantified && quantified->comparesQueryRows())
                 quantifiedSites_.insert(quantified);
         compiled_.emplace(expression, std::move(compiled));
     }
@@ -1693,7 +1694,7 @@ void PreparedQueryExecution::planStatementConstants(const Stmt* statement,
                 pulledChildren(binary->left.get()); pulledChildren(binary->right.get());
             } else if (const auto* any = dynamic_cast<const QuantifiedComparisonExpr*>(root);
                 any && any->quantifier == QuantifiedComparisonExpr::Quantifier::Any &&
-                any->right && any->right->preparedSubquery && localNonvolatileTest(any->left.get())) {
+                any->comparesQueryRows() && localNonvolatileTest(any->left.get())) {
                 planStatementConstants(any->right->preparedSubquery.get(), visited);
             }
         };
@@ -1931,7 +1932,7 @@ void PreparedQueryExecution::prepareChildCursors() {
     for(const auto* root:prepared_)
         visitStructuredValue(compiled_.at(root).get(),[&](const Expr* value) {
             const auto* quantified=dynamic_cast<const QuantifiedComparisonExpr*>(value);
-            if(!quantified || !quantified->right || !quantified->right->preparedSubquery)return;
+            if(!quantified || !quantified->comparesQueryRows())return;
             const auto mapped=originalSites_.find(quantified);
             const auto* original=mapped==originalSites_.end()?nullptr:
                 dynamic_cast<const QuantifiedComparisonExpr*>(mapped->second);
@@ -1955,7 +1956,7 @@ std::vector<Operator*> PreparedQueryExecution::childPlans(const Expr* scope) con
     std::function<void(const Expr*)> gather=[&](const Expr* node) {
         if(!node || node->preparedSubquery)return;
         if(const auto* quantified=dynamic_cast<const QuantifiedComparisonExpr*>(node)) {
-            if(quantified->right && quantified->right->preparedSubquery)sites.insert(quantified->right.get());
+            if(quantified->comparesQueryRows())sites.insert(quantified->right.get());
             gather(quantified->left.get());gather(quantified->right.get());
         } else if(const auto* binary=dynamic_cast<const BinaryOpExpr*>(node)) {gather(binary->left.get());gather(binary->right.get());}
         else if(const auto* unary=dynamic_cast<const UnaryOpExpr*>(node))gather(unary->operand.get());
@@ -2041,6 +2042,46 @@ ExprValue PreparedQueryExecution::executeQuantified(const QuantifiedComparisonEx
     return unknown?ExprValue("boolean","",true):answer;
 }
 
+static ExprValue collectSubqueryArray(const LiteralExpr& expression, const QueryOutputColumn& input,
+                                     PreparedQueryCursor& cursor) {
+    if (!expression.arraySubqueryType)
+        throw DbError("XX000", "ARRAY subquery lacks its bound type");
+    const bool stacked = expression.arraySubqueryType->actualOid == input.typeOid;
+    const auto inputType = ExprHelper::canonicalResultTypeName(input.type);
+    std::vector<ExprValue> row;
+    std::vector<ExprValue> elements;
+    std::vector<DatumArrayDimension> dimensions;
+    int32_t length = 0;
+    while (cursor.next(row)) {
+        checkForQueryInterrupt();
+        if (row.size() != 1 || (row.front().typeName != input.type &&
+            ExprHelper::canonicalResultTypeName(row.front().typeName) != inputType))
+            throw DbError("XX000", "ARRAY subquery cursor lost its declared column");
+        if (length == INT32_MAX) throw DbError("54000", "array size exceeds the maximum allowed");
+        if (stacked) {
+            if (row.front().isNull) throw DbError("22004", "cannot accumulate null arrays");
+            const auto shape = compound_value_detail::arrayDimensions(row.front());
+            if (shape.empty()) throw DbError("2202E", "cannot accumulate empty arrays");
+            if (shape.size() >= 6) throw DbError("54000", "number of array dimensions exceeds the maximum allowed (6)");
+            if (dimensions.empty()) dimensions = shape;
+            else if (!std::equal(dimensions.begin(), dimensions.end(), shape.begin(), shape.end(),
+                [](const auto& a, const auto& b) { return a.length == b.length && a.lower == b.lower; }))
+                throw DbError("2202E", "cannot accumulate arrays of different dimensionality");
+            auto slice = compound_value_detail::elements(row.front());
+            if (slice.size() > static_cast<size_t>(INT32_MAX) - elements.size())
+                throw DbError("54000", "array size exceeds the maximum allowed");
+            elements.insert(elements.end(), std::make_move_iterator(slice.begin()), std::make_move_iterator(slice.end()));
+        } else {
+            elements.push_back(std::move(row.front()));
+        }
+        ++length;
+    }
+    if (length) dimensions.insert(dimensions.begin(), {length, 1});
+    ExprValue result(expression.typeName, compound_value_detail::render(elements, dimensions));
+    compound_value_detail::attach(result, std::move(elements), std::move(dimensions), expression.arraySubqueryType);
+    return result;
+}
+
 ExprValue PreparedQueryExecution::executeChild(const Expr* expression, const RowContext& row) const {
     const Expr* consumer = expression;
     const auto* call = dynamic_cast<const FunctionCallExpr*>(expression);
@@ -2055,7 +2096,11 @@ ExprValue PreparedQueryExecution::executeChild(const Expr* expression, const Row
         const auto cached = memo_.find(consumer);
         if (cached != memo_.end()) return cached->second;
     }
-    if (childCursorFactory_ && (existence || cursorOwnsScalarChildren_ ||
+    const auto* literal = dynamic_cast<const LiteralExpr*>(expression);
+    const bool array = literal && literal->arraySubquery;
+    if (array && !childCursorFactory_)
+        throw DbError("0A000", "ARRAY subquery requires a prepared query cursor");
+    if (childCursorFactory_ && (existence || array || cursorOwnsScalarChildren_ ||
         (!queryExecutor_ && !engine_->hasPlpgsqlQueryExecutor()))) {
         const Stmt* statement = expression->preparedSubquery.get();
         const auto output = query_->statementOutputs.find(statement);
@@ -2077,10 +2122,16 @@ ExprValue PreparedQueryExecution::executeChild(const Expr* expression, const Row
                 if (memoizable) memo_.emplace(consumer, result);
                 return result;
             }
-            if (descriptor.size() != 1 ||
+            if (descriptor.size() != 1 || (array && descriptor.front().typeOid != output->second.front().typeOid) ||
                 ExprHelper::canonicalResultTypeName(descriptor.front().type) !=
                     ExprHelper::canonicalResultTypeName(output->second.front().type))
                 throw DbError("XX000", "prepared child cursor lost its declared descriptor");
+            if (array) {
+                auto result = collectSubqueryArray(*literal, descriptor.front(), *cursor);
+                cursor->close();
+                if (memoizable) memo_.emplace(expression, result);
+                return result;
+            }
             std::vector<ExprValue> values;
             ExprValue result(output->second.front().type, "", true);
             if (cursor->next(values)) {

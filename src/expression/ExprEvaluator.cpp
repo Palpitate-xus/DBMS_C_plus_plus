@@ -2069,7 +2069,7 @@ static bool isNumericLiteral(const std::string& s) {
 
 ExprValue ExprEvaluator::evalLiteral(const LiteralExpr* e) const {
     if (!e) return ExprValue{};
-    if (e->preparedSubquery)
+    if (e->preparedSubquery || e->arraySubquery)
         throw DbError("0A000", "prepared subqueries require a query execution context");
     const std::string& raw = e->value;
     std::string low = toLower(raw);
@@ -8272,7 +8272,7 @@ ExprValue ExprEvaluator::evalArrayExpr(const ArrayExpr* array,const RowContext& 
 
 ExprValue ExprEvaluator::evalQuantified(const QuantifiedComparisonExpr* expression,const RowContext& row) const {
     if (!expression || !expression->comparison) throw DbError("XX000","quantified comparison was not prepared");
-    if (expression->right && expression->right->preparedSubquery) {
+    if (expression->comparesQueryRows()) {
         if (!quantifiedExecutor_) throw DbError("0A000","quantified SQL requires its prepared query cursor");
         return quantifiedExecutor_(expression,row);
     }

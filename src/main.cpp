@@ -5958,13 +5958,15 @@ static bool publishExplainPlan(const function<dbms::OpPtr()>& buildPlan, const s
     return false;
 }
 
-static bool containsPreparedQuantifier(const dbms::Expr* value) {
+static bool containsPreparedMultirowExpression(const dbms::Expr* value) {
     if(!value)return false;
     if(dynamic_cast<const dbms::QuantifiedComparisonExpr*>(value))return true;
+    if (const auto* literal = dynamic_cast<const dbms::LiteralExpr*>(value); literal && literal->arraySubquery)
+        return true;
     if(const auto* binary=dynamic_cast<const dbms::BinaryOpExpr*>(value))
-        return containsPreparedQuantifier(binary->left.get()) || containsPreparedQuantifier(binary->right.get());
-    if(const auto* unary=dynamic_cast<const dbms::UnaryOpExpr*>(value))return containsPreparedQuantifier(unary->operand.get());
-    if(const auto* cast=dynamic_cast<const dbms::CastExpr*>(value))return containsPreparedQuantifier(cast->operand.get());
+        return containsPreparedMultirowExpression(binary->left.get()) || containsPreparedMultirowExpression(binary->right.get());
+    if(const auto* unary=dynamic_cast<const dbms::UnaryOpExpr*>(value))return containsPreparedMultirowExpression(unary->operand.get());
+    if(const auto* cast=dynamic_cast<const dbms::CastExpr*>(value))return containsPreparedMultirowExpression(cast->operand.get());
     if(const auto* call=dynamic_cast<const dbms::FunctionCallExpr*>(value)){
         if (call->schema.empty() && dbms::SQLParser::toLower(call->funcName) == "exists" &&
             call->args.size() == 1) {
@@ -5976,25 +5978,25 @@ static bool containsPreparedQuantifier(const dbms::Expr* value) {
                     return true;
             }
         }
-        for(const auto& arg:call->args)if(containsPreparedQuantifier(arg.get()))return true;
-        for(const auto& arg:call->namedArgs)if(containsPreparedQuantifier(arg.value.get()))return true;
+        for(const auto& arg:call->args)if(containsPreparedMultirowExpression(arg.get()))return true;
+        for(const auto& arg:call->namedArgs)if(containsPreparedMultirowExpression(arg.value.get()))return true;
     }
     if(const auto* conditional=dynamic_cast<const dbms::CaseExpr*>(value)){
-        if(containsPreparedQuantifier(conditional->switchExpr.get()) || containsPreparedQuantifier(conditional->elseExpr.get()))return true;
+        if(containsPreparedMultirowExpression(conditional->switchExpr.get()) || containsPreparedMultirowExpression(conditional->elseExpr.get()))return true;
         for(const auto& arm:conditional->whenClauses)
-            if(containsPreparedQuantifier(arm.first.get()) || containsPreparedQuantifier(arm.second.get()))return true;
+            if(containsPreparedMultirowExpression(arm.first.get()) || containsPreparedMultirowExpression(arm.second.get()))return true;
     }
     if(const auto* array=dynamic_cast<const dbms::ArrayExpr*>(value))
-        for(const auto& arg:array->elements)if(containsPreparedQuantifier(arg.get()))return true;
+        for(const auto& arg:array->elements)if(containsPreparedMultirowExpression(arg.get()))return true;
     if(const auto* row=dynamic_cast<const dbms::RowExpr*>(value))
-        for(const auto& arg:row->elements)if(containsPreparedQuantifier(arg.get()))return true;
+        for(const auto& arg:row->elements)if(containsPreparedMultirowExpression(arg.get()))return true;
     return false;
 }
-static bool containsPreparedQuantifier(const dbms::SelectStmt& select) {
-    if(containsPreparedQuantifier(select.whereClause.get()))return true;
-    for(const auto& item:select.selectList)if(containsPreparedQuantifier(item.expr.get()))return true;
-    for(const auto& item:select.orderBy)if(containsPreparedQuantifier(item.expr.get()))return true;
-    for(const auto& row:select.valuesRows)for(const auto& item:row)if(containsPreparedQuantifier(item.get()))return true;
+static bool containsPreparedMultirowExpression(const dbms::SelectStmt& select) {
+    if(containsPreparedMultirowExpression(select.whereClause.get()))return true;
+    for(const auto& item:select.selectList)if(containsPreparedMultirowExpression(item.expr.get()))return true;
+    for(const auto& item:select.orderBy)if(containsPreparedMultirowExpression(item.expr.get()))return true;
+    for(const auto& row:select.valuesRows)for(const auto& item:row)if(containsPreparedMultirowExpression(item.get()))return true;
     return false;
 }
 // The later statement-owned provider keeps lexical CTE producers alive while
@@ -6077,7 +6079,7 @@ static bool probesPreparedIntegerJoin(const dbms::SelectStmt& select) {
 }
 
 static bool explainNeedsTypedPlan(const dbms::SelectStmt& select) {
-    if (containsPreparedQuantifier(select) || !select.fromClause || !select.fromClause->alias.empty() || select.offset ||
+    if (containsPreparedMultirowExpression(select) || !select.fromClause || !select.fromClause->alias.empty() || select.offset ||
         (select.limit && !*select.limit) || select.orderBy.size() > 1) return true;
     std::function<bool(const dbms::Expr*)> typed = [&](const dbms::Expr* expression) {
         if (!expression) return false;
@@ -6163,7 +6165,7 @@ static bool handleExplain(const string& sql, Session& s) {
        dynamic_cast<dbms::UpdateStmt*>(explained.stmt.get()) || dynamic_cast<dbms::DeleteStmt*>(explained.stmt.get())))
         return explainPreparedDmlQuery(s,inner,opts,isJson);
     auto* explainedSelect = explained.success ? dynamic_cast<dbms::SelectStmt*>(explained.stmt.get()) : nullptr;
-    if(explainedSelect && containsPreparedQuantifier(*explainedSelect))
+    if(explainedSelect && containsPreparedMultirowExpression(*explainedSelect))
         return explainPreparedReadQuery(s,inner,opts,isJson);
     map<string,string> boundIntegerAtoms;
     if (explainedSelect && dbms::QueryPlanner::supportsPreparedSourceSelectPlan(*explainedSelect)) {
@@ -20465,7 +20467,7 @@ static pair<bool, bool> scalarQueryRoles(const dbms::Expr* expression, bool scal
     if (!expression) return {};
     if (const auto* literal = dynamic_cast<const dbms::LiteralExpr*>(expression)) {
         const auto tokens = dbms::SQLParser::tokenize(literal->value);
-        const bool query = expression->preparedSubquery ||
+        const bool query = expression->preparedSubquery || literal->arraySubquery ||
             (tokens.size() > 1 && tokens[0] == "(" &&
              (dbms::SQLParser::toLower(tokens[1]) == "select" ||
               dbms::SQLParser::toLower(tokens[1]) == "with" ||
@@ -23703,7 +23705,7 @@ static bool handlePreparedMultirowQuery(const string& raw,Session& session,bool&
     dbms::SQLParser parser;const auto parsed=parser.parseForBinding(raw);
     const auto* select=parsed.success?dynamic_cast<const dbms::SelectStmt*>(parsed.stmt.get()):nullptr;
     if(!select || hasCurrentQueryWindows(select))return false;
-    const bool quantified=containsPreparedQuantifier(*select);
+    const bool quantified=containsPreparedMultirowExpression(*select);
     // Only a provider actually owned by this receiver may request whole
     // binding here. Other scalar/session host functions retain their own
     // consumer; no analysis exception is swallowed to discover ownership.
@@ -23827,28 +23829,28 @@ static bool handlePreparedQuantifiedDml(const string& rawSql,Session& session,bo
     if(!parsed.isValid())return false;
     bool quantified=false;
     const auto scan=[&](const auto& items) {
-        for(const auto& item:items)quantified=quantified || containsPreparedQuantifier(item.expr.get());
+        for(const auto& item:items)quantified=quantified || containsPreparedMultirowExpression(item.expr.get());
     };
     if(const auto* insert=dynamic_cast<const dbms::InsertStmt*>(parsed.stmt.get())) {
         // Unsupported legacy conflict/override/default contracts remain on
         // their established dispatcher; the new entry is not a retry path.
         if(!insert->conflictAction.empty() || !insert->override_.empty() || insert->defaultValues)return false;
         for(const auto& row:insert->values)for(const auto& cell:row)
-            quantified=quantified || containsPreparedQuantifier(cell.get());
+            quantified=quantified || containsPreparedMultirowExpression(cell.get());
         if(const auto* source=dynamic_cast<const dbms::SelectStmt*>(insert->selectSource.get()))
-            quantified=quantified || containsPreparedQuantifier(*source);
+            quantified=quantified || containsPreparedMultirowExpression(*source);
         scan(insert->returning);
     } else if(const auto* update=dynamic_cast<const dbms::UpdateStmt*>(parsed.stmt.get())) {
         if(update->only || !update->whereCurrentOf.empty())return false;
         for(const auto& assignment:update->setClauses) {
             const auto* value=dynamic_cast<const dbms::LiteralExpr*>(assignment.second.get());
             if(value && !value->preparedSubquery && dbms::SQLParser::toLower(value->value)=="default")return false;
-            quantified=quantified || containsPreparedQuantifier(assignment.second.get());
+            quantified=quantified || containsPreparedMultirowExpression(assignment.second.get());
         }
-        quantified=quantified || containsPreparedQuantifier(update->whereClause.get());scan(update->returning);
+        quantified=quantified || containsPreparedMultirowExpression(update->whereClause.get());scan(update->returning);
     } else if(const auto* remove=dynamic_cast<const dbms::DeleteStmt*>(parsed.stmt.get())) {
         if(remove->only || !remove->whereCurrentOf.empty())return false;
-        quantified=containsPreparedQuantifier(remove->whereClause.get());scan(remove->returning);
+        quantified=containsPreparedMultirowExpression(remove->whereClause.get());scan(remove->returning);
     } else return false;
     if(!quantified)return false;
     auto query=make_shared<dbms::PreparedQuery>(g_engine.prepareBoundQuery(session.currentDB,rawSql));
