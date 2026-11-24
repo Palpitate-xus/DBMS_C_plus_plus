@@ -2430,7 +2430,7 @@ public:
         } restore{countReferences,countContexts,setOrderScope,previousOrder};
         const auto source=expression(count,scopes);
         const auto base=patternBaseType(source,count.get());
-        if(base!="unknown" && base!="smallint" && base!="integer" && base!="bigint" &&
+        if(base!="unknown" && base!="smallint" && base!="integer" && base!="bigint" && base!="oid" &&
            base!="numeric" && base!="real" && base!="double precision")
             throw DbError("42804",std::string("argument of ")+clause+" must be type bigint, not "+source);
         coerceCaseInput(count,source,"bigint");

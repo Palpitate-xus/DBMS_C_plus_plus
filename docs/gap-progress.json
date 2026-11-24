@@ -2,6 +2,18 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-24 bind direct row count parameters for ordinary SELECT pages",
+      "gap_ids": ["QRY-06", "OPT-01", "PROTO-03", "PROTO-04"],
+      "status": "partial",
+      "evidence": ["src/parser/parser.cpp", "src/network/NetworkServer.cpp", "src/executor/ExecutionPlan.cpp", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/bound_row_count_protocol_e2e_test.py", "tests/oid_column_recovery_protocol_e2e_test.py", "tests/physical_limit_demand_protocol_e2e_test.py"],
+      "verification": [
+        "The ordinary top-level SELECT and its EXPLAIN recognize direct row count parameters and derive their types from the bound query. Bound result columns keep their declared types and origins.",
+        "A small bound page can use the existing ordered index reader. Unbounded and zero limits, NULL, offsets, peers, invalid input and negative-count error phases are checked on the wire.",
+        "Recovery uses the prior data format. General count expressions, nested count parameters and wider parameter inference remain open."
+      ]
+    },
+    {
       "issue": "2026-11-24 read ordered OID pages from B-tree indexes",
       "gap_ids": ["IDX-03", "OPT-01", "TYPE-20", "PROTO-04"],
       "status": "partial",

@@ -845,6 +845,14 @@ SELECT id FROM migration_log ORDER BY source_table DESC NULLS LAST LIMIT 2;
 
 小页查询可配合 `OFFSET` 或 `FETCH ... WITH TIES`，也可在同一列上指定编号范围。数据库会在需要读取空值、使用其他列筛选或按多列排序时改用原有查询方式。 [分页测试](test-report.md#oid-page-20261124)
 
+应用通过 PostgreSQL 扩展查询协议连接时，可以准备下面的语句，每次传入要取的行数和要跳过的行数。符合前面条件的小页仍可利用索引。
+
+```sql
+SELECT id FROM migration_log ORDER BY source_table LIMIT $1 OFFSET $2;
+```
+
+直接用于这些位置且未声明类型的参数通常按 `bigint` 读取。`LIMIT` 传空值表示不限行数，`OFFSET` 传空值表示从第一条开始。带参数的 `FETCH … WITH TIES` 也可翻页，空值表示返回偏移之后的全部记录。两个位置的负数会在执行时返回错误。 [带参数的分页测试](test-report.md#bound-row-count-20261124)
+
 ### 其他类型
 | 类型 | 说明 |
 |------|------|

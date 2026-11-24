@@ -4114,8 +4114,8 @@ static bool currentLevelWindowExpression(const Expr* expression) {
     return false;
 }
 
-static bool parseSelectWindowCount(const std::vector<std::string>& tokens,
-                                   size_t& pos, SelectStmt& statement, RootRowCount kind) {
+static bool parseSelectCountExpression(const std::vector<std::string>& tokens,
+                                       size_t& pos, SelectStmt& statement, RootRowCount kind) {
     // This private syntax purpose is consumed only by the two pure
     // RETURNING endpoints. Ordinary parse/binding keeps the window-only
     // count contract below; no executable query or plan escapes this path.
@@ -4133,10 +4133,9 @@ static bool parseSelectWindowCount(const std::vector<std::string>& tokens,
         }
         return true;
     }
-    // Ordinary SELECT has no general dynamic-count execution contract. Keep
-    // only genuine current-level OVER sites so normal analysis can reject
-    // their actual routine role. Parse the original stream into temporary
-    // count fields; rejected candidates leave the legacy receiver untouched.
+    // Ordinary SELECT accepts a direct parameter at the row count boundary.
+    // Keep current-level OVER sites for the binder's placement diagnostic as
+    // well. Other expressions retain their existing execution receivers.
     size_t next = pos;
     SelectStmt parsed;
     std::string diagnostic;
@@ -4148,8 +4147,15 @@ static bool parseSelectWindowCount(const std::vector<std::string>& tokens,
     } restore{previous};
     const auto error = parseRootRowCount(tokens,next,parsed,kind);
     auto& expression = kind == RootRowCount::Offset ? parsed.offsetExpr : parsed.limitExpr;
-    if (!error.empty() || !diagnostic.empty() || !currentLevelWindowExpression(expression.get()))
+    if (!error.empty() || !diagnostic.empty() ||
+        (!dynamic_cast<const ParameterExpr*>(expression.get()) &&
+         !currentLevelWindowExpression(expression.get())))
         return false;
+    if (dynamic_cast<const ParameterExpr*>(expression.get())) {
+        // The row count owns its surrounding parentheses. Replacing just
+        // the inner parameter would leave a dynamic expression in the plan.
+        markSource(expression.get(), tokens, pos, next);
+    }
     (kind == RootRowCount::Offset ? statement.offsetExpr : statement.limitExpr) = std::move(expression);
     pos = next;
     return true;
@@ -4194,7 +4200,7 @@ static std::string parseQueryRootClauses(const std::vector<std::string>& tokens,
             sawLimit = true; ++pos;
             if (statement.command == SqlCommand::Values || statement.setOp != SetOp::None || returningDeclarationSyntax) {
                 if (auto error = parseRootRowCount(tokens,pos,statement,RootRowCount::Limit); !error.empty()) return error;
-            } else if (parseSelectWindowCount(tokens,pos,statement,RootRowCount::Limit)) {
+            } else if (parseSelectCountExpression(tokens,pos,statement,RootRowCount::Limit)) {
                 // Analysis-only count; its current-level window must fail.
             } else if (word(pos) == "all") ++pos;
             else if (word(pos) == "null") {
@@ -4210,7 +4216,7 @@ static std::string parseQueryRootClauses(const std::vector<std::string>& tokens,
             sawOffset = true; ++pos;
             if (statement.command == SqlCommand::Values || statement.setOp != SetOp::None || returningDeclarationSyntax) {
                 if (auto error = parseRootRowCount(tokens,pos,statement,RootRowCount::Offset); !error.empty()) return error;
-            } else if (parseSelectWindowCount(tokens,pos,statement,RootRowCount::Offset)) {
+            } else if (parseSelectCountExpression(tokens,pos,statement,RootRowCount::Offset)) {
                 // Analysis-only count; its current-level window must fail.
             } else if (word(pos) == "null") {
                 ++pos; statement.offset = 0; statement.signedOffsetCount.reset();
@@ -4231,7 +4237,7 @@ static std::string parseQueryRootClauses(const std::vector<std::string>& tokens,
                 (word(pos+1)=="only" || (word(pos+1)=="with" && word(pos+2)=="ties"));
             if (expressionOwner && !omitted) {
                 if (auto error=parseRootRowCount(tokens,pos,statement,RootRowCount::Fetch);!error.empty())return error;
-            } else if (parseSelectWindowCount(tokens,pos,statement,RootRowCount::Fetch)) {
+            } else if (parseSelectCountExpression(tokens,pos,statement,RootRowCount::Fetch)) {
                 // Analysis-only count; its current-level window must fail.
             } else if (word(pos) == "null") {
                 ++pos; statement.limit.reset(); statement.signedFetchCount.reset();
@@ -4759,8 +4765,8 @@ ParseResult SQLParser::parseSelect(const std::string& sql) {
             r.error = "LIMIT requires a non-negative integer or ALL";
             return r;
         }
-        if (parseSelectWindowCount(tokens,pos,*stmt,RootRowCount::Limit)) {
-            // The real count expression is retained only for analysis.
+        if (parseSelectCountExpression(tokens,pos,*stmt,RootRowCount::Limit)) {
+            // The expression is retained for parameter binding and analysis.
         } else if (toLower(tokens[pos]) == "all") {
             ++pos;
         } else if (toLower(tokens[pos]) == "null") {
@@ -4789,8 +4795,8 @@ ParseResult SQLParser::parseSelect(const std::string& sql) {
             r.error = "OFFSET requires a non-negative integer";
             return r;
         }
-        if (parseSelectWindowCount(tokens,pos,*stmt,RootRowCount::Offset)) {
-            // The real count expression is retained only for analysis.
+        if (parseSelectCountExpression(tokens,pos,*stmt,RootRowCount::Offset)) {
+            // The expression is retained for parameter binding and analysis.
         } else if (toLower(tokens[pos]) == "null") {
             ++pos; stmt->offset = 0;
         } else {
@@ -4818,8 +4824,8 @@ ParseResult SQLParser::parseSelect(const std::string& sql) {
         ++pos;
         stmt->fetchFirst = true;
 
-        if (parseSelectWindowCount(tokens,pos,*stmt,RootRowCount::Fetch)) {
-            // The real count expression is retained only for analysis.
+        if (parseSelectCountExpression(tokens,pos,*stmt,RootRowCount::Fetch)) {
+            // The expression is retained for parameter binding and analysis.
         } else if (pos < tokens.size() && toLower(tokens[pos]) == "null") {
             ++pos; stmt->limit.reset(); stmt->signedFetchCount.reset();
         } else if (pos < tokens.size() && (toLower(tokens[pos]) == "row" || toLower(tokens[pos]) == "rows")) {

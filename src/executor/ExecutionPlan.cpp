@@ -2276,7 +2276,8 @@ public:
 static bool supportsPreparedSelectShape(const SelectStmt& select, bool allowCtes, bool sourceContexts = false,
                                        bool selectBodyOnly = false) {
     if (select.command != SqlCommand::Select || (!allowCtes && !select.ctes.empty()) ||
-        (!selectBodyOnly && (select.setOp != SetOp::None || select.setOpLhs || select.setOpRhs)) ||
+        (!selectBodyOnly && (select.setOp != SetOp::None || select.setOpLhs || select.setOpRhs ||
+                            select.limitExpr || select.offsetExpr)) ||
         (selectBodyOnly && (select.setOp == SetOp::None || select.setOpLhs || !select.setOpRhs)) ||
         !select.groupBy.empty() || !select.groupByElems.empty() ||
         !select.distinctOn.empty() ||

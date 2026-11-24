@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>应用传入页大小和位置，查数据更快 · 2026-11-24</summary>
+
+应用每次传入要取几条、要跳过几条，数据库就能沿编号索引读够就停。在 2,048 行的测试中，取 3 条的时间从 33–38 毫秒降到约 4 毫秒。
+
+[使用说明](docs/MANUAL.md#对象编号) · [测试报告](docs/test-report.md#bound-row-count-20261124) · [性能报告](docs/performance-report-2026-10-30.md#bound-row-count-cost-20261124)
+
+</details>
+
+<details>
 <summary>按对象编号排序，取前几条更快 · 2026-11-24</summary>
 
 给原表编号建好索引后，查询编号最小或最大的几条迁移记录时，数据库可以读够就停。在 2,050 行的测试中，取最小的 3 条从约 16 毫秒降到约 3 毫秒。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>可以在表里保存对象编号 · 2026-11-24</summary>
+<summary>查看更早的更新和版本记录</summary>
+
+## 2026-11-24 · 可以在表里保存对象编号
 
 例如，迁移记录可以保存原表的编号，最大可到 4,294,967,295。没有编号的记录可以留空，和编号 0 区分开。
 
 [使用说明](docs/MANUAL.md#对象编号) · [测试报告](docs/test-report.md#oid-column-20261124) · [性能报告](docs/performance-report-2026-10-30.md#oid-column-cost-20261124)
-
-</details>
-
-<details>
-<summary>查看更早的更新和版本记录</summary>
 
 ## 2026-11-23 · 两张表按编号匹配时，取第一条更快
 

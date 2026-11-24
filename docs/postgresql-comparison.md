@@ -2,6 +2,13 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="bound-row-count-comparison-20261124"></a>
+## 2026-11-24 · 应用传入分页行数
+
+PostgreSQL 将 `LIMIT` 和 `OFFSET` 的表达式转换为 `bigint`，执行时先取偏移再取行数。绑定的空行数表示不限制，空偏移按 0 处理。`FETCH … WITH TIES` 中直接写 `NULL` 会报错，参数传 `NULL` 可以返回余下全部记录。SQLite 同样允许行数表达式，但其 `LIMIT NULL` 会报错，负上限表示不限制。DuckDB 提供预编译语句的位置参数以及 `LIMIT` 和 `OFFSET`。 [PostgreSQL 18.6 类型转换](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/parser/parse_clause.c#L1743-L1785) · [PostgreSQL 18.6 执行](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/executor/nodeLimit.c#L328-L413) · [SQLite 行数规则](https://www.sqlite.org/lang_select.html#the_limit_clause) · [DuckDB 预编译语句](https://duckdb.org/docs/current/sql/query_syntax/prepared_statements) · [DuckDB 查询末尾子句](https://duckdb.org/docs/current/sql/statements/select)
+
+本项目在普通外层 `SELECT` 和其 `EXPLAIN` 中确认直接分页参数的类型和位置，再将每次绑定的小页数交给原有查询计划。编号过滤或投影中再次使用同一参数时保留原来的类型。执行检查覆盖负值、偏移与行数同时为负时的报错顺序，以及并列结果。任意行数表达式、嵌套子查询中的分页参数及更一般的重复参数类型推断仍有差距。 [验证范围](test-report.md#bound-row-count-20261124) · [性能测试](performance-report-2026-10-30.md#bound-row-count-cost-20261124)
+
 <a id="oid-page-comparison-20261124"></a>
 ## 2026-11-24 · 按对象编号排序并取前几条
 

@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-24 · 应用可以直接传入分页行数和位置
+
+普通外层 `SELECT` 的 `LIMIT`、`OFFSET` 和 `FETCH` 可从客户端接收直接参数。小页使用现有按序读取计划，客户端能够取得输入类型、结果类型和原列位置。较早的事务快照仍按当前可见性规则读取。任意表达式和嵌套参数有待补齐。`QRY-06`、`OPT-01`、`PROTO-03` 和 `PROTO-04` 保持部分实现。 [功能验证](test-report.md#bound-row-count-20261124) · [性能对照](performance-report-2026-10-30.md#bound-row-count-cost-20261124) · [实现对照](postgresql-comparison.md#bound-row-count-comparison-20261124)
+
 ## 2026-11-24 · 单列对象编号索引可以按顺序取小页
 
 普通表的完整单列 B 树可以正向或反向读取 `oid`，支持同列范围、偏移和并列记录。编号跨过 2,147,483,647 时仍按无符号顺序排列。行级安全、较早的事务快照、空值进入所需结果和过大的候选页会使用原有查询方式。`IDX-03`、`OPT-01`、`TYPE-20` 和 `PROTO-04` 保持部分实现。 [功能验证](test-report.md#oid-page-20261124) · [性能对照](performance-report-2026-10-30.md#oid-page-cost-20261124) · [实现对照](postgresql-comparison.md#oid-page-comparison-20261124)

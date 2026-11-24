@@ -435,6 +435,7 @@ struct ProtocolPortal {
     std::string preparedSql;
     std::vector<uint32_t> parameterOids;
     std::vector<uint16_t> resultFormats;
+    std::optional<DbError> rowCountError;
     // Allocation precedes input conversion and plan acquisition. A failed
     // Bind can leave a real, undefined portal, never the replaced result.
     bool defined = false;
@@ -3945,6 +3946,128 @@ bool prepareProtocolRangeParameters(const ProtocolQuerySyntax& querySyntax, Sess
         }
     }
     return true;
+}
+
+struct ProtocolRowCounts {
+    const ParameterExpr* offset = nullptr;
+    const ParameterExpr* limit = nullptr;
+    bool withTies = false;
+    bool evaluatesCounts = true;
+};
+
+ProtocolRowCounts protocolRowCounts(const ProtocolQuerySyntax& syntax) {
+    const auto& parsed = syntax.parse();
+    if (!parsed.isValid()) return {};
+    const auto* explain = dynamic_cast<const ExplainStmt*>(parsed.stmt.get());
+    const auto* select = dynamic_cast<const SelectStmt*>(explain ? explain->query.get() : parsed.stmt.get());
+    // VALUES and set operations already have a dynamic row count executor.
+    if (!select || select->command != SqlCommand::Select || select->setOp != SetOp::None ||
+        select->setOpLhs || select->setOpRhs) return {};
+    return {dynamic_cast<const ParameterExpr*>(select->offsetExpr.get()),
+        dynamic_cast<const ParameterExpr*>(select->limitExpr.get()), select->withTies, !explain || explain->analyze};
+}
+
+void inferProtocolRowCountParameters(const ProtocolQuerySyntax& syntax, Session& session,
+                                     std::vector<uint32_t>& oids) {
+    const auto counts = protocolRowCounts(syntax);
+    if ((!counts.offset && !counts.limit) || oids.empty()) return;
+    auto* previous = currentSession(); setCurrentSession(&session);
+    struct Restore { Session* previous; ~Restore() { setCurrentSession(previous); } } restore{previous};
+    const auto prepared = g_engine.prepareBoundQuery(session.currentDB, syntax.sql(),
+        protocolMetadataParameters(session, oids));
+    if (std::find(oids.begin(), oids.end(), 0) == oids.end()) return;
+    auto inferred = oids;
+    for (const auto& use : prepared.uses) {
+        if (use.begin >= use.end || use.end > prepared.source.size())
+            throw DbError("XX000", "row count query parameter has no source provenance");
+        const auto tokens = SQLParser::tokenize(prepared.source.substr(use.begin, use.end - use.begin));
+        for (const auto& token : tokens) {
+            if (token.size() < 2 || token.front() != '$') continue;
+            size_t position = 0;
+            const auto end = token.data() + token.size();
+            const auto parsed = std::from_chars(token.data() + 1, end, position);
+            if (parsed.ptr != end || parsed.ec != std::errc{} || !position || position > oids.size())
+                continue;
+            if (inferred[position - 1]) break;
+            const auto type = ExprHelper::canonicalResultTypeName(prepared.parameters.at(use.slot).typeName);
+            const auto oid = mapBuiltinTypeNameToOid(type);
+            if (oid != INVALID_OID && oid != 705) inferred[position - 1] = oid;
+            break;
+        }
+    }
+    if (std::find(inferred.begin(), inferred.end(), 0) != inferred.end())
+        throw DbError("42P18", "could not determine data type of query parameter");
+    oids = std::move(inferred);
+}
+
+std::string lowerProtocolRowCounts(const ProtocolQuerySyntax& syntax, const ProtocolRowCounts& counts,
+    const std::vector<uint32_t>& oids, const std::vector<std::string>& decoded,
+    std::optional<DbError>& error) {
+    auto sql = syntax.sql();
+    std::vector<std::tuple<size_t, size_t, std::string>> changes;
+    const auto lower = [&](const ParameterExpr* parameter, bool offset) {
+        if (!parameter) return;
+        const auto index = parameter->slot;
+        const auto oid = oids.at(index);
+        auto value = decoded.at(index);
+        if (parameter->sourceBegin >= parameter->sourceEnd || parameter->sourceEnd > sql.size())
+            throw DbError("XX000", "row count parameter has no source provenance");
+        if (value != "NULL") {
+            if (isNumericParameterType(oid)) {
+                // Convert only already-decoded scalar data. Never evaluate the
+                // SELECT or any expression supplied by the client at Bind.
+                const auto type = oid == 1700 ? "numeric" : oid == 700 ? "real" : "double precision";
+                LiteralExpr input;
+                input.typeName = type;
+                input.value = value.front() == '\'' ? value : "'" + value + "'";
+                ExprEvaluator evaluator;
+                RowContext row;
+                // Input decoding belongs to Bind. A subsequent bigint
+                // conversion error belongs to the executing row count.
+                row.setParameters({evaluator.eval(&input, row)});
+                try {
+                    CastExpr cast;
+                    cast.typeName = "bigint";
+                    cast.operand = std::make_unique<ParameterExpr>();
+                    value = evaluator.eval(&cast, row).value;
+                } catch (const DbError& failure) {
+                    if (counts.evaluatesCounts && !error) error = failure;
+                    value = "0";
+                }
+            } else if (!isIntegerParameterType(oid)) {
+                // Catalog-owned conversions still follow the existing value path.
+                return;
+            }
+            if (!value.empty() && value.front() == '-') {
+                if (counts.evaluatesCounts && !error) error.emplace(offset ? "2201X" : "2201W",
+                    offset ? "OFFSET must not be negative" : "LIMIT must not be negative");
+                value = "0";
+            }
+        } else if (!offset && counts.withTies) {
+            // A bound NULL count is unbounded. Remove WITH TIES from this
+            // expanded query only, so it cannot become the disallowed raw
+            // FETCH NULL WITH TIES spelling.
+            size_t position = parameter->sourceEnd;
+            size_t suffix = position;
+            for (const auto* expected : {"row", "with", "ties"}) {
+                position = skipLeadingSqlTrivia(sql, position);
+                if (position >= sql.size()) throw DbError("XX000", "row count lost its FETCH suffix");
+                const size_t start = position;
+                while (position < sql.size() && std::isalpha(static_cast<unsigned char>(sql[position]))) ++position;
+                const auto word = SQLParser::toLower(sql.substr(start, position - start));
+                if (word == "with") suffix = start;
+                if (word != expected && !(word == "rows" && std::string_view(expected) == "row"))
+                    throw DbError("XX000", "row count lost its FETCH suffix");
+            }
+            changes.emplace_back(suffix, position, "ONLY");
+        }
+        changes.emplace_back(parameter->sourceBegin, parameter->sourceEnd, " " + value + " ");
+    };
+    lower(counts.offset, true);
+    lower(counts.limit, false);
+    std::sort(changes.rbegin(), changes.rend());
+    for (const auto& [begin, end, value] : changes) sql.replace(begin, end - begin, value);
+    return sql;
 }
 
 bool protocolConstantBitBetween(const Stmt& statement,Session& session) {
@@ -9192,6 +9315,7 @@ void handleClient(SecureSocket socket, std::string clientHost, CopyQueryFactory 
                         validatePreparedStoredSignatures(syntax,session,parameterTypes);
                         validatePreparedScalarArithmetic(syntax,session,parameterTypes);
                         validatePreparedIntegerInputs(syntax,session,parameterTypes);
+                        inferProtocolRowCountParameters(syntax, session, parameterTypes);
                         validatePreparedBitScalarParameters(syntax,session,parameterTypes);
                         std::vector<PgColumnDescription> explainDescriptor;
                         (void)describePreparedHavingResult(syntax, session, explainDescriptor, parameterTypes);
@@ -9335,6 +9459,10 @@ void handleClient(SecureSocket socket, std::string clientHost, CopyQueryFactory 
             portals[portal] = ProtocolPortal{};
             std::vector<std::string> literals;
             literals.reserve(valueCount);
+            const auto rowCounts = sessionSetting ? ProtocolRowCounts{} : protocolRowCounts(preparedSyntax);
+            const bool lowerRowCounts = rowCounts.offset || rowCounts.limit;
+            std::vector<std::string> decodedCounts;
+            if (lowerRowCounts) decodedCounts.resize(valueCount);
             bool bindError = false;
             std::string bindErrorMessage;
             std::string bindErrorSqlstate = "0A000";
@@ -9382,6 +9510,9 @@ void handleClient(SecureSocket socket, std::string clientHost, CopyQueryFactory 
                     }
                     literals.push_back(std::move(literal));
                 }
+                if (lowerRowCounts && ((rowCounts.offset && rowCounts.offset->slot == i) ||
+                                       (rowCounts.limit && rowCounts.limit->slot == i)))
+                    decodedCounts[i] = literals.back();
                 // SQL lowering must preserve Parse's physical declaration
                 // for every Bind datum, not only NULL or bare VALUES. A
                 // numeric spelling must not turn SMALLINT into INTEGER, and
@@ -9443,8 +9574,18 @@ void handleClient(SecureSocket socket, std::string clientHost, CopyQueryFactory 
             if (extendedQueryError) continue;
             std::string expandedSql;
             std::string substitutionError;
+            std::optional<DbError> rowCountError;
+            std::string loweredSql;
+            try {
+                if (lowerRowCounts)
+                    loweredSql = lowerProtocolRowCounts(preparedSyntax, rowCounts, preparedParameterTypes,
+                        decodedCounts, rowCountError);
+            } catch (const DbError& failure) {
+                sendExtendedProtocolError(failure.sqlState(), failure.message());
+                continue;
+            }
             if (!dbms::ps_substituteDollarParams(
-                    preparedSql, literals, expandedSql, substitutionError)) {
+                    lowerRowCounts ? loweredSql : preparedSql, literals, expandedSql, substitutionError)) {
                 sendExtendedProtocolError("42P02", substitutionError);
                 extendedQueryError = true;
                 continue;
@@ -9491,6 +9632,7 @@ void handleClient(SecureSocket socket, std::string clientHost, CopyQueryFactory 
             portals[portal] = ProtocolPortal{
                 statement, std::move(expandedSql), preparedSql,
                 preparedParameterTypes, std::move(resultFormats)};
+            portals[portal].rowCountError = std::move(rowCountError);
             protocol.sendBindComplete();
             continue;
         }
@@ -9549,6 +9691,11 @@ void handleClient(SecureSocket socket, std::string clientHost, CopyQueryFactory 
                 portalIt = portals.emplace(portal, std::move(utilityPortal)).first;
             }
             auto& portalState = portalIt->second;
+            if (portalState.rowCountError) {
+                const auto& failure = *portalState.rowCountError;
+                sendExtendedProtocolError(failure.sqlState(), failure.message());
+                continue;
+            }
             if (!portalState.executed) {
                 CopyWirePlan copyPlan = parseCopyWirePlan(portalState.sql);
                 if (copyPlan.matched && !copyPlan.error.empty()) {

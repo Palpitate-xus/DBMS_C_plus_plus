@@ -43,8 +43,15 @@ def main():
                        tag=f"SELECT {len(ids)}", fields=[("id", 23)], ready=ready)
 
     def verify_page(ids, ready=b"I"):
-        wire.query("SELECT id FROM oid_durable ORDER BY k DESC NULLS LAST LIMIT 2",
+        ordered = "SELECT id FROM oid_durable ORDER BY k DESC NULLS LAST"
+        wire.query(ordered + " LIMIT 2",
                    rows=[(str(i),) for i in ids], tag="SELECT 2", fields=[("id", 23)], ready=ready)
+        frames = wire.exchange(wire.parse(ordered + " LIMIT $1") + wire.bind(arguments=(b"2",), result_format=1)
+                               + wire.describe_portal() + wire.execute() + wire.packet(b"S"))
+        assert b"".join(kind for kind, _ in frames) == b"12TDDCZ", frames
+        assert client.row_description_fields(frames)[0][3:] == (23, 4, -1, 1), frames
+        assert client.data_row_values(frames) == [[struct.pack("!i", i)] for i in ids], frames
+        assert frames[-2:] == [(b"C", b"SELECT 2\0"), (b"Z", ready)], frames
 
     def begin_update():
         wire.command("BEGIN", "BEGIN", ready=b"T")
