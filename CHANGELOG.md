@@ -1,27 +1,27 @@
 # 更新日志
 
 <details>
-<summary>可以用 psql 列出数据库角色 · 2026-11-24</summary>
+<summary>在 psql 中查看数据库账号 · 2026-11-24</summary>
 
-输入 `\du` 就能查看角色能否登录、连接数限制和密码有效期。直接查询角色目录时，密码字段只显示星号。
+输入 `\du` 就能查看哪些账号可以登录、同时连接的数量上限，以及密码何时过期。直接查询角色信息时，密码字段只显示星号。
 
 [查询示例](docs/MANUAL.md#列出数据库角色) · [测试报告](docs/test-report.md#roles-view-20261124) · [性能报告](docs/performance-report-2026-10-30.md#roles-view-cost-20261124)
 
 </details>
 
 <details>
-<summary>可以用 SQL 查询分区归属 · 2026-11-24</summary>
+<summary>查出一个分区属于哪张表 · 2026-11-24</summary>
 
-分区根表会返回自己的名称。普通表返回空结果。旧库中已有归属记录的子分区也可以查到它的父表。
+例如，订单按月份分开存放时，现在可以从某个月的分区查到订单总表。旧数据库中已记录归属关系的分区也可以查。
 
 [查询示例](docs/MANUAL.md#查询分区归属) · [测试报告](docs/test-report.md#partition-ancestors-20261124) · [性能报告](docs/performance-report-2026-10-30.md#partition-ancestors-cost-20261124)
 
 </details>
 
 <details>
-<summary>查看删除或更新数据时的外键规则 · 2026-11-24</summary>
+<summary>查看删除或修改记录时会怎样影响关联数据 · 2026-11-24</summary>
 
-例如，可以查到删除客户时，外键规则是一起删除相关订单，还是阻止删除客户。表或列改名后，会显示新名称。
+例如，可以查到删除客户时，数据库会一起删除该客户的订单，还是拒绝删除这位客户。表或列改名后会显示新名称。
 
 [查询示例](docs/MANUAL.md#查询表的外键) · [测试报告](docs/test-report.md#foreign-key-definition-20261124) · [性能报告](docs/performance-report-2026-10-30.md#foreign-key-definition-cost-20261124)
 
