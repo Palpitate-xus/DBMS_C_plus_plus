@@ -7,6 +7,9 @@ inline bool reference(const std::string& type) {
 }
 inline void validateScalar(const std::string& source,const std::string& target) {
     static const std::set<std::string> strings={"unknown","text","varchar","bpchar","name"};
+    if (target == "oid" && !common_type_detail::implicit(source, target) &&
+        common_type_detail::category(source) != 'S')
+        throw DbError("42846", "cannot cast type " + source + " to oid");
     if(reference(target) && !strings.count(source) && source!=target && source!="oid" &&
        source!="smallint" && source!="integer" && source!="bigint")
         throw DbError("42846","cannot cast type "+source+" to "+target);

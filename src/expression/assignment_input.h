@@ -2,6 +2,7 @@
 
 #include "common/DbError.h"
 #include "expression/ExprEvaluator.h"
+#include "expression/common_type.h"
 #include "expression/expr_helper.h"
 #include "expression/macaddr_input.h"
 #include "expression/network_input.h"
@@ -72,6 +73,12 @@ inline void validateAssignmentInput(const QueryOutputColumn& target,
                                     const Expr* source,
                                     const std::string& sourceType) {
     const auto targetType = ExprHelper::canonicalResultTypeName(target.type);
+    if (targetType == "oid") {
+        const auto inputType = common_type_detail::canonical(sourceType);
+        if (!common_type_detail::implicit(inputType, targetType))
+            throw DbError("42804", "column \"" + target.name + "\" is of type oid but expression is of type " + inputType);
+        return;
+    }
     if (targetType=="inet" || targetType=="cidr") {
         const auto inputType=ExprHelper::canonicalResultTypeName(sourceType);
         if (inputType.empty() || inputType=="unknown")

@@ -5458,7 +5458,7 @@ bool DdlExecutor::columnDefToColumn(const ColumnDef& cd, const std::string& dbna
     else if (baseType == "datetime") baseType = "timestamp";
 
     const auto& typeMods = cd.typeMods.empty() ? domainTypeMods : cd.typeMods;
-    if (stored_regtype_detail::scalarType(baseType) && !typeMods.empty()) {
+    if ((baseType == "oid" || stored_regtype_detail::scalarType(baseType)) && !typeMods.empty()) {
         error = "type modifier is not allowed for type "+baseType+" (SQLSTATE 42601)";
         return false;
     }
@@ -5543,6 +5543,16 @@ bool DdlExecutor::columnDefToColumn(const ColumnDef& cd, const std::string& dbna
         // hold n multibyte UTF-8 characters.  Keep the declared character
         // width in dsize and use a varlena physical slot for new SQL columns.
         col.isVariableLength = true;
+    } else if (baseType == "oid") {
+        if (storageArray) {
+            error = "storing oid arrays is not supported (SQLSTATE 0A000)";
+            return false;
+        }
+        col.dataName = cd.name;
+        col.dataType = "oid";
+        col.dsize = sizeof(Oid);
+        col.isNull = cd.isNull;
+        col.isPrimaryKey = cd.isPrimaryKey;
     } else if (stored_regtype_detail::scalarType(baseType)) {
         if (!typeMods.empty()) {
             error = "type modifier is not allowed for type "+baseType+" (SQLSTATE 42601)";

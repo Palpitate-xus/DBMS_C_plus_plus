@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-24 · 普通表可以保存对象编号
+
+标量 `oid` 用 4 字节保存完整无符号范围，支持普通表写入、等值索引、排序、带类型的二进制查询及磁盘恢复。对象编号数组、范围索引和其他对象引用类型仍待补齐。`TYPE-20`、`PROTO-04` 和 `PROTO-05` 保持部分实现。 [功能验证](test-report.md#oid-column-20261124) · [性能对照](performance-report-2026-10-30.md#oid-column-cost-20261124) · [实现对照](postgresql-comparison.md#oid-column-comparison-20261124)
+
 ## 2026-11-23 · 用转换后的整数连接时可以按需读取
 
 普通表子查询可直接转换作为等值连接键的内置整数或 `oid`，并沿用逐行连接。`LIMIT 0` 可以跳过两侧取行，取够行数后可以停止。受测的筛选、排序、偏移、重复值和外连接继续由同一查询计划处理。任意表达式、多来源子查询与通用的连接顺序优化仍待补齐，整数转 `oid` 的受测边界及扩展协议的列来源已核对。`QRY-01`、`QRY-02`、`QRY-03` 和 `OPT-02` 保持部分实现。 [功能验证](test-report.md#integer-cast-join-limit-20261123) · [性能对照](performance-report-2026-10-30.md#integer-cast-join-limit-cost-20261123) · [实现对照](postgresql-comparison.md#integer-cast-join-limit-comparison-20261123)

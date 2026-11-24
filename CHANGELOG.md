@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>可以在表里保存对象编号 · 2026-11-24</summary>
+
+例如，迁移记录可以保存原表的编号，最大可到 4,294,967,295。没有编号的记录可以留空，和编号 0 区分开。
+
+[使用说明](docs/MANUAL.md#对象编号) · [测试报告](docs/test-report.md#oid-column-20261124) · [性能报告](docs/performance-report-2026-10-30.md#oid-column-cost-20261124)
+
+</details>
+
+<details>
 <summary>两张表按编号匹配时，取第一条更快 · 2026-11-23</summary>
 
 在一组测试中，先把两张表的编号转成同一种类型，再查找相同的编号。取第一条结果的时间从约 310 毫秒降到了约 6 毫秒。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>可以查到一张表直接继承了哪些表 · 2026-11-23</summary>
+<summary>查看更早的更新和版本记录</summary>
+
+## 2026-11-23 · 可以查到一张表直接继承了哪些表
 
 例如，迁移工具可以查到订单子表直接继承了哪些表，以及这些父表的顺序。
 
 [使用说明](docs/MANUAL.md#查询继承表) · [测试报告](docs/test-report.md#pg-inherits-20261123) · [性能报告](docs/performance-report-2026-10-30.md#pg-inherits-cost-20261123)
-
-</details>
-
-<details>
-<summary>查看更早的更新和版本记录</summary>
 
 ## 2026-11-23 · 建子表时可以指明父表的位置
 

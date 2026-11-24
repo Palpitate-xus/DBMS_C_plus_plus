@@ -314,6 +314,13 @@ std::string TypeRegistry::validateColumn(Column& col) const {
         col.isUnsigned = !isArray;
         col.dsize = isArray ? size_t(65535) : sizeof(uint32_t);
     }
+    if (entry->canonicalName == "oid") {
+        if (isArray) return "storing oid arrays is not supported";
+        // A derived table can carry a provisional text width until its
+        // declared column type is resolved.
+        col.dsize = sizeof(uint32_t);
+        col.isUnsigned = false;
+    }
 
     // 修正 isVariableLength 标记：以注册表为准
     if (!isArray) {
@@ -382,6 +389,7 @@ void TypeRegistry::registerNumericTypes() {
 }
 
 void TypeRegistry::registerStringTypes() {
+    registerType({"oid", 4, 'i', 'p', TypeCategory::ObjectReference, false, -1, 0, false});
     registerType({"regtype", 4, 'i', 'p', TypeCategory::ObjectReference, false, -1, 65535, true});
     registerType({"regclass", 4, 'i', 'p', TypeCategory::ObjectReference, false, -1, 65535, true});
     registerType({"name", 64, 'c', 'p', TypeCategory::String, false, -1, 0, true});

@@ -1,3 +1,4 @@
+#include "common/OidInput.h"
 #include "commands/InheritanceGraph.h"
 #include "catalog/SystemCatalogRows.h"
 #include "catalog/PgDefaultCatalog.h"
@@ -8315,7 +8316,7 @@ static bool isSingleColumnPrimaryKey(const TableSchema& table,
     return primaryColumns == 1 && matches;
 }
 
-static std::string integerEqualityValue(const TableSchema& table,
+static std::string canonicalEqualityValue(const TableSchema& table,
                                        const std::string& column,
                                        const std::string& value,
                                        StorageEngine* engine=nullptr,
@@ -8323,6 +8324,7 @@ static std::string integerEqualityValue(const TableSchema& table,
     for (size_t i = 0; i < table.len(); ++i) {
         if (table.cols[i].dataName != column) continue;
         const auto& type = table.cols[i].dataType;
+        if (type == "oid" && !table.cols[i].isArray) return std::to_string(parseOidInput(value));
         if(stored_regtype_detail::scalarType(type) && !table.cols[i].isArray && engine) {
             const auto catalog=regtype_detail::metadata(*engine,database);
             return stored_regtype_detail::input(value,false,catalog,currentSession(),type);
@@ -8369,9 +8371,10 @@ static bool equalityIndexKeyIsEmpty(const TableSchema& table,
                                     const StorageEngine::Condition& condition) {
     if (condition.op != "=") return false;
     for(size_t i=0;i<table.len();++i)
-        if(table.cols[i].dataName==condition.colName && stored_regtype_detail::scalarType(table.cols[i].dataType) &&
-           !table.cols[i].isArray)return false; // Every genuine OID key is nonempty.
-    const auto value = integerEqualityValue(table, condition.colName, condition.value);
+        if (table.cols[i].dataName == condition.colName && !table.cols[i].isArray &&
+            (table.cols[i].dataType == "oid" || stored_regtype_detail::scalarType(table.cols[i].dataType)))
+            return false; // Every genuine object-number key is nonempty.
+    const auto value = canonicalEqualityValue(table, condition.colName, condition.value);
     return isSingleColumnPrimaryKey(table, condition.colName)
         ? table.buildPKValue({{condition.colName, value}}).empty()
         : table.columnIndexKey(condition.colName, value).empty();
@@ -8421,10 +8424,11 @@ bool IndexScanOp::open() {
     tableLockHeld_ = true;
     tbl_ = engine_->getTableSchema(dbname_, tablename_);
     for(size_t i=0;i<tbl_.len();++i)
-        if(tbl_.cols[i].dataName==colname_ && !tbl_.cols[i].isArray &&
-           stored_regtype_detail::scalarType(tbl_.cols[i].dataType)) {
+        if (tbl_.cols[i].dataName == colname_ && !tbl_.cols[i].isArray &&
+            (tbl_.cols[i].dataType == "oid" || stored_regtype_detail::scalarType(tbl_.cols[i].dataType))) {
             try {
-                if(referenceInputOid_)referenceEqualityOid_=referenceInputOid_;
+                if (referenceInputOid_) referenceEqualityOid_ = referenceInputOid_;
+                else if (tbl_.cols[i].dataType == "oid") referenceEqualityOid_ = parseOidInput(value_);
                 else {
                     const auto catalog=regtype_detail::metadata(*engine_,dbname_);
                     referenceEqualityOid_=stored_regtype_detail::inputOid(value_,catalog,currentSession(),tbl_.cols[i].dataType);
@@ -8463,9 +8467,9 @@ bool IndexScanOp::open() {
 
     const std::string key = isPK_
         ? tbl_.buildPKValue({{colname_, (referenceEqualityOid_ ? std::to_string(*referenceEqualityOid_) :
-            integerEqualityValue(tbl_, colname_, value_))}})
+            canonicalEqualityValue(tbl_, colname_, value_))}})
         : tbl_.columnIndexKey(colname_, (referenceEqualityOid_ ? std::to_string(*referenceEqualityOid_) :
-            integerEqualityValue(tbl_, colname_, value_)));
+            canonicalEqualityValue(tbl_, colname_, value_)));
     const auto heapFallback=[&]() {
         // Historical build/write paths omit empty keys. Direct callers need
         // the same complete heap fallback as the planner, with next() still
@@ -8576,7 +8580,7 @@ bool IndexScanOp::next(std::string& outRow) {
              detail::storedRowColumnIsNull(*engine_, dbname_, tablename_, tbl_, rid, columnIndex));
         if (StorageEngine::compareValues(tbl_.cols[columnIndex], actual,
                 valueIsNull, (referenceEqualityOid_ ? std::to_string(*referenceEqualityOid_) :
-            integerEqualityValue(tbl_, colname_, value_)),
+            canonicalEqualityValue(tbl_, colname_, value_)),
                 false, "=") != StorageEngine::PredicateTruth::True)
             continue;
         rtInstr_.emitted = true;
@@ -8612,10 +8616,11 @@ static bool collectEqualityIndexCandidates(
     if (condition.op != "=" || equalityIndexKeyIsEmpty(tbl, condition)) return false;
     std::string value; bool reference=false;
     for(size_t i=0;i<tbl.len();++i)
-        if(tbl.cols[i].dataName==condition.colName && !tbl.cols[i].isArray &&
-           stored_regtype_detail::scalarType(tbl.cols[i].dataType))reference=true;
+        if (tbl.cols[i].dataName == condition.colName && !tbl.cols[i].isArray &&
+            (tbl.cols[i].dataType == "oid" || stored_regtype_detail::scalarType(tbl.cols[i].dataType)))
+            reference = true;
     if(reference && condition.referenceInputOid)value=std::to_string(*condition.referenceInputOid);
-    else value = integerEqualityValue(
+    else value = canonicalEqualityValue(
         tbl, condition.colName, condition.value, engine, dbname);
 
     if (isSingleColumnPrimaryKey(tbl, condition.colName)) {

@@ -2,6 +2,18 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-24 store scalar OID values in ordinary tables",
+      "gap_ids": ["TYPE-20", "PROTO-04", "PROTO-05"],
+      "status": "partial",
+      "evidence": ["src/common/OidInput.h", "src/commands/TableManage.cpp", "src/catalog/type_registry.cpp", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/oid_column_storage_protocol_e2e_test.py", "tests/oid_column_recovery_protocol_e2e_test.py", "tests/oid_equality_join_protocol_e2e_test.py"],
+      "verification": [
+        "Ordinary scalar OID columns use four bytes and preserve the unsigned range, zero and NULL. The tested forms cover typed input, text COPY, binary parameters and column provenance.",
+        "Equality uses canonical unsigned index keys. Crash restarts cover committed and rolled-back changes, and the previous reader rejects the new table format.",
+        "OID arrays, indexed range scans and the remaining object-reference type family stay open."
+      ]
+    },
+    {
       "issue": "2026-11-23 execute joins on directly converted integer keys on demand",
       "gap_ids": ["QRY-01", "QRY-02", "QRY-03", "OPT-02"],
       "status": "partial",

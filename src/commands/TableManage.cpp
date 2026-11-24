@@ -33,6 +33,7 @@
 #include "common/NetworkValue.h"
 #include "common/GeometryValue.h"
 #include "common/IntegerTextCodec.h"
+#include "common/OidInput.h"
 #include "expression/geometric_input.h"
 #include "common/NotificationManager.h"
 #include "common/QueryHostProvider.h"
@@ -994,6 +995,11 @@ static std::string orderedTemporalKey(int64_t value) {
     return key;
 }
 
+static bool fixedObjectNumber(const Column& column) {
+    return !column.isArray &&
+        (column.dataType == "oid" || stored_regtype_detail::scalarType(column.dataType));
+}
+
 static std::string canonicalColumnKeyValue(const Column& column,
                                            const std::string& value) {
     if (value.empty()) return {};
@@ -1013,7 +1019,7 @@ static std::string canonicalColumnKeyValue(const Column& column,
         }
         return orderedTemporalKey(keyValue);
     }
-    if (!column.isArray && stored_regtype_detail::scalarType(column.dataType)) {
+    if (fixedObjectNumber(column)) {
         const Oid oid = stored_regtype_detail::rawOid(value);
         // Fixed width preserves unsigned OID ordering in the existing byte-key
         // B+tree/hash/SSI/unique-key owners. This is not a rendered type name.
@@ -13370,11 +13376,11 @@ std::string StorageEngine::extractColumnValueStatic(const std::string& rowBuffer
         for (int i = 0; i < n; ++i)
             bytes[i] = static_cast<uint8_t>(rowBuffer[offset + i]);
         return formatMacAddr(bytes, n);
-    } else if (!col.isArray && stored_regtype_detail::scalarType(col.dataType)) {
-        // REGTYPE is persisted as the complete unsigned OID datum.  This
-        // identity does not depend on the legacy schema unsigned suffix.
+    } else if (fixedObjectNumber(col)) {
+        // OID and scalar object reference columns use all 32 bits, whether
+        // or not the legacy SQL unsigned-extension flag is set.
         if (col.dsize != sizeof(uint32_t)) {
-            throw DbError("XX001", "invalid persisted regtype object width");
+            throw DbError("XX001", "invalid persisted object number width");
         }
         uint32_t oid = 0;
         std::memcpy(&oid, rowBuffer.data() + offset, sizeof(oid));
@@ -19358,6 +19364,7 @@ constexpr int32_t SCHEMA_TEMPORAL_CODEC_FORMAT_VERSION = 0x4442000D;
 // E widens only persisted FK relation identities, never SQL identifier fields.
 constexpr int32_t SCHEMA_LONG_RELATION_FORMAT_VERSION = 0x4442000E;
 constexpr int32_t SCHEMA_IDENTITY_SEQUENCE_FORMAT_VERSION = 0x4442000F;
+constexpr int32_t SCHEMA_OID_FORMAT_VERSION = 0x44420010;
 constexpr uint32_t SCHEMA_TEMPORAL_CODEC_MAGIC = 0x314D4354; // "TCM1"
 constexpr uint32_t SCHEMA_COLUMN_TYPEMOD_MAGIC = 0x314D5449; // "ITM1"
 constexpr uint32_t SCHEMA_PHYSICAL_ID_MAGIC = 0x31444952;  // "RID1"
@@ -19486,6 +19493,10 @@ void StorageEngine::writeSchema(std::ostream& out, const TableSchema& tbl) {
     }
     // Old readers reject B before consuming it rather than treating an
     // implicit domain default as a frozen SQL column expression.
+    // This envelope makes older readers reject unsigned OID heap fields
+    // before they can interpret them as signed data. The inner layout is unchanged.
+    if (std::any_of(tbl.cols.begin(), tbl.cols.end(), [](const auto& column) { return column.dataType == "oid"; }))
+        out.write(reinterpret_cast<const char*>(&SCHEMA_OID_FORMAT_VERSION), sizeof(SCHEMA_OID_FORMAT_VERSION));
     const int32_t schemaFormat = hasIdentitySequences ? SCHEMA_IDENTITY_SEQUENCE_FORMAT_VERSION : longReferences ? SCHEMA_LONG_RELATION_FORMAT_VERSION : hasTemporalCodecs ? SCHEMA_TEMPORAL_CODEC_FORMAT_VERSION : hasColumnTypeMods ? SCHEMA_COLUMN_TYPEMOD_FORMAT_VERSION : hasDefaultOrigins ? SCHEMA_DEFAULT_ORIGIN_FORMAT_VERSION : tbl.physicalRelationId == 0
         ? SCHEMA_FORMAT_VERSION : SCHEMA_PHYSICAL_ID_FORMAT_VERSION;
     out.write(reinterpret_cast<const char*>(&schemaFormat), sizeof(schemaFormat));
@@ -19792,6 +19803,11 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
     in.read(reinterpret_cast<char*>(&firstInt), 4);
     if (!in) return {};
 
+    const bool hasOidColumns = firstInt == SCHEMA_OID_FORMAT_VERSION;
+    if (hasOidColumns) {
+        in.read(reinterpret_cast<char*>(&firstInt), sizeof(firstInt));
+        if (!in) return {};
+    }
     if (firstInt != SCHEMA_FORMAT_VERSION && firstInt != SCHEMA_PHYSICAL_ID_FORMAT_VERSION && firstInt != SCHEMA_DEFAULT_ORIGIN_FORMAT_VERSION && firstInt != SCHEMA_COLUMN_TYPEMOD_FORMAT_VERSION && firstInt != SCHEMA_TEMPORAL_CODEC_FORMAT_VERSION && (firstInt != SCHEMA_LONG_RELATION_FORMAT_VERSION && firstInt != SCHEMA_IDENTITY_SEQUENCE_FORMAT_VERSION)) {
         std::cerr << "[catalog] unsupported schema format for table " << tablename
                   << "; recreate the database with the current binary" << std::endl;
@@ -19875,6 +19891,8 @@ TableSchema StorageEngine::readSchema(std::istream& in, const std::string& table
         uint8_t arrFlag = 0;
         in.read(reinterpret_cast<char*>(&arrFlag), 1);
         if (in) tbl.cols[i].isArray = (arrFlag != 0);
+        if (tbl.cols[i].dataType == "oid" && (!hasOidColumns || tbl.cols[i].isArray ||
+            tbl.cols[i].isVariableLength || tbl.cols[i].dsize != sizeof(Oid))) return {};
     }
     // Read foreign keys
     int32_t fkLen = 0;
@@ -29399,7 +29417,7 @@ StorageEngine::PredicateTruth StorageEngine::compareValues(
         return result ? PredicateTruth::True : PredicateTruth::False;
     };
 
-    if (!col.isArray && stored_regtype_detail::scalarType(col.dataType)) {
+    if (fixedObjectNumber(col)) {
         const Oid l = stored_regtype_detail::rawOid(left);
         const Oid r = stored_regtype_detail::rawOid(right);
         return fromCompare((l > r) - (l < r));
@@ -29915,7 +29933,7 @@ bool StorageEngine::evalConditionOnRowWithSyntax(const Condition& cond,
         }
         Condition bound = cond;
         const std::string comparison = cond.op.substr(9);
-        const bool referenceColumn=column && !column->isArray && stored_regtype_detail::scalarType(column->dataType);
+        const bool referenceColumn = column && fixedObjectNumber(*column);
         if (!numericColumn && !referenceColumn && (column || cond.colName.find('(') != std::string::npos)) {
             // Compact API values have historically been decoded literals.
             // Text "1+2" and date "2024-01-01" must not become arithmetic.
@@ -30203,6 +30221,13 @@ bool StorageEngine::evalConditionOnRowWithSyntax(const Condition& cond,
             if (op == ">=") return !ltOk();
             return false;
         }
+    }
+    if (col.dataType == "oid" && !col.isArray &&
+        (cond.op == "=" || cond.op == "<>" || cond.op == "!=" || cond.op == "<" ||
+         cond.op == ">" || cond.op == "<=" || cond.op == ">=")) {
+        const auto right = cond.referenceInputOid ? *cond.referenceInputOid :
+            parseOidInput(cond.decodedLiteralRhs ? cond.value : decodeSqlLiteral(cond.value));
+        return compareValues(col, val, false, std::to_string(right), false, cond.op) == PredicateTruth::True;
     }
     if (!col.isArray && stored_regtype_detail::scalarType(col.dataType) &&
         (cond.op=="=" || cond.op=="<>" || cond.op=="!=" || cond.op=="<" ||
@@ -30780,7 +30805,7 @@ static std::string buildRowBuffer(const TableSchema& tbl,
                 uint8_t bytes[8] = {0};
                 if (!val.empty()) normalizeMacAddr(val, n, bytes);
                 std::memcpy(&rowBuffer[offset], bytes, n);
-            } else if (stored_regtype_detail::scalarType(col.dataType) && !col.isArray) {
+            } else if (fixedObjectNumber(col)) {
                 const uint32_t oid = val.empty() ? 0 : stored_regtype_detail::rawOid(val);
                 std::memcpy(&rowBuffer[offset], &oid, sizeof(oid));
             } else if (col.dataType == "boolean") {
@@ -30869,7 +30894,7 @@ static std::string buildRowBuffer(const TableSchema& tbl,
                     std::memcpy(&fixedData[fixedOff], &x, sizeof(double));
                     std::memcpy(&fixedData[fixedOff + sizeof(double)], &y,
                                 sizeof(double));
-                } else if (stored_regtype_detail::scalarType(col.dataType) && !col.isArray) {
+                } else if (fixedObjectNumber(col)) {
                     const uint32_t oid = val.empty() ? 0 : stored_regtype_detail::rawOid(val);
                     std::memcpy(&fixedData[fixedOff], &oid, sizeof(oid));
                 } else if (col.dataType == "boolean") {
@@ -31863,6 +31888,10 @@ DBStatus StorageEngine::insertInternal(
         if (col.storageCodec == Column::StorageCodec::ZonedClock) {
             if (hasValue && !isNullMarker)
                 actualValues[col.dataName] = normalizeZonedColumn(col, val);
+            return DBStatus::OK;
+        }
+        if (hasValue && !isNullMarker && col.dataType == "oid" && !col.isArray) {
+            actualValues[col.dataName] = std::to_string(parseOidInput(val));
             return DBStatus::OK;
         }
         const bool arrayDomain = col.isArray && !col.domainName.empty();
@@ -34372,6 +34401,11 @@ static void prepareFilterConditions(
         if (declared && (condition.op == "=" || isZonedClockRangeOp(condition.op)) && condition.decodedLiteralRhs &&
             condition.patternType == "unknown" && !condition.patternIsNull)
             validateStoredZonedClockComparisonInput(*declared, condition.value);
+        if (declared && !rightIsColumn && !declared->isArray && declared->dataType == "oid" && !condition.patternIsNull) {
+            const auto input = condition.decodedLiteralRhs ? condition.value : decodeSqlLiteral(condition.value);
+            condition.value = std::to_string(condition.referenceInputOid ? *condition.referenceInputOid : parseOidInput(input));
+            condition.decodedLiteralRhs = true;
+        }
         if(declared && !rightIsColumn && !declared->isArray && stored_regtype_detail::scalarType(declared->dataType)) {
             const auto catalog=regtype_detail::metadata(engine,dbname);
             condition.value=condition.referenceInputOid?std::to_string(*condition.referenceInputOid):
@@ -37170,6 +37204,10 @@ DBStatus StorageEngine::updateInternal(
                     if (isNullMarker) {
                         prepared[i].clear();
                         preparedNullColumns.insert(i);
+                        break;
+                    }
+                    if (col.dataType == "oid" && !col.isArray) {
+                        prepared[i] = std::to_string(parseOidInput(kv.second));
                         break;
                     }
                     const bool arrayDomain = col.isArray && !col.domainName.empty();

@@ -17,6 +17,7 @@
 #include "expression/ExprEvaluator.h"
 #include "expression/IdentityValue.h"
 #include "expression/StoredRegtypeValue.h"
+#include "expression/assignment_input.h"
 #include "expression/expr_helper.h"
 #include "expression/prepared_query_execution.h"
 #include "executor/ExecutionPlan.h"
@@ -741,6 +742,8 @@ bool checkInsertColumns(Session& s, const std::string& table,
 
 bool evaluateValue(const ExprPtr& expr, const std::string& currentDB,
                    SqlCell& value, const std::string& assignmentType = {});
+ExprValue coerceEvaluatedAssignment(ExprValue value, const std::string& assignmentType,
+                                    const std::string& currentDB);
 bool evaluateValue(const ExprPtr& expr, const std::string& currentDB,
                    std::string& value);
 bool referencesColumn(const Expr* expr);
@@ -754,7 +757,7 @@ bool findTableColumn(const TableSchema& table, const std::string& column) {
     return false;
 }
 
-std::string conflictAssignmentType(const TableSchema& table, const std::string& column) {
+std::string columnAssignmentType(const TableSchema& table, const std::string& column) {
     for (size_t i=0;i<table.len();++i)
         if (table.cols[i].dataName==column) return table.cols[i].dataType;
     return {};
@@ -1213,7 +1216,7 @@ bool buildConflictUpdatePlan(const InsertStmt& stmt, const InsertStmt& boundStmt
         }
 
         SqlCell value;
-        if (!evaluateValue(expr, currentDB, value, conflictAssignmentType(table,column))) return false;
+        if (!evaluateValue(expr, currentDB, value, columnAssignmentType(table,column))) return false;
         updates[column] = std::move(value);
     }
     if (stmt.conflictWhere) {
@@ -2601,13 +2604,22 @@ bool evaluateStructuredSqlExpression(
     const std::vector<StructuredSourceRelation>& sources,
     const std::vector<const std::map<std::string, std::string>*>& sourceRows,
     const std::string& currentDB, SqlCell& value,
-    const GeneratedRelationPtr& targetGeneration) {
+    const GeneratedRelationPtr& targetGeneration,
+    const std::string& oidAssignmentColumn) {
     ExprEvaluator evaluator;
     evaluator.setCurrentDB(currentDB);
-    const ExprValue result = evaluator.eval(
+    ExprValue result = evaluator.eval(
         expression, structuredRelationContext(targetValues, targetTable,
                                               targetQualifier, sources,
                                               sourceRows,currentDB,true,targetGeneration));
+    if (!oidAssignmentColumn.empty() && !result.isUnknown()) {
+        const auto* literal = dynamic_cast<const LiteralExpr*>(expression);
+        const auto input = assignment_input_detail::unknownLiteral(literal) &&
+            ExprHelper::inferParsedInputType(literal) == "unknown"
+            ? "unknown" : result.typeName;
+        validateAssignmentInput({oidAssignmentColumn, "oid"}, expression, input);
+        result = coerceEvaluatedAssignment(std::move(result), "oid", currentDB);
+    }
     if (result.isUnknown() || result.typeName == "unknown") return false;
     if (result.isNull) {
         value = std::nullopt;
@@ -3086,16 +3098,15 @@ bool usesVersionedReturning(const std::vector<SelectItem>& returning,
     return false;
 }
 
-// The narrow conflict path owns an already-evaluated datum, not the prepared
-// tree's assignment CAST. Convert before erasing its actual type into SqlCell;
-// the source expression is never re-executed or inferred from value bytes.
-ExprValue coerceConflictNetworkValue(ExprValue value, const std::string& assignmentType,
+// Convert a typed datum before the SQL cell loses its declared type.
+// The source expression has already run, including for compound SELECTs.
+ExprValue coerceEvaluatedAssignment(ExprValue value, const std::string& assignmentType,
                                      const std::string& currentDB) {
     if (assignmentType.empty()) return value;
     const auto target=ExprHelper::canonicalResultTypeName(assignmentType);
-    if (target!="inet" && target!="cidr") return value;
+    if (target!="inet" && target!="cidr" && target!="oid") return value;
     const auto source=ExprHelper::canonicalResultTypeName(value.typeName);
-    if (source==target || (source!="inet" && source!="cidr")) return value;
+    if (source==target || (target!="oid" && source!="inet" && source!="cidr")) return value;
     ExprEvaluator evaluator;
     evaluator.setCurrentDB(currentDB);
     CastExpr cast;
@@ -3115,7 +3126,7 @@ bool evaluateValue(const ExprPtr& expr, const std::string& currentDB,
     evaluator.setCurrentDB(currentDB);
     RowContext emptyContext;
     ExprValue result = evaluator.eval(expr, emptyContext);
-    result=coerceConflictNetworkValue(std::move(result),assignmentType,currentDB);
+    result=coerceEvaluatedAssignment(std::move(result),assignmentType,currentDB);
     if (result.isUnknown()) return false;
     if (result.isNull) {
         value = std::nullopt;
@@ -3173,7 +3184,7 @@ bool evaluateConflictExpression(
                       excludedNull));
     }
     ExprValue result = evaluator.eval(expr, context);
-    result=coerceConflictNetworkValue(std::move(result),assignmentType,currentDB);
+    result=coerceEvaluatedAssignment(std::move(result),assignmentType,currentDB);
     if (result.isUnknown()) return false;
     if (result.isNull) {
         value = std::nullopt;
@@ -3378,6 +3389,7 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback,
     std::vector<bool> generatedTargets;
     std::vector<char> identityTargets;
     std::set<std::string> arrayDomainTargets;
+    std::set<std::string> oidTargets;
     generatedTargets.reserve(columns.size());
     identityTargets.reserve(columns.size());
     for (const auto& column : columns) {
@@ -3389,6 +3401,8 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback,
                 identityKind = table.cols[i].identityKind;
                 if (table.cols[i].isArray && !table.cols[i].domainName.empty())
                     arrayDomainTargets.insert(column);
+                if (!table.cols[i].isArray && table.cols[i].dataType == "oid")
+                    oidTargets.insert(column);
                 break;
             }
         }
@@ -3611,6 +3625,8 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback,
                     throw DbError("XX000", "INSERT SELECT lost its structured row width");
                 SqlRow values;
                 for (size_t i = 0; i < cells.size(); ++i) {
+                    if (oidTargets.count(columns[i]))
+                        cells[i] = coerceEvaluatedAssignment(std::move(cells[i]), "oid", s.currentDB);
                     if (cells[i].isNull) values[columns[i]] = std::nullopt;
                     else {
                         auto text = arrayDomainTargets.count(columns[i])
@@ -3873,7 +3889,7 @@ bool executeInsert(const InsertStmt& stmt, Session& s, bool& fallback,
                     SqlCell value;
                     if (!evaluateConflictExpression(expression, table, conflictingRow,
                                                     s.currentDB, value, nullptr, {},
-                                                    conflictAssignmentType(table,updateColumn))) {
+                                                    columnAssignmentType(table,updateColumn))) {
                         std::cout << "ON CONFLICT expression evaluation failed" << std::endl;
                         return true;
                     }
@@ -5506,14 +5522,16 @@ bool executeMerge(const MergeStmt& stmt, Session& s, bool& fallback) {
         }
         SqlRow updates;
         for (const auto& [rawColumn, expression] : clause->updateSet) {
+            const auto column = identifier(rawColumn);
+            const auto oidTarget = columnAssignmentType(targetSchema, column) == "oid" ? column : std::string{};
             SqlCell value;
             if (!evaluateStructuredSqlExpression(
                     expression.get(), targetRows[targetIndex], targetSchema,
-                    targetQualifier, sources, rows, s.currentDB, value,targetGeneration)) {
+                    targetQualifier, sources, rows, s.currentDB, value, targetGeneration, oidTarget)) {
                 evaluationFailed = true;
                 return false;
             }
-            updates[identifier(rawColumn)] = std::move(value);
+            updates[column] = std::move(value);
         }
         const auto [it, inserted] = pendingUpdates.emplace(key, updates);
         if (!inserted && it->second != updates) {
@@ -5538,14 +5556,16 @@ bool executeMerge(const MergeStmt& stmt, Session& s, bool& fallback) {
             if (!clause || lower(clause->action) == "do nothing") continue;
             SqlRow values;
             for (const auto& [rawColumn, expression] : clause->insertCols) {
+                const auto column = identifier(rawColumn);
+                const auto oidTarget = columnAssignmentType(targetSchema, column) == "oid" ? column : std::string{};
                 SqlCell value;
                 if (!evaluateStructuredSqlExpression(
                         expression.get(), emptyTarget, noTargetSchema, "",
-                        sources, sourceRows[sourceIndex], s.currentDB, value,{})) {
+                        sources, sourceRows[sourceIndex], s.currentDB, value, {}, oidTarget)) {
                     evaluationFailed = true;
                     break;
                 }
-                values[identifier(rawColumn)] = std::move(value);
+                values[column] = std::move(value);
             }
             if (evaluationFailed) break;
             pendingInserts.push_back(std::move(values));

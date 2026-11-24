@@ -39,6 +39,7 @@
 #include "expression/sql_value.h"
 #include "common/DbError.h"
 #include "common/IntegerTextCodec.h"
+#include "common/OidInput.h"
 #include "expression/float8_output.inc"
 #include "common/version.h"
 #include "common/SqlArrayText.h"
@@ -4104,7 +4105,7 @@ ExprValue ExprEvaluator::evalBinaryOp(const BinaryOpExpr* e, const RowContext& c
         const auto zoned = [](const ExprValue& value) {
             return value.typeName == "timetz" || value.typeName == "time with time zone";
         };
-        if (zoned(l) || zoned(r)) {
+        if (zoned(l) || zoned(r) || l.typeName == "oid" || r.typeName == "oid") {
             const auto inputType = [](const Expr* expression, const ExprValue& value) {
                 const auto* literal = dynamic_cast<const LiteralExpr*>(expression);
                 return literal && !literal->preparedSubquery && literal->typeName.empty() &&
@@ -5791,9 +5792,10 @@ ExprValue ExprEvaluator::transformUnknownIntegerInput(const ExprValue& input,
     const std::string& resolvedType) {
     const auto target=ExprHelper::canonicalResultTypeName(resolvedType);
     if(ExprHelper::canonicalResultTypeName(input.typeName)!="unknown" ||
-       (target!="smallint" && target!="integer" && target!="bigint"))
+       (target!="smallint" && target!="integer" && target!="bigint" && target!="oid"))
         throw DbError("XX000","integer input transformation requires UNKNOWN and a resolved builtin declaration");
     if(input.isNull)return ExprValue(target,"",true);
+    if(target=="oid")return ExprValue("oid",std::to_string(parseOidInput(input.value)));
     return castToInteger(input,target=="smallint"?IntegerCastTarget::SmallInt:
         target=="integer"?IntegerCastTarget::Integer:IntegerCastTarget::BigInt);
 }
@@ -5948,11 +5950,12 @@ ExprValue ExprEvaluator::evalCast(const Expr* inputExpression, const RowContext&
     }
     const auto sourceType=ExprHelper::canonicalResultTypeName(v.typeName);
     const auto targetBase=ExprHelper::canonicalResultTypeName(target);
-    if (target == "oid" && (isIntegerTypeName(sourceType) || sourceType == "oid")) {
+    if (target == "oid" && !regtype_cast_detail::reference(sourceType)) {
+        regtype_cast_detail::validate(sourceType, target);
         if (v.isNull) return ExprValue("oid", "", true);
-        const auto oid = sourceType == "oid"
+        const auto oid = common_type_detail::oidType(sourceType)
             ? (v.objectOid ? *v.objectOid : regtype_detail::numericOid(v.value))
-            : integerObjectId(v, sourceType);
+            : isIntegerTypeName(sourceType) ? integerObjectId(v, sourceType) : parseOidInput(v.value);
         ExprValue result("oid", std::to_string(oid));
         result.objectOid = oid;
         return result;

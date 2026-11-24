@@ -298,19 +298,21 @@ public:
         input = std::move(cast);
     }
 
-    bool needsAddressAssignmentCast(const std::string& sourceType,const std::string& targetType) {
+    bool needsTypedAssignmentCast(const std::string& sourceType,const std::string& targetType) {
         const auto source=common_type_detail::canonical(sourceType);
         const auto target=common_type_detail::canonical(targetType);
         const bool mac=(source=="macaddr" || source=="macaddr8") &&
                        (target=="macaddr" || target=="macaddr8");
         const bool network=(source=="inet" || source=="cidr") &&
                            (target=="inet" || target=="cidr");
-        return source!=target && (mac || network);
+        const bool oid = target == "oid" && source != "unknown" &&
+                         common_type_detail::implicit(source, target);
+        return source!=target && (mac || network || oid);
     }
 
-    void coerceAddressAssignment(ExprPtr& input,const std::string& sourceType,
+    void coerceTypedAssignment(ExprPtr& input,const std::string& sourceType,
                                  const std::string& targetType) {
-        if (needsAddressAssignmentCast(sourceType,targetType))
+        if (needsTypedAssignmentCast(sourceType,targetType))
             coerceCaseInput(input,common_type_detail::canonical(sourceType),
                             common_type_detail::canonical(targetType));
     }
@@ -1037,9 +1039,10 @@ public:
                         common_type_detail::canonical(input->declaredType)=="unknown";
                 };
                 const bool zonedClock = leftBase=="timetz" || rightBase=="timetz";
-                if(!binary->comparison && (zonedClock || metadataInput(binary->left.get()) ||
+                const bool objectNumber = leftBase == "oid" || rightBase == "oid";
+                if(!binary->comparison && (zonedClock || objectNumber || metadataInput(binary->left.get()) ||
                                            metadataInput(binary->right.get()))) {
-                    const auto operation = zonedClock &&
+                    const auto operation = (zonedClock || objectNumber) &&
                         (binary->op=="IS DISTINCT FROM" || binary->op=="IS NOT DISTINCT FROM") ? "=" : binary->op;
                     const auto selected=ExprEvaluator::resolveComparison(operation,left,right);
                     inferMetadataInput(binary->left.get(),selected.leftType);
@@ -1052,7 +1055,7 @@ public:
                 // not constants and must remain runtime expression sites.
                 const auto integer=[](const std::string& type) {
                     const auto canonical=common_type_detail::canonical(type);
-                    return canonical=="smallint" || canonical=="integer" || canonical=="bigint";
+                    return canonical=="smallint" || canonical=="integer" || canonical=="bigint" || canonical=="oid";
                 };
                 const auto unknownLiteral=[](const Expr* input) {
                     const auto* literal=dynamic_cast<const LiteralExpr*>(input);
@@ -2805,7 +2808,7 @@ public:
                             if (assignments[i].generated || (assignments[i].identity == 'a' && insert->override_.empty()))
                                 throw DbError("428C9", "cannot insert a non-DEFAULT value into column " + assignments[i].name);
                             if (metadata.assignmentInput) metadata.assignmentInput(assignments[i],row[i].get(),types[i]);
-                            coerceAddressAssignment(row[i],types[i],assignments[i].type);
+                            coerceTypedAssignment(row[i],types[i],assignments[i].type);
                     }
             }
             if (insert->selectSource) {
@@ -2834,7 +2837,7 @@ public:
                         if (inputs[i].type == "unknown")
                             coerceSetUnknown(insert->selectSource.get(), i, assignments[i].type,
                                              assignments[i].typeMod);
-                        else if (needsAddressAssignmentCast(inputs[i].type,assignments[i].type))
+                        else if (assignments[i].type != "oid" && needsTypedAssignmentCast(inputs[i].type,assignments[i].type))
                             coerceSetInput(insert->selectSource.get(),i,inputs[i].type,
                                            assignments[i].type,assignments[i].typeMod);
             }
@@ -2873,9 +2876,9 @@ public:
                 }
                 const auto source=expression(value.second,conflictScopes);
                 const auto targetType=common_type_detail::canonical(column->type);
-                if ((targetType=="inet" || targetType=="cidr") && metadata.assignmentInput)
+                if ((targetType=="inet" || targetType=="cidr" || targetType=="oid") && metadata.assignmentInput)
                     metadata.assignmentInput(*column,value.second.get(),source);
-                coerceAddressAssignment(value.second,source,column->type);
+                coerceTypedAssignment(value.second,source,column->type);
             }
             const auto conflictCondition = expression(insert->conflictWhere, conflictScopes);
             if (insert->conflictWhere) {
@@ -2976,7 +2979,7 @@ public:
                         [&](const auto& candidate) { return candidate.name == name; });
                     if (metadata.assignmentInput)
                         metadata.assignmentInput(*column,update->setClauses[i].second.get(),assignmentTypes[i]);
-                    coerceAddressAssignment(update->setClauses[i].second,assignmentTypes[i],column->type);
+                    coerceTypedAssignment(update->setClauses[i].second,assignmentTypes[i],column->type);
                 }
             if (!explicitIdentityAssignments.empty())
                 throw DbError("428C9", "column can only be updated to DEFAULT: " + explicitIdentityAssignments.front());

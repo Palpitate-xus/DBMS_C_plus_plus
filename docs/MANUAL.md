@@ -823,6 +823,19 @@ BC/完整大年份及所有日期函数输入不由此声明完成。上方各R1
 可能被错误接受，DEFAULT也存在两条非法语法放行，不能据上述功能宣称完整兼容。
 事务级SET LOCAL、其它SESSION参数、非UTC startup和完整GUC事务语义仍有限。
 
+### 对象编号
+
+`oid` 可以保存表等数据库对象的编号，范围是 0 到 4,294,967,295。每个非空值占 4 字节。用 `NULL` 表示缺失的编号。
+
+```sql
+CREATE TABLE migration_log (id integer PRIMARY KEY, source_table oid);
+INSERT INTO migration_log VALUES (1, 4294967295), (2, NULL), (3, 0);
+CREATE INDEX migration_log_source ON migration_log(source_table);
+SELECT id FROM migration_log WHERE source_table = '4294967295';
+```
+
+查询返回编号为 1 的迁移记录。等值条件可以用索引。当前支持单个 `oid` 值，`oid[]` 列仍待实现。 [测试报告](test-report.md#oid-column-20261124) · [升级说明](PACKAGING.md#对象编号列的表定义)
+
 ### 其他类型
 | 类型 | 说明 |
 |------|------|
@@ -841,6 +854,7 @@ BC/完整大年份及所有日期函数输入不由此声明完成。上方各R1
 | `ENUM` | 枚举类型 (CREATE TYPE ... AS ENUM) |
 | `RANGE` | 范围类型，如 `INT4RANGE` |
 | `DOMAIN` | 域类型 |
+| `OID` | 数据库对象的编号，如系统目录中的表编号 |
 
 `DROP DOMAIN [IF EXISTS] schema.name [RESTRICT|CASCADE]`保留限定及quoted标识符，按实际选中的域身份执行。
 当前只支持单目标；逗号多目标在事务和任何修改前报`0A000`，所有目标保留，不能当作PG多目标实现。
