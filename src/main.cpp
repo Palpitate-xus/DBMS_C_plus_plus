@@ -6220,7 +6220,7 @@ static bool handleExplain(const string& sql, Session& s) {
         };
         if (!select->ctes.empty() || explainNeedsTypedPlan(*select) ||
             dbms::QueryPlanner::mayUseIntegerPrimaryKeyPage(&g_engine,s.currentDB,*prepared,*select) ||
-            dbms::mayUseStoredZonedClockPage(g_engine,s.currentDB,*prepared,*select) ||
+            dbms::mayUseStoredBtreePage(g_engine,s.currentDB,*prepared,*select) ||
             (directCall && directCall->setReturning) || typedDeclaredFilter())
             // Consume the same owned, bound query on the real execution
             // root, including its source/demand contexts and pure planning.
@@ -21157,16 +21157,16 @@ class PreparedWithDmlRuntime {
         const bool orderedPrimaryPage = select == readRoot_ && descendants.empty() &&
             select->limit && !select->orderBy.empty() &&
             dbms::QueryPlanner::mayUseIntegerPrimaryKeyPage(&g_engine, session_.currentDB, *query_, *select);
-        const bool orderedClockPage = select == readRoot_ && descendants.empty() &&
-            dbms::mayUseStoredZonedClockPage(g_engine, session_.currentDB, *query_, *select);
+        const bool orderedBtreePage = select == readRoot_ && descendants.empty() &&
+            dbms::mayUseStoredBtreePage(g_engine, session_.currentDB, *query_, *select);
         const bool emptyProjection = select->selectList.empty();
         if (descendants.empty() && !emptyProjection &&
-            (select != readRoot_ || (!select->whereClause && !storedCount && !orderedPrimaryPage && !orderedClockPage))) return {};
+            (select != readRoot_ || (!select->whereClause && !storedCount && !orderedPrimaryPage && !orderedBtreePage))) return {};
         auto parent=g_engine.getTableSchema(session_.currentDB,table);
         const bool declaredFilter = select == readRoot_ &&
             dbms::QueryPlanner::usesDeclaredFilterCollations(*select, parent);
         if (descendants.empty()) {
-            if (!emptyProjection && !declaredFilter && !orderedClockPage && !(orderedPrimaryPage && parent.hasVariableLength()) &&
+            if (!emptyProjection && !declaredFilter && !orderedBtreePage && !(orderedPrimaryPage && parent.hasVariableLength()) &&
                 !(storedCount && dbms::QueryPlanner::usesStoredCountSource(
                     g_engine, session_.currentDB, *select, parent, range.ordinal)))
                 return {};

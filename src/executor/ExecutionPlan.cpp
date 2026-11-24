@@ -5473,23 +5473,25 @@ public:
     }
 };
 
-struct ZonedClockPageSpec {
+struct BtreePageSpec {
     StoredBtreeRange range;
-    StoredZonedClockOrder order;
+    StoredBtreeOrder order;
 };
 
-static std::optional<ZonedClockPageSpec> zonedClockPageSpec(StorageEngine& engine,
+static std::optional<BtreePageSpec> btreePageSpec(StorageEngine& engine,
         const std::string& database, const SelectStmt& select,
         const QueryColumnBinding& key, const TableSchema& schema) {
     const auto count = simplePageDemand(select, true);
-    if (!count || *count > StoredZonedClockOrder::maxRows || key.columnOrdinal >= schema.len() || key.typeOid != 1266 ||
-        !key.typeMetadata || key.typeMetadata->actualOid != 1266 || key.typeMetadata->codecOid != 1266)
+    if (!count || *count > StoredBtreeOrder::maxRows || key.columnOrdinal >= schema.len() ||
+        (key.typeOid != 1266 && key.typeOid != 26) || !key.typeMetadata ||
+        key.typeMetadata->actualOid != key.typeOid || key.typeMetadata->codecOid != key.typeOid)
         return {};
     const auto& column = schema.cols[key.columnOrdinal];
-    if (column.isArray || column.generatedKind || !column.domainName.empty() ||
-        !completeStoredZonedClockIndex(engine, database, schema, column)) return {};
+    const auto kind = key.typeOid == 26 ? StoredBtreeRange::Key::ObjectNumber : StoredBtreeRange::Key::ZonedClock;
+    if (!completeStoredBtreeIndex(engine, database, schema, column, kind)) return {};
     const auto& order = select.orderBy.front();
-    ZonedClockPageSpec page{{column.dataName}, {*count, !order.asc, order.nullsFirst, false, select.withTies}};
+    BtreePageSpec page{StoredBtreeRange::fullDomain(column.dataName, kind),
+        {*count, !order.asc, order.nullsFirst, false, select.withTies}};
     if (select.whereClause) {
         const auto* test = dynamic_cast<const UnaryOpExpr*>(select.whereClause.get());
         const auto* reference = test && test->op == "IS NOT NULL" && !test->preparedSubquery
@@ -5498,8 +5500,8 @@ static std::optional<ZonedClockPageSpec> zonedClockPageSpec(StorageEngine& engin
             reference->binding->scopeDepth || reference->binding->mergedUsing ||
             reference->binding->sourceOrdinal != key.sourceOrdinal ||
             reference->binding->columnOrdinal != key.columnOrdinal) {
-            auto range = storedBtreeRange(engine, database, schema, select.whereClause.get(), key.sourceOrdinal);
-            if (!range || range->column != column.dataName) return {};
+            auto range = storedBtreeRange(engine, database, schema, select.whereClause.get(), key.sourceOrdinal, true);
+            if (!range || range->column != column.dataName || range->key != kind) return {};
             page.range = std::move(*range);
         }
         page.order.excludesNulls = true;
@@ -5509,16 +5511,16 @@ static std::optional<ZonedClockPageSpec> zonedClockPageSpec(StorageEngine& engin
     return page;
 }
 
-bool mayUseStoredZonedClockPage(StorageEngine& engine, const std::string& database,
+bool mayUseStoredBtreePage(StorageEngine& engine, const std::string& database,
                                const PreparedQuery& query, const SelectStmt& select) {
     const auto key = directPageOrder(query, select, true);
-    if (!key || key->typeOid != 1266) return false;
+    if (!key || (key->typeOid != 1266 && key->typeOid != 26)) return false;
     const auto* relation = integerPageRelation(query, select, *key);
     if (!relation) return false;
     const auto table = relation->relationSchema.empty() || relation->relationSchema == "public" ? relation->relationName
         : relation->relationSchema + "__" + relation->relationName;
     const auto schema = engine.getTableSchema(database, table);
-    return zonedClockPageSpec(engine, database, select, *key, schema).has_value();
+    return btreePageSpec(engine, database, select, *key, schema).has_value();
 }
 
 // The outer filter keeps responsibility for the SQL predicate. This source
@@ -5527,7 +5529,7 @@ class StoredBtreeRangeScanOp final : public Operator {
 public:
     StoredBtreeRangeScanOp(StorageEngine& engine, std::string database,
                           const TableSchema& schema, StoredBtreeRange range, OpPtr fallback,
-                          std::optional<StoredZonedClockOrder> order = std::nullopt)
+                          std::optional<StoredBtreeOrder> order = std::nullopt)
         : engine_(engine), database_(std::move(database)), table_(schema.tablename),
           relationId_(schema.physicalRelationId), range_(std::move(range)), fallback_(std::move(fallback)), order_(order) {}
 
@@ -5550,7 +5552,7 @@ public:
             engine_.getInheritedChildren(database_, table_).empty()) {
             engine_.noteQuerySnapshot();
             if (order_) {
-                page_ = readStoredZonedClockPage(engine_, database_, schema_, range_, *order_, sortWorkMemBytes());
+                page_ = readStoredBtreePage(engine_, database_, schema_, range_, *order_, sortWorkMemBytes());
                 if (page_) {
                     prefixRows_ = page_->rows.size();
                     prefixNodes_ = page_->indexNodes;
@@ -5645,7 +5647,7 @@ public:
         if (error) std::rethrow_exception(error);
     }
     std::string preparedPlanNodeName() const override {
-        if (range_.key == StoredBtreeRange::Key::ObjectNumber) return "OidRangeScan";
+        if (range_.key == StoredBtreeRange::Key::ObjectNumber) return order_ ? "OidIndexPage" : "OidRangeScan";
         return order_ ? "ZonedClockIndexPage" : "ZonedClockRangeScan";
     }
     std::map<std::string, std::string> preparedPlanAttributes() const override {
@@ -5669,8 +5671,8 @@ private:
     uint64_t relationId_;
     StoredBtreeRange range_;
     OpPtr fallback_;
-    std::optional<StoredZonedClockOrder> order_;
-    std::optional<StoredZonedClockPage> page_;
+    std::optional<StoredBtreeOrder> order_;
+    std::optional<StoredBtreePage> page_;
     TableSchema schema_;
     std::vector<int64_t> rids_;
     size_t position_ = 0, column_ = 0;
@@ -5700,8 +5702,9 @@ static OpPtr makePreparedTableSource(StorageEngine* engine, const std::string& d
     const auto* physical = dynamic_cast<const TableScanOp*>(source.get());
     if (physical && typeid(*physical) == typeid(TableScanOp) && physical->tableName() == schema.tablename) {
         const auto orderKey = directPageOrder(*query, *select, true);
-        if (orderKey && orderKey->typeOid == 1266 && integerPageRelation(*query, *select, *orderKey)) {
-            if (auto page = zonedClockPageSpec(*engine, database, *select, *orderKey, schema)) {
+        if (orderKey && (orderKey->typeOid == 1266 || orderKey->typeOid == 26) &&
+            integerPageRelation(*query, *select, *orderKey)) {
+            if (auto page = btreePageSpec(*engine, database, *select, *orderKey, schema)) {
                 return std::make_unique<StoredBtreeRangeScanOp>(*engine, database, schema,
                     std::move(page->range), heap(), page->order);
             }

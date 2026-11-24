@@ -3933,6 +3933,16 @@ bool prepareProtocolRangeParameters(const ProtocolQuerySyntax& querySyntax, Sess
         for (const auto& field : prepared.output) {shape.columns.push_back(field.name); shape.columnTypes.push_back(field.type);}
         *columns = describeProtocolColumns(shape, std::string{}, session);
         applyBoundProtocolDescriptor(*columns, prepared.output, session);
+        if (select->fromClause && std::any_of(prepared.output.begin(), prepared.output.end(),
+                [](const auto& field) { return field.typeOid == 26; })) {
+            visitPreparedProjectionOrigins(columns->size(), prepared, session,
+                [&](size_t i, uint32_t relation, uint16_t attribute) {
+                    if (prepared.output[i].typeOid == 26) {
+                        (*columns)[i].tableOid = relation;
+                        (*columns)[i].attributeNumber = attribute;
+                    }
+                });
+        }
     }
     return true;
 }

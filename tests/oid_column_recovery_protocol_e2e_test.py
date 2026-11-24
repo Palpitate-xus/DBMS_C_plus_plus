@@ -42,11 +42,16 @@ def main():
             wire.query("SELECT id FROM oid_durable WHERE " + predicate, rows=[(str(i),) for i in ids],
                        tag=f"SELECT {len(ids)}", fields=[("id", 23)], ready=ready)
 
+    def verify_page(ids, ready=b"I"):
+        wire.query("SELECT id FROM oid_durable ORDER BY k DESC NULLS LAST LIMIT 2",
+                   rows=[(str(i),) for i in ids], tag="SELECT 2", fields=[("id", 23)], ready=ready)
+
     def begin_update():
         wire.command("BEGIN", "BEGIN", ready=b"T")
         wire.command("UPDATE oid_durable SET k='0x10' WHERE id=2", "UPDATE 1", ready=b"T")
         verify_key("16", [2], ready=b"T")
         verify_key("0xffffffff", [], ready=b"T")
+        verify_page([3, 2], ready=b"T")
 
     try:
         wire.command("CREATE TABLE oid_durable(id integer PRIMARY KEY,k oid,note text)", "CREATE TABLE")
@@ -59,16 +64,19 @@ def main():
         restart()
         verify_key("0xffffffff", [2])
         verify_key("16", [])
+        verify_page([2, 3])
 
         begin_update()
         wire.command("COMMIT", "COMMIT")
         restart()
         verify_key("4294967295", [])
         verify_key("16", [2])
+        verify_page([3, 2])
         wire.command("VACUUM FULL oid_durable", "VACUUM")
         wire.command("REINDEX TABLE oid_durable", "REINDEX")
         restart()
         verify_key("16", [2])
+        verify_page([3, 2])
 
         name = b"objects"
         request = (wire.parse("SELECT k FROM oid_durable ORDER BY id", name) + wire.bind(name, result_format=1)

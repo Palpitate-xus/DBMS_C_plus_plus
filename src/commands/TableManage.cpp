@@ -34161,6 +34161,13 @@ static bool ordinaryOidColumn(const Column& column) {
         !column.isArray && !column.isVariableLength && !column.generatedKind && column.domainName.empty();
 }
 
+bool completeStoredBtreeIndex(StorageEngine& engine, const std::string& database,
+    const TableSchema& schema, const Column& column, StoredBtreeRange::Key key) {
+    if (key == StoredBtreeRange::Key::ObjectNumber)
+        return ordinaryOidColumn(column) && completeStoredRangeIndex(engine, database, schema, column);
+    return ordinaryZonedClockColumn(column) && completeStoredZonedClockIndex(engine, database, schema, column);
+}
+
 static const Column* storedBtreeRangeColumn(const TableSchema& schema, const std::string& name) {
     for (size_t i = 0; i < schema.len(); ++i)
         if (schema.cols[i].dataName == name &&
@@ -34172,6 +34179,12 @@ static std::optional<int64_t> storedZonedClockOrder(std::string_view input) {
     const auto clock = temporal_storage_detail::parseZonedClock(input);
     if (!clock) return {};
     return temporal_storage_detail::zonedClockOrderKey(*clock);
+}
+
+StoredBtreeRange StoredBtreeRange::fullDomain(std::string column, Key key) {
+    if (key == Key::ObjectNumber)
+        return {std::move(column), 0, std::numeric_limits<Oid>::max(), key};
+    return {std::move(column), INT64_MIN, INT64_MAX, key};
 }
 
 bool StoredBtreeRange::matches(const std::string& value) const {
@@ -34186,14 +34199,9 @@ bool StoredBtreeRange::matches(const std::string& value) const {
 static bool addStoredBtreeBound(StoredBtreeRange& range, const Column& column,
                                std::string_view op, int64_t key) {
     if (!range.column.empty() && range.column != column.dataName) return false;
-    if (range.column.empty()) {
-        range.column = column.dataName;
-        if (ordinaryOidColumn(column)) {
-            range.key = StoredBtreeRange::Key::ObjectNumber;
-            range.lower = 0;
-            range.upper = std::numeric_limits<Oid>::max();
-        }
-    }
+    if (range.column.empty())
+        range = StoredBtreeRange::fullDomain(column.dataName, ordinaryOidColumn(column)
+            ? StoredBtreeRange::Key::ObjectNumber : StoredBtreeRange::Key::ZonedClock);
     // Both supported key types lie strictly within the int64 endpoints.
     // An exclusive comparison against an OID endpoint produces an empty range.
     if (op.front() == '<') range.upper = std::min(range.upper, key - (op == "<"));
@@ -34304,10 +34312,10 @@ static bool hasSelectiveStoredBtreeBound(const StoredBtreeRange& range) {
 
 std::optional<StoredBtreeRange> storedBtreeRange(StorageEngine& engine,
     const std::string& database, const TableSchema& schema, const Expr* predicate,
-    size_t sourceOrdinal) {
+    size_t sourceOrdinal, bool includeFullDomain) {
     StoredBtreeRange range;
     if (collectStoredBtreeBounds(engine, database, schema, predicate, sourceOrdinal, range) &&
-        hasSelectiveStoredBtreeBound(range)) return range;
+        (includeFullDomain || hasSelectiveStoredBtreeBound(range))) return range;
     return {};
 }
 
@@ -34364,13 +34372,36 @@ static std::pair<std::string,std::string> storedBtreeDiskBounds(const StoredBtre
     return {encode(range.lower), std::move(upper)};
 }
 
+static double storedBtreeHeapCost(StorageEngine& engine, const std::string& database,
+                                  const TableSchema& schema) {
+    uint64_t rows = 0;
+    const auto pages = engine.tableNumPages(database, schema.tablename);
+    return QueryPlanner::costScan("seq_scan", getRuntimeLiveRowEstimate(database, schema.tablename, rows)
+        ? static_cast<double>(rows) : 32.0 * pages, pages);
+}
+
+template <typename Candidates, typename RowId>
+static double storedBtreeLookupCost(StoredBtreeRange::Key key, const Candidates& candidates, RowId rowId) {
+    if (key != StoredBtreeRange::Key::ObjectNumber)
+        return QueryPlanner::costScan("index_scan", candidates.size(), 0);
+    // A small run of nearby keys can point to many rows on the same heap page.
+    std::unordered_set<uint32_t> heapPages;
+    for (const auto& candidate : candidates) {
+        uint32_t page;
+        uint16_t slot;
+        StorageEngine::decodeRid(rowId(candidate), page, slot);
+        heapPages.insert(page);
+    }
+    return QueryPlanner::costScan("index_scan", heapPages.size(), 0) +
+        QueryPlanner::costScan("seq_scan", candidates.size(), 0);
+}
+
 std::optional<std::vector<int64_t>> readStoredBtreeRange(StorageEngine& engine,
     const std::string& database, const TableSchema& schema, const StoredBtreeRange& range) {
     const auto* column = storedBtreeRangeColumn(schema, range.column);
     if (!column || engine.getIsolationLevel() == IsolationLevel::SERIALIZABLE ||
         engine.rlsAppliesTo(database, schema.tablename) ||
-        (range.key == StoredBtreeRange::Key::ObjectNumber) != ordinaryOidColumn(*column) ||
-        !completeStoredRangeIndex(engine, database, schema, *column)) return {};
+        !completeStoredBtreeIndex(engine, database, schema, *column, range.key)) return {};
     const auto fence = engine.indexReadSnapshotFence(database);
     if (!fence) return {};
     if (range.lower > range.upper) return std::vector<int64_t>{};
@@ -34379,10 +34410,6 @@ std::optional<std::vector<int64_t>> readStoredBtreeRange(StorageEngine& engine,
         ? engine.getPKIndex(database, schema.tablename)
         : engine.getSecondaryIndex(database, schema.tablename, range.column);
     if (!index) throw DbError("XX001", "could not open B-tree index for relation \"" + schema.tablename + "\"");
-    uint64_t rows = 0;
-    const size_t pages = engine.tableNumPages(database, schema.tablename);
-    const double heapCost = QueryPlanner::costScan("seq_scan", getRuntimeLiveRowEstimate(database, schema.tablename, rows)
-        ? static_cast<double>(rows) : 32.0 * pages, pages);
     constexpr size_t maxRows = 512;
     constexpr size_t maxNodes = 64;
     const auto [lower, upper] = storedBtreeDiskBounds(range);
@@ -34392,34 +34419,18 @@ std::optional<std::vector<int64_t>> readStoredBtreeRange(StorageEngine& engine,
     if (result == BPTree::LeafEntriesResult::Error)
         throw DbError("XX001", "could not read B-tree index for relation \"" + schema.tablename + "\"");
     if (result != BPTree::LeafEntriesResult::Complete || engine.indexReadSnapshotFence(database) != fence) return {};
-    if (candidates.size() > 1) {
-        double indexCost = QueryPlanner::costScan("index_scan", candidates.size(), 0);
-        if (range.key == StoredBtreeRange::Key::ObjectNumber) {
-            // Nearby OID keys can refer to out-of-order rows on the same
-            // heap page. The row reader sorts RIDs before fetching them.
-            std::unordered_set<uint32_t> heapPages;
-            for (int64_t rid : candidates) {
-                uint32_t page;
-                uint16_t slot;
-                StorageEngine::decodeRid(rid, page, slot);
-                heapPages.insert(page);
-            }
-            indexCost = QueryPlanner::costScan("index_scan", heapPages.size(), 0) +
-                QueryPlanner::costScan("seq_scan", candidates.size(), 0);
-        }
-        if (indexCost >= heapCost) return {};
-    }
+    if (candidates.size() > 1 && storedBtreeLookupCost(range.key, candidates, [](int64_t rid) { return rid; }) >=
+        storedBtreeHeapCost(engine, database, schema)) return {};
     return candidates;
 }
 
-std::optional<StoredZonedClockPage> readStoredZonedClockPage(StorageEngine& engine,
+std::optional<StoredBtreePage> readStoredBtreePage(StorageEngine& engine,
     const std::string& database, const TableSchema& schema, const StoredBtreeRange& range,
-    const StoredZonedClockOrder& order, size_t byteBudget) {
+    const StoredBtreeOrder& order, size_t byteBudget) {
     const auto* column = storedBtreeRangeColumn(schema, range.column);
     if (!column || engine.getIsolationLevel() == IsolationLevel::SERIALIZABLE ||
-        range.key != StoredBtreeRange::Key::ZonedClock || !ordinaryZonedClockColumn(*column) ||
         engine.rlsAppliesTo(database, schema.tablename) ||
-        !completeStoredZonedClockIndex(engine, database, schema, *column)) return {};
+        !completeStoredBtreeIndex(engine, database, schema, *column, range.key)) return {};
     const auto fence = engine.indexReadSnapshotFence(database);
     if (!fence) return {};
     const size_t ordinal = static_cast<size_t>(column - schema.cols.data());
@@ -34429,10 +34440,10 @@ std::optional<StoredZonedClockPage> readStoredZonedClockPage(StorageEngine& engi
     const auto* index = primary ? engine.getPKIndex(database, schema.tablename)
         : engine.getSecondaryIndex(database, schema.tablename, range.column);
     if (!index) throw DbError("XX001", "could not open B-tree index for relation \"" + schema.tablename + "\"");
-    StoredZonedClockPage result;
+    StoredBtreePage result;
     if (range.lower > range.upper) return result;
-    const size_t candidateLimit = std::min(StoredZonedClockOrder::maxRows,
-        byteBudget / (sizeof(BPTree::LeafEntry) + sizeof(StoredZonedClockPage::Row)));
+    const size_t candidateLimit = std::min(StoredBtreeOrder::maxRows,
+        byteBudget / (sizeof(BPTree::LeafEntry) + sizeof(StoredBtreePage::Row)));
     if (!order.count || order.count > candidateLimit) return {};
     const auto [lower, upper] = storedBtreeDiskBounds(range);
     std::vector<BPTree::LeafEntry> entries;
@@ -34447,14 +34458,8 @@ std::optional<StoredZonedClockPage> readStoredZonedClockPage(StorageEngine& engi
     if (status != BPTree::LeafEntriesResult::Complete || (nullable && entries.size() < order.count) ||
         engine.indexReadSnapshotFence(database) != fence) return {};
     if (nullable && order.withTies && entries.back().key == entries[order.count - 1].key) return {};
-    if (entries.size() > 8) {
-        uint64_t rows = 0;
-        const auto pages = engine.tableNumPages(database, schema.tablename);
-        const double sequential = QueryPlanner::costScan("seq_scan",
-            getRuntimeLiveRowEstimate(database, schema.tablename, rows) ? static_cast<double>(rows) : 32.0 * pages,
-            pages);
-        if (QueryPlanner::costScan("index_scan", entries.size(), 0) >= sequential) return {};
-    }
+    if (entries.size() > 8 && storedBtreeLookupCost(range.key, entries,
+            [](const auto& entry) { return entry.value; }) >= storedBtreeHeapCost(engine, database, schema)) return {};
 
     struct RestoreBinding {
         StorageEngine::NullRowBindingState previous = StorageEngine::captureNullRowBinding();
@@ -34462,14 +34467,14 @@ std::optional<StoredZonedClockPage> readStoredZonedClockPage(StorageEngine& engi
     } restore;
     result.rows.reserve(entries.size());
     const size_t allocated = entries.capacity() * sizeof(BPTree::LeafEntry) +
-        result.rows.capacity() * sizeof(StoredZonedClockPage::Row);
+        result.rows.capacity() * sizeof(StoredBtreePage::Row);
     if (allocated > byteBudget) return {};
     byteBudget -= allocated;
     std::unordered_set<int64_t> seen;
     for (const auto& entry : entries) {
         checkForQueryInterrupt();
         if (entry.value <= 0 || !seen.insert(entry.value).second) return {};
-        StoredZonedClockPage::Row row{entry.value, {}, {}};
+        StoredBtreePage::Row row{entry.value, {}, {}};
         bool failed = false;
         if (!engine.readIndexedRowByRid(database, schema.tablename, row.rid, row.data, schema, nullptr, &failed)) {
             if (failed) throw DbError("XX001", "indexed heap fetch failed");

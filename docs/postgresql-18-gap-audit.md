@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-24 · 单列对象编号索引可以按顺序取小页
+
+普通表的完整单列 B 树可以正向或反向读取 `oid`，支持同列范围、偏移和并列记录。编号跨过 2,147,483,647 时仍按无符号顺序排列。行级安全、较早的事务快照、空值进入所需结果和过大的候选页会使用原有查询方式。`IDX-03`、`OPT-01`、`TYPE-20` 和 `PROTO-04` 保持部分实现。 [功能验证](test-report.md#oid-page-20261124) · [性能对照](performance-report-2026-10-30.md#oid-page-cost-20261124) · [实现对照](postgresql-comparison.md#oid-page-comparison-20261124)
+
 ## 2026-11-24 · 单列对象编号索引可以读一段范围
 
 支持普通表的单列主键或单列 B 树，按无符号顺序合并同列边界并核对表行，覆盖大于 2,147,483,647 的值。用于 `BETWEEN` 或大小比较的协议参数可按列类型确定。现有数据目录可以直接打开。`IDX-03`、`OPT-01`、`TYPE-20`、`PROTO-03` 和 `PROTO-05` 保持部分实现。 [功能验证](test-report.md#oid-range-20261124) · [性能对照](performance-report-2026-10-30.md#oid-range-cost-20261124) · [实现对照](postgresql-comparison.md#oid-range-comparison-20261124)

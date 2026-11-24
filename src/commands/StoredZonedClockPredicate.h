@@ -29,12 +29,16 @@ struct StoredBtreeRange {
     int64_t upper = INT64_MAX;
     Key key = Key::ZonedClock;
 
+    static StoredBtreeRange fullDomain(std::string column, Key key);
     bool matches(const std::string& value) const;
 };
 
+bool completeStoredBtreeIndex(StorageEngine& engine, const std::string& database,
+    const TableSchema& schema, const Column& column, StoredBtreeRange::Key key);
+
 std::optional<StoredBtreeRange> storedBtreeRange(StorageEngine& engine,
     const std::string& database, const TableSchema& schema, const Expr* predicate,
-    size_t sourceOrdinal);
+    size_t sourceOrdinal, bool includeFullDomain = false);
 
 std::optional<StoredBtreeRange> storedBtreeRange(StorageEngine& engine,
     const std::string& database, const TableSchema& schema,
@@ -45,7 +49,7 @@ std::optional<StoredBtreeRange> storedBtreeRange(StorageEngine& engine,
 std::optional<std::vector<int64_t>> readStoredBtreeRange(StorageEngine& engine,
     const std::string& database, const TableSchema& schema, const StoredBtreeRange& range);
 
-struct StoredZonedClockOrder {
+struct StoredBtreeOrder {
     static constexpr size_t maxRows = 512;
     size_t count;
     bool descending;
@@ -54,7 +58,7 @@ struct StoredZonedClockOrder {
     bool withTies;
 };
 
-struct StoredZonedClockPage {
+struct StoredBtreePage {
     struct Row {
         int64_t rid;
         std::string data;
@@ -64,12 +68,12 @@ struct StoredZonedClockPage {
     size_t indexNodes = 0;
 };
 
-std::optional<StoredZonedClockPage> readStoredZonedClockPage(StorageEngine& engine,
+std::optional<StoredBtreePage> readStoredBtreePage(StorageEngine& engine,
     const std::string& database, const TableSchema& schema, const StoredBtreeRange& range,
-    const StoredZonedClockOrder& order, size_t byteBudget);
+    const StoredBtreeOrder& order, size_t byteBudget);
 
 // Query admission and source construction use the same bound order and range.
-bool mayUseStoredZonedClockPage(StorageEngine& engine, const std::string& database,
+bool mayUseStoredBtreePage(StorageEngine& engine, const std::string& database,
                                const PreparedQuery& query, const SelectStmt& select);
 
 } // namespace dbms

@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>按对象编号排序，取前几条更快 · 2026-11-24</summary>
+
+给原表编号建好索引后，查询编号最小或最大的几条迁移记录时，数据库可以读够就停。在 2,050 行的测试中，取最小的 3 条从约 16 毫秒降到约 3 毫秒。
+
+[使用说明](docs/MANUAL.md#对象编号) · [测试报告](docs/test-report.md#oid-page-20261124) · [性能报告](docs/performance-report-2026-10-30.md#oid-page-cost-20261124)
+
+</details>
+
+<details>
 <summary>按一段对象编号查记录更快 · 2026-11-24</summary>
 
 例如，给原表编号建好索引后，可以直接找到编号在指定范围内的迁移记录。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>两张表按编号匹配时，取第一条更快 · 2026-11-23</summary>
+<summary>查看更早的更新和版本记录</summary>
+
+## 2026-11-23 · 两张表按编号匹配时，取第一条更快
 
 在一组测试中，先把两张表的编号转成同一种类型，再查找相同的编号。取第一条结果的时间从约 310 毫秒降到了约 6 毫秒。
 
 [测试报告](docs/test-report.md#integer-cast-join-limit-20261123) · [性能报告](docs/performance-report-2026-10-30.md#integer-cast-join-limit-cost-20261123)
-
-</details>
-
-<details>
-<summary>查看更早的更新和版本记录</summary>
 
 ## 2026-11-23 · 查一张子表的父表名称更快
 

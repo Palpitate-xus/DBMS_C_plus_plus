@@ -2,6 +2,13 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="oid-page-comparison-20261124"></a>
+## 2026-11-24 · 按对象编号排序并取前几条
+
+PostgreSQL 可直接沿 B 树正读或倒读，配合 `LIMIT` 时可在读够行数后停止。SQLite 也可以沿索引顺序读出数据，省去排序。DuckDB 的 TopN 优化在扫描输入时维护所需的最前几行，减少排序开销。 [PostgreSQL 18 索引排序](https://www.postgresql.org/docs/18/indexes-ordering.html) · [SQLite 查询规划](https://www.sqlite.org/queryplanner.html#sorting_by_index) · [DuckDB 查询优化](https://duckdb.org/2024/11/14/optimizers)
+
+本项目的普通表在单个 `oid` 列上有完整 B 树时，沿编号顺序取够 `OFFSET + LIMIT` 行即可停止。`WITH TIES` 会继续读取相同编号，直到读到下一种编号或查完范围。读出的记录仍会检查事务可见性和实际编号。当前索引省略空值，因此需要查空值组成的前缀或并列组时会扫描表。交叉列筛选、多列排序、行级安全策略和无法使用索引检查事务可见性的情况也保留表扫描。 [结果及执行计划验证](test-report.md#oid-page-20261124) · [性能对照](performance-report-2026-10-30.md#oid-page-cost-20261124)
+
 <a id="oid-range-comparison-20261124"></a>
 ## 2026-11-24 · 用索引查一段对象编号
 

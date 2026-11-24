@@ -837,6 +837,14 @@ SELECT id FROM migration_log WHERE source_table >= '4294967290' AND source_table
 
 两条查询都返回编号为 1 的迁移记录。索引可以查指定编号，也可以在较小范围内查找。查询涉及较多记录或使用较早的事务快照时，会改为扫描表。当前支持单个 `oid` 值，`oid[]` 列仍待实现。 [范围查询测试](test-report.md#oid-range-20261124) · [升级说明](PACKAGING.md#对象编号列的表定义)
 
+索引还可以按编号顺序读够几行就停。下面的查询取原表编号最大的两条迁移记录，把编号空缺的记录排在最后。
+
+```sql
+SELECT id FROM migration_log ORDER BY source_table DESC NULLS LAST LIMIT 2;
+```
+
+小页查询可配合 `OFFSET` 或 `FETCH ... WITH TIES`，也可在同一列上指定编号范围。数据库会在需要读取空值、使用其他列筛选或按多列排序时改用原有查询方式。 [分页测试](test-report.md#oid-page-20261124)
+
 ### 其他类型
 | 类型 | 说明 |
 |------|------|
