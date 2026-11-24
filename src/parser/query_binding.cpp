@@ -59,6 +59,7 @@ bool incompleteOwnedCatalog(const Range& range) {
         ((range.relationName=="pg_class" && range.columns.size()==30) ||
          (range.relationName=="pg_attribute" && range.columns.size()==19) ||
          (range.relationName=="pg_type" && range.columns.size()==28) ||
+         (range.relationName=="pg_am" && range.columns.size()==3) ||
          (range.relationName=="pg_settings" && range.columns.size()==3));
 }
 void requireCompleteStar(const Range& range) {
@@ -2143,7 +2144,7 @@ public:
             : std::optional<QueryRelationMetadata>{};
         if (!owned && !metadata.relation) throw DbError("42P01", "relation does not exist: " + source);
         const auto description = owned ? *owned : metadata.relation(source);
-        if (writeTarget) requireWritablePgTypeRelation(description.schema, description.name);
+        if (writeTarget) requireWritableBuiltinRelation(description.schema, description.name);
         Range range{alias.empty() ? description.schema : "", alias.empty() ? description.name : identifier(alias), description.columns};
         range.relationSchema = description.schema;
         range.relationName = description.name;
@@ -2296,9 +2297,10 @@ public:
                 for (auto& range : side) {
                     if (key == "nspacl" && incompleteNamespaceCatalog(range))
                         throw DbError("0A000", "pg_namespace ACL JOIN key is not implemented");
-                    if (range.relationName == "pg_settings" && incompleteOwnedCatalog(range) &&
+                    if ((range.relationName == "pg_settings" || range.relationName == "pg_am") &&
+                        incompleteOwnedCatalog(range) &&
                         system_catalog::unownedColumn(range.relationName, range.columns, key))
-                        throw DbError("0A000", "pg_settings JOIN key is not implemented");
+                        throw DbError("0A000", range.relationName + " JOIN key is not implemented");
                     if (range.hiddenUnqualified.count(key)) continue;
                     for (size_t i = 0; i < range.columns.size(); ++i)
                         if (range.columns[i].name == key) found = {&range, i, found.count + 1};
@@ -3329,7 +3331,7 @@ public:
             // The target is always its real catalog relation, never a CTE
             // reinterpreted as a physical row owner.
             auto targetRange=declarationRelation(targetName,targetAlias,{});
-            requireWritablePgTypeRelation(targetRange.relationSchema,targetRange.relationName);
+            requireWritableBuiltinRelation(targetRange.relationSchema,targetRange.relationName);
             const auto target=registerSource(std::move(targetRange));
             auto ranges=declarationFrom(source,outer,ctes);checkRangeConflicts({target},ranges);
             ranges.insert(ranges.begin(),target);

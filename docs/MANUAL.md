@@ -2688,6 +2688,8 @@ statement/portal 仍返回 CloseComplete。一个 Sync group 内的 Execute 共�
 
 ### 按名称查找表
 
+原版 `psql` 18.6 可用 `\dt` 列出普通表，显示所属模式、表名、类型和所有者。`\dt orders*` 按名称筛选，`\dt sales.*` 列出 `sales` 模式的表。
+
 以下查询查找当前搜索路径下可以直接用名称引用的 `orders` 表，返回表编号和所属模式。
 
 ```sql
@@ -2699,7 +2701,22 @@ WHERE c.relname = 'orders'
 ORDER BY n.nspname, c.relname;
 ```
 
-`psql` 的 `\d orders` 能执行名称查找。后续显示表结构的步骤还需要补齐系统目录。 [验证记录](test-report.md#psql-catalog-discovery-20261124)
+`psql` 的 `\d orders` 能查找表并读取访问方式。显示列和索引的后续步骤还需要补齐。 [验证记录](test-report.md#pg-access-method-20261124)
+
+### 查询表和索引的访问方式
+
+可以查询表或索引实际采用的存储和查找方式。以下示例按名称查找 `orders` 与 `orders_customer_idx`，显示所属模式和访问方式。
+
+```sql
+SELECT n.nspname, c.relname, am.amname
+FROM pg_catalog.pg_class c
+JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+LEFT JOIN pg_catalog.pg_am am ON am.oid = c.relam
+WHERE c.relname IN ('orders', 'orders_customer_idx')
+ORDER BY 1, 2;
+```
+
+`pg_am` 可以查询 `oid`、`amname` 和 `amtype`。其中 `t` 代表表，`i` 代表索引。处理函数字段 `amhandler` 仍未开放，请在查询中列出需要的字段。 [验证记录](test-report.md#pg-access-method-20261124)
 
 ---
 

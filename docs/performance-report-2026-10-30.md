@@ -4,6 +4,21 @@
 
 > 复核发现，几组早期 COPY 计时在每个对照场景中使用了固定的执行顺序。耗时差可能包含顺序影响。这项问题涉及默认值求值、按列查找、默认值标记、短 CSV 导出和短查询导出的配对计时。[默认值求值](#copy-default-evaluation-order-cost-20261122) · [按列查找](#copy-identity-input-cost-20261122) · [默认值标记](#copy-default-marker-cost-20261122) · [CSV 导出](#copy-csv-out-cost-20261122) · [查询导出](#copy-query-stdout-cost-20261122)
 
+<a id="pg-access-method-cost-20261124"></a>
+## 2026-11-24 · 按名称查表和列出普通表
+
+对照旧版 `07e2f16d`、新版与 PostgreSQL 18.6。测试机为 Intel Xeon E5-2678 v3，本项目用 GCC 13.3、CMake C++17 和 `-O2` 构建，关闭 OpenSSL。项目的数据目录位于内存盘，客户端和服务端限定在 CPU 13、28。测试从通过本地 TCP 发送一条 SQL 到收到就绪消息，并核对全部结果行、类型和完成消息。每轮先预热 4 次，再计时 20 次。各版本轮流执行，第二轮反转顺序。P95 为每轮第 19 小的样本。
+
+三套数据库均创建 `access_probe` 和 `access_probe_00` 到 `access_probe_31`，每张表使用 `(id integer, a integer DEFAULT 0, b text DEFAULT 'x', c integer DEFAULT 1)`。名称查找使用协议测试中的 `DISCOVERY`，匹配目标改为 `access_probe`，核对各数据库实际表编号。表列表使用 `TABLE_LIST`。列出 33 张表时，把模式换成 `^(access_probe(_[0-9][0-9])?)$`。旧版的列表查询缺少系统目录，表中留空。 [名称查找夹具](../tests/psql_catalog_discovery_protocol_e2e_test.py) · [列表夹具](../tests/pg_access_method_catalog_protocol_e2e_test.py)
+
+| 场景 | 旧版中位数 | 新版中位数 | PostgreSQL 中位数 | 旧版 P95 | 新版 P95 | PostgreSQL P95 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 按名称找表 | 8.09–9.45 | 8.04–9.37 | 0.79–0.89 | 8.43–14.23 | 10.70–14.11 | 1.07–1.11 |
+| 列出一张表 | — | 20.55–21.60 | 0.64–1.09 | — | 21.42–22.56 | 1.19–1.24 |
+| 列出 33 张表 | — | 37.85–39.27 | 1.17–1.21 | — | 38.60–45.08 | 1.54–1.55 |
+
+表中单位为毫秒。读取表目录和生成列来源时可以跳过列默认值等无关数据。名称查找的中位数接近，第二轮的新版 P95 更高。两轮结果不足以确认稳定提速。列表功能已可使用，耗时仍高于 PostgreSQL。 [功能验证](test-report.md#pg-access-method-20261124)
+
 <a id="psql-catalog-discovery-cost-20261124"></a>
 ## 2026-11-24 · 按模式匹配名称和查找表
 

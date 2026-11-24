@@ -2,6 +2,7 @@
 #include "commands/InheritanceGraph.h"
 #include "catalog/SystemCatalogRows.h"
 #include "catalog/PgDefaultCatalog.h"
+#include "catalog/PgAccessMethodCatalog.h"
 #include "ExecutionPlan.h"
 #include "parser/BetweenSyntax.h"
 #include "expression/StoredRegtypeValue.h"
@@ -7719,18 +7720,24 @@ OpPtr QueryPlanner::buildPreparedQueryPlan(StorageEngine* engine,const std::stri
                     cache->rows.push_back(row);return true;
                 });
         } else if(found->relationSchema=="pg_catalog" &&
-                  (found->relationName=="pg_class" || found->relationName=="pg_attribute")) {
+                  (found->relationName=="pg_class" || found->relationName=="pg_attribute" ||
+                   found->relationName==access_method_catalog::name)) {
             for(const auto& output:found->columns) {
                 Column column;column.dataName=output.name;column.dataType=output.type;
                 column.isVariableLength=true;schema.append(column);
             }
             const bool attributes=found->relationName=="pg_attribute";
+            const bool methods=found->relationName==access_method_catalog::name;
             auto rows=std::make_shared<std::optional<PreparedQueryRows>>();
             source=std::make_unique<PreparedSourceRowsOp>(found->columns,
-                [engine,database,rows,attributes](size_t index,std::vector<ExprValue>& row) {
+                [engine,database,rows,attributes,methods](size_t index,std::vector<ExprValue>& row) {
                     if(!*rows) {
-                        const auto metadata=engine->catalogService().metadataSnapshot(database);
-                        *rows=attributes?system_catalog::attributeRows(metadata):system_catalog::classRows(metadata);
+                        if (methods) *rows = access_method_catalog::rows();
+                        else {
+                            const auto metadata = engine->catalogService().metadataSnapshot(database, attributes);
+                            *rows = attributes ? system_catalog::attributeRows(metadata)
+                                : system_catalog::classRows(metadata);
+                        }
                     }
                     if(index>=(**rows).size())return false;
                     row=(**rows)[index];return true;

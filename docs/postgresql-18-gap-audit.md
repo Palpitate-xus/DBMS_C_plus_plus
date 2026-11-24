@@ -1,8 +1,12 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-24 · 可以用 psql 列出普通表
+
+增加 `pg_am` 的访问方式编号、名称和种类，以及根据角色编号返回名称的 `pg_get_userbyid`。普通堆表和已登记的显式索引通过 `relam` 关联真实访问方式。原版 `psql` 18.6 的 `\dt` 可列出普通表。`\d` 的列类型格式化、索引目录及处理函数仍待补齐。`CAT-03` 和 `CLIENT-01` 保持部分实现。 [功能验证](test-report.md#pg-access-method-20261124) · [性能对照](performance-report-2026-10-30.md#pg-access-method-cost-20261124)
+
 ## 2026-11-24 · psql 可以完成按名称查找表
 
-原版 `psql` 18.6 的 `\d` 可以查出目标表编号和所属模式。正则筛选和表的搜索路径判断可用于普通 SQL。显示表结构的下一条查询仍缺少 `pg_am`。其后还需要索引、约束等目录。将 `CLIENT-01` 记为部分实现，`CAT-03` 和 `SQL-04` 保持部分实现。 [功能验证](test-report.md#psql-catalog-discovery-20261124) · [性能对照](performance-report-2026-10-30.md#psql-catalog-discovery-cost-20261124) · [实现对照](postgresql-comparison.md#psql-catalog-discovery-comparison-20261124)
+版本 `07e2f16d` 验证了原版 `psql` 18.6 用于 `\d` 的表名查找语句。正则筛选和表的搜索路径判断可用于普通 SQL。将 `CLIENT-01` 记为部分实现，`CAT-03` 和 `SQL-04` 保持部分实现。 [功能验证](test-report.md#psql-catalog-discovery-20261124) · [性能对照](performance-report-2026-10-30.md#psql-catalog-discovery-cost-20261124) · [实现对照](postgresql-comparison.md#psql-catalog-discovery-comparison-20261124)
 
 ## 2026-11-24 · 原版 psql 可以通过本地 SCRAM 登录
 

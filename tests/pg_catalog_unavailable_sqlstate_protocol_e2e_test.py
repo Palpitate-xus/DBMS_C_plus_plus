@@ -8,7 +8,6 @@ import struct
 
 UNIMPLEMENTED_CATALOGS = (
     "pg_constraint",
-    "pg_am",
     "pg_opclass",
     "pg_cast",
     "pg_collation",

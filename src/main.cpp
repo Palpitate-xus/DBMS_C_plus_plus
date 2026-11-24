@@ -7,6 +7,7 @@
 #include "catalog/TypeCatalogScan.h"
 #include "catalog/SystemCatalogRows.h"
 #include "catalog/PgInheritanceCatalog.h"
+#include "catalog/PgAccessMethodCatalog.h"
 #include "catalog/PgDefaultCatalog.h"
 #include "expression/ArrayDatumInput.h"
 #include "expression/StoredRegtypeValue.h"
@@ -5269,7 +5270,7 @@ static bool handleCopy(const string& sql, Session& s) {
     if (fromPos != string::npos) {
         const auto target = dbms::resolveCopyRelation(
             g_engine, s, trim(rest.substr(0, fromPos)), resolveTableName);
-        if (target.systemPgType) dbms::requireWritablePgTypeRelation("pg_catalog", "pg_type");
+        if (target.systemPgType) dbms::requireWritableBuiltinRelation("pg_catalog", "pg_type");
         const auto& tname = target.physicalName;
         string fileRest = trim(rest.substr(fromPos + 4));
         size_t q1 = fileRest.find('\'');
@@ -20099,7 +20100,7 @@ static bool executePgStatActivityQuery(const string& rawSql,
 // physical heap. Feed the same real catalog rows to typed source consumers;
 // keep the physical descriptor guard for actual heap relations.
 static dbms::PreparedQueryRows preparedPgClassRows(const Session& session) {
-    return dbms::system_catalog::classRows(g_engine.catalogService().metadataSnapshot(session.currentDB));
+    return dbms::system_catalog::classRows(g_engine.catalogService().metadataSnapshot(session.currentDB, false));
 }
 
 // pg_settings is exposed as a deliberate typed subset.  PostgreSQL 18 has
@@ -21487,12 +21488,13 @@ class PreparedWithDmlRuntime {
                 virtualRows=make_shared<dbms::PreparedQueryRows>(g_engine.getSequenceCatalogRows(session_.currentDB));
             } else if (range.relationSchema == "pg_catalog" && range.relationName == dbms::inheritance_catalog::name) {
                 virtualRows = make_shared<dbms::PreparedQueryRows>(dbms::inheritance_catalog::rows(g_engine, session_.currentDB));
+            } else if (range.relationSchema == "pg_catalog" && range.relationName == dbms::access_method_catalog::name) {
+                virtualRows = make_shared<dbms::PreparedQueryRows>(dbms::access_method_catalog::rows());
             } else if(range.relationSchema=="pg_catalog" && range.relationName=="pg_stats") {
                 statisticsRows=make_shared<optional<dbms::PreparedQueryRows>>();
             } else if(range.relationSchema=="pg_catalog" && range.relationName=="pg_namespace") {
                 virtualRows=make_shared<dbms::PreparedQueryRows>();
-                const auto metadata=g_engine.catalogService().metadataSnapshot(session_.currentDB);
-                for(const auto& row:metadata.namespaces)
+                for(const auto& row:g_engine.catalogService().namespaceSnapshot(session_.currentDB))
                     virtualRows->push_back(dbms::ownedNamespaceCatalogCells(row));
             } else if(range.relationSchema=="pg_catalog" && range.relationName=="pg_settings") {
                 virtualRows=make_shared<dbms::PreparedQueryRows>(preparedPgSettingsRows(session_));
@@ -33817,7 +33819,7 @@ static bool executeInternal(const string& rawSql, Session& s,
             queryDb == s.currentDB && !g_engine.tableExists(queryDb, tname) &&
             !g_engine.viewExists(queryDb, tname);
         static const std::set<std::string> unimplementedCatalogRelations = {
-            "pg_am", "pg_auth_members", "pg_authid", "pg_cast",
+            "pg_auth_members", "pg_authid", "pg_cast",
             "pg_collation", "pg_constraint", "pg_default_acl", "pg_index",
             "pg_namespace", "pg_opclass", "pg_operator", "pg_policy",
             "pg_publication",

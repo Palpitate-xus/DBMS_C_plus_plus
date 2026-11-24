@@ -1,5 +1,6 @@
 #include "commands/CopyInputOrder.h"
 #include "catalog/pg_owned_catalog_query.h"
+#include "common/InternalCharCodec.h"
 #include "catalog/RelationSearchPath.h"
 #include "catalog/type_catalog.h"
 #include "catalog/SystemCatalogRows.h"
@@ -1005,6 +1006,14 @@ std::string binaryProtocolParameterLiteral(uint32_t typeOid,
                 return {};
             }
             return raw[0] ? "TRUE" : "FALSE";
+        case 18:
+            if (raw.empty()) {
+                inputSqlState = "08P01";
+                error = "insufficient data left in message";
+                return {};
+            }
+            if (raw.size() != 1) break;
+            return quoteProtocolText(internalCharText(raw.front()), error);
         case 21:
             if (!decodeBinaryUnsigned(raw, 2, bits)) break;
             return std::to_string(static_cast<int16_t>(bits));
@@ -1396,6 +1405,7 @@ std::string protocolParameterLiteral(uint32_t typeOid,
 const char* valuesParameterCastType(uint32_t typeOid) {
     switch (typeOid) {
         case 16: return "boolean";
+        case 18: return "\"char\"";
         case 20: return "bigint";
         case 21: return "smallint";
         case 23: return "integer";
@@ -1800,7 +1810,7 @@ ProtocolPhysicalSource protocolPhysicalSourceFromQuery(const std::string& sql,
     for (auto schema : schemas) {
         if (schema == "pg_temp") schema = sessionTempSchemaName(session);
         if (schema == "pg_catalog" && source.name == "pg_type") {
-            if (describeWriteTarget) requireWritablePgTypeRelation(schema, source.name);
+            if (describeWriteTarget) requireWritableBuiltinRelation(schema, source.name);
             return result;
         }
         Oid namespaceOid = INVALID_OID;
@@ -2936,7 +2946,7 @@ void visitPreparedProjectionOrigins(size_t width, const PreparedQuery& query,
     std::optional<CatalogManager::MetadataSnapshot> catalog;
     const auto relation = [&](const PreparedQuery::SourceRange& source,size_t ordinal) -> Origin {
         if (source.relationSchema.empty() || source.relationName.empty()) return none;
-        if (!catalog) catalog = g_engine.catalogService().metadataSnapshot(session.currentDB);
+        if (!catalog) catalog = g_engine.catalogService().metadataSnapshot(session.currentDB, false);
         uint32_t namespaceOid = 0, relationOid = 0;
         for (const auto& space : catalog->namespaces)
             if (space.nspname == source.relationSchema) { namespaceOid = space.oid; break; }
@@ -2955,7 +2965,8 @@ void visitPreparedProjectionOrigins(size_t width, const PreparedQuery& query,
         // Column aliases rename source.columns, but never change its actual
         // physical ordinal. Dropped attributes retain their real attnum gap.
         if(source.relationSchema=="pg_catalog" && ordinal<source.columns.size() &&
-           (source.relationName=="pg_class" || source.relationName=="pg_attribute" || source.relationName=="pg_type") &&
+           (source.relationName=="pg_class" || source.relationName=="pg_attribute" ||
+            source.relationName=="pg_type" || source.relationName=="pg_am") &&
            source.columns[ordinal].physicalAttributeNumber>0) {
             const auto number=source.columns[ordinal].physicalAttributeNumber;
             for(const auto* attribute:attributes)if(attribute->attnum==number &&

@@ -82,6 +82,7 @@ inline const QueryRowDescriptor& settingsDescriptor() {
 }
 inline bool unownedColumn(const std::string& relation,const QueryRowDescriptor& owned,const std::string& name) {
     if(std::any_of(owned.begin(),owned.end(),[&](const auto& f){return f.name==name;}))return false;
+    if (relation == "pg_am") return name == "amhandler";
     const auto contains=[&](const auto& fields){return std::any_of(fields.begin(),fields.end(),
         [&](const auto& field){return name==field.name;});};
     if (relation == "pg_settings") {

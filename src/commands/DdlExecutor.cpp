@@ -20,6 +20,7 @@
 #include "process/StatementNotice.h"
 #include "parser/parser.h"
 #include "catalog/CatalogService.h"
+#include "catalog/PgAccessMethodCatalog.h"
 #include "catalog/RelationSearchPath.h"
 #include "catalog/systables.h"
 #include "catalog/type_registry.h"
@@ -1447,6 +1448,8 @@ static void registerTableInCatalog(CatalogManager& cat, const TableSchema& tbl,
     cls.relname = logicalName;
     cls.relnamespace = nspOid;
     cls.relkind = 'r';
+    if (tbl.partitionType == TableSchema::PartitionType::None)
+        cls.relam = access_method_catalog::heapOid;
     cls.relnatts = static_cast<int16_t>(tbl.len());
     cls.relchecks = tableCheckConstraintCount(tbl);
     cls.relhasindex = tableSchemaHasImplicitIndex(tbl);
@@ -1510,6 +1513,7 @@ static Oid registerMaterializedViewInCatalog(
     relation.relname = logicalName;
     relation.relnamespace = namespaceOid;
     relation.relkind = 'm';
+    relation.relam = access_method_catalog::heapOid;
     relation.relnatts = static_cast<int16_t>(output.len());
     relation.relispopulated = populated;
     if (!output.owner.empty()) {
@@ -8993,6 +8997,8 @@ bool DdlExecutor::executeCreateIndex(const CreateIndexStmt* stmt, Session& s) {
             idx.relname = idxName;
             idx.relnamespace = ns->oid;
             idx.relkind = 'i';
+            idx.relam = access_method_catalog::indexOid(physicalMethod);
+            if (!idx.relam) throw std::runtime_error("index method has no catalog identity");
             idx.relpersistence = indexingSessionTemp ? 't' : tbl->relpersistence;
             idx.relnatts = static_cast<int16_t>(colnames.size());
             Oid idxOid = cat.createClass(idx);

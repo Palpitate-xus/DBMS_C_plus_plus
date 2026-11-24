@@ -1,6 +1,7 @@
 #include "PostgresProtocol.h"
 #include "expression/ExprEvaluator.h"
 #include "common/DateType.h"
+#include "common/InternalCharCodec.h"
 #include "common/TemporalStorageCodec.h"
 #include "PostgresNumeric.h"
 #include "types/bytea.h"
@@ -266,6 +267,9 @@ bool encodeBinaryValue(const std::string& value, const PgColumnDescription& colu
                 else return false;
                 return true;
             }
+            case 18:
+                encoded.push_back(parseInternalCharByte(value));
+                return true;
             case 21: {
                 const auto number = std::stoll(value);
                 if (number < std::numeric_limits<int16_t>::min() ||

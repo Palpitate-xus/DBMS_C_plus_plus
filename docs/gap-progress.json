@@ -2,6 +2,18 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-24 expose table and index access methods for psql table listings",
+      "gap_ids": ["CAT-03", "CLIENT-01"],
+      "status": "partial",
+      "evidence": ["src/catalog/PgAccessMethodCatalog.h", "src/catalog/CatalogService.cpp", "src/commands/DdlExecutor.cpp", "src/expression/ExprEvaluator.cpp", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/pg_access_method_catalog_protocol_e2e_test.py"],
+      "verification": [
+        "Stock psql 18.6 lists ordinary tables and fits the tested name, schema, search path and temporary table cases.",
+        "The supported pg_am fields expose real relation origins and match the PostgreSQL identifiers for the common access methods. DDL and recovery retain the access method of explicitly created indexes.",
+        "The handler field, user-defined access methods, index and constraint catalogs, and the remaining steps of psql describe stay open."
+      ]
+    },
+    {
       "issue": "2026-11-24 resolve visible relation names in stock psql catalog queries",
       "gap_ids": ["CLIENT-01", "CAT-03", "SQL-04"],
       "status": "partial",

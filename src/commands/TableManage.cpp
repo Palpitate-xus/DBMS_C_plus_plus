@@ -24,6 +24,7 @@
 #include "common/DatabaseMetadataWrite.h"
 #include "commands/InheritanceGraph.h"
 #include "catalog/PgInheritanceCatalog.h"
+#include "catalog/PgAccessMethodCatalog.h"
 #include "common/DataDirectory.h"
 #include "storage/VariableRow.h"
 #include "common/SqlArrayText.h"
@@ -42476,7 +42477,8 @@ decltype(auto) StorageEngine::withQueryBindingMetadata(const std::string& dbname
             std::vector<std::string> schemas;
             const Session* session = currentSession();
             if (!requested.schema.empty()) schemas.push_back(requested.schema);
-            else if (requested.name == "pg_type" || requested.name == inheritance_catalog::name)
+            else if (requested.name == "pg_type" || requested.name == inheritance_catalog::name ||
+                     requested.name == access_method_catalog::name)
                 schemas = effectiveRelationSearchPath(session);
             else {
                 std::string canonical; std::vector<std::string> path;
@@ -42503,6 +42505,7 @@ decltype(auto) StorageEngine::withQueryBindingMetadata(const std::string& dbname
                         {"pg_attrdef", default_catalog::descriptor()},
                         {"pg_depend", default_catalog::dependencyDescriptor()},
                         {"pg_inherits", inheritance_catalog::descriptor()},
+                        {access_method_catalog::name, access_method_catalog::descriptor()},
                         {"pg_namespace", ownedNamespaceCatalogDescriptor()},
                         {"pg_settings", system_catalog::settingsDescriptor()},
                         {"pg_stat_activity", {{"pid","integer"},{"datname","name"},{"usename","name"},{"state","text"},{"query","text"}}}
@@ -42526,6 +42529,9 @@ decltype(auto) StorageEngine::withQueryBindingMetadata(const std::string& dbname
                         if (requested.name == inheritance_catalog::name)
                             default_catalog::validate(catalog, inheritance_catalog::relationOid,
                                 inheritance_catalog::name, inheritance_catalog::fields);
+                        if (requested.name == access_method_catalog::name)
+                            default_catalog::validate(catalog, access_method_catalog::relationOid,
+                                access_method_catalog::name, access_method_catalog::fields);
                         for(auto& column:description.columns) {
                             column.typeOid=mapBuiltinTypeNameToOid(column.type);
                             if(column.typeOid)column.typeMetadata=metadata.datumType(column.type,column.typeOid);

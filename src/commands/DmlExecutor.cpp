@@ -530,7 +530,7 @@ std::string resolveTable(Session& s, const std::string& name,
     if (!qualified.schema.empty()) {
         const std::string& schema = qualified.schema;
         const std::string& table = qualified.name;
-        if (checkPgType) requireWritablePgTypeRelation(schema, table);
+        if (checkPgType) requireWritableBuiltinRelation(schema, table);
         const bool temporary = schema == "pg_temp" ||
             (schema.rfind("pg_temp_", 0) == 0 &&
              (!checkPgType || schema == sessionTempSchemaName(s)));
@@ -605,7 +605,7 @@ std::string resolveTable(Session& s, const std::string& name,
     for (const auto& rawSchema : entries) {
         const std::string schema = checkPgType ? rawSchema :
             expandSessionSearchPathEntry(rawSchema, s.username);
-        if (checkPgType) requireWritablePgTypeRelation(schema, table);
+        if (checkPgType) requireWritableBuiltinRelation(schema, table);
         if (schema == "pg_temp" || schema == temporarySchema) {
             if (isTempTable(s, table)) return temporaryPhysicalName(table);
             continue;

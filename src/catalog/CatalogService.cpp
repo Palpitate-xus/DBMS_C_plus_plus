@@ -14,6 +14,7 @@
 #include "utils/Session.h"
 #include "common/DatabaseMetadataWrite.h"
 #include "catalog/PgInheritanceCatalog.h"
+#include "catalog/PgAccessMethodCatalog.h"
 #include "common/DbError.h"
 #include "access/IndexFileUtil.h"
 #include <filesystem>
@@ -180,6 +181,94 @@ std::vector<CatalogManager::PhysicalArrayAttribute> physicalArrayAttributes(
 }
 
 struct CatalogDatabaseIdentity { uint64_t device = 0; uint64_t inode = 0; };
+
+bool accessMethodsPublished(const fs::path& path) {
+    std::error_code error;
+    const auto status = fs::symlink_status(path, error);
+    if (error == std::errc::no_such_file_or_directory ||
+        (!error && !fs::exists(status))) return false;
+    if (error) throw DbError("58030", "cannot inspect access method catalog version");
+    if (!fs::is_regular_file(status) ||
+        fs::file_size(path) != sizeof(access_method_catalog::version) - 1)
+        throw DbError("XX001", "invalid access method catalog version");
+    std::ifstream input(path, std::ios::binary);
+    if (!input) throw DbError("58030", "cannot read access method catalog version");
+    const std::string bytes((std::istreambuf_iterator<char>(input)), {});
+    if (input.bad() || bytes != access_method_catalog::version)
+        throw DbError("XX001", "invalid access method catalog version");
+    return true;
+}
+
+void initializeRelationAccessMethods(const StorageEngine& engine, const std::string& database,
+                                     CatalogManager& catalog) {
+    const auto snapshot = catalog.metadataSnapshot();
+    std::unordered_map<Oid, const PgClassRow*> relations;
+    std::unordered_map<Oid, std::string_view> schemas;
+    std::unordered_map<Oid, Oid> indexParents;
+    for (const auto& relation : snapshot.relations) relations.emplace(relation.oid, &relation);
+    for (const auto& schema : snapshot.namespaces) schemas.emplace(schema.oid, schema.nspname);
+    for (const auto& edge : snapshot.dependencies) {
+        if (edge.classid != PgClassOid_Class || edge.refclassid != PgClassOid_Class ||
+            edge.objsubid || edge.refobjsubid || edge.deptype != 'a') continue;
+        const auto [position, inserted] = indexParents.emplace(edge.objid, edge.refobjid);
+        if (!inserted && position->second != edge.refobjid) position->second = INVALID_OID;
+    }
+    const auto physicalNames = [&](const PgClassRow& relation) {
+        std::vector<std::string> names;
+        const auto found = schemas.find(relation.relnamespace);
+        if (found == schemas.end()) return names;
+        const auto schema = found->second;
+        if (schema == "public") {
+            names = {relation.relname, "public__" + relation.relname};
+        } else if (schema.substr(0, 8) == "pg_temp_") {
+            names.push_back("__tmp_" + std::string(schema.substr(8)) + "_" + relation.relname);
+        } else {
+            names.push_back(std::string(schema) + "__" + relation.relname);
+        }
+        if (relation.relkind == 'm')
+            for (auto& name : names) name = StorageEngine::materializedViewPrefix(name);
+        return names;
+    };
+    struct StoredRelation {
+        std::string name;
+        bool usesHeap = false;
+    };
+    std::unordered_map<Oid, StoredRelation> storedRelations;
+    const auto storedRelation = [&](const PgClassRow& relation) -> const StoredRelation& {
+        auto [entry, inserted] = storedRelations.try_emplace(relation.oid);
+        if (inserted) {
+            for (const auto& name : physicalNames(relation)) {
+                const auto schema = engine.readPersistedSchemaForCatalog(database, name);
+                if (!schema) continue;
+                entry->second = {name, schema->partitionType == TableSchema::PartitionType::None};
+                break;
+            }
+        }
+        return entry->second;
+    };
+    for (auto relation : snapshot.relations) {
+        if (relation.relam) continue;
+        if (relation.relkind == 'm' || (relation.relkind == 'r' && relation.relnamespace == 11)) {
+            relation.relam = access_method_catalog::heapOid;
+        } else if (relation.relkind == 'r') {
+            if (storedRelation(relation).usesHeap) relation.relam = access_method_catalog::heapOid;
+        } else if (relation.relkind == 'i') {
+            const auto parent = indexParents.find(relation.oid);
+            if (parent == indexParents.end()) continue;
+            const auto table = relations.find(parent->second);
+            if (table == relations.end()) continue;
+            const auto& name = storedRelation(*table->second).name;
+            if (!name.empty()) {
+                const auto index = engine.getNamedIndex(database, name, relation.relname);
+                if (index)
+                    relation.relam = access_method_catalog::indexOid(index->accessMethod);
+            }
+        }
+        if (relation.relam && !catalog.updateClass(relation.oid, relation))
+            throw DbError("XX001", "relation disappeared during access method catalog upgrade");
+    }
+}
+
 bool databaseIdentity(const std::filesystem::path& path, CatalogDatabaseIdentity& identity,
                       bool reservedCatalogOnly = false) {
     struct stat data{};
@@ -251,6 +340,11 @@ std::shared_ptr<CatalogManager> loadOwnedCatalog(
     }
     const bool initializedInheritance = default_catalog::bootstrapOne(*catalog,
         inheritance_catalog::relationOid, inheritance_catalog::name, inheritance_catalog::fields, publishedInheritance);
+    const auto accessMethodMarker = directory / ".access_method_catalog_version";
+    const bool publishedAccessMethods = accessMethodsPublished(accessMethodMarker);
+    const bool initializedAccessMethods = default_catalog::bootstrapOne(*catalog,
+        access_method_catalog::relationOid, access_method_catalog::name, access_method_catalog::fields,
+        publishedAccessMethods);
     const bool publishedDefaultCatalog = default_catalog::published(directory);
     const bool initializedDefaultCatalog = default_catalog::bootstrap(*catalog, publishedDefaultCatalog);
     const auto sequenceMarker=directory/".sequence_catalog_version";
@@ -276,6 +370,7 @@ std::shared_ptr<CatalogManager> loadOwnedCatalog(
     const bool publishedPhysicalArrays = physicalArraysPublished(directory);
     const bool initializedPhysicalArrays = catalog->bootstrapPhysicalArrayAttributes(
         physicalArrayAttributes(engine, database, *catalog), publishedPhysicalArrays);
+    if (!publishedAccessMethods) initializeRelationAccessMethods(engine, database, *catalog);
     // Some legitimate server cluster scaffolds already have tlist.lst and
     // auth metadata, but no namespace catalog. A newly bootstrapped logical
     // public namespace must have the same checked physical marker as CREATE
@@ -300,8 +395,11 @@ std::shared_ptr<CatalogManager> loadOwnedCatalog(
         }
     }
     migrateLegacyPublicDottedSequences(engine, database, *catalog);
-    if((initializedClassCatalog || initializedOwnedCatalogs || initializedInheritance || initializedSequenceCatalog || initializedStatisticsView || initializedSystemAttributes || initializedTypeProperties || initializedCatalogCollations || initializedPhysicalArrays || initializedDefaultCatalog || !publishedDefaultCatalog || !publishedTypeProperties || !publishedCatalogCollations || !publishedPhysicalArrays) && !catalog->persistAll())
+    if((initializedClassCatalog || initializedOwnedCatalogs || initializedInheritance || initializedSequenceCatalog || initializedStatisticsView || initializedSystemAttributes || initializedTypeProperties || initializedCatalogCollations || initializedPhysicalArrays || initializedDefaultCatalog || !publishedDefaultCatalog || !publishedTypeProperties || !publishedCatalogCollations || !publishedPhysicalArrays || initializedAccessMethods || !publishedAccessMethods) && !catalog->persistAll())
         throw DbError("58030","could not publish initialized system view identities");
+    if (!publishedAccessMethods && index_file::writeAtomicallyNoReplace(accessMethodMarker,
+            access_method_catalog::version) != index_file::WriteResult::OK)
+        throw DbError("58030", "could not publish access method catalog version");
     if (!publishedInheritance && index_file::writeAtomicallyNoReplace(inheritanceMarker,
             inheritance_catalog::version) != index_file::WriteResult::OK)
         throw DbError("58030", "could not publish inheritance catalog version");

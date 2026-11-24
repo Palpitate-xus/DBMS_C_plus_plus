@@ -40,6 +40,7 @@
 #include "expression/sql_value.h"
 #include "common/DbError.h"
 #include "common/IntegerTextCodec.h"
+#include "common/InternalCharCodec.h"
 #include "common/OidInput.h"
 #include "expression/float8_output.inc"
 #include "common/version.h"
@@ -1283,7 +1284,6 @@ static std::string trimStr(const std::string& s);
 static size_t utf8ByteAt(const std::string& s, size_t charIdx);
 static bool isBlankPaddedCharacterType(const std::string& typeName);
 static size_t logicalCharacterByteLength(const ExprValue& value);
-static unsigned char parseInternalCharByte(const std::string& input);
 
 // ----------------------------------------------------------------------------
 // Interval support
@@ -5786,25 +5786,8 @@ static ExprValue castToBitString(const ExprValue& value,
                      std::move(bits), false);
 }
 
-static unsigned char parseInternalCharByte(const std::string& input) {
-    // This type holds a byte, not a UTF-8 character or a CHAR(1) string.
-    // Its text input accepts an exact three-octal-digit escape, otherwise
-    // the first input byte. Output keeps high bytes safe for client encoding.
-    unsigned char byte = input.empty()?0:static_cast<unsigned char>(input.front());
-    if (input.size()==4 && input.front()=='\\' &&
-        std::all_of(input.begin()+1,input.end(),[](char c){return c>='0' && c<='7';})) {
-        byte=static_cast<unsigned char>((input[1]-'0')*64+(input[2]-'0')*8+input[3]-'0');
-    }
-    return byte;
-}
-
 static ExprValue formatInternalCharByte(unsigned char byte) {
-    std::string output;
-    if (byte>=128) {
-        output={'\\',static_cast<char>('0'+(byte>>6)),
-            static_cast<char>('0'+((byte>>3)&7)),static_cast<char>('0'+(byte&7))};
-    } else if (byte) output.push_back(static_cast<char>(byte));
-    return ExprValue("\"char\"",std::move(output),false);
+    return ExprValue("\"char\"", internalCharText(byte), false);
 }
 
 ExprValue ExprEvaluator::transformUnknownIntegerInput(const ExprValue& input,
@@ -6588,6 +6571,22 @@ struct SqlTableVisibilityFunction {
         return ExprValue("boolean", *visible ? "t" : "f");
     }
 };
+struct SqlRoleNameFunction {
+    ExprValue operator()(const std::vector<ExprValue>&) const {
+        throw DbError("XX000", "pg_get_userbyid requires its catalog context");
+    }
+
+    ExprValue invoke(const std::vector<ExprValue>& args, StorageEngine& engine) const {
+        if (args.size() != 1)
+            throw DbError("42883", "function pg_get_userbyid does not exist for these arguments");
+        const auto& input = args.front();
+        if (input.isNull) return ExprValue("name", "", true);
+        const auto oid = input.objectOid ? *input.objectOid : parseOidInput(input.value);
+        const auto role = engine.catalogService().acquire("info")->getAuthId(oid);
+        if (role) return ExprValue("name", role->rolname);
+        return ExprValue("name", "unknown (OID=" + std::to_string(oid) + ")");
+    }
+};
 struct SqlSessionSettingFunction {
     bool write;
 
@@ -6606,6 +6605,8 @@ bool ownsScalarSignatures(const std::string& name,const ScalarFunction* callback
         return callback && callback->target<SqlSerialSequenceFunction>();
     if (name == "pg_table_is_visible")
         return callback && callback->target<SqlTableVisibilityFunction>();
+    if (name == "pg_get_userbyid")
+        return callback && callback->target<SqlRoleNameFunction>();
     if(isCoreOverloadedScalarName(name))
         return callback && callback->target<DeclaredCoreScalarFunction>();
     if(isArraySearchScalarName(name))
@@ -6690,6 +6691,11 @@ const std::vector<ScalarSignature>& scalarSignatures(const std::string& name) {
     if (name == "pg_table_is_visible") {
         static const auto* const signatures = new const std::vector<ScalarSignature>{
             {{"oid"}, "boolean"}};
+        return *signatures;
+    }
+    if (name == "pg_get_userbyid") {
+        static const auto* const signatures = new const std::vector<ScalarSignature>{
+            {{"oid"}, "name"}};
         return *signatures;
     }
     if (name == "current_setting") {
@@ -8005,6 +8011,9 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
         } else if (const auto* visibility = it->second.target<SqlTableVisibilityFunction>()) {
             auto* owner = sqlValueEngine_ ? sqlValueEngine_ : &g_engine;
             result = visibility->invoke(args, *owner, currentDB_);
+        } else if (const auto* user = it->second.target<SqlRoleNameFunction>()) {
+            auto* owner = sqlValueEngine_ ? sqlValueEngine_ : &g_engine;
+            result = user->invoke(args, *owner);
         } else result = it->second(args);
         if(!pushElement && declaredResult.size()>=2 && declaredResult.compare(declaredResult.size()-2,2,"[]")==0)
             result=implicitRuntimeValue(*this,std::move(result),declaredResult);
@@ -13991,6 +14000,8 @@ void ExprEvaluator::registerStatelessBuiltins() {
     functions_["pg_get_serial_sequence"]=SqlSerialSequenceFunction{};
     functions_["pg_table_is_visible"] = SqlTableVisibilityFunction{};
     volatility_["pg_table_is_visible"] = 's';
+    functions_["pg_get_userbyid"] = SqlRoleNameFunction{};
+    volatility_["pg_get_userbyid"] = 's';
     functions_["current_setting"] = SqlSessionSettingFunction{false};
     functions_["set_config"] = SqlSessionSettingFunction{true};
     functions_["version"]=SqlVersionFunction{};
