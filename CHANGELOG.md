@@ -1,27 +1,27 @@
 # 更新日志
 
 <details>
-<summary>可以按表查已创建的索引 · 2026-11-24</summary>
+<summary>列出一张表上手动创建的索引 · 2026-11-24</summary>
 
-例如，可以列出订单表上手动创建的索引，查看每个索引用了几列、是否要求值不重复。
+例如，可以列出订单表上的索引，看看哪些索引要求值不能重复。
 
 [查询示例](docs/MANUAL.md#按表查询索引) · [测试报告](docs/test-report.md#pg-index-20261124) · [性能报告](docs/performance-report-2026-10-30.md#pg-index-cost-20261124)
 
 </details>
 
 <details>
-<summary>查看索引建在哪张表和哪些列上 · 2026-11-24</summary>
+<summary>查看某个索引用了哪些列 · 2026-11-24</summary>
 
-例如，可以查到订单索引按客户编号查找，也顺带保存了订单日期。可以查看整个定义，或只查看其中一列。
+例如，可以查到订单表的一个索引按客户编号查找，同时保存了订单日期。可以查看整个索引的定义，也可以只查其中一列。
 
 [查询示例](docs/MANUAL.md#查询索引的定义) · [测试报告](docs/test-report.md#index-definition-20261124) · [性能报告](docs/performance-report-2026-10-30.md#index-definition-cost-20261124)
 
 </details>
 
 <details>
-<summary>把一列查询结果收进数组 · 2026-11-24</summary>
+<summary>把多行查询结果放进一个数组 · 2026-11-24</summary>
 
-例如，用一条查询把某位客户的订单编号按顺序放进一个数组。没有订单时会返回空数组。
+例如，可以把某位客户的所有订单编号放在同一个数组里。没有订单时会得到空数组。
 
 [查询示例](docs/MANUAL.md#把查询结果收进数组) · [测试报告](docs/test-report.md#array-subquery-20261124) · [性能报告](docs/performance-report-2026-10-30.md#array-subquery-cost-20261124)
 
