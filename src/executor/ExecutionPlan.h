@@ -1471,7 +1471,8 @@ public:
     static OpPtr buildPreparedSetReturningPlan(StorageEngine*,const std::string&,
         std::shared_ptr<PreparedQuery>,SelectStmt*,const RowContext& = {},
         PreparedChildExecutor = {},PreparedChildCursorFactory = {},
-        bool planRootConstants = false, PreparedSetReturningReader providerReader = {});
+        bool planRootConstants = false, PreparedSetReturningReader providerReader = {},
+        bool selectBodyOnly = false);
     // Build operator tree for SELECT * FROM t WHERE ... ORDER BY ... LIMIT ...
     static OpPtr buildSelectPlan(StorageEngine* engine, const PlanContext& ctx);
 

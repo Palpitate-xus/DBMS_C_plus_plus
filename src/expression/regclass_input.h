@@ -51,11 +51,15 @@ inline const PgClassRow* lookup(const CatalogManager::QualifiedName& name,
     }
     return nullptr;
 }
-inline Oid inputOid(const std::string& input,const CatalogManager::MetadataSnapshot& catalog,
-    const Session* session) {
+inline std::optional<Oid> literalOid(const std::string& input) {
     if(input=="-")return 0;
     if(!input.empty() && std::all_of(input.begin(),input.end(),
        [](unsigned char c){return c>='0' && c<='9';}))return regtype_detail::numericOid(input);
+    return std::nullopt;
+}
+inline Oid inputOid(const std::string& input,const CatalogManager::MetadataSnapshot& catalog,
+    const Session* session) {
+    if(const auto numeric=literalOid(input))return *numeric;
     const auto name=parseName(input);
     if(const auto* relation=lookup(name,catalog,session))return relation->oid;
     throw DbError("42P01","relation \""+input+"\" does not exist");

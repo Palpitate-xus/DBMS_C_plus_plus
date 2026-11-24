@@ -2,6 +2,10 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-24 · 查询分区归属
+
+`pg_catalog.pg_partition_ancestors(regclass)` 返回 `regclass` 行。分区根表返回自身，旧目录中有可确认父表的子分区按由近到远的顺序返回自身和父表。普通表、普通继承表、未知表编号和 SQL `NULL` 返回零行。若按名称指定的表不存在，则返回 `42P01`。旧目录记录与分区定义不能确定唯一父表时会报错。独立分区表、分区索引及完整的关联函数查询仍待补齐。 [查询示例](MANUAL.md#查询分区归属) · [测试记录](test-report.md#partition-ancestors-20261124)
+
 ## 2026-11-24 · 查询列的排序规则
 
 `pg_collation` 提供 `default`、`C`、`POSIX`、`ucs_basic` 及项目自带的 `nocase`、`reverse` 和 `C.utf8`。目录列保留各自的 SQL 类型，包括名称、对象编号、编码和可空的区域设置。普通表显式使用这些规则时，`pg_attribute.attcollation` 指向对应记录。用户创建的排序规则及完整区域设置目录仍待补齐。 [查询示例](MANUAL.md#查询列的排序规则) · [测试记录](test-report.md#collation-catalog-20261124)

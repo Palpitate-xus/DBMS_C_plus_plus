@@ -20,9 +20,12 @@
 #include "catalog/DatumMetadataFactory.h"
 #include "expression/regclass_input.h"
 #include "common/DbError.h"
+#include "common/QueryHostProvider.h"
 #include "access/IndexFileUtil.h"
+#include <charconv>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <stdexcept>
 #include <fcntl.h>
 #include <unistd.h>
@@ -712,6 +715,10 @@ bool CatalogService::has(const std::string& dbname) const {
 
 CatalogService::ReadCatalog CatalogService::readCatalog(const std::string& dbname) const {
     const auto ownership = engine_.catalogReadOwnership(dbname);
+    return readCatalog(dbname, ownership.mayReadCurrentFiles);
+}
+
+CatalogService::ReadCatalog CatalogService::readCatalog(const std::string& dbname, bool mayReadCurrentFiles) const {
     CatalogDatabaseIdentity physical;
     if (!databaseIdentity(engine_.dbPath(dbname), physical, dbname == "info")) return {};
     std::shared_ptr<CatalogManager> model;
@@ -720,17 +727,17 @@ CatalogService::ReadCatalog CatalogService::readCatalog(const std::string& dbnam
         const auto found = cache_.find(dbname);
         if (found != cache_.end() && found->second.databaseDevice == physical.device &&
             found->second.databaseInode == physical.inode)
-            model = !ownership.mayReadCurrentFiles && found->second.committed
+            model = !mayReadCurrentFiles && found->second.committed
                 ? found->second.committed : found->second.manager;
     }
     if (model) {
-        if (!ownership.mayReadCurrentFiles) return {std::move(model), {}};
+        if (!mayReadCurrentFiles) return {std::move(model), {}};
         const auto state = model->publicationState();
         if (state == CatalogManager::PublicationState::Current) return {std::move(model), {}};
         if (state == CatalogManager::PublicationState::Conflict)
             throw DbError("58030", "catalog read conflicts with unpublished or missing metadata");
     }
-    if (!ownership.mayReadCurrentFiles)
+    if (!mayReadCurrentFiles)
         throw DbError("55P03", "cold catalog read conflicts with an active DDL owner");
     // Copying committed metadata remains pure: no bootstrap/OID allocation,
     // cache insertion, legacy migration or destructor publication.
@@ -1061,5 +1068,131 @@ std::optional<std::string> definition(const StorageEngine& engine, const std::st
 }
 
 } // namespace foreign_key_catalog
+
+namespace {
+
+std::optional<Oid> partitionInputOid(const ExprValue& input) {
+    if (input.objectOid) return *input.objectOid;
+    const auto type = ExprHelper::canonicalResultTypeName(input.typeName);
+    if (type == "oid") return regtype_detail::numericOid(input.value);
+    if (type == "smallint" || type == "integer" || type == "bigint") {
+        int64_t number = 0;
+        const auto* end = input.value.data() + input.value.size();
+        const auto parsed = std::from_chars(input.value.data(), end, number);
+        if (parsed.ec != std::errc{} || parsed.ptr != end ||
+            (type == "bigint" && (number < 0 || number > std::numeric_limits<Oid>::max())))
+            throw DbError("22003", "OID out of range");
+        return static_cast<Oid>(number);
+    }
+    return regclass_detail::literalOid(input.value);
+}
+
+bool namesPartition(const TableSchema& parent, const std::string& name) {
+    switch (parent.partitionType) {
+    case TableSchema::PartitionType::Range:
+        return name == parent.defaultPartitionName ||
+            std::any_of(parent.rangePartitions.begin(), parent.rangePartitions.end(),
+                        [&](const auto& bound) { return bound.first == name; });
+    case TableSchema::PartitionType::List:
+        return name == parent.defaultPartitionName ||
+            std::any_of(parent.listPartitions.begin(), parent.listPartitions.end(),
+                        [&](const auto& bound) { return bound.first == name; });
+    case TableSchema::PartitionType::Hash: {
+        if (name.size() < 2 || name.front() != 'p' || (name.size() > 2 && name[1] == '0')) return false;
+        size_t slot = 0;
+        const auto* end = name.data() + name.size();
+        const auto parsed = std::from_chars(name.data() + 1, end, slot);
+        return parsed.ec == std::errc{} && parsed.ptr == end && slot < parent.hashPartitions;
+    }
+    default:
+        return false;
+    }
+}
+
+bool canOwnPartition(const PgClassRow& row) {
+    // Old catalog rows use relkind 'r' for roots and do not assign the heap AM.
+    return row.relkind == 'p' || (row.relkind == 'r' && !row.relam && row.relnamespace != 11);
+}
+
+} // namespace
+
+std::vector<ExprValue> readPartitionAncestors(const StorageEngine& engine,
+    const std::string& database, const Session* session, const ExprValue& input) {
+    if (input.isNull) return {};
+    const auto numeric = partitionInputOid(input);
+    if (numeric && *numeric == INVALID_OID) return {};
+    const auto fence = engine.catalogReadOwnership(database);
+    if (!fence.mayReadCurrentFiles)
+        throw DbError("55P03", "partition ancestry read conflicts with an active database writer");
+    const auto catalog = engine.catalogService().readCatalog(database, fence.mayReadCurrentFiles);
+    if (!catalog.manager && catalog.path.empty()) return {};
+    if (numeric && catalog.manager) {
+        // Clients such as psql already know the OID. An ordinary relation
+        // needs neither a copied catalog snapshot nor a table schema read.
+        const auto relation = catalog.manager->getClass(*numeric);
+        if (!relation || (!relation->relispartition && !canOwnPartition(*relation))) return {};
+    }
+    const auto metadata = catalog.manager ? catalog.manager->metadataSnapshot(false)
+        : CatalogManager::readMetadataSnapshot(catalog.path, false);
+    const auto oid = numeric ? *numeric : regclass_detail::inputOid(input.value, metadata, session);
+    const auto relation = std::find_if(metadata.relations.begin(), metadata.relations.end(),
+        [&](const auto& row) { return row.oid == oid; });
+    if (relation == metadata.relations.end() ||
+        (!relation->relispartition && !canOwnPartition(*relation))) return {};
+
+    const auto physicalName = [&](const PgClassRow& row) {
+        const auto space = std::find_if(metadata.namespaces.begin(), metadata.namespaces.end(),
+            [&](const auto& ns) { return ns.oid == row.relnamespace; });
+        if (space == metadata.namespaces.end()) throw DbError("XX001", "partition relation has no namespace");
+        if (space->nspname == "public") return row.relname;
+        if (space->nspname.rfind("pg_temp_", 0) == 0)
+            return "__tmp_" + space->nspname.substr(8) + "_" + row.relname;
+        return space->nspname + "__" + row.relname;
+    };
+    const auto partitionSchema = [&](const PgClassRow& row) {
+        const auto name = physicalName(row);
+        auto stored = engine.readPersistedSchemaForCatalog(database, name);
+        if (!stored && row.relname == name) {
+            CatalogManager::QualifiedName alternate{"public", "public__" + name};
+            if (!regclass_detail::lookup(alternate, metadata, session))
+                stored = engine.readPersistedSchemaForCatalog(database, alternate.name);
+        }
+        return stored;
+    };
+    if (!relation->relispartition) {
+        const auto stored = partitionSchema(*relation);
+        if (!stored || stored->partitionType == TableSchema::PartitionType::None) {
+            if (relation->relkind == 'p') throw DbError("XX001", "partitioned table has no stored partition definition");
+            return {};
+        }
+    }
+
+    std::vector<ExprValue> result;
+    std::set<Oid> seen;
+    for (auto current = &*relation; ; ) {
+        if (!seen.insert(current->oid).second) throw DbError("XX001", "cycle in partition ancestry");
+        auto& value = result.emplace_back("regclass", regclass_detail::output(current->oid, metadata, session));
+        value.objectOid = current->oid;
+        if (!current->relispartition) return result;
+        if (current->relkind != 'r' && current->relkind != 'p')
+            throw DbError("0A000", "ancestry for this kind of partition is not supported");
+
+        // Legacy SQL could register a child before independent relation
+        // attachment was disabled. Only an explicit catalog flag together
+        // with a unique stored parent bound proves that relationship.
+        const auto name = physicalName(*current);
+        const PgClassRow* parent = nullptr;
+        for (const auto& candidate : metadata.relations) {
+            checkForQueryInterrupt();
+            if (!canOwnPartition(candidate)) continue;
+            const auto stored = partitionSchema(candidate);
+            if (!stored || !namesPartition(*stored, name)) continue;
+            if (parent) throw DbError("XX001", "partition has more than one stored parent");
+            parent = &candidate;
+        }
+        if (!parent) throw DbError("XX001", "partition has no stored parent");
+        current = parent;
+    }
+}
 
 } // namespace dbms

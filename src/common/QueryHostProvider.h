@@ -8,6 +8,9 @@
 #include <array>
 
 namespace dbms {
+std::vector<ExprValue> readPartitionAncestors(const StorageEngine& engine,
+    const std::string& database, const Session* session, const ExprValue& input);
+
 // The query host, not the scalar evaluator, owns these actual row providers.
 // Binding/ownership and execution consume the same immutable registration.
 struct QueryHostSetReturningProvider {
@@ -18,15 +21,26 @@ struct QueryHostSetReturningProvider {
     bool fixedSignature;
     std::string (*resultType)(const std::vector<std::string>&);
     std::vector<ExprValue> (*read)(const std::vector<ExprValue>&,
-                                 const Session*, const std::string&);
+                                const Session*, const std::string&, const StorageEngine*);
     std::unique_ptr<QueryHostValueCursor> (*open)(const std::vector<ExprValue>&,
         const QuerySetReturningBinding&,const Session*,const std::string&)=nullptr;
     size_t maximumArity=0;
+    const char* singleInputType = nullptr;
+    const char* singleInputName = nullptr;
+    const char* sourceColumnName = nullptr;
     bool acceptsArity(size_t count) const {return count>=arity && count<=(maximumArity?maximumArity:arity);}
+
+    const Expr* singleInput(const FunctionCallExpr& call) const {
+        if (call.args.size() == 1 && call.namedArgs.empty()) return call.args.front().get();
+        if (singleInputName && call.args.empty() && call.namedArgs.size() == 1 &&
+            call.namedArgs.front().name == singleInputName)
+            return call.namedArgs.front().value.get();
+        return nullptr;
+    }
 };
 
-inline const std::array<QueryHostSetReturningProvider,3>& queryHostSetReturningProviders() {
-    static const std::array<QueryHostSetReturningProvider,3> providers{{
+inline const std::array<QueryHostSetReturningProvider,4>& queryHostSetReturningProviders() {
+    static const std::array<QueryHostSetReturningProvider,4> providers{{
         {QuerySetReturningBinding::Kind::Unnest,"unnest","builtin:pg_catalog.unnest(anyarray)",1,false,
             [](const std::vector<std::string>& types) {
                 if(types.size()!=1)throw DbError("42883","function unnest does not exist for these arguments");
@@ -36,7 +50,7 @@ inline const std::array<QueryHostSetReturningProvider,3>& queryHostSetReturningP
                     throw DbError("42883","function unnest("+input+") does not exist");
                 return input.substr(0,input.size()-2);
             },
-            [](const std::vector<ExprValue>& arguments,const Session*,const std::string&) {
+            [](const std::vector<ExprValue>& arguments,const Session*,const std::string&,const StorageEngine*) {
                 if(arguments.size()!=1)throw DbError("XX000","bound unnest argument count changed");
                 return ExprEvaluator::arrayElements(arguments.front());
             }},
@@ -46,7 +60,8 @@ inline const std::array<QueryHostSetReturningProvider,3>& queryHostSetReturningP
                 if(!types.empty())throw DbError("42883","function pg_listening_channels does not exist for these arguments");
                 return std::string("text");
             },
-            [](const std::vector<ExprValue>& arguments,const Session* backend,const std::string& database) {
+            [](const std::vector<ExprValue>& arguments,const Session* backend,const std::string& database,
+               const StorageEngine*) {
                 if(!arguments.empty())throw DbError("XX000","bound channel provider argument count changed");
                 if(!backend)throw DbError("55000","channel provider requires an actual backend session");
                 if(backend->currentDB!=database)
@@ -61,7 +76,24 @@ inline const std::array<QueryHostSetReturningProvider,3>& queryHostSetReturningP
             [](const std::vector<ExprValue>& arguments,const QuerySetReturningBinding& binding,
                const Session* backend,const std::string&)->std::unique_ptr<QueryHostValueCursor> {
                 return std::make_unique<GenerateSeriesCursor>(arguments,binding.elementType,backend);
-            },4}
+            },4},
+        {QuerySetReturningBinding::Kind::PartitionAncestors,"pg_partition_ancestors",
+            "builtin:pg_catalog.pg_partition_ancestors(regclass)",1,false,
+            [](const std::vector<std::string>& types) {
+                if (types.size() != 1) throw DbError("42883", "pg_partition_ancestors requires one argument");
+                const auto& type = types.front();
+                if (type != "regclass" && type != "oid" && type != "unknown" && type != "text" &&
+                    type != "character varying" && type != "varchar" && type != "integer" &&
+                    type != "smallint" && type != "bigint")
+                    throw DbError("42883", "function pg_partition_ancestors(" + type + ") does not exist");
+                return std::string("regclass");
+            },
+            [](const std::vector<ExprValue>& arguments, const Session* session, const std::string& database,
+               const StorageEngine* engine) {
+                if (!engine || arguments.size() != 1)
+                    throw DbError("XX000", "partition ancestry requires a bound argument and catalog");
+                return readPartitionAncestors(*engine, database, session, arguments.front());
+            },nullptr,0,"regclass","partitionid","relid"}
     }};
     return providers;
 }

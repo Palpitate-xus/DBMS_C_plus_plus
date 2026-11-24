@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>可以用 SQL 查询分区归属 · 2026-11-24</summary>
+
+分区根表会返回自己的名称。普通表返回空结果。旧库中已有归属记录的子分区也可以查到它的父表。
+
+[查询示例](docs/MANUAL.md#查询分区归属) · [测试报告](docs/test-report.md#partition-ancestors-20261124) · [性能报告](docs/performance-report-2026-10-30.md#partition-ancestors-cost-20261124)
+
+</details>
+
+<details>
 <summary>查看删除或更新数据时的外键规则 · 2026-11-24</summary>
 
 例如，可以查到删除客户时，外键规则是一起删除相关订单，还是阻止删除客户。表或列改名后，会显示新名称。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>查看表的列信息更快 · 2026-11-24</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-24 · 查看表的列信息更快
 
 在本机测试中，查询一张有五列的表，显示列名、类型、默认值和排序规则，耗时中位数从约 307 毫秒降到约 15 毫秒。
 
 [测试报告](docs/test-report.md#catalog-oid-lookup-20261124) · [性能报告](docs/performance-report-2026-10-30.md#catalog-oid-lookup-cost-20261124)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-24 · 查看文本列怎么排序
 

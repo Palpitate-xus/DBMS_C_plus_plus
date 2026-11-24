@@ -2128,6 +2128,7 @@ class PreparedSetReturningOp final : public Operator {
     PreparedQueryExecution execution_;
     RowContext outer_;
     std::string database_;
+    const StorageEngine* engine_;
     PreparedSetReturningReader providerReader_;
     std::vector<const FunctionCallExpr*> calls_;
     std::vector<std::unique_ptr<QueryHostValueCursor>> providerCursors_;
@@ -2141,7 +2142,8 @@ public:
         PreparedChildExecutor reader,PreparedChildCursorFactory cursor,bool planRootConstants,
         PreparedSetReturningReader providerReader)
         :query_(std::move(query)),select_(select),
-         execution_(query_,engine,database),outer_(outer),database_(database),providerReader_(std::move(providerReader)) {
+         execution_(query_,engine,database),outer_(outer),database_(database),engine_(engine),
+         providerReader_(std::move(providerReader)) {
         execution_.setQueryExecutor(std::move(reader));
         execution_.setChildCursorFactory(std::move(cursor));
         if(planRootConstants)execution_.planStatementConstants(select_);
@@ -2192,7 +2194,7 @@ public:
                     else {
                         if(!providerReader_ && !provider.read)
                             throw DbError("XX000","set-returning receiver has no cursor factory");
-                        auto rows=providerReader_?providerReader_(binding,arguments):provider.read(arguments,currentSession(),database_);
+                        auto rows=providerReader_?providerReader_(binding,arguments):provider.read(arguments,currentSession(),database_,engine_);
                         for(const auto& cell:rows)
                             if(cell.typeName != binding.elementType && ExprHelper::canonicalResultTypeName(cell.typeName)!=
                                ExprHelper::canonicalResultTypeName(binding.elementType))
@@ -7563,16 +7565,18 @@ OpPtr QueryPlanner::applyPreparedValuesClauses(StorageEngine* engine,const std::
 OpPtr QueryPlanner::buildPreparedSetReturningPlan(StorageEngine* engine,const std::string& database,
     std::shared_ptr<PreparedQuery> query,SelectStmt* select,const RowContext& outer,
     PreparedChildExecutor reader,PreparedChildCursorFactory cursor,bool planRootConstants,
-    PreparedSetReturningReader providerReader) {
+    PreparedSetReturningReader providerReader,bool selectBodyOnly) {
     if(!select)return {};
     bool returning=false;
     for(const auto& target:select->selectList)
         if(const auto* call=dynamic_cast<const FunctionCallExpr*>(target.expr.get());call && call->setReturning)returning=true;
     if(!returning && !select->functionSourceProducer)return {};
-    if(select->command!=SqlCommand::Select || select->fromClause || select->setOp!=SetOp::None ||
-        select->setOpLhs || select->setOpRhs || !select->groupBy.empty() || !select->groupByElems.empty() ||
-        select->having || select->distinct || !select->distinctOn.empty() || !select->orderBy.empty() ||
-        !select->windowDefs.empty() || !select->locking.empty() || select->withTies)
+    if(select->command!=SqlCommand::Select || select->fromClause ||
+        (!selectBodyOnly && (select->setOp!=SetOp::None || select->setOpLhs || select->setOpRhs ||
+                             !select->orderBy.empty() || select->withTies)) ||
+        (selectBodyOnly && (select->setOp==SetOp::None || select->setOpLhs || !select->setOpRhs)) ||
+        !select->groupBy.empty() || !select->groupByElems.empty() || select->having || select->distinct ||
+        !select->distinctOn.empty() || !select->windowDefs.empty() || !select->locking.empty())
         throw DbError("0A000","set-returning SELECT requires additional relational lowering");
     if(!query)
         throw DbError("XX000","set-returning SELECT has no prepared query-host implementation");
@@ -7592,6 +7596,9 @@ OpPtr QueryPlanner::buildPreparedSetReturningPlan(StorageEngine* engine,const st
     }
     OpPtr plan=std::make_unique<PreparedSetReturningOp>(engine,database,std::move(query),select,outer,
         std::move(reader),std::move(cursor),planRootConstants,std::move(providerReader));
+    // The parent set operation owns ORDER BY, OFFSET and LIMIT for its
+    // combined output. An inline left SELECT supplies only its own rows.
+    if(selectBodyOnly)return plan;
     if(select->offset)plan=std::make_unique<OffsetOp>(std::move(plan),*select->offset);
     if(select->signedFetchCount && *select->signedFetchCount<0)
         plan=std::make_unique<PreparedNegativeFetchOp>(std::move(plan));
@@ -7615,7 +7622,7 @@ OpPtr QueryPlanner::buildPreparedQueryPlan(StorageEngine* engine,const std::stri
             [engine,database,query,outer](SelectStmt* branch,bool body,PreparedExecutionProvider owner) {
                 return buildPreparedQueryPlan(engine,database,query,branch,outer,std::move(owner),body);
             },{},childFactory,false,false,std::move(executionProvider),outer);
-    if(!selectBodyOnly)if(auto set=buildPreparedSetReturningPlan(engine,database,query,select,outer,{},childFactory))return set;
+    if(auto set=buildPreparedSetReturningPlan(engine,database,query,select,outer,{},childFactory,false,{},selectBodyOnly))return set;
     if(select->command==SqlCommand::Values) {
         if(select->whereClause || (!selectBodyOnly && select->setOp!=SetOp::None))
             throw DbError("0A000","prepared VALUES requires additional clause lowering");

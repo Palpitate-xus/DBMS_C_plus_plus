@@ -2,6 +2,13 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="partition-ancestors-comparison-20261124"></a>
+## 2026-11-24 · 查询分区归属
+
+PostgreSQL 18.6 用继承目录的表编号连接子分区与父表。`pg_partition_ancestors` 从输入的分区开始向上查找。SQLite 的 `PRAGMA table_list` 提供每张表的基本信息，虚拟表可以提供带参数的行来源。DuckDB 的 Hive 分区读取器从目录结构取得分区键，可以跳过与查询条件无关的文件。 [PostgreSQL 分区函数源码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/utils/adt/partitionfuncs.c) · [PostgreSQL 父表查询源码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/catalog/partition.c) · [SQLite 表清单](https://www.sqlite.org/pragma.html#pragma_table_list) · [SQLite 虚拟表](https://www.sqlite.org/vtab.html#table_valued_functions) · [DuckDB 文件分区](https://duckdb.org/docs/current/data/partitioning/hive_partitioning)
+
+本项目用表的实际目录编号和已保存的分区定义查找。普通表走按编号查找，可直接结束。旧版的子分区需要有明确的目录标记和唯一匹配的父表定义。普通继承关系不参与查询。独立子分区、分区索引和 PostgreSQL 的完整分区目录仍有差距。 [使用说明](MANUAL.md#查询分区归属) · [测试报告](test-report.md#partition-ancestors-20261124)
+
 <a id="foreign-key-definition-comparison-20261124"></a>
 ## 2026-11-24 · 还原外键的 SQL 定义
 

@@ -1403,6 +1403,10 @@ public:
             call->setReturning=metadata.setReturning?metadata.setReturning(call):std::nullopt;
             if(call->setReturning) {
                 if(!allowSetReturning)throw DbError("0A000","set-returning functions are not allowed in this expression context");
+                if (!call->namedArgs.empty()) {
+                    call->args.push_back(std::move(call->namedArgs.front().value));
+                    call->namedArgs.clear();
+                }
                 call->setReturning->elementType=ExprHelper::canonicalResultTypeName(call->setReturning->elementType);
                 call->resolvedResultType=declaredType(call->setReturning->elementType,call);
                 return call->resolvedResultType;
@@ -2078,6 +2082,12 @@ public:
             else if(const auto label=projectionLabel(item.expr.get());label.second)name=label.first;
             const bool queryTarget=!statementOwners.empty() && statementOwners.back()->command==SqlCommand::Select;
             const auto type = expression(item.expr, scopes,{},queryTarget);
+            const auto* select = queryTarget ? static_cast<const SelectStmt*>(statementOwners.back()) : nullptr;
+            if (select && select->functionSourceProducer) {
+                const auto* call = dynamic_cast<const FunctionCallExpr*>(item.expr.get());
+                if (call && call->setReturning && !call->setReturning->sourceColumnName.empty())
+                    name = call->setReturning->sourceColumnName;
+            }
             if(item.alias.empty() && item.expr->preparedSubquery) {
                 const auto child=result.statementOutputs.find(item.expr->preparedSubquery.get());
                 if(child!=result.statementOutputs.end() && child->second.size()==1)

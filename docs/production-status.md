@@ -6,9 +6,13 @@
 
 截至 2026-11-24，273 项功能要求中有 22 项完成、169 项部分实现、67 项待验证、15 项暂缓。各项结果和剩余范围见功能总账。以下更新报告给出各轮测试的实际范围。[功能总账](gap-progress.json) · [支持的功能和限制](compatibility-contract.md)
 
+## 2026-11-24 · 可以查询分区归属
+
+原版 `psql` 可以执行查找引用当前表的外键所用的 SQL。随后查询 `pg_policy` 时仍会报缺少该目录。独立分区子表的创建和挂载仍待实现。 [查询示例](MANUAL.md#查询分区归属) · [测试报告](test-report.md#partition-ancestors-20261124)
+
 ## 2026-11-24 · 可以显示普通表外键的 SQL 定义
 
-原版 `psql` 可执行当前表的外键查询，获得定义及动作。完整 `\d` 当前停在查找引用方所需的 `pg_partition_ancestors`。 [测试报告](test-report.md#foreign-key-definition-20261124) · [性能报告](performance-report-2026-10-30.md#foreign-key-definition-cost-20261124)
+原版 `psql` 可执行当前表的外键查询，获得定义及动作。 [测试报告](test-report.md#foreign-key-definition-20261124) · [性能报告](performance-report-2026-10-30.md#foreign-key-definition-cost-20261124)
 
 ## 2026-11-24 · 可以查询普通表的外键
 

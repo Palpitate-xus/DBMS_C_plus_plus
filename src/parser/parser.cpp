@@ -3815,14 +3815,14 @@ static std::unique_ptr<FromItem> parseFromAtom(const std::vector<std::string>& t
         } else if (!item->only && pos < tokens.size() && tokens[pos] == "(") {
             CatalogManager::QualifiedName name;
             if (CatalogManager::parseQualifiedName(item->tableName, name, true) &&
-                (name.name == "generate_series" || name.name == "unnest")) {
+                (name.name == "generate_series" || name.name == "unnest" || name.name == "pg_partition_ancestors")) {
                 const auto argStart = pos;
                 pos = nameBegin;
                 auto expression = parseFromFunctionCall(tokens, pos, argStart);
                 if (!expression) return nullptr;
                 item->type = FromItem::Type::Function;
                 auto producer = std::make_unique<SelectStmt>();
-                if (name.name == "unnest") {
+                if (name.name == "unnest" || name.name == "pg_partition_ancestors") {
                     producer->functionSourceProducer = true;
                     appendFromFunction(*producer, std::move(expression));
                 } else {

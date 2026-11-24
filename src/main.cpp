@@ -21910,8 +21910,8 @@ class PreparedWithDmlRuntime {
                 [this,outer,frames](dbms::SelectStmt* branch,bool body,dbms::QueryPlanner::PreparedExecutionProvider owner) {
                     return selectPlan(branch,outer,frames,false,false,std::move(owner),body);
                 },reader(frames),cursorFactory(frames),true,planRootConstants,std::move(executionProvider),outer);
-        if(!selectBodyOnly)if(auto set=dbms::QueryPlanner::buildPreparedSetReturningPlan(&g_engine,session_.currentDB,
-            query_,select,outer,reader(frames),cursorFactory(frames),planRootConstants))return set;
+        if(auto set=dbms::QueryPlanner::buildPreparedSetReturningPlan(&g_engine,session_.currentDB,
+            query_,select,outer,reader(frames),cursorFactory(frames),planRootConstants,{},selectBodyOnly))return set;
         if(select->command==dbms::SqlCommand::Values) {
             if(select->whereClause || (!selectBodyOnly && select->setOp!=dbms::SetOp::None))
                 throw dbms::DbError("0A000","WITH VALUES requires additional clause lowering");
@@ -23645,7 +23645,15 @@ static bool handlePreparedSetQuery(const string& rawSql,Session& session,bool& h
         }
         if(select->setOpLhs && !supported(dynamic_cast<const dbms::SelectStmt*>(select->setOpLhs.get())))return false;
         if(select->setOpRhs && !supported(dynamic_cast<const dbms::SelectStmt*>(select->setOpRhs.get())))return false;
-        for(const auto& target:select->selectList)if(!scalar(target.expr.get()))return false;
+        for(const auto& target:select->selectList) {
+            const auto* call=dynamic_cast<const dbms::FunctionCallExpr*>(target.expr.get());
+            if(append && call && call->setReturning) {
+                if(select->fromClause || select->distinct ||
+                   (select->setOp==dbms::SetOp::None && !select->orderBy.empty()) ||
+                   !all_of(call->args.begin(),call->args.end(),[&](const auto& arg){return scalar(arg.get());}))
+                    return false;
+            } else if(!scalar(target.expr.get()))return false;
+        }
         for(const auto& row:select->valuesRows)for(const auto& value:row)if(!scalar(value.get()))return false;
         for(const auto& key:select->orderBy)
             if(!key.usingOp.empty() || (select->setOp==dbms::SetOp::None && !scalar(key.expr.get())))return false;

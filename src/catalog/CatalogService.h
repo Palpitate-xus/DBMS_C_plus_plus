@@ -6,9 +6,12 @@
 #include <string>
 #include <unordered_map>
 
+struct Session;
+
 namespace dbms {
 
 class StorageEngine;
+struct ExprValue;
 
 // ============================================================================
 // CatalogService: per-database CatalogManager cache
@@ -95,6 +98,10 @@ private:
         std::string path;
     };
     ReadCatalog readCatalog(const std::string& dbname) const;
+    // The caller supplies the result of its held database read fence.
+    ReadCatalog readCatalog(const std::string& dbname, bool mayReadCurrentFiles) const;
+    friend std::vector<ExprValue> readPartitionAncestors(const StorageEngine&,
+        const std::string&, const Session*, const ExprValue&);
     std::shared_ptr<CatalogManager> acquireImpl(const std::string& dbname,
                                               bool cacheCold);
 };

@@ -21,7 +21,7 @@ int main() {
     size_t reads=0;
     const PreparedSetReturningReader reader=[&](const QuerySetReturningBinding& binding,const std::vector<ExprValue>& arguments) {
         ++reads;
-        return queryHostSetReturningProvider(binding).read(arguments,currentSession(),db);
+        return queryHostSetReturningProvider(binding).read(arguments,currentSession(),db,&g_engine);
     };
     const auto plan=[&](const std::string& sql) {
         auto query=std::make_shared<PreparedQuery>(g_engine.prepareBoundQuery(db,sql));

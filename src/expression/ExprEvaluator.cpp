@@ -7255,6 +7255,15 @@ ResolvedScalarFunction resolveScalarFunction(
             if(provider && provider->fixedSignature && call->args.size()==provider->arity && call->namedArgs.empty()) {
                 result.provider=provider;result.schema=candidateSchema;return result;
             }
+            if (provider && provider->singleInputType) {
+                const auto* input = provider->singleInput(*call);
+                if (input && ExprHelper::canonicalResultTypeName(ExprHelper::inferParsedInputType(
+                        input, {}, database, engine, &evaluator)) == provider->singleInputType) {
+                    result.provider = provider;
+                    result.schema = candidateSchema;
+                    return result;
+                }
+            }
             if(provider && provider->kind==QuerySetReturningBinding::Kind::GenerateSeries &&
                provider->acceptsArity(call->args.size()) && call->namedArgs.empty()) {
                 std::vector<std::string> inputs;

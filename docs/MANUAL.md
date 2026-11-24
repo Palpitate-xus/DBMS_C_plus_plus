@@ -2532,6 +2532,19 @@ CREATE TABLE h (
 ) PARTITION BY HASH (K);
 ```
 
+### 查询分区归属
+
+`pg_partition_ancestors` 接收表名或表编号。分区根表会返回自身。旧库中已有明确归属记录的子分区，从子表开始逐层返回父表。普通表、普通继承表、空值或已不存在的表编号返回零行。
+
+```sql
+SELECT relid, ordinality
+FROM pg_catalog.pg_partition_ancestors('events') WITH ORDINALITY;
+```
+
+通过父表保存的分区文件不单独分配表编号。独立子表的创建、挂载和分区索引仍待实现。 [测试范围](test-report.md#partition-ancestors-20261124)
+
+### 查询分区数据
+
 查询父表时，`OR` 可以匹配不同分区中的记录。多个条件同时匹配同一条记录时，这条记录只返回一次。不同记录即使显示成相同的值，也会各自返回。可以按未出现在结果里的列排序，并指定空值排在前面还是后面。
 
 ```sql

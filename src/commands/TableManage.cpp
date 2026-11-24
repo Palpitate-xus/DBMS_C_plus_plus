@@ -42796,14 +42796,20 @@ decltype(auto) StorageEngine::withQueryBindingMetadata(const std::string& dbname
             const auto role=preparedSetReturningRole(evaluator,function,this);
             if(!role)return std::nullopt;
             const auto spelling=function->schema.empty()?function->funcName:function->schema+"."+function->funcName;
-            if(!role->acceptsArity(function->args.size()) || !function->namedArgs.empty() || function->hasOver ||
+            const auto* singleInput = role->singleInputType ? role->singleInput(*function) : nullptr;
+            const size_t count = singleInput ? 1 : function->args.size();
+            if(!role->acceptsArity(count) || (!singleInput && !function->namedArgs.empty()) || function->hasOver ||
                 function->filter || function->distinct || !function->orderBy.empty())
                 throw DbError("42883","function does not exist: "+spelling);
             std::vector<std::string> inputs;
-            for(const auto& argument:function->args)
+            const auto appendType = [&](const Expr* argument) {
                 inputs.push_back(ExprHelper::canonicalResultTypeName(ExprHelper::inferParsedInputType(
-                    argument.get(),{},dbname,const_cast<StorageEngine*>(this))));
-            return QuerySetReturningBinding{role->kind,role->identity,role->resultType(inputs)};
+                    argument,{},dbname,const_cast<StorageEngine*>(this))));
+            };
+            if (singleInput) appendType(singleInput);
+            else for (const auto& argument : function->args) appendType(argument.get());
+            return QuerySetReturningBinding{role->kind, role->identity, role->resultType(inputs),
+                role->sourceColumnName ? role->sourceColumnName : ""};
         };
         metadata.functionType = [&](const FunctionCallExpr* function) {
             CatalogManager::QualifiedName routine;

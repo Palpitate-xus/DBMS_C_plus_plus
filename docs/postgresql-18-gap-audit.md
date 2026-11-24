@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-24 · 可以查询分区归属
+
+`pg_partition_ancestors` 可以按当前目录编号查分区根表，或沿已证明的旧版子分区关系查父表。原版 `psql` 查找引用当前表的外键所用的 SQL 已可执行。分区索引、独立叶分区和后续查询所需的 `pg_policy` 目录仍待补齐。`CAT-03`、`CAT-11` 和 `CLIENT-01` 保持部分实现。 [功能验证](test-report.md#partition-ancestors-20261124) · [性能对照](performance-report-2026-10-30.md#partition-ancestors-cost-20261124)
+
 ## 2026-11-24 · 显示外键的 SQL 定义
 
 为已登记的普通外键实现 `pg_get_constraintdef`。显示时使用当前的表和列，并区分新登记的默认动作和显式限制。`CAT-02`、`CAT-03`、`CAT-07` 和 `CLIENT-01` 保持部分实现。完整 `psql \d` 仍需要分区祖先查询以及其他目录。 [验证范围](test-report.md#foreign-key-definition-20261124) · [性能对照](performance-report-2026-10-30.md#foreign-key-definition-cost-20261124)

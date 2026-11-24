@@ -16,7 +16,7 @@ int main() {
             return QueryPlanner::makePreparedCursor(QueryPlanner::buildPreparedQueryPlan(&engine,db,query,child,row),
                 query->statementOutputs.at(child));
         };
-        return QueryPlanner::buildPreparedUnionAllPlan(&engine,db,query,static_cast<SelectStmt*>(query->ast.get()),
+        return QueryPlanner::buildPreparedSetPlan(&engine,db,query,static_cast<SelectStmt*>(query->ast.get()),
             [&engine,db,query](SelectStmt* branch,bool body,QueryPlanner::PreparedExecutionProvider owner) {
                 return QueryPlanner::buildPreparedQueryPlan(&engine,db,query,branch,{},std::move(owner),body);
             },{},cursor,true,plan);

@@ -2,6 +2,18 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-24 read partition ancestry for psql's incoming foreign key query",
+      "gap_ids": ["CAT-03", "CAT-11", "CLIENT-01"],
+      "status": "partial",
+      "evidence": ["src/catalog/CatalogService.cpp", "src/common/QueryHostProvider.h", "src/executor/ExecutionPlan.cpp", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/pg_partition_ancestors_protocol_e2e_test.py", "tests/partition_ancestry_catalog_test.cpp"],
+      "verification": [
+        "Ordinary and inherited tables return no ancestors; partition roots return their own regclass identity. A legacy leaf needs an explicit catalog flag and a unique persisted parent bound.",
+        "The stock psql incoming foreign key SQL returns the expected typed rows on both protocols. The unmodified psql 18.6 client next requests pg_policy.",
+        "Old roots and transaction recovery retain their names and identifiers. Independent child relations, partition indexes, concurrent detachment and full lateral function sources remain open."
+      ]
+    },
+    {
       "issue": "2026-11-24 deparse ordinary foreign key definitions from their durable identities",
       "gap_ids": ["CAT-02", "CAT-03", "CAT-07", "CLIENT-01"],
       "status": "partial",
