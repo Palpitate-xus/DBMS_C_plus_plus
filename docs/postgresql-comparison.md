@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-26 · 在扫描阶段先筛出待修改的行
+
+PostgreSQL 的扫描节点可以直接筛选记录，再把结果交给更新或删除节点。SQLite 也会先检查从索引即可判断的条件，只有符合条件时才读取表中对应的行。DuckDB 会把筛选移到更早执行的步骤，并按批次处理数据。 [PostgreSQL 执行计划](https://www.postgresql.org/docs/18/using-explain.html) · [SQLite 筛选优化](https://www.sqlite.org/optoverview.html) · [DuckDB 执行机制](https://duckdb.org/docs/2.0/internals/overview)
+
+本项目在必须扫描表时直接比较可见行中的整数编号，符合范围的行才交给原有的条件检查和写入流程。扫描仍遍历表中数据页。 [测试报告](test-report.md#heap-range-mutations-20261126) · [与 PostgreSQL 18.6 的实测](performance-report-2026-10-30.md#heap-range-mutation-cost-20261126)
+
 ## 2026-11-26 · 索引定位候选行后核对其余条件
 
 PostgreSQL 把可用于索引的条件交给扫描，再用剩余条件筛选实际行。SQLite 会把 `AND` 分项分析，也可以分开处理可分别用索引的 `OR` 分支。DuckDB 的筛选下推让下层执行步骤尽早丢掉无关记录。 [PostgreSQL 索引扫描](https://www.postgresql.org/docs/18/index-scanning.html) · [SQLite 查询优化](https://www.sqlite.org/optoverview.html) · [DuckDB 优化器](https://duckdb.org/2024/11/14/optimizers)

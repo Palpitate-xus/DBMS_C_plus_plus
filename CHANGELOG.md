@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>一笔事务里连续修改订单更快了</summary>
+
+例如，先改一笔订单，再按编号批量更新或删除时，即使要扫描整张表，数据库也能先检查编号，只对符合范围的订单检查其余条件。
+
+2026-11-26 · [用法](docs/MANUAL.md#按整数主键更新或删除) · [测试报告](docs/test-report.md#heap-range-mutations-20261126) · [性能报告](docs/performance-report-2026-10-30.md#heap-range-mutation-cost-20261126)
+
+</details>
+
+<details>
 <summary>按编号和状态批量处理订单更快了</summary>
 
 例如，要更新编号 300 到 308 中待处理的订单，数据库可以先找到这段订单，再检查哪些尚未处理。删除时也可以这样筛选。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>表多时，查询可以更快返回列名</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-26 · 表多时，查询可以更快返回列名
 
 例如，查订单报表时，数据库只准备这次查询用到的表的列名和数据类型。
 
-2026-11-26 · [测试报告](docs/test-report.md#bound-column-metadata-20261126) · [性能报告](docs/performance-report-2026-10-30.md#bound-column-metadata-cost-20261126)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
+[测试报告](docs/test-report.md#bound-column-metadata-20261126) · [性能报告](docs/performance-report-2026-10-30.md#bound-column-metadata-cost-20261126)
 
 ## 2026-11-26 · 客户端能显示报表的列名了
 

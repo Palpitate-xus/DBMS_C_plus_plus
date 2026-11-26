@@ -1434,6 +1434,8 @@ DELETE FROM items WHERE id = 43 RETURNING id;
 
 范围之外还有筛选时也可以使用索引，例如 `WHERE id BETWEEN 42 AND 49 AND label='待复核'`。索引先找这段编号，更新时仍检查 `label`。两段范围各自带筛选时，也可以先查两段编号。无法证明提前筛选会保留原条件的调用和错误行为时，按原顺序扫描。 [附加筛选测试](test-report.md#filtered-key-mutations-20261126)
 
+必须扫描表时，符合条件的普通单表写入仍可先检查整数编号。数据库按当前事务可见的行逐条检查，只有编号在目标范围内的行才进入完整条件检查。其他整数列的简单等值筛选也可在扫描时完成初筛。 [扫描回退测试](test-report.md#heap-range-mutations-20261126)
+
 带来源表的 `UPDATE ... FROM` 和 `DELETE ... USING` 也可用这个查找方式。条件开头需用同类型的整数值和目标表的主键作等值比较。核实索引命中后，数据库仍计算来源和完整条件。索引未命中时沿用原来的查找方式。[带来源表的测试](test-report.md#joined-primary-key-target-20261119)
 
 ```sql

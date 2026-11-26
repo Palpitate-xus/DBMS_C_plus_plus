@@ -3,6 +3,19 @@
   "recent_updates": [
 
     {
+      "issue": "2026-11-26 filter integer mutation targets on table scans",
+      "gap_ids": ["DML-01", "OPT-03", "TXN-01", "TXN-02"],
+      "status": "partial",
+      "evidence": ["src/commands/TableManage.cpp", "src/storage/StoredIntegerField.h", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/primary_key_range_mutation_protocol_e2e_test.py", "tests/update_typed_predicate_protocol_e2e_test.py", "tests/transaction_isolation_protocol_e2e_test.py"],
+      "verification": [
+        "Compare 60 updates and deletes after an earlier write in the same transaction with the previous build and PostgreSQL 18.6.",
+        "Verify visible row scan counts, signed bigint boundaries, a stale snapshot, low work memory, and recovery after forced process exit.",
+        "Measure indexed and sequential paths on ext4 and tmpfs with a repeat of the previous build."
+      ]
+    },
+
+    {
       "issue": "2026-11-26 use integer primary-key ranges for writes with residual predicates",
       "gap_ids": ["DML-01", "OPT-03", "IDX-03"],
       "status": "partial",

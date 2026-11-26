@@ -32,6 +32,7 @@
 #include "catalog/PgRolesCatalog.h"
 #include "common/DataDirectory.h"
 #include "storage/VariableRow.h"
+#include "storage/StoredIntegerField.h"
 #include "common/SqlArrayText.h"
 #include "expression/StoredRegtypeValue.h"
 #include "common/BooleanCodec.h"
@@ -35664,12 +35665,12 @@ enum class IntegerHeapCollection { Unavailable, Collected, IoError };
 // The caller already owns the relation's mutation lock and snapshot. This is
 // only a necessary predicate: the typed matcher and lock-time recheck still
 // decide which rows may actually be changed.
-static IntegerHeapCollection collectIntegerHeapEquality(
+static IntegerHeapCollection collectIntegerHeapTargets(
         StorageEngine& engine, const std::string& dbname, const std::string& tablename,
         const TableSchema& table, const StorageEngine::SqlMutationCallbacks* callbacks,
         bool hasMatcher, bool transactionMatches, IsolationLevel isolation,
         bool registerSiread, std::set<int64_t>& matches) {
-    if (!callbacks || !callbacks->integerHeapEquality || !hasMatcher ||
+    if (!callbacks || (!callbacks->integerHeapEquality && !callbacks->integerPrimaryKeyRange) || !hasMatcher ||
         callbacks->matches || callbacks->recheckJoinedTarget || !transactionMatches ||
         (isolation != IsolationLevel::READ_COMMITTED && isolation != IsolationLevel::REPEATABLE_READ) ||
         table.isUnlogged || isSessionTemporaryRelation(tablename) ||
@@ -35679,47 +35680,68 @@ static IntegerHeapCollection collectIntegerHeapEquality(
                     [](const Column& column) { return column.generatedKind == 'v'; }))
         return IntegerHeapCollection::Unavailable;
 
-    const auto& candidate = *callbacks->integerHeapEquality;
-    if (!candidate.physicalRelationId || candidate.physicalRelationId != table.physicalRelationId ||
-        candidate.columnOrdinal >= table.len()) return IntegerHeapCollection::Unavailable;
-    const auto& column = table.cols[candidate.columnOrdinal];
+    const auto& range = callbacks->integerPrimaryKeyRange;
+    const auto& equality = callbacks->integerHeapEquality;
+    const auto relationId = range ? range->physicalRelationId : equality->physicalRelationId;
+    const auto ordinal = range ? range->columnOrdinal : equality->columnOrdinal;
+    if (!relationId || relationId != table.physicalRelationId || ordinal >= table.len())
+        return IntegerHeapCollection::Unavailable;
+    const auto& column = table.cols[ordinal];
     const auto type = ExprHelper::canonicalResultTypeName(column.dataType);
-    const size_t width = type == "smallint" ? 2 : type == "integer" ? 4 : type == "bigint" ? 8 : 0;
-    size_t offset = 0;
-    bool shapeValid = width && column.dataName == candidate.columnName &&
-        type == candidate.declaredType && column.dsize == width &&
-        !column.isArray && !column.isUnsigned && !column.isVariableLength &&
-        !column.generatedKind && column.generatedExpr.empty() && column.domainName.empty() &&
-        !column.isPrimaryKey &&
-        std::find(table.pkColIndices.begin(), table.pkColIndices.end(), candidate.columnOrdinal)
-            == table.pkColIndices.end();
-    for (size_t i = 0; shapeValid && i < candidate.columnOrdinal; ++i) {
-        if (table.cols[i].isVariableLength) continue;
-        if (table.cols[i].dsize > std::numeric_limits<size_t>::max() - offset)
-            shapeValid = false;
-        else offset += table.cols[i].dsize;
+    const auto field = storedSignedIntegerField(table, ordinal, type);
+    if (!field || column.isArray || column.isUnsigned || column.generatedKind ||
+        !column.generatedExpr.empty() || !column.domainName.empty())
+        return IntegerHeapCollection::Unavailable;
+    if (range) {
+        if (column.isNull || primary_key_index::singleKeyColumn(table) != ordinal ||
+            range->intervals.empty()) return IntegerHeapCollection::Unavailable;
+        for (size_t i = 0; i < range->intervals.size(); ++i) {
+            const auto [first, last] = range->intervals[i];
+            if (first > last || (i && range->intervals[i - 1].second >= first))
+                return IntegerHeapCollection::Unavailable;
+        }
+    } else if (column.dataName != equality->columnName || type != equality->declaredType ||
+               column.isPrimaryKey ||
+               std::find(table.pkColIndices.begin(), table.pkColIndices.end(), ordinal) != table.pkColIndices.end()) {
+        return IntegerHeapCollection::Unavailable;
     }
-    if (!shapeValid) return IntegerHeapCollection::Unavailable;
 
-    StorageEngine::Condition condition;
-    condition.op = "=";
-    condition.colName = candidate.columnName;
-    condition.value = std::to_string(candidate.value);
-    condition.decodedLiteralRhs = true;
-    std::vector<bool> nulls(table.len(), false);
+    // Verify the physical slot again under the caller's relation lock.
+    const auto locked = engine.getTableSchema(dbname, tablename);
+    if (locked.physicalRelationId != relationId || locked.formatVersion != table.formatVersion ||
+        locked.partitionType != TableSchema::PartitionType::None ||
+        locked.len() != table.len()) return IntegerHeapCollection::Unavailable;
+    const auto& lockedColumn = locked.cols[ordinal];
+    const auto lockedType = ExprHelper::canonicalResultTypeName(lockedColumn.dataType);
+    const auto lockedField = storedSignedIntegerField(locked, ordinal, lockedType);
+    if (lockedType != type || lockedColumn.dataName != column.dataName || lockedColumn.isNull != column.isNull ||
+        lockedColumn.isArray || lockedColumn.isUnsigned || lockedColumn.generatedKind ||
+        !lockedColumn.generatedExpr.empty() || !lockedColumn.domainName.empty() ||
+        !(lockedField == field) || (range && primary_key_index::singleKeyColumn(locked) != ordinal))
+        return IntegerHeapCollection::Unavailable;
+
     bool usable = true;
+    uint64_t rowsRead = 0;
     const bool scanOk = engine.forEachRow(dbname, tablename,
         [&](uint32_t pid, uint16_t sid, const char* data, size_t len) {
             if (!usable) return;
-            if (offset > len || width > len - offset) { usable = false; return; }
-            ScannedNullRowBinding nullOwner(table, nulls, data, len);
-            if (!nullOwner.active()) { usable = false; return; }
-            const std::string row(data, len);
-            if (StorageEngine::evalConditionOnRowWithSyntax(condition, row, table, nullptr))
-                matches.insert(StorageEngine::encodeRid(pid, sid));
+            ++rowsRead;
+            if (!scanPayloadMatchesTuple(table, data, len, g_scanHeapTuple)) { usable = false; return; }
+            if (column.isNull && dbms::isNull(g_scanHeapTuple, ordinal)) return;
+            const auto value = field->read({data, len});
+            if (!value) { usable = false; return; }
+            if (range) {
+                const auto found = std::lower_bound(range->intervals.begin(), range->intervals.end(), *value,
+                    [](const auto& interval, int64_t key) { return interval.second < key; });
+                if (found == range->intervals.end() || *value < found->first) return;
+            } else if (*value != equality->value) return;
+            matches.insert(StorageEngine::encodeRid(pid, sid));
         }, nullptr, {}, registerSiread);
     if (!scanOk) return IntegerHeapCollection::IoError;
-    if (usable) return IntegerHeapCollection::Collected;
+    if (usable) {
+        recordTableScan(dbname, tablename, rowsRead, false, false);
+        return IntegerHeapCollection::Collected;
+    }
     matches.clear();
     return IntegerHeapCollection::Unavailable;
 }
@@ -36415,7 +36437,7 @@ DBStatus StorageEngine::removeInternal(
             scanFailed = *status != DBStatus::OK;
         else if (!conds.empty() || !collectCurrentMutationKeyRange(*this, dbname, tablename, tbl, context,
                      ownerBeforeWrite, pa, mutationCallbacks, toDelete)) {
-            const auto collected = collectIntegerHeapEquality(
+            const auto collected = collectIntegerHeapTargets(
                 *this, dbname, tablename, tbl, mutationCallbacks, bool(deleteMatcher),
                 context.inTransaction && context.txnDB == dbname, context.txnIsolationLevel,
                 false, toDelete);
@@ -38096,7 +38118,7 @@ DBStatus StorageEngine::updateInternal(
         } else if (conds.empty()) {
             if (!collectCurrentMutationKeyRange(*this, dbname, tablename, tbl, context,
                     ownerBeforeWrite, pa, mutationCallbacks, matchIds)) {
-                const auto collected = collectIntegerHeapEquality(
+                const auto collected = collectIntegerHeapTargets(
                     *this, dbname, tablename, tbl, mutationCallbacks, bool(updateMatcher),
                     context.inTransaction && context.txnDB == dbname, context.txnIsolationLevel,
                     true, matchIds);

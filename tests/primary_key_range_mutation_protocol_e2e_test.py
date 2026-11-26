@@ -9,12 +9,12 @@ import uuid
 from session_setting_functions_protocol_e2e_test import Wire, runner
 
 
-def index_counts(wire, table):
+def scan_counts(wire, table):
     rows, state, message, _, _ = runner.decode_wire_result(
         wire.send_statements("SELECT * FROM pg_stat_tables"))
     assert state is None, message
     row = next(row for row in rows if row[0] == table)
-    return tuple(map(int, row[3:5]))
+    return tuple(map(int, row[1:5]))
 
 
 def exercise(wire, peer, schema, reference):
@@ -22,29 +22,32 @@ def exercise(wire, peer, schema, reference):
     table = f"{schema}.{name}"
     storage_name = f"{schema}__{name}"
     wire.command(f"CREATE SCHEMA {schema}", "CREATE SCHEMA")
-    wire.command(f"CREATE TABLE {table}(k int PRIMARY KEY, qty int CHECK(qty<5000), note text)",
+    wire.command(f"CREATE TABLE {table}(note text, qty int CHECK(qty<5000), k int PRIMARY KEY)",
                  "CREATE TABLE")
     wire.command("BEGIN", "BEGIN", b"T")
     note = "x" * 60
     note_sql = f"'{note}'"
     for start in range(1, 3073, 128):
         batch = ",".join(f"({k},{k},{'NULL' if k % 2 else note_sql})" for k in range(start, start + 128))
-        wire.command(f"INSERT INTO {table} VALUES {batch}", "INSERT 0 128", b"T")
+        wire.command(f"INSERT INTO {table}(k,qty,note) VALUES {batch}", "INSERT 0 128", b"T")
     wire.command("COMMIT", "COMMIT")
 
-    def mutate(sql, keys, reader=wire, ready=b"I", indexed=True, fetched=None):
-        before = index_counts(wire, storage_name) if not reference else None
+    def mutate(sql, keys, reader=wire, ready=b"I", indexed=True, fetched=None,
+               heap_rows=None, storage=storage_name):
+        before = scan_counts(wire, storage) if not reference else None
         frames = reader.send_statements(sql)
         rows, state, message, _, tag = runner.decode_wire_result(frames)
         assert state is None, (sql, state, message)
         assert sorted(int(row[0]) for row in rows) == sorted(keys), (sql, rows)
         assert tag == f"{sql.split()[0]} {len(keys)}" and frames[-1] == (b"Z", ready), (sql, frames)
         if before is not None:
-            reads, read_rows = index_counts(wire, storage_name)
+            after = scan_counts(wire, storage)
+            changes = tuple(a - b for a, b in zip(after, before))
             amount = len(keys) if fetched is None else fetched
             expected = (1, amount) if indexed else (0, 0)
-            observed = (reads - before[0], read_rows - before[1])
-            assert observed == expected, (sql, observed, expected)
+            assert changes[2:] == expected, (sql, changes, expected)
+            if heap_rows is not None:
+                assert changes[:2] == (1, heap_rows), (sql, changes)
 
     mutate(f"UPDATE {table} SET qty=qty+10 WHERE k BETWEEN 41 AND 48 RETURNING k", list(range(41, 49)))
     mutate(f"UPDATE {table} AS t SET qty=qty+10 WHERE 49<=t.k AND t.k<53 RETURNING k",
@@ -89,13 +92,26 @@ def exercise(wire, peer, schema, reference):
 
     wire.command("BEGIN", "BEGIN", b"T")
     wire.command(f"UPDATE {table} SET k=9011 WHERE k=1", "UPDATE 1", b"T")
-    mutate(f"UPDATE {table} SET qty=75 WHERE k BETWEEN 9009 AND 9012 RETURNING k", [9011], ready=b"T", indexed=False)
+    mutate(f"UPDATE {table} SET qty=75 WHERE k BETWEEN 9009 AND 9012 OR "
+           "(k BETWEEN 22 AND 23 AND note IS NOT NULL) RETURNING k",
+           [22, 9011], ready=b"T", indexed=False, heap_rows=3064)
+    mutate(f"DELETE FROM {table} WHERE k BETWEEN 9010 AND 9015 AND qty>=75 RETURNING k",
+           [9011], ready=b"T", indexed=False, heap_rows=3064)
+    mutate(f"UPDATE {table} SET qty=qty+1 WHERE k BETWEEN 371 AND 374 AND nextval('{calls}')>0 RETURNING k",
+           [371, 372, 373, 374], ready=b"T", indexed=False, heap_rows=3063)
+    wire.query(f"SELECT currval('{calls}') AS n", rows=[("8",)], fields=[("n", 20)], ready=b"T")
+    if not reference:
+        # A sequential scan cannot move a later key condition ahead of a
+        # division that must still be evaluated on an out-of-range row.
+        wire.query(f"UPDATE {table} SET qty=qty+10 WHERE 99/(k-20)>1 AND k BETWEEN 31 AND 34 RETURNING k",
+                   tag=None, state="22012", ready=b"E")
     wire.command("ROLLBACK", "ROLLBACK")
 
     wire.command("BEGIN ISOLATION LEVEL REPEATABLE READ", "BEGIN", b"T")
     wire.query(f"SELECT qty FROM {table} WHERE k=81", rows=[("81",)], fields=[("qty", 23)], ready=b"T")
     peer.command(f"UPDATE {table} SET k=9001 WHERE k=2", "UPDATE 1")
-    mutate(f"UPDATE {table} SET qty=75 WHERE k BETWEEN 9000 AND 9008 RETURNING k", [], ready=b"T", indexed=False)
+    mutate(f"UPDATE {table} SET qty=75 WHERE k BETWEEN 9000 AND 9008 RETURNING k",
+           [], ready=b"T", indexed=False, heap_rows=3064)
     wire.command("ROLLBACK", "ROLLBACK")
     mutate(f"UPDATE {table} SET qty=75 WHERE k BETWEEN 9000 AND 9008 RETURNING k", [9001])
 
@@ -104,7 +120,18 @@ def exercise(wire, peer, schema, reference):
     wire.command("ROLLBACK", "ROLLBACK")
     wire.command("SET work_mem='64kB'", "SET")
     mutate(f"UPDATE {table} SET qty=qty+1 WHERE k BETWEEN 401 AND 1200 RETURNING k",
-           list(range(401, 1201)), indexed=False)
+           list(range(401, 1201)), indexed=False, heap_rows=3064)
+
+    wide = f"{schema}.wide_changes"
+    wire.command(f"CREATE TABLE {wide}(note text, qty int, k bigint PRIMARY KEY)", "CREATE TABLE")
+    wire.command(f"INSERT INTO {wide} VALUES (NULL,NULL,-9223372036854775808),"
+                 "('two',2,-9223372036854775807),('three',3,0),(NULL,4,9223372036854775807)", "INSERT 0 4")
+    wire.command("BEGIN", "BEGIN", b"T")
+    wire.command(f"UPDATE {wide} SET qty=2 WHERE k=0", "UPDATE 1", b"T")
+    mutate(f"DELETE FROM {wide} WHERE (k BETWEEN -9223372036854775808 AND -9223372036854775807 AND qty IS NULL) "
+           "OR k>=9223372036854775807 RETURNING k", [-9223372036854775808, 9223372036854775807],
+           ready=b"T", indexed=False, heap_rows=4, storage=f"{schema}__wide_changes")
+    wire.command("ROLLBACK", "ROLLBACK")
 
 
 def main():

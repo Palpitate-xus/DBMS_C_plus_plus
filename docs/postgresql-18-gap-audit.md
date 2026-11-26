@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-26 · 顺序扫描时提前筛选待修改的行
+
+普通单表更新和删除回退到顺序扫描时，可以在数据页上先检查整数主键范围，随后用完整条件筛选并锁行。扫描仍遵守当前事务的可见性，并包含本事务可见的写入。 `DML-01`、`OPT-03`、`TXN-01` 和 `TXN-02` 保持部分实现。 [功能验证](test-report.md#heap-range-mutations-20261126) · [性能报告](performance-report-2026-10-30.md#heap-range-mutation-cost-20261126)
+
 ## 2026-11-26 · 主键范围与附加筛选组合
 
 普通单表更新和删除可在保持原条件求值效果的前提下，用主键范围缩小候选集。受支持的纯筛选可以出现在主键条件之前，各分支均有可证明的范围时可以合并。`DML-01`、`OPT-03` 和 `IDX-03` 保持部分实现。 [功能验证](test-report.md#filtered-key-mutations-20261126) · [性能报告](performance-report-2026-10-30.md#filtered-key-mutation-cost-20261126)
