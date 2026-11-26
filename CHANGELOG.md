@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>按订单号和状态批量修改更快了</summary>
+
+例如，要把订单号 300 到 308 中待处理的订单标记为已复核，数据库可以先找到这段订单，再逐笔检查状态。批量删除也可以这样筛选。
+
+2026-11-26 · [用法](docs/MANUAL.md#按整数主键更新或删除) · [测试报告](docs/test-report.md#filtered-key-mutations-20261126) · [性能报告](docs/performance-report-2026-10-30.md#filtered-key-mutation-cost-20261126)
+
+</details>
+
+<details>
 <summary>按一段订单号修改或删除更快了</summary>
 
 例如，要给订单号 42 到 49 的记录标记为已复核，数据库可以先直接找到这几笔订单，再逐条检查并修改。删除一段编号也可以用这个方法。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>客户端能显示报表的列名了</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-26 · 客户端能显示报表的列名了
 
 用 psql 查看多层报表时，可以看到每列的名称和数据类型。即使没有符合条件的记录，也能查看列说明。
 
-2026-11-26 · [测试报告](docs/test-report.md#nested-view-columns-20261126) · [性能报告](docs/performance-report-2026-10-30.md#nested-view-column-cost-20261126)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
+[测试报告](docs/test-report.md#nested-view-columns-20261126) · [性能报告](docs/performance-report-2026-10-30.md#nested-view-column-cost-20261126)
 
 ## 2026-11-26 · 查多层报表时少占内存
 

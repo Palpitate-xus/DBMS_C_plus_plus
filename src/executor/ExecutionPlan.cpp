@@ -4951,27 +4951,6 @@ static std::optional<StorageEngine::IntegerPartitionFilter> integerKeyPredicate(
     return Filter::comparison(op, endpoint->value);
 }
 
-std::optional<StorageEngine::IntegerPrimaryKeyMutationRange> preparedMutationPrimaryKeyRange(
-        const PreparedQuery& query, const Expr* where, const TableSchema& schema, size_t targetOrdinal) {
-    if (!where || !schema.physicalRelationId || schema.partitionType != TableSchema::PartitionType::None ||
-        std::any_of(schema.cols.begin(), schema.cols.end(),
-            [](const auto& column) { return column.generatedKind == 'v'; })) return {};
-    const auto ordinal = primary_key_index::singleKeyColumn(schema);
-    if (!ordinal || *ordinal >= schema.len()) return {};
-    const auto& column = schema.cols[*ordinal];
-    const auto type = ExprHelper::canonicalResultTypeName(column.dataType);
-    if ((type != "smallint" && type != "integer" && type != "bigint") || column.isArray ||
-        column.isUnsigned || column.isNull || column.generatedKind || !column.domainName.empty()) return {};
-
-    size_t remaining = maxRangePredicateNodes;
-    auto filter = integerKeyPredicate(where, targetOrdinal, *ordinal, type, &query, &remaining);
-    if (!filter || filter->intervals.empty() ||
-        (filter->intervals.size() == 1 &&
-         filter->intervals.front() == IntegerInterval{INT64_MIN, INT64_MAX})) return {};
-    return StorageEngine::IntegerPrimaryKeyMutationRange{
-        schema.physicalRelationId, *ordinal, std::move(filter->intervals)};
-}
-
 static bool intersectIntegerPageBounds(const Expr* expression, const QueryColumnBinding& key,
                                        const TableSchema& schema, const PreparedQuery& query,
                                        IntegerPageBounds& bounds) {
@@ -6045,6 +6024,80 @@ static bool viewFilterTerms(const Expr* expr, const PreparedQuery& query, const 
         addViewIntegerFilter(*filters, *right, *Values::comparison(reversed, lhs->value));
     }
     return true;
+}
+
+struct MutationKeyGuard {
+    StorageEngine::IntegerPartitionFilter values;
+    bool keyOnly;
+};
+
+// For these non-null keys, a guard proves that outside its ranges the
+// original expression is false before any residual expression is evaluated.
+static std::optional<MutationKeyGuard> mutationKeyGuard(const Expr* where, const PreparedQuery& query,
+        size_t target, size_t key, const std::string& type, size_t& remaining) {
+    if (!where || where->preparedSubquery || !remaining) return {};
+    const auto* binary = dynamic_cast<const BinaryOpExpr*>(where);
+    if (!binary || (binary->op != "AND" && binary->op != "OR")) {
+        auto values = integerKeyPredicate(where, target, key, type, &query, &remaining);
+        if (!values) return {};
+        return MutationKeyGuard{std::move(*values), true};
+    }
+
+    --remaining;
+    auto left = mutationKeyGuard(binary->left.get(), query, target, key, type, remaining);
+    const bool conjunction = binary->op == "AND";
+    if (!left || (conjunction && !left->keyOnly)) return left;
+    auto right = mutationKeyGuard(binary->right.get(), query, target, key, type, remaining);
+    if (conjunction) {
+        if (right) left->values.intersect(right->values);
+    } else {
+        if (!right) return {};
+        left->values.unite(right->values);
+    }
+    left->keyOnly = left->keyOnly && right && right->keyOnly;
+    return left;
+}
+
+std::optional<StorageEngine::IntegerPrimaryKeyMutationRange> preparedMutationPrimaryKeyRange(
+        const PreparedQuery& query, const Expr* where, const TableSchema& schema, size_t targetOrdinal) {
+    if (!where || !schema.physicalRelationId || schema.partitionType != TableSchema::PartitionType::None ||
+        std::any_of(schema.cols.begin(), schema.cols.end(),
+            [](const auto& column) { return column.generatedKind == 'v'; })) return {};
+    const auto ordinal = primary_key_index::singleKeyColumn(schema);
+    if (!ordinal || *ordinal >= schema.len()) return {};
+    const auto& column = schema.cols[*ordinal];
+    const auto type = ExprHelper::canonicalResultTypeName(column.dataType);
+    if ((type != "smallint" && type != "integer" && type != "bigint") || column.isArray ||
+        column.isUnsigned || column.isNull || column.generatedKind || !column.domainName.empty()) return {};
+
+    size_t remaining = maxRangePredicateNodes;
+    auto keys = integerKeyPredicate(where, targetOrdinal, *ordinal, type, &query, &remaining);
+    // Total, row-local predicates can also use a key condition appearing
+    // after a residual condition, with no change in effects or errors.
+    if (!keys) {
+        const auto target = std::find_if(query.sourceRanges.begin(), query.sourceRanges.end(), [&](const auto& range) {
+            return range.ordinal == targetOrdinal;
+        });
+        std::vector<PreparedViewIntegerFilter> filters;
+        remaining = maxRangePredicateNodes;
+        if (target != query.sourceRanges.end() && viewFilterTerms(where, query, *target, remaining, &filters)) {
+            for (auto& filter : filters) {
+                if (filter.key.columnOrdinal != *ordinal) continue;
+                keys = std::move(filter.values);
+                break;
+            }
+        }
+    }
+    if (!keys) {
+        remaining = maxRangePredicateNodes;
+        if (auto guard = mutationKeyGuard(where, query, targetOrdinal, *ordinal, type, remaining))
+            keys = std::move(guard->values);
+    }
+    if (!keys || keys->intervals.empty() ||
+        (keys->intervals.size() == 1 &&
+         keys->intervals.front() == IntegerInterval{INT64_MIN, INT64_MAX})) return {};
+    return StorageEngine::IntegerPrimaryKeyMutationRange{
+        schema.physicalRelationId, *ordinal, std::move(keys->intervals)};
 }
 
 std::vector<PreparedViewIntegerFilter> preparedViewIntegerFilters(const PreparedQuery& parent,

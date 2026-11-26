@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-26 · 索引定位候选行后核对其余条件
+
+PostgreSQL 把可用于索引的条件交给扫描，再用剩余条件筛选实际行。SQLite 会把 `AND` 分项分析，也可以分开处理可分别用索引的 `OR` 分支。DuckDB 的筛选下推让下层执行步骤尽早丢掉无关记录。 [PostgreSQL 索引扫描](https://www.postgresql.org/docs/18/index-scanning.html) · [SQLite 查询优化](https://www.sqlite.org/optoverview.html) · [DuckDB 优化器](https://duckdb.org/2024/11/14/optimizers)
+
+本项目的普通单表更新和删除可以用整数主键查找候选行，再由原条件判断这行是否应当写入。带函数调用或可能报错的表达式需要保留求值顺序。 [测试报告](test-report.md#filtered-key-mutations-20261126)
+
 ## 2026-11-26 · 按主键范围定位待修改的记录
 
 PostgreSQL 18.6 对受测的单段或两段整数范围使用 B-tree 位图扫描定位 `UPDATE` 和 `DELETE` 的目标。行锁等待结束后，会按隔离级别检查最新版本。SQLite 会为 `BETWEEN` 分析上下界，并可对不同 `OR` 分支分别查索引。DuckDB 的最小值和最大值索引会跳过无关数据块，单列 ART 扫描主要用于等值和 `IN` 条件。 [PostgreSQL 索引类型](https://www.postgresql.org/docs/18/indexes-types.html) · [PostgreSQL 事务隔离](https://www.postgresql.org/docs/18/transaction-iso.html) · [SQLite 查询优化](https://www.sqlite.org/optoverview.html) · [DuckDB 索引](https://duckdb.org/docs/current/guides/performance/indexing)

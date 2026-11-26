@@ -26,12 +26,13 @@ def exercise(wire, peer, schema, reference):
                  "CREATE TABLE")
     wire.command("BEGIN", "BEGIN", b"T")
     note = "x" * 60
+    note_sql = f"'{note}'"
     for start in range(1, 3073, 128):
-        batch = ",".join(f"({k},{k},'{note}')" for k in range(start, start + 128))
+        batch = ",".join(f"({k},{k},{'NULL' if k % 2 else note_sql})" for k in range(start, start + 128))
         wire.command(f"INSERT INTO {table} VALUES {batch}", "INSERT 0 128", b"T")
     wire.command("COMMIT", "COMMIT")
 
-    def mutate(sql, keys, reader=wire, ready=b"I", indexed=True):
+    def mutate(sql, keys, reader=wire, ready=b"I", indexed=True, fetched=None):
         before = index_counts(wire, storage_name) if not reference else None
         frames = reader.send_statements(sql)
         rows, state, message, _, tag = runner.decode_wire_result(frames)
@@ -39,8 +40,11 @@ def exercise(wire, peer, schema, reference):
         assert sorted(int(row[0]) for row in rows) == sorted(keys), (sql, rows)
         assert tag == f"{sql.split()[0]} {len(keys)}" and frames[-1] == (b"Z", ready), (sql, frames)
         if before is not None:
-            reads, fetched = index_counts(wire, storage_name)
-            assert (reads - before[0], fetched - before[1]) == ((1, len(keys)) if indexed else (0, 0)), sql
+            reads, read_rows = index_counts(wire, storage_name)
+            amount = len(keys) if fetched is None else fetched
+            expected = (1, amount) if indexed else (0, 0)
+            observed = (reads - before[0], read_rows - before[1])
+            assert observed == expected, (sql, observed, expected)
 
     mutate(f"UPDATE {table} SET qty=qty+10 WHERE k BETWEEN 41 AND 48 RETURNING k", list(range(41, 49)))
     mutate(f"UPDATE {table} AS t SET qty=qty+10 WHERE 49<=t.k AND t.k<53 RETURNING k",
@@ -51,6 +55,32 @@ def exercise(wire, peer, schema, reference):
     mutate(f"UPDATE {table} SET qty=qty+10 WHERE k BETWEEN 9000 AND 9008 RETURNING k", [])
     mutate(f"DELETE FROM {table} WHERE k BETWEEN NULL AND 80 RETURNING k", [], indexed=False)
     wire.query(f"SELECT qty FROM {table} WHERE k=63", rows=[("73",)], fields=[("qty", 23)])
+
+    mutate(f"UPDATE {table} SET qty=qty+10 WHERE k BETWEEN 301 AND 308 AND note='{note}' RETURNING k",
+           [302, 304, 306, 308], fetched=8)
+    wire.command(f"UPDATE {table} SET qty=NULL WHERE k=315", "UPDATE 1")
+    mutate(f"UPDATE {table} SET qty=qty+10 WHERE qty>=315 AND k BETWEEN 312 AND 319 RETURNING k",
+           [316, 317, 318, 319], fetched=8)
+    mutate(f"DELETE FROM {table} WHERE (k BETWEEN 321 AND 324 AND note='{note}') "
+           "OR (k BETWEEN 335 AND 338 AND note IS NULL) RETURNING k", [322, 324, 335, 337], fetched=8)
+    mutate(f"UPDATE {table} SET qty=qty+10 WHERE k>=340 AND qty>341 AND k<=343 RETURNING k",
+           [342, 343], fetched=4)
+    mutate(f"UPDATE {table} SET qty=qty+10 WHERE (k BETWEEN 351 AND 354 AND note IS NOT NULL) "
+           "OR qty=390 RETURNING k", [352, 354, 390], indexed=False)
+    mutate(f"UPDATE {table} SET qty=qty+10 WHERE k BETWEEN 361 AND 364 AND qty>6000 RETURNING k", [], fetched=4)
+
+    calls = f"{schema}.calls"
+    wire.command(f"CREATE SEQUENCE {calls}", "CREATE SEQUENCE")
+    mutate(f"UPDATE {table} SET qty=qty+10 WHERE k BETWEEN 371 AND 374 AND nextval('{calls}')>0 RETURNING k",
+           [371, 372, 373, 374])
+    wire.query(f"SELECT currval('{calls}') AS n", rows=[("4",)], fields=[("n", 20)])
+    wire.query(f"UPDATE {table} SET qty=qty+10 WHERE k BETWEEN 20 AND 22 AND 99/(k-20)>1 RETURNING k",
+               tag=None, state="22012")
+    if not reference:
+        # The local executor evaluates the left conjunct first. A late
+        # key condition cannot suppress errors from that conjunct.
+        wire.query(f"UPDATE {table} SET qty=qty+10 WHERE 99/(k-20)>1 AND k BETWEEN 31 AND 34 RETURNING k",
+                   tag=None, state="22012")
 
     wire.query(f"UPDATE {table} SET qty=CASE WHEN k=11 THEN 5000 ELSE qty+10 END "
                "WHERE k BETWEEN 10 AND 12 RETURNING k", tag=None, state="23514")

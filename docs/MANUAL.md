@@ -1432,6 +1432,8 @@ DELETE FROM items WHERE id = 43 RETURNING id;
 
 普通单表更新和删除也可通过整数主键范围查找，例如 `UPDATE items SET label='已复核' WHERE id BETWEEN 42 AND 49`。同一主键上的几段范围可以用 `OR` 连接。数据库先确定完整的候选行，再核对原条件、锁行和写入。需要读取过半表页、超出工作内存、使用旧索引、使用旧快照或同一事务已经写入时会扫描表。 [范围测试](test-report.md#key-range-mutations-20261126)
 
+范围之外还有筛选时也可以使用索引，例如 `WHERE id BETWEEN 42 AND 49 AND label='待复核'`。索引先找这段编号，更新时仍检查 `label`。两段范围各自带筛选时，也可以先查两段编号。无法证明提前筛选会保留原条件的调用和错误行为时，按原顺序扫描。 [附加筛选测试](test-report.md#filtered-key-mutations-20261126)
+
 带来源表的 `UPDATE ... FROM` 和 `DELETE ... USING` 也可用这个查找方式。条件开头需用同类型的整数值和目标表的主键作等值比较。核实索引命中后，数据库仍计算来源和完整条件。索引未命中时沿用原来的查找方式。[带来源表的测试](test-report.md#joined-primary-key-target-20261119)
 
 ```sql

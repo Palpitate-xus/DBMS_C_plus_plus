@@ -3,6 +3,19 @@
   "recent_updates": [
 
     {
+      "issue": "2026-11-26 use integer primary-key ranges for writes with residual predicates",
+      "gap_ids": ["DML-01", "OPT-03", "IDX-03"],
+      "status": "partial",
+      "evidence": ["src/executor/ExecutionPlan.cpp", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/primary_key_range_mutation_protocol_e2e_test.py"],
+      "verification": [
+        "Compare 60 ordinary updates and deletes with PostgreSQL 18.6 and the previous build.",
+        "Check retained residual errors, sequence calls, rejected candidates, original row filters and crash recovery.",
+        "Compare selective residual predicates on tmpfs and ext4, and repeat the single-key control separately."
+      ]
+    },
+
+    {
       "issue": "2026-11-26 use complete integer primary-key ranges for ordinary UPDATE and DELETE",
       "gap_ids": ["DML-01", "IDX-03", "TXN-01", "TXN-02"],
       "status": "partial",

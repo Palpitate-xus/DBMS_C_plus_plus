@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-26 · 主键范围与附加筛选组合
+
+普通单表更新和删除可在保持原条件求值效果的前提下，用主键范围缩小候选集。受支持的纯筛选可以出现在主键条件之前，各分支均有可证明的范围时可以合并。`DML-01`、`OPT-03` 和 `IDX-03` 保持部分实现。 [功能验证](test-report.md#filtered-key-mutations-20261126) · [性能报告](performance-report-2026-10-30.md#filtered-key-mutation-cost-20261126)
+
 ## 2026-11-26 · 用整数主键范围找到待修改的行
 
 普通表首次写入可从当前版本的整数主键索引读取完整候选集，再用原条件和行锁流程修改或删除。使用旧快照、已在同一事务写入、候选覆盖过多数据页或超过工作内存时扫描表。`DML-01`、`IDX-03`、`TXN-01` 和 `TXN-02` 保持部分实现。 [功能验证](test-report.md#key-range-mutations-20261126) · [性能报告](performance-report-2026-10-30.md#key-range-mutation-cost-20261126)
