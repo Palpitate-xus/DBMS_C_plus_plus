@@ -2094,14 +2094,18 @@ constexpr const char* kCreateUndo = ".create_table_undo";
 constexpr const char* kRetiredCreateUndo = ".create_table_undo.retired";
 constexpr const char* kCreateUndoCleanup = ".create_table_undo.cleanup";
 constexpr const char* kCreateUndoCleanupMember = "cleanup";
+constexpr const char* kCommentUndoMember = "annotations";
+constexpr const char* kCommentsPath = ".comments";
+constexpr const char* kDescriptionPath = "pg_catalog/pg_description.cat";
 constexpr size_t kCreateUndoImageLimit = 256 * 1024 * 1024;
 // Keep allocator counters out of the undo image. They must never move
 // backwards after recovery even if the objects using those IDs disappear.
 const std::array<const char*, 12> kCreateUndoCatalogPaths = {
-    "tlist.lst", ".inherits", ".comments", ".exclusions", ".permissions",
+    "tlist.lst", ".inherits", kCommentsPath, ".exclusions", ".permissions",
     ".grant_chain", "pg_catalog/pg_class.cat", "pg_catalog/pg_attribute.cat",
     "pg_catalog/pg_attrdef.cat", "pg_catalog/pg_depend.cat", "pg_catalog/pg_constraint.cat",
-    "pg_catalog/pg_description.cat"};
+    kDescriptionPath};
+constexpr std::array<const char*, 2> kCommentUndoPaths = {kCommentsPath, kDescriptionPath};
 constexpr size_t kCreateUndoV2PathCount = 10;
 constexpr size_t kCreateUndoV3PathCount = 11;
 
@@ -2129,25 +2133,33 @@ bool readCreateUndoFile(const std::filesystem::path& path, size_t limit,
     return true;
 }
 
-bool captureCreateUndoCatalog(const std::filesystem::path& database,
-                              const std::string& header, std::string& image,
-                              bool includeDescriptions) {
+bool captureCreateUndoFiles(const std::filesystem::path& database,
+                            const std::string& header, const char* version,
+                            const char* const* paths, size_t pathCount,
+                            std::string& image) {
     std::error_code error;
     if (std::filesystem::symlink_status(database / "pg_catalog", error).type() !=
             std::filesystem::file_type::directory || error) return false;
-    image = (includeDescriptions ? "CTUC4" : "CTUC3") + createUndoBinding(database, header);
-    const size_t pathCount = includeDescriptions ? kCreateUndoCatalogPaths.size() : kCreateUndoV3PathCount;
+    image = version + createUndoBinding(database, header);
     for (size_t i = 0; i < pathCount; ++i) {
         constexpr size_t overhead = 8 + create_table_undo::digestBytes;
         if (image.size() > kCreateUndoImageLimit - overhead) return false;
         std::optional<std::string> bytes;
-        if (!readCreateUndoFile(database / kCreateUndoCatalogPaths[i],
+        if (!readCreateUndoFile(database / paths[i],
                                 kCreateUndoImageLimit - image.size() - overhead, bytes)) return false;
         relation_name_codec::append(image, bytes ? bytes->size() + 1 : 0, 8);
         if (bytes) image += *bytes;
     }
     image += SHA256::hash(image);
     return true;
+}
+
+bool captureCreateUndoCatalog(const std::filesystem::path& database,
+                              const std::string& header, std::string& image) {
+    return captureCreateUndoFiles(database, header, "CTUC4", kCreateUndoCatalogPaths.data(),
+                                  kCreateUndoCatalogPaths.size(), image) ||
+           captureCreateUndoFiles(database, header, "CTUC3", kCreateUndoCatalogPaths.data(),
+                                  kCreateUndoV3PathCount, image);
 }
 
 bool restoreCreateUndoPath(const std::filesystem::path& path, const std::optional<std::string>& bytes) {
@@ -2160,25 +2172,13 @@ bool restoreCreateUndoPath(const std::filesystem::path& path, const std::optiona
     return type == std::filesystem::file_type::not_found || index_file::removeDurably(path);
 }
 
-bool restoreCreateUndoCatalog(const std::filesystem::path& database,
-                              const std::filesystem::path& journal) {
-    std::optional<std::string> image;
-    std::optional<std::string> header;
-    if (!readCreateUndoFile(journal / "catalog", kCreateUndoImageLimit, image) ||
-        !image || !readCreateUndoFile(journal / "header", create_table_undo::maxRecordBytes, header) ||
-        !header || image->size() < 133)
-        return false;
-    const auto binding = createUndoBinding(database, *header);
-    size_t pathCount = kCreateUndoCatalogPaths.size();
-    if (image->compare(0, 69, "CTUC2" + binding) == 0) pathCount = kCreateUndoV2PathCount;
-    else if (image->compare(0, 69, "CTUC3" + binding) == 0) pathCount = kCreateUndoV3PathCount;
-    else if (image->compare(0, 69, "CTUC4" + binding) != 0) return false;
-    std::error_code directoryError;
-    if (std::filesystem::symlink_status(database / "pg_catalog", directoryError).type() !=
-            std::filesystem::file_type::directory || directoryError) return false;
-    const std::string payload = image->substr(0, image->size() - 64);
-    if (SHA256::hash(payload) != image->substr(payload.size())) return false;
-    std::vector<std::optional<std::string>> before;
+using CreateUndoFiles = std::vector<std::optional<std::string>>;
+
+bool decodeCreateUndoFiles(const std::string& image, size_t pathCount, CreateUndoFiles& before) {
+    constexpr size_t digest = create_table_undo::digestBytes;
+    if (image.size() < 69 + digest) return false;
+    const std::string payload = image.substr(0, image.size() - digest);
+    if (SHA256::hash(payload) != image.substr(payload.size())) return false;
     size_t offset = 69;
     for (size_t i = 0; i < pathCount; ++i) {
         uint64_t size = 0;
@@ -2191,10 +2191,55 @@ bool restoreCreateUndoCatalog(const std::filesystem::path& database,
             offset += size - 1;
         }
     }
-    if (offset != payload.size() || !before.front() ||
-        !relation_name_codec::decode(*before.front())) return false;
-    for (size_t i = 0; i < before.size(); ++i)
-        if (!restoreCreateUndoPath(database / kCreateUndoCatalogPaths[i], before[i])) return false;
+    return offset == payload.size();
+}
+
+bool isCommentUndoPath(std::string_view path) {
+    return path == kCommentsPath || path == kDescriptionPath;
+}
+
+bool createUndoImageStartsWith(const std::filesystem::path& image, std::string_view version) {
+    std::error_code error;
+    if (std::filesystem::symlink_status(image, error).type() !=
+            std::filesystem::file_type::regular || error) return false;
+    std::ifstream in(image, std::ios::binary);
+    char magic[5];
+    return in.read(magic, sizeof(magic)) && std::string_view(magic, sizeof(magic)) == version;
+}
+
+bool restoreCreateUndoCatalog(const std::filesystem::path& database,
+                              const std::filesystem::path& journal, bool requireCatalog = false) {
+    std::optional<std::string> catalog, comments, header;
+    if (!readCreateUndoFile(journal / "catalog", kCreateUndoImageLimit, catalog) ||
+        !readCreateUndoFile(journal / kCommentUndoMember, kCreateUndoImageLimit, comments) ||
+        (!catalog && (requireCatalog || !comments)) ||
+        !readCreateUndoFile(journal / "header", create_table_undo::maxRecordBytes, header) || !header) return false;
+
+    std::error_code directoryError;
+    if (std::filesystem::symlink_status(database / "pg_catalog", directoryError).type() !=
+            std::filesystem::file_type::directory || directoryError) return false;
+    const auto binding = createUndoBinding(database, *header);
+    CreateUndoFiles oldCatalog, oldComments;
+    if (catalog) {
+        size_t count = kCreateUndoCatalogPaths.size();
+        if (catalog->compare(0, 69, "CTUC2" + binding) == 0) count = kCreateUndoV2PathCount;
+        else if (catalog->compare(0, 69, "CTUC3" + binding) == 0) count = kCreateUndoV3PathCount;
+        else if (catalog->compare(0, 69, "CTUC4" + binding) != 0) return false;
+        if (!decodeCreateUndoFiles(*catalog, count, oldCatalog) ||
+            !oldCatalog.front() || !relation_name_codec::decode(*oldCatalog.front())) return false;
+    }
+    if (comments && (comments->compare(0, 69, "CTUA1" + binding) != 0 ||
+        !decodeCreateUndoFiles(*comments, kCommentUndoPaths.size(), oldComments))) return false;
+
+    // If comments started the journal, a later CREATE captured its catalog
+    // after those edits. Use the earlier image for both overlapping files.
+    for (size_t i = 0; i < oldCatalog.size(); ++i) {
+        const auto* path = kCreateUndoCatalogPaths[i];
+        if ((!comments || !isCommentUndoPath(path)) &&
+            !restoreCreateUndoPath(database / path, oldCatalog[i])) return false;
+    }
+    for (size_t i = 0; i < oldComments.size(); ++i)
+        if (!restoreCreateUndoPath(database / kCommentUndoPaths[i], oldComments[i])) return false;
     return true;
 }
 
@@ -2305,7 +2350,7 @@ bool removeRetiredCreateUndo(const std::filesystem::path& database) {
             if (!readCreateUndoFile(entry->path(), create_table_undo::maxRecordBytes, bytes) ||
                 !bytes || *bytes != (name == "header" ? header : createUndoBinding(database, header)))
                 return false;
-        } else if (name != "catalog" && name.rfind(".dbms_atomic_", 0) != 0) {
+        } else if (name != "catalog" && name != kCommentUndoMember && name.rfind(".dbms_atomic_", 0) != 0) {
             std::optional<std::string> bytes;
             create_table_undo::Birth birth;
             if (!readCreateUndoFile(entry->path(), create_table_undo::maxRecordBytes, bytes) ||
@@ -53247,7 +53292,7 @@ static bool parsePreparedLockMode(const std::string& value,
 static bool validPhysicalBackupSource(
     const std::filesystem::path& source, std::string& sourceDatabase);
 
-bool StorageEngine::ensureCreateUndoImage(const std::string& dbname) {
+bool StorageEngine::ensureCreateUndoImage(const std::string& dbname, bool commentsOnly) {
     const auto& context = transactionContext();
     if (context.txnDB != dbname || !context.databaseExclusiveLock ||
         !context.databaseExclusiveLock->owns_lock()) return false;
@@ -53264,15 +53309,16 @@ bool StorageEngine::ensureCreateUndoImage(const std::string& dbname) {
         const Lsn anchor = wal->currentWriteLsn();
         const auto header = create_table_undo::encodeHeader(
             {context.currentTxnId, wal->timelineId(), anchor});
-        // Large annotations must not reduce the range of databases that can
-        // use the pre-existing CREATE TABLE journal. COMMENT checks that its
-        // file is part of the image before using the scoped undo.
-        if (header.empty() || (!captureCreateUndoCatalog(directory, header, image, true) &&
-                               !captureCreateUndoCatalog(directory, header, image, false)) ||
+        if (header.empty()) return false;
+        const bool captured = commentsOnly
+            ? captureCreateUndoFiles(directory, header, "CTUA1", kCommentUndoPaths.data(),
+                                     kCommentUndoPaths.size(), image)
+            : captureCreateUndoCatalog(directory, header, image);
+        if (!captured ||
             (anchor != 0 && !wal->XLogFlush(anchor))) return false;
         const auto stage = makeCreateUndoStage(directory);
         if (stage.empty()) return false;
-        if (index_file::writeAtomicallyNoReplace(stage / "catalog", image) !=
+        if (index_file::writeAtomicallyNoReplace(stage / (commentsOnly ? kCommentUndoMember : "catalog"), image) !=
                 index_file::WriteResult::OK ||
             index_file::writeAtomicallyNoReplace(stage / "header", header) !=
                 index_file::WriteResult::OK ||
@@ -53290,6 +53336,23 @@ bool StorageEngine::ensureCreateUndoImage(const std::string& dbname) {
             !header || !create_table_undo::decodeHeader(*header, owner) ||
             owner.xid != context.currentTxnId || owner.timeline != wal->timelineId())
             return false;
+        if (!commentsOnly) {
+            const bool hasCatalog = pathEntryExists(journal / "catalog", error);
+            if (error) return false;
+            if (!hasCatalog) {
+                // COMMENT was the first writer. Capture the table-related
+                // files before a CREATE birth becomes durable.
+                std::optional<std::string> comments;
+                CreateUndoFiles before;
+                if (!readCreateUndoFile(journal / kCommentUndoMember, kCreateUndoImageLimit, comments) ||
+                    !comments || comments->compare(0, 69, "CTUA1" + createUndoBinding(directory, *header)) != 0 ||
+                    !decodeCreateUndoFiles(*comments, kCommentUndoPaths.size(), before)) return false;
+                std::string catalog;
+                if (!captureCreateUndoCatalog(directory, *header, catalog) ||
+                    index_file::writeAtomicallyNoReplace(journal / "catalog", catalog) !=
+                        index_file::WriteResult::OK) return false;
+            }
+        }
     }
     return true;
 }
@@ -53306,22 +53369,25 @@ bool StorageEngine::recordCreateTableUndo(const std::string& dbname, const Table
 bool StorageEngine::recoverCreateTableUndo(const std::string& dbname,
                                           const std::set<uint64_t>& committed,
                                           const std::set<uint64_t>& aborted,
-                                          bool targetedRecovery) {
+                                          const std::set<uint64_t>* excludedByTarget) {
     const auto directory = dbPath(dbname);
     const auto journal = directory / kCreateUndo;
     if (!removeRetiredCreateUndo(directory)) return false;
     std::error_code error;
     if (!pathEntryExists(journal, error)) return !error;
     if (std::filesystem::symlink_status(journal, error).type() !=
-            std::filesystem::file_type::directory || error || targetedRecovery) return false;
+            std::filesystem::file_type::directory || error) return false;
     std::optional<std::string> header;
     if (!readCreateUndoFile(journal / "header", create_table_undo::maxRecordBytes, header))
         return false;
 
     std::map<std::string, std::map<uint64_t, std::string>> births;
+    bool hasCatalog = false, hasComments = false;
     for (const auto& entry : std::filesystem::directory_iterator(journal)) {
         const auto name = entry.path().filename().string();
-        if (name == "header" || name == "catalog" || name == "retired" ||
+        if (name == "catalog") hasCatalog = true;
+        if (name == kCommentUndoMember) hasComments = true;
+        if (name == "header" || name == "catalog" || name == kCommentUndoMember || name == "retired" ||
             name == kCreateUndoCleanupMember ||
             name.rfind(".dbms_atomic_", 0) == 0)
             continue;
@@ -53343,7 +53409,25 @@ bool StorageEngine::recoverCreateTableUndo(const std::string& dbname,
     if (!wal || wal->timelineId() != owner.timeline ||
         wal->earliestAvailableLsn() > owner.anchorLsn ||
         wal->currentWriteLsn() < owner.anchorLsn) return false;
-    if (committed.count(owner.xid) || aborted.count(owner.xid)) return retireCreateUndo(directory);
+    if (excludedByTarget) {
+        // A recycled or forked WAL history cannot rule out another commit
+        // whose annotation changes are already in the before-image.
+        if (wal->timelineId() != 1 || wal->earliestAvailableLsn() != 0 ||
+            !hasComments || hasCatalog || !births.empty() ||
+            std::any_of(excludedByTarget->begin(), excludedByTarget->end(),
+                        [&](uint64_t xid) { return xid != owner.xid; })) return false;
+    }
+    const bool ownerExcluded = excludedByTarget && excludedByTarget->count(owner.xid);
+    if (committed.count(owner.xid) || (aborted.count(owner.xid) && !ownerExcluded)) {
+        if (excludedByTarget) {
+            std::optional<std::string> comments;
+            CreateUndoFiles before;
+            if (!readCreateUndoFile(journal / kCommentUndoMember, kCreateUndoImageLimit, comments) ||
+                !comments || comments->compare(0, 69, "CTUA1" + createUndoBinding(directory, *header)) != 0 ||
+                !decodeCreateUndoFiles(*comments, kCommentUndoPaths.size(), before)) return false;
+        }
+        return retireCreateUndo(directory);
+    }
 
     struct OwnedRelation {
         std::string name;
@@ -53386,7 +53470,7 @@ bool StorageEngine::recoverCreateTableUndo(const std::string& dbname,
                 std::filesystem::file_type::regular || error) return false;
         return std::filesystem::remove(path, error) && !error;
     };
-    if (!restoreCreateUndoCatalog(directory, journal)) return false;
+    if (!restoreCreateUndoCatalog(directory, journal, !births.empty())) return false;
     for (const auto& table : owned) {
         for (const auto& path : table.files) {
             if (!removeFile(path)) return false;
@@ -53440,6 +53524,7 @@ bool StorageEngine::recoverAllDatabases() {
     std::map<std::string, std::set<uint64_t>> committedXidsByDb;
     std::map<std::string, std::set<uint64_t>> abortedXidsByDb;
     std::map<std::string, std::set<uint64_t>> pitrExcludedXidsByDb;
+    std::set<std::string> pitrDatabasesWithUndatedCommits;
     std::map<std::string, std::set<uint64_t>> preparedWalXidsByDb;
     std::map<std::string, std::map<uint64_t, uint8_t>> xactWalStateByDb;
     std::map<std::string, uint64_t> recoveryTargetsByDb;
@@ -53739,6 +53824,8 @@ bool StorageEngine::recoverAllDatabases() {
                             ? recoveryTargetsByDb[dbname]
                             : 0;
                     const uint64_t commitEpoch = commitEpochOf(rec);
+                    if (targetEpoch != 0 && commitEpoch == 0)
+                        pitrDatabasesWithUndatedCommits.insert(dbname);
                     const bool excludedByTarget =
                         targetEpoch != 0 && commitEpoch != 0 &&
                         commitEpoch > targetEpoch;
@@ -53974,11 +54061,13 @@ bool StorageEngine::recoverAllDatabases() {
     for (const auto& dbname : getDatabaseNames()) {
         if (!pendingCreateUndo(dbPath(dbname))) continue;
         uint64_t owner = 0;
+        const auto* excluded = recoveryTargetsByDb.count(dbname) ? &pitrExcludedXidsByDb[dbname] : nullptr;
         if (pendingTruncateUndo(dbPath(dbname)) || !createUndoOwner(dbPath(dbname), owner) ||
+            (owner != 0 && excluded && pitrDatabasesWithUndatedCommits.count(dbname)) ||
             inDoubtPreparedXids.count({dbname, owner}) ||
             !recoverCreateTableUndo(dbname, committedXidsByDb[dbname],
                                     abortedXidsByDb[dbname],
-                                    recoveryTargetsByDb.count(dbname))) {
+                                    excluded)) {
             std::cerr << "[recovery] could not recover CREATE TABLE undo for "
                       << dbname << std::endl;
             return false;
@@ -59465,21 +59554,14 @@ bool StorageEngine::beginCreateTableUndo(const std::string& dbname) {
 }
 
 std::function<bool()> StorageEngine::prepareCommentUndo(const std::string& dbname, bool compatibilityFile) {
-    if (!beginCreateTableUndo(dbname) || hasTransactionBackup() || !ensureCreateUndoImage(dbname)) return {};
+    if (!beginCreateTableUndo(dbname) || hasTransactionBackup() || !ensureCreateUndoImage(dbname, true)) return {};
     const auto root = dbPath(dbname);
-    {
-        const auto image = root / kCreateUndo / "catalog";
-        std::error_code error;
-        if (std::filesystem::symlink_status(image, error).type() !=
-                std::filesystem::file_type::regular || error) return {};
-        std::ifstream in(image, std::ios::binary);
-        char version[5];
-        if (!in.read(version, sizeof(version)) || std::string_view(version, sizeof(version)) != "CTUC4")
-            return {};
-    }
+    const auto journal = root / kCreateUndo;
+    if (!createUndoImageStartsWith(journal / kCommentUndoMember, "CTUA1") &&
+        !createUndoImageStartsWith(journal / "catalog", "CTUC4")) return {};
     transactionContext().hasCommentUndo = true;
-    const auto description = root / "pg_catalog" / "pg_description.cat";
-    const auto compatibility = root / ".comments";
+    const auto description = root / kDescriptionPath;
+    const auto compatibility = root / kCommentsPath;
     std::optional<std::string> oldDescription, oldCompatibility;
     if (!readCreateUndoFile(description, kCreateUndoImageLimit, oldDescription) ||
         (compatibilityFile && !readCreateUndoFile(compatibility, kCreateUndoImageLimit, oldCompatibility)))

@@ -115,7 +115,9 @@ int main() {
     assert(g_engine.beginTransaction(database) == dbms::DBStatus::OK);
     assert(!ddl.executeSql("COMMENT ON TABLE notes IS 'outer comment'", session));
     assert(!g_engine.hasTransactionBackup());
-    assert(fs::is_regular_file(g_engine.dbPath(database) / ".create_table_undo" / "catalog"));
+    const auto undo = g_engine.dbPath(database) / ".create_table_undo";
+    assert(fs::is_regular_file(undo / "annotations"));
+    assert(!fs::exists(undo / "catalog"));
     assert(g_engine.getTableComment(database, "notes") == "outer comment");
     assert(g_engine.savepoint("after_first_comment") == dbms::DBStatus::OK);
     assert(!ddl.executeSql("COMMENT ON TABLE notes IS 'inner comment'", session));
@@ -127,7 +129,21 @@ int main() {
     assert(g_engine.catalogService().get(database).getDescription(tableOid, dbms::PgClassOid_Class, 0) ==
            "outer comment");
     assert(g_engine.rollbackTransaction() == dbms::DBStatus::OK);
-    assert(!fs::exists(g_engine.dbPath(database) / ".create_table_undo"));
+    assert(!fs::exists(undo));
+    assert(g_engine.getTableComment(database, "notes") == "table comment");
+    assert(g_engine.catalogService().get(database).getDescription(tableOid, dbms::PgClassOid_Class, 0) ==
+           "table comment");
+
+    assert(g_engine.beginTransaction(database) == dbms::DBStatus::OK);
+    assert(!ddl.executeSql("COMMENT ON TABLE notes IS 'before create'", session));
+    assert(!ddl.executeSql("CREATE TABLE rollback_birth (id INT)", session));
+    assert(!g_engine.hasTransactionBackup());
+    assert(fs::is_regular_file(undo / "annotations"));
+    assert(fs::is_regular_file(undo / "catalog"));
+    assert(g_engine.tableExists(database, "rollback_birth"));
+    assert(g_engine.rollbackTransaction() == dbms::DBStatus::OK);
+    assert(!fs::exists(undo));
+    assert(!g_engine.tableExists(database, "rollback_birth"));
     assert(g_engine.getTableComment(database, "notes") == "table comment");
     assert(g_engine.catalogService().get(database).getDescription(tableOid, dbms::PgClassOid_Class, 0) ==
            "table comment");

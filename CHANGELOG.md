@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>修改注释所需的临时备份更小 · 2026-11-26</summary>
+
+在另有 128 张表的测试库里，只修改一条注释时，临时备份从约 131 KB 降到不到 1 KB。
+
+[测试报告](docs/test-report.md#comment-compact-undo-20261126) · [性能报告](docs/performance-report-2026-10-30.md#comment-compact-undo-cost-20261126)
+
+</details>
+
+<details>
 <summary>给表和列保存注释更快 · 2026-11-26</summary>
 
 给表或列加注释时，省去了备份整个数据库的步骤。在另有 128 张表的测试库里，给一张表加注释从约 100 毫秒降到约 16–17 毫秒。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>查找其他连接的临时表分组更快 · 2026-11-26</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-26 · 查找其他连接的临时表分组更快
 
 数据库会把每个连接的临时表单独放在一组。在额外建了 128 个普通分组的测试库里，查找其他连接的临时分组从约 17 毫秒降到约 3 毫秒。
 
 [使用说明](docs/MANUAL.md#建表) · [测试报告](docs/test-report.md#namespace-identity-index-20261126) · [性能报告](docs/performance-report-2026-10-30.md#namespace-identity-index-cost-20261126)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-26 · 可以查出临时表放在哪个分组
 

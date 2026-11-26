@@ -2455,11 +2455,11 @@ private:
     // transaction lock and flushed all durable state.
     void lockDatabaseForDdl();
     bool recordCreateTableUndo(const std::string& dbname, const TableSchema& table);
-    bool ensureCreateUndoImage(const std::string& dbname);
+    bool ensureCreateUndoImage(const std::string& dbname, bool commentsOnly = false);
     bool recoverCreateTableUndo(const std::string& dbname,
                                 const std::set<uint64_t>& committed,
                                 const std::set<uint64_t>& aborted,
-                                bool targetedRecovery);
+                                const std::set<uint64_t>* excludedByTarget);
 
     bool physicalBackupLocked(const std::string& dbname,
                               const std::string& backupPath,

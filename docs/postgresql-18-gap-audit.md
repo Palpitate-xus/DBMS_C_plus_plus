@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-26 · 用更小的注释日志恢复
+
+只执行 `COMMENT ON` 时，恢复记录只包含 `.comments` 与 `pg_description.cat`，同一事务随后建表时再补齐其他文件。在保留完整初始日志时，启动恢复可根据目标时间保留或撤销这笔注释事务。其他目标后提交、已有时间线分叉及混合建表的日志仍拒绝按此方式恢复。注释历史和新内容尚未接入可从备份重放的目录日志。`CAT-03`、`WAL-08` 和 `BACKUP-04` 维持部分实现。 [测试报告](test-report.md#comment-compact-undo-20261126) · [性能报告](performance-report-2026-10-30.md#comment-compact-undo-cost-20261126)
+
 ## 2026-11-26 · 保存注释时只备份相关文件
 
 对已有目录编号的对象，`COMMENT ON` 用文件级恢复日志保护注释写入。保存点记录本次修改前的注释文件，重启用事务开始写入前的记录恢复。与建表或需要完整备份的目录写入混合时仍使用对应恢复流程。`CAT-03`、`MON-01` 和 `WAL-08` 维持部分实现。 [回滚测试](test-report.md#comment-file-undo-20261126) · [性能报告](performance-report-2026-10-30.md#comment-file-undo-cost-20261126)

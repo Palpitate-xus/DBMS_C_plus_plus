@@ -2,6 +2,18 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-26 save only annotation files in comment undo",
+      "gap_ids": ["CAT-03", "WAL-08", "BACKUP-04"],
+      "status": "partial",
+      "evidence": ["src/commands/TableManage.cpp", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/object_description_protocol_e2e_test.py", "tests/comment_dependency_test.cpp", "tests/pitr_recovery_test.cpp"],
+      "verification": [
+        "The native rollback test checks the two-file undo image, later CREATE TABLE promotion and correct savepoint and full rollback results.",
+        "Restart checks cover ordinary rollback, old image formats, retained commits on either side of a recovery target, and rejection of a corrupt image, mixed CREATE TABLE, prior excluded commit or forked WAL history.",
+        "Compare comment write latency and recovery-image size with the previous build and PostgreSQL 18.6. Archived WAL replay of older comment changes remains open."
+      ]
+    },
+    {
       "issue": "2026-11-26 use scoped catalog undo for comment writes",
       "gap_ids": ["CAT-03", "MON-01", "WAL-08"],
       "status": "partial",
