@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>改表时少读一遍备份文件 · 2026-11-26</summary>
+
+在额外建了 128 张表的磁盘测试中，改表名的时间从约 1.8 秒缩短到约 1.1 秒。
+
+[测试报告](docs/test-report.md#transaction-backup-copy-20261126) · [性能报告](docs/performance-report-2026-10-30.md#transaction-backup-copy-cost-20261126)
+
+</details>
+
+<details>
 <summary>修改表时可以跳过不存在的表 · 2026-11-26</summary>
 
 用 `ALTER TABLE IF EXISTS` 给表加列、删列或改名时，如果表不存在，数据库会提示并跳过。
@@ -21,16 +30,13 @@
 </details>
 
 <details>
-<summary>磁盘上的表改名更快 · 2026-11-26</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-26 · 磁盘上的表改名更快
 
 在额外建了 128 张表的磁盘测试中，改一张表名的时间从约 3.6 秒缩短到约 1.8 秒。
 
 [测试报告](docs/test-report.md#backup-file-sync-20261126) · [性能报告](docs/performance-report-2026-10-30.md#backup-file-sync-cost-20261126)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-26 · 库里表多时，改表名更快
 

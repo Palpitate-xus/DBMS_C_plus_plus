@@ -55691,10 +55691,97 @@ static bool digestManifestFile(const std::filesystem::path& path,
     return true;
 }
 
+// A transaction image keeps the original file contents. Copy and hash those
+// bytes together, then seal the destination before it can enter the manifest.
+static bool copyAndSealBackupFile(const std::filesystem::path& source,
+                                  const std::filesystem::path& destination,
+                                  PhysicalBackupFileEntry& entry) {
+    const int input = ::open(source.c_str(), O_RDONLY | O_CLOEXEC | O_NONBLOCK);
+    if (input < 0) return false;
+    struct stat file{};
+    const bool regular = ::fstat(input, &file) == 0 && S_ISREG(file.st_mode) && file.st_size >= 0;
+    const int output = regular
+        ? ::open(destination.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600) : -1;
+    if (output < 0) {
+        ::close(input);
+        return false;
+    }
+
+    bool complete = true;
+    uint64_t remaining = static_cast<uint64_t>(file.st_size);
+    dbms::backup_manifest_detail::ManifestCreationSha256 digest;
+    std::array<char, 64 * 1024> buffer;
+    while (complete) {
+        const ssize_t count = ::read(input, buffer.data(), buffer.size());
+        if (count < 0 && errno == EINTR) continue;
+        if (count == 0) break;
+        if (count < 0 || static_cast<uint64_t>(count) > remaining) {
+            complete = false;
+            break;
+        }
+        for (ssize_t written = 0; written < count;) {
+            const ssize_t part = ::write(output, buffer.data() + written, count - written);
+            if (part < 0 && errno == EINTR) continue;
+            if (part <= 0) {
+                complete = false;
+                break;
+            }
+            written += part;
+        }
+        digest.append(buffer.data(), static_cast<size_t>(count));
+        remaining -= static_cast<uint64_t>(count);
+    }
+    complete = complete && remaining == 0 &&
+        ::fchmod(output, file.st_mode & 07777) == 0 && syncPhysicalBackupDescriptor(output);
+    const bool outputClosed = ::close(output) == 0;
+    const bool inputClosed = ::close(input) == 0;
+    if (!complete || !outputClosed || !inputClosed) return false;
+    entry.size = static_cast<uint64_t>(file.st_size);
+    entry.digest = digest.finishHex();
+    return true;
+}
+
+template <size_t backgroundWorkers = 3, typename RunFile>
+static bool runBackupFileJobs(size_t count, const RunFile& runFile) {
+    if (count < 128) {
+        for (size_t index = 0; index < count; ++index)
+            if (!runFile(index)) return false;
+        return true;
+    }
+    // Each worker owns separate files and manifest entries. Wait for every
+    // worker before inspecting the stage or removing it after an error.
+    std::atomic<size_t> next{0};
+    std::atomic<bool> valid{true};
+    const auto worker = [&]() {
+        try {
+            while (valid.load(std::memory_order_relaxed)) {
+                const size_t index = next.fetch_add(1, std::memory_order_relaxed);
+                if (index >= count) return;
+                if (!runFile(index)) break;
+            }
+        } catch (...) {
+            // The staging tree must not be published after a worker failed.
+        }
+        valid.store(false, std::memory_order_relaxed);
+    };
+    std::array<std::thread, backgroundWorkers> workers;
+    try {
+        for (auto& thread : workers) thread = std::thread(worker);
+    } catch (...) {
+        // The caller and any workers already started can finish the queue.
+    }
+    worker();
+    for (auto& thread : workers) {
+        if (thread.joinable()) thread.join();
+    }
+    return valid.load(std::memory_order_relaxed);
+}
+
 static bool collectManifestCreationEntries(
     const std::filesystem::path& root,
     PhysicalBackupDirectories& directories,
-    PhysicalBackupFiles& files, bool syncFiles) {
+    PhysicalBackupFiles& files, bool syncFiles,
+    const PhysicalBackupFiles& sealed = {}) {
     directories.clear();
     files.clear();
     std::error_code error;
@@ -55704,6 +55791,7 @@ static bool collectManifestCreationEntries(
     const std::filesystem::recursive_directory_iterator end;
     if (error) return false;
     std::vector<std::pair<std::filesystem::path, PhysicalBackupFileEntry*>> toSync;
+    size_t sealedCount = 0;
     for (; iterator != end; iterator.increment(error)) {
         if (error) return false;
         const auto& entry = *iterator;
@@ -55722,56 +55810,30 @@ static bool collectManifestCreationEntries(
         if (error || !entry.is_regular_file(error) || error) return false;
         const auto [file, inserted] = files.try_emplace(name);
         if (!inserted) return false;
-        if (syncFiles) {
+        const auto alreadySealed = sealed.find(name);
+        if (alreadySealed != sealed.end()) {
+            if (entry.file_size(error) != alreadySealed->second.size || error) return false;
+            file->second = alreadySealed->second;
+            ++sealedCount;
+        } else if (syncFiles) {
             toSync.emplace_back(entry.path(), &file->second);
         } else if (!digestManifestFile(entry.path(), file->second, false)) {
             return false;
         }
     }
-    if (error) return false;
-    if (toSync.size() < 128) {
-        return std::all_of(toSync.begin(), toSync.end(), [](const auto& file) {
-            return digestManifestFile(file.first, *file.second, true);
+    return !error && sealedCount == sealed.size() &&
+        runBackupFileJobs(toSync.size(), [&](size_t index) {
+            const auto& [path, file] = toSync[index];
+            return digestManifestFile(path, *file, true);
         });
-    }
-
-    // Files in the private staging tree have no dependency on each other.
-    // Batch their digest and fsync work before the caller syncs directories
-    // and publishes the manifest. Each worker fills different map entries;
-    // the map's structure is fixed until all workers have joined.
-    std::atomic<size_t> next{0};
-    std::atomic<bool> valid{true};
-    const auto syncFilesForWorker = [&]() {
-        try {
-            while (valid.load(std::memory_order_relaxed)) {
-                const size_t index = next.fetch_add(1, std::memory_order_relaxed);
-                if (index >= toSync.size()) return;
-                const auto& [path, file] = toSync[index];
-                if (!digestManifestFile(path, *file, true)) break;
-            }
-        } catch (...) {
-            // The staging tree must not be published after a worker failed.
-        }
-        valid.store(false, std::memory_order_relaxed);
-    };
-    std::array<std::thread, 3> workers;
-    try {
-        for (auto& worker : workers) worker = std::thread(syncFilesForWorker);
-    } catch (...) {
-        // The caller and any workers already started can finish the queue.
-    }
-    syncFilesForWorker();
-    for (auto& worker : workers) {
-        if (worker.joinable()) worker.join();
-    }
-    return valid.load(std::memory_order_relaxed);
 }
 
 static bool writePhysicalBackupManifest(const std::filesystem::path& root,
-                                        const std::string& database) {
+                                        const std::string& database,
+                                        const PhysicalBackupFiles& sealed) {
     PhysicalBackupDirectories directories;
     PhysicalBackupFiles files;
-    if (!collectManifestCreationEntries(root, directories, files, /*syncFiles=*/true))
+    if (!collectManifestCreationEntries(root, directories, files, true, sealed))
         return false;
 
     // Children follow their parents in this ordered set of relative names.
@@ -56334,6 +56396,17 @@ bool StorageEngine::physicalBackupLocked(
             return false;
         }
 
+        // Internal rollback images retain all main forks and have no progress
+        // callback. Their top-level payload can be copied directly into its
+        // final form. The exported backup still supports filtering and progress.
+        const bool sealDuringCopy = includeUnloggedMain && !progress;
+        PhysicalBackupFiles sealed;
+        struct CopyJob {
+            std::filesystem::path source;
+            std::filesystem::path destination;
+            PhysicalBackupFileEntry* entry;
+        };
+        std::vector<CopyJob> copyJobs;
         for (const auto& entry : std::filesystem::directory_iterator(src)) {
             // Advisory lock and interrupted temporary files are runtime
             // coordination state, not database contents. Never copy them
@@ -56349,6 +56422,14 @@ bool StorageEngine::physicalBackupLocked(
                 continue;
             }
             auto destPath = stagedBackup / entry.path().filename();
+            // These two destinations can be populated by additional copy
+            // steps below, so keep their existing order and replacement rules.
+            if (sealDuringCopy && filename != "wal_archive" && filename != "tablespaces" &&
+                entry.is_regular_file()) {
+                const auto file = sealed.try_emplace(filename).first;
+                copyJobs.push_back({entry.path(), std::move(destPath), &file->second});
+                continue;
+            }
             if (entry.is_directory()) {
                 std::filesystem::copy(entry.path(), destPath,
                     std::filesystem::copy_options::overwrite_existing |
@@ -56361,6 +56442,15 @@ bool StorageEngine::physicalBackupLocked(
                 discardStagedBackup();
                 return false;
             }
+        }
+        // Copies also spend time waiting for allocation and writeback. Keep
+        // more of them in flight than for sealing an already copied tree.
+        if (!runBackupFileJobs<7>(copyJobs.size(), [&](size_t index) {
+                const auto& [source, destination, entry] = copyJobs[index];
+                return copyAndSealBackupFile(source, destination, *entry);
+            })) {
+            discardStagedBackup();
+            return false;
         }
         // Also backup WAL archive if exists
         if (std::filesystem::exists(archiveDir)) {
@@ -56479,7 +56569,7 @@ bool StorageEngine::physicalBackupLocked(
                 }
             }
         }
-        if (!writePhysicalBackupManifest(stagedBackup, dbname)) {
+        if (!writePhysicalBackupManifest(stagedBackup, dbname, sealed)) {
             discardStagedBackup();
             return false;
         }

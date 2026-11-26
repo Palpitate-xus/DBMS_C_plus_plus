@@ -3,6 +3,19 @@
   "recent_updates": [
 
     {
+      "issue": "2026-11-26 copy and seal transaction rollback files together",
+      "gap_ids": ["BACKUP-01", "BACKUP-02", "TXN-05", "WAL-07"],
+      "status": "partial",
+      "evidence": ["src/commands/TableManage.cpp", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/physical_backup_replacement_test.cpp", "tests/physical_backup_manifest_test.cpp", "tests/cold_start_transaction_backup_protocol_e2e_test.py", "tests/tablespace_protocol_e2e_test.py"],
+      "verification": [
+        "Fail a file sync during the internal rollback copy, retry, and restore bytes and permissions.",
+        "Interrupt a rename before backup publication and after moving table files, compare the manifest with the actual files, and reopen with the other version.",
+        "Time standalone and explicit transaction renames with different numbers of unrelated tables."
+      ]
+    },
+
+    {
       "issue": "2026-11-26 skip missing ALTER TABLE targets and defer explicit rename backups",
       "gap_ids": ["SQL-11", "TXN-05", "WAL-05"],
       "status": "partial",

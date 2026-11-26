@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-26 · 回滚备份少读一遍文件
+
+PostgreSQL 的物理备份在传输文件时更新校验值，并默认等备份写入磁盘。SQLite 的在线备份按页复制，可以分次进行。DuckDB 通过检查点把日志中的写入合入数据库文件。 [PostgreSQL 备份实现](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/backup/basebackup.c#L1659-L1668) · [PostgreSQL 备份落盘](https://www.postgresql.org/docs/18/app-pgbasebackup.html) · [SQLite 在线备份](https://www.sqlite.org/backup.html) · [DuckDB 检查点](https://duckdb.org/docs/1.5/sql/statements/checkpoint)
+
+本项目的回滚备份在复制顶层文件时计算校验值并同步。普通表改名仍复制整库。PostgreSQL 更新目录里的表名和对应行类型名，表的数据文件无需改名或复制。 [PostgreSQL 改名实现](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/commands/tablecmds.c#L4022-L4102) · [功能测试](test-report.md#transaction-backup-copy-20261126) · [性能报告](performance-report-2026-10-30.md#transaction-backup-copy-cost-20261126)
+
 ## 2026-11-26 · 跳过不存在的表
 
 PostgreSQL 在执行普通 `ALTER TABLE` 前查找目标关系，带 `IF EXISTS` 时对缺表发出提示。SQLite 的 `ALTER TABLE` 直接修改保存的建表语句。DuckDB 的 `ALTER TABLE` 修改目录，改动随事务提交或回滚。 [PostgreSQL 实现](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/tcop/utility.c#L1200-L1257) · [SQLite ALTER TABLE](https://www.sqlite.org/lang_altertable.html) · [DuckDB ALTER TABLE](https://duckdb.org/docs/1.5/sql/statements/alter_table)

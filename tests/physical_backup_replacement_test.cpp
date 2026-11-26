@@ -19,22 +19,26 @@
 #include <unistd.h>
 
 namespace {
-std::atomic<bool> failStagedFileSync{false};
+enum class SyncFailure { None, Export, Transaction };
+std::atomic<SyncFailure> failStagedFileSync{SyncFailure::None};
 }
 
 extern "C" int __real_fsync(int descriptor);
 extern "C" int __wrap_fsync(int descriptor) {
-    if (failStagedFileSync.load(std::memory_order_relaxed)) {
+    auto failure = failStagedFileSync.load(std::memory_order_relaxed);
+    if (failure != SyncFailure::None) {
         const std::string link = "/proc/self/fd/" + std::to_string(descriptor);
         std::array<char, 4096> buffer;
         const ssize_t length = ::readlink(link.c_str(), buffer.data(), buffer.size());
         if (length > 0) {
             const std::string_view path(buffer.data(), static_cast<size_t>(length));
-            constexpr std::string_view suffix = "/backup_payload/item-97";
+            const std::string_view suffix = failure == SyncFailure::Export
+                ? "/backup_payload/item-97" : "/transaction-payload-97";
             if (path.find(".backup_staging.") != std::string_view::npos &&
                 path.size() >= suffix.size() &&
                 path.substr(path.size() - suffix.size()) == suffix &&
-                failStagedFileSync.exchange(false, std::memory_order_relaxed)) {
+                failStagedFileSync.compare_exchange_strong(
+                    failure, SyncFailure::None, std::memory_order_relaxed)) {
                 errno = EIO;
                 return -1;
             }
@@ -81,9 +85,9 @@ int main() {
         payload << std::string(static_cast<size_t>(index), 'x');
         assert(payload.good());
     }
-    failStagedFileSync.store(true, std::memory_order_relaxed);
+    failStagedFileSync.store(SyncFailure::Export, std::memory_order_relaxed);
     assert(!engine.physicalBackup(database, backup));
-    assert(!failStagedFileSync.load(std::memory_order_relaxed));
+    assert(failStagedFileSync.load(std::memory_order_relaxed) == SyncFailure::None);
     assert(std::filesystem::is_regular_file(
         std::filesystem::path(backup) / "obsolete_table.stc"));
     assert(!std::filesystem::exists(std::filesystem::path(backup) / "backup_payload"));
@@ -144,6 +148,41 @@ int main() {
     for (int index = 0; index < 160; ++index)
         assert(std::filesystem::file_size(extra / ("item-" + std::to_string(index))) ==
                static_cast<uintmax_t>(index));
+
+    // The transaction image copies regular files at the database root in
+    // parallel. Exercise one failed writeback, retry, and an exact restore.
+    const auto databaseRoot = engine.dbPath(database);
+    for (int index = 0; index < 160; ++index) {
+        const auto path = databaseRoot / ("transaction-payload-" + std::to_string(index));
+        std::ofstream payload(path, std::ios::binary);
+        payload << std::string(static_cast<size_t>(index), 'y');
+        assert(payload.good());
+    }
+    const std::string largeBytes = std::string(65536, 'a') + std::string(65539, 'b');
+    const auto largePath = databaseRoot / "transaction-payload-97";
+    std::ofstream(largePath, std::ios::binary | std::ios::trunc) << largeBytes;
+    const auto mode = std::filesystem::perms::owner_read | std::filesystem::perms::owner_write;
+    std::filesystem::permissions(largePath, mode);
+    assert(engine.beginTransaction(database, true) == dbms::DBStatus::OK);
+    failStagedFileSync.store(SyncFailure::Transaction, std::memory_order_relaxed);
+    assert(!engine.createTransactionBackup());
+    assert(failStagedFileSync.load(std::memory_order_relaxed) == SyncFailure::None);
+    assert(!engine.hasTransactionBackup());
+    assert(engine.createTransactionBackup());
+    engine.preserveTransactionBackupOnRollback(true);
+    engine.restoreTransactionBackupBeforeRowUndo(true);
+    engine.markTransactionBackupDirty();
+    std::ofstream(largePath, std::ios::trunc) << "changed";
+    assert(engine.rollbackTransaction() == dbms::DBStatus::OK);
+    std::ifstream restored(largePath, std::ios::binary);
+    const std::string restoredBytes{std::istreambuf_iterator<char>(restored), {}};
+    assert(restoredBytes == largeBytes);
+    assert(std::filesystem::status(largePath).permissions() == mode);
+    for (int index = 0; index < 160; ++index) {
+        if (index == 97) continue;
+        const auto path = databaseRoot / ("transaction-payload-" + std::to_string(index));
+        assert(std::filesystem::file_size(path) == static_cast<uintmax_t>(index));
+    }
 
     finalCleanupTestData();
     std::cout << "[PHYSICAL BACKUP REPLACEMENT] passed\n";
