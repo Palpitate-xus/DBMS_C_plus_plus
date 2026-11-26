@@ -1,27 +1,27 @@
 # 更新日志
 
 <details>
-<summary>表多时，开始事务更快 · 2026-11-26</summary>
+<summary>库里表多时，开始事务更快 · 2026-11-26</summary>
 
-数据库可以复用表的信息和表之间的依赖关系。额外建了 512 张表的测试中，开始事务从约 2.95 毫秒缩短到约 0.93 毫秒。
+在额外建了 512 张表的测试库里，开始事务从约 3 毫秒降到不到 1 毫秒。
 
 [测试报告](docs/test-report.md#relation-publication-20261126) · [性能报告](docs/performance-report-2026-10-30.md#relation-publication-cost-20261126)
 
 </details>
 
 <details>
-<summary>表多、列多时少做重复工作 · 2026-11-26</summary>
+<summary>库里列多时，按主键查一行更快 · 2026-11-26</summary>
 
-数据库可以复用没改过的列定义。测试库额外建了 4,096 列且只有一条注释时，按主键查询一行从约 7.8 毫秒缩短到约 4.5 毫秒。
+在额外建了 4,096 列、只给目标表写了一条注释的测试库里，按主键查一行从约 8 毫秒降到约 4.5 毫秒。
 
 [测试报告](docs/test-report.md#attribute-publication-20261126) · [性能报告](docs/performance-report-2026-10-30.md#attribute-publication-cost-20261126)
 
 </details>
 
 <details>
-<summary>注释多时，普通读写更快 · 2026-11-26</summary>
+<summary>列注释多时，按主键查一行更快 · 2026-11-26</summary>
 
-数据库可以复用已经保存的注释内容。在额外写入 4,096 条列注释的测试库里，按主键读一行从约 25.9 毫秒缩短到约 8.4 毫秒。
+在额外写了 4,096 条列注释的测试库里，按主键查一行从约 26 毫秒降到约 8.4 毫秒。
 
 [测试报告](docs/test-report.md#description-publication-20261126) · [性能报告](docs/performance-report-2026-10-30.md#description-publication-cost-20261126)
 
