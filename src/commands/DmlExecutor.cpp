@@ -6501,6 +6501,39 @@ static void normalizeBoundReturningArrayDescriptors(QueryRowDescriptor& output) 
     }
 }
 
+// The view's public columns and the heap columns can have different names
+// and positions. Keep the caller's existing bindings and route only the row
+// reads and writes through the projection's actual source columns.
+struct WritableViewProjection {
+    const PreparedQuery::SourceRange* source;
+    const SelectStmt* select;
+    std::vector<size_t> columns;
+};
+
+std::optional<WritableViewProjection> writableViewProjection(const PreparedQuery& view) {
+    const auto* select = dynamic_cast<const SelectStmt*>(view.ast.get());
+    if (!select || !select->fromClause || select->fromClause->type != FromItem::Type::Table ||
+        select->fromClause->only || !select->fromClause->columnAliases.empty() ||
+        !select->ctes.empty() || select->distinct || !select->distinctOn.empty() ||
+        select->setOp != SetOp::None || !select->groupBy.empty() || !select->groupByElems.empty() ||
+        select->having || select->hasRowCountClause || select->limit || select->offset ||
+        select->limitExpr || select->offsetExpr || !select->locking.empty()) return std::nullopt;
+
+    const auto source = std::find_if(view.sourceRanges.begin(), view.sourceRanges.end(),
+        [&](const auto& range) { return range.owner == select && range.source == select->fromClause.get(); });
+    if (source == view.sourceRanges.end() || source->relationSchema.empty() ||
+        source->relationName.empty() || source->viewQuery || source->cteStatement ||
+        source->generatedRelation) return std::nullopt;
+
+    WritableViewProjection projection{&*source, select, {}};
+    for (const auto& value : view.projectionBindings.at(select)) {
+        if (!value.column || value.column->scopeDepth || value.column->sourceOrdinal != source->ordinal)
+            return std::nullopt;
+        projection.columns.push_back(value.column->columnOrdinal);
+    }
+    return projection;
+}
+
 class BoundDmlExecution {
     Stmt* statement_;
     Session& session_;
@@ -6516,6 +6549,52 @@ class BoundDmlExecution {
     bool hasSource_ = false;
     bool ownsChildCursors_ = false;
     std::vector<Expr*> expressions_;
+    std::vector<std::string> updateColumns_;
+    std::vector<size_t> viewColumns_;
+    const Expr* viewPredicate_ = nullptr;
+    const PreparedQuery::SourceRange* viewSource_ = nullptr;
+    std::unique_ptr<PreparedQueryExecution> viewFilter_;
+
+    const Column& physicalColumn(size_t ordinal) const {
+        return table_.cols[viewSource_ ? viewColumns_.at(ordinal) : ordinal];
+    }
+    std::string physicalColumnName(const std::string& name) const {
+        if (!viewSource_) return name;
+        const auto column = std::find_if(target_->columns.begin(), target_->columns.end(),
+            [&](const auto& field) { return field.name == name; });
+        if (column == target_->columns.end())
+            throw DbError("42703", "view column does not exist: " + name);
+        return physicalColumn(static_cast<size_t>(column - target_->columns.begin())).dataName;
+    }
+
+    bool matchesView(const SqlRow& values) const {
+        if (!viewPredicate_) return true;
+        auto row = viewFilter_->context();
+        std::vector<ExprValue> cells;
+        cells.reserve(viewSource_->columns.size());
+        for (size_t ordinal = 0; ordinal < viewSource_->columns.size(); ++ordinal) {
+            const auto& column = viewSource_->columns[ordinal];
+            const auto value = values.find(column.name);
+            if (value == values.end()) throw DbError("XX000", "view filter has no bound input column: " + column.name);
+            cells.push_back(readPhysicalCell(table_.cols[ordinal], column, value->second));
+        }
+        viewFilter_->setSourceRow(row, viewSource_->ordinal, std::move(cells));
+        const auto result = viewFilter_->evaluate(viewPredicate_, row);
+        return !result.isNull && result.asBool();
+    }
+
+    ExprValue readPhysicalCell(const Column& stored, const QueryOutputColumn& declared,
+                              const SqlCell& value, bool captureArray = false) const {
+        ExprValue cell(declared.type, value.value_or(""), !value);
+        if (stored.generatedKind != 'v' && stored_regtype_detail::columnType(stored.dataType)) {
+            const auto catalog = regtype_detail::metadata(g_engine, session_.currentDB);
+            cell = stored_regtype_detail::load(value.value_or(""), stored.isArray,
+                !value, catalog, &session_, declared.typeMetadata, stored.dataType);
+        }
+        if (captureArray && stored.generatedKind != 'v' && stored.isArray)
+            (void)compound_value_detail::decodeArrayStorageInput(cell, declared.typeMetadata);
+        return cell;
+    }
 
     static bool defaultValue(const Expr* expr) {
         const auto* literal = dynamic_cast<const LiteralExpr*>(expr);
@@ -6564,23 +6643,14 @@ class BoundDmlExecution {
         auto row=source?*source:execution_->context();std::vector<ExprValue> cells;
         for(const auto& column:target_->columns) {
             if(target_->generatedRelation && execution_->generatedSourceRead(target_->ordinal,cells.size())){cells.emplace_back();continue;}
-            const auto found=values.find(column.name);
+            const auto position=cells.size();
+            const auto& stored=physicalColumn(position);
+            const auto found=values.find(stored.dataName);
             if(found==values.end())throw DbError("XX000","DML row has no bound target column: "+column.name);
-            cells.emplace_back(column.type,found->second.value_or(""),!found->second);
-            const auto position=cells.size()-1;
-            if(position<table_.len() && table_.cols[position].generatedKind!='v' &&
-               stored_regtype_detail::columnType(table_.cols[position].dataType)) {
-                const auto catalog=regtype_detail::metadata(g_engine,session_.currentDB);
-                cells.back()=stored_regtype_detail::load(found->second.value_or(""),
-                    table_.cols[position].isArray,!found->second,catalog,&session_,column.typeMetadata,table_.cols[position].dataType);
-            }
-            if(captureReturningArrays && position<table_.len() &&
-               table_.cols[position].dataName==column.name &&
-               table_.cols[position].generatedKind!='v' && table_.cols[position].isArray)
-                (void)compound_value_detail::decodeArrayStorageInput(cells.back(),column.typeMetadata);
+            cells.push_back(readPhysicalCell(stored, column, found->second, captureReturningArrays));
         }
         if(generated)for(size_t i=0;i<target_->columns.size();++i) {
-            const auto actual=generated->find(target_->columns[i].name);
+            const auto actual=generated->find(physicalColumn(i).dataName);
             if(actual!=generated->end() && compatibleGeneratedDatum(actual->second,target_->columns[i].type))
                 cells.at(i)=actual->second;
         }
@@ -6600,33 +6670,32 @@ class BoundDmlExecution {
             std::vector<ExprValue> cells;
             for(const auto& column:source.columns) {
                 if(source.generatedRelation && execution_->generatedSourceRead(source.ordinal,cells.size())){cells.emplace_back();continue;}
-                const auto found=values.find(column.name);
+                const auto& stored=physicalColumn(cells.size());
+                const auto found=values.find(stored.dataName);
                 // A missing row version is a whole typed NULL row (INSERT
                 // OLD / DELETE NEW), not a guessed textual NULL sentinel.
                 if((source.generatedRelation?returningSourcePresent(image,channel.second):!values.empty()) && found==values.end())
                     throw DbError("XX000","RETURNING image lost its bound descriptor column");
                 const bool isNull=found==values.end() || !found->second;
                 cells.emplace_back(column.type,isNull?std::string{}:*found->second,isNull);
-                const auto position=cells.size()-1;
-                if(position<table_.len() && table_.cols[position].dataName==column.name &&
-                   table_.cols[position].generatedKind!='v') {
+                if(stored.generatedKind!='v') {
                     // OLD/NEW aliases are original stored row versions, not
                     // strings rendered by a query or a new parameter frame.
                     // Non-NULL format0 output also needs the original uint32
                     // datum and its catalog display. Missing/NULL versions
                     // keep their previous no-capture path without a lookup.
-                    if((captureArrays || !isNull) && stored_regtype_detail::columnType(table_.cols[position].dataType)) {
+                    if((captureArrays || !isNull) && stored_regtype_detail::columnType(stored.dataType)) {
                         const auto catalog=regtype_detail::metadata(g_engine,session_.currentDB);
                         cells.back()=stored_regtype_detail::load(isNull?std::string{}:*found->second,
-                            table_.cols[position].isArray,isNull,catalog,&session_,column.typeMetadata,table_.cols[position].dataType);
+                            stored.isArray,isNull,catalog,&session_,column.typeMetadata,stored.dataType);
                     }
-                    if(captureArrays && table_.cols[position].isArray)
+                    if(captureArrays && stored.isArray)
                         (void)compound_value_detail::decodeArrayStorageInput(cells.back(),column.typeMetadata);
                 }
             }
             if(const auto* generated=returningGeneratedValues(image,channel.second))
                 for(size_t i=0;i<source.columns.size();++i) {
-                    const auto actual=generated->find(source.columns[i].name);
+                    const auto actual=generated->find(physicalColumn(i).dataName);
                     if(actual!=generated->end() && compatibleGeneratedDatum(actual->second,source.columns[i].type))
                         cells.at(i)=actual->second;
                 }
@@ -6635,6 +6704,7 @@ class BoundDmlExecution {
         return row;
     }
     bool matches(const Expr* where,const SqlRow& values) const {
+        if(!matchesView(values))return false;
         if(!where)return true;
         const auto value=execution_->evaluate(where,context(values));
         return !value.isNull && value.asBool();
@@ -6647,8 +6717,8 @@ class BoundDmlExecution {
         if(!column) {column=dynamic_cast<const ColumnRefExpr*>(equality->right.get());input=equality->left.get();}
         if(!column || column->preparedSubquery || !column->binding || column->binding->scopeDepth ||
             column->binding->mergedUsing || column->binding->sourceOrdinal!=target_->ordinal ||
-            column->binding->columnOrdinal>=table_.len() || !input || input->preparedSubquery)return {};
-        const auto& stored=table_.cols[column->binding->columnOrdinal];
+            column->binding->columnOrdinal>=target_->columns.size() || !input || input->preparedSubquery)return {};
+        const auto& stored=physicalColumn(column->binding->columnOrdinal);
         const auto type=ExprHelper::canonicalResultTypeName(stored.dataType);
         if((type!="smallint" && type!="integer" && type!="bigint") || stored.isArray || stored.isUnsigned ||
             !stored.domainName.empty() || stored.generatedKind || stored.dataName.empty() ||
@@ -6737,7 +6807,8 @@ public:
                       PreparedDmlSourceFactory sourceFactory = {},
                       PreparedChildCursorFactory childCursorFactory = {},
                       bool planRootConstants = false,bool deferWriteChecks = false,
-                      std::function<PreparedDmlSourceFactory(std::weak_ptr<PreparedQueryExecution>)> sources = {})
+                      std::function<PreparedDmlSourceFactory(std::weak_ptr<PreparedQueryExecution>)> sources = {},
+                      const WritableViewProjection* view = nullptr)
         :statement_(statement),session_(session),query_(std::move(query)),
          execution_(std::make_shared<PreparedQueryExecution>(query_,&g_engine,session.currentDB)) {
         if(sources)sourceFactory=sources(execution_);
@@ -6749,17 +6820,35 @@ public:
         }
         if(!target_ || target_->cteStatement || target_->relationName.empty())
             throw DbError("XX000","prepared DML has no physical target identity");
-        const auto& name=target_->relationName;
-        const bool temporary=target_->relationSchema==sessionTempSchemaName(session_) || target_->relationSchema=="pg_temp";
-        physical_=temporary?tempTablePrefix(session_,name):target_->relationSchema=="public"?name:target_->relationSchema+"__"+name;
+        const auto& storedSource = view ? *view->source : *target_;
+        const auto& name=storedSource.relationName;
+        const bool temporary=storedSource.relationSchema==sessionTempSchemaName(session_) || storedSource.relationSchema=="pg_temp";
+        physical_=temporary?tempTablePrefix(session_,name):storedSource.relationSchema=="public"?name:storedSource.relationSchema+"__"+name;
         if(temporary)g_engine.noteTemporaryRelationAccess(session_.currentDB,physical_);
         if(!deferWriteChecks && g_engine.isReadOnly() && !temporary)
             throw DbError("25006","cannot execute DML in a read-only transaction");
         rejectPreparedMaterializedTarget(statement_,session_,query_);
         table_=g_engine.getTableSchema(session_.currentDB,physical_);
-        if(!table_.len() || table_.len()!=target_->columns.size())throw DbError("0A000","prepared DML target requires additional view/virtual lowering");
-        for(size_t i=0;i<table_.len();++i)if(table_.cols[i].dataName!=target_->columns[i].name)
+        if(!table_.len() || table_.len()!=storedSource.columns.size())throw DbError("0A000","prepared DML target requires additional view/virtual lowering");
+        for(size_t i=0;i<table_.len();++i)if(table_.cols[i].dataName!=storedSource.columns[i].name)
             throw DbError("XX000","physical DML target differs from its prepared descriptor");
+        if (view) {
+            viewSource_ = view->source;
+            viewColumns_ = view->columns;
+            if (viewColumns_.size() != target_->columns.size())
+                throw DbError("XX000", "view output width differs from its write projection");
+            if (view->select->whereClause && !dynamic_cast<const InsertStmt*>(statement_)) {
+                auto* condition = view->select->whereClause.get();
+                viewPredicate_ = condition;
+                viewFilter_ = std::make_unique<PreparedQueryExecution>(target_->viewQuery, &g_engine, session_.currentDB);
+                viewFilter_->setChildCursorFactory([query=target_->viewQuery,database=session_.currentDB](const Stmt* child,const RowContext& row) {
+                    auto plan = QueryPlanner::buildPreparedQueryPlan(&g_engine, database, query, child, row);
+                    return QueryPlanner::makePreparedCursor(std::move(plan), query->statementOutputs.at(child));
+                });
+                viewFilter_->prepareExpression(condition);
+                viewFilter_->prepareChildCursors();
+            }
+        }
         StorageEngine::TablePrivilege privilege;
         const ReturningOptions* options=nullptr;
         std::string returningRelation,returningAlias;
@@ -6797,7 +6886,10 @@ public:
             }
             predicate(remove->whereClause.get());
         } else throw DbError("0A000","prepared WITH primary DML is not lowered");
-        if(!temporary && !checkTablePrivilege(session_,physical_,privilege))throw DbError("42501","permission denied for DML target");
+        const bool canWrite = temporary || (view && privilege == StorageEngine::TablePrivilege::Insert
+            ? checkInsertTablePermission(session_, physical_)
+            : checkTablePrivilege(session_, physical_, privilege));
+        if(!canWrite)throw DbError("42501","permission denied for DML target");
         if(const auto* insert=dynamic_cast<const InsertStmt*>(statement_); insert && insert->selectSource)
             checkPreparedInsertSources(*query_, session_);
         // Resolve canonical transition names once against the prepared
@@ -6845,10 +6937,15 @@ public:
         if(const auto* update=dynamic_cast<const UpdateStmt*>(statement_)) {
             std::set<std::string> targets;
             for(const auto& assignment:update->setClauses) {
-                const auto name=identifier(assignment.first);
+                const auto name=physicalColumnName(identifier(assignment.first));
                 if(!targets.insert(name).second)
                     throw DbError("42601","multiple assignments to column \""+name+"\"");
+                updateColumns_.push_back(name);
             }
+            if (view && !sessionIsAdmin(session_) && !temporary &&
+                !g_engine.hasColumnPermission(session_.currentDB, physical_, effectiveSessionRole(session_),
+                    privilege, std::vector<std::string>(targets.begin(), targets.end())))
+                throw DbError("42501", "permission denied for view's underlying columns");
         }
         // Whole metadata/privileges/duplicate targets precede pure planning.
         // Plan this actual execution-owned carrier before callback binding
@@ -6863,10 +6960,12 @@ public:
         try {
             if(ownsChildCursors_)execution_->prepareChildCursors();
             auto output=executeRows(reader);
+            if(viewFilter_)viewFilter_->closeChildCursors();
             execution_->closeChildCursors();
             return output;
         } catch(...) {
             const auto primary=std::current_exception();
+            try{if(viewFilter_)viewFilter_->closeChildCursors();}catch(...){}
             try{execution_->closeChildCursors();}catch(...){}
             std::rethrow_exception(primary);
         }
@@ -6896,18 +6995,32 @@ private:
         CapturedVirtualRows virtualRows(table_,!returning_->empty());
         if(auto* insert=dynamic_cast<InsertStmt*>(statement_)) {
             std::vector<std::string> columns;
-            if(insert->columns.empty())for(const auto& column:target_->columns)columns.push_back(column.name);
-            else for(const auto& column:insert->columns)columns.push_back(identifier(column));
+            if(insert->columns.empty())for(size_t i=0;i<target_->columns.size();++i)columns.push_back(physicalColumn(i).dataName);
+            else for(const auto& column:insert->columns)columns.push_back(physicalColumnName(identifier(column)));
+            if (viewSource_) {
+                if (!insert->defaultValues) {
+                    const size_t supplied = insert->selectSource
+                        ? query_->statementOutputs.at(insert->selectSource.get()).size()
+                        : insert->values.at(0).size();
+                    const std::set<std::string> distinct(columns.begin(), columns.begin() + supplied);
+                    if (distinct.size() != supplied)
+                        throw DbError("42701", "multiple view columns assign the same underlying column");
+                }
+                if (!sessionIsAdmin(session_) && !g_engine.hasColumnPermission(
+                        session_.currentDB, physical_, effectiveSessionRole(session_),
+                        StorageEngine::TablePrivilege::Insert, columns))
+                    throw DbError("42501", "permission denied for view's underlying columns");
+            }
             StorageEngine::IdentityOverride override=StorageEngine::IdentityOverride::None;
             if(lower(insert->override_)=="system")override=StorageEngine::IdentityOverride::System;
             if(lower(insert->override_)=="user")override=StorageEngine::IdentityOverride::User;
             std::vector<SqlRow> images;size_t count=0;
             const auto write=[&](SqlRow row) {
                 for(const auto& value:insert->preparedDefaults) {
-                    const auto& column=target_->columns[value.first];
-                    if(row.find(column.name)!=row.end())continue;
+                    const auto& column=physicalColumn(value.first).dataName;
+                    if(row.find(column)!=row.end())continue;
                     const auto cell=execution_->evaluate(value.second.get(),execution_->context());
-                    row[column.name]=cell.isNull?SqlCell{}:SqlCell{stored_regtype_detail::storageText(cell)};
+                    row[column]=cell.isNull?SqlCell{}:SqlCell{stored_regtype_detail::storageText(cell)};
                 }
                 const auto status=g_engine.insertRow(session_.currentDB,physical_,row,returning_->empty()?nullptr:&images,override,virtualRows.output(),true);
                 if(status!=DBStatus::OK)throw DbError(sqlstateForDBStatus(status),"WITH INSERT failed");
@@ -6959,9 +7072,9 @@ private:
             };
             const auto assignments = [&](const RowContext& row) {
                 SqlRow values;
-                if (update) for (const auto& assignment : update->setClauses) {
-                    const auto value = execution_->evaluate(assignment.second.get(), row);
-                    values[identifier(assignment.first)] = value.isNull
+                if (update) for (size_t i = 0; i < updateColumns_.size(); ++i) {
+                    const auto value = execution_->evaluate(update->setClauses[i].second.get(), row);
+                    values[updateColumns_[i]] = value.isNull
                         ? SqlCell{} : SqlCell{stored_regtype_detail::storageText(value)};
                 }
                 return values;
@@ -6969,6 +7082,7 @@ private:
             StorageEngine::SqlMutationCallbacks callbacks;
             callbacks.targetPrimaryKeyProbe = joinedTargetPrimaryKeyProbe(where);
             callbacks.matches=[&](int64_t rid,const SqlRow& old) {
+                if(!matchesView(old))return false;
                 originalTarget = rid;
                 alternatives.clear();
                 if(oneTimeQualification) {
@@ -6997,6 +7111,10 @@ private:
                 if (originalTarget != originalRid || original == chosen.end())
                     throw DbError("XX000", "mutation lost its original source match");
                 auto row = context(latest, &original->second.row);
+                if (!matchesView(latest)) {
+                    chosen.erase(original);
+                    return false;
+                }
                 if (!qualifies(row)) {
                     bool matched = false;
                     RowContext source;
@@ -7051,9 +7169,9 @@ private:
             const auto matcher=[&](const SqlRow& old){return matches(update->whereClause.get(),old);};
             const auto resolver=[&](const SqlRow& old,SqlRow& values) {
                 const auto row=context(old);
-                for(const auto& assignment:update->setClauses) {
-                    const auto value=execution_->evaluate(assignment.second.get(),row);
-                    values[identifier(assignment.first)]=value.isNull?SqlCell{}:SqlCell{stored_regtype_detail::storageText(value)};
+                for(size_t i = 0; i < updateColumns_.size(); ++i) {
+                    const auto value=execution_->evaluate(update->setClauses[i].second.get(),row);
+                    values[updateColumns_[i]]=value.isNull?SqlCell{}:SqlCell{stored_regtype_detail::storageText(value)};
                 }
                 return true;
             };
@@ -7064,13 +7182,13 @@ private:
         }
         auto* remove=static_cast<DeleteStmt*>(statement_);
         StorageEngine::SqlDeleteMatcher matcher;
-        if (remove->whereClause) {
+        if (remove->whereClause || viewPredicate_) {
             matcher = [&](const SqlRow& old) { return matches(remove->whereClause.get(), old); };
         }
-        callbacks.integerHeapEquality = boundIntegerHeapEquality(
+        if(!viewSource_)callbacks.integerHeapEquality = boundIntegerHeapEquality(
             remove->whereClause.get(), table_, target_->ordinal);
         auto candidates = integerEqualityCandidates(remove->whereClause.get());
-        if (candidates.empty())
+        if (candidates.empty() && !viewSource_)
             candidates = boundCompositePrimaryKeyCandidates(remove->whereClause.get(), table_, target_->ordinal);
         const auto status=g_engine.removeRows(session_.currentDB,physical_,candidates,returning_->empty()?nullptr:&images,matcher,&count,&callbacks,virtualRows.output(),true);
         if(status!=DBStatus::OK)throw DbError(sqlstateForDBStatus(status),"WITH DELETE failed");
@@ -7292,6 +7410,67 @@ DmlResult executeAtomicDmlUnit(Session& session,const std::function<DmlResult()>
     if(!finishCommand())throw DbError("54000","WITH command view could not finish");
     if(!boundary.finish())throw DbError("58030","WITH transaction finish failed");
     return result;
+}
+
+static bool executeProjectedViewDml(const Stmt& statement, Session& session,
+    const std::string& storageName, const std::string& sql) {
+    if (g_engine.getViewBaseTable(session.currentDB, storageName).empty() ||
+        !g_engine.getViewCheckOption(session.currentDB, storageName).empty()) return false;
+    const auto* insert = dynamic_cast<const InsertStmt*>(&statement);
+    const auto* update = dynamic_cast<const UpdateStmt*>(&statement);
+    const auto* remove = dynamic_cast<const DeleteStmt*>(&statement);
+    const auto event = insert ? "insert" : update ? "update" : "delete";
+    std::vector<StorageEngine::Trigger> triggers;
+    if (!g_engine.tryGetTriggers(session.currentDB, storageName, "instead of", event, triggers))
+        throw DbError("58030", "could not read view trigger definitions");
+    if (!triggers.empty()) return false;
+
+    auto query = std::make_shared<PreparedQuery>(g_engine.prepareBoundQuery(session.currentDB, sql));
+    const auto target = std::find_if(query->sourceRanges.begin(), query->sourceRanges.end(),
+        [&](const auto& range) { return range.owner == query->ast.get() && !range.source && range.viewQuery; });
+    if (target == query->sourceRanges.end()) return false;
+    auto projection = writableViewProjection(*target->viewQuery);
+    if (!projection) return false;
+    const auto& source = *projection->source;
+    if (g_engine.resolveMaterializedView(session.currentDB, source.relationSchema, source.relationName))
+        return false;
+
+    if ((insert && (!insert->conflictAction.empty() || !insert->override_.empty())) ||
+        (update && (update->only || !update->whereCurrentOf.empty() ||
+            std::any_of(update->setClauses.begin(), update->setClauses.end(),
+                [](const auto& assignment) { return isDefaultValue(assignment.second); }))) ||
+        (remove && (remove->only || !remove->whereCurrentOf.empty()))) {
+        // The old relation-name substitution cannot be used once a view
+        // changes projection names, ordering or row visibility.
+        if (!projection->select->whereClause && projection->columns.size() == source.columns.size() &&
+            std::equal(projection->columns.begin(), projection->columns.end(), target->columns.begin(), target->columns.end(),
+                [&](size_t ordinal, const auto& field) { return source.columns.at(ordinal).name == field.name; })) return false;
+        throw DbError("0A000", "this write form requires additional view rewriting");
+    }
+
+    NativeBoundDmlSources sources(session, query);
+    const auto cursors = sources.cursorFactory();
+    const auto read = [&](const Stmt* child, const RowContext& row, size_t limit) {
+        auto cursor = cursors(child, row);
+        PreparedQueryRows rows;
+        try {
+            std::vector<ExprValue> cells;
+            while ((!limit || rows.size() < limit) && cursor->next(cells)) rows.push_back(cells);
+            cursor->close();
+        } catch (...) {
+            try { cursor->close(); } catch (...) {}
+            throw;
+        }
+        return rows;
+    };
+    auto output = executeAtomicDmlUnit(session, [&] {
+        return BoundDmlExecution(query->ast.get(), session, query, sources.factory(), cursors, true,
+                                 false, {}, &*projection).run(read);
+    });
+    publishLastDmlResult(std::move(output));
+    std::cout << g_lastDmlResult.commandTag << std::endl;
+    printReturningRows(g_lastDmlResult);
+    return true;
 }
 
 void notePreparedTemporaryObjectAccess(const std::string& sql, Session& session) {
@@ -7605,13 +7784,17 @@ bool tryDmlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
     else if(const auto* remove=dynamic_cast<const DeleteStmt*>(parsed.stmt.get()))targetSpelling=&remove->tableName;
     if(targetSpelling) {
         bool viewTarget=false,materializedTarget=false;
-        (void)resolveTable(s,*targetSpelling,true,&viewTarget,&materializedTarget,true);
+        const auto targetName=resolveTable(s,*targetSpelling,true,&viewTarget,&materializedTarget,true);
         if(materializedTarget) {
             if(!checkDatabase(s)){handled=true;return true;}
             auto prepared=std::make_shared<PreparedQuery>(
                 g_engine.prepareBoundQuery(s.currentDB,rawSql.empty()?sql:rawSql));
             rejectPreparedMaterializedTarget(prepared->ast.get(),s,prepared);
             throw DbError("XX000","materialized target lost its prepared identity");
+        }
+        if (viewTarget && executeProjectedViewDml(*parsed.stmt, s, targetName, rawSql.empty() ? sql : rawSql)) {
+            handled = true;
+            return false;
         }
     }
 

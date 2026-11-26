@@ -708,6 +708,10 @@ public:
         coerceCaseInput(right,rightType,target);
     }
     ExprPtr targetDefault(const Range& range, const QueryOutputColumn& column) {
+        // A view column has no default in the heap catalog. Automatic
+        // INSERT rewriting leaves an omitted input for the real heap column;
+        // an INSTEAD OF trigger instead receives the view's own row image.
+        if (range.viewQuery) return {};
         if (metadata.identityDefault) {
             const auto sequence = metadata.identityDefault(range.relationSchema,range.relationName,column.name);
             if (sequence) {

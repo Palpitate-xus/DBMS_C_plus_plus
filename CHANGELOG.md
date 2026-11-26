@@ -1,6 +1,17 @@
 # 更新日志
 
 <details>
+<summary>表的列改名后，还能通过视图改数据 · 2026-11-26</summary>
+
+例如，订单表的 `qty` 改名后，通过原有的单表视图写入 `qty`，值仍会存到原来对应的那一列。
+
+修改和删除也会遵守视图原来筛选数据的条件。
+
+[用法](docs/MANUAL.md#9-视图与物化视图) · [测试报告](docs/test-report.md#writable-view-projection-20261126) · [性能报告](docs/performance-report-2026-10-30.md#writable-view-projection-cost-20261126)
+
+</details>
+
+<details>
 <summary>表的列改名后，已有报表还能查 · 2026-11-26</summary>
 
 例如，把订单表的 `qty` 改成 `quantity` 后，通过已有视图做的报表仍可用 `qty` 查询。
@@ -23,18 +34,15 @@
 </details>
 
 <details>
-<summary>给视图改名、换位置更快了 · 2026-11-26</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-26 · 给视图改名、换位置更快了
 
 例如，单独把视图从 `sales.monthly` 移到 `archive.monthly` 时，只需要备份这次改动涉及的文件。
 
 在额外建了 64 张空表的磁盘测试中，单独移动视图的中位耗时从 532–644 毫秒降到 67–90 毫秒。
 
 [测试报告](docs/test-report.md#alter-view-file-undo-20261126) · [性能报告](docs/performance-report-2026-10-30.md#alter-view-file-undo-cost-20261126)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-26 · 可以给视图换个位置
 

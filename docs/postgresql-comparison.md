@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-26 · 通过视图写入原来的数据表
+
+PostgreSQL 根据视图查询树把写入目标映射到原表列，并给更新和删除附上视图的过滤条件。它也支持满足条件的嵌套视图以及 `WITH CHECK OPTION`。SQLite 的普通视图可以用 `INSTEAD OF` 触发器接收写入。DuckDB 的 `CREATE VIEW` 文档提供查询视图的用法。 [PostgreSQL 可更新视图](https://www.postgresql.org/docs/18/sql-createview.html#SQL-CREATEVIEW-UPDATABLE-VIEWS) · [PostgreSQL 重写实现](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/rewrite/rewriteHandler.c#L3075) · [SQLite CREATE VIEW](https://www.sqlite.org/lang_createview.html) · [DuckDB CREATE VIEW](https://duckdb.org/docs/2.0/sql/statements/create_view)
+
+本项目对受支持的单表视图按列在定义中的实际来源写入，查询结果仍使用视图公开的名称。隐藏列的默认值由数据表提供，更新和删除同时应用视图的条件。完整的视图重写和 `CHECK OPTION` 仍待覆盖。 [功能测试](test-report.md#writable-view-projection-20261126) · [性能报告](performance-report-2026-10-30.md#writable-view-projection-cost-20261126)
+
 ## 2026-11-26 · 表改列名后保留依赖视图的列和连接
 
 PostgreSQL 修改目录里的列名，视图规则保存解析过的查询树，能够继续引用原列的位置。SQLite 会改写保存的 SQL 文本，文档指出隐含的 `NATURAL JOIN` 和星号输出可能受改名影响。DuckDB 会更新所涉约束，依赖该列名的视图需要单独处理。 [PostgreSQL 改列名实现](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/commands/tablecmds.c#L3706-L3742) · [PostgreSQL 视图规则](https://www.postgresql.org/docs/18/rules-views.html) · [SQLite ALTER TABLE](https://www.sqlite.org/lang_altertable.html#limitations) · [DuckDB RENAME COLUMN](https://duckdb.org/docs/2.0/sql/statements/alter_table#rename-column)

@@ -3,6 +3,19 @@
   "recent_updates": [
 
     {
+      "issue": "2026-11-26 bind single-table view writes to the original table columns",
+      "gap_ids": ["CAT-16", "DML-01", "DML-03"],
+      "status": "partial",
+      "evidence": ["src/commands/DmlExecutor.cpp", "src/parser/query_binding.cpp", "src/network/NetworkServer.cpp", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/compat/cases/writable_view_column_projection.sql", "tests/writable_view_projection_protocol_e2e_test.py"],
+      "verification": [
+        "Compare writes through direct view projections with PostgreSQL 18.6 after base column renames, search path shadowing and savepoint rollback.",
+        "Verify projected names and types through ordinary, extended and prepared binary result protocols.",
+        "Restart after committed and uncommitted writes, then time matching operations against PostgreSQL and an unchanged-column control."
+      ]
+    },
+
+    {
       "issue": "2026-11-26 preserve star projections and named joins in views after table column rename",
       "gap_ids": ["CAT-07", "CAT-10", "CAT-16", "SQL-11"],
       "status": "partial",

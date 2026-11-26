@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-26 · 写入单表视图时找到原来的表列
+
+对受支持的单表视图，`INSERT`、`UPDATE` 和 `DELETE` 按视图原有的列名和列顺序定位表列，`UPDATE` 和 `DELETE` 应用视图的过滤条件。改表列名或调整同名表的查找顺序后，这些操作仍写入定义时选定的表列。视图自身的列改名、嵌套视图、计算列、完整的 `CHECK OPTION` 和 `ON CONFLICT` 仍有差距。`CAT-16`、`DML-01` 和 `DML-03` 保持部分实现。 [功能测试](test-report.md#writable-view-projection-20261126) · [性能报告](performance-report-2026-10-30.md#writable-view-projection-cost-20261126)
+
 ## 2026-11-26 · 表改列名后保留视图的星号输出和连接
 
 对已登记依赖的普通视图，`ALTER TABLE ... RENAME COLUMN` 保留受测星号子查询、CTE、`JOIN USING` 和 `NATURAL JOIN` 的输出与连接键。物化视图、缺少依赖信息的旧定义和视图自身的列改名仍待覆盖。`CAT-07`、`CAT-10`、`CAT-16` 和 `SQL-11` 保持部分实现。 [功能测试](test-report.md#rename-view-star-and-join-20261126) · [性能报告](performance-report-2026-10-30.md#rename-view-star-and-join-cost-20261126)

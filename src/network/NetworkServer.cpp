@@ -4586,7 +4586,22 @@ bool protocolHasReturningTransition(const Stmt* parsed) {
 
 bool describePreparedReturningDeclaration(const std::string& sql,Session& session,const Stmt* parsed,
     std::vector<PgColumnDescription>& columns,const std::vector<uint32_t>& parameterOids) {
-    if(!protocolHasReturningTransition(parsed))return false;
+    if (!protocolHasReturningTransition(parsed)) {
+        const auto* insert = dynamic_cast<const InsertStmt*>(parsed);
+        const auto* update = dynamic_cast<const UpdateStmt*>(parsed);
+        const auto* remove = dynamic_cast<const DeleteStmt*>(parsed);
+        const auto* target = insert && !insert->returning.empty() ? &insert->tableName :
+            update && !update->returning.empty() ? &update->tableName :
+            remove && !remove->returning.empty() ? &remove->tableName : nullptr;
+        if (!target) return false;
+        CatalogManager::QualifiedName name;
+        if (!CatalogManager::parseQualifiedName(*target, name, true)) return false;
+        const auto path = name.schema.empty() ? effectiveRelationSearchPath(&session)
+            : std::vector<std::string>{name.schema == "pg_temp" ? sessionTempSchemaName(session) : name.schema};
+        const auto relation = g_engine.catalogService().get(session.currentDB).resolveRelationSnapshot(
+            SQLParser::quoteIdentifier(name.name), path);
+        if (!relation || relation->relkind != 'v') return false;
+    }
     // Original non-transition Describe branches, unknown parameter inference,
     // and every paused root enum family retain their complete old path.
     if(std::any_of(parameterOids.begin(),parameterOids.end(),[](uint32_t oid){return !oid;}))return false;

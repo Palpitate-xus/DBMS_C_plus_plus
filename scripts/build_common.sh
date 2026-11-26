@@ -348,6 +348,7 @@ dbms_init_build_config() {
     DBMS_E2E_TESTS+=(tests/physical_column_origin_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/view_trigger_typed_values_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/view_command_tag_protocol_e2e_test.py)
+    DBMS_E2E_TESTS+=(tests/writable_view_projection_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/temporal_view_materialization_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/trigger_nested_result_isolation_protocol_e2e_test.py)
     DBMS_E2E_TESTS+=(tests/trigger_diagnostic_channel_protocol_e2e_test.py)
