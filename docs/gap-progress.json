@@ -2,6 +2,18 @@
   "source": "docs/postgresql-18-gap-audit.md",
   "recent_updates": [
     {
+      "issue": "2026-11-26 keep catalog reload dependencies available during shutdown",
+      "gap_ids": ["CAT-02", "WAL-08"],
+      "status": "partial",
+      "evidence": ["src/catalog/type_registry.cpp", "src/commands/TableManage.cpp", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/catalog_default_snapshot_demand_test.cpp", "tests/maintenance_shutdown_test.cpp", "tests/column_default_expression_protocol_e2e_test.py"],
+      "verification": [
+        "Keep the built-in type registry alive for process shutdown and bypass per-thread metadata caches when the storage engine is shutting down.",
+        "Verify the original native fixture exits normally and publishes CLEAN after rolling back default metadata.",
+        "Verify default definitions and inserted data after ordinary shutdown and after committed and uncommitted forced stops."
+      ]
+    },
+    {
       "issue": "2026-11-24 skip publication image encoding on read-only catalog loads",
       "gap_ids": ["CAT-02", "CAT-03"],
       "status": "partial",

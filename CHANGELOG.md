@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>修复回滚后关闭数据库时的崩溃 · 2026-11-26</summary>
+
+从 C++ 调用数据库时，撤销表结构修改后再关闭数据库，有时会在保存表信息时崩溃。现在这一过程可以正常完成。
+
+[测试报告](docs/test-report.md#catalog-shutdown-20261126) · [性能报告](docs/performance-report-2026-10-30.md#catalog-shutdown-cost-20261126)
+
+</details>
+
+<details>
 <summary>读取表和列的信息时少做重复工作 · 2026-11-24</summary>
 
 数据库读取表名、列名等信息时，省掉了准备写回文件的步骤。单独测试这项读取时，耗时减少约三成。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>用 psql 查看索引列更快 · 2026-11-24</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-24 · 用 psql 查看索引列更快
 
 在本地测试中，用 `psql` 列出一个五列索引的列名和类型，这条查询比上一版快约 6%–11%。
 
 [测试报告](docs/test-report.md#bound-catalog-results-20261124) · [性能报告](docs/performance-report-2026-10-30.md#bound-catalog-results-cost-20261124)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-24 · 库里的表很多时，查看索引更快
 

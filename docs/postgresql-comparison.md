@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-26 · 关闭时保留目录所需的数据
+
+PostgreSQL 后端按类型编号维护类型缓存，并注册目录变更的失效回调。SQLite 的关闭接口要求先释放连接等资源。DuckDB 的数据库实例先清理附加数据库，再释放调度器、日志管理器和缓冲区。 [PostgreSQL 18.6 类型缓存源码](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/utils/cache/typcache.c) · [SQLite 关闭接口](https://www.sqlite.org/c3ref/initialize.html) · [DuckDB 1.4.2 数据库实例源码](https://raw.githubusercontent.com/duckdb/duckdb/v1.4.2/src/main/database.cpp)
+
+本项目把内置类型表保留到进程结束。关闭期间如果需要刷新目录，表结构和索引名称直接从文件读取。 [验证记录](test-report.md#catalog-shutdown-20261126)
+
 ## 2026-11-24 · 从文件读取已有目录
 
 PostgreSQL 可以按键查询系统目录缓存，需要修改记录的调用方可显式复制该记录。SQLite 在 `sqlite_schema` 保存定义对象的 SQL，并用文件头的结构版本核对已准备的语句。DuckDB 从目录项集合中查找对象，并按事务决定适用的版本。 [PostgreSQL 18.6 目录缓存源码](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/utils/cache/syscache.c) · [SQLite 结构表](https://www.sqlite.org/fileformat.html#storage_of_the_sql_database_schema) · [DuckDB 1.4.2 目录项源码](https://raw.githubusercontent.com/duckdb/duckdb/v1.4.2/src/catalog/catalog_set.cpp)

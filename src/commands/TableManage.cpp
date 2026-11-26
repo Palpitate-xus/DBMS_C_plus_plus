@@ -11625,28 +11625,32 @@ std::optional<StorageEngine::NamedIndexInfo> StorageEngine::getNamedIndex(
         return std::getline(input, entry.name, '\t') && std::getline(input, entry.accessMethod, '\t') &&
                std::getline(input, entry.key);
     };
-    thread_local MetadataReadCache<std::vector<NamedIndexInfo>> recent;
-    struct stat status{};
     // A cold name lookup can stream directly. Stat is needed only when the
     // same metadata path is still in this reader's small working set.
-    if (recent.observePath(path) && ::stat(path.c_str(), &status) == 0 && S_ISREG(status.st_mode)) {
-        const auto generation = FileImageGeneration::from(status);
-        if (auto* cached = recent.repeated(path, generation)) {
-            if (!*cached) {
-                if (auto image = readMetadataImage(path, generation, 0)) {
-                    std::istringstream input(std::move(*image));
-                    std::vector<NamedIndexInfo> entries;
-                    NamedIndexInfo entry;
-                    while (readEntry(input, entry)) entries.push_back(std::move(entry));
-                    cached->emplace(std::move(entries));
+    // A global engine can also reload a catalog after thread-local caches
+    // have been destroyed. Stream directly while that engine shuts down.
+    if (!shuttingDown_.load(std::memory_order_acquire)) {
+        thread_local MetadataReadCache<std::vector<NamedIndexInfo>> recent;
+        struct stat status{};
+        if (recent.observePath(path) && ::stat(path.c_str(), &status) == 0 && S_ISREG(status.st_mode)) {
+            const auto generation = FileImageGeneration::from(status);
+            if (auto* cached = recent.repeated(path, generation)) {
+                if (!*cached) {
+                    if (auto image = readMetadataImage(path, generation, 0)) {
+                        std::istringstream input(std::move(*image));
+                        std::vector<NamedIndexInfo> entries;
+                        NamedIndexInfo entry;
+                        while (readEntry(input, entry)) entries.push_back(std::move(entry));
+                        cached->emplace(std::move(entries));
+                    }
                 }
-            }
-            if (*cached) {
-                const auto& entries = **cached;
-                const auto found = std::find_if(entries.begin(), entries.end(),
-                    [&](const auto& entry) { return entry.name == indexName; });
-                if (found != entries.end()) return *found;
-                return std::nullopt;
+                if (*cached) {
+                    const auto& entries = **cached;
+                    const auto found = std::find_if(entries.begin(), entries.end(),
+                        [&](const auto& entry) { return entry.name == indexName; });
+                    if (found != entries.end()) return *found;
+                    return std::nullopt;
+                }
             }
         }
     }
@@ -20500,15 +20504,19 @@ std::optional<TableSchema> StorageEngine::readPersistedSchemaForCatalog(
             throw DbError("XX001", "invalid persisted table schema");
         return schema;
     };
-    thread_local MetadataReadCache<TableSchema> recent;
-    const auto generation = FileImageGeneration::from(status);
-    if (auto* cached = recent.repeated(path, generation)) {
-        if (*cached) return **cached;
-        if (auto image = readMetadataImage(path, generation, O_NOFOLLOW)) {
-            std::istringstream input(std::move(*image), std::ios::binary);
-            auto schema = parse(input);
-            cached->emplace(schema);
-            return schema;
+    // A catalog refresh during global engine teardown can run after the
+    // current thread's cache destructor. The streaming path needs no cache.
+    if (!shuttingDown_.load(std::memory_order_acquire)) {
+        thread_local MetadataReadCache<TableSchema> recent;
+        const auto generation = FileImageGeneration::from(status);
+        if (auto* cached = recent.repeated(path, generation)) {
+            if (*cached) return **cached;
+            if (auto image = readMetadataImage(path, generation, O_NOFOLLOW)) {
+                std::istringstream input(std::move(*image), std::ios::binary);
+                auto schema = parse(input);
+                cached->emplace(schema);
+                return schema;
+            }
         }
     }
     std::ifstream input(path, std::ios::binary);
