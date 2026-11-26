@@ -96,6 +96,8 @@ public:
     bool dropNamespace(Oid oid);
     bool renameNamespace(Oid oid, const std::string& name);
     std::vector<PgNamespaceRow> listNamespaces() const;
+    static uint64_t namespaceRevision();
+    static void invalidateNamespaceReads();
 
     // =====================================================================
     // 名称解析（search_path）

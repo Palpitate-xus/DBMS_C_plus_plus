@@ -673,6 +673,28 @@ PreparedQueryExecution::PreparedQueryExecution(std::shared_ptr<PreparedQuery> qu
                 throw DbError("XX000", "projection metadata does not belong to its SQL source occurrence");
         }
     }
+    std::set<size_t> namespaceRanges;
+    for (const auto& range : query_->sourceRanges) {
+        if (range.relationSchema == "pg_catalog" && range.relationName == "pg_namespace" &&
+            !range.mergedUsing && range.columns.size() >= 2 &&
+            range.columns[0].name == "oid" && range.columns[1].name == "nspname")
+            namespaceRanges.insert(range.ordinal);
+    }
+    if (!namespaceRanges.empty()) {
+        // The source reads a checked catalog generation. Use its name for a
+        // direct reference to its OID until a namespace change or restoration
+        // makes the live lookup necessary again.
+        evaluator_.setNamespaceColumnReader(
+            [ranges = std::move(namespaceRanges), revision = CatalogManager::namespaceRevision()]
+            (const Expr* argument, const RowContext& context) -> const std::string* {
+                const auto* column = dynamic_cast<const ColumnRefExpr*>(argument);
+                if (!column || !column->binding || column->binding->columnOrdinal != 0 ||
+                    !ranges.count(column->binding->sourceOrdinal) ||
+                    revision != CatalogManager::namespaceRevision()) return nullptr;
+                const auto* name = context.findBoundColumn(column->binding->sourceOrdinal, 1);
+                return name && !name->isNull ? &name->value : nullptr;
+            });
+    }
     // Classify correlation structurally from range owners. An internally
     // correlated grandchild does not make its containing initplan correlated
     // with this query's caller.

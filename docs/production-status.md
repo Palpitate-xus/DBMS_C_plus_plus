@@ -6,6 +6,10 @@
 
 截至 2026-11-26，273 项功能要求中有 22 项完成、169 项部分实现、67 项待验证、15 项暂缓。各项结果和剩余范围见功能总账。以下更新报告给出各轮测试的实际范围。[功能总账](gap-progress.json) · [支持的功能和限制](compatibility-contract.md)
 
+## 2026-11-26 · 筛选其他连接的临时模式
+
+直接用模式目录中的编号筛选列表时，函数可以用该行已有的名称判断归属。在额外创建 128 个普通模式的测试里，筛选耗时中位数从 20.35–20.43 毫秒降到 15.21–15.55 毫秒，PostgreSQL 18.6 为 0.19–0.20 毫秒。 [测试报告](test-report.md#temp-schema-source-reuse-20261126) · [性能报告](performance-report-2026-10-30.md#temp-schema-source-reuse-cost-20261126)
+
 ## 2026-11-26 · 查看临时模式编号和归属
 
 可以用 `pg_my_temp_schema()` 查询当前连接的临时模式编号，也可以用 `pg_is_other_temp_schema(oid)` 排除其他临时模式。两条查询按编号或名称直接查模式目录。 [用法](MANUAL.md#建表) · [测试报告](test-report.md#temp-schema-inspection-20261126)

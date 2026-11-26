@@ -903,10 +903,14 @@ const ExprValue& RowContext::parameter(size_t slot) const {
 }
 
 const ExprValue& RowContext::boundColumn(size_t sourceOrdinal, size_t columnOrdinal) const {
+    const auto* found = findBoundColumn(sourceOrdinal, columnOrdinal);
+    if (!found) throw DbError("XX000", "prepared source column has no runtime cell");
+    return *found;
+}
+
+const ExprValue* RowContext::findBoundColumn(size_t sourceOrdinal, size_t columnOrdinal) const {
     const auto found = boundColumns_.find({sourceOrdinal, columnOrdinal});
-    if (found == boundColumns_.end())
-        throw DbError("XX000", "prepared source column has no runtime cell");
-    return found->second;
+    return found == boundColumns_.end() ? nullptr : &found->second;
 }
 
 
@@ -6600,7 +6604,7 @@ struct SqlTemporarySchemaFunction {
     }
 
     ExprValue invoke(const std::vector<ExprValue>& args, StorageEngine& engine,
-                     const std::string& database) const {
+                     const std::string& database, const std::string* catalogName) const {
         const auto* session = currentSession();
         const auto& db = database.empty() && session ? session->currentDB : database;
         const auto own = activeTemporarySchema(session && session->currentDB == db ? session : nullptr);
@@ -6615,10 +6619,14 @@ struct SqlTemporarySchemaFunction {
         if (args.size() != 1) throw DbError("42883", "pg_is_other_temp_schema requires one oid argument");
         const auto& input = args.front();
         if (input.isNull) return ExprValue("boolean", "", true);
-        const Oid oid = input.objectOid ? *input.objectOid : parseOidInput(input.value);
-        const auto row = engine.catalogService().namespaceIdentity(db, oid);
-        const bool other = row && row->nspname != own &&
-            (row->nspname.rfind("pg_temp_", 0) == 0 || row->nspname.rfind("pg_toast_temp_", 0) == 0);
+        std::optional<PgNamespaceRow> row;
+        if (!catalogName) {
+            const Oid oid = input.objectOid ? *input.objectOid : parseOidInput(input.value);
+            row = engine.catalogService().namespaceIdentity(db, oid);
+            if (row) catalogName = &row->nspname;
+        }
+        const bool other = catalogName && *catalogName != own &&
+            (catalogName->rfind("pg_temp_", 0) == 0 || catalogName->rfind("pg_toast_temp_", 0) == 0);
         return ExprValue("boolean", other ? "t" : "f");
     }
 };
@@ -8218,7 +8226,10 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
             result = visibility->invoke(args, *owner, currentDB_);
         } else if (const auto* temporarySchema = it->second.target<SqlTemporarySchemaFunction>()) {
             auto* owner = sqlValueEngine_ ? sqlValueEngine_ : &g_engine;
-            result = temporarySchema->invoke(args, *owner, currentDB_);
+            const auto* catalogName = temporarySchema->otherSession && namespaceColumnReader_ &&
+                e->args.size() == 1 && !args.empty() && !args.front().isNull
+                ? namespaceColumnReader_(e->args.front().get(), ctx) : nullptr;
+            result = temporarySchema->invoke(args, *owner, currentDB_, catalogName);
         } else if (const auto* user = it->second.target<SqlRoleNameFunction>()) {
             auto* owner = sqlValueEngine_ ? sqlValueEngine_ : &g_engine;
             result = user->invoke(args, *owner);

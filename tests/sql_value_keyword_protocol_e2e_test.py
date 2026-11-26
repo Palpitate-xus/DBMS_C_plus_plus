@@ -126,6 +126,34 @@ def check_temp_inspection(client, sock, connect):
         peer.command("DROP TABLE pg_temp.temp_inspection_peer", "DROP TABLE")
         assert schema_oid(peer) == peer_oid
         peer.query(other.format(peer_oid), rows=[("f",)], fields=[("v", 16)])
+        for extended in (False, True):
+            wire = Wire(client, sock, extended)
+            for oid, expected in ((owner_oid, "f"), (peer_oid, "t")):
+                wire.query(other.format("n.oid") + f" FROM pg_catalog.pg_namespace n WHERE n.oid='{oid}'::oid",
+                           rows=[(expected,)], fields=[("v", 16)])
+            wire.query("SELECT n.oid FROM pg_catalog.pg_namespace n "
+                       f"WHERE n.oid='{peer_oid}'::oid AND pg_catalog.pg_is_other_temp_schema(n.oid)",
+                       rows=[(str(peer_oid),)], fields=[("oid", 26)])
+
+        owner.command("CREATE TEMP TABLE temp_inspection_input(oid oid, nspname text)", "CREATE TABLE")
+        owner.command(f"INSERT INTO pg_temp.temp_inspection_input VALUES ('{peer_oid}'::oid, 'public')", "INSERT 0 1")
+        owner.query(other.format("input.oid") + " FROM pg_temp.temp_inspection_input input",
+                    rows=[("t",)], fields=[("v", 16)])
+        owner.command("DROP TABLE pg_temp.temp_inspection_input", "DROP TABLE")
+
+        owner.command("CREATE SCHEMA temp_inspection_override", "CREATE SCHEMA")
+        try:
+            owner.command("CREATE FUNCTION temp_inspection_override.pg_is_other_temp_schema(oid) "
+                          "RETURNS boolean LANGUAGE SQL AS $$ SELECT false $$", "CREATE FUNCTION")
+            owner.command("SET search_path=temp_inspection_override,pg_catalog,public", "SET")
+            owner.query("SELECT pg_is_other_temp_schema(n.oid) AS v "
+                        f"FROM pg_catalog.pg_namespace n WHERE n.oid='{peer_oid}'::oid",
+                        rows=[("f",)], fields=[("v", 16)])
+        finally:
+            owner.command("SET search_path=pg_temp,public", "SET")
+            owner.command("DROP FUNCTION temp_inspection_override.pg_is_other_temp_schema(oid)", "DROP FUNCTION")
+            owner.command("DROP SCHEMA temp_inspection_override", "DROP SCHEMA")
+
         sql = other.format("$1")
         statement = b"temp_schema_owner_probe"
         frames = owner.exchange(owner.parse(sql, statement) + owner.packet(b"D", b"S" + statement + b"\0")
@@ -138,6 +166,22 @@ def check_temp_inspection(client, sock, connect):
                                     owner.describe_portal() + owner.execute() + owner.packet(b"S"))
             assert client.data_row_values(frames) == [[expected]], frames
             assert [(field[3], field[-1]) for field in client.row_description_fields(frames)] == [(16, 1)], frames
+
+
+def check_temp_catalog_change(client, sock):
+    wire = Wire(client, sock)
+    name = "pg_temp_catalog_move_probe"
+    wire.command(f'CREATE SCHEMA "{name}"', "CREATE SCHEMA")
+    frames = wire.send_statements(f"SELECT oid FROM pg_catalog.pg_namespace WHERE nspname='{name}'")
+    oid = int(client.data_row_values(frames)[0][0])
+    wire.command("CREATE FUNCTION public.catalog_move_probe() RETURNS boolean VOLATILE LANGUAGE plpgsql AS $$ "
+                 f'BEGIN DROP SCHEMA "{name}"; RETURN true; END; $$', "CREATE FUNCTION")
+    try:
+        wire.query("SELECT CASE WHEN public.catalog_move_probe() THEN pg_catalog.pg_is_other_temp_schema(n.oid) "
+                   f"ELSE true END AS v FROM pg_catalog.pg_namespace n WHERE n.oid='{oid}'::oid",
+                   rows=[("f",)], fields=[("v", 16)])
+    finally:
+        wire.command("DROP FUNCTION public.catalog_move_probe()", "DROP FUNCTION")
 
 
 def main():
@@ -237,6 +281,8 @@ def main():
         check('SELECT sql_value_keyword_text_schema()',[["public"]],[25])
         check_temporary_schema(client, sock)
         check_temp_inspection(client, sock, connect)
+        if not reference:
+            check_temp_catalog_change(client, sock)
         print('SQL_VALUE_KEYWORD_COMPLETE',checked,'FAILED',len(failures),failures,flush=True)
         assert not failures,failures
     finally:

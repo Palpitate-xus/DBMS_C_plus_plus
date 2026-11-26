@@ -662,6 +662,8 @@ std::shared_ptr<CatalogManager> CatalogService::acquireImpl(
 void CatalogService::evict(const std::string& dbname) {
     std::lock_guard<std::mutex> lock(mutex_);
     const auto found = cache_.find(dbname);
+    // Restore/eviction may replace namespace rows without a catalog DDL call.
+    CatalogManager::invalidateNamespaceReads();
     if (found != cache_.end() && found->second.committed &&
         engine_.inTransaction() &&
         found->second.writeTransaction == engine_.currentTxnId()) {

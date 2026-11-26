@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-26 · 筛选其他连接的临时模式
+
+PostgreSQL 18.6 用模式编号从系统目录缓存查模式名，再判断名称前缀。SQLite 的虚拟机把行值放入寄存器供函数读取，DuckDB 按批向执行算子传递各列的数据。 [PostgreSQL 18.6 模式名称查找](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/catalog/namespace.c#L3483-L3508) · [SQLite Function 指令](https://sqlite.org/opcode.html#Function) · [DuckDB 向量格式](https://duckdb.org/docs/1.5/internals/vector)
+
+本项目读取模式列表时，已经拿到了每行的名称。直接用这一行的编号调用内置函数时，可以用该名称判断归属。一般参数和普通表里的编号仍要查目录。如果这次查询期间有模式变动，也会重新按编号查询。 [功能测试](test-report.md#temp-schema-source-reuse-20261126) · [性能对照](performance-report-2026-10-30.md#temp-schema-source-reuse-cost-20261126)
+
 ## 2026-11-26 · 查询临时模式的编号和归属
 
 PostgreSQL 的 `pg_my_temp_schema()` 返回当前连接自己的编号。`pg_is_other_temp_schema(oid)` 可按编号排除其他临时模式，也识别 PostgreSQL 用于存放大字段的临时模式名称。SQLite 用 `PRAGMA database_list` 列出当前连接的数据库，DuckDB 提供 `duckdb_schemas()` 查询模式。 [PostgreSQL 18.6 判断源码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/catalog/namespace.c#L3442-L3509) · [SQLite 数据库列表](https://sqlite.org/pragma.html#pragma_database_list) · [DuckDB 1.4 模式目录](https://duckdb.org/docs/1.4/sql/meta/duckdb_table_functions#duckdb_schemas)

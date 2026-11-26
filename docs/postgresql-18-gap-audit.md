@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-26 · 加快筛选其他连接的临时模式
+
+用 `pg_namespace.oid` 直接调用内置 `pg_is_other_temp_schema` 时，复用同一行已读取的模式名。若目录发生变动，函数会按编号重新查找。普通表的编号、一般参数和同名用户函数继续使用各自原有的执行路径。`CAT-03`、`QRY-01` 和 `CLIENT-01` 维持部分实现。 [测试报告](test-report.md#temp-schema-source-reuse-20261126) · [性能对照](performance-report-2026-10-30.md#temp-schema-source-reuse-cost-20261126)
+
 ## 2026-11-26 · 支持查询临时模式编号和归属
 
 `pg_my_temp_schema()` 及 `pg_is_other_temp_schema(oid)` 支持临时模式检查。正在使用的模式按实际目录编号判断，回滚后恢复连接状态。缺少编号和空参数分别按 PostgreSQL 的规则处理。`CAT-03`、`QRY-01` 和 `CLIENT-01` 维持部分实现。 [测试报告](test-report.md#temp-schema-inspection-20261126) · [性能对照](performance-report-2026-10-30.md#temp-schema-inspection-cost-20261126)

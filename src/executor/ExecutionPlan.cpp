@@ -7855,7 +7855,7 @@ OpPtr QueryPlanner::buildPreparedQueryPlan(StorageEngine* engine,const std::stri
             auto rows=std::make_shared<std::optional<std::vector<PgNamespaceRow>>>();
             source=std::make_unique<PreparedSourceRowsOp>(found->columns,
                 [engine,database,rows](size_t index,std::vector<ExprValue>& row) {
-                    if(!*rows)*rows=engine->catalogService().metadataSnapshot(database).namespaces;
+                    if(!*rows)*rows=engine->catalogService().namespaceSnapshot(database);
                     if(index>=(**rows).size())return false;
                     row=ownedNamespaceCatalogCells((**rows)[index]);return true;
                 });

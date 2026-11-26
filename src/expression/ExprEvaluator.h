@@ -111,6 +111,7 @@ public:
         boundColumns_[{sourceOrdinal, columnOrdinal}] = std::move(cell);
     }
     const ExprValue& boundColumn(size_t sourceOrdinal, size_t columnOrdinal) const;
+    const ExprValue* findBoundColumn(size_t sourceOrdinal, size_t columnOrdinal) const;
     void setGeneratedBound(size_t source,size_t column,GeneratedReadPtr read,bool present);
     void setGeneratedNamed(const std::string& key,GeneratedReadPtr read,bool present);
     const GeneratedInputState::Input* generatedBound(size_t source,size_t column) const;
@@ -160,6 +161,10 @@ public:
     using NamedColumnReader = std::function<std::optional<ExprValue>(const std::string&)>;
     void setNamedColumnReader(NamedColumnReader reader) {
         namedColumnReader_ = std::move(reader);
+    }
+    using NamespaceColumnReader = std::function<const std::string*(const Expr*, const RowContext&)>;
+    void setNamespaceColumnReader(NamespaceColumnReader reader) {
+        namespaceColumnReader_ = std::move(reader);
     }
     ExprValue evaluateGenerated(const GeneratedInputState::Input&,const RowContext&) const;
     ExprValue assignGenerated(const Expr* actualExpression,const RowContext&,
@@ -248,6 +253,7 @@ private:
     ExprValue evalSqlValue(const FunctionCallExpr*,const RowContext&) const;
     ScalarSubqueryExecutor scalarSubqueryExecutor_;
     NamedColumnReader namedColumnReader_;
+    NamespaceColumnReader namespaceColumnReader_;
     QuantifiedExecutor quantifiedExecutor_;
     struct GeneratedEvaluationState;
     mutable std::shared_ptr<GeneratedEvaluationState> generatedCompiled_; // metadata only, default null

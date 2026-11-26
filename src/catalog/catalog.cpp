@@ -9,6 +9,7 @@
 #include <sstream>
 #include <iostream>
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cmath>
 #include <iomanip>
@@ -26,6 +27,8 @@
 namespace dbms {
 
 namespace {
+std::atomic<uint64_t> namespaceReadRevision{0};
+
 struct CatalogFileGeneration {
     bool exists = false;
     bool regular = false;
@@ -904,6 +907,7 @@ Oid CatalogManager::createNamespace(const std::string& nspname, Oid owner) {
     namespaces_.push_back(row);
     nsByOid_[oid] = idx;
     nsByName_[nspname] = oid;
+    invalidateNamespaceReads();
     return oid;
 }
 
@@ -943,6 +947,7 @@ bool CatalogManager::dropNamespaceUnlocked(Oid oid) {
     }
     namespaces_.pop_back();
     nsByOid_.erase(oid);
+    invalidateNamespaceReads();
     return true;
 }
 
@@ -960,7 +965,16 @@ bool CatalogManager::renameNamespace(Oid oid, const std::string& name) {
     nsByName_.emplace(name, oid);
     row.nspname.swap(replacement);
     nsByName_.erase(replacement);
+    invalidateNamespaceReads();
     return true;
+}
+
+uint64_t CatalogManager::namespaceRevision() {
+    return namespaceReadRevision.load(std::memory_order_acquire);
+}
+
+void CatalogManager::invalidateNamespaceReads() {
+    namespaceReadRevision.fetch_add(1, std::memory_order_release);
 }
 
 std::vector<PgNamespaceRow> CatalogManager::listNamespaces() const {
@@ -2516,6 +2530,7 @@ void CatalogManager::bootstrapSystemNamespaces() {
         namespaces_.push_back(row);
         nsByOid_[oid] = idx;
         nsByName_[name] = oid;
+        invalidateNamespaceReads();
     };
     for(const auto& row:builtinNamespaceRows()) {
         if(row.nspname=="public" && (!initializePublic || nsByName_.count("public")))continue;
@@ -3373,6 +3388,7 @@ CatalogManager::PersistResult CatalogManager::persistAllImpl(bool reloadInPlace,
         persistence_->publication->durable[image.first] = {after, image.second};
         persistence_->observed[image.first] = after;
         persistence_->baseline[image.first] = image.second;
+        if (image.first == "namespace") invalidateNamespaceReads();
     }
     if (oidGen_ && !oidGen_->persist()) ok = false;
     return ok ? PersistResult::Published : PersistResult::Failed;
@@ -3955,6 +3971,7 @@ void CatalogManager::loadAllLocked() {
     if (oidGen_) {
         persistence_->baseline = std::move(images);
         persistence_->observed = std::move(observed);
+        invalidateNamespaceReads();
     }
     systemAttributesMaterialized_=systemAttributesExpected;
     } catch (...) {
