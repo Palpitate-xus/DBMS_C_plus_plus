@@ -1,27 +1,27 @@
 # 更新日志
 
 <details>
-<summary>用查询参数查列信息更快 · 2026-11-26</summary>
+<summary>应用传入表名时，查看列信息更快 · 2026-11-26</summary>
 
-应用程序传入表名时，数据库可以先找到对应的表。在另有 128 张表的测试库里，列出四列的用时从约 320 毫秒降到约 17 毫秒。
+应用把表名作为参数传给查询时，可以更快拿到列名和类型。在另外建了 128 张表的测试库里，列出目标表的四列用时从约 320 毫秒降到约 17 毫秒。
 
 [使用说明](docs/MANUAL.md#查询列的类型) · [测试报告](docs/test-report.md#catalog-runtime-key-20261126) · [性能报告](docs/performance-report-2026-10-30.md#catalog-runtime-key-cost-20261126)
 
 </details>
 
 <details>
-<summary>可以从数据里的表名查编号 · 2026-11-26</summary>
+<summary>可以用保存的表名查表编号 · 2026-11-26</summary>
 
-表名保存在文本列时，可以直接查到这张表的编号。表名只有数字也能查到，例如名为 `007` 的表。在另有 128 张表的测试库里，从 48 行文本查表编号快了约 11%。
+如果一列保存的是表名，可以在查询里把它转换成数据库给这张表分配的编号。像 `007` 这样只含数字的表名也能查到。
 
 [使用说明](docs/MANUAL.md#从文本列查找表的编号) · [测试报告](docs/test-report.md#regclass-runtime-20261126) · [性能报告](docs/performance-report-2026-10-30.md#regclass-runtime-cost-20261126)
 
 </details>
 
 <details>
-<summary>按表名查看列信息更快 · 2026-11-26</summary>
+<summary>直接在 SQL 里写表名，查看列信息更快 · 2026-11-26</summary>
 
-把表名直接写在 SQL 里查列名和类型，数据库可以跳过其他表的列。在另有 32 张表的测试库里，列出四列的用时从约 95 毫秒降到约 6 毫秒。
+查询只需要一张表的列名和类型时，数据库可以跳过其他表。在另外建了 32 张表的测试库里，列出目标表的四列用时从约 95 毫秒降到约 6 毫秒。
 
 [测试报告](docs/test-report.md#regclass-catalog-filter-20261126) · [性能报告](docs/performance-report-2026-10-30.md#regclass-catalog-cost-20261126)
 
