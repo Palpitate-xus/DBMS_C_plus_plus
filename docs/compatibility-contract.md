@@ -10,7 +10,7 @@
 
 新库不预置临时模式。旧库里的 `pg_temp_1` 目录记录由原数据保留，`pg_temp` 按当前连接实际使用的临时模式解析。回滚首次创建后，显式文本转换返回 `3F000`。成功创建之后，删除临时对象或执行 `DISCARD TEMP` 仍保留本连接的临时模式。 [临时模式测试](test-report.md#lazy-temp-namespace-20261126)
 
-当 `pg_temp` 是查找顺序里第一项可用的模式时，求值 `current_schema` 可以初始化它。只读事务也可执行此查询。首次初始化随事务回滚，查询的输出类型仍为 `name`。 [当前模式测试](test-report.md#current-schema-temp-20261126)
+当 `pg_temp` 是查找顺序里第一项可用的模式时，求值 `current_schema` 可以初始化它。只读事务也可执行此查询。首次初始化随事务回滚，查询的输出类型仍为 `name`。回滚只删除本次新建的目录记录，已经存在的旧库记录保留原编号。 [当前模式测试](test-report.md#current-schema-temp-20261126) · [旧库与回滚测试](test-report.md#temp-namespace-row-undo-20261126)
 
 ## 2026-11-24 · 系统目录函数的返回类型
 

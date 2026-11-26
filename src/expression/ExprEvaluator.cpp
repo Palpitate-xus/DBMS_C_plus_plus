@@ -7669,16 +7669,24 @@ ExprValue ExprEvaluator::evalSqlValue(const FunctionCallExpr* e,const RowContext
             if(name=="pg_temp") {
                 if (!session || database.empty() || session->currentDB != database) continue;
                 if (!session->tempNamespaceCreated) {
-                    // A leading pg_temp is the default creation namespace.
-                    // Keep initialization within the caller's transaction so
-                    // a failed SELECT or ROLLBACK TO also undoes this change.
+                    // Keep the catalog write under the same owner as CREATE
+                    // TABLE. Only the new namespace needs an undo action;
+                    // startup already retires abandoned temporary namespaces.
                     DdlTransaction transaction(*engine, database, session);
-                    if (!transaction.enableSnapshotRollback() || !transaction.begin())
+                    if (!transaction.begin() || !engine->beginCreateTableUndo(database))
                         throw DbError("58030", "could not start temporary schema initialization");
                     auto& catalog = engine->catalogService().get(database);
                     if (!catalog.getTempNamespace(session->pid)) {
-                        transaction.markSnapshotDirty();
-                        if (!catalog.createTempNamespace(session->pid) || !catalog.persistAll())
+                        const auto created = std::make_shared<Oid>(INVALID_OID);
+                        engine->registerDdlUndo([engine, database, pid = session->pid, created]() {
+                            auto& current = engine->catalogService().get(database);
+                            const auto entry = current.getTempNamespace(pid);
+                            if (entry && (entry->oid != *created || !current.dropNamespace(entry->oid)))
+                                return false;
+                            return current.persistAll();
+                        });
+                        *created = catalog.createTempNamespace(session->pid);
+                        if (!*created || !catalog.persistAll())
                             throw DbError("58030", "could not publish temporary schema");
                     }
                     engine->noteTemporaryObjectAccess(database);

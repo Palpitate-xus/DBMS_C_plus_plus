@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-26 · 缩短首次创建临时模式的耗时
+
+`current_schema` 创建临时模式时只登记对应的撤销操作。回滚时用实际编号核对并移除新建记录，重启时沿用现有的临时对象清理。首次初始化的数据库级锁仍会影响其他连接。`CAT-03`、`QRY-01` 和 `WAL-08` 维持部分实现。 [测试报告](test-report.md#temp-namespace-row-undo-20261126) · [性能对照](performance-report-2026-10-30.md#temp-namespace-row-undo-cost-20261126)
+
 ## 2026-11-26 · 查询当前模式并初始化临时模式
 
 搜索路径中第一项可用的模式为 `pg_temp` 时，执行 `current_schema` 可以创建本连接的临时模式。普通查询只取模式记录。事务、保存点和恢复用例通过，首次初始化仍会与其他连接争用数据库级锁。`CAT-03`、`QRY-01` 和 `WAL-08` 仍为部分实现。 [测试报告](test-report.md#current-schema-temp-20261126) · [性能报告](performance-report-2026-10-30.md#current-schema-temp-cost-20261126)

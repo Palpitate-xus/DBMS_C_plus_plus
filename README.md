@@ -7,6 +7,13 @@
 ## 最近更新
 
 <details>
+<summary>首次查询临时模式更快 · 2026-11-26</summary>
+
+用 `current_schema` 首次启用临时模式时，数据库省去了整库备份。在多建了 128 张表的测试库里，这步从约 108 毫秒降到约 17 毫秒。
+
+</details>
+
+<details>
 <summary>可以查到当前连接的临时模式名 · 2026-11-26</summary>
 
 把 `pg_temp` 放在查找顺序的最前面后，运行 `SELECT current_schema` 会返回这个连接自己的临时模式名。
@@ -17,13 +24,6 @@
 <summary>查找不存在的临时表时，错误提示更准确 · 2026-11-26</summary>
 
 查临时表的编号时，报错会区分当前连接还没创建过临时表或序列，还是已经创建过但找不到指定的表。
-
-</details>
-
-<details>
-<summary>查表编号时可以带上当前数据库名 · 2026-11-26</summary>
-
-连接到 `shop` 数据库后，可以用 `shop.public.orders` 查订单表的编号。
 
 </details>
 

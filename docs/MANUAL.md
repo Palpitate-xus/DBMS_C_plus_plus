@@ -1055,7 +1055,7 @@ CREATE TABLE t (ID INT) WITH (FILLFACTOR = 90);
 
 `pg_temp` 指向当前连接的临时模式。第一次创建临时对象并生效前，查询 `'pg_temp.orders'::text::regclass` 会返回 `3F000`。临时模式已有时，找不到表会返回 `42P01`，包括删掉最后一张临时表之后。撤销首次创建会让临时模式重新变成不可用。 [临时模式测试](test-report.md#lazy-temp-namespace-20261126)
 
-执行 `SET search_path = pg_temp, public` 后，`SELECT current_schema` 会按需创建当前连接的临时模式并返回名称。把 `public` 放在前面时，查询返回 `public`。回滚首次初始化的事务会撤销这次创建。 [当前模式测试](test-report.md#current-schema-temp-20261126)
+执行 `SET search_path = pg_temp, public` 后，`SELECT current_schema` 会按需创建当前连接的临时模式并返回名称。把 `public` 放在前面时，查询返回 `public`。回滚首次初始化的事务会撤销这次创建。 [当前模式测试](test-report.md#current-schema-temp-20261126) · [回滚与重启测试](test-report.md#temp-namespace-row-undo-20261126)
 
 ### 修改表
 

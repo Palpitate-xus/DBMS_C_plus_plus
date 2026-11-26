@@ -41,16 +41,33 @@ def check_temporary_schema(client, sock):
             mode.check(sql, frames, rows=[(value,)], fields=[("n", 19)], ready=ready)
             mode.query(f"SELECT nspname FROM pg_namespace WHERE nspname='{value}'",
                        rows=[(value,)], fields=[("nspname", 19)], ready=ready)
+            return value
+
+        def removed(name, ready=b"I"):
+            wire.query(f"SELECT nspname FROM pg_namespace WHERE nspname='{name}'",
+                       rows=[], fields=[("nspname", 19)], tag="SELECT 0", ready=ready)
 
         wire.command("BEGIN READ ONLY", "BEGIN", ready=b"T")
-        initialize(wire, "current_schema", ready=b"T")
+        name = initialize(wire, "current_schema", ready=b"T")
         wire.command("ROLLBACK", "ROLLBACK")
+        removed(name)
         wire.query(missing, state="3F000", tag=None)
+        wire.command("BEGIN", "BEGIN", ready=b"T")
+        name = initialize(wire, "current_schema", ready=b"T")
+        wire.command("CREATE TABLE public.current_schema_created_in_txn(id int)", "CREATE TABLE", ready=b"T")
+        wire.command("INSERT INTO public.current_schema_created_in_txn VALUES(5)", "INSERT 0 1", ready=b"T")
+        wire.command("ROLLBACK", "ROLLBACK")
+        removed(name)
+        wire.query("SELECT * FROM public.current_schema_created_in_txn", state="42P01", tag=None)
         wire.command("BEGIN", "BEGIN", ready=b"T")
         wire.command("SAVEPOINT before_temp", "SAVEPOINT", ready=b"T")
         extended = Wire(client, sock, extended=True)
-        initialize(extended, "current_schema()", ready=b"T")
+        name = initialize(extended, "current_schema()", ready=b"T")
+        wire.command("CREATE TEMP TABLE pg_temp.current_schema_temp_in_savepoint(id int)",
+                     "CREATE TABLE", ready=b"T")
+        wire.command("INSERT INTO pg_temp.current_schema_temp_in_savepoint VALUES(7)", "INSERT 0 1", ready=b"T")
         wire.command("ROLLBACK TO before_temp", "ROLLBACK", ready=b"T")
+        removed(name, ready=b"T")
         wire.query(missing, state="3F000", tag=None, ready=b"E")
         wire.command("ROLLBACK", "ROLLBACK")
         wire.query(missing, state="3F000", tag=None)

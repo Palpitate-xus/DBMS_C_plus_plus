@@ -8,7 +8,7 @@ PostgreSQL 18.6 在首次使用临时模式时才初始化它，按连接记录�
 
 项目的新库也在首次使用时创建临时模式。通过 `pg_temp` 查表编号时，旧库中遗留的目录记录不会让尚未初始化的连接误报表不存在。两边的 `current_schema` 都可以在 `pg_temp` 优先时创建临时模式，并在事务或保存点回滚时撤销。DuckDB 也提供 `current_schema()`，默认返回 `main`。 [首次使用测试](test-report.md#lazy-temp-namespace-20261126) · [当前模式测试](test-report.md#current-schema-temp-20261126) · [PostgreSQL 18.6 搜索路径源码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/catalog/namespace.c#L4523-L4551) · [DuckDB 1.4 函数说明](https://duckdb.org/docs/1.4/sql/functions/utility#current_schema)
 
-仍有并发行为差异。本项目首次初始化沿用目录写入的数据库级锁，事务结束前，其他连接读取普通表也可能等锁超时。 [性能报告](performance-report-2026-10-30.md#current-schema-temp-cost-20261126)
+PostgreSQL 在事务或子事务结束时分别处理临时模式的状态。DuckDB 将临时表与连接绑定，SQLite 把临时表放在独立的临时数据库里。本项目现在只登记待撤销的临时模式记录，实例重启后由现有的临时对象清理流程移除孤立记录。首次初始化仍持有目录写入的数据库级锁，事务结束前，其他连接读取普通表也可能等锁超时。 [PostgreSQL 18.6 回滚源码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/catalog/namespace.c#L4245-L4319) · [DuckDB 1.4 临时表](https://duckdb.org/docs/1.4/sql/statements/create_table#temporary-tables) · [SQLite 临时数据库](https://sqlite.org/tempfiles.html#temp_databases) · [性能报告](performance-report-2026-10-30.md#temp-namespace-row-undo-cost-20261126)
 
 ## 2026-11-26 · 表名前带上数据库名
 
