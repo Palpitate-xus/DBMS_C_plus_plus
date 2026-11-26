@@ -3,6 +3,19 @@
   "recent_updates": [
 
     {
+      "issue": "2026-11-26 share saved catalog bytes and reuse relation and dependency images",
+      "gap_ids": ["CAT-02", "CAT-06", "CAT-07"],
+      "status": "partial",
+      "evidence": ["src/catalog/catalog.cpp", "src/catalog/catalog.h", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/catalog_clean_publication_test.cpp", "tests/catalog_publication_scan_test.cpp", "tests/view_column_dependency_test.cpp", "tests/pg_foreign_key_catalog_protocol_e2e_test.py"],
+      "verification": [
+        "Check real file identities and reloads after relation rename, a repeated borrowed edit, and dependency addition and removal.",
+        "Compare savepoint rollback and DROP RESTRICT with PostgreSQL 18.6. Recheck file replacement, retry and restart outcomes.",
+        "Measure BEGIN, ordinary reads and writes, catalog lookups, and rename with many tables, plus saving large existing catalogs."
+      ]
+    },
+
+    {
       "issue": "2026-11-26 reuse saved pg_attribute images in transaction startup",
       "gap_ids": ["CAT-02", "CAT-03", "TXN-05"],
       "status": "partial",

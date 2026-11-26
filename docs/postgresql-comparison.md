@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-26 · 复用表定义和依赖记录
+
+PostgreSQL 在 `pg_depend` 保存对象之间的依赖，用于 `DROP RESTRICT` 和 `DROP CASCADE`，并在提交后让其他进程更新目录缓存。SQLite 使用数据库头里的模式版本识别表结构变化。DuckDB 允许在一个写入进程中缓存目录并通过多版本控制处理并发。 [PostgreSQL 依赖目录](https://www.postgresql.org/docs/18/catalog-pg-depend.html) · [PostgreSQL 缓存更新](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/utils/cache/inval.c) · [SQLite 文件格式](https://www.sqlite.org/fileformat2.html#schema_cookie) · [DuckDB 并发](https://duckdb.org/docs/1.5/connect/concurrency)
+
+项目复用已保存的表定义和依赖记录。每次发布继续核对目录文件版本。视图、外键、改名和保存点已做同一组 SQL 对照。当前目录存储仍使用独立文件，并发和完整日志恢复还有差距。 [功能测试](test-report.md#relation-publication-20261126) · [性能报告](performance-report-2026-10-30.md#relation-publication-cost-20261126)
+
 ## 2026-11-26 · 复用已保存的列定义
 
 PostgreSQL 在目录记录变更后让其他连接更新相应的缓存。SQLite 通过文件头里的模式版本判断是否需要重新读取表结构。DuckDB 可以在同一写入进程内缓存目录，通过多版本控制处理并发。 [PostgreSQL 目录缓存](https://raw.githubusercontent.com/postgres/postgres/REL_18_6/src/backend/utils/cache/inval.c) · [SQLite 文件格式](https://www.sqlite.org/fileformat2.html#schema_cookie) · [DuckDB 并发](https://duckdb.org/docs/1.5/connect/concurrency)

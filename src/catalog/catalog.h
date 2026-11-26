@@ -15,6 +15,7 @@
 namespace dbms {
 
 struct CatalogPersistenceState;
+struct CatalogImageSet;
 
 // ============================================================================
 // Catalog 管理器
@@ -467,7 +468,7 @@ private:
     // 辅助函数
     std::string catalogFilePath(const std::string& tablename) const;
     enum class WriteScope { All, Namespaces, Descriptions };
-    std::map<std::string, std::string> serializeAllLocked(WriteScope scope = WriteScope::All) const;
+    CatalogImageSet serializeAllLocked(WriteScope scope = WriteScope::All) const;
     PersistResult persistAllImpl(bool reloadInPlace, WriteScope scope = WriteScope::All);
     void loadAllLocked();
     void rebuildIndexes();

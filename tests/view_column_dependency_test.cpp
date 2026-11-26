@@ -127,8 +127,8 @@ int main() {
     check(g_engine.viewExists(db, "whole_v") && g_engine.viewExists(db, "whole_child"),
           "view restriction preserves parent and child");
 
-    // The compiled pg_class source exposes a smaller, reordered descriptor.
-    // Its seventh source field is relowner, not catalog attribute number 7.
+    // Even when only some fields are executable, aliases in pg_class follow
+    // the declared order. relowner and relam are adjacent at positions 6 and 7.
     const auto catalogDeclaration = execute("CREATE VIEW catalog_owner AS SELECT relowner FROM pg_catalog.pg_class");
     check(!catalogDeclaration.first, "compiled catalog is a real view read source");
     const auto catalogView = catalog().resolveRelationSnapshot("catalog_owner", {"public"});
@@ -140,15 +140,20 @@ int main() {
             ownerDependency |= dependency.refclassid == PgClassOid_Class &&
                 dependency.refobjid == PgClassOid_Class && dependency.refobjsubid == ownerAttribute->attnum;
     check(ownerDependency, "partial catalog source keeps actual column identity");
-    const auto partialAlias = execute("CREATE VIEW partial_alias AS SELECT a.owner FROM pg_catalog.pg_class a(k,r,n,kind,atts,persist,owner)");
+    const auto partialAlias = execute("CREATE VIEW partial_alias AS SELECT a.owner, a.access_method "
+                                      "FROM pg_catalog.pg_class a(k,r,n,row_type,of_type,owner,access_method)");
     check(!partialAlias.first, "aliased partial catalog declaration is preserved");
     const auto aliasView = catalog().resolveRelationSnapshot("partial_alias", {"public"});
-    bool aliasDependency = false;
+    const auto accessMethodAttribute = catalog().getAttribute(PgClassOid_Class, "relam");
+    assert(accessMethodAttribute);
+    bool aliasOwner = false, aliasAccessMethod = false;
     if (aliasView)
-        for (const auto& dependency : catalog().findDepends(PgClassOid_Class, aliasView->oid))
-            aliasDependency |= dependency.refclassid == PgClassOid_Class &&
-                dependency.refobjid == PgClassOid_Class && dependency.refobjsubid == ownerAttribute->attnum;
-    check(aliasDependency, "partial catalog column alias retains original declaration identity");
+        for (const auto& dependency : catalog().findDepends(PgClassOid_Class, aliasView->oid)) {
+            if (dependency.refclassid != PgClassOid_Class || dependency.refobjid != PgClassOid_Class) continue;
+            aliasOwner |= dependency.refobjsubid == ownerAttribute->attnum;
+            aliasAccessMethod |= dependency.refobjsubid == accessMethodAttribute->attnum;
+        }
+    check(aliasOwner && aliasAccessMethod, "catalog column aliases keep both declared dependency identities");
 
     setup("CREATE TABLE chain_rows(id INT,n INT)");
     setup("CREATE VIEW chain_a AS SELECT n FROM chain_rows");

@@ -56,15 +56,42 @@ int main() {
         assert(owner.persistAll());
         const auto path = root / "pg_class.cat";
         const auto descriptionPath = root / "pg_description.cat";
+        const auto dependencyPath = root / "pg_depend.cat";
         const auto first = identity(path);
         const auto firstDescription = identity(descriptionPath);
+        const auto firstDependencies = identity(dependencyPath);
         for (int repetition = 0; repetition < 4; ++repetition)
             assert(owner.persistCurrent() == CatalogManager::PersistResult::Published);
         assert(unchanged(firstDescription, identity(descriptionPath)));
+        assert(unchanged(firstDependencies, identity(dependencyPath)));
         if (!unchanged(first, identity(path))) {
             std::cerr << "unchanged catalog image was atomically republished\n";
             assert(false);
         }
+
+        assert(owner.renameClass(rel, "renamed_rows"));
+        assert(owner.persistCurrent() == CatalogManager::PersistResult::Published);
+        CatalogManager cleanReader(root.string(), false);
+        assert(cleanReader.getClassByName("renamed_rows", nsp)->oid == rel);
+        assert(owner.renameClass(rel, "rows"));
+
+        PgDependRow extra;
+        extra.classid = PgClassOid_Class;
+        extra.objid = rel;
+        extra.objsubid = 3;
+        extra.refclassid = PgClassOid_Namespace;
+        extra.refobjid = nsp;
+        extra.deptype = 'n';
+        owner.addDepend(extra);
+        assert(owner.hasUnpublishedChanges());
+        assert(owner.persistCurrent() == CatalogManager::PersistResult::Published);
+        cleanReader.loadAll();
+        assert(cleanReader.findDepends(extra.classid, rel, 3).size() == 1);
+        assert(owner.removeDepend(extra.classid, rel, extra.objsubid,
+                                  extra.refclassid, extra.refobjid, extra.refobjsubid));
+        assert(owner.persistCurrent() == CatalogManager::PersistResult::Published);
+        cleanReader.loadAll();
+        assert(cleanReader.findDepends(extra.classid, rel, 3).empty());
 
         // A caller mutating an existing row cannot be hidden by a setter flag.
         auto* mutableRelation = const_cast<PgClassRow*>(owner.findClass(rel));
@@ -74,6 +101,13 @@ int main() {
         assert(!unchanged(first, identity(path)));
         auto snapshot = CatalogManager::readMetadataSnapshot(root.string());
         assert(snapshot.relations.size() == 1 && snapshot.relations[0].relpages == 73);
+        mutableRelation->relpages = 74;
+        assert(owner.hasUnpublishedChanges());
+        assert(owner.persistCurrent() == CatalogManager::PersistResult::Published);
+        snapshot = CatalogManager::readMetadataSnapshot(root.string());
+        assert(snapshot.relations.size() == 1 && snapshot.relations[0].relpages == 74);
+        mutableRelation->relpages = 73;
+        assert(owner.persistCurrent() == CatalogManager::PersistResult::Published);
         const auto changed = identity(path);
         assert(owner.persistAll());
         assert(unchanged(changed, identity(path)));

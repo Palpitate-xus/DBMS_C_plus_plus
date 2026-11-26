@@ -3,6 +3,17 @@
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
 
+<a id="relation-publication-20261126"></a>
+## 2026-11-26 · 表定义和依赖记录的保存与恢复
+
+在同一个目录上反复发布，核对已保存的表信息和依赖文件。改名后重新打开目录，检查新名字和原编号。添加再删除依赖关系，两次均从磁盘读回结果。通过同一个借出的表对象连续改两次统计值，确认两次都发布了真实修改。用系统调用拦截检查文件竞争、删除、持久化失败与重试。 [目录回归](../tests/catalog_clean_publication_test.cpp) · [目录竞争回归](../tests/catalog_publication_scan_test.cpp)
+
+在 PostgreSQL 18.6、上一版和本次构建上执行同一组 SQL。检查改名保留编号、保存点撤销改名和数据可读性，以及存在视图或外键时 `DROP ... RESTRICT` 返回 `2BP01`。最后删掉依赖后才可以删除原表。
+
+视图依赖测试原先以旧的列顺序假定第七列是 `relowner`。旧断言在两版各失败一项。以 PostgreSQL 18.6 的实际列号核对后，改为同时断言第六列 `relowner` 和第七列 `relam` 的依赖，两版均通过 242 项检查。 [视图依赖用例](../tests/view_column_dependency_test.cpp) · [PostgreSQL pg_class](https://www.postgresql.org/docs/18/catalog-pg-class.html)
+
+本次构建通过 20 个协议用例和 28 个 C++ 用例，另通过 8 种普通重启、7 种指定时间恢复和两种注释写入故障的结果核对。程序 SHA-256 为 `c26e16daaa4f6bfe7f23b1ca775f344b46963d3e68148864e328848464f60633`。 [性能报告](performance-report-2026-10-30.md#relation-publication-cost-20261126)
+
 <a id="attribute-publication-20261126"></a>
 ## 2026-11-26 · 列定义保存、事务回滚和旧格式
 
@@ -1252,7 +1263,7 @@ SQL 转换把带数值偏移的本地时钟先读到微秒，再按 `TIMETZ(p)` 
 
 另外对照了两种受限情况。查找顺序影响原来的视图来源时返回 `0A000`。重命名 `JOIN USING` 正在使用的列仍返回 `42703`。失败后原视图都继续可查，已经保存的另一视图定义随改名撤销。PostgreSQL 18.6 可以完成这两种改名。该版直接连接普通视图和表会报错，后续已有单独的执行修复。[后续连接测试](#join-ordinary-views-20261122) · [性能报告](performance-report-2026-10-30.md#rename-dependent-views-cost-20261122)
 
-九套客户端回归通过，包括替换视图、视图触发器、物化视图刷新、导入和事务隔离。C++ 视图依赖测试的 242 项检查中有一项失败，将系统表 `pg_class` 的部分列用别名引用时会记录错误的列依赖。提取同一检查在基线和新版重跑，均复现该失败。[C++ 视图依赖测试](../tests/view_column_dependency_test.cpp)
+九套客户端回归通过，包括替换视图、视图触发器、物化视图刷新、导入和事务隔离。C++ 视图依赖测试的 242 项检查中有一项失败，涉及用别名引用系统表 `pg_class` 时的预期列号。提取同一检查在基线和新版重跑，均复现该失败。后续核对发现，该断言沿用了旧的目录列序。修正后的用例按第六列和第七列分别检查依赖关系。[后续的列号核对](#relation-publication-20261126) · [C++ 视图依赖测试](../tests/view_column_dependency_test.cpp)
 
 新版程序的 SHA-256 为 `40d6105e685a84323f734036201fc2ebcaf5c0e6644b14d3470727b710edffef`。PostgreSQL 对照、新版对照和强制重启记录的 SHA-256 分别为 `d203522cd2e3e2ad107ea91e38333d3389a2c38b79266f59b9ee784a00ea4aa9`、`03eddaf33413ecc17c22a044e5600386c8452adf3b3fe2ce110bd23b7f61abd4` 和 `f9f05608d5a29a96e256ef311fe9a0e0fbbd86a342eb400d00f95424f9d6bdec`。
 
