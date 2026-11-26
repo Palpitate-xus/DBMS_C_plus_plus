@@ -14513,7 +14513,7 @@ bool DdlExecutor::executeComment(const CommentStmt* stmt, Session& s) {
         }
     }
 
-    if (stmt->isNull) {
+    if (stmt->isNull || stmt->comment.empty()) {
         (void)catalog->removeDescription(
             objectOid, classOid, objectSubId);
     } else {

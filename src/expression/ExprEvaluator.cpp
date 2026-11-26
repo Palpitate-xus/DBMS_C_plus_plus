@@ -6649,6 +6649,31 @@ struct SqlRoleNameFunction {
         return ExprValue("name", "unknown (OID=" + std::to_string(oid) + ")");
     }
 };
+struct SqlDescriptionFunction {
+    bool column;
+
+    ExprValue operator()(const std::vector<ExprValue>&) const {
+        throw DbError("XX000", "description function requires its catalog context");
+    }
+
+    ExprValue invoke(const std::vector<ExprValue>& args, StorageEngine& engine,
+                     const std::string& database) const {
+        if (args.size() != 2 && (column || args.size() != 1))
+            throw DbError("42883", "description function does not exist for these arguments");
+        if (std::any_of(args.begin(), args.end(), [](const auto& arg) { return arg.isNull; }))
+            return ExprValue("text", "", true);
+        const auto& object = args.front();
+        const auto oid = object.objectOid ? *object.objectOid : parseOidInput(object.value);
+        std::optional<std::string_view> catalog;
+        if (column) catalog = "pg_class";
+        else if (args.size() == 2) catalog = args[1].value;
+        const auto subobject = column ? static_cast<int32_t>(args[1].asInt()) : 0;
+        const auto* session = currentSession();
+        const auto& db = database.empty() && session ? session->currentDB : database;
+        auto comment = engine.catalogService().description(db, oid, subobject, catalog);
+        return ExprValue("text", comment ? std::move(*comment) : std::string{}, !comment);
+    }
+};
 struct SqlFormatTypeFunction {
     ExprValue operator()(const std::vector<ExprValue>&) const {
         throw DbError("XX000", "format_type requires its catalog context");
@@ -6738,6 +6763,8 @@ bool ownsScalarSignatures(const std::string& name,const ScalarFunction* callback
         return callback && callback->target<SqlTemporarySchemaFunction>();
     if (name == "pg_get_userbyid")
         return callback && callback->target<SqlRoleNameFunction>();
+    if (name == "obj_description" || name == "col_description")
+        return callback && callback->target<SqlDescriptionFunction>();
     if (name == "format_type")
         return callback && callback->target<SqlFormatTypeFunction>();
     if (name == "pg_get_expr")
@@ -6839,6 +6866,16 @@ const std::vector<ScalarSignature>& scalarSignatures(const std::string& name) {
     if (name == "pg_get_userbyid") {
         static const auto* const signatures = new const std::vector<ScalarSignature>{
             {{"oid"}, "name"}};
+        return *signatures;
+    }
+    if (name == "obj_description") {
+        static const auto* const signatures = new const std::vector<ScalarSignature>{
+            {{"oid"}, "pg_catalog.text"}, {{"oid", "name"}, "pg_catalog.text"}};
+        return *signatures;
+    }
+    if (name == "col_description") {
+        static const auto* const signatures = new const std::vector<ScalarSignature>{
+            {{"oid", "integer"}, "pg_catalog.text"}};
         return *signatures;
     }
     if (name == "format_type") {
@@ -7105,6 +7142,7 @@ ResolvedScalarFunction resolveTypedScalar(const std::string& name,
     if(candidates.empty())return {};
     if((name=="scale" || name=="min_scale" || name=="gcd" || name=="lcm" || name=="factorial" ||
         name=="format_type" || name=="pg_get_expr" || name=="pg_get_constraintdef" || name=="pg_get_indexdef" ||
+        name=="obj_description" || name=="col_description" ||
         isSessionSettingFunction(name)) && !candidates.front().stored &&
        (call->hasOver || call->distinct || call->filter || !call->orderBy.empty() ||
         !call->aggregateOrderKeys.empty()))
@@ -8243,6 +8281,9 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
         } else if (const auto* user = it->second.target<SqlRoleNameFunction>()) {
             auto* owner = sqlValueEngine_ ? sqlValueEngine_ : &g_engine;
             result = user->invoke(args, *owner);
+        } else if (const auto* description = it->second.target<SqlDescriptionFunction>()) {
+            auto* owner = sqlValueEngine_ ? sqlValueEngine_ : &g_engine;
+            result = description->invoke(args, *owner, currentDB_);
         } else if (const auto* type = it->second.target<SqlFormatTypeFunction>()) {
             auto* owner = sqlValueEngine_ ? sqlValueEngine_ : &g_engine;
             result = type->invoke(args, *owner, currentDB_);
@@ -14246,6 +14287,10 @@ void ExprEvaluator::registerStatelessBuiltins() {
     functions_["pg_is_other_temp_schema"] = SqlTemporarySchemaFunction{true};
     volatility_["pg_is_other_temp_schema"] = 's';
     functions_["pg_get_userbyid"] = SqlRoleNameFunction{};
+    functions_["obj_description"] = SqlDescriptionFunction{false};
+    volatility_["obj_description"] = 's';
+    functions_["col_description"] = SqlDescriptionFunction{true};
+    volatility_["col_description"] = 's';
     volatility_["pg_get_userbyid"] = 's';
     functions_["format_type"] = SqlFormatTypeFunction{};
     volatility_["format_type"] = 's';

@@ -526,14 +526,15 @@ std::string resolveTable(Session& s, const std::string& name,
     CatalogManager::QualifiedName qualified;
     if (!CatalogManager::parseQualifiedName(name, qualified,
                                             foldUnquoted)) return name;
-    const bool checkPgType = writeTarget && qualified.name == "pg_type";
+    const bool checkCatalogTarget = writeTarget &&
+        (qualified.name == "pg_type" || qualified.name == "pg_description");
     if (!qualified.schema.empty()) {
         const std::string& schema = qualified.schema;
         const std::string& table = qualified.name;
-        if (checkPgType) requireWritableBuiltinRelation(schema, table);
+        if (checkCatalogTarget) requireWritableBuiltinRelation(schema, table);
         const bool temporary = schema == "pg_temp" ||
             (schema.rfind("pg_temp_", 0) == 0 &&
-             (!checkPgType || schema == sessionTempSchemaName(s)));
+             (!checkCatalogTarget || schema == sessionTempSchemaName(s)));
         if (temporary && isTempTable(s, table)) {
             return temporaryPhysicalName(table);
         }
@@ -585,14 +586,14 @@ std::string resolveTable(Session& s, const std::string& name,
     }
     const std::string& table = qualified.name;
     std::vector<std::string> entries;
-    if (checkPgType) {
+    if (checkCatalogTarget) {
         entries = effectiveRelationSearchPath(&s);
     } else {
         std::string canonical;
         if (!parseSessionSearchPath(s.searchPath, entries, canonical)) entries = {"public"};
     }
     const std::string temporarySchema = sessionTempSchemaName(s);
-    const bool explicitTemporary = checkPgType || std::any_of(entries.begin(), entries.end(),
+    const bool explicitTemporary = checkCatalogTarget || std::any_of(entries.begin(), entries.end(),
         [&](const std::string& entry) {
             const auto schema = expandSessionSearchPathEntry(entry, s.username);
             return schema == "pg_temp" || schema == temporarySchema;
@@ -603,9 +604,9 @@ std::string resolveTable(Session& s, const std::string& name,
         return temporaryPhysicalName(table);
     std::string firstCandidate;
     for (const auto& rawSchema : entries) {
-        const std::string schema = checkPgType ? rawSchema :
+        const std::string schema = checkCatalogTarget ? rawSchema :
             expandSessionSearchPathEntry(rawSchema, s.username);
-        if (checkPgType) requireWritableBuiltinRelation(schema, table);
+        if (checkCatalogTarget) requireWritableBuiltinRelation(schema, table);
         if (schema == "pg_temp" || schema == temporarySchema) {
             if (isTempTable(s, table)) return temporaryPhysicalName(table);
             continue;

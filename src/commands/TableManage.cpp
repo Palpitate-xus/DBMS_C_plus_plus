@@ -70,6 +70,7 @@
 #include "catalog/declared_type.h"
 #include "catalog/type_catalog.h"
 #include "catalog/namespace_catalog.h"
+#include "catalog/description_catalog.h"
 #include "catalog/PgStatsProjection.h"
 #include "common/SqlSyntax.h"
 #include "expression/expr_helper.h"
@@ -42619,6 +42620,7 @@ decltype(auto) StorageEngine::withQueryBindingMetadata(const std::string& dbname
                         {foreign_key_catalog::name, foreign_key_catalog::descriptor()},
                         {index_catalog::name, index_catalog::descriptor()},
                         {"pg_namespace", ownedNamespaceCatalogDescriptor()},
+                        {description_catalog::name, description_catalog::descriptor()},
                         {"pg_settings", system_catalog::settingsDescriptor()},
                         {"pg_stat_activity", {{"pid","integer"},{"datname","name"},{"usename","name"},{"state","text"},{"query","text"}}}
                     };

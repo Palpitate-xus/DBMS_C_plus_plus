@@ -93,6 +93,7 @@
 #include "commands/StoredRowNull.h"
 #include "catalog/CatalogService.h"
 #include "catalog/namespace_catalog.h"
+#include "catalog/description_catalog.h"
 #include "catalog/namespace_query.h"
 #include "catalog/pg_stats_query.h"
 #include "catalog/MaintenanceProgressView.h"
@@ -21626,6 +21627,11 @@ class PreparedWithDmlRuntime {
                 virtualRows=make_shared<dbms::PreparedQueryRows>();
                 for(const auto& row:g_engine.catalogService().namespaceSnapshot(session_.currentDB))
                     virtualRows->push_back(dbms::ownedNamespaceCatalogCells(row));
+            } else if (range.relationSchema == "pg_catalog" && range.relationName == dbms::description_catalog::name) {
+                virtualRows = make_shared<dbms::PreparedQueryRows>();
+                for (const auto& row : g_engine.catalogService().descriptionSnapshot(
+                         session_.currentDB, dbms::description_catalog::objectFilter(range)))
+                    virtualRows->push_back(dbms::description_catalog::cells(row));
             } else if(range.relationSchema=="pg_catalog" && range.relationName=="pg_settings") {
                 virtualRows=make_shared<dbms::PreparedQueryRows>(preparedPgSettingsRows(session_));
             } else if(item->type==dbms::FromItem::Type::Table && !range.cteStatement) {

@@ -240,7 +240,7 @@ static std::string readString(std::istringstream& in) {
 }
 
 template <typename T>
-static bool readCatalogCsvField(std::istringstream& input, T& value) {
+static bool readCatalogCsvField(std::istream& input, T& value) {
     if (!(input >> value)) return false;
     char delimiter = 0;
     return input.get(delimiter) && delimiter == ',';
@@ -2292,6 +2292,49 @@ std::string CatalogManager::getDescription(Oid objoid, Oid classoid, int32_t obj
     return "";
 }
 
+std::optional<std::string> CatalogManager::description(Oid object, int32_t subobject,
+    std::optional<std::string_view> catalogName) const {
+    if (!object) return std::nullopt;
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::optional<Oid> classOid;
+    if (catalogName) {
+        if (*catalogName == "pg_class") classOid = PgClassOid_Class;
+        else if (*catalogName == "pg_namespace") classOid = PgClassOid_Namespace;
+        else if (*catalogName == "pg_type") classOid = PgClassOid_Type;
+        else if (*catalogName == "pg_proc") classOid = PgClassOid_Proc;
+        else {
+            const auto found = classByName_.find(classNameKey(11, std::string(*catalogName)));
+            if (found == classByName_.end() || found->second >= classes_.size()) return std::nullopt;
+            classOid = classes_[found->second].oid;
+        }
+    }
+    const auto row = std::find_if(descriptions_.begin(), descriptions_.end(), [&](const auto& entry) {
+        return entry.objoid == object && entry.objsubid == subobject &&
+               (!classOid || entry.classoid == *classOid);
+    });
+    return row == descriptions_.end() ? std::nullopt : std::make_optional(row->description);
+}
+
+std::optional<std::string> CatalogManager::readDescription(const std::string& path, Oid object,
+    int32_t subobject, std::optional<std::string_view> catalogName) {
+    CatalogManager catalog(path, ReadOnlyTag{});
+    return catalog.description(object, subobject, catalogName);
+}
+
+std::vector<PgDescriptionRow> CatalogManager::descriptionSnapshot(std::optional<Oid> object) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!object) return descriptions_;
+    std::vector<PgDescriptionRow> rows;
+    for (const auto& row : descriptions_) if (row.objoid == *object) rows.push_back(row);
+    return rows;
+}
+
+std::vector<PgDescriptionRow> CatalogManager::readDescriptionSnapshot(const std::string& path,
+    std::optional<Oid> object) {
+    CatalogManager catalog(path, ReadOnlyTag{});
+    return catalog.descriptionSnapshot(object);
+}
+
 bool CatalogManager::removeDescription(Oid objoid, Oid classoid, int32_t objsubid) {
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = std::remove_if(descriptions_.begin(), descriptions_.end(),
@@ -3912,18 +3955,29 @@ void CatalogManager::loadAllLocked() {
 
     // pg_description
     {
-        std::ifstream in(catalogFilePath("description"));
-        std::string line;
-        while (std::getline(in, line)) {
-            if (line.empty()) continue;
-            std::istringstream iss(line);
+        auto in = openRelationImage("description");
+        while (in >> std::ws && in.peek() != std::char_traits<char>::eof()) {
             PgDescriptionRow r;
-            iss >> r.objoid; iss.ignore(1);
-            iss >> r.classoid; iss.ignore(1);
-            iss >> r.objsubid; iss.ignore(1);
-            r.description = readString(iss);
-            descriptions_.push_back(r);
+            if (!readCatalogCsvField(in, r.objoid) || !readCatalogCsvField(in, r.classoid) ||
+                !readCatalogCsvField(in, r.objsubid))
+                throw DbError("XX001", "invalid pg_description object address");
+            if (in.peek() == '"') {
+                // The existing quoted format can contain literal newlines.
+                // Read the quoted field across lines and keep the disk format.
+                if (!(in >> std::quoted(r.description)))
+                    throw DbError("XX001", "incomplete pg_description comment");
+                if (in.peek() == '\r') in.get();
+                if (in.peek() != std::char_traits<char>::eof() && in.get() != '\n')
+                    throw DbError("XX001", "unexpected data after pg_description comment");
+            } else {
+                std::string text;
+                std::getline(in, text);
+                std::istringstream legacy(text);
+                r.description = readString(legacy);
+            }
+            descriptions_.push_back(std::move(r));
         }
+        if (in.bad()) throw DbError("58030", "cannot read pg_description catalog image");
     }
 
     rebuildIndexes();

@@ -1570,8 +1570,7 @@ struct CommentStmt : public Stmt {
     std::string objectType;
     std::string objectName;
     std::string comment;
-    // PostgreSQL distinguishes an empty comment from IS NULL.  Keeping that
-    // distinction in the AST is required for pg_description row lifecycle.
+    // Retain whether the input used the SQL NULL token or a string literal.
     bool isNull = false;
     std::string columnName;    // COMMENT ON COLUMN table.column
 

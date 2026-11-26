@@ -112,13 +112,13 @@ int main() {
                "integer comment");
     }
 
-    // Empty text is a stored pg_description row; only IS NULL removes it.
+    // PostgreSQL treats an empty SQL comment as a request to delete the row.
     assert(!ddl.executeSql("COMMENT ON TABLE notes IS ''", session));
     {
         auto& catalog = g_engine.catalogService().get(database);
         assert(catalog.getDescription(
                    tableOid, dbms::PgClassOid_Class, 0).empty());
-        assert(catalog.removeDescription(
+        assert(!catalog.removeDescription(
             tableOid, dbms::PgClassOid_Class, 0));
     }
     assert(!ddl.executeSql(

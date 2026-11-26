@@ -70,6 +70,10 @@ public:
     std::optional<PgNamespaceRow> namespaceIdentity(const std::string& dbname, Oid oid) const;
     std::optional<PgNamespaceRow> namespaceIdentity(const std::string& dbname, const std::string& name) const;
     CatalogManager::NamespaceIdentityNames namespaceIdentityNames(const std::string& dbname) const;
+    std::optional<std::string> description(const std::string& dbname, Oid object,
+        int32_t subobject, std::optional<std::string_view> catalogName) const;
+    std::vector<PgDescriptionRow> descriptionSnapshot(const std::string& dbname,
+        std::optional<Oid> object = std::nullopt) const;
     std::pair<Oid, std::string> resolveRegclass(const std::string& database, std::optional<Oid> oid,
         const std::string& input, const Session* session, bool textInput = false) const;
     std::optional<bool> relationIsVisible(const std::string& dbname, Oid oid,

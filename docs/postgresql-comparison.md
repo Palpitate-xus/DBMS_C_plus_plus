@@ -2,6 +2,16 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-26 · 读取已保存的对象注释
+
+PostgreSQL 18.6 的 `pg_description` 用对象编号、所属目录和子对象编号标识注释，`obj_description` 和 `col_description` 读取对应记录。DuckDB 也支持 `COMMENT ON`，可用目录函数查看注释。SQLite 在 `sqlite_schema` 中保存对象的建表或建索引定义。 [PostgreSQL 注释目录](https://www.postgresql.org/docs/18/catalog-pg-description.html) · [PostgreSQL 注释函数源码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/catalog/system_functions.sql#L274-L310) · [DuckDB COMMENT ON](https://duckdb.org/docs/1.5/sql/statements/comment_on) · [SQLite 模式表](https://sqlite.org/schematab.html)
+
+本项目读取通过 `COMMENT ON` 保存的数据库内注释，并保留多行文本。PostgreSQL 预置的系统对象注释和跨数据库共享对象目录还有缺口。原版 `psql` 的 `\dn+` 还需要暂缓的模式权限字段。 [用法](MANUAL.md#查看对象注释) · [功能测试](test-report.md#object-description-20261126) · [性能对照](performance-report-2026-10-30.md#object-description-cost-20261126)
+
+一条 SQL 先调用会改写注释的函数，再读取注释时，本项目会立即读到新内容。PostgreSQL 18.6 在该语句中仍读到旧内容，下一条语句才读到新内容。 [PostgreSQL 函数可见性说明](https://www.postgresql.org/docs/18/xfunc-volatility.html)
+
+`pg_description` 已能直接查询，`'pg_catalog.pg_description'::regclass` 和部分 `EXPLAIN` 查询仍需要补齐。
+
 ## 2026-11-26 · 在一次查询中复用模式编号索引
 
 PostgreSQL 18.6 分别按模式名和编号建唯一索引，系统目录缓存使用这些索引。SQLite 用数据库文件头的模式版本检测结构变更。DuckDB 的 `duckdb_schemas()` 初始化时收集模式列表，再分批返回。 [PostgreSQL 18.6 模式目录](https://github.com/postgres/postgres/blob/REL_18_6/src/include/catalog/pg_namespace.h#L50-L55) · [SQLite 文件格式](https://sqlite.org/fileformat2.html#schema_cookie) · [DuckDB 1.5 源码](https://github.com/duckdb/duckdb/blob/v1.5.0/src/function/table/system/duckdb_schemas.cpp#L43-L65)

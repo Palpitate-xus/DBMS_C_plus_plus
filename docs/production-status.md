@@ -4,7 +4,11 @@
 
 ## 当前状态与验证范围
 
-截至 2026-11-26，273 项功能要求中有 22 项完成、169 项部分实现、67 项待验证、15 项暂缓。各项结果和剩余范围见功能总账。以下更新报告给出各轮测试的实际范围。[功能总账](gap-progress.json) · [支持的功能和限制](compatibility-contract.md)
+截至 2026-11-26，273 项功能要求中有 22 项完成、170 项部分实现、66 项待验证、15 项暂缓。各项结果和剩余范围见功能总账。以下更新报告给出各轮测试的实际范围。[功能总账](gap-progress.json) · [支持的功能和限制](compatibility-contract.md)
+
+## 2026-11-26 · 从 SQL 读取注释
+
+可以从 `pg_description` 查询数据库内保存的注释，也可以用 `obj_description` 和 `col_description` 查对象或列的说明。读取保留原有文件格式，可以从旧库读回带换行的完整文本。预置系统注释和共享对象注释仍有差距。 [用法](MANUAL.md#查看对象注释) · [功能测试](test-report.md#object-description-20261126) · [性能对照](performance-report-2026-10-30.md#object-description-cost-20261126)
 
 ## 2026-11-26 · 筛选其他连接的临时模式
 

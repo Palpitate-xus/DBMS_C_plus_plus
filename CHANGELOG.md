@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>可以查询表、列和其他对象的注释 · 2026-11-26</summary>
+
+用 SQL 可以读回给模式、表、列、索引、视图、序列和类型写的注释，换行和引号也会原样保留。
+
+[使用说明](docs/MANUAL.md#查看对象注释) · [测试报告](docs/test-report.md#object-description-20261126) · [性能报告](docs/performance-report-2026-10-30.md#object-description-cost-20261126)
+
+</details>
+
+<details>
 <summary>查其他连接的临时表分组更快 · 2026-11-26</summary>
 
 在额外建了 128 个普通分组的测试里，查其他连接的临时分组从约 17 毫秒降到约 3 毫秒。也修复了旧库里同一个分组编号可能查出不同结果的问题。
@@ -19,16 +28,13 @@
 </details>
 
 <details>
-<summary>第一次建立临时表分组更快 · 2026-11-26</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-26 · 第一次建立临时表分组更快
 
 数据库建立临时表分组时，省去了整理其他表信息的步骤。在预先建了 128 张表的测试库里，这一步从约 16–18 毫秒降到约 14–15 毫秒。
 
 [使用说明](docs/MANUAL.md#建表) · [测试报告](docs/test-report.md#temp-schema-scoped-publication-20261126) · [性能报告](docs/performance-report-2026-10-30.md#temp-schema-scoped-publication-cost-20261126)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-26 · 列出临时表分组时少查一次名称
 

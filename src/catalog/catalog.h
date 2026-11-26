@@ -9,6 +9,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
 
 namespace dbms {
 
@@ -366,6 +367,13 @@ public:
                         const std::string& description);
     std::string getDescription(Oid objoid, Oid classoid, int32_t objsubid) const;
     bool removeDescription(Oid objoid, Oid classoid, int32_t objsubid);
+    std::optional<std::string> description(Oid object, int32_t subobject,
+        std::optional<std::string_view> catalogName) const;
+    static std::optional<std::string> readDescription(const std::string& path, Oid object,
+        int32_t subobject, std::optional<std::string_view> catalogName);
+    std::vector<PgDescriptionRow> descriptionSnapshot(std::optional<Oid> object) const;
+    static std::vector<PgDescriptionRow> readDescriptionSnapshot(const std::string& path,
+        std::optional<Oid> object);
 
     // 按对象类型 + 名称设置注释（支持 SCHEMA / TYPE / FUNCTION / PROCEDURE）
     bool setComment(const std::string& objType,

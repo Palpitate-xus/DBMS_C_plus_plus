@@ -148,6 +148,33 @@ static void legacy(const fs::path& directory) {
           "normalized complete reload");
 }
 
+static void descriptions(const fs::path& directory) {
+    CatalogManager catalog(directory.string());
+    const Oid relation = seed(catalog);
+    const std::string multiline = "first row\r\nsecond, with \"quotes\" and \\ slash";
+    catalog.setDescription(relation, PgClassOid_Class, 0, multiline);
+    catalog.setDescription(relation, PgClassOid_Class, 1, "column comment");
+    check(catalog.persistAll(), "persist quoted description records");
+    const auto read = CatalogManager::readDescriptionSnapshot(directory.string(), relation);
+    check(read.size() == 2 && read[0].description == multiline && read[1].description == "column comment",
+          "multiline record and following comment read without loss");
+    const fs::path path = directory / "pg_description.cat";
+    const std::string valid = bytes(path);
+    const size_t closingQuote = valid.rfind('"');
+    check(closingQuote != std::string::npos, "file has quoted comment");
+    replace(path, valid.substr(0, closingQuote));
+    bool rejected = false;
+    try { catalog.loadAll(); }
+    catch (const DbError& error) { rejected = error.sqlState() == "XX001"; }
+    check(rejected, "unterminated quoted description fails closed");
+    check(catalog.getDescription(relation, PgClassOid_Class, 1) == "column comment",
+          "torn description read preserves prior state");
+    replace(path, valid);
+    catalog.loadAll();
+    check(catalog.getDescription(relation, PgClassOid_Class, 0) == multiline,
+          "repaired image reopens with multiline comment");
+}
+
 int main() {
     char pattern[] = "/tmp/dbms-catalog-complete-XXXXXX";
     char* created = ::mkdtemp(pattern);
@@ -161,7 +188,9 @@ int main() {
         incomplete(root / ("attribute-field-" + std::to_string(field)), "attribute", field);
     directoryRead(root / "class-directory", "class");
     directoryRead(root / "attribute-directory", "attribute");
+    directoryRead(root / "description-directory", "description");
     legacy(root / "legacy");
+    descriptions(root / "description-records");
     fs::remove_all(root);
     std::cout << "catalog complete read checks=" << checks
               << " failures=" << failures << '\n';

@@ -1,0 +1,122 @@
+#!/usr/bin/env python3
+"""Read persisted comments using PostgreSQL catalog identities and wire types."""
+
+import socket
+import struct
+import sys
+
+from session_setting_functions_protocol_e2e_test import Wire, runner
+
+
+def check(client, sock, reference):
+    wire = Wire(client, sock)
+    wire.command('CREATE SCHEMA comment_lookup', 'CREATE SCHEMA')
+    wire.command('CREATE TABLE comment_lookup.notes(id integer, body text)', 'CREATE TABLE')
+    wire.command('CREATE INDEX notes_body ON comment_lookup.notes(body)', 'CREATE INDEX')
+    wire.command('CREATE SEQUENCE comment_lookup.note_seq', 'CREATE SEQUENCE')
+    wire.command('CREATE VIEW comment_lookup.note_view AS SELECT id FROM comment_lookup.notes', 'CREATE VIEW')
+    wire.command("CREATE TYPE comment_lookup.note_state AS ENUM ('new')", 'CREATE TYPE')
+    multiline = 'first line\nsecond line, "quoted" and \\ slash'
+    wire.command("COMMENT ON SCHEMA comment_lookup IS 'schema details'", 'COMMENT')
+    wire.command("COMMENT ON TABLE comment_lookup.notes IS 'table details'", 'COMMENT')
+    wire.command(f"COMMENT ON COLUMN comment_lookup.notes.body IS '{multiline}'", 'COMMENT')
+    wire.command("COMMENT ON INDEX comment_lookup.notes_body IS 'ordered by body'", 'COMMENT')
+    wire.command("COMMENT ON SEQUENCE comment_lookup.note_seq IS 'note number'", 'COMMENT')
+    wire.command("COMMENT ON VIEW comment_lookup.note_view IS 'visible note IDs'", 'COMMENT')
+    wire.command("COMMENT ON TYPE comment_lookup.note_state IS 'workflow state'", 'COMMENT')
+
+    def oid(sql):
+        frames = wire.send_statements(sql)
+        return int(client.data_row_values(frames)[0][0])
+
+    namespace = oid("SELECT oid FROM pg_catalog.pg_namespace WHERE nspname='comment_lookup'")
+    table = oid("SELECT 'comment_lookup.notes'::regclass::oid")
+    index = oid("SELECT 'comment_lookup.notes_body'::regclass::oid")
+    sequence = oid("SELECT 'comment_lookup.note_seq'::regclass::oid")
+    view = oid("SELECT 'comment_lookup.note_view'::regclass::oid")
+    note_type = oid("SELECT oid FROM pg_catalog.pg_type WHERE typname='note_state' AND "
+                    f"typnamespace='{namespace}'::oid")
+    rows = [(str(table), '1259', '0', 'table details'), (str(table), '1259', '2', multiline)]
+    fields = [('objoid', 26), ('classoid', 26), ('objsubid', 23), ('description', 25)]
+    catalog = f"SELECT * FROM pg_catalog.pg_description WHERE objoid='{table}'::oid ORDER BY objsubid"
+    for mode in (wire, Wire(client, sock, extended=True)):
+        mode.query(catalog, rows=rows, fields=fields, tag='SELECT 2')
+        for expression, expected in (
+            (f"pg_catalog.obj_description('{namespace}'::oid, 'pg_namespace')", 'schema details'),
+            (f"obj_description('{table}'::oid)", 'table details'),
+            (f"obj_description('{table}'::oid, 'pg_class'::text)", 'table details'),
+            (f"obj_description('{index}'::oid, 'pg_class')", 'ordered by body'),
+            (f"obj_description('{sequence}'::oid, 'pg_class')", 'note number'),
+            (f"obj_description('{view}'::oid, 'pg_class')", 'visible note IDs'),
+            (f"obj_description('{note_type}'::oid, 'pg_type')", 'workflow state'),
+            (f"col_description('{table}'::oid, 0)", 'table details'),
+            (f"pg_catalog.col_description('{table}'::oid, 2)", multiline),
+            (f"col_description('{table}'::oid, 99)", None),
+            (f"obj_description('{table}'::oid, 'PG_CLASS')", None),
+            (f"obj_description('{table}'::oid, 'pg_catalog.pg_class')", None),
+            (f"obj_description('{table}'::oid, 'pg_type')", None),
+            (f"obj_description('{table}'::oid, NULL)", None),
+            ('pg_catalog.col_description(NULL, 2)', None),
+            ("pg_catalog.obj_description('4294967295'::oid)", None),
+        ):
+            mode.query(f'SELECT {expression} AS note', rows=[(expected,)], fields=[('note', 25)])
+        mode.query("SELECT pg_catalog.col_description('unparseable', 2)", state='22P02', tag=None)
+        mode.query('SELECT pg_catalog.obj_description()', state='42883', tag=None)
+
+    statement = b'comment_by_oid'
+    sync = wire.packet(b'S')
+    frames = wire.exchange(wire.parse('SELECT pg_catalog.obj_description($1, $2) AS note', statement) +
+                           wire.packet(b'D', b'S' + statement + b'\0') + sync)
+    assert b''.join(kind for kind, _ in frames) == b'1tTZ', frames
+    assert frames[1][1] == struct.pack('!HII', 2, 26, 19), frames
+    request = wire.bind(statement, (str(namespace).encode(), b'pg_namespace'), result_format=1)
+    frames = wire.exchange(request + wire.describe_portal() + wire.execute() + sync)
+    assert client.data_row_values(frames) == [[b'schema details']], frames
+    assert [(field[3], field[-1]) for field in client.row_description_fields(frames)] == [(25, 1)], frames
+
+    wire.command('BEGIN', 'BEGIN', ready=b'T')
+    wire.command("COMMENT ON TABLE comment_lookup.notes IS 'pending'", 'COMMENT', ready=b'T')
+    wire.query(f"SELECT obj_description('{table}'::oid) AS note", rows=[('pending',)], fields=[('note', 25)], ready=b'T')
+    wire.command('ROLLBACK', 'ROLLBACK')
+    wire.command('ALTER TABLE comment_lookup.notes RENAME COLUMN body TO content', 'ALTER TABLE')
+    wire.command('ALTER TABLE comment_lookup.notes RENAME TO journal', 'ALTER TABLE')
+    wire.query(catalog, rows=rows, fields=fields, tag='SELECT 2')
+    wire.command("COMMENT ON TABLE comment_lookup.journal IS ''", 'COMMENT')
+    wire.query(f"SELECT col_description('{table}'::oid,0) AS note", rows=[(None,)], fields=[('note', 25)])
+    wire.command('COMMENT ON COLUMN comment_lookup.journal.content IS NULL', 'COMMENT')
+    wire.query(catalog, rows=[], fields=fields, tag='SELECT 0')
+    wire.command('DROP VIEW comment_lookup.note_view', 'DROP VIEW')
+    wire.command('DROP TYPE comment_lookup.note_state', 'DROP TYPE')
+    wire.command('DROP TABLE comment_lookup.journal', 'DROP TABLE')
+    wire.query(f"SELECT obj_description('{index}'::oid) AS note", rows=[(None,)], fields=[('note', 25)])
+    wire.command('DROP SEQUENCE comment_lookup.note_seq', 'DROP SEQUENCE')
+    wire.command('DROP SCHEMA comment_lookup', 'DROP SCHEMA')
+    wire.query(f"SELECT obj_description('{namespace}'::oid) AS note", rows=[(None,)], fields=[('note', 25)])
+
+    if not reference:
+        for sql in ("INSERT INTO pg_catalog.pg_description VALUES (1, 1, 0, 'invalid')",
+                    "UPDATE pg_catalog.pg_description SET description='invalid'",
+                    'DELETE FROM pg_catalog.pg_description'):
+            wire.query(sql, state='0A000', tag=None)
+
+
+def main():
+    client = runner.load_protocol_client()
+    reference = '--reference18' in sys.argv
+    if reference:
+        host, port, user, database, password = runner._reference_connection_settings()
+        with socket.create_connection((host, port), timeout=runner.wire_timeout()) as sock:
+            client.startup_reference(sock, user, database, password=password)
+            runner.verify_reference_version(client, sock)
+            check(client, sock, reference)
+    else:
+        server = runner.start_ours(client)
+        try:
+            check(client, server['sock'], reference)
+        finally:
+            runner.stop_ours(server)
+    print('OBJECT_DESCRIPTION_PROTOCOL_COMPLETE', flush=True)
+
+
+if __name__ == '__main__':
+    main()

@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-26 · 从 SQL 读取对象注释
+
+`pg_description` 提供四个有类型的字段，`obj_description` 和 `col_description` 读取已保存的对象或列注释。按明确的对象编号查目录时只构造匹配行，旧目录中的带引号多行注释可以按原格式读取。`MON-01` 转为部分实现，`CAT-03` 和 `CLIENT-01` 继续为部分实现。预置系统注释和共享对象注释还有缺口。 [测试报告](test-report.md#object-description-20261126) · [性能对照](performance-report-2026-10-30.md#object-description-cost-20261126)
+
 ## 2026-11-26 · 减少模式归属判断的重复目录检查
 
 已绑定到模式目录编号的内置 `pg_is_other_temp_schema` 从同一查询内的编号索引获取名称。这个索引遵循独立查编号的规则，修复旧文件含重复编号时可能返回不同结果的问题。模式变化会恢复逐次查找。`CAT-03`、`QRY-01`、`CLIENT-01` 仍为部分实现。 [测试报告](test-report.md#namespace-identity-index-20261126) · [性能报告](performance-report-2026-10-30.md#namespace-identity-index-cost-20261126)

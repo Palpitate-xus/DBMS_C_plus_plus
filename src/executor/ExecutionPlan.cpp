@@ -41,6 +41,7 @@
 #include "catalog/type_catalog.h"
 #include "catalog/TypeCatalogScan.h"
 #include "catalog/namespace_catalog.h"
+#include "catalog/description_catalog.h"
 #include "catalog/systables.h"
 #include "Config.h"
 #include "process/RuntimeStats.h"
@@ -7858,6 +7859,20 @@ OpPtr QueryPlanner::buildPreparedQueryPlan(StorageEngine* engine,const std::stri
                     if(!*rows)*rows=engine->catalogService().namespaceSnapshot(database);
                     if(index>=(**rows).size())return false;
                     row=ownedNamespaceCatalogCells((**rows)[index]);return true;
+                });
+        } else if (found->relationSchema == "pg_catalog" && found->relationName == description_catalog::name) {
+            for (const auto& output : found->columns) {
+                Column column; column.dataName = output.name; column.dataType = output.type;
+                column.isVariableLength = true; schema.append(column);
+            }
+            auto rows = std::make_shared<std::optional<std::vector<PgDescriptionRow>>>();
+            source = std::make_unique<PreparedSourceRowsOp>(found->columns,
+                [engine, database, rows, object = description_catalog::objectFilter(*found)](
+                    size_t index, std::vector<ExprValue>& row) {
+                    if (!*rows) *rows = engine->catalogService().descriptionSnapshot(database, object);
+                    if (index >= (**rows).size()) return false;
+                    row = description_catalog::cells((**rows)[index]);
+                    return true;
                 });
         } else if(found->relationSchema=="pg_catalog" && found->relationName=="pg_type") {
             for(const auto& output:found->columns) {

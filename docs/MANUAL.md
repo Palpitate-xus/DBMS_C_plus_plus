@@ -1065,6 +1065,21 @@ WHERE NOT pg_catalog.pg_is_other_temp_schema(oid)
 ORDER BY nspname;
 ```
 
+### 查看对象注释
+
+用 `COMMENT ON` 保存说明，再用 `obj_description` 查模式、表、索引、视图、序列或类型的注释。用 `col_description` 按表编号和列号查列注释，列号可从 `pg_attribute.attnum` 取得。未设置注释时返回 `NULL`，用 `IS NULL` 或空字符串 `IS ''` 可以清除已有注释。 [测试报告](test-report.md#object-description-20261126)
+
+```sql
+CREATE SCHEMA shop;
+COMMENT ON SCHEMA shop IS '存放订单和商品数据';
+
+SELECT pg_catalog.obj_description(oid, 'pg_namespace') AS note
+FROM pg_catalog.pg_namespace
+WHERE nspname = 'shop';
+```
+
+也可以从只读的 `pg_catalog.pg_description` 读取已保存的对象编号、所属目录编号、子对象编号和注释。表注释的子对象编号为 0，列注释使用该列的编号。
+
 ### 修改表
 
 用 `ALTER TABLE ... RENAME COLUMN` 改列名时，已有的检查约束和生成列表达式会使用新列名。比如把 `"数量"` 改成 `"订购数量"` 后，正数检查和用数量计算的列仍会生效。双引号保留大小写，`"D"` 和 `d` 可以是不同的列。[改名和回滚测试](test-report.md#rename-quoted-column-references-20261122)

@@ -849,6 +849,23 @@ CatalogManager::NamespaceIdentityNames CatalogService::namespaceIdentityNames(co
     return CatalogManager::readNamespaceIdentityNames(catalog.path);
 }
 
+std::optional<std::string> CatalogService::description(const std::string& dbname, Oid object,
+    int32_t subobject, std::optional<std::string_view> catalogName) const {
+    if (dbname.empty() || !object) return std::nullopt;
+    const auto catalog = readCatalog(dbname);
+    if (catalog.manager) return catalog.manager->description(object, subobject, catalogName);
+    if (catalog.path.empty()) return std::nullopt;
+    return CatalogManager::readDescription(catalog.path, object, subobject, catalogName);
+}
+
+std::vector<PgDescriptionRow> CatalogService::descriptionSnapshot(const std::string& dbname,
+    std::optional<Oid> object) const {
+    const auto catalog = readCatalog(dbname);
+    if (catalog.manager) return catalog.manager->descriptionSnapshot(object);
+    if (catalog.path.empty()) return {};
+    return CatalogManager::readDescriptionSnapshot(catalog.path, object);
+}
+
 std::pair<Oid, std::string> CatalogService::resolveRegclass(const std::string& database,
     std::optional<Oid> oid, const std::string& input, const Session* session, bool textInput) const {
     const auto ownership = database.empty() ? StorageEngine::CatalogReadOwnership{}
