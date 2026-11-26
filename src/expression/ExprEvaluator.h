@@ -27,6 +27,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace dbms {
@@ -162,7 +163,7 @@ public:
     void setNamedColumnReader(NamedColumnReader reader) {
         namedColumnReader_ = std::move(reader);
     }
-    using NamespaceColumnReader = std::function<const std::string*(const Expr*, const RowContext&)>;
+    using NamespaceColumnReader = std::function<std::optional<std::string_view>(const Expr*, const RowContext&)>;
     void setNamespaceColumnReader(NamespaceColumnReader reader) {
         namespaceColumnReader_ = std::move(reader);
     }

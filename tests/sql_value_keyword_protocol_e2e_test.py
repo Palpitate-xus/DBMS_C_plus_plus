@@ -177,11 +177,39 @@ def check_temp_catalog_change(client, sock):
     wire.command("CREATE FUNCTION public.catalog_move_probe() RETURNS boolean VOLATILE LANGUAGE plpgsql AS $$ "
                  f'BEGIN DROP SCHEMA "{name}"; RETURN true; END; $$', "CREATE FUNCTION")
     try:
-        wire.query("SELECT CASE WHEN public.catalog_move_probe() THEN pg_catalog.pg_is_other_temp_schema(n.oid) "
-                   f"ELSE true END AS v FROM pg_catalog.pg_namespace n WHERE n.oid='{oid}'::oid",
+        wire.query("SELECT CASE WHEN pg_catalog.pg_is_other_temp_schema(n.oid) THEN "
+                   "CASE WHEN public.catalog_move_probe() THEN pg_catalog.pg_is_other_temp_schema(n.oid) "
+                   f"ELSE true END ELSE true END AS v FROM pg_catalog.pg_namespace n WHERE n.oid='{oid}'::oid",
                    rows=[("f",)], fields=[("v", 16)])
     finally:
         wire.command("DROP FUNCTION public.catalog_move_probe()", "DROP FUNCTION")
+
+
+def check_duplicate_namespace_oid(client, server):
+    wire = Wire(client, server["sock"])
+    ordinary = "duplicate_schema_probe"
+    duplicate = "pg_temp_duplicate_oid_fixture"
+    wire.command(f"CREATE SCHEMA {ordinary}", "CREATE SCHEMA")
+    frames = wire.send_statements(f"SELECT oid FROM pg_namespace WHERE nspname='{ordinary}'")
+    oid = int(client.data_row_values(frames)[0][0])
+    catalog = Path(server["dir"]) / "info" / "pg_catalog" / "pg_namespace.cat"
+    original = catalog.read_bytes()
+    fixture = catalog.with_name("namespace-test-fixture.cat")
+    try:
+        # The private fixture emulates an older image with two physical rows
+        # for one OID. Lookup by OID picks the last registered row.
+        fixture.write_bytes(original + f'{oid},"{duplicate}",10\n'.encode())
+        fixture.replace(catalog)
+        wire.query(f"SELECT pg_catalog.pg_is_other_temp_schema('{oid}'::oid) AS v",
+                   rows=[("t",)], fields=[("v", 16)])
+        wire.query("SELECT nspname, pg_catalog.pg_is_other_temp_schema(n.oid) AS v "
+                   f"FROM pg_catalog.pg_namespace n WHERE n.oid='{oid}'::oid ORDER BY nspname",
+                   rows=[(ordinary, "t"), (duplicate, "t")], fields=[("nspname", 19), ("v", 16)], tag="SELECT 2")
+    finally:
+        fixture.write_bytes(original)
+        fixture.replace(catalog)
+    wire.query(f"SELECT pg_catalog.pg_is_other_temp_schema('{oid}'::oid) AS v",
+               rows=[("f",)], fields=[("v", 16)])
 
 
 def main():
@@ -283,6 +311,7 @@ def main():
         check_temp_inspection(client, sock, connect)
         if not reference:
             check_temp_catalog_change(client, sock)
+            check_duplicate_namespace_oid(client, server)
         print('SQL_VALUE_KEYWORD_COMPLETE',checked,'FAILED',len(failures),failures,flush=True)
         assert not failures,failures
     finally:

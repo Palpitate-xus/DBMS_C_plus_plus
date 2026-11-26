@@ -1,6 +1,7 @@
 #include "prepared_query_execution.h"
 #include <exception>
 #include "commands/TableManage.h"
+#include "catalog/CatalogService.h"
 #include "catalog/catalog.h"
 #include "common/Config.h"
 #include "common/DbError.h"
@@ -676,23 +677,39 @@ PreparedQueryExecution::PreparedQueryExecution(std::shared_ptr<PreparedQuery> qu
     std::set<size_t> namespaceRanges;
     for (const auto& range : query_->sourceRanges) {
         if (range.relationSchema == "pg_catalog" && range.relationName == "pg_namespace" &&
-            !range.mergedUsing && range.columns.size() >= 2 &&
-            range.columns[0].name == "oid" && range.columns[1].name == "nspname")
+            !range.mergedUsing && !range.cteStatement && !range.viewQuery && !range.columns.empty() &&
+            range.columns[0].name == "oid" && range.columns[0].typeOid == 26)
             namespaceRanges.insert(range.ordinal);
     }
     if (!namespaceRanges.empty()) {
-        // The source reads a checked catalog generation. Use its name for a
-        // direct reference to its OID until a namespace change or restoration
-        // makes the live lookup necessary again.
+        // Resolve direct catalog OIDs against one checked lookup index. Older
+        // catalogs can contain duplicate OIDs, so the physical source row's
+        // name is not necessarily the result of a lookup by that OID.
         evaluator_.setNamespaceColumnReader(
-            [ranges = std::move(namespaceRanges), revision = CatalogManager::namespaceRevision()]
-            (const Expr* argument, const RowContext& context) -> const std::string* {
+            [ranges = std::move(namespaceRanges), revision = CatalogManager::namespaceRevision(),
+             engine = engine_, database = database_, index = std::optional<CatalogManager::NamespaceIdentityNames>{}]
+            (const Expr* argument, const RowContext& context) mutable -> std::optional<std::string_view> {
                 const auto* column = dynamic_cast<const ColumnRefExpr*>(argument);
-                if (!column || !column->binding || column->binding->columnOrdinal != 0 ||
+                if (!column || column->preparedSubquery || column->generatedBaseDeclaration ||
+                    !column->binding || column->binding->columnOrdinal != 0 || column->binding->typeOid != 26 ||
                     !ranges.count(column->binding->sourceOrdinal) ||
-                    revision != CatalogManager::namespaceRevision()) return nullptr;
-                const auto* name = context.findBoundColumn(column->binding->sourceOrdinal, 1);
-                return name && !name->isNull ? &name->value : nullptr;
+                    revision != CatalogManager::namespaceRevision()) return std::nullopt;
+                const auto* value = context.findBoundColumn(column->binding->sourceOrdinal, 0);
+                if (!value || value->isNull || value->typeName != "oid") return std::nullopt;
+                Oid oid = 0;
+                if (value->objectOid) {
+                    oid = *value->objectOid;
+                } else {
+                    const char* end = value->value.data() + value->value.size();
+                    const auto parsed = std::from_chars(value->value.data(), end, oid);
+                    if (parsed.ec != std::errc{} || parsed.ptr != end) return std::nullopt;
+                }
+                if (!index) {
+                    index = engine->catalogService().namespaceIdentityNames(database);
+                    if (revision != CatalogManager::namespaceRevision()) return std::nullopt;
+                }
+                const auto name = index->find(oid);
+                return name == index->end() ? std::string_view{} : std::string_view(name->second);
             });
     }
     // Classify correlation structurally from range owners. An internally

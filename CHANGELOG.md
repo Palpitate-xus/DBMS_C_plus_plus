@@ -1,11 +1,11 @@
 # 更新日志
 
 <details>
-<summary>筛选其他连接的临时表分组更快 · 2026-11-26</summary>
+<summary>查其他连接的临时表分组更快 · 2026-11-26</summary>
 
-列出其他连接的临时表分组时，数据库省去了逐条重查名称的步骤。在额外建了 128 个普通分组的测试里，查询从约 20 毫秒降到约 15–16 毫秒。
+在额外建了 128 个普通分组的测试里，查其他连接的临时分组从约 17 毫秒降到约 3 毫秒。也修复了旧库里同一个分组编号可能查出不同结果的问题。
 
-[使用说明](docs/MANUAL.md#建表) · [测试报告](docs/test-report.md#temp-schema-source-reuse-20261126) · [性能报告](docs/performance-report-2026-10-30.md#temp-schema-source-reuse-cost-20261126)
+[使用说明](docs/MANUAL.md#建表) · [测试报告](docs/test-report.md#namespace-identity-index-20261126) · [性能报告](docs/performance-report-2026-10-30.md#namespace-identity-index-cost-20261126)
 
 </details>
 
@@ -29,6 +29,12 @@
 
 <details>
 <summary>更早的更新</summary>
+
+## 2026-11-26 · 列出临时表分组时少查一次名称
+
+在额外建了 128 个普通分组的测试里，上一轮优化将筛选用时从约 20 毫秒降到约 15–16 毫秒。
+
+[测试报告](docs/test-report.md#temp-schema-source-reuse-20261126) · [性能报告](docs/performance-report-2026-10-30.md#temp-schema-source-reuse-cost-20261126)
 
 ## 2026-11-26 · 第一次查询临时表分组的名称更快
 

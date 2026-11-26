@@ -39,6 +39,21 @@ Result compare(StorageEngine& e,const std::string& db,const std::string& label) 
     for(const auto& [oid,name,owner]:a.rows) std::cout<<"  old "<<oid<<" "<<std::quoted(name)<<" "<<owner<<std::endl;
     for(const auto& [oid,name,owner]:b.rows) std::cout<<"  new "<<oid<<" "<<std::quoted(name)<<" "<<owner<<std::endl;
     need(a.state==b.state && a.message==b.message && a.rows==b.rows,label+" mismatch");
+    if (a.state.empty()) {
+        const auto names = e.catalogService().namespaceIdentityNames(db);
+        need(names.size() == b.rows.size(), label+" namespace lookup index size");
+        for (const auto& [oid, name, owner] : b.rows) {
+            const auto row = e.catalogService().namespaceIdentity(db, oid);
+            const auto indexed = names.find(oid);
+            need(row && indexed != names.end() && row->nspname == indexed->second,
+                 label+" point and indexed namespace lookups differ");
+        }
+    } else {
+        std::string indexState;
+        try { (void)e.catalogService().namespaceIdentityNames(db); }
+        catch (const DbError& ex) { indexState = ex.sqlState(); }
+        need(indexState == a.state, label+" namespace lookup index changed the error");
+    }
     return a;
 }
 bool has(const Result& r,const std::string& n) {

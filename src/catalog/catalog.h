@@ -93,6 +93,11 @@ public:
     std::optional<PgNamespaceRow> getNamespaceByName(const std::string& name) const;
     static std::optional<PgNamespaceRow> readNamespace(const std::string& path, Oid oid);
     static std::optional<PgNamespaceRow> readNamespace(const std::string& path, const std::string& name);
+    // Copy the OID lookup index, preserving the selected row in older images
+    // where more than one physical row can carry the same OID.
+    using NamespaceIdentityNames = std::unordered_map<Oid, std::string>;
+    NamespaceIdentityNames namespaceIdentityNames() const;
+    static NamespaceIdentityNames readNamespaceIdentityNames(const std::string& path);
     bool dropNamespace(Oid oid);
     bool renameNamespace(Oid oid, const std::string& name);
     std::vector<PgNamespaceRow> listNamespaces() const;

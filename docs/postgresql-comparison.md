@@ -2,11 +2,19 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-26 · 在一次查询中复用模式编号索引
+
+PostgreSQL 18.6 分别按模式名和编号建唯一索引，系统目录缓存使用这些索引。SQLite 用数据库文件头的模式版本检测结构变更。DuckDB 的 `duckdb_schemas()` 初始化时收集模式列表，再分批返回。 [PostgreSQL 18.6 模式目录](https://github.com/postgres/postgres/blob/REL_18_6/src/include/catalog/pg_namespace.h#L50-L55) · [SQLite 文件格式](https://sqlite.org/fileformat2.html#schema_cookie) · [DuckDB 1.5 源码](https://github.com/duckdb/duckdb/blob/v1.5.0/src/function/table/system/duckdb_schemas.cpp#L43-L65)
+
+本项目筛选模式目录时，第一次执行归属判断会读取已经核验的编号索引，后续行可复用同一份索引。旧目录中同一编号存在多条记录时，用原有编号查找选中的名称。若查询执行中改动了模式，后续判断会重新读取目录。 [测试报告](test-report.md#namespace-identity-index-20261126) · [性能报告](performance-report-2026-10-30.md#namespace-identity-index-cost-20261126)
+
+原版 `psql` 18.6 的 `\dn 模式名` 会另查复制发布信息。本项目仍缺这项查询所需的发布目录。`\dn+ 模式名` 也仍缺少模式权限字段。 [psql 模式列表源码](https://github.com/postgres/postgres/blob/REL_18_6/src/bin/psql/describe.c#L4886-L4958)
+
 ## 2026-11-26 · 筛选其他连接的临时模式
 
 PostgreSQL 18.6 用模式编号从系统目录缓存查模式名，再判断名称前缀。SQLite 的虚拟机把行值放入寄存器供函数读取，DuckDB 按批向执行算子传递各列的数据。 [PostgreSQL 18.6 模式名称查找](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/catalog/namespace.c#L3483-L3508) · [SQLite Function 指令](https://sqlite.org/opcode.html#Function) · [DuckDB 向量格式](https://duckdb.org/docs/1.5/internals/vector)
 
-本项目读取模式列表时，已经拿到了每行的名称。直接用这一行的编号调用内置函数时，可以用该名称判断归属。一般参数和普通表里的编号仍要查目录。如果这次查询期间有模式变动，也会重新按编号查询。 [功能测试](test-report.md#temp-schema-source-reuse-20261126) · [性能对照](performance-report-2026-10-30.md#temp-schema-source-reuse-cost-20261126)
+前一版读取模式列表时，用该行已有的名称判断归属。一般参数和普通表里的编号仍要查目录。查询期间有模式变动时，会重新按编号查询。 [功能测试](test-report.md#temp-schema-source-reuse-20261126) · [性能对照](performance-report-2026-10-30.md#temp-schema-source-reuse-cost-20261126)
 
 ## 2026-11-26 · 查询临时模式的编号和归属
 

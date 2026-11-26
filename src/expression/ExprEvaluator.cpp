@@ -6603,13 +6603,22 @@ struct SqlTemporarySchemaFunction {
         throw DbError("XX000", "temporary schema inspection requires its database context");
     }
 
+    static ExprValue classifyOther(std::string_view name, const std::string& database) {
+        if (name.rfind("pg_temp_", 0) != 0 && name.rfind("pg_toast_temp_", 0) != 0)
+            return ExprValue("boolean", "f");
+        const auto* session = currentSession();
+        const auto own = activeTemporarySchema(
+            session && (database.empty() || session->currentDB == database) ? session : nullptr);
+        return ExprValue("boolean", name != own ? "t" : "f");
+    }
+
     ExprValue invoke(const std::vector<ExprValue>& args, StorageEngine& engine,
-                     const std::string& database, const std::string* catalogName) const {
+                     const std::string& database) const {
         const auto* session = currentSession();
         const auto& db = database.empty() && session ? session->currentDB : database;
-        const auto own = activeTemporarySchema(session && session->currentDB == db ? session : nullptr);
         if (!otherSession) {
             if (!args.empty()) throw DbError("42883", "pg_my_temp_schema requires no arguments");
+            const auto own = activeTemporarySchema(session && session->currentDB == db ? session : nullptr);
             const auto row = engine.catalogService().namespaceIdentity(db, own);
             const Oid oid = row ? row->oid : INVALID_OID;
             ExprValue result("oid", std::to_string(oid));
@@ -6619,15 +6628,9 @@ struct SqlTemporarySchemaFunction {
         if (args.size() != 1) throw DbError("42883", "pg_is_other_temp_schema requires one oid argument");
         const auto& input = args.front();
         if (input.isNull) return ExprValue("boolean", "", true);
-        std::optional<PgNamespaceRow> row;
-        if (!catalogName) {
-            const Oid oid = input.objectOid ? *input.objectOid : parseOidInput(input.value);
-            row = engine.catalogService().namespaceIdentity(db, oid);
-            if (row) catalogName = &row->nspname;
-        }
-        const bool other = catalogName && *catalogName != own &&
-            (catalogName->rfind("pg_temp_", 0) == 0 || catalogName->rfind("pg_toast_temp_", 0) == 0);
-        return ExprValue("boolean", other ? "t" : "f");
+        const Oid oid = input.objectOid ? *input.objectOid : parseOidInput(input.value);
+        const auto row = engine.catalogService().namespaceIdentity(db, oid);
+        return classifyOther(row ? std::string_view(row->nspname) : std::string_view{}, db);
     }
 };
 struct SqlRoleNameFunction {
@@ -7807,6 +7810,16 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
     if(e->setReturning)throw DbError("0A000","set-returning routine requires its query-host receiver");
     std::string name = toLower(e->funcName);
     const auto callback=functionRegistry().find(name);
+    if (namespaceColumnReader_ && name == "pg_is_other_temp_schema" &&
+        callback != functionRegistry().end() && callback->second.target<SqlTemporarySchemaFunction>() &&
+        e->resolvedResultType == "boolean" && e->args.size() == 1 && e->namedArgs.empty() &&
+        !e->hasOver && !e->distinct && !e->filter && e->orderBy.empty() && e->aggregateOrderKeys.empty()) {
+        // The checked catalog column is already an OID and has no runtime
+        // coercion or side effects. The stored-routine and generic paths
+        // still perform their usual argument and signature checks.
+        if (const auto catalogName = namespaceColumnReader_(e->args.front().get(), ctx))
+            return SqlTemporarySchemaFunction::classifyOther(*catalogName, currentDB_);
+    }
     if(callback!=functionRegistry().end() && callback->second.target<SqlSerialSequenceFunction>()) {
         if(e->args.size()!=2 || !e->namedArgs.empty())
             throw DbError("42883", "function pg_get_serial_sequence does not exist for these arguments");
@@ -8226,10 +8239,7 @@ ExprValue ExprEvaluator::evalFunctionCall(const FunctionCallExpr* e, const RowCo
             result = visibility->invoke(args, *owner, currentDB_);
         } else if (const auto* temporarySchema = it->second.target<SqlTemporarySchemaFunction>()) {
             auto* owner = sqlValueEngine_ ? sqlValueEngine_ : &g_engine;
-            const auto* catalogName = temporarySchema->otherSession && namespaceColumnReader_ &&
-                e->args.size() == 1 && !args.empty() && !args.front().isNull
-                ? namespaceColumnReader_(e->args.front().get(), ctx) : nullptr;
-            result = temporarySchema->invoke(args, *owner, currentDB_, catalogName);
+            result = temporarySchema->invoke(args, *owner, currentDB_);
         } else if (const auto* user = it->second.target<SqlRoleNameFunction>()) {
             auto* owner = sqlValueEngine_ ? sqlValueEngine_ : &g_engine;
             result = user->invoke(args, *owner);

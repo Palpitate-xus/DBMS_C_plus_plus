@@ -841,6 +841,14 @@ std::optional<PgNamespaceRow> CatalogService::namespaceIdentity(const std::strin
     return CatalogManager::readNamespace(catalog.path, name);
 }
 
+CatalogManager::NamespaceIdentityNames CatalogService::namespaceIdentityNames(const std::string& dbname) const {
+    if (dbname.empty()) return {};
+    const auto catalog = readCatalog(dbname);
+    if (catalog.manager) return catalog.manager->namespaceIdentityNames();
+    if (catalog.path.empty()) return {};
+    return CatalogManager::readNamespaceIdentityNames(catalog.path);
+}
+
 std::pair<Oid, std::string> CatalogService::resolveRegclass(const std::string& database,
     std::optional<Oid> oid, const std::string& input, const Session* session, bool textInput) const {
     const auto ownership = database.empty() ? StorageEngine::CatalogReadOwnership{}

@@ -674,6 +674,21 @@ std::optional<PgNamespaceRow> CatalogManager::readNamespace(const std::string& p
     return catalog.getNamespaceByName(name);
 }
 
+CatalogManager::NamespaceIdentityNames CatalogManager::namespaceIdentityNames() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    NamespaceIdentityNames result;
+    result.reserve(nsByOid_.size());
+    for (const auto& [oid, index] : nsByOid_) {
+        if (oid && index < namespaces_.size()) result.emplace(oid, namespaces_[index].nspname);
+    }
+    return result;
+}
+
+CatalogManager::NamespaceIdentityNames CatalogManager::readNamespaceIdentityNames(const std::string& path) {
+    CatalogManager catalog(path, ReadOnlyTag{});
+    return catalog.namespaceIdentityNames();
+}
+
 std::optional<PgNamespaceRow> CatalogManager::getTempNamespace(uint64_t sessionId) const {
     return getNamespaceByName("pg_temp_" + std::to_string(sessionId));
 }

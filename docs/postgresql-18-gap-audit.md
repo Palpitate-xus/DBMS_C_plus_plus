@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-26 · 减少模式归属判断的重复目录检查
+
+已绑定到模式目录编号的内置 `pg_is_other_temp_schema` 从同一查询内的编号索引获取名称。这个索引遵循独立查编号的规则，修复旧文件含重复编号时可能返回不同结果的问题。模式变化会恢复逐次查找。`CAT-03`、`QRY-01`、`CLIENT-01` 仍为部分实现。 [测试报告](test-report.md#namespace-identity-index-20261126) · [性能报告](performance-report-2026-10-30.md#namespace-identity-index-cost-20261126)
+
 ## 2026-11-26 · 加快筛选其他连接的临时模式
 
 用 `pg_namespace.oid` 直接调用内置 `pg_is_other_temp_schema` 时，复用同一行已读取的模式名。若目录发生变动，函数会按编号重新查找。普通表的编号、一般参数和同名用户函数继续使用各自原有的执行路径。`CAT-03`、`QRY-01` 和 `CLIENT-01` 维持部分实现。 [测试报告](test-report.md#temp-schema-source-reuse-20261126) · [性能对照](performance-report-2026-10-30.md#temp-schema-source-reuse-cost-20261126)
