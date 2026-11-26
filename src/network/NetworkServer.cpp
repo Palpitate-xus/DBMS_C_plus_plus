@@ -4764,7 +4764,12 @@ bool describePreparedResultShape(const ProtocolQuerySyntax& syntax, Session& ses
         const auto types = session.preparedStmtParameterOids.find(execute->name);
         if (statement != session.preparedStmts.end() && types != session.preparedStmtParameterOids.end()) {
             const ProtocolQuerySyntax body(statement->second);
-            if (view_write::targetsView(session, body.parse().stmt.get()))
+            const auto* root = body.parse().stmt.get();
+            const auto* select = dynamic_cast<const SelectStmt*>(root);
+            if (view_write::targetsView(session, root) ||
+                (select && select->fromClause &&
+                    (protocolPhysicalSourceFromQuery(body.sql(), session).logicalView ||
+                     protocolJoinsOrdinaryView(*select, session))))
                 return describePreparedResultShape(body, session, columns, types->second);
         }
     }
@@ -7611,7 +7616,9 @@ QueryResult executeProtocolQuery(const std::string& sql, Session& session,
         result.rows = structuredDml.rows;
         result.nulls = structuredDml.nulls;
         result.columnDescriptions = ordinarySourceColumns.empty()
-            ? describeProtocolColumns(result, sql, session) : ordinarySourceColumns;
+            ? describeProtocolColumns(result, sql, session,
+                result.rowDescriptor.empty() ? nullptr : &result.rowDescriptor)
+            : ordinarySourceColumns;
         applyBoundProtocolDescriptor(result.columnDescriptions, result.rowDescriptor, session);
         result.commandTag = structuredDml.commandTag;
         dbms::recordQueryExecution(sql, elapsedMs, session.currentDB, true,
@@ -8543,10 +8550,19 @@ void handleClient(SecureSocket socket, std::string clientHost, CopyQueryFactory 
             ScopedWorkMemUtilityContext settingsContext(
                 wasInTransaction && !extendedImplicitTransaction,
                 extendedImplicitTransaction && extendedImplicitExecuted);
-            result = executeProtocolQuery(
-                effectiveSql, *execSession,
-                remainingExtendedQueryTimeoutMs(), !typeDeclarationsAnalyzed,
-                retainOrdinarySourceDeclaration, captureTyped);
+            try {
+                result = executeProtocolQuery(
+                    effectiveSql, *execSession,
+                    remainingExtendedQueryTimeoutMs(), !typeDeclarationsAnalyzed,
+                    retainOrdinarySourceDeclaration, captureTyped);
+            } catch (const DbError& error) {
+                // Legacy receivers can still need to bind a result
+                // descriptor while assembling the response. Report a
+                // failure through the connection's usual abort handling.
+                result.error = true;
+                result.sqlState = error.sqlState();
+                result.errorMessage = error.message();
+            }
         }
         if (!result.error && (!wasInTransaction || extendedImplicitTransaction) &&
             SQLParser::isSetTransactionStatement(sql)) {

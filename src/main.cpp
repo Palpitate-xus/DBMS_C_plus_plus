@@ -21759,9 +21759,10 @@ class PreparedWithDmlRuntime {
                             const auto catalog=dbms::regtype_detail::metadata(g_engine,session_.currentDB);
                             cells.back()=dbms::stored_regtype_detail::load(value,column.isArray,
                                 isNull,catalog,&session_,declaration,column.dataType,validatedArrayDomainOid);
-                        } else if(validatedArrayDomainOid &&
+                        } else if(column.isArray &&
+                            (validatedArrayDomainOid || dbms::typedResultCaptureRequested()) &&
                             !dbms::compound_value_detail::decodeArrayStorageInput(cells.back(),
-                                declaration,{},validatedArrayDomainOid)) {
+                                declaration,{},validatedArrayDomainOid) && validatedArrayDomainOid) {
                             throw dbms::DbError("XX001","could not decode stored array domain value");
                         }
                         cells.back().collation=column.collation;
@@ -22422,6 +22423,20 @@ static void executePreparedReadReceiver(Session& session,
         cout<<'\n';
     }
     dbms::publishLastDmlResult(std::move(result));
+}
+
+static bool supportsPreparedViewRead(const dbms::PreparedQuery& query) {
+    for (const auto& entry : query.statementOutputs) {
+        const auto* select = dynamic_cast<const dbms::SelectStmt*>(entry.first);
+        if (!select || (!dbms::QueryPlanner::supportsPreparedSourceSelectPlan(*select) &&
+                (select->command != dbms::SqlCommand::Values || select->setOp != dbms::SetOp::None ||
+                 select->fromClause || select->whereClause)) ||
+            any_of(select->ctes.begin(), select->ctes.end(), [](const auto& cte) { return cte.recursive; }))
+            return false;
+    }
+    return all_of(query.sourceRanges.begin(), query.sourceRanges.end(), [](const auto& range) {
+        return !range.viewQuery || supportsPreparedViewRead(*range.viewQuery);
+    });
 }
 
 static bool bindExecutedRowCounts(dbms::SelectStmt& select, const dbms::PreparedQuery& query,
@@ -34058,35 +34073,36 @@ static bool executeInternal(const string& rawSql, Session& s,
                     : viewQualified.schema + "." + viewQualified.name;
             }
             if (g_engine.viewExists(queryDb, viewLookup)) {
-                string viewSql = g_engine.getViewSQL(queryDb, viewLookup);
-                if (!viewSql.empty()) {
-                    // Join views can return typed rows to the outer query
-                    // directly. Check the actual bound view and both SELECT
-                    // shapes before opening any producer.
-                    if (queryDb == s.currentDB &&
-                        findTopLevelKeyword(toLowerSql(viewSql), "join", 0) != string::npos) {
-                        dbms::SQLParser parser;
-                        const auto probe = parser.parseForBinding(effectiveRawSql);
-                        const auto* outer = dynamic_cast<const dbms::SelectStmt*>(probe.stmt.get());
-                        if (probe.isValid() && outer && outer->fromClause &&
-                            outer->fromClause->type == dbms::FromItem::Type::Table &&
-                            dbms::QueryPlanner::supportsPreparedSourceSelectPlan(*outer) &&
-                            !usesInheritedQueryCteSource(*outer, s)) {
-                            auto prepared = make_shared<dbms::PreparedQuery>(
+                if (queryDb == s.currentDB) {
+                    dbms::SQLParser parser;
+                    const auto probe = parser.parseForBinding(effectiveRawSql);
+                    const auto* outer = dynamic_cast<const dbms::SelectStmt*>(probe.stmt.get());
+                    if (probe.isValid() && outer && outer->fromClause &&
+                        outer->fromClause->type == dbms::FromItem::Type::Table &&
+                        dbms::QueryPlanner::supportsPreparedSourceSelectPlan(*outer) &&
+                        !usesInheritedQueryCteSource(*outer, s)) {
+                        shared_ptr<dbms::PreparedQuery> prepared;
+                        try {
+                            prepared = make_shared<dbms::PreparedQuery>(
                                 g_engine.prepareBoundQuery(queryDb, effectiveRawSql, {}, true));
-                            const auto joinedView = [&](const dbms::PreparedQuery::SourceRange& range) {
-                                if (range.owner != prepared->ast.get() || !range.viewQuery) return false;
-                                const auto* body = dynamic_cast<const dbms::SelectStmt*>(range.viewQuery->ast.get());
-                                return body && body->fromClause &&
-                                    body->fromClause->type == dbms::FromItem::Type::Join &&
-                                    dbms::QueryPlanner::supportsPreparedSourceSelectPlan(*body);
-                            };
-                            if (any_of(prepared->sourceRanges.begin(), prepared->sourceRanges.end(), joinedView)) {
-                                executePreparedReadReceiver(s, prepared);
-                                return false;
-                            }
+                        } catch (const dbms::DbError& error) {
+                            if (error.sqlState() != "0A000") throw;
+                        }
+                        // Admission is decided from the actual bound source.
+                        // Once a producer starts, no legacy fallback can
+                        // evaluate its expressions a second time.
+                        if (prepared && supportsPreparedViewRead(*prepared) &&
+                            any_of(prepared->sourceRanges.begin(), prepared->sourceRanges.end(),
+                                [&](const auto& range) {
+                                    return range.owner == prepared->ast.get() && range.viewQuery;
+                                })) {
+                            executePreparedReadReceiver(s, prepared);
+                            return false;
                         }
                     }
+                }
+                string viewSql = g_engine.getViewSQL(queryDb, viewLookup);
+                if (!viewSql.empty()) {
                     // Explicit CREATE VIEW column names belong to the view
                     // relation, not its independently executed query body.
                     // Read that same bound contract before materialization;

@@ -36137,6 +36137,10 @@ DBStatus StorageEngine::mutatePartitionRows(
             view, true, mayRecheck, conditions, matcher, nullptr, false, leaf.rows, &leaf.name);
         if (status != DBStatus::OK) return status;
     }
+    if (std::none_of(leaves.begin(), leaves.end(),
+            [](const auto& leaf) { return !leaf.rows.empty(); }))
+        return DBStatus::OK;
+    txn.hasWrite = true;
 
     if (update) {
         // Evaluate SET against the locked old versions before publishing any
@@ -36270,7 +36274,6 @@ DBStatus StorageEngine::removeInternal(
             ensureTransactionSnapshot();
         }
         if (!context.hasWrite) ownerBeforeWrite = context.currentTxnId;
-        context.hasWrite = true;
     }
     if (transactionContext().readOnly &&
         !isSessionTemporaryRelation(tablename)) {
@@ -36426,6 +36429,10 @@ DBStatus StorageEngine::removeInternal(
         lockManager_.unlock(tablename);
         return DBStatus::OK;
     }
+    // Selection, predicate evaluation and concurrent-row rechecks may
+    // leave no rows to change. Keep any writes made by an invoked routine,
+    // while letting an otherwise unchanged transaction publish no commit.
+    if (context.inTransaction && dbname == context.txnDB) context.hasWrite = true;
     ActiveReferentialRows activeDeleteGuard(
         referentialContext.activeDeletes, std::move(activeDeleteKeys));
 
@@ -37629,7 +37636,6 @@ DBStatus StorageEngine::updateInternal(
             ensureTransactionSnapshot();
         }
         if (!context.hasWrite) ownerBeforeWrite = context.currentTxnId;
-        context.hasWrite = true;
     }
     if (transactionContext().readOnly &&
         !isSessionTemporaryRelation(tablename)) {
@@ -38099,6 +38105,7 @@ DBStatus StorageEngine::updateInternal(
         lockManager_.unlock(tablename);
         return DBStatus::OK;
     }
+    if (context.inTransaction && dbname == context.txnDB) context.hasWrite = true;
     ActiveReferentialRows activeUpdateGuard(
         referentialContext.activeUpdates, std::move(activeUpdateKeys));
 

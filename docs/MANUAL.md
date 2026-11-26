@@ -2320,6 +2320,8 @@ SELECT id, score FROM example_index_maintenance WHERE score >= 15 ORDER BY id;
 
 查询可以把普通视图与表或另一普通视图连接起来。例如 `SELECT v.total, o.status FROM order_totals v JOIN orders o ON v.id = o.id` 会按订单号匹配金额和状态。受支持的连接视图可以直接输出查询结果，省去写临时表的步骤。[验证范围](test-report.md#join-ordinary-views-20261122)
 
+直接查询受支持的普通视图，包括逐层读取其他视图的定义，可以使用保存的查询直接返回行。列名、空值和数组类型会保留。例子是 `SELECT amount FROM order_prices WHERE id = 10`。部分复杂定义仍使用原来的执行方式。 [测试与范围](test-report.md#view-read-and-empty-writes-20261126)
+
 普通表改列名后，受支持的普通视图仍读取同一列，也保留创建视图时的输出列名。比如订单表的 `quantity` 改成 `order_quantity` 后，查询原视图仍可使用 `quantity`。这也适用于受测的 `SELECT *` 子查询、公用表表达式、`JOIN USING` 和 `NATURAL JOIN`。如果无法核实改名仍引用原来的列和连接键，数据库会撤销这次改名。 [早期验证](test-report.md#rename-dependent-views-20261122) · [星号与连接验证](test-report.md#rename-view-star-and-join-20261126)
 
 可以用 `INSERT`、`UPDATE` 和 `DELETE` 操作已识别为可写、直接读取一张表的普通视图。按视图的列名和顺序提供数据，数据库会找到其对应的表列。`UPDATE` 和 `DELETE` 也会应用视图里的 `WHERE`，`RETURNING` 输出视图的列名。改过表列名或调整连接的 `search_path` 后，写入仍使用视图原先选择的表和列。 [写入与回滚测试](test-report.md#writable-view-projection-20261126)

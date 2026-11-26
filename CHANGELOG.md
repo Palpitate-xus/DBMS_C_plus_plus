@@ -1,6 +1,17 @@
 # 更新日志
 
 <details>
+<summary>查普通视图可以省去临时表</summary>
+
+例如，打开订单视图时，数据库可以直接读取查询结果，省去写入磁盘临时表的步骤。
+
+如果更新或删除没有匹配任何行，而且这笔事务也没有其他改动，提交时可以省去写入提交日志。
+
+2026-11-26 · [测试报告](docs/test-report.md#view-read-and-empty-writes-20261126) · [性能报告](docs/performance-report-2026-10-30.md#view-read-and-empty-write-cost-20261126)
+
+</details>
+
+<details>
 <summary>改数据时可以用视图里的计算结果</summary>
 
 例如，可以按视图里的订单金额挑出要修改的订单，并在修改后返回新的金额。
@@ -23,18 +34,15 @@
 </details>
 
 <details>
-<summary>已有视图可以拒绝不符合条件的数据</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-26 · 已有视图可以拒绝不符合条件的数据
 
 例如，一个视图只显示有库存的商品。开启检查后，通过这个视图把库存改成零就会报错。这项检查也可以关闭。
 
 视图的列名和注释会保留，依赖它的查询也可以继续使用。
 
-2026-11-26 · [用法](docs/MANUAL.md#9-视图与物化视图) · [测试报告](docs/test-report.md#alter-view-check-option-20261126) · [性能报告](docs/performance-report-2026-10-30.md#alter-view-check-option-cost-20261126)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
+[用法](docs/MANUAL.md#9-视图与物化视图) · [测试报告](docs/test-report.md#alter-view-check-option-20261126) · [性能报告](docs/performance-report-2026-10-30.md#alter-view-check-option-cost-20261126)
 
 ## 2026-11-26 · 撤销部分数据修改时少写一次磁盘
 

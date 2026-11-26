@@ -3,6 +3,19 @@
   "recent_updates": [
 
     {
+      "issue": "2026-11-26 read ordinary views without temporary tables and publish only effective row mutations",
+      "gap_ids": ["CAT-16", "QRY-12", "DML-03", "TXN-05", "PROTO-02"],
+      "status": "partial",
+      "evidence": ["src/main.cpp", "src/commands/TableManage.cpp", "src/network/NetworkServer.cpp", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/compat/cases/view_read_and_empty_writes.sql", "tests/view_replacement_contract_protocol_e2e_test.py", "tests/read_transaction_publication_test.cpp"],
+      "verification": [
+        "Compare ordinary view reads and empty writes with PostgreSQL 18.6 in both wire protocols, including prepared reads and statement errors.",
+        "Track table-inventory identity, real WAL position, commit status files and fsync calls, with a sequence-changing predicate as a positive control.",
+        "Verify restarts with previous view definitions, committed and uncommitted writes and a sequence change, then measure end-to-end latency."
+      ]
+    },
+
+    {
       "issue": "2026-11-26 read computed view columns on demand during writes",
       "gap_ids": ["CAT-16", "DML-01", "DML-03", "TXN-05"],
       "status": "partial",

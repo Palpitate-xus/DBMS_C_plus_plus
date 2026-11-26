@@ -85,11 +85,7 @@ Rows scan(const std::string& phase) {
     }
     out.flush(); need(bool(out), "whole observed values independently recoverable"); return rows;
 }
-void readCommit(const char* label, IsolationLevel isolation, bool readOnly, bool readRows) {
-    need(g_engine.setIsolationLevel(isolation), "actual selected isolation");
-    need(g_engine.beginTransaction(database) == DBStatus::OK, "actual native BEGIN");
-    if (readOnly) need(g_engine.setReadOnly(true), "actual READ ONLY mode");
-    if (readRows) check(scan(label) == initial(), "every actual read value and NULL exact");
+void checkUnchangedCommit(const char* label) {
     auto* wal = g_engine.getWAL(database); need(wal != nullptr, "retained actual WAL");
     const auto xid = g_engine.currentTxnId(); const auto before = wal->currentWriteLsn(); const auto clog = clogImage();
     syncCalls = 0; observeSync = true; const auto status = g_engine.commitTransaction(); observeSync = false;
@@ -101,6 +97,30 @@ void readCommit(const char* label, IsolationLevel isolation, bool readOnly, bool
     std::cout << "READ_COMMIT case=" << label << " xid=" << xid << " wal_before=" << before
               << " wal_after=" << after << " clog_unchanged=" << unchanged
               << " real_fsync=" << syncCalls << " status=" << int(status) << '\n';
+}
+void readCommit(const char* label, IsolationLevel isolation, bool readOnly, bool readRows) {
+    need(g_engine.setIsolationLevel(isolation), "actual selected isolation");
+    need(g_engine.beginTransaction(database) == DBStatus::OK, "actual native BEGIN");
+    if (readOnly) need(g_engine.setReadOnly(true), "actual READ ONLY mode");
+    if (readRows) check(scan(label) == initial(), "every actual read value and NULL exact");
+    checkUnchangedCommit(label);
+}
+void emptyMutationCommit(bool remove) {
+    need(g_engine.beginTransaction(database) == DBStatus::OK, "empty mutation BEGIN");
+    size_t affected = 1;
+    std::vector<StorageEngine::SqlRow> rows;
+    size_t visited = 0;
+    const auto predicate = [&](const StorageEngine::SqlRow& row) {
+        need(row.at("id").has_value(), "real mutation predicate input");
+        ++visited;
+        return false;
+    };
+    const auto status = remove
+        ? g_engine.removeRows(database, "items", {}, &rows, predicate, &affected)
+        : g_engine.updateRows(database, "items", {{"note", "unused"}}, {}, &rows, {}, predicate, &affected);
+    check(status == DBStatus::OK && affected == 0 && rows.empty() && visited == initial().size(),
+          "zero-row mutation evaluated every candidate and returned no images");
+    checkUnchangedCommit(remove ? "delete-zero" : "update-zero");
 }
 void setup() {
     need(g_engine.createDatabase(database, "utf8") == DBStatus::OK, "actual own database");
@@ -135,6 +155,26 @@ void setup() {
     readCommit("readonly", IsolationLevel::REPEATABLE_READ, true, true);
     readCommit("serializable", IsolationLevel::SERIALIZABLE, true, true);
     readCommit("empty", IsolationLevel::READ_COMMITTED, false, false);
+    emptyMutationCommit(false);
+    emptyMutationCommit(true);
+    need(g_engine.beginTransaction(database) == DBStatus::OK, "zero rows with effects BEGIN");
+    size_t effectedRows = 1;
+    bool sequenceCalled = false;
+    const auto predicateWithEffect = [&](const StorageEngine::SqlRow& row) {
+        if (row.at("id") == Cell{"1"}) {
+            need(g_engine.setval(database, "counter", 50, false) == 50, "predicate setval");
+            sequenceCalled = true;
+        }
+        return false;
+    };
+    check(g_engine.removeRows(database, "items", {}, nullptr, predicateWithEffect, &effectedRows) ==
+              DBStatus::OK && effectedRows == 0 && sequenceCalled,
+          "zero affected rows can still change a sequence through the predicate");
+    auto* effectsWal = g_engine.getWAL(database);
+    const auto effectsStart = effectsWal->currentWriteLsn();
+    syncCalls = 0; observeSync = true; const auto effectsStatus = g_engine.commitTransaction(); observeSync = false;
+    check(effectsStatus == DBStatus::OK && effectsWal->currentWriteLsn() > effectsStart && syncCalls > 0,
+          "zero-row write with a sequence effect keeps the durable terminal");
     need(g_engine.setIsolationLevel(IsolationLevel::REPEATABLE_READ), "restore real repeatable snapshot");
     need(g_engine.beginTransaction(database) == DBStatus::OK, "read then write BEGIN");
     check(scan("before-write") == initial(), "actual pre-write full snapshot");

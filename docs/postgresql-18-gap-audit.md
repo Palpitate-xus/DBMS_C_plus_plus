@@ -1,5 +1,9 @@
 # PostgreSQL 18 功能差距审计
 
+## 2026-11-26 · 查询普通视图和提交零行写入
+
+受支持的普通视图直接从查询计划读取行。更新或删除没有匹配行，且现有的无改动检查通过时，可以省去提交日志和状态文件同步。带分组、集合或其他待完善形状的查询仍受现有执行范围限制，外层筛选也仍可能扫描全部可见行。`CAT-16`、`QRY-12`、`DML-03`、`TXN-05` 和 `PROTO-02` 保持部分实现。 [功能测试](test-report.md#view-read-and-empty-writes-20261126) · [性能报告](performance-report-2026-10-30.md#view-read-and-empty-write-cost-20261126)
+
 ## 2026-11-26 · 写入时使用视图的计算列
 
 受支持的嵌套视图可以用计算列筛选目标、计算要写入的数据、检查新行和返回旧值及新值。实际写入目标必须是直接引用的表列。普通视图的 `MERGE`、`ON CONFLICT`、分区表的写入检查和嵌套视图触发器仍有缺口。`CAT-16`、`DML-01`、`DML-03` 和 `TXN-05` 保持部分实现。 [功能测试](test-report.md#computed-view-writes-20261126) · [性能报告](performance-report-2026-10-30.md#computed-view-write-cost-20261126)

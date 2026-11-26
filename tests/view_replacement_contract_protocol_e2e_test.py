@@ -68,7 +68,25 @@ def main():
         check(view('SELECT id,t,i FROM ' + source, columns='(id)'))
         check('SELECT * FROM ' + schema + '.v', rows=[['1', 'ann', '9']], names=['id', 't', 'i'], oids=[23, 25, 23])
         check(view('SELECT id,t,i FROM ' + source, columns='(changed)'), state='42P16')
+        inventory = Path(server['dir']) / 'info' / 'tlist.lst' if server else None
+        before = inventory.stat() if inventory else None
         check('SELECT * FROM ' + schema + '.v', rows=[['1', 'ann', '9']], names=['id', 't', 'i'], oids=[23, 25, 23])
+        if inventory:
+            after = inventory.stat()
+            assert (before.st_ino, before.st_mtime_ns) == (after.st_ino, after.st_mtime_ns), (
+                'reading an ordinary view changed the table inventory', before, after)
+            # A view result that the binder cannot describe must leave the
+            # connection usable. If supported in the future, check its value.
+            sql = "SELECT string_agg(t, ',' ORDER BY id) AS labels FROM " + schema + ".v"
+            replies = client.simple_query(sock, sql)
+            rows, state, _, names, tag, oids = runner.decode_wire_result(replies, include_types=True)
+            assert replies[-1] == (b'Z', b'I'), replies
+            if state is None:
+                assert (rows, names, tag, oids) == ([['ann']], ['labels'], 'SELECT 1', [25]), replies
+            else:
+                assert state == '0A000' and not rows and tag is None, replies
+            followup = runner.decode_wire_result(client.simple_query(sock, 'SELECT 1'))
+            assert followup[0] == [['1']] and followup[1] is None, followup
         check(view('SELECT v FROM ' + source, suffix='width_v'))
         check(view('SELECT w AS v FROM ' + source, suffix='width_v'), state='42P16')
         check(view('SELECT CAST(v AS VARCHAR(20)) AS v FROM ' + source, suffix='width_v'), state='42P16')
@@ -93,11 +111,22 @@ def main():
             check('SELECT * FROM ' + schema + '.check_v', rows=[['1', 'ann']], names=['id', 't'], oids=[23, 25])
         check(view('SELECT id AS same,t AS same FROM ' + source, suffix='duplicate_v'), state='42701')
         check('CREATE TABLE ' + schema + '.array_rows(a INT[],b TEXT[])')
-        check("INSERT INTO " + schema + ".array_rows VALUES(ARRAY[1,2],ARRAY['x','y'])")
+        check("INSERT INTO " + schema + ".array_rows VALUES(ARRAY[1,NULL,2],ARRAY['x','y'])")
         check(view('SELECT a FROM ' + schema + '.array_rows', suffix='array_v'))
-        check('SELECT * FROM ' + schema + '.array_v', rows=[['{1,2}']], names=['a'], oids=[1007])
+        check('SELECT * FROM ' + schema + '.array_v', rows=[['{1,NULL,2}']], names=['a'], oids=[1007])
+        sql = ('SELECT a FROM ' + schema + '.array_v').encode()
+        sock.sendall(client.typed(b'P', b'\0' + sql + b'\0\0\0') +
+                     client.typed(b'B', b'\0\0' + struct.pack('!HHHH', 0, 0, 1, 1)) +
+                     client.typed(b'D', b'P\0') + client.typed(b'E', b'\0\0\0\0\0') +
+                     client.typed(b'S'))
+        messages = client.read_until_ready(sock)
+        assert [kind for kind, _ in messages] == [b'1', b'2', b'T', b'D', b'C', b'Z'], messages
+        field = client.row_description_fields(messages)[0]
+        assert (field[0], field[3], field[-1]) == (b'a', 1007, 1), field
+        assert client.data_row_values(messages) == [[struct.pack('!10i', 1, 1, 23, 3, 1, 4, 1, -1, 4, 2)]], messages
+        assert messages[-2:] == [(b'C', b'SELECT 1\0'), (b'Z', b'I')], messages
         check(view('SELECT b AS a FROM ' + schema + '.array_rows', suffix='array_v'), state='42P16')
-        check('SELECT * FROM ' + schema + '.array_v', rows=[['{1,2}']], names=['a'], oids=[1007])
+        check('SELECT * FROM ' + schema + '.array_v', rows=[['{1,NULL,2}']], names=['a'], oids=[1007])
         check(view('SELECT ARRAY[3,4] AS a FROM ' + schema + '.array_rows', suffix='array_v'))
         check('SELECT * FROM ' + schema + '.array_v', rows=[['{3,4}']], names=['a'], oids=[1007])
         check(view('SELECT array[5,6] AS a FROM ' + schema + '.array_rows', suffix='array_v'))

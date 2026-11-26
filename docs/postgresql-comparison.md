@@ -2,6 +2,12 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+## 2026-11-26 · 普通视图读取与零行写入
+
+PostgreSQL 把普通视图的保存查询放进调用方的查询树。SQLite 可以展开合适的子查询，或让子查询逐行提供结果。DuckDB 读取普通视图时执行保存的查询。本项目让已有查询计划直接提供受支持的视图结果，省去磁盘临时表。外层条件仍可能在读取底表各行后执行。 [PostgreSQL 视图规则](https://www.postgresql.org/docs/18/rules-views.html) · [SQLite 子查询优化](https://www.sqlite.org/optoverview.html#subquery_flattening) · [DuckDB 视图](https://duckdb.org/docs/2.0/sql/statements/create_view)
+
+实测 PostgreSQL 18.6 在受测的零行更新和删除中未分配事务编号，更新一行时才分配。SQLite 在首次修改页面时打开回滚日志。DuckDB 根据撤销记录和事务本地数据是否有变更决定是否写入 WAL。本项目仍分配事务编号，用既有的无改动检查决定能否省去提交日志和状态文件同步。 [PostgreSQL 提交代码](https://raw.githubusercontent.com/postgres/postgres/refs/tags/REL_18_6/src/backend/access/transam/xact.c#L1262) · [SQLite Pager](https://raw.githubusercontent.com/sqlite/sqlite/master/src/pager.c#L5827) · [DuckDB 事务代码](https://github.com/duckdb/duckdb/blob/main/src/transaction/duck_transaction.cpp) · [性能报告](performance-report-2026-10-30.md#view-read-and-empty-write-cost-20261126)
+
 ## 2026-11-26 · 写入时使用视图的计算列
 
 PostgreSQL 会在改写写入语句时，把调用方引用的视图列替换为底层列或视图表达式。SQLite 依靠视图触发器处理写入。DuckDB 的视图保存定义查询，读取时执行该查询。 [PostgreSQL 改写代码](https://github.com/postgres/postgres/blob/REL_18_6/src/backend/rewrite/rewriteHandler.c#L3629-L3645) · [SQLite CREATE VIEW](https://www.sqlite.org/lang_createview.html) · [DuckDB CREATE VIEW](https://duckdb.org/docs/2.0/sql/statements/create_view)
