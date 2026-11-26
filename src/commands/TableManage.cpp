@@ -6625,6 +6625,12 @@ bool StorageEngine::validateViewCheckOption(
 
     std::string baseTable = getViewBaseTable(dbname, viewname);
     if (baseTable.empty()) return true;
+    CatalogManager::QualifiedName target;
+    if (CatalogManager::parseQualifiedName(baseTable, target, true) && !target.schema.empty()) {
+        baseTable = target.schema == "public" ? target.name : target.schema + "__" + target.name;
+        if (target.schema == "public" && !tableExists(dbname, baseTable))
+            baseTable = "public__" + target.name;
+    }
 
     TableSchema tbl = getTableSchema(dbname, baseTable);
 

@@ -25543,10 +25543,15 @@ static bool executeInternal(const string& rawSql, Session& s,
                             }
                         }
                     } else {
-                        const string baseTable = g_engine.getViewBaseTable(s.currentDB, tname);
-                        TableSchema baseSchema = g_engine.getTableSchema(s.currentDB, baseTable);
-                        for (size_t i = 0; i < baseSchema.len(); ++i) {
-                            columns.push_back(baseSchema.cols[i].dataName);
+                        if (ordinaryView) {
+                            const auto view = g_engine.prepareBoundQuery(s.currentDB, "SELECT * FROM " +
+                                effectiveRawSql.substr(rawTargetBegin, rawTargetEnd - rawTargetBegin), {}, true);
+                            for (const auto& column : view.output) columns.push_back(column.name);
+                        } else {
+                            const string baseTable = g_engine.getViewBaseTable(s.currentDB, tname);
+                            const auto base = g_engine.getTableSchema(s.currentDB,
+                                resolveTableName(s, baseTable, true));
+                            for (size_t i = 0; i < base.len(); ++i) columns.push_back(base.cols[i].dataName);
                         }
                     }
 

@@ -2403,7 +2403,14 @@ bool tryDdlBridge(const std::string& sql, dbms::SqlCommand parsedCmd,
         const auto* view = dynamic_cast<const dbms::AlterObjectStmt*>(r.stmt.get());
         const auto words = view ? dbms::SQLParser::tokenize(view->subCommand)
                                 : std::vector<std::string>{};
-        if (words.size() == 3 && toLower(words[0]) == "set" && toLower(words[1]) == "schema") {
+        CatalogManager::QualifiedName target;
+        // Extended mode also has an older cross-database command. An actual
+        // namespace in the current database takes precedence over that name.
+        if (view && !view->ifExists && !s.currentDB.empty() && words.size() == 3 &&
+            toLower(words[0]) == "set" && toLower(words[1]) == "schema" &&
+            CatalogManager::parseQualifiedName(words[2], target) && target.schema.empty() &&
+            g_engine.databaseExists(target.name) && g_engine.databaseExists(s.currentDB) &&
+            !g_engine.catalogService().get(s.currentDB).getNamespaceByName(target.name)) {
             handled = false;
             return false;
         }
@@ -11437,6 +11444,47 @@ static std::string qualifyViewSources(const PreparedQuery& prepared,
     return definition;
 }
 
+static std::optional<std::string> pinMovedViewWriteTarget(
+    CatalogManager& catalog, const std::string& database, Oid view,
+    const std::string& storageName) {
+    auto definition = g_engine.getViewSQL(database, storageName);
+    const auto query = viewDefinitionQuery(definition);
+    constexpr std::string_view marker = "\nBASE_TABLE:";
+    if (definition.compare(query.size(), marker.size(), marker) != 0) return std::nullopt;
+    const auto start = query.size() + marker.size();
+    const auto end = definition.find('\n', start);
+    CatalogManager::QualifiedName stored;
+    if (!CatalogManager::parseQualifiedName(definition.substr(start, end - start), stored, true))
+        throw DbError("XX001", "view write target is invalid");
+    if (!stored.schema.empty()) return std::nullopt;
+
+    const auto prepared = g_engine.prepareBoundQuery(database, query, {}, true);
+    const auto* select = dynamic_cast<const SelectStmt*>(prepared.ast.get());
+    if (!select || !select->fromClause)
+        throw DbError("XX001", "view write target is missing from its query");
+    for (const auto& range : prepared.sourceRanges) {
+        if (range.owner != select || range.source != select->fromClause.get() ||
+            range.cteStatement || range.relationSchema.empty() || range.relationName != stored.name)
+            continue;
+        const auto space = catalog.getNamespaceByName(range.relationSchema);
+        const auto base = space ? catalog.getClassByName(range.relationName, space->oid) : std::nullopt;
+        if (base) {
+            const auto edges = catalog.findDepends(PgClassOid_Class, view);
+            if (std::any_of(edges.begin(), edges.end(), [&](const auto& edge) {
+                    return edge.refclassid == PgClassOid_Class && edge.refobjid == base->oid;
+                })) {
+                // Older files can have an unqualified write target even
+                // though the read query already names the original schema.
+                definition.replace(start, end - start,
+                    SQLParser::quoteIdentifier(range.relationSchema) + "." +
+                    SQLParser::quoteIdentifier(range.relationName));
+                return qualifyViewSources(prepared) + definition.substr(query.size());
+            }
+        }
+    }
+    throw DbError("0A000", "view write target does not match its recorded dependency");
+}
+
 static auto viewJoinKeys(const PreparedQuery& query) {
     std::map<size_t, std::set<std::string>> keys;
     for (const auto& source : query.sourceRanges) {
@@ -12629,13 +12677,16 @@ bool DdlExecutor::executeAlterView(const AlterObjectStmt* stmt, Session& s) {
             throw DbError("42601", "invalid ALTER VIEW source name");
         const auto tokens = SQLParser::tokenize(stmt->subCommand);
         if (tokens.empty()) throw DbError("42601", "ALTER VIEW requires a subcommand");
-        if (toLower(tokens[0]) != "rename" ||
-            (tokens.size() > 1 && toLower(tokens[1]) != "to"))
-            throw DbError("0A000", "ALTER VIEW supports RENAME TO");
+        const bool move = tokens.size() > 1 && toLower(tokens[0]) == "set" &&
+            toLower(tokens[1]) == "schema";
+        const bool rename = tokens.size() > 1 && toLower(tokens[0]) == "rename" &&
+            toLower(tokens[1]) == "to";
+        if (!move && !rename)
+            throw DbError("0A000", "ALTER VIEW supports RENAME TO and SET SCHEMA");
         CatalogManager::QualifiedName destination;
         if (tokens.size() != 3 || !CatalogManager::parseQualifiedName(tokens[2], destination) ||
             !destination.schema.empty())
-            throw DbError("42601", "ALTER VIEW RENAME TO requires an unqualified name");
+            throw DbError("42601", "ALTER VIEW requires an unqualified destination name");
 
         const std::string schema = requested.schema == "pg_temp"
             ? activeTemporarySchema(&s) : requested.schema;
@@ -12711,28 +12762,51 @@ bool DdlExecutor::executeAlterView(const AlterObjectStmt* stmt, Session& s) {
         const auto space = catalog.getNamespace(relation->relnamespace);
         if (!space) throw DbError("XX001", "view namespace is missing");
         if (space->nspname == "pg_catalog")
-            throw DbError("42501", "permission denied: cannot rename a system view");
+            throw DbError("42501", "permission denied: cannot change a system view");
+        auto target = space;
+        if (move) {
+            const auto temporary = [](const std::string& name) {
+                return name == "pg_temp" || name.rfind("pg_temp_", 0) == 0;
+            };
+            if (destination.name == "pg_temp")
+                throw DbError("0A000", "cannot move objects into or out of temporary schemas");
+            target = catalog.getNamespaceByName(destination.name);
+            if (!target)
+                throw DbError("3F000", "schema \"" + destination.name + "\" does not exist");
+            if (temporary(space->nspname) || temporary(target->nspname))
+                throw DbError("0A000", "cannot move objects into or out of temporary schemas");
+            if (space->nspname == "pg_toast" || target->nspname == "pg_toast")
+                throw DbError("0A000", "cannot move objects into or out of TOAST schema");
+            if (target->nspname == "pg_catalog" || relation->reltype != INVALID_OID)
+                throw DbError("0A000", "moving this kind of view is not supported");
+        }
         // The current schema grant model stores CREATE in its ALL grant.
-        if (!admin && !owns(space->nspowner) && !hasSchemaGrant(*space, true))
-            throw schemaDenied(space->nspname);
+        if (!admin && !owns(target->nspowner) && !hasSchemaGrant(*target, true))
+            throw schemaDenied(target->nspname);
+        if (move && space->oid == target->oid) return !txn.commit();
+
+        const auto& newName = move ? relation->relname : destination.name;
         const auto nameCollision = [&]() {
-            return DbError("42P07", "relation \"" + destination.name + "\" already exists");
+            return DbError("42P07", "relation \"" + newName + "\" already exists");
         };
-        if (catalog.getClassByName(destination.name, space->oid)) throw nameCollision();
-        if (catalog.getTypeByName(destination.name, space->oid))
-            throw DbError("42710", "type \"" + destination.name + "\" already exists");
+        if (catalog.getClassByName(newName, target->oid)) throw nameCollision();
+        if (catalog.getTypeByName(newName, target->oid))
+            throw DbError("42710", "type \"" + newName + "\" already exists");
 
         const auto prefix = space->nspname == "public" ? std::string{} : space->nspname + ".";
         std::string from = prefix + relation->relname;
         if (prefix.empty() && !g_engine.viewExists(s.currentDB, from) &&
             g_engine.viewExists(s.currentDB, "public." + from)) from = "public." + from;
-        const auto to = prefix + destination.name;
-        const auto tableName = prefix.empty() ? destination.name : space->nspname + "__" + destination.name;
+        const bool targetIsPublic = target->nspname == "public";
+        const auto to = targetIsPublic ? newName : target->nspname + "." + newName;
+        const auto tableName = targetIsPublic ? newName : target->nspname + "__" + newName;
         if (g_engine.tableExists(s.currentDB, tableName) || g_engine.isMaterializedView(s.currentDB, to) ||
-            (prefix.empty() && g_engine.viewExists(s.currentDB, "public." + destination.name)))
+            (targetIsPublic && g_engine.viewExists(s.currentDB, "public." + newName)))
             throw nameCollision();
         auto plans = planViewSourceRename(catalog, s.currentDB, space->nspname,
-                                         relation->relname, space->nspname, destination.name);
+                                         relation->relname, target->nspname, newName);
+        const auto definition = move ? pinMovedViewWriteTarget(catalog, s.currentDB, relation->oid, from)
+                                     : std::nullopt;
         const auto status = g_engine.renameView(s.currentDB, from, to, [&] {
             if (!txn.prepareSnapshot())
                 throw DbError("58030", "could not save files before renaming view");
@@ -12741,7 +12815,26 @@ bool DdlExecutor::executeAlterView(const AlterObjectStmt* stmt, Session& s) {
         if (status == DBStatus::TABLE_ALREADY_EXISTS) throw nameCollision();
         if (status != DBStatus::OK)
             throw DbError(sqlstateForDBStatus(status), "could not rename view definition");
-        if (!catalog.renameClass(relation->oid, destination.name) || !catalog.persistAll())
+        if (definition && !index_file::writeAtomically(g_engine.viewPath(s.currentDB, to), *definition))
+            throw DbError("58030", "could not save the moved view's write target");
+        if (move) {
+            auto moved = *relation;
+            moved.relnamespace = target->oid;
+            if (!catalog.updateClass(moved.oid, moved))
+                throw DbError("XX001", "moved view is missing from the catalog");
+            catalog.removeDepend(PgClassOid_Class, moved.oid, 0,
+                                 PgClassOid_Namespace, space->oid, 0);
+            PgDependRow edge;
+            edge.classid = PgClassOid_Class;
+            edge.objid = moved.oid;
+            edge.refclassid = PgClassOid_Namespace;
+            edge.refobjid = target->oid;
+            edge.deptype = 'n';
+            catalog.addDepend(edge);
+        } else if (!catalog.renameClass(relation->oid, newName)) {
+            throw DbError("XX001", "renamed view is missing from the catalog");
+        }
+        if (!catalog.persistAll())
             throw DbError("58030", "could not save renamed view in the catalog");
         publishDependentViewRenames(catalog, s.currentDB, plans, txn);
         txn.recordUpdate(DdlObjectKind::View, from, to);

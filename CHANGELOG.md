@@ -1,6 +1,15 @@
 # 更新日志
 
 <details>
+<summary>可以给视图换个位置 · 2026-11-26</summary>
+
+可以把 `sales.monthly` 移到 `archive.monthly`。视图仍然使用原来的数据表，依赖它的查询也能继续运行。
+
+[用法](docs/MANUAL.md#9-视图与物化视图) · [测试报告](docs/test-report.md#alter-view-set-schema-20261126) · [性能报告](docs/performance-report-2026-10-30.md#alter-view-set-schema-cost-20261126)
+
+</details>
+
+<details>
 <summary>可以给视图改名 · 2026-11-26</summary>
 
 用 `ALTER VIEW` 改名后，依赖这个视图的查询仍能运行，原有注释也会保留。
@@ -19,18 +28,15 @@
 </details>
 
 <details>
-<summary>修改表时可以跳过不存在的表 · 2026-11-26</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-26 · 修改表时可以跳过不存在的表
 
 用 `ALTER TABLE IF EXISTS` 给表加列、删列或改名时，如果表不存在，数据库会提示并跳过。
 
 在已经开始的事务里，跳过这条命令也省去了一次全库备份。
 
 [用法](docs/MANUAL.md#修改表) · [测试报告](docs/test-report.md#alter-if-exists-20261126) · [性能报告](docs/performance-report-2026-10-30.md#alter-if-exists-cost-20261126)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
 
 ## 2026-11-26 · 改表名时更快发现重名
 

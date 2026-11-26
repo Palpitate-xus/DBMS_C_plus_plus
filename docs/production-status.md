@@ -6,9 +6,13 @@
 
 截至 2026-11-26，273 项功能要求中有 22 项完成、170 项部分实现、66 项待验证、15 项暂缓。各项结果和剩余范围见功能总账。以下更新报告给出各轮测试的实际范围。[功能总账](gap-progress.json) · [支持的功能和限制](compatibility-contract.md)
 
+## 2026-11-26 · 可以把普通视图移到另一个模式
+
+`ALTER VIEW [IF EXISTS] ... SET SCHEMA` 支持同一数据库内的用户模式。移动时保留编号、注释和触发器，依赖视图仍可访问。通过可更新视图插入数据时，记录仍进入起初选定的表。 [用法](MANUAL.md#9-视图与物化视图) · [功能测试](test-report.md#alter-view-set-schema-20261126) · [性能报告](performance-report-2026-10-30.md#alter-view-set-schema-cost-20261126)
+
 ## 2026-11-26 · 可以给普通视图改名
 
-`ALTER VIEW [IF EXISTS] ... RENAME TO` 保留视图的编号、注释及触发器，依赖它的普通视图会继续读取同一个对象。保存点回滚和进程中途终止后的恢复已验证。更换视图所在的模式属于另一项功能。 [用法](MANUAL.md#9-视图与物化视图) · [功能测试](test-report.md#alter-view-rename-20261126) · [性能报告](performance-report-2026-10-30.md#alter-view-rename-cost-20261126)
+`ALTER VIEW [IF EXISTS] ... RENAME TO` 保留视图的编号、注释及触发器，依赖它的普通视图会继续读取同一个对象。保存点回滚和进程中途终止后的恢复已验证。 [用法](MANUAL.md#9-视图与物化视图) · [功能测试](test-report.md#alter-view-rename-20261126) · [性能报告](performance-report-2026-10-30.md#alter-view-rename-cost-20261126)
 
 ## 2026-11-26 · 回滚备份少读一遍文件
 

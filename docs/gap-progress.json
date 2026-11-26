@@ -3,6 +3,19 @@
   "recent_updates": [
 
     {
+      "issue": "2026-11-26 move ordinary views between schemas in one database",
+      "gap_ids": ["CAT-16", "SQL-11", "TXN-05"],
+      "status": "partial",
+      "evidence": ["src/commands/DdlExecutor.cpp", "src/commands/TableManage.cpp", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/alter_view_set_schema_protocol_e2e_test.py", "tests/alter_view_rename_protocol_e2e_test.py", "tests/view_trigger_typed_values_protocol_e2e_test.py"],
+      "verification": [
+        "Compare syntax, missing relations, ownership, destination privileges, name collisions and results with PostgreSQL 18.6 in both wire protocols.",
+        "Check original write targets with a same-named table, plus comments, triggers, dependencies and recovery before and after commit.",
+        "Measure successful moves, unchanged destinations, collisions and skips at two database sizes."
+      ]
+    },
+
+    {
       "issue": "2026-11-26 rename ordinary views with their dependencies",
       "gap_ids": ["CAT-16", "SQL-11", "TXN-05"],
       "status": "partial",

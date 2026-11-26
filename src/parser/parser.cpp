@@ -12710,7 +12710,8 @@ StmtPtr SQLParser::parseAlterView(const std::vector<std::string>& tokens, size_t
     if (match(tokens, pos, "only") ||
         !parseQualifiedIdentifier(tokens, pos, stmt->objectName, true) ||
         pos == tokens.size() || tokens[pos] == ";") return nullptr;
-    if (match(tokens, pos, "rename") && match(tokens, pos + 1, "to")) {
+    const bool move = match(tokens, pos, "set") && match(tokens, pos + 1, "schema");
+    if (move || (match(tokens, pos, "rename") && match(tokens, pos + 1, "to"))) {
         pos += 2;
         const size_t start = pos;
         std::string name;
@@ -12718,7 +12719,7 @@ StmtPtr SQLParser::parseAlterView(const std::vector<std::string>& tokens, size_t
             (name.front() != '"' && identifierKeywordKind(toLower(name)) > 1)) return nullptr;
         if (pos < tokens.size() && tokens[pos] == ";") ++pos;
         if (pos != tokens.size()) return nullptr;
-        stmt->subCommand = "RENAME TO " + name;
+        stmt->subCommand = (move ? "SET SCHEMA " : "RENAME TO ") + name;
         return stmt;
     }
     if (match(tokens, pos, "rename")) {

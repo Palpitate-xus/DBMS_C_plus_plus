@@ -2,6 +2,19 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="alter-view-set-schema-20261126"></a>
+## 2026-11-26 · 移动普通视图和恢复
+
+用 `ALTER VIEW ... SET SCHEMA` 在同一数据库的用户模式之间移动普通视图。协议回归核对视图及列注释、编号、依赖视图和触发器，确认保存点回滚保留了事务中先前插入的行。再用同名表和新的 `search_path` 检查写入，带 `WITH CHECK OPTION` 的可更新视图仍写入原表。 [协议用例](../tests/alter_view_set_schema_protocol_e2e_test.py)
+
+源视图不存在且使用 `IF EXISTS` 时返回提示。目标模式缺失、同名对象、权限不足和语法错误分别检查。与原模式相同的目标不需要备份。权限通过当前已有的 `ALL` 规则授予 `CREATE`，视图行类型和移入 `pg_catalog` 仍有差距。 `extended` 兼容模式保留指向已有数据库的旧写法，同名模式优先。 [使用手册](MANUAL.md#9-视图与物化视图) · [性能报告](performance-report-2026-10-30.md#alter-view-set-schema-cost-20261126)
+
+与 PostgreSQL 18.6 对照 92 条 SQL，简单和扩展协议各 92 条一致。比较命令标签、事务状态、结果值、列名及类型、错误码和提示信息。另在 `extended` 兼容模式检查了同名模式优先和旧跨库行为。
+
+在内存盘和 ext4 上各验证三种情况。向依赖视图定义的同步操作注入 `EIO` 后可重试。视图文件已移动并保存原表的完整名称时强制终止进程，重启可找回两个原文件及旧目录编号。提交成功后强制终止进程，重启仍能用移动后的名称读取视图、注释和依赖查询。实际断电待验证。
+
+CMake 构建的程序 SHA-256 为 `d5791038e0c0b30663338cca3806313ef35cdefffe28d900c38b89f5c934064b`。13 个协议用例、6 个 C++ 用例，以及三个既有文件中的 208 条 SQL 检查通过。 [改表名](../tests/compat/cases/rename_table_view_sources.sql) · [改模式名](../tests/compat/cases/rename_schema_with_views.sql) · [改列名](../tests/compat/cases/rename_column_dependent_views.sql)
+
 <a id="alter-view-rename-20261126"></a>
 ## 2026-11-26 · 普通视图改名和恢复
 
@@ -4901,6 +4914,8 @@ SELECT * FROM v2;
 ---
 
 ### 5.5 ALTER VIEW SET SCHEMA
+
+本条记录来自旧版的跨数据库扩展语法。当前同库模式迁移见 [2026-11-26 回归](#alter-view-set-schema-20261126)。
 
 **输入**
 ```sql
