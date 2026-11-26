@@ -1,33 +1,33 @@
 # 更新日志
 
 <details>
-<summary>查普通视图可以省去临时表</summary>
+<summary>部分报表打开得更快了</summary>
 
-例如，打开订单视图时，数据库可以直接读取查询结果，省去写入磁盘临时表的步骤。
+例如，查看按条件筛出的订单时，数据库可以直接返回结果，省去先把结果另外存一遍的步骤。
 
-如果更新或删除没有匹配任何行，而且这笔事务也没有其他改动，提交时可以省去写入提交日志。
+如果要修改或删除的数据一条都没找到，而且这次提交也没有其他改动，数据库可以少写一次日志。
 
 2026-11-26 · [测试报告](docs/test-report.md#view-read-and-empty-writes-20261126) · [性能报告](docs/performance-report-2026-10-30.md#view-read-and-empty-write-cost-20261126)
 
 </details>
 
 <details>
-<summary>改数据时可以用视图里的计算结果</summary>
+<summary>可以按报表算出的金额修改订单</summary>
 
-例如，可以按视图里的订单金额挑出要修改的订单，并在修改后返回新的金额。
+例如，可以找出总价超过 100 元的订单，修改数量后立即看到新的总价。
 
-也可以在删除时按金额筛选，或在写入后用 `RETURNING` 取回修改前后的计算结果。
+删除订单时也可以按总价筛选。修改订单时，可以用 SQL 的 `RETURNING` 查看修改前后的总价。
 
 2026-11-26 · [用法](docs/MANUAL.md#9-视图与物化视图) · [测试报告](docs/test-report.md#computed-view-writes-20261126) · [性能报告](docs/performance-report-2026-10-30.md#computed-view-write-cost-20261126)
 
 </details>
 
 <details>
-<summary>不能再通过汇总视图改数据</summary>
+<summary>汇总报表只能查看</summary>
 
-例如，按月统计销量的视图只供查询。试图通过它增删数据时，数据库会报错并保留原表的数据。
+例如，按月统计销量的报表只供查询。试图在报表里添加、修改或删除记录时，数据库会拒绝操作，保留原始数据。
 
-这也覆盖只显示前几行、去重和排名的视图。通过普通可写视图修改数据时，仍会遵守视图的筛选条件。
+只显示前几条记录、去掉重复项或计算排名的视图也只供查询。部分普通视图仍然可以用来改数据，数据库会按视图里的条件挑出要修改的记录。
 
 2026-11-26 · [测试报告](docs/test-report.md#read-only-view-writes-20261126) · [性能报告](docs/performance-report-2026-10-30.md#read-only-view-write-cost-20261126)
 
