@@ -1,6 +1,17 @@
 # 更新日志
 
 <details>
+<summary>从多层报表按编号找记录更快了</summary>
+
+例如，按订单号查一笔订单时，数据库可以用原表的索引找到它，再确认它是否该出现在报表里。
+
+即使报表给订单号换了名字，也可以用这个方法查找。查询计划会显示经过的报表和实际读取的记录数。
+
+2026-11-26 · [用法](docs/MANUAL.md#9-视图与物化视图) · [测试报告](docs/test-report.md#indexed-view-reads-20261126) · [性能报告](docs/performance-report-2026-10-30.md#indexed-view-read-cost-20261126)
+
+</details>
+
+<details>
 <summary>部分报表打开得更快了</summary>
 
 例如，查看按条件筛出的订单时，数据库可以直接返回结果，省去先把结果另外存一遍的步骤。
@@ -23,18 +34,15 @@
 </details>
 
 <details>
-<summary>汇总报表只能查看</summary>
+<summary>更早的更新</summary>
+
+## 2026-11-26 · 汇总报表只能查看
 
 例如，按月统计销量的报表只供查询。试图在报表里添加、修改或删除记录时，数据库会拒绝操作，保留原始数据。
 
 只显示前几条记录、去掉重复项或计算排名的视图也只供查询。部分普通视图仍然可以用来改数据，数据库会按视图里的条件挑出要修改的记录。
 
-2026-11-26 · [测试报告](docs/test-report.md#read-only-view-writes-20261126) · [性能报告](docs/performance-report-2026-10-30.md#read-only-view-write-cost-20261126)
-
-</details>
-
-<details>
-<summary>更早的更新</summary>
+[测试报告](docs/test-report.md#read-only-view-writes-20261126) · [性能报告](docs/performance-report-2026-10-30.md#read-only-view-write-cost-20261126)
 
 ## 2026-11-26 · 已有视图可以拒绝不符合条件的数据
 

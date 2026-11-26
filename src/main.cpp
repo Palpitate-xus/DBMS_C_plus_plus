@@ -5878,8 +5878,8 @@ static bool handleDeallocate(const string& sql, Session& s) {
 // Cached text is a plain-EXPLAIN optimization, never an ANALYZE result.
 static bool publishExplainPlan(const function<dbms::OpPtr()>& buildPlan, const string& inner,
     Session& s, const dbms::QueryPlanner::ExplainOptions& opts, bool isJson,
-    const string& relationIdentity = {}) {
-    const bool usePlanCache = !opts.analyze && !dbms::QueryPlanner::costModel().customCost &&
+    const string& relationIdentity = {}, bool cacheRenderedPlan = true) {
+    const bool usePlanCache = cacheRenderedPlan && !opts.analyze && !dbms::QueryPlanner::costModel().customCost &&
                              g_config.enableQueryPlanCache &&
                              g_config.queryPlanCacheSize > 0;
     string cacheKey = s.currentDB + "::" + inner;
@@ -6017,6 +6017,7 @@ static bool explainPreparedDmlQuery(Session&,const string&,
 
 static bool canRunPreparedIntegerJoin(const dbms::PreparedQuery&, const Session&);
 static bool usesDemandedLogicalRead(const dbms::PreparedQuery&);
+static bool hasPreparedViewSource(const dbms::PreparedQuery&);
 
 static bool simpleJoinFilter(const dbms::Expr* expression) {
     if (!expression) return true;
@@ -6188,7 +6189,7 @@ static bool handleExplain(const string& sql, Session& s) {
                     range.relationName == dbms::description_catalog::name &&
                     !range.cteStatement && !range.viewQuery;
             });
-        if (select->selectList.empty() || usesDemandedLogicalRead(*prepared) ||
+        if (select->selectList.empty() || usesDemandedLogicalRead(*prepared) || hasPreparedViewSource(*prepared) ||
             readsDescriptions || (integerJoinProbe && canRunPreparedIntegerJoin(*prepared, s)))
             return explainPreparedReadQuery(s,inner,opts,isJson,std::move(prepared));
         // Scalar query children acquire their AST role during pure binding;
@@ -21536,7 +21537,8 @@ class PreparedWithDmlRuntime {
     shared_ptr<DmlSourceNode> sourceNode(const dbms::Stmt* owner,const dbms::FromItem* item,
                                         const dbms::RowContext& outer,const Frames& frames,
                                         dbms::QueryPlanner::PreparedExecutionProvider provider={},
-                                        const dbms::CatalogJoinFilters* joinFilters=nullptr) {
+                                        const dbms::CatalogJoinFilters* joinFilters=nullptr,
+                                        const vector<dbms::PreparedViewIntegerLookup>* viewLookups=nullptr) {
         if(!item)throw dbms::DbError("XX000","mutation source has no retained FROM tree");
         dbms::CatalogJoinFilters localFilters;
         if (const auto* select = dynamic_cast<const dbms::SelectStmt*>(owner);
@@ -21596,7 +21598,13 @@ class PreparedWithDmlRuntime {
                 viewRuntime=make_shared<PreparedWithDmlRuntime>(session_,range.viewQuery,streamResults_,planOnly_);
                 auto* select=dynamic_cast<dbms::SelectStmt*>(range.viewQuery->ast.get());
                 if(!select)throw dbms::DbError("0A000","view source requires a genuine SELECT/VALUES plan");
-                cursor=dbms::QueryPlanner::makePreparedCursor(viewRuntime->selectPlan(select,dbms::RowContext{},{}),range.columns);
+                const auto inputLookups = viewLookups ? dbms::preparedViewIntegerLookups(*query_, range, *viewLookups)
+                                                      : vector<dbms::PreparedViewIntegerLookup>{};
+                cursor=dbms::QueryPlanner::makePreparedCursor(viewRuntime->selectPlan(select,dbms::RowContext{}, {},
+                    false, false, {}, false, inputLookups),range.columns);
+                node->planName = "View Scan";
+                node->planAttributes["relation"] = view;
+                if (cursor->plan()) node->planChildren.push_back(cursor->plan());
             } else if(range.relationSchema=="pg_catalog" && range.relationName=="pg_class") {
                 virtualRows=make_shared<dbms::PreparedQueryRows>(preparedPgClassRows(session_, catalogFilter(1)));
             } else if(range.relationSchema=="pg_catalog" && range.relationName=="pg_attribute") {
@@ -21666,9 +21674,12 @@ class PreparedWithDmlRuntime {
                         physicalScan=dbms::makeInheritedTableSource(g_engine,session_.currentDB,scanSchema,range,descendants,true);
                 }
                 if(!physicalScan)physicalScan=make_unique<dbms::TableScanOp>(&g_engine,session_.currentDB,table);
-                if(select)
+                if(select) {
+                    static const vector<dbms::PreparedViewIntegerLookup> noViewLookups;
                     physicalScan=dbms::makePreparedTableSource(&g_engine,session_.currentDB,
-                        query_,const_cast<dbms::SelectStmt*>(select),scanSchema,std::move(physicalScan));
+                        query_,const_cast<dbms::SelectStmt*>(select),scanSchema,std::move(physicalScan),
+                        viewLookups ? *viewLookups : noViewLookups);
+                }
                 scan=shared_ptr<dbms::Operator>(std::move(physicalScan));
                 node->predicateSource=scan.get();
                 node->planChildren.push_back(scan.get());
@@ -21968,7 +21979,8 @@ class PreparedWithDmlRuntime {
     }
     dbms::OpPtr selectPlan(dbms::SelectStmt* select,const dbms::RowContext& outer,Frames frames,
                           bool rootDefinitionsProvided=false,bool planRootConstants=false,
-                          dbms::QueryPlanner::PreparedExecutionProvider executionProvider={},bool selectBodyOnly=false) {
+                          dbms::QueryPlanner::PreparedExecutionProvider executionProvider={},bool selectBodyOnly=false,
+                          const vector<dbms::PreparedViewIntegerLookup>& viewLookups={}) {
         if(!rootDefinitionsProvided && !select->ctes.empty() && (frames.empty() ||
             !frames.back()->producers.count(select->ctes.front().query.get())))
             frames.push_back(definitions(select->ctes,outer));
@@ -22026,7 +22038,10 @@ class PreparedWithDmlRuntime {
                    !(select->fromClause->type == dbms::FromItem::Type::Table &&
                      (source = dbms::description_catalog::makeCountSource(g_engine, session_.currentDB,
                          sourceRange(select, select->fromClause.get()))))) {
-            auto node=sourceNode(select,select->fromClause.get(),outer,frames,executionProvider);
+            // An external execution provider can supply new parameters on
+            // rebind. The view lookup uses the root statement's fixed inputs.
+            const auto* lookups = select == readRoot_ && !selectBodyOnly && !executionProvider ? &viewLookups : nullptr;
+            auto node=sourceNode(select,select->fromClause.get(),outer,frames,executionProvider,nullptr,lookups);
             const function<bool(const dbms::FromItem*)> physicalSources=[&](const dbms::FromItem* item) {
                 if(!item)return false;
                 if(item->type==dbms::FromItem::Type::Join)return physicalSources(item->left.get()) && physicalSources(item->right.get());
@@ -22437,6 +22452,14 @@ static bool supportsPreparedViewRead(const dbms::PreparedQuery& query) {
     return all_of(query.sourceRanges.begin(), query.sourceRanges.end(), [](const auto& range) {
         return !range.viewQuery || supportsPreparedViewRead(*range.viewQuery);
     });
+}
+
+static bool hasPreparedViewSource(const dbms::PreparedQuery& query) {
+    const auto* select = dynamic_cast<const dbms::SelectStmt*>(query.ast.get());
+    return select && select->fromClause && select->fromClause->type == dbms::FromItem::Type::Table &&
+        any_of(query.sourceRanges.begin(), query.sourceRanges.end(), [&](const auto& range) {
+            return range.owner == select && range.source == select->fromClause.get() && range.viewQuery;
+        }) && supportsPreparedViewRead(query);
 }
 
 static bool bindExecutedRowCounts(dbms::SelectStmt& select, const dbms::PreparedQuery& query,
@@ -23760,6 +23783,13 @@ static bool handlePreparedSetQuery(const string& rawSql,Session& session,bool& h
     dbms::publishLastDmlResult(std::move(result));handled=true;return false;
 }
 
+static bool mayCacheRenderedPlan(const dbms::PreparedQuery& query) {
+    // Render views from their current bound sources. The text cache key
+    // can be shared by connections that resolve a view name differently.
+    return none_of(query.sourceRanges.begin(), query.sourceRanges.end(),
+        [](const auto& range) { return bool(range.viewQuery); });
+}
+
 static bool explainPreparedReadQuery(Session& session,const string& raw,
     const dbms::QueryPlanner::ExplainOptions& options,bool json,
     shared_ptr<dbms::PreparedQuery> query) {
@@ -23768,7 +23798,7 @@ static bool explainPreparedReadQuery(Session& session,const string& raw,
     auto plan=runtime.queryPlan();
     // Writer completion is part of the exact successful statement. The
     // publication sink remains outer-commit gated by execute().
-    const auto error=publishExplainPlan([&] { return std::move(plan); },raw,session,options,json);
+    const auto error=publishExplainPlan([&] { return std::move(plan); },raw,session,options,json,{},mayCacheRenderedPlan(*query));
     if(options.analyze && !error)runtime.finishQueryWrites();
     return error;
 }
@@ -23776,9 +23806,10 @@ static bool explainPreparedReadQuery(Session& session,const string& raw,
 static bool explainPreparedDmlQuery(Session& session,const string& raw,
     const dbms::QueryPlanner::ExplainOptions& options,bool json) {
     auto query=make_shared<dbms::PreparedQuery>(g_engine.prepareBoundQuery(session.currentDB,raw));
+    const bool cacheRenderedPlan = mayCacheRenderedPlan(*query);
     PreparedWithDmlRuntime runtime(session,std::move(query));
     auto plan=runtime.mutationPlan();
-    return publishExplainPlan([&] { return std::move(plan); },raw,session,options,json);
+    return publishExplainPlan([&] { return std::move(plan); },raw,session,options,json,{},cacheRenderedPlan);
 }
 
 static bool handlePreparedMultirowQuery(const string& raw,Session& session,bool& handled) {
@@ -34091,11 +34122,7 @@ static bool executeInternal(const string& rawSql, Session& s,
                         // Admission is decided from the actual bound source.
                         // Once a producer starts, no legacy fallback can
                         // evaluate its expressions a second time.
-                        if (prepared && supportsPreparedViewRead(*prepared) &&
-                            any_of(prepared->sourceRanges.begin(), prepared->sourceRanges.end(),
-                                [&](const auto& range) {
-                                    return range.owner == prepared->ast.get() && range.viewQuery;
-                                })) {
+                        if (prepared && hasPreparedViewSource(*prepared)) {
                             executePreparedReadReceiver(s, prepared);
                             return false;
                         }

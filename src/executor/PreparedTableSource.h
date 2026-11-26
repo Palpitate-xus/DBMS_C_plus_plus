@@ -23,11 +23,22 @@ public:
     virtual std::optional<PreparedIntegerKeyOrder> integerKeyOrder(size_t sourceOrdinal) const = 0;
 };
 
+struct PreparedViewIntegerLookup {
+    QueryColumnBinding key;
+    int64_t value;
+};
+
+// Translate necessary equalities on a view's output into its bound input
+// occurrences. Every query keeps its original predicates.
+std::vector<PreparedViewIntegerLookup> preparedViewIntegerLookups(const PreparedQuery& parent,
+    const PreparedQuery::SourceRange& range, const std::vector<PreparedViewIntegerLookup>& lookups);
+
 // Shared physical source construction for native and frontend prepared
 // graphs. This never opens a source or evaluates a query expression.
 OpPtr makePreparedTableSource(StorageEngine* engine, const std::string& database,
     const std::shared_ptr<PreparedQuery>& query, SelectStmt* select,
-    const TableSchema& schema, OpPtr source);
+    const TableSchema& schema, OpPtr source,
+    const std::vector<PreparedViewIntegerLookup>& viewLookups = {});
 
 // Traditional inheritance is one SQL range. Descendants are returned once
 // even when more than one path reaches a relation.

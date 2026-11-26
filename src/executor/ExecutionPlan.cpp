@@ -5903,9 +5903,144 @@ private:
     bool locked_ = false, fallbackOpened_ = false, usedIndex_ = false;
 };
 
+static bool localViewColumn(const QueryColumnBinding& binding, const PreparedQuery::SourceRange& range) {
+    return !binding.scopeDepth && !binding.mergedUsing && binding.sourceOrdinal == range.ordinal &&
+        binding.columnOrdinal < range.columns.size();
+}
+
+static const QueryColumnBinding* plainViewColumn(const Expr* expr, const PreparedQuery::SourceRange& range) {
+    const auto* column = dynamic_cast<const ColumnRefExpr*>(expr);
+    if (!column || column->preparedSubquery || column->generatedRead || column->generatedBaseDeclaration ||
+        !column->binding || !localViewColumn(*column->binding, range)) return nullptr;
+    return &*column->binding;
+}
+
+static bool plainViewScalar(const QueryColumnBinding& binding, uint32_t oid) {
+    const auto& declaration = binding.typeMetadata;
+    return (!binding.typeOid || binding.typeOid == oid) &&
+        (!declaration || (declaration->kind == DatumKind::Scalar && !declaration->enumType &&
+                         declaration->actualOid == oid && declaration->codecOid == oid));
+}
+
+static std::string viewIntegerType(const QueryColumnBinding* column) {
+    if (!column) return {};
+    auto type = ExprHelper::canonicalResultTypeName(column->declaredType);
+    if (type != "smallint" && type != "integer" && type != "bigint") return {};
+    return plainViewScalar(*column, mapBuiltinTypeNameToOid(type)) ? type : std::string{};
+}
+
+// Moving a necessary equality past a VIEW may suppress evaluation on other
+// rows. Prove the filters are total and row-local before considering the move.
+// Only equalities required by the whole WHERE can become an index candidate.
+static bool viewFilterTerms(const Expr* expr, const PreparedQuery& query, const PreparedQuery::SourceRange& range,
+                            std::vector<PreparedViewIntegerLookup>* lookups = nullptr) {
+    if (!expr) return true;
+    if (expr->preparedSubquery) return false;
+    if (const auto* column = plainViewColumn(expr, range))
+        return ExprHelper::canonicalResultTypeName(column->declaredType) == "boolean" && plainViewScalar(*column, 16);
+    if (const auto* literal = dynamic_cast<const LiteralExpr*>(expr))
+        return (literal->typeName.empty() || literal->typeName == "boolean") &&
+            (literal->value == "true" || literal->value == "false" || literal->value == "null");
+    if (const auto* unary = dynamic_cast<const UnaryOpExpr*>(expr)) {
+        if (unary->op == "NOT") return viewFilterTerms(unary->operand.get(), query, range);
+        const auto* column = plainViewColumn(unary->operand.get(), range);
+        return (unary->op == "IS NULL" || unary->op == "IS NOT NULL") && column &&
+            column->typeMetadata && column->typeMetadata->kind != DatumKind::Record;
+    }
+    const auto* comparison = dynamic_cast<const BinaryOpExpr*>(expr);
+    if (!comparison || comparison->rowComparison || comparison->predicateCollation) return false;
+    const auto& op = comparison->op;
+    if (op == "AND" || op == "OR") {
+        auto* required = op == "AND" ? lookups : nullptr;
+        return viewFilterTerms(comparison->left.get(), query, range, required) &&
+            viewFilterTerms(comparison->right.get(), query, range, required);
+    }
+    if (op != "=" && op != "<>" && op != "!=" && op != "<" && op != "<=" && op != ">" && op != ">=")
+        return false;
+    const auto* left = plainViewColumn(comparison->left.get(), range);
+    const auto* right = plainViewColumn(comparison->right.get(), range);
+    const auto lhs = left ? std::nullopt : integerPageEndpoint(comparison->left.get(), &query);
+    const auto rhs = right ? std::nullopt : integerPageEndpoint(comparison->right.get(), &query);
+    const auto leftType = lhs ? lhs->type : viewIntegerType(left);
+    const auto rightType = rhs ? rhs->type : viewIntegerType(right);
+    if (leftType.empty() || rightType.empty()) return false;
+    if (comparison->comparison) {
+        const auto& binding = *comparison->comparison;
+        const auto boundOp = op == "!=" ? "<>" : op;
+        if (!binding.strict || binding.enumTypeOid || !binding.collation.empty() || binding.collationUsesSystemLocale ||
+            binding.op != boundOp || binding.leftType != leftType || binding.rightType != rightType ||
+            binding.identity != "builtin-comparison:" + boundOp + "(" + leftType + "," + rightType + ")") return false;
+    }
+    if (lookups && op == "=") {
+        if (left && rhs) lookups->push_back({*left, rhs->value});
+        if (right && lhs) lookups->push_back({*right, lhs->value});
+    }
+    return true;
+}
+
+std::vector<PreparedViewIntegerLookup> preparedViewIntegerLookups(const PreparedQuery& parent,
+        const PreparedQuery::SourceRange& range, const std::vector<PreparedViewIntegerLookup>& lookups) {
+    const auto* outer = dynamic_cast<const SelectStmt*>(range.owner);
+    if (!outer || outer->fromClause.get() != range.source || !outer->locking.empty() ||
+        (!outer->whereClause && lookups.empty()) || !range.viewQuery) return {};
+    std::vector<PreparedViewIntegerLookup> current = lookups;
+    if (!viewFilterTerms(outer->whereClause.get(), parent, range, &current) || current.empty()) return {};
+
+    const auto& view = *range.viewQuery;
+    const auto* select = dynamic_cast<const SelectStmt*>(view.ast.get());
+    if (!select || select->command != SqlCommand::Select || !select->fromClause ||
+        select->fromClause->type != FromItem::Type::Table || !select->ctes.empty() ||
+        select->setOp != SetOp::None || select->distinct || !select->distinctOn.empty() ||
+        select->having || !select->groupBy.empty() || !select->groupByElems.empty() ||
+        !select->windowDefs.empty() || !select->locking.empty() || !select->orderBy.empty() ||
+        select->hasRowCountClause || select->limit || select->offset || select->limitExpr || select->offsetExpr)
+        return {};
+    const auto input = std::find_if(view.sourceRanges.begin(), view.sourceRanges.end(), [&](const auto& candidate) {
+        return candidate.owner == select && candidate.source == select->fromClause.get() && !candidate.mergedUsing;
+    });
+    const auto projected = view.projectionBindings.find(select);
+    if (input == view.sourceRanges.end() || projected == view.projectionBindings.end() ||
+        projected->second.size() != range.columns.size() || input->generatedRelation ||
+        !viewFilterTerms(select->whereClause.get(), view, *input)) return {};
+    // Includes both kinds of star expansion. Binding has already resolved
+    // each output ordinal, so view aliases and later renames need no lookup.
+    for (const auto& field : projected->second) {
+        if (!field.column || !localViewColumn(*field.column, *input) || !field.expression ||
+            field.expression->preparedSubquery) return {};
+        const auto* column = dynamic_cast<const ColumnRefExpr*>(field.expression);
+        if (column && (column->generatedRead || column->generatedBaseDeclaration)) return {};
+    }
+    std::vector<PreparedViewIntegerLookup> result;
+    for (const auto& lookup : current) {
+        if (!localViewColumn(lookup.key, range)) continue;
+        const auto& column = *projected->second[lookup.key.columnOrdinal].column;
+        const auto type = viewIntegerType(&column);
+        if (!type.empty() && type == viewIntegerType(&lookup.key)) result.push_back({column, lookup.value});
+    }
+    return result;
+}
+
 static OpPtr makePreparedTableSource(StorageEngine* engine, const std::string& database,
     const std::shared_ptr<PreparedQuery>& query, SelectStmt* select,
-    const TableSchema& schema, OpPtr source, const std::vector<bool>& projectedColumns) {
+    const TableSchema& schema, OpPtr source, const std::vector<bool>& projectedColumns,
+    const std::vector<PreparedViewIntegerLookup>& viewLookups = {}) {
+    const auto* physical = dynamic_cast<const TableScanOp*>(source.get());
+    if (!viewLookups.empty() && physical && typeid(*physical) == typeid(TableScanOp) &&
+        physical->tableName() == schema.tablename) {
+        for (const auto& lookup : viewLookups) {
+            if (!integerPageRelation(*query, *select, lookup.key) || !eligibleIntegerPageKey(schema, lookup.key))
+                continue;
+            IntegerPageBounds bounds;
+            bounds.lower = bounds.upper = lookup.value;
+            // A single-column primary key can return at most one row. The
+            // original source remains available for snapshots where the
+            // current index cannot answer, and WHERE still runs at each level.
+            auto fallback = makePreparedTableSource(engine, database, query, select, schema,
+                std::move(source), projectedColumns);
+            return std::make_unique<IntegerPrimaryKeyPageOp>(engine, database, schema, lookup.key.columnOrdinal,
+                1, false, std::move(bounds), std::move(fallback), projectedColumns);
+        }
+    }
     if (auto narrowed = preparedCompositePrimarySource(engine, database, query, *select, schema, source, false))
         return narrowed;
     if (auto narrowed = literalBrinTableSource(engine, database, query, select, schema, source))
@@ -5921,7 +6056,6 @@ static OpPtr makePreparedTableSource(StorageEngine* engine, const std::string& d
         auto filtered = prefilterPreparedHeap(*engine, database, *query, *select, schema, source);
         return filtered ? std::move(filtered) : std::move(source);
     };
-    const auto* physical = dynamic_cast<const TableScanOp*>(source.get());
     if (physical && typeid(*physical) == typeid(TableScanOp) && physical->tableName() == schema.tablename) {
         const auto orderKey = directPageOrder(*query, *select, true);
         if (orderKey && (orderKey->typeOid == 1266 || orderKey->typeOid == 26) &&
@@ -6017,9 +6151,9 @@ static OpPtr makePreparedTableSource(StorageEngine* engine, const std::string& d
 
 OpPtr makePreparedTableSource(StorageEngine* engine, const std::string& database,
     const std::shared_ptr<PreparedQuery>& query, SelectStmt* select,
-    const TableSchema& schema, OpPtr source) {
+    const TableSchema& schema, OpPtr source, const std::vector<PreparedViewIntegerLookup>& viewLookups) {
     // The raw-row consumers need the complete physical value envelope.
-    return makePreparedTableSource(engine, database, query, select, schema, std::move(source), {});
+    return makePreparedTableSource(engine, database, query, select, schema, std::move(source), {}, viewLookups);
 }
 
 static std::vector<bool> projectedPrimaryKeyReadColumns(const PreparedSelectState& state) {

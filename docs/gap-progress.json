@@ -3,6 +3,19 @@
   "recent_updates": [
 
     {
+      "issue": "2026-11-26 use a base table's integer primary key for eligible view point queries",
+      "gap_ids": ["CAT-16", "QRY-12", "OPT-03", "OPT-16"],
+      "status": "partial",
+      "evidence": ["src/main.cpp", "src/executor/ExecutionPlan.cpp", "src/executor/PreparedTableSource.h", "docs/test-report.md", "docs/performance-report-2026-10-30.md"],
+      "tests": ["tests/indexed_view_reads_protocol_e2e_test.py", "tests/compat/cases/view_read_and_empty_writes.sql"],
+      "verification": [
+        "Compare aliased ordinary views, typed binary parameters, visibility of moved primary keys, and query results against PostgreSQL 18.6.",
+        "Verify actual heap row counts, safe fallback, and EXPLAIN binding for same-named views in different schemas.",
+        "Restart after committed and uncommitted key changes, after savepoint rollback, and with earlier view files. Compare round-trip query latency on ext4 and tmpfs."
+      ]
+    },
+
+    {
       "issue": "2026-11-26 read ordinary views without temporary tables and publish only effective row mutations",
       "gap_ids": ["CAT-16", "QRY-12", "DML-03", "TXN-05", "PROTO-02"],
       "status": "partial",

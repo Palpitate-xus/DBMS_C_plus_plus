@@ -2,6 +2,13 @@
 
 > 历史基准原始数据不随 Git 仓库提供。本文中的 `benchmarks/` 路径仅指可能存在的本地可选证据；新克隆仓库没有这些文件，原始结果只能在另行取得数据后复核。文中的测试与性能摘要仍保留。
 
+<a id="indexed-view-reads-comparison-20261126"></a>
+## 2026-11-26 · 通过视图按编号查找
+
+PostgreSQL 展开视图定义，再把能合并的子查询提到同一层规划。SQLite 可以合并子查询，也可以在保留子查询的同时把部分条件传进去。SQLite 文档以 `LIMIT` 说明提前筛选可能改变结果。DuckDB 把可提前执行的筛选移到更靠近数据源的位置，减少传给后续步骤的行。 [PostgreSQL 视图规则](https://www.postgresql.org/docs/18/rules-views.html) · [SQLite 条件下推](https://www.sqlite.org/optoverview.html#the_predicate_push_down_optimization) · [DuckDB 优化器](https://duckdb.org/2024/11/14/optimizers#filter-pull-up--filter-pushdown)
+
+本项目沿已经绑定的视图列找到整数主键，在原表索引里查指定编号。各层 `WHERE` 会继续检查找到的记录。带限行、排序、汇总或计算列的视图留在原有路径。当前索引无法回答某个旧快照时，查询会读该快照可见的表行。 [测试报告](test-report.md#indexed-view-reads-20261126) · [性能报告](performance-report-2026-10-30.md#indexed-view-read-cost-20261126)
+
 ## 2026-11-26 · 普通视图读取与零行写入
 
 PostgreSQL 把普通视图的保存查询放进调用方的查询树。SQLite 可以展开合适的子查询，或让子查询逐行提供结果。DuckDB 读取普通视图时执行保存的查询。本项目让已有查询计划直接提供受支持的视图结果，省去磁盘临时表。外层条件仍可能在读取底表各行后执行。 [PostgreSQL 视图规则](https://www.postgresql.org/docs/18/rules-views.html) · [SQLite 子查询优化](https://www.sqlite.org/optoverview.html#subquery_flattening) · [DuckDB 视图](https://duckdb.org/docs/2.0/sql/statements/create_view)
